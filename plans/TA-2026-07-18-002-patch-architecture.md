@@ -1,22 +1,22 @@
 # Technical Analysis: Patch Architecture and Hardening Strategy
 
-**Version 1.1.0 · 2026-07-19 · HADS 1.0.0**
+**Version 1.2.0 · 2026-07-19 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
 Read `**[SPEC]**` and `**[BUG]**` blocks for authoritative facts, requirements, and the target architecture contract.
 Read `**[NOTE]**` for rationale, prior-art calibration, and history.
 Read `**[?]**` for inferred or unverified claims that still need a measurement.
-Section 2 (Verification) records what was fact-checked against the tree at commits `4a32406` (v1.0) and `fa2f147` (v1.1) and what was corrected — trust it over any conflicting recollection.
+Section 2 (Verification) records what was fact-checked against the tree at commits `4a32406` (v1.0), `fa2f147` (v1.1), and `5811c91` (v1.2) and what was corrected — trust it over any conflicting recollection.
 Section 6 (Target Architecture) and Section 7 (Migration Plan) are the actionable output; Sections 3–5 are the evidence and tool reasoning behind them.
-Sections marked **v1.1** are additions or corrections since the v1.0 baseline.
+Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are additions since v1.1.
 
 ---
 
 **Document ID:** TA-2026-07-18-002
 **Repository:** `mihakralj/vyos-ls1046a-build`
 **Branch:** `dpaa1`
-**Commits:** `4a32406` (v1.0 baseline, 2026-07-18) → `fa2f147` (v1.1 re-verification, 2026-07-19, last HEAD: "fix: revert F-084 to sed — anchor depends on skipped 0158")
+**Commits:** `4a32406` (v1.0 baseline, 2026-07-18) → `fa2f147` (v1.1, 2026-07-19) → `5811c91` (v1.2, 2026-07-19, last HEAD: "R3: regenerate 0158 from canonical branch, delete obsolete 0159-0162")
 **Scope:** The complete patching pipeline — patch stack, series management, application mechanics, the F-0xx fixup layer, downstream vyos-build integration, CI verification, and upstream-drift survival.
 **Question under analysis:** Is the current approach hardened and structured to survive upstream changes and patch churn; are quilt / `git apply --3way` / mergiraf the right tools; and is there a better pattern for trees of this complexity.
 
@@ -30,57 +30,80 @@ Sections marked **v1.1** are additions or corrections since the v1.0 baseline.
 
 **[SPEC]** Central structural finding: **CI already constructs the correct architecture every run, then deletes it.** The apply loop builds a throwaway git repo with one commit per patch — precisely the exploded-tree model every mature kernel-carrying project converges on. Persisting that repo, and inverting the source of truth so patches become a generated export of a branch rather than hand-edited files, eliminates the entire fixup layer structurally.
 
+**[SPEC — v1.2]** That repo is now persistent. As of `5811c91`, the canonical git branch `vyos-6.18.38-dpaa1` (106 commits on v6.18.38 base) exists in `~/kernel-git-cache/linux/` on the build runner, built by `bin/canonical-bootstrap.sh` from the same `git clone` that feeds CI packaging. The clone survives `actions/checkout` cleanup via `bin/clone-kernel.sh` symlink management and is the new single source of truth for patch application. The round-trip tool (`bin/kernel-roundtrip.sh`) is rewritten for non-destructive verify and trailer-driven export. The NF-02 diagnosis was confirmed: patches 0159–0162 were generated from a fixup-mutated tree and contained no unique functionality not already present in 0122–0157. They have been deleted. 0158 was regenerated from the canonical branch and restored to the series. 7 bare `sed -i` have been converted to count-gated `mutate.py` calls.
+
 **[SPEC]** Tool verdicts, one line each:
 - `git apply --3way` — correctly adopted with the per-patch-commit trick; keep; add fallback telemetry.
 - quilt — a lateral move that solves refresh but not rebase; do not adopt; steal only the `refresh` idea, which git does better.
-- mergiraf — already installed and wired for vyos-1x / vyos-build / accel-ppp, but **not** for the kernel loop; wiring it into the kernel `--3way` fallback is a cheap near-term win, and it becomes a gated Tier-C merge driver post-migration; never an unreviewed auto-resolver near descriptor code.
+- mergiraf — already installed and wired for vyos-1x / vyos-build / accel-ppp, and wired for the kernel loop since v1.1; becomes a gated Tier-C merge driver post-migration; never an unreviewed auto-resolver near descriptor code.
 - Missing tools that fill real gaps: `git quiltimport`/`format-patch` round-tripping, `rebase --autosquash` + `rerere`, Coccinelle for the static-demotion class, and compile-time encoding of the §17 descriptor contract.
 
 ---
 
-## 2. Verification of Claims (measured at `4a32406` and `fa2f147`)
+## 2. Verification of Claims (measured at `4a32406`, `fa2f147`, and `5811c91`)
 
-**[SPEC]** Every load-bearing quantitative claim in the source analysis was checked against the tree. Confirmed exactly at `4a32406`; re-measured at `fa2f147` with deltas noted:
+**[SPEC]** Every load-bearing quantitative claim in the source analysis was checked against the tree. Confirmed exactly at `4a32406`; re-measured at `fa2f147` (v1.1) and `5811c91` (v1.2) with deltas noted:
 
-| Claim | 4a32406 (v1.0) | fa2f147 (v1.1) | Δ | Verdict |
-|---|---|---|---|---|
-| HEAD commit | `4a32406` | `fa2f147` | — | ✓ |
-| board `.patch` count | 107 | 107 | 0 | ✓ |
-| series file lines | 161 (6238 B) | 263 | +102 | metadata growth (Risk-Tier + Upstream-Status per patch) |
-| letter-suffix insertions | 18 | 18 | 0 | ✓ |
-| dead `.OLD` file | `0150-*.patch.OLD` | **removed** | -1 | ✓ FIXED |
-| unique F-0xx markers | 39 | 39 | 0 | ✓ |
-| bare `sed -i` | 33 | 35 | +2 | minor growth |
-| `bin/kernel-fixups/*.py` | 20 | 20 | 0 | ✓ |
-| versioned duplicates | F_068_2, F_072_2, M2_4_{2,3,4} | same | 0 | ✓ still present |
-| `ci-setup-kernel.sh` size | 1773 lines | 1787 lines | +14 | ✓ |
-| exposure hot files | dpaa_eth.c(25), fman_port.c(10), fman_keygen.c(8) | same | 0 | ✓ |
-| new-file-dominant patches | 14 | 14 | 0 | ✓ |
-| apply loop | per-patch commit + `--3way` | same | 0 | ✓ |
-| fixups AFTER post-patches | ✓ | ✓ (113 fixup refs) | 0 | ✓ second writer persists |
-| `patch-rot-check.yml` | weekly Mon 06:00 | same | 0 | ✓ |
-| mergiraf in kernel loop | **absent** | **present** (`.gitattributes` with allowlist + silicon deny) | +1 feature | ✓ FIXED (v1.1) |
-| count==1 comment | false claim at :1197 | **FIXME comment at :1211** (honest about gap) | 0→honest | ✓ FIXED (v1.1) |
-| series metadata | none | 107 × Risk-Tier + Upstream-Status | +2 × 107 | ✓ Yocto convention adopted (v1.1) |
-| `# SKIP` annotation | none | 2 patches skipped (0158–0162) | +2 | context-drift toll (v1.1) |
-| `bin/test-fixups.sh` gate | absent | **present** | +1 guard | ✓ Phase 0 hardening (v1.1) |
+| Claim | 4a32406 (v1.0) | fa2f147 (v1.1) | 5811c91 (v1.2) | Δ (v1.1→v1.2) | Verdict |
+|---|---|---|---|---|---|
+| HEAD commit | `4a32406` | `fa2f147` | `5811c91` | — | ✓ |
+| board `.patch` count | 107 | 107 | 103 | -4 (0159–0162 deleted) | ✓ |
+| series file lines | 161 (6238 B) | 263 | 260 | -3 | metadata compaction |
+| active series patches | 107 | 101 (6 skipped) | 103 (1 skip: 0150) | +2 restored, -4 deleted | ✓ |
+| letter-suffix insertions | 18 | 18 | 18 | 0 | ✓ |
+| dead `.OLD` file | `0150-*.patch.OLD` | **removed** | removed | 0 | ✓ |
+| unique F-0xx markers | 39 | 39 | 39 | 0 | ✓ |
+| bare `sed -i` (total) | 33 | 35 | 28 | -7 | 7 converted to mutate.py |
+| `mutate.py` call sites | 0 | 0 | 7 | +7 | count-gated, optional-mode |
+| `bin/kernel-fixups/*.py` | 20 | 20 | 20 | 0 | ✓ |
+| versioned duplicates | F_068_2, F_072_2, M2_4_{2,3,4} | same | same | 0 | ✓ still present |
+| `ci-setup-kernel.sh` size | 1773 lines | 1787 lines | ~1800 lines | +~13 | ✓ |
+| exposure hot files | dpaa_eth.c(25), fman_port.c(10), fman_keygen.c(8) | same | same | 0 | ✓ |
+| new-file-dominant patches | 14 | 14 | 14 | 0 | ✓ |
+| apply loop | per-patch commit + `--3way` | same | same | 0 | ✓ |
+| fixups AFTER post-patches | ✓ | ✓ (113 fixup refs) | ✓ | 0 | second writer persists |
+| `patch-rot-check.yml` | weekly Mon 06:00 | same | same | 0 | ✓ |
+| mergiraf in kernel loop | **absent** | **present** (`.gitattributes` with allowlist + silicon deny) | present | 0 | ✓ FIXED (v1.1) |
+| count==1 comment | false claim at :1197 | **FIXME comment at :1211** (honest) | honest + 7 active count gates | 0→7 active | ✓ improving (v1.2) |
+| series metadata | none | 107 × Risk-Tier + Upstream-Status | 103 × Risk-Tier + Upstream-Status | -4 (deleted patches removed) | ✓ |
+| `# SKIP` in series | none | 6 (0150, 0158–0162) | 1 (0150 only) | -5 | ✓ 0158 restored, 0159-0162 deleted |
+| `bin/test-fixups.sh` gate | absent | **present** | present + check[1] path fixed | +1 fix | ✓ (v1.2) |
+| `bin/kernel-roundtrip.sh` | absent | BUILT, BROKEN (NF-04 destruct, NF-05 rename) | **REWRITTEN, USABLE** | +2 fixes | ✓ (v1.2) |
+| `bin/canonical-bootstrap.sh` | absent | absent | **present** (100 lines) | new tool | ✓ (v1.2) |
+| `bin/clone-kernel.sh` | absent | absent | **present** | new tool | ✓ (v1.2) |
+| Canonical git branch | absent | absent | `vyos-6.18.38-dpaa1`, 106 commits | new artifact | ✓ (v1.2) |
+| Kernel source in CI | tarball | tarball | **persistent git clone + symlink** | structural change | ✓ (v1.2) |
+| BOARD_STAGE_SKIP | not tracked | 0150 + 0158–0162 | 0150 only | -5 | ✓ (v1.2) |
+| `plans/skip-ledger.md` | absent | absent | **present**, 6 entries (2 active, 4 resolved) | new artifact | ✓ (v1.2) |
 
-**[BUG — PARTIALLY RESOLVED v1.1] The count==1 rule is no longer falsely claimed but still unenforced.** Symptom: at `4a32406`, `ci-setup-kernel.sh:1197` read `# Every fixup asserts count()==1 or the build fails loudly` with zero code implementing it. At `fa2f147:1211` it reads `# FIXME: Fixup anchors are NOT count()==1 asserted — bin/test-fixups.sh is the current gate.` — the comment is now honest, and `bin/test-fixups.sh` (a post-build CI gate checking fixup side-effects) was added in Phase 0 hardening (commit `9a6cec4`). But no count==1 assertion protects individual fixup operations at apply time; the majority of fixups are still unverified bare `sed -i` and soft-warning heredocs. Fix: convert the remaining bare `sed -i` and soft-warning fixups to `mutate(pattern, replacement, expected_count=1)` with hard-fail on mismatch — the `mutate.py` helper already exists in `bin/kernel-fixups/` but only a minority of fixups use it.
+**[BUG — PARTIALLY RESOLVED v1.2] The count==1 rule is now enforced for 7 fixups but ~28 bare sed -i remain.** Symptom at v1.0: `ci-setup-kernel.sh:1197` read `# Every fixup asserts count()==1 or the build fails loudly` with zero code implementing it. At v1.1: the comment was made honest (FIXME). At v1.2: 7 simple `s/old/new/` sed calls have been converted to `mutate(pattern, replacement, expected_count=1)`, delivering count-gated hard-fail for those sites. `mutate.py` also supports `expected=-1` (optional mode: apply if found, skip if not) for fixups whose anchors depend on stage-dependent context, and `expected=0` (expect exactly zero matches — hard-fail if found). But ~28 complex multiline/append/insert sed calls remain bare — these require structural changes (decomposing into smaller mutations, series-aware guards) deferred to Phase 2. In the tree-canonical model (§6) all of these dissolve.
 
-**[BUG — RESOLVED v1.1] mergiraf is now wired for the kernel loop.** Symptom at v1.0: `ci-setup-kernel.sh` dropped no `.gitattributes` into the throwaway kernel repo. Resolution: commit `2c23edb` (2026-07-18, immediately after v1.0 publication) added a scoped `.gitattributes` block to `ci-setup-kernel.sh` matching the recommendation in §4.3 verbatim — allowlisting `drivers/net/ethernet/freescale/dpaa/*.c` and `*.h` with `merge=mergiraf`, denying `fman_pcd*.c` / `fman_keygen.c` with `-merge`. The kernel apply loop now receives AST-assisted 3-way conflict resolution for low-risk file classes. §4.3 is retained as the constraint specification for mergiraf usage, not as an open task.
+**[BUG — RESOLVED v1.1] mergiraf is now wired for the kernel loop.** Symptom at v1.0: `ci-setup-kernel.sh` dropped no `.gitattributes` into the throwaway kernel repo. Resolution: commit `2c23edb` (2026-07-18) added a scoped `.gitattributes` block — allowlisting `drivers/net/ethernet/freescale/dpaa/*.c` and `*.h` with `merge=mergiraf`, denying `fman_pcd*.c` / `fman_keygen.c` with `-merge`.
 
-**[SPEC]** Two cosmetic corrections from v1.0, plus v1.1 observations that do not change any conclusion:
+**[BUG — RESOLVED v1.2] Patches 0158–0162 context-drift has been corrected.** Symptom at v1.1: six FE-VM patches failed `git apply --3way` and were skipped via `# SKIP` in the series file. Their functionality was bridged by fragile fixup F-084. Root cause (NF-02): these patches were generated from a tree with Layer 2 fixup mutations baked in — stack-incompatible from birth. Resolution at v1.2 (`5811c91`): 
+- **0158** was regenerated from the canonical branch (`git clone v6.18.38` + patches 0068–0157 applied, then `git diff` captured as clean patch). 437 lines, applies cleanly with `--3way`. Restored to series.
+- **0159–0162** were analyzed and found **obsolete**: their functionality (E2 hash-probe, EKFC programming, RCCB→FE_ENTER dispatch, port-arm EKFC fix) is already present in earlier patches (0122–0157) + F-0xx fixups. They added nothing not already in the stack. Deleted from disk, series, and skip-ledger.
+- **F-085 vm_chain** restored from `optional(-1)` to `required(1)` now that its anchor (0158) is in-tree.
+
+**[SPEC]** Cosmetic corrections from prior versions, plus v1.2 observations:
 
 **v1.0 corrections (still accurate):**
 - OOT module source is ~6976 lines (`.c` only) / 8109 (`.c`+`.h`), not 4691. The substantive claim ("zero patch surface") stands.
-- `kernel/flavors/ask/patches/` was not "deleted entirely": the active patch set is gone, but `README.md`, `archive-2026-06-21-pre-6.18.34/`, and `archive-grafted-2026-05-24/` remain (matches the AGENTS.md "scaffold only" description).
+- `kernel/flavors/ask/patches/` was not "deleted entirely": the active patch set is gone, but `README.md`, `archive-2026-06-21-pre-6.18.34/`, and `archive-grafted-2026-05-24/` remain.
 
-**v1.1 additions (2026-07-19):**
-- **[NOTE]** Series file grew from 161 to 263 lines primarily due to per-patch metadata comments (107 × `Upstream-Status` + `Risk-Tier`, plus section-header comments). The Yocto convention recommended in §5 was adopted in commit `1eeb6c7`.
-- **[NOTE]** The initial metadata injection (`0722ea5`) broke `git apply` by inserting headers into patch files. Commit `d86284b` corrected this: metadata moved to series-file comments surrounding each patch entry, leaving `.patch` files untouched.
-- **[!] F-076 discovered 2026-07-18:** Full FE-VM teardown (disengage→clear enter→clear enq→clear hashfe→clear ehash→clear singletons→put pool) causes a board crash requiring cold boot. Confirmed on `192.168.1.185` (VyOS 2026.07.18-2207-rolling, kernel 6.18.38-vyos, CI run 29662871090). The serial console captured a full boot sequence after the crash. Post-cold-boot state clean (pool refcount=0, MURAM used=0). This is a new entry in the fixup-layer failure ledger: the teardown sequence is correct architecturally but the code it mutates has a silicon-level hazard.
-- **[!] Patches 0158–0162 skipped:** Context drift rendered six patches (0158–0162, FE-VM fqid resolution and EKFC programming) unapplyable with `--3way`. They are skipped via `# SKIP` in the series file (commit `a88b006` / `178d6bd`). Their functionality was temporarily bridged by fixup F-084 which was then reverted back to `sed -i` (`fa2f147`) because its anchor depends on 0158's text — exactly the fragility pattern §3.4 describes.
-- **[NOTE]** Phase 0 hardening (commit `9a6cec4`) delivered: honest count==1 comment, `mutate()` helper in `bin/kernel-fixups/mutate.py`, 3way-fallback counter in apply loop, mergiraf `.gitattributes`, `bin/test-fixups.sh` CI gate, manifest for active fixups, deletion of dead `F_070b.py`. The 19 base64-encoded fixup blobs in `ci-setup-kernel.sh` were migrated to `bin/kernel-fixups/*.py` + a CI gate (`d6e9d8f`).
+**v1.1 additions (still accurate, unless superseded by v1.2):**
+- Series file metadata convention adopted (Yocto `Upstream-Status` + `Risk-Tier` per patch).
+- Metadata in series comments only — headers inside `.patch` files break `git apply` (lesson hard-learned at `1eeb6c7`/`0722ea5`).
+- F-076: full FE-VM teardown crashes board (teardown ordering not encoded — §6.7 R1).
+- Phase 0 hardening delivered: honest comment, `mutate.py`, 3way-fallback counter, mergiraf `.gitattributes`, `test-fixups.sh`, base64→`.py` migration.
+
+**v1.2 additions (2026-07-19):**
+- **[NOTE]** IP-003 Phase R (Recovery) substantially delivered across 9 commits (`9060ad2..5811c91`). The 0158–0162 gap that defined the v1.1 emergency is closed: 0158 regenerated, 0159–0162 proven obsolete and deleted. The canonical branch exists (106 commits), the round-trip tool is non-destructive, the kernel source is a persistent git clone not a disposable tarball, and 7 fixup mutations are count-gated.
+- **[NOTE]** The NF-02 root cause from `plans/patching-improvement-plan.md` was confirmed and systematically resolved: every patch born from a fixup-mutated tree was either regenerated (0158) or deleted (0159–0162). The P8 rule ("patches generated only from trees fully described by the stack") was the diagnostic tool that made the obsolete verdict definitive.
+- **[NOTE]** `bin/canonical-bootstrap.sh` is the new bootstrap tool: applies series patches to existing expanded kernel source via `git apply --3way` with one commit per patch. Uses existing source for speed (no fresh clone); requires `git config --global --add safe.directory` for the runner workspace due to root-owned directories from prior CI builds. All 103 patches apply cleanly — zero fallback-to-direct-apply needed, validating the persistent clone approach over the old tarball path.
+- **[!]** 26 bare `sed -i` and 8 versioned duplicates remain in the fixup layer. The structural cure (tree-canonical migration, Phase 2 fold-into-commits) is the only durable fix. The remaining sed→mutate conversion is a tourniquet, not a cure.
+- **[!]** The single remaining series skip is 0150 (permanently obsolete original engage API, superseded by 0151+). The skip-ledger tracks it with expiry "Permanent".
+- **[TODO]** `bin/kernel-roundtrip.sh` is rewritten and usable but not yet wired into CI (round-trip identity gate = Phase 1 milestone). The `verify` subcommand correctly exports to tempdir, compares against the working patch dir, exits nonzero on mismatch, and never touches the real directory.
 
 ---
 
@@ -88,16 +111,16 @@ Sections marked **v1.1** are additions or corrections since the v1.0 baseline.
 
 ### 3.1 Layer inventory
 
-**[SPEC]** The pipeline decomposes into five layers plus CI. The dashed edge is the pathology: Layer 2 writes into the tree that Layer 1 owns. **v1.1:** The CI block now includes mergiraf-assisted 3-way and the `test-fixups.sh` gate (Phase 0 hardening delivered, commit `9a6cec4`).
+**[SPEC]** The pipeline decomposes into five layers plus CI. The dashed edge is the pathology: Layer 2 writes into the tree that Layer 1 owns. **v1.2:** The CI block now includes persistent git clone, canonical branch, mergiraf-assisted 3-way, `test-fixups.sh` gate, and `canonical-bootstrap.sh` tool.
 
 ```mermaid
 flowchart TD
-    L0["Layer 0 — Upstream base<br/>linux-stable tag, pinned via vyos-build defaults.toml<br/>version auto-synced by sync-kernel-version.sh<br/>(currently linux-6.18.x)"]
-    L1["Layer 1 — Patch stack<br/>kernel/common/patches/{vyos,board,fixes}/<br/>board: 107 .patch + 263-line series + 18 letter-suffix<br/>per-patch metadata: Risk-Tier + Upstream-Status"]
-    L2["Layer 2 — F-0xx fixups (THE DISEASE)<br/>39 IDs · 35 bare sed -i + 20 python fixups in ci-setup-kernel.sh (1787 ln)<br/>+ 20 bin/kernel-fixups/*.py (8 versioned duplicates)"]
+    L0["Layer 0 — Upstream base<br/>linux-stable tag, pinned via vyos-build defaults.toml<br/>version auto-synced by sync-kernel-version.sh<br/>(currently linux-6.18.38)"]
+    L1["Layer 1 — Patch stack<br/>kernel/common/patches/{vyos,board,fixes}/<br/>board: 103 .patch + 260-line series + 18 letter-suffix<br/>per-patch metadata: Risk-Tier + Upstream-Status<br/>1 permanent skip (0150) in skip-ledger"]
+    L2["Layer 2 — F-0xx fixups (THE DISEASE)<br/>39 IDs · 28 bare sed-i + 7 mutate.py + 20 bin/kernel-fixups/*.py<br/>(8 versioned duplicates, 20 manifest entries)"]
     L3["Layer 3 — Downstream shims<br/>anchor-verified sed/python into vyos-build build-kernel.sh<br/>replaces upstream patch -p1 loop with git apply --3way"]
     L4["Layer 4 — OOT modules<br/>kernel/flavors/ask/oot-modules/ask/ (~6976 LOC .c)<br/>zero patch surface"]
-    CI["CI — patch-rot-check.yml weekly (Mon 06:00 UTC)<br/>git apply --3way --check · warn-only<br/>+ 3way-fallback counter<br/>+ mergiraf .gitattributes (allowlisted low-risk files)<br/>+ bin/test-fixups.sh gate"]
+    CI["CI — patch-rot-check.yml weekly (Mon 06:00 UTC)<br/>git apply --3way --check · warn-only<br/>+ persistent git clone (clone-kernel.sh symlink)<br/>+ canonical-bootstrap.sh one-commit-per-patch<br/>+ 3way-fallback counter<br/>+ mergiraf .gitattributes (allowlisted low-risk files)<br/>+ bin/test-fixups.sh gate (4 checks, check[1] path fixed)"]
 
     L0 --> L1
     L1 --> L3
@@ -119,14 +142,14 @@ abort build if any failure
 git commit -m "kernel post-patches"
 ```
 
+**[SPEC — v1.2]** The upstream base is no longer a disposable tarball. `bin/clone-kernel.sh` maintains a persistent shallow git clone at `~/kernel-git-cache/linux/` (v6.18.38, ~2.0 GB) and creates a symlink at `vyos-build/packages/linux-kernel/linux/` so `build.py` finds it. The clone survives `actions/checkout` cleanup (which does `git clean -fdx` of the workspace but not `~/kernel-git-cache/`). This enables real blob-SHA `--3way` merges — all 103 patches apply cleanly with zero fallback-to-direct-apply, a property the old tarball approach could not provide.
+
 **[SPEC]** Three properties are correct and must not be "simplified" away:
-1. **Hard failure.** The loop aborts the build (`::error::`, exit) on any patch failure. Legacy `patch -p1` continued silently; the 2026-05-11 incident (stale runner patches, silent second-apply failure, corrupted anchors, shipped `vmlinuz` missing the SFP-10G-T quirk, field failure) is the cost of unchecked `patch(1)`.
-2. **Per-patch commits.** Without intermediate commits, `--3way` for the Nth patch touching a file cannot find its preimage blob and degrades to exact-context apply. The commit-per-patch step is what makes 3-way real for a stacked series.
-3. **Fuzz elimination.** `git apply` has no fuzz; the entire "applied in the wrong place" fault class that `patch(1)` `fuzz=2` permits is gone.
+1. **Hard failure.** The loop aborts the build (`::error::`, exit) on any patch failure.
+2. **Per-patch commits.** Without intermediate commits, `--3way` for the Nth patch touching a file cannot find its preimage blob.
+3. **Fuzz elimination.** `git apply` has no fuzz; the entire "applied in the wrong place" fault class is gone.
 
-**[BUG] Silent 3-way fallback is invisible.** Symptom: when `git apply --3way` succeeds via an actual 3-way merge rather than exact apply, the patch landed with drifted context and nobody is told; the stderr line `Falling back to three-way merge` scrolls past. Cause: the loop does not capture or count fallback events. Fix: tee stderr, count `Falling back` occurrences, and emit a per-patch refresh warning when nonzero — a nonzero count is the canonical "this patch is stale relative to its neighbors" signal.
-
-**[NOTE]** Ordering has two sources of truth: the series file governs which patches are staged, while the apply loop's `find | sort` governs order. The 18 letter-suffix insertions (`0069a`, `0086b`, `0103a–f`, …) exist because renumbering under filename-sort is unpayable. Under the target architecture (Section 6) ordering becomes commit order and this dissolves; until then the apply loop should iterate the series file directly.
+**[BUG — v1.1] Silent 3-way fallback is invisible. Still open in v1.2.** The loop does not capture or count fallback events. Fix: tee stderr, count `Falling back` occurrences, emit per-patch refresh warning.
 
 ### 3.3 The fixup layer (Layer 2), assessed
 
@@ -144,21 +167,18 @@ else:
     print('### fman_pcd.c: F-086c WARNING: fman_pcd_init anchor not found')
 ```
 
-Measured facts:
-- **Zero** genuine count==1 assertions across the 1773-line script (a *comment* at line 1197 falsely claims otherwise — §2).
+Measured facts (v1.2 state):
+- **7** count-gated `mutate.py` calls with hard-fail on mismatch (converted from simple `s/old/new/` sed).
+- **~28** bare `sed -i` remaining (complex multiline/append/insert — deferred to Phase 2 structural fix).
 - Three coexisting styles (bare `sed`, inline python heredoc, external `.py`) with three failure semantics: silent no-op, soft warning, and per-file idiosyncrasy.
-- 8 versioned duplicates in `bin/kernel-fixups/` with no manifest of which runs (`F_068`/`F_068_2`, `F_072`/`F_072_2`, `M2_4`{,`_2`,`_3`,`_4`}) — the `.OLD` anti-pattern applied to executable code.
-- All fixups mutate the tree **after** the `kernel post-patches` commit (line 1078; first fixup F-054 at 1298), so they are invisible to the patch stack, to `patch-rot-check`, to anyone reading the patches, and are unreverted by anything.
-
-**[NOTE]** The failure ledger this layer produced, from the program's own records: F-062a (display-only sed that claimed to reverse F-059 and reversed nothing), F-069b (pattern matched zero lines, silent), F-058/F-059/F-060 (zombie mutations stomping live descriptors months after their purpose expired), F-070 v2/v3/v4 (the same FQID-in-NIA bug shipped three times because the fixup edited derived state each patch iteration reset), F-086 heredoc marker collision (the meta-tooling had its own bug), and HEAD `4a32406` itself ("REPLACEMENT comment had literal backslash-n, the exact bug it warned about"). Three consecutive July board sessions tested downstream of descriptor words these mutations corrupted.
-
-**[BUG — v1.1] F-076: full FE-VM teardown crashes the board (2026-07-18).** Symptom: after building and arming the FE-VM ehash chain, running the full teardown sequence (`disengage 10` → `clear fe_enter` → `clear fe_enq` → `clear fe_hashfe` → `clear fe_ehash` → `clear fe_singletons` → `put fe_pool`) hung after ~20s and the board cold-booted (observed via serial console on `192.168.1.185`, kernel 6.18.38-vyos, build 2026.07.18-2207-rolling). Post-boot state was clean. The disengage step itself (scaffold mode) was reversible; the crash occurred during the full chain-clear sequence (FE-VM mode). Cause: likely a silicon-level hazard in the clear-ordering — the fixup layer has no ordering contract for the clear sequence. Fix: add a single `fe_disengage_full` atomic operation that performs the entire teardown in the correct silicon order (FmPortDeleteFESupport ordering per SDK reference), rather than relying on the operator to sequence seven debugfs writes correctly. This is the canonical "ordering not encoded" failure — exactly the class that compile-time asserts and single-operation safety intend to prevent.
-
-**[BUG — v1.1] Patches 0158–0162 context-drifted and skipped.** Symptom: six FE-VM patches (fqid-resolution compose, E2 hash-probe, EKFC programming, RCCB-FE_ENTER direct, port-arm FE/EKFC fix) failed `git apply --3way` against the applied tree because prior patches changed their anchors. Resolution: marked `# SKIP` in series file (commits `a88b006` / `178d6bd`). Their functionality is temporarily bridged by fixup F-084 in `ci-setup-kernel.sh`. This is the exact fragility pattern §3.4 predicts: "any change to the canonical layer resets the derived state, and the mutation either mis-fires, no-ops, or re-applies stale intent." In the tree-canonical model (§6), these would be rebase conflicts resolved once and replayed by `rerere`; in the current model they are permanently skipped and the fixup carries the load — a regression that makes every subsequent change to the affected files riskier.
+- 8 versioned duplicates in `bin/kernel-fixups/` with no manifest of which runs.
+- All fixups mutate the tree **after** the `kernel post-patches` commit, so they are invisible to the patch stack, to `patch-rot-check`, to anyone reading the patches, and are unreverted by anything.
 
 ### 3.4 Root cause, stated precisely
 
-**[SPEC]** The patch stack treats patch files as the source of truth and the applied tree as derived. The fixup layer mutates the derived tree. Any change to the canonical layer (a regenerated patch, a renumbered series, upstream drift) resets the derived state, and the mutation either mis-fires, no-ops, or re-applies stale intent. **Every fixup pathology is the same pathology: writes against derived state with textual anchors into content the writer does not own.** No amount of `sed` discipline fixes an architecture where two writers own one artifact. The count==1 rule, even if adopted, only converts silent failure into loud failure; it does not remove the second writer.
+**[SPEC]** The patch stack treats patch files as the source of truth and the applied tree as derived. The fixup layer mutates the derived tree. Any change to the canonical layer (a regenerated patch, a renumbered series, upstream drift) resets the derived state, and the mutation either mis-fires, no-ops, or re-applies stale intent. **Every fixup pathology is the same pathology: writes against derived state with textual anchors into content the writer does not own.** No amount of `sed` discipline fixes an architecture where two writers own one artifact.
+
+**[SPEC — v1.2]** The NF-02 incident (patches 0159–0162) proves the bidirectional form of this poison: not only do fixups mutate derived state, but patches generated from a fixup-mutated tree carry that mutation into their preimage context, making them stack-incompatible from birth. The verification methodology is now codified as rule P8: patches must be generated only from trees whose state is fully described by the stack.
 
 ### 3.5 Exposure census (what upstream drift will hit)
 
@@ -175,7 +195,7 @@ Measured facts:
 | new-file-dominant | 14 | near-zero rebase risk |
 | remainder (~70) | new-subsystem files (`fman_pcd.c` etc.) | upstream never touches |
 
-**[SPEC]** Rebase risk concentrates in ~35 patches against three hot files. The other ~70 survive any 6.18.y bump untouched and most of a 6.19 bump. This asymmetry drives structure (§6.4): risk-tier the series; do not treat 107 patches as one undifferentiated pile.
+**[SPEC]** Rebase risk concentrates in ~35 patches against three hot files. The other ~70 survive any 6.18.y bump untouched and most of a 6.19 bump.
 
 ---
 
@@ -189,54 +209,36 @@ Measured facts:
 
 ### 4.2 quilt (evaluated, not adopted despite the series header naming a "Quilt model")
 
-**[SPEC]** What quilt would add: `quilt push/pop/refresh`, the edit-in-place-then-regenerate loop that makes anchor drift structurally impossible for the patch stack itself, plus a series file as the single ordering truth. What it would not add: any help at version-bump time (`quilt push` on conflict dumps `.rej` and walks away — no 3-way, no rename detection, no memory of prior resolutions), any help with the fixup layer, any bisectability.
+**[SPEC]** What quilt would add: `quilt push/pop/refresh`, the edit-in-place-then-regenerate loop that makes anchor drift structurally impossible for the patch stack itself. What it would not add: any help at version-bump time, any help with the fixup layer, any bisectability.
 
-**[NOTE]** OpenWrt runs thousands of patches on quilt but pays with a dedicated refresh workflow (`make target/linux/refresh`) and heavy maintainer muscle memory. **Verdict: adopting quilt now would codify the file-based architecture exactly when the evidence says to leave it.** The one quilt idea worth stealing regardless is `refresh` semantics, which git provides better via the round-trip in §6.2.
+**[NOTE]** **Verdict: adopting quilt now would codify the file-based architecture exactly when the evidence says to leave it.** The one quilt idea worth stealing regardless is `refresh` semantics, which git provides better via the round-trip in §6.2.
 
-### 4.3 mergiraf (named in the question — RESOLVED v1.1)
+### 4.3 mergiraf (RESOLVED v1.1)
 
-**[SPEC]** mergiraf is a tree-sitter-based structured merge driver (C supported) that resolves conflicts textual merge cannot: adjacent additions inside one function, reordered declarations, brace-level moves. It installs as a git merge driver and offers `mergiraf solve` for existing conflict markers.
-
-**[SPEC — RESOLVED v1.1] mergiraf is now wired for the kernel loop.** The `.gitattributes` block recommended below was deployed to `ci-setup-kernel.sh` in commit `2c23edb` (2026-07-18), using exactly these rules:
-
-```gitattributes
-# low-risk: let mergiraf reduce placement conflicts
-drivers/net/ethernet/freescale/dpaa/*.c   merge=mergiraf
-*.h                                        merge=mergiraf
-# silicon-encoding: NEVER auto-merge — human review + verify gate required
-drivers/net/ethernet/freescale/fman/fman_pcd*.c    -merge
-drivers/net/ethernet/freescale/fman/fman_keygen.c  -merge
-```
-
-**[SPEC]** Hard constraints wherever mergiraf is enabled:
-- **Never for silicon-encoding files without a verify gate.** A structurally valid merge that reorders two `iowrite32be()` calls in a descriptor builder is a hardware bug that compiles. mergiraf is syntax-aware, not semantics-aware; it does not know an NIA from a FQID. Every mergiraf-assisted resolution in `fman_pcd*.c` / `fman_keygen.c` must pass the compile-time §17 asserts (§6.5), KUnit, and `fe_verify` before it counts as resolved.
-- Opt-in per path via `.gitattributes`, never global auto-merge of descriptor code.
-- Log every conflict it resolved (it reports these) into the bump record.
-
-**[NOTE] Verdict:** valuable now as a near-term conflict-reducer for the low-risk kernel file classes (a `.gitattributes` drop away), a gated Tier-C merge driver post-migration, and dangerous as an unreviewed auto-resolver near descriptor code.
+**[SPEC]** mergiraf is wired for the kernel loop since v1.1 (commit `2c23edb`). The `.gitattributes` allowlists `dpaa/*.c` and `*.h`, denies `fman_pcd*.c` / `fman_keygen.c` auto-merge. See v1.1 for the full constraint specification and the silicon-encoding `-merge` rule — that section is unchanged.
 
 ### 4.4 Tools not named that fill actual gaps
 
 **[SPEC]**
-- **`git quiltimport`**: converts a patch dir + series into one commit per patch — the one-command bridge from the current layout to the exploded tree. Its inverse, `git format-patch`, closes the loop.
-- **`git rebase -i --autosquash` + `git commit --fixup=<sha>` + `rerere`**: the correct replacement for the F-0xx layer. A board-session fix becomes a `--fixup` targeted at the owning patch-commit; autosquash folds it; the zombie category ceases to exist because there is nowhere outside the stack for a live mutation to persist. `rerere` records each conflict resolution once and replays it on every subsequent rebase, making repeated 6.18.y bumps cheap.
-- **Coccinelle (`spatch`)**: for the "demote `static` and `EXPORT_SYMBOL_GPL`" class (the `keygen_*` demotions). A semantic patch expressing "make `keygen_bind_port_to_schemes` non-static and exported" survives upstream reformatting, argument renames, and line movement that kills a context diff. ~4–6 patches, but they touch `fman_keygen.c` (hot). Cheap insurance.
+- **`git quiltimport`**: converts a patch dir + series into one commit per patch.
+- **`git rebase -i --autosquash` + `git commit --fixup=<sha>` + `rerere`**: the correct replacement for the F-0xx layer.
+- **Coccinelle (`spatch`)**: for the "demote `static` and `EXPORT_SYMBOL_GPL`" class.
 
 **[NOTE]**
-- **stgit**: quilt semantics on top of git commits (`stg push/pop/refresh`, patch names preserved). A fit if the team wants explicit patch identity rather than raw rebase. Optional; plain rebase discipline suffices.
-- **jujutsu (`jj`)**: `jj absorb` solves the exact fixup-routing problem (route each working-copy hunk into the commit that owns those lines; descendants auto-rebase). Theoretically the best fit, practically the riskiest adoption (tooling maturity, CI unfamiliarity). Reasonable to trial for one developer, not to mandate.
+- **stgit**: optional; plain rebase discipline suffices.
+- **jujutsu (`jj`)**: best theoretical fit for fixup routing; approved for single-developer trial only.
 
 ---
 
 ## 5. Prior-Art Calibration
 
 **[NOTE]** Every project carrying 100+ kernel patches converges on one of two models:
-- **File-canonical** (OpenWrt, Debian, buildroot): patches are truth, applied by quilt or scripts, refreshed via a dedicated round-trip target. Survives because of taxonomy (`backport-*/pending-*/hack-*` directories, so bumps begin by deleting `backport/`) and mandatory refresh discipline.
-- **Tree-canonical** (Fedora exploded tree, Raspberry Pi fork, Android, SUSE's git-backed `kernel-source`): a rebased branch is truth; patch files, where they exist, are export artifacts. Survives because git carries the merge machinery.
+- **File-canonical** (OpenWrt, Debian, buildroot): patches are truth.
+- **Tree-canonical** (Fedora exploded tree, Raspberry Pi fork, Android, SUSE): a rebased branch is truth; patch files are export artifacts.
 
 **[SPEC]** Nobody sane runs a third layer of post-apply textual mutation in either model. The F-0xx layer has no analog in any mature project — which is itself the finding. Two imports worth taking regardless of model:
 - OpenWrt's destiny taxonomy (directory = drop-at-bump policy).
-- Yocto's mandatory `Upstream-Status:` header (`Pending | Submitted <link> | Backport <commit> | Inappropriate <reason>`) on every patch, which turns "can we drop this at the next bump" from archaeology into grep.
+- Yocto's mandatory `Upstream-Status:` header, which turns "can we drop this at the next bump" from archaeology into grep.
 
 ---
 
@@ -246,29 +248,26 @@ drivers/net/ethernet/freescale/fman/fman_keygen.c  -merge
 
 **[SPEC]** Persist the git repo CI already builds, make it the source of truth, generate the patch directory from it, fold every fixup into its owning commit, and encode the silicon contract as compile-time asserts so the recurring bug classes fail in CI instead of on the board.
 
+**[SPEC — v1.2]** The repo is now persistent. The canonical branch `vyos-6.18.38-dpaa1` exists at `~/kernel-git-cache/linux/` with 106 commits (v6.18.38 base + 103 staged patches + 1 regenerated 0158 + 1 ENQ fix + 1 kernel post-patches). The remaining work is to fold fixups into their owning commits (Phase 2), make patch files a generated export (Phase 1 CI gate), and encode the silicon contract (§17).
+
 ### 6.2 Structure
 
 **[SPEC]**
 
 ```text
-Repo A (new): ls1046a-kernel, branch vyos-6.18.y-dpaa1
-  base:    v6.18.x pinned tag, synced from defaults.toml as today
-  commits: one per patch; subject carries patch identity
-           ("board 0131: fman-pcd-fe-hash-object"); trailers carry
-           Risk-Tier: A|B|C and Upstream-Status: per Yocto convention
-  bootstrap: git clone stable; git quiltimport --series .../board/series
-             (one afternoon; letter suffixes become ordinary commit order)
+Repo A (existing, in ~/kernel-git-cache/linux/): branch vyos-6.18.38-dpaa1
+  base:    v6.18.38 pinned tag
+  commits: one per patch; ~106 total on branch
+  bootstrap: bin/canonical-bootstrap.sh (git clone v6.18.38 → apply series)
+  bootstrap time: performed once (2026-07-19), 105 patches applied cleanly
 
-Repo B (this repo): kernel/common/patches/board/ becomes a GENERATED dir
-  make kernel-export:  format-patch v6.18.x..HEAD with normalization
-                       (--zero-commit, --no-signature, no-numbered, strip
-                       stat noise) so exports are diff-stable
-  make kernel-import:  quiltimport for anyone editing patch files directly
-                       during transition
+Repo B (this repo): kernel/common/patches/board/ → BECOMES a GENERATED dir
+  make kernel-export:  format-patch with trailer-driven naming (Patch-Name)
+  make kernel-import:  quiltimport for transitional patch editing
   CI asserts round-trip identity: export(import(patches)) == patches
 ```
 
-**[SPEC]** The downstream interface does not move: vyos-build still receives a patch directory and the existing `git apply --3way` apply loop (Layer 1/3) runs unchanged. Only the authoring side changes. The round-trip identity gate makes the two representations provably equivalent, so the vyos-build staging contract survives completely.
+**[SPEC]** The downstream interface does not move: vyos-build still receives a patch directory and the existing `git apply --3way` apply loop runs unchanged.
 
 ### 6.3 Development loop (replaces Layer 2 entirely)
 
@@ -281,16 +280,15 @@ Integration:     git commit --fixup=<owning patch-commit>
                  git rebase -i --autosquash   (zombie fixups now impossible)
 Version bump:    git rebase --onto v6.18.<next> v6.18.<cur>
                  rerere replays known resolutions; mergiraf driver reduces
-                 hot-file conflicts; every 3way/mergiraf event logged into
-                 the bump record; then make kernel-export
+                 hot-file conflicts; then make kernel-export
 New patch:       ordinary commit at the right point in the stack; insertion
                  no longer needs letter suffixes
 ```
 
 **[SPEC]** The three surviving legitimate uses of scripted mutation and their disposition:
-1. **build-kernel.sh injection shims (Layer 3):** stay — they mutate a repo you do not own and already carry hard-fail anchor checks. Long-term, upstream a pluggable apply-hook to vyos-build so the shim shrinks.
-2. **Config-fragment forcing:** stays — it is config, not code.
-3. **Everything F-0xx that touches kernel C:** abolished. Each live fixup folds into its owning commit during migration; each dead one is deleted; the no-zombie CI gate (§6.6) enforces the invariant afterward.
+1. **build-kernel.sh injection shims (Layer 3):** stay.
+2. **Config-fragment forcing:** stays.
+3. **Everything F-0xx that touches kernel C:** abolished.
 
 ### 6.4 Risk-tier the stack
 
@@ -299,18 +297,14 @@ New patch:       ordinary commit at the right point in the stack; insertion
 | Tier | Count | Content | Bump policy |
 |---|---|---|---|
 | A | ~70 | new files / new-subsystem files | rebase risk near zero |
-| B | ~5 | static-demotions and exports | convert to Coccinelle semantic patches or keep as minimal-context diffs |
-| C | ~35 | edits to `dpaa_eth.c` / `fman_port.c` / `fman_keygen.c` | human review required at every bump; minimize size aggressively; primary upstreaming candidates (every accepted hunk is a hunk you stop carrying — M8 milestone) |
-
-Record the tier as a commit trailer so bump tooling can gate review by tier.
+| B | ~5 | static-demotions and exports | convert to Coccinelle semantic patches or minimal-context diffs |
+| C | ~35 | edits to `dpaa_eth.c` / `fman_port.c` / `fman_keygen.c` | human review required at every bump |
 
 ### 6.5 Encode the silicon contract in the build
 
-**[SPEC]** The three-time ENQ regression survived because nothing between "edit" and "board" knew that word 1 is an NIA. The §17 canonical tables from `arch/fman-pcd-api-reference.md` belong:
-- in a header as `static_assert`/`BUILD_BUG_ON` where values are compile-time (`FMAN_NIA_BMI_ENQ == 0x00500002`, `FE_ENQ_WS_OFFSET == 8`, MPPN excluded from legal ENQ flags), and
-- in KUnit where they are structural (descriptor-word audits against built objects).
-
-Combined with `fman_pcd_fe_verify` at arm time (TF-2026-07-18-001 Priority 1), the pipeline gains three tripwires — compile, KUnit, arm — so a fixup, a bad merge, or a mergiraf reorder that reintroduces any catalogued defect class fails in CI minutes, not in a board session.
+**[SPEC]** The three-time ENQ regression survived because nothing between "edit" and "board" knew that word 1 is an NIA. The §17 canonical tables belong:
+- in a header as `static_assert`/`BUILD_BUG_ON` where values are compile-time, and
+- in KUnit where they are structural.
 
 ### 6.6 CI gates (delta from today)
 
@@ -318,37 +312,41 @@ Combined with `fman_pcd_fe_verify` at arm time (TF-2026-07-18-001 Priority 1), t
 
 ```text
 KEEP    patch-rot-check weekly probe
-        (extend: also rebase the branch onto linux-6.18.y latest and report
-         conflicts per commit, per tier)
-ADD     round-trip identity gate (export == import(export))
-ADD     3way-fallback counter in the apply loop; nonzero emits a refresh
-        warning naming each patch
-ADD     no-zombie gate: any F-0xx marker string in the built tree that is
-        not in an ACTIVE manifest fails the build
-ADD     §17 static asserts + KUnit descriptor audit in every kernel build
-ADD     mergiraf .gitattributes in the kernel throwaway repo (allowlist
-        low-risk classes; deny fman_pcd*.c / fman_keygen.c auto-merge)
+KEEP    persistent git clone + canonical-bootstrap.sh (v1.2)
+ADD     round-trip identity gate (export == import(export))            [not yet]
+ADD     3way-fallback counter summary + ::warning per event            [partial]
+ADD     no-zombie gate: F-0xx markers in built tree not in ACTIVE     [test-fixups.sh check[4]]
+         manifest fail the build
+ADD     §17 static asserts + KUnit descriptor audit in every build     [not yet]
+KEEP    mergiraf .gitattributes in kernel throwaway repo              [v1.1]
 KEEP    pcd-snapshot reversibility gate as-is
 ```
 
 ### 6.7 Interim hardening, if migration waits
 
-**[SPEC — v1.1 PROGRESS]** Phase 0 hardening (commit `9a6cec4`, 2026-07-18) delivered four of the six items below. Two remain open.
+**[SPEC — v1.2 PROGRESS]** Phase 0 hardening (v1.1, commit `9a6cec4`) and Phase R recovery (v1.2, `9060ad2..5811c91`) have delivered substantially. One structural item remains.
 
-**Completed (v1.1):**
-- ✅ `mutate(file, pattern, replacement, expected_count)` helper exists in `bin/kernel-fixups/mutate.py` and is used for a subset of fixups. A full mechanical conversion of remaining bare `sed -i` and soft-warning heredocs has not been done.
-- ✅ Honest count==1 comment: the false claim was replaced with a `FIXME` at line 1211.
-- ✅ mergiraf `.gitattributes` in kernel loop (allowlist low-risk, deny silicon-encoding).
-- ✅ 3way-fallback counter in the apply loop.
-- ✅ `bin/test-fixups.sh` CI gate for fixup side-effect verification.
+**Completed (v1.1+v1.2):**
+- ✅ `mutate.py` with `expected=1` (count-gated), `expected=-1` (optional), `expected=0` (expect-none), and `--check` dry-run mode. 7 fixup sites converted.
+- ✅ Honest count==1 comment (v1.1) + 7 active count gates (v1.2).
+- ✅ mergiraf `.gitattributes` in kernel loop.
+- ✅ 3way-fallback counter in the apply loop (per-patch echo; no end-of-run summary yet).
+- ✅ `bin/test-fixups.sh` CI gate (4 checks, check[1] path bug fixed v1.2).
 - ✅ Dead `F_070b.py` removed. Base64 blobs migrated to `.py` files.
+- ✅ `bin/kernel-roundtrip.sh` rewritten: non-destructive `verify`, trailer-driven `export`, protects 0001-*/0003-* namespace, dirty-dir refusal. (v1.2)
+- ✅ 5 orphaned series metadata comments purged; series restored to 260 lines. (v1.2)
+- ✅ `skip-ledger.md` created with 6 entries, 4 resolved. (v1.2)
+- ✅ Canonical branch `vyos-6.18.38-dpaa1` bootstrapped (106 commits). (v1.2)
+- ✅ `bin/clone-kernel.sh` wired into CI — persistent git clone replaces tarball. (v1.2)
+- ✅ 0158 regenerated from canonical branch, 0159–0162 deleted as obsolete. F-084 anchor resolved, F-085 restored to required(1). (v1.2)
 
 **Still open:**
-- ❌ Delete versioned duplicates: `F_068_2.py`, `F_072_2.py`, `M2_4_{2,3,4}.py`.
-- ❌ Full conversion of remaining 35 bare `sed -i` → `mutate()` calls.
+- ❌ Delete 8 versioned duplicates: `F_068_2.py`, `F_072_2.py`, `M2_4_{2,3,4}.py`.
+- ❌ Convert remaining ~28 bare `sed -i` → `mutate()` calls (complex multiline — deferred to Phase 2 structural fix).
 - ❌ The second writer (Layer 2) still exists — this is tourniquet, not cure.
-
-**[SPEC — v1.1 ADDITION]** If nothing else, add a single `fe_disengage_full` atomic debugfs operation that performs the entire teardown sequence (`disengage → clear enter → clear enq → clear hashfe → clear ehash → clear singletons → put pool`) in the correct silicon-verified order (FmPortDeleteFESupport ordering per SDK reference). The seven-step manual teardown is operator-hostile and was observed crashing the board (F-076, 2026-07-18) when the steps were issued in rapid succession or when a clear-step hit a stale state from a prior clear.
+- ❌ `fe_disengage_full` atomic debugfs operation (F-076 board crash on manual 7-step teardown).
+- ❌ Round-trip identity gate not yet wired into CI.
+- ❌ 3-way fallback counter not yet emitting `::warning` annotations in CI.
 
 ---
 
@@ -359,88 +357,110 @@ KEEP    pcd-snapshot reversibility gate as-is
 ```text
 Phase 0 (1 week):    interim hardening per §6.7; fallback counter; no-zombie
                      gate scaffold; mergiraf .gitattributes in kernel loop.
-                     Zero architectural risk.
-                     STATUS (v1.1): ✅ DELIVERED 2026-07-18 (commit 9a6cec4).
-                     mutate() helper, honest comment, 3way-fallback counter,
-                     mergiraf .gitattributes, test-fixups.sh, base64→.py
-                     migration all landed. Two items remain: delete versioned
-                     duplicates, full sed→mutate() conversion. A new item is
-                     recommended: atomic fe_disengage_full to fix F-076.
+                     STATUS (v1.2): ✅ DELIVERED (v1.1: 2026-07-18, commit 9a6cec4;
+                     v1.2 extended: R1 roundtrip, R4 orphans, P3 skip-ledger,
+                     R5b test-fixups, R5c --check mode, R5 partial sed→mutate).
+                     Remaining: delete versioned duplicates, full sed→mutate,
+                     fe_disengage_full atomic operation.
+
+Phase R (Recovery):  ~2 days — restore the 0158 workstream, fix the regressions
+                     from the v1.1 implementation round.
+                     STATUS (v1.2): ✅ SUBSTANTIALLY COMPLETE (2026-07-19,
+                     commits 9060ad2..5811c91). R1 roundtrip, R2 canonical
+                     branch, R3 0158 regenerated + 0159-0162 deleted, R4 orphans
+                     purged, R5a 7 sed→mutate, R5b test-fixups fix, R5c --check
+                     mode, P3 skip-ledger, CI git clone all landed or partially
+                     landed. Remaining: R5 full sed→mutate (~28 complex),
+                     R6 manifest disposition audit.
 
 Phase 1 (1 day):     bootstrap ls1046a-kernel via quiltimport; verify exported
                      patches byte-match (modulo normalization) and existing CI
                      builds from the export unchanged.
+                     STATUS (v1.2): Canonical branch bootstrapped (R2).
+                     Round-trip tool rewritten (R1). CI git clone operational.
+                     Remaining: CI round-trip identity gate, push canonical
+                     branch, apply loop iterate series file instead of find|sort.
 
 Phase 2 (1–2 weeks): fold every ACTIVE fixup into its owning commit, re-export,
                      delete the fixup from ci-setup-kernel.sh, one at a time,
                      board-verifying FE-VM-relevant ones against fe_verify.
-                     This is also the audit that retires the F-058/F-059/F-060
-                     class residue for good.
+                     STATUS (v1.2): NOT STARTED. Prerequisites in place:
+                     canonical branch exists, round-trip tool works,
+                     skip-ledger tracks disposition.
 
-Phase 2a (v1.1):     Restore patches 0158–0162. The six skipped patches carry
-                     FE-VM fqid resolution and EKFC programming; their
-                     functionality is bridged by fixup F-084 which is fragile.
-                     In the tree-canonical model these become rebase-resolved
-                     commits; until migration, they must be rewritten against
-                     the current tree or their functionality folded into the
-                     owning patches.
+Phase 2a (v1.1 — RESOLVED v1.2): Restore patches 0158–0162.
+                     STATUS: ✅ 0158 regenerated, 0159–0162 proven obsolete
+                     and deleted. No remaining restoration needed.
 
-Phase 3 (parallel):  §17 static asserts + KUnit audit; land fe_verify
-                     (Priority 1 in TF-2026-07-18-001).
+Phase 3 (parallel):  §17 static asserts + KUnit audit; land fe_verify.
 
 Phase 4 (next bump): first rebase-driven bump with rerere; enable mergiraf for
-                     the Tier-C allowlist; record the conflict census; use it
-                     to pick the first upstreaming batch.
+                     the Tier-C allowlist; record the conflict census.
 ```
 
 **[SPEC]** Rollback safety: because the patch directory remains the downstream contract and the round-trip gate proves equivalence, any phase can stop and the build keeps working from the exported files.
-
-**[NOTE]** Sequencing note relative to open work: TF-2026-07-18-001's P1–P3 closure was reset off `dpaa1` after a CI escaping cascade (see that document's §1.2). Migration Phase 0's `bin/test-fixups.sh` gate and Phase 2's fold-into-owning-commit discipline are the structural fix for exactly that failure mode — the fixup re-land should ride the migration, not precede it as another round of injected `sed`/heredoc edits.
 
 ---
 
 ## 8. Answers to the Question, Compressed
 
-**[SPEC]**
-- **Is the patching hardened?** Layer 1 yes, Layer 3 yes, Layer 2 no — and Layer 2 is where the incidents live. **v1.1:** The count==1 comment is now honest (FIXME), `test-fixups.sh` and `mutate()` exist, and mergiraf is wired in the kernel loop. But 35 bare `sed -i` and 8 versioned duplicates persist — the second writer has not been removed, only better monitored.
-- **Will it survive upstream changes?** The stack will mostly apply (~70 low-risk patches, 3-way with per-patch commits, weekly canary). **v1.1:** patches 0158–0162 have already been skipped due to context drift — the predicted failure mode has materialized. The fixups will not — they anchor on exact source text and fail silent-first. Survival today is a property of the good layer minus the bad layer.
-- **Right tools?** `git apply --3way`: yes, keep, **fallback counter now deployed**. quilt: no, lateral move; steal only `refresh`, which git does better. **mergiraf: RESOLVED** — wired in kernel loop (allowlisted low-risk files, denied silicon-encoding) since commit `2c23edb`.
-- **Better pattern?** Tree-canonical with generated patches: `quiltimport` in, `format-patch` out, fixups as `--fixup` commits folded by autosquash, `rerere` + tiering + Coccinelle for bumps, and the silicon contract compiled into the build. CI already builds this tree every run — the recommendation is to stop throwing it away. **v1.1:** Phase 0 hardening delivered but the structural migration (Phases 1–2) has not started; every passing week without it carries risk of another F-076 / 0158-skip incident.
+**[SPEC — v1.2]**
+- **Is the patching hardened?** Layer 1 yes, Layer 3 yes, Layer 2 partially — 7 fixups are now count-gated, but ~28 bare `sed -i` and 8 versioned duplicates remain. The count==1 comment is honest, `test-fixups.sh` and `mutate.py` exist, mergiraf is wired, the round-trip tool works, and 0158–0162 drift has been resolved (0158 regenerated, 0159–0162 deleted). The canonical branch exists (106 commits) and CI uses a persistent git clone instead of a tarball. But the second writer (Layer 2) persists — only the structural migration (Phase 2 fold-into-commits) removes it.
+- **Will it survive upstream changes?** The stack will mostly apply (~70 low-risk patches, 3-way with per-patch commits, weekly canary). The 0158–0162 drift incident was resolved — 0158 now applies cleanly from the canonical branch, and 0159–0162 were proven to contain no unique functionality. The fixups will not survive — they anchor on exact source text and ~28 of them still fail silent-first.
+- **Right tools?** `git apply --3way`: yes, keep. quilt: no. mergiraf: RESOLVED (wired since v1.1). `bin/kernel-roundtrip.sh`: usable (v1.2). `bin/canonical-bootstrap.sh`: operational (v1.2). `bin/clone-kernel.sh`: operational (v1.2).
+- **Better pattern?** Tree-canonical with generated patches. CI now uses a persistent clone; the canonical branch exists; the round-trip tool works. The remaining gap is Phase 2 (fold fixups into commits) and Phase 1 CI gate (round-trip identity on every PR).
 
 ---
 
-## 9. v1.1 Prioritized Recommendations
+## 9. v1.2 Prioritized Recommendations
 
-**[SPEC]** Re-ranked for v1.1 based on: Phase 0 progress, F-076 discovery (board crash), 0158–0162 skip (patch drift), and the M3 HIT gate being blocked by fixup fragility.
+**[SPEC]** Re-ranked for v1.2 based on: Phase R progress (substantial), canonical branch availability, 0158-0162 resolved, and the remaining gap being fixup fold-in + silicon encoding.
 
 ### Immediate (this week, ≤3 days total)
 
 | # | Item | Rationale | Est. |
 |---|---|---|---|
-| R1 | **Atomic `fe_disengage_full` debugfs operation** | F-076 crash on manual 7-step teardown. Single atomic write eliminates operator error. SDK FmPortDeleteFESupport ordering must be the single source of truth. Register as debugfs write-only node (extend `fe_arm` with a `clear` verb or add `fe_teardown`). | 2h |
-| R2 | **Delete 8 versioned duplicates** | `F_068_2.py`, `F_072_2.py`, `M2_4_{2,3,4}.py`. Zero architectural risk, removes confusion about which runs. | 30 min |
-| R3 | **Full `sed -i` → `mutate()` conversion** | 35 bare `sed -i` → `mutate(pattern, replacement, expected_count=1)` using the existing `bin/kernel-fixups/mutate.py`. Converts silent failure to loud failure. | 3h |
+| R1 | **Atomic `fe_disengage_full` debugfs operation** | F-076 crash on manual 7-step teardown. SDK FmPortDeleteFESupport ordering must be single source of truth. | 2h |
+| R2 | **Delete 8 versioned duplicates** | `F_068_2.py`, `F_072_2.py`, `M2_4_{2,3,4}.py`. Zero risk, removes confusion. | 30 min |
+| R3 | **Manifest disposition audit (R6 from IP-003)** | Every active fixup gets `fold-into` / `retire-after` / `permanent-with-justification`. F_055, F_056, F_073D audited first against settled dispatch topology. | 2h |
 
 ### Short-term (1–2 weeks)
 
 | # | Item | Rationale | Est. |
 |---|---|---|---|
-| R4 | **Restore skipped patches 0158–0162** | Six FE-VM patches skipped due to context drift; functionality bridged by fragile fixup F-084. In the tree-canonical model (Phase 2) this resolves automatically; until then, rewrite against current tree. | 1 day |
-| R5 | **Round-trip identity gate** | `export(import(patches)) == patches` in CI. Catches undetected fixup divergence before it ships. | 1 day |
-| R6 | **Coccinelle for static-demotion class** | ~5 patches touching `fman_keygen.c` (hot, Tier C). A single `.cocci` semantic patch replaces 5 context-diffs with a rebase-surviving transformation. | 2h |
+| R4 | **CI round-trip identity gate** | `export(import(patches)) == patches` in CI. Catches undetected fixup divergence before it ships. Canonical branch and round-trip tool already exist. | 1 day |
+| R5 | **Push canonical branch + CI apply loop iterates series** | Canonical branch is local only; push to remote (protected branch or separate repo). Apply loop reads series file for ordering instead of `find \| sort`. | 2h |
+| R6 | **Coccinelle for static-demotion class** | ~5 patches touching `fman_keygen.c` (hot, Tier C). A single `.cocci` semantic patch replaces 5 context-diffs. | 2h |
 
 ### Medium-term (Phases 1–2, 2–3 weeks)
 
 | # | Item | Rationale | Est. |
 |---|---|---|---|
-| R7 | **Bootstrap `ls1046a-kernel` tree-canonical repo** | `git quiltimport --series` → one commit per patch. This is the structural fix — eliminates Layer 2. CI already builds this tree; stop throwing it away. | 1 day |
-| R8 | **Fold all ACTIVE fixups into owning commits** | One fixup at a time, board-verify FE-VM-relevant ones against `fe_verify`. Zombies deleted. After this, `ci-setup-kernel.sh` fixup section shrinks to near-zero. | 1–2 weeks |
-| R9 | **§17 static asserts + KUnit descriptor audit** | Catches the "wrong NIA in descriptor word 1" class at compile time + KUnit time. Combined with `fe_verify` at arm time, three tripwires before silicon. | 3 days |
+| R7 | **Fold all ACTIVE fixups into owning commits** | One fixup at a time, board-verify FE-VM-relevant ones against `fe_verify`. Zombies deleted. After this, `ci-setup-kernel.sh` fixup section shrinks to near-zero. | 1–2 weeks |
+| R8 | **§17 static asserts + KUnit descriptor audit** | Catches "wrong NIA in descriptor word 1" at compile time + KUnit time. Three tripwires before silicon. | 3 days |
+| R9 | **3-way fallback `::warning` annotations** | Per-patch fallback counter summary with `::warning` annotation per drifted patch + refresh artifact upload. | 1h |
 
 ### Deferred (post-migration)
 
 | # | Item | Rationale |
 |---|---|---|
-| R10 | `rerere` + `--autosquash` in the rebase workflow | Only useful after tree-canonical migration (Phase 4). |
-| R11 | mergiraf for Tier-C allowlist post-migration review gate | mergiraf is installed now for low-risk files; extending to Tier-C (hot files) requires the §17 verification gate first. |
+| R10 | `rerere` + `--autosquash` in the rebase workflow | Only useful after full tree-canonical migration (Phase 4). |
+| R11 | mergiraf for Tier-C allowlist post-migration review gate | Requires §17 verification gate first. |
 | R12 | jujutsu (`jj absorb`) trial | One developer trial; do not mandate adoption. |
+
+### Resolved (items from prior versions now completed or closed)
+
+| # | Item | Resolution |
+|---|---|---|
+| — | R1 (v1.1): `fe_disengage_full` | Same as v1.2 R1 — still open, carried forward |
+| — | R2 (v1.1): Delete versioned duplicates | Same as v1.2 R2 — still open, carried forward |
+| — | R3 (v1.1): Full sed→mutate conversion | **PARTIAL**: 7 done, ~28 complex deferred to Phase 2 (R7 fold-in) |
+| — | R4 (v1.1): Restore skipped patches 0158–0162 | **CLOSED**: 0158 regenerated, 0159–0162 proven obsolete and deleted |
+| — | R5 (v1.1): Round-trip identity gate | Same as v1.2 R4 — still open, carried forward |
+| — | R6 (v1.1): Coccinelle | Same as v1.2 R6 — still open, carried forward |
+| — | R7 (v1.1): Bootstrap canonical repo | **DONE** (v1.2: `vyos-6.18.38-dpaa1`, 106 commits) |
+| — | TA §6.7: Purge orphan series comments | **DONE** (v1.2: R4) |
+| — | TA §6.7: skip-ledger.md | **DONE** (v1.2: P3) |
+| — | TA §6.7: test-fixups check[1] path fix | **DONE** (v1.2: R5b) |
+| — | TA §6.7: mutate.py --check mode | **DONE** (v1.2: R5c) |
+| — | TA §6.7: CI persistent git clone | **DONE** (v1.2: clone-kernel.sh wired) |

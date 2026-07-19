@@ -6,7 +6,6 @@
     "F_057.py": "fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)",
     "F_061.py": "fman_pcd.c: F-061 fe_probe debugfs (KG key dump from FE pool workspace)",
     "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB\u2192FE_ENTER)",
-    "F_068_2.py": "dpaa_eth.c: F-068 IC key probe (HWA size extended +32B for KG key)",
     "F_069.py": "F-069: MISS context + DDR alloc (count-asserted anchors)",
     "F_069a.py": "dpaa_eth.c: F-069a v9 buf_base + vaddr captures\\n",
     "F_069b.py": "no description",
@@ -19,7 +18,8 @@
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
     "fe_flow_key_fix.py": "no description",
-    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions"
+    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions",
+    "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)"
   },
   "count": 20,
   "removed_dead": [
@@ -27,8 +27,89 @@
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {
-    "F_068_2.py": "separate anchor (dpaa_eth.c) from F_068 (fman_pcd.c) \u2014 not a duplicate",
     "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 \u2014 not a duplicate",
     "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) \u2014 not duplicates"
+  },
+  "dispositions": {
+    "F_054.py": {
+      "action": "permanent",
+      "reason": "Core fix for context_build corruption (MUX/Transition AD writes)"
+    },
+    "F_055.py": {
+      "action": "fold-into F_054.py",
+      "reason": "Correction to F_054 MUX write target (AD+0\u2192AD+4). Merge into single fixup."
+    },
+    "F_056.py": {
+      "action": "permanent",
+      "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage \u2014 workaround for F-047 patch drift"
+    },
+    "F_057.py": {
+      "action": "permanent",
+      "reason": "SDK-compliant DDR record layout (no per-record next-FE pointer)"
+    },
+    "F_061.py": {
+      "action": "delete-after M2_4_2 upgrade",
+      "reason": "Superseded by M2_4_2.py v6 (64-word probe with non-zero filter). v1 implementation, slot-1 save strategy replaced."
+    },
+    "F_068.py": {
+      "action": "permanent",
+      "reason": "Settled AC_CC direct topology (RCCB\u2192FE_ENTER, not CCBS)"
+    },
+    "F_069.py": {
+      "action": "permanent",
+      "reason": "MISS-path DDR context allocation for ehash"
+    },
+    "F_069a.py": {
+      "action": "permanent",
+      "reason": "RX buffer vaddr capture for ic_probe/hash_probe debugfs"
+    },
+    "F_069b.py": {
+      "action": "permanent",
+      "reason": "ic_probe debugfs (IC dump from captured vaddr)"
+    },
+    "F_071.py": {
+      "action": "permanent",
+      "reason": "hash_probe debugfs (captured CRC-64 KG hash)"
+    },
+    "F_072.py": {
+      "action": "permanent",
+      "reason": "KG hash capture from dpaa_eth RX path (eth4-only guard)"
+    },
+    "F_072_2.py": {
+      "action": "permanent",
+      "reason": "FmPortSetFESupport porting: FE buffer pool alloc/teardown, params page setup"
+    },
+    "F_073D.py": {
+      "action": "permanent",
+      "reason": "Settled terminal ENQ descriptor (w0=0x02010000, w3=0) per 210.10.1"
+    },
+    "F_076.py": {
+      "action": "permanent",
+      "reason": "Atomic fe_disengage_full debugfs (F-076 board crash fix)"
+    },
+    "M2_4.py": {
+      "action": "fold-into M2_4_2.py",
+      "reason": "Intermediate version (v4: slot-5 save). Superseded by M2_4_2.py v6 (64-word probe)."
+    },
+    "M2_4_2.py": {
+      "action": "permanent",
+      "reason": "Current fe_probe debugfs (v6: 64-word scan, non-zero filter, slot-5 save)"
+    },
+    "M2_4_3.py": {
+      "action": "permanent",
+      "reason": "Params page MURAM free on disengage (fixes 256B/cycle leak)"
+    },
+    "M2_4_4.py": {
+      "action": "permanent",
+      "reason": "Lazy params page allocation in fe_port_set (robustness fix)"
+    },
+    "fe_flow_key_fix.py": {
+      "action": "permanent",
+      "reason": "fe_flow debugfs key display: key_size-based loop, correct key offset"
+    },
+    "mutate.py": {
+      "action": "permanent",
+      "reason": "Count-gated text replacement infrastructure (F-085 and --check validations)"
+    }
   }
 }
