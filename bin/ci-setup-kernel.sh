@@ -1673,6 +1673,13 @@ echo "### F-100: AF_XDP pool attach path instrumented"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_101.py" 2>&1
 echo "### F-101: DPAA1_MIN_UMEM_CHUNK lowered to 2048"
 
+# F-102: Add NULL guard for fq in __poll_portal_fast SDQCR path.
+# The ZC datapath can produce DQRR entries with invalid context_b.
+# Without this guard, fq->cb.dqrr dereferences NULL and panics.
+# Temporary — remove once ZC RX path properly initializes all FQ context_b.
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_102.py" 2>&1
+echo "### F-102: NULL fq guard in QMan poll path"
+
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
 # two lines. w5 was already MUX from patch 0131.
