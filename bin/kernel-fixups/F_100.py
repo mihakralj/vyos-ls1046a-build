@@ -13,11 +13,12 @@ if os.path.exists(AFXDP):
     with open(AFXDP) as f:
         s = f.read()
 
-    # Entry
-    if 'int af_xdp_pool_xsk_pool_attach(' in s:
+    # Entry — insert after the opening brace of the function body.
+    # Anchor on the first substantive line after the declarations.
+    if 'if (!priv || !pool)' in s:
         s = s.replace(
-            'int af_xdp_pool_xsk_pool_attach(',
-            'int af_xdp_pool_xsk_pool_attach(\n\tpr_err("ZCBIND: af_xdp_pool_attach ENTER pool=%px qid=%u\\n", pool, queue_id);\n\t',
+            'if (!priv || !pool)',
+            'pr_err("ZCBIND: af_xdp_pool_attach ENTER pool=%px qid=%u\\n", pool, queue_id);\n\tif (!priv || !pool)',
             1)
         changes += 1
         print("### F_100: af_xdp_pool_attach ENTER instrumented")
