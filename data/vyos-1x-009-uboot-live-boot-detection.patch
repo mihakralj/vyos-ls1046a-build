@@ -1,3 +1,12 @@
+From 7e63a6f637b1966d54a5fce1e9fb6904aa930bed Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-009-uboot-live-boot-detection.patch
+
+---
+ python/vyos/system/image.py | 3 +++
+ 1 file changed, 3 insertions(+)
+
 diff --git a/python/vyos/system/image.py b/python/vyos/system/image.py
 index ed8a96f..d1868fe 100644
 --- a/python/vyos/system/image.py
@@ -12,3 +21,6 @@ index ed8a96f..d1868fe 100644
      return True
  
  def if_not_live_boot(func):
+-- 
+2.39.5
+

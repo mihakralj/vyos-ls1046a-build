@@ -1,5 +1,14 @@
+From 3cfd944ea26016ecadbe582831d539c562eddf76 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-007-prefer-emmc-default.patch
+
+---
+ src/op_mode/image_installer.py | 5 +++++
+ 1 file changed, 5 insertions(+)
+
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index 07f69cc..967c5a4 100755
+index ea5aed0..f2715c0 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
 @@ -396,6 +396,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
@@ -14,3 +23,6 @@ index 07f69cc..967c5a4 100755
      for disk_name, disk_size in disks_available.items():
          disk_size_human: str = bytes_to_gb(disk_size)
          print(f'Drive: {disk_name} ({disk_size_human} GB)')
+-- 
+2.39.5
+

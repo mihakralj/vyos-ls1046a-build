@@ -1,3 +1,12 @@
+From 216360d1431f9454ac655b2445a91383c7a9c4a8 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-028-add-image-uboot-env.patch
+
+---
+ src/op_mode/image_installer.py | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 index ea5aed0..52f614d 100755
 --- a/src/op_mode/image_installer.py
@@ -33,3 +42,6 @@ index ea5aed0..52f614d 100755
          # unmount an ISO and cleanup
          cleanup([str(iso_path)])
  
+-- 
+2.39.5
+

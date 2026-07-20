@@ -1,3 +1,12 @@
+From e6e176b50d1c974153cf45df6bbaeb1077f3f2bd Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-016-timezone-rsyslog-guard.patch
+
+---
+ src/conf_mode/system_timezone.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
 diff --git a/src/conf_mode/system_timezone.py b/src/conf_mode/system_timezone.py
 index 54ffb88..57c72a3 100755
 --- a/src/conf_mode/system_timezone.py
@@ -16,3 +25,6 @@ index 54ffb88..57c72a3 100755
  
  if __name__ == '__main__':
      try:
+-- 
+2.39.5
+

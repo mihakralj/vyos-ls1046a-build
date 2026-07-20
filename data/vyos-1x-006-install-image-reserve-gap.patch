@@ -1,5 +1,15 @@
+From 9887af6efa640e0fee5a25e8cec3d81a329863f7 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-006-install-image-reserve-gap.patch
+
+---
+ python/vyos/system/disk.py     | 76 ++++++++++++++++++++++++++++------
+ src/op_mode/image_installer.py |  9 ++++
+ 2 files changed, 72 insertions(+), 13 deletions(-)
+
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 7ae9a15bb..1da29bae5 100644
+index 359afa2..fde330e 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
 @@ -15,6 +15,7 @@
@@ -161,3 +171,6 @@ index ea5aed0..fdb80df 100755
          # unmount an ISO and cleanup
          cleanup([str(iso_path)])
  
+-- 
+2.39.5
+

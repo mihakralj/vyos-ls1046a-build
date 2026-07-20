@@ -1,20 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: VyOS LS1046A CI <ci@vyos-ls1046a>
-Date: Sun, 20 Jul 2026 03:45:00 +0000
-Subject: [PATCH] ethernet: add 'offload ask' CLI node + NOP Python stub
-
-XML: adds valueless `offload ask` leafNode under ethernet offload
-options.  When set, signals that ASK hardware forwarding via FMan
-FE-VM should be engaged on this interface.
-
-Python: adds 'offload.ask' to the interface defaults list and a NOP
-stub comment in the update() method.  M6 will wire it to actual
-fman_pcd_fe_engage() / fman_pcd_fe_disengage() per interface.
-
-Regenerated 2026-07-20 against vyos-1x rolling fb6f19f (upstream
-added tso leafNode, shifting line numbers).
+From f0d388e730c81c57fedb64d2a3fcdafca6197ab5 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-031-offload-ask-cli.patch
 
 ---
+ interface-definitions/interfaces_ethernet.xml.in | 6 ++++++
+ python/vyos/ifconfig/ethernet.py                 | 4 ++++
+ 2 files changed, 10 insertions(+)
+
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
 index e981481..16f9a06 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
@@ -54,3 +47,6 @@ index b7b7b12..c6e059a 100644
          # RPS - Receive Packet Steering
          self.set_rps(dict_search('offload.rps', config) is not None)
  
+-- 
+2.39.5
+

@@ -1,5 +1,14 @@
+From 146d57fe6b900d20e702978f070865f462a17c93 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-014-download-chunk-size.patch
+
+---
+ python/vyos/remote.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
 diff --git a/python/vyos/remote.py b/python/vyos/remote.py
-index b69e8d3..9d2f6f6 100644
+index a3cbc1a..c93ced2 100644
 --- a/python/vyos/remote.py
 +++ b/python/vyos/remote.py
 @@ -59,7 +59,7 @@
@@ -11,3 +20,6 @@ index b69e8d3..9d2f6f6 100644
  
  class InteractivePolicy(MissingHostKeyPolicy):
      """
+-- 
+2.39.5
+

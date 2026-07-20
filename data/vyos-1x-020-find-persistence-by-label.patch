@@ -1,3 +1,12 @@
+From f7cda02f6d0e604d340b81d4a54e1e674f13d65d Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-020-find-persistence-by-label.patch
+
+---
+ python/vyos/system/disk.py | 26 +++++++++++++++++++++++---
+ 1 file changed, 23 insertions(+), 3 deletions(-)
+
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
 index 359afa2..62a3f09 100644
 --- a/python/vyos/system/disk.py
@@ -41,3 +50,6 @@ index 359afa2..62a3f09 100644
      return ''
  
  
+-- 
+2.39.5
+
