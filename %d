@@ -1,4 +1,0 @@
-  File "<string>", line 3
-    base = /sys/kernel/mm/hugepages
-           ^
-SyntaxError: invalid syntax
