@@ -16,11 +16,11 @@ if os.path.exists(HEADER):
         s = f.read()
 
     old = '#define DPAA1_MIN_UMEM_CHUNK        3840'
-    new = '#define DPAA1_MIN_UMEM_CHUNK        2048'
+    new = '#define DPAA1_MIN_UMEM_CHUNK        1792'
     if old in s:
         s = s.replace(old, new, 1)
         changes += 1
-        print("### F_101: DPAA1_MIN_UMEM_CHUNK 3840→2048")
+        print("### F_101: DPAA1_MIN_UMEM_CHUNK 3840→1792")
 
     with open(HEADER, 'w') as f:
         f.write(s)
