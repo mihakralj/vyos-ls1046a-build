@@ -1680,6 +1680,14 @@ echo "### F-101: DPAA1_MIN_UMEM_CHUNK lowered to 2048"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_102.py" 2>&1
 echo "### F-102: NULL fq guard in QMan poll path"
 
+# F-103: Skip FMan RX port BPID reprogram during ZC attach.
+# The reprogram-WRITE changes the FMan RX port's primary BMan pool
+# from kernel page-pool to XSK pool, causing QMan context_b corruption
+# and a NULL deref crash in __poll_portal_fast.
+# Temporary — re-enable once ZC RX datapath is fully ready.
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_103.py" 2>&1
+echo "### F-103: FMan RX port BPID reprogram disabled"
+
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
 # two lines. w5 was already MUX from patch 0131.
