@@ -1,14 +1,16 @@
-From e4af2125c62e29a38290ebb490542ca18b1ff120 Mon Sep 17 00:00:00 2001
+From d365931f1694a73c0420661aab89743832e3cd61 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 03:56:43 +0000
-Subject: [PATCH] temp: vyos-1x-030-vpp-arm64-resource-defaults.patch
+Date: Mon, 20 Jul 2026 05:57:26 +0000
+Subject: [PATCH] temp: 030 regenerated
 
 ---
- interface-definitions/vpp.xml.in | 4 ++--
- 1 file changed, 2 insertions(+), 2 deletions(-)
+ interface-definitions/vpp.xml.in                            | 4 ++--
+ python/vyos/vpp/config_resource_checks/resource_defaults.py | 4 ++--
+ python/vyos/vpp/config_verify.py                            | 2 +-
+ 3 files changed, 5 insertions(+), 5 deletions(-)
 
 diff --git a/interface-definitions/vpp.xml.in b/interface-definitions/vpp.xml.in
-index bf5e56d..ea41e72 100644
+index bf5e56d..10d22da 100644
 --- a/interface-definitions/vpp.xml.in
 +++ b/interface-definitions/vpp.xml.in
 @@ -229,7 +229,7 @@
@@ -25,10 +27,39 @@ index bf5e56d..ea41e72 100644
                        #include <include/unformat_memory_size.xml.i>
                      </properties>
 -                    <defaultValue>3G</defaultValue>
-+                    <defaultValue>256M</defaultValue>
++                    <defaultValue>256M</defaultValue>  <!-- ARM64: reduced from 3G -->
                    </leafNode>
                    <leafNode name="main-heap-page-size">
                      <properties>
+diff --git a/python/vyos/vpp/config_resource_checks/resource_defaults.py b/python/vyos/vpp/config_resource_checks/resource_defaults.py
+index aa1c9a8..7b8d279 100644
+--- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
++++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
+@@ -21,9 +21,9 @@
+     # Default size of buffers transferred via netlink
+     'netlink_rx_buffer_size': 268435456,
+     # Minimal amount of memory required to start VPP
+-    'min_memory': '8G',
++    'min_memory': '4G',  # ARM64: LS1046A has 4 GB
+     # Minimal number of physical CPU cores required to start VPP
+-    'min_cpus': 4,
++    'min_cpus': 2,  # ARM64: LS1046A has 4 cores
+     # Reserve at least 2 physical cores
+     'reserved_cpu_cores': 2,
+ }
+diff --git a/python/vyos/vpp/config_verify.py b/python/vyos/vpp/config_verify.py
+index 228fcbc..1d866b2 100644
+--- a/python/vyos/vpp/config_verify.py
++++ b/python/vyos/vpp/config_verify.py
+@@ -284,7 +284,7 @@ def verify_vpp_main_heap_size(settings: dict):
+     main_heap_size = mem_checks.memory_main_heap(settings)
+     main_heap_page_size = mem_checks.main_heap_page_size(settings)
+ 
+-    if main_heap_size < 1 << 30:
++    if main_heap_size < 1 << 28:  # ARM64: 256M minimum
+         raise ConfigError('The main heap size must be greater than or equal to 1G')
+ 
+     readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
 -- 
 2.39.5
 
