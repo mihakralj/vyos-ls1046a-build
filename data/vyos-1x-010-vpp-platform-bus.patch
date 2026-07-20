@@ -1,12 +1,12 @@
-From afb5b7e47dcae68b43deab67b4d44ea05c56ca1c Mon Sep 17 00:00:00 2001
+From 06b456595e2d2f0dd1c47adfab59c7c98a61b644 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 05:54:21 +0000
-Subject: [PATCH] temp: 010 regenerated with full AF_XDP support
+Date: Mon, 20 Jul 2026 06:24:40 +0000
+Subject: [PATCH] temp: 010 with fixed driver assignment order
 
 ---
  data/templates/vpp/startup.conf.j2 | 25 +++++++++++++++++++++++++
- src/conf_mode/vpp.py               |  9 ++++++++-
- 2 files changed, 33 insertions(+), 1 deletion(-)
+ src/conf_mode/vpp.py               | 20 +++++++++++++-------
+ 2 files changed, 38 insertions(+), 7 deletions(-)
 
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
 index 82d3753..7579950 100644
@@ -45,7 +45,7 @@ index 82d3753..7579950 100644
  linux-xfrm-nl {
       enable-route-mode-ipsec
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1..85bb396 100755
+index c0e30d1..d5562db 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
 @@ -133,6 +133,7 @@
@@ -56,17 +56,36 @@ index c0e30d1..85bb396 100755
  )
  
  
-@@ -380,6 +381,9 @@ def get_config(config=None):
+@@ -379,7 +380,15 @@ def get_config(config=None):
+             interface_rx_mode = config['settings'].get('interface_rx_mode')
  
              for iface, iface_config in config['settings']['interface'].items():
++                # Get current kernel module, required for extra verification and
++                # logic for VMBus interfaces
++                config['settings']['interface'][iface]['kernel_module'] = (
++                    EthtoolGDrvinfo(iface).driver
++                )
                  iface_config['driver'] = 'dpdk'
 +                # LS1046A: fsl_dpa is a platform-bus AF_XDP driver, not DPDK
-+                if iface_config.get('kernel_module') == 'fsl_dpa':
++                if iface_config['kernel_module'] == 'fsl_dpa':
 +                    iface_config['driver'] = 'xdp'
  
                  # old_driver = leaf_node_changed(
                  #     conf, base_settings + ['interface', iface, 'driver']
-@@ -685,8 +689,11 @@ def generate(config):
+@@ -388,12 +397,6 @@ def get_config(config=None):
+                 # if old_driver:
+                 #     config['settings']['interface'][iface]['driver_changed'] = {}
+ 
+-                # Get current kernel module, required for extra verification and
+-                # logic for VMBus interfaces
+-                config['settings']['interface'][iface]['kernel_module'] = (
+-                    EthtoolGDrvinfo(iface).driver
+-                )
+-
+                 # filter unsupported config nodes
+                 iface_filter_eth(conf, iface)
+                 set_dependents('ethernet', conf, iface)
+@@ -685,8 +688,11 @@ def generate(config):
  
  
  def initialize_interface(iface, driver, iface_config) -> None:
