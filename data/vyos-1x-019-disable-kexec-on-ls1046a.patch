@@ -1,8 +1,8 @@
 diff --git a/src/conf_mode/system_option.py b/src/conf_mode/system_option.py
-index 003e8c9..634abb2 100755
+index 8951adc..c06b797 100755
 --- a/src/conf_mode/system_option.py
 +++ b/src/conf_mode/system_option.py
-@@ -480,9 +480,23 @@ def generate_cmdline_for_kexec(options):
+@@ -506,9 +506,23 @@ def generate_cmdline_for_kexec(options):
  
  
  def apply(options):
@@ -24,6 +24,6 @@ index 003e8c9..634abb2 100755
      if kexec_required:
 -        if not boot_configuration_complete() and os.getenv('VYOS_CONFIGD'):
 +        if (not _ls1046a) and not boot_configuration_complete() and os.getenv('VYOS_CONFIGD'):
-             cmd(
-                 'kexec -l /boot/vmlinuz --initrd=/boot/initrd.img '
-                 f'--command-line="{cmdline_new}" --kexec-file-syscall'
+             cmdl([
+                 'kexec', '-l', '/boot/vmlinuz', '--initrd=/boot/initrd.img',
+                 f'--command-line={cmdline_new}', '--kexec-file-syscall',

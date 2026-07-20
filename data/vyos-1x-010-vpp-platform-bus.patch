@@ -112,7 +112,7 @@ index 228fcbc..376da42 100644
      readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
  
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index 342d58f..1d5381c 100755
+index c0e30d1..1551939 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
 @@ -16,6 +16,9 @@
@@ -125,16 +125,7 @@ index 342d58f..1d5381c 100755
  from pathlib import Path
  
  from pyroute2.iproute import IPRoute
-@@ -95,7 +98,7 @@
- }
- 
- # drivers that does not use PCIe addresses
--not_pci_drv: list[str] = ['hv_netvsc']
-+not_pci_drv: list[str] = ['hv_netvsc', 'fsl_dpa']
- 
- # drivers that support interrupt RX mode for DPDK and XDP
- drivers_support_interrupt: dict[str, list] = {
-@@ -129,8 +132,81 @@
+@@ -133,8 +136,81 @@
  )
  SUPPORTED_DRIVERS = (
      'hv_netvsc',  # Microsoft Hyper-V network interface card
@@ -216,7 +207,7 @@ index 342d58f..1d5381c 100755
  
  def _load_module(module_name: str):
      """
-@@ -348,8 +424,20 @@ def get_config(config=None):
+@@ -352,8 +428,20 @@ def get_config(config=None):
          effective_config = config_dict_merge(default_values_effective, effective_config)
          # Buffer normalization (auto → computed)
          _normalize_buffers(effective_config)
@@ -239,7 +230,7 @@ index 342d58f..1d5381c 100755
          config['effective'] = effective_config
  
      # Save important info about all interfaces that cannot be retrieved later
-@@ -375,7 +463,25 @@ def get_config(config=None):
+@@ -379,7 +467,25 @@ def get_config(config=None):
              interface_rx_mode = config['settings'].get('interface_rx_mode')
  
              for iface, iface_config in config['settings']['interface'].items():
@@ -266,7 +257,7 @@ index 342d58f..1d5381c 100755
  
                  # old_driver = leaf_node_changed(
                  #     conf, base_settings + ['interface', iface, 'driver']
-@@ -770,20 +876,33 @@ def apply(config):
+@@ -779,20 +885,33 @@ def apply(config):
                              override_drivers[k_module],
                          )
  

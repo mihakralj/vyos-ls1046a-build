@@ -135,182 +135,21 @@ index 7ae9a15bb..1da29bae5 100644
              upperdir={overlay_params["upperdir"]},\
              lowerdir={overlay_params["lowerdir"]},\
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index 07f69ccd5..4a4a16dce 100755
+index ea5aed0..fdb80df 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -130,7 +130,7 @@
- CONST_MIN_DISK_SIZE: int = 2147483648  # 2 GB
- CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
- # a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
--CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
-+CONST_RESERVED_SPACE: int = (32 + 1 + 256) * 1024**2
+@@ -1034,6 +1034,10 @@ def install_image() -> None:
+         for file in Path(DIR_KERNEL_SRC).iterdir():
+             if file.is_file():
+                 copy(file, f'{DIR_DST_ROOT}/boot/{image_name}/')
++        # Copy device tree blobs for U-Boot boards (e.g., LS1046A)
++        for file in Path(DIR_KERNEL_SRC).iterdir():
++            if file.is_file() and file.suffix == '.dtb':
++                copy(file, f'{DIR_DST_ROOT}/boot/{image_name}/')
+         copy(FILE_ROOTFS_SRC,
+              f'{DIR_DST_ROOT}/boot/{image_name}/{image_name}.squashfs')
  
- # define directories and paths
- DIR_CONFIG: str = directories['config']
-@@ -194,6 +194,40 @@ def find_disks() -> dict[str, int]:
-     for disk_name, disk_size in disks_available.copy().items():
-         if disk_size < CONST_MIN_DISK_SIZE:
-             del disks_available[disk_name]
-+
-+    # Hide USB-attached drives -- they are typically install media or
-+    # removable storage, not legitimate install targets on this platform.
-+    for disk_name in list(disks_available):
-+        try:
-+            transport = cmd(f"lsblk -ndo TRAN {disk_name}").strip()
-+        except Exception:
-+            transport = ""
-+        if transport == "usb":
-+            del disks_available[disk_name]
-+
-+    # Exclude the live boot media so it cannot be chosen as install
-+    # target and does not inflate the disk count (which triggers the
-+    # RAID-1 prompt).  Try well-known live-boot mount points
-+    # (VyOS / Debian bookworm / older Debian) until one resolves.
-+    live_src: str = ''
-+    for _mnt in ('/usr/lib/live/mount/medium',
-+                 '/run/live/medium',
-+                 '/lib/live/mount/medium'):
-+        try:
-+            live_src = cmd(f'findmnt -n -o SOURCE {_mnt}').strip()
-+            if live_src:
-+                break
-+        except Exception:
-+            continue
-+
-+    if live_src:
-+        try:
-+            pkname = cmd(f'lsblk -n -o PKNAME {live_src}').strip()
-+            live_disk = f'/dev/{pkname}' if pkname else live_src
-+            if live_disk in disks_available:
-+                del disks_available[live_disk]
-+        except Exception:
-+            pass  # lsblk failed -- keep all disks (safe fallback)
-     if not disks_available:
-         print(MSG_ERR_NO_DISK)
-         exit(MSG_INFO_INSTALL_EXIT)
-@@ -216,9 +250,22 @@ def ask_root_size(available_space: int) -> int:
-     if ask_yes_no(MSG_INPUT_ROOT_SIZE_ALL, default=True):
-         return available_space
- 
-+    min_gb: float = CONST_MIN_ROOT_SIZE / 1024**3
-+    max_gb: float = (available_space * 1024) / 1024**3
-+    prompt: str = (
-+        f"Please specify the size (in GB) of the root partition "
-+        f"(min {min_gb:.1f} GB, max {max_gb:.2f} GB; press Enter for max)?"
-+    )
-+
-     while True:
--        root_size_gb: str = ask_input(MSG_INPUT_ROOT_SIZE_SET)
--        root_size_kbytes: int = (gb_to_bytes(float(root_size_gb))) // 1024
-+        root_size_gb: str = ask_input(prompt)
-+        if root_size_gb.strip() == "":
-+            return available_space
-+        try:
-+            root_size_kbytes: int = (gb_to_bytes(float(root_size_gb))) // 1024
-+        except ValueError:
-+            print("Please enter a number, or press Enter to use the full disk.")
-+            continue
- 
-         if root_size_kbytes > available_space:
-             print(MSG_WARN_ROOT_SIZE_TOOBIG)
-@@ -396,6 +443,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
-     """
-     print(MSG_INFO_INSTALL_DISKS_LIST)
-     default_disk: str = list(disks_available)[0]
-+    # Prefer eMMC/SD card (mmcblk) as default on embedded/ARM hardware.
-+    for _d in disks_available:
-+        if 'mmcblk' in _d:
-+            default_disk = _d
-+            break
-     for disk_name, disk_size in disks_available.items():
-         disk_size_human: str = bytes_to_gb(disk_size)
-         print(f'Drive: {disk_name} ({disk_size_human} GB)')
-@@ -1058,6 +1110,75 @@ def install_image() -> None:
-         grub.set_default(image_name, DIR_DST_ROOT)
-         grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
- 
-+        # ------------------------------------------------------------
-+        # U-Boot / eMMC boot configuration (LS1046A Mono Gateway)
-+        # ------------------------------------------------------------
-+        print()
-+        print('=' * 60)
-+        print('Boot configuration')
-+        print('=' * 60)
-+
-+        # (a) Always write /boot/vyos.env to eMMC.
-+        vyos_env_ok = False
-+        vyos_env_err = ''
-+        try:
-+            vyos_env = Path(f'{DIR_DST_ROOT}/boot/vyos.env')
-+            vyos_env.write_text(f'vyos_image={image_name}\n')
-+            vyos_env_ok = True
-+        except Exception as e:
-+            vyos_env_err = f'{type(e).__name__}: {e}'
-+
-+        if vyos_env_ok:
-+            print(f'  [OK]   eMMC : /boot/vyos.env  -> vyos_image={image_name}')
-+        else:
-+            print(f'  [FAIL] eMMC : /boot/vyos.env  ({vyos_env_err})')
-+
-+        # (b) Try to set U-Boot env vars in QSPI NOR via fw_setenv.
-+        uboot_ok = False
-+        uboot_reason = ''
-+        postinstall = Path('/usr/local/bin/vyos-postinstall')
-+        mtd_present = Path('/dev/mtd2').exists()
-+        if not postinstall.exists():
-+            uboot_reason = 'vyos-postinstall helper not installed'
-+        elif not mtd_present:
-+            uboot_reason = ('kernel has no MTD/SPI support -- /dev/mtd2 '
-+                            'absent (need CONFIG_MTD=y, CONFIG_SPI=y, '
-+                            'CONFIG_SPI_FSL_QUADSPI=y)')
-+        else:
-+            try:
-+                rc = run(f'{postinstall} --root {DIR_DST_ROOT} {image_name}')
-+                if rc == 0:
-+                    uboot_ok = True
-+                else:
-+                    uboot_reason = f'vyos-postinstall exited with code {rc}'
-+            except Exception as e:
-+                uboot_reason = f'{type(e).__name__}: {e}'
-+
-+        if uboot_ok:
-+            print('  [OK]   QSPI : U-Boot env (bootcmd, vyos_image, usb_vyos)')
-+        else:
-+            print(f'  [SKIP] QSPI : U-Boot env NOT updated')
-+            print(f'         reason: {uboot_reason}')
-+
-+        # Summary line + manual recovery hint when QSPI step skipped.
-+        print()
-+        if vyos_env_ok and uboot_ok:
-+            print(f'Boot path ready: U-Boot (QSPI) -> eMMC p3 '
-+                  f'/boot/{image_name}/  (vmlinuz, initrd, dtb)')
-+        elif vyos_env_ok and not uboot_ok:
-+            print('eMMC payload written, but U-Boot env was NOT updated.')
-+            print('To boot the new image, run ONCE at the U-Boot prompt:')
-+            print(f'    setenv vyos_image {image_name}')
-+            print('    saveenv')
-+            print('    boot')
-+            print('See vyos-ls1046a-build/INSTALL.md for the full bootcmd.')
-+        else:
-+            print('WARNING: install incomplete -- /boot/vyos.env was not')
-+            print('         written; the board will not autoboot the new')
-+            print('         image until that file is created manually.')
-+        print('=' * 60)
-+        print()
-+
-         if is_raid_install(install_target):
-             # add RAID specific modules
-             grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
-@@ -1095,7 +1216,7 @@ def install_image() -> None:
-         exit()
- 
-     except Exception as err:
--        print(f'Unable to install VyOS: {err}')
-+        print(f"Unable to install VyOS: {type(err).__name__}: {err}")
-         # unmount filesystems and cleanup
-         try:
-             if install_target is not None:
-@@ -1307,6 +1428,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+@@ -1312,6 +1316,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
          copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
               f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
  

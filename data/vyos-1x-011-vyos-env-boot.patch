@@ -1,8 +1,8 @@
 diff --git a/python/vyos/system/grub.py b/python/vyos/system/grub.py
-index 9435d18..b78b30d 100644
+index fea12d8..2df5437 100644
 --- a/python/vyos/system/grub.py
 +++ b/python/vyos/system/grub.py
-@@ -359,6 +359,15 @@ def set_default(version_name: str, root_dir: str = '') -> None:
+@@ -361,6 +361,15 @@ def set_default(version_name: str, root_dir: str = '') -> None:
      vars_current['default'] = gen_version_uuid(version_name)
      vars_write(vars_file, vars_current)
  
@@ -19,10 +19,10 @@ index 9435d18..b78b30d 100644
  def common_write(root_dir: str = '', grub_common: dict[str, str] = {}) -> None:
      """Write common GRUB configuration file (overwrite everything)
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index 68db05f..dbc3685 100755
+index ea5aed0..d1696be 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -1092,6 +1092,31 @@ def install_image() -> None:
+@@ -1044,6 +1044,31 @@ def install_image() -> None:
          # copy saved encrypted config volume
          copy_previous_encrypted_config(f'{DIR_DST_ROOT}/luks', image_name)
  
@@ -54,15 +54,3 @@ index 68db05f..dbc3685 100755
          if is_raid_install(install_target):
              write_dir: str = f'{DIR_DST_ROOT}/boot/{image_name}/rw'
              raid.update_default(write_dir)
-@@ -1453,6 +1478,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
-             if file.is_file() and file.suffix == '.dtb':
-                 copy(file, f'{root_dir}/boot/{image_name}/')
- 
-+        # Copy device tree blobs for U-Boot boards (e.g., LS1046A)
-+        for file in Path(DIR_ISO_MOUNT).iterdir():
-+            if file.is_file() and file.suffix == '.dtb':
-+                copy(file, f'{root_dir}/boot/{image_name}/')
-+
-         # unmount an ISO and cleanup
-         cleanup([str(iso_path)])
- 
