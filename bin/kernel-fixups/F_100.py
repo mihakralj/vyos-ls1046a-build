@@ -7,7 +7,7 @@ return in af_xdp_pool_xsk_pool_attach(). Remove after root cause found.
 import os
 
 changes = 0
-AFXDP = "drivers/net/ethernet/freescale/dpaa/dpaa_eth_afxdp.c"
+AFXDP = "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c"
 
 if os.path.exists(AFXDP):
     with open(AFXDP) as f:
