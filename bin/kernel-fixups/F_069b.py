@@ -12,6 +12,9 @@ ic_probe_body = (
     " * IC is at vaddr - data_offset (data_offset typically 64-256).\n"
     " * Safe backward scan: only up to the page boundary of vaddr.\n"
     " */\n"
+    "extern void *fman_pcd_ic_vaddr;\n"
+    "extern void *fman_pcd_ic_buf_base;\n"
+    "\n"
     "static int fman_pcd_ic_probe_show(struct seq_file *s, void *unused)\n"
     "{\n"
     "\tvoid *vaddr;\n"
@@ -78,6 +81,24 @@ else:
         src = src[:pos] + ic_probe_body + src[pos:]
         changes += 1
         print("### fman_pcd.c: F-069b v22 ic_probe inserted fresh")
+
+# Inject extern declarations at file scope (needed for fman_pcd_ic_vaddr)
+extern_decl = "extern void *fman_pcd_ic_vaddr;\nextern void *fman_pcd_ic_buf_base;\n\n"
+if "extern void *fman_pcd_ic_vaddr" not in src:
+    # Insert after the SPDX comment block, before first #include
+    spdx_end = src.find(" */\n\n")
+    if spdx_end > 0:
+        insert_at = spdx_end + len(" */\n\n")
+        src = src[:insert_at] + extern_decl + src[insert_at:]
+        changes += 1
+        print("### fman_pcd.c: F-069b v22 extern declarations added")
+    else:
+        # Fallback: insert before first #include
+        first_include = src.find("\n#include")
+        if first_include > 0:
+            src = src[:first_include+1] + extern_decl + src[first_include+1:]
+            changes += 1
+            print("### fman_pcd.c: F-069b v22 extern declarations added (fallback)")
 
 fe_dbg = ('\t\t\tdebugfs_create_file("fe_probe", 0444,\n'
           '\t\t\t\t\t    pcd->debugfs_dir, pcd,\n'
