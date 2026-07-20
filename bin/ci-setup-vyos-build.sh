@@ -189,10 +189,11 @@ if [ -f vyos-build/data/defaults.toml ]; then
   # The pre_build_hook generates a .pylintrc with human-readable message names
   # (possibly-used-before-assignment, assigning-from-no-return) that are only
   # valid in pylint 3.x.  Our CI runner has pylint 2.16.2 (Debian bookworm)
-  # which rejects them with W0012 (unknown-option-value).  Replace with the
-  # equivalent error codes (E0606, E1111).
+  # which rejects them with W0012 (unknown-option-value).
+  # E0606 also does not exist in pylint 2.x.  Remove all three invalid entries,
+  # keeping only E0602 and E0611 which are valid in both versions.
   if [ -f vyos-build/scripts/package-build/vyos-1x/package.toml ]; then
-    sed -i 's/disable=E0602,E0611,E1111,possibly-used-before-assignment,assigning-from-no-return/disable=E0602,E0606,E0611,E1111/' \
+    sed -i 's/disable=E0602,E0611,E1111,possibly-used-before-assignment,assigning-from-no-return/disable=E0602,E0611/' \
       vyos-build/scripts/package-build/vyos-1x/package.toml
     echo "### package.toml pylint disable list fixed for pylint 2.x"
   fi
