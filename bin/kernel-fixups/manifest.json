@@ -29,9 +29,10 @@
     "F_099.py": "net/xdp/*.c + dpaa_eth.c: M4 ZC-bind instrumentation — pr_err at every error return to trace xsk_socket__create() EINVAL",
     "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation — pr_err at xsk_pool_dma_map/bman_new_pool failures",
     "F_101.py": "dpaa_eth.h: M4 ZC workaround — lower DPAA1_MIN_UMEM_CHUNK 3840→2048 for VPP 2K-chunk compatibility",
-    "F_102.py": "qman.c: M4 ZC crash fix — NULL guard for fq in __poll_portal_fast SDQCR path"
+    "F_102.py": "qman.c: M4 ZC crash fix — NULL guard for fq in __poll_portal_fast SDQCR path",
+    "F_103.py": "af_xdp_pool_main.c: M4 ZC crash fix — skip FMan RX port BPID reprogram (causes QMan context_b corruption)"
   },
-  "count": 30,
+  "count": 31,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
@@ -172,6 +173,10 @@
     "F_102.py": {
       "action": "remove-after-M4",
       "reason": "temporary crash fix — ZC datapath produces DQRR entries with invalid context_b; remove once ZC RX path properly initializes all FQ context_b"
+    },
+    "F_103.py": {
+      "action": "remove-after-M4",
+      "reason": "temporary crash fix — FMan RX port BPID reprogram causes QMan context_b corruption; re-enable once ZC RX datapath handles XSK-pool frames"
     }
   }
 }
