@@ -1,51 +1,27 @@
-From 06b456595e2d2f0dd1c47adfab59c7c98a61b644 Mon Sep 17 00:00:00 2001
+From d8f7327cfb2df20259f253683c45e1e620ae9592 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 06:24:40 +0000
-Subject: [PATCH] temp: 010 with fixed driver assignment order
+Date: Mon, 20 Jul 2026 06:58:08 +0000
+Subject: [PATCH] temp: 010 final
 
 ---
- data/templates/vpp/startup.conf.j2 | 25 +++++++++++++++++++++++++
- src/conf_mode/vpp.py               | 20 +++++++++++++-------
- 2 files changed, 38 insertions(+), 7 deletions(-)
+ data/templates/vpp/startup.conf.j2 |  1 +
+ src/conf_mode/vpp.py               | 27 ++++++++++++++++++++-------
+ 2 files changed, 21 insertions(+), 7 deletions(-)
 
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
-index 82d3753..7579950 100644
+index 82d3753..4a68e4f 100644
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
-@@ -180,6 +180,31 @@ dpdk {
-     uio-bind-force
- }
- 
-+af_xdp {
-+{% for iface, iface_config in interface.items() %}
-+{%     if iface_config.driver == 'xdp' %}
-+    dev {{ iface }} {
-+        name {{ iface }}
-+{%         if iface_config.xdp_api_params.rxq_size is vyos_defined %}
-+        rx-queue-size {{ iface_config.xdp_api_params.rxq_size }}
-+{%         endif %}
-+{%         if iface_config.xdp_api_params.txq_size is vyos_defined %}
-+        tx-queue-size {{ iface_config.xdp_api_params.txq_size }}
-+{%         endif %}
-+{%         if iface_config.xdp_api_params.rxq_num is vyos_defined %}
-+        num-rx-queues {{ iface_config.xdp_api_params.rxq_num }}
-+{%         endif %}
-+{%         if iface_config.xdp_api_params.mode is vyos_defined %}
-+        mode {{ iface_config.xdp_api_params.mode }}
-+{%         endif %}
-+{%         if iface_config.xdp_api_params.flags is vyos_defined %}
-+        flags {{ iface_config.xdp_api_params.flags }}
-+{%         endif %}
-+    }
-+{%     endif %}
-+{% endfor %}
-+}
-+
- {% if ipsec_acceleration is vyos_defined %}
- linux-xfrm-nl {
-      enable-route-mode-ipsec
+@@ -74,6 +74,7 @@ plugins {
+     plugin default { disable }
+     plugin avf_plugin.so { enable }
+     plugin dpdk_plugin.so { enable }
++    plugin af_xdp_plugin.so { enable }
+     plugin vmxnet3_plugin.so { enable }
+     plugin lacp_plugin.so { enable }
+     plugin linux_cp_plugin.so { enable }
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1..d5562db 100755
+index c0e30d1..79e9d66 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
 @@ -133,6 +133,7 @@
@@ -56,7 +32,7 @@ index c0e30d1..d5562db 100755
  )
  
  
-@@ -379,7 +380,15 @@ def get_config(config=None):
+@@ -379,7 +380,22 @@ def get_config(config=None):
              interface_rx_mode = config['settings'].get('interface_rx_mode')
  
              for iface, iface_config in config['settings']['interface'].items():
@@ -69,10 +45,17 @@ index c0e30d1..d5562db 100755
 +                # LS1046A: fsl_dpa is a platform-bus AF_XDP driver, not DPDK
 +                if iface_config['kernel_module'] == 'fsl_dpa':
 +                    iface_config['driver'] = 'xdp'
++                    # DPAA1 AF_XDP defaults (XDP options removed from CLI by T8202)
++                    if 'xdp_options' not in iface_config:
++                        iface_config['xdp_options'] = {
++                            'rx_queue_size': '1024',
++                            'tx_queue_size': '1024',
++                            'num_rx_queues': '1',
++                        }
  
                  # old_driver = leaf_node_changed(
                  #     conf, base_settings + ['interface', iface, 'driver']
-@@ -388,12 +397,6 @@ def get_config(config=None):
+@@ -388,12 +404,6 @@ def get_config(config=None):
                  # if old_driver:
                  #     config['settings']['interface'][iface]['driver_changed'] = {}
  
@@ -85,7 +68,7 @@ index c0e30d1..d5562db 100755
                  # filter unsupported config nodes
                  iface_filter_eth(conf, iface)
                  set_dependents('ethernet', conf, iface)
-@@ -685,8 +688,11 @@ def generate(config):
+@@ -685,8 +695,11 @@ def generate(config):
  
  
  def initialize_interface(iface, driver, iface_config) -> None:
