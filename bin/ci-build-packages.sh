@@ -526,6 +526,15 @@ for package in $packages; do
     if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ]; then
       KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
       echo "### single-image: building ASK2 OOT kernel modules (ask.ko, dormant)"
+      # F-069a-FIX: change extern→definition in dpaa_eth.c so the linker
+      # can resolve fman_pcd_ic_vaddr.  Both ci-setup-kernel.sh fixups
+      # and build-kernel.sh inject extern declarations; exactly one
+      # compilation unit must provide the definition.
+      if [ -f "$KSRC_ABS_ASK/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c" ]; then
+        sed -i 's/^extern void \*fman_pcd_ic_vaddr;$/void *fman_pcd_ic_vaddr;/' "$KSRC_ABS_ASK/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c"
+        sed -i 's/^extern void \*fman_pcd_ic_buf_base;$/void *fman_pcd_ic_buf_base;/' "$KSRC_ABS_ASK/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c"
+        echo "### F-069a-FIX: extern→definition in dpaa_eth.c"
+      fi
       # F-094-FIX: ensure the OOT module's kernel header snapshot has the
       # struct definition and updated signature.  The ci-setup-kernel.sh
       # fixups target the main kernel tree, but the OOT module builds
