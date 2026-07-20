@@ -1,12 +1,12 @@
-From 656d263f2980d1e91bec24703c5c53bf1290bc40 Mon Sep 17 00:00:00 2001
+From afb5b7e47dcae68b43deab67b4d44ea05c56ca1c Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 05:07:07 +0000
-Subject: [PATCH] temp: 010 regenerated with AF_XDP device block
+Date: Mon, 20 Jul 2026 05:54:21 +0000
+Subject: [PATCH] temp: 010 regenerated with full AF_XDP support
 
 ---
  data/templates/vpp/startup.conf.j2 | 25 +++++++++++++++++++++++++
- src/conf_mode/vpp.py               |  1 +
- 2 files changed, 26 insertions(+)
+ src/conf_mode/vpp.py               |  9 ++++++++-
+ 2 files changed, 33 insertions(+), 1 deletion(-)
 
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
 index 82d3753..7579950 100644
@@ -45,7 +45,7 @@ index 82d3753..7579950 100644
  linux-xfrm-nl {
       enable-route-mode-ipsec
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1..36de31a 100755
+index c0e30d1..85bb396 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
 @@ -133,6 +133,7 @@
@@ -56,6 +56,29 @@ index c0e30d1..36de31a 100755
  )
  
  
+@@ -380,6 +381,9 @@ def get_config(config=None):
+ 
+             for iface, iface_config in config['settings']['interface'].items():
+                 iface_config['driver'] = 'dpdk'
++                # LS1046A: fsl_dpa is a platform-bus AF_XDP driver, not DPDK
++                if iface_config.get('kernel_module') == 'fsl_dpa':
++                    iface_config['driver'] = 'xdp'
+ 
+                 # old_driver = leaf_node_changed(
+                 #     conf, base_settings + ['interface', iface, 'driver']
+@@ -685,8 +689,11 @@ def generate(config):
+ 
+ 
+ def initialize_interface(iface, driver, iface_config) -> None:
++    # LS1046A: AF_XDP platform-bus devices need no PCI rescan
++    if driver == 'xdp' and iface_config.get('original_driver') == 'fsl_dpa':
++        pass  # AF_XDP on platform bus — no PCI rescan, no rename
+     # DPDK - rescan PCI to use a proper driver
+-    if driver == 'dpdk' and iface_config['original_driver'] not in not_pci_drv:
++    elif driver == 'dpdk' and iface_config['original_driver'] not in not_pci_drv:
+         # 'gve' devices require a specific unbind/bind process instead of a standard PCI rescan.
+         if iface_config['original_driver'] == 'gve':
+             control_host.rebind_gve_driver(
 -- 
 2.39.5
 
