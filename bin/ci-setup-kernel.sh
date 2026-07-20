@@ -1661,6 +1661,15 @@ fi
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_099.py" 2>&1
 echo "### F-099: AF_XDP ZC bind path instrumented"
 
+# F-069a-FIX: ensure exactly one definition of fman_pcd_ic_vaddr.
+# Both the fixup scripts and build-kernel.sh inject extern declarations.
+# Change the one in dpaa_eth.c to a definition so the linker resolves it.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    sed -i 's/^extern void \*fman_pcd_ic_vaddr;$/void *fman_pcd_ic_vaddr;/' drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+    sed -i 's/^extern void \*fman_pcd_ic_buf_base;$/void *fman_pcd_ic_buf_base;/' drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+    echo "### F-069a-FIX: extern→definition in dpaa_eth.c"
+fi
+
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
 # two lines. w5 was already MUX from patch 0131.
