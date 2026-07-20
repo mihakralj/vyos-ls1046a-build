@@ -526,6 +526,21 @@ for package in $packages; do
     if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ]; then
       KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
       echo "### single-image: building ASK2 OOT kernel modules (ask.ko, dormant)"
+      # F-094-FIX: ensure the OOT module's kernel header snapshot has the
+      # struct definition and updated signature.  The ci-setup-kernel.sh
+      # fixups target the main kernel tree, but the OOT module builds
+      # against the snapshot at ask-kernel-snapshot/extracted/.
+      SNAP_HDR="$KSRC_ABS_ASK/../ask-kernel-snapshot/extracted/usr/src/linux-headers-6.18.38-vyos/include/linux/fsl/fman_pcd.h"
+      if [ -f "$SNAP_HDR" ]; then
+        if ! grep -q 'struct fman_pcd_fe_flow_action {' "$SNAP_HDR"; then
+          sed -i '/^int fman_pcd_fe_engage/i/* F-094: Structured flow action.\n */\n#define FMAN_FE_FLOW_KEY_MAX   56\nstruct fman_pcd_fe_flow_action {\n\tu8   key[FMAN_FE_FLOW_KEY_MAX];\n\tu8   key_size;\n\tunsigned long enq_off;\n\tu32  flags;\n};\n' "$SNAP_HDR"
+          echo "### F-094-FIX: added struct to snapshot header"
+        fi
+        if grep -q 'const u8 \*key, u8 key_size, unsigned long enq_off' "$SNAP_HDR"; then
+          sed -i 's/const u8 \*key, u8 key_size, unsigned long enq_off);/const struct fman_pcd_fe_flow_action *action);/' "$SNAP_HDR"
+          echo "### F-094-FIX: updated flow_add signature in snapshot header"
+        fi
+      fi
       # Cross-build env is already exported by the kernel build above
       # (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-). Pass through.
       ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
