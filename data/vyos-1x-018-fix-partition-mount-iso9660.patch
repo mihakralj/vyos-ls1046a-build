@@ -1,5 +1,14 @@
+From 4e347e777b60b4a87dea6f4f24dbd30bba2bf5f8 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-018-fix-partition-mount-iso9660.patch
+
+---
+ python/vyos/system/disk.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 7ae9a15..e53f99b 100644
+index 359afa2..c5287bc 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
 @@ -171,7 +171,7 @@ def partition_mount(partition: str,
@@ -11,3 +20,6 @@ index 7ae9a15..e53f99b 100644
          command: str = f'mount -t overlay -o noatime,\
              upperdir={overlay_params["upperdir"]},\
              lowerdir={overlay_params["lowerdir"]},\
+-- 
+2.39.5
+

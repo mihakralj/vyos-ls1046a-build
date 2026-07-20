@@ -1,19 +1,19 @@
-From 547ab219f4ad4220b5ade8064b31a08815f32110 Mon Sep 17 00:00:00 2001
-From: ls1046a-agent <agent@vyos-ls1046a-build>
-Date: Sun, 7 Jun 2026 06:05:59 +0000
-Subject: [PATCH] ethernet: hw ingress-policer (DPAA1 FMan Policer offload)
+From 306e12132263e79b79ef430394a79c6097cd4306 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-025-ingress-policer.patch
 
 ---
- .../interfaces_ethernet.xml.in                | 90 +++++++++++++++++++++
- python/vyos/ifconfig/ethernet.py              | 69 +++++++++++++++++++
+ .../interfaces_ethernet.xml.in                | 90 +++++++++++++++++++
+ python/vyos/ifconfig/ethernet.py              | 69 ++++++++++++++
  src/conf_mode/interfaces_ethernet.py          | 19 ++++
  3 files changed, 178 insertions(+)
 
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index 5385916..34d5879 100644
+index e981481..6cf3373 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -139,6 +139,96 @@
+@@ -133,6 +133,96 @@
                </leafNode>
              </children>
            </node>
@@ -111,10 +111,10 @@ index 5385916..34d5879 100644
              <properties>
                <help>Link speed</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 02d4b76..2a87c79 100644
+index b7b7b12..ea7f2f9 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -364,6 +364,70 @@ def set_vlan_strip(self, state):
+@@ -335,6 +335,70 @@ def set_lro(self, state):
                  )
          return False
  
@@ -185,7 +185,7 @@ index 02d4b76..2a87c79 100644
      def set_rps(self, state):
          if not isinstance(state, bool):
              raise ValueError('Value out of range')
-@@ -636,5 +700,10 @@ def update(self, config):
+@@ -604,5 +668,10 @@ def update(self, config):
          # call base class last
          super().update(config)
  
@@ -197,10 +197,10 @@ index 02d4b76..2a87c79 100644
          # enable/disable EAPoL (Extensible Authentication Protocol over Local Area Network)
          self.set_eapol()
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 10b778e..02a9523 100755
+index 9063bcd..0c67e7b 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -376,6 +376,24 @@ def verify_vpp_remove_vif(ethernet: dict):
+@@ -384,6 +384,24 @@ def verify_vpp_remove_vif(ethernet: dict):
      for vlan in vlan_names:
          verify_vpp_remove_interface(vlan, vpp_config)
  
@@ -225,7 +225,7 @@ index 10b778e..02a9523 100755
  def verify(ethernet):
      verify_flowtable(ethernet)
      verify_vpp_remove_vif(ethernet)
-@@ -387,6 +405,7 @@ def verify(ethernet):
+@@ -395,6 +413,7 @@ def verify(ethernet):
      verify_interface_exists(ethernet, ifname, state_required=True)
      verify_eapol(ethernet)
      verify_mirror_redirect(ethernet)

@@ -1,5 +1,14 @@
+From c02312baf0430a6d05547d34f8ee6db38e335ede Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-012-ls1046a-motd.patch
+
+---
+ data/templates/login/default_motd.j2 | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
 diff --git a/data/templates/login/default_motd.j2 b/data/templates/login/default_motd.j2
-index 0d52092..f9e3bd2 100644
+index 0d52092..e396e48 100644
 --- a/data/templates/login/default_motd.j2
 +++ b/data/templates/login/default_motd.j2
 @@ -1,4 +1,4 @@
@@ -18,3 +27,6 @@ index 0d52092..f9e3bd2 100644
   * Documentation:  {{ version_data.documentation_url }}
   * Project news:   {{ version_data.project_news_url }}
   * Bug reports:    {{ version_data.bugtracker_url }}
+-- 
+2.39.5
+

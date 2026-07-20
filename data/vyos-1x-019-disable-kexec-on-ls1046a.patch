@@ -1,3 +1,12 @@
+From 65f831a3607c8ffe2e9bb502aa4919d69ffe7bca Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-019-disable-kexec-on-ls1046a.patch
+
+---
+ src/conf_mode/system_option.py | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
 diff --git a/src/conf_mode/system_option.py b/src/conf_mode/system_option.py
 index 8951adc..c06b797 100755
 --- a/src/conf_mode/system_option.py
@@ -27,3 +36,6 @@ index 8951adc..c06b797 100755
              cmdl([
                  'kexec', '-l', '/boot/vmlinuz', '--initrd=/boot/initrd.img',
                  f'--command-line={cmdline_new}', '--kexec-file-syscall',
+-- 
+2.39.5
+

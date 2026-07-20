@@ -1,20 +1,115 @@
+From 35f8b7d7b78d3410c677d8d20707e12d71089412 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:57:11 +0000
+Subject: [PATCH] temp: 024
+
+---
+ .../interfaces_ethernet.xml.in                | 90 +++++++++++++++++++
+ python/vyos/ethtool.py                        |  3 +
+ python/vyos/ifconfig/ethernet.py              | 28 ++++++
+ 3 files changed, 121 insertions(+)
+
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index 16f9a06..f0e1b78 100644
+index e981481..6cf3373 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -137,6 +137,12 @@
-                   <valueless/>
-                 </properties>
+@@ -133,6 +133,96 @@
                </leafNode>
-+              <leafNode name="vlan-strip">
-+                <properties>
-+                  <help>Enable hardware VLAN tag stripping on receive (NXP LS1046A FMan Header Manipulation offload)</help>
-+                  <valueless/>
-+                </properties>
-+              </leafNode>
              </children>
            </node>
++          <node name="ingress-policer">
++            <properties>
++              <help>Hardware ingress rate policer (NXP LS1046A FMan Policer offload)</help>
++            </properties>
++            <children>
++              <leafNode name="bandwidth">
++                <properties>
++                  <help>Committed information rate (policer drop threshold)</help>
++                  <valueHelp>
++                    <format>&lt;number&gt;</format>
++                    <description>Bits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;bit</format>
++                    <description>Bits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;kbit</format>
++                    <description>Kilobits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;mbit</format>
++                    <description>Megabits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;gbit</format>
++                    <description>Gigabits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;tbit</format>
++                    <description>Terabits per second</description>
++                  </valueHelp>
++                  <constraint>
++                    <validator name="numeric" argument="--positive"/>
++                    <regex>\d+(bit|kbit|mbit|gbit|tbit)?</regex>
++                  </constraint>
++                </properties>
++              </leafNode>
++              <leafNode name="burst">
++                <properties>
++                  <help>Burst size in bytes</help>
++                  <valueHelp>
++                    <format>&lt;number&gt;</format>
++                    <description>Bytes</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;&lt;suffix&gt;</format>
++                    <description>Bytes with scaling suffix (kb, mb, gb)</description>
++                  </valueHelp>
++                  <constraint>
++                    <validator name="numeric" argument="--positive"/>
++                    <regex>\d+(b|kb|mb|gb)?</regex>
++                  </constraint>
++                </properties>
++              </leafNode>
++              <leafNode name="peak-bandwidth">
++                <properties>
++                  <help>Peak information rate (enables two-rate trTCM policing)</help>
++                  <valueHelp>
++                    <format>&lt;number&gt;</format>
++                    <description>Bits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;bit</format>
++                    <description>Bits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;kbit</format>
++                    <description>Kilobits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;mbit</format>
++                    <description>Megabits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;gbit</format>
++                    <description>Gigabits per second</description>
++                  </valueHelp>
++                  <valueHelp>
++                    <format>&lt;number&gt;tbit</format>
++                    <description>Terabits per second</description>
++                  </valueHelp>
++                  <constraint>
++                    <validator name="numeric" argument="--positive"/>
++                    <regex>\d+(bit|kbit|mbit|gbit|tbit)?</regex>
++                  </constraint>
++                </properties>
++              </leafNode>
++            </children>
++          </node>
            <leafNode name="speed">
+             <properties>
+               <help>Link speed</help>
 diff --git a/python/vyos/ethtool.py b/python/vyos/ethtool.py
 index 85e228e..00ca6f2 100644
 --- a/python/vyos/ethtool.py
@@ -30,7 +125,7 @@ index 85e228e..00ca6f2 100644
          # Configuration of RX/TX ring-buffers is not supported on every device,
          # thus when it's impossible return None
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index c6e059a..39491f1 100644
+index b7b7b12..0d7fc25 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
 @@ -78,6 +78,10 @@ def feature(ifname, option, value):
@@ -44,7 +139,7 @@ index c6e059a..39491f1 100644
          },
      }
  
-@@ -336,6 +340,30 @@ def set_lro(self, state):
+@@ -335,6 +339,30 @@ def set_lro(self, state):
                  )
          return False
  
@@ -75,3 +170,6 @@ index c6e059a..39491f1 100644
      def set_rps(self, state):
          if not isinstance(state, bool):
              raise ValueError('Value out of range')
+-- 
+2.39.5
+

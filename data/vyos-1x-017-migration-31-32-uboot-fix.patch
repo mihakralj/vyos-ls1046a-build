@@ -1,3 +1,12 @@
+From e26bedeab88151ca1deadbb15f658a8a11afb86f Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-017-migration-31-32-uboot-fix.patch
+
+---
+ src/migration-scripts/system/31-to-32 | 1 +
+ 1 file changed, 1 insertion(+)
+
 diff --git a/src/migration-scripts/system/31-to-32 b/src/migration-scripts/system/31-to-32
 index b68dab3..4cefa67 100644
 --- a/src/migration-scripts/system/31-to-32
@@ -10,3 +19,6 @@ index b68dab3..4cefa67 100644
  from vyos.configtree import ConfigTree
  from vyos.system import disk
  from vyos.system.grub import CFG_VYOS_VARS
+-- 
+2.39.5
+

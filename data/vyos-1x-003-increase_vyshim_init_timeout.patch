@@ -1,3 +1,12 @@
+From feaba7d993370d01a5436938eb555081e0226a58 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-003-increase_vyshim_init_timeout.patch
+
+---
+ src/shim/vyshim.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
 diff --git a/src/shim/vyshim.c b/src/shim/vyshim.c
 index 7b516cd..2f843e6 100644
 --- a/src/shim/vyshim.c
@@ -11,3 +20,6 @@ index 7b516cd..2f843e6 100644
      timer.it_interval.tv_sec = timer.it_interval.tv_usec = 0;
      none_timer.it_value.tv_sec = none_timer.it_value.tv_usec = 0;
      none_timer.it_interval.tv_sec = none_timer.it_interval.tv_usec = 0;
+-- 
+2.39.5
+

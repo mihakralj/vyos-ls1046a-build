@@ -1,3 +1,15 @@
+From de3a81d512f1e49aafd856bdffbcbe32981f09d5 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-010-vpp-platform-bus.patch
+
+---
+ data/templates/vpp/startup.conf.j2            |  52 +++++--
+ .../resource_defaults.py                      |   6 +-
+ python/vyos/vpp/config_verify.py              |   4 +-
+ src/conf_mode/vpp.py                          | 137 ++++++++++++++++--
+ 4 files changed, 171 insertions(+), 28 deletions(-)
+
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
 index 82d3753..f00a6d6 100644
 --- a/data/templates/vpp/startup.conf.j2
@@ -297,3 +309,6 @@ index c0e30d1..1551939 100755
  
      if 'settings' in config and 'interface' in config.get('settings'):
          interface_rx_mode = config['settings'].get('interface_rx_mode')
+-- 
+2.39.5
+

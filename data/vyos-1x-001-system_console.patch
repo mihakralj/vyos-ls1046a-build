@@ -1,3 +1,13 @@
+From 7fe7846ce53d7b2bd1301232c688e40e60049c45 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-001-system_console.patch
+
+---
+ interface-definitions/system_console.xml.in | 16 ++++++++++++----
+ src/conf_mode/system_console.py             | 11 ++++++++---
+ 2 files changed, 20 insertions(+), 7 deletions(-)
+
 diff --git a/interface-definitions/system_console.xml.in b/interface-definitions/system_console.xml.in
 index 8ae9829..043ad83 100644
 --- a/interface-definitions/system_console.xml.in
@@ -55,7 +65,7 @@ index 8ae9829..043ad83 100644
                  </properties>
                  <defaultValue>115200</defaultValue>
 diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
-index 51c95fc..ff1d028 100755
+index 22a4a37..fbf96c0 100755
 --- a/src/conf_mode/system_console.py
 +++ b/src/conf_mode/system_console.py
 @@ -136,14 +136,19 @@ def apply(console):
@@ -81,3 +91,6 @@ index 51c95fc..ff1d028 100755
      if 'powersave' in console.keys():
          # Configure screen blank powersaving on VGA console
          call('/usr/bin/setterm -blank 15 -powersave powerdown -powerdown 60 -term linux </dev/tty1 >/dev/tty1 2>&1')
+-- 
+2.39.5
+

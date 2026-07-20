@@ -1,11 +1,14 @@
-# ARM64 boards (LS1046A Mono Gateway DK) have no DMI/SMBIOS tables, so
-# `show version`'s Hardware vendor/model/S/N/UUID always print "Unknown".
-# Falls back to devicetree model, the board-ID EEPROM (i2c-3 @0x50, offset
-# 0x0028, read via I2C_SLAVE_FORCE same as board/scripts/fan-pid), and the
-# lowest MAC address (colons stripped) as a stable pseudo-UUID.
-# See specs/conntrack-root-cause-analysis.md-adjacent chat thread 2026-07-01.
+From e98a9b4914e75eed091994853a11a78ddd6e0b03 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-029-arm64-hw-info.patch
+
+---
+ python/vyos/version.py | 85 ++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 78 insertions(+), 7 deletions(-)
+
 diff --git a/python/vyos/version.py b/python/vyos/version.py
-index d62778c..c229d16 100644
+index 4ba44f1..c229d16 100644
 --- a/python/vyos/version.py
 +++ b/python/vyos/version.py
 @@ -94,16 +94,87 @@ def get_full_version_data(fname=version_file):
@@ -103,3 +106,6 @@ index d62778c..c229d16 100644
  def get_remote_version(url):
      """
      Get remote available JSON file from remote URL
+-- 
+2.39.5
+

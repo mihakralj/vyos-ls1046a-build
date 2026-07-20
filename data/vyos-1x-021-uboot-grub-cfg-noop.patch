@@ -1,3 +1,13 @@
+From 4fd901ee9dcc29091094825a4e58304e7e05114e Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-021-uboot-grub-cfg-noop.patch
+
+---
+ python/vyos/system/compat.py    | 19 +++++++++++++++++++
+ python/vyos/system/grub_util.py | 13 +++++++++++++
+ 2 files changed, 32 insertions(+)
+
 diff --git a/python/vyos/system/compat.py b/python/vyos/system/compat.py
 index 40b38b3..5011f69 100644
 --- a/python/vyos/system/compat.py
@@ -80,3 +90,6 @@ index edaea8a..a9163fd 100644
      if not root_dir:
          root_dir = disk.find_persistence()
  
+-- 
+2.39.5
+

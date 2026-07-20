@@ -1,5 +1,14 @@
+From e678685fbdd61c0887063fb8ec146ed35f1e4bca Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-023-no-console-restart-if-unchanged.patch
+
+---
+ src/conf_mode/system_console.py | 120 +++++++++++++++++++++++++++++---
+ 1 file changed, 110 insertions(+), 10 deletions(-)
+
 diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
-index 51c95fc..b55b3a2 100755
+index 22a4a37..f549fcc 100755
 --- a/src/conf_mode/system_console.py
 +++ b/src/conf_mode/system_console.py
 @@ -23,13 +23,55 @@
@@ -180,3 +189,6 @@ index 51c95fc..b55b3a2 100755
 -        exit(1)
 +        exit(1)
 \ No newline at end of file
+-- 
+2.39.5
+

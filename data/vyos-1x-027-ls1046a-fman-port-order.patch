@@ -1,5 +1,14 @@
+From 621a3d5670ccd03a86c7bbfb4843e592529de647 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:43 +0000
+Subject: [PATCH] temp: vyos-1x-027-ls1046a-fman-port-order.patch
+
+---
+ src/udev/vyos_net_name | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
 diff --git a/src/udev/vyos_net_name b/src/udev/vyos_net_name
-index 568734c..cc789d6 100755
+index f5c3b9f..de2a278 100755
 --- a/src/udev/vyos_net_name
 +++ b/src/udev/vyos_net_name
 @@ -95,6 +95,37 @@ def get_biosdevname(ifname: str) -> str:
@@ -50,3 +59,6 @@ index 568734c..cc789d6 100755
      if predefined:
          newname = predefined
          logger.info(f"predefined interface name for '{intf_name}' is '{newname}'")
+-- 
+2.39.5
+

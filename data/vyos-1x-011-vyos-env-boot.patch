@@ -1,3 +1,13 @@
+From bf42387c9db82816da78ea47ab6e1f30cbb3e86e Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-011-vyos-env-boot.patch
+
+---
+ python/vyos/system/grub.py     |  9 +++++++++
+ src/op_mode/image_installer.py | 25 +++++++++++++++++++++++++
+ 2 files changed, 34 insertions(+)
+
 diff --git a/python/vyos/system/grub.py b/python/vyos/system/grub.py
 index fea12d8..2df5437 100644
 --- a/python/vyos/system/grub.py
@@ -54,3 +64,6 @@ index ea5aed0..d1696be 100755
          if is_raid_install(install_target):
              write_dir: str = f'{DIR_DST_ROOT}/boot/{image_name}/rw'
              raid.update_default(write_dir)
+-- 
+2.39.5
+

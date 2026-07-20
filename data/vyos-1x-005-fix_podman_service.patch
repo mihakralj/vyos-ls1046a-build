@@ -1,5 +1,14 @@
+From ecf727ecf72ceb9e3c5ac7d44ac340ee8bd287f5 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 20 Jul 2026 03:56:42 +0000
+Subject: [PATCH] temp: vyos-1x-005-fix_podman_service.patch
+
+---
+ src/conf_mode/container.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
 diff --git a/src/conf_mode/container.py b/src/conf_mode/container.py
-index 20ec300..c2532d6 100755
+index 91f44d2..b2464f7 100755
 --- a/src/conf_mode/container.py
 +++ b/src/conf_mode/container.py
 @@ -470,7 +470,7 @@ def generate_run_arguments(name, container_config, host_ident):
@@ -11,3 +20,6 @@ index 20ec300..c2532d6 100755
                           f'--name {name} {hostname} {device} {port} {name_server} {volume} {tmpfs} {env_opt} {label} {uid} {host_pid}'
  
      entrypoint = ''
+-- 
+2.39.5
+
