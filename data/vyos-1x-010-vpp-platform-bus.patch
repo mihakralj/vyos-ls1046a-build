@@ -1,27 +1,49 @@
-From 48ea262c1b0b29c51c41a3451924c00acb7a491a Mon Sep 17 00:00:00 2001
+From 656d263f2980d1e91bec24703c5c53bf1290bc40 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 04:06:55 +0000
-Subject: [PATCH] temp: 010 regenerated
+Date: Mon, 20 Jul 2026 05:07:07 +0000
+Subject: [PATCH] temp: 010 regenerated with AF_XDP device block
 
 ---
- data/templates/vpp/startup.conf.j2 | 3 +++
- src/conf_mode/vpp.py               | 1 +
- 2 files changed, 4 insertions(+)
+ data/templates/vpp/startup.conf.j2 | 25 +++++++++++++++++++++++++
+ src/conf_mode/vpp.py               |  1 +
+ 2 files changed, 26 insertions(+)
 
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
-index 82d3753..eeccf30 100644
+index 82d3753..7579950 100644
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
-@@ -71,6 +71,9 @@ physmem {
- {% endif %}
+@@ -180,6 +180,31 @@ dpdk {
+     uio-bind-force
+ }
  
- plugins {
-+    plugin default { enable }
-+    plugin dpdk { enable }
-+    plugin af_xdp { enable }
-     plugin default { disable }
-     plugin avf_plugin.so { enable }
-     plugin dpdk_plugin.so { enable }
++af_xdp {
++{% for iface, iface_config in interface.items() %}
++{%     if iface_config.driver == 'xdp' %}
++    dev {{ iface }} {
++        name {{ iface }}
++{%         if iface_config.xdp_api_params.rxq_size is vyos_defined %}
++        rx-queue-size {{ iface_config.xdp_api_params.rxq_size }}
++{%         endif %}
++{%         if iface_config.xdp_api_params.txq_size is vyos_defined %}
++        tx-queue-size {{ iface_config.xdp_api_params.txq_size }}
++{%         endif %}
++{%         if iface_config.xdp_api_params.rxq_num is vyos_defined %}
++        num-rx-queues {{ iface_config.xdp_api_params.rxq_num }}
++{%         endif %}
++{%         if iface_config.xdp_api_params.mode is vyos_defined %}
++        mode {{ iface_config.xdp_api_params.mode }}
++{%         endif %}
++{%         if iface_config.xdp_api_params.flags is vyos_defined %}
++        flags {{ iface_config.xdp_api_params.flags }}
++{%         endif %}
++    }
++{%     endif %}
++{% endfor %}
++}
++
+ {% if ipsec_acceleration is vyos_defined %}
+ linux-xfrm-nl {
+      enable-route-mode-ipsec
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
 index c0e30d1..36de31a 100755
 --- a/src/conf_mode/vpp.py
