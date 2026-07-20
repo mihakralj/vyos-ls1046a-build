@@ -184,6 +184,18 @@ if [ -f vyos-build/data/defaults.toml ]; then
     echo "### defaults.toml squashfs_compression_type after sed:"
     grep -E '^\s*squashfs_compression_type\s*=' vyos-build/data/defaults.toml || true
   fi
+
+  # Fix pylint disable list in vyos-1x package.toml for pylint 2.x compatibility.
+  # The pre_build_hook generates a .pylintrc with human-readable message names
+  # (possibly-used-before-assignment, assigning-from-no-return) that are only
+  # valid in pylint 3.x.  Our CI runner has pylint 2.16.2 (Debian bookworm)
+  # which rejects them with W0012 (unknown-option-value).  Replace with the
+  # equivalent error codes (E0606, E1111).
+  if [ -f vyos-build/scripts/package-build/vyos-1x/package.toml ]; then
+    sed -i 's/disable=E0602,E0611,E1111,possibly-used-before-assignment,assigning-from-no-return/disable=E0602,E0606,E0611,E1111/' \
+      vyos-build/scripts/package-build/vyos-1x/package.toml
+    echo "### package.toml pylint disable list fixed for pylint 2.x"
+  fi
 fi
 
 ### Pin kernel_version to the ASK kernel.
