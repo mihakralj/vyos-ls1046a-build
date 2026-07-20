@@ -9,16 +9,16 @@ except FileNotFoundError:
 
 changes = 0
 
-# 1. extern declarations
-if "extern void *fman_pcd_ic_buf_base" not in src:
+# 1. extern declarations → definitions (dpaa_eth.c owns these globals)
+if "void *fman_pcd_ic_buf_base" not in src:
     first_st = src.find("\nstatic ")
     if first_st > 0:
         src = (src[:first_st+1] +
-               "extern void *fman_pcd_ic_vaddr;\n" +
-               "extern void *fman_pcd_ic_buf_base;\n" +
+               "void *fman_pcd_ic_vaddr;\n" +
+               "void *fman_pcd_ic_buf_base;\n" +
                src[first_st+1:])
         changes += 1
-        print("### dpaa_eth.c: F-069a v9 externs added")
+        print("### dpaa_eth.c: F-069a v9 globals defined (not extern)")
 
 # 2. Capture buf_base from dpaa_bp->vaddr (try multiple variable names)
 captured = "fman_pcd_ic_buf_base = "
