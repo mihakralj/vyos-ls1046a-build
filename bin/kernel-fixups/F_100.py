@@ -41,9 +41,9 @@ if os.path.exists(AFXDP):
         print("### F_100: bman_new_pool failure instrumented")
 
     # Success
-    if 'xsk_pool_attach_ok++;' in s:
+    if 'priv->xsk_pool_attach_ok++;' in s:
         s = s.replace(
-            'xsk_pool_attach_ok++;',
+            'priv->xsk_pool_attach_ok++;',
             'pr_err("ZCBIND: af_xdp_pool_attach OK pool=%px bpid=%u\\n", pool, priv->xsk_bpid[queue_id]);\n\tpriv->xsk_pool_attach_ok++;',
             1)
         changes += 1
