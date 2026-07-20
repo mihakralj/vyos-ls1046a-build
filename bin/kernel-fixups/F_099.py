@@ -42,7 +42,7 @@ if os.path.exists(XBP):
     if ok: print("### F_099: ZC features check instrumented"); changes += 1
 
     # ndo_bpf failure
-    if '\t\terr = netdev->netdev_ops->ndo_bpf(netdev, &bpf);' in s:
+    if '\terr = netdev->netdev_ops->ndo_bpf(netdev, &bpf);' in s:
         old = ('\terr = netdev->netdev_ops->ndo_bpf(netdev, &bpf);\n'
                '\tif (err)\n\t\tgoto err_unreg_pool;')
         new = ('\terr = netdev->netdev_ops->ndo_bpf(netdev, &bpf);\n'
@@ -52,6 +52,23 @@ if os.path.exists(XBP):
         if old in s:
             s = s.replace(old, new, 1)
             print("### F_099: ndo_bpf failure instrumented"); changes += 1
+        else:
+            print("### F_099: ndo_bpf anchor NOT FOUND (skipped)")
+
+    # Frame size check failure
+    if '\tif (needed > frame_size * segs) {' in s:
+        old2 = ('\tif (needed > frame_size * segs) {\n'
+                '\t\terr = -EINVAL;\n'
+                '\t\tgoto err_unreg_pool;\n\t}')
+        new2 = ('\tif (needed > frame_size * segs) {\n'
+                '\t\tpr_err("ZCBIND: xp_assign_dev FAIL: frame_size needed=%u > frame_size=%u * segs=%u\\n", needed, frame_size, segs);\n'
+                '\t\terr = -EINVAL;\n'
+                '\t\tgoto err_unreg_pool;\n\t}')
+        if old2 in s:
+            s = s.replace(old2, new2, 1)
+            print("### F_099: frame_size check instrumented"); changes += 1
+        else:
+            print("### F_099: frame_size anchor NOT FOUND (skipped)")
 
     # err_unreg_pool label
     if '\terr_unreg_pool:\n' in s:
@@ -59,6 +76,8 @@ if os.path.exists(XBP):
                       '\terr_unreg_pool:\n'
                       '\tpr_err("ZCBIND: xp_assign_dev EXIT err=%d dev=%s\\n", err, netdev->name);\n')
         print("### F_099: err_unreg_pool label instrumented"); changes += 1
+    else:
+        print("### F_099: err_unreg_pool anchor NOT FOUND (skipped)")
 
     with open(XBP, 'w') as f:
         f.write(s)
