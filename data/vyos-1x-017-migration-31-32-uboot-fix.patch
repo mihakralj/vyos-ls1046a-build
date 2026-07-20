@@ -1,14 +1,14 @@
-From e26bedeab88151ca1deadbb15f658a8a11afb86f Mon Sep 17 00:00:00 2001
+From e9d2e23f79837c599845d212a8929a4f1b7cf5cb Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 03:56:43 +0000
-Subject: [PATCH] temp: vyos-1x-017-migration-31-32-uboot-fix.patch
+Date: Mon, 20 Jul 2026 04:35:47 +0000
+Subject: [PATCH] temp: 017
 
 ---
- src/migration-scripts/system/31-to-32 | 1 +
- 1 file changed, 1 insertion(+)
+ src/migration-scripts/system/31-to-32 | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
 
 diff --git a/src/migration-scripts/system/31-to-32 b/src/migration-scripts/system/31-to-32
-index b68dab3..4cefa67 100644
+index b68dab3..d7e35fb 100644
 --- a/src/migration-scripts/system/31-to-32
 +++ b/src/migration-scripts/system/31-to-32
 @@ -15,6 +15,7 @@
@@ -19,6 +19,29 @@ index b68dab3..4cefa67 100644
  from vyos.configtree import ConfigTree
  from vyos.system import disk
  from vyos.system.grub import CFG_VYOS_VARS
+@@ -27,11 +28,20 @@ def migrate(config: ConfigTree) -> None:
+     if not config.exists(base):
+         return
+ 
+-    root_dir = disk.find_persistence()
++    try:
++        root_dir = disk.find_persistence()
++    except Exception:
++        # U-Boot systems may not have standard GRUB persistence layout
++        return
++
+     vars_file: str = f'{root_dir}/{CFG_VYOS_VARS}'
++    if not os.path.exists(vars_file):
++        # No GRUB vars file (U-Boot/non-GRUB bootloader) — skip migration
++        return
++
+     vars_current: dict[str, str] = vars_read(vars_file)
+     # Check if VyOS installation uses serial boot console
+-    if vars_current['console_type'] == 'ttyS':
++    if vars_current.get('console_type') == 'ttyS':
+         # In the past we only supported ttyS0 as boot console, that's why we
+         # can hardcode it ...
+         if config.exists(base + ['device', serial_console]):
 -- 
 2.39.5
 
