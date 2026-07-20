@@ -1,15 +1,15 @@
-From 7a8d3cce210d6ee7c1168445eb6bb852257a8bd4 Mon Sep 17 00:00:00 2001
+From c076fcc5e686125b492014bc98a13c0f01766a51 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 08:05:41 +0000
-Subject: [PATCH] temp: 010 with multi-port fixes
+Date: Mon, 20 Jul 2026 21:25:46 +0000
+Subject: [PATCH] temp: 010 with no_syscall_lock fix
 
 ---
  data/templates/vpp/startup.conf.j2 |  3 +-
- src/conf_mode/vpp.py               | 48 +++++++++++++++++++++---------
- 2 files changed, 36 insertions(+), 15 deletions(-)
+ src/conf_mode/vpp.py               | 57 +++++++++++++++++++-----------
+ 2 files changed, 39 insertions(+), 21 deletions(-)
 
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
-index 82d3753..7c0e9bc 100644
+index 82d3753ae..7c0e9bc56 100644
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
 @@ -74,6 +74,7 @@ plugins {
@@ -30,7 +30,7 @@ index 82d3753..7c0e9bc 100644
          name {{ iface }}
  {%         if iface_config.num_rx_desc is vyos_defined %}
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1..c40e2a4 100755
+index c0e30d1f1..c686ed2db 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
 @@ -133,6 +133,7 @@
@@ -96,7 +96,23 @@ index c0e30d1..c40e2a4 100755
                  # filter unsupported config nodes
                  iface_filter_eth(conf, iface)
                  set_dependents('ethernet', conf, iface)
-@@ -628,7 +641,7 @@ def verify(config):
+@@ -463,12 +476,9 @@ def get_config(config=None):
+                         )
+                     if 'zero-copy' in iface_config['xdp_options']:
+                         xdp_api_params['mode'] = 'zero-copy'
+-                    if (
+-                        interface_rx_mode in ('interrupt', 'adaptive')
+-                        and int(config['settings']['resource_allocation']['cpu_cores'])
+-                        > 1
+-                    ):
+-                        xdp_api_params['flags'] = 'no_syscall_lock'
++                    # Always use no_syscall_lock for DPAA1 AF_XDP to prevent
++                    # TX packet loss from syscall-required stalls
++                    xdp_api_params['flags'] = 'no_syscall_lock'
+                     iface_config['xdp_api_params'] = xdp_api_params
+ 
+         # Buffer normalization (auto → computed)
+@@ -628,7 +638,7 @@ def verify(config):
          if iface_config['driver'] == 'xdp' and 'xdp_options' in iface_config:
              if iface_config['xdp_options']['num_rx_queues'] != 'all':
                  rx_queues = iface_config['xdp_api_params']['rxq_num']
@@ -105,7 +121,7 @@ index c0e30d1..c40e2a4 100755
                  if rx_queues > max_rx_queues:
                      raise ConfigError(
                          f'Maximum supported number of RX queues for interface {iface} is {max_rx_queues}. '
-@@ -685,8 +698,11 @@ def generate(config):
+@@ -685,8 +695,11 @@ def generate(config):
  
  
  def initialize_interface(iface, driver, iface_config) -> None:
@@ -118,7 +134,7 @@ index c0e30d1..c40e2a4 100755
          # 'gve' devices require a specific unbind/bind process instead of a standard PCI rescan.
          if iface_config['original_driver'] == 'gve':
              control_host.rebind_gve_driver(
-@@ -703,7 +719,7 @@ def initialize_interface(iface, driver, iface_config) -> None:
+@@ -703,7 +716,7 @@ def initialize_interface(iface, driver, iface_config) -> None:
          control_host.set_promisc(f'defunct_{iface}', 'off')
          control_host.rename_iface(f'defunct_{iface}', iface)
          control_host.xdp_remove(iface)
@@ -127,7 +143,7 @@ index c0e30d1..c40e2a4 100755
              control_host.set_eth_channels(iface, iface_config['channels'])
  
      # Rename Mellanox NIC to a normal name
-@@ -822,13 +838,13 @@ def apply(config):
+@@ -822,13 +835,13 @@ def apply(config):
                      # Some cloud NICs fail to load XDP if all RX queues are configured. To avoid this,
                      # we limit the number of queues to half of the maximum supported by the driver.
                      if (
@@ -144,7 +160,7 @@ index c0e30d1..c40e2a4 100755
                          channels = {}
                          if channels_orig.get('rx'):
                              channels = {'rx': max_rx_queues, 'tx': max_rx_queues}
-@@ -889,8 +905,12 @@ def apply(config):
+@@ -889,8 +902,12 @@ def apply(config):
              # we need to stop vpp service and initialize interfaces
              call(f'systemctl stop {service_name}.service')
              for iface, iface_config in config['settings']['interface'].items():
