@@ -36,9 +36,14 @@
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
       "description": "rx_hook diagnostics: log why frames are rejected (temporary)",
       "date": "2026-07-21"
+    },
+    "F_106.py": {
+      "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
+      "description": "rx_hook trace_printk diagnostics at every return-false point (temporary)",
+      "date": "2026-07-21"
     }
   },
-  "count": 33,
+  "count": 34,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],

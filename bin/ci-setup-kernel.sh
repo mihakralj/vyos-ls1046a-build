@@ -1700,6 +1700,10 @@ echo "### F-104: DPAA1 get_channels ethtool op added"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_105.py" 2>&1
 echo "### F-105: rx_hook diagnostics added"
 
+# F-106: rx_hook trace_printk diagnostics at every return-false point (temporary, remove after root cause found)
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_106.py" 2>&1
+echo "### F-106: rx_hook trace_printk diagnostics added"
+
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
 # two lines. w5 was already MUX from patch 0131.
