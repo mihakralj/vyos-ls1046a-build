@@ -1611,6 +1611,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-093: dynamic FQID (kill hardcoded 0x200)"
 fi
 
+# F-107: gen_pool double-free prevention — per-port engagement guard.
+# Replaces u8 fe_armed_port with DECLARE_BITMAP(fe_port_armed, 32).
+# Adds -EBUSY guard in fman_pcd_fe_engage() to prevent double-arm,
+# which overwrites the KG scheme MURAM pointer and causes gen_pool_free_owner
+# panic on disengage (lib/genalloc.c:508).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_107.py" 2>&1
+    echo "### F-107: gen_pool double-free prevention (fe_port_armed bitmap)"
+fi
+
 # F-094: Retype fman_pcd_fe_flow_add to use structured flow_action.
 # Replaces raw (key, key_size, enq_off) with const struct fman_pcd_fe_flow_action *.
 # Breaking API change before anyone depends on the old signature.
