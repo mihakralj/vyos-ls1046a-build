@@ -182,6 +182,11 @@ struct ask_hw_pcd {
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
 
+/* F-113: kmem_cache for struct ask_hw_flow_cookie — O(1) alloc/free
+ * under heavy flow churn (50k+ active flows).  Replaces per-entry
+ * kzalloc/kfree to reduce slab fragmentation and allocation pressure. */
+static struct kmem_cache *ask_hw_cookie_cache;
+
 /* ENQ FE MURAM offset, captured during engage for use in flow insert.
  * F-110: Write-once-read-many — WRITE_ONCE() on engage (under h->lock),
  * READ_ONCE() in flow_offload REPLACE path (lockless, hot path). */
@@ -318,7 +323,12 @@ u32 ask_hw_cookie_alloc(struct ask_hw_pcd *h,
         if (!h || !src)
                 return 0;
 
-        entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+        /* F-113: Use kmem_cache for O(1) alloc under flow churn.
+         * Falls back to kzalloc if cache creation failed at bringup. */
+        if (ask_hw_cookie_cache)
+                entry = kmem_cache_zalloc(ask_hw_cookie_cache, GFP_KERNEL);
+        else
+                entry = kzalloc(sizeof(*entry), GFP_KERNEL);
         if (!entry)
                 return 0;
         *entry = *src;
@@ -326,7 +336,10 @@ u32 ask_hw_cookie_alloc(struct ask_hw_pcd *h,
         rc = xa_alloc(&h->flow_cookies, &cookie, entry,
                       XA_LIMIT(1, U32_MAX), GFP_KERNEL);
         if (rc) {
-                kfree(entry);
+                if (ask_hw_cookie_cache)
+                        kmem_cache_free(ask_hw_cookie_cache, entry);
+                else
+                        kfree(entry);
                 return 0;
         }
         return cookie;
@@ -349,7 +362,11 @@ void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie)
         if (!h || cookie == 0)
                 return;
         entry = xa_erase(&h->flow_cookies, cookie);
-        kfree(entry);
+        /* F-113: Use kmem_cache_free for O(1) dealloc. */
+        if (ask_hw_cookie_cache)
+                kmem_cache_free(ask_hw_cookie_cache, entry);
+        else
+                kfree(entry);
 }
 EXPORT_SYMBOL_GPL(ask_hw_cookie_free);
 
@@ -399,6 +416,15 @@ int ask_hw_pcd_bringup(void)
         h->fman = fman;
         xa_init_flags(&h->flow_cookies, XA_FLAGS_ALLOC1);
         atomic_set(&h->hit_release_refcnt, 0);  /* F-108: init refcount */
+
+        /* F-113: Create kmem_cache for flow cookie entries.
+         * Falls back to kzalloc/kfree if cache creation fails (non-fatal). */
+        ask_hw_cookie_cache = kmem_cache_create("ask_hw_flow_cookie",
+                sizeof(struct ask_hw_flow_cookie),
+                __alignof__(struct ask_hw_flow_cookie),
+                0, NULL);
+        if (!ask_hw_cookie_cache)
+                ask_pr_warn("hw: kmem_cache_create failed — falling back to kzalloc\n");
 
         ask_hw_pcd_inst = h;
 
@@ -493,7 +519,11 @@ void ask_hw_pcd_teardown(void)
                 if (ck->hm_handle)
                         fman_hm_nexthop_put(ck->fm, ck->port_id, ck->hm_handle);
                 xa_erase(&h->flow_cookies, idx);
-                kfree(ck);
+                /* F-113: Use kmem_cache_free for O(1) dealloc. */
+                if (ask_hw_cookie_cache)
+                        kmem_cache_free(ask_hw_cookie_cache, ck);
+                else
+                        kfree(ck);
         }
 
         /* Restore TX confirm on all ports before tearing down CC trees.
@@ -523,6 +553,11 @@ void ask_hw_pcd_teardown(void)
 
         xa_destroy(&h->flow_cookies);
         mutex_destroy(&h->lock);
+        /* F-113: Destroy the flow-cookie kmem_cache. */
+        if (ask_hw_cookie_cache) {
+                kmem_cache_destroy(ask_hw_cookie_cache);
+                ask_hw_cookie_cache = NULL;
+        }
         kfree(h);
         ask_pr_dbg("hw: pcd teardown complete\n");
 }
