@@ -182,7 +182,9 @@ struct ask_hw_pcd {
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
 
-/* ENQ FE MURAM offset, captured during engage for use in flow insert. */
+/* ENQ FE MURAM offset, captured during engage for use in flow insert.
+ * F-110: Write-once-read-many — WRITE_ONCE() on engage (under h->lock),
+ * READ_ONCE() in flow_offload REPLACE path (lockless, hot path). */
 static unsigned long ask_hw_enq_fe_off;
 
 /* ------------------------------------------------------------------------- */
@@ -542,10 +544,12 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
  * Debugfs is for diagnostics only (Decision 10, 2026-07-19).
  */
 
-/* Accessor for ENQ FE offset (used by flow_offload REPLACE handler). */
+/* Accessor for ENQ FE offset (used by flow_offload REPLACE handler).
+ * F-110: READ_ONCE() — this is called lockless from the flow offload
+ * hot path.  The writer (engage) holds h->lock and uses WRITE_ONCE(). */
 unsigned long ask_hw_get_enq_fe_off(void)
 {
-        return ask_hw_enq_fe_off;
+        return READ_ONCE(ask_hw_enq_fe_off);
 }
 EXPORT_SYMBOL_GPL(ask_hw_get_enq_fe_off);
 
@@ -600,8 +604,10 @@ int ask_hw_offload_engage(u8 hw_port_id)
         }
 
         /* F-109: Capture ENQ FE offset via kernel API instead of
-         * debugfs loopback (filp_open + kernel_read + sscanf). */
-        ask_hw_enq_fe_off = fman_pcd_fe_enq_get_offset(h->fman);
+         * debugfs loopback (filp_open + kernel_read + sscanf).
+         * F-110: WRITE_ONCE() — paired with READ_ONCE() in the
+         * lockless flow_offload REPLACE hot path. */
+        WRITE_ONCE(ask_hw_enq_fe_off, fman_pcd_fe_enq_get_offset(h->fman));
         ask_pr_info("hw: ENQ FE offset 0x%lx (kernel API)\n",
                     ask_hw_enq_fe_off);
 
