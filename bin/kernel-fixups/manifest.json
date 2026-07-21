@@ -24,6 +24,7 @@
     "F_094.py": "fman_pcd.c/h: F-094 retype flow_add \u2192 struct fman_pcd_fe_flow_action *",
     "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage \u2014 build/teardown VM chain via API",
     "F_107.py": "fman_pcd.c: F-107 gen_pool double-free prevention \u2014 DECLARE_BITMAP(fe_port_armed) + -EBUSY guard in fe_engage",
+    "F_109.py": "fman_pcd.c/h: F-109 fman_pcd_fe_enq_get_offset() export \u2014 eliminates debugfs loopback for ENQ FE offset",
     "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage \u2014 unparks FE-VM",
     "F_097.py": "fman_pcd.c: T-P1-1 F-08 \u2014 fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
     "F_098.py": "fman_pcd.c: T-P1-4 F-12 \u2014 fman_pcd_fe_context_build retype void __iomem* \u2192 struct fman_ddr_region* (DDR not MMIO)",
@@ -44,7 +45,7 @@
       "date": "2026-07-21"
     }
   },
-  "count": 35,
+  "count": 36,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
@@ -157,6 +158,10 @@
     "F_107.py": {
       "action": "fold-into 0153+0157",
       "reason": "gen_pool double-free prevention — engagement guard belongs with the engage/disengage API patches"
+    },
+    "F_109.py": {
+      "action": "fold-into 0153",
+      "reason": "ENQ FE offset getter — eliminates debugfs loopback, belongs with the FE-VM engage API"
     },
     "F_092.py": {
       "action": "fold-into 0158+0153",

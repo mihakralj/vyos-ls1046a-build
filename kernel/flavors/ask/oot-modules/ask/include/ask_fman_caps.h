@@ -183,4 +183,8 @@ int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 int  fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
                           const u8 *key, u8 key_size);
 
+/* F-109: Return the MURAM offset of the first ENQ FE object, or 0 if
+ * the FE pool is not engaged.  Replaces debugfs fe_enq parsing. */
+unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm);
+
 #endif /* __ASK_FMAN_CAPS_H */

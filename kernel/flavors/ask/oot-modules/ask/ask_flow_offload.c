@@ -1024,32 +1024,34 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 /* ------------------------------------------------------------------------- */
 /* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
  * to FMan hash key (L4PDST+L4PSRC+IPDST+IPSRC) and writes fe_flow debugfs. */
-static void ask_debugfs_fe_flow_write(const struct ask_flow_key *key,
-                                       unsigned long enq_off)
+/* F-109: Direct kernel API for flow insert — replaces debugfs loopback.
+ * Uses fman_pcd_fe_flow_add() with a struct fman_pcd_fe_flow_action
+ * instead of filp_open() + kernel_write() to /sys/kernel/debug/.../fe_flow.
+ * Key is MSB-first EKFC extraction order: SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2).
+ */
+static void ask_fe_flow_insert(const struct ask_flow_key *key,
+                               unsigned long enq_off)
 {
-        char buf[128];
-        u8 raw[13];
-        struct file *filp;
-        loff_t pos = 0;
+        struct fman_pcd_fe_flow_action action;
 
         if (!key) {
-                ask_pr_dbg("debugfs_fe_flow_write: NULL key (flow destroyed) -- skipping\n");
+                ask_pr_dbg("fe_flow_insert: NULL key (flow destroyed) -- skipping\n");
                 return;
         }
 
+        memset(&action, 0, sizeof(action));
         /* F-049: descending EKFC bit order — SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2) */
-        memcpy(&raw[0], key->src_ip, 4);
-        memcpy(&raw[4], key->dst_ip, 4);
-        raw[8]  = key->l4_proto;
-        raw[9]  = (key->sport >> 8) & 0xff;   raw[10] = key->sport & 0xff;
-        raw[11] = (key->dport >> 8) & 0xff;   raw[12] = key->dport & 0xff;
+        memcpy(&action.key[0], key->src_ip, 4);
+        memcpy(&action.key[4], key->dst_ip, 4);
+        action.key[8]  = key->l4_proto;
+        action.key[9]  = (key->sport >> 8) & 0xff;
+        action.key[10] = key->sport & 0xff;
+        action.key[11] = (key->dport >> 8) & 0xff;
+        action.key[12] = key->dport & 0xff;
+        action.key_size = 13;
+        action.enq_off  = enq_off;
 
-        snprintf(buf, sizeof(buf), "add 0 %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X %lx",
-                 raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
-                 raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], enq_off);
-
-        filp = filp_open("/sys/kernel/debug/fman_pcd/0/fe_flow", O_WRONLY, 0);
-        if (!IS_ERR(filp)) { kernel_write(filp, buf, strlen(buf), &pos); filp_close(filp, NULL); }
+        fman_pcd_fe_flow_add(NULL, 0, &action);
 }
 
 
@@ -1468,10 +1470,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                             f->cookie, hw_id,
                             ingress_dev ? netdev_name(ingress_dev) : "?", oif,
                             key.next_hop_mac, key.egress_mac);
-        /* Insert flow into FMan FE-VM ehash table (debugfs bridge, Phase 3).
-         * Fix C3: use captured ENQ FE offset instead of 0 to avoid invalid
-         * DDR flow record dispatch (next-FE pointer must be valid MURAM offset). */
-        ask_debugfs_fe_flow_write(&key, ask_hw_get_enq_fe_off());
+        /* F-109: Insert flow via kernel API (not debugfs loopback).
+         * Uses captured ENQ FE offset for valid DDR flow record dispatch. */
+        ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off());
 
         return 0;
 }
@@ -1505,7 +1506,8 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                 return rc;
 
         ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
-        ask_debugfs_fe_flow_write(NULL, 0); /* clear all */
+        /* F-109: Clear all flows via kernel API (not debugfs loopback). */
+        fman_pcd_fe_flow_del(NULL, 0, NULL, 0);
         return 0;
 }
 
