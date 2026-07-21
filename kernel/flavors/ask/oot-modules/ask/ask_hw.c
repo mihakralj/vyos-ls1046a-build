@@ -457,7 +457,8 @@ int ask_hw_pcd_bringup(void)
         return 0;
 }
 
-static int debugfs_fe_write(const char *name, const char *buf, size_t len);
+/* F-109: debugfs_fe_write forward declaration removed — all callers
+ * now use kernel API (fman_pcd_fe_disengage, fman_pcd_fe_flow_add). */
 void ask_hw_pcd_teardown(void)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_inst;
@@ -499,10 +500,12 @@ void ask_hw_pcd_teardown(void)
         fman_port_set_silicon_hit_release_all(h->fman, false);
         atomic_set(&h->hit_release_refcnt, 0);
 
-        /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
+        /* Disengage any port still in the M1 coarse S1 mode-switch (0129).
+         * F-109: Use kernel API fman_pcd_fe_disengage() instead of
+         * debugfs loopback (filp_open + kernel_write). */
         for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
                 if (h->port[i].in_use && h->port[i].offload_engaged) {
-                        debugfs_fe_write("fe_arm", "disengage 0x10", 14);
+                        fman_pcd_fe_disengage(h->fman, h->port[i].port_id);
                         h->port[i].offload_engaged = false;
                 }
         }
@@ -531,60 +534,13 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */
 
-static int debugfs_fe_write(const char *name, const char *buf, size_t len)
-{
-        static const char pf[] = "/sys/kernel/debug/fman_pcd/0/";
-        struct file *f;
-        loff_t pos = 0;
-        ssize_t w;
-        char path[128];
-
-        if (snprintf(path, sizeof(path), "%s%s", pf, name) >= sizeof(path))
-                return -ENAMETOOLONG;
-        f = filp_open(path, O_WRONLY, 0);
-        if (IS_ERR(f)) {
-                ask_pr_err("hw: open %s: %ld\n", path, PTR_ERR(f));
-                return PTR_ERR(f);
-        }
-        w = kernel_write(f, buf, len, &pos);
-        if (w < 0 || (size_t)w != len)
-                ask_pr_err("hw: write %s: %zd/%zu\n", path, w, len);
-        filp_close(f, NULL);
-        return (w >= 0 && (size_t)w == len) ? 0 : -EIO;
-}
-
-/* Read debugfs node output (for capturing FE offsets). */
-static int debugfs_fe_read(const char *name, char *buf, size_t buf_size)
-{
-        static const char pf[] = "/sys/kernel/debug/fman_pcd/0/";
-        struct file *f;
-        loff_t pos = 0;
-        ssize_t r;
-        char path[128];
-
-        if (snprintf(path, sizeof(path), "%s%s", pf, name) >= sizeof(path))
-                return -ENAMETOOLONG;
-        f = filp_open(path, O_RDONLY, 0);
-        if (IS_ERR(f))
-                return PTR_ERR(f);
-        r = kernel_read(f, buf, buf_size - 1, &pos);
-        filp_close(f, NULL);
-        if (r < 0)
-                return r;
-        buf[r] = '\0';
-        return r;
-}
-
-/* Parse ENQ FE offset from debugfs fe_enq output (e.g., "enq[0]     off=0x55500 ..."). */
-static unsigned long parse_enq_offset(const char *buf)
-{
-        const char *p = strstr(buf, "off=0x");
-        unsigned long off = 0;
-
-        if (p)
-                sscanf(p, "off=0x%lx", &off);
-        return off;
-}
+/* F-109: debugfs_fe_write(), debugfs_fe_read(), and parse_enq_offset()
+ * DELETED.  All callers now use kernel API:
+ *   - fman_pcd_fe_disengage() replaces debugfs_fe_write("fe_arm", ...)
+ *   - fman_pcd_fe_enq_get_offset() replaces debugfs_fe_read("fe_enq", ...)
+ *   - fman_pcd_fe_flow_add() replaces ask_debugfs_fe_flow_write()
+ * Debugfs is for diagnostics only (Decision 10, 2026-07-19).
+ */
 
 /* Accessor for ENQ FE offset (used by flow_offload REPLACE handler). */
 unsigned long ask_hw_get_enq_fe_off(void)
@@ -643,18 +599,11 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        /* Diagnostic: read ENQ FE offset from debugfs for flow_insert use.
-         * Debugfs is READ-ONLY here — hardware control uses the API above. */
-        {
-                char read_buf[256];
-                if (debugfs_fe_read("fe_enq", read_buf, sizeof(read_buf)) > 0) {
-                        unsigned long off = parse_enq_offset(read_buf);
-                        if (off)
-                                ask_hw_enq_fe_off = off;
-                }
-                ask_pr_info("hw: ENQ FE offset 0x%lx (diagnostic read)\n",
-                            ask_hw_enq_fe_off);
-        }
+        /* F-109: Capture ENQ FE offset via kernel API instead of
+         * debugfs loopback (filp_open + kernel_read + sscanf). */
+        ask_hw_enq_fe_off = fman_pcd_fe_enq_get_offset(h->fman);
+        ask_pr_info("hw: ENQ FE offset 0x%lx (kernel API)\n",
+                    ask_hw_enq_fe_off);
 
         /*
          * Enable silicon HIT-release on all FMan TX ports so that
