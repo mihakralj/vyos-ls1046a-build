@@ -58,6 +58,7 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/fsl/dpaa_flow_offload.h>
+#include <linux/fsl/fman_pcd.h>       /* F-109: fman_pcd_fe_flow_add/del, fman_pcd_fe_flow_action */
 
 /*
  * Single-image OOT re-declares (board patches 0121 + 0104).
