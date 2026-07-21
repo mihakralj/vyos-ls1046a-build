@@ -567,6 +567,12 @@ for package in $packages; do
     # Must happen while kernel source tree ($KSRC) still exists
     if [ -n "$KSRC" ] && [ -x "$GITHUB_WORKSPACE/bin/ci-build-accel-ppp.sh" ]; then
       KSRC_ABS_ACCEL="$(cd "$KSRC" && pwd)"
+      # bindeb-pkg runs `make clean` which removes .config. Regenerate it
+      # so OOT module builds (accel-ppp-ng, ask.ko) can find the kernel config.
+      if [ ! -f "$KSRC_ABS_ACCEL/.config" ]; then
+        echo "### Regenerating .config after bindeb-pkg clean"
+        make -C "$KSRC_ABS_ACCEL" olddefconfig ARCH=arm64 2>&1 | tail -3
+      fi
       echo "### Building accel-ppp-ng ARM64 packages"
       "$GITHUB_WORKSPACE/bin/ci-build-accel-ppp.sh" "$KSRC_ABS_ACCEL" "$(pwd)" || \
         echo "WARNING: accel-ppp-ng build failed (non-fatal) — PPPoE/L2TP will be unavailable"
