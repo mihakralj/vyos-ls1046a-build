@@ -193,6 +193,17 @@ return -EINVAL;
 if (dir >= ASK_HW_DIR_NR)
 return -EINVAL;
 
+/*
+ * F-112: Fast-path duplicate check BEFORE kzalloc().
+ * rhashtable_lookup_insert_fast() rejects -EEXIST, but by that
+ * point we've already allocated memory and potentially inserted
+ * into hardware (requiring a rollback).  Checking first avoids
+ * unnecessary slab alloc/free churn and HW slot waste during
+ * duplicate-flow storms (e.g. nft flowtable re-insertion races).
+ */
+if (ask_flow_lookup(t, cookie))
+return -EEXIST;
+
 f = kzalloc(sizeof(*f), GFP_KERNEL);
 if (!f)
 return -ENOMEM;
