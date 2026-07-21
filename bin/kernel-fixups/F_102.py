@@ -21,18 +21,19 @@ if os.path.exists(QMAN):
         s = f.read()
 
     # Guard 1: MR path (line ~1521) — fq_state_change dereferences fq
-    old1 = ('\t\t\tfq = tag_to_fq(be32_to_cpu(msg->fq.context_b));\n'
-            '\t\t\tfq_state_change(p, fq, msg, verb);\n'
-            '\t\t\tif (fq->cb.fqs)')
-    new1 = ('\t\t\tfq = tag_to_fq(be32_to_cpu(msg->fq.context_b));\n'
-            '\t\t\t/* F_102 v2: ZC datapath can produce entries with invalid context_b */\n'
-            '\t\t\tif (unlikely(!fq)) {\n'
-            '\t\t\t\tpr_err_once("qman: NULL fq from MR context_b=0x%x, skipping\\n",\n'
-            '\t\t\t\t\t   be32_to_cpu(msg->fq.context_b));\n'
-            '\t\t\t\tcontinue;\n'
-            '\t\t\t}\n'
-            '\t\t\tfq_state_change(p, fq, msg, verb);\n'
-            '\t\t\tif (fq->cb.fqs)')
+    # Uses 4 tabs (inside switch→case→for→if)
+    old1 = ('\t\t\t\tfq = tag_to_fq(be32_to_cpu(msg->fq.context_b));\n'
+            '\t\t\t\tfq_state_change(p, fq, msg, verb);\n'
+            '\t\t\t\tif (fq->cb.fqs)')
+    new1 = ('\t\t\t\tfq = tag_to_fq(be32_to_cpu(msg->fq.context_b));\n'
+            '\t\t\t\t/* F_102 v3: ZC datapath can produce entries with invalid context_b */\n'
+            '\t\t\t\tif (unlikely(!fq)) {\n'
+            '\t\t\t\t\tpr_err_once("qman: NULL fq from MR context_b=0x%x, skipping\\n",\n'
+            '\t\t\t\t\t\t   be32_to_cpu(msg->fq.context_b));\n'
+            '\t\t\t\t\tcontinue;\n'
+            '\t\t\t\t}\n'
+            '\t\t\t\tfq_state_change(p, fq, msg, verb);\n'
+            '\t\t\t\tif (fq->cb.fqs)')
     if old1 in s:
         s = s.replace(old1, new1, 1)
         changes += 1
