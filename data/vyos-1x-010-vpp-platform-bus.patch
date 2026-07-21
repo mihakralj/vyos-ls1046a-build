@@ -20,7 +20,7 @@ index 82d3753ae..60282697d 100644
          name {{ iface }}
  {%         if iface_config.num_rx_desc is vyos_defined %}
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1f1..f1709d81c 100755
+index c0e30d1f1..fbfff9905 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
 @@ -132,6 +132,7 @@
@@ -31,18 +31,18 @@ index c0e30d1f1..f1709d81c 100755
      'hv_netvsc',  # Microsoft Hyper-V network interface card
  )
  
-@@ -284,6 +285,11 @@ def get_config(config=None):
-             to_append = {
+@@ -285,6 +286,11 @@ def get_config(config=None):
                  'iface_name': removed_iface,
                  'driver': 'dpdk',
+             }
 +            # LS1046A: fsl_dpa is platform-bus AF_XDP, not DPDK
 +            # Check persist_config for the original driver
 +            orig_drv = eth_ifaces_persist.get(removed_iface, {}).get('original_driver', '')
 +            if orig_drv == 'fsl_dpa':
 +                to_append['driver'] = 'xdp'
-             }
              removed_ifaces.append(to_append)
              # add an interface to a list of interfaces that need
+             # to be reinitialized after the commit
 @@ -354,6 +360,9 @@ def get_config(config=None):
          _normalize_buffers(effective_config)
          for iface_config in effective_config['settings']['interface'].values():
