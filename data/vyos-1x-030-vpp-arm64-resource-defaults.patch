@@ -18,7 +18,7 @@ index bf5e56d..10d22da 100644
                        </constraint>
                      </properties>
 -                    <defaultValue>auto</defaultValue>
-+                    <defaultValue>16384</defaultValue>
++                    <defaultValue>32768</defaultValue>  <!-- ARM64: increased for 10G throughput -->
                    </leafNode>
                    <leafNode name="data-size">
                      <properties>

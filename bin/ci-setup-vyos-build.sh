@@ -458,6 +458,15 @@ chmod +x "$HOOKS/98-fancontrol.chroot"
 cp data/hooks/99-mask-services.chroot "$HOOKS/99-mask-services.chroot"
 chmod +x "$HOOKS/99-mask-services.chroot"
 
+# Workaround for upstream vyos-build regression (2026-07-20):
+# 93-vyos-user-dotfiles.chroot runs `chown vyos:vyos` but the vyos user
+# may not exist yet in the chroot at hook execution time. Remove the hook
+# until upstream fixes the ordering.
+if [ -f "$HOOKS/93-vyos-user-dotfiles.chroot" ]; then
+  rm -f "$HOOKS/93-vyos-user-dotfiles.chroot"
+  echo "### Removed broken upstream hook: 93-vyos-user-dotfiles.chroot"
+fi
+
 ### NOTE: ethernet port remapping was deleted on 2026-05-15. The previous
 ### eth0..eth4 rename layer (fman-port-name + 10-fman-port-order.rules +
 ### 00-fman.link) lived in the squashfs, but the predictable-naming race
