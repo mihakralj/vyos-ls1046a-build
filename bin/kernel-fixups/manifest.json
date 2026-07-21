@@ -3,56 +3,57 @@
     "F_054.py": "fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)",
     "F_056.py": "fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)",
     "F_057.py": "fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)",
-    "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)",
+    "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB\u2192FE_ENTER)",
     "F_069.py": "F-069: MISS context + DDR alloc (count-asserted anchors)",
     "F_069a.py": "dpaa_eth.c: F-069a v9 buf_base + vaddr captures\\n",
     "F_069b.py": "no description",
     "F_071.py": "no description",
     "F_072.py": "no description",
     "F_072_2.py": "fman_pcd.c: F-072 v3 FmPortSetFESupport ported",
-    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3",
+    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 \u00a77.1/\u00a77.3",
     "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
     "fe_flow_key_fix.py": "no description",
-    "mutate.py": "count-gated text replacement helper — F-084 and future conversions",
+    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions",
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)",
-    "F_089.py": "fman_pcd.c: F-089 §17 FE descriptor static_asserts + KUnit test injection",
-    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain",
-    "F_091.py": "fman_pcd.c: F-091 HIT scaffold — numKeys=1 + FE_ENTER AD at ato+32",
-    "F_093.py": "fman_pcd.c: F-093 dynamic FQID — kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
-    "F_094.py": "fman_pcd.c/h: F-094 retype flow_add → struct fman_pcd_fe_flow_action *",
-    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage — build/teardown VM chain via API",
-    "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage — unparks FE-VM",
-    "F_097.py": "fman_pcd.c: T-P1-1 F-08 — fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
-    "F_098.py": "fman_pcd.c: T-P1-4 F-12 — fman_pcd_fe_context_build retype void __iomem* → struct fman_ddr_region* (DDR not MMIO)",
-    "F_099.py": "net/xdp/*.c + dpaa_eth.c: M4 ZC-bind instrumentation — pr_err at every error return to trace xsk_socket__create() EINVAL",
-    "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation — pr_err at xsk_pool_dma_map/bman_new_pool failures",
-    "F_101.py": "dpaa_eth.h: M4 ZC workaround — lower DPAA1_MIN_UMEM_CHUNK 3840→2048 for VPP 2K-chunk compatibility",
-    "F_102.py": "qman.c: M4 ZC crash fix — NULL guard for fq in __poll_portal_fast SDQCR path",
-    "F_103.py": "af_xdp_pool_main.c: M4 ZC crash fix — skip FMan RX port BPID reprogram (causes QMan context_b corruption)"
+    "F_089.py": "fman_pcd.c: F-089 \u00a717 FE descriptor static_asserts + KUnit test injection",
+    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs \u2014 wires __fman_pcd_fe_build_vm_chain",
+    "F_091.py": "fman_pcd.c: F-091 HIT scaffold \u2014 numKeys=1 + FE_ENTER AD at ato+32",
+    "F_093.py": "fman_pcd.c: F-093 dynamic FQID \u2014 kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
+    "F_094.py": "fman_pcd.c/h: F-094 retype flow_add \u2192 struct fman_pcd_fe_flow_action *",
+    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage \u2014 build/teardown VM chain via API",
+    "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage \u2014 unparks FE-VM",
+    "F_097.py": "fman_pcd.c: T-P1-1 F-08 \u2014 fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
+    "F_098.py": "fman_pcd.c: T-P1-4 F-12 \u2014 fman_pcd_fe_context_build retype void __iomem* \u2192 struct fman_ddr_region* (DDR not MMIO)",
+    "F_099.py": "net/xdp/*.c + dpaa_eth.c: M4 ZC-bind instrumentation \u2014 pr_err at every error return to trace xsk_socket__create() EINVAL",
+    "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation \u2014 pr_err at xsk_pool_dma_map/bman_new_pool failures",
+    "F_101.py": "dpaa_eth.h: M4 ZC workaround \u2014 lower DPAA1_MIN_UMEM_CHUNK 3840\u21922048 for VPP 2K-chunk compatibility",
+    "F_102.py": "qman.c: M4 ZC crash fix \u2014 NULL guard for fq in __poll_portal_fast SDQCR path",
+    "F_103.py": "af_xdp_pool_main.c: M4 ZC crash fix \u2014 skip FMan RX port BPID reprogram (causes QMan context_b corruption)",
+    "F_104.py": "dpaa_ethtool.c: F_104 add get_channels ethtool op (reports 4 combined channels for multi-queue XSK)"
   },
-  "count": 31,
+  "count": 32,
   "removed_dead": [
-    "F_070b.py — unreferenced in ci-setup-kernel.sh"
+    "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {
-    "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 — not a duplicate",
-    "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) — not duplicates"
+    "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 \u2014 not a duplicate",
+    "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) \u2014 not duplicates"
   },
   "dispositions": {
     "F_054.py": {
       "action": "permanent",
-      "reason": "MUX(AD+4)/Transition AD direct writes — F_055 correction folded in"
+      "reason": "MUX(AD+4)/Transition AD direct writes \u2014 F_055 correction folded in"
     },
     "F_055.py": {
       "action": "fold-into F_054.py",
-      "reason": "Correction to F_054 MUX write target (AD+0→AD+4). Merge into single fixup."
+      "reason": "Correction to F_054 MUX write target (AD+0\u2192AD+4). Merge into single fixup."
     },
     "F_056.py": {
       "action": "permanent",
-      "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage — workaround for F-047 patch drift"
+      "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage \u2014 workaround for F-047 patch drift"
     },
     "F_057.py": {
       "action": "permanent",
@@ -64,7 +65,7 @@
     },
     "F_068.py": {
       "action": "permanent",
-      "reason": "Settled AC_CC direct topology (RCCB→FE_ENTER, not CCBS)"
+      "reason": "Settled AC_CC direct topology (RCCB\u2192FE_ENTER, not CCBS)"
     },
     "F_069.py": {
       "action": "permanent",
@@ -124,15 +125,15 @@
     },
     "F_089.py": {
       "action": "permanent",
-      "reason": "§17 canonical FE descriptor compile-time + KUnit guards (three-tripwire architecture)"
+      "reason": "\u00a717 canonical FE descriptor compile-time + KUnit guards (three-tripwire architecture)"
     },
     "F_090.py": {
       "action": "fold-into 0158",
-      "reason": "fe_chain debugfs node belongs with the builder it calls — 0158 defines __fman_pcd_fe_build_vm_chain"
+      "reason": "fe_chain debugfs node belongs with the builder it calls \u2014 0158 defines __fman_pcd_fe_build_vm_chain"
     },
     "F_091.py": {
       "action": "fold-into 0158",
-      "reason": "Scaffold HIT path — belongs with the engage/arm code in 0132/0158"
+      "reason": "Scaffold HIT path \u2014 belongs with the engage/arm code in 0132/0158"
     },
     "F_093.py": {
       "action": "fold-into 0158",
@@ -140,15 +141,15 @@
     },
     "F_094.py": {
       "action": "permanent",
-      "reason": "API cleanup — structured params instead of raw (key, size, offset)"
+      "reason": "API cleanup \u2014 structured params instead of raw (key, size, offset)"
     },
     "F_092.py": {
       "action": "fold-into 0158+0153",
-      "reason": "fe_engage should build VM chain; fe_disengage should tear down — belongs with the API patches"
+      "reason": "fe_engage should build VM chain; fe_disengage should tear down \u2014 belongs with the API patches"
     },
     "F_096.py": {
       "action": "fold-into 0146/0158",
-      "reason": "Context build call belongs with the arm_engage function — 0146 lost call site, F-091/F-092 overwrote it"
+      "reason": "Context build call belongs with the arm_engage function \u2014 0146 lost call site, F-091/F-092 overwrote it"
     },
     "F_097.py": {
       "action": "fold-into 0153",
@@ -160,23 +161,23 @@
     },
     "F_099.py": {
       "action": "remove-after-M4",
-      "reason": "temporary diagnostic — traces ZC bind failure; remove once root cause identified"
+      "reason": "temporary diagnostic \u2014 traces ZC bind failure; remove once root cause identified"
     },
     "F_100.py": {
       "action": "remove-after-M4",
-      "reason": "temporary diagnostic — traces ZC attach-path failure; remove once root cause identified"
+      "reason": "temporary diagnostic \u2014 traces ZC attach-path failure; remove once root cause identified"
     },
     "F_101.py": {
       "action": "remove-after-M4",
-      "reason": "temporary workaround — VPP uses 2K chunks but driver needs 4K; remove once VPP fixed"
+      "reason": "temporary workaround \u2014 VPP uses 2K chunks but driver needs 4K; remove once VPP fixed"
     },
     "F_102.py": {
       "action": "remove-after-M4",
-      "reason": "temporary crash fix — ZC datapath produces DQRR entries with invalid context_b; remove once ZC RX path properly initializes all FQ context_b"
+      "reason": "temporary crash fix \u2014 ZC datapath produces DQRR entries with invalid context_b; remove once ZC RX path properly initializes all FQ context_b"
     },
     "F_103.py": {
       "action": "remove-after-M4",
-      "reason": "temporary crash fix — FMan RX port BPID reprogram causes QMan context_b corruption; re-enable once ZC RX datapath handles XSK-pool frames"
+      "reason": "temporary crash fix \u2014 FMan RX port BPID reprogram causes QMan context_b corruption; re-enable once ZC RX datapath handles XSK-pool frames"
     }
   }
 }

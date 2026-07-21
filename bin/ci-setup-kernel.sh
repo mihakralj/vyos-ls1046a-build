@@ -1688,6 +1688,14 @@ echo "### F-102: NULL fq guard in QMan poll path"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_103.py" 2>&1
 echo "### F-103: FMan RX port BPID reprogram disabled"
 
+# F-104: Add get_channels ethtool op to DPAA1 driver.
+# VPP's af_xdp plugin uses ETHTOOL_GCHANNELS to detect available RX queues.
+# DPAA1 doesn't implement get_channels, so VPP defaults to 1 queue.
+# This prevents multi-queue XSK binding needed for ZC RX (FMan RSS spreads
+# across 4 qbands). Reports 4 combined channels (one per qband).
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_104.py" 2>&1
+echo "### F-104: DPAA1 get_channels ethtool op added"
+
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
 # two lines. w5 was already MUX from patch 0131.
