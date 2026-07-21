@@ -31,9 +31,14 @@
     "F_101.py": "dpaa_eth.h: M4 ZC workaround \u2014 lower DPAA1_MIN_UMEM_CHUNK 3840\u21922048 for VPP 2K-chunk compatibility",
     "F_102.py": "qman.c: M4 ZC crash fix \u2014 NULL guard for fq in __poll_portal_fast SDQCR path",
     "F_103.py": "af_xdp_pool_main.c: SUPERSEDED 2026-07-21 \u2014 BPID reprogram re-enabled (F_102 guards crash path)",
-    "F_104.py": "dpaa_ethtool.c: F_104 add get_channels ethtool op (reports 4 combined channels for multi-queue XSK)"
+    "F_104.py": "dpaa_ethtool.c: F_104 add get_channels ethtool op (reports 4 combined channels for multi-queue XSK)",
+    "F_105.py": {
+      "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
+      "description": "rx_hook diagnostics: log why frames are rejected (temporary)",
+      "date": "2026-07-21"
+    }
   },
-  "count": 32,
+  "count": 33,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
