@@ -1,15 +1,5 @@
-From c076fcc5e686125b492014bc98a13c0f01766a51 Mon Sep 17 00:00:00 2001
-From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 21:25:46 +0000
-Subject: [PATCH] temp: 010 with no_syscall_lock fix + removed_ifaces driver fix
-
----
- data/templates/vpp/startup.conf.j2 |  3 +-
- src/conf_mode/vpp.py               | 77 +++++++++++++++++++++++-------
- 2 files changed, 59 insertions(+), 21 deletions(-)
-
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
-index 82d3753ae..7c0e9bc56 100644
+index 82d3753ae..60282697d 100644
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
 @@ -74,6 +74,7 @@ plugins {
@@ -30,40 +20,30 @@ index 82d3753ae..7c0e9bc56 100644
          name {{ iface }}
  {%         if iface_config.num_rx_desc is vyos_defined %}
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1f1..c686ed2db 100755
+index c0e30d1f1..f1709d81c 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -133,6 +133,7 @@
+@@ -132,6 +132,7 @@
+     '1d0f:ec20',  # Amazon.com, Inc. Elastic Network Adapter (ENA)
  )
  SUPPORTED_DRIVERS = (
-     'hv_netvsc',  # Microsoft Hyper-V network interface card
 +    'fsl_dpa',    # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
+     'hv_netvsc',  # Microsoft Hyper-V network interface card
  )
  
- 
-@@ -217,7 +218,7 @@ def _get_max_xdp_rx_queues(config: dict):
-     - If neither `rx` nor `combined` is set, return 1.
-     """
-     for key in ('rx', 'combined'):
--        value = config['channels'].get(key)
-+        value = config.get('channels', {}).get(key)
-         if value:
-             if config['original_driver'] in ethtool_channels_change_drv:
-                 return max(1, int(value) // 2)
-@@ -288,6 +289,14 @@ def get_config(config=None):
+@@ -284,6 +285,11 @@ def get_config(config=None):
              to_append = {
                  'iface_name': removed_iface,
                  'driver': 'dpdk',
-             }
 +            # LS1046A: fsl_dpa is platform-bus AF_XDP, not DPDK
 +            # Check persist_config for the original driver
 +            orig_drv = eth_ifaces_persist.get(removed_iface, {}).get('original_driver', '')
 +            if orig_drv == 'fsl_dpa':
 +                to_append['driver'] = 'xdp'
+             }
              removed_ifaces.append(to_append)
              # add an interface to a list of interfaces that need
-             # to be reinitialized after the commit
-@@ -354,6 +363,9 @@ def get_config(config=None):
+@@ -354,6 +360,9 @@ def get_config(config=None):
          _normalize_buffers(effective_config)
          for iface_config in effective_config['settings']['interface'].values():
              iface_config['driver'] = 'dpdk'
@@ -73,16 +53,10 @@ index c0e30d1f1..c686ed2db 100755
          config['effective'] = effective_config
  
      # Save important info about all interfaces that cannot be retrieved later
-@@ -379,7 +391,22 @@ def get_config(config=None):
-             interface_rx_mode = config['settings'].get('interface_rx_mode')
+@@ -394,6 +403,16 @@ def get_config(config=None):
+                     EthtoolGDrvinfo(iface).driver
+                 )
  
-             for iface, iface_config in config['settings']['interface'].items():
-+                # Get current kernel module, required for extra verification and
-+                # logic for VMBus interfaces
-+                config['settings']['interface'][iface]['kernel_module'] = (
-+                    EthtoolGDrvinfo(iface).driver
-+                )
-                 iface_config['driver'] = 'dpdk'
 +                # LS1046A: fsl_dpa is a platform-bus AF_XDP driver, not DPDK
 +                if iface_config['kernel_module'] == 'fsl_dpa':
 +                    iface_config['driver'] = 'xdp'
@@ -93,23 +67,10 @@ index c0e30d1f1..c686ed2db 100755
 +                            'tx_queue_size': '4096',
 +                            'num_rx_queues': '1',
 +                        }
- 
-                 # old_driver = leaf_node_changed(
-                 #     conf, base_settings + ['interface', iface, 'driver']
-@@ -388,12 +415,6 @@ def get_config(config=None):
-                 # if old_driver:
-                 #     config['settings']['interface'][iface]['driver_changed'] = {}
- 
--                # Get current kernel module, required for extra verification and
--                # logic for VMBus interfaces
--                config['settings']['interface'][iface]['kernel_module'] = (
--                    EthtoolGDrvinfo(iface).driver
--                )
--
                  # filter unsupported config nodes
                  iface_filter_eth(conf, iface)
                  set_dependents('ethernet', conf, iface)
-@@ -463,12 +484,9 @@ def get_config(config=None):
+@@ -463,12 +482,7 @@ def get_config(config=None):
                          )
                      if 'zero-copy' in iface_config['xdp_options']:
                          xdp_api_params['mode'] = 'zero-copy'
@@ -119,13 +80,11 @@ index c0e30d1f1..c686ed2db 100755
 -                        > 1
 -                    ):
 -                        xdp_api_params['flags'] = 'no_syscall_lock'
-+                    # Always use no_syscall_lock for DPAA1 AF_XDP to prevent
-+                    # TX packet loss from syscall-required stalls
-+                    xdp_api_params['flags'] = 'no_syscall_lock'
++                    xdp_api_params['flags'] = 'no_syscall_lock'  # Always for DPAA1 AF_XDP
                      iface_config['xdp_api_params'] = xdp_api_params
  
          # Buffer normalization (auto → computed)
-@@ -628,7 +646,7 @@ def verify(config):
+@@ -628,7 +642,7 @@ def verify(config):
          if iface_config['driver'] == 'xdp' and 'xdp_options' in iface_config:
              if iface_config['xdp_options']['num_rx_queues'] != 'all':
                  rx_queues = iface_config['xdp_api_params']['rxq_num']
@@ -134,29 +93,55 @@ index c0e30d1f1..c686ed2db 100755
                  if rx_queues > max_rx_queues:
                      raise ConfigError(
                          f'Maximum supported number of RX queues for interface {iface} is {max_rx_queues}. '
-@@ -685,8 +703,11 @@ def generate(config):
- 
+@@ -686,6 +700,9 @@ def generate(config):
  
  def initialize_interface(iface, driver, iface_config) -> None:
+     # DPDK - rescan PCI to use a proper driver
 +    # AF_XDP devices (platform-bus or otherwise) need no PCI rescan
 +    if driver == 'xdp':
 +        pass  # AF_XDP — no PCI rescan, no rename
-     # DPDK - rescan PCI to use a proper driver
--    if driver == 'dpdk' and iface_config['original_driver'] not in not_pci_drv:
-+    elif driver == 'dpdk' and iface_config.get('original_driver', '') not in not_pci_drv:
+     if driver == 'dpdk' and iface_config['original_driver'] not in not_pci_drv:
          # 'gve' devices require a specific unbind/bind process instead of a standard PCI rescan.
          if iface_config['original_driver'] == 'gve':
-             control_host.rebind_gve_driver(
-@@ -703,7 +724,7 @@ def initialize_interface(iface, driver, iface_config) -> None:
-         control_host.set_promisc(f'defunct_{iface}', 'off')
-         control_host.rename_iface(f'defunct_{iface}', iface)
-         control_host.xdp_remove(iface)
--        if iface_config['original_driver'] in ethtool_channels_change_drv:
-+        if iface_config.get('original_driver', '') in ethtool_channels_change_drv:
-             control_host.set_eth_channels(iface, iface_config['channels'])
+@@ -751,7 +768,7 @@ def apply(config):
+                     if iface_config['kernel_module'] == 'ena':
+                         control_host.unsafe_noiommu_mode(True)
  
-     # Rename Mellanox NIC to a normal name
-@@ -822,13 +843,13 @@ def apply(config):
+-                    original_driver = config['persist_config'][iface]['original_driver']
++                    original_driver = config['persist_config'].get(iface, {}).get('original_driver', '')
+                     effective_ifaces = (
+                         config.get('effective', {})
+                         .get('settings', {})
+@@ -774,8 +791,8 @@ def apply(config):
+                         or override_xdp_to_dpdk
+                     ):
+                         control_host.override_driver(
+-                            config['persist_config'][iface]['bus_id'],
+-                            config['persist_config'][iface]['dev_id'],
++                            config['persist_config'].get(iface, {})['bus_id'],
++                            config['persist_config'].get(iface, {})['dev_id'],
+                             override_drivers[k_module],
+                         )
+ 
+@@ -784,6 +801,8 @@ def apply(config):
+ 
+     # Initialize interfaces removed from VPP
+     for iface in config.get('removed_ifaces', []):
++        # Use .get() for persist_config — it may have been deleted
++        persist = config['persist_config'].get(iface['iface_name'], {})
+         initialize_interface(
+             iface['iface_name'],
+             iface['driver'],
+@@ -792,7 +811,7 @@ def apply(config):
+ 
+         # Remove what is not in the config anymore
+         if iface['iface_name'] not in config.get('settings', {}).get('interface', {}):
+-            del config['persist_config'][iface['iface_name']]
++            config['persist_config'].pop(iface['iface_name'], None)
+ 
+     if 'settings' in config and 'interface' in config.get('settings'):
+         interface_rx_mode = config['settings'].get('interface_rx_mode')
+@@ -822,13 +841,13 @@ def apply(config):
                      # Some cloud NICs fail to load XDP if all RX queues are configured. To avoid this,
                      # we limit the number of queues to half of the maximum supported by the driver.
                      if (
@@ -169,11 +154,11 @@ index c0e30d1f1..c686ed2db 100755
 +                            config['persist_config'].get(iface, {})
                          )
 -                        channels_orig = config['persist_config'][iface]['channels']
-+                        channels_orig = config['persist_config'].get(iface, {}).get('channels', {})
++                        channels_orig = config['persist_config'].get(iface, {})['channels']
                          channels = {}
                          if channels_orig.get('rx'):
                              channels = {'rx': max_rx_queues, 'tx': max_rx_queues}
-@@ -889,8 +910,12 @@ def apply(config):
+@@ -889,8 +908,12 @@ def apply(config):
              # we need to stop vpp service and initialize interfaces
              call(f'systemctl stop {service_name}.service')
              for iface, iface_config in config['settings']['interface'].items():
@@ -183,25 +168,7 @@ index c0e30d1f1..c686ed2db 100755
 +                    continue
                  initialize_interface(
 -                    iface, iface_config['driver'], config['persist_config'][iface]
-+                    iface, iface_config['driver'], persist
++                    iface, iface_config['driver'], config['persist_config'].get(iface, {})
                  )
  
              raise ConfigError(
-@@ -903,6 +924,14 @@ def apply(config):
-     # Initialize interfaces removed from VPP
-     for iface in config.get('removed_ifaces', []):
-+        # Use .get() for persist_config — it may have been deleted
-+        persist = config['persist_config'].get(iface['iface_name'], {})
-         initialize_interface(
-             iface['iface_name'],
-             iface['driver'],
--            config['persist_config'][iface['iface_name']],
-+            persist,
-         )
- 
-         # Remove what is not in the config anymore
-         if iface['iface_name'] not in config.get('settings', {}).get('interface', {}):
--            del config['persist_config'][iface['iface_name']]
-+            config['persist_config'].pop(iface['iface_name'], None)
--- 
-2.39.5
