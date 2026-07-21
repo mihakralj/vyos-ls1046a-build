@@ -77,7 +77,7 @@ unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm)
 
 \tobj = list_first_entry_or_null(&pcd->fe_enq,
 \t\t\t\t       struct fman_pcd_fe_obj, node);
-\treturn obj ? obj->off : 0;
+\treturn obj ? obj->muram_off : 0;
 }
 EXPORT_SYMBOL_GPL(fman_pcd_fe_enq_get_offset);
 """
