@@ -34,20 +34,7 @@
 
 /* Opaque to the OOT consumer; resolved inside fsl_dpa.ko. */
 struct fman;
-
-/*
- * F-109: Full struct definition (not just forward-decl) so the OOT
- * module can allocate fman_pcd_fe_flow_action on the stack for
- * fman_pcd_fe_flow_add().  MUST stay byte-identical to the in-tree
- * definition in include/linux/fsl/fman_pcd.h (F-094 fixup).
- */
-#define FMAN_FE_FLOW_KEY_MAX   56   /* fits 256B DDR record minus header */
-struct fman_pcd_fe_flow_action {
-	u8   key[FMAN_FE_FLOW_KEY_MAX];
-	u8   key_size;
-	unsigned long enq_off;		/* ENQ FE MURAM offset for HIT dispatch */
-	u32  flags;			/* reserved for future use */
-};
+struct fman_pcd_fe_flow_action;     /* defined in <linux/fsl/fman_pcd.h> */
 
 /* L4 protocol selector for fman_cc_key.proto (IANA numbers). 0 = any. */
 #define FMAN_CC_PROTO_ANY	0
