@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.8.0 · 2026-07-20 · HADS 1.0.0**
+**Version 1.9.2 · 2026-07-20 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -77,6 +77,10 @@ M5 reversibility: gen_pool double-free has no code fix yet (§6).
 | **VPP AF_XDP copy-mode on .185** | **2026-07-20** | **VPP 25.10 starts, eth4 AF_XDP interface created via binary API (xdp_iface_create). Copy-mode only — ZC still blocked (M4). Kernel side: MTU 3290, IP 10.99.2.185/24. VPP side: MTU 9000, polling mode. Packets flowing (RX 2, TX 14). Requires: isolcpus=3, hugepagesz=2M hugepages=512 in U-Boot bootargs, min_memory=4G, min_cpus=2, main-heap-size=256M, main_heap_size >= 256M in config_verify.** |
 | **vyos-1x patches regenerated for upstream drift** | **2026-07-20** | **Upstream vyos-1x rolling moved (PR#5323, fb6f19f). 10 patches regenerated as proper git format-patch with index blob SHAs for --3way merge. 010: complete AF_XDP support (fsl_dpa→xdp driver, plugin af_xdp_plugin.so enable, no af_xdp config block — VPP 25.10 creates AF_XDP via binary API). 030: ARM64 resource defaults (min_memory=4G, min_cpus=2, main-heap-size=256M, buffers-per-numa=16384, main_heap_size >= 256M). 017: regenerated with os.path.exists usage intact. pylint 2.x compatibility fix in ci-setup-vyos-build.sh (removed E0606/E1111/possibly-used-before-assignment/assigning-from-no-return — not valid in pylint 2.16.2).** |
 | **VPP 25.10 AF_XDP architecture** | **2026-07-20** | **VPP 25.10 does NOT support af_xdp { } config stanzas — AF_XDP interfaces are created via binary API (vpp_control.xdp_iface_create). The af_xdp { } config block causes "unknown input" error at startup. Only plugin af_xdp_plugin.so { enable } is needed in startup.conf. The xdp_iface_create() call at vpp.py line 854 handles interface creation after VPP starts.** |
+| **VPP AF_XDP copy-mode throughput ceiling** | **2026-07-20** | **~1.3 Gbps burst, collapse after 4s. syscall-required TX bottleneck. True ZC required for 10 Gbps.** |
+| **VPP AF_XDP ZC pool attach SUCCESS** | **2026-07-20** | **MTU 1766, bpid=5 (eth3), bpid=6 (eth4). xsk_zc_rx_armed=1 on both. Board stable (no crash).** |
+| **VPP AF_XDP ZC datapath blocked** | **2026-07-20** | **xsk_zc_rx_redirect=0, xsk_zc_eligible=0. XDP program not redirecting to XSK socket.** |
+| **VPP AF_XDP ZC datapath blocked — ROOT CAUSE** | **2026-07-20** | **xsk_rx_branch=0: RSS distributes frames across 4 qbands, XSK pool only on qband 0. Frames on qbands 1-3 bypass XSK entirely.** |
 | Dual-DAC topology unblocked | 2026-07-14 | eth3+eth4 both SFP-H10GB-CU1M @10G on .185 |
 | **Multi-port VPP AF_XDP (eth3+eth4)** | **2026-07-20** | **Both 10G SFP+ ports in VPP simultaneously via AF_XDP copy-mode. Seven fixes in vyos-1x-010: effective_config fsl_dpa→xdp override, template dpdk guard, initialize_interface simplified, .get() guards for persist_config/original_driver/channels, error handler skip for non-physical interfaces. Requires 2048 hugepages (4GB). Verified on .185: eth3 RX 1147, eth4 RX 1154, both polling mode, packets flowing. Build 29726714675 (vyos-2026.07.20-0806-rolling) deployed to lxc200.** |
 
@@ -266,13 +270,15 @@ graph LR
 - **Key outcome:** 13-byte 5-tuple keysize no longer stalls (F-072b fix validated).
 - **Calendar:** 1 board session (2026-07-19 17:00–18:00 UTC).
 
-### M4 — AF_XDP true-ZC RX 🟡 parallel (COPY-MODE WORKING; ZC STILL BLOCKED)
+### M4 — AF_XDP true-ZC RX 🟡 ZC POOL ATTACH WORKS; MULTI-QUEUE FIX IN CI BUILD
 
 - **Gate:** `xsk_zc_rx_redirect` > 0 under XDP_ZEROCOPY bind + traffic.
-- **Copy-mode WORKING (2026-07-20):** VPP 25.10 starts, **both eth3 and eth4** AF_XDP interfaces created via binary API (`xdp_iface_create`). Kernel side: MTU 3290, IP 10.99.2.185/24 (eth3), 10.11.1.1/29 (eth4). VPP side: MTU 9000, polling mode. Packets flowing on both ports (eth3 RX 1147, eth4 RX 1154). Requires: `isolcpus=3 hugepagesz=2M hugepages=2048` in U-Boot bootargs (4GB for dual 10G ports), `min_memory=4G`, `min_cpus=2`, `main-heap-size=256M`, `main_heap_size >= 256M` in config_verify. Seven vyos-1x-010 fixes committed (65370f4), build 29726714675 deployed.
-- **ZC still blocked:** `xsk_zc_eligible` and `xsk_zc_rx_armed` counters both 0 — no ZC bind attempted. VPP `xdp_api_params` don't include `mode: 'zero-copy'` (our default `xdp_options` lack `'zero-copy'` key). Even if added, kernel-side ZC precondition still fails (0164 fixed port accessor + params page but at least one more check fails).
-- **Instrumentation deployed:** F-099 fixup (CI 29706934409 PASSED) adds `pr_err("ZCBIND:...")` at every error return in `xp_assign_dev()`, `xsk_bind()`, `dpaa_xdp()`, and `af_xdp_pool_attach()`. Included in build 29726714675 (vyos-2026.07.20-0806-rolling).
-- **Next:** install build 29726714675 on .185 → add `'zero-copy': True` to xdp_options → reproduce ZC EINVAL → `dmesg | grep ZCBIND` → identify failing precondition → implement fix → rebuild without F-099 → verify `xsk_zc_rx_redirect > 0`.
+- **Copy-mode WORKING (2026-07-20):** VPP 25.10 starts, **both eth3 and eth4** AF_XDP interfaces created via binary API (`xdp_iface_create`). Throughput: ~1.3 Gbps burst, collapse after 4s (syscall-required TX bottleneck). Copy-mode ceiling confirmed — true ZC required for 10 Gbps.
+- **ZC BREAKTHROUGH (2026-07-20 22:50 UTC):** ZC pool attach SUCCEEDS on both ports. F-099 instrumentation confirmed: `xp_assign_dev` passes with MTU 1766 (needed=1792 ≤ frame_size=1792), `af_xdp_pool_attach` returns OK with bpid=5 (eth3) and bpid=6 (eth4). `xsk_zc_rx_armed=1` on both interfaces. Board did NOT crash — BPID reprogram executed successfully.
+- **ZC datapath NOT flowing — ROOT CAUSE IDENTIFIED (2026-07-20 23:15 UTC):** `xsk_rx_branch=0`, `xsk_zc_eligible=0`, `xsk_zc_rx_redirect=0`. The XSK pool is attached to qband 0 only. FMan RSS distributes ingress frames across all 4 qbands (128 FQs, 32 per qband). Frames landing on qbands 1-3 never hit the XSK pool. VPP only creates 1 XSK socket because DPAA1 lacks `get_channels` ethtool op → `ETHTOOL_GCHANNELS` returns 1 → `rxq_num=65535` capped to 1.
+- **Fix — Option A (multi-queue XSK, true to VPP design):** F_104 fixup adds `dpaa_get_channels()` reporting 4 combined channels (one per qband). This lets VPP's `rxq_num=65535` create 4 XSK sockets covering all RSS-distributed frames. Fixup anchor-tested locally, registered in manifest (32 fixups), wired in ci-setup-kernel.sh.
+- **vyos-1x fixes (hotfixed on .185, committed to 010 patch):** (1) `removed_ifaces` driver detection via `eth_ifaces_persist.original_driver`. (2) `persist_config` `.get()` guards. (3) DPDK path `.get()` guards. (4) Template guard `driver | default('dpdk') != 'xdp'`. (5) `effective_config` loop `EthtoolGDrvinfo` fallback to `defunct_` prefix. (6) Main config loop fallback. (7) Ring sizes 1024→4096. (8) `zero-copy: True` + `num_rx_queues: all` in defaults. vyos-1x-030: buffers 16384→32768.
+- **Next:** Trigger CI build with F_104 → deploy ISO to .185 → verify 4 XSK sockets → test ZC RX datapath.
 
 ### M5 — First classified + FE-forwarded flow 🟢 ACTIVE — scaffold gate passed; VPP copy-mode working
 
@@ -336,23 +342,24 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 - [ ] **T-P0-1** `@___` — Add `pcd->fe_port_armed[port_id]` boolean array to `struct fman_pcd`. Initialise to `false` in `fman_pcd_init()`. Add guard at entry of `fman_pcd_fe_engage()`: if `pcd->fe_port_armed[port_id]`, return `-EBUSY`. Set `true` on successful engage, set `false` in `fe_disengage_full()`. Gate: `test-fixups.sh 4/4` passes, local compile clean, CI build green. This is ~30 LOC, zero silicon changes. Without it, double-arm → double-free → MURAM corruption is reproducible on every `engage→disengage-fail→engage` cycle.
 
-### M4 — true-ZC (parallel) 🟡 COPY-MODE WORKING; ZC BLOCKED
+### M4 — true-ZC (parallel) 🟡 ZC POOL ATTACH WORKS; MULTI-QUEUE FIX IN CI
 
-- [x] **T-M4-0a** `@mihakralj` — **VPP AF_XDP copy-mode on .185 (single-port eth4).** ✅ DONE 2026-07-20. VPP 25.10 starts, eth4 AF_XDP interface created via binary API. Required: vyos-1x patches 010 (fsl_dpa→xdp driver, plugin enable, no af_xdp config block), 030 (ARM64 resource defaults), U-Boot bootargs with isolcpus=3 hugepagesz=2M hugepages=512. Build 29723242656, hotfix-verified on .185 with ISO 2026.07.20-0625.
-- [x] **T-M4-0b** `@mihakralj` — **Multi-port VPP AF_XDP (eth3+eth4).** ✅ DONE 2026-07-20. Both 10G SFP+ ports in VPP simultaneously. Seven fixes in vyos-1x-010: effective_config fsl_dpa→xdp override, template dpdk guard, initialize_interface simplified, .get() guards for persist_config/original_driver/channels, error handler skip for non-physical interfaces. Requires 2048 hugepages (4GB). Build 29726714675 (vyos-2026.07.20-0806-rolling) deployed to lxc200.
-- [x] **T-M4-1a** `@mihakralj` — **Deploy ISO with F-099 ZC instrumentation.** ✅ DONE 2026-07-20. Build 29726714675 (vyos-2026.07.20-0806-rolling) includes F-099 fixup (pr_err("ZCBIND:...") at every kernel XSK error return). Deployed to lxc200 at http://192.168.1.137:8080/iso/latest.iso. Not yet installed on .185 (board running hotfixed 0700 build with both eth3+eth4 in VPP).
-- [ ] **T-M4-1b** `@mihakralj` — **Add 'zero-copy': True to xdp_options** and attempt VPP commit. VPP 25.10 af_xdp plugin sees NETDEV_XDP_ACT_XSK_ZEROCOPY (patch 0070) and tries ZC mode → xsk_socket__create() returns EINVAL.
-- [ ] **T-M4-1c** `@mihakralj` — **Extract `dmesg | grep ZCBIND`** from board .185. F-099 prints the file+line+error code at every error return.
-- [ ] **T-M4-1d** `@mihakralj` — **Analyze the failing check.** Map the file+line to the specific DPAA1 XSK init path.
-- [ ] **T-M4-1e** `@mihakralj` — **Implement the fix.** New kernel patch or count-gated fixup. Must leave copy-mode AF_XDP unaffected.
-- [ ] **T-M4-1f** `@mihakralj` — **Rebuild ISO WITHOUT F-099 instrumentation.** Strip diagnostic pr_err lines; keep only the actual ZC fix.
-- [ ] **T-M4-1g** `@mihakralj` — **Deploy fixed ISO to .185** and retry VPP AF_XDP ZC bind on eth4.
-- [ ] **T-M4-1h** `@mihakralj` — **Apply GAP-2 steering** to get high-rate flow to XSK default FQ.
-- [ ] **T-M4-1i** `@mihakralj` — **Verify ZC oracle fires.** `ethtool -S eth3 | grep xsk_zc_rx_redirect` climbs > 0.
-- [ ] **T-M4-1j** `@mihakralj` — **Measure ZC throughput.** Compare against copy-mode baseline (~3.5 Gbps).
-- [ ] **T-M4-1k** `@mihakralj` — **Verify reversibility.** Unbind VPP, confirm counters return to dormant, eth4 IP reachability recovers.
-- [ ] **T-M4-1l** `@mihakralj` — **Close ZC-RX-SCOPE.md.** Archive scope doc, log findings to qdrant.
-- [ ] **T-M4-1m** `@mihakralj` — **Flip M4 milestone status to DONE.** Gate: `xsk_zc_rx_redirect > 0` under steered flow.
+- [x] **T-M4-0a** `@mihakralj` — **VPP AF_XDP copy-mode on .185 (single-port eth4).** ✅ DONE 2026-07-20.
+- [x] **T-M4-0b** `@mihakralj` — **Multi-port VPP AF_XDP (eth3+eth4).** ✅ DONE 2026-07-20.
+- [x] **T-M4-0c** `@mihakralj` — **Copy-mode throughput measured.** ✅ DONE 2026-07-20. ~1.3 Gbps burst, collapse after 4s (syscall-required TX bottleneck). True ZC required for 10 Gbps.
+- [x] **T-M4-1a** `@mihakralj` — **Deploy ISO with F-099 ZC instrumentation.** ✅ DONE 2026-07-20. Build 29726714675 deployed to lxc200.
+- [x] **T-M4-1b** `@mihakralj` — **Add 'zero-copy': True to xdp_options + lower MTU to 1766.** ✅ DONE 2026-07-20. Hotfix on .185: `xp_assign_dev` passes (needed=1792 ≤ frame_size=1792), `af_xdp_pool_attach` returns OK with bpid=5 (eth3) and bpid=6 (eth4). `xsk_zc_rx_armed=1` on both interfaces. Board stable — no crash from BPID reprogram.
+- [x] **T-M4-1c** `@mihakralj` — **Extract `dmesg | grep ZCBIND`.** ✅ DONE 2026-07-20. F-099 confirmed: `force_zc=1`, `af_xdp_pool_attach OK`, FMan RX port reprogrammed to XSK BPID.
+- [x] **T-M4-1d** `@mihakralj` — **Analyze ZC datapath blockage.** ✅ DONE 2026-07-20. ROOT CAUSE: `xsk_rx_branch=0` — RSS distributes frames across 4 qbands, XSK pool only on qband 0. Frames on qbands 1-3 bypass XSK entirely. VPP only creates 1 XSK socket because DPAA1 lacks `get_channels` ethtool op → `ETHTOOL_GCHANNELS` returns 1.
+- [x] **T-M4-1e** `@mihakralj` — **Implement fix: F_104 get_channels ethtool op.** ✅ DONE 2026-07-20. New fixup adds `dpaa_get_channels()` reporting 4 combined channels (one per qband). Registered in manifest (32 fixups), wired in ci-setup-kernel.sh after F_103. Local anchor-test PASSED.
+- [x] **T-M4-1f** `@mihakralj` — **vyos-1x fixes consolidated.** ✅ DONE 2026-07-20. 8 fixes in vyos-1x-010 patch: removed_ifaces driver detection via `eth_ifaces_persist.original_driver`, persist_config `.get()` guards, template guard simplified to `driver | default('dpdk') != 'xdp'`, EthtoolGDrvinfo fallback to `defunct_` prefix, ring sizes 1024→4096, `zero-copy: True` in defaults, `num_rx_queues: all`. vyos-1x-030: buffers 16384→32768.
+- [ ] **T-M4-2a** `@mihakralj` — **Trigger CI build with F_104.** `gh workflow run "VyOS LS1046A build (self-hosted)" --ref main`
+- [ ] **T-M4-2b** `@mihakralj` — **Deploy ISO to .185** via `add system image <url>`.
+- [ ] **T-M4-2c** `@mihakralj` — **Verify 4 XSK sockets created.** Check `vppctl show hard` shows 4 RX queues per interface, `ethtool -l defunct_eth3` shows 4 combined channels.
+- [ ] **T-M4-2d** `@mihakralj` — **Verify ZC datapath flows.** `ethtool -S defunct_eth3 | grep xsk_zc_rx_redirect` climbs > 0 under traffic.
+- [ ] **T-M4-2e** `@mihakralj` — **Measure ZC throughput.** iperf3 single-stream, compare against copy-mode baseline (~1.3 Gbps burst).
+- [ ] **T-M4-2f** `@mihakralj` — **Verify reversibility.** Unbind VPP, confirm counters return to dormant, eth3/eth4 IP reachability recovers.
+- [ ] **T-M4-2g** `@mihakralj` — **Flip M4 milestone status to DONE.** Gate: `xsk_zc_rx_redirect > 0` under steered flow.
 
 ### M5 — flow automation (after M3) 🟢 ACTIVE — partially complete; VPP copy-mode working
 
