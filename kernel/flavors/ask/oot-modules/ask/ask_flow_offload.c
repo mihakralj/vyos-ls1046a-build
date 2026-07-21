@@ -527,6 +527,12 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
                 /* Re-resolve so we always pick up the fresh n->ha. */
                 ask_resolve_neigh_v4(dev, dst_ip,
                                      p->key.next_hop_mac, p->key.egress_mac);
+                /* F-111: Drop pending entries with multicast/broadcast
+                 * next-hop — these can never be HW-offloaded. */
+                if (is_multicast_ether_addr(p->key.next_hop_mac)) {
+                        kfree(p);
+                        continue;
+                }
                 if (is_zero_ether_addr(p->key.next_hop_mac)) {
                         /* Race: neigh went back to INCOMPLETE between
                          * NETEVENT delivery and our re-lookup.  Re-park.
@@ -1274,6 +1280,16 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          */
         ask_resolve_neigh_v4(egress_dev, dst_ip,
                              key.next_hop_mac, key.egress_mac);
+
+        /*
+         * F-111: Reject multicast/broadcast next-hop MACs before HW insert.
+         * The FMan HM chain writes the next-hop MAC into the L2 header;
+         * multicast or broadcast destinations would produce invalid frames
+         * on the wire.  Return -EAGAIN so the kernel SW fastpath handles
+         * the flow (SW forwarding correctly handles multicast/broadcast).
+         */
+        if (is_multicast_ether_addr(key.next_hop_mac))
+                return -EAGAIN;
 
         /*
          * PR14y: if the next-hop MAC is still all-zero, the ARP entry is
