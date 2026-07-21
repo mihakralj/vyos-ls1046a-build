@@ -38,6 +38,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/atomic.h>               /* F-108: atomic_t hit_release_refcnt */
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -167,6 +168,16 @@ struct ask_hw_pcd {
          * taildrop bottleneck). */
         struct qman_fq  dedicated_fq;
         bool            dedicated_fq_ready;
+
+        /*
+         * F-108: Refcount for the FMan-global silicon HIT-release bypass.
+         * fman_port_set_silicon_hit_release_all() toggles TX-confirm bypass
+         * across ALL FMan TX ports.  When multiple ports are offloaded,
+         * disengaging one must not disable the bypass for remaining engaged
+         * ports.  Increment on engage (enable hardware bypass only on
+         * 0→1 transition), decrement on disengage (disable only on 1→0).
+         */
+        atomic_t        hit_release_refcnt;
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -385,6 +396,7 @@ int ask_hw_pcd_bringup(void)
         mutex_init(&h->lock);
         h->fman = fman;
         xa_init_flags(&h->flow_cookies, XA_FLAGS_ALLOC1);
+        atomic_set(&h->hit_release_refcnt, 0);  /* F-108: init refcount */
 
         ask_hw_pcd_inst = h;
 
@@ -481,8 +493,11 @@ void ask_hw_pcd_teardown(void)
                 kfree(ck);
         }
 
-        /* Restore TX confirm on all ports before tearing down CC trees. */
+        /* Restore TX confirm on all ports before tearing down CC trees.
+         * F-108: Unconditional disable on teardown — module unload must
+         * always restore the S0 default regardless of refcount state. */
         fman_port_set_silicon_hit_release_all(h->fman, false);
+        atomic_set(&h->hit_release_refcnt, 0);
 
         /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
         for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
@@ -644,19 +659,17 @@ int ask_hw_offload_engage(u8 hw_port_id)
         /*
          * Enable silicon HIT-release on all FMan TX ports so that
          * HIT frames bypass QMan and go directly to the wire.
-         * Idempotent — repeated calls with 'true' are harmless.
+         * F-108: Refcount-guarded — only enable hardware bypass on the
+         * first engage (0→1 transition).  Subsequent engages on other
+         * ports increment the refcount without touching hardware.
          * Reversed symmetrically in ask_hw_offload_disengage() so the
          * S1→S0 cycle restores the TX-confirm bit to its S0 default and
          * `pcd-snapshot diff` stays byte-clean (DUAL-DATAPLANE.md M1
          * reversibility contract).  Also reversed in ask_hw_pcd_teardown()
          * for module-unload cleanup as a belt-and-suspenders.
-         *
-         * NOTE: this call is FMan-global (touches every TX port).  v1
-         * enforces global mutual exclusion (one port engaged at a time),
-         * so a symmetric enable/disable at engage/disengage is safe.
-         * A future multi-port engage will need a per-fman refcount.
          */
-        fman_port_set_silicon_hit_release_all(h->fman, true);
+        if (atomic_inc_return(&h->hit_release_refcnt) == 1)
+                fman_port_set_silicon_hit_release_all(h->fman, true);
 
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
@@ -700,11 +713,13 @@ void ask_hw_offload_disengage(u8 hw_port_id)
          * S1→S0 cycle restores the silicon HIT-release bit to its S0
          * default.  Mirrors the engage-side call at line ~598; keeps
          * `pcd-snapshot diff` byte-clean per the DUAL-DATAPLANE.md M1
-         * reversibility contract.  Safe under v1 mutual exclusion (one
-         * port engaged at a time); a future multi-port engage will need
-         * a per-fman refcount so this only fires on the last disengage.
+         * reversibility contract.
+         * F-108: Refcount-guarded — only disable hardware bypass on the
+         * last disengage (1→0 transition).  Intermediate disengages on
+         * other ports decrement the refcount without touching hardware.
          */
-        fman_port_set_silicon_hit_release_all(h->fman, false);
+        if (atomic_dec_return(&h->hit_release_refcnt) == 0)
+                fman_port_set_silicon_hit_release_all(h->fman, false);
 
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
