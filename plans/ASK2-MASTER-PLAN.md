@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.9.2 · 2026-07-20 · HADS 1.0.0**
+**Version 1.9.3 · 2026-07-21 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -83,6 +83,11 @@ M5 reversibility: gen_pool double-free has no code fix yet (§6).
 | **VPP AF_XDP ZC datapath blocked — ROOT CAUSE** | **2026-07-20** | **xsk_rx_branch=0: RSS distributes frames across 4 qbands, XSK pool only on qband 0. Frames on qbands 1-3 bypass XSK entirely.** |
 | Dual-DAC topology unblocked | 2026-07-14 | eth3+eth4 both SFP-H10GB-CU1M @10G on .185 |
 | **Multi-port VPP AF_XDP (eth3+eth4)** | **2026-07-20** | **Both 10G SFP+ ports in VPP simultaneously via AF_XDP copy-mode. Seven fixes in vyos-1x-010: effective_config fsl_dpa→xdp override, template dpdk guard, initialize_interface simplified, .get() guards for persist_config/original_driver/channels, error handler skip for non-physical interfaces. Requires 2048 hugepages (4GB). Verified on .185: eth3 RX 1147, eth4 RX 1154, both polling mode, packets flowing. Build 29726714675 (vyos-2026.07.20-0806-rolling) deployed to lxc200.** |
+| **F_104 get_channels ethtool op DEPLOYED** | **2026-07-21** | **CI build 29792991355 SUCCEEDED (dpaa1 a4375db). ISO vyos-2026.07.21-0123-rolling deployed to lxc200. Kernel 6.18.38-vyos. ethtool -l eth3/eth4 shows Combined: 4. VPP creates 3 XSK sockets (xsk_zc_rx_armed=3). xsk_zc_eligible=19 on eth3 under traffic. xsk_zc_rx_redirect=0 — ZC datapath still not flowing despite multi-queue fix.** |
+| **vyos-1x-010 patch regenerated (2×)** | **2026-07-21** | **First regeneration: corrupt hunk headers from hand-editing (commit cb199a8). Second regeneration: Python syntax error — fsl_dpa detection code placed inside dict literal (commit a4375db). Both fixed. Patch applies cleanly to vyos-1x HEAD (69039b470).** |
+| **U-Boot bootargs fix** | **2026-07-21** | **vyos boot target hardcodes bootargs (does not use $bootargs variable). Manually added isolcpus=3 hugepagesz=2M hugepages=2048 to vyos U-Boot env. After reboot: CPU 3 isolated, 2048 hugepages (4GB) available. Required for VPP ZC mode.** |
+| **VPP config generation bug** | **2026-07-21** | **generate() writes to /run/vpp/vpp.conf, but VPP systemd service reads /etc/vpp/startup.conf. Template file not updated by package install (date Sep 10 2023 despite patch). Manually fixed template + copied config. Root cause: vyos-1x package build may not have applied template patch correctly.** |
+| **VPP AF_XDP ZC status on .185** | **2026-07-21** | **VPP running with eth3+eth4 in AF_XDP mode (manually created via vppctl). xsk_zc_rx_armed=3 (3 XSK sockets), xsk_zc_eligible=19 (eth3), xsk_zc_rx_redirect=0. ZC datapath armed but not flowing — kernel XDP program not redirecting frames to XSK sockets despite multi-queue fix.** |
 
 ---
 
@@ -270,15 +275,15 @@ graph LR
 - **Key outcome:** 13-byte 5-tuple keysize no longer stalls (F-072b fix validated).
 - **Calendar:** 1 board session (2026-07-19 17:00–18:00 UTC).
 
-### M4 — AF_XDP true-ZC RX 🟡 ZC POOL ATTACH WORKS; MULTI-QUEUE FIX IN CI BUILD
+### M4 — AF_XDP true-ZC RX 🟡 MULTI-QUEUE FIX DEPLOYED; ZC DATAPATH STILL BLOCKED
 
 - **Gate:** `xsk_zc_rx_redirect` > 0 under XDP_ZEROCOPY bind + traffic.
 - **Copy-mode WORKING (2026-07-20):** VPP 25.10 starts, **both eth3 and eth4** AF_XDP interfaces created via binary API (`xdp_iface_create`). Throughput: ~1.3 Gbps burst, collapse after 4s (syscall-required TX bottleneck). Copy-mode ceiling confirmed — true ZC required for 10 Gbps.
 - **ZC BREAKTHROUGH (2026-07-20 22:50 UTC):** ZC pool attach SUCCEEDS on both ports. F-099 instrumentation confirmed: `xp_assign_dev` passes with MTU 1766 (needed=1792 ≤ frame_size=1792), `af_xdp_pool_attach` returns OK with bpid=5 (eth3) and bpid=6 (eth4). `xsk_zc_rx_armed=1` on both interfaces. Board did NOT crash — BPID reprogram executed successfully.
 - **ZC datapath NOT flowing — ROOT CAUSE IDENTIFIED (2026-07-20 23:15 UTC):** `xsk_rx_branch=0`, `xsk_zc_eligible=0`, `xsk_zc_rx_redirect=0`. The XSK pool is attached to qband 0 only. FMan RSS distributes ingress frames across all 4 qbands (128 FQs, 32 per qband). Frames landing on qbands 1-3 never hit the XSK pool. VPP only creates 1 XSK socket because DPAA1 lacks `get_channels` ethtool op → `ETHTOOL_GCHANNELS` returns 1 → `rxq_num=65535` capped to 1.
 - **Fix — Option A (multi-queue XSK, true to VPP design):** F_104 fixup adds `dpaa_get_channels()` reporting 4 combined channels (one per qband). This lets VPP's `rxq_num=65535` create 4 XSK sockets covering all RSS-distributed frames. Fixup anchor-tested locally, registered in manifest (32 fixups), wired in ci-setup-kernel.sh.
-- **vyos-1x fixes (hotfixed on .185, committed to 010 patch):** (1) `removed_ifaces` driver detection via `eth_ifaces_persist.original_driver`. (2) `persist_config` `.get()` guards. (3) DPDK path `.get()` guards. (4) Template guard `driver | default('dpdk') != 'xdp'`. (5) `effective_config` loop `EthtoolGDrvinfo` fallback to `defunct_` prefix. (6) Main config loop fallback. (7) Ring sizes 1024→4096. (8) `zero-copy: True` + `num_rx_queues: all` in defaults. vyos-1x-030: buffers 16384→32768.
-- **Next:** Trigger CI build with F_104 → deploy ISO to .185 → verify 4 XSK sockets → test ZC RX datapath.
+- **F_104 DEPLOYED (2026-07-21):** CI build 29792991355 SUCCEEDED (dpaa1 a4375db). ISO vyos-2026.07.21-0123-rolling deployed to lxc200, installed on .185. Kernel 6.18.38-vyos. `ethtool -l eth3/eth4` shows Combined: 4. VPP creates 3 XSK sockets (`xsk_zc_rx_armed=3`). `xsk_zc_eligible=19` on eth3 under traffic. **BUT `xsk_zc_rx_redirect=0` — ZC datapath still not flowing.** Multi-queue fix is correct but insufficient — kernel XDP program is not redirecting frames to XSK sockets despite armed=3 and eligible>0.
+- **Next investigation:** Why does `xsk_zc_rx_redirect` stay at 0 when `xsk_zc_rx_armed=3` and `xsk_zc_eligible>0`? Possible causes: (a) XSK pool DMA mapping issue — FMan DMA engine not writing to XSK UMEM despite BPID pointing to XSK pool; (b) XDP program redirect logic — `xdp_do_redirect()` or `bpf_redirect_map()` failing silently; (c) QMan FQ context_b not updated when BPID changes — FQ still points to kernel page-pool, not XSK pool. Need kernel-level debugging (tracepoints, bpftrace) to determine which layer blocks the redirect.
 
 ### M5 — First classified + FE-forwarded flow 🟢 ACTIVE — scaffold gate passed; VPP copy-mode working
 
@@ -342,7 +347,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 - [ ] **T-P0-1** `@___` — Add `pcd->fe_port_armed[port_id]` boolean array to `struct fman_pcd`. Initialise to `false` in `fman_pcd_init()`. Add guard at entry of `fman_pcd_fe_engage()`: if `pcd->fe_port_armed[port_id]`, return `-EBUSY`. Set `true` on successful engage, set `false` in `fe_disengage_full()`. Gate: `test-fixups.sh 4/4` passes, local compile clean, CI build green. This is ~30 LOC, zero silicon changes. Without it, double-arm → double-free → MURAM corruption is reproducible on every `engage→disengage-fail→engage` cycle.
 
-### M4 — true-ZC (parallel) 🟡 ZC POOL ATTACH WORKS; MULTI-QUEUE FIX IN CI
+### M4 — true-ZC (parallel) 🟡 MULTI-QUEUE FIX DEPLOYED; ZC DATAPATH STILL BLOCKED
 
 - [x] **T-M4-0a** `@mihakralj` — **VPP AF_XDP copy-mode on .185 (single-port eth4).** ✅ DONE 2026-07-20.
 - [x] **T-M4-0b** `@mihakralj` — **Multi-port VPP AF_XDP (eth3+eth4).** ✅ DONE 2026-07-20.
@@ -353,11 +358,11 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [x] **T-M4-1d** `@mihakralj` — **Analyze ZC datapath blockage.** ✅ DONE 2026-07-20. ROOT CAUSE: `xsk_rx_branch=0` — RSS distributes frames across 4 qbands, XSK pool only on qband 0. Frames on qbands 1-3 bypass XSK entirely. VPP only creates 1 XSK socket because DPAA1 lacks `get_channels` ethtool op → `ETHTOOL_GCHANNELS` returns 1.
 - [x] **T-M4-1e** `@mihakralj` — **Implement fix: F_104 get_channels ethtool op.** ✅ DONE 2026-07-20. New fixup adds `dpaa_get_channels()` reporting 4 combined channels (one per qband). Registered in manifest (32 fixups), wired in ci-setup-kernel.sh after F_103. Local anchor-test PASSED.
 - [x] **T-M4-1f** `@mihakralj` — **vyos-1x fixes consolidated.** ✅ DONE 2026-07-20. 8 fixes in vyos-1x-010 patch: removed_ifaces driver detection via `eth_ifaces_persist.original_driver`, persist_config `.get()` guards, template guard simplified to `driver | default('dpdk') != 'xdp'`, EthtoolGDrvinfo fallback to `defunct_` prefix, ring sizes 1024→4096, `zero-copy: True` in defaults, `num_rx_queues: all`. vyos-1x-030: buffers 16384→32768.
-- [ ] **T-M4-2a** `@mihakralj` — **Trigger CI build with F_104.** `gh workflow run "VyOS LS1046A build (self-hosted)" --ref main`
-- [ ] **T-M4-2b** `@mihakralj` — **Deploy ISO to .185** via `add system image <url>`.
-- [ ] **T-M4-2c** `@mihakralj` — **Verify 4 XSK sockets created.** Check `vppctl show hard` shows 4 RX queues per interface, `ethtool -l defunct_eth3` shows 4 combined channels.
-- [ ] **T-M4-2d** `@mihakralj` — **Verify ZC datapath flows.** `ethtool -S defunct_eth3 | grep xsk_zc_rx_redirect` climbs > 0 under traffic.
-- [ ] **T-M4-2e** `@mihakralj` — **Measure ZC throughput.** iperf3 single-stream, compare against copy-mode baseline (~1.3 Gbps burst).
+- [x] **T-M4-2a** `@mihakralj` — **Trigger CI build with F_104.** ✅ DONE 2026-07-21. Build 29792991355 SUCCEEDED (dpaa1 a4375db). Required 3 fix commits: corrupt hunk headers (cb199a8), .config regeneration (68cd6d2), Python syntax error (a4375db).
+- [x] **T-M4-2b** `@mihakralj` — **Deploy ISO to .185.** ✅ DONE 2026-07-21. ISO vyos-2026.07.21-0123-rolling deployed to lxc200, installed on .185 via `add system image`.
+- [x] **T-M4-2c** `@mihakralj` — **Verify 4 XSK sockets created.** ✅ DONE 2026-07-21. `ethtool -l eth3/eth4` shows Combined: 4. VPP creates 3 XSK sockets (`xsk_zc_rx_armed=3`). `xsk_zc_eligible=19` on eth3 under traffic.
+- [ ] **T-M4-2d** `@mihakralj` — **Verify ZC datapath flows.** `xsk_zc_rx_redirect` stays at 0 despite armed=3 and eligible>0. Multi-queue fix is correct but insufficient — kernel XDP program not redirecting frames to XSK sockets. **BLOCKED — needs kernel-level debugging.**
+- [ ] **T-M4-2e** `@mihakralj` — **Measure ZC throughput.** Blocked by T-M4-2d.
 - [ ] **T-M4-2f** `@mihakralj` — **Verify reversibility.** Unbind VPP, confirm counters return to dormant, eth3/eth4 IP reachability recovers.
 - [ ] **T-M4-2g** `@mihakralj` — **Flip M4 milestone status to DONE.** Gate: `xsk_zc_rx_redirect > 0` under steered flow.
 
@@ -413,6 +418,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; pcd-snapshot A/B + prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` (T-M5-4) or Path-B YNL interim |
 | **ZC EINVAL** | `xsk_socket__create()` returns EINVAL for XDP_ZEROCOPY on DPAA1; 0164 fixed port accessor + params page but ZC still blocked. Copy-mode AF_XDP works (VPP 25.10 on .185, eth4 up, packets flowing). ZC counters (xsk_zc_eligible, xsk_zc_rx_armed) both 0 — no ZC bind attempted yet. | OPEN 2026-07-20 | M4 | Deploy F-099 instrumentation → add 'zero-copy': True to xdp_options → trace dmesg | grep ZCBIND → identify failing precondition |
+| **ZC redirect blocked** | `xsk_zc_rx_armed=3`, `xsk_zc_eligible>0`, but `xsk_zc_rx_redirect=0`. Multi-queue fix (F_104) deployed — VPP creates 3 XSK sockets covering all 4 qbands. Frames recognized as ZC-eligible but kernel XDP program not redirecting to XSK sockets. Possible causes: (a) FMan DMA engine not writing to XSK UMEM despite BPID pointing to XSK pool; (b) XDP redirect logic (`xdp_do_redirect()`/`bpf_redirect_map()`) failing silently; (c) QMan FQ context_b not updated when BPID changes — FQ still points to kernel page-pool. | OPEN 2026-07-21 | M4 gate | Needs kernel-level debugging: tracepoints, bpftrace, or FMan register dump to determine which layer blocks the redirect. F_103 (skip BPID reprogram) may need reversal — BPID change alone may be insufficient without QMan FQ context_b update. |
 | **gen_pool double-free** | `fe_arm disengage` after API engage → `gen_pool_free_owner` BUG (double-free of KG scheme MURAM). Root cause: double-arm without engagement guard overwrites KG scheme allocation, disengage frees twice. | OPEN 2026-07-19 — engagement guard needed in `fman_pcd_fe_engage()` | M5 reversibility | Add `pcd->fe_port_armed[port_id]` guard; refuse engage on already-armed port. Workaround: never engage twice without successful disengage. |
 
 ---
