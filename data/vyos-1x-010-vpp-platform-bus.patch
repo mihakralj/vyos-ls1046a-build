@@ -20,18 +20,9 @@ index 82d3753ae..60282697d 100644
          name {{ iface }}
  {%         if iface_config.num_rx_desc is vyos_defined %}
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1f1..324e657df 100755
+index c0e30d1f1..e233d8029 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -72,7 +72,7 @@
- airbag.enable()
- 
- service_name = 'vpp'
--service_conf = Path(f'/run/vpp/{service_name}.conf')
-+service_conf = Path('/etc/vpp/startup.conf')
- systemd_override = '/run/systemd/system/vpp.service.d/10-override.conf'
- 
- vpp_log = getLogger(
 @@ -132,6 +132,7 @@
      '1d0f:ec20',  # Amazon.com, Inc. Elastic Network Adapter (ENA)
  )
