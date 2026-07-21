@@ -64,7 +64,7 @@ FW_ENV_CONFIG="/etc/fw_env.config"
 # devices stable. XHCI_AVOID_BEI + XHCI_TRUST_TX_LENGTH are set by kernel
 # patch 4006-xhci-plat-ls1046a-avoid-bei.patch (xhci-plat does NOT consume
 # xhci_hcd.quirks= cmdline — PCI-only).
-UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 loglevel=4 systemd.show_status=true net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1"
+UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 loglevel=4 systemd.show_status=true net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1 isolcpus=3 hugepagesz=2M hugepages=2048"
 
 # Canonical U-Boot bootcmd: USB → eMMC → SPI recovery. This is the single
 # source of truth for BOTH the writer (Phase 1) and the boot-service
