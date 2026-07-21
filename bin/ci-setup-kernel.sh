@@ -1680,13 +1680,13 @@ echo "### F-101: DPAA1_MIN_UMEM_CHUNK lowered to 2048"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_102.py" 2>&1
 echo "### F-102: NULL fq guard in QMan poll path"
 
-# F-103: Skip FMan RX port BPID reprogram during ZC attach.
-# The reprogram-WRITE changes the FMan RX port's primary BMan pool
-# from kernel page-pool to XSK pool, causing QMan context_b corruption
-# and a NULL deref crash in __poll_portal_fast.
-# Temporary — re-enable once ZC RX datapath is fully ready.
+# F-103: SUPERSEDED 2026-07-21 — BPID reprogram re-enabled.
+# F_102 (NULL fq guard) provides sufficient protection against the
+# QMan context_b corruption crash. The BPID reprogram is required
+# for true-ZC RX — without it, FMan DMA writes to kernel page-pool,
+# not XSK UMEM, and xsk_zc_rx_redirect stays at 0.
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_103.py" 2>&1
-echo "### F-103: FMan RX port BPID reprogram disabled"
+echo "### F-103: SUPERSEDED — BPID reprogram re-enabled (F_102 guards crash path)"
 
 # F-104: Add get_channels ethtool op to DPAA1 driver.
 # VPP's af_xdp plugin uses ETHTOOL_GCHANNELS to detect available RX queues.

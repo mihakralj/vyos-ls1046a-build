@@ -30,7 +30,7 @@
     "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation \u2014 pr_err at xsk_pool_dma_map/bman_new_pool failures",
     "F_101.py": "dpaa_eth.h: M4 ZC workaround \u2014 lower DPAA1_MIN_UMEM_CHUNK 3840\u21922048 for VPP 2K-chunk compatibility",
     "F_102.py": "qman.c: M4 ZC crash fix \u2014 NULL guard for fq in __poll_portal_fast SDQCR path",
-    "F_103.py": "af_xdp_pool_main.c: M4 ZC crash fix \u2014 skip FMan RX port BPID reprogram (causes QMan context_b corruption)",
+    "F_103.py": "af_xdp_pool_main.c: SUPERSEDED 2026-07-21 \u2014 BPID reprogram re-enabled (F_102 guards crash path)",
     "F_104.py": "dpaa_ethtool.c: F_104 add get_channels ethtool op (reports 4 combined channels for multi-queue XSK)"
   },
   "count": 32,
