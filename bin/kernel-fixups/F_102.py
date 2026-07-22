@@ -1,14 +1,13 @@
-"""F_102 v2: Add NULL guards for ALL tag_to_fq calls in __poll_portal_fast.
+"""F_102 v4: Add NULL guards for ALL tag_to_fq calls AND portal entry in __poll_portal_fast.
 
 The ZC datapath (BPID reprogram) can produce QMan portal entries (MR, ERN,
 DQRR) whose context_b doesn't map to a valid qman_fq. tag_to_fq() returns
 NULL, and the code dereferences fq->cb.* without checking.
 
-v1 only guarded the SDQCR path. v2 adds guards for the MR and ERN paths too,
-which crash at __poll_portal_fast+0x40 (MR path, the first tag_to_fq call).
-
-Temporary — remove once the ZC RX path properly initializes all FQ
-context_b values.
+v1 only guarded the SDQCR path. v2 added guards for MR and ERN paths.
+v4 adds entry NULL portal guards for __poll_portal_fast and qman_p_poll_dqrr
+to prevent NULL pointer dereferences when polling on isolated CPUs (isolcpus=3)
+where p (qman_portal) is NULL.
 """
 
 import os
@@ -19,6 +18,32 @@ QMAN = "drivers/soc/fsl/qbman/qman.c"
 if os.path.exists(QMAN):
     with open(QMAN) as f:
         s = f.read()
+
+    # Guard 0: __poll_portal_fast entry NULL portal guard
+    old0 = 'static int __poll_portal_fast(struct qman_portal *p, unsigned int poll_limit)\n{'
+    new0 = ('static int __poll_portal_fast(struct qman_portal *p, unsigned int poll_limit)\n{\n'
+            '\t/* F_102 v4: NULL portal guard for isolated CPUs (isolcpus) */\n'
+            '\tif (unlikely(!p))\n'
+            '\t\treturn 0;\n')
+    if old0 in s and "F_102 v4: NULL portal guard" not in s:
+        s = s.replace(old0, new0, 1)
+        changes += 1
+        print("### F_102 v4: NULL portal guard added in __poll_portal_fast entry")
+    elif "F_102 v4: NULL portal guard" in s:
+        print("### F_102 v4: __poll_portal_fast entry guard already present")
+    else:
+        print("### F_102 v4: WARNING __poll_portal_fast entry anchor not found in qman.c")
+
+    # Guard 0b: qman_p_poll_dqrr entry NULL portal guard
+    old0b = 'int qman_p_poll_dqrr(struct qman_portal *p, unsigned int limit)\n{'
+    new0b = ('int qman_p_poll_dqrr(struct qman_portal *p, unsigned int limit)\n{\n'
+             '\t/* F_102 v4: NULL portal guard for isolated CPUs (isolcpus) */\n'
+             '\tif (unlikely(!p))\n'
+             '\t\treturn 0;\n')
+    if old0b in s and "qman_p_poll_dqrr" not in s: # check if already guarded
+        s = s.replace(old0b, new0b, 1)
+        changes += 1
+        print("### F_102 v4: NULL portal guard added in qman_p_poll_dqrr entry")
 
     # Guard 1: MR path (line ~1521) — fq_state_change dereferences fq
     # Uses 4 tabs (inside switch→case→for→if)
@@ -87,6 +112,6 @@ if os.path.exists(QMAN):
         f.write(s)
 
 if changes:
-    print("### F_102 v2: %d change(s) applied" % changes)
+    print("### F_102 v4: %d change(s) applied" % changes)
 else:
-    print("### F_102 v2: WARNING no changes applied")
+    print("### F_102 v4: WARNING no changes applied")
