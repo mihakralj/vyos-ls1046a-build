@@ -283,6 +283,6 @@ ssh-keygen -y -f ~/.ssh/id_vyos_vanity > ~/.ssh/id_vyos_vanity.pub
 ## See Also
 
 - **[plans/FIRMWARE.md](plans/FIRMWARE.md)** — Board firmware update (NOR + eMMC flash procedure, partition offset details, recovery)
-- **[plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md)** — Complete technical specification: U-Boot variable definitions, annotated boot sequences for both USB and eMMC paths, `vyos.env` write paths, DTB delivery, kexec prevention, SPI NOR layout, and all documented failure modes
-- **[plans/UBOOT.md](plans/UBOOT.md)** — U-Boot serial console reference: memory map, working boot commands, clock tree, MTD layout
+- **[plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md)** — Complete technical specification: U-Boot environment, memory map, clock tree, USB and eMMC boot sequences, `vyos.env` write paths, DTB delivery, kexec prevention, SPI NOR layout, and failure modes
+- **[plans/archive/UBOOT.md](plans/archive/UBOOT.md)** — (Archived) former U-Boot reference, consolidated into `BOOT-PROCESS.md`
 - **[plans/PORTING.md](plans/PORTING.md)** — Why 13 things were broken and how each was fixed

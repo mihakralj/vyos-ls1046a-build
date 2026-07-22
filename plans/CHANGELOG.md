@@ -30,6 +30,9 @@ Historical change records, newest first. Subheadings (Fixed / Added / Improved /
 
 ### 2.1 Unreleased
 
+**Improved**
+- **Repo Markdown Documentation Consolidation & HADS 1.0.0 Standard Alignment** — Reviewed all markdown files across repository (`arch/`, `specs/`, `plans/`, `kernel/`, `patches/`, root). Consolidated redundant boot documentation by merging `plans/UBOOT.md` into `plans/BOOT-PROCESS.md` (v1.1.0, single authoritative boot spec) and archiving `UBOOT.md`. Converted `DEV-LOOP.md` and `NETWORKING-DEEP-DIVE.md` to strict HADS 1.0.0 format with `[SPEC]`, `[NOTE]`, `[BUG]` paragraph annotations, version headers, and AI reading instructions. Updated `plans/archive/README.md` file index.
+
 **Fixed**
 - **`ipsec_flow_fini` kernel panic on reboot** — ASK `ipsec_flow_fini()` operates on a global table (`ipsec_flow_table_global`) but is called per-network-namespace via `xfrm_net_exit()`. When init_net and Docker namespaces both call fini, the second call does `kfree()` on already-freed `hash_table` pointer → BUG at `mm/slub.c:448`. Fixed by NULLing the pointer after free and guarding against double-free.
 - **ASK `fp_netfilter_init` boot crash** — `comcerto_fp_netfilter.c` used `module_init()` which runs at `device_initcall` level 6, but was linked before `nf_conntrack` in the Makefile. `nf_ct_netns_get(&init_net)` called before conntrack per-net data existed → NULL pointer dereference. Fixed by changing to `late_initcall()`.

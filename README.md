@@ -15,10 +15,7 @@ The hardware earns the effort. The NXP LS1046A brings four Cortex-A72 cores at 1
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
 | **Control hardware & diagnose problems** on a running system | [HWCTL.md](HWCTL.md): the `led` RGBW status-LED command (palette, fades, demo modes), LED/fan shell recipes, + the seven built-in `*-check` diagnostic scripts (`dpaa1-check`, `sfp-check`, `fan-check`, `caam-check`, `xsk-zc-check`, `ask-check`, `firmware-check`) — health probes for networking, SFP modules, thermals, crypto, AF_XDP, and the boot firmware / FMan microcode chain |
 | **Update board firmware** (bricked or fresh board) | [plans/FIRMWARE.md](plans/FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
-| **Understand the boot process** | [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
-| **Understand what broke and how it got fixed** | [plans/PORTING.md](plans/PORTING.md): driver archaeology, DPAA1 architecture, boot flow |
-| **Push to 10 Gbps** with VPP acceleration | [plans/VPP.md](plans/VPP.md): AF_XDP integration, `set vpp` CLI, thermal management, troubleshooting |
-| **Debug at the U-Boot console** | [plans/UBOOT.md](plans/UBOOT.md): memory map, boot commands, clock tree, MTD layout |
+| **Understand the boot process & U-Boot** | [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, memory map, clock tree, MTD layout, `booti` sequence, failure modes |
 | **See what changed** between releases | [plans/CHANGELOG.md](plans/CHANGELOG.md): per-build changelog |
 
 > Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues) before installing. Some limitations are permanent hardware constraints. Better to know before you're three hours into a rack installation.
