@@ -1722,6 +1722,13 @@ echo "### F-105: rx_hook diagnostics added"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_106.py" 2>&1
 echo "### F-106: rx_hook trace_printk diagnostics added"
 
+# F-115: Fix DMA-index headroom mismatch (recover=0 bug) + diagnostic.
+# dpaa_xsk_build_dma_index stores pool->heads[i].dma (base) but seed/refill
+# store xsk_buff_xdp_get_dma (base+headroom); FMan reports base+headroom so
+# the bsearch misses every frame → recover=0. Adds headroom to the index key.
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_115.py" 2>&1
+echo "### F-115: DMA-index headroom fix + recover-miss diagnostic"
+
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
 # two lines. w5 was already MUX from patch 0131.
