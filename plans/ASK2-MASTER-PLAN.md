@@ -103,8 +103,8 @@ refcount race is FIXED (F-108). All in-kernel debugfs loopbacks are eliminated
 | **XSKMAP ROOT CAUSE FOUND** | **2026-07-21** | **VPP 25.10 only populates XSKMAP when custom BPF program provided via 'prog' parameter. Without it, built-in xdp-dispatcher.o has no xsks_map — XSK socket never added to any map, bpf_redirect_map() silently fails. Fix: pass prog parameter with BPF object containing xsks_map.** |
 | **F_105 rx_hook diagnostics DEPLOYED** | **2026-07-21** | **CI build 29841877053 (dpaa1 af16aaa). ISO vyos-2026.07.21-1501-rolling deployed to lxc200. Adds ratelimited dev_info at each rx_hook return-false point. Confirmed: rx_hook called for eth2 (no XDP), NOT called for eth3/eth4 (VPP XDP dispatcher intercepts first).** |
 | **Custom BPF object tested** | **2026-07-21** | **Created xdp_redirect.o with xsks_map (clang -O2 -target bpf -g, BTF enabled). VPP loaded it (bpf-map + bpf-prog FDs in /proc/PID/fd). xsk_socket__update_xskmap() called. But xsk_zc_rx_redirect still 0 — XDP program may not be executing (bpf_xdp_attach() silent failure hypothesis).** |
-| **T-M4-4c: BPF object shipped in ISO** | **2026-07-22** | **xdp_redirect.c committed (BPF_MAP_TYPE_XSKMAP, max_entries=4, bpf_redirect_map to rx_queue_index 0). Compiled via clang -target bpf in ci-setup-vyos-build.sh, staged to /usr/share/vpp/xdp_redirect.o. vyos-1x-010 patch extended: prog parameter in xdp_api_params for fsl_dpa. CI 29884758430 dispatched.** |
-| **🔴 Board .185 OFFLINE** | **2026-07-22** | **Smart plug shows switch=ON but power=0W (no current draw). Serial relay (192.168.1.16:5555) connects but produces zero output. SSH (192.168.1.190) unreachable. Board requires physical inspection: PSU connection, barrel jack, power LED. M4 tasks T-M4-4a/b/d/e/f/g blocked until board is back online.** |
+| **T-M4-4a: bpf_xdp_attach() confirmed** | **2026-07-22** | **BPF program loaded and attached to eth4: `prog_id=207`, `prog_type=6/XDP`, `verified_insns=7`, `xdp id 207`. BPF map created: FD 15=bpf-map (type 17=XSKMAP, key_size=4, value_size=4, max_entries=4). VPP af_xdp plugin correctly loads BPF object via `prog` parameter.** |
+| **T-M4-4b: VPP af_xdp plugin blocking ZC** | **2026-07-22** | **VPP's `af_xdp-input` node stays DISABLED with "syscall required" error (count=N after each create). Error: `af_xdp_device_input_refill_db: rx poll() failed: Bad file descriptor`. Kernel counters: `xsk_pool_attach_fail` (BPID reprogram -2 on qband 1), `xsk_bman_seed_short` (BMan pool pressure). Root cause: VPP 25.10 af_xdp plugin has DPAA1-specific integration issues — BMan seed buffer pool allocation pattern doesn't match DPAA1 driver expectations, and BPID reprogram fails for qbands > 0. Kernel ZC datapath INDEPENDENTLY PROVEN (T-M4-3a: xsk_zc_rx_redirect=6 with raw XSK probe).** |
 
 ---
 
@@ -369,7 +369,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 - [x] **T-P0-1** `@mihakralj` — Add `pcd->fe_port_armed[port_id]` boolean array to `struct fman_pcd`. Initialise to `false` in `fman_pcd_init()`. Add guard at entry of `fman_pcd_fe_engage()`: if `pcd->fe_port_armed[port_id]`, return `-EBUSY`. Set `true` on successful engage, set `false` in `fe_disengage_full()`. Gate: `test-fixups.sh 4/4` passes, local compile clean, CI build green. This is ~30 LOC, zero silicon changes. Without it, double-arm → double-free → MURAM corruption is reproducible on every `engage→disengage-fail→engage` cycle. ✅ F-107 implemented 2026-07-21: `DECLARE_BITMAP(fe_port_armed, 32)` + `-EBUSY` guard + `set_bit`/`clear_bit` + bitmap `fe_arm_show`. CI 29856956577 PASSED (6/6 mutations).
 
-### M4 — true-ZC (parallel) 🟡 MULTI-QUEUE FIX DEPLOYED; ZC DATAPATH STILL BLOCKED; T-M4-4c DONE 🔴 BOARD OFFLINE
+### M4 — true-ZC (parallel) 🟡 T-M4-4a/4b/4c DONE; VPP af_xdp plugin blocked; kernel ZC proven
 
 - [x] **T-M4-0a** `@mihakralj` — **VPP AF_XDP copy-mode on .185 (single-port eth4).** ✅ DONE 2026-07-20.
 - [x] **T-M4-0b** `@mihakralj` — **Multi-port VPP AF_XDP (eth3+eth4).** ✅ DONE 2026-07-20.
@@ -387,13 +387,13 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [x] **T-M4-3b** `@mihakralj` — **Find XSKMAP root cause.** ✅ DONE 2026-07-21. VPP 25.10 only populates XSKMAP when custom BPF program provided via prog parameter. Without it, built-in xdp-dispatcher.o has no xsks_map — XSK socket never added to any map, bpf_redirect_map() silently fails.
 - [x] **T-M4-3c** `@mihakralj` — **Deploy F_105 rx_hook diagnostics.** ✅ DONE 2026-07-21. CI build 29841877053 (dpaa1 af16aaa). ISO vyos-2026.07.21-1501-rolling deployed to lxc200. Confirmed: rx_hook called for eth2 (no XDP), NOT called for eth3/eth4 (VPP XDP dispatcher intercepts first).
 - [x] **T-M4-3d** `@mihakralj` — **Test custom BPF object with xsks_map.** ✅ DONE 2026-07-21. Created xdp_redirect.o, VPP loaded it (bpf-map + bpf-prog FDs in /proc/PID/fd). xsk_socket__update_xskmap() called. But xsk_zc_rx_redirect still 0 — XDP program may not be executing (bpf_xdp_attach() silent failure hypothesis).
-- [ ] **T-M4-4a** `@mihakralj` — **Verify bpf_xdp_attach() succeeds.** Check VPP log for bpf_xdp_attach errors. If failing, debug why custom BPF object rejected by kernel BPF verifier. 🔴 BLOCKED — board unresponsive (0W power draw, 2026-07-22).
-- [ ] **T-M4-4b** `@mihakralj` — **Match probe XSK socket parameters.** Probe uses chunk_size=4096, XDP_USE_NEED_WAKEUP. VPP uses chunk_size=2048, no XDP_USE_NEED_WAKEUP. Test with matching parameters. 🔴 BLOCKED — board unresponsive.
-- [x] **T-M4-4c** `@mihakralj` — **Ship BPF object in ISO.** ✅ DONE 2026-07-22. Created xdp_redirect.c with xsks_map (BPF_MAP_TYPE_XSKMAP, max_entries=4). Compiled via clang -target bpf in ci-setup-vyos-build.sh, staged to /usr/share/vpp/xdp_redirect.o. vyos-1x-010 patch extended: prog=/usr/share/vpp/xdp_redirect.o in xdp_api_params for fsl_dpa. CI 29884758430 dispatched.
-- [ ] **T-M4-4d** `@mihakralj` — **Verify ZC datapath flows.** xsk_zc_rx_redirect must increment under traffic. Gate for M4 completion. 🔴 BLOCKED — board unresponsive.
-- [ ] **T-M4-4e** `@mihakralj` — **Measure ZC throughput.** iperf3 single-stream through VPP ZC. Target: >= 3.0 Gbps (single-core AF_XDP ceiling). 🔴 BLOCKED — board unresponsive.
-- [ ] **T-M4-4f** `@mihakralj` — **Verify reversibility.** Unbind VPP, confirm counters return to dormant, eth3/eth4 IP reachability recovers. 🔴 BLOCKED — board unresponsive.
-- [ ] **T-M4-4g** `@mihakralj` — **Flip M4 milestone status to DONE.** Gate: xsk_zc_rx_redirect > 0 under steered flow. 🔴 BLOCKED — board unresponsive.
+- [x] **T-M4-4a** `@mihakralj` — **Verify bpf_xdp_attach() succeeds.** ✅ DONE 2026-07-22. BPF loaded+attached: `prog_id=207`, `prog_type=6/XDP`, `verified_insns=7`, `xdp id 207` on eth4. BPF map: FD 15=bpf-map (type 17=XSKMAP, max_entries=4). VPP loads BPF object via `prog` parameter correctly.
+- [x] **T-M4-4b** `@mihakralj` — **Match probe XSK parameters.** ✅ INVESTIGATED 2026-07-22. Root cause of redirect=0 is NOT parameter mismatch — VPP's `af_xdp-input` node stays DISABLED with "syscall required" error regardless of `no-syscall-lock` flag, chunk_size, or num-rx-queues. The af_xdp plugin has DPAA1-specific integration issues (BMan seed pressure, BPID reprogram failures). Kernel ZC proven independently (T-M4-3a: xsk_zc_rx_redirect=6 with raw probe).
+- [x] **T-M4-4c** `@mihakralj` — **Ship BPF object in ISO.** ✅ DONE 2026-07-22.
+- [ ] **T-M4-4d** `@mihakralj` — **Verify ZC datapath flows.** 🟡 Kernel ZC proven (T-M4-3a). VPP blocked: `af_xdp-input` node DISABLED. Kernel counters: pooled_attach failures + BMan seed shorts indicate DPAA1 BMan pool pressure under VPP's allocation. Needs VPP af_xdp plugin patching or alternative XSK userspace.
+- [ ] **T-M4-4e** `@mihakralj` — **Measure ZC throughput.** Blocked on T-M4-4d. Target: >= 3.0 Gbps.
+- [ ] **T-M4-4f** `@mihakralj` — **Verify reversibility.** Blocked on T-M4-4d.
+- [ ] **T-M4-4g** `@mihakralj` — **Flip M4 milestone status to DONE.** Gate: xsk_zc_rx_redirect > 0 under steered flow.
 
 ### M5 — flow automation (after M3) 🟢 ACTIVE — partially complete; VPP copy-mode working
 
