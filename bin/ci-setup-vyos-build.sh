@@ -349,6 +349,18 @@ cp board/dtb/mono-gw.dtb vyos-build/data/live-build-config/includes.binary/mono-
 mkdir -p "$CHROOT/boot"
 cp board/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
 
+### M4 ZC: AF_XDP BPF redirect program for VPP zero-copy (T-M4-4c).
+# VPP 25.10's built-in xdp-dispatcher.o has no xsks_map, so bpf_redirect_map()
+# silently fails — ZC RX stays at 0.  This custom BPF object provides the
+# xsks_map that VPP populates via xsk_socket__update_xskmap().
+# Compile from source (clang -target bpf) and stage into the ISO rootfs.
+mkdir -p "$CHROOT/usr/share/vpp"
+clang -O2 -target bpf -g \
+    -I/usr/include/aarch64-linux-gnu \
+    -c kernel/common/files/bpf/xdp_redirect.c \
+    -o "$CHROOT/usr/share/vpp/xdp_redirect.o" 2>&1
+echo "### M4 ZC: xdp_redirect.o compiled and staged to ISO"
+
 ### U-Boot tools: fw_setenv config for updating boot env from Linux
 cp board/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 
