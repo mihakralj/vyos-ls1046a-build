@@ -67,7 +67,7 @@ GITATTR
 # Apply with git apply --3way (refuses fuzz, falls back to real 3-way merge
 # on context drift). Idempotent: skip patches that reverse-apply cleanly,
 # treating that as "already merged upstream".
-for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch; do
+for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch data/vyos-build-008-vpp-libxdp.patch; do
   if git -C vyos-build apply --reverse --check --whitespace=nowarn "../$p" >/dev/null 2>&1; then
     echo "### $p: skipped (already applied upstream)"
     continue
