@@ -208,6 +208,18 @@ jobs:
         with:
           repository: vyos/vyos-build
           path: vyos-build
+          # vyos-build/build/ (chroot, live-build's own package cache,
+          # .build/ stage markers) is gitignored — actions/checkout's
+          # default clean:true runs `git clean -ffdx` on EVERY run, which
+          # wipes it before VYOS_PERSIST_CHROOT's persist_chroot check in
+          # build-vyos-image ever gets a chance to see it (this was the
+          # actual reason runs 29892449272/29892887213 both still fell
+          # back to a full `lb clean` despite the earlier
+          # "Unmount stale chroot bind-mounts" gate). clean:false only
+          # skips removing untracked files; tracked files (the vyos-build
+          # source tree itself) are still reset to match the fetched ref
+          # as normal, so the patch-apply step remains idempotent.
+          clean: false
 
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # All package installs live in bin/ci-install-vyos1x-deps.sh so the
