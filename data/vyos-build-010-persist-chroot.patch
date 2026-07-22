@@ -1,0 +1,53 @@
+diff --git a/scripts/image-build/build-vyos-image b/scripts/image-build/build-vyos-image
+index b181a6e..3d6525d 100755
+--- a/scripts/image-build/build-vyos-image
++++ b/scripts/image-build/build-vyos-image
+@@ -513,7 +513,47 @@ DOCUMENTATION_URL="{build_config['documentation_url']}"
+
+         ## Clean up earlier build state and artifacts
+         print("I: Cleaning the build workspace")
+-        cmd("lb clean")
++        persist_chroot = (
++            os.environ.get("VYOS_PERSIST_CHROOT") == "1"
++            and os.path.isdir("chroot")
++            and os.path.exists(os.path.join(".build", "bootstrap"))
++        )
++        if persist_chroot:
++            # The base chroot (Debian bookworm minbase + the --custom-package
++            # set) is identical across most CI runs; only the locally-built
++            # kernel/vyos-1x .debs actually change. Reusing the populated
++            # chroot instead of a full debootstrap+dpkg-unpack every run
++            # skips the ~250s of dpkg unpack/configure/trigger overhead for
++            # packages that were already correctly installed last time.
++            # Only the binary (ISO) stage and the package-install stage are
++            # reset: `lb build` re-runs `apt-get install` against the
++            # CURRENT package/kernel/vyos-1x list on the EXISTING chroot —
++            # unchanged packages are a fast no-op, the delta (new kernel,
++            # vyos-1x, ask-modules, any bumped custom package) is the only
++            # part that really unpacks/configures.
++            #
++            # Trade-off: chroot state can drift over many runs (e.g. a
++            # package dropped from --custom-package is never actively
++            # removed, only left uninstalled-but-unpurged). There is no
++            # automatic periodic reset here — if drift is ever suspected,
++            # unset VYOS_PERSIST_CHROOT (or `rm -rf vyos-build/build`) once
++            # to force a clean rebuild.
++            print("I: VYOS_PERSIST_CHROOT=1 — reusing existing chroot, resetting install-packages stage only")
++            cmd("lb clean --binary")
++            for pattern in (
++                ".build/chroot_install-packages.*",
++                ".build/chroot_package-lists.*",
++                ".build/chroot_hacks",
++                ".build/chroot_hooks",
++                ".build/chroot_linux-image",
++                ".build/chroot_includes_*",
++                ".build/chroot_debianchroot",
++                ".build/chroot_preseed",
++            ):
++                for f in glob.glob(pattern):
++                    os.remove(f)
++        else:
++            cmd("lb clean")
+         #iter(lambda p: shutil.rmtree(p, ignore_errors=True),
+         #  ['config/binary', 'config/bootstrap', 'config/chroot', 'config/common', 'config/source'])
+         artifacts = functools.reduce(

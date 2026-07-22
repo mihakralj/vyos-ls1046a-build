@@ -70,6 +70,13 @@ sudo sed -i 's/Chroot ${CHROOT} apt-get ${APT_OPTIONS} "${@}"/Chroot ${CHROOT} a
   /usr/share/live/build/functions/wrapper.sh
 grep 'Allow-Downgrades' /usr/share/live/build/functions/wrapper.sh && echo "Apt() patched" || echo "ERROR: Apt() patch failed"
 
+# Reuse the populated chroot across CI runs on this persistent self-hosted
+# runner instead of a full debootstrap+dpkg-unpack every build (see
+# data/vyos-build-010-persist-chroot.patch). Only the delta — new kernel
+# .deb, vyos-1x .deb, any bumped custom package — actually gets
+# unpacked/configured; unchanged packages are a fast apt no-op.
+export VYOS_PERSIST_CHROOT=1
+
 ./build-vyos-image \
   --architecture arm64 \
   --build-by "$BUILD_BY" \

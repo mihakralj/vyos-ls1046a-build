@@ -1,0 +1,13 @@
+diff --git a/scripts/image-build/build-vyos-image b/scripts/image-build/build-vyos-image
+index b181a6e..825e0c3 100755
+--- a/scripts/image-build/build-vyos-image
++++ b/scripts/image-build/build-vyos-image
+@@ -664,7 +664,7 @@ DOCUMENTATION_URL="{build_config['documentation_url']}"
+                 --checksums "sha256" \
+                 --chroot-squashfs-compression-type "{{squashfs_compression_type}}" \
+                 --debian-installer none \
+-                --debootstrap-options "--variant=minbase --exclude=isc-dhcp-client,isc-dhcp-common,ifupdown --include=apt-utils,ca-certificates,gnupg2,linux-kbuild-6.1" \
++                --debootstrap-options "--variant=minbase --exclude=isc-dhcp-client,isc-dhcp-common,ifupdown --include=apt-utils,ca-certificates,gnupg2,linux-kbuild-6.1,eatmydata" \
+                 --distribution "{{debian_distribution}}" \
+                 --firmware-binary false \
+                 --firmware-chroot false \
