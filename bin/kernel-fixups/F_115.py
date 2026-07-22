@@ -1,17 +1,25 @@
-"""F-115: Fix DMA-index headroom mismatch (recover=0 bug) + diagnostic.
+"""F-115 v2: Fix DMA-index headroom mismatch (recover=0 bug) + diagnostic.
 
 M4 ZC blocker: xsk_zc_eligible climbs but xsk_zc_rx_recovered stays 0.
 
 Root cause: dpaa_xsk_build_dma_index() stores pool->heads[i].dma (the
 chunk BASE dma) in xsk_chunk_dma[band][i].  But the seed/refill loops
 store xsk_buff_xdp_get_dma(handle) — which is base + XDP_PACKET_HEADROOM
-+ pool->headroom — into the BMan buffer.  FMan reports that same
-headroom-adjusted address as qm_fd_addr(fd).  So dpaa_xsk_chunk_head_from_dma()
-bsearches for (base+headroom) in an array of [base...] values and MISSES
-every frame → recover never increments → redirect never fires.
+— into the BMan buffer.  FMan reports that same headroom-adjusted address
+as qm_fd_addr(fd).  So dpaa_xsk_chunk_head_from_dma() bsearches for
+(base+256) in an array of [base...] values and MISSES every frame →
+recover never increments → redirect never fires.
 
-FIX: build the DMA index from the same headroom-adjusted address the
-seed loop uses, so the bsearch key matches qm_fd_addr(fd).
+v2 (2026-07-22): HW-validated on board .185.  The v1 fix added
+pool->headroom to the index key, but the F-115 diagnostic showed the
+delta was exactly pool->headroom (256 bytes) too large.  xsk_buff_xdp_get_dma()
+returns base + XDP_PACKET_HEADROOM only — pool->headroom is an internal
+XSK offset NOT reflected in the DMA address.  v2 removes pool->headroom
+from the index key.
+
+FIX: build the DMA index from base + XDP_PACKET_HEADROOM (256 bytes),
+matching what xsk_buff_xdp_get_dma() stores in BMan and what FMan
+reports as qm_fd_addr(fd).
 
 DIAGNOSTIC: on a bsearch miss, rate-limited-log the fd DMA, the index
 range [0]..[cnt-1], and the delta from base[0], so if the headroom
@@ -34,25 +42,25 @@ with open(path) as f:
 
 changes = 0
 
-# ── 1. FIX: index build must store headroom-adjusted DMA ──
-# Match:  priv->xsk_chunk_dma[band][i] = pool->heads[i].dma;
-# (whitespace between tokens is flexible)
-pat = re.compile(
-    r'(priv->xsk_chunk_dma\[band\]\[i\]\s*=\s*)pool->heads\[i\]\.dma;')
-matches = pat.findall(src)
-if len(matches) == 1:
-    src = pat.sub(
-        r'\1pool->heads[i].dma + XDP_PACKET_HEADROOM + pool->headroom; '
-        r'/* F-115: match qm_fd_addr(fd)=base+headroom */',
-        src)
-    changes += 1
-    print("### F-115: index build now headroom-adjusted (base+XDP_PACKET_HEADROOM+pool->headroom)")
-elif len(matches) == 0:
-    print("### F-115: WARNING — index build assignment not found (already fixed?)")
-else:
-    print(f"### F-115: WARNING — expected 1 index assignment, found {len(matches)} — skipping fix")
+# ── 1. DIAGNOSTIC ONLY: NO index modification needed ──
+# The original code `pool->heads[i].dma` is CORRECT.
+# xp_init_xskb_dma() sets xskb->dma = frame_dma + pool->headroom + XDP_PACKET_HEADROOM.
+# The FMan reports this exact value as qm_fd_addr(fd).
+# The bsearch key matches the index key — no headroom adjustment needed.
+#
+# v1 (reverted): added + XDP_PACKET_HEADROOM + pool->headroom, which
+# DOUBLE-ADDED the headroom (pool->heads[i].dma already includes both).
+# HW-validated 2026-07-22: the F-115 diagnostic showed delta = pool->headroom
+# (256 bytes) too large, confirming the double-add.
+#
+# v2: diagnostic-only.  The recover=0 bug observed in T-M4-4b was caused by
+# a STALE DMA index (from a previous attach), not a headroom mismatch.
+# The stale-index root cause is still under investigation.
 
 # ── 2. DIAGNOSTIC: log the delta on a bsearch miss ──
+# This is the PRIMARY purpose of F-115 v2.  The diagnostic helped identify
+# that the v1 headroom fix was wrong (delta = pool->headroom too large) and
+# that the real issue is a stale DMA index from a previous attach.
 # Anchor on the bsearch call, insert a rate-limited log after the miss check.
 anchor = "hit = bsearch(&dma, base, cnt, sizeof(*base), dpaa_xsk_dma_cmp);"
 if anchor in src and "F-115 recover-miss" not in src:
