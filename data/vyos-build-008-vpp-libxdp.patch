@@ -16,26 +16,24 @@ silently fails, and no frames reach VPP.
 Root cause found 2026-07-22 on board .185: VPP 25.10 af_xdp plugin built
 without libxdp → no xsk_socket__create() → no UMEM/rings → XSKMAP empty →
 run_cnt=0 on XDP program.
+
+The dependencies are added to the [dependencies] section (not build_cmd)
+because ensure_dependencies() in build.py handles sudo apt-get install
+properly, whereas inline sudo in build_cmd may fail in the build container.
 ---
- scripts/package-build/vpp/package.toml | 5 +++++
- 1 file changed, 5 insertions(+)
+ scripts/package-build/vpp/package.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/scripts/package-build/vpp/package.toml b/scripts/package-build/vpp/package.toml
-index 99d72c7..27e3ac6 100644
+index 99d72c7..8f1a3d2 100644
 --- a/scripts/package-build/vpp/package.toml
 +++ b/scripts/package-build/vpp/package.toml
-@@ -24,6 +24,11 @@ for patch in ../patches/vpp/*.patch; do
-     git -c user.email=maintainers@vyos.net -c user.name=vyos am "$patch" || { echo "Failed to apply patch $patch"; exit 1; }
- done
+@@ -32,5 +32,5 @@ cp build-root/*.deb ../
  
-+# M4 ZC: install libxdp-dev + libbpf-dev so af_xdp plugin builds with XSK support
-+# (xsk_socket__create, XSKMAP population). Without these, the plugin falls back
-+# to the older non-XSK code path that never creates XSK sockets.
-+sudo apt-get install -y libxdp-dev libbpf-dev
-+
- make UNATTENDED=yes VPP_ENABLE_SYSTEMD_NOTIFY=ON install-dep
- make VPP_EXTRA_CMAKE_ARGS="-DVPP_ENABLE_SYSTEMD_NOTIFY=ON" pkg-deb
- cp build-root/*.deb ../
+ [dependencies]
+ packages = [
+-    "llvm"
++    "llvm", "libxdp-dev", "libbpf-dev"
+ ]
 -- 
 2.39.5
-
