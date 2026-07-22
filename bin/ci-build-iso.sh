@@ -94,7 +94,11 @@ grep -F 'eatmydata' /usr/share/live/build/functions/wrapper.sh && echo "eatmydat
 # data/vyos-build-010-persist-chroot.patch). Only the delta — new kernel
 # .deb, vyos-1x .deb, any bumped custom package — actually gets
 # unpacked/configured; unchanged packages are a fast apt no-op.
-export VYOS_PERSIST_CHROOT=1
+# VYOS_PERSIST_CHROOT is set at the workflow env: level (auto-build.yml)
+# because the earlier "Unmount stale chroot bind-mounts" step needs to
+# see it too, before this script ever runs; default here covers local/
+# dev-build.sh invocations that don't go through that workflow.
+export VYOS_PERSIST_CHROOT="${VYOS_PERSIST_CHROOT:-1}"
 
 ./build-vyos-image \
   --architecture arm64 \
