@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.12.0 · 2026-07-22 · HADS 1.0.0**
+**Version 1.13.0 · 2026-07-22 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -143,7 +143,7 @@ ISO vyos-2026.07.19-1732-rolling, CI run 29697031761, branch dpaa1 @ bb3a3cf):
 → `fe_hashfe build` → `fe_enq build 0x200` → `fe_enter build 0x4af00` →
 `fe_arm engage 10 53f00 2B9 1C0006` → `fe_flow add 0 <key> 4b000`.
 
-### 2.2 Gap B — AF_XDP true-ZC RX (M4) 🟡 VPP libxdp rebuild needed
+### 2.2 Gap B — AF_XDP true-ZC RX (M4) 🟡 VPP libxdp ISO deployed — awaiting board test
 
 **[SPEC]** Patch 0164 (RX-port accessor + `fman_pcd_port_ensure_params_page()`)
 is deployed: `fman_port_set_rx_bpool()` returns 0 and qband 0 reprograms to the
@@ -409,7 +409,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 - [x] **T-P0-1** `@mihakralj` — Add `pcd->fe_port_armed[port_id]` boolean array to `struct fman_pcd`. Initialise to `false` in `fman_pcd_init()`. Add guard at entry of `fman_pcd_fe_engage()`: if `pcd->fe_port_armed[port_id]`, return `-EBUSY`. Set `true` on successful engage, set `false` in `fe_disengage_full()`. Gate: `test-fixups.sh 4/4` passes, local compile clean, CI build green. This is ~30 LOC, zero silicon changes. Without it, double-arm → double-free → MURAM corruption is reproducible on every `engage→disengage-fail→engage` cycle. ✅ F-107 implemented 2026-07-21: `DECLARE_BITMAP(fe_port_armed, 32)` + `-EBUSY` guard + `set_bit`/`clear_bit` + bitmap `fe_arm_show`. CI 29856956577 PASSED (6/6 mutations).
 
-### M4 — true-ZC (parallel) 🟡 VPP libxdp rebuild needed — XSK socket never created (root cause found)
+### M4 — true-ZC (parallel) 🟡 VPP libxdp ISO deployed — awaiting board test
 
 - [x] **T-M4-0a** `@mihakralj` — **VPP AF_XDP copy-mode on .185 (single-port eth4).** ✅ DONE 2026-07-20.
 - [x] **T-M4-0b** `@mihakralj` — **Multi-port VPP AF_XDP (eth3+eth4).** ✅ DONE 2026-07-20.
@@ -431,7 +431,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [x] **T-M4-4b** `@mihakralj` — **Match probe XSK parameters.** ✅ INVESTIGATED 2026-07-22. Root cause of redirect=0 is NOT parameter mismatch — VPP's `af_xdp-input` node stays DISABLED with "syscall required" error regardless of `no-syscall-lock` flag, chunk_size, or num-rx-queues. The af_xdp plugin has DPAA1-specific integration issues (BMan seed pressure, BPID reprogram failures). Kernel ZC proven independently (T-M4-3a: xsk_zc_rx_redirect=6 with raw probe).
 - [x] **T-M4-4c** `@mihakralj` — **Ship BPF object in ISO.** ✅ DONE 2026-07-22.
 - [ ] **T-M4-4d** `@mihakralj` — **Verify ZC datapath flows.** 🟡 BLOCKED — VPP libxdp rebuild needed. FIX A (VPP interrupt rx-mode + zero-copy + single-queue + no workers) solved the node-disabled blocker: node "interrupt wait", force_zc=1, qband 0 BPID reprogram OK. But **XSK socket is never created** — VPP 25.10 af_xdp plugin built WITHOUT libxdp → CMake check fails → plugin falls back to older non-XSK code path → no `xsk_socket__create()` → no UMEM/rings → XSKMAP stays empty → `bpf_redirect_map()` silently fails → `run_cnt=0` on XDP program. Root cause confirmed 2026-07-22 on .185: `ldd af_xdp_plugin.so` shows no libxdp; `/proc/PID/fd` has bpf-map+bpf-prog but no XSK socket; `bpftool` shows `run_cnt=0`. Fix: add `libxdp-dev libbpf-dev` to VPP build deps (vyos-build-008 patch). F-115 (DMA headroom) also pending — both needed for gate.
-- [ ] **T-M4-5a** `@mihakralj` — **Rebuild VPP with libxdp support.** Add `libxdp-dev libbpf-dev` to VPP build deps via vyos-build-008-vpp-libxdp.patch. Trigger CI build. Verify: `ldd af_xdp_plugin.so` shows libxdp; XSK socket appears in `/proc/PID/fd`; `xsk_socket__update_xskmap()` populates XSKMAP; `run_cnt > 0` on XDP program under traffic.
+- [ ] **T-M4-5a** `@mihakralj` — **Rebuild VPP with libxdp support.** ✅ ISO BUILT + DEPLOYED 2026-07-22. CI 29888749801 SUCCESS. ISO vyos-2026.07.22-0333-rolling-LS1046A-arm64.iso deployed to lxc200 (534MB). Contains: F-115 (DMA headroom fix) + vyos-build-008 (libxdp-dev/libbpf-dev for VPP). `add system image http://192.168.1.137:8080/iso/latest.iso`. Next: install on .185, cold boot, verify `ldd af_xdp_plugin.so` shows libxdp, XSK socket appears in `/proc/PID/fd`, `run_cnt > 0` on XDP program under traffic.
 - [ ] **T-M4-4e** `@mihakralj` — **Measure ZC throughput.** Blocked on T-M4-4d. Target: >= 3.0 Gbps.
 - [ ] **T-M4-4f** `@mihakralj` — **Verify reversibility.** Blocked on T-M4-4d.
 - [ ] **T-M4-4g** `@mihakralj` — **Flip M4 milestone status to DONE.** Gate: xsk_zc_rx_redirect > 0 under steered flow.
@@ -492,7 +492,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 | **ZC recover=0 (DMA headroom)** | `xsk_zc_eligible` climbs but `xsk_zc_rx_recovered=0`. `dpaa_xsk_build_dma_index` keys the bsearch on `pool->heads[i].dma` (base) but FMan reports `qm_fd_addr(fd)`=base+`XDP_PACKET_HEADROOM`+`pool->headroom` (what seed/refill put in BMan) → every lookup misses. | FIX BUILDING 2026-07-22 — F-115 adds headroom to index key + recover-miss diagnostic. CI 29887180426. | M4 gate | Deploy F-115, confirm recover→redirect climbs |
 | **ZC refill under flood** | `refill_batches` freezes under sustained flood; pool drains at ~256 frames, FMan drops rest at HW. Interrupt-mode wakeup not firing under load. | OPEN 2026-07-22 | M4 throughput | Investigate after recover=0 closed; secondary to gate |
 | **ZC redirect blocked (XSKMAP)** | Historical (2026-07-21): built-in xdp-dispatcher.o has no xsks_map. RESOLVED by shipping custom `xdp_redirect.o` (T-M4-4c) + `prog` parameter. bpf_xdp_attach() CONFIRMED (prog_id=207, xdp id 207 on eth4). | ✅ RESOLVED 2026-07-22 | M4 gate | Custom BPF object with xsks_map in ISO; VPP `prog` parameter |
-| **VPP af_xdp no libxdp (XSK socket)** | VPP 25.10 af_xdp plugin built without libxdp → CMake check fails → plugin falls back to non-XSK code path → no `xsk_socket__create()` → no UMEM/rings → XSKMAP empty → `run_cnt=0` on XDP program. Confirmed 2026-07-22 on .185: `ldd af_xdp_plugin.so` shows no libxdp; `/proc/PID/fd` has bpf-map+bpf-prog but no XSK socket. | FIX COMMITTED 2026-07-22 — vyos-build-008-vpp-libxdp.patch adds `libxdp-dev libbpf-dev` to VPP build deps. Awaiting CI rebuild. | M4 gate | Rebuild VPP with libxdp; verify XSK socket appears + run_cnt>0 |
+| **VPP af_xdp no libxdp (XSK socket)** | VPP 25.10 af_xdp plugin built without libxdp → CMake check fails → plugin falls back to non-XSK code path → no `xsk_socket__create()` → no UMEM/rings → XSKMAP empty → `run_cnt=0` on XDP program. Confirmed 2026-07-22 on .185: `ldd af_xdp_plugin.so` shows no libxdp; `/proc/PID/fd` has bpf-map+bpf-prog but no XSK socket. | ✅ FIX COMMITTED + ISO DEPLOYED 2026-07-22 — vyos-build-008-vpp-libxdp.patch adds `libxdp-dev libbpf-dev` to VPP build deps. CI 29888749801 SUCCESS. ISO vyos-2026.07.22-0333-rolling deployed to lxc200. | M4 gate | Install on .185, verify XSK socket appears + run_cnt>0 |
 | **gen_pool double-free** | `fe_arm disengage` after API engage → `gen_pool_free_owner` BUG (double-free of KG scheme MURAM). Root cause: double-arm without engagement guard overwrites KG scheme allocation, disengage frees twice. | ✅ CLOSED 2026-07-21 — F-107: `DECLARE_BITMAP(fe_port_armed, 32)` + `-EBUSY` guard in `fman_pcd_fe_engage()`. CI 29856956577 PASSED. | M5 reversibility | — |
 | **silicon HIT-release refcount** | `fman_port_set_silicon_hit_release_all(true/false)` toggles TX confirm bypass globally. Disengaging one port disables bypass for all remaining engaged ports. | ✅ CLOSED 2026-07-21 — F-108: `atomic_t hit_release_refcnt`; enable on 0→1, disable on 1→0. | Multi-port offload | — |
 
