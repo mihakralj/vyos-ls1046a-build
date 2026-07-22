@@ -1,0 +1,14 @@
+diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
+--- a/src/conf_mode/vpp.py
++++ b/src/conf_mode/vpp.py
+@@ -486,6 +486,10 @@ def get_config(config=None):
+                     if 'zero-copy' in iface_config['xdp_options']:
+                         xdp_api_params['mode'] = 'zero-copy'
+                     xdp_api_params['flags'] = 'no_syscall_lock'  # Always for DPAA1 AF_XDP
++                    # M4 ZC: DPAA1 needs custom BPF object with xsks_map.
++                    # VPP 25.10's built-in xdp-dispatcher.o has no xsks_map.
++                    if eth_ifaces_persist.get(iface, {}).get('original_driver') == 'fsl_dpa':
++                        xdp_api_params['prog'] = '/usr/share/vpp/xdp_redirect.o'
+                     iface_config['xdp_api_params'] = xdp_api_params
+ 
+         # Buffer normalization (auto → computed)
