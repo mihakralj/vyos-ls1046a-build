@@ -1,30 +1,34 @@
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -486,6 +486,10 @@ def get_config(config=None):
-                     if 'zero-copy' in iface_config['xdp_options']:
-                         xdp_api_params['mode'] = 'zero-copy'
-                     xdp_api_params['flags'] = 'no_syscall_lock'  # Always for DPAA1 AF_XDP
+@@ -469,6 +469,10 @@
+                         > 1
+                     ):
+                         xdp_api_params['flags'] = 'no_syscall_lock'
 +                    # M4 ZC: DPAA1 needs custom BPF object with xsks_map.
 +                    # VPP 25.10's built-in xdp-dispatcher.o has no xsks_map.
 +                    if eth_ifaces_persist.get(iface, {}).get('original_driver') == 'fsl_dpa':
 +                        xdp_api_params['prog'] = '/usr/share/vpp/xdp_redirect.o'
                      iface_config['xdp_api_params'] = xdp_api_params
-
+ 
          # Buffer normalization (auto → computed)
 diff --git a/python/vyos/vpp/control_vpp.py b/python/vyos/vpp/control_vpp.py
 --- a/python/vyos/vpp/control_vpp.py
 +++ b/python/vyos/vpp/control_vpp.py
-@@ -463,6 +463,7 @@ def xdp_iface_create(
+@@ -463,6 +463,7 @@
          txq_size: int = 0,
          mode: Literal['auto', 'copy', 'zero-copy'] = 'auto',
          flags: Literal['no_syscall_lock', ''] = '',
 +        prog: str = '',
      ) -> None:
          """Create XDP interface
-@@ -487,6 +488,8 @@ def xdp_iface_create(
+ 
+@@ -487,6 +488,8 @@
+             api_call_args['mode'] = mode_resolve[mode]
          if flags == 'no_syscall_lock':
              api_call_args['flags'] = 1
 +        if prog:
 +            api_call_args['prog'] = prog
          return self.__vpp_api_client.api.af_xdp_create_v3(**api_call_args)
+ 
+     @_Decorators.check_retval
