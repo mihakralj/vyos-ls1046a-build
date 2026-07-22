@@ -10,5 +10,21 @@ diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
 +                    if eth_ifaces_persist.get(iface, {}).get('original_driver') == 'fsl_dpa':
 +                        xdp_api_params['prog'] = '/usr/share/vpp/xdp_redirect.o'
                      iface_config['xdp_api_params'] = xdp_api_params
- 
+
          # Buffer normalization (auto → computed)
+diff --git a/python/vyos/vpp/control_vpp.py b/python/vyos/vpp/control_vpp.py
+--- a/python/vyos/vpp/control_vpp.py
++++ b/python/vyos/vpp/control_vpp.py
+@@ -463,6 +463,7 @@ def xdp_iface_create(
+         txq_size: int = 0,
+         mode: Literal['auto', 'copy', 'zero-copy'] = 'auto',
+         flags: Literal['no_syscall_lock', ''] = '',
++        prog: str = '',
+     ) -> None:
+         """Create XDP interface
+@@ -487,6 +488,8 @@ def xdp_iface_create(
+         if flags == 'no_syscall_lock':
+             api_call_args['flags'] = 1
++        if prog:
++            api_call_args['prog'] = prog
+         return self.__vpp_api_client.api.af_xdp_create_v3(**api_call_args)

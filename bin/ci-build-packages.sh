@@ -1,5 +1,5 @@
 #!/bin/bash
-# ci-build-packages.sh — Build vyos-1x (+ optionally linux-kernel) packages
+# ci-build-packages.sh — Build vyos-1x + vpp (+ optionally linux-kernel) packages
 # Called by: .github/workflows/auto-build.yml "Build Image Packages" step
 # Expects: GITHUB_WORKSPACE set
 #
@@ -8,6 +8,17 @@
 # bin/ci-consume-ask-kernel.sh. Building the kernel locally in that mode
 # would just consume 20+ minutes and replace the ASK kernel with a vanilla
 # one that lacks fast-path hooks.
+#
+# vpp is built from source (not the prebuilt VyOS repo .deb) so
+# data/vyos-build-008-vpp-libxdp.patch's [dependencies] addition
+# (libxdp-dev + libbpf-dev) actually gets installed before VPP's own
+# build — required for the af_xdp plugin's xsk_socket__create() path.
+# Without "vpp" in this list, scripts/package-build/vpp/package.toml
+# (what that patch modifies) is never invoked at all, and patch 008
+# becomes dead code — this was the actual cause of the M4 ZC libxdp
+# regression after commit 957b8f3 reverted the earlier attempt to wire
+# this in (that revert was chasing a different, since-fixed CI caching
+# bug — see 1cee5b2 — and inadvertently took this down with it).
 set -ex -o pipefail
 
 # Source FLAVOR before changing CWD so common.sh can resolve REPO_ROOT.
@@ -18,9 +29,9 @@ cd "${GITHUB_WORKSPACE:-.}/vyos-build/scripts/package-build"
 
 if [ -n "${ASK_KERNEL_TAG:-}" ]; then
     echo "### ASK kernel in effect ($ASK_KERNEL_TAG) — skipping linux-kernel local build"
-    packages="vyos-1x"
+    packages="vyos-1x vpp"
 else
-    packages="linux-kernel vyos-1x"
+    packages="linux-kernel vyos-1x vpp"
 fi
 ignore_packages=(amazon-cloudwatch-agent amazon-ssm-agent xen-guest-agent)
 
