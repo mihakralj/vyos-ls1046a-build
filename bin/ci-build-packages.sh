@@ -76,6 +76,26 @@ for package in $packages; do
   #
   # 14-day mtime GC matches the vyos-1x cache. .debs are 60-100MB each so the
   # cache footprint stays bounded (~3-4 keys retained ~= 1GB).
+  # Validate cached .deb(s) with dpkg-deb --info before trusting a HIT. The
+  # content-hash key already detects "source changed" staleness (a MISS is
+  # the correct, cheap response to that). This function catches the other
+  # kind of staleness: a cache entry whose key still matches but whose
+  # payload is truncated/corrupt because a prior job died mid-write (OOM
+  # kill, cancelled run, disk full) before completing. Callers evict just
+  # the affected entry and fall through to a normal rebuild — never wipe
+  # the whole cache root for this.
+  cache_debs_intact() {
+    local f
+    for f in "$@"; do
+      [ -f "$f" ] || continue
+      if ! dpkg-deb --info "$f" >/dev/null 2>&1; then
+        echo "### cache entry corrupt (dpkg-deb --info failed): $f"
+        return 1
+      fi
+    done
+    return 0
+  }
+
   SKIP_KERNEL_BUILD=0
   KERNEL_CACHE_KEY=""
   KERNEL_CACHE_HIT_DIR=""
@@ -118,15 +138,20 @@ for package in $packages; do
       KERNEL_CACHE_HIT_DIR="$KERNEL_CACHE_ROOT/$KERNEL_CACHE_KEY"
       if [ -d "$KERNEL_CACHE_HIT_DIR" ] && \
          ls "$KERNEL_CACHE_HIT_DIR"/linux-image-*_arm64.deb >/dev/null 2>&1; then
-        echo "### linux-kernel cache HIT (key=$KERNEL_CACHE_KEY)"
-        # Replay .debs into package-build/linux-kernel/ (current cwd)
-        for d in "$KERNEL_CACHE_HIT_DIR"/*.deb; do
-          [ -f "$d" ] || continue
-          cp -v "$d" "./$(basename "$d")"
-        done
-        # Refresh mtime on a HIT so the GC doesn't evict warm entries
-        touch "$KERNEL_CACHE_HIT_DIR"
-        SKIP_KERNEL_BUILD=1
+        if cache_debs_intact "$KERNEL_CACHE_HIT_DIR"/*.deb; then
+          echo "### linux-kernel cache HIT (key=$KERNEL_CACHE_KEY)"
+          # Replay .debs into package-build/linux-kernel/ (current cwd)
+          for d in "$KERNEL_CACHE_HIT_DIR"/*.deb; do
+            [ -f "$d" ] || continue
+            cp -v "$d" "./$(basename "$d")"
+          done
+          # Refresh mtime on a HIT so the GC doesn't evict warm entries
+          touch "$KERNEL_CACHE_HIT_DIR"
+          SKIP_KERNEL_BUILD=1
+        else
+          echo "### linux-kernel cache MISS (key=$KERNEL_CACHE_KEY, corrupt entry evicted) — building"
+          rm -rf "$KERNEL_CACHE_HIT_DIR"
+        fi
       else
         echo "### linux-kernel cache MISS (key=$KERNEL_CACHE_KEY) — building"
       fi
@@ -170,7 +195,7 @@ for package in $packages; do
     if [ -n "$UPSTREAM_SHA" ] && [ -n "$PATCH_HASH" ]; then
       CACHE_KEY="vyos-1x_${UPSTREAM_SHA}_${PATCH_HASH}"
       CACHED=$(find "$CACHE_DIR" -maxdepth 1 -name "${CACHE_KEY}__*_arm64.deb" 2>/dev/null | sort)
-      if [ -n "$CACHED" ]; then
+      if [ -n "$CACHED" ] && cache_debs_intact $CACHED; then
         echo "### vyos-1x cache HIT (key=$CACHE_KEY)"
         for c in $CACHED; do
           orig=$(basename "$c" | sed -E "s/^${CACHE_KEY}__//")
@@ -178,7 +203,12 @@ for package in $packages; do
         done
         SKIP_VYOS1X_BUILD=1
       else
-        echo "### vyos-1x cache MISS (key=$CACHE_KEY) — building"
+        if [ -n "$CACHED" ]; then
+          echo "### vyos-1x cache MISS (key=$CACHE_KEY, corrupt entry evicted) — building"
+          rm -f $CACHED
+        else
+          echo "### vyos-1x cache MISS (key=$CACHE_KEY) — building"
+        fi
       fi
     else
       echo "### vyos-1x cache: could not derive key (UPSTREAM_SHA='$UPSTREAM_SHA' PATCH_HASH='$PATCH_HASH') — building"
@@ -257,7 +287,16 @@ for package in $packages; do
     cached_count=0
     for built in vyos-1x_*_arm64.deb ../vyos-1x_*_arm64.deb; do
       [ -f "$built" ] || continue
-      cp "$built" "$CACHE_DIR/${CACHE_KEY}__$(basename "$built")"
+      # Stage then atomically rename (same filesystem) so a job killed
+      # mid-copy never leaves a truncated .deb visible under the final
+      # cache-key filename — matches the linux-kernel cache's stage->mv
+      # pattern below. Without this, a later run's cache-HIT glob would
+      # see the partial file (it only checked existence, not integrity)
+      # before the dpkg-deb --info validation was added.
+      dest="$CACHE_DIR/${CACHE_KEY}__$(basename "$built")"
+      stage="$CACHE_DIR/.staging.$$.${CACHE_KEY}__$(basename "$built")"
+      cp "$built" "$stage"
+      mv "$stage" "$dest"
       cached_count=$((cached_count + 1))
     done
     if [ "$cached_count" -gt 0 ]; then
