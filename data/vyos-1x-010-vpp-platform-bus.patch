@@ -85,6 +85,9 @@ index c0e30d1f1..e233d8029 100755
 -                    ):
 -                        xdp_api_params['flags'] = 'no_syscall_lock'
 +                    xdp_api_params['flags'] = 'no_syscall_lock'  # Always for DPAA1 AF_XDP
++                    # M4 ZC: DPAA1 needs custom BPF object with xsks_map
++                    if eth_ifaces_persist.get(iface, {}).get('original_driver') == 'fsl_dpa':
++                        xdp_api_params['prog'] = '/usr/share/vpp/xdp_redirect.o'
                      iface_config['xdp_api_params'] = xdp_api_params
  
          # Buffer normalization (auto → computed)
