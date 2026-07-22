@@ -30,6 +30,11 @@ on:
         type: string
         required: false
         default: ''
+      force_clean_caches:
+        description: 'Wipe kernel/vyos-1x build caches before building (debug only — normal runs rely on content-hash keys + dpkg-deb integrity checks to detect staleness)'
+        type: boolean
+        required: false
+        default: false
     secrets:
       MOK_KEY:
         required: false
@@ -75,7 +80,7 @@ jobs:
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
     # vyos-builder container removes the docker dependency on the runner
-    # and gives the build direct access to /mnt NVMe and full host RAM.
+    # and gives the build direct access to the host disk and full host RAM.
     #
     # `shell: sudo -E bash -e {0}` mirrors the `--user root` of the removed
     # container: live-build needs root for debootstrap, chroot, mount,
@@ -98,7 +103,7 @@ jobs:
       flavor: ${{ steps.build_iso.outputs.flavor }}
 
     steps:
-      - name: Verify Hardware (self-hosted)
+      - name: Verify Hardware
         run: |
           echo "=== Runner Hardware ==="
           echo "CPU Cores: $(nproc)"
@@ -107,9 +112,8 @@ jobs:
           echo "=== Block Devices ==="
           lsblk -d -o NAME,SIZE,MODEL 2>/dev/null || true
           echo ""
-          echo "=== /mnt (NVMe scratch) ==="
-          df -h /mnt || true
-          ls -la /mnt || true
+          echo "=== Disk usage ==="
+          df -h / || true
           echo ""
           echo "=== Memory ==="
           free -h
@@ -123,16 +127,12 @@ jobs:
           echo "VYOS_BUILD_THREADS=$CORES" >> "$GITHUB_ENV"
           echo "### Build parallelism configured for $CORES cores"
 
-      - name: Relocate workspace to NVMe (self-hosted)
-        run: |
-          set -e
-          # The host has /mnt mounted on the 880 GiB NVMe scratch disk.
-          # Redirect the build scratch area to NVMe to avoid the slower OS disk.
-          mkdir -p /mnt/build-workspace
-          # Clean any stale content from a previous run of the same job
-          rm -rf /mnt/build-workspace/* /mnt/build-workspace/.[!.]* 2>/dev/null || true
-          echo "NVMe scratch ready at /mnt/build-workspace"
-          df -h /mnt
+      # NOTE: this workflow has exactly one caller (self-hosted-build.yml),
+      # which always targets the persistent self-hosted runner ARM64-runner2
+      # (see top-of-file comment — GitHub-hosted runs are intentionally not
+      # supported). The next two steps clean up state left behind by a
+      # PREVIOUS run on that same persistent host; they are not meaningful
+      # on an ephemeral runner but there is no such caller today.
 
       - name: Unmount stale chroot bind-mounts (self-hosted)
         run: |
@@ -164,11 +164,6 @@ jobs:
           if [ -d "$GITHUB_WORKSPACE" ]; then
             sudo chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
             sudo rm -rf "$GITHUB_WORKSPACE/.git" 2>/dev/null || true
-          fi
-          # Also drop any prior root-owned content under the runner work root
-          # in case the workspace dir itself has the wrong owner.
-          if [ -d "/mnt/nvme/_work" ]; then
-            chown -R vyos:vyos /mnt/nvme/_work 2>/dev/null || true
           fi
 
       - uses: actions/checkout@v6
@@ -247,17 +242,24 @@ jobs:
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
 
-      - name: Clear stale build caches (self-hosted)
+      - name: Force-clean build caches (opt-in, self-hosted)
+        # Staleness is normally detected automatically: both caches key on a
+        # content hash (source change -> natural cache MISS), and both the
+        # read and write paths now guard against corruption (atomic
+        # stage->rename on write; dpkg-deb --info validation on read, with
+        # per-entry eviction on failure — see bin/ci-build-packages.sh).
+        # This step is only for a human who explicitly wants a clean-slate
+        # build (e.g. while debugging the caching logic itself); it must
+        # never run unconditionally on normal builds.
+        if: ${{ inputs.force_clean_caches }}
         run: |
           set -e
           CACHE_ROOT="${RUNNER_TOOL_CACHE:-/tmp}"
-          echo "### Clearing kernel cache: ${CACHE_ROOT}/linux-kernel-cache/"
+          echo "### force_clean_caches=true — clearing kernel cache: ${CACHE_ROOT}/linux-kernel-cache/"
           rm -rf "${CACHE_ROOT}/linux-kernel-cache/"* 2>/dev/null || true
-          echo "### Clearing vyos-1x cache: ${CACHE_ROOT}/vyos-1x-cache/"
+          echo "### force_clean_caches=true — clearing vyos-1x cache: ${CACHE_ROOT}/vyos-1x-cache/"
           rm -rf "${CACHE_ROOT}/vyos-1x-cache/"* 2>/dev/null || true
-          echo "### Clearing ccache"
-          rm -rf /home/vyos/.ccache/* 2>/dev/null || true
-          df -h / /mnt 2>/dev/null || true
+          df -h / 2>/dev/null || true
           echo "### Caches cleared"
 
       - name: Clone Linux Kernel (git repo, not tarball)
