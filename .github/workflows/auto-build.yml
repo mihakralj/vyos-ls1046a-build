@@ -42,6 +42,14 @@ on:
         required: false
 
 env:
+  # Reuse the populated ISO-build chroot across runs on this persistent
+  # self-hosted runner instead of a full debootstrap+dpkg-unpack every
+  # time (see data/vyos-build-010-persist-chroot.patch, bin/ci-build-iso.sh).
+  # Must be visible here, not just in ci-build-iso.sh: the "Unmount stale
+  # chroot bind-mounts" step below unconditionally rm -rf's build/chroot
+  # before build-vyos-image ever runs, which would otherwise defeat this
+  # every time regardless of the Python-side persist_chroot check.
+  VYOS_PERSIST_CHROOT: "1"
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
   # VyOS retired the `current/` apt path (its dist moved current->rolling). The
@@ -147,8 +155,15 @@ jobs:
               sudo umount -l "$mp" 2>/dev/null || true
             fi
           done
-          # Also try to clean entirely if the workspace exists
-          sudo rm -rf "${GITHUB_WORKSPACE}/vyos-build/build/chroot" 2>/dev/null || true
+          # Also try to clean entirely if the workspace exists — unless
+          # VYOS_PERSIST_CHROOT wants to reuse a chroot left by a
+          # cleanly-completed prior run (build-vyos-image itself still
+          # decides, via the .build/bootstrap marker, whether what's here
+          # is actually reusable; this just stops removing the candidate
+          # before that check ever runs).
+          if [ "${VYOS_PERSIST_CHROOT:-}" != "1" ]; then
+            sudo rm -rf "${GITHUB_WORKSPACE}/vyos-build/build/chroot" 2>/dev/null || true
+          fi
 
       - name: Reset workspace ownership (self-hosted)
         run: |
