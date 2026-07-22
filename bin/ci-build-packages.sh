@@ -113,6 +113,15 @@ for package in $packages; do
       find "$GITHUB_WORKSPACE/kernel/common/patches"       -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       find "$GITHUB_WORKSPACE/kernel/common/files"         -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       find "$GITHUB_WORKSPACE/kernel/common/scripts"       -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      # bin/kernel-fixups/*.py are invoked BY ci-setup-kernel.sh (which IS
+      # hashed below) but their own CONTENT was not, so editing a fixup
+      # script silently replayed a stale cached kernel .deb built with the
+      # OLD fixup logic (discovered 2026-07-22: F-115 v2->v3 change was
+      # silently ignored across two full CI cycles because only
+      # ci-setup-kernel.sh's *invocation* of F_115.py was hashed, not
+      # F_115.py itself). Hash the whole directory so ANY fixup edit busts
+      # the cache.
+      find "$GITHUB_WORKSPACE/bin/kernel-fixups"           -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-setup-kernel.sh" 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-stage-kernel.sh" 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-setup-vyos-build.sh" 2>/dev/null
