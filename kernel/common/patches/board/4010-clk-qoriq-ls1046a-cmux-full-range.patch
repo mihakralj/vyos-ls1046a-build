@@ -1,0 +1,78 @@
+diff --git a/drivers/clk/clk-qoriq.c b/drivers/clk/clk-qoriq.c
+index 0000000..0000000 100644
+--- a/drivers/clk/clk-qoriq.c
++++ b/drivers/clk/clk-qoriq.c
+@@ -71,6 +71,13 @@
+  */
+ #define CG_CMUX_GE_PLAT		1
+ 
++/*
++ * cmux max rate must be found by scanning all valid clksel entries
++ * instead of trusting the clksel the core mux register happens to be
++ * set to at probe time. See create_one_cmux() for why.
++ */
++#define CG_CMUX_MAX_ALL		16
++
+ #define CG_PLL_8BIT		2	/* PLLCnGSR[CFG] is 8 bits, not 6 */
+ #define CG_VER3			4	/* version 3 cg: reg layout different */
+ #define CG_LITTLE_ENDIAN	8
+@@ -646,7 +653,7 @@
+ 		},
+ 		.pll_mask = BIT(PLATFORM_PLL) |
+ 			    BIT(CGA_PLL1) | BIT(CGA_PLL2),
+-		.flags = CG_PLL_8BIT,
++		.flags = CG_PLL_8BIT | CG_CMUX_MAX_ALL,
+ 	},
+ 	{
+ 		.compat = "fsl,ls1088a-clockgen",
+@@ -994,12 +1001,45 @@
+ 	 * assumption, certain clock options (possibly including the
+ 	 * default clksel) may be inappropriately excluded on certain
+ 	 * chips.
++	 *
++	 * On boards whose bootloader leaves the core mux parked on a
++	 * slow clksel (e.g. it never explicitly raises it to the fastest
++	 * implemented PLL tap before jumping to Linux), the above
++	 * assumption silently caps every core forever at whatever speed
++	 * the bootloader happened to leave selected -- even though the
++	 * SoC's pll_mask says faster, valid taps exist and are already
++	 * running. CG_CMUX_MAX_ALL opts a clockgen variant out of that
++	 * assumption: scan every valid clksel entry for this cmux group
++	 * and take the true maximum instead of trusting the boot-time
++	 * register value.
+ 	 */
+-	clksel = (cg_in(cg, hwc->reg) & CLKSEL_MASK) >> CLKSEL_SHIFT;
+-	div = get_pll_div(cg, hwc, clksel);
+-	if (!div) {
+-		kfree(hwc);
+-		return NULL;
++	if (cg->info.flags & CG_CMUX_MAX_ALL) {
++		int i;
++		unsigned long rate, best_rate = 0;
++		const struct clockgen_pll_div *best_div = NULL;
++
++		for (i = 0; i < NUM_MUX_PARENTS; i++) {
++			div = get_pll_div(cg, hwc, i);
++			if (!div)
++				continue;
++			rate = clk_get_rate(div->clk);
++			if (rate > best_rate) {
++				best_rate = rate;
++				best_div = div;
++			}
++		}
++		if (!best_div) {
++			kfree(hwc);
++			return NULL;
++		}
++		div = best_div;
++	} else {
++		clksel = (cg_in(cg, hwc->reg) & CLKSEL_MASK) >> CLKSEL_SHIFT;
++		div = get_pll_div(cg, hwc, clksel);
++		if (!div) {
++			kfree(hwc);
++			return NULL;
++		}
+ 	}
+ 
+ 	max_rate = clk_get_rate(div->clk);

@@ -245,6 +245,18 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4009-sfp-oem-rollball-quirk.patch
 
+# ── CPU stuck at 700MHz: clk-qoriq's create_one_cmux() trusts whatever
+#    clksel the core mux register is set to at Linux probe time as the
+#    "rated maximum" and filters out everything faster. NXP's stock
+#    U-Boot pre-selects the fast PLL1 tap before booting Linux; this
+#    project's U-Boot doesn't, so Linux inherits the reset-default slow
+#    tap (PLL2/div2, 700MHz) and permanently excludes the faster,
+#    already-locked-and-running PLL1 taps (confirmed identical RCW +
+#    identical live clk tree vs a board that boots at 1.6GHz). Fixes
+#    cpuinfo_max_freq 700MHz -> 1600MHz. Scoped to ls1046a-clockgen only. ──
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4010-clk-qoriq-ls1046a-cmux-full-range.patch
+
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0155-fman-pcd-fe-arm-allow-zero-offset.patch
