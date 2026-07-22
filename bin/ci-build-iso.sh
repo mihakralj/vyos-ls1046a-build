@@ -66,9 +66,28 @@ rm -rf packages/linux-headers-*
 # -o APT::Get::Allow-Downgrades=true.  This is the single funnel through
 # which ALL apt-get calls pass (bootstrap_archives, chroot_archives,
 # chroot_install-packages), so fixing it once covers everything.
-sudo sed -i 's/Chroot ${CHROOT} apt-get ${APT_OPTIONS} "${@}"/Chroot ${CHROOT} apt-get ${APT_OPTIONS} -o APT::Get::Allow-Downgrades=true "${@}"/' \
+#
+# Same funnel also gets an `eatmydata` prefix (conditional on the binary
+# already existing inside $CHROOT, since bootstrap_archives runs before
+# debootstrap has unpacked anything — see data/vyos-build-009). Once
+# eatmydata is unpacked (its debootstrap --include entry), every later
+# apt-get call in this funnel — critically chroot_install-packages, which
+# is where the ~250s of dpkg unpack/configure actually happens — runs
+# under LD_PRELOAD=libeatmydata.so and skips fsync() on every file.
+# eatmydata ships no apt/dpkg auto-hook of its own; it only does anything
+# if something actually invokes the `eatmydata` binary, hence this sed.
+#
+# This runner is persistent and live-build is never reinstalled between
+# builds, so /usr/share/live/build/functions/wrapper.sh stays patched
+# from whichever run last modified it — a sed targeting the pristine
+# line would silently no-op forever after the first successful patch.
+# Force a known-pristine baseline first so the sed below is idempotent
+# regardless of what a previous run left on disk.
+sudo apt-get install --reinstall -y live-build >/dev/null
+sudo sed -i 's/Chroot ${CHROOT} apt-get ${APT_OPTIONS} "${@}"/Chroot ${CHROOT} $([ -x "${CHROOT}\/usr\/bin\/eatmydata" ] \&\& echo eatmydata) apt-get ${APT_OPTIONS} -o APT::Get::Allow-Downgrades=true "${@}"/' \
   /usr/share/live/build/functions/wrapper.sh
 grep 'Allow-Downgrades' /usr/share/live/build/functions/wrapper.sh && echo "Apt() patched" || echo "ERROR: Apt() patch failed"
+grep -F 'eatmydata' /usr/share/live/build/functions/wrapper.sh && echo "eatmydata prefix wired" || echo "ERROR: eatmydata prefix missing"
 
 # Reuse the populated chroot across CI runs on this persistent self-hosted
 # runner instead of a full debootstrap+dpkg-unpack every build (see
