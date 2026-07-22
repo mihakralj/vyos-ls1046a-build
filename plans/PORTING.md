@@ -661,10 +661,10 @@ CONFIG_NLS_UTF8=y               # FAT UTF-8
 
 ## See Also
 
-- [BOOT-PROCESS.md](BOOT-PROCESS.md) -- complete boot path specification: U-Boot env variables, annotated USB and eMMC sequences, `vyos.env` mechanism, SPI NOR layout, failure modes
+- [BOOT-PROCESS.md](BOOT-PROCESS.md) -- complete boot path & U-Boot reference: U-Boot env variables, annotated USB and eMMC sequences, `vyos.env` mechanism, SPI NOR layout, clock tree, interface map, failure modes
 - [DEV-LOOP.md](DEV-LOOP.md) -- local dev build: TFTP dev loop, `bin/dev-build.sh` reference, U-Boot `dev_boot` setup
 - [INSTALL.md](../INSTALL.md) -- step-by-step installation guide
-- [UBOOT.md](UBOOT.md) -- U-Boot serial console reference: memory map, boot commands, clock tree, MTD layout
+- [archive/UBOOT.md](archive/UBOOT.md) -- (archived) former U-Boot reference, consolidated into BOOT-PROCESS.md
 - [README.md](../README.md) -- project overview
 - [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md) -- DPAA1 HW-accelerated AF_XDP driver modernization: design, milestone tracker, FMan offload (CC/HM/Policer/CEETM) status (supersedes the abandoned DPDK PMD / USDPAA chardev path, removed per RC#31)
 - [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux

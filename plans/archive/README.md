@@ -57,6 +57,7 @@ For current state, see (in order of authority):
 | `ASK2-PERFORMANCE-MODERNIZATION.md` | cdx.ko parity analysis + MANIP/NAT opcode gap tables | Parity targets + opcode backlog folded into master plan §4/§5/§7 (2026-07-19); redirect note at `ASK2-PERFORMANCE-MODERNIZATION.md.archive-note.md` |
 | `ASK2-F3-F6-UNBLOCK-PROPOSAL.md` | F3/F6 blocker analysis + regression bisect | Findings folded into master plan §6 + §5 (2026-07-19); redirect note at `ASK2-F3-F6-UNBLOCK-PROPOSAL.md.archive-note.md` |
 | `ASK-PLANS.md` | 2026-06-09 ASK/ASK2 documentation hub | Hub role superseded by `plans/ASK2-MASTER-PLAN.md` §8 + `specs/ask2-rewrite-spec.md` v1.10 (2026-07-19); hub maintenance rules carried into this README; redirect note at `ASK-PLANS.md.archive-note.md` |
+| `UBOOT.md` | U-Boot hardware and environment reference | Consolidated into `plans/BOOT-PROCESS.md` v1.1.0 (2026-07-22) to eliminate ~80% documentation overlap; redirect note at `UBOOT.md.archive-note.md` |
 
 Archived 2026-05-25 as part of the v1.3 doc consolidation following PR14z21 M2 gate run.
 
