@@ -18,9 +18,9 @@ cd "${GITHUB_WORKSPACE:-.}/vyos-build/scripts/package-build"
 
 if [ -n "${ASK_KERNEL_TAG:-}" ]; then
     echo "### ASK kernel in effect ($ASK_KERNEL_TAG) — skipping linux-kernel local build"
-    packages="vyos-1x vpp"
+    packages="vyos-1x"
 else
-    packages="linux-kernel vyos-1x vpp"
+    packages="linux-kernel vyos-1x"
 fi
 ignore_packages=(amazon-cloudwatch-agent amazon-ssm-agent xen-guest-agent)
 
