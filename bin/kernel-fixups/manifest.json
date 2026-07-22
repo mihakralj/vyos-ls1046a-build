@@ -43,9 +43,14 @@
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
       "description": "rx_hook trace_printk diagnostics at every return-false point (temporary)",
       "date": "2026-07-21"
+    },
+    "F_115.py": {
+      "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
+      "description": "M4 ZC recover=0 fix — DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
+      "date": "2026-07-22"
     }
   },
-  "count": 36,
+  "count": 37,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
