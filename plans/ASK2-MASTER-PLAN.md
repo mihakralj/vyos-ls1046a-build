@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.10.0 · 2026-07-22 · HADS 1.0.0**
+**Version 1.11.0 · 2026-07-22 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -143,12 +143,38 @@ ISO vyos-2026.07.19-1732-rolling, CI run 29697031761, branch dpaa1 @ bb3a3cf):
 → `fe_hashfe build` → `fe_enq build 0x200` → `fe_enter build 0x4af00` →
 `fe_arm engage 10 53f00 2B9 1C0006` → `fe_flow add 0 <key> 4b000`.
 
-### 2.2 Gap B — AF_XDP true-ZC RX (M4) 🟡 LANDED, AWAITING HW
+### 2.2 Gap B — AF_XDP true-ZC RX (M4) 🟢 VPP NODE ACTIVE; recover=0 fix building
 
 **[SPEC]** Patch 0164 (RX-port accessor + `fman_pcd_port_ensure_params_page()`)
-is committed. Once deployed: `fman_port_set_rx_bpool()` returns 0 (not −22) and
-`xsk_zc_rx_redirect` climbs under XDP_ZEROCOPY bind + traffic. Follow-up scope:
-`plans/ZC-RX-SCOPE.md`.
+is deployed: `fman_port_set_rx_bpool()` returns 0 and qband 0 reprograms to the
+XSK BPID ("true-ZC RX live"). Follow-up scope: `plans/ZC-RX-SCOPE.md`.
+
+**[SPEC]** 2026-07-22 breakthrough on board .185. Two blockers isolated:
+
+**[BUG] VPP af_xdp-input node DISABLED ("syscall required")** — SOLVED (FIX A).
+VPP polling mode counts "syscall required" and disables the input node because
+DPAA1's ZC model requires the userspace `poll()/recvmsg` wakeup to trigger
+`ndo_xsk_wakeup → dpaa_eth_poll → BMan refill` (patch 0103c circular-deadlock
+note). Fix: VPP **interrupt rx-mode + zero-copy + single-queue + no workers**.
+Recipe: `cpu { main-core 2 }` (no workers); `create int af_xdp host-if eth4 name
+eth4 zero-copy prog /usr/share/vpp/xdp_redirect.o num-rx-queues 1`; `set
+interface rx-mode eth4 interrupt`. Result: node "interrupt wait", `force_zc=1`,
+`xsk_zc_eligible` climbs 0→256 under ping flood from .106. The `zero-copy` flag
+is MANDATORY (VPP syntax `zero-copy`, not `zero-copy on`); without it `force_zc=0`
+and eligible stays 0.
+
+**[BUG] recover=0 — DMA-index headroom mismatch** — FIX BUILDING (F-115).
+`xsk_zc_eligible` climbs but `xsk_zc_rx_recovered` stays 0. `dpaa_xsk_build_dma_index()`
+stores `pool->heads[i].dma` (chunk BASE) in `xsk_chunk_dma[band][i]`, but the
+seed/refill loops store `xsk_buff_xdp_get_dma(handle)` = base + `XDP_PACKET_HEADROOM`
++ `pool->headroom` in the BMan buffer. FMan reports `qm_fd_addr(fd)` = base+headroom,
+so `dpaa_xsk_chunk_head_from_dma()` bsearches base+headroom in an array of [base…]
+values → misses every frame → recover never fires. F-115 fixup adds the headroom
+to the index key + a rate-limited recover-miss diagnostic. CI 29887180426.
+
+**[NOTE]** Secondary bug: `refill_batches` freezes under sustained flood (pool
+drains at ~256 frames, FMan drops the rest at hardware) — the interrupt-mode
+wakeup isn't firing under load. Investigate after recover=0 is closed.
 
 ### 2.3 Gap C — Cross-track alignment (CC match → FE_ENTER) 🟡 SCAFFOLD PROVEN, PRODUCTION PLANNED
 
@@ -371,7 +397,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 - [x] **T-P0-1** `@mihakralj` — Add `pcd->fe_port_armed[port_id]` boolean array to `struct fman_pcd`. Initialise to `false` in `fman_pcd_init()`. Add guard at entry of `fman_pcd_fe_engage()`: if `pcd->fe_port_armed[port_id]`, return `-EBUSY`. Set `true` on successful engage, set `false` in `fe_disengage_full()`. Gate: `test-fixups.sh 4/4` passes, local compile clean, CI build green. This is ~30 LOC, zero silicon changes. Without it, double-arm → double-free → MURAM corruption is reproducible on every `engage→disengage-fail→engage` cycle. ✅ F-107 implemented 2026-07-21: `DECLARE_BITMAP(fe_port_armed, 32)` + `-EBUSY` guard + `set_bit`/`clear_bit` + bitmap `fe_arm_show`. CI 29856956577 PASSED (6/6 mutations).
 
-### M4 — true-ZC (parallel) 🟡 T-M4-4a/4b/4c DONE; VPP af_xdp plugin blocked; kernel ZC proven
+### M4 — true-ZC (parallel) 🟢 BREAKTHROUGH — VPP node active (FIX A), eligible climbing; recover=0 fix (F-115) building
 
 - [x] **T-M4-0a** `@mihakralj` — **VPP AF_XDP copy-mode on .185 (single-port eth4).** ✅ DONE 2026-07-20.
 - [x] **T-M4-0b** `@mihakralj` — **Multi-port VPP AF_XDP (eth3+eth4).** ✅ DONE 2026-07-20.
@@ -448,8 +474,11 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 | **BUG 3b flood half** | iperf3 flood under policer → watchdog reset | OPEN | M8 | Needs serial capture + cold power-cycle; **always repro policer with a few pings, never a flood** |
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; pcd-snapshot A/B + prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` (T-M5-4) or Path-B YNL interim |
-| **ZC EINVAL** | `xsk_socket__create()` returns EINVAL for XDP_ZEROCOPY on DPAA1; 0164 fixed port accessor + params page but ZC still blocked. Copy-mode AF_XDP works (VPP 25.10 on .185, eth4 up, packets flowing). ZC counters (xsk_zc_eligible, xsk_zc_rx_armed) both 0 — no ZC bind attempted yet. | OPEN 2026-07-20 | M4 | Deploy F-099 instrumentation → add 'zero-copy': True to xdp_options → trace dmesg | grep ZCBIND → identify failing precondition |
-| **ZC redirect blocked** | `xsk_zc_rx_armed=3`, `xsk_zc_eligible>0`, but `xsk_zc_rx_redirect=0`. ROOT CAUSE FOUND 2026-07-21: VPP 25.10 only populates XSKMAP when custom BPF program provided via 'prog' parameter. Without it, built-in xdp-dispatcher.o has no xsks_map. Fix: pass prog parameter with BPF object containing xsks_map. Custom BPF object tested — VPP loads it and calls xsk_socket__update_xskmap(), but XDP program may not be executing (bpf_xdp_attach() silent failure hypothesis). Kernel ZC datapath proven working via raw XSK probe (xsk_zc_rx_redirect=6). | OPEN 2026-07-21 | M4 gate | Next: verify bpf_xdp_attach() succeeds; match probe's XSK socket parameters (chunk_size=4096, XDP_USE_NEED_WAKEUP); ship BPF object in ISO; modify control_vpp.py to always pass prog. |
+| **ZC EINVAL** | `xsk_socket__create()` EINVAL for XDP_ZEROCOPY — historical, resolved by 0164 + VPP recipe | ✅ RESOLVED 2026-07-22 | M4 | VPP `zero-copy` flag + interrupt rx-mode → `force_zc=1`, attach OK, eligible climbs |
+| **ZC node DISABLED ("syscall required")** | VPP `af_xdp-input` node disabled; `rx poll() failed: Bad file descriptor`. DPAA1 ZC needs the userspace wakeup syscall to drive `ndo_xsk_wakeup → BMan refill` (0103c), which VPP polling mode never issues. | ✅ SOLVED 2026-07-22 (FIX A) | M4 gate | VPP **interrupt rx-mode** + zero-copy + single-queue + no workers → node "interrupt wait", eligible 0→256 |
+| **ZC recover=0 (DMA headroom)** | `xsk_zc_eligible` climbs but `xsk_zc_rx_recovered=0`. `dpaa_xsk_build_dma_index` keys the bsearch on `pool->heads[i].dma` (base) but FMan reports `qm_fd_addr(fd)`=base+`XDP_PACKET_HEADROOM`+`pool->headroom` (what seed/refill put in BMan) → every lookup misses. | FIX BUILDING 2026-07-22 — F-115 adds headroom to index key + recover-miss diagnostic. CI 29887180426. | M4 gate | Deploy F-115, confirm recover→redirect climbs |
+| **ZC refill under flood** | `refill_batches` freezes under sustained flood; pool drains at ~256 frames, FMan drops rest at HW. Interrupt-mode wakeup not firing under load. | OPEN 2026-07-22 | M4 throughput | Investigate after recover=0 closed; secondary to gate |
+| **ZC redirect blocked (XSKMAP)** | Historical (2026-07-21): built-in xdp-dispatcher.o has no xsks_map. RESOLVED by shipping custom `xdp_redirect.o` (T-M4-4c) + `prog` parameter. bpf_xdp_attach() CONFIRMED (prog_id=207, xdp id 207 on eth4). | ✅ RESOLVED 2026-07-22 | M4 gate | Custom BPF object with xsks_map in ISO; VPP `prog` parameter |
 | **gen_pool double-free** | `fe_arm disengage` after API engage → `gen_pool_free_owner` BUG (double-free of KG scheme MURAM). Root cause: double-arm without engagement guard overwrites KG scheme allocation, disengage frees twice. | ✅ CLOSED 2026-07-21 — F-107: `DECLARE_BITMAP(fe_port_armed, 32)` + `-EBUSY` guard in `fman_pcd_fe_engage()`. CI 29856956577 PASSED. | M5 reversibility | — |
 | **silicon HIT-release refcount** | `fman_port_set_silicon_hit_release_all(true/false)` toggles TX confirm bypass globally. Disengaging one port disables bypass for all remaining engaged ports. | ✅ CLOSED 2026-07-21 — F-108: `atomic_t hit_release_refcnt`; enable on 0→1, disable on 1→0. | Multi-port offload | — |
 
