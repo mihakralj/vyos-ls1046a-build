@@ -1,29 +1,51 @@
-"""F-115 v2: Fix DMA-index headroom mismatch (recover=0 bug) + diagnostic.
+"""F-115 v3: Fix DMA-index headroom mismatch (recover=0 bug) + diagnostic.
 
 M4 ZC blocker: xsk_zc_eligible climbs but xsk_zc_rx_recovered stays 0.
 
-Root cause: dpaa_xsk_build_dma_index() stores pool->heads[i].dma (the
-chunk BASE dma) in xsk_chunk_dma[band][i].  But the seed/refill loops
-store xsk_buff_xdp_get_dma(handle) — which is base + XDP_PACKET_HEADROOM
-— into the BMan buffer.  FMan reports that same headroom-adjusted address
-as qm_fd_addr(fd).  So dpaa_xsk_chunk_head_from_dma() bsearches for
-(base+256) in an array of [base...] values and MISSES every frame →
+Root cause: dpaa_xsk_build_dma_index() stores pool->heads[i].dma in
+xsk_chunk_dma[band][i].  pool->heads[i].dma (== xskb->dma, set once by
+the kernel's xp_init_xskb_dma()) equals:
+
+    frame_dma + pool->headroom + XDP_PACKET_HEADROOM
+
+But FMan reports qm_fd_addr(fd) == frame_dma + XDP_PACKET_HEADROOM ONLY
+(pool->headroom is an XSK-core bookkeeping offset that is never applied
+to the physical buffer address FMan actually DMAs into/reports back —
+FMan's BMI writes to the raw buffer address released to BMan, and the
+"headroom" reservation is purely a software convention consumed by
+xsk_buff_set_size()/xsk_buff_dma_sync_for_cpu() on the recovered xdp_buff,
+not by the hardware DMA engine).
+
+So dpaa_xsk_chunk_head_from_dma() bsearches for (frame_dma+256) in an
+array of (frame_dma+256+pool->headroom) values and MISSES every frame →
 recover never increments → redirect never fires.
 
-v2 (2026-07-22): HW-validated on board .185.  The v1 fix added
-pool->headroom to the index key, but the F-115 diagnostic showed the
-delta was exactly pool->headroom (256 bytes) too large.  xsk_buff_xdp_get_dma()
-returns base + XDP_PACKET_HEADROOM only — pool->headroom is an internal
-XSK offset NOT reflected in the DMA address.  v2 removes pool->headroom
-from the index key.
+v1 (reverted 2026-07-22): added + XDP_PACKET_HEADROOM + pool->headroom to
+the index key.  WRONG — pool->heads[i].dma already includes both, so this
+DOUBLE-ADDED them.  Diagnostic showed delta = pool->headroom (256B) too
+large after accounting for the also-present stale-index confound.
 
-FIX: build the DMA index from base + XDP_PACKET_HEADROOM (256 bytes),
-matching what xsk_buff_xdp_get_dma() stores in BMan and what FMan
-reports as qm_fd_addr(fd).
+v2 (reverted 2026-07-22): diagnostic-only, no index modification.
+HW-validated on board .185 (kernel 6.18.38-vyos, ISO 2026.07.22-0610-rolling):
+every single bsearch-miss sample showed the SAME fixed 256-byte low-bit
+gap — base[0] and every subsequent base[] entry end in 0x...200 (512),
+while every single fd_dma sample ends in 0x...100 (256), consistently,
+across 8/8 rate-limited samples.  This is not noise or a stale-pool
+artifact (the previously-observed 291MB deltas were the stale-pool
+confound, now resolved by v2 removing the double-add) — it is a fixed,
+reproducible 256-byte (== pool->headroom) offset present on EVERY sample.
 
-DIAGNOSTIC: on a bsearch miss, rate-limited-log the fd DMA, the index
-range [0]..[cnt-1], and the delta from base[0], so if the headroom
-arithmetic is still off we can read the exact offset.
+v3 (this version): SUBTRACT pool->headroom from the index key at build
+time, where `pool` is already in scope in dpaa_xsk_build_dma_index().
+This self-corrects regardless of the actual negotiated headroom value
+(whatever XDP_UMEM_REG / needed_headroom ends up producing), rather than
+hardcoding a constant.  Result: index key == frame_dma + XDP_PACKET_HEADROOM,
+matching qm_fd_addr(fd) exactly.
+
+DIAGNOSTIC: keeps the rate-limited recover-miss log (fd DMA, index range,
+delta from base[0]) for future regression detection, and ADDS a one-time
+build-time log of pool->headroom so the exact value driving this fix is
+directly observable in dmesg (no more guessing at the source of "256").
 
 Disposition: fold-into 0103b once validated on silicon.
 Upstream-Status: Inappropriate [LS1046A DPAA1 AF_XDP ZC]
@@ -42,26 +64,58 @@ with open(path) as f:
 
 changes = 0
 
-# ── 1. DIAGNOSTIC ONLY: NO index modification needed ──
-# The original code `pool->heads[i].dma` is CORRECT.
-# xp_init_xskb_dma() sets xskb->dma = frame_dma + pool->headroom + XDP_PACKET_HEADROOM.
-# The FMan reports this exact value as qm_fd_addr(fd).
-# The bsearch key matches the index key — no headroom adjustment needed.
-#
-# v1 (reverted): added + XDP_PACKET_HEADROOM + pool->headroom, which
-# DOUBLE-ADDED the headroom (pool->heads[i].dma already includes both).
-# HW-validated 2026-07-22: the F-115 diagnostic showed delta = pool->headroom
-# (256 bytes) too large, confirming the double-add.
-#
-# v2: diagnostic-only.  The recover=0 bug observed in T-M4-4b was caused by
-# a STALE DMA index (from a previous attach), not a headroom mismatch.
-# The stale-index root cause is still under investigation.
+# ── 1. FIX: index build must SUBTRACT pool->headroom ──
+# Match:  priv->xsk_chunk_dma[band][i] = pool->heads[i].dma;
+# (whitespace between tokens is flexible)
+pat = re.compile(
+    r'(priv->xsk_chunk_dma\[band\]\[i\]\s*=\s*)pool->heads\[i\]\.dma;')
+matches = pat.findall(src)
+if len(matches) == 1:
+    src = pat.sub(
+        r'\1pool->heads[i].dma - pool->headroom; '
+        r'/* F-115 v3: qm_fd_addr(fd) omits pool->headroom (XSK-core-only offset) */',
+        src)
+    changes += 1
+    print("### F-115 v3: index build now subtracts pool->headroom (matches qm_fd_addr(fd)=frame_dma+XDP_PACKET_HEADROOM)")
+elif len(matches) == 0:
+    print("### F-115: WARNING — index build assignment not found (already fixed?)")
+else:
+    print(f"### F-115: WARNING — expected 1 index assignment, found {len(matches)} — skipping fix")
 
-# ── 2. DIAGNOSTIC: log the delta on a bsearch miss ──
-# This is the PRIMARY purpose of F-115 v2.  The diagnostic helped identify
-# that the v1 headroom fix was wrong (delta = pool->headroom too large) and
-# that the real issue is a stale DMA index from a previous attach.
-# Anchor on the bsearch call, insert a rate-limited log after the miss check.
+# ── 2. DIAGNOSTIC: one-time build-time log of pool->headroom ──
+# Confirms the exact runtime headroom value driving the v3 fix, right
+# where `pool` is already in scope (avoids threading it through to the
+# recover-miss log in a different function).  Inserted BEFORE the
+# for-loop so it fires ONCE per attach, not once per array element.
+# Uses regex only to FIND the anchor + its indent, then str.replace()
+# for the actual substitution (re.sub() re-interprets \n in the
+# replacement string, corrupting the embedded C string literal escape —
+# str.replace() does zero escape processing, matching the proven-safe
+# pattern used by the recover-miss diagnostic in section 3 below).
+build_pat = re.compile(r'\n(\s*)for \(i = 0; i < cnt; i\+\+\) \{')
+build_matches = build_pat.findall(src)
+if len(build_matches) == 1 and "F-115 build" not in src:
+    indent = build_matches[0]
+    anchor_str = "\n" + indent + "for (i = 0; i < cnt; i++) {"
+    diag_str = (
+        "\n" + indent +
+        "dev_info_ratelimited(priv->net_dev->dev.parent,\n" + indent +
+        "\t\"F-115 build: band=%u cnt=%u pool_headroom=%u first_head_dma=0x%llx\\n\",\n" + indent +
+        "\tband, cnt, pool->headroom,\n" + indent +
+        "\t(unsigned long long)pool->heads[0].dma);\n" +
+        anchor_str)
+    src = src.replace(anchor_str, diag_str, 1)
+    changes += 1
+    print("### F-115 v3: build-time pool->headroom diagnostic injected")
+elif "F-115 build" in src:
+    print("### F-115: build-time diagnostic already present")
+elif len(build_matches) == 0:
+    print("### F-115: WARNING — build-loop anchor not found for build-time diagnostic (non-fatal, fix still applies)")
+else:
+    print(f"### F-115: WARNING — expected 1 build-loop anchor, found {len(build_matches)} — skipping diagnostic")
+
+# ── 3. DIAGNOSTIC: log the delta on a bsearch miss ──
+# Rate-limited recover-miss log retained from v2 for regression detection.
 anchor = "hit = bsearch(&dma, base, cnt, sizeof(*base), dpaa_xsk_dma_cmp);"
 if anchor in src and "F-115 recover-miss" not in src:
     diag = (anchor + "\n"
@@ -84,9 +138,8 @@ elif "F-115 recover-miss" in src:
 else:
     print("### F-115: WARNING — bsearch anchor not found for diagnostic")
 
-# ── 3. Ensure XDP_PACKET_HEADROOM is available ──
+# ── 4. Ensure XDP_PACKET_HEADROOM is available (referenced in comments/future use) ──
 if "XDP_PACKET_HEADROOM" in src and "#include <net/xdp.h>" not in src and "#include <linux/bpf.h>" not in src:
-    # Insert include after the first #include line
     m = re.search(r'#include\s+<[^>]+>\n', src)
     if m:
         src = src[:m.end()] + "#include <net/xdp.h>\t/* F-115: XDP_PACKET_HEADROOM */\n" + src[m.end():]
