@@ -48,9 +48,14 @@
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
       "description": "M4 ZC recover=0 fix — DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
       "date": "2026-07-22"
+    },
+    "F_108.py": {
+      "target": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c",
+      "description": "Ratelimit Err FD status console log spam for physical frame errors",
+      "date": "2026-07-23"
     }
   },
-  "count": 37,
+  "count": 38,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
@@ -163,10 +168,6 @@
     "F_107.py": {
       "action": "fold-into 0153+0157",
       "reason": "gen_pool double-free prevention — engagement guard belongs with the engage/disengage API patches"
-    },
-    "F_108.py": {
-      "action": "permanent",
-      "reason": "Ratelimit 'Err FD status' console log spam in dpaa_eth.c for physical frame errors"
     },
     "F_109.py": {
       "action": "fold-into 0153",
