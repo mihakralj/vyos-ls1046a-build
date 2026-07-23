@@ -70,6 +70,13 @@ env:
   # is bootstrapped at exactly 4.14.2 in the
   # "Bootstrap OCaml/opam for libvyosconfig" step.
   OCAML_VERSION: "4.14.2"
+  # Compiler Caching (ccache / sccache) across Linux kernel, out-of-tree modules, and VPP builds.
+  CCACHE_DIR: "/home/vyos/cache/ccache"
+  CCACHE_MAXSIZE: "20G"
+  CCACHE_COMPRESS: "1"
+  CCACHE_SLOPPINESS: "time_macros,file_macro,include_file_mtime,include_file_ctime,pch_defines"
+  CMAKE_C_COMPILER_LAUNCHER: "ccache"
+  CMAKE_CXX_COMPILER_LAUNCHER: "ccache"
 
 jobs:
   build_iso:
@@ -297,6 +304,14 @@ jobs:
 
       - name: Build Image Packages
         run: bin/ci-build-packages.sh
+
+      - name: Print ccache statistics
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            echo "### ccache summary:"
+            ccache -s || true
+          fi
 
       - name: Verify round-trip patch identity
         if: success()

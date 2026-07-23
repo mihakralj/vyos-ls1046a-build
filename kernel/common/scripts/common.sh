@@ -106,18 +106,17 @@ setup_ccache() {
     export CCACHE_SLOPPINESS="${CCACHE_SLOPPINESS:-time_macros,file_macro,include_file_mtime,include_file_ctime,pch_defines}"
     export CCACHE_COMPRESS="${CCACHE_COMPRESS:-1}"
 
-    # Prepend Debian's /usr/lib/ccache shim dir to PATH so dpkg-buildpackage
-    # / autotools / make-without-explicit-CC flows (build-ask-iptables.sh,
-    # build-ask-ppp.sh) transparently route gcc/g++/cc through ccache. The
-    # kernel build's own `make CC="ccache gcc"` (CCACHE_MAKE_ARGS below)
-    # still wins for kbuild because it sets CC explicitly.
-    if [[ -d /usr/lib/ccache && ":$PATH:" != *":/usr/lib/ccache:"* ]]; then
-        export PATH="/usr/lib/ccache:$PATH"
-    fi
+    # Do not prepend /usr/lib/ccache to PATH to avoid recursive ccache symlink loops.
+    # Resolve real compiler binary paths explicitly.
+    local cc_bin hostcc_bin
+    cc_bin=$(which "${CROSS_COMPILE:-}gcc" 2>/dev/null | grep -v "/usr/lib/ccache" | head -1)
+    hostcc_bin=$(which gcc 2>/dev/null | grep -v "/usr/lib/ccache" | head -1)
+    cc_bin="${cc_bin:-/usr/bin/${CROSS_COMPILE:-}gcc}"
+    hostcc_bin="${hostcc_bin:-/usr/bin/gcc}"
 
     CCACHE_MAKE_ARGS=(
-        "CC=ccache ${CROSS_COMPILE:-}gcc"
-        "HOSTCC=ccache gcc"
+        "CC=ccache $cc_bin"
+        "HOSTCC=ccache $hostcc_bin"
     )
     CCACHE_ENABLED=1
     return 0
