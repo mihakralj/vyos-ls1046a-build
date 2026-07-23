@@ -148,3 +148,36 @@ index 6cf3373f1..e000c7860 100644
                <leafNode name="lro">
                  <properties>
                    <help>Enable Large Receive Offload</help>
+diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 0c67e7bf1..b8b9ceefd 100755
+--- a/src/conf_mode/interfaces_ethernet.py
++++ b/src/conf_mode/interfaces_ethernet.py
+@@ -294,6 +294,12 @@ def verify_coalesce(ethernet: dict, ethtool: Ethtool):
+ 
+ 
+ def verify_offload(ethernet: dict, ethtool: Ethtool):
++    if dict_search('offload.ask', ethernet) is not None:
++        ifname = ethernet.get('ifname')
++        vpp_config = get_config_dict('vpp settings')
++        if vpp_config and ifname in vpp_config.get('interface', {}):
++            raise ConfigError(f'Interface {ifname} cannot be configured for ASK offload while assigned to VPP!')
++
+     """
+      Verify offloading capabilities
+     :param ethernet: dictionary which is received from get_interface_dict
+diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
+index bdfc31e52..01269af28 100755
+--- a/src/conf_mode/vpp.py
++++ b/src/conf_mode/vpp.py
+@@ -572,6 +572,11 @@ def verify(config):
+     if 'settings' not in config:
+         raise ConfigError('"settings interface" is required but not set!')
+ 
++    for iface in config['settings'].get('interface', {}):
++        iface_config = get_config_dict(f'interfaces ethernet {iface}')
++        if iface_config and dict_search('offload.ask', iface_config) is not None:
++            raise ConfigError(f'Interface {iface} cannot be assigned to VPP while configured for ASK offload!')
++
+     if 'interface' not in config['settings']:
+         raise ConfigError('"settings interface" is required but not set!')
+ 
