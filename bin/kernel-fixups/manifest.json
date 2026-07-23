@@ -164,6 +164,10 @@
       "action": "fold-into 0153+0157",
       "reason": "gen_pool double-free prevention — engagement guard belongs with the engage/disengage API patches"
     },
+    "F_108.py": {
+      "action": "permanent",
+      "reason": "Ratelimit 'Err FD status' console log spam in dpaa_eth.c for physical frame errors"
+    },
     "F_109.py": {
       "action": "fold-into 0153",
       "reason": "ENQ FE offset getter — eliminates debugfs loopback, belongs with the FE-VM engage API"
