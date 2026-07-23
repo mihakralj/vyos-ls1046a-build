@@ -66,7 +66,7 @@ apt-get install -y \
   `# Debian packaging stack used by every sub-package's debian/rules` \
   pbuilder python3-setuptools python3-pip python3-build python3-wheel \
   python3-stdeb dh-python debhelper devscripts equivs quilt \
-  fakeroot rsync curl ca-certificates
+  fakeroot rsync curl ca-certificates ccache sccache
 
 # Upgrade after install so that any of the just-installed packages
 # get their security patches — matches what the upstream vyos-builder
