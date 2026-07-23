@@ -78,6 +78,13 @@ for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.pa
   fi
 done
 
+# M4 ZC: stage the xdp-tools -Wextra/-Werror unused-parameter build fixup
+# next to the (not-yet-cloned) VPP git checkout, so vyos-build-008's
+# patched package.toml build_cmd can invoke it as ../fix-xdp-tools-werror.py
+# (build_cmd's cwd is scripts/package-build/vpp/vpp/, the VPP repo root).
+mkdir -p vyos-build/scripts/package-build/vpp
+cp data/fix-xdp-tools-werror.py vyos-build/scripts/package-build/vpp/fix-xdp-tools-werror.py
+
 ### build-vyos-image: vyos-1x branch checkout fallback (current -> rolling).
 #
 # build-vyos-image clones github.com/vyos/vyos-1x and does

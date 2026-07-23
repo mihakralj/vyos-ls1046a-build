@@ -1,39 +1,22 @@
-From c325427cf52aab281efb828838252f6c3e4fc9ea Mon Sep 17 00:00:00 2001
-From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Wed, 22 Jul 2026 03:31:41 +0000
-Subject: [PATCH] vpp: add libxdp-dev + libbpf-dev for af_xdp XSK support (M4
- ZC)
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-The VPP af_xdp plugin requires libxdp (xsk_socket__create, XSKMAP population)
-for zero-copy AF_XDP to work. Without these build deps, the CMake check fails
-and the plugin falls back to the older non-XSK code path that never creates
-XSK sockets — BPF program attaches but XSKMAP stays empty, bpf_redirect_map()
-silently fails, and no frames reach VPP.
-
-Root cause found 2026-07-22 on board .185: VPP 25.10 af_xdp plugin built
-without libxdp → no xsk_socket__create() → no UMEM/rings → XSKMAP empty →
-run_cnt=0 on XDP program.
-
-The dependencies are added to the [dependencies] section (not build_cmd)
-because ensure_dependencies() in build.py handles sudo apt-get install
-properly, whereas inline sudo in build_cmd may fail in the build container.
----
- scripts/package-build/vpp/package.toml | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
-
 diff --git a/scripts/package-build/vpp/package.toml b/scripts/package-build/vpp/package.toml
-index 99d72c7..8f1a3d2 100644
 --- a/scripts/package-build/vpp/package.toml
 +++ b/scripts/package-build/vpp/package.toml
-@@ -32,5 +32,5 @@ cp build-root/*.deb ../
+@@ -24,6 +24,11 @@
+     git -c user.email=maintainers@vyos.net -c user.name=vyos am "$patch" || { echo "Failed to apply patch $patch"; exit 1; }
+ done
+ 
++# M4 ZC: xdp-tools 1.5.5 (VPP's vendored external dep) fails to build
++# under -Wextra -Werror due to unused params in a #else branch. Fix
++# in place before VPP's own build pulls and builds it.
++python3 ../fix-xdp-tools-werror.py
++
+ make UNATTENDED=yes VPP_ENABLE_SYSTEMD_NOTIFY=ON install-dep
+ make VPP_EXTRA_CMAKE_ARGS="-DVPP_ENABLE_SYSTEMD_NOTIFY=ON" pkg-deb
+ cp build-root/*.deb ../
+@@ -31,5 +36,5 @@
  
  [dependencies]
  packages = [
 -    "llvm"
 +    "llvm", "libxdp-dev", "libbpf-dev"
  ]
--- 
-2.39.5
