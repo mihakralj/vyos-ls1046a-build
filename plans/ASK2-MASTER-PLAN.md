@@ -470,7 +470,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 - [ ] **T-M7-1** `@___` — vyos-1x patch: `interfaces ethernet eth<n> offload ask` leaf (engage/disengage composes debugfs-proven verbs).
 - [ ] **T-M7-2** `@___` — F-04 `ask_op.c` real body (op-mode netlink receiver).
-- [ ] **T-M7-3** `@___` — Validator: reject same-port ASK+VPP (per-interface mutex; other ports free).
+- [x] **T-M7-3** `@mihakralj` — Validator: reject same-port ASK+VPP (per-interface mutex; other ports free). ✅ DONE 2026-07-23 (commit 6155849c).
 - [ ] **T-M7-4** `@___` — Deprecate `system offload classify` CLI (vyos-1x-026): remove CLI exposure, keep mechanism as silent default (RSS+parser); ASK is the sole offload switch.
 - [ ] **T-M7-5** `@___` — Op-mode `show interfaces ethernet eth<n> offload ask flows` via `ynl --family ask`.
 
