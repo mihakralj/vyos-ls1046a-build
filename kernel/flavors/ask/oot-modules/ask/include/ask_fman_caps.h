@@ -183,8 +183,15 @@ int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 int  fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
                           const u8 *key, u8 key_size);
 
+/* FMan L3 forwarding hardware opcodes (lf-5.4 LSDK reference) */
+#define FMAN_FE_OP_STRIP_ETH_HDR    0x80000010
+#define FMAN_FE_OP_TTL_DECREMENT    0x80000200
+#define FMAN_FE_OP_ETH_REBUILD      0x8000C001
+#define FMAN_FE_OP_ENQUEUE_PKT      0x81000000
+
 /* F-109: Return the MURAM offset of the first ENQ FE object, or 0 if
  * the FE pool is not engaged.  Replaces debugfs fe_enq parsing. */
 unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm);
 
 #endif /* __ASK_FMAN_CAPS_H */
+
