@@ -1698,6 +1698,10 @@ echo "### F-101: DPAA1_MIN_UMEM_CHUNK lowered to 2048"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_102.py" 2>&1
 echo "### F-102: NULL fq guard in QMan poll path"
 
+# F-108: Ratelimit 'Err FD status' console spam in dpaa_eth.c
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_108.py" 2>&1
+echo "### F-108: Ratelimited Err FD status in dpaa_eth.c"
+
 # F-103: SUPERSEDED 2026-07-21 — BPID reprogram re-enabled.
 # F_102 (NULL fq guard) provides sufficient protection against the
 # QMan context_b corruption crash. The BPID reprogram is required
