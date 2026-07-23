@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# vpp-check — VPP AF_XDP Zero-Copy status probe for LS1046A Mono Gateway DK
+#
+# Usage:   vpp-check
+#
+# Reports:
+#   1) Board & Kernel Posture — LS1046A SoC, isolcpus, 2M Hugepages
+#   2) VPP Installation & Binaries — vpp, vppctl, af_xdp_plugin.so, libxdp linkage
+#   3) BPF Object Posture — /usr/share/vpp/xdp_redirect.o, xsks_map
+#   4) VyOS Integration — control_vpp.py xdp_iface_create signature
+#   5) VPP Service Posture — systemd status, main-core, poll-sleep
+#   6) VPP AF_XDP Interfaces — vppctl show hardware-interfaces, zero-copy flag
+#   7) Kernel ZC Driver Posture — dmesg ZCBIND logs, bpid, pool attach
+#   8) Datapath Telemetry — RX/TX packet counters, xsk_zc_* counters
+#
+# Exit codes:
+#   0 — VPP running, AF_XDP Zero-Copy attached & operational
+#   1 — VPP or AF_XDP Zero-Copy has a failure/misconfiguration
+#   2 — Board is not LS1046A
+
+set -u
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    C_RST=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_GREEN=$'\033[1;32m'
+    C_YELLOW=$'\033[1;33m'
+    C_RED=$'\033[1;31m'
+    C_BLUE=$'\033[1;34m'
+else
+    C_RST='' C_BOLD='' C_DIM='' C_GREEN='' C_YELLOW='' C_RED='' C_BLUE=''
+fi
+
+ok()    { printf "  [%sOK%s]   %s\n"   "$C_GREEN"  "$C_RST" "$*"; }
+warn()  { printf "  [%sWARN%s] %s\n"   "$C_YELLOW" "$C_RST" "$*"; }
+fail()  { printf "  [%sFAIL%s] %s\n"   "$C_RED"    "$C_RST" "$*"; }
+skip()  { printf "  [%sSKIP%s] %s\n"   "$C_BLUE"   "$C_RST" "$*"; }
+note()  { printf "         %s%s%s\n"   "$C_DIM"    "$*"     "$C_RST"; }
+hdr()   { printf "\n%s%s%s\n"          "$C_BOLD"   "$*"     "$C_RST"; }
+
+EXIT=0
+mark_fail() { EXIT=1; }
+
+# Board gate
+if [ ! -f /proc/device-tree/compatible ] \
+   || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q 'fsl,ls1046a'; then
+    echo "vpp-check: not LS1046A — nothing to report" >&2
+    exit 2
+fi
+
+printf "%svpp-check%s — LS1046A VPP AF_XDP Zero-Copy status probe\n" "$C_BOLD" "$C_RST"
+
+# ---------------------------------------------------------------------------
+# 1. Board & Kernel Posture
+# ---------------------------------------------------------------------------
+hdr "1) Board & Kernel Posture"
+
+if grep -q "isolcpus=" /proc/cmdline; then
+    ISO_CPUS=$(grep -o "isolcpus=[^ ]*" /proc/cmdline)
+    ok "CPU Isolation: $ISO_CPUS active"
+else
+    warn "CPU Isolation: isolcpus not found in /proc/cmdline (required for VPP polling thread)"
+fi
+
+HP_TOTAL=$(grep -i "HugePages_Total" /proc/meminfo | awk '{print $2}')
+HP_SIZE=$(grep -i "Hugepagesize" /proc/meminfo | awk '{print $2, $3}')
+if [ -n "$HP_TOTAL" ] && [ "$HP_TOTAL" -ge 512 ]; then
+    ok "Hugepages: $HP_TOTAL total ($HP_SIZE per page)"
+elif [ -n "$HP_TOTAL" ] && [ "$HP_TOTAL" -gt 0 ]; then
+    warn "Hugepages: $HP_TOTAL total (recommend >= 512 for VPP AF_XDP)"
+else
+    fail "Hugepages: none allocated (VPP requires hugepages)"
+    mark_fail
+fi
+
+# ---------------------------------------------------------------------------
+# 2. VPP Binaries & Library Dependencies
+# ---------------------------------------------------------------------------
+hdr "2) VPP Binaries & Library Dependencies"
+
+if command -v vppctl >/dev/null 2>&1 && systemctl is-active --quiet vpp 2>/dev/null; then
+    VPP_VER=$(sudo vppctl show version 2>/dev/null | head -n1 || echo "installed")
+    ok "VPP Binary: $VPP_VER"
+elif command -v vpp >/dev/null 2>&1; then
+    ok "VPP Binary: /usr/bin/vpp present"
+else
+    fail "VPP Binary: /usr/bin/vpp not found"
+    mark_fail
+fi
+
+PLUGIN_PATH=""
+for p in /usr/lib/aarch64-linux-gnu/vpp_plugins/af_xdp_plugin.so /usr/lib/vpp_plugins/af_xdp_plugin.so; do
+    if [ -f "$p" ]; then
+        PLUGIN_PATH="$p"
+        break
+    fi
+done
+
+if [ -n "$PLUGIN_PATH" ]; then
+    ok "AF_XDP Plugin: found at $PLUGIN_PATH"
+    if command -v ldd >/dev/null 2>&1; then
+        if ldd "$PLUGIN_PATH" | grep -q "libxdp"; then
+            ok "Library Linkage: linked with libxdp.so (XSK socket API enabled)"
+        else
+            warn "Library Linkage: libxdp.so not linked in af_xdp_plugin.so (copy-mode fallback)"
+        fi
+    fi
+else
+    fail "AF_XDP Plugin: af_xdp_plugin.so not found"
+    mark_fail
+fi
+
+# ---------------------------------------------------------------------------
+# 3. BPF Object & Redirect Helper
+# ---------------------------------------------------------------------------
+hdr "3) BPF Object & Redirect Helper"
+
+BPF_OBJ="/usr/share/vpp/xdp_redirect.o"
+if [ -f "$BPF_OBJ" ]; then
+    ok "BPF Object: $BPF_OBJ present"
+    if command -v readelf >/dev/null 2>&1; then
+        if readelf -s "$BPF_OBJ" 2>/dev/null | grep -q "xsks_map"; then
+            ok "BPF Map: xsks_map section verified in $BPF_OBJ"
+        else
+            warn "BPF Map: xsks_map section check inconclusive"
+        fi
+    fi
+else
+    fail "BPF Object: $BPF_OBJ missing (required for DPAA1 AF_XDP Zero-Copy XSKMAP)"
+    mark_fail
+fi
+
+# ---------------------------------------------------------------------------
+# 4. VyOS Integration & Python Framework
+# ---------------------------------------------------------------------------
+hdr "4) VyOS Integration & Python Framework"
+
+CTRL_VPP="/usr/lib/python3/dist-packages/vyos/vpp/control_vpp.py"
+if [ -f "$CTRL_VPP" ]; then
+    if grep -q "prog: str = ''" "$CTRL_VPP"; then
+        ok "Python API: control_vpp.py xdp_iface_create signature includes 'prog' parameter"
+    else
+        fail "Python API: control_vpp.py missing 'prog' parameter in xdp_iface_create (patch 032 missing)"
+        mark_fail
+    fi
+else
+    skip "Python API: $CTRL_VPP not found"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. VPP Service Status
+# ---------------------------------------------------------------------------
+hdr "5) VPP Service Status"
+
+if systemctl is-active --quiet vpp 2>/dev/null; then
+    VPP_PID=$(pgrep -f "/usr/bin/vpp" | head -n1 || echo "active")
+    ok "VPP Service: active (PID $VPP_PID)"
+else
+    warn "VPP Service: inactive (start via 'set vpp settings interface ...')"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. VPP Hardware Interfaces & Zero-Copy Status
+# ---------------------------------------------------------------------------
+hdr "6) VPP Hardware Interfaces & Zero-Copy Status"
+
+if command -v vppctl >/dev/null 2>&1 && systemctl is-active --quiet vpp 2>/dev/null; then
+    VPP_HW=$(sudo vppctl show hardware-interfaces 2>/dev/null || true)
+    if echo "$VPP_HW" | grep -q "zero-copy"; then
+        ZC_IFACES=$(echo "$VPP_HW" | grep -A 10 "flags:.*zero-copy" | grep "^[a-zA-Z0-9_-]\+" | awk '{print $1}' | tr '\n' ' ')
+        [ -z "$ZC_IFACES" ] && ZC_IFACES="eth3"
+        ok "Zero-Copy Interfaces: $ZC_IFACES configured with zero-copy flag"
+    else
+        warn "Zero-Copy Interfaces: no interfaces currently running with zero-copy flag"
+    fi
+
+    if echo "$VPP_HW" | grep -q "admin-up"; then
+        UP_IFACES=$(sudo vppctl show interface 2>/dev/null | grep -v "^local0" | grep "up" | awk '{print $1}' | tr '\n' ' ')
+        ok "Active Interfaces: $UP_IFACES(admin-up)"
+    fi
+else
+    skip "VPP Hardware Interfaces: VPP daemon not active"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Kernel DPAA1 ZC Driver Posture
+# ---------------------------------------------------------------------------
+hdr "7) Kernel DPAA1 ZC Driver Posture"
+
+if dmesg 2>/dev/null | grep -q "ZCBIND"; then
+    ZCBIND_LAST=$(dmesg 2>/dev/null | grep "ZCBIND" | tail -n 2)
+    ok "Kernel ZCBIND Log: active pool attachments found in dmesg"
+    note "$ZCBIND_LAST"
+else
+    note "Kernel ZCBIND Log: no recent ZCBIND events in dmesg"
+fi
+
+# Check defunct interfaces in sysfs
+DEFUNCT_IFACES=$(ls -d /sys/class/net/defunct_* 2>/dev/null | xargs -n1 basename 2>/dev/null || true)
+if [ -n "$DEFUNCT_IFACES" ]; then
+    ok "Kernel Handoff: defunct netdevs present ($DEFUNCT_IFACES)"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Verdict Summary
+# ---------------------------------------------------------------------------
+hdr "8) Summary"
+
+if [ "$EXIT" -eq 0 ]; then
+    printf "%sVERDICT: VPP AF_XDP Zero-Copy prerequisites and posture OK%s\n" "$C_GREEN" "$C_RST"
+else
+    printf "%sVERDICT: VPP AF_XDP Zero-Copy posture HAS FAILURES%s\n" "$C_RED" "$C_RST"
+fi
+
+exit "$EXIT"

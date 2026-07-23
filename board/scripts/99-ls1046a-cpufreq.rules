@@ -1,0 +1,6 @@
+# 99-ls1046a-cpufreq.rules — Force 'performance' cpufreq governor on all A72 cores (1600 MHz)
+#
+# Prevents userspace cpufreq daemons from throttling CPUs to 'conservative' (800 MHz),
+# maintaining full 1.6 GHz clock speed on all cores for networking performance.
+
+ACTION=="add", SUBSYSTEM=="cpu", RUN+="/bin/sh -c 'echo performance > /sys/devices/system/cpu/%k/cpufreq/scaling_governor 2>/dev/null || true'"
