@@ -63,6 +63,7 @@ commit_id = "rolling"
 scm_url = "https://github.com/vyos/vyos-1x.git"
 pre_build_hook = '''
   set -ex
+  rm -f /tmp/xml_cache.json || sudo rm -f /tmp/xml_cache.json || true
   cp ../ls1046a-patches/reftree.cache data/reftree.cache
   sed -i 's/all: clean copyright/all: clean/' Makefile
   # Remove packages not available for ARM64 from dependencies, plus sub-packages
