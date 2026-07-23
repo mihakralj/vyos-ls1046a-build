@@ -21,18 +21,28 @@ if os.path.exists(QMAN):
 
     # Guard 0: __poll_portal_fast entry NULL portal guard
     old0 = 'static int __poll_portal_fast(struct qman_portal *p, unsigned int poll_limit)\n{'
+    old0_alt = 'static int __poll_portal_fast(struct qman_portal *p, int poll_limit)\n{'
     new0 = ('static int __poll_portal_fast(struct qman_portal *p, unsigned int poll_limit)\n{\n'
             '\t/* F_102 v4: NULL portal guard for isolated CPUs (isolcpus) */\n'
             '\tif (unlikely(!p))\n'
             '\t\treturn 0;\n')
-    if old0 in s and "F_102 v4: NULL portal guard" not in s:
-        s = s.replace(old0, new0, 1)
-        changes += 1
-        print("### F_102 v4: NULL portal guard added in __poll_portal_fast entry")
-    elif "F_102 v4: NULL portal guard" in s:
-        print("### F_102 v4: __poll_portal_fast entry guard already present")
+    new0_alt = ('static int __poll_portal_fast(struct qman_portal *p, int poll_limit)\n{\n'
+                '\t/* F_102 v4: NULL portal guard for isolated CPUs (isolcpus) */\n'
+                '\tif (unlikely(!p))\n'
+                '\t\treturn 0;\n')
+    if "NULL portal guard" not in s:
+        if old0 in s:
+            s = s.replace(old0, new0, 1)
+            changes += 1
+            print("### F_102 v4: NULL portal guard added in __poll_portal_fast entry")
+        elif old0_alt in s:
+            s = s.replace(old0_alt, new0_alt, 1)
+            changes += 1
+            print("### F_102 v4: NULL portal guard added in __poll_portal_fast entry (alt)")
+        else:
+            print("### F_102 v4: WARNING __poll_portal_fast entry anchor not found in qman.c")
     else:
-        print("### F_102 v4: WARNING __poll_portal_fast entry anchor not found in qman.c")
+        print("### F_102 v4: __poll_portal_fast entry guard already present")
 
     # Guard 0b: qman_p_poll_dqrr entry NULL portal guard
     old0b = 'int qman_p_poll_dqrr(struct qman_portal *p, unsigned int limit)\n{'
@@ -40,7 +50,7 @@ if os.path.exists(QMAN):
              '\t/* F_102 v4: NULL portal guard for isolated CPUs (isolcpus) */\n'
              '\tif (unlikely(!p))\n'
              '\t\treturn 0;\n')
-    if old0b in s and "qman_p_poll_dqrr" not in s: # check if already guarded
+    if old0b in s and "NULL portal guard" not in s: # check if already guarded
         s = s.replace(old0b, new0b, 1)
         changes += 1
         print("### F_102 v4: NULL portal guard added in qman_p_poll_dqrr entry")

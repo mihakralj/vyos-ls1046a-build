@@ -1,0 +1,6 @@
+# 99-dpaa1-offloads.rules — Force Scatter-Gather (sg), GSO, and GRO on DPAA1 netdevs (eth0-eth4)
+#
+# Prevents single-packet SKB linearization overhead on fsl_dpa interfaces,
+# restoring full multi-stream GSO throughput across all ports.
+
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[0-4]", RUN+="/usr/sbin/ethtool -K %k sg on gso on gro on"

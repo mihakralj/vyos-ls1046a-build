@@ -427,8 +427,12 @@ cp board/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
 # the driver's bound-device symlink failed silently and was never
 # re-evaluated). With this rule + the DT-only board gate in the unit, the
 # daemon starts whichever way wins the race.
+cp board/scripts/ls1046a-cpufreq.service "$CHROOT/etc/systemd/system/ls1046a-cpufreq.service"
+chroot "$CHROOT" systemctl enable ls1046a-cpufreq.service || true
 mkdir -p "$CHROOT/etc/udev/rules.d"
 cp board/scripts/10-emc2305-fan-pid.rules "$CHROOT/etc/udev/rules.d/10-emc2305-fan-pid.rules"
+cp board/scripts/99-dpaa1-offloads.rules "$CHROOT/etc/udev/rules.d/99-dpaa1-offloads.rules"
+cp board/scripts/99-ls1046a-cpufreq.rules "$CHROOT/etc/udev/rules.d/99-ls1046a-cpufreq.rules"
 
 ### Board-level power-off GPIO hook (Mono Gateway DK).
 ###
@@ -557,6 +561,12 @@ chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
 ### is the expected "dormant".
 cp board/scripts/xsk-zc-check "$CHROOT/usr/local/bin/xsk-zc-check"
 chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
+
+### VPP AF_XDP Zero-Copy health helper: `vpp-check` reports VPP posture,
+### library dependencies (libxdp linkage), BPF object / xsks_map,
+### control_vpp.py signature, VPP service status, zero-copy flags, and dmesg ZCBIND logs.
+cp board/scripts/vpp-check "$CHROOT/usr/local/bin/vpp-check"
+chmod +x "$CHROOT/usr/local/bin/vpp-check"
 
 ### ASK2 stack health helper: `ask-check` reports the landed state of the
 ### ASK2 in-tree kernel patches (0001 caam-qi-share, 0002 dpaa-eth-flow-block,
