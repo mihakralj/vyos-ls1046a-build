@@ -1,0 +1,12 @@
+[Unit]
+Description=Force 1.6 GHz Performance CPU Governor for LS1046A
+After=multi-user.target vyos-configd.service
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
