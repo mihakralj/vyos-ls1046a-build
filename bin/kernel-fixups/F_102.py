@@ -50,10 +50,32 @@ if os.path.exists(QMAN):
              '\t/* F_102 v4: NULL portal guard for isolated CPUs (isolcpus) */\n'
              '\tif (unlikely(!p))\n'
              '\t\treturn 0;\n')
-    if old0b in s and "NULL portal guard" not in s: # check if already guarded
+    if old0b in s and "F_102 v4: NULL portal guard" not in s: # check if already guarded
         s = s.replace(old0b, new0b, 1)
         changes += 1
         print("### F_102 v4: NULL portal guard added in qman_p_poll_dqrr entry")
+
+    # Guard 0c: qman_p_irqsource_add entry NULL portal guard
+    old0c = 'void qman_p_irqsource_add(struct qman_portal *p, u32 bits)\n{'
+    new0c = ('void qman_p_irqsource_add(struct qman_portal *p, u32 bits)\n{\n'
+             '\t/* F_102 v5: NULL portal guard for isolated CPUs (isolcpus) */\n'
+             '\tif (unlikely(!p))\n'
+             '\t\treturn;\n')
+    if old0c in s and "F_102 v5: NULL portal guard" not in s:
+        s = s.replace(old0c, new0c, 1)
+        changes += 1
+        print("### F_102 v5: NULL portal guard added in qman_p_irqsource_add entry")
+
+    # Guard 0d: qman_p_irqsource_remove entry NULL portal guard
+    old0d = 'void qman_p_irqsource_remove(struct qman_portal *p, u32 bits)\n{'
+    new0d = ('void qman_p_irqsource_remove(struct qman_portal *p, u32 bits)\n{\n'
+             '\t/* F_102 v5: NULL portal guard for isolated CPUs (isolcpus) */\n'
+             '\tif (unlikely(!p))\n'
+             '\t\treturn;\n')
+    if old0d in s and "F_102 v5: NULL portal guard" not in s:
+        s = s.replace(old0d, new0d, 1)
+        changes += 1
+        print("### F_102 v5: NULL portal guard added in qman_p_irqsource_remove entry")
 
     # Guard 1: MR path (line ~1521) — fq_state_change dereferences fq
     # Uses 4 tabs (inside switch→case→for→if)
