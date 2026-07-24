@@ -468,7 +468,10 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [ ] **T-M6-3** `@___` — F-03 `ask_neigh.c` real body (NETEVENT_NEIGH_UPDATE → HMCT rebuild; kills stale-MAC blackholing).
 - [ ] **T-M6-4** `@___` — IPsec landing series in one merge: F-01 + F-07 + F-02 + F-23 + F-21 + F-22 + F-20, then `NETIF_F_HW_ESP` LAST. GCM refused (§3.8).
 
-### M7 — CLI (after M5; needs F-076 closed) 🟢 5/5 built; T-M7-1 HW-validated 2026-07-24; T-M7-5 kernel flat-rework awaiting rebuild
+### M7 — CLI (after M5; needs F-076 closed) 🟢 5/5 built + HW-validated on ISO 2042 (2026-07-24); T-M7-5 populated-flow render pending physical sink
+
+**Board validation on ISO 2026.07.24-2042-rolling (commit 60f9f1f2), .185/.106:** T-M7-1 CLI engage/disengage confirmed with the mutex fix BAKED IN — `set … offload ask` → dmesg `port 0x10/0x11 ENGAGED (AC_CC)`, `delete` → `DISENGAGED`, S0-clean. Bug #2 fixed: `ynl --dump dump-flows` returns `[]` (EXIT=0), no hang. Bug #3 flat rework confirmed: ynl decodes the flat dump cleanly; op-mode `show interfaces ethernet eth3 offload ask flows` renders end-to-end ("No flows offloaded…" for the empty table). REMAINING: a *populated* flow render (5-tuple/packets/bytes) — blocked only on the physical M5 traffic plane (heidi 10.99.1.2 sink host is down; the ask rhashtable is populated solely by nft-flowtable FLOW_CLS_REPLACE on an ESTABLISHED transit flow, which needs a live second host on the eth3 side).
+
 
 **Board test 2026-07-24 (ISO 1922 on .185/.106) surfaced 3 real bugs static checks missed:**
 - **Bug 1 — `verify_offload` NameError:** the T-M7-3 mutex called a bare `get_config_dict('vpp settings')` (not a function) → threw on *every* `offload ask` commit. T-M7-3 was marked done but never ran on HW. Fixed in `data/vyos-1x-031` (ethernet side reuses the gathered `ethernet['vpp']`; vpp side uses a `Config()` instance). Hotfixed live → **T-M7-1 validated: dmesg `port 0x10 ENGAGED (AC_CC)` on set, `DISENGAGED` on delete.**
