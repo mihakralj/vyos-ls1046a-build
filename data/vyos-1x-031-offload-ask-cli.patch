@@ -1,136 +1,50 @@
-diff --cc python/vyos/ifconfig/ethernet.py
-index 0d7fc2521,ea7f2f9b9..000000000
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index f3c9f30ef..923e21dcc 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@@ -318,6 -314,6 +318,21 @@@ class EthernetIf(Interface)
-                  print('Adapter does not support changing hw-tc-offload settings!')
-          return False
-  
-++    def set_ask_offload(self, enable: bool):
-++        """Engage or disengage NXP LS1046A ASK FMan FE-VM hardware offload."""
-++        port_map = {'eth3': 16, 'eth4': 17, 'eth0': 8, 'eth1': 9, 'eth2': 10}
-++        if self.ifname not in port_map:
-++            return
-++        port_id = port_map[self.ifname]
-++        verb = "engage" if enable else "disengage"
-++        try:
-++            import os
-++            if os.path.exists('/sys/kernel/debug/ask/offload'):
-++                with open('/sys/kernel/debug/ask/offload', 'w') as f:
-++                    f.write(f"{verb} {port_id}\n")
-++        except Exception:
-++            pass
-++
-      def set_lro(self, state):
-          """
-          Enable Large Receive offload. State can be either True or False.
-@@@ -339,29 -335,69 +354,96 @@@
-                  )
-          return False
-  
-++<<<<<<< ours
- +    def set_vlan_strip(self, state):
- +        """
- +        Enable hardware VLAN tag stripping on receive. State can be either
- +        True or False. On the NXP LS1046A this drives the DPAA1 FMan Header
- +        Manipulation offload via the dpaa_set_features() .ndo_set_features
- +        bridge (NETIF_F_HW_VLAN_CTAG_RX).
- +        Example:
- +        >>> from vyos.ifconfig import EthernetIf
- +        >>> i = EthernetIf('eth0')
- +        >>> i.set_vlan_strip(True)
- +        """
- +        if not isinstance(state, bool):
- +            raise ValueError('Value out of range')
- +
- +        enabled, fixed = self.ethtool.get_rx_vlan_offload()
- +        if enabled != state:
- +            if not fixed:
- +                return self.set_interface('rxvlan', 'on' if state else 'off')
- +            else:
- +                print(
- +                    'Adapter does not support changing rx-vlan-offload settings!'
- +                )
- +        return False
-++||||||| base
-++=======
-+     def set_ingress_policer(self, config):
-+         """
-+         Install or remove a hardware ingress rate policer. On the NXP LS1046A
-+         this drives the DPAA1 FMan Policer via the dpaa_setup_tc() matchall
-+         .ndo_setup_tc bridge. Supplying only 'bandwidth' installs a
-+         single-rate (srTCM) policer; additionally supplying 'peak-bandwidth'
-+         installs a two-rate (trTCM) policer.
-+ 
-+         'config' is the per-interface configuration dictionary. The policer is
-+         attached as a matchall filter (pref 50) on the classic 'ffff: ingress'
-+         qdisc so it coexists with any mirror/redirect filter on the same qdisc.
-+         This must be called AFTER the base-class mirror/redirect setup, which
-+         may tear the ingress qdisc down and rebuild it.
-+         Example:
-+         >>> from vyos.ifconfig import EthernetIf
-+         >>> i = EthernetIf('eth0')
-+         >>> i.set_ingress_policer({'ingress_policer': {'bandwidth': '1gbit'}})
-+         """
-+         ifname = self.ifname
-+         pref = '50'
-+ 
-+         # Always remove our own filter first so the call is idempotent and a
-+         # deleted policer leaves no stale hardware profile behind.
-+         self._popen(f'tc filter del dev {ifname} parent ffff: pref {pref} 2>/dev/null')
-+ 
-+         policer = config.get('ingress_policer')
-+         if not policer:
-+             # No policer configured: return hw-tc-offload to its default-off
-+             # state so a deleted policer leaves no toggled feature behind.
-+             self._popen(f'ethtool -K {ifname} hw-tc-offload off')
-+             return None
-+ 
-+         rate = policer.get('bandwidth')
-+         if not rate:
-+             return None
-+ 
-+         # Ensure the ingress qdisc exists (shared with mirror/redirect). Adding
-+         # an already-present qdisc fails harmlessly - errors are ignored.
-+         self._popen(f'tc qdisc add dev {ifname} handle ffff: ingress 2>/dev/null')
-+ 
-+         # The matchall policer filter below is installed with 'skip_sw' (a
-+         # hardware-only filter). The DPAA1 netdev advertises NETIF_F_HW_TC as a
-+         # toggleable feature that defaults to OFF, so hw-tc-offload must be
-+         # switched on first or the tc core rejects the filter with 'TC offload
-+         # is disabled on net device' and no policing is applied.
-+         self._popen(f'ethtool -K {ifname} hw-tc-offload on')
-+ 
-+         burst = policer.get('burst', '15k')
-+         peak = policer.get('peak_bandwidth')
-+ 
-+         cmd = (
-+             f'tc filter add dev {ifname} parent ffff: pref {pref} '
-+             f'matchall skip_sw action police rate {rate} burst {burst}'
-+         )
-+         if peak:
-+             mtu = read_file(f'/sys/class/net/{ifname}/mtu')
-+             cmd += f' peakrate {peak} mtu {mtu}'
-+         cmd += ' conform-exceed drop/pipe'
-+ 
-+         _, err = self._popen(cmd)
-+         if err:
-+             print('tc filter for ingress-policer failed')
-+         return None
-++>>>>>>> theirs
-  
-      def set_rps(self, state):
-          if not isinstance(state, bool):
-@@@ -599,6 -635,6 +681,9 @@@
-          # LRO (large receive offload)
-          self.set_lro(dict_search('offload.lro', config) is not None)
-  
-++        # ASK offload — NXP LS1046A FMan FE-VM hardware forwarding
-++        self.set_ask_offload(dict_search('offload.ask', config) is not None)
-++
-          # RPS - Receive Packet Steering
-          self.set_rps(dict_search('offload.rps', config) is not None)
-  
+@@ -318,6 +318,32 @@ class EthernetIf(Interface):
+                 print('Adapter does not support changing hw-tc-offload settings!')
+         return False
+ 
++    def set_ask_offload(self, enable: bool):
++        """
++        Engage or disengage NXP LS1046A ASK (Accelerated Switching Kernel)
++        FMan FE-VM hardware forwarding offload on this interface. Composes the
++        proven /usr/local/bin/vyos-offload-ask engage/disengage verbs, which
++        program the fman_pcd debugfs fe_arm node (CONT_LOOKUP pass-through
++        scaffold) and resolve the port's kernel Rx miss FQID. Only the two 10G
++        SFP+ datapath ports carry the FE-VM substrate (eth3 = FMan RX BMI port
++        0x10, eth4 = 0x11); the request is a no-op on any other interface.
++        Example:
++        >>> from vyos.ifconfig import EthernetIf
++        >>> i = EthernetIf('eth3')
++        >>> i.set_ask_offload(True)
++        """
++        port_map = {'eth3': '0x10', 'eth4': '0x11'}
++        port = port_map.get(self.ifname)
++        if port is None:
++            return
++        tool = '/usr/local/bin/vyos-offload-ask'
++        if not os.path.exists(tool):
++            return
++        verb = 'engage' if enable else 'disengage'
++        _, err = self._popen(f'{tool} --port {port} {verb}')
++        if err:
++            print(f'ASK offload {verb} failed on {self.ifname}')
++
+     def set_lro(self, state):
+         """
+         Enable Large Receive offload. State can be either True or False.
+@@ -663,6 +689,9 @@ class EthernetIf(Interface):
+         # LRO (large receive offload)
+         self.set_lro(dict_search('offload.lro', config) is not None)
+ 
++        # ASK offload - NXP LS1046A FMan FE-VM hardware forwarding
++        self.set_ask_offload(dict_search('offload.ask', config) is not None)
++
+         # RPS - Receive Packet Steering
+         self.set_rps(dict_search('offload.rps', config) is not None)
+ 
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
 index 6cf3373f1..e000c7860 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
