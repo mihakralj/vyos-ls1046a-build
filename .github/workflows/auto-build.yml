@@ -183,6 +183,12 @@ jobs:
           # step ever gets to run.  Reset ownership unconditionally so
           # checkout can repopulate the workspace cleanly.
           set -e
+          # Also fix the runner work root — prior sudo builds leave
+          # root-owned files that actions/checkout can't unlink.
+          RUNNER_WORK_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          if [ -d "$RUNNER_WORK_ROOT" ]; then
+            sudo chown -R vyos:vyos "$RUNNER_WORK_ROOT" 2>/dev/null || true
+          fi
           if [ -d "$GITHUB_WORKSPACE" ]; then
             sudo chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
             sudo rm -rf "$GITHUB_WORKSPACE/.git" 2>/dev/null || true
