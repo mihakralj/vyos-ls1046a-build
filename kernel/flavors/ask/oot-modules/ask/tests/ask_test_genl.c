@@ -5,7 +5,7 @@
  * Drives the pure-helper surface of ask_genl.c directly:
  *
  *   - ask_genl_get_info_fill()      builds the ASK_ATTR_INFO nested block
- *   - ask_genl_fill_one_flow()      builds one ASK_ATTR_FLOW nested block
+ *   - ask_genl_fill_one_flow()      appends one flow's attrs FLAT (T-M7-5)
  *   - ask_genl_dump_one_cb()        the per-flow walker callback
  *   - ask_genl_eopnotsupp_doit()    + dumpit() for the seven not-yet-wired cmds
  *
@@ -93,6 +93,8 @@
 
 struct ask_genl_dump_ctx {
 	struct sk_buff *skb;
+	u32            portid;
+	u32            seq;
 	int            start;
 	int            count;
 	int            seen;
@@ -257,7 +259,7 @@ static void ask_genl_test_info_fill_emsgsize(struct kunit *test)
 static void ask_genl_test_fill_one_flow_happy_path(struct kunit *test)
 {
 	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
-	struct nlattr *flow_nest, *attrs[ASK_FLOW_ATTR_MAX + 1];
+	struct nlattr *attrs[ASK_FLOW_ATTR_MAX + 1];
 	struct ask_flow f;
 	int rc;
 
@@ -268,12 +270,10 @@ static void ask_genl_test_fill_one_flow_happy_path(struct kunit *test)
 	rc = ask_genl_fill_one_flow(skb, &f);
 	KUNIT_EXPECT_EQ(test, rc, 0);
 
-	flow_nest = (struct nlattr *)skb->data;
-	KUNIT_ASSERT_EQ(test, (int)(flow_nest->nla_type & NLA_TYPE_MASK),
-			ASK_ATTR_FLOW);
-
-	rc = nla_parse_nested(attrs, ASK_FLOW_ATTR_MAX, flow_nest,
-			      ask_flow_policy, NULL);
+	/* Attributes are emitted FLAT now (no ASK_ATTR_FLOW wrapper): parse the
+	 * skb's attribute stream directly against the flow policy. */
+	rc = nla_parse(attrs, ASK_FLOW_ATTR_MAX, (struct nlattr *)skb->data,
+		       skb->len, ask_flow_policy, NULL);
 	KUNIT_EXPECT_EQ(test, rc, 0);
 
 	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_ID]);
@@ -302,7 +302,7 @@ static void ask_genl_test_fill_one_flow_happy_path(struct kunit *test)
 static void ask_genl_test_fill_one_flow_with_stats(struct kunit *test)
 {
 	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
-	struct nlattr *flow_nest, *attrs[ASK_FLOW_ATTR_MAX + 1];
+	struct nlattr *attrs[ASK_FLOW_ATTR_MAX + 1];
 	struct ask_flow f;
 	int rc;
 
@@ -318,9 +318,9 @@ static void ask_genl_test_fill_one_flow_with_stats(struct kunit *test)
 	rc = ask_genl_fill_one_flow(skb, &f);
 	KUNIT_ASSERT_EQ(test, rc, 0);
 
-	flow_nest = (struct nlattr *)skb->data;
-	rc = nla_parse_nested(attrs, ASK_FLOW_ATTR_MAX, flow_nest,
-			      ask_flow_policy, NULL);
+	/* Flat attribute stream (no ASK_ATTR_FLOW wrapper). */
+	rc = nla_parse(attrs, ASK_FLOW_ATTR_MAX, (struct nlattr *)skb->data,
+		       skb->len, ask_flow_policy, NULL);
 	KUNIT_ASSERT_EQ(test, rc, 0);
 
 	KUNIT_EXPECT_EQ(test, nla_get_u64(attrs[ASK_FLOW_ATTR_PACKETS]),
