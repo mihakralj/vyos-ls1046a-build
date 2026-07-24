@@ -363,6 +363,8 @@ int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f)
 struct nlattr *nest;
 u64 packets, bytes, last_seen_ns;
 unsigned int seq;
+u16 l3proto;
+int iplen;
 
 nest = nla_nest_start(skb, ASK_ATTR_FLOW);
 if (!nest)
@@ -374,6 +376,33 @@ goto nla_put_failure;
 if (nla_put_u32(skb, ASK_FLOW_ATTR_HW_FLOW_ID, f->hw_flow_id))
 goto nla_put_failure;
 if (nla_put_u32(skb, ASK_FLOW_ATTR_OIF, f->oif))
+goto nla_put_failure;
+
+/*
+ * T-M7-2: emit the 5-tuple + ingress ifindex so op-mode
+ * `show interfaces ethernet eth<n> offload ask flows` can render each
+ * flow and filter by interface (iif/oif) without a second lookup.
+ * key.l3_proto is the internal ASK_FLOW_L3_* enum; the UAPI attr carries
+ * the EtherType (ETH_P_IP / ETH_P_IPV6) the ask.yaml spec documents.
+ * src_ip/dst_ip are u8[16] with the v4 address packed into the first 4.
+ * sport/dport are already __be16, so nla_put_be16() keeps them on the
+ * wire in the big-endian order the spec declares.
+ */
+l3proto = (f->key.l3_proto == ASK_FLOW_L3_IPV6) ? ETH_P_IPV6 : ETH_P_IP;
+iplen   = (f->key.l3_proto == ASK_FLOW_L3_IPV6) ? 16 : 4;
+if (nla_put_u16(skb, ASK_FLOW_ATTR_L3_PROTO, l3proto))
+goto nla_put_failure;
+if (nla_put_u8(skb, ASK_FLOW_ATTR_L4_PROTO, f->key.l4_proto))
+goto nla_put_failure;
+if (nla_put(skb, ASK_FLOW_ATTR_SRC_IP, iplen, f->key.src_ip))
+goto nla_put_failure;
+if (nla_put(skb, ASK_FLOW_ATTR_DST_IP, iplen, f->key.dst_ip))
+goto nla_put_failure;
+if (nla_put_be16(skb, ASK_FLOW_ATTR_SPORT, f->key.sport))
+goto nla_put_failure;
+if (nla_put_be16(skb, ASK_FLOW_ATTR_DPORT, f->key.dport))
+goto nla_put_failure;
+if (nla_put_u32(skb, ASK_FLOW_ATTR_IIF, f->key.iif))
 goto nla_put_failure;
 
 do {

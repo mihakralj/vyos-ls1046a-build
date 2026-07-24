@@ -619,6 +619,29 @@ cp board/scripts/vyos-offload-ask "$CHROOT/usr/local/bin/vyos-offload-ask"
 chmod +x "$CHROOT/usr/local/bin/vyos-offload-ask"
 chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
 
+### ASK2 op-mode transport: the vendored YNL Python client (board/ynl/) + the
+### `ask` genl spec, so `show interfaces ethernet eth<n> offload ask flows`
+### (T-M7-5) can run `ynl --family ask --dump dump-flows` against ask.ko's
+### generic-netlink family (kernel/flavors/ask/uapi/ask.yaml §3.5 Operator UX).
+### ynl is not in the VyOS apt archive, so the pure-Python client is shipped in
+### the image. `ynl --family ask` resolves the spec from /usr/share/ynl/specs/
+### and, because that path is under sys_schema_dir, auto-disables schema
+### validation — python3-yaml is the only runtime dep (jsonschema not needed).
+### See board/ynl/VENDORED.md for the refresh procedure.
+mkdir -p "$CHROOT/usr/share/ynl/pyynl/lib" "$CHROOT/usr/share/ynl/specs"
+cp board/ynl/cli.py       "$CHROOT/usr/share/ynl/pyynl/cli.py"
+cp board/ynl/__init__.py  "$CHROOT/usr/share/ynl/pyynl/__init__.py"
+cp board/ynl/lib/*.py     "$CHROOT/usr/share/ynl/pyynl/lib/"
+cp kernel/flavors/ask/uapi/ask.yaml "$CHROOT/usr/share/ynl/specs/ask.yaml"
+cat > "$CHROOT/usr/local/bin/ynl" <<'YNLWRAP'
+#!/bin/sh
+# ASK2: thin wrapper over the vendored YNL Python client (board/ynl/,
+# installed to /usr/share/ynl/pyynl). `ynl --family ask ...` talks directly
+# to ask.ko — no askd daemon in the path. See board/ynl/VENDORED.md.
+exec python3 /usr/share/ynl/pyynl/cli.py "$@"
+YNLWRAP
+chmod +x "$CHROOT/usr/local/bin/ynl"
+
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit
 ### hex RRGGBBWW. Auto-creates /config/led.json with a 32-entry default
