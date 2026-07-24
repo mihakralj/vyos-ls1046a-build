@@ -57,13 +57,22 @@ definitions:
   -
     type: enum
     name: flow-l4-proto
-    doc: IANA L4 protocol numbers used as ASK_FLOW_ATTR_L4_PROTO values.
+    doc: |
+      IANA L4 protocol numbers used as ASK_FLOW_ATTR_L4_PROTO values. The
+      kernel emits the raw IANA number (key.l4_proto), so each entry carries
+      its explicit IANA value — without these, ynl indexes the enum
+      positionally (icmp=0, tcp=1, …) and renders e.g. TCP(6) as "Unknown(6)".
     entries:
-      - icmp
-      - tcp
-      - udp
-      - esp
-      - sctp
+      - name: icmp
+        value: 1
+      - name: tcp
+        value: 6
+      - name: udp
+        value: 17
+      - name: esp
+        value: 50
+      - name: sctp
+        value: 132
   -
     type: enum
     name: capability

@@ -1058,7 +1058,30 @@ static void ask_fe_flow_insert(const struct ask_flow_key *key,
         action.key_size = 13;
         action.enq_off  = enq_off;
 
-        fman_pcd_fe_flow_add(NULL, 0, &action);
+        /* Fix B: drive the real FMan (fman_get_pcd -> ehash) instead of NULL,
+         * so the per-flow silicon HIT record is actually created. */
+        fman_pcd_fe_flow_add(ask_hw_get_fman(), 0, &action);
+}
+
+/*
+ * Fix B: remove exactly the one FE-VM silicon record for @key. Builds the
+ * identical 13-byte EKFC key ask_fe_flow_insert() used, so fman_pcd_fe_flow_del
+ * (per-key, F-117) matches and unlinks just this flow — not clear-all.
+ */
+static void ask_fe_flow_remove(const struct ask_flow_key *key)
+{
+        u8 k[13];
+
+        if (!key)
+                return;
+        memcpy(&k[0], key->src_ip, 4);
+        memcpy(&k[4], key->dst_ip, 4);
+        k[8]  = key->l4_proto;
+        k[9]  = (key->sport >> 8) & 0xff;
+        k[10] = key->sport & 0xff;
+        k[11] = (key->dport >> 8) & 0xff;
+        k[12] = key->dport & 0xff;
+        fman_pcd_fe_flow_del(ask_hw_get_fman(), 0, k, sizeof(k));
 }
 
 
@@ -1516,15 +1539,33 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
         if (!t)
                 return -EOPNOTSUPP;
 
-        rc = ask_flow_remove(t, (u64)f->cookie);
-        if (rc == -ENOENT)
-                return 0;
-        if (rc)
-                return rc;
+        /* Fix B: capture the flow's 5-tuple BEFORE removing it from the rht,
+         * so we can delete exactly its FE-VM silicon record (not clear-all). */
+        {
+                struct ask_flow *fl;
+                struct ask_flow_key dkey;
+                bool have_key = false;
 
-        ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
-        /* F-109: Clear all flows via kernel API (not debugfs loopback). */
-        fman_pcd_fe_flow_del(NULL, 0, NULL, 0);
+                rcu_read_lock();
+                fl = ask_flow_lookup(t, (u64)f->cookie);
+                if (fl) {
+                        dkey = fl->key;
+                        have_key = true;
+                }
+                rcu_read_unlock();
+
+                rc = ask_flow_remove(t, (u64)f->cookie);
+                if (rc == -ENOENT)
+                        return 0;
+                if (rc)
+                        return rc;
+
+                ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
+                /* Fix B: per-key FE-VM delete (F-117) — removes just this
+                 * flow's silicon record instead of clearing every flow. */
+                if (have_key)
+                        ask_fe_flow_remove(&dkey);
+        }
         return 0;
 }
 

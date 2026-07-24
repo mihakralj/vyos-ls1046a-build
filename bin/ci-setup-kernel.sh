@@ -1677,6 +1677,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-116: FE-VM flow-delete NULL guards"
 fi
 
+# F-117 (Fix B pt1): per-key FE-VM ehash delete. Adds fman_pcd_ehash_del_key
+# (head + mid-chain collision-chain unlink, prev_head LIFO invariant kept) and
+# rewrites fman_pcd_fe_flow_del to delete by key (NULL key => clear-all). Runs
+# AFTER F-116 (matches F-116's guarded fe_flow_del body). Pairs with the
+# ask.ko real-fm + built-key wiring in ask_flow_offload.c.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_117.py" 2>&1
+    echo "### F-117: FE-VM per-key ehash delete"
+fi
+
 # F-095 (DELETED — stub, never implemented)
 
 fi

@@ -172,6 +172,11 @@ void ask_hw_pcd_teardown(void);
  */
 struct ask_hw_pcd *ask_hw_pcd_get(void);
 
+/* Fix B: cached FMan handle (fman_bind() at bringup) for the flow_offload
+ * FE-VM add/del path; NULL before bringup / after teardown. */
+struct fman;
+struct fman *ask_hw_get_fman(void);
+
 /*
  * Phase 4.10 helpers (v1.3 Path A): per-port CC node accessors. The
  * pre-netdev hook (ask_pcd_install_hook) creates one cc_v4_tcp and
