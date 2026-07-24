@@ -1667,6 +1667,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-098: context_build retype (DDR not MMIO)"
 fi
 
+# F-116 (crash-safety): NULL-guard the FE-VM flow-delete path. On
+# FLOW_CLS_DESTROY, ask_flow_offload.c calls fman_pcd_fe_flow_del(NULL, ...);
+# with no guard fman_pcd_ehash_flow_clear_all(fman_get_pcd(NULL)) dereferenced
+# NULL+0x138 and panicked the box on EVERY offloaded flow that closed
+# (HW 2026-07-24, ISO 2042). Adds NULL guards so the delete is a safe no-op.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_116.py" 2>&1
+    echo "### F-116: FE-VM flow-delete NULL guards"
+fi
+
 # F-095 (DELETED — stub, never implemented)
 
 fi
