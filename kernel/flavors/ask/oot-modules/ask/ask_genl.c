@@ -69,6 +69,8 @@ int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f);
  */
 struct ask_genl_dump_ctx {
 struct sk_buff *skb;
+u32            portid;  /* NETLINK_CB portid for the per-flow genlmsg */
+u32            seq;     /* dump request nlmsg_seq for the per-flow genlmsg */
 int            start;   /* skip first N entries */
 int            count;   /* how many emitted so far this call */
 int            seen;    /* total walked (start + count + skipped tail) */
@@ -344,8 +346,11 @@ EXPORT_SYMBOL_GPL(ask_genl_eopnotsupp_dumpit);
 /* PR7 (M1.3) flow command handlers.                                          */
 /*                                                                            */
 /* These wire ASK_CMD_DUMP_FLOWS / GET_FLOW / FLUSH_FLOWS to the              */
-/* rhashtable + RCU table created in ask_flow.c. The wire format is the       */
-/* nested ASK_ATTR_FLOW container described in spec §7. Per-flow content:     */
+/* rhashtable + RCU table created in ask_flow.c. The wire format is FLAT      */
+/* (T-M7-5): each dumped flow is its own NLM_F_MULTI message and GET_FLOW     */
+/* replies with a single message, both carrying the ASK_FLOW_ATTR_* set at    */
+/* the genl message top level — matching the flat ask.yaml `flow` set and the */
+/* idiomatic mainline one-object-per-message dump. Per-flow content:          */
 /*   ASK_FLOW_ATTR_COOKIE     (u64)                                           */
 /*   ASK_FLOW_ATTR_HW_FLOW_ID (u32)  — fake counter for PR7, real in PR14     */
 /*   ASK_FLOW_ATTR_OIF        (u32)                                           */
@@ -360,16 +365,20 @@ EXPORT_SYMBOL_GPL(ask_genl_eopnotsupp_dumpit);
 
 int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f)
 {
-struct nlattr *nest;
 u64 packets, bytes, last_seen_ns;
 unsigned int seq;
 u16 l3proto;
 int iplen;
 
-nest = nla_nest_start(skb, ASK_ATTR_FLOW);
-if (!nest)
-return -EMSGSIZE;
-
+/*
+ * T-M7-5: emit the flow's attributes FLAT (no ASK_ATTR_FLOW wrapper).
+ * Each dumped flow is its own NLM_F_MULTI message (dump_one_cb frames one
+ * genlmsg per flow) and get-flow returns a single message, so these
+ * attributes sit directly at the genl message top level — matching the
+ * flat genetlink-legacy layout ask.yaml declares and the idiomatic
+ * mainline one-object-per-message dump shape. Callers own the genlmsg
+ * header/cancel; this helper only appends attributes.
+ */
 if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_ID, f->cookie,
       ASK_FLOW_ATTR_UNSPEC))
 goto nla_put_failure;
@@ -422,11 +431,9 @@ if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_LAST_SEEN_NS, last_seen_ns,
       ASK_FLOW_ATTR_UNSPEC))
 goto nla_put_failure;
 
-nla_nest_end(skb, nest);
 return 0;
 
 nla_put_failure:
-nla_nest_cancel(skb, nest);
 return -EMSGSIZE;
 }
 EXPORT_SYMBOL_GPL(ask_genl_fill_one_flow);
@@ -440,6 +447,7 @@ EXPORT_SYMBOL_GPL(ask_genl_fill_one_flow);
 int ask_genl_dump_one_cb(struct ask_flow *f, void *arg)
 {
 struct ask_genl_dump_ctx *ctx = arg;
+void *hdr;
 int rc;
 
 if (ctx->seen < ctx->start) {
@@ -447,13 +455,29 @@ ctx->seen++;
 return 0;
 }
 
+/*
+ * One flow == one NLM_F_MULTI genl message, attributes emitted FLAT.
+ * This is the idiomatic mainline dump shape and matches the flat
+ * ask.yaml `flow` attribute-set (ynl decodes each message's top-level
+ * attributes against that set). A failed genlmsg_put / fill means the
+ * dump skb is full: stop the walk with -EMSGSIZE so the dumpit re-runs
+ * from ctx->seen on the next netlink invocation.
+ */
+hdr = genlmsg_put(ctx->skb, ctx->portid, ctx->seq, &ask_genl_family,
+  NLM_F_MULTI, ASK_CMD_DUMP_FLOWS);
+if (!hdr) {
+ctx->err = -EMSGSIZE;
+return -EMSGSIZE;
+}
+
 rc = ask_genl_fill_one_flow(ctx->skb, f);
 if (rc) {
+genlmsg_cancel(ctx->skb, hdr);
 ctx->err = rc;
-/* Stop walk; netlink core will resume from ctx->seen next call. */
 return rc;
 }
 
+genlmsg_end(ctx->skb, hdr);
 ctx->count++;
 ctx->seen++;
 return 0;
@@ -465,41 +489,31 @@ static int ask_genl_dump_flows_dumpit(struct sk_buff *skb,
 {
 struct ask_flow_table *t = ask_flow_default_table();
 struct ask_genl_dump_ctx ctx = { 0 };
-void *hdr;
-int rc;
 
 if (!t)
 return 0; /* table not initialised → empty dump */
 
-ctx.skb   = skb;
-ctx.start = cb->args[0];
+ctx.skb    = skb;
+ctx.start  = cb->args[0];
+ctx.portid = NETLINK_CB(cb->skb).portid;
+ctx.seq    = cb->nlh->nlmsg_seq;
 
-hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
-  &ask_genl_family, NLM_F_MULTI, ASK_CMD_DUMP_FLOWS);
-if (!hdr)
-return -EMSGSIZE;
+/*
+ * Emit as many flows as fit into this skb, one genl message each, then
+ * let netlink call us again (cb->args[0] advanced past what we emitted).
+ * When the walker emits nothing this round the table is exhausted (or a
+ * later call has skipped every entry): returning 0 ends the dump and
+ * netlink appends NLMSG_DONE. This naturally terminates on an empty
+ * table — no header is written when count == 0 — so there is no infinite
+ * dump the way a bare genlmsg_put per call would produce.
+ */
+ask_flow_walk(t, ask_genl_dump_one_cb, &ctx);
 
-rc = ask_flow_walk(t, ask_genl_dump_one_cb, &ctx);
-
-if (ctx.count == 0 && rc == -EMSGSIZE) {
-/* First fill on this call already overflowed → real error. */
-genlmsg_cancel(skb, hdr);
-return -EMSGSIZE;
-}
-
-genlmsg_end(skb, hdr);
+if (ctx.count == 0)
+return ctx.err ? ctx.err : 0;
 
 cb->args[0] = ctx.seen;
-
-/* Returning 0 ends the dump; returning >0 keeps it going. We end
- * when the walker exhausted the table (rc == 0 AND ctx.count fit
- * everything still owed). On EMSGSIZE we report the bytes written
- * so far and let netlink call us again with cb->args[0] advanced.
- */
-if (rc == 0 || rc == -EMSGSIZE)
 return skb->len;
-
-return rc;
 }
 
 static int ask_genl_get_flow_doit(struct sk_buff *skb, struct genl_info *info)
