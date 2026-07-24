@@ -567,6 +567,17 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
         return ask_hw_pcd_inst;
 }
 
+/*
+ * Fix B: expose the cached FMan handle (resolved via fman_bind() at bringup)
+ * so ask_flow_offload.c can drive fman_pcd_fe_flow_add/_del against the real
+ * FMan instead of passing NULL. Returns NULL before bringup / after teardown.
+ */
+struct fman *ask_hw_get_fman(void)
+{
+        return ask_hw_pcd_inst ? ask_hw_pcd_inst->fman : NULL;
+}
+EXPORT_SYMBOL_GPL(ask_hw_get_fman);
+
 /* ------------------------------------------------------------------------- */
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */
