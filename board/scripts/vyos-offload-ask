@@ -193,7 +193,13 @@ hit_engage() {
     fi
 
     # Step 10 (final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active)
-    echo "engage $PORT $fe_enter_off $miss_fqid $ekfc" > "$PCD_BASE/fe_arm" \
+    # NB: the fe_arm engage verb consumes exactly 3 tokens ("engage %x %lx %x" =
+    # port, fe_enter_off, miss_fqid).  A 4th token (ekfc) is NOT consumed by the
+    # handler and left trailing bytes that the write(2) retry re-submits as a
+    # bogus second command → spurious EINVAL AFTER the port already armed, making
+    # the tool die() past a successful engage.  EKFC is configured by the EXT_HASH
+    # FE (fe_hashfe build), not here.  Pass only the 3 tokens the handler reads.
+    echo "engage $PORT $fe_enter_off $miss_fqid" > "$PCD_BASE/fe_arm" \
         || die "fe_arm engage failed"
 
     # Show state for verification
