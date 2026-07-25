@@ -447,76 +447,37 @@ static int ask_flow_pending_enqueue(u64 cookie,
         return 0;
 }
 
-static int ask_flow_offload_netevent(struct notifier_block *nb,
-                                     unsigned long event, void *ptr)
+/*
+ * ask_flow_neigh_resolved - deferred-insert drain for a resolved next-hop.
+ *
+ * Called in PROCESS context from ask_neigh.c's workqueue when an ARP neighbour
+ * toward @dst_ip on @dev transitions to NUD_VALID.  Drains every pending cookie
+ * waiting on (dev->ifindex, dst_ip) and replays its HW insert.
+ *
+ * MUST run in process context: ask_flow_insert() below allocates GFP_KERNEL.
+ * The netevent chain is ATOMIC (net/core/netevent.c ATOMIC_NOTIFIER_HEAD), so
+ * ask_neigh defers here via a workqueue rather than calling inline — this also
+ * closes the historical PR14z8 "deferred-insert OK=0" gap (the old inline call
+ * from the atomic notifier could not complete a GFP_KERNEL insert).
+ */
+void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
 {
-        struct neighbour *n;
-        struct net_device *dev;
-        __be32 dst_ip;
         struct ask_flow_pending *p;
         struct ask_flow_table *t;
         u32 hw_id = 0;
         int rc;
         unsigned int drained = 0;
 
-        /*
-         * PR14z8 (2026-05-19): instrument the NETEVENT path to nail down
-         * why ask_flow_pending_list never drains (M2 2026-05-19 dmesg
-         * counters: installed=33, defer=141, deferred-insert OK=0).
-         *
-         * Two competing hypotheses:
-         *  H1: NETEVENT_NEIGH_UPDATE doesn't fire for entries we created
-         *      ourselves via __neigh_create()+neigh_event_send() — it only
-         *      fires on already-tracked INCOMPLETE→REACHABLE transitions.
-         *  H2: It does fire, but ask_flow_pending_take_one() filter on
-         *      (egress_ifindex, dst_ip) misses because primary_key
-         *      encoding differs from how we stored dst_ip at defer time.
-         *
-         * The three pr_info_ratelimited below distinguish them:
-         *  - "netevent entry" with the event code proves H1 false (we ARE
-         *    being called); absence of this trace proves H1 true.
-         *  - "netevent NUD_VALID" with the dst_ip + dev->ifindex shows
-         *    what filter key we're searching with.
-         *  - "netevent drained N" at exit shows whether any cookies
-         *    matched. If we see NUD_VALID traces but drained=0 every
-         *    time, H2 is confirmed.
-         */
-        pr_info_ratelimited("ask: flow_offload: netevent entry event=%lu ptr=%px\n",
-                            event, ptr);
-
-        if (event != NETEVENT_NEIGH_UPDATE)
-                return NOTIFY_DONE;
-
-        n = ptr;
-        if (!n || n->tbl != &arp_tbl) {
-                pr_info_ratelimited("ask: flow_offload: netevent skip (n=%px tbl=%s)\n",
-                                    n, (n && n->tbl) ? "non-arp" : "null");
-                return NOTIFY_DONE;
-        }
-
-        /* Only act on transitions into NUD_VALID (lladdr is now meaningful). */
-        read_lock_bh(&n->lock);
-        if (!(n->nud_state & NUD_VALID)) {
-                u8 ns = n->nud_state;
-                read_unlock_bh(&n->lock);
-                pr_info_ratelimited("ask: flow_offload: netevent skip not-VALID nud_state=0x%02x\n",
-                                    ns);
-                return NOTIFY_DONE;
-        }
-        dev = n->dev;
-        memcpy(&dst_ip, n->primary_key, sizeof(dst_ip));
-        read_unlock_bh(&n->lock);
-
         if (!dev)
-                return NOTIFY_DONE;
+                return;
 
-        pr_info_ratelimited("ask: flow_offload: netevent NUD_VALID dev=%s ifindex=%d dst_ip=%pI4 pending_count=%u\n",
+        pr_info_ratelimited("ask: neigh: resolved dev=%s ifindex=%d dst_ip=%pI4 pending_count=%u\n",
                             netdev_name(dev), dev->ifindex, &dst_ip,
                             READ_ONCE(ask_flow_pending_count));
 
         t = ask_flow_default_table();
         if (!t)
-                return NOTIFY_DONE;
+                return;
 
         /*
          * Drain ALL pending entries waiting on (dev->ifindex, dst_ip) — a
@@ -586,12 +547,115 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
                 kfree(p);
         }
 
-        return NOTIFY_DONE;
+        (void)drained;
+        return;
+}
+EXPORT_SYMBOL_GPL(ask_flow_neigh_resolved);
+
+/* Collector context for ask_flow_neigh_mac_changed()'s rhashtable walk. */
+struct ask_neigh_mac_ctx {
+        int             ifindex;    /* egress oif the neigh resolved on */
+        __be32          dst_ip;     /* next-hop L3 address that changed */
+        const u8        *new_mac;   /* fresh lladdr from n->ha          */
+        struct list_head fixups;    /* ask_neigh_mac_fixup, built here  */
+        unsigned int    matched;
+};
+
+struct ask_neigh_mac_fixup {
+        struct list_head    node;
+        u64                 cookie;
+        struct ask_flow_key key;    /* copy with next_hop_mac already patched */
+        u32                 oif;
+        u32                 action_flags;
+        u8                  dir;
+};
+
+/*
+ * Walk callback: collect installed IPv4 flows egressing to (ifindex, dst_ip)
+ * whose baked-in next_hop_mac no longer matches the neighbour's new lladdr.
+ * We only COLLECT here (GFP_ATOMIC, no sleeping) — the rebuild happens after
+ * the walk so ask_flow_remove()/insert() run outside the rhashtable iterator.
+ */
+static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
+{
+        struct ask_neigh_mac_ctx *ctx = arg;
+        struct ask_neigh_mac_fixup *fx;
+
+        if (f->key.l3_proto != ASK_FLOW_L3_IPV4)
+                return 0;
+        if (f->oif != (u32)ctx->ifindex)
+                return 0;
+        if (memcmp(f->key.dst_ip, &ctx->dst_ip, sizeof(ctx->dst_ip)) != 0)
+                return 0;
+        if (f->hw_flow_id == 0)                     /* no HW backing to fix */
+                return 0;
+        if (ether_addr_equal(f->key.next_hop_mac, ctx->new_mac))
+                return 0;                           /* MAC unchanged */
+
+        fx = kzalloc(sizeof(*fx), GFP_ATOMIC);
+        if (!fx)
+                return 0;                           /* best-effort; skip on OOM */
+        fx->cookie       = f->cookie;
+        fx->key          = f->key;
+        ether_addr_copy(fx->key.next_hop_mac, ctx->new_mac);
+        fx->oif          = f->oif;
+        fx->action_flags = f->action_flags;
+        fx->dir          = f->dir;
+        list_add_tail(&fx->node, &ctx->fixups);
+        ctx->matched++;
+        return 0;
 }
 
-static struct notifier_block ask_flow_offload_netevent_nb = {
-        .notifier_call = ask_flow_offload_netevent,
-};
+/*
+ * ask_flow_neigh_mac_changed - re-point offloaded flows at a next-hop whose
+ * MAC changed, killing stale-MAC blackholing (T-M6-3).
+ *
+ * When a neighbour toward @dst_ip on @dev resolves to a NEW @new_mac, every
+ * already-installed flow egressing there still rewrites the OLD MAC in silicon
+ * → frames blackhole.  We collect those flows, then rebuild each cookie-stably
+ * (remove stale-MAC HW entry + reinsert with the fresh MAC).  During the brief
+ * window a rebuilt flow has no HW backing the kernel SW path carries it, so no
+ * packet is lost.  Runs in PROCESS context (workqueue) — insert/remove sleep.
+ */
+void ask_flow_neigh_mac_changed(struct net_device *dev, __be32 dst_ip,
+                                const u8 *new_mac)
+{
+        struct ask_flow_table *t = ask_flow_default_table();
+        struct ask_neigh_mac_fixup *fx, *tmp;
+        struct ask_neigh_mac_ctx ctx;
+        u32 hw_id = 0;
+        int rc;
+
+        if (!t || !dev || !new_mac)
+                return;
+        /* A multicast/zero lladdr is never an offloadable next-hop. */
+        if (is_zero_ether_addr(new_mac) || is_multicast_ether_addr(new_mac))
+                return;
+
+        ctx.ifindex      = dev->ifindex;
+        ctx.dst_ip       = dst_ip;
+        ctx.new_mac      = new_mac;
+        ctx.matched      = 0;
+        INIT_LIST_HEAD(&ctx.fixups);
+
+        ask_flow_walk(t, ask_neigh_mac_collect, &ctx);
+        if (!ctx.matched)
+                return;
+
+        list_for_each_entry_safe(fx, tmp, &ctx.fixups, node) {
+                ask_flow_remove(t, fx->cookie);
+                rc = ask_flow_insert(t, fx->cookie, &fx->key, fx->oif,
+                                     fx->action_flags, fx->dir, &hw_id);
+                if (rc == -EEXIST)
+                        rc = 0;
+                pr_info_ratelimited("ask: neigh: stale-MAC rebuild cookie=0x%llx dev=%s dst_ip=%pI4 nh=%pM rc=%d\n",
+                                    fx->cookie, netdev_name(dev), &dst_ip,
+                                    fx->key.next_hop_mac, rc);
+                list_del(&fx->node);
+                kfree(fx);
+        }
+}
+EXPORT_SYMBOL_GPL(ask_flow_neigh_mac_changed);
 
 /* ------------------------------------------------------------------------- */
 /* PR14z9 (2026-05-19): active-poll fallback for pending queue drain.        */
@@ -1948,20 +2012,12 @@ int ask_flow_offload_init(void)
         }
 
         /*
-         * PR14y: subscribe to NETEVENT_NEIGH_UPDATE so we can replay the
-         * deferred-insert pending queue the moment any ARP entry resolves.
-         * register_netevent_notifier() is documented as never failing in
-         * mainline (it's a raw atomic notifier chain register), but the
-         * return is checked for completeness.
+         * T-M6-3: the NETEVENT_NEIGH_UPDATE notifier now lives in ask_neigh.c
+         * (mainline-aligned single owner for neigh events), which calls
+         * ask_flow_neigh_resolved() (deferred-insert drain) and
+         * ask_flow_neigh_mac_changed() (stale-MAC rebuild) from a workqueue in
+         * process context.  Only the PR14z9 active-poll fallback stays here.
          */
-        rc = register_netevent_notifier(&ask_flow_offload_netevent_nb);
-        if (rc) {
-                ask_pr_err("flow_offload: register_netevent_notifier failed: %d\n", rc);
-                dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
-                flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
-                                         ask_flow_indr_release);
-                return rc;
-        }
 
         /*
          * PR14z9 (2026-05-19): arm the active-poll fallback that re-runs
@@ -1997,7 +2053,7 @@ void ask_flow_offload_exit(void)
         cancel_delayed_work_sync(&ask_flow_pending_poll_work);
 
         dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
-        unregister_netevent_notifier(&ask_flow_offload_netevent_nb);
+        /* T-M6-3: netevent notifier unregistration moved to ask_neigh_exit(). */
 
         /*
          * PR14y: drain any still-pending deferred-insert entries.  The
