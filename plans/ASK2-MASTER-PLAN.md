@@ -51,6 +51,7 @@ Where this plan and those documents disagree, they win — update this plan.
 | **M5 HIT gate PASSED**: ask.ko → fman_pcd_fe_engage → flow insert → TCP HIT | 2026-07-19 |
 | **M5 COMPLETE**: 10.259 Gbps line rate, 0.16% CPU, 0% loss, opcode chain active | 2026-07-24 |
 | **M7 COMPLETE**: CLI engage/disengage, per-interface mutex, `show flows` via ynl | 2026-07-25 |
+| **Fix B (F-117) per-key ehash unlink VALIDATED**: mid-chain + head + -ENOENT correct, memory-clean (dma_free_coherent); scale path beyond 32-key CC-tree ceiling | 2026-07-25 |
 | Kernel ZC datapath PROVEN (xsk_zc_rx_redirect=6 with raw XSK probe); gap is VPP integration | 2026-07-21 |
 | VPP interrupt-mode ZC recipe: `zero-copy` + interrupt rx-mode + single-queue + no workers → eligible climbs | 2026-07-22 |
 | 1.6 GHz performance governor + netdev offloads (sg/gso/gro) deployed | 2026-07-22 |
@@ -247,7 +248,7 @@ Key outcomes: FE-VM hardware match & dispatch engine verified; nft flowtable `ho
 - [ ] **T-M6-2** `@___` — F-06 `ask_bridge.c` real body (switchdev).
 - [ ] **T-M6-3** `@___` — F-03 `ask_neigh.c` real body (NETEVENT_NEIGH_UPDATE → HMCT rebuild; kills stale-MAC blackholing).
 - [ ] **T-M6-4** `@___` — IPsec landing series in one merge: F-01 + F-07 + F-02 + F-23 + F-21 + F-22 + F-20, then `NETIF_F_HW_ESP` LAST. GCM refused (§3.8).
-- [~] **T-M6-5** `@mihakralj` — **Per-flow FE-VM ehash HIT (scale path beyond the CC-tree ceiling)** — carved out of T-M5-8. **SPLIT into Part 1 (strategic, DONE) + Part 2 (engineering, OPEN) on 2026-07-25.**
+- [~] **T-M6-5** `@mihakralj` — **Per-flow FE-VM ehash HIT (scale path beyond the CC-tree ceiling)** — carved out of T-M5-8. **Part 1 (strategic) DONE + Part 2 (Fix B correctness) DONE & silicon-validated 2026-07-25. Part 3 (arm/teardown robustness, task #11) + Cosmetic 2 deferred.**
   - **✅ PART 1 — strategic reconciliation (DONE 2026-07-25).** Resolved the "is this load-bearing or a dormant scaffold?" question against code ground truth. The shipping datapath is **Fork-B** (frames traverse the FE-VM, decision §3.1): ask.ko `flow_add` (`ask_flow_offload.c:1063`) calls `fman_pcd_fe_flow_add`, but flow **matching** is via **CC-tree**, hard-capped at **`FMAN_CC_MAX_STATIC_KEYS = 32`** keys/tree (~5 KiB MURAM budget, `0086b`); beyond 32 flows the insert returns `hw_insert=-19` and falls back to the kernel **SW flowtable** (`ask_flow_offload.c:1126`). The **FE-VM EHASH** mechanism (this task / Fix B / F-117) matches via hash to `FMAN_EHASH_MASK_MAX = 0x7fff` = **thousands of flows**. **VERDICT: the FE-VM ehash path IS the durable answer to HW-offloading >32 concurrent flows** — a real ceiling for router/firewall workloads, not a dead-end. Hardening it (Part 2) is justified. **This does NOT block shipping** (CC-tree + SW-flowtable already meets the 10.259 Gbps gate for ≤32 offloaded flows); it is a scale feature.
   - **🟢 PART 2 — engineering (OPEN, task #10):** (1) crash-safe **idempotent** FE-VM ehash arm/disengage/`fe_pool put` state machine (the `fe_pool put` wedge + disengage residue below); (2) a `del <key>` verb on the `fe_flow` debugfs node → deterministic Fix B unit test; (3) validate F-117 per-key unlink on silicon. Design-first / test-first, one CI cycle — NOT trial-and-error on wedging HW.
   - Sub-items (status detail below):
