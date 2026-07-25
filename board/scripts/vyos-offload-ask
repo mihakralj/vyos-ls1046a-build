@@ -274,6 +274,26 @@ flow_add() {
 }
 
 # ---------------------------------------------------------------------------
+# flow-del [key_hex]
+# With a key: per-key delete (F-118 "del <key>" verb → fman_pcd_ehash_del_key,
+#   removes exactly that flow, keeping the collision chain intact).
+# Without a key: clear ALL flows (legacy behaviour).
+# ---------------------------------------------------------------------------
+flow_del() {
+    local key="${1:-}"
+    if [ -z "$key" ]; then
+        echo "clear" > "$PCD_BASE/fe_flow" 2>/dev/null || true
+        info "flows CLEARED (all)"
+        return
+    fi
+    if [ $(( ${#key} % 2 )) -ne 0 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]+$'; then
+        die "key must be even-length hex"
+    fi
+    echo "del ${key}" > "$PCD_BASE/fe_flow" || die "fe_flow del failed (no such key, or F-118 not present)"
+    info "FLOW DELETED  key=$key ($(( ${#key} / 2 )) bytes)"
+}
+
+# ---------------------------------------------------------------------------
 # Guard: LS1046A only
 # ---------------------------------------------------------------------------
 if ! grep -q "fsl,ls1046a" /proc/device-tree/compatible 2>/dev/null; then
@@ -287,7 +307,8 @@ case "$VERB" in
     hit-disengage)  hit_disengage ;;
     status)         status ;;
     flow-add)       flow_add "$@" ;;
-    flow-del)
+    flow-del)       flow_del "$@" ;;
+    flow-clear)
         echo "clear" > "$PCD_BASE/fe_flow" 2>/dev/null || true
         info "flows CLEARED"
         ;;
