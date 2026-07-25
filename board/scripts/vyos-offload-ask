@@ -147,7 +147,17 @@ hit_engage() {
     echo "build" > "$PCD_BASE/fe_singletons" || die "fe_singletons build failed"
 
     # Step 4: configure ehash table
-    echo "set 0x7fff $keysize 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
+    # Bucket count = mask+1; the DDR bucket array is 16 B/bucket, allocated as a
+    # single dma_alloc_coherent() (patch 0130).  mask 0x7fff = 32768 buckets =
+    # 512 KiB = an order-7 (128 contiguous pages) coherent alloc, which fails
+    # -ENOMEM on this platform even on a fresh boot (no CMA region for the FMan
+    # dev; the buddy allocator cannot reliably serve order-7).  0x0fff = 4096
+    # buckets = 64 KiB = order-4, which allocates reliably.  The mask is
+    # self-consistent end-to-end: fman_pcd_ehash_bucket_index() masks the CRC64
+    # with this same value, table_set() sizes by it, and the silicon node encodes
+    # hash_mask_bits from it — so HIT is preserved for any 2^n-1 mask.  4096
+    # buckets is ample for the handful of flows this verification path inserts.
+    echo "set 0x0fff $keysize 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
 
     # Step 5: build EXT_HASH FE (consumes ehash config)
     echo "build" > "$PCD_BASE/fe_hashfe" || die "fe_hashfe build failed"
