@@ -14,9 +14,10 @@ PORT="0x11"
 # Test flow: 10.99.2.106:44444 → 10.99.2.185:55555 TCP
 # Key (MSB-first): 0A63026A0A6302B906AD9CD903
 # CRC-64 raw: 0x600824e70ae4d573
-# Bucket index: (0x600824e70ae4d573 >> 48) & 0x7FFF = 0x6008
+# Bucket index: (0x600824e70ae4d573 >> 48) & 0x0FFF = 0x008
+# (mask reduced 0x7fff->0x0fff: 512 KiB order-7 dma_alloc_coherent -> 64 KiB order-4; see vyos-offload-ask)
 KEY="0A63026A0A6302B906AD9CD903"
-EXPECTED_BUCKET="6008"
+EXPECTED_BUCKET="008"
 
 echo "=== ASK2 HIT Test — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 echo "Key: $KEY (MSB-first: SIP→DIP→PROTO→SPORT→DPORT)"
@@ -31,7 +32,7 @@ sleep 1
 # Step 2: Engage with keysize=13
 echo "--- Step 2: Engage keysize=13 ---"
 echo "set $PORT" > "$PCD/fe_port"
-echo "set 0x7FFF 13 0" > "$PCD/fe_ehash"
+echo "set 0x0fff 13 0" > "$PCD/fe_ehash"
 echo get > "$PCD/fe_pool"
 echo build > "$PCD/fe_singletons"
 echo build > "$PCD/fe_hashfe"
