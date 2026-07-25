@@ -640,6 +640,20 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
 int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type,
        void *type_data, void *cb_priv);
 
+/*
+ * T-M6-3 neigh entry points, driven by ask_neigh.c's netevent notifier from a
+ * workqueue (process context — both sleep via GFP_KERNEL insert):
+ *   ask_flow_neigh_resolved()    — drain deferred-insert pending toward a
+ *                                  now-resolved (dev, dst_ip) next-hop.
+ *   ask_flow_neigh_mac_changed() — rebuild installed flows egressing to
+ *                                  (dev, dst_ip) whose baked-in next_hop_mac
+ *                                  no longer matches @new_mac (kills stale-MAC
+ *                                  blackholing).
+ */
+void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip);
+void ask_flow_neigh_mac_changed(struct net_device *dev, __be32 dst_ip,
+       const u8 *new_mac);
+
 /* ------------------------------------------------------------------------- */
 /* ask_xfrm.c — xfrmdev_ops packet-mode IPsec offload                         */
 /* PR16a fills these in.                                                     */
