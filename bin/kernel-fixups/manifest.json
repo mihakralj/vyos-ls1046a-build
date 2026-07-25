@@ -63,9 +63,14 @@
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "Fix B pt1: per-key FE-VM ehash delete (fman_pcd_ehash_del_key head+mid-chain) + fe_flow_del per-key rewrite (NULL key => clear-all)",
       "date": "2026-07-24"
+    },
+    "F_118.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "Fix B pt2: 'del <key>' verb on fe_flow debugfs node -> fman_pcd_ehash_del_key (per-key unlink unit-test hook, no fe_arm needed). Runs after F-117.",
+      "date": "2026-07-25"
     }
   },
-  "count": 40,
+  "count": 41,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],

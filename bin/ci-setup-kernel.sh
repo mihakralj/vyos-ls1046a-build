@@ -1687,6 +1687,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-117: FE-VM per-key ehash delete"
 fi
 
+# F-118 (Fix B pt2): add a "del <key>" verb to the fe_flow debugfs node routing
+# to fman_pcd_ehash_del_key (table 0), so Fix B's per-key collision-chain unlink
+# is unit-testable via pure ehash ops (fe_ehash set / fe_flow add / fe_flow del)
+# with NO fe_arm. Additive; runs AFTER F-117 (needs fman_pcd_ehash_del_key).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_118.py" 2>&1
+    echo "### F-118: fe_flow 'del <key>' unit-test hook"
+fi
+
 # F-095 (DELETED — stub, never implemented)
 
 fi
