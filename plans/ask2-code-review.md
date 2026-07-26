@@ -1,4 +1,4 @@
-**Version 2.1.0 · 2026-07-26 · HADS 1.0.0**
+**Version 2.2.0 · 2026-07-26 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -12,7 +12,7 @@
 
 **[BUG] Production ASK CLI does not select the reviewed production kernel path.** `set interfaces ethernet eth<n> offload ask` invokes `vyos-offload-ask engage`, which deliberately arms the debugfs `CONT_LOOKUP` scaffold with `fe_enter_off=0`. It does not invoke `ASK_CMD_ENGAGE` or `ask_hw_offload_engage()`, the path that calls `fman_pcd_fe_engage()` and builds the FE-VM ehash chain. The flow path then ignores `fman_pcd_fe_flow_add()` failure and still allocates a cookie, sets `hw_backed`, increments `num_hw_backed`, and reports `offloaded=true`. On the shipping CLI path, a flow can therefore be reported as hardware-offloaded without a per-flow FE-VM record.
 
-**[SPEC]** This invalidates the current “M7 complete” release claim until CR-001 and CR-003 are fixed and silicon-verified through the actual VyOS CLI. The kernel API implementation is materially safer than the CLI-selected debugfs path, but it is not the path operators receive.
+**[SPEC]** This invalidates the current “M7 complete” release claim until CR-001 and CR-003 are fixed and silicon-verified through the actual VyOS CLI. **Reflected in `plans/ASK2-MASTER-PLAN.md` v1.21.0**: §1.2 now carries a `[BUG]` qualifying M7 (the CLI *surface* stays DONE; the end-to-end offload claim does not), and CR-001 is tracked as defect **F-123**. The kernel API implementation is materially safer than the CLI-selected debugfs path, but it is not the path operators receive.
 
 **[SPEC]** The review found three P0 release blockers, five P1 correctness/resource defects, and four P2 hardening or future-feature defects. No new evidence overturned the settled FE-VM topology, EKFC `0x001C0006`, 13-byte MSB-first key order, raw CRC-64, direct RCCB→FE_ENTER dispatch, or the F-120 collect-then-replay design.
 
@@ -152,6 +152,8 @@ key_bytes.bytes[10] = key->sport & 0xff;
 
 **[SPEC] Root cause.** Fix C1 removed the Fork-A `ask_hw_port_reinstall()` programming path, but retained its fixed shadow array, `nkeys` limit, HM next-hop allocation and key construction. No live CC entry consumes that shadow key or HM handle; the actual per-flow path is `fman_pcd_fe_flow_add()`.
 
+**[BUG] UNRESOLVED CONTRADICTION with `ASK2-MASTER-PLAN.md` §5 T-M6-5 Part 1.** That section's strategic verdict rests on the premise that flow *matching* is via CC-tree "hard-capped at `FMAN_CC_MAX_STATIC_KEYS = 32`", and uses that ceiling to justify the FE-VM ehash scale path. CR-007 says the shadow is dead bookkeeping and nothing programs a per-flow CC key, which would make the 32 cap an artefact rather than a silicon classifier limit. **Both cannot be true.** The observable consequences are identical either way — `-ENOSPC` at 32, and F-120's leak reaching it — so no fix here is blocked, but the *justification* for the ehash scale path differs. Resolve by reading `ask_hw_flow_insert()` against live CC-tree state on silicon **before** planning T-M6-5 Part 3. Flagged symmetrically in the master plan; neither document should be treated as settled on this point.
+
 **[SPEC] Impact.**
 
 1. A dead data structure imposes the obsolete CC-tree scale ceiling on the ehash path.
@@ -234,7 +236,7 @@ struct fman *fman_bind(struct device *fm_dev)
 7. Sleep-in-atomic neighbour handling: notifier work is deferred to process context.
 8. Whole-table FE delete on ordinary flow removal: F-117 added per-key ehash unlink; silicon collision-chain validation remains separate from this code review.
 
-**[NOTE]** F-120 is code-fixed but not fully closed for release: CR-009 is a narrower concurrent-completion race, and board validation must still prove hardware/MURAM convergence.
+**[NOTE]** F-120 is code-fixed but not fully closed for release: CR-009 (the narrower concurrent-completion race) is now also fixed, but board validation must still prove hardware/MURAM convergence — tracked as **T-M6-6** in the master plan. The decisive check is `p->nkeys`/MURAM returning to baseline; an empty `dump-flows` is the exact false signal the broken code produced.
 
 ## 6. Evidence anchors
 
@@ -277,3 +279,5 @@ struct fman *fman_bind(struct device *fm_dev)
 6. Delete dead Fork-A bookkeeping, remove the artificial 32-flow cap, and release the FMan reference.
 7. Close CR-009/010/011 with focused KUnit coverage.
 8. Run a cold-boot silicon session through the actual VyOS CLI and update `ASK2-MASTER-PLAN.md` only after the acceptance evidence is captured.
+
+**[NOTE] Progress 2026-07-26.** Steps completed out of order because they were small, verified and self-contained: CR-002 (step 2) is code-fixed with its KUnit vector, and CR-009/CR-010 (step 7) are closed. **Step 2's silicon half remains blocked by step 1** — the 13-byte key can be pinned in KUnit, but proving it takes a HIT needs the FE-VM path reachable through the shipping CLI, which CR-001 prevents. Steps 1, 3, 4, 5, 6 are untouched and are the real remaining work. Two adjacent board-found defects landed alongside: **F-121** (`AttributeError` in the commit path — the fixed half of CR-003) and **F-122** (`vyos-offload-ask engage` non-idempotent), both recorded in the master-plan defect table.
