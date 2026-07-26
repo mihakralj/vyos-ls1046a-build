@@ -1,96 +1,279 @@
-**Version 1.6.0 · 2026-07-26 · HADS 1.0.0**
+**Version 2.0.0 · 2026-07-26 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
-**[SPEC]** This document is the live ASK2 code-review state, rewritten to be **priority-first**. It separates actionable open issues from already-fixed findings, and maps each open item to a concrete fix direction.
+**[SPEC]** This document is the live, priority-first ASK2 code review. Treat §2 as the actionable defect list, §3 as the detailed evidence and fix contract, §4 as incomplete-but-gated feature work, and §5 as closed historical findings.
 
-**[SPEC]** Scope reviewed: last-10-commit window ending at `04d3bb19`, prior `ask2-code-review` findings, and Qdrant historical diagnostics.
+**[SPEC]** Review baseline: repository HEAD `c2fe6011` (`fix(ask2): F-120 — make FLUSH_FLOWS remove-equivalent (HW teardown)`), the ten commits ending at that revision, the complete `kernel/ask/oot-modules/ask/` implementation, ASK UAPI/YNL surfaces, the VyOS CLI integration, relevant FMan patch/fixup code, `ASK2-MASTER-PLAN.md`, and Qdrant silicon findings through 2026-07-26.
 
-## 1. Prioritized issue list (actionable)
+**[SPEC]** Findings are limited to defects supported by current source plus an executable failure sequence or authoritative silicon evidence. Speculative teardown-locking and dedicated-FQ claims were excluded where module-unregister ordering or settled topology could plausibly make them safe.
 
-| Priority | Issue | Severity | Status | Why it is prioritized |
-|---|---|---|---|---|
-| ~~P0~~ | `FLUSH_FLOWS` clears SW table but can leave HW flow state (`2.8`) | HIGH | **FIXED in code** — silicon validation pending | Was the highest priority: leaked CC slots permanently exhausted the 32-key tree |
-| P1 | Neighbour stale-MAC path still O(total flows) (`2.4`) | MEDIUM | PARTIALLY FIXED | Can become control-plane hot path under churn and large flow tables. **Note:** its `num_hw_backed==0` skip only works now that 2.8 stopped leaking that counter |
-| P2 | No silicon validation for the post-fix stale-MAC rebuild branch **or** for 2.8's HW release | MEDIUM | OPEN (validation) | All fixes are code-complete but unproven on `.185`; 2.8 in particular can only be confirmed by observing `p->nkeys` return to baseline |
+## 1. Executive verdict
 
-## 2. Open findings (detailed)
+**[BUG] Production ASK CLI does not select the reviewed production kernel path.** `set interfaces ethernet eth<n> offload ask` invokes `vyos-offload-ask engage`, which deliberately arms the debugfs `CONT_LOOKUP` scaffold with `fe_enter_off=0`. It does not invoke `ASK_CMD_ENGAGE` or `ask_hw_offload_engage()`, the path that calls `fman_pcd_fe_engage()` and builds the FE-VM ehash chain. The flow path then ignores `fman_pcd_fe_flow_add()` failure and still allocates a cookie, sets `hw_backed`, increments `num_hw_backed`, and reports `offloaded=true`. On the shipping CLI path, a flow can therefore be reported as hardware-offloaded without a per-flow FE-VM record.
 
-### 2.8 HIGH — `ASK_CMD_FLUSH_FLOWS` bypassed HW teardown — **FIXED in code, validation pending**
+**[SPEC]** This invalidates the current “M7 complete” release claim until CR-001 and CR-003 are fixed and silicon-verified through the actual VyOS CLI. The kernel API implementation is materially safer than the CLI-selected debugfs path, but it is not the path operators receive.
 
-**[BUG]** `ASK_CMD_FLUSH_FLOWS` reported empty flow state while hardware cookies, CC slots and HM refs remained active.
+**[SPEC]** The review found three P0 release blockers, five P1 correctness/resource defects, and four P2 hardening or future-feature defects. No new evidence overturned the settled FE-VM topology, EKFC `0x001C0006`, 13-byte MSB-first key order, raw CRC-64, direct RCCB→FE_ENTER dispatch, or the F-120 collect-then-replay design.
 
-**[SPEC]** Confirmed, and more damaging than first written. `ask_flow_flush()` unlinked entries straight out of the rhashtable walker and `call_rcu`'d them, never calling `ask_hw_flow_remove()`. Per HW-backed flow that leaked:
+## 2. Prioritized actionable findings
 
-1. **The CC shadow slot** — `p->shadow[i].used` stayed true and `p->nkeys` was never decremented. This is what made it P0 rather than a tidy-up: `ask_hw_flow_insert()` refuses at `p->nkeys >= FMAN_CC_MAX_STATIC_KEYS` (**32**), so flushing 32 HW-backed flows permanently filled that port's CC tree. Every later insert returned `-ENOSPC` and fell back silently to the software path, with **no recovery short of a module reload** — from a command whose own `ask.yaml` doc string calls it "debug/recovery". The operator reaching for flush while troubleshooting was exactly who lost offload.
-2. **The HM next-hop reference** — `fman_hm_nexthop_put()` never ran, so the MURAM node was never freed. MURAM is the scarce resource behind the known 327×-ENOMEM wall.
-3. **The xarray cookie + kmem_cache object** — `ask_hw_cookie_free()` never ran.
+| ID | Priority | Severity | Finding | Status |
+|---|---|---:|---|---|
+| CR-001 | P0 | CRITICAL | Production CLI arms the dormant debugfs scaffold; per-flow FE insertion errors are ignored while flows are reported `offloaded=true` | OPEN |
+| CR-002 | P0 | HIGH | FE-VM key serialization reverses TCP/UDP port bytes on little-endian ARM64 | OPEN |
+| CR-003 | P0 | HIGH | VyOS commit-path error handling is broken and fail-open: integer return code is treated as stderr, missing/unsupported paths silently succeed, helper teardown errors are swallowed | OPEN |
+| CR-004 | P1 | HIGH | Stale-MAC remove-then-reinsert can resurrect a destroyed flow or permanently lose tracking after reinsertion failure | OPEN |
+| CR-005 | P1 | HIGH | `num_hw_backed == 0` stale-MAC shortcut has a lost-event race with an in-flight hardware insert | OPEN |
+| CR-006 | P1 | HIGH | `ask.yaml` does not describe the active `get-info` wire format and omits engage/disengage operations | OPEN |
+| CR-007 | P1 | MEDIUM | Removed Fork-A programming still imposes a false 32-flow cap and allocates unused HM/shadow state | OPEN |
+| CR-008 | P1 | MEDIUM | ASK retains the `fman_bind()` device reference for the module lifetime without releasing it | OPEN |
+| CR-009 | P2 | MEDIUM | F-120 flush can stop partially complete after one concurrently removed batch | OPEN |
+| CR-010 | P2 | MEDIUM | `ask_flow_insert()` performs an RCU-protected rhashtable lookup without an RCU read-side critical section | OPEN |
+| CR-011 | P2 | LOW | Authoritative comments and KUnit tests still encode disproven fake-ID and `-EAGAIN` contracts | OPEN |
+| CR-012 | P2 | HIGH when enabled | XFRM add returns success without programming hardware; currently unreachable but unsafe to expose | GATED |
 
-Plus `t->num_hw_backed` was left permanently high, disabling the stale-MAC fast-path skip added for 2.4. **Severity split:** items 1-3 pre-date the 2026-07-26 review fixes; the `num_hw_backed` leak was a regression introduced *by* those fixes. Its effect was performance-only — an over-count causes a pointless walk, whereas an under-count would have skipped needed rebuilds.
+## 3. Detailed findings
 
-**[SPEC] Fix as implemented.** Flush is now remove-**equivalent** via collect-then-replay:
+### 3.1 CR-001 P0 — production CLI reports per-flow offload without installing a per-flow hardware record
 
-- **Phase 1** collects up to `ASK_FLOW_FLUSH_BATCH` (32) cookies under `rhashtable_walk_start/stop` — no allocation, no sleeping.
-- **Phase 2** replays them through the ordinary `ask_flow_remove()` outside the walker, which performs HW teardown and maintains both counters. One implementation of teardown ordering, not two.
-- Repeats until the table drains, with a no-progress guard so a genl `doit` handler can never livelock.
+**[BUG] Symptom.** The operator enables ASK through the supported VyOS command, `dump-flows` can report `offloaded=true`, but the production helper has only installed the debugfs `CONT_LOOKUP` scaffold. No FE-VM ehash table or per-flow record is guaranteed to exist.
 
-**[NOTE]** The two-phase shape is **mandatory, not stylistic**: `rhashtable_walk_start()` opens an RCU read-side critical section and `ask_hw_flow_remove()` takes `h->lock`, a mutex that can sleep. Calling it from inside the walker would be a sleep-in-atomic — the same class of bug T-M6-3 had to fix in the netevent notifier.
+**[SPEC] Root cause.**
 
-**[NOTE]** `ask_flow_table_destroy()`'s walker had the same missing-`num_hw_backed` shape and now balances it. It deliberately still does **not** call `ask_hw_flow_remove()`: it runs at module teardown where `ask_hw_pcd_teardown()` releases the whole PCD chain wholesale, and `rhashtable_free_and_destroy()` offers no sleepable context. A comment records that any new non-teardown caller must be reworked like flush was.
+1. `data/vyos-1x-031-offload-ask-cli.patch` calls `/usr/local/bin/vyos-offload-ask --port <id> engage`.
+2. `board/scripts/vyos-offload-ask:engage()` writes `engage <port> 0` to `fman_pcd/0/fe_arm`. Its own contract calls this “PRODUCTION path: CONT_LOOKUP scaffold, FE-VM dormant.”
+3. The helper does not call the generic-netlink `ASK_CMD_ENGAGE` handler. That handler reaches `ask_hw_offload_engage()`, which calls `fman_pcd_fe_engage()` and `__fman_pcd_fe_build_vm_chain()`, including `fman_pcd_ehash_table_set()`.
+4. Every successful flow replace calls `ask_fe_flow_insert()`, but that function is `void` and discards the return from `fman_pcd_fe_flow_add()`.
+5. `ask_hw_flow_insert()` no longer programs the removed Fork-A CC entry. It allocates an HM reference, a 32-slot shadow entry and a cookie, then returns success.
+6. `ask_flow_insert()` interprets that cookie as hardware ownership, sets `hw_backed=true`, increments `num_hw_backed`, and exposes `offloaded=true`.
 
-**[SPEC] Coverage.** KUnit `ask_flow_test_flush_is_remove_equivalent` drives 100 entries (>3 batches) through flush and asserts the table drains and both counters return to zero. It cannot prove the silicon release — the harness has no PCD — so that remains a board task (see P2).
+**[SPEC]** Qdrant’s 2026-07-25 board result independently observed this exact shipping-path state: `fe_flow` reported no ehash table, `fman_pcd_fe_flow_add()` returned `-ENODEV`, and the error was a safe no-op only because the caller discarded it. Current source still selects that helper path.
 
-### 2.4 P1 / MEDIUM — stale-MAC update remains O(total flows)
+**[SPEC] Additional lifetime defect.** `ask_fe_flow_insert()` is unconditional: it does not verify that the ingress port is engaged, does not bind the record to a per-port engagement generation, and uses the module-global cached `ask_hw_enq_fe_off`. Disengage tears down the FE chain but does not clear that cached offset. A later replace can therefore attempt to program an offset belonging to a freed or rebuilt MURAM object.
 
-**[BUG]** Even after mitigations, the rebuild trigger still performs full-table walks whenever `num_hw_backed > 0`.
+**[SPEC] Required fix.**
 
-**[SPEC]** What is fixed already:
-1. Early skip when `num_hw_backed == 0`.
-2. Cheap `!hw_backed` reject in collector.
-3. Neighbour queue coalescing and capping in `ask_neigh.c`.
+1. Make the VyOS CLI use the generic-netlink/YNL engage and disengage operations; production configuration must not write debugfs.
+2. Add engage/disengage and `port-id` to `ask.yaml`, then generate or use a typed userspace client.
+3. Make FE-record insertion return an error to the replace transaction.
+4. Publish `hw_backed` and `offloaded=true` only after the FE record is installed and read back successfully.
+5. On FE insertion failure, roll back the cookie, HM reference and shadow state before returning a software-fallback result.
+6. Couple each flow to an engaged port/generation and reject insertion when no valid FE chain exists.
+7. Clear or generation-invalidate cached FE offsets during disengage.
 
-**[SPEC]** What remains open:
-1. No adjacency index keyed by `(oif, l3_proto, dst_ip)`.
-2. Worst-case asymptotic path under churn is still linear in table size.
+**[SPEC] Acceptance gate.** Engage through the real VyOS CLI; verify an ehash table exists; install one non-palindromic TCP flow; verify the exact 13-byte record and bucket pointer; prove matching traffic takes HIT while a neighboring tuple takes MISS; remove the flow and prove the record, HM ref, cookie and `num_hw_backed` all return to baseline.
 
-**[SPEC] Fix direction**
-1. Add adjacency index (dst tuple -> cookie list/set).
-2. Update index on insert/remove/rehash and use it in stale-MAC rebuild path.
-3. Keep current walk as fallback behind debug flag until index is proven.
+### 3.2 CR-002 P0 — FE-VM key serialization reverses transport ports
 
-### P2 Validation gap — stale-MAC rebuild not yet silicon-proven
+**[BUG] Symptom.** A flow with source port `44444` (`0xAD9C`) and destination port `55555` (`0xD903`) is serialized as `9CAD 03D9` on the LS1046A’s little-endian ARM64 kernel, so it cannot match the silicon EKFC key `... 06 AD9C D903`.
 
-**[NOTE]** Post-fix logic is stronger, but live validation remains incomplete. This is not a new code defect; it is a release-readiness risk.
+**[SPEC] Root cause.** `struct ask_flow_key::sport` and `dport` are `__be16`, but `ask_fe_flow_insert()` and `ask_fe_flow_remove()` split them with integer shifts:
 
-**[SPEC] Required validation**
-1. Engage ASK on `.185`, install HW-backed flows, force neighbour MAC change, verify rebuild occurs and forwarding continues.
-2. Exercise `FLUSH_FLOWS` before/after fix and confirm HW state + `num_hw_backed` converge to zero.
-3. Capture `dump-flows`, relevant debugfs counters, and `pcd-snapshot` before/after transitions.
+```c
+key_bytes.bytes[9]  = key->sport >> 8;
+key_bytes.bytes[10] = key->sport & 0xff;
+```
 
-## 3. Closed findings summary
+**[SPEC]** On little-endian ARM64, the numeric value of an in-memory `__be16` containing bytes `AD 9C` is `0x9CAD`; shifting it emits the bytes backwards. Add and delete agree with each other, which can hide the defect in software-only tests, but neither agrees with the hardware-extracted key.
 
-**[SPEC]** Previously reported defects now closed in code:
-1. `2.1` `hw_flow_id` namespace collision between SW fallback IDs and real HW cookies — **FIXED**.
-2. `2.2` stale-MAC rebuild admitting SW-only flows — **FIXED**.
-3. `2.3` unbounded neighbour event queue — **FIXED**.
-4. `2.5` stale comments asserting invalid runtime invariants — **FIXED**.
-5. `2.6` fake `hw_flow_id` exported as if real HW cookie — **FIXED**.
-6. `2.7` queue-bound comment mismatch — **FIXED**.
+**[SPEC]** Qdrant’s silicon-verified key is `0a63026a0a6302b906ad9cd903`: SIP, DIP, protocol, source port and destination port in wire order. This is consistent with the settled MSB-first extraction contract.
 
-## 4. Evidence anchors
+**[SPEC] Required fix.** Copy the raw two bytes of each `__be16` into the key buffer, or convert with `be16_to_cpu()` before splitting. Use one shared key-builder for insert, delete, tests and diagnostics.
 
-**[SPEC]** Open-item anchors re-verified 2026-07-26.
+**[SPEC] Acceptance gate.** Add a KUnit vector asserting the complete 13-byte output equals `0a63026a0a6302b906ad9cd903`; then prove the same key appears in `fe_flow` and receives a silicon HIT.
 
-| Anchor | What it shows |
+### 3.3 CR-003 P0 — VyOS configuration is fail-open and raises the wrong exception on helper failure
+
+**[BUG] Symptom.** A failed ASK helper can either crash the commit path with `AttributeError` or be silently accepted as successful.
+
+**[SPEC] Root cause.**
+
+1. VyOS `Interface._popen()` returns `(stdout, integer_return_code)`.
+2. `set_ask_offload()` assigns the second value to `err` and calls `err.strip()` when it is nonzero.
+3. Even after correcting the type, the method only prints selected helper text instead of raising `ConfigError`, so the configuration can commit while hardware remains unchanged.
+4. Missing helper binaries and unsupported interfaces return silently.
+5. The helper treats required `fe_port set` failure as a warning, suppresses both disengage writes with `|| true`, and its hit-disengage/flow-clear teardown commands similarly hide failures.
+
+**[SPEC] Required fix.** Use an API that returns stdout, stderr and integer status unambiguously; reject unsupported ports during `verify()`; raise `ConfigError` on every nonzero engage/disengage result; treat the required FE pool arm as fatal; and make teardown report partial failure rather than printing unconditional success.
+
+**[SPEC] Acceptance gate.** Inject failures at helper missing, engage, FE pool arm and disengage stages. Each must abort commit with the original kernel/helper error, leave configuration and hardware state aligned, and never raise a Python type error.
+
+### 3.4 CR-004 P1 — stale-MAC rebuild is not atomic with flow destruction
+
+**[BUG] Symptom.** A neighbour update can bring back a flow after nftables destroyed it, or can delete a tracked flow permanently when reinsertion fails.
+
+**[SPEC] Root cause.** `ask_flow_neigh_mac_changed()` snapshots a flow key, calls `ask_flow_remove(cookie)`, then calls `ask_flow_insert(cookie, rebuilt_key)`.
+
+**[SPEC] Destruction race.**
+
+1. Neighbour work collects cookie `C`.
+2. nftables destroys `C`.
+3. Neighbour work ignores `-ENOENT` from its remove and inserts `C` again.
+
+**[SPEC]** A second ordering is also unsafe: neighbour work removes `C`; nftables destroy observes `-ENOENT` and completes; neighbour work then reinserts `C`. Both resurrect a flow after its authoritative owner removed it.
+
+**[SPEC] Reinsertion failure.** If removal succeeds but insertion returns `-ENOMEM`, `-ENOSPC` or another error, the code only logs. The flow disappears from tracking and hardware and is not queued for retry.
+
+**[SPEC] Required fix.** Rebuild under a lifecycle mechanism that distinguishes active, destroying and rebuilding states. A destroy must set a tombstone/generation that prevents replay. Failed active-flow rebuilds should enter the existing deferred-insert mechanism rather than disappear.
+
+**[SPEC] Acceptance gate.** KUnit race tests must cover destroy-before-remove, destroy-between-remove-and-insert, and reinsertion failure. No ordering may resurrect a destroyed cookie or lose a still-authoritative flow.
+
+### 3.5 CR-005 P1 — stale-MAC fast-path can lose the only neighbour-change event
+
+**[BUG] Symptom.** A newly inserted hardware flow can retain the old next-hop MAC indefinitely even though the neighbour update notifier ran.
+
+**[SPEC] Failure sequence.**
+
+1. Flow replace resolves and stores the old neighbour MAC but has not yet published/incremented `num_hw_backed`.
+2. Neighbour work observes `num_hw_backed == 0` and returns without walking.
+3. Flow insert completes with the old MAC and increments the counter.
+4. No further neighbour event is required to occur, so the stale action remains.
+
+**[SPEC]** The comment that “the next event picks it up” is not a correctness guarantee. The counter is safe as a performance hint only when insertion and neighbour generations are synchronized.
+
+**[SPEC] Required fix.** Track a neighbour generation in the resolved adjacency and revalidate it before publishing the hardware flow, or remove the zero-counter shortcut until an adjacency index provides synchronized ownership.
+
+### 3.6 CR-006 P1 — YNL schema and live generic-netlink ABI disagree
+
+**[BUG] Symptom.** A client generated from `kernel/ask/uapi/ask.yaml` can fail to decode or mislabel `get-info`, and cannot invoke the kernel’s engage/disengage handlers.
+
+**[SPEC] Root cause.**
+
+1. `ask.h` and `ask_genl.c` emit a nested `ASK_ATTR_INFO` containing ten positional attributes: driver version, genl version, separate ucode fields, capabilities, FMan count and flow count.
+2. `ask.yaml` declares only four `info` attributes and models ucode as one nested `binary` struct.
+3. The schema omits `ASK_CMD_ENGAGE`, `ASK_CMD_DISENGAGE` and the required `ASK_ATTR_PORT_ID`, even though the UAPI enum and live handlers implement them.
+
+**[SPEC] Required fix.** Make `ask.yaml` the canonical ABI description, align all numeric IDs and nesting with `ask.h`, generate validation artifacts in CI, and route the production CLI through the generated interface.
+
+### 3.7 CR-007 P1 — dead Fork-A bookkeeping caps the FE-VM path at 32 flows
+
+**[BUG] Symptom.** The FE-VM ehash design supports far more than 32 records, but `ask_hw_flow_insert()` returns `-ENOSPC` when `p->nkeys` reaches `FMAN_CC_MAX_STATIC_KEYS` (32).
+
+**[SPEC] Root cause.** Fix C1 removed the Fork-A `ask_hw_port_reinstall()` programming path, but retained its fixed shadow array, `nkeys` limit, HM next-hop allocation and key construction. No live CC entry consumes that shadow key or HM handle; the actual per-flow path is `fman_pcd_fe_flow_add()`.
+
+**[SPEC] Impact.**
+
+1. A dead data structure imposes the obsolete CC-tree scale ceiling on the ehash path.
+2. Every flow consumes HM/MURAM resources that the FE record does not reference.
+3. F-120’s historical “CC slot leak” was real relative to this bookkeeping, but the slot is no longer a programmed per-flow CC key. The master plan and diagnostics should not describe the 32-slot shadow as the active classifier.
+
+**[SPEC] Required fix.** Delete the dead Fork-A shadow/HM path physically, make successful FE records the hardware ownership object, and derive capacity from the ehash allocator rather than `FMAN_CC_MAX_STATIC_KEYS`.
+
+### 3.8 CR-008 P1 — `fman_bind()` reference is never released
+
+**[BUG] Symptom.** Each successful ASK hardware bring-up retains one device reference until reboot, including across a module unload/reload cycle.
+
+**[SPEC] Root cause.** Linux v6.18 implements:
+
+```c
+struct fman *fman_bind(struct device *fm_dev)
+{
+	return dev_get_drvdata(get_device(fm_dev));
+}
+```
+
+**[SPEC]** `ask_hw_pcd_bringup()` correctly releases the temporary platform-device reference obtained by `of_find_device_by_node()`, but the separate reference acquired inside `fman_bind()` is not released by `ask_hw_pcd_teardown()`. No `fman_unbind()` helper exists in the current API.
+
+**[SPEC] Required fix.** Add/use a symmetric public unbind helper or retain the bound `struct device *` explicitly and call `put_device()` exactly once during teardown and every post-bind failure unwind.
+
+### 3.9 CR-009 P2 — F-120 flush can return with flows still present
+
+**[BUG] Symptom.** `ASK_CMD_FLUSH_FLOWS` can report success after stopping with a non-empty table.
+
+**[SPEC] Failure sequence.** Flush collects a non-empty batch, concurrent destroy removes every cookie in that batch, each replayed `ask_flow_remove()` returns `-ENOENT`, `freed` remains zero, and the no-progress guard breaks even if other flows remain.
+
+**[SPEC] Required fix.** Completion must be established by a subsequent collection that returns zero cookies. Use a bounded retry/generation guard for repeated zero-progress collisions rather than treating the first fully raced batch as completion.
+
+**[NOTE]** The collect-then-replay shape remains correct and mandatory because hardware removal can sleep and cannot run inside the rhashtable walker’s RCU critical section.
+
+### 3.10 CR-010 P2 — duplicate precheck lacks required RCU protection
+
+**[BUG]** `ask_flow_insert()` calls `ask_flow_lookup()` as a duplicate fast-path without `rcu_read_lock()`, while the remove and stats callers correctly protect the same `rhashtable_lookup_fast()` operation.
+
+**[SPEC]** The later `rhashtable_lookup_insert_fast()` remains the authoritative duplicate arbiter, so the simplest fix is to remove the unsafe precheck. If retained as an allocation optimization, wrap it in the required RCU read-side section and use the result only as a hint.
+
+### 3.11 CR-011 P2 — tests and comments preserve obsolete ownership contracts
+
+**[BUG]** `include/ask_internal.h` still states that fake IDs have `ASK_HW_TOKEN_NONE` and may be removed unconditionally. `tests/ask_test_hw_pcd.c` repeats that model and also claims `-EAGAIN` demotes to software fallback.
+
+**[SPEC]** Current `ask_flow.c` instead tracks explicit `hw_backed` ownership, prevents fake-ID/HW-cookie collision, and preserves deferred `-EAGAIN` semantics. Stale executable documentation makes regression toward the disproven contract more likely.
+
+**[SPEC] Required fix.** Rewrite the comments and tests around the current ownership bit, cookie namespace and deferred-insert behavior. Add negative assertions proving a synthetic ID never enters `ask_hw_flow_remove()`.
+
+### 3.12 CR-012 P2 — XFRM add is success-shaped without hardware programming
+
+**[BUG]** `ask_xfrm_state_add()` returns success while no SA is programmed. If `xfrmdev_ops` and `NETIF_F_HW_ESP` are later exposed without replacing this body, the XFRM core may send packets to a nonexistent offload path.
+
+**[SPEC]** This is not an active packet-loss defect today because ASK does not register the required XFRM device operations or advertise `NETIF_F_HW_ESP`.
+
+**[SPEC] Required gate.** Until real CAAM/QI SA programming, rollback and lifetime handling exist, return `-EOPNOTSUPP` and keep all capability bits disabled. Add a feature-enable test that refuses registration while the stub remains.
+
+## 4. Incomplete features that are not active defects
+
+**[SPEC]** These surfaces remain planned work and must stay capability-gated:
+
+| Surface | Current state | Safety requirement |
+|---|---|---|
+| IPv6 flow hardware insertion | Parser/notifier plumbing partly landed; hardware replace rejects unsupported cases | Do not mark v6 flows offloaded until separate 37-byte scheme/table is implemented |
+| Bridge/switchdev | `ask_bridge.c` is a stub | Do not register switchdev behavior or bridge capability |
+| IPsec/CAAM | XFRM and CAAM bodies are incomplete | Keep `NETIF_F_HW_ESP` and xfrmdev registration absent |
+| Per-flow hardware counters | Dump fields exist but silicon HIT accounting is incomplete | Report zero/unknown explicitly; do not label software counters as silicon counters |
+| AF_XDP true-ZC RX | Kernel datapath work exists; VPP/XSKMAP integration remains blocked | Keep shipping verdict dormant until fill-ring and redirect gates pass |
+
+## 5. Closed historical findings
+
+**[SPEC]** The following prior review findings are fixed in current code and remain closed:
+
+1. Hardware-cookie and synthetic-ID namespace collision: explicit `hw_backed` ownership plus collision protection landed in `04d3bb19`.
+2. Stale-MAC collector admitting software-only flows: collector now rejects `!hw_backed`.
+3. Unbounded neighbour-event queue: cap and coalescing landed.
+4. `offloaded` observability ambiguity: UAPI now exports an explicit ownership attribute, although CR-001 shows the producer currently sets it before FE-record success.
+5. F-120 direct SW-only flush: `c2fe6011` routes flush through ordinary remove in batches and balances counters.
+6. Flow-table destroy counter imbalance: teardown now balances `num_hw_backed`.
+7. Sleep-in-atomic neighbour handling: notifier work is deferred to process context.
+8. Whole-table FE delete on ordinary flow removal: F-117 added per-key ehash unlink; silicon collision-chain validation remains separate from this code review.
+
+**[NOTE]** F-120 is code-fixed but not fully closed for release: CR-009 is a narrower concurrent-completion race, and board validation must still prove hardware/MURAM convergence.
+
+## 6. Evidence anchors
+
+| Finding | Source anchors |
 |---|---|
-| `ask_genl.c:592,600` | `ASK_CMD_FLUSH_FLOWS` calls `ask_flow_flush()` directly |
-| `ask_flow.c:521+` | flush unlinks SW entries only (no per-entry HW teardown path) |
-| `ask_flow.c:359,428` | `num_hw_backed` maintained on insert/remove only |
-| `ask_flow_offload.c:665` | neighbour fast-path depends on `num_hw_backed == 0` |
+| CR-001 | `data/vyos-1x-031-offload-ask-cli.patch:set_ask_offload`; `board/scripts/vyos-offload-ask:engage`; `ask_genl.c:ask_cmd_engage`; `ask_hw.c:ask_hw_offload_engage`; `ask_flow_offload.c:ask_fe_flow_insert`; Qdrant board result 2026-07-25 |
+| CR-002 | `ask_flow_offload.c:ask_fe_flow_insert`, `ask_fe_flow_remove`; Qdrant verified key `0a63026a0a6302b906ad9cd903` |
+| CR-003 | `data/vyos-1x-031-offload-ask-cli.patch:set_ask_offload`; helper `engage`, `disengage`, `hit_disengage`, `flow_clear` |
+| CR-004/005 | `ask_flow_offload.c:ask_flow_neigh_mac_changed`; `ask_flow.c:ask_flow_insert`, `ask_flow_remove` |
+| CR-006 | `kernel/ask/uapi/ask.yaml`; `include/uapi/linux/ask/ask.h`; `ask_genl.c:ask_cmd_get_info`, engage/disengage ops |
+| CR-007 | `ask_hw.c:ask_hw_flow_insert`, Fix C1 comments, `FMAN_CC_MAX_STATIC_KEYS` guard |
+| CR-008 | Linux v6.18 `fman.c:fman_bind`; `ask_hw.c:ask_hw_pcd_bringup`, `ask_hw_pcd_teardown` |
+| CR-009 | `ask_flow.c:ask_flow_flush`, `if (!freed) break` |
+| CR-010 | `ask_flow.c:ask_flow_lookup`, duplicate precheck in `ask_flow_insert` |
+| CR-011 | `include/ask_internal.h` hardware-ID contract; `tests/ask_test_hw_pcd.c` |
+| CR-012 | `ask_xfrm.c:ask_xfrm_state_add`; absence of xfrmdev registration and `NETIF_F_HW_ESP` |
 
-## 5. Decision-ready execution order
+## 7. Validation status and limits
+
+**[SPEC]** Source validation completed:
+
+1. All ASK module, UAPI, CLI/helper and relevant FMan composition paths were traced at HEAD `c2fe6011`.
+2. Recent commits were reconciled against the previous review and master-plan status.
+3. Qdrant findings were checked for the FE key, production scaffold behavior, FE-VM HIT topology, teardown history and FMan ownership model.
+4. Upstream Linux v6.18 `fman_bind()` was checked directly and confirmed to acquire a device reference with `get_device()`.
+
+**[NOTE]** A local build against the host’s stock 6.1 headers is not a valid ASK source gate because those headers do not contain the downstream `linux/fsl/fman_pcd.h` API. No source regression was inferred from that environment mismatch.
+
+**[SPEC]** Silicon validation is still required for CR-001/002 after repair, stale-MAC race closure, F-120 hardware convergence, per-key collision-chain delete, and repeated two-port engage/disengage.
+
+## 8. Required execution order
 
 **[SPEC]**
-1. ~~Implement 2.8~~ — **done** (collect-then-replay flush + counter maintenance + KUnit guard).
-2. **Next: silicon validation** for 2.8 and the stale-MAC rebuild branch, in one board session. For 2.8 the decisive check is that `p->nkeys` / MURAM return to baseline after flushing HW-backed flows — a `dump-flows` that merely reads empty was exactly the false signal the old code gave.
-3. Implement the adjacency index for 2.4 only if that session's profiling shows the walk is material with ASK engaged and a large flow table.
+
+1. Fix CR-001 and CR-003 together: one production control plane, generic netlink/YNL only, fail-closed configuration, and no debugfs writes from VyOS commit.
+2. Fix CR-002 before the first production FE-record validation; its exact 13-byte KUnit vector is a hard gate.
+3. Make FE insertion transactional: record success must precede `hw_backed`, with full rollback and engagement-generation checks.
+4. Fix CR-004/005 before declaring stale-MAC handling complete.
+5. Align `ask.yaml` with the live ABI and generate the userspace client used by step 1.
+6. Delete dead Fork-A bookkeeping, remove the artificial 32-flow cap, and release the FMan reference.
+7. Close CR-009/010/011 with focused KUnit coverage.
+8. Run a cold-boot silicon session through the actual VyOS CLI and update `ASK2-MASTER-PLAN.md` only after the acceptance evidence is captured.
