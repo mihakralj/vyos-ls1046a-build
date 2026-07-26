@@ -73,7 +73,7 @@ UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 loglevel=4 systemd.show_status=true ne
 # `run ask_boot ...` / `run dev_boot ...` / a raw `tftp ...`) would otherwise
 # survive every upgrade and keep booting the wrong (or TFTP) kernel. The
 # boot-service path heals it by comparing the live bootcmd against this value.
-UBOOT_BOOTCMD='run usb_vyos || run vyos || run recovery'
+UBOOT_BOOTCMD='run vyos || run recovery'
 
 # Accumulated exit code — set to 1 on any actual error, but script always runs to completion
 RC=0
