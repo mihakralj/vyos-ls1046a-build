@@ -267,7 +267,8 @@ static void ask_resolve_neigh_v4(struct net_device *egress_dev,
 /* per-flow forwarding decision still works in software, just at higher     */
 /* CPU cost).                                                                */
 /*                                                                            */
-/* Bounded: ASK_FLOW_PENDING_MAX = 256.  Beyond the cap we drop new          */
+/* Bounded by ASK_FLOW_PENDING_MAX (see the note on that define for the      */
+/* current value and how it was sized).  Beyond the cap we drop new          */
 /* deferrals on the floor (counter pr_info'd, ratelimited) so a pathological */
 /* burst can't pin unbounded memory.                                         */
 /*                                                                            */
@@ -587,13 +588,22 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
         struct ask_neigh_mac_ctx *ctx = arg;
         struct ask_neigh_mac_fixup *fx;
 
+        /*
+         * hw_backed, not hw_flow_id != 0. A SW-fallback flow carries a
+         * non-zero fake id, so the old predicate admitted every flow the HW
+         * gate had rejected (IPv6, and any non-TCP/UDP v4 — ask_hw.c's
+         * -EOPNOTSUPP arm). Those flows have no silicon state to repair, and
+         * rebuilding them called ask_flow_remove() -> ask_hw_flow_remove()
+         * with an id that aliases a live xarray cookie, corrupting an
+         * unrelated offloaded flow on ordinary neighbour churn.
+         */
+        if (!f->hw_backed)                          /* no HW backing to fix */
+                return 0;
         if (f->key.l3_proto != ctx->l3_proto)
                 return 0;
         if (f->oif != (u32)ctx->ifindex)
                 return 0;
         if (memcmp(f->key.dst_ip, ctx->dst_ip, ctx->addr_len) != 0)
-                return 0;
-        if (f->hw_flow_id == 0)                     /* no HW backing to fix */
                 return 0;
         if (ether_addr_equal(f->key.next_hop_mac, ctx->new_mac))
                 return 0;                           /* MAC unchanged */
@@ -636,6 +646,23 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
                 return;
         /* A multicast/zero lladdr is never an offloadable next-hop. */
         if (is_zero_ether_addr(new_mac) || is_multicast_ether_addr(new_mac))
+                return;
+
+        /*
+         * Fast path: nothing is offloaded, so the walk below can only match
+         * zero flows. This is the steady state whenever ASK is disengaged,
+         * where every ARP/ND update would otherwise walk the whole table for
+         * nothing. Advisory read — a stale value costs at most one redundant
+         * walk or one deferred rebuild that the next event picks up, never
+         * correctness.
+         *
+         * The walk itself is still O(total flows); a proper (oif, l3_proto,
+         * dst_ip) adjacency index is the durable fix and is tracked as
+         * finding 2.4 in plans/ask2-code-review.md. Combined with the
+         * coalescing in ask_neigh.c and the cheap hw_backed early-out in
+         * ask_neigh_mac_collect(), the realistic hot paths are covered.
+         */
+        if (atomic_read(&t->num_hw_backed) == 0)
                 return;
 
         ctx.ifindex      = dev->ifindex;

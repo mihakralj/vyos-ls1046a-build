@@ -121,7 +121,8 @@ enum ask_flow_attr {
     ASK_FLOW_ATTR_PACKETS,      /* u64 */
     ASK_FLOW_ATTR_BYTES,        /* u64 */
     ASK_FLOW_ATTR_LAST_SEEN_NS, /* u64 */
-    ASK_FLOW_ATTR_HW_FLOW_ID,   /* u32, opaque */
+    ASK_FLOW_ATTR_HW_FLOW_ID,   /* u32, opaque; omitted when not offloaded */
+    ASK_FLOW_ATTR_OFFLOADED,    /* u8, 1 = programmed into silicon */
 
     __ASK_FLOW_ATTR_MAX,
 };

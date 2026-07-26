@@ -108,6 +108,7 @@ return -EINVAL;
 memset(t, 0, sizeof(*t));
 atomic_set(&t->fake_hw_id_seq, 0);
 atomic_set(&t->num_flows, 0);
+atomic_set(&t->num_hw_backed, 0);
 t->tag = tag ? tag : "default";
 
 rc = rhashtable_init(&t->rht, &ask_flow_rht_params);
@@ -238,14 +239,23 @@ u64_stats_init(&f->stats.syncp);
  *                       and bail out.
  *
  * The dispatcher contract is documented in include/ask_internal.h
- * (PR14g-body-2 section). Token packing uses bit 31..16 = node
- * token, bit 15..0 = slot; the SW-only fake counter is a flat u32
- * starting at 1 and incrementing — these never collide with a real
- * (token >= 1, slot < 65536) packed id at typical workloads, and
- * even if the counter ever wrapped the only consequence would be a
- * misroute through ask_hw_flow_remove() (which the TOKEN_NONE arm
- * silently ignores). Cookie is the rht key, not hw_id, so collisions
- * here are non-fatal.
+ * (PR14g-body-2 section).
+ *
+ * ID-SPACE INVARIANT (corrected 2026-07-26): @hw_flow_id is NOT
+ * self-describing. Real HW ids are xarray cookies from
+ * xa_alloc(..., XA_LIMIT(1, U32_MAX), ...); SW-only fallback ids come
+ * from atomic_inc_return(&t->fake_hw_id_seq). Both start at 1 and
+ * increment densely, so they collide from the first flow of each
+ * class onward.
+ *
+ * An earlier version of this comment claimed the two could not
+ * collide because ids were packed (bit 31..16 = node token,
+ * bit 15..0 = slot) and that a stray SW id would be absorbed by a
+ * TOKEN_NONE arm in ask_hw_flow_remove(). Neither is true of the
+ * current code: packing survives only as the debug helper
+ * ask_priv_pack_hw_flow_id(), and ask_hw_flow_remove() resolves its
+ * argument as an xarray cookie. Never infer HW backing from the
+ * numeric value — use struct ask_flow::hw_backed, set just below.
  */
 rc = ask_hw_flow_insert(key, oif, action_flags, dir, &hw_id);
 if (rc == 0) {
@@ -311,6 +321,7 @@ kfree(f);
 return rc;
 }
 f->hw_flow_id = hw_id;
+f->hw_backed  = hw_inserted;
 
 rc = rhashtable_lookup_insert_fast(&t->rht, &f->node,
    ask_flow_rht_params);
@@ -321,9 +332,12 @@ if (rc) {
  * rejected the cookie (most commonly -EEXIST from a duplicate
  * nft flow add). Drop the silicon slot before freeing the
  * software entry so we do not leak a forever-routed CC slot
- * to a now-orphan flow. ask_hw_flow_remove() is NULL-safe on
- * a TOKEN_NONE id, so the SW-fallback path's call here is a
- * harmless no-op.
+ * to a now-orphan flow.
+ *
+ * The @hw_inserted guard is load-bearing, not defensive: on the
+ * SW-fallback path @hw_id is a fake counter value that would
+ * alias a live xarray cookie, so calling ask_hw_flow_remove()
+ * here would tear down an unrelated flow's silicon state.
  */
 if (hw_inserted) {
 int rm_rc = ask_hw_flow_remove(hw_id);
@@ -341,6 +355,8 @@ return rc;
 }
 
 atomic_inc(&t->num_flows);
+if (hw_inserted)
+atomic_inc(&t->num_hw_backed);
 *out_hw_id = hw_id;
 return 0;
 }
@@ -350,6 +366,7 @@ int ask_flow_remove(struct ask_flow_table *t, u64 cookie)
 {
 struct ask_flow *f;
 u32 hw_id;
+bool hw_backed;
 int rc;
 
 if (!t)
@@ -362,10 +379,10 @@ rcu_read_unlock();
 return -ENOENT;
 }
 /*
- * Snapshot hw_flow_id BEFORE the rht unlink so we can hand it to
- * ask_hw_flow_remove() after the SW table no longer references the
- * entry. Reading f->hw_flow_id is safe under rcu_read_lock — the
- * field is set once at insert time and never mutated after.
+ * Snapshot hw_flow_id + hw_backed BEFORE the rht unlink so we can
+ * hand them to ask_hw_flow_remove() after the SW table no longer
+ * references the entry. Both fields are set once at insert time and
+ * never mutated, so reading them under rcu_read_lock is safe.
  *
  * Pin the entry across the rhashtable_remove_fast() call. The
  * remove path itself does not free; it just unlinks. Once unlink
@@ -373,7 +390,8 @@ return -ENOENT;
  * lookup that already obtained the pointer drains through a
  * grace period before the kfree fires.
  */
-hw_id = f->hw_flow_id;
+hw_id     = f->hw_flow_id;
+hw_backed = f->hw_backed;
 rc = rhashtable_remove_fast(&t->rht, &f->node, ask_flow_rht_params);
 rcu_read_unlock();
 
@@ -381,23 +399,33 @@ if (rc)
 return rc;
 
 /*
- * PR14g-body-3: drop the silicon slot (if any). NULL-safe on a
- * SW-only id (TOKEN_NONE arm of the dispatcher returns 0 without
- * touching hardware), so unconditional call here covers both the
- * HW-offloaded and SW-fallback cases without inspection. A non-
- * zero return is logged but not propagated — the SW table has
- * already released ownership of the cookie and the caller (nft
- * flow destroy) cannot re-attempt; surfacing the error here would
- * just leak the SW entry. In practice the only non-zero return
- * is -EINVAL on a malformed token, which means the slot was never
- * really ours and there is nothing to free.
+ * Drop the silicon slot — ONLY for flows that actually have one.
+ *
+ * This call used to be unconditional, on the theory that a SW-only
+ * id would be harmlessly ignored by a TOKEN_NONE arm inside
+ * ask_hw_flow_remove(). That arm does not exist: the live id form is
+ * an xarray cookie (ask_hw.c, ask_priv_pack_hw_flow_id() is a debug
+ * helper kept only for ABI), and ask_hw_flow_remove() resolves its
+ * argument with ask_hw_cookie_lookup(). Because SW fallback ids and
+ * real cookies both start at 1 and increment densely, the very first
+ * SW-fallback teardown aliased the very first HW flow's cookie and
+ * silently freed that flow's CC shadow slot and HM next-hop
+ * reference — leaving a live, still-advertised flow with no silicon
+ * backing. Gate on @hw_backed instead of trying to tell the two id
+ * spaces apart numerically; see struct ask_flow::hw_backed.
+ *
+ * A non-zero return is logged but not propagated — the SW table has
+ * already released ownership of the cookie and the caller (nft flow
+ * destroy) cannot re-attempt; surfacing the error here would just
+ * leak the SW entry.
  */
-{
+if (hw_backed) {
 int rm_rc = ask_hw_flow_remove(hw_id);
 
 if (rm_rc && rm_rc != -ENODEV)
 ask_pr_warn("flow: hw_remove(cookie=0x%llx hw_id=0x%08x) %d\n",
     cookie, hw_id, rm_rc);
+atomic_dec(&t->num_hw_backed);
 }
 
 atomic_dec(&t->num_flows);

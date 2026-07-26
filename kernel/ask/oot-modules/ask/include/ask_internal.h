@@ -509,6 +509,25 @@ u32 action_flags;
  * correct cc_tree without re-deriving direction from oif.
  */
 u8  dir;
+/*
+ * True iff ask_hw_flow_insert() actually programmed silicon for this
+ * flow, i.e. @hw_flow_id is a real xarray cookie from
+ * ask_hw_cookie_alloc() rather than a software-only counter value.
+ *
+ * This exists because @hw_flow_id ALONE CANNOT ANSWER THAT QUESTION.
+ * Two producers share its numeric space and both start at 1 and
+ * increment densely: xa_alloc(..., XA_LIMIT(1, U32_MAX), ...) for real
+ * HW cookies, and atomic_inc_return(&t->fake_hw_id_seq) for SW-only
+ * fallbacks. The first flow of each class therefore collides, and
+ * ask_hw_flow_remove() resolves whatever it is given as an xarray
+ * cookie — so a SW-fallback teardown used to free an unrelated real
+ * flow's CC slot and HM next-hop reference while that flow stayed in
+ * this table believing it was still offloaded.
+ *
+ * Set once at insert, never mutated, so it is safe to read under
+ * rcu_read_lock() alongside @hw_flow_id.
+ */
+bool hw_backed;
 struct ask_flow_stats stats;
 };
 
@@ -524,6 +543,16 @@ struct ask_flow_table {
 struct rhashtable rht;
 atomic_t fake_hw_id_seq; /* PR7 placeholder until real hostcmd */
 atomic_t num_flows;
+/*
+ * Count of entries with ask_flow::hw_backed set. Lets the neigh
+ * stale-MAC path skip its full-table walk outright when nothing is
+ * offloaded — the common case whenever ASK is disengaged, where every
+ * ARP/ND update would otherwise walk the entire table to match zero
+ * flows. Advisory: read without the rht lock purely as a fast-path
+ * skip, so a stale read costs at most one redundant (or skipped-then-
+ * retried-next-event) walk, never correctness.
+ */
+atomic_t num_hw_backed;
 const char *tag;
 };
 

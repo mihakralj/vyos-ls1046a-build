@@ -1,4 +1,4 @@
-**Version 1.2.0 · 2026-07-26 · HADS 1.0.0**
+**Version 1.3.0 · 2026-07-26 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -6,7 +6,9 @@
 
 **[SPEC]** Findings are ranked by release risk. `BLOCKER` means unacceptable for throughput-test ISO unless intentionally accepted. `HIGH` means should be fixed before broad tester rollout. `MEDIUM` means should be scheduled with explicit risk acceptance.
 
-**[SPEC]** All line anchors in this document were re-checked against `e70dcbd3` on 2026-07-26 and are exact as of that commit. Re-verify after any edit to `ask_flow.c` / `ask_hw.c` / `ask_flow_offload.c`.
+**[SPEC]** All line anchors in this document were re-checked against `e70dcbd3` on 2026-07-26 and are exact **as of that commit**. The fixes landed in the commit that carries this v1.3.0 update, so anchors in `ask_flow.c` / `ask_flow_offload.c` / `ask_neigh.c` / `ask_genl.c` have SHIFTED — treat §5 as historical evidence for the diagnosis, not as current navigation. Re-derive before any further edit.
+
+**[SPEC]** **Status: 2.1, 2.2, 2.3, 2.5, 2.6 and 2.7 are FIXED. 2.4 is PARTIALLY fixed** (frequency and per-flow cost reduced; the adjacency index remains open). Each finding carries a **Status** line below.
 
 ## 1. Scope reviewed (post-refactor re-review + verification)
 
@@ -26,6 +28,8 @@
 **[BUG] SW fallback teardown deletes an unrelated real HW-offloaded flow**
 
 **Verdict: CONFIRMED.** Collision is not a wrap-around corner case — it happens on the *first* flow of each class.
+
+**Status: FIXED.** `struct ask_flow` gained `bool hw_backed`, set from the existing `hw_inserted` local at insert. `ask_flow_remove()` now calls `ask_hw_flow_remove()` only when it is set, so a SW-fallback teardown can no longer resolve a live xarray cookie. The rollback path inside `ask_flow_insert()` was already `hw_inserted`-guarded; its comment now says why that guard is load-bearing rather than defensive.
 
 **Symptom:** removing a SW-fallback flow silently tears down a different, valid HW flow's silicon state while that flow remains in the SW table believing it is offloaded.
 
@@ -57,6 +61,8 @@ u32 ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx)
 
 **Verdict: CONFIRMED, but v1.1.0 mis-scoped it twice.** Corrections below.
 
+**Status: FIXED.** `ask_neigh_mac_collect()` now tests `!f->hw_backed` instead of `f->hw_flow_id == 0`, and that test was moved to the front of the predicate chain so the common reject costs one bool load.
+
 **Correction 1 — not IPv6-specific.** The HW gate rejects *any* non-TCP/UDP v4 flow as well:
 
 ```c
@@ -79,6 +85,8 @@ So a v4 ICMP flow plus a v4 `arp_tbl` event reproduces this today, and did so **
 
 **Verdict: CONFIRMED.**
 
+**Status: FIXED.** `ask_neigh.c` gained `ASK_NEIGH_EV_MAX` (1024) plus `ask_neigh_ev_count`, and coalescing: an enqueue for a neighbour already queued refreshes that entry's lladdr in place instead of appending, which is what actually tames a storm — a flapping neighbour stays O(1). Both consumers act on the latest MAC, so collapsing is semantically identical. Coalesced/dropped counters are reported on module exit. The cap is re-checked after the unlocked `kzalloc` so the bound stays exact under concurrent notifiers.
+
 **Symptom:** neighbour-update storms grow memory without bound; the only backstop is `GFP_ATOMIC` allocation failure.
 
 **Cause:** global list (`ask_neigh.c:57`) with unconditional `list_add_tail()` (`ask_neigh.c:156`). No cap, no dedup keyed on `(ifindex, l3_proto, dst_ip)`.
@@ -93,6 +101,14 @@ So a v4 ICMP flow plus a v4 `arp_tbl` event reproduces this today, and did so **
 
 **Verdict: CONFIRMED.**
 
+**Status: PARTIALLY FIXED — the asymptotic issue remains open.** Three mitigations landed, none of which changes the O(total flows) bound of a walk that does happen:
+
+1. `ask_flow_table` gained `atomic_t num_hw_backed`; `ask_flow_neigh_mac_changed()` returns immediately when it is zero. This removes the walk entirely in the steady state where ASK is disengaged — previously every ARP/ND update walked the whole table to match nothing.
+2. The `!f->hw_backed` early-out (2.2) makes the per-flow cost of a non-matching entry one bool load.
+3. Coalescing (2.3) cuts the number of walks a storm can provoke.
+
+**Still open:** a genuine `(oif, l3_proto, dst_ip)` adjacency index. Deferred deliberately — it is a new data structure that must be kept coherent across insert/remove/rehash, which is its own correctness surface, and it is not on the path of any current milestone. Re-open if profiling shows the walk is material with ASK engaged and a large flow table.
+
 **Cause:** every event performs a full table walk before any targeted rebuild — `ask_flow_walk(t, ask_neigh_mac_collect, &ctx)` (`ask_flow_offload.c:649`).
 
 **[NOTE]** Compounds with 2.3: unbounded events × full walk per event ⇒ O(events × flows) control-plane cost under a neighbour storm.
@@ -105,6 +121,8 @@ So a v4 ICMP flow plus a v4 `arp_tbl` event reproduces this today, and did so **
 
 **Verdict: CONFIRMED — more instances than v1.1.0 cited.**
 
+**Status: FIXED.** Both comments rewritten to describe the xarray-cookie model and to state plainly that HW backing must never be inferred from the numeric id. The `struct ask_flow::hw_backed` declaration carries the full rationale. A KUnit regression guard was added — `ask_flow_test_sw_fallback_not_hw_backed` asserts that SW-fallback flows land on ids `1` and `2` (exactly the values a real cookie allocator hands out) while reporting `hw_backed == false` and leaving `num_hw_backed == 0`. The pre-existing `ask_flow_test_hw_fallback_insert_remove` had comments asserting the false TOKEN_NONE property; those were corrected in place.
+
 1. `ask_flow.c:240-254` — asserts SW fake ids "never collide with a real (token >= 1, slot < 65536) packed id", and that a wrap would at worst "misroute through `ask_hw_flow_remove()` (which the `TOKEN_NONE` arm silently ignores)". Both clauses describe the retired packed-token model (§2.1).
 2. `ask_flow.c:325-328` — asserts "`ask_hw_flow_remove()` is NULL-safe on a `TOKEN_NONE` id, so the SW-fallback path's call here is a harmless no-op". Doubly wrong: there is no `TOKEN_NONE` arm on the live path, **and** that call is guarded by `if (hw_inserted)` so the SW-fallback path never reaches it.
 
@@ -116,6 +134,8 @@ So a v4 ICMP flow plus a v4 `arp_tbl` event reproduces this today, and did so **
 
 **Verdict: NEW — not in v1.1.0.**
 
+**Status: FIXED.** Added `ASK_FLOW_ATTR_OFFLOADED` (u8) to the uapi enum and an `offloaded` attribute to `ask.yaml` — additive only, appended to both the `dump-flows` and `get-flow` reply lists. `hw-flow-id` is now emitted **only** when the flow is HW-backed, so a meaningless id is absent rather than misleading. `show_ask_offload.py` gained an `Offload` column (`hw`/`sw`/`?`, where `?` means the field is absent because the image predates this change) and its caption now reads `N tracked, M in hardware` instead of captioning every tracked flow as offloaded.
+
 **Cause:** `nla_put_u32(skb, ASK_FLOW_ATTR_HW_FLOW_ID, f->hw_flow_id)` (`ask_genl.c:385`) emits the field unconditionally. The header comment at `ask_genl.c:355` still labels it "fake counter for PR7, real in PR14". An operator cannot distinguish an offloaded flow from a SW-fallback one, and two flows can display the same id.
 
 **Fix direction:** once the HW-backed bit exists (§4 item 1), either emit `hw-flow-id` only for HW-backed flows or add an explicit `offloaded` boolean to `ask.yaml`, and render it in `show_ask_offload.py`. Note `ask.yaml` is a durable `Documentation/netlink/specs` contract — additive only.
@@ -125,6 +145,8 @@ So a v4 ICMP flow plus a v4 `arp_tbl` event reproduces this today, and did so **
 **[BUG] `ASK_FLOW_PENDING_MAX` comment and definition disagree**
 
 **Verdict: NEW — not in v1.1.0.**
+
+**Status: FIXED.** The comment no longer states a value; it points at the define, whose own note already explains the 256 → 4096 raise and the measurement behind it. Value left at 4096 — deliberately, per that note.
 
 `ask_flow_offload.c:270` documents "Bounded: `ASK_FLOW_PENDING_MAX` = 256"; `ask_flow_offload.c:297` defines it as **4096**. Same class as 2.5, and directly relevant to 2.3 because this is the code one would copy when adding a cap to the neigh queue.
 
@@ -140,19 +162,19 @@ So a v4 ICMP flow plus a v4 `arp_tbl` event reproduces this today, and did so **
 
 **[SPEC]** One anchor correction: v1.1.0 cited `ask_flow_offload.c:647` for the table walk; the walk is at **649** (647 is `INIT_LIST_HEAD`).
 
-## 4. Immediate fix order
+## 4. Implementation record
 
-**[SPEC]** Item 1 replaces v1.1.0's "split ID namespaces" recommendation with a smaller change that closes 2.1 and 2.2 together.
+**[SPEC]** All items below landed together in the commit carrying this v1.3.0 update. `ask.ko` builds clean against `work/linux-6.18.34` (0 errors, no new warnings; the only warning remains the pre-existing `ask_xfrm_state_add` missing-prototype), and the KUnit suite compiles including the new case.
 
-1. **Persist the HW-backed bit** (closes `BLOCKER` 2.1 + `HIGH` 2.2). `ask_flow_insert()` already computes `bool hw_inserted` (`ask_flow.c:188`, set at `ask_flow.c:252`, used at `ask_flow.c:328`) and then **discards it** — it is a local, absent from `struct ask_flow` (`include/ask_internal.h:497-513`). Persist it as `bool hw_backed`, then:
-   - gate `ask_hw_flow_remove()` in `ask_flow_remove()` (`ask_flow.c:396`) on it;
-   - replace the `f->hw_flow_id == 0` predicate in `ask_neigh_mac_collect()` (`ask_flow_offload.c:596`) with it.
+1. **HW-backed bit persisted** — closes `BLOCKER` 2.1 and `HIGH` 2.2. This replaced v1.1.0's "split the ID namespaces" proposal: `ask_flow_insert()` already computed `bool hw_inserted` and discarded it, so persisting it as `struct ask_flow::hw_backed` was strictly smaller than introducing a second numeric convention, and it removes all reliance on id semantics rather than adding more. Gates `ask_hw_flow_remove()` in `ask_flow_remove()` and the predicate in `ask_neigh_mac_collect()`.
+2. **Neigh queue bounded + coalescing** (2.3) — `ASK_NEIGH_EV_MAX` = 1024, in-place lladdr refresh for an already-queued neighbour, coalesced/dropped counters.
+3. **Walk skipped when nothing is offloaded** (2.4, partial) — `atomic_t num_hw_backed` on the table; the adjacency index remains open and is *not* claimed as done.
+4. **Fake ids no longer exported** (2.6) — additive `offloaded` attribute in `ask.yaml` + uapi enum; `hw-flow-id` emitted only when meaningful; op-mode renders an `Offload` column.
+5. **Invariants locked** (2.5, 2.7) — comments corrected at all four stale sites, plus a KUnit regression guard that fails if `hw_backed` is ever removed or wired to the numeric id.
 
-   Preferred over namespace splitting because it removes all reliance on numeric id semantics instead of adding a second numeric convention to reason about, and it needs no change to the xarray allocator or the fake counter.
-2. **Bound + coalesce `ask_neigh_ev_list`** (2.3), following the `ASK_FLOW_PENDING_MAX` shape.
-3. **Reduce full-table-walk frequency/cost** (2.4) via an `(oif, l3_proto, dst_ip)` index.
-4. **Stop exporting fake ids** (2.6) — additive `ask.yaml` change plus op-mode rendering.
-5. **Correct the stale comments and add the KUnit guard** (2.5, 2.7) to lock the invariants item 1 establishes.
+**[NOTE]** Verification performed: production `ask.ko` and the KUnit build both compile clean; all 28 `data/vyos-1x-*.patch` still apply cleanly against upstream `rolling` (`vyos-1x-033` was **regenerated from a real tree**, not hand-edited, per the §2.5-adjacent rule in `plans/ASK2-MASTER-PLAN.md` §7). **Not yet verified on silicon** — none of this has run on `.185`. The stale-MAC rebuild branch in particular still has no live-flow coverage (T-M6-3, tracked in the master plan).
+
+**[NOTE]** Deliberately not done: renaming the in-kernel `dpaa_register_flavor_ops()` family, which is unrelated to these findings.
 
 ## 5. Evidence anchors
 
