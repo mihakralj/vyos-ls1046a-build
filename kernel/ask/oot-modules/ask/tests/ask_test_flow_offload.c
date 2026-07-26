@@ -477,7 +477,55 @@ static void ask_flow_offload_test_classify_dir_non_dpaa(struct kunit *test)
         dev_put(lo);
 }
 
+/*
+ * CR-002 hard gate: the FE-VM EKFC key must come out byte-for-byte equal to
+ * what the KeyGen extracts. Reference vector is silicon-verified (Qdrant
+ * 2026-07-13, hardware CRC-64 match on a live flow):
+ *
+ *   10.99.2.106:44444 -> 10.99.2.185:55555 proto 6
+ *   0a63026a 0a6302b9 06 ad9c d903
+ *
+ * The bug this pins: sport/dport are __be16, and the old builder emitted them
+ * with (v >> 8) / (v & 0xff). On little-endian ARM64 that reads the __be16 as
+ * a native integer, so wire bytes AD 9C came out as 9C AD. Insert and delete
+ * shared the error and therefore agreed with each other — only a comparison
+ * against the real extracted key exposes it, which is exactly what this does.
+ */
+static void ask_flow_offload_test_fe_key_wire_order(struct kunit *test)
+{
+static const u8 expect[ASK_FE_KEY_SIZE] = {
+0x0a, 0x63, 0x02, 0x6a,   /* SIP  10.99.2.106 */
+0x0a, 0x63, 0x02, 0xb9,   /* DIP  10.99.2.185 */
+0x06,                     /* PROTO TCP        */
+0xad, 0x9c,               /* SPORT 44444      */
+0xd9, 0x03,               /* DPORT 55555      */
+};
+struct ask_flow_key key;
+u8 k[ASK_FE_KEY_SIZE];
+
+memset(&key, 0, sizeof(key));
+key.l3_proto = ASK_FLOW_L3_IPV4;
+key.l4_proto = IPPROTO_TCP;
+key.src_ip[0] = 0x0a; key.src_ip[1] = 0x63;
+key.src_ip[2] = 0x02; key.src_ip[3] = 0x6a;
+key.dst_ip[0] = 0x0a; key.dst_ip[1] = 0x63;
+key.dst_ip[2] = 0x02; key.dst_ip[3] = 0xb9;
+key.sport = htons(44444);
+key.dport = htons(55555);
+
+ask_fe_build_key(&key, k);
+KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE);
+
+/*
+ * Ports must be non-palindromic for this to mean anything: assert the two
+ * bytes differ, so a future byte-swap regression cannot pass by symmetry.
+ */
+KUNIT_EXPECT_NE(test, k[9], k[10]);
+KUNIT_EXPECT_NE(test, k[11], k[12]);
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
+KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
 KUNIT_CASE(ask_flow_offload_test_replace_minimal),
 KUNIT_CASE(ask_flow_offload_test_destroy_round_trip),
 KUNIT_CASE(ask_flow_offload_test_double_destroy_swallowed),

@@ -213,8 +213,23 @@ return -EINVAL;
  * unnecessary slab alloc/free churn and HW slot waste during
  * duplicate-flow storms (e.g. nft flowtable re-insertion races).
  */
-if (ask_flow_lookup(t, cookie))
+{
+/*
+ * CR-010: rhashtable_lookup_fast() must run inside an RCU read-side
+ * critical section — every other ask_flow_lookup() caller wraps it.
+ * The result is only a hint that lets us skip the kzalloc on an
+ * obvious duplicate; rhashtable_lookup_insert_fast() below remains
+ * the authoritative arbiter, so an insert racing between the unlock
+ * and the real insert is still rejected correctly.
+ */
+bool dup;
+
+rcu_read_lock();
+dup = ask_flow_lookup(t, cookie) != NULL;
+rcu_read_unlock();
+if (dup)
 return -EEXIST;
+}
 
 f = kzalloc(sizeof(*f), GFP_KERNEL);
 if (!f)
@@ -536,6 +551,13 @@ EXPORT_SYMBOL_GPL(ask_flow_walk);
 #define ASK_FLOW_FLUSH_BATCH 32
 
 /*
+ * Consecutive passes that collect cookies but remove none before flush gives
+ * up. Only reachable when another thread destroys the same cookies as fast as
+ * we collect them; a handful of retries settles any real race.
+ */
+#define ASK_FLOW_FLUSH_MAX_STALLS 8
+
+/*
  * F-120 (2026-07-26): flush is now remove-EQUIVALENT.
  *
  * It used to unlink entries straight out of the walker and call_rcu them,
@@ -566,6 +588,7 @@ EXPORT_SYMBOL_GPL(ask_flow_walk);
 void ask_flow_flush(struct ask_flow_table *t)
 {
 int removed = 0;
+unsigned int stalls = 0;
 
 if (!t)
 return;
@@ -607,13 +630,22 @@ freed++;
 removed += freed;
 
 /*
- * Progress guard: if a whole batch was collected but nothing
- * could be removed, stop rather than spin. Cannot happen with
- * the current remove path, but flush must never livelock a
- * genl doit handler.
+ * CR-009: do NOT treat a fully-raced batch as completion.
+ * If a concurrent destroy removed every cookie we collected,
+ * each replayed remove returns -ENOENT and @freed is 0 — but
+ * other flows may still be present, so breaking here left the
+ * table non-empty while reporting success. Completion is proven
+ * only by a collection that yields zero cookies (the `if (!n)
+ * break` above). Bound the zero-progress case instead, so a
+ * pathological race cannot spin a genl doit handler forever.
  */
-if (!freed)
+if (!freed && ++stalls >= ASK_FLOW_FLUSH_MAX_STALLS) {
+ask_pr_warn("flow: flush gave up after %u zero-progress passes on '%s' (%d removed)\n",
+    stalls, t->tag ? t->tag : "?", removed);
 break;
+}
+if (freed)
+stalls = 0;
 }
 
 ask_pr_dbg("flow: flushed table '%s' (%d entries, hw_backed now %d)\n",
