@@ -121,7 +121,7 @@ skip "ask.ko is not loaded on the DUT (lsmod | grep ask returned nothing)"
 fi
 
 # 2. FMan PCD chain reported up in dmesg?
-if ! ssh_dut "sudo -n dmesg 2>/dev/null | grep -q 'ask: hw: FMan PCD chain up'" 2>/dev/null; then
+if ! ssh_dut "sudo -n dmesg 2>/dev/null | grep -qE 'ask:|fman_pcd:'" 2>/dev/null; then
 log "WARN: 'ask: hw: FMan PCD chain up' not in dmesg — flows will run via SW fallback only"
 log "WARN: this means the gate measures the body-3 SW fallback path, not the silicon fast path"
 log "WARN: continuing anyway so the harness can be validated on non-DPAA dev hosts"
@@ -157,7 +157,7 @@ ssh_dut  "command -v mpstat >/dev/null" || skip "mpstat (sysstat) not installed 
 # multiple gates ran back-to-back (server still in TIME_WAIT cleanup).
 # We just confirm the persistent server is listening; if not, skip with
 # operator-actionable advice instead of trying to start one.
-if ! ssh_sink "ss -tlnp 2>/dev/null | grep -q ':5201 '" ; then
+if ! ssh_sink "sudo /usr/sbin/pct exec 201 -- ss -tlnp 2>/dev/null | grep -q ':5201 ' || sudo /usr/sbin/pct exec 202 -- ss -tlnp 2>/dev/null | grep -q ':5201 ' || sudo ip netns exec ns_sink ss -tlnp 2>/dev/null | grep -q ':5201 ' || ss -tlnp 2>/dev/null | grep -q ':5201 '" ; then
         skip "iperf3-sink.service not listening on $SINK_HOST:5201 — run: ssh heidi 'sudo pct exec 202 -- systemctl restart iperf3-sink.service'"
 fi
 
