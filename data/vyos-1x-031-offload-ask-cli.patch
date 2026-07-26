@@ -8,7 +8,7 @@ index e981481..9870e49 100644
                </leafNode>
 +              <leafNode name="ask">
 +                <properties>
-+                  <help>ASK (Accelerated Switching Kernel) offload — FMan FE-VM hardware forwarding for this interface (NXP LS1046A)</help>
++                  <help>ASK2 offload — FMan FE-VM hardware forwarding for this interface (NXP LS1046A)</help>
 +                  <valueless/>
 +                </properties>
 +              </leafNode>
@@ -47,7 +47,11 @@ index b7b7b12..82be431 100644
 +        verb = 'engage' if enable else 'disengage'
 +        _, err = self._popen(f'{tool} --port {port} {verb}')
 +        if err:
-+            print(f'ASK offload {verb} failed on {self.ifname}')
++            err_msg = err.strip()
++            # Treat advisory stderr warnings as non-fatal; only hard-fail when
++            # the helper emits an explicit ASK offload ERROR line.
++            if 'ASK offload ERROR:' in err_msg:
++                print(f'ASK offload {verb} failed on {self.ifname}: {err_msg}')
 +
      def set_lro(self, state):
          """
