@@ -6,6 +6,12 @@
  * HW-offload pattern (mlx5e_rep_neigh, nfp): the notifier lives here, the flow
  * layer is a consumer driven through two entry points.
  *
+ * Covers both neighbour tables that can back an offloaded next-hop: arp_tbl
+ * (IPv4) and, since T-M6-1 piece 4, nd_tbl (IPv6/NDISC).  The v6 half stays
+ * inert until T-M6-1 pieces 2-3 give v6 flows a HW insert path — today they
+ * are parsed and SW-tracked but rejected at the HW gate, so no installed v6
+ * flow can match the stale-MAC walk.
+ *
  * The netevent chain is ATOMIC (net/core/netevent.c ATOMIC_NOTIFIER_HEAD), so
  * the notifier callback runs in atomic context and MUST NOT sleep.  The flow
  * entry points it needs — ask_flow_neigh_resolved() (deferred-insert drain) and
@@ -25,6 +31,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <net/arp.h>
+#include <net/ndisc.h>
 #include <net/neighbour.h>
 #include <net/netevent.h>
 
@@ -33,11 +40,17 @@
 /*
  * One captured neigh event.  @dev is dev_hold()'d in the atomic notifier and
  * dev_put() in the worker so it stays valid across the deferral.
+ *
+ * T-M6-1 piece 4: @dst_ip is a 16-byte buffer carrying either a 4-byte arp_tbl
+ * key (IPv4, remaining bytes zero) or a 16-byte nd_tbl key (IPv6); @l3_proto
+ * says which.  This mirrors struct ask_flow_key, whose dst_ip is already 16
+ * bytes, so no separate v6 event type is needed.
  */
 struct ask_neigh_event {
 	struct list_head   node;
 	struct net_device *dev;
-	__be32             dst_ip;
+	u8                 dst_ip[16];
+	u8                 l3_proto;	/* ASK_FLOW_L3_IPV4 / _IPV6 */
 	u8                 mac[ETH_ALEN];
 };
 
@@ -62,9 +75,22 @@ static void ask_neigh_work_fn(struct work_struct *w)
 			break;
 
 		/* Deferred-insert drain, then stale-MAC rebuild, for this
-		 * now-resolved next-hop. */
-		ask_flow_neigh_resolved(ev->dev, ev->dst_ip);
-		ask_flow_neigh_mac_changed(ev->dev, ev->dst_ip, ev->mac);
+		 * now-resolved next-hop.
+		 *
+		 * The drain is IPv4-only: the pending queue is keyed by __be32
+		 * and only the v4 HW-insert path ever parks entries on it (v6
+		 * flows are rejected at the HW gate with -EOPNOTSUPP until
+		 * T-M6-1 pieces 2-3 land), so a v6 event has nothing to drain.
+		 * The stale-MAC rebuild is family-generic and runs for both.
+		 */
+		if (ev->l3_proto == ASK_FLOW_L3_IPV4) {
+			__be32 v4;
+
+			memcpy(&v4, ev->dst_ip, sizeof(v4));
+			ask_flow_neigh_resolved(ev->dev, v4);
+		}
+		ask_flow_neigh_mac_changed(ev->dev, ev->dst_ip, ev->l3_proto,
+					   ev->mac);
 
 		dev_put(ev->dev);
 		kfree(ev);
@@ -77,12 +103,32 @@ static int ask_neigh_netevent(struct notifier_block *nb,
 	struct neighbour *n = ptr;
 	struct ask_neigh_event *ev;
 	struct net_device *dev;
-	__be32 dst_ip;
+	u8 dst_ip[16] = { 0 };
+	unsigned int key_len;
+	u8 l3_proto;
 	u8 mac[ETH_ALEN];
 
 	if (event != NETEVENT_NEIGH_UPDATE)
 		return NOTIFY_DONE;
-	if (!n || n->tbl != &arp_tbl)
+	if (!n)
+		return NOTIFY_DONE;
+
+	/* T-M6-1 piece 4: arp_tbl (IPv4) and nd_tbl (IPv6/NDISC) are the two
+	 * tables whose entries can back an offloaded next-hop.  Everything
+	 * else (e.g. DECnet-style or bridge tables) is not ours.
+	 */
+	if (n->tbl == &arp_tbl)
+		l3_proto = ASK_FLOW_L3_IPV4;
+	else if (n->tbl == &nd_tbl)
+		l3_proto = ASK_FLOW_L3_IPV6;
+	else
+		return NOTIFY_DONE;
+
+	/* Take the length from the table itself rather than assuming 4/16, and
+	 * refuse anything that would overflow the capture buffer.
+	 */
+	key_len = n->tbl->key_len;
+	if (key_len != ask_flow_l3_addr_len(l3_proto) || key_len > sizeof(dst_ip))
 		return NOTIFY_DONE;
 
 	/* Act only on transitions into NUD_VALID (n->ha is now meaningful). */
@@ -92,7 +138,7 @@ static int ask_neigh_netevent(struct notifier_block *nb,
 		return NOTIFY_DONE;
 	}
 	dev = n->dev;
-	memcpy(&dst_ip, n->primary_key, sizeof(dst_ip));
+	memcpy(dst_ip, n->primary_key, key_len);
 	ether_addr_copy(mac, n->ha);
 	read_unlock_bh(&n->lock);
 
@@ -102,7 +148,8 @@ static int ask_neigh_netevent(struct notifier_block *nb,
 		return NOTIFY_DONE;	/* best-effort; PR14z9 poll still drains */
 	dev_hold(dev);
 	ev->dev = dev;
-	ev->dst_ip = dst_ip;
+	ev->l3_proto = l3_proto;
+	memcpy(ev->dst_ip, dst_ip, sizeof(ev->dst_ip));
 	ether_addr_copy(ev->mac, mac);
 
 	spin_lock_bh(&ask_neigh_ev_lock);
@@ -129,7 +176,7 @@ int ask_neigh_init(void)
 		return rc;
 	}
 	ask_neigh_registered = true;
-	ask_pr_info("neigh: netevent notifier active (deferred-insert drain + stale-MAC rebuild)\n");
+	ask_pr_info("neigh: netevent notifier active (arp_tbl + nd_tbl; deferred-insert drain + stale-MAC rebuild)\n");
 	return 0;
 }
 
