@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.16.0 · 2026-07-25 · HADS 1.0.0**
+**Version 1.17.0 · 2026-07-26 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -248,9 +248,9 @@ Key outcomes: FE-VM hardware match & dispatch engine verified; nft flowtable `ho
   - **✅ Piece 1 — SW v6 flow parse (DONE, compiles clean):** added `ask_parse_match_v6()` (16-byte v6 addr copies) + an `ask_parse_match()` dispatcher on the match EtherType; REPLACE now calls the dispatcher. v6 flows are parsed + SW-tracked (visible in `show flows`); until the v6 HW path lands, `ask_hw.c:913` returns `-EOPNOTSUPP` for `l3_proto==IPV6` so they fall to the kernel SW path (safe, no blackhole). No silicon touched.
   - **🔴 Piece 2 — v6 KeyGen EKFC scheme + separate v6 ehash table (Risk-Tier C, silicon):** a v6 EKFC extracting the 37-byte key (SIP16+DIP16+PROTO1+SPORT2+DPORT2) — v4 uses EKFC 0x001C0006 for 13 bytes — and a second ehash table sized for `key_size=37`. Delicate KeyGen config; needs careful design + board iteration.
   - **🔴 Piece 3 — v6 HW insert branch (`ask_hw.c`):** lift the `l3_proto != IPV4` gate for v6, build the 37-byte ehash key + v6 CC-tree key, set `is_ipv6=1`.
-  - **🟢 Piece 4 — `nd_tbl` in `ask_neigh.c`:** handle `NETEVENT_NEIGH_UPDATE` for `nd_tbl` (NDISC) next to `arp_tbl` — the notifier T-M6-3 built accommodates this directly; low-risk, but only exercised once Pieces 2-3 offload v6.
+  - **✅ Piece 4 — `nd_tbl` in `ask_neigh.c` (DONE 2026-07-26, compiles clean):** the notifier now accepts **both** `arp_tbl` (IPv4) and `nd_tbl` (IPv6/NDISC) and rejects every other table. `struct ask_neigh_event` carries a 16-byte `dst_ip` + an `ASK_FLOW_L3_*` discriminator (mirroring `ask_flow_key`, whose `dst_ip` was already 16 bytes), and the capture length is taken from `n->tbl->key_len` with a bounds check rather than assuming 4/16. `ask_flow_neigh_mac_changed()` is now family-generic — signature changed to `(dev, const u8 *dst_ip, u8 l3_proto, const u8 *new_mac)`, the walk collector matches `ctx->l3_proto` **before** a length-aware `memcmp` (so a v4 event can never match a v6 flow whose first 4 `dst_ip` bytes collide), and the rebuild log picks `%pI4`/`%pI6`. New `ask_flow_l3_addr_len()` helper in `ask_internal.h`. **`ask_flow_neigh_resolved()` deliberately stays IPv4-only:** it drains the deferred-insert pending queue, which is keyed by `__be32` and only ever populated by the v4 HW-insert path — v6 flows are rejected at the HW gate (`-EOPNOTSUPP`) until Pieces 2-3, so a v6 event has nothing to drain; generalise it together with the pending queue when the v6 HW insert branch lands. Verified: full `ask.ko` builds clean against `work/linux-6.18.34` (15 objects, 0 errors; the only warning is the pre-existing `ask_xfrm_state_add` missing-prototype). `CONFIG_IPV6=y` on this kernel and `nd_tbl` is `EXPORT_SYMBOL_GPL`, so the new `U nd_tbl` reference resolves at module load. The v6 half is **inert until Pieces 2-3** (no installed v6 flow can carry `hw_flow_id != 0`, so the stale-MAC walk cannot match one) — this is plumbing-ahead, not a behaviour change.
 - [ ] **T-M6-2** `@___` — F-06 `ask_bridge.c` real body (switchdev).
-- [~] **T-M6-3** `@mihakralj` — F-03 `ask_neigh.c` real body (NETEVENT_NEIGH_UPDATE → stale-MAC rebuild; kills stale-MAC blackholing). **IMPLEMENTED 2026-07-25 (Option B, mainline-aligned), compiles clean; awaiting CI + board validation.** `ask_neigh.c` is now the single owner of neigh events (mlx5e_rep_neigh / nfp pattern): its notifier does minimal atomic-context capture (dev/dst_ip/new_mac on NUD_VALID for `arp_tbl`) and **defers to a workqueue** (process context). The netevent chain is `ATOMIC_NOTIFIER_HEAD` but the flow entry points replay GFP_KERNEL inserts, so the deferral is mandatory — this also **fixes the latent sleep-in-atomic bug** behind the old PR14z8 "deferred-insert OK=0" (the inline drain in the atomic notifier could never complete). `ask_flow_offload.c` exports two consumer entry points: `ask_flow_neigh_resolved(dev,dst_ip)` (the existing deferred-insert drain, refactored out of the old notifier) and NEW `ask_flow_neigh_mac_changed(dev,dst_ip,new_mac)` (walks installed IPv4 flows egressing to (oif=ifindex, dst_ip) whose baked-in `next_hop_mac != new_mac`, rebuilds each cookie-stably via `ask_flow_remove`+`ask_flow_insert` with the fresh MAC — brief SW-path window, no blackhole). PR14z9 active-poll fallback stays in `ask_flow_offload.c`. Both TUs compile clean against `work/linux-6.18.34`. **✅ STRUCTURALLY VALIDATED on silicon (ISO 1949, .185, 2026-07-25):** dmesg shows `ask: neigh: resolved dev=eth0 … pending_count=0` firing repeatedly over ~16 min of real ARP churn, board healthy — proving (a) the notifier relocated to `ask_neigh.c` is registered + firing, (b) the workqueue deferral runs in PROCESS context with no sleep-in-atomic regression (the old bug is closed), (c) `ask_flow_neigh_mac_changed` runs alongside `_resolved` on every update (empty-table walk-and-return is silicon-safe). **PENDING:** the stale-MAC *rebuild* branch (matched offloaded flow → `neigh: stale-MAC rebuild`) needs a live offloaded transit flow to fire — ASK offload not currently engaged; fold this functional check into the next offloaded-flow session (uses only proven `ask_flow_remove`/`insert` primitives on the now-proven notifier/workqueue/walk path).
+- [~] **T-M6-3** `@mihakralj` — F-03 `ask_neigh.c` real body (NETEVENT_NEIGH_UPDATE → stale-MAC rebuild; kills stale-MAC blackholing). **IMPLEMENTED 2026-07-25 (Option B, mainline-aligned), compiles clean; awaiting CI + board validation.** `ask_neigh.c` is now the single owner of neigh events (mlx5e_rep_neigh / nfp pattern): its notifier does minimal atomic-context capture (dev/dst_ip/new_mac on NUD_VALID for `arp_tbl`) and **defers to a workqueue** (process context). The netevent chain is `ATOMIC_NOTIFIER_HEAD` but the flow entry points replay GFP_KERNEL inserts, so the deferral is mandatory — this also **fixes the latent sleep-in-atomic bug** behind the old PR14z8 "deferred-insert OK=0" (the inline drain in the atomic notifier could never complete). `ask_flow_offload.c` exports two consumer entry points: `ask_flow_neigh_resolved(dev,dst_ip)` (the existing deferred-insert drain, refactored out of the old notifier) and NEW `ask_flow_neigh_mac_changed(dev,dst_ip,new_mac)` (walks installed IPv4 flows egressing to (oif=ifindex, dst_ip) whose baked-in `next_hop_mac != new_mac`, rebuilds each cookie-stably via `ask_flow_remove`+`ask_flow_insert` with the fresh MAC — brief SW-path window, no blackhole). PR14z9 active-poll fallback stays in `ask_flow_offload.c`. Both TUs compile clean against `work/linux-6.18.34`. **✅ STRUCTURALLY VALIDATED on silicon (ISO 1949, .185, 2026-07-25):** dmesg shows `ask: neigh: resolved dev=eth0 … pending_count=0` firing repeatedly over ~16 min of real ARP churn, board healthy — proving (a) the notifier relocated to `ask_neigh.c` is registered + firing, (b) the workqueue deferral runs in PROCESS context with no sleep-in-atomic regression (the old bug is closed), (c) `ask_flow_neigh_mac_changed` runs alongside `_resolved` on every update (empty-table walk-and-return is silicon-safe). **PENDING:** the stale-MAC *rebuild* branch (matched offloaded flow → `neigh: stale-MAC rebuild`) needs a live offloaded transit flow to fire — ASK offload not currently engaged; fold this functional check into the next offloaded-flow session (uses only proven `ask_flow_remove`/`insert` primitives on the now-proven notifier/workqueue/walk path). **Board survey 2026-07-26:** `.185`/`.106`/heidi all reachable, `.185` up 12 h on the pre-Piece-4 image (banner still reads `neigh: netevent notifier active (deferred-insert drain + stale-MAC rebuild)` without `arp_tbl + nd_tbl`), eth3 `10.99.1.185/24` + eth4 `10.99.2.185/24`, **no `ask_offload` nft flowtable, 0 `[HW_OFFLOAD]` conntrack entries, offload not engaged, no ehash table** — i.e. the M5 transit plane (eth3 `10.99.1.1/30`, ip_forward, flowtable, notrack deleted, `.106` route, heidi sink) is torn down and must be rebuilt for the test. **Sequencing decision:** do NOT run this on the current image. Piece 4 changed `ask_flow_neigh_mac_changed()`'s signature, so validating on the deployed build would prove T-M6-3 but leave Piece 4 unexercised and force a full three-host re-setup afterwards. Build one ISO carrying Piece 4 + the 2026-07-26 patch fixes, have the operator install it (per AGENTS.md image deployment is the USER's task — the agent never runs `add system image`), then validate T-M6-3's rebuild branch and Piece 4's `nd_tbl` notifier in a single session.
 - [ ] **T-M6-4** `@___` — IPsec landing series in one merge: F-01 + F-07 + F-02 + F-23 + F-21 + F-22 + F-20, then `NETIF_F_HW_ESP` LAST. GCM refused (§3.8).
 - [~] **T-M6-5** `@mihakralj` — **Per-flow FE-VM ehash HIT (scale path beyond the CC-tree ceiling)** — carved out of T-M5-8. **Part 1 (strategic) DONE + Part 2 (Fix B correctness) DONE & silicon-validated 2026-07-25. Part 3 (arm/teardown robustness, task #11) + Cosmetic 2 deferred.**
   - **✅ PART 1 — strategic reconciliation (DONE 2026-07-25).** Resolved the "is this load-bearing or a dormant scaffold?" question against code ground truth. The shipping datapath is **Fork-B** (frames traverse the FE-VM, decision §3.1): ask.ko `flow_add` (`ask_flow_offload.c:1063`) calls `fman_pcd_fe_flow_add`, but flow **matching** is via **CC-tree**, hard-capped at **`FMAN_CC_MAX_STATIC_KEYS = 32`** keys/tree (~5 KiB MURAM budget, `0086b`); beyond 32 flows the insert returns `hw_insert=-19` and falls back to the kernel **SW flowtable** (`ask_flow_offload.c:1126`). The **FE-VM EHASH** mechanism (this task / Fix B / F-117) matches via hash to `FMAN_EHASH_MASK_MAX = 0x7fff` = **thousands of flows**. **VERDICT: the FE-VM ehash path IS the durable answer to HW-offloading >32 concurrent flows** — a real ceiling for router/firewall workloads, not a dead-end. Hardening it (Part 2) is justified. **This does NOT block shipping** (CC-tree + SW-flowtable already meets the 10.259 Gbps gate for ≤32 offloaded flows); it is a scale feature.
@@ -308,6 +308,52 @@ mandatory on 10G tests (MTU 1500 caps ~1.5 Gbps with retransmit storms).
 MTU 9000 (line-rate baseline), and treat MTU 8192 as a known boundary-cliff in
 order-3 RX allocation paths. For throughput comparisons across MTUs, use
 order-4-primary / order-3-fallback so packet-to-buffer fit remains stable.
+
+**[SPEC]** Patch-pipeline hygiene (added 2026-07-26 after the CI firefight that
+produced `511c0092`/`bb6a0838`). Four defects were found and fixed:
+
+1. **`patch-rot-check.yml` was inert for eight weeks.** Upstream renamed the
+   vyos-1x / vyos-build default branch `current` → `rolling` on 2026-05-30
+   (already documented in `bin/ci-setup-vyos-build.sh`); the workflow still
+   cloned `--branch current` and carried `continue-on-error: true` on *every*
+   step, so it reported success every Monday while checking nothing. 13-16 s
+   run times were the tell. Now: clones `rolling`, hard-fails on the
+   `data/vyos-1x-*` and `data/vyos-build-*` buckets, kernel bucket stays
+   advisory (independent `--check` false-fails the stacked board series —
+   `patch-health.sh` remains authoritative there).
+2. **It only ran on `main`, which has no `vyos-1x-030..034`.** The ASK2 CLI
+   patches were never rot-checked on any branch. Now a `[main, dpaa1]` matrix,
+   with a dual checkout so the probe script comes from the workflow's own
+   branch and the patches from the branch under test.
+3. **The probe now mirrors the build's real semantics** (`.github/scripts/patch-rot-probe.sh`):
+   cumulative apply in glob order with Mergiraf wired, not independent
+   `--check` — these patches stack (024/025/031/034 all edit
+   `interfaces_ethernet.xml.in`). It classifies FAIL / CONFLICT (applied with
+   markers, exit 0 — the silent path to a broken `.deb`) / MISSING, and
+   distinguishes *corrupt* patches from genuine drift.
+4. **The `.deb` cache masks rot indefinitely.** `ci-build-packages.sh` keys the
+   vyos-1x `.deb` on `sha256(cat data/vyos-1x-*.patch)`, so patches are not
+   re-applied while the cache hits and rot only detonates on the next unrelated
+   edit. Builds 1640→1949 rode a cached `.deb`; the 2026-07-26 edit busted it
+   and exposed accumulated rot.
+
+**[NOTE]** Two patch-authoring rules follow from that firefight:
+- **Never hand-edit a `.patch` body.** `7527c23c` edited 031/034 in place and
+  left the `@@` hunk line counts stale → `git apply` rejects the file with
+  *"corrupt patch at line N"*. `bb6a0838` misdiagnosed this as context drift and
+  reverted rather than fixing the counts. This is the third occurrence of the
+  same bug class (see the `vyos-1x-010` corruption, 2026-07-21). Regenerate
+  with `git diff` against a real tree.
+- **Watch for false-positive SKIPs.** The build's `git apply --reverse --check`
+  idempotency guard silently no-ops a patch whose reverse hunk matches at the
+  wrong offset — repetitive XML (`</leafNode>` followed by the next
+  `<leafNode>`) is the trap. 034 hit exactly this and applied as a no-op; fixed
+  by generating it with `-U8` so the reverse hunk cannot match elsewhere.
+- Patches whose base is a **mid-stack** state (they touch a file an earlier
+  patch already modified) must carry **no `index` line** — that blob never
+  exists in the shallow upstream clone. This is the accurate form of the rule
+  `511c0092` overstated as "all patch files must stay index-line-free" (30 of
+  the `data/*.patch` files carry index lines and apply fine).
 
 **[SPEC]** Gate mechanics:
 - `pcd-snapshot capture/diff` byte-exactness is the reversibility gate — never

@@ -649,10 +649,28 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type,
  *                                  (dev, dst_ip) whose baked-in next_hop_mac
  *                                  no longer matches @new_mac (kills stale-MAC
  *                                  blackholing).
+ *
+ * T-M6-1 piece 4: ask_flow_neigh_mac_changed() takes the next-hop as a raw
+ * byte pointer plus an ASK_FLOW_L3_* discriminator so it serves both arp_tbl
+ * (4-byte key) and nd_tbl (16-byte key) without a parallel v6 copy — the flow
+ * key already stores dst_ip as 16 bytes.  @dst_ip must point at
+ * ask_flow_l3_addr_len(@l3_proto) readable bytes.
+ *
+ * ask_flow_neigh_resolved() stays IPv4-only on purpose: it drains the
+ * deferred-insert pending queue, which is keyed by __be32 and is only ever
+ * populated by the v4 HW-insert path.  v6 flows are parsed and SW-tracked but
+ * rejected at the HW gate (-EOPNOTSUPP) until T-M6-1 pieces 2-3 land, so there
+ * is nothing for a v6 event to drain.  Generalise it together with the pending
+ * queue when the v6 HW insert branch lands.
  */
+static inline unsigned int ask_flow_l3_addr_len(u8 l3_proto)
+{
+return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
+}
+
 void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip);
-void ask_flow_neigh_mac_changed(struct net_device *dev, __be32 dst_ip,
-       const u8 *new_mac);
+void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
+       u8 l3_proto, const u8 *new_mac);
 
 /* ------------------------------------------------------------------------- */
 /* ask_xfrm.c — xfrmdev_ops packet-mode IPsec offload                         */
