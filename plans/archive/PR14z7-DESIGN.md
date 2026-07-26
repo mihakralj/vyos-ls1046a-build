@@ -262,7 +262,7 @@ drain limit; further bisection will be needed.
 ## 4. Implementation plan
 
 1. **kernel patch 0039** — write `0039-dpaa-export-rx-fman-port.patch`
-   in `kernel/flavors/ask/patches/`. Verify it applies cleanly with
+   in `kernel/ask/patches/`. Verify it applies cleanly with
    `bash scripts/patch-health.sh --source release` (CI-level health
    check). Visual `grep` the produced `dpaa_eth.c` for the new
    `dpaa_get_rx_fman_port` export.

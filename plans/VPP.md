@@ -126,7 +126,7 @@ Patch 010 still ships some DPDK template branches in `startup.conf.j2`; in the s
 
 **[SPEC]**
 - VPP needs `BPF_SYSCALL`, `BPF_JIT`, `XDP_SOCKETS`, `XDP_SOCKETS_DIAG`, `HUGETLBFS`, `FSL_FMAN`, `FSL_DPAA_ETH` — all already on in the default arm64 kernel config.
-- The legacy `kernel/flavors/vpp/kernel-config/00-vpp-af-xdp.config` was only ever a documentation stub (it flipped no new symbols); under the single-image model there is no vpp flavor tree.
+- The legacy `kernel/flavors/vpp/kernel-config/00-vpp-af-xdp.config` was only ever a documentation stub — every symbol it set (BPF_SYSCALL, BPF_JIT, XDP_SOCKETS, HUGETLBFS, HUGETLB_PAGE, FSL_FMAN, FSL_DPAA_ETH) already comes from `vyos_defconfig` or `kernel/common/kernel-config/`, and it was never collected by the build. Deleted 2026-07-26 with the rest of the flavor tree. The single exception, `XDP_SOCKETS_DIAG` (diagnostics only, `ss --xdp`), has therefore never been enabled in any shipped image.
 - Two kernel-side fixes land in `kernel/common/` (applied unconditionally to the single image): the DPAA1 XDP `queue_index` patch and the MTU ≤ 3290 invariant.
 
 **[BUG] AF_XDP RX gets zero packets without the queue_index=0 patch**

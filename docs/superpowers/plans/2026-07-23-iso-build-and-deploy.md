@@ -23,7 +23,7 @@
 
 - [ ] **Step 1: Execute ISO build**
 
-Run: `FLAVOR=ask ./bin/dev-build.sh iso`
+Run: `./bin/dev-build.sh iso`
 Expected: Live-build completes and produces `vyos-*-LS1046A-arm64.iso`.
 
 - [ ] **Step 2: Verify ISO output file**

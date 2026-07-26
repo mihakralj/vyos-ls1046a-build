@@ -52,7 +52,7 @@ Compared to the wedge model: the silicon transition is from `KGSE_CCBS=cc_empty`
 
 ## 3. Patches required (in landing order)
 
-### 3.1 In-tree kernel patches (added to `kernel/flavors/ask/patches/`)
+### 3.1 In-tree kernel patches (added to `kernel/ask/patches/`)
 
 | Slot | Name | LOC | Purpose |
 |---|---|---|---|
@@ -60,7 +60,7 @@ Compared to the wedge model: the silicon transition is from `KGSE_CCBS=cc_empty`
 | 0045 | `0045-fman-pcd-cc-node-add-remove-key.patch` | ~120 | Expose `fman_pcd_cc_node_add_key()` / `_remove_key()` as `EXPORT_SYMBOL_GPL` if not already (PR14c-body-4 may have only `attach_cc`). Adds debugfs `cc_node_dump` showing all keys + AD entries per node. |
 | 0046 | `0046-fman-pcd-debug-regdump.patch` | ~200 | New `/sys/kernel/debug/fman_pcd/` tree exposing: per-KG-scheme registers (KGSE_MODE/CCBS/FQB/MV/EKFC/SPC), per-BMI-port registers (FMBM_RFPNE/RFQID/RFCA), `fmkg_pe_sp` port↔scheme bindings, MURAM allocation map (offset/size/owner), and live CC tree topology. Read-only. Each register read is timestamped + sampled into a small ring buffer so we can correlate against `nft` events post-hoc. |
 
-### 3.2 Out-of-tree module changes (`kernel/flavors/ask/oot-modules/ask/`)
+### 3.2 Out-of-tree module changes (`kernel/ask/oot-modules/ask/`)
 
 | File | Action | Notes |
 |---|---|---|
@@ -76,7 +76,7 @@ Compared to the wedge model: the silicon transition is from `KGSE_CCBS=cc_empty`
 - `0043-fman-pcd-kg-graft-mode-nia.patch` — no longer needed, NIA set once at scheme create
 - Any subsequent z-suffixed patches that touched `fman_pcd_kg_graft_cc()` / `_ungraft_cc()` paths
 
-These should be moved to `kernel/flavors/ask/patches/archived/` with a one-line note ("superseded by PR14z19 Path A, see plans/PR14z19-PATH-A-DESIGN.md") so the patch numbers stay reserved and the audit trail remains.
+These should be moved to `kernel/ask/patches/archived/` with a one-line note ("superseded by PR14z19 Path A, see plans/PR14z19-PATH-A-DESIGN.md") so the patch numbers stay reserved and the audit trail remains.
 
 ## 4. Debugging / inspection hooks (the operator's explicit ask)
 
@@ -154,7 +154,7 @@ After patches land, before claiming M2 pass, run these in order on the live DUT 
 | # | Risk | Mitigation |
 |---|---|---|
 | 1 | Pre-netdev hook conflicts with upstream dpaa_eth direction (clean-up trend is to *remove* hooks, not add them) | Keep hook narrow: single function pointer, single FM instance, no global state. Gated by Kconfig `CONFIG_FSL_DPAA_PCD_PRE_NETDEV_HOOK`. Default n. Submit upstream only after M2 passes and we have data showing the cost. |
-| 2 | `ask.ko` not loaded early enough to register hook before `dpaa_eth` probe | Build ASK as `bool` (built-in) in `kernel/flavors/ask/oot-modules/ask/Kconfig`. Confirm load order with `dmesg | grep -E "(ask_module_init|dpaa_eth probe)"`. |
+| 2 | `ask.ko` not loaded early enough to register hook before `dpaa_eth` probe | Build ASK as `bool` (built-in) in `kernel/ask/oot-modules/ask/Kconfig`. Confirm load order with `dmesg | grep -E "(ask_module_init|dpaa_eth probe)"`. |
 | 3 | Empty CC tree costs measurable idle CPU (FM_CTL walks even with 0 keys) | Step 4 of verification measures this. If positive, add a fast-path "empty tree → fallthrough to KGSE_FQB base" via the existing miss-action AD; original ASK does this. |
 | 4 | Silicon debug ring buffer overflow under heavy nft churn | 4 KiB ring × ~16 bytes/entry = 256 entries. Per-CPU lockless ring (RCU). Verify no measurable cost in step 6 — disable via `ask_debug_level=0` if needed. |
 | 5 | MURAM exhaustion on long-running nft churn (cf. ASK 1.x failure mode) | `silicon_sample_history` tracks MURAM free bytes. If trending down, we have a leak; debug via `trace_fman_muram_alloc/free` comparison. |
@@ -164,16 +164,16 @@ After patches land, before claiming M2 pass, run these in order on the live DUT 
 
 | File | Action |
 |---|---|
-| `kernel/flavors/ask/patches/0044-fman-pcd-pre-netdev-hook.patch` | Create |
-| `kernel/flavors/ask/patches/0045-fman-pcd-cc-node-add-remove-key.patch` | Create |
-| `kernel/flavors/ask/patches/0046-fman-pcd-debug-regdump.patch` | Create |
-| `kernel/flavors/ask/patches/0042-…graft-cc.patch` | Move to `archived/` |
-| `kernel/flavors/ask/patches/0043-…graft-mode-nia.patch` | Move to `archived/` |
-| `kernel/flavors/ask/oot-modules/ask/ask_hw.c` | Rewrite `ask_hw_bind`/`unbind` as no-ops; new `ask_pcd_install_hook` (~300 LOC net delete) |
-| `kernel/flavors/ask/oot-modules/ask/ask_main.c` | Register/unregister hook at init/exit (~20 LOC) |
-| `kernel/flavors/ask/oot-modules/ask/ask_debugfs.c` | Add all `/sys/kernel/debug/ask/` entries listed in §4.3 |
-| `kernel/flavors/ask/oot-modules/ask/ask_trace.h` | New tracepoints per §4.1 + §4.2 |
-| `kernel/flavors/ask/oot-modules/ask/Kconfig` | `tristate "ASK offload" → bool "ASK offload"` (force built-in) |
+| `kernel/ask/patches/0044-fman-pcd-pre-netdev-hook.patch` | Create |
+| `kernel/ask/patches/0045-fman-pcd-cc-node-add-remove-key.patch` | Create |
+| `kernel/ask/patches/0046-fman-pcd-debug-regdump.patch` | Create |
+| `kernel/ask/patches/0042-…graft-cc.patch` | Move to `archived/` |
+| `kernel/ask/patches/0043-…graft-mode-nia.patch` | Move to `archived/` |
+| `kernel/ask/oot-modules/ask/ask_hw.c` | Rewrite `ask_hw_bind`/`unbind` as no-ops; new `ask_pcd_install_hook` (~300 LOC net delete) |
+| `kernel/ask/oot-modules/ask/ask_main.c` | Register/unregister hook at init/exit (~20 LOC) |
+| `kernel/ask/oot-modules/ask/ask_debugfs.c` | Add all `/sys/kernel/debug/ask/` entries listed in §4.3 |
+| `kernel/ask/oot-modules/ask/ask_trace.h` | New tracepoints per §4.1 + §4.2 |
+| `kernel/ask/oot-modules/ask/Kconfig` | `tristate "ASK offload" → bool "ASK offload"` (force built-in) |
 | `bin/ci-setup-kernel.sh` | `ASK_PATCH_COUNT 43 → 46`, glob extension, `0044/0045/0046 → 1044/1045/1046` rename clauses |
 | `bin/ask-pcd-regdump.py` | Add `--history` flag reading `/sys/kernel/debug/ask/silicon_sample_history` |
 | `bin/m2-dut-prep.sh` | ARP-flush step + verify `pipeline_status` shows `cc_tree_active=yes` before proceeding |

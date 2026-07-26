@@ -21,7 +21,7 @@
 #
 # Place this file at Documentation/netlink/specs/ask.yaml when the
 # ask.ko series is upstreamed. Until then it lives in this repo at
-# kernel/flavors/ask/uapi/ask.yaml and is copied into the kernel tree
+# kernel/ask/uapi/ask.yaml and is copied into the kernel tree
 # by bin/ci-stage-kernel.sh (FLAVOR=ask) during the build.
 #
 # Schema authoring rules: see Documentation/userspace-api/netlink/

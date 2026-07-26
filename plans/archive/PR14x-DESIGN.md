@@ -118,7 +118,7 @@ struct fman_pcd_action {
 
 ## Implementation files
 
-### Kernel patch `kernel/flavors/ask/patches/0035-fman-pcd-manip-chain.patch`
+### Kernel patch `kernel/ask/patches/0035-fman-pcd-manip-chain.patch`
 
 1. **`drivers/net/ethernet/freescale/fman/fman_pcd_manip.c`** (+~250 LOC)
    - New `struct fman_pcd_manip_chain` private to the TU: `{ kref, pcd, hmct_off, hmct_vbase, n_manips, manips[FMAN_PCD_OH_MAX_MANIPS=4] }`.
@@ -143,7 +143,7 @@ struct fman_pcd_action {
    - New KUnit case `manip_chain_lifetime_refcount`: create chain, install on 2 CC keys, destroy chain handle (chain stays alive on keys' refs), tombstone both keys, verify chain MURAM is finally freed.
    - New KUnit case `manip_chain_invalid_n_zero`: `_create(pcd, [], 0)` returns `-EINVAL`. `_create(pcd, manips, 5)` returns `-EINVAL`.
 
-### ASK patch `kernel/flavors/ask/oot-modules/ask/ask_hw.c` (PR14x-ask, separate commit on top of 0e6f3bc)
+### ASK patch `kernel/ask/oot-modules/ask/ask_hw.c` (PR14x-ask, separate commit on top of 0e6f3bc)
 
 1. Delete:
    - `ASK_HW_NUM_OH_PORTS`, `oh_pool[]`, `oh_pool_count`, `oh_alloc_bitmap`.
@@ -248,11 +248,11 @@ if (ck->m_insrt)
 
 ## Test plan
 
-1. **Local native build:** `cd work/linux-6.18.29 && git reset --hard <pre-0035> && git apply --3way kernel/flavors/ask/patches/0035-fman-pcd-manip-chain.patch && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j32 drivers/net/ethernet/freescale/fman/` — zero warnings, vmlinux links, all 3 new `__ksymtab_fman_pcd_manip_chain_*` (well, 2: create + destroy) present.
+1. **Local native build:** `cd work/linux-6.18.29 && git reset --hard <pre-0035> && git apply --3way kernel/ask/patches/0035-fman-pcd-manip-chain.patch && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j32 drivers/net/ethernet/freescale/fman/` — zero warnings, vmlinux links, all 3 new `__ksymtab_fman_pcd_manip_chain_*` (well, 2: create + destroy) present.
 
 2. **KUnit:** `make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- M=drivers/net/ethernet/freescale/fman/tests -j32` then `./tools/testing/kunit/kunit.py run --kernel_arch arm64 --cross_compile aarch64-linux-gnu- fman_pcd_manip` — all manip_chain_* cases PASS.
 
-3. **OOT build of ask.ko against the patched tree:** `cd kernel/flavors/ask/oot-modules/ask && make -C $KSRC M=$PWD modules` — links cleanly with `fman_pcd_manip_chain_create`/`_destroy` resolved against patched vmlinux exports.
+3. **OOT build of ask.ko against the patched tree:** `cd kernel/ask/oot-modules/ask && make -C $KSRC M=$PWD modules` — links cleanly with `fman_pcd_manip_chain_create`/`_destroy` resolved against patched vmlinux exports.
 
 4. **patch-health:** `bash kernel/common/scripts/patch-health.sh --flavor ask --source release` — patches/0035 green; no regression in pre-existing pass count.
 
@@ -280,7 +280,7 @@ if (ck->m_insrt)
 | HMCT MURAM pool exhaustion under flow churn | Each chain costs `n_manips * sizeof(hmct_entry) = 4 * 16 = 64 B`. 255 chains = 16 KiB of MURAM, well within the 384 KiB FMan budget. PR14w `enospc_chain_muram` counter will surface this if hit. |
 | `cc_encode_ad()` kref_get on action template that the caller frees synchronously | Caller (`ask_hw_flow_insert_v4_tcp`) stores `chain` in the cookie BEFORE `cc_node_add_key` returns, so the cookie's stored chain pointer is the long-lived reference. The action template on the stack is consumed-only. Pattern matches the existing MANIPULATE arm in PR14d. |
 | Existing OH-port code path leaks after PR14x deletes its caller | `fman_pcd_oh_port_set_chain` / `_claim` / `_release` exports stay (used by future IPsec re-inject in v1.1+). They become dormant in ASK2 v1.0, not deleted. |
-| Patch-stack baseline drift on `git apply --3way` | All preceding ASK patches are git-format unified diffs with stable blob SHAs (per AGENTS.md patch discipline). 0035 inserts new symbols and a new action-union arm — no overlap with preceding hunks. Pre-flight check: `git apply --3way --check kernel/flavors/ask/patches/0035-*.patch`. |
+| Patch-stack baseline drift on `git apply --3way` | All preceding ASK patches are git-format unified diffs with stable blob SHAs (per AGENTS.md patch discipline). 0035 inserts new symbols and a new action-union arm — no overlap with preceding hunks. Pre-flight check: `git apply --3way --check kernel/ask/patches/0035-*.patch`. |
 | KUnit test infrastructure for `fman_pcd_manip` requires a stubbed `struct fman_pcd` | Existing PR14d-body-4 KUnit cases already constructed this stub. Reuse `tests/fman_pcd_test_helpers.c` (introduced by patch 0017). |
 
 ## Estimated effort
@@ -319,7 +319,7 @@ git checkout -b pr14x-fman-pcd-manip-chain
 # 4. edit include/linux/fsl/fman_pcd.h (action union + symbol decls)
 # 5. add drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_chain_test.c (or extend existing tests/fman_pcd_manip_test.c)
 # 6. make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j32 drivers/net/ethernet/freescale/fman/
-# 7. git diff --cached > /home/vyos/vyos-ls1046a-build/kernel/flavors/ask/patches/0035-fman-pcd-manip-chain.patch
+# 7. git diff --cached > /home/vyos/vyos-ls1046a-build/kernel/ask/patches/0035-fman-pcd-manip-chain.patch
 # 8. cd /home/vyos/vyos-ls1046a-build && bash kernel/common/scripts/patch-health.sh --flavor ask --source release
 ```
 

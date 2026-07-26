@@ -266,7 +266,7 @@ implementation per the operator's "A → B → C" sequence.
 
 Two new patches landed on `ask20`:
 
-### `kernel/flavors/ask/patches/0053-dpaa-noconfirm-offload-tx-fq.patch`
+### `kernel/ask/patches/0053-dpaa-noconfirm-offload-tx-fq.patch`
 
 In-tree kernel patch (`drivers/net/ethernet/freescale/dpaa/dpaa_eth.{c,h}`
 + `include/linux/fsl/dpaa_flow_offload.h`):
@@ -297,7 +297,7 @@ In-tree kernel patch (`drivers/net/ethernet/freescale/dpaa/dpaa_eth.{c,h}`
   WQ/CGR/OAL correctly — only the confirmation-suppression bit is
   changed.
 
-### `kernel/flavors/ask/patches/0054-ask-hw-noconfirm-tx-fq-resolver.patch`
+### `kernel/ask/patches/0054-ask-hw-noconfirm-tx-fq-resolver.patch`
 
 Consumer change in `drivers/net/ethernet/freescale/dpaa/ask/ask_hw.c`:
 

@@ -34,7 +34,7 @@ if [ "${1:-}" = "ask-mod" ]; then
         exit 1
     fi
     PKG_DIR="${PKG_DIR:-$WORKSPACE}"
-    BUILDER="$WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
+    BUILDER="$WORKSPACE/kernel/ask/oot-modules/ask/ci-build.sh"
     if [ ! -x "$BUILDER" ]; then
         echo "FATAL: $BUILDER missing or not executable"
         exit 1
@@ -159,7 +159,7 @@ step "Setup vyos-1x patches" bash bin/ci-setup-vyos1x.sh
 
 # ASK2 (rewrite-in-progress): the legacy ASK kernel staging steps
 # (local-stage-ask-kernel.sh, ci-consume-ask-kernel.sh, ci-setup-kernel-ask.sh)
-# were removed on the ask20 branch. All flavors now build the kernel locally
+# were removed on the ask20 branch. The kernel is now always built locally
 # from the upstream-tracked source via ci-setup-kernel.sh + ci-build-packages.sh.
 
 step "Setup kernel config and patches" bash bin/ci-setup-kernel.sh

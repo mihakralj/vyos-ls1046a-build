@@ -58,7 +58,7 @@ ls -alh packages
 #
 # ASK2 (rewrite-in-progress): the legacy ASK-consume branch
 # (ASK_KERNEL_TAG → packages.chroot/) was removed on the ask20 branch.
-# All flavors now build the kernel locally and stage it under packages/.
+# The kernel is always built locally and staged under packages/.
 KERNEL_PKGS=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' | wc -l)
 if [ "$KERNEL_PKGS" -eq 0 ]; then
   echo ""
@@ -75,12 +75,12 @@ echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in package
 #
 # The default `find scripts/package-build -name '*.deb'` glob above
 # already sweeps in our ask-modules-${KVER}_*_arm64.deb (produced by
-# kernel/flavors/ask/oot-modules/ask/ci-build.sh under
+# kernel/ask/oot-modules/ask/ci-build.sh under
 # scripts/package-build/linux-kernel/) — no name-based filtering excludes
 # it. This block is a fail-fast guard: if the OOT module didn't make it
 # in, the ISO would silently boot without ask.ko and the operator would
 # only discover the omission after USB-booting the device. ask.ko is built
-# unconditionally in every single-image build (FLAVOR=ask gate retired
+# unconditionally in every single-image build (the ask-only gate was retired
 # 2026-06-14) and ships dormant; see bin/ci-build-packages.sh.
 ASK_MOD_PKGS=$(find packages -name 'ask-modules-*.deb' | wc -l)
 if [ "$ASK_MOD_PKGS" -eq 0 ]; then

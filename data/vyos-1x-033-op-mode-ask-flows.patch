@@ -58,7 +58,7 @@ index 000000000..77e380f58
 +# Renders the flows the NXP LS1046A FMan FE-VM has offloaded to silicon on
 +# a given interface. There is no askd daemon: this wraps the standard YNL
 +# client talking straight to ask.ko's generic-netlink family, per
-+# kernel/flavors/ask/uapi/ask.yaml (§3.5 "Operator UX"):
++# kernel/ask/uapi/ask.yaml (§3.5 "Operator UX"):
 +#
 +#     ynl --family ask --dump dump-flows --output-json
 +#

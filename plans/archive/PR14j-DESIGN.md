@@ -476,7 +476,7 @@ Add to `ask_flow_suite` (+2):
 
 ## 6. Patch layout — single new patch slot
 
-PR14j is **entirely OOT-side**. No new in-tree patch is needed (PR14h/i/k already landed all in-tree primitives). The ask.ko source tree absorbs the change directly under `kernel/flavors/ask/oot-modules/ask/`. No `ASK_PATCH_COUNT` bump in `bin/ci-setup-kernel.sh`. No `patch-health.sh` impact.
+PR14j is **entirely OOT-side**. No new in-tree patch is needed (PR14h/i/k already landed all in-tree primitives). The ask.ko source tree absorbs the change directly under `kernel/ask/oot-modules/ask/`. No `ASK_PATCH_COUNT` bump in `bin/ci-setup-kernel.sh`. No `patch-health.sh` impact.
 
 Files touched (estimated LOC delta):
 
@@ -497,7 +497,7 @@ Body of the spec budget was 200 LOC; the real number is closer to 520 net new LO
 1. **Native ARM64 OOT build** against the work/linux-6.18.29 tree on Cobalt 100:
    ```bash
    FLAVOR=ask bash bin/ci-stage-kernel.sh
-   cd kernel/flavors/ask/oot-modules/ask
+   cd kernel/ask/oot-modules/ask
    make -C $KSRC M=$PWD modules ARCH=arm64
    # zero warnings required; all new symbols T in nm output
    ```

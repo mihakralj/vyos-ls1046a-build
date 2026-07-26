@@ -96,8 +96,8 @@ the kernel scheme to our CC tree, instead of allocating a new scheme).
 
 ### Action items (replaces the entire former §0 and Tier-2 H1/H2/H3 set)
 
-1. ✅ **DONE 2026-05-25** — `kernel/flavors/ask/patches/0065-fman-pcd-graft-kernel-scheme.patch` authored. Exports `fman_pcd_kg_lookup_port_scheme` / `fman_pcd_kg_graft_cc` / `fman_pcd_kg_ungraft_cc` (KGSE_CCBS-only RMW; `KGSE_MODE` intentionally untouched per USDPAA reference and the 0043 disproof / 0051 revert). Stats +344 / -1, 4 files. `patch-health.sh --flavor ask` → Pass=63 Fail=0. `bin/ci-setup-kernel.sh` glob+rename+`ASK_PATCH_COUNT=51` updated. `kernel/flavors/ask/patches/README.md` documents the patch.
-2. ✅ **DONE (prior session)** — `ask_pcd_install_hook()` rewritten in `kernel/flavors/ask/oot-modules/ask/ask_hw.c` to call `lookup_port_scheme` + `graft_cc` instead of `scheme_create` + `bind_port`. Dead `ask_hw_kg_params_fill()` static removed.
+1. ✅ **DONE 2026-05-25** — `kernel/ask/patches/0065-fman-pcd-graft-kernel-scheme.patch` authored. Exports `fman_pcd_kg_lookup_port_scheme` / `fman_pcd_kg_graft_cc` / `fman_pcd_kg_ungraft_cc` (KGSE_CCBS-only RMW; `KGSE_MODE` intentionally untouched per USDPAA reference and the 0043 disproof / 0051 revert). Stats +344 / -1, 4 files. `patch-health.sh --flavor ask` → Pass=63 Fail=0. `bin/ci-setup-kernel.sh` glob+rename+`ASK_PATCH_COUNT=51` updated. `kernel/ask/patches/README.md` documents the patch.
+2. ✅ **DONE (prior session)** — `ask_pcd_install_hook()` rewritten in `kernel/ask/oot-modules/ask/ask_hw.c` to call `lookup_port_scheme` + `graft_cc` instead of `scheme_create` + `bind_port`. Dead `ask_hw_kg_params_fill()` static removed.
 3. ✅ **DONE** — `fman_pcd_kg_lookup_port_scheme(pcd, hwport_id, &sid, &base_fqid)` is wired into 0065 (added by the patch alongside `graft_cc` / `ungraft_cc` — the archived 0042 helper that `ask_hw_port_bind` previously used was archived along with the rest of 0042; 0065 supplies the fresh ABI surface).
 4. **PENDING HARDWARE** — Re-run harness: expect `kgse_ccbs` non-zero on schemes 3 + 4 (the kernel's schemes), `kgse_spc` on schemes 3 + 4 still climbing (KG still dispatches), schemes 5–9 ABSENT from regdump (ASK no longer creates schemes), kernel-net CPU collapses, CC tree consults happen. User-driven: `bin/local-build.sh ask` → deploy to DUT 192.168.1.190 → `bash bin/m2-dut-prep.sh && bash bin/verify-ask-flow-offload.sh`.
 
@@ -214,7 +214,7 @@ spec §3.6 v1.3 + course-correction §2.4.5. Grep:
 
 ```bash
 grep -rn 'fman_pcd_cc_node_add_key\|fman_pcd_cc_node_remove_key' \
-  kernel/flavors/ask/oot-modules/ask/ work/linux-*/drivers/net/ethernet/freescale/dpaa/ask/
+  kernel/ask/oot-modules/ask/ work/linux-*/drivers/net/ethernet/freescale/dpaa/ask/
 ```
 
 Trace every call site upward to the entry point. If `add_key` is gated behind a
@@ -276,7 +276,7 @@ This tier is only relevant if **§1.2 Deliverable B** comes back with
 ### 2.1 Locate the missing `fman_pcd_cc_node_add_key()` call site
 
 **Investigation steps:**
-1. `git log --all --grep='add_key' -- kernel/flavors/ask/` → which patch was supposed
+1. `git log --all --grep='add_key' -- kernel/ask/` → which patch was supposed
    to wire REPLACE → `add_key`?
 2. `git show <patch>:ask_flow_offload.c` vs. current tree → was the call site
    removed during a refactor?
@@ -477,7 +477,7 @@ is the GA condition.
   current MURAM-blocker disposition.
 - `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` — Path A architectural rationale.
 - `specs/ask2-rewrite-spec.md` v1.3 — current authoritative spec.
-- `kernel/flavors/ask/patches/0060-0064` — landed remediation stack.
+- `kernel/ask/patches/0060-0064` — landed remediation stack.
 - `bin/verify-ask-flow-offload.sh`, `bin/m2-dut-prep.sh`, `bin/ask-pcd-regdump.py` —
   M2 harness toolkit.
 - Qdrant entries tagged `ASK2`, `path-A`, `MURAM`, `cookie-callback`, `m2-gate`.

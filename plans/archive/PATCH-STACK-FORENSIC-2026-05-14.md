@@ -88,14 +88,14 @@ via the failure branch in `patch-health.sh` lines 251–254.
 ### 3. The smoking gun: patch 0009's first hunk header
 
 ```
-$ grep '^@@ -' kernel/flavors/ask/patches/0009-fman-pcd-cc-body-data-structures.patch | head -1
+$ grep '^@@ -' kernel/ask/patches/0009-fman-pcd-cc-body-data-structures.patch | head -1
 @@ -1,77 +1,242 @@
 ```
 
 vs. what patch 0007 actually creates:
 
 ```
-$ grep -A1 'fman_pcd_cc.c' kernel/flavors/ask/patches/0007-fman-pcd-cc-prep.patch | head -3
+$ grep -A1 'fman_pcd_cc.c' kernel/ask/patches/0007-fman-pcd-cc-prep.patch | head -3
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 @@ -0,0 +1,159 @@
@@ -115,11 +115,11 @@ NOT 77 lines.)
 ### 4. Authoring timeline rules out a pre-rewrite of 0007
 
 ```
-$ git log --pretty=format:'%h %ad %s' --date=iso -- kernel/flavors/ask/patches/0007-fman-pcd-cc-prep.patch
+$ git log --pretty=format:'%h %ad %s' --date=iso -- kernel/ask/patches/0007-fman-pcd-cc-prep.patch
 2e1fb63 2026-05-14 04:01:30 +0000 docs+patches: retire clean-room terminology …
 c613714 2026-05-14 03:15:51 +0000 ASK2 PR14c-prep: FMan PCD Coarse Classifier public API stub
 
-$ git log --pretty=format:'%h %ad %s' --date=iso -- kernel/flavors/ask/patches/0009-fman-pcd-cc-body-data-structures.patch
+$ git log --pretty=format:'%h %ad %s' --date=iso -- kernel/ask/patches/0009-fman-pcd-cc-body-data-structures.patch
 3b791d1 2026-05-14 04:12:17 +0000 kernel/ask: PR14c-body-1 — fman_pcd_cc tree create/destroy bodies (patch 0009)
 ```
 

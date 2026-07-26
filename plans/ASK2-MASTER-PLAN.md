@@ -25,8 +25,9 @@ Where this plan and those documents disagree, they win — update this plan.
 
 ### 1.1 The five-layer ASK2 stack
 
-**[SPEC]** 107 board patches, single flavor-neutral dual-dataplane ISO
-(`default|ask|vpp` flavor split retired 2026-06-14).
+**[SPEC]** 107 board patches, single dual-dataplane ISO (`default|ask|vpp`
+flavor split retired 2026-06-14; the `FLAVOR` build variable and the
+`kernel/flavors/` tree removed 2026-07-26 — see §7).
 
 | Layer | Status | Blocker |
 |---|---|---|
@@ -309,6 +310,38 @@ MTU 9000 (line-rate baseline), and treat MTU 8192 as a known boundary-cliff in
 order-3 RX allocation paths. For throughput comparisons across MTUs, use
 order-4-primary / order-3-fallback so packet-to-buffer fit remains stable.
 
+**[SPEC]** Flavor removal (2026-07-26). The `default|ask|vpp` build split was
+retired 2026-06-14, but its machinery lingered. All of it is now gone:
+
+- **`FLAVOR` variable removed** (`bin/common.sh` and every consumer). It had
+  resolved to `default` in *every* build since the collapse — no workflow set
+  it and `data/flavor.pin` never existed — so every `ask`/`vpp` branch it
+  guarded was unreachable. Removing it deleted the dead SDK-DTB selection path
+  in `ci-build-packages.sh` (its inputs `board/dtb/mono-gateway-dk-sdk.dts` and
+  `board/dtb/sdk-dtsi/` no longer exist, so the `if [ -f … ]` was permanently
+  false), the `FLAVOR=ask` in-tree patch-staging block in `ci-setup-kernel.sh`,
+  and the always-true skip gate in `ci-verify-vpp-iso.sh`.
+- **`kernel/flavors/ask/` → `kernel/ask/`**; `kernel/flavors/vpp/` deleted (its
+  one config fragment was never collected by the build and set nothing that
+  `vyos_defconfig` did not already set, except the diagnostics-only
+  `XDP_SOCKETS_DIAG` — which has therefore never been on in a shipped image).
+- **Kernel cache key** dropped its flavor component
+  (`linux-kernel_<kver>_<hash>`), and caching now covers every kernel build —
+  the "excluded when ask" gate existed for the ASK 1.x SDK userspace tree,
+  which is gone. One forced cache miss on the first build after this change.
+- **`kernel/common/scripts/integration-test.sh` deleted** — a one-time
+  acceptance test for the 2026-05 repo merge. It asserted a layout that no
+  longer exists (266 SDK files, per-flavor READMEs, 1 board patch vs the
+  actual 104) and had been failing long before this change.
+- **Deliberately kept:** the in-kernel `dpaa_register_flavor_ops()` /
+  `struct dpaa_pcd_ops` / `flavor_priv` API (19 board patches, 0068–0164) and
+  the "consumer role" language in `specs/dpaa1-afxdp-modernization-spec.md`.
+  That is a *pluggable-dataplane ops table*, a different concept from the build
+  split, and renaming it would mean regenerating 19 stacked unified diffs
+  across the shipping ASK↔dpaa seam for no functional gain. Also kept: the
+  `version-{default,ask,vpp}.json` aliases — fielded installs baked those URLs
+  before the collapse and deleting one silently breaks `add system image`.
+
 **[SPEC]** Patch-pipeline hygiene (added 2026-07-26 after the CI firefight that
 produced `511c0092`/`bb6a0838`). Four defects were found and fixed:
 
@@ -354,6 +387,18 @@ produced `511c0092`/`bb6a0838`). Four defects were found and fixed:
   exists in the shallow upstream clone. This is the accurate form of the rule
   `511c0092` overstated as "all patch files must stay index-line-free" (30 of
   the `data/*.patch` files carry index lines and apply fine).
+
+**[NOTE]** `patch-health.sh` is **destructive to `work/linux-*`** (hit
+2026-07-26). It does `git reset --hard <baseline>` + `git clean -fdq` on that
+tree, which wipes the **uncommitted** `bin/kernel-fixups/F_*.py` mutations —
+the patch stack is committed one-commit-per-patch, the Layer-2 fixups are not.
+Symptom afterwards: an out-of-tree `ask.ko` build against that tree fails with
+`conflicting types for 'fman_pcd_fe_flow_add'`, because `F_094.py`'s rewrite to
+the `const struct fman_pcd_fe_flow_action *` signature is gone while
+`ask_fman_caps.h` still expects it. This is a local-scratch artifact, not a
+regression: `work/` is gitignored and CI restages it from scratch every run.
+Do not diagnose an ask.ko signature mismatch without first checking
+`git -C work/linux-* status` — a clean tree there means the fixups are missing.
 
 **[SPEC]** Gate mechanics:
 - `pcd-snapshot capture/diff` byte-exactness is the reversibility gate — never

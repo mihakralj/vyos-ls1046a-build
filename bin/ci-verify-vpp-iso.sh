@@ -1,5 +1,11 @@
 #!/bin/bash
-# ci-verify-vpp-iso.sh — fail fast if a FLAVOR=vpp ISO is missing VPP essentials.
+# ci-verify-vpp-iso.sh — fail fast if the ISO is missing VPP essentials.
+#
+# VPP ships dormant in the single image (engaged at runtime via
+# `set vpp settings`), so this check applies to every build. It used to
+# early-exit unless FLAVOR=vpp, which stopped happening when the flavor split
+# was retired 2026-06-14 — i.e. it had been a silent no-op. Not currently
+# wired into .github/workflows/; run it by hand after a build.
 set -euo pipefail
 
 REPO_ROOT=${GITHUB_WORKSPACE:-$(pwd)}
@@ -7,11 +13,6 @@ cd "$REPO_ROOT"
 
 # shellcheck disable=SC1091
 BC_QUIET=1 source "$REPO_ROOT/bin/common.sh"
-
-if [[ "$FLAVOR" != "vpp" ]]; then
-    echo "### FLAVOR=$FLAVOR — skipping VPP ISO verification"
-    exit 0
-fi
 
 CHROOT="$REPO_ROOT/vyos-build/data/live-build-config/includes.chroot"
 PKG_MANIFEST="$REPO_ROOT/vyos-build/build/chroot.packages.install"

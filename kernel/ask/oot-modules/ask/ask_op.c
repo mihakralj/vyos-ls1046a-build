@@ -4,7 +4,7 @@
  *
  * The operator-facing netlink receiver is NOT here: it is the generic
  * netlink family in ask_genl.c, which serves the query surface defined by
- * kernel/flavors/ask/uapi/ask.yaml (get-info, dump-flows, get-flow,
+ * kernel/ask/uapi/ask.yaml (get-info, dump-flows, get-flow,
  * flush-flows, engage, disengage). Op-mode `show interfaces ethernet
  * eth<n> offload ask flows` drives ASK_CMD_DUMP_FLOWS there;
  * ask_genl_fill_one_flow() emits the full 5-tuple + iif/oif + stats
