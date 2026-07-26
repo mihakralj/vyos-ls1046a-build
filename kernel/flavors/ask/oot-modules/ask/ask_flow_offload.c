@@ -916,6 +916,81 @@ static int ask_parse_match_v4(struct flow_cls_offload *f,
         return 0;
 }
 
+/*
+ * T-M6-1 (IPv6, piece 1): parse an IPv6 5-tuple flow_cls match into the shared
+ * ask_flow_key.  Mirror of ask_parse_match_v4() but copies the full 16-byte v6
+ * addresses (the key already reserves src_ip[16]/dst_ip[16]).  Until the v6 HW
+ * path (v6 EKFC KeyGen scheme + separate v6 ehash table) lands, ask_hw.c's
+ * insert gate returns -EOPNOTSUPP for l3_proto==IPV6, so parsed v6 flows fall
+ * back to the kernel SW path (correct, no blackhole) and are visible in
+ * `show flows`.
+ */
+static int ask_parse_match_v6(struct flow_cls_offload *f,
+                              struct ask_flow_key *key)
+{
+        struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+
+        memset(key, 0, sizeof(*key));
+        key->l3_proto = ASK_FLOW_L3_IPV6;
+
+        if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+                struct flow_match_basic m;
+
+                flow_rule_match_basic(rule, &m);
+                if (m.key->n_proto != htons(ETH_P_IPV6))
+                        return -EOPNOTSUPP;
+                key->l4_proto = m.key->ip_proto;
+        } else {
+                return -EOPNOTSUPP;
+        }
+
+        if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV6_ADDRS)) {
+                struct flow_match_ipv6_addrs m;
+
+                flow_rule_match_ipv6_addrs(rule, &m);
+                memcpy(&key->src_ip[0], &m.key->src, 16);
+                memcpy(&key->dst_ip[0], &m.key->dst, 16);
+        } else {
+                return -EOPNOTSUPP;
+        }
+
+        if (key->l4_proto == IPPROTO_TCP || key->l4_proto == IPPROTO_UDP) {
+                struct flow_match_ports m;
+
+                if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
+                        return -EOPNOTSUPP;
+                flow_rule_match_ports(rule, &m);
+                key->sport = m.key->src;
+                key->dport = m.key->dst;
+        }
+
+        if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN)) {
+                struct flow_match_vlan m;
+
+                flow_rule_match_vlan(rule, &m);
+                key->vlan_id = m.key->vlan_id;
+        }
+
+        return 0;
+}
+
+/*
+ * Dispatch on the match's EtherType: IPv6 → ask_parse_match_v6, else v4.
+ */
+static int ask_parse_match(struct flow_cls_offload *f,
+                           struct ask_flow_key *key)
+{
+        struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+        struct flow_match_basic m;
+
+        if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC))
+                return -EOPNOTSUPP;
+        flow_rule_match_basic(rule, &m);
+        if (m.key->n_proto == htons(ETH_P_IPV6))
+                return ask_parse_match_v6(f, key);
+        return ask_parse_match_v4(f, key);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Action parsing                                                             */
 /*                                                                            */
@@ -1170,9 +1245,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 return -EOPNOTSUPP;
         }
 
-        rc = ask_parse_match_v4(f, &key);
+        rc = ask_parse_match(f, &key);
         if (rc) {
-                pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_match_v4=%d) cookie=0x%lx\n",
+                pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_match=%d) cookie=0x%lx\n",
                                     rc, f->cookie);
                 return rc;
         }
