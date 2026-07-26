@@ -1,7 +1,10 @@
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -101,6 +101,12 @@
+@@ -98,12 +98,18 @@
+               <leafNode name="hw-tc-offload">
+                 <properties>
+                   <help>Enable Hardware Flow Offload</help>
                    <valueless/>
                  </properties>
                </leafNode>
@@ -14,10 +17,16 @@ diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-defini
                <leafNode name="lro">
                  <properties>
                    <help>Enable Large Receive Offload</help>
+                   <valueless/>
+                 </properties>
+               </leafNode>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -318,6 +318,36 @@ class EthernetIf(Interface):
+@@ -315,12 +315,49 @@ class EthernetIf(Interface):
+             if not fixed:
+                 return self.set_interface('hw-tc-offload', 'on' if state else 'off')
+             else:
                  print('Adapter does not support changing hw-tc-offload settings!')
          return False
  
@@ -43,18 +52,31 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
 +        if not os.path.exists(tool):
 +            return
 +        verb = 'engage' if enable else 'disengage'
-+        _, err = self._popen(f'{tool} --port {port} {verb}')
-+        if err:
-+            err_msg = err.strip()
-+            # Treat advisory stderr warnings as non-fatal; only hard-fail when
-+            # the helper emits an explicit ASK offload ERROR line.
-+            if 'ASK offload ERROR:' in err_msg:
-+                print(f'ASK offload {verb} failed on {self.ifname}: {err_msg}')
++        # NOTE: Interface._popen() returns (stdout, returncode). The second
++        # value is an INT exit status, not stderr — calling a string method on
++        # it raises AttributeError inside the commit-apply path, which surfaces
++        # to the operator as "There was a config error on boot" and aborts the
++        # interface's configuration. Keep this rc-typed.
++        out, rc = self._popen(f'{tool} --port {port} {verb}')
++        if rc:
++            # Report and continue. A failed engage must not fail the commit:
++            # at boot the first attempt can lose a race with FMan PCD
++            # bring-up, and the interface is still perfectly usable on the
++            # kernel software path.
++            msg = (out or '').strip().splitlines()
++            detail = f': {msg[-1]}' if msg else ''
++            print(f'ASK offload {verb} failed on {self.ifname} (rc={rc}){detail}')
 +
      def set_lro(self, state):
          """
          Enable Large Receive offload. State can be either True or False.
-@@ -663,6 +693,9 @@ class EthernetIf(Interface):
+         Example:
+         >>> from vyos.ifconfig import EthernetIf
+         >>> i = EthernetIf('eth0')
+@@ -660,12 +697,15 @@ class EthernetIf(Interface):
+         # GSO (generic segmentation offload)
+         self.set_hw_tc_offload(dict_search('offload.hw_tc_offload', config) is not None)
+ 
          # LRO (large receive offload)
          self.set_lro(dict_search('offload.lro', config) is not None)
  
@@ -64,10 +86,16 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
          # RPS - Receive Packet Steering
          self.set_rps(dict_search('offload.rps', config) is not None)
  
+         # RFS - Receive Flow Steering
+         self.set_rfs(dict_search('offload.rfs', config) is not None)
+ 
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -294,6 +294,14 @@ def verify_coalesce(ethernet: dict, ethtool: Ethtool):
+@@ -291,12 +291,20 @@ def verify_coalesce(ethernet: dict, ethtool: Ethtool):
+                     param_name = param.replace('_', '-')
+                     msg = f'Driver does not support "{param_name}" coalesce setting!'
+                     raise ConfigError(msg)
  
  
  def verify_offload(ethernet: dict, ethtool: Ethtool):
@@ -82,10 +110,16 @@ diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_eth
      """
       Verify offloading capabilities
      :param ethernet: dictionary which is received from get_interface_dict
+     :type ethernet: dict
+     :param ethtool: Ethernet object
+     :type ethtool: Ethtool
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -572,6 +572,15 @@ def verify(config):
+@@ -569,12 +569,21 @@ def verify(config):
+             removed_iface['iface_name'], config, match_vlans=True
+         )
+ 
      if 'settings' not in config:
          raise ConfigError('"settings interface" is required but not set!')
  
@@ -101,3 +135,6 @@ diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
      if 'interface' not in config['settings']:
          raise ConfigError('"settings interface" is required but not set!')
  
+     ipoe_ifaces = list(
+         {
+             iface
