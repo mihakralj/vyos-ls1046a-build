@@ -39,7 +39,7 @@ lines of `board/scripts/ask-check` run on the lab board (192.168.1.190, image
 | FE/ehash VM substrate (dormant chain) | BUILT, DORMANT | `0122`→`0131`, byte-verifiable via `fe_*` debugfs |
 | ask.ko control plane (genl, flow table, debugfs, engage entry) | BUILT | `ask_flow_offload.c` 92 KB, `ask_hw.c` 32 KB, genl id 0x1e |
 | Classifier→FE root link armed | **FAIL** | the single datapath gate |
-| `ask_bridge.ko` (L2 switchdev) | **FAIL** (stub 417 B) | `kernel/flavors/ask/oot-modules/ask/ask_bridge.c` |
+| `ask_bridge.ko` (L2 switchdev) | **FAIL** (stub 417 B) | `kernel/ask/oot-modules/ask/ask_bridge.c` |
 | CAAM descriptor-sharing API | **FAIL** (`0001` not in common tree) | symbol `caam_qi_ext_consumer_register` absent on board |
 | ESP hardware-offload advertise | **FAIL** (stub 1 KB) | `ask_xfrm.c` |
 | `set system offload ask` CLI | **FAIL** (not started) | — |
@@ -200,7 +200,7 @@ MURAM is full; `rmmod`/`modprobe` clean.
 
 **[SPEC]**
 Three tasks: (a) forward-port `0001-caam-qi-share` from
-`kernel/flavors/ask/patches/` into `kernel/common/patches/board/` and wire it
+`kernel/ask/patches/` into `kernel/common/patches/board/` and wire it
 into `bin/ci-setup-kernel.sh`'s common (not `FLAVOR=ask`) path — this restores
 `caam_qi_ext_consumer_register` in the single image; (b) implement `ask_xfrm.c`
 (`xfrmdev_ops` packet-mode): set `netdev->xfrmdev_ops`, advertise

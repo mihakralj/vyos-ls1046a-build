@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# stage-kernel.sh — produce a fully patched + configured kernel tree for one flavor.
+# stage-kernel.sh — produce a fully patched + configured kernel tree.
 #
 # Per plans/archive/INTEGRATION-PLAN.md §3.4 + §3.5 (historical merge plan).
-# of the this repo's bin/ci-setup-kernel.sh. It does NOT touch the this repo's
-# legacy ci-setup-kernel.sh — the legacy script is what the existing CI uses
-# today; this script is the new path for FLAVOR builds (PR 3+).
+# It does NOT touch this repo's legacy bin/ci-setup-kernel.sh — that is what
+# the existing CI uses today; this script is the alternative staging path.
+#
+# There is one image, so there is one patch set. The per-flavor patch bucket
+# (flavors/$FLAVOR/patches/{ask,fixes,}) and the FLAVOR=ask SDK source overlay
+# were removed 2026-07-26: the flavor split was retired 2026-06-14, and both
+# of their input trees (kernel/ask/patches/*.patch at top level,
+# kernel/ask/sdk-sources/) no longer exist. ASK2's PCD/FE-VM features live in
+# kernel/common/patches/board/ and ask.ko is an out-of-tree module.
 #
 # Steps:
 #   1. Ensure kernel source extracted at $WORK_DIR/linux-$KVER (uses fetch-kernel.sh)
 #   2. Apply patches in plan §3.4 order:
 #        common/vyos → common/board → common/fixes
-#        flavors/$FLAVOR/patches/{ask,fixes,}
-#   3. Stage SDK source overlay (FLAVOR=ask only): kernel/flavors/ask/sdk-sources/
-#   4. Stage kernel/common/files/ artefacts (lp5812 driver source, fsl_fmd_shim.c)
+#   3. Stage kernel/common/files/ artefacts (lp5812 driver source, fsl_fmd_shim.c)
 #      under their target paths in the kernel tree (matches legacy ci-setup-kernel.sh
 #      injection block, but done here at staging time — not at build time).
 #   5. Run inline Python patchers from kernel/common/files/inject/ against
@@ -24,9 +28,8 @@
 #      run `make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig`.
 #
 # Usage:
-#   bash kernel/common/scripts/stage-kernel.sh --flavor default
-#   bash kernel/common/scripts/stage-kernel.sh --flavor ask
-#   FLAVOR=vpp bash kernel/common/scripts/stage-kernel.sh
+#   bash kernel/common/scripts/stage-kernel.sh
+#   bash kernel/common/scripts/stage-kernel.sh 6.18.38   # explicit version
 #
 # Optional env:
 #   ARCH=arm64                              (default)
@@ -65,23 +68,19 @@ echo "  kernel pin: $KERNEL_VERSION (series $KERNEL_SERIES, source: $_SOURCE)"
 need git find python3 make
 
 # ── Argument parsing ──────────────────────────────────────────────────
-FLAVOR="${FLAVOR:-default}"
 VERSION_ARG=""
 STAGE_ONLY="${STAGE_ONLY:-0}"
 while (( $# )); do
     case "$1" in
-        --flavor)   FLAVOR="$2"; shift 2 ;;
-        --flavor=*) FLAVOR="${1#--flavor=}"; shift ;;
+        # --flavor is accepted and ignored so any stale caller does not break.
+        # The flavor split was retired 2026-06-14; the variable went 2026-07-26.
+        --flavor)   warn "--flavor is obsolete and ignored"; shift 2 ;;
+        --flavor=*) warn "--flavor is obsolete and ignored"; shift ;;
         --stage-only) STAGE_ONLY=1; shift ;;
         -h|--help)  sed -n '1,40p' "$0"; exit 0 ;;
         *) VERSION_ARG="$1"; shift ;;
     esac
 done
-
-case "$FLAVOR" in
-    default|ask|vpp) : ;;
-    *) err "FLAVOR must be one of: default | ask | vpp (got '$FLAVOR')" ;;
-esac
 
 # Default cross-compile (skipped when running natively on arm64)
 ARCH="${ARCH:-arm64}"
@@ -94,18 +93,10 @@ export ARCH CROSS_COMPILE
 
 # ── Layout invariants ──────────────────────────────────────────────────
 COMMON_DIR="$REPO_ROOT/kernel/common"
-FLAVOR_DIR="$REPO_ROOT/kernel/flavors/$FLAVOR"
-SDK_DIR="$REPO_ROOT/kernel/flavors/ask/sdk-sources"
 FILES_DIR="$COMMON_DIR/files"
 INJECT_DIR="$FILES_DIR/inject"
 
 [[ -d "$COMMON_DIR/patches" ]] || err "missing $COMMON_DIR/patches"
-# kernel/flavors/$FLAVOR/ is optional: default and vpp share the upstream-tracked
-# kernel from kernel/common/ alone (their per-flavor dirs were dead-code
-# placeholders, removed 2026-05-11). Only ask is mandatory.
-if [[ ! -d "$FLAVOR_DIR" && "$FLAVOR" == "ask" ]]; then
-    err "missing $FLAVOR_DIR (required for FLAVOR=ask)"
-fi
 
 # ── Kernel source ──────────────────────────────────────────────────────
 if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" ]]; then
@@ -131,15 +122,7 @@ for sub in vyos board fixes; do
     while IFS= read -r p; do PATCHES+=("$p"); done \
         < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
 done
-if [[ -d "$FLAVOR_DIR" ]]; then
-    for sub in ask fixes ""; do
-        d="$FLAVOR_DIR/patches${sub:+/$sub}"
-        [[ -d "$d" ]] || continue
-        while IFS= read -r p; do PATCHES+=("$p"); done \
-            < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
-    done
-fi
-(( ${#PATCHES[@]} )) || err "no patches found for flavor=$FLAVOR"
+(( ${#PATCHES[@]} )) || err "no patches found under $COMMON_DIR/patches"
 
 # Turn $KSRC into a throwaway git repo so that `git apply --3way` has access to
 # the pristine blobs for fallback 3-way merge. This is the same strategy used
@@ -177,18 +160,6 @@ for p in "${PATCHES[@]}"; do
         err "patch failed: $name (see *.rej under $KSRC)"
     fi
 done
-
-# ── SDK source overlay (ASK only) ─────────────────────────────────────
-if [[ "$FLAVOR" == "ask" && -d "$SDK_DIR" ]]; then
-    info "overlaying SDK sources (266 files) onto kernel tree…"
-    (cd "$SDK_DIR" && find . -type f -print0) | \
-        while IFS= read -r -d '' f; do
-            f="${f#./}"
-            mkdir -p "$KSRC/$(dirname "$f")"
-            cp -f "$SDK_DIR/$f" "$KSRC/$f"
-        done
-    ok "SDK overlay complete"
-fi
 
 # ── Inject driver source files (LP5812, FMD shim) ─────────────────────
 if [[ -d "$FILES_DIR/lp5812" ]]; then
@@ -243,7 +214,7 @@ fi
 # under kernel/common/patches/board/ (4005/4006/4007). They are now applied
 # by the standard PATCHES loop above, with the same --3way safety as every
 # other patch. The patch-dpaa-probe-fix.py SDK patcher likewise became
-# kernel/flavors/ask/patches/fixes/4008-sdk-dpaa-probe-fix.patch.
+# kernel/ask/patches/fixes/4008-sdk-dpaa-probe-fix.patch.
 
 # ── Defconfig assembly (plan §3.5) ────────────────────────────────────
 info "assembling .config from defconfig fragments…"
@@ -253,16 +224,17 @@ shopt -s nullglob
     [[ -f "$COMMON_DIR/vyos-base/arm64/vyos_defconfig" ]] && cat "$COMMON_DIR/vyos-base/arm64/vyos_defconfig"
     for f in "$COMMON_DIR/vyos-base"/*.config; do cat "$f"; done
     for f in "$COMMON_DIR/kernel-config"/*.config; do cat "$f"; done
-    for f in "$FLAVOR_DIR/kernel-config"/*.config; do cat "$f"; done
-    # ASK rule: ask.config wins last (per AGENTS.md "SDK DPAA config must apply LAST").
-    [[ "$FLAVOR" == "ask" && -f "$FLAVOR_DIR/ask.config" ]] && cat "$FLAVOR_DIR/ask.config"
+    # kernel/ask/kernel-config/90-kunit.config is deliberately NOT included:
+    # it is an opt-in developer fragment for CONFIG_NET_ASK_KUNIT_TEST runs,
+    # never a production config. It used to be pulled in only under the ask
+    # flavor, which no build ever selected.
 } > "$DEFCONFIG"
 shopt -u nullglob
 ok "wrote $DEFCONFIG ($(wc -l < "$DEFCONFIG") lines)"
 
 if [[ "$STAGE_ONLY" == "1" ]]; then
     info "STAGE_ONLY=1 — skipping make olddefconfig"
-    ok "stage-kernel done (flavor=$FLAVOR, kernel=linux-$KVER, no resolve)"
+    ok "stage-kernel done (kernel=linux-$KVER, no resolve)"
     exit 0
 fi
 
@@ -270,6 +242,6 @@ info "running make olddefconfig…"
 ( cd "$KSRC" && make ARCH="$ARCH" ${CROSS_COMPILE:+CROSS_COMPILE="$CROSS_COMPILE"} olddefconfig ) >/dev/null 2>&1 \
     || warn "make olddefconfig exited non-zero (config may have unresolved symbols)"
 
-ok "stage-kernel done (flavor=$FLAVOR, kernel=linux-$KVER)"
+ok "stage-kernel done (kernel=linux-$KVER)"
 echo "Tree ready at: $KSRC"
 echo "Next: cd $KSRC && make ARCH=$ARCH ${CROSS_COMPILE:+CROSS_COMPILE=$CROSS_COMPILE} -j\$(nproc) Image modules"

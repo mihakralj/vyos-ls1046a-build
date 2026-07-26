@@ -5,9 +5,9 @@
 set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
-# Resolve $FLAVOR (default | ask | vpp) so the per-flavor update-check feed
-# URL can be substituted into config.boot.* before they're staged into the
-# chroot. Sourcing common.sh sets FLAVOR via env / data/flavor.pin / "default".
+# common.sh resolves KERNEL_VERSION and REPO_ROOT. It no longer resolves a
+# FLAVOR: the split was retired 2026-06-14 and the variable removed
+# 2026-07-26, and no per-flavor update-check URL rewrite happens any more.
 # shellcheck disable=SC1091
 . "$(dirname "$0")/common.sh"
 
@@ -39,9 +39,9 @@ cp board/vyos-config/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.ful
 cp board/vyos-config/config.boot.vpp     "$CHROOT/opt/vyatta/etc/config.boot.vpp"
 
 # Single-image build: every staged config.boot.* already references the
-# canonical `…/main/version.json` feed — no per-flavor URL rewrite. The
-# version-{default,ask,vpp}.json aliases are kept byte-identical by CI so any
-# fielded install with a persisted per-flavor URL keeps updating.
+# canonical `…/main/version.json` feed — no URL rewrite. The historical
+# version-{default,ask,vpp}.json aliases are still kept byte-identical by CI
+# so any fielded install that persisted one of those URLs keeps updating.
 echo "### Update-check feed URLs (single-image, no rewrite):"
 grep -H 'update-check\|version' \
     "$CHROOT/opt/vyatta/etc/config.boot.default" \
@@ -411,7 +411,7 @@ cp board/systemd/vyos-postinstall.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/vyos-post
 ### samples all 5 LS1046A thermal zones (ddr, serdes, fman, cluster, sec)
 ### and drives the EMC2305 PWM via max-policy combine + EMA smoothing +
 ### anti-windup integral clamp + hard-fault force-MAX at 100 C. Installed
-### unconditionally for every flavor (default | ask | vpp) because all
+### unconditionally because all
 ### LS1046A boards share the same EMC2305 + thermal-zone topology.
 ### See data/hooks/98-fancontrol.chroot for the rationale on masking
 ### upstream `fancontrol.service` defensively (two PWM controllers must
@@ -502,7 +502,7 @@ fi
 
 ### SFP+ inventory helper: `sfp-check` reports vendor/PN of every inserted
 ### module and emits a paste-ready SFP_QUIRK_F() line when a module looks
-### like a 10GBASE-T rollball masquerading as SR fiber. Flavor-agnostic —
+### like a 10GBASE-T rollball masquerading as SR fiber. Board-generic —
 ### only requires ethtool -m support, which is universal.
 cp board/scripts/sfp-check "$CHROOT/usr/local/bin/sfp-check"
 chmod +x "$CHROOT/usr/local/bin/sfp-check"
@@ -512,7 +512,7 @@ chmod +x "$CHROOT/usr/local/bin/sfp-check"
 ### fan-pid daemon health (with journalctl tail), and flags genuine
 ### fancontrol/fan-pid concurrency conflicts. Exit 0 healthy / non-zero on
 ### fault — usable as a Nagios/monit probe. Mirrors sfp-check / ask-check
-### style. Flavor-agnostic (every LS1046A board has the same EMC2305 +
+### style. Board-generic (every LS1046A board has the same EMC2305 +
 ### thermal-zone topology).
 cp board/scripts/fan-check "$CHROOT/usr/local/bin/fan-check"
 chmod +x "$CHROOT/usr/local/bin/fan-check"
@@ -521,9 +521,9 @@ chmod +x "$CHROOT/usr/local/bin/fan-check"
 ### presence, kernel driver / built-in posture (caam, caam_jr, caamalg,
 ### caamhash, caamrng, …), Job Ring count, dmesg banner, /proc/crypto
 ### registrations sourced from CAAM, /dev/hwrng status with current_source,
-### and (FLAVOR=ask only) CDX <-> SEC FQ wiring health. Exit 0 healthy /
+### and CDX <-> SEC FQ wiring health. Exit 0 healthy /
 ### non-zero on fault — usable as a Nagios/monit probe. Mirrors
-### sfp-check / fan-check / ask-check style. Flavor-agnostic at install
+### sfp-check / fan-check / ask-check style. Board-generic at install
 ### time (CAAM is the same SEC 5.4 block on every LS1046A board); the
 ### script's section 7 is the only ASK-specific check and self-skips on
 ### default/vpp where cdx/dpa_ipsec are absent.
@@ -539,7 +539,7 @@ chmod +x "$CHROOT/usr/local/bin/caam-check"
 ### frames, eth0-eth4 (driver/MAC/MTU/AF_XDP cap), QMan/BMan liveness, and
 ### the AF_XDP zero-copy xsk_* counters (chaining to xsk-zc-check). Exit
 ### non-zero if a controller/driver/port is missing — mirrors sfp-check /
-### fan-check / caam-check so monit/Nagios can poll it. Flavor-agnostic
+### fan-check / caam-check so monit/Nagios can poll it. Board-generic
 ### (DPAA1 is the same block on every LS1046A board).
 cp board/scripts/dpaa1-check "$CHROOT/usr/local/bin/dpaa1-check"
 chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
@@ -555,9 +555,9 @@ chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
 ### xsk_fill_guard_block==0 → preconditions met), or fault (fill_guard>0 /
 ### hard attach-DMA error). Exit 0 healthy / 1 fault / 2 not-LS1046A-or-no-
 ### xsk-counters — usable as a Nagios/monit probe. Mirrors sfp-check /
-### fan-check / caam-check style. Flavor-agnostic: the AF_XDP datapath
+### fan-check / caam-check style. The AF_XDP datapath
 ### patches are in the common board patch set, so the counters exist on
-### every flavor; on a shipping image with no ZC producer bound the verdict
+### every image; with no ZC producer bound the verdict
 ### is the expected "dormant".
 cp board/scripts/xsk-zc-check "$CHROOT/usr/local/bin/xsk-zc-check"
 chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
@@ -576,9 +576,9 @@ chmod +x "$CHROOT/usr/local/bin/vpp-check"
 ### surface, nf_flow_table HW-offload smoke test, and dmesg integrity.
 ### Exit 0 healthy / non-zero on fault — usable as a Nagios/monit probe.
 ### Mirrors sfp-check / fan-check / caam-check style. Installed
-### unconditionally on every flavor: on default/vpp the ASK-specific
+### unconditionally: with ASK disengaged the ASK-specific
 ### sections cleanly emit TODO/SKIP (no false FAILs), making it a useful
-### roadmap-status printer. On FLAVOR=ask it is the single command an
+### roadmap-status printer. With ASK engaged it is the single command an
 ### operator runs to confirm the modern ASK2 stack came up correctly.
 cp board/scripts/ask-check "$CHROOT/usr/local/bin/ask-check"
 chmod +x "$CHROOT/usr/local/bin/ask-check"
@@ -596,8 +596,8 @@ chmod +x "$CHROOT/usr/local/bin/ask-check"
 ### boot targets (vyos/usb_vyos/recovery/dev_boot*), and the
 ### /boot/vyos.env image selector vs the running image. Exit 0 healthy /
 ### 1 fault / 2 not-LS1046A — usable as a Nagios/monit probe. Mirrors
-### sfp-check / fan-check / caam-check style. Flavor-agnostic (the boot
-### firmware chain is identical on every flavor).
+### sfp-check / fan-check / caam-check style. Board-generic (the boot
+### firmware chain is identical on every image).
 cp board/scripts/firmware-check "$CHROOT/usr/local/bin/firmware-check"
 chmod +x "$CHROOT/usr/local/bin/firmware-check"
 
@@ -612,7 +612,7 @@ chmod +x "$CHROOT/usr/local/bin/firmware-check"
 ### prove every engage/disengage cycle was fully reversible without a reboot.
 ### Exit 0 clean / 1 drift|fault / 2 not-LS1046A — usable as a soak gate.
 ### Mirrors firmware-check / fan-check / caam-check style; installed without a
-### .py suffix (fan-pid / led / caam-check convention). Flavor-agnostic (the
+### .py suffix (fan-pid / led / caam-check convention). Board-generic (the
 ### board PCD substrate is in the common patch set on every image).
 cp board/scripts/pcd-snapshot "$CHROOT/usr/local/bin/pcd-snapshot"
 cp board/scripts/vyos-offload-ask "$CHROOT/usr/local/bin/vyos-offload-ask"
@@ -622,7 +622,7 @@ chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
 ### ASK2 op-mode transport: the vendored YNL Python client (board/ynl/) + the
 ### `ask` genl spec, so `show interfaces ethernet eth<n> offload ask flows`
 ### (T-M7-5) can run `ynl --family ask --dump dump-flows` against ask.ko's
-### generic-netlink family (kernel/flavors/ask/uapi/ask.yaml §3.5 Operator UX).
+### generic-netlink family (kernel/ask/uapi/ask.yaml §3.5 Operator UX).
 ### ynl is not in the VyOS apt archive, so the pure-Python client is shipped in
 ### the image. `ynl --family ask` resolves the spec from /usr/share/ynl/specs/
 ### and, because that path is under sys_schema_dir, auto-disables schema
@@ -632,7 +632,7 @@ mkdir -p "$CHROOT/usr/share/ynl/pyynl/lib" "$CHROOT/usr/share/ynl/specs"
 cp board/ynl/cli.py       "$CHROOT/usr/share/ynl/pyynl/cli.py"
 cp board/ynl/__init__.py  "$CHROOT/usr/share/ynl/pyynl/__init__.py"
 cp board/ynl/lib/*.py     "$CHROOT/usr/share/ynl/pyynl/lib/"
-cp kernel/flavors/ask/uapi/ask.yaml "$CHROOT/usr/share/ynl/specs/ask.yaml"
+cp kernel/ask/uapi/ask.yaml "$CHROOT/usr/share/ynl/specs/ask.yaml"
 cat > "$CHROOT/usr/local/bin/ynl" <<'YNLWRAP'
 #!/bin/sh
 # ASK2: thin wrapper over the vendored YNL Python client (board/ynl/,
@@ -710,17 +710,17 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 
 # M0.3: stage the chroot hook that auto-loads ask.ko at boot via
 # /etc/modules-load.d/ask.conf. The ask-modules-*.deb (built by
-# kernel/flavors/ask/oot-modules/ask/ci-build.sh and swept into the
+# kernel/ask/oot-modules/ask/ci-build.sh and swept into the
 # chroot by ci-pick-packages.sh) installs ask.ko under
 # /lib/modules/$KVER/extra/ but does not auto-load it — that's this
 # hook's job. Staged UNCONDITIONALLY: the flavor split was retired
 # 2026-06-14 (single image carries the dormant ask.ko), so this must
-# match the kernel/flavors/ask oot-module build, which is itself wired
-# unconditionally into the common build. A FLAVOR gate here silently
+# match the kernel/ask oot-module build, which is itself wired
+# unconditionally into the single build. A build-time gate here silently
 # ships ask.ko installed-but-never-loaded (no /sys/kernel/debug/ask/
 # offload node) — observed on image 2026.06.16-2015 before this fix.
 cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
 chmod +x "$HOOKS/97-ask-modules.chroot"
 echo "### staged 97-ask-modules.chroot for systemd-modules-load auto-load"
 
-echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-default})"
+echo "### vyos-build setup complete"

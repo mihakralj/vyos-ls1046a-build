@@ -20,8 +20,8 @@
 ### Task 1: Unstub & Verify `FmPcdCcBuildContextByFE` (F-096)
 
 **Files:**
-- Modify: `kernel/flavors/ask/oot-modules/ask/ask_hw.c:320-360`
-- Test: `kernel/flavors/ask/oot-modules/ask/ci-build.sh`
+- Modify: `kernel/ask/oot-modules/ask/ask_hw.c:320-360`
+- Test: `kernel/ask/oot-modules/ask/ci-build.sh`
 
 **Interfaces:**
 - Consumes: `fman_pcd_fe_build_contexts()` from `fman_pcd.h` (patch 0135/0146).
@@ -35,18 +35,18 @@
 
 - [ ] **Step 2: Verify `ask_hw.c` calls `fman_pcd_fe_build_contexts()` on engage**
 
-Run: `grep -rn "fman_pcd_fe_build_contexts" kernel/flavors/ask/oot-modules/ask/`
+Run: `grep -rn "fman_pcd_fe_build_contexts" kernel/ask/oot-modules/ask/`
 Expected: `ask_hw.c` contains the invocation in the `arm_engage` sequence.
 
 - [ ] **Step 3: Build module and verify clean compile**
 
-Run: `cd kernel/flavors/ask/oot-modules/ask/ && ./ci-build.sh`
+Run: `cd kernel/ask/oot-modules/ask/ && ./ci-build.sh`
 Expected: `ask.ko` builds with 0 errors.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add kernel/flavors/ask/oot-modules/ask/ask_hw.c
+git add kernel/ask/oot-modules/ask/ask_hw.c
 git commit -m "feat(ask2): verify FmPcdCcBuildContextByFE context builder call on engage"
 ```
 
@@ -55,9 +55,9 @@ git commit -m "feat(ask2): verify FmPcdCcBuildContextByFE context builder call o
 ### Task 2: Implement FMan Opcode Chain in DDR Records (T-M5-9)
 
 **Files:**
-- Modify: `kernel/flavors/ask/oot-modules/ask/ask_flow_offload.c:1030-1080`
-- Modify: `kernel/flavors/ask/oot-modules/ask/include/ask_fman_caps.h:180-210`
-- Test: `kernel/flavors/ask/oot-modules/ask/ci-build.sh`
+- Modify: `kernel/ask/oot-modules/ask/ask_flow_offload.c:1030-1080`
+- Modify: `kernel/ask/oot-modules/ask/include/ask_fman_caps.h:180-210`
+- Test: `kernel/ask/oot-modules/ask/ci-build.sh`
 
 **Interfaces:**
 - Consumes: Flow metadata (`ask_flow_key`, source/dest MAC addresses, egress TX FQID).
@@ -117,13 +117,13 @@ static void ask_fe_flow_insert_with_opcodes(const struct ask_flow_key *key,
 
 - [ ] **Step 3: Verify module compilation**
 
-Run: `cd kernel/flavors/ask/oot-modules/ask/ && ./ci-build.sh`
+Run: `cd kernel/ask/oot-modules/ask/ && ./ci-build.sh`
 Expected: `ask.ko` builds cleanly.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add kernel/flavors/ask/oot-modules/ask/ask_flow_offload.c kernel/flavors/ask/oot-modules/ask/include/ask_fman_caps.h
+git add kernel/ask/oot-modules/ask/ask_flow_offload.c kernel/ask/oot-modules/ask/include/ask_fman_caps.h
 git commit -m "feat(ask2): encode FMan hardware L3 forwarding opcodes in DDR flow records"
 ```
 
@@ -132,8 +132,8 @@ git commit -m "feat(ask2): encode FMan hardware L3 forwarding opcodes in DDR flo
 ### Task 3: Dedicated Hardware TX FQs per Port (T-M5-11)
 
 **Files:**
-- Modify: `kernel/flavors/ask/oot-modules/ask/ask_hw.c:450-500`
-- Test: `kernel/flavors/ask/oot-modules/ask/ci-build.sh`
+- Modify: `kernel/ask/oot-modules/ask/ask_hw.c:450-500`
+- Test: `kernel/ask/oot-modules/ask/ci-build.sh`
 
 **Interfaces:**
 - Consumes: Egress `net_device` struct pointer.
@@ -160,13 +160,13 @@ u32 ask_hw_get_egress_tx_fqid(struct net_device *egress_dev)
 
 - [ ] **Step 2: Connect TX FQ resolution to flow offload replace path**
 
-Run: `cd kernel/flavors/ask/oot-modules/ask/ && ./ci-build.sh`
+Run: `cd kernel/ask/oot-modules/ask/ && ./ci-build.sh`
 Expected: `ask.ko` compiles without warnings or errors.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add kernel/flavors/ask/oot-modules/ask/ask_hw.c
+git add kernel/ask/oot-modules/ask/ask_hw.c
 git commit -m "feat(ask2): resolve dedicated egress hardware TX FQID for direct FMan enqueue"
 ```
 
@@ -175,9 +175,9 @@ git commit -m "feat(ask2): resolve dedicated egress hardware TX FQID for direct 
 ### Task 4: Selective Offload Architecture Transition (T-M5-7)
 
 **Files:**
-- Modify: `kernel/flavors/ask/oot-modules/ask/ask_hw.c:200-260`
-- Modify: `kernel/flavors/ask/oot-modules/ask/ask_flow_offload.c:1100-1150`
-- Test: `kernel/flavors/ask/oot-modules/ask/ci-build.sh`
+- Modify: `kernel/ask/oot-modules/ask/ask_hw.c:200-260`
+- Modify: `kernel/ask/oot-modules/ask/ask_flow_offload.c:1100-1150`
+- Test: `kernel/ask/oot-modules/ask/ci-build.sh`
 
 **Interfaces:**
 - Consumes: Hardware engage state.
@@ -196,13 +196,13 @@ When a flow is marked for offload by `nftables` / TC, call `fman_pcd_fe_flow_add
 
 - [ ] **Step 3: Verify module compilation**
 
-Run: `cd kernel/flavors/ask/oot-modules/ask/ && ./ci-build.sh`
+Run: `cd kernel/ask/oot-modules/ask/ && ./ci-build.sh`
 Expected: Clean build of `ask.ko`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add kernel/flavors/ask/oot-modules/ask/ask_hw.c kernel/flavors/ask/oot-modules/ask/ask_flow_offload.c
+git add kernel/ask/oot-modules/ask/ask_hw.c kernel/ask/oot-modules/ask/ask_flow_offload.c
 git commit -m "feat(ask2): transition to selective-offload architecture with numKeys=0 pass-through baseline"
 ```
 
@@ -212,7 +212,7 @@ git commit -m "feat(ask2): transition to selective-offload architecture with num
 
 **Files:**
 - Test: `bin/test-fixups.sh`
-- Test: `kernel/flavors/ask/oot-modules/ask/ci-build.sh`
+- Test: `kernel/ask/oot-modules/ask/ci-build.sh`
 
 - [ ] **Step 1: Run fixup validation test suite**
 
@@ -221,7 +221,7 @@ Expected: `4/4 tests passed`.
 
 - [ ] **Step 2: Build complete OOT module package**
 
-Run: `cd kernel/flavors/ask/oot-modules/ask/ && ./ci-build.sh`
+Run: `cd kernel/ask/oot-modules/ask/ && ./ci-build.sh`
 Expected: `ask.ko` built successfully with all 4 tasks included.
 
 - [ ] **Step 3: Commit final M5 task milestone**

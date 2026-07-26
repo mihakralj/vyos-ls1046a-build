@@ -370,7 +370,7 @@ RNG reads).
 | `firmware-check` | The complete boot-firmware inventory below the OS: board/SoC identity (DT model, SVR, silicon rev), running U-Boot version vs the copy embedded in QSPI flash, the full `/proc/mtd` partition map with per-partition fingerprints (RCW/PBL preamble, env CRC, FMan-ucode QEF header, recovery-DTB FDT magic, recovery kernel), a deep decode of the running FMan microcode (id, length, SoC code, **proprietary 210.x vs open-source 106.x** classification, md5) cross-checked against the on-flash copy and the kernel's `FMan PCD caps` probe, boot-critical U-Boot env variables + boot targets, and the `/boot/vyos.env` image selector vs the running image. | After any firmware/flash operation, before reporting a bug, or when `add system image` boot selection misbehaves. Run with `sudo` for the full report (flash reads + `fw_printenv`); unprivileged runs skip those sections. A `WARN` on running-vs-flash ucode mismatch means a flash update is pending a reboot. |
 
 ```bash
-# Run everything that applies to this board/flavor
+# Run everything that applies to this board
 for c in dpaa1-check sfp-check fan-check caam-check xsk-zc-check ask-check vpp-check firmware-check; do
     echo "== $c =="; "$c"; echo "rc=$?"
 done

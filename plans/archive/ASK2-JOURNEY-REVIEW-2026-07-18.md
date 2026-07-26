@@ -28,7 +28,7 @@ Here is what exists in the tree as of commit `1017612` (branch `dpaa1`):
 | **FE-VM ehash substrate** | 0124–0131 | BUILT, DORMANT | Byte-verified via `fe_*` debugfs; MISS→EXIT proven safe |
 | **Reversible mode-switch + pcd-snapshot** | 0105/0106/0116/0129 | DONE | 100× control-plane soak, 0 drift |
 | **AF_XDP ZC datapath** | 0068–0114, 0139, 0164 | DUT-VALIDATED (ZC pending) | Copy-mode 3.5 Gbps; ZC fix committed (0164), awaiting HW |
-| **ask.ko control plane** | kernel/flavors/ask/ | DORMANT (genl + flow table + debugfs) | Not yet driving FE-VM datapath |
+| **ask.ko control plane** | kernel/ask/ | DORMANT (genl + flow table + debugfs) | Not yet driving FE-VM datapath |
 | **fman_pcd_port_recover** | 0163, F-086 | LANDED | HW-validated; debugfs `fe_recover` wired today |
 | **FmPortSetFESupport auto-arm** | F-072b/c/d, 0123 | LANDED | Gate A proven; MURAM leak fixed (F-072d) |
 

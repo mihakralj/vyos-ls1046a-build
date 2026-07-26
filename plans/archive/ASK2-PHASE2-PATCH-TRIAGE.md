@@ -3,7 +3,7 @@
 **Date:** 2026-05-24
 **Branch:** `ask20`
 **Driver:** `plans/ASK2-COURSE-CORRECTION.md` §2 Phase 2
-**Scope:** Classify every patch in `kernel/flavors/ask/patches/0001-0053` as
+**Scope:** Classify every patch in `kernel/ask/patches/0001-0053` as
 **KEEP / ARCHIVE / PARTIAL** under the v1.3 Path A architecture, identify the
 archive destination, and define the resulting `bin/ci-setup-kernel.sh`
 `ASK_PATCH_COUNT` arithmetic.
@@ -16,7 +16,7 @@ This document is the authoritative inventory consumed by Phase 2.4–2.7
 `bash kernel/common/scripts/patch-health.sh --flavor ask --source release`
 → **Pass=55 Fail=0** (10 common patches + 45 active ASK patches).
 ASK-tree breakdown: 45 active + 10 archived in
-`kernel/flavors/ask/patches/archive-grafted-2026-05-24/`.
+`kernel/ask/patches/archive-grafted-2026-05-24/`.
 
 The original §8 "Open decision" between Option A (full split) and Option B
 (defer split) was resolved in favour of a refined Option C2: full split
@@ -47,7 +47,7 @@ are physically split (Phase 2.3) into a KEEP half (renumbered into a new
 slot) and an ARCHIVE half (moved with the rest).
 
 Archive destination:
-`kernel/flavors/ask/patches/archive-grafted-2026-05-24/`
+`kernel/ask/patches/archive-grafted-2026-05-24/`
 
 The archive directory name encodes both the *reason* (graft model
 abandoned) and the *date* (so a future v1.4 audit can `git log -- … /
@@ -171,7 +171,7 @@ sorted order per `bin/ci-setup-kernel.sh` glob).
 
 ## 4. Archive list (6 wholesale + 2 partial halves)
 
-Move via `git mv` into `kernel/flavors/ask/patches/archive-grafted-2026-05-24/`:
+Move via `git mv` into `kernel/ask/patches/archive-grafted-2026-05-24/`:
 
 | Patch | Reason |
 |---|---|
@@ -229,7 +229,7 @@ Required changes:
    ASK2-PHASE2-PATCH-TRIAGE.md`).
 
 The archive directory itself must **not** be globbed by
-`ci-setup-kernel.sh` — leave the `kernel/flavors/ask/patches/*.patch`
+`ci-setup-kernel.sh` — leave the `kernel/ask/patches/*.patch`
 glob bare so it picks up only active patches at the top level.
 Sub-directories are not recursed.
 
@@ -369,7 +369,7 @@ arithmetic is documented inline).
 ### 10.5 Archive directory contents (final, 10 patches)
 
 ```
-kernel/flavors/ask/patches/archive-grafted-2026-05-24/
+kernel/ask/patches/archive-grafted-2026-05-24/
 ├── 0032-fman-pcd-oh-port.patch
 ├── 0033-fman-pcd-manip-v1.2-oh-port-primitives-RMV-INSRT-only.patch
 ├── 0034-fman-pcd-oh-port-claim-lock-split.patch

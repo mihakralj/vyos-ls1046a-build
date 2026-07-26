@@ -15,8 +15,8 @@ Actual patch surface as found on `main` after single-repo absorption (PR 7):
 | `data/kernel-patches/*.patch` | 4 | staged by `kernel/common/scripts/stage-kernel.sh` |
 | `data/ask-userspace/{fmc,fmlib,libnetfilter-conntrack,libnfnetlink}/` | 5 | per-component build scripts |
 | `kernel/common/patches/{vyos,board,fixes}/` | 6 | `stage-kernel.sh` + `apply-to-tree.sh` |
-| `kernel/flavors/ask/patches/{ask,fixes}/` | 10 | `stage-kernel.sh` + `apply-to-tree.sh` |
-| `kernel/flavors/ask/userspace-patches/{ppp,rp-pppoe}/` | 2 | `kernel/common/scripts/build-ask-ppp.sh` |
+| `kernel/ask/patches/{ask,fixes}/` | 10 | `stage-kernel.sh` + `apply-to-tree.sh` |
+| `kernel/ask/userspace-patches/{ppp,rp-pppoe}/` | 2 | `kernel/common/scripts/build-ask-ppp.sh` |
 | `ASK/patches/{fmc,fmlib}/` | 4 | `bin/ci-build-fmc.sh`, `bin/ci-build-fmlib.sh` |
 | `patches/libcli/` | (workspace) | `bin/ci-build-ask-userspace.sh` (already uses `git apply`) |
 
@@ -55,11 +55,11 @@ The replacement stack is:
   - `data/kernel-patches/*.patch` — against the pinned kernel (today: `linux-6.18.28`, see below)
   - `data/ask-userspace/{fmc,fmlib,libnetfilter-conntrack,libnfnetlink}/*.patch` — against pinned upstream userspace tarballs
   - `kernel/common/patches/{vyos,board,fixes}/*.patch` — flavor-agnostic kernel deltas
-  - `kernel/flavors/ask/patches/{ask,fixes}/*.patch` — ASK fast-path + ASK-specific 6.6.y/6.18.y fixes
-  - `kernel/flavors/ask/userspace-patches/{ppp,rp-pppoe}/*.patch` — against pinned ppp / rp-pppoe sources
+  - `kernel/ask/patches/{ask,fixes}/*.patch` — ASK fast-path + ASK-specific 6.6.y/6.18.y fixes
+  - `kernel/ask/userspace-patches/{ppp,rp-pppoe}/*.patch` — against pinned ppp / rp-pppoe sources
   - `ASK/patches/{fmc,fmlib}/*.patch` — against `nxp-qoriq/fmlib` and `nxp-qoriq/fmc` at the pinned tag (`lf-6.18.2-1.0.0`)
   - `patches/libcli/*.patch` — already in git format, applied via `git apply` (line 148 of `bin/ci-build-ask-userspace.sh`); needs only the `--3way` upgrade
-- **Kernel version pinning:** as of 2026-05-09, both `default` and `ask` flavors target `linux-6.18.28` (per `versions.lock` and `kernel/flavors/ask/README.md`). The historical 6.6.137 ASK base is gone — ASK was forward-ported through `nxp-qoriq/linux ask-6.6-port @ 6d0b77e` and now applies on top of `linux-6.18.28`. **Phase 2c and 2d both target the same kernel tag** (`v6.18.28`) and can share a single checkout. Re-evaluate if `versions.lock` is bumped after the migration starts.
+- **Kernel version pinning:** as of 2026-05-09, both `default` and `ask` flavors target `linux-6.18.28` (per `versions.lock` and `kernel/ask/README.md`). The historical 6.6.137 ASK base is gone — ASK was forward-ported through `nxp-qoriq/linux ask-6.6-port @ 6d0b77e` and now applies on top of `linux-6.18.28`. **Phase 2c and 2d both target the same kernel tag** (`v6.18.28`) and can share a single checkout. Re-evaluate if `versions.lock` is bumped after the migration starts.
 - **CI scripts that apply patches** (verified 2026-05-09; line numbers from current `main`):
   - `bin/ci-setup-vyos1x.sh:70,74` — `patch --no-backup-if-mismatch -p1`
   - `bin/ci-setup-vyos-build.sh:35–36` — `patch --no-backup-if-mismatch -N -p1 -d vyos-build`
@@ -246,17 +246,17 @@ for p in "$REPO"/data/kernel-patches/*.patch; do
 done
 ```
 
-### 2d. Absorbed flavor-bucket patches (kernel/common + kernel/flavors/ask)
+### 2d. Absorbed flavor-bucket patches (kernel/common + kernel/ask)
 
 **Use the same `/tmp/regen/linux` checkout from 2c** — do not re-clone. The buckets must be applied in the exact order `kernel/common/scripts/apply-to-tree.sh` uses, because later patches in the chain depend on earlier ones being on disk. Stage the SDK source drop first (it is a *file* drop, not a patch) so any ASK patches that touch SDK paths can resolve.
 
 ```sh
 # Already in /tmp/regen/linux from Phase 2c; tree is on a tmp HEAD with all
 # data/kernel-patches/* applied. That state is fine — the kernel/common +
-# kernel/flavors/ask patches stack on top of those.
+# kernel/ask patches stack on top of those.
 
 # Step 0: stage SDK source drop (only needed for FLAVOR=ask)
-SDK_DIR="$REPO/kernel/flavors/ask/sdk-sources"
+SDK_DIR="$REPO/kernel/ask/sdk-sources"
 if [ -d "$SDK_DIR" ]; then
     (cd "$SDK_DIR" && find . -type f) | while read -r f; do
         f=${f#./}
@@ -271,8 +271,8 @@ for bucket_dir in \
     "$REPO/kernel/common/patches/vyos" \
     "$REPO/kernel/common/patches/board" \
     "$REPO/kernel/common/patches/fixes" \
-    "$REPO/kernel/flavors/ask/patches/ask" \
-    "$REPO/kernel/flavors/ask/patches/fixes"; do
+    "$REPO/kernel/ask/patches/ask" \
+    "$REPO/kernel/ask/patches/fixes"; do
     [ -d "$bucket_dir" ] || continue
     for p in "$bucket_dir"/*.patch; do
         [ -f "$p" ] || continue
@@ -567,8 +567,8 @@ jobs:
               ../kernel/common/patches/vyos \
               ../kernel/common/patches/board \
               ../kernel/common/patches/fixes \
-              ../kernel/flavors/ask/patches/ask \
-              ../kernel/flavors/ask/patches/fixes \
+              ../kernel/ask/patches/ask \
+              ../kernel/ask/patches/fixes \
               ../kernel/flavors/vpp/patches; do
               [ -d "$bucket" ] || continue
               for p in "$bucket"/*.patch; do
@@ -704,7 +704,7 @@ Patches in git format apply fine with old-style `patch -p1` (`index` lines ignor
 
 The integration merge (PRs 1–7) is complete on `main` as of 2026-05-09. This migration runs against the post-merge tree:
 
-- Patch surface: ~47 patches across `data/{vyos-1x,vyos-build,kernel-patches,ask-userspace}`, `kernel/common/patches/{vyos,board,fixes}/`, `kernel/flavors/ask/patches/{ask,fixes}/`, `kernel/flavors/ask/userspace-patches/`, and `ASK/patches/{fmc,fmlib}/`.
+- Patch surface: ~47 patches across `data/{vyos-1x,vyos-build,kernel-patches,ask-userspace}`, `kernel/common/patches/{vyos,board,fixes}/`, `kernel/ask/patches/{ask,fixes}/`, `kernel/ask/userspace-patches/`, and `ASK/patches/{fmc,fmlib}/`.
 - The absorbed `kernel/common/scripts/normalize-patch.awk` is **made obsolete** by Phase 2's git-diff-based regeneration. Mark it as such (header comment) or delete in the migration PR; document in the commit body why.
 - The absorbed hunk-validator hooks (`.clinehooks/block-dual-ref-push.sh`, `.clinehooks/hunk-validator`) **remain in force** — `git apply --3way` does not detect malformed hunk arithmetic that produces well-formed but semantically wrong patches. The archived kernel-build repo's ask13→ask14 incident (`AGENTS.md`) is the cautionary tale.
 - The patch-rot workflow (Phase 8) iterates every flavor bucket, not just `data/`.

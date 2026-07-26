@@ -19,9 +19,7 @@
 # Expects: GITHUB_WORKSPACE, BUILD_BY, BUILD_VERSION, DEBIAN_MIRROR,
 #          DEBIAN_SECURITY_MIRROR, VYOS_MIRROR in env
 set -ex -o pipefail
-# Single-image build: one flavor-neutral ISO named vyos-<version>-LS1046A-arm64.iso.
-# bin/common.sh still resolves FLAVOR (always "default" now) for the few
-# FLAVOR-aware ci-*.sh helpers; the ISO filename no longer encodes it.
+# Single-image build: one ISO named vyos-<version>-LS1046A-arm64.iso.
 BC_QUIET=1 source "${GITHUB_WORKSPACE:-.}/bin/common.sh"
 
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
@@ -29,7 +27,7 @@ cd "${GITHUB_WORKSPACE:-.}/vyos-build"
 ### Pre-flight: verify custom kernel is present (defense-in-depth)
 # ASK2 (rewrite-in-progress): the legacy ASK-consume path
 # (ASK_KERNEL_TAG → data/live-build-config/packages.chroot/) was removed
-# on the ask20 branch. All flavors now build the kernel locally via
+# on the ask20 branch. The kernel is now always built locally via
 # ci-build-packages.sh and stage it under vyos-build/packages/.
 KERNEL_IN_PACKAGES=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
 SEARCH_DIR="packages/"
@@ -147,7 +145,7 @@ export VYOS_PERSIST_CHROOT="${VYOS_PERSIST_CHROOT:-1}"
   generic
 
 cd build
-# Rename generic -> LS1046A in artifact filenames. Single flavor-neutral image:
+# Rename generic -> LS1046A in artifact filenames. Single image:
 #   vyos-2026.05.09-1830-rolling-LS1046A-arm64.iso
 ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
 IMAGE_ISO="${ORIG_ISO/generic/LS1046A}"
@@ -155,7 +153,6 @@ IMAGE_NAME="${IMAGE_ISO%.iso}"
 mv "$ORIG_ISO" "$IMAGE_ISO"
 echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
 echo "image_iso=${IMAGE_ISO}" >> "$GITHUB_OUTPUT"
-echo "flavor=${FLAVOR}" >> "$GITHUB_OUTPUT"
 
 ### ─── Make ISO hybrid: append FAT32 boot partition for U-Boot ──────────────
 #

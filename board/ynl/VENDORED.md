@@ -3,7 +3,7 @@
 Source: Linux kernel `tools/net/ynl/pyynl/` from `linux-6.18.34`.
 Vendored for ASK2 T-M7-5: op-mode `show interfaces ethernet ethN offload
 ask flows` wraps `ynl --family ask --dump dump-flows` per
-`kernel/flavors/ask/uapi/ask.yaml` (§3.5 "Operator UX"). ynl is not in the
+`kernel/ask/uapi/ask.yaml` (§3.5 "Operator UX"). ynl is not in the
 VyOS apt archive, so the pure-Python client is shipped in the image.
 
 Install layout (bin/ci-setup-vyos-build.sh):
