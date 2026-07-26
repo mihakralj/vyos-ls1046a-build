@@ -73,10 +73,10 @@ if [[ "$ASK_LOADED" == "0" ]]; then
         exit 2
 fi
 
-PCD_UP=$(run "dmesg | grep -c 'FMan PCD chain up'" || echo 0)
+PCD_UP=$(run "sudo -n dmesg | grep -c 'FMan PCD chain up'" || echo 0)
 echo "FMan PCD chain up events: $PCD_UP"
 
-OH_POOL_LINE=$(run "dmesg | grep -E 'PR14[sj] OH-port (pool|chain) ready' | tail -1" || true)
+OH_POOL_LINE=$(run "sudo -n dmesg | grep -E 'PR14[sj] OH-port (pool|chain) ready' | tail -1" || true)
 echo "OH-port bring-up: ${OH_POOL_LINE:-<none>}"
 
 OH_POOL_COUNT=$(echo "$OH_POOL_LINE" | grep -oE 'claimed [0-9]+' | awk '{print $2}')
@@ -89,7 +89,7 @@ echo "OH-port pool count: $OH_POOL_COUNT"
 
 hdr "2. Flow insert/remove accounting (last $DMESG_LINES dmesg lines)"
 
-DMESG=$(run "dmesg | tail -n $DMESG_LINES" || true)
+DMESG=$(run "sudo -n dmesg | tail -n $DMESG_LINES" || true)
 
 count() { echo "$DMESG" | grep -cE "$1" || true; }
 
@@ -119,7 +119,7 @@ printf '    of which PR14t-absorbed:     %s\n' "$PR14T_ABSORBED"
 
 hdr "3. /proc/net/nf_conntrack HW_OFFLOAD markers"
 
-CT=$(run "cat /proc/net/nf_conntrack 2>/dev/null" || true)
+CT=$(run "sudo -n cat /proc/net/nf_conntrack 2>/dev/null" || true)
 CT_TOTAL=$(echo "$CT" | grep -c . || echo 0)
 CT_OFFLOAD=$(echo "$CT" | grep -c HW_OFFLOAD || echo 0)
 CT_OFFLOAD_SW=$(echo "$CT" | grep -c '\[OFFLOAD\]' || echo 0)
