@@ -83,14 +83,10 @@ jobs:
     runs-on: ${{ inputs.runs_on || 'ARM64-runner2' }}
     permissions:
       contents: write
-    env:
-      # Single-image build: there is one flavor-neutral ISO. FLAVOR is left
-      # empty so bin/common.sh resolves it to "default" (or data/flavor.pin
-      # for a developer locally exercising the dormant ASK landing zone). The
-      # ask.ko / VPP dataplanes ship dormant in the one image and are switched
-      # at runtime (set system offload ask / set vpp settings), not selected at
-      # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
-      FLAVOR: ''
+    # Single-image build: there is one ISO. The ask.ko / VPP dataplanes ship
+    # dormant in it and are switched at runtime (set interfaces ethernet ethN
+    # offload ask / set vpp settings), not selected at build time. The FLAVOR
+    # env var was removed 2026-07-26. See AGENTS.md + plans/DUAL-DATAPLANE.md.
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
@@ -115,7 +111,6 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
-      flavor: ${{ steps.build_iso.outputs.flavor }}
 
     steps:
       - name: Verify Hardware
@@ -272,7 +267,7 @@ jobs:
       # (Consume prebuilt ASK kernel, Setup ASK fast-path kernel) were
       # removed on the ask20 branch. Until ASK2 components land
       # (ask.ko, ask_bridge.ko, askd, ask-load, libask_fci) per
-      # specs/ask2-rewrite-spec.md, the single flavor-neutral image ships
+      # specs/ask2-rewrite-spec.md, the single image ships
       # without ASK userspace or an SDK kernel; ASK engages at runtime
       # (set system offload ask) once those components are built in.
 
@@ -472,7 +467,7 @@ jobs:
           cat /tmp/release_notes.md
 
       # ─── Single-image update-check feed ───────────────────────────────
-      # One flavor-neutral ISO → one canonical feed. version.json is the source
+      # One ISO → one canonical feed. version.json is the source
       # of truth; version-{default,ask,vpp}.json are written byte-identical as
       # aliases so any fielded install that baked in a per-flavor URL before the
       # 2026-06-14 flavor collapse keeps updating (deleting an alias would make a

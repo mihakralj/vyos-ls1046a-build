@@ -4,7 +4,7 @@
 **Authority:** Proposal P7 from `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md`.
 **Scope:** classify all 38 surviving cmm shell tests under `we-are-mono/ASK:cmm/unit_tests/` (numbered 001 .. 042 with 012, 023, 025, 026 absent in upstream) and decide for each whether the equivalent behaviour:
 
-- (A) is **already exercised** by an ASK2 test under `kernel/flavors/ask/oot-modules/ask/tests/` or `bin/verify-ask-*`,
+- (A) is **already exercised** by an ASK2 test under `kernel/ask/oot-modules/ask/tests/` or `bin/verify-ask-*`,
 - (B) **should** be exercised but isn't yet — i.e. defer-port,
 - (C) is **architecturally not applicable** to ASK2 (cmm-CLI-specific or VoIP-feature-specific) — i.e. won't-port.
 

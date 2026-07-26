@@ -22,7 +22,7 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 
 ## Status tracker
 
-> **v1.3 course-correction (2026-05-24, per `plans/ASK2-COURSE-CORRECTION.md` + `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md`).** All `PR14h … PR14z13` rows carrying the **[ARCHIVED v1.3]** tag belong to the graft / OH-port era and are dispositional dead-code as of `kernel/flavors/ask/patches/archived/`. The new M2-perf critical path is **Path A boot-time PCD install** (patch `0044-fman-pcd-pre-netdev-hook.patch` + `0049-ask-fs_initcall.patch` + `0050-fman-pcd-cc-wire-group-table-and-miss-ad.patch` + `0051-fman-keygen-revert-pr14z15-nia-rmw.patch` + `0053-dpaa-noconfirm-offload-tx-fq.patch`) plus the inline **`FORWARD_FQ_WITH_MANIP`** CC-action (new patch slot 0005, to be authored in Phase 4 per the plan). The OH-port subsystem (`fman_pcd_oh.c` patches 0032/0034/0036/0038/0042/0043) is **archived** (not deleted — bisect anchor for 1 release cycle), and may be revived in **v1.1 as an IPsec re-inject path only**. The userspace control plane is **deleted** in v1.3: rows 17 (`askd`) and 18 (`ask-cli`) below are dispositional dead-code; promotion policy lives in nftables (`/etc/ask/exclude-alg.nft`), operator UX is `ynl --family ask --do …` against the kernel directly, and Prometheus metrics are written from `ask.ko` to `/run/ask/metrics.prom` (scraped by `node_exporter --collector.textfile`). The new top-of-stack PRs to be authored are **PR15** (Path A inline-MANIP M2 hard-gate, replaces PR14z7-z13), **PR16** (M3 IPv6 + bridge), and **PR17** (M4 IPsec via xfrmdev_ops + CAAM). All references to "gated on PR14z7" below are stale — the real M2 gate is **PR15** under the v1.3 spec. **2026-05-25 PR14z21 update:** Path A boot-time activation is verified on the mono DUT (`claimed=5 declined=0 failed=0` after dropping the bogus 64 KiB MURAM reservation, patch 0062, commit `59f7209`). The M2 gate now FAILs on CPU only — 6.955 Gbps PASS / 21.40 % kernel-net CPU FAIL / 327× `fman_pcd_manip_chain_create(3 manips) failed: -12` in dmesg. PR15 remains the M2 hard gate, but its scope narrows to: instrument MURAM `gen_pool` accounting in `fman_pcd_manip.c`, identify which of the three v1.4 hypotheses applies (boot-time CC-tree pool exhaustion / wrong byte-size math / per-manip pre-alloc leak), and land the local fix. No architecture revision — v1.3 Path A + FORWARD_FQ_WITH_MANIP + YNL-only userspace are confirmed correct.
+> **v1.3 course-correction (2026-05-24, per `plans/ASK2-COURSE-CORRECTION.md` + `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md`).** All `PR14h … PR14z13` rows carrying the **[ARCHIVED v1.3]** tag belong to the graft / OH-port era and are dispositional dead-code as of `kernel/ask/patches/archived/`. The new M2-perf critical path is **Path A boot-time PCD install** (patch `0044-fman-pcd-pre-netdev-hook.patch` + `0049-ask-fs_initcall.patch` + `0050-fman-pcd-cc-wire-group-table-and-miss-ad.patch` + `0051-fman-keygen-revert-pr14z15-nia-rmw.patch` + `0053-dpaa-noconfirm-offload-tx-fq.patch`) plus the inline **`FORWARD_FQ_WITH_MANIP`** CC-action (new patch slot 0005, to be authored in Phase 4 per the plan). The OH-port subsystem (`fman_pcd_oh.c` patches 0032/0034/0036/0038/0042/0043) is **archived** (not deleted — bisect anchor for 1 release cycle), and may be revived in **v1.1 as an IPsec re-inject path only**. The userspace control plane is **deleted** in v1.3: rows 17 (`askd`) and 18 (`ask-cli`) below are dispositional dead-code; promotion policy lives in nftables (`/etc/ask/exclude-alg.nft`), operator UX is `ynl --family ask --do …` against the kernel directly, and Prometheus metrics are written from `ask.ko` to `/run/ask/metrics.prom` (scraped by `node_exporter --collector.textfile`). The new top-of-stack PRs to be authored are **PR15** (Path A inline-MANIP M2 hard-gate, replaces PR14z7-z13), **PR16** (M3 IPv6 + bridge), and **PR17** (M4 IPsec via xfrmdev_ops + CAAM). All references to "gated on PR14z7" below are stale — the real M2 gate is **PR15** under the v1.3 spec. **2026-05-25 PR14z21 update:** Path A boot-time activation is verified on the mono DUT (`claimed=5 declined=0 failed=0` after dropping the bogus 64 KiB MURAM reservation, patch 0062, commit `59f7209`). The M2 gate now FAILs on CPU only — 6.955 Gbps PASS / 21.40 % kernel-net CPU FAIL / 327× `fman_pcd_manip_chain_create(3 manips) failed: -12` in dmesg. PR15 remains the M2 hard gate, but its scope narrows to: instrument MURAM `gen_pool` accounting in `fman_pcd_manip.c`, identify which of the three v1.4 hypotheses applies (boot-time CC-tree pool exhaustion / wrong byte-size math / per-manip pre-alloc leak), and land the local fix. No architecture revision — v1.3 Path A + FORWARD_FQ_WITH_MANIP + YNL-only userspace are confirmed correct.
 
 | PR  | Title                                            | Target | Status      |
 |-----|--------------------------------------------------|--------|-------------|
@@ -296,7 +296,7 @@ family and exits.
 
 ### PR1 — Module skeleton + Kbuild + Kconfig
 
-**Files added under `kernel/flavors/ask/oot-modules/ask/`:**
+**Files added under `kernel/ask/oot-modules/ask/`:**
 
 ```
 ask/
@@ -414,7 +414,7 @@ Per spec §10, three small kernel patches are needed:
 `-EOPNOTSUPP`. This lets the build pipeline (PR3) wire the patch list
 without blocking on the real implementation work.
 
-**Files added under `kernel/flavors/ask/patches/`:**
+**Files added under `kernel/ask/patches/`:**
 ```
 patches/
 ├── 0001-caam-qi-share.patch              # placeholder
@@ -432,7 +432,7 @@ mergiraf merge driver if context drifts.
 
 **Modifies:**
 - `bin/ci-setup-kernel.sh` — when `FLAVOR=ask`, copy
-  `kernel/flavors/ask/patches/000{1,2,3}-*.patch` into the kernel
+  `kernel/ask/patches/000{1,2,3}-*.patch` into the kernel
   patches dir alongside the default-flavor `101-*` and `400[5-9]-*` set.
   The cleanup `find` glob already preserves vyos-build's own `0001-*`
   and `0003-*` upstream patches; the `! -name '0001-*' ! -name '0003-*'`
@@ -445,12 +445,12 @@ mergiraf merge driver if context drifts.
   drive the OOT build:
   ```sh
   if [[ "${FLAVOR:-}" == "ask" ]]; then
-      bash kernel/flavors/ask/oot-modules/ask/ci-build.sh
+      bash kernel/ask/oot-modules/ask/ci-build.sh
   fi
   ```
 - `bin/local-build.sh` — add an `ask-mod` mode that builds just the
   OOT module against the dev-loop kernel on LXC 200 (no full ISO).
-- `kernel/flavors/ask/oot-modules/ask/ci-build.sh` (new) — the actual
+- `kernel/ask/oot-modules/ask/ci-build.sh` (new) — the actual
   build driver. Runs `make -C $KSRC M=$PWD modules`, signs each `.ko`
   with `$KSRC/scripts/sign-file sha512 $KSRC/certs/signing_key.pem
   $KSRC/certs/signing_key.x509 $ko`, packages the signed `.ko` as a
@@ -475,7 +475,7 @@ mergiraf merge driver if context drifts.
 
 ### PR4 — kunit harness + first dummy test
 
-**Files added under `kernel/flavors/ask/oot-modules/ask/tests/`:**
+**Files added under `kernel/ask/oot-modules/ask/tests/`:**
 ```
 tests/
 ├── Kbuild
@@ -740,7 +740,7 @@ the kernel via the device-tree property
 U-Boot loaded into FMan IRAM at boot from SPI flash partition `mtd3`.
 
 **Files added/changed:**
-- `kernel/flavors/ask/oot-modules/ask/ask_hw.c` (new, ~250 LOC) —
+- `kernel/ask/oot-modules/ask/ask_hw.c` (new, ~250 LOC) —
   `ask_hw_init()`/`ask_hw_exit()` plus `ask_hw_ucode_get_version()`
   helper. Walks DT for `compatible = "fsl,fman-firmware"`, reads the
   `fsl,firmware` property, validates the `'Q' 'E' 'F' 0x01` magic at
@@ -748,16 +748,16 @@ U-Boot loaded into FMan IRAM at boot from SPI flash partition `mtd3`.
   description at offset 8 (`"Microcode version 210.10.1 for LS1043 r1.0"`).
   Caches via `READ_ONCE`/`WRITE_ONCE`. Logs single dmesg breadcrumb
   `ask: hw: FMan microcode 210.10.1 ("Microcode version …")` on success.
-- `kernel/flavors/ask/oot-modules/ask/include/ask_internal.h` —
+- `kernel/ask/oot-modules/ask/include/ask_internal.h` —
   `struct ask_hw_ucode_version { u16 family; u8 major; u8 minor;
    u16 patch; char description[64]; }` + three function decls.
-- `kernel/flavors/ask/oot-modules/ask/Kbuild` — adds `ask_hw.o`.
-- `kernel/flavors/ask/oot-modules/ask/ask_main.c` — wires
+- `kernel/ask/oot-modules/ask/Kbuild` — adds `ask_hw.o`.
+- `kernel/ask/oot-modules/ask/ask_main.c` — wires
   `ask_hw_init` as the first subsystem and `ask_hw_exit` as the last
   in the unwind chain (zero deps on other subsystems; non-DPAA hosts
   fail-fast with a single dmesg line, and a missing/malformed blob is
   non-fatal — module still loads with version 0.0.0).
-- `kernel/flavors/ask/oot-modules/ask/ask_genl.c` —
+- `kernel/ask/oot-modules/ask/ask_genl.c` —
   `ASK_INFO_ATTR_UCODE_FAMILY/MAJOR/MINOR/PATCH` are now sourced from
   `ask_hw_ucode_get_version()` instead of hard-coded zeros.
 
@@ -924,7 +924,7 @@ and round-tripped through `patch-health`:
 
 #### PR14b-prep — KG public API stub + helper exports — **landed (fda5a03)**
 
-Captured as `kernel/flavors/ask/patches/0005-fman-pcd-kg-prep.patch`
+Captured as `kernel/ask/patches/0005-fman-pcd-kg-prep.patch`
 (541 lines). Adds:
 
 - `drivers/net/ethernet/freescale/fman/fman_pcd_kg.c` (new) — public
@@ -942,12 +942,12 @@ Captured as `kernel/flavors/ask/patches/0005-fman-pcd-kg-prep.patch`
   functions + the opaque struct.
 
 Also added to `patch-health.sh`: cumulative-stack mode for
-`kernel/flavors/ask/patches/` so cross-dependent patches in a logical
+`kernel/ask/patches/` so cross-dependent patches in a logical
 series (0004 + 0005 etc.) don't produce false-positive rot.
 
 #### PR14b-body — Real KGSE_* programming (IPv4 5-tuple) — **landed (00d6f16)**
 
-Captured as `kernel/flavors/ask/patches/0006-fman-pcd-kg-body.patch`
+Captured as `kernel/ask/patches/0006-fman-pcd-kg-body.patch`
 (341 inserted / 48 deleted in `fman_pcd_kg.c`, ~330 LOC final).
 Replaces the four `-EOPNOTSUPP` stubs with the real implementation:
 
@@ -1017,7 +1017,7 @@ pattern that worked for PR14b.
 
 #### PR14c-prep — CC public API stub — **landed (c613714)**
 
-Captured as `kernel/flavors/ask/patches/0007-fman-pcd-cc-prep.patch`
+Captured as `kernel/ask/patches/0007-fman-pcd-cc-prep.patch`
 (386 LOC: +157 in new `.c`, +281 in header, +1 Makefile, +1 wiring).
 Kernel-side commit `965b9d9f4` on `/var/tmp/pr14a/linux-6.18.28`.
 
@@ -1526,7 +1526,7 @@ LOC budget: ~1040.
 
 Following the established cadence (PR14c×5, PR14d×4, PR14e×4), PR14f is
 split into four sub-PRs each landing as a separate kernel-tree commit
-and a separate workspace patch under `kernel/flavors/ask/patches/`:
+and a separate workspace patch under `kernel/ask/patches/`:
 
 - **body-1 — `fman_pcd_replic` group create/destroy MURAM bodies** —
   patch `0022-fman-pcd-replic-body-1-create-destroy.patch`, kernel-tree
@@ -1674,7 +1674,7 @@ M2 gate.
 
 **Files changed (out-of-tree `ask.ko`):**
 
-- `kernel/flavors/ask/oot-modules/ask/ask_hostcmd.c`:
+- `kernel/ask/oot-modules/ask/ask_hostcmd.c`:
   - `ask_hw_flow_insert_v4_tcp()` switches from
     "encode wire bytes + `fmd_host_cmd()` → `-ENXIO`" to
     "build `fman_pcd_cc_key_table` + call
@@ -1687,7 +1687,7 @@ M2 gate.
   - Add `ask_hw_flow_remove()`, `ask_hw_flow_query_stats()` companions
     using `fman_pcd_cc_node_destroy_key()` and the per-key MURAM
     stats counter readback.
-- `kernel/flavors/ask/oot-modules/ask/ask_hw.c`:
+- `kernel/ask/oot-modules/ask/ask_hw.c`:
   - Add `ask_priv_alloc_cc_node_for_v4_tcp()` — at module init, build
     the per-FMan KG scheme + CC tree + CC node skeleton that
     `ask_hw_flow_insert_v4_tcp()` will append keys to. Wires
@@ -1776,7 +1776,7 @@ Authoritative reference: `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` §7
   (stack-apply marks 0038 ✓; the 33 pre-existing ✗ entries in
   isolated dry-run mode are not regressions — CI run
   26028478858 confirmed the full stack applies cleanly).
-  Per `kernel/flavors/ask/patches/README.md`
+  Per `kernel/ask/patches/README.md`
   ("FMAN_PCD_API_VERSION bump rule") this is a new optional
   output accessor and **does not** bump
   `FMAN_PCD_API_VERSION_PR14` (still 0x102).
@@ -1805,7 +1805,7 @@ Authoritative reference: `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` §7
 
 P6 (`FMAN_PCD_API_VERSION` bump rule documentation) and P7 (cmm-test
 classification matrix) are docs-only and have **already landed** —
-see `kernel/flavors/ask/patches/README.md` and
+see `kernel/ask/patches/README.md` and
 `plans/ASK2-CMM-TEST-PARITY.md` respectively.
 
 ---

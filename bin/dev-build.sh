@@ -18,18 +18,17 @@
 #   iso-live [<iso>]    Extract live artefacts (kernel/initrd/dtb/squashfs)
 #                       for the dev_boot_live U-Boot env, push to TFTP.
 #                       With no arg, downloads the newest GitHub release.
-#   iso                 Run bin/local-build.sh with $FLAVOR set (default | ask
+#   iso                 Run bin/local-build.sh to produce the single ISO
 #                       | vpp), then publish the resulting .iso (+ .minisig if
 #                       produced) to admin@LXC200:/srv/tftp/iso/ so the board
 #                       can pull it with `add system image http://192.168.1.137
 #                       :8080/iso/<name>.iso`. Symlinks
-#                       /srv/tftp/iso/latest-<flavor>.iso to the just-built
+#                       /srv/tftp/iso/latest.iso to the just-built
 #                       ISO. Roughly ~40 min cold, ~7 min warm caches.
 #   push                Just rsync work/dev-tftp/ -> admin@LXC200:/srv/tftp/.
 #   help                This message.
 #
 # Environment:
-#   FLAVOR              default | ask | vpp        (default: default)
 #   LXC200_HOST         SSH target for TFTP server (default: admin@192.168.1.137)
 #   TFTP_DIR_REMOTE     Path on LXC 200             (default: /srv/tftp)
 #   USE_CCACHE          1 to wire ccache (default: 1 if /usr/bin/ccache exists)
@@ -44,7 +43,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # ── Defaults ──────────────────────────────────────────────────────────
-FLAVOR="${FLAVOR:-default}"
 LXC200_HOST="${LXC200_HOST:-admin@192.168.1.137}"
 TFTP_DIR_REMOTE="${TFTP_DIR_REMOTE:-/srv/tftp}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/admin_key}"
@@ -92,7 +90,6 @@ export GITHUB_OUTPUT="${GITHUB_OUTPUT:-/tmp/dev-gh_output.$(id -u)}"
 export GITHUB_ENV="${GITHUB_ENV:-/tmp/dev-gh_env.$(id -u)}"
 export GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-/tmp/dev-gh_step_summary.$(id -u)}"
 : > "$GITHUB_OUTPUT"; : > "$GITHUB_ENV"; : > "$GITHUB_STEP_SUMMARY"
-export FLAVOR
 
 # Resolve kernel version (same logic as stage-kernel.sh / common.sh).
 KVER=""
@@ -135,7 +132,7 @@ cmd_push() {
 
 # ── kernel: stage + build + push ──────────────────────────────────────
 cmd_kernel() {
-    hdr "Stage kernel tree (FLAVOR=$FLAVOR, KERNEL=$KVER)"
+    hdr "Stage kernel tree (KERNEL=$KVER)"
     # stage-kernel.sh handles patches, file injection, defconfig fragment
     # merge AND `make olddefconfig` — it is the single source of truth for
     # producing a ready-to-build kernel tree. We do NOT run ci-setup-kernel.sh
@@ -263,22 +260,22 @@ cmd_iso_live() {
 
 # ── iso: full ISO build via bin/local-build.sh + publish to LXC 200 ───
 #
-# Builds a FLAVOR-tagged ISO locally using the same CI script chain that
+# Builds the ISO locally using the same CI script chain that
 # self-hosted CI uses, then rsyncs the .iso (+ .minisig if produced) to
 # admin@LXC200:/srv/tftp/iso/ so the running board can pull it with
 #   add system image http://192.168.1.137:8080/iso/<file>.iso
-# A symlink /srv/tftp/iso/latest-<flavor>.iso is updated to the just-
+# A symlink /srv/tftp/iso/latest.iso is updated to the just-
 # built ISO so dev workflows can always grab the freshest build from a
 # stable URL.
 #
 # Requires sudo on this VM (local-build.sh installs host build-deps).
 cmd_iso() {
-    hdr "Full ISO build (FLAVOR=$FLAVOR) via bin/local-build.sh"
+    hdr "Full ISO build via bin/local-build.sh"
 
     if [ "$(id -u)" -ne 0 ]; then
         info "local-build.sh installs apt packages — re-invoking under sudo"
-        # Preserve FLAVOR + auth env across the sudo boundary.
-        exec sudo --preserve-env=FLAVOR,LXC200_HOST,TFTP_DIR_REMOTE,SSH_KEY,JOBS,USE_CCACHE \
+        # Preserve auth env across the sudo boundary.
+        exec sudo --preserve-env=LXC200_HOST,TFTP_DIR_REMOTE,SSH_KEY,JOBS,USE_CCACHE \
             HOME="$HOME" bash "$0" iso "$@"
     fi
 
@@ -288,7 +285,7 @@ cmd_iso() {
     rm -f "$REPO_ROOT"/vyos-*-LS1046A-*.iso "$REPO_ROOT"/vyos-*-LS1046A-*.iso.minisig
 
     local _T0=$SECONDS
-    FLAVOR="$FLAVOR" bash "$REPO_ROOT/bin/local-build.sh"
+    bash "$REPO_ROOT/bin/local-build.sh"
     ok "ISO build finished in $(( SECONDS - _T0 ))s"
 
     # The build leaves exactly one ISO at the repo root; pick it up.
@@ -305,8 +302,8 @@ cmd_iso() {
     if [ -f "$iso.minisig" ]; then
         rsync_lxc -av "$iso.minisig" "$LXC200_HOST:$TFTP_DIR_REMOTE/iso/$iso_name.minisig"
     fi
-    # Refresh the stable "latest" symlink for this flavor.
-    ssh_lxc "sudo ln -sfn '$iso_name' '$TFTP_DIR_REMOTE/iso/latest-$FLAVOR.iso'"
+    # Refresh the stable "latest" symlink.
+    ssh_lxc "sudo ln -sfn '$iso_name' '$TFTP_DIR_REMOTE/iso/latest.iso'"
     ok "Published"
 
     local lxc_ip="${LXC200_HOST#*@}"
@@ -314,7 +311,7 @@ cmd_iso() {
     info "On the running board (vyos@192.168.1.190):"
     echo "    add system image http://${lxc_ip}:8080/iso/$iso_name"
     info "Or via the stable 'latest' alias:"
-    echo "    add system image http://${lxc_ip}:8080/iso/latest-$FLAVOR.iso"
+    echo "    add system image http://${lxc_ip}:8080/iso/latest.iso"
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────

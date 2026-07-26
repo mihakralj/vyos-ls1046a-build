@@ -124,7 +124,7 @@ Steering + BUG 3a (FMPL block master-enable `GCR.EN|STEN` clear at boot) + the B
 ## 6. ASK2 COMPLETION (`ask20` BRANCH)
 
 **[SPEC]**
-- State: `kernel/flavors/ask/` is scaffold-only; the single image ships `ask.ko` **dormant in every ISO** — until the ASK2 components land, the offload is a no-op and the image is functionally vanilla VyOS for ASK. Spec is **v1.8** (single-image flavor collapse adopted; architecture frozen; dual-dataplane state machine S0/S1/S2). Path A is **config-driven late-bind**: `ask.ko` loads on a `set system offload ask` commit and `pcd_ops->install` late-binds under quiesce on already-registered netdevs (NOT boot-unconditional).
+- State: `kernel/ask/` is scaffold-only; the single image ships `ask.ko` **dormant in every ISO** — until the ASK2 components land, the offload is a no-op and the image is functionally vanilla VyOS for ASK. Spec is **v1.8** (single-image flavor collapse adopted; architecture frozen; dual-dataplane state machine S0/S1/S2). Path A is **config-driven late-bind**: `ask.ko` loads on a `set system offload ask` commit and `pcd_ops->install` late-binds under quiesce on already-registered netdevs (NOT boot-unconditional).
 - Components to land: the ~10k-LOC FMan-PCD substrate is **already largely landed in the common board stack** (`0092`/`0097`–`0101`, consumed via `pcd_ops`) — not a fresh build. ASK2-specific NEW code (per spec §15.1): `ask.ko` ~1500 + `ask_bridge.ko` ~400 + `dpaa_flavor_ops` ~100 + YNL `ask` family ~300 (≈ 2.3k LOC kernel/OOT) **+** VyOS CLI ~1200 LOC (Python, `set system offload ask`). Userspace daemon = 0 (single YNL family; no `askd`, no `libfci` ABI — opnsense-deps keeps the legacy daemon, we delete it).
 
 **[BUG] ASK2 M2 CPU gate FAILED — 327× manip_chain_create -ENOMEM**

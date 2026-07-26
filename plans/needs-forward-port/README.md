@@ -10,11 +10,11 @@ have non-trivial context drift against the new 6.18.28 base.
 ## When to handle
 
 PR 9 (`plans/PATCH-MIGRATION-3WAY.md`) — the existing `git apply --3way` migration
-plan covers this systematically. Do NOT hand-fix here in PR 3 / PR 4 (default-flavor
+plan covers this systematically. Do NOT hand-fix here in PR 3 / PR 4 (baseline
 green-build PRs).
 
 ## Re-introducing
 
 Once forward-ported, move back into `kernel/common/patches/board/`. Re-run
-`bash kernel/common/scripts/integration-test.sh` to confirm `Pass:` count goes up
+`bash kernel/common/scripts/patch-health.sh` to confirm the `Pass:` count goes up
 by exactly 1 and remains green.

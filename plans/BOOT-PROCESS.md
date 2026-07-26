@@ -488,5 +488,5 @@ recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size};
 - `plans/DEV-LOOP.md` — Fast dev loop (TFTP / network boot without re-flashing)
 - `plans/DUAL-DATAPLANE.md` — Dual-dataplane architecture (S0/S1/S2 runtime model)
 - `plans/NETWORKING-DEEP-DIVE.md` — Silicon deep-dive (FMan, BMan, QMan, VPP, ASK)
-- `specs/dpaa1-afxdp-modernization-spec.md` — Authoritative cross-flavor DPAA1 spec
+- `specs/dpaa1-afxdp-modernization-spec.md` — Authoritative cross-consumer DPAA1 spec
 - `INSTALL.md` — Step-by-step physical installation guide

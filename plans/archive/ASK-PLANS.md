@@ -78,7 +78,7 @@ valid. **Do not consult for current architecture.** Full index with rationale:
 |---|---|---|
 | [`archive/ASK2-IMPLEMENTATION.md`](archive/ASK2-IMPLEMENTATION.md) | ASK2 per-PR implementation tracker (target spec v1.1) | Superseded by the `specs/dpaa1-afxdp-modernization-spec.md` cross-flavor milestone table; ASK2 spec is now v1.6. |
 | [`archive/ASK2-NEXT-STEPS-2026-05-25.md`](archive/ASK2-NEXT-STEPS-2026-05-25.md) | Dated forensic roadmap (KG scheme priority-race) toward ASK2 GA | Snapshot only; references spec v1.3 (now v1.6) and the pre-cross-flavor architecture. |
-| [`archive/ASK2-PHASE2-PATCH-TRIAGE.md`](archive/ASK2-PHASE2-PATCH-TRIAGE.md) | KEEP/ARCHIVE/PARTIAL classification of `kernel/flavors/ask/patches/0001-0053` | The ASK 1.x patch tree it classifies was deleted on `ask20`; FMan PCD now lives in the common board stack. |
+| [`archive/ASK2-PHASE2-PATCH-TRIAGE.md`](archive/ASK2-PHASE2-PATCH-TRIAGE.md) | KEEP/ARCHIVE/PARTIAL classification of `kernel/ask/patches/0001-0053` | The ASK 1.x patch tree it classifies was deleted on `ask20`; FMan PCD now lives in the common board stack. |
 | [`archive/ASK2-CMM-TEST-PARITY.md`](archive/ASK2-CMM-TEST-PARITY.md) | Parity matrix mapping the 38 legacy `cmm/unit_tests` shell tests to ASK2 | The `cmm`/`we-are-mono/ASK` corpus was deleted; ASK2 offload has no CLI harness. |
 | [`archive/ASK-UPSTREAM-SYNC.md`](archive/ASK-UPSTREAM-SYNC.md) | Legacy ASK 1.x SDK upstream-sync workflow (vs `we-are-mono/ASK@mt-6.12.y`) | ASK 1.x fork deleted; project pivoted to patching mainline 6.18 directly. See [`archive/ASK-UPSTREAM-SYNC.md.archive-note.md`](archive/ASK-UPSTREAM-SYNC.md.archive-note.md). |
 

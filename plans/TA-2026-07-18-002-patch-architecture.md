@@ -83,7 +83,7 @@ Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are 
 
 **v1.0 corrections (still accurate):**
 - OOT module source is ~6976 lines (`.c` only) / 8109 (`.c`+`.h`), not 4691. The substantive claim ("zero patch surface") stands.
-- `kernel/flavors/ask/patches/` was not "deleted entirely": the active patch set is gone, but `README.md`, `archive-2026-06-21-pre-6.18.34/`, and `archive-grafted-2026-05-24/` remain.
+- `kernel/ask/patches/` was not "deleted entirely": the active patch set is gone, but `README.md`, `archive-2026-06-21-pre-6.18.34/`, and `archive-grafted-2026-05-24/` remain.
 
 **v1.3 additions (2026-07-19):**
 - **[NOTE]** The count-gating investment paid for itself within hours of being wired into CI. Two anchor drifts were caught — both would have been silent regressions under the old bare-sed regime. The first (NF-10, SFP-10G-T rename) was redundant with patch 4009; the second (NF-11, `fman_muram_offset_to_vbase` cast) matched 29 occurrences instead of the assumed 1. Each bare `sed -i` was a latent defect waiting to happen — the count-gates proved it.
@@ -119,7 +119,7 @@ flowchart TD
     L1["Layer 1 — Patch stack<br/>kernel/common/patches/{vyos,board,fixes}/<br/>board: 103 .patch + 260-line series + 18 letter-suffix<br/>per-patch metadata: Risk-Tier + Upstream-Status<br/>1 permanent skip (0150) in skip-ledger"]
     L2["Layer 2 — F-0xx fixups (THE DISEASE)<br/>39 IDs · 28 bare sed-i + 7 mutate.py + 20 bin/kernel-fixups/*.py<br/>(8 versioned duplicates, 20 manifest entries)"]
     L3["Layer 3 — Downstream shims<br/>anchor-verified sed/python into vyos-build build-kernel.sh<br/>replaces upstream patch -p1 loop with git apply --3way"]
-    L4["Layer 4 — OOT modules<br/>kernel/flavors/ask/oot-modules/ask/ (~6976 LOC .c)<br/>zero patch surface"]
+    L4["Layer 4 — OOT modules<br/>kernel/ask/oot-modules/ask/ (~6976 LOC .c)<br/>zero patch surface"]
     CI["CI — patch-rot-check.yml weekly (Mon 06:00 UTC)<br/>git apply --3way --check · warn-only<br/>+ persistent git clone (clone-kernel.sh symlink)<br/>+ canonical-bootstrap.sh one-commit-per-patch<br/>+ 3way-fallback counter<br/>+ mergiraf .gitattributes (allowlisted low-risk files)<br/>+ bin/test-fixups.sh gate (4 checks, check[1] path fixed)"]
 
     L0 --> L1

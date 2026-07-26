@@ -115,7 +115,7 @@ vyos-ls1046a-build/
 These exist today on the consumer side and overlap conceptually with `kernel/common/patches/board/` and `kernel/common/kernel-config/`. The migration policy:
 
 - **Anything board-bringup, flavor-agnostic** (boot, eMMC, console, fan, LED, mono DTS, INA234 power sensors, ttyS0 console, watchdog, QSPI partitions) → moves to `kernel/common/patches/board/` and `kernel/common/kernel-config/`.
-- **Anything SDK-related or ASK-specific** (`ls1046a-ask.config`, `ls1046a-sdk.config`, `003-ask-kernel-hooks.patch`, `ask-nxp-sdk-sources.tar.gz`) → moves to `kernel/flavors/ask/` and is replaced by the producer's bucketed equivalents under `kernel/flavors/ask/patches/{ask,fixes}/` + `kernel/flavors/ask/sdk-sources/`. The tarball form is retired; verbatim source drops are committed as files (matches the producer's existing `release/patches/kernel/sdk-sources/` layout — 266 files, with `/* ASK-edit (askNN) */` markers grep-auditable).
+- **Anything SDK-related or ASK-specific** (`ls1046a-ask.config`, `ls1046a-sdk.config`, `003-ask-kernel-hooks.patch`, `ask-nxp-sdk-sources.tar.gz`) → moves to `kernel/ask/` and is replaced by the producer's bucketed equivalents under `kernel/ask/patches/{ask,fixes}/` + `kernel/ask/sdk-sources/`. The tarball form is retired; verbatim source drops are committed as files (matches the producer's existing `release/patches/kernel/sdk-sources/` layout — 266 files, with `/* ASK-edit (askNN) */` markers grep-auditable).
 - **Anything mainline-DPAA-specific** (`ls1046a-dpaa1.config`) → moves to `kernel/flavors/default/kernel-config/`.
 - **Anything XDP/AF_XDP/VPP-specific** (`patch-dpaa-xdp-queue-index.py`, AF_XDP tunings) → moves to `kernel/flavors/vpp/`.
 
@@ -182,7 +182,7 @@ KERNEL_FLAVOR="kernel/flavors/${FLAVOR}"
 4. `kernel/flavors/${FLAVOR}/patches/ask/*.patch`         (only present for `ask`)
 5. `kernel/flavors/${FLAVOR}/patches/fixes/*.patch`        (flavor-specific fixes)
 6. `kernel/flavors/${FLAVOR}/patches/*.patch`             (everything else under flavor root)
-7. SDK source drops (only for `ask`): `cp -r kernel/flavors/ask/sdk-sources/* $KSRC/`
+7. SDK source drops (only for `ask`): `cp -r kernel/ask/sdk-sources/* $KSRC/`
 
 All patches use `patch --no-backup-if-mismatch -p1 -d $KSRC` (consistent with current `data/vyos-*.patch` application convention).
 
@@ -197,7 +197,7 @@ cat \
   > $KSRC/.config
 ```
 
-The flavor fragment wins last. For ASK specifically, `kernel/flavors/ask/ask.config` (the LS1046A/DPAA delta) is appended after `ls1046a-ask.config` to preserve the current "ASK config wins last" invariant documented in `AGENTS.md` ("**SDK DPAA config must apply LAST**" rule). The `ci-setup-kernel.sh` script must explicitly re-append `kernel/flavors/ask/ask.config` last, the same way today's `ci-setup-kernel-ask.sh` re-applies SDK config after all fragments.
+The flavor fragment wins last. For ASK specifically, `kernel/ask/ask.config` (the LS1046A/DPAA delta) is appended after `ls1046a-ask.config` to preserve the current "ASK config wins last" invariant documented in `AGENTS.md` ("**SDK DPAA config must apply LAST**" rule). The `ci-setup-kernel.sh` script must explicitly re-append `kernel/ask/ask.config` last, the same way today's `ci-setup-kernel-ask.sh` re-applies SDK config after all fragments.
 
 ### 3.6. Userspace package selection
 
@@ -206,7 +206,7 @@ The flavor fragment wins last. For ASK specifically, `kernel/flavors/ask/ask.con
 | Flavor | accel-ppp-ng | ASK userspace (fmlib/fmc/dpa_app/cdx/fci/auto_bridge/cmm) | OOT kernel modules | iptables/QOSMARK |
 |---|---|---|---|---|
 | `default` | yes (already built) | no | no | no |
-| `ask` | yes | yes (rebuilt from `mihakralj/ask-ls1046a-6.6` per existing `bin/ci-build-fmlib.sh`/`bin/ci-build-fmc.sh`/`bin/ci-build-ask-userspace.sh` flow) | yes (signed against in-tree kernel certs per `AGENTS.md` rule) | yes (patched iptables from `kernel/flavors/ask/userspace-patches/`) |
+| `ask` | yes | yes (rebuilt from `mihakralj/ask-ls1046a-6.6` per existing `bin/ci-build-fmlib.sh`/`bin/ci-build-fmc.sh`/`bin/ci-build-ask-userspace.sh` flow) | yes (signed against in-tree kernel certs per `AGENTS.md` rule) | yes (patched iptables from `kernel/ask/userspace-patches/`) |
 | `vpp` | yes | no | no | no |
 
 The `97-ask-userspace.chroot` live-build hook is **conditional** on `${FLAVOR} == ask`; `ci-setup-vyos-build.sh` only copies it into `$HOOKS/` when building the ASK flavor. Same gating for `sfp-tx-enable-sdk.service`, `ask-conntrack-fix.service`, and the SDK-specific DTS overrides.
@@ -257,13 +257,13 @@ vyos-1.5-rolling-2026XXXX-LS1046A-arm64-vpp.iso
 
 **Patch set:** as listed in `kernel-ls1046a-build/README.md` Patch Inventory (vyos/3 + ask/8 + fixes/6 = 17 patches), plus `kernel/common/patches/board/*` and the consumer-side ASK kernel hooks if not yet absorbed into the SDK source tree.
 
-**SDK sources:** 266 verbatim NXP SDK files under `kernel/flavors/ask/sdk-sources/`, with `/* ASK-edit (askNN) */` direct-edit markers preserved. Audit surface unchanged: `grep -rn 'ASK-edit' kernel/flavors/ask/sdk-sources/`.
+**SDK sources:** 266 verbatim NXP SDK files under `kernel/ask/sdk-sources/`, with `/* ASK-edit (askNN) */` direct-edit markers preserved. Audit surface unchanged: `grep -rn 'ASK-edit' kernel/ask/sdk-sources/`.
 
 **Defconfig fragments:** as today, plus the reference-aligned invariants:
 - `CONFIG_NET_KEY=y`, `CONFIG_INET_IPSEC_OFFLOAD=n`, `CONFIG_CPE_FAST_PATH=y`, `CONFIG_ASK_FCI_NLKEY=y`.
-- `kernel/flavors/ask/ask.config` re-appended LAST after all fragments.
+- `kernel/ask/ask.config` re-appended LAST after all fragments.
 
-**OOT modules:** cdx, fci, auto_bridge — built from `kernel/flavors/ask/oot-modules/` against in-tree kernel headers, signed with `$KSRC/scripts/sign-file sha512` per `MODULE_SIG_FORCE` requirement.
+**OOT modules:** cdx, fci, auto_bridge — built from `kernel/ask/oot-modules/` against in-tree kernel headers, signed with `$KSRC/scripts/sign-file sha512` per `MODULE_SIG_FORCE` requirement.
 
 **Userspace:** fmlib + fmc rebuilt in CI from `github.com/nxp-qoriq/{fmlib,fmc}` at tag `lf-6.18.2-1.0.0` with mono patches applied (preserves the ABI-mismatch fix documented in `AGENTS.md`); dpa_app + cmm built from `mihakralj/ask-ls1046a-6.6` at the pinned `ask-userspace-audit-vN` tag.
 
@@ -366,7 +366,7 @@ A new **"FLAVOR switch"** section documents:
 - The three flavors and their intent.
 - The patch / config / userspace inheritance order (common → flavor).
 - The hard rules: where common patches end and flavor patches begin; how to decide which bucket a new patch belongs in.
-- The audit surfaces: `grep -rn 'ASK-edit' kernel/flavors/ask/sdk-sources/` for direct SDK edits; `git log --grep '^audit-b' --oneline` in `mihakralj/ask-ls1046a-6.6` for ASK userspace audits.
+- The audit surfaces: `grep -rn 'ASK-edit' kernel/ask/sdk-sources/` for direct SDK edits; `git log --grep '^audit-b' --oneline` in `mihakralj/ask-ls1046a-6.6` for ASK userspace audits.
 - The `patch-health` invariant per flavor (ASK: `Pass: 17  Fail: 0   0 SDK conflicts (266 files to install)`; default + vpp: TBD on first green build).
 
 A new **"Producer-absorbed rules"** section folds in (with attribution) the relevant rules from `kernel-ls1046a-build/.clinerules/`:
@@ -388,7 +388,7 @@ A new **"Producer-absorbed rules"** section folds in (with attribution) the rele
 
 A short deprecation header pointing to:
 
-> This repo's content has been merged into `vyos-ls1046a-build` under `kernel/flavors/ask/` (sdk-sources, patches, oot-modules, userspace-patches) and `kernel/common/` (vyos patches, scripts, vyos-base fragments). New ASK iterations land in `vyos-ls1046a-build` against the `ask` flavor. This repo is preserved as a frozen reference; tag pulls of `kernel-6.6.137-askN` for N ≤ <last-released> remain valid.
+> This repo's content has been merged into `vyos-ls1046a-build` under `kernel/ask/` (sdk-sources, patches, oot-modules, userspace-patches) and `kernel/common/` (vyos patches, scripts, vyos-base fragments). New ASK iterations land in `vyos-ls1046a-build` against the `ask` flavor. This repo is preserved as a frozen reference; tag pulls of `kernel-6.6.137-askN` for N ≤ <last-released> remain valid.
 
 ### 6.4. New per-flavor `README.md` files
 
@@ -412,10 +412,10 @@ The migration is broken into reviewable PRs, each independently green:
 
 ### PR 2 — Absorb `kernel-ls1046a-build` content (verbatim copy)
 - `cp -r kernel-ls1046a-build/release/patches/vyos/* vyos-ls1046a-build/kernel/common/patches/vyos/`
-- `cp -r kernel-ls1046a-build/release/patches/ask/* kernel/flavors/ask/patches/ask/`
-- `cp -r kernel-ls1046a-build/release/patches/fixes/* kernel/flavors/ask/patches/fixes/` (then split out the flavor-agnostic fixes into `kernel/common/patches/fixes/` per §4.1)
-- `cp -r kernel-ls1046a-build/release/patches/kernel/sdk-sources/* kernel/flavors/ask/sdk-sources/`
-- `cp -r kernel-ls1046a-build/release/{ask.config,manifest.json,oot-modules,userspace-patches,vyos-base} kernel/flavors/ask/` (vyos-base goes to `kernel/common/vyos-base/` instead)
+- `cp -r kernel-ls1046a-build/release/patches/ask/* kernel/ask/patches/ask/`
+- `cp -r kernel-ls1046a-build/release/patches/fixes/* kernel/ask/patches/fixes/` (then split out the flavor-agnostic fixes into `kernel/common/patches/fixes/` per §4.1)
+- `cp -r kernel-ls1046a-build/release/patches/kernel/sdk-sources/* kernel/ask/sdk-sources/`
+- `cp -r kernel-ls1046a-build/release/{ask.config,manifest.json,oot-modules,userspace-patches,vyos-base} kernel/ask/` (vyos-base goes to `kernel/common/vyos-base/` instead)
 - `cp -r kernel-ls1046a-build/scripts/* kernel/common/scripts/`
 - Verify `kernel/common/scripts/patch-health.sh --source kernel/common --flavor ask` reports `Pass: 17  Fail: 0   0 SDK conflicts (266 files to install)`.
 - No CI changes yet; the new tree exists in parallel with the old `data/kernel-patches/` and consumer-side ASK paths.
@@ -468,10 +468,10 @@ These rules survive the merge and apply to the integrated repo:
 11. **No auto-commit/push** without explicit user approval; stage and present for review.
 12. **`patch-health` invariant for ASK flavor:** `Pass: 17  Fail: 0   0 SDK conflicts (266 files to install)`. Lowering the assertion to make a build pass is forbidden.
 13. **Audit surfaces preserved:**
-    - `grep -rn 'ASK-edit' kernel/flavors/ask/sdk-sources/` for direct SDK edits.
+    - `grep -rn 'ASK-edit' kernel/ask/sdk-sources/` for direct SDK edits.
     - `git -C ask-ls1046a-6.6 log --grep '^audit-b' --oneline` for ASK userspace audits.
 14. **Per-flavor patch buckets are ordered:** `vyos/` → `board/` → `fixes/` (common) → `ask/` (flavor) → `fixes/` (flavor) → `*` (flavor root). SDK source drops happen LAST, after all patches.
-15. **`ASK config wins last` rule:** `kernel/flavors/ask/ask.config` is appended after `ls1046a-ask.config` so the SDK DPAA / mainline DPAA mutex resolves in favor of SDK on the ASK flavor.
+15. **`ASK config wins last` rule:** `kernel/ask/ask.config` is appended after `ls1046a-ask.config` so the SDK DPAA / mainline DPAA mutex resolves in favor of SDK on the ASK flavor.
 16. **OOT modules signed against in-tree kernel certs** (`MODULE_SIG_FORCE=y`); never ship pre-built unsigned modules.
 17. **Producer-side rules** (`.clinerules/00..60` in `kernel-ls1046a-build/`) folded into consumer `AGENTS.md` retain their authority for the `ask` flavor sub-tree.
 
@@ -483,7 +483,7 @@ These rules survive the merge and apply to the integrated repo:
 2. **`fixes/` split criteria.** Is `094-swphy-10g-fixed-link.patch` truly common or ASK-only? It's used today by both SDK fixed-link and (potentially) mainline if mono-gateway-dk-sdk.dts ever lands in `default`. Proposal: keep in `kernel/common/patches/fixes/` and let the patch be a no-op when the relevant code isn't compiled.
 3. **`kernel/common/scripts/patch-health.sh` flavor flag.** New `--flavor <name>` flag iterates the common + flavor patches. Default flavor for `--flavor` if unset: `ask` (preserves the current invariant assertion on producer-style runs).
 4. **Per-flavor release tags.** Proposal: `v<vyos-version>-<date>-<flavor>` (e.g., `v1.5-rolling-2026.05.09-ask`). Producer-style `kernel-6.6.137-askN` retires as a public tag format.
-5. **`mihakralj/ask-ls1046a-6.6` integration.** Currently consumed as a separate git checkout in `bin/ci-build-ask-userspace.sh`. Stays external for now; the merged repo continues to clone it at the pinned `ask-userspace-audit-vN` tag. Future option: vendor it as `kernel/flavors/ask/userspace-src/` to reduce external dependencies.
+5. **`mihakralj/ask-ls1046a-6.6` integration.** Currently consumed as a separate git checkout in `bin/ci-build-ask-userspace.sh`. Stays external for now; the merged repo continues to clone it at the pinned `ask-userspace-audit-vN` tag. Future option: vendor it as `kernel/ask/userspace-src/` to reduce external dependencies.
 6. **VPP flavor scope.** Does `vpp` build the VPP plugin against accel-ppp-ng (currently disabled per `bin/ci-build-accel-ppp.sh`)? Proposal: yes — it's the natural home for the plugin once ARM64 build is sorted. Track in `kernel/flavors/vpp/README.md`.
 7. **DTB selection per flavor.** `default` and `vpp` use mainline `mono-gateway-dk.dts`; `ask` uses `mono-gateway-dk-sdk.dts` with SDK port compatible strings. CI must select the right DTS per flavor in `bin/ci-setup-kernel.sh`.
 

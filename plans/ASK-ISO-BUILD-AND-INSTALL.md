@@ -218,7 +218,7 @@ ssh vyos sudo /tmp/ask-check
 **[NOTE] Historical probe table (ASK 1.x kernel patches; the numbered patches below were superseded when the FMan PCD subsystem moved into the common board stack, patches 0092–0164). For current state of each probe see `plans/ASK2-MASTER-PLAN.md` §1. The ASK-1.x kernel component names (`fmd_host_cmd`, `askd.service`, `ask-cli`) are retained here for archaeological cross-reference only — none of them exist in the current single-image build.**
 
 **[SPEC]**
-What should change vs. the default-flavor image:
+What should change once ASK is engaged:
 
 | Probe | offload disabled (default) | offload engaged (`set interfaces ethernet eth<n> offload ask`) |
 |---|---|---|

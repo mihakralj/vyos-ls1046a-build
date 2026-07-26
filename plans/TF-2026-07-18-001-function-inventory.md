@@ -17,7 +17,7 @@ ranks findings by cost-to-value ratio.
 **Repository:** `mihakralj/vyos-ls1046a-build`
 **Branch:** `dpaa1`
 **Commit:** doc origin `73e39e9` → current `dpaa1` HEAD `9f67b56` (2026-07-18). **The P1–P3 closure series `4493ce8`→`9970745` was reset OUT of the branch after a CI cascade — see §1.2.**
-**Scope:** All stubbed, incomplete, or type-drifted functions across `kernel/flavors/ask/oot-modules/ask/` and `kernel/common/patches/board/`
+**Scope:** All stubbed, incomplete, or type-drifted functions across `kernel/ask/oot-modules/ask/` and `kernel/common/patches/board/`
 **Reference specs:** `arch/fman-pcd-api-reference.md` v3.0.0, `specs/ask2-rewrite-spec.md`, `arch/fman-microcode-210-programming-reference.md`
 **Methodology:** Static analysis of source and patch text, cross-reference against v3.0.0 API contract, symbol-presence grep across `EXPORT_SYMBOL_GPL` surface.
 **Progress:** **0/23 resolved on `dpaa1` HEAD `9f67b56`.** The full P1–P3 closure was implemented on 2026-07-18 (commits `4493ce8`→`9970745`) but every CI build failed and the series was reset off the branch (§1.2); re-land in progress behind `bin/test-fixups.sh`. Progress: ░░░░░░ 0.0%
@@ -41,7 +41,7 @@ ranks findings by cost-to-value ratio.
 
 ### 1.2 Current Branch State — P1–P3 closure reset out (2026-07-18)
 
-**[BUG] The entire P1–P3 remediation series was implemented, CI-failed, and reset off `dpaa1`.** On 2026-07-18 the Priority-1/2/3 fixes (§5) were committed as `4493ce8` (F-08 `fman_pcd_fe_verify`) → `ec61aa2` (P1: F-08/F-09/F-10/F-11/F-12/F-15) → `cb2ebbd` (P2: F-093/F-13/F-16/F-17/F-18/F-19 + type hygiene) → `28ed22d` (P3: F-01/F-02/F-07/F-20/F-21/F-22/F-23) → `9970745` (F-13 `sh`-init CI fix). Every CI run of the series failed in a cascade of escape-sequence bugs inside the `bin/ci-setup-kernel.sh` REPLACEMENT / base64-Python / heredoc fixup blocks that inject the C changes into the kernel tree: F-11 and F-12 Python `SyntaxError` (raw `\n`/`\t` in triple-quoted strings), F-088 forward-declaration + heredoc-marker collisions, a bash `syntax error` at line 449 (`\n` in a comment), the F093PY `\n`-inside-triple-quote fault, and finally `NameError: name 'sh' is not defined` in the F-13 edit (`sh` used before assignment). The nearest-green kernel still tripped the OOT-module builder guard `FATAL: …/linux-6.18.38/certs/signing_key.pem missing — MODULE_SIG_KEYS broken?` because `kernel/flavors/ask/oot-modules/ask/ci-build.sh:67` only switches to the headers-snapshot tree when `Module.symvers` is absent, not when only `certs/signing_key.pem` was wiped. The branch was reset to `73e39e9` (this doc's origin) to recover; `159752e` then added `bin/test-fixups.sh`, which decodes the REPLACEMENT block and every base64 Python blob and runs `bash -n` + `compile()` on them BEFORE any push — the missing pre-flight gate whose absence produced the cascade.
+**[BUG] The entire P1–P3 remediation series was implemented, CI-failed, and reset off `dpaa1`.** On 2026-07-18 the Priority-1/2/3 fixes (§5) were committed as `4493ce8` (F-08 `fman_pcd_fe_verify`) → `ec61aa2` (P1: F-08/F-09/F-10/F-11/F-12/F-15) → `cb2ebbd` (P2: F-093/F-13/F-16/F-17/F-18/F-19 + type hygiene) → `28ed22d` (P3: F-01/F-02/F-07/F-20/F-21/F-22/F-23) → `9970745` (F-13 `sh`-init CI fix). Every CI run of the series failed in a cascade of escape-sequence bugs inside the `bin/ci-setup-kernel.sh` REPLACEMENT / base64-Python / heredoc fixup blocks that inject the C changes into the kernel tree: F-11 and F-12 Python `SyntaxError` (raw `\n`/`\t` in triple-quoted strings), F-088 forward-declaration + heredoc-marker collisions, a bash `syntax error` at line 449 (`\n` in a comment), the F093PY `\n`-inside-triple-quote fault, and finally `NameError: name 'sh' is not defined` in the F-13 edit (`sh` used before assignment). The nearest-green kernel still tripped the OOT-module builder guard `FATAL: …/linux-6.18.38/certs/signing_key.pem missing — MODULE_SIG_KEYS broken?` because `kernel/ask/oot-modules/ask/ci-build.sh:67` only switches to the headers-snapshot tree when `Module.symvers` is absent, not when only `certs/signing_key.pem` was wiped. The branch was reset to `73e39e9` (this doc's origin) to recover; `159752e` then added `bin/test-fixups.sh`, which decodes the REPLACEMENT block and every base64 Python blob and runs `bash -n` + `compile()` on them BEFORE any push — the missing pre-flight gate whose absence produced the cascade.
 
 **[NOTE]** The orphaned closure commits (`4493ce8`, `ec61aa2`, `cb2ebbd`, `28ed22d`, `9970745`) are NOT in the branch but remain reachable via `git reflog` / `git cherry-pick` (not yet garbage-collected). The design and code for every P1–P3 finding are therefore recoverable — the reset unwound the *landing*, not the *work*. Re-land discipline: run `bin/test-fixups.sh` and confirm it passes before every push; land the OOT-builder snapshot-fallback broadening (switch to the snapshot whenever the source tree is missing ANY of `Module.symvers` / `scripts/sign-file` / `certs/signing_key.pem`, not only `Module.symvers`) in the same series so the `signing_key.pem` FATAL cannot recur.
 
@@ -85,7 +85,7 @@ ranks findings by cost-to-value ratio.
 
 **[BUG]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_xfrm.c:12-25`
+**Location:** `kernel/ask/oot-modules/ask/ask_xfrm.c:12-25`
 
 **Symptom:** For any SA that is not `rfc4106(gcm(aes))`, the function returns `0`, which the mainline xfrm stack interprets as "SA installed in hardware."
 
@@ -114,7 +114,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_caam.c`
+**Location:** `kernel/ask/oot-modules/ask/ask_caam.c`
 
 **Symptom:** Both `ask_caam_init()` and `ask_caam_exit()` are `pr_debug("caam: {init,exit} (stub)")` and return `0`.
 
@@ -130,7 +130,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_neigh.c`
+**Location:** `kernel/ask/oot-modules/ask/ask_neigh.c`
 
 **Symptom:** Init/exit prints only.
 
@@ -144,7 +144,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_op.c`
+**Location:** `kernel/ask/oot-modules/ask/ask_op.c`
 
 **Symptom:** Init/exit prints only. No genl handler wires here; the VyOS op-mode CLI has no kernel-side receiver except the debugfs escape hatch.
 
@@ -158,7 +158,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_stats.c`
+**Location:** `kernel/ask/oot-modules/ask/ask_stats.c`
 
 **Symptom:** No stats collection.
 
@@ -172,7 +172,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_bridge.c`
+**Location:** `kernel/ask/oot-modules/ask/ask_bridge.c`
 
 **Symptom:** Init/exit prints only. Design work not started.
 
@@ -186,7 +186,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_xfrm.c`
+**Location:** `kernel/ask/oot-modules/ask/ask_xfrm.c`
 
 **Symptom:** No `ask_xfrm_state_delete` function declared or defined. `xdo_dev_state_delete` in the future `struct xfrmdev_ops` will point at NULL.
 
@@ -366,7 +366,7 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_genl.c:108-112`
+**Location:** `kernel/ask/oot-modules/ask/ask_genl.c:108-112`
 
 **Symptom:** Wired to `ask_genl_eopnotsupp_doit` in the `small_ops` table.
 
@@ -380,7 +380,7 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_genl.c:141-148`
+**Location:** `kernel/ask/oot-modules/ask/ask_genl.c:141-148`
 
 **Impact:** Policer is reachable only via `tc` matchall path today. No genl route for the ASK-native operator flow.
 
@@ -392,7 +392,7 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_genl.c:126-129`
+**Location:** `kernel/ask/oot-modules/ask/ask_genl.c:126-129`
 
 **Impact:** Blocked by F-01. Cannot dump SAs that do not exist.
 
@@ -404,7 +404,7 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 **[SPEC]**
 
-**Location:** `kernel/flavors/ask/oot-modules/ask/ask_genl.c:138-141`
+**Location:** `kernel/ask/oot-modules/ask/ask_genl.c:138-141`
 
 **Impact:** Blocked by F-01.
 

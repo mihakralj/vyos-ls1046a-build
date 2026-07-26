@@ -42,7 +42,7 @@ For current state, see (in order of authority):
 | `PR14z22-DESIGN.md` | DROP-miss diagnostic that proved silicon HIT path works | Diagnostic complete — silicon HIT proven at 6.945 Gbps / 16.63 % baseline |
 | `PR14z23-DESIGN.md` | TX-confirm NAPI softirq reduction (no-confirm FQ + bpid fast-path) | Approach superseded by Path A inline `FORWARD_FQ_WITH_MANIP` action atom |
 | `ASK2-IMPLEMENTATION.md` | ASK2 per-PR implementation tracker (target spec v1.1) | Superseded by the `specs/dpaa1-afxdp-modernization-spec.md` cross-flavor milestone table; ASK2 spec is now v1.6 |
-| `ASK2-PHASE2-PATCH-TRIAGE.md` | KEEP/ARCHIVE/PARTIAL classification of `kernel/flavors/ask/patches/0001-0053` | The ASK 1.x patch tree it classifies was deleted on `ask20`; FMan PCD now lives in the common board stack |
+| `ASK2-PHASE2-PATCH-TRIAGE.md` | KEEP/ARCHIVE/PARTIAL classification of `kernel/ask/patches/0001-0053` | The ASK 1.x patch tree it classifies was deleted on `ask20`; FMan PCD now lives in the common board stack |
 | `ASK2-CMM-TEST-PARITY.md` | Parity matrix mapping the 38 legacy `cmm/unit_tests` shell tests to ASK2 | The `cmm`/`we-are-mono/ASK` corpus was deleted; ASK2 offload has no CLI harness |
 | `ASK2-NEXT-STEPS-2026-05-25.md` | Dated forensic roadmap (KG scheme priority-race) toward ASK2 GA | Snapshot only; references spec v1.3 (now v1.6) and the pre-cross-flavor architecture |
 | `PR14z19-PATH-A-DESIGN.md` | Path A boot-time PCD-install design (graft-model replacement) | Design landed; joins its already-archived PR14z* siblings. Current state in the dpaa1 spec |

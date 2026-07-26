@@ -17,7 +17,7 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 | §2.4(6) (M0 verdict) | FE-VM ehash path flows on 210.10.1 | `arch/fman-fe-ehash.md` (the M0 oracle) |
 | §3 (API surfaces) | pcd_ops, qmgmt_ops, flavor ops | `specs/dpaa1-afxdp-modernization-spec.md` §5 |
 | §3.5a (API consumption table) | Which consumer uses which API | `specs/dpaa1-afxdp-modernization-spec.md` §5 |
-| §5 (ask.ko module) | ~2800 LOC in-tree OOT module | `kernel/flavors/ask/oot-modules/ask/` |
+| §5 (ask.ko module) | ~2800 LOC in-tree OOT module | `kernel/ask/oot-modules/ask/` |
 | §6 (userspace daemons) | askd, ask-cli — deleted in v1.3 | `plans/archive/ASK2-IMPLEMENTATION.md` |
 | §11.1 (Flow ceilings) | MURAM budget, 750-flow ceiling | `arch/muram.md` (Fork-B: DDR ehash, unbounded flows) |
 | §12 (Wire format) | CDX ↔ kernel serialization — deleted v1.3 | `plans/archive/ASK2-IMPLEMENTATION.md` |

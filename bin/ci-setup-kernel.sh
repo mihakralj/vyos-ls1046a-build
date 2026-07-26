@@ -6,7 +6,7 @@
 # ASK2 (rewrite-in-progress): the legacy ASK_KERNEL_TAG env var and the
 # ci-consume-ask-kernel.sh / ci-setup-kernel-ask.sh helpers were deleted on
 # the ask20 branch along with the ASK 1.x SDK kernel stack. This script
-# now runs unconditionally for all flavors (default | ask | vpp). The
+# now runs unconditionally in the single-image build. The
 # ASK_KERNEL_TAG guard below is dead code kept only as a safety belt in
 # case some external caller still injects the variable.
 set -ex -o pipefail
@@ -35,14 +35,14 @@ sed -i '/CONFIG_IO_STRICT_DEVMEM/d'         "$DEFCONFIG"
 sed -i '/CONFIG_CMA/d'                      "$DEFCONFIG"
 sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 
-# Append all flavor-agnostic LS1046A kernel config fragments from the
+# Append all LS1046A kernel config fragments from the
 # canonical location kernel/common/kernel-config/. Files are numbered
 # (00-board.config .. 08-dpaa1.config) so a plain glob expansion sorts
-# alphabetically into the intended load order. Flavor-specific fragments
-# live under kernel/flavors/<flavor>/kernel-config/ and are NOT picked up
+# alphabetically into the intended load order. kernel/ask/kernel-config/
+# holds an opt-in kunit fragment only, and is NOT picked up
 # here. ASK2 (per specs/ask2-rewrite-spec.md) does not currently
-# add any flavor-specific kernel-config fragments; if it grows them they
-# would live under kernel/flavors/ask/kernel-config/ and need explicit
+# add any ASK-specific kernel-config fragments; if it grows them they
+# would live under kernel/ask/kernel-config/ and need explicit
 # wiring at that point.
 #
 # History: prior to Phase 1c of the repo-layout refactor (2026-05-11)
@@ -97,11 +97,11 @@ if [ -z "$KSERIES_FOR_PATCH" ] && [ -f versions.lock ]; then
     KSERIES_FOR_PATCH=$(awk -F= '/KERNEL_SERIES/{gsub(/[" ]/,"",$2); print $2}' versions.lock)
 fi
 
-# INA234 hwmon patch (formerly kernel/flavors/ask/patches/fixes/4002-*) was
+# INA234 hwmon patch (formerly kernel/ask/patches/fixes/4002-*) was
 # only meaningful on the kernel 6.6 line, since INA234 is upstream from
-# kernel 6.10 onwards. The default + vpp flavors track 6.18+, so the patch
+# kernel 6.10 onwards. The build tracks 6.18+, so the patch
 # is unnecessary. ASK2 (rewrite-in-progress) tracks the same 6.18+
-# kernel as the other flavors per specs/ask2-rewrite-spec.md — no
+# kernel per specs/ask2-rewrite-spec.md — no
 # special handling needed here.
 
 # Shared LS1046A board patches now live under kernel/common/patches/board/.
@@ -115,11 +115,11 @@ BOARD_PATCH_DIR=kernel/common/patches/board
 [ -d "$BOARD_PATCH_DIR" ] || { echo "ERROR: $BOARD_PATCH_DIR missing"; exit 1; }
 
 # Clean stale patches left by prior CI runs on the same self-hosted runner.
-# Failure mode (observed 2026-05-11): a prior FLAVOR=ask build on the same
+# Failure mode (observed 2026-05-11): a prior ASK-flavor build on the same
 # runner workspace left 003-ask-kernel-hooks, 4002-hwmon-ina2xx,
 # 4003-sfp-rollball-phylink-einval-fallback (legacy name of current 101) and
 # 4004-swphy-support-10g-fixed-link-speed in $KERNEL_PATCHES. They were then
-# applied alphabetically alongside the current default-flavor patches by
+# applied alphabetically alongside the current patches by
 # build-kernel.sh's `for patch in ...; patch -p1` loop, which does NOT check
 # exit codes. Legacy 4003 and current 101 both touch sfp.c near line 2667;
 # the second-applied silently fails, corrupts subsequent line anchors, and
@@ -182,16 +182,16 @@ unset _count _series _src _p
 # M3-3 step 4: NAPI-hooked BMan refill from the XSK fill ring + new
 # xsk_bman_refill_batches counter. Folded into the existing rcu_read_lock()
 # block in dpaa_eth_poll() right after xsk_set_rx_need_wakeup. With no XSK
-# pool bound (default flavor) the new ops->napi_refill callback walks zero
+# pool bound the new ops->napi_refill callback walks zero
 # bound qbands and returns; no datapath cost. Spec sec 6.1.3.
 # M3-3 step 5: TX ZC submission + xsk_tx_inflight backpressure + TxConf
 # round-trip closure. Three new flavor ops (napi_tx_zc, xsk_set_tx_need_wakeup,
 # tx_conf_zc) wired into dpaa_eth_poll() tail (same RCU section as 0084) and
 # dpaa_tx_conf() head. Two new ethtool counters (xsk_tx_zc_submit,
-# xsk_tx_conf_zc). With no XSK pool bound (default flavor) all three ops
+# xsk_tx_conf_zc). With no XSK pool bound all three ops
 # walk zero bound qbands and the tx_conf_zc claim probe returns false on
 # bpid mismatch -- skb fast path unchanged. ≥ 7 Gbps acceptance gate on
-# vpp flavor. Spec sec 6.1.4.
+# VPP dataplane. Spec sec 6.1.4.
 # M3-3b: FMan PCD capability detection + CC-steering stub API. Adds
 # CONFIG_DPAA_HW_CC_STEERING (default y), priv->fman_caps snapshot via
 # dpaa_fman_get_caps() at probe, one-shot KERN_INFO log, hw_offload_unavailable
@@ -263,7 +263,7 @@ unset _count _series _src _p
 # 8.7.6) lands in a follow-up. Must apply AFTER 0090a (both edit
 # dpaa_fman_caps.h). Spec sec 5.6.
 # FMan PCD (Parse/Classify/Distribute) orchestration subsystem — COMMON
-# (all flavors). Forward-port of the ask20 0004 skeleton re-anchored to
+# Forward-port of the ask20 0004 skeleton re-anchored to
 # 6.18.31: new files fman_pcd.c / fman_pcd_internal.h /
 # include/linux/fsl/fman_pcd.h, the fman_get_muram/pcd/dev/id accessors,
 # struct fman.pcd member, and fman_pcd_init/release wired into fman_probe
@@ -492,7 +492,7 @@ unset _count _series _src _p
 # (dpaa_get_rx_fman_port / dpaa_get_tx_fqid) on the common dpaa_fman_caps.h
 # substrate so the OOT ask.ko PCD consumer can derive the fman_cc_tree_*
 # port key and a CC target_fqid. EXPORT_SYMBOL_GPL, dormant (no in-tree
-# caller). Bodies are the proven dead-ask-flavor 0031/0039 reparented.
+# caller). Bodies are the proven retired-ASK-tree 0031/0039 reparented.
 # ASK2 Fork B M1 step 1: FE-object MURAM pool scaffold (arch/fman-fe-ehash.md
 # §3 AllocFEObjs). Lazy + refcounted pool of 100×28 B FE records carved from
 # FMan MURAM, driven by a new debugfs fman_pcd/<id>/fe_pool (0644) get/put
@@ -622,9 +622,9 @@ unset _count _series _src _p
 # the ext_lock/ext_active fields in struct caam_drv_ctx (qi.h) + the new header
 # include/linux/crypto/caam_qi_share.h, so a future in-kernel consumer (ask.ko's
 # CAAM/xfrm datapath) can dequeue completed CAAM frames from a chosen sink FQID.
-# Forward-ported VERBATIM from kernel/flavors/ask/patches/0001-caam-qi-share.patch,
+# Forward-ported VERBATIM from kernel/ask/patches/0001-caam-qi-share.patch,
 # which was NEVER staged after the 2026-06-14 flavor collapse killed the dead
-# FLAVOR=ask gate. Touches ONLY drivers/crypto/caam/* + a new header — zero
+# ask-only gate. Touches ONLY drivers/crypto/caam/* + a new header — zero
 # overlap with the FMan PCD board patches, so apply order is irrelevant. Exports
 # the symbols EXPORT_SYMBOL_GPL but they stay dormant (no caller until the CAAM
 # datapath lands). This cp line is MANDATORY — the staging-completeness guard
@@ -642,8 +642,7 @@ unset _count _series _src _p
 # 0137: MANIP creation + chain API for L3 forwarding (fman_pcd_manip_create/_destroy/_chain_create/_chain_destroy/_hmtd_off).
 # ASK2 M2.2: external flow-offload backend registration slot (single-slot
 # RCU-protected dpaa_register/unregister_flow_offload_handler). 0145 is a
-# board/common patch (not flavor-gated) because the dpaa driver is built-in
-# for all flavors.
+# board/common patch because the dpaa driver is always built-in.
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every .patch file in kernel/common/patches/board/ must be listed in
@@ -670,11 +669,10 @@ if [ -n "$_missing" ]; then
 fi
 echo "### Board patch staging-completeness guard: OK"
 
-# Stage critical flavor-agnostic kernel fix:
+# Stage critical kernel fix:
 #   120-perf-libperf-asm-headers-srctree.patch — fixes arm64 perf build
 #   failure ("No rule to make target ... tools/perf/libperf/arch/arm64/
-#   include/generated/uapi/asm/unistd_64.h"). Required for FLAVOR=default
-#   and FLAVOR=vpp on kernel 6.18+.
+#   include/generated/uapi/asm/unistd_64.h"). Required on kernel 6.18+.
 #
 # We DO NOT bulk-stage kernel/common/patches/{vyos,fixes}/ because:
 #   - kernel/common/patches/vyos/{001,003}-* are byte-identical duplicates
@@ -700,7 +698,7 @@ fi
 #   when nf_flow_offload_alloc() fails and HW offload is aborted before
 #   reaching the driver's FLOW_CLS_REPLACE cb. Required to diagnose the
 #   M2 acceptance gate failure (2026-05-17: BIND fires, REPLACE never
-#   does). Flavor-agnostic; safe for default/ask/vpp.
+#   does).
 NF_FLOW_LOG_PATCH="$COMMON_FIXES_DIR/130-nf-flow-offload-log-alloc-failure.patch"
 if [ -f "$NF_FLOW_LOG_PATCH" ]; then
     echo "### Staging $(basename "$NF_FLOW_LOG_PATCH") (PR14o nf_flow_table_offload alloc-failure diagnostic)"
@@ -709,64 +707,18 @@ else
     echo "WARNING: $NF_FLOW_LOG_PATCH missing — PR14o REPLACE-delivery diagnostic disabled"
 fi
 
-### FLAVOR=ask: stage the ASK2 in-tree kernel patches
+### ASK2 in-tree kernel patches: none.
 #
-# Per plans/archive/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
-# kernel surface needs three small patches (currently placeholder stubs;
-# real implementations land in M2):
-#   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
-#   0002-dpaa-eth-flow-block.patch  — TC_SETUP_BLOCK in dpaa_setup_tc()
-#   0003-fman-host-command-api.patch — fman_host_cmd_send() + new header
-#   0004-fman-pcd-subsystem.patch   — FMan PCD orchestration scaffold (PR14a)
-#   0005-fman-pcd-kg-prep.patch     — FMan PCD KeyGen public API stub (PR14b-prep)
-#   0006-fman-pcd-kg-body.patch     — FMan PCD KeyGen real KGSE_* programming (PR14b-body)
+# There is no flavor-gated patch bucket any more. This block used to stage
+# kernel/ask/patches/*.patch under FLAVOR=ask, renaming them to 1xxx- to dodge
+# vyos-build's reserved upstream 0001-*/0003-* filenames. Two things killed it:
+# the ASK-specific patches were archived on 2026-06-21 once the common board
+# series (kernel/common/patches/board/0092-0164) absorbed the PCD/HM/CC
+# features, and the flavor split itself was retired on 2026-06-14 — so the
+# FLAVOR=ask gate never fired again. Removed 2026-07-26 along with FLAVOR.
 #
-# Naming hazard: vyos-build's own upstream patch loop reserves the
-# `0001-*` and `0003-*` filenames in $KERNEL_PATCHES (preserved by the
-# cleanup glob above via `! -name '0001-*' ! -name '0003-*'`). Copying our
-# patches in with their authored 0001/0002/0003 names would collide with
-# vyos-build's reserved upstream patches and either silently overwrite
-# them or fail to apply. Solution: rename to 1001/1002/1003 at staging
-# time. The build-kernel.sh patch loop applies `find … | sort`-ordered,
-# producing the deterministic apply order:
-#     0001 0003 101 1001 1002 1003 1004 1005 1006 1007 4005 4006 4007 4009
-# i.e. vyos-build's reserved patches first, then board patches, then
-# ASK patches, then the rest of the board patches.
-#
-# Source-of-truth filenames in the repo stay 0001/0002/0003 because that
-# matches the spec §10 numbering and the authoring rule (every patch is
-# `git format-patch`-style starting at 0001). The rename happens ONLY in
-# the staged copies. README.md under kernel/flavors/ask/patches/ documents
-# this.
-if [ "${FLAVOR:-default}" = "ask" ]; then
-    ASK_PATCH_DIR=kernel/flavors/ask/patches
-    if [ ! -d "$ASK_PATCH_DIR" ]; then
-        echo "ERROR: FLAVOR=ask but $ASK_PATCH_DIR is missing"
-        exit 1
-    fi
-    echo "### FLAVOR=ask — staging ASK2 in-tree kernel patches from $ASK_PATCH_DIR"
-    # All ASK-specific kernel patches were archived to
-    # archive-2026-06-21-pre-6.18.34/ on 2026-06-21 because the board/common
-    # patch series (kernel/common/patches/board/0092–0145) now carries the
-    # ASK2 PCD/HM/CC features directly. The ASK flavor relies solely on the
-    # common board patch stack; no flavor-specific kernel patches are active.
-    if ls "$ASK_PATCH_DIR"/*.patch >/dev/null 2>&1; then
-        ASK_PATCH_COUNT=0
-        for src_patch in "$ASK_PATCH_DIR"/*.patch; do
-            [ -f "$src_patch" ] || continue
-            base=$(basename "$src_patch")
-            # Rename to 1xxx- to avoid collision with vyos-build's reserved
-            # upstream 0001-*/0003-* patches.
-            dst="1${base}"
-            echo "###   $base → $dst"
-            cp "$src_patch" "$KERNEL_PATCHES/$dst"
-            ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
-        done
-        echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
-    else
-        echo "### ASK2: 0 kernel patches staged (common board stack carries all PCD features)"
-    fi
-fi
+# ASK2's kernel surface is now entirely: kernel/common/patches/board/ (in-tree)
+# plus kernel/ask/oot-modules/ask/ (ask.ko, out-of-tree).
 
 # Stage FMD Shim + LP5812 source from the new common files layout.
 # Source of truth: kernel/common/files/{fsl_fmd_shim.c,lp5812/}.
@@ -1865,10 +1817,10 @@ PYEOF
 #       complete kbuild Makefile machinery)
 #     - Copy the persistent key+cert into the extracted tree's certs/ dir
 #     - Symlink ${CWD}/ask-kernel-snapshot/ksrc -> extracted/usr/src/linux-headers-…
-#       so kernel/flavors/ask/oot-modules/ask/ci-build.sh can use it as KSRC
+#       so kernel/ask/oot-modules/ask/ci-build.sh can use it as KSRC
 #     - Touch ${CWD}/ask-kernel-snapshot/.done as the "snapshot ready" flag
 #
-# kernel/flavors/ask/oot-modules/ask/ci-build.sh checks for the snapshot
+# kernel/ask/oot-modules/ask/ci-build.sh checks for the snapshot
 # when its $KSRC/Module.symvers is missing and switches KSRC to the
 # snapshot's extracted headers tree.
 #
