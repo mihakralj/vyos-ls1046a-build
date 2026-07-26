@@ -136,12 +136,23 @@ struct ask_flow *f = ptr;
 struct ask_flow_table *t = arg;
 
 atomic_dec(&t->num_flows);
+if (f->hw_backed)
+atomic_dec(&t->num_hw_backed);
 /*
  * rhashtable_free_and_destroy() iterates with no readers, so an
  * immediate kfree is also safe. Stay consistent with the runtime
  * remove path and use call_rcu so PR9's coverage tests (which
  * exercise this from a kunit context with concurrent readers)
  * see uniform lifecycle handling.
+ *
+ * F-120: this path deliberately does NOT call ask_hw_flow_remove().
+ * It runs from ask_flow_table_destroy(), i.e. module teardown, where
+ * ask_hw_pcd_teardown() releases the whole PCD chain wholesale — a
+ * per-flow release would be redundant, and rhashtable_free_and_destroy()
+ * gives no context in which it would be safe to sleep. The counters are
+ * still balanced so a destroy/create cycle starts clean. If this
+ * function ever gains a caller outside module teardown, it must be
+ * reworked the way ask_flow_flush() was.
  */
 call_rcu(&f->rcu, ask_flow_free_rcu);
 }
@@ -518,43 +529,96 @@ return rc;
 }
 EXPORT_SYMBOL_GPL(ask_flow_walk);
 
+/*
+ * Cookies collected per pass. On-stack, so keep it small; flush is a rare
+ * admin/recovery command and extra passes cost nothing that matters.
+ */
+#define ASK_FLOW_FLUSH_BATCH 32
+
+/*
+ * F-120 (2026-07-26): flush is now remove-EQUIVALENT.
+ *
+ * It used to unlink entries straight out of the walker and call_rcu them,
+ * which skipped ask_hw_flow_remove() entirely. Every HW-backed flow therefore
+ * leaked, per flow:
+ *
+ *   - its CC shadow slot — p->shadow[i].used stayed true and p->nkeys was
+ *     never decremented. That is the damaging one: ask_hw_flow_insert()
+ *     refuses at p->nkeys >= FMAN_CC_MAX_STATIC_KEYS (32), so flushing 32
+ *     HW-backed flows permanently filled the port's CC tree. Every later
+ *     insert returned -ENOSPC and silently fell back to the software path,
+ *     with no recovery short of a module reload — from a command documented
+ *     as "debug/recovery".
+ *   - its HM next-hop reference (fman_hm_nexthop_put never ran), so the
+ *     MURAM node was never freed.
+ *   - its xarray cookie + kmem_cache object (ask_hw_cookie_free never ran).
+ *
+ * It also left t->num_hw_backed permanently high, which disabled the
+ * neigh stale-MAC fast-path skip in ask_flow_neigh_mac_changed().
+ *
+ * Why two phases rather than simply calling ask_hw_flow_remove() from inside
+ * the loop: rhashtable_walk_start() opens an RCU read-side critical section,
+ * and ask_hw_flow_remove() takes h->lock (a mutex) and can sleep. Collect
+ * cookies under the walker, then replay them through the ordinary
+ * ask_flow_remove() path outside it — which keeps exactly one implementation
+ * of teardown ordering, HW release and counter maintenance.
+ */
 void ask_flow_flush(struct ask_flow_table *t)
 {
-struct rhashtable_iter iter;
-struct ask_flow *f;
 int removed = 0;
 
 if (!t)
 return;
 
+for (;;) {
+u64 batch[ASK_FLOW_FLUSH_BATCH];
+struct rhashtable_iter iter;
+struct ask_flow *f;
+unsigned int n = 0, i, freed = 0;
+
+/* Phase 1 — collect only. No allocation, no sleeping. */
 rhashtable_walk_enter(&t->rht, &iter);
 rhashtable_walk_start(&iter);
-
-while ((f = rhashtable_walk_next(&iter)) != NULL) {
+while (n < ASK_FLOW_FLUSH_BATCH &&
+       (f = rhashtable_walk_next(&iter)) != NULL) {
 if (IS_ERR(f)) {
 if (PTR_ERR(f) == -EAGAIN)
 continue;
 break;
 }
-/*
- * remove_fast inside an active walker iteration is supported
- * by rhashtable; it adjusts the iterator state. Once removed
- * the entry goes through the same call_rcu free path as
- * regular removal so concurrent lookups stay safe.
- */
-if (rhashtable_remove_fast(&t->rht, &f->node,
-   ask_flow_rht_params) == 0) {
-atomic_dec(&t->num_flows);
-call_rcu(&f->rcu, ask_flow_free_rcu);
-removed++;
+batch[n++] = f->cookie;
 }
-}
-
 rhashtable_walk_stop(&iter);
 rhashtable_walk_exit(&iter);
 
-ask_pr_dbg("flow: flushed table '%s' (%d entries)\n",
-   t->tag ? t->tag : "?", removed);
+if (!n)
+break;
+
+/*
+ * Phase 2 — process context, safe to sleep. ask_flow_remove()
+ * performs the HW teardown and decrements both counters.
+ * -ENOENT means a concurrent remove won the race; that is
+ * success from flush's point of view.
+ */
+for (i = 0; i < n; i++) {
+if (ask_flow_remove(t, batch[i]) == 0)
+freed++;
+}
+removed += freed;
+
+/*
+ * Progress guard: if a whole batch was collected but nothing
+ * could be removed, stop rather than spin. Cannot happen with
+ * the current remove path, but flush must never livelock a
+ * genl doit handler.
+ */
+if (!freed)
+break;
+}
+
+ask_pr_dbg("flow: flushed table '%s' (%d entries, hw_backed now %d)\n",
+   t->tag ? t->tag : "?", removed,
+   atomic_read(&t->num_hw_backed));
 }
 EXPORT_SYMBOL_GPL(ask_flow_flush);
 
