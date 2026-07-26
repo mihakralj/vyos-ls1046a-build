@@ -54,8 +54,39 @@ struct ask_neigh_event {
 	u8                 mac[ETH_ALEN];
 };
 
+/*
+ * Bound + coalesce (2026-07-26).
+ *
+ * The queue used to be an unbounded list with an unconditional enqueue: a
+ * neighbour-update storm (ARP/ND churn on a busy segment, or a scan against a
+ * populated /24) could pin memory with only GFP_ATOMIC failure as a backstop,
+ * and each queued event costs a full flow-table walk in the worker.
+ *
+ * Two mitigations, mirroring the deferred-insert pending queue in
+ * ask_flow_offload.c:
+ *
+ *   COALESCE — a neighbour is identified by (dev ifindex, l3_proto, dst_ip).
+ *   Repeated updates for the same neighbour are idempotent from our side:
+ *   both consumers act on the LATEST lladdr, so an already-queued event is
+ *   simply refreshed in place with the newer MAC rather than appended. This
+ *   is what actually tames a storm — flapping one neighbour stays O(1).
+ *
+ *   CAP — distinct neighbours are still bounded. Beyond the cap new events
+ *   are dropped and counted; dropping is safe because it degrades to the
+ *   pre-existing behaviour for that neighbour (SW path keeps forwarding, and
+ *   the PR14z9 active-poll fallback in ask_flow_offload.c still drains
+ *   pending inserts).
+ *
+ * Sized well above the realistic distinct-next-hop count for this box (a
+ * /24 of directly-attached peers is 254) while costing ~40 B/entry.
+ */
+#define ASK_NEIGH_EV_MAX 1024
+
 static LIST_HEAD(ask_neigh_ev_list);
 static DEFINE_SPINLOCK(ask_neigh_ev_lock);
+static unsigned int ask_neigh_ev_count;
+static atomic_t ask_neigh_ev_coalesced = ATOMIC_INIT(0);
+static atomic_t ask_neigh_ev_dropped   = ATOMIC_INIT(0);
 static struct work_struct ask_neigh_work;
 static bool ask_neigh_registered;
 
@@ -68,8 +99,10 @@ static void ask_neigh_work_fn(struct work_struct *w)
 		spin_lock_bh(&ask_neigh_ev_lock);
 		ev = list_first_entry_or_null(&ask_neigh_ev_list,
 					      struct ask_neigh_event, node);
-		if (ev)
+		if (ev) {
 			list_del(&ev->node);
+			ask_neigh_ev_count--;
+		}
 		spin_unlock_bh(&ask_neigh_ev_lock);
 		if (!ev)
 			break;
@@ -142,6 +175,38 @@ static int ask_neigh_netevent(struct notifier_block *nb,
 	ether_addr_copy(mac, n->ha);
 	read_unlock_bh(&n->lock);
 
+	/*
+	 * Coalesce first, under the lock, without allocating: if this
+	 * neighbour is already queued just refresh its lladdr in place. Both
+	 * consumers act on the latest MAC, so collapsing N updates for one
+	 * neighbour into one event is semantically identical and keeps a
+	 * flapping neighbour O(1) in both memory and worker cost.
+	 */
+	spin_lock_bh(&ask_neigh_ev_lock);
+	list_for_each_entry(ev, &ask_neigh_ev_list, node) {
+		if (ev->dev == dev && ev->l3_proto == l3_proto &&
+		    memcmp(ev->dst_ip, dst_ip, key_len) == 0) {
+			ether_addr_copy(ev->mac, mac);
+			spin_unlock_bh(&ask_neigh_ev_lock);
+			atomic_inc(&ask_neigh_ev_coalesced);
+			schedule_work(&ask_neigh_work);
+			return NOTIFY_DONE;
+		}
+	}
+	if (ask_neigh_ev_count >= ASK_NEIGH_EV_MAX) {
+		spin_unlock_bh(&ask_neigh_ev_lock);
+		/* Dropping degrades to pre-notifier behaviour for this
+		 * neighbour: the SW path keeps forwarding and the PR14z9
+		 * active-poll fallback still drains deferred inserts. */
+		if (atomic_inc_return(&ask_neigh_ev_dropped) == 1 ||
+		    net_ratelimit())
+			ask_pr_warn("neigh: event queue full (%u) — dropping (total dropped=%d)\n",
+				    ASK_NEIGH_EV_MAX,
+				    atomic_read(&ask_neigh_ev_dropped));
+		return NOTIFY_DONE;
+	}
+	spin_unlock_bh(&ask_neigh_ev_lock);
+
 	/* Atomic context: capture only, defer to the workqueue. */
 	ev = kzalloc(sizeof(*ev), GFP_ATOMIC);
 	if (!ev)
@@ -152,8 +217,21 @@ static int ask_neigh_netevent(struct notifier_block *nb,
 	memcpy(ev->dst_ip, dst_ip, sizeof(ev->dst_ip));
 	ether_addr_copy(ev->mac, mac);
 
+	/*
+	 * Re-check the cap after the unlocked kzalloc: a concurrent notifier
+	 * may have filled the queue in the window. Racing to one over the cap
+	 * would be harmless, but re-checking keeps the bound exact.
+	 */
 	spin_lock_bh(&ask_neigh_ev_lock);
+	if (ask_neigh_ev_count >= ASK_NEIGH_EV_MAX) {
+		spin_unlock_bh(&ask_neigh_ev_lock);
+		dev_put(dev);
+		kfree(ev);
+		atomic_inc(&ask_neigh_ev_dropped);
+		return NOTIFY_DONE;
+	}
 	list_add_tail(&ev->node, &ask_neigh_ev_list);
+	ask_neigh_ev_count++;
 	spin_unlock_bh(&ask_neigh_ev_lock);
 
 	schedule_work(&ask_neigh_work);
@@ -198,7 +276,10 @@ void ask_neigh_exit(void)
 		dev_put(ev->dev);
 		kfree(ev);
 	}
+	ask_neigh_ev_count = 0;
 	spin_unlock_bh(&ask_neigh_ev_lock);
 
-	ask_pr_dbg("neigh: exit\n");
+	ask_pr_info("neigh: exit (coalesced=%d dropped=%d)\n",
+		    atomic_read(&ask_neigh_ev_coalesced),
+		    atomic_read(&ask_neigh_ev_dropped));
 }

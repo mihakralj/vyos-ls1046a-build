@@ -352,7 +352,8 @@ EXPORT_SYMBOL_GPL(ask_genl_eopnotsupp_dumpit);
 /* the genl message top level — matching the flat ask.yaml `flow` set and the */
 /* idiomatic mainline one-object-per-message dump. Per-flow content:          */
 /*   ASK_FLOW_ATTR_COOKIE     (u64)                                           */
-/*   ASK_FLOW_ATTR_HW_FLOW_ID (u32)  — fake counter for PR7, real in PR14     */
+/*   ASK_FLOW_ATTR_OFFLOADED  (u8)   — 1 = in silicon, 0 = SW path only      */
+/*   ASK_FLOW_ATTR_HW_FLOW_ID (u32)  — opaque; emitted only when offloaded   */
 /*   ASK_FLOW_ATTR_OIF        (u32)                                           */
 /*   ASK_FLOW_ATTR_ACTION_FLAGS (u32)                                         */
 /*   ASK_FLOW_ATTR_PACKETS    (u64)                                           */
@@ -382,7 +383,18 @@ int iplen;
 if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_ID, f->cookie,
       ASK_FLOW_ATTR_UNSPEC))
 goto nla_put_failure;
-if (nla_put_u32(skb, ASK_FLOW_ATTR_HW_FLOW_ID, f->hw_flow_id))
+/*
+ * Only a HW-backed flow has a meaningful id. A software-fallback flow
+ * carries a counter value drawn from a space that overlaps real xarray
+ * cookies, so emitting it let two different flows report the same
+ * hw-flow-id and gave operators no way to tell an offloaded flow from
+ * one the hardware refused. Report the state explicitly and omit the
+ * id when it would be meaningless.
+ */
+if (nla_put_u8(skb, ASK_FLOW_ATTR_OFFLOADED, f->hw_backed ? 1 : 0))
+goto nla_put_failure;
+if (f->hw_backed &&
+    nla_put_u32(skb, ASK_FLOW_ATTR_HW_FLOW_ID, f->hw_flow_id))
 goto nla_put_failure;
 if (nla_put_u32(skb, ASK_FLOW_ATTR_OIF, f->oif))
 goto nla_put_failure;

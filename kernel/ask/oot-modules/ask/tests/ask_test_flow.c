@@ -300,8 +300,15 @@ KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-hw-fallback"), 0);
  * Two distinct cookies. With ask_hw_pcd_get() == NULL, both inserts
  * take the SW-fallback path, so the assigned hw_ids are sequential
  * fake-counter values (1, 2 — fake_hw_id_seq starts at 0 and uses
- * inc_return). The token half MUST be TOKEN_NONE so a subsequent
- * unconditional ask_hw_flow_remove() is a no-op.
+ * inc_return).
+ *
+ * NOTE: the token/idx unpacking below is retained only as a
+ * regression check on the debug helper's arithmetic. It is NOT a
+ * safety property. ask_priv_pack/unpack_hw_flow_id() no longer
+ * describe the live id form (xarray cookies do), and there is no
+ * TOKEN_NONE arm inside ask_hw_flow_remove() to absorb a stray SW id.
+ * The real guarantee is ask_flow::hw_backed — see
+ * ask_flow_test_sw_fallback_not_hw_backed().
  */
 make_key_v4(&key, htonl(0x0a010001), htonl(0x0a010002),
     htons(11000), htons(80));
@@ -340,10 +347,10 @@ KUNIT_EXPECT_EQ(test, f->hw_flow_id, hw_id_b);
 rcu_read_unlock();
 
 /*
- * Remove must succeed even though body-3 unconditionally calls
- * ask_hw_flow_remove() on the fake-counter hw_id — the TOKEN_NONE
- * arm short-circuits to 0 (or -ENODEV in the no-PCD harness, which
- * body-3 logs but does not propagate).
+ * Remove must succeed. It no longer calls ask_hw_flow_remove() at
+ * all for these entries: hw_backed is false, so the teardown skips
+ * the silicon path entirely rather than handing it an id that would
+ * alias a live xarray cookie.
  */
 KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0xaaaa), 0);
 KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0xbbbb), 0);
@@ -425,6 +432,76 @@ KUNIT_SUCCEED(test);
 }
 }
 
+/*
+ * Regression guard for the hw_flow_id namespace collision (BLOCKER 2.1 in
+ * plans/ask2-code-review.md, fixed 2026-07-26).
+ *
+ * SW-fallback ids and real HW cookies share one u32 space and both start at
+ * 1: xa_alloc(..., XA_LIMIT(1, U32_MAX), ...) hands out 1, 2, 3... for real
+ * cookies, and fake_hw_id_seq hands out 1, 2, 3... for software fallbacks.
+ * A non-zero hw_flow_id therefore proves NOTHING about hardware backing.
+ *
+ * This test pins the property the teardown and stale-MAC paths now rely on:
+ * a flow that did not reach silicon must report hw_backed == false and must
+ * not be counted in num_hw_backed — regardless of how ordinary its
+ * hw_flow_id looks.
+ */
+static void ask_flow_test_sw_fallback_not_hw_backed(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id_a = 0, hw_id_b = 0;
+struct ask_flow *f;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-hw-backed"), 0);
+
+/* No PCD in the kunit harness => both inserts take the SW fallback. */
+make_key_v4(&key, htonl(0x0a020001), htonl(0x0a020002),
+    htons(12000), htons(443));
+KUNIT_ASSERT_EQ(test,
+ask_flow_insert(&t, 0xc0de01, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id_a), 0);
+
+make_key_v4(&key, htonl(0x0a020003), htonl(0x0a020004),
+    htons(12001), htons(443));
+KUNIT_ASSERT_EQ(test,
+ask_flow_insert(&t, 0xc0de02, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id_b), 0);
+
+/*
+ * The ids land exactly on the low integers a real xarray cookie
+ * allocator would also hand out. This is the collision, asserted
+ * explicitly so nobody "optimises" hw_backed away later.
+ */
+KUNIT_EXPECT_EQ(test, hw_id_a, 1u);
+KUNIT_EXPECT_EQ(test, hw_id_b, 2u);
+
+rcu_read_lock();
+f = ask_flow_lookup(&t, 0xc0de01);
+KUNIT_EXPECT_NOT_NULL(test, f);
+if (f) {
+/* Non-zero id ... */
+KUNIT_EXPECT_NE(test, f->hw_flow_id, 0u);
+/* ... but definitively not hardware-backed. */
+KUNIT_EXPECT_FALSE(test, f->hw_backed);
+}
+f = ask_flow_lookup(&t, 0xc0de02);
+KUNIT_EXPECT_NOT_NULL(test, f);
+if (f) {
+KUNIT_EXPECT_NE(test, f->hw_flow_id, 0u);
+KUNIT_EXPECT_FALSE(test, f->hw_backed);
+}
+rcu_read_unlock();
+
+/* Nothing offloaded => the neigh stale-MAC walk must be skippable. */
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_hw_backed), 0);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 2);
+
+KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0xc0de01), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0xc0de02), 0);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_hw_backed), 0);
+
+ask_flow_table_destroy(&t);
+}
+
 /* ------------------------------------------------------------------------- */
 /* suite                                                                      */
 /* ------------------------------------------------------------------------- */
@@ -439,6 +516,7 @@ KUNIT_CASE(ask_flow_test_walk_and_flush),
 KUNIT_CASE(ask_flow_test_stress_walk),
 KUNIT_CASE(ask_flow_test_hw_fallback_insert_remove),
 KUNIT_CASE(ask_flow_test_hw_fallback_eexist_rollback),
+KUNIT_CASE(ask_flow_test_sw_fallback_not_hw_backed),
 KUNIT_CASE(ask_flow_test_default_table_unused_until_init),
 {}
 };
