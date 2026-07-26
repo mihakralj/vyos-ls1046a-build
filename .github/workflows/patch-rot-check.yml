@@ -1,13 +1,29 @@
 name: Patch rot check
 
 # Runs weekly against latest upstream HEAD to catch drift before it bites a
-# real build. Does not block, only reports — every step has
-# continue-on-error: true so one failing patch does not mask the others.
+# real build.
 #
-# All staged patches in this repo are git-format unified diffs and apply via
-# `git apply --3way --whitespace=nowarn` in the actual build pipeline. This
-# workflow probes whether they STILL apply against the latest upstream
-# `current` branch (or pinned tag, for the kernel) without context drift.
+# WHY THIS IS A HARD GATE for data/vyos-1x-*.patch and data/vyos-build-*.patch
+# (changed 2026-07-26): the vyos-1x .deb is cache-keyed by the sha256 of the
+# concatenated patch files (bin/ci-build-packages.sh). While the cache hits,
+# the patches are never re-applied, so rot accumulates invisibly and only
+# detonates on the next unrelated patch edit that busts the cache. That is
+# exactly what broke runs 30189226531 / 30189295091 on 2026-07-26. A warning
+# nobody reads is worth nothing here — these steps must fail the job.
+#
+# HISTORY: from 2026-05-30 (when upstream renamed the vyos-1x / vyos-build
+# default branch `current` -> `rolling`) until 2026-07-26 this workflow was
+# silently inert: every step cloned `--branch current`, which no longer
+# exists, and every step carried `continue-on-error: true`, so the job
+# reported success every Monday while checking nothing at all. Both the
+# branch name and the blanket continue-on-error are fixed below.
+#
+# The vyos-1x / vyos-build steps mirror the REAL build's apply semantics
+# (bin/ci-setup-vyos1x.sh, bin/ci-setup-vyos-build.sh): cumulative apply in
+# glob order onto one tree, `git apply --3way --whitespace=nowarn`, with
+# Mergiraf wired as the merge driver. Independent per-patch --check would be
+# wrong: these patches stack (e.g. 024/025/031/034 all edit
+# interfaces_ethernet.xml.in).
 
 on:
   schedule:
@@ -19,63 +35,79 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # main carries the default/vpp patch set; dpaa1 additionally carries
+        # the ASK2 CLI patches (vyos-1x-030..034), which exist on NO other
+        # branch. Checking only main is why the 031/034 rot went unnoticed.
+        branch: [main, dpaa1]
+    name: "check (${{ matrix.branch }})"
     steps:
+      # Two checkouts on purpose. The first is the branch this workflow ran
+      # from and supplies .github/scripts/patch-rot-probe.sh, so the probe
+      # logic never depends on the branch being probed (main does not carry
+      # the script). The second is the branch under test and supplies the
+      # patches — everything the probe reads lives under target/.
       - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.branch }}
+          path: target
 
-      - name: Check vyos-1x patches against latest current
+      # Without Mergiraf, `git apply --3way` degrades to leaving conflict
+      # markers in the file AND returning exit 0 (see bin/ci-install-deps.sh).
+      # The real build installs it, so the check must too — otherwise it
+      # reports drift the build would have absorbed.
+      - name: Install Mergiraf
         run: |
-          set -e
-          git clone --branch current --depth 1 https://github.com/vyos/vyos-1x.git
-          cd vyos-1x
-          rc=0
-          for p in ../data/vyos-1x-*.patch; do
-              if ! git apply --3way --check --whitespace=nowarn "$p" 2>&1; then
-                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-1x current"
-                  rc=1
-              fi
-          done
-          exit $rc
+          set -euo pipefail
+          ver="v0.17.0"
+          url="https://codeberg.org/mergiraf/mergiraf/releases/download/${ver}/mergiraf_aarch64-unknown-linux-gnu.tar.gz"
+          tmp=$(mktemp -d)
+          curl -fsSL "$url" -o "$tmp/m.tar.gz"
+          tar -xzf "$tmp/m.tar.gz" -C "$tmp"
+          sudo install -m 0755 "$tmp"/mergiraf*/mergiraf /usr/local/bin/mergiraf 2>/dev/null \
+            || sudo install -m 0755 "$tmp/mergiraf" /usr/local/bin/mergiraf
+          mergiraf --version
+
+      - name: Check vyos-1x patches (cumulative, mirrors ci-setup-vyos1x.sh)
+        run: |
+          bash .github/scripts/patch-rot-probe.sh \
+            https://github.com/vyos/vyos-1x.git rolling vyos-1x-probe 'target/data/vyos-1x-*.patch'
+
+      - name: Check vyos-build patches (cumulative, mirrors ci-setup-vyos-build.sh)
+        run: |
+          bash .github/scripts/patch-rot-probe.sh \
+            https://github.com/vyos/vyos-build.git rolling vyos-build-probe 'target/data/vyos-build-*.patch'
+
+      # Kernel patches stay WARN-ONLY. Unlike the data/ patches these are
+      # probed independently against a pristine tree, which is a known
+      # false-failure mode for the stacked board series (see
+      # plans/TA-2026-07-18-002-patch-architecture.md and patch-health.sh's
+      # stack-apply mode). Promoting this to a hard gate would mean permanent
+      # red. patch-health.sh remains the authoritative kernel-patch gate.
+      - name: Check kernel patches against pinned tag (advisory)
         continue-on-error: true
-
-      - name: Check vyos-build patches against latest current
         run: |
-          set -e
-          git clone --branch current --depth 1 https://github.com/vyos/vyos-build.git
-          cd vyos-build
-          rc=0
-          for p in ../data/vyos-build-*.patch; do
-              if ! git apply --3way --check --whitespace=nowarn "$p" 2>&1; then
-                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-build current"
-                  rc=1
-              fi
-          done
-          exit $rc
-        continue-on-error: true
-
-      - name: Check kernel patches against pinned tag
-        run: |
-          set -e
-          # Kernel pin auto-tracked via vyos-build/data/defaults.toml.
-          # We need vyos-build/ checked out for the sync script to read it.
-          git clone --branch current --depth 1 https://github.com/vyos/vyos-build.git vyos-build
-          KERNEL_VERSION=$(bash -c '. kernel/common/scripts/sync-kernel-version.sh >/dev/null && echo $KERNEL_VERSION')
+          set -eo pipefail
+          git clone --branch rolling --depth 1 \
+              https://github.com/vyos/vyos-build.git vyos-build
+          # sync-kernel-version.sh resolves vyos-build/data/defaults.toml
+          # relative to ITS OWN repo root (target/), so point it explicitly at
+          # the clone above rather than letting it fall back to versions.lock.
+          export VYOS_BUILD_DEFAULTS="$PWD/vyos-build/data/defaults.toml"
+          KERNEL_VERSION=$(bash -c '. target/kernel/common/scripts/sync-kernel-version.sh >/dev/null && echo $KERNEL_VERSION')
           KERNEL_TAG="v${KERNEL_VERSION}"
           echo "::notice::Probing kernel patches against $KERNEL_TAG"
           git clone --branch "$KERNEL_TAG" --depth 1 \
               https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
           cd linux-src
           rc=0
-          # Iterate every flavor bucket in apply order
-          # ASK2 (rewrite-in-progress): kernel/flavors/ask/patches/ was
-          # deleted on the ask20 branch. ASK2 ships ask.ko / ask_bridge.ko
-          # as out-of-tree modules per specs/ask2-rewrite-spec.md, so
-          # there are no in-tree kernel patches to probe. Re-add the
-          # kernel/flavors/ask/patches/{ask,fixes} buckets here once any
-          # ASK2 in-tree patches land.
           for bucket in \
-              ../kernel/common/patches/vyos \
-              ../kernel/common/patches/board \
-              ../kernel/common/patches/fixes; do
+              ../target/kernel/common/patches/vyos \
+              ../target/kernel/common/patches/board \
+              ../target/kernel/common/patches/fixes; do
               [ -d "$bucket" ] || continue
               for p in "$bucket"/*.patch; do
                   [ -f "$p" ] || continue
@@ -86,4 +118,3 @@ jobs:
               done
           done
           exit $rc
-        continue-on-error: true
