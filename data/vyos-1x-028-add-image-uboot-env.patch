@@ -1,25 +1,15 @@
-From 216360d1431f9454ac655b2445a91383c7a9c4a8 Mon Sep 17 00:00:00 2001
-From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 03:56:43 +0000
-Subject: [PATCH] temp: vyos-1x-028-add-image-uboot-env.patch
-
----
- src/op_mode/image_installer.py | 24 ++++++++++++++++++++++++
- 1 file changed, 24 insertions(+)
-
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index ea5aed0..52f614d 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -1312,6 +1312,30 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+@@ -1423,16 +1423,35 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
          copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
               f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
  
-+        # Copy device tree blobs for U-Boot boards (e.g., LS1046A)
-+        for file in Path(DIR_ISO_MOUNT).iterdir():
-+            if file.is_file() and file.suffix == '.dtb':
-+                copy(file, f'{root_dir}/boot/{image_name}/')
-+
+         # Copy device tree blobs for U-Boot boards (e.g., LS1046A)
+         for file in Path(DIR_ISO_MOUNT).iterdir():
+             if file.is_file() and file.suffix == '.dtb':
+                 copy(file, f'{root_dir}/boot/{image_name}/')
+ 
 +        # U-Boot boards (e.g. LS1046A): re-assert the QSPI U-Boot environment so
 +        # the freshly added image becomes the autoboot target. grub.set_default()
 +        # above only writes /boot/vyos.env; it never rewrites the QSPI `bootcmd`,
@@ -42,6 +32,8 @@ index ea5aed0..52f614d 100755
          # unmount an ISO and cleanup
          cleanup([str(iso_path)])
  
--- 
-2.39.5
-
+         # add information about version
+         grub.version_add(image_name, root_dir)
+         if set_as_default:
+             grub.set_default(image_name, root_dir)
+ 
