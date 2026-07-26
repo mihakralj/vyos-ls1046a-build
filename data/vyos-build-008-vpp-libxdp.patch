@@ -1,10 +1,9 @@
 diff --git a/scripts/package-build/vpp/package.toml b/scripts/package-build/vpp/package.toml
-index 27e3ac6..eb4447b 100644
 --- a/scripts/package-build/vpp/package.toml
 +++ b/scripts/package-build/vpp/package.toml
-@@ -29,6 +29,11 @@ done
- # to the older non-XSK code path that never creates XSK sockets.
- sudo apt-get install -y libxdp-dev libbpf-dev
+@@ -24,6 +24,11 @@
+     git -c user.email=maintainers@vyos.net -c user.name=vyos am "$patch" || { echo "Failed to apply patch $patch"; exit 1; }
+ done
  
 +# M4 ZC: xdp-tools 1.5.5 (VPP's vendored external dep) fails to build
 +# under -Wextra -Werror due to unused params in a #else branch. Fix
@@ -14,7 +13,7 @@ index 27e3ac6..eb4447b 100644
  make UNATTENDED=yes VPP_ENABLE_SYSTEMD_NOTIFY=ON install-dep
  make VPP_EXTRA_CMAKE_ARGS="-DVPP_ENABLE_SYSTEMD_NOTIFY=ON" pkg-deb
  cp build-root/*.deb ../
-@@ -36,5 +41,5 @@ cp build-root/*.deb ../
+@@ -31,5 +36,5 @@
  
  [dependencies]
  packages = [
