@@ -1,0 +1,49 @@
+diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+--- a/interface-definitions/interfaces_ethernet.xml.in
++++ b/interface-definitions/interfaces_ethernet.xml.in
+@@ -102,22 +102,16 @@
+                 </properties>
+               </leafNode>
+               <leafNode name="ask">
+                 <properties>
+                   <help>ASK2 offload — FMan FE-VM hardware forwarding for this interface (NXP LS1046A)</help>
+                   <valueless/>
+                 </properties>
+               </leafNode>
+-              <leafNode name="lro">
+-                <properties>
+-                  <help>Enable Large Receive Offload</help>
+-                  <valueless/>
+-                </properties>
+-              </leafNode>
+               <leafNode name="rps">
+                 <properties>
+                   <help>Enable Receive Packet Steering</help>
+                   <valueless/>
+                 </properties>
+               </leafNode>
+               <leafNode name="rfs">
+                 <properties>
+@@ -126,22 +120,16 @@
+                 </properties>
+               </leafNode>
+               <leafNode name="sg">
+                 <properties>
+                   <help>Enable Scatter-Gather</help>
+                   <valueless/>
+                 </properties>
+               </leafNode>
+-              <leafNode name="tso">
+-                <properties>
+-                  <help>Enable TCP Segmentation Offloading</help>
+-                  <valueless/>
+-                </properties>
+-              </leafNode>
+             </children>
+           </node>
+           <node name="ingress-policer">
+             <properties>
+               <help>Hardware ingress rate policer (NXP LS1046A FMan Policer offload)</help>
+             </properties>
+             <children>
+               <leafNode name="bandwidth">
