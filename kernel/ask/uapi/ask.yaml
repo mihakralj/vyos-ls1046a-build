@@ -428,6 +428,13 @@ operations:
         Administratively remove all offloaded flows (debug/recovery).
         Userspace flowtable rules remain; flows re-promote organically
         as traffic resumes. Does NOT flush SAs.
+
+        Semantics are identical to removing every flow individually:
+        each hardware-backed flow releases its CC slot, next-hop
+        reference and cookie. Before 2026-07-26 (F-120) this command
+        cleared only software state and leaked that hardware state,
+        which permanently exhausted the 32-key CC tree after 32
+        flushed flows.
       attribute-set: flow
       flags: [ admin-perm ]
       do: {}

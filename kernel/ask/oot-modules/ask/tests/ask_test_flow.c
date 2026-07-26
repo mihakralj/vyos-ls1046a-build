@@ -502,6 +502,70 @@ KUNIT_EXPECT_EQ(test, atomic_read(&t.num_hw_backed), 0);
 ask_flow_table_destroy(&t);
 }
 
+/*
+ * Regression guard for F-120 (flush bypassed HW teardown, fixed 2026-07-26).
+ *
+ * ask_flow_flush() used to unlink entries straight out of the rhashtable
+ * walker, skipping ask_hw_flow_remove() and leaving num_hw_backed high. The
+ * fix made flush remove-equivalent via collect-then-replay.
+ *
+ * The kunit harness has no PCD, so every insert here is a SW fallback and
+ * num_hw_backed is 0 throughout — this test cannot prove the silicon release
+ * (that needs .185, tracked as T-M6-6 validation). What it DOES pin, and what
+ * regressed before, is that flush drains the table completely and leaves both
+ * counters at zero rather than leaking them. A reintroduced direct-unlink
+ * flush that forgot num_hw_backed would still pass on count alone, so assert
+ * the counters explicitly.
+ */
+static void ask_flow_test_flush_is_remove_equivalent(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id = 0;
+int i;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-flush-eq"), 0);
+
+/* Flush on an empty table must be a clean no-op, not a spin. */
+ask_flow_flush(&t);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 0);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_hw_backed), 0);
+
+/*
+ * More than ASK_FLOW_FLUSH_BATCH (32) entries, so the collect/replay
+ * loop is forced through multiple passes — the case a single-pass
+ * implementation would silently get wrong.
+ */
+for (i = 0; i < 100; i++) {
+make_key_v4(&key, htonl(0x0c000000 + i), htonl(0x0d000000 + i),
+    htons(2000 + i), htons(443));
+KUNIT_ASSERT_EQ(test,
+ask_flow_insert(&t, 0xf100 + i, &key, 1, 0,
+ASK_HW_DIR_FWD, &hw_id), 0);
+}
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 100);
+
+ask_flow_flush(&t);
+
+/* Table fully drained across passes, counters balanced. */
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 0);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_hw_backed), 0);
+
+rcu_read_lock();
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(&t, 0xf100));
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(&t, 0xf100 + 99));
+rcu_read_unlock();
+
+/* Table stays usable after a flush. */
+make_key_v4(&key, htonl(0x0e000001), htonl(0x0e000002),
+    htons(3000), htons(443));
+KUNIT_EXPECT_EQ(test,
+ask_flow_insert(&t, 0xbeef, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id), 0);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 1);
+
+ask_flow_table_destroy(&t);
+}
+
 /* ------------------------------------------------------------------------- */
 /* suite                                                                      */
 /* ------------------------------------------------------------------------- */
@@ -517,6 +581,7 @@ KUNIT_CASE(ask_flow_test_stress_walk),
 KUNIT_CASE(ask_flow_test_hw_fallback_insert_remove),
 KUNIT_CASE(ask_flow_test_hw_fallback_eexist_rollback),
 KUNIT_CASE(ask_flow_test_sw_fallback_not_hw_backed),
+KUNIT_CASE(ask_flow_test_flush_is_remove_equivalent),
 KUNIT_CASE(ask_flow_test_default_table_unused_until_init),
 {}
 };
