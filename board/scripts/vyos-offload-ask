@@ -87,7 +87,9 @@ engage() {
     info "engaging port $PORT — CONT_LOOKUP pass-through (FQ 0x$miss_fqid)"
 
     # fe_enter_off=0 → scaffold: RCCB→group_table→miss-AD→kernel FQ.
-    echo "engage $PORT 0 $miss_fqid" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
+    # Current fe_arm ABI is: engage <port> <fe_enter_off>
+    # MISS FQID is resolved in-kernel during engage.
+    echo "engage $PORT 0" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
 
     # Arm workspace pool (FmPortSetFESupport).  Required even in scaffold mode
     # so any future FE frame carves from the right pool, not MURAM offset 0.
@@ -193,13 +195,9 @@ hit_engage() {
     fi
 
     # Step 10 (final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active)
-    # NB: the fe_arm engage verb consumes exactly 3 tokens ("engage %x %lx %x" =
-    # port, fe_enter_off, miss_fqid).  A 4th token (ekfc) is NOT consumed by the
-    # handler and left trailing bytes that the write(2) retry re-submits as a
-    # bogus second command → spurious EINVAL AFTER the port already armed, making
-    # the tool die() past a successful engage.  EKFC is configured by the EXT_HASH
-    # FE (fe_hashfe build), not here.  Pass only the 3 tokens the handler reads.
-    echo "engage $PORT $fe_enter_off $miss_fqid" > "$PCD_BASE/fe_arm" \
+    # fe_arm engage ABI is: engage <port> <fe_enter_off>.
+    # EKFC and MISS FQID are configured/resolved in-kernel, not parsed here.
+    echo "engage $PORT $fe_enter_off" > "$PCD_BASE/fe_arm" \
         || die "fe_arm engage failed"
 
     # Show state for verification

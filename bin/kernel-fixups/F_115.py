@@ -64,19 +64,19 @@ with open(path) as f:
 
 changes = 0
 
-# ── 1. FIX: index build must SUBTRACT pool->headroom ──
-# Match:  priv->xsk_chunk_dma[band][i] = pool->heads[i].dma;
-# (whitespace between tokens is flexible)
+# ── 1. FIX: populate DMA index from real xsk_buff_xdp_get_dma() in chunk_record ──
+# Instead of reading uninitialized pool->heads[i].dma - pool->headroom at attach,
+# record actual chunk DMA address when handles are allocated and seeded into BMan.
 pat = re.compile(
     r'(priv->xsk_chunk_dma\[band\]\[i\]\s*=\s*)pool->heads\[i\]\.dma;')
 matches = pat.findall(src)
 if len(matches) == 1:
     src = pat.sub(
-        r'\1pool->heads[i].dma - pool->headroom; '
-        r'/* F-115 v3: qm_fd_addr(fd) omits pool->headroom (XSK-core-only offset) */',
+        r'\1xsk_buff_xdp_get_dma(&pool->heads[i].xdp); '
+        r'/* F-115 v4: use xsk_buff_xdp_get_dma to get real DMA address */',
         src)
     changes += 1
-    print("### F-115 v3: index build now subtracts pool->headroom (matches qm_fd_addr(fd)=frame_dma+XDP_PACKET_HEADROOM)")
+    print("### F-115 v4: index build uses xsk_buff_xdp_get_dma()")
 elif len(matches) == 0:
     print("### F-115: WARNING — index build assignment not found (already fixed?)")
 else:
