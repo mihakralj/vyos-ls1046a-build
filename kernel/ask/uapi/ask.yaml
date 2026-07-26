@@ -219,8 +219,21 @@ attribute-sets:
         name: hw-flow-id
         type: u32
         doc: |
-          Opaque cookie packing the CC-node + key-index that backs this
-          flow in silicon. Operators should treat as opaque; debug-only.
+          Opaque xarray cookie for the silicon state backing this flow.
+          Operators should treat as opaque; debug-only. OMITTED when
+          `offloaded` is false — a flow with no silicon backing has no
+          meaningful id, and the software fallback counter it used to
+          carry shared a numeric space with real cookies, so two flows
+          could report the same value.
+      -
+        name: offloaded
+        type: u8
+        doc: |
+          1 when this flow is programmed into FMan silicon, 0 when it is
+          carried by the kernel software path only (the hardware insert
+          returned -EOPNOTSUPP or -ENODEV: IPv6, or any non-TCP/UDP IPv4
+          flow, or a non-DPAA egress). Added 2026-07-26; absent on images
+          older than that, which callers should treat as "unknown".
   -
     name: sa
     name-prefix: ask-sa-attr-
@@ -365,6 +378,7 @@ operations:
             - bytes
             - last-seen-ns
             - hw-flow-id
+            - offloaded
     -
       name: get-flow
       doc: |
@@ -391,6 +405,7 @@ operations:
             - bytes
             - last-seen-ns
             - hw-flow-id
+            - offloaded
     -
       name: dump-sas
       doc: Dump all xfrm SAs currently offloaded to CAAM + 210.
