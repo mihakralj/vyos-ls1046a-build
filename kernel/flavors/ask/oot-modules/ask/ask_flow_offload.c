@@ -555,7 +555,9 @@ EXPORT_SYMBOL_GPL(ask_flow_neigh_resolved);
 /* Collector context for ask_flow_neigh_mac_changed()'s rhashtable walk. */
 struct ask_neigh_mac_ctx {
         int             ifindex;    /* egress oif the neigh resolved on */
-        __be32          dst_ip;     /* next-hop L3 address that changed */
+        const u8        *dst_ip;    /* next-hop L3 address that changed */
+        unsigned int    addr_len;   /* 4 (arp_tbl) or 16 (nd_tbl)       */
+        u8              l3_proto;   /* ASK_FLOW_L3_IPV4 / _IPV6         */
         const u8        *new_mac;   /* fresh lladdr from n->ha          */
         struct list_head fixups;    /* ask_neigh_mac_fixup, built here  */
         unsigned int    matched;
@@ -571,21 +573,25 @@ struct ask_neigh_mac_fixup {
 };
 
 /*
- * Walk callback: collect installed IPv4 flows egressing to (ifindex, dst_ip)
- * whose baked-in next_hop_mac no longer matches the neighbour's new lladdr.
+ * Walk callback: collect installed flows egressing to (ifindex, dst_ip) whose
+ * baked-in next_hop_mac no longer matches the neighbour's new lladdr.
  * We only COLLECT here (GFP_ATOMIC, no sleeping) — the rebuild happens after
  * the walk so ask_flow_remove()/insert() run outside the rhashtable iterator.
+ *
+ * Address family comes from the notifier's neigh table (T-M6-1 piece 4): a
+ * v4 event must not match a v6 flow whose first 4 dst_ip bytes happen to
+ * collide, hence the explicit l3_proto match before the length-aware memcmp.
  */
 static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
 {
         struct ask_neigh_mac_ctx *ctx = arg;
         struct ask_neigh_mac_fixup *fx;
 
-        if (f->key.l3_proto != ASK_FLOW_L3_IPV4)
+        if (f->key.l3_proto != ctx->l3_proto)
                 return 0;
         if (f->oif != (u32)ctx->ifindex)
                 return 0;
-        if (memcmp(f->key.dst_ip, &ctx->dst_ip, sizeof(ctx->dst_ip)) != 0)
+        if (memcmp(f->key.dst_ip, ctx->dst_ip, ctx->addr_len) != 0)
                 return 0;
         if (f->hw_flow_id == 0)                     /* no HW backing to fix */
                 return 0;
@@ -617,8 +623,8 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
  * window a rebuilt flow has no HW backing the kernel SW path carries it, so no
  * packet is lost.  Runs in PROCESS context (workqueue) — insert/remove sleep.
  */
-void ask_flow_neigh_mac_changed(struct net_device *dev, __be32 dst_ip,
-                                const u8 *new_mac)
+void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
+                                u8 l3_proto, const u8 *new_mac)
 {
         struct ask_flow_table *t = ask_flow_default_table();
         struct ask_neigh_mac_fixup *fx, *tmp;
@@ -626,7 +632,7 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, __be32 dst_ip,
         u32 hw_id = 0;
         int rc;
 
-        if (!t || !dev || !new_mac)
+        if (!t || !dev || !dst_ip || !new_mac)
                 return;
         /* A multicast/zero lladdr is never an offloadable next-hop. */
         if (is_zero_ether_addr(new_mac) || is_multicast_ether_addr(new_mac))
@@ -634,6 +640,8 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, __be32 dst_ip,
 
         ctx.ifindex      = dev->ifindex;
         ctx.dst_ip       = dst_ip;
+        ctx.l3_proto     = l3_proto;
+        ctx.addr_len     = ask_flow_l3_addr_len(l3_proto);
         ctx.new_mac      = new_mac;
         ctx.matched      = 0;
         INIT_LIST_HEAD(&ctx.fixups);
@@ -648,9 +656,14 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, __be32 dst_ip,
                                      fx->action_flags, fx->dir, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
-                pr_info_ratelimited("ask: neigh: stale-MAC rebuild cookie=0x%llx dev=%s dst_ip=%pI4 nh=%pM rc=%d\n",
-                                    fx->cookie, netdev_name(dev), &dst_ip,
-                                    fx->key.next_hop_mac, rc);
+                if (l3_proto == ASK_FLOW_L3_IPV6)
+                        pr_info_ratelimited("ask: neigh: stale-MAC rebuild cookie=0x%llx dev=%s dst_ip=%pI6 nh=%pM rc=%d\n",
+                                            fx->cookie, netdev_name(dev), dst_ip,
+                                            fx->key.next_hop_mac, rc);
+                else
+                        pr_info_ratelimited("ask: neigh: stale-MAC rebuild cookie=0x%llx dev=%s dst_ip=%pI4 nh=%pM rc=%d\n",
+                                            fx->cookie, netdev_name(dev), dst_ip,
+                                            fx->key.next_hop_mac, rc);
                 list_del(&fx->node);
                 kfree(fx);
         }
