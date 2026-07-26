@@ -1207,6 +1207,37 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
         return other->src_v4.s_addr;
 }
 
+/*
+ * Serialise @key into the 13-byte EKFC record the FE-VM comparator matches.
+ *
+ * Layout is the silicon's MSB-first extraction order for EKFC 0x001C0006:
+ *   SIP(4) DIP(4) PROTO(1) SPORT(2) DPORT(2)
+ *
+ * ENDIANNESS (CR-002, fixed 2026-07-26): @sport/@dport are __be16, i.e. they
+ * already hold the bytes in wire order. They MUST be copied, not shifted.
+ * The previous code did
+ *
+ *      k[9] = (key->sport >> 8) & 0xff;  k[10] = key->sport & 0xff;
+ *
+ * which reads the __be16 as a native integer. On this little-endian ARM64
+ * kernel a port whose wire bytes are AD 9C has the numeric value 0x9CAD, so
+ * the shift emitted 9C AD — the bytes backwards. Insert and delete shared the
+ * bug, so they agreed with each other and software-only tests passed, but
+ * neither agreed with the key the KeyGen actually extracts. Silicon-verified
+ * reference (Qdrant 2026-07-13): 0a63026a 0a6302b9 06 ad9c d903.
+ *
+ * One builder for insert, delete and tests so the two can never diverge again.
+ * Non-static solely so tests/ask_test_flow_offload.c can pin the exact bytes.
+ */
+void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE])
+{
+        memcpy(&k[0],  key->src_ip, 4);
+        memcpy(&k[4],  key->dst_ip, 4);
+        k[8] = key->l4_proto;
+        memcpy(&k[9],  &key->sport, sizeof(key->sport));
+        memcpy(&k[11], &key->dport, sizeof(key->dport));
+}
+
 /* ------------------------------------------------------------------------- */
 /* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
  * to FMan hash key (L4PDST+L4PSRC+IPDST+IPSRC) and writes fe_flow debugfs. */
@@ -1226,15 +1257,8 @@ static void ask_fe_flow_insert(const struct ask_flow_key *key,
         }
 
         memset(&action, 0, sizeof(action));
-        /* F-049: descending EKFC bit order — SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2) */
-        memcpy(&action.key[0], key->src_ip, 4);
-        memcpy(&action.key[4], key->dst_ip, 4);
-        action.key[8]  = key->l4_proto;
-        action.key[9]  = (key->sport >> 8) & 0xff;
-        action.key[10] = key->sport & 0xff;
-        action.key[11] = (key->dport >> 8) & 0xff;
-        action.key[12] = key->dport & 0xff;
-        action.key_size = 13;
+        ask_fe_build_key(key, action.key);
+        action.key_size = ASK_FE_KEY_SIZE;
         action.enq_off  = enq_off;
 
         /* Fix B: drive the real FMan (fman_get_pcd -> ehash) instead of NULL,
@@ -1249,17 +1273,11 @@ static void ask_fe_flow_insert(const struct ask_flow_key *key,
  */
 static void ask_fe_flow_remove(const struct ask_flow_key *key)
 {
-        u8 k[13];
+        u8 k[ASK_FE_KEY_SIZE];
 
         if (!key)
                 return;
-        memcpy(&k[0], key->src_ip, 4);
-        memcpy(&k[4], key->dst_ip, 4);
-        k[8]  = key->l4_proto;
-        k[9]  = (key->sport >> 8) & 0xff;
-        k[10] = key->sport & 0xff;
-        k[11] = (key->dport >> 8) & 0xff;
-        k[12] = key->dport & 0xff;
+        ask_fe_build_key(key, k);
         fman_pcd_fe_flow_del(ask_hw_get_fman(), 0, k, sizeof(k));
 }
 

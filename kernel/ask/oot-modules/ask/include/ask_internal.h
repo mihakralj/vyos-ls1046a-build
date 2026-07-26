@@ -697,6 +697,14 @@ static inline unsigned int ask_flow_l3_addr_len(u8 l3_proto)
 return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
 }
 
+/*
+ * FE-VM EKFC key serialiser (CR-002). Exposed only so the kunit suite can
+ * assert the exact 13-byte wire layout; production callers are the insert and
+ * delete paths inside ask_flow_offload.c. @k must have room for 13 bytes.
+ */
+#define ASK_FE_KEY_SIZE 13
+void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE]);
+
 void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip);
 void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
        u8 l3_proto, const u8 *new_mac);

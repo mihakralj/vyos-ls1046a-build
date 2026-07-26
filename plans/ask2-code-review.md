@@ -1,4 +1,4 @@
-**Version 2.0.0 · 2026-07-26 · HADS 1.0.0**
+**Version 2.1.0 · 2026-07-26 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -21,15 +21,15 @@
 | ID | Priority | Severity | Finding | Status |
 |---|---|---:|---|---|
 | CR-001 | P0 | CRITICAL | Production CLI arms the dormant debugfs scaffold; per-flow FE insertion errors are ignored while flows are reported `offloaded=true` | OPEN |
-| CR-002 | P0 | HIGH | FE-VM key serialization reverses TCP/UDP port bytes on little-endian ARM64 | OPEN |
-| CR-003 | P0 | HIGH | VyOS commit-path error handling is broken and fail-open: integer return code is treated as stderr, missing/unsupported paths silently succeed, helper teardown errors are swallowed | OPEN |
+| CR-002 | P0 | HIGH | FE-VM key serialization reverses TCP/UDP port bytes on little-endian ARM64 | **FIXED** `4a1c9e2` — shared builder + silicon-vector KUnit gate |
+| CR-003 | P0 | HIGH | VyOS commit-path error handling is broken and fail-open: integer return code is treated as stderr, missing/unsupported paths silently succeed, helper teardown errors are swallowed | **PARTIAL** — the `AttributeError` crash is fixed (F-121, `b5998f33`); the fail-open half (no `ConfigError`, silent unsupported paths, `\|\| true` teardown) is still OPEN |
 | CR-004 | P1 | HIGH | Stale-MAC remove-then-reinsert can resurrect a destroyed flow or permanently lose tracking after reinsertion failure | OPEN |
 | CR-005 | P1 | HIGH | `num_hw_backed == 0` stale-MAC shortcut has a lost-event race with an in-flight hardware insert | OPEN |
 | CR-006 | P1 | HIGH | `ask.yaml` does not describe the active `get-info` wire format and omits engage/disengage operations | OPEN |
 | CR-007 | P1 | MEDIUM | Removed Fork-A programming still imposes a false 32-flow cap and allocates unused HM/shadow state | OPEN |
 | CR-008 | P1 | MEDIUM | ASK retains the `fman_bind()` device reference for the module lifetime without releasing it | OPEN |
-| CR-009 | P2 | MEDIUM | F-120 flush can stop partially complete after one concurrently removed batch | OPEN |
-| CR-010 | P2 | MEDIUM | `ask_flow_insert()` performs an RCU-protected rhashtable lookup without an RCU read-side critical section | OPEN |
+| CR-009 | P2 | MEDIUM | F-120 flush can stop partially complete after one concurrently removed batch | **FIXED** — completion now requires an empty collection; bounded stall guard |
+| CR-010 | P2 | MEDIUM | `ask_flow_insert()` performs an RCU-protected rhashtable lookup without an RCU read-side critical section | **FIXED** — precheck wrapped, retained as a hint only |
 | CR-011 | P2 | LOW | Authoritative comments and KUnit tests still encode disproven fake-ID and `-EAGAIN` contracts | OPEN |
 | CR-012 | P2 | HIGH when enabled | XFRM add returns success without programming hardware; currently unreachable but unsafe to expose | GATED |
 
@@ -79,9 +79,9 @@ key_bytes.bytes[10] = key->sport & 0xff;
 
 **[SPEC]** Qdrant’s silicon-verified key is `0a63026a0a6302b906ad9cd903`: SIP, DIP, protocol, source port and destination port in wire order. This is consistent with the settled MSB-first extraction contract.
 
-**[SPEC] Required fix.** Copy the raw two bytes of each `__be16` into the key buffer, or convert with `be16_to_cpu()` before splitting. Use one shared key-builder for insert, delete, tests and diagnostics.
+**[SPEC] FIXED.** Confirmed by inspection: `sport`/`dport` are `__be16` (wire order in memory), so `(v >> 8)` reads them as native integers and emits the bytes reversed on this little-endian ARM64 kernel. Insert and delete shared the fault, which is precisely why software-only tests agreed. Replaced both open-coded serialisers with one `ask_fe_build_key()` that `memcpy`s the `__be16` bytes, exposed for tests via `ask_internal.h`. `ASK_FE_KEY_SIZE` replaces the bare `13`.
 
-**[SPEC] Acceptance gate.** Add a KUnit vector asserting the complete 13-byte output equals `0a63026a0a6302b906ad9cd903`; then prove the same key appears in `fe_flow` and receives a silicon HIT.
+**[SPEC] Acceptance gate — code half DONE.** `ask_flow_offload_test_fe_key_wire_order` asserts the full 13 bytes equal `0a63026a 0a6302b9 06 ad9c d903` and additionally asserts `k[9] != k[10]` and `k[11] != k[12]`, so a future byte-swap regression cannot pass by palindromic symmetry. **Silicon half still OPEN:** proving the same key appears in `fe_flow` and takes a HIT requires the FE-VM path to be reachable, which CR-001 currently prevents through the shipping CLI.
 
 ### 3.3 CR-003 P0 — VyOS configuration is fail-open and raises the wrong exception on helper failure
 
@@ -183,7 +183,7 @@ struct fman *fman_bind(struct device *fm_dev)
 
 **[SPEC] Failure sequence.** Flush collects a non-empty batch, concurrent destroy removes every cookie in that batch, each replayed `ask_flow_remove()` returns `-ENOENT`, `freed` remains zero, and the no-progress guard breaks even if other flows remain.
 
-**[SPEC] Required fix.** Completion must be established by a subsequent collection that returns zero cookies. Use a bounded retry/generation guard for repeated zero-progress collisions rather than treating the first fully raced batch as completion.
+**[SPEC] FIXED.** Confirmed: `if (!freed) break` treated a fully-raced batch as completion, so flush could return success with the table non-empty. Completion is now proven only by a collection yielding zero cookies; zero-progress passes are counted and bounded by `ASK_FLOW_FLUSH_MAX_STALLS` (8) with a warning, so a pathological race cannot spin a genl `doit` handler.
 
 **[NOTE]** The collect-then-replay shape remains correct and mandatory because hardware removal can sleep and cannot run inside the rhashtable walker’s RCU critical section.
 
@@ -191,7 +191,7 @@ struct fman *fman_bind(struct device *fm_dev)
 
 **[BUG]** `ask_flow_insert()` calls `ask_flow_lookup()` as a duplicate fast-path without `rcu_read_lock()`, while the remove and stats callers correctly protect the same `rhashtable_lookup_fast()` operation.
 
-**[SPEC]** The later `rhashtable_lookup_insert_fast()` remains the authoritative duplicate arbiter, so the simplest fix is to remove the unsafe precheck. If retained as an allocation optimization, wrap it in the required RCU read-side section and use the result only as a hint.
+**[SPEC] FIXED.** Confirmed: `ask_genl.c:571`, `ask_flow_offload.c:1484` and `:1747` all wrap `ask_flow_lookup()` in `rcu_read_lock()`; the F-112 precheck did not. Kept as the allocation optimisation it was intended to be, now wrapped, with a comment recording that it is only a hint and `rhashtable_lookup_insert_fast()` stays the arbiter.
 
 ### 3.11 CR-011 P2 — tests and comments preserve obsolete ownership contracts
 
