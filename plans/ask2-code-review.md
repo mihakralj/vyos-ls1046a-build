@@ -1,4 +1,4 @@
-**Version 2.4.2 · 2026-07-27 · HADS 1.0.0**
+**Version 2.5.0 · 2026-07-27 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -32,6 +32,7 @@
 | CR-010 | P2 | MEDIUM | `ask_flow_insert()` performs an RCU-protected rhashtable lookup without an RCU read-side critical section | **FIXED** — precheck wrapped, retained as a hint only |
 | CR-011 | P2 | LOW | Authoritative comments and KUnit tests still encode disproven fake-ID and `-EAGAIN` contracts | PARTIAL |
 | CR-012 | P2 | HIGH when enabled | XFRM add returns success without programming hardware; currently unreachable but unsafe to expose | **FIXED-GATED** |
+| CR-013 | P0 | HIGH | FE-VM engage leaks 304 B of PCD MURAM per failed attempt (monotonic, reboot-only reclaim) and fragments the arena; ehash `int_buf` never released | **PARTIAL** — leak fixed (`F_125.py`); `int_buf` release still OPEN |
 
 ## 3. Detailed findings
 
@@ -217,6 +218,22 @@ struct fman *fman_bind(struct device *fm_dev)
 **[SPEC] Required gate.** Until real CAAM/QI SA programming, rollback and lifetime handling exist, return `-EOPNOTSUPP` and keep all capability bits disabled. Add a feature-enable test that refuses registration while the stub remains.
 
 **[SPEC] FIXED-GATED.** `ask_xfrm_state_add()` now unconditionally returns `-EOPNOTSUPP` (fail-closed) until real SA programming exists.
+
+### 3.13 CR-013 P0 — engage leaks MURAM per failed attempt and fragments the arena
+
+**[BUG] Symptom.** Measured on `.185` **and** `.106` (ISO `2026.07.27-0255`), byte-identically: `used=52282 free=13254` after one port engages, `port 0x11 ENGAGED` then `fman_pcd_fe_engage port 0x10 failed: -12`. Every subsequent failed engage leaks exactly **304 bytes**, monotonically (51514 → 51818 → 52122), reclaimable only by reboot.
+
+**[SPEC] The arena is NOT undersized.** Pristine post-init baseline is 43253 of 65536 and one engage costs 9029, so two ports need **61311 of 65536** — they fit by total bytes and fail on *placement*. The 33280-byte `int_buf` at `0x4c100` splits the arena into a ~5376-byte head and a ~26880-byte tail.
+
+**[SPEC] Root cause — not what it looked like.** `__fman_pcd_fe_arm_disengage()` **already** calls `fman_pcd_fe_arm_free_scaffold()`, so a successful engage/disengage is clean. The leak is on the *failure* path: `__fman_pcd_fe_arm_engage()` allocates the FE_ENTER scaffold (gro 256 + mto 16 + ato 32 = **304**, exactly the measured leak), and when `fman_pcd_kg_port_arm_fe()` fails it returns with `pcd->fe_scaffold_*` still populated. The next attempt re-enters the `fe_enter_off == 0` path and **overwrites** those fields, orphaning the triple permanently. Stranded triples sit mid-arena, which is the fragmentation: a post-disengage state of 43253 used / 22283 free failed a fresh engage that the byte-identical cold-boot state satisfied.
+
+**[SPEC] FIXED (leak half) — `bin/kernel-fixups/F_125.py`.** Releases the scaffold on the `kg_port_arm_fe` failure path, guarded on `fe_armed_port` so a failure alongside an already-armed port cannot pull it out from under; and unwinds a partial 3-way allocation, which previously stranded whichever of the three succeeded. Reuses the existing helper — no second one added. Idempotent; `fman_pcd.c` compiles clean with no new warnings; fixup gate 42/42.
+
+**[SPEC] STILL OPEN.** The ehash table and its 33280-byte `int_buf` are still held with **zero** ports engaged (`refcount=1`). Separate allocation site, deliberately a separate change so the two are independently revertible. Releasing it on last disengage returns 33280 bytes and is the strongest candidate for F-124's `pcd-snapshot` MURAM delta.
+
+**[NOTE] Ruled out:** shrinking `FMAN_EHASH_INT_BUF_POOL_SIZE` (`256 * 128`). It is a vendor/LSDK constant — 256 is almost certainly concurrent FE-VM contexts — so shrinking it caps in-flight frames and would surface as drops under exactly the load the M5 10.259 Gbps gate measures. Also note the plan's documented `0x7fff → 0x0fff` mask mitigation **cannot** help here: `int_buf` size is mask-independent; the mask only sizes the 512 KiB DDR table.
+
+**[SPEC] Acceptance gate.** Cold boot, then three engage/disengage cycles per port with `muram_budget` returning to the 43253 baseline each time and zero `pcd-snapshot` drift. **Diagnostic hazard:** probing this consumes MURAM irreversibly until the `int_buf` half also lands — budget attempts and cold-boot between measurement runs.
 
 ## 4. Incomplete features that are not active defects
 

@@ -46,7 +46,7 @@
     },
     "F_115.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
-      "description": "M4 ZC recover=0 fix — DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
+      "description": "M4 ZC recover=0 fix \u2014 DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
       "date": "2026-07-22"
     },
     "F_108.py": {
@@ -56,7 +56,7 @@
     },
     "F_116.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "NULL-guard FE-VM flow-delete (fman_pcd_fe_flow_del + ehash_flow_clear_all) — crash-safety for FLOW_CLS_DESTROY with NULL fm",
+      "description": "NULL-guard FE-VM flow-delete (fman_pcd_fe_flow_del + ehash_flow_clear_all) \u2014 crash-safety for FLOW_CLS_DESTROY with NULL fm",
       "date": "2026-07-24"
     },
     "F_117.py": {
@@ -68,6 +68,11 @@
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "Fix B pt2: 'del <key>' verb on fe_flow debugfs node -> fman_pcd_ehash_del_key (per-key unlink unit-test hook, no fe_arm needed). Runs after F-117.",
       "date": "2026-07-25"
+    },
+    "F_125.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() returned on kg_port_arm_fe failure with pcd->fe_scaffold_* still set; the next attempt overwrote those fields, orphaning the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) permanently. Measured at exactly 304 B per failed engage on .185 and .106, reclaimable only by reboot, and the source of the arena fragmentation that made even single-port engage fail -ENOMEM. Also unwinds a partial 3-way allocation. Reuses the existing fman_pcd_fe_arm_free_scaffold(). Runs after F-118.",
+      "date": "2026-07-27"
     }
   },
   "count": 41,
@@ -176,17 +181,17 @@
       "action": "fold-into 0158",
       "reason": "Dynamic FQID belongs with the arm_engage/chain builder in 0158"
     },
-"F_094.py": {
+    "F_094.py": {
       "action": "permanent",
-      "reason": "API cleanup — structured params instead of raw (key, size, offset)"
+      "reason": "API cleanup \u2014 structured params instead of raw (key, size, offset)"
     },
     "F_107.py": {
       "action": "fold-into 0153+0157",
-      "reason": "gen_pool double-free prevention — engagement guard belongs with the engage/disengage API patches"
+      "reason": "gen_pool double-free prevention \u2014 engagement guard belongs with the engage/disengage API patches"
     },
     "F_109.py": {
       "action": "fold-into 0153",
-      "reason": "ENQ FE offset getter — eliminates debugfs loopback, belongs with the FE-VM engage API"
+      "reason": "ENQ FE offset getter \u2014 eliminates debugfs loopback, belongs with the FE-VM engage API"
     },
     "F_092.py": {
       "action": "fold-into 0158+0153",

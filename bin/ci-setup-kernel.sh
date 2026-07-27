@@ -1648,6 +1648,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-118: fe_flow 'del <key>' unit-test hook"
 fi
 
+# F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() allocated
+# the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) and, when
+# fman_pcd_kg_port_arm_fe() failed, returned with pcd->fe_scaffold_* still set.
+# The next attempt re-entered the fe_enter_off == 0 path and OVERWROTE those
+# fields, orphaning the triple permanently — measured at exactly 304 B per
+# failed engage on both .185 and .106, reclaimable only by reboot, and the
+# source of the arena fragmentation that made even a single-port engage fail
+# -ENOMEM with plenty of free bytes. Also unwinds a partial 3-way allocation.
+# Reuses the existing fman_pcd_fe_arm_free_scaffold(); adds no second helper.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_125.py" 2>&1
+fi
+
 # F-095 (DELETED — stub, never implemented)
 
 fi
