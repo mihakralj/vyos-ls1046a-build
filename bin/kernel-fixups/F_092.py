@@ -48,14 +48,22 @@ else:
         if arm_call not in func_scope:
             print("### F-092: arm_engage call not found in production fe_engage()")
         else:
-            chain_build = """/* F-092: Build FE-VM chain before arming (idempotent). */
+            chain_build = """/* F-092: Build FE-VM chain before arming (idempotent).
+\t * The ehash/fe_pool may already exist from FMan microcode pre-init
+\t * (U-Boot loads ucode into MURAM).  If so, just mark built and skip
+\t * the allocation to avoid double-allocating the arena.
+\t */
 \tif (!pcd->fe_vm_chain_built) {
-\t\terr = __fman_pcd_fe_build_vm_chain(pcd);
-\t\tif (err) {
-\t\t\tpr_err("fman_pcd: FE engage: VM chain build failed: %d\\n", err);
-\t\t\treturn err;
+\t\tif (!list_empty(&pcd->fe_ehash_tables)) {
+\t\t\tpcd->fe_vm_chain_built = true;
+\t\t} else {
+\t\t\terr = __fman_pcd_fe_build_vm_chain(pcd);
+\t\t\tif (err) {
+\t\t\t\tpr_err("fman_pcd: FE engage: VM chain build failed: %d\\n", err);
+\t\t\t\treturn err;
+\t\t\t}
+\t\t\tpcd->fe_vm_chain_built = true;
 \t\t}
-\t\tpcd->fe_vm_chain_built = true;
 \t}
 
 \t"""
