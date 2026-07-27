@@ -1,10 +1,8 @@
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+index e981481..48f409b 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -98,12 +98,18 @@
-               <leafNode name="hw-tc-offload">
-                 <properties>
-                   <help>Enable Hardware Flow Offload</help>
+@@ -101,6 +101,12 @@
                    <valueless/>
                  </properties>
                </leafNode>
@@ -17,57 +15,41 @@ diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-defini
                <leafNode name="lro">
                  <properties>
                    <help>Enable Large Receive Offload</help>
-                   <valueless/>
-                 </properties>
-               </leafNode>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index b7b7b12..16c1a51 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -315,12 +315,49 @@ class EthernetIf(Interface):
-             if not fixed:
-                 return self.set_interface('hw-tc-offload', 'on' if state else 'off')
-             else:
+@@ -314,6 +314,29 @@ def set_hw_tc_offload(self, state):
                  print('Adapter does not support changing hw-tc-offload settings!')
          return False
  
 +    def set_ask_offload(self, enable: bool):
 +        """
 +        Engage or disengage NXP LS1046A ASK (Accelerated Switching Kernel)
-+        FMan FE-VM hardware forwarding offload on this interface. Composes the
-+        /usr/local/bin/vyos-offload-ask engage/disengage verbs, which drive
-+        ask.ko's generic-netlink engage/disengage control path via YNL.
-+        Only the two 10G
-+        SFP+ datapath ports carry the FE-VM substrate (eth3 = FMan RX BMI port
-+        0x10, eth4 = 0x11); the request is a no-op on any other interface.
-+        Example:
-+        >>> from vyos.ifconfig import EthernetIf
-+        >>> i = EthernetIf('eth3')
-+        >>> i.set_ask_offload(True)
++        FMan FE-VM hardware forwarding offload on this interface.
 +        """
 +        port_map = {'eth3': '0x10', 'eth4': '0x11'}
 +        port = port_map.get(self.ifname)
 +        if port is None:
 +            return
++
 +        tool = '/usr/local/bin/vyos-offload-ask'
 +        if not os.path.exists(tool):
 +            raise ConfigError(f'ASK offload helper not found: {tool}')
++
 +        verb = 'engage' if enable else 'disengage'
 +        out, rc = self._popen(f'{tool} --port {port} {verb}')
 +        if rc:
 +            msg = (out or '').strip().splitlines()
 +            detail = msg[-1] if msg else f'helper exited with rc={rc}'
-+            raise ConfigError(f'ASK offload {verb} failed on {self.ifname}: {detail}')
++            raise ConfigError(
++                f'ASK offload {verb} failed on {self.ifname}: {detail}'
++            )
 +
      def set_lro(self, state):
          """
          Enable Large Receive offload. State can be either True or False.
-         Example:
-         >>> from vyos.ifconfig import EthernetIf
-         >>> i = EthernetIf('eth0')
-@@ -660,12 +697,15 @@ class EthernetIf(Interface):
-         # GSO (generic segmentation offload)
-         self.set_hw_tc_offload(dict_search('offload.hw_tc_offload', config) is not None)
- 
+@@ -571,6 +594,9 @@ def update(self, config):
          # LRO (large receive offload)
          self.set_lro(dict_search('offload.lro', config) is not None)
  
@@ -77,57 +59,50 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
          # RPS - Receive Packet Steering
          self.set_rps(dict_search('offload.rps', config) is not None)
  
-         # RFS - Receive Flow Steering
-         self.set_rfs(dict_search('offload.rfs', config) is not None)
- 
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 9063bcd..800c05e 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -291,12 +291,20 @@ def verify_coalesce(ethernet: dict, ethtool: Ethtool):
-                     param_name = param.replace('_', '-')
-                     msg = f'Driver does not support "{param_name}" coalesce setting!'
-                     raise ConfigError(msg)
- 
- 
- def verify_offload(ethernet: dict, ethtool: Ethtool):
-+    if dict_search('offload.ask', ethernet) is not None:
-+        ifname = ethernet.get('ifname')
-+        # get_config() already gathers the VPP config into ethernet['vpp'];
-+        # reuse it rather than opening a second Config() read.
-+        vpp_ifaces = dict_search('vpp.settings.interface', ethernet) or {}
-+        if ifname in vpp_ifaces:
-+            raise ConfigError(f'Interface {ifname} cannot be configured for ASK offload while assigned to VPP!')
-+        if ifname not in ('eth3', 'eth4'):
-+            raise ConfigError(f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)')
-+
-     """
-      Verify offloading capabilities
-     :param ethernet: dictionary which is received from get_interface_dict
-     :type ethernet: dict
+@@ -301,6 +301,18 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
      :param ethtool: Ethernet object
      :type ethtool: Ethtool
+     """
++    if dict_search('offload.ask', ethernet) is not None:
++        ifname = ethernet.get('ifname')
++        vpp_ifaces = dict_search('vpp.settings.interface', ethernet) or {}
++        if ifname in vpp_ifaces:
++            raise ConfigError(
++                f'Interface {ifname} cannot be configured for ASK offload while assigned to VPP!'
++            )
++        if ifname not in ('eth3', 'eth4'):
++            raise ConfigError(
++                f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)'
++            )
++
+     if dict_search('offload.rps', ethernet) != None:
+         if not os.path.exists(f'/sys/class/net/{ethernet["ifname"]}/queues/rx-0/rps_cpus'):
+             raise ConfigError('Interface does not support RPS!')
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
+index c0e30d1..05316b5 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -569,12 +569,21 @@ def verify(config):
-             removed_iface['iface_name'], config, match_vlans=True
-         )
- 
+@@ -556,6 +556,19 @@ def verify(config):
      if 'settings' not in config:
          raise ConfigError('"settings interface" is required but not set!')
  
 +    # Reject a VPP interface that already carries ASK offload (per-port mutex).
 +    _conf = Config()
 +    for iface in config['settings'].get('interface', {}):
-+        iface_config = _conf.get_config_dict(['interfaces', 'ethernet', iface],
-+                                             key_mangling=('-', '_'),
-+                                             get_first_key=True)
++        iface_config = _conf.get_config_dict(
++            ['interfaces', 'ethernet', iface],
++            key_mangling=('-', '_'),
++            get_first_key=True,
++        )
 +        if iface_config and dict_search('offload.ask', iface_config) is not None:
-+            raise ConfigError(f'Interface {iface} cannot be assigned to VPP while configured for ASK offload!')
++            raise ConfigError(
++                f'Interface {iface} cannot be assigned to VPP while configured for ASK offload!'
++            )
 +
      if 'interface' not in config['settings']:
          raise ConfigError('"settings interface" is required but not set!')
  
-     ipoe_ifaces = list(
-         {
-             iface
