@@ -132,11 +132,14 @@ else:
             + ind + "\t * fields, orphaning this triple permanently — 304 bytes per\n"
             + ind + "\t * failed attempt, monotonic, reclaimable only by reboot.\n"
             + ind + "\t *\n"
-            + ind + "\t * Guarded on fe_armed_port so a failure while another port is\n"
-            + ind + "\t * already armed does not pull the scaffold out from under it.\n"
+            + ind + "\t * Freed unconditionally: the scaffold is single-owner in this\n"
+            + ind + "\t * driver — __fman_pcd_fe_arm_disengage() already releases it for\n"
+            + ind + "\t * whichever port disengages, without a per-port guard — so a\n"
+            + ind + "\t * failed arm has no other owner to protect. An earlier revision\n"
+            + ind + "\t * guarded on pcd->fe_armed_port, but that member does not exist\n"
+            + ind + "\t * in the staged tree and broke the build (run 30238415728).\n"
             + ind + "\t */\n"
-            + ind + "\tif (!pcd->fe_armed_port)\n"
-            + ind + "\t\tfman_pcd_fe_arm_free_scaffold(pcd);\n"
+            + ind + "\tfman_pcd_fe_arm_free_scaffold(pcd);\n"
             + ind + "\treturn err;\n"
             + ind + "}")
     src = src[:m.start()] + repl + src[m.end():]
