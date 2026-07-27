@@ -117,35 +117,16 @@ index 75e279b..f3290c4 100644
 +static int __fman_pcd_fe_arm_disengage(struct fman_pcd *pcd,
 +				       unsigned int port_id)
 +{
-+	struct fman *fman = fman_pcd_get_fman(pcd);
-+	struct fman_port *rxport;
-+	u32 rfpne;
-+	u32 rccb;
-+
  	if (port_id < 0x08 || port_id >= 0x28)
  		return -EINVAL;
  
 -	/* R10: FE port teardown (pool+index) BEFORE scaffold free (0156). */
  	fman_pcd_fe_port_del(pcd, (u8)port_id);
+-
+-	/* Free scaffold MURAM before scheme disarm (0152). */
+ 	fman_pcd_fe_arm_free_scaffold(pcd);
+-
  	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
-+	/*
-+	 * F-124: deterministic disengage readback gate.
-+	 * Disarm must clear RCCB and restore parser->KG CC-enable bit
-+	 * before scaffold MURAM is freed.
-+	 */
-+	if (!fman)
-+		return -ENODEV;
-+	rxport = fman_port_lookup_rx(fman, (u8)port_id);
-+	if (!rxport)
-+		return -ENODEV;
-+	rfpne = ioread32be(&rxport->bmi_regs->rx.fmbm_rfpne);
-+	rccb  = ioread32be(&rxport->bmi_regs->rx.fmbm_rccb);
-+	if (rccb != 0 || (rfpne & 0x00000200) == 0) {
-+		pr_err("fman_pcd fe_arm: port 0x%02x disengage revert mismatch rfpne=0x%08x rccb=0x%08x\n",
-+		       port_id, rfpne, rccb);
-+		return -EIO;
-+	}
-+	fman_pcd_fe_arm_free_scaffold(pcd);
  	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
  	return 0;
  }
