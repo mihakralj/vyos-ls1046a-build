@@ -1661,6 +1661,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_125.py" 2>&1
 fi
 
+# F-126 DIAGNOSTIC (TEMPORARY — delete with F-125). Tags every early return in
+# __fman_pcd_fe_arm_engage() with a unique pr_err. ISO 0501 shipped F-125 in
+# full ("2 change(s) applied") yet the 304 B/attempt leak and the -12 on port
+# 0x10 are unchanged, and dmesg has ruled out both the scaffold-alloc path and
+# F_097's verify gate. One board cycle with this in place names the site.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_126.py" 2>&1
+fi
+
 # F-095 (DELETED — stub, never implemented)
 
 fi
