@@ -73,6 +73,11 @@
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() returned on kg_port_arm_fe failure with pcd->fe_scaffold_* still set; the next attempt overwrote those fields, orphaning the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) permanently. Measured at exactly 304 B per failed engage on .185 and .106, reclaimable only by reboot, and the source of the arena fragmentation that made even single-port engage fail -ENOMEM. Also unwinds a partial 3-way allocation. Reuses the existing fman_pcd_fe_arm_free_scaffold(). Runs after F-118.",
       "date": "2026-07-27"
+    },
+    "F_126.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "F-126 DIAGNOSTIC (TEMPORARY): tag every early return in __fman_pcd_fe_arm_engage() with a unique pr_err so the -12 on port 0x10 names its own site. F-125 did not close the 304 B/attempt leak on ISO 0501; dmesg ruled out the scaffold-alloc path and F_097's verify gate, so the failing return is unidentified. DELETE this fixup and its manifest entry when F-125 closes.",
+      "date": "2026-07-27"
     }
   },
   "count": 41,
