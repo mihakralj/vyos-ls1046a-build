@@ -1564,6 +1564,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_128.py" 2>&1
 fi
 
+# F-129: Add FE-VM chain teardown to production fman_pcd_fe_disengage().
+# F_092 inserted teardown into the DEBUGFS handler only; the production
+# YNL/genl path had ZERO teardown. Board-verified 2026-07-27 on .185:
+# disengage leaves ehash int_buf refcount=1, 33280 B held, fe_pool engaged=YES.
+# Inserts teardown with list_empty guard after __fman_pcd_fe_arm_disengage()
+# in the production function. Runs after F-128.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_129.py" 2>&1
+    echo "### F-129: VM chain teardown in production fe_disengage()"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
