@@ -48,13 +48,12 @@ if disarm_line not in src:
 
 teardown_block = """\t__fman_pcd_fe_arm_disengage(pcd, hw_port_id);
 \t/* F-129: Tear down shared FE-VM chain on last port disengage.
-\t * Gate on list_empty, not fe_vm_chain_built: the ehash/fe_pool may
-\t * exist from FMan microcode pre-init (U-Boot loads ucode into MURAM)
-\t * and fe_vm_chain_built is only set by F_092's build block, which is
-\t * skipped when objects already exist (idempotent).  Check the ehash
-\t * table directly — if it has an int_buf, the chain was built.
+\t * Gate on fe_refcount (set by fe_pool_get, cleared by fe_pool_put).
+\t * When the last port disengages and fe_ports is empty, tear down
+\t * the shared chain (pool, singletons, ehash, hashfe, enq).
 \t */
-\tif (list_empty(&pcd->fe_ports) && !list_empty(&pcd->fe_ehash_tables)) {
+\tif (list_empty(&pcd->fe_ports) && pcd->fe_refcount) {
+\t\tpr_info("fman_pcd: F-129 tearing down FE-VM chain (last port disengaged)\\n");
 \t\tfman_pcd_fe_enq_free(pcd);
 \t\tfman_pcd_fe_hash_free(pcd);
 \t\tfman_pcd_ehash_drain(pcd);
