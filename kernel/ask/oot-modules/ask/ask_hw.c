@@ -77,6 +77,7 @@
 struct device;
 struct fman_port;
 struct fman *fman_bind(struct device *dev);
+struct device *fman_get_dev(struct fman *fman);
 struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
 u8 fman_port_get_id(struct fman_port *port);
 int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
