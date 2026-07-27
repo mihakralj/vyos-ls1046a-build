@@ -44,7 +44,7 @@ independently revertible. See F-125 in plans/ASK2-MASTER-PLAN.md.
 Disposition: permanent — allocation-lifecycle correctness.
 """
 
-import sys, os
+import sys, os, re
 
 kroot = "drivers/net/ethernet/freescale/fman"
 pcd_c = os.path.join(kroot, "fman_pcd.c")
@@ -100,37 +100,48 @@ else:
     print("### F-125: WARNING — scaffold alloc block not found (layout drift?)")
 
 # ── 2. Release the scaffold when the KG arm fails ─────────────────────
-old_arm = """\terr = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
-\t\t\t\t      (u32)fe_enter_off, &saved_engine, ekfc);
-\tif (err)
-\t\treturn err;"""
-
-new_arm = """\terr = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
-\t\t\t\t      (u32)fe_enter_off, &saved_engine, ekfc);
-\tif (err) {
-\t\t/*
-\t\t * F-125: release the scaffold we just built. Returning with
-\t\t * pcd->fe_scaffold_* still populated meant the next engage took
-\t\t * the fe_enter_off == 0 path again and OVERWROTE those fields,
-\t\t * orphaning this triple permanently — 304 bytes per failed
-\t\t * attempt, monotonic, reclaimable only by reboot.
-\t\t *
-\t\t * Guarded on fe_armed_port so a failure while another port is
-\t\t * already armed does not pull the scaffold out from under it.
-\t\t */
-\t\tif (!pcd->fe_armed_port)
-\t\t\tfman_pcd_fe_arm_free_scaffold(pcd);
-\t\treturn err;
-\t}"""
+#
+# Anchored by REGEX, not an exact multi-line literal. 42 fixups mutate this
+# same file and several rewrite this exact region (F_091 wraps the scaffold
+# block; F_097 injects a verify gate immediately before this call), so a
+# literal anchor silently no-ops in CI while still matching a local tree —
+# which is exactly what happened on run 30237744833: part 1 applied, part 2
+# reported "kg_port_arm_fe block not found", and the ISO shipped without the
+# actual leak fix.
+kg_re = re.compile(
+    r'(err\s*=\s*fman_pcd_kg_port_arm_fe\(pcd,[^;]*?;\s*\n)'   # the call
+    r'([ \t]*)if \(err\)\s*\n'                                  # if (err)
+    r'[ \t]*return err;',                                          # return err;
+    re.S)
 
 if "F-125: release the scaffold we just built" in src:
     print("### F-125: KG-arm unwind already applied")
-elif old_arm in src:
-    src = src.replace(old_arm, new_arm, 1)
+else:
+    m = kg_re.search(src)
+    if not m:
+        print("### F-125: ERROR — kg_port_arm_fe + 'if (err) return err;' not found")
+        print("### F-125: refusing to continue; the leak fix would silently no-op")
+        sys.exit(1)
+    ind = m.group(2)
+    repl = (m.group(1)
+            + ind + "if (err) {\n"
+            + ind + "\t/*\n"
+            + ind + "\t * F-125: release the scaffold we just built. Returning with\n"
+            + ind + "\t * pcd->fe_scaffold_* still populated meant the next engage\n"
+            + ind + "\t * re-entered the fe_enter_off == 0 path and OVERWROTE those\n"
+            + ind + "\t * fields, orphaning this triple permanently — 304 bytes per\n"
+            + ind + "\t * failed attempt, monotonic, reclaimable only by reboot.\n"
+            + ind + "\t *\n"
+            + ind + "\t * Guarded on fe_armed_port so a failure while another port is\n"
+            + ind + "\t * already armed does not pull the scaffold out from under it.\n"
+            + ind + "\t */\n"
+            + ind + "\tif (!pcd->fe_armed_port)\n"
+            + ind + "\t\tfman_pcd_fe_arm_free_scaffold(pcd);\n"
+            + ind + "\treturn err;\n"
+            + ind + "}")
+    src = src[:m.start()] + repl + src[m.end():]
     changes += 1
     print("### F-125: KG-arm failure now releases the scaffold")
-else:
-    print("### F-125: WARNING — kg_port_arm_fe block not found")
 
 if changes:
     open(pcd_c, "w").write(src)
