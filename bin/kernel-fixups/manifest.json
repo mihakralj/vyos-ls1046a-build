@@ -88,9 +88,14 @@
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-127 DIAGNOSTIC (TEMPORARY): tag every early return in fman_pcd_fe_engage() (the wrapper) with a unique pr_err. On ISO 0530 the genl engage fails with -12 but F-126's tags never fire, proving the -12 comes from the wrapper before __fman_pcd_fe_arm_engage() is called. DELETE when F-125 closes.",
       "date": "2026-07-27"
+    },
+    "F_128.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "F-128: F-125(c) — free ehash on LAST port disengage. Changes F_092's teardown guard from fe_vm_chain_built to fe_vm_chain_built && list_empty(&pcd->fe_ports). The shared FE-VM chain is torn down only when the last port disengages, returning 33280 B MURAM (int_buf) + 512 KiB DDR (bucket table). Runs after F-092.",
+      "date": "2026-07-27"
     }
   },
-  "count": 43,
+  "count": 44,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
