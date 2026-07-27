@@ -1,4 +1,4 @@
-**Version 2.2.0 · 2026-07-26 · HADS 1.0.0**
+**Version 2.4.0 · 2026-07-27 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -20,49 +20,44 @@
 
 | ID | Priority | Severity | Finding | Status |
 |---|---|---:|---|---|
-| CR-001 | P0 | CRITICAL | Production CLI arms the dormant debugfs scaffold; per-flow FE insertion errors are ignored while flows are reported `offloaded=true` | OPEN |
+| CR-001 | P0 | CRITICAL | Production control path migrated to YNL, but engage/disengage remains non-reversible on silicon and offload ownership still needs end-to-end proof | PARTIAL |
 | CR-002 | P0 | HIGH | FE-VM key serialization reverses TCP/UDP port bytes on little-endian ARM64 | **FIXED** `4a1c9e2` — shared builder + silicon-vector KUnit gate |
 | CR-003 | P0 | HIGH | VyOS commit-path error handling is broken and fail-open: integer return code is treated as stderr, missing/unsupported paths silently succeed, helper teardown errors are swallowed | **PARTIAL** — the `AttributeError` crash is fixed (F-121, `b5998f33`); the fail-open half (no `ConfigError`, silent unsupported paths, `\|\| true` teardown) is still OPEN |
-| CR-004 | P1 | HIGH | Stale-MAC remove-then-reinsert can resurrect a destroyed flow or permanently lose tracking after reinsertion failure | OPEN |
-| CR-005 | P1 | HIGH | `num_hw_backed == 0` stale-MAC shortcut has a lost-event race with an in-flight hardware insert | OPEN |
-| CR-006 | P1 | HIGH | `ask.yaml` does not describe the active `get-info` wire format and omits engage/disengage operations | OPEN |
-| CR-007 | P1 | MEDIUM | Removed Fork-A programming still imposes a false 32-flow cap and allocates unused HM/shadow state | OPEN |
-| CR-008 | P1 | MEDIUM | ASK retains the `fman_bind()` device reference for the module lifetime without releasing it | OPEN |
+| CR-004 | P1 | HIGH | Stale-MAC remove-then-reinsert can resurrect a destroyed flow or permanently lose tracking after reinsertion failure | PARTIAL |
+| CR-005 | P1 | HIGH | `num_hw_backed == 0` stale-MAC shortcut has a lost-event race with an in-flight hardware insert | **FIXED** |
+| CR-006 | P1 | HIGH | `ask.yaml` does not describe the active `get-info` wire format and omits engage/disengage operations | **FIXED** |
+| CR-007 | P1 | MEDIUM | Removed Fork-A programming still imposes a false 32-flow cap and allocates unused HM/shadow state | PARTIAL |
+| CR-008 | P1 | MEDIUM | ASK retains the `fman_bind()` device reference for the module lifetime without releasing it | **FIXED** |
 | CR-009 | P2 | MEDIUM | F-120 flush can stop partially complete after one concurrently removed batch | **FIXED** — completion now requires an empty collection; bounded stall guard |
 | CR-010 | P2 | MEDIUM | `ask_flow_insert()` performs an RCU-protected rhashtable lookup without an RCU read-side critical section | **FIXED** — precheck wrapped, retained as a hint only |
-| CR-011 | P2 | LOW | Authoritative comments and KUnit tests still encode disproven fake-ID and `-EAGAIN` contracts | OPEN |
-| CR-012 | P2 | HIGH when enabled | XFRM add returns success without programming hardware; currently unreachable but unsafe to expose | GATED |
+| CR-011 | P2 | LOW | Authoritative comments and KUnit tests still encode disproven fake-ID and `-EAGAIN` contracts | PARTIAL |
+| CR-012 | P2 | HIGH when enabled | XFRM add returns success without programming hardware; currently unreachable but unsafe to expose | **FIXED-GATED** |
 
 ## 3. Detailed findings
 
-### 3.1 CR-001 P0 — production CLI reports per-flow offload without installing a per-flow hardware record
+### 3.1 CR-001 P0 — production path switched to YNL, but end-to-end ownership/reversibility remains unproven
 
-**[BUG] Symptom.** The operator enables ASK through the supported VyOS command, `dump-flows` can report `offloaded=true`, but the production helper has only installed the debugfs `CONT_LOOKUP` scaffold. No FE-VM ehash table or per-flow record is guaranteed to exist.
+**[BUG] Symptom (current, 2026-07-27).** After switching CLI control to YNL engage/disengage, both `.106` and `.185` still drift after a successful engage+disengage cycle (`pcd-snapshot` non-clean: KG/BMI state changes, MURAM delta), so the production path is still not release-safe.
 
 **[SPEC] Root cause.**
 
-1. `data/vyos-1x-031-offload-ask-cli.patch` calls `/usr/local/bin/vyos-offload-ask --port <id> engage`.
-2. `board/scripts/vyos-offload-ask:engage()` writes `engage <port> 0` to `fman_pcd/0/fe_arm`. Its own contract calls this “PRODUCTION path: CONT_LOOKUP scaffold, FE-VM dormant.”
-3. The helper does not call the generic-netlink `ASK_CMD_ENGAGE` handler. That handler reaches `ask_hw_offload_engage()`, which calls `fman_pcd_fe_engage()` and `__fman_pcd_fe_build_vm_chain()`, including `fman_pcd_ehash_table_set()`.
-4. Every successful flow replace calls `ask_fe_flow_insert()`, but that function is `void` and discards the return from `fman_pcd_fe_flow_add()`.
-5. `ask_hw_flow_insert()` no longer programs the removed Fork-A CC entry. It allocates an HM reference, a 32-slot shadow entry and a cookie, then returns success.
-6. `ask_flow_insert()` interprets that cookie as hardware ownership, sets `hw_backed=true`, increments `num_hw_backed`, and exposes `offloaded=true`.
+1. `board/scripts/vyos-offload-ask` now calls `ynl --family ask --do engage|disengage` with `port-id`.
+2. Boards `.106` and `.185` now expose YNL ops `engage`/`disengage`; transport no longer depends on debugfs writes.
+3. Even with successful netlink return (`null` replies, rc 0/0), `pcd-snapshot diff` reports non-reversible drift on both DUTs (KG scheme[4], BMI `rfpne/rccb`, MURAM used change), so kernel disengage does not restore baseline.
+4. `ynl --do get-info` decode still fails (`driver-version` decode mismatch), indicating remaining ABI/schema/runtime mismatch in the shipped board environment.
 
-**[SPEC]** Qdrant’s 2026-07-25 board result independently observed this exact shipping-path state: `fe_flow` reported no ehash table, `fman_pcd_fe_flow_add()` returned `-ENODEV`, and the error was a safe no-op only because the caller discarded it. Current source still selects that helper path.
+**[NOTE] 2026-07-27 update.** The old helper-path defect is code-fixed (YNL path in repo and hot-patched on both DUTs), but the new silicon blocker is disengage/revert correctness in the kernel/FMan path, not CLI transport.
 
 **[SPEC] Additional lifetime defect.** `ask_fe_flow_insert()` is unconditional: it does not verify that the ingress port is engaged, does not bind the record to a per-port engagement generation, and uses the module-global cached `ask_hw_enq_fe_off`. Disengage tears down the FE chain but does not clear that cached offset. A later replace can therefore attempt to program an offset belonging to a freed or rebuilt MURAM object.
 
 **[SPEC] Required fix.**
 
-1. Make the VyOS CLI use the generic-netlink/YNL engage and disengage operations; production configuration must not write debugfs.
-2. Add engage/disengage and `port-id` to `ask.yaml`, then generate or use a typed userspace client.
-3. Make FE-record insertion return an error to the replace transaction.
-4. Publish `hw_backed` and `offloaded=true` only after the FE record is installed and read back successfully.
-5. On FE insertion failure, roll back the cookie, HM reference and shadow state before returning a software-fallback result.
-6. Couple each flow to an engaged port/generation and reject insertion when no valid FE chain exists.
-7. Clear or generation-invalidate cached FE offsets during disengage.
+1. Keep CLI on YNL only (done in code); no production debugfs control writes.
+2. Fix kernel disengage/revert semantics so engage+disengage is byte-clean under `pcd-snapshot` on both DUTs.
+3. Keep FE-record insertion transactional and ownership publication gated on successful FE install/readback.
+4. Couple flows to engagement generation and invalidate cached FE offsets on disengage.
 
-**[SPEC] Acceptance gate.** Engage through the real VyOS CLI; verify an ehash table exists; install one non-palindromic TCP flow; verify the exact 13-byte record and bucket pointer; prove matching traffic takes HIT while a neighboring tuple takes MISS; remove the flow and prove the record, HM ref, cookie and `num_hw_backed` all return to baseline.
+**[SPEC] Acceptance gate.** On both `.106` and `.185`, run three consecutive YNL engage/disengage cycles with zero `pcd-snapshot` drift first; only then run FE/HIT flow install/remove proofs.
 
 ### 3.2 CR-002 P0 — FE-VM key serialization reverses transport ports
 
@@ -134,6 +129,8 @@ key_bytes.bytes[10] = key->sport & 0xff;
 
 **[SPEC] Required fix.** Track a neighbour generation in the resolved adjacency and revalidate it before publishing the hardware flow, or remove the zero-counter shortcut until an adjacency index provides synchronized ownership.
 
+**[SPEC] FIXED.** The zero-counter fast-return was removed from `ask_flow_neigh_mac_changed()`. The handler now always walks with the existing `hw_backed` filter, so neighbour updates are no longer dropped by an advisory `num_hw_backed` race.
+
 ### 3.6 CR-006 P1 — YNL schema and live generic-netlink ABI disagree
 
 **[BUG] Symptom.** A client generated from `kernel/ask/uapi/ask.yaml` can fail to decode or mislabel `get-info`, and cannot invoke the kernel’s engage/disengage handlers.
@@ -145,6 +142,8 @@ key_bytes.bytes[10] = key->sport & 0xff;
 3. The schema omits `ASK_CMD_ENGAGE`, `ASK_CMD_DISENGAGE` and the required `ASK_ATTR_PORT_ID`, even though the UAPI enum and live handlers implement them.
 
 **[SPEC] Required fix.** Make `ask.yaml` the canonical ABI description, align all numeric IDs and nesting with `ask.h`, generate validation artifacts in CI, and route the production CLI through the generated interface.
+
+**[SPEC] FIXED.** `kernel/ask/uapi/ask.yaml` now matches `ask.h`/`ask_genl.c` for `get-info`, `get-muram`, flow/SA/event/policer attrs, and includes `engage`/`disengage` with top-level `port-id`.
 
 ### 3.7 CR-007 P1 — dead Fork-A bookkeeping caps the FE-VM path at 32 flows
 
@@ -162,6 +161,8 @@ key_bytes.bytes[10] = key->sport & 0xff;
 
 **[SPEC] Required fix.** Delete the dead Fork-A shadow/HM path physically, make successful FE records the hardware ownership object, and derive capacity from the ehash allocator rather than `FMAN_CC_MAX_STATIC_KEYS`.
 
+**[NOTE] PARTIAL.** The hard `-ENOSPC` gate at 32 shadow keys was removed. Flow insertion no longer fails when no shadow slot is free; slot metadata is now optional and `cc_handle` is zero when no slot exists. HM/shadow bookkeeping is still present and should be removed fully in a follow-up.
+
 ### 3.8 CR-008 P1 — `fman_bind()` reference is never released
 
 **[BUG] Symptom.** Each successful ASK hardware bring-up retains one device reference until reboot, including across a module unload/reload cycle.
@@ -178,6 +179,8 @@ struct fman *fman_bind(struct device *fm_dev)
 **[SPEC]** `ask_hw_pcd_bringup()` correctly releases the temporary platform-device reference obtained by `of_find_device_by_node()`, but the separate reference acquired inside `fman_bind()` is not released by `ask_hw_pcd_teardown()`. No `fman_unbind()` helper exists in the current API.
 
 **[SPEC] Required fix.** Add/use a symmetric public unbind helper or retain the bound `struct device *` explicitly and call `put_device()` exactly once during teardown and every post-bind failure unwind.
+
+**[SPEC] FIXED.** `ask_hw_pcd_teardown()` now balances the bind reference with `put_device(fman_get_dev(h->fman))`.
 
 ### 3.9 CR-009 P2 — F-120 flush can return with flows still present
 
@@ -203,6 +206,8 @@ struct fman *fman_bind(struct device *fm_dev)
 
 **[SPEC] Required fix.** Rewrite the comments and tests around the current ownership bit, cookie namespace and deferred-insert behavior. Add negative assertions proving a synthetic ID never enters `ask_hw_flow_remove()`.
 
+**[NOTE] PARTIAL.** Core contract comments were updated for cookie-based IDs (`hw_flow_id == 0` is SW-only) and stale packed-token wording was removed from KUnit narrative comments. Additional behavioral KUnit assertions are still needed.
+
 ### 3.12 CR-012 P2 — XFRM add is success-shaped without hardware programming
 
 **[BUG]** `ask_xfrm_state_add()` returns success while no SA is programmed. If `xfrmdev_ops` and `NETIF_F_HW_ESP` are later exposed without replacing this body, the XFRM core may send packets to a nonexistent offload path.
@@ -210,6 +215,8 @@ struct fman *fman_bind(struct device *fm_dev)
 **[SPEC]** This is not an active packet-loss defect today because ASK does not register the required XFRM device operations or advertise `NETIF_F_HW_ESP`.
 
 **[SPEC] Required gate.** Until real CAAM/QI SA programming, rollback and lifetime handling exist, return `-EOPNOTSUPP` and keep all capability bits disabled. Add a feature-enable test that refuses registration while the stub remains.
+
+**[SPEC] FIXED-GATED.** `ask_xfrm_state_add()` now unconditionally returns `-EOPNOTSUPP` (fail-closed) until real SA programming exists.
 
 ## 4. Incomplete features that are not active defects
 
@@ -242,13 +249,13 @@ struct fman *fman_bind(struct device *fm_dev)
 
 | Finding | Source anchors |
 |---|---|
-| CR-001 | `data/vyos-1x-031-offload-ask-cli.patch:set_ask_offload`; `board/scripts/vyos-offload-ask:engage`; `ask_genl.c:ask_cmd_engage`; `ask_hw.c:ask_hw_offload_engage`; `ask_flow_offload.c:ask_fe_flow_insert`; Qdrant board result 2026-07-25 |
+| CR-001 | `data/vyos-1x-031-offload-ask-cli.patch:set_ask_offload`; `board/scripts/vyos-offload-ask`; `ask_genl.c:ask_cmd_engage/disengage`; `ask_hw.c:ask_hw_offload_engage/disengage`; dual-DUT retest 2026-07-27 (.106/.185) |
 | CR-002 | `ask_flow_offload.c:ask_fe_flow_insert`, `ask_fe_flow_remove`; Qdrant verified key `0a63026a0a6302b906ad9cd903` |
 | CR-003 | `data/vyos-1x-031-offload-ask-cli.patch:set_ask_offload`; helper `engage`, `disengage`, `hit_disengage`, `flow_clear` |
 | CR-004/005 | `ask_flow_offload.c:ask_flow_neigh_mac_changed`; `ask_flow.c:ask_flow_insert`, `ask_flow_remove` |
 | CR-006 | `kernel/ask/uapi/ask.yaml`; `include/uapi/linux/ask/ask.h`; `ask_genl.c:ask_cmd_get_info`, engage/disengage ops |
 | CR-007 | `ask_hw.c:ask_hw_flow_insert`, Fix C1 comments, `FMAN_CC_MAX_STATIC_KEYS` guard |
-| CR-008 | Linux v6.18 `fman.c:fman_bind`; `ask_hw.c:ask_hw_pcd_bringup`, `ask_hw_pcd_teardown` |
+| CR-008 | Linux v6.18 `fman.c:fman_bind`; `ask_hw.c:ask_hw_pcd_bringup`, `ask_hw_pcd_teardown` (`put_device(fman_get_dev(...))`) |
 | CR-009 | `ask_flow.c:ask_flow_flush`, `if (!freed) break` |
 | CR-010 | `ask_flow.c:ask_flow_lookup`, duplicate precheck in `ask_flow_insert` |
 | CR-011 | `include/ask_internal.h` hardware-ID contract; `tests/ask_test_hw_pcd.c` |
@@ -274,10 +281,10 @@ struct fman *fman_bind(struct device *fm_dev)
 1. Fix CR-001 and CR-003 together: one production control plane, generic netlink/YNL only, fail-closed configuration, and no debugfs writes from VyOS commit.
 2. Fix CR-002 before the first production FE-record validation; its exact 13-byte KUnit vector is a hard gate.
 3. Make FE insertion transactional: record success must precede `hw_backed`, with full rollback and engagement-generation checks.
-4. Fix CR-004/005 before declaring stale-MAC handling complete.
+4. Finish CR-004 lifecycle/tombstone closure before declaring stale-MAC handling complete.
 5. Align `ask.yaml` with the live ABI and generate the userspace client used by step 1.
 6. Delete dead Fork-A bookkeeping, remove the artificial 32-flow cap, and release the FMan reference.
 7. Close CR-009/010/011 with focused KUnit coverage.
 8. Run a cold-boot silicon session through the actual VyOS CLI and update `ASK2-MASTER-PLAN.md` only after the acceptance evidence is captured.
 
-**[NOTE] Progress 2026-07-26.** Steps completed out of order because they were small, verified and self-contained: CR-002 (step 2) is code-fixed with its KUnit vector, and CR-009/CR-010 (step 7) are closed. **Step 2's silicon half remains blocked by step 1** — the 13-byte key can be pinned in KUnit, but proving it takes a HIT needs the FE-VM path reachable through the shipping CLI, which CR-001 prevents. Steps 1, 3, 4, 5, 6 are untouched and are the real remaining work. Two adjacent board-found defects landed alongside: **F-121** (`AttributeError` in the commit path — the fixed half of CR-003) and **F-122** (`vyos-offload-ask engage` non-idempotent), both recorded in the master-plan defect table.
+**[NOTE] Progress 2026-07-27.** Control-plane transport is now exercised via YNL on both DUTs (ops present; helper path switched), but silicon still fails reversibility: engage/disengage leaves KG/BMI/MURAM drift on `.106` and `.185`. Immediate priority remains CR-001/003 closure at kernel disengage semantics, then CR-004 lifecycle hardening.
