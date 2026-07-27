@@ -562,18 +562,11 @@ EXPORT_SYMBOL_GPL(ask_flow_walk);
  *
  * It used to unlink entries straight out of the walker and call_rcu them,
  * which skipped ask_hw_flow_remove() entirely. Every HW-backed flow therefore
- * leaked, per flow:
+ * leaked its xarray cookie + kmem_cache object (ask_hw_cookie_free never ran).
  *
- *   - its CC shadow slot — p->shadow[i].used stayed true and p->nkeys was
- *     never decremented. That is the damaging one: ask_hw_flow_insert()
- *     refuses at p->nkeys >= FMAN_CC_MAX_STATIC_KEYS (32), so flushing 32
- *     HW-backed flows permanently filled the port's CC tree. Every later
- *     insert returned -ENOSPC and silently fell back to the software path,
- *     with no recovery short of a module reload — from a command documented
- *     as "debug/recovery".
- *   - its HM next-hop reference (fman_hm_nexthop_put never ran), so the
- *     MURAM node was never freed.
- *   - its xarray cookie + kmem_cache object (ask_hw_cookie_free never ran).
+ * CR-007 (2026-07-27): the Fork-A CC shadow slot and HM next-hop references
+ * that the original F-120 comment described are now deleted — the FE-VM ehash
+ * path (Fork-B) manages its own flow keys via ask_fe_flow_insert/remove().
  *
  * It also left t->num_hw_backed permanently high, which disabled the
  * neigh stale-MAC fast-path skip in ask_flow_neigh_mac_changed().
