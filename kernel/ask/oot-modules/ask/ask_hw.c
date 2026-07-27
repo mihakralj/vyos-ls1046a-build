@@ -645,7 +645,19 @@ int ask_hw_offload_engage(u8 hw_port_id)
          * This replaces the debugfs bridge — debugfs is for diagnostics only.
          */
         rc = fman_pcd_fe_engage(h->fman, hw_port_id);
-        if (rc) {
+        if (rc == -EBUSY) {
+                /*
+                 * F-122/F-124: treat "already armed" as idempotent success.
+                 * The FE state may have been left engaged while our software
+                 * flag is false (e.g. after prior partial transitions). We
+                 * still return success so userspace can issue disengage and
+                 * converge hardware/software state deterministically.
+                 */
+                ask_pr_warn("hw: fman_pcd_fe_engage port 0x%02x already armed; treating as idempotent success\n",
+                            hw_port_id);
+                rc = 0;
+                goto out_unlock;
+        } else if (rc) {
                 ask_pr_err("hw: fman_pcd_fe_engage port 0x%02x failed: %d\n",
                            hw_port_id, rc);
                 goto out_unlock;
@@ -701,7 +713,7 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                         break;
                 }
         }
-        if (!p || !p->offload_engaged) {
+        if (!p) {
                 mutex_unlock(&h->lock);
                 return;                 /* idempotent no-op */
         }
@@ -721,7 +733,7 @@ void ask_hw_offload_disengage(u8 hw_port_id)
          * last disengage (1→0 transition).  Intermediate disengages on
          * other ports decrement the refcount without touching hardware.
          */
-        if (atomic_dec_return(&h->hit_release_refcnt) == 0)
+        if (p->offload_engaged && atomic_dec_return(&h->hit_release_refcnt) == 0)
                 fman_port_set_silicon_hit_release_all(h->fman, false);
 
         p->offload_engaged = false;
