@@ -122,12 +122,8 @@ static void hw_pcd_test_unpack_null_safe(struct kunit *test)
 static void hw_pcd_test_token_sentinels(struct kunit *test)
 {
 	/*
-	 * Lock the macro values: ask_flow.c body-3's fake_hw_id_seq
-	 * starts at 1 and increments without a token — the SW-fallback
-	 * ids look like packed (token=0, idx=N). Real HW ids always
-	 * have token >= 1 (TOKEN_V4_TCP). This invariant is what makes
-	 * the unconditional ask_hw_flow_remove() call from body-3 safe:
-	 * the TOKEN_NONE arm short-circuits to 0 without touching HW.
+	 * Legacy helpers still expose token constants for compatibility
+	 * with older packed-id paths used by historical tests.
 	 */
 	KUNIT_EXPECT_EQ(test, (u32)ASK_HW_FLOW_ID_TOKEN_NONE,   0u);
 	KUNIT_EXPECT_EQ(test, (u32)ASK_HW_FLOW_ID_TOKEN_V4_TCP, 1u);
@@ -238,14 +234,9 @@ static void hw_pcd_test_remove_token_none_is_noop(struct kunit *test)
 	int rc;
 
 	/*
-	 * SW-only ids look like packed (token=NONE, idx=N). Body-3
-	 * calls ask_hw_flow_remove() unconditionally on every tear-
-	 * down regardless of whether the insert went through HW or
-	 * fell back to the SW counter. The TOKEN_NONE arm of the
-	 * dispatcher MUST short-circuit to 0 (or -ENODEV when no PCD)
-	 * without touching hardware. Both are non-error from body-3's
-	 * point of view — the SW table has already released ownership
-	 * of the cookie.
+	 * SW-only ids are represented as 0 in the current cookie-based
+	 * contract. Older packed token/index ids are still accepted as
+	 * benign no-op input to keep remove idempotent.
 	 */
 	sw_only_id = ask_priv_pack_hw_flow_id(ASK_HW_FLOW_ID_TOKEN_NONE, 7);
 	rc = ask_hw_flow_remove(sw_only_id);
@@ -268,13 +259,7 @@ static void hw_pcd_test_remove_unknown_token(struct kunit *test)
 	u32 bogus_id;
 	int rc;
 
-	/*
-	 * Token 0xff is not assigned to any protocol. On a populated
-	 * PCD, the dispatcher returns -EINVAL via the default arm; on
-	 * the no-PCD kunit harness the early -ENODEV wins. Both are
-	 * acceptable — the contract is "do not crash, do not silently
-	 * succeed".
-	 */
+	/* Unknown synthetic ids must never crash and must not silently succeed. */
 	bogus_id = ask_priv_pack_hw_flow_id(0xff, 1);
 	rc = ask_hw_flow_remove(bogus_id);
 	KUNIT_EXPECT_TRUE(test, rc == -ENODEV || rc == -EINVAL);

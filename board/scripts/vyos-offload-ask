@@ -3,10 +3,10 @@
 #
 # TWO ENGAGEMENT MODES:
 #
-#   engage / disengage  (PRODUCTION, current shipping path)
-#     CONT_LOOKUP pass-through: RCCB→group_table→miss-AD→kernel Rx FQ.
-#     fe_enter_off=0 in fe_arm.  FE-VM chain never entered.
-#     Proven: 6.87 Gbps M2 gate, fully reversible.
+# engage / disengage  (PRODUCTION path)
+#     Uses ASK generic-netlink commands (engage/disengage) through YNL.
+#     This reaches ask_hw_offload_engage()/disengage() and the kernel API
+#     fman_pcd_fe_engage()/fman_pcd_fe_disengage() path (no debugfs writes).
 #
 #   hit-engage / hit-disengage  (HIT TEST — SHORT-TERM VERIFICATION ONLY)
 #     Builds full FE chain via debugfs verbs and engages RCCB→FE_ENTER
@@ -29,6 +29,7 @@
 set -e
 
 PCD_BASE="/sys/kernel/debug/fman_pcd/0"
+YNL_BIN="$(command -v ynl 2>/dev/null || true)"
 PORT="0x11"   # default: eth4 (FMan MAC10, RX BMI port 0x11)
 
 while [ $# -gt 0 ]; do
@@ -43,6 +44,24 @@ shift || true
 die()  { echo "ASK offload ERROR: $*" >&2; exit 1; }
 warn() { echo "ASK offload WARNING: $*" >&2; }
 info() { echo "ASK offload: $*"; }
+
+# ---------------------------------------------------------------------------
+# ynl_do <op> [json]
+# ---------------------------------------------------------------------------
+ynl_do() {
+    local op="$1"
+    local json="${2-}"
+    [ -n "$json" ] || json='{}'
+    [ -n "$YNL_BIN" ] && [ -x "$YNL_BIN" ] || die "ynl not installed in PATH"
+    "$YNL_BIN" --family ask --do "$op" --json "$json" >/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# port_id_dec — convert 0x10/0x11 style input to decimal u8 for YNL.
+# ---------------------------------------------------------------------------
+port_id_dec() {
+    printf '%d' "$((PORT))" 2>/dev/null || die "invalid --port value '$PORT'"
+}
 
 # ---------------------------------------------------------------------------
 # resolve_fqid — port's kernel Rx default FQID (hex, no 0x prefix).
@@ -74,37 +93,24 @@ read_fe_offset() {
 }
 
 # ---------------------------------------------------------------------------
-# engage — PRODUCTION path: CONT_LOOKUP scaffold, FE-VM dormant.
+# engage — PRODUCTION path via generic-netlink/YNL.
 # ---------------------------------------------------------------------------
 engage() {
-    local miss_fqid
-    miss_fqid=$(resolve_fqid)
-    if [ -z "$miss_fqid" ]; then
-        warn "FQID resolution failed — kernel will fall back to params-page 0x0C"
-        miss_fqid="0"
-    fi
-
-    info "engaging port $PORT — CONT_LOOKUP pass-through (FQ 0x$miss_fqid)"
-
-    # fe_enter_off=0 → scaffold: RCCB→group_table→miss-AD→kernel FQ.
-    # Current fe_arm ABI is: engage <port> <fe_enter_off>
-    # MISS FQID is resolved in-kernel during engage.
-    echo "engage $PORT 0" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
-
-    # Arm workspace pool (FmPortSetFESupport).  Required even in scaffold mode
-    # so any future FE frame carves from the right pool, not MURAM offset 0.
-    echo "set $PORT" > "$PCD_BASE/fe_port" 2>/dev/null || warn "fe_port set failed (pool not armed)"
-
-    info "ENGAGED — CONT_LOOKUP pass-through, MISS→FQ 0x$miss_fqid"
+    local port_id
+    port_id="$(port_id_dec)"
+    info "engaging port $PORT via ask genl (port-id=$port_id)"
+    ynl_do engage "{\"port-id\": $port_id}"
+    info "ENGAGED"
 }
 
 # ---------------------------------------------------------------------------
-# disengage — PRODUCTION path teardown.
+# disengage — PRODUCTION path teardown via generic-netlink/YNL.
 # ---------------------------------------------------------------------------
 disengage() {
+    local port_id
+    port_id="$(port_id_dec)"
     info "disengaging port $PORT..."
-    echo "del $PORT"       > "$PCD_BASE/fe_port" 2>/dev/null || true  # F-074: pool before scheme
-    echo "disengage $PORT" > "$PCD_BASE/fe_arm"  2>/dev/null || true
+    ynl_do disengage "{\"port-id\": $port_id}"
     info "DISENGAGED"
 }
 

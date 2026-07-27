@@ -383,7 +383,7 @@ void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie);
  * full layout, so the order here works.
  *
  * Contract for ask_hw_flow_insert():
- *   return  0           -> packed (token, idx) hw_flow_id in *out_hw_id;
+ *   return  0           -> non-zero cookie hw_flow_id in *out_hw_id;
  *                          caller stores it in struct ask_flow.hw_flow_id
  *                          and uses ask_hw_flow_remove() at teardown
  *           -ENODEV     -> no HW backing for this protocol/netdev (no DPAA,
@@ -398,10 +398,10 @@ void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie);
  *                          rather than silently fall back, so userspace
  *                          observes the error
  *
- * ask_hw_flow_remove() is NULL-safe when @hw_flow_id has token NONE
- * (an SW-only id from the fake counter) and returns 0 in that case so
+ * ask_hw_flow_remove() is NULL-safe when @hw_flow_id is 0
+ * (SW-only fallback / no HW backing) and returns 0 in that case so
  * callers can call it unconditionally on every flow tear-down without
- * inspecting the token first.
+ * inspecting the id first.
  *
  * ask_hw_flow_query_stats() returns -EOPNOTSUPP at body-2; per-key
  * MURAM counters land in M3 with the bulk OP_FLOW_DUMP_STATS poller.
