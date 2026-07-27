@@ -69,7 +69,7 @@ def tag(m):
     return (
         f'{indent}do {{\n'
         f'{indent}\tpr_err("fman_pcd F-127: fe_engage port 0x%02x early-return #%d rc=%d\\n",\n'
-        f'{indent}\t       (unsigned int)hw_port_id, (int)({expr}));\n'
+        f'{indent}\t       (unsigned int)hw_port_id, {n}, (int)({expr}));\n'
         f'{indent}\treturn {expr};\n'
         f'{indent}}} while (0);'
     )
