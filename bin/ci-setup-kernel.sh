@@ -1661,6 +1661,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_125.py" 2>&1
 fi
 
+# F-122: make fe_arm engage idempotent. Adds test_bit(fe_port_armed) check at
+# the top of __fman_pcd_fe_arm_engage() (shared core, protects both debugfs and
+# API paths) and changes the F-107 -EBUSY guard in fman_pcd_fe_engage() to
+# return 0 with pr_info. The caller asked for the port to be engaged and it
+# already is — the desired state is achieved. Runs before F-125/F-126 so the
+# idempotency check is the first thing in the function.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_122.py" 2>&1
+fi
+
 # F-126 DIAGNOSTIC (TEMPORARY — delete with F-125). Tags every early return in
 # __fman_pcd_fe_arm_engage() with a unique pr_err. ISO 0501 shipped F-125 in
 # full ("2 change(s) applied") yet the 304 B/attempt leak and the -12 on port
@@ -1668,6 +1678,15 @@ fi
 # F_097's verify gate. One board cycle with this in place names the site.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_126.py" 2>&1
+fi
+
+# F-127 DIAGNOSTIC (TEMPORARY — delete with F-125). Tags every early return in
+# fman_pcd_fe_engage() (the wrapper, not the core). On ISO 0530 the genl engage
+# fails with -12 but F-126's tags never fire, proving the -12 comes from the
+# wrapper before __fman_pcd_fe_arm_engage() is called. One board cycle names
+# the exact site in the wrapper.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_127.py" 2>&1
 fi
 
 # F-095 (DELETED — stub, never implemented)
