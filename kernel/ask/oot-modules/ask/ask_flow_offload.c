@@ -648,23 +648,6 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
         if (is_zero_ether_addr(new_mac) || is_multicast_ether_addr(new_mac))
                 return;
 
-        /*
-         * Fast path: nothing is offloaded, so the walk below can only match
-         * zero flows. This is the steady state whenever ASK is disengaged,
-         * where every ARP/ND update would otherwise walk the whole table for
-         * nothing. Advisory read — a stale value costs at most one redundant
-         * walk or one deferred rebuild that the next event picks up, never
-         * correctness.
-         *
-         * The walk itself is still O(total flows); a proper (oif, l3_proto,
-         * dst_ip) adjacency index is the durable fix and is tracked as
-         * finding 2.4 in plans/ask2-code-review.md. Combined with the
-         * coalescing in ask_neigh.c and the cheap hw_backed early-out in
-         * ask_neigh_mac_collect(), the realistic hot paths are covered.
-         */
-        if (atomic_read(&t->num_hw_backed) == 0)
-                return;
-
         ctx.ifindex      = dev->ifindex;
         ctx.dst_ip       = dst_ip;
         ctx.l3_proto     = l3_proto;
@@ -678,11 +661,53 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
                 return;
 
         list_for_each_entry_safe(fx, tmp, &ctx.fixups, node) {
+                struct ask_flow *cur;
+                struct ask_flow_key old_key;
+                u32 old_oif;
+                u32 old_action_flags;
+                u8 old_dir;
+                bool snapshot_ok = false;
+
+                rcu_read_lock();
+                cur = ask_flow_lookup(t, fx->cookie);
+                if (cur) {
+                        old_key = cur->key;
+                        old_oif = cur->oif;
+                        old_action_flags = cur->action_flags;
+                        old_dir = cur->dir;
+                        snapshot_ok = true;
+                }
+                rcu_read_unlock();
+                if (!snapshot_ok) {
+                        list_del(&fx->node);
+                        kfree(fx);
+                        continue;
+                }
+
                 ask_flow_remove(t, fx->cookie);
+                rcu_read_lock();
+                cur = ask_flow_lookup(t, fx->cookie);
+                rcu_read_unlock();
+                if (cur) {
+                        list_del(&fx->node);
+                        kfree(fx);
+                        continue;
+                }
                 rc = ask_flow_insert(t, fx->cookie, &fx->key, fx->oif,
                                      fx->action_flags, fx->dir, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
+                if (rc) {
+                        int restore_rc;
+
+                        restore_rc = ask_flow_insert(t, fx->cookie, &old_key, old_oif,
+                                                     old_action_flags, old_dir, &hw_id);
+                        if (restore_rc == -EEXIST)
+                                restore_rc = 0;
+                        if (restore_rc)
+                                pr_warn_ratelimited("ask: neigh: rebuild rollback failed cookie=0x%llx rc=%d\n",
+                                                    fx->cookie, restore_rc);
+                }
                 if (l3_proto == ASK_FLOW_L3_IPV6)
                         pr_info_ratelimited("ask: neigh: stale-MAC rebuild cookie=0x%llx dev=%s dst_ip=%pI6 nh=%pM rc=%d\n",
                                             fx->cookie, netdev_name(dev), dst_ip,
@@ -1246,14 +1271,26 @@ void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE])
  * instead of filp_open() + kernel_write() to /sys/kernel/debug/.../fe_flow.
  * Key is MSB-first EKFC extraction order: SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2).
  */
-static void ask_fe_flow_insert(const struct ask_flow_key *key,
-                               unsigned long enq_off)
+static int ask_fe_flow_insert(const struct ask_flow_key *key,
+                              unsigned long enq_off)
 {
         struct fman_pcd_fe_flow_action action;
+        struct fman *fm;
+        int rc;
 
         if (!key) {
                 ask_pr_dbg("fe_flow_insert: NULL key (flow destroyed) -- skipping\n");
-                return;
+                return -EINVAL;
+        }
+
+        fm = ask_hw_get_fman();
+        if (!fm) {
+                ask_pr_dbg("fe_flow_insert: no bound fman (HW not ready)\n");
+                return -ENODEV;
+        }
+        if (!enq_off) {
+                ask_pr_dbg("fe_flow_insert: invalid ENQ FE offset 0x0\n");
+                return -EINVAL;
         }
 
         memset(&action, 0, sizeof(action));
@@ -1261,9 +1298,12 @@ static void ask_fe_flow_insert(const struct ask_flow_key *key,
         action.key_size = ASK_FE_KEY_SIZE;
         action.enq_off  = enq_off;
 
-        /* Fix B: drive the real FMan (fman_get_pcd -> ehash) instead of NULL,
-         * so the per-flow silicon HIT record is actually created. */
-        fman_pcd_fe_flow_add(ask_hw_get_fman(), 0, &action);
+        /* Drive the real FMan (fman_get_pcd -> ehash) and surface failures so
+         * callers can roll back provisional HW-backed ownership. */
+        rc = fman_pcd_fe_flow_add(fm, 0, &action);
+        if (rc)
+                ask_pr_warn("fe_flow_insert: fman_pcd_fe_flow_add failed: %d\n", rc);
+        return rc;
 }
 
 /*
@@ -1707,9 +1747,20 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                             f->cookie, hw_id,
                             ingress_dev ? netdev_name(ingress_dev) : "?", oif,
                             key.next_hop_mac, key.egress_mac);
-        /* F-109: Insert flow via kernel API (not debugfs loopback).
-         * Uses captured ENQ FE offset for valid DDR flow record dispatch. */
-        ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off());
+        /* Keep offload ownership transactional: only keep the flow in the
+         * HW-backed table if the FE-VM record was actually installed. */
+        rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off());
+        if (rc) {
+                int rrc;
+
+                ask_pr_warn("flow_offload: REPLACE rollback cookie=0x%lx fe_flow_insert=%d\n",
+                            f->cookie, rc);
+                rrc = ask_flow_remove(t, (u64)f->cookie);
+                if (rrc)
+                        ask_pr_warn("flow_offload: REPLACE rollback remove=%d cookie=0x%lx\n",
+                                    rrc, f->cookie);
+                return rc;
+        }
 
         return 0;
 }

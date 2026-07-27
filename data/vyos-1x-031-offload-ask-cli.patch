@@ -34,9 +34,9 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
 +        """
 +        Engage or disengage NXP LS1046A ASK (Accelerated Switching Kernel)
 +        FMan FE-VM hardware forwarding offload on this interface. Composes the
-+        proven /usr/local/bin/vyos-offload-ask engage/disengage verbs, which
-+        program the fman_pcd debugfs fe_arm node (CONT_LOOKUP pass-through
-+        scaffold) and resolve the port's kernel Rx miss FQID. Only the two 10G
++        /usr/local/bin/vyos-offload-ask engage/disengage verbs, which drive
++        ask.ko's generic-netlink engage/disengage control path via YNL.
++        Only the two 10G
 +        SFP+ datapath ports carry the FE-VM substrate (eth3 = FMan RX BMI port
 +        0x10, eth4 = 0x11); the request is a no-op on any other interface.
 +        Example:
@@ -50,22 +50,13 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
 +            return
 +        tool = '/usr/local/bin/vyos-offload-ask'
 +        if not os.path.exists(tool):
-+            return
++            raise ConfigError(f'ASK offload helper not found: {tool}')
 +        verb = 'engage' if enable else 'disengage'
-+        # NOTE: Interface._popen() returns (stdout, returncode). The second
-+        # value is an INT exit status, not stderr — calling a string method on
-+        # it raises AttributeError inside the commit-apply path, which surfaces
-+        # to the operator as "There was a config error on boot" and aborts the
-+        # interface's configuration. Keep this rc-typed.
 +        out, rc = self._popen(f'{tool} --port {port} {verb}')
 +        if rc:
-+            # Report and continue. A failed engage must not fail the commit:
-+            # at boot the first attempt can lose a race with FMan PCD
-+            # bring-up, and the interface is still perfectly usable on the
-+            # kernel software path.
 +            msg = (out or '').strip().splitlines()
-+            detail = f': {msg[-1]}' if msg else ''
-+            print(f'ASK offload {verb} failed on {self.ifname} (rc={rc}){detail}')
++            detail = msg[-1] if msg else f'helper exited with rc={rc}'
++            raise ConfigError(f'ASK offload {verb} failed on {self.ifname}: {detail}')
 +
      def set_lro(self, state):
          """
@@ -106,6 +97,8 @@ diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_eth
 +        vpp_ifaces = dict_search('vpp.settings.interface', ethernet) or {}
 +        if ifname in vpp_ifaces:
 +            raise ConfigError(f'Interface {ifname} cannot be configured for ASK offload while assigned to VPP!')
++        if ifname not in ('eth3', 'eth4'):
++            raise ConfigError(f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)')
 +
      """
       Verify offloading capabilities

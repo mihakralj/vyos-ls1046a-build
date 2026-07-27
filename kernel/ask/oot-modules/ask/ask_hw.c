@@ -132,7 +132,7 @@ static bool ask_hw_cached_valid;
  * RSS bring-up.  Stage B only needs to remember which BMI ports carry a
  * live static CC tree so teardown can raze them; Stage C grows this with
  * the software CC-key shadow the rebuild-via-install per-flow model
- * maintains (mirroring board patch 0109 dpaa_cls_reinstall).
+ * maintains while optional slot metadata is available.
  */
 struct ask_hw_cc_slot {
         bool                    used;
@@ -145,7 +145,7 @@ struct ask_hw_port {
         u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
         bool            cc_installed;   /* a static CC tree is live on this port */
         bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
-        u16             nkeys;          /* live entries in shadow[] */
+        u16             nkeys;          /* live slot-backed entries in shadow[] */
         u32             next_key_id;    /* per-port monotonic id (never 0) */
         struct ask_hw_cc_slot shadow[FMAN_CC_MAX_STATIC_KEYS];
 };
@@ -553,6 +553,8 @@ void ask_hw_pcd_teardown(void)
 
         xa_destroy(&h->flow_cookies);
         mutex_destroy(&h->lock);
+        if (h->fman)
+                put_device(fman_get_dev(h->fman));
         /* F-113: Destroy the flow-cookie kmem_cache. */
         if (ask_hw_cookie_cache) {
                 kmem_cache_destroy(ask_hw_cookie_cache);
@@ -935,17 +937,9 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
                 rc = -ENOSPC;
                 goto out_unlock;
         }
-        if (p->nkeys >= FMAN_CC_MAX_STATIC_KEYS) {
-                rc = -ENOSPC;
-                goto out_unlock;
-        }
         for (slot = 0; slot < FMAN_CC_MAX_STATIC_KEYS; slot++)
                 if (!p->shadow[slot].used)
                         break;
-        if (slot == FMAN_CC_MAX_STATIC_KEYS) {
-                rc = -ENOSPC;
-                goto out_unlock;
-        }
 
         /*
          * Resolve (and refcount) the shared next-hop HM node.  MAC order per
@@ -961,25 +955,27 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
                 goto out_unlock;
         }
 
-        /* Build the masked 5-tuple CC key -> FORWARD_FQ_WITH_MANIP atom. */
-        k = &p->shadow[slot].key;
-        memset(k, 0, sizeof(*k));
-        k->ethertype    = FMAN_CC_ETHERTYPE_IPV4;
-        k->proto        = key->l4_proto;
-        k->is_ipv6      = 0;
-        k->src_ip       = get_unaligned_be32(&key->src_ip[0]);
-        k->dst_ip       = get_unaligned_be32(&key->dst_ip[0]);
-        k->src_ip_mask  = 0xffffffffu;
-        k->dst_ip_mask  = 0xffffffffu;
-        k->src_port     = be16_to_cpu(key->sport);
-        k->dst_port     = be16_to_cpu(key->dport);
-        k->target_qband = 0;
-        k->target_fqid  = tx_fqid;
-        k->hm_handle    = hm_handle;
+        if (slot < FMAN_CC_MAX_STATIC_KEYS) {
+                /* Build masked 5-tuple metadata while a slot is available. */
+                k = &p->shadow[slot].key;
+                memset(k, 0, sizeof(*k));
+                k->ethertype    = FMAN_CC_ETHERTYPE_IPV4;
+                k->proto        = key->l4_proto;
+                k->is_ipv6      = 0;
+                k->src_ip       = get_unaligned_be32(&key->src_ip[0]);
+                k->dst_ip       = get_unaligned_be32(&key->dst_ip[0]);
+                k->src_ip_mask  = 0xffffffffu;
+                k->dst_ip_mask  = 0xffffffffu;
+                k->src_port     = be16_to_cpu(key->sport);
+                k->dst_port     = be16_to_cpu(key->dport);
+                k->target_qband = 0;
+                k->target_fqid  = tx_fqid;
+                k->hm_handle    = hm_handle;
 
-        p->shadow[slot].used   = true;
-        p->shadow[slot].key_id = p->next_key_id;
-        p->nkeys++;
+                p->shadow[slot].used   = true;
+                p->shadow[slot].key_id = p->next_key_id;
+                p->nkeys++;
+        }
 
         /* Fix C1: Removed Fork-A path (ask_hw_port_reinstall).
          * The CC static tree path is replaced by Fork-B FE-VM ehash path
@@ -989,7 +985,7 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 
         ck.fm           = h->fman;
         ck.port_id      = port_id;
-        ck.cc_handle    = p->shadow[slot].key_id;
+        ck.cc_handle    = (slot < FMAN_CC_MAX_STATIC_KEYS) ? p->shadow[slot].key_id : 0;
         ck.hm_handle    = hm_handle;
         ck.sink_ifindex = (int)oif;
         ck.sink_fqid    = tx_fqid;
@@ -1011,8 +1007,10 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         return 0;
 
 out_rollback:
-        p->shadow[slot].used = false;
-        p->nkeys--;
+        if (slot < FMAN_CC_MAX_STATIC_KEYS) {
+                p->shadow[slot].used = false;
+                p->nkeys--;
+        }
         /* Fix C1: Removed Fork-A rollback (ask_hw_port_reinstall).
          * Shadow array is updated above; Fork-B path is managed separately. */
         if (hm_handle)
