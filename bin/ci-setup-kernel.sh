@@ -1532,6 +1532,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
+# F-130: Grow PCD MURAM arena 64 KiB -> 84 KiB.
+# The ehash int_buf (33280 B) + two per-port pools (~9029 B each) = 51338 B
+# fits in 65536 B by total bytes but fails on placement because the int_buf
+# at offset 0x4c100 fragments the arena. The contiguous MURAM extent from
+# 0x4ac00 to 0x60000 is 86016 B (84 KiB). Must run BEFORE F-092 (VM chain
+# build) so the gen_pool is sized correctly before any allocation.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_130.py" 2>&1
+    echo "### F-130: PCD MURAM arena 64 KiB -> 84 KiB"
+fi
+
 # F-090: MISS→kernel bypass ENQ — route non-matching frames to kernel FQ.
 # Adds a second ENQ FE that enqueues MISS frames to miss_fqid instead of EXIT drop.
 # Enables ARP/ICMP to work through FE-VM, which is the #1 blocker for HIT testing.

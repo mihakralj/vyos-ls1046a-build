@@ -98,6 +98,11 @@
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-129: add FE-VM chain teardown to production fman_pcd_fe_disengage(). F_092 inserted teardown into the DEBUGFS handler only; the production YNL/genl path had ZERO teardown. Board-verified 2026-07-27: disengage leaves ehash int_buf refcount=1, 33280 B held. Inserts teardown with list_empty guard after __fman_pcd_fe_arm_disengage() in the production function. Runs after F-128.",
       "date": "2026-07-27"
+    },
+    "F_130.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "F-130: grow PCD MURAM arena 64 KiB -> 84 KiB. The ehash int_buf (33280 B) + two per-port pools (~9029 B each) = 51338 B fits by total bytes but fails on placement because the int_buf at offset 0x4c100 fragments the arena. Contiguous MURAM extent 0x4ac00->0x60000 = 86016 B (84 KiB). Must run BEFORE F-092 (VM chain build) so gen_pool is sized before any allocation.",
+      "date": "2026-07-27"
     }
   },
   "count": 44,
