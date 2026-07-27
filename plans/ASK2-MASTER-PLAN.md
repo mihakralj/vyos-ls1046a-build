@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.23.0 · 2026-07-27 · HADS 1.0.0**
+**Version 1.24.0 · 2026-07-27 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -16,10 +16,9 @@ sequences them): silicon contract `arch/fman-fe-ehash.md` +
 `arch/fman-microcode-210-programming-reference.md`; flow-key spec
 `specs/fman-keygen-flow-key-spec.md`; state machine + CLI contract
 `plans/DUAL-DATAPLANE.md`; API surface `arch/fman-pcd-api-reference.md`;
-stub/type inventory `plans/TF-2026-07-18-001-function-inventory.md`;
-live defect review `plans/ask2-code-review.md` (v2.4.0 — its CR-0xx findings are
-binding on release claims; where it contradicts a milestone status here, it wins
-until the finding is closed or refuted).
+stub/type inventory `plans/TF-2026-07-18-001-function-inventory.md`; and the
+consolidated defect review in §9 (CR-0xx findings are binding on release claims;
+where they contradict milestone status, §9 wins until closed or refuted).
 Where this plan and those documents disagree, they win — update this plan.
 
 ---
@@ -44,7 +43,7 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 
 **[SPEC]** M2 (perf gate 7.37 Gbps), M3 (FE-VM HIT), M5 (flow automation + 10.259 Gbps line rate), and M7 (VyOS CLI) are complete and verified on silicon. M4 (AF_XDP true-ZC RX) is the active parallel track — kernel ZC datapath proven, VPP integration blocked on XSKMAP population. M6 (IPv6/bridge/IPsec) is unblocked and in incremental rollout (T-M6-1 pieces 1+4 landed; T-M6-3 notifier/workqueue path hardened). A high-priority correctness item found post-review — `FLUSH_FLOWS` clearing SW state without HW teardown — is **fixed in code** and awaiting silicon validation (see §5 T-M6-6 and §6 F-120). M8 (soak/upstream) is the final gate.
 
-**[BUG] M7's "complete" claim is QUALIFIED as of 2026-07-27** by `plans/ask2-code-review.md` CR-001: the CLI control path is now YNL-driven, but silicon still fails reversibility under the production kernel API path. On both `.106` and `.185`, successful YNL engage/disengage cycles leave `pcd-snapshot` drift (KG scheme[4], BMI `rfpne/rccb`, MURAM delta). M7 remains DONE for surface wiring, but the end-to-end production offload claim stays blocked on disengage/revert correctness (F-124) and CR-001 closure.
+**[BUG] M7's "complete" claim is QUALIFIED as of 2026-07-27** by consolidated CR-001 (§9): the CLI control path is now YNL-driven, but silicon still fails reversibility under the production kernel API path. On both `.106` and `.185`, successful YNL engage/disengage cycles leave `pcd-snapshot` drift (KG scheme[4], BMI `rfpne/rccb`, MURAM delta). M7 remains DONE for surface wiring, but the end-to-end production offload claim stays blocked on disengage/revert correctness (F-124) and CR-001 closure.
 
 ### 1.3 Silicon-proven facts (all on LS1046A hardware)
 
@@ -301,7 +300,7 @@ Key outcomes: FE-VM hardware match & dispatch engine verified; nft flowtable `ho
 | **F-123** | Production CLI previously used debugfs scaffold path instead of kernel API FE-VM path (code-review CR-001) | **PARTIAL** (transport fixed in code/hotpatch 2026-07-27; full release claim still blocked) | **M7 release claim**, M6 correctness | Keep CLI on generic-netlink/YNL engage/disengage; retain transactional FE insertion and ownership publication checks. |
 | **F-124** | Kernel API engage/disengage validation initially failed on `.106`/`.185`, but root cause split into (a) stale image provenance (old debugfs helper in run `30227073161`, SHA `2f32b637`) and (b) kernel API convergence failures (`-EBUSY` already-armed on port 0x10, `-ENOMEM` VM-chain build on 0x11) | IN PROGRESS (2026-07-27: YNL hotpatch restored reversible `pcd-snapshot`; ask_hw idempotence/convergence fix committed, revalidation pending fresh ISO) | **M7 release claim**, M8 soak | Validate three consecutive clean engage/disengage cycles per DUT with `engage/disengage rc=0`; then continue HIT/flow validation only if `pcd-snapshot` stays byte-clean. |
 | **F-124b** | `set_ask_offload()` raises `ConfigError` (CR-003 fail-closed) but `python/vyos/ifconfig/ethernet.py` never imports it → `NameError: name 'ConfigError' is not defined` in commit-apply → `ERROR_COMMIT_APPLY` + "Configuration error" on every boot with `offload ask`; eth3 (0x10) never engaged as a result | **FIXED 2026-07-27** (`from vyos.base import ConfigError`) | M7 CLI correctness | Board-confirmed on `.185` ISO `2026.07.27-0116`. Same class as F-121: an unresolved name on the commit-apply path. Triggered every commit because F-122 makes `engage` return non-zero. Guard added: an AST check asserts every `raise <Name>(...)` in the patched module resolves to an import |
-| **F-125** | FE-VM engage MURAM allocation lifecycle is broken three ways, reproduced **byte-identically on `.185` and `.106`** (ISO 2026.07.27-0255): (a) **failed engage does not roll back** — first failure leaks 7957 B, every subsequent one leaks exactly **304 B, monotonic and unbounded**, reclaimable only by reboot; (b) **engage/disengage fragments the arena** — from a post-disengage baseline with 22283 B free, a single engage still fails `-ENOMEM`, while the identical 43253/22283 state at cold boot succeeds; (c) **the ehash table + `int_buf` are never freed on disengage** (`refcount=1`, `raw_size=33280` MURAM + 512 KiB DDR still held with zero ports engaged) | OPEN (found 2026-07-27) | **F-124 / CR-001 release gate**, M8 soak | **The arena is NOT too small:** pristine baseline 43253 + 2×9029 = 61311 < 65536, so two ports fit by total bytes and fail on *placement*. The 33280 B `int_buf` at `0x4c100` splits the arena into a 5376 B head and a ~26880 B tail, so second-port blocks cannot be placed. Fix order: (1) make engage transactional — unwind every partial allocation on the failure path (same class as F-120 flush and CR-001 transactional FE insert); (2) drop the ehash/`int_buf` refcount on last disengage, which returns 33280 B and makes engage/disengage genuinely reversible — this is very likely the `pcd-snapshot` MURAM delta chased as F-124; (3) re-measure before considering any arena growth. `FMAN_PCD_MURAM_RESERVED_BYTES` could rise 64→84 KiB max (contiguous extent `0x4ac00`→`0x60000` = 86016 B), but growing it while (a) leaks only converts a hard failure into a slow one |
+| **F-125** | FE-VM engage MURAM allocation lifecycle is broken three ways, reproduced **byte-identically on `.185` and `.106`** (ISO 2026.07.27-0255): (a) **failed engage does not roll back** — first failure leaks 7957 B, every subsequent one leaks exactly **304 B, monotonic and unbounded**, reclaimable only by reboot; (b) **engage/disengage fragments the arena** — from a post-disengage baseline with 22283 B free, a single engage still fails `-ENOMEM`, while the identical 43253/22283 state at cold boot succeeds; (c) **the ehash table + `int_buf` are never freed on disengage** (`refcount=1`, `raw_size=33280` MURAM + 512 KiB DDR still held with zero ports engaged) | **(a) FIXED 2026-07-27** (`F_125.py`); (b) expected to follow from (a); (c) still OPEN | **F-124 / CR-001 release gate**, M8 soak | **The arena is NOT too small:** pristine baseline 43253 + 2×9029 = 61311 < 65536, so two ports fit by total bytes and fail on *placement*. The 33280 B `int_buf` at `0x4c100` splits the arena into a 5376 B head and a ~26880 B tail, so second-port blocks cannot be placed. **Fix (a) landed as `bin/kernel-fixups/F_125.py`:** the leak was NOT a missing free on disengage — `__fman_pcd_fe_arm_disengage()` already calls `fman_pcd_fe_arm_free_scaffold()`. It was `__fman_pcd_fe_arm_engage()` returning on `fman_pcd_kg_port_arm_fe()` failure with `pcd->fe_scaffold_*` still populated, so the next attempt re-entered the `fe_enter_off == 0` path and **overwrote** those fields, orphaning the triple. The fixup releases the scaffold on that failure path (guarded on `fe_armed_port` so a failure alongside an already-armed port cannot pull it out from under) and unwinds a partial 3-way allocation. Reuses the existing helper — no second one added. Remaining fix order: (1) ~~make engage transactional~~ DONE — unwind every partial allocation on the failure path (same class as F-120 flush and CR-001 transactional FE insert); (2) drop the ehash/`int_buf` refcount on last disengage, which returns 33280 B and makes engage/disengage genuinely reversible — this is very likely the `pcd-snapshot` MURAM delta chased as F-124; (3) re-measure before considering any arena growth. `FMAN_PCD_MURAM_RESERVED_BYTES` could rise 64→84 KiB max (contiguous extent `0x4ac00`→`0x60000` = 86016 B), but growing it while (a) leaks only converts a hard failure into a slow one |
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; pcd-snapshot A/B + prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` (T-M5-4) or Path-B YNL interim |
 | **ZC refill under flood** | `refill_batches` freezes under sustained flood; pool drains at ~256 frames, FMan drops rest at HW. Interrupt-mode wakeup not firing under load. | OPEN 2026-07-22 | M4 throughput | Investigate after recover=0 closed; secondary to gate |
@@ -451,7 +450,6 @@ citing the old paths resolve via those notes). Where their content lives now:
 (state machine + CLI contract — owns both, not sequencing), `plans/TRAFFIC-HARNESS.md`,
 `plans/TF-2026-07-18-001-function-inventory.md` (stub/type inventory behind §5),
 `plans/OFFLOAD-CAPABILITIES.md`, `plans/MODULE-INVENTORY.md`, `plans/ZC-RX-SCOPE.md`,
-`plans/ask2-code-review.md` (live defect review — CR-0xx findings bind release claims),
 `plans/ASK-ISO-BUILD-AND-INSTALL.md` (operator how-to), the patching-pipeline docs
 (`TA-2026-07-18-002-patch-architecture.md`, `patching-improvement-plan.md`,
 `skip-ledger.md` — orthogonal to ASK2 feature sequencing), and all of `arch/` and
@@ -461,3 +459,52 @@ citing the old paths resolve via those notes). Where their content lives now:
 check off §5 items, and log evidence to qdrant in the same change. When a TODO
 spawns a defect, add it to §6. Do not author new ASK2 plan documents — extend
 this one.
+
+---
+
+## 9. Consolidated ASK2 code review (merged 2026-07-27)
+
+**[SPEC]** This section consolidates and replaces `plans/ask2-code-review.md`
+(deleted in this change). Baseline reconciled against recent commits through
+`fb62fabf` and Qdrant entries through 2026-07-27 (notably F-124/F-124b/F-125 and
+the YNL control-path correction history).
+
+### 9.1 Commit and memory reconciliation
+
+**[SPEC]** Latest relevant commits compared while consolidating:
+`6952a8af` (CR-002/009/010 fixes), `099d9188` + `66b27994` (control-plane
+hardening/F-124), `d8183a4a` (F-124b ConfigError import), and `fb62fabf`
+(F-125 MURAM lifecycle diagnosis reflected in §6).
+
+**[SPEC]** Qdrant cross-check: F-125 diagnostics (same measured 304-byte leak
+step and int_buf lifetime), per-interface ASK CLI contract, and YNL transition
+history are consistent with this plan's current open-defect/gate state.
+
+### 9.2 Priority findings (CR-0xx)
+
+| ID | Priority | Severity | Finding | Status |
+|---|---|---:|---|---|
+| CR-001 | P0 | CRITICAL | Production YNL control path still fails engage/disengage reversibility and ownership proof on silicon | PARTIAL |
+| CR-002 | P0 | HIGH | FE-VM key serialization had little-endian TCP/UDP byte reversal | **FIXED** |
+| CR-003 | P0 | HIGH | VyOS commit-path handling was fail-open (rc/stderr confusion + helper-failure masking) | PARTIAL |
+| CR-004 | P1 | HIGH | Stale-MAC remove/reinsert lifecycle can resurrect or lose flows | PARTIAL |
+| CR-005 | P1 | HIGH | `num_hw_backed==0` shortcut could drop the only neighbour-change event | **FIXED** |
+| CR-006 | P1 | HIGH | `ask.yaml` and active genl ABI were mismatched (`get-info`, engage/disengage attrs) | **FIXED** |
+| CR-007 | P1 | MEDIUM | Dead Fork-A shadow/HM bookkeeping still burdens FE-VM path semantics | PARTIAL |
+| CR-008 | P1 | MEDIUM | `fman_bind()` reference lifetime was not released | **FIXED** |
+| CR-009 | P2 | MEDIUM | F-120 flush completion could report done with remaining flows | **FIXED** |
+| CR-010 | P2 | MEDIUM | Duplicate precheck lookup lacked RCU read-side guard | **FIXED** |
+| CR-011 | P2 | LOW | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL |
+| CR-012 | P2 | HIGH when enabled | XFRM add returned success without hardware programming | **FIXED-GATED** |
+
+### 9.3 Binding execution order from the review
+
+**[SPEC]**
+1. Close CR-001 + CR-003 together: one production control path (YNL/genl), fail-closed config behavior, no debugfs control writes from VyOS commit path.
+2. Keep CR-002 as a hard precondition for FE-record silicon validation (13-byte wire-order vector gate).
+3. Keep FE insertion transactional: publish ownership only after FE install/readback success; rollback fully on failure.
+4. Close CR-004 lifecycle/tombstone race before declaring stale-MAC handling complete.
+5. Keep YAML/UAPI parity (CR-006) and generated userspace decoding in lockstep.
+6. Finish removal of dead Fork-A bookkeeping (CR-007) and keep capacity derived from active FE/ehash resources.
+7. Maintain KUnit coverage for CR-009/010/011 invariants.
+8. Only update milestone release claims after cold-boot silicon acceptance through the actual VyOS CLI path.

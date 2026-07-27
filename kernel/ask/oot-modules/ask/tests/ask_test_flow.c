@@ -433,8 +433,8 @@ KUNIT_SUCCEED(test);
 }
 
 /*
- * Regression guard for the hw_flow_id namespace collision (BLOCKER 2.1 in
- * plans/ask2-code-review.md, fixed 2026-07-26).
+ * Regression guard for the hw_flow_id namespace collision (consolidated in
+ * plans/ASK2-MASTER-PLAN.md §9, fixed 2026-07-26).
  *
  * SW-fallback ids and real HW cookies share one u32 space and both start at
  * 1: xa_alloc(..., XA_LIMIT(1, U32_MAX), ...) hands out 1, 2, 3... for real
