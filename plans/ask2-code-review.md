@@ -1,4 +1,4 @@
-**Version 2.4.1 · 2026-07-27 · HADS 1.0.0**
+**Version 2.4.2 · 2026-07-27 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -287,4 +287,4 @@ struct fman *fman_bind(struct device *fm_dev)
 7. Close CR-009/010/011 with focused KUnit coverage.
 8. Run a cold-boot silicon session through the actual VyOS CLI and update `ASK2-MASTER-PLAN.md` only after the acceptance evidence is captured.
 
-**[NOTE] Progress 2026-07-27.** Control-plane transport is now exercised via YNL on both DUTs (ops present; helper path switched), but silicon still fails reversibility: engage/disengage leaves KG/BMI/MURAM drift on `.106` and `.185`. Kernel pass in progress now reorders disengage to disarm-before-scaffold-free and adds a deterministic BMI readback gate (`kernel/common/patches/board/0157-fman-pcd-fe-arm-typed-impl.patch`), pending dual-DUT revalidation. Immediate priority remains CR-001/003 closure at kernel disengage semantics, then CR-004 lifecycle hardening.
+**[NOTE] Progress 2026-07-27.** Failed dual-DUT validation was first caused by image provenance: run `30227073161` shipped remote SHA `2f32b637` (pre-YNL helper), so both DUTs booted the old debugfs `CONT_LOOKUP` helper. Hotpatching current `vyos-offload-ask` + `ask.yaml` switched both DUTs to YNL control and restored byte-clean `pcd-snapshot` reversibility. Remaining blocker is engage return-code convergence under kernel API (`-EBUSY` already-armed on port 0x10 and `-ENOMEM` chain-build on 0x11), addressed in `ask_hw_offload_engage()/disengage()` idempotence hardening pending fresh ISO validation.
