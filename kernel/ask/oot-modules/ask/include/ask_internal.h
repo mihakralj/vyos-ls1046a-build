@@ -314,7 +314,7 @@ struct fman_pcd_cc_node;
 struct fman_pcd_manip;
 
 /*
- * ASK2 board-substrate per-flow cookie (2026-06-15).
+ * ASK2 board-substrate per-flow cookie (2026-06-15, updated 2026-07-27).
  *
  * Supersedes the PR14j/PR14x ASK-flavor MANIP-chain bookkeeping.  The
  * old model owned per-flow fman_pcd_manip handles (RMV_ETHERNET +
@@ -323,39 +323,28 @@ struct fman_pcd_manip;
  * the source of the 327x `fman_pcd_manip_chain_create(...) failed -12`
  * MURAM-exhaustion blocker.
  *
- * The widened hw_flow_id is still an opaque u32 cookie indexing a
- * per-ask_hw_pcd xarray of struct ask_hw_flow_cookie, but each entry
- * now tracks only the two COMMON-board substrate handles a flow owns:
- *
- *   1. cc_handle  — the CC key slot returned by fman_cc_tree_add_key()
- *                   (board patch 0086/0098/0106/0108/0115).  Carries
- *                   the 5-tuple match + target_fqid + hm_handle and is
- *                   released with fman_cc_tree_remove_key().
- *   2. hm_handle  — the SHARED, refcounted next-hop header-manip node
- *                   returned by fman_hm_nexthop_get() (board patch
- *                   0120).  Many flows toward the same L3 adjacency
- *                   share one node, so MURAM use scales O(next-hops)
- *                   not O(flows).  Released with fman_hm_nexthop_put().
+ * CR-007 (2026-07-27): Fork-A shadow/HM bookkeeping removed. The
+ * cc_handle and hm_handle fields, the per-port shadow[] array, nkeys,
+ * next_key_id, and cc_installed are all gone. The FE-VM ehash path
+ * (Fork-B) manages its own flow keys via ask_fe_flow_insert/remove()
+ * in ask_flow_offload.c. The cookie now snapshots only the port identity
+ * and sink metadata for teardown.
  *
  * fm / port_id are the ingress port's FMan handle and BMI hwport id,
- * snapshotted so ask_hw_flow_remove() can call remove_key()/put()
- * without re-resolving the port.  sink_ifindex / sink_fqid remain
- * informational snapshots for stats and debugability; they are not
- * dereferenced during teardown.
+ * snapshotted so teardown can resolve the port without re-looking up
+ * the netdev.  sink_ifindex / sink_fqid remain informational snapshots
+ * for stats and debugability; they are not dereferenced during teardown.
  *
  * Cookie 0 is reserved as the "no HW backing" sentinel so ask_flow.c
  * can call ask_hw_flow_remove() unconditionally on every tear-down.
  * The xarray is initialised with XA_FLAGS_ALLOC1 so the allocator
- * skips 0.  A zero cc_handle / hm_handle means HW never armed silicon
- * for that object on this cookie — teardown is a no-op for it.
+ * skips 0.
  */
 struct fman;
 
 struct ask_hw_flow_cookie {
         struct fman              *fm;           /* ingress port's FMan */
         u8                        port_id;      /* ingress BMI hwport id */
-        u32                       cc_handle;    /* fman_cc_tree_add_key() */
-        u32                       hm_handle;    /* fman_hm_nexthop_get()  */
         int                       sink_ifindex;
         u32                       sink_fqid;
 };

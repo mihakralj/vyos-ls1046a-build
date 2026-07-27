@@ -11,21 +11,20 @@
  * model was the source of the `fman_pcd_manip_chain_create() failed -12`
  * MURAM-exhaustion blocker.
  *
- * BOARD SUBSTRATE (2026-06-15, updated 2026-07-14).  ask.ko now consumes ONLY
+ * BOARD SUBSTRATE (2026-06-15, updated 2026-07-27).  ask.ko now consumes ONLY
  * the exported COMMON-board FMan capability API (see include/ask_fman_caps.h):
  *
- *   - FE-VM offload via debugfs bridge (Fork-B path):
- *       fe_pool / fe_singletons / fe_ehash / fe_hashfe / fe_enq / fe_enter / fe_arm
+ *   - FE-VM offload via kernel API (Fork-B path):
+ *       fman_pcd_fe_engage / fman_pcd_fe_disengage / fman_pcd_fe_flow_add / _del
  *     The FE-VM pipeline (pool/singletons/ehash/hashfe/enq/enter/arm) is built
- *     via debugfs writes. Flow insert uses ask_debugfs_fe_flow_write() which
- *     writes to fe_flow debugfs node. This is the Fork-B FE-VM ehash path.
- *   - Shared, refcounted next-hop header manip:
- *       fman_hm_nexthop_get / fman_hm_nexthop_put (board patch 0120).
- *     MURAM use scales O(next-hops) not O(flows).
+ *     via the kernel API. Flow insert uses ask_fe_flow_insert() in
+ *     ask_flow_offload.c. This is the Fork-B FE-VM ehash path.
  *
  * Fix C1 (2026-07-14): Removed Fork-A path (CC static tree via fman_cc_tree_install).
- * The ask_hw_flow_insert() function no longer calls ask_hw_port_reinstall().
- * Flow insert now uses only Fork-B FE-VM ehash path via ask_debugfs_fe_flow_write().
+ * CR-007 (2026-07-27): Removed Fork-A shadow/HM bookkeeping (shadow[], nkeys,
+ * next_key_id, cc_installed, cc_handle, hm_handle). The FE-VM ehash path
+ * manages its own flow keys; the cookie now snapshots only port identity
+ * and sink metadata for teardown.
  *
  * This file (Stage B of ask2-cc-repoint) reshapes bring-up/teardown and
  * the per-flow cookie onto that substrate; the per-flow insert path uses
@@ -128,27 +127,13 @@ static bool ask_hw_cached_valid;
 /*
  * Per-offloaded-port record.  Under the board substrate ask.ko owns no
  * private CC tree / KG scheme / pre-netdev hook — the CC tree lives in
- * fsl_dpa.ko and is addressed by (struct fman *, u8 port_id), and the
- * port's KG scheme was armed with the CC_EN gate by the COMMON-board
- * RSS bring-up.  Stage B only needs to remember which BMI ports carry a
- * live static CC tree so teardown can raze them; Stage C grows this with
- * the software CC-key shadow the rebuild-via-install per-flow model
- * maintains while optional slot metadata is available.
+ * CR-007 (2026-07-27): Fork-A shadow/HM bookkeeping removed. The FE-VM
+ * ehash path (Fork-B) manages its own flow keys via ask_fe_flow_insert/remove().
  */
-struct ask_hw_cc_slot {
-        bool                    used;
-        u32                     key_id;   /* monotonic; == cookie.cc_handle */
-        struct fman_cc_key      key;      /* 5-tuple + target_fqid + hm_handle */
-};
-
 struct ask_hw_port {
         bool            in_use;
         u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
-        bool            cc_installed;   /* a static CC tree is live on this port */
         bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
-        u16             nkeys;          /* live slot-backed entries in shadow[] */
-        u32             next_key_id;    /* per-port monotonic id (never 0) */
-        struct ask_hw_cc_slot shadow[FMAN_CC_MAX_STATIC_KEYS];
 };
 
 struct ask_hw_pcd {
@@ -158,7 +143,7 @@ struct ask_hw_pcd {
 
         /*
          * Per-flow cookie indirection table.  u32 cookie -> struct
-         * ask_hw_flow_cookie{fm, port_id, cc_handle, hm_handle, ...}.
+         * ask_hw_flow_cookie{fm, port_id, sink_ifindex, sink_fqid}.
          * XA_FLAGS_ALLOC1 keeps cookie 0 as the "no HW backing" sentinel.
          */
         struct xarray   flow_cookies;
@@ -509,16 +494,13 @@ void ask_hw_pcd_teardown(void)
         }
 
         /*
-         * Drain any flow cookies that survived to teardown, releasing each
-         * flow's shared next-hop HM reference.  The per-port static tree is
-         * razed wholesale just below, so the CC keys need no per-flow
-         * remove here — only the HM refcounts must be balanced.
+         * Drain any flow cookies that survived to teardown.
+         * CR-007: Fork-A HM refcount balancing removed — the FE-VM ehash
+         * path (Fork-B) manages its own teardown via fman_pcd_fe_flow_del().
          */
         xa_for_each(&h->flow_cookies, idx, ck) {
                 if (!ck)
                         continue;
-                if (ck->hm_handle)
-                        fman_hm_nexthop_put(ck->fm, ck->port_id, ck->hm_handle);
                 xa_erase(&h->flow_cookies, idx);
                 /* F-113: Use kmem_cache_free for O(1) dealloc. */
                 if (ask_hw_cookie_cache)
@@ -543,14 +525,8 @@ void ask_hw_pcd_teardown(void)
                 }
         }
 
-        /* Fix L1: Teardown Fork-B FE-VM pipeline via debugfs bridge.
-         * The Fork-A CC static tree teardown (fman_cc_tree_destroy) is kept
-         * for backward compatibility but is now a no-op since cc_installed
-         * is never set after C1 fix removed the Fork-A path. */
-        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
-                if (h->port[i].in_use && h->port[i].cc_installed)
-                        fman_cc_tree_destroy(h->fman, h->port[i].port_id);
-        }
+        /* CR-007: Fork-A CC static tree teardown removed — cc_installed was
+         * never set after C1 removed the Fork-A path. */
 
         xa_destroy(&h->flow_cookies);
         mutex_destroy(&h->lock);
@@ -832,18 +808,8 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h, u8 port_id
 
         h->port[free_idx].in_use       = true;
         h->port[free_idx].port_id      = port_id;
-        h->port[free_idx].cc_installed = false;
-        h->port[free_idx].nkeys        = 0;
-        h->port[free_idx].next_key_id  = 1;
         return &h->port[free_idx];
 }
-
-/*
- * Fix L1: Removed ask_hw_port_reinstall() function (Fork-A CC static tree rebuild).
- * This function was part of the Fork-A path that was removed in C1 fix.
- * Flow insert now uses only Fork-B FE-VM ehash path via ask_debugfs_fe_flow_write().
- * The function is kept as a comment for historical reference.
- */
 
 /*
  * Map an ASK flow netdev ifindex to its ingress BMI hwport id via the board
@@ -904,10 +870,7 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         struct ask_hw_pcd *h = ask_hw_pcd_get();
         struct ask_hw_flow_cookie ck;
         struct ask_hw_port *p;
-        struct fman_cc_key *k;
-        unsigned int slot;
         u32 tx_fqid = 0;
-        u32 hm_handle = 0;
         u32 cookie;
         u8  port_id = 0;
         int rc;
@@ -950,84 +913,29 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
                 rc = -ENOSPC;
                 goto out_unlock;
         }
-        for (slot = 0; slot < FMAN_CC_MAX_STATIC_KEYS; slot++)
-                if (!p->shadow[slot].used)
-                        break;
 
-        /*
-         * Resolve (and refcount) the shared next-hop HM node.  MAC order per
-         * the caps header: src_mac = egress port's own MAC, dst_mac = next-hop
-         * MAC.  -ENOTSUPP (ucode lacks HM caps) maps to -EOPNOTSUPP so the
-         * caller treats it as a clean SW fallback, not a hard error.
-         */
-        rc = fman_hm_nexthop_get(h->fman, port_id, tx_fqid,
-                                 key->egress_mac, key->next_hop_mac,
-                                 &hm_handle);
-        if (rc) {
-                rc = (rc == -ENOTSUPP) ? -EOPNOTSUPP : rc;
-                goto out_unlock;
-        }
-
-        if (slot < FMAN_CC_MAX_STATIC_KEYS) {
-                /* Build masked 5-tuple metadata while a slot is available. */
-                k = &p->shadow[slot].key;
-                memset(k, 0, sizeof(*k));
-                k->ethertype    = FMAN_CC_ETHERTYPE_IPV4;
-                k->proto        = key->l4_proto;
-                k->is_ipv6      = 0;
-                k->src_ip       = get_unaligned_be32(&key->src_ip[0]);
-                k->dst_ip       = get_unaligned_be32(&key->dst_ip[0]);
-                k->src_ip_mask  = 0xffffffffu;
-                k->dst_ip_mask  = 0xffffffffu;
-                k->src_port     = be16_to_cpu(key->sport);
-                k->dst_port     = be16_to_cpu(key->dport);
-                k->target_qband = 0;
-                k->target_fqid  = tx_fqid;
-                k->hm_handle    = hm_handle;
-
-                p->shadow[slot].used   = true;
-                p->shadow[slot].key_id = p->next_key_id;
-                p->nkeys++;
-        }
-
-        /* Fix C1: Removed Fork-A path (ask_hw_port_reinstall).
-         * The CC static tree path is replaced by Fork-B FE-VM ehash path
-         * which is called from ask_flow_offload_replace() via
-         * ask_debugfs_fe_flow_write(). The shadow array is still used
-         * for software flow tracking (stats, remove operations). */
+        /* CR-007: Fork-A shadow/HM bookkeeping removed. The FE-VM ehash path
+         * (Fork-B) manages its own keys via ask_fe_flow_insert() in
+         * ask_flow_offload.c. This function now only snapshots the cookie
+         * metadata for teardown (port_id, sink_ifindex, sink_fqid). */
 
         ck.fm           = h->fman;
         ck.port_id      = port_id;
-        ck.cc_handle    = (slot < FMAN_CC_MAX_STATIC_KEYS) ? p->shadow[slot].key_id : 0;
-        ck.hm_handle    = hm_handle;
         ck.sink_ifindex = (int)oif;
         ck.sink_fqid    = tx_fqid;
 
         cookie = ask_hw_cookie_alloc(h, &ck);
         if (!cookie) {
                 rc = -ENOMEM;
-                goto out_rollback;
+                goto out_unlock;
         }
-
-        /* Commit: consume the per-port id (skip 0) and publish the cookie. */
-        if (++p->next_key_id == 0)
-                p->next_key_id = 1;
 
         mutex_unlock(&h->lock);
         *out_hw_id = cookie;
-        ask_pr_dbg("hw: flow_insert: port=0x%02x fqid=%u hm=0x%x key_id=%u cookie=0x%x\n",
-                   port_id, tx_fqid, hm_handle, ck.cc_handle, cookie);
+        ask_pr_dbg("hw: flow_insert: port=0x%02x fqid=%u cookie=0x%x\n",
+                   port_id, tx_fqid, cookie);
         return 0;
 
-out_rollback:
-        if (slot < FMAN_CC_MAX_STATIC_KEYS) {
-                p->shadow[slot].used = false;
-                p->nkeys--;
-        }
-        /* Fix C1: Removed Fork-A rollback (ask_hw_port_reinstall).
-         * Shadow array is updated above; Fork-B path is managed separately. */
-        if (hm_handle)
-                fman_hm_nexthop_put(h->fman, port_id, hm_handle);
 out_unlock:
         mutex_unlock(&h->lock);
         return rc;
@@ -1038,8 +946,6 @@ int ask_hw_flow_remove(u32 hw_flow_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
         struct ask_hw_flow_cookie *ck;
-        struct ask_hw_port *p = NULL;
-        unsigned int i;
 
         if (!h || hw_flow_id == 0)
                 return 0;
@@ -1053,36 +959,9 @@ int ask_hw_flow_remove(u32 hw_flow_id)
                 return 0;
         }
 
-        /*
-         * Drop this flow's 5-tuple from the ingress port's software CC shadow
-         * (matched by the monotonic key_id snapshotted in cc_handle).
-         * Fix C1: Removed Fork-A path (ask_hw_port_reinstall). The shadow
-         * array is updated for software tracking; Fork-B FE-VM ehash path
-         * is managed separately via ask_debugfs_fe_flow_write(NULL, 0).
-         * Then release the shared next-hop HM reference (refcounted: the
-         * node survives until the last flow toward that adjacency is gone).
-         */
-        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
-                if (h->port[i].in_use && h->port[i].port_id == ck->port_id) {
-                        p = &h->port[i];
-                        break;
-                }
-        }
-        if (p && ck->cc_handle) {
-                for (i = 0; i < FMAN_CC_MAX_STATIC_KEYS; i++) {
-                        if (p->shadow[i].used &&
-                            p->shadow[i].key_id == ck->cc_handle) {
-                                p->shadow[i].used = false;
-                                p->nkeys--;
-                                /* Fix C1: Removed Fork-A rebuild (ask_hw_port_reinstall).
-                                 * Shadow array updated above; Fork-B path cleared separately. */
-                                break;
-                        }
-                }
-        }
-
-        if (ck->hm_handle)
-                fman_hm_nexthop_put(ck->fm, ck->port_id, ck->hm_handle);
+        /* CR-007: Fork-A shadow/HM teardown removed. The FE-VM ehash path
+         * (Fork-B) manages its own flow deletion via ask_fe_flow_remove()
+         * in ask_flow_offload.c. */
 
         ask_hw_cookie_free(h, hw_flow_id);
 

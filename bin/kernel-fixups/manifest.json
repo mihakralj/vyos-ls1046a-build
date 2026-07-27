@@ -74,13 +74,23 @@
       "description": "F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() returned on kg_port_arm_fe failure with pcd->fe_scaffold_* still set; the next attempt overwrote those fields, orphaning the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) permanently. Measured at exactly 304 B per failed engage on .185 and .106, reclaimable only by reboot, and the source of the arena fragmentation that made even single-port engage fail -ENOMEM. Also unwinds a partial 3-way allocation. Reuses the existing fman_pcd_fe_arm_free_scaffold(). Runs after F-118.",
       "date": "2026-07-27"
     },
+    "F_122.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "F-122: make fe_arm engage idempotent. Adds test_bit(fe_port_armed) check at top of __fman_pcd_fe_arm_engage() (shared core, protects both debugfs and API paths) returning 0 with pr_info when already engaged. Also changes F-107 -EBUSY guard in fman_pcd_fe_engage() to idempotent return 0. Runs before F-125/F-126.",
+      "date": "2026-07-27"
+    },
     "F_126.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-126 DIAGNOSTIC (TEMPORARY): tag every early return in __fman_pcd_fe_arm_engage() with a unique pr_err so the -12 on port 0x10 names its own site. F-125 did not close the 304 B/attempt leak on ISO 0501; dmesg ruled out the scaffold-alloc path and F_097's verify gate, so the failing return is unidentified. DELETE this fixup and its manifest entry when F-125 closes.",
       "date": "2026-07-27"
+    },
+    "F_127.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "F-127 DIAGNOSTIC (TEMPORARY): tag every early return in fman_pcd_fe_engage() (the wrapper) with a unique pr_err. On ISO 0530 the genl engage fails with -12 but F-126's tags never fire, proving the -12 comes from the wrapper before __fman_pcd_fe_arm_engage() is called. DELETE when F-125 closes.",
+      "date": "2026-07-27"
     }
   },
-  "count": 41,
+  "count": 43,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
@@ -190,9 +200,13 @@
       "action": "permanent",
       "reason": "API cleanup \u2014 structured params instead of raw (key, size, offset)"
     },
-    "F_107.py": {
+"F_107.py": {
       "action": "fold-into 0153+0157",
-      "reason": "gen_pool double-free prevention \u2014 engagement guard belongs with the engage/disengage API patches"
+      "reason": "gen_pool double-free prevention — engagement guard belongs with the engage/disengage API patches"
+    },
+    "F_122.py": {
+      "action": "fold-into 0157",
+      "reason": "Idempotent engage — test_bit guard in shared core, return 0 when already armed"
     },
     "F_109.py": {
       "action": "fold-into 0153",
