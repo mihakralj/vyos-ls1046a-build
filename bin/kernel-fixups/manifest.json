@@ -91,7 +91,7 @@
     },
     "F_128.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-128: F-125(c) — free ehash on LAST port disengage. Changes F_092's teardown guard from fe_vm_chain_built to fe_vm_chain_built && list_empty(&pcd->fe_ports). The shared FE-VM chain is torn down only when the last port disengages, returning 33280 B MURAM (int_buf) + 512 KiB DDR (bucket table). Runs after F-092.",
+      "description": "F-128: F-125(c) \u2014 free ehash on LAST port disengage. Changes F_092's teardown guard from fe_vm_chain_built to fe_vm_chain_built && list_empty(&pcd->fe_ports). The shared FE-VM chain is torn down only when the last port disengages, returning 33280 B MURAM (int_buf) + 512 KiB DDR (bucket table). Runs after F-092.",
       "date": "2026-07-27"
     },
     "F_129.py": {
@@ -103,6 +103,14 @@
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-130: grow PCD MURAM arena 64 KiB -> 84 KiB. The ehash int_buf (33280 B) + two per-port pools (~9029 B each) = 51338 B fits by total bytes but fails on placement because the int_buf at offset 0x4c100 fragments the arena. Contiguous MURAM extent 0x4ac00->0x60000 = 86016 B (84 KiB). Must run BEFORE F-092 (VM chain build) so gen_pool is sized before any allocation.",
       "date": "2026-07-27"
+    },
+    "F_131.py": {
+      "action": "keep",
+      "reason": "permanent guard \u2014 gen_pool_has_addr() check in fman_pcd_muram_free() prevents kexec-stale MURAM offset BUG"
+    },
+    "F_132.py": {
+      "action": "keep",
+      "reason": "permanent \u2014 frees FM_CTL params pages on last port disengage, reclaims 512 B MURAM for multi-cycle reversibility"
     }
   },
   "count": 44,
@@ -215,13 +223,13 @@
       "action": "permanent",
       "reason": "API cleanup \u2014 structured params instead of raw (key, size, offset)"
     },
-"F_107.py": {
+    "F_107.py": {
       "action": "fold-into 0153+0157",
-      "reason": "gen_pool double-free prevention — engagement guard belongs with the engage/disengage API patches"
+      "reason": "gen_pool double-free prevention \u2014 engagement guard belongs with the engage/disengage API patches"
     },
     "F_122.py": {
       "action": "fold-into 0157",
-      "reason": "Idempotent engage — test_bit guard in shared core, return 0 when already armed"
+      "reason": "Idempotent engage \u2014 test_bit guard in shared core, return 0 when already armed"
     },
     "F_109.py": {
       "action": "fold-into 0153",
