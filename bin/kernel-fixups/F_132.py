@@ -1,24 +1,18 @@
 """F-132: Free FM_CTL params pages on last port disengage.
 
-The params pages (CC_CTRL_PARAMS_PAGE_SZ = 256 B per port) are allocated
+The params pages (256 B per port) are allocated
 by fman_pcd_port_ensure_params_page() during engage and are idempotent
 (cached per port).  They are NOT freed on disengage, contributing to the
 persistent MURAM residual that fragments the arena for re-engage.
 
 This fixup adds params page teardown to the F-129 teardown block in
-fman_pcd_fe_disengage().  It iterates the fe_ports list (which is empty
-at this point — ports were already removed by fe_port_del) and clears
-the params page via fman_port_set_params_page(port, 0, NULL), then
-frees the MURAM via fman_pcd_muram_free().
+fman_pcd_fe_disengage().  It iterates ports 0x08-0x27, looks up the
+rxport, reads the params page offset via fman_port_get_params_page(),
+clears it via fman_port_set_params_page(port, 0, NULL), and frees the
+MURAM via fman_pcd_muram_free(pcd, off, 256).
 
-Since fe_ports is empty when the F-129 guard runs, we instead iterate
-the pcd->cc_trees list to find ports that had params pages allocated.
-Each CC tree has a port_id; we look up the rxport and free its params
-page.
-
-Actually, the simpler approach: the params page offset is cached in the
-fman_port via fman_port_get_params_page().  We can iterate all known
-ports (0x08-0x27) and free any that have a params page set.
+Uses literal 256 instead of CC_CTRL_PARAMS_PAGE_SZ because that #define
+is in fman_pcd_cc.c (not a header) and is not visible from fman_pcd.c.
 
 Disposition: fold into F-129 teardown
 Upstream-Status: Inappropriate [LS1046A Mono Gateway DK FE-VM]
@@ -67,8 +61,7 @@ params_cleanup = """\t\t/* F-132: Free FM_CTL params pages allocated by
 \t\t\t\toff = fman_port_get_params_page(port);
 \t\t\t\tif (off) {
 \t\t\t\t\tfman_port_set_params_page(port, 0, NULL);
-\t\t\t\t\tfman_pcd_muram_free(pcd, off,
-\t\t\t\t\t\tCC_CTRL_PARAMS_PAGE_SZ);
+\t\t\t\t\tfman_pcd_muram_free(pcd, off, 256);
 \t\t\t\t}
 \t\t\t}
 \t\t}
