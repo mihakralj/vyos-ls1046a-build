@@ -1543,6 +1543,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-130: PCD MURAM arena 64 KiB -> 84 KiB"
 fi
 
+# F-131: Guard fman_pcd_muram_free() against kexec-stale MURAM offsets.
+# After a kexec reboot, the new kernel's gen_pool has a fresh chunk at a
+# potentially different muram_offset.  Offsets from the previous kernel are
+# not valid, and calling gen_pool_free() on them hits BUG() in lib/genalloc.c.
+# Adds gen_pool_has_addr() check before gen_pool_free() with a pr_warn and
+# budget adjustment for stale offsets.  Board-verified 2026-07-28 on .185
+# (ISO 0422): disengaging from kexec-preserved state triggered:
+#   kernel BUG at lib/genalloc.c:508!
+#   gen_pool_free_owner -> fman_pcd_muram_free -> fman_pcd_fe_pool_free ->
+#   fman_pcd_fe_pool_put -> fman_pcd_fe_disengage
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_131.py" 2>&1
+    echo "### F-131: gen_pool_has_addr() guard in fman_pcd_muram_free()"
+fi
+
 # F-090: MISS→kernel bypass ENQ — route non-matching frames to kernel FQ.
 # Adds a second ENQ FE that enqueues MISS frames to miss_fqid instead of EXIT drop.
 # Enables ARP/ICMP to work through FE-VM, which is the #1 blocker for HIT testing.
@@ -1584,6 +1599,15 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_129.py" 2>&1
     echo "### F-129: VM chain teardown in production fe_disengage()"
+fi
+
+# F-132: Free FM_CTL params pages on last port disengage.
+# The params pages (256 B per port) are allocated by
+# fman_pcd_port_ensure_params_page() during engage and never freed.
+# Adds cleanup to the F-129 teardown block.  Must run AFTER F-129.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_132.py" 2>&1
+    echo "### F-132: params page cleanup in F-129 teardown"
 fi
 
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
