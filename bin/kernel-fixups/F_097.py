@@ -126,6 +126,13 @@ else:
 
 # ── 2. Inject verify call BEFORE fman_pcd_kg_port_arm_fe in engage path ──
 
+# Forward declare fman_pcd_fe_verify_internal before __fman_pcd_fe_arm_engage to avoid implicit declaration warning
+ENGAGE_SIG = "static int __fman_pcd_fe_arm_engage("
+if ENGAGE_SIG in src:
+    src = src.replace(ENGAGE_SIG, "static int fman_pcd_fe_verify_internal(struct fman_pcd *pcd, u8 hw_port_id);\n\nstatic int __fman_pcd_fe_arm_engage(", 1)
+    changes += 1
+    print("### F_097: injected forward declaration of fman_pcd_fe_verify_internal")
+
 KG_ARM_ANCHOR = "\terr = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,"
 if src.count(KG_ARM_ANCHOR) != 1:
     print("### F_097: WARNING KG arm anchor count=%d (expected 1)" % src.count(KG_ARM_ANCHOR))
