@@ -207,23 +207,34 @@ changes += 1
 print("### F-133: added muram_allocations debugfs show function")
 
 # Hook the debugfs file into fman_pcd_init
-# Find an existing debugfs_create_file call to add after
+# Find the muram_budget debugfs line and insert after it.
+# Use line-level insertion to avoid multi-line call breakage.
 hook_marker = 'debugfs_create_file("muram_budget"'
 if hook_marker not in src:
     print("### F-133: muram_budget debugfs not found")
     sys.exit(1)
 
-# Find the end of that line
+# Find the full statement (may span multiple lines with continuations)
 hook_pos = src.find(hook_marker)
-line_end = src.find("\n", hook_pos)
-hook_line = src[hook_pos:line_end]
+# Find the semicolon that ends this statement
+stmt_end = src.find(";", hook_pos)
+if stmt_end == -1:
+    print("### F-133: cannot find end of muram_budget debugfs statement")
+    sys.exit(1)
+# Include the semicolon and newline
+stmt_end = src.find("\n", stmt_end)
+if stmt_end == -1:
+    stmt_end = len(src)
+else:
+    stmt_end += 1  # include the newline
 
-# Insert the new debugfs call on its own line AFTER the existing one
-new_block = hook_line + "\n" + """\t\t\tdebugfs_create_file("muram_allocations", 0444,
+new_call = """\t\t\tdebugfs_create_file("muram_allocations", 0444,
 \t\t\t\t\t    pcd->debugfs_dir, pcd,
-\t\t\t\t\t    &fman_pcd_muram_allocations_fops);"""
+\t\t\t\t\t    &fman_pcd_muram_allocations_fops);
+"""
 
-src = src.replace(hook_line, new_block, 1)
+# Insert after the full statement
+src = src[:stmt_end] + new_call + src[stmt_end:]
 changes += 1
 print("### F-133: hooked muram_allocations debugfs file")
 
