@@ -1630,6 +1630,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-134: KG disarm before MURAM free"
 fi
 
+# F-135: Clear fe_port_armed bit on disengage.
+# F-107 sets the bit for per-port engagement guarding, F-122 tests it for
+# idempotency, but nothing clears it on disengage.  After engage→disengage
+# the stale bit blocks re-engage: F-122 returns "already armed (idempotent)"
+# without actually re-arming.  Board-verified on .106 (ISO 0242).
+# Must run AFTER F-134 (which reorders the function this modifies).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_135.py" 2>&1
+    echo "### F-135: clear fe_port_armed on disengage"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
