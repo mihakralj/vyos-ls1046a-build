@@ -101,7 +101,14 @@ src = src.replace(pool_raw_free, new_pool_raw_free)
 changes += 1
 print(f"### F-137: pool_raw free -> global FMan MURAM ({count_before} occurrences)")
 
-# Also fix the drain function which has the same frees
+# Also fix the drain function which has the same frees, declaring muram at the top of the function
+drain_func = "static void fman_pcd_fe_port_drain(struct fman_pcd *pcd)\n{\n\tstruct fman_pcd_fe_port *fp, *tmp;"
+new_drain_func = "static void fman_pcd_fe_port_drain(struct fman_pcd *pcd)\n{\n\tstruct muram_info *muram = fman_get_muram(pcd->fman);\n\tstruct fman_pcd_fe_port *fp, *tmp;"
+if drain_func in src:
+    src = src.replace(drain_func, new_drain_func)
+    changes += 1
+    print("### F-137: declared muram in fman_pcd_fe_port_drain")
+
 drain_mgmt = "\t\tfman_pcd_muram_free(pcd, fp->mgmt_off, fp->mgmt_size);"
 if drain_mgmt in src:
     src = src.replace(drain_mgmt, "\t\tfman_muram_free_mem(muram, fp->mgmt_off, fp->mgmt_size);")
