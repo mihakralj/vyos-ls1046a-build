@@ -1610,6 +1610,23 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-132: params page cleanup in F-129 teardown"
 fi
 
+# F-133: MURAM allocation tracking — diagnostic debugfs node.
+# Adds muram_allocations debugfs to dump every outstanding allocation
+# with offset/size/label.  Identifies the 8229 B residual after disengage.
+# Must run AFTER F-129 and F-132 (instruments their allocations too).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_133.py" 2>&1
+    echo "### F-133: MURAM allocation tracking"
+fi
+
+# F-134: Reorder __fman_pcd_fe_arm_disengage — KG disarm BEFORE MURAM free.
+# Fixes the second-cycle disengage hang (bus lockup from BMI dereferencing
+# freed MURAM via stale FMBM_RCCB).  Must run AFTER 0157 (typed impl).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_134.py" 2>&1
+    echo "### F-134: KG disarm before MURAM free"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
