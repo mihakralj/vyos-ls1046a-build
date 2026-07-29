@@ -218,12 +218,12 @@ hook_pos = src.find(hook_marker)
 line_end = src.find("\n", hook_pos)
 hook_line = src[hook_pos:line_end]
 
-new_hook = hook_line + """
-\t\t\tdebugfs_create_file("muram_allocations", 0444,
+# Insert the new debugfs call on its own line AFTER the existing one
+new_block = hook_line + "\n" + """\t\t\tdebugfs_create_file("muram_allocations", 0444,
 \t\t\t\t\t    pcd->debugfs_dir, pcd,
 \t\t\t\t\t    &fman_pcd_muram_allocations_fops);"""
 
-src = src.replace(hook_line, new_hook, 1)
+src = src.replace(hook_line, new_block, 1)
 changes += 1
 print("### F-133: hooked muram_allocations debugfs file")
 
