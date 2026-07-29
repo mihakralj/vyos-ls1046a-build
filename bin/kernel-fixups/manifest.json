@@ -119,6 +119,10 @@
     "F_134.py": {
       "action": "keep",
       "reason": "permanent \u2014 reorder __fman_pcd_fe_arm_disengage() to disarm KG (FMBM_RCCB=0) BEFORE freeing MURAM. Fixes BMI dereferencing freed scaffold MURAM via stale RCCB \u2192 bus lockup \u2192 hard hang."
+    },
+    "F_135.py": {
+      "action": "keep",
+      "reason": "permanent \u2014 clear fe_port_armed bit on disengage so re-engage is not blocked by stale idempotency guard"
     }
   },
   "count": 44,
