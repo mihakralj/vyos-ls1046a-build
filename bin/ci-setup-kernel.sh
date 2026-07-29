@@ -1641,6 +1641,18 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-135: clear fe_port_armed on disengage"
 fi
 
+# F-136: Keep FE-VM chain warm across disengage/re-engage cycles.
+# The F-129 teardown frees the entire chain (ehash, pool, singletons,
+# enq, hash) causing arena fragmentation on re-engage (-12 ENOMEM for
+# second port) and disengage hangs (BMI dereferences freed MURAM).
+# Instead, keep the chain allocated — only disarm KG and free per-port
+# resources.  F-092 v3 detects the existing chain on re-engage and
+# skips re-allocation.  Must run AFTER F-129 (modifies its teardown).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_136.py" 2>&1
+    echo "### F-136: keep FE-VM chain warm across cycles"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).

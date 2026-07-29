@@ -123,6 +123,10 @@
     "F_135.py": {
       "action": "keep",
       "reason": "permanent \u2014 clear fe_port_armed bit on disengage so re-engage is not blocked by stale idempotency guard"
+    },
+    "F_136.py": {
+      "action": "keep",
+      "reason": "permanent \u2014 keep FE-VM chain warm across disengage/re-engage cycles to prevent arena fragmentation and disengage hang"
     }
   },
   "count": 44,
