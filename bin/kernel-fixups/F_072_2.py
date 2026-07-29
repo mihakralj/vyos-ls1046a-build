@@ -97,39 +97,11 @@ print("### fman_pcd.c: F-072 v3 buffer setup/teardown functions added")
 
 call_anchor = "/* F-079: CONT_LOOKUP pass-through scaffold (RM 8.7.4.1)."
 if call_anchor in src:
-    setup_call = (
-        "\t/* F-072 v3: arm FE buffer pool BEFORE scaffold */\n"
-        "\t{\n"
-        "\t\tstruct fman_port *rxport = fman_port_lookup_rx(pcd->fman, (u8)port_id);\n"
-        "\t\tint _bfr;\n"
-        "\t\tif (!rxport)\n"
-        "\t\t\treturn -ENODEV;\n"
-        "\t\t_bfr = fman_pcd_fe_buffer_setup(pcd, rxport, (u8)port_id);\n"
-        "\t\tif (_bfr)\n"
-        "\t\t\treturn _bfr;\n"
-        "\t}\n"
-        "\n"
-        "\t" + call_anchor
-    )
-    src = src.replace(call_anchor, setup_call, 1)
-    changes += 1
-    print("### fman_pcd.c: F-072 v3 buffer setup call inserted in engage")
+    print("### F-072 v3: buffer setup call bypassed (handled by fman_pcd_fe_port_set)")
 
 disanchor = "fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);"
 if disanchor in src:
-    teardown_call = (
-        "\t/* F-072 v3: tear down FE buffer BEFORE PCD disarm */\n"
-        "\t{\n"
-        "\t\tstruct fman_port *rxport = fman_port_lookup_rx(pcd->fman, (u8)port_id);\n"
-        "\t\tif (rxport)\n"
-        "\t\t\tfman_pcd_fe_buffer_teardown(pcd, rxport);\n"
-        "\t}\n"
-        "\n"
-        "\t" + disanchor
-    )
-    src = src.replace(disanchor, teardown_call, 1)
-    changes += 1
-    print("### fman_pcd.c: F-072 v3 buffer teardown call inserted in disengage")
+    print("### F-072 v3: buffer teardown call bypassed (handled by fman_pcd_fe_port_del)")
 
 dbg_anchor = 'debugfs_create_file("fe_arm", 0600,'
 if dbg_anchor in src:
