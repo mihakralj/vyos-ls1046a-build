@@ -1349,21 +1349,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 
     # F-072b/c: Bypassed. ASK2's fman_pcd_fe_port_set handles the FmPortSetFESupport pool natively.
     # Leaving the injection active would cause double-allocations and ENOMEM failures in production engage path.
-    # python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-    #     drivers/net/ethernet/freescale/fman/fman_pcd.c \
-    #     'static int __fman_pcd_fe_arm_engage(' \
-    #     'static int fman_pcd_fe_buffer_setup(struct fman_pcd *, struct fman_port *, u8);\n\nstatic int __fman_pcd_fe_arm_engage(' \
-    #     1 \
-    #     "F-072c: forward-decl fman_pcd_fe_buffer_setup"
-    # echo "### fman_pcd.c: F-072c forward-decl fman_pcd_fe_buffer_setup (mutate)"
-
-    # python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-    #     drivers/net/ethernet/freescale/fman/fman_pcd.c \
-    #     'err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,' \
-    #     '{ struct fman_port *rxp = fman_port_lookup_rx(pcd->fman, (u8)port_id); int _b; if (!rxp) return -ENODEV; _b = fman_pcd_fe_buffer_setup(pcd, rxp, (u8)port_id); if (_b) return _b; } err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,' \
-    #     1 \
-    #     "F-072b: FmPortSetFESupport call injected before arm_fe"
-    # echo "### fman_pcd.c: F-072b FmPortSetFESupport call injected (mutate)"
 
     # F-084: Fix 0158 compose FE_ENTER target — EXT_HASH not ENQ.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
