@@ -127,6 +127,10 @@
     "F_136.py": {
       "action": "keep",
       "reason": "permanent \u2014 keep FE-VM chain warm across disengage/re-engage cycles to prevent arena fragmentation and disengage hang"
+    },
+    "F_137.py": {
+      "action": "keep",
+      "reason": "permanent \u2014 allocate per-port FE buffer pools from global FMan MURAM instead of PCD gen_pool to avoid arena fragmentation"
     }
   },
   "count": 44,

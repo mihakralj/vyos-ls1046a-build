@@ -1653,6 +1653,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-136: keep FE-VM chain warm across cycles"
 fi
 
+# F-137: Allocate per-port FE buffer pools from global FMan MURAM.
+# With the warm-chain strategy (F-136), the ehash int_buf (33280 B)
+# stays allocated, fragmenting the 84 KiB PCD arena.  The second port's
+# ~9 KB pool cannot be placed → -12 ENOMEM.  Move per-port pool
+# allocations to the global FMan MURAM (fman_muram_alloc/free_mem)
+# which has ~299 KiB of space.  Must run AFTER F-136.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_137.py" 2>&1
+    echo "### F-137: per-port pools from global FMan MURAM"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
