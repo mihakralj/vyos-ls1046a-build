@@ -1601,14 +1601,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-129: VM chain teardown in production fe_disengage()"
 fi
 
-# F-132: Free FM_CTL params pages on last port disengage.
-# The params pages (256 B per port) are allocated by
-# fman_pcd_port_ensure_params_page() during engage and never freed.
-# Adds cleanup to the F-129 teardown block.  Must run AFTER F-129.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_132.py" 2>&1
-    echo "### F-132: params page cleanup in F-129 teardown"
-fi
+# F-132: DISABLED 2026-07-29 — M2_4_3.py already frees params pages in
+# fman_pcd_kg_port_disarm_fe() (fman_pcd_kg.c).  Running both causes a
+# double-free panic: F-132 frees the page in the F-129 teardown block,
+# then F-134's reordered disarm calls kg_port_disarm_fe which frees it
+# again → gen_pool_free_owner BUG.
+# Board-verified on .185 (ISO 0146): panic at fman_pcd_kg_port_disarm_fe
+# → fman_pcd_muram_free(0x4b600, 256) → gen_pool_free_owner BUG.
+# if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+#     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_132.py" 2>&1
+#     echo "### F-132: params page cleanup in F-129 teardown"
+# fi
 
 # F-133: MURAM allocation tracking — diagnostic debugfs node.
 # Adds muram_allocations debugfs to dump every outstanding allocation
