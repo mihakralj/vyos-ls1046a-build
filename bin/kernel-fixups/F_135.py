@@ -48,15 +48,15 @@ if count == 0:
     print("### F-135: disarm call not found")
     sys.exit(0)
 
-# Insert clear_bit after the disarm
-new_block = disarm_line + "\n\tclear_bit(port_id, pcd->fe_port_armed);"
+# Insert clear_bit and 5ms FMan pipeline drain delay after the disarm
+new_block = disarm_line + "\n\tclear_bit(port_id, pcd->fe_port_armed);\n\tfsleep(5000);"
 if new_block in src:
     print("### F-135: clear_bit already present")
     sys.exit(0)
 
 src = src.replace(disarm_line, new_block, 1)
 changes += 1
-print("### F-135: added clear_bit(fe_port_armed) after KG disarm")
+print("### F-135: added clear_bit(fe_port_armed) + fsleep(5000) pipeline drain after KG disarm")
 
 if changes:
     with open(pcd_c, "w") as f:
