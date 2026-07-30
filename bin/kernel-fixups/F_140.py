@@ -26,6 +26,7 @@ import sys, os
 kroot = "drivers/net/ethernet/freescale/fman"
 pcd_c = os.path.join(kroot, "fman_pcd.c")
 keygen_c = os.path.join(kroot, "fman_pcd_keygen.c")
+pcd_h = "include/linux/fsl/fman_pcd.h"
 
 total_changes = 0
 
@@ -61,16 +62,23 @@ if os.path.exists(pcd_c):
     else:
         print("### F-140: v4 ehash_table_set not found")
 
-    # A2. Add v6_scheme_id field to struct fman_pcd
-    insert_after = "\tDECLARE_BITMAP(fe_port_armed, 32);"
-    if insert_after in src:
-        new_field = insert_after + "\n\tint v6_scheme_id;\t/* F-140: v6 KG scheme id, -1 = not armed */"
-        if "v6_scheme_id" not in src:
-            src = src.replace(insert_after, new_field, 1)
-            changes += 1
-            print("### F-140: added v6_scheme_id field")
+    # A2. Add v6_scheme_id field to struct fman_pcd in the HEADER
+    if os.path.exists(pcd_h):
+        with open(pcd_h) as f:
+            hdr_src = f.read()
+        insert_after = "\tDECLARE_BITMAP(fe_port_armed, 32);"
+        if insert_after in hdr_src:
+            new_field = insert_after + "\n\tint v6_scheme_id;\t/* F-140: v6 KG scheme id, -1 = not armed */"
+            if "v6_scheme_id" not in hdr_src:
+                hdr_src = hdr_src.replace(insert_after, new_field, 1)
+                with open(pcd_h, "w") as f:
+                    f.write(hdr_src)
+                changes += 1
+                print("### F-140: added v6_scheme_id field to fman_pcd.h")
+            else:
+                print("### F-140: v6_scheme_id field already in header")
         else:
-            print("### F-140: v6_scheme_id field already present")
+            print("### F-140: fe_port_armed bitmap not found in header")
 
     # A3. Initialize v6_scheme_id = -1 in fman_pcd_init
     init_anchor = "\tpcd->fe_vm_chain_built = false;"
