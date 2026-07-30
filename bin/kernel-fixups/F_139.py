@@ -103,65 +103,36 @@ if old_drain in src:
 else:
     print("### F-139: fe_port_drain free block not found")
 
-# ── 3. Replace pcd->fe_scaffold_gro = gro with per-port lookup ──
-# Use simple string replacement on each line individually.
-# This is robust against whitespace/context changes from other fixups.
-import re
-
-gro_re = re.compile(r'(\t*)pcd->fe_scaffold_gro\s*=\s*gro;')
-mto_re = re.compile(r'(\t*)pcd->fe_scaffold_mto\s*=\s*mto;')
-ato_re = re.compile(r'(\t*)pcd->fe_scaffold_ato\s*=\s*ato;')
-
-gro_m = gro_re.search(src)
-mto_m = mto_re.search(src)
-ato_m = ato_re.search(src)
-
-if gro_m and mto_m and ato_m:
-    indent = gro_m.group(1)
-    lookup_block = (indent + "{\n" +
-                    indent + "\tstruct fman_pcd_fe_port *fp = fman_pcd_fe_port_find(pcd, (u8)port_id);\n" +
-                    indent + "\tif (fp) {\n" +
-                    indent + "\t\tfp->scaffold_gro = gro;\n" +
-                    indent + "\t\tfp->scaffold_mto = mto;\n" +
-                    indent + "\t\tfp->scaffold_ato = ato;\n" +
-                    indent + "\t}\n" +
-                    indent + "}")
-    # Replace the three lines with the lookup block
-    gro_pos = gro_m.start()
-    ato_end = src.find("\n", ato_m.start()) + 1
-    src = src[:gro_pos] + lookup_block + "\n" + src[ato_end:]
+# ── 3. In fe_port_set, copy scaffold offsets from singleton to per-port ──
+# The scaffold is allocated in __fman_pcd_fe_arm_engage BEFORE fe_port_set
+# adds the port to fe_ports.  So fman_pcd_fe_port_find() returns NULL during
+# engage.  Instead: keep the singleton assignment in engage, then copy to
+# per-port in fe_port_set after list_add_tail, and zero the singleton.
+#
+# Find the list_add_tail in fe_port_set and add scaffold copy after it.
+old_list_add = "\tlist_add_tail(&fp->node, &pcd->fe_ports);"
+if old_list_add in src:
+    new_list_add = """\tlist_add_tail(&fp->node, &pcd->fe_ports);
+\t/* F-139: Copy scaffold offsets from singleton (set during engage before
+\t * the port was in fe_ports) to per-port struct for teardown in fe_port_del.
+\t */
+\tfp->scaffold_gro = pcd->fe_scaffold_gro;
+\tfp->scaffold_mto = pcd->fe_scaffold_mto;
+\tfp->scaffold_ato = pcd->fe_scaffold_ato;
+\tpcd->fe_scaffold_gro = 0;
+\tpcd->fe_scaffold_mto = 0;
+\tpcd->fe_scaffold_ato = 0;"""
+    src = src.replace(old_list_add, new_list_add, 1)
     changes += 1
-    print("### F-139: scaffold tracking moved to per-port fp->scaffold_*")
+    print("### F-139: scaffold copy from singleton to per-port in fe_port_set")
 else:
-    print("### F-139: scaffold tracking assignment not found — fields will be kept as-is")
-    # List what WAS found for debugging
-    if gro_m: print("### F-139: DEBUG gro found at", gro_m.start())
-    if mto_m: print("### F-139: DEBUG mto found at", mto_m.start())
-    if ato_m: print("### F-139: DEBUG ato found at", ato_m.start())
-    # Search for any reference to fe_scaffold
-    any_ref = re.findall(r'fe_scaffold_\w+', src)
-    if any_ref:
-        print(f"### F-139: DEBUG found fe_scaffold_* references: {any_ref[:10]}")
+    print("### F-139: list_add_tail not found in fe_port_set")
 
-# ── 4. Remove the singleton scaffold fields from struct fman_pcd ──
-# Only if the tracking was successfully moved (pcd->fe_scaffold_gro no longer referenced)
-if "pcd->fe_scaffold_gro" not in src:
-    old_fields = """\tunsigned long fe_scaffold_gro;\t/* group table (256 B) */
-\tunsigned long fe_scaffold_mto;\t/* match table (16 B) */
-\tunsigned long fe_scaffold_ato;\t/* AD table    (32 B) */"""
-
-    if old_fields in src:
-        new_fields = """\t/* F-139: scaffold tracking moved to per-port struct fman_pcd_fe_port */
-\t/* unsigned long fe_scaffold_gro; */
-\t/* unsigned long fe_scaffold_mto; */
-\t/* unsigned long fe_scaffold_ato; */"""
-        src = src.replace(old_fields, new_fields, 1)
-        changes += 1
-        print("### F-139: singleton scaffold fields removed from struct fman_pcd")
-    else:
-        print("### F-139: singleton scaffold fields not found — may already be removed")
-else:
-    print("### F-139: skipping field removal (pcd->fe_scaffold_gro still referenced)")
+# ── 4. Keep singleton scaffold fields in struct fman_pcd ──
+# They are still used during engage (before the port is in fe_ports).
+# fe_port_set copies them to per-port and zeros them.
+# No change needed — the fields stay.
+print("### F-139: singleton scaffold fields kept (used during engage, copied in fe_port_set)")
 
 # ── 5. Reduce fman_pcd_fe_arm_free_scaffold() to no-op ──
 free_func = "static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)"
