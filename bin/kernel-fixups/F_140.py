@@ -24,7 +24,7 @@ import sys, os
 
 kroot = "drivers/net/ethernet/freescale/fman"
 pcd_c = os.path.join(kroot, "fman_pcd.c")
-keygen_c = os.path.join(kroot, "fman_pcd_keygen.c")
+keygen_c = os.path.join(kroot, "fman_pcd_kg.c")
 
 total_changes = 0
 
@@ -88,9 +88,8 @@ if os.path.exists(pcd_c):
             print("### F-140: neither fe_armed_port nor fe_exit_off found in struct")
 
     # A3. Initialize v6_scheme_id = -1 in fman_pcd_init().
-    #     Use a unique anchor: the function signature + first assignment.
-    #     fman_pcd_init sets pcd->muram_offset early — use that as anchor.
-    init_anchor = "\tpcd->muram_offset = fman_muram_offset(fman);"
+    #     Use pcd->fman = fman as anchor (first assignment after kzalloc).
+    init_anchor = "\tpcd->fman = fman;"
     if init_anchor in src:
         v6_init = "\tpcd->v6_scheme_id = -1;\t/* F-140 */\n" + init_anchor
         if "v6_scheme_id = -1" not in src:
@@ -100,7 +99,7 @@ if os.path.exists(pcd_c):
         else:
             print("### F-140: v6_scheme_id init already present")
     else:
-        print("### F-140: muram_offset init not found in fman_pcd_init")
+        print("### F-140: pcd->fman = fman init not found in fman_pcd_init")
 
     if changes:
         with open(pcd_c, "w") as f:
