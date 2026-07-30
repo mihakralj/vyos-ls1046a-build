@@ -1640,6 +1640,13 @@ fi
 #     echo "### F-137: per-port pools from global FMan MURAM"
 # fi
 
+# F-138: DIAGNOSTIC — printk scaffold alloc/free to trace 304 B/cycle leak.
+# DELETE after root cause confirmed.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_138.py" 2>&1
+    echo "### F-138: scaffold alloc/free diagnostic printk"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
