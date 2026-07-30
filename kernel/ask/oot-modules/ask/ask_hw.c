@@ -885,8 +885,9 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         if (!h)
                 return -ENODEV;
 
-        /* Body ships v4 TCP/UDP only; everything else falls back to SW. */
-        if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
+        /* Body ships v4/v6 TCP/UDP only; everything else falls back to SW. */
+        if ((key->l3_proto != ASK_FLOW_L3_IPV4 &&
+             key->l3_proto != ASK_FLOW_L3_IPV6) ||
             (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
                 return -EOPNOTSUPP;
 
