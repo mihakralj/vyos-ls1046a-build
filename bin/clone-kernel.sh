@@ -48,20 +48,25 @@ if [ -d "${CACHE_DIR}/.git" ] && [ "$FORCE" != "1" ]; then
     else
         echo "### Already at ${TAG}"
     fi
-    # Ensure blob objects are available for git apply --3way
-    if ! git cat-file -e HEAD^{tree} 2>/dev/null; then
+    # Ensure blob objects are available for git apply --3way.
+    # A shallow clone (--depth=1) only has the tree and commit objects,
+    # not the individual file blobs referenced by patch index lines.
+    # Test with a known file that every kernel has.
+    if ! git cat-file -e HEAD:Makefile 2>/dev/null; then
         echo "### Deepening existing clone for --3way blob access..."
         git fetch --unshallow 2>/dev/null || git fetch --depth=100000 2>/dev/null || true
+        echo "### Clone depth after deepening: $(git rev-list --count HEAD 2>/dev/null || echo unknown)"
     fi
 else
     echo "### Cloning linux-stable ${TAG} into cache (shallow)..."
     [ "$FORCE" = "1" ] && rm -rf "$CACHE_DIR"
     git clone --depth=1 --branch "$TAG" "$URL" "$CACHE_DIR"
-    # Deepen to get blob objects needed for git apply --3way
+    # Deepen to get blob objects needed for git apply --3way.
+    # A shallow clone lacks individual file blobs referenced by patch index lines.
     echo "### Deepening clone for --3way blob access..."
     cd "$CACHE_DIR"
     git fetch --unshallow 2>/dev/null || git fetch --depth=100000 2>/dev/null || true
-    echo "### Clone depth: $(git rev-list --count HEAD)"
+    echo "### Clone depth: $(git rev-list --count HEAD 2>/dev/null || echo unknown)"
 fi
 
 echo "### Kernel git cache ready: $(cd "$CACHE_DIR" && git describe --tags)"
