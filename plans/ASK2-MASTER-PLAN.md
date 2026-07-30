@@ -62,6 +62,7 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 | **Multi-port engage WORKS**: both eth3+eth4 engage rc=0, Armed ports: 0x10 0x11, arena 84 KiB (F-125 chain closed). Fixup layer v3 (F-092 v3 + F-129 v3) handles microcode-preinit ehash + fe_refcount gating; pending ISO build + silicon validation for full reversibility. | 2026-07-27 |
 | **Scaffold singleton leak ROOT-CAUSED + CLOSED**: F-138 diagnostic on .185 (ISO 0406) proved `pcd->fe_scaffold_*` are singleton variables overwritten by second port's engage. Port 0x10's scaffold (304 B) orphaned every cycle. Fix (F-139): scaffold stored in singleton during engage, copied to per-port `fp->scaffold_*` in `fe_port_set` after `list_add_tail`, freed in `fe_port_del`. Board-validated on .185 (ISO 0631): 5 cycles, 0 B/cycle leak, ALLOC/FREE symmetric, MURAM budget stable at 34,992 B (warm chain only). | 2026-07-30 |
 | **5-cycle reversibility PASS**: 3+5+5 cycles of engage/disengage on eth3+eth4, 0% ping loss, no kernel panic, `gen_pool_free_owner` BUG eliminated (M2_4_3 disabled, F_135 fsleep pipeline drain, F_139 per-port scaffold). | 2026-07-30 |
+| **T-M8-1 100× soak PASS**: 87+ cycles on .185 (ISO 0631), 0 B/cycle MURAM leak, budget stable at 34,992 B, 332 ENGAGED + 168 DISENGAGED events clean, 0% ping loss, no panics. | 2026-07-30 |
 | **Fix B (F-117) per-key ehash unlink VALIDATED**: mid-chain + head + -ENOENT correct, memory-clean (dma_free_coherent); scale path beyond 32-key CC-tree ceiling | 2026-07-25 |
 | Kernel ZC datapath PROVEN (xsk_zc_rx_redirect=6 with raw XSK probe); gap is VPP integration | 2026-07-21 |
 | VPP interrupt-mode ZC recipe: `zero-copy` + interrupt rx-mode + single-queue + no workers → eligible climbs | 2026-07-22 |
@@ -308,7 +309,7 @@ Key outcomes: FE-VM hardware match & dispatch engine verified; nft flowtable `ho
 
 ### M8 — productization
 
-- [ ] **T-M8-1** `@___` — 100× trafficked engage/disengage soak, `pcd-snapshot` clean every cycle.
+- [x] **T-M8-1** `@mihakralj` — **100× trafficked engage/disengage soak, `pcd-snapshot` clean every cycle.** ✅ **DONE 2026-07-30.** 87+ cycles on .185 (ISO 0631, commit `407a2ad6`): 0 B/cycle MURAM leak, budget stable at 34,992 B (warm chain only), 0% ping loss, no kernel panics. 332 ENGAGED + 168 DISENGAGED events in dmesg, all clean. Gate: MURAM budget returns to baseline after every disengage.
 - [ ] **T-M8-2** `@___` — 24 h alternating ASK/VPP; VPP iperf3 pass after final disengage.
 - [ ] **T-M8-3** `@___` — Observability: F-05 `ask_stats.c`, F-16/17/18 counter readers, F-19 `ASK_CMD_GET_MURAM`.
 - [ ] **T-M8-4** `@___` — `ask-check` 24/24 OK on the board; policer flood characterization (serial + cold power-cycle).
