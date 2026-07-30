@@ -133,6 +133,7 @@
     "F_143.py": "fman_pcd.c: F-143 \u2014 place en_exthash_node descriptor at DDR table base",
     "F_144.py": "fman_pcd.c: F-144 \u2014 fix EXT_HASH FE word1 byte order (hashShift<<24|contextSize<<16|hashMask)",
     "F_145.py": "fman_pcd.c: F-145 \u2014 contextSize=255 (DDR record size, not key size)",
+    "F_146.py": "fman_pcd.c: F-146 \u2014 populate CC group table with FE_ENTER AD pointer",
     "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
