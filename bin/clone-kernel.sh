@@ -52,6 +52,11 @@ else
     echo "### Cloning linux-stable ${TAG} into cache (shallow)..."
     [ "$FORCE" = "1" ] && rm -rf "$CACHE_DIR"
     git clone --depth=1 --branch "$TAG" "$URL" "$CACHE_DIR"
+    # Deepen to get blob objects needed for git apply --3way
+    echo "### Deepening clone for --3way blob access..."
+    cd "$CACHE_DIR"
+    git fetch --unshallow 2>/dev/null || git fetch --depth=100000 2>/dev/null || true
+    echo "### Clone depth: $(git rev-list --count HEAD)"
 fi
 
 echo "### Kernel git cache ready: $(cd "$CACHE_DIR" && git describe --tags)"
