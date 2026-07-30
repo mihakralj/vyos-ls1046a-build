@@ -1654,6 +1654,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-140: v6 ehash table + KG scheme"
 fi
 
+# F-142: Convert ehash flow records from kzalloc to dma_alloc_coherent.
+# Fixes F-141: the FMan DMA engine reads flow records from DDR and needs
+# uncached memory (dma_alloc_coherent), not cacheable kmalloc memory.
+# Without this, the FE-VM ehash path (Fork-B) cannot produce a HIT.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_142.py" 2>&1
+    echo "### F-142: dma_alloc_coherent for ehash flow records"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
