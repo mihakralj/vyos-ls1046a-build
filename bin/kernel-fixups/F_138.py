@@ -3,8 +3,10 @@
 The 5-cycle test shows +304 B PCD gen_pool residual per cycle.  The engage
 delta is 17,546 B (scaffold 304 + 2× per-port pools 17,242).  The disengage
 frees 17,242 B (pools) but NOT the 304 B scaffold.  This fixup adds printk
-to verify whether fman_pcd_fe_arm_free_scaffold() is actually called and
-whether the tracking variables are non-zero.
+to verify whether the scaffold is allocated and freed correctly.
+
+As of F-139, the scaffold is per-port (fp->scaffold_*) and freed in
+fman_pcd_fe_port_del().  This diagnostic verifies the fix.
 
 DELETE this fixup after root cause is confirmed.
 """
@@ -24,31 +26,37 @@ with open(pcd_c) as f:
 changes = 0
 
 # 1. Add printk to scaffold allocation in __fman_pcd_fe_arm_engage
-# Find the tracking variable assignments
-alloc_anchor = '\t\t\tpcd->fe_scaffold_gro = gro;'
+# Find the per-port tracking assignment (F-139 style)
+alloc_anchor = '\t\t\tfp->scaffold_gro = gro;'
 if alloc_anchor in src:
-    new_alloc = alloc_anchor + '\n\t\t\tpr_info("fman_pcd: F-138 scaffold ALLOC gro=0x%lx mto=0x%lx ato=0x%lx\\n", gro, mto, ato);'
+    new_alloc = alloc_anchor + '\n\t\t\tpr_info("fman_pcd: F-138 scaffold ALLOC port=0x%x gro=0x%lx mto=0x%lx ato=0x%lx\\n", (u8)port_id, gro, mto, ato);'
     if new_alloc not in src:
         src = src.replace(alloc_anchor, new_alloc, 1)
         changes += 1
-        print("### F-138: added scaffold ALLOC printk")
+        print("### F-138: added per-port scaffold ALLOC printk")
 else:
-    print("### F-138: scaffold alloc anchor not found")
+    # Fall back to old singleton style
+    alloc_anchor = '\t\t\tpcd->fe_scaffold_gro = gro;'
+    if alloc_anchor in src:
+        new_alloc = alloc_anchor + '\n\t\t\tpr_info("fman_pcd: F-138 scaffold ALLOC gro=0x%lx mto=0x%lx ato=0x%lx\\n", gro, mto, ato);'
+        if new_alloc not in src:
+            src = src.replace(alloc_anchor, new_alloc, 1)
+            changes += 1
+            print("### F-138: added singleton scaffold ALLOC printk")
+    else:
+        print("### F-138: scaffold alloc anchor not found")
 
-# 2. Add printk to scaffold free
-free_func = "static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)"
-if free_func in src:
-    # Find the function body opening brace
-    func_idx = src.index(free_func)
-    brace_idx = src.index("{", func_idx)
-    # Insert printk at the top of the function
-    insert = '{\n\tpr_info("fman_pcd: F-138 scaffold FREE gro=0x%lx mto=0x%lx ato=0x%lx\\n", pcd->fe_scaffold_gro, pcd->fe_scaffold_mto, pcd->fe_scaffold_ato);'
-    if insert not in src:
-        src = src[:brace_idx] + insert + src[brace_idx+1:]
+# 2. Add printk to scaffold free in fe_port_del
+# Find the scaffold free block added by patch 0123
+free_anchor = 'if (fp->scaffold_ato)'
+if free_anchor in src:
+    insert = '\tpr_info("fman_pcd: F-138 scaffold FREE port=0x%x gro=0x%lx mto=0x%lx ato=0x%lx\\n", fp->port_id, fp->scaffold_gro, fp->scaffold_mto, fp->scaffold_ato);\n\t'
+    if 'F-138 scaffold FREE' not in src:
+        src = src.replace(free_anchor, insert + free_anchor, 1)
         changes += 1
-        print("### F-138: added scaffold FREE printk")
+        print("### F-138: added per-port scaffold FREE printk")
 else:
-    print("### F-138: scaffold_free function not found")
+    print("### F-138: scaffold free anchor not found in fe_port_del")
 
 if changes:
     with open(pcd_c, "w") as f:

@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.27.0 · 2026-07-27 · HADS 1.0.0**
+**Version 1.31.0 · 2026-07-30 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -45,7 +45,7 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 
 **[BUG] M7's "complete" claim is QUALIFIED as of 2026-07-27** by consolidated CR-001 (§9): the CLI control path is now YNL-driven, but silicon still fails reversibility under the production kernel API path. On both `.106` and `.185`, successful YNL engage/disengage cycles leave `pcd-snapshot` drift (KG scheme[4], BMI `rfpne/rccb`, MURAM delta). M7 remains DONE for surface wiring, but the end-to-end production offload claim stays blocked on disengage/revert correctness (F-124) and CR-001 closure.
 
-**[SPEC] Refinement 2026-07-27 (F-125 CLOSED).** The reversibility failure had three root causes, all fixed: (a) `__fman_pcd_fe_arm_engage()` orphaned its 304-byte FE_ENTER scaffold on failed kg_port_arm_fe (F-125a); (b) the ehash `int_buf` (33280 B) at offset 0x4c100 fragmented the 64 KiB arena so a second port's ~8 KiB pool could not be placed (F-130: arena grown to 84 KiB); (c) the VM chain teardown was inserted into the debugfs handler only, never the production `fman_pcd_fe_disengage()` (F-092 v2 + F-129). **Multi-port engage WORKS on .185 (ISO 1502): both ports rc=0, Armed ports: 0x10 0x11.** Full reversibility (ehash freed on last disengage, muram_budget returns to baseline) is pending validation on ISO 1533 which carries F-092 v2.
+**[SPEC] Refinement 2026-07-28 (F-129 v4).** The reversibility failure had three root causes, all fixed in code: (a) scaffold orphan on failed engage (F-125a); (b) arena fragmentation (F-130: 64→84 KiB); (c) VM chain teardown in debugfs handler only (F-092 v2 + F-129). **Board test on ISO 1835 (`.185`, 2026-07-28) revealed F-129 v1-v3 had the F-092 v1 bug class:** `src.replace(..., 1)` matched the debugfs handler's `__fman_pcd_fe_arm_disengage()` call (first in file), not the production `fman_pcd_fe_disengage()`. Engage works (both ports rc=0), disengage disarms ports, but teardown never fires — ehash int_buf held at refcount=1, fe_pool engaged=YES, 67428 B MURAM used. **F-129 v4** (commit `938aa3ab`) scopes to production function signature, same pattern as F-092 v2. CI build 30326497207 in progress. Full reversibility validation pending on that build.
 
 ### 1.3 Silicon-proven facts (all on LS1046A hardware)
 
@@ -59,7 +59,9 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 | **M5 COMPLETE**: 10.259 Gbps line rate, 0.16% CPU, 0% loss, opcode chain active | 2026-07-24 |
 | **M7 COMPLETE**: CLI engage/disengage, per-interface mutex, `show flows` via ynl | 2026-07-25 |
 | Post-review hardening landed: `hw_backed` ownership bit, neigh queue cap+coalesce, `offloaded` genl/uapi attr, remove-equivalent `FLUSH_FLOWS` (F-120) | 2026-07-26 |
-| **Multi-port engage WORKS**: both eth3+eth4 engage rc=0, Armed ports: 0x10 0x11, arena 84 KiB (F-125 chain closed) | 2026-07-27 |
+| **Multi-port engage WORKS**: both eth3+eth4 engage rc=0, Armed ports: 0x10 0x11, arena 84 KiB (F-125 chain closed). Fixup layer v3 (F-092 v3 + F-129 v3) handles microcode-preinit ehash + fe_refcount gating; pending ISO build + silicon validation for full reversibility. | 2026-07-27 |
+| **Scaffold singleton leak ROOT-CAUSED**: F-138 diagnostic on .185 (ISO 0406, 2026-07-30) proved `pcd->fe_scaffold_*` are singleton variables overwritten by second port's engage. Port 0x10's scaffold (304 B) orphaned every cycle. Fix: F-139 moves scaffold tracking to per-port `struct fman_pcd_fe_port`, freed in `fe_port_del()`. | 2026-07-30 |
+| **5-cycle reversibility PASS**: 3+5 cycles of engage/disengage on eth3+eth4, 0% ping loss, no kernel panic, `gen_pool_free_owner` BUG eliminated (M2_4_3 disabled, F_135 fsleep pipeline drain). Residual 304 B/cycle identified as scaffold singleton leak — fixed in F-139. | 2026-07-30 |
 | **Fix B (F-117) per-key ehash unlink VALIDATED**: mid-chain + head + -ENOENT correct, memory-clean (dma_free_coherent); scale path beyond 32-key CC-tree ceiling | 2026-07-25 |
 | Kernel ZC datapath PROVEN (xsk_zc_rx_redirect=6 with raw XSK probe); gap is VPP integration | 2026-07-21 |
 | VPP interrupt-mode ZC recipe: `zero-copy` + interrupt rx-mode + single-queue + no workers → eligible climbs | 2026-07-22 |
@@ -70,8 +72,12 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 **[SPEC]** Provenance has already invalidated one validation cycle (F-124 root cause (a): run `30227073161` shipped SHA `2f32b637`, so both DUTs booted the pre-YNL debugfs helper and the results were meaningless). Keep this table current; **never interpret a board result without first confirming which SHA the running ISO was built from.**
 
 | ISO | Built from | Deployed | Carries | Notes |
-|---|---|---|---|---|
-| `2026.07.27-1533-rolling` | `34c799fc` | lxc200 `latest.iso` | F-092 v2 (production build) + F-129 (production teardown) + F-130 (84 KiB arena) + F-125(a) + F-126/F-127 diagnostics | **Current latest.** PENDING: cold-boot + full engage/disengage cycle validation |
+|---|---|---|---|---|---|
+| *(CI 30512956585)* | `412c726f` | lxc200 `latest.iso`, installed on .185 | F-138 diagnostic (scaffold alloc/free printk) | **Board-tested 2026-07-30:** F-138 proved scaffold singleton leak — port 0x10's scaffold orphaned every cycle. Root cause confirmed. |
+| `2026.07.30-0406-rolling` | `412c726f` | lxc200 `latest.iso` | F-138 diagnostic | Deployed for scaffold leak diagnosis. |
+| *(CI 30326497207)* | `938aa3ab` | — | F-129 v4 (production-scoped teardown) + F-092 v3 + all F-125 chain fixes | **Building now.** F-129 v4 fixes the F-092 v1 bug class: v1-v3 matched debugfs handler, not production fn. |
+| `2026.07.27-1835-rolling` | `c70b2f87` | lxc200 `latest.iso`, installed on .185 + .106 | F-092 v3 + F-129 v3 (debugfs-scoped — BROKEN) + F-130 + F-125(a) | **Board-tested 2026-07-28 on .185:** engage works (both ports rc=0), disengage disarms ports but F-129 teardown never fires — ehash int_buf held, fe_pool engaged=YES, 67428 B MURAM used. Root cause: F-129 v3 `src.replace(..., 1)` matched debugfs handler's disarm call, not production fn. Fixed in v4. |
+| `2026.07.27-1533-rolling` | `34c799fc` | — | F-092 v2 (production build) + F-129 v1 (fe_vm_chain_built gate) + F-130 + F-125(a) | F-092 v2 scoped build to production; F-129 v1 gated on fe_vm_chain_built. Superseded by 1835. |
 | `2026.07.27-1502-rolling` | `8d60cd25` | installed on `.185` | F-130 (84 KiB arena) + F-129 + F-125(a) + F-126/F-127; F-092 v1 (debugfs-only build) | **Multi-port engage WORKS** (both ports rc=0). Disengage leaves ehash held (F-092 v1 bug). |
 | `2026.07.27-0645-rolling` | `9c879e34` | — | F-125(a) + F-126 + F-127 + F-128 | F-127 return #6 = fman_pcd_fe_port_set() -ENOMEM (arena fragmentation) |
 | `2026.07.27-0501-rolling` | `ff321186` | — | F-125 (a) in full — **and it did not work** | Baseline for F-126 instrumentation |
@@ -169,10 +175,15 @@ All three gaps closed: `FmPcdCcBuildContextByFE` reproduced from lf-5.4 LSDK; fu
 12. **10G DMA page-order policy is order-4 primary (throughput-first).**
     Dedicated 3-node MTU sweep on .185 shows a non-linear order-3 cliff
     (1500→8192: 1.044/2.118/2.540/3.250/4.250 Gbps) and full line-rate only at
-    MTU 9000 (10.259 Gbps, 0 retransmits). Adopt order-4 as the default
-    allocation profile for 10G data ports, keep order-3 as a fallback on memory
-    pressure, and avoid the 8192 boundary profile in order-3 paths (header +
-    headroom spill causes multi-descriptor DMA splits and ring pressure).
+     MTU 9000 (10.259 Gbps, 0 retransmits). Adopt order-4 as the default
+     allocation profile for 10G data ports, keep order-3 as a fallback on memory
+     pressure, and avoid the 8192 boundary profile in order-3 paths (header +
+     headroom spill causes multi-descriptor DMA splits and ring pressure).
+13. **Robust MURAM allocation strategy (2026-07-28).** To prevent MURAM fragmentation and ensure long-term stability for dynamic, runtime resource allocation, the following patterns must be adopted:
+    - **Slab Allocation for Fixed-Size Objects:** All frequently allocated, fixed-size FMan hardware objects (e.g., CC nodes, HM entries, Policer Profiles, Action Descriptors) must be allocated from dedicated, pre-allocated MURAM pools (slabs), one for each object type. This eliminates external fragmentation for these objects.
+    - **Segregated Fit for General-Purpose Allocation:** The remaining general-purpose MURAM pool should use a segregated-fit strategy with power-of-two size classes to minimize internal fragmentation and improve coalescing opportunities.
+    - **Strict Object Lifecycles:** All dynamically allocated MURAM objects must have a clearly defined owner and their lifecycle tied to the parent kernel object to prevent leaks. Teardown paths must be validated with `pcd-snapshot` to be byte-clean.
+
 
 ---
 
@@ -301,7 +312,9 @@ Key outcomes: FE-VM hardware match & dispatch engine verified; nft flowtable `ho
 - [ ] **T-M8-2** `@___` — 24 h alternating ASK/VPP; VPP iperf3 pass after final disengage.
 - [ ] **T-M8-3** `@___` — Observability: F-05 `ask_stats.c`, F-16/17/18 counter readers, F-19 `ASK_CMD_GET_MURAM`.
 - [ ] **T-M8-4** `@___` — `ask-check` 24/24 OK on the board; policer flood characterization (serial + cold power-cycle).
-- [ ] **T-M8-5** `@___` — Upstream prep: checkpatch/sparse clean, kunit ≥80% on `ask_flow.c`/`ask_genl_attr.c`.
+   - [ ] **T-M8-5** `@___` — Upstream prep: checkpatch/sparse clean, kunit ≥80% on `ask_flow.c`/`ask_genl_attr.c`.
+   - [ ] **T-M8-6** `@___` — Implement robust MURAM allocation strategy (slab allocator for fixed-size objects) per decision §3.13.
+
 
 ---
 
@@ -317,7 +330,9 @@ Key outcomes: FE-VM hardware match & dispatch engine verified; nft flowtable `ho
 | **F-123** | Production CLI previously used debugfs scaffold path instead of kernel API FE-VM path (code-review CR-001) | **PARTIAL** (transport fixed in code/hotpatch 2026-07-27; full release claim still blocked) | **M7 release claim**, M6 correctness | Keep CLI on generic-netlink/YNL engage/disengage; retain transactional FE insertion and ownership publication checks. |
 | **F-124** | Kernel API engage/disengage validation initially failed on `.106`/`.185`, but root cause split into (a) stale image provenance (old debugfs helper in run `30227073161`, SHA `2f32b637`) and (b) kernel API convergence failures (`-EBUSY` already-armed, and **`-ENOMEM` VM-chain build — now identified as F-125**, see that row; the two describe the same symptom and F-124's drift is very likely downstream of F-125's orphaned scaffolds fragmenting the arena, so F-125 must be validated first) | IN PROGRESS (2026-07-27: YNL hotpatch restored reversible `pcd-snapshot`; ask_hw idempotence/convergence fix committed, revalidation pending fresh ISO) | **M7 release claim**, M8 soak | Validate three consecutive clean engage/disengage cycles per DUT with `engage/disengage rc=0`; then continue HIT/flow validation only if `pcd-snapshot` stays byte-clean. |
 | **F-124b** | `set_ask_offload()` raises `ConfigError` (CR-003 fail-closed) but `python/vyos/ifconfig/ethernet.py` never imports it → `NameError: name 'ConfigError' is not defined` in commit-apply → `ERROR_COMMIT_APPLY` + "Configuration error" on every boot with `offload ask`; eth3 (0x10) never engaged as a result | **FIXED 2026-07-27** (`from vyos.base import ConfigError`) | M7 CLI correctness | Board-confirmed on `.185` ISO `2026.07.27-0116`. Same class as F-121: an unresolved name on the commit-apply path. Triggered every commit because F-122 makes `engage` return non-zero. Guard added: an AST check asserts every `raise <Name>(...)` in the patched module resolves to an import |
-| **F-125** | FE-VM engage MURAM allocation lifecycle was broken three ways: (a) failed engage leaked 304 B/attempt (scaffold orphan); (b) arena fragmentation from ehash int_buf at 0x4c100; (c) ehash never freed on disengage (teardown in debugfs handler only, not production path) | **CLOSED 2026-07-27** — six fixups landed (F-125a, F-126/F-127 diagnostics, F-128 guard, F-129 production teardown, F-130 arena 64→84 KiB, F-092 v2 production build). Multi-port engage WORKS on .185 (ISO 1502): both ports rc=0, Armed ports: 0x10 0x11. F-092 v2 + F-129 teardown validation PENDING on ISO 1533. | **F-124 / CR-001 release gate**, M8 soak | Arena grown to 84 KiB (max contiguous extent). F-092 v2 scoped VM chain build to production fman_pcd_fe_engage(). F-129 adds teardown with list_empty guard to production fman_pcd_fe_disengage(). F-126/F-127 are TEMPORARY diagnostics — delete when F-125 fully validated. |
+| **F-125** | FE-VM engage MURAM allocation lifecycle was broken three ways. | **CLOSED 2026-07-27** — six fixups landed. Multi-port engage WORKS on .185 (ISO 1502). **F-129 v4** (commit `f1f9a4dd`) fixed the F-092 v1 bug class (scoped to production fn). Board-validated on .185 (ISO 0422): Cycle 1 engage+disengage PASS (F-129 fired, fe_pool=NO, ehash freed). Cycle 2 re-engage FAILS (eth4 -12 ENOMEM) — arena fragmented by persistent PCD allocations (~17 KB). **F-131** (commit `90887f20`) adds gen_pool_has_addr() guard against kexec panic. **F-132** (commit `90887f20`) adds params page free to teardown. CI build 30338186165 in progress. F-126/F-127 are TEMPORARY diagnostics — delete when F-125 fully validated. |
+| **F-131** | Disengaging from kexec-preserved stale state triggers `gen_pool_free_owner` BUG → kernel panic | **FIXED 2026-07-28** — `gen_pool_has_addr()` guard in `fman_pcd_muram_free()`. Logs warning and adjusts budget for stale offsets instead of crashing. | M8 soak | Board-verified on .185 (ISO 0422). Single-point defense for ALL stale-offset scenarios. |
+| **F-132** | FM_CTL params pages (256 B/port) never freed on disengage, contributing to persistent MURAM residual | **FIXED 2026-07-28** — added to F-129 teardown block. Iterates ports 0x08-0x27, clears and frees params pages. | M7 reversibility | Reclaims 512 B (2 ports). Pending silicon validation on next ISO build. |
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; pcd-snapshot A/B + prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` (T-M5-4) or Path-B YNL interim |
 | **ZC refill under flood** | `refill_batches` freezes under sustained flood; pool drains at ~256 frames, FMan drops rest at HW. Interrupt-mode wakeup not firing under load. | OPEN 2026-07-22 | M4 throughput | Investigate after recover=0 closed; secondary to gate |
@@ -513,6 +528,7 @@ history are consistent with this plan's current open-defect/gate state.
 | CR-010 | P2 | MEDIUM | Duplicate precheck lookup lacked RCU read-side guard | **FIXED** |
 | CR-011 | P2 | LOW | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL |
 | CR-012 | P2 | HIGH when enabled | XFRM add returned success without hardware programming | **FIXED-GATED** |
+| CR-013 | P0 | HIGH | Scaffold singleton (`pcd->fe_scaffold_*`) overwritten by second port's engage, orphaning 304 B/cycle | **FIXED** (F-139, 2026-07-30) |
 
 ### 9.3 Binding execution order from the review
 

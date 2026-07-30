@@ -128,6 +128,7 @@
       "reason": "permanent \u2014 allocate per-port FE buffer pools from global FMan MURAM instead of PCD gen_pool to avoid arena fragmentation"
     },
     "F_138.py": "fman_pcd.c: F-138 DIAGNOSTIC \u2014 printk scaffold alloc/free to trace 304 B/cycle leak",
+    "F_139.py": "fman_pcd.c: F-139 move scaffold tracking from singleton to per-port (fix 304 B/cycle leak)",
     "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
