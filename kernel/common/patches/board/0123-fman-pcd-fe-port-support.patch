@@ -83,9 +83,6 @@ index 803b45d..9a4b709 100644
 +	size_t pool_raw_size;
 +	unsigned long mgmt_off;
 +	size_t mgmt_size;
-+	unsigned long scaffold_gro;	/* CONT_LOOKUP group table (256 B) */
-+	unsigned long scaffold_mto;	/* match table (16 B) */
-+	unsigned long scaffold_ato;	/* AD table (32 B) */
 +};
 +
 +static struct fman_pcd_fe_port *
@@ -241,17 +238,6 @@ index 803b45d..9a4b709 100644
 +
 +	fman_pcd_muram_free(pcd, fp->mgmt_off, fp->mgmt_size);
 +	fman_pcd_muram_free(pcd, fp->pool_raw_off, fp->pool_raw_size);
-+	/* Free per-port CONT_LOOKUP scaffold (gro 256 + mto 16 + ato 32 = 304 B).
-+	 * Formerly a singleton in pcd->fe_scaffold_* that was overwritten by the
-+	 * second port's engage, orphaning the first port's scaffold permanently.
-+	 * Now per-port — freed with the rest of the port's FE resources.
-+	 */
-+	if (fp->scaffold_ato)
-+		fman_pcd_muram_free(pcd, fp->scaffold_ato, 32);
-+	if (fp->scaffold_mto)
-+		fman_pcd_muram_free(pcd, fp->scaffold_mto, 16);
-+	if (fp->scaffold_gro)
-+		fman_pcd_muram_free(pcd, fp->scaffold_gro, 256);
 +	list_del(&fp->node);
 +	dev_info(fman_get_dev(pcd->fman),
 +		 "fman_pcd: FE support removed on port 0x%x\n", port_id);
@@ -266,12 +252,6 @@ index 803b45d..9a4b709 100644
 +	list_for_each_entry_safe(fp, tmp, &pcd->fe_ports, node) {
 +		fman_pcd_muram_free(pcd, fp->mgmt_off, fp->mgmt_size);
 +		fman_pcd_muram_free(pcd, fp->pool_raw_off, fp->pool_raw_size);
-+		if (fp->scaffold_ato)
-+			fman_pcd_muram_free(pcd, fp->scaffold_ato, 32);
-+		if (fp->scaffold_mto)
-+			fman_pcd_muram_free(pcd, fp->scaffold_mto, 16);
-+		if (fp->scaffold_gro)
-+			fman_pcd_muram_free(pcd, fp->scaffold_gro, 256);
 +		list_del(&fp->node);
 +		kfree(fp);
 +	}
