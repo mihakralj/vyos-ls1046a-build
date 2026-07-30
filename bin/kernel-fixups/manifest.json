@@ -11,20 +11,13 @@
     "F_072.py": "no description",
     "F_072_2.py": "fman_pcd.c: F-072 v3 FmPortSetFESupport ported",
     "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 \u00a77.1/\u00a77.3",
-    "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
-    "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
-    "M2_4_4.py": "no description",
-    "fe_flow_key_fix.py": "no description",
-    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions",
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)",
     "F_089.py": "fman_pcd.c: F-089 \u00a717 FE descriptor static_asserts + KUnit test injection",
     "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs \u2014 wires __fman_pcd_fe_build_vm_chain",
     "F_091.py": "fman_pcd.c: F-091 HIT scaffold \u2014 numKeys=1 + FE_ENTER AD at ato+32",
+    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage \u2014 build/teardown VM chain via API",
     "F_093.py": "fman_pcd.c: F-093 dynamic FQID \u2014 kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
     "F_094.py": "fman_pcd.c/h: F-094 retype flow_add \u2192 struct fman_pcd_fe_flow_action *",
-    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage \u2014 build/teardown VM chain via API",
-    "F_107.py": "fman_pcd.c: F-107 gen_pool double-free prevention \u2014 DECLARE_BITMAP(fe_port_armed) + -EBUSY guard in fe_engage",
-    "F_109.py": "fman_pcd.c/h: F-109 fman_pcd_fe_enq_get_offset() export \u2014 eliminates debugfs loopback for ENQ FE offset",
     "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage \u2014 unparks FE-VM",
     "F_097.py": "fman_pcd.c: T-P1-1 F-08 \u2014 fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
     "F_098.py": "fman_pcd.c: T-P1-4 F-12 \u2014 fman_pcd_fe_context_build retype void __iomem* \u2192 struct fman_ddr_region* (DDR not MMIO)",
@@ -44,15 +37,17 @@
       "description": "rx_hook trace_printk diagnostics at every return-false point (temporary)",
       "date": "2026-07-21"
     },
-    "F_115.py": {
-      "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
-      "description": "M4 ZC recover=0 fix \u2014 DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
-      "date": "2026-07-22"
-    },
+    "F_107.py": "fman_pcd.c: F-107 gen_pool double-free prevention \u2014 DECLARE_BITMAP(fe_port_armed) + -EBUSY guard in fe_engage",
     "F_108.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c",
       "description": "Ratelimit Err FD status console log spam for physical frame errors",
       "date": "2026-07-23"
+    },
+    "F_109.py": "fman_pcd.c/h: F-109 fman_pcd_fe_enq_get_offset() export \u2014 eliminates debugfs loopback for ENQ FE offset",
+    "F_115.py": {
+      "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
+      "description": "M4 ZC recover=0 fix \u2014 DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
+      "date": "2026-07-22"
     },
     "F_116.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
@@ -69,14 +64,14 @@
       "description": "Fix B pt2: 'del <key>' verb on fe_flow debugfs node -> fman_pcd_ehash_del_key (per-key unlink unit-test hook, no fe_arm needed). Runs after F-117.",
       "date": "2026-07-25"
     },
-    "F_125.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() returned on kg_port_arm_fe failure with pcd->fe_scaffold_* still set; the next attempt overwrote those fields, orphaning the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) permanently. Measured at exactly 304 B per failed engage on .185 and .106, reclaimable only by reboot, and the source of the arena fragmentation that made even single-port engage fail -ENOMEM. Also unwinds a partial 3-way allocation. Reuses the existing fman_pcd_fe_arm_free_scaffold(). Runs after F-118.",
-      "date": "2026-07-27"
-    },
     "F_122.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-122: make fe_arm engage idempotent. Adds test_bit(fe_port_armed) check at top of __fman_pcd_fe_arm_engage() (shared core, protects both debugfs and API paths) returning 0 with pr_info when already engaged. Also changes F-107 -EBUSY guard in fman_pcd_fe_engage() to idempotent return 0. Runs before F-125/F-126.",
+      "date": "2026-07-27"
+    },
+    "F_125.py": {
+      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
+      "description": "F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() returned on kg_port_arm_fe failure with pcd->fe_scaffold_* still set; the next attempt overwrote those fields, orphaning the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) permanently. Measured at exactly 304 B per failed engage on .185 and .106, reclaimable only by reboot, and the source of the arena fragmentation that made even single-port engage fail -ENOMEM. Also unwinds a partial 3-way allocation. Reuses the existing fman_pcd_fe_arm_free_scaffold(). Runs after F-118.",
       "date": "2026-07-27"
     },
     "F_126.py": {
@@ -131,7 +126,13 @@
     "F_137.py": {
       "action": "keep",
       "reason": "permanent \u2014 allocate per-port FE buffer pools from global FMan MURAM instead of PCD gen_pool to avoid arena fragmentation"
-    }
+    },
+    "F_138.py": "fman_pcd.c: F-138 DIAGNOSTIC \u2014 printk scaffold alloc/free to trace 304 B/cycle leak",
+    "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
+    "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
+    "M2_4_4.py": "no description",
+    "fe_flow_key_fix.py": "no description",
+    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions"
   },
   "count": 44,
   "removed_dead": [
