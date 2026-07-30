@@ -1641,17 +1641,10 @@ fi
 # fi
 
 # F-139: Move scaffold tracking from singleton to per-port (fp->scaffold_*).
-# Fixes 304 B/cycle MURAM leak.  Must run BEFORE F-134 (reorder) and F-138 (diagnostic).
+# Fixes 304 B/cycle MURAM leak (CR-013).  Must run BEFORE F-134 (reorder).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_139.py" 2>&1
     echo "### F-139: scaffold tracking moved to per-port fp->scaffold_*"
-fi
-
-# F-138: DIAGNOSTIC — printk scaffold alloc/free to trace 304 B/cycle leak.
-# DELETE after root cause confirmed.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_138.py" 2>&1
-    echo "### F-138: scaffold alloc/free diagnostic printk"
 fi
 
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
