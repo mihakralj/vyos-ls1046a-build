@@ -1284,7 +1284,7 @@ fi
 # The correct value for an 8-byte header is 1 (the field encodes 0→0B, 1→8B).
 # The CRC64 bucket-indexer's hash_shift is a separate parameter and is unchanged.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "((u32)(t->hash_shift & 0x3) << 16)" "((u32)(1) << 16)" -1 "F-053: hash_bytes_offset=1 (optional — 0158 skipped)" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" drivers/net/ethernet/freescale/fman/fman_pcd.c "((u32)(t->hash_shift & 0x3) << 16)" "((u32)(1) << 16)" 1 "F-053: hash_bytes_offset=1" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-053 hash_bytes_offset=1 (key at offset 8 in DDR record)"
 fi
