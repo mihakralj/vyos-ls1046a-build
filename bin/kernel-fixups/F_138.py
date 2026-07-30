@@ -26,23 +26,25 @@ with open(pcd_c) as f:
 changes = 0
 
 # 1. Add printk to scaffold allocation in __fman_pcd_fe_arm_engage
-# Find the per-port tracking assignment (F-139 style)
-alloc_anchor = '\t\t\tfp->scaffold_gro = gro;'
+# The scaffold is stored in the singleton pcd->fe_scaffold_* during engage,
+# then copied to per-port fp->scaffold_* in fe_port_set (F-139).
+# Anchor on the singleton assignment.
+alloc_anchor = '\t\t\tpcd->fe_scaffold_gro = gro;'
 if alloc_anchor in src:
     new_alloc = alloc_anchor + '\n\t\t\tpr_info("fman_pcd: F-138 scaffold ALLOC port=0x%x gro=0x%lx mto=0x%lx ato=0x%lx\\n", (u8)port_id, gro, mto, ato);'
     if new_alloc not in src:
         src = src.replace(alloc_anchor, new_alloc, 1)
         changes += 1
-        print("### F-138: added per-port scaffold ALLOC printk")
+        print("### F-138: added scaffold ALLOC printk (singleton)")
 else:
-    # Fall back to old singleton style
-    alloc_anchor = '\t\t\tpcd->fe_scaffold_gro = gro;'
+    # Try per-port style (post-F_139)
+    alloc_anchor = '\t\t\tfp->scaffold_gro = gro;'
     if alloc_anchor in src:
-        new_alloc = alloc_anchor + '\n\t\t\tpr_info("fman_pcd: F-138 scaffold ALLOC gro=0x%lx mto=0x%lx ato=0x%lx\\n", gro, mto, ato);'
+        new_alloc = alloc_anchor + '\n\t\t\tpr_info("fman_pcd: F-138 scaffold ALLOC port=0x%x gro=0x%lx mto=0x%lx ato=0x%lx\\n", (u8)port_id, gro, mto, ato);'
         if new_alloc not in src:
             src = src.replace(alloc_anchor, new_alloc, 1)
             changes += 1
-            print("### F-138: added singleton scaffold ALLOC printk")
+            print("### F-138: added scaffold ALLOC printk (per-port)")
     else:
         print("### F-138: scaffold alloc anchor not found")
 
