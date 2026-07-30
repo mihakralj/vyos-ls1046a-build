@@ -49,6 +49,17 @@ if count == 0:
     sys.exit(0)
 
 # Insert clear_bit and 5ms FMan pipeline drain delay after the disarm
+# Also ensure <linux/delay.h> is included for fsleep()
+delay_include = "#include <linux/delay.h>"
+if delay_include not in src:
+    # Find the last #include line and add delay.h after it
+    last_include = src.rfind("#include <")
+    if last_include != -1:
+        end_of_line = src.find("\n", last_include)
+        src = src[:end_of_line+1] + delay_include + "\n" + src[end_of_line+1:]
+        changes += 1
+        print("### F-135: added #include <linux/delay.h> for fsleep()")
+
 new_block = disarm_line + "\n\tclear_bit(port_id, pcd->fe_port_armed);\n\tfsleep(5000);"
 if new_block in src:
     print("### F-135: clear_bit already present")
