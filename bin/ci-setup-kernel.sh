@@ -1647,6 +1647,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-139: scaffold tracking moved to per-port fp->scaffold_*"
 fi
 
+# F-140: M6 Piece 2 — IPv6 ehash table (key_size=37) + v6 KG scheme.
+# Adds second ehash table and v6 KG scheme to FE-VM chain build.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_140.py" 2>&1
+    echo "### F-140: v6 ehash table + KG scheme"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
