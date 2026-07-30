@@ -104,7 +104,6 @@ if os.path.exists(kg_c):
 \t\t\t\t/* Free or unbound — take it for v6 */
 \t\t\t\tvs->ekfc = ekfc;
 \t\t\t\tvs->next_engine = 2;\t/* CC (AC_CC dispatch) */
-\t\t\t\tvs->ccbs = 0;
 \t\t\t\tvs->hw_port_id = hw_port_id;
 \t\t\t\tvs->used = true;
 \t\t\t\tpr_info("fman_pcd: v6 KG scheme %d armed for port 0x%02x (EKFC=0x%08x)\\n",
@@ -146,7 +145,6 @@ if os.path.exists(kg_c):
 \t\t\t\tvs->used = false;
 \t\t\t\tvs->ekfc = 0;
 \t\t\t\tvs->next_engine = 0;
-\t\t\t\tvs->ccbs = 0;
 \t\t\t\tvs->hw_port_id = 0;
 \t\t\t\tpr_info("fman_pcd: v6 KG scheme %d disarmed\\n", vi);
 \t\t\t}
