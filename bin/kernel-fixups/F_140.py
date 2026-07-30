@@ -11,25 +11,27 @@ order is the same MSB-first: SIP → DIP → PROTO → SPORT → DPORT.
 Changes:
 1. In __fman_pcd_fe_build_vm_chain() (fman_pcd.c), add a second
    ehash_table_set() call with key_size=37 for v6 (table index 1).
-2. In fman_pcd_kg_port_arm_fe() (fman_pcd_keygen.c), also find a free scheme
+2. In fman_pcd_kg_port_arm_fe() (fman_pcd_kg.c), also find a free scheme
    slot and arm it for v6 with the same EKFC.
-3. In fman_pcd_kg_port_disarm_fe(), also disarm the v6 scheme.
-4. Add v6_scheme_id field to the private struct fman_pcd in fman_pcd.c,
-   initialized to -1 in fman_pcd_init().
+3. In fman_pcd_kg_port_disarm_fe(), iterate all schemes and disarm any
+   that match the port (catches both v4 and v6 schemes).
 
-Must run AFTER 0158 and AFTER F_090 (which adds fe_vm_chain_built).
+Note: fman_pcd_kg.c only has an opaque struct fman_pcd* (forward-declared),
+so we cannot access pcd->v6_scheme_id.  Instead, disarm iterates all schemes.
+
+Must run AFTER 0158.
 """
 
 import sys, os
 
 kroot = "drivers/net/ethernet/freescale/fman"
 pcd_c = os.path.join(kroot, "fman_pcd.c")
-keygen_c = os.path.join(kroot, "fman_pcd_kg.c")
+kg_c = os.path.join(kroot, "fman_pcd_kg.c")
 
 total_changes = 0
 
 # ═══════════════════════════════════════════════════════════════════════
-# Part A: fman_pcd.c — v6 ehash table + struct field + init
+# Part A: fman_pcd.c — v6 ehash table
 # ═══════════════════════════════════════════════════════════════════════
 
 if os.path.exists(pcd_c):
@@ -60,47 +62,6 @@ if os.path.exists(pcd_c):
     else:
         print("### F-140: v4 ehash_table_set not found in fman_pcd.c")
 
-    # A2. Add v6_scheme_id field to the private struct fman_pcd in fman_pcd.c.
-    #     The struct starts with "struct fman_pcd {" around line 89.
-    #     Insert after fe_armed_port (added by 0131) or after fe_exit_off.
-    #     Use fe_armed_port as anchor since it's the last field before debugfs_dir.
-    anchor = "\tu8 fe_armed_port;\t\t/* F-079-R4: last engaged port */"
-    if anchor in src:
-        new_field = anchor + "\n\tint v6_scheme_id;\t/* F-140: v6 KG scheme id, -1 = not armed */"
-        if "v6_scheme_id" not in src:
-            src = src.replace(anchor, new_field, 1)
-            changes += 1
-            print("### F-140: added v6_scheme_id field to private struct")
-        else:
-            print("### F-140: v6_scheme_id field already present")
-    else:
-        # Fallback: try fe_exit_off
-        anchor2 = "\tunsigned long fe_exit_off;"
-        if anchor2 in src:
-            new_field2 = anchor2 + "\n\tint v6_scheme_id;\t/* F-140: v6 KG scheme id, -1 = not armed */"
-            if "v6_scheme_id" not in src:
-                src = src.replace(anchor2, new_field2, 1)
-                changes += 1
-                print("### F-140: added v6_scheme_id field (fallback anchor)")
-            else:
-                print("### F-140: v6_scheme_id already present (fallback)")
-        else:
-            print("### F-140: neither fe_armed_port nor fe_exit_off found in struct")
-
-    # A3. Initialize v6_scheme_id = -1 in fman_pcd_init().
-    #     Use pcd->fman = fman as anchor (first assignment after kzalloc).
-    init_anchor = "\tpcd->fman = fman;"
-    if init_anchor in src:
-        v6_init = "\tpcd->v6_scheme_id = -1;\t/* F-140 */\n" + init_anchor
-        if "v6_scheme_id = -1" not in src:
-            src = src.replace(init_anchor, v6_init, 1)
-            changes += 1
-            print("### F-140: initialized v6_scheme_id = -1 in fman_pcd_init")
-        else:
-            print("### F-140: v6_scheme_id init already present")
-    else:
-        print("### F-140: pcd->fman = fman init not found in fman_pcd_init")
-
     if changes:
         with open(pcd_c, "w") as f:
             f.write(src)
@@ -112,16 +73,18 @@ else:
     print("### F-140: fman_pcd.c not found")
 
 # ═══════════════════════════════════════════════════════════════════════
-# Part B: fman_pcd_keygen.c — v6 scheme arm/disarm
+# Part B: fman_pcd_kg.c — v6 scheme arm/disarm
 # ═══════════════════════════════════════════════════════════════════════
 
-if os.path.exists(keygen_c):
-    with open(keygen_c) as f:
+if os.path.exists(kg_c):
+    with open(kg_c) as f:
         kg_src = f.read()
     kg_changes = 0
 
     # B1. In fman_pcd_kg_port_arm_fe(), after setting slot->ekfc, also find
     #     a free scheme slot and arm it for v6 with the same EKFC.
+    #     Note: fman_pcd_kg.c only has opaque struct fman_pcd*, so we cannot
+    #     access pcd->v6_scheme_id.  We just always try to arm a v6 scheme.
     v4_arm = "\tif (ekfc)\n\t\tslot->ekfc = ekfc;"
     if v4_arm in kg_src:
         v6_arm_block = """\tif (ekfc)
@@ -131,7 +94,7 @@ if os.path.exists(keygen_c):
 \t * Same EKFC — silicon determines field size from parse result.
 \t * Skip slots already used by this port (the v4 slot).
 \t */
-\tif (ekfc && pcd->v6_scheme_id < 0) {
+\tif (ekfc) {
 \t\tint vi;
 \t\tfor (vi = 0; vi < FM_KG_MAX_NUM_OF_SCHEMES; vi++) {
 \t\t\tstruct keygen_scheme *vs = &keygen->schemes[vi];
@@ -141,63 +104,72 @@ if os.path.exists(keygen_c):
 \t\t\t\t/* Free or unbound — take it for v6 */
 \t\t\t\tvs->ekfc = ekfc;
 \t\t\t\tvs->next_engine = 2;\t/* CC (AC_CC dispatch) */
-\t\t\t\tvs->mode = 0x80000006;\t/* EN | CC/DONE */
 \t\t\t\tvs->ccbs = 0;
 \t\t\t\tvs->hw_port_id = hw_port_id;
 \t\t\t\tvs->used = true;
-\t\t\t\tpcd->v6_scheme_id = vi;
 \t\t\t\tpr_info("fman_pcd: v6 KG scheme %d armed for port 0x%02x (EKFC=0x%08x)\\n",
 \t\t\t\t\tvi, hw_port_id, ekfc);
 \t\t\t\tbreak;
 \t\t\t}
 \t\t}
-\t\tif (pcd->v6_scheme_id < 0)
-\t\t\tpr_warn("fman_pcd: no free KG scheme for v6 on port 0x%02x\\n", hw_port_id);
 \t}"""
-        if "v6_scheme_id" not in kg_src:
+        if "v6 KG scheme" not in kg_src:
             kg_src = kg_src.replace(v4_arm, v6_arm_block, 1)
             kg_changes += 1
             print("### F-140: added v6 KG scheme arm in arm_fe()")
         else:
-            print("### F-140: v6 arm already present in keygen.c")
+            print("### F-140: v6 arm already present in fman_pcd_kg.c")
     else:
-        print("### F-140: v4 arm block not found in keygen.c")
+        print("### F-140: v4 arm block not found in fman_pcd_kg.c")
 
-    # B2. In fman_pcd_kg_port_disarm_fe(), add v6 disarm
+    # B2. In fman_pcd_kg_port_disarm_fe(), also disarm any v6 scheme bound
+    #     to this port.  Iterate all schemes and clear any matching hw_port_id
+    #     beyond the first one (the v4 slot is already handled by the existing
+    #     disarm code).
     disarm_end = "\t(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);"
     if disarm_end in kg_src:
         v6_disarm = """\t(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
 
-\t/* F-140: Disarm v6 KG scheme */
-\tif (pcd->v6_scheme_id >= 0) {
-\t\tstruct keygen_scheme *v6 = &keygen->schemes[pcd->v6_scheme_id];
-\t\tv6->used = false;
-\t\tv6->ekfc = 0;
-\t\tv6->mode = 0;
-\t\tv6->next_engine = 0;
-\t\tv6->ccbs = 0;
-\t\tv6->hw_port_id = 0;
-\t\tpr_info("fman_pcd: v6 KG scheme %d disarmed\\n", pcd->v6_scheme_id);
-\t\tpcd->v6_scheme_id = -1;
+\t/* F-140: Disarm any additional schemes bound to this port (v6).
+\t * The first match is the v4 slot already disarmed above; clear any others.
+\t */
+\t{
+\t\tint vi;
+\t\tint found_v4 = 0;
+\t\tfor (vi = 0; vi < FM_KG_MAX_NUM_OF_SCHEMES; vi++) {
+\t\t\tstruct keygen_scheme *vs = &keygen->schemes[vi];
+\t\t\tif (vs->used && vs->hw_port_id == hw_port_id) {
+\t\t\t\tif (!found_v4) {
+\t\t\t\t\tfound_v4 = 1;\t/* skip the v4 slot */
+\t\t\t\t\tcontinue;
+\t\t\t\t}
+\t\t\t\tvs->used = false;
+\t\t\t\tvs->ekfc = 0;
+\t\t\t\tvs->next_engine = 0;
+\t\t\t\tvs->ccbs = 0;
+\t\t\t\tvs->hw_port_id = 0;
+\t\t\t\tpr_info("fman_pcd: v6 KG scheme %d disarmed\\n", vi);
+\t\t\t}
+\t\t}
 \t}"""
-        if "v6_scheme_id" not in kg_src:
+        if "v6 KG scheme" not in kg_src:
             kg_src = kg_src.replace(disarm_end, v6_disarm, 1)
             kg_changes += 1
             print("### F-140: added v6 KG scheme disarm in disarm_fe()")
         else:
-            print("### F-140: v6 disarm already present in keygen.c")
+            print("### F-140: v6 disarm already present in fman_pcd_kg.c")
     else:
-        print("### F-140: disarm end not found in keygen.c")
+        print("### F-140: disarm end not found in fman_pcd_kg.c")
 
     if kg_changes:
-        with open(keygen_c, "w") as f:
+        with open(kg_c, "w") as f:
             f.write(kg_src)
-        print(f"### F-140: {kg_changes} change(s) to fman_pcd_keygen.c")
+        print(f"### F-140: {kg_changes} change(s) to fman_pcd_kg.c")
         total_changes += kg_changes
     else:
-        print("### F-140: no changes to fman_pcd_keygen.c")
+        print("### F-140: no changes to fman_pcd_kg.c")
 else:
-    print("### F-140: fman_pcd_keygen.c not found")
+    print("### F-140: fman_pcd_kg.c not found")
 
 if total_changes:
     print(f"### F-140: {total_changes} total change(s) applied")
