@@ -75,8 +75,9 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 
 | ISO | Built from | Deployed | Carries | Notes |
 |---|---|---|---|---|---|
-| `2026.07.30-0726-rolling` | `e7428b13` | lxc200 `latest.iso` | M6 Pieces 2+3: F-140 v6 ehash table + KG scheme, v6 HW insert path, v4/v6 gate lifted | **Deployed 2026-07-30.** Ready for silicon validation on .185. |
-| `2026.07.30-0631-rolling` | `407a2ad6` | installed on .185 | F-139 per-port scaffold (CR-013 fix) + F-138 diagnostic | **Board-validated 2026-07-30:** 5 cycles, 0 B/cycle leak, ALLOC/FREE symmetric. CR-013 CLOSED. |
+| `2026.07.30-1610-rolling` | `1aae6334` | lxc200 `latest.iso` | F-140 v4: v6 ehash table + v6 KG scheme arm (private struct fix) | **Deployed 2026-07-30.** Ready for silicon validation on .185. |
+| `2026.07.30-0726-rolling` | `e7428b13` | — | F-140 v1: v6 ehash table (key_size=37) + broken kg_scheme_create() call | Superseded by 1610. |
+| `2026.07.30-0631-rolling` | `407a2ad6` | installed on .185 | F-139 per-port scaffold (CR-013 fix) + F-138 diagnostic | **Board-validated 2026-07-30:** 5 cycles, 0 B/cycle leak. CR-013 CLOSED. |
 | `2026.07.30-0406-rolling` | `412c726f` | — | F-138 diagnostic (scaffold alloc/free printk) | **Board-tested 2026-07-30:** F-138 proved scaffold singleton leak — port 0x10's scaffold orphaned every cycle. Root cause confirmed. |
 | *(CI 30326497207)* | `938aa3ab` | — | F-129 v4 (production-scoped teardown) + F-092 v3 + all F-125 chain fixes | Superseded by later builds. |
 | `2026.07.27-1835-rolling` | `c70b2f87` | lxc200 `latest.iso`, installed on .185 + .106 | F-092 v3 + F-129 v3 (debugfs-scoped — BROKEN) + F-130 + F-125(a) | **Board-tested 2026-07-28 on .185:** engage works (both ports rc=0), disengage disarms ports but F-129 teardown never fires — ehash int_buf held, fe_pool engaged=YES, 67428 B MURAM used. Root cause: F-129 v3 `src.replace(..., 1)` matched debugfs handler's disarm call, not production fn. Fixed in v4. |
