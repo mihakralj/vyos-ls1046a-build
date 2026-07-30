@@ -131,6 +131,7 @@
     "F_140.py": "fman_pcd.c: F-140 M6 Piece 2 \u2014 v6 ehash table (key_size=37) + v6 KG scheme",
     "F_142.py": "fman_pcd.c: F-142 \u2014 dma_alloc_coherent for ehash flow records (fixes F-141 HIT failure)",
     "F_143.py": "fman_pcd.c: F-143 \u2014 place en_exthash_node descriptor at DDR table base",
+    "F_144.py": "fman_pcd.c: F-144 \u2014 fix EXT_HASH FE word1 byte order (hashShift<<24|contextSize<<16|hashMask)",
     "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
