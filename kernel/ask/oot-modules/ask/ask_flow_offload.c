@@ -1263,6 +1263,19 @@ void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE])
         memcpy(&k[11], &key->dport, sizeof(key->dport));
 }
 
+/*
+ * M6 Piece 3: v6 ehash key builder.  Same MSB-first EKFC extraction order
+ * as v4, but with 16-byte addresses: SIP(16)+DIP(16)+PROTO(1)+SPORT(2)+DPORT(2).
+ */
+void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6])
+{
+        memcpy(&k[0],  key->src_ip, 16);
+        memcpy(&k[16], key->dst_ip, 16);
+        k[32] = key->l4_proto;
+        memcpy(&k[33], &key->sport, sizeof(key->sport));
+        memcpy(&k[35], &key->dport, sizeof(key->dport));
+}
+
 /* ------------------------------------------------------------------------- */
 /* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
  * to FMan hash key (L4PDST+L4PSRC+IPDST+IPSRC) and writes fe_flow debugfs. */
@@ -1276,7 +1289,8 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 {
         struct fman_pcd_fe_flow_action action;
         struct fman *fm;
-        int rc;
+        int rc, table_idx;
+        u8 key_buf[ASK_FE_KEY_SIZE_V6];
 
         if (!key) {
                 ask_pr_dbg("fe_flow_insert: NULL key (flow destroyed) -- skipping\n");
@@ -1294,15 +1308,27 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         }
 
         memset(&action, 0, sizeof(action));
-        ask_fe_build_key(key, action.key);
-        action.key_size = ASK_FE_KEY_SIZE;
+
+        /* M6 Piece 3: route v4 to ehash table 0, v6 to table 1 */
+        if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+                ask_fe_build_key_v6(key, key_buf);
+                memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_V6);
+                action.key_size = ASK_FE_KEY_SIZE_V6;
+                table_idx = 1;
+        } else {
+                ask_fe_build_key(key, key_buf);
+                memcpy(action.key, key_buf, ASK_FE_KEY_SIZE);
+                action.key_size = ASK_FE_KEY_SIZE;
+                table_idx = 0;
+        }
         action.enq_off  = enq_off;
 
         /* Drive the real FMan (fman_get_pcd -> ehash) and surface failures so
          * callers can roll back provisional HW-backed ownership. */
-        rc = fman_pcd_fe_flow_add(fm, 0, &action);
+        rc = fman_pcd_fe_flow_add(fm, table_idx, &action);
         if (rc)
-                ask_pr_warn("fe_flow_insert: fman_pcd_fe_flow_add failed: %d\n", rc);
+                ask_pr_warn("fe_flow_insert: fman_pcd_fe_flow_add(table=%d) failed: %d\n",
+                            table_idx, rc);
         return rc;
 }
 

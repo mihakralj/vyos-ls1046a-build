@@ -692,7 +692,9 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
  * delete paths inside ask_flow_offload.c. @k must have room for 13 bytes.
  */
 #define ASK_FE_KEY_SIZE 13
+#define ASK_FE_KEY_SIZE_V6 37
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE]);
+void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6]);
 
 void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip);
 void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
