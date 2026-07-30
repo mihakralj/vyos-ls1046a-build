@@ -1672,6 +1672,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-143: en_exthash_node at DDR table base"
 fi
 
+# F-144: Fix EXT_HASH FE word1 byte order to match SDK's packed struct.
+# The NXP SDK's t_ExtHashFe is _Packed (little-endian fields).  The FMan
+# reads word1 as big-endian: hashShift<<24 | contextSize<<16 | hashMask.
+# Our code was writing hashMask<<16 | contextSize<<8 | hashShift — reversed.
+# This caused the microcode to use hashShift=0x7F (high byte of hashMask)
+# and hashMask=0x0C00 (contextSize+hashShift packed), producing wrong buckets.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_144.py" 2>&1
+    echo "### F-144: EXT_HASH FE word1 byte order fixed"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
