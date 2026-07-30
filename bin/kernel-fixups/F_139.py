@@ -104,11 +104,15 @@ else:
     print("### F-139: fe_port_drain free block not found")
 
 # ── 3. Replace pcd->fe_scaffold_gro = gro with per-port lookup ──
-old_track = """\t\t\tpcd->fe_scaffold_gro = gro;
-\t\t\tpcd->fe_scaffold_mto = mto;
-\t\t\tpcd->fe_scaffold_ato = ato;"""
+# F_091.py may have modified the surrounding code, so use individual line
+# replacements instead of a multi-line block.
+gro_line = "\t\t\tpcd->fe_scaffold_gro = gro;"
+mto_line = "\t\t\tpcd->fe_scaffold_mto = mto;"
+ato_line = "\t\t\tpcd->fe_scaffold_ato = ato;"
 
-new_track = """\t\t\t{
+if gro_line in src and mto_line in src and ato_line in src:
+    # Replace with per-port lookup block (insert before gro, remove all three)
+    lookup_block = """\t\t\t{
 \t\t\t\tstruct fman_pcd_fe_port *fp = fman_pcd_fe_port_find(pcd, (u8)port_id);
 \t\t\t\tif (fp) {
 \t\t\t\t\tfp->scaffold_gro = gro;
@@ -116,29 +120,61 @@ new_track = """\t\t\t{
 \t\t\t\t\tfp->scaffold_ato = ato;
 \t\t\t\t}
 \t\t\t}"""
-
-if old_track in src:
-    src = src.replace(old_track, new_track, 1)
+    # Find the gro line and replace the three-line block
+    gro_pos = src.find(gro_line)
+    # Find the end of the ato line
+    ato_pos = src.find(ato_line, gro_pos)
+    ato_end = src.find("\n", ato_pos) + 1
+    old_block = src[gro_pos:ato_end]
+    src = src[:gro_pos] + lookup_block + "\n" + src[ato_end:]
     changes += 1
     print("### F-139: scaffold tracking moved to per-port fp->scaffold_*")
 else:
-    print("### F-139: scaffold tracking assignment not found — may already be converted")
+    # Try alternate pattern — F_091 may have changed indentation
+    import re
+    gro_re = re.compile(r'\t+pcd->fe_scaffold_gro\s*=\s*gro;')
+    mto_re = re.compile(r'\t+pcd->fe_scaffold_mto\s*=\s*mto;')
+    ato_re = re.compile(r'\t+pcd->fe_scaffold_ato\s*=\s*ato;')
+    gro_m = gro_re.search(src)
+    mto_m = mto_re.search(src)
+    ato_m = ato_re.search(src)
+    if gro_m and mto_m and ato_m:
+        lookup_block = """\t\t\t{
+\t\t\t\tstruct fman_pcd_fe_port *fp = fman_pcd_fe_port_find(pcd, (u8)port_id);
+\t\t\t\tif (fp) {
+\t\t\t\t\tfp->scaffold_gro = gro;
+\t\t\t\t\tfp->scaffold_mto = mto;
+\t\t\t\t\tfp->scaffold_ato = ato;
+\t\t\t\t}
+\t\t\t}"""
+        gro_pos = gro_m.start()
+        ato_end = src.find("\n", ato_m.start()) + 1
+        old_block = src[gro_pos:ato_end]
+        src = src[:gro_pos] + lookup_block + "\n" + src[ato_end:]
+        changes += 1
+        print("### F-139: scaffold tracking moved to per-port fp->scaffold_* (regex fallback)")
+    else:
+        print("### F-139: scaffold tracking assignment not found — fields will be kept as-is")
 
 # ── 4. Remove the singleton scaffold fields from struct fman_pcd ──
-old_fields = """\tunsigned long fe_scaffold_gro;\t/* group table (256 B) */
+# Only if the tracking was successfully moved (pcd->fe_scaffold_gro no longer referenced)
+if "pcd->fe_scaffold_gro" not in src:
+    old_fields = """\tunsigned long fe_scaffold_gro;\t/* group table (256 B) */
 \tunsigned long fe_scaffold_mto;\t/* match table (16 B) */
 \tunsigned long fe_scaffold_ato;\t/* AD table    (32 B) */"""
 
-if old_fields in src:
-    new_fields = """\t/* F-139: scaffold tracking moved to per-port struct fman_pcd_fe_port */
+    if old_fields in src:
+        new_fields = """\t/* F-139: scaffold tracking moved to per-port struct fman_pcd_fe_port */
 \t/* unsigned long fe_scaffold_gro; */
 \t/* unsigned long fe_scaffold_mto; */
 \t/* unsigned long fe_scaffold_ato; */"""
-    src = src.replace(old_fields, new_fields, 1)
-    changes += 1
-    print("### F-139: singleton scaffold fields removed from struct fman_pcd")
+        src = src.replace(old_fields, new_fields, 1)
+        changes += 1
+        print("### F-139: singleton scaffold fields removed from struct fman_pcd")
+    else:
+        print("### F-139: singleton scaffold fields not found — may already be removed")
 else:
-    print("### F-139: singleton scaffold fields not found — may already be removed")
+    print("### F-139: skipping field removal (pcd->fe_scaffold_gro still referenced)")
 
 # ── 5. Reduce fman_pcd_fe_arm_free_scaffold() to no-op ──
 free_func = "static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)"
