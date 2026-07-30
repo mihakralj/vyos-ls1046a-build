@@ -48,9 +48,9 @@ else:
 
 # ── 2. Increase DDR allocation size by 16 bytes ──
 # Find: tablesize = (size_t)(mask + 1) * FMAN_EHASH_BUCKET_SIZE;
-old_size = "\ttablesize = (size_t)(mask + 1) * FMAN_EHASH_BUCKET_SIZE;"
+old_size = "\ttablesize = (size_t)FMAN_EHASH_BUCKET_SIZE << ii;"
 if old_size in src:
-    new_size = "\ttablesize = FMAN_EHASH_NODE_SIZE + (size_t)(mask + 1) * FMAN_EHASH_BUCKET_SIZE;\t/* F-143: room for en_exthash_node */"
+    new_size = "\ttablesize = FMAN_EHASH_NODE_SIZE + ((size_t)FMAN_EHASH_BUCKET_SIZE << ii);\t/* F-143: room for en_exthash_node */"
     if "FMAN_EHASH_NODE_SIZE" not in src:
         src = src.replace(old_size, new_size, 1)
         changes += 1
