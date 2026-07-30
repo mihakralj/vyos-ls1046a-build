@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.31.0 · 2026-07-30 · HADS 1.0.0**
+**Version 1.32.0 · 2026-07-30 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -60,8 +60,8 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 | **M7 COMPLETE**: CLI engage/disengage, per-interface mutex, `show flows` via ynl | 2026-07-25 |
 | Post-review hardening landed: `hw_backed` ownership bit, neigh queue cap+coalesce, `offloaded` genl/uapi attr, remove-equivalent `FLUSH_FLOWS` (F-120) | 2026-07-26 |
 | **Multi-port engage WORKS**: both eth3+eth4 engage rc=0, Armed ports: 0x10 0x11, arena 84 KiB (F-125 chain closed). Fixup layer v3 (F-092 v3 + F-129 v3) handles microcode-preinit ehash + fe_refcount gating; pending ISO build + silicon validation for full reversibility. | 2026-07-27 |
-| **Scaffold singleton leak ROOT-CAUSED**: F-138 diagnostic on .185 (ISO 0406, 2026-07-30) proved `pcd->fe_scaffold_*` are singleton variables overwritten by second port's engage. Port 0x10's scaffold (304 B) orphaned every cycle. Fix: F-139 moves scaffold tracking to per-port `struct fman_pcd_fe_port`, freed in `fe_port_del()`. | 2026-07-30 |
-| **5-cycle reversibility PASS**: 3+5 cycles of engage/disengage on eth3+eth4, 0% ping loss, no kernel panic, `gen_pool_free_owner` BUG eliminated (M2_4_3 disabled, F_135 fsleep pipeline drain). Residual 304 B/cycle identified as scaffold singleton leak — fixed in F-139. | 2026-07-30 |
+| **Scaffold singleton leak ROOT-CAUSED + CLOSED**: F-138 diagnostic on .185 (ISO 0406) proved `pcd->fe_scaffold_*` are singleton variables overwritten by second port's engage. Port 0x10's scaffold (304 B) orphaned every cycle. Fix (F-139): scaffold stored in singleton during engage, copied to per-port `fp->scaffold_*` in `fe_port_set` after `list_add_tail`, freed in `fe_port_del`. Board-validated on .185 (ISO 0631): 5 cycles, 0 B/cycle leak, ALLOC/FREE symmetric, MURAM budget stable at 34,992 B (warm chain only). | 2026-07-30 |
+| **5-cycle reversibility PASS**: 3+5+5 cycles of engage/disengage on eth3+eth4, 0% ping loss, no kernel panic, `gen_pool_free_owner` BUG eliminated (M2_4_3 disabled, F_135 fsleep pipeline drain, F_139 per-port scaffold). | 2026-07-30 |
 | **Fix B (F-117) per-key ehash unlink VALIDATED**: mid-chain + head + -ENOENT correct, memory-clean (dma_free_coherent); scale path beyond 32-key CC-tree ceiling | 2026-07-25 |
 | Kernel ZC datapath PROVEN (xsk_zc_rx_redirect=6 with raw XSK probe); gap is VPP integration | 2026-07-21 |
 | VPP interrupt-mode ZC recipe: `zero-copy` + interrupt rx-mode + single-queue + no workers → eligible climbs | 2026-07-22 |
@@ -73,9 +73,9 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 
 | ISO | Built from | Deployed | Carries | Notes |
 |---|---|---|---|---|---|
-| *(CI 30512956585)* | `412c726f` | lxc200 `latest.iso`, installed on .185 | F-138 diagnostic (scaffold alloc/free printk) | **Board-tested 2026-07-30:** F-138 proved scaffold singleton leak — port 0x10's scaffold orphaned every cycle. Root cause confirmed. |
-| `2026.07.30-0406-rolling` | `412c726f` | lxc200 `latest.iso` | F-138 diagnostic | Deployed for scaffold leak diagnosis. |
-| *(CI 30326497207)* | `938aa3ab` | — | F-129 v4 (production-scoped teardown) + F-092 v3 + all F-125 chain fixes | **Building now.** F-129 v4 fixes the F-092 v1 bug class: v1-v3 matched debugfs handler, not production fn. |
+| `2026.07.30-0631-rolling` | `407a2ad6` | lxc200 `latest.iso`, installed on .185 | F-139 per-port scaffold (CR-013 fix) + F-138 diagnostic | **Board-validated 2026-07-30:** 5 cycles, 0 B/cycle leak, ALLOC/FREE symmetric. CR-013 CLOSED. |
+| `2026.07.30-0406-rolling` | `412c726f` | — | F-138 diagnostic (scaffold alloc/free printk) | **Board-tested 2026-07-30:** F-138 proved scaffold singleton leak — port 0x10's scaffold orphaned every cycle. Root cause confirmed. |
+| *(CI 30326497207)* | `938aa3ab` | — | F-129 v4 (production-scoped teardown) + F-092 v3 + all F-125 chain fixes | Superseded by later builds. |
 | `2026.07.27-1835-rolling` | `c70b2f87` | lxc200 `latest.iso`, installed on .185 + .106 | F-092 v3 + F-129 v3 (debugfs-scoped — BROKEN) + F-130 + F-125(a) | **Board-tested 2026-07-28 on .185:** engage works (both ports rc=0), disengage disarms ports but F-129 teardown never fires — ehash int_buf held, fe_pool engaged=YES, 67428 B MURAM used. Root cause: F-129 v3 `src.replace(..., 1)` matched debugfs handler's disarm call, not production fn. Fixed in v4. |
 | `2026.07.27-1533-rolling` | `34c799fc` | — | F-092 v2 (production build) + F-129 v1 (fe_vm_chain_built gate) + F-130 + F-125(a) | F-092 v2 scoped build to production; F-129 v1 gated on fe_vm_chain_built. Superseded by 1835. |
 | `2026.07.27-1502-rolling` | `8d60cd25` | installed on `.185` | F-130 (84 KiB arena) + F-129 + F-125(a) + F-126/F-127; F-092 v1 (debugfs-only build) | **Multi-port engage WORKS** (both ports rc=0). Disengage leaves ehash held (F-092 v1 bug). |
@@ -528,7 +528,7 @@ history are consistent with this plan's current open-defect/gate state.
 | CR-010 | P2 | MEDIUM | Duplicate precheck lookup lacked RCU read-side guard | **FIXED** |
 | CR-011 | P2 | LOW | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL |
 | CR-012 | P2 | HIGH when enabled | XFRM add returned success without hardware programming | **FIXED-GATED** |
-| CR-013 | P0 | HIGH | Scaffold singleton (`pcd->fe_scaffold_*`) overwritten by second port's engage, orphaning 304 B/cycle | **FIXED** (F-139, 2026-07-30) |
+| CR-013 | P0 | HIGH | Scaffold singleton (`pcd->fe_scaffold_*`) overwritten by second port's engage, orphaning 304 B/cycle | **CLOSED 2026-07-30** (F-139, board-validated on .185 ISO 0631: 5 cycles, 0 B/cycle leak, ALLOC/FREE symmetric) |
 
 ### 9.3 Binding execution order from the review
 
