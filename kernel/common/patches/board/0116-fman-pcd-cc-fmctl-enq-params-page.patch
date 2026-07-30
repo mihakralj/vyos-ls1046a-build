@@ -200,15 +200,8 @@ index b8bb2f3..c50c2e7 100644
 +{
 +	u32 sdm, sem;
 +
-+	if (!port || port->port_type != FMAN_PORT_TYPE_RX)
++	if (!port || !page || port->port_type != FMAN_PORT_TYPE_RX)
 +		return -EINVAL;
-+
-+	if (!muram_off || !page) {
-+		if (port->bmi_regs)
-+			iowrite32be(0, &port->bmi_regs->rx.fmbm_rgpr);
-+		port->ctrl_params_page = 0;
-+		return 0;
-+	}
 +
 +	sdm = ioread32be(&port->bmi_regs->rx.fmbm_rfsdm);
 +	sem = ioread32be(&port->bmi_regs->rx.fmbm_rfsem);
