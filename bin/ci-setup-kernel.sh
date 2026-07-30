@@ -1663,6 +1663,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-142: dma_alloc_coherent for ehash flow records"
 fi
 
+# F-143: Place en_exthash_node descriptor at start of DDR table allocation.
+# The FE-VM EXT_HASH FE reads the en_exthash_node from DDR at table_base to
+# get hash_bytes_offset, key_size, hash_mask_bits, etc.  Without this, the
+# FE-VM reads garbage and cannot configure the ehash lookup correctly.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_143.py" 2>&1
+    echo "### F-143: en_exthash_node at DDR table base"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
