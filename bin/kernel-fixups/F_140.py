@@ -12,13 +12,12 @@ Changes:
 1. In __fman_pcd_fe_build_vm_chain() (fman_pcd.c), add a second
    ehash_table_set() call with key_size=37 for v6 (table index 1).
 2. In fman_pcd_kg_port_arm_fe() (fman_pcd_keygen.c), also find a free scheme
-   slot and arm it for v6 with the same EKFC.  The existing code reuses an
-   RSS scheme slot via kg_find_port_scheme() — we find a second free slot
-   and configure it identically but for v6.
+   slot and arm it for v6 with the same EKFC.
 3. In fman_pcd_kg_port_disarm_fe(), also disarm the v6 scheme.
-4. Add v6_scheme_id field to struct fman_pcd for tracking.
+4. Add v6_scheme_id field to the private struct fman_pcd in fman_pcd.c,
+   initialized to -1 in fman_pcd_init().
 
-Must run AFTER 0158.
+Must run AFTER 0158 and AFTER F_090 (which adds fe_vm_chain_built).
 """
 
 import sys, os
@@ -26,7 +25,6 @@ import sys, os
 kroot = "drivers/net/ethernet/freescale/fman"
 pcd_c = os.path.join(kroot, "fman_pcd.c")
 keygen_c = os.path.join(kroot, "fman_pcd_keygen.c")
-pcd_h = "include/linux/fsl/fman_pcd.h"
 
 total_changes = 0
 
@@ -39,7 +37,7 @@ if os.path.exists(pcd_c):
         src = f.read()
     changes = 0
 
-    # A1. Add v6 ehash table after the v4 one
+    # A1. Add v6 ehash table after the v4 one in __fman_pcd_fe_build_vm_chain
     v4_ehash = "\terr = fman_pcd_ehash_table_set(pcd, ehash_mask,\n\t\t\t\t       ehash_key_sz, ehash_shift);"
     if v4_ehash in src:
         v6_ehash_block = """\terr = fman_pcd_ehash_table_set(pcd, ehash_mask,
@@ -60,34 +58,49 @@ if os.path.exists(pcd_c):
         else:
             print("### F-140: v6 ehash table already present")
     else:
-        print("### F-140: v4 ehash_table_set not found")
+        print("### F-140: v4 ehash_table_set not found in fman_pcd.c")
 
-    # A2. Add v6_scheme_id field to struct fman_pcd in the HEADER
-    if os.path.exists(pcd_h):
-        with open(pcd_h) as f:
-            hdr_src = f.read()
-        insert_after = "\tDECLARE_BITMAP(fe_port_armed, 32);"
-        if insert_after in hdr_src:
-            new_field = insert_after + "\n\tint v6_scheme_id;\t/* F-140: v6 KG scheme id, -1 = not armed */"
-            if "v6_scheme_id" not in hdr_src:
-                hdr_src = hdr_src.replace(insert_after, new_field, 1)
-                with open(pcd_h, "w") as f:
-                    f.write(hdr_src)
-                changes += 1
-                print("### F-140: added v6_scheme_id field to fman_pcd.h")
-            else:
-                print("### F-140: v6_scheme_id field already in header")
+    # A2. Add v6_scheme_id field to the private struct fman_pcd in fman_pcd.c.
+    #     The struct starts with "struct fman_pcd {" around line 89.
+    #     Insert after fe_armed_port (added by 0131) or after fe_exit_off.
+    #     Use fe_armed_port as anchor since it's the last field before debugfs_dir.
+    anchor = "\tu8 fe_armed_port;\t\t/* F-079-R4: last engaged port */"
+    if anchor in src:
+        new_field = anchor + "\n\tint v6_scheme_id;\t/* F-140: v6 KG scheme id, -1 = not armed */"
+        if "v6_scheme_id" not in src:
+            src = src.replace(anchor, new_field, 1)
+            changes += 1
+            print("### F-140: added v6_scheme_id field to private struct")
         else:
-            print("### F-140: fe_port_armed bitmap not found in header")
+            print("### F-140: v6_scheme_id field already present")
+    else:
+        # Fallback: try fe_exit_off
+        anchor2 = "\tunsigned long fe_exit_off;"
+        if anchor2 in src:
+            new_field2 = anchor2 + "\n\tint v6_scheme_id;\t/* F-140: v6 KG scheme id, -1 = not armed */"
+            if "v6_scheme_id" not in src:
+                src = src.replace(anchor2, new_field2, 1)
+                changes += 1
+                print("### F-140: added v6_scheme_id field (fallback anchor)")
+            else:
+                print("### F-140: v6_scheme_id already present (fallback)")
+        else:
+            print("### F-140: neither fe_armed_port nor fe_exit_off found in struct")
 
-    # A3. Initialize v6_scheme_id = -1 in fman_pcd_init
-    init_anchor = "\tpcd->fe_vm_chain_built = false;"
+    # A3. Initialize v6_scheme_id = -1 in fman_pcd_init().
+    #     Use a unique anchor: the function signature + first assignment.
+    #     fman_pcd_init sets pcd->muram_offset early — use that as anchor.
+    init_anchor = "\tpcd->muram_offset = fman_muram_offset(fman);"
     if init_anchor in src:
-        v6_init = init_anchor + "\n\tpcd->v6_scheme_id = -1;\t/* F-140 */"
+        v6_init = "\tpcd->v6_scheme_id = -1;\t/* F-140 */\n" + init_anchor
         if "v6_scheme_id = -1" not in src:
             src = src.replace(init_anchor, v6_init, 1)
             changes += 1
-            print("### F-140: initialized v6_scheme_id = -1")
+            print("### F-140: initialized v6_scheme_id = -1 in fman_pcd_init")
+        else:
+            print("### F-140: v6_scheme_id init already present")
+    else:
+        print("### F-140: muram_offset init not found in fman_pcd_init")
 
     if changes:
         with open(pcd_c, "w") as f:
@@ -108,11 +121,8 @@ if os.path.exists(keygen_c):
         kg_src = f.read()
     kg_changes = 0
 
-    # B1. In fman_pcd_kg_port_arm_fe(), after the v4 arm, also find a free
-    #     scheme slot and arm it for v6 with the same EKFC.
-    #     The function already has keygen = fman->keygen, and we have ekfc.
-    #     We need to find a free slot (not used, or used by a different port)
-    #     and configure it for v6.
+    # B1. In fman_pcd_kg_port_arm_fe(), after setting slot->ekfc, also find
+    #     a free scheme slot and arm it for v6 with the same EKFC.
     v4_arm = "\tif (ekfc)\n\t\tslot->ekfc = ekfc;"
     if v4_arm in kg_src:
         v6_arm_block = """\tif (ekfc)
@@ -120,8 +130,7 @@ if os.path.exists(keygen_c):
 
 \t/* F-140: Find a free KG scheme slot and arm it for IPv6.
 \t * Same EKFC — silicon determines field size from parse result.
-\t * Skip slots already used by this port (the v4 slot) and RSS slots
-\t * that are still active for other ports.
+\t * Skip slots already used by this port (the v4 slot).
 \t */
 \tif (ekfc && pcd->v6_scheme_id < 0) {
 \t\tint vi;
