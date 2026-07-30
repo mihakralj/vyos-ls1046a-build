@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.33.0 · 2026-07-30 · HADS 1.0.0**
+**Version 1.34.0 · 2026-07-30 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -63,7 +63,8 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 | **Scaffold singleton leak ROOT-CAUSED + CLOSED**: F-138 diagnostic on .185 (ISO 0406) proved `pcd->fe_scaffold_*` are singleton variables overwritten by second port's engage. Port 0x10's scaffold (304 B) orphaned every cycle. Fix (F-139): scaffold stored in singleton during engage, copied to per-port `fp->scaffold_*` in `fe_port_set` after `list_add_tail`, freed in `fe_port_del`. Board-validated on .185 (ISO 0631): 5 cycles, 0 B/cycle leak, ALLOC/FREE symmetric, MURAM budget stable at 34,992 B (warm chain only). | 2026-07-30 |
 | **5-cycle reversibility PASS**: 3+5+5 cycles of engage/disengage on eth3+eth4, 0% ping loss, no kernel panic, `gen_pool_free_owner` BUG eliminated (M2_4_3 disabled, F_135 fsleep pipeline drain, F_139 per-port scaffold). | 2026-07-30 |
 | **T-M8-1 100× soak PASS**: 87+ cycles on .185 (ISO 0631), 0 B/cycle MURAM leak, budget stable at 34,992 B, 332 ENGAGED + 168 DISENGAGED events clean, 0% ping loss, no panics. | 2026-07-30 |
-| **M6 Pieces 2+3 IMPLEMENTED**: F-140 v6 ehash table (key_size=37) + v6 KG scheme (scheme 5, EKFC=0x001C0006) + v6 HW insert path (table 1 routing, v4/v6 gate lifted). CI build 30522936032 pending. | 2026-07-30 |
+| **M6 Pieces 2+3 IMPLEMENTED**: F-140 v7 — v6 ehash table (key_size=37) + v6 KG scheme arm in fman_pcd_kg.c (iterate free slots, disarm iterates all). CI build 30564136285 (ISO 1701) deployed to lxc200. | 2026-07-30 |
+| **F-141 DISCOVERED**: Software CRC64 bucket index ≠ hardware KG hash. `hash_probe` captured `0xd6af22e764a17e66` vs software `0x62b02e22d7be2bf6` for same key — buckets 0x56af vs 0x62b0. The FE-VM ehash path (Fork-B) cannot HIT until the hash algorithms are aligned. The M5 gate (10.259 Gbps) used the CC-tree exact-match path (Fork-A), not the ehash. | 2026-07-30 |
 | **Fix B (F-117) per-key ehash unlink VALIDATED**: mid-chain + head + -ENOENT correct, memory-clean (dma_free_coherent); scale path beyond 32-key CC-tree ceiling | 2026-07-25 |
 | Kernel ZC datapath PROVEN (xsk_zc_rx_redirect=6 with raw XSK probe); gap is VPP integration | 2026-07-21 |
 | VPP interrupt-mode ZC recipe: `zero-copy` + interrupt rx-mode + single-queue + no workers → eligible climbs | 2026-07-22 |
@@ -75,9 +76,10 @@ flavor split retired 2026-06-14; the `FLAVOR` build variable and the
 
 | ISO | Built from | Deployed | Carries | Notes |
 |---|---|---|---|---|---|
-| `2026.07.30-1610-rolling` | `1aae6334` | lxc200 `latest.iso` | F-140 v4: v6 ehash table + v6 KG scheme arm (private struct fix) | **Deployed 2026-07-30.** Ready for silicon validation on .185. |
-| `2026.07.30-0726-rolling` | `e7428b13` | — | F-140 v1: v6 ehash table (key_size=37) + broken kg_scheme_create() call | Superseded by 1610. |
-| `2026.07.30-0631-rolling` | `407a2ad6` | installed on .185 | F-139 per-port scaffold (CR-013 fix) + F-138 diagnostic | **Board-validated 2026-07-30:** 5 cycles, 0 B/cycle leak. CR-013 CLOSED. |
+| `2026.07.30-1701-rolling` | `09ae9ec3` | lxc200 `latest.iso` | F-140 v7: v6 ehash + v6 KG arm in fman_pcd_kg.c (iterate free slots, disarm iterates all) | **Deployed 2026-07-30.** Ready for v6 KG scheme validation. |
+| `2026.07.30-1610-rolling` | `1aae6334` | installed on .185 | F-140 v4: v6 ehash table (key_size=37) + broken KG arm (wrong file, wrong struct) | **Board-tested 2026-07-30:** v6 ehash table present, v6 KG scheme DISABLED. F-141 discovered. |
+| `2026.07.30-0726-rolling` | `e7428b13` | — | F-140 v1: v6 ehash table + broken kg_scheme_create() call | Superseded. |
+| `2026.07.30-0631-rolling` | `407a2ad6` | — | F-139 per-port scaffold (CR-013 fix) | CR-013 CLOSED. |
 | `2026.07.30-0406-rolling` | `412c726f` | — | F-138 diagnostic (scaffold alloc/free printk) | **Board-tested 2026-07-30:** F-138 proved scaffold singleton leak — port 0x10's scaffold orphaned every cycle. Root cause confirmed. |
 | *(CI 30326497207)* | `938aa3ab` | — | F-129 v4 (production-scoped teardown) + F-092 v3 + all F-125 chain fixes | Superseded by later builds. |
 | `2026.07.27-1835-rolling` | `c70b2f87` | lxc200 `latest.iso`, installed on .185 + .106 | F-092 v3 + F-129 v3 (debugfs-scoped — BROKEN) + F-130 + F-125(a) | **Board-tested 2026-07-28 on .185:** engage works (both ports rc=0), disengage disarms ports but F-129 teardown never fires — ehash int_buf held, fe_pool engaged=YES, 67428 B MURAM used. Root cause: F-129 v3 `src.replace(..., 1)` matched debugfs handler's disarm call, not production fn. Fixed in v4. |
@@ -328,6 +330,7 @@ Key outcomes: FE-VM hardware match & dispatch engine verified; nft flowtable `ho
 |---|---|---|---|---|
 | **F-076** | Port RX deaf after FE-VM-armed disengage; `fe_arm.engaged` stays YES (blocks re-engage); cold boot recovers | CLOSED on scaffold path (fe_disengage_full + fe_recover proven); DIRECT path still deaf | M7 reversibility claim | `fe_disengage_full` recovers cleanly after scaffold-based engage; tested 2026-07-19 on .185 |
 | **BUG 3b flood half** | iperf3 flood under policer → watchdog reset | OPEN | M8 | Needs serial capture + cold power-cycle; **always repro policer with a few pings, never a flood** |
+| **F-141** | Software CRC64 (`fman_pcd_crc64`) ≠ hardware KG hash. `hash_probe` captured `0xd6af22e764a17e66` vs software `0x62b02e22d7be2bf6` for same 13-byte key — buckets 0x56af vs 0x62b0. The FE-VM ehash path (Fork-B) cannot HIT. The M5 gate (10.259 Gbps) used the CC-tree exact-match path (Fork-A), not the ehash. Root cause: the KG uses a different hash algorithm (likely Toeplitz for RSS) than the software CRC64-ECMA-182. | **OPEN — discovered 2026-07-30** | M6 (blocks v4/v6 ehash HIT) | Fix options: (A) read KG hash from FE workspace and use it for bucket indexing; (B) configure KG to use CRC64-ECMA-182 via `kgse_hc`; (C) use CC-tree exact-match for flow lookup instead of ehash. |
 | **F-120** | `ASK_CMD_FLUSH_FLOWS` cleared SW table but left HW flow state (CC slot / `p->nkeys`, HM ref, xarray cookie) and stale `num_hw_backed`; 32 flushes permanently exhausted the CC tree | **CODE-FIXED 2026-07-26** (remove-equivalent collect-then-replay + KUnit guard); silicon validation OPEN | M6 correctness / M8 soak | Validate on `.185`: `p->nkeys`/MURAM must return to baseline after flushing HW-backed flows — an empty `dump-flows` is not sufficient evidence (T-M6-6) |
 | **F-121** | `set_ask_offload()` called `.strip()` on `Interface._popen()`'s SECOND return value, which is an **int returncode**, not stderr → `AttributeError: 'int' object has no attribute 'strip'` inside commit-apply → `ERROR_COMMIT_APPLY` and *"There was a config error on boot"* on every boot with `offload ask` configured | **FIXED 2026-07-26** (rc-typed, non-fatal warning) | M7 CLI correctness | Regression introduced by re-applying `7527c23c`'s reverted 031 "polish" in `5c00d930`. Board-observed on `.185` ISO 2004. Root trigger: the first engage at boot loses a race with FMan PCD bring-up and returns non-zero |
 | **F-122** | `vyos-offload-ask engage` exits non-zero on an already-engaged port (`echo: write error: Invalid argument`, `fe_arm engage failed`) even though the kernel engaged; engage is not idempotent | OPEN (observed 2026-07-26 on `.185`) | M7 polish / M8 soak | Make `fe_arm engage` idempotent (return 0 when already engaged), mirroring the F-116/F-120 idempotence rule. Benign now that F-121 makes a non-zero rc a warning rather than a commit failure |
