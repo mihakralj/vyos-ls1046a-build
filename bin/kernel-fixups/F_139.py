@@ -104,57 +104,44 @@ else:
     print("### F-139: fe_port_drain free block not found")
 
 # ── 3. Replace pcd->fe_scaffold_gro = gro with per-port lookup ──
-# F_091.py may have modified the surrounding code, so use individual line
-# replacements instead of a multi-line block.
-gro_line = "\t\t\tpcd->fe_scaffold_gro = gro;"
-mto_line = "\t\t\tpcd->fe_scaffold_mto = mto;"
-ato_line = "\t\t\tpcd->fe_scaffold_ato = ato;"
+# Use simple string replacement on each line individually.
+# This is robust against whitespace/context changes from other fixups.
+import re
 
-if gro_line in src and mto_line in src and ato_line in src:
-    # Replace with per-port lookup block (insert before gro, remove all three)
-    lookup_block = """\t\t\t{
-\t\t\t\tstruct fman_pcd_fe_port *fp = fman_pcd_fe_port_find(pcd, (u8)port_id);
-\t\t\t\tif (fp) {
-\t\t\t\t\tfp->scaffold_gro = gro;
-\t\t\t\t\tfp->scaffold_mto = mto;
-\t\t\t\t\tfp->scaffold_ato = ato;
-\t\t\t\t}
-\t\t\t}"""
-    # Find the gro line and replace the three-line block
-    gro_pos = src.find(gro_line)
-    # Find the end of the ato line
-    ato_pos = src.find(ato_line, gro_pos)
-    ato_end = src.find("\n", ato_pos) + 1
-    old_block = src[gro_pos:ato_end]
+gro_re = re.compile(r'(\t*)pcd->fe_scaffold_gro\s*=\s*gro;')
+mto_re = re.compile(r'(\t*)pcd->fe_scaffold_mto\s*=\s*mto;')
+ato_re = re.compile(r'(\t*)pcd->fe_scaffold_ato\s*=\s*ato;')
+
+gro_m = gro_re.search(src)
+mto_m = mto_re.search(src)
+ato_m = ato_re.search(src)
+
+if gro_m and mto_m and ato_m:
+    indent = gro_m.group(1)
+    lookup_block = (indent + "{\n" +
+                    indent + "\tstruct fman_pcd_fe_port *fp = fman_pcd_fe_port_find(pcd, (u8)port_id);\n" +
+                    indent + "\tif (fp) {\n" +
+                    indent + "\t\tfp->scaffold_gro = gro;\n" +
+                    indent + "\t\tfp->scaffold_mto = mto;\n" +
+                    indent + "\t\tfp->scaffold_ato = ato;\n" +
+                    indent + "\t}\n" +
+                    indent + "}")
+    # Replace the three lines with the lookup block
+    gro_pos = gro_m.start()
+    ato_end = src.find("\n", ato_m.start()) + 1
     src = src[:gro_pos] + lookup_block + "\n" + src[ato_end:]
     changes += 1
     print("### F-139: scaffold tracking moved to per-port fp->scaffold_*")
 else:
-    # Try alternate pattern — F_091 may have changed indentation
-    import re
-    gro_re = re.compile(r'\t+pcd->fe_scaffold_gro\s*=\s*gro;')
-    mto_re = re.compile(r'\t+pcd->fe_scaffold_mto\s*=\s*mto;')
-    ato_re = re.compile(r'\t+pcd->fe_scaffold_ato\s*=\s*ato;')
-    gro_m = gro_re.search(src)
-    mto_m = mto_re.search(src)
-    ato_m = ato_re.search(src)
-    if gro_m and mto_m and ato_m:
-        lookup_block = """\t\t\t{
-\t\t\t\tstruct fman_pcd_fe_port *fp = fman_pcd_fe_port_find(pcd, (u8)port_id);
-\t\t\t\tif (fp) {
-\t\t\t\t\tfp->scaffold_gro = gro;
-\t\t\t\t\tfp->scaffold_mto = mto;
-\t\t\t\t\tfp->scaffold_ato = ato;
-\t\t\t\t}
-\t\t\t}"""
-        gro_pos = gro_m.start()
-        ato_end = src.find("\n", ato_m.start()) + 1
-        old_block = src[gro_pos:ato_end]
-        src = src[:gro_pos] + lookup_block + "\n" + src[ato_end:]
-        changes += 1
-        print("### F-139: scaffold tracking moved to per-port fp->scaffold_* (regex fallback)")
-    else:
-        print("### F-139: scaffold tracking assignment not found — fields will be kept as-is")
+    print("### F-139: scaffold tracking assignment not found — fields will be kept as-is")
+    # List what WAS found for debugging
+    if gro_m: print("### F-139: DEBUG gro found at", gro_m.start())
+    if mto_m: print("### F-139: DEBUG mto found at", mto_m.start())
+    if ato_m: print("### F-139: DEBUG ato found at", ato_m.start())
+    # Search for any reference to fe_scaffold
+    any_ref = re.findall(r'fe_scaffold_\w+', src)
+    if any_ref:
+        print(f"### F-139: DEBUG found fe_scaffold_* references: {any_ref[:10]}")
 
 # ── 4. Remove the singleton scaffold fields from struct fman_pcd ──
 # Only if the tracking was successfully moved (pcd->fe_scaffold_gro no longer referenced)
