@@ -58,7 +58,8 @@ if dev_field in src:
     else:
         print("### F-148: pcd back-pointer already present")
 else:
-    print("### F-148: dev field not found in ehash_table struct")
+    print("### F-148: FATAL: dev field not found in ehash_table struct")
+    sys.exit(1)
 
 # ── 2. Set t->pcd in fman_pcd_ehash_table_set ──
 set_dev = "\tt->dev = dev;"
@@ -71,7 +72,8 @@ if set_dev in src:
     else:
         print("### F-148: t->pcd already set")
 else:
-    print("### F-148: t->dev assignment not found")
+    print("### F-148: FATAL: t->dev assignment not found")
+    sys.exit(1)
 
 # ── 3. In fman_pcd_ehash_add_key: write key to CC match table ──
 list_add = "\tlist_add(&flow->node, &t->flows);\t/* head-add => LIFO drain */"
@@ -154,7 +156,8 @@ if list_add in src:
     else:
         print("### F-148: v4 code already present")
 else:
-    print("### F-148: list_add not found in ehash_add_key")
+    print("### F-148: FATAL: list_add not found in ehash_add_key")
+    sys.exit(1)
 
 if changes:
     with open(pcd_c, "w") as f:
