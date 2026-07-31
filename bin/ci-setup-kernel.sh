@@ -1690,7 +1690,19 @@ fi
 # was actually caused by the word1 byte order bug (F-144), not contextSize.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_145.py" 2>&1
-    echo "### F-145: contextSize=255 (DDR record size)"
+    echo "### F-145: contextSize=255 (DDR record size) — REVERTED by F-149 below"
+fi
+
+# F-149: Revert F-145 — restore contextSize = key_size (microcode §7.2).
+# F-145 changed contextSize to 256 (DDR record allocation size), but the
+# EXT_HASH FE uses contextSize for KEY COMPARISON, not DMA read sizing.
+# With contextSize=256, the FE compares 256 bytes per entry — bytes 21-255
+# are uninitialized padding, so the comparison can never match.
+# This is the root cause of F-141 (ehash HIT failure).
+# The microcode reference explicitly documents this bug and its fix.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_149.py" 2>&1
+    echo "### F-149: contextSize = key_size (revert F-145)"
 fi
 
 # F-147: Fix RCCB to point directly to FE_ENTER AD (not group table).
@@ -1701,15 +1713,6 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_147.py" 2>&1
     echo "### F-147: hybrid CONT_LOOKUP + FE-VM topology (fe_enter_off = gro)"
-fi
-
-# F-148: Write flow key to CC match table on ehash insert.
-# Bridges Fork-B (ehash) and Fork-A (CC-tree exact match).
-# When a flow is inserted into the ehash, also writes the key bytes
-# to the CC match table so the CC engine can do exact-match dispatch.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_148.py" 2>&1
-    echo "### F-148: CC match table key write on flow insert"
 fi
 
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
