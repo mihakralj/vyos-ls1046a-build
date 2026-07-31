@@ -1,23 +1,22 @@
-"""F-147: Fix RCCB to point directly to FE_ENTER AD, not group table.
+"""F-147: Fix RCCB to point directly to FE_ENTER AD (pcd->fe_root_ad_off).
 
 The settled architecture (2026-07-16, qdrant) requires RCCB → FE_ENTER direct
 dispatch.  No CC group table, no CC node, no match table.  This was proven
 working on 2026-07-04 (the only confirmed HIT in program history).
 
-F-091 introduced a bug: it sets fe_enter_off = gro (the group table offset)
-at the end of the scaffold block, overriding the correct fe_enter_off = ato+32
-(the FE_ENTER AD offset).  This causes fman_port_set_cc_base() to write the
-group table offset to RCCB instead of the FE_ENTER AD offset.
+The original 0132 patch sets fe_enter_off = gro (the group table offset),
+causing fman_port_set_cc_base() to write the group table offset to RCCB.
+The CC engine reads the empty group table and falls through to RSS.
 
-The CC engine reads the group table at RCCB, finds it empty (no entries),
-and falls through to the default RSS path.  The FE-VM is never entered.
+F-147 v1 removed the fe_enter_off = gro line, but fe_enter_off then stayed 0
+(the parameter value), causing fman_pcd_kg_port_arm_fe() to fail with -EINVAL
+(!fe_enter_off check).
 
-Fix: Remove the fe_enter_off = gro line.  fe_enter_off is already correctly
-set to ato + 32 (the FE_ENTER AD offset) earlier in the scaffold block.
+F-147 v2: Replace fe_enter_off = gro with fe_enter_off = pcd->fe_root_ad_off
+(the FE_ENTER AD offset, set by fman_pcd_fe_enter_build()).  This makes RCCB
+point directly to the FE_ENTER AD, matching the settled architecture.
 
-This aligns with the settled architecture: RCCB → FE_ENTER direct.
-
-Must run AFTER F-091 (which introduced the bug).
+Must run AFTER F-091 (which modifies the scaffold block).
 """
 
 import sys, os
@@ -34,33 +33,24 @@ with open(pcd_c) as f:
 
 changes = 0
 
-# Find and remove the fe_enter_off = gro line that F-091 added
-# The line appears as: fe_enter_off = gro;
-# It's right before pcd->fe_scaffold_gro = gro;
+# Replace fe_enter_off = gro with fe_enter_off = pcd->fe_root_ad_off
+# The line appears in the scaffold block, right before pcd->fe_scaffold_gro = gro
 
-old_line = "\t\t\t\tfe_enter_off = gro;\n\n\t\t\t\tpcd->fe_scaffold_gro = gro;"
-new_line = "\t\t\t\tpcd->fe_scaffold_gro = gro;"
+old_line = "\t\t\t\tfe_enter_off = gro;"
+new_line = "\t\t\t\tfe_enter_off = pcd->fe_root_ad_off;\t/* F-147: RCCB → FE_ENTER direct */"
 
 if old_line in src:
     src = src.replace(old_line, new_line, 1)
     changes += 1
-    print("### F-147: removed fe_enter_off = gro (RCCB now points to FE_ENTER AD)")
+    print("### F-147: fe_enter_off = gro → pcd->fe_root_ad_off (RCCB → FE_ENTER direct)")
 else:
-    # Try without the blank line
-    old_line2 = "\t\t\t\tfe_enter_off = gro;\n\t\t\t\tpcd->fe_scaffold_gro = gro;"
-    if old_line2 in src:
-        src = src.replace(old_line2, "\t\t\t\tpcd->fe_scaffold_gro = gro;", 1)
-        changes += 1
-        print("### F-147: removed fe_enter_off = gro (compact variant)")
+    # Check if already fixed
+    if "fe_enter_off = pcd->fe_root_ad_off" in src:
+        print("### F-147: already fixed (fe_enter_off = pcd->fe_root_ad_off)")
+    elif "F-147" in src:
+        print("### F-147: F-147 comment already present")
     else:
-        # Try just the line itself
-        old_line3 = "\t\t\t\tfe_enter_off = gro;"
-        if old_line3 in src:
-            src = src.replace(old_line3, "\t\t\t\t/* F-147: fe_enter_off stays as ato+32 (FE_ENTER AD) — RCCB direct */", 1)
-            changes += 1
-            print("### F-147: replaced fe_enter_off = gro with comment")
-        else:
-            print("### F-147: fe_enter_off = gro not found — may already be fixed")
+        print("### F-147: fe_enter_off = gro not found — may have been removed by v1")
 
 if changes:
     with open(pcd_c, "w") as f:
