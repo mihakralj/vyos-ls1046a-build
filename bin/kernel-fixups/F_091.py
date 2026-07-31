@@ -102,6 +102,27 @@ if old_block not in src:
 # Instead of matching the whole block, let's change the logic:
 # Always create scaffold, but if fe_enter_off != 0, set numKeys=1 and point at FE_ENTER
 
+# F-091 v4 (2026-07-31): mto MUST be 64 bytes (2 rows x 32B), not 16.
+#
+# The CC match table format (authoritative in-tree implementation, patch
+# 0098 cc_pack_key + RM 8.7.4.2): each match row is key(16B) followed by
+# mask(16B) = 2 * CC_KEY_SIZE = 32 bytes per row, and the table has
+# (num_keys+1) rows (trailing row = miss slot).  For our single-key
+# scaffold (numKeys 0 -> 1 after the first flow insert) that is 2 rows x
+# 32B = 64 bytes.  A 16-byte allocation holds only a bare key with NO
+# mask and NO trailing row -- the CC engine would read uninitialized
+# MURAM as the mask, so the key comparison could never match, which is
+# why HIT dispatch has failed on every attempt with this scaffold.
+# Keep in sync with F_125.py (unwind alloc/free) and F_139.py (free size).
+alloc16 = "\t\t\tmto = fman_pcd_muram_alloc(pcd, 16);"
+alloc64 = "\t\t\tmto = fman_pcd_muram_alloc(pcd, 64);"
+if alloc16 in src and alloc64 not in src:
+    src = src.replace(alloc16, alloc64, 1)
+    changes += 1
+    print("### F-091 v4: mto alloc 16 -> 64 B (key+mask rows per RM 8.7.4.2)")
+elif alloc64 in src:
+    print("### F-091 v4: mto alloc already 64 B")
+
 # Find the simplest anchor to modify
 anchor1 = "iowrite32be((0u << 24) | (mto & 0xFFFFFF),"
 if anchor1 not in src:

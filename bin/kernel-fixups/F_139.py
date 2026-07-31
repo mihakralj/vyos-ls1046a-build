@@ -47,7 +47,7 @@ new_struct = """struct fman_pcd_fe_port {
 \tunsigned long mgmt_off;
 \tsize_t mgmt_size;
 \tunsigned long scaffold_gro;\t/* CONT_LOOKUP group table (256 B) */
-\tunsigned long scaffold_mto;\t/* match table (16 B) */
+\tunsigned long scaffold_mto;\t/* match table (64 B; key+mask rows per RM 8.7.4.2) */
 \tunsigned long scaffold_ato;\t/* AD table (32 B) */
 };"""
 
@@ -64,14 +64,14 @@ old_del = """\tfman_pcd_muram_free(pcd, fp->pool_raw_off, fp->pool_raw_size);
 \tlist_del(&fp->node);"""
 
 new_del = """\tfman_pcd_muram_free(pcd, fp->pool_raw_off, fp->pool_raw_size);
-\t/* F-139: Free per-port CONT_LOOKUP scaffold (gro 256 + mto 16 + ato 32 = 304 B).
+\t/* F-139: Free per-port CONT_LOOKUP scaffold (gro 256 + mto 64 + ato 32 = 352 B).
 \t * Formerly a singleton in pcd->fe_scaffold_* that was overwritten by the
 \t * second port's engage, orphaning the first port's scaffold permanently.
 \t */
 \tif (fp->scaffold_ato)
 \t\tfman_pcd_muram_free(pcd, fp->scaffold_ato, 32);
 \tif (fp->scaffold_mto)
-\t\tfman_pcd_muram_free(pcd, fp->scaffold_mto, 16);
+\t\tfman_pcd_muram_free(pcd, fp->scaffold_mto, 64);
 \tif (fp->scaffold_gro)
 \t\tfman_pcd_muram_free(pcd, fp->scaffold_gro, 256);
 \tlist_del(&fp->node);"""
@@ -91,7 +91,7 @@ new_drain = """\t\tfman_pcd_muram_free(pcd, fp->pool_raw_off, fp->pool_raw_size)
 \t\tif (fp->scaffold_ato)
 \t\t\tfman_pcd_muram_free(pcd, fp->scaffold_ato, 32);
 \t\tif (fp->scaffold_mto)
-\t\t\tfman_pcd_muram_free(pcd, fp->scaffold_mto, 16);
+\t\t\tfman_pcd_muram_free(pcd, fp->scaffold_mto, 64);
 \t\tif (fp->scaffold_gro)
 \t\t\tfman_pcd_muram_free(pcd, fp->scaffold_gro, 256);
 \t\tlist_del(&fp->node);"""
