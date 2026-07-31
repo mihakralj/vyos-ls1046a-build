@@ -1,11 +1,26 @@
-"""F-091: Modify __fman_pcd_fe_arm_engage to support HIT via scaffold.
+"""F-091 v3: Modify __fman_pcd_fe_arm_engage to support HIT via scaffold.
 
 When fe_enter_off != 0, instead of skipping the CONT_LOOKUP scaffold,
-create it with numKeys=1 and a match-all entry that dispatches to FE_ENTER.
-The miss-AD still routes to kernel FQ for non-matching flows.
+create it with numKeys=1 (dynamic write only -- no engage-time HIT-AD
+content write; see v3 note below).  The miss-AD still routes to kernel
+FQ for non-matching flows.
 
-This enables the HIT gate test: engage with FE_ENTER AD, insert ehash flow,
-matching frames go through FE_ENTER → EXT_HASH → HIT → ENQ → TX FQ.
+v3 (2026-07-31): REMOVED the engage-time HIT-AD write at ato+32 that
+v1/v2 (this session) added.  `ato` is allocated as exactly 32 bytes and
+is already fully used by two pre-existing 16-byte miss-AD copies
+(ato+0..15, ato+16..31); any write at ato+32+ is a MURAM buffer overflow
+into whatever object gen_pool placed next, regardless of content.  This
+branch is dead in production (fman_pcd_fe_engage() always passes
+fe_enter_off=0) and redundant with F-148 v4, which correctly writes the
+real HIT-AD content to the in-bounds ato+0 slot when a flow is inserted.
+See the inline comment at the removal site for full detail.
+
+The HIT gate test now relies entirely on F-148 v4's flow-insert-time
+write for HIT-AD population: engage (numKeys stays 0 at engage time in
+production; debugfs engage with non-zero offset sets numKeys=1 but
+writes no AD content), insert ehash flow (F-148 v4 writes key + real
+HIT-AD to slot ato+0), matching frames go through FE_ENTER → EXT_HASH →
+HIT → ENQ → TX FQ.
 
 Disposition: fold-into 0158
 """
@@ -101,45 +116,40 @@ if old_write in src and new_write not in src:
     changes += 1
     print("### F-091: numKeys dynamic (0 for scaffold, 1 for HIT)")
 
-# Now we need to add the HIT AD entry after the miss-AD entries.
-# The ato table has 8 words: 4 for miss-AD[0], 4 for miss-AD[1]
-# We need to add: HIT-AD[0] pointing at FE_ENTER (word0=0x80000000|fe_enter_off, rest=0)
-# The HIT AD goes at ato + 32 (after the two miss-AD slots)
-
-# Find the last write to ato (the second miss_fqid write)
+# F-091 v3 (2026-07-31): DO NOT add a third HIT-AD entry at ato+32.
+#
+# `ato` is allocated as exactly 32 bytes (fman_pcd_muram_alloc(pcd, 32)).
+# The pre-existing scaffold code above already fills the FULL 32 bytes
+# with two duplicate 16-byte miss-AD copies (c+0..15 and c+16..31). Any
+# write at c+32 or beyond is 16+ bytes PAST THE END of this allocation --
+# a genuine MURAM buffer overflow into whatever object gen_pool placed
+# next, regardless of what content is written there.
+#
+# v1 (this session) wrote a raw fe_enter_off offset to c+32 (decodes as
+# a bogus enqueue-AD per RM 8.7.4.3 -- wrong content, AND out of bounds).
+# v2 (this session) fixed the CONTENT (a real 4-word FE_ENTER AD copy via
+# ioread32be/iowrite32be) but left the out-of-bounds LOCATION unfixed.
+#
+# v3 deletes this branch entirely. It is:
+#   1. Dead in production: fman_pcd_fe_engage() (F-092) always calls
+#      __fman_pcd_fe_arm_engage(pcd, hw_port_id, 0, miss_fqid, ...) with
+#      fe_enter_off hardcoded 0, so "if (fe_enter_off != 0)" never fires
+#      during normal ask.ko engage.
+#   2. Redundant: F-148 v4 already writes the correct HIT-AD content to
+#      ato+0 (the in-bounds first-key slot) when a flow is inserted via
+#      fman_pcd_ehash_add_key(), overwriting one of the two pre-existing
+#      miss-AD duplicates. This matches RM 8.7.4.3's AD-table sizing
+#      formula "(num_keys+1)*16 bytes" for the numKeys 0->1 transition
+#      (32 bytes = (1+1)*16, exactly what's allocated).
+#
+# No replacement code is inserted. The pre-existing "iowrite32be(0, c + 28);"
+# (last byte of the two-miss-AD-copy block) is left untouched.
 hit_anchor = "iowrite32be(0, c + 28);"
 if hit_anchor not in src:
     print("### F-091: FATAL: last AD write anchor 'iowrite32be(0, c + 28)' not found")
     sys.exit(1)
 else:
-    # v2 FIX (2026-07-31): The original code wrote raw fe_enter_off as word0,
-    # which decodes as a bogus enqueue-AD to a nonexistent FQID (RM 8.7.4.3).
-    # Per microcode reference Sec 7.7, the correct FE_ENTER AD content is:
-    #   w0=0x40800000 (CONT_LOOKUP|NIA_ORDER_RESTOR)
-    #   w1=0x00000000
-    #   w2=0x000000F6 (OPC_FE_ENTER)
-    #   w3=next-FE MURAM offset
-    # We read the live FE_ENTER AD from MURAM and copy all 4 words.
-    hit_insert = """iowrite32be(0, c + 28);
-\t\t\t\t/* F-091 v2: if numKeys>0, copy real FE_ENTER AD to HIT-AD slot.
-\t\t\t\t * Reads 4 words from the live FE_ENTER AD at fe_enter_off
-\t\t\t\t * and writes them to ato+32 (HIT-AD[0]).  Per microcode
-\t\t\t\t * reference Sec 7.7: w0=0x40800000, w1=0, w2=0xF6, w3=next-FE.
-\t\t\t\t */
-\t\t\t\tif (fe_enter_off != 0) {
-\t\t\t\t\tvoid __iomem *fe_ad = (void __iomem *)
-\t\t\t\t\t\tfman_muram_offset_to_vbase(muram, fe_enter_off);
-\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 0), c + 32);
-\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 4), c + 36);
-\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 8), c + 40);
-\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 12), c + 44);
-\t\t\t\t}"""
-    if "F-091 v2" not in src:
-        src = src.replace(hit_anchor, hit_insert, 1)
-        changes += 1
-        print("### F-091 v2: HIT-AD copies real FE_ENTER AD (4-word ioread32be/iowrite32be)")
-    else:
-        print("### F-091 v2: HIT-AD copy already present")
+    print("### F-091 v3: no HIT-AD write added at ato+32 (would overflow 32B buffer; F-148 v4 covers the in-bounds case)")
 
 # Also remove the outer if-guard and always allocate scaffold
 # (since we always need the scaffold now)

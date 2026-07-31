@@ -1,4 +1,4 @@
-"""F-148 v4: Write flow key to CC match table on ehash insert, increment numKeys.
+"""F-148 v5: Write flow key to CC match table on ehash insert, increment numKeys.
 
 The FE-VM ehash path (Fork-B) cannot produce a HIT because the CONT_LOOKUP
 group table has numKeys=0, routing ALL frames to the miss-AD → kernel.
@@ -16,8 +16,25 @@ exact-match comparison; matching frames go to FE_ENTER → EXT_HASH → ehash
 lookup → HIT → MUX → TRANSITION → ENQ.  Non-matching frames go to miss-AD
 → kernel.
 
-Limited to FMAN_CC_MAX_STATIC_KEYS (32) entries.  The ehash DDR table
-provides scale beyond 32 by allowing hash-based lookup within the FE-VM.
+v5 (2026-07-31): FIXES A CONFIRMED MURAM OVERFLOW.  v4's guard "if (nkeys
+< 32)" and its docstring ("Limited to FMAN_CC_MAX_STATIC_KEYS (32)
+entries") borrowed a constant NAME from an entirely unrelated subsystem
+(FMAN_CC_MAX_STATIC_KEYS is defined in patch 0086b for the OFFICIAL
+fman_cc_tree / ethtool-ntuple-steering path, which has its own properly
+sized `struct fman_cc_key keys[32]` storage).  The scaffold this fixup
+actually writes into (F-091's mto/ato) is allocated as mto=16 bytes (room
+for exactly ONE 16-byte key row) and ato=32 bytes (room for exactly one
+key's HIT-AD + one miss-AD, matching RM 8.7.4.3's (numKeys+1)*16 formula
+for the 0->1 transition only).  A SECOND key insert into the same
+scaffold writes to `mt + 1*16`, 16 bytes past mto's 16-byte allocation --
+a real MURAM overflow, reachable via genuine multi-flow ask.ko production
+use, not just test-only paths.  v5 caps at nkeys<1 (single-key only,
+matching the buffer's actual capacity) instead of the borrowed,
+oversized 32.  Supporting more than one key correctly requires a bigger
+redesign: enlarging mto/ato AND implementing the "slide the miss-AD to
+the new highest slot on every insert" pattern the official ask20/
+patch-0050 CC implementation uses, which this scaffold does not
+currently do at any key count.  Out of scope for this fix.
 
 v4 fixes bug (a) found by code review: the HIT-AD slot must contain a COPY
 of the four words at pcd->fe_root_ad_off (the standalone FE_ENTER AD per
@@ -78,10 +95,25 @@ else:
 # ── 3. In fman_pcd_ehash_add_key: write key to CC match table ──
 list_add = "\tlist_add(&flow->node, &t->flows);\t/* head-add => LIFO drain */"
 if list_add in src:
-    cc_write = """\t/* F-148 v4: Write key to CC match table so the CC engine can dispatch
+    cc_write = """\t/* F-148 v5: Write key to CC match table so the CC engine can dispatch
 \t * matching frames to FE_ENTER.  Without this, numKeys=0 routes ALL
 \t * frames to the miss-AD and the FE-VM ehash is never consulted.
-\t * Limited to 32 entries (FMAN_CC_MAX_STATIC_KEYS).
+\t *
+\t * v5 FIX (2026-07-31): capped at nkeys<1 (single-key only).  mto is
+\t * allocated as bare 16 bytes (F-091) -- room for exactly ONE 16-byte
+\t * key row.  ato is allocated as 32 bytes -- room for exactly one
+\t * key's HIT-AD plus one miss-AD (RM 8.7.4.3's (numKeys+1)*16 for the
+\t * 0->1 transition only).  v4's "nkeys < 32" guard borrowed the name
+\t * FMAN_CC_MAX_STATIC_KEYS from an unrelated subsystem (patch 0086b's
+\t * official fman_cc_tree, which has its own properly sized storage)
+\t * without the scaffold here ever actually being sized for more than
+\t * one key.  A second key insert wrote to mt + 1*16, 16 bytes past
+\t * mto's allocation -- a real MURAM overflow reachable via ordinary
+\t * multi-flow use, not just test-only paths.  Supporting more than
+\t * one key correctly needs a bigger redesign (enlarge mto/ato AND
+\t * slide the miss-AD to the new top slot on every insert, matching
+\t * the official ask20/patch-0050 CC implementation) -- out of scope
+\t * here; this fix only prevents the overflow.
 \t *
 \t * v4 fixes bug (a): the HIT-AD slot must contain a COPY of the four
 \t * words already at pcd->fe_root_ad_off (the standalone FE_ENTER AD:
@@ -112,7 +144,7 @@ if list_add in src:
 \t\t\tu32 nkeys = (gw0 >> 24) & 0xFF;
 \t\t\tint i;
 
-\t\t\tif (nkeys < 32) {
+\t\t\tif (nkeys < 1) {
 \t\t\t\tfor (i = 0; i < key_size; i++)
 \t\t\t\t\tiowrite8(key[i], mt + nkeys * 16 + i);
 \t\t\t\tfor (; i < 16; i++)
@@ -135,26 +167,28 @@ if list_add in src:
 \t\t\t\tpr_info(\"fman_pcd: F-148 CC key[%u] written, nkeys=%u\\n\",
 \t\t\t\t\t nkeys - 1, nkeys);
 \t\t\t} else {
-\t\t\t\tpr_warn(\"fman_pcd: F-148 CC match table full (32 keys)\\n\");
+\t\t\t\tpr_warn(\"fman_pcd: F-148 CC match table full (1 key max -- scaffold not sized for more)\\n\");
 \t\t\t}
 \t\t}
 \t}
 
 \tlist_add(&flow->node, &t->flows);\t/* head-add => LIFO drain */"""
-    if "F-148 v4" not in src:
-        # Remove any prior v3 block first (idempotent replace)
-        v3_marker_start = src.find("\t/* F-148 v3:")
-        if v3_marker_start != -1:
-            v3_marker_end = src.find(list_add, v3_marker_start) + len(list_add)
-            src = src[:v3_marker_start] + cc_write + src[v3_marker_end:]
+    if "F-148 v5" not in src:
+        # Remove any prior v3 or v4 block first (idempotent replace)
+        prior_marker_start = src.find("\t/* F-148 v4:")
+        if prior_marker_start == -1:
+            prior_marker_start = src.find("\t/* F-148 v3:")
+        if prior_marker_start != -1:
+            prior_marker_end = src.find(list_add, prior_marker_start) + len(list_add)
+            src = src[:prior_marker_start] + cc_write + src[prior_marker_end:]
             changes += 1
-            print("### F-148 v4: replaced v3 with corrected HIT-AD content copy (bug a fix)")
+            print("### F-148 v5: replaced prior version with nkeys<1 overflow fix")
         else:
             src = src.replace(list_add, cc_write, 1)
             changes += 1
-            print("### F-148 v4: added CC match table key write with corrected HIT-AD copy")
+            print("### F-148 v5: added CC match table key write with nkeys<1 overflow fix")
     else:
-        print("### F-148: v4 code already present")
+        print("### F-148: v5 code already present")
 else:
     print("### F-148: FATAL: list_add not found in ehash_add_key")
     sys.exit(1)
