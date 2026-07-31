@@ -1705,6 +1705,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-149: contextSize = key_size (revert F-145)"
 fi
 
+# F-152: Revert F-144 — restore original EXT_HASH FE word1 bit-position
+# formula.  F-144 changed the encoding to hashShift<<24|contextSize<<16|
+# hashMask based on an unverified theory, without first checking
+# arch/fman-microcode-210-programming-reference.md — which already
+# documented (since 2026-07-17) that the ORIGINAL patch 0131 formula
+# (hashMask<<16)|((contextSize-1)<<8)|hashShift is correct (verified
+# value 0x7fff0c00).  F-144 produced 0x000C7FFF instead — hashMask,
+# contextSize, and hashShift all in the wrong bit positions.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_152.py" 2>&1
+    echo "### F-152: revert F-144 (restore hashMask<<16|contextSize-1<<8|hashShift)"
+fi
+
 # F-147: Fix RCCB to point directly to FE_ENTER AD (not group table).
 # F-091 introduced a bug: fe_enter_off = gro overrides the correct
 # fe_enter_off = ato+32.  The settled architecture requires RCCB→FE_ENTER
@@ -1715,15 +1728,29 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-147: hybrid CONT_LOOKUP + FE-VM topology (fe_enter_off = gro)"
 fi
 
-# F-148 v3: Write flow key to CC match table on ehash insert.
+# F-153: Fix 0146's MUX/TRANSITION wiring.  0146 wires MUX directly to
+# ENQ (skipping TRANSITION) and mislabels TRANSITION as a "MISS -> Exit"
+# relay wired to fe_exit_off.  Per microcode reference Sec 7.5/7.6/7.1
+# (line 60, "DDR -->|HIT| MUX[MUX FE]") and Sec 7.3 line 384 ("ENQ's
+# proven role is the HIT terminal: MUX -> TRANSITION -> ENQ -> TX FQ"),
+# the correct wiring is MUX->TRANSITION->ENQ.  TRANSITION is a MUX-HIT
+# relay, not a MISS-path object (MISS is EXT_HASH's own missNextFE, w6).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_153.py" 2>&1
+    echo "### F-153: MUX->TRANSITION->ENQ wiring (was MUX->ENQ direct)"
+fi
+
+# F-148 v4: Write flow key to CC match table on ehash insert.
 # The CONT_LOOKUP group table has numKeys=0, routing ALL frames to miss-AD.
 # To enter the FE-VM, the CC engine must match a key.  This fixup writes
 # the flow key to the CC match table and increments numKeys when a flow
-# is inserted.  Matching frames → FE_ENTER → EXT_HASH → ehash → HIT.
-# Non-matching frames → miss-AD → kernel.  Limited to 32 entries.
+# is inserted.  Matching frames → FE_ENTER → EXT_HASH → ehash → HIT →
+# MUX → TRANSITION → ENQ.  Non-matching frames → miss-AD → kernel.
+# Limited to 32 entries.  v4 copies the real FE_ENTER AD content (4 words)
+# into the HIT-AD slot instead of writing the raw offset as word0 (v3 bug).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_148.py" 2>&1
-    echo "### F-148 v3: CC match table key write on flow insert"
+    echo "### F-148 v4: CC match table key write + real FE_ENTER AD copy"
 fi
 
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.

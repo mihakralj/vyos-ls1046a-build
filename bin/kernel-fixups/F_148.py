@@ -1,4 +1,4 @@
-"""F-148 v3: Write flow key to CC match table on ehash insert, increment numKeys.
+"""F-148 v4: Write flow key to CC match table on ehash insert, increment numKeys.
 
 The FE-VM ehash path (Fork-B) cannot produce a HIT because the CONT_LOOKUP
 group table has numKeys=0, routing ALL frames to the miss-AD → kernel.
@@ -13,16 +13,21 @@ match table.  This requires:
 This fixup writes the flow key to the CC match table and increments numKeys
 when a flow is inserted via fman_pcd_ehash_add_key().  The CC engine does
 exact-match comparison; matching frames go to FE_ENTER → EXT_HASH → ehash
-lookup → HIT → MUX → ENQ.  Non-matching frames go to miss-AD → kernel.
+lookup → HIT → MUX → TRANSITION → ENQ.  Non-matching frames go to miss-AD
+→ kernel.
 
 Limited to FMAN_CC_MAX_STATIC_KEYS (32) entries.  The ehash DDR table
 provides scale beyond 32 by allowing hash-based lookup within the FE-VM.
 
+v4 fixes bug (a) found by code review: the HIT-AD slot must contain a COPY
+of the four words at pcd->fe_root_ad_off (the standalone FE_ENTER AD per
+microcode reference Sec 7.7: w0=0x40800000, w1=0, w2=0x000000F6,
+w3=EXT_HASH offset), not the raw offset NUMBER written as word0.  v3's
+"iowrite32be(fe_root_ad_off, at+0)" decoded as an RM 8.7.4.3 enqueue-AD
+to a nonexistent FQID -- the fix is a 4-word ioread/iowrite copy.
+
 v3: Uses per-port scaffold fields (fp->scaffold_mto/gro/ato) via
     pcd->fe_ports walk.  Adds pr_info diagnostics for debugging.
-    Properly handles the AD table layout: AD[0..nkeys-1] = HIT→FE_ENTER,
-    AD[nkeys] = MISS→kernel FQ.  When nkeys increments, the old miss-AD
-    slot becomes the new HIT-AD slot.
 
 Must run AFTER F-091 (scaffold creation), F-139 (per-port scaffold),
 and 0128 (fman_pcd_ehash_add_key).
@@ -71,10 +76,18 @@ else:
 # ── 3. In fman_pcd_ehash_add_key: write key to CC match table ──
 list_add = "\tlist_add(&flow->node, &t->flows);\t/* head-add => LIFO drain */"
 if list_add in src:
-    cc_write = """\t/* F-148 v3: Write key to CC match table so the CC engine can dispatch
+    cc_write = """\t/* F-148 v4: Write key to CC match table so the CC engine can dispatch
 \t * matching frames to FE_ENTER.  Without this, numKeys=0 routes ALL
 \t * frames to the miss-AD and the FE-VM ehash is never consulted.
 \t * Limited to 32 entries (FMAN_CC_MAX_STATIC_KEYS).
+\t *
+\t * v4 fixes bug (a): the HIT-AD slot must contain a COPY of the four
+\t * words already at pcd->fe_root_ad_off (the standalone FE_ENTER AD:
+\t * w0=0x40800000 CONT_LOOKUP|NIA_ORDER_RESTOR, w1=0, w2=0x000000F6
+\t * OPC_FE_ENTER, w3=EXT_HASH offset -- microcode reference Sec 7.7),
+\t * NOT the raw offset NUMBER written as word0.  A bare word0 with a
+\t * zero top byte decodes as an enqueue-AD to FQID=that number (RM
+\t * 8.7.4.3), which is a nonexistent FQ -- v3's bug.
 \t */
 \tif (t->pcd) {
 \t\tstruct fman_pcd_fe_port *fp;
@@ -98,26 +111,22 @@ if list_add in src:
 \t\t\tint i;
 
 \t\t\tif (nkeys < 32) {
-\t\t\t\t/* Write key bytes to match table entry nkeys (16 bytes, zero-padded). */
 \t\t\t\tfor (i = 0; i < key_size; i++)
 \t\t\t\t\tiowrite8(key[i], mt + nkeys * 16 + i);
 \t\t\t\tfor (; i < 16; i++)
 \t\t\t\t\tiowrite8(0, mt + nkeys * 16 + i);
 
-\t\t\t\t/* Write HIT-AD at ato + nkeys*16 pointing to FE_ENTER.
-\t\t\t\t * The AD table has nkeys+1 entries: AD[0..nkeys-1] for HIT,
-\t\t\t\t * AD[nkeys] for MISS.  When nkeys increments, the old
-\t\t\t\t * miss-AD slot becomes the new HIT-AD slot.
-\t\t\t\t */
-\t\t\t\tif (ato) {
+\t\t\t\tif (ato && t->pcd->fe_root_ad_off) {
 \t\t\t\t\tvoid __iomem *at = (void __iomem *)fman_muram_offset_to_vbase(muram, ato);
-\t\t\t\t\tiowrite32be((u32)t->pcd->fe_root_ad_off, at + nkeys * 16 + 0);
-\t\t\t\t\tiowrite32be(0, at + nkeys * 16 + 4);
-\t\t\t\t\tiowrite32be(0, at + nkeys * 16 + 8);
-\t\t\t\t\tiowrite32be(0, at + nkeys * 16 + 12);
+\t\t\t\t\tvoid __iomem *root = (void __iomem *)fman_muram_offset_to_vbase(
+\t\t\t\t\t\tmuram, t->pcd->fe_root_ad_off);
+\t\t\t\t\t/* Copy the real FE_ENTER AD content (4 words), not the offset. */
+\t\t\t\t\tiowrite32be(ioread32be(root + 0), at + nkeys * 16 + 0);
+\t\t\t\t\tiowrite32be(ioread32be(root + 4), at + nkeys * 16 + 4);
+\t\t\t\t\tiowrite32be(ioread32be(root + 8), at + nkeys * 16 + 8);
+\t\t\t\t\tiowrite32be(ioread32be(root + 12), at + nkeys * 16 + 12);
 \t\t\t\t}
 
-\t\t\t\t/* Increment numKeys in group table word0. */
 \t\t\t\tnkeys++;
 \t\t\t\tiowrite32be((nkeys << 24) | (gw0 & 0x00FFFFFF), gt);
 
@@ -130,12 +139,20 @@ if list_add in src:
 \t}
 
 \tlist_add(&flow->node, &t->flows);\t/* head-add => LIFO drain */"""
-    if "F-148 v3" not in src:
-        src = src.replace(list_add, cc_write, 1)
-        changes += 1
-        print("### F-148 v3: added CC match table key write with per-port scaffold walk")
+    if "F-148 v4" not in src:
+        # Remove any prior v3 block first (idempotent replace)
+        v3_marker_start = src.find("\t/* F-148 v3:")
+        if v3_marker_start != -1:
+            v3_marker_end = src.find(list_add, v3_marker_start) + len(list_add)
+            src = src[:v3_marker_start] + cc_write + src[v3_marker_end:]
+            changes += 1
+            print("### F-148 v4: replaced v3 with corrected HIT-AD content copy (bug a fix)")
+        else:
+            src = src.replace(list_add, cc_write, 1)
+            changes += 1
+            print("### F-148 v4: added CC match table key write with corrected HIT-AD copy")
     else:
-        print("### F-148: v3 code already present")
+        print("### F-148: v4 code already present")
 else:
     print("### F-148: list_add not found in ehash_add_key")
 
