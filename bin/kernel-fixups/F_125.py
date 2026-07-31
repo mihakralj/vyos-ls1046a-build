@@ -62,14 +62,17 @@ if "fman_pcd_fe_arm_free_scaffold" not in src:
     sys.exit(0)
 
 # ── 1. Unwind a partial scaffold allocation ───────────────────────────
+# v2 (2026-07-31): mto alloc is 64 B since F-091 v4 (CC match rows are
+# key(16B)+mask(16B) = 32B each, (num_keys+1)=2 rows per RM 8.7.4.2) —
+# keep the anchor/free sizes in sync with F_091.py.
 old_alloc = """\t\t\tgro = fman_pcd_muram_alloc(pcd, 256);
-\t\t\tmto = fman_pcd_muram_alloc(pcd, 16);
+\t\t\tmto = fman_pcd_muram_alloc(pcd, 64);
 \t\t\tato = fman_pcd_muram_alloc(pcd, 32);
 \t\t\tif (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) &&
 \t\t\t    !IS_ERR_VALUE(ato)) {"""
 
 new_alloc = """\t\t\tgro = fman_pcd_muram_alloc(pcd, 256);
-\t\t\tmto = fman_pcd_muram_alloc(pcd, 16);
+\t\t\tmto = fman_pcd_muram_alloc(pcd, 64);
 \t\t\tato = fman_pcd_muram_alloc(pcd, 32);
 \t\t\tif (IS_ERR_VALUE(gro) || IS_ERR_VALUE(mto) ||
 \t\t\t    IS_ERR_VALUE(ato)) {
@@ -82,10 +85,10 @@ new_alloc = """\t\t\tgro = fman_pcd_muram_alloc(pcd, 256);
 \t\t\t\tif (!IS_ERR_VALUE(gro))
 \t\t\t\t\tfman_pcd_muram_free(pcd, gro, 256);
 \t\t\t\tif (!IS_ERR_VALUE(mto))
-\t\t\t\t\tfman_pcd_muram_free(pcd, mto, 16);
+\t\t\t\t\tfman_pcd_muram_free(pcd, mto, 64);
 \t\t\t\tif (!IS_ERR_VALUE(ato))
 \t\t\t\t\tfman_pcd_muram_free(pcd, ato, 32);
-\t\t\t\tpr_warn("fman_pcd fe_arm: FE_ENTER scaffold alloc failed (needs 304 B of PCD MURAM)\\n");
+\t\t\t\tpr_warn("fman_pcd fe_arm: FE_ENTER scaffold alloc failed (needs 352 B of PCD MURAM)\\n");
 \t\t\t\treturn -ENOMEM;
 \t\t\t}
 \t\t\tif (1) {"""
