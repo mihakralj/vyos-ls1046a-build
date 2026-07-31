@@ -1726,6 +1726,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-148 v3: CC match table key write on flow insert"
 fi
 
+# F-150: Fix CONT_LOOKUP group table key_size to match EKFC extraction.
+# The scaffold hardcodes word2=0x4F000000 (key_size=16) which was correct
+# for EKFC=0x00180206 (16-byte: SIP+DIP+SPI+SPORT+DPORT).  Our EKFC is
+# 0x001C0006 (13-byte: SIP+DIP+PROTO+SPORT+DPORT, no SPI).  With key_size=16
+# the CC engine compares 16 bytes but KG only extracts 13 → never matches.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_150.py" 2>&1
+    echo "### F-150: group table key_size 16→13 (match EKFC=0x001C0006)"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
