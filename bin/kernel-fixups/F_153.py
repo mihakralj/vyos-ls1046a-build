@@ -1,28 +1,27 @@
-"""F-153: Fix 0146's MUX/TRANSITION wiring -- MUX must go through TRANSITION to ENQ.
+"""F-153 v2: Fix MUX/TRANSITION wiring in F-054's direct-iowrite output.
 
-Per arch/fman-microcode-210-programming-reference.md Section 7.5/7.6/7.1 line 60:
-the proven FE-VM HIT chain is:
+F-054 replaces patch 0146's fman_pcd_fe_build_contexts() calls with direct
+iowrite32be writes.  F-054's output wires:
 
-    EXT_HASH --HIT--> MUX --> TRANSITION --> ENQ --> TX FQ
+  MUX word0 = FMAN_FE_TYPE_MUX | enq->muram_off   (MUX -> ENQ directly)
+  TRANSITION word1 = pcd->fe_exit_off              (TRANSITION -> EXIT)
 
-Patch 0146's fman_pcd_fe_build_contexts() wires this WRONG:
+Per arch/fman-microcode-210-programming-reference.md Sec 7.5/7.6/7.1 (line 60)
+and Sec 7.3 (line 384), the proven FE-VM HIT chain is:
 
-    MUX.next_fe_off      = enq->muram_off        (skips TRANSITION entirely)
-    TRANSITION.next_ad_off = pcd->fe_exit_off    (mislabeled "MISS -> Exit",
-                                                   but TRANSITION is a MUX-HIT-
-                                                   branch relay per Section 7.6,
-                                                   not a MISS-path object --
-                                                   MISS is EXT_HASH's own
-                                                   missNextFE, w6, unrelated)
+  EXT_HASH --HIT--> MUX --> TRANSITION --> ENQ --> TX FQ
 
-Section 7.3 line 384 confirms ENQ's proven role requires arriving via this
-exact three-hop chain ("MUX -> TRANSITION -> ENQ -> TX FQ"), not a direct
-MUX -> ENQ jump.  This fixup corrects both assignments:
+F-054's wiring skips TRANSITION entirely (MUX -> ENQ direct) and misroutes
+TRANSITION to EXIT (a MISS-path object).  This fixup corrects both:
 
-    MUX.next_fe_off        = pcd->fe_transition_off
-    TRANSITION.next_ad_off = enq->muram_off
+  MUX word0 = FMAN_FE_TYPE_MUX | pcd->fe_transition_off  (MUX -> TRANSITION)
+  TRANSITION word1 = enq->muram_off                       (TRANSITION -> ENQ)
 
-Must run AFTER 0146 (which defines fman_pcd_fe_build_contexts()).
+v2: Targets F-054's output (direct iowrite32be), not the original 0146
+    context-builder code which F-054 already removed.  This is why v1's
+    anchors failed ("MUX context anchor not found" in CI log).
+
+Must run AFTER F-054 (which replaces the context builder with direct writes).
 """
 
 import sys, os
@@ -39,74 +38,48 @@ with open(pcd_c) as f:
 
 changes = 0
 
-# --- Fix 1: MUX context. HIT -> TRANSITION (not directly -> ENQ) ---
-old_mux = """	/* MUX context: HIT -> ENQ */
-	if (pcd->fe_mux_off && enq) {
-		fe = fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
-		memset(&p, 0, sizeof(p));
-		p.type = FMAN_FE_TYPE_MUX;
-		p.u.mux.next_fe_off = enq->muram_off;
-		fman_pcd_fe_context_build(fe, FMAN_FE_MUX_CTX_OFF, &p);
-	}"""
-
-new_mux = """	/* F-153: MUX context. HIT -> TRANSITION (proven chain per
-	 * microcode reference Sec 7.5/7.1: MUX -> TRANSITION -> ENQ).
-	 * Was: MUX -> ENQ directly, skipping TRANSITION entirely. */
-	if (pcd->fe_mux_off && pcd->fe_transition_off) {
-		fe = fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
-		memset(&p, 0, sizeof(p));
-		p.type = FMAN_FE_TYPE_MUX;
-		p.u.mux.next_fe_off = pcd->fe_transition_off;
-		fman_pcd_fe_context_build(fe, FMAN_FE_MUX_CTX_OFF, &p);
-	}"""
+# --- Fix 1: MUX word0. F-054 writes: iowrite32be(FMAN_FE_TYPE_MUX | (u32)enq->muram_off, fe);
+# Change enq->muram_off to pcd->fe_transition_off ---
+old_mux = "iowrite32be(FMAN_FE_TYPE_MUX | (u32)enq->muram_off, fe);"
+new_mux = "iowrite32be(FMAN_FE_TYPE_MUX | (u32)pcd->fe_transition_off, fe);\t/* F-153: MUX -> TRANSITION (was -> ENQ) */"
 
 if old_mux in src:
     src = src.replace(old_mux, new_mux, 1)
     changes += 1
-    print("### F-153: fixed MUX context — HIT -> TRANSITION (was -> ENQ directly)")
-elif "F-153" in src:
-    print("### F-153: MUX fix already present")
+    print("### F-153 v2: fixed MUX word0 — -> TRANSITION (was -> ENQ)")
 else:
-    print("### F-153: MUX context anchor not found")
+    # Try with F-054+F-055 comment variant
+    old_mux2 = "iowrite32be(FMAN_FE_TYPE_MUX | (u32)enq->muram_off, fe); /* F-054+F-055: SDK-correct MUX context at AD+4 */"
+    if old_mux2 in src:
+        src = src.replace(old_mux2, new_mux, 1)
+        changes += 1
+        print("### F-153 v2: fixed MUX word0 (F-054+F-055 comment variant)")
+    else:
+        print("### F-153 v2: MUX iowrite32be not found — check F-054 output")
 
-# --- Fix 2: TRANSITION context. -> ENQ (not -> EXIT) ---
-old_transition = """	/* Transition: MISS -> Exit (deallocate) */
-	if (pcd->fe_transition_off && pcd->fe_exit_off) {
-		fe = fman_muram_offset_to_vbase(muram,
-					pcd->fe_transition_off);
-		memset(&p, 0, sizeof(p));
-		p.type = FMAN_FE_TYPE_TRANSITION;
-		p.u.transition.next_ad_off = pcd->fe_exit_off;
-		fman_pcd_fe_context_build(fe, FMAN_FE_TRANSITION_CTX_OFF, &p);
-	}"""
+# --- Fix 2: TRANSITION word1. F-054 writes: iowrite32be((u32)pcd->fe_exit_off, (u32 __iomem *)fe + 1);
+# Change pcd->fe_exit_off to enq->muram_off ---
+old_trans = "iowrite32be((u32)pcd->fe_exit_off, (u32 __iomem *)fe + 1);"
+new_trans = "iowrite32be((u32)enq->muram_off, (u32 __iomem *)fe + 1);\t/* F-153: TRANSITION -> ENQ (was -> EXIT) */"
 
-new_transition = """	/* F-153: TRANSITION context. -> ENQ (proven chain per microcode
-	 * reference Sec 7.6/7.1). TRANSITION is a MUX-HIT-branch relay,
-	 * NOT a MISS-path object -- MISS is EXT_HASH's own missNextFE
-	 * (w6), unrelated to this singleton. Was mislabeled "MISS -> Exit"
-	 * and wired to fe_exit_off, which orphaned the HIT chain. */
-	if (pcd->fe_transition_off && enq) {
-		fe = fman_muram_offset_to_vbase(muram,
-					pcd->fe_transition_off);
-		memset(&p, 0, sizeof(p));
-		p.type = FMAN_FE_TYPE_TRANSITION;
-		p.u.transition.next_ad_off = enq->muram_off;
-		fman_pcd_fe_context_build(fe, FMAN_FE_TRANSITION_CTX_OFF, &p);
-	}"""
-
-if old_transition in src:
-    src = src.replace(old_transition, new_transition, 1)
+if old_trans in src:
+    src = src.replace(old_trans, new_trans, 1)
     changes += 1
-    print("### F-153: fixed TRANSITION context — -> ENQ (was -> EXIT)")
-elif "F-153" in src and "TRANSITION context. -> ENQ" in src:
-    print("### F-153: TRANSITION fix already present")
+    print("### F-153 v2: fixed TRANSITION word1 — -> ENQ (was -> EXIT)")
 else:
-    print("### F-153: TRANSITION context anchor not found")
+    # Try with F-054 comment variant
+    old_trans2 = "iowrite32be((u32)pcd->fe_exit_off, (u32 __iomem *)fe + 1); /* F-054: direct AD word 1 write */"
+    if old_trans2 in src:
+        src = src.replace(old_trans2, new_trans, 1)
+        changes += 1
+        print("### F-153 v2: fixed TRANSITION word1 (F-054 comment variant)")
+    else:
+        print("### F-153 v2: TRANSITION iowrite32be not found — check F-054 output")
 
 if changes:
     with open(pcd_c, "w") as f:
         f.write(src)
-    print(f"### F-153: {changes} change(s) applied")
+    print(f"### F-153 v2: {changes} change(s) applied")
 else:
-    print("### F-153: no changes — may already be present")
+    print("### F-153 v2: no changes — may already be present")
     sys.exit(0)
