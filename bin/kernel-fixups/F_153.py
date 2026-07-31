@@ -55,7 +55,8 @@ else:
         changes += 1
         print("### F-153 v2: fixed MUX word0 (F-054+F-055 comment variant)")
     else:
-        print("### F-153 v2: MUX iowrite32be not found — check F-054 output")
+        print("### F-153 v2: FATAL: MUX iowrite32be not found — check F-054 output")
+        sys.exit(1)
 
 # --- Fix 2: TRANSITION word1. F-054 writes: iowrite32be((u32)pcd->fe_exit_off, (u32 __iomem *)fe + 1);
 # Change pcd->fe_exit_off to enq->muram_off ---
@@ -74,7 +75,8 @@ else:
         changes += 1
         print("### F-153 v2: fixed TRANSITION word1 (F-054 comment variant)")
     else:
-        print("### F-153 v2: TRANSITION iowrite32be not found — check F-054 output")
+        print("### F-153 v2: FATAL: TRANSITION iowrite32be not found — check F-054 output")
+        sys.exit(1)
 
 if changes:
     with open(pcd_c, "w") as f:
