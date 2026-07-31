@@ -138,7 +138,8 @@
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
     "fe_flow_key_fix.py": "no description",
-    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions"
+    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions",
+    "F_148.py": "fman_pcd.c: F-148 \u2014 write flow key to CC match table on ehash insert (CC-tree exact-match dispatch)"
   },
   "count": 44,
   "removed_dead": [

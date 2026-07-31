@@ -1700,7 +1700,16 @@ fi
 # 2026-07-04 (the only confirmed HIT in program history).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_147.py" 2>&1
-    echo "### F-147: RCCB → FE_ENTER direct (removed fe_enter_off = gro)"
+    echo "### F-147: hybrid CONT_LOOKUP + FE-VM topology (fe_enter_off = gro)"
+fi
+
+# F-148: Write flow key to CC match table on ehash insert.
+# Bridges Fork-B (ehash) and Fork-A (CC-tree exact match).
+# When a flow is inserted into the ehash, also writes the key bytes
+# to the CC match table so the CC engine can do exact-match dispatch.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_148.py" 2>&1
+    echo "### F-148: CC match table key write on flow insert"
 fi
 
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
