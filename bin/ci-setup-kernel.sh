@@ -1715,6 +1715,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-147: hybrid CONT_LOOKUP + FE-VM topology (fe_enter_off = gro)"
 fi
 
+# F-148 v3: Write flow key to CC match table on ehash insert.
+# The CONT_LOOKUP group table has numKeys=0, routing ALL frames to miss-AD.
+# To enter the FE-VM, the CC engine must match a key.  This fixup writes
+# the flow key to the CC match table and increments numKeys when a flow
+# is inserted.  Matching frames → FE_ENTER → EXT_HASH → ehash → HIT.
+# Non-matching frames → miss-AD → kernel.  Limited to 32 entries.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_148.py" 2>&1
+    echo "### F-148 v3: CC match table key write on flow insert"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
