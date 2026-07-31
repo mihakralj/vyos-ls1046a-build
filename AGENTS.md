@@ -2,6 +2,17 @@
 
 Agent guidance for this repo. Legend: → leads-to; ∵ because; ¬ not; w/ w/o with/without. Normative caps (MUST/NEVER) are binding. Code blocks, commands, paths, values verbatim.
 
+## S0. QDRANT GATE — BEFORE ANY CODE CHANGE (MUST)
+
+**Before writing or committing ANY code that touches FMan PCD registers, FE descriptors, KG schemes, CC trees, ehash tables, MURAM offsets, flow key formats, or kernel fixups (bin/kernel-fixups/F_*.py):**
+
+1. Run `qdrant-find` with ≥3 focused queries covering the specific register/field/component being modified.
+2. Cross-reference findings against `arch/fman-microcode-210-programming-reference.md` and `specs/fman-keygen-flow-key-spec.md`.
+3. Do NOT commit until qdrant agrees with the change.
+4. If qdrant contradicts the change, qdrant wins. Halt and re-evaluate.
+
+**F-150 (2026-07-31) is the canonical violation:** changed CC group table key_size 16→13 without qdrant check. Qdrant holds RM §5.12: valid CC key sizes are 1,2,4,8,16,24,32,40,48,56 — 13 is invalid. Had to revert. This rule exists because buffer layouts, register offsets, field names, and silicon behavior have been wrong multiple times; qdrant holds the corrections.
+
 ## S1. Agent Memory (qdrant) — every task
 
 qdrant MCP = authoritative persistent memory (diagnoses, root causes, failed attempts, gotchas).
