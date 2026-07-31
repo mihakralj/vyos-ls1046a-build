@@ -80,8 +80,8 @@ if old_block not in src:
     print("### F-091: exact scaffold block not found — trying variant...")
     # Check for variant patterns
     if "if (fe_enter_off == 0)" not in src:
-        print("### F-091: fe_enter_off guard not found at all")
-        sys.exit(0)
+        print("### F-091: FATAL: fe_enter_off guard not found at all")
+        sys.exit(1)
 
 # The key change: replace "if (fe_enter_off == 0)" with unconditional scaffold + HIT option
 # Instead of matching the whole block, let's change the logic:
@@ -90,8 +90,8 @@ if old_block not in src:
 # Find the simplest anchor to modify
 anchor1 = "iowrite32be((0u << 24) | (mto & 0xFFFFFF),"
 if anchor1 not in src:
-    print("### F-091: numKeys write anchor not found")
-    sys.exit(0)
+    print("### F-091: FATAL: numKeys write anchor not found")
+    sys.exit(1)
 
 # Replace the numKeys write to be dynamic: 0 for pass-through, 1 for HIT
 old_write = "iowrite32be((0u << 24) | (mto & 0xFFFFFF),"
@@ -109,20 +109,37 @@ if old_write in src and new_write not in src:
 # Find the last write to ato (the second miss_fqid write)
 hit_anchor = "iowrite32be(0, c + 28);"
 if hit_anchor not in src:
-    print("### F-091: last AD write anchor not found")
+    print("### F-091: FATAL: last AD write anchor 'iowrite32be(0, c + 28)' not found")
+    sys.exit(1)
 else:
+    # v2 FIX (2026-07-31): The original code wrote raw fe_enter_off as word0,
+    # which decodes as a bogus enqueue-AD to a nonexistent FQID (RM 8.7.4.3).
+    # Per microcode reference Sec 7.7, the correct FE_ENTER AD content is:
+    #   w0=0x40800000 (CONT_LOOKUP|NIA_ORDER_RESTOR)
+    #   w1=0x00000000
+    #   w2=0x000000F6 (OPC_FE_ENTER)
+    #   w3=next-FE MURAM offset
+    # We read the live FE_ENTER AD from MURAM and copy all 4 words.
     hit_insert = """iowrite32be(0, c + 28);
-\t\t\t\t/* F-091: if numKeys>0, write HIT-AD pointing at FE_ENTER */
+\t\t\t\t/* F-091 v2: if numKeys>0, copy real FE_ENTER AD to HIT-AD slot.
+\t\t\t\t * Reads 4 words from the live FE_ENTER AD at fe_enter_off
+\t\t\t\t * and writes them to ato+32 (HIT-AD[0]).  Per microcode
+\t\t\t\t * reference Sec 7.7: w0=0x40800000, w1=0, w2=0xF6, w3=next-FE.
+\t\t\t\t */
 \t\t\t\tif (fe_enter_off != 0) {
-\t\t\t\t\tiowrite32be((u32)fe_enter_off, c + 32);
-\t\t\t\t\tiowrite32be(0, c + 36);
-\t\t\t\t\tiowrite32be(0, c + 40);
-\t\t\t\t\tiowrite32be(0, c + 44);
+\t\t\t\t\tvoid __iomem *fe_ad = (void __iomem *)
+\t\t\t\t\t\tfman_muram_offset_to_vbase(muram, fe_enter_off);
+\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 0), c + 32);
+\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 4), c + 36);
+\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 8), c + 40);
+\t\t\t\t\tiowrite32be(ioread32be(fe_ad + 12), c + 44);
 \t\t\t\t}"""
-    if "F-091" not in src:
+    if "F-091 v2" not in src:
         src = src.replace(hit_anchor, hit_insert, 1)
         changes += 1
-        print("### F-091: HIT-AD entry at ato+32 pointing at FE_ENTER")
+        print("### F-091 v2: HIT-AD copies real FE_ENTER AD (4-word ioread32be/iowrite32be)")
+    else:
+        print("### F-091 v2: HIT-AD copy already present")
 
 # Also remove the outer if-guard and always allocate scaffold
 # (since we always need the scaffold now)

@@ -69,7 +69,9 @@ if m:
 elif "(u32)(t->hash_mask & 0xffff) << 16" in src:
     print("### F-152: original formula already present — F-144 not applied or already reverted")
 else:
-    print("### F-152: F-144's pattern not found — check fman_pcd_fe_hash_encode() manually")
+    print("### F-152: FATAL: F-144's pattern not found and original formula not present")
+    print("### F-152: Check fman_pcd_fe_hash_encode() — word1 formula may have changed")
+    sys.exit(1)
 
 if changes:
     with open(pcd_c, "w") as f:

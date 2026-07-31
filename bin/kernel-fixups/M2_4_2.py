@@ -17,19 +17,19 @@ else:
         changes += 1
         print("### fman_pcd.c: F-061 fe_pool_off field added")
     else:
-        print("### fman_pcd.c: F-061 WARNING: struct anchor not found")
+        print("### fman_pcd.c: F-061 FATAL: struct anchor 'int fe_refcount;' not found")
+        sys.exit(1)
 
 # ---- 2. Save fe_pool_off at slot 5 using a UNIQUE anchor ----
-# v5 BUG: alloc_anchor matched on the WRONG list_add_tail call (there are
-# multiple list_add_tail calls in fman_pcd.c). The replace(..., 1) replaced
-# the first match, which was NOT in fe_pool_alloc, corrupting the pool.
-# v6 FIX: use a compound anchor that includes context unique to the pool
-# allocation loop: gen_pool_alloc + list_add_tail.
-unique_anchor = "gen_pool_alloc(pcd->fe_gen_pool"
+# v7 FIX (2026-07-31): The v6 anchor "pcd->fe_obj[i].muram_off = off" never
+# matched because patch 0122 uses local variable "obj->muram_off = off", not
+# array access.  This was a silent no-op (6th recurrence of the F-069 pattern).
+# v7 uses the ACTUAL code from patch 0122: "obj->muram_off = off" +
+# "list_add_tail(&obj->node, &pcd->fe_available)".  Hard-fails on mismatch.
 if "if (i == 5)" in src and "pcd->fe_pool_off = off" in src:
-    print("### fman_pcd.c: F-061 fe_pool_off v4 save already present")
+    print("### fman_pcd.c: F-061 fe_pool_off save already present")
 else:
-    # Remove any broken v5 save that might be left
+    # Remove any broken prior-version saves
     for broken in ["\t\tif (i == 5)\t/* F-061 v4: slot 5 past 3 singletons */\n\t\t\tpcd->fe_pool_off = off;;",
                    "\t\tpcd->fe_pool_off = off;\t/* F-061 v2: save last pool slot for fe_probe (overwritten each iter) */",
                    "\t\tif (!pcd->fe_pool_off)\t/* F-061: save first slot for fe_probe */\n\t\t\tpcd->fe_pool_off = off;"]:
@@ -38,33 +38,19 @@ else:
             changes += 1
             print(f"### fman_pcd.c: F-061 removed broken save: {broken[:40]}...")
 
-    # Find the actual pool alloc loop body and add the save AFTER list_add_tail
-    # Use a unique enough anchor: the i * FMAN_PCD_FE_MAX_SIZE pattern
-    alloc_pattern = "\t\tpcd->fe_obj[i].muram_off = off;"
-    if alloc_pattern in src:
-        # Find the list_add_tail that immediately follows this line
-        tail_anchor = alloc_pattern + "\n\t\tlist_add_tail(&pcd->fe_obj[i].node, &pcd->fe_available);"
-        if tail_anchor in src:
-            new_block = tail_anchor + "\n\t\tif (i == 5)\t/* F-061 v6: slot 5 past 3 singletons */\n\t\t\tpcd->fe_pool_off = off;"
-            src = src.replace(tail_anchor, new_block, 1)
-            changes += 1
-            print("### fman_pcd.c: F-061 v6: fe_pool_off save at slot 5 using unique anchor")
-        else:
-            # Fallback: insert after the gen_pool_alloc+list_add_tail pair
-            # just after the for loop opening
-            loop_body = "\tfor (i = 0; i < ARRAY_SIZE(pcd->fe_obj); i++) {"
-            if loop_body in src:
-                save_line = "\t\tif (i == 5)\t/* F-061 v6: slot 5 past 3 singletons */\n\t\t\tpcd->fe_pool_off = off;\n"
-                # Insert inside the loop body after the first statement
-                first_stmt = "\n\t\tpcd->fe_obj[i].muram_off = off;"
-                if first_stmt in src:
-                    src = src.replace(first_stmt, first_stmt + "\n" + save_line, 1)
-                    changes += 1
-                    print("### fman_pcd.c: F-061 v6: save inserted after fe_obj[i] init")
-            else:
-                print("### fman_pcd.c: F-061 WARNING: could not find loop anchor")
+    # v7: Match the ACTUAL patch 0122 code: obj->muram_off = off;
+    # followed by list_add_tail(&obj->node, &pcd->fe_available);
+    alloc_pattern = "\t\tobj->muram_off = off;"
+    tail_anchor = alloc_pattern + "\n\t\tlist_add_tail(&obj->node, &pcd->fe_available);"
+    if tail_anchor in src:
+        new_block = tail_anchor + "\n\t\tif (i == 5)\t/* F-061 v7: slot 5 past 3 singletons */\n\t\t\tpcd->fe_pool_off = off;"
+        src = src.replace(tail_anchor, new_block, 1)
+        changes += 1
+        print("### fman_pcd.c: F-061 v7: fe_pool_off save at slot 5 (obj->muram_off anchor)")
     else:
-        print("### fman_pcd.c: F-061 WARNING: could not find fe_obj init anchor")
+        print("### fman_pcd.c: F-061 FATAL: pool alloc anchor 'obj->muram_off = off;' not found")
+        print("### fman_pcd.c: F-061 The patch 0122 code may have changed. Check fman_pcd_fe_pool_alloc().")
+        sys.exit(1)
 
 # ---- 3. Add fe_probe_show function (v5: 64-word scan, non-zero filter) ----
 old_probe_anchor = "static int fman_pcd_fe_port_show(struct seq_file *s, void *unused)"
@@ -124,7 +110,8 @@ if "fman_pcd_fe_probe_show" not in src:
         changes += 1
         print("### fman_pcd.c: F-061 fe_probe_show v6 inserted (64 words, non-zero filter)")
     else:
-        print("### fman_pcd.c: F-061 WARNING: probe anchor not found")
+        print("### fman_pcd.c: F-061 FATAL: probe anchor 'fman_pcd_fe_port_show' not found")
+        sys.exit(1)
 else:
     # Already present - upgrade to v6: expand loop + non-zero filter
     old_loop = "for (i = 0; i < 8; i++) {"
@@ -157,7 +144,8 @@ else:
         changes += 1
         print("### fman_pcd.c: F-061 fe_probe debugfs registered")
     else:
-        print("### fman_pcd.c: F-061 WARNING: debugfs anchor not found")
+        print("### fman_pcd.c: F-061 FATAL: debugfs anchor 'fe_hashfe' not found")
+        sys.exit(1)
 
 if changes == 0:
     print("### fman_pcd.c: F-061 v6: no changes (all already applied)")
