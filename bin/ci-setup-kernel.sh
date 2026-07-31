@@ -1693,12 +1693,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-145: contextSize=255 (DDR record size)"
 fi
 
-# F-146: Populate CC group table with FE_ENTER AD pointer.
-# The CC engine reads the group table at rccb to find the default action.
-# Without this, the FE-VM is never entered (CC falls through to RSS).
+# F-147: Fix RCCB to point directly to FE_ENTER AD (not group table).
+# F-091 introduced a bug: fe_enter_off = gro overrides the correct
+# fe_enter_off = ato+32.  The settled architecture requires RCCB→FE_ENTER
+# direct dispatch (no CC group table).  This was proven working on
+# 2026-07-04 (the only confirmed HIT in program history).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_146.py" 2>&1
-    echo "### F-146: CC group table populated with FE_ENTER AD pointer"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_147.py" 2>&1
+    echo "### F-147: RCCB → FE_ENTER direct (removed fe_enter_off = gro)"
 fi
 
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
