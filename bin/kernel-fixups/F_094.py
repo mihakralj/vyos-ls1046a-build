@@ -46,11 +46,29 @@ struct fman_pcd_fe_flow_action {
 """
 
     # Insert before the fe_engage declaration
-    anchor = "int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id);"
-    if anchor in src and "fman_pcd_fe_flow_action" not in src:
-        src = src.replace(anchor, struct_def + anchor, 1)
-        changes += 1
-        print("### F-094: added fman_pcd_fe_flow_action struct to header")
+    # F-157 (2026-08-01) extended fe_engage to 3-arg; match either form.
+    anchor2 = "int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id);"
+    anchor3 = "int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id,\n\t\t\t u32 enq_fqid);"
+    if "fman_pcd_fe_flow_action" not in src:
+        if anchor2 in src:
+            src = src.replace(anchor2, struct_def + anchor2, 1)
+            changes += 1
+            print("### F-094: added fman_pcd_fe_flow_action struct to header (2-arg anchor)")
+        elif anchor3 in src:
+            src = src.replace(anchor3, struct_def + anchor3, 1)
+            changes += 1
+            print("### F-094: added fman_pcd_fe_flow_action struct to header (3-arg anchor)")
+        else:
+            # Fallback: insert before any fman_pcd_fe_flow_add declaration.
+            fall = "int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id"
+            if fall in src:
+                src = src.replace(fall, struct_def + fall, 1)
+                changes += 1
+                print("### F-094: added fman_pcd_fe_flow_action struct (fallback anchor)")
+            else:
+                print("### F-094: WARNING — could not locate header insertion anchor")
+    else:
+        print("### F-094: fman_pcd_fe_flow_action already in header")
 
     # Update the flow_add declaration
     old_decl = """int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
