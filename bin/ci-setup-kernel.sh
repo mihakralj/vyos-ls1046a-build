@@ -2020,6 +2020,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-072 v3 FmPortSetFESupport ported"
 fi
 
+# F-158: debugfs dump node (fe_scaffold) — ground truth on CC match-table
+# layout.  STRICT_DEVMEM blocks /dev/mem MURAM reads, so this kernel node is
+# the only way to see what F-148 actually wrote (key+mask) vs what the CC
+# comparator reads.  Dumps group/match/AD tables for every armed port.
+# Runs after F-072 (which also anchors on fe_arm_show) to keep function order.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_158.py" 2>&1
+    echo "### fman_pcd.c: F-158 fe_scaffold debugfs dump node"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
