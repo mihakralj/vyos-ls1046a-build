@@ -1,5 +1,15 @@
 # Software Stack — SDK / ASK / ASK2 / LSDK & how it binds to the silicon
 
+**Version 2.1 · HADS 1.0.0**
+
+## AI READING INSTRUCTION
+
+This document maps the ASK2 software stack onto DPAA1 silicon. The canonical offload mechanism is
+**CC-tree classification + kernel SW flowtable + manip-chain forwarding** (§7). FE-VM ehash HIT
+(Fork-B) is retired experimental (§8). All facts tagged `[SPEC]` or `[NOTE]`.
+
+---
+
 **Purpose:** the bridge between the hardware reference docs (this directory) and the ASK2
 implementation. It explains the *software* lineage that drives DPAA1 — vendor SDK, the legacy
 **ASK** reference stack, the modern **ASK2** rewrite, mainline Linux, and the NXP doc corpus (LSDK
@@ -145,6 +155,79 @@ The PCD layer is the single biggest gap mainline doesn't fill — which is exact
 | `dpaa_eth` FQ/channel binding | [`qman-ceetm.md`](qman-ceetm.md) | scheduling/QoS |
 | OH ports OP1/OP2 | [`fman.md`](fman.md) §OH | reinject + flood |
 | RCW/ucode/reserved-mem | [`soc-integration.md`](soc-integration.md) | bring-up DTS |
+
+---
+
+## 7. Shipping offload mechanism: CC-tree + SW flowtable + manip chain
+
+**[SPEC]** The ASK2 shipping HW-offload path uses **CC-tree classification (top-N flows) + kernel
+software flowtable (tail flows) + FMan manip-chain forwarding**. This is the Linux flow-offload
+model: the FMan PCD Coarse Classification tree matches the top ~2000 flows in hardware; the kernel
+`nf_flowtable` handles the tail; both paths use the same FMan header-manipulation chain for
+NAT/VLAN/TTL/cksum rewriting.
+
+**[SPEC]** Per-interface engagement via VyOS CLI:
+```
+set interfaces ethernet eth<n> offload ask
+```
+This engages `ask.ko` + kernel `fman_pcd` + netfilter flowtable on the specified interface. ASK and
+VPP are **mutually exclusive per interface** — one port cannot be both, but other ports are free.
+
+**[SPEC]** Proven throughput (Mono Gateway DK, 10G SFP+):
+- **CC pass-through (M2):** 7.37 Gbps @ 0.16% loss — real pass-through, no false positive.
+- **CC-tree + nf_flowtable (M5):** 10.259 Gbps @ 0.16% loss — full offload stack.
+- **NXP cdx.ko (reference):** 8.58 Gbps via opcode/manip chain — vendor baseline.
+
+**[SPEC]** CC-tree architecture:
+- **CC comparator reads KG-emitted bytes** (patch 0108). The KeyGen extracts the 5-tuple in
+  **EKFC MSB-first order: SIP → DIP → PROTO → SPORT → DPORT** (13 bytes, EKFC=`0x001C0006`).
+- **Scaling:** 32 software caps vs 255 hardware keys per CC node. 64 KiB MURAM budget yields
+  ~8 CC nodes → ~2000+ flows in hardware.
+- **Only real HIT path:** RCCB → FE_ENTER direct dispatch (confirmed 2026-07-04). No CC group
+  table, no node table, no match table — the CC tree is the sole classification path.
+
+**[NOTE]** The M3/M5 "HIT PASSED" results were false positives. The M2 7.37 Gbps pass-through
+measurement is the only real HIT benchmark. All subsequent measurements use the CC-tree + SW
+flowtable stack.
+
+---
+
+## 8. FE-VM ehash HIT path (Fork-B) — RETIRED EXPERIMENTAL
+
+**[SPEC]** The FE-VM ehash exact-match HIT path (Fork-B) is a **dead end** and is **NOT shipping**.
+It never worked at production throughput (~1.5 Gbps DDR ceiling, limited by MURAM read bandwidth
+on the FE workspace path). It is retained in the codebase as experimental/retired and must not be
+re-enabled.
+
+**[NOTE]** Fork-B was the original ASK2 design target (FE-VM + ehash table for per-flow exact
+match). It was superseded by the CC-tree + SW flowtable model after silicon measurements proved
+the DDR ceiling makes FE-VM ehash non-viable for line-rate forwarding. The CC-tree approach
+achieves 10.259 Gbps vs Fork-B's ~1.5 Gbps.
+
+**[SPEC]** Do not re-enable Fork-B. The `if (0)` guards on FE-VM ehash code paths are intentional
+and permanent. Git history holds the experimental code; the guards prevent accidental re-activation
+across rebases.
+
+---
+
+## 9. ask.ko stack: runtime dataplane model
+
+**[SPEC]** The `ask.ko` stack operates as follows at runtime:
+
+1. **Engage:** `set interfaces ethernet eth<n> offload ask` triggers `ask.ko` to program the
+   FMan PCD on that port: KG scheme (EKFC `0x001C0006`, 5-tuple extraction), CC tree root,
+   and default forward-to-kernel FQ.
+2. **Flow insertion:** `nf_flowtable` (or `vyos-offload-ask` YNL command) inserts top-N flows
+   into the CC tree. The kernel SW flowtable handles the tail.
+3. **Fast path:** FMan PCD classifies frames through the CC tree. HIT → manip chain → direct
+   forward (no CPU). MISS → default FQ → kernel `nf_flowtable` → software forward.
+4. **Manip chain:** FMan header manipulation rewrites NAT/VLAN/TTL/cksum in hardware for both
+   CC-tree HIT and SW-flowtable paths.
+5. **Disengage:** `delete interfaces ethernet eth<n> offload ask` tears down the KG scheme,
+   CC tree, and FQ bindings; the port returns to kernel-only forwarding.
+
+**[SPEC]** YNL family `ask` provides the netlink control plane. `vyos-offload-ask` is the
+userspace CLI tool that speaks YNL to `ask.ko`.
 
 *Related: every sibling doc — this one is the map from code to silicon. Primary spec:
 `../specs/ask2-rewrite-spec.md` (§1.3 design, §13 PCD modules, §16 Risk #13). Plans: `../plans/`.*

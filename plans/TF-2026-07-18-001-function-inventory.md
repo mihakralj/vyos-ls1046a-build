@@ -1,6 +1,6 @@
 # Technical Finding: Incomplete Function Inventory
 
-**Version 1.0.0 · 2026-07-18 · HADS 1.0.0**
+**Version 1.1.0 · 2026-08-01 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -28,6 +28,8 @@ ranks findings by cost-to-value ratio.
 
 **[SPEC]** Twenty-three findings across six categories. Nine are hard blockers for shipped features (IPsec offload, VyOS op-mode integration, `NETIF_F_HW_ESP` advertisement). Eight are spec/code drift where the v3.0.0 API mandates a signature or symbol the tree does not carry. Six are intentional deferrals correctly marked, listed for auditor visibility.
 
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The shipping HW-offload dataplane is **CC-tree + kernel SW flowtable + manip-chain forwarding**. The FE-VM ehash HIT path (Fork-B) is **RETIRED/DEAD-END** — it never achieved a production HIT, is bounded by a ~1.5 Gbps DDR ceiling, and exists only as experimental diagnostic infrastructure. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. CC-tree scales to ~2000+ flows (32 software caps × 255 HW keys per node). All FE-VM ehash HIT path entries in this inventory are annotated as **retired/experimental** and are NOT production re-land targets. The CC-tree/SW-flowtable/manip-chain items remain the shipping re-land target.
+
 **[BUG] F-01** `ask_xfrm_state_add` returns success without installing an SA, which becomes silent packet loss the moment `NETIF_F_HW_ESP` is advertised.
 
 ### 1.1 Severity Definitions
@@ -38,6 +40,7 @@ ranks findings by cost-to-value ratio.
 | **HIGH** | Missing implementation of a documented API contract. Feature is unusable but fails safely. |
 | **MEDIUM** | Signature drift or missing observability. Feature works but violates a spec rule (T1/T2/T8/T9/T10) or hides state. |
 | **LOW** | Documented deferral. Listed for tracking, no action required this cycle. |
+| **RETIRED** | FE-VM ehash HIT path item. Experimental diagnostic infra only; NOT a production re-land target. Listed for historical traceability. |
 
 ### 1.2 Current Branch State — P1–P3 closure reset out (2026-07-18)
 
@@ -60,14 +63,14 @@ ranks findings by cost-to-value ratio.
 | F-05 | HIGH | `ask_stats.c` is 21-line init/exit stub | `ask_stats.c` | [ ] |
 | F-06 | HIGH | `ask_bridge.c` is 21-line init/exit stub | `ask_bridge.c` | [ ] |
 | F-07 | HIGH | `xdo_dev_state_delete` callback does not exist | `ask_xfrm.c` | [ ] |
-| F-08 | HIGH | `fman_pcd_fe_verify` absent from tree | spec §10.1, §17 | [ ] (impl `4493ce8`, reset out — §1.2) |
-| F-09 | HIGH | `dpaa_get_rx_default_fqid` absent from tree | spec §14.2 | [ ] |
-| F-10 | HIGH | `dpaa_get_rx_pcd_fqid_range` absent from tree | spec §14.2 | [ ] |
-| F-11 | MED | `fman_pcd_fe_flow_add` uses `unsigned long enq_off` | `0153-fman-pcd-fe-engage-api.patch:72` | [ ] |
-| F-12 | MED | `fman_pcd_fe_context_build` writes DDR through `void __iomem *` | `0135-fman-pcd-fe-context-build.patch:44` | [ ] |
+| F-08 | RETIRED | `fman_pcd_fe_verify` — FE-VM diagnostic infra, not production re-land | spec §10.1, §17 | [ ] (impl `4493ce8`, reset out — §1.2) |
+| F-09 | MED | `dpaa_get_rx_default_fqid` absent from tree | spec §14.2 | [ ] |
+| F-10 | MED | `dpaa_get_rx_pcd_fqid_range` absent from tree | spec §14.2 | [ ] |
+| F-11 | RETIRED | `fman_pcd_fe_flow_add` uses `unsigned long enq_off` — FE-VM path, retired | `0153-fman-pcd-fe-engage-api.patch:72` | [ ] |
+| F-12 | RETIRED | `fman_pcd_fe_context_build` writes DDR through `void __iomem *` — FE-VM path, retired | `0135-fman-pcd-fe-context-build.patch:44` | [ ] |
 | F-13 | MED | `fman_pcd_kg_unbind_port` missing `port_id` parameter | `0151-fman-pcd-kg-unbind-detach.patch:20` | [ ] |
 | F-14 | MED | `fman_port_lookup_rx` typed `void *fm` | `fman_port.c` per spec §12 | [ ] |
-| F-15 | MED | Hardcoded `tx_fqid = 0x200` in FE-VM compose path | `0158-fman-pcd-fqid-resolution-compose.patch:69` | [ ] |
+| F-15 | RETIRED | Hardcoded `tx_fqid = 0x200` in FE-VM compose path — FE-VM path, retired | `0158-fman-pcd-fqid-resolution-compose.patch:69` | [ ] |
 | F-16 | MED | `fman_pcd_kg_scheme_counter_read` absent | spec §6 | [ ] |
 | F-17 | MED | `fman_cc_key_stats_get` absent | spec §7, audit row 5a | [ ] |
 | F-18 | MED | `fman_policer_counters_get` absent | spec §9, audit row 8a | [ ] |
@@ -75,7 +78,7 @@ ranks findings by cost-to-value ratio.
 | F-20 | MED | `ASK_CMD_SET_POLICER` returns `-EOPNOTSUPP` | `ask_genl.c:144` | [ ] |
 | F-21 | MED | `ASK_CMD_DUMP_SAS` returns `-EOPNOTSUPP` | `ask_genl.c:129` | [ ] |
 | F-22 | MED | `ASK_CMD_FLUSH_SAS` returns `-EOPNOTSUPP` | `ask_genl.c:141` | [ ] |
-| F-23 | LOW | `fman_pcd_fe_flow_stats_get` reserved, not declared | spec §10.1, audit row 9a | [ ] |
+| F-23 | RETIRED | `fman_pcd_fe_flow_stats_get` — FE-VM path, retired | spec §10.1, audit row 9a | [ ] |
 
 ---
 
@@ -162,9 +165,11 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **Symptom:** No stats collection.
 
-**Impact:** `tc -s` on any offloaded flow reports zeros for silicon-forwarded packets, because the software counter does not increment on the HIT path (which never touches `dpaa_eth_napi_poll`), and no reader reads the FMan CC per-key counters silicon is already computing. Also blocks M4 acceptance measurement.
+**Impact:** `tc -s` on any offloaded flow reports zeros for silicon-forwarded packets, because the software counter does not increment on the CC-tree HIT path (which never touches `dpaa_eth_napi_poll`), and no reader reads the FMan CC per-key counters silicon is already computing. Also blocks M4 acceptance measurement.
 
-**Fix:** Wire a 1 Hz workqueue that reads per-CC-key counters via F-17 and per-flow-context counters via `fman_pcd_fe_flow_stats_get` (F-23, when it lands), applies them via `ask_flow_update_stats`.
+**[NOTE]** The original text referenced the FE-VM ehash HIT path, which is retired (§1). The CC-tree HIT path has the same observability gap: CC per-key counters are computed by silicon but never read back to the software flowtable.
+
+**Fix:** Wire a 1 Hz workqueue that reads per-CC-key counters via F-17, applies them via `ask_flow_update_stats`.
 
 ---
 
@@ -196,11 +201,11 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 ---
 
-### F-08 (HIGH — [ ] OPEN, impl reset out): `fman_pcd_fe_verify` implemented then orphaned
+### F-08 (RETIRED — [ ] OPEN, impl reset out): `fman_pcd_fe_verify` — FE-VM diagnostic infra, not production re-land
 
 **[SPEC]** Status on `dpaa1` HEAD `9f67b56`: **OPEN.** The implementation described below landed in commit `4493ce8` but was reset off the branch (§1.2); `grep fman_pcd_fe_verify bin/ci-setup-kernel.sh` returns zero hits in the current tree. The account below documents the orphaned implementation for re-land.
 
-**[SPEC]**
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. The shipping dataplane is CC-tree + kernel SW flowtable + manip-chain forwarding. This function (`fman_pcd_fe_verify`) is experimental diagnostic infrastructure only — it validates FE descriptor layouts for a path that will never ship. It is NOT a production re-land target. The severity is downgraded from HIGH to RETIRED.
 
 **[SPEC]**
 
@@ -212,23 +217,25 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **Fix:** Land as a self-contained function that walks group AD, miss-AD, EXT_HASH words, each ENQ FE, EXIT singleton, FE_ENTER, and params page `+0x54`/`+0x58` against `§17.1` through `§17.6` tables. Refuse `fman_pcd_fe_engage` with `-EPROTO` on any mismatch. Expose as debugfs `fe_verify` for board sessions.
 
-**[NOTE]** Highest return on investment in this document. One board session saved pays for it in engineer-hours.
+**[NOTE]** Highest return on investment in this document for FE-VM diagnostic sessions. One board session saved pays for it in engineer-hours. However, with the FE-VM path retired, this function's value is limited to historical validation of descriptor layouts that may inform future CC-tree descriptor work.
 
 ---
 
-### F-09 (HIGH): `dpaa_get_rx_default_fqid` absent from tree
+### F-09 (MEDIUM): `dpaa_get_rx_default_fqid` absent from tree
 
 **[SPEC]**
 
 **Location:** Specified in `arch/fman-pcd-api-reference.md` v3.0.0 §14.2. Zero hits across `kernel/common/patches/board/*.patch`.
 
-**Impact:** Rule T8 (FQID direction validated at API boundary) is spec text only. Currently the RX default FQID is scraped by shell from `/sys/class/net/*/fqids` at engage time, or, in `0158`, read from params page `+0x0C` via an inline helper local to `fman_pcd.c`. Both are workarounds; neither is available to other builders (F-15).
+**Impact:** Rule T8 (FQID direction validated at API boundary) is spec text only. Currently the RX default FQID is scraped by shell from `/sys/class/net/*/fqids` at engage time, or, in `0158`, read from params page `+0x0C` via an inline helper local to `fman_pcd.c`. Both are workarounds; neither is available to other builders.
+
+**[NOTE]** The FE-VM compose path that consumed this (F-15) is retired (§1). The function remains useful for CC-tree dispatch and general PCD FQID resolution.
 
 **Fix:** Promote `fman_pcd_resolve_miss_fqid` (already in `0158:19-47`) to a `dpaa_get_rx_default_fqid(net_dev)` export, retype return to `fman_fqid_t` with direction tag `FMAN_FQ_DIR_RX_KERNEL`.
 
 ---
 
-### F-10 (HIGH): `dpaa_get_rx_pcd_fqid_range` absent from tree
+### F-10 (MEDIUM): `dpaa_get_rx_pcd_fqid_range` absent from tree
 
 **[SPEC]**
 
@@ -240,7 +247,9 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 ---
 
-### F-11 (MEDIUM): `fman_pcd_fe_flow_add` uses `unsigned long enq_off`
+### F-11 (RETIRED): `fman_pcd_fe_flow_add` uses `unsigned long enq_off` — FE-VM path, retired
+
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This function is the FE-VM flow-add API and is NOT a production re-land target. The severity is downgraded from MEDIUM to RETIRED. The CC-tree flow-add path (`fman_cc_key_insert`) is the shipping equivalent.
 
 **[SPEC]**
 
@@ -257,9 +266,13 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 
 **Fix:** Retype to `const struct fman_pcd_fe_flow_action *action`. Materialize the action as the flow's result/context pair per §17.5. Two callers to update.
 
+**[NOTE]** This fix is retained for historical completeness but is NOT prioritized for re-land. The FE-VM path is retired; the CC-tree path (`fman_cc_key_insert`) is the production flow-add API.
+
 ---
 
-### F-12 (MEDIUM): `fman_pcd_fe_context_build` writes DDR through `void __iomem *`
+### F-12 (RETIRED): `fman_pcd_fe_context_build` writes DDR through `void __iomem *` — FE-VM path, retired
+
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This function builds FE-VM flow contexts and is NOT a production re-land target. The severity is downgraded from MEDIUM to RETIRED.
 
 **[SPEC]**
 
@@ -274,6 +287,8 @@ int fman_pcd_fe_context_build(void __iomem *ctx, u16 offset, ...)
 **Impact:** Rule T10 violation. The FE workspace context lives in DDR (hardware DMA-loads it into the frame workspace), not iomem. Writing DDR through `void __iomem *` with `iowrite32be` is the root of the descriptor-as-context defect family (F-058 in the defect register). Sparse cannot catch the type mismatch because `void __iomem *` accepts anything.
 
 **Fix:** Retype to `struct fman_ddr_region *ctx`. Body uses `cpu_to_be32` CPU stores at `ctx->cpu + offset`, not iowrite. One caller path (`0146-fman-pcd-fe-context-build-integration.patch`) to update in the same series.
+
+**[NOTE]** This fix is retained for historical completeness but is NOT prioritized for re-land. The FE-VM path is retired.
 
 ---
 
@@ -308,7 +323,9 @@ int fman_pcd_kg_unbind_port(struct fman_pcd_kg_scheme *scheme)
 
 ---
 
-### F-15 (MEDIUM): Hardcoded `tx_fqid = 0x200` in FE-VM compose path
+### F-15 (RETIRED): Hardcoded `tx_fqid = 0x200` in FE-VM compose path — FE-VM path, retired
+
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This hardcoded TX FQID is in the FE-VM compose path. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. This finding is NOT a production re-land target. The severity is downgraded from MEDIUM to RETIRED.
 
 **[SPEC]**
 
@@ -323,6 +340,8 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 **Impact:** Rule T8 violation. The value `0x200` is eth3-era and does not resolve to a valid TX-side FQ on eth4. Any FE-VM flow that reaches this compose path egresses to a stale FQ, silently blackholes.
 
 **Fix:** Consume `dpaa_get_tx_fqid` (present per spec §14.2) or a dedicated offload TX FQ once F-09 lands. Same TODO comment references the fix.
+
+**[NOTE]** This fix is retained for historical completeness but is NOT prioritized for re-land. The FE-VM path is retired; the CC-tree path uses `fman_cc_key_insert` with its own TX FQ resolution.
 
 ---
 
@@ -344,7 +363,7 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 **Location:** Specified in `arch/fman-pcd-api-reference.md` v3.0.0 §7. Zero hits.
 
-**Impact:** Consumes audit row 5a. Without it, conntrack byte/packet accounting re-counts what silicon has already counted, wasting CPU on the hot path.
+**Impact:** Consumes audit row 5a. Without it, conntrack byte/packet accounting re-counts what silicon has already counted, wasting CPU on the hot path. This is the CC-tree per-key counter reader — the production equivalent of the retired FE-VM flow stats path (F-23).
 
 **Fix:** Statistics-AD encoding must be transcribed from the DPAA RM into spec §17 in the same series. Includes a C2 readback verify.
 
@@ -412,7 +431,9 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 ---
 
-### F-23 (LOW): `fman_pcd_fe_flow_stats_get` reserved, not declared
+### F-23 (RETIRED): `fman_pcd_fe_flow_stats_get` — FE-VM path, retired
+
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This function is the FE-VM per-flow stats reader and is NOT a production re-land target. The severity is downgraded from LOW to RETIRED. The CC-tree equivalent is F-17 (`fman_cc_key_stats_get`).
 
 **[NOTE]**
 
@@ -421,6 +442,8 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 **Impact:** Reserved for M4 monitoring milestone. Signature is fixed in spec so the conntrack-sync consumer can be written against it. No blocker today because M4 has not started.
 
 **Fix:** Land the header declaration returning `-ENOSYS` in the M4 base patch so callers can compile against it. Real body ships with the monitor-buffer DDR allocation extension to flow-add/del.
+
+**[NOTE]** This fix is retained for historical completeness but is NOT prioritized for re-land. The FE-VM path is retired; use F-17 (`fman_cc_key_stats_get`) for CC-tree per-key stats.
 
 ---
 
@@ -439,52 +462,60 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 ## 5. Prioritized Remediation Plan
 
-**[SPEC]** Ranked by cost-to-value ratio and dependency ordering.
+**[SPEC]** Ranked by cost-to-value ratio and dependency ordering. FE-VM ehash HIT path items (F-08, F-11, F-12, F-15, F-23) are RETIRED and excluded from the production re-land plan. The shipping dataplane is CC-tree + kernel SW flowtable + manip-chain forwarding (§1).
 
 ### Priority 1 — Before next board session
 
 | Step | Finding | What | LOC ~ |
 |---|---|---|---|
-| 1 | F-08 | `fman_pcd_fe_verify` — highest ROI, one board session saved pays for it | ~150 |
-| 2 | F-09+F-10+F-15 | `dpaa_get_rx_default_fqid` + `_pcd_fqid_range` + remove `tx_fqid=0x200` | ~120 |
-| 3 | F-11 | `fman_pcd_fe_flow_add` retype to `const struct fman_pcd_fe_flow_action *` | ~60 |
-| 4 | F-12 | `fman_pcd_fe_context_build` retype to `struct fman_ddr_region *` | ~40 |
+| 1 | F-09+F-10 | `dpaa_get_rx_default_fqid` + `_pcd_fqid_range` — general PCD FQID resolution | ~120 |
+| 2 | F-13 | `fman_pcd_kg_unbind_port` add `port_id` | ~20 |
+| 3 | F-14 | `fman_port_lookup_rx` retype | ~5 |
 
 ### Priority 2 — Before M2 GA
 
 | Step | Finding | What | LOC ~ |
 |---|---|---|---|
-| 5 | F-05 | `ask_stats.c` real body. Prerequisite for M4 acceptance measurement | ~80 |
-| 6 | F-19 | `ASK_CMD_GET_MURAM`. Cheap observability win | ~30 |
-| 7 | F-16, F-17, F-18 | Counter readers. Consume free silicon-side counters | ~90 |
-| 8 | F-13 | `fman_pcd_kg_unbind_port` add `port_id` | ~20 |
-| 9 | F-14 | `fman_port_lookup_rx` retype | ~5 |
+| 4 | F-05 | `ask_stats.c` real body — CC-tree per-key counter reader via F-17. Prerequisite for M4 acceptance measurement | ~80 |
+| 5 | F-19 | `ASK_CMD_GET_MURAM`. Cheap observability win | ~30 |
+| 6 | F-16, F-17, F-18 | Counter readers. Consume free silicon-side counters (KG scheme, CC key, policer) | ~90 |
 
 ### Priority 3 — M4 IPsec landing series (must ship together)
 
 | Step | Finding | What |
 |---|---|---|
-| 10 | F-01 | `ask_xfrm_state_add` real body |
-| 11 | F-07 | `ask_xfrm_state_delete` new callback |
-| 12 | F-02 | `ask_caam.c` real body wiring to `caam_qi_ext_consumer_register` |
-| 13 | F-23 | `fman_pcd_fe_flow_stats_get` declaration with `-ENOSYS` |
-| 14 | F-21 | `ASK_CMD_DUMP_SAS` real body |
-| 15 | F-22 | `ASK_CMD_FLUSH_SAS` real body |
-| 16 | F-20 | `ASK_CMD_SET_POLICER` real body |
-| 17 | — | `NETIF_F_HW_ESP` advertise (last, gated on all of the above) |
+| 7 | F-01 | `ask_xfrm_state_add` real body |
+| 8 | F-07 | `ask_xfrm_state_delete` new callback |
+| 9 | F-02 | `ask_caam.c` real body wiring to `caam_qi_ext_consumer_register` |
+| 10 | F-21 | `ASK_CMD_DUMP_SAS` real body |
+| 11 | F-22 | `ASK_CMD_FLUSH_SAS` real body |
+| 12 | F-20 | `ASK_CMD_SET_POLICER` real body |
+| 13 | — | `NETIF_F_HW_ESP` advertise (last, gated on all of the above) |
 
 ### Priority 4 — M3 milestone
 
 | Step | Finding | What |
 |---|---|---|
-| 18 | F-03 | `ask_neigh.c` real body |
-| 19 | F-04 | `ask_op.c` real body |
-| 20 | F-06 | `ask_bridge.c` real body |
+| 14 | F-03 | `ask_neigh.c` real body |
+| 15 | F-04 | `ask_op.c` real body |
+| 16 | F-06 | `ask_bridge.c` real body |
+
+### Retired — FE-VM ehash HIT path (NOT production re-land targets)
+
+| Step | Finding | What | Rationale |
+|---|---|---|---|
+| R1 | F-08 | `fman_pcd_fe_verify` | Experimental diagnostic infra; FE-VM path retired |
+| R2 | F-11 | `fman_pcd_fe_flow_add` retype | FE-VM flow-add API; CC-tree uses `fman_cc_key_insert` |
+| R3 | F-12 | `fman_pcd_fe_context_build` retype | FE-VM context builder; CC-tree uses CC key entries |
+| R4 | F-15 | Hardcoded `tx_fqid = 0x200` | FE-VM compose path; CC-tree has own TX FQ resolution |
+| R5 | F-23 | `fman_pcd_fe_flow_stats_get` | FE-VM per-flow stats; CC-tree uses F-17 |
 
 ---
 
 ## 6. Sign-Off
 
-**[NOTE]** Findings F-08, F-09, F-10, F-15, F-11, and F-12 close three of the last five silicon incidents at compile or arm time and cost fewer than 400 lines total. Recommend landing as a single series before further FE-VM board testing.
+**[NOTE]** Findings F-09, F-10, F-13, and F-14 close general PCD infrastructure gaps and cost fewer than 150 lines total. Recommend landing as a single series before further CC-tree board testing.
+
+**[NOTE]** The FE-VM ehash HIT path items (F-08, F-11, F-12, F-15, F-23) are retired per the canonical silicon reality of 2026-08-01. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. The shipping dataplane is CC-tree + kernel SW flowtable + manip-chain forwarding, scaling to ~2000+ flows (32 software caps × 255 HW keys per node).
 
 **[SPEC]** The `arch/fman-pcd-api-reference.md` v3.0.0, `plans/ASK2-MASTER-PLAN.md`, and the `plans/DUAL-DATAPLANE.md` v1.2 milestone tracker should be cross-referenced against this inventory to ensure no finding contradicts a released gate claim.

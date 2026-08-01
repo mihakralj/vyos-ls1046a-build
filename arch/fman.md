@@ -1,5 +1,25 @@
 # Frame Manager (FMan v3) — Internals, Ports, mEMAC
 
+**Version 2.1 · HADS 1.0.0**
+
+## AI READING INSTRUCTION
+
+This is the FMan v3 PLUMBING doc (BMI, QMI, FPM, DMA, ports, mEMAC). For the *classification*
+pipeline (Parser, KeyGen, Coarse Classifier, Policer, Manip) see [`fman-pcd.md`](fman-pcd.md).
+
+**Architecture-status banner (2026-08-01):** The SHIPPING HW-offload forward path is **CC-tree
+classification + kernel SW flowtable + manip-chain forwarding** (M2 7.37 Gbps pass-through, M5
+10.259 Gbps CC-tree+nf_flowtable, NXP cdx.ko 8.58 Gbps). The **FE-VM ehash HIT path (Fork-B, the
+FE/EXT_HASH family)** is RETIRED/EXPERIMENTAL — it never worked at production throughput (~1.5 Gbps
+DDR ceiling) and is NOT the production forward path. CC-tree scales: 32 software caps vs 255 HW
+keys/node, ~8 nodes in 64 KiB MURAM → ~2000+ flows. Any reference in this doc to the FE-VM ehash
+as the forward path is experimental/retired; the shipping path is CC-tree + SW flowtable + manip
+chain.
+
+**[SPEC]** facts are binding. **[NOTE]** is rationale/history. **[BUG]** has symptom+cause+fix.
+
+---
+
 **Source:** LS1046A DPAA RM Ch.5 (§5.1–5.8, pp.467–802). FMan variant on LS1046A = **FMan_v3**,
 **1 instance @ ~700 MHz**, aggregate **32 Mpps / 22 Gbps**, **MURAM 384 KB**, **128 TNUMs**.
 
@@ -7,10 +27,6 @@ The FMan is an autonomous packet-processing engine: it integrates the Ethernet M
 buffer/queue interfaces, an internal SRAM (MURAM), and a configurable parse→classify→police
 pipeline. Frames flow as Frame Descriptors; per-frame **tasks (TNUMs)** are dispatched stage to stage
 by the FPM, routed by a 24-bit **NIA** (Next Invoked Action) field in each module register.
-
-> For the *classification* stages (Parser, KeyGen, Coarse Classifier, Policer, Manip, Replicator)
-> see the flagship [`fman-pcd.md`](fman-pcd.md). This doc covers the **plumbing**: BMI, QMI, FPM,
-> DMA, ports, FIFO/MURAM partition, mEMAC.
 
 ---
 
@@ -229,6 +245,9 @@ XFI/10GBASE-KR, see [`serdes-ethernet.md`](serdes-ethernet.md).
 ---
 
 ## 9. ASK2 relevance
+
+**[SPEC]** The shipping ASK2 forward path is **CC-tree + kernel SW flowtable + manip chain**.
+The FE-VM ehash HIT path (Fork-B) is retired/experimental — see banner above.
 
 | FMan facility | Why ASK2 cares |
 |---|---|

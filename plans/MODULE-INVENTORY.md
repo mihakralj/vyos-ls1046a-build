@@ -1,55 +1,60 @@
 # ASK2 Module Inventory — Delivered & Planned
 
-**Date:** 2026-07-05
+**Date:** 2026-08-01
+**Version:** 2.0
 **Branch:** `dpaa1`
 **CI build:** #28733398715
 **ISO:** `vyos-2026.07.05-0730-rolling-LS1046A-arm64.iso`
+
+**[SPEC] Shipping HW-offload architecture (2026-08-01): CC-tree classification (top-N hot flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding.** The FE-VM ehash HIT path (Fork-B) is RETIRED — it never dispatched a single HIT across the project's history (F-156/F-157/F-158 proved the scaffold byte-perfect and the CC engine still not dispatching to it), and even if fixed is architecturally capped at ~1.5 Gbps by per-frame DDR latency. The FE-VM ehash infrastructure (F-156/F-157/F-158 fixups, fe_scaffold oracle, dedicated TX FQ 0x2b9) is retained as diagnostic/experimental tooling that proved the CC-match stage is not a production path. CC-tree scales: 32 software caps vs 255 HW keys/node, ~8 nodes in 64 KiB → ~2,000+ flows. M3/M5 "HIT PASSED" were false positives; M2 7.37 Gbps real pass-through; only real HIT RCCB→FE_ENTER direct 2026-07-04.
 
 ---
 
 ## Delivered — In-Tree Kernel (91 board patches, ~12K LOC)
 
-### FMan PCD Subsystem (classification engine)
+### FMan PCD Subsystem (classification engine) — SHIPPING PATH
 | Patch | Component | Purpose | Silicon Status |
 |-------|-----------|---------|----------------|
 | 0092 | `fman_pcd.c` | PCD core, MURAM genpool, debugfs | ON SILICON |
 | 0097 | `fman_pcd_kg.c`, `fman_keygen.c` | KeyGen: scheme create/bind, port attach | ON SILICON |
-| 0098 | `fman_pcd_cc.c` | CC tree: static install, per-key AD | ON SILICON |
-| 0099 | `fman_pcd_manip.c` | HM: node install/destroy, L3 forward ops | ON SILICON |
+| 0098 | `fman_pcd_cc.c` | CC tree: static install, per-key AD | **ON SILICON — SHIPPING** |
+| 0099 | `fman_pcd_manip.c` | HM: node install/destroy, L3 forward ops | **ON SILICON — SHIPPING** |
 | 0100 | `fman_pcd_plcr.c` | Policer: srTCM/trTCM profile install | ON SILICON |
 | 0106 | `fman_keygen.c` | CC→KG graft wiring (KGSE_CCBS) | ON SILICON |
-| 0108 | `fman_pcd_cc.c` | CC per-key FQ enqueue AD (NADEN) | ON SILICON |
+| 0108 | `fman_pcd_cc.c` | CC per-key FQ enqueue AD (NADEN) | **ON SILICON — SHIPPING** |
 | 0113 | `fman_pcd_dcsr.c` | DCSR error taps | COMPILED |
 | 0117 | `fman.c` | FMan load ctrl microcode | ON SILICON |
 | 0118 | `fman_keygen.c` | Revert CCBS dispatch, real AC_CC prep | ON SILICON |
-| 0119 | `fman_pcd_manip.c` | HM L3 forward ops (TTL dec, cksum) | COMPILED |
-| 0120 | `fman_pcd_manip.c` | HM nexthop dedup | COMPILED |
+| 0119 | `fman_pcd_manip.c` | HM L3 forward ops (TTL dec, cksum) | **COMPILED — SHIPPING** |
+| 0120 | `fman_pcd_manip.c` | HM nexthop dedup | **COMPILED — SHIPPING** |
 
-### FE-VM Subsystem (Fork B ehash path)
+### FE-VM Subsystem (Fork B ehash path) — RETIRED / DIAGNOSTIC ONLY
+**[NOTE] The FE-VM ehash HIT path (Fork-B) is RETIRED as of 2026-08-01. It never dispatched a single HIT across the project's history (F-156/F-157/F-158 proved the scaffold byte-perfect and the CC engine still not dispatching to it), and even if fixed is architecturally capped at ~1.5 Gbps by per-frame DDR latency. The infrastructure below is retained as diagnostic/experimental tooling that proved the CC-match stage is not a production path. The shipping datapath is CC-tree + SW flowtable + manip chain (see above).**
+
 | Patch | Component | Purpose | Silicon Status |
 |-------|-----------|---------|----------------|
-| 0122 | `fman_pcd.c` | FE pool alloc/free (100×28B, refcounted) | ON SILICON (Phase 1) |
-| 0123 | `fman_pcd.c` | FE port support, registration | ON SILICON |
-| 0124 | `fman_pcd.c` | FE singletons (MUX/Transition/Exit) | ON SILICON (Phase 1) |
-| 0125 | `fman_pcd.c` | Ehash table create/destroy + DDR bucket array | ON SILICON (Phase 1) |
+| 0122 | `fman_pcd.c` | FE pool alloc/free (100×28B, refcounted) | ON SILICON (Phase 1) — diagnostic |
+| 0123 | `fman_pcd.c` | FE port support, registration | ON SILICON — diagnostic |
+| 0124 | `fman_pcd.c` | FE singletons (MUX/Transition/Exit) | ON SILICON (Phase 1) — diagnostic |
+| 0125 | `fman_pcd.c` | Ehash table create/destroy + DDR bucket array | ON SILICON (Phase 1) — diagnostic |
 | 0126 | `fman_pcd.c` | MURAM genpool (64 KiB reserve) | ON SILICON |
-| 0127 | `fman_pcd.c` | ENQ FE root (per-flow FQID) + FE_ENTER root AD | ON SILICON (Phase 1) |
-| 0128 | `fman_pcd.c` | Flow insert (CRC64 hash + DDR record + next-FE ptr) | COMPILED |
-| 0130 | `fman_pcd.c` | FE ehash DMA coherent (DDR bucket array) | COMPILED |
-| 0131 | `fman_pcd.c` | FE hash object (t_ExtHashFe 7-word encoder) | ON SILICON (Phase 1) |
-| 0132 | `fman_pcd.c` | FE arm debugfs (engage/disengage) | ON SILICON (Phase 1) |
-| **0133** | `fman_keygen.c` | **Real AC_CC arm** (KGSE_MODE 0x80000006, corrects CCBS placebo) | **ON SILICON (Phase 1)** |
-| **0135** | `fman_pcd.c` | **FE context builder** (FmPcdCcBuildContextByFE port from lf-5.4 L8954) | **COMPILED** |
+| 0127 | `fman_pcd.c` | ENQ FE root (per-flow FQID) + FE_ENTER root AD | ON SILICON (Phase 1) — diagnostic |
+| 0128 | `fman_pcd.c` | Flow insert (CRC64 hash + DDR record + next-FE ptr) | COMPILED — diagnostic |
+| 0130 | `fman_pcd.c` | FE ehash DMA coherent (DDR bucket array) | COMPILED — diagnostic |
+| 0131 | `fman_pcd.c` | FE hash object (t_ExtHashFe 7-word encoder) | ON SILICON (Phase 1) — diagnostic |
+| 0132 | `fman_pcd.c` | FE arm debugfs (engage/disengage) | ON SILICON (Phase 1) — diagnostic |
+| **0133** | `fman_keygen.c` | **Real AC_CC arm** (KGSE_MODE 0x80000006, corrects CCBS placebo) | **ON SILICON (Phase 1) — diagnostic** |
+| **0135** | `fman_pcd.c` | **FE context builder** (FmPcdCcBuildContextByFE port from lf-5.4 L8954) | **COMPILED — diagnostic** |
 
 ### TX Confirm Bypass
 | Patch | Component | Purpose | Status |
 |-------|-----------|---------|--------|
 | **0136** | `fman_port.c` | `fman_port_set_silicon_hit_release_mode()` + `_all()` | **COMPILED, ask.ko wired** |
 
-### MANIP Chain API (L3 forwarding)
+### MANIP Chain API (L3 forwarding) — SHIPPING PATH
 | Patch | Component | Purpose | Status |
 |-------|-----------|---------|--------|
-| **0137 v2** | `fman_pcd_manip.c` | MANIP create/chain API, `HMAN_OC_IP_MANIP=0x34` fix, HMCD_LAST clearing | **COMPILED, SDK-verified** |
+| **0137 v2** | `fman_pcd_manip.c` | MANIP create/chain API, `HMAN_OC_IP_MANIP=0x34` fix, HMCD_LAST clearing | **COMPILED, SDK-verified — SHIPPING** |
 
 ### CAAM (Hardware Crypto)
 | Patch | Component | Purpose | Status |
@@ -89,6 +94,15 @@
 | 0121 | `dpaa_eth.c` | Export CC target resolvers | COMPILED |
 | **0145** | `dpaa_eth.c` | **Flow-offload backend slot** (RCU-protected for ask.ko) | **COMPILED** |
 
+### Diagnostic / Experimental Fixups (Layer 2) — RETIRED FOR SHIPPING
+**[NOTE] F-156/F-157/F-158 fixups + fe_scaffold oracle + dedicated TX FQ 0x2b9 are diagnostic tooling that proved the CC-match stage is not a production path. Retained for provenance; do not re-enable for shipping.**
+
+| Fixup | Purpose | Status |
+|-------|---------|--------|
+| F-156 | CC match-key row format fix (key+mask 32B stride) | DEPLOYED 2026-07-31 — diagnostic |
+| F-157 | Dedicated TX FQ 0x2b9 HIT/MISS discriminator | DEPLOYED 2026-08-01 — diagnostic |
+| F-158 | fe_scaffold debugfs ground-truth oracle | DEPLOYED 2026-08-01 — diagnostic |
+
 ### Board Scripts (userspace)
 | Script | Purpose | Status |
 |--------|---------|--------|
@@ -113,7 +127,7 @@
 | Module core | `ask_main.c` | ~200 | Module init, `dpaa_flavor_ops` registration | COMPILED |
 | HW engage | `ask_hw.c` | ~500 | Engage/disengage: FE pool → chain → `fe_arm` → **TX bypass** | COMPILED |
 | Flow table | `ask_flow.c` | ~300 | Hash table, per-flow insert/lookup/delete | COMPILED |
-| Flow offload | `ask_flow_offload.c` | ~1025 | nf_flow_table BIND/REPLACE/DESTROY handler | COMPILED (REPLACE untested) |
+| Flow offload | `ask_flow_offload.c` | ~1025 | nf_flow_table BIND/REPLACE/DESTROY handler | **COMPILED — SHIPPING (CC-tree + SW flowtable)** |
 | Control plane | `ask_genl.c` (+attr) | ~400 | Generic netlink (`ask` family) | COMPILED |
 | DebugFS | `ask_debugfs.c` | ~200 | Diagnostic debugfs nodes | COMPILED |
 | Neighbor | `ask_neigh.c` | ~150 | Next-hop neighbor resolution | COMPILED |
@@ -180,3 +194,5 @@
 | **M2 gate condition (1)** | **SATISFIED on silicon** | — |
 | **M2 gate condition (2)** | — | **fe_flow add HIT test** |
 | Phase 3-6 | — | 4 phases, ~12 components |
+
+**[SPEC] Architecture status (2026-08-01):** Shipping HW-offload = CC-tree classification (top-N) + kernel SW flowtable (tail) + manip-chain forwarding. FE-VM ehash HIT path (Fork-B) is RETIRED — never dispatched a HIT, ~1.5 Gbps DDR ceiling. F-156/F-157/F-158 + fe_scaffold oracle + dedicated TX FQ 0x2b9 are diagnostic tooling that proved the CC-match stage is not a production path. CC-tree scales: 32 software caps vs 255 HW keys/node, ~8 nodes in 64 KiB → ~2,000+ flows. M3/M5 "HIT PASSED" were false positives; M2 7.37 Gbps real pass-through; only real HIT RCCB→FE_ENTER direct 2026-07-04.

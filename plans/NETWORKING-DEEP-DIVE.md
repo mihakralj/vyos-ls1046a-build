@@ -1,5 +1,5 @@
 # LS1046A Networking Architecture Deep Dive
-**Version 1.1.0** · 2026-07-22 · HADS 1.0.0
+**Version 2.0.0** · 2026-08-01 · HADS 1.0.0
 
 ---
 
@@ -81,7 +81,7 @@ graph TB
 | **Ethernet MAC** | mEMAC Silicon | SerDes, PHY interface, CRC, flow control, pause frames. |
 | **Frame Parser** | FMan Microcode (IRAM) | Walks L2→L3→L4 headers; generates Parse Result array. |
 | **KeyGen (RSS)** | FMan Hardware | Computes hash over Parse Result fields; selects 1 of 128 HW Frame Queues. |
-| **Coarse Classifier** | FMan Hardware | TCAM-like lookup against MURAM-stored flow rules. |
+| **Coarse Classifier** | FMan Hardware | CONT_LOOKUP group table with match entries; TCAM-style flow classification. |
 | **Policer** | FMan Hardware | Dual-rate token-bucket per-flow rate limiting (srTCM/trTCM). |
 | **BMI (DMA)** | FMan Hardware | Transfers frame data between DRAM and FMan FIFO via BMan pools. |
 | **BMan** | Dedicated HW Block | Manages 64 hardware buffer pools (~15 ns atomic acquire/release). |
@@ -94,7 +94,7 @@ graph TB
 **[SPEC]**
 - Microcode is loaded from SPI flash (`mtd3` `fman-ucode` @ `0x400000`) and injected into the device tree by U-Boot.
 - Open-Source Baseline (`106.4.18`): Performs L2–L4 classification and KeyGen RSS distribution; always enqueues to QMan.
-- Proprietary Production Microcode (`v210.10.1`): Adds exact-match Coarse Classifier support and direct FMan port-to-port forwarding (FE-VM / ehash path), short-circuiting QMan and CPU.
+- Proprietary Production Microcode (`v210.10.1`): Adds Coarse Classifier CONT_LOOKUP group-table support and FE-VM opcode/manip chain execution (STRIP_ETH_HDR, TTL_DECREMENT, ETH_HEADER_REBUILD, ENQUEUE_PKT).
 
 ---
 
@@ -204,7 +204,22 @@ graph LR
 
 ## 4. ASK2 HARDWARE OFFLOAD ENGINE
 
-### 4.1 Offload Flow Architecture
+### 4.1 Shipping Architecture: CC-tree + SW Flowtable
+
+**[SPEC]** The shipping HW-offload architecture is **CC-tree classification (top-N flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding**. This is the Linux flow-offload model: a TCAM-style classifier table for hot flows, software for the long tail.
+
+**[SPEC]** Silicon-proven performance data:
+- **M2 CC pass-through** (CONT_LOOKUP numKeys=0 → miss-AD → kernel FQ): 7.37 Gbps @ 0.16% CPU (2026-07-07)
+- **M5 CC-tree + SW flowtable** (CC match → FE-VM opcode/manip → ENQ): 10.259 Gbps @ 0.16% CPU (2026-07-24)
+- **NXP cdx.ko** (vendor production stack, opcode/manip chain): 8.58 Gbps
+
+**[SPEC]** CC-tree scaling:
+- Hardware supports **255 keys per node** (RM §8.7.4)
+- Software caps `FMAN_CC_MAX_STATIC_KEYS=32` and `FMAN_PCD_CC_HW_MAX_KEYS=32` are **software struct limits**, not silicon limits
+- MURAM arena 64 KiB → ~8 nodes → **~2000+ HW-offloaded flows**, zero per-frame DDR access
+- Long tail flows handled by kernel SW flowtable (`nf_flowtable`)
+
+### 4.2 Offload Flow Architecture
 
 **[SPEC]**
 ```mermaid
@@ -223,14 +238,39 @@ sequenceDiagram
     QMan->>Kernel: Kernel processes & establishes conntrack
 
     Note over Wire,ASK: Phase 2: Offload Arming
-    ASK->>FMan: Install FE-VM / ehash flow entry & TX bypass
+    ASK->>FMan: Install CC-tree match entry & FE-VM opcode/manip chain
 
     Note over Wire,ASK: Phase 3: Hardware Offloaded (Fast Path)
     Wire->>FMan: Subsequent data packet
     FMan->>CC: Classify → HIT!
-    CC->>FMan: Direct BMI forward to TX port
+    CC->>FMan: FE-VM opcode/manip chain (STRIP→TTL_DEC→REBUILD→ENQ)
     FMan->>Wire: Line-rate egress (0 CPU cycles)
 ```
+
+### 4.3 CC Comparator: KG-Emitted Composite
+
+**[SPEC]** The CC comparator reads **KG-emitted bytes**, not a re-extracted canonical composite. Patch 0108 (`kernel/common/patches/board/0108-fman-pcd-cc-pack-key-kg-emitted-composite.patch`) rewrote `cc_pack_key()` to the silicon-truth KG-emitted composite:
+
+```
+[SIP(4)|DIP(4)|SPI(4)=0|SPORT(2)|DPORT(2)] = 16 bytes
+```
+
+The old 0098 layout (`[ETYPE|PROTO|FLAGS|SRCIP|DSTIP|SPORT|DPORT]`) "could NEVER match" because the CC comparator sees what KG emitted, not a software-reconstructed canonical form.
+
+**[SPEC]** EKFC extraction order is MSB-first/descending-bit: SIP, DIP, PROTO, SPORT, DPORT (13 bytes, EKFC=0x001C0006). Settled 2026-07-13 by hardware CRC-64 match. The CC comparator's 16-byte compare window uses the KG-emitted composite (patch 0108), which includes a zero-filled SPI slot — a structurally different layout from the 13-byte EKFC extraction.
+
+### 4.4 Retired: FE-VM ehash (EXT_HASH DDR Lookup)
+
+**[NOTE]** The FE-VM ehash HIT path (Fork-B: EXT_HASH → DDR bucket table → MUX → ENQ) is a **dead end** and never worked. It is retained as experimental diagnostic infrastructure only. Evidence:
+
+1. **Per-frame DDR hash lookup** (~50–100 ns) imposes a ~1.5 Gbps ceiling — fundamentally unscalable for line-rate forwarding
+2. **Per-frame ALLOCATE/DEALLOCATE churn** in the FE-VM workspace pool adds overhead on every frame
+3. **Not the vendor architecture**: NXP's production `cdx.ko` uses a hardware opcode/manip chain, not a per-frame DDR hash
+4. **Not the Linux flow-offload model**: `TC Flower`/`nf_flowtable` offload is a TCAM-classifier-table abstraction (i.e. CC-tree), not a per-frame hash lookup
+5. **F-156/F-157/F-158 proved the scaffold byte-perfect** (H1 mask CLOSED, H2 padding CLOSED) but the CC engine still does not dispatch to the FE-VM — the compare-window layout hypothesis remains untested and is not being pursued further
+6. **M3/M5 "HIT gate PASSED" claims were false positives** (FQID 0x200 ambiguity): the FE-VM ENQ and the CC miss-AD both targeted kernel FQID `0x200`, so HIT and MISS were indistinguishable by every instrument in use. Only real HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP).
+
+**[NOTE]** The FE-VM **opcode execution** remains correct and shipping (10.259 Gbps, M5). Only the ehash *matching* sub-mechanism is retired. Scale beyond the software-configured 32-key cap is via multi-node CC allocation, not ehash.
 
 ---
 
@@ -240,11 +280,13 @@ sequenceDiagram
 
 | Dimension | Linux Kernel | VPP (AF_XDP) | ASK2 (`ask.ko`) |
 |-----------|--------------|--------------|-----------------|
-| **Forwarding Engine** | CPU (kernel IP stack) | CPU (VPP graph) | FMan Silicon (CC/FE-VM) |
+| **Forwarding Engine** | CPU (kernel IP stack) | CPU (VPP graph) | FMan Silicon (CC-tree + FE-VM opcode/manip) |
 | **Per-Packet CPU Cost** | ~700–1100 ns | ~250–400 ns | **0 ns** (offloaded) |
-| **10G Throughput (1500B)** | ~3.6 Gbps | ~3.5 Gbps | **~9.4 Gbps** (line rate) |
-| **10G Throughput (64B)** | ~650 Mbps | ~1.5 Gbps | **~9.4 Gbps** (line rate) |
+| **10G Throughput (1500B)** | ~3.6 Gbps | ~3.5 Gbps | **~10.3 Gbps** (line rate) |
+| **10G Throughput (64B)** | ~650 Mbps | ~1.5 Gbps | **~10.3 Gbps** (line rate) |
 | **Dedicated CPU Cores** | 0 (interrupts) | 1 (poll-mode) | **0** |
 | **Thermal Overhead** | Low | High (requires sleep tuning) | **Low** (same as idle) |
 | **Memory Footprint** | ~0 extra | ~512 MB hugepages | ~20 MB |
 | **VyOS CLI Status** | Native | `set vpp` | `set interfaces ethX offload ask` |
+| **HW Flow Capacity** | N/A | N/A | ~2000+ (CC-tree), tail via SW flowtable |
+| **Offload Model** | N/A | N/A | Linux flow-offload (TCAM classifier + SW tail) |

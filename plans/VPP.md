@@ -1,5 +1,5 @@
 # VyOS + VPP on the LS1046A Mono Gateway (single-image AF_XDP dataplane)
-**Version 1.0.0** · 2026-06-09 · HADS 1.0.0
+**Version 1.1.0** · 2026-08-01 · HADS 1.0.0
 
 ---
 
@@ -239,7 +239,9 @@ Order of work, smallest first:
 5. L3 forwarding + NAT44 via VPP, with FRR on the control plane talking over the LCP taps.
 
 **[SPEC]**
-- Hardware-level FMan offload (parse/classify/policer steering into per-worker FQs) is NOT in scope — it requires either NXP's USDPAA path (deleted) or a from-scratch native VPP DPAA1 plugin (`specs/vpp-dpaa1-ls1046a-spec.md`, v0.1 draft, ~12 kLOC). The production path is AF_XDP.
+- Hardware-level FMan offload (parse/classify/policer steering into per-worker FQs) is NOT in scope for VPP — it requires either NXP's USDPAA path (deleted) or a from-scratch native VPP DPAA1 plugin (`specs/vpp-dpaa1-ls1046a-spec.md`, v0.6 draft, ~12 kLOC). The production path is AF_XDP.
+
+**[NOTE] ASK offload architecture (2026-08-01):** The ASK S1 offload (separate from VPP S2) uses CC-tree classification + kernel SW flowtable (`nf_flowtable`) + manip-chain forwarding. The FE-VM ehash path is retired — experimental dead-end, never worked, ~1.5 Gbps DDR ceiling. Proven ASK throughput: M2 CC pass-through 7.37 Gbps @ 0.16%, M5 CC-tree+nf_flowtable 10.259 Gbps @ 0.16%, NXP cdx.ko 8.58 Gbps. VPP AF_XDP numbers are separate and not yet benchmarked on current hardware.
 
 ---
 
