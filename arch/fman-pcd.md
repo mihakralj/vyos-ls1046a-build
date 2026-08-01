@@ -1,8 +1,22 @@
-# FMan PCD — Parse · Classify · Distribute (FLAGSHIP)
+# FMan PCD — Parse · Classify · Distribute
 
-**Source:** LS1046A DPAA RM §5.9–5.12 (pp.803–1182). **This is the most important arch doc for
-ASK2** — the PCD is what `ask.ko` programs and what `fman_pcd_*.c` drives. Every resource ceiling
-here is a hard constraint on the offload engine.
+**Version 2.0 · HADS 1.0.0**
+
+## AI READING INSTRUCTION
+
+This is the PCD pipeline ARCHITECTURE doc. The **CC-tree + kernel SW flowtable + manip-chain** forward
+path is the SHIPPING HW-offload mechanism. The **FE-VM ehash HIT path (Fork-B)** is a retired
+experimental dead-end — it never worked at production throughput (~1.5 Gbps DDR ceiling) and is NOT the
+production PCD forward path. The only real ehash HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8
+ICMP). All production forwarding uses the CC-tree exact-match path with kernel nf_flowtable for the
+long tail.
+
+**[SPEC]** facts are binding. **[NOTE]** is rationale/history. **[BUG]** has symptom+cause+fix.
+
+---
+
+**Source:** LS1046A DPAA RM §5.9–5.12 (pp.803–1182). Every resource ceiling here is a hard constraint
+on the offload engine.
 
 The PCD is the in-FMan pipeline that decides **where each frame goes**:
 
@@ -82,9 +96,9 @@ flowchart TD
     CMP -->|no match| DEF["FMKG_GCR[DEFNIA]"]
 ```
 
-> **ASK2 exact-match note:** a scheme with `match_vector ≠ 0` is how `fman_pcd_kg.c` pins specific
-> parsed-protocol combinations to a scheme that then steers into the CC flow table. Schemes with
-> `SI=0` (not initialised, `FMKG_SE_MODE`) are skipped.
+> **[SPEC]** A scheme with `match_vector ≠ 0` is how `fman_pcd_kg.c` pins specific parsed-protocol
+> combinations to a scheme that then steers into the CC flow table. Schemes with `SI=0` (not
+> initialised, `FMKG_SE_MODE`) are skipped.
 
 ### Key construction (≤ 56 bytes)
 
@@ -94,9 +108,27 @@ flowchart TD
 2. **Generic Extract** (`GEC0–7`) — 8 commands, extract 1–16 B from frame/PR/IC at `HT+EO`; up to 4
    byte-masks. `TYPE=1` variant ORs a field directly into the distribution value (KDFV).
 
+### EKFC extraction order (canonical, HW-verified)
+
+**[SPEC]** EKFC extraction is **MSB-first**: SIP → DIP → PROTO → SPORT → DPORT. 13 bytes at
+`EKFC=0x001C0006` (IPSRC1|IPDST1|PTYPE1|L4PSRC|L4PDST). HW-verified 2026-07-13 (board 192.168.1.185,
+6.18.38-vyos, ISO 2026.07.13-1938-rolling) via CRC-64 match on two independent TCP flows on eth4.
+Ascending-bit and size-grouped models DISPROVEN. See `specs/fman-keygen-flow-key-spec.md` §2–3.
+
+**[SPEC]** The CC comparator reads KG-emitted bytes in the order `[SIP|DIP|SPI=0|SPORT|DPORT]` (patch
+0108 `cc_pack_key` rewrite). The old 0098 layout (ethertype/proto/flags/IP/ports) "could NEVER match"
+— it was a different byte order than what KG emits. EKFC-only, no GEC.
+
+**[SPEC]** PTYPE1 bit 18 MUST be set for 5-tuple (adds protocol byte). 4-tuple `0x00180006` aliases
+TCP/UDP sharing IP:port = silent misforwarding. IPsec SPI bit 9 MUST NOT be set on non-IPsec schemes
+(no SPI offset → random bytes → unpredictable key; F-043 origin).
+
 ### Hash & FQID
 
 - **CRC-64-ECMA-182**, init `0xFFFF_…FFFF`, over the assembled key → 64-bit hash.
+- **[SPEC]** HW KG hash = RAW CRC-64, no final complement. Silicon stores `crc64_raw(key)` @IC offset
+  0x48 (seed `~0ULL`, NO final `~crc` XOR). CRC-64/XZ finalized variant does NOT match. Verified
+  2026-07-13: `crc64_raw(SIP|DIP|6|0xAD9C|0xD903) = 0x600824e70ae4d573` = captured hash.
 - **Symmetric hash** (`SYM`): XOR src/dst pairs (MAC, IP, L4 port) before hashing → **both directions
   of a flow map to the same queue** (the IC still shows original fields). Important for stateful NAT.
 - `KDFV[0:23] = (hash >> HSHIFT) & HMASK | OrData`; **`FQID = KDFV | FQBASE`**. `HMASK` width sets the
@@ -110,7 +142,31 @@ flowchart TD
 ## 3. Coarse Classifier (§5.12) — `fman_pcd_cc.c` — **the flow table**
 
 The FMan Controller is a microcode engine; its **Custom Classifier (CC)** does exact-match lookups in
-MURAM-resident tables. This is literally where ASK2's hardware flow table lives.
+MURAM-resident tables. This is the **SHIPPING HW-offload flow table** — the production forward path.
+
+### Architecture: CC-tree + kernel SW flowtable
+
+**[SPEC]** The production PCD forward path is a two-tier architecture:
+
+1. **CC-tree (HW):** exact-match tables in MURAM, ≤3 nested lookups, ≤255 entries per table. First
+   packet of a flow misses → CPU slow path → `ask.ko` installs a CC entry. Subsequent packets match
+   in silicon (parse → match → NAT/TTL/cksum → police → egress), never touching a core.
+2. **Kernel nf_flowtable (SW):** the long tail. CC-tree caps at ~8 nodes (~2000+ flows) due to 64 KiB
+   MURAM budget. Flows beyond the CC-tree capacity are handled by the kernel software flowtable.
+
+**[NOTE]** The FE-VM ehash HIT path (Fork-B, `FE_ENTER` → DDR buckets → ehash lookup) is a **retired
+experimental dead-end**. It was explored as an alternative dispatch path but never worked at production
+throughput (~1.5 Gbps DDR ceiling vs line-rate MURAM). The only real ehash HIT was RCCB→FE_ENTER
+direct (2026-07-04, keysize=8 ICMP). All production forwarding uses the CC-tree path. See
+`fman-fe-ehash.md` for the full FE/ehash autopsy.
+
+### Proven throughput
+
+| Path | Throughput | Loss | Notes |
+|---|---|---|---|
+| M2 pass-through | 7.37 Gbps | 0.16% | No CC, no manip — raw FMan forwarding |
+| M5 CC-tree + SW flowtable | 10.259 Gbps | 0.16% | **SHIPPING** — CC-tree HW + kernel nf_flowtable |
+| NXP cdx.ko (reference) | 8.58 Gbps | — | Legacy ASK 1.x CDX stack |
 
 ### Hard limits (memorise these — they bound the offload)
 
@@ -123,6 +179,7 @@ MURAM-resident tables. This is literally where ASK2's hardware flow table lives.
 | Nested lookups / packet | **≤ 3** | ≤3 chained table hops (e.g. proto→5-tuple→action) |
 | IC-Index lookup | up to **4096 ADs** (12-bit `GMASK` `0x0000_FFF0`) | direct hash-bucket indexing for big flow sets |
 | AD size | 16 bytes | every entry/action is 16 B in MURAM |
+| **CC-tree scale** | **~8 nodes → ~2000+ flows** | 64 KiB MURAM budget; long tail in kernel nf_flowtable |
 
 ### Masking modes
 - **No mask** — direct compare, any key size.
@@ -147,17 +204,17 @@ dst/src/src+dst · `0x0F/10` IPv6 dst/src · `0x1F/20/21` L4 src/dst/src+dst por
 TTL==1** · **`0x2A` IPv6 HopLimit==1** · `0x2C` **IC-Index (hash bucket → ≤4096 ADs)** · `0x25/27/2B`
 generic-from-PR/frame/IC (≤56 B).
 
-> **ASK2 `FORWARD_FQ_WITH_MANIP`:** a CC entry whose action both selects an egress FQID *and* points
+> **[SPEC]** `FORWARD_FQ_WITH_MANIP`: a CC entry whose action both selects an egress FQID *and* points
 > at a header-manip chain is the core fast-path primitive. `0x29`/`0x2A` (TTL/hop-limit == 1) are how
 > the router punts expired packets to the slow path in hardware.
 
-> **Exact-match vs external-hash (the disposition fork — read before M2).** The exact-match
-> `CONT_LOOKUP` AD above is the universal v3 CC primitive, but on the shipping **210.10.1** microcode a
-> classified frame's *terminal disposition* (the BMI-FIFO free) is performed by the **Frame-Engine (FE)
-> opcode VM**, which exists only on the **external-hash** dispatch path (root AD `FE_ENTER`,
-> `pcAndOffsets=0xF6`, DDR buckets). A bare exact-match node that exits via `CONTRL_FLOW` (FQID-override)
-> leaks the FIFO → the open **M3-3b** stall. The complete FE/ehash init contract, the two-path table,
-> and the M2 decision criterion are the M0 oracle: see [`fman-fe-ehash.md`](fman-fe-ehash.md).
+> **[NOTE]** The `CONT_LOOKUP` AD is the universal v3 CC primitive. On the shipping **210.10.1**
+> microcode, a classified frame's terminal disposition (BMI-FIFO free) is performed by the
+> **Frame-Engine (FE) opcode VM**, which exists only on the **external-hash** dispatch path (root AD
+> `FE_ENTER`, `pcAndOffsets=0xF6`, DDR buckets). A bare exact-match node that exits via `CONTRL_FLOW`
+> (FQID-override) leaks the FIFO → the open **M3-3b** stall. The complete FE/ehash init contract and
+> the two-path table are documented in [`fman-fe-ehash.md`](fman-fe-ehash.md). **This path is retired
+> experimental — the production forward path uses the CC-tree with kernel SW flowtable fallback.**
 
 ---
 
@@ -180,10 +237,10 @@ MURAM.
 This block **is** ASK2's inline NAT: 0x0C rewrites IP addr + decrements TTL + fixes the IP checksum
 automatically; 0x0E rewrites L4 ports + fixes the L4 checksum incrementally.
 
-> ⚠ **Risk #13 (ASK2 spec §16 / §13.3 — `muram.md`):** each manip chain must total **≤ 1 KiB MURAM**.
-> On the board after PR14z21, `fman_pcd_manip_chain_create(3 manips)` failed `-ENOMEM` (errno 12) **327×**
-> while `gen_pool` still had ~320 KiB free → needs instrumentation. `fman_pcd_manip.c` must budget AD
-> entries (≤4/chain) and MURAM carefully. See [`muram.md`](muram.md).
+> ⚠ **[BUG] Risk #13 (ASK2 spec §16 / §13.3 — `muram.md`):** each manip chain must total **≤ 1 KiB
+> MURAM**. On the board after PR14z21, `fman_pcd_manip_chain_create(3 manips)` failed `-ENOMEM` (errno
+> 12) **327×** while `gen_pool` still had ~320 KiB free → needs instrumentation. `fman_pcd_manip.c`
+> must budget AD entries (≤4/chain) and MURAM carefully. See [`muram.md`](muram.md).
 
 ---
 
@@ -238,10 +295,12 @@ are the CC/AD limits above (16-byte ADs, MURAM budget).
 | CC AD size | 16 B | §5.12 |
 | HMCD table | ≤ 256 B | §5.12.10 |
 | Manip MURAM / chain | ≤ 1 KiB (Risk #13) | ASK2 spec §13.3 |
+| **CC-tree scale** | **~8 nodes → ~2000+ flows** | 64 KiB MURAM budget |
+| **SW flowtable** | **kernel nf_flowtable** | long tail beyond CC-tree capacity |
 
 ---
 
-## 8. End-to-end PCD dataflow
+## 8. End-to-end PCD dataflow (SHIPPING)
 
 ```mermaid
 flowchart TD
@@ -256,13 +315,17 @@ flowchart TD
     MANIP --> PLCR["Policer (RFC-4115)<br/>GREEN/YELLOW/RED"]
     PLCR -->|GREEN/YELLOW| ENQ[enqueue egress FQID → QMan]
     PLCR -->|RED| DROP[discard]
-    MISS --> CPU[CPU slow path:<br/>ask.ko installs CC entry]
+    MISS --> CPU["CPU slow path:<br/>ask.ko installs CC entry<br/>OR kernel nf_flowtable"]
     CPU -.programs.-> LOOKUP
 ```
 
-This is the whole ASK2 thesis: **first packet misses the CC table → goes to the CPU → `ask.ko`
-installs a flow entry → every subsequent packet of that flow stays in silicon** (parse → match →
-NAT/TTL/cksum → police → egress), never touching a core.
+**[SPEC]** This is the whole ASK2 thesis: **first packet misses the CC table → goes to the CPU →
+`ask.ko` installs a flow entry → every subsequent packet of that flow stays in silicon** (parse →
+match → NAT/TTL/cksum → police → egress), never touching a core. Flows beyond CC-tree capacity (~2000+)
+fall back to the kernel nf_flowtable software path.
+
+**[NOTE]** The FE-VM ehash HIT path (Fork-B) is NOT shown here — it is a retired experimental dead-end
+that never worked at production throughput. See §3 and `fman-fe-ehash.md` for the full autopsy.
 
 ---
 
@@ -283,4 +346,5 @@ Exposed to `ask.ko` via `<linux/fsl/fman_pcd.h>` (shared-board patches `0092` / 
 [`../specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) §13.
 
 *Related: [`muram.md`](muram.md) (where these tables physically live + the -ENOMEM risk),
-[`qman-ceetm.md`](qman-ceetm.md) (where the chosen FQID goes next).*
+[`qman-ceetm.md`](qman-ceetm.md) (where the chosen FQID goes next),
+[`fman-fe-ehash.md`](fman-fe-ehash.md) (FE-VM ehash autopsy — retired experimental path).*

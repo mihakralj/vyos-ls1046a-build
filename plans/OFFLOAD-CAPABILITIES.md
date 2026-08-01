@@ -1,10 +1,26 @@
 # ASK2 Offloading Capabilities — Silicon-Verified
-**2026-07-09 · dpaa1 branch · Board B (.185) kernel 6.18.38-vyos**
+**2026-08-01 · dpaa1 branch · Board B (.185) kernel 6.18.38-vyos · Version 2.0**
 
-This document lists every offloading capability that has been built, deployed,
-and VERIFIED ON SILICON (the Mono Gateway DK LS1046A board, NXP 210.10.1
-microcode).  No paper architecture — every entry below was exercised on real
-hardware and the test traffic walked the FMan datapath.
+## AI READING INSTRUCTION
+
+This document is the living inventory of silicon-verified offload capabilities for
+the Mono Gateway DK LS1046A board (NXP 210.10.1 microcode). Every entry was
+exercised on real hardware and the test traffic walked the FMan datapath.
+
+**[SPEC]** Shipping HW-offload = CC-tree classification (top-N) + kernel SW
+flowtable (tail) + manip-chain forwarding. This is the Linux flow-offload model.
+
+**[SPEC]** FE-VM ehash HIT path (Fork-B) = DEAD END / never worked (~1.5 Gbps
+DDR ceiling), experimental/retired, NOT shipping.
+
+**[SPEC]** CC comparator reads KG-emitted bytes (patch 0108); old 0098 "could
+NEVER match". EKFC MSB-first (SIP,DIP,PROTO,SPORT,DPORT).
+
+**[SPEC]** CC-tree scales: 32-key software caps vs 255 HW keys/node, 64KiB MURAM
+→ ~8 nodes → ~2000+ flows; long tail in kernel nf_flowtable.
+
+**[SPEC]** M3/M5 HIT "PASSED" were false positives (FQID 0x200 ambiguity). M2
+7.37 Gbps real pass-through. Only real HIT: RCCB→FE_ENTER direct (2026-07-04).
 
 ---
 
@@ -29,35 +45,23 @@ hardware and the test traffic walked the FMan datapath.
 | Scheme 3 restored AC_CC→RSS on disengage | `0106` detach | `pcd-snapshot`: back to nia=0x02 |
 | AC_CC dispatch confirmed on silicon | `0107` cc_test harness | dmesg: "FMBM_RCCB bound to 0x4ac00, KG CC-dispatched" |
 | 100× S0↔S1 mode-switch soak (reversible) | M1 gate | `pcd-snapshot diff`: register state byte-identical to warm-S0' baseline |
+| CC comparator reads KG-emitted bytes (MSB-first EKFC) | `0108` | Comparator matches SIP,DIP,PROTO,SPORT,DPORT in silicon order |
+| EKFC extraction order confirmed MSB-first | 2026-07-13 HW measurement | CRC-64 raw match on two independent TCP flows on eth4 |
 
 ---
 
-## 3. FE-VM Frame-Engine Path (Fork B — Oracle §3-§5)
+## 3. CC-Tree Classification — Shipping HW Offload Path
+
+**[SPEC]** This is the shipping HW-offload path. CC-tree classification (top-N
+flows) + kernel nf_flowtable (tail) + manip-chain forwarding.
 
 | Capability | Gate | Silicon Evidence |
 |---|---|---|
-| FE pool (16 × 28 B) MURAM allocation | `0122`/`0124` | `fe_pool` debugfs: get/put cycles, gen_pool used returns to baseline |
-| FE singletons (MUX 8 B, TRANSITION 8 B, EXIT 4 B) | `0124` byte-assembled | `fe_singletons` debugfs readback: MUX=0x04000000, EXIT=0x03800000 |
-| `t_ExtHashFe` (28 B, DDR table addr, MUX/MISS links) | `0131` | `fe_hashfe` readback: 7 words match oracle §5 byte table |
-| FE_ENTER root AD (16 B, pcAndOffsets=0xF6, NIA_ORDER_RESTOR) | `0127` | `fe_enter` readback: 40800000 00000000 000000f6 00000010 |
-| ENQ FE (16 B, NIA+FQID 0x2b9 = dedicated TX FQ) | `0127`/P4.1 | `fe_enq` readback: 02010000 000002b9 00000000 00000000 |
-| DDR ehash table (mask=0x7FFF, 524 KB, DMA-coherent) | `0125`/`0130` | dmesg: "ehash table mask 0x7fff keysize 13 ii 15 size 524288 DDR=0xf7780000" |
-| CRC64 flow insertion into DDR buckets | `0128` | `fe_flow` readback: bucket=0x273d rec=0xfa403000, key=`<hex>` verified |
-| FE-VM arm engages (BMI CC root → FE_ENTER) | `0132` D9-B | `fe_arm`: "fe_pool engaged: YES, FE_ENTER root AD: 0x59200" |
-| **Port survives sustained FE-VM traffic** | **M3-3b fix** | **50+ pings, zero STL stall, no fault latched** |
-| EXIT singleton deallocateBuffer frees BMI FIFO | M2 gate | `FMFP_PS[STL]` never set; `fmdmsr=0`; all FMan fault registers clean |
-| MURAM returns to **0 bytes** on disengage | F-002 fix | 3 engage/disengage cycles: used returns to 0 (±0 B) |
-
----
-
-## 4. PCD Infrastructure — Policing, Scheduling
-
-| Capability | Gate | Silicon Evidence |
-|---|---|---|
-| HW ingress policer (tc matchall → FMan PLCR) | `0097`/`0100`/`0104` | `tc -s filter`: `in_hw` flag; `FMPL_GCR`=0xC0500002 (EN\|STEN); TPC increments |
-| PLCR block enable (master EN+STEN) on first profile commit | `0100` plcr_enable_block() | Live `/dev/mem` RMW: GCR 0x00500002→0xC0500002, policed ping 100%→0% loss |
-| Policer attach/detach reversible (no scheme leak) | `0104` release callback | delete→re-apply: filter empties, ping 5/5 0% loss, eth3 alive |
-| CC test static tree install (group+match+AD tables) | `0098` | `cc_test` readback: "port 0x10: 1 keys, group=0x4ac00 match=0x4ad00 ad=0x4ae00" |
+| CC pass-through (M2 gate) | `0098`/`0108` | 7.37 Gbps @ 0.16% CPU — real pass-through, no false positive |
+| CC-tree + nf_flowtable (M5 gate) | `0108`/`0116` | 10.259 Gbps @ 0.16% CPU — top-N HW + tail SW |
+| NXP cdx.ko manip-chain forwarding | — | 8.58 Gbps via opcode/manip chain |
+| CC tree static install (group+match+AD tables) | `0098` | `cc_test` readback: "port 0x10: 1 keys, group=0x4ac00 match=0x4ad00 ad=0x4ae00" |
+| CC-tree scale: 255 HW keys/node, 64KiB MURAM | `0126` | ~8 nodes → ~2000+ flows in HW; long tail in kernel nf_flowtable |
 | FM_CTL params page (256 B, FMBM_RGPR, errdisc) | `0116` | dmesg: "FM_CTL params page at MURAM off 0x4af00 (errdisc 0x012ee0e8)" |
 | Per-port FE support — FE internal-buffer pool + mgmt free-list | M2-§4 | `fe_port`: "port 0x10 pool 0x4b000/8448 B mgmt 0x4ac00/21 B" |
 | Params page +0x54/+0x58 FE management words | M2-§4 | `iowrite32be` to `page_v + 0x54` (mgmt index), `+ 0x58` (depl cnt=0) |
@@ -65,7 +69,41 @@ hardware and the test traffic walked the FMan datapath.
 
 ---
 
-## 5. Kernel Datapath — AF_XDP, tc Offload, DPAA1
+## 4. FE-VM ehash HIT Path — RETIRED / EXPERIMENTAL (NOT SHIPPING)
+
+**[SPEC]** Fork-B FE-VM ehash HIT path is a DEAD END. ~1.5 Gbps DDR ceiling
+makes it non-viable for production. All entries below are experimental/retired.
+The only real HIT was RCCB→FE_ENTER direct (2026-07-04). M3/M5 HIT "PASSED"
+were false positives (FQID 0x200 ambiguity).
+
+| Capability | Gate | Silicon Evidence | Status |
+|---|---|---|---|
+| FE pool (16 × 28 B) MURAM allocation | `0122`/`0124` | `fe_pool` debugfs: get/put cycles, gen_pool used returns to baseline | RETIRED |
+| FE singletons (MUX 8 B, TRANSITION 8 B, EXIT 4 B) | `0124` byte-assembled | `fe_singletons` debugfs readback: MUX=0x04000000, EXIT=0x03800000 | RETIRED |
+| `t_ExtHashFe` (28 B, DDR table addr, MUX/MISS links) | `0131` | `fe_hashfe` readback: 7 words match oracle §5 byte table | RETIRED |
+| FE_ENTER root AD (16 B, pcAndOffsets=0xF6, NIA_ORDER_RESTOR) | `0127` | `fe_enter` readback: 40800000 00000000 000000f6 00000010 | RETIRED |
+| ENQ FE (16 B, NIA+FQID 0x2b9 = dedicated TX FQ) | `0127`/P4.1 | `fe_enq` readback: 02010000 000002b9 00000000 00000000 | RETIRED |
+| DDR ehash table (mask=0x7FFF, 524 KB, DMA-coherent) | `0125`/`0130` | dmesg: "ehash table mask 0x7fff keysize 13 ii 15 size 524288 DDR=0xf7780000" | RETIRED |
+| CRC64 flow insertion into DDR buckets | `0128` | `fe_flow` readback: bucket=0x273d rec=0xfa403000, key=`<hex>` verified | RETIRED |
+| FE-VM arm engages (BMI CC root → FE_ENTER) | `0132` D9-B | `fe_arm`: "fe_pool engaged: YES, FE_ENTER root AD: 0x59200" | RETIRED |
+| Port survives sustained FE-VM traffic | M3-3b fix | 50+ pings, zero STL stall, no fault latched | RETIRED |
+| EXIT singleton deallocateBuffer frees BMI FIFO | M2 gate | `FMFP_PS[STL]` never set; `fmdmsr=0`; all FMan fault registers clean | RETIRED |
+| MURAM returns to 0 bytes on disengage | F-002 fix | 3 engage/disengage cycles: used returns to 0 (±0 B) | RETIRED |
+| RCCB→FE_ENTER direct HIT (only real HIT) | 2026-07-04 | Single flow matched, no DDR ehash involved | EXPERIMENTAL |
+
+---
+
+## 5. PCD Infrastructure — Policing, Scheduling
+
+| Capability | Gate | Silicon Evidence |
+|---|---|---|
+| HW ingress policer (tc matchall → FMan PLCR) | `0097`/`0100`/`0104` | `tc -s filter`: `in_hw` flag; `FMPL_GCR`=0xC0500002 (EN\|STEN); TPC increments |
+| PLCR block enable (master EN+STEN) on first profile commit | `0100` plcr_enable_block() | Live `/dev/mem` RMW: GCR 0x00500002→0xC0500002, policed ping 100%→0% loss |
+| Policer attach/detach reversible (no scheme leak) | `0104` release callback | delete→re-apply: filter empties, ping 5/5 0% loss, eth3 alive |
+
+---
+
+## 6. Kernel Datapath — AF_XDP, tc Offload, DPAA1
 
 | Capability | Gate | Silicon Evidence |
 |---|---|---|
@@ -79,7 +117,7 @@ hardware and the test traffic walked the FMan datapath.
 
 ---
 
-## 6. Platform Integration
+## 7. Platform Integration
 
 | Capability | Gate | Silicon Evidence |
 |---|---|---|
@@ -96,7 +134,7 @@ hardware and the test traffic walked the FMan datapath.
 
 ---
 
-## 7. Build & Deployment Pipeline
+## 8. Build & Deployment Pipeline
 
 | Capability | Gate | Silicon Evidence |
 |---|---|---|
@@ -109,30 +147,34 @@ hardware and the test traffic walked the FMan datapath.
 
 ---
 
-## 8. Pending — Designed, Not Yet Silicon-Gated
+## 9. Pending — Designed, Not Yet Silicon-Gated
 
 | Capability | Blocked On |
 |---|---|
-| Flow HIT → FORWARD_FQ_WITH_MANIP → egress FQ | KG key extraction format (ekfc=0x00180206 layout unknown for ICMP/TCP matching) |
 | Full per-port `FmPortSetFESupport` (FE buffer pool wired to ucode) | `fman_port_lookup_rx` port_id mismatch (fixed — needs CI deploy + verify) |
 | ASK2 `ask.ko` full datapath engage (xfrm/flow offload) | M3 gate + `flow_block_offload` wiring |
 | VPP AF_XDP overlay on S0 | S2 switch (S0→S2 tested; full VPP+ASK mutual exclusion pending) |
-| External-hash CRC64 confirmation against 210.10.1 HW dump | §8.6 oracle gate — dormant harmlessly, gate before arming |
 | Per-flow statistics (byte/frame counters in DDR) | M3 forwarding verified first |
 | HM (Header Manipulation) FE for NAT/fragmentation | M3 substrate complete, HM patch authored (0120) — dormant |
 | ASK2 userspace daemon (YNL family + flow promotion) | Dependent on ask.ko readiness |
 
 ---
 
-## 9. Key Test Results
+## 10. Key Test Results
 
 | Test | Date | Result |
 |---|---|---|
 | 100× S0↔S1 soak (pcd-snapshot clean) | 2026-06-15 | PASS — 0 diffs, MURAM used=0 |
 | M3-3b fault-capture (iter-50) | 2026-06-16 | All FMan fault regs clean — Fork A dead, Fork B confirmed |
-| FE-VM EXIT singleton no-stall (50+ pings) | 2026-07-09 | PASS — 0% loss, no STL, no fault |
-| F-002 MURAM leak fixed (3 engage/disengage cycles) | 2026-07-09 | PASS — used returns to 0 B (±0) |
+| CC pass-through (M2 gate) | 2026-07-04 | PASS — 7.37 Gbps @ 0.16% CPU, real pass-through |
+| CC-tree + nf_flowtable (M5 gate) | 2026-07-09 | PASS — 10.259 Gbps @ 0.16% CPU |
+| NXP cdx.ko manip-chain forwarding | 2026-07-09 | PASS — 8.58 Gbps via opcode/manip chain |
+| RCCB→FE_ENTER direct HIT (only real HIT) | 2026-07-04 | PASS — single flow matched, no DDR ehash |
+| FE-VM EXIT singleton no-stall (50+ pings) | 2026-07-09 | PASS — 0% loss, no STL, no fault (RETIRED) |
+| F-002 MURAM leak fixed (3 engage/disengage cycles) | 2026-07-09 | PASS — used returns to 0 B (±0) (RETIRED) |
 | F-040 memset_io zeroing (gen_pool) | 2026-07-09 | PASS — CI build #28981979429, HW-verified |
 | Dual-DAC iperf3 (4-stream, 10 s) | 2026-07-09 | eth3: 7.63 Gbps, eth4: 6.54 Gbps, 0 retrans |
-| PLCR HW policer (100%→0% loss) | 2026-06-09 | PASS — FMPL_GCR EN|STEN, TPC increments |
+| PLCR HW policer (100%→0% loss) | 2026-06-09 | PASS — FMPL_GCR EN\|STEN, TPC increments |
 | Policer → delete → re-apply (no scheme leak) | 2026-06-09 | PASS — ping 5/5 0% loss, eth3 alive |
+| EKFC extraction order MSB-first confirmed | 2026-07-13 | PASS — CRC-64 raw match on two independent TCP flows |
+| M3/M5 HIT false positives identified | 2026-07-09 | FQID 0x200 ambiguity — CC-tree path is real, FE-VM ehash is not |

@@ -1,10 +1,12 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.0**
+**Version 1.1**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
 **Blob:** 51652 bytes, 12851 code words, SPI `mtd3` @ `0x400000`, DT node `/soc/fman@1a00000/fman-firmware/fsl,firmware`
+
+> **[NOTE — Architecture status (2026-08-01)]** The FE-VM ehash/EXT_HASH/EHASH family described in this reference (Fork-B: `FE_ENTER` → EXT_HASH FE → DDR bucket lookup → MUX → ENQ) is **RETIRED/EXPERIMENTAL**. It never produced a working HIT on silicon (~1.5 Gbps DDR ceiling) and is NOT the shipping HW-offload path. F-156/F-157/F-158 + fe_scaffold oracle proved the CC-match stage not production-worthy. The **shipping path** is CC-tree classification (`CC_KEY_SIZE=16`, `CONT_LOOKUP` group table, CC match rows key+mask) + kernel SW flowtable + manip-chain forwarding. CC-tree scales to 255 keys/node (~8 nodes in 64KiB MURAM → ~2000+ flows). CC comparator reads KG-emitted bytes, not a re-extracted canonical composite (patch 0108). All register offsets, FE types, opcodes, floor/ceiling numbers, and Kconfig facts in this document remain valid regardless of which path is active.
 
 ## 1. Identity and Scope
 
@@ -601,6 +603,43 @@ Each DDR flow record is 256 bytes:
 Collision chain: head-insert at bucket. Chains are LIFO: head-add, head-first walk, reverse insert order. Inverse MUST drain LIFO.
 
 **Entry sizing.** DDR flow records are 256 bytes (`FMAN_EHASH_FLOW_REC_SIZE`), providing ample space for any supported key size. The comparison size is controlled by `contextSize` in the EXT_HASH FE (§7.2), NOT by the DDR record size. `contextSize` MUST equal the EKFC key length. Setting `contextSize` to the DDR record size (256) causes the hardware to compare 256 bytes per entry, stalling the BMI port. For 5-tuple: `keysize = 13` in the DDR record key field and `contextSize = 13` in the EXT_HASH FE.
+
+### 10.2a Vendor source cross-check (2026-08-01, `.106` oracle Phase 1)
+
+**[SPEC]** The 8-byte record header above is confirmed **bit-exact** against the genuine NXP LSDK source (`nxp-sdk` branch, `kernel/flavors/ask/sdk-sources/.../inc/Peripherals/fm_ehash.h`, `struct en_ehash_entry`):
+
+```c
+struct en_ehash_entry {
+    union {
+        struct {
+            union {
+                struct { uint16_t flags; uint16_t next_entry_hi; uint32_t next_entry_lo; };
+                uint64_t next_entry;
+            };
+            uint8_t key[0];   // variable-size key starts here, offset 0x08
+        } __attribute__((packed));
+        ...
+    } __attribute__((packed));
+} __attribute__((packed));
+```
+
+`flags(2B) + next_entry_hi(2B) + next_entry_lo(4B)` = 8 bytes, key at offset `0x08` — matches this document's §10.2 table exactly.
+
+**[BUG] What does not match: the "after key: 4B next-FE MURAM offset" row (§10.2, last row) is this project's own design choice, not a documented vendor mechanism.** The real `flags` field is far richer than a generic 16 bits — the vendor header defines it as a packed bitfield:
+
+```c
+#define SET_INVALID_ENTRY(flags)        (flags |= (1 << 15))
+#define SET_TIMESTAMP_ENABLE(flags)     (flags |= (1 << 13))
+#define SET_STATS_ENABLE(flags)         (flags |= (1 << 12))
+#define SET_OPC_OFFSET(flags, offset)   (flags |= ((offset >> 2) << 6))   /* bits [10:6] */
+#define SET_PARAM_OFFSET(flags, offset) (flags |= (offset >> 2))          /* bits [5:0] */
+```
+
+`OPC_OFFSET` points into a per-entry **opcode list** — the same opcode set as the manip/forward chain (`STRIP_ETH_HDR=0x11`, `UPDATE_TTL=0x21`, `ENQUEUE_PKT=0x01`, etc., all defined in the same header) — and `PARAM_OFFSET` points to that opcode chain's parameter blob (e.g. `struct en_ehash_enqueue_param{mtu, hdr_xpnd_sz, bpid, fqid, ...}` for `ENQUEUE_PKT`). **This means the vendor's real HIT-dispatch mechanism embeds the forwarding action directly in each hash-table entry's flags/offset fields, not as a separate "next-FE" pointer applied uniformly across a whole table** — the design this project's scaffold uses (single external `nextFEPtr` in the EXT_HASH FE descriptor, §7.2, applied to every HIT regardless of which entry matched). Confirming `FM_PCD_HashTableSet`'s own doc comment (`fm_pcd_ext.h`): `t_FmPcdHashTableParams` defines `ccNextEngineParamsForMiss` (a **MISS**-path next-engine) but **no equivalent HIT-path field** — consistent with HIT-path forwarding being handled per-entry via the opcode-list mechanism above, not via a table-level next-engine pointer.
+
+**Practical implication:** this project's simpler "one external next-FE for the whole table" design is a valid, distinct configuration of the same underlying EXT_HASH silicon feature (bucket → record compare → dispatch) — nothing here proves it's broken. But it does mean the vendor's "enhanced ehash" reference implementation (`cdx_ehash.c`, the actual `.106` production code) is not a direct structural analog for the trailing-offset scheme this document previously implied; treat §10.2's last row as this project's own design, not a vendor-documented fact.
+
+**Secondary confirmation:** `t_FmPcdHashTableParams.hashShift` doc comment reads *"Byte offset from the beginning of the KeyGen hash result to the 2-bytes to be used as hash index"* — functionally equivalent to this document's §10.3 `(crc >> ((6-hashShift)*8)) & hashMask` model (both select a 2-byte window from the 8-byte hash result at a shift-determined position), just described as a byte-offset-to-a-window rather than a right-shift-then-mask. No contradiction, just a terminology note. The struct also marks a *different*, obsolete field `kgHashShift` as *"Obsolete; will be considered as '0'"* — don't confuse the two names if cross-referencing older SDK versions.
 
 ### 10.3 CRC-64 Hash
 

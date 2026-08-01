@@ -1,6 +1,6 @@
 # VPP DPAA1 Acceleration Specification for NXP LS1046A (ASK2 Architecture)
 
-> **Status: DRAFT v0.5 — design intent, partially aspirational (2026-07-19).**
+> **Status: DRAFT v0.6 — design intent, partially aspirational (2026-08-01).**
 > The shipped VPP dataplane is `set vpp settings interface ethX` over unmodified
 > upstream `af_xdp` (per `plans/VPP.md` + AGENTS.md S5) — Sections 1–3 describe
 > that reality. **Sections 4, 6.1 (`vpp-options`), and 7 describe the
@@ -87,6 +87,15 @@ The NXP FMan hardware parser evaluates L2, L3, and L4 headers at line rate befor
 * **CPU Cycle Savings:** Software parsing nodes (`ethernet-input`, `ip4-input-check`, `ip6-input-check`) are bypassed entirely for valid frames, routing vectors straight to `ip4-lookup` or `ip6-lookup`.
 
 ### 4.2 Coarse Classification (CC) Flow Steering
+
+> **[NOTE] Architecture status (2026-08-01):** The ASK S1 offload uses CC-tree
+> classification + kernel SW flowtable (`nf_flowtable`) + manip-chain forwarding.
+> The FE-VM ehash path is retired — it was an experimental dead-end that never
+> worked and was capped at ~1.5 Gbps by DDR bandwidth. Proven ASK throughput:
+> M2 CC pass-through 7.37 Gbps @ 0.16%, M5 CC-tree+nf_flowtable 10.259 Gbps @
+> 0.16%, NXP cdx.ko 8.58 Gbps. The `ask_cp.so` design below is aspirational
+> and would build on the CC-tree mechanism, not FE-VM ehash.
+
 Active, persistent traffic flows (such as established NAT sessions, IPsec tunnels, or BGP-routed elephant flows) are offloaded from VPP software execution into NXP silicon.
 * **Flow Threshold Monitoring:** `ask_cp.so` monitors active forwarding tables. When a flow exceeds a configurable packet-per-second threshold, the plugin initiates a hardware offload request.
 * **Silicon Execution:** The plugin transmits the 5-tuple matching key and action (e.g., encapsulation, MAC rewrite, egress port) to `ask.ko` via Netlink.
@@ -155,7 +164,7 @@ define ask_cp_flow_details {
 | State | VPP Engine | Interface Control | Hardware & Driver State |
 |---|---|---|---|
 | **0: Dormant** | Stopped / Unloaded | Mainline Linux Kernel | Standard DPAA1 netdev driver active; RSS NAPI distributes frames to Linux network stack. |
-| **1: Kernel Offload** | Stopped / Unloaded | Mainline Linux Kernel | `ask.ko` active on the offloaded port(s); FE-VM ehash offloads flows (nftables flowtable hooks). |
+| **1: Kernel Offload** | Stopped / Unloaded | Mainline Linux Kernel | `ask.ko` active on the offloaded port(s); CC-tree classification + kernel SW flowtable + manip-chain forwarding (FE-VM ehash retired — experimental dead-end, never worked, ~1.5 Gbps DDR ceiling). |
 | **2: VPP Overlay** | Active (`af_xdp`) | VPP on the assigned port(s), Linux elsewhere | BMan pools mapped to XSK UMEM; `ask_cp.so` (future) manages FMan CC flow steering and XDP hints. |
 
 ---
