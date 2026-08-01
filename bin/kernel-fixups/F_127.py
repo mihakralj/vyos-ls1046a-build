@@ -39,8 +39,21 @@ if "F-127: fe_engage port" in src:
     sys.exit(0)
 
 # ── Locate the function body ──────────────────────────────────────────
+# F-157 (2026-08-01) extended the signature to add `u32 enq_fqid` (R1:
+# dedicated TX FQ as the HIT ENQ target).  Accept both the pre-F-157
+# 2-arg and post-F-157 3-arg forms so this diagnostic keeps working
+# regardless of order.
 sig = "int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)"
 i = src.find(sig)
+if i == -1:
+    # 3-arg form: "int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id,\n..."
+    m3 = re.search(
+        r"int fman_pcd_fe_engage\(struct fman \*fm, u8 hw_port_id,\s*\n\s*u32 enq_fqid\)",
+        src)
+    if m3:
+        i = m3.start()
+        sig = m3.group(0)
+        print("### F-127: matched post-F-157 3-arg fe_engage signature")
 if i == -1:
     print("### F-127: ERROR — fman_pcd_fe_engage not found")
     sys.exit(1)
