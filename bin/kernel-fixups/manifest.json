@@ -142,10 +142,11 @@
     "F_149.py": "fman_pcd.c: F-149 \u2014 revert F-145, restore contextSize = key_size (microcode \u00a77.2)",
     "F_148.py": "fman_pcd.c: F-148 v4 \u2014 write flow key to CC match table + copy real FE_ENTER AD content into HIT-AD slot",
     "F_157.py": "fman_pcd.c: F-157 \u2014 wire dedicated TX FQ into FE-VM ENQ (HIT dest distinct from miss-AD kernel FQ 0x200)",
+    "F_158.py": "fman_pcd.c: F-158 \u2014 fe_scaffold debugfs dump node (ground truth on CC match-table layout; STRICT_DEVMEM blocks /dev/mem)",
     "F_152.py": "fman_pcd.c: F-152 \u2014 revert F-144, restore original word1 formula (hashMask<<16|contextSize-1<<8|hashShift)",
     "F_153.py": "fman_pcd.c: F-153 \u2014 fix 0146 MUX/TRANSITION wiring (MUX->TRANSITION->ENQ, not MUX->ENQ direct)"
   },
-  "count": 67,
+  "count": 68,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
