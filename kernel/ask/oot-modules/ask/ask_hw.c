@@ -620,8 +620,18 @@ int ask_hw_offload_engage(u8 hw_port_id)
          * __fman_pcd_fe_build_vm_chain(), creates the CONT_LOOKUP scaffold
          * with numKeys=1 (F-091), and arms the port for FE-VM dispatch.
          * This replaces the debugfs bridge — debugfs is for diagnostics only.
+         *
+         * F-157 (2026-08-01): pass the dedicated TX FQ as the FE-VM ENQ
+         * target so the HIT disposition is DISTINCT from the CC miss-AD
+         * (kernel FQ 0x200).  This makes HIT observable for the first time:
+         * a matched frame is enqueued to the dedicated TX FQ on channel
+         * 0x801 (eth4 TX), not delivered back to the eth3 kernel RX path
+         * where it was previously indistinguishable from a miss.  Falls back
+         * to 0x200 if the dedicated FQ is not ready.
          */
-        rc = fman_pcd_fe_engage(h->fman, hw_port_id);
+        rc = fman_pcd_fe_engage(h->fman, hw_port_id,
+                                h->dedicated_fq_ready ?
+                                h->dedicated_fq.fqid : 0x200);
         if (rc == -EBUSY) {
                 /*
                  * F-122/F-124: treat "already armed" as idempotent success.
