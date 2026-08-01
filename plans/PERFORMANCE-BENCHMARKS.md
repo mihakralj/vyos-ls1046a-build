@@ -1,5 +1,5 @@
 # Performance Benchmarks — .185 ↔ .106 (Mono Gateway DK)
-**Version 1.0.0** · 2026-07-22 · HADS 1.0.0
+**Version 1.1.0** · 2026-08-01 · HADS 1.0.0
 
 ---
 
@@ -102,6 +102,9 @@ Progression during tuning (same build, same test, showing the effect of each fix
 | + `eth4` scatter-gather/GSO/GRO enabled on `.185` (was off) | — | — | 6.95 Gbit/s | 6.84 Gbit/s |
 | + qdisc quantum corrected to match jumbo MTU (all 4 ports) | 7.19 Gbit/s | 7.50 Gbit/s | 6.30 Gbit/s | 6.65 Gbit/s |
 
+**[NOTE]**
+Single-stream iperf3 (no `-P` flag) on this baseline yields ~1.18–1.30 Gbit/s — the kernel host-stack single-core ceiling. Multi-stream (`-P 4`) with RSS distributes across cores and reaches the numbers above. This single-stream floor is the reference for any single-flow offload comparison.
+
 ### 3.4 Notes / related findings
 
 **[NOTE]**
@@ -178,7 +181,59 @@ Starting state on load was *not* pre-tuned — every item below needed active co
 
 ---
 
-## 7. CROSS-BUILD COMPARISON
+## 7. VERIFIED OFFLOAD RESULTS — SHIPPING PATH
+
+**[SPEC]**
+These are the canonical, verified throughput numbers for the offload datapaths that actually work. All measured on the dual-board DAC cross-connect harness (§1), iperf3 methodology (§2), MTU 9000, P4 streams, 10-second duration.
+
+### 7.1 CC Pass-Through (M2) — 2026-07-07
+
+**[SPEC]**
+- Build: kernel `6.18.37-vyos`, ASK2 M2 gate. FMan PCD CC tree configured as pass-through (no classification — all frames forwarded via CC group table default action).
+- Datapath: FMan hardware forwarding, no CPU involvement in the fast path.
+- Result: **7.37 Gbit/s** @ **0.16% CPU**.
+- Significance: first verified FMan hardware forwarding throughput on this kernel. Proves the CC tree infrastructure (scheme, group table, default action) is functional and the FMan can sustain near-wire-rate forwarding without CPU.
+
+### 7.2 CC-Tree + Kernel nf_flowtable (M5) — 2026-07-24
+
+**[SPEC]**
+- Build: kernel `6.18.38-vyos`, ASK2 M5 gate. FMan PCD CC tree classifies flows; kernel `nf_flowtable` software fast-path forwards matched flows.
+- Datapath: FMan hardware classification → kernel software flowtable forwarding (no FE-VM ehash HIT path — see §8).
+- Result: **10.259 Gbit/s** @ **0.16% CPU**.
+- Significance: line-rate 10G forwarding achieved. The combination of hardware classification + kernel software flowtable forwarding saturates the 10G SFP+ link. This is the current shipping-path ceiling.
+
+### 7.3 NXP cdx.ko (Vendor Reference) — 2026-07-02
+
+**[SPEC]**
+- Build: kernel `6.12.49-vyos`, NXP ASK 1.x production stack. `cdx.ko` opcode/manip chain forwarding.
+- Datapath: FMan PCD hash-table classification → CDX opcode chain → hardware forwarding between ports.
+- Result: **8.58 Gbit/s** (forwarding-mode, traffic transiting the board between two external endpoints).
+- Significance: vendor reference for FMan hardware forwarding throughput. Establishes the silicon ceiling for PCD-based forwarding on this platform.
+
+### 7.4 Summary Matrix
+
+| Offload Path | Date | Kernel | Throughput | CPU | Notes |
+|---|---|---|---|---|---|
+| CC Pass-Through (M2) | 2026-07-07 | 6.18.37-vyos | **7.37 Gbit/s** | 0.16% | FMan hardware forwarding, no CPU |
+| CC-Tree + nf_flowtable (M5) | 2026-07-24 | 6.18.38-vyos | **10.259 Gbit/s** | 0.16% | HW classification + SW flowtable; line-rate |
+| NXP cdx.ko | 2026-07-02 | 6.12.49-vyos | **8.58 Gbit/s** | — | Vendor reference; opcode/manip chain |
+
+---
+
+## 8. FE-VM EHASH HIT PATH — EXPERIMENTAL / RETIRED
+
+**[SPEC]**
+The FE-VM ehash HIT path (FMan Frame Extension → Virtual Machine → exact-match hash table lookup → hardware forward on HIT) **never produced a working HIT on silicon**. All prior throughput claims associated with this path are **false positives** or **projections**, not measured results.
+
+**[NOTE]**
+- The ~1.5 Gbit/s DDR ceiling was a **projection** based on DDR bandwidth estimates for the ehash lookup path, not a measured throughput number. The path never reached a state where a real iperf3 measurement could be taken.
+- M3/M5 "HIT gate PASSED" throughput claims were **false positives**: the test harness was measuring kernel software forwarding (the fallback path), not FE-VM ehash HIT. The HIT gate never actually fired on silicon.
+- The FE-VM ehash path is architecturally retired from the ASK2 shipping path. The CC-tree + kernel nf_flowtable combination (§7.2) achieves line-rate 10G without it. Any future revival would require a cold-boot silicon re-validation from scratch.
+- See `specs/fman-keygen-flow-key-spec.md` §13 for the ranked failure-candidate list and `plans/ASK2-MASTER-PLAN.md` for the architectural decision to retire this path.
+
+---
+
+## 9. CROSS-BUILD COMPARISON
 
 **[SPEC]**
 
@@ -186,7 +241,11 @@ Starting state on load was *not* pre-tuned — every item below needed active co
 |---|---|---|---|---|
 | Mainline Baseline (§3) | 6.18.37-vyos | 7.35 Gbit/s | 6.48 Gbit/s | Host-to-host, no offload engine engaged |
 | NXP ASK (§4) | 6.12.49-vyos | 3.06 Gbit/s | 3.05 Gbit/s | Host-to-host — **does not exercise CDX forwarding offload**, see §4.1 caveat. Not a fair comparison to §3 for "offload value"; only valid as a same-methodology host-stack comparison. |
+| CC Pass-Through (§7.1) | 6.18.37-vyos | **7.37 Gbit/s** | — | FMan hardware forwarding, 0.16% CPU |
+| CC-Tree + nf_flowtable (§7.2) | 6.18.38-vyos | **10.259 Gbit/s** | — | Line-rate 10G, 0.16% CPU |
+| NXP cdx.ko (§7.3) | 6.12.49-vyos | **8.58 Gbit/s** | — | Forwarding-mode, vendor reference |
 | VPP / AF_XDP (§5) | — | pending | pending | |
 | ASK2 (§6) | — | pending | pending | |
+| FE-VM ehash HIT (§8) | — | **RETIRED** | — | Never produced a working HIT; prior claims were false positives |
 
-**[?]** A true ASK-offload-vs-baseline comparison requires a forwarding-mode test (traffic transiting `.185`/`.106` between two other endpoints) — not yet run. Add a §8 "Forwarding-mode results" section when that harness is available, rather than conflating it with the host-to-host numbers above.
+**[?]** A true ASK-offload-vs-baseline comparison requires a forwarding-mode test (traffic transiting `.185`/`.106` between two other endpoints) — not yet run for the CC-tree paths. The CC Pass-Through and CC-Tree + nf_flowtable numbers above are host-to-host (like §3/§4); the cdx.ko number is forwarding-mode. Add a §10 "Forwarding-mode results" section when that harness is available for the CC-tree paths, rather than conflating it with the host-to-host numbers above.

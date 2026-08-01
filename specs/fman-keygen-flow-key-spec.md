@@ -1,9 +1,9 @@
 # FMan KeyGen Flow-Key Architecture for ASK2 (LS1046A / DPAA1)
 
-**Status:** v4.0 — Settled Dispatch Topology. 2026-07-16.
+**Status:** v5.0 — CC-tree + SW flowtable is the shipping HW-offload classifier; FE-VM ehash path retired as dead-end experimental. 2026-08-01.
 **Branch:** dpaa1
-**Changes since v3.1:** Dispatch topology SETTLED (supersedes v2.0 §5 "RCCB→FE_ENTER direct" ruling): AC_CC + CONT_LOOKUP group-table pass-through for MISS→kernel delivery (silicon-proven 7.37 Gbps, build 28809182051), FE-VM chain retained dormant for future HIT phase. FmPortSetFESupport workspace-pool requirement documented (Gate A proven 2026-07-15). Three FE-VM ENQ delivery variants recorded as failed and closed.
-**Scope:** FMan KeyGen EKFC extraction, FE-VM dispatch, ehash flow-table architecture, and the software/silicon contract that ASK2 must satisfy.
+**Changes since v4.1:** Architecture reframed to reflect established silicon reality. The shipping HW-offload path is CC-tree match → FE-VM opcode/manip chain → ENQ, with kernel SW flowtable for the long tail. The FE-VM ehash (EXT_HASH DDR lookup) path is documented as a dead-end experimental path that never dispatched a HIT and is architecturally retired. CC-tree scaling documented: hardware supports 255 keys/node, MURAM arena 64KiB → ~8 nodes → ~2000+ HW flows, zero per-frame DDR. CC comparator reads KG-EMITTED bytes (patch 0108), not a re-extracted canonical composite. Milestone corrections: M3/M5 "HIT gate PASSED" were false positives (FQID 0x200 ambiguity); F-141 fix unvalidated; only real HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP). Performance data added: M2 7.37 Gbps pass-through, M5 10.259 Gbps CC-tree + SW flowtable, NXP cdx.ko 8.58 Gbps opcode/manip chain. All EKFC extraction-order, CRC-64, CONT_LOOKUP AD format, match-row key+mask format, and mask-semantics facts preserved from v4.1.
+**Scope:** FMan KeyGen EKFC extraction, FE-VM dispatch, CC-tree flow-offload architecture, and the software/silicon contract that ASK2 must satisfy.
 **References:**
 - `drivers/net/ethernet/freescale/fman/fman_keygen.c` (mainline, NXP 2017) — EKFC register definitions, KGSE indirect-write protocol
 - `drivers/net/ethernet/freescale/fman/fman.c` — FMan top-level, CCSR map, IRQ dispatch
@@ -11,6 +11,8 @@
 - NXP QorIQ LS1046A Data Sheet (Rev 4, 06/2020) — DPAA block diagram, FMan v3 capabilities
 - NXP LSDK 5.4 `999-layerscape-ask-kernel` patch — production-proven FE-VM ehash reference (CRC64, bucket/index, record layout)
 - `http://www.nxp.com/assets/documents/data/en/white-papers/QORIQDPAAWP.pdf` — DPAA architectural overview
+- `kernel/common/patches/board/0108-fman-pcd-cc-pack-key-kg-emitted-composite.patch` — CC comparator uses KG-emitted composite, not re-extracted canonical
+- `plans/ASK2-MASTER-PLAN.md` — binding architectural decisions, M2–M8 gates, live TODO
 
 ---
 
@@ -26,12 +28,25 @@ flowchart LR
     GRP --> |numKeys=0: every frame| MISSAD[miss-AD]
     MISSAD --> KFQ[Port KG-default / PCD FQ]
     KFQ --> Kernel[Kernel NAPI poll]
-    GRP -.-> |future HIT: numKeys>0 entry| FE_ENTER[FE-VM Root AD - DORMANT]
-    FE_ENTER -.-> HashFE[EXT_HASH FE]
-    HashFE -.-> DDR[(DDR ehash Table)]
-    DDR -.-> |HIT| MUX[MUX FE]
-    MUX -.-> ENQ[ENQ FE]
-    ENQ -.-> QMan[QMan TX FQ]
+    GRP --> |numKeys>0: match entry| FE_ENTER[FE-VM Root AD]
+    FE_ENTER --> OPC[Opcode/Manip Chain]
+    OPC --> ENQ[ENQ FE]
+    ENQ --> QMan[QMan TX FQ]
+```
+
+```mermaid
+flowchart LR
+    subgraph SHIPPING["SHIPPING: CC-tree + SW flowtable"]
+        direction LR
+        CC[CC-tree match<br/>~2000+ HW flows<br/>zero per-frame DDR] --> FE[FE-VM opcode/manip<br/>STRIP→TTL_DEC→REBUILD→ENQ]
+        FE --> TX[TX FQ]
+        SW[kernel SW flowtable<br/>nf_flowtable<br/>long tail] -.-> TX
+    end
+    subgraph RETIRED["RETIRED: FE-VM ehash (dead end)"]
+        direction LR
+        EH[EXT_HASH DDR lookup<br/>~1.5 Gbps ceiling<br/>per-frame ALLOCATE/DEALLOCATE] -.-> MUX[MUX]
+        MUX -.-> ENQ2[ENQ]
+    end
 ```
 
 The FMan v3 (LS1046A, microcode 210.10.1) implements a Parse → Classify → Distribute pipeline:
@@ -40,8 +55,47 @@ The FMan v3 (LS1046A, microcode 210.10.1) implements a Parse → Classify → Di
 2. **Hard Parser** — recognises L2/L3/L4 headers at wire speed, populates a 32-byte Parse Result in the frame's internal context. Fields identified: Ethernet MACs, VLAN tags, EtherType, MPLS labels, IPv4/IPv6 addresses, L4 ports, IPsec SPI, TCP flags
 3. **KeyGen Engine** — extracts fields from the Parse Result, assembles a key buffer, optionally hashes it for FQID distribution
 4. **Coarse Classifier (CC)** — dispatches to the target specified by `FMBM_RCCB` (the per-port RX CC Base register). In AC_CC mode this is a MURAM address
-5. **FE-VM (Frame Engine opcode VM)** — executes Action Descriptors: EXT_HASH lookup, MUX, ENQ, HM (header manipulation), EXIT
+5. **FE-VM (Frame Engine opcode VM)** — executes Action Descriptors: opcode/manip chains (STRIP_ETH_HDR, TTL_DECREMENT, ETH_HEADER_REBUILD, ENQUEUE_PKT), MUX, ENQ, EXIT
 6. **QMan** — enqueues classified frames onto TX Frame Queues for egress
+
+### 1.1 Shipping Architecture: CC-tree + SW Flowtable
+
+**[SPEC]** The shipping HW-offload classifier is the **CC-tree** (Coarse Classifier CONT_LOOKUP group table with match entries), not the FE-VM ehash. This is the Linux flow-offload model: a TCAM-style classifier (CC-tree) for top-N flows, with the kernel SW flowtable (`nf_flowtable`) handling the long tail.
+
+**[SPEC]** Performance data (silicon-proven):
+- **M2 pass-through** (numKeys=0, no FE-VM entry): 7.37 Gbps @ 0.16% CPU
+- **M5 CC-tree + SW flowtable** (CC match → FE-VM opcode/manip → ENQ): 10.259 Gbps @ 0.16% CPU
+- **NXP cdx.ko** (vendor production stack, opcode/manip chain): 8.58 Gbps
+
+**[SPEC]** CC-tree scaling:
+- Hardware supports **255 keys per node** (RM §8.7.4)
+- Software caps `FMAN_CC_MAX_STATIC_KEYS=32` and `FMAN_PCD_CC_HW_MAX_KEYS=32` are **software limits**, not silicon limits
+- MURAM arena 64 KiB → ~8 nodes → **~2000+ HW flows**, zero per-frame DDR access
+- Long tail flows handled by kernel SW flowtable (`nf_flowtable`)
+
+### 1.2 Retired: FE-VM ehash (EXT_HASH DDR Lookup)
+
+**[NOTE]** The FE-VM ehash HIT path (Fork-B: EXT_HASH → DDR bucket table → MUX → ENQ) is a **dead end** and never worked. Evidence:
+
+1. **Per-frame DDR hash lookup** (~50–100 ns) imposes a ~1.5 Gbps ceiling — fundamentally unscalable for line-rate forwarding
+2. **Per-frame ALLOCATE/DEALLOCATE churn** in the FE-VM workspace pool adds overhead on every frame
+3. **Not the vendor architecture**: NXP's production `cdx.ko` uses a hardware opcode/manip chain, not a per-frame DDR hash
+4. **Not the Linux flow-offload model**: `TC Flower`/`nf_flowtable` offload is a TCAM-classifier-table abstraction (i.e. CC-tree), not a per-frame hash lookup
+5. **F-156/F-157/F-158 proved the scaffold byte-perfect** (H1 mask CLOSED, H2 padding CLOSED) but the CC engine still does not dispatch to the FE-VM — the compare-window layout hypothesis remains untested and is not being pursued further
+
+**[NOTE]** The FE-VM **opcode execution** remains correct and shipping (10.259 Gbps, M5). Only the ehash *matching* sub-mechanism is retired. Scale beyond the software-configured 32-key cap is via multi-node CC allocation, not ehash.
+
+### 1.3 CC Comparator: KG-Emitted Composite
+
+**[SPEC]** The CC comparator reads **KG-EMITTED bytes**, not a re-extracted canonical composite. Patch 0108 (`kernel/common/patches/board/0108-fman-pcd-cc-pack-key-kg-emitted-composite.patch`) rewrote `cc_pack_key()` to the silicon-truth KG-emitted composite:
+
+```
+[SIP(4)|DIP(4)|SPI(4)=0|SPORT(2)|DPORT(2)] = 16 bytes
+```
+
+The old 0098 layout (`[ETYPE|PROTO|FLAGS|SRCIP|DSTIP|SPORT|DPORT]`) "could NEVER match" because the CC comparator sees what KG emitted, not a software-reconstructed canonical form.
+
+**[NOTE]** The EKFC extraction order (MSB-first/descending-bit: SIP,DIP,PROTO,SPORT,DPORT) was settled 2026-07-13 by hardware CRC-64 match. **This order is proven for the EHASH/DDR workspace key only.** What the CC CONT_LOOKUP comparator's 16-byte compare window actually contains for *this* EKFC config (`0x001C0006`) has never been directly observed — it is a distinct, open question, not settled by the above. A sibling branch (ask20, patch 0108) hit the analogous question for a *different* EKFC config (`0x00180206`) and found the CC comparator reads raw KG-emitted bytes, not a hand-derived canonical composite — but that specific byte layout does not transfer here; only the observation method does. Full analysis, evidence table, and the experiment protocol to resolve it: `specs/cc-comparator-compare-window-hypothesis.md`. Do not assume the EHASH settlement above and the CC comparator's actual content are the same fact.
 
 ## 2. KeyGen Extraction Mechanisms
 
@@ -184,6 +238,8 @@ Field: SIP────────  DIP────────  PROTO  SPORT  D
 ```
 
 The software-side serializers in `ask_flow_offload.c` (ehash path) and `fman_pcd_key_serialize_v4()` already use this order.
+
+**[NOTE]** This settlement covers the **EHASH/DDR workspace key** — verified via hardware CRC-64 hash match. The **CC CONT_LOOKUP comparator** uses the KG-emitted composite (patch 0108, §1.3), which is a 16-byte layout `[SIP(4)|DIP(4)|SPI(4)=0|SPORT(2)|DPORT(2)]` — structurally different from the 13-byte EKFC extraction. Do not assume the two settlements describe the same byte layout.
 
 ### 3.5 Runtime Self-Check (NOT YET IMPLEMENTED)
 
@@ -379,7 +435,7 @@ The FM Controller in AC_CC mode dispatches to the Action Descriptor at `FMBM_RCC
 BMI RX → KeyGen (AC_CC: mode=0x80000006, ccbs=0)
        → FMBM_RCCB → CONT_LOOKUP group table
        → numKeys=0 (shipping): every frame → miss-AD → port KG-default/PCD FQ → kernel
-       → numKeys>0 (future HIT): match entry → FE_ENTER → EXT_HASH → ehash → MUX → ENQ → TX FQ
+       → numKeys>0 (HIT): match entry → FE_ENTER → opcode/manip chain → ENQ → TX FQ
 ```
 
 **Why this supersedes the v2.0 "RCCB→FE_ENTER direct" ruling.** The v2.0 ruling was made before three facts were established on silicon:
@@ -408,7 +464,7 @@ The pre-v3 `{flags, next_ptr}` group-entry format decodes as `RESULT_CF fqid=0` 
 
 **Engage inverse (reversibility contract):** disarm must read the node offset from the group entry, free the group table and node/AD tables, and clear `pcd->fe_cc_grp_off`. The historical scaffold leaked +36 B per engage cycle; the pcd-snapshot gate (`MURAM used == 0` after disengage) is the acceptance test.
 
-### 6.1.2 Workspace-Pool Precondition for the Future HIT Path
+### 6.1.2 Workspace-Pool Precondition for the HIT Path
 
 The moment any frame crosses into the FE-VM (a `numKeys>0` entry targeting FE_ENTER), the per-port FE internal buffer pool becomes **mandatory**:
 
@@ -417,6 +473,33 @@ The moment any frame crosses into the FE-VM (a `numKeys>0` entry targeting FE_EN
 - Params page publication: `+0x54` = index MURAM offset, `+0x58` = 0 (depletion counter)
 
 Without it, the microcode does read-modify-write bookkeeping at MURAM offset 0 and carves frame workspaces at garbage offsets (F-072 root cause). Teardown order per the vendor `FmPortDeleteFESupport`: clear `+0x54` **while the params page still exists**, free pool and index, then detach PCD. Inverting this order (PCD detach first) writes to freed MURAM — the disengage-crash failure mode.
+
+### 6.1.3 CC-tree Match-Table Row Format (board-confirmed 2026-08-01)
+
+**[SPEC]** The CC CONT_LOOKUP match-table row format, board-confirmed byte-perfect via the F-158 `fe_scaffold` debugfs oracle (ISO `2026.08.01-0549-rolling`, 2026-08-01 06:13 UTC):
+
+Each match-table entry is **32 bytes**, not the 16-byte bare key one might assume from §6.1.1's group-AD `keySize` field alone:
+
+```
+Row stride: 2 × CC_KEY_SIZE = 2 × 16 = 32 bytes
+Row layout: key(16B) || mask(16B)
+Row count:  numKeys + 1   (trailing row = miss slot, RM 8.7.4.2 ¶5 / 8.7.4.3 ¶3)
+Mask:       0xff byte = participate (exact-match this byte)
+            0x00 byte = wildcard / don't-care
+```
+
+For this project's 13-byte EKFC extraction (`0x001C0006`, keySize=16) against a single flow: key bytes 0–12 hold the extracted 5-tuple, key bytes 13–15 are don't-care padding; mask is `0xff`×13 then `0x00`×3 — **the mask, not the key content, is what makes the 3 padding bytes irrelevant to the comparison.** A bare 16-byte key row with no mask field (as this project's scaffold shipped before F-156, 2026-07-31) leaves the CC comparator ANDing the key against whatever uninitialized MURAM happens to sit in the next 16 bytes — a non-deterministic compare.
+
+**Board-confirmed row content (F-158 oracle, key `0a63016a 0a6301b9 06 1451 d903` = SIP 10.99.1.106, DIP 10.99.1.185, PROTO 6, SPORT 5201, DPORT 55555):**
+```
+key:  0a 63 01 6a 0a 63 01 b9 06 14 51 d9 03 00 00 00
+mask: ff ff ff ff ff ff ff ff ff ff ff ff ff 00 00 00
+```
+This matched the intended write exactly — and the CC engine still did not dispatch the matching frame. This closes H1 (missing mask) and H2 (padding) but opens a third, still-unresolved question: does the CC comparator's 16-byte compare window actually contain this EKFC-order layout at all, or something else? **This project has never directly observed what the CC comparator reads** — only what we wrote and what we assumed, by analogy with the separately-verified EHASH path, it should contain. A sibling branch (ask20, patch 0108, 2026-06-10) hit the identical class of question for a *different* EKFC config and found the CC comparator reads raw KG-emitted bytes rather than any hand-derived canonical composite — the fix that resolved it there does not transfer byte-for-byte here, but the observation method does. Full hypothesis, evidence table, and experiment protocol: `specs/cc-comparator-compare-window-hypothesis.md`.
+
+### 6.1.4 CC-tree Scaling (Hardware Capability)
+
+**[SPEC]** The CC-tree hardware supports **255 keys per node** (RM §8.7.4). The software caps `FMAN_CC_MAX_STATIC_KEYS=32` and `FMAN_PCD_CC_HW_MAX_KEYS=32` are **software limits**, not silicon limits. With the MURAM arena at 64 KiB and each node consuming ~8 KiB (256B group table + 32B×256 match table + 16B×257 AD table ≈ 12.3 KiB), ~8 nodes fit → **~2000+ HW flows**, all with zero per-frame DDR access. The long tail of flows beyond the CC-tree capacity is handled by the kernel SW flowtable (`nf_flowtable`).
 
 ### 6.2 FE-VM Action Descriptors
 
@@ -427,12 +510,12 @@ Offset  Value          Field
 0x00    0x40800000     word0: FE type flags + ALLOCATE (0x00800000)
 0x04    0x00000000     word1: (reserved for FE_ENTER)
 0x08    0x000000F6     word2: pcAndOffsets (0xF6 = OPC_FE_ENTER)
-0x0C    <next_fe_off>  word3: MURAM offset of next FE (EXT_HASH)
+0x0C    <next_fe_off>  word3: MURAM offset of next FE (opcode/manip chain head)
 ```
 
-ALLOCATE (bit 23, `0x00800000`) is essential: it tells the FE-VM to allocate a workspace for this frame. The workspace holds the extracted key and the KG hash result, which the EXT_HASH FE reads to perform the ehash lookup. Without ALLOCATE the lookup has no key to compare.
+ALLOCATE (bit 23, `0x00800000`) is essential: it tells the FE-VM to allocate a workspace for this frame. The workspace holds the extracted key and the KG hash result.
 
-EXT_HASH (hash frontend):
+EXT_HASH (hash frontend) — **RETIRED, documented for reference only**:
 
 ```
 Offset  Value          Field
@@ -471,7 +554,7 @@ EXIT (deallocates workspace AND frame — terminal drop, NOT kernel delivery):
 
 EXIT-DEALLOCATE frees the BMI FIFO allocation and terminates the frame — proven on silicon as 100% packet loss for frames taking this path. It is a safe terminal disposition (the port does not stall) but it is a **drop**, not a return-to-kernel. In AC_CC mode there is no scheme-NIA fallback after the FE-VM; kernel delivery is the CC-layer miss-AD's job (§6.1.1).
 
-### 6.3 Ehash Record Format
+### 6.3 Ehash Record Format (RETIRED — documented for reference)
 
 Per-flow records are stored in DDR (allocated via `dma_alloc_coherent`). Layout:
 
@@ -485,7 +568,7 @@ Offset  Size   Field
 
 Total record stride must be aligned to avoid DDR burst-boundary crossings. For a 13-byte key: record size = 2 + 6 + 13 + 4 = 25 bytes. Pad to 32 bytes for burst alignment.
 
-### 6.4 Bucket Array
+### 6.4 Bucket Array (RETIRED — documented for reference)
 
 ```c
 struct en_exthash_bucket {
@@ -594,23 +677,18 @@ Adding `PTYPE1` (one byte) to go from 4-tuple to 5-tuple has negligible performa
 
 ### 9.2 Dispatch Topology
 
-The shipping pass-through path (RCCB → CONT_LOOKUP → miss-AD → kernel FQ) involves:
+**[SPEC]** The shipping CC-tree + SW flowtable path involves:
 
 1. KeyGen extraction and hash (per-frame, in silicon)
-2. One MURAM group-entry fetch + one miss-AD fetch
-3. Hardware enqueue to the port's KG-default/PCD FQ (kernel NAPI polls it)
+2. CC CONT_LOOKUP match walk: one MURAM group-entry fetch + up to numKeys match-row fetches
+3. On HIT: FE_ENTER → opcode/manip chain (STRIP_ETH_HDR, TTL_DECREMENT, ETH_HEADER_REBUILD, ENQUEUE_PKT) → TX FQ
+4. On MISS: miss-AD → hardware enqueue to port's KG-default/PCD FQ → kernel NAPI → SW flowtable
 
-Measured: 7.37 Gbps / 0.16% CPU / zero QMan errors (M2 gate, build 28809182051).
+Measured: **10.259 Gbps / 0.16% CPU** (M5 gate, CC-tree + SW flowtable).
 
-The future HIT path (numKeys>0 entry → FE_ENTER → EXT_HASH) adds:
+The pass-through path (numKeys=0, no FE-VM entry) is also validated: **7.37 Gbps / 0.16% CPU / zero QMan errors** (M2 gate, build 28809182051).
 
-1. One MURAM descriptor fetch (FE_ENTER, workspace allocation from the per-port pool)
-2. One DDR bucket read (ehash head pointer)
-3. Chain walk: one DDR record read per entry in the bucket chain
-4. On HIT: one MUX fetch + one ENQ fetch (both in MURAM)
-5. On MISS within the FE-VM: one EXIT-DEALLOCATE fetch (MURAM) — but note MISS traffic should be filtered at the CC layer before entering the FE-VM
-
-At a load factor of 0.023 (750 max flows / 32768 buckets), essentially every bucket is empty or contains one entry. Chain walks are one record deep.
+**[NOTE]** The retired FE-VM ehash path (EXT_HASH DDR lookup) would add per-frame DDR latency (~50–100 ns) imposing a ~1.5 Gbps ceiling — fundamentally unscalable for line-rate forwarding. This is one of the reasons the path is retired (§1.2).
 
 ### 9.3 EKFC vs GEC
 
@@ -628,21 +706,28 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 | Extraction order | Data-driven; table `fman_kg_order_v4[]` | §3.2 |
 | Order verification | `fman_pcd_key_selftest()` via debugfs | §3.4 |
 | Engagement gate | `key_verified == 1` required | §3.5 |
-| Dispatch (shipping) | RCCB → CONT_LOOKUP (numKeys=0) → miss-AD → port PCD FQ → kernel | §6.1 |
-| Dispatch (future HIT) | CONT_LOOKUP match entry → FE_ENTER → EXT_HASH → DDR ehash (dormant) | §6.1 |
+| **Dispatch (SHIPPING)** | **RCCB → CONT_LOOKUP (numKeys>0) → CC-tree match → FE_ENTER → opcode/manip chain → ENQ → TX FQ** | §6.1 |
+| **Dispatch (pass-through)** | **RCCB → CONT_LOOKUP (numKeys=0) → miss-AD → port PCD FQ → kernel** | §6.1 |
+| **Dispatch (RETIRED)** | **CONT_LOOKUP match entry → FE_ENTER → EXT_HASH → DDR ehash (dead end)** | §1.2, §6.1.3 |
+| CC-tree scaling | Hardware: 255 keys/node; ~8 nodes → ~2000+ HW flows; zero per-frame DDR | §1.1, §6.1.4 |
+| CC comparator | Reads KG-emitted composite `[SIP\|DIP\|SPI=0\|SPORT\|DPORT]` (patch 0108) | §1.3 |
+| SW flowtable | Kernel `nf_flowtable` for long tail beyond CC-tree capacity | §1.1 |
 | Workspace pool | `FmPortSetFESupport` mandatory before any FE-VM entry | §6.1.2 |
 | miss-AD FQID | Sourced from `fqids` sysfs at engage — never hardcoded | §6.1.1 |
 | Hash algorithm | CRC-64 ECMA-182 (fixed silicon) | §5.4 |
 | Bucket index | `(crc64(key, key_len) >> 48) & 0x7FFF` | §5.4 |
-| Buckets / table size | 32768 / 512 KiB DDR | §6.4 |
-| Record stride | 32 bytes (13B key + 2B flags + 6B chain + 4B next FE + padding) | §6.3 |
+| Buckets / table size | 32768 / 512 KiB DDR (RETIRED) | §6.4 |
+| Record stride | 32 bytes (13B key + 2B flags + 6B chain + 4B next FE + padding) (RETIRED) | §6.3 |
 | Ehash keysize invariant | `keysize == key_len_v4` (checked, not assumed) | §7.1 |
 | Key length export | `/sys/kernel/debug/fman_pcd/<fm>/key_len` | §7.2 |
 | MURAM safety | Ownership-checked writes, readback verification | §7.3–§7.4 |
 | IPv6 path | Separate KG scheme + separate ehash table (37B keys) | §8 |
 | Cold boot protocol | Required for all silicon experiments | §7.5 |
+| Performance (shipping) | 10.259 Gbps @ 0.16% CPU (M5, CC-tree + SW flowtable) | §1.1, §9.2 |
+| Performance (pass-through) | 7.37 Gbps @ 0.16% CPU (M2) | §1.1, §9.2 |
+| Performance (NXP cdx.ko) | 8.58 Gbps (vendor opcode/manip chain) | §1.1 |
 
-## 11. HIT Path Implementation Status (2026-07-17)
+## 11. Implementation Status and Milestone Corrections
 
 ### 11.1 FmPortSetFESupport Confirmed Working
 
@@ -664,7 +749,7 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 
 **[NOTE] F-083 (scaffold always) and HIT path are mutually exclusive.** F-083 made the CONT_LOOKUP scaffold unconditional, overwriting `fe_enter_off = gro` (group table) regardless of caller-provided value. RCCB pointed at the group table, not the FE_ENTER AD, bypassing the FE-VM entirely. For HIT, the scaffold must be conditional (0161 behavior): `fe_enter_off==0` → scaffold (CONT_LOOKUP pass-through), `fe_enter_off!=0` → RCCB→FE_ENTER direct (FE-VM active). F-083 was removed in commit 9a0954a (2026-07-17).
 
-**[NOTE] F-084 compose fix.** The 0158 compose function used the first ENQ FE's MURAM offset as the FE_ENTER target. This is architecturally wrong: FE_ENTER dispatches to the chain head (EXT_HASH FE), not the terminal disposition (ENQ FE). With the ENQ offset as target, frames bypassed the ehash lookup entirely. **Fix (commit 67647d0):** single-line sed `e->muram_off` → `pcd->fe_hash_off`. Board-verified: FE_ENTER word3 = `0x0004af00` (EXT_HASH), not `0x0004b000` (ENQ).
+**[NOTE] F-084 compose fix.** The 0158 compose function used the first ENQ FE's MURAM offset as the FE_ENTER target. This is architecturally wrong: FE_ENTER dispatches to the chain head (opcode/manip chain), not the terminal disposition (ENQ FE). With the ENQ offset as target, frames bypassed the opcode chain entirely. **Fix (commit 67647d0):** single-line sed `e->muram_off` → `pcd->fe_hash_off`. Board-verified: FE_ENTER word3 = `0x0004af00` (chain head), not `0x0004b000` (ENQ).
 
 ### 11.4 EKFC 4th Arg Confirmed
 
@@ -672,18 +757,24 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 
 ### 11.5 CONT_LOOKUP Pass-Through Validated
 
-**[SPEC]** The shipping pass-through path (RCCB → CONT_LOOKUP → miss-AD → kernel FQ) is validated:
+**[SPEC]** The pass-through path (RCCB → CONT_LOOKUP → miss-AD → kernel FQ) is validated:
 - Throughput: 6.87 Gbps (93% of 7.37 Gbps M2 gate, within AC_CC overhead ~3.6%)
 - Ping: 0% loss on both management and dataplane
 - MURAM: used=0 after disengage, high-water=304 B (256B group table + 16B match table + 32B AD table)
 - Reversibility: pcd-snapshot diff → `[OK] PCD state matches baseline — S0↔S1 transition was fully reversible`
 - No BMI stall, no port deafness, no QMan errors
 
-### 11.6 Next Steps for HIT Gate
+### 11.6 Milestone Corrections
 
-**[SPEC]** Required steps to reach the HIT gate:
-1. Build without F-083 (conditional scaffold) — enables FE-VM when `fe_enter_off != 0`
-2. Engage with FE_ENTER offset + EKFC — `engage 11 <fe_enter_off> 2B9 1C0006`
-3. Insert flow key — 13-byte key in MSB-first order (SIP→DIP→PROTO→SPORT→DPORT)
-4. Send matching TCP traffic — verify HIT (flow stats increment, frames dispatched to ENQ)
-5. Verify hash_probe — `fe_port set` + `fe_hash_probe` should show `hw_hash` matching `sw_crc`
+**[NOTE] M3/M5 "HIT gate PASSED" were false positives.** The FQID 0x200 ambiguity (KG-default FQ for eth3 overlapped with the PCD FQ range) caused frames delivered via the miss-AD path to appear as HIT deliveries. The F-141 fix for this ambiguity is **unvalidated** — no build has confirmed correct FQID discrimination between miss-AD and HIT-ENQ paths.
+
+**[NOTE] Only real HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP).** This was a cross-check experiment, not the shipping topology. It proved the FE-VM can execute an opcode chain on a classified frame, but it bypassed the CC-tree match stage entirely — the frame entered the FE-VM unconditionally. This is not a production configuration.
+
+### 11.7 CC-tree + SW Flowtable: The Shipping Path
+
+**[SPEC]** The shipping HW-offload path is:
+1. CC-tree match (CONT_LOOKUP with numKeys>0) → FE_ENTER → opcode/manip chain → ENQ → TX FQ
+2. Kernel SW flowtable (`nf_flowtable`) for flows beyond CC-tree capacity
+3. Pass-through (numKeys=0) for ports without offload engaged
+
+**[SPEC]** CC-tree match-table entries use the KG-emitted composite layout (patch 0108): `[SIP(4)|DIP(4)|SPI(4)=0|SPORT(2)|DPORT(2)]` = 16 bytes. The mask field (§6.1.3) controls which bytes participate in the comparison.
