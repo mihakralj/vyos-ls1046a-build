@@ -176,7 +176,7 @@ int  fman_pcd_offload_engage(struct fman *fm, u8 hw_port_id);
  */
 void fman_pcd_offload_disengage(struct fman *fm, u8 hw_port_id);
 
-int  fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id);
+int  fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id, u32 enq_fqid);
 void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);
 int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 			   const struct fman_pcd_fe_flow_action *action);

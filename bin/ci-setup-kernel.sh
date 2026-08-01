@@ -1753,6 +1753,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-148 v4: CC match table key write + real FE_ENTER AD copy"
 fi
 
+# F-157: Wire the dedicated TX FQ into the FE-VM ENQ (HIT destination).
+# __fman_pcd_fe_build_vm_chain() built ENQ with tx_fqid=0x200, identical to
+# the CC miss-AD target — HIT and MISS converged on kernel FQ 0x200 and no
+# instrument could discriminate them.  R1: fman_pcd_fe_engage() now takes a
+# caller-supplied enq_fqid (ask.ko's dedicated TX FQ, P4.1, ch 0x801 = eth4
+# TX), stored on pcd->fe_enq_fqid and used by the chain builder (fallback
+# 0x200).  A HIT frame now goes to the dedicated TX FQ (observable) while a
+# miss still goes miss-AD -> kernel FQ 0x200 on eth3.  Runs after F-148.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_157.py" 2>&1
+    echo "### F-157: dedicated TX FQ wired into FE-VM ENQ (HIT destination)"
+fi
+
 # F-093: Dynamic FQID resolution — kill hardcoded 0x200.
 # Uses fman_pcd_resolve_miss_fqid() from port params page instead.
 # Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
