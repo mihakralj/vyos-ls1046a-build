@@ -285,21 +285,34 @@ for package in $packages; do
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
     echo "### Skipping ./build.py for vyos-1x (cache hit)"
   else
-    # Defensive: reset any pre-existing vyos-1x checkout to clean tracked
-    # state right before build.py runs. ci-setup-vyos1x.sh does the same
-    # reset much earlier (its own "Setup vyos-1x patches" step), but on
-    # this persistent self-hosted/local runner that step and this one can
-    # be minutes apart with kernel/DTB/vyos-build setup running in
-    # between — 2026-08-04 debugging found the checkout re-dirtied
-    # (specifically python/vyos/system/grub.py showing modified) by the
-    # time build.py's own `git checkout <commit_id>` ran here, even
-    # though it was verified clean immediately after the earlier reset.
-    # The exact intervening cause wasn't pinned down; reset again here,
-    # closest to the point of actual use, rather than leave it to chance.
-    if [ -d vyos-1x/.git ]; then
-      git -C vyos-1x reset --hard HEAD
-      git -C vyos-1x clean -fdq
-      echo "### vyos-1x/: reset to clean tracked state immediately before build.py"
+    # Defensive: reset any pre-existing $package/$package checkout to clean
+    # tracked state right before build.py runs. For vyos-1x, ci-setup-
+    # vyos1x.sh does an earlier reset in its own "Setup vyos-1x patches"
+    # step, but on this persistent self-hosted/local runner that step and
+    # this one can be minutes apart with kernel/DTB/vyos-build setup
+    # running in between — 2026-08-04 debugging found the vyos-1x checkout
+    # re-dirtied (python/vyos/system/grub.py showing modified) by the time
+    # build.py's own `git checkout <commit_id>` ran here, even though it
+    # was verified clean immediately after the earlier reset. For vpp
+    # (no earlier reset exists), the SAME persistent-checkout class of
+    # problem showed up as a worse failure: a previous build's incomplete
+    # `git am` left .git/rebase-apply behind, which makes every subsequent
+    # `git am` in build_cmd's patch loop fail outright with "previous
+    # rebase directory still exists" until cleared — plus separate leftover
+    # unstaged modifications from a prior successful build. `git am --abort`
+    # needs a committer identity; use the same -c override the build_cmd
+    # patch loop itself already uses (data/vyos-build-008-vpp-libxdp.patch's
+    # `git -c user.email=... -c user.name=vyos am`) rather than touching
+    # global git config. Neither exact intervening re-dirty cause was
+    # pinned down; reset again here, closest to the point of actual use,
+    # rather than leave it to chance.
+    if [ -d "$package/.git" ]; then
+      if [ -d "$package/.git/rebase-apply" ]; then
+        git -c user.email=maintainers@vyos.net -c user.name=vyos -C "$package" am --abort || true
+      fi
+      git -C "$package" reset --hard HEAD
+      git -C "$package" clean -fdq
+      echo "### $package/: reset to clean tracked state immediately before build.py"
     fi
     ./build.py
   fi
