@@ -285,6 +285,22 @@ for package in $packages; do
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
     echo "### Skipping ./build.py for vyos-1x (cache hit)"
   else
+    # Defensive: reset any pre-existing vyos-1x checkout to clean tracked
+    # state right before build.py runs. ci-setup-vyos1x.sh does the same
+    # reset much earlier (its own "Setup vyos-1x patches" step), but on
+    # this persistent self-hosted/local runner that step and this one can
+    # be minutes apart with kernel/DTB/vyos-build setup running in
+    # between — 2026-08-04 debugging found the checkout re-dirtied
+    # (specifically python/vyos/system/grub.py showing modified) by the
+    # time build.py's own `git checkout <commit_id>` ran here, even
+    # though it was verified clean immediately after the earlier reset.
+    # The exact intervening cause wasn't pinned down; reset again here,
+    # closest to the point of actual use, rather than leave it to chance.
+    if [ -d vyos-1x/.git ]; then
+      git -C vyos-1x reset --hard HEAD
+      git -C vyos-1x clean -fdq
+      echo "### vyos-1x/: reset to clean tracked state immediately before build.py"
+    fi
     ./build.py
   fi
 
