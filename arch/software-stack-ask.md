@@ -4,9 +4,36 @@
 
 ## AI READING INSTRUCTION
 
-This document maps the ASK2 software stack onto DPAA1 silicon. The canonical offload mechanism is
-**CC-tree classification + kernel SW flowtable + manip-chain forwarding** (§7). FE-VM ehash HIT
-(Fork-B) is retired experimental (§8). All facts tagged `[SPEC]` or `[NOTE]`.
+> **⚠ CRITICAL CORRECTION (2026-08-04) — §7, §8, and §9 below are WRONG about what is currently wired.**
+> §7 and §9 assert CC-tree is the shipping insert path and §8 asserts FE-VM ehash "is NOT shipping."
+> This is backwards as of current HEAD. Commit `dd364494` (CR-007, 2026-07-27) deleted CC-tree's
+> flow-insert code from `ask.ko` (all callers of `fman_pcd_cc_node_add_key()` removed). The only insert
+> path actually wired today is `ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` →
+> `fman_pcd_ehash_add_key()` (confirmed against patch `0153-fman-pcd-fe-engage-api.patch`) — i.e.
+> **FE-VM ehash (Fork-B), the mechanism §8 calls "NOT shipping."** Fork-B is separately proven
+> (F-156/F-157/F-158) to never dispatch a HIT. Net: as of 2026-08-04, `ask.ko` has **no working
+> hardware-classification insert path** — CC-tree is absent from the code, and the one mechanism left
+> wired is the one already proven broken. §9's numbered runtime steps (2, 3, 6) describing "CC tree"
+> insert/lookup/teardown do not correspond to any function that currently executes. **Retraction
+> (2026-08-04, later same day) on the M5 measurement:** this banner previously claimed M5 (10.259 Gbps,
+> 2026-07-24) definitely used CC-tree because `ask_fe_flow_insert()` "didn't exist until 2026-07-26" —
+> that was a git-history artifact of a path-filtered pickaxe search not following a later file rename;
+> the function (under a different source path) and its unconditional call from the REPLACE handler both
+> already existed at M5 time, and `ask_hw_flow_insert()`'s own contemporaneous comment at that commit
+> states the CC-tree shadow array was already software-only bookkeeping, never reaching hardware.
+> **M5's mechanism is therefore uncertain, not confirmed CC-tree** — most likely pure kernel software
+> forwarding, since neither CC-tree nor ehash produced a working HIT at M5 time. The project may never
+> have silicon-confirmed a genuine hardware-classified HIT at production throughput at any point. What's
+> below reflects the 2026-08-01 *decision* to standardize on CC-tree, not the code that implements it,
+> and not a confirmed-working prior baseline. Full evidence: qdrant `agent_memory`, tag
+> `no-confirmed-hw-hit-ever`, dated 2026-08-04.
+
+This document maps the ASK2 software stack onto DPAA1 silicon. The intended offload mechanism per the
+2026-08-01 decision is **CC-tree classification + kernel SW flowtable + manip-chain forwarding** (§7),
+but per the correction above this is not currently implemented in `ask.ko`. FE-VM ehash HIT (Fork-B,
+§8) is the mechanism actually wired, despite being labeled "retired" below. All facts tagged `[SPEC]`
+or `[NOTE]` should be read as describing the target architecture, not verified current behavior, until
+§7/§8/§9 are rewritten.
 
 ---
 
@@ -160,7 +187,11 @@ The PCD layer is the single biggest gap mainline doesn't fill — which is exact
 
 ## 7. Shipping offload mechanism: CC-tree + SW flowtable + manip chain
 
-**[SPEC]** The ASK2 shipping HW-offload path uses **CC-tree classification (top-N flows) + kernel
+> **⚠ CORRECTION (2026-08-04):** despite the "shipping" label below, `ask.ko`'s CC-tree insert path
+> was deleted by CR-007 (`dd364494`, 2026-07-27) and never restored. No live code path currently
+> installs a CC-tree entry. See the AI READING INSTRUCTION banner at the top of this file.
+
+**[SPEC, intended architecture — not currently implemented, see correction above]** The ASK2 shipping HW-offload path uses **CC-tree classification (top-N flows) + kernel
 software flowtable (tail flows) + FMan manip-chain forwarding**. This is the Linux flow-offload
 model: the FMan PCD Coarse Classification tree matches the top ~2000 flows in hardware; the kernel
 `nf_flowtable` handles the tail; both paths use the same FMan header-manipulation chain for
@@ -192,38 +223,64 @@ flowtable stack.
 
 ---
 
-## 8. FE-VM ehash HIT path (Fork-B) — RETIRED EXPERIMENTAL
+## 8. FE-VM ehash HIT path (Fork-B) — RETIRED EXPERIMENTAL, DESIGNATION vs REALITY
 
-**[SPEC]** The FE-VM ehash exact-match HIT path (Fork-B) is a **dead end** and is **NOT shipping**.
-It never worked at production throughput (~1.5 Gbps DDR ceiling, limited by MURAM read bandwidth
-on the FE workspace path). It is retained in the codebase as experimental/retired and must not be
-re-enabled.
+> **⚠ CORRECTION (2026-08-04):** despite the heading and "[SPEC] ... NOT shipping" below, Fork-B
+> (FE-VM ehash) is the *only* flow-insert mechanism currently wired into `ask.ko`
+> (`ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` → `fman_pcd_ehash_add_key()`). It was intended
+> to be retired on 2026-08-01, but the retirement only updated documentation — CC-tree, the intended
+> replacement, was never rewired in (its code was deleted 2026-07-27, before the retirement decision).
+> There is no `if (0)` guard blocking Fork-B in the current insert path; it runs live on every REPLACE.
+> It is separately proven (F-156/F-157/F-158) to never dispatch a HIT.
+
+**[SPEC, architectural intent]** The FE-VM ehash exact-match HIT path (Fork-B) is a **dead end** and is
+**intended to not ship** per the 2026-08-01 decision — but see the correction above: it is in fact the
+only mechanism currently wired. It never worked at production throughput (~1.5 Gbps DDR ceiling,
+limited by MURAM read bandwidth on the FE workspace path).
 
 **[NOTE]** Fork-B was the original ASK2 design target (FE-VM + ehash table for per-flow exact
-match). It was superseded by the CC-tree + SW flowtable model after silicon measurements proved
-the DDR ceiling makes FE-VM ehash non-viable for line-rate forwarding. The CC-tree approach
-achieves 10.259 Gbps vs Fork-B's ~1.5 Gbps.
+match). The 2026-08-01 decision intended to supersede it with the CC-tree + SW flowtable model after
+silicon measurements proved the DDR ceiling makes FE-VM ehash non-viable for line-rate forwarding, but
+that supersession was never implemented in code (see correction above).
 
-**[SPEC]** Do not re-enable Fork-B. The `if (0)` guards on FE-VM ehash code paths are intentional
-and permanent. Git history holds the experimental code; the guards prevent accidental re-activation
-across rebases.
+**[SPEC]** The intent going forward remains not to re-enable/rely on Fork-B once CC-tree is restored.
+There is currently no code guard preventing Fork-B from running — restoring CC-tree and rewiring the
+REPLACE handler to use it (see §7 correction) is a prerequisite for actually retiring Fork-B, not
+merely a documentation update.
 
 ---
 
 ## 9. ask.ko stack: runtime dataplane model
 
-**[SPEC]** The `ask.ko` stack operates as follows at runtime:
+> **⚠ CORRECTION (2026-08-04):** steps 2, 3, and 6 below describe CC-tree operations. As of current
+> HEAD, `ask.ko` does not perform any of these against a CC tree — the actual call chain for step 2 is
+> `ask_flow_offload.c`'s REPLACE handler → `ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` →
+> `fman_pcd_ehash_add_key()` (FE-VM ehash, not CC-tree), which is proven to never produce a working
+> HIT. Steps 1, 4, 5 (KG scheme programming, manip chain, neighbor maintenance) are accurate as
+> general silicon/driver mechanisms but their "CC tree"/"CC-tree entry" wording should be read as
+> "flow table entry (mechanism currently ehash, not CC-tree)."
+
+**[SPEC, intended model — see correction above for current reality]** The `ask.ko` stack is intended to operate as follows at runtime:
 
 1. **Engage:** `set interfaces ethernet eth<n> offload ask` triggers `ask.ko` to program the
    FMan PCD on that port: KG scheme (EKFC `0x001C0006`, 5-tuple extraction), CC tree root,
    and default forward-to-kernel FQ.
-2. **Flow insertion:** `nf_flowtable` (or `vyos-offload-ask` YNL command) inserts top-N flows
-   into the CC tree. The kernel SW flowtable handles the tail.
-3. **Fast path:** FMan PCD classifies frames through the CC tree. HIT → manip chain → direct
-   forward (no CPU). MISS → default FQ → kernel `nf_flowtable` → software forward.
+2. **Flow insertion (intended CC-tree; actual mechanism is ehash, see correction):** `nf_flowtable`
+   (or `vyos-offload-ask` YNL command) is intended to insert top-N flows into the CC tree. The kernel
+   SW flowtable handles the tail. Currently, flows are instead inserted into the FE-VM ehash table,
+   which never dispatches a HIT.
+3. **Fast path (intended; not currently working):** FMan PCD is intended to classify frames through
+   the CC tree. HIT → manip chain → direct forward (no CPU). MISS → default FQ → kernel
+   `nf_flowtable` → software forward. Since no CC-tree entries are ever installed (step 2), every
+   frame currently takes the kernel software forward path.
 4. **Manip chain:** FMan header manipulation rewrites NAT/VLAN/TTL/cksum in hardware for both
    CC-tree HIT and SW-flowtable paths.
-5. **Disengage:** `delete interfaces ethernet eth<n> offload ask` tears down the KG scheme,
+5. **Neighbor maintenance:** `ask_neigh.c` (part of `ask.ko`) listens for `NETEVENT_NEIGH_UPDATE`
+   (ARP/ND changes) and rewrites the stored destination-MAC in an already-installed flow-table
+   entry's manip chain when a neighbor's MAC changes — keeps HIT-path header rewrites correct
+   without removing and reinstalling the flow. (In practice currently inert, since step 2 never
+   installs a working HW-backed entry.)
+6. **Disengage:** `delete interfaces ethernet eth<n> offload ask` tears down the KG scheme,
    CC tree, and FQ bindings; the port returns to kernel-only forwarding.
 
 **[SPEC]** YNL family `ask` provides the netlink control plane. `vyos-offload-ask` is the
