@@ -2030,6 +2030,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-158 fe_scaffold debugfs dump node"
 fi
 
+# F-159 (2026-08-04, CC-Tree Rebuild Plan Phase 0): fix cc_pack_key()'s KG
+# composite from patch 0108's ask20-branch layout (SIP|DIP|SPI=0|SPORT|DPORT,
+# EKFC 0x00180206) to this branch's real EKFC 0x001C0006 (SIP|DIP|PROTO|
+# SPORT|DPORT) — running the 0107/0108 debugfs CC-tree harness against the
+# wrong composite would produce a false-negative MISS.  Also extends the
+# cc_test debugfs read handler with a raw match-table hex dump (F-158's
+# ground-truth philosophy, applied to the CC-tree harness).  Runs after 0108
+# is applied (fman_pcd_cc.c must already have 0108's cc_pack_key() body).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_159.py" 2>&1
+    echo "### fman_pcd_cc.c: F-159 dpaa1 EKFC cc_pack_key fix + match-table dump"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
