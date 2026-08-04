@@ -4,12 +4,46 @@
 
 ## AI READING INSTRUCTION
 
-This is the PCD pipeline ARCHITECTURE doc. The **CC-tree + kernel SW flowtable + manip-chain** forward
-path is the SHIPPING HW-offload mechanism. The **FE-VM ehash HIT path (Fork-B)** is a retired
-experimental dead-end — it never worked at production throughput (~1.5 Gbps DDR ceiling) and is NOT the
-production PCD forward path. The only real ehash HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8
-ICMP). All production forwarding uses the CC-tree exact-match path with kernel nf_flowtable for the
-long tail.
+> **⚠ CRITICAL CORRECTION (2026-08-04) — read this before trusting anything below about "shipping."**
+> This document (and `plans/ASK2-MASTER-PLAN.md`) describes the **CC-tree + kernel SW flowtable +
+> manip-chain** path as the shipping HW-offload mechanism, based on a 2026-08-01 architectural decision
+> to retire FE-VM ehash and fall back to CC-tree. **That decision was never implemented in code.**
+> Commit `dd364494` (CR-007, 2026-07-27 — four days *before* the 2026-08-01 rewrite) already deleted
+> CC-tree's flow-insert plumbing from `ask.ko` (`struct ask_hw_cc_slot`, the shadow array, and all
+> callers of `fman_pcd_cc_node_add_key()`). `ask.ko`'s only currently-wired insert path
+> (`ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` → `fman_pcd_ehash_add_key()`, confirmed by reading
+> patch `0153-fman-pcd-fe-engage-api.patch`) drives **FE-VM ehash (Fork-B)** — the mechanism this
+> document calls "retired" and proven (F-156/F-157/F-158) to **never dispatch a HIT** on this silicon.
+> Net effect: **as of current HEAD, `ask.ko` has no working hardware-classification insert path at
+> all** — CC-tree is gone, and the only path left in place is the one already proven broken. Every
+> claim below of the form "CC-tree is the shipping/production path" describes the *intended*
+> architecture from the 2026-08-01 decision, not the code that currently exists. Restoring CC-tree
+> requires reimplementing the ~120 lines CR-007 removed (recoverable from `git show dd364494`) and
+> rewiring `ask_flow_offload.c`'s REPLACE handler to call it — this is a real implementation task, not
+> a config or constant change. Full evidence trail: qdrant `agent_memory` collection, entries tagged
+> `ask2-code-review` / `M5-mechanism-resolved` / `T-M6-5-premise-invalid`, dated 2026-08-04.
+>
+> **Retraction on the M5 point (2026-08-04, later same day):** this banner previously claimed M5 was
+> unaffected because `ask_fe_flow_insert()` "didn't exist until 2026-07-26" — that was a git-history
+> artifact (the source moved path in a later refactor; a path-filtered pickaxe search doesn't follow
+> renames, so the function looked newly-introduced when it had existed since well before, under
+> `kernel/flavors/ask/oot-modules/ask/`). Reading the actual M5-era commit (`9ad356a7`, 2026-07-24)
+> shows `ask_fe_flow_insert()` already existed and already ran on every REPLACE, and `ask_hw_flow_insert()`'s
+> own contemporaneous comment states the CC-tree shadow array was *already* software-only bookkeeping
+> ("replaced by Fork-B FE-VM ehash path") — CC-tree's hardware write was already dead before M5. **M5's
+> mechanism is therefore uncertain, not confirmed CC-tree.** The likelier explanation is pure kernel
+> software forwarding (`nf_flowtable`), since neither CC-tree (never hardware-written) nor ehash (F-141
+> shows it broken both before and after 07-24) produced a working HIT at M5 time. This means the project
+> may never have silicon-confirmed a genuine hardware-classified HIT at production throughput at any
+> point. Evidence: qdrant tag `no-confirmed-hw-hit-ever`.
+
+This is the PCD pipeline ARCHITECTURE doc. Historically (through 2026-07-24/M5) the **CC-tree + kernel
+SW flowtable + manip-chain** forward path was the shipping HW-offload mechanism; per the correction
+above, CC-tree's insert path no longer exists in `ask.ko`. The **FE-VM ehash HIT path (Fork-B)** is the
+only insert path currently wired, and is proven to never dispatch a HIT at production throughput. The
+only real ehash HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP). Read the sections below as
+describing silicon capability and the *intended* architecture, not a currently-functioning production
+forward path.
 
 **[SPEC]** facts are binding. **[NOTE]** is rationale/history. **[BUG]** has symptom+cause+fix.
 
@@ -146,7 +180,13 @@ MURAM-resident tables. This is the **SHIPPING HW-offload flow table** — the pr
 
 ### Architecture: CC-tree + kernel SW flowtable
 
-**[SPEC]** The production PCD forward path is a two-tier architecture:
+> **⚠ CORRECTION (2026-08-04):** the "production" framing below describes the 2026-08-01 architectural
+> *decision*, not current code. `ask.ko`'s CC-tree insert path was deleted by CR-007 (`dd364494`,
+> 2026-07-27) and never restored — see the AI READING INSTRUCTION banner at the top of this file for
+> the full evidence trail. Currently no live path installs CC-tree entries.
+
+**[SPEC]** The production PCD forward path is a two-tier architecture (as of the 2026-08-01 decision;
+**CC-tree's insert path is not currently implemented in `ask.ko`, see correction above**):
 
 1. **CC-tree (HW):** exact-match tables in MURAM, ≤3 nested lookups, ≤255 entries per table. First
    packet of a flow misses → CPU slow path → `ask.ko` installs a CC entry. Subsequent packets match
@@ -326,6 +366,36 @@ fall back to the kernel nf_flowtable software path.
 
 **[NOTE]** The FE-VM ehash HIT path (Fork-B) is NOT shown here — it is a retired experimental dead-end
 that never worked at production throughput. See §3 and `fman-fe-ehash.md` for the full autopsy.
+
+### 8a. Component ownership at a glance (2026-08-04)
+
+The diagram above shows the silicon pipeline; `software-stack-ask.md` §9 covers the `ask.ko`
+orchestration side. This table is the single place both are tied together — which component
+performs which packet-flow task, and in which domain:
+
+> **⚠ CORRECTION (2026-08-04):** this table describes the intended/silicon-capable division of labor,
+> not `ask.ko`'s current wiring. The row below marked † is not exercised by any live insert path today
+> — `ask.ko`'s only wired mechanism is FE-VM ehash (`ask_fe_flow_insert()` →
+> `fman_pcd_ehash_add_key()`), proven to never dispatch a HIT. See the AI READING INSTRUCTION banner.
+
+| Task | Component | Domain |
+|---|---|---|
+| Ingress admission | BMI RX port | Silicon |
+| Header recognition | Hard Parser | Silicon |
+| Field extraction + hashing | KeyGen (KG), `fman_pcd_kg.c` | Silicon, kernel-configured |
+| **Classification / HIT-MISS decision (†not currently wired)** | **Coarse Classifier (CC)**, `fman_pcd_cc.c` | Silicon, kernel-configured |
+| **HIT-path header rewrite + forward** | Header Manip engine (manip chain) | Silicon |
+| **MISS-path kernel handoff** | CC engine's miss-AD → port's default FQ | Silicon → kernel boundary |
+| Kernel forwarding for MISS frames | NAPI / netfilter / `nf_flowtable` | Linux kernel (stock) |
+| Decides which flows become CC-tree entries (†not currently wired) | `ask.ko` / `ask_flow_offload.c` | Kernel (custom OOT) |
+| Keeps HIT-path rewrites current on neighbor change | `ask_neigh.c` (part of `ask.ko`) | Kernel (custom OOT) |
+| Engage/disengage per interface | VyOS CLI + `vyos-offload-ask` | Userspace control plane |
+
+Note KG (hashing/extraction) and CC (the HIT/MISS compare) are separate silicon blocks with
+separate roles — KG never decides HIT/MISS, it only produces the bytes CC compares against. **† As of
+2026-08-04, `ask.ko` currently drives FE-VM ehash instead of CC-tree for flow insert (CR-007 deleted the
+CC-tree insert path 2026-07-27); ehash is proven to never dispatch a HIT. Neither mechanism is
+currently both wired and working.**
 
 ---
 
