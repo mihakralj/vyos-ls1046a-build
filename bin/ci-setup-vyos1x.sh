@@ -15,7 +15,34 @@ cd "${GITHUB_WORKSPACE:-.}"
 # AFTER checkout, before dpkg-buildpackage.
 VYOS1X_BUILD=vyos-build/scripts/package-build/vyos-1x
 PATCH_STAGING="$VYOS1X_BUILD/ls1046a-patches"
+# 2026-08-04: rm -rf before mkdir, not just mkdir -p. The old mkdir -p +
+# additive-cp never deleted patches removed/renamed from data/ on a reused
+# local checkout, so obsolete patch files (e.g. a stale 019-*.patch long
+# since removed from data/) lingered forever and were fed to git apply as
+# phantom failures. On a fresh CI clone this never showed up (nothing to
+# accumulate); on a persistent local dev-build machine it silently built up.
+rm -rf "$PATCH_STAGING"
 mkdir -p "$PATCH_STAGING"
+
+# 2026-08-04: build.py (vyos-build/scripts/package-build/build.py, genuine
+# upstream VyOS tooling) only `git clone`s if the target dir doesn't already
+# exist, and its `git checkout <commit_id>` never resets a dirty tree -- the
+# right behavior for a fresh CI runner, but on a reused local checkout the
+# vyos-1x working tree accumulates every previous run's already-applied
+# patch modifications, so patches that apply perfectly cleanly on pristine
+# upstream fail here with spurious "does not match index" / 3-way merge
+# errors. Reset before build.py touches it, if a prior checkout exists.
+VYOS1X_REPO="$VYOS1X_BUILD/vyos-1x"
+if [ -d "$VYOS1X_REPO/.git" ]; then
+  # reset --hard HEAD (not just checkout -- .) because a prior run's patches
+  # left both modified tracked files AND staged new files (git apply --3way
+  # stages new-file hunks); a plain checkout won't unstage/remove those.
+  # build.py's own `git checkout <commit_id>` runs after this and will land
+  # on the right branch/ref regardless of what HEAD currently points to.
+  git -C "$VYOS1X_REPO" reset --hard HEAD
+  git -C "$VYOS1X_REPO" clean -fdq
+  echo "### $VYOS1X_REPO: reset to clean tracked state (reused local checkout)"
+fi
 
 # Copy all unified-diff patches. Patch 010 (vpp-platform-bus) and the former
 # patch-mmcblk-default were Python patchers; both have been folded back into
