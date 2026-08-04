@@ -310,9 +310,36 @@ for package in $packages; do
       if [ -d "$package/.git/rebase-apply" ]; then
         git -c user.email=maintainers@vyos.net -c user.name=vyos -C "$package" am --abort || true
       fi
-      git -C "$package" reset --hard HEAD
+      # 2026-08-04: a plain `reset --hard HEAD` only fixes DIRTY state, not
+      # STALE state -- build.py's own `git checkout <commit_id>` never
+      # fetches, so a persistent local checkout can silently fall behind
+      # its remote branch forever. Hit this exact case for vpp: the local
+      # checkout was one commit behind origin/stable/2510, and the missing
+      # commit's absence made an otherwise-clean upstream VyOS patch
+      # (0001-linux-cp-add-support-for-xfrm-netlink-notifcation.patch)
+      # fail to apply -- confirmed by testing the identical patch against
+      # a freshly-fetched worktree, where it applied with zero errors.
+      # Extract this package's OWN commit_id from package.toml (a toml
+      # file can define multiple [[packages]] blocks with different
+      # commit_ids -- e.g. vpp/package.toml has both "vyos-vpp-patches"
+      # @ rolling and "vpp" @ stable/2510 -- so match name==$package, not
+      # just the first commit_id line in the file) and fetch+reset to it.
+      # Falls back to a plain HEAD reset if the fetch fails for any
+      # reason (offline, ref renamed, etc.) rather than hard-failing.
+      PKG_COMMIT_ID=$(awk -v pkg="$package" '
+        /^\[\[packages\]\]/ { name=""; cid="" }
+        /^name[ \t]*=/ { gsub(/"/,""); n=$0; sub(/^name[ \t]*=[ \t]*/,"",n); name=n }
+        /^commit_id[ \t]*=/ { gsub(/"/,""); c=$0; sub(/^commit_id[ \t]*=[ \t]*/,"",c); cid=c }
+        name==pkg && cid!="" { print cid; exit }
+      ' package.toml 2>/dev/null)
+      if [ -n "$PKG_COMMIT_ID" ] && git -C "$package" fetch origin "$PKG_COMMIT_ID" 2>/dev/null; then
+        git -C "$package" reset --hard FETCH_HEAD
+        echo "### $package/: fetched + reset to origin's current $PKG_COMMIT_ID immediately before build.py"
+      else
+        git -C "$package" reset --hard HEAD
+        echo "### $package/: fetch unavailable/failed, reset to local HEAD immediately before build.py"
+      fi
       git -C "$package" clean -fdq
-      echo "### $package/: reset to clean tracked state immediately before build.py"
     fi
     ./build.py
   fi
