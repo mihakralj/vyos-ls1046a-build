@@ -1,14 +1,5 @@
-From e678685fbdd61c0887063fb8ec146ed35f1e4bca Mon Sep 17 00:00:00 2001
-From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 03:56:43 +0000
-Subject: [PATCH] temp: vyos-1x-023-no-console-restart-if-unchanged.patch
-
----
- src/conf_mode/system_console.py | 120 +++++++++++++++++++++++++++++---
- 1 file changed, 110 insertions(+), 10 deletions(-)
-
 diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
-index 22a4a37..f549fcc 100755
+index fbf96c0a4..29356b792 100755
 --- a/src/conf_mode/system_console.py
 +++ b/src/conf_mode/system_console.py
 @@ -23,13 +23,55 @@
@@ -165,7 +156,7 @@ index 22a4a37..f549fcc 100755
      grub_util.update_serial_console(*default_tty_console)
      return None
  
-@@ -139,7 +231,15 @@ def apply(console):
+@@ -147,7 +239,15 @@ def apply(console):
      # Service control moved to vyos.utils.serial to unify checks and prompts.
      # If users are connected, we want to show an informational message on completing
      # the process, but not halt configuration processing with an interactive prompt.
@@ -180,15 +171,12 @@ index 22a4a37..f549fcc 100755
 +    if _serial_getty_files_changed:
 +        restart_login_consoles(prompt_user=False, quiet=False)
  
-     if not console:
-         return None
-@@ -158,4 +258,4 @@ def apply(console):
+     if 'powersave' in console.keys():
+         # Configure screen blank powersaving on VGA console
+@@ -163,4 +263,4 @@ def apply(console):
          apply(c)
      except ConfigError as e:
          print(e)
 -        exit(1)
 +        exit(1)
 \ No newline at end of file
--- 
-2.39.5
-
