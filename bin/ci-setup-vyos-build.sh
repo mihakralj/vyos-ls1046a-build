@@ -67,7 +67,20 @@ GITATTR
 # Apply with git apply --3way (refuses fuzz, falls back to real 3-way merge
 # on context drift). Idempotent: skip patches that reverse-apply cleanly,
 # treating that as "already merged upstream".
-for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch data/vyos-build-008-vpp-libxdp.patch data/vyos-build-009-eatmydata-bootstrap.patch data/vyos-build-010-persist-chroot.patch; do
+#
+# 2026-08-04: data/vyos-build-008-vpp-libxdp.patch removed from this list.
+# Confirmed byte-exact: vyos-build/scripts/package-build/vpp/package.toml
+# (currently at vyos-build commit c325427, "vpp: add libxdp-dev + libbpf-dev
+# for af_xdp XSK support (M4 ZC)") already contains 100% of this patch's
+# intended content verbatim -- both the shell build_cmd additions and the
+# [dependencies] packages array. The reverse-apply idempotency check above
+# still fails on it (unrelated context drift elsewhere in the file from
+# later vyos-build commits shifts the hunk's surrounding lines), so it
+# can't self-detect as "already applied" the way 005/007 do -- removed
+# explicitly instead of guessing a context refresh. Left in data/ for
+# history; fix-xdp-tools-werror.py is still staged unconditionally below
+# regardless of this loop.
+for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch data/vyos-build-009-eatmydata-bootstrap.patch data/vyos-build-010-persist-chroot.patch; do
   if git -C vyos-build apply --reverse --check --whitespace=nowarn "../$p" >/dev/null 2>&1; then
     echo "### $p: skipped (already applied upstream)"
     continue
