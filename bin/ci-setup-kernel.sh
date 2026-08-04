@@ -650,7 +650,17 @@ unset _count _series _src _p
 # This catches orphaned patches with no series entry (the old guard
 # caught forgotten cp lines — now the loop reads series directly so
 # the failure mode is a patch file committed without a series entry).
-BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch"
+# 2026-08-04: 0127/0128/0129 filenames below are untracked on-disk WIP that
+# collides with the REAL, already-committed, in-series patches of the same
+# number (0127-fman-pcd-fe-vm-enq-root.patch, 0128-fman-pcd-fe-vm-flow-
+# insert.patch, 0129-fman-pcd-offload-engage.patch — unrelated FE-VM/ehash
+# work). Content looks like a genuine MURAM segregated-fit allocator +
+# Risk #13 fix, but it was never renumbered/reviewed, so it is excluded
+# here rather than either overwriting the real 0127-0129 or guessing new
+# numbers for unreviewed content. 0138 has no number collision but is
+# skipped alongside it for the same reason (unreviewed, depends on 0128/0129
+# APIs). Revisit: renumber to free slots (0165+) and review before staging.
+BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch 0127-fman-pcd-cc-node-slab.patch 0128-fman-pcd-muram-segpool.patch 0129-fman-pcd-muram-largest-free.patch 0138-fman-pcd-manip-frag-check.patch"
 _missing=""
 # Cross-check: every .patch in board/ must be in series or SKIP list
 {
