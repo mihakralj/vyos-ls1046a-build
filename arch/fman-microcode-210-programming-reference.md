@@ -34,6 +34,18 @@ The microcode is proprietary NXP 210.10.1, not the open-source `qoriq-fm-ucode` 
 - **Second number = HW rev.** `.1` FMANv2 no-SW-DMA-sem · `.2` FMANv2 w/sem · `.3` FMANv3 Rev1 · `.4` FMANv3 > Rev1. LS1046A r1.0 ⇒ `106.4.18`.
 - **`210.x` is proprietary** — a newer NXP release **not in the public repo** (`210 ≫ 108`). It lacks the HC host-command doorbell, so our approach uses **direct KG→`FM_CTL|AC_CC` dispatch + result-AD enqueue**, never the HC doorbell.
 
+**Full feature matrix, source: `qoriq-fm-ucode` repo readme (2026-08-05 direct fetch, `gh api repos/nxp-qoriq/qoriq-fm-ucode/contents/readme`):**
+
+| Family | CC | IM | HC | IPF | IPR | HM | DSAR | CAPWAP |
+|---|---|---|---|---|---|---|---|---|
+| **106** | + | + | + | + | + | + | − | − |
+| **107** | + | + | + | − | − | − | + | − |
+| **108** | + | + | + | + | + | + | − | + |
+
+CC (Custom/Coarse Classification), IM (Independent-Mode), HC (Host-Commands), IPF/IPR (IPv4/6 Fragmentation/Reassembly), HM (Header Manipulation), DSAR (Deep Sleep Auto Response), CAPWAP (NG CAPWAP). **CC is present in every public family** — the "the `106.4.18` ucode parks identically on bare exact-match CC" note in §13 is not describing a `106`-specific quirk; CC support (and, per this project's own board testing, CC's exact-match-parking failure mode) spans the entire public lineup. `210.x`'s own capability bitmask (§12, `caps=0x17`) has HC's bit clear — a real divergence from every public family, which uniformly ships HC.
+
+**No public register-level documentation exists for any of these families.** The `qoriq-fm-ucode` repo (checked 2026-08-05) contains only binary firmware blobs (`.bin`, one per silicon/family combination) and three PDF release notes (`DPAA_IPACC_ReleaseNote.pdf`, `DPAA_DSAR_ReleaseNote.pdf`, `DPAA_NG_CAPWAP_ReleaseNote.pdf`). The IPACC release note (read in full) is a 28-table changelog spanning `106.x.0` (Feb 2012) through `106.x.18` (Nov 2015) — feature additions, errata (`IPRnn`, `IPACCnn`, `HMn`), and restrictions, with zero register bit-layouts, zero AD/descriptor byte formats, and zero opcode encodings. This corroborates §13's existing claim ("No public documentation, no disassembler, no simulator") at the register level specifically, not just for the FE-VM ISA. **Consequence for this document:** every register-bit-level fact in §4–§10 is derived from this project's own board reads (`.106` vendor stack, `.185` `dpaa1`), the NXP DPAA Reference Manual, or the lf-5.4 LSDK driver source — never from the public `qoriq-fm-ucode` repo, which cannot supply it. A "210-only vs 106/107/108" comparison is only meaningful at the feature-changelog level shown above, not at the bit level.
+
 **Coarse vs fine — the terminology trap.** NXP's PCD has two distinct steering mechanisms whose "coarse/fine" naming is inverted relative to the networking meaning:
 
 - **KeyGen (KG)** hashes a key and spreads flows across a *set* of frame queues → **statistical / COARSE**. This is what mainline DPAA programs by default (RSS).
