@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.3**
+**Version 1.4**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -402,16 +402,33 @@ Searched every caller of that setter across the entire PCD module tree (`FM/Pcd/
 
 **This does not hold up under cross-checking.** `.106` runs the *identical* 210.10.1 blob. If HC sync were genuinely required for ehash operations to succeed, `.106` would show `"FmPcdHcSync failed"` (the module's own `printk` on sync failure) in dmesg — a full `dmesg` search on `.106` found **zero** hits for any HC-related string. Combined with this project's separately-confirmed finding that `cmm`'s connection-tracker never actually fires on `.106` (`CT-TRACE` shows zero invocations of `__cmmCtCatch` across every boot observed) — the more likely explanation is that `.106`'s `ExternalHashTableAddKey()` path (and therefore any `FmPcdHcSync()` calls inside it) is simply **never reached** on that board's current traffic, not that HC sync silently succeeds. This means `.106`'s earlier decisive 400+-frame stress-test success (§14, cross-reference to the NXP-106 deep-dive plan) most likely exercised a statically-preconfigured classification path from `cdx_pcd.xml` (or plain kernel software forwarding), **not** the dynamic ehash-insert path this branch's F-163/F-165 work targets — i.e. `.106`'s success may not actually validate the mechanism under test here at all. Flagged as a genuinely open methodological question, not resolved.
 
-#### 5.2.6 Status summary
+#### 5.2.6 Does `.106` actually exercise ehash? Direct verification (2026-08-05)
+
+§5.2.5 raised this as an open methodological question. Two further checks push it from "open" to "most likely no":
+
+**1. `cmm`'s connection table is empty on a completely fresh boot.** `cmm -c "show stat connection query"` on `.106` (rebooted earlier the same day, per `journalctl -b`'s `start_dpa_app` line) reports `Number of Active Connections: 0`, and `CT-TRACE` (the diagnostic added to `__cmmCtCatch()`, see §3.2) shows only 2 hits for the entire boot — consistent with the fixed startup-sequence prints this project already characterized, not per-connection activity. This reconfirms, on a fresh boot rather than accumulated session state, that `cmm` never populates a single flow.
+
+**2. The group-table entry's "next AD" word does not point at a coherent structure.** `/etc/cdx_pcd.xml` declares `hashtable external="yes" ... keysize="14"` for exactly two distributions (`cdx_udp4_dist`, `cdx_tcp4_dist` — the first two `<distribution>` blocks in the file), matching this branch's own confirmed real vendor key format (F-163). Live MURAM read of hwport `0x11`'s group table (`FMBM_RCCB=0x48e00`) at rows 8 and 9 (the ones whose word0 decodes to `keysize=14`, confirming the row↔distribution mapping):
+```
+row8: 4e400008 eb500100 0402080f 0048030b
+row9: 4e400008 eb700100 0402080f 00480308
+```
+Word3 (`0x0048030b` / `0x00480308`) looks like a MURAM-internal offset (same numeric neighborhood as `FMBM_RCCB` itself, `0x48e00`) rather than a DDR bus address (which on this board's traffic has consistently appeared as an `0x8xxxxxxxx`-range physical address, e.g. `0x81c3f000` seen in this branch's own `hash_fe` object, §10). Following it (dumping MURAM at offset `0x480300`–`0x480320`) finds **almost entirely zeroed memory**, not a recognizable AD, `en_exthash_node`, or any other structure with a plausible DDR pointer inside it. This word's actual meaning is still not decoded — it does not resolve as a simple raw-offset pointer the way `FMBM_RCCB` itself does — but it does NOT show any sign of pointing at a live, populated DDR-backed hash table either.
+
+**Conclusion:** combining both — `cmm` never writes a single flow key (confirmed twice, different boots), and the MURAM structure downstream of the classification entry shows no evidence of an active DDR-backed table — the most likely explanation for `.106`'s earlier decisive 400+-frame stress-test success is that it **never exercised a genuine ehash HIT at all**. The ehash tables are structurally declared (`hashtable external="yes"`) and wired into the group table, but sit permanently empty; every frame MISSes, and the traffic that "worked" was carried by whatever the MISS disposition actually is for these entries (most likely plain kernel-delivered/software-forwarded traffic, consistent with this project's own separately-reached conclusion about its own M5 gate — see `plans/ASK2-MASTER-PLAN.md`'s 2026-08-04 banner: "the most likely explanation is pure kernel software forwarding"). **This means `.106` was never a valid live reference for whether a genuine hardware ehash HIT is achievable on this microcode at all** — its "success" validates that MISS-path traffic survives cleanly, not that classification works. The word3 AD-encoding mystery remains genuinely open (not just deprioritized) — resolving it would need either vendor `dpa_app` source access (not available in this branch) or a live capture of a genuine HIT happening somewhere else first.
+
+#### 5.2.7 Status summary
 
 | Hypothesis | Status |
 |---|---|
 | `FMBM_RIM` | Closed — understood to be unrelated (manip scratch space), no live test needed |
 | `FMBM_RICP` | Closed — live-tested negative (F-166, reverted) |
 | `AttachPCD()` NIA-restore / single-RISC restriction | Deprioritized — traced to be dormant for CC-tree in this SDK snapshot |
-| Host Command sync | Open, weakened — doesn't survive the `.106` cross-check; reframes the question as "does `.106`'s working config even exercise ehash" rather than "is HC required" |
+| Host Command sync | Reframed, not resolved — see §5.2.6: the premise ("does `.106` exercise ehash") is now most likely false, which makes the HC-sync question moot rather than answered |
+| **Whether `.106` validates genuine ehash HIT capability at all** | **Most likely NO (§5.2.6)** — `cmm` never populates a flow (confirmed on two separate boots) and the group-table's downstream AD structure shows no sign of an active DDR-backed table. `.106`'s stress-test success most likely reflects MISS-path/software-forwarded traffic, not hardware classification. |
 | `FMBM_RFNE` bit 28, `FMBM_RPSO`, `FMBM_RPP` | Open, untested, no hypothesis formed yet |
-| **The wedge itself** | **Root cause not found as of this section.** Three concrete register hypotheses tested/closed; the investigation is shifting from "which register is missing" toward "does the reference (`.106`) even exercise the mechanism being tested" |
+| Group-table word3 AD encoding | Open — does not resolve as a simple raw MURAM pointer; genuinely undecoded, not just deprioritized |
+| **The port-wedge itself (this branch, `.185`)** | **Root cause not found.** Three concrete register hypotheses tested/closed; with `.106` most likely not a valid ehash-HIT reference either, this project currently has **no board-confirmed example of a genuine hardware ehash HIT on 210.10.1 microcode at all**, vendor or otherwise. |
 
 
 ## 6. FM_CTL Params Page (per-port, 256 B MURAM)
