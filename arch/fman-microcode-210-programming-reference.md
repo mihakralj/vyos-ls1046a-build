@@ -1,12 +1,14 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.1**
+**Version 1.2**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
 **Blob:** 51652 bytes, 12851 code words, SPI `mtd3` @ `0x400000`, DT node `/soc/fman@1a00000/fman-firmware/fsl,firmware`
 
-> **[NOTE — Architecture status (2026-08-01)]** The FE-VM ehash/EXT_HASH/EHASH family described in this reference (Fork-B: `FE_ENTER` → EXT_HASH FE → DDR bucket lookup → MUX → ENQ) is **RETIRED/EXPERIMENTAL**. It never produced a working HIT on silicon (~1.5 Gbps DDR ceiling) and is NOT the shipping HW-offload path. F-156/F-157/F-158 + fe_scaffold oracle proved the CC-match stage not production-worthy. The **shipping path** is CC-tree classification (`CC_KEY_SIZE=16`, `CONT_LOOKUP` group table, CC match rows key+mask) + kernel SW flowtable + manip-chain forwarding. CC-tree scales to 255 keys/node (~8 nodes in 64KiB MURAM → ~2000+ flows). CC comparator reads KG-emitted bytes, not a re-extracted canonical composite (patch 0108). All register offsets, FE types, opcodes, floor/ceiling numbers, and Kconfig facts in this document remain valid regardless of which path is active.
+> **[NOTE — Architecture status UPDATED (2026-08-05), supersedes the 2026-08-01 note below]** The 2026-08-01 "RETIRED/EXPERIMENTAL, NOT the shipping HW-offload path" verdict for the FE-VM ehash/EXT_HASH family was based on lf-6.6.y/lf-5.4 **SDK archives**, whose FE-VM programming core is a documented stub. Reading the **genuine deployed vendor `cdx.ko` driver** instead (`cdx_ehash.c`/`cdx_common.h`, nxp-sdk branch, from board `.106`'s actual running image) shows the opposite: `cmm`'s connection-tracker inserts every accelerated flow via `insert_entry_in_classif_table()` → `fill_key_info()` → `ExternalHashTableAddKey()` — the vendor's real production classification mechanism **is** external-hash, not CC-tree-only. Full reconciliation: `specs/fman-keygen-flow-key-spec.md` §1.2a, `arch/fman-fe-ehash.md` (un-retirement banner). Concrete fix from this finding: **F-163** (§10.5a below) — this branch's own ehash key builder was missing a leading port-ID byte the real vendor key format always carries; fixed. **Still unconfirmed on silicon:** whether the corrected key format actually produces a HIT once FE_ENTER is wired as the live CC root AD (not yet attempted — §10.5a). The CC-tree pass-through numbers below (M2/M5, cdx.ko 8.58 Gbps) remain real and valid; what changed is only the claim that CC-tree is *the* vendor architecture and ehash is not.
+>
+> **[NOTE — Architecture status (2026-08-01), SUPERSEDED above]** The FE-VM ehash/EXT_HASH/EHASH family described in this reference (Fork-B: `FE_ENTER` → EXT_HASH FE → DDR bucket lookup → MUX → ENQ) is **RETIRED/EXPERIMENTAL**. It never produced a working HIT on silicon (~1.5 Gbps DDR ceiling) and is NOT the shipping HW-offload path. F-156/F-157/F-158 + fe_scaffold oracle proved the CC-match stage not production-worthy. The **shipping path** is CC-tree classification (`CC_KEY_SIZE=16`, `CONT_LOOKUP` group table, CC match rows key+mask) + kernel SW flowtable + manip-chain forwarding. CC-tree scales to 255 keys/node (~8 nodes in 64KiB MURAM → ~2000+ flows). CC comparator reads KG-emitted bytes, not a re-extracted canonical composite (patch 0108). All register offsets, FE types, opcodes, floor/ceiling numbers, and Kconfig facts in this document remain valid regardless of which path is active.
 
 ## 1. Identity and Scope
 
@@ -736,6 +738,11 @@ All bucket and record memory is DDR. gen_pool `used` is unchanged.
 
 **[SPEC] EKFC 4th arg confirmed.** `engage 11 0 2B9 1C0006` → dmesg shows `ekfc=0x001c0006 (slot->ekfc=0x001c0006)`. The strsep tokenizer (0160) correctly parses the 4th arg and propagates it through `fman_pcd_kg_port_arm_fe` → `keygen_scheme_setup` → `keygen_write_scheme`.
 
+### 10.5a keysize=13 → 14: PORT_ID prefix (F-163, 2026-08-05)
+
+**[NOTE — supersedes §10.5's "keysize=13" framing]** §10.5's `keysize=13`/`contextSize=13` verification (EKFC=0x001C0006, 5-tuple `SIP|DIP|PROTO|SPORT|DPORT`) is still correct **for that EKFC**, but that EKFC is now known to be incomplete: the genuine vendor `cdx.ko` driver's external-hash key always carries a leading port-ID byte (`union dpa_key`, `cdx_common.h`, nxp-sdk branch — see `arch/fman-fe-ehash.md` §5 and `specs/fman-keygen-flow-key-spec.md` §1.2a/§4.3a for the full finding). Fixed by adding `KG_SCH_KN_PORT_ID` (bit 31) to the EKFC, giving `0x801C0006` and a 14-byte key (`PORT_ID|SIP|DIP|PROTO|SPORT|DPORT`); implemented in `ask_fe_build_key()`/`_v6()` (`kernel/ask/oot-modules/ask/ask_flow_offload.c`), `ASK_FE_KEY_SIZE`/`_V6` bumped 13/37→14/38.
+
+**Not yet re-verified on silicon:** §10.5's `contextSize`/bucket-index arithmetic was derived for the 13-byte key. With a 14-byte key, `contextSize-1` becomes `0x0d` (13) instead of `0x0c` (12) if the FE object's EXT_HASH word1 is rebuilt for this key length — this has not been re-armed or re-tested on hardware since F-163 landed (the `engage` call site does not yet pass `0x801C0006`; F-163 only fixed the software-side key **content**, not the live EKFC register arm). Confirming a real HIT with the new key format is the next open step (§10.5's `[BUG] keysize=13 BMI stall` caveat about `FmPortSetFESupport` being a prerequisite still applies unchanged).
 
 ## 11. Resource Ceilings (Hard Hardware Limits)
 
