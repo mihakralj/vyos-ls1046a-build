@@ -340,6 +340,20 @@ for package in $packages; do
         echo "### $package/: fetch unavailable/failed, reset to local HEAD immediately before build.py"
       fi
       git -C "$package" clean -fdq
+      # 2026-08-05: git clean -fdq (no -x) never touches gitignored paths.
+      # vpp/.gitignore excludes /build-root/build-*/ and /build-root/
+      # install-*/ (the actual CMake/ninja build+install trees) precisely
+      # so `git clean` won't nuke /build-root/.ccache alongside them --
+      # but that means those build-output directories silently persist
+      # and accumulate state across every local build attempt on this
+      # persistent runner. Traced a real failure to this: "make: ***
+      # No rule to make target 'gcc'. Stop." inside build-root/, which
+      # did not reproduce when the exact same `make ... pkg-deb` command
+      # was rerun by hand once, immediately after -- consistent with a
+      # corrupted CMakeCache.txt/build tree from an earlier interrupted
+      # run, not a real Makefile bug. Remove just the build-*/install-*
+      # trees (glob, not -x) so /build-root/.ccache is preserved.
+      rm -rf "$package"/build-root/build-*/ "$package"/build-root/install-*/ 2>/dev/null || true
     fi
     ./build.py
   fi
