@@ -968,10 +968,31 @@ import sys, re, pathlib
 bk = pathlib.Path(sys.argv[1])
 src = bk.read_text()
 SENTINEL = "# === ls1046a-build: git apply --3way kernel patch loop ==="
+END_MARKER = "# === end ls1046a-build patch-loop replacement ===\n"
 
+# 2026-08-05: the SENTINEL-present check used to be a hard no-op ("already
+# replaced, skip"). That made every REPLACEMENT edit below (a new F_XXX.py
+# fixup, say) silently never apply on a persistent local dev-build machine
+# that already ran ci-setup-kernel.sh once before -- build-kernel.sh stays
+# frozen at whatever REPLACEMENT looked like on the FIRST run, forever,
+# with no error and no indication anything was skipped. Root-caused this
+# 2026-08-04 (a 1269-line-stale build-kernel.sh silently dropped F-152
+# through F-159 across multiple local builds) and again 2026-08-05 (a
+# freshly-added F-160 silently skipped the same way, one build cycle after
+# the first fix). A fresh GitHub Actions runner never hits this (always a
+# clean clone), which is why it went unnoticed there. Fix: when SENTINEL
+# is present, strip the previously-injected block back out (SENTINEL
+# through END_MARKER) so the match-and-replace below can run fresh EVERY
+# time, keeping build-kernel.sh in sync with the current REPLACEMENT
+# content rather than whatever was first injected.
+reinject_at = None
 if SENTINEL in src:
-    print(f"### {bk}: patch loop already replaced — no-op")
-    sys.exit(0)
+    start = src.index(SENTINEL)
+    end_marker_pos = src.index(END_MARKER, start)
+    end = end_marker_pos + len(END_MARKER)
+    src = src[:start] + src[end:]
+    reinject_at = start
+    print(f"### {bk}: previously-injected patch loop found — stripping for a fresh re-inject")
 
 # Match the upstream loop EXACTLY. Indentation is 4 spaces.
 PATTERN = re.compile(
@@ -2069,7 +2090,15 @@ fi
 # === end ls1046a-build patch-loop replacement ===
 """
 
-new, n = PATTERN.subn(lambda m: REPLACEMENT, src, count=1)
+if reinject_at is not None:
+    # Re-inject case: the original upstream loop pattern is long gone (it
+    # was replaced on the first run), so there is nothing left for PATTERN
+    # to match. Splice the current REPLACEMENT text directly back into the
+    # gap left by the strip above.
+    new = src[:reinject_at] + REPLACEMENT + src[reinject_at:]
+    n = 1
+else:
+    new, n = PATTERN.subn(lambda m: REPLACEMENT, src, count=1)
 if n == 0:
     print(
         f"ERROR: upstream `for patch in $(ls ${{PATCH_DIR}})` loop not found in {bk}.\n"
