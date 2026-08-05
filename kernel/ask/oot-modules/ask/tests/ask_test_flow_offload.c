@@ -490,10 +490,19 @@ static void ask_flow_offload_test_classify_dir_non_dpaa(struct kunit *test)
  * a native integer, so wire bytes AD 9C came out as 9C AD. Insert and delete
  * shared the error and therefore agreed with each other — only a comparison
  * against the real extracted key exposes it, which is exactly what this does.
+ *
+ * F-163 (2026-08-05): a port_id=0x11 prefix byte was added ahead of the
+ * silicon-verified 13 bytes above. The 0x11 value itself is a test fixture
+ * (this branch's usual hwport-under-test, not an independent silicon
+ * capture); what IS independently silicon-confirmed is that PORT_ID lands
+ * at byte offset 0, ahead of every other field -- that follows directly
+ * from the already-proven MSB-first descending EKFC assembly order (spec
+ * §3.4) applied to bit 31, the highest bit KG_SCH_KN_PORT_ID sets.
  */
 static void ask_flow_offload_test_fe_key_wire_order(struct kunit *test)
 {
 static const u8 expect[ASK_FE_KEY_SIZE] = {
+0x11,                     /* PORT_ID (test fixture, see comment above) */
 0x0a, 0x63, 0x02, 0x6a,   /* SIP  10.99.2.106 */
 0x0a, 0x63, 0x02, 0xb9,   /* DIP  10.99.2.185 */
 0x06,                     /* PROTO TCP        */
@@ -506,6 +515,7 @@ u8 k[ASK_FE_KEY_SIZE];
 memset(&key, 0, sizeof(key));
 key.l3_proto = ASK_FLOW_L3_IPV4;
 key.l4_proto = IPPROTO_TCP;
+key.port_id = 0x11;
 key.src_ip[0] = 0x0a; key.src_ip[1] = 0x63;
 key.src_ip[2] = 0x02; key.src_ip[3] = 0x6a;
 key.dst_ip[0] = 0x0a; key.dst_ip[1] = 0x63;
@@ -520,8 +530,8 @@ KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE);
  * Ports must be non-palindromic for this to mean anything: assert the two
  * bytes differ, so a future byte-swap regression cannot pass by symmetry.
  */
-KUNIT_EXPECT_NE(test, k[9], k[10]);
-KUNIT_EXPECT_NE(test, k[11], k[12]);
+KUNIT_EXPECT_NE(test, k[10], k[11]);
+KUNIT_EXPECT_NE(test, k[12], k[13]);
 }
 
 static struct kunit_case ask_flow_offload_test_cases[] = {

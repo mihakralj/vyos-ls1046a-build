@@ -1233,10 +1233,16 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 }
 
 /*
- * Serialise @key into the 13-byte EKFC record the FE-VM comparator matches.
+ * Serialise @key into the 14-byte EKFC record the FE-VM comparator matches.
  *
- * Layout is the silicon's MSB-first extraction order for EKFC 0x001C0006:
- *   SIP(4) DIP(4) PROTO(1) SPORT(2) DPORT(2)
+ * Layout is the silicon's MSB-first extraction order for EKFC 0x801C0006
+ * (F-163, 2026-08-05: KG_SCH_KN_PORT_ID | IPSRC1 | IPDST1 | PTYPE1 |
+ * L4PSRC | L4PDST):
+ *   PORT_ID(1) SIP(4) DIP(4) PROTO(1) SPORT(2) DPORT(2)
+ *
+ * The PORT_ID prefix matches the real vendor cdx.ko external-hash key
+ * byte-for-byte (union dpa_key, cdx_common.h, nxp-sdk branch) -- see the
+ * ASK_FE_KEY_SIZE comment in ask_internal.h for the full provenance.
  *
  * ENDIANNESS (CR-002, fixed 2026-07-26): @sport/@dport are __be16, i.e. they
  * already hold the bytes in wire order. They MUST be copied, not shifted.
@@ -1249,31 +1255,35 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
  * the shift emitted 9C AD — the bytes backwards. Insert and delete shared the
  * bug, so they agreed with each other and software-only tests passed, but
  * neither agreed with the key the KeyGen actually extracts. Silicon-verified
- * reference (Qdrant 2026-07-13): 0a63026a 0a6302b9 06 ad9c d903.
+ * reference (Qdrant 2026-07-13, pre-PORT_ID 13-byte capture):
+ * 0a63026a 0a6302b9 06 ad9c d903.
  *
  * One builder for insert, delete and tests so the two can never diverge again.
  * Non-static solely so tests/ask_test_flow_offload.c can pin the exact bytes.
  */
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE])
 {
-        memcpy(&k[0],  key->src_ip, 4);
-        memcpy(&k[4],  key->dst_ip, 4);
-        k[8] = key->l4_proto;
-        memcpy(&k[9],  &key->sport, sizeof(key->sport));
-        memcpy(&k[11], &key->dport, sizeof(key->dport));
+        k[0] = key->port_id;
+        memcpy(&k[1],  key->src_ip, 4);
+        memcpy(&k[5],  key->dst_ip, 4);
+        k[9] = key->l4_proto;
+        memcpy(&k[10], &key->sport, sizeof(key->sport));
+        memcpy(&k[12], &key->dport, sizeof(key->dport));
 }
 
 /*
  * M6 Piece 3: v6 ehash key builder.  Same MSB-first EKFC extraction order
- * as v4, but with 16-byte addresses: SIP(16)+DIP(16)+PROTO(1)+SPORT(2)+DPORT(2).
+ * as v4 (F-163: PORT_ID prefix added), 16-byte addresses:
+ * PORT_ID(1)+SIP(16)+DIP(16)+PROTO(1)+SPORT(2)+DPORT(2).
  */
 void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6])
 {
-        memcpy(&k[0],  key->src_ip, 16);
-        memcpy(&k[16], key->dst_ip, 16);
-        k[32] = key->l4_proto;
-        memcpy(&k[33], &key->sport, sizeof(key->sport));
-        memcpy(&k[35], &key->dport, sizeof(key->dport));
+        k[0] = key->port_id;
+        memcpy(&k[1],  key->src_ip, 16);
+        memcpy(&k[17], key->dst_ip, 16);
+        k[33] = key->l4_proto;
+        memcpy(&k[34], &key->sport, sizeof(key->sport));
+        memcpy(&k[36], &key->dport, sizeof(key->dport));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1334,7 +1344,8 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 
 /*
  * Fix B: remove exactly the one FE-VM silicon record for @key. Builds the
- * identical 13-byte EKFC key ask_fe_flow_insert() used, so fman_pcd_fe_flow_del
+ * identical EKFC key ask_fe_flow_insert() used (including the F-163
+ * port_id prefix, preserved in @key since insert time), so fman_pcd_fe_flow_del
  * (per-key, F-117) matches and unlinks just this flow — not clear-all.
  */
 static void ask_fe_flow_remove(const struct ask_flow_key *key)
@@ -1700,6 +1711,18 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                         if (prc == 0) {
                                 u8 expected = 0xff;
                                 u8 winner;
+
+                                /*
+                                 * F-163 (2026-08-05): stash the real
+                                 * ingress hwport id in the key so
+                                 * ask_fe_build_key()/_v6() can prefix
+                                 * it onto the FE-VM ehash key (matches
+                                 * the vendor cdx.ko key format). This is
+                                 * this flow's own physical ingress port,
+                                 * independent of the FWD/REV pipeline-
+                                 * slot winner decided below.
+                                 */
+                                key.port_id = pid;
 
                                 /*
                                  * Race-free first-arrival latch:

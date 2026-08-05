@@ -1,8 +1,8 @@
 # FMan KeyGen Flow-Key Architecture for ASK2 (LS1046A / DPAA1)
 
-**Status:** v5.0 — CC-tree + SW flowtable is the shipping HW-offload classifier; FE-VM ehash path retired as dead-end experimental. 2026-08-01.
+**Status:** v6.0 — FE-VM ehash path UN-RETIRED (2026-08-05): the real vendor `cdx.ko` driver's production classification path IS external-hash, not CC-tree-only. See §1.2a.
 **Branch:** dpaa1
-**Changes since v4.1:** Architecture reframed to reflect established silicon reality. The shipping HW-offload path is CC-tree match → FE-VM opcode/manip chain → ENQ, with kernel SW flowtable for the long tail. The FE-VM ehash (EXT_HASH DDR lookup) path is documented as a dead-end experimental path that never dispatched a HIT and is architecturally retired. CC-tree scaling documented: hardware supports 255 keys/node, MURAM arena 64KiB → ~8 nodes → ~2000+ HW flows, zero per-frame DDR. CC comparator reads KG-EMITTED bytes (patch 0108), not a re-extracted canonical composite. Milestone corrections: M3/M5 "HIT gate PASSED" were false positives (FQID 0x200 ambiguity); F-141 fix unvalidated; only real HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP). Performance data added: M2 7.37 Gbps pass-through, M5 10.259 Gbps CC-tree + SW flowtable, NXP cdx.ko 8.58 Gbps opcode/manip chain. All EKFC extraction-order, CRC-64, CONT_LOOKUP AD format, match-row key+mask format, and mask-semantics facts preserved from v4.1.
+**Changes since v5.0:** §1.2's "dead end / not the vendor architecture" verdict is corrected. Reading the genuine vendor `cdx.ko` source (`kernel/flavors/ask/sources/cdx/cdx-5.03.1/`, nxp-sdk branch — not the lf-6.6.y/lf-5.4 SDK archives this doc previously relied on) shows `cmm`'s connection-tracker inserts every accelerated flow via `insert_entry_in_classif_table()` → `fill_key_info()` → `ExternalHashTableAddKey()` — i.e. the vendor's real production hardware-offload path for TCP/UDP/ESP flows is external-hash, matching this branch's own (previously retired) Fork-B mechanism. `fill_key_info()`'s key layout is `portid(1B)|SIP(4B)|DIP(4B)|PROTO(1B)|SPORT(2B)|DPORT(2B)` = 14 bytes (`union dpa_key`, `cdx_common.h`), with a leading port-ID byte no EKFC hypothesis on this branch had ever included. KeyGen already has a matching field for it, `KG_SCH_KN_PORT_ID` (bit 31, §4.1) — never previously added to this branch's EKFC. Since bit 31 is the highest bit and the EKFC assembly order was independently silicon-confirmed MSB-first descending (§3.4, 2026-07-13), adding it produces exactly the vendor's byte layout. Fixed as F-163: `ask_flow_key` gained a `port_id` field, `ask_fe_build_key()`/`_v6()` (`kernel/ask/oot-modules/ask/ask_flow_offload.c`) now prefix it, `ASK_FE_KEY_SIZE`/`_V6` bumped 13/37→14/38. **Caveat carried forward:** `cmm`'s conntrack ingestion has a separate, confirmed-broken bug on the currently deployed `.106` image (Layer 3b, `arch/fman-microcode-210-programming-reference.md` §3.2) — the vendor's ehash insertion call was read from source, not observed live-firing on that specific board image. The key-format finding stands on source evidence independent of that bug. All EKFC extraction-order, CRC-64, CONT_LOOKUP AD format, match-row key+mask format, and mask-semantics facts preserved from v5.0/v4.1; CC-tree pass-through's own performance numbers (M2/M5, cdx.ko 8.58 Gbps) are unaffected by this correction — see §1.2a for how the two mechanisms coexist.
 **Scope:** FMan KeyGen EKFC extraction, FE-VM dispatch, CC-tree flow-offload architecture, and the software/silicon contract that ASK2 must satisfy.
 **References:**
 - `drivers/net/ethernet/freescale/fman/fman_keygen.c` (mainline, NXP 2017) — EKFC register definitions, KGSE indirect-write protocol
@@ -84,6 +84,14 @@ The FMan v3 (LS1046A, microcode 210.10.1) implements a Parse → Classify → Di
 5. **F-156/F-157/F-158 proved the scaffold byte-perfect** (H1 mask CLOSED, H2 padding CLOSED) but the CC engine still does not dispatch to the FE-VM — the compare-window layout hypothesis remains untested and is not being pursued further
 
 **[NOTE]** The FE-VM **opcode execution** remains correct and shipping (10.259 Gbps, M5). Only the ehash *matching* sub-mechanism is retired. Scale beyond the software-configured 32-key cap is via multi-node CC allocation, not ehash.
+
+### 1.2a UN-RETIRED (2026-08-05): the vendor's real path is external-hash
+
+**[NOTE — SUPERSEDES §1.2's "not the vendor architecture" claim]** §1.2 point 3 asserted "NXP's production `cdx.ko` uses a hardware opcode/manip chain, not a per-frame DDR hash." That claim was based on the lf-6.6.y/lf-5.4 SDK *archives* (stubbed FE-VM programming core, per this doc's own Provenance caveats — see `arch/fman-fe-ehash.md`), not the genuine shipping vendor driver. Reading the actual vendor `cdx.ko` source (`kernel/flavors/ask/sources/cdx/cdx-5.03.1/cdx_ehash.c`, nxp-sdk branch — obtained from board `.106`'s real deployment, not an SDK archive) shows the opposite: `insert_entry_in_classif_table()` — the function `cmm`'s connection-tracker calls for every accelerated TCP/UDP/ESP flow — builds a key via `fill_key_info()` and inserts it with `ExternalHashTableAddKey()`. This **is** the external-hash mechanism (Path 1 in §2 below), not CC-tree exact-match (Path 2).
+
+Reconciling this with the CC-tree pass-through performance numbers in §1.1 (M2 7.37 Gbps, M5 10.259 Gbps, cdx.ko 8.58 Gbps): those numbers are real and unaffected — they measure *this branch's own* CC-tree implementation, which is a legitimate, independently-useful SDK-supported primitive (RM §8.7.4.1). What's corrected is the *comparison claim*, not the numbers: CC-tree pass-through was never actually validated against genuine vendor ehash traffic, because (a) the SDK archives available at the time stub the ehash programming core, and (b) `cmm`'s ehash insertion call has a separate, confirmed bug on the currently deployed `.106` image (never fires — `arch/fman-microcode-210-programming-reference.md` §3.2) that prevented observing it live. The vendor's *intended* production path is ehash; whether this branch should pursue CC-tree, ehash, or both is an open architectural question again, not a settled one.
+
+The immediate, concrete consequence: F-163 (§3.4/§4.1 below) fixes a real, previously-unknown defect in this branch's own (dormant) ehash key builder — a missing leading port-ID byte — using the vendor's key format as ground truth.
 
 ### 1.3 CC Comparator: KG-Emitted Composite
 
@@ -241,6 +249,8 @@ The software-side serializers in `ask_flow_offload.c` (ehash path) and `fman_pcd
 
 **[NOTE]** This settlement covers the **EHASH/DDR workspace key** — verified via hardware CRC-64 hash match. The **CC CONT_LOOKUP comparator** uses the KG-emitted composite (patch 0108, §1.3), which is a 16-byte layout `[SIP(4)|DIP(4)|SPI(4)=0|SPORT(2)|DPORT(2)]` — structurally different from the 13-byte EKFC extraction. Do not assume the two settlements describe the same byte layout.
 
+**[NOTE — F-163, 2026-08-05]** The 13-byte layout above predates the PORT_ID field (§4.3a). It remains the correct, silicon-verified byte order for the five fields it covers; PORT_ID is a new 14th byte prepended at offset 0, not a revision of the existing five. The MSB-first-descending rule this settlement established is exactly what predicts PORT_ID's position (bit 31 > bit 20, so it sorts first) — the extension follows from this settlement, it does not contradict it. `ask_fe_build_key()`/`ask_fe_build_key_v6()` (`kernel/ask/oot-modules/ask/ask_flow_offload.c`) implement the extended 14/38-byte layout; the kunit reference vector in `tests/ask_test_flow_offload.c` was updated to match (with a test-fixture `0x11` PORT_ID byte, not an independent silicon capture of that field specifically).
+
 ### 3.5 Runtime Self-Check (NOT YET IMPLEMENTED)
 
 ```
@@ -325,6 +335,18 @@ EKFC = 0x001C0006
 Five fields, 13 bytes for IPv4. The protocol byte (`PTYPE1`, bit 18) disambiguates TCP and UDP flows that share the same IP:port 4-tuple. Without it, a TCP flow and a UDP flow with the same addresses and ports produce byte-identical keys and alias to one ehash entry — a silent misforwarding hazard on any router that forwards both protocols.
 
 The mainline RSS default (`DEFAULT_HASH_KEY_EXTRACT_FIELDS = 0x00180206`) includes `IPSEC_SPI` (bit 9) but omits `PTYPE1` (bit 18). This is correct for RSS — where hash collisions among 128 FQs are harmless — but incorrect for exact-match flow classification, where a collision means a wrong forwarding decision.
+
+### 4.3a PORT_ID — added by F-163 (2026-08-05)
+
+```
+EKFC = 0x801C0006
+     = KG_SCH_KN_PORT_ID | KG_SCH_KN_IPSRC1 | KG_SCH_KN_IPDST1
+     | KG_SCH_KN_PTYPE1  | KG_SCH_KN_L4PSRC | KG_SCH_KN_L4PDST
+```
+
+Six fields, 14 bytes for IPv4. `KG_SCH_KN_PORT_ID` (bit 31) was not part of any prior EKFC hypothesis on this branch (F-159's 0x001C0006, F-161's board-confirmed 0x00180006 for the *separate* cc_test/CC-tree scheme). It is required because the real vendor `cdx.ko` external-hash key always carries a leading ingress-port-id byte (§1.2a) — without it, this branch's ehash records can never byte-match what a vendor-equivalent silicon extraction would produce. Being the highest set bit, PORT_ID lands at buffer offset 0 under the already-confirmed MSB-first descending assembly order (§3.4), ahead of SIP/DIP/PROTO/SPORT/DPORT — exactly the vendor's layout.
+
+**Scope note:** this is the ehash-path scheme (Fork-B, `kernel/ask/oot-modules/ask/ask_flow_offload.c`). It is a *different* KeyGen scheme from cc_test's bare exact-match scheme (F-161's board-confirmed `0x00180006` on hwport 0x11's scheme4) — the two must not be conflated; adding PORT_ID here does not change cc_test's CC-tree EKFC.
 
 ### 4.4 Fields Explicitly Excluded
 

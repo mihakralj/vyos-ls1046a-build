@@ -462,6 +462,16 @@ __be16 sport;
 __be16 dport;
 u32 iif;
 u16 vlan_id;
+/*
+ * F-163 (2026-08-05): ingress FMan hwport id, set by
+ * ask_flow_offload_replace() from ask_dpaa_get_fman_port_id(ingress_dev).
+ * Not part of the 5-tuple, but kept inside the key (like next_hop_mac/
+ * egress_mac above) so it survives into the stored ask_flow and is
+ * available, unchanged, at DESTROY time for the symmetric FE-VM ehash
+ * delete. Prepended as byte 0 of the FE-VM ehash key by ask_fe_build_key()/
+ * _v6() -- see ASK_FE_KEY_SIZE comment.
+ */
+u8  port_id;
 u8  src_ip[16];     /* v4 packs into first 4, last 12 zero */
 u8  dst_ip[16];
 
@@ -688,11 +698,25 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
 
 /*
  * FE-VM EKFC key serialiser (CR-002). Exposed only so the kunit suite can
- * assert the exact 13-byte wire layout; production callers are the insert and
- * delete paths inside ask_flow_offload.c. @k must have room for 13 bytes.
+ * assert the exact wire layout; production callers are the insert and
+ * delete paths inside ask_flow_offload.c. @k must have room for
+ * ASK_FE_KEY_SIZE(_V6) bytes.
+ *
+ * F-163 (2026-08-05): PORT_ID prefix added. The real NXP cdx.ko driver
+ * (kernel/flavors/ask/sources/cdx/cdx-5.03.1/cdx_common.h `union dpa_key`,
+ * cdx_ehash.c `fill_key_info()`, nxp-sdk branch) builds its external-hash
+ * key as portid(1B) | SIP | DIP | PROTO | SPORT | DPORT -- a leading
+ * port-id byte no prior EKFC hypothesis on this branch included. KeyGen's
+ * EKFC has a matching field, KG_SCH_KN_PORT_ID (bit 31, 1 byte,
+ * specs/fman-keygen-flow-key-spec.md sec.4.1); since the EKFC assembly
+ * order was independently silicon-confirmed MSB-first descending
+ * (sec.3.4, 2026-07-13 CRC-64 hardware match), bit 31 being the highest
+ * set bit lands it at byte offset 0, ahead of every other field --
+ * exactly the vendor's layout. Widths bumped 13->14 (v4) and 37->38 (v6)
+ * accordingly.
  */
-#define ASK_FE_KEY_SIZE 13
-#define ASK_FE_KEY_SIZE_V6 37
+#define ASK_FE_KEY_SIZE 14
+#define ASK_FE_KEY_SIZE_V6 38
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE]);
 void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6]);
 
