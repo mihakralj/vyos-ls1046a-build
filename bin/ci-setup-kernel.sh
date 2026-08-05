@@ -2103,6 +2103,24 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
     echo "### fman_pcd_cc.c: F-161 board-confirmed EKFC cc_pack_key fix (supersedes F-159)"
 fi
 
+# F-162 (2026-08-05, CC-Tree Rebuild Plan): F-159/F-160/F-161 all confirmed
+# correct against vendor source and board dmesg, yet hwport 0x11 still goes
+# totally RX-silent within a handful of frames of any cc_test install.
+# Reading the vendor SDK's actual FM_PORT_SetPCD()/SetPcd() (Peripherals/FM/
+# Port/fm_port.c) shows the PRS_AND_KG_AND_CC case ORs NIA_KG_DIRECT |
+# physicalSchemeId into fmbm_rfpne for a port with exactly one bound scheme
+# -- this project's CC-graft model exactly -- and no code path here has ever
+# written it (confirmed absent from every "rfpne 0x00480200" dmesg line all
+# session: the NIA_ENG_KG|NIA_KG_CC_EN bits are right, but NIA_KG_DIRECT and
+# the scheme id are missing). Without it, the KeyGen falls back to the
+# generic SI/match-vector scheme-selection walk instead of deterministically
+# using the CC-attached scheme. Adds fman_port_set/clear_kg_direct_scheme()
+# and wires them into fman_pcd_kg_port_attach_cc()/detach_cc().
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_162.py" 2>&1
+    echo "### fman_port.c/fman_pcd_kg.c: F-162 KeyGen direct-scheme addressing (NIA_KG_DIRECT)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
