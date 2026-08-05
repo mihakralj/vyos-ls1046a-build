@@ -2087,6 +2087,22 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo "### fman_pcd_kg.c: F-160 CC-tree graft real-AC_CC NIA fix"
 fi
 
+# F-161 (2026-08-05, CC-Tree Rebuild Plan Phase 1 board test): supersedes
+# F-159's cc_pack_key() layout. Board-testing F-160 on .185 caused hwport
+# 0x11's RX to go totally silent (matching AND non-matching traffic) on
+# every cc_test install, requiring a reboot to recover — surviving `clear`.
+# dmesg from the install/detach cycle directly observed hwport 0x11's own
+# live KeyGen scheme (scheme4) using EKFC 0x00180006 (SIP|DIP|SPORT|DPORT,
+# NO proto), not F-159's assumed 0x001C0006 (which added PROTO based on the
+# separate EHASH/FE-VM path, never confirmed against the CC comparator).
+# Realigns cc_pack_key()'s software match-table layout to this directly
+# observed hardware EKFC. Must run after F-159 (targets F-159's own output
+# text) and after F-160 (same board-test cycle that surfaced this).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_161.py" 2>&1
+    echo "### fman_pcd_cc.c: F-161 board-confirmed EKFC cc_pack_key fix (supersedes F-159)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
