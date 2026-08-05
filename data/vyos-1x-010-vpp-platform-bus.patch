@@ -20,10 +20,10 @@ index 82d3753ae..60282697d 100644
          name {{ iface }}
  {%         if iface_config.num_rx_desc is vyos_defined %}
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index c0e30d1f1..e233d8029 100755
+index a831ded02..e8238b6c4 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -132,6 +132,7 @@
+@@ -133,6 +133,7 @@
      '1d0f:ec20',  # Amazon.com, Inc. Elastic Network Adapter (ENA)
  )
  SUPPORTED_DRIVERS = (
@@ -31,7 +31,7 @@ index c0e30d1f1..e233d8029 100755
      'hv_netvsc',  # Microsoft Hyper-V network interface card
  )
  
-@@ -285,6 +286,11 @@ def get_config(config=None):
+@@ -286,6 +287,11 @@ def get_config(config=None):
                  'iface_name': removed_iface,
                  'driver': 'dpdk',
              }
@@ -43,7 +43,7 @@ index c0e30d1f1..e233d8029 100755
              removed_ifaces.append(to_append)
              # add an interface to a list of interfaces that need
              # to be reinitialized after the commit
-@@ -352,8 +358,12 @@ def get_config(config=None):
+@@ -353,8 +359,12 @@ def get_config(config=None):
          effective_config = config_dict_merge(default_values_effective, effective_config)
          # Buffer normalization (auto → computed)
          _normalize_buffers(effective_config)
@@ -57,8 +57,8 @@ index c0e30d1f1..e233d8029 100755
          config['effective'] = effective_config
  
      # Save important info about all interfaces that cannot be retrieved later
-@@ -394,6 +404,16 @@ def get_config(config=None):
-                     EthtoolGDrvinfo(iface).driver
+@@ -401,6 +411,16 @@ def get_config(config=None):
+                     ['interfaces', 'ethernet', iface, 'mac']
                  )
  
 +                # LS1046A: fsl_dpa is a platform-bus AF_XDP driver, not DPDK
@@ -74,7 +74,7 @@ index c0e30d1f1..e233d8029 100755
                  # filter unsupported config nodes
                  iface_filter_eth(conf, iface)
                  set_dependents('ethernet', conf, iface)
-@@ -463,12 +483,7 @@ def get_config(config=None):
+@@ -470,12 +490,7 @@ def get_config(config=None):
                          )
                      if 'zero-copy' in iface_config['xdp_options']:
                          xdp_api_params['mode'] = 'zero-copy'
@@ -88,7 +88,7 @@ index c0e30d1f1..e233d8029 100755
                      iface_config['xdp_api_params'] = xdp_api_params
  
          # Buffer normalization (auto → computed)
-@@ -628,7 +643,7 @@ def verify(config):
+@@ -641,7 +656,7 @@ def verify(config):
          if iface_config['driver'] == 'xdp' and 'xdp_options' in iface_config:
              if iface_config['xdp_options']['num_rx_queues'] != 'all':
                  rx_queues = iface_config['xdp_api_params']['rxq_num']
@@ -97,7 +97,7 @@ index c0e30d1f1..e233d8029 100755
                  if rx_queues > max_rx_queues:
                      raise ConfigError(
                          f'Maximum supported number of RX queues for interface {iface} is {max_rx_queues}. '
-@@ -686,6 +701,9 @@ def generate(config):
+@@ -699,6 +714,9 @@ def generate(config):
  
  def initialize_interface(iface, driver, iface_config) -> None:
      # DPDK - rescan PCI to use a proper driver
@@ -107,7 +107,7 @@ index c0e30d1f1..e233d8029 100755
      if driver == 'dpdk' and iface_config['original_driver'] not in not_pci_drv:
          # 'gve' devices require a specific unbind/bind process instead of a standard PCI rescan.
          if iface_config['original_driver'] == 'gve':
-@@ -751,7 +769,7 @@ def apply(config):
+@@ -764,7 +782,7 @@ def apply(config):
                      if iface_config['kernel_module'] == 'ena':
                          control_host.unsafe_noiommu_mode(True)
  
@@ -116,7 +116,7 @@ index c0e30d1f1..e233d8029 100755
                      effective_ifaces = (
                          config.get('effective', {})
                          .get('settings', {})
-@@ -774,8 +792,8 @@ def apply(config):
+@@ -787,8 +805,8 @@ def apply(config):
                          or override_xdp_to_dpdk
                      ):
                          control_host.override_driver(
@@ -127,7 +127,7 @@ index c0e30d1f1..e233d8029 100755
                              override_drivers[k_module],
                          )
  
-@@ -784,6 +802,8 @@ def apply(config):
+@@ -797,6 +815,8 @@ def apply(config):
  
      # Initialize interfaces removed from VPP
      for iface in config.get('removed_ifaces', []):
@@ -136,7 +136,7 @@ index c0e30d1f1..e233d8029 100755
          initialize_interface(
              iface['iface_name'],
              iface['driver'],
-@@ -792,7 +812,7 @@ def apply(config):
+@@ -805,7 +825,7 @@ def apply(config):
  
          # Remove what is not in the config anymore
          if iface['iface_name'] not in config.get('settings', {}).get('interface', {}):
@@ -145,7 +145,7 @@ index c0e30d1f1..e233d8029 100755
  
      if 'settings' in config and 'interface' in config.get('settings'):
          interface_rx_mode = config['settings'].get('interface_rx_mode')
-@@ -822,13 +842,13 @@ def apply(config):
+@@ -835,13 +855,13 @@ def apply(config):
                      # Some cloud NICs fail to load XDP if all RX queues are configured. To avoid this,
                      # we limit the number of queues to half of the maximum supported by the driver.
                      if (
@@ -162,7 +162,7 @@ index c0e30d1f1..e233d8029 100755
                          channels = {}
                          if channels_orig.get('rx'):
                              channels = {'rx': max_rx_queues, 'tx': max_rx_queues}
-@@ -889,8 +909,12 @@ def apply(config):
+@@ -902,8 +922,12 @@ def apply(config):
              # we need to stop vpp service and initialize interfaces
              call(f'systemctl stop {service_name}.service')
              for iface, iface_config in config['settings']['interface'].items():
