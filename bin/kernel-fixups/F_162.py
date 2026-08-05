@@ -164,16 +164,14 @@ with open(port_h) as f:
     hsrc = f.read()
 
 old_h_tail = (
-    "u32 fman_port_get_params_page(struct fman_port *port);\n"
-    "int fman_port_set_params_page(struct fman_port *port, u32 muram_off,\n"
-    "\t\t\t      void __iomem *page);\n"
+    "/* 0123: total task (tnum) count - FE internal-buffer pool sizing */\n"
+    "u8 fman_port_get_total_tnums(struct fman_port *port);\n"
     "\n"
     "#endif /* __FMAN_PORT_H */\n"
 )
 new_h = (
-    "u32 fman_port_get_params_page(struct fman_port *port);\n"
-    "int fman_port_set_params_page(struct fman_port *port, u32 muram_off,\n"
-    "\t\t\t      void __iomem *page);\n"
+    "/* 0123: total task (tnum) count - FE internal-buffer pool sizing */\n"
+    "u8 fman_port_get_total_tnums(struct fman_port *port);\n"
     "\n"
     "/* F-162: direct KeyGen scheme addressing in fmbm_rfpne (NIA_KG_DIRECT) */\n"
     "int fman_port_set_kg_direct_scheme(struct fman_port *port, u8 scheme_id);\n"
