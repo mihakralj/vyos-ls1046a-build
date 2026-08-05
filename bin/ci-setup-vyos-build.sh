@@ -68,19 +68,22 @@ GITATTR
 # on context drift). Idempotent: skip patches that reverse-apply cleanly,
 # treating that as "already merged upstream".
 #
-# 2026-08-04: data/vyos-build-008-vpp-libxdp.patch removed from this list.
-# Confirmed byte-exact: vyos-build/scripts/package-build/vpp/package.toml
-# (currently at vyos-build commit c325427, "vpp: add libxdp-dev + libbpf-dev
-# for af_xdp XSK support (M4 ZC)") already contains 100% of this patch's
-# intended content verbatim -- both the shell build_cmd additions and the
-# [dependencies] packages array. The reverse-apply idempotency check above
-# still fails on it (unrelated context drift elsewhere in the file from
-# later vyos-build commits shifts the hunk's surrounding lines), so it
-# can't self-detect as "already applied" the way 005/007 do -- removed
-# explicitly instead of guessing a context refresh. Left in data/ for
-# history; fix-xdp-tools-werror.py is still staged unconditionally below
-# regardless of this loop.
-for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch data/vyos-build-009-eatmydata-bootstrap.patch data/vyos-build-010-persist-chroot.patch; do
+# 2026-08-04: data/vyos-build-008-vpp-libxdp.patch was removed from this
+# list, believed redundant against vyos-build commit c325427 ("vpp: add
+# libxdp-dev + libbpf-dev for af_xdp XSK support (M4 ZC)"). 2026-08-05
+# CORRECTION: that check compared against a PERSISTENT LOCAL vyos-build
+# clone that had c325427 as a local-only commit -- `git merge-base
+# --is-ancestor c325427 origin/rolling` proves it was never on real
+# upstream. A genuinely fresh clone (confirmed via a real CI run on
+# self-hosted-build.yml, which always clones fresh) has NONE of this
+# content, so removing the patch broke CI outright: the af_xdp plugin's
+# xdp-tools 1.5.5 external dependency failed with a hard -Werror=
+# unused-parameter build error (fix-xdp-tools-werror.py's sed step,
+# which this patch's [[build_cmd]] addition stages, never ran because
+# the line that invokes it was never present). Restored. Verified
+# against a fresh worktree at the true current origin/rolling tip
+# (6dea4497 as of this fix) -- applies cleanly.
+for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch data/vyos-build-008-vpp-libxdp.patch data/vyos-build-009-eatmydata-bootstrap.patch data/vyos-build-010-persist-chroot.patch; do
   if git -C vyos-build apply --reverse --check --whitespace=nowarn "../$p" >/dev/null 2>&1; then
     echo "### $p: skipped (already applied upstream)"
     continue
