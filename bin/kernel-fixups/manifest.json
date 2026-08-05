@@ -144,6 +144,7 @@
     "F_157.py": "fman_pcd.c: F-157 \u2014 wire dedicated TX FQ into FE-VM ENQ (HIT dest distinct from miss-AD kernel FQ 0x200)",
     "F_158.py": "fman_pcd.c: F-158 \u2014 fe_scaffold debugfs dump node (ground truth on CC match-table layout; STRICT_DEVMEM blocks /dev/mem)",
     "F_159.py": "fman_pcd_cc.c: F-159 \u2014 fix cc_pack_key() from patch 0108's ask20 EKFC 0x00180206 composite to this branch's real EKFC 0x001C0006 (SIP|DIP|PROTO|SPORT|DPORT); extends cc_test debugfs read with a raw match-table hex dump",
+    "F_160.py": "fman_pcd_kg.c: F-160 \u2014 fix fman_pcd_kg_port_attach_cc()'s next_engine=2 (confirmed no-op CC dispatch) to next_engine=3 (real AC_CC, matching the FE-VM arm path's already-validated encoding)",
     "F_152.py": "fman_pcd.c: F-152 \u2014 revert F-144, restore original word1 formula (hashMask<<16|contextSize-1<<8|hashShift)",
     "F_153.py": "fman_pcd.c: F-153 \u2014 fix 0146 MUX/TRANSITION wiring (MUX->TRANSITION->ENQ, not MUX->ENQ direct)"
   },
