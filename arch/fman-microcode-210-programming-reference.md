@@ -149,8 +149,11 @@ To read or write a scheme word:
 | Word Index | Register Name | Bits | Meaning |
 |---|---|---|---|
 | **0** | `kgse_mode` | `[31]` | **EN**: master enable for this scheme |
+| | | `[30:24]` | **CCOBASE**: group-table entry index this scheme's AC_CC dispatch selects (board-confirmed 2026-08-05, see below) |
 | | | `[22:16]` | NIA target engine (same encoding as `FMBM_RFPNE`; see §5) |
 | | | `[7:0]` | Action code: `2`=BMI enqueue frame (RSS), `6`=CC/DONE, others per RM |
+
+**CCOBASE, board-confirmed (`.106` vendor stack, `bin/kg-scheme-read.py`, 2026-08-05):** vendor's 12 enabled schemes on a single port show `kgse_mode` values `0x8b000006` down to `0x80000006` (scheme 0→11), i.e. `KG_SCH_MODE_EN(0x80000000) | (CCOBASE=11..0)<<24 | NIA_ENG_FM_CTL|AC_CC(0x000006)`, with `kgse_ccbs=0x00000000` on every scheme. This confirms: (a) `kgse_ccbs` genuinely is unused in AC_CC mode (§4.2 above already noted CCBS must be 0 for AC_CC — this is now board-verified across 12 independent schemes, not just theorized); (b) `FMBM_RCCB` points at a **shared group table with one 16-byte entry per scheme**, and each scheme's own CCOBASE field selects which entry is "its" entry (`effective_target = FMBM_RCCB + CCOBASE * 16`) — not a single-entry table per port. See §7.11a for the confirmed entry-table byte layout.
 | **1** | `kgse_ekfc` | `[31:0]` | **Extract Known Fields bitmask**: see §4.3 |
 | **2** | `kgse_mv` | `[31:0]` | **Match Vector**: LCV bits that select this scheme |
 | **3** | `kgse_ccbs` | `[27:12]` | **CC Base Select**: MURAM offset of CC group table (set to `0` for direct AC_CC dispatch via `FMBM_RCCB`) |
@@ -285,10 +288,12 @@ Parser-Next-Engine (`FMBM_RFPNE`) and Frame-Enqueue-Next-Engine (`FMBM_RFENE`) s
 | Symbol | Value | Meaning |
 |---|---|---|
 | `NIA_ENG_HWP` | `0x00440000` | Hardware Parser |
-| `NIA_ENG_HWK` | `0x00480000` | KeyGen (RSS / classification hash) |
+| `NIA_ENG_HWK` (= `NIA_ENG_KG` in vendor SDK naming) | `0x00480000` | KeyGen (RSS / classification hash) |
 | `NIA_ENG_BMI` | `0x00500000` | BMI direct |
 | `NIA_BMI_AC_ENQ_FRAME` | `0x00000002` | BMI: enqueue frame to destination FQ |
 | `NIA_BMI_AC_CC` | `0x00000200` | BMI: dispatch to coarse-classifier (CC / FE-VM entry) | **210-only**: AC_CC dispatch path |
+| `NIA_KG_CC_EN` | `0x00000200` | Same bit value as `NIA_BMI_AC_CC`, KeyGen-context name (`fman_port.c`) — set when the port's next engine after KeyGen must be CC |
+| `NIA_KG_DIRECT` | `0x00000100` | **KG addresses one scheme directly**, bypassing the SI/match-vector walk (§4.4). OR'd with the low-order `physicalSchemeId` (5 bits, 0–31). Vendor SDK `fm_port.c SetPcd()`'s `PRS_AND_KG_AND_CC` case sets this whenever the port has exactly one bound scheme (`directScheme`). This project's own CC-graft code (`fman_pcd_kg_port_attach_cc()`) never wrote this bit before F-162 (2026-08-05) — confirmed absent from every board dmesg line prior (`rfpne 0x00480200`, no `0x100` bit, no scheme id) |
 | `NIA_ORDER_RESTOR` | `0x00800000` | QMan order-restoration flag (order-preserving enqueue) |
 
 Observed pipeline configurations on LS1046A:
@@ -297,10 +302,13 @@ Observed pipeline configurations on LS1046A:
 |---|---|---|---|---|
 | `0x00500002` | `NIA_ENG_BMI \| AC_ENQ_FRAME` | Parser → BMI → direct enqueue | no | no (stale/garbage) |
 | `0x00480000` | `NIA_ENG_HWK` | Parser → KG → RSS-hash → BMI enqueue | yes | yes (KG raw CRC-64) |
-| `0x00480200` | `NIA_ENG_HWK \| AC_CC` | Parser → KG → AC_CC dispatch → FE-VM | yes | yes (KG raw CRC-64) | **210-only**: AC_CC dispatch path |
+| `0x00480200` | `NIA_ENG_HWK \| AC_CC` | Parser → KG → AC_CC dispatch, **generic SI/match-vector scheme selection** (§4.4) | yes | yes (KG raw CRC-64) | **210-only**: AC_CC dispatch path |
+| `0x00480200 \| NIA_KG_DIRECT \| scheme_id` (e.g. `0x00480304` = scheme 4) | `NIA_ENG_HWK \| AC_CC \| KG_DIRECT` | Parser → KG (**scheme addressed directly**, no SI/match-vector walk) → AC_CC dispatch | yes | yes | **210-only, F-162 (2026-08-05)**: required by vendor SDK for a single-bound-scheme port; board-confirmed via `dev_info` log `"fman_port: KG direct-scheme addressing set, scheme %u (rfpne 0x%08x)"` |
 | `0x00440200` | `NIA_ENG_HWP \| AC_CC` | Parser → CC (KG skipped) | no | no |
 
 The mainline `dpaa_eth` default for kernel RSS delivery is `0x00500002`: no KeyGen. To engage the KG for either RSS or AC_CC, RFPNE must be rewritten to `0x00480000` or `0x00480200` on the target port. Before trusting any read at `hash_result_offset`, dump RFPNE and confirm bits [22:16] = `0x48`. If bits [22:16] = `0x50`, the KG did not run and the annotation hash slot is not populated by the KG.
+
+**Note (2026-08-05):** `NIA_KG_DIRECT` alone does not explain the RX-stall this project observed under `cc_test`-driven AC_CC dispatch (F-162 added it, board-confirmed live and correctly encoded, stall persisted regardless — see `plans/CC-TREE-REBUILD-PLAN.md`). It is documented here because it is a real, vendor-required field this project was missing, not because it is a proven fix for that stall.
 
 
 ## 6. FM_CTL Params Page (per-port, 256 B MURAM)
@@ -479,6 +487,21 @@ RCCB → CONT_LOOKUP group AD
 - The pre-RM-8.7.4.1 `{flags, next_ptr}` group-entry format decodes as `RESULT_CF fqid=0` (reserved-invalid) → QMan Invalid-Enqueue-State storm. Do not use.
 - **Engage inverse:** free group table + node/AD tables on disarm, clear the driver's group-offset bookkeeping. The historical scaffold leaked +36 B/cycle; the pcd-snapshot gate (`MURAM used == 0` after disengage) is the acceptance test.
 - Any `numKeys>0` entry targeting `FE_ENTER` makes the per-port FE workspace pool (`FmPortSetFESupport`, params page `+0x54`/`+0x58` — see [`fman-fe-ehash.md`](fman-fe-ehash.md) §4) **mandatory** before the first frame dispatches.
+
+### 7.11a Vendor group-table entry format, board-confirmed (`.106`, 2026-08-05)
+
+The table above (§7.11) is this project's own single-entry model, matched against SDK doc comments. Direct MURAM inspection of `.106`'s genuine, working vendor stack (`bin/muram-mmap-dump.py` + `bin/kg-scheme-read.py`, hwport `0x11` — the same physical port, `1a91000.port`, as this project's own `eth4`) shows a **different, richer structure**: `FMBM_RCCB` on real hardware points at a **shared table of one 16-byte entry per enabled KeyGen scheme**, not a single entry. With 12 schemes enabled, `FMBM_RCCB`+`0x00`..`0xB0` held 12 contiguous 16-byte rows, then zero padding. Each scheme's own `kgse_mode` CCOBASE field (§4.2) selects its row: `effective_target = FMBM_RCCB + CCOBASE*16`.
+
+Per-entry word layout, decoded and **verified byte-exact against `/etc/cdx_pcd.xml`'s per-distribution `keysize` attribute for all 12 rows** (12/12 exact match, zero offset — `cdx_udp6_cc`/`cdx_tcp6_cc` keysize 38 ↔ rows with sizeField 38, `cdx_esp6_cc` keysize 22 ↔ sizeField 22, `cdx_multicast6_cc` keysize 34 ↔ sizeField 34, `cdx_ethernet_cc` keysize 15 ↔ sizeField 15, `cdx_pppoe_cc` keysize 11 ↔ sizeField 11, `cdx_tuple3udp4/tcp4_cc` keysize 8 ↔ sizeField 8, `cdx_tuple3udp6/tcp6_cc` keysize 20 ↔ sizeField 20, `cdx_udp4/tcp4_cc` keysize 14 ↔ sizeField 14, `cdx_esp4/multicast4_cc` keysize 10 ↔ sizeField 10):
+
+| Word | Offset | Contents (confirmed) |
+|---|---|---|
+| `w0` | `0x00` | `FM_PCD_AD_CONT_LOOKUP_TYPE(0x40000000)` in bits `[31:30]` — **same type tag this project's own `cc_write_group0()` uses**, correcting an earlier (2026-08-05, same-day) hypothesis that vendor uses a categorically different AD species here. Bits `[29:24]` = classification **keysize, direct value, no −1 adjustment** (contrary to the `(sizeOfExtraction-1)<<24` SDK C-code comment for the code path this project modeled §7.11 on — that comment evidently describes a different call site than what `dpa_app`/`fmc` actually emits). Low 24 bits = **constant `0x400008` across all 12 entries** regardless of scheme — a shared resource pointer, not yet decoded. |
+| `w1` | `0x04` | NOT a literal `numKeys<<24 \| LCL_MASK \| MatchTableOffset` per §7.11's model — top byte takes only two observed values (`0xd6`=214, `0xcc`=204, `0xeb`=235) implausible as literal key counts; low 23 bits (`0x044100`–`0x73dd00` range) too large to be in-range MURAM offsets. Most likely packed hash/CRC configuration, not yet decoded. |
+| `w2` | `0x08` | Constant `0x0402` in the top 16 bits across all 12 entries. Low byte shows a plausible parse-code-family pattern: `0x0f` for the four TCP/UDP-port-based classifications (udp4/tcp4/udp6/tcp6), `0x08` for most others (ipv4/ipv6/esp/multicast/tuple3), `0x04` for `pppoe` — a real per-protocol-family selector, but the exact code values do **not** match this project's own `CC_PC_GENERIC_IC_GMASK=0x2B` convention. Vendor uses a different parse-code scheme at this layer. |
+| `w3` | `0x0C` | Clustered around `0x0048030x` (x = 6–b) for most entries; the first two (rows 0–1, `ethernet`/`pppoe`) differ at `0x004c8000`. Not yet decoded — plausibly a further MURAM pointer (`0x048030x`/`0x04c8000` are both in-range MURAM offsets, ~0x300 bytes apart from the group table itself, worth a follow-up targeted dump). |
+
+**What this settles:** the type tag and keysize field prove vendor's per-scheme root AD is structurally the same `CONT_LOOKUP` species this project already builds — the earlier explanation "vendor uses a fundamentally different AD species (`t_ExtHashFe`)" for why real hardware survives sustained traffic where `cc_test` freezes within 17–30 frames is **not correct as stated**. **What remains open:** `w1`–`w3`'s real semantics (most likely a hash/CRC-config + further-indirection-pointer scheme this project has never replicated), which is the more likely home for the actual behavioral difference. See `plans/NXP-106-DEEP-DIVE-PLAN.md` Phase A/C for follow-on work — resolving `w1`–`w3` needs either `dpa_app`/`fmc`'s own build-time source (not just the raw SDK primitives this document was modeled on) or live instrumentation.
 
 
 ## 8. Header Manipulation Opcodes
