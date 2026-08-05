@@ -73,10 +73,24 @@ else
 fi
 
 # Wire ccache for kernel C compiles.
+#
+# 2026-08-05: point at the SAME CCACHE_DIR the real CI pipeline uses
+# (.github/workflows/auto-build.yml's CCACHE_DIR: /home/vyos/cache/ccache)
+# instead of ccache's own per-user default (~/.ccache, or ~root/.ccache
+# under the iso mode's sudo re-exec). This machine IS the self-hosted CI
+# runner (ARM64-runner2), so a local dev build and a real CI run on it
+# can now share compiled-object cache even though — after the 2026-08-05
+# fresh-clone fix below — they no longer share git checkouts. Compiled
+# objects are content-addressed by ccache, so sharing them across two
+# independently-cloned checkouts of the same source is safe; sharing
+# whole git checkouts across runs is what caused this session's entire
+# string of stale-state bugs, including a local-only vyos-build commit
+# that silently diverged from upstream (c325427).
+export CCACHE_DIR="${CCACHE_DIR:-/home/vyos/cache/ccache}"
 if [ "$USE_CCACHE" = "1" ] && command -v ccache >/dev/null 2>&1; then
     export KBUILD_BUILD_TIMESTAMP="${KBUILD_BUILD_TIMESTAMP:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
     export CC="ccache ${CROSS_COMPILE}gcc"
-    info "ccache enabled (stats: $(ccache -s 2>/dev/null | awk '/cache hit rate/ {print $0; exit}'))"
+    info "ccache enabled, dir=$CCACHE_DIR (stats: $(ccache -s 2>/dev/null | awk '/cache hit rate/ {print $0; exit}'))"
 fi
 
 # CI scripts expect GITHUB_WORKSPACE etc. Provide minimal shims so they
@@ -275,7 +289,7 @@ cmd_iso() {
     if [ "$(id -u)" -ne 0 ]; then
         info "local-build.sh installs apt packages — re-invoking under sudo"
         # Preserve auth env across the sudo boundary.
-        exec sudo --preserve-env=LXC200_HOST,TFTP_DIR_REMOTE,SSH_KEY,JOBS,USE_CCACHE \
+        exec sudo --preserve-env=LXC200_HOST,TFTP_DIR_REMOTE,SSH_KEY,JOBS,USE_CCACHE,CCACHE_DIR \
             HOME="$HOME" bash "$0" iso "$@"
     fi
 

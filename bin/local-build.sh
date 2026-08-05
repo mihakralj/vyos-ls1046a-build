@@ -108,11 +108,22 @@ apt-get install -y --no-install-recommends \
 
 step "Set version" env INPUT_BUILD_BY="" INPUT_BUILD_VERSION="" bash bin/ci-set-version.sh
 
-step "Clone vyos-build" bash -c '
-if [ ! -d vyos-build/.git ]; then
-  rm -rf vyos-build
-  git clone --depth=1 https://github.com/vyos/vyos-build.git vyos-build
-fi
+# 2026-08-05: always fresh-clone, never reuse an existing checkout. This
+# used to be `if [ ! -d vyos-build/.git ]` (clone once, reuse forever on
+# this persistent local runner) -- the exact mechanism behind an entire
+# session's worth of stale-state bugs, including a local-only commit
+# (c325427) that silently diverged from real upstream and made a genuine
+# patch look redundant. vyos-1x/vpp nest inside vyos-build/scripts/
+# package-build/ and get cloned fresh by build.py's own `if not exists`
+# check, so freshening vyos-build here cascades to them automatically --
+# no separate fix needed there. This makes local `dev-build.sh iso` do
+# the same clone-fresh-every-run process real CI always has, at the cost
+# of the clone+extract time on every local iso build (mitigated by
+# --depth=1 and a shared ccache for the actual compile time -- see the
+# CCACHE_DIR wiring in dev-build.sh).
+step "Clone vyos-build (fresh, always)" bash -c '
+rm -rf vyos-build
+git clone --depth=1 https://github.com/vyos/vyos-build.git vyos-build
 '
 
 step "Install vyos-1x build deps (VyOS apt repo)" bash -c '
