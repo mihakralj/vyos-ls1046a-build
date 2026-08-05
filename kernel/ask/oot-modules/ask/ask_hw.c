@@ -111,16 +111,24 @@ static bool ask_hw_cached_valid;
  * IP:port 4-tuple. This matches the spec requirement in
  * specs/fman-keygen-flow-key-spec.md §3.4.
  *
- * Total emitted key width = 13 bytes: [SIP:4][DIP:4][PROTO:1][SP:2][DP:2].
- * This is the Fork-B FE-VM ehash path key format used by
- * ask_debugfs_fe_flow_write() in ask_flow_offload.c.
+ * F-163 (2026-08-05): recipe extended to EKFC=0x801C0006, adding
+ * KG_SCH_KN_PORT_ID (bit 31) so the extracted key carries a leading
+ * ingress-port byte matching the real vendor cdx.ko external-hash key
+ * format (union dpa_key, nxp-sdk branch cdx_common.h). Being the highest
+ * set bit, PORT_ID lands first under the silicon's confirmed MSB-first
+ * descending assembly order (spec §3.4).
+ *
+ * Total emitted key width = 14 bytes:
+ * [PORT_ID:1][SIP:4][DIP:4][PROTO:1][SP:2][DP:2]. This is the Fork-B
+ * FE-VM ehash path key format used by ask_fe_build_key() in
+ * ask_flow_offload.c (ASK_FE_KEY_SIZE).
  */
 #define ASK_HW_PR_OFF_IPV4_SIP  12
 #define ASK_HW_PR_OFF_IPV4_DIP  16
 #define ASK_HW_PR_OFF_L4_SPORT  20
 #define ASK_HW_PR_OFF_L4_DPORT  22
 
-#define ASK_HW_V4_KEY_WIDTH     13      /* Fix M2: was 16 (with SPI), now 13 (with PTYPE1) */
+#define ASK_HW_V4_KEY_WIDTH     14      /* F-163: was 13, +1 for PORT_ID prefix */
 
 #define ASK_HW_MAX_PORTS        8       /* LS1046A has 8 BMI RX ports total */
 
