@@ -1,5 +1,7 @@
 # CC-Tree Hardware-Offload Rebuild — Test & Implementation Plan
 
+**[NOTE, 2026-08-05]** This plan's Phase 2 ("wire into `ask_flow_offload_replace()`, demote ehash") was written the day before F-163 found that the genuine deployed vendor `cdx.ko` driver's own production classification path is external-hash (`ExternalHashTableAddKey()`, `cdx_ehash.c`), not CC-tree-only — see `arch/fman-fe-ehash.md`'s un-retirement banner and `specs/fman-keygen-flow-key-spec.md` §1.2a. This plan's CC-tree work isn't necessarily wrong (CC-tree avoids per-frame DDR access and has its own real MURAM-footprint advantages), but "demote ehash" as a premise should be re-examined in light of that finding before Phase 2 executes, not carried forward unexamined. A 2026-08-05 live board test of the corrected ehash key format (F-163) was byte-correct end-to-end but still produced a MISS — see `arch/fman-microcode-210-programming-reference.md` §10.5a — so neither path currently has a confirmed hardware HIT on this branch.
+
 **Status:** Phase 0 code-prep done (2026-08-04): 0a confirmed patch 0107's match-row format is clean;
 0a-2 found and fixed a second blocker (patch 0108 hardcoded the wrong branch's EKFC composite into
 `cc_pack_key()`) via new fixup `bin/kernel-fixups/F_159.py`, validated with `bin/test-fixups.sh`. 0b's
