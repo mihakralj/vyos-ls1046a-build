@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.2**
+**Version 1.3**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -340,6 +340,78 @@ Observed pipeline configurations on LS1046A:
 The mainline `dpaa_eth` default for kernel RSS delivery is `0x00500002`: no KeyGen. To engage the KG for either RSS or AC_CC, RFPNE must be rewritten to `0x00480000` or `0x00480200` on the target port. Before trusting any read at `hash_result_offset`, dump RFPNE and confirm bits [22:16] = `0x48`. If bits [22:16] = `0x50`, the KG did not run and the annotation hash slot is not populated by the KG.
 
 **Note (2026-08-05):** `NIA_KG_DIRECT` alone does not explain the RX-stall this project observed under `cc_test`-driven AC_CC dispatch (F-162 added it, board-confirmed live and correctly encoded, stall persisted regardless — see `plans/CC-TREE-REBUILD-PLAN.md`). It is documented here because it is a real, vendor-required field this project was missing, not because it is a proven fix for that stall.
+
+### 5.2 Full BMI RX Port Register Comparison — dpaa1 vs vendor, and the port-wedge investigation (2026-08-05)
+
+**Context.** Arming AC_CC/FE_ENTER dispatch on port `0x11` (eth4) via this branch's `fe_arm engage` debugfs verb wedges the port immediately and 100% reproducibly (4/4 cold-boot cycles as of this section) — before any test traffic is even sent, with zero fault signature anywhere (no `FMFP_PS` STL bit, all DCSR fault registers — `bmi_err`, `fpm_err`, `kg_err`, `parser_err`, `pol_err`, `qmi_err` — clean both before and immediately after arming). Only a full cold power cycle clears it; `fe_arm disengage` does not. This matches the project's documented "silent WAIT, no fault latched" corruption class (the iter-50 fault-capture precedent) and the broader "port goes deaf, cold boot required" failure class (F-069, F-076, F-125).
+
+This section documents a full register-level comparison against the genuine vendor `cdx.ko` stack running on `.106` (same physical hwport `0x11`), read via `bin/ask-pcd-regdump.py` (`/dev/mem`, read-only) on both boards, plus a methodical trace of the NXP SDK source (`nxp-sdk` branch, `kernel/flavors/ask/sdk-sources/.../Peripherals/FM/Port/fm_port.c`, `FM/SP/fm_sp.c`, `FM/Pcd/fm_pcd.c`, `FM/Pcd/fm_ehash.c`) to determine, for every register that differs, whether the difference is causally relevant to the wedge or merely a general-port-config difference unrelated to AC_CC specifically.
+
+#### 5.2.1 Register-by-register table
+
+`fmbm_rfpne` (the actual AC_CC/HWK dispatch trigger, §5.1) matches exactly between vendor and our armed state. Everything below is registers our arm path either doesn't touch, or that differ in value.
+
+| Register | Offset | Vendor (`.106`) | Ours (`.185`, pre-arm baseline) | Status |
+|---|---|---|---|---|
+| `FMBM_RIM` (Internal Buffer Margins) | `0x18` | `0x60000000` (96 B) | `0x00000000` (never set by our arm path) | **RESOLVED — not the cause.** §5.2.2: reserved scratch space for header-manip opcodes only, unrelated to classification. Legitimately 0 for our manip-free test. |
+| `FMBM_RICP` (Internal Context Parameters) | `0x14` | `0x00000007` | `0x000e0203` | **RULED OUT by live test.** §5.2.3: F-166 set this to the exact vendor value on arm — wedge persisted unchanged (4th cold-boot cycle). Reverted (commit `2262727a`). |
+| `FMBM_RSTC` (Statistics Counters control) | `0x200` | `0x80000000` (enabled) | `0x00000000` (disabled) | Explains why `FMBM_RFRC` (RX Frame Counter) reads 0 on `.185` even under confirmed working traffic — **not a live-traffic health signal on this build**, a pure counting-enable difference. Not investigated as a wedge cause (a disabled counter cannot itself block RX). |
+| `FMBM_RFNE` (pre-parser next engine) | `0x20` | `0x10440000` | `0x00440000` | Bit 28 differs; meaning not decoded. Open, low priority — this is upstream of the parser, before classification. |
+| `FMBM_RPSO` (Parse Start Offset) | `0x2C` | `0x00000060` (96 B) | `0x00000000` | Open. Possibly paired with `FMBM_RIM`'s margin (both 0 together may be internally self-consistent for a manip-free config, matching §5.2.2's conclusion) — not confirmed either way. |
+| `FMBM_RPP` (Policer Profile) | `0x30` | `0x01000000` (policer engaged) | `0x00000000` | Likely orthogonal — rate limiting is a separate mechanism from classification dispatch. Not investigated live. |
+| `FMBM_RFENE` (post-enqueue next engine) | `0x70` | `0x00000022` | `0x00d40000` | §5.2.4: traced to `AttachPCD()`'s NIA-restore mechanism, found **dormant** for standard CC-tree/AC_CC setups in this source tree — likely general port-init tuning, not PCD-attach-specific. Deprioritized. |
+| `FMBM_RCMNE` (continuous-mode next engine) | `0x7C` | `0x0000000e` | `0x00000000` | Same as `FMBM_RFENE` above — same dormant mechanism, same conclusion. Deprioritized. |
+
+#### 5.2.2 `FMBM_RIM` fully traced — closed, not the cause
+
+Source: `FmSpBuildBufferStructure()` (`FM/SP/fm_sp.c`):
+```c
+/* save extra space for manip in both external and internal buffers */
+if (p_BufferPrefixContent->manipExtraSpace) {
+    uint8_t extraSpace;
+    extraSpace = p_BufferPrefixContent->manipExtraSpace;
+    p_FmSpBufferOffsets->manipOffset = p_FmSpBufMargins->startMargins;
+    p_FmSpBufMargins->startMargins += extraSpace;
+    *internalBufferOffset = extraSpace;
+}
+```
+`internalBufferOffset` (which becomes `FMBM_RIM` via `int_buf_start_margin`, `FM/Port/fm_port.c` ~line 695) is **only** set when the port's buffer-prefix config declares `manipExtraSpace` — i.e. it is scratch space reserved for header-manipulation opcodes (STRIP_ETH_HDR / TTL_DECREMENT / ETH_HEADER_REBUILD, §10.1), not anything KeyGen/CC/ehash-related. Vendor's `.106` shows 96 B because its live PCD config uses manip opcodes on this port; our test uses none. `0x00000000` is the *correct* value for a manip-free classification test, not a missing default. This closes the `FMBM_RIM` line of investigation — no live test needed.
+
+#### 5.2.3 `FMBM_RICP` fully traced — ruled out by live test, mechanism now understood
+
+Decoded bit layout (`ic_ext_offset<<16 | ic_int_offset<<8 | ic_size`, all in 16-byte units — `BMI_IC_TO_EXT_SHIFT=16`, `BMI_IC_FROM_INT_SHIFT=8`, `FMAN_PORT_IC_OFFSET_UNITS=0x10`, confirmed identical in both vendor SDK and our mainline driver):
+
+| | ic_ext_offset | ic_int_offset | ic_size |
+|---|---|---|---|
+| Vendor `0x00000007` | 0 B | 0 B | 112 B |
+| Ours `0x000e0203` | 224 B | 32 B | 48 B |
+
+Source: `FM/Port/fman_port.c` (the vendor's flib-style driver, ~line 108) computes a value from `cfg->ic_ext_offset`/`ic_int_offset`/`ic_size` via the standard formula, then **unconditionally discards it**: `tmp = 0x00000007;` immediately before the register write, no explanatory comment. This is disconnected from the fancier `FmSpBuildBufferStructure()` computation described in §5.2.2 (which would compute IC size from `passPrsResult`/`passTimeStamp`/`passHashResult` flags, maxing out around 48 B, not 112 B) — the actual silicon write is a flib-level hardcoded constant regardless of what the higher-level config layer computed. Our value (`0x000e0203`) comes from mainline `dpaa_eth`'s own `fman_port_cfg_buf_prefix_content()` mechanism, tuned for RSS-hash-in-skb / checksum offload, set once at port init, unrelated to and unaffected by AC_CC arming.
+
+F-166 (`bin/kernel-fixups/F_166.py`, commit `d2f3e875`) live-tested overriding this to the exact vendor value (`0x00000007`) when AC_CC is armed. Confirmed correctly applied (`fmbm_ricp=0x00000007` read back live via `/dev/mem` at arm time) — **the wedge persisted unchanged.** Reverted (commit `2262727a`). This closes `FMBM_RICP` as a cause: even byte-exact reproduction of the vendor's real register write does not resolve the wedge.
+
+#### 5.2.4 `AttachPCD()`/`DetachPCD()`'s NIA-restore mechanism — traced, found dormant for CC-tree
+
+`FM/Port/fm_port.c`'s `AttachPCD()` (called when a PCD-configured port transitions from BMI-to-BMI state to PCD-active) conditionally restores several saved registers based on `p_FmPort->requiredAction` bitflags: `FMBM_RCMNE`, `FMQM_PNEN` (QMI-side, not BMI), `FMBM_RFENE`, `FMQM_PNDN` (QMI-side), and can restrict the port to a single RISC core via `FmSetNumOfRiscsPerPort(fm, hwport, 1, ...)` (flag `UPDATE_FMFP_PRC_WITH_ONE_RISC_ONLY`). These flags are set via a companion setter, `FmPortGetSetCcParams()`'s `setCcParams` half.
+
+Searched every caller of that setter across the entire PCD module tree (`FM/Pcd/*.c`): **only `fm_manip.c` calls it, and only with `UPDATE_OFP_DPTE`** (an OH-offline-parsing-port-specific manip flag). Nothing in `fm_cc.c` (the Coarse Classification / CC-tree module) or anywhere else in the searched tree ever sets `UPDATE_NIA_FENE`, `UPDATE_NIA_CMNE`, `UPDATE_NIA_PNEN`, `UPDATE_NIA_PNDN`, or `UPDATE_FMFP_PRC_WITH_ONE_RISC_ONLY` for a standard CC-tree/AC_CC setup in this SDK source snapshot. This mechanism appears to exist for a narrower manip-chain use case than general PCD attach. Consequently the `FMBM_RFENE`/`FMBM_RCMNE` differences in §5.2.1 are most likely general per-port init-time tuning (same category as `FMBM_RICP`), not something PCD-attach specifically requires — deprioritized as a wedge cause, not ruled out by a live test.
+
+#### 5.2.5 Host Command (HC) synchronization — a lead that does not survive cross-checking
+
+`FM/Pcd/fm_ehash.c` — the vendor's actual external-hash table module, the direct ancestor of this branch's own ehash/Fork-B implementation — calls `FmPcdHcSync()` at least 9 times throughout its normal table-set/key-add/key-delete operations (e.g. `ExternalHashTableSet`, `ExternalHashTableAddKey`). This project has separately and extensively confirmed (§1, §3) that the 210.10.1 microcode blob lacks `FMAN_CAP_HC_DISPATCH` (`caps=0x17`, bit 3 clear; `fmd_host_cmd_send()` returns `-ENXIO`). This looked like a strong candidate: HC might play a synchronization/commit role during ehash table operations that this branch's from-scratch arm path has no substitute for.
+
+**This does not hold up under cross-checking.** `.106` runs the *identical* 210.10.1 blob. If HC sync were genuinely required for ehash operations to succeed, `.106` would show `"FmPcdHcSync failed"` (the module's own `printk` on sync failure) in dmesg — a full `dmesg` search on `.106` found **zero** hits for any HC-related string. Combined with this project's separately-confirmed finding that `cmm`'s connection-tracker never actually fires on `.106` (`CT-TRACE` shows zero invocations of `__cmmCtCatch` across every boot observed) — the more likely explanation is that `.106`'s `ExternalHashTableAddKey()` path (and therefore any `FmPcdHcSync()` calls inside it) is simply **never reached** on that board's current traffic, not that HC sync silently succeeds. This means `.106`'s earlier decisive 400+-frame stress-test success (§14, cross-reference to the NXP-106 deep-dive plan) most likely exercised a statically-preconfigured classification path from `cdx_pcd.xml` (or plain kernel software forwarding), **not** the dynamic ehash-insert path this branch's F-163/F-165 work targets — i.e. `.106`'s success may not actually validate the mechanism under test here at all. Flagged as a genuinely open methodological question, not resolved.
+
+#### 5.2.6 Status summary
+
+| Hypothesis | Status |
+|---|---|
+| `FMBM_RIM` | Closed — understood to be unrelated (manip scratch space), no live test needed |
+| `FMBM_RICP` | Closed — live-tested negative (F-166, reverted) |
+| `AttachPCD()` NIA-restore / single-RISC restriction | Deprioritized — traced to be dormant for CC-tree in this SDK snapshot |
+| Host Command sync | Open, weakened — doesn't survive the `.106` cross-check; reframes the question as "does `.106`'s working config even exercise ehash" rather than "is HC required" |
+| `FMBM_RFNE` bit 28, `FMBM_RPSO`, `FMBM_RPP` | Open, untested, no hypothesis formed yet |
+| **The wedge itself** | **Root cause not found as of this section.** Three concrete register hypotheses tested/closed; the investigation is shifting from "which register is missing" toward "does the reference (`.106`) even exercise the mechanism being tested" |
 
 
 ## 6. FM_CTL Params Page (per-port, 256 B MURAM)
