@@ -149,9 +149,10 @@
     "F_162.py": "fman_port.c/fman_pcd_kg.c \u2014 F-162: add fman_port_set/clear_kg_direct_scheme() (NIA_KG_DIRECT | scheme_id in fmbm_rfpne, per vendor SDK's FM_PORT_SetPCD directScheme case) and wire into fman_pcd_kg_port_attach_cc()/detach_cc(). Confirmed missing from every board test this session despite everything else matching vendor source exactly.",
     "F_152.py": "fman_pcd.c: F-152 \u2014 revert F-144, restore original word1 formula (hashMask<<16|contextSize-1<<8|hashShift)",
     "F_153.py": "fman_pcd.c: F-153 \u2014 fix 0146 MUX/TRANSITION wiring (MUX->TRANSITION->ENQ, not MUX->ENQ direct)",
-    "F_165.py": "fman_pcd.c: F-165 \u2014 __fman_pcd_fe_arm_engage()'s CONT_LOOKUP scaffold unconditionally overwrote the caller's fe_enter_off with its own gro offset (F-091), silently defeating the debugfs fe_arm engage <off> verb's ability to target an arbitrary FE_ENTER AD. Board-confirmed via direct fmbm_rccb register read (0x057100 instead of the intended 0x057000) that this fully explained an earlier byte-correct-chain-still-MISS result -- the ehash lookup was never reached. Guards the overwrite on the caller's original fe_enter_off being 0; production engage (always 0) is unaffected."
+    "F_165.py": "fman_pcd.c: F-165 \u2014 __fman_pcd_fe_arm_engage()'s CONT_LOOKUP scaffold unconditionally overwrote the caller's fe_enter_off with its own gro offset (F-091), silently defeating the debugfs fe_arm engage <off> verb's ability to target an arbitrary FE_ENTER AD. Board-confirmed via direct fmbm_rccb register read (0x057100 instead of the intended 0x057000) that this fully explained an earlier byte-correct-chain-still-MISS result -- the ehash lookup was never reached. Guards the overwrite on the caller's original fe_enter_off being 0; production engage (always 0) is unaffected.",
+    "F_166.py": "fman_port.c: F-166 \u2014 diagnostic probe: arming AC_CC/FE_ENTER via fe_arm engage wedges port 0x11 immediately and 100% reproducibly (3/3 cold-boot cycles), zero fault signature. Vendor cdx.ko (.106, same hwport) hardcodes FMBM_RICP=0x00000007 (ic_ext_offset=0/ic_int_offset=0/ic_size=112B) while mainline dpaa_eth leaves it at 0x000e0203 (224B/32B/48B, tuned for RSS-hash-in-skb, unrelated to AC_CC). Overrides FMBM_RICP to the vendor value in fman_port_set_cc_base() when a real CC base is set, restores mainline's value on disengage. Untested hypothesis, not a proven fix -- revert if the wedge persists unchanged."
   },
-  "count": 69,
+  "count": 70,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
