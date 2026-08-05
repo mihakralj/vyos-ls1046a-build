@@ -2053,6 +2053,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
     echo "### fman_pcd_cc.c: F-159 dpaa1 EKFC cc_pack_key fix + match-table dump"
 fi
 
+# F-160 (2026-08-04, CC-Tree Rebuild Plan Phase 1): fix fman_pcd_kg_port_
+# attach_cc()'s KeyGen NIA dispatch mode. next_engine=2 (unchanged since
+# patch 0106) is a project-confirmed no-op for CC dispatch (patch 0133's
+# own commit message: "NEVER invokes the CC walk"). Board-tested on .185:
+# a byte-exact match table (F-159) with FMBM_RCCB correctly bound still
+# produced a clean MISS via a real fqid-redirect HIT/MISS test. Switches
+# to next_engine=3, the real AC_CC encoding already used by the FE-VM arm
+# path (patch 0133) but never wired into the CC-tree graft path until now.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_160.py" 2>&1
+    echo "### fman_pcd_kg.c: F-160 CC-tree graft real-AC_CC NIA fix"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 

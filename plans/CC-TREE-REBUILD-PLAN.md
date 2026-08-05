@@ -7,10 +7,61 @@ ground-truth dump tooling is included in that same fixup. **0c partially execute
 (`.185`, 2026-08-04):** installed a real CC-tree key via `cc_test`, mmap-dumped the raw match-table
 bytes, got a byte-exact match against the predicted (buggy) layout — confirms the harness mechanics and
 the mmap-verification technique both work end-to-end on silicon. Fully reversible; board left clean.
-**Board's running kernel predates F-159 (built 2026-08-01), so this only exercised the known-wrong
-layout as a mechanics/negative-control test — the real HIT/MISS answer needs a new build+deploy with
-F-159 included.** Deployment (VyOS `add system image`) is intentionally not something this agent
-performs; that step is pending user action. Full result: qdrant tag `phase-0c-executed`.
+**Board's running kernel predated F-159 (built 2026-08-01), so that test only exercised the known-wrong
+layout as a mechanics/negative-control test.** A fresh ISO with F-159 has since been built and
+published (`vyos-2026.08.04-1736-rolling-LS1046A-arm64.iso`, `http://192.168.1.137:8080/iso/latest.iso`,
+2026-08-04) after resolving 6 unrelated pre-existing local-build-infrastructure bugs (patch numbering
+collision, redundant/stale patches, a stale fixup-injection cache, and vyos-1x/vpp checkout staleness —
+full detail: qdrant tag `BUILD-SUCCESS`). **Deployed by the user on 2026-08-04 (`.185` and `.106`, the latter repurposed from NXP vendor oracle to
+a matched traffic-generation host — confirmed intentional).** Reran the install→dump procedure on
+`.185`: F-159's match-table hex dump shows byte-exact `SIP|DIP|PROTO|wildcard-SPORT|DPORT`, confirming
+the corrected dpaa1 EKFC layout is genuinely written to hardware, not just in source. **Byte-correctness
+goal: CONFIRMED.** Did not attempt a HIT/MISS behavioral test this round — the install command used
+`fqid=0` (soft fall-through), which makes a HIT indistinguishable from a MISS in packet delivery, and no
+CC/KG hit counters are exposed on `.185`'s stock driver stack. **Exit criteria MET, with a clean MISS (2026-08-04).** Installed a real `target_fqid=0x6e` (eth3's
+genuine "Rx default" FQID, read from sysfs — a safe, already-valid redirect target) and sent real
+matching traffic from `.106` while capturing non-promiscuously on both eth3 and eth4. Result: the frame
+appeared only on eth4 (normal path, kernel-generated RST), never on eth3 — a clean, unambiguous,
+board-confirmed **MISS** despite the byte-exact-correct match table. (A first attempt with default
+promiscuous tcpdump showed the frame on both interfaces — investigated and ruled out as cross-interface
+promiscuous noise, not a real signal; no bridging exists between the two.)
+
+**Root cause found — not byte layout.** Reading `fman_pcd_kg_port_attach_cc()`'s actual implementation
+(patch 0106) shows it grafts the CC-tree pointer into the KeyGen scheme's `KGSE_CCBS` register. But the
+earlier `.106` oracle investigation (`plans/NXP-106-ORACLE-VALIDATION-PLAN.md` Phase 2e, run on genuine
+working NXP vendor hardware before that board was reimaged today) found `kgse_ccbs = 0` on **every**
+AC_CC-mode scheme on a board that *was* dispatching hardware classification successfully — the real
+group-table pointer for AC_CC mode lives in the per-port `FMBM_RCCB` BMI register instead, which that
+investigation found real values for but never finished decoding. Patch 0106's graft function has
+therefore never written the tree's location to a register AC_CC-mode silicon actually reads — this
+plausibly explains the entire history of "CC-tree/Fork-A doesn't dispatch," not just the byte-layout
+question F-156/F-159 fixed. Full evidence: qdrant tag `CRITICAL-FINDING`.
+
+**SUPERSEDED same day by a deeper finding, 2026-08-04.** `FMBM_RCCB`'s encoding was never actually
+undocumented — this project's own patch 0105 (2026-06-08) already fully diagnosed it (BMI port register
+offset 0x34, raw MURAM byte offset, no shift) and landed `fman_port_set_cc_base()` as a dormant, ready
+primitive. Reconstructing the full patch history (0105→0106→0115→0118→0132→0133) found the real problem:
+`fman_pcd_kg_port_attach_cc()` (patch 0106, what `cc_test install` still calls today, unchanged) uses
+KeyGen `next_engine=2` — which **this project's own later commit message (0133) states explicitly is a
+confirmed no-op**: "per the CC-dispatch truth table that encoding NEVER invokes the CC walk — frames
+bypass into plain RSS." The real AC_CC encoding (`next_engine=3`, mode `0x80000006`) exists in the
+codebase but is wired only into the FE-VM/ehash arm path (`fman_pcd_kg_port_arm_fe`, patch 0133), never
+into the CC-tree graft path. This plausibly explains **both** open mysteries at once — per the settled
+topology (`specs/fman-keygen-flow-key-spec.md` §6.1), `FE_ENTER` is only reached *after* a CC-tree HIT,
+and F-156/157/158's extensive `fe_arm` testing (which correctly uses `next_engine=3`) was never combined
+with a correctly-grafted CC-tree (which uses the broken `next_engine=2`) — so a perfectly-armed FE-VM
+had no HIT ever reaching it.
+
+**Caution, not dismissed:** `0118` reverted away from AC_CC in the first place because it caused a real
+**port stall** on hardware (DUT `.190`, 2026-06-12) — but that predates F-072 (2026-07-15), which fixed
+the FE-VM workspace-pool bug plausibly responsible for it; `0133`'s later AC_CC re-introduction has run
+extensively via `fe_arm` since without a reported stall. Treat as likely-safe, not proven-safe.
+
+**Redefines Phase 1's scope**: rewrite `fman_pcd_kg_port_attach_cc()` to use `next_engine=3` (matching
+FE-VM's already-validated encoding) combined with the existing `fman_port_set_cc_base()`/`FMBM_RCCB`
+bind, then retest via the standalone `cc_test` harness (not a live `ask.ko` engage) — watching for
+`FMFP_PS[STL]` port-stall before declaring success or failure. Full evidence: qdrant tag
+`SUPERSEDING-FINDING`.
 **Context:** code review 2026-08-04 (see `plans/ASK2-MASTER-PLAN.md` top-of-doc 2026-08-04 banner,
 `arch/fman-pcd.md`, `arch/software-stack-ask.md`) established that `ask.ko` currently has **no working
 hardware-classification insert path**: CC-tree's insert plumbing was deleted from `ask.ko` (CR-007,
