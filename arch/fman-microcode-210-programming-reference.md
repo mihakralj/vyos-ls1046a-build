@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.6**
+**Version 1.7**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -162,6 +162,37 @@ SHA256: `5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d`
 **Confirmed and extended 2026-08-05** (this session, `.106`): the July 2026-07-01 analysis's own highest-priority open item was "re-run with genuine transit traffic, not locally-originated" (its own test used a `curl` run directly on the router). This session built a genuine, TTL-verified multi-hop transit path through `.106` using two Linux network namespaces on a peer board plus ingress-interface-keyed policy routing (reusable technique for any 2-box transit test with no third host available — see `plans/NXP-106-DEEP-DIVE-PLAN.md` Phase B for the full recipe). Result: **`cmm`'s connection table stayed at 0 across three separate TCP flows sent through verified genuine transit** — closing that open item and ruling out the "was it just local traffic" confound. Further: `journalctl -u ls1046a-ask.service` was checked for the `CT-TRACE` diagnostic the July analysis itself added (an unconditional print at the top of `__cmmCtCatch()`, `cmm`'s netlink event callback) — only *startup*-sequence `CT-TRACE` lines appear (`cmmCtInit`, thread spawn, fd numbers); **zero per-event `"CT-TRACE: __cmmCtCatch type=..."` lines exist anywhere in the retained journal**, across every boot from 2026-08-01 through 2026-08-05. This means `__cmmCtCatch()` is never invoked at all, for any traffic, ever — a stronger, now-direct confirmation of the vendored-library hypothesis than the July analysis's own more tentative framing.
 
 **Practical consequence for anyone testing PCD/CC dispatch on this board:** do not use `cmm`'s connection table or `/proc/fqid_stats` as a HIT/MISS oracle — they reflect a broken userspace layer, not FMan hardware state. Use direct register/MURAM reads instead (`bin/kg-scheme-read.py`, `bin/muram-mmap-dump.py` — both proven safe, read-only `mmap()` on `/dev/mem`, no `STRICT_DEVMEM` issue on this build), matching the methodology in §7.11a.
+
+### 3.3 210.10.1 vs the public 106.x/108.x QEF blobs — quantified binary comparison (2026-08-06)
+
+`github.com/nxp-qoriq/qoriq-fm-ucode` (the public repo already cited in §14) ships LS1046-specific blobs for the open-source tiers: `fsl_fman_ucode_ls1046_r1.0_106_4_18.bin` and `fsl_fman_ucode_ls1046_r1.0_108_4_9.bin`. Parsed with the same `struct qe_firmware` layout as §3 (header fields at identical offsets across all three), and compared against this board's own running 210.10.1 blob (pulled fresh from `.185`'s `/dev/mtd3`, byte-identical to the header table above — `length=51652`, SHA256 `5f3ed8d3...`):
+
+| | 106.4.18 | 108.4.9 | 210.10.1 |
+|---|---|---|---|
+| File size | 32604 B | 37560 B | 51652 B |
+| Code words | 8089 | 9328 | 12851 |
+| `id` string | `Microcode version 106.4.18 for LS1046 r1.0` | `Microcode version 108.4.9 for LS1046 r1.0` | `Microcode version 210.10.1 for LS1043 r1.0` |
+| `soc.model` field | `0x0416` | `0x0416` | `0x0413` |
+| `eccr` | `0x20800000` (identical across all three) | | |
+| `code_offset` | `244` (identical across all three — `124`-byte header + one `120`-byte `qe_microcode` descriptor) | | |
+
+**The `soc.model`/`id`-string "LS1043" mismatch is confirmed cosmetic at the source level, not just by assertion.** Neither loader that ever touches this field validates it against actual chip identity: the generic QUICC-Engine loader (`drivers/soc/fsl/qe/qe.c`, `qe_upload_firmware()`) only uses `soc.model`/`major`/`minor` to format an informational `printk` (`qe-firmware: firmware '%s' for %u V%u.%u`) — no comparison, no gate. This kernel's own FMan-specific loader (`fman.c`'s `load_fman_ctrl_code()`, patch `0117`) doesn't reference `soc.model` at all — its `QE_FW_*_OFF` constant list only covers magic/id/ucode-table fields. The field is inert on both code paths; whatever value the compiler happened to stamp in has zero functional consequence.
+
+**Content comparison: 210 is not "106/108 plus an appended tail."** No shared prefix beyond 2–3 bytes, and neither 106's nor 108's full code stream appears anywhere in 210 as an exact contiguous substring — ruling out the simplest model (proprietary tiers = public tier + linked-on extra microcode). Firmware of this kind is compiled/linked as a whole; even logic that is functionally unchanged between tiers gets relocated (branch targets, jump tables) by the addition of new code elsewhere, so a fixed-offset or substring comparison systematically underestimates real code reuse.
+
+**Relocated-content comparison (fixed-size chunks matched anywhere, not just at the same offset) gives a more honest answer:**
+
+| Comparison | 8 B chunks | 16 B chunks | 32 B chunks | Byte-histogram L1 distance |
+|---|---|---|---|---|
+| 106 chunks found in 108 | 77.1% | 70.0% | 62.3% | 0.063 |
+| 106 chunks found in 210 | 41.9% | 35.2% | 30.7% | 0.195 |
+| 108 chunks found in 210 | 41.3% | 35.5% | 32.8% | 0.198 |
+
+106 and 108 are closely related (60–77% shared content depending on chunk granularity, low histogram distance) — consistent with 108 being an incremental evolution of the same open-source-tier codebase. 210 shares roughly a third of its content with each public tier at the chunk level — real, substantial overlap (the underlying FE-VM ISA and a shared base of parse/classify logic), but the clear majority (roughly 60–70%, depending on granularity) of 210's ~51 KB of code has no counterpart in either public blob at all. This is the first byte-level, quantified evidence for the capability-bit-based "210-only" claims in §12's function inventory (FE-VM ehash, CC Hash-Table, Frame Replicator, IP Reassembly/Fragmentation, Soft Parser extensions) — previously those were inferred only from `caps` bits and public-repo absence, not from a direct comparison of the actual code content.
+
+**What this does NOT establish:** no disassembler exists for the FE-VM ISA (§13), so none of the above says *what* the shared or unique chunks actually do — only how much raw byte content is shared vs. unique, at a granularity coarse enough to survive relocation. Semantic understanding of any specific 210-only feature still requires the register/AD-level reverse-engineering this document already does elsewhere (§5, §7, §10), not blob comparison.
+
+Reproduction: `git clone --depth 1 https://github.com/nxp-qoriq/qoriq-fm-ucode.git`; pull the running blob via `sudo dd if=/dev/mtd3 of=mtd3-raw.bin bs=1M count=1` (confirm partition number via `/proc/mtd` first, §3.1's caveat); parse with `struct qe_firmware`'s layout (§3's header table, this section's code-offset formula `124 + 120×count`).
 
 
 ## 4. KeyGen Scheme Registers
