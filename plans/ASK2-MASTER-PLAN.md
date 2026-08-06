@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.1.0 · 2026-08-06 · HADS 1.0.0**
+**Version 2.2.0 · 2026-08-06 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -45,7 +45,7 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
 |---|---|
 | 1. FMan PCD subsystem (KG / CC / HM / PLCR) | Shipping — patches 0092–0118, 0151–0155 |
 | 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete — patches 0124–0131; byte-verified via `fe_*` debugfs; no confirmed HIT |
-| 3. Classifier→FE arm | Scaffold arm (`fe_arm engage <port> 0`) works, cold-boot reproducible (F-168); FE_ENTER-direct arm (`off != 0`) stalled once (§4.1) |
+| 3. Classifier→FE arm | Both scaffold arm (`off=0`) and FE_ENTER-direct arm (`off != 0`) engage cleanly and stay healthy, cold-boot reproducible (F-168) — port `0x11` has not stalled since F-168 landed. Neither path has produced a confirmed HIT (§4.1) |
 | 4. ask.ko datapath (genl + flow table) | Shipping — engage/disengage via kernel API; conntrack offload + crash-safe teardown; flow insert currently ehash-only (`ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` → `fman_pcd_ehash_add_key()`) |
 | 5. VyOS CLI + mutual exclusion | Shipping — `offload ask` per-interface, ASK↔VPP mutex, `show flows` via ynl. Release claim gated by CR-001 (§5) |
 
@@ -57,9 +57,18 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
 - **KG hash = raw CRC-64** (ECMA-182, reflected poly `0xC96C5795D7870F42`),
   seed `~0ULL`, **no final complement**; stored at IC offset `0x48`.
   CRC-64/XZ does NOT match hardware.
-- **Vendor flow key** = `portid(1B)|SIP|DIP|PROTO|SPORT|DPORT` = **14 bytes**
-  (`union dpa_key`), EKFC **`0x801C0006`** (adds `KG_SCH_KN_PORT_ID`). IPv6
-  variant = **38 bytes**. `ASK_FE_KEY_SIZE`=14. (F-163, commit `f212c701`.)
+- **This branch's flow key is 13 bytes:** `SIP|DIP|PROTO|SPORT|DPORT`, EKFC
+  `0x001C0006` — hardware-CRC-64-validated twice (2026-07-13, re-confirmed
+  2026-08-06). **F-163's 14-byte `portid`-prefixed variant (EKFC
+  `0x801C0006`, commit `f212c701`) is WRONG and reverted (§4.1):**
+  `KG_SCH_KN_PORT_ID` does not reproduce vendor's `portid` byte — vendor
+  builds it via a `<combine portid="true".../>` **GEC** directive, a
+  different register block EKFC-only schemes (§2 decision 1) cannot reach —
+  and it isn't needed here anyway, since vendor's `portid` disambiguates
+  `shared="true"` tables serving many ports at once, while this branch's
+  `fe_ehash` tables are per-scheme. Vendor's own key IS 14 bytes
+  (`union dpa_key`) for its own, structurally different, shared-table
+  design; do not port that number back to this branch's schemes.
 - Vendor `cdx.ko` classifies every accelerated flow via
   `ExternalHashTableAddKey()` — external-hash **is** the vendor production
   classification; the opcode/manip chain executes from inside each DDR ehash
@@ -105,8 +114,19 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
   the per-port **workspace pool** (`FmPortSetFESupport`, `0x54e00`) — "empty"
   is expected even on a real HIT. `fe_buffer +0x58` is a
   workspace-pool-exhaustion counter, not an allocation counter. Neither
-  distinguishes HIT from MISS on its own; the dedicated TX FQ `0x2B9` is the
-  discriminator.
+  distinguishes HIT from MISS on its own.
+- **`EXIT`-`DEALLOCATE` (the ehash MISS disposition) is a silent frame DROP,
+  not kernel delivery** (§7.4 of the microcode reference). 100% ping/ARP
+  loss on an armed port is *expected* for any non-matching frame, not a
+  malfunction — do not read connectivity loss alone as a fault.
+- **eth4's real kernel-delivery FQID is `0x300`** (traced live via
+  `dpaa_rx_fd`, 2026-08-06) — not `0x200` (eth3's) or `0x2B9` (`ask.ko`'s
+  unrelated TX-bypass queue, no RX consumer in a raw-debugfs test). The
+  discriminator for a genuine HIT is an ordinary `dpaa_rx_fd` event on the
+  target FQID: a real HIT dispatches through the same dequeue point as
+  normal traffic, so its *absence* on a matching frame is evidence of a
+  MISS, not an inconclusive result. `fe_arm`'s 3rd argument is inert on the
+  `off != 0` path — the live dispatch target is `fe_enq build <fqid>`.
 
 ---
 
@@ -166,7 +186,7 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
 ```mermaid
 graph LR
     M2["M2 perf gate<br/>DONE - regression-monitor only"] --> M5["M5 flow automation<br/>DONE - mechanism unresolved"]
-    M3["M3 FE-VM ehash HIT gate<br/>OPEN - attempt 2 ISO ready"]
+    M3["M3 FE-VM ehash HIT gate<br/>OPEN - attempt 5 ISO building"]
     M5 --> M6["M6 IPv6 / bridge / IPsec<br/>UNBLOCKED"]
     M5 --> M7["M7 VyOS CLI<br/>DONE - release claim gated by CR-001"]
     M6 --> M8["M8 soak + upstream"]
@@ -180,10 +200,11 @@ ehash mechanism, not a sequencing blocker for M6/M7/M8.
 - **M2 — Performance gate. DONE.** ≥2 Gbps + ≤5% kernel-net CPU; actual 7.37
   Gbps / 0.16% CPU. Regression-monitor: every build changing `fman_pcd.c` or
   `dpaa_eth.c` re-runs the CONT_LOOKUP pass-through iperf3 gate.
-- **M3 — FE-VM ehash HIT gate. OPEN.** Gate: one flow HIT — ehash stats
-  increment AND the packet observed on the dedicated TX FQ `0x2B9`, with a
-  discriminator that cannot confuse HIT with MISS→kernel delivery. Work:
-  §4.1.
+- **M3 — FE-VM ehash HIT gate. OPEN.** Gate: one flow HIT — a matching frame
+  visibly dispatches through `fe_enq`'s target FQID (`0x300` for eth4, traced
+  live, not `0x2B9`) with a discriminator that cannot confuse HIT with
+  MISS→kernel delivery (MISS is a silent `EXIT`-`DEALLOCATE` drop, not
+  kernel delivery — §1.3). Work: §4.1.
 - **M4 — AF_XDP true-ZC RX. BLOCKED.** Gate: `xsk_zc_rx_redirect` > 0 under
   XDP_ZEROCOPY bind + steered flow. Work: §4.4.
 - **M5 — CC-tree + SW flowtable + manip chain. DONE (throughput), mechanism
@@ -297,7 +318,7 @@ ports/schemes; this branch's `fe_ehash` tables are per-scheme, not shared,
 so there is no collision to disambiguate. **F-163 should be reverted (or
 gated off) for the single-port ehash path; the 13-byte key is correct as-is.**
 
-**Suspected real blocker, not yet board-tested: wrong AD species at
+**Suspected real blocker, board-test pending: wrong AD species at
 `FMBM_RCCB`.** `arch/fman-microcode-210-programming-reference.md` §7.11
 documents the settled topology (2026-07-16): `RCCB` must point to a
 `CONT_LOOKUP` **group AD** (`numKeys|matchTableAddr`, `adTableAddr`,
@@ -312,14 +333,26 @@ documented `numKeys>0` HIT topology. **Caveat:** F-158 (2026-08-01) already
 built and byte-verified an equivalent group/match/AD-table structure via a
 *different* tool (`cc_test`) and got a decisive negative (CC comparator
 confirmed not dispatching) — so this is not guaranteed to be the fix, but it
-is the most concrete untested structural gap. Building a debugfs primitive
-to test this directly is real, not-yet-started engineering work.
+is the most concrete untested structural gap.
 
-**Immediate next step for T-M3-R attempt 5:** revert to the 13-byte key (no
-PORT_ID) — already correct — and either (a) build a `numKeys>0` group/match
-AD-table primitive to test the RM-documented topology directly, or (b) run
-the NXP-106 Phase A/C oracle first per §4.2. Do not spend further board
-cycles on FQID or key-content variations; both are closed.
+**Attempt 5 test vehicle: F-171 (`fe_group`), built.** Adds a debugfs verb
+that wraps the existing, already-byte-verified `fe_enter` chain in a genuine
+`CONT_LOOKUP` group AD with an **all-wildcard match row** (mask `0x00` on
+every byte) — sidesteps F-158's still-open "does the CC comparator read the
+compare window in EKFC order" question entirely, since a fully-wildcarded
+row matches regardless of layout. `cat fe_group` after `build` shows the
+group AD's own offset; arm with that offset instead of `fe_enter`'s
+(`fe_arm` itself is unmodified). CI build in progress as of this edit —
+check status before assuming the ISO is ready.
+
+**Procedure for attempt 5:** build the chain exactly as attempts 2–4
+(`fe_port`/`fe_ehash`/`fe_pool`/`fe_singletons`/`fe_hashfe`/`fe_enq build
+0x300`/`fe_enter build`), using the **13-byte key** (no PORT_ID,
+`fe_kg_ekfc set 4 001c0006`) — then `echo "build 0x300" > fe_group`, read
+back the group AD's offset via `cat fe_group`, and arm with
+`fe_arm engage 11 <group_ad_off> 0x300`. If this also misses, do not
+attempt further topology variations blind — proceed to the NXP-106 Phase
+A/C oracle (§4.2) for byte-level ground truth instead of guessing further.
 
 **Risk: MEDIUM.** Port `0x11` itself has stayed healthy across every attempt
 since F-168 (2026-08-06); port `0x17`'s cosmetic stall requires a cold boot
