@@ -16,17 +16,22 @@ their ExternalHashTableAddKey() call:
     wmb() drains the store buffer, ordering all prior writes before
     AddKey's bucket-head publication."
 
-This branch's own fman_pcd_ehash_add_key() (patch 0128, amended by
-F-142/F-143) writes the flow record's header/key/next-FE-pointer fields,
-then publishes the bucket head pointer (`*flow->bucket_h = swab64(...)`)
-with NO barrier in between. F-142 (2026-07-30) already fixed the adjacent
-half of this bug class -- switched the flow record allocation from
-kzalloc() to dma_alloc_coherent() (cache COHERENCY) -- but coherent
-allocation does not by itself guarantee WRITE ORDERING on a weak-ordered
-CPU: the record's field writes and the separate bucket-head pointer write
-target different memory locations, and FMan (an independent DMA-capable
-hardware walker) can observe the pointer write before the pointee's field
-writes are globally visible, exactly as vendor's own bug report describes.
+This branch's own fman_pcd_ehash_add_key() (patch 0128, amended by patch
+0130 and F-143) writes the flow record's header/key/next-FE-pointer
+fields, then publishes the bucket head pointer
+(`*flow->bucket_h = swab64(...)`) with NO barrier in between. Patch 0130
+(2026-07-?, static patch, applied before any Python fixups run) already
+fixed the adjacent half of this bug class -- switched the flow record
+allocation from kzalloc() to dma_alloc_coherent() (cache COHERENCY),
+superseding the earlier F-142 fixup attempt at the same thing (F-142's
+own anchor text no longer matches patch 0130's slightly different
+wording/variable names, so F-142 is now a harmless no-op in the fixup
+pipeline). But coherent allocation does not by itself guarantee WRITE
+ORDERING on a weak-ordered CPU: the record's field writes and the
+separate bucket-head pointer write target different memory locations,
+and FMan (an independent DMA-capable hardware walker) can observe the
+pointer write before the pointee's field writes are globally visible,
+exactly as vendor's own bug report describes.
 
 Fix: add wmb() immediately before the bucket-head publish, matching
 vendor's exact fix location and rationale. Purely additive -- no other
@@ -42,13 +47,13 @@ with open(path) as f:
 changes = 0
 
 old = (
-    "\t/* Head-insert: bucket head = swab64(phys(record)). */\n"
-    "\trec_phys = (u64)flow->record_dma;\t/* F-142: bus address from dma_alloc_coherent */\n"
+    "\t/* Head-insert: bucket head = swab64(dma_addr(record)). */\n"
+    "\trec_phys = (u64)rdma;\n"
     "\t*flow->bucket_h = swab64(rec_phys);\n"
 )
 new = (
-    "\t/* Head-insert: bucket head = swab64(phys(record)). */\n"
-    "\trec_phys = (u64)flow->record_dma;\t/* F-142: bus address from dma_alloc_coherent */\n"
+    "\t/* Head-insert: bucket head = swab64(dma_addr(record)). */\n"
+    "\trec_phys = (u64)rdma;\n"
     "\n"
     "\t/* F-173: order the record's field writes above (header, key,\n"
     "\t * next-FE pointer) before this bucket-head publish becomes\n"
@@ -71,8 +76,8 @@ elif old in src:
 else:
     print(
         "### F-173: FATAL: expected bucket-head publish sequence not "
-        "found verbatim -- F-142 may not have applied, or source has "
-        "drifted. Refusing to guess."
+        "found verbatim -- patch 0130 may not have applied, or source "
+        "has drifted. Refusing to guess."
     )
     sys.exit(1)
 
