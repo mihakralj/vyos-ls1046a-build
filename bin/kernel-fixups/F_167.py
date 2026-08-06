@@ -39,6 +39,25 @@ condition. `cat fe_extc` reads the current register value; `echo sync
 reports the outcome via dev_info/dev_warn (kernel log) plus the
 write()'s return value (0 on cleared, -ETIMEDOUT on stuck).
 
+v2 FIX (2026-08-06, CI run 31060168305): the first version dereferenced
+`fman->fpm_regs->fmfp_extc` directly from fman_pcd.c. Compile failed:
+"invalid use of undefined type 'struct fman_fpm_regs'" -- that struct
+is fully defined only in fman.c; fman.h's `struct fman` merely holds an
+opaque `struct fman_fpm_regs __iomem *fpm_regs` pointer, which is
+enough to compile fman.c itself but not enough for any other
+translation unit to dereference through it. This project already has
+the exact same pattern solved for other registers/fields: fman.c
+defines small accessor functions (fman_get_dev(), fman_get_pcd(),
+fman_get_id() -- each with a comment literally noting "Used by
+fman_pcd.c ... [since] fman_pcd cannot walk ... directly"), declared
+in fman.h, and fman_pcd.c calls them. fman.c and fman_pcd.c compile
+into the same module (fsl_dpaa_fman.o per the driver Makefile), so no
+new EXPORT is strictly required for in-module linkage, but this fixup
+uses EXPORT_SYMBOL_GPL anyway to match every neighboring accessor's
+convention. v2 adds fman_get_fpm_extc()/fman_set_fpm_extc() to
+fman.c/fman.h and switches fman_pcd.c's fe_extc probe to call them
+instead of touching fpm_regs directly.
+
 Disposition: debugfs-probe-only, zero change to any existing code path
 (fman_pcd_ehash_add_key, fe_arm engage/disengage, and all other fe_*
 verbs are byte-for-byte unchanged). Purely additive. Only after this
@@ -51,20 +70,112 @@ import sys, os, re
 
 kroot = "drivers/net/ethernet/freescale/fman"
 pcd_c = os.path.join(kroot, "fman_pcd.c")
+fman_c = os.path.join(kroot, "fman.c")
+fman_h = os.path.join(kroot, "fman.h")
 
-if not os.path.exists(pcd_c):
-    print("### F-167: fman_pcd.c not found")
-    sys.exit(0)
-
-with open(pcd_c) as f:
-    src = f.read()
+for p in (pcd_c, fman_c, fman_h):
+    if not os.path.exists(p):
+        print(f"### F-167: {p} not found")
+        sys.exit(0)
 
 changes = 0
 
-# --- 0. fman_pcd.c has no existing udelay()/linux/delay.h user; add the
-#        include explicitly (matches fman.c/fman_port.c/fman_dtsec.c
-#        convention in this same driver) rather than relying on an
-#        unconfirmed transitive cpu_relax()/udelay() availability. ---
+# =============================================================================
+# Part A: fman.h -- declare the two new accessors, right after fman_get_dev's
+# declaration (a stable, already-established anchor: this exact function was
+# itself added by an earlier project fixup for the same "fman_pcd.c can't see
+# opaque fman internals" reason this fixup now hits for fpm_regs).
+# =============================================================================
+with open(fman_h) as f:
+    h_src = f.read()
+
+if "u32 fman_get_fpm_extc(struct fman *fman);" in h_src:
+    print("### F-167: fman.h accessor declarations already applied")
+else:
+    anchor_h = "struct device *fman_get_dev(struct fman *fman);\n"
+    if anchor_h not in h_src:
+        print(
+            "### F-167: FATAL: expected 'struct device *fman_get_dev(...)' "
+            "declaration not found verbatim in fman.h -- source has likely "
+            "drifted since this fixup was written. Refusing to guess; fix "
+            "the anchor text in F_167.py against the current fman.h before "
+            "retrying."
+        )
+        sys.exit(1)
+    new_h = anchor_h + (
+        "u32 fman_get_fpm_extc(struct fman *fman);\n"
+        "void fman_set_fpm_extc(struct fman *fman, u32 val);\n"
+    )
+    h_src = h_src.replace(anchor_h, new_h, 1)
+    changes += 1
+    print("### F-167: fman.h accessor declarations added")
+
+# =============================================================================
+# Part B: fman.c -- define the two new accessors, right after fman_get_dev's
+# EXPORT_SYMBOL_GPL line.
+# =============================================================================
+with open(fman_c) as f:
+    c_src = f.read()
+
+if "u32 fman_get_fpm_extc(struct fman *fman)" in c_src:
+    print("### F-167: fman.c accessor definitions already applied")
+else:
+    anchor_c = "EXPORT_SYMBOL_GPL(fman_get_dev);\n"
+    if anchor_c not in c_src:
+        print(
+            "### F-167: FATAL: expected 'EXPORT_SYMBOL_GPL(fman_get_dev);' "
+            "not found verbatim in fman.c -- source has likely drifted "
+            "since this fixup was written. Refusing to guess; fix the "
+            "anchor text in F_167.py against the current fman.c before "
+            "retrying."
+        )
+        sys.exit(1)
+    new_c = anchor_c + (
+        "\n"
+        "/**\n"
+        " * fman_get_fpm_extc\n"
+        " * @fman: A pointer to FMan device\n"
+        " *\n"
+        " * Return: raw FMFP_EXTC (FPM External Requests Control, CCSR\n"
+        " *         offset 0x074) register value. struct fman_fpm_regs is\n"
+        " *         only fully defined in this file -- fman_pcd.c's fe_extc\n"
+        " *         debugfs probe (F-167) cannot dereference fpm_regs\n"
+        " *         directly, same reason fman_get_dev() etc exist.\n"
+        " */\n"
+        "u32 fman_get_fpm_extc(struct fman *fman)\n"
+        "{\n"
+        "\treturn ioread32be(&fman->fpm_regs->fmfp_extc);\n"
+        "}\n"
+        "EXPORT_SYMBOL_GPL(fman_get_fpm_extc);\n"
+        "\n"
+        "/**\n"
+        " * fman_set_fpm_extc\n"
+        " * @fman: A pointer to FMan device\n"
+        " * @val: value to write to FMFP_EXTC\n"
+        " *\n"
+        " * Raw write to FMFP_EXTC. See fman_get_fpm_extc().\n"
+        " */\n"
+        "void fman_set_fpm_extc(struct fman *fman, u32 val)\n"
+        "{\n"
+        "\tiowrite32be(val, &fman->fpm_regs->fmfp_extc);\n"
+        "}\n"
+        "EXPORT_SYMBOL_GPL(fman_set_fpm_extc);\n"
+    )
+    c_src = c_src.replace(anchor_c, new_c, 1)
+    changes += 1
+    print("### F-167: fman.c accessor definitions added")
+
+# =============================================================================
+# Part C: fman_pcd.c -- the fe_extc debugfs probe itself, using the new
+# accessors instead of dereferencing fpm_regs directly.
+# =============================================================================
+with open(pcd_c) as f:
+    src = f.read()
+
+# --- C0. fman_pcd.c has no existing udelay()/linux/delay.h user; add the
+#         include explicitly (matches fman.c/fman_port.c/fman_dtsec.c
+#         convention in this same driver) rather than relying on an
+#         unconfirmed transitive cpu_relax()/udelay() availability. ---
 anchor0 = "#include <linux/uaccess.h>\n"
 new0 = anchor0 + "#include <linux/delay.h>\n"
 
@@ -83,7 +194,7 @@ else:
     )
     sys.exit(1)
 
-# --- 1. Insert the fe_extc show/write/fops block, right before fe_arm's fops ---
+# --- C1. Insert the fe_extc show/write/fops block, right before fe_arm's fops ---
 anchor1 = "static const struct file_operations fman_pcd_fe_arm_fops = {"
 
 probe_block = '''/* ── fe_extc: FMFP_EXTC (FPM External Requests Control, CCSR 0x074)
@@ -91,7 +202,9 @@ probe_block = '''/* ── fe_extc: FMFP_EXTC (FPM External Requests Control, CC
  * programming-reference.md §5.3.4. Standalone: does not touch any
  * existing fe_* code path. `cat fe_extc` reads the live register;
  * `echo sync > fe_extc` asserts INV0 and polls for hardware to clear
- * it, reporting the outcome to the kernel log.
+ * it, reporting the outcome to the kernel log. Uses fman_get_fpm_extc()/
+ * fman_set_fpm_extc() (fman.c) rather than dereferencing fpm_regs
+ * directly -- struct fman_fpm_regs is opaque outside fman.c.
  */
 #define FMAN_FPM_EXTC_INV0	0x80000000U
 #define FMAN_FPM_EXTC_POLL_MAX	100000U
@@ -106,7 +219,7 @@ static int fman_pcd_fe_extc_show(struct seq_file *s, void *unused)
 		seq_puts(s, "fman not available\\n");
 		return 0;
 	}
-	val = ioread32be(&fman->fpm_regs->fmfp_extc);
+	val = fman_get_fpm_extc(fman);
 	seq_printf(s, "fmfp_extc: 0x%08x (INV0=%u)\\n", val,
 		   !!(val & FMAN_FPM_EXTC_INV0));
 	return 0;
@@ -141,14 +254,14 @@ static ssize_t fman_pcd_fe_extc_write(struct file *file,
 	if (!fman)
 		return -ENODEV;
 
-	val = ioread32be(&fman->fpm_regs->fmfp_extc);
+	val = fman_get_fpm_extc(fman);
 	dev_info(fman_get_dev(pcd->fman),
 		 "fe_extc: fmfp_extc before sync = 0x%08x\\n", val);
 
-	iowrite32be(FMAN_FPM_EXTC_INV0, &fman->fpm_regs->fmfp_extc);
+	fman_set_fpm_extc(fman, FMAN_FPM_EXTC_INV0);
 
 	for (i = 0; i < FMAN_FPM_EXTC_POLL_MAX; i++) {
-		val = ioread32be(&fman->fpm_regs->fmfp_extc);
+		val = fman_get_fpm_extc(fman);
 		if (!(val & FMAN_FPM_EXTC_INV0))
 			break;
 		udelay(1);
@@ -194,14 +307,14 @@ else:
     )
     sys.exit(1)
 
-# --- 2. Register the new debugfs node, right after fe_arm's registration.
-#        Whitespace-tolerant regex (not a literal string match): earlier
-#        drift showed the fe_arm debugfs_create_file call's exact
-#        indentation/line-wrap in the real CI-built tree does not match
-#        any locally-available snapshot of this file byte-for-byte, even
-#        though the surrounding code (F-165's guard, the fe_arm fops
-#        struct itself) is otherwise identical. Only the call's shape
-#        (name/mode/args/fops-in-order) is load-bearing here. ---
+# --- C2. Register the new debugfs node, right after fe_arm's registration.
+#         Whitespace-tolerant regex (not a literal string match): earlier
+#         drift showed the fe_arm debugfs_create_file call's exact
+#         indentation/line-wrap in the real CI-built tree does not match
+#         any locally-available snapshot of this file byte-for-byte, even
+#         though the surrounding code (F-165's guard, the fe_arm fops
+#         struct itself) is otherwise identical. Only the call's shape
+#         (name/mode/args/fops-in-order) is load-bearing here. ---
 if 'debugfs_create_file("fe_extc"' in src:
     print("### F-167: fe_extc debugfs registration already applied")
 else:
@@ -232,6 +345,10 @@ else:
     print("### F-167: fe_extc registered in fman_pcd debugfs directory")
 
 if changes:
+    with open(fman_h, "w") as f:
+        f.write(h_src)
+    with open(fman_c, "w") as f:
+        f.write(c_src)
     with open(pcd_c, "w") as f:
         f.write(src)
     print(f"### F-167: {changes} change(s) applied")
