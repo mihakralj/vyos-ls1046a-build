@@ -2196,6 +2196,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-171 fe_group CONT_LOOKUP group AD wrapper (debugfs)"
 fi
 
+# F-172 (2026-08-06, T-M3-R attempt 6): F-171's fe_group always programmed
+# an all-wildcard match row, which a discriminator test proved does not
+# distinguish HIT from MISS (all traffic dispatches through the same path).
+# Documentation review found F-158 (2026-08-01), the only prior real-key
+# test of this dispatch shape, predates F-168's FMFP_EXTC SYNC fix -- so a
+# real key + real participate-mask has never been tried WITH F-168 present.
+# Extends fe_group's write handler to accept an explicit 16-byte key and
+# 16-byte mask (falls back to F-171's wildcard default when omitted).
+# Purely additive on top of F-171; no other fe_* verb touched.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_172.py" 2>&1
+    echo "### fman_pcd.c: F-172 fe_group extended to accept explicit key+mask"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
