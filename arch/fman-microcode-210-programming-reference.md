@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.4**
+**Version 1.5**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -429,6 +429,53 @@ Word3 (`0x0048030b` / `0x00480308`) looks like a MURAM-internal offset (same num
 | `FMBM_RFNE` bit 28, `FMBM_RPSO`, `FMBM_RPP` | Open, untested, no hypothesis formed yet |
 | Group-table word3 AD encoding | Open — does not resolve as a simple raw MURAM pointer; genuinely undecoded, not just deprioritized |
 | **The port-wedge itself (this branch, `.185`)** | **Root cause not found.** Three concrete register hypotheses tested/closed; with `.106` most likely not a valid ehash-HIT reference either, this project currently has **no board-confirmed example of a genuine hardware ehash HIT on 210.10.1 microcode at all**, vendor or otherwise. |
+
+### 5.3 Authoritative RM findings on Custom Classifier table updates (2026-08-06)
+
+Source: `QorIQ LS1043A Data Path Acceleration Architecture (DPAA) Reference Manual`, Rev. 0, 04/2016 (`LS1043ADPAARM.pdf`, community.nxp.com — this manual covers the same DPAA1 FMan v3 IP block as LS1046A; register offsets and mechanisms are shared silicon, only the microcode blob and cap bits differ). §5.12 ("FMan Controller"). This section documents public RM content this project had not previously located, obtained specifically to unblock §5.2's open questions.
+
+#### 5.3.1 The hash-lookup AD chain, by the book
+
+RM Table 5-8 ("FMan Receive Functional Flow Example") walks a genuine hash-table classification example, naming the exact AD types involved:
+
+| Stage | AD Type / Opcode | RM description |
+|---|---|---|
+| Bucket select | Type `0x01`, Opcode `0x2C` | "Uses the KeyGen calculated hash value to choose a bucket. First stage of an exact match, hash table lookup. A table — containing a key list (for exact matches) and bucket-associated actions — is attached to each bucket." |
+| Bucket walk / key compare | Type `0x01`, Opcode `0x2D` (**`Generic_6_Off_IC_AGE_MASK`**, the RM's official name for this AD) | "The bucket, with key list, is searched in order to find an entry with the same key (exact match)... If there is a match then the [associated] AD is used. If there isn't a match then the last AD is used." |
+| HIT terminal | Type `0x00` | "The next processing stage after the FMan Controller is determined by the NIA configured in this AD. FQID... is also configured in this AD... updates the ICAD field." |
+| MISS terminal | Type `0x10` | "Invoked when no exact match entry is found... does not affect the FQID. The default FQID programmed in FMBM_RFQID is used." |
+
+This is a **two-stage AD chain** (bucket-select opcode `0x2C`, then bucket-walk opcode `0x2D`) — not the single "group-table entry" model this project's Phase A decode assumed. §5.2.6's group-table word3 (`0x0048030b`/`0x00480308` for the vendor's genuine `keysize=14` rows) failing to resolve as a plausible DDR pointer is now explained structurally: it was very likely never meant to be read as a raw MURAM address at all (see §5.3.2).
+
+#### 5.3.2 Next-AD pointers are index×16, not raw offsets — a project-wide convention
+
+RM Table 5-468 (HM Table Descriptor, a *different* AD type used as a control example) documents `NextActionDescriptorIndex`: *"Index to the next Action Descriptor. The pointer to the next Action Descriptor is equal to this value multiplied by 16 (no base is added to this result)."* This is the same `index*16` convention this project already found for `KGSE_MODE`'s `CCOBASE` field (§4.2) — now confirmed as a **general RM convention for inter-AD pointers**, not a one-off. §5.2.6's attempt to dereference word3 as a literal physical/MURAM byte address was very likely the wrong interpretation; the correct decode requires knowing which bits of word3 hold the index and what base it's relative to, which is AD-type-specific and not yet identified for opcode `0x2C`/`0x2D`'s own word layout (not published in the excerpted RM content found so far).
+
+#### 5.3.3 Aging requires Host Command — but non-aging tables may not
+
+RM §5.12.5.4 ("Using KeyGen HASH Result for Indexed Look-Up") describes the core bucket/hash mechanism this branch's ehash implementation is modeled on, and is explicit that **aging is a separate, optional feature**: *"Aging mechanism is supported to enable application to monitor if a certain Key is accessed for certain period of time... The application should set periodically the relevant age bit, using **a special host command**, and the FMan controller is responsible to clear this bit when a match is found."*
+
+The Host Command Opcode Register (§5.12.16.4.1) confirms this at the protocol level: opcode `0x13` is *"Dynamic update of custom classifier tables **when the old table to be replaced is with operation code Generic_6_Off_IC_AGE_MASK (0x2D) and user plan to update, add or remove entries from this table**."* — i.e. HC is the vendor's documented mechanism specifically for tables using the aging-capable opcode `0x2D`.
+
+**This matters directly for the `.106` question (§5.2.6).** `/etc/cdx_pcd.xml` declares `hashtable external="yes" aging="yes"` for the two genuine (`keysize="14"`) distributions. If aging-enabled tables structurally require Host Command for any add/remove, and this project has separately, extensively confirmed (§1, §3) that the 210.10.1 blob's `caps=0x17` has `FMAN_CAP_HC_DISPATCH` (bit 3) clear — then `.106`'s aging-enabled ehash tables may be **structurally unable to receive a dynamically-inserted key on this microcode, regardless of any `cmm` software bug**. This reframes the earlier "fix `cmm`'s Layer-3b conntrack bug" candidate (§5.2.6, option A of the post-reframe next-step discussion): if this reading is correct, fixing `cmm` would not be sufficient by itself — the deeper blocker would be the same HC absence this project already board-confirmed. **Not yet proven**: this branch's own ehash implementation (`fe_ehash`/F-163) does not implement or request aging at all (`fe_ehash set <mask> <keysize> <hashshift>` has no aging parameter, and `hash_fe`'s decoded words show no AGE_MASK-shaped field) — so this specific HC requirement, if real, may not apply to *our* implementation, only to vendor's aging-enabled configuration. Worth deliberately keeping these two questions ("can `.106` ever get a HIT" vs "can `.185`'s non-aging implementation get a HIT") separate rather than conflating them.
+
+#### 5.3.4 `FMFP_EXTC` — a real, HC-independent table-update sync mechanism this branch has never used
+
+RM §5.12.14.1 documents three officially-supported flows for dynamically updating a live custom-classifier table, all requiring a **SYNC step** before the change is safe to rely on:
+
+1. **"Direct Table Access Direct Access Sync Flow"** — uses `FMFP_EXTC[INV0]` (FPM External Requests Control Register, CCSR offset `0x074`, 1 bit per external-request TNUM, SW sets `INV0=1`, HW clears it when the request completes) for SYNC. RM: *"may only be used by hypervisor."* No Host Command involved at all.
+2. **"Direct Table access Host Command Sync Flow"** — same direct-memory-write content update, but SYNC is done via a Host Command instead of `FMFP_EXTC`. *"May be used by any host."*
+3. **"Full Host Command Flow"** — both the content update and the SYNC are done via Host Command.
+
+Protocol for flow 1/2 (RM §5.12.14.1.1–.2): (a) prepare the new AD + its structures; (b) overwrite the **first 4 bytes** of the *old* AD with a `Type=11` placeholder encoding a pointer to the *new* AD (Figure 5-457: `Type=11 | reserved[2:7] | New AD pointer[8:31]`); (c) assert SYNC (`FMFP_EXTC[INV0]=1`, poll for hardware to clear it, **or** the HC equivalent) and wait for completion; (d) copy the remaining bytes of the new AD over the old AD's location **in reverse order** (last bytes first, first 4 bytes last); (e) assert SYNC again, wait; (f) old structures may now be freed.
+
+**This branch's `fe_flow add`/`fman_pcd_ehash_add_key()` implementation performs none of this.** It writes a new DDR flow record directly and swings the bucket head pointer (`bucket->h = swab64(phys(record))`) with a single unsynchronized `iowrite32be`/write — no `Type=11` placeholder step, no `FMFP_EXTC` assertion, no reverse-order copy, no wait for hardware acknowledgment. The RM frames this SYNC step as a required part of safely updating *any* live-walked FMan-controller structure, not an optional nicety.
+
+**Caveat on applicability, stated plainly:** §5.12.14.1 is documented in the context of swapping *Action Descriptors* (the classification-tree structure itself) — it is not certain this exact protocol also governs the external-hash *bucket chain* specifically (a DDR-resident linked list, a different data structure from the MURAM-resident AD tree this section otherwise discusses). Whether `FMFP_EXTC`/HC synchronization is *also* required for ehash bucket-chain inserts specifically, versus only for AD/tree updates, is not resolved by the RM content found so far — but given both are "live-walked-by-the-FMan-controller-while-frames-may-be-in-flight" structures, and the RM's own framing treats synchronization as categorically necessary for that class of update, this is a strong, concrete, previously-unconsidered candidate for **both** open questions: why `fe_flow`-inserted keys never produce a HIT, and — separately, more speculatively — why arming AC_CC/FE_ENTER dispatch wedges the port outright (a first frame walking into a structure the FMan controller was never told is ready could plausibly hang exactly the way this project has observed, with zero fault signature).
+
+#### 5.3.5 Updated priority for outstanding work
+
+Given §5.3.3 and §5.3.4, `FMFP_EXTC`-based synchronization is now a more concrete, more directly RM-sourced candidate than the previously-planned single-RISC-restriction test (§5.2.4, found dormant in the SDK source for CC-tree setups, i.e. weaker evidence). Recommended before further live cold-boot cycles: locate `FMFP_EXTC`'s absolute CCSR address (FPM block base + `0x074`) and confirm its accessibility/behavior read-only first, then design a minimal live test that asserts the flow-1 SYNC sequence around a `fe_flow add` on `.185` and observes whether it changes either the MISS result or the port-wedge behavior.
 
 
 ## 6. FM_CTL Params Page (per-port, 256 B MURAM)
