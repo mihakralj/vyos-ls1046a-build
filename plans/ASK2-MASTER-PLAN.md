@@ -30,7 +30,7 @@ confirmed silicon HIT. The only silicon-proven hardware offload today is the
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **F-163's 14-byte PORT_ID key format is WRONG and should be reverted — the 13-byte format is correct (§4.1).** Attempts 2–4 (2026-08-06) ruled out FQID choice and key content as explanations for the continuing MISS; suspected real blocker is the AD species written to `FMBM_RCCB` (§4.1, §7.11), not yet tested. |
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **F-163's 14-byte PORT_ID key format is WRONG and should be reverted — the 13-byte format is correct (§4.1).** Attempts 2–4 (2026-08-06) ruled out FQID choice and key content. Attempt 5 (F-171, `fe_group` genuine `CONT_LOOKUP` AD, all-wildcard mask) is a conclusive negative: the group-AD topology alone does not discriminate HIT from MISS. Attempt 6 (F-172, real key + real mask, closes an F-158/F-168 temporal confound) is the next untested configuration (§4.1). |
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
@@ -245,7 +245,8 @@ be the actual structural blocker (below). **T-M3-R is not yet passed.**
 | F-168 | `7e85a035` | `FMFP_EXTC` SYNC in the arm path — fixes the port-wedge for the `off=0` scaffold arm, **and confirmed cold-boot-reproducible on the `off!=0` path too across attempts 2–4: port `0x11` itself never stalled again after this fixup** |
 | F-169 | `a84e5fe5` | `fe_kg_ekfc` debugfs verb — live EKFC reconfiguration of a bound KG scheme |
 | F-170 | (this session) | Widened the `hash_probe` capture hook (`F-072`) from eth4-only to eth3+eth4, for the PORT_ID characterization below (see caveat: turned out not to be needed) |
-| F-171 | (this session) | `fe_group` debugfs verb — wraps the existing FE_ENTER chain in a genuine `CONT_LOOKUP` group AD (RM §7.11) with an all-wildcard match row, instead of writing FE_ENTER directly to `RCCB`. This is attempt 5's test vehicle. |
+| F-171 | (this session) | `fe_group` debugfs verb — wraps the existing FE_ENTER chain in a genuine `CONT_LOOKUP` group AD (RM §7.11) with an all-wildcard match row, instead of writing FE_ENTER directly to `RCCB`. Attempt 5's test vehicle — conclusive negative, see below. |
+| F-172 | (this session) | Extends `fe_group` to accept an explicit key+mask instead of F-171's hardcoded wildcard. Attempt 6's test vehicle — closes the F-158/F-168 temporal confound (real key+mask, never before tested with F-168 present). |
 
 **[BUG] T-M3-R attempt 1 (2026-08-06) — stalled.** `fe_arm engage 11 0x57200 0x200`
 → port `0x11` STALLED (`fmfp_ps=0x80800000`). Root confound: KeyGen scheme4's
@@ -335,24 +336,59 @@ built and byte-verified an equivalent group/match/AD-table structure via a
 confirmed not dispatching) — so this is not guaranteed to be the fix, but it
 is the most concrete untested structural gap.
 
-**Attempt 5 test vehicle: F-171 (`fe_group`), built.** Adds a debugfs verb
-that wraps the existing, already-byte-verified `fe_enter` chain in a genuine
-`CONT_LOOKUP` group AD with an **all-wildcard match row** (mask `0x00` on
-every byte) — sidesteps F-158's still-open "does the CC comparator read the
-compare window in EKFC order" question entirely, since a fully-wildcarded
-row matches regardless of layout. `cat fe_group` after `build` shows the
-group AD's own offset; arm with that offset instead of `fe_enter`'s
-(`fe_arm` itself is unmodified). CI build in progress as of this edit —
-check status before assuming the ISO is ready.
+**[BUG] Attempt 5 (F-171, `fe_group`, all-wildcard) — conclusive negative:
+the group-AD topology does not discriminate HIT from MISS at all.** Built
+the chain exactly as attempts 2–4, wrapped in the genuine `CONT_LOOKUP`
+group AD (`fe_group build 0x300`), armed at the group AD's offset. First
+pass (miss_fqid=`0x300`, same as the HIT target) looked like a HIT — ping
+worked for the first time all session, and the matching SYN produced a
+`dpaa_rx_fd` event on `0x300`. This was a false positive: because miss and
+hit shared the same FQID, it couldn't distinguish "dispatched via a genuine
+HIT" from "dispatched via MISS regardless." A proper discriminator rebuild
+(disengage → full teardown → rebuild with a deliberately different
+`miss_fqid=0x2b9`) showed **ping (a non-matching frame) also landing on
+`0x300`**, the designated HIT-only target — proving every frame, matching
+or not, passes through the same path. The CC/EXT_HASH HIT/MISS branch is
+not discriminating in this configuration; **the topology fix alone did not
+produce a genuine HIT.**
 
-**Procedure for attempt 5:** build the chain exactly as attempts 2–4
+**Confound discovered during doc review, 2026-08-06: F-158 and F-171 are
+opposite-polarity tests, and neither ran with F-168 present.** F-158
+(2026-08-01) built a near-identical group/match/AD-table structure via
+`cc_test`, using a **real key + full participate-mask**, and got "always
+MISS" (matching frames never reached the FE_ENTER chain) — the opposite
+symptom from F-171's "always HIT" (all-wildcard mask, everything reaches
+it). Critically, **F-158 predates F-168** (the `FMFP_EXTC` SYNC fix,
+board-confirmed 2026-08-06 to fix a real dispatch defect on the `off!=0`
+arm path) — F-158's "decisive negative" was never re-tested with that fix
+in place, so it cannot be trusted as a clean data point. **No test has ever
+combined a real key + real mask with F-168's fix present.** That is now
+identified as the only genuinely untested configuration of this dispatch
+shape.
+
+**Attempt 6 test vehicle: F-172 (extends `fe_group`), built, CI triggered
+2026-08-06.** Widens `fe_group`'s write handler to accept an explicit
+16-byte key + 16-byte mask instead of always defaulting to F-171's
+wildcard row (`echo "build <miss_fqid_hex> <key_hex> <mask_hex>" >
+fe_group`; omitting key/mask reproduces F-171's behavior exactly, fully
+backward compatible). Purely additive on top of F-171.
+
+**Procedure for attempt 6:** build the chain exactly as attempts 2–5
 (`fe_port`/`fe_ehash`/`fe_pool`/`fe_singletons`/`fe_hashfe`/`fe_enq build
 0x300`/`fe_enter build`), using the **13-byte key** (no PORT_ID,
-`fe_kg_ekfc set 4 001c0006`) — then `echo "build 0x300" > fe_group`, read
-back the group AD's offset via `cat fe_group`, and arm with
-`fe_arm engage 11 <group_ad_off> 0x300`. If this also misses, do not
-attempt further topology variations blind — proceed to the NXP-106 Phase
-A/C oracle (§4.2) for byte-level ground truth instead of guessing further.
+`fe_kg_ekfc set 4 001c0006`) — then build the group with the **real key +
+full participate-mask** matching F-158's construction (`0xff` on the 13
+real key bytes, `0x00` on the 3 trailing pad bytes, both padded to the
+16-byte compare window), e.g.:
+`echo "build 300 <13-byte-key-hex>000000 ffffffffffffffffffffffffff000000" > fe_group`,
+read back the group AD's offset via `cat fe_group`, and arm with
+`fe_arm engage 11 <group_ad_off> 0x300`, using a distinct miss_fqid (e.g.
+`0x2b9`) so a HIT is unambiguous from the start — no separate discriminator
+rebuild needed this time. If ping (non-matching) still lands on the HIT
+FQID, or the matching SYN never produces a `dpaa_rx_fd` event at all, this
+closes out the group-AD topology entirely (both polarities now tested with
+F-168 present) — proceed to the NXP-106 Phase A/C oracle (§4.2) for
+byte-level ground truth instead of guessing further.
 
 **Risk: MEDIUM.** Port `0x11` itself has stayed healthy across every attempt
 since F-168 (2026-08-06); port `0x17`'s cosmetic stall requires a cold boot
