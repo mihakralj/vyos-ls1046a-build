@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.14**
+**Version 1.15**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -547,7 +547,8 @@ Word3 (`0x0048030b` / `0x00480308`) looks like a MURAM-internal offset (same num
 | **Whether `.106` validates genuine ehash HIT capability at all** | **Most likely NO (§5.2.6)** — `cmm` never populates a flow (confirmed on two separate boots) and the group-table's downstream AD structure shows no sign of an active DDR-backed table. `.106`'s stress-test success most likely reflects MISS-path/software-forwarded traffic, not hardware classification. |
 | `FMBM_RFNE` bit 28, `FMBM_RPSO`, `FMBM_RPP` | Open, untested, no hypothesis formed yet |
 | Group-table word3 AD encoding | Open — does not resolve as a simple raw MURAM pointer; genuinely undecoded, not just deprioritized |
-| **The port-wedge itself (this branch, `.185`)** | **Resolved by F-168 (2026-08-06, board-confirmed) — see §5.4.** Asserting `FMFP_EXTC` SYNC between the `fmbm_rccb` and `fmbm_rfpne` writes in `fman_port_set_cc_base()` allowed port `0x11` to arm and pass 34 packets with 0% loss, where every prior arm attempt wedged immediately. Not yet repeated across multiple cold-boot cycles, and does not yet establish whether a genuine ehash HIT is achievable — see §5.4 for what remains open. |
+| **The port-wedge itself (this branch, `.185`), simple `off=0` scaffold arm path** | **Resolved by F-168, cold-boot reproducibility CONFIRMED (2026-08-06) — see §5.4.** Asserting `FMFP_EXTC` SYNC between the `fmbm_rccb` and `fmbm_rfpne` writes in `fman_port_set_cc_base()` allowed port `0x11` to arm and pass traffic (34 + 20 = 54 packets across 3 arms, 2 same-boot + 1 fresh-cold-boot, 0% loss every time), where every prior arm attempt wedged immediately. Does **not** establish whether a genuine ehash HIT is achievable — see below. |
+| **The FE_ENTER-direct (`off != 0`) arm path, used for genuine ehash-HIT testing** | **Still stalls even with F-168 applied (2026-08-06) — see §5.4.** A likely-explanatory test-harness gap was found (KeyGen scheme4's EKFC never reconfigured to match the armed ehash table's key format) but not yet fixed or retested. Open. |
 
 ### 5.3 Authoritative RM findings on Custom Classifier table updates (2026-08-06)
 
@@ -625,6 +626,8 @@ Before testing F-168 live, its rationale was checked directly against the genuin
 **A likely-relevant confound, not yet disentangled from a genuine hardware limit:** the dmesg EKFC line at arm time still showed `ekfc=0x00180006` — `scheme4`'s own CC-tree EKFC (12-byte `SIP|DIP|SPORT|DPORT`, no `PORT_ID`, no `PROTO`) — not the 14-byte ehash-specific format the inserted flow actually used. The FE_ENTER-direct arm path (`off != 0`) apparently does not reconfigure KeyGen's scheme to match whatever ehash structure it's pointed at; that reconfiguration may only happen on the `off == 0` "production" path (§5.2.4's `AttachPCD`/scheme-bind machinery), which was never exercised here. If so, this test armed a 14-byte ehash table behind a KeyGen scheme still extracting a 12-byte key — a structural mismatch that would make a HIT impossible regardless of whether F-163's key format is otherwise correct, and could independently explain a stall (the FE-VM walking into a table whose key layout doesn't match what KeyGen handed it). **This does not settle the genuine-HIT question either way** — it shows the debug-only FE_ENTER-direct test harness itself has a gap (missing KeyGen scheme reconfiguration) that must be closed before this test can be considered a fair trial of F-163's key format. Not yet attempted: fixing the harness to also reconfigure scheme4's EKFC to `0x801C0006` (bit31 `KG_SCH_KN_PORT_ID` | SIP|DIP|PROTO|SPORT|DPORT) before arming, matching what the ehash table actually expects.
 
 Per explicit user instruction, no recovery was attempted (no `disengage`, no further probing) — this stall is left for a cold boot to clear, alongside the still-pending cold-boot repeatability test for F-168 itself.
+
+**Cold-boot reproducibility confirmed (2026-08-06, same day).** `.185` was power-cycled and rebooted fresh onto the same F-168 kernel build. Immediately after boot, `fe_arm engage 11 0` (the simple scaffold path) was re-tested from a completely clean state: identical clean sequence (`FMFP_EXTC SYNC cleared after 0 poll(s)`, `RX coarse-classification base set to MURAM off 0x4b600`, `port 0x11 ENGAGED (AC_CC)`), all fault registers clean, and **20/20 ping packets at 0% packet loss**. This is the third independent successful arm (two same-boot, now one fresh-cold-boot) — closing the last open item from the earlier confirmations. Board was left in a clean, disengaged state afterward. **F-168's fix for the `off=0` scaffold arm path is now considered solid.** The FE_ENTER-direct path's stall (previous paragraph) remains unresolved and untested against the identified EKFC-mismatch fix — that retest requires a new kernel fixup (exposing `fman_pcd_kg_scheme_set_ekfc()`, already present but uncalled/unexposed in `fman_pcd_kg.c`, via a debugfs verb) and was not attempted this session.
 
 
 ## 6. FM_CTL Params Page (per-port, 256 B MURAM)
