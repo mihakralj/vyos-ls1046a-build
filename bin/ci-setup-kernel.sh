@@ -2158,6 +2158,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     echo "### fman_port.c: F-168 FMFP_EXTC SYNC assertion in fman_port_set_cc_base() (arm path)"
 fi
 
+# F-169 (2026-08-06, Task #26 / T-M3-R attempt 2 follow-up): T-M3-R attempt 1
+# stalled on the FE_ENTER-direct arm path with a real test-harness gap found
+# -- KeyGen scheme4's EKFC was never reconfigured to match the 14-byte ehash
+# table it was pointed at (stayed on its own 12-byte CC-tree format,
+# 0x00180006, instead of F-163's 0x801C0006). Adds a debugfs verb
+# (`fe_kg_ekfc`, `echo "set <scheme_id_hex> <ekfc_hex>" > fe_kg_ekfc`) to
+# reconfigure a live scheme's EKFC via the correct disable/mutate/re-enable
+# sequence keygen_scheme_setup() requires for an already-bound scheme.
+# Purely additive; only fires on an explicit `set` write.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_169.py" 2>&1
+    echo "### fman_pcd.c: F-169 fe_kg_ekfc live KeyGen scheme EKFC reconfig (debugfs)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
