@@ -2144,6 +2144,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-167 fe_extc FMFP_EXTC SYNC probe (debugfs, inert by default)"
 fi
 
+# F-168 (2026-08-06, Task #26 follow-up to F-167): F-167's standalone probe
+# board-confirmed FMFP_EXTC is safe/responsive to touch in isolation. F-168
+# wires a real SYNC assertion into fman_port_set_cc_base() -- between the
+# fmbm_rccb write (repoints the AC_CC dispatch target) and the fmbm_rfpne
+# write (enables dispatch into it) -- to test whether this prevents the
+# port-wedge that has reproducibly occurred on every prior arm attempt this
+# session. Scoped to the arm path only (cc_muram_off != 0); teardown is
+# untouched. Depends on F-167's fman_get_fpm_extc()/fman_set_fpm_extc()
+# accessors already being present in fman.c/fman.h.
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_168.py" 2>&1
+    echo "### fman_port.c: F-168 FMFP_EXTC SYNC assertion in fman_port_set_cc_base() (arm path)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
