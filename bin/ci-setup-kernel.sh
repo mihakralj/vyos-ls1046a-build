@@ -2183,6 +2183,19 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ] && [ -f drivers/net/eth
     echo "### dpaa_eth.c + fman_pcd.c: F-170 hash_probe widened to eth3+eth4"
 fi
 
+# F-171 (2026-08-06, T-M3-R attempt 5): every off!=0 arm this session has
+# written FE_ENTER directly to FMBM_RCCB -- the deprecated topology RM
+# section 7.11 says was superseded 2026-07-16. Adds a `fe_group` debugfs
+# verb that wraps the existing FE_ENTER chain (fe_enter build) in a genuine
+# CONT_LOOKUP group AD with an all-wildcard match row (sidesteps the CC
+# compare-window layout question entirely), so RCCB gets armed with the
+# RM-documented AD species instead. Purely additive; does not touch fe_arm
+# or any existing fe_* verb.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_171.py" 2>&1
+    echo "### fman_pcd.c: F-171 fe_group CONT_LOOKUP group AD wrapper (debugfs)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
