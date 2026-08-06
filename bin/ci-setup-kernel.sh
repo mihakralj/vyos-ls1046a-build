@@ -2130,6 +2130,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-165 fe_arm engage honors caller's explicit fe_enter_off"
 fi
 
+# F-167 (2026-08-06, Task #26 follow-up, Option D): standalone FMFP_EXTC
+# (FPM External Requests Control, CCSR 0x074) SYNC probe. RM §5.12.14.1
+# documents this register as required by all three officially-documented
+# Custom Classifier table update flows; fman_pcd_ehash_add_key() has never
+# asserted it. Adds an inert-by-default debugfs node (fe_extc: cat reads
+# the register, "echo sync" asserts INV0 and polls for HW to clear it) so
+# the register's basic behavior can be tested standalone, without engaging
+# any port. Does not touch fman_pcd_ehash_add_key() or any existing fe_*
+# code path -- purely additive.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_167.py" 2>&1
+    echo "### fman_pcd.c: F-167 fe_extc FMFP_EXTC SYNC probe (debugfs, inert by default)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
