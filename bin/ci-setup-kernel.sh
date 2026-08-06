@@ -2172,6 +2172,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-169 fe_kg_ekfc live KeyGen scheme EKFC reconfig (debugfs)"
 fi
 
+# F-170 (2026-08-06, Task #26 follow-up): the annotation-hash-match technique
+# just found F-163's PORT_ID byte is wrong for eth4/port 0x11 (silicon
+# extracts 0x00, not the raw hw_port_id). Characterizing whether this is
+# port-specific or universal needs the same test on eth3/port 0x10, but
+# F-072's hash capture hook is hardcoded to eth4 only. Widens it to eth3+eth4
+# and records which interface produced the capture. Purely additive.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ] && [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_170.py" 2>&1
+    echo "### dpaa_eth.c + fman_pcd.c: F-170 hash_probe widened to eth3+eth4"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
