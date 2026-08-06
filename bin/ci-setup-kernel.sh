@@ -2210,6 +2210,22 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-172 fe_group extended to accept explicit key+mask"
 fi
 
+# F-173 (2026-08-06, task #26): a deep read of vendor's own original,
+# unmodified source (we-are-mono/ASK) found their fix/security-hardening
+# branch fixing this project's exact symptom class ("byte-correct key/
+# chain, never a genuine HIT") via an explicit wmb() before their ehash
+# bucket-head-pointer publish -- weak-ordered ARM64 can let the pointer
+# write reach visibility before the record's own field writes do, so
+# FMan's independent DMA-capable walker dereferences a still-stale
+# record. F-142 already fixed the adjacent cache-coherency half of this
+# bug (kzalloc -> dma_alloc_coherent) but never added the ordering half.
+# Adds wmb() immediately before this branch's own bucket-head publish in
+# fman_pcd_ehash_add_key(), matching vendor's exact fix location/rationale.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_173.py" 2>&1
+    echo "### fman_pcd.c: F-173 wmb() before ehash bucket-head publish"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
