@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.5**
+**Version 1.6**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -345,6 +345,8 @@ The mainline `dpaa_eth` default for kernel RSS delivery is `0x00500002`: no KeyG
 
 **Context.** Arming AC_CC/FE_ENTER dispatch on port `0x11` (eth4) via this branch's `fe_arm engage` debugfs verb wedges the port immediately and 100% reproducibly (4/4 cold-boot cycles as of this section) — before any test traffic is even sent, with zero fault signature anywhere (no `FMFP_PS` STL bit, all DCSR fault registers — `bmi_err`, `fpm_err`, `kg_err`, `parser_err`, `pol_err`, `qmi_err` — clean both before and immediately after arming). Only a full cold power cycle clears it; `fe_arm disengage` does not. This matches the project's documented "silent WAIT, no fault latched" corruption class (the iter-50 fault-capture precedent) and the broader "port goes deaf, cold boot required" failure class (F-069, F-076, F-125).
 
+**Software recovery checked and closed (2026-08-06).** The vendor SDK's `fman_is_port_stalled()`/`fman_resume_stalled_port()` (`FM/fm.c`, `FMFP_PS[port]` STALLED bit + a `FMFP_PRC` write) looked like a candidate soft de-wedge mechanism. `FmResumeStalledPort()` explicitly returns `E_NOT_AVAILABLE` for FM major rev ≥ 6, and several other unrelated `>= 6` gates in the same file strongly imply this silicon's FMan v3 reports major rev 6 — this mechanism is deprecated on this hardware. Confirms there is currently no known software recovery path for this wedge class; cold power cycle remains the only one.
+
 This section documents a full register-level comparison against the genuine vendor `cdx.ko` stack running on `.106` (same physical hwport `0x11`), read via `bin/ask-pcd-regdump.py` (`/dev/mem`, read-only) on both boards, plus a methodical trace of the NXP SDK source (`nxp-sdk` branch, `kernel/flavors/ask/sdk-sources/.../Peripherals/FM/Port/fm_port.c`, `FM/SP/fm_sp.c`, `FM/Pcd/fm_pcd.c`, `FM/Pcd/fm_ehash.c`) to determine, for every register that differs, whether the difference is causally relevant to the wedge or merely a general-port-config difference unrelated to AC_CC specifically.
 
 #### 5.2.1 Register-by-register table
@@ -476,6 +478,10 @@ Protocol for flow 1/2 (RM §5.12.14.1.1–.2): (a) prepare the new AD + its stru
 #### 5.3.5 Updated priority for outstanding work
 
 Given §5.3.3 and §5.3.4, `FMFP_EXTC`-based synchronization is now a more concrete, more directly RM-sourced candidate than the previously-planned single-RISC-restriction test (§5.2.4, found dormant in the SDK source for CC-tree setups, i.e. weaker evidence). Recommended before further live cold-boot cycles: locate `FMFP_EXTC`'s absolute CCSR address (FPM block base + `0x074`) and confirm its accessibility/behavior read-only first, then design a minimal live test that asserts the flow-1 SYNC sequence around a `fe_flow add` on `.185` and observes whether it changes either the MISS result or the port-wedge behavior.
+
+**Update (2026-08-06).** `FMFP_EXTC`'s absolute CCSR address is confirmed: `FMAN_CCSR_BASE` (`0x01a00000`, per `bin/ask-pcd-regdump.py`) `+ FM_MM_FPM (0x0C3000) + 0x074 = 0x01ac3074` — cross-checked against both the vendor SDK's `fsl_fman.h` and this kernel's own `fman.c`, which independently define an identical `struct fman_fpm_regs` layout (`fmfp_extc` at struct offset `0x74`). `INV0` is the MSB (`0x80000000`), confirmed against the vendor SDK's own `FM_SetParams()` write path (`fm.c`). Notably, a full grep of the vendor SDK tree found **zero callers anywhere** that ever set `FM_SetParams`'s `UPDATE_FPM_EXTC` flag — meaning neither `cmm` nor the genuine deployed `cdx.ko` driver on `.106` has ever exercised this register either. This is independent, reinforcing evidence for §5.2.6's conclusion that `.106` never exercises a genuine dynamic table update through any of the RM's documented mechanisms.
+
+A first fixup (F-167, `bin/kernel-fixups/F_167.py`) has been built: a standalone, inert-by-default debugfs probe (`fe_extc` — `cat` reads the register, `echo sync` asserts `INV0` and polls for hardware to clear it) that does not touch `fman_pcd_ehash_add_key()` or any live-arming path, so the register's basic behavior can be verified without going anywhere near the port-wedge. As of this update it has not yet been live-tested on board (still working through CI build fixes — `struct fman_fpm_regs` is opaque outside `fman.c`, requiring new `fman_get_fpm_extc()`/`fman_set_fpm_extc()` accessor functions in `fman.c`/`fman.h`, following the same pattern as `fman_get_dev()`).
 
 
 ## 6. FM_CTL Params Page (per-port, 256 B MURAM)
