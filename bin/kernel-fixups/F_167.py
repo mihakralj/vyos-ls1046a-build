@@ -47,7 +47,7 @@ to design a second fixup that actually wires a SYNC assertion into
 fman_pcd_ehash_add_key() and/or fe_arm engage.
 """
 
-import sys, os
+import sys, os, re
 
 kroot = "drivers/net/ethernet/freescale/fman"
 pcd_c = os.path.join(kroot, "fman_pcd.c")
@@ -194,32 +194,42 @@ else:
     )
     sys.exit(1)
 
-# --- 2. Register the new debugfs node, right after fe_arm's registration ---
-anchor2 = (
-    '\t\t\tdebugfs_create_file("fe_arm", 0600,\n'
-    '\t\t\t\t\t    pcd->debugfs_dir, pcd,\n'
-    '\t\t\t\t\t    &fman_pcd_fe_arm_fops);\n'
-)
-new2 = anchor2 + (
-    '\t\t\tdebugfs_create_file("fe_extc", 0644,\n'
-    '\t\t\t\t\t    pcd->debugfs_dir, pcd,\n'
-    '\t\t\t\t\t    &fman_pcd_fe_extc_fops);\n'
-)
-
-if new2 in src:
+# --- 2. Register the new debugfs node, right after fe_arm's registration.
+#        Whitespace-tolerant regex (not a literal string match): earlier
+#        drift showed the fe_arm debugfs_create_file call's exact
+#        indentation/line-wrap in the real CI-built tree does not match
+#        any locally-available snapshot of this file byte-for-byte, even
+#        though the surrounding code (F-165's guard, the fe_arm fops
+#        struct itself) is otherwise identical. Only the call's shape
+#        (name/mode/args/fops-in-order) is load-bearing here. ---
+if 'debugfs_create_file("fe_extc"' in src:
     print("### F-167: fe_extc debugfs registration already applied")
-elif anchor2 in src:
-    src = src.replace(anchor2, new2, 1)
+else:
+    pat = re.compile(
+        r'([ \t]*)debugfs_create_file\(\s*"fe_arm"\s*,\s*0600\s*,'
+        r'[\s\S]*?&fman_pcd_fe_arm_fops\s*\)\s*;\n'
+    )
+    m = pat.search(src)
+    if not m:
+        print(
+            "### F-167: FATAL: fe_arm debugfs_create_file call not found "
+            "(even with a whitespace-tolerant regex) in fman_pcd.c -- "
+            "source has likely drifted structurally, not just in "
+            "formatting, since this fixup was written. Refusing to "
+            "guess; fix the anchor pattern in F_167.py against the "
+            "current fman_pcd.c before retrying."
+        )
+        sys.exit(1)
+
+    indent = m.group(1)
+    insertion = (
+        f'{indent}debugfs_create_file("fe_extc", 0644,\n'
+        f'{indent}\t\t\t    pcd->debugfs_dir, pcd,\n'
+        f'{indent}\t\t\t    &fman_pcd_fe_extc_fops);\n'
+    )
+    src = src[: m.end()] + insertion + src[m.end() :]
     changes += 1
     print("### F-167: fe_extc registered in fman_pcd debugfs directory")
-else:
-    print(
-        "### F-167: FATAL: expected fe_arm debugfs_create_file anchor not "
-        "found verbatim in fman_pcd.c -- source has likely drifted since "
-        "this fixup was written. Refusing to guess; fix the anchor text "
-        "in F_167.py against the current fman_pcd.c before retrying."
-    )
-    sys.exit(1)
 
 if changes:
     with open(pcd_c, "w") as f:
