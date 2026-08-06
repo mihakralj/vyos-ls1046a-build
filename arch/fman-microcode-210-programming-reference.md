@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.7**
+**Version 1.8**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -178,7 +178,7 @@ SHA256: `5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d`
 
 **The `soc.model`/`id`-string "LS1043" mismatch is confirmed cosmetic at the source level, not just by assertion.** Neither loader that ever touches this field validates it against actual chip identity: the generic QUICC-Engine loader (`drivers/soc/fsl/qe/qe.c`, `qe_upload_firmware()`) only uses `soc.model`/`major`/`minor` to format an informational `printk` (`qe-firmware: firmware '%s' for %u V%u.%u`) — no comparison, no gate. This kernel's own FMan-specific loader (`fman.c`'s `load_fman_ctrl_code()`, patch `0117`) doesn't reference `soc.model` at all — its `QE_FW_*_OFF` constant list only covers magic/id/ucode-table fields. The field is inert on both code paths; whatever value the compiler happened to stamp in has zero functional consequence.
 
-**Content comparison: 210 is not "106/108 plus an appended tail."** No shared prefix beyond 2–3 bytes, and neither 106's nor 108's full code stream appears anywhere in 210 as an exact contiguous substring — ruling out the simplest model (proprietary tiers = public tier + linked-on extra microcode). Firmware of this kind is compiled/linked as a whole; even logic that is functionally unchanged between tiers gets relocated (branch targets, jump tables) by the addition of new code elsewhere, so a fixed-offset or substring comparison systematically underestimates real code reuse.
+**Content comparison: 210 is not "106/108 plus an appended tail."** Neither 106's nor 108's full code stream appears anywhere in 210 as an exact contiguous substring — ruling out the simplest model (proprietary tiers = public tier + linked-on extra microcode). Firmware of this kind is compiled/linked as a whole; even logic that is functionally unchanged between tiers gets relocated (branch targets, jump tables) by the addition of new code elsewhere, so a fixed-offset or substring comparison systematically underestimates real code reuse. (The very first bytes of the code region differ across all three even before any real code starts — see §3.4: that's a version-stamped dispatch table, not divergent instructions, and the actual instruction stream immediately after it is byte-identical across all three tiers for 68+ bytes.)
 
 **Relocated-content comparison (fixed-size chunks matched anywhere, not just at the same offset) gives a more honest answer:**
 
@@ -193,6 +193,51 @@ SHA256: `5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d`
 **What this does NOT establish:** no disassembler exists for the FE-VM ISA (§13), so none of the above says *what* the shared or unique chunks actually do — only how much raw byte content is shared vs. unique, at a granularity coarse enough to survive relocation. Semantic understanding of any specific 210-only feature still requires the register/AD-level reverse-engineering this document already does elsewhere (§5, §7, §10), not blob comparison.
 
 Reproduction: `git clone --depth 1 https://github.com/nxp-qoriq/qoriq-fm-ucode.git`; pull the running blob via `sudo dd if=/dev/mtd3 of=mtd3-raw.bin bs=1M count=1` (confirm partition number via `/proc/mtd` first, §3.1's caveat); parse with `struct qe_firmware`'s layout (§3's header table, this section's code-offset formula `124 + 120×count`).
+
+### 3.4 A real entry-point table at the start of the code region — genuine, if coarse, function-level mapping
+
+§3.3 compares raw bytes. This subsection asks a sharper question: without a disassembler, can we still identify *individual routines* well enough to compare them across tiers by identity, not just aggregate content overlap? The answer is yes, for one specific structure.
+
+**The first `0xc0` (192) bytes of the code region are not instructions — they're a 24-slot table**, identical in *layout* across all three tiers (same slot positions, same reserved slots). Each slot is 8 bytes: a `0xb7ffXXXX` word (fixed `0xb7ff` high halfword — almost certainly a jump/branch opcode — plus a 16-bit `XXXX` that is, in every populated slot across all three blobs, a plausible **word offset into this same code region** (bounded by the blob's own word count in every case)), followed by an `0xffffffff` padding word — except slot 0, whose second word is not padding but a literal `\x00\xd2\x0a\x01` / `\x00\x6a\x04\x12` / `\x00\x6c\x04\x09` — decimal `(0, 210, 10, 1)` for the 210 blob, matching its own `210.10.1` version stamp exactly (106/108's slot-0 second words don't decode as their own version numbers as cleanly, but are structurally in the same position). This is almost certainly the FE-VM's internal trap/dispatch vector table — a small, fixed set of entry reasons (parse-done, classify-done, error, per-engine handoff, etc.), separate from and not to be confused with the QEF container's own unrelated `vtraps[8]` header field (confirmed all-zero and unused on this blob, §3).
+
+**Slot-by-slot comparison (24 slots, target = the low 16 bits of each slot's first word, in words):**
+
+| Slot | 106.4.18 | 108.4.9 | 210.10.1 | Note |
+|---|---|---|---|---|
+| 0 | 470 | 578 | 585 | |
+| 1 | 490 | 598 | 605 | |
+| 2 | 488 | 596 | 603 | |
+| 3 | 546 | 658 | **1578** | disproportionate jump in 210 |
+| 4 | 2066 | 2520 | 2580 | |
+| 5 | 1870 | 2324 | 2384 | |
+| 6 | 6238 | 6966 | **8574** | disproportionate jump in 210 |
+| 7 | 7584 | 8785 | **12124** | disproportionate jump in 210 |
+| 8 | 32 | 32 | 32 | fixed across all tiers |
+| 9 | 172 | 172 | 179 | |
+| 10 | *(unused)* | *(unused)* | *(unused)* | reserved in all three |
+| 11 | 272 | 351 | 358 | |
+| 12 | 27 | 27 | 27 | fixed across all tiers |
+| 13 | 422 | 530 | 537 | |
+| 14 | *(unused)* | *(unused)* | *(unused)* | reserved in all three |
+| 15 | 420 | 528 | 535 | = slot 16 in every tier |
+| 16 | 420 | 528 | 535 | = slot 15 in every tier |
+| 17 | 374 | 479 | 486 | |
+| 18 | 483 | 591 | 598 | |
+| 19 | *(unused)* | *(unused)* | **8621** | **210-ONLY entry point** |
+| 20 | 489 | 597 | 604 | = slot 21 in every tier |
+| 21 | 489 | 597 | 604 | = slot 20 in every tier |
+| 22 | 7810 | 9049 | **12388** | disproportionate jump in 210 |
+| 23 | *(unused)* | *(unused)* | *(unused)* | reserved in all three |
+
+**Findings this table supports directly, without disassembling anything:**
+
+- **The table's shape (which of the 24 slots are populated vs. reserved) is identical across all three tiers.** This is strong structural evidence that 106, 108, and 210 are three builds of the *same* microcode source tree / entry-point contract, not three unrelated programs that happen to share an ISA — reinforcing §3.3's chunk-overlap finding with a second, independent line of evidence.
+- **Slot 19 is reserved (unused) in both public tiers and populated only in 210** — a genuine, structurally-identified **210-only entry point** (target word 8621), the clearest single artifact in this whole comparison of "here is specifically where 210 added a new capability's dispatch handler."
+- **Slots 3, 6, 7, and 22 grow disproportionately faster in 210** than the roughly-linear growth every other populated slot shows (106→108→210 is a fairly steady climb for slots 0–2, 4–5, 9, 11, 13, 15–18, 20–21; slots 3/6/7/22 instead show a much bigger jump specifically from 108→210). Since every slot's target is (almost certainly) "start of the routine handling that trap/entry reason," and routines are laid out sequentially, this is consistent with — *not proof of* — extra code being inserted specifically in the vicinity of whatever slots 3/6/7/22 dispatch to, between the 108 and 210 tiers. These four slots are the most promising starting points for any future manual/disassembly effort aimed at finding the ehash/CC-hash-table/replicator/reassembly routines specifically (§12's "210-only" feature list).
+- **Slots 8 and 12 have the exact same target (32 and 27 words respectively) in all three tiers** — these are almost certainly small, foundational, version-independent routines (early in the code region, unaffected by any tier's feature additions) — plausible candidates for generic setup/dispatch-prologue code rather than any protocol-specific handler.
+- **The actual instruction stream immediately after the table (from file offset `0xc0`) is byte-identical across all three tiers for at least 68 bytes**, and 106/108 stay identical for 168 bytes before diverging — correcting the naive byte-0 "no shared prefix" read in §3.3: there IS a real, substantial, fixed-position shared preamble; it's just positioned after the version-specific table, not at byte 0.
+
+**What this still does not establish:** we know *where* 24 routines start (as word offsets) and roughly how their start offsets move between tiers — not what any of them do, how long they run, or where they end. That would need either a disassembler for the `0xb7ff`-prefixed instruction encoding (and whatever the rest of the ISA looks like) or a NXP-internal symbol map, neither of which is available. Slot-to-feature attribution (e.g. "slot 19 is the ehash lookup entry point") is a hypothesis this table makes plausible and prioritizable, not a confirmed mapping.
 
 
 ## 4. KeyGen Scheme Registers
