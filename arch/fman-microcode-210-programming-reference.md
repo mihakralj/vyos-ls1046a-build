@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 Programming Reference
 
-**Version 1.8**
+**Version 1.9**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -239,8 +239,35 @@ Reproduction: `git clone --depth 1 https://github.com/nxp-qoriq/qoriq-fm-ucode.g
 
 **What this still does not establish:** we know *where* 24 routines start (as word offsets) and roughly how their start offsets move between tiers — not what any of them do, how long they run, or where they end. That would need either a disassembler for the `0xb7ff`-prefixed instruction encoding (and whatever the rest of the ISA looks like) or a NXP-internal symbol map, neither of which is available. Slot-to-feature attribution (e.g. "slot 19 is the ehash lookup entry point") is a hypothesis this table makes plausible and prioritizable, not a confirmed mapping.
 
+### 3.5 Mapping table slots to known register-level semantics (2026-08-06)
 
-## 4. KeyGen Scheme Registers
+§3.4 established *where* 24 routines start. This subsection asks whether we can attach a *reason* to any of those 24 slots by cross-referencing the slot index itself against small-integer "operation code" spaces this project already has independent, non-blob-derived knowledge of: the RM's **Host Command Opcode Register (HCOR)** field (§5.12.16.4.1 — a genuine vendor-documented enumeration, distinct from anything in this repo's own code) and this project's own **NIA engine-code table** (`bin/ask-pcd-regdump.py`'s `NIA_ENG` dict, `eng = (nia >> 20) & 0xf`, board-confirmed via extensive live register reads all session).
+
+The RM's HCOR opcode field is 8 bits wide but only sparsely populated: `0x00` Policer Profile HC, `0x01` KeyGen HC, `0x02` SYNC, `0x03` dynamic update of custom classifier tables (general), `0x04` Aging support, `0x10` IP Reassembly Timeout Config, `0x11` IP Fragmentation HC, `0x13` dynamic update of custom classifier tables *specifically when the old table is `Generic_6_Off_IC_AGE_MASK` (opcode `0x2D`, §5.3.1's bucket-walk AD)* — "Other Opcodes — Reserved" for everything else, including `0x12`, which the RM is explicitly silent on. `NIA_ENG` covers a disjoint low range: `0x0`–`0xC` (`DONE, RES1, PRS, RES3, HWK, BMI, QMI_ENQ, QMI_DEQ, FM_CTL_A, FM_CTL_B, PLCR, FR, CC`) — note `RES1`/`RES3` were always this project's own placeholder guesses, never vendor-confirmed.
+
+Read as **decimal slot index = hex opcode value** (slot 19 = `0x13`, no offset needed), both schemes land cleanly on the table with essentially no forcing:
+
+| Slot | Hex | Candidate | Scheme | Evidence |
+|---|---|---|---|---|
+| 0 | `0x00` | Policer Profile HC / `DONE` | ambiguous | populated all 3, stable-ish growth — both plausible baseline |
+| 1 | `0x01` | **KeyGen HC** | HCOR | populated all 3 (490/598/605) — `NIA_ENG`'s own `RES1` guess is unconfirmed; HC opcode is the better-evidenced reading |
+| 2 | `0x02` | SYNC / `PRS` | ambiguous | populated all 3 (488/596/603) — SYNC is RM-emphasized as required by every dynamic-update flow; `PRS` equally plausible |
+| 3 | `0x03` | **Dynamic CC-table update (general)** | HCOR | populated all 3, **disproportionate 210 growth** (546/658/**1578**) — exactly what you'd expect: this routine must grow substantially to support 210's CC-Hash-Table, while 106/108 (exact-match only) need less of it |
+| 4 | `0x04` | `HWK` (KeyGen hash dispatch) | `NIA_ENG` (favored) | populated all 3, fairly steady growth (2066/2520/2580) — *not* disproportionate like slot 3, which argues against "Aging support" (RM implies aging should scale with 210's aging-capable tables) and for the well-established `HWK` reading |
+| 5–9 | `0x05`–`0x09` | `BMI, QMI_ENQ, QMI_DEQ, FM_CTL_A, FM_CTL_B` | `NIA_ENG` only | RM has no opcode here ("reserved"); slot 8 fixed at 32 words in all 3 tiers (self-referential/foundational fit for `FM_CTL_A`); slots 6/7 (`QMI_ENQ`/`QMI_DEQ`) show the largest disproportionate 210 growth of any low slot |
+| 10 | `0x0A` | `PLCR` (Policer) | `NIA_ENG` | **unused in all three tiers** — consistent with the Policer being a dedicated hardware state machine (`FMPL_*` registers, §9) that never dispatches through FM_CTL microcode at all |
+| 11 | `0x0B` | `FR` (Frame Replicator) | `NIA_ENG` | populated in **all three** tiers (272/351/358) despite Frame Replicator being labeled "210-only (unconsumed)" in §12 — see caveat below |
+| 12 | `0x0C` | `CC` (Coarse Classifier) | `NIA_ENG` | **fixed at 27 words in all three tiers** — a short, stable dispatch stub, consistent with CC being present (in some form) everywhere and branching internally by config |
+| 13, 15, 18 | `0x0D, 0x0F, 0x12` | unidentified | — | populated in all three, no match in either scheme (RM explicitly silent on `0x12`) |
+| 14, 23 | `0x0E, 0x17` | unidentified | — | unused in all three |
+| 16 | `0x10` | **IP Reassembly Timeout Config** | HCOR | populated all 3 (420/528/535, identical to slot 15) — IP Reassembly is also "210-only (unconsumed)" per §12; same code-vs-caps caveat as slot 11 |
+| 17 | `0x11` | **IP Fragmentation HC** | HCOR | populated all 3 (374/479/486) — IP Fragmentation also "210-only (unconsumed)" per §12; same caveat |
+| 19 | `0x13` | **Dynamic CC-table update, aging-specific** | HCOR | **reserved in 106 and 108, populated only in 210** (target word 8621) — this is the single cleanest match in the whole table: the one documented opcode that is *specifically* about updating `Generic_6_Off_IC_AGE_MASK`-typed (aging-capable) tables, and CC Hash-Table (the 210-only feature that uses such tables) is exactly what §12 already marks 210-only |
+| 20–22 | `0x14`–`0x16` | unidentified | — | populated all 3, slot 22 shows the largest absolute target of any slot (7810/9049/12388) and the biggest raw jump into 210 — another strong "large 210-only addition" candidate alongside slot 3 |
+
+**The important nuance this table surfaces, worth stating explicitly:** slots 11, 16, and 17 (Frame Replicator, IP Reassembly, IP Fragmentation) are all populated with real dispatch targets in **every** tier, even though §12 marks all three features "210-only (unconsumed)." This means *code for these features exists in the 106/108 blobs too* — the "210-only" claim in §12 is about `caps`-bit gating and driver consumption, not about whether the microcode blob contains any code for the feature at all. A future audit of §12 should make this distinction explicit rather than implying the public blobs are missing this code entirely; they may simply never advertise or invoke it.
+
+**Confidence, stated plainly:** slots 1, 3, and especially 19 are well-evidenced — multiple independent signals (opcode-value match, disproportionate-growth pattern, and the 210-only-population fact for slot 19) all agree. Slots identified via `NIA_ENG` alone (5–12) rest on this project's own register-decode work, extensively board-confirmed this session but never vendor-published. Slots 0, 2, and 4 are genuinely ambiguous between two plausible readings. Nine slots (13, 14, 15, 18, 20, 21, 22, 23, and the `PLCR`/slot-10 gap already explained) have no candidate identity at all. None of this is proof — it is a set of testable, prioritized hypotheses for exactly where a future disassembly effort would find the highest-value entry points, ranked by how much independent evidence currently supports each.
 
 FMan CCSR base: `0x01A_0000`. KeyGen register block: offset `0x0C_1000`. All scheme registers are accessed indirectly through the KeyGen Action Register (`FMKG_AR` at offset `0x1FC`).
 
