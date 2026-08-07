@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.2.0 · 2026-08-06 · HADS 1.0.0**
+**Version 2.3.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -30,7 +30,7 @@ confirmed silicon HIT. The only silicon-proven hardware offload today is the
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **F-163's 14-byte PORT_ID key format is WRONG and should be reverted — the 13-byte format is correct (§4.1).** Attempts 2–4 (2026-08-06) ruled out FQID choice and key content. Attempt 5 (F-171, `fe_group` genuine `CONT_LOOKUP` AD, all-wildcard mask) is a conclusive negative: the group-AD topology alone does not discriminate HIT from MISS. Attempt 6 (F-172, real key + real mask, closes an F-158/F-168 temporal confound) is the next untested configuration (§4.1). |
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. 13-byte key (no PORT_ID) confirmed correct. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity — but that result is suspect, not yet trustworthy: the discriminator itself (F-176) forces a flag bit vendor's own mechanism requires backing infrastructure for, which this branch doesn't have.** See §4.1 for the phased retest plan. |
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
@@ -127,6 +127,38 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
   normal traffic, so its *absence* on a matching frame is evidence of a
   MISS, not an inconclusive result. `fe_arm`'s 3rd argument is inert on the
   `off != 0` path — the live dispatch target is `fe_enq build <fqid>`.
+- **The direct `RCCB→FE_ENTER` topology, not the `CONT_LOOKUP` group-AD RM
+  §7.11 describes, is vendor's real dispatch mechanism (2026-08-07).**
+  Reading `we-are-mono/ASK`'s `fm_cc.c` completely found `copy_td_to_ccbase()`
+  writes the ehash table's `en_exthash_node` 4-word descriptor **directly
+  into the CC-tree root's own AD slot** — the exact MURAM location `RCCB`
+  points at — with no group-AD/match-table indirection anywhere in the
+  `USE_ENHANCED_EHASH` path. This independently confirms F-147/F-148's
+  direct-topology work (done without ever having read this vendor function)
+  was correct, and further confirms the group-AD topology (F-171/F-172,
+  §4.1's old attempt 6 plan) was never the right thing to chase.
+- **`FMFP_EXTC`/Host-Command sync is NOT what vendor asserts around a plain
+  ehash insert (2026-08-07).** Read `fm_ehash.c` (complete, 1924 lines) and
+  `hc.c` (both the ASK diff and pristine base) in full: `ExternalHashTableAddKey()`'s
+  fast path (fresh insert into an empty bucket) calls no sync of any kind —
+  not `FmPcdHcSync()`, nothing. `FmPcdHcSync()`/`FmHcPcdSync()` is a genuine
+  Host Command **frame dispatch** (enqueued via `EnQFrm()` to the FMan's HC
+  port) — structurally unavailable on this board's microcode regardless
+  (`caps=0x17` bit 3 clear). `F_167`'s `FMFP_EXTC` register-level probe
+  remains untested on the insert path specifically, but is now a weaker
+  hypothesis than before this reading — vendor doesn't need any sync there.
+- **Vendor forces `TIMESTAMP_EN` on every ehash key unconditionally, backed
+  by a live, periodically-refreshed MURAM pool (`extHashTsInfo`) kept alive
+  by a userspace timer (`cdx/cdx_timer.c`) entirely outside `sdk_fman`
+  (2026-08-07).** `F-176` (this branch's new stats/HIT-discriminator debugfs
+  node, `fe_ehash_stats`) reproduces the forced-on flag bit
+  (`flags=0x3000`, `STATS_EN|TIMESTAMP_EN`) with **no** corresponding pool.
+  **The 2026-08-07 "clean negative" result (13-byte key + direct topology,
+  `pkt_count` stayed 0) was produced using this tainted discriminator and
+  cannot yet be trusted** — see §4.1's Phase 1 for the required retest with
+  `TIMESTAMP_EN` cleared before this result is treated as real. Full
+  function-level catalogue of everything read: `arch/fman-microcode-210-programming-reference.md`
+  §12.1.
 
 ---
 
@@ -394,6 +426,78 @@ byte-level ground truth instead of guessing further.
 since F-168 (2026-08-06); port `0x17`'s cosmetic stall requires a cold boot
 to clear between attempts but has no observed functional consequence. Pings
 only, never flood. Explicit user go-ahead before arming.
+
+**[SPEC — superseded by 2026-08-07 events, attempt 6 never run as planned.]**
+The vendor-source read (binding facts above) confirmed the direct topology
+is correct and the group-AD topology is not, making attempt 6's planned
+"real key+mask through the group AD" test moot before it was scheduled.
+Instead, this session (T-M3-R attempts 7–8, below) went straight to testing
+the now-fully-corrected direct-topology combination, using a new
+dispatch-independent discriminator (`F-176`) that attempt 6's plan didn't
+have available. Attempts 7–8 superseded attempt 6's queued procedure; it is
+not going to be run.
+
+**Attempt 7 (2026-08-07) — F-176 built: `fe_ehash_stats` debugfs node.**
+Adds hardware-writeback `packet_count`/`packet_bytes`/`timestamp` readback
+(`en_ehash_entry`'s second union view, 320B entries, `SET_STATS_ENABLE`/
+`SET_TIMESTAMP_ENABLE` flags — set unconditionally, **later found to be the
+taint, see Phase 1 below**). First dispatch/FQID-independent HIT signal
+this project has ever had. CI-built, board-validated functional.
+
+**Attempt 8 (2026-08-07) — the fully-corrected combination, clean negative,
+not yet trustworthy.** Rebuilt on a freshly cold-booted, confirmed-healthy
+board: 13-byte key (no PORT_ID, `EKFC=0x001C0006`), direct `FE_ENTER`
+topology (`fe_arm engage 11 <off> <fqid>`), `F-168`'s SYNC fix present,
+clean arm (fault registers clean). Sent the genuinely-matching TCP SYN three
+times, confirmed physically transmitted via `tcpdump` on the peer's own
+interface. `fe_ehash_stats`' `pkt_count` stayed `0` all three times. Bucket
+index (`0x6008`) independently cross-checked against the 2026-07-13
+silicon-measured hash for this exact key (`hash >> 48 = 0x6008`) — the
+insertion side is validated as thoroughly as software reasoning allows.
+**This is the cleanest negative this project has produced — every
+construction-level variable individually corrected and combined for the
+first time — but it used `F-176` with `TIMESTAMP_EN` forced on, which the
+vendor deep-read (binding facts above) found requires backing MURAM
+infrastructure this branch doesn't have. Cannot be trusted until retested
+without that taint (Phase 1, immediately below).**
+
+Post-test, direct-`FE_ENTER` engage/disengage reliably required a cold boot
+to restore plain RSS afterward — confirmed 2/2 this session, independent of
+traffic volume (one single frame was enough the second time). Budget one
+cold boot per test cycle on this topology as a standing operational cost,
+not an occasional fallback.
+
+**T-M3-R Phase 1 (⬅ NEXT ACTION) — un-taint `F-176`, retest.** Change
+`F-176`'s flags from `0x3000` to `0x1000` (`STATS_EN` only — `packet_count`/
+`packet_bytes` are inline at fixed offsets and don't need `extHashTsInfo`
+the way `timestamp_counter` does). One CI build, one board session, same
+attempt-8 procedure. **`pkt_count` still 0 → the negative is real, proceed
+to Phase 2. `pkt_count` increments → `TIMESTAMP_EN` without its pool was the
+bug all along; fix is drop the bit or implement the pool properly, and this
+closes T-M3-R.**
+
+**T-M3-R Phase 2 (if Phase 1 negative) — the two remaining concrete,
+unverified leads, one CI build:**
+1. Byte-for-byte re-verify `en_exthash_node.word_1`'s `int_buf_pool_addr`/
+   `global_mem_offset` against `ExternalHashTableSet()`'s exact derivation
+   (believed correct — `fman_pcd_ehash_int_buf_get()` shows non-zero live —
+   but never re-checked bit-for-bit since flagged). Pure code review, zero
+   board risk.
+2. Wire `FMFP_EXTC` sync into `fman_pcd_ehash_add_key()` itself (the
+   flow-*insert* path) — `F-168` only covers the arm path. Weaker hypothesis
+   post-`hc.c` reading (vendor's own insert path needs no sync at all), but
+   cheap and still untested there specifically.
+
+**T-M3-R Phase 3 (if Phase 1+2 both negative) — stop guessing at registers.**
+Every construction-level hypothesis this project has ever generated will be
+exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
+observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
+structurally cannot do this, transient workspace + async CPU read) rather
+than another register/key/topology permutation. If no such capability
+materializes, this is the point to treat Fork-B as non-viable on this
+silicon/microcode and reallocate effort to Fork-A (CC-tree) — noting Fork-A
+carries its own unresolved, unrelated trust problem (M5's throughput number,
+CR-007, §1.1) that would need its own honest re-verification first.
 
 ### 4.2 NXP-106 deep-dive — vendor oracle track (parallel; unblocks CC-tree)
 
