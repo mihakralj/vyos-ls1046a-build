@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.5.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.6.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -30,7 +30,7 @@ confirmed silicon HIT. The only silicon-proven hardware offload today is the
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. 13-byte key (no PORT_ID) confirmed correct. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity. Phase 1 retest (same day, `F-176` un-tainted to `STATS_EN`-only) reproduced the identical zero-activity result — the negative is confirmed genuine, not a discriminator artifact.** See §4.1 Phase 2 for the two remaining concrete, unverified leads. |
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. 13-byte key (no PORT_ID) confirmed correct. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity. Phase 1 (`F-176` un-tainted to `STATS_EN`-only) and Phase 2 (`int_buf_pool_addr` byte-exact-correct by code review; `F-177`'s `FMFP_EXTC` sync on the bucket-head publish, board-tested) both reproduced the identical zero-activity result — the negative is confirmed genuine across every construction-level and now every concrete sync-related hypothesis this project has generated.** See §4.1 Phase 3 for the current next step. |
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
@@ -495,22 +495,36 @@ hash_mask_bits:4 | int_buf_pool_addr:16`, LSB-first) confirmed against the
 real `fm_ehash.h` `EXCLUDE_FMAN_IPR_OFFLOAD` struct variant (this board's
 config) — exact match. **Not the gap.**
 
-**T-M3-R Phase 2, item 2 — fixup written, 2026-08-07, awaiting CI
-build + board retest.** `F-177` (`bin/kernel-fixups/F_177.py`) wires the
-same `FMFP_EXTC[INV0]` SYNC assertion `F-168` uses on `FMBM_RCCB` (RM
+**T-M3-R Phase 2, item 2 — COMPLETE, 2026-08-07: negative, Phase 2 fully
+closed.** `F-177` (`bin/kernel-fixups/F_177.py`) wires the same
+`FMFP_EXTC[INV0]` SYNC assertion `F-168` uses on `FMBM_RCCB` (RM
 §5.12.14.1) into `fman_pcd_ehash_add_key()`'s own bucket-head publish
 (right after `F-173`'s `wmb()`-then-`*flow->bucket_h = swab64(...)`), on
 both call sites (`fe_flow` debugfs write, `fman_pcd_fe_flow_add()`
-ask.ko API). Weaker hypothesis than `F-168`'s (vendor's own
-`ExternalHashTableAddKey()` fast-insert path calls no sync of any kind —
-§12.1 finding), but cheap, additive-only, and the last concrete
-insert-path lead before Phase 3. Both anchors verified byte-exact against
-`F-175`'s actual post-transform text (dry-run tested in isolation, no
-board/CI involved) before being wired into `ci-setup-kernel.sh`'s embedded
-fixup sequence, right after `F-176`. **Needs a CI build + one board retest
-(same Phase 1 procedure) — held for explicit go-ahead.**
+ask.ko API). Two CI builds needed: the first failed a pre-flight gate
+(`F_177.py` unregistered in `bin/kernel-fixups/manifest.json`); the
+second failed to compile (`FMAN_FPM_EXTC_INV0`/`POLL_MAX` are `#define`d
+later in `fman_pcd.c`, near `fe_arm`'s fops — not visible at
+`fman_pcd_fe_flow_write()`'s earlier position; fixed by using
+self-contained local consts, matching `F-168`'s own established pattern
+for the same register). Third build (CI run `31199999991`) succeeded,
+deployed to lxc200, installed on `.185`. Board retest, same Phase 1
+procedure: fresh boot confirmed (kernel `Fri Aug 7 16:59:31 UTC 2026`),
+clean 0% ping baseline, full chain rebuilt — `node` AD word_2 read back
+as `0x04c6f080` on-board, independently confirming Phase 2 item 1's
+code-review finding live (`gmo=0x080 | mask_bits=0xf<<12 |
+int_buf=0x4c6<<16` — bit-exact). Flow inserted at bucket `0x6008` (same
+bucket every test with this key). Armed cleanly — dmesg confirmed
+`FMFP_EXTC SYNC cleared after 0 poll(s)` (F-177 fired). 3 matching TCP
+SYNs sent, confirmed on the wire via `tcpdump` on `.106`. **`fe_ehash_stats`
+after: `pkt_count` still `0`.** Disengaged cleanly. **Phase 2 is now fully
+negative — neither the buffer-pool encoding nor an FMan-walker sync nudge
+on the bucket-head publish was the gap. Proceeding to Phase 3.** (RX
+went deaf after disengage, per this session's established direct-`FE_ENTER`
+pattern — needs a cold boot to restore, operator action, not itself a new
+finding.)
 
-**T-M3-R Phase 3 (if Phase 1+2 both negative) — stop guessing at registers.**
+**T-M3-R Phase 3 (⬅ NEXT ACTION, Phase 1+2 both negative) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
