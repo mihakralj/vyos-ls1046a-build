@@ -2226,21 +2226,37 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-173 wmb() before ehash bucket-head publish"
 fi
 
-# F-174 (2026-08-07, T-M3-R attempt 7): F-172/F-173 both still show every
-# frame -- matching or not -- converging on the same FQID, despite a live
-# register read confirming FMBM_RFPNE/FMBM_RCCB are correctly wired to our
-# chain. qdrant surfaced an old, apparently-lost fixup (F-062e,
-# 2026-07-14): DEALLOCATE on EXIT frees the frame buffer and falls through
-# to the KeyGen scheme's own default dispatch -- not a silent drop. Patch
-# 0124 still has DEALLOCATE set on BOTH Transition (the HIT path: EXT_HASH
-# -> MUX -> Transition -> ENQ) and Exit (the MISS path), so a genuine HIT
-# would deallocate-and-fall-through at Transition before ENQ's own
-# distinguishing FQID write ever takes effect -- matching this session's
-# symptom exactly, independent of AD species/key/mask/barrier. Strips
-# DEALLOCATE from both, restoring F-062e's fix.
+# F-174: NOT WIRED IN. Built and CI-tested clean (2026-08-07) but never
+# armed on a board. A same-day 2026-07-15 post-mortem (F-069) found that
+# stripping DEALLOCATE from EXIT is independently suspected of CAUSING
+# port-deafness (BMI internal buffer leak, per the SDK oracle: EXIT's
+# deallocateBuffer=TRUE is required, not optional) -- a worse failure mode
+# than the one F-174 was trying to fix, and its underlying "DEALLOCATE
+# causes FD corruption" theory (F-062e) was itself later called a
+# misattribution by that same post-mortem. Superseded by F-175, which
+# targets the actual documented gap (missing per-flow workspace context
+# block + wrong ENQ NIA encoding) instead. Kept on disk for the record;
+# do not wire in without addressing the port-deafness risk first.
+
+# F-175 (2026-08-07, T-M3-R attempt 8): a deep re-read of this project's
+# own history surfaced a 2026-07-15 finding that the real NXP design is a
+# two-layer machine -- static singleton FEs (EXT_HASH->MUX->Transition->
+# ENQ->EXIT) plus a per-flow 256B workspace CONTEXT block, attached to each
+# ehash flow record, that hardware auto-loads into the frame's transient FE
+# workspace on a genuine HIT. This branch has only ever implemented layer
+# one: the flow record's trailing bytes carried a single "next-FE MURAM
+# offset" instead of the documented 5-field context block, and ENQ's word1
+# carried a raw FQID instead of a genuine NIA action code (the vendor-
+# correct encoding was board-tested on 2026-07-16, F-073B, and got one
+# frame through before stopping -- evidence the mechanism is real). Fixes
+# both: writes the {MUX next-FE, Transition next-AD, ENQ (rspid<<24)|fqid,
+# ppid<<16, HM pointer} context block per flow, and corrects ENQ to the
+# board-tested ws_offset=8/NIA encoding. Updates both call sites that share
+# fman_pcd_ehash_add_key() (the fe_flow debugfs path and the ask.ko-facing
+# kernel API) so the build stays consistent.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_174.py" 2>&1
-    echo "### fman_pcd.c: F-174 DEALLOCATE stripped from Transition/Exit"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_175.py" 2>&1
+    echo "### fman_pcd.c: F-175 per-flow workspace context + vendor ENQ NIA"
 fi
 
 # === end ls1046a-build patch-loop replacement ===
