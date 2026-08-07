@@ -1305,20 +1305,40 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-052b debugfs_root_put marked __unused"
 fi
 
-# F-053: Fix hash_bytes_offset in en_exthash_node descriptor ad[0] encoding.
-# The DDR flow record (en_ehash_entry) has an 8-byte link-chain header (flags +
-# next_entry pointer) before the key data at FMAN_EHASH_FLOW_KEY_OFF=8.  The
-# hardware descriptor field hash_bytes_offset (bits 17:16 of ad[0]) was being
-# written with t->hash_shift (0), telling the hardware to start key comparison
-# at byte 0 of the DDR record — comparing against the link header (all zeros
-# for the first flow) + partial key, which NEVER matches the KG-extracted bytes.
-# The correct value for an 8-byte header is 1 (the field encodes 0→0B, 1→8B).
-# The CRC64 bucket-indexer's hash_shift is a separate parameter and is unchanged.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" drivers/net/ethernet/freescale/fman/fman_pcd.c "((u32)(t->hash_shift & 0x3) << 16)" "((u32)(1) << 16)" 1 "F-053: hash_bytes_offset=1" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-053 hash_bytes_offset=1 (key at offset 8 in DDR record)"
-fi
+# F-053 RETRACTED (2026-08-07, T-M3-R "999 patch" forensic finding). The
+# original rationale (below, kept for the record) assumed en_exthash_node
+# word_0's hash_bytes_offset field tells hardware where the key starts
+# within the DDR flow record (an 8-byte link-chain header precedes it) --
+# a theory formed from a /dev/mem DDR dump, before any vendor source was
+# available to check it against. It was wrong. The vendor's pristine (not
+# ASK-modified) fm_pcd_ext.h documents this field via the API param that
+# feeds it (t_FmPcdHashTableParams.hashShift, a DIFFERENT field from the
+# genuinely-obsolete kgHashShift): "Byte offset from the beginning of the
+# KeyGen hash result to the 2-bytes to be used as hash index" -- i.e. it
+# controls HARDWARE's own live bucket-index derivation from a KeyGen hash,
+# not DDR record layout. Vendor's real cdx_pcd.xml sets hashshift="0" on
+# every one of its 16 production hashtable distributions, despite having
+# the identical 8-byte DDR header this project's does -- proving the field
+# has nothing to do with skipping it. This project's own software bucket
+# placement (fman_pcd_ehash_bucket_index(), patch 0128) has always used
+# t->hash_shift=0 (every `fe_ehash set` call this project has ever run
+# passed 0), unaffected by this fixup. Forcing hash_bytes_offset=1 in the
+# AD word means hardware's live bucket-index derivation (if it reads this
+# field the same way) computes a DIFFERENT bucket than the one software
+# inserted into -- a silent, structural, always-present mismatch
+# mechanistically consistent with the zero-HIT symptom chased across
+# F-141 through F-177. Original F-053 rationale, kept for the record:
+# "The DDR flow record (en_ehash_entry) has an 8-byte link-chain header
+# (flags + next_entry pointer) before the key data at
+# FMAN_EHASH_FLOW_KEY_OFF=8. The hardware descriptor field
+# hash_bytes_offset (bits 17:16 of ad[0]) was being written with
+# t->hash_shift (0), telling the hardware to start key comparison at byte
+# 0 of the DDR record -- comparing against the link header (all zeros for
+# the first flow) + partial key, which NEVER matches the KG-extracted
+# bytes. The correct value for an 8-byte header is 1 (the field encodes
+# 0->0B, 1->8B)." No mutation applied now -- hash_bytes_offset reverts to
+# tracking t->hash_shift dynamically, matching every vendor production
+# table's value (0) for this project's own test configuration.
 
 # F-054: Fix context_build overwriting FE Action Descriptors.
 # fman_pcd_fe_build_contexts() calls fman_pcd_fe_context_build(fe, offset, &p)
