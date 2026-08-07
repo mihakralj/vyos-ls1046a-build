@@ -2240,23 +2240,29 @@ fi
 
 # F-175 (2026-08-07, T-M3-R attempt 8): a deep re-read of this project's
 # own history surfaced a 2026-07-15 finding that the real NXP design is a
-# two-layer machine -- static singleton FEs (EXT_HASH->MUX->Transition->
-# ENQ->EXIT) plus a per-flow 256B workspace CONTEXT block, attached to each
-# ehash flow record, that hardware auto-loads into the frame's transient FE
-# workspace on a genuine HIT. This branch has only ever implemented layer
-# one: the flow record's trailing bytes carried a single "next-FE MURAM
-# offset" instead of the documented 5-field context block, and ENQ's word1
-# carried a raw FQID instead of a genuine NIA action code (the vendor-
-# correct encoding was board-tested on 2026-07-16, F-073B, and got one
-# frame through before stopping -- evidence the mechanism is real). Fixes
-# both: writes the {MUX next-FE, Transition next-AD, ENQ (rspid<<24)|fqid,
-# ppid<<16, HM pointer} context block per flow, and corrects ENQ to the
-# board-tested ws_offset=8/NIA encoding. Updates both call sites that share
-# fman_pcd_ehash_add_key() (the fe_flow debugfs path and the ask.ko-facing
-# kernel API) so the build stays consistent.
+# two-layer machine -- static singleton FEs (EXT_HASH->MUX->ENQ->EXIT) plus
+# a per-flow FE CONTEXT that hardware auto-loads into the frame's transient
+# workspace on a genuine HIT. An earlier fixup, F-057, had already tried
+# writing 4 bytes trailing the key inline in the ehash record and found it
+# corrupts the record -- F-057 was right about that specific location, but
+# for the wrong stated reason. Reading the actual SDK oracle source
+# directly (the real, non-stub FmPcdCcBuildContextByFE()/
+# ExternalHashTableAddKey(), not a stub found in a different, newer patch)
+# resolves the disagreement: the FE context is a SEPARATELY allocated 16B
+# buffer (this branch needs only MUX+ENQ, no HM/replication chain), never
+# inline in the ehash record -- the record instead carries an 8-byte DMA
+# pointer to it (matching the SDK's t_FmExtHashResult.contex_addr width),
+# confirming F-057's fix was correct for that location and this fixup's
+# byte-level field encoding (validated byte-exact against the real
+# encoder) was always correct, just aimed at the wrong destination. Also
+# corrects ENQ's own encoding to the board-tested vendor form (word1 =
+# genuine NIA, not a raw FQID -- tried on this exact silicon 2026-07-16,
+# F-073B, got one frame through before stopping). Updates both call sites
+# that share fman_pcd_ehash_add_key() (the fe_flow debugfs path and the
+# ask.ko-facing kernel API) so the build stays consistent.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_175.py" 2>&1
-    echo "### fman_pcd.c: F-175 per-flow workspace context + vendor ENQ NIA"
+    echo "### fman_pcd.c: F-175 per-flow FE context buffer + vendor ENQ NIA"
 fi
 
 # === end ls1046a-build patch-loop replacement ===
