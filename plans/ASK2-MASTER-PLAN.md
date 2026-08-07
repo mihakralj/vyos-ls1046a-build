@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.6.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.7.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -524,7 +524,83 @@ went deaf after disengage, per this session's established direct-`FE_ENTER`
 pattern — needs a cold boot to restore, operator action, not itself a new
 finding.)
 
-**T-M3-R Phase 3 (⬅ NEXT ACTION, Phase 1+2 both negative) — stop guessing at registers.**
+**T-M3-R "999 patch" forensic finding (2026-08-07) — `F-053` almost certainly
+programs the wrong value, ⬅ NEXT ACTION, supersedes Phase 3 framing below.**
+Full read of `~/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`
+(the complete SDK diff vendor's production ASK stack is built from — kernel
+5.4, genuinely different snapshot from `we-are-mono/ASK`'s 6.12 diff, per
+user instruction to forensically analyze it directly) surfaced a concrete,
+previously-undetected discrepancy:
+
+- `t_FmPcdHashTableParams.hashShift` (pristine `fm_pcd_ext.h`, NOT
+  ASK-modified) is documented: *"Byte offset from the beginning of the
+  KeyGen hash result to the 2-bytes to be used as hash index."* This is a
+  **separate field from the similarly-named, genuinely obsolete
+  `kgHashShift`** (`ASK` marks that one "will be considered as 0" — a
+  different field this project was never using anyway). `fm_ehash.c`'s
+  `ExternalHashTableSet()` assigns it directly: `node->hash_bytes_offset =
+  info->hashshift = p_Param->hashShift` — i.e. `hash_bytes_offset` (`en_exthash_node.word_0`
+  bits 17:16) is HARDWARE's own byte-offset selector into an 8-byte KeyGen
+  hash result for **live bucket-index derivation** — not a DDR-record
+  layout offset.
+- Vendor's real `cdx_pcd.xml` (FMC-parsed via `01-mono-ask-extensions.patch`'s
+  `htNode.hashShift = refnode.hashShift`) sets **`hashshift="0"` on every
+  single one of its 16 real `<hashtable>` distributions**, regardless of key
+  size (14, 38, 10, 22, 34, 15, 11, 8, 20, 12 bytes all use `hashshift="0"`).
+  Vendor's own `en_ehash_entry` DDR layout has the **identical** 8-byte
+  link-chain header before the key that this project's does — and vendor
+  still uses 0, proving the field has nothing to do with skipping that
+  header.
+- **`F-053`** (commit `9bc98ea4`, 2026-07-10 — an early fixup, predating all
+  of this session's deep vendor-source reads) hardcodes
+  `en_exthash_node.word_0`'s `hash_bytes_offset` to **`1`** unconditionally,
+  overriding whatever `t->hash_shift` the caller configured (`fe_ehash set
+  <mask> <keysize> <hash_shift>`'s 3rd argument — every test this whole
+  project has ever run used `0` there). Its original rationale ("DDR record
+  has an 8-byte header before the key, so hardware needs `hash_bytes_offset=1`
+  to skip it") is a plausible-sounding but, per the above, **factually
+  incorrect model of what this field controls** — discovered via a
+  `/dev/mem` DDR dump, before any vendor source was available to check
+  against.
+- **The mechanism this would break:** this project's own **software**
+  bucket-index computation (`fman_pcd_ehash_bucket_index()`, patch 0128) is
+  fully independent of the AD word — it computes `crc >>= ((6 -
+  hash_shift) << 3)` directly from `t->hash_shift` (0, unaffected by
+  `F-053`) to decide which DDR bucket to insert a flow record into. If
+  hardware's **live** bucket-index derivation genuinely uses the same
+  shift-of-a-64-bit-CRC formula keyed off `hash_bytes_offset` from the AD
+  word (1, forced by `F-053`), then insert-time software and live-time
+  hardware would be computing **two different buckets for the same key** —
+  a silent, structural, always-present mismatch that would produce exactly
+  the persistent zero-HIT symptom this entire investigation has chased,
+  regardless of how correct every other construction-level detail is (and
+  every other detail HAS independently checked out correct — see Phase 1/2
+  above).
+
+**Proposed test, next action:** new fixup (or `F-053` reversion) setting
+`hash_bytes_offset` back to `t->hash_shift` (i.e. `0`, matching every one
+of vendor's real production tables) instead of the hardcoded `1`. One CI
+build, one board retest, identical Phase 1/2 procedure. This is the single
+highest-confidence untested hypothesis this project has generated —
+concrete, vendor-XML-confirmed, and explains the symptom mechanistically,
+not just "another register permutation." **Held for explicit go-ahead**
+before implementing (kernel-code change) and before any CI build / board
+retest.
+
+**Also surfaced, not yet re-tested** (secondary, lower-confidence lead,
+already flagged pre-session in `arch/fman-vendor-source-extraction-2026-08-07.md`
+§5 and never closed): whether the live-packet-side KeyGen EKFC extraction
+should carry `PORT_ID` (vendor's `fm_kg.c` `BuildSchemeRegs()` unconditionally
+ORs `KG_SCH_KN_PORT_ID` into every scheme's `kgse_ekfc`, no guard) — this
+project's own EKFC test config (`0x001c0006`) omits it. The recommended
+closing test (compare KG hash for `EKFC=0x001c0006` vs `EKFC=0x801c0006` on
+the same controlled frame) was never run; the reliable, ALLOCATE-independent
+hash-capture mechanism the original 2026-07-13 UNKNOWN-1 closure used was
+never re-located this session. Lower priority than the `hash_bytes_offset`
+finding above (that one has a positive, XML-confirmed vendor value to test
+against; this one still needs a working measurement tool built first).
+
+**T-M3-R Phase 3 (if the `hash_bytes_offset` test above is ALSO negative) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
