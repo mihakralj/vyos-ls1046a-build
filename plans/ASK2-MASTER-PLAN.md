@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.14.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.15.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -794,20 +794,61 @@ comparator itself, but by bracketing precisely where between two known
 points the frame stops behaving as expected, for the first time all
 session.
 
-**Not yet done**: repeat with multiple frames / investigate why only 1 of
-3 SYN retransmits incremented `spc` (may itself be informative — could
-indicate the *later* retransmits behave differently once *something*
-downstream has already touched state, worth control-testing with fresh
-single-shot frames per arm cycle rather than a 3-in-a-row burst).
-Consider whether an equivalent persistent, hardware-native counter exists
-one stage further downstream (CC-tree/AC_CC-level, not ehash-entry-level)
-to narrow further before concluding the FE-VM microcode's own comparator
-logic is the remaining suspect.
+**Follow-up, same day — `FMBM_RSTC` combined test, single-shot frame:
+the trail narrows further and the 1-of-3 anomaly resolves as an
+artifact, not a finding.** In response to "which direction is most
+aligned to track vendor ASK SDK" — pursued the one genuinely vendor-used
+mechanism already flagged (§5.2's register comparison table: `FMBM_RSTC`
+is `0x80000000` on `.106`, `0x00000000` on `.185` — a real, known
+divergence, not an invented probe), alongside a source re-read of
+`fm_cc.c`/`fm_cc_dbg.h` for any AC_CC-dispatch-verification mechanism not
+yet found (found `display_stats_ad()`, a debug dump for the **standard
+CC match-table**'s own stats-AD type — a different PCD feature from
+`ExternalHashTableSet()`/ehash, not directly applicable here).
 
-**T-M3-R Phase 3 — still the honest fallback if the above doesn't
-narrow further, but no longer "no remaining untested concrete
-hypothesis": `kgse_spc` opened a genuinely new, reliable observation
-point this session didn't have before.**
+`FMBM_RSTC` (offset `0x200`, port `0x11` BMI block) was confirmed safe to
+enable live via `/dev/mem` (already reasoned safe in this doc's own §5.2:
+"a disabled counter cannot block RX" — confirmed true: RX stayed healthy
+immediately after enabling, on a fresh cold boot). This unlocks
+`fmbm_rfrc`/`rfbc`/`rlfc`/`rffc`/`rfdc`/`rfldec`/`rodc` — genuine BMI RX
+counters (frame-received, bad-frame, large-frame, filter, **discard**,
+DMA-error, other-discard).
+
+Rebuilt the identical chain, this time sending a **single** matching
+frame (not a 3-in-a-row burst) specifically to control for the earlier
+"only 1 of 3 registered" observation. Result, all three layers read
+together in one cycle:
+
+- `fmbm_rfrc`: `3 → 4` (the single frame, cleanly 1:1 — plus the 3 prior
+  baseline pings, confirming the counter genuinely tracks RX frames)
+- `fmbm_rfbc`/`rlfc`/`rffc`/`rfdc`/`rfldec`/`rodc`: **all stayed `0`** —
+  the frame was not flagged bad, oversized, filtered, **discarded**, a
+  DMA error, or any other BMI-level anomaly
+- `kgse_spc`: `0 → 1`, cleanly 1:1 with the frame and with `fmbm_rfrc`'s
+  delta — **the earlier "1 of 3" result is now explained as an artifact
+  of the 3-in-a-row burst (likely BMI/QMan-level backpressure or
+  retransmit handling on a rapid triple-send), not a KeyGen-level
+  anomaly.** Single-shot testing gives a clean, unambiguous 1:1 signal.
+- `fe_ehash_stats`: `pkt_count` still `0`
+
+**Consequence:** `fmbm_rfdc` (the BMI's own discard counter) staying `0`
+rules out a generic BMI-level drop as the disposition of this frame —
+whatever happens to it (most likely `EXIT`+`DEALLOCATE`, this branch's
+MISS path) happens entirely inside FE-VM microcode processing, invisible
+to this counter. Combined with `kgse_spc`, this is now a **clean,
+three-layer, single-frame-resolution trace**: BMI reception → KeyGen
+classification, both confirmed with zero anomalies anywhere visible at
+these layers → and the ehash comparator shows no activity. The remaining
+window (AC_CC hand-off after KeyGen, or the FE-VM microcode's own
+bucket/key comparison) has no further persistent, hardware-native counter
+this project has found to narrow it beyond this point.
+
+**T-M3-R Phase 3 — still the honest fallback if no further narrowing is
+found, but no longer "no remaining untested concrete hypothesis":
+`kgse_spc` + `FMBM_RSTC` together opened genuinely new, reliable
+observation points this session didn't have before, and used them to
+produce the most precise characterization yet of exactly where the
+frame's trail goes cold.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
