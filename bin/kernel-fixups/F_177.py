@@ -40,10 +40,14 @@ insert path calls no sync of any kind on real hardware -- see fm_ehash.c
 sec 12.1 finding), but cheap, additive-only, and the only concrete
 insert-path lead left before Phase 3 (new diagnostic capability /
 Fork-B viability reassessment). Uses the same fman_get_fpm_extc()/
-fman_set_fpm_extc() helpers (fman.c, added by F-167) and
-FMAN_FPM_EXTC_INV0/FMAN_FPM_EXTC_POLL_MAX macros (defined once, by
-F-167's fe_extc block, already present earlier in fman_pcd.c) that
-F-168 uses -- no new helper needed.
+fman_set_fpm_extc() helpers (fman.c, added by F-167) F-168 uses. Does
+NOT use F-167's FMAN_FPM_EXTC_INV0/FMAN_FPM_EXTC_POLL_MAX macros --
+CI build 31199595186 (2026-08-07) found those are #defined later in
+fman_pcd.c (near fe_arm's fops), after fman_pcd_fe_flow_write()'s
+position in the file, so they are not visible at this insertion point
+("undeclared" compile error). Uses self-contained local consts inside
+the SYNC block instead, exactly matching F-168's own established
+pattern for the same register.
 
 Scope: both call sites of fman_pcd_ehash_add_key() get the SYNC after a
 successful insert (err == 0) -- the fe_flow debugfs path
@@ -106,20 +110,28 @@ SYNC_SNIPPET = (
     "\t\tstruct fman *__f177_fman = fman_pcd_get_fman(pcd);\n"
     "\n"
     "\t\tif (__f177_fman) {\n"
+    "\t\t\t/* Local constants, not F-167's FMAN_FPM_EXTC_* macros --\n"
+    "\t\t\t * those are #defined later in this file (near fe_arm's\n"
+    "\t\t\t * fops), after this insertion point, so they are not yet\n"
+    "\t\t\t * visible here. Matches F-168's own precedent of a\n"
+    "\t\t\t * self-contained local const for the same register.\n"
+    "\t\t\t */\n"
+    "\t\t\tconst u32 __f177_inv0 = 0x80000000U;\n"
+    "\t\t\tconst unsigned int __f177_poll_max = 100000U;\n"
     "\t\t\tu32 __f177_extc;\n"
     "\t\t\tunsigned int __f177_i;\n"
     "\n"
-    "\t\t\tfman_set_fpm_extc(__f177_fman, FMAN_FPM_EXTC_INV0);\n"
-    "\t\t\tfor (__f177_i = 0; __f177_i < FMAN_FPM_EXTC_POLL_MAX; __f177_i++) {\n"
+    "\t\t\tfman_set_fpm_extc(__f177_fman, __f177_inv0);\n"
+    "\t\t\tfor (__f177_i = 0; __f177_i < __f177_poll_max; __f177_i++) {\n"
     "\t\t\t\t__f177_extc = fman_get_fpm_extc(__f177_fman);\n"
-    "\t\t\t\tif (!(__f177_extc & FMAN_FPM_EXTC_INV0))\n"
+    "\t\t\t\tif (!(__f177_extc & __f177_inv0))\n"
     "\t\t\t\t\tbreak;\n"
     "\t\t\t\tudelay(1);\n"
     "\t\t\t}\n"
-    "\t\t\tif (__f177_extc & FMAN_FPM_EXTC_INV0)\n"
+    "\t\t\tif (__f177_extc & __f177_inv0)\n"
     "\t\t\t\tdev_warn(fman_get_dev(pcd->fman),\n"
     "\t\t\t\t\t \"fe_flow: F-177 FMFP_EXTC SYNC timed out after %u polls (fmfp_extc=0x%08x)\\n\",\n"
-    "\t\t\t\t\t FMAN_FPM_EXTC_POLL_MAX, __f177_extc);\n"
+    "\t\t\t\t\t __f177_poll_max, __f177_extc);\n"
     "\t\t\telse\n"
     "\t\t\t\tdev_info(fman_get_dev(pcd->fman),\n"
     "\t\t\t\t\t \"fe_flow: F-177 FMFP_EXTC SYNC cleared after %u poll(s)\\n\",\n"
