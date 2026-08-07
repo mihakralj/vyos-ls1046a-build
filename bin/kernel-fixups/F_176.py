@@ -12,13 +12,30 @@ counters starting at offset 256, gated by `SET_STATS_ENABLE`(bit12)/
 entries sized 320B (`MAX_EN_EHASH_EXT_ENTRY_SIZE`) instead of 256B
 (`MAX_EN_EHASH_ENTRY_SIZE`) to hold them.
 
+Phase 1 correction (2026-08-07, same day as the first version): the
+original version of this fixup set flags = 0x3000 (STATS_EN|TIMESTAMP_EN).
+A full read of the real vendor source (arch/fman-microcode-210-programming-
+reference.md §12.1) found vendor forces TIMESTAMP_EN on every key
+unconditionally too -- but backed by a live, periodically-refreshed 4-slot
+MURAM pool (`extHashTsInfo`, FM_PCD_Init()) that a userspace timer
+(cdx/cdx_timer.c) keeps alive, entirely outside sdk_fman. This branch
+implements neither the pool nor the timer. Setting TIMESTAMP_EN without
+that backing infrastructure may have tainted the first HIT test run with
+this fixup (plans/ASK2-MASTER-PLAN.md T-M3-R attempt 8, 2026-08-07): a
+clean pkt_count=0 result is not trustworthy if the flag itself corrupts the
+record/comparator rather than merely failing to update stats. This version
+sets flags = 0x1000 (STATS_EN only) instead -- packet_count/packet_bytes
+are inline in the entry at fixed offsets and, per the same vendor read, do
+not depend on any pool the way timestamp_counter does.
+
 This fixup:
   1. Bumps FMAN_EHASH_FLOW_REC_SIZE 256 -> 320 so every allocated flow
      record has room for the stats/timestamp region (unconditional —
      this is a diagnostic build; there is no reason to keep two record
      sizes for a debugfs-driven single/few-flow test harness).
-  2. Sets flags = 0x3000 (STATS_EN|TIMESTAMP_EN bits) instead of 0 on
-     every inserted record, unconditionally, for the same reason.
+  2. Sets flags = 0x1000 (STATS_EN bit only) instead of 0 on every inserted
+     record, unconditionally, for the same reason. TIMESTAMP_EN (bit 13)
+     is deliberately NOT set — see the Phase 1 correction above.
   3. Adds a new debugfs node "fe_ehash_stats" (0444) dumping, per inserted
      flow: bucket index, key size, the record's DMA address, the bucket
      head pointer AS IT STANDS NOW (re-read at dump time, not cached —
@@ -68,26 +85,41 @@ else:
     changed += 1
     print("### F-176: FMAN_EHASH_FLOW_REC_SIZE bumped 256 -> 320")
 
-# ── 2. flags = 0 -> flags = 0x3000 (STATS_EN|TIMESTAMP_EN) ──
-if "F-176: STATS_EN" in src:
-    print("### F-176: flags already set to STATS_EN|TIMESTAMP_EN")
+# ── 2. flags = 0 -> flags = 0x1000 (STATS_EN only, NOT TIMESTAMP_EN) ──
+# Phase 1 correction: TIMESTAMP_EN (bit 13) requires a backing MURAM pool
+# (vendor's extHashTsInfo) this branch doesn't implement -- see docstring.
+if "F-176: STATS_EN only" in src:
+    print("### F-176: flags already set to STATS_EN only")
+elif "0x3000" in src and "STATS_EN|TIMESTAMP_EN (bits 12/13)" in src:
+    # An earlier build of this fixup already ran and set 0x3000 -- correct
+    # it in place rather than skipping (idempotent re-run on a tree that
+    # already has the old, tainted value).
+    src = sub_one(
+        r'(\*\(__be16 \*\)\(r \+ 0\) = cpu_to_be16\()0x3000(\);\t/\* F-176: STATS_EN\|TIMESTAMP_EN \(bits 12/13\) \*/)',
+        r'\g<1>0x1000);\t/* F-176: STATS_EN only (bit 12) -- TIMESTAMP_EN dropped, Phase 1 correction */',
+        src, "record flags 0x3000 -> 0x1000 (correcting prior taint)",
+    )
+    changed += 1
+    print("### F-176: record flags corrected 0x3000 -> 0x1000 (STATS_EN only)")
 else:
     src = sub_one(
         r'(\*\(__be16 \*\)\(r \+ 0\) = cpu_to_be16\()0(\);[^\n]*)',
-        r'\g<1>0x3000\2\t/* F-176: STATS_EN|TIMESTAMP_EN (bits 12/13) */',
-        src, "record flags 0 -> 0x3000",
+        r'\g<1>0x1000\2\t/* F-176: STATS_EN only (bit 12) */',
+        src, "record flags 0 -> 0x1000",
     )
     changed += 1
-    print("### F-176: record flags set to 0x3000 (STATS_EN|TIMESTAMP_EN)")
+    print("### F-176: record flags set to 0x1000 (STATS_EN only)")
 
 # ── 3. New fe_ehash_stats debugfs node ──
 STATS_SHOW_BLOCK = '''
 /*
  * F-176: dispatch/FQID-independent HIT discriminator. Dumps, per inserted
- * ehash flow, the hardware-writeback stats/timestamp fields (valid once
- * F-176's flags=0x3000 has been armed and a matching frame has been sent)
- * plus the bucket head pointer re-read live (not cached) so a stale/
- * overwritten head is visible without a separate probe.
+ * ehash flow, the hardware-writeback stats fields (packet_count/
+ * packet_bytes valid once F-176's flags=0x1000/STATS_EN has been armed and
+ * a matching frame has been sent -- timestamp intentionally not populated,
+ * see the Phase 1 correction in this file's module docstring) plus the
+ * bucket head pointer re-read live (not cached) so a stale/overwritten
+ * head is visible without a separate probe.
  */
 static int fman_pcd_fe_ehash_stats_show(struct seq_file *s, void *unused)
 {
