@@ -2350,6 +2350,30 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo "### fman_pcd_kg.c: F-178 NIA_KG_DIRECT wired into the FE-VM arm path"
 fi
 
+# F-179 (2026-08-07, follow-up while resolving <combine>/PORT_ID from
+# vendor's real FMC compiler source). fm_pcd_ext.h's t_FmPcdExtractEntry has
+# no dedicated union member for e_FM_PCD_KG_EXTRACT_PORT_PRIVATE_INFO, and
+# vendor's fm_kg.c BuildSchemeRegs() assigns kgse_dv0/dv1 straight from the
+# scheme's privateDflt0/1 fields -- meaning KG_SCH_KN_PORT_ID (EKFC bit 31)
+# draws its extracted value from these same "scheme default register 0/1"
+# fields. This project's own fman_keygen.c (mainline-derived, unmodified for
+# this logic) populates kgse_dv0/dv1 with DEFAULT_HASH_KEY_IPv4_ADDR/
+# DEFAULT_HASH_KEY_L4_PORT (0x0A0A0A0A/0x0B0B0B0B) inside the
+# `if (scheme->use_hashing)` branch -- a completely unrelated mainline
+# RSS-fallback mechanism. Live-read on .185 scheme 4 confirmed an exact
+# byte-for-byte match. This project's own EKFC override never reprograms
+# these registers, so every PORT_ID board measurement so far (the
+# 2026-07-13 brute force and the 2026-08-07 16-candidate sweep) tested
+# against this uncontrolled value, not a value either test accounted for --
+# neither result can be trusted to rule the mechanism out. Fix: zero
+# kgse_dv0/kgse_dv1/kgse_ekdv whenever this project's own EKFC override
+# (scheme->ekfc) is in control, so any PORT_ID extraction reads a known
+# 0x00 instead of a leftover RSS constant.
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_179.py" 2>&1
+    echo "### fman_keygen.c: F-179 kgse_dv0/dv1/ekdv zeroed under EKFC override"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
