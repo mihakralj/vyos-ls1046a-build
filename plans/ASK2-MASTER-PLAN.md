@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.13.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.14.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -752,8 +752,62 @@ structures, buffer-pool/sync mechanisms, and key content have all now
 been independently verified correct or fixed, and none of it changes the
 outcome.
 
-**T-M3-R Phase 3 — now the honest next step, no remaining untested
-concrete hypothesis.**
+**`KGSE_SPC` diagnostic, 2026-08-07 — genuinely new capability, genuinely
+new result: the frame reaches KeyGen, scheme 4 classifies it, and the
+trail goes cold immediately after.** In response to "does vendor ASK
+source include additional diagnostic capabilities" — `kgse_spc` (KeyGen
+per-scheme packet counter, RM-documented, already known to this project
+via `bin/kg-scheme-read.py`, built earlier for reading `.106`'s live
+scheme table) is a genuine, **persistent, hardware-native** counter,
+unlike `fe_probe`/`fe_hash_probe`'s transient async-populated workspace —
+it increments "for every frame the scheme classifies" and can be read at
+any time without racing a window.
+
+Test (same genuinely-cold-booted board, same 13-byte key/`EKFC=0x001c0006`
+as the `F-178` test — isolating one new observation, not a new
+construction variable): built the identical chain, confirmed `kgse_spc`
+reset to `0` by the `fe_kg_ekfc` write (a full scheme-register rewrite
+clears it — a clean baseline for free), armed (`kgse_mode=0x80000006`
+confirming AC_CC dispatch active, `rfpne=0x00480304` confirming
+`NIA_KG_DIRECT` fired), confirmed `spc=0` immediately post-arm (before
+traffic). Sent 3 matching TCP SYNs, confirmed transmitted via `tcpdump`
+on `.106`. **`kgse_spc` read back as `1`** (only one of the three SYN
+retransmits registered — noted, not yet explained, secondary to the main
+result). **`fe_ehash_stats`: `pkt_count` still `0`, same test cycle.**
+
+**This is the most load-bearing single result of the whole
+investigation.** It proves, for the first time with a reliable
+hardware-native counter rather than inference: the frame genuinely
+reaches KeyGen, genuinely gets classified by scheme 4 specifically (the
+correct scheme, per `NIA_KG_DIRECT`'s now-confirmed dispatch), using the
+correctly-configured `EKFC`. Parser→KeyGen dispatch, scheme selection,
+and KeyGen-level classification are no longer hypotheses — they are
+directly observed working. **The trail goes cold somewhere between
+KeyGen's own classification completing and the ehash comparator's
+stats-writeback becoming visible** — either the AC_CC hand-off after
+KeyGen, the bucket/key comparison inside the FE-VM microcode itself, or
+(less likely, given the offset was independently verified against
+vendor's own header) the stats write-back mechanism specifically. This
+directly answers Phase 3's original ask ("a synchronous way to observe
+the FE-VM's actual comparator behavior") — not by observing the
+comparator itself, but by bracketing precisely where between two known
+points the frame stops behaving as expected, for the first time all
+session.
+
+**Not yet done**: repeat with multiple frames / investigate why only 1 of
+3 SYN retransmits incremented `spc` (may itself be informative — could
+indicate the *later* retransmits behave differently once *something*
+downstream has already touched state, worth control-testing with fresh
+single-shot frames per arm cycle rather than a 3-in-a-row burst).
+Consider whether an equivalent persistent, hardware-native counter exists
+one stage further downstream (CC-tree/AC_CC-level, not ehash-entry-level)
+to narrow further before concluding the FE-VM microcode's own comparator
+logic is the remaining suspect.
+
+**T-M3-R Phase 3 — still the honest fallback if the above doesn't
+narrow further, but no longer "no remaining untested concrete
+hypothesis": `kgse_spc` opened a genuinely new, reliable observation
+point this session didn't have before.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
