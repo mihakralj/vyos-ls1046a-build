@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.3.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.4.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -30,7 +30,7 @@ confirmed silicon HIT. The only silicon-proven hardware offload today is the
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. 13-byte key (no PORT_ID) confirmed correct. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity — but that result is suspect, not yet trustworthy: the discriminator itself (F-176) forces a flag bit vendor's own mechanism requires backing infrastructure for, which this branch doesn't have.** See §4.1 for the phased retest plan. |
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. 13-byte key (no PORT_ID) confirmed correct. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity. Phase 1 retest (same day, `F-176` un-tainted to `STATS_EN`-only) reproduced the identical zero-activity result — the negative is confirmed genuine, not a discriminator artifact.** See §4.1 Phase 2 for the two remaining concrete, unverified leads. |
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
@@ -467,16 +467,19 @@ traffic volume (one single frame was enough the second time). Budget one
 cold boot per test cycle on this topology as a standing operational cost,
 not an occasional fallback.
 
-**T-M3-R Phase 1 (⬅ NEXT ACTION) — un-taint `F-176`, retest.** Change
-`F-176`'s flags from `0x3000` to `0x1000` (`STATS_EN` only — `packet_count`/
-`packet_bytes` are inline at fixed offsets and don't need `extHashTsInfo`
-the way `timestamp_counter` does). One CI build, one board session, same
-attempt-8 procedure. **`pkt_count` still 0 → the negative is real, proceed
-to Phase 2. `pkt_count` increments → `TIMESTAMP_EN` without its pool was the
-bug all along; fix is drop the bit or implement the pool properly, and this
-closes T-M3-R.**
+**T-M3-R Phase 1 — COMPLETE, 2026-08-07: un-tainted `F-176`, retested,
+negative confirmed real.** `F-176` changed from flags `0x3000` to `0x1000`
+(`STATS_EN` only — `TIMESTAMP_EN` dropped). CI build (run `31195846141`)
+deployed to `.185`, cold-booted, full attempt-8 chain rebuilt (`fe_pool` →
+`fe_singletons` → `fe_ehash set 7fff 13 0` → `fe_hashfe` → `fe_enq` →
+`fe_enter`, `fe_kg_ekfc set 4 001c0006`, `fe_flow add` at bucket `0x6008`),
+armed (`fe_arm engage 11 54900 300`), 3× matching TCP SYN sent and confirmed
+on the wire via `tcpdump` on `.106` itself. **`fe_ehash_stats` after: `pkt_count`
+still `0`.** Disengaged cleanly. **This closes the Phase 1 question: the
+clean-negative HIT result is genuine, not an artifact of `TIMESTAMP_EN`
+lacking its backing pool. Proceeding to Phase 2.**
 
-**T-M3-R Phase 2 (if Phase 1 negative) — the two remaining concrete,
+**T-M3-R Phase 2 (⬅ NEXT ACTION) — the two remaining concrete,
 unverified leads, one CI build:**
 1. Byte-for-byte re-verify `en_exthash_node.word_1`'s `int_buf_pool_addr`/
    `global_mem_offset` against `ExternalHashTableSet()`'s exact derivation
