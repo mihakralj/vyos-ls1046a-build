@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.4.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.5.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -479,17 +479,36 @@ still `0`.** Disengaged cleanly. **This closes the Phase 1 question: the
 clean-negative HIT result is genuine, not an artifact of `TIMESTAMP_EN`
 lacking its backing pool. Proceeding to Phase 2.**
 
-**T-M3-R Phase 2 (⬅ NEXT ACTION) — the two remaining concrete,
-unverified leads, one CI build:**
-1. Byte-for-byte re-verify `en_exthash_node.word_1`'s `int_buf_pool_addr`/
-   `global_mem_offset` against `ExternalHashTableSet()`'s exact derivation
-   (believed correct — `fman_pcd_ehash_int_buf_get()` shows non-zero live —
-   but never re-checked bit-for-bit since flagged). Pure code review, zero
-   board risk.
-2. Wire `FMFP_EXTC` sync into `fman_pcd_ehash_add_key()` itself (the
-   flow-*insert* path) — `F-168` only covers the arm path. Weaker hypothesis
-   post-`hc.c` reading (vendor's own insert path needs no sync at all), but
-   cheap and still untested there specifically.
+**T-M3-R Phase 2, item 1 — COMPLETE, 2026-08-07: byte-for-byte re-verify
+`en_exthash_node.word_1`, CLOSED, no fix.** Read vendor's real
+`ExternalHashTableSet()` (`fm_ehash.c`) and `FM_PCD_Init()`'s MURAM-pool
+allocation (`hc.c`) directly. Confirmed bit-exact against this project's
+`fman_pcd_ehash_encode_node()` (patch 0125): `int_buf_pool_addr` = vendor's
+`p_FmPcd->InternalBufMgmtMuramArea`, which `FM_PCD_Init()` right-shifts by 8
+(`>>= 8`) at allocation time before `ExternalHashTableSet()` assigns it
+verbatim — identical to this project's `(int_buf_off >> 8) & 0xffff`.
+`global_mem_offset` = vendor's `EN_INTERNAL_BUFF_POOL_SIZE >> 8` (a
+compile-time constant, not a runtime address) — identical to this project's
+`(FMAN_EHASH_INT_BUF_POOL_SIZE >> 8) & 0xfff` with the same `256*128`
+pool-size constant. Bit-position layout (`global_mem_offset:12 |
+hash_mask_bits:4 | int_buf_pool_addr:16`, LSB-first) confirmed against the
+real `fm_ehash.h` `EXCLUDE_FMAN_IPR_OFFLOAD` struct variant (this board's
+config) — exact match. **Not the gap.**
+
+**T-M3-R Phase 2, item 2 — fixup written, 2026-08-07, awaiting CI
+build + board retest.** `F-177` (`bin/kernel-fixups/F_177.py`) wires the
+same `FMFP_EXTC[INV0]` SYNC assertion `F-168` uses on `FMBM_RCCB` (RM
+§5.12.14.1) into `fman_pcd_ehash_add_key()`'s own bucket-head publish
+(right after `F-173`'s `wmb()`-then-`*flow->bucket_h = swab64(...)`), on
+both call sites (`fe_flow` debugfs write, `fman_pcd_fe_flow_add()`
+ask.ko API). Weaker hypothesis than `F-168`'s (vendor's own
+`ExternalHashTableAddKey()` fast-insert path calls no sync of any kind —
+§12.1 finding), but cheap, additive-only, and the last concrete
+insert-path lead before Phase 3. Both anchors verified byte-exact against
+`F-175`'s actual post-transform text (dry-run tested in isolation, no
+board/CI involved) before being wired into `ci-setup-kernel.sh`'s embedded
+fixup sequence, right after `F-176`. **Needs a CI build + one board retest
+(same Phase 1 procedure) — held for explicit go-ahead.**
 
 **T-M3-R Phase 3 (if Phase 1+2 both negative) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
