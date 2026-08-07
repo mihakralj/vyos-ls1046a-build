@@ -481,6 +481,21 @@ new_api = '''int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 }'''
 apply_block("fe_flow_add (ask.ko API) enq lookup", old_api, new_api)
 
+# --- 10. __fman_pcd_fe_build_vm_chain() (patch 0158, "compose" helper --
+#         not exercised by this session's debugfs-driven testing, but
+#         still part of the same compilation unit and must build). Its
+#         hardcoded `tx_fqid` local becomes unused once the call no
+#         longer takes it; remove both.
+old_compose_const = (
+    "\tconst u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */\n"
+)
+new_compose_const = ""
+apply_block("compose helper unused tx_fqid removed", old_compose_const, new_compose_const)
+
+old_compose_call = "\terr = fman_pcd_fe_enq_build(pcd, tx_fqid, 0);\n"
+new_compose_call = "\terr = fman_pcd_fe_enq_build(pcd);\t/* F-175: no per-call fqid */\n"
+apply_block("compose helper enq_build call", old_compose_call, new_compose_call)
+
 if changes:
     with open(path, "w") as f:
         f.write(src)
