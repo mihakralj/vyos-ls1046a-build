@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.8.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.9.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -597,23 +597,42 @@ mismatch theory, however compelling mechanistically, doesn't explain the
 whole picture by itself. Ledger updated
 (`arch/fman-config-value-ledger.md`).
 
-**Remaining lead — the `PORT_ID`/EKFC question, now the top open item**
-(already flagged pre-session in
-`arch/fman-vendor-source-extraction-2026-08-07.md` §5, never closed):
-whether the live-packet-side KeyGen EKFC extraction should carry
-`PORT_ID` (vendor's `fm_kg.c` `BuildSchemeRegs()` unconditionally ORs
-`KG_SCH_KN_PORT_ID` into every scheme's `kgse_ekfc`, no guard) — this
-project's own EKFC test config (`0x001c0006`) omits it. The recommended
-closing test (compare KG hash for `EKFC=0x001c0006` vs `EKFC=0x801c0006`
-on the same controlled frame) was never run; the reliable,
-ALLOCATE-independent hash-capture mechanism the original 2026-07-13
-UNKNOWN-1 closure used was never re-located this session. This now needs
-a working measurement tool built before it can be tested at all —
-higher-effort than the `hash_bytes_offset` test was, but the only
-concrete, not-yet-exhausted lead remaining before Phase 3's "stop
-guessing at registers" applies for real.
+**`PORT_ID`/EKFC question — RESOLVED FROM THE INSERT SIDE, 2026-08-07,
+directly testable, ⬅ NEXT ACTION.** Deep-read `cdx_ehash.c`'s
+`insert_entry_in_classif_table()` → `fill_key_info()` and `cdx_common.h`'s
+`union dpa_key` in full (primary source, not inference): vendor's real
+DDR-stored comparison key for TCP/IPv4 is unambiguously **14 bytes**,
+`uint8_t portid` at byte 0 followed by the 13-byte 5-tuple —
+`key_size = sizeof(struct ipv4_tcpudp_key) + 1`, matching `cdx_pcd.xml`'s
+`keysize="14"` exactly. This also *explains* (not just co-occurs with)
+`fm_kg.c`'s unconditional `KG_SCH_KN_PORT_ID` force — KeyGen needs to
+extract the byte the DDR key expects to find. `portid` itself is a small
+(0–10 observed), application-assigned **logical** index from
+`cdx_cfg.xml`, not this project's FMan hardware port ID — no direct value
+correspondence, so the right test value isn't obvious and needs empirical
+testing (start with `0`, the universal default across every real vendor
+config).
 
-**T-M3-R Phase 3 (if the `PORT_ID`/EKFC lead is ALSO negative, or can't be tested) — stop guessing at registers.**
+**This no longer needs new tooling.** The earlier plan (capture and
+compare KG hashes for `EKFC=0x001c0006` vs `0x801c0006`) needed the
+missing 2026-07-13 hash-capture mechanism. A **direct HIT test** doesn't:
+build the ehash table with a 14-byte `portid`-prefixed key,
+`EKFC=0x801c0006`, run the exact same `fe_ehash`/`fe_flow`/`fe_arm`/
+`fe_ehash_stats` procedure already used and validated for Phase 1, Phase
+2, and `F-053` — if `pkt_count` increments, this closes T-M3-R.
+
+**Explicitly NOT reconciled, flagged not overridden**: this directly
+contradicts the 2026-07-13 "13-byte no-`PORT_ID`, CRC-64 bit-exact match
+on two independent flows" measurement that this project's current test
+config is built on. That measurement was a strong signal (a 64-bit CRC
+match twice is not plausible by chance) — see
+`arch/fman-vendor-source-extraction-2026-08-07.md` §5 for the open
+question. A successful 14-byte HIT test would falsify that old
+measurement's conclusion outright (regardless of why it was wrong); a
+negative result leaves both explanations equally unresolved and Phase 3
+becomes the honest next step.
+
+**T-M3-R Phase 3 (if the 14-byte `PORT_ID` test above is ALSO negative) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
