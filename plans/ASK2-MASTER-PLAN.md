@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.15.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.17.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -858,6 +858,101 @@ materializes, this is the point to treat Fork-B as non-viable on this
 silicon/microcode and reallocate effort to Fork-A (CC-tree) — noting Fork-A
 carries its own unresolved, unrelated trust problem (M5's throughput number,
 CR-007, §1.1) that would need its own honest re-verification first.
+
+**`<combine>`/`kgse_dv0`/`kgse_dv1` resolution, same day (2026-08-07) —
+user-directed "work in small steps, HOW does vendor NXP ASK offload packets
+to hw, analyze where do we deviate," followed by "keep digging."**
+
+Step 1 (approved plan item 1): resolved `<combine portid="true" offset="16"
+mask="0xF"/>`'s actual mechanism from vendor's real, pristine, public FMC
+source (`github.com/nxp-qoriq/fmc` @ `5b9f4b16a864e9dfa58cdcc860be278a7f66ac18`,
+the exact commit this project's own `meta-ask/recipes-ask/fmc/fmc_git.bb`
+pins). Traced `FMCPCDReader.cpp` → `FMCPCDModel.cpp` → `FMCCModelOutput.cpp`:
+`<combine>` builds the KeyGen **"extractedOrs"** array (AN4760's "OR Data
+Vector"), which affects the computed **FQID**, not the raw ehash comparison
+key. **This corrects an earlier doc conclusion (§10.5a, pre-2026-08-07) that
+wrongly called `<combine>` a "GEC" (`kgse_gec[]`) key-extraction mechanism.**
+Full detail and the corrected recommendation: `arch/fman-microcode-210-programming-reference.md`
+§10.5a.
+
+Natural follow-up while finishing that trace: what does `KG_SCH_KN_PORT_ID`
+(EKFC bit 31, the actual key-extraction path, a genuinely separate mechanism
+from `<combine>`) draw its value from? `fm_pcd_ext.h`'s `t_FmPcdExtractEntry`
+has no dedicated union member for `PORT_PRIVATE_INFO`; `fm_kg.c`'s
+`BuildSchemeRegs()` assigns `kgse_dv0 = privateDflt0` / `kgse_dv1 =
+privateDflt1` — the same "scheme default" registers `t_FmPcdKgKeyExtractAndHashParams`
+exposes. Live-read on `.185` scheme 4: `kgse_dv0 = 0x0a0a0a0a`,
+`kgse_dv1 = 0x0b0b0b0b` — an **exact byte-for-byte match** to this project's
+own mainline-derived `work/linux-6.18.34/.../fman_keygen.c`'s
+`DEFAULT_HASH_KEY_IPv4_ADDR`/`DEFAULT_HASH_KEY_L4_PORT` (`0x0A0A0A0A`/
+`0x0B0B0B0B`) — RSS-hashing-fallback constants, set unconditionally inside
+that file's `if (scheme->use_hashing) { ... }` branch for a purpose entirely
+unrelated to port ID. This project's `//bmr`-equivalent hack never
+reprograms these registers, so `KG_SCH_KN_PORT_ID` (when forced on) very
+likely extracts whatever coincidental value mainline's unrelated RSS logic
+left there — never an intentional portid value.
+
+**Implication: both this branch's existing negative `KG_SCH_KN_PORT_ID`
+measurements are confounded, not conclusive.** The 184,320-candidate
+brute-force (§10.5a, pre-2026-08-07) found silicon extracts `0x00` — but no
+byte within `0x0a0a0a0a`/`0x0b0b0b0b` is `0x00`, so that measurement's board
+session must have had these registers in a different state than today's
+read (the two facts don't reconcile as one constant). Today's 16-candidate
+`portid=0x00`–`0x0f` sweep (§4.1 above, `F-cross-checked... comprehensively
+NEGATIVE` row) tested single-byte DDR-key values against a comparator keyed
+off whatever `kgse_dv0`/`dv1` happened to hold during that run — not a value
+the test controlled or accounted for. Neither result rules out
+`KG_SCH_KN_PORT_ID` on its own merits.
+
+**Not yet fully closed**: exactly why `kgse_dv0`/`dv1` were non-zero
+(matching the `if (scheme->use_hashing)` branch) while `kgse_ekdv` read back
+zero (matching the `else` branch that would also zero `dv0`/`dv1`) is an
+unreconciled timing/branch detail — worth understanding before implementing
+a fix, but doesn't change the core finding (the live values are an
+unambiguous, exact match to unrelated mainline constants, definitely not an
+intentional portid value).
+
+**Fix implemented and CI-validated, same day (`F-179`,
+`bin/kernel-fixups/F_179.py`)**: zeroes `kgse_dv0`/`kgse_dv1`/`kgse_ekdv`
+inside `fman_keygen.c`'s existing `if (scheme->ekfc) { ... }` override
+block, right where this project's own EKFC value already overwrites
+mainline's `kgse_ekfc`. Closes the confound outright — any `KG_SCH_KN_PORT_ID`
+extraction now reads a known `0x00` instead of a leftover, uncontrolled RSS
+constant, making a `portid=0x00` retest genuinely controlled for the first
+time. Dry-run tested for correctness and idempotency against the exact
+reconstructed source text; `python3 bin/test-fixups.sh` passes (REPLACEMENT
+bash syntax valid, all 86 fixups py_compile clean, manifest in sync).
+**Not yet board-tested** — needs a CI build + arm + retest cycle before its
+effect on the `portid` hypothesis can be assessed.
+
+**Plan item 2 RESOLVED, same day, no board action needed** — independently
+verified whether the T-M3-R test methodology's HIT-visibility signal
+(`fe_ehash_stats`'s `pkt_count`, `F-176`) actually depends on the ENQ FE's
+target FQID (`0x2b9`) being polled by anything. It does not: traced
+`fman_pcd_fe_ehash_stats_show()`'s `pkt_count = be64_to_cpu(*(const __be64
+*)(r + 256))`, where `r = flow->record` is a plain CPU pointer into a
+`dma_alloc_coherent()`-backed DDR buffer (confirmed at the allocation site,
+`fman_pcd.c`) — a raw, synchronous memory read of hardware-writeback state
+that never touches QMan, FQID delivery, or kernel RX polling. **Every
+`pkt_count=0` result this project has ever observed, including today's, can
+only mean the ehash comparator itself never matched — it cannot be
+explained by a frame reaching the comparator, matching, and then being lost
+after ENQ to an un-polled FQID.** (Historical note, surfaced but not
+overturned by this check: `0x2b9` does have a real, separately-documented
+history of silently blackholing frames *when used as a kernel-RX
+miss-target* — `specs/fman-keygen-flow-key-spec.md` line ~492,
+`arch/fman-pcd-api-reference.md` T8 — but that is a different signal
+(wire/kernel visibility) from `pkt_count` (hardware DDR writeback), and does
+not affect this investigation's fault-localization.) Full detail: qdrant tag
+`step2-fqid-visibility-resolved-fe-ehash-stats-independent`.
+
+**Both items of the user's approved "do 1 and then 2" plan are now fully
+closed.** The fault remains cleanly localized to: after KeyGen
+classification (`kgse_spc` confirmed incrementing), before the ehash
+comparator's hardware writeback (`pkt_count` stays `0`) — i.e. inside the
+FE-VM microcode's own bucket-walk/key-compare logic, or a construction-level
+input to that stage not yet found. `F-179`'s `kgse_dv0`/`dv1` fix is the
+most concrete untested candidate for the latter.
 
 ### 4.2 NXP-106 deep-dive — vendor oracle track (parallel; unblocks CC-tree)
 
