@@ -1,61 +1,74 @@
-"""F-175: per-flow workspace context block, vendor-correct ENQ (T-M3-R attempt 8).
+"""F-175: per-flow FE context buffer, vendor-correct ENQ (T-M3-R attempt 8).
 
 CONTEXT (2026-08-07): after F-172 (real key+mask), F-173 (write barrier), and
 a live register read confirming FMBM_RFPNE/FMBM_RCCB are correctly wired,
-every frame -- matching or not -- still converged on the same FQID. A deep
-re-read of this project's own qdrant history surfaced a 2026-07-15 finding
-("KERNEL PANIC ROOT-CAUSE ANALYSIS", citing ~/ask-ref/ask-kernel-5.4.patch
-line numbers) that this project's own arch doc reconstruction is WRONG in
-load-bearing places: the real NXP design is a TWO-LAYER machine --
+every frame -- matching or not -- still converged on the same FQID. Also
+board-confirmed and fixed separately: F-073D's hidden "F-070b: rewire w6 to
+ENQ" was clobbering the MISS disposition to point at the same ENQ object the
+HIT path used (see F-073D.py).
 
-  layer 1: static singleton FEs (EXT_HASH -> MUX -> Transition -> ENQ -> EXIT)
-  layer 2: a per-flow 256B context, attached to each ehash flow record,
-           auto-loaded by hardware into the frame's transient FE workspace
-           on a genuine HIT. MUX/Transition/ENQ read THEIR OWN routing
-           decision from this workspace, not from their own static
-           descriptor words.
+A deep re-read of this project's own qdrant history surfaced a 2026-07-15
+finding ("KERNEL PANIC ROOT-CAUSE ANALYSIS") that this project's own arch
+doc reconstruction is WRONG in load-bearing places: the real NXP design is a
+TWO-LAYER machine -- static singleton FEs (EXT_HASH -> MUX -> ENQ -> EXIT)
+plus a per-flow FE CONTEXT, auto-loaded by hardware into the frame's
+transient FE workspace on a genuine HIT, from which MUX/ENQ read their
+actual routing decision (not from their own static descriptor words).
 
-Two concrete divergences from that design, both still live in this branch's
-code as of this fixup:
+An EARLIER fixup (F-057) had already tried something in this direction --
+writing 4 bytes trailing the key inline in the ehash flow record -- and
+found it corrupts the record ("SDK's en_ehash_entry has NO per-record
+next-FE... causing hardware to read garbage and crash"). F-057 was RIGHT
+about that specific design, but not for the reason it gave. This fixup
+resolves the disagreement by reading the actual SDK oracle source directly
+(~/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch,
+the real, non-stub FmPcdCcBuildContextByFE() at line 8954, and
+ExternalHashTableAddKey() at line 8442):
 
-1. ENQ's word1 has always carried a raw FQID (fman_pcd_fe_enq_build():
-   `p.nia = fqid`) instead of a genuine NIA action code. The vendor-correct
-   encoding -- w0=TYPE|FQID-enable|ws_offset(8), w1=NIA_ENG_BMI|
-   NIA_BMI_AC_ENQ_FRAME (0x00500002), w3=exit_off -- was actually tried on
-   this exact silicon on 2026-07-16 (F-073B) and got ONE frame through
-   (neighbor table showed STALE, not FAILED) before delivery stopped --
-   evidence the mechanism is real, not that it's a dead end.
+  - The FE context is a SEPARATELY allocated 256B buffer (from its own pool,
+    "GetFEContext"), never inline trailing bytes in the ehash flow/bucket
+    record itself -- confirming F-057's fix was correct for that location.
+  - The per-key "result" associated with a match (t_FmExtHashResult: 16B,
+    {contex_addr, monitoring_addr}) is a POINTER to that separate context
+    buffer, not the context data itself.
+  - FmPcdCcBuildContextByFE()'s real (non-stub) body, byte-exact:
+      case ENQ:  word[off+0] = (rspid<<24)|fqid;  word[off+4] = ppid<<16;
+      case MUX:  word[off+0] = MURAM offset of next FE;
+    -- confirming the byte-level encoding this project's own F-175 attempt
+    already used was correct; only the *destination* (inline vs a separate
+    buffer) was wrong.
+  - For a plain ENQ with no header-manipulation/replication (this branch's
+    only use case), ExternalHashTableAddKey()'s real flow builds the ENQ FE
+    once, writes the FQID into ITS OWN context at FE_ENQUEUE_CONTEXT_OFFSET
+    (8), then writes the MUX context (offset 0) pointing DIRECTLY at that
+    ENQ FE -- Transition is skipped entirely (it exists only for frame-
+    replication/HM chaining). So the minimum needed per flow is 16 bytes:
+    {MUX->ENQ offset, (rspid<<24)|fqid, ppid<<16}, not the full 256B/5-field
+    block this fixup originally wrote.
 
-2. The flow record's trailing bytes (after the key) have always carried a
-   single 4-byte "next-FE MURAM offset" (fman_pcd_ehash_add_key()). The SDK
-   oracle's BuildContextByFE (~line 8954) documents a 5-field workspace
-   context block instead: +0 MUX next-FE, +4 Transition next-AD, +8 ENQ
-   (rspid<<24)|fqid, +12 ppid<<16, +16 HM pointer. This project's own
-   Transition singleton already sets AD_FROM_WS (next-AD taken from
-   workspace, not its own descriptor) -- consistent with, and requiring,
-   exactly this context block -- but nothing has ever written one. F-073B's
-   own fallback attempt (writing an FQID override to a *separate* DDR
-   buffer) failed for exactly this reason: ENQ reads its override from the
-   live per-frame workspace, not an arbitrary DDR buffer the driver
-   pre-populates -- the context block IS the mechanism that gets it there
-   (hardware copies it from the matched flow record into the workspace on
-   HIT), and this branch never populated it.
+Fix: allocate a small (16B), separate DMA-coherent context buffer per flow
+(new fman_pcd_ehash_flow fields ctx/ctx_dma, freed alongside the record on
+drain), write the 3 fields the SDK's real encoder writes, and store a
+pointer to that buffer (not inline context data) at the flow record's
+trailing offset -- an 8-byte DMA bus address, matching t_FmExtHashResult's
+contex_addr width (this project's original F-057-removed field was only
+4 bytes, a MURAM offset, a different width AND a different meaning; that
+mismatch may have been part of why it corrupted things). Also corrects
+ENQ's own encoding to the board-tested vendor form (word1 = genuine NIA,
+not a raw FQID; the vendor encoding was tried on this exact silicon on
+2026-07-16, F-073B, and got ONE frame through before stopping).
 
-Fix: rewrite the flow record's context bytes to the documented 5-field
-block, and correct ENQ's own encoding to the board-tested vendor form.
-rspid and ppid are both 0 (no storage-profile/policer override in this
-branch's design); HM pointer is 0 (no header manipulation chain). Because
-`fman_pcd_ehash_add_key()` is shared by both the fe_flow debugfs path and
-the ask.ko-facing kernel API (fman_pcd_fe_flow_add(), retyped by F-094),
-both call sites are updated so the build stays consistent; the public
-`fman_pcd_fe_flow_action` struct's `enq_off` field is reinterpreted as the
-target FQID rather than renamed, to avoid a second breaking API/header
+Because fman_pcd_ehash_add_key() is shared by both the fe_flow debugfs path
+and the ask.ko-facing kernel API (fman_pcd_fe_flow_add(), retyped by
+F-094), both call sites are updated so the build stays consistent; the
+public fman_pcd_fe_flow_action struct's enq_off field is reinterpreted as
+the target FQID rather than renamed, to avoid a second breaking API/header
 change on top of F-094's.
 
-fe_enq's debugfs `build` verb drops its fqid argument -- ENQ is now a plain
+fe_enq's debugfs build verb drops its fqid argument -- ENQ is now a plain
 singleton (matches MUX/Transition/Exit): `echo build > fe_enq`. fe_flow's
-`add` verb keeps its syntax (`add <table_idx> <keyhex> <hex>`), but the
-third argument's role changes from an ENQ FE MURAM offset to a target FQID.
+add verb keeps its syntax (`add <table_idx> <keyhex> <hex>`), but the third
+argument's role changes from an ENQ FE MURAM offset to a target FQID.
 """
 
 import sys
@@ -99,6 +112,15 @@ new_defs = (
     " */\n"
     "#define FMAN_FE_ENQ_CONTEXT_OFFSET\t8\n"
     "#define FMAN_NIA_BMI_AC_ENQ_FRAME\t0x00500002\n"
+    "/* F-175: per-flow FE context buffer (SDK: separately allocated, NEVER\n"
+    " * inline in the ehash record -- see FmPcdCcBuildContextByFE). Only\n"
+    " * MUX (offset 0, ENQ's own MURAM offset) and ENQ (offset 8/12,\n"
+    " * (rspid<<24)|fqid and ppid<<16) are needed -- this branch has no\n"
+    " * header-manipulation/replication chain, so Transition/HM are unused.\n"
+    " */\n"
+    "#define FMAN_FE_CTX_SIZE\t\t16\n"
+    "#define FMAN_FE_CTX_MUX_OFF\t\t0\n"
+    "#define FMAN_FE_CTX_ENQ_OFF\t\t8\n"
 )
 apply_block("ENQ context-offset/NIA #defines", old_defs, new_defs)
 
@@ -157,7 +179,7 @@ new_enq_build = '''static int fman_pcd_fe_enq_build(struct fman_pcd *pcd)
 	/* F-175: vendor-correct ENQ (board-tested, F-073B) -- word1 is a
 	 * genuine NIA (BMI enqueue action), not a raw FQID; the target FQID
 	 * is read from the per-frame workspace at ws+8, populated by
-	 * hardware from the matched flow record's context block on a
+	 * hardware from the matched flow record's context buffer on a
 	 * genuine HIT. ENQ always chains to EXIT (SDK: never terminal).
 	 */
 	memset(&p, 0, sizeof(p));
@@ -226,7 +248,7 @@ new_enq_write = '''static ssize_t fman_pcd_fe_enq_write(struct file *file,
 	if (!strncmp(buf, "build", 5)) {
 		/* F-175: no fqid argument -- ENQ is a plain singleton now;
 		 * the per-flow FQID lives in the flow record's own context
-		 * block (see fe_flow), not this shared FE descriptor.
+		 * buffer (see fe_flow), not this shared FE descriptor.
 		 */
 		err = fman_pcd_fe_enq_build(pcd);
 	} else if (!strncmp(buf, "clear", 5)) {
@@ -241,7 +263,19 @@ new_enq_write = '''static ssize_t fman_pcd_fe_enq_write(struct file *file,
 }'''
 apply_block("fe_enq_write no-fqid form", old_enq_write, new_enq_write)
 
-# --- 4. fman_pcd_ehash_add_key(): widen signature.
+# --- 4. struct fman_pcd_ehash_flow: add ctx/ctx_dma fields for the new
+#        separately-allocated per-flow context buffer.
+old_flow_struct_field = (
+    "\tdma_addr_t record_dma;\t\t/* bus address of record (bucket head holds it) */\n"
+)
+new_flow_struct_field = (
+    "\tdma_addr_t record_dma;\t\t/* bus address of record (bucket head holds it) */\n"
+    "\tvoid *ctx;\t\t\t/* F-175: separate 16B FE context buffer */\n"
+    "\tdma_addr_t ctx_dma;\t\t/* F-175: bus address of ctx (stored in record) */\n"
+)
+apply_block("ehash_flow struct ctx fields", old_flow_struct_field, new_flow_struct_field)
+
+# --- 5. fman_pcd_ehash_add_key(): simplified signature (enq_off, fqid).
 old_sig = (
     "static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,\n"
     "\t\t\t\t  const u8 *key, u8 key_size,\n"
@@ -250,41 +284,76 @@ old_sig = (
 new_sig = (
     "static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,\n"
     "\t\t\t\t  const u8 *key, u8 key_size,\n"
-    "\t\t\t\t  u32 mux_off, u32 enq_off, u32 fqid)"
+    "\t\t\t\t  u32 enq_off, u32 fqid)"
 )
 apply_block("ehash_add_key signature", old_sig, new_sig)
 
-# --- 5. fman_pcd_ehash_add_key(): context-block write (was single pointer).
+# --- 6. fman_pcd_ehash_add_key(): allocate the separate context buffer,
+#        write it per the SDK's real FmPcdCcBuildContextByFE() encoding,
+#        and store a POINTER to it (not inline context data) in the flow
+#        record -- this is the fix for F-057's corruption: the record gets
+#        an 8-byte DMA address (matching t_FmExtHashResult.contex_addr),
+#        not inline next-FE data.
 old_ctx = (
     "\t/* next-FE pointer (ENQ FE MURAM offset) after the 8-byte-aligned key. */\n"
     "\tfe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);\n"
     "\t*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);\n"
 )
 new_ctx = (
-    "\t/* F-175: per-flow workspace context block (SDK BuildContextByFE),\n"
-    "\t * loaded by hardware into the frame's transient FE workspace on a\n"
-    "\t * genuine HIT -- MUX/Transition/ENQ read their routing decision\n"
-    "\t * from here (workspace-relative), not from their own static FE\n"
-    "\t * descriptor words. Replaces the single next-FE pointer this\n"
-    "\t * branch wrote previously.\n"
+    "\t/* F-175: separate per-flow FE context buffer (SDK\n"
+    "\t * FmPcdCcBuildContextByFE, ~line 8954 of the real oracle) --\n"
+    "\t * NEVER inline in the ehash record (F-057 correctly found that\n"
+    "\t * corrupts it). MUX's context (offset 0) points at the ENQ FE\n"
+    "\t * directly (no Transition -- this branch has no HM/replication\n"
+    "\t * chain); ENQ's context (offset 8/12) carries (rspid<<24)|fqid\n"
+    "\t * and ppid<<16, byte-exact to the SDK's real encoder. rspid and\n"
+    "\t * ppid are both 0 in this branch's design.\n"
     "\t */\n"
-    "\tfe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);\n"
-    "\t*(__be32 *)(r + fe_ptr_off + 0)  = cpu_to_be32(mux_off);\t\t/* MUX next-FE */\n"
-    "\t*(__be32 *)(r + fe_ptr_off + 4)  = cpu_to_be32(enq_off);\t\t/* Transition next-AD */\n"
-    "\t*(__be32 *)(r + fe_ptr_off + 8)  = cpu_to_be32(fqid & 0x00ffffff);\t/* ENQ (rspid<<24)|fqid */\n"
-    "\t*(__be32 *)(r + fe_ptr_off + 12) = cpu_to_be32(0);\t\t\t/* ppid<<16 */\n"
-    "\t*(__be32 *)(r + fe_ptr_off + 16) = cpu_to_be32(0);\t\t\t/* HM pointer */\n"
+    "\t{\n"
+    "\t\tdma_addr_t ctx_dma;\n"
+    "\t\tu8 *ctx = dma_alloc_coherent(t->dev, FMAN_FE_CTX_SIZE, &ctx_dma,\n"
+    "\t\t\t\t\t     GFP_KERNEL);\n"
+    "\n"
+    "\t\tif (!ctx) {\n"
+    "\t\t\tdma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE, r, rdma);\n"
+    "\t\t\tkfree(flow);\n"
+    "\t\t\treturn -ENOMEM;\n"
+    "\t\t}\n"
+    "\t\t*(__be32 *)(ctx + FMAN_FE_CTX_MUX_OFF) = cpu_to_be32(enq_off);\n"
+    "\t\t*(__be32 *)(ctx + FMAN_FE_CTX_ENQ_OFF) = cpu_to_be32(fqid & 0x00ffffff);\n"
+    "\t\t*(__be32 *)(ctx + FMAN_FE_CTX_ENQ_OFF + 4) = cpu_to_be32(0);\t/* ppid<<16 */\n"
+    "\t\tflow->ctx = ctx;\n"
+    "\t\tflow->ctx_dma = ctx_dma;\n"
+    "\n"
+    "\t\tfe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);\n"
+    "\t\t*(__be64 *)(r + fe_ptr_off) = cpu_to_be64((u64)ctx_dma);\n"
+    "\t}\n"
 )
-apply_block("ehash_add_key context-block write", old_ctx, new_ctx)
+apply_block("ehash_add_key ctx buffer alloc+write", old_ctx, new_ctx)
 
-# --- 6. fman_pcd_fe_flow_write(): look up mux/enq offsets, pass through.
-#        NOTE: F-118 (2026-08-01, already wired in) inserts a whole "del
-#        <keyhex>" verb between the "clear" branch and the "add" sscanf --
-#        anchoring the WHOLE function body is fragile against unrelated
-#        future insertions like that one, so this edit is split into three
-#        small, independently-anchored surgical edits instead.
+# --- 7. fman_pcd_ehash_flow_drain(): free the ctx buffer alongside record.
+old_drain = (
+    "\t\tdma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE,\n"
+    "\t\t\t\t  flow->record, flow->record_dma);\n"
+    "\t\tkfree(flow);\n"
+)
+new_drain = (
+    "\t\tdma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE,\n"
+    "\t\t\t\t  flow->record, flow->record_dma);\n"
+    "\t\tif (flow->ctx)\t/* F-175 */\n"
+    "\t\t\tdma_free_coherent(t->dev, FMAN_FE_CTX_SIZE, flow->ctx,\n"
+    "\t\t\t\t\t  flow->ctx_dma);\n"
+    "\t\tkfree(flow);\n"
+)
+apply_block("ehash_flow_drain ctx free", old_drain, new_drain)
 
-# 6a. Variable declarations: enq_fe_off -> fqid, add enq_obj.
+# --- 8. fman_pcd_fe_flow_write(): look up the ENQ singleton offset, pass
+#        it + the target FQID through. Split into small surgical edits
+#        (F-118, already wired in, inserts a "del <keyhex>" verb between
+#        the "clear" branch and the "add" sscanf, so anchoring the WHOLE
+#        function body is fragile against unrelated insertions like that).
+
+# 8a. Variable declarations: enq_fe_off -> fqid, add enq_obj.
 old_flow_decls = (
     "\tstruct fman_pcd_ehash_table *t;\n"
     "\tunsigned long enq_fe_off = 0;\n"
@@ -298,20 +367,20 @@ new_flow_decls = (
 )
 apply_block("fe_flow_write decls (fqid)", old_flow_decls, new_flow_decls)
 
-# 6b. The "add" sscanf: 3rd arg is now the target FQID.
+# 8b. The "add" sscanf: 3rd arg is now the target FQID.
 old_flow_scan = (
     '\tnf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &enq_fe_off);\n'
 )
 new_flow_scan = (
     "\t/* F-175: 3rd arg is now the target FQID, not an ENQ FE MURAM\n"
-    "\t * offset -- the real per-flow dispatch target lives in the flow\n"
-    "\t * record's own workspace context block (see fman_pcd_ehash_add_key).\n"
+    "\t * offset -- the real per-flow dispatch target lives in a separate\n"
+    "\t * context buffer (see fman_pcd_ehash_add_key).\n"
     "\t */\n"
     '\tnf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &fqid);\n'
 )
 apply_block("fe_flow_write sscanf (fqid)", old_flow_scan, new_flow_scan)
 
-# 6c. Final block: look up mux/enq singleton offsets, pass through.
+# 8c. Final block: look up the ENQ singleton offset, pass through.
 old_flow_tail = (
     "\tt = fman_pcd_ehash_table_by_index(pcd, tbl_idx);\n"
     "\tif (!t) {\n"
@@ -334,23 +403,22 @@ new_flow_tail = (
     "\n"
     "\tenq_obj = list_first_entry_or_null(&pcd->fe_enq,\n"
     "\t\t\t\t\t   struct fman_pcd_fe_obj, node);\n"
-    "\tif (!pcd->fe_mux_off || !enq_obj) {\n"
+    "\tif (!enq_obj) {\n"
     "\t\tmutex_unlock(&pcd->fe_lock);\n"
-    "\t\treturn -ENOENT;\t/* fe_singletons/fe_enq build first */\n"
+    "\t\treturn -ENOENT;\t/* fe_enq build first */\n"
     "\t}\n"
     "\n"
     "\terr = fman_pcd_ehash_add_key(t, key, key_size,\n"
-    "\t\t\t\t     (u32)pcd->fe_mux_off,\n"
     "\t\t\t\t     (u32)enq_obj->muram_off, (u32)fqid);\n"
     "\tmutex_unlock(&pcd->fe_lock);\n"
     "\n"
     "\treturn err ? err : count;\n"
     "}"
 )
-apply_block("fe_flow_write mux/enq lookup", old_flow_tail, new_flow_tail)
+apply_block("fe_flow_write enq lookup", old_flow_tail, new_flow_tail)
 
-# --- 7. fman_pcd_fe_flow_add() (ask.ko-facing API, F-094's retyped body):
-#        same mux/enq lookup so it stays consistent with the new signature.
+# --- 9. fman_pcd_fe_flow_add() (ask.ko-facing API, F-094's retyped body):
+#        same enq lookup so it stays consistent with the new signature.
 old_api = '''int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 			 const struct fman_pcd_fe_flow_action *action)
 {
@@ -388,20 +456,19 @@ new_api = '''int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 		return -ENODEV;
 
 	/* F-175: action->enq_off is now interpreted as the target FQID;
-	 * MUX/ENQ singleton offsets are looked up here, matching the
+	 * the ENQ singleton offset is looked up here, matching the
 	 * fe_flow debugfs path (fman_pcd_fe_flow_write).
 	 */
 	enq_obj = list_first_entry_or_null(&pcd->fe_enq,
 					   struct fman_pcd_fe_obj, node);
-	if (!pcd->fe_mux_off || !enq_obj)
+	if (!enq_obj)
 		return -ENOENT;
 
 	return fman_pcd_ehash_add_key(t, action->key, action->key_size,
-				      (u32)pcd->fe_mux_off,
 				      (u32)enq_obj->muram_off,
 				      (u32)action->enq_off);
 }'''
-apply_block("fe_flow_add (ask.ko API) mux/enq lookup", old_api, new_api)
+apply_block("fe_flow_add (ask.ko API) enq lookup", old_api, new_api)
 
 if changes:
     with open(path, "w") as f:
