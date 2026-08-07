@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.9.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.10.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -629,10 +629,34 @@ match twice is not plausible by chance) — see
 `arch/fman-vendor-source-extraction-2026-08-07.md` §5 for the open
 question. A successful 14-byte HIT test would falsify that old
 measurement's conclusion outright (regardless of why it was wrong); a
-negative result leaves both explanations equally unresolved and Phase 3
-becomes the honest next step.
+negative result leaves both explanations equally unresolved.
 
-**T-M3-R Phase 3 (if the 14-byte `PORT_ID` test above is ALSO negative) — stop guessing at registers.**
+**Tested, 2026-08-07, `portid=0` — negative.** No CI build needed (`fe_ehash`'s
+key-size validation already allows up to 56 bytes). Board test on the
+already-installed `F-053`-fixed image: `fe_ehash set 7fff 14 0` (confirmed
+`node` word_0 `0e000000`, `keysize=14`), flow inserted with `portid=0x00`
+prepended (`000a63026a0a6302b906ad9cd903`, bucket `0x3508` — correctly
+re-derived for the new 14-byte content), `fe_kg_ekfc set 4 801c0006`
+(dmesg confirmed `EKFC write: ekfc=0x801c0006` on arm). 3 matching TCP
+SYNs confirmed transmitted. `fe_ehash_stats` after: `pkt_count` still `0`.
+Disengaged cleanly, RX deaf afterward (established pattern).
+
+**`portid=0` was only one candidate out of several plausible values** —
+`portid` has no direct correspondence to this project's own hardware port
+numbering, so a negative result at `0` doesn't rule out the whole
+14-byte-key theory, only that specific value. **Proposed next, before
+conceding to Phase 3**: a single-cycle batch test — insert multiple flow
+records for the *same* 5-tuple, one per plausible `portid` candidate
+(`0`–`10`, covering every value observed across real vendor config
+files, plus this port's own hardware ID `0x11` on the chance the mapping
+is 1:1 after all), all in one `fe_flow`/arm cycle. Send one matching
+frame, check `fe_ehash_stats` for **all** inserted records — whichever
+one (if any) shows `pkt_count>0` reveals which `portid` value hardware
+actually extracts, without needing one cold-boot cycle per candidate.
+**Held for explicit go-ahead** (needs the same arm/frame/disengage
+sequence, still subject to the standing per-attempt confirmation rule).
+
+**T-M3-R Phase 3 (if the batch `PORT_ID` test above is ALSO negative, or the user opts not to run it) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
