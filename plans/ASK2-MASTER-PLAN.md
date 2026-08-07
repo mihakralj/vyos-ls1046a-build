@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.7.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.8.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -30,7 +30,7 @@ confirmed silicon HIT. The only silicon-proven hardware offload today is the
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. 13-byte key (no PORT_ID) confirmed correct. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity. Phase 1 (`F-176` un-tainted to `STATS_EN`-only) and Phase 2 (`int_buf_pool_addr` byte-exact-correct by code review; `F-177`'s `FMFP_EXTC` sync on the bucket-head publish, board-tested) both reproduced the identical zero-activity result — the negative is confirmed genuine across every construction-level and now every concrete sync-related hypothesis this project has generated.** See §4.1 Phase 3 for the current next step. |
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity. Phase 1 (`F-176`), Phase 2 (`F-177`'s sync, `int_buf_pool_addr` cross-check), and the `999`-patch forensic finding (`F-053`'s `hash_bytes_offset=1` retracted to `0`, matching vendor's real production value) all board-tested negative in turn — the zero-HIT is confirmed genuine across every construction-level, sync-related, and now vendor-value-cross-checked hypothesis tested to date.** The 13-byte-no-`PORT_ID` key format is **no longer "confirmed correct"** — it's the one significant remaining untested divergence from vendor's real config (vendor unconditionally forces `PORT_ID` into every KeyGen scheme's EKFC; this project's test config omits it) and is now the leading open lead. See §4.1 Phase 3 for the current next step. |
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
@@ -577,30 +577,43 @@ previously-undetected discrepancy:
   every other detail HAS independently checked out correct — see Phase 1/2
   above).
 
-**Proposed test, next action:** new fixup (or `F-053` reversion) setting
-`hash_bytes_offset` back to `t->hash_shift` (i.e. `0`, matching every one
-of vendor's real production tables) instead of the hardcoded `1`. One CI
-build, one board retest, identical Phase 1/2 procedure. This is the single
-highest-confidence untested hypothesis this project has generated —
-concrete, vendor-XML-confirmed, and explains the symptom mechanistically,
-not just "another register permutation." **Held for explicit go-ahead**
-before implementing (kernel-code change) and before any CI build / board
-retest.
+**Tested, 2026-08-07 — negative.** `F-053` retracted (commit `ee276acb`),
+CI build `31206787307`, deployed to lxc200, installed on `.185`. Board
+retest, identical Phase 1/2 procedure: fresh boot confirmed (kernel `Fri
+Aug 7 18:27:00 UTC 2026`), clean baseline, chain rebuilt — `node` word_0
+read back as `0d000000` (bit 16 clear, confirming `hash_bytes_offset=0`
+on-board, vs. the pre-fix `0d010000`), flow inserted at bucket `0x6008`
+(unchanged, as expected — the fix touches hardware's live derivation, not
+software's own insert-time computation, so the bucket didn't move). Armed
+cleanly, 3 matching TCP SYNs confirmed transmitted via `tcpdump` on
+`.106`. **`fe_ehash_stats` after: `pkt_count` still `0`.** Disengaged
+cleanly (RX deaf afterward, per the established direct-`FE_ENTER` pattern
+— cold boot needed, not itself a new finding).
 
-**Also surfaced, not yet re-tested** (secondary, lower-confidence lead,
-already flagged pre-session in `arch/fman-vendor-source-extraction-2026-08-07.md`
-§5 and never closed): whether the live-packet-side KeyGen EKFC extraction
-should carry `PORT_ID` (vendor's `fm_kg.c` `BuildSchemeRegs()` unconditionally
-ORs `KG_SCH_KN_PORT_ID` into every scheme's `kgse_ekfc`, no guard) — this
+**Verdict:** `hash_bytes_offset=1` was a real, vendor-contradicted bug —
+fixing it was correct and the fix is confirmed applied on-board — but it
+was **not** (or not the sole) blocker for the ehash-HIT symptom. The value
+mismatch theory, however compelling mechanistically, doesn't explain the
+whole picture by itself. Ledger updated
+(`arch/fman-config-value-ledger.md`).
+
+**Remaining lead — the `PORT_ID`/EKFC question, now the top open item**
+(already flagged pre-session in
+`arch/fman-vendor-source-extraction-2026-08-07.md` §5, never closed):
+whether the live-packet-side KeyGen EKFC extraction should carry
+`PORT_ID` (vendor's `fm_kg.c` `BuildSchemeRegs()` unconditionally ORs
+`KG_SCH_KN_PORT_ID` into every scheme's `kgse_ekfc`, no guard) — this
 project's own EKFC test config (`0x001c0006`) omits it. The recommended
-closing test (compare KG hash for `EKFC=0x001c0006` vs `EKFC=0x801c0006` on
-the same controlled frame) was never run; the reliable, ALLOCATE-independent
-hash-capture mechanism the original 2026-07-13 UNKNOWN-1 closure used was
-never re-located this session. Lower priority than the `hash_bytes_offset`
-finding above (that one has a positive, XML-confirmed vendor value to test
-against; this one still needs a working measurement tool built first).
+closing test (compare KG hash for `EKFC=0x001c0006` vs `EKFC=0x801c0006`
+on the same controlled frame) was never run; the reliable,
+ALLOCATE-independent hash-capture mechanism the original 2026-07-13
+UNKNOWN-1 closure used was never re-located this session. This now needs
+a working measurement tool built before it can be tested at all —
+higher-effort than the `hash_bytes_offset` test was, but the only
+concrete, not-yet-exhausted lead remaining before Phase 3's "stop
+guessing at registers" applies for real.
 
-**T-M3-R Phase 3 (if the `hash_bytes_offset` test above is ALSO negative) — stop guessing at registers.**
+**T-M3-R Phase 3 (if the `PORT_ID`/EKFC lead is ALSO negative, or can't be tested) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
