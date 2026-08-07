@@ -294,12 +294,22 @@ apply_block("ehash_add_key signature", old_sig, new_sig)
 #        record -- this is the fix for F-057's corruption: the record gets
 #        an 8-byte DMA address (matching t_FmExtHashResult.contex_addr),
 #        not inline next-FE data.
-old_ctx = (
-    "\t/* next-FE pointer (ENQ FE MURAM offset) after the 8-byte-aligned key. */\n"
-    "\tfe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);\n"
-    "\t*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);\n"
+#
+#        NOTE: F-057 (already wired in, runs much earlier) REMOVES the old
+#        "next-FE pointer" block outright -- comment, computation, AND the
+#        `size_t fe_ptr_off;` declaration -- not just the semantics this
+#        fixup once assumed were merely stale. Anchoring on what F-057
+#        deletes (or the exact blank-line residue its deletion leaves
+#        behind) is fragile, so this inserts right after the key memcpy
+#        instead (untouched by F-057, unambiguous), and declares its own
+#        block-scoped fe_ptr_off rather than relying on the now-deleted
+#        outer declaration.
+old_memcpy = (
+    "\tmemcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);\n"
 )
-new_ctx = (
+new_memcpy_ctx = (
+    "\tmemcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);\n"
+    "\n"
     "\t/* F-175: separate per-flow FE context buffer (SDK\n"
     "\t * FmPcdCcBuildContextByFE, ~line 8954 of the real oracle) --\n"
     "\t * NEVER inline in the ehash record (F-057 correctly found that\n"
@@ -310,6 +320,8 @@ new_ctx = (
     "\t * ppid are both 0 in this branch's design.\n"
     "\t */\n"
     "\t{\n"
+    "\t\tsize_t fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF +\n"
+    "\t\t\t\t     ((key_size + 7U) & ~7U);\n"
     "\t\tdma_addr_t ctx_dma;\n"
     "\t\tu8 *ctx = dma_alloc_coherent(t->dev, FMAN_FE_CTX_SIZE, &ctx_dma,\n"
     "\t\t\t\t\t     GFP_KERNEL);\n"
@@ -325,11 +337,10 @@ new_ctx = (
     "\t\tflow->ctx = ctx;\n"
     "\t\tflow->ctx_dma = ctx_dma;\n"
     "\n"
-    "\t\tfe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);\n"
     "\t\t*(__be64 *)(r + fe_ptr_off) = cpu_to_be64((u64)ctx_dma);\n"
     "\t}\n"
 )
-apply_block("ehash_add_key ctx buffer alloc+write", old_ctx, new_ctx)
+apply_block("ehash_add_key ctx buffer alloc+write", old_memcpy, new_memcpy_ctx)
 
 # --- 7. fman_pcd_ehash_flow_drain(): free the ctx buffer alongside record.
 old_drain = (
