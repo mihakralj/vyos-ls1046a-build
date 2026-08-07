@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.12.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.13.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -728,14 +728,32 @@ already-CI-wired helper, `id` already in scope via
 `kg_find_port_scheme()` — at the end of `arm_fe()`'s success path;
 symmetric `fman_port_clear_kg_direct_scheme(rxport)` in `disarm_fe()`.
 No new register-level code — two new call sites reusing a mechanism
-already written and already applied by CI. Dry-run tested (including a
-second-run idempotency check) against the exact reconstructed source
-text before commit. **Held for explicit go-ahead** before CI build /
-board retest, per standing practice — but structurally, this is the
-strongest candidate this investigation has produced: it doesn't add or
-change a value, it changes *whether scheme 4 is ever reached at all*.
+already written and already applied by CI.
 
-**T-M3-R Phase 3 (if `F-178` is ALSO negative) — stop guessing at registers.**
+**Board-tested 2026-08-07 — fix confirmed applied, result negative.** CI
+build `31215715970`, deployed to lxc200, installed on `.185`, verified
+via a genuine power-cycle cold boot (not just `sudo reboot` — see the
+operational correction earlier this session). Chain rebuilt with the
+original 13-byte key / `EKFC=0x001c0006` combination (the exact config
+from the very first Phase 1 test, to isolate this one variable). On arm,
+dmesg confirmed the fix fired exactly as designed: `"KG direct-scheme
+addressing set, scheme 4 (rfpne 0x00480304)"` — `rfpne` moved from the
+generic `0x00480200` every prior test showed to `0x00480200 |
+NIA_KG_DIRECT | 4`, byte-for-byte the vendor-required encoding. 3
+matching TCP SYNs confirmed transmitted. **`fe_ehash_stats` after:
+`pkt_count` still `0`.** Disengaged cleanly.
+
+**This was the strongest structural hypothesis this investigation
+produced, and it did not resolve the symptom.** KeyGen now deterministically
+dispatches to scheme 4 (confirmed, not assumed), and the result is
+identical to every value-level test run today. This significantly
+narrows what's left: dispatch topology, dispatch determinism, DDR
+structures, buffer-pool/sync mechanisms, and key content have all now
+been independently verified correct or fixed, and none of it changes the
+outcome.
+
+**T-M3-R Phase 3 — now the honest next step, no remaining untested
+concrete hypothesis.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
