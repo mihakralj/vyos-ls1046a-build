@@ -484,10 +484,13 @@ apply_block("fe_flow_add (ask.ko API) enq lookup", old_api, new_api)
 # --- 10. __fman_pcd_fe_build_vm_chain() (patch 0158, "compose" helper --
 #         not exercised by this session's debugfs-driven testing, but
 #         still part of the same compilation unit and must build). Its
-#         hardcoded `tx_fqid` local becomes unused once the call no
-#         longer takes it; remove both.
+#         `tx_fqid` local becomes unused once the call no longer takes
+#         it; remove both. NOTE: F-157 (already wired in, runs earlier)
+#         already rewrote the plain "= 0x200" initializer to a
+#         pcd->fe_enq_fqid-conditional one -- anchor on ITS output.
 old_compose_const = (
-    "\tconst u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */\n"
+    "\tconst u32 tx_fqid       = pcd->fe_enq_fqid ?\n"
+    "\t                        pcd->fe_enq_fqid : 0x200;\t/* F-157: dedicated TX FQ */\n"
 )
 new_compose_const = ""
 apply_block("compose helper unused tx_fqid removed", old_compose_const, new_compose_const)
