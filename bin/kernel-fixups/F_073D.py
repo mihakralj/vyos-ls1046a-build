@@ -77,17 +77,23 @@ if not done_next:
         src = src.replace(orig_next, new_next, 1); changed += 1
         print("### F-073D: ENQ w3=0 (from original)")
 
-# 4. Keep w6 rewire
+# 4. F-175 (2026-08-07): F-070b's w6 rewire REMOVED. Board-confirmed live
+# on .185 (hash_fe w6 == the just-built ENQ's own MURAM offset, not
+# EXIT's) that this silently redirected the MISS disposition (EXT_HASH
+# w6/missNextFE) to the SAME ENQ object the HIT path (w5) uses -- meaning
+# HIT and MISS were structurally wired to the identical destination the
+# entire T-M3-R campaign, independent of AD species/key/mask/write-
+# ordering/workspace-context. No longer touches hash_fe's w6; kept as a
+# removal step (not a bare deletion) so a build with the old block still
+# baked in from a prior run gets it stripped back out idempotently.
 enq_call = '\t\terr = fman_pcd_fe_enq_build(pcd, fqid, 0);'
 if enq_call in src:
-    rewire = '\n\t\t/* F-070b: rewire w6 to ENQ */'
-    if rewire not in src:
-        post = '\n\t\t/* F-070b: rewire w6 to ENQ */\n\t\tif (!err && pcd->fe_hash_off) {\n\t\t\tstruct fman_pcd_fe_obj *eo = list_first_entry_or_null(&pcd->fe_enq, struct fman_pcd_fe_obj, node);\n\t\t\tif (eo) {\n\t\t\t\tu32 __iomem *fe = (u32 __iomem *)fman_muram_offset_to_vbase(fman_get_muram(pcd->fman), pcd->fe_hash_off);\n\t\t\t\tiowrite32be((u32)eo->muram_off, fe + 6);\n\t\t\t}\n\t\t}\n'
-        assert_one(enq_call, "enq debugfs")
-        src = src.replace(enq_call, enq_call + post, 1); changed += 1
-        print("### F-070b: w6 rewired")
+    post = '\n\t\t/* F-070b: rewire w6 to ENQ */\n\t\tif (!err && pcd->fe_hash_off) {\n\t\t\tstruct fman_pcd_fe_obj *eo = list_first_entry_or_null(&pcd->fe_enq, struct fman_pcd_fe_obj, node);\n\t\t\tif (eo) {\n\t\t\t\tu32 __iomem *fe = (u32 __iomem *)fman_muram_offset_to_vbase(fman_get_muram(pcd->fman), pcd->fe_hash_off);\n\t\t\t\tiowrite32be((u32)eo->muram_off, fe + 6);\n\t\t\t}\n\t\t}\n'
+    if post in src:
+        src = src.replace(post, '', 1); changed += 1
+        print("### F-175: F-070b w6 rewire REMOVED (was clobbering MISS disposition)")
     else:
-        print("### F-070b: w6 already rewired")
+        print("### F-175: F-070b w6 rewire not present (already clean)")
 
 # 5. F-070c: params zeroing
 old = 'slot->next_engine = *saved_engine;'
