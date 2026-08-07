@@ -635,6 +635,22 @@ cleanly, not that classification works. Keep two questions separate: "can
 `.106` ever get a HIT" (aging-enabled, HC-blocked) vs "can `.185`'s non-aging
 implementation get a HIT" (the HC requirement may not apply to us at all).
 
+**[IMPORTANT CORRECTION, 2026-08-07]** `.106`'s deployed kernel is **this
+project's own VyOS graft** — a VyOS-side kernel build with ASK kernel
+patches applied, not a pristine, unmodified original `we-are-mono/ASK`
+reference build. Every claim above ("vendor stack" on `.106`) describes
+*userspace* fidelity (`cdx`/`cmm`/`dpa_app`, genuinely vendor code) riding
+on *this project's own graft kernel* underneath — not a guarantee that
+`.106`'s specific deployment matches what a genuinely pristine vendor
+build would do. The user's position is that the **original, unmodified**
+`we-are-mono/ASK` is guaranteed to achieve real hardware offload; this
+section's "most likely no" finding is about `.106`'s *current graft*
+specifically, and does not by itself contradict that. Do not conflate
+"this project's graft on `.106` may not exercise ehash" with "vendor's
+real, original ASK doesn't either" — they are different systems, and only
+the deep vendor-source reads (§10.2a, §12, `arch/fman-config-value-ledger.md`)
+speak to what original vendor code actually does.
+
 ### 5.3 Dynamic updates to live classification structures (RM §5.12, authoritative)
 
 Source: `QorIQ LS1043A DPAA Reference Manual`, Rev. 0, 04/2016 — same DPAA1
