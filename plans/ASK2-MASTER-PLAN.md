@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.11.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.12.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -669,7 +669,73 @@ theory remains directly, unreconciled contradictory with the 2026-07-13
 §5) — neither is confirmed correct, both remain open questions, but
 neither currently produces a HIT on this silicon either way.
 
-**T-M3-R Phase 3 (Phase 1, Phase 2, `F-053`, and the full `PORT_ID` batch test are all negative) — stop guessing at registers.**
+**`NIA_KG_DIRECT` finding, `F-178` (2026-08-07) — ⬅ NEXT ACTION, potentially
+supersedes everything above.** Written in direct response to the user's
+challenge: vendor's real ASK code demonstrably works on this exact
+board/microcode — so what is this project's approach actually doing
+differently, structurally, not just field-by-field? Full read of
+vendor's real `FM_PORT_SetPCD()`/`SetPcd()` (`fm_port.c`) for the exact
+single-bound-scheme-per-port case this project's FE-VM model matches:
+
+```
+case (e_FM_PORT_PCD_SUPPORT_PRS_AND_KG_AND_CC):
+    tmpReg = NIA_KG_CC_EN;
+    fallthrough;
+case (e_FM_PORT_PCD_SUPPORT_PRS_AND_KG):
+    if (p_PcdParams->p_KgParams->directScheme)
+        tmpReg |= (NIA_KG_DIRECT | physicalSchemeId);
+    WRITE_UINT32(*p_BmiPrsNia, NIA_ENG_KG | tmpReg);
+```
+
+Vendor **always** ORs `NIA_KG_DIRECT | physicalSchemeId` into `fmbm_rfpne`
+for a directScheme port. Without it, KeyGen falls back to the generic
+SI/match-vector walk (RM §4.4: first scheme where `SI=1 AND (QLCV &
+kgse_mv)==kgse_mv` wins) instead of being told deterministically which
+scheme governs this port's dispatch.
+
+**`F-162` (2026-08-05) already found and fixed exactly this gap once** —
+but wired the fix only into `fman_pcd_kg_port_attach_cc()`/`detach_cc()`,
+the `CONT_LOOKUP`/group-AD "CC-graft" mechanism this project's own
+history has since abandoned (group-AD topology confirmed dead 3 ways;
+direct `RCCB→FE_ENTER`, established later via F-147/F-148, is what every
+T-M3-R test this project has ever actually run uses). **The real arm
+path, `fman_pcd_kg_port_arm_fe()`/`_disarm_fe()` (patch 0132), is a
+completely separate function pair that never calls F-162's helper at
+all** — confirmed directly, by reading the function body, not inference.
+This is independently, empirically confirmed by **this session's own
+dmesg on every single arm, all day**: `rfpne 0x00480200` — `NIA_ENG_HWK |
+AC_CC`, generic SI/match-vector selection — **never**
+`0x00480200 | NIA_KG_DIRECT | scheme_id` (e.g. `0x00480304` for scheme
+4), the vendor-required encoding already documented in this doc's §5.1.
+
+**Why this could explain the entire pattern of today's results**: every
+T-M3-R test this session ran (Phase 1, Phase 2, `F-053`, the full
+`PORT_ID` batch) carefully configured EKFC/key-format/`hash_bytes_offset`
+on "scheme 4" specifically — and every one of them independently verified
+correct against vendor source. But none of that matters if live traffic
+never actually dispatches *through* scheme 4 in the first place. If the
+generic SI/match-vector walk selects a different scheme (or none —
+scheme 4's own `mv=0x00000000`, confirmed via this session's own dmesg,
+consistent with it being a mainline "direct"-style RSS scheme never
+meant to be reached via generic matching), every other correctly-tuned
+field would sit unconsulted. This would mechanistically explain a
+uniform zero-HIT result independent of every other hypothesis already
+tested and found negative today.
+
+**Fix (`F-178`, `bin/kernel-fixups/F_178.py`)**: call
+`fman_port_set_kg_direct_scheme(rxport, id)` — F-162's own existing,
+already-CI-wired helper, `id` already in scope via
+`kg_find_port_scheme()` — at the end of `arm_fe()`'s success path;
+symmetric `fman_port_clear_kg_direct_scheme(rxport)` in `disarm_fe()`.
+No new register-level code — two new call sites reusing a mechanism
+already written and already applied by CI. Dry-run tested (including a
+second-run idempotency check) against the exact reconstructed source
+text before commit. **Held for explicit go-ahead** before CI build /
+board retest, per standing practice — but structurally, this is the
+strongest candidate this investigation has produced: it doesn't add or
+change a value, it changes *whether scheme 4 is ever reached at all*.
+
+**T-M3-R Phase 3 (if `F-178` is ALSO negative) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
