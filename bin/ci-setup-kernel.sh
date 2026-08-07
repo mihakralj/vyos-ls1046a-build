@@ -2289,6 +2289,28 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-176 ehash stats/timestamp HIT discriminator"
 fi
 
+# F-177 (2026-08-07, T-M3-R Phase 2 item 2): Phase 1 (F-176 corrected to
+# STATS_EN-only) confirmed the FE-VM ehash zero-HIT result is real. Phase 2
+# item 1 (int_buf_pool_addr/global_mem_offset byte-for-byte re-check against
+# vendor's ExternalHashTableSet()) found this project's encoding already
+# bit-exact correct -- no fix, no board risk, closed by code review alone.
+# Item 2 (this fixup): F-168 wired an FMFP_EXTC[INV0] SYNC assertion into
+# fman_port_set_cc_base()'s FMBM_RCCB write (the AC_CC dispatch topology)
+# and it fixed the historical port-wedge on arm. RM S5.12.14.1 documents
+# this SYNC as required after changing ANY live FMan-controller-walked
+# structure before dispatch into it is safe -- the ehash bucket table is
+# exactly such a structure, yet fman_pcd_ehash_add_key()'s own bucket-head
+# publish (F-173's wmb()-then-publish) has never asserted it. Weaker
+# hypothesis than F-168's (vendor's own ExternalHashTableAddKey() fast
+# insert path calls no sync of any kind -- see fm_ehash.c, arch/fman-
+# microcode-210-programming-reference.md sec 12.1), but cheap and the last
+# concrete insert-path lead before Phase 3 (new diagnostic capability /
+# Fork-B viability reassessment).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_177.py" 2>&1
+    echo "### fman_pcd.c: F-177 FMFP_EXTC SYNC on ehash bucket-head publish"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
