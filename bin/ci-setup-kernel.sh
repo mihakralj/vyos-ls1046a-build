@@ -2265,6 +2265,30 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-175 per-flow FE context buffer + vendor ENQ NIA"
 fi
 
+# F-176 (2026-08-07, Phase 1 of plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md):
+# adds a dispatch/FQID-independent HIT discriminator. Phase 0 of that plan
+# first misread the wrong vendor function family (ext_hash_add_key() /
+# t_FmPcdCcNodeExtHashInfo, reachable only via FM_PCD_HashTableSet(), never
+# called by cdx_ehash.c) and concluded this project's ehash bucket/record
+# format needed a 16x-stride structural rewrite -- WRONG, retracted same
+# day. The function cdx_ehash.c actually calls, ExternalHashTableAddKey(),
+# operates on en_exthash_bucket/en_exthash_node/en_ehash_entry -- checked
+# field-by-field, this project's existing 16-byte bucket, 4-word DDR
+# descriptor encoding, and flow-record header are bit-exact correct. No
+# format fix needed (see arch/fman-microcode-210-programming-reference.md
+# section 10 for the full correction). What IS new: en_ehash_entry is a
+# union whose second view exposes hardware-writeback packet_count/
+# packet_bytes/timestamp counters at offset 256, gated by
+# SET_STATS_ENABLE/SET_TIMESTAMP_ENABLE flag bits, in a 320B (not 256B)
+# entry. F-176 enables this unconditionally (diagnostic build) and adds a
+# new debugfs node "fe_ehash_stats" to read it back -- the first way to
+# tell, independent of FQID/dispatch, whether hardware ever actually
+# performed a compare against an inserted key.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_176.py" 2>&1
+    echo "### fman_pcd.c: F-176 ehash stats/timestamp HIT discriminator"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
