@@ -216,19 +216,57 @@ software construction. This may live in `fm_port.c`'s `SetPcd()` (not yet
 read in full this session) or may genuinely be the KeyGen/EKFC path after
 all — **not yet distinguished**.
 
-**Recommended next step** (unchanged from the session's prior "Candidate A"
-plan, now sharpened): the hardware CRC-64 match technique that closed
-UNKNOWN-1 for the old 13-byte key (2026-07-13) needs to be re-run for
-`EKFC=0x801C0006` specifically — but this doc's finding adds a second thing
-to check in that same test: capture the KG hash for a controlled frame with
-`EKFC=0x001C0006` (**no** PORT_ID bit) and compare against the *same*
-frame's hash with `EKFC=0x801C0006`. If the two hashes differ in exactly
-the way consistent with a 13-vs-14-byte MSB-first key, that's strong
-evidence PORT_ID genuinely reaches the KG extraction stage as this project
-assumes. If they're identical, that's strong evidence PORT_ID never reaches
-the raw extracted-key buffer via EKFC at all — pointing squarely at the
-`<combine>`/OR-vector theory instead, and meaning `F-163`'s key format
-needs revisiting.
+**Recommended next step, revised 2026-08-07 (T-M3-R post-`F-053` deep
+dive)** — the hash-capture-comparison plan above turned out to need a
+tool this project no longer has (the reliable 2026-07-13 UNKNOWN-1
+technique). It also isn't actually necessary: this project already has a
+**direct HIT test** (the same `fe_ehash`/`fe_flow`/`fe_arm`/`fe_ehash_stats`
+procedure used for Phase 1, Phase 2, and the `F-053` retraction) that
+needs no new instrumentation at all. Build the ehash table with a
+**14-byte key, `portid` as byte 0**, `EKFC=0x801c0006` (`KG_SCH_KN_PORT_ID`
+set), and check whether `pkt_count` increments on a matching frame — the
+existing test IS the closing test.
+
+Two things resolved by continued reading, narrowing this further:
+- `union dpa_key`'s exact layout (`cdx_common.h`): `portid` is a bare
+  `uint8_t` at byte 0, immediately followed by the protocol-specific
+  struct (`ipv4_tcpudp_key` etc.) — `key_size = sizeof(struct) + 1`,
+  confirming `keysize="14"` byte-for-byte: `1 (portid) + 4 (saddr) +
+  4 (daddr) + 1 (proto) + 2 (sport) + 2 (dport)`.
+- `portid` is **not** the raw FMan hardware port ID (the `0x08`–`0x1F`-ish
+  register-level port number this project uses for `fe_arm engage 11
+  ...`). It's a small, sequential, **application-assigned logical index**
+  from `cdx_cfg.xml`'s `<port .../>` declarations — observed values 0–10
+  across every config variant in the tree. This fits neatly inside 4 bits,
+  which is suggestively the same width as `<combine portid="true"
+  offset="16" mask="0xF"/>`'s mask — raising (not proving) a revised
+  reading of `<combine>`: rather than an FQID/hash-result OR-vector
+  unrelated to the raw key, it may be exactly the mechanism that inserts
+  this 4-bit logical port index into the live-extracted comparison key,
+  reconciling with `fill_key_info()`'s software-side insertion instead of
+  contradicting it. Still not proven either way from source alone.
+
+**Practical implication for testing:** there is no single obviously-right
+`portid` VALUE to test with, since this project has no equivalent
+XML-config-assigned logical port numbering. `0` is the simplest, most
+common default across every real vendor config file and the natural first
+candidate. If a HIT doesn't materialize with `portid=0`, trying a small
+range (1, 2, this port's own hardware ID `0x11` on the off chance the
+mapping is 1:1 after all) is cheap — each is a debugfs re-`add`, not a new
+CI build.
+
+**Status of the OLD 2026-07-13 "13-byte, no-PORT_ID, CRC-64 bit-exact
+match on two independent flows" measurement — NOT explained, flagged for
+honest reconciliation, not silently overridden.** That measurement was a
+genuinely strong signal (a 64-bit CRC match across two independent flows
+is not plausible by chance) and directly contradicts a 14-byte
+portid-prefixed key producing the same live hash. Do not treat the
+14-byte theory as settled until this conflict is either resolved (e.g.
+the old measurement's methodology turns out to have measured something
+other than the true comparison key, such as only the masked bucket-index
+bits rather than the full 64-bit hash) or the new 14-byte test is
+board-confirmed to actually produce a HIT, which would falsify the old
+measurement's conclusion outright regardless of why it was wrong.
 
 ## Cross-references
 
