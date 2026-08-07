@@ -1527,36 +1527,90 @@ comparator. One residual observed: MURAM `used` settled at 1344 B vs the
 720 B baseline (624 B residual; ≥256 B very likely the intentionally
 persistent FM_CTL params page).
 
-**[SPEC] RESOLVED — the PORT_ID mechanism does not reproduce the vendor's,
-and is not needed for this branch's architecture.** Two independent findings:
+**[SPEC] CORRECTED 2026-08-07 — the "GEC" claim below (point 2, original
+text) was wrong.** Fetched vendor's real, pristine, public FMC source
+(`github.com/nxp-qoriq/fmc` @ `5b9f4b16a864e9dfa58cdcc860be278a7f66ac18`, the
+exact commit this project's own `meta-ask/recipes-ask/fmc/fmc_git.bb` pins)
+and traced `<combine>` end to end: `FMCPCDReader.cpp` parses it into a
+`CCombineEntry` (`offsetInFqid`), `FMCPCDModel.cpp` sets
+`combine.type = e_FM_PCD_KG_EXTRACT_PORT_PRIVATE_INFO` and pushes it to
+`scheme.combines[]`, and `FMCCModelOutput.cpp` writes it out as
+`scheme[index].extractedOrs[i].bitOffsetInFqid = sch.combines[i].offsetInFqid`
+with `numOfUsedExtractedOrs = sch.combines.size()`. **`<combine>` builds the
+KeyGen "extractedOrs" array — AN4760's "OR Data Vector" — which affects the
+computed FQID, not the raw ehash comparison key.** It is not a GEC
+(`kgse_gec[]`) operation at all; GEC and extractedOrs are both real vendor
+mechanisms but `<combine>` maps to the latter, never the former. This
+correction does not change the bottom-line recommendation (still drop
+PORT_ID from the ehash key — see below) but it does retire the "no GEC in
+this branch" framing as the reason EKFC can't replicate vendor's portid
+byte; the real reason is simpler: vendor's portid byte was never in the
+*key* to begin with, it only ever influenced *FQID selection*.
 
-1. **Board measurement.** The annotation-hash-match technique (capture the
-   real hardware CRC-64 for a known frame via `hash_probe`, brute-force every
-   plausible key layout against it) found silicon extracts
-   `KG_SCH_KN_PORT_ID = 0x00` for a live frame on eth4 (hw_port_id `0x11`) —
-   not the raw hw_port_id F-163 assumed. Unique match across 184,320
-   candidate combinations (120 field orderings × 6 insertion positions × 256
-   byte values) — high confidence, not noise.
-2. **Vendor's real mechanism, in `/etc/cdx_pcd.xml` (RSR 10.3.0.B1):** every
-   distribution's portid byte comes from a
-   `<combine portid="true" offset="16" mask="0xF"/>` NetPCD directive — a
-   **GEC** (`kgse_gec[8]`) software-combine operation, a *different register
-   block* from `kgse_ekfc`. Vendor never uses `KG_SCH_KN_PORT_ID` for this at
-   all.
+**[SPEC] Second correction, same date — where does `KG_SCH_KN_PORT_ID`
+(EKFC bit 31, the actual *key*-extraction path, unrelated to `<combine>`)
+draw its value from?** Cross-checked `t_FmPcdExtractEntry` (`fm_pcd_ext.h`):
+the key-extraction-array entry struct has no dedicated union member for
+`e_FM_PCD_KG_EXTRACT_PORT_PRIVATE_INFO` — only `extractByHdr`/`extractNonHdr`
+exist. `fm_kg.c`'s own `BuildSchemeRegs()` assigns
+`p_SchemeRegs->kgse_dv0 = p_KeyAndHash->privateDflt0` /
+`kgse_dv1 = p_KeyAndHash->privateDflt1` — the same two "scheme default"
+registers `t_FmPcdKgKeyExtractAndHashParams` exposes at the top level. The
+simplest reading silicon supports: `PORT_PRIVATE_INFO` extraction (in the
+*key*, distinct from `<combine>`'s FQID-only extractedOrs use of the same
+type enum) draws from these scheme-level `kgse_dv0`/`kgse_dv1` "private
+default" registers, with no further per-entry override available.
 
-This branch cannot replicate the vendor's portid mechanism via EKFC — the
-"EKFC-only, no GEC" architecture decision rules out the register the vendor
-actually uses — and it does not need to: vendor's portid disambiguates
-collisions in `shared="true"` tables serving many ports/schemes at once,
-while this branch's `fe_ehash` tables are per-scheme, not shared. There is no
-collision to disambiguate. **Recommendation: drop PORT_ID from the ehash key
-— revert to the 13-byte `SIP|DIP|PROTO|SPORT|DPORT` format
-(`EKFC=0x001C0006`)**, which remains the most rigorously silicon-validated
-key this project has (hardware CRC-64 match, independently re-confirmed via
-the same clean isolated-capture method, unique match). F-163 (`f212c701`)
-should be reverted or gated off for the single-port ehash path; keep the
-14-byte/GEC question open only if genuinely shared multi-scheme tables are
-ever built.
+Live-read on `.185` scheme 4 today: `kgse_dv0 = 0x0a0a0a0a`,
+`kgse_dv1 = 0x0b0b0b0b` — an **exact byte-for-byte match** to mainline's own
+`work/linux-6.18.34/.../fman_keygen.c` constants `DEFAULT_HASH_KEY_IPv4_ADDR`
+(`0x0A0A0A0A`) / `DEFAULT_HASH_KEY_L4_PORT` (`0x0B0B0B0B`) — set
+unconditionally inside that file's `if (scheme->use_hashing) { ... }` branch
+as RSS-hashing fallback material (used when a frame lacks the IPv4/L4-port
+header a generic-RSS scheme wants to hash on), a purpose **completely
+unrelated to port ID**. This project's `//bmr`-equivalent hack
+(`kgse_ekfc |= KG_SCH_KN_PORT_ID`) never reprograms `kgse_dv0`/`dv1` — it
+inherits whatever mainline's unrelated RSS logic left there.
+
+**This means both existing negative measurements are confounded and neither
+can be trusted at face value:**
+- The F-163-era 184,320-candidate brute force (above) found silicon extracts
+  `0x00`. But no byte within `0x0a0a0a0a`/`0x0b0b0b0b` is `0x00` — if
+  `KG_SCH_KN_PORT_ID` really pulls from `kgse_dv0`/`dv1`, that measurement's
+  board session must have had these registers in a *different* (likely
+  zeroed, `else`-branch) state than today's read, not the same value
+  observed today. The two facts are not reconcilable as a single constant.
+- The 2026-08-07 16-candidate `portid=0x00`–`0x0f` sweep (test row below)
+  tested single-byte DDR-key values `0x00`–`0x0f` against a comparator that
+  — per this finding — was actually keyed off of whatever `kgse_dv0`/`dv1`
+  held during *that* test run, not a controlled value the test accounted
+  for. `0x0a` was incidentally one of the 16 tested values, but only as one
+  candidate among many, not because the test knew to expect it.
+
+Neither negative result rules out `KG_SCH_KN_PORT_ID` on its own merits —
+both were run against an uncontrolled register. **Open, un-superseded
+recommendation:** before drawing any further conclusion about whether EKFC
+bit 31 can work at all, add a fixup that explicitly zeroes (or sets to a
+known value) `kgse_dv0`/`kgse_dv1` in this project's own EKFC-override path,
+then retest — this closes the confound outright, regardless of the still-
+unresolved width/byte-position question.
+
+**[SPEC] Original 2026-07-13 conclusion, still standing as the primary
+recommendation regardless of the above correction:** this branch's
+`fe_ehash` tables are per-scheme, not `shared="true"` across multiple
+ports/schemes the way vendor's are — so there is no FQID collision for
+vendor's real portid mechanism (`<combine>`/extractedOrs, confirmed above)
+to disambiguate in the first place, and no `KG_SCH_KN_PORT_ID` key-extraction
+mechanism to replicate either, once it's understood vendor's actual portid
+byte was never in the *key* to begin with. **Recommendation unchanged: drop
+PORT_ID from the ehash key — revert to the 13-byte
+`SIP|DIP|PROTO|SPORT|DPORT` format (`EKFC=0x001C0006`)**, which remains the
+most rigorously silicon-validated key this project has (hardware CRC-64
+match, independently re-confirmed via the same clean isolated-capture
+method, unique match). F-163 (`f212c701`) should be reverted or gated off
+for the single-port ehash path. The 14-byte/`KG_SCH_KN_PORT_ID` question can
+stay open (now with a clear, actionable resolving experiment above) only if
+someone wants to chase it further before reverting.
 
 ---
 

@@ -268,6 +268,72 @@ bits rather than the full 64-bit hash) or the new 14-byte test is
 board-confirmed to actually produce a HIT, which would falsify the old
 measurement's conclusion outright regardless of why it was wrong.
 
+## 6. RESOLUTION (later same day, 2026-08-07) — `<combine>` is FQID-only, and the real key-side mechanism is confounded, not falsified
+
+§5 above left the question open between two readings: `<combine>` as the
+AN4760 "OR Data Vector"/FQID stage, vs. `<combine>` as the mechanism that
+inserts a 4-bit logical port index into the live-extracted *comparison key*
+(reconciling with `fill_key_info()`'s insert-side software construction).
+
+**This is now resolved in favor of the first reading, from vendor's own
+public source, not inference.** Fetched the real, pristine FMC (FMan
+Configuration Compiler) source — `github.com/nxp-qoriq/fmc` @
+`5b9f4b16a864e9dfa58cdcc860be278a7f66ac18`, the exact commit this project's
+own `meta-ask/recipes-ask/fmc/fmc_git.bb` Yocto recipe pins (so this is
+provably the same tool vendor used to compile `cdx_pcd.xml` into what runs
+on `.106`). Traced `<combine>` through all three stages of FMC's own
+pipeline:
+- `FMCPCDReader.cpp`: parses `<combine>` into a `CCombineEntry` struct
+  (`offsetInFqid`, `size`, `kind` — `PORTDATA` for `portid="true"`).
+- `FMCPCDModel.cpp`: sets `combine.type =
+  e_FM_PCD_KG_EXTRACT_PORT_PRIVATE_INFO` and pushes it into
+  `scheme.combines[]` — a field that is structurally separate from the
+  scheme's key-extraction array.
+- `FMCCModelOutput.cpp`, the authoritative ioctl-struct code generator:
+  `scheme[index].extractedOrs[i].bitOffsetInFqid =
+  sch.combines[i].offsetInFqid;` and `scheme[index].numOfUsedExtractedOrs =
+  sch.combines.size();` — i.e. `<combine>` entries are written out as
+  KeyGen **extractedOrs**, the literal AN4760 "OR Data Vector" stage, which
+  ORs a value into the computed **FQID**. There is no code path anywhere in
+  this pipeline that writes a `<combine>` entry into the key-extraction
+  array (`kgse_ekfc`-adjacent structures) at all.
+
+**`<combine>` never touches the raw ehash comparison key. It only affects
+which FQID a frame is enqueued to.** The "reconciling" reading floated at
+the end of §5 does not hold up against vendor's own compiler source.
+
+This reopens, rather than closes, the practical question §5 was really
+chasing (does the live-packet-side comparison key carry a portid byte at
+all, matching CMM's insert-side `fill_key_info()` construction) — but
+narrows it: if it does, the only remaining live-extraction candidate is
+`KG_SCH_KN_PORT_ID` (EKFC bit 31) itself, not `<combine>`. Chasing that bit
+further the same session found where it draws its extracted value from:
+`fm_pcd_ext.h`'s `t_FmPcdExtractEntry` has no dedicated union member for
+`e_FM_PCD_KG_EXTRACT_PORT_PRIVATE_INFO`, and `fm_kg.c`'s `BuildSchemeRegs()`
+assigns `kgse_dv0 = privateDflt0` / `kgse_dv1 = privateDflt1` — the same
+"scheme default register 0/1" fields `t_FmPcdKgKeyExtractAndHashParams`
+exposes. Live-read on `.185` scheme 4: `kgse_dv0 = 0x0a0a0a0a`, `kgse_dv1 =
+0x0b0b0b0b` — an exact match to this project's own mainline-derived
+`fman_keygen.c`'s `DEFAULT_HASH_KEY_IPv4_ADDR`/`DEFAULT_HASH_KEY_L4_PORT`
+RSS-fallback constants, set unconditionally for a purpose unrelated to port
+ID, and never reprogrammed by this project's own EKFC-override path.
+
+**Practical consequence for §5's "Status of the OLD 2026-07-13 measurement"
+paragraph and this session's 2026-08-07 16-candidate sweep (both already in
+the ledger as board-tested negative): neither is conclusive.** Both were
+run with `kgse_dv0`/`dv1` in an uncontrolled state — the 2026-07-13
+measurement found extraction `0x00`, which is not a byte present in
+`0x0a0a0a0a`/`0x0b0b0b0b`, so that session's registers must have held a
+different value than today's read; today's sweep tested DDR-key candidates
+`0x00`–`0x0f` against a comparator keyed off whatever `dv0`/`dv1` held
+during that specific run, not a value the test controlled. The `KG_SCH_KN_PORT_ID`
+hypothesis remains genuinely open, pending a retest with `kgse_dv0`/`dv1`
+explicitly zeroed (or otherwise controlled) by this project's own code —
+not yet implemented or board-tested. Full detail:
+`arch/fman-microcode-210-programming-reference.md` §10.5a;
+`arch/fman-config-value-ledger.md`'s `KG_SCH_KN_PORT_ID` and `<combine>`
+rows; qdrant tag `kgse-dv0-dv1-mainline-rss-confound-confirmed`.
+
 ## Cross-references
 
 - Full XML: `/home/vyos/kernel-ls1046a-build/reference/ASK-mt-6.12.y/dpa_app/files/etc/cdx_pcd.xml` (locally available, 525 lines, no fetch needed).
