@@ -2331,6 +2331,25 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-177 FMFP_EXTC SYNC on ehash bucket-head publish"
 fi
 
+# F-178 (2026-08-07, direct response to: "vendor's real ASK code works on
+# this exact board -- what are we doing differently?"). Vendor's real
+# FM_PORT_SetPCD()/SetPcd() ALWAYS ORs NIA_KG_DIRECT | physicalSchemeId
+# into fmbm_rfpne for a single-bound-scheme port. F-162 already wrote and
+# CI-wired the fix (fman_port_set_kg_direct_scheme()) but only ever called
+# it from the abandoned attach_cc()/detach_cc() CC-graft mechanism -- the
+# ACTUAL arm path every T-M3-R test has used, fman_pcd_kg_port_arm_fe()/
+# _disarm_fe(), never calls it. Confirmed directly by this session's own
+# dmesg on every arm: "rfpne 0x00480200", never "... | NIA_KG_DIRECT |
+# scheme_id". Without it, KeyGen uses the generic SI/match-vector walk
+# instead of deterministically dispatching to the CC-attached scheme --
+# meaning every carefully-configured EKFC/key-format/hash_bytes_offset/
+# PORT_ID value tested on "scheme 4" so far may never have been consulted
+# for live traffic if the generic walk selects a different scheme.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_178.py" 2>&1
+    echo "### fman_pcd_kg.c: F-178 NIA_KG_DIRECT wired into the FE-VM arm path"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 

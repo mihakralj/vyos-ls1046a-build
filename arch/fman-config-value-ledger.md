@@ -58,6 +58,12 @@ Cite one of these for every vendor-side value quoted below:
 | `next_entry_hi:16`/`next_entry_lo:32` (chain pointer, `swab64`'d) | matches | `F-144` (byte-order fix) | same | `[999-5.4]` `fm_ehash.c` `ExternalHashTableAddKey()` | cross-checked-match |
 | key bytes, position (offset 8) | matches | patch 0128 | same (8-byte header before key) | `[999-5.4]` `fm_ehash.h` | cross-checked-match — **structural** position only; key *content* (does it include `PORT_ID`?) is the open question below |
 
+## Port dispatch NIA (`fmbm_rfpne`)
+
+| Field | This project | Set by | Vendor value | Source | Status |
+|---|---|---|---|---|---|
+| `NIA_KG_DIRECT` (bit 8) \| `physicalSchemeId` (bits 4:0) | **never set** — `fmbm_rfpne` stays `0x00480200` on every arm this whole session | `fman_pcd_kg_port_arm_fe()` (patch 0132), the function backing `fe_arm engage` | **always OR'd in for a single-bound-scheme port** (`fm_port.c` `SetPcd()`, `PRS_AND_KG_AND_CC`/`PRS_AND_KG` cases, `directScheme` branch) | `[999-5.4]` `fm_port.c`; `[.185-live]` dmesg confirms `rfpne 0x00480200` on every single test this session | **cross-checked-MISMATCH, fix written (`F-178`), not yet board-tested.** `F-162` (2026-08-05) already wrote and CI-wired the exact helper (`fman_port_set_kg_direct_scheme()`) but called it only from the abandoned `attach_cc()`/`detach_cc()` CC-graft mechanism, never from `arm_fe()`/`disarm_fe()` — the function pair every T-M3-R test has actually used. Without this bit, KeyGen uses the generic SI/match-vector walk instead of deterministic dispatch to scheme 4 — potentially explaining every prior negative result uniformly, since none of scheme 4's other correctly-configured fields matter if live traffic never dispatches through it. See `plans/ASK2-MASTER-PLAN.md` §4.1 for the full writeup. |
+
 ## KeyGen scheme register (`kgse_ekfc`)
 
 | Field | This project | Set by | Vendor value | Source | Status |
