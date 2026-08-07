@@ -103,6 +103,9 @@ new_defs = (
 apply_block("ENQ context-offset/NIA #defines", old_defs, new_defs)
 
 # --- 2. fman_pcd_fe_enq_build(): drop fqid param, vendor-correct encoding.
+#        NOTE: F-073D (2026-07-16, already wired in and runs before this
+#        fixup) rewrote the next_fe_off line to hardcode pcd->fe_exit_off
+#        -- anchor against ITS output, not patch 0127's original text.
 old_enq_build = '''static int fman_pcd_fe_enq_build(struct fman_pcd *pcd, u32 fqid,
 				 unsigned long next_fe_off)
 {
@@ -126,7 +129,7 @@ old_enq_build = '''static int fman_pcd_fe_enq_build(struct fman_pcd *pcd, u32 fq
 	p.type = FMAN_FE_TYPE_ENQ;
 	p.flags = FMAN_FE_ENQ_FQID;
 	p.nia = fqid;
-	p.next_fe_off = next_fe_off;
+	p.next_fe_off = pcd->fe_exit_off;	/* F-073D: chain to EXIT(DEALLOCATE) */
 
 	list_del(&obj->node);
 	fman_pcd_fe_build(muram, obj->muram_off, &p);
@@ -275,143 +278,76 @@ new_ctx = (
 apply_block("ehash_add_key context-block write", old_ctx, new_ctx)
 
 # --- 6. fman_pcd_fe_flow_write(): look up mux/enq offsets, pass through.
-old_flow_write = '''static ssize_t fman_pcd_fe_flow_write(struct file *file,
-				      const char __user *ubuf,
-				      size_t count, loff_t *ppos)
-{
-	struct seq_file *s = file->private_data;
-	struct fman_pcd *pcd = s->private;
-	struct fman_pcd_ehash_table *t;
-	unsigned long enq_fe_off = 0;
-	unsigned int tbl_idx;
-	char buf[160], keytok[2 * FMAN_EHASH_FLOW_KEY_MAX + 2];
-	u8 key[FMAN_EHASH_FLOW_KEY_MAX];
-	u8 key_size = 0;
-	int nf, err;
-	const char *k;
+#        NOTE: F-118 (2026-08-01, already wired in) inserts a whole "del
+#        <keyhex>" verb between the "clear" branch and the "add" sscanf --
+#        anchoring the WHOLE function body is fragile against unrelated
+#        future insertions like that one, so this edit is split into three
+#        small, independently-anchored surgical edits instead.
 
-	if (count == 0 || count >= sizeof(buf))
-		return -EINVAL;
-	if (copy_from_user(buf, ubuf, count))
-		return -EFAULT;
-	buf[count] = '\\0';
+# 6a. Variable declarations: enq_fe_off -> fqid, add enq_obj.
+old_flow_decls = (
+    "\tstruct fman_pcd_ehash_table *t;\n"
+    "\tunsigned long enq_fe_off = 0;\n"
+    "\tunsigned int tbl_idx;\n"
+)
+new_flow_decls = (
+    "\tstruct fman_pcd_ehash_table *t;\n"
+    "\tstruct fman_pcd_fe_obj *enq_obj;\n"
+    "\tunsigned long fqid = 0;\t/* F-175: was an ENQ FE MURAM offset */\n"
+    "\tunsigned int tbl_idx;\n"
+)
+apply_block("fe_flow_write decls (fqid)", old_flow_decls, new_flow_decls)
 
-	mutex_lock(&pcd->fe_lock);
-	if (!strncmp(buf, "clear", 5)) {
-		fman_pcd_ehash_flow_clear_all(pcd);
-		mutex_unlock(&pcd->fe_lock);
-		return count;
-	}
+# 6b. The "add" sscanf: 3rd arg is now the target FQID.
+old_flow_scan = (
+    '\tnf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &enq_fe_off);\n'
+)
+new_flow_scan = (
+    "\t/* F-175: 3rd arg is now the target FQID, not an ENQ FE MURAM\n"
+    "\t * offset -- the real per-flow dispatch target lives in the flow\n"
+    "\t * record's own workspace context block (see fman_pcd_ehash_add_key).\n"
+    "\t */\n"
+    '\tnf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &fqid);\n'
+)
+apply_block("fe_flow_write sscanf (fqid)", old_flow_scan, new_flow_scan)
 
-	nf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &enq_fe_off);
-	if (nf < 2) {
-		mutex_unlock(&pcd->fe_lock);
-		return -EINVAL;
-	}
-
-	/* Parse the hex key string into bytes. */
-	for (k = keytok; k[0] && k[1]; k += 2) {
-		int hi = fman_pcd_hexval(k[0]);
-		int lo = fman_pcd_hexval(k[1]);
-
-		if (hi < 0 || lo < 0 || key_size >= FMAN_EHASH_FLOW_KEY_MAX) {
-			mutex_unlock(&pcd->fe_lock);
-			return -EINVAL;
-		}
-		key[key_size++] = (u8)((hi << 4) | lo);
-	}
-	if (key_size == 0 || keytok[2 * key_size] != '\\0') {
-		mutex_unlock(&pcd->fe_lock);
-		return -EINVAL;		/* odd-length or trailing junk */
-	}
-
-	t = fman_pcd_ehash_table_by_index(pcd, tbl_idx);
-	if (!t) {
-		mutex_unlock(&pcd->fe_lock);
-		return -ENODEV;
-	}
-
-	err = fman_pcd_ehash_add_key(t, key, key_size, enq_fe_off);
-	mutex_unlock(&pcd->fe_lock);
-
-	return err ? err : count;
-}'''
-new_flow_write = '''static ssize_t fman_pcd_fe_flow_write(struct file *file,
-				      const char __user *ubuf,
-				      size_t count, loff_t *ppos)
-{
-	struct seq_file *s = file->private_data;
-	struct fman_pcd *pcd = s->private;
-	struct fman_pcd_ehash_table *t;
-	struct fman_pcd_fe_obj *enq_obj;
-	unsigned long fqid = 0;
-	unsigned int tbl_idx;
-	char buf[160], keytok[2 * FMAN_EHASH_FLOW_KEY_MAX + 2];
-	u8 key[FMAN_EHASH_FLOW_KEY_MAX];
-	u8 key_size = 0;
-	int nf, err;
-	const char *k;
-
-	if (count == 0 || count >= sizeof(buf))
-		return -EINVAL;
-	if (copy_from_user(buf, ubuf, count))
-		return -EFAULT;
-	buf[count] = '\\0';
-
-	mutex_lock(&pcd->fe_lock);
-	if (!strncmp(buf, "clear", 5)) {
-		fman_pcd_ehash_flow_clear_all(pcd);
-		mutex_unlock(&pcd->fe_lock);
-		return count;
-	}
-
-	/* F-175: 3rd arg is now the target FQID, not an ENQ FE MURAM
-	 * offset -- the real per-flow dispatch target lives in the flow
-	 * record's own workspace context block (see fman_pcd_ehash_add_key).
-	 */
-	nf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &fqid);
-	if (nf < 2) {
-		mutex_unlock(&pcd->fe_lock);
-		return -EINVAL;
-	}
-
-	/* Parse the hex key string into bytes. */
-	for (k = keytok; k[0] && k[1]; k += 2) {
-		int hi = fman_pcd_hexval(k[0]);
-		int lo = fman_pcd_hexval(k[1]);
-
-		if (hi < 0 || lo < 0 || key_size >= FMAN_EHASH_FLOW_KEY_MAX) {
-			mutex_unlock(&pcd->fe_lock);
-			return -EINVAL;
-		}
-		key[key_size++] = (u8)((hi << 4) | lo);
-	}
-	if (key_size == 0 || keytok[2 * key_size] != '\\0') {
-		mutex_unlock(&pcd->fe_lock);
-		return -EINVAL;		/* odd-length or trailing junk */
-	}
-
-	t = fman_pcd_ehash_table_by_index(pcd, tbl_idx);
-	if (!t) {
-		mutex_unlock(&pcd->fe_lock);
-		return -ENODEV;
-	}
-
-	enq_obj = list_first_entry_or_null(&pcd->fe_enq,
-					   struct fman_pcd_fe_obj, node);
-	if (!pcd->fe_mux_off || !enq_obj) {
-		mutex_unlock(&pcd->fe_lock);
-		return -ENOENT;	/* fe_singletons/fe_enq build first */
-	}
-
-	err = fman_pcd_ehash_add_key(t, key, key_size,
-				     (u32)pcd->fe_mux_off,
-				     (u32)enq_obj->muram_off, (u32)fqid);
-	mutex_unlock(&pcd->fe_lock);
-
-	return err ? err : count;
-}'''
-apply_block("fe_flow_write mux/enq lookup", old_flow_write, new_flow_write)
+# 6c. Final block: look up mux/enq singleton offsets, pass through.
+old_flow_tail = (
+    "\tt = fman_pcd_ehash_table_by_index(pcd, tbl_idx);\n"
+    "\tif (!t) {\n"
+    "\t\tmutex_unlock(&pcd->fe_lock);\n"
+    "\t\treturn -ENODEV;\n"
+    "\t}\n"
+    "\n"
+    "\terr = fman_pcd_ehash_add_key(t, key, key_size, enq_fe_off);\n"
+    "\tmutex_unlock(&pcd->fe_lock);\n"
+    "\n"
+    "\treturn err ? err : count;\n"
+    "}"
+)
+new_flow_tail = (
+    "\tt = fman_pcd_ehash_table_by_index(pcd, tbl_idx);\n"
+    "\tif (!t) {\n"
+    "\t\tmutex_unlock(&pcd->fe_lock);\n"
+    "\t\treturn -ENODEV;\n"
+    "\t}\n"
+    "\n"
+    "\tenq_obj = list_first_entry_or_null(&pcd->fe_enq,\n"
+    "\t\t\t\t\t   struct fman_pcd_fe_obj, node);\n"
+    "\tif (!pcd->fe_mux_off || !enq_obj) {\n"
+    "\t\tmutex_unlock(&pcd->fe_lock);\n"
+    "\t\treturn -ENOENT;\t/* fe_singletons/fe_enq build first */\n"
+    "\t}\n"
+    "\n"
+    "\terr = fman_pcd_ehash_add_key(t, key, key_size,\n"
+    "\t\t\t\t     (u32)pcd->fe_mux_off,\n"
+    "\t\t\t\t     (u32)enq_obj->muram_off, (u32)fqid);\n"
+    "\tmutex_unlock(&pcd->fe_lock);\n"
+    "\n"
+    "\treturn err ? err : count;\n"
+    "}"
+)
+apply_block("fe_flow_write mux/enq lookup", old_flow_tail, new_flow_tail)
 
 # --- 7. fman_pcd_fe_flow_add() (ask.ko-facing API, F-094's retyped body):
 #        same mux/enq lookup so it stays consistent with the new signature.
