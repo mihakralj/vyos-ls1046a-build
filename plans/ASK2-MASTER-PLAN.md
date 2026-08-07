@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.10.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.11.0 · 2026-08-07 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -641,22 +641,35 @@ re-derived for the new 14-byte content), `fe_kg_ekfc set 4 801c0006`
 SYNs confirmed transmitted. `fe_ehash_stats` after: `pkt_count` still `0`.
 Disengaged cleanly, RX deaf afterward (established pattern).
 
-**`portid=0` was only one candidate out of several plausible values** —
-`portid` has no direct correspondence to this project's own hardware port
-numbering, so a negative result at `0` doesn't rule out the whole
-14-byte-key theory, only that specific value. **Proposed next, before
-conceding to Phase 3**: a single-cycle batch test — insert multiple flow
-records for the *same* 5-tuple, one per plausible `portid` candidate
-(`0`–`10`, covering every value observed across real vendor config
-files, plus this port's own hardware ID `0x11` on the chance the mapping
-is 1:1 after all), all in one `fe_flow`/arm cycle. Send one matching
-frame, check `fe_ehash_stats` for **all** inserted records — whichever
-one (if any) shows `pkt_count>0` reveals which `portid` value hardware
-actually extracts, without needing one cold-boot cycle per candidate.
-**Held for explicit go-ahead** (needs the same arm/frame/disengage
-sequence, still subject to the standing per-attempt confirmation rule).
+**Batch-tested, 2026-08-07, all 16 candidates — negative.** `portid=0`
+alone doesn't rule out the 14-byte-key theory (no direct correspondence
+between vendor's application-assigned `portid` and this project's own
+hardware port numbering), so a single-cycle batch test inserted one flow
+record per possible 4-bit `portid` value (`0x00`–`0x0f`, the full range
+implied by `<combine mask="0xF">`) for the identical 5-tuple. First
+required correcting the boot procedure mid-test: an agent-issued `sudo
+reboot` is a **warm** reboot and does not clear BMI/MURAM state (RM
+warning, §10.9 in the microcode doc) — the user corrected this and
+provided the smart-plug REST API (`192.168.1.187`, device 10) for a
+genuine power-cycle cold boot, which was then used. Fresh cold boot
+confirmed, chain rebuilt, all 16 candidate flows re-inserted at their
+(deterministic, unchanged) buckets, baseline confirmed clean across all
+16, armed (`EKFC=0x801c0006` confirmed via dmesg), 3 matching TCP SYNs
+confirmed transmitted. **`fe_ehash_stats` after: all 16 candidates stayed
+`pkt_count=0`.** Disengaged cleanly.
 
-**T-M3-R Phase 3 (if the batch `PORT_ID` test above is ALSO negative, or the user opts not to run it) — stop guessing at registers.**
+**This exhausts the plausible `portid` value space for a 4-bit field on
+this board.** Combined with the earlier structural/sync/value-cross-check
+work (Phase 1, Phase 2, `F-053`), every concrete, evidence-backed
+hypothesis this project has generated for the FE-VM ehash zero-HIT
+symptom — construction-level, sync-related, config-value, and now
+key-content — has been tested and found negative. The 14-byte-`portid`
+theory remains directly, unreconciled contradictory with the 2026-07-13
+13-byte measurement (see `arch/fman-vendor-source-extraction-2026-08-07.md`
+§5) — neither is confirmed correct, both remain open questions, but
+neither currently produces a HIT on this silicon either way.
+
+**T-M3-R Phase 3 (Phase 1, Phase 2, `F-053`, and the full `PORT_ID` batch test are all negative) — stop guessing at registers.**
 Every construction-level hypothesis this project has ever generated will be
 exhausted. Needs a genuinely new diagnostic capability (a synchronous way to
 observe the FE-VM's actual comparator behavior — `fe_probe`/`fe_hash_probe`
