@@ -2226,6 +2226,23 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-173 wmb() before ehash bucket-head publish"
 fi
 
+# F-174 (2026-08-07, T-M3-R attempt 7): F-172/F-173 both still show every
+# frame -- matching or not -- converging on the same FQID, despite a live
+# register read confirming FMBM_RFPNE/FMBM_RCCB are correctly wired to our
+# chain. qdrant surfaced an old, apparently-lost fixup (F-062e,
+# 2026-07-14): DEALLOCATE on EXIT frees the frame buffer and falls through
+# to the KeyGen scheme's own default dispatch -- not a silent drop. Patch
+# 0124 still has DEALLOCATE set on BOTH Transition (the HIT path: EXT_HASH
+# -> MUX -> Transition -> ENQ) and Exit (the MISS path), so a genuine HIT
+# would deallocate-and-fall-through at Transition before ENQ's own
+# distinguishing FQID write ever takes effect -- matching this session's
+# symptom exactly, independent of AD species/key/mask/barrier. Strips
+# DEALLOCATE from both, restoring F-062e's fix.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_174.py" 2>&1
+    echo "### fman_pcd.c: F-174 DEALLOCATE stripped from Transition/Exit"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
