@@ -11,6 +11,24 @@ dispatch-table attribution).
 
 ---
 
+## 2026-08-08 (newest) — CORRECTION: w12849 branches to w12551, not w12830; pool tail is a one-pass slot walk with a shared error/continue exit
+
+**The earlier "pool_status_loop loop-back" reading misdecoded the branch
+immediate.** w12849 is `b3fffed6` — imm16 `0xfed6` sign-extends to **−298**,
+not `0xffed`/−19. Target = word **12551** (byte `0xc41c`, confirmed by the
+listing's own decode `brc 0x0000c41c`). w12849 is the **guard-failure
+convergence point** for the pool slot walk: all the per-slot
+`ld [off] → op_f0 [0xb01] → brc 0xc8c4 → st [off]` templates (w12675,
+w12685, w12698, w12751, w12763, … ≈12+ sites over offsets 0x08–0x60)
+converge on w12849, which jumps to the **shared status-check region
+w12551** (`7c19f808` reads FM_CTL status `[0xf808]`; `ld r1,[0xd018]`;
+`tst_dc r0,0xf838`; `op_eb r1,0x30c` params-base compute; `m_77 r0,[0x300]`;
+`m_78 r1,[0xfb00]`) — not back to w12830. So the tail routine
+(w12667–w12848) is a **one-pass per-frame bookkeeping walk** over ~22
+params-page offsets with a common error/continue exit into w12551, not a
+self-refresh loop. Naming-map §3 anchor corrected: `pool_status_loop` →
+`pool_slot_walk` (w12667–w12848) + `w12551 shared_status_check`.
+
 ## 2026-08-08 (late) — Naming harvest verified against qdrant + NXP; parse-result sub-fields named and applied
 
 Cross-checked the naming vocabulary (qdrant agent-memory + `nxp_docs` on
