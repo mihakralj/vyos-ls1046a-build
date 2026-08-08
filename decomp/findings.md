@@ -1,3 +1,4 @@
+
 # decomp/findings.md — Discovery Log
 
 **Newest first · Every entry states its evidence · "Open question —" marks the unresolved**
@@ -10,8 +11,181 @@ dispatch-table attribution).
 
 ---
 
-## 2026-08-08 (later still) — Wedge-mechanism disassembly + key-compare candidate
+## 2026-08-08 (newest) — FE-VM decompile restored; the `0x73` family is the FE-VM conditional-test core (the type dispatch is now readable)
 
+Restored the full Ghidra decompile pipeline after `/tmp/kilo` wipe (blob
+re-fetched from `.185`, code region = blob offset 244 → `fman-code-210.bin`,
+12852 words; import MUST use the full language ID `fman-risc:BE:32:default`,
+the short form `fman-risc` fails with "Unsupported language"). Key new decode:
+**the `0x73xx` family (190 sites) is the FE-VM's conditional-test core** —
+`prefix8=0x73`, `reg=bits[20:16]`, `imm16=low16`, semantics "test reg against
+the MURAM word at imm16 (or immediate), set cc; a following `brc` consumes
+it" — same role as the already-modeled `tst_dc` (`0xdc`). Added to the SLASpec
+as `tst_73` and recompiled; the decompiler now resolves the FE-VM branch
+skeleton (cc_dispatch/fm_ctl_a/enq_builder/frame_epilogue all decompile with
+real if/while structure). **The FE type dispatch idiom** is `ebce001a`
+(`op_eb r14, 0x1a` = shift word0 right 26 → extract type field bits[31:26])
+followed by `73ee7106` (`tst_73 r14, 0x7106`, low byte `0x06` = EXT_HASH, the
+highest FE type 1..6) — the per-FE-object type check, confirming anchors
+N01-N03 (types decoded field-wise, never full-word constants). **Correction:
+the region w790–w900 is a DATA TABLE, not code** (44 identical `73f8c420`
+records + `ffffffff` pads; all its `2e5f` offsets converge on w1268–w1270) —
+so of the 8 `ebce001a`+`73ee7106` sites only the five in the enq_builder
+region (w9068/w9112/w9242/w9436/w9488) are live code; w1805/w1832/w1844 sit
+in the data table. The FE-VM interpreter core is the enq_builder region
+w9040–w9520 (ENQ constant `0x02010000` materialized at w9055). New scripts in
+`decomp/ghidra/scripts/`: FmanFEVM.py, FmanFEVM2.py, FmanFullListing.py,
+FmanCCDisasm.py. Full listing `/tmp/kilo/fman-listing.txt`, decompiles
+`/tmp/kilo/fevm3.log`.
+
+## 2026-08-08 — E-HM9: wedge bisection localizes the wedge to the CC-engine dispatch of a frame to the FE_ENTER AD (before the FE-VM pool machinery)
+
+Full writeup in `decomp/experiments.md` E-HM9. Single-variable bisection
+using E-HM8's wedge-after-one-frame as the observable: the M2 scaffold
+(CONT_LOOKUP numKeys=0) classifies 3 frames 1:1, delivers to kernel, and
+does NOT wedge — the AC_CC dispatch machinery is healthy. The FE-VM chain
+wedges after one frame, and the wedge **survives** clearing the FE_ENTER
+`ALLOCATE` bit, clearing the EXIT `DEALLOCATE` bit, and bypassing EXT_HASH
+entirely (`FE_ENTER w3 → EXIT`). Post-wedge, the FE workspace pool is
+correctly configured and **completely untouched** (read index 4, depletion
+0, free-list intact) — the FE-VM ALLOCATE never consumed a slot. So the
+frame never reaches the FE-VM pool machinery: the wedge/consumption is at
+the **CC engine's dispatch of a frame to the FE_ENTER-form AD
+(CONT_LOOKUP|ALLOCATE) itself**. Two methodology corrections: FMBM_RGPR is
+at **port-base + 0x30C** (not 0x38); and earlier params-page reads were
+invalid (mmap not page-aligned to the target — the correct pattern is
+pcd-snapshot's single-page-aligned reads). Board left cold-booted and
+clean.
+
+## 2026-08-08 (earlier) — E-HM8: armed FE-VM wedges port RX after one frame; earlier armed nulls were frame-less
+
+See `decomp/experiments.md` E-HM8 for the full writeup. The headline facts:
+(1) frames were not arriving at `.185`'s eth4 for most of today's armed
+test cycles (eth4 kernel RX 0, tcpdump 0 while `.106` transmitted) — the
+link works after a cold boot, then the port goes RX-deaf after FE-VM
+arming, surviving disarm, recoverable only by another cold boot. (2)
+Today's E-HM4/5/6/7 armed null results, the params-page `+0x54/+0x58`
+observation, and the FE_ENTER AD w3/w0 corruption canaries are all
+invalidated — they were frame-less. (3) With a genuinely-arriving frame
+(cold boot → arm → one SYN → `kgse_spc` 0→1, consumed by FMan, kernel RX
+unchanged), the DDR record is still byte-for-byte identical — so the
+"record never touched" finding is now confirmed with real traffic, and the
+fault window is definitively "after KeyGen classification, before the ehash
+comparator". (4) The wedge-after-one-frame is a new reproducible silicon
+behavior matching `decomp/wedge-path.md`'s predicted pool-drain mechanism,
+and is the recommended diagnostic observable going forward (patch
+microcode, watch whether the wedge disappears). Also disproven cheaply:
+the FM_CTL params-page/`FMBM_RGPR` hypothesis (working vendor board `.106`
+has `FMBM_RGPR=0` too); `/dev/mem` port-BMI-block writes don't stick on
+6.18.41 while MURAM writes do, and `m.flush()` EINVALs (writes actually
+succeed — scripts must skip flush); the `w12667`–`w12850` "pool routine"
+is a generic status-refresh loop, not the ALLOCATE pool routine; full-MURAM
+diffing is too noisy on a live board.
+
+## 2026-08-08 (earlier) — Methodology bug found: this session's own test script never re-synced KeyGen EKFC after reboot/kexec; corrected retest (E-HM7) still negative
+
+Prompted by the user asking why 13-byte (rather than 14-byte) keys were in
+use. Investigating found the live boot-default KeyGen scheme 4 EKFC is
+actually **`0x00180006`** (12-byte, `IPSRC1|IPDST1|L4PSRC|L4PDST`, no
+PROTO, no PORT_ID) — neither the 13 bytes `AGENTS.md` documents as
+"Target EKFC" nor the 14 bytes this whole investigation has otherwise
+assumed. Traced the cause: this session's own `T26b-shift-sweep.sh`
+(reused unmodified across E-HM4, E-HM5, E-HM6) never calls `fe_kg_ekfc` —
+it only builds the ehash side. Every kexec/reboot this session ran before
+those three experiments reset KeyGen back to this 12-byte boot-default,
+meaning E-HM4/E-HM5/E-HM6 ran with KeyGen extracting a fundamentally
+different key than the one written into the ehash table — their specific
+conclusions about `ce`/`cf`/`hash_shift` are confounded, though the
+observed "record never touched" pattern itself still held. Corrected
+retest (E-HM7): explicitly ran `fe_kg_ekfc set 4 801c0006` before arming,
+confirmed live via `kg-scheme-read.py` that EKFC was genuinely
+`0x801c0006` at arm time, re-ran the standard baseline test. **Still
+byte-for-byte identical / `pkt_count=0`** — a properly-synchronized
+14-byte portid-prefixed key still does not HIT, now independently
+confirmed a third time (after 2026-08-06's discovery and 2026-08-07's
+16-candidate batch test). Also flagged, not fixed here: `AGENTS.md` §S6
+"Target EKFC" still says `0x001C0006`/13 bytes, stale relative to the
+2026-08-06/07 PORT_ID discovery — needs the project owner's correction
+since `AGENTS.md` is the binding rules document. Full writeup:
+`decomp/experiments.md` "METHODOLOGY CORRECTION" section.
+**UPDATE 2026-08-08:** AGENTS.md §S6 has since been corrected to the 14-byte target.
+
+## 2026-08-08 (later) — E-HM5 + E-HM6: `ce`/`cf` isolated and compound-zeroed on silicon — both negative
+
+Direct follow-through on E-HM2's own noted next steps ("test `cf` the same
+way to isolate which of the pair matters"; "patch both together for a
+stronger perturbation"). Live-read the true current values first
+(`w1947=0xce000189` subop `000`; `w1948=0xcf800241` subop `100` — refines,
+does not contradict, the schematic notation used earlier). **E-HM5**:
+zeroed `w1948` alone, delivered via the proven kexec pipeline (post-kexec
+blob md5 matched the precomputed patch exactly), ran the standard armed
+test — byte-for-byte identical record, clean faults, correct wiring, same
+null result as E-HM2's `ce`-alone test. **E-HM6**: zeroed `w1947` and
+`w1948` together (compound, from a fresh pristine baseline) — again
+byte-for-byte identical, clean faults, correct wiring. Three independent
+mutations of increasing strength on the same 2-instruction chain (`ce`
+alone, `cf` alone, both together) now all produce identical null results —
+materially stronger evidence for Candidate A (frames never reach this deep
+into `bucket_index`/`ehash_walker`) than any single test, since the
+compound mutation was the one most likely to show *some* divergence if
+these opcodes did anything load-bearing for this flow. Board `.185`
+rebooted after E-HM6 and confirmed fully restored to pristine (blob md5
+`6f23090a3d5ae8b302ea41fd90a14d4d`, no ehash tables, no armed ports, all
+expected links up). Full writeup: `decomp/experiments.md` (E-HM5, E-HM6),
+`decomp/hitmiss-path.md` (updated). The next test that would directly
+discriminate reachability — a canary write or deliberate infinite loop on
+`bucket_index`'s first instruction — carries a materially different risk
+profile (possible shared-engine hang affecting all FMan1 ports, recoverable
+only by hard power-cycle) and was not attempted; it needs its own
+specifically-scoped confirmation.
+
+## 2026-08-08 (later) — E-HM4: hash_shift sweep (0-3), all clean negative
+
+Follow-up to the `nxp_docs` survey below. LSDKUG's "4 lower bits must be
+cleared" mask convention turned out untestable through this project's own
+software interface at all — `fman_pcd_ehash_table_set()` structurally
+requires `mask = 2^n-1` (validated, `-EINVAL` otherwise). The nearest
+testable analog, sweeping `hash_shift` (0-3, the field's full range) to see
+if the silicon selects a different 16-bit window of the 64-bit hash than
+software assumes, was run as **E-HM4**: all three untested values (1, 2, 3;
+0 was already covered by the original baseline) came back clean negative —
+correctly-computed bucket indices (verified independently in Python),
+correct `FMBM_RCCB` wiring, clean fault registers, byte-for-byte untouched
+320-byte DDR records after matching traffic, every time. Pure debugfs
+configuration sweep, no microcode patch. Exhaustively closes "wrong
+shift/window" as a hypothesis class; leaves the low-mask-bits question
+itself open (untestable without a microcode patch or a hand-rolled
+raw-memory dual-bucket insert, neither attempted). Fourth independent
+variation (after E-HM2, E-HM3) producing the identical "wiring perfect,
+record never touched" signature. Full writeup:
+`decomp/experiments.md` (E-HM4), `decomp/hitmiss-path.md` "new source"
+section (updated).
+
+## 2026-08-08 (later) — New NXP documentation source surveyed (nxp_docs qdrant)
+
+A separate `nxp_docs` qdrant MCP server (distinct from this project's own
+agent-memory qdrant) became available, indexing `LS1046ADPAARM.pdf` (QorIQ
+LS1046A DPAA Reference Manual, Rev 0, 03/2017 — the actual chip-specific RM,
+not the LS1043A analog previously relied on) and `LSDKUG_Rev21.08.pdf`
+(Layerscape SDK User Guide, Rev 21.08, 09/2022 — full FMan PCD driver + FMC
+XML config reference). Surveyed with ~13 focused queries. Full writeup and
+the one new testable hypothesis it produced (a possible "4 lower bits must
+be cleared" constraint on hash-selection masks, from the RM/driver's
+*documented* CC Hash-Table construct — a different, RM-covered mechanism
+from this project's own proprietary EXT_HASH FE, so not confirmed to apply)
+are in `decomp/hitmiss-path.md`'s "New source" section, dated the same day.
+Other yield: a complete FMC Result-Array byte-offset table (confirms `nia`
+is a real, 3-byte NXP-documented field, matching this project's own NIA
+convention independently); confirmation the LS1046A RM has its own Chapter
+5 "Frame Manager (FMan)" (content itself not yet surfaced by any query
+tried); two RM table references ("Table 8-398. Table Descriptor (Type =
+01)", "Table 8-399. Operation Code Description") that sound directly
+relevant to AD/opcode encoding but whose content did not surface — they
+appear to belong to a different, more generic "DPAA Reference Manual"
+numbering not (yet) present in this qdrant corpus. Nothing found
+contradicts any previously-settled fact in this project's own docs.
+
+## 2026-08-08 (later still) — Wedge-mechanism disassembly + key-compare candidate
 User asked to find (a) the key-comparison instruction and (b) why the
 microcode wedges, and how to unwedge — via disassembly, not further qdrant
 archaeology. qdrant was still consulted first (per S1) to gather the

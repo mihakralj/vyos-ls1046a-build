@@ -90,7 +90,7 @@ labeling MURAM descriptor data the microcode writes.)
 | `0x012ee0e8` | `ERRORS_DISCARD_MASK` | §6 params page |
 | `0x00007fff` | `EHASH_MASK` (32768 buckets) | §7.2/§10 |
 | `0x80500002` `0xC04C0000` `0x80000006` | `KGSE_MODE_RSS` / `_PLCR` / `_AC_CC` | 2026-06-23 verify |
-| `0x00180006` / `0x001C0006` | `KGSE_MV_4TUPLE` / `_5TUPLE` | |
+| `0x00180006` / `0x001C0006` / `0x801C0006` | `KGSE_MV_4TUPLE` / `_5TUPLE` (historical) / `_6TUPLE` (current target) | |
 
 **NIA engine field** (low half-word / bits[22:16], `arch` §5): `0x44`=HWP,
 `0x48`=HWK, `0x50`=BMI. Engine index table (`(nia>>20)&0xf`): `0`=DONE,
