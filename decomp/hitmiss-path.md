@@ -272,3 +272,49 @@ Tools from this pass: `decomp/ghidra/scripts/{FmanHitMissDispatch,
 FmanCFGTrace,FmanW4187,FmanEpilogues,FmanEpilogueTerminal,
 FmanDispatchReturn,FmanSlotSelector,FmanScratchWrites,
 FmanScratchOrigin}.py`.
+
+## Register trace + decompiler re-read (2026-08-08, continued)
+
+Tried the most targeted remaining lead: does the register asymmetry right
+before the two `jmp → w12133` sites (`w4197: op_eb r8,0x1a` vs
+`w4263: op_eb r1,0x0`) carry the HIT/MISS outcome into the shared epilogue?
+Precisely decoded `regfld` for every instruction (not just modeled ones)
+across the epilogue's first 127 words
+(`decomp/ghidra/scripts/FmanRegTrace.py`). **Negative**: `r8` is referenced
+**zero times** anywhere in that window — dead after being set, at least
+locally. `r1` gets touched 29 times, but the first touch sits inside a
+block `w12144`'s branch can skip entirely, so its incoming value isn't
+reliably consulted either. This specific hypothesis doesn't hold up.
+
+**More significant: re-read the "key-compare loop" through the decompiler
+and revised the framing.** Earlier this session, the tight loop at
+`w3304`–`w3309` (reading `[0x1b00]`/`[0x1b01]`) was described as the
+best candidate for a byte-by-byte key-compare loop. Decompiling the region
+(`decomp/ghidra/scripts/FmanCompareDecompile.py`) shows `fman_test_dc`
+there checking a 4-byte fetch from `[0x1b00:0x1b04]` against fixed
+patterns like `0x28f8` — and the *surrounding* logic (`decomp/experiments`
+region) tests further fixed patterns (`0x27f8`, `0x20b8`, `0xf8b8`,
+`0x20f8`, `0xf978`, `0x1938`, `0xf878`) that don't resemble literal
+expected key-byte values. Given the shared `0xf8`-suffix across almost all
+of them, `fman_test_dc` more plausibly performs a **masked status check**
+(AND with a fixed mask, e.g. `0xf8` = top 5 bits, then compare) than a
+literal byte-equality test — i.e. this is very likely more of the same
+generic "poll a hardware resource's status" idiom found throughout, not a
+software memcmp loop.
+
+**Revised working hypothesis**: the EXT_HASH FE's actual byte-for-byte key
+comparison may run in **dedicated hardware** (a comparator engine separate
+from the general-purpose FE-VM RISC core), with the microcode's role
+limited to: DMA-fetch the candidate record → trigger the comparator →
+poll for completion (all the `park`/`tst_dc`/`op_f0` idioms found
+throughout this region) → read a single match/no-match status bit. Under
+this reading, the original `w3384`–`w3388` decision point (`ldb
+r0,[0x86a]` → `tst_dc r0,0xf838` → branch) is *more* plausible as the real
+HIT/MISS check, not less — it would be reading the comparator's final
+completion/match status after all the surrounding polling infrastructure
+finishes, rather than a byte-by-byte loop needing to be found separately.
+**Still unconfirmed** — this is a structural reinterpretation that makes
+the existing evidence more coherent, not a new proof. The oracle test that
+would settle it: patch the immediate `0xf838` (or the byte at `[0x86a]`'s
+source) and observe whether HIT/MISS behavior changes in a predictable
+way.
