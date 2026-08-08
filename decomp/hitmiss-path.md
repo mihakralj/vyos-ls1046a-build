@@ -192,3 +192,83 @@ touching this record. **(B) directly connects this session's disassembly
 work to this silicon result** and is now the most concrete, targeted next
 oracle experiment: patch one of `ce`/`cf`'s immediates and observe whether
 the bucket a known-good key lands in changes.
+
+**E-HM2 (live patch, `ce` immediate zeroed) result: no effect** — see
+`decomp/experiments.md`. Zeroing `w1947`'s immediate (`0xce000189 →
+0xce000000`) via the proven `qef-patch`→DTB→`kexec` pipeline produced no
+change at all: the record was still byte-for-byte untouched. This doesn't
+resolve (A) vs (B) on its own — it's consistent with either "`ce` isn't the
+load-bearing part of bucket selection" or "the code isn't reached at all
+regardless of what's patched there."
+
+## Deep CFG trace toward the actual HIT/MISS dispatch (2026-08-08, later)
+
+Went back to disassembly specifically to find the instruction(s) that read
+the EXT_HASH descriptor's `w5` (`nextFEPtr`, HIT) vs `w6` (`missNextFE`,
+MISS) and branch accordingly — using Ghidra's own flow APIs
+(`getFlows()`), not manual hex arithmetic, to keep every branch target
+exact (`decomp/ghidra/scripts/FmanCFGTrace.py`).
+
+**Precisely located the compare-loop's exit fork:**
+```
+w3384  ldb r0,[0x86a]
+w3385  op_eb r0,0x0
+w3386  tst_dc r0,0xf838
+w3387  brc -> w4187      (exit)
+w3388  jmp -> w2837       (unconditional retry: back to ehash_walker's own entry)
+```
+This is the cleanest, most precise branch-fork found in the whole
+investigation — a genuine two-way split at the CFG level, not an inferred
+one.
+
+**Followed the exit path (`w4187`) through several more forks** — all
+CFG-traced, not hand-read — converging on:
+- a large, self-looping "frame epilogue" region (`w12091`–`w12851`-ish,
+  the tail of the image) doing generic per-frame bookkeeping: context
+  field byte-swaps, timestamp/stat-adjacent writes (`ctx 0xd030`–`0xd03f`
+  processed in a repetitive 8-byte-pair pattern), and its own internal loop
+  (`w12313: jmp → w12133`);
+- a genuine, structurally unambiguous **dispatch-table pattern** at
+  `w40`–`w180` (repeating `brc → w104` / data-setup instruction pairs —
+  a real switch-statement shape, not a guess). The epilogue's several exits
+  land on *specific slots* within this table (`w87`, `w98`, `w114`,
+  `w116`), not a generic "restart" point — meaning the epilogue selects
+  *which* table entry to jump to based on some outcome, which is
+  structurally exactly where a HIT/MISS-shaped selection would live.
+
+**A tempting lead, traced fully and retracted.** The code selecting
+between those table slots (`w12690`–`w12789`) contains `ld r1,[0x14]` and
+`ld r1,[0x18]` — matching `w5`/`w6`'s exact byte offsets. Before trusting
+this, checked the SLEIGH model: `ld` reads an **absolute** 16-bit address
+(no register-relative mode exists in this ISA model), so `[0x14]` cannot
+be a runtime-relocatable read of the EXT_HASH descriptor (which lives at a
+different MURAM address every time it's built) — it must be a **fixed,
+low-address scratch slot**. Traced where that slot gets *written* to check
+whether it's populated *from* the descriptor: it isn't. `0x14` and `0x18`
+turned out to be two of **eight** slots (`0x20, 0x24, 0x28, 0x14, 0x18,
+0x1c, 0x2c, 0x60`) refreshed by a generic loop — each iteration does
+`op_f0 r1,[0xb01]` (combine with a fixed hardware-status address, the same
+DMA-poll idiom found earlier in `ehash_walker`) → error-check → write
+back. The offset match is coincidental, not a targeted descriptor read.
+**Retracted before being written up as a finding** — left here so the next
+session doesn't re-chase the same coincidence.
+
+**Where this leaves the search:** the exact instruction(s) that read
+`nextFEPtr`/`missNextFE` and dispatch to `MUX`/`EXIT` have not been
+isolated. The architecture appears to funnel many different FE-VM
+execution paths through this same shared epilogue/dispatch-table
+machinery — the HIT/MISS distinction may be carried as a *value* (in a
+register or a context field not yet identified) through several layers of
+shared code, rather than existing as one clean, isolated branch. Finding
+it precisely likely needs either: (a) tracing the *specific* register/value
+set right at the `w3387` fork (the `r0`/`r1`/`r8` values set via
+`op_eb ...,0x90` / `0x1a` / `0x0` immediately before the two observed
+`jmp → w12133` sites, which differ between the two paths and are a
+plausible "which outcome" parameter carried into the shared epilogue), or
+(b) an oracle test on the dispatch-table region itself once a specific,
+well-motivated patch target is identified there.
+
+Tools from this pass: `decomp/ghidra/scripts/{FmanHitMissDispatch,
+FmanCFGTrace,FmanW4187,FmanEpilogues,FmanEpilogueTerminal,
+FmanDispatchReturn,FmanSlotSelector,FmanScratchWrites,
+FmanScratchOrigin}.py`.
