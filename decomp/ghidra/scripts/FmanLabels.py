@@ -34,8 +34,8 @@ NAMES = {
     585: "fm_ctl_action_table", 583: "fm_ctl_action_table",
     534: "ipf", 8669: "hc_cc_update_aging",
     2837: "table_walker", 8676: "aging_walker_loop",
-    12133: "frame_epilogue", 12830: "pool_status_loop",
-    12849: "pool_status_loop_loopback", 9055: "enq_builder",
+    12133: "frame_epilogue", 12667: "pool_slot_walk",
+    12551: "shared_status_check", 9055: "enq_builder",
 }
 
 for i in range(NWORDS):
