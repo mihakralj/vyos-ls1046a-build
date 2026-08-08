@@ -11,6 +11,46 @@ dispatch-table attribution).
 
 ---
 
+## 2026-08-08 (late) — Naming harvest verified against qdrant + NXP; parse-result sub-fields named and applied
+
+Cross-checked the naming vocabulary (qdrant agent-memory + `nxp_docs` on
+LS1046ADPAARM.pdf / LSDKUG_Rev21.08.pdf) against `decomp/naming-map.md`:
+the harvest is correct and complete for FE types, NIA engines, HCOR
+dispatch slots, HM opcodes, FM_CTL params-page fields, and the BMI port
+registers (FMBM_RFPNE/RFQID/RCCB/RICP + NIA decode). Two stale labels
+corrected in `decomp/ghidra/scripts/FmanLabels.py` (v2): `w583` was
+`ipr_timeout` (superseded — slots 13/15/16 target the FM_CTL action-
+dispatch table) and `w12849` was `exit_stub` (corrected to
+`pool_status_loop_loopback`, with `w12830` named `pool_status_loop`).
+
+**New object names added** (from `struct fman_prs_result`, NXP-copyrighted
+mainline `fman.h`, cross-checked vs AN4760 Table 23 + LSDKUG Table 79 FMC
+result-array names): the 32 B parse-result sub-fields at IC `0x20–0x3F` —
+`lpid, shimr, l2r, l3r, l4r, cplan, nxthdr, cksum, flags_frag_off,
+route_type, rhp_ip_valid, shim_off[0..1], ip_pid_off, eth_off,
+llc_snap_off, vlan_off[0..1], etype_off, pppoe_off, mpls_off[0..1],
+ip_off[0..1], gre_off, l4_off, nxthdr_off` (full table in naming-map §8).
+These are read by frame_epilogue (w12133) at IC `0xd031–0xd042` = the
+header-offset tail (`shim_off[1]` … `nxthdr_off`, +1 byte into timestamp).
+Also labeled `ctx_ad_base` (IC 0xd008, read by the FE-VM entry w214),
+`ctx_current_nia` (IC 0xd0c4, the e9c9 cascade target), and the §7
+windows (`ad_base_window` 0x8000, `cc_ad_base` 0x8040/0x8050,
+`fm_ctl_status_window` 0xf800, +0xf900/0xfb00/0xfc00).
+
+**Base-convention warning recorded** (2026-08-06 derived finding):
+AN4760/FMC "parse-array byte" numbering counts from the start of the
+annotation region (+16 from `struct fman_prs_result` offsets) — a silent
+16 B base mismatch is a known bug class for RICP/contextOffsetInWS work.
+
+**Applied + verified headless**: FmanLabels.py v2 renamed 25 functions
+(both `fm_ctl_action_table` at w583/w585 applied cleanly) and labeled 40
+ctx/parse/window fields at the correct IC base (`0xd020+`); stale
+wrong-base `prs_*` labels (from a first run at `0x20–0x3f`) removed.
+`FmanVerifyNames.py` added for post-verify dumps. Project
+`/tmp/kilo/ghidra-proj/fman.gpr`, program `fman-code-210.bin`.
+
+---
+
 ## 2026-08-08 (newest) — FE-VM decompile: register/window map + 2c3f computed-branch + frame core identified
 
 Full-image address-window census from the regenerated listing (all `ld/st/

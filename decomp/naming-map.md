@@ -26,11 +26,14 @@ page"; `arch/fman-fe-ehash.md` §8.1). The IC has a **documented sub-layout**
 
 | IC offset | Field | Notes |
 |---|---|---|
-| `0x00–0x1F` | reserved | |
-| `0x20–0x3F` | **Parse Result** (32 B) | protocol IDs, L3/L4 header offsets, shim/next-header |
+| `0x00–0x07` | reserved | |
+| `0x08` | **AD base pointer** | FE-VM entry (w214) reads the AD base from `IC[0xd008]` → MURAM slot `0x1b00` word0 |
+| `0x10–0x1F` | reserved / FQD context | |
+| `0x20–0x3F` | **Parse Result** (32 B = `struct fman_prs_result`) | authoritative field names in §8; per-byte layout kernel-confirmed |
 | `0x40–0x47` | **Timestamp** (8 B) | IEEE-1588 if enabled |
 | `0x48–0x4F` | **KG Hash Result** (8 B) | RAW CRC-64 (seed ~0, no final complement) |
 | `0x50+` | beyond IC copy window | workspace scratch |
+| `0xC4` | **Current-NIA / action slot** | `e9c9` guarded-store cascade (w75–w103) writes the incoming NIA/action here before action-table dispatch |
 
 Total IC ≈ 246 B (`0xF6`). **[?]** If `ctx` base = `0xd000`, then
 `ctx[0xd020]`=parse_result, `ctx[0xd048]`=kg_hash. This base alignment is a
@@ -125,7 +128,8 @@ hard parser strips tags.)
 | 9 | w227 | `fm_ctl_b` | [?] |
 | 11 | w406 | `frame_replicator` | [?] |
 | 12 | w75 | `cc_dispatch` (fixed 27 w all tiers) | [STRONG] |
-| 16 | w583 | `ipr_timeout` (HCOR 0x10) | [STRONG] |
+| 13 | w585 | `fm_ctl_action_table` (action-dispatch preamble) | [FACT] 2026-08-08 (was `ipr_timeout`) |
+| 16 | w583 | `fm_ctl_action_table` (action-dispatch preamble) | [FACT] 2026-08-08 (was `ipr_timeout`) |
 | 17 | w534 | `ipf` (HCOR 0x11) | [STRONG] |
 | 19 | w8669 | `hc_cc_update_aging` (HCOR 0x13, ASK-added) | [FACT] three-way |
 
@@ -134,8 +138,8 @@ Structural anchors (rename by role): w2837 `table_walker`, w8676–w12072
 (was `exit_stub` at w12849 — **corrected 2026-08-08**: w12849 `b3fffed6`
 branches back to w12830, it is the loop-back/re-iterate point of the tail
 pool-status refresh loop, not a terminal exit; 12+ branches from w12675–
-w12780 land there as the common guard-failure continue), w9055 region
-`enq_builder`.
+w12780 land there as the common guard-failure continue), w9040–w9520
+`enq_builder` (ENQ constant materialized at w9055).
 
 ## 4. SDK function names — reference only (NOT microcode symbols)
 
@@ -233,3 +237,61 @@ current-NIA/action slot) that dispatch on the incoming action before
 converging at w104 → `b7ff0217` → w583 (action table). The imm values straddle
 the FM_CTL action-code space (0x06/0x0e/0x1e) and NIA values (0x200
 KG-CC_EN, 0x40a/0x802) — **[?]** exact compare semantics open.
+
+## 8. Parse-Result / Result-Array field vocabulary (authoritative)
+
+The 32 B parse result at **IC `0x20–0x3F`** is `struct fman_prs_result`
+(NXP-copyrighted mainline kernel `drivers/net/ethernet/freescale/fman/
+fman.h`, cross-checked against AN4760 Table 23 and the FMC result-array
+variable names in LSDKUG Table 79). Per-field names and IC offsets:
+
+| IC offset (IC `0x20` base) | Field | Meaning |
+|---|---|---|
+| `+0x00` (`IC 0x20`) | `lpid` | Logical port id |
+| `+0x01` (`0x21`) | `shimr` | Shim header result |
+| `+0x02` (`0x22`) | `l2r` | Layer 2 result flags (u16) |
+| `+0x04` (`0x24`) | `l3r` | Layer 3 result flags (u16; bit15 IPv4, bit14 IPv6) |
+| `+0x06` (`0x26`) | `l4r` | Layer 4 result flags (u8; bit6 UDP, bit5 TCP) |
+| `+0x07` (`0x27`) | `cplan` | Classification plan id |
+| `+0x08` (`0x28`) | `nxthdr` | Next header EtherType/IP-proto (u16) |
+| `+0x0A` (`0x2A`) | `cksum` | Running checksum (u16) |
+| `+0x0C` (`0x2C`) | `flags_frag_off` | Flags & fragment offset of last IP header (u16) |
+| `+0x0E` (`0x2E`) | `route_type` | IPv6 routing ext header routing type |
+| `+0x0F` (`0x2F`) | `rhp_ip_valid` | Routing Ext Header Present; LSB = IP valid |
+| `+0x10` (`0x30`) | `shim_off[0]` | Shim offset, first |
+| `+0x11` (`0x31`) | `shim_off[1]` | Shim offset, last — **read by frame_epilogue** |
+| `+0x12` (`0x32`) | `ip_pid_off` | IP PID (last IP-proto) offset |
+| `+0x13` (`0x33`) | `eth_off` | ETH header offset |
+| `+0x14` (`0x34`) | `llc_snap_off` | LLC/SNAP offset |
+| `+0x15` (`0x35`) | `vlan_off[0]` | VLAN offset, first |
+| `+0x16` (`0x36`) | `vlan_off[1]` | VLAN offset, last |
+| `+0x17` (`0x37`) | `etype_off` | EtherType offset |
+| `+0x18` (`0x38`) | `pppoe_off` | PPPoE offset |
+| `+0x19` (`0x39`) | `mpls_off[0]` | MPLS offset, first |
+| `+0x1A` (`0x3A`) | `mpls_off[1]` | MPLS offset, last |
+| `+0x1B` (`0x3B`) | `ip_off[0]` | IP offset, first (outer) — **read by frame_epilogue** |
+| `+0x1C` (`0x3C`) | `ip_off[1]` | IP offset, last (inner/tunneled) |
+| `+0x1D` (`0x3D`) | `gre_off` | GRE offset |
+| `+0x1E` (`0x3E`) | `l4_off` | L4 header offset — **read by frame_epilogue** |
+| `+0x1F` (`0x3F`) | `nxthdr_off` | Parser end-point (next-header) offset |
+
+**Base-convention warning (2026-08-06 derived finding):** AN4760 / FMC
+"parse-array byte" numbering counts from the **start of the annotation
+region** (16 B reserved + 32 B parse result), i.e. `AN4760_byte =
+fman_prs_result_offset + 16`. `struct fman_prs_result` counts from the
+parse result proper. IC offsets (`FMBM_RICP iciof/iceof/icsz`,
+`contextOffsetInWS`) count from the IC base — be explicit which base is
+meant; a silent 16 B mismatch is a known bug class. Hardware annotation
+layout: `[16 B reserved][32 B parse result][8 B timestamp][8 B KG hash]`
+(`DPAA_HWA_SIZE = 48`).
+
+**frame_epilogue (w12133) relevance:** the per-frame status-assembly loop
+reads IC parse-result bytes `0xd031`–`0xd042` — i.e. `shim_off[1]`,
+`ip_pid_off`, `eth_off`, `llc_snap_off`, `vlan_off[0..1]`, `etype_off`,
+`pppoe_off`, `mpls_off[0..1]`, `ip_off[0..1]`, `gre_off`, `l4_off`,
+`nxthdr_off` — the header-offset tail of the parse result (plus one byte
+past `0x3F` into timestamp, per the observed window). These are named
+fields, not opaque bytes.
+
+**Flag bits (kernel-confirmed):** `l3r` bit15 = IPv4 present, bit14 = IPv6
+present; `l4r` bit6 = UDP, bit5 = TCP.
