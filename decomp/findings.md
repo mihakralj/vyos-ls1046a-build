@@ -10,6 +10,77 @@ dispatch-table attribution).
 
 ---
 
+## 2026-08-08 (mid-7) — Static bucket-index probe + branch-family completion
+
+Attempted to crack the `0xce/0xcf` bucket shift/mask statically (option "b").
+Outcome — one confirmed, one oracle-deferred, one bonus:
+
+**Bucket mask FOUND**: `w1944 e9 r0,0xffff` masks the hash register; `0xffff`
+is the immediate in **63/118** `0xe9` sites → `0xe9` is an AND/mask op and the
+bucket index is masked to **16 bits**, consistent with `mask ≤ 0x7fff`. The
+hash-register op chain is `b8 (w1942) → e9&0xffff (w1944) → ce (w1947) → cf
+(w1948)`.
+
+**Shift `>>48` NOT statically confirmable**: no shift immediate (`0x30/0x10/
+0x08`) appears near the hash; the shift is implicit in the load byte-position
+or inside a black-box op. Confirming needs the oracle (patch the shift/mask,
+observe bucket placement) — reinforces the plan's oracle-gating.
+
+**BONUS — branch-family gap found + fixed.** A family scan of `0xa0–0xbf`
+found **9 more conditional-branch classes** (`b03f/b83f/b41f/bc1f/b81f/b01f/
+b45f/b17f/a7ff`, all with the `_f` suffix, 100% relative-in-range) that were
+`unk` in **both** `cfg-map.py` and the SLEIGH — so the original G1
+cross-validation "matched exactly" while **both shared the blind spot**. Added
+to both: **brc 966 → 1240** (+274 branches), `unk` 5534 → 4247.
+- Honest correction: G1 confirmed SLEIGH↔cfg-map *consistency*, not
+  *completeness*. The block map (`210.10.1-blocks.json`) should be regenerated
+  with the full branch set (follow-up).
+- Directly relevant to HIT/MISS: the branch opcode's `_f` suffix byte **encodes
+  the condition** — so "which `brc` = HIT vs MISS" is an opcode-level question,
+  answerable by mapping opcode → condition (oracle).
+
+Repo: `fman-risc.slaspec` (full branch family), `cfg-map.py` (synced).
+
+---
+
+## 2026-08-08 (mid-6) — EXT_HASH HIT/MISS discriminator located
+
+Targeted the months-old flow-MISS mystery by locating the microcode that
+decides HIT vs MISS. Full analysis in `decomp/hitmiss-path.md`.
+
+**Bucket-index setup (`bucket_index`, w1928–1948)**: `w1936 ld r0,[0xd048]`
+reads the KG hash; `w1947 ?ce r0,0x0189 ; w1948 ?cf r0,0x0241` operate on the
+hash register = the **shift/mask** forming the bucket index. Decompile shows
+it assembles hi/lo addresses (`CONCAT22(dmem[0x6301],dmem[0x6303])`) and
+fetches via `0xf4` — a DMA/table-fetch candidate — using a second workspace
+at `0xe000`.
+
+**Compare-and-dispatch walker (`ehash_walker`, w2837)**: decompiles to
+`iVar2 = fman_test_dc(ctx[0xa8], 0x10f8); if (iVar2==0) {…muram[0x13a8]…} else
+{…muram[0xba0]…}` — `0xdc` (`fman_test_dc`) **confirmed as the comparator**
+(its result is the `if` predicate); reads context/key fields
+(`ctx 0x98/0x9c/0xa8/0xb4`); the walker's `?op_e1 0x0008/0x000c` immediates
+(**8, 12**) match the DDR key offset (+8) and keysize (12/13).
+
+**G3+ SLEIGH**: added black-box pcodeops for the walker's classes (`0xe1`,
+`0xef`, `0xd9`, `0x77`, `0x78`, `0xf1`, `0xf4`) so the HIT/MISS path
+decompiles readably. `decomp/ghidra/scripts/FmanHitMiss.py`.
+
+**Critical unknowns** (each oracle-confirmable): the `0xce/0xcf` shift/mask
+(bucket index), the DDR **DMA-read** (`0xf4`/`0xf1` lead), the exact `test_dc`
+compare length, and which `brc` = HIT vs MISS. **Decisive experiment E-HM1**:
+on the ASK2 engage path, force the `test_dc` branch to the match path — if
+flows then HIT, the MISS is a **key-comparison failure** (step 5), not
+bucket-index/DMA; one measurement splits the candidate space. Needs the ehash
+path engaged (ASK2 M3) since the islands are cold on the mainline path.
+
+Scope: ~2 functions + ~5 encodings, oracle-confirmable — the decomp oracle and
+the ASK2 flow-HIT work converge here.
+
+Repo: `decomp/hitmiss-path.md`, `fman-risc.slaspec` (G3+), `FmanHitMiss.py`.
+
+---
+
 ## 2026-08-08 (mid-5) — Ghidra G3: ALU classes decoded, conditions modeled → readable decompilation
 
 **Field analysis** identified the top unknown classes' operand structure:

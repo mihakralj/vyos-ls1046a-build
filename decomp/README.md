@@ -23,6 +23,7 @@ covers the *code itself*.
 | [ghidra-setup.md](ghidra-setup.md) | Ghidra 11.3.2 + GhidraMCP install record (ARM64 native build, MCP wiring, operational steps) |
 | [ghidra-decompile-plan.md](ghidra-decompile-plan.md) | Staged plan to decompile 210.10.1 with Ghidra (SLEIGH module G0–G4, cross-validation gate, oracle loop, MCP workflow) |
 | [naming-map.md](naming-map.md) | Authoritative naming/structure vocabulary (context/IC layout, MURAM structs, constants, dispatch-slot function names) harvested from `arch/` + qdrant |
+| [hitmiss-path.md](hitmiss-path.md) | Locating the EXT_HASH HIT/MISS discriminator (bucket_index + ehash_walker), critical encodings, the decisive E-HM1 oracle experiment |
 | [00-acquisition.md](00-acquisition.md) | Phase 0 — blob acquisition, provenance, hashes, corpus |
 | [01-container.md](01-container.md) | Phase 1 — QEF container parse tooling |
 | [02-static-structure.md](02-static-structure.md) | Phase 2 — zero-ISA static structure (entropy, dispatch table, segmentation, histograms) |
