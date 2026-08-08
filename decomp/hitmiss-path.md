@@ -65,7 +65,7 @@ repetitions of a DMA-issue/spin-wait/DMA-read idiom
 (`op_f0`/`unk`/`park`/`op_f0`) — real confirmation of a per-record walk loop,
 but the **actual per-byte key-compare was not located** in this window; the
 visible `tst_dc` instances there are DMA-status polls, not an obvious
-13-byte compare. The region is bigger/more tangled than this doc's original
+13-byte compare (pre-PORT_ID; current target is 14 bytes). The region is bigger/more tangled than this doc's original
 estimate. `op_eb`/`op_e1` were confirmed to compute their offsets from
 **compile-time immediate constants** (not a descriptor/register read) —
 real evidence the record-header-skip mechanism exists in silicon, but
@@ -317,4 +317,175 @@ finishes, rather than a byte-by-byte loop needing to be found separately.
 the existing evidence more coherent, not a new proof. The oracle test that
 would settle it: patch the immediate `0xf838` (or the byte at `[0x86a]`'s
 source) and observe whether HIT/MISS behavior changes in a predictable
+way.
+
+## 2026-08-08 (E-HM8) — armed FE-VM wedges port RX after one frame; the comparator-confirmed findings are valid but earlier armed nulls were frame-less
+
+**Full writeup: `decomp/experiments.md` E-HM8.** Headlines for this path:
+(1) frames were NOT arriving at `.185`'s eth4 during most of today's armed
+test cycles — the port wedges RX-deaf after FE-VM arming (reproduced
+twice, cold-boot-verified; survives disarm; only a cold boot recovers), so
+E-HM4/5/6/7 and the AD-corruption canaries were frame-less and their nulls
+are invalid as FE-VM tests. (2) The **record-never-touched finding is now
+confirmed with a genuinely-arriving frame**: cold boot → arm → one SYN →
+`kgse_spc` 0→1 (KeyGen classified), frame consumed by FMan (kernel RX
+unchanged), DDR record byte-for-byte identical. The fault window is
+definitively "after KeyGen classification, before the ehash comparator".
+(3) The wedge-after-one-frame is a new reproducible observable matching
+`wedge-path.md`'s pool-drain prediction — the recommended diagnostic for
+the next microcode experiment (patch FE_ENTER/ALLOCATE/EXIT-path
+instructions and watch whether the wedge disappears), very likely the same
+root cause that keeps the comparator unreachable. (4) The params-page /
+`FMBM_RGPR` hypothesis was disproven cheaply (working vendor board `.106`
+also has `FMBM_RGPR=0`), and `/dev/mem` port-BMI-block writes don't stick
+on 6.18.41 (MURAM writes do; `m.flush()` EINVALs — writes actually
+succeed, skip flush).
+
+## 2026-08-08 (new source) — NXP documentation cross-reference (nxp_docs qdrant)
+
+A second NXP documentation corpus became available this session via a
+dedicated `nxp_docs` qdrant MCP server, distinct from this project's own
+agent-memory qdrant. It indexes at least two PDFs not previously searchable
+by this project: `LS1046ADPAARM.pdf` (QorIQ LS1046A DPAA Reference Manual,
+Rev 0, 03/2017 — chip-specific, not the LS1043A analog this project relied
+on before) and `LSDKUG_Rev21.08.pdf` (Layerscape SDK User Guide, Rev 21.08,
+09/2022 — a full FMan PCD driver + FMC XML reference, much more detailed
+than anything previously available). Searched with ~13 focused queries
+covering EXT_HASH/FE-VM, Action Descriptor encoding, hash-table bucket
+selection, KeyGen registers, Result Array offsets, and NIA. Nothing found
+contradicts this project's settled facts (raw CRC-64 hash, EKFC MSB-first
+order, EXT_HASH word0/word1 layout) — it's additive context plus one new
+testable hypothesis.
+
+**Scope-limiting fact re-confirmed (not new, but important context for
+what follows):** this project's own prior work already established
+(`arch/fman-microcode-210-programming-reference.md` L1228-1233) that this
+project's `EXT_HASH` FE (opcode `0x06000000`, `en_exthash_*` structures) is
+"a separate, unrelated set of structures" from the RM/driver's own
+documented "CC Hash-Table" node type. The new LSDKUG material describes
+that *other*, RM-documented mechanism in full: §8.2.5.2.7.1.1.6 "Custom
+Classifier Hash-Table Node" says the driver builds it as a Match-Table node
+of type **Indexed-Hash** (selects a bucket/"way-group" using part of the
+KeyGen 64-bit hash result) whose entries each point to a hash bucket
+implemented as a Match-Table node of type **Exact-Match** — a documented,
+2-level, driver-supported CC construct (`FM_PCD_HashTableSet`/
+`FM_PCD_HashTableAddKey`, or the FMC `<hashtable mask="0x30" hashshift="0"
+keysize="24"/>` XML element) that is **not** what this project's hand-built
+EXT_HASH FE descriptor uses. Any bucket-selection constraint sourced from
+this material (below) is confirmed to apply only to that other mechanism
+until shown otherwise.
+
+**New, testable hypothesis — "4 lower bits must be cleared" on the
+hash-select mask.** LSDKUG §8.2.6.12.16 (Hash Tables), Table 106: "`mask`
+... The number-of-sets for this hash will be calculated as (2^(number of
+bits set in 'mask')); **the 4 lower bits must be cleared**." The worked
+example (`<hashtable mask="0x30" hashshift="0" keysize="24"/>`) and Figure
+99 ("Hash_Table node example": "12 Bits Mask (starting at byte 2 of the
+hash) = 0x0030 (2 bits → 4 entries table)") both use masks whose bottom 4
+bits are zero, and Figure 99 additionally shows a "Sets × Ways" structure
+(4 sets × 3 ways = 12 keys total) — i.e. the low bits of the 16-bit
+hash-index candidate look structurally reserved (possibly for a way-select
+role), not just a stylistic choice in that one example.
+
+This project's own bucket-index formula (`bucket_index`,
+`specs/fman-keygen-flow-key-spec.md` L456/776; matches the disassembly at
+`w1936–1948` above) is `(crc64_raw >> 48) & 0x7fff` — mask `0x7fff` has ALL
+of bits 0-14 set, including the bottom 4 the LSDKUG rule would forbid.
+**This is not confirmed to be a bug.** The mask is applied to an
+already-right-shifted 16-bit value (top 16 bits of the 64-bit hash relocated
+to bit positions 15-0) — a different arithmetic shape than LSDKUG's "select
+2 bytes at `hashshift`, then mask those bytes directly" — and the mechanism
+it governs (the documented CC Hash-Table) is admittedly not the one this
+project uses.
+
+**Update (2026-08-08, E-HM4):** the specific "clear the low 4 bits of the
+mask" shape is **not testable through this project's own software
+interface at all** — `fman_pcd_ehash_table_set()`
+(`0125-fman-pcd-fe-ehash-table.patch`) validates `(1u << fls(mask)) ==
+mask + 1`, structurally rejecting any mask that isn't `2^n-1` (contiguous
+from bit 0) before it ever reaches hardware. The nearest testable analog —
+sweeping the `hash_shift` parameter (0-3, the field's entire valid range,
+selecting a different 16-bit window of the 64-bit hash instead of a
+different sub-mask within the same window) — was run as **E-HM4** and came
+back **clean negative at every value** (`decomp/experiments.md`): all four
+shifts produced correctly-computed bucket indices, correct `FMBM_RCCB`
+wiring, clean fault registers, and byte-for-byte untouched records after
+matching traffic. This exhaustively closes "wrong shift/window" as a class,
+but leaves the specific low-mask-bits question genuinely open — testing it
+for real still needs either a microcode patch to `ce`/`cf` or a hand-rolled
+raw-memory dual-bucket insert bypassing the kernel's own bucket-index
+computation, both of which carry more novel risk than a parameter sweep and
+were deliberately not attempted this round. Combined with E-HM2 (`ce`
+immediate zeroed) and E-HM3 (`w3387` branch forced), this is the **fourth**
+independent parameter/patch variation producing the identical "wiring
+perfect, record never touched" signature — mounting evidence for Candidate
+A (frames never reach this deep into `bucket_index`/`ehash_walker` at all)
+over any specific miscomputation within it.
+
+**Update (2026-08-08, E-HM5 + E-HM6):** went ahead and tested `ce`/`cf`
+directly after all, via microcode patch rather than the untestable
+software-mask route. Live-read the actual current values first
+(`qef-parse.py dump-words`): `w1947 = 0xce000189` (subop `000`), `w1948 =
+0xcf800241` (subop `100`, `0x800000`) — this refines the schematic
+`0xcf000241` used earlier in this file to the true value including `cf`'s
+own subop bits (not a contradiction, just more precise). **E-HM5**: zeroed
+`w1948` alone (`0xcf800241→0xcf000000`, same style as E-HM2's `ce` patch).
+**E-HM6**: zeroed `w1947` **and** `w1948` together from the same pristine
+baseline (the compound perturbation E-HM2 anticipated: "patch both
+together for a stronger perturbation"). Both delivered via the proven
+kexec pipeline, both verified by exact post-kexec blob-md5 match. Both
+came back **byte-for-byte identical to unpatched microcode** — same
+bucket, same wiring, same clean faults, same untouched 320-byte record,
+same `pkt_count=0`, link stayed up throughout both. Full detail:
+`decomp/experiments.md` E-HM5/E-HM6.
+
+This is now **three** independent mutations of increasing strength on the
+exact same two-instruction chain (`ce` alone, `cf` alone, both together)
+all producing identical null results — a materially stronger signal than
+any one test alone, since the compound mutation (the largest perturbation
+tried) would be the most likely of the three to show *some* divergence if
+`ce`/`cf` genuinely computed something load-bearing for this flow's
+placement. Getting the same "nothing happens" result at every perturbation
+strength favors **frames never executing this code at all** over "the code
+runs but these particular immediates happen not to matter here." Combined
+with E-HM2, E-HM3, E-HM4, this is the fifth/sixth independent
+parameter/patch variation converging on the same signature. Board `.185`
+rebooted (not just re-kexec'd) after E-HM6 to restore the pristine SPI
+blob.
+
+- **Result Array byte map** (LSDKUG Table 79, §8.2.6.11.6.1, FMC
+  Soft-Parser scripting layer): `framedescriptor1`=48-55,
+  `framedescriptor2`=56-63, `actiondescriptor`=64-71, `ccbase`=72-75,
+  `ks`=76-76, `hpnia`=77-79, `sperc`=80-80 ... `attr`=92-92, **`nia`=93-95**
+  (3 bytes — matches this project's own 24-bit NIA convention,
+  `naming-map.md` L96), `ipv4sa`=96-99, `ipv4da`=100-103, `ipv6sa1/2`=96-111,
+  `ipv6da1/2`=112-127. This is the FMC/Soft-Parser's documented view of a
+  Parse-Result-like structure, not confirmed identical to this project's
+  own `ctx+0x00..0x4F` IC layout (`naming-map.md` §1.1) — the two numbering
+  schemes look like they cover different (adjacent?) regions, not the same
+  bytes reinterpreted. Useful as an independent naming cross-check, not a
+  byte-for-byte replacement.
+- **NIA pipeline diagrams** (LSDKUG Figures 94-96): confirm, architecturally
+  (not at register-bit level), that Custom Classifier sits after KeyGen in
+  the documented default flow, and that "NIA" is the standard NXP term for
+  the "what happens next" field threaded through BMI→Parser→KeyGen→CC→
+  Policer→QMI→BMI-release→END — consistent with, not new evidence for or
+  against, this project's own HIT/MISS dispatch search.
+- **KeyGen FQID algorithm** (LSDKUG §8.2.1.7, Figures 69/70): confirms the
+  general "hash key → CRC → shift → mask → combine → base" shape is the
+  same pattern KeyGen uses for its *own*, unrelated FQID-distribution
+  purpose — architecturally consistent with, not proof of, this project's
+  EXT_HASH bucket-index formula.
+- Could not retrieve actual LS1046A DPAA RM **Chapter 5** ("Frame Manager
+  (FMan)") register-level content through this qdrant server despite
+  several attempts — every `LS1046ADPAARM.pdf` hit so far has come from
+  Chapter 1 (DPAA Overview), which repeatedly says "See Chapter 5" without
+  surfacing it. Two references inside LSDKUG point to specific RM tables
+  that would likely matter here — **"Table 8-398. Table Descriptor (Type =
+  01)"** and **"Table 8-399. Operation Code Description"** (LSDKUG
+  §8.2.6.12.15, the `nonheader`/`ic_index_mask` element) — but these appear
+  to belong to a different, more generic "DPAA Reference Manual" numbering
+  than the LS1046A-specific one, and no hit surfaced their actual content.
+  Worth a follow-up search if this qdrant server's corpus grows, or if a
+  copy of that specific manual is identified.
 way.
