@@ -141,9 +141,54 @@ Engaged the FE-VM ehash path on eth4 and drove the matching flow from .106
 (`decomp/experiments.md` E-HM1 RESULT). **Decomp findings confirmed on
 silicon**: EXT_HASH descriptor `w1=0x0fff0c00` (mask 0x0fff, contextSize=13,
 shift 0); flow in **bucket 0x008 = (sw_crc>>48)&mask** — verifying the
-decomp's `bucket=(hash>>48)&mask` + the `e9&0xffff` mask. **MISS root cause
-found**: HW hash `0x50b43c9c…`→bucket `0x0b4` ≠ SW CRC-64 `0x600824e7…`→
-bucket `0x008` (`pkt_count=0`) — the silicon KG hash isn't the software CRC-64
-(the 2026-07-10 "Candidate 2"), so the frame and the flow land in different
-buckets. The decomp's bucket *math* is correct; the open question moves to the
-KeyGen `kgse_hc`/EKFC config (why the KG hash ≠ CRC-64 on this build).
+decomp's `bucket=(hash>>48)&mask` + the `e9&0xffff` mask.
+
+**Correction (same day, later):** the initial write-up here concluded "the
+silicon KG hash isn't the software CRC-64" (HW `0x50b43c9c…` ≠ SW
+`0x600824e7…`). That conclusion doesn't survive cross-checking against
+qdrant — the "KG-hash-vs-CRC64" hypothesis (2026-07-10 "Candidate 2") was
+already independently disproven back on 2026-07-13 via a cleaner,
+RSS-path-only measurement, and there's a documented precedent for
+`hash_probe` capturing unrelated background traffic (not the intended test
+flow) rather than a genuine algorithm mismatch. Retracted; do not cite the
+"silicon KG hash ≠ CRC-64" framing above as settled. See
+`decomp/findings.md` for the fuller reconciliation.
+
+## Definitive result, 2026-08-08 (later): wiring confirmed correct, record never touched
+
+Re-ran the armed test with the CRC-64-independently-reconfirmed
+`portid=0x00` 14-byte key (`decomp/wedge-path.md`'s companion investigation
+covers the same session). Two things nailed down that go beyond anything
+above:
+
+1. **`FMBM_RCCB` read back via `/dev/mem` immediately after arming equals
+   the FE_ENTER offset exactly** (`0x00056c00` vs `enter_off=0x56c00`, no
+   shift, no scaling). This rules out the historical F-165 failure mode
+   (`arch/fman-microcode-210-programming-reference.md` §10.5a: an earlier
+   "byte-correct MISS" turned out to mean the engage path never pointed the
+   port at the built chain at all) — for *this* test, the port is
+   genuinely, verifiably wired straight to the built ehash chain.
+2. **The full 320-byte DDR flow record, read raw via `/dev/mem`, is
+   byte-for-byte identical before and after sending 3 confirmed-transmitted
+   matching TCP SYNs.** Not one byte changed anywhere in the record —
+   not the stats fields, not any scratch/flag bit. Combined with (1) and
+   the already-established bucket/linkage correctness, this is the
+   strongest evidence yet that the comparator doesn't *fail to match* —
+   it **never reaches this record at all** during live processing.
+
+This sharpens (does not just repeat) the open question. With wiring, key
+content, bucket index, and DDR linkage all independently confirmed correct,
+the two live candidates are: **(A)** something upstream of the ehash walker
+silently drops or redirects the frame per-frame, without wedging the port
+(a different failure shape than this session's `park`-forever wedge
+mechanism); or **(B)** the microcode's *live* bucket-index computation
+doesn't match the `(hash>>48)&mask` software assumption — i.e. the
+`ce`/`cf` opcodes chained onto the hash register after the `e9` mask
+(`e9(r0,0xffff)→ce(r0,0x0189)→cf(r0,0x0241)`, found earlier this session,
+semantics still unconfirmed) apply some further transformation, so the
+microcode looks in a different bucket than 0x508 at runtime, finds it
+empty, and correctly (from its own perspective) returns MISS without ever
+touching this record. **(B) directly connects this session's disassembly
+work to this silicon result** and is now the most concrete, targeted next
+oracle experiment: patch one of `ce`/`cf`'s immediates and observe whether
+the bucket a known-good key lands in changes.
