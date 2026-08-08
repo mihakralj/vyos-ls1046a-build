@@ -146,3 +146,62 @@ the ehash path), not a microcode-decode error. The patch-break sub-experiments
 (force `test_dc`, patch `e1 0x0008`) were not needed — there is no HIT baseline
 to break; the hash divergence is the answer. Next: read the engaged KG
 scheme's `kgse_hc`/EKFC vs the CRC-64 expectation to see why the hash diverges.
+
+**Retraction (2026-08-08, later — see `decomp/hitmiss-path.md`'s matching
+correction):** the "Candidate-2 confirmed" conclusion above does not survive
+cross-checking against qdrant. That exact hypothesis was already
+independently disproven 2026-07-13 via a cleaner, isolated RSS-path
+measurement, and there's documented precedent for `hash_probe` capturing
+unrelated background traffic rather than the intended test flow. Treat the
+paragraph above as superseded, not settled. The corrected, independently
+reconfirmed hash-match result is in the "Definitive result" section of
+`decomp/hitmiss-path.md` and the qdrant record dated 2026-08-08.
+
+---
+
+## E-HM2 — live microcode patch: does `ce`'s immediate affect bucket selection? — NEGATIVE
+
+First live *behavioral* microcode mutation test (E1/E2 validated delivery
+and cold-region safety; this is the first patch to a **hot**, always-armed
+code path with a real hypothesis attached). Grew directly out of the
+2026-08-08 "wiring confirmed correct, DDR record never touched" result
+(`decomp/hitmiss-path.md`) — with wiring, key content, bucket index, and
+record linkage all independently confirmed correct, the two live
+candidates were (A) something upstream silently drops the frame, or (B)
+the microcode's *live* bucket-index computation doesn't match
+`(hash>>48)&mask` because of what `ce`/`cf` do to the hash register after
+the `e9` mask.
+
+**Patch**: word `w1947` (`ce`, chained onto the hash register:
+`e9(r0,0xffff)→ce(r0,0x0189)→cf(r0,0x0241)`) — `0xce000189 → 0xce000000`,
+zeroing only the 16-bit immediate. 6 bytes differed in the patched DTB (2
+immediate + 4 CRC trailer). Delivered via the proven pipeline; live DT
+property blob md5 after kexec (`d464159ce94ad942f91877a07d639d67`) matched
+the precomputed patched-blob md5 exactly — confirmed genuinely loaded.
+
+**Test**: re-ran the exact same armed test as the "record never touched"
+baseline (`portid=0x00` 14-byte key, `board/scripts/T26-verify-wiring-and-record.sh`).
+Chain built cleanly, bucket still `0x0508` (pure kernel-driver software
+math, unaffected by the patch — a sanity check, not part of the test).
+`FMBM_RCCB` still read back exactly equal to `enter_off` — wiring still
+correct under the patched microcode. Sent 3 confirmed-transmitted matching
+TCP SYNs, dumped the full 320-byte record before and after.
+
+**Result**: **byte-for-byte identical**, exactly as under the unpatched
+microcode. Zeroing `ce`'s immediate had zero observable effect. Fault
+registers stayed clean throughout — no wedge, no crash; the board handled
+this hot-path mutation gracefully (useful risk calibration: this region
+isn't so delicate that a changed immediate hangs the engine).
+
+**Conclusion**: a clean negative result that does **not** distinguish
+between three readings — (1) `ce`'s immediate genuinely doesn't affect
+bucket selection (or this specific bit-change wasn't enough to shift it
+observably); (2) frames never reach `bucket_index`/`ehash_walker` at all
+regardless of this patch (Candidate A), so the patch was moot; (3) `ce`
+affects something other than bucket selection. Next candidates (not yet
+run): test `cf` (`w1948`) the same way to isolate which of the pair
+matters; patch both together for a stronger perturbation; or pivot to
+testing Candidate A directly — patch something further upstream (e.g.
+`FE_ENTER`'s `ALLOCATE` opcode, or `bucket_index`'s very first instruction)
+with an obviously-detectable side effect, to determine whether
+`bucket_index` is reached at all for these frames.
