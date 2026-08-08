@@ -93,6 +93,17 @@ define pcodeop fman_test_73;
 
 :tst_73 regfld, imm16 is prefix8=0x73 & regfld & imm16 { cc = fman_test_73(regfld, imm16:4); }
 
+# --- G3+ 0x2c3f family: computed-branch / table trampoline (2026-08-08) ---
+# 29 sites. low16 = table base in the flat dmem space; the handler index is
+# in a register at runtime.  Typical: `2c3ff000` before the FM_CTL
+# action-dispatch table (w583, followed by the 0x79 table at w585) = "jump to
+# the handler whose pointer is stored at the 0xf000-window (f8xx) slot indexed
+# by the current action code".  Modeled as an opaque indirect branch to a
+# data-space location (tables are data, never walked as code).
+# 0x2c3f = computed-branch (table trampoline) - modeled as a plain nop so
+# disassembly stays in sync; the runtime target is data (never walked).
+:br_tbl [addr16] is prefix16=0x2c3f & addr16 { }
+
 # --- G3+ HIT/MISS-path classes (black-box; modeled to make the EXT_HASH
 # walker readable). Small-immediate: 0xe1 (byte offset/count), 0xef.
 # ALU: 0xd9. Address-carrying (memory-touching): 0x77 0x78 0xf1 0xf4. ---
