@@ -43,6 +43,18 @@ RDEST: rel is simm16 [ rel = inst_start + simm16 * 4; ] { export *:1 rel; }
 :brc  RDEST is prefix16=0xb3ff & RDEST { if (cc != 0) goto RDEST; }
 :brc  RDEST is prefix16=0xb43f & RDEST { if (cc != 0) goto RDEST; }
 :brc  RDEST is prefix16=0xbc3f & RDEST { if (cc != 0) goto RDEST; }
+# additional conditional-branch classes (2026-08-08: found via family scan;
+# same _f branch-suffix, 100% relative-in-range; the opcode byte encodes the
+# condition — differentiation is future work, edges added for CFG completeness)
+:brc  RDEST is prefix16=0xb03f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xb83f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xb41f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xbc1f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xb81f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xb01f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xb45f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xb17f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xa7ff & RDEST { if (cc != 0) goto RDEST; }
 :jmp  RDEST is prefix16=0xa3ff & RDEST { goto RDEST; }
 :park       is prefix16=0xb7df & imm16 { goto inst_start; }
 
@@ -68,6 +80,25 @@ define pcodeop fman_test_dc;
 :op_d8  regfld, imm16 is prefix8=0xd8 & regfld & imm16 { regfld = fman_alu_d8(regfld, imm16:4); }
 :op_db  regfld, imm16 is prefix8=0xdb & regfld & imm16 { regfld = fman_alu_db(regfld, imm16:4); }
 :tst_dc regfld, imm16 is prefix8=0xdc & regfld & imm16 { cc = fman_test_dc(regfld, imm16:4); }
+
+# --- G3+ HIT/MISS-path classes (black-box; modeled to make the EXT_HASH
+# walker readable). Small-immediate: 0xe1 (byte offset/count), 0xef.
+# ALU: 0xd9. Address-carrying (memory-touching): 0x77 0x78 0xf1 0xf4. ---
+define pcodeop fman_op_e1;
+define pcodeop fman_op_ef;
+define pcodeop fman_alu_d9;
+define pcodeop fman_mem_77;
+define pcodeop fman_mem_78;
+define pcodeop fman_mem_f1;
+define pcodeop fman_mem_f4;
+
+:op_e1 regfld, imm16 is prefix8=0xe1 & regfld & imm16 { regfld = fman_op_e1(regfld, imm16:4); }
+:op_ef regfld, imm16 is prefix8=0xef & regfld & imm16 { regfld = fman_op_ef(regfld, imm16:4); }
+:op_d9 regfld, imm16 is prefix8=0xd9 & regfld & imm16 { regfld = fman_alu_d9(regfld, imm16:4); }
+:m_77  regfld, [addr16] is prefix8=0x77 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_77(regfld, *[dmem]:4 a); }
+:m_78  regfld, [addr16] is prefix8=0x78 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_78(regfld, *[dmem]:4 a); }
+:m_f1  regfld, [addr16] is prefix8=0xf1 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_f1(regfld, *[dmem]:4 a); }
+:m_f4  regfld, [addr16] is prefix8=0xf4 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_f4(regfld, *[dmem]:4 a); }
 
 # Fixed-width catch-all keeps disassembly synchronized (least specific).
 :unk prefix16, imm16 is prefix16 & imm16 { }

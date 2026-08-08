@@ -25,7 +25,12 @@ from pathlib import Path
 
 ABS, REL, PARK = "abs", "rel", "park"
 ABS_PREFIXES = {0xB7FF}
-REL_PREFIXES = {0xB3FF, 0xB43F, 0xBC3F, 0xA3FF}
+# Conditional/relative-branch family (2026-08-08: extended after a family scan
+# found b03f/b83f/b41f/bc1f/b81f/b01f/b45f/b17f/a7ff were missed — the branch
+# opcode's _f suffix byte encodes the condition). a3ff = unconditional rel.
+REL_PREFIXES = {0xB3FF, 0xB43F, 0xBC3F, 0xA3FF,
+                0xB03F, 0xB83F, 0xB41F, 0xBC1F, 0xB81F, 0xB01F,
+                0xB45F, 0xB17F, 0xA7FF}
 PARK_PREFIXES = {0xB7DF}
 
 
