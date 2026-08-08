@@ -144,7 +144,7 @@ The iteration direction — whether the silicon walks bits from 31 down to 0 (de
 
 Three candidate orders exist, all consistent with the documented register interface:
 
-| Model | Iteration | Byte 0 holds | 13-byte layout (EKFC=0x001C0006) |
+| Model | Iteration | Byte 0 holds | 14-byte layout (EKFC=0x801C0006) |
 |---|---|---|---|
 | Descending | Bit 31 → 0 | Highest-set-bit field | SIP, DIP, PROTO, SPORT, DPORT |
 | Ascending | Bit 0 → 31 | Lowest-set-bit field | DPORT, SPORT, PROTO, DIP, SIP |
@@ -200,7 +200,7 @@ static int fman_pcd_key_init(struct fman_pcd *pcd)
          */
         return -EINVAL;
     }
-    pcd->key_len_v4 = len;  /* 13 for EKFC=0x001C0006 */
+    pcd->key_len_v4 = len;  /* 14 for EKFC=0x801C0006 (was 13 for 0x001C0006 pre-PORT_ID) */
     return 0;
 }
 ```
@@ -239,11 +239,12 @@ int fman_pcd_key_serialize_v4(const struct fman_pcd *pcd,
 
 The extraction order was resolved by CRC-64 hash-match on hardware: two independent TCP flows on eth4 produced hash values that matched `crc64_raw(SIP|DIP|6|SPORT|DPORT)` under MSB-first order and no other order. The ascending-bit-position model and size-grouped model are both **DISPROVEN**.
 
-**Confirmed byte layout for EKFC=0x001C0006 (13 bytes):**
+**Confirmed byte layout for EKFC=0x801C0006 (14 bytes, SUPERSEDING the pre-PORT_ID 13-byte layout):**
 ```
-Byte:  0  1  2  3  4  5  6  7  8   9 10 11 12
-Field: SIP────────  DIP────────  PROTO  SPORT  DPORT
+Byte:  0   1  2  3  4  5  6  7  8   9 10 11 12 13
+Field: PORT  SIP────────  DIP────────  PROTO  SPORT  DPORT
 ```
+PORT_ID = `0x00` for eth4/port 0x11 (NOT raw hw_port_id `0x11`). HW-confirmed via 184,320-candidate CRC-64 brute force (2026-08-06), 16-candidate batch test (2026-08-07), and independent re-confirmation via passive `hash_probe` (2026-08-08). The old 13-byte `0x001C0006` layout below is the historical 2026-07-13 finding — correct for what it tested (byte order), superseded by the PORT_ID requirement.
 
 The software-side serializers in `ask_flow_offload.c` (ehash path) and `fman_pcd_key_serialize_v4()` already use this order.
 
@@ -350,12 +351,16 @@ Six fields, 14 bytes for IPv4. `KG_SCH_KN_PORT_ID` (bit 31) was not part of any 
 
 **Scope note:** this is the ehash-path scheme (Fork-B, `kernel/ask/oot-modules/ask/ask_flow_offload.c`). It is a *different* KeyGen scheme from cc_test's bare exact-match scheme (F-161's board-confirmed `0x00180006` on hwport 0x11's scheme4) — the two must not be conflated; adding PORT_ID here does not change cc_test's CC-tree EKFC.
 
-**[CORRECTION — 2026-08-06] F-163's PORT_ID field is wrong and should be reverted for the single-port ehash path.** The §3.4 caveat above ("whether EKFC's `KG_SCH_KN_PORT_ID` causing silicon's real-time lookup key to carry portid first... has not been directly observed... only inferred by analogy") turned out to be flagging a real problem. Two independent findings closed it:
+**[CORRECTION — 2026-08-06, SUPERSEDED 2026-08-07/08]** The paragraph below (originally written 2026-08-06) concluded the 13-byte key was "correct as-is" and F-163 should be reverted. That conclusion rested on a since-corrected misreading that `<combine portid="true">` was a GEC/`kgse_gec[]` mechanism — reading vendor's real FMC source (`FMCPCDReader.cpp`/`FMCPCDModel.cpp`/`FMCCModelOutput.cpp`, 2026-08-07) proved `<combine>` builds the KeyGen "extractedOrs"/OR-Data-Vector array (FQID-only), a structurally different mechanism from `KG_SCH_KN_PORT_ID` (EKFC bit 31), which genuinely IS part of the raw comparison key. The 14-byte `PORT_ID|SIP|DIP|PROTO|SPORT|DPORT` format (`EKFC=0x801C0006`, `PORT_ID=0x00` for eth4/port 0x11) is HW-confirmed correct via CRC-64 hash match 3 independent times (2026-08-06 brute force, 2026-08-07 batch test, 2026-08-08 independent re-confirmation). **A properly-EKFC-synced 14-byte key still does not HIT** — PORT_ID/key-format is a CLOSED lead, not the open one. The original 2026-08-06 text is preserved below as the historical record of that intermediate conclusion; do not act on it.
+
+**[HISTORICAL — 2026-08-06, SUPERSEDED 2026-08-07/08]** F-163's PORT_ID field is wrong and should be reverted for the single-port ehash path. The §3.4 caveat above ("whether EKFC's `KG_SCH_KN_PORT_ID` causing silicon's real-time lookup key to carry portid first... has not been directly observed... only inferred by analogy") turned out to be flagging a real problem. Two independent findings closed it:
 
 1. **Board measurement (annotation-hash-match, finally executed 2026-08-06):** captured the real hardware CRC-64 for a known frame on eth4 via `hash_probe`, then brute-forced every plausible key layout (120 field orderings × 6 insertion positions × 256 candidate PORT_ID values = 184,320 combinations) against it. Unique match: `KG_SCH_KN_PORT_ID` extracts `0x00` for eth4, not the raw hw_port_id (`0x11`) this section assumed.
 2. **Vendor's real mechanism, found in the official `/etc/cdx_pcd.xml` (RSR 10.3.0.B1, cross-referenced 2026-08-06):** every distribution's portid byte comes from a `<combine portid="true" offset="16" mask="0xF"/>` NetPCD directive — a **GEC** (Generic Extract Command) software-combine operation, a different register block (`kgse_gec[8]`) from `kgse_ekfc` entirely. Vendor never uses `KG_SCH_KN_PORT_ID` for this. The analogy this section built F-163 on does not hold.
 
 `plans/ASK2-MASTER-PLAN.md` §2 decision 1 ("EKFC-only, no GEC") means this branch cannot replicate vendor's mechanism regardless of which EKFC value is chosen — but it also doesn't need to: vendor needs portid to disambiguate collisions in `shared="true"` tables serving many ports/schemes at once, while this branch's `fe_ehash` tables are per-scheme, not shared. There is no collision to disambiguate. **The 13-byte key (§3.4, no PORT_ID, `EKFC=0x001C0006`) is correct as-is** — it remains the most rigorously silicon-validated key format this project has (2026-07-13 hardware CRC-64 match, independently re-confirmed 2026-08-06). F-163 (`f212c701`) should be reverted or gated off for the current single-port ehash design; revisit §4.3a's 14-byte/PORT_ID/GEC approach only if this project ever builds genuinely shared multi-scheme tables. Full writeup: `arch/fman-microcode-210-programming-reference.md` §10.5a.
+
+**SUPERSEDED 2026-08-07/08:** The `<combine>` = GEC premise above was wrong (see correction at top of this block). The 14-byte `PORT_ID|SIP|DIP|PROTO|SPORT|DPORT` format (`EKFC=0x801C0006`, `PORT_ID=0x00`) is HW-confirmed correct. The 13-byte format is not "correct as-is"; it is superseded. F-163 should NOT be reverted.
 
 ### 4.4 Fields Explicitly Excluded
 
@@ -519,7 +524,9 @@ Mask:       0xff byte = participate (exact-match this byte)
             0x00 byte = wildcard / don't-care
 ```
 
-For this project's 13-byte EKFC extraction (`0x001C0006`, keySize=16) against a single flow: key bytes 0–12 hold the extracted 5-tuple, key bytes 13–15 are don't-care padding; mask is `0xff`×13 then `0x00`×3 — **the mask, not the key content, is what makes the 3 padding bytes irrelevant to the comparison.** A bare 16-byte key row with no mask field (as this project's scaffold shipped before F-156, 2026-07-31) leaves the CC comparator ANDing the key against whatever uninitialized MURAM happens to sit in the next 16 bytes — a non-deterministic compare.
+For this project's 14-byte EKFC extraction (`0x801C0006`, keySize=16) against a single flow: key bytes 0–13 hold the extracted 6-tuple (PORT_ID + 5-tuple), key bytes 14–15 are don't-care padding; mask is `0xff`×14 then `0x00`×2 — **the mask, not the key content, is what makes the 2 padding bytes irrelevant to the comparison.** A bare 16-byte key row with no mask field (as this project's scaffold shipped before F-156, 2026-07-31) leaves the CC comparator ANDing the key against whatever uninitialized MURAM happens to sit in the next 16 bytes — a non-deterministic compare.
+
+**SUPERSEDED NOTE:** The original text described the 13-byte `0x001C0006` extraction (5-tuple, no PORT_ID). The current target is 14-byte `0x801C0006` (PORT_ID + 5-tuple), HW-confirmed 2026-08-06/07/08.
 
 **Board-confirmed row content (F-158 oracle, key `0a63016a 0a6301b9 06 1451 d903` = SIP 10.99.1.106, DIP 10.99.1.185, PROTO 6, SPORT 5201, DPORT 55555):**
 ```
@@ -597,7 +604,7 @@ Offset  Size   Field
 0x08+N  4B     next_fe_ptr (MURAM offset of next FE on HIT — typically ENQ)
 ```
 
-Total record stride must be aligned to avoid DDR burst-boundary crossings. For a 13-byte key: record size = 2 + 6 + 13 + 4 = 25 bytes. Pad to 32 bytes for burst alignment.
+Total record stride must be aligned to avoid DDR burst-boundary crossings. For a 14-byte key: record size = 2 + 6 + 14 + 4 = 26 bytes. Pad to 32 bytes for burst alignment.
 
 ### 6.4 Bucket Array (RETIRED — documented for reference)
 
@@ -689,7 +696,7 @@ Code that is architecturally superseded is deleted, not disabled with `if (0)` o
 
 ## 8. IPv6 Flow Offload (Deferred)
 
-With `IPSRC1` and `IPDST1` set and an IPv6 frame, the silicon extracts 16 bytes per address. `EKFC = 0x001C0006` then yields 2 + 2 + 1 + 16 + 16 = 37 bytes. The ehash `keysize` is fixed per table, so a 13-byte table cannot classify a 37-byte key.
+With `IPSRC1` and `IPDST1` set and an IPv6 frame, the silicon extracts 16 bytes per address. `EKFC = 0x801C0006` then yields 1 + 16 + 16 + 1 + 2 + 2 = 38 bytes. The ehash `keysize` is fixed per table, so a 14-byte table cannot classify a 38-byte key.
 
 IPv6 requires a separate KG scheme and a separate ehash table. Dispatch between them can use parser-result indication (EtherType `0x0800` vs `0x86DD`) or a separate CC scheme per address family.
 
@@ -702,8 +709,8 @@ The `fman_kg_field` table structure generalises cleanly to IPv6 by setting `.wid
 Adding `PTYPE1` (one byte) to go from 4-tuple to 5-tuple has negligible performance cost:
 
 - **Extraction:** The parser already decoded the protocol byte. EKFC reads it in the same gather that fetches IPSRC1 and IPDST1. No additional pipeline stage.
-- **Hashing:** 13 bytes through hardware CRC-64 versus 12 bytes. Not measurable at FMan v3 clock speeds (~700 MHz).
-- **Comparison:** 13 bytes instead of 12. The record layout places the key at offset 8; with 32-byte-aligned records both fit within a single DDR burst.
+- **Hashing:** 14 bytes through hardware CRC-64 versus 12 bytes. Not measurable at FMan v3 clock speeds (~700 MHz).
+- **Comparison:** 14 bytes instead of 12. The record layout places the key at offset 8; with 32-byte-aligned records both fit within a single DDR burst.
 - **Insert path:** One more byte through software CRC64. Control-plane operation. Irrelevant.
 
 ### 9.2 Dispatch Topology
@@ -732,8 +739,8 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 | Component | Specification | Source |
 |---|---|---|
 | Extraction mechanism | EKFC only, no GEC | §2.3 |
-| Target EKFC | `0x001C0006` (IPSRC1\|IPDST1\|PTYPE1\|L4PSRC\|L4PDST) | §4.3 |
-| Key length | 13 bytes for IPv4 | §3.2 |
+| Target EKFC | `0x801C0006` (PORT_ID\|IPSRC1\|IPDST1\|PTYPE1\|L4PSRC\|L4PDST) — SUPERSEDES `0x001C0006` | §4.3a |
+| Key length | 14 bytes for IPv4 (PORT_ID + 5-tuple) | §3.2, §4.3a |
 | Extraction order | Data-driven; table `fman_kg_order_v4[]` | §3.2 |
 | Order verification | `fman_pcd_key_selftest()` via debugfs | §3.4 |
 | Engagement gate | `key_verified == 1` required | §3.5 |
@@ -768,13 +775,13 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 
 ### 11.2 keysize=13 Resolution
 
-**[BUG] keysize=13 BMI stall (qdrant F-063).** Symptom: keysize=13 (5-tuple EKFC=0x001C0006) caused BMI port stall on first frame. **Cause:** build without FmPortSetFESupport — params page `+0x54=0` → FE_ENTER ALLOCATE corrupting MURAM at offset 0. **Fix:** arm FmPortSetFESupport before FE-VM activity (F-072).
+**[BUG] keysize=13 BMI stall (qdrant F-063).** Symptom: keysize=13 (5-tuple EKFC=0x001C0006, pre-PORT_ID) caused BMI port stall on first frame. **Cause:** build without FmPortSetFESupport — params page `+0x54=0` → FE_ENTER ALLOCATE corrupting MURAM at offset 0. **Fix:** arm FmPortSetFESupport before FE-VM activity (F-072). **Note:** current target is 14-byte `0x801C0006` (PORT_ID + 5-tuple); the 13-byte stall was a pre-PORT_ID-era symptom, not a current concern.
 
 **[SPEC]** With FmPortSetFESupport present:
-- DDR record is 256 B (`FMAN_EHASH_FLOW_REC_SIZE`), ample for 13-byte key at offset 8
-- EXT_HASH FE contextSize = 13 (word1 = `0x7fff0c00`), matching EKFC key length
+- DDR record is 256 B (`FMAN_EHASH_FLOW_REC_SIZE`), ample for 14-byte key at offset 8
+- EXT_HASH FE contextSize = 14 (word1 = `0x7fff0d00`), matching EKFC key length
 - Bucket index formula: `(crc64_raw >> 48) & 0x7fff` (HIGH bits, not low bits)
-- Test key `0A63026A0A6302B906D6D91451` → bucket `0x145a` (matches flow insertion)
+- Test key `000A63026A0A6302B906D6D91451` → bucket computed from 14-byte CRC-64
 
 ### 11.3 F-083 / F-084 Findings
 
@@ -784,7 +791,7 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 
 ### 11.4 EKFC 4th Arg Confirmed
 
-**[SPEC]** `engage 11 0 2B9 1C0006` → dmesg shows `ekfc=0x001c0006 (slot->ekfc=0x001c0006)`. The strsep tokenizer (0160) correctly parses the 4th arg and propagates it through `fman_pcd_kg_port_arm_fe` → `keygen_scheme_setup` → `keygen_write_scheme`.
+**[SPEC]** `engage 11 0 2B9 801C0006` → dmesg shows `ekfc=0x801c0006 (slot->ekfc=0x801c0006)`. The strsep tokenizer (0160) correctly parses the 4th arg and propagates it through `fman_pcd_kg_port_arm_fe` → `keygen_scheme_setup` → `keygen_write_scheme`. **SUPERSEDED NOTE:** The original text documented `1C0006` (13-byte `0x001C0006`). Current target is `801C0006` (14-byte `0x801C0006` with PORT_ID).
 
 ### 11.5 CONT_LOOKUP Pass-Through Validated
 

@@ -1,6 +1,16 @@
 # MURAM — FMan Internal RAM & the ASK2 Flow-Table Budget
 
-**Version 2.0 · HADS 1.0.0**
+**Version 2.1 · HADS 1.0.0**
+
+> **[NOTE — status correction (2026-08-05)]** This doc's "retired FE-VM ehash" framing (§5 and
+> elsewhere) predates F-163's un-retirement finding: the genuine deployed vendor `cdx.ko` driver's
+> production classification path **is** external-hash (`ExternalHashTableAddKey()`, `cdx_ehash.c`),
+> so "retired / historical reference only" is no longer accurate as an architecture verdict — the
+> FE-VM ehash DDR path is **un-retired and under active re-validation** (14-byte PORT_ID-prefixed
+> key, EKFC `0x801C0006`, F-163; test-methodology fix F-165). What remains true and load-bearing
+> here: the MURAM budget arithmetic, the vendor MURAM-exhaustion history, and the fact that no HIT
+> is confirmed on *this branch's* silicon yet via either path. See `arch/fman-fe-ehash.md`
+> (un-retirement banner) and `plans/ASK2-MASTER-PLAN.md` top banners.
 
 **Source:** LS1046A DPAA RM §5.3.13 (p.481), §5.5 (BMI), §5.12 (CC); ASK2 spec §13.3 & §16 (Risk #13);
 patch `0126-fman-pcd-muram-genpool.patch`; `fman-pcd-api-reference.md` §16.4 (throughput).
@@ -14,9 +24,10 @@ all FMan modules.
 
 ## AI READING INSTRUCTION
 
-**[SPEC]** This document defines the MURAM allocation model for the **shipping** HW-offload path
-(CC-tree match tables + manip chain + gen_pool arena) and documents the **retired** FE-VM ehash DDR
-path. The CC-tree is the active consumer; the FE-VM ehash is historical reference only.
+**[SPEC]** This document defines the MURAM allocation model for the **intended** HW-offload path
+(CC-tree match tables + manip chain + gen_pool arena) and documents the **FE-VM ehash DDR** path
+(un-retired 2026-08-05 — see the status correction above). Neither dispatch path has a confirmed
+hardware HIT on this branch as of 2026-08-05; the allocation model is real and in use regardless.
 
 ```mermaid
 flowchart TB
@@ -51,11 +62,11 @@ flowchart TB
 
 ---
 
-## 2. The shipping CC-tree allocation model (64 KiB gen_pool arena)
+## 2. The CC-tree allocation model (64 KiB gen_pool arena)
 
 **[SPEC]** The active HW-offload memory model is the **CC-tree** (match tables + manip chain), served
-from a dedicated **64 KiB gen_pool** arena carved from the CC region. This is the shipping path;
-the FE-VM ehash DDR table (§5) is retired experimental.
+from a dedicated **64 KiB gen_pool** arena carved from the CC region. (The FE-VM ehash DDR table,
+§5, lives outside this arena — in DMA-coherent DDR — and is un-retired as of 2026-08-05.)
 
 **[SPEC]** `FMAN_PCD_MURAM_RESERVED_BYTES = 64 * 1024` (patch `0126`). The reservation is
 sub-allocated via a dedicated `gen_pool` (`FMAN_PCD_MURAM_ORDER = 8`, 256-byte granule) so PCD
@@ -142,11 +153,21 @@ flowchart TD
 
 ---
 
-## 5. Retired: FE-VM ehash DDR path (historical reference)
+## 5. FE-VM ehash DDR path (un-retired 2026-08-05; previously "retired")
 
-**[SPEC]** The FE-VM external-hash path (Frame-Engine opcode VM, DDR bucket tables, `FE_ENTER` AD,
-`pcAndOffsets=0xF6`) is **retired** from the shipping dataplane. It is documented here for
-historical completeness and as a reference architecture.
+> **[NOTE — 2026-08-05]** This section was headed "Retired: FE-VM ehash DDR path (historical
+> reference)" until F-163 un-retired the path: the genuine deployed vendor `cdx.ko` driver
+> classifies production flows via external-hash (`ExternalHashTableAddKey()`), so this is the
+> vendor's real architecture, not a historical fork. The retirement rationale below is preserved
+> verbatim as the decision record; its points 1–4 remain real engineering constraints, but none of
+> them is the reason the path failed here — it never failed *here* at all, because it was never
+> correctly exercised (F-165: the engage path overwrote the caller's FE_ENTER target with an empty
+> scaffold). On this branch the path is **un-validated, not dead**.
+
+**[SPEC — 2026-08-01, SUPERSEDED as a verdict, kept as the constraint record]** The FE-VM
+external-hash path (Frame-Engine opcode VM, DDR bucket tables, `FE_ENTER` AD,
+`pcAndOffsets=0xF6`) was retired from the shipping dataplane on 2026-08-01. It is documented here
+for historical completeness and as a reference architecture.
 
 **[NOTE]** The FE-VM ehash path was the M0 vendor-oracle deliverable and the original M2 target.
 It was retired because:
@@ -165,13 +186,17 @@ It was retired because:
    this entirely by never touching the ehash allocator.
 
 **[SPEC]** The FE-VM ehash path achieved **8.58 Gbps** in the NXP cdx.ko production stack
-(`fman-fe-ehash.md` §10), proving the FE opcode VM is functional on 210.10.1 microcode. The
-CC-tree path exceeds this at 10.259 Gbps with lower complexity and zero DDR traffic.
+(`fman-fe-ehash.md` §10), proving the FE opcode VM is functional on 210.10.1 microcode. ~~The
+CC-tree path exceeds this at 10.259 Gbps with lower complexity and zero DDR traffic.~~
+**[Correction 2026-08-05]** the 10.259 Gbps M5 figure is under retraction review — M5's mechanism
+is unresolved and most likely measured kernel `nf_flowtable` software forwarding, not any hardware
+classification (qdrant tag `no-confirmed-hw-hit-ever`); neither CC-tree nor ehash has a confirmed
+hardware HIT on this branch.
 
 **[NOTE]** The full FE/ehash init contract (allocation sizes, `FE_ENTER` AD encoding, per-port
 `FmPortSetFESupport`, DDR bucket layout, reversibility inverse) is preserved in
 [`fman-fe-ehash.md`](fman-fe-ehash.md) §3–§6. That document remains the authoritative byte-level
-reference for the retired path.
+reference for the path.
 
 ---
 
@@ -181,8 +206,8 @@ reference for the retired path.
 |---|---|
 | 384 KB total, FIFO/CC split | hard ceiling on offload capacity |
 | 64 KiB gen_pool → **~8 CC nodes → ~2 000+ flows** | HW flow table = cache; `ask.ko` must age/evict |
-| CC-tree: zero per-frame DDR, 7.37–10.259 Gbps | on-chip MURAM path is the shipping dataplane |
-| FE-VM ehash: DDR ceiling ~1.5 Gbps, retired | historical reference; see §5 |
+| CC-tree: zero per-frame DDR | on-chip MURAM path — **no confirmed HIT on this branch** (`cc_test` architecture broken, F-159–F-162) |
+| FE-VM ehash: DDR-per-frame lookup, ~1.5 Gbps ceiling claim **unmeasured** | un-retired (F-163, vendor production path); no confirmed HIT yet (F-165 retest pending); see §5 |
 | Manip chain ≤1 KiB; Risk #13 frag | `fman_pcd_manip.c` must instrument gen_pool + pool chains + fail soft |
 | FIFO vs CC zero-sum | jumbo-frame support directly cuts flow capacity — a tuning knob |
 | Policer/parser RAM separate | rate-limiting & parsing don't eat the flow budget |
@@ -192,5 +217,6 @@ software slow path**, not a replacement for it. Every other arch doc's resource 
 **this is the one that bites.**
 
 *Related: [`fman-pcd.md`](fman-pcd.md) (the CC/manip structures that live here), [`fman.md`](fman.md)
-(the FIFO side of the split), [`fman-fe-ehash.md`](fman-fe-ehash.md) (retired FE-VM ehash DDR path),
+(the FIFO side of the split), [`fman-fe-ehash.md`](fman-fe-ehash.md) (FE-VM ehash DDR path —
+un-retired 2026-08-05),
 [`../specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) §13.3 & §16 Risk #13.*
