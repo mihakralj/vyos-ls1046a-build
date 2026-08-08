@@ -81,6 +81,18 @@ define pcodeop fman_test_dc;
 :op_db  regfld, imm16 is prefix8=0xdb & regfld & imm16 { regfld = fman_alu_db(regfld, imm16:4); }
 :tst_dc regfld, imm16 is prefix8=0xdc & regfld & imm16 { cc = fman_test_dc(regfld, imm16:4); }
 
+# --- G3+ 0x73-family: the FE-VM conditional-test core (2026-08-08) ---
+# 190 sites. Encoding confirmed against the existing conventions:
+#   prefix8 = 0x73, reg = bits[20:16], imm16 = low16.
+# Semantics: test reg against (MURAM word at imm16 | immediate) and set cc;
+# the following brc/b43f/... consumes cc.  The paired FE-type dispatch idiom
+# is `ebce001a` (shift >>26 = extract FE type field) then `73ee7106` where
+# reg=r14 and low-byte 0x06 = EXT_HASH type (highest FE type 1..6).  Modeled
+# as a black-box cc-setter so the decompiler can resolve the branch skeleton.
+define pcodeop fman_test_73;
+
+:tst_73 regfld, imm16 is prefix8=0x73 & regfld & imm16 { cc = fman_test_73(regfld, imm16:4); }
+
 # --- G3+ HIT/MISS-path classes (black-box; modeled to make the EXT_HASH
 # walker readable). Small-immediate: 0xe1 (byte offset/count), 0xef.
 # ALU: 0xd9. Address-carrying (memory-touching): 0x77 0x78 0xf1 0xf4. ---

@@ -164,7 +164,7 @@ plausibly a staging-buffer/streaming-read port) each iteration and
 `tst_dc`s the result — the right *shape* for "read next chunk; compare;
 loop." Constants `0x213d`/`0x2138` **recur across the different nearby
 loops**, consistent with several small loops sharing base
-pointers/parameters rather than one generic 13-byte memcmp — which would
+pointers/parameters rather than one generic 14-byte memcmp — which would
 actually make sense given the extraction is known (silicon-confirmed,
 2026-07-13) to be **field-based** (SIP, DIP, PROTO, SPORT, DPORT as
 distinct fields, not a flat byte array). Reading this as "one small compare
