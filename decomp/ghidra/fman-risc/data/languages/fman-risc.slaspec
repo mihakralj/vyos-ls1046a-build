@@ -1,0 +1,73 @@
+# fman-risc.slaspec
+# NXP FMan v3 Controller microcode RISC ISA - reverse-engineered, PARTIAL.
+# Stage G2: control flow (G1, silicon+cfg-map validated) + memory access
+# (HYPOTHESIS - load/store format derived from field analysis, not yet
+# oracle-confirmed; load/store direction of 0x04 vs 0x14 is a guess).
+# Encodings: decomp/maps/anchors.json, decomp/findings.md.
+
+define endian=big;
+define alignment=4;
+
+# Code is byte-addressed; instruction word w lives at byte 4*w.
+define space code     type=ram_space       size=4  default;
+define space register type=register_space  size=4;
+# Data address space: the per-task context page (0xd0xx) and the internal
+# MURAM window live here (16-bit addresses). One flat space for dataflow.
+define space dmem     type=ram_space       size=2;
+
+# Provisional register file: reg operand = bits[20:16] (5-bit, r0..r31).
+# bits[23:21] treated as flags/sub-op for now (Stage G3 resolves the full
+# 8-bit operand field; observed values reach 0x99).
+define register offset=0x00 size=4
+  [ r0  r1  r2  r3  r4  r5  r6  r7  r8  r9  r10 r11 r12 r13 r14 r15
+    r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 ];
+define register offset=0x100 size=4 [ pc sp cc ];
+
+define token instr(32)
+    prefix16 = (16,31)
+    prefix8  = (24,31)
+    imm16    = (0,15)
+    simm16   = (0,15) signed
+    regfld   = (16,20)
+    addr16   = (0,15)
+;
+attach variables [ regfld ]
+  [ r0  r1  r2  r3  r4  r5  r6  r7  r8  r9  r10 r11 r12 r13 r14 r15
+    r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 ];
+
+# --- control flow (G1: targets validated; conditions provisional) ---
+BDEST: rel is imm16  [ rel = (48 + imm16) * 4; ]        { export *:1 rel; }
+RDEST: rel is simm16 [ rel = inst_start + simm16 * 4; ] { export *:1 rel; }
+
+:br   BDEST is prefix16=0xb7ff & BDEST { goto BDEST; }
+:brc  RDEST is prefix16=0xb3ff & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xb43f & RDEST { if (cc != 0) goto RDEST; }
+:brc  RDEST is prefix16=0xbc3f & RDEST { if (cc != 0) goto RDEST; }
+:jmp  RDEST is prefix16=0xa3ff & RDEST { goto RDEST; }
+:park       is prefix16=0xb7df & imm16 { goto inst_start; }
+
+# --- memory access (G2 HYPOTHESIS: reg=bits[20:16], addr=bits[15:0]) ---
+# 0x04 = load, 0x14 = store, 0x10 = load (directions are a guess pending G3).
+:ld  regfld, [addr16] is prefix8=0x04 & regfld & addr16 { local a:2 = addr16; regfld = *[dmem]:4 a; }
+:st  [addr16], regfld is prefix8=0x14 & regfld & addr16 { local a:2 = addr16; *[dmem]:4 a = regfld; }
+:ldb regfld, [addr16] is prefix8=0x10 & regfld & addr16 { local a:2 = addr16; regfld = *[dmem]:4 a; }
+
+# --- ALU / op classes (G3 HYPOTHESIS: operand STRUCTURE decoded; the exact
+# operation is UNVERIFIED, so each is a black-box pcodeop that tracks dataflow
+# without asserting semantics. reg = bits[20:16], operand = low16.
+# 0xeb = reg-immediate (small imm); 0xf0 = MURAM-addressing; 0xdc = the
+# dominant pre-branch op, hypothesised as the condition-setter. ---
+define pcodeop fman_alu_eb;
+define pcodeop fman_alu_f0;
+define pcodeop fman_alu_d8;
+define pcodeop fman_alu_db;
+define pcodeop fman_test_dc;
+
+:op_eb  regfld, imm16 is prefix8=0xeb & regfld & imm16 { regfld = fman_alu_eb(regfld, imm16:4); }
+:op_f0  regfld, [addr16] is prefix8=0xf0 & regfld & addr16 { local a:2 = addr16; regfld = fman_alu_f0(regfld, *[dmem]:4 a); }
+:op_d8  regfld, imm16 is prefix8=0xd8 & regfld & imm16 { regfld = fman_alu_d8(regfld, imm16:4); }
+:op_db  regfld, imm16 is prefix8=0xdb & regfld & imm16 { regfld = fman_alu_db(regfld, imm16:4); }
+:tst_dc regfld, imm16 is prefix8=0xdc & regfld & imm16 { cc = fman_test_dc(regfld, imm16:4); }
+
+# Fixed-width catch-all keeps disassembly synchronized (least specific).
+:unk prefix16, imm16 is prefix16 & imm16 { }

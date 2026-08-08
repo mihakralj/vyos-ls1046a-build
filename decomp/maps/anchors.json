@@ -1,0 +1,63 @@
+{
+  "generated": "2026-08-07",
+  "blob": {
+    "file": "fman-ucode-210.10.1.bin",
+    "sha256": "5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d",
+    "code_words": 12851,
+    "unique_islands_vs_public": [[2972, 8096], [8584, 12090]]
+  },
+  "conventions": {
+    "word_index": "0-based u32 word index from code-region start (blob offset 244)",
+    "dispatch_target": "absolute word = 48 + slot_low16 (table is 24 slots x 8B = 48 words, base byte 0xC0)",
+    "confidence": ["verified", "high", "statistical", "hypothesis"]
+  },
+  "anchors": [
+    {"id": "A00", "kind": "dispatch-slot", "slot": 0, "target": "w633", "label": "Policer Profile HC / DONE (ambiguous)", "evidence": "arch §1.2 slot table; RM HCOR 0x00", "confidence": "statistical"},
+    {"id": "A01", "kind": "dispatch-slot", "slot": 1, "target": "w653", "label": "KeyGen HC (HCOR 0x01)", "evidence": "arch §1.2; RM HCOR 0x01; populated all tiers", "confidence": "high"},
+    {"id": "A02", "kind": "dispatch-slot", "slot": 2, "target": "w651", "label": "SYNC / PRS (ambiguous)", "evidence": "arch §1.2", "confidence": "statistical"},
+    {"id": "A03", "kind": "dispatch-slot", "slot": 3, "target": "w1626", "label": "dynamic CC-table update, general (HCOR 0x03)", "evidence": "arch §1.2 disproportionate 210 growth; target inside unique run w1581-w1644", "confidence": "high"},
+    {"id": "A06", "kind": "dispatch-slot", "slot": 6, "target": "w8622", "label": "QMI_ENQ (NIA_ENG 0x6)", "evidence": "arch §1.2; target inside unique run w8584-w8632 at head of second island", "confidence": "statistical"},
+    {"id": "A07", "kind": "dispatch-slot", "slot": 7, "target": "w12172", "label": "QMI_DEQ (NIA_ENG 0x7)", "evidence": "arch §1.2; target sits past unique island w10349-w12090", "confidence": "statistical"},
+    {"id": "A08", "kind": "dispatch-slot", "slot": 8, "target": "w80", "label": "FM_CTL_A; guarded-store cascade construct (b3ff/e9c9), tier-shared tail", "evidence": "arch §1.2 + 2026-08-06 probe; byte-identical cross-tier at byte 0x140", "confidence": "verified"},
+    {"id": "A12", "kind": "dispatch-slot", "slot": 12, "target": "w75", "label": "CC dispatch stub (NIA_ENG 0xC), fixed 27 words all tiers", "evidence": "arch §1.2", "confidence": "high"},
+    {"id": "A19", "kind": "dispatch-slot", "slot": 19, "target": "w8669", "label": "dynamic CC-table update, aging-specific (HCOR 0x13 = HC_HCOR_OPCODE_CC_UPDATE_WITH_AGING)", "evidence": "THREE-WAY: 210-only slot (arch §1.2) + target inside unique island w8648-w10262 (alignment map) + ASK-added vendor HC opcode (function-inventory §2)", "confidence": "high"},
+
+    {"id": "C01", "kind": "opcode-class", "prefix": "0xb7ff", "label": "absolute branch (low16 = word target from table end)", "evidence": "dispatch-table cross-tier byte identity at computed targets", "confidence": "verified"},
+    {"id": "C02", "kind": "opcode-class", "prefix": "0xb3ff", "label": "relative conditional branch (short skips + loops)", "evidence": "bimodal low16 (median 0x001b + 0xffxx tail); slot-8 cascade keeps PC+NNNN constant", "confidence": "high"},
+    {"id": "C03", "kind": "opcode-class", "prefix": "0xb43f", "label": "relative conditional branch (short)", "evidence": "95% small low16", "confidence": "statistical"},
+    {"id": "C04", "kind": "opcode-class", "prefix": "0xbc3f", "label": "relative conditional branch", "evidence": "small low16 + 0xffde tail", "confidence": "statistical"},
+    {"id": "C05", "kind": "opcode-class", "prefix": "0xa3ff", "label": "long relative branch / call candidate", "evidence": "median low16 0x1f56", "confidence": "statistical"},
+    {"id": "C06", "kind": "opcode-class", "prefix": "0xb7df", "label": "park/halt stub (branch-to-self)", "evidence": "low16 ~= 0xffff/0xfffe only, 285x", "confidence": "high"},
+    {"id": "C07", "kind": "opcode-class", "prefix": "0x04xx family (0x0400/01/02/03/08...)", "label": "per-task context-page / memory access (load-store)", "evidence": "carries 0xd0xx addresses (59x in 0x0400 alone); 11.7% of all code; top 210-growth class", "confidence": "high"},
+    {"id": "C08", "kind": "opcode-class", "prefix": "0x1xxx family (0x1400/01/02, 0x1000, 0x120x...)", "label": "per-task context-page / memory access (second class)", "evidence": "carries 0xd0xx (59x in 0x1400); 0x1409d0c4 bracket in slot-8 construct = context access at 0xd0c4", "confidence": "high"},
+    {"id": "C09", "kind": "opcode-class", "prefix": "0xf042", "label": "memory access, low internal region", "evidence": "low16 span 0x0300-0x4b00, never small/negative", "confidence": "statistical"},
+    {"id": "C10", "kind": "opcode-class", "prefix": "0xe9c9", "label": "store/index op, slot-8 construct only", "evidence": "13 occurrences blob-wide", "confidence": "statistical"},
+
+    {"id": "M01", "kind": "memory-region", "range": "0x0843-0x087d", "label": "hot data structure accessed via 0x1080 class (115 accesses, 58-word window)", "evidence": "tight cluster", "confidence": "statistical"},
+    {"id": "M02", "kind": "memory-region", "range": "0xd000-0xd0ff", "label": "per-task context page (iter-42)", "evidence": "779 words carry 0xd0xx in low16 via 0x04xx/0x1xxx classes; corroborates arch/fman-fe-ehash.md §8.1 item 3", "confidence": "high"},
+
+    {"id": "K01", "kind": "constant", "value": "0x02010000 (ENQ FE w0)", "sites_210": ["w2184", "w2289", "w9055", "w9307"], "label": "ENQ FE descriptor materialization sites; w9055/w9307 inside second island (FE-VM code); also present in 106/108 (ENQ terminates HM chains in public microcode too)", "confidence": "verified"},
+    {"id": "K02", "kind": "constant", "value": "0x04000000 (MUX FE type)", "sites_210": ["w3998", "w4772", "w11081"], "label": "MUX FE materialization; also in public tiers (5x/6x)", "confidence": "statistical", "caveat": "w3998 sits among 04xx/14xx instructions — could be an all-zero-operand instruction rather than the constant"},
+    {"id": "K03", "kind": "constant", "value": "low16 NIA engine codes 0x44/0x48/0x50", "sites_210": ["0x48: w2232,w12593,w12777,w12812,w12814", "0x50: w2177,w2291,w3419,w3501,w4112,w4886,...", "0x44: w384,w1594,w1786,w1791,w3404,w11915,..."], "label": "NIA construction sites (NIA engine field in low half-word)", "confidence": "high"},
+    {"id": "K04", "kind": "constant", "value": "0x0800 (IPv4 ethertype, low16)", "sites_210": ["82 hits incl. w393, w1768, w2133"], "label": "parser/protocol compare constants", "confidence": "high"},
+    {"id": "K05", "kind": "constant", "value": "0x0806 ARP (7x), 0x86DD IPv6 (2x: w391,w9348), 0x0868 GTP (6x)", "label": "more protocol constants; VLAN 0x8100 and PPPoE 0x8864 ABSENT (hard parser handles tag stripping)", "confidence": "high"},
+
+    {"id": "N01", "kind": "negative-result", "value": "FE type codes 0x01000000/0x03000000/0x04000000-only/0x05000000/0x06000000", "label": "FE descriptor types are NOT compared as full 32-bit constants anywhere in any tier (except MUX 0x04000000 hits with ambiguity) — type dispatch uses bit-fields or a table, not literal compares", "confidence": "verified"},
+    {"id": "N02", "kind": "negative-result", "value": "FE-VM opcodes 0x80000010/0x80000200/0x8000C001/0x81000000", "label": "FE-VM flow-record opcodes never appear in code, any tier — the interpreter decodes them via bit-fields or indexed dispatch, not literal compare; alternatively FE-VM opcode execution is not done by controller code at all", "confidence": "verified"},
+    {"id": "N03", "kind": "negative-result", "value": "0x40800000 (FE_ENTER w0), 0x00007fff (hash mask), 0x80000000 (opcode top bit), 0x0000d000 (ctx base)", "label": "none appear as full words — descriptor fields are built/tested by masks and shifts, not literal constants", "confidence": "verified"},
+
+    {"id": "B01", "kind": "structure", "location": "w2837", "label": "head of 9-deep loop nest spanning up to w5127 (2290 words) into island 1 — table walker, largest control-flow feature in blob", "evidence": "cfg-map v2: 12 predecessors at head, nested backward branches", "confidence": "high"},
+    {"id": "B02", "kind": "structure", "location": "w8676-w12072", "label": "3396-word single loop covering most of island 2 — the aging walker; slot 19 (w8669) falls into it after 6-word preamble", "evidence": "cfg-map v2 backward branch w12072->w8676 + slot-19 block", "confidence": "high"},
+    {"id": "B03", "kind": "structure", "location": "w12133", "label": "hottest join point (36 predecessors) — frame-handling epilogue/dispatch core candidate", "evidence": "cfg-map v2 predecessor counts", "confidence": "high"},
+    {"id": "B04", "kind": "structure", "location": "w12849", "label": "16-predecessor stub at code end (12851) — common exit", "evidence": "cfg-map v2", "confidence": "high"},
+    {"id": "B05", "kind": "structure", "location": "w653-w654", "label": "slot trampolines: dispatch slots are 1-3 word stubs branching to real bodies (slot1 -> w12061, slot8 -> w104, slot6 -> w72)", "evidence": "cfg-map v2 block shapes", "confidence": "high"}
+  ],
+  "open_questions": [
+    "Q01: iter-42's 'vector-table entry word 0x630' addressing frame — no dispatch-slot target matches under verified base (nearest slot 3 = w1626)",
+    "Q02: aging-update invocation path on 210 — slot 19 handler exists but no HC doorbell (caps bit 3 clear); how does vendor invoke it?",
+    "Q03: identity of M01 hot structure (0x0843-0x087d)",
+    "Q04: meaning of 0x0082 0000 (110 identical words)",
+    "Q05: how FE descriptor types ARE dispatched (bit-field test vs table) given N01 — NARROWED 2026-08-07 night: NO secondary jump tables and NO raw offset tables exist in the blob (cfg-map v2), so indexed data-table dispatch is refuted; remaining: compare-and-branch cascade (most likely, branch-rich ISA + small type constants 1-6) or computed indirect branch (needs Phase-4 compare/indirect encodings)",
+    "Q06: whether FE-VM flow-record opcodes execute in controller code at all given N02 — check w9055/w9307 neighborhoods for the actual enqueue-path construction"
+  ]
+}
