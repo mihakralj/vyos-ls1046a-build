@@ -134,12 +134,15 @@ hard parser strips tags.)
 | 19 | w8669 | `hc_cc_update_aging` (HCOR 0x13, ASK-added) | [FACT] three-way |
 
 Structural anchors (rename by role): w2837 `table_walker`, w8676–w12072
-`aging_walker_loop`, w12133 `frame_epilogue`, w12830–w12850 `pool_status_loop`
-(was `exit_stub` at w12849 — **corrected 2026-08-08**: w12849 `b3fffed6`
-branches back to w12830, it is the loop-back/re-iterate point of the tail
-pool-status refresh loop, not a terminal exit; 12+ branches from w12675–
-w12780 land there as the common guard-failure continue), w9040–w9520
-`enq_builder` (ENQ constant materialized at w9055).
+`aging_walker_loop`, w12133 `frame_epilogue`, w12667–w12848 `pool_slot_walk`
+(per-slot `ld [off] → op_f0 [0xb01] status-poll → brc w12849 → st [off]`
+template over offsets 0x08–0x60, ~22 slots — **corrected 2026-08-08-2**:
+w12849 `b3fffed6` imm `0xfed6` = −298 targets word **12551**, NOT w12830 —
+the earlier "pool_status_loop loop-back" reading misdecoded `0xfed6` as
+`0xffed`; w12849 is the guard-failure convergence point that jumps to the
+shared status-check region w12551 (`[0xf808]` FM_CTL status + `op_eb
+r1,0x30c` params-base compute), not a self-loop), w9040–w9520 `enq_builder`
+(ENQ constant materialized at w9055).
 
 ## 4. SDK function names — reference only (NOT microcode symbols)
 
