@@ -84,6 +84,19 @@ touching two entries in a **~22-entry table** (`0x08`–`0x60`) the microcode
 walks as a unit — recovery may need to re-seed more of that table than the
 two fields currently named.
 
+**2026-08-08 (later, independent cross-validation from the kernel side):**
+while checking for an existing MURAM-physical-address convention,
+`bin/kernel-fixups/F_073D.py`'s "F-070c: zero FM_CTL params" disengage
+cleanup code turned up — it writes zero to **exactly `pp+0x54` and
+`pp+0x58`** (`iowrite32be(0, pp + 0x54/4); iowrite32be(0, pp + 0x58/4);`).
+This is a **third, independent source** (alongside this doc's own
+microcode disassembly and patch 0163's `fe_recover`) agreeing these two
+offsets matter to the pool-management mechanism — the kernel driver's own
+disengage-time cleanup targets the identical two fields the tail-of-image
+routine manipulates. Doesn't resolve the "same template as ~18 neighbors"
+caveat above, but strengthens confidence this is the right region, not a
+coincidence.
+
 ### A rare, deliberate trap/halt vector guards this routine's entry
 
 `w12665: br 0x0003fbac` — an **unconditional** jump to word 65259, far
