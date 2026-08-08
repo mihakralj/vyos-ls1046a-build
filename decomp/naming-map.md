@@ -179,3 +179,53 @@ A starter script can bulk-apply §3 (function renames) + §2 (equates) via the
 GhidraMCP `rename_function`/`set_decompiler_comment` tools or a headless
 GhidraScript. This is the immediate next labeling step once the G3 register
 model firms up the store operands.
+
+## 7. Address-window map — 2026-08-08 (full-image census)
+
+**Complete address-window census from the regenerated listing.** Every
+`ld`/`st`/`m_77`/`m_78`/`m_f1`/`m_f4`/`op_f0` operand was counted. The FMan
+210 controller has ONE flat 16-bit data address space; the regions are:
+
+| Window | Accesses | Role | Evidence |
+|---|---|---|---|
+| `0xd000–0xd0ff` | ~787 | **per-task Internal Context (IC)** — §1.1 | `ld`/`st` hot offsets 0x08/0x18/0x0c/0xb8/0xc0/0xd4 |
+| `0x0300 + n·0x800` (n=0..12) | 502/266/184/105/62/49/43/30/19/18/17/15/13 | **per-tnum MURAM workspace slots** (0x800 = 2048 B apart) | every slot shares a header at `+0x500–0x548` (below) |
+| `0x0800`/`0x1000`/`0x1800` | 1023/929/597 | deeper tier of the same slot array | same `+0x500` header offsets |
+| `0x8000–0x80ff` | 232 | **AD-base / frame-command window** — CC reads the AD base from `[0x8040]`/`[0x8050]` | w1854 `ld r1,[0x8040]` immediately before AD-type extract |
+| `0xf800–0xf8ff` | 125 at `+0x00` | **FM_CTL status / current-NIA window** — the dispatcher's `[0xf800]` slots | w603 `m_78 r2,[0xf800]` right after the action table |
+| `0xf900`/`0xfb00`/`0xfc00` | 18/78/20 | more FM_CTL status slots (parse-result echo, error status) | `m_78`-only (`0x78XX` ops) |
+| `0xc000–0xc0ff` | 184 | per-frame IC/command region | |
+
+**Common per-slot header at `+0x500–0x548` (every workspace slot):** byte
+offsets `0x500/0x502/0x504/0x508/0x510/0x518/0x534/0x538/0x53c/0x540` appear
+in *all* 13+ 0x800-slots — a fixed 0x48-byte per-tnum control block the FE-VM
+writes uniformly (pointers/counters). **[?]** individual field identity open.
+
+**`0x79XX` = DATA, not an instruction** (corrected 2026-08-08). The 16 words
+`w585–w606` (`0x7902f800`, `0x7904f800`, …, `0x791ef800`, `0x7900f800`) are
+the **FM_CTL action-dispatch table**: each packs `(action_code, 0xf800)` with
+constant low16 — mapping FM_CTL action codes (0x02 ENQ, 0x06 CC, 0x08/0x0a
+IND_MODE, 0x0c HC, 0x0e POP_TO_N_STEP, 0x10/0x12/0x14/0x18 BMI-fetch
+variants, 0x1a PRE_BMI_ENQ, 0x1e DISCARD) to handler slots in the `0xf800`
+status window. Only branched into at w585/w583 (dispatch slots 13/15/16);
+the dispatcher loads the resolved pointer via `[0xf800]` (w603). The older
+"`w583` = `ipr_timeout` (HCOR 0x10)" label (slot 16) is **superseded for the
+slot-13/15/16 targets** — those land on the action-dispatch table. w583
+(`0x2c3ff000`) is the table preamble, w584 pad.
+
+**AD-type extraction idiom (CC engine):** `c600001e` (shift right 30) extracts
+the **AD type field bits[31:30]** (`0x40000000` CONT_LOOKUP→1, `0x80000000`
+RESULT→2, `0xc0000000` BYPASS→3) — the CC engine's dispatch on the action
+descriptor at RCCB. Sibling `c600001a` / `op_eb r14,0x1a` (shift 26) sites
+(w121/192/241/347 in the CC region; w9067/9111/9241/9435/9487 in the FE
+interpreter) extract the **FE type field bits[31:26]**. Both confirm anchors
+N01–N03: type/opcode fields are decoded field-wise, never compared as full
+32-bit constants.
+
+**`e9c9` guarded-store cascade (CC dispatch stub, w75–w103):** pairs of
+`b3ff <skip>` + `e9c9 <imm>` with immediates `0x0e/0x06/0x1e/0x16/0x3e/0x36/
+0x01/0xc2/0x142/0x200/0x40a/0x802` — conditional stores to `ctx[0xd0c4]` (the
+current-NIA/action slot) that dispatch on the incoming action before
+converging at w104 → `b7ff0217` → w583 (action table). The imm values straddle
+the FM_CTL action-code space (0x06/0x0e/0x1e) and NIA values (0x200
+KG-CC_EN, 0x40a/0x802) — **[?]** exact compare semantics open.
