@@ -1089,6 +1089,73 @@ real semantics (most likely a hash/CRC-config + further-indirection scheme
 never replicated here) — the more likely home for the actual behavioral
 difference. Follow-on work: `plans/NXP-106-DEEP-DIVE-PLAN.md` Phase A/C.
 
+### 7.12 FE-VM microcode dispatch mechanics — decompile-verified (2026-08-08)
+
+How the 210.10.1 microcode *itself* implements the FE-VM (the
+SDK-facing contract is §7.10; this is the microcode-internal side, recovered
+from `decomp/fman-listing.txt` + Ghidra SLEIGH `fman-risc`, word index = byte
+offset / 4).
+
+**The `0x73xx` family is the FE-VM's conditional-test core** (190 sites).
+Encoding: `prefix8=0x73`, `reg=bits[20:16]`, `imm16=low16` — "test reg against
+the MURAM word at imm16 (or an immediate), set `cc`", consumed by a following
+`brc`. This is the microcode's primary per-frame predicate (role of
+`tst_dc`/`0xdc` but far more numerous). Added to the SLEIGH as `tst_73`;
+with it modeled, the decompiler resolves the FE-VM branch skeleton.
+
+**The `0x2c3f` family is the computed-branch / table trampoline** (29 sites):
+`2c3f<base>` = "jump to the handler whose pointer is at MURAM base low16,
+indexed by a runtime register". `2c3ff000` targets the `0xf800`-window
+handler-pointer slots.
+
+**FE type dispatch idiom** (the "how the interpreter runs an FE object"):
+```
+ebce001a   ; op_eb r14, 0x1a  → r14 = word0 >> 26 = FE type field (bits[31:26])
+73ee7106   ; tst_73 r14, 0x7106 → test the type (low byte 0x06 = EXT_HASH,
+           ;                    the highest FE type 1..6)
+2c3ff000   ; br_tbl [0xf000]  → computed dispatch via the handler table
+```
+Five live sites in the FE interpreter (w9068/9112/9242/9436/9488, the
+enq_builder region w9040–w9520); sibling `c600001a` shift-26 sites
+(w121/192/241/347) in the CC-engine path. **This confirms anchors N01–N03:
+FE types are decoded field-wise (`>>26`), never compared as full 32-bit
+constants — there is no literal `0x06`, `0x02010000`, `0xf6`, or `0x40800000`
+anywhere in the image.**
+
+**AD-type extraction (CC engine):** `c600001e` (shift right 30) extracts the
+AD type field `bits[31:30]` (`0x40000000` CONT_LOOKUP→1, `0x80000000`
+RESULT→2, `0xc0000000` BYPASS→3) — the CC engine's dispatch on the action
+descriptor at RCCB.
+
+**FM_CTL action-dispatch table (`w585–w606`, DATA — corrected).** The 16
+words `0x7902f800 … 0x791ef800, 0x7900f800` map FM_CTL action codes (0x02
+ENQ, 0x06 CC, 0x08/0x0a IND_MODE, 0x0c HC, 0x0e POP_TO_N_STEP, 0x10/0x12/
+0x14/0x18 BMI-fetch variants, 0x1a PRE_BMI_ENQ, 0x1e DISCARD) to handler
+slots in the `0xf800` status window; the dispatcher (w603) loads the resolved
+pointer via `[0xf800]`. Only branched into at w585/w583 (dispatch slots
+13/15/16). The older "w583 = ipr_timeout (HCOR 0x10)" label is **superseded
+for those targets**. `e9c9` guarded-store cascade (w75–w103) writes the
+incoming NIA/action to `ctx[0xd0c4]` before converging to the table.
+
+**Register / address-window map** (full-image census, `naming-map.md` §7):
+per-task IC `0xd000–0xd0ff` (parse result `0x20–0x3f`, timestamp `0x40–0x47`,
+KG-hash result `0x48–0x4f`); per-tnum MURAM workspace slots `0x0300 + n·0x800`
+with a common `+0x500–0x548` control block; AD-base/frame-command window
+`0x8000`; FM_CTL status/current-NIA window `0xf800–0xf8ff` (+`0xf900`/`0xfb00`/
+`0xfc00`); frame core = `frame_epilogue` w12133 (per-frame status-assembly
+loop reading IC parse-result bytes); bucket indexer w1928 reads IC `[0xd048]`
+(KG hash) + `[0xe000]` (DDR bucket-table base).
+
+**Wedge relevance (E-HM8/E-HM9):** the wedge fires at the CC engine's
+dispatch of a frame to the FE_ENTER AD, *before* the FE-VM pool machinery
+(pool untouched). The FE-VM entry sequence above (CC path w214–w242: read AD
+base from IC `[0xd008]`, read the FE object word0 from slot `0x1b00`, `>>26`
+type extract, `2c3f` handler dispatch) is the exact code the wedge localizes
+to. The pool routine w12667 is NOT statically reachable from cc_dispatch —
+consistent with the pool staying untouched — but `2c3f` computed branches
+make static reachability inconclusive (the wedge could route through a
+handler slot in the `0xf800` window whose target is data-resolved).
+
 ---
 
 ## 8. Header Manipulation Opcodes
