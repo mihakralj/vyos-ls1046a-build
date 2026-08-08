@@ -57,13 +57,29 @@ branches two ways — the HIT/MISS-shaped structure. The `?op_e1 0x0008/0x000c`
 in the walker (immediates **8** and **12**) match the DDR key offset (`+8`)
 and keysize (12/13) — the byte-compare access.
 
+**2026-08-08 (extended pass, 260 words, raw hex not just mnemonics):** the
+snippet above is only the function *head*. A wider read (`w2837`–`w3096`,
+`decomp/ghidra/scripts/FmanHashOffset2.py`) shows `ehash_walker` self-loops
+onto its own entry (`jmp 0x00002c54`, at least twice) and contains ~8
+repetitions of a DMA-issue/spin-wait/DMA-read idiom
+(`op_f0`/`unk`/`park`/`op_f0`) — real confirmation of a per-record walk loop,
+but the **actual per-byte key-compare was not located** in this window; the
+visible `tst_dc` instances there are DMA-status polls, not an obvious
+13-byte compare. The region is bigger/more tangled than this doc's original
+estimate. `op_eb`/`op_e1` were confirmed to compute their offsets from
+**compile-time immediate constants** (not a descriptor/register read) —
+real evidence the record-header-skip mechanism exists in silicon, but
+**orthogonal to, not a resolution of**, the F-053/2026-08-07
+`hash_bytes_offset` AD-word controversy (see `decomp/findings.md`
+2026-08-08-late for the full writeup, including a self-caught correction).
+
 ## The encodings on the critical path (what to crack, and status)
 
 | Encoding | Role | Status |
 |---|---|---|
-| `0xdc` `fman_test_dc` | the **compare** → `cc` | modeled (black box); semantics = compare, verify what & how many bytes |
-| `0xe1` (imm 8/12) | key-offset / byte access | modeled; likely the per-byte compare/access |
-| `0xce`/`0xcf` (on hash reg) | **shift/mask** for bucket index | **partly cracked (2026-08-08)**: `0xe9 & 0xffff` = the 16-bit bucket mask (63/118 sites); the `>>48` shift is oracle-only |
+| `0xdc` `fman_test_dc` | the **compare** → `cc` | modeled (black box); the *key-byte* compare instance still not located (2026-08-08) — instances found so far are DMA-status polls |
+| `0xe1` (imm 8/12) | key-offset / byte access | modeled; confirmed (2026-08-08) these are **compile-time immediates** in `op_eb`/`op_e1` pairs, not descriptor-driven — real but doesn't resolve the F-053 `hash_bytes_offset` question |
+| `0xce`/`0xcf` (on hash reg) | **shift/mask** for bucket index | **partly cracked (2026-08-08)**: `0xe9 & 0xffff` = the 16-bit bucket mask (63/118 sites), confirmed via disassembler `regfld` decode to chain `e9(r0)→ce(r0)→cf(r0)`; the *operation* ce/cf perform (shift? by how much?) is still oracle-only — `ce`/`cf` have zero slaspec rules |
 | `0xf4`/`0xf1` (assembled addr) | **DMA / table fetch** (DDR bucket+record) | modeled as mem black box; confirm it's the DDR read |
 | `0x77`/`0x78`/`0xca`/`0xcb` | address-carrying (high `0xf8xx`) | unmodeled; DMA/addressing family |
 | `brc` (b3ff/b43f/bc3f/**b03f/b83f/b41f/…**) | HIT vs continue-walk vs MISS | **family completed (2026-08-08, +274 branches)**; the opcode `_f`-suffix byte **encodes the condition** — map opcode→condition (oracle) to label HIT vs MISS |

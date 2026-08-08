@@ -10,6 +10,110 @@ dispatch-table attribution).
 
 ---
 
+## 2026-08-08 (late) — Ghidra disassembly pass on `bucket_index`/`ehash_walker`, re-triggered by the F-053/`hash_bytes_offset` qdrant controversy
+
+User redirected away from a hypothesis (permutation brute-force of the
+E-HM1 hash divergence) and back to ground truth: read the actual microcode.
+Re-staged the blob (`/tmp/kilo` had been cleared; re-fetched from `.185`'s DT
+property, SHA-256 verified identical), re-imported into a fresh headless
+Ghidra project with the `fman-risc:BE:32:default` SLEIGH module (already
+compiled+installed at `/opt/ghidra_11.3.2_PUBLIC/Ghidra/Processors/fman-risc/`
+from earlier this session), disassembled + decompiled `bucket_index` (w1928)
+and `ehash_walker` (w2837) with full raw 32-bit words printed alongside
+whatever mnemonic the slaspec resolves.
+
+**Confirmed, disassembly-grounded (upgrade from speculation to fact):**
+- `w1944` (`0xe920ffff`): the `0xe9`-prefixed instruction's `regfld` decodes
+  to **r0** — the *same* register `w1936 ld r0,[0xd048]` (the KG hash) loaded
+  8 instructions earlier, with r0 untouched in between. This independently
+  reproduces, via the real disassembler (not manual hex decode), the
+  2026-08-08-mid-7 entry's "`e9 r0,0xffff` masks the hash register" claim.
+  The *operation* `e9` performs is still unconfirmed — only the
+  register-chaining (e9 operates on the hash register, not some unrelated
+  register) is now disassembler-verified.
+- A second, previously-undocumented read: `w1946` (`0x0604d040`, prefix8=
+  `0x06`, NOT the modeled `0x04` `ld` rule — a sibling opcode, itself
+  unconfirmed) reads Internal-Context offset **0x40** — 8 bytes *before* the
+  hash at 0x48. This is per-frame IC space, not FE-descriptor/scheme-config
+  space, so it does **not** look like a read of the AD-word's
+  `hash_bytes_offset` field (F-053/2026-08-07 qdrant finding) — that field
+  lives in the scheme/FE-descriptor, addressed differently (via
+  MURAM-addressing ops like `op_f0`/`m_77`/`m_78`), not as a fixed IC offset.
+- In `ehash_walker`, the `op_eb`/`op_e1` pair (both modeled pcodeops) computes
+  DDR-record byte offsets using **compile-time immediate constants** — `8`
+  (twice, w2856/w2943) and `0xc`/12 (three times, w2899/w2915/w2922) — baked
+  into the instruction encoding, **not loaded from any descriptor/register
+  field**. This is real evidence a "+8 byte-offset" mechanism genuinely
+  exists in silicon (the F-053 author's original mechanism intuition was
+  onto something real), but it is a fixed compiled-in behavior, structurally
+  independent of wherever (if anywhere) the SDK's separate AD-word
+  `hash_bytes_offset` bits[17:16] get consumed — no load of such a field was
+  found feeding into either `op_eb`/`op_e1` pair in this window.
+- `ehash_walker` self-loops (`jmp 0x00002c54`, back to its own entry) at
+  least twice (`w2983`, `w3008`) — confirms a per-bucket-entry walk loop, as
+  documented. The loop body contains ~8 repetitions of a
+  `op_f0`(issue-DMA)/`unk`(go-bit?)/`park`(spin-wait)/`op_f0`(read result at
+  fixed `[0xb01]`) idiom — a DMA-issue-and-poll pattern, not obviously a
+  byte-comparison loop.
+
+**Correction / honesty check on existing docs — self-corrected within this
+same pass.** First wrote (in an earlier draft of this entry) that `ce`/`cf`
+chaining onto the hash register was unconfirmed and that the mid-7 entry's
+"hash-register op chain ... → ce → cf" was speculation dressed as fact.
+That was **wrong** — manually decoding `regfld` for `w1947`/`w1948` using
+the *exact same field position* (`bits[20:16]`) every modeled opcode in the
+slaspec already uses gives `regfld=r0` for **both** `ce` and `cf`, same as
+`e9`. So: **`e9(r0,0xffff) → ce(r0,0x0189) → cf(r0,0x0241)` is a real,
+consistent three-instruction chain on the hash register**, confirmed by
+the same decode method used for every other opcode in this ISA (not proof
+by analogy for `ce`/`cf` specifically, since they have zero slaspec rules
+of their own — but the field convention is uniform across every *other*
+opcode observed, so extrapolating it here is reasonable, not a stretch).
+The `subop` bits (23:21, "flags" per the slaspec comment) differ across the
+three: `e9`=`001`, `ce`=`000`, `cf`=`100` — plausibly a variant selector
+(consistent with two *different* shift/mask sub-steps).
+
+**What is still genuinely unconfirmed** (this is the part the mid-7 entry
+correctly hedged and that still stands): the *operation* `ce`/`cf` perform.
+Zero slaspec rules match `prefix8=0xce`/`0xcf` — Ghidra can only report the
+raw operand bytes (`0x0189`, `0x0241`), not semantics. Those immediates are
+not small integers in the 0–63 range one would expect for a literal
+"shift by N bits" encoding, so "shift" remains a plausible label inherited
+from the mid-7 entry, not a confirmed operation — it could equally be an
+address, a table index, or something else. Confirming needs the oracle
+(patch one of `0x0189`/`0x0241` and observe bucket placement on silicon),
+exactly as the mid-7 entry already said.
+
+**Not found in this pass:** the actual per-byte (or per-word) flow-key
+comparison loop. The `tst_dc` instances visible in a 260-word window
+(`w2837`–`w3096`) are DMA-status polls (each paired with an adjacent `park`)
+or isolated conditional checks, not an obvious tight loop comparing 13 key
+bytes against a fetched record. The region is larger and more tangled than
+the original ~90-word `ehash_walker` estimate assumed — likely several
+logically distinct sub-handlers/FE-type cases concatenated, not a single
+clean function. Locating the real compare needs either (a) much deeper
+static reading across the full extent, or (b) an oracle experiment (e.g.
+patch one candidate `tst_dc`'s immediate and observe HIT/MISS effect on
+silicon) — the latter is exactly the kind of controlled, falsifiable test
+this program is supposed to prefer over static guessing.
+
+**Bearing on the F-053/`hash_bytes_offset` qdrant controversy (2026-08-07):**
+this pass neither confirms nor refutes the SDK-derived claim that
+`hash_bytes_offset` (AD-word bits 17:16) drives live bucket-index derivation
+— no load of that specific field was located feeding into the bucket-index
+or record-offset arithmetic examined here. It *does* independently confirm
+a real, hardcoded "+8" record-navigation behavior exists in the walker,
+which is consistent with — but not proof of — the original F-053 mechanism
+being real while being a different register/field than the AD-word's
+`hash_bytes_offset`. This question remains open pending either deeper
+disassembly or a silicon oracle test.
+
+Tools: `/tmp/kilo/ghidra_scripts/FmanHashOffset.py`,
+`/tmp/kilo/ghidra_scripts/FmanHashOffset2.py` (not yet copied into
+`decomp/ghidra/scripts/` — ad hoc probes, promote if they prove reusable).
+
+---
+
 ## 2026-08-08 (mid-7) — Static bucket-index probe + branch-family completion
 
 Attempted to crack the `0xce/0xcf` bucket shift/mask statically (option "b").
