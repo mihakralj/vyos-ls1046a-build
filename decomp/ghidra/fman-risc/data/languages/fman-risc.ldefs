@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<language_definitions>
+  <language processor="fman-risc"
+            endian="big"
+            size="32"
+            variant="default"
+            version="1.0"
+            slafile="fman-risc.sla"
+            processorspec="fman-risc.pspec"
+            id="fman-risc:BE:32:default">
+    <description>NXP FMan v3 Controller microcode RISC (reverse-engineered, partial - Stage G1 control flow)</description>
+    <compiler name="default" spec="fman-risc.cspec" id="default"/>
+  </language>
+</language_definitions>
