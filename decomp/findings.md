@@ -11,7 +11,44 @@ dispatch-table attribution).
 
 ---
 
-## 2026-08-08 (newest) — FE-VM decompile restored; the `0x73` family is the FE-VM conditional-test core (the type dispatch is now readable)
+## 2026-08-08 (newest) — FE-VM decompile: register/window map + 2c3f computed-branch + frame core identified
+
+Full-image address-window census from the regenerated listing (all `ld/st/
+m_77/m_78/m_f1/m_f4/op_f0` operands counted) — documented in `naming-map.md`
+§7. Highlights:
+- **Per-task IC** `0xd000–0xd0ff` (hot offsets 0x08/0x18/0x0c/0xb8/0xc0/0xd4).
+- **Per-tnum MURAM workspace slots** `0x0300 + n·0x800` (n=0..12), each with a
+  common header at `+0x500–0x548` (uniform per-tnum control block).
+- **AD-base / frame-command window** `0x8000` (CC reads AD base from
+  `[0x8040]`/`[0x8050]` right before the AD-type extract).
+- **FM_CTL status/current-NIA window** `0xf800–0xf8ff` (+0xf900/+0xfb00/
+  +0xfc00): the dispatcher's handler-pointer slots.
+- **`0x79XX` = DATA, corrected** (w585–w606): the FM_CTL action-dispatch
+  table (action codes 0x02 ENQ…0x1e DISCARD → `0xf800` handler slots); the
+  older "w583 = ipr_timeout" naming-map label is superseded for slots 13/15/16.
+- **`2c3f` = computed-branch / table trampoline** (29 sites): low16 = table
+  base; the runtime handler index comes from a register. `2c3ff000` targets
+  the `0xf8xx` window. Added to the SLASpec (compiles; disassembly in sync).
+- **AD-type extraction idiom**: `c600001e` (shift 30) = AD type bits[31:30]
+  (CONT_LOOKUP=1, RESULT=2, BYPASS=3); sibling `c600001a`/`op_eb r14,0x1a`
+  (shift 26) = FE type bits[31:26]. Both confirm N01–N03 (field-wise decode).
+- **No `0xf6` literal anywhere in the image** — the FE_ENTER opcode (246) is
+  never compared as a constant; recognition is structural (AD type + flags).
+- **`e9c9` guarded-store cascade** (CC dispatch stub w75–w103): conditional
+  stores to `ctx[0xd0c4]` (current-NIA slot) dispatching on the incoming
+  action, converging at w104 → `b7ff0217` → w583 action table.
+- **frame_epilogue w12133**: per-frame status-assembly loop (reads IC parse-
+  result bytes 0xd031–0xd042, assembles 32-bit fields, `tst_73` gates).
+- **bucket_index w1928**: reads IC `[0xd048]` (KG hash result) + `[0xe000]`
+  (DDR bucket-table base), computes the index (`op_db` shifts/masks) — the
+  §4.3/§4.5 documented CRC-64→bucket path, now with the 73/2c3f decode.
+- CFG reachability: cc_dispatch (w75) reaches the AD-type-dispatch (w1854)
+  and frame_epilogue (w12133); the FE interpreter (w9040) reaches both; the
+  pool routine (w12667) is NOT statically reachable from these entries
+  (consistent with E-HM9: pool untouched — but 2c3f computed branches may
+  route to it, so this is not proof).
+
+## 2026-08-08 — FE-VM decompile restored; the `0x73` family is the FE-VM conditional-test core (the type dispatch is now readable)
 
 Restored the full Ghidra decompile pipeline after `/tmp/kilo` wipe (blob
 re-fetched from `.185`, code region = blob offset 244 → `fman-code-210.bin`,
