@@ -1,12 +1,25 @@
 # ASK2 Module Inventory — Delivered & Planned
 
-**Date:** 2026-08-01
-**Version:** 2.0
+**Date:** 2026-08-05 (status correction; original 2026-08-01)
+**Version:** 2.1
 **Branch:** `dpaa1`
 **CI build:** #28733398715
 **ISO:** `vyos-2026.07.05-0730-rolling-LS1046A-arm64.iso`
 
-**[SPEC] Shipping HW-offload architecture (2026-08-01): CC-tree classification (top-N hot flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding.** The FE-VM ehash HIT path (Fork-B) is RETIRED — it never dispatched a single HIT across the project's history (F-156/F-157/F-158 proved the scaffold byte-perfect and the CC engine still not dispatching to it), and even if fixed is architecturally capped at ~1.5 Gbps by per-frame DDR latency. The FE-VM ehash infrastructure (F-156/F-157/F-158 fixups, fe_scaffold oracle, dedicated TX FQ 0x2b9) is retained as diagnostic/experimental tooling that proved the CC-match stage is not a production path. CC-tree scales: 32 software caps vs 255 HW keys/node, ~8 nodes in 64 KiB → ~2,000+ flows. M3/M5 "HIT PASSED" were false positives; M2 7.37 Gbps real pass-through; only real HIT RCCB→FE_ENTER direct 2026-07-04.
+> **⚠ STATUS CORRECTION (2026-08-05) — the "shipping architecture" [SPEC] below is SUPERSEDED.**
+> (1) FE-VM ehash is UN-RETIRED (F-163, commit `f212c701`): the deployed vendor `cdx.ko`'s
+> production classification **is** external-hash; this branch's key builder was fixed to the
+> vendor's 14-byte PORT_ID-prefixed `union dpa_key` (`EKFC 0x801C0006`). (2) "CC-tree shipping"
+> was never implemented in `ask.ko` (CR-007, `dd364494`) and the `cc_test` harness is
+> architecturally broken (F-159–F-162: five vendor-verified register fixes, RX-silent within
+> 17–30 frames vs `.106` vendor stack's 400+; `cc_test` to be retired). (3) "never dispatched a
+> single HIT" is overstated — F-165 (commit `e4f23948`) showed every prior arm test pointed the
+> port at an empty scaffold; the corrected chain has never been genuinely exercised (T-M3-R
+> retest pending). **No dispatch path has a confirmed hardware HIT on this branch.** Sections
+> marked "RETIRED / DIAGNOSTIC ONLY" below should be read as "built and byte-verified, no
+> confirmed HIT, un-retired and under re-validation."
+
+**[SPEC — 2026-08-01, SUPERSEDED above] ~~Shipping HW-offload architecture (2026-08-01): CC-tree classification (top-N hot flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding.~~** ~~The FE-VM ehash HIT path (Fork-B) is RETIRED — it never dispatched a single HIT across the project's history (F-156/F-157/F-158 proved the scaffold byte-perfect and the CC engine still not dispatching to it), and even if fixed is architecturally capped at ~1.5 Gbps by per-frame DDR latency.~~ The FE-VM ehash infrastructure (F-156/F-157/F-158 fixups, fe_scaffold oracle, dedicated TX FQ 0x2b9) is retained as diagnostic/experimental tooling. CC-tree scales: 32 software caps vs 255 HW keys/node, ~8 nodes in 64 KiB → ~2,000+ flows (arithmetic; no confirmed HIT). M3/M5 "HIT PASSED" were false positives; M2 7.37 Gbps real pass-through; only real HIT RCCB→FE_ENTER direct 2026-07-04.
 
 ---
 
@@ -28,8 +41,8 @@
 | 0119 | `fman_pcd_manip.c` | HM L3 forward ops (TTL dec, cksum) | **COMPILED — SHIPPING** |
 | 0120 | `fman_pcd_manip.c` | HM nexthop dedup | **COMPILED — SHIPPING** |
 
-### FE-VM Subsystem (Fork B ehash path) — RETIRED / DIAGNOSTIC ONLY
-**[NOTE] The FE-VM ehash HIT path (Fork-B) is RETIRED as of 2026-08-01. It never dispatched a single HIT across the project's history (F-156/F-157/F-158 proved the scaffold byte-perfect and the CC engine still not dispatching to it), and even if fixed is architecturally capped at ~1.5 Gbps by per-frame DDR latency. The infrastructure below is retained as diagnostic/experimental tooling that proved the CC-match stage is not a production path. The shipping datapath is CC-tree + SW flowtable + manip chain (see above).**
+### FE-VM Subsystem (Fork B ehash path) — UN-RETIRED 2026-08-05, under re-validation
+**[NOTE — updated 2026-08-05]** The FE-VM ehash HIT path (Fork-B) was RETIRED 2026-08-01 and UN-RETIRED 2026-08-05 (F-163 — the deployed vendor `cdx.ko` classifies via external-hash; key format corrected to the 14-byte PORT_ID-prefixed `union dpa_key`). It has no confirmed HIT on this branch, but the F-165 finding (engage-path scaffold overwrite) means the corrected chain has never been genuinely exercised — retest = T-M3-R. The infrastructure below is built and byte-verified. CC-tree (above) is the *intended* classifier but is not wired in `ask.ko` and its `cc_test` harness is broken (F-159–F-162).
 
 | Patch | Component | Purpose | Silicon Status |
 |-------|-----------|---------|----------------|
@@ -94,7 +107,7 @@
 | 0121 | `dpaa_eth.c` | Export CC target resolvers | COMPILED |
 | **0145** | `dpaa_eth.c` | **Flow-offload backend slot** (RCU-protected for ask.ko) | **COMPILED** |
 
-### Diagnostic / Experimental Fixups (Layer 2) — RETIRED FOR SHIPPING
+### Diagnostic / Experimental Fixups (Layer 2) — FE-VM ehash (un-retired 2026-08-05, under re-validation)
 **[NOTE] F-156/F-157/F-158 fixups + fe_scaffold oracle + dedicated TX FQ 0x2b9 are diagnostic tooling that proved the CC-match stage is not a production path. Retained for provenance; do not re-enable for shipping.**
 
 | Fixup | Purpose | Status |
@@ -195,4 +208,4 @@
 | **M2 gate condition (2)** | — | **fe_flow add HIT test** |
 | Phase 3-6 | — | 4 phases, ~12 components |
 
-**[SPEC] Architecture status (2026-08-01):** Shipping HW-offload = CC-tree classification (top-N) + kernel SW flowtable (tail) + manip-chain forwarding. FE-VM ehash HIT path (Fork-B) is RETIRED — never dispatched a HIT, ~1.5 Gbps DDR ceiling. F-156/F-157/F-158 + fe_scaffold oracle + dedicated TX FQ 0x2b9 are diagnostic tooling that proved the CC-match stage is not a production path. CC-tree scales: 32 software caps vs 255 HW keys/node, ~8 nodes in 64 KiB → ~2,000+ flows. M3/M5 "HIT PASSED" were false positives; M2 7.37 Gbps real pass-through; only real HIT RCCB→FE_ENTER direct 2026-07-04.
+**[SPEC — 2026-08-01, SUPERSEDED 2026-08-05 (see top-of-doc correction)]** ~~Architecture status (2026-08-01):~~ Shipping HW-offload was declared = CC-tree classification (top-N) + kernel SW flowtable (tail) + manip-chain forwarding; FE-VM ehash HIT path (Fork-B) was declared RETIRED — never dispatched a HIT, ~1.5 Gbps DDR ceiling. **2026-08-05 reality:** ehash un-retired (F-163, vendor production path, 14-byte PORT_ID key); CC-tree never wired (CR-007) with a broken harness (F-159–F-162); no confirmed HIT on either path; F-165 retest (T-M3-R) is next. M3/M5 "HIT PASSED" were false positives; M2 7.37 Gbps real pass-through; only real HIT RCCB→FE_ENTER direct 2026-07-04.

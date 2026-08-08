@@ -206,7 +206,7 @@ graph LR
 
 ### 4.1 Shipping Architecture: CC-tree + SW Flowtable
 
-**[SPEC]** The shipping HW-offload architecture is **CC-tree classification (top-N flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding**. This is the Linux flow-offload model: a TCAM-style classifier table for hot flows, software for the long tail.
+**[SPEC — 2026-08-01, SUPERSEDED 2026-08-05]** ~~The shipping HW-offload architecture is **CC-tree classification (top-N flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding**.~~ **(2026-08-05: never implemented in `ask.ko` (CR-007); `cc_test` harness architecturally broken (F-159–F-162); FE-VM ehash un-retired (F-163); no confirmed HIT on any path — see `plans/ASK2-MASTER-PLAN.md` top banners.)** This is the Linux flow-offload model: a TCAM-style classifier table for hot flows, software for the long tail.
 
 **[SPEC]** Silicon-proven performance data:
 - **M2 CC pass-through** (CONT_LOOKUP numKeys=0 → miss-AD → kernel FQ): 7.37 Gbps @ 0.16% CPU (2026-07-07)
@@ -257,20 +257,20 @@ sequenceDiagram
 
 The old 0098 layout (`[ETYPE|PROTO|FLAGS|SRCIP|DSTIP|SPORT|DPORT]`) "could NEVER match" because the CC comparator sees what KG emitted, not a software-reconstructed canonical form.
 
-**[SPEC]** EKFC extraction order is MSB-first/descending-bit: SIP, DIP, PROTO, SPORT, DPORT (13 bytes, EKFC=0x001C0006). Settled 2026-07-13 by hardware CRC-64 match. The CC comparator's 16-byte compare window uses the KG-emitted composite (patch 0108), which includes a zero-filled SPI slot — a structurally different layout from the 13-byte EKFC extraction.
+**[SPEC]** EKFC extraction order is MSB-first/descending-bit: PORT_ID, SIP, DIP, PROTO, SPORT, DPORT (14 bytes, EKFC=0x801C0006). Settled 2026-08-06/07/08 by hardware CRC-64 match (184,320-candidate brute force, 16-candidate batch test, independent re-confirmation). PORT_ID = `0x00` for eth4/port 0x11. The old 13-byte `0x001C0006` (2026-07-13) is superseded. The CC comparator's 16-byte compare window uses the KG-emitted composite (patch 0108), which includes a zero-filled SPI slot — a structurally different layout from the 14-byte EKFC extraction.
 
-### 4.4 Retired: FE-VM ehash (EXT_HASH DDR Lookup)
+### 4.4 FE-VM ehash (EXT_HASH DDR Lookup) — retired 08-01, UN-RETIRED 08-05
 
-**[NOTE]** The FE-VM ehash HIT path (Fork-B: EXT_HASH → DDR bucket table → MUX → ENQ) is a **dead end** and never worked. It is retained as experimental diagnostic infrastructure only. Evidence:
+**[NOTE — updated 2026-08-05]** The FE-VM ehash HIT path (Fork-B: EXT_HASH → DDR bucket table → MUX → ENQ) was declared a **dead end** on 2026-08-01 on the four grounds below; ground 3 is **refuted** and ground 5 is **weakened** as of 2026-08-05:
 
-1. **Per-frame DDR hash lookup** (~50–100 ns) imposes a ~1.5 Gbps ceiling — fundamentally unscalable for line-rate forwarding
+1. **Per-frame DDR hash lookup** (~50–100 ns) imposes a ~1.5 Gbps ceiling — fundamentally unscalable for line-rate forwarding *(theoretical bound, never measured against real vendor traffic)*
 2. **Per-frame ALLOCATE/DEALLOCATE churn** in the FE-VM workspace pool adds overhead on every frame
-3. **Not the vendor architecture**: NXP's production `cdx.ko` uses a hardware opcode/manip chain, not a per-frame DDR hash
+3. ~~**Not the vendor architecture**: NXP's production `cdx.ko` uses a hardware opcode/manip chain, not a per-frame DDR hash~~ **REFUTED (F-163, 2026-08-05):** the deployed vendor `cdx.ko` classifies every accelerated flow via `insert_entry_in_classif_table()` → `fill_key_info()` → `ExternalHashTableAddKey()` — external-hash IS the vendor's production classification; the opcode/manip chain executes from inside each DDR ehash entry
 4. **Not the Linux flow-offload model**: `TC Flower`/`nf_flowtable` offload is a TCAM-classifier-table abstraction (i.e. CC-tree), not a per-frame hash lookup
-5. **F-156/F-157/F-158 proved the scaffold byte-perfect** (H1 mask CLOSED, H2 padding CLOSED) but the CC engine still does not dispatch to the FE-VM — the compare-window layout hypothesis remains untested and is not being pursued further
+5. **F-156/F-157/F-158 proved the scaffold byte-perfect** (H1 mask CLOSED, H2 padding CLOSED) but the CC engine still does not dispatch to the FE-VM — **weakened (F-165, 2026-08-05):** every prior arm test ran through the F-091 scaffold-overwrite bug, so the port was pointed at an empty scaffold match table, never at the built chain; the corrected chain (14-byte PORT_ID key, `EKFC 0x801C0006`, F-163) has never been genuinely exercised. Retest = T-M3-R
 6. **M3/M5 "HIT gate PASSED" claims were false positives** (FQID 0x200 ambiguity): the FE-VM ENQ and the CC miss-AD both targeted kernel FQID `0x200`, so HIT and MISS were indistinguishable by every instrument in use. Only real HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP).
 
-**[NOTE]** The FE-VM **opcode execution** remains correct and shipping (10.259 Gbps, M5). Only the ehash *matching* sub-mechanism is retired. Scale beyond the software-configured 32-key cap is via multi-node CC allocation, not ehash.
+**[NOTE — updated 2026-08-05]** The FE-VM **opcode execution** claim ("shipping, 10.259 Gbps, M5") is itself under mechanism-retraction review — M5 most likely measured kernel `nf_flowtable` (qdrant tag `no-confirmed-hw-hit-ever`), and the opcode chain only executes after a HIT, which no path has produced. The ehash *matching* sub-mechanism is un-retired and under re-validation; the CC-tree scale-out path (multi-node allocation) is arithmetic-only until its own harness is rebuilt (`cc_test` condemned, F-159–F-162).
 
 ---
 

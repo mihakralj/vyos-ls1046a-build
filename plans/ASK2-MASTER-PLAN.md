@@ -30,7 +30,7 @@ confirmed silicon HIT. The only silicon-proven hardware offload today is the
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The fully-corrected combination (13-byte key + direct topology) was tested 2026-08-07 and showed zero hardware compare activity. Phase 1 (`F-176`), Phase 2 (`F-177`'s sync, `int_buf_pool_addr` cross-check), and the `999`-patch forensic finding (`F-053`'s `hash_bytes_offset=1` retracted to `0`, matching vendor's real production value) all board-tested negative in turn — the zero-HIT is confirmed genuine across every construction-level, sync-related, and now vendor-value-cross-checked hypothesis tested to date.** The 13-byte-no-`PORT_ID` key format is **no longer "confirmed correct"** — it's the one significant remaining untested divergence from vendor's real config (vendor unconditionally forces `PORT_ID` into every KeyGen scheme's EKFC; this project's test config omits it) and is now the leading open lead. See §4.1 Phase 3 for the current next step. |
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The key-format question is CLOSED (2026-08-06/07/08): vendor's real 14-byte `portid`-prefixed key (EKFC=`0x801C0006`, `PORT_ID=0x00` for eth4/port 0x11) is HW-confirmed correct via CRC-64 hash match, independently reproduced 3 times (2026-08-06 discovery, 2026-08-07 16-candidate batch test, 2026-08-08 re-confirmation) — see §1.3 below. A properly-EKFC-synchronized 14-byte key STILL does not HIT, tested 3 independent times with the same result.** Phase 1 (`F-176`), Phase 2 (`F-177`'s sync, `int_buf_pool_addr` cross-check), the `999`-patch forensic finding (`F-053`'s `hash_bytes_offset=1` retracted to `0`), and the corrected 14-byte-key retest have all board-tested negative in turn — the zero-HIT is confirmed genuine across every construction-level, sync-related, key-format, and vendor-value-cross-checked hypothesis tested to date. The fault is now bracketed (via persistent hardware counters `kgse_spc` + `FMBM_RSTC`, 2026-08-07) to somewhere between KeyGen classification completing and the ehash comparator's stats becoming visible. See §4.1 Phase 3 for the current next step. |
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
@@ -53,22 +53,30 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
 
 **[SPEC]**
 
-- **EKFC extraction is MSB-first:** SIP→DIP→PROTO→SPORT→DPORT.
+- **EKFC extraction is MSB-first:** SIP→DIP→PROTO→SPORT→DPORT (+PORT_ID
+  sorting first as the highest set bit, when present).
 - **KG hash = raw CRC-64** (ECMA-182, reflected poly `0xC96C5795D7870F42`),
   seed `~0ULL`, **no final complement**; stored at IC offset `0x48`.
   CRC-64/XZ does NOT match hardware.
-- **This branch's flow key is 13 bytes:** `SIP|DIP|PROTO|SPORT|DPORT`, EKFC
-  `0x001C0006` — hardware-CRC-64-validated twice (2026-07-13, re-confirmed
-  2026-08-06). **F-163's 14-byte `portid`-prefixed variant (EKFC
-  `0x801C0006`, commit `f212c701`) is WRONG and reverted (§4.1):**
-  `KG_SCH_KN_PORT_ID` does not reproduce vendor's `portid` byte — vendor
-  builds it via a `<combine portid="true".../>` **GEC** directive, a
-  different register block EKFC-only schemes (§2 decision 1) cannot reach —
-  and it isn't needed here anyway, since vendor's `portid` disambiguates
-  `shared="true"` tables serving many ports at once, while this branch's
-  `fe_ehash` tables are per-scheme. Vendor's own key IS 14 bytes
-  (`union dpa_key`) for its own, structurally different, shared-table
-  design; do not port that number back to this branch's schemes.
+- **This branch's flow key is 14 bytes, CLOSED 2026-08-06/07/08:**
+  `PORT_ID|SIP|DIP|PROTO|SPORT|DPORT`, EKFC `0x801C0006`, `PORT_ID=0x00` for
+  eth4/port 0x11 — hardware-CRC-64-validated 3 independent times (2026-08-06
+  184,320-candidate brute force discovery; 2026-08-07 16-candidate 0x00-0x0f
+  batch test; 2026-08-08 independent re-confirmation via passive
+  `hash_probe`, bit-for-bit identical hash across sessions). **F-163's
+  14-byte `portid`-prefixed variant (EKFC `0x801C0006`, commit `f212c701`)
+  was RIGHT, not wrong** — the 2026-08-06 "reverted, GEC conflation" episode
+  (below) was itself corrected the next day: `<combine portid="true".../>`
+  was proven (2026-08-07, reading vendor's real FMC source —
+  `FMCPCDReader.cpp`/`FMCPCDModel.cpp`/`FMCCModelOutput.cpp`) to build the
+  KeyGen "extractedOrs"/OR-Data-Vector array (FQID-only, unrelated to the raw
+  comparison key), a structurally different mechanism from
+  `KG_SCH_KN_PORT_ID` (EKFC bit 31), which genuinely IS part of the raw
+  comparison key via `GetKnownFieldId()` sorting it first. Vendor's own key
+  IS 14 bytes (`union dpa_key`) — and this branch's key now matches it
+  exactly, byte-for-byte, HW-confirmed. **A properly-EKFC-synchronized
+  14-byte key still does not HIT** (tested 3 independent times, same
+  result each time) — key format is a CLOSED lead, not the open one.
 - Vendor `cdx.ko` classifies every accelerated flow via
   `ExternalHashTableAddKey()` — external-hash **is** the vendor production
   classification; the opcode/manip chain executes from inside each DDR ehash
@@ -350,6 +358,18 @@ portid because their ehash tables are `shared="true"` across many
 ports/schemes; this branch's `fe_ehash` tables are per-scheme, not shared,
 so there is no collision to disambiguate. **F-163 should be reverted (or
 gated off) for the single-port ehash path; the 13-byte key is correct as-is.**
+
+> **SUPERSEDED 2026-08-07/08 — do not act on the paragraph above.** The
+> `<combine portid="true".../>` = GEC premise this conclusion rests on was
+> itself wrong: reading vendor's real FMC source (`FMCPCDReader.cpp`/
+> `FMCPCDModel.cpp`/`FMCCModelOutput.cpp`, 2026-08-07) proved `<combine>`
+> builds the KeyGen "extractedOrs"/OR-Data-Vector array (FQID-only), a
+> structurally different mechanism from `KG_SCH_KN_PORT_ID` (EKFC bit 31),
+> which genuinely IS part of the raw comparison key. F-163's 14-byte
+> `portid`-prefixed key (with `PORT_ID=0x00`, not `0x11`) is HW-confirmed
+> correct — see §1.3 at the top of this document. The 13-byte key is not
+> "correct as-is"; it is superseded. Left in place for the historical
+> record of how this conclusion was reached and revised, not as guidance.
 
 **Suspected real blocker, board-test pending: wrong AD species at
 `FMBM_RCCB`.** `arch/fman-microcode-210-programming-reference.md` §7.11

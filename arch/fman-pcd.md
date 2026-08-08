@@ -37,10 +37,24 @@
 > may never have silicon-confirmed a genuine hardware-classified HIT at production throughput at any
 > point. Evidence: qdrant tag `no-confirmed-hw-hit-ever`.
 
+> **Addendum (2026-08-05) — the "retired" verdict itself is now partially refuted.** F-163 (commit
+> `f212c701`) found the genuine deployed vendor `cdx.ko` driver classifies production flows via
+> external-hash (`insert_entry_in_classif_table()` → `fill_key_info()` → `ExternalHashTableAddKey()`)
+> — so Fork-B **is** the vendor architecture, and its key builder was missing the leading PORT_ID
+> byte (`union dpa_key`, 14 B total); fixed (`EKFC 0x801C0006`). The F-163 live test was byte-correct
+> but still MISSed — and F-165 (commit `e4f23948`) then showed that test never exercised the ehash
+> chain (F-091's scaffold overwrote the caller's `fe_enter_off`; live `fmbm_rccb` read proved it).
+> So "proven to never dispatch a HIT" overstates the evidence: the corrected chain has never been
+> genuinely tested. Meanwhile the CC-tree track also has no HIT: `cc_test` froze within 17–30 frames
+> across five vendor-verified register fixes (F-159–F-162) while `.106`'s vendor stack survived 400+
+> — `cc_test`'s architecture is the problem. **Neither path has a confirmed hardware HIT on this
+> branch; both are under active rework.** Byte-level oracle path forward:
+> `plans/NXP-106-DEEP-DIVE-PLAN.md` Phases A/C.
+
 This is the PCD pipeline ARCHITECTURE doc. Historically (through 2026-07-24/M5) the **CC-tree + kernel
 SW flowtable + manip-chain** forward path was the shipping HW-offload mechanism; per the correction
 above, CC-tree's insert path no longer exists in `ask.ko`. The **FE-VM ehash HIT path (Fork-B)** is the
-only insert path currently wired, and is proven to never dispatch a HIT at production throughput. The
+only insert path currently wired — un-retired 2026-08-05 (F-163) but still without a confirmed HIT. The
 only real ehash HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP). Read the sections below as
 describing silicon capability and the *intended* architecture, not a currently-functioning production
 forward path.
@@ -144,9 +158,11 @@ flowchart TD
 
 ### EKFC extraction order (canonical, HW-verified)
 
-**[SPEC]** EKFC extraction is **MSB-first**: SIP → DIP → PROTO → SPORT → DPORT. 13 bytes at
-`EKFC=0x001C0006` (IPSRC1|IPDST1|PTYPE1|L4PSRC|L4PDST). HW-verified 2026-07-13 (board 192.168.1.185,
-6.18.38-vyos, ISO 2026.07.13-1938-rolling) via CRC-64 match on two independent TCP flows on eth4.
+**[SPEC]** EKFC extraction is **MSB-first**: PORT_ID → SIP → DIP → PROTO → SPORT → DPORT. 14 bytes at
+`EKFC=0x801C0006` (PORT_ID|IPSRC1|IPDST1|PTYPE1|L4PSRC|L4PDST). HW-verified 2026-08-06/07/08
+via CRC-64 match (184,320-candidate brute force, 16-candidate batch test, independent re-confirmation).
+PORT_ID = `0x00` for eth4/port 0x11 (NOT raw hw_port_id `0x11`). The old 13-byte `0x001C0006` layout
+(2026-07-13) is superseded — correct for what it tested (byte order), predates the PORT_ID requirement.
 Ascending-bit and size-grouped models DISPROVEN. See `specs/fman-keygen-flow-key-spec.md` §2–3.
 
 **[SPEC]** The CC comparator reads KG-emitted bytes in the order `[SIP|DIP|SPI=0|SPORT|DPORT]` (patch
@@ -194,18 +210,22 @@ MURAM-resident tables. This is the **SHIPPING HW-offload flow table** — the pr
 2. **Kernel nf_flowtable (SW):** the long tail. CC-tree caps at ~8 nodes (~2000+ flows) due to 64 KiB
    MURAM budget. Flows beyond the CC-tree capacity are handled by the kernel software flowtable.
 
-**[NOTE]** The FE-VM ehash HIT path (Fork-B, `FE_ENTER` → DDR buckets → ehash lookup) is a **retired
-experimental dead-end**. It was explored as an alternative dispatch path but never worked at production
-throughput (~1.5 Gbps DDR ceiling vs line-rate MURAM). The only real ehash HIT was RCCB→FE_ENTER
-direct (2026-07-04, keysize=8 ICMP). All production forwarding uses the CC-tree path. See
-`fman-fe-ehash.md` for the full FE/ehash autopsy.
+**[NOTE — updated 2026-08-05]** The FE-VM ehash HIT path (Fork-B, `FE_ENTER` → DDR buckets → ehash
+lookup) was called a "retired experimental dead-end" here until F-163 un-retired it (the vendor's
+real production path **is** external-hash; key format corrected to the 14-byte PORT_ID-prefixed
+`union dpa_key`). It has still never dispatched a confirmed HIT on this branch — but the F-163
+byte-correct-MISS test never exercised the chain (F-165 scaffold-overwrite), so the question is
+open, not closed. The only real ehash HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP).
+The CC-tree path described above is the *intended* classifier; it is not currently wired in
+`ask.ko` and its `cc_test` harness is architecturally broken (F-159–F-162). See
+`fman-fe-ehash.md` for the FE/ehash mechanics.
 
 ### Proven throughput
 
 | Path | Throughput | Loss | Notes |
 |---|---|---|---|
-| M2 pass-through | 7.37 Gbps | 0.16% | No CC, no manip — raw FMan forwarding |
-| M5 CC-tree + SW flowtable | 10.259 Gbps | 0.16% | **SHIPPING** — CC-tree HW + kernel nf_flowtable |
+| M2 pass-through | 7.37 Gbps | 0.16% | No CC, no manip — raw FMan forwarding (MISS→kernel; **not offload**) |
+| M5 "CC-tree + SW flowtable" | 10.259 Gbps | 0.16% | **Mechanism unresolved** — most likely kernel `nf_flowtable` SW forwarding; no HW classification confirmed (`no-confirmed-hw-hit-ever`) |
 | NXP cdx.ko (reference) | 8.58 Gbps | — | Legacy ASK 1.x CDX stack |
 
 ### Hard limits (memorise these — they bound the offload)
@@ -253,8 +273,9 @@ generic-from-PR/frame/IC (≤56 B).
 > **Frame-Engine (FE) opcode VM**, which exists only on the **external-hash** dispatch path (root AD
 > `FE_ENTER`, `pcAndOffsets=0xF6`, DDR buckets). A bare exact-match node that exits via `CONTRL_FLOW`
 > (FQID-override) leaks the FIFO → the open **M3-3b** stall. The complete FE/ehash init contract and
-> the two-path table are documented in [`fman-fe-ehash.md`](fman-fe-ehash.md). **This path is retired
-> experimental — the production forward path uses the CC-tree with kernel SW flowtable fallback.**
+> the two-path table are documented in [`fman-fe-ehash.md`](fman-fe-ehash.md). **(2026-08-05: this
+> path is un-retired — F-163 established it is the vendor's real production mechanism; it remains
+> without a confirmed HIT on this branch pending the F-165 retest.)**
 
 ---
 
@@ -364,8 +385,10 @@ flowchart TD
 match → NAT/TTL/cksum → police → egress), never touching a core. Flows beyond CC-tree capacity (~2000+)
 fall back to the kernel nf_flowtable software path.
 
-**[NOTE]** The FE-VM ehash HIT path (Fork-B) is NOT shown here — it is a retired experimental dead-end
-that never worked at production throughput. See §3 and `fman-fe-ehash.md` for the full autopsy.
+**[NOTE — updated 2026-08-05]** The FE-VM ehash HIT path (Fork-B) is not shown in this diagram. It
+was called a "retired experimental dead-end" here until F-163 un-retired it (vendor production
+path; 14-byte PORT_ID key) — it has no confirmed HIT on this branch yet, but the question is open
+(F-165 retest), not closed. See §3 and `fman-fe-ehash.md`.
 
 ### 8a. Component ownership at a glance (2026-08-04)
 
@@ -417,4 +440,4 @@ Exposed to `ask.ko` via `<linux/fsl/fman_pcd.h>` (shared-board patches `0092` / 
 
 *Related: [`muram.md`](muram.md) (where these tables physically live + the -ENOMEM risk),
 [`qman-ceetm.md`](qman-ceetm.md) (where the chosen FQID goes next),
-[`fman-fe-ehash.md`](fman-fe-ehash.md) (FE-VM ehash autopsy — retired experimental path).*
+[`fman-fe-ehash.md`](fman-fe-ehash.md) (FE-VM ehash mechanics — un-retired 2026-08-05, under re-validation).*

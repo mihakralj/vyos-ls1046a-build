@@ -30,6 +30,8 @@ ranks findings by cost-to-value ratio.
 
 **[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The shipping HW-offload dataplane is **CC-tree + kernel SW flowtable + manip-chain forwarding**. The FE-VM ehash HIT path (Fork-B) is **RETIRED/DEAD-END** — it never achieved a production HIT, is bounded by a ~1.5 Gbps DDR ceiling, and exists only as experimental diagnostic infrastructure. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. CC-tree scales to ~2000+ flows (32 software caps × 255 HW keys per node). All FE-VM ehash HIT path entries in this inventory are annotated as **retired/experimental** and are NOT production re-land targets. The CC-tree/SW-flowtable/manip-chain items remain the shipping re-land target.
 
+**[SPEC] CANONICAL SILICON REALITY (2026-08-05), SUPERSEDING the paragraph above:** (1) FE-VM ehash is **UN-RETIRED** (F-163, commit `f212c701`) — the deployed vendor `cdx.ko` classifies production flows via external-hash (`ExternalHashTableAddKey()`); this branch's key builder gained the vendor's leading PORT_ID byte (14-byte `union dpa_key`, `EKFC 0x801C0006`). (2) "CC-tree shipping" was never implemented in `ask.ko` (CR-007, `dd364494`) and the `cc_test` harness is architecturally broken (F-159–F-162: five vendor-verified register fixes, RX-silent within 17–30 frames vs `.106` vendor stack's 400+; `cc_test` to be retired). (3) "Proved the CC-match stage is not production-worthy" is overstated — F-165 (commit `e4f23948`) showed every prior arm test pointed the port at an empty scaffold, so the corrected chain has never been genuinely exercised. **Effect on this inventory: rows marked RETIRED on FE-VM grounds are re-land candidates again** (ehash is the only wired insert path and the near-term HIT candidate — T-M3-R retest pending); read "RETIRED" below as "FE-VM ehash path — un-retired 2026-08-05, no confirmed HIT, under re-validation." No dispatch path has a confirmed hardware HIT on this branch.
+
 **[BUG] F-01** `ask_xfrm_state_add` returns success without installing an SA, which becomes silent packet loss the moment `NETIF_F_HW_ESP` is advertised.
 
 ### 1.1 Severity Definitions
@@ -40,7 +42,7 @@ ranks findings by cost-to-value ratio.
 | **HIGH** | Missing implementation of a documented API contract. Feature is unusable but fails safely. |
 | **MEDIUM** | Signature drift or missing observability. Feature works but violates a spec rule (T1/T2/T8/T9/T10) or hides state. |
 | **LOW** | Documented deferral. Listed for tracking, no action required this cycle. |
-| **RETIRED** | FE-VM ehash HIT path item. Experimental diagnostic infra only; NOT a production re-land target. Listed for historical traceability. |
+| **RETIRED** | FE-VM ehash HIT path item. **(2026-08-05: un-retired — see §1's second CANONICAL note; these rows are re-land candidates again.)** Was: experimental diagnostic infra only, NOT a production re-land target. Listed for historical traceability. |
 
 ### 1.2 Current Branch State — P1–P3 closure reset out (2026-07-18)
 
@@ -205,7 +207,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **[SPEC]** Status on `dpaa1` HEAD `9f67b56`: **OPEN.** The implementation described below landed in commit `4493ce8` but was reset off the branch (§1.2); `grep fman_pcd_fe_verify bin/ci-setup-kernel.sh` returns zero hits in the current tree. The account below documents the orphaned implementation for re-land.
 
-**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. The shipping dataplane is CC-tree + kernel SW flowtable + manip-chain forwarding. This function (`fman_pcd_fe_verify`) is experimental diagnostic infrastructure only — it validates FE descriptor layouts for a path that will never ship. It is NOT a production re-land target. The severity is downgraded from HIGH to RETIRED.
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01, SUPERSEDED 2026-08-05 — see §1's second CANONICAL note):** The FE-VM ehash HIT path (Fork-B) was marked RETIRED. **2026-08-05: un-retired (F-163); the corrected chain has never been genuinely tested (F-165).** This function (`fman_pcd_fe_verify`) validates FE descriptor layouts for a path that is again a re-land candidate.
 
 **[SPEC]**
 
@@ -249,7 +251,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 ### F-11 (RETIRED): `fman_pcd_fe_flow_add` uses `unsigned long enq_off` — FE-VM path, retired
 
-**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This function is the FE-VM flow-add API and is NOT a production re-land target. The severity is downgraded from MEDIUM to RETIRED. The CC-tree flow-add path (`fman_cc_key_insert`) is the shipping equivalent.
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01, SUPERSEDED 2026-08-05 — see §1's second CANONICAL note):** The FE-VM ehash HIT path (Fork-B) was marked RETIRED. **2026-08-05: un-retired (F-163); this function (`fman_pcd_fe_flow_add`) is on the only currently-wired insert path and is a re-land candidate again.** ~~The CC-tree flow-add path (`fman_cc_key_insert`) is the shipping equivalent~~ (CC-tree insert path deleted from `ask.ko` per CR-007; harness broken per F-159–F-162).
 
 **[SPEC]**
 
@@ -272,7 +274,7 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 
 ### F-12 (RETIRED): `fman_pcd_fe_context_build` writes DDR through `void __iomem *` — FE-VM path, retired
 
-**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This function builds FE-VM flow contexts and is NOT a production re-land target. The severity is downgraded from MEDIUM to RETIRED.
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01, SUPERSEDED 2026-08-05 — see §1's second CANONICAL note):** The FE-VM ehash HIT path (Fork-B) was marked RETIRED. **2026-08-05: un-retired (F-163); this function is a re-land candidate again.**
 
 **[SPEC]**
 
@@ -325,7 +327,7 @@ int fman_pcd_kg_unbind_port(struct fman_pcd_kg_scheme *scheme)
 
 ### F-15 (RETIRED): Hardcoded `tx_fqid = 0x200` in FE-VM compose path — FE-VM path, retired
 
-**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This hardcoded TX FQID is in the FE-VM compose path. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. This finding is NOT a production re-land target. The severity is downgraded from MEDIUM to RETIRED.
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01, SUPERSEDED 2026-08-05 — see §1's second CANONICAL note):** The FE-VM ehash HIT path (Fork-B) was marked RETIRED. **2026-08-05: un-retired (F-163); the corrected chain has never been genuinely tested (F-165); this finding is a re-land candidate again.**
 
 **[SPEC]**
 
@@ -433,7 +435,7 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 ### F-23 (RETIRED): `fman_pcd_fe_flow_stats_get` — FE-VM path, retired
 
-**[SPEC] CANONICAL SILICON REALITY (2026-08-01):** The FE-VM ehash HIT path (Fork-B) is RETIRED (§1). This function is the FE-VM per-flow stats reader and is NOT a production re-land target. The severity is downgraded from LOW to RETIRED. The CC-tree equivalent is F-17 (`fman_cc_key_stats_get`).
+**[SPEC] CANONICAL SILICON REALITY (2026-08-01, SUPERSEDED 2026-08-05 — see §1's second CANONICAL note):** The FE-VM ehash HIT path (Fork-B) was marked RETIRED. **2026-08-05: un-retired (F-163); this function is a re-land candidate again.** The CC-tree equivalent is F-17 (`fman_cc_key_stats_get`).
 
 **[NOTE]**
 
@@ -462,7 +464,7 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 ## 5. Prioritized Remediation Plan
 
-**[SPEC]** Ranked by cost-to-value ratio and dependency ordering. FE-VM ehash HIT path items (F-08, F-11, F-12, F-15, F-23) are RETIRED and excluded from the production re-land plan. The shipping dataplane is CC-tree + kernel SW flowtable + manip-chain forwarding (§1).
+**[SPEC — updated 2026-08-05]** Ranked by cost-to-value ratio and dependency ordering. FE-VM ehash HIT path items (F-08, F-11, F-12, F-15, F-23) were marked RETIRED and excluded from the production re-land plan at 08-01 — **that exclusion is lifted (§1's second CANONICAL note): the ehash path is un-retired and these are re-land candidates again.**
 
 ### Priority 1 — Before next board session
 
@@ -516,6 +518,6 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 **[NOTE]** Findings F-09, F-10, F-13, and F-14 close general PCD infrastructure gaps and cost fewer than 150 lines total. Recommend landing as a single series before further CC-tree board testing.
 
-**[NOTE]** The FE-VM ehash HIT path items (F-08, F-11, F-12, F-15, F-23) are retired per the canonical silicon reality of 2026-08-01. F-156/F-157/F-158 plus `fe_scaffold` plus dedicated TX FQ `0x2b9` proved the CC-match stage is not production-worthy. The shipping dataplane is CC-tree + kernel SW flowtable + manip-chain forwarding, scaling to ~2000+ flows (32 software caps × 255 HW keys per node).
+**[NOTE — updated 2026-08-05]** The FE-VM ehash HIT path items (F-08, F-11, F-12, F-15, F-23) were retired per the canonical silicon reality of 2026-08-01 — **superseded by §1's second CANONICAL note (2026-08-05): un-retired (F-163), never genuinely tested (F-165), re-land candidates again.**
 
 **[SPEC]** The `arch/fman-pcd-api-reference.md` v3.0.0, `plans/ASK2-MASTER-PLAN.md`, and the `plans/DUAL-DATAPLANE.md` v1.2 milestone tracker should be cross-referenced against this inventory to ensure no finding contradicts a released gate claim.

@@ -241,7 +241,7 @@ Order of work, smallest first:
 **[SPEC]**
 - Hardware-level FMan offload (parse/classify/policer steering into per-worker FQs) is NOT in scope for VPP — it requires either NXP's USDPAA path (deleted) or a from-scratch native VPP DPAA1 plugin (`specs/vpp-dpaa1-ls1046a-spec.md`, v0.6 draft, ~12 kLOC). The production path is AF_XDP.
 
-**[NOTE] ASK offload architecture (2026-08-01):** The ASK S1 offload (separate from VPP S2) uses CC-tree classification + kernel SW flowtable (`nf_flowtable`) + manip-chain forwarding. The FE-VM ehash path is retired — experimental dead-end, never worked, ~1.5 Gbps DDR ceiling. Proven ASK throughput: M2 CC pass-through 7.37 Gbps @ 0.16%, M5 CC-tree+nf_flowtable 10.259 Gbps @ 0.16%, NXP cdx.ko 8.58 Gbps. VPP AF_XDP numbers are separate and not yet benchmarked on current hardware.
+**[NOTE] ASK offload architecture (2026-08-01, updated 2026-08-05):** The ASK S1 offload (separate from VPP S2) was declared as CC-tree classification + kernel SW flowtable (`nf_flowtable`) + manip-chain forwarding, with the FE-VM ehash path retired. **2026-08-05: that framing is under re-litigation** — ehash is un-retired (F-163: the deployed vendor `cdx.ko` classifies via external-hash; key fixed to the 14-byte PORT_ID format), CC-tree was never wired in `ask.ko` (CR-007) and its `cc_test` harness is broken (F-159–F-162), and neither path has a confirmed hardware HIT (`plans/ASK2-MASTER-PLAN.md` top banners). Claimed ASK throughput: M2 CC pass-through 7.37 Gbps @ 0.16% (real, but pass-through ≠ offload), M5 10.259 Gbps @ 0.16% (mechanism unresolved — most likely kernel `nf_flowtable`), NXP cdx.ko 8.58 Gbps. VPP AF_XDP numbers are separate and not yet benchmarked on current hardware.
 
 ---
 

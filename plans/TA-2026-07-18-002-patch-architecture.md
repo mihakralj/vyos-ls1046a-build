@@ -36,6 +36,8 @@ Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are 
 
 **[SPEC — v1.4] Canonical silicon reality (2026-08-01):** The shipping HW-offload architecture is **CC-tree + kernel SW flowtable + manip-chain forwarding**. The FE-VM ehash HIT path (Fork-B) is **RETIRED/DEAD-END** — it never achieved a production HIT, was bounded to ~1.5 Gbps by DDR latency, and was conclusively proven non-viable by F-156/F-157/F-158 + `fe_scaffold` + dedicated TX FQ 0x2b9 experiments. The FE-VM infra (patches 0158, F-076, F-084, F-085, F-086c, F-089, `fe_verify`, `fe_disengage_full`) remains in-tree as **experimental/retired diagnostic scaffolding only** — it is not the production dataplane and must not be characterized as such. The CC-tree scales to ~2000+ flows (32 software caps × 255 HW keys/node × ~8 nodes). This document's process/layer/migration/tier content is unaffected; only the characterization of what the patches target is updated.
 
+**[SPEC — v1.5] Canonical silicon reality (2026-08-05), SUPERSEDING the v1.4 paragraph above:** (1) FE-VM ehash is **UN-RETIRED** (F-163, commit `f212c701`): the genuine deployed vendor `cdx.ko` classifies production flows via external-hash (`ExternalHashTableAddKey()`); this branch's key builder gained the vendor's leading PORT_ID byte (14-byte `union dpa_key`, `EKFC 0x801C0006`). (2) "CC-tree shipping" was never implemented in `ask.ko` (CR-007, `dd364494`) and the `cc_test` harness is architecturally broken (F-159–F-162: five vendor-verified register fixes, RX-silent within 17–30 frames vs `.106` vendor stack's 400+; `cc_test` to be retired). (3) "Conclusively proven non-viable" is overstated — F-165 (commit `e4f23948`) showed every prior arm test pointed the port at an empty scaffold, so the corrected chain has never been genuinely exercised. **No dispatch path has a confirmed hardware HIT on this branch; the FE-VM infra in-tree is the near-term HIT candidate (T-M3-R retest pending), not merely diagnostic scaffolding.** This document's process/layer/migration/tier content remains unaffected.
+
 **[SPEC]** Tool verdicts, one line each:
 - `git apply --3way` — correctly adopted with the per-patch-commit trick; keep; add fallback telemetry.
 - quilt — a lateral move that solves refresh but not rebase; do not adopt; steal only the `refresh` idea, which git does better.
@@ -76,9 +78,9 @@ Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are 
 
 **[BUG — RESOLVED v1.1] mergiraf is now wired for the kernel loop.** Symptom at v1.0: `ci-setup-kernel.sh` dropped no `.gitattributes` into the throwaway kernel repo. Resolution: commit `2c23edb` (2026-07-18) added a scoped `.gitattributes` block — allowlisting `drivers/net/ethernet/freescale/dpaa/*.c` and `*.h` with `merge=mergiraf`, denying `fman_pcd*.c` / `fman_keygen.c` with `-merge`.
 
-**[BUG — RESOLVED v1.2] Patches 0158–0162 context-drift has been corrected.** Symptom at v1.1: six FE-VM patches (experimental/retired Fork-B ehash HIT path — see §1 v1.4 silicon reality) failed `git apply --3way` and were skipped via `# SKIP` in the series file. Their functionality was bridged by fragile fixup F-084. Root cause (NF-02): these patches were generated from a tree with Layer 2 fixup mutations baked in — stack-incompatible from birth. Resolution at v1.2 (`5811c91`): 
+**[BUG — RESOLVED v1.2] Patches 0158–0162 context-drift has been corrected.** Symptom at v1.1: six FE-VM patches (experimental Fork-B ehash HIT path — see §1 v1.5 silicon reality, superseding v1.4's "retired") failed `git apply --3way` and were skipped via `# SKIP` in the series file. Their functionality was bridged by fragile fixup F-084. Root cause (NF-02): these patches were generated from a tree with Layer 2 fixup mutations baked in — stack-incompatible from birth. Resolution at v1.2 (`5811c91`): 
 - **0158** was regenerated from the canonical branch (`git clone v6.18.38` + patches 0068–0157 applied, then `git diff` captured as clean patch). 437 lines, applies cleanly with `--3way`. Restored to series.
-- **0159–0162** were analyzed and found **obsolete**: their functionality (E2 hash-probe, EKFC programming, RCCB→FE_ENTER dispatch, port-arm EKFC fix — all retired Fork-B ehash path) is already present in earlier patches (0122–0157) + F-0xx fixups. They added nothing not already in the stack. Deleted from disk, series, and skip-ledger.
+- **0159–0162** were analyzed and found **obsolete**: their functionality (E2 hash-probe, EKFC programming, RCCB→FE_ENTER dispatch, port-arm EKFC fix — all Fork-B ehash path, retired at v1.4, un-retired at v1.5) is already present in earlier patches (0122–0157) + F-0xx fixups. They added nothing not already in the stack. Deleted from disk, series, and skip-ledger.
 - **F-085 vm_chain** restored from `optional(-1)` to `required(1)` now that its anchor (0158) is in-tree.
 
 **[SPEC]** Cosmetic corrections from prior versions, plus v1.3 observations:
@@ -96,7 +98,7 @@ Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are 
 **v1.1 additions (still accurate, unless superseded by v1.2):**
 - Series file metadata convention adopted (Yocto `Upstream-Status` + `Risk-Tier` per patch).
 - Metadata in series comments only — headers inside `.patch` files break `git apply` (lesson hard-learned at `1eeb6c7`/`0722ea5`).
-- F-076: full FE-VM teardown crashes board (teardown ordering not encoded — §6.7 R1). **[NOTE v1.4]** FE-VM is retired/experimental diagnostic infra; the shipping dataplane is CC-tree + SW flowtable + manip chain.
+- F-076: full FE-VM teardown crashes board (teardown ordering not encoded — §6.7 R1). **[NOTE v1.5]** FE-VM was retired/experimental at v1.4 and is un-retired as of v1.5 (§1) — under re-validation, no confirmed HIT.
 - Phase 0 hardening delivered: honest comment, `mutate.py`, 3way-fallback counter, mergiraf `.gitattributes`, `test-fixups.sh`, base64→`.py` migration.
 
 **v1.2 additions (2026-07-19):**
@@ -250,7 +252,7 @@ Measured facts (v1.2 state):
 
 **[SPEC]** Persist the git repo CI already builds, make it the source of truth, generate the patch directory from it, fold every fixup into its owning commit, and encode the silicon contract as compile-time asserts so the recurring bug classes fail in CI instead of on the board.
 
-**[SPEC — v1.2]** The repo is now persistent. The canonical branch `vyos-6.18.38-dpaa1` exists at `~/kernel-git-cache/linux/` with 106 commits (v6.18.38 base + 103 staged patches + 1 regenerated 0158 + 1 ENQ fix + 1 kernel post-patches). **[NOTE v1.4]** The 0158/ENQ commits are experimental/retired FE-VM ehash diagnostic infra (Fork-B, dead-end); the shipping dataplane is CC-tree + SW flowtable + manip chain. The remaining work is to fold fixups into their owning commits (Phase 2), make patch files a generated export (Phase 1 CI gate), and encode the silicon contract (§17).
+**[SPEC — v1.2]** The repo is now persistent. The canonical branch `vyos-6.18.38-dpaa1` exists at `~/kernel-git-cache/linux/` with 106 commits (v6.18.38 base + 103 staged patches + 1 regenerated 0158 + 1 ENQ fix + 1 kernel post-patches). **[NOTE v1.5]** The 0158/ENQ commits are FE-VM ehash infra (Fork-B; retired at v1.4, un-retired at v1.5 — §1). The remaining work is to fold fixups into their owning commits (Phase 2), make patch files a generated export (Phase 1 CI gate), and encode the silicon contract (§17).
 
 ### 6.2 Structure
 
@@ -366,7 +368,7 @@ Phase 0 (1 week):    interim hardening per §6.7; fallback counter; no-zombie
                      v1.2 extended: R1 roundtrip, R4 orphans, P3 skip-ledger,
                      R5b test-fixups, R5c --check mode, R5 partial sed→mutate).
                      Remaining: delete versioned duplicates, full sed→mutate,
-                     fe_disengage_full atomic operation (experimental/retired diagnostic infra).
+                     fe_disengage_full atomic operation (FE-VM diagnostic infra; retired v1.4, un-retired v1.5 — §1).
 
 Phase R (Recovery):  ~2 days — restore the 0158 workstream, fix the regressions
                      from the v1.1 implementation round.
@@ -389,7 +391,7 @@ Phase 1 (1 day):     bootstrap ls1046a-kernel via quiltimport; verify exported
 Phase 2 (1–2 weeks): fold every ACTIVE fixup into its owning commit, re-export,
                       delete the fixup from ci-setup-kernel.sh, one at a time,
                       board-verifying FE-VM-relevant ones against fe_verify
-                      (experimental/retired diagnostic infra — see §1 v1.4).
+                      (FE-VM diagnostic infra — see §1 v1.5, superseding v1.4).
                      STATUS (v1.2): NOT STARTED. Prerequisites in place:
                      canonical branch exists, round-trip tool works,
                      skip-ledger tracks disposition.
@@ -412,7 +414,7 @@ Phase 4 (next bump): first rebase-driven bump with rerere; enable mergiraf for
 
 **[SPEC — v1.2]**
 - **Is the patching hardened?** Layer 1 yes, Layer 3 yes, Layer 2 partially — 7 fixups are now count-gated, but ~28 bare `sed -i` and 8 versioned duplicates remain. The count==1 comment is honest, `test-fixups.sh` and `mutate.py` exist, mergiraf is wired, the round-trip tool works, and 0158–0162 drift has been resolved (0158 regenerated, 0159–0162 deleted). The canonical branch exists (106 commits) and CI uses a persistent git clone instead of a tarball. But the second writer (Layer 2) persists — only the structural migration (Phase 2 fold-into-commits) removes it.
-- **Will it survive upstream changes?** The stack will mostly apply (~70 low-risk patches, 3-way with per-patch commits, weekly canary). The 0158–0162 drift incident was resolved — 0158 now applies cleanly from the canonical branch, and 0159–0162 were proven to contain no unique functionality. **[NOTE v1.4]** These are experimental/retired FE-VM ehash patches (Fork-B dead-end); the shipping CC-tree + SW flowtable + manip chain path is unaffected. The fixups will not survive — they anchor on exact source text and ~28 of them still fail silent-first.
+- **Will it survive upstream changes?** The stack will mostly apply (~70 low-risk patches, 3-way with per-patch commits, weekly canary). The 0158–0162 drift incident was resolved — 0158 now applies cleanly from the canonical branch, and 0159–0162 were proven to contain no unique functionality. **[NOTE v1.5]** These are FE-VM ehash patches (Fork-B; retired at v1.4, un-retired at v1.5 — §1). The fixups will not survive — they anchor on exact source text and ~28 of them still fail silent-first.
 - **Right tools?** `git apply --3way`: yes, keep. quilt: no. mergiraf: RESOLVED (wired since v1.1). `bin/kernel-roundtrip.sh`: usable (v1.2). `bin/canonical-bootstrap.sh`: operational (v1.2). `bin/clone-kernel.sh`: operational (v1.2).
 - **Better pattern?** Tree-canonical with generated patches. CI now uses a persistent clone; the canonical branch exists; the round-trip tool works. The remaining gap is Phase 2 (fold fixups into commits) and Phase 1 CI gate (round-trip identity on every PR).
 
@@ -420,7 +422,7 @@ Phase 4 (next bump): first rebase-driven bump with rerere; enable mergiraf for
 
 ## 9. v1.2 Prioritized Recommendations
 
-**[SPEC]** Re-ranked for v1.2 based on: Phase R progress (substantial), canonical branch availability, 0158-0162 resolved, and the remaining gap being fixup fold-in + silicon encoding. **[NOTE v1.4]** The FE-VM ehash items (R1, R7 FE-VM verification) are experimental/retired diagnostic infra; the shipping dataplane is CC-tree + SW flowtable + manip chain.
+**[SPEC]** Re-ranked for v1.2 based on: Phase R progress (substantial), canonical branch availability, 0158-0162 resolved, and the remaining gap being fixup fold-in + silicon encoding. **[NOTE v1.5]** The FE-VM ehash items (R1, R7 FE-VM verification) are FE-VM diagnostic infra (retired at v1.4, un-retired at v1.5 — §1).
 
 ### Immediate (this week, ≤3 days total)
 
@@ -442,7 +444,7 @@ Phase 4 (next bump): first rebase-driven bump with rerere; enable mergiraf for
 
 | # | Item | Rationale | Est. |
 |---|---|---|---|
-| R7 | **Fold all ACTIVE fixups into owning commits** | One fixup at a time, board-verify FE-VM-relevant ones against `fe_verify` (experimental/retired diagnostic infra). Zombies deleted. After this, `ci-setup-kernel.sh` fixup section shrinks to near-zero. | 1–2 weeks |
+| R7 | **Fold all ACTIVE fixups into owning commits** | One fixup at a time, board-verify FE-VM-relevant ones against `fe_verify` (FE-VM diagnostic infra; retired v1.4, un-retired v1.5). Zombies deleted. After this, `ci-setup-kernel.sh` fixup section shrinks to near-zero. | 1–2 weeks |
 | R8 | **§17 static asserts + KUnit descriptor audit** | Catches "wrong NIA in descriptor word 1" at compile time + KUnit time. Three tripwires before silicon. | — | **DONE (v1.3, `9f67b56`)** |
 | R9 | **3-way fallback `::warning` annotations** | Per-patch fallback counter summary with `::warning` annotation per drifted patch + refresh artifact upload. | 1h |
 

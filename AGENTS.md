@@ -29,13 +29,14 @@ qdrant MCP = authoritative persistent memory (diagnoses, root causes, failed att
    - `nxp-sdk` branch (`.kilo/worktrees/nxp-sdk/`): ported / attempted-reverted / never-touched status per SDK fn in `arch/fman-microcode-210-programming-reference.md`.
    - Live ASK on `.106` (`ssh root@192.168.1.106`): CDX/FCI/CMM/dpa_app production stack. Check `/proc/fqid_stats/pcd/`, `cat /sys/kernel/debug/fman/...`, `ask-check`.
    - Precedence: `.106` live > qdrant SDK docs > nxp-sdk branch. All agree = safe. Any disagree = halt, resolve first.
+9. **END-OF-SESSION RECONCILIATION (MUST):** Before ending any session that produced board test results, root cause findings, architectural decisions, fixup iterations, or revert/oscillation patterns: run `bin/qdrant-reconcile.sh`, check each high-value signal against qdrant, `qdrant-store` any gaps. A session that produced knowledge but didn't store it is an incomplete session — the next session will `qdrant-find` first, and if the knowledge isn't there it will be rediscovered from scratch, wasting time and risking different conclusions. Canonical violation: 2026-07-28→2026-08-05 gap (91 commits, 12 knowledge clusters, 0 qdrant entries). Command: `/qdrant-reconcile`.
 
 ## S2. Documentation Style
 
 - Mermaid, ¬ASCII art, for all .md diagrams (```` ```mermaid ```` fences).
 - HADS 1.0.0 for all `specs/`, `plans/`, `arch/`, code-documenting `README.md`: `**Version … · HADS 1.0.0**` header, `## AI READING INSTRUCTION` block, numbered `##` sections, paragraphs tagged `**[SPEC]**` (facts/reqs/contracts), `**[NOTE]**` (rationale/history), `**[BUG] Title**` (symptom+cause+fix, all 3), `**[?]**` (unverified). Use `hads-convert` skill. Convert IN PLACE (precedent: `plans/UBOOT.md`, `plans/VPP.md`), on-touch w/ normal edits, ¬bulk pass.
 - Data-loss guard: narrative → `[NOTE]` intact; only verifiable facts → `[SPEC]`. NEVER condense correctness-critical prose (register layouts, MURAM offsets, reversibility contract, risk registers, M3-3b/FE-VM findings). Preserve every command, address, register value, patch number, date, qdrant anchor verbatim. Dropped fact = regression.
-- Exceptions (stay prose): `README.md`, `INSTALL.md` (human entry, Bryson voice), `vyos_sshkey.md` (credential), `plans/archive/**` (frozen; convert only if un-archived), `AGENTS.md`.
+- Exceptions (stay prose): `README.md`, `INSTALL.md` (human entry, Bryson voice), `vyos_sshkey.md` (credential), `arch/fman-microcode-210-programming-reference.md` (deliberately de-HADS'd 2026-08-07 at user request — human-readable reference w/ TOC, unwrapped prose, `Bug —`/`Open question —` lead-ins; do NOT re-convert), `plans/archive/**` (frozen; convert only if un-archived), `AGENTS.md`.
 
 ## S3. ASK2 (rewrite-in-progress) — single-image runtime offload
 
@@ -147,21 +148,21 @@ Ref: archived repo `.clinerules/01-shared-vm-runtime.md` (daemon, units, Managed
 Authoritative: `specs/fman-keygen-flow-key-spec.md` v2.0 (2026-07-10).
 
 ### Architecture (settled)
-- EKFC only, no GEC: `kgse_gec[]` stays 0. SDK uses FMC/GEC declared order (SIP,DIP,PROTO,SPORT,DPORT); ASK2 gets silicon's fixed EKFC order. Same 5 fields, 13 bytes, different byte order. Do NOT "fix" ASK2 layout to match SDK. (§1.3–1.4)
+- EKFC only, no GEC: `kgse_gec[]` stays 0. SDK uses FMC/GEC declared order (SIP,DIP,PROTO,SPORT,DPORT); ASK2 gets silicon's fixed EKFC order. Same 5 fields + PORT_ID (6th field, HW-confirmed 2026-08-06/07/08, see below), 14 bytes total, different byte order. Do NOT "fix" ASK2 layout to match SDK. (§1.3–1.4)
 - RCCB → FE_ENTER direct = correct dispatch. No CC group table/node/match table (F-044, F-047 removed). OQ4 (CC-hop clobbers hash) moot — no hop. (§5)
 - `kgse_hc` ≠ hash-algorithm selector. KG hash = fixed silicon CRC-64 (ECMA-182, reflected poly `0xC96C5795D7870F42`); `kgse_hc` only configures FQID distribution (shift/symmetric/mask). No Toeplitz anywhere. Do NOT read back `kgse_hc`. (§4.3)
 - ASK2 CRC64 settings (in place): `hashShift = 0`, `symmetric = false` (direction-distinct, conntrack-friendly), `mask = 0x7fff`. `fman_pcd_crc64()` + `fman_pcd_ehash_bucket_index()` verbatim-identical to ASK1 `get_indexed_hash_bucket()`. (§4.3)
 
-### Target EKFC
-- Target = `0x001C0006` (adds PTYPE1 bit 18 → 5-tuple): `IPSRC1|IPDST1|PTYPE1|L4PSRC|L4PDST`, 13 bytes. 4-tuple `0x00180006` aliases TCP/UDP sharing IP:port = silent misforwarding. (§2–3)
+### Target EKFC — SUPERSEDED 2026-08-06/07/08, now 14 bytes w/ PORT_ID
+- Target = `0x801C0006` (5-tuple `0x001C0006` + PORT_ID bit 31): `PORT_ID|IPSRC1|IPDST1|PTYPE1|L4PSRC|L4PDST`, **14 bytes**. PORT_ID value = `0x00` for eth4/port 0x11 (NOT raw hw_port_id `0x11`) — HW-confirmed via 184,320-candidate CRC-64 brute force (2026-08-06), exhaustive 16-candidate batch test (2026-08-07), and independently re-confirmed via passive `hash_probe` (2026-08-08, 2 separate sessions, bit-for-bit identical hash). Matches ASK 1.x's real `cdx_ehash.c fill_key_info()` DDR key layout exactly (`union dpa_key`: `portid` byte 0 + 13-byte 5-tuple). The old `0x001C0006`/13-byte target below is SUPERSEDED, not wrong for what it tested (byte order) — it simply predates the PORT_ID requirement. **A properly-EKFC-synced 14-byte key still does not HIT** (tested 3 independent times: 2026-08-06, 2026-08-07 batch, 2026-08-08 this session w/ live-register-verified EKFC) — PORT_ID/key-format is a CLOSED lead, not the open one. 4-tuple `0x00180006` (no PROTO, no PORT_ID; mainline RSS boot-default, `F-048`) aliases TCP/UDP sharing IP:port = silent misforwarding — do not mistake this boot-default for the target. (§2–3, §4.3a)
 - IPsec SPI bit 9 MUST NOT be set on non-IPsec schemes (no SPI offset → random bytes → unpredictable key; F-043 origin). (§4.1)
 - PTYPE1 has no EKDV default-value slot (§4.2). Guard: reject `proto == 0` at flow insert (§10.6). Non-IP never reaches FE path (IPv4-indication gated); leak-through `proto=0` → deterministic 0x00, matches nothing.
 
-### Extraction order: SETTLED 2026-07-13
-- CONFIRMED MSB-first: SIP → DIP → PROTO → SPORT → DPORT; 13 bytes @EKFC=0x001C0006. HW-verified (board 192.168.1.185, 6.18.38-vyos, ISO 2026.07.13-1938-rolling) via CRC-64 match on two independent TCP flows on eth4. Ascending-bit and size-grouped models DISPROVEN.
-- HW KG hash = RAW CRC-64, no final complement. Silicon stores `crc64_raw(key)` @IC offset 0x48 (seed `~0ULL`, NO final `~crc` XOR). CRC-64/XZ finalized variant does NOT match. Verified: `crc64_raw(SIP|DIP|6|0xAD9C|0xD903) = 0x600824e70ae4d573` = captured hash; `crc64_xz` ≠. Use raw for ehash keys + bucket indices.
-- Repeatable methodology: mainline RSS on eth4 (KG in RX path, `receive-hashing: on`, `FMBM_RFPNE` HWK), no ASK engage; eth4-only capture via `strcmp(net_dev->name, "eth4")` in `rx_default_dqrr`; controlled TCP SYN `.106:portA → .185:portB` distinct nonzero fields; read `hash_probe` debugfs; compare `crc64_raw()` over 13-byte key in confirmed order.
-- IPv6 = separate KG scheme + separate ehash table (16B addrs → 37-byte key). Design must not preclude. (§12)
+### Extraction order: SETTLED 2026-07-13 (byte order); byte COUNT extended 2026-08-06 (+PORT_ID)
+- CONFIRMED MSB-first: SIP → DIP → PROTO → SPORT → DPORT; 13 bytes @EKFC=0x001C0006. HW-verified (board 192.168.1.185, 6.18.38-vyos, ISO 2026.07.13-1938-rolling) via CRC-64 match on two independent TCP flows on eth4. Ascending-bit and size-grouped models DISPROVEN. **This order-finding still holds** — PORT_ID (bit 31, highest set bit) simply sorts first per the same MSB-first rule, extending to 14 bytes total (`PORT_ID|SIP|DIP|PROTO|SPORT|DPORT`), not contradicting it. See "Target EKFC" above.
+- HW KG hash = RAW CRC-64, no final complement. Silicon stores `crc64_raw(key)` @IC offset 0x48 (seed `~0ULL`, NO final `~crc` XOR). CRC-64/XZ finalized variant does NOT match. Verified: `crc64_raw(SIP|DIP|6|0xAD9C|0xD903) = 0x600824e70ae4d573` = captured hash (13-byte, pre-PORT_ID test); `crc64_raw(00|SIP|DIP|6|0xAD9C|0xD903) = 0xb508e222f73f6794` = captured hash (14-byte, PORT_ID=0x00, 2026-08-06/08); `crc64_xz` ≠ either. Use raw for ehash keys + bucket indices.
+- Repeatable methodology: mainline RSS on eth4 (KG in RX path, `receive-hashing: on`, `FMBM_RFPNE` HWK), no ASK engage; eth4-only capture via `strcmp(net_dev->name, "eth4")` in `rx_default_dqrr`; controlled TCP SYN `.106:portA → .185:portB` distinct nonzero fields; read `hash_probe` debugfs; compare `crc64_raw()` over the confirmed-order key (14 bytes w/ PORT_ID=0x00 prefix, or 13 bytes without, per which EKFC is live).
+- IPv6 = separate KG scheme + separate ehash table (16B addrs → 37-byte key, or 38B w/ PORT_ID). Design must not preclude. (§12)
 
 ### Immediate required actions (order-independent)
 - ~~Revert F-046~~: restore `word0 = 0x40800000` (ALLOCATE) on FE_ENTER AD. F-046 stripped it speculatively vs the only config that ever HIT. ALLOCATE allocates the FE workspace holding extracted key + KG hash. (§5.4)

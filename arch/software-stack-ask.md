@@ -1,8 +1,33 @@
 # Software Stack — SDK / ASK / ASK2 / LSDK & how it binds to the silicon
 
-**Version 2.1 · HADS 1.0.0**
+**Version 2.2 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
+
+> **⚠ ADDENDUM (2026-08-05) to the 2026-08-04 correction below — the Fork-B story moved again.**
+> F-163 (commit `f212c701`) **un-retired** Fork-B: the genuine deployed vendor `cdx.ko` driver's
+> production classification path **is** external-hash (`cdx_ehash.c`: `insert_entry_in_classif_table()`
+> → `fill_key_info()` → `ExternalHashTableAddKey()`), so "not the vendor architecture" is refuted.
+> This branch's ehash key builder was missing the vendor's leading PORT_ID byte (`union dpa_key`,
+> 14 B total); F-163 added it (`EKFC 0x801C0006`). The F-163 live test on `.185` was byte-correct
+> end-to-end yet still MISSed — but F-165 (commit `e4f23948`) then proved that test never reached
+> the ehash chain at all: F-091's CONT_LOOKUP scaffold unconditionally overwrote the caller's
+> `fe_enter_off` with its own scaffold offset (board-confirmed via live `fmbm_rccb` read). So the
+> "proven to never dispatch a HIT" framing in the banner below is itself overstated — the corrected
+> chain has never been genuinely tested. **Current reality: no confirmed hardware HIT on either
+> path; Fork-B un-retired and under active re-validation (F-165 retest is the immediate step);
+> CC-tree absent from `ask.ko` AND its `cc_test` harness architecturally broken (F-159–F-162:
+> five vendor-verified register fixes, still RX-silent within 17–30 frames vs `.106` vendor stack's
+> 400+).** Byte-level oracle path: `plans/NXP-106-DEEP-DIVE-PLAN.md` Phases A/C.
+>
+> **Vendor-stack observability note (2026-08-05):** on `.106`, `cmm`'s connection tracker is
+> functionally deaf — its vendored, statically-linked libnetfilter_conntrack 1.1.0 (+ comcerto-fp
+> patch) never dispatches into `__cmmCtCatch()` (zero CT-TRACE events across every boot Aug 1–5,
+> even under TTL-verified 3-hop transit). Consequently `/proc/fqid_stats/pcd/*/*` counters do NOT
+> move with flow traffic and are **not usable as a HIT/MISS oracle** — use direct register/MURAM
+> reads (`bin/kg-scheme-read.py`, `bin/muram-mmap-dump.py`). Root cause:
+> `specs/conntrack-root-cause-analysis.md` + qdrant "cmm-root-cause-CORRECTED" (2026-08-05).
+> The earlier "auto_bridge L2-path" guess was retracted the same day (commit `cd5bf90b`).
 
 > **⚠ CRITICAL CORRECTION (2026-08-04) — §7, §8, and §9 below are WRONG about what is currently wired.**
 > §7 and §9 assert CC-tree is the shipping insert path and §8 asserts FE-VM ehash "is NOT shipping."
@@ -30,8 +55,9 @@
 
 This document maps the ASK2 software stack onto DPAA1 silicon. The intended offload mechanism per the
 2026-08-01 decision is **CC-tree classification + kernel SW flowtable + manip-chain forwarding** (§7),
-but per the correction above this is not currently implemented in `ask.ko`. FE-VM ehash HIT (Fork-B,
-§8) is the mechanism actually wired, despite being labeled "retired" below. All facts tagged `[SPEC]`
+but per the corrections above this is not currently implemented in `ask.ko`, and its hardware harness
+is broken. FE-VM ehash HIT (Fork-B, §8) is the mechanism actually wired — un-retired 2026-08-05
+(F-163), still without a confirmed HIT. All facts tagged `[SPEC]`
 or `[NOTE]` should be read as describing the target architecture, not verified current behavior, until
 §7/§8/§9 are rewritten.
 
@@ -185,11 +211,19 @@ The PCD layer is the single biggest gap mainline doesn't fill — which is exact
 
 ---
 
-## 7. Shipping offload mechanism: CC-tree + SW flowtable + manip chain
+## 7. Intended offload mechanism: CC-tree + SW flowtable + manip chain (not currently wired)
 
 > **⚠ CORRECTION (2026-08-04):** despite the "shipping" label below, `ask.ko`'s CC-tree insert path
 > was deleted by CR-007 (`dd364494`, 2026-07-27) and never restored. No live code path currently
 > installs a CC-tree entry. See the AI READING INSTRUCTION banner at the top of this file.
+>
+> **⚠ ADDENDUM (2026-08-05):** the CC-tree hardware harness (`cc_test`, patch 0107) is additionally
+> proven architecturally broken on silicon: five vendor-verified register fixes (F-159 EKFC
+> composite, F-160 `next_engine=3` AC_CC graft, F-161 live-EKFC realignment, F-162 `NIA_KG_DIRECT`)
+> still left the port RX-silent within 17–30 frames (surviving `clear`, reboot-required), while
+> `.106`'s vendor stack classified 400+ frames at 0% loss in the same session. Per
+> `plans/NXP-106-DEEP-DIVE-PLAN.md`, `cc_test` is to be retired rather than further patched; the
+> vendor `t_ExtHashFe` decode (Phase A) is the byte-level oracle for whatever replaces it.
 
 **[SPEC, intended architecture — not currently implemented, see correction above]** The ASK2 shipping HW-offload path uses **CC-tree classification (top-N flows) + kernel
 software flowtable (tail flows) + FMan manip-chain forwarding**. This is the Linux flow-offload
@@ -204,14 +238,19 @@ set interfaces ethernet eth<n> offload ask
 This engages `ask.ko` + kernel `fman_pcd` + netfilter flowtable on the specified interface. ASK and
 VPP are **mutually exclusive per interface** — one port cannot be both, but other ports are free.
 
-**[SPEC]** Proven throughput (Mono Gateway DK, 10G SFP+):
-- **CC pass-through (M2):** 7.37 Gbps @ 0.16% loss — real pass-through, no false positive.
-- **CC-tree + nf_flowtable (M5):** 10.259 Gbps @ 0.16% loss — full offload stack.
+**[SPEC]** Claimed throughput (Mono Gateway DK, 10G SFP+):
+- **CC pass-through (M2):** 7.37 Gbps @ 0.16% loss — real pass-through, no false positive (but
+  pass-through is MISS→kernel delivery, **not** hardware offload).
+- **"CC-tree + nf_flowtable" (M5):** 10.259 Gbps @ 0.16% loss — **mechanism unresolved**: most
+  likely kernel `nf_flowtable` software forwarding alone, since neither CC-tree nor ehash was a
+  functioning HW-classification path at M5 time (qdrant tag `no-confirmed-hw-hit-ever`).
 - **NXP cdx.ko (reference):** 8.58 Gbps via opcode/manip chain — vendor baseline.
 
 **[SPEC]** CC-tree architecture:
-- **CC comparator reads KG-emitted bytes** (patch 0108). The KeyGen extracts the 5-tuple in
-  **EKFC MSB-first order: SIP → DIP → PROTO → SPORT → DPORT** (13 bytes, EKFC=`0x001C0006`).
+- **CC comparator reads KG-emitted bytes** (patch 0108). The KeyGen extracts the 6-tuple in
+  **EKFC MSB-first order: PORT_ID → SIP → DIP → PROTO → SPORT → DPORT** (14 bytes, EKFC=`0x801C0006`).
+  PORT_ID = `0x00` for eth4/port 0x11. HW-confirmed 2026-08-06/07/08. The old 13-byte `0x001C0006`
+  (5-tuple, no PORT_ID) is superseded.
 - **Scaling:** 32 software caps vs 255 hardware keys per CC node. 64 KiB MURAM budget yields
   ~8 CC nodes → ~2000+ flows in hardware.
 - **Only real HIT path:** RCCB → FE_ENTER direct dispatch (confirmed 2026-07-04). No CC group
@@ -223,47 +262,65 @@ flowtable stack.
 
 ---
 
-## 8. FE-VM ehash HIT path (Fork-B) — RETIRED EXPERIMENTAL, DESIGNATION vs REALITY
+## 8. FE-VM ehash HIT path (Fork-B) — UN-RETIRED 2026-08-05, under re-validation
 
-> **⚠ CORRECTION (2026-08-04):** despite the heading and "[SPEC] ... NOT shipping" below, Fork-B
+> **⚠ UN-RETIREMENT (2026-08-05, supersedes the "dead end / intended to not ship" text below):**
+> F-163 (commit `f212c701`) established that the genuine deployed vendor `cdx.ko` driver's
+> production classification path **is** external-hash — `cmm`'s connection tracker inserts every
+> accelerated flow via `insert_entry_in_classif_table()` → `fill_key_info()` →
+> `ExternalHashTableAddKey()` (`cdx_ehash.c`, nxp-sdk branch). The vendor key is
+> `portid(1B)|SIP|DIP|PROTO|SPORT|DPORT` = 14 B (`union dpa_key`, `cdx_common.h`); this branch's
+> key builder was missing the leading PORT_ID byte and F-163 added it (`KG_SCH_KN_PORT_ID`, EKFC
+> `0x801C0006`). The "not vendor architecture" leg of the 2026-08-01 retirement is **refuted**
+> (mechanism citation: SDK `fm_kg.c` `GetKnownFieldId()`, commit `94b89b95`). Still standing: no
+> confirmed HIT on this branch's silicon, and the ~1.5 Gbps DDR-ceiling claim is unmeasured against
+> real vendor traffic. The F-163 live test was byte-correct but MISSed because the engage path
+> never pointed the port at the built chain — F-165 (commit `e4f23948`) fixed that
+> scaffold-overwrite; retest is the immediate open step.
+
+> **⚠ CORRECTION (2026-08-04):** despite the "[SPEC] ... NOT shipping" text below, Fork-B
 > (FE-VM ehash) is the *only* flow-insert mechanism currently wired into `ask.ko`
 > (`ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` → `fman_pcd_ehash_add_key()`). It was intended
 > to be retired on 2026-08-01, but the retirement only updated documentation — CC-tree, the intended
 > replacement, was never rewired in (its code was deleted 2026-07-27, before the retirement decision).
 > There is no `if (0)` guard blocking Fork-B in the current insert path; it runs live on every REPLACE.
-> It is separately proven (F-156/F-157/F-158) to never dispatch a HIT.
+> ~~It is separately proven (F-156/F-157/F-158) to never dispatch a HIT.~~ *(2026-08-05: overstated —
+> F-156/157/158 predated the corrected key format and the F-165 engage fix; no genuine test of the
+> corrected chain has been run.)*
 
-**[SPEC, architectural intent]** The FE-VM ehash exact-match HIT path (Fork-B) is a **dead end** and is
-**intended to not ship** per the 2026-08-01 decision — but see the correction above: it is in fact the
-only mechanism currently wired. It never worked at production throughput (~1.5 Gbps DDR ceiling,
-limited by MURAM read bandwidth on the FE workspace path).
+**[SPEC, architectural intent — 2026-08-01, SUPERSEDED 2026-08-05]** The FE-VM ehash exact-match HIT path (Fork-B) is a **dead end** and is
+**intended to not ship** per the 2026-08-01 decision — but see the corrections above: it is in fact the
+only mechanism currently wired, and it is the vendor's real production mechanism. The "~1.5 Gbps DDR
+ceiling" figure is an unmeasured theoretical bound, not a silicon measurement.
 
 **[NOTE]** Fork-B was the original ASK2 design target (FE-VM + ehash table for per-flow exact
 match). The 2026-08-01 decision intended to supersede it with the CC-tree + SW flowtable model after
 silicon measurements proved the DDR ceiling makes FE-VM ehash non-viable for line-rate forwarding, but
-that supersession was never implemented in code (see correction above).
+that supersession was never implemented in code (see correction above), and its "not vendor
+architecture" premise was refuted by F-163.
 
-**[SPEC]** The intent going forward remains not to re-enable/rely on Fork-B once CC-tree is restored.
-There is currently no code guard preventing Fork-B from running — restoring CC-tree and rewiring the
-REPLACE handler to use it (see §7 correction) is a prerequisite for actually retiring Fork-B, not
-merely a documentation update.
+**[SPEC — current, 2026-08-05]** Fork-B is the live insert path and the near-term HIT candidate:
+the immediate validation step is the F-165 retest — arm a real FE_ENTER root AD as the port's CC
+target with `EKFC=0x801C0006` and the 14-byte PORT_ID-prefixed key, and check for a genuine
+hardware HIT. CC-tree restoration (§7 correction) remains a separate, larger task whose hardware
+harness is itself broken (F-159–F-162).
 
 ---
 
 ## 9. ask.ko stack: runtime dataplane model
 
-> **⚠ CORRECTION (2026-08-04):** steps 2, 3, and 6 below describe CC-tree operations. As of current
+> **⚠ CORRECTION (2026-08-04, amended 2026-08-05):** steps 2, 3, and 6 below describe CC-tree operations. As of current
 > HEAD, `ask.ko` does not perform any of these against a CC tree — the actual call chain for step 2 is
 > `ask_flow_offload.c`'s REPLACE handler → `ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` →
-> `fman_pcd_ehash_add_key()` (FE-VM ehash, not CC-tree), which is proven to never produce a working
-> HIT. Steps 1, 4, 5 (KG scheme programming, manip chain, neighbor maintenance) are accurate as
+> `fman_pcd_ehash_add_key()` (FE-VM ehash, not CC-tree), which has no confirmed HIT (and whose
+> corrected 14-byte-key chain has never been genuinely exercised — F-163/F-165). Steps 1, 4, 5 (KG scheme programming, manip chain, neighbor maintenance) are accurate as
 > general silicon/driver mechanisms but their "CC tree"/"CC-tree entry" wording should be read as
 > "flow table entry (mechanism currently ehash, not CC-tree)."
 
 **[SPEC, intended model — see correction above for current reality]** The `ask.ko` stack is intended to operate as follows at runtime:
 
 1. **Engage:** `set interfaces ethernet eth<n> offload ask` triggers `ask.ko` to program the
-   FMan PCD on that port: KG scheme (EKFC `0x001C0006`, 5-tuple extraction), CC tree root,
+   FMan PCD on that port: KG scheme (EKFC `0x801C0006`, 6-tuple extraction with PORT_ID), CC tree root,
    and default forward-to-kernel FQ.
 2. **Flow insertion (intended CC-tree; actual mechanism is ehash, see correction):** `nf_flowtable`
    (or `vyos-offload-ask` YNL command) is intended to insert top-N flows into the CC tree. The kernel

@@ -215,21 +215,21 @@ These are the canonical, verified throughput numbers for the offload datapaths t
 | Offload Path | Date | Kernel | Throughput | CPU | Notes |
 |---|---|---|---|---|---|
 | CC Pass-Through (M2) | 2026-07-07 | 6.18.37-vyos | **7.37 Gbit/s** | 0.16% | FMan hardware forwarding, no CPU |
-| CC-Tree + nf_flowtable (M5) | 2026-07-24 | 6.18.38-vyos | **10.259 Gbit/s** | 0.16% | HW classification + SW flowtable; line-rate |
-| NXP cdx.ko | 2026-07-02 | 6.12.49-vyos | **8.58 Gbit/s** | — | Vendor reference; opcode/manip chain |
+| "CC-Tree + nf_flowtable" (M5) | 2026-07-24 | 6.18.38-vyos | **10.259 Gbit/s** | 0.16% | ⚠ mechanism unresolved (2026-08-04): most likely kernel `nf_flowtable` SW forwarding; no HW classification confirmed |
+| NXP cdx.ko | 2026-07-02 | 6.12.49-vyos | **8.58 Gbit/s** | — | Vendor reference; external-hash classification + opcode/manip chain (F-163) |
 
 ---
 
-## 8. FE-VM EHASH HIT PATH — EXPERIMENTAL / RETIRED
+## 8. FE-VM EHASH HIT PATH — retired 08-01, UN-RETIRED 08-05 (F-163), re-validation pending
 
-**[SPEC]**
-The FE-VM ehash HIT path (FMan Frame Extension → Virtual Machine → exact-match hash table lookup → hardware forward on HIT) **never produced a working HIT on silicon**. All prior throughput claims associated with this path are **false positives** or **projections**, not measured results.
+**[SPEC — updated 2026-08-05]**
+The FE-VM ehash HIT path (FMan Frame Extension → Virtual Machine → exact-match hash table lookup → hardware forward on HIT) **has never produced a working HIT on silicon** — but the 08-01 "architecturally retired" verdict is reversed: F-163 (2026-08-05) established the deployed vendor `cdx.ko`'s production classification **is** external-hash, and F-165 (2026-08-05) showed every prior arm test pointed the port at an empty scaffold, so the corrected chain (14-byte PORT_ID key, `EKFC 0x801C0006`) has never been genuinely exercised. All prior throughput claims associated with this path are **false positives** or **projections**, not measured results. Re-validation = `plans/ASK2-MASTER-PLAN.md` T-M3-R.
 
 **[NOTE]**
-- The ~1.5 Gbit/s DDR ceiling was a **projection** based on DDR bandwidth estimates for the ehash lookup path, not a measured throughput number. The path never reached a state where a real iperf3 measurement could be taken.
+- The ~1.5 Gbit/s DDR ceiling was a **projection** based on DDR bandwidth estimates for the ehash lookup path, not a measured throughput number. The path never reached a state where a real iperf3 measurement could be taken. *(Still true 2026-08-05 — and still unmeasured against the vendor's real external-hash traffic.)*
 - M3/M5 "HIT gate PASSED" throughput claims were **false positives**: the test harness was measuring kernel software forwarding (the fallback path), not FE-VM ehash HIT. The HIT gate never actually fired on silicon.
-- The FE-VM ehash path is architecturally retired from the ASK2 shipping path. The CC-tree + kernel nf_flowtable combination (§7.2) achieves line-rate 10G without it. Any future revival would require a cold-boot silicon re-validation from scratch.
-- See `specs/fman-keygen-flow-key-spec.md` §13 for the ranked failure-candidate list and `plans/ASK2-MASTER-PLAN.md` for the architectural decision to retire this path.
+- ~~The FE-VM ehash path is architecturally retired from the ASK2 shipping path. The CC-tree + kernel nf_flowtable combination (§7.2) achieves line-rate 10G without it.~~ **(2026-08-05: un-retired — F-163. And §7.2's own mechanism is unresolved: most likely kernel `nf_flowtable` SW forwarding, no HW classification confirmed — qdrant tag `no-confirmed-hw-hit-ever`.)** Any validation must start cold-boot from scratch (silicon-experiment rule).
+- See `specs/fman-keygen-flow-key-spec.md` §13 for the ranked failure-candidate list and `plans/ASK2-MASTER-PLAN.md` for the re-litigated architecture status.
 
 ---
 
@@ -242,10 +242,10 @@ The FE-VM ehash HIT path (FMan Frame Extension → Virtual Machine → exact-mat
 | Mainline Baseline (§3) | 6.18.37-vyos | 7.35 Gbit/s | 6.48 Gbit/s | Host-to-host, no offload engine engaged |
 | NXP ASK (§4) | 6.12.49-vyos | 3.06 Gbit/s | 3.05 Gbit/s | Host-to-host — **does not exercise CDX forwarding offload**, see §4.1 caveat. Not a fair comparison to §3 for "offload value"; only valid as a same-methodology host-stack comparison. |
 | CC Pass-Through (§7.1) | 6.18.37-vyos | **7.37 Gbit/s** | — | FMan hardware forwarding, 0.16% CPU |
-| CC-Tree + nf_flowtable (§7.2) | 6.18.38-vyos | **10.259 Gbit/s** | — | Line-rate 10G, 0.16% CPU |
+| "CC-Tree + nf_flowtable" (§7.2) | 6.18.38-vyos | **10.259 Gbit/s** | — | ⚠ mechanism unresolved — most likely kernel `nf_flowtable`, no HW classification confirmed (2026-08-04) |
 | NXP cdx.ko (§7.3) | 6.12.49-vyos | **8.58 Gbit/s** | — | Forwarding-mode, vendor reference |
 | VPP / AF_XDP (§5) | — | pending | pending | |
 | ASK2 (§6) | — | pending | pending | |
-| FE-VM ehash HIT (§8) | — | **RETIRED** | — | Never produced a working HIT; prior claims were false positives |
+| FE-VM ehash HIT (§8) | — | **no HIT ever** | — | Never produced a working HIT; prior claims were false positives; un-retired 2026-08-05 (F-163), retest pending (F-165/T-M3-R) |
 
 **[?]** A true ASK-offload-vs-baseline comparison requires a forwarding-mode test (traffic transiting `.185`/`.106` between two other endpoints) — not yet run for the CC-tree paths. The CC Pass-Through and CC-Tree + nf_flowtable numbers above are host-to-host (like §3/§4); the cdx.ko number is forwarding-mode. Add a §10 "Forwarding-mode results" section when that harness is available for the CC-tree paths, rather than conflating it with the host-to-host numbers above.
