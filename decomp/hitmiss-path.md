@@ -6,10 +6,14 @@ Feeds: the months-old ASK2 flow-MISS mystery**
 
 ## Why this matters
 
-Every ASK2 flow currently MISSes on silicon (F-063 keysize / EKFC-order /
-bucket-index / key-comparison candidates, unresolved for months). The
-discriminator is the **EXT_HASH FE's key comparison**. Reading it in the
-microcode turns those candidates from *inferred* to *observed*.
+Flow-HIT was **proven working 2026-07-19** (ASK2 M3+M5 gates on .185) — the
+original MISS was **F-053** (compare must start at DDR record **+8**, past the
+8-byte link header, not +0). The current open MISS (task #26) is a
+regression/config-drift, not a never-solved failure. Reading the discriminator
+in the microcode makes the F-053/F-141/F-163 candidate chain **observed rather
+than inferred** — the walker's `?op_e1 0x0008` immediate already corroborates
+the record+8 key offset. The live confirmation experiment is **E-HM1** in
+`decomp/experiments.md` (uses the known-HIT config as a silicon oracle).
 
 ## The HIT/MISS path (EXT_HASH FE, 6 steps)
 
@@ -99,3 +103,16 @@ Understanding the full HIT/MISS path = **~2 functions** (`bucket_index` +
 `0xce/0xcf` shift, `0xf4/0xf1` DMA, the `brc` conditions), each
 **oracle-confirmable** against observable HIT/MISS behavior. Narrow and
 high-leverage — not the whole ISA.
+
+## Silicon verification (2026-08-08, E-HM1 safe variant)
+
+Engaged the FE-VM ehash path on eth4 and drove the matching flow from .106
+(`decomp/experiments.md` E-HM1 RESULT). **Decomp findings confirmed on
+silicon**: EXT_HASH descriptor `w1=0x0fff0c00` (mask 0x0fff, contextSize=13,
+shift 0); flow in **bucket 0x008 = (sw_crc>>48)&mask** — verifying the
+decomp's `bucket=(hash>>48)&mask` + the `e9&0xffff` mask. **MISS root cause
+found**: HW hash `0x50b43c9c…`→bucket `0x0b4` ≠ SW CRC-64 `0x600824e7…`→
+bucket `0x008` (`pkt_count=0`) — the silicon KG hash isn't the software CRC-64
+(the 2026-07-10 "Candidate 2"), so the frame and the flow land in different
+buckets. The decomp's bucket *math* is correct; the open question moves to the
+KeyGen `kgse_hc`/EKFC config (why the KG hash ≠ CRC-64 on this build).
