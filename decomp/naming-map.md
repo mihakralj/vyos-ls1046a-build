@@ -130,8 +130,12 @@ hard parser strips tags.)
 | 19 | w8669 | `hc_cc_update_aging` (HCOR 0x13, ASK-added) | [FACT] three-way |
 
 Structural anchors (rename by role): w2837 `table_walker`, w8676–w12072
-`aging_walker_loop`, w12133 `frame_epilogue`, w12849 `exit_stub`,
-w9055 region `enq_builder`.
+`aging_walker_loop`, w12133 `frame_epilogue`, w12830–w12850 `pool_status_loop`
+(was `exit_stub` at w12849 — **corrected 2026-08-08**: w12849 `b3fffed6`
+branches back to w12830, it is the loop-back/re-iterate point of the tail
+pool-status refresh loop, not a terminal exit; 12+ branches from w12675–
+w12780 land there as the common guard-failure continue), w9055 region
+`enq_builder`.
 
 ## 4. SDK function names — reference only (NOT microcode symbols)
 
