@@ -10,6 +10,73 @@ dispatch-table attribution).
 
 ---
 
+## 2026-08-08 (later still) — Wedge-mechanism disassembly + key-compare candidate
+
+User asked to find (a) the key-comparison instruction and (b) why the
+microcode wedges, and how to unwedge — via disassembly, not further qdrant
+archaeology. qdrant was still consulted first (per S1) to gather the
+existing kernel-side model to test against: patch 0163
+(`fman_pcd_port_recover`/`fe_recover`) documents a workspace-pool-exhaustion
+wedge mechanism (ring index at per-port params-page **+0x54**, depletion
+counter at **+0x58** — see full mechanism in `decomp/wedge-path.md`), and
+F-168 documents a *different* arm-time wedge fixed by inserting an
+`FMFP_EXTC` SYNC.
+
+**Wedge mechanism — found a strong disassembly-grounded match, with a
+caveat.** A whole-image scan (`FmanWedgeHunt.py`) for the exact patch-0163
+constants found `ld`/`st [0x54]` and `ld`/`st [0x58]` pairs sitting right
+next to each other (`w12830`/`w12832`, `w12836`/`w12838`) inside a
+dedicated straight-line routine at the tail of the 12,851-word image
+(`w12667`–`w12850`, `FmanAllocDealloc.py`) that walks ~22 small offsets
+(`0x08`–`0x60`) with a uniform read/touch/branch/write-back template, after
+first reading three per-frame Internal-Context fields — consistent with a
+per-frame ALLOCATE/DEALLOCATE bookkeeping pass. Caveat: `0x54`/`0x58` get
+the *exact same* template as ~18 neighboring offsets — nothing
+distinguishes them as "the special ring cursor/depletion fields" in the
+instruction stream itself, which either means patch 0163's SDK-derived
+labels are an approximation of a wider table, or the real distinction lives
+in an untraced base-register computation.
+
+**Second, independent finding: a rare hardware trap/halt vector guards this
+routine.** `w12665: br 0x0003fbac` unconditionally jumps to word 65259 —
+outside the 12,851-word image. A full branch-target census
+(`FmanBranchRange.py`) found only 12 such out-of-range targets among 1,446
+total branches (0.8%), all clustered in a 315-word band (65259–65574,
+straddling the 256 KiB mark) — far too tight a cluster to be a decode-model
+bug, and much more likely a hardware-recognized trap/idle vector. It's
+guarded by an unmodeled, not-yet-classified conditional-skip opcode
+(`w12663: 0x2e3f`) sitting directly in front of the pool routine's real
+entry. This supports a **two-tier wedge model**: (1) soft/recoverable —
+ordinary pool-table desync, a legitimate resource-wait with no fault
+latched (matches the documented "silent WAIT" signature exactly), fixable
+by re-seeding the table (what `fe_recover` does, possibly needing to touch
+more than just `+0x54`/`+0x58`); (2) hard/unrecoverable — the guard at
+`w12663` fails and the microcode deliberately jumps to the out-of-range
+trap, which no debugfs write can reach, matching every case where only a
+cold power-cycle (never `fe_recover`, never warm reboot) restored the
+board. This is a hypothesis the disassembly *supports structurally*, not
+yet an oracle-proven fact — no experiment deliberately drove the `w12663`
+guard to watch the trap fire.
+
+**Key-compare — found the best candidate so far, still not confirmed.**
+Extending `ehash_walker`'s window further (`w3096`–`w3500`,
+`FmanKeyCompare.py`) turned up several tight backward loops (5–34 words) —
+a much better shape for a comparison than the DMA-poll-dominated region
+found in the earlier pass. The tightest, `w3304`→`w3309`, reads a fixed
+small address (`op_f0 r3,[0x1b01]`) each iteration and `tst_dc`s the
+result. Nearby loops reuse the same base constants (`0x213d`/`0x2138`),
+consistent with several small per-**field** compare blocks (matching the
+silicon-confirmed MSB-first SIP/DIP/PROTO/SPORT/DPORT extraction order)
+rather than one generic 13-byte memcmp. Plausible, not proven — `tst_dc`'s
+actual operation and what `[0x1b01]` streams from remain unverified.
+
+Full writeup, tables, and follow-up oracle experiments:
+`decomp/wedge-path.md` (new file). `hitmiss-path.md` updated with the
+key-compare candidate. Scripts promoted: `FmanWedgeHunt.py`,
+`FmanAllocDealloc.py`, `FmanBranchRange.py`, `FmanKeyCompare.py`.
+
+---
+
 ## 2026-08-08 (late) — Ghidra disassembly pass on `bucket_index`/`ehash_walker`, re-triggered by the F-053/`hash_bytes_offset` qdrant controversy
 
 User redirected away from a hypothesis (permutation brute-force of the

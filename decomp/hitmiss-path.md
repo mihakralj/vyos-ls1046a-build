@@ -73,6 +73,21 @@ real evidence the record-header-skip mechanism exists in silicon, but
 `hash_bytes_offset` AD-word controversy (see `decomp/findings.md`
 2026-08-08-late for the full writeup, including a self-caught correction).
 
+**2026-08-08 (later, key-compare candidate found):** extending the window
+further (`w3096`–`w3500`, `decomp/ghidra/scripts/FmanKeyCompare.py`) turned
+up several **tight backward loops** (5–34 words) — a much better structural
+match for a compare than the DMA-poll-dominated region above. The tightest,
+`w3304`→`w3309` (5-word body), reads from a fixed small address
+(`op_f0 r3,[0x1b01]`) each iteration and immediately `tst_dc`s the result —
+the right shape for "read next chunk; compare; loop." Two nearby loops
+(`w3316`–`w3339`, `w3311`–`w3345`) **reuse the same base constants**
+(`0x213d`/`0x2138`), consistent with several small per-**field** compare
+blocks (SIP, DIP, PROTO, SPORT, DPORT — matching the silicon-confirmed
+field-based MSB-first extraction) rather than one generic 13-byte memcmp.
+**Not yet oracle-confirmed** — this is the best candidate found so far, not
+a proven answer. Full writeup: `decomp/wedge-path.md` (found during the
+same pass that investigated the microcode wedge mechanism).
+
 ## The encodings on the critical path (what to crack, and status)
 
 | Encoding | Role | Status |
