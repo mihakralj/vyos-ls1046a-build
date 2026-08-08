@@ -154,7 +154,13 @@ points for finding the ehash/CC-hash-table/replicator routines. Slots 11, 16,
 "210-only" label in §12 is about caps-bit gating and driver consumption, not
 absence of code. What it does **not** establish: what any routine does, how
 long it runs, or where it ends. Slot-to-feature attribution is a prioritized
-hypothesis set, not a confirmed mapping.
+hypothesis set, not a confirmed mapping. **(2026-08-07) Slot 19 upgraded to
+high-confidence**: three independent signals agree — structurally 210-only
+slot (this table), its target region byte-unique vs both public blobs
+(absolute target w8669, 21 words inside the 1,615-word unique island
+w8648–w10262; `decomp/maps/`), and the vendor-source opcode name
+(`HC_HCOR_OPCODE_CC_UPDATE_WITH_AGING`, an `[ASK]`-added HC wrapper —
+`arch/fman-function-inventory.md` §2).
 
 **Basic disassembly probes.** Whole-code entropy is 6.29 bits/byte (210) —
 unencrypted, uncompressed fixed-width machine code. Two recurring candidate
@@ -168,6 +174,20 @@ stepping down by 2); 210 arrives from a longer run-up and immediately
 re-instantiates the entire construct a second time — direct, address-level
 evidence of the growth the slot numbers only imply. This confirms manual
 disassembly of the region is tractable; it is not a completed disassembly.
+
+**Follow-up (2026-08-07, decomp program).** Corpus-wide distribution-shape
+analysis revises the two candidate-class guesses above: `0xb3ff`'s low 16
+bits are bimodal (median `0x001b`, plus an `0xffxx` tail) — a
+**relative-branch** shape, not a load-immediate shape (structural proof:
+in the slot-8 construct, `b3ffNNNN` stepping down by 2 while the
+surrounding words step up by 2 keeps `PC+NNNN` constant — every branch in
+the cascade targets the same continuation). And `0xe9c9` occurs only 13
+times blob-wide — locally significant here, not a blob-wide class.
+Separately established: `0xb7df` (285 occurrences, low16 ≈ `0xffff`) reads
+as park/halt stubs; `0x1080` (115×) addresses a tight `0x0843`–`0x087d`
+window (one hot structure); 779 words carry `0xd0xx` context-page addresses
+via the `0x04xx`/`0x1xxx` classes (corroborating the iter-42 context-page
+claim). Full data: `decomp/maps/README.md`; tools: `decomp/tools/`.
 
 Reproduction: `git clone --depth 1 https://github.com/nxp-qoriq/qoriq-fm-ucode.git`;
 pull the running blob via `sudo dd if=/dev/mtd3 of=mtd3-raw.bin bs=1M count=1`
@@ -235,8 +255,15 @@ The microcode blob on SPI `mtd3` (flash offset `0x400000`, 1 MiB partition
 | `0x47` | `count` (microcode sections) | `1` |
 | `0x48–0x49` | `__be16 soc_model` | `0x0413` |
 | `+112` | `u8×3 version` | `0xd2 0x0a 0x01` = 210.10.1 |
+| `length-4 … length` | `__be32 trailer CRC` | `0x961eb941` — raw CRC-32, reflected poly `0xEDB88320`, init `0`, **no** final complement, over `blob[0:length-4]` |
 
 Microcode entry at `code_offset = 244`, `wcount = 12851` (51404 code bytes).
+The 4-byte trailer accounts for the remaining `51652 − 244 − 51404` bytes.
+Its CRC parametrization was solved 2026-08-07 and verifies on all 24 corpus
+blobs (`decomp/tools/qef-parse.py crc`); note the `qe_firmware.rst` formula
+(`crc32(-1, blob, length-4) ^ -1`, i.e. zlib CRC-32) does **not** apply to
+FMan blobs — this is U-Boot `crc32_no_comp(0, …)` style. Details:
+`decomp/01-container.md`.
 After U-Boot loads it, the kernel reads it from the DT property
 `/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware`.
 
@@ -417,9 +444,8 @@ verified against `fman_keygen.c` (the authoritative constant block).
 
 Common targets:
 
-- **5-tuple:** `EKFC = 0x001C0006` = `IPSRC1 | IPDST1 | PTYPE1 | L4PSRC | L4PDST` → 13 bytes.
-- **5-tuple + port ID:** `EKFC = 0x801C0006` → 14 bytes (see §10.5a for the
-  current verdict on whether to use this).
+- **5-tuple:** `EKFC = 0x001C0006` = `IPSRC1 | IPDST1 | PTYPE1 | L4PSRC | L4PDST` → 13 bytes (historical, pre-PORT_ID).
+- **5-tuple + port ID:** `EKFC = 0x801C0006` → 14 bytes — **current target**, HW-confirmed 2026-08-06/07/08 (see §10.5a).
 - **4-tuple (no PTYPE1):** `EKFC = 0x00180006` → 12 bytes. Do not use for
   production: aliases TCP and UDP flows sharing the same IP:port pair (silent
   misforwarding).
@@ -441,7 +467,7 @@ the FE-VM comparator will not HIT.
 scheme makes the parser read random bytes → unpredictable per-frame key. The
 mainline `DEFAULT_HASH_KEY_EXTRACT_FIELDS = 0x00180206` (in `fman_keygen.c`)
 includes bit 9; when `keygen_port_hashing_init()` applies it, the KG hash for
-non-IPsec traffic is nondeterministic. Use `0x001C0006` or `0x00180006`.
+non-IPsec traffic is nondeterministic. Use `0x801C0006` (current target) or `0x00180006`.
 
 ### 4.4 Scheme selection logic
 
@@ -1484,9 +1510,9 @@ MURAM corruption. Fix: arm `FmPortSetFESupport` before any FE-VM activity
 the port-deafness-after-disengage symptom (corruption survived warm reboot,
 required cold boot).
 
-**[SPEC] Verified configuration values.** EXT_HASH FE word1 = `0x7fff0c00` →
-hashMask=`0x7fff`, contextSize-1=`0x0c` (12) → contextSize = 13 = EKFC key
-length ✓. The DDR record is 256 B — ample space for the 13-byte key at
+**[SPEC] Verified configuration values.** EXT_HASH FE word1 = `0x7fff0d00` →
+hashMask=`0x7fff`, contextSize-1=`0x0d` (13) → contextSize = 14 = EKFC key
+length ✓. The DDR record is 256 B — ample space for the 14-byte key at
 offset 8, no DDR access past boundary. Bucket-index formula verified end to
 end (§4.5's worked example).
 
@@ -1497,10 +1523,10 @@ bypassed the FE-VM entirely. Current behavior (F-165, commit `e4f23948`):
 `fe_enter_off==0` → scaffold (CONT_LOOKUP pass-through); `fe_enter_off!=0` →
 RCCB→FE_ENTER direct (FE-VM active).
 
-**[SPEC] EKFC 4th arg confirmed.** `engage 11 0 2B9 1C0006` → dmesg shows
-`ekfc=0x001c0006 (slot->ekfc=0x001c0006)`. The strsep tokenizer correctly
+**[SPEC] EKFC 4th arg confirmed.** `engage 11 0 2B9 801C0006` → dmesg shows
+`ekfc=0x801c0006 (slot->ekfc=0x801c0006)`. The strsep tokenizer correctly
 parses the 4th arg and propagates it through `fman_pcd_kg_port_arm_fe` →
-`keygen_scheme_setup` → `keygen_write_scheme`.
+`keygen_scheme_setup` → `keygen_write_scheme`. **SUPERSEDED NOTE:** The original text documented `1C0006` (13-byte `0x001C0006`). Current target is `801C0006` (14-byte `0x801C0006` with PORT_ID).
 
 ### 10.5a Key format: 13 vs 14 bytes — the PORT_ID question, resolved
 
@@ -1595,22 +1621,9 @@ known value) `kgse_dv0`/`kgse_dv1` in this project's own EKFC-override path,
 then retest — this closes the confound outright, regardless of the still-
 unresolved width/byte-position question.
 
-**[SPEC] Original 2026-07-13 conclusion, still standing as the primary
-recommendation regardless of the above correction:** this branch's
-`fe_ehash` tables are per-scheme, not `shared="true"` across multiple
-ports/schemes the way vendor's are — so there is no FQID collision for
-vendor's real portid mechanism (`<combine>`/extractedOrs, confirmed above)
-to disambiguate in the first place, and no `KG_SCH_KN_PORT_ID` key-extraction
-mechanism to replicate either, once it's understood vendor's actual portid
-byte was never in the *key* to begin with. **Recommendation unchanged: drop
-PORT_ID from the ehash key — revert to the 13-byte
-`SIP|DIP|PROTO|SPORT|DPORT` format (`EKFC=0x001C0006`)**, which remains the
-most rigorously silicon-validated key this project has (hardware CRC-64
-match, independently re-confirmed via the same clean isolated-capture
-method, unique match). F-163 (`f212c701`) should be reverted or gated off
-for the single-port ehash path. The 14-byte/`KG_SCH_KN_PORT_ID` question can
-stay open (now with a clear, actionable resolving experiment above) only if
-someone wants to chase it further before reverting.
+**[SPEC] Original 2026-07-13 conclusion, SUPERSEDED 2026-08-07/08 — do not act on the recommendation below.** The `<combine portid="true".../>` = GEC premise this conclusion rested on was itself wrong: reading vendor's real FMC source (`FMCPCDReader.cpp`/`FMCPCDModel.cpp`/`FMCCModelOutput.cpp`, 2026-08-07) proved `<combine>` builds the KeyGen "extractedOrs"/OR-Data-Vector array (FQID-only), a structurally different mechanism from `KG_SCH_KN_PORT_ID` (EKFC bit 31), which genuinely IS part of the raw comparison key. The 14-byte `PORT_ID|SIP|DIP|PROTO|SPORT|DPORT` format (`EKFC=0x801C0006`, `PORT_ID=0x00` for eth4/port 0x11) is HW-confirmed correct via CRC-64 hash match 3 independent times (2026-08-06 brute force, 2026-08-07 batch test, 2026-08-08 independent re-confirmation). **A properly-EKFC-synced 14-byte key still does not HIT** — PORT_ID/key-format is a CLOSED lead, not the open one. F-163 should NOT be reverted. The original text is preserved below as the historical record.
+
+**[HISTORICAL — 2026-08-06, SUPERSEDED 2026-08-07/08]** Original 2026-07-13 conclusion, still standing as the primary recommendation regardless of the above correction: this branch's `fe_ehash` tables are per-scheme, not `shared="true"` across multiple ports/schemes the way vendor's are — so there is no FQID collision for vendor's real portid mechanism (`<combine>`/extractedOrs, confirmed above) to disambiguate in the first place, and no `KG_SCH_KN_PORT_ID` key-extraction mechanism to replicate either, once it's understood vendor's actual portid byte was never in the *key* to begin with. **Recommendation unchanged: drop PORT_ID from the ehash key — revert to the 13-byte `SIP|DIP|PROTO|SPORT|DPORT` format (`EKFC=0x001C0006`)**, which remains the most rigorously silicon-validated key this project has (hardware CRC-64 match, independently re-confirmed via the same clean isolated-capture method, unique match). F-163 (`f212c701`) should be reverted or gated off for the single-port ehash path. The 14-byte/`KG_SCH_KN_PORT_ID` question can stay open (now with a clear, actionable resolving experiment above) only if someone wants to chase it further before reverting.
 
 ---
 

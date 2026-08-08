@@ -24,7 +24,8 @@
 #   vyos-offload-ask [--port 0x10|0x11] flow-del|flow-list|flow-stats
 #
 # Default keysize=8 (SIP+DIP, EKFC=0x00180000) — safe, won't stall BMI.
-# Use keysize=13 EKFC=001c0006 once keysize=8 HIT is confirmed.
+# Use keysize=14 EKFC=801c0006 (PORT_ID + 5-tuple, HW-confirmed 2026-08-06/07/08)
+# once keysize=8 HIT is confirmed. The old keysize=13 EKFC=001c0006 is superseded.
 
 set -e
 

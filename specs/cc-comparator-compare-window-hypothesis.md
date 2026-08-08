@@ -19,7 +19,7 @@ Gap 2 is the one that has killed every FE-VM-ehash HIT attempt on this project, 
 
 | Claim | Verified how | Scope |
 |---|---|---|
-| EKFC `0x001C0006` (dpaa1) extracts `SIP(4)\|DIP(4)\|PROTO(1)\|SPORT(2)\|DPORT(2)`, MSB-first, 13 bytes | Hardware CRC-64 hash match: `crc64_raw(key)` computed in software over this exact byte sequence matched the KG's own hash output, for two independent live TCP flows (2026-07-13) | **The EHASH/EXT_HASH FE path only** — this is the byte sequence the KG writes to IC offset `0x48`, which the EHASH comparator reads from the FE workspace after `ALLOCATE`. |
+| EKFC `0x801C0006` (dpaa1) extracts `PORT_ID(1)\|SIP(4)\|DIP(4)\|PROTO(1)\|SPORT(2)\|DPORT(2)`, MSB-first, 14 bytes | Hardware CRC-64 hash match: `crc64_raw(key)` computed in software over this exact byte sequence matched the KG's own hash output, for two independent live TCP flows (2026-07-13 for the 5-tuple order; 2026-08-06/07/08 for the PORT_ID prefix) | **The EHASH/EXT_HASH FE path only** — this is the byte sequence the KG writes to IC offset `0x48`, which the EHASH comparator reads from the FE workspace after `ALLOCATE`. PORT_ID = `0x00` for eth4/port 0x11. |
 | CC match-table row format is `key(16B)+mask(16B)`, 32-byte stride, `(numKeys+1)` rows | In-tree `cc_pack_key()` source (dpaa1, `kernel/common/patches/board/0098-fman-pcd-cc-static-install.patch`) + board dump via `fe_scaffold` (F-158, 2026-08-01) showing the live table matches this model exactly, byte-for-byte | **Row structure only** — this says nothing about what content should be inside the 16-byte key field, only how the CC engine expects rows to be laid out in MURAM. |
 | Writing `SIP\|DIP\|PROTO\|SPORT\|DPORT` (the EHASH-validated order) into that key field, with `0xff` mask on 13 bytes, `0x00` on 3 pad bytes | Board-confirmed byte-perfect via `fe_scaffold` dump (F-158) | Confirms **our write matches our model**. Says nothing about whether **our model matches silicon reality** at the CC comparator specifically. |
 | A matching frame dispatches through the CC engine to the FE-VM | **Never observed.** F-157's dedicated-TX-FQ discriminator (2026-08-01) — the first test capable of telling HIT from MISS apart at all — showed a genuine, unambiguous MISS on the byte-perfect build. | — |
@@ -28,7 +28,7 @@ Gap 2 is the one that has killed every FE-VM-ehash HIT attempt on this project, 
 
 ## 3. The hypothesis, stated precisely
 
-> The CC CONT_LOOKUP comparator's 16-byte compare window, for KeyGen scheme `EKFC=0x001C0006`, is populated with a different byte sequence (order, offset, or field set) than what lands at IC offset `0x48` for the EHASH/EXT_HASH FE path — and our match-table content, though byte-perfect against the *wrong* model, has therefore never had a chance to match a real frame.
+> The CC CONT_LOOKUP comparator's 16-byte compare window, for KeyGen scheme `EKFC=0x801C0006`, is populated with a different byte sequence (order, offset, or field set) than what lands at IC offset `0x48` for the EHASH/EXT_HASH FE path — and our match-table content, though byte-perfect against the *wrong* model, has therefore never had a chance to match a real frame.
 
 This hypothesis does **not** claim the FE-VM ehash dispatch mechanism is broken, unreachable, or requires a kernel change beyond the match-table content. It claims a specific, narrow, testable thing: **we don't know what the CC engine actually compares against, and we've been guessing by analogy instead of observing it.**
 
@@ -41,7 +41,7 @@ The ask20 branch hit the identical class of problem on 2026-06-10 (patch `0108-f
 - Fix: rewrite `cc_pack_key()` to emit the actual KG output for their scheme — `[SIP(4)|DIP(4)|SPI(4)=0|SPORT(2)|DPORT(2)]`, 16 bytes — determined by direct silicon observation, not by assumption.
 - Validation: **24M frames matched** in the PR14z22 DROP-miss diagnostic.
 
-**This does not transfer literally.** ask20's `EKFC=0x00180206` is a different KeyGen scheme configuration than dpaa1's `EKFC=0x001C0006` (different field set — theirs includes a zero-filled SPI slot and excludes PROTO; ours includes PROTO and excludes SPI). The specific byte layout `[SIP|DIP|SPI=0|SPORT|DPORT]` is meaningless for our scheme.
+**This does not transfer literally.** ask20's `EKFC=0x00180206` is a different KeyGen scheme configuration than dpaa1's `EKFC=0x801C0006` (different field set — theirs includes a zero-filled SPI slot and excludes PROTO; ours includes PORT_ID and PROTO and excludes SPI). The specific byte layout `[SIP|DIP|SPI=0|SPORT|DPORT]` is meaningless for our scheme.
 
 **What transfers is the method:** don't assume any fixed layout — not the old "canonical" one, and not the EHASH-validated one either, however tempting the analogy — **observe what the KG scheme actually emits toward the CC comparator, for this specific EKFC configuration, on this specific silicon.**
 
@@ -49,8 +49,8 @@ The ask20 branch hit the identical class of problem on 2026-06-10 (patch `0108-f
 
 Not yet run. Estimated cost: one board session, using tooling that already exists.
 
-1. Extend `fe_scaffold` (F-158, `bin/kernel-fixups/F_158.py`) — or complete the 2026-07-12 "annotation-hash-match" technique, proposed but never finished — to capture the raw bytes arriving at the CC engine's compare input for a live frame under `EKFC=0x001C0006`, independent of and prior to any FE-VM entry.
-2. Diff against what's currently written to the match table (known from F-158: `0a 63 01 6a 0a 63 01 b9 06 14 51 d9 03 00 00 00`, mask `ff×13 00×3`).
+1. Extend `fe_scaffold` (F-158, `bin/kernel-fixups/F_158.py`) — or complete the 2026-07-12 "annotation-hash-match" technique, proposed but never finished — to capture the raw bytes arriving at the CC engine's compare input for a live frame under `EKFC=0x801C0006`, independent of and prior to any FE-VM entry.
+2. Diff against what's currently written to the match table (known from F-158: `0a 63 01 6a 0a 63 01 b9 06 14 51 d9 03 00 00 00`, mask `ff×13 00×3`). **Note:** this match-table content reflects the old 13-byte `0x001C0006` layout; the current target is 14-byte `0x801C0006` with PORT_ID prefix.
 3. **If they match:** the layout hypothesis is refuted. The CC engine sees the right bytes and still doesn't dispatch — the defect is elsewhere (group/AD table addressing, dispatch-stage logic, or something not yet modeled), and warrants a fresh, narrower investigation independent of this document.
 4. **If they don't match:** write the observed layout to the match table and re-run the F-157 dedicated-TX-FQ discriminator. A genuine HIT would confirm the hypothesis and be new information — a 13-byte, non-vendor EKFC scheme successfully dispatching through FE-VM ehash, which nothing on this project has ever achieved.
 
@@ -71,7 +71,7 @@ Phase 0 of the `.106` oracle plan has been executed. The live `/etc/cdx_pcd.xml`
 <combine portid="true" offset="16" mask="0xF"/>
 ```
 
-That's `SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2)` = 13 bytes — **the identical field set, in the identical order**, to dpaa1's `EKFC=0x001C0006`. This is a real data point against the "field order is silently different at the CC comparator" hypothesis as originally framed: on a *working* system, the declared/extraction order for this exact field set is exactly what dpaa1 has been writing to the match table. It does not prove the CC comparator sees this order — that still requires Phase 2/3 of the oracle plan (a live MURAM/hash-table dump) — but it removes "our order is probably just wrong" as the most likely explanation.
+That's `SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2)` = 13 bytes — **the identical field set, in the identical order**, to dpaa1's old `EKFC=0x001C0006` (pre-PORT_ID). This is a real data point against the "field order is silently different at the CC comparator" hypothesis as originally framed: on a *working* system, the declared/extraction order for this exact field set is exactly what dpaa1 has been writing to the match table. It does not prove the CC comparator sees this order — that still requires Phase 2/3 of the oracle plan (a live MURAM/hash-table dump) — but it removes "our order is probably just wrong" as the most likely explanation. **Note:** the current target EKFC is `0x801C0006` (14 bytes with PORT_ID prefix), not `0x001C0006`.
 
 **What it surfaces instead:** `keysize="14"`, not 13. The 14th byte comes from `<combine portid="true" offset="16" mask="0xF"/>` — NXP appends a 4-bit physical-port-ID discriminator, **because this hash table is `shared="true"` across multiple physical RX ports**. Confirmed by checking dpaa1's own code (`bin/kernel-fixups/F_090.py`/`F_092.py`, `pcd->fe_vm_chain_built`): the FE-VM chain — including the CC group/match/AD table this whole investigation centers on — is built **once per `pcd`, not once per port**, and reused across every port that engages. Structurally, dpaa1 has the identical sharing pattern NXP's production config has, but without NXP's port-ID disambiguation byte.
 

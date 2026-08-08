@@ -1,13 +1,35 @@
 # Frame Manager (FMan v3) — Internals, Ports, mEMAC
 
-**Version 2.1 · HADS 1.0.0**
+**Version 2.2 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
 This is the FMan v3 PLUMBING doc (BMI, QMI, FPM, DMA, ports, mEMAC). For the *classification*
 pipeline (Parser, KeyGen, Coarse Classifier, Policer, Manip) see [`fman-pcd.md`](fman-pcd.md).
 
-**Architecture-status banner (2026-08-01):** The SHIPPING HW-offload forward path is **CC-tree
+**Architecture-status banner (2026-08-05, supersedes the 2026-08-01 banner below):** the "FE-VM
+ehash is RETIRED / not the vendor architecture" verdict is **partially REFUTED**. Reading the
+genuine deployed vendor `cdx.ko` driver (`cdx_ehash.c`/`cdx_common.h`, nxp-sdk branch, board
+`.106`'s actual running image — not the stubbed lf-6.6.y/lf-5.4 SDK archives the 08-01 verdict
+relied on) shows the vendor's real production classification path **is** external-hash:
+`cmm` inserts every accelerated flow via `insert_entry_in_classif_table()` → `fill_key_info()` →
+`ExternalHashTableAddKey()` (F-163, commit `f212c701`). The vendor key format is
+`portid(1B)|SIP|DIP|PROTO|SPORT|DPORT` = **14 bytes** (`union dpa_key`); this branch's key builder
+gained the missing PORT_ID prefix (EKFC `0x801C0006`). **Current reality:** neither dispatch path
+has a confirmed hardware HIT on this branch — the F-163 live test was byte-correct end-to-end but
+still MISSed, and F-165 (commit `e4f23948`) then proved that test never exercised the ehash chain
+at all (F-091's CONT_LOOKUP scaffold unconditionally overwrote the caller's `fe_enter_off`;
+`fmbm_rccb` read back the scaffold offset, not the built FE_ENTER AD). A retest with F-165 in
+place is the immediate open step. The CC-tree track is separately stalled: five vendor-verified
+register fixes (F-159–F-162) still produced RX-silence — `cc_test`'s architecture itself is the
+problem (`.106` vendor stack survived 400+ classified frames where `.185`'s `cc_test` froze within
+17–30). Still-standing caveats: the ~1.5 Gbps DDR-per-frame ceiling claim is unmeasured against
+real vendor traffic, and M5's 10.259 Gbps most likely measured kernel SW forwarding
+(`no-confirmed-hw-hit-ever`). Full status: `arch/fman-fe-ehash.md` (un-retirement banner),
+`arch/fman-microcode-210-programming-reference.md` §10.5a, `plans/ASK2-MASTER-PLAN.md` top banners.
+
+**Architecture-status banner (2026-08-01, SUPERSEDED above — kept for history):** The SHIPPING
+HW-offload forward path is **CC-tree
 classification + kernel SW flowtable + manip-chain forwarding** (M2 7.37 Gbps pass-through, M5
 10.259 Gbps CC-tree+nf_flowtable, NXP cdx.ko 8.58 Gbps). The **FE-VM ehash HIT path (Fork-B, the
 FE/EXT_HASH family)** is RETIRED/EXPERIMENTAL — it never worked at production throughput (~1.5 Gbps
@@ -246,8 +268,10 @@ XFI/10GBASE-KR, see [`serdes-ethernet.md`](serdes-ethernet.md).
 
 ## 9. ASK2 relevance
 
-**[SPEC]** The shipping ASK2 forward path is **CC-tree + kernel SW flowtable + manip chain**.
-The FE-VM ehash HIT path (Fork-B) is retired/experimental — see banner above.
+**[SPEC]** The ASK2 forward-path architecture is **under re-litigation as of 2026-08-05** — see the
+banner above. The 2026-08-01 position (CC-tree + kernel SW flowtable + manip chain shipping, FE-VM
+ehash retired) lost its "not vendor architecture" leg to F-163; neither path currently has a
+confirmed hardware HIT on this branch.
 
 | FMan facility | Why ASK2 cares |
 |---|---|
