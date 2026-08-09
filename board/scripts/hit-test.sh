@@ -77,7 +77,7 @@ echo ""
 # Step 3: Verify EXT_HASH contextSize
 echo "--- Step 3: Verify EXT_HASH w1 (contextSize) ---"
 w1_line=$(cat "$PCD/fe_hashfe" | grep "hash_fe")
-w1=$(echo "$w1_line" | awk '{print $3}')
+w1=$(echo "$w1_line" | awk '{print $4}')  # $1=label $2=off=... $3=word0(type) $4=word1(hashMask|ctxSize|shift)
 cs=$(( (0x$w1 >> 8) & 0xFF ))
 cs_actual=$((cs + 1))
 echo "EXT_HASH w1=0x$w1 → contextSize-1=$cs → contextSize=$cs_actual"
