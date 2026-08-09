@@ -1,27 +1,30 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
-Date: Sun, 9 Aug 2026 20:35:00 +0000
-Subject: [PATCH] fman_pcd: cc_test leaf-fe verb — CC group tree with FE_ENTER AD as match leaf (F-182)
+Date: Sun, 9 Aug 2026 21:05:00 +0000
+Subject: [PATCH] fman_pcd: cc_test install optional FE_ENTER match leaf (F-182)
 
 Implements the vendor .106 RCCB-target topology (E-HM15 2026-08-09): the
 port classification root is a CC group tree whose match-leaf AD IS the
-FE_ENTER AD, not the bare FE_ENTER AD pointed at directly as the FMBM_RCCB
-root (the form that stalls the frame parser, fmfp_ps 0x80800000).  The CC
-walker dispatches matching frames into FE_ENTER -> EXT_HASH -> ehash chain.
+FE_ENTER AD, not the bare FE_ENTER AD as the FMBM_RCCB root (the form
+that stalls the frame parser, fmfp_ps 0x80800000).  The CC walker
+dispatches matching frames into FE_ENTER -> EXT_HASH -> ehash.
 
-The new debugfs verb copies the FE_ENTER AD four words (fits CC_AD_ENTRY_SIZE)
-from MURAM into the installed tree AD-table row 0:
+cc_test install gains an optional 8th arg fe_off_hex: when present, the
+match-leaf AD row 0 is overwritten with the FE_ENTER AD 4 words BEFORE
+the tree goes live (attach_cc), because a raw overwrite of the AD table
+AFTER attach_cc faults the live-walked FMan structure without the RM
+5.12.14.1 FMFP_EXTC sync protocol (observed: board watchdog-reset on
+the initial leaf-fe-after-install design, 2026-08-09).
 
-  cc_test install <port> <qband> <proto> <sip> <dip> <dport> [fqid-hex]
-  cc_test leaf-fe <port_hex> <fe_enter_off_hex>
+  cc_test install <port> <qband> <proto> <sip> <dip> <dport> [fqid] [fe_off_hex]
 
 Board test (frame-2, E-HM8-correct): build FE chain + flow, then
-install+leaf-fe, then send the matching SYN and check fe_ehash_stats
-pkt_count vs the fmfp_ps stall.
+install with fe_off, send matching SYN, check fe_ehash_stats pkt_count
+vs the fmfp_ps stall.
 
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
-index 6d88d1a..7028723 100644
+index 6d88d1a..f0c8358 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
 @@ -36,6 +36,7 @@
@@ -40,77 +43,97 @@ index 6d88d1a..7028723 100644
  #include "fman_pcd_internal.h"
  #include "fman_port.h"
  
-@@ -139,6 +141,62 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+@@ -66,17 +68,20 @@ static int cc_test_open(struct inode *inode, struct file *file)
+ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ {
+ 	struct fman_pcd_cc_hw_spec *spec;
++	struct muram_info *muram;
++	void __iomem *group, *ad, *fe;
+ 	char src_str[40], dst_str[40];
+-	u32 src_ip, dst_ip, cc_base;
++	u32 src_ip, dst_ip, cc_base, ad_off;
+ 	struct fman_port *rxport;
+-	u32 fqid = 0;
++	u32 fqid = 0, fe_off = 0;
+ 	u8 port_id, proto;
+ 	u16 qband, dport;
+-	int n, err;
++	int n, err, i;
+ 
+-	n = sscanf(args, "install %hhi %hu %hhu %39s %39s %hu %x",
+-		   &port_id, &qband, &proto, src_str, dst_str, &dport, &fqid);
+-	if (n != 6 && n != 7)
++	n = sscanf(args, "install %hhi %hu %hhu %39s %39s %hu %x %x",
++		   &port_id, &qband, &proto, src_str, dst_str, &dport, &fqid,
++		   &fe_off);
++	if (n != 6 && n != 7 && n != 8)
+ 		return -EINVAL;
+ 
+ 	if (qband > 3 || !(proto == 6 || proto == 17))
+@@ -113,6 +118,47 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 	if (err)
+ 		return err;
+ 
++	/*
++	 * F-182 (RCCB-target, optional 8th arg fe_off_hex): overwrite the
++	 * match-leaf AD row 0 with the FE_ENTER AD's four words BEFORE the
++	 * tree goes live (attach_cc below).  Implements the vendor .106
++	 * topology (E-HM15): RCCB -> CC group tree -> match leaf IS the
++	 * FE_ENTER-form AD, instead of the bare FE_ENTER AD as the RCCB root
++	 * (the form that stalls the frame parser, fmfp_ps 0x80800000).
++	 *
++	 * The FE_ENTER AD is exactly 4 words (CC_AD_ENTRY_SIZE == 16) so it
++	 * fits the CC AD-table row verbatim.  Writing it here, pre-live, is
++	 * mandatory: a raw overwrite of the AD table AFTER attach_cc (the
++	 * tree is a live-walked FMan structure) faults the FMan controller
++	 * without the RM 5.12.14.1 FMFP_EXTC sync protocol (observed: board
++	 * watchdog-reset, 2026-08-09).
++	 */
++	if (fe_off) {
++		err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++		if (err)
++			goto out_destroy;
++		muram = fman_get_muram(fman_pcd_get_fman(pcd));
++		if (!muram) {
++			err = -ENXIO;
++			goto out_destroy;
++		}
++		group = (void __iomem *)fman_muram_offset_to_vbase(muram,
++								   cc_base);
++		/* group[0].word1 = AD-table MURAM offset (RM 8.7.4.1). */
++		ad_off = ioread32be((u32 __iomem *)((u8 __iomem *)group + 4));
++		ad_off &= 0xFFFFFF;
++		if (!ad_off) {
++			err = -EINVAL;
++			goto out_destroy;
++		}
++		ad = (void __iomem *)fman_muram_offset_to_vbase(muram, ad_off);
++		fe = (void __iomem *)fman_muram_offset_to_vbase(muram, fe_off);
++		for (i = 0; i < 4; i++)
++			iowrite32be(ioread32be((u32 __iomem *)((u8 __iomem *)fe +
++								 4 * i)),
++				    (u32 __iomem *)((u8 __iomem *)ad + 4 * i));
++	}
++
+ 	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
+ 	if (!err) {
+ 		rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
+@@ -128,14 +174,16 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 		if (err)
+ 			(void)fman_port_set_cc_base(rxport, 0);
+ 	}
++out_destroy:
+ 	if (err) {
+ 		fman_pcd_cc_static_destroy(pcd, port_id);
+ 		return err;
+ 	}
+ 
+-	pr_info("fman_pcd cc_test: port 0x%02x tree installed, FMBM_RCCB bound to 0x%x, KG CC-dispatched, key fqid 0x%x%s\n",
++	pr_info("fman_pcd cc_test: port 0x%02x tree installed, FMBM_RCCB bound to 0x%x, KG CC-dispatched, key fqid 0x%x%s%s\n",
+ 		port_id, cc_base, fqid,
+-		fqid ? " (hardware enqueue-AD)" : " (soft fall-through)");
++		fqid ? " (hardware enqueue-AD)" : " (soft fall-through)",
++		fe_off ? " (FE_ENTER match leaf)" : "");
  	return 0;
  }
  
-+/*
-+ * F-182 (RCCB-target): overwrite the installed tree's match-leaf AD row 0
-+ * with the FE_ENTER AD's four words (read live from MURAM at <fe_off_hex>).
-+ *
-+ * Implements the vendor .106 topology (E-HM15, 2026-08-09): the port's
-+ * classification root is a CC group tree whose match leaf IS the
-+ * FE_ENTER-form AD (FillAdOfTypeContLookup externalHash) — NOT the bare
-+ * FE_ENTER AD pointed at directly as the FMBM_RCCB root, which is the form
-+ * that stalls the frame parser (fmfp_ps 0x80800000, E-HM8/E-HM15).  The CC
-+ * walker dispatches matching frames into FE_ENTER -> EXT_HASH -> ehash.
-+ *
-+ * The FE_ENTER AD is exactly 4 words (CC_AD_ENTRY_SIZE == 16), so it fits
-+ * the CC AD-table row verbatim: word0 CONT_LOOKUP|NIA_ORDER_RESTOR, word2
-+ * context size, word3 next-FE MURAM offset.
-+ *
-+ * Prerequisite: `cc_test install ...` for the same port (builds the tree +
-+ * attach_cc).  Reads ad_off back from group[0].word1 (RM 8.7.4.1).
-+ */
-+static int cc_test_leaf_fe(struct fman_pcd *pcd, const char *args)
-+{
-+	struct muram_info *muram;
-+	void __iomem *group, *ad, *fe;
-+	u8 port_id;
-+	u32 fe_off, cc_base, ad_off;
-+	int n, err, i;
-+
-+	n = sscanf(args, "leaf-fe %hhi %x", &port_id, &fe_off);
-+	if (n != 2)
-+		return -EINVAL;
-+
-+	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
-+	if (err)
-+		return err;
-+
-+	muram = fman_get_muram(fman_pcd_get_fman(pcd));
-+	if (!muram)
-+		return -ENXIO;
-+
-+	group = (void __iomem *)fman_muram_offset_to_vbase(muram, cc_base);
-+	/* group[0].word1 = AD-table MURAM offset (RM 8.7.4.1). */
-+	ad_off = ioread32be((u32 __iomem *)((u8 __iomem *)group + 4));
-+	ad_off &= 0xFFFFFF;
-+	if (!ad_off)
-+		return -EINVAL;
-+
-+	ad = (void __iomem *)fman_muram_offset_to_vbase(muram, ad_off);
-+	fe = (void __iomem *)fman_muram_offset_to_vbase(muram, fe_off);
-+	for (i = 0; i < 4; i++)
-+		iowrite32be(ioread32be((u32 __iomem *)((u8 __iomem *)fe + 4 * i)),
-+			    (u32 __iomem *)((u8 __iomem *)ad + 4 * i));
-+
-+	pr_info("fman_pcd cc_test: port 0x%02x AD row0 <- FE_ENTER@0x%x (group 0x%x ad 0x%x)\n",
-+		port_id, fe_off, cc_base, ad_off);
-+	return 0;
-+}
-+
- static ssize_t cc_test_write(struct file *file, const char __user *buf,
- 			     size_t count, loff_t *ppos)
- {
-@@ -174,6 +232,10 @@ static ssize_t cc_test_write(struct file *file, const char __user *buf,
- 		ret = cc_test_install(pcd, kbuf);
- 		if (ret == 0)
- 			ret = count;
-+	} else if (strncmp(kbuf, "leaf-fe ", 8) == 0) {
-+		ret = cc_test_leaf_fe(pcd, kbuf);
-+		if (ret == 0)
-+			ret = count;
- 	} else {
- 		ret = -EINVAL;
- 	}
