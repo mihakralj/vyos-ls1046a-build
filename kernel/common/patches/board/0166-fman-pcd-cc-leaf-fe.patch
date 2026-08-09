@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
-Date: Sun, 9 Aug 2026 21:05:00 +0000
-Subject: [PATCH] fman_pcd: cc_test install optional FE_ENTER match leaf (F-182)
+Date: Sun, 9 Aug 2026 21:30:00 +0000
+Subject: [PATCH] fman_pcd: cc_test install optional FE_ENTER match leaf, pre-live (F-182)
 
 Implements the vendor .106 RCCB-target topology (E-HM15 2026-08-09): the
 port classification root is a CC group tree whose match-leaf AD IS the
@@ -11,10 +11,14 @@ dispatches matching frames into FE_ENTER -> EXT_HASH -> ehash.
 
 cc_test install gains an optional 8th arg fe_off_hex: when present, the
 match-leaf AD row 0 is overwritten with the FE_ENTER AD 4 words BEFORE
-the tree goes live (attach_cc), because a raw overwrite of the AD table
-AFTER attach_cc faults the live-walked FMan structure without the RM
-5.12.14.1 FMFP_EXTC sync protocol (observed: board watchdog-reset on
-the initial leaf-fe-after-install design, 2026-08-09).
+the tree goes live (attach_cc).
+
+v3 fix: ad_off is read from group[0].word0 low24 (0115 SDK CONT_LOOKUP
+layout: word0 = CONT_LOOKUP|(keylen-1)<<24|ad_off, word1 =
+num_keys<<24|LCL_MASK|match_off).  v1/v2 read word1&0xFFFFFF which is
+match_off with the LCL_MASK bit 0x800000 ORd in -> unmapped write ->
+kernel oops (the v1 watchdog was the same oops, panic=60 looked like a
+watchdog remotely; FMFP_EXTC live-write was NOT the cause).
 
   cc_test install <port> <qband> <proto> <sip> <dip> <dport> [fqid] [fe_off_hex]
 
@@ -24,7 +28,7 @@ vs the fmfp_ps stall.
 
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
-index 6d88d1a..f0c8358 100644
+index 6d88d1a..8a7e069 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
 @@ -36,6 +36,7 @@
@@ -70,7 +74,7 @@ index 6d88d1a..f0c8358 100644
  		return -EINVAL;
  
  	if (qband > 3 || !(proto == 6 || proto == 17))
-@@ -113,6 +118,47 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+@@ -113,6 +118,48 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
  	if (err)
  		return err;
  
@@ -100,8 +104,9 @@ index 6d88d1a..f0c8358 100644
 +		}
 +		group = (void __iomem *)fman_muram_offset_to_vbase(muram,
 +								   cc_base);
-+		/* group[0].word1 = AD-table MURAM offset (RM 8.7.4.1). */
-+		ad_off = ioread32be((u32 __iomem *)((u8 __iomem *)group + 4));
++		/* group[0].word0 low24 = AD-table MURAM offset (0115 SDK
++		 * CONT_LOOKUP layout; word1 carries match_off|LCL_MASK). */
++		ad_off = ioread32be((u32 __iomem *)group);
 +		ad_off &= 0xFFFFFF;
 +		if (!ad_off) {
 +			err = -EINVAL;
@@ -118,7 +123,7 @@ index 6d88d1a..f0c8358 100644
  	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
  	if (!err) {
  		rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
-@@ -128,14 +174,16 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+@@ -128,14 +175,16 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
  		if (err)
  			(void)fman_port_set_cc_base(rxport, 0);
  	}
