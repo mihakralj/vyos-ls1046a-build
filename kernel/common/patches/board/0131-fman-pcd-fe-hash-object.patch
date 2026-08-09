@@ -181,7 +181,7 @@ index 0df6585..0fb8c0a 100644
 +		return -EEXIST;
 +	if (!pcd->fe_mux_off || !pcd->fe_exit_off)
 +		return -ENXIO;			/* build the singletons first */
-+	t = list_first_entry_or_null(&pcd->fe_ehash_tables,
++	t = list_last_entry_or_null(&pcd->fe_ehash_tables,
 +				     struct fman_pcd_ehash_table, node);
 +	if (!t)
 +		return -ENXIO;			/* set an ehash table first */
