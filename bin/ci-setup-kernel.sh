@@ -1044,24 +1044,39 @@ PATCH_FALLBACK_LIST=""
 for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); do
     pname=$(basename "$patch")
     echo "I: Apply Kernel patch: $patch"
-    if ! git apply --3way --whitespace=nowarn "$patch" 2>/tmp/_apply_stderr; then
-        echo "::error::Kernel patch FAILED to apply (git apply --3way): $pname" >&2
-        PATCH_FAIL=$((PATCH_FAIL + 1))
-        PATCH_FAIL_LIST="$PATCH_FAIL_LIST $pname"
-    else
+    APPLIED=0
+    if git apply --3way --whitespace=nowarn "$patch" 2>/tmp/_apply_stderr; then
+        APPLIED=1
         # Detect silent 3-way fallback — patch landed but with drifted context
         if grep -q "Falling back to three-way merge" /tmp/_apply_stderr; then
             echo "::warning::3-way-fallback: $pname applied via 3-way merge (context drifted)" >&2
             PATCH_FALLBACK_COUNT=$((PATCH_FALLBACK_COUNT + 1))
             PATCH_FALLBACK_LIST="$PATCH_FALLBACK_LIST $pname"
         fi
+    else
+        # Fall back to legacy patch -p1 when --3way fails (e.g. missing blobs
+        # in a fresh shallow cache).  This is a one-time bootstrap path: once
+        # the cache accumulates blobs from a successful build, subsequent
+        # builds will use the safer --3way path.
+        echo "::warning::git apply --3way failed for $pname — falling back to patch -p1" >&2
+        if patch -p1 -s -t --no-backup-if-mismatch < "$patch" 2>/dev/null; then
+            APPLIED=1
+            echo "::warning::patch -p1 fallback succeeded for $pname (cache will be seeded for next build)" >&2
+            PATCH_FALLBACK_COUNT=$((PATCH_FALLBACK_COUNT + 1))
+            PATCH_FALLBACK_LIST="$PATCH_FALLBACK_LIST $pname(fallback)"
+        else
+            echo "::error::Kernel patch FAILED to apply (both git apply --3way and patch -p1): $pname" >&2
+            PATCH_FAIL=$((PATCH_FAIL + 1))
+            PATCH_FAIL_LIST="$PATCH_FAIL_LIST $pname"
+        fi
+    fi
+    if [ "$APPLIED" -eq 1 ]; then
         # Commit each successfully-applied patch so that subsequent patches'
         # `git apply --3way` sees the cumulative on-disk state as their merge
         # base. Without this commit step, every patch re-bases against the
         # original pristine commit and effectively falls through to a plain
         # direct apply that requires exact context match — which fails after
-        # earlier patches have shifted line numbers (e.g. 1060's context in
-        # fman_pcd.c after 1044's pre-netdev-hook insertions).
+        # earlier patches have shifted line numbers.
         git -c user.email=ci@local -c user.name=ci add -A
         git -c user.email=ci@local -c user.name=ci commit -q --allow-empty -m "applied: $pname" || true
     fi
