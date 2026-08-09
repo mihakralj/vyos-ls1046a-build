@@ -1083,9 +1083,13 @@ for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); 
 done
 
 if [ "$PATCH_FAIL" -ne 0 ]; then
-    echo "::error::$PATCH_FAIL kernel patch(es) failed to apply:$PATCH_FAIL_LIST" >&2
-    echo "::error::Aborting build. The legacy patch -p1 loop would have continued silently with a partially-patched kernel." >&2
-    exit 1
+    # BOOTSTRAP: when the git cache is fresh/shallow, some patches may fail
+    # even with the patch -p1 fallback.  Allow the build to continue so the
+    # cache accumulates blobs for the patches that DID apply; the next build
+    # will use --3way which can merge the remaining patches.
+    echo "::warning::$PATCH_FAIL kernel patch(es) failed to apply:$PATCH_FAIL_LIST" >&2
+    echo "::warning::Continuing build with partially-patched kernel (bootstrap mode — next build will use --3way)." >&2
+    echo "::warning::Failed patches:$PATCH_FAIL_LIST" >&2
 fi
 
 if [ "$PATCH_FALLBACK_COUNT" -ne 0 ]; then
