@@ -1,0 +1,56 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+index 8a7e0695f..ebd949d88 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -160,6 +160,51 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 				    (u32 __iomem *)((u8 __iomem *)ad + 4 * i));
+ 	}
+ 
++	/*
++	 * F-183 (2026-08-09): the CC CONT_LOOKUP comparator compares the
++	 * KeyGen-EXTRACTED composite at IC byte 0x50 (CC_IC_KG_KEY_OFFSET),
++	 * 16 bytes.  With the FE-VM harness EKFC 0x801c0006 the extraction
++	 * is 14 bytes: PORT_ID(1)|SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2),
++	 * so the window starts with the PORT_ID byte (0x00).  The 0115 match
++	 * key cc_pack_key() emits is packed for the 12-byte mainline RSS
++	 * EKFC 0x00180006 (SIP|DIP|SPORT|DPORT) and can never match this
++	 * window: byte0 = PORT_ID(0x00) vs key SIP[0](0x0a), mask 0xff ->
++	 * permanent CC miss -> frames never reach the FE_ENTER leaf.  Pack
++	 * match row 0 in the 14-byte EKFC window layout, pre-live (same
++	 * rule as the F-182 AD row above).
++	 */
++	if (fe_off) {
++		u8 key16[16] = { 0 }, msk16[16] = { 0 };
++		void __iomem *match;
++		u32 match_off;
++
++		match_off = ioread32be((u32 __iomem *)group + 1);
++		match_off &= 0x7FFFFF;	/* strip numKeys<<24 and LCL_MASK */
++		if (!match_off) {
++			err = -EINVAL;
++			goto out_destroy;
++		}
++		match = (void __iomem *)fman_muram_offset_to_vbase(muram,
++								    match_off);
++		key16[0] = 0x00; msk16[0] = 0xff;	/* PORT_ID = 0 */
++		memcpy(&key16[1], &src_ip, 4);		/* SIP, net order */
++		memset(&msk16[1], 0xff, 4);
++		memcpy(&key16[5], &dst_ip, 4);		/* DIP, net order */
++		memset(&msk16[5], 0xff, 4);
++		key16[9] = proto; msk16[9] = 0xff;	/* PROTO */
++		/* bytes 10-11 SPORT: wildcard (mask 0) - ehash is exact */
++		{
++			u16 dp = cpu_to_be16(dport);
++			memcpy(&key16[12], &dp, 2);
++			msk16[12] = msk16[13] = 0xff;
++		}
++		/* bytes 14-15: pad, wildcard */
++		for (i = 0; i < 16; i++) {
++			iowrite8(key16[i], (u8 __iomem *)match + i);
++			iowrite8(msk16[i], (u8 __iomem *)match + 16 + i);
++		}
++	}
++
+ 	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
+ 	if (!err) {
+ 		rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
