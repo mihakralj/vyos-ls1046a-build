@@ -270,3 +270,5 @@
 0163-fman-pcd-port-recover.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0165-fman-pcd-fe-arm-ensure-params-page.patch

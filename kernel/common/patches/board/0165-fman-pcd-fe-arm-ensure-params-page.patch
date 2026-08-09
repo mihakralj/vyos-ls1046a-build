@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Sun, 9 Aug 2026 09:30:00 +0000
+Subject: [PATCH] fman-pcd: ensure FM_CTL params page in __fman_pcd_fe_arm_engage (F-180)
+
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 8958b304d..50ff1dcad 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2310,6 +2310,28 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 		}
+ 	}
+ 
++	/*
++	 * F-180: FE_ENTER ALLOCATE requires a valid FM_CTL params page.
++	 * The production path (fman_pcd_fe_engage) ensures it before
++	 * calling us, but the debugfs fe_arm harness does not — without
++	 * it, ALLOCATE performs RMW bookkeeping at MURAM offset 0 and
++	 * carves per-frame workspaces at garbage offsets, corrupting
++	 * MURAM cumulatively (permanent port RX wedge after frame 1).
++	 * Idempotent: no-op when the port already has a params page
++	 * (F-072, patch 0164).
++	 */
++	{
++		struct fman *fman = fman_pcd_get_fman(pcd);
++		struct fman_port *rxport = fman_port_lookup_rx(fman,
++							       (u8)port_id);
++
++		if (!rxport)
++			return -ENODEV;
++		err = fman_pcd_port_ensure_params_page(pcd, rxport);
++		if (err)
++			return err;
++	}
++
+ 	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
+ 				      (u32)fe_enter_off, &saved_engine, ekfc);
+ 	if (err)
