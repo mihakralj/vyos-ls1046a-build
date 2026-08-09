@@ -2121,9 +2121,21 @@ fi
 # produced a clean MISS via a real fqid-redirect HIT/MISS test. Switches
 # to next_engine=3, the real AC_CC encoding already used by the FE-VM arm
 # path (patch 0133) but never wired into the CC-tree graft path until now.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
+#
+# DISABLED (F-184, 2026-08-09): the AC_CC flip is a REGRESSION, not a fix.
+# With AC_CC (next_engine=3, mode 0x80000006, CCBS=0) a frame that reaches
+# KG scheme4 (spc++) never produces a CC match against THIS branch's
+# CONT_LOOKUP tree (w1 = numKeys<<24|LCL_MASK|match_off) -- the 210 ref
+# 7.11a vendor-group-table audit shows AC_CC expects the vendor .106
+# encoding (w1 = hash/CRC config, w2 = parse-code family, w3 ~ KG-direct
+# NIA, keysize direct). Observed twice (F-182 v3, F-183): pkt_count=0,
+# FE pool mgmt cursor frozen, netdev frozen, no errors. The committed
+# HEAD form (next_engine=2, CCBS = group offset, 24M+ frames through CC
+# match per fman_keygen.c CC chaining comment) is restored by disabling
+# this fixup. F-162 (KG-direct rfpne) remains active.
+if false; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_160.py" 2>&1
-    echo "### fman_pcd_kg.c: F-160 CC-tree graft real-AC_CC NIA fix"
+    echo "### fman_pcd_kg.c: F-160 CC-tree graft real-AC_CC NIA fix (DISABLED by F-184)"
 fi
 
 # F-161 (2026-08-05, CC-Tree Rebuild Plan Phase 1 board test): supersedes
