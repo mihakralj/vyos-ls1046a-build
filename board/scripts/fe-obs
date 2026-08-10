@@ -1,0 +1,155 @@
+#!/bin/bash
+# fe-obs - FE-VM execution observation harness (0169 canary + dispatch audit)
+#
+# Makes the EXT_HASH comparator's execution observable from the host.  The
+# comparator-input audit (2026-08-10) verified hash/bucket/record/chain are
+# byte-perfect yet pkt_count=0 - the gap is FE dispatch / comparator
+# execution, which no existing signal observes (record stats can never move:
+# flow records are 256 B, SDK stores stats at +256, hashfe word0 has no
+# UPDATE_STATS flag).
+#
+# Verdict model (3-way, mutually exclusive):
+#   A) never dispatched   - frame reaches KeyGen (scheme spc++) but is
+#                           delivered via the tree miss row (rx tracks spc)
+#                           and NEVER enters the hashfe.  Both canary FQs
+#                           silent, pkt_count=0.
+#   B) comparator MISS    - frame REACHES the hashfe and takes the MISS
+#                           disposition.  miss-canary FQ count > 0.
+#   C) comparator HIT     - hit-canary FQ count > 0 (and/or pkt_count > 0).
+#
+# Canary mechanism: debugfs node fe_obs (kernel patch 0169) redirects the
+# hashfe's nextFEPtr (w5, HIT) and missNextFEPtr (w6, MISS) at two ENQ FEs
+# targeting caller-supplied FQIDs, restoring the MUX/EXIT originals on
+# disarm.  The default canary targets are the kernel RX FQIDs of idle ports
+# (miss -> eth3 RX, hit -> eth4 RX), counted via netdev rx deltas - no wire
+# peer needed to count.
+#
+# Usage (run on the board, needs sudo):
+#   fe-obs snapshot                       # capture all observation signals
+#   fe-obs arm [port_hex] [hit_fq] [miss_fq]   # install the canary
+#   fe-obs disarm [port_hex]              # restore hashfe w5/w6
+#   fe-obs probe [peer_ip] [n]            # N SYNs from peer (ssh, optional)
+#   fe-obs verdict                        # render the 3-way verdict
+#   fe-obs run <peer_ip> [n]              # snapshot + arm + probe + verdict + disarm
+#
+# The peer (e.g. .106 at 10.99.2.106) is the SFP+ neighbour on the armed
+# port's wire.  If no peer is up, drive traffic manually and use
+# `fe-obs snapshot` before/after.
+
+PCD=/sys/kernel/debug/fman_pcd/0
+QMAP=/sys/kernel/debug/af_xdp_pool/qmap
+SSH_KEY=~/.ssh/vyos_key
+SSH_OPTS="-i $SSH_KEY -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+# --- helpers ---------------------------------------------------------------
+
+rd() { sudo cat "$1" 2>/dev/null || echo "?"; }
+
+net_rx() { # $1 = iface -> rx packets
+    ip -s link show "$1" 2>/dev/null | awk '/RX:/{getline; print $2}'
+}
+
+fqid_of() { # $1 = iface -> qband0 fqid_base (kernel RX FQID)
+    sudo awk -v i="$1" '$1=="iface="i{getline; for(k=1;k<=NF;k++) if($k ~ /^fqid_base=/){split($k,a,"="); print a[2]; exit}}' "$QMAP" 2>/dev/null
+}
+
+syn_flood() { # $1 = peer ip, $2 = count, $3 = dst ip (this board)
+    local peer="$1" n="${2:-8}" dst="$3"
+    [ -z "$peer" ] && return 0
+    echo ">> SYN ${n}x ${peer} -> ${dst} (ssh)"
+    timeout 15 ssh $SSH_OPTS "vyos@$peer" \
+        "for i in \$(seq 1 $n); do sudo hping3 -c 1 -S -p 55555 -q $dst 2>/dev/null || sudo nmap -sS -Pn -p 55555 -n --host-timeout 1s $dst >/dev/null 2>&1; done; echo peer_done" \
+        2>/dev/null | tail -1
+}
+
+# --- observations ----------------------------------------------------------
+
+snapshot() {
+    echo "=== $(date -u +%FT%TZ) FE-VM observation snapshot ==="
+    echo "--- fe_arm ---";        rd "$PCD/fe_arm"
+    echo "--- fe_obs (canary) ---"; rd "$PCD/fe_obs"
+    echo "--- fe_hashfe ---";     rd "$PCD/fe_hashfe"
+    echo "--- fe_ehash_stats ---"; rd "$PCD/fe_ehash_stats"
+    echo "--- fe_buffer ---";     rd "$PCD/fe_buffer"
+    echo "--- muram_budget ---";  rd "$PCD/muram_budget"
+    echo "--- eth3 ---";          ip -s link show eth3 | sed -n '3,4p'
+    echo "--- eth4 ---";          ip -s link show eth4 | sed -n '3,4p'
+    echo "--- eth3 rx fqid: $(fqid_of eth3)   eth4 rx fqid: $(fqid_of eth4) ---"
+}
+
+arm() {
+    local port="${1:-11}" hit="${2:-$(fqid_of eth4)}" miss="${3:-$(fqid_of eth3)}"
+    [ -z "$hit" ] && hit=0x200; [ -z "$miss" ] && miss=0x200
+    echo ">> fe_obs arm 0x$port hit_fq=$hit miss_fq=$miss"
+    sudo sh -c "echo 'arm $port $hit $miss' > $PCD/fe_obs" && echo "armed" || echo "ARM FAILED"
+    rd "$PCD/fe_obs"
+}
+
+disarm() {
+    local port="${1:-11}"
+    echo ">> fe_obs disarm 0x$port"
+    sudo sh -c "echo 'disarm $port' > $PCD/fe_obs" && echo "disarmed" || echo "DISARM FAILED"
+    rd "$PCD/fe_obs"
+}
+
+# --- verdict ---------------------------------------------------------------
+
+verdict() {
+    # reads snapshot files produced by run(); renders the 3-way verdict
+    local miss_delta hit_delta pkt_count
+    miss_delta=$(awk '/eth3/{getline; print $1}' /tmp/feobs_miss_after 2>/dev/null)
+    hit_delta=$(awk '/eth4/{getline; print $1}' /tmp/feobs_hit_after 2>/dev/null)
+    pkt_count=$(rd "$PCD/fe_ehash_stats" | grep -o 'pkt_count=[0-9]*' | head -1)
+    echo "=== VERDICT ==="
+    echo "miss-canary (eth3 rx delta): ${miss_delta:-?}"
+    echo "hit-canary  (eth4 rx delta): ${hit_delta:-?}"
+    echo "record pkt_count: ${pkt_count:-?}"
+    if [ "${miss_delta:-0}" -gt 0 ] 2>/dev/null; then
+        echo ">> B) comparator MISS: frame REACHED the hashfe and took the MISS disposition"
+    elif [ "${hit_delta:-0}" -gt 0 ] 2>/dev/null || [ "${pkt_count#*=}" -gt 0 ] 2>/dev/null; then
+        echo ">> C) comparator HIT"
+    else
+        echo ">> A) never dispatched: frame delivered via tree miss row, never entered the hashfe (dispatch gap)"
+    fi
+}
+
+run() {
+    local peer="${1:-}" n="${2:-8}" port="${3:-11}"
+    local dst; dst=$(ip -4 -br addr show eth4 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
+    [ -z "$dst" ] && dst=10.99.2.185
+    snapshot
+    local rx3a rx4a rx3b rx4b
+    rx3a=$(net_rx eth3); rx4a=$(net_rx eth4)
+    echo ">> pre-traffic: eth3 rx=$rx3a eth4 rx=$rx4a"
+    syn_flood "$peer" "$n" "$dst"
+    sleep 2
+    rx3b=$(net_rx eth3); rx4b=$(net_rx eth4)
+    echo ">> post-traffic: eth3 rx=$rx3b eth4 rx=$rx4b (deltas eth3=$((rx3b-rx3a)) eth4=$((rx4b-rx4a)))"
+    echo "$rx3b $rx3a" > /tmp/feobs_miss_after
+    echo "$rx4b $rx4a" > /tmp/feobs_hit_after
+    echo
+    echo "=== baseline (no canary) done - now install canary ==="
+    arm "$port"
+    rx3a=$(net_rx eth3); rx4a=$(net_rx eth4)
+    syn_flood "$peer" "$n" "$dst"
+    sleep 2
+    rx3b=$(net_rx eth3); rx4b=$(net_rx eth4)
+    echo ">> canary traffic: eth3 rx=$rx3b eth4 rx=$rx4b (deltas eth3=$((rx3b-rx3a)) eth4=$((rx4b-rx4a)))"
+    echo "$rx3b $rx3a" > /tmp/feobs_miss_after
+    echo "$rx4b $rx4a" > /tmp/feobs_hit_after
+    rd "$PCD/fe_ehash_stats"
+    verdict
+    disarm "$port"
+    snapshot
+}
+
+case "${1:-}" in
+    snapshot) snapshot ;;
+    arm)      arm "${2:-11}" "${3:-}" "${4:-}" ;;
+    disarm)   disarm "${2:-11}" ;;
+    verdict)  verdict ;;
+    run)      run "$2" "$3" "${4:-11}" ;;
+    *)
+        sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+        exit 1 ;;
+esac
