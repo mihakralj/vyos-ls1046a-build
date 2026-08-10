@@ -1,0 +1,148 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 1aed407..e5d1ae9 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -50,6 +50,7 @@
+ #include <linux/list.h>
+ #include <linux/of.h>
+ #include <linux/of_device.h>
++#include <linux/slab.h>
+ #include <linux/spinlock.h>
+ #include <linux/types.h>
+ #include <linux/vmalloc.h>
+@@ -101,6 +102,11 @@
+  	 */
+ 	struct list_head replic_prss;
+ 	struct list_head manip_chains;
++
++	/*
++	 * Slab allocator for Coarse Classifier nodes.
++	 */
++	struct kmem_cache *pcd_cc_nodes_cache;
+ };
+ 
+ static struct dentry *fman_pcd_debugfs_root;
+@@ -1349,6 +1355,16 @@
+ 		goto err_destroy_pool;
+ 	}
+ 
++	/* Slab allocator for CC nodes */
++	pcd->pcd_cc_nodes_cache =
++		kmem_cache_create("fman_pcd_cc_nodes",
++				  sizeof(struct fman_pcd_cc_node),
++				  0, SLAB_HWCACHE_ALIGN, NULL);
++	if (!pcd->pcd_cc_nodes_cache) {
++		err = -ENOMEM;
++		goto err_destroy_pool;
++	}
++
+ 	err = fman_pcd_debugfs_root_get();
+ 	if (err) {
+ 		dev_warn(fman_get_dev(fman),
+@@ -1388,6 +1404,8 @@
+ 
+ 	return pcd;
+ 
++err_destroy_cc_slab:
++	kmem_cache_destroy(pcd->pcd_cc_nodes_cache);
+ err_destroy_pool:
+ 	gen_pool_destroy(pcd->muram_pool);
+ err_unreserve:
+@@ -1436,6 +1454,9 @@
+ 	if (pcd->muram_pool)
+ 		gen_pool_destroy(pcd->muram_pool);
+ 
++	if (pcd->pcd_cc_nodes_cache)
++		kmem_cache_destroy(pcd->pcd_cc_nodes_cache);
++
+ 	if (!IS_ERR_VALUE(pcd->muram_offset))
+ 		fman_muram_free_mem(fman_get_muram(pcd->fman),
+ 				    pcd->muram_offset,
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index a3d3e3f..b4a5f67 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -35,16 +35,26 @@
+ #define FM_PCD_HASH_TABLE_NUM_OF_ENTRIES	256
+ #define FM_PCD_PLCR_PROF_IDX_DUMMY		0
+ 
++struct fman_pcd_cc_node *fman_pcd_cc_node_alloc(struct fman_pcd *pcd)
++{
++	return kmem_cache_alloc(pcd->pcd_cc_nodes_cache, GFP_KERNEL);
++}
++
++void fman_pcd_cc_node_free(struct fman_pcd *pcd,
++			   struct fman_pcd_cc_node *node)
++{
++	kmem_cache_free(pcd->pcd_cc_nodes_cache, node);
++}
++
+ /**
+  * fman_pcd_cc_node_create
+  *
+  * @pcd:	A pointer to a FMan PCD object
+- * @size:	size of CC node to allocate
+  *
+  * Return: A pointer to a CC Node object, NULL otherwise
+  */
+-struct fman_pcd_cc_node *fman_pcd_cc_node_create(struct fman_pcd *pcd, u16 size)
++struct fman_pcd_cc_node *fman_pcd_cc_node_create(struct fman_pcd *pcd)
+ {
+ 	struct fman_pcd_cc_node *node;
+ 
+-	node = kzalloc(size, GFP_KERNEL);
++	node = fman_pcd_cc_node_alloc(pcd);
+ 	if (!node)
+ 		return NULL;
+ 
+@@ -53,17 +63,16 @@
+ 
+ 	return node;
+ }
+-EXPORT_SYMBOL(fman_pcd_cc_node_create);
++EXPORT_SYMBOL(fman_pcd_cc_node_create);
+ 
+ /**
+  * fman_pcd_cc_node_delete
+  *
+  * @pcd:	A pointer to a FMan PCD object
+- * @size:	size of CC node to free
+  * @node:	A pointer to a CC Node object
+  */
+-void fman_pcd_cc_node_delete(struct fman_pcd *pcd, u16 size,
+-			     struct fman_pcd_cc_node *node)
++void fman_pcd_cc_node_delete(struct fman_pcd *pcd,
++			   struct fman_pcd_cc_node *node)
+ {
+ 	if (!node)
+ 		return;
+@@ -73,9 +82,9 @@
+ 
+ 	list_del(&node->list);
+ 
+-	kfree(node);
++	fman_pcd_cc_node_free(pcd, node);
+ }
+-EXPORT_SYMBOL(fman_pcd_cc_node_delete);
++EXPORT_SYMBOL(fman_pcd_cc_node_delete);
+ 
+ static int fman_pcd_cc_build_tree(struct fman_pcd *pcd,
+ 				  struct fman_pcd_cc_node *node)
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index e0b1c0a..a1b2c3d 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -204,11 +204,10 @@
+ 
+ struct fman_pcd_cc_node *
+ fman_pcd_cc_node_create(struct fman_pcd *pcd, u16 size);
+-
+ void
+-fman_pcd_cc_node_delete(struct fman_pcd *pcd, u16 size,
+-			struct fman_pcd_cc_node *node);
++fman_pcd_cc_node_delete(struct fman_pcd *pcd, struct fman_pcd_cc_node *node);
+ 
++struct fman_pcd_cc_node *fman_pcd_cc_node_alloc(struct fman_pcd *pcd);
+ 
+ int fman_pcd_cc_add_entry(struct fman_pcd_cc_node *node,
+ 			  struct fman_pcd_cc_key_cfg *key_cfg);

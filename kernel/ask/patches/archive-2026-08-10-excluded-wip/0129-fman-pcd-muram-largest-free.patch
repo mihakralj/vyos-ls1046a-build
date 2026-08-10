@@ -1,0 +1,41 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index c8a5b14..a3c4f5a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -211,6 +211,21 @@
+ }
+ EXPORT_SYMBOL(fman_pcd_muram_free);
+ 
++size_t fman_pcd_muram_get_largest_free(struct fman_pcd *pcd)
++{
++	size_t largest_free = 0;
++	int i;
++
++	if (WARN_ON(!pcd))
++		return 0;
++
++	mutex_lock(&pcd->lock);
++	for (i = 0; i < FMAN_PCD_MURAM_POOL_COUNT; i++)
++		largest_free = max(largest_free,
++				   gen_pool_avail(pcd->muram_pools[i]));
++	mutex_unlock(&pcd->lock);
++
++	return largest_free;
++}
++
+ int fman_pcd_enable(struct fman_pcd *pcd)
+ {
+ 	struct fman_pcd_regs __iomem *pcd_regs;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index a1b2c3d..b4a5f67 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -109,6 +109,8 @@
+ unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size);
+ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
+ 			 size_t size);
++size_t fman_pcd_muram_get_largest_free(struct fman_pcd *pcd);
++
+ int fman_pcd_enable(struct fman_pcd *pcd);
+ void fman_pcd_disable(struct fman_pcd *pcd);
+ int fman_pcd_is_enabled(struct fman_pcd *pcd);
