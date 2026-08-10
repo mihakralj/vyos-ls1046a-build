@@ -97,31 +97,27 @@ routine manipulates. Doesn't resolve the "same template as ~18 neighbors"
 caveat above, but strengthens confidence this is the right region, not a
 coincidence.
 
-### A rare, deliberate trap/halt vector guards this routine's entry
+### A rare, deliberate trap/halt vector guards this routine's entry — **FALSIFIED 2026-08-09 (E-HM18)**
 
-`w12665: br 0x0003fbac` — an **unconditional** jump to word 65259, far
-outside the 12,851-word code image. A whole-image census found only **12
-such out-of-range branch targets in 1,446 total branches** (0.8%), and all
-12 cluster in a narrow **315-word band** (words 65259–65574, i.e. roughly
-0x3FBAC–0x40098 bytes — straddling the 256 KiB mark). This is not a
-decode-formula error (if it were, out-of-range targets would be common or
-follow a clean per-opcode pattern; instead they're a small, tightly
-clustered special case). The most defensible reading: **a
-hardware-recognized trap/halt/idle vector**, reached deliberately when a
-guard condition fails, not a real fetchable instruction address.
+**REVISED**: the "w12665 → 0x3FBAC out-of-range trap" reading was a DECODE
+ARTIFACT of the old (wrong) `b7ff` model `(48+imm16)*4`. With the corrected
+signed-relative-word model (`target = i + s16(low16)`), **w12665 (`b7fffebb`)
+→ w12340 and w12663 (`2e3ffebd`) → w12340 — both in-range**, landing on
+`0x7c19f808` (a common prologue, 34 sites in the image). A whole-image census
+of all 17 branch families (1550 branches) finds **zero out-of-range targets**.
+There is NO trap band at 0x3FBAC-0x40098. See experiments.md E-HM18.
 
-The guard immediately before it (`w12663: unk 0x2e3f,0xfebd` — an
-unmodeled, not-yet-classified conditional-skip-shaped opcode, distinct from
-every `brc`/`br`/`jmp`/`park` family member already in the slaspec) sits
-**directly in front of the pool-management routine's real entry point**
-(`w12667` onward). Structurally: *check something about this frame's
-context/pool state → if bad, jump to the out-of-range trap → else fall
-through to the per-slot walk.*
+The guard immediately before it (`w12663: 0x2e3f,0xfebd` — now modeled as
+`brc2e3f`, a conditional relative branch to **w12340**) sits in front of a
+branch to the FE-VM main-loop region (w12340), not in front of a trap. The
+"check → trap" two-tier structure is FALSIFIED; both w12663 and w12665 are
+normal in-range branches to the same helper.
 
-### Bearing on the wedge mechanism — two tiers, not one
+### Bearing on the wedge mechanism — re-derived 2026-08-09 (E-HM18)
 
-This gives a two-tier picture, consistent with (and sharpening) the
-existing kernel-side findings:
+The two-tier picture (soft pool-wait + hard out-of-range trap) is FALSIFIED
+in its hard tier — no out-of-range branch exists anywhere. The remaining
+structure:
 
 1. **Soft/recoverable tier** (matches F-136/F-069/patch-0163's own
    framing): the per-frame ALLOCATE/DEALLOCATE bookkeeping table (`0x08`–
@@ -131,20 +127,24 @@ existing kernel-side findings:
    an error), matching the documented "silent WAIT, no fault latched"
    signature exactly. Re-seeding the table (what `fe_recover` does, per
    this session's finding possibly needing to cover more than `+0x54`/
-   `+0x58` alone) can restore it without a reboot.
-2. **Hard/unrecoverable tier** (new, this session): if the guard check
-   at `w12663` ever fails — e.g. the per-frame context is inconsistent with
-   the pool state in a way the microcode considers unrecoverable — it takes
-   the deliberate **out-of-range trap branch** at `w12665`. This is not a
-   resource-wait; it looks like a genuine hardware halt vector. If real,
-   **no debugfs write can reach or reverse it** — matching every case in
-   qdrant's history where only a **cold power-cycle**, never `fe_recover`
-   or a warm reboot, restored the board (e.g. the 2026-08-05 "port-wedge"
-   finding, and the general T-M6-5 pattern before F-136/F-168 landed).
+   `+0x58` alone) can restore it without a reboot. **Re-checked under the
+   corrected CFG**: w12667 (the per-slot walk) is reached from **w654**
+   (`b7ff2eed`), NOT from w12663 — the "guard" at w12663 branches to w12340
+   (main loop), so the pool-walk entry is a different call site than
+   wedge-path.md assumed.
+2. **Hard/unrecoverable tier — FALSIFIED.** There is no out-of-range trap
+   branch; w12665 is a normal branch to w12340. Every prior "cold-power-
+   cycle-only recovery" case in qdrant is still real, but the mechanism is
+   NOT a microcode branch into a hardware halt vector.
 
-This is a hypothesis the disassembly *supports structurally* but has not
-*proven* — no oracle experiment has deliberately driven the guard condition
-at `w12663` to observe the trap firing. See Follow-ups.
+**Open after E-HM18**: the wedge mechanism must be re-derived from the
+corrected CFG. Candidates: (a) the `2c3f`-dispatched handler at w242 (FE
+type → engine-internal handler slot, host-unreadable) looping/parking
+without re-arming; (b) the pool walk w12667 (entered from w654) starving on
+a slot never returned; (c) an FPM/TNUM task-completion handshake never
+released. A clean re-test of the E-HM12/13/15 sites under the CORRECTED
+model (their patches actually landed on w512/w452/w511/w531, not the
+claimed w270/w280/w290) is a candidate next oracle experiment.
 
 ## The per-field key-compare candidate (side finding, feeds hitmiss-path.md)
 
@@ -174,17 +174,23 @@ actually streams from remain unverified.
 
 ## Follow-ups (oracle-gated, not run this session)
 
-- Drive the `w12663` guard condition deliberately (e.g. via a controlled
-  pool-exhaustion test) and watch whether the board's known "silent wait,
-  no fault" wedge correlates with reaching `w12665`'s trap — this is the
-  one experiment that would upgrade "two-tier hypothesis" to "confirmed."
+- **Re-test the E-HM12/13/15 patch sites under the CORRECTED branch model.**
+  E-HM18 showed those patches actually landed on w512/w452/w511/w531 (not the
+  claimed w270/w280/w290), and the "trap band" they targeted never existed.
+  A clean single-variable re-test (e.g. w242's `2c3ff000` dispatch target,
+  or the w654→w12667 pool-walk caller) under the corrected model is the
+  highest-value next oracle experiment.
+- Drive the pool-exhaustion condition deliberately (controlled pool test)
+  and watch whether the "silent wait, no fault" wedge correlates with the
+  w12667 walk stalling — this would confirm the soft tier.
 - Patch one of the tight-loop's `tst_dc` immediates (`0x28f8`) or bump
   `[0x1b01]`'s apparent stream and watch for a HIT/MISS behavior change on
   a known-HIT config — the same falsifiable-test principle as
   `hitmiss-path.md`'s E-HM1.
-- Classify the `0x2e3f` conditional-skip family (currently unmodeled) —
-  it may be a sibling worth adding to the branch family alongside the
-  `brc` variants already found 2026-08-08.
+- Classify the `0x79` dispatch-stub family (w585-w606) — it is CODE, not
+  data (E-HM18), and the entry vector w0 → w585 makes it the first-executed
+  instruction stream; its semantics (`0x79 <action> 0xf800`) are the
+  FM_CTL action-dispatch chain.
 
 Tools: `decomp/ghidra/scripts/FmanWedgeHunt.py` (whole-image `park` census +
 constant search), `FmanAllocDealloc.py` (tail-of-image dump),

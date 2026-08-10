@@ -207,22 +207,36 @@ model firms up the store operands.
 | `0xf900`/`0xfb00`/`0xfc00` | 18/78/20 | more FM_CTL status slots (parse-result echo, error status) | `m_78`-only (`0x78XX` ops) |
 | `0xc000–0xc0ff` | 184 | per-frame IC/command region | |
 
+**[IMPORTANT 2026-08-09, E-HM18]** the `0xf000`/`0xf800` dmem windows are
+FM_CTL **engine-internal** (the microcode's own flat 16-bit data space),
+NOT host-visible MURAM at physical 0x1A00000+offset. Live /dev/mem reads at
+0x1A0F000/0x1A0F800 on BOTH boards return volatile aliased content (mDNS
+service strings "Spotify Desktop Launcher", "_spotify-connect._tcp.local"
+on .185; 0x0400015E/0x04008040 on .106) — packet/config data, not a static
+handler table. The host cannot read or populate the FE-type dispatch slots
+that `2c3ff000` at w242 indexes. E-HM17's "pristine reads return clean
+0x00000000" was a transient artifact (misread of the same aliased window);
+CAND-1's original "aliased to volatile userspace memory / not a
+kernel-populated MURAM table" conclusion is RESTORED.
+
 **Common per-slot header at `+0x500–0x548` (every workspace slot):** byte
 offsets `0x500/0x502/0x504/0x508/0x510/0x518/0x534/0x538/0x53c/0x540` appear
 in *all* 13+ 0x800-slots — a fixed 0x48-byte per-tnum control block the FE-VM
 writes uniformly (pointers/counters). **[?]** individual field identity open.
 
-**`0x79XX` = DATA, not an instruction** (corrected 2026-08-08). The 16 words
-`w585–w606` (`0x7902f800`, `0x7904f800`, …, `0x791ef800`, `0x7900f800`) are
-the **FM_CTL action-dispatch table**: each packs `(action_code, 0xf800)` with
-constant low16 — mapping FM_CTL action codes (0x02 ENQ, 0x06 CC, 0x08/0x0a
-IND_MODE, 0x0c HC, 0x0e POP_TO_N_STEP, 0x10/0x12/0x14/0x18 BMI-fetch
-variants, 0x1a PRE_BMI_ENQ, 0x1e DISCARD) to handler slots in the `0xf800`
-status window. Only branched into at w585/w583 (dispatch slots 13/15/16);
-the dispatcher loads the resolved pointer via `[0xf800]` (w603). The older
-"`w583` = `ipr_timeout` (HCOR 0x10)" label (slot 16) is **superseded for the
-slot-13/15/16 targets** — those land on the action-dispatch table. w583
-(`0x2c3ff000`) is the table preamble, w584 pad.
+**`0x79XX` = an instruction family (DISPATCH STUBS), NOT data** (re-corrected
+2026-08-09, E-HM18). The 2026-08-08 "0x79XX = DATA" correction was based on
+the old (WRONG) `b7ff` decode `(48+imm16)*4` which made w585 unreachable. With
+the corrected signed-relative-word model, **w0 (`b7ff0249`) → w585**, so w585
+is the FIRST instruction executed: `0x7902f800`. The 16 words `w585–w606`
+(`0x7902f800`, `0x7904f800`, …, `0x791ef800`, `0x7900f800`) are a DISPATCH
+CHAIN of `0x79`-family action-code stubs: constant low16 `0xf800`, middle
+byte = action code (0x02 ENQ, 0x04, 0x06 CC, 0x08/0x0a IND_MODE, 0x0c HC,
+0x0e POP_TO_N_STEP, 0x10/0x12/0x14/0x18 BMI-fetch variants, 0x1a PRE_BMI_ENQ,
+0x1e DISCARD, 0x00 wrap) → each "dispatch action code <n> via the `0xf800`
+handler window". w603 (`m_78 r2,[0xf800]`) reads the resolved pointer. **[?]**
+exact 0x79 semantics (indirect jump vs load) open — but they are CODE, and
+the whole-image census shows only these 17 `0x79`-family words.
 
 **AD-type extraction idiom (CC engine):** `c600001e` (shift right 30) extracts
 the **AD type field bits[31:30]** (`0x40000000` CONT_LOOKUP→1, `0x80000000`

@@ -36,10 +36,16 @@ attach variables [ regfld ]
     r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 ];
 
 # --- control flow (G1: targets validated; conditions provisional) ---
+# 2026-08-09 correction: b7ff ("br") uses the SAME signed-relative-word
+# encoding as the brc family (target = inst + s16(low16)), NOT the old
+# (48+imm16)*4 unsigned-byte formula. Whole-image validation: 97 b7ff sites,
+# 96 land on valid code (the old model was wrong 42/97 incl. the phantom
+# "0x3FBAC out-of-range trap" at w12665, which actually targets w12340).
+# BDEST retained only as a named alias for the shared sub-rule.
 BDEST: rel is imm16  [ rel = (48 + imm16) * 4; ]        { export *:1 rel; }
 RDEST: rel is simm16 [ rel = inst_start + simm16 * 4; ] { export *:1 rel; }
 
-:br   BDEST is prefix16=0xb7ff & BDEST { goto BDEST; }
+:br   RDEST is prefix16=0xb7ff & RDEST { goto RDEST; }
 :brc  RDEST is prefix16=0xb3ff & RDEST { if (cc != 0) goto RDEST; }
 :brc  RDEST is prefix16=0xb43f & RDEST { if (cc != 0) goto RDEST; }
 :brc  RDEST is prefix16=0xbc3f & RDEST { if (cc != 0) goto RDEST; }
@@ -57,6 +63,20 @@ RDEST: rel is simm16 [ rel = inst_start + simm16 * 4; ] { export *:1 rel; }
 :brc  RDEST is prefix16=0xa7ff & RDEST { if (cc != 0) goto RDEST; }
 :jmp  RDEST is prefix16=0xa3ff & RDEST { goto RDEST; }
 :park       is prefix16=0xb7df & imm16 { goto inst_start; }
+
+# --- G3+ 0x2e3f/0x2e5f family: conditional relative branch (2026-08-09) ---
+# 52 + 49 sites. Encoding validated against the brc convention: prefix16 =
+# 0x2e3f/0x2e5f, low16 = signed relative WORD offset (target = i + s16(low16),
+# i.e. inst_start + simm16*4 in the byte-addressed code space). Whole-image
+# validation: 101/101 targets land on non-0xffffffff code words (vs the old
+# unsigned (48+imm16)*4 model which was wrong 42/97 for b7ff). The word that
+# follows every site is 0xffffffff (trap/pad on fall-through). Semantics
+# provisional: branch-on-cc like the brc family; the cc source is the
+# preceding 0x48xx/0x4cxx/0x4exx ALU or 0x70e0/0x1000 op. Modeled with
+# conditional-goto so the CFG resolves past the pool-guard sites (w12663).
+:brc2e3f RDEST is prefix16=0x2e3f & RDEST { if (cc != 0) goto RDEST; }
+:brc2e5f RDEST is prefix16=0x2e5f & RDEST { if (cc != 0) goto RDEST; }
+:brc2e1f RDEST is prefix16=0x2e1f & RDEST { if (cc != 0) goto RDEST; }
 
 # --- memory access (G2 HYPOTHESIS: reg=bits[20:16], addr=bits[15:0]) ---
 # 0x04 = load, 0x14 = store, 0x10 = load (directions are a guess pending G3).
@@ -125,3 +145,9 @@ define pcodeop fman_mem_f4;
 
 # Fixed-width catch-all keeps disassembly synchronized (least specific).
 :unk prefix16, imm16 is prefix16 & imm16 { }
+
+# 0xffffffff = explicit NOP/pad (2026-08-09). 449 occurrences, almost always
+# immediately after a branch (2c3f: 56, 2e3f: 52, b7ff: 50, 2e5f: 49, 283f:
+# 33) or in runs within the entry vector region. Must come AFTER :unk so the
+# more-specific match wins.
+:nop is prefix16=0xffff & imm16 { }
