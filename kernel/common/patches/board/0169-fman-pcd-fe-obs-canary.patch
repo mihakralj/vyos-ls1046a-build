@@ -36,11 +36,17 @@ Reference: 999-layerscape-ask-kernel_linux_5_4_3_00_0.patch
   t_ExtHashFe (L10318): nextFEPtr/missNextFEPtr are the only dispositions
   MAX_EN_EHASH_EXT_ENTRY_SIZE=320 (L15457): stats at +256, record is 576 B
   FmPcdCcBuildContextByFE (L8954): ENQ context encoding (rspid/fqid/ppid)
+F-107 compatibility: the per-port armed check originally used
+pcd->fe_armed_port (u8), but the Layer-2 F-107 fixup rewrites that field
+to DECLARE_BITMAP(fe_port_armed, 32) AFTER the patch stack.  The check is
+therefore dropped from arm/disarm (pool-engaged + fe_hash_off are the
+authoritative guards) and the show() port line removed, so the patch is
+valid in both the pre-fixup and post-fixup trees.
 
 Signed-off-by: VyOS LS1046A <ask20@vyos-ls1046a-build>
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 7fdb1fb07..37d2bf4fa 100644
+index 7fdb1fb..1b91853 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 @@ -142,6 +142,18 @@ struct fman_pcd {
@@ -62,7 +68,7 @@ index 7fdb1fb07..37d2bf4fa 100644
  
  	struct dentry *debugfs_dir;
  };
-@@ -2171,6 +2183,269 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+@@ -2171,6 +2183,271 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
  	.release	= single_release,
  };
  
@@ -168,8 +174,11 @@ index 7fdb1fb07..37d2bf4fa 100644
 +		return -EBUSY;
 +	if (pcd->fe_refcount == 0 || !pcd->fe_hash_off)
 +		return -ENXIO;		/* pool + hashfe required */
-+	if (pcd->fe_armed_port != port_id)
-+		return -EINVAL;		/* hashfe belongs to the armed port */
++	/* NB: no per-port armed check here — the armed-port representation
++	 * is rewritten by the F-107 fixup (u8 fe_armed_port -> bitmap
++	 * fe_port_armed) which runs AFTER the patch stack; referencing
++	 * either name would dangle in the other tree.  fe_hash_off (built
++	 * only when a port is armed) is the authoritative guard. */
 +	if (!muram)
 +		return -ENXIO;
 +	if ((hit_fqid & ~FMAN_FE_ENQ_NIA_MASK) ||
@@ -222,7 +231,7 @@ index 7fdb1fb07..37d2bf4fa 100644
 +
 +	if (!pcd->fe_obs_armed)
 +		return 0;
-+	if (pcd->fe_armed_port != port_id || !muram)
++	if (!muram)
 +		return -EINVAL;
 +
 +	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
@@ -253,7 +262,6 @@ index 7fdb1fb07..37d2bf4fa 100644
 +		return 0;
 +	}
 +	seq_printf(s, "armed:       %s\n", pcd->fe_obs_armed ? "YES" : "NO");
-+	seq_printf(s, "port:        0x%02x\n", pcd->fe_armed_port);
 +	seq_printf(s, "hash_fe off: 0x%05lx\n", pcd->fe_hash_off);
 +	if (pcd->fe_obs_armed) {
 +		seq_printf(s, "canary hit:  off=0x%05lx fqid=0x%x\n",
@@ -332,7 +340,7 @@ index 7fdb1fb07..37d2bf4fa 100644
  /*
   * Build FE-VM runtime contexts after the full dormant chain is assembled.
   * Called by fe_arm engage before reprogramming KeyGen/BMI.
-@@ -2877,6 +3152,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -2877,6 +3154,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_arm", 0600,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_arm_fops);
