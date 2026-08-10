@@ -1,0 +1,344 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Mon, 10 Aug 2026 06:00:00 +0000
+Subject: [PATCH] fman_pcd: FE-VM observation canary - hashfe HIT/MISS disposition redirect (0169)
+
+Make the EXT_HASH comparator's execution observable from the host.  The
+2026-08-10 comparator-input audit (decomp/experiments.md) verified the
+hash, bucket, record and chain are byte-perfect yet pkt_count=0 - the
+remaining gap is FE dispatch / comparator execution, which is engine
+internal and not host-observable via any existing signal (the record
+counters can never move: flow records are 256 B while the SDK stores
+stats at +256, and hashfe word0 carries no UPDATE_STATS flag).
+
+New debugfs node fe_obs redirects the hashfe's own dispositions -
+nextFEPtr (w5, HIT) and missNextFEPtr (w6, MISS) - at two freshly
+built ENQ FEs targeting caller-supplied FQIDs, saving the originals
+(MUX/EXIT singletons) for a byte-exact restore.  Counting frames at
+each canary FQ yields the 3-way verdict:
+
+  miss-canary count > 0  -> frame REACHED the hashfe and took MISS
+                            (comparator ran, no match)
+  hit-canary  count > 0  -> comparator HIT
+  both 0, rx tracks spc  -> frame never dispatched to the FE chain
+
+Verbs:  arm <port_hex> <hit_fqid_hex> <miss_fqid_hex> | disarm <port_hex>
+
+The canary FEs are pool slots parked on fe_singletons (teardown
+reclaims them); arm/disarm are readback-verified per S6 Sec 10.2 and
+restore hashfe w5/w6 byte-exact on mismatch.  Statistics-mode flags are
+deliberately NOT touched (no UPDATE_TS: missing timestamp_counter; no
+UPDATE_STATS: would write past the 256-B record).  Driver note: the
+209-patch "hitResult" field does not exist in t_ExtHashFe - HIT
+disposition is the descriptor nextFEPtr, which is what this redirects.
+
+Reference: 999-layerscape-ask-kernel_linux_5_4_3_00_0.patch
+  t_ExtHashFe (L10318): nextFEPtr/missNextFEPtr are the only dispositions
+  MAX_EN_EHASH_EXT_ENTRY_SIZE=320 (L15457): stats at +256, record is 576 B
+  FmPcdCcBuildContextByFE (L8954): ENQ context encoding (rspid/fqid/ppid)
+
+Signed-off-by: VyOS LS1046A <ask20@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 7fdb1fb07..37d2bf4fa 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -142,6 +142,18 @@ struct fman_pcd {
+ 	u8  fe_probe_key[32];
+ 	int fe_probe_key_len;
+ 	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
++	/* FE-VM observation canary (0169): redirect the hashfe HIT/MISS
++	 * dispositions (w5/w6) at two countable ENQ FEs so a probe can
++	 * discriminate "frame reached the EXT_HASH comparator and MISSed"
++	 * from "frame never dispatched to the FE chain".  fe_obs_saved_*
++	 * hold the w5/w6 values restored by disarm (MUX/EXIT singletons). */
++	unsigned long fe_obs_hit_off;
++	unsigned long fe_obs_miss_off;
++	u32 fe_obs_saved_hit;
++	u32 fe_obs_saved_miss;
++	u32 fe_obs_hit_fqid;
++	u32 fe_obs_miss_fqid;
++	bool fe_obs_armed;
+ 
+ 	struct dentry *debugfs_dir;
+ };
+@@ -2171,6 +2183,269 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+ 	.release	= single_release,
+ };
+ 
++/*
++ * ---------------------------------------------------------------------------
++ * FE-VM observation canary (0169) - make the EXT_HASH comparator's execution
++ * observable from the host.
++ *
++ * The first-order question (decomp/experiments.md 2026-08-10 audit) is
++ * whether a frame that reaches KeyGen ever enters the hashfe and produces a
++ * comparator verdict, or is delivered straight to the tree's miss row (RSS
++ * fall-through) without the FE chain dispatching.  pkt_count is NOT a valid
++ * verdict signal here: the flow record is 256 B while the SDK stores stats
++ * at +256 (MAX_EN_EHASH_EXT_ENTRY_SIZE=320) and the hashfe word0 carries no
++ * UPDATE_STATS flag, so the record counters can never move even on a true
++ * HIT (and setting the flag would make the FE-VM write past the record).
++ *
++ * Instead the canary redirects the hashfe's own dispositions - nextFEPtr
++ * (w5, HIT) and missNextFEPtr (w6, MISS) - at two freshly built ENQ FEs
++ * targeting caller-supplied FQIDs, saving the originals (MUX/EXIT) for a
++ * byte-exact restore.  Counting frames at each canary FQ yields the verdict:
++ *
++ *   miss-canary count > 0  -> frame REACHED the hashfe and took the MISS
++ *                             path (comparator ran, no match)
++ *   hit-canary  count > 0  -> comparator HIT
++ *   both 0, rx tracks spc  -> frame never dispatched to the FE chain
++ *                             (the FE_ENTER/hashfe entry gap)
++ *
++ * FQIDs are supplied by the caller (kernel RX FQs of idle ports are the
++ * natural countable targets; eth3 RX FQ 0x200 works without a wire peer).
++ * The canary FEs are pool slots parked on fe_singletons so teardown
++ * reclaims them.  Readback-verified per S6 §10.2.
++ * ---------------------------------------------------------------------------
++ */
++
++/* Build one canary ENQ FE (type ENQ, FQID flag, chain terminates). */
++static int fman_pcd_fe_obs_enq_one(struct fman_pcd *pcd, u32 fqid,
++				   unsigned long *out_off)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_context_params c = {};
++	struct fman_pcd_fe_params p;
++	struct fman_pcd_fe_obj *obj;
++
++	if (!muram || pcd->fe_refcount == 0)
++		return -ENXIO;
++	if (fqid & ~FMAN_FE_ENQ_NIA_MASK)
++		return -EINVAL;		/* FQIDs are 24-bit */
++
++	obj = list_first_entry_or_null(&pcd->fe_available,
++				       struct fman_pcd_fe_obj, node);
++	if (!obj)
++		return -ENOSPC;
++
++	memset(&p, 0, sizeof(p));
++	p.type = FMAN_FE_TYPE_ENQ;
++	p.flags = FMAN_FE_ENQ_FQID;
++	p.nia = fqid;			/* word1: 24-bit target FQID */
++	p.next_fe_off = 0;		/* chain terminates at the enqueue */
++	fman_pcd_fe_build(muram, obj->muram_off, &p);
++	/* ENQ context at bytes 8-15: (rspid<<24)|fqid, ppid<<16. */
++	c.type = FMAN_FE_TYPE_ENQ;
++	c.u.enq.fqid = fqid;
++	fman_pcd_fe_context_build((void __iomem *)
++				  fman_muram_offset_to_vbase(muram,
++							     obj->muram_off),
++				  FMAN_FE_ENQ_CTX_OFF, &c);
++	*out_off = obj->muram_off;
++	list_add_tail(&obj->node, &pcd->fe_singletons);
++	return 0;
++}
++
++/* Inverse: re-zero the canary FE's MURAM and return its slot to the pool. */
++static void fman_pcd_fe_obs_free_one(struct fman_pcd *pcd,
++				     unsigned long off)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_obj *obj, *tmp;
++
++	list_for_each_entry_safe(obj, tmp, &pcd->fe_singletons, node) {
++		if (obj->muram_off != off)
++			continue;
++		list_del(&obj->node);
++		if (muram)
++			memset_io((void __iomem *)
++				  fman_muram_offset_to_vbase(muram, off),
++				  0, FMAN_PCD_FE_MAX_SIZE);
++		list_add_tail(&obj->node, &pcd->fe_available);
++		break;
++	}
++}
++
++static int fman_pcd_fe_obs_arm(struct fman_pcd *pcd, unsigned int port_id,
++			       u32 hit_fqid, u32 miss_fqid)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	u32 __iomem *fe;
++	u32 saved_hit, saved_miss;
++	unsigned long hit_off = 0, miss_off = 0;
++	int err;
++
++	if (pcd->fe_obs_armed)
++		return -EBUSY;
++	if (pcd->fe_refcount == 0 || !pcd->fe_hash_off)
++		return -ENXIO;		/* pool + hashfe required */
++	if (pcd->fe_armed_port != port_id)
++		return -EINVAL;		/* hashfe belongs to the armed port */
++	if (!muram)
++		return -ENXIO;
++	if ((hit_fqid & ~FMAN_FE_ENQ_NIA_MASK) ||
++	    (miss_fqid & ~FMAN_FE_ENQ_NIA_MASK))
++		return -EINVAL;
++
++	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++						      pcd->fe_hash_off);
++	saved_hit = ioread32be(fe + 5);
++	saved_miss = ioread32be(fe + 6);
++
++	err = fman_pcd_fe_obs_enq_one(pcd, hit_fqid, &hit_off);
++	if (err)
++		return err;
++	err = fman_pcd_fe_obs_enq_one(pcd, miss_fqid, &miss_off);
++	if (err) {
++		fman_pcd_fe_obs_free_one(pcd, hit_off);
++		return err;
++	}
++
++	iowrite32be((u32)hit_off, fe + 5);
++	iowrite32be((u32)miss_off, fe + 6);
++	/* Readback (S6 §10.2): restore on mismatch, nothing committed. */
++	if (ioread32be(fe + 5) != (u32)hit_off ||
++	    ioread32be(fe + 6) != (u32)miss_off) {
++		iowrite32be(saved_hit, fe + 5);
++		iowrite32be(saved_miss, fe + 6);
++		fman_pcd_fe_obs_free_one(pcd, hit_off);
++		fman_pcd_fe_obs_free_one(pcd, miss_off);
++		return -EIO;
++	}
++
++	pcd->fe_obs_hit_off = hit_off;
++	pcd->fe_obs_miss_off = miss_off;
++	pcd->fe_obs_saved_hit = saved_hit;
++	pcd->fe_obs_saved_miss = saved_miss;
++	pcd->fe_obs_hit_fqid = hit_fqid;
++	pcd->fe_obs_miss_fqid = miss_fqid;
++	pcd->fe_obs_armed = true;
++	pr_info("fman_pcd fe_obs: port 0x%02x CANARY hit->0x%05lx(fq 0x%x) "
++		"miss->0x%05lx(fq 0x%x)\n", port_id, hit_off, hit_fqid,
++		miss_off, miss_fqid);
++	return 0;
++}
++
++static int fman_pcd_fe_obs_disarm(struct fman_pcd *pcd, unsigned int port_id)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	u32 __iomem *fe;
++
++	if (!pcd->fe_obs_armed)
++		return 0;
++	if (pcd->fe_armed_port != port_id || !muram)
++		return -EINVAL;
++
++	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++						      pcd->fe_hash_off);
++	iowrite32be(pcd->fe_obs_saved_hit, fe + 5);
++	iowrite32be(pcd->fe_obs_saved_miss, fe + 6);
++	if (ioread32be(fe + 5) != pcd->fe_obs_saved_hit ||
++	    ioread32be(fe + 6) != pcd->fe_obs_saved_miss)
++		return -EIO;	/* leave armed state for inspection */
++	fman_pcd_fe_obs_free_one(pcd, pcd->fe_obs_hit_off);
++	fman_pcd_fe_obs_free_one(pcd, pcd->fe_obs_miss_off);
++	pcd->fe_obs_armed = false;
++	pr_info("fman_pcd fe_obs: port 0x%02x canary DISARMED\n", port_id);
++	return 0;
++}
++
++static int fman_pcd_fe_obs_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	u32 __iomem *fe;
++	unsigned int i;
++
++	mutex_lock(&pcd->fe_lock);
++	if (!muram || pcd->fe_refcount == 0) {
++		seq_puts(s, "fe pool not engaged\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	seq_printf(s, "armed:       %s\n", pcd->fe_obs_armed ? "YES" : "NO");
++	seq_printf(s, "port:        0x%02x\n", pcd->fe_armed_port);
++	seq_printf(s, "hash_fe off: 0x%05lx\n", pcd->fe_hash_off);
++	if (pcd->fe_obs_armed) {
++		seq_printf(s, "canary hit:  off=0x%05lx fqid=0x%x\n",
++			   pcd->fe_obs_hit_off, pcd->fe_obs_hit_fqid);
++		seq_printf(s, "canary miss: off=0x%05lx fqid=0x%x\n",
++			   pcd->fe_obs_miss_off, pcd->fe_obs_miss_fqid);
++		seq_printf(s, "saved w5:    0x%08x  saved w6: 0x%08x\n",
++			   pcd->fe_obs_saved_hit, pcd->fe_obs_saved_miss);
++	}
++	if (pcd->fe_hash_off) {
++		fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++							      pcd->fe_hash_off);
++		seq_puts(s, "hashfe:      ");
++		for (i = 0; i < FMAN_FE_HASH_SIZE / 4; i++)
++			seq_printf(s, "%08x ", ioread32be(fe + i));
++		seq_puts(s, "\n");
++	}
++	mutex_unlock(&pcd->fe_lock);
++	seq_puts(s, "verbs: arm <port_hex> <hit_fqid_hex> <miss_fqid_hex> | disarm <port_hex>\n");
++	return 0;
++}
++
++static int fman_pcd_fe_obs_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_obs_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_obs_write(struct file *file,
++				     const char __user *ubuf,
++				     size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	unsigned int port_id = 0, hit_fqid = 0, miss_fqid = 0;
++	char buf[64];
++	char *cmd;
++	int err;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++	cmd = strim(buf);
++
++	mutex_lock(&pcd->fe_lock);
++	if (!strncmp(cmd, "disarm", 6)) {
++		if (sscanf(cmd, "disarm %x", &port_id) != 1)
++			err = -EINVAL;
++		else
++			err = fman_pcd_fe_obs_disarm(pcd, port_id);
++	} else if (!strncmp(cmd, "arm", 3)) {
++		if (sscanf(cmd, "arm %x %x %x", &port_id, &hit_fqid,
++			   &miss_fqid) != 3)
++			err = -EINVAL;
++		else
++			err = fman_pcd_fe_obs_arm(pcd, port_id, hit_fqid,
++						  miss_fqid);
++	} else {
++		err = -EINVAL;
++	}
++	mutex_unlock(&pcd->fe_lock);
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_pcd_fe_obs_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_obs_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_obs_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /*
+  * Build FE-VM runtime contexts after the full dormant chain is assembled.
+  * Called by fe_arm engage before reprogramming KeyGen/BMI.
+@@ -2877,6 +3152,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_arm", 0600,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_arm_fops);
++			debugfs_create_file("fe_obs", 0600,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_obs_fops);
+ 		}
+ 	}
+ 
