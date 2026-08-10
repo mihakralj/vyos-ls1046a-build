@@ -306,26 +306,16 @@ instruction stream itself, which either means patch 0163's SDK-derived
 labels are an approximation of a wider table, or the real distinction lives
 in an untraced base-register computation.
 
-**Second, independent finding: a rare hardware trap/halt vector guards this
-routine.** `w12665: br 0x0003fbac` unconditionally jumps to word 65259 —
-outside the 12,851-word image. A full branch-target census
-(`FmanBranchRange.py`) found only 12 such out-of-range targets among 1,446
-total branches (0.8%), all clustered in a 315-word band (65259–65574,
-straddling the 256 KiB mark) — far too tight a cluster to be a decode-model
-bug, and much more likely a hardware-recognized trap/idle vector. It's
-guarded by an unmodeled, not-yet-classified conditional-skip opcode
-(`w12663: 0x2e3f`) sitting directly in front of the pool routine's real
-entry. This supports a **two-tier wedge model**: (1) soft/recoverable —
-ordinary pool-table desync, a legitimate resource-wait with no fault
-latched (matches the documented "silent WAIT" signature exactly), fixable
-by re-seeding the table (what `fe_recover` does, possibly needing to touch
-more than just `+0x54`/`+0x58`); (2) hard/unrecoverable — the guard at
-`w12663` fails and the microcode deliberately jumps to the out-of-range
-trap, which no debugfs write can reach, matching every case where only a
-cold power-cycle (never `fe_recover`, never warm reboot) restored the
-board. This is a hypothesis the disassembly *supports structurally*, not
-yet an oracle-proven fact — no experiment deliberately drove the `w12663`
-guard to watch the trap fire.
+**Second, independent finding — FALSIFIED 2026-08-09 (E-HM18):** the
+"rare hardware trap/halt vector" reading of `w12665: br 0x0003fbac` was a
+decode artifact of the old (wrong) `b7ff` model `(48+imm16)*4`. Under the
+corrected signed-relative-word model (`target = i + s16(low16)`), **w12665
+→ w12340 and w12663 (`2e3ffebd`) → w12340 — both in-range**, landing on
+`0x7c19f808` (a common prologue). A whole-image census of all 17 branch
+families (1550 branches) finds **zero out-of-range targets**; the
+"0x3FBAC–0x40098 trap band" never existed. The two-tier wedge model's hard
+tier is void; see experiments.md E-HM18 for the full correction, and
+E-HM18b for the mis-targeted E-HM12/13/15 patches.
 
 **Key-compare — found the best candidate so far, still not confirmed.**
 Extending `ehash_walker`'s window further (`w3096`–`w3500`,
