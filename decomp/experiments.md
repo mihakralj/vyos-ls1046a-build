@@ -1885,3 +1885,15 @@ activity per dispatch.
 2. Build the next ISO (6.18.38 + 0169) and deploy to .185 via lxc200 TFTP (dev-build loop) so the board has fe_obs.
 3. Resolve a traffic peer on eth4 (operator: power up .106, or alternative host on 10.99.2.0/24).
 4. Run `fe-obs run <peer> <n>` on .185 → 3-way verdict → record to qdrant.
+
+## 2026-08-10 20:00-20:30Z — 6.18.38+0169 build SUCCESS (dev-build native); deploy blocked by network outage
+
+**Build**: `bin/dev-build.sh kernel` on arm64-runner2 (48-core, native) — full 6.18.38-vyos kernel with all 113 patches (incl. **0169** — verified applied in the real CI-equivalent path: `✓ board/0169-fman-pcd-fe-obs-canary.patch`) + Layer-2 fixups (F-086 fe_recover, F-069a ic_probe, F-071 hash_probe, F-158 fe_scaffold, etc. injected). `fe_obs` symbols confirmed in `fman_pcd.o` (fman_pcd_fe_obs_enq_one/arm/disarm/fops). vmlinuz = `Linux version 6.18.38-vyos`, staged at `work/dev-tftp/vmlinuz` (13991343 B, LOCALVERSION=-vyos verified in `include/config/kernel.release`).
+
+**Dev-loop gotchas hit + fixed (worth remembering)**:
+1. Stale `work/.kernel-version` = 6.18.34 broke the 6.18.38 pin — stage-kernel.sh only calls fetch-kernel.sh when `.kernel-version` is ABSENT, and dev-build.sh expects `work/linux-$KVER`; the stale marker made the build stage 6.18.34 then fail the `linux-6.18.38` checkpoint. Fix: `sudo rm work/.kernel-version` (root-owned).
+2. Root-owned `work/.kernel.state` + `work/.kernel-version` → `Permission denied` on the state write. Fix: `sudo chown vyos:vyos` them.
+3. `work/dev-tftp/*` are 444 (read-only) from the previous build → `cp: Permission denied` at the push step. Fix: `chmod u+w work/dev-tftp/*`.
+4. Manual `make Image.gz` WITHOUT `LOCALVERSION=-vyos` clobbers `kernel.release` back to `6.18.38+` (S5 trap — LOCALVERSION is MANDATORY; dev-build passes it on the make line, a manual re-run must too). Fixed: `make ARCH=arm64 LOCALVERSION=-vyos Image.gz`.
+
+**Deploy BLOCKED**: 192.168.1.x LAN went down mid-session (heidi Tailscale subnet-router path lost) — lxc200 (192.168.1.137), .185, .106 all unreachable. `dev-build.sh push` (rsync → lxc200:/srv/tftp/) pending network recovery. Board experiment additionally needs a traffic peer on eth4 (.106 down). Artifact ready locally.
