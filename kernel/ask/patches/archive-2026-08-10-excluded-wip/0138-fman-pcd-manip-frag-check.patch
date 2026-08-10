@@ -1,0 +1,21 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 4a60f8acf..a4b6d5b 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -183,6 +183,14 @@
+ 	struct fman_pcd_manip * const *manips, u8 n_manips)
+ {
+ 	struct fman_pcd_hm_node *chain; struct muram_info *muram; struct mutex *pcd_lock;
++	size_t largest_free;
+ 	unsigned long off; void __iomem *vb, *cur; size_t total = 0; int i;
+ 
++	largest_free = fman_pcd_muram_get_largest_free(pcd);
++	if (largest_free < FMAN_PCD_HMCT_CHAIN_SIZE) {
++		pr_warn("fman_pcd_manip_chain_create: Not enough contiguous MURAM for chain. want %uB, have %zuB\n",
++			FMAN_PCD_HMCT_CHAIN_SIZE, largest_free);
++		return ERR_PTR(-ENOMEM);
++	}
++
+ 	if (!pcd || !manips || n_manips == 0 || n_manips > 4) return ERR_PTR(-EINVAL);
+ 	for (i = 0; i < n_manips; i++) {
+ 		struct fman_pcd_hm_node *src = (struct fman_pcd_hm_node *)manips[i];
