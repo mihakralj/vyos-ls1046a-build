@@ -1,0 +1,185 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index e5d1ae9..c8a5b14 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -30,6 +30,7 @@
+ #include <linux/kernel.h>
+ #include <linux/list.h>
+ #include <linux/of.h>
++#include <linux/sizes.h>
+ #include <linux/of_device.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
+@@ -52,14 +53,30 @@
+  * instead of competing with the global MURAM free list.
+  */
+ #define FMAN_PCD_MURAM_RESERVED_BYTES	(64U * 1024U)
+-#define FMAN_PCD_MURAM_ORDER		8	/* 256-byte gen_pool granule */
++
++/*
++ * Segregated-fit MURAM allocator pools. The 64 KiB reserved partition is
++ * split into power-of-two arenas. Allocations are made from the smallest
++ * pool that fits the request. This minimizes fragmentation from
++ * variable-sized header-manip command descriptors, the primary cause of
++ * Risk #13 (-ENOMEM on contiguous chain_create).
++ */
++#define FMAN_PCD_MURAM_POOL_COUNT	4
++#define FMAN_PCD_MURAM_POOL_MAX_IDX	(FMAN_PCD_MURAM_POOL_COUNT - 1)
++
++/* Pool sizes: 16K, 16K, 16K, 16K */
++static const size_t fman_pcd_muram_pool_sizes[FMAN_PCD_MURAM_POOL_COUNT] = {
++	SZ_16K, SZ_16K, SZ_16K, SZ_16K
++};
++
++/* Size classes: <=256, <=512, <=1K, >1K */
++static const size_t fman_pcd_muram_pool_classes[FMAN_PCD_MURAM_POOL_COUNT] = {
++	SZ_256, SZ_512, SZ_1K, 0
++};
+ 
+ struct fman_pcd {
+ 	/* Fman properties */
+@@ -95,7 +112,8 @@
+ 	size_t muram_reserved;
+ 	size_t muram_used;
+ 	size_t muram_high_water;
+-	struct gen_pool *muram_pool;	/* sub-allocator over the reservation */
++	/* Segregated sub-allocators over the reservation */
++	struct gen_pool *muram_pools[FMAN_PCD_MURAM_POOL_COUNT];
+ 
+ 	/*
+ 	 * Per-engine registries.  Each list_head is consumed by the
+@@ -141,19 +159,32 @@
+  */
+ unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size)
+ {
+-	unsigned long offset;
++	struct gen_pool *pool = NULL;
++	unsigned long offset = 0;
++	int i;
+ 
+ 	if (WARN_ON(!pcd) || size == 0)
+ 		return (unsigned long)-EINVAL;
+ 
+-	if (WARN_ON(!pcd->muram_pool))
+-		return (unsigned long)-ENXIO;
++	/* Find the smallest pool that fits the requested size */
++	for (i = 0; i < FMAN_PCD_MURAM_POOL_COUNT; i++) {
++		if (size <= fman_pcd_muram_pool_classes[i] ||
++		    fman_pcd_muram_pool_classes[i] == 0) {
++			pool = pcd->muram_pools[i];
++			break;
++		}
++	}
++
++	if (WARN_ON(!pool))
++		return (unsigned long)-EINVAL; /* Should not happen */
+ 
+ 	/*
+ 	 * gen_pool_alloc() returns 0 on failure.  The reserved partition
+@@ -162,8 +193,8 @@
+ 	 * non-zero and 0 unambiguously means out-of-arena.
+ 	 */
+-	offset = gen_pool_alloc(pcd->muram_pool, size);
++	offset = gen_pool_alloc(pool, size);
+ 	if (!offset)
+ 		return (unsigned long)-ENOMEM;
+ 
+@@ -179,16 +210,26 @@
+ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
+ 			 size_t size)
+ {
+-	if (WARN_ON(!pcd) || size == 0)
++	struct gen_pool *pool = NULL;
++	int i;
++
++	if (WARN_ON(!pcd) || size == 0 || offset == 0)
+ 		return;
+ 
+-	if (WARN_ON(!pcd->muram_pool))
+-		return;
++	/* Find the pool this allocation belongs to */
++	for (i = 0; i < FMAN_PCD_MURAM_POOL_COUNT; i++) {
++		if (offset >= (unsigned long)pcd->muram_pools[i]->data &&
++		    offset < ((unsigned long)pcd->muram_pools[i]->data + fman_pcd_muram_pool_sizes[i])) {
++			pool = pcd->muram_pools[i];
++			break;
++		}
++	}
+ 
+-	gen_pool_free(pcd->muram_pool, offset, size);
++	if (WARN_ON(!pool))
++		return; /* Should not happen */
+ 
++	gen_pool_free(pool, offset, size);
+ 	mutex_lock(&pcd->lock);
+ 	if (WARN_ON(pcd->muram_used < size))
+ 		pcd->muram_used = 0;
+@@ -1355,27 +1396,49 @@
+ 		goto err_unreserve;
+ 	}
+ 
+-	/* Slab allocator for CC nodes */
++	/* Create segregated MURAM pools */
++	chunk_offset = pcd->muram_offset;
++	for (i = 0; i < FMAN_PCD_MURAM_POOL_COUNT; i++) {
++		pcd->muram_pools[i] = gen_pool_create(ilog2(fman_pcd_muram_pool_classes[i] ?
++							    fman_pcd_muram_pool_classes[i] : SZ_4K), -1);
++		if (!pcd->muram_pools[i]) {
++			err = -ENOMEM;
++			goto err_destroy_muram_pools;
++		}
++		/* The "address" for the pool is the MURAM byte offset */
++		err = gen_pool_add_owner(pcd->muram_pools[i], chunk_offset,
++					 fman_pcd_muram_pool_sizes[i], -1,
++					 (void *)chunk_offset);
++		if (err) {
++			gen_pool_destroy(pcd->muram_pools[i]);
++			pcd->muram_pools[i] = NULL;
++			goto err_destroy_muram_pools;
++		}
++		chunk_offset += fman_pcd_muram_pool_sizes[i];
++	}
++
+ 	pcd->pcd_cc_nodes_cache =
+ 		kmem_cache_create("fman_pcd_cc_nodes",
+ 				  sizeof(struct fman_pcd_cc_node),
+ 				  0, SLAB_HWCACHE_ALIGN, NULL);
+ 	if (!pcd->pcd_cc_nodes_cache) {
+ 		err = -ENOMEM;
+-		goto err_destroy_pool;
++		goto err_destroy_muram_pools;
+ 	}
+ 
+ 	err = fman_pcd_debugfs_root_get();
+ 	if (err) {
+ 		dev_warn(fman_get_dev(fman),
+ 			 "fman_pcd: can't create debugfs (err %d)\n", err);
+-		err = 0;
+ 	}
+ 
+ 	return pcd;
+ 
+ err_destroy_cc_slab:
+ 	kmem_cache_destroy(pcd->pcd_cc_nodes_cache);
+-err_destroy_pool:
+-	gen_pool_destroy(pcd->muram_pool);
++err_destroy_muram_pools:
++	for (i = 0; i < FMAN_PCD_MURAM_POOL_COUNT; i++)
++		if (pcd->muram_pools[i])
++			gen_pool_destroy(pcd->muram_pools[i]);
+ err_unreserve:
+ 	fman_muram_free_mem(muram, pcd->muram_offset,
+ 			    FMAN_PCD_MURAM_RESERVED_BYTES);
+@@ -1424,8 +1487,11 @@
+ 		fman_pcd_fe_pool_free(pcd);
+ 	mutex_destroy(&pcd->fe_lock);
+ 
+-	if (pcd->muram_pool)
+-		gen_pool_destroy(pcd->muram_pool);
++	for (i = 0; i < FMAN_PCD_MURAM_POOL_COUNT; i++) {
++		if (pcd->muram_pools[i])
++			gen_pool_destroy(pcd->muram_pools[i]);
++	}
+ 
+ 	if (pcd->pcd_cc_nodes_cache)
+ 		kmem_cache_destroy(pcd->pcd_cc_nodes_cache);
