@@ -25,6 +25,16 @@
 
 #include "include/ask_internal.h"
 
+/*
+ * PRODUCTION NOTE (2026-08-11, plans/ASK2-PRODUCTION-ARCHITECTURE.md Phase 1):
+ * The debugfs surface is gated behind CONFIG_NET_ASK_DEBUG_FS and is compiled
+ * OUT of production images. Ask.ko's production control surface is the
+ * generic-netlink "ask" family (ask_genl.c) alone. When this symbol is off,
+ * no debugfs code is present in the module at all — ask_debugfs_init()/exit()
+ * compile to no-ops below.
+ */
+#ifdef CONFIG_NET_ASK_DEBUG_FS
+
 static struct dentry *ask_debugfs_root;
 
 static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
@@ -92,3 +102,16 @@ void ask_debugfs_exit(void)
 	ask_debugfs_root = NULL;
 	ask_pr_dbg("debugfs: exit\n");
 }
+
+#else /* !CONFIG_NET_ASK_DEBUG_FS */
+
+int ask_debugfs_init(void)
+{
+	return 0;
+}
+
+void ask_debugfs_exit(void)
+{
+}
+
+#endif /* CONFIG_NET_ASK_DEBUG_FS */
