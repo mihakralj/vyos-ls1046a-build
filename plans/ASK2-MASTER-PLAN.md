@@ -981,6 +981,18 @@ decode of `.106`'s live `FMBM_RCCB` targets — the byte-level oracle for this
 branch's chain. Phase C: Fork-B gap punch-list. Feeds both T-M3-R failure
 analysis and the CC-tree replacement harness.
 
+**[NOTE — 2026-08-11]** Phases A/B of the NXP-106 oracle are now **answered**
+and stored in qdrant (the live `.106` ASK stack was fully mapped over SSH
+2026-08-11): complete arming/offload process (`qdrant: ask-arm-offload-every-step`),
+HIT/PASS encoding decode from the 999-patch source (`qdrant:
+hit-pass-flow-encoding-decoded`), and the ASK2↔vendor difference inventory
+(`qdrant: ask2-vendor-diff-inventory`). The `t_ExtHashFe` decode + the DDR
+record-side `t_ExtHashResult` encoding are written into `arch/fman-fe-ehash.md`
+§5.1/§5.2. **Phase C (Fork-B gap punch-list) is the live work** — it is what
+`plans/ASK2-PRODUCTION-ARCHITECTURE.md` Phase 2 (M3 attempt 5) executes. The
+CC-tree replacement harness is no longer gated on Phase A/C; it follows the
+same three-delta attempt-5.
+
 ### 4.3 T-M6-5 — CC-tree scale-out ⛔ BLOCKED on T-M3-R + Phase A/C
 
 **[SPEC]** Raising `FMAN_CC_MAX_STATIC_KEYS` alone has zero effect: CR-007
@@ -1069,7 +1081,7 @@ the milestone shown.
 
 | ID | Symptom | Status | Gates | Next action |
 |---|---|---|---|---|
-| **F-141** | FE-VM ehash never HITs (umbrella). Root causes fixed: flow-record allocator (F-142), EXT_HASH `contextSize` (F-149), CC match-row mask (F-156), scaffold overwrite (F-165), EKFC reconfiguration (F-169). **F-163 (PORT_ID key) was itself wrong, not a fix — reverted 2026-08-06 (§4.1).** FQID choice and key content both ruled out as explanations (attempts 2–4). Suspected remaining cause: wrong AD species at `FMBM_RCCB` (§4.1, §7.11), not yet tested | OPEN — attempt 5 needed | M3 | T-M3-R attempt 5 (§4.1) |
+| **F-141** | FE-VM ehash never HITs (umbrella). Root causes fixed: flow-record allocator (F-142), EXT_HASH `contextSize` (F-149), CC match-row mask (F-156), scaffold overwrite (F-165), EKFC reconfiguration (F-169). **F-163 (PORT_ID key) was itself wrong, not a fix — reverted 2026-08-06 (§4.1).** FQID choice and key content both ruled out as explanations (attempts 2–4). Suspected remaining cause: wrong AD species at `FMBM_RCCB` (§4.1, §7.11), not yet tested. **2026-08-11 course-correction** (`plans/ASK2-PRODUCTION-ARCHITECTURE.md` §3.1/§4 Phase 2): attempt 5 = three deltas — (1) RCCB AD species (vendor `copy_td_to_ccbase` ehash-node-in-root form vs our bare form), (2) record-side HIT payload (16 B `t_ExtHashResult` = per-flow MUX context + `monitorAddr` stats, not our u32 ENQ offset — see `arch/fman-fe-ehash.md` §5.2), (3) params-page `OFFLOAD_SUPPORT_EN` (`misc |= 0x40000000`) + FE pool/index at `+0x54/+0x58`. Land Delta 1 alone first to isolate the variable | OPEN — attempt 5 needed | M3 | T-M3-R attempt 5 per `plans/ASK2-PRODUCTION-ARCHITECTURE.md` Phase 2 |
 | **F-076** | Port RX deaf after FE-VM-armed disengage; `fe_arm.engaged` stays YES | CLOSED on the scaffold path (`fe_disengage_full` + `fe_recover` proven); **DIRECT path still deaf** | M3 (T-M3-R uses the direct path) | Observe during T-M3-R; `fman_pcd_port_recover` de-wedge (0163) if hit |
 | **CR-001 / F-123** | Production YNL engage/disengage cycles leave `pcd-snapshot` drift (KG scheme[4], BMI `rfpne`/`rccb`, MURAM delta) | PARTIAL | **M7 release claim**, M8 soak | Validate three consecutive clean engage/disengage cycles per DUT with `engage/disengage rc=0` and byte-clean `pcd-snapshot`; continue HIT/flow validation only if clean |
 | **CR-003** | VyOS commit-path handling was fail-open (rc/stderr confusion + helper-failure masking) | PARTIAL | M7 release claim | Close together with CR-001: one production control path (YNL/genl), fail-closed config behavior, no debugfs control writes from the VyOS commit path |
