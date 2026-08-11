@@ -2340,6 +2340,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-176 ehash stats/timestamp HIT discriminator"
 fi
 
+# F-181 (2026-08-11): vendor-faithful per-key opcode-script in the ehash DDR
+# record.  Source-grounded against the genuine vendor ExternalHashTableAddKey()
+# (we-are-mono/ASK 010-ask-fman-dpaa-ehash.patch): the vendor en_ehash_entry
+# flags carry SET_OPC_OFFSET/SET_PARAM_OFFSET + an inline ENQUEUE_PKT opcode
+# list + en_ehash_enqueue_param(flow fqid).  Our record had flags=STATS_EN only
+# + key + u32 ENQ offset, so on a HIT the FE-VM walks opc_offset=0 (header
+# bytes) and cannot ENQUEUE -- the ehash comparator never completes.  F-181
+# writes the vendor opcode-script.  MUST run AFTER F-176 (sets STATS_EN in
+# flags) and BEFORE F-175's record-model blocks (which F-181's payload
+# supersedes for the dispatch).  No container change -- 16B bucket path kept.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_181.py" 2>&1
+    echo "### fman_pcd.c: F-181 ehash record opcode-script + ENQ fqid"
+fi
+
 # F-177 (2026-08-07, T-M3-R Phase 2 item 2): Phase 1 (F-176 corrected to
 # STATS_EN-only) confirmed the FE-VM ehash zero-HIT result is real. Phase 2
 # item 1 (int_buf_pool_addr/global_mem_offset byte-for-byte re-check against
