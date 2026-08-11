@@ -222,6 +222,25 @@ The §3 FE pool holds 28-byte slots because the largest FE record is the **exter
 
 **Critical address-space split:** the table pointer (`w2`/`w3`) is a **full DDR bus address** (`table_dma`, from `0130`'s `dma_alloc_coherent`), because the FE VM DMA-reads the bucket array from DDR; `nextFEPtr`/`missNextFEPtr` (`w5`/`w6`) are **MURAM offsets** (gen_pool offsets, the SDK `phys(FE) - physicalMuramBase` convention). The `0125` `en_exthash_node` is the table/int-buf **substrate** feeding `t_ExtHashFe`'s `w2`/`w3` (table addr), `w1` hashMask/hashShift — it is **not** itself the FE object. `0131` also repoints `fman_pcd_fe_enter_build`'s default `gmask` to prefer `pcd->fe_hash_off` (the `t_ExtHashFe`) once built, falling back to the MUX singleton (the `0127` default, kept so the bare-chain gate still works). Ships **DORMANT**: assembled + byte-verifiable via the `fe_hashfe` debugfs readback against this table while the port is quiescent (§8.6 item 6), but nothing dispatches into it until the M2 arm (D9-B) switches the KeyGen scheme to AC_CC and points the BMI CC root at the `FE_ENTER` AD. `w4` and the `w2` LIODN are arming-time fields, left zero.
 
+### 5.2 The HIT record encoding — `en_ehash_entry` + `t_ExtHashResult` (decoded 2026-08-11)
+
+**[SPEC — decoded from the genuine lf-5.4 LSDK `999-layerscape-ask-kernel` patch (authoritative source), cross-checked against the `.106` vendor stack; qdrant `hit-pass-flow-encoding-decoded`.]** The DDR flow record written by `ExternalHashTableAddKey()` is **not** "key + next-FE u32" (our `0128` form) — it is the vendor's `en_ehash_entry` with a **16-byte HIT result payload** after the key:
+
+| Offset | Field | Encoding |
+|---|---|---|
+| `0x00` | chain header | `flags:16` (BE) + `next_entry_hi:16` + `next_entry_lo:32` (previous bucket head; collision chain) |
+| `0x08` | key | variable size (14 B vendor / our `keysize`), compare window — `hash_bytes_offset=1` → key at offset 8 |
+| `0x08 + keysize` | **`t_ExtHashResult` (16 B)** | `liodnContextAndContextPtrHi` + `contextPtrLow` (**contextAddr** = phys addr of the per-flow MUX FE chain) + `liodnMonitorAndMonitorPtrHi` + `monitorPtrLow` (**monitorAddr** = stats/aging counters) |
+| `0x100` (256) | stats block (extended entry) | `packet_count` u64, `packet_bytes` u64, `timestamp` u32, `reserved` u32, `timestamp_counter` u32 — 64-byte aligned |
+
+- `MAX_EN_EHASH_ENTRY_SIZE = 256` (key + result region); `MAX_EN_EHASH_EXT_ENTRY_SIZE = 320` (256 + stats; "Stats begins at the 256th byte, aligned again on 64 bytes").
+- **Per-key add sequence (the missing HIT-side glue):** `BuildFEChainAndContextFromNextEngine(h_FmPcd, p_Context, &ccNextEngineParams)` builds the per-flow FE chain (MUX → ENQ with that flow's FQID, plus any HM ops) → `FmPcdCcBuildContextByFE(h_FmPcd, p_Context, FE_MUX_CONTEXT_OFFSET, &MUX)` writes the MUX context slot → `ExternalHashBuildResult(&result, dataLiodnOffset, PTR_TO_UINT(p_Context), monitorAddr)` builds the 16 B result → `ext_hash_add_key()` writes **key + result** into the DDR bucket. Contexts come from the FE-context pool (`GetFEContext`, MURAM).
+- **HIT walk:** FE hashes → bucket → compare key at offset 8 → read `t_ExtHashResult` → dispatch to `contextAddr` (the per-flow MUX chain) → update `monitorAddr` (stats/aging). `monitorAddr` is **required** when `statisticsMode` or `agingSupport` is set.
+- **MISS:** `miss_action_type ∈ {DONE=0, NIA=1, ENQUE=2, DROP=3}` (node `w0` bits 1:0); MISS→KG re-classify = `NIA_ENG_KG | NIA_KG_DIRECT | scheme_id | NIA_KG_CC_EN` (matches vendor `RFPNE=0x00480200`).
+- **Fe structs:** `t_FmExtHashResult` = `{u64 contex_addr; u64 monitoring_addr}` (16 B, the result field); `en_exthash_node` w0 = `table_base_hi:16|hash_bytes_offset:2|reserved:6|key_size:6|miss_action_type:2`, w1 = `table_base_lo`, w2 = `global_mem_offset:12|hash_mask_bits:4|int_buf_pool_addr:16`, w3 = `nia`/`fqid`.
+- **Our `0128` delta (the M3 structural gap):** we write a single u32 ENQ FE MURAM offset after the key (`fe_ptr_off = 8 + align8(keysize)`); the vendor writes the 16 B `t_ExtHashResult` and builds per-flow MUX contexts. **Porting the exact semantics** (per-flow context build + result write + `monitorAddr`) is the M3 attempt-5 record-side work (Phase 2, `plans/ASK2-PRODUCTION-ARCHITECTURE.md`).
+- **Bucket formats:** both exist in the 999 source — 16 B `en_exthash_bucket {u64 h; u64 pad}` (chained head-insert; what `0128` implements) and the 256 B `t_FmExtHashBucket` (inline `key_result[0xF0]` extended format). Selection per the external-hash path is an open question (§8.6 / plan §6).
+
 ---
 
 ## 6. MURAM / DDR budget & the vendor over-provisioning anti-pattern
