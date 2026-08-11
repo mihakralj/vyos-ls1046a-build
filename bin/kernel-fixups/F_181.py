@@ -33,9 +33,9 @@ FIX (single variable, NO container change): write the vendor opcode-script.
     param_off = opc_off + MAX_OPCODES(16)
     r[opc_off] = ENQUEUE_PKT (0x01)
     en_ehash_enqueue_param at param_off: mtu=be16(1500), hdr=0, bpid=0,
-        fqid=be32(enq_fe_off & 0xffffff), word=0, word2=0
+        fqid=be32(enq_off & 0xffffff), word=0, word2=0
 
-Anchored on the actual CI-record state (flags=0x1000 + u32 enq_fe_off at 8+
+Anchored on the actual CI-record state (flags=0x1000 + u32 enq_off at 8+
 align8 keysize).  Idempotent (marker "F-181: opcode-script").  CI-only build.
 """
 
@@ -103,11 +103,19 @@ new_header = (
     "\t\t*(__be16 *)(r + param_off + 0) = cpu_to_be16(1500);\t/* mtu */\n"
     "\t\t*(r + param_off + 2) = 0;\t/* hdr_xpnd_sz */\n"
     "\t\t*(r + param_off + 3) = 0;\t/* bpid */\n"
-    "\t\t*(__be32 *)(r + param_off + 4) = cpu_to_be32((u32)enq_fe_off & 0x00ffffff);\t/* fqid */\n"
+    "\t\t*(__be32 *)(r + param_off + 4) = cpu_to_be32((u32)__FQID_SRC__ & 0x00ffffff);\t/* fqid */\n"
     "\t\t*(__be32 *)(r + param_off + 8) = cpu_to_be32(0);\t/* stats word */\n"
     "\t\t*(__be32 *)(r + param_off + 12) = cpu_to_be32(0);\t/* dscp word */\n"
     "\t}\n"
 )
+# F-181: resolve the add_key target-param name (enq_off vs enq_fe_off).
+# Confine detection to the add_key signature: the LAST non-comment line
+# before "{ }" of the function decl.  Match "unsigned long enq_off" or
+# "unsigned long enq_fe_off" specifically inside that declaration block.
+import re as _re
+m = _re.search(r"fman_pcd_ehash_add_key\([^;{]*?\b(?:unsigned long\s+)?(enq_off|enq_fe_off)\)", src)
+fqid_param = m.group(1) if m else ("enq_off" if "u32 enq_off" in src else "enq_fe_off")
+new_header = new_header.replace("__FQID_SRC__", fqid_param)
 apply_block("opcode-script record", old_header, new_header)
 
 with open(path, "w") as f:
