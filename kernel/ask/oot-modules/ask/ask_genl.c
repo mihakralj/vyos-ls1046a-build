@@ -57,6 +57,7 @@ static int ask_genl_get_info_doit(struct sk_buff *skb, struct genl_info *info);
 static int ask_genl_get_muram_doit(struct sk_buff *skb, struct genl_info *info);
 static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info);
 static int ask_genl_disengage_doit(struct sk_buff *skb, struct genl_info *info);
+static int ask_genl_set_policer_doit(struct sk_buff *skb, struct genl_info *info);
 /*
  * The eopnotsupp stubs and the per-flow fill / dump-walker helpers below
  * are non-static so the kunit suite (PR9 / M1.5) can call them directly
@@ -155,7 +156,7 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 .cmd      = ASK_CMD_SET_POLICER,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 .flags    = GENL_UNS_ADMIN_PERM,
-.doit     = ask_genl_eopnotsupp_doit,
+.doit     = ask_genl_set_policer_doit,
 },
 {
 .cmd      = ASK_CMD_ENGAGE,
@@ -381,8 +382,73 @@ err:
 }
 
 /* ------------------------------------------------------------------------- */
-/* Lifecycle                                                                  */
+/* ASK_CMD_SET_POLICER handler                                                */
+/*                                                                            */
+/* Programs one srTCM (RFC 2697) policer profile on a port via the exported   */
+/* fman_pcd_plcr_install(). srTCM = single-rate two-color: committed rate +   */
+/* committed burst. The genl request carries a nested ASK_ATTR_POLICER set    */
+/* (port-id, rate-bps, burst-bytes) per kernel/ask/uapi/ask.yaml.             */
+/*                                                                            */
+/* Phase 1 (plans/ASK2-PRODUCTION-ARCHITECTURE.md): genl is the production    */
+/* control surface; this replaces any future debugfs policer knob. The        */
+/* implementation is a thin wire of the already-exported kernel API — no      */
+/* silicon encode logic lives in ask.ko.                                      */
 /* ------------------------------------------------------------------------- */
+static int ask_genl_set_policer_doit(struct sk_buff *skb, struct genl_info *info)
+{
+	struct fman_pcd_plcr_hw_profile hw;
+	struct fman *fman;
+	struct fman_pcd *pcd;
+	struct nlattr *nest;
+	struct nlattr *tb[ASK_POLICER_ATTR_MAX + 1];
+	u8 port_id;
+	u32 rate_bps;
+	u32 burst_bytes;
+	int rc;
+
+	nest = info->attrs[ASK_ATTR_POLICER];
+	if (!nest)
+		return -EINVAL;
+
+	rc = nla_parse_nested(tb, ASK_POLICER_ATTR_MAX, nest, ask_policer_policy,
+			      info->extack);
+	if (rc)
+		return rc;
+
+	if (!tb[ASK_POLICER_ATTR_PORT_ID] ||
+	    !tb[ASK_POLICER_ATTR_RATE_BPS] ||
+	    !tb[ASK_POLICER_ATTR_BURST_BYTES])
+		return -EINVAL;
+
+	port_id   = nla_get_u8(tb[ASK_POLICER_ATTR_PORT_ID]);
+	rate_bps  = nla_get_u32(tb[ASK_POLICER_ATTR_RATE_BPS]);
+	burst_bytes = nla_get_u32(tb[ASK_POLICER_ATTR_BURST_BYTES]);
+
+	fman = ask_hw_get_fman();
+	pcd = fman ? fman_get_pcd(fman) : NULL;
+	if (!pcd)
+		return -ENODEV;
+
+	memset(&hw, 0, sizeof(hw));
+	hw.trtcm       = false;	       /* srTCM: single-rate two-color */
+	hw.color_aware = false;	       /* colour-blind */
+	hw.cir_bps     = rate_bps;
+	hw.cbs_bytes   = burst_bytes;
+	hw.pir_bps     = 0;	       /* N/A for srTCM */
+	hw.pbs_bytes   = 0;	       /* N/A for srTCM */
+
+	/* profile_id == port_id (one srTCM policer slot per port). */
+	rc = fman_pcd_plcr_install(pcd, port_id, port_id, &hw);
+	if (rc) {
+		ask_pr_err("genl: set_policer port 0x%02x failed: %d\n",
+			   port_id, rc);
+		return rc;
+	}
+
+	ask_pr_info("genl: set_policer port 0x%02x rate=%u bps burst=%u\n",
+		    port_id, rate_bps, burst_bytes);
+	return 0;
+}
 int ask_genl_register(void)
 {
 int rc = genl_register_family(&ask_genl_family);
