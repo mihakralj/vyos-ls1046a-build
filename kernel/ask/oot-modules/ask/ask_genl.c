@@ -20,7 +20,15 @@
 #include <net/sock.h>
 
 #include <uapi/linux/ask/ask.h>
+#include <linux/fsl/fman_pcd.h>
 #include "include/ask_internal.h"
+
+/*
+ * fman_get_pcd() is EXPORT_SYMBOL_GPL but declared only in the private
+ * fsl_dpaa_fman driver header (fman/fman.h). ask.ko consumes the exported
+ * symbol, so declare the prototype here (matching fman.h).
+ */
+extern struct fman_pcd *fman_get_pcd(struct fman *fman);
 
 /* ------------------------------------------------------------------------- */
 /* PR7 (M1.3) flow command handlers — wire DUMP_FLOWS / GET_FLOW /            */
@@ -46,6 +54,7 @@ static const struct genl_multicast_group ask_mcgrps[] = {
 
 /* Forward */
 static int ask_genl_get_info_doit(struct sk_buff *skb, struct genl_info *info);
+static int ask_genl_get_muram_doit(struct sk_buff *skb, struct genl_info *info);
 static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info);
 static int ask_genl_disengage_doit(struct sk_buff *skb, struct genl_info *info);
 /*
@@ -110,7 +119,7 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 .cmd      = ASK_CMD_GET_MURAM,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 .flags    = GENL_UNS_ADMIN_PERM,
-.doit     = ask_genl_eopnotsupp_doit,
+.doit     = ask_genl_get_muram_doit,
 },
 {
 .cmd      = ASK_CMD_DUMP_FLOWS,
@@ -273,17 +282,102 @@ goto err;
 }
 
 rc = ask_genl_get_info_fill(rep);
-if (rc)
-goto err_cancel;
+	if (rc)
+		goto err_cancel;
 
-genlmsg_end(rep, hdr);
-return genlmsg_reply(rep, info);
+	genlmsg_end(rep, hdr);
+	return genlmsg_reply(rep, info);
 
 err_cancel:
-genlmsg_cancel(rep, hdr);
+	genlmsg_cancel(rep, hdr);
 err:
-nlmsg_free(rep);
-return rc;
+	nlmsg_free(rep);
+	return rc;
+}
+
+/* ------------------------------------------------------------------------- */
+/* ASK_CMD_GET_MURAM handler                                                   */
+/*                                                                            */
+/* Returns the FMan PCD MURAM budget as a nested ASK_ATTR_MURAM set.           */
+/* Production equivalent of the fman_pcd debugfs muram_budget node: the        */
+/* "no debugfs in production" plan (plans/ASK2-PRODUCTION-ARCHITECTURE.md)     */
+/* requires this info be reachable over genl, not /sys/kernel/debug.           */
+/*                                                                            */
+/* The kernel-side data already exists (fman_pcd_get_muram_budget() +          */
+/* fman_get_pcd() are exported); this handler only wires it onto the wire.     */
+/* No FMan handle (module not brought up / not bound) -> empty budget fields   */
+/* and rc=0, matching the "no microcode info" contract userspace already       */
+/* understands for GET_INFO.                                                   */
+/* ------------------------------------------------------------------------- */
+static int ask_genl_fill_muram(struct sk_buff *skb)
+{
+	struct fman *fman;
+	struct fman_pcd *pcd;
+	struct fman_pcd_muram_budget b;
+	struct nlattr *nest;
+	bool have;
+
+	memset(&b, 0, sizeof(b));
+
+	fman = ask_hw_get_fman();
+	pcd = fman ? fman_get_pcd(fman) : NULL;
+	have = pcd != NULL;
+	if (have)
+		b = fman_pcd_get_muram_budget(pcd);
+
+	nest = nla_nest_start(skb, ASK_ATTR_MURAM);
+	if (!nest)
+		return -EMSGSIZE;
+
+	if (!have) {
+		/* No PCD: report zeros (no MURAM budget info). */
+		nla_nest_end(skb, nest);
+		return 0;
+	}
+
+	if (nla_put_u32(skb, ASK_MURAM_ATTR_TOTAL_BYTES,
+			(u32)b.reserved_bytes) ||
+	    nla_put_u32(skb, ASK_MURAM_ATTR_FREE_BYTES,
+			(u32)b.free_bytes) ||
+	    nla_put_u32(skb, ASK_MURAM_ATTR_FLOW_TABLE_BYTES,
+			(u32)b.used_bytes)) {
+		nla_nest_cancel(skb, nest);
+		return -EMSGSIZE;
+	}
+
+	nla_nest_end(skb, nest);
+	return 0;
+}
+
+static int ask_genl_get_muram_doit(struct sk_buff *skb, struct genl_info *info)
+{
+	struct sk_buff *rep;
+	void *hdr;
+	int rc;
+
+	rep = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!rep)
+		return -ENOMEM;
+
+	hdr = genlmsg_put_reply(rep, info, &ask_genl_family, 0,
+				ASK_CMD_GET_MURAM);
+	if (!hdr) {
+		rc = -EMSGSIZE;
+		goto err;
+	}
+
+	rc = ask_genl_fill_muram(rep);
+	if (rc)
+		goto err_cancel;
+
+	genlmsg_end(rep, hdr);
+	return genlmsg_reply(rep, info);
+
+err_cancel:
+	genlmsg_cancel(rep, hdr);
+err:
+	nlmsg_free(rep);
+	return rc;
 }
 
 /* ------------------------------------------------------------------------- */
