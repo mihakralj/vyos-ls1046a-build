@@ -28,6 +28,23 @@ help
 
   Say M here to build as a module (recommended). Say N if unsure.
 
+config NET_ASK_DEBUG_FS
+bool "ASK2 debugfs diagnostics (dev/bring-up only)"
+depends on NET_ASK
+depends on DEBUG_FS
+default n
+help
+  Expose /sys/kernel/debug/ask/ control + diagnostics files.
+
+  This is for silicon bring-up and development ONLY. It is NOT a
+  production interface: debugfs is not a stable ABI and the VyOS
+  configuration path must never depend on it. PRODUCTION images MUST
+  disable this option so no /sys/kernel/debug/ask nodes exist at all;
+  the production control surface is the generic-netlink "ask" family
+  (see NET_ASK help).
+
+  Say N in production. Say Y when iterating on hardware.
+
 config NET_ASK_KUNIT_TEST
 tristate "ASK2 kunit test harness"
 depends on NET_ASK
