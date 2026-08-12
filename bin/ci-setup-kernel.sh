@@ -2465,6 +2465,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c/fman_pcd_kg.c/fman_pcd.c: F-183 Delta-1 dispatch (CCBS word-3, group-root miss-slot FE_ENTER)"
 fi
 
+# F-184 (2026-08-12): the first live `fe_obs arm` (patch 0169's canary
+# discriminator, until then only compile-verified) panicked the kernel on
+# .185 -- reproduced twice:
+#   list_add double add ... kernel BUG at lib/list_debug.c:35!
+#   fman_pcd_fe_obs_enq_one -> __list_add_valid_or_report -> panic=60 reboot
+# Root cause: fe_obs_enq_one() takes the canary FE object via
+# list_first_entry_or_null(&pcd->fe_available) (which does NOT unlink) and
+# list_add_tail's it onto fe_singletons WITHOUT list_del -- a double-add.
+# Every other fe_available consumer (singletons/enq/hashfe builders) does
+# list_del first; fe_obs missed the pattern. Insert the list_del.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_184.py" 2>&1
+    echo "### fman_pcd.c: F-184 fe_obs_enq_one list_del fix (arm-panic)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
