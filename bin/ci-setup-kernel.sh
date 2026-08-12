@@ -2551,6 +2551,28 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-187 fe_hashfe miss-result leak fix (16B MURAM + 256B DMA/cycle)"
 fi
 
+# F-188 (2026-08-12, P0-2 production-path audit): align the production
+# genl/flowtable path with the E25/E26-verified 14-byte mechanism. Three
+# stale bits guaranteed no production HIT: (1) __fman_pcd_fe_build_vm_chain
+# created the ehash table with key_size 13 + fman_pcd_fe_engage armed EKFC
+# 0x001C0006 (13-byte, no PORT_ID) while records are 14-byte
+# (ASK_FE_KEY_SIZE=14) -> comparator/bucket never agree; (2) the record
+# target FQID was action->enq_off, fed by ask.ko's
+# ask_hw_get_enq_fe_off() = the ENQ FE MURAM offset (invalid FQID);
+# (3) ask_fe_build_key wrote k[0]=key->port_id (hw port 0x11) but the
+# silicon's PORT_ID extraction reads the zeroed dv default 0x00 (fixed by
+# a direct OOT edit to kernel/ask/oot-modules/ask/ask_flow_offload.c).
+# Fixes: ehash_key_sz 13->14, fe_engage EKFC -> 0x801C0006, fe_flow_add
+# target -> fman_pcd_resolve_miss_fqid(pcd, hw_port_id) (own-port RX
+# FQID, same source as the miss path). The genl engage itself already
+# reaches the F-185/F-186 arm (verified live: ENQUE node + own-port miss
+# fqid + dv0/dv1=0); the nft flowtable offload additionally needs active
+# conntrack on the board (nf_conntrack_count was 0) -- separate item.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_188.py" 2>&1
+    echo "### fman_pcd.c: F-188 production-path alignment (14-byte key + own-port flow target)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 

@@ -1263,7 +1263,12 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
  */
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE])
 {
-        k[0] = key->port_id;
+        /* F-188: k[0] = 0x00, NOT key->port_id. The silicon's PORT_ID
+         * extraction reads the scheme's zeroed dv0/dv1 default (0x00) --
+         * the raw FMan hw port id (0x11 for eth4) never matches (E25/E26
+         * brute-force + live-hash verified; see decomp/experiments.md E28).
+         */
+        k[0] = 0;
         memcpy(&k[1],  key->src_ip, 4);
         memcpy(&k[5],  key->dst_ip, 4);
         k[9] = key->l4_proto;
@@ -1278,7 +1283,7 @@ void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE])
  */
 void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6])
 {
-        k[0] = key->port_id;
+        k[0] = 0;   /* F-188: PORT_ID = 0x00 (zeroed dv default), see ask_fe_build_key() */
         memcpy(&k[1],  key->src_ip, 16);
         memcpy(&k[17], key->dst_ip, 16);
         k[33] = key->l4_proto;

@@ -2418,3 +2418,81 @@ every step except multi-port traffic (cabling) and IPv6 (unbuilt). Board
 restored to clean S0 (scheme 4 plain RSS, RCCB 0, eth3 temp IP removed,
 .106 ARP cleaned). MURAM gen_pool leak per engage cycle persists (fixup
 candidate, not blocking).
+
+## E27 — F-187 leak-fix verification on .185 (2026-08-12, 6.18.44-vyos, CI run 31648385802, commit 04a6f809)
+
+Root-caused + fixed the fe_hashfe MURAM leak (F-187): fman_pcd_fe_hash_build()
+allocates pcd->miss_res_off (16 B MURAM t_ExtHashResult) + pcd->miss_ctx
+(256 B DMA), but fman_pcd_fe_hash_free() returned only the FE object to the
+pool and never freed them. Diagnosis path: minimal arm (no hashfe build)
+leaked 0; full cycle leaked exactly +16 B MURAM/cycle, linear (1616→1632→
+1648→1664); per-step bisect pinned the +16 to fe_hashfe build (fe_enter's
+16 B was freed; fe_hashfe's was not); code confirmed miss_res_off/miss_ctx
+had no free site. Fix: fe_hash_free frees both (guarded), resetting to
+0/NULL; the hash AD is zeroed first so the missResult pointer ref is gone
+before the target is freed.
+
+Verification on the F-187 image (fresh boot, S0 used=720 B):
+- 4 full arm→disengage→teardown cycles: used 720 → 1328 (ONE-TIME first-
+  cycle cost: port mgmt/pool + params-page first-touch) → **1328 → 1328 →
+  1328 → 1328 — FLAT. No monotonic growth.**
+- Per-step cycle: fe_hashfe clear now shows −16 (F-187 free working);
+  fe_enter clear −16; cycle ends exactly at its start (fully reversible).
+- No regression: node byte-exact `8e400000 fa110000 04d9080c 00000300`
+  (ENQUE + own-port fqb 0x300), hit flow 44444 rc=7, miss flow 44448 rc=7,
+  eth4 rx=3, 0 errs/drops.
+- Teardown returns used to exactly 1328; port 0x11 back to RSS (rccb 0).
+
+Observation: the 720→1328 first-cycle residual (~608 B) is a one-time
+per-port cost (fe_port mgmt/pool + engaged params page retained), flat
+thereafter — NOT a per-cycle leak; the "used MUST return to baseline"
+invariant holds in the per-cycle sense (end == start of each cycle). S0
+baseline differs per image (720 here vs 1600 on 2147-rolling) due to
+probe-time allocation order; always compare within a boot.
+
+## E28 — P0-2 production-path audit: genl engage OK, three stale bits found + flowtable/conntrack blocker (2026-08-12, .185 6.18.44-vyos)
+
+Production-path validation (ask.ko genl + nft flowtable -> FLOW_CLS_REPLACE
+-> fman_pcd_fe_flow_add). Findings:
+
+1. **genl engage WORKS (F-185/F-186 path).** `ynl --family ask --do engage
+   {"port-id": 17}` (sudo; admin-perm) -> "ask: hw: offload ENGAGED port
+   0x11 (S0->S1)". ask_hw_offload_engage() calls fman_pcd_fe_engage() (NOT
+   the stale fman_pcd_offload_engage M1 graft). Live state: scheme 4 AC_CC
+   mode 0x80000006, ekfc 0x001c0006, dv0/dv1=0, fqb 0x300, rfpne
+   0x00480200, RCCB 0x54b00 -> node `8d400000 fa180000 04c7080f 00000300`
+   = miss_action ENQUE(2), key_size 13, mask_bits 15 (0x7fff), miss fqid
+   0x300 (own-port). Disengage clean (RSS restored, rccb 0).
+
+2. **THREE stale production bits (guaranteed no production HIT):**
+   (a) __fman_pcd_fe_build_vm_chain ehash_key_sz=13 + fe_engage EKFC
+   0x001c0006 (13-byte) vs records ASK_FE_KEY_SIZE=14 (F-163) -> comparator
+   byte-count + bucket index never agree;
+   (b) ask_fe_build_key k[0]=key->port_id = FMan hw port id (0x11/eth4),
+   but silicon PORT_ID extraction reads the zeroed dv default = 0x00
+   (E25/E26 brute-force) -> byte-0 mismatch;
+   (c) fman_pcd_fe_flow_add param.fqid = action->enq_off, fed by
+   ask_hw_get_enq_fe_off() = fman_pcd_fe_enq_get_offset() = ENQ FE MURAM
+   offset (invalid FQID; E25: target must be the frame's own-port RX FQID
+   0x300).
+   Fixed by F-188 (fman_pcd.c: key_sz 14, EKFC 0x801c0006, flow target =
+   fman_pcd_resolve_miss_fqid(pcd, hw_port_id)) + direct OOT edit
+   (ask_flow_offload.c k[0]=0, v4+v6).
+
+3. **flowtable offload BLOCKED by passive conntrack on this board:**
+   nft 1.0.9 accepts only `hook ingress` flowtables (hook forward =
+   "invalid hook forward" — the plan's "use hook forward" defect does not
+   apply to this build). Scoped ingress flowtable (eth4, flags offload,
+   rule 10.99.2.106->192.168.1.137:8080) BINDed eth4 but no FLOW_CLS_REPLACE
+   ever fired: nf_conntrack_count stays 0 even with active forwarding
+   (conntrack not tracking the forward path) -> the `ct state new flow add
+   @ft` rule never matches -> flows never enter the flowtable -> no offload
+   events. Separate integration item: enable conntrack on the forward path
+   (or drive ask_fe_flow_insert via a REPLACE-unit test).
+
+4. **Transit-topology note for future production tests:** .106:eth4
+   (10.99.2.106) -> .185 (forward, ip_forward=1) -> eth0 -> 192.168.1.137
+   requires the RETURN route on the destination (10.99.2.0/24 via
+   192.168.1.185) or replies leave via its default gw and never return
+   through .185. Verified: ping 0% loss + curl http=200 once the return
+   route was added.
