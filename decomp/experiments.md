@@ -2193,3 +2193,41 @@ U-Boot → kexec → stable after ~3-4 min.
 
 **Next:** rebuild with F-184, redeploy, re-arm E21 sequence + fe_obs,
 traffic verdict.
+
+## E23 — Ghidra CC-dispatch decode + vendor-source convergence (2026-08-12, analysis; no silicon this entry)
+
+**Trigger:** user directive "find and follow the approach the NXP ASK SDK is
+doing — the known working path; re-address the Ghidra-disassembled 210 blob
+for how it dispatches into the CC tree."
+
+**Method:** blob re-fetched rootless from .185 (SHA 5f3ed8d3 exact),
+imported headless (fman-risc:BE:32:default) into a PERSISTENT project
+(/home/vyos/.cache/fman-decomp — /tmp/kilo was wiped mid-session by an
+unidentified cleaner; systemd-tmpfiles rules exonerated). Four analysis
+scripts (FmanCcDispatch/2/3 lost with the wipe; FmanCcAll + FmanCcFinal
+re-ran everything). Vendor sources extracted to /tmp/kilo/sdk (also wiped;
+re-extractable from origin/nxp-sdk) + /home/vyos/ask-ref.
+
+**Results (full detail: decomp/findings.md 2026-08-12 entry):**
+1. The CC engine's single AD-type dispatch (w1857, >>30, br_tbl[0xf000])
+   routes type-1 (CONT_LOOKUP species) into the enhanced external-hash
+   machine, which parses the AD as en_exthash_node VARIANT B — field widths
+   proven by extraction census (6-bit key_size w1711, 8-bit table_base_hi
+   w1610, 4-bit hash_mask_bits w1598, >>16 pool w1557, table_base_lo staged
+   dmem[0xe000] w2045/2049, bucket_index w1928 off ctx[0xd048]).
+2. .106 row9 decodes variant-B four independent ways (DDR table probed,
+   mask=0x7fff=cdx, miss NIA = exact SDK KG-direct encoding, keysize 14).
+3. F-183's RM-8.7.4.1 group AD is garbage-as-node (miss_action DONE,
+   keysize 0, table_base = MURAM-off-as-DDR, pool out of range) → frames
+   terminated with no disposition = the exact current symptom. There is no
+   match-table walker in this blob; the 5-negative-variant "comparator
+   insensitive" history is closed by structure, not by another row format.
+4. Bare-FE_ENTER stall = node with table_base=0/pool=0 = wait-on-pool-0
+   silent stall. Prior AC_CC stalls were content faults, not mode faults.
+5. 0125's dormant template is variant A + miss_action 0 — superseded.
+
+**Next (F-185, vendor-faithful):** engage writes one variant-B node at RCCB
+(miss NIA = KG-direct|CC_EN|scheme), scheme AC_CC 0x80000006 CCOBASE=0
+ccbs=0; HIT via entry opcode ENQUEUE_PKT (F-181/F-182 records); M3
+discriminator = HIT fqid 0x200/eth3 rx delta (fe_obs blind to this
+topology); fallback = same node via CCBS word-3 if AC_CC stalls.
