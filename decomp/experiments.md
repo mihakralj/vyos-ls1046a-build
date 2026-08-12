@@ -2231,3 +2231,131 @@ re-extractable from origin/nxp-sdk) + /home/vyos/ask-ref.
 ccbs=0; HIT via entry opcode ENQUEUE_PKT (F-181/F-182 records); M3
 discriminator = HIT fqid 0x200/eth3 rx delta (fe_obs blind to this
 topology); fallback = same node via CCBS word-3 if AC_CC stalls.
+
+## E24 — F-185 first silicon: machine RUNS, vendor miss-NIA loops, HIT-by-elimination (2026-08-12, .185, image 2026.08.12-1949-rolling, 6.18.44-vyos, CI run 31634513313)
+
+F-185 deployed via `add system image` (warm install reboot; FMan re-probed
+clean per the 2026-08-10 recovery finding). Arm sequence (debugfs
+fman_pcd/0): fe_port set 11 → fe_ehash set fff 14 0 → fe_pool get →
+fe_singletons/fe_hashfe/fe_enq/fe_enter build → fe_flow add 0
+000a63026a0a6302b906ad9cd903 **200** (HIT canary = eth3 fqb) → fe_kg_ekfc
+set 4 801c0006 → fe_arm engage 11 0 200. Injection: .106 (root@192.168.1.106,
+vyos_key) static ARP + sequential `curl --local-port 44444 --connect-timeout 2
+http://10.99.2.185:55555/` (2 SYNs per curl: initial + 1s retransmit).
+
+**Armed state verified byte-exact live:**
+- node @MURAM 0x56d00 = `4e400000 fa110000 04d9080c 00480304` — variant B:
+  miss_action=1, key_size=14, table_type=4, hbo=0, ad_off=0, table_hi=0;
+  DDR bucket table 0xfa110000 (valid: board has 7.5G RAM); pool 0x4d900>>8;
+  global_mem_off 0x80; mask_bits 12; word3 = KG|CC_EN|KG_DIRECT|sch4.
+- scheme 4: mode 0x80000006 (AC_CC), word3/bmch=0, ekfc 0x801c0006, fqb 0x300.
+- port 0x11: RCCB=0x56d00, rfpne=0x00480200 (vendor). FMFP_PS STL=0.
+- record in the SILICON bucket: crc64_raw(key)=0xb508e222f73f6794 → bucket
+  0x508 @ 0xfa115080; head=0x81c42000; flags=0x018a, key@8, ENQUEUE_PKT@24,
+  param@40 (mtu=1500, bpid=0, fqid=0x00000200). Pool @0x4d900 all zeros =
+  vendor initial state (999 patch FM_PCD_Open never initializes it).
+
+**Finding 1 — the machine RUNS (proven by the MISS loop).** With the flow
+DELETED (empty bucket), each SYN: spc++ then frame re-appears at scheme 4 —
+sustained ~4.5M classifications/sec for minutes, no hop limit, no stall,
+frames never terminate. The machine therefore: executed under AC_CC (no
+OFFLOAD_SUPPORT_EN needed for dispatch), read the DDR bucket head via DMA
+(got 0), and issued the word3 miss NIA. E-HM14's params-page deltas are NOT
+gatekeepers for reaching the machine.
+
+**Finding 2 — FATAL: the vendor miss-NIA encoding is an infinite re-entry
+loop on this blob.** word3 = NIA_ENG_KG|NIA_KG_CC_EN|NIA_KG_DIRECT|scheme
+re-enters FULL KG classification (spc increments every pass) → scheme →
+AC_CC → node → MISS → NIA → ∞. Recovery: `fe_arm disengage 11` restores the
+RSS scheme mid-loop; the looping frames then drain to the kernel via fqb
+(eth4 rx +7). The .106 oracle uses this exact encoding in production with 0%
+loss — UNRESOLVED: blob-family difference (our proprietary 210.10.1 vs
+open-106.x), or .106 never presents an empty bucket to classified traffic,
+or the low bits carry row/CCOBASE semantics we haven't reproduced.
+
+**Finding 3 — HIT-by-elimination.** WITH the record present, spc stayed at
+exactly 2 (one pass per SYN, zero re-entry) → the machine did NOT issue the
+miss NIA → it took the HIT path (opcode script ENQUEUE_PKT → param.fqid
+0x200). But eth3 rx_packets never moved: the HIT enqueue did not land on
+eth3's netdev. Open suspects: (a) enqueue_param bpid=0 — vendor fills
+l2_info.bpid (the port's RX buffer pool); (b) FQ 0x200 cross-port enqueue
+or not-polled; (c) FD/attribute fault at ENQUEUE_PKT. dmesg clean (no QMan
+error captured).
+
+**Teardown deltas (pcd-snapshot diff vs pre-arm):** MURAM gen_pool used
+720→1344 = 624 B/cycle LEAK (fixup candidate); kgse_dv0/dv1 stay zeroed
+post-disarm (F-179 zero not restored — benign, PORT_ID=0x00 desired);
+fe_port del after disengage = ENOENT (disengage already removed the port
+registration; write(2) returns the handler errno — reads fine); transient
+write-ENOENT on fe_port right after teardown races the same path.
+
+**Next (E25):** (A) live /dev/mem patch of node word3 to
+KG|DIRECT|scheme WITHOUT CC_EN (0x00480104), empty bucket → expect kernel
+delivery via fqb with no loop (also proves fqb 0x300 is polled); (B) HIT
+enqueue chase: record fqid 0x200 + ethtool -S eth3 deltas + bpid variant
+(read port RX pool id from FMBM_EBMPI, write into param.bpid).
+
+## E25 — M3 GATE ACHIEVED: HIT + MISS both deliver to kernel; miss-action form decoded (2026-08-12, .185, 6.18.44-vyos)
+
+Follow-up to E24, live /dev/mem node patching (single variable per test).
+Node at RCCB, all tests with the flow record DELETED except the final HIT
+test. Injection: .106 curls (each curl = 2 SYNs at t=0/t=1s).
+
+**Miss-action decoding (the E24 loop root cause, definitively):**
+- word3 = KG|DIRECT|scheme (with OR without CC_EN, 0x00480104/0x00480304):
+  INFINITE re-entry loop (spc ~4.5M/sec sustained, no hop limit, no stall).
+  KG-direct to the frame's OWN scheme re-classifies into AC_CC → node →
+  MISS → NIA → ∞. KG-direct to a FOREIGN scheme → FM_FD_ERR_NO_SCHEME
+  (0x00004000) → port's error FQ (refqid 0x291) → dmesg "Err FD status =
+  0x00004000". So ANY KG miss NIA is wrong on this blob.
+- Correct form (SDK 999 patch, ExternalHashTableSet e_FM_PCD_DONE case):
+  miss_action_type = EN_EHASH_MISS_ACTION_ENQUE (**2**, bits[31:30]=0b10 in
+  word0) + word3 = **fqid** (the nia/fqid union, selected by miss_action).
+  Direct enqueue, no KG, no re-entry. Node word0 = 0x8E400000 (ENQUE |
+  key_size 14 | table_type 4), word3 = fqid.
+- ENQUE miss to the frame's OWN port fqb (0x300): LOOP-FREE, delivers to
+  kernel cleanly (rc=7 = RST from .185 kernel; spc stable at 2 for 2 SYNs).
+- ENQUE miss to a CROSS-port fqb (0x200/eth3): delivered to eth3's FQ but
+  DROPPED by the dpaa driver (eth3 rx_dropped++, rx_packets 0) — the FD's
+  buffer belongs to eth4's BM pool; eth3 can't release it (context
+  mismatch). Expected: the miss fqid must be the frame's own port fqb.
+
+**Live extraction + hash verified byte-exact on this build:** hash_probe
+captures (driver reads vaddr+264 = ext_buf_offset+sizeof(fman_prs_result)+8)
+match crc64_raw(00|SIP|DIP|6|SPORT|DPORT) EXACTLY for ports 44445/6/7/8
+(e.g. 44448 → 0xce69b25ee00a9c2e = computed; 44445 → 0x8a03036866550a5f;
+44446 → 0xcb1f20b7d5ebbc02; 44447 → 0xf414c1fd4481d1c9). The settled 14-byte
+EKFC order + raw CRC-64 (ECMA-182, seed ~0) + get_indexed_hash_bucket
+(>>48 & mask) are all confirmed against live silicon. The single 44444
+capture (0xaa7cba304ce683b6) was a stale/other-frame artifact (fresh
+re-injection read the same stale value because the 44444 frames HIT and
+went to eth4, not eth3 — the eth3 capture never re-triggered).
+
+**HIT CONFIRMED (M3 gate):** with the record inserted (fqid 0x300, bpid=1,
+flags 0x018a, ENQUEUE_PKT@24), the 44444 flow (record match) delivers to
+the kernel: curl rc=7 (RST), eth4 rx++. The machine's comparator matches the
+record, the opcode script ENQUEUE_PKT executes, param.fqid 0x300 enqueues
+to eth4 → kernel. Non-record flows (44445-48) MISS → word3 → same-port
+delivery rc=7. Final combined test: hit-flow 44444 rc=7 AND miss-flow 44448
+rc=7 with word3=0x300 — both paths deliver.
+
+**Confound retro-analysis:** the earlier "~50% delivery" chaos (rc=28,
+counters climbing without tcpdump visibility) was cross-experiment
+contamination: multiple injection ports (44444 vs 44445-48), mixed word3
+targets (0x200/0x300), and record state changed mid-session. With a
+controlled single-flow setup the behavior is fully deterministic.
+
+**Teardown deltas (vs pre-arm):** MURAM gen_pool used 720→1808 (+1088 B =
+the 624 B/cycle leak × ~2 cycles; fixup candidate); scheme4 dv0/dv1 stay
+zeroed (F-179 desired). Board back to S0.
+
+**F-186 fixup recommendation (next):** in F-185's engage node build:
+(1) word0 bits[31:30] = 0b10 (miss_action_type=ENQUE) instead of 0b01
+(NIA); (2) word3 = the port's own fqb (scheme->base_fqid / kgse_fqb, e.g.
+0x300 for eth4) instead of the KG miss NIA — computed in arm_fe where the
+scheme id is resolved, or read back from the engaged scheme's fqb;
+(3) record enqueue_param.bpid = port RX bpid (from the engaged port, e.g.
+1), not 0. The miss fqid must NEVER be a cross-port FQ. Test again with
+one flow, one port. Also: full-sequence idempotency re-run is destructive
+(count-gated mutate.py fixups FATAL by design on re-run); per-fixer
+marker-guard idempotency only.
