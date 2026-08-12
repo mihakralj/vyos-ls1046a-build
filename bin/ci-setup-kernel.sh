@@ -2420,6 +2420,51 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-179 kgse_dv0/dv1/ekdv zeroed under EKFC override"
 fi
 
+# F-182 (2026-08-12, E20 corrected track step 1): the F-181 first silicon
+# test's DDR record dump exposed three record bugs independent of dispatch:
+# (1) F-175's per-flow ctx pointer write (8B be64 at 8+align8(keysize))
+# CLOBBERS F-181's opcode slot (8+ALIGN(keysize,4)) -- both = 24 for
+# keysize 14; dump showed opcode[24]=0x00 under the ctx_dma be64. Relocate
+# the ctx pointer past opcode area + param block (offset 56 for keysize 14).
+# (2) param.fqid carried the ENQ FE MURAM offset (dump: 0x00055f00) -- the
+# vendor writes the flow's actual target FQID there (cdx create_enque_hm:
+# param->fqid = cpu_to_be32(l2_info.fqid)). Write the add_key fqid param.
+# (3) SET_STATS_ENABLE on a 256B record: vendor sets it only with the 320B
+# ext entry (stats at +256) + UPDATE_STATS in the hashfe word; we have
+# neither, so clear it (pkt_count was never a valid discriminator -- the
+# M3 gate is the fe_obs canary, patch 0169). Anchored on F-175/F-181
+# outputs; MUST run after both.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_182.py" 2>&1
+    echo "### fman_pcd.c: F-182 ehash record fixes (opcode-slot clobber, fqid source, STATS_EN)"
+fi
+
+# F-183 (2026-08-12, E20 corrected track step 2 -- Delta 1 adapted to what
+# .185 silicon survives): the F-181 test stalled on the first dispatched
+# frame because engage used the bare-FE_ENTER-root-at-RCCB form (known
+# staller) + AC_CC mode (stalls on .185 mainline) + KG_DIRECT rfpne
+# (0x00480304, vendor is 0x00480200). Assembles the ONLY combination where
+# every element is individually proven non-stalling on .185:
+#   - CCBS-graft dispatch: KGSE_MODE stays EN|ENQUEUE_KG_DFLT_NIA
+#     (0x80500002), KGSE_CCBS = group-table offset -- written to scheme
+#     window WORD 3 (struct kgse_bmch, 0x10C), NOT word 19 (kgse_ccbs,
+#     0x14C) which 210.10.1 ignores (F-184 board proof 2026-08-10). This
+#     is a real kernel bug fix in keygen_scheme_setup().
+#   - RCCB -> group table numKeys=0 with the MISS SLOT = verbatim copy of
+#     the caller's FE_ENTER AD: the CC comparator is proven INSENSITIVE to
+#     match rows (5 negative variants), so FE_ENTER cannot ride a match
+#     leaf; every frame -> FE_ENTER -> the ehash decides HIT/MISS.
+#   - rfpne stays 0x00480200 (F-178's KG_DIRECT OR removed from arm_fe).
+#   - F-148's numKeys bump is pinned at 0 (numKeys=1 would move the miss
+#     slot off the FE_ENTER copy after the first flow insert).
+# Teardown unchanged: detach_cc restores next_engine=0 + cc_bits_sel=0,
+# clearing word 3 via the same path. Anchored on F-051/F-148/F-165/F-178
+# outputs; MUST run after all of them.
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_183.py" 2>&1
+    echo "### fman_keygen.c/fman_pcd_kg.c/fman_pcd.c: F-183 Delta-1 dispatch (CCBS word-3, group-root miss-slot FE_ENTER)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
