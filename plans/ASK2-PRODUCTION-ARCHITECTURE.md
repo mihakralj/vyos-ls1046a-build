@@ -246,21 +246,25 @@ start Phase 2 silicon work without the qdrant gate (AGENTS.md S0).
 **[SPEC]** Qdrant gate first (S0): query FMan PCD/FE/ehash/KG/CC before any
 change; cross-check `arch/fman-microcode-210-programming-reference.md` and
 `specs/fman-keygen-flow-key-spec.md`.
-- [ ] **Delta 1 — RCCB AD species:** replace the bare `FE_ENTER` root with
-      the vendor form — `en_exthash_node` written directly into the CC-tree
-      root AD slot (`copy_td_to_ccbase` semantics). Reconcile `RFPNE` to
-      `0x00480200`.
-- [ ] **Delta 2 — record-side HIT payload:** write the 16 B
-      `t_ExtHashResult` after the key; build the per-flow MUX FE chain
-      (`BuildFEChainAndContextFromNextEngine` → `FmPcdCcBuildContextByFE`);
-      wire `monitorAddr` stats.
-- [ ] **Delta 3 — params page:** set `OFFLOAD_SUPPORT_EN` (`misc |=
-      0x40000000`) + FE buffer pool/index at `+0x54`/`+0x58`.
-- [ ] One variable per experiment; cold-boot before each; pings never floods.
-- **Validation (M3 gate):** a single controlled TCP flow on eth4 produces a
-  confirmed ehash HIT (frame consumed by the FMan path, not kernel), proven
-  by the `fe_obs` canary (patch 0169) disposition targets + `pcd-snapshot`,
-  not by "tcpdump quiet" alone.
+- [x] **Delta 1 — RCCB AD species:** DONE (F-185, 2026-08-12) — vendor
+      VARIANT B `en_exthash_node` written at RCCB (`copy_td_to_ccbase`
+      semantics), `RFPNE` reconciled to `0x00480200`. The RM-8.7.4.1
+      group-AD form (F-183) parses as a garbage node — frames terminated
+      with no disposition (E23/E24 root cause).
+- [x] **Delta 2 — record-side HIT payload:** DONE differently — the
+      F-181/F-182 inline opcode-script record (`ENQUEUE_PKT` +
+      `en_ehash_enqueue_param` fqid) delivers; the 16 B `t_ExtHashResult` /
+      per-flow MUX chain was proven UNNECESSARY (E25 HIT with the minimal
+      record; E26 writeback confirms the machine reads it as-is).
+- [x] **Delta 3 — params page:** PROVEN NOT A DISPATCH GATEKEEPER (E24) —
+      the machine runs under AC_CC with `OFFLOAD_SUPPORT_EN` unset.
+- [x] One variable per experiment; cold-boot before each; pings never floods.
+- **Validation (M3 gate):** PASSED 2026-08-12 (E25/E26) — one controlled
+      TCP flow on eth4 HITs through the record's target FQID (0x300) to the
+      kernel, discriminated by the split-target test (miss fqid 0x200/eth3
+      vs record fqid 0x300/eth4) + single-pass `kgse_spc` + bucket/chain/
+      writeback verification. Full matrix: collision chain, per-key delete,
+      UDP, ~780 pps sustained 0% loss, eth3/0x10 structural.
 
 ### Phase 3 — Flow learning: fix the flowtable REPLACE path
 - [ ] Register ask for the FT offload type; handle `FLOW_CLS_REPLACE` in
