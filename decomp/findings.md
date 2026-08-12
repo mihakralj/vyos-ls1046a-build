@@ -1058,3 +1058,69 @@ routine exits into the IRAM/trap band beyond the 12851-word blob, a
 decompiler artifact (in-range target outside loaded image), limiting
 decompiler-based analysis of this routine; raw word dump (FmanAllocDealloc.py)
 is the reliable view.
+
+## 2026-08-12 — CC-tree dispatch DECODED: the CONT_LOOKUP path IS the enhanced external-hash machine (en_exthash_node VARIANT B); F-183 group AD is garbage to it; SDK approach = F-185
+
+Ghidra re-analysis (persistent rebuild at /home/vyos/.cache/fman-decomp after
+/tmp/kilo wipe; blob SHA 5f3ed8d3 verified; FmanCcAll.py + FmanCcFinal.py,
+ccall.log/ccfinal.log) + vendor source (origin/nxp-sdk fm_ehash.{c,h},
+fm_cc.c FillAdOfTypeContLookup, fm_kg.c BuildSchemeRegs, ask-ref patch 999,
+cdx_ehash.c) + .106 live-row decode, converged:
+
+1. The 210.10.1 CC engine has ONE AD-type extraction site: c600001e (>>30)
+   at w1857, dispatch via br_tbl[0xf000]. The type-1 (bits[31:30]=01,
+   CONT_LOOKUP species) handler is the ENHANCED EXTERNAL-HASH MACHINE. It
+   parses the 16B AD at RCCB+CCOBASE*16 as an en_exthash_node — field-width
+   census proof: w1711 AND-0x3f (key_size:6 = word0[29:24]), w1610 AND-0xff
+   (table_base_hi:8 = word0[7:0]), w1598 AND-0xf (hash_mask_bits:4 =
+   word2[3:0]), w1557 >>16 (int_buf_pool_addr:16 = word2[31:16]);
+   table_base_lo staged to dmem[0xe000] at w2045/w2049; bucket_index w1928
+   then reads KG hash ctx[0xd048], AND-0xffff w1944, ce/cf shifts, m_f4 DMA.
+   This is VARIANT B of fm_ehash.h (table_type:4 at word0[23:20],
+   ipv4_ad_offset:8 at [15:8], hbo:3 at [18:16]) — the
+   EXCLUDE_FMAN_IPR_OFFLOAD variant A (table_base_hi:16, mask_bits at
+   word2[15:12]) is NOT what this blob parses.
+
+2. .106 row9 (tcp4) 4e400008 eb700100 0402080f 00480308 decodes variant-B
+   four independent ways: word1 = DDR bucket array (probed zeros at
+   0x8eb700100); word2[3:0]=0xf = 15 mask bits = cdx_pcd.xml mask 0x7fff;
+   word3 = 0x00480308 = NIA_ENG_KG|NIA_KG_CC_EN|NIA_KG_DIRECT|scheme 8 —
+   byte-exact the SDK's miss-NIA encoding (fm_ehash.c e_FM_PCD_KG case);
+   word0 key_size=14 = cdx keysize. miss_action_type=1(NIA) sits exactly in
+   the AD-type bits[31:30] — the "CONT_LOOKUP type" and the node's
+   miss_action_type are the same field.
+
+3. ROOT CAUSE of the current failure (F-183 engage: frames consumed, no
+   canary, no delivery): the RM-8.7.4.1 group AD (w0=0x00056e00,
+   w1=0x56f00, w2=0x4F000000, w3=0) parses as a garbage node —
+   miss_action_type=0 (DONE: terminate with no disposition), key_size=0,
+   table_base=0x56f00 (a MURAM offset misread as a DDR physical address),
+   mask_bits=0, pool=0x4F0000 (out of MURAM range). The machine terminates
+   every frame with no action: consumed, never delivered, no fault — the
+   exact observed symptom. The entire RM-8.7.4.1 match-table model (numKeys/
+   matchTable/ADTable, the 0x40000000-in-word2 convention) is not what this
+   blob implements for CONT_LOOKUP — it closes the 5-negative-variant
+   "comparator insensitive to match rows" history: there IS no match-table
+   walker; there is only the external-hash machine.
+
+4. The bare-FE_ENTER-at-RCCB stall (0118 iter-48, E20, Path A) is the same
+   mechanism one step worse: FE_ENTER w0=0x40800000 parses as a node with
+   table_base=0 and pool=0 → the machine waits on a workspace allocation
+   from pool 0 forever = the silent-WAIT port-stall signature. Prior AC_CC
+   stalls were invalid-CONTENT stalls, not invalid-MODE stalls — .106 runs
+   AC_CC (0x8x000006, ccbs=0) on this same blob in production.
+
+5. 0125's dormant node template encodes variant A with miss_action_type=0 —
+   wrong variant, wrong miss action, no table_type. Rewritten by F-185.
+
+FIX (F-185, vendor-faithful): engage writes ONE 16B en_exthash_node variant
+B at the RCCB target: word0 = (EN_EHASH_MISS_ACTION_NIA<<30)|(key_size<<24)|
+(L4_TABLE=4<<20)|(hash_bytes_offset<<16)|(table_base_hi&0xff); word1 =
+table_base_lo; word2 = ((int_buf_off>>8)<<16)|(0x80<<4)|hash_mask_bits;
+word3 = NIA_ENG_KG|NIA_KG_DIRECT|NIA_KG_CC_EN|scheme_id (MISS → kernel RSS).
+Scheme mode = AC_CC 0x80000006, CCOBASE=0, ccbs=0 (the vendor mode). HIT =
+the DDR entry's opcode script ENQUEUE_PKT→param.fqid (F-181/F-182, already
+vendor-faithful) — fe_obs cannot observe this topology; the M3 discriminator
+becomes a HIT fqid on the OTHER netdev's kernel-polled FQ (0x200/eth3).
+Fallback if AC_CC stalls again: same node via CCBS word-3 dispatch (untried
+combination, E20's named vendor-faithful fallback).

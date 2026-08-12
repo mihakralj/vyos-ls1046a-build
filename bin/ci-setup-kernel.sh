@@ -2480,6 +2480,36 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-184 fe_obs_enq_one list_del fix (arm-panic)"
 fi
 
+# F-185 (2026-08-12, E23): vendor-faithful CC dispatch -- AC_CC mode +
+# VARIANT B en_exthash_node at RCCB (the NXP ASK SDK production path;
+# user-approved direction). Ghidra re-analysis decoded the 210.10.1 CC
+# engine: the single AD-type extraction site (c600001e >>30 @ w1857,
+# br_tbl[0xf000]) routes type-1 (CONT_LOOKUP) into the enhanced
+# external-hash machine, which parses the 16B AD as an en_exthash_node
+# VARIANT B (field widths proven by the microcode's own extraction
+# census; .106 production row tcp4 4e400008 eb700100 0402080f 00480308
+# decodes it 4 independent ways). ROOT CAUSE of F-183's no-HIT/no-MISS/
+# no-delivery: the RM-8.7.4.1 group AD parses as a garbage node
+# (miss_action DONE, keysize 0, table_base = MURAM offset misread as
+# DDR, pool out of range) -> every frame terminated with no disposition.
+# The historical AC_CC stalls (0118 iter-48, Path A 08-10) were
+# invalid-CONTENT stalls (bare FE_ENTER = node with table_base=0, pool=0
+# -> pool-0 wait), not invalid-MODE: .106 runs AC_CC 0x8x000006 ccbs=0
+# on this identical blob in production. 6 blocks / 3 files: (1) engage
+# scaffold writes the node at gro (needs fe_ehash table + fe_int_buf
+# pool; falls back to F-183's numKeys=0 miss-enq group without them),
+# (2) fman_pcd_fe_node_set_miss_nia() setter, (3) internal.h decl,
+# (4) arm_fe next_engine 2->3 + cc_bits_sel=0 (vendor AC_CC, ccbs=0),
+# (5) miss-NIA commit NIA_ENG_KG|NIA_KG_CC_EN|NIA_KG_DIRECT|scheme_id
+# (byte-exact the .106 0x0048030x encoding) before the EXTC SYNC,
+# (6) ENGAGED dmesg. HIT = DDR entry opcode script ENQUEUE_PKT ->
+# param.fqid (F-181/F-182 records); MISS = word3 NIA -> KG-direct
+# re-entry -> scheme fqb -> kernel. Anchored on F-183/F-184 outputs.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_185.py" 2>&1
+    echo "### fman_pcd.c/fman_pcd_kg.c/fman_pcd_internal.h: F-185 vendor AC_CC + VARIANT B node dispatch"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 

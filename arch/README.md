@@ -49,6 +49,7 @@ The arch docs are the **bedrock** the specs stand on. Where a spec says *"per RM
 | [`serdes-ethernet.md`](serdes-ethernet.md) | SerDes lanes, MAC↔lane map, mEMAC registers, 1588, XFI/KR | PHY/link bring-up, port map, 10G |
 | [`soc-integration.md`](soc-integration.md) | CCSR/memory map, reset/clock/RCW, GIC interrupts, SCFG/DCFG/DEVDISR, SMMU/ICID | Probe order, IRQ wiring, coherency |
 | [`software-stack-ask.md`](software-stack-ask.md) | SDK vs ASK vs ASK2 vs mainline; FLib/FMC/dpaa_eth; how SW maps to HW | Orienting in the codebase |
+| [`ask1-vs-ask2-module-comparison.md`](ask1-vs-ask2-module-comparison.md) | **ASK 1.x vs ASK2 module mapping** (HADS, v1.0.0) — every vendor component (`cdx`/`fci`/`auto_bridge`/comcerto/`cmm`/`dpa_app`/`fmc`/QOSMARK) mapped to its ASK2 successor or recorded as deleted; control/data-path diagrams, shared silicon invariants, maturity comparison, reference locations | Mapping a vendor ASK 1.x mechanism to its ASK2 equivalent, or deciding whether a 1.x component has a successor |
 
 ---
 
