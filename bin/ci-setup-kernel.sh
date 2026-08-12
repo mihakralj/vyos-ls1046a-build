@@ -2510,6 +2510,29 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c/fman_pcd_kg.c/fman_pcd_internal.h: F-185 vendor AC_CC + VARIANT B node dispatch"
 fi
 
+# F-186 (2026-08-12, E25 silicon-proof): correct the F-185 node miss-action
+# to the form that actually works on 210.10.1. E25 (live /dev/mem patches,
+# .185 6.18.44-vyos) proved the F-185 miss form (miss_action_type=NIA, word3
+# = KG-direct NIA) is FATAL: empty-bucket MISS -> KG re-classification into
+# the AC_CC scheme -> node -> MISS -> NIA = INFINITE LOOP (~4.5M
+# classifications/sec, no hop limit, no stall); KG-direct to a foreign
+# scheme -> FM_FD_ERR_NO_SCHEME 0x00004000 -> error FQ 0x291. The correct
+# form (999 patch e_FM_PCD_DONE + E25 verified): miss_action_type=ENQUE
+# (word0 bits[31:30]=0b10) + word3 = fqid = direct enqueue, loop-free, and
+# the fqid MUST be the frame's own-port base fqid (0x300/eth4): cross-port
+# fqb (0x200/eth3) delivers to eth3's FQ but the dpaa driver drops it (FD
+# buffer belongs to the frame's own BM pool). 2 blocks / 2 files:
+# (1) fman_pcd.c engage node word0 -> 0b10 ENQUE; (2) fman_pcd_kg.c arm_fe
+# captures slot->base_fqid under the lock and commits it as node word3 via
+# fman_pcd_fe_node_set_miss_nia() instead of the KG-direct NIA. bpid
+# intentionally NOT changed (record stays bpid=0; whether the machine uses
+# param.bpid on the ENQUEUE_PKT path is an E26 matrix test, F-187 if it
+# matters). Anchored on the exact F-185 derived output; runs after F-185.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_186.py" 2>&1
+    echo "### fman_pcd.c/fman_pcd_kg.c: F-186 ENQUE miss form + own-port fqb (loop fix)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
