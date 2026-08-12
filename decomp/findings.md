@@ -1028,3 +1028,33 @@ immediate hunt + prefix histogram) — works on all tiers. Hardens into
 - NXP ASK release notes list "Port-lockup crash is observed with collisions
   in Flow table" as a **known issue** on this exact microcode — a silicon-age
   bug we may be able to root-cause from recovered code (Phase 6, target 1).
+
+## 2026-08-11 (E19 followup) — Patch A (w242 dispatch redirect) NEGATIVE: wedge is downstream of the FE-type dispatch, in the FE interpreter/enq_builder or epilogue; pool-slot-walk (w12667-w12850) is the never-reached dealloc path
+
+Patch A = w242 `2c3ff000` (br_tbl [0xf000]) → `b7ff0002` (unconditional → w244,
+natural fall-through), delivered via qef-patch→DTB→kexec on .185
+(Phase-1 ISO, 0117 re-stream, blob md5 609be273... verified live).
+Engage OK (pool YES, port 0x11 armed, FE_ENTER root 0x54900), but traffic
+100% loss with `fe_pool enqueued=1` — one workspace buffer allocated
+(FE_ENTER ALLOCATE succeeded) and never returned. eth4 kernel RX frozen at
+5 pkts (frames consumed by FMan). No fault latched.
+
+CONCLUSION: redirecting the w242 FE-type dispatch does NOT prevent the wedge.
+The frame reaches the FE machinery (pool ALLOCATE consumes a buffer) but the
+path that returns it — the pool-slot-walk dealloc routine w12667-w12850
+(per-slot bookkeeping, ring index +0x54 / depletion +0x58 updates at
+w12830/w12836, exit w12849→w12551 shared_status_check) — never runs for that
+buffer. The wedge lives DOWNSTREAM of the w242 dispatch: in the FE-VM
+interpreter core (enq_builder w9040-w9520, ENQ const 0x02010000 @w9055) or
+the frame epilogue (w12133), where the frame is consumed but the dealloc
+path is not reached. Consistent with E-HM12/13/14/15 (wedge survives every
+entry-gate mutation) and the 08-10 "comparator never executes" bracket
+(KG classification completes → FE dispatch consumes → dealloc never runs).
+This closes the w242-dispatch candidate.
+
+Note: decompiling the pool-slot-walk hits a Ghidra pcode error at
+code:0xc8cc ("Could not follow flow into non-existing memory") — the
+routine exits into the IRAM/trap band beyond the 12851-word blob, a
+decompiler artifact (in-range target outside loaded image), limiting
+decompiler-based analysis of this routine; raw word dump (FmanAllocDealloc.py)
+is the reliable view.

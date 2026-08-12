@@ -1897,3 +1897,252 @@ activity per dispatch.
 4. Manual `make Image.gz` WITHOUT `LOCALVERSION=-vyos` clobbers `kernel.release` back to `6.18.38+` (S5 trap — LOCALVERSION is MANDATORY; dev-build passes it on the make line, a manual re-run must too). Fixed: `make ARCH=arm64 LOCALVERSION=-vyos Image.gz`.
 
 **Deploy BLOCKED**: 192.168.1.x LAN went down mid-session (heidi Tailscale subnet-router path lost) — lxc200 (192.168.1.137), .185, .106 all unreachable. `dev-build.sh push` (rsync → lxc200:/srv/tftp/) pending network recovery. Board experiment additionally needs a traffic peer on eth4 (.106 down). Artifact ready locally.
+
+---
+
+## E18 — Headless Ghidra decompile of FE-VM entry path (w214–w243) — INFRA+DECOMP MILESTONE (2026-08-11)
+
+**NOT a board-mutation experiment.** Infrastructure + static-decomp milestone
+responding to E-HM16's "decompile the FE-VM entry path w214–w242" next step,
+using **headless Ghidra** (per user instruction, instead of the GhidraMCP
+server which requires a live GUI plugin).
+
+- **SLEIGH module built**: `decomp/tools/build-fman-sleigh.sh` compiled
+  `decomp/ghidra/fman-risc/data/languages/fman-risc.{slaspec,pspec,cspec,ldefs}`
+  → `/opt/ghidra_11.3.2_PUBLIC/Ghidra/Processors/fman-risc/data/languages/fman-risc.sla`
+  (3.1 KB, benign `NOP constructors`/`BDEST` warnings). Processor id
+  `fman-risc:BE:32:default`, byte-addressed code, word w at byte 4*w.
+- **Blob re-acquired (volatile source)**: canonical `210.10.1` QEF blob
+  extracted from `.106` SPI `mtd4` (`00 00 c9 c4` = length 0xc9c4=51652,
+  then QEF magic). `head -c 51652 /tmp/kilo/mtd4.bin` → SHA-256
+  `5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d` = exact
+  canonical match (per `decomp/00-acquisition.md`). 1 section, code_off=244,
+  wcount=12851 dict. Raw code words at `code_off` = 51404 B →
+  `/tmp/kilo/fman-code/code.bin`.
+- **Headless import + postScript**:
+  `ghidra-analyzeHeadless /tmp/kilo/ghidra-proj decomp.gpr -import code.bin -processor fman-risc:BE:32:default -postScript decomp/ghidra/scripts/FmanW214decomp.py`
+  → `cc_fe_enter_entry` decompiled (pseudocode in `/tmp/kilo/w214-decomp.txt`).
+- **Key accesses surfaced (match E-HM16)**: `in_dmem_0000d018` (IC context),
+  `in_dmem_00001b00` (FE word0 slot), `0xf800`/`0xfb00`/`0xf907`/`0x83xx`/
+  `0x8bxx` handler-window slots — all in the **16-bit `dmem` data space**
+  (context page 0xd0xx + MURAM window), which is why the script's code-space
+  `0xf800` dump throws `MemoryAccessException` (those are data, not code).
+- **Caveat**: the SLEIGH ISA is PARTIAL (Stage G1 control-flow; load/store
+  direction `0x04` vs `0x14` is a guess per ldefs). Pseudocode is
+  algorithmically suggestive, NOT byte-authoritative. The `0xf000`/`0xf800`
+  handler tables need loading the data segment / a `dmem` block to dump —
+  follow-up.
+- **Implication for E-HM16's open question** ("why doesn't the FE-VM
+  comparator execute / never re-arms the port"): the entry path reads FE
+  word0 at slot `0x1b00` and dispatches via the `0xf800`-window handler
+  pointers through computed branches (`0x2c3f`) — consistent with a
+  type-extract (`>>26`) → handler-table dispatch. Full recovery needs
+  SLEIGH G2/G3 memory semantics + the `dmem` handler table dump. Next step;
+  not yet enough to close the comparator-execution question alone.
+
+---
+
+## E19 — Patch A (w242 2c3ff000 -> b7ff0002 -> w244) FE-type-dispatch redirect — NEGATIVE (2026-08-11)
+
+**Hypothesis**: the FE-VM entry's `w242 2c3ff000 br_tbl [0xf000]` (FE-type
+dispatch through the 0xf000-window) is where the frame is consumed and never
+re-armed. Redirecting it to its natural fall-through (w244) should change the
+wedge behavior.
+
+**Patch A**: `w242: 2c3ff000 -> b7ff0002` (= unconditional br to w244; the
+signed-relative-word encoding gives target 242+2=244, SLASpec 2026-08-09
+correction). Built via `decomp/tools/qef-patch.py --set-word 242=0xb7ff0002`,
+delivered via DTB->kexec (0117 re-stream). Blob md5 `609be273a52cc5be0662da3ecf6961af`
+= patchA-blob = live DT blob (verified).
+
+**Method (E-HM8-correct)**: pristine cold boot on Phase-1 ISO
+(2026.08.11-0420-rolling, 6.18.41-vyos) -> baseline eth4 ping 0/3 0% loss ->
+kexec Patch A -> verify live blob md5 MATCH -> arm chain (pool get, ehash
+0xfff/14/0, singletons, hashfe, enq 0x300, enter 0x2b9, kg_ekfc 4 801c0006,
+engage 0x11 0x54900)
+
+**Result — NEGATIVE**: engage succeeded (fe_pool engaged YES, port 0x11
+armed, FE_ENTER root AD 0x54900), but traffic immediately 100% loss.
+Observables: `fe_pool enqueued=1` (one buffer outstanding, never returned),
+eth4 kernel RX frozen at 5 packets (frames consumed by FMan, not delivered),
+no fault latched (dmesg clean, FMFP_EXTC SYNC cleared in 0 polls, RCCB set to
+0x54900, KG direct scheme 4). Disarm not attempted (occupied by wedge).
+
+**Interpretation**: redirecting the w242 FE-type dispatch to its natural
+fall-through does NOT prevent the wedge. The frame is still consumed
+(FE_ENTER ALLOCATE succeeds, buffer enqueued) but never released. The wedge
+is downstream of the w242 dispatch — in the FE-VM interpreter core
+(enq_builder w9040-w9520) or frame epilogue (w12133), consistent with the
+E-HM12/13/14/15 finding that the wedge survives every entry-gate mutation.
+This closes the "w242 dispatch is the wedge location" candidate.
+
+**Recovery**: board wedged (port 0x11 RX-deaf). Needs warm reboot (per
+2026-08-10 finding, mainline-driver warm reboot re-probes FMan and recovers;
+the "cold-power-cycle-only" claim was disproven for this driver) or cold boot.
+
+---
+
+## E20 — F-181 first silicon test + full vendor/track validation (2026-08-12)
+
+**Test (image 2026.08.11-1752-rolling, kernel 6.18.44-vyos, cold-booted):**
+armed F-181 chain on port 0x11 (fe_port set 11 → fe_ehash set 0xfff 14 0 →
+fe_pool get → fe_singletons → fe_hashfe → fe_enq build 0x300 → fe_enter build
+@0x56c00 → fe_flow add 0 000a63026a0a6302b906ad9cd903 0x300 → fe_kg_ekfc set 4
+801c0006 → fe_arm engage 11 0x56c00 0x300). Engage dmesg clean (EXTC SYNC 0
+polls, RCCB=0x56c00, rfpne 0x00480304 KG-direct-sch4). **RESULT: port STALLED
+on the first dispatched frame** — FMFP_PS[0x11]=0x80800000 (FPM_PS_STALLED),
+fe_pool enqueued 0→2 (two FE_ENTER ALLOCATEs never returned), KG TPC flat
+during a 20-SYN burst (frames died in the stalled port's BMI FIFO, never
+reached KG), zero faults latched (fm_epi/fm_cld/decceh/seer=0). Recovered via
+smart-plug cold boot; verified healthy (FMFP_PS ok, muram baseline 720B, eth4
+ping 0.44 ms).
+
+**DDR record dump (@0x81c42000) — F-181 layout verified + TWO NEW BUGS:**
+flags=0x118a ✓ (STATS_EN|opc_off=24|param_off=40, vendor bit-packing exact),
+key ✓, mtu=0x05dc ✓ at [40], BUT (1) opcode[24]=0x00 — F-175's per-flow ctx
+DMA pointer (8B @ [24..31], value 0x0000000081c43000) CLOBBERS F-181's opcode
+slot (opc_off = 8+ALIGN(14,4) = 24); (2) param.fqid[44..47]=0x00055f00 = the
+ENQ FE MURAM offset — vendor writes the flow's actual TX FQID
+(cdx create_enque_hm: param->fqid = cpu_to_be32(info->l2_info.fqid)).
+
+**Vendor source validation (we-are-mono/ASK b4c31a46 + 010 patch, authoritative):**
+F-181's record format IS the vendor cdx format — SET_OPC_OFFSET(flags,off)=
+(off>>2)<<6, SET_PARAM_OFFSET=(off>>2), STATS_EN=1<<12, TS_EN=1<<13 (010 patch
+L9983-86); en_ehash_enqueue_param packed 16B {mtu be16, hdr_xpnd_sz u8, bpid
+u8, fqid be32, word(rspid:8|stats_ptr:24), word2(dscp_fq_enable:8|
+muram_frag_param_addr:24)} (L10149); ENQUEUE_PKT=0x01 (L10082); MAX_OPCODES=16,
+TBLENTRY_OPC_ALIGN=4, MAX_EN_EHASH_ENTRY_SIZE=256 / EXT=320 "Stats begins at
+the 256th byte" (L9972-76); insert path opc/param offset math (cdx_ehash.c
+L963-975) = F-181's exactly. **F-181 direction CONFIRMED vendor-faithful.**
+Also confirmed: SET_STATS_ENABLE with our 256B record is a mismatch — vendor
+stats block lives at +256 (needs the 320B ext entry); our hashfe w0=0x06000000
+has no UPDATE_STATS (0x00010000) so FE never writes stats → **pkt_count can
+never move (08-10 reframe re-confirmed): today's discriminator was invalid;
+the plan's M3 gate mandates the fe_obs canary (0169), which was not used.**
+
+**Track validation verdict — PARTIAL: right record direction, wrong dispatch +
+order. Three confounds invalidated the test (one-variable rule violated):**
+1. **Dispatch form = bare FE_ENTER root at RCCB — the KNOWN-Stalling form.**
+   F-182 v3 (08-09) VALIDATED that the group-tree root form fixes the stall;
+   Path A (08-10) + E-HM15/16 + today re-prove bare FE_ENTER root stalls on
+   the first dispatched frame. The plan's own Phase 2 says "land Delta 1
+   (RCCB AD species) first, ALONE" — F-181 (Delta 2 variant) was tested
+   without Delta 1.
+2. **Engage path still writes AC_CC mode (0x80000006) + KG_DIRECT rfpne
+   (0x00480304, F-178)** — F-184's CCBS restore (6efa34c8) only covered the
+   cc_test/attach_cc path. Path A (08-10) proved AC_CC mode + dispatched
+   frame STALLS on .185 mainline; vendor RFPNE=0x00480200 (KG|CC_EN, NO
+   DIRECT bit).
+3. **Discriminator = pkt_count (invalid, see above).**
+
+**.106 oracle LIMIT (binding):** .106's ehash tables are EMPTY — vendor cdx
+never inserts flows on 210.10.1 (aging-enabled tables need the HC doorbell
+this blob lacks, caps=0x17; E-HM16 + Path A probed table base 0x8eb700100 =
+all zeros). .106 NEVER executed the HIT path; its traffic stability is
+MISS-path delivery (miss NIA → KG-direct distribution scheme). .106 is a
+STATIC oracle only: scheme modes 0x8x000006 (FM_CTL|CCOBASE|AC_CC), ccbs=0,
+RFPNE 0x00480200, RCCB=0x48e00 → 12 externalHash CONT_LOOKUP rows (tcp4 row
+4e400008 eb700100 0402080f 00480308: keysz=14, mask_bits=15→0x7fff, pool
+0x40200, miss NIA=KG-direct-sch8), cdx_pcd.xml mask=0x7fff keysize=14.
+
+**Proven-working on .185 mainline (the pieces of the correct track):**
+- CCBS-graft dispatch (mode 0x80500002 + KGSE_CCBS at window **WORD 3** —
+  F-184's kernel bug: keygen_scheme_setup writes word 19, HW reads word 3)
+  fires the CC walk; miss-row delivery works (F-184 session, rx tracks spc 1:1).
+- Group-tree root at RCCB does NOT stall (E-HM9 control, F-182 v3); bare
+  FE_ENTER root stalls (today + history).
+- KG extraction + hash BYTE-PERFECT with EKFC 0x801c0006/PORT_ID=0x00:
+  staging hash@+0x48 = crc64_raw(14B key) exact, key@+0x50 exact (F-184
+  session; HW-confirmed x3 via brute force 08-06).
+- CC comparator INSENSITIVE to match-table rows (5 negative variants, 08-10:
+  0115 layout, bespoke 24M-era layout, mask/key/keysize permutations) — the
+  CCBS walker does not compare our match table; frames always take the miss
+  slot. Consequence: FE_ENTER cannot ride a match leaf — it must sit in the
+  MISS slot (numKeys=0 group → all frames → FE_ENTER → ehash decides).
+
+**CORRECTED TRACK (next attempt, single-variable discipline):**
+1. Fix record bugs first (no dispatch change): (a) remove/relocate F-175's
+   ctx pointer write so the opcode slot at 8+ALIGN(keysize,4) survives;
+   (b) param.fqid = target FQID (0x300 = eth4 kernel RX FQ for the
+   HIT-observable test), not the ENQ FE offset; (c) clear SET_STATS_ENABLE
+   until records grow to 320B + hashfe w0 gains UPDATE_STATS (or keep it and
+   accept inert stats — decide; vendor sets it only with the 320B entry).
+2. Dispatch = Delta 1 per plan, adapted to what .185 survives: RCCB → group
+   table (numKeys=0) with the **miss slot = FE_ENTER AD**; scheme dispatch =
+   CCBS graft with the WORD-3 CCBS fix (NOT AC_CC, NOT KG_DIRECT rfpne —
+   reconcile RFPNE to 0x00480200). This is the only combination where every
+   element is individually proven non-stalling on .185.
+3. MISS disposition must become kernel delivery (vendor miss = NIA KG-direct),
+   not EXIT-DEALLOCATE drop — else the armed port stays deaf to all non-HIT
+   traffic (ARP/ICMP death observed every arm).
+4. Discriminator = fe_obs canary (0169) dispositions + pcd-snapshot, per the
+   plan's M3 gate. NOT pkt_count, NOT "tcpdump quiet".
+
+**Open (carried):** does the 210.10.1 CCBS walker execute a vendor-form
+en_exthash_node row natively (Delta 1 literal form) — Path A said literal
+vendor row + AC_CC did nothing on .185, but it was never tested with the
+CCBS word-3 dispatch; that combination is untried and is the vendor-faithful
+fallback if the group-tree/miss-slot form fails.
+
+## E21 — F-182/F-183 implementation of the E20 corrected track (2026-08-12)
+
+Implementation of E20's corrected track as two count-gated fixups (no
+silicon yet). Qdrant gate passed first (6 queries; all layers of the track
+have silicon- or source-grounded entries; the one conflict — the 08-11
+"256B set-associative bucket" entry — is the wrong function family,
+retracted 08-10 and superseded by E20's vendor validation).
+
+**F-182 (record bugs, fman_pcd.c, 3 blocks):**
+1. STATS_EN cleared — vendor sets it only with the 320B ext entry (stats at
+   +256) + UPDATE_STATS in the hashfe word; we have neither. Keysize-14
+   flags now `0x018A` (was `0x118A`).
+2. `param.fqid` = the add_key `fqid` parameter (the flow's target FQID,
+   vendor `l2_info.fqid`), not the ENQ FE MURAM offset F-181 v1 wrote.
+3. F-175 ctx pointer relocated from `8+align8(keysize)` (=24, CLOBBERED the
+   opcode slot) to `8+ALIGN(keysize,4)+32` (=56 keysize-14, =80 IPv6-37B;
+   inside the 256B record, past everything the FE-VM walks). Expected
+   record: header@0, key@8, opcode 0x01@24, param@40..55 (fqid=target),
+   ctx@56..63.
+
+**F-183 (Delta-1 dispatch adapted, 8 blocks / 3 files):**
+- fman_keygen.c: **CCBS word-3 kernel bug fix** — `keygen_scheme_setup`
+  wrote `cc_bits_sel` to `kgse_ccbs` (window word 19, 0x14C); 210.10.1
+  reads CCBS from window word 3 (0x10C, struct field `kgse_bmch`). Now
+  written there, after F-051's zeroing (which would clobber it).
+- fman_pcd_kg.c: `arm_fe` next_engine 3→2 (CCBS-implicit; mode stays
+  `0x80500002`), `cc_bits_sel` = group-table offset; F-178's KG_DIRECT OR
+  removed (rfpne stays vendor `0x00480200`); v6 slot `cc_bits_sel=0`.
+- fman_pcd.c: scaffold group ALWAYS numKeys=0; explicit FE_ENTER target
+  rides the **miss slot** (ato[0] = verbatim FE_ENTER AD copy); RCCB
+  always repointed at the group (F-165's bare-FE_ENTER-direct form is the
+  stalling topology — retired); F-148's numKeys bump pinned at 0
+  (numKeys=1 would move the miss slot off the FE_ENTER copy after the
+  first insert); ENGAGED dmesg no longer claims AC_CC.
+
+**Expected chain (port 0x11):** Parser→KG scheme4 (EKFC 0x801c0006, mode
+0x80500002)→CCBS word3=gro→CC walk→group(numKeys=0)→miss slot=FE_ENTER→
+ALLOCATE→hashfe→ehash compare → HIT: opcode ENQUEUE_PKT→param.fqid (0x300)
+[+w5 path]; MISS: hashfe w6 (fe_obs miss canary → 0x200).
+
+**Test procedure (next image, COLD boot, one variable = the whole
+vendor-faithful config assembled from individually-proven pieces):**
+1. `fe_port set 11` → `fe_ehash set 0xfff 14 0` → `fe_pool get` →
+   `fe_singletons` → `fe_hashfe` → `fe_enq build` → `fe_enter build` →
+   `fe_flow add 0 000a63026a0a6302b906ad9cd903 0x300` →
+   `fe_kg_ekfc set 4 801c0006` → `fe_arm engage 11 <fe_enter_off> 0x300`.
+2. `fe_obs arm 11 300 200` (hit canary 0x300/eth4, miss canary 0x200/eth3)
+   — the M3-gate discriminator; pcd-snapshot capture before traffic.
+3. Static ARP on .106; SEQUENTIAL `curl --local-port 44444
+   http://10.99.2.185:55555/` (never floods; a few pings max).
+4. Verdict: eth4 rx delta >0 → HIT; eth3 rx delta → MISS (comparator ran,
+   key/content next); both 0 + spc tracks rx → never dispatched to FE
+   chain. FMFP_PS[0x11] must stay 0x80000000 (group root + CCBS word-3 =
+   the individually proven non-stalling forms).
+5. Stall recovery: smart-plug cold boot (restart-dut skill); warm reboot
+   NOT reliable for FMFP_PS stalls.
+
+**Verification so far:** full CI REPLACEMENT block re-extracted from the
+edited ci-setup-kernel.sh and re-run on a pristine patched scratch worktree
+— 0 FATALs, all 11 blocks apply in order, idempotent re-run clean,
+`bin/test-fixups.sh` 4/4 OK. Compile gate = CI (no local compile per user
+directive).

@@ -3,29 +3,29 @@
     "F_054.py": "fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)",
     "F_056.py": "fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)",
     "F_057.py": "fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)",
-    "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB\u2192FE_ENTER)",
+    "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)",
     "F_069.py": "F-069: MISS context + DDR alloc (count-asserted anchors)",
     "F_069a.py": "dpaa_eth.c: F-069a v9 buf_base + vaddr captures\\n",
     "F_069b.py": "no description",
     "F_071.py": "no description",
     "F_072.py": "no description",
     "F_072_2.py": "fman_pcd.c: F-072 v3 FmPortSetFESupport ported",
-    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 \u00a77.1/\u00a77.3",
+    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3",
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)",
-    "F_089.py": "fman_pcd.c: F-089 \u00a717 FE descriptor static_asserts + KUnit test injection",
-    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs \u2014 wires __fman_pcd_fe_build_vm_chain",
-    "F_091.py": "fman_pcd.c: F-091 HIT scaffold \u2014 numKeys=1 + FE_ENTER AD at ato+32",
-    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage \u2014 build/teardown VM chain via API",
-    "F_093.py": "fman_pcd.c: F-093 dynamic FQID \u2014 kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
-    "F_094.py": "fman_pcd.c/h: F-094 retype flow_add \u2192 struct fman_pcd_fe_flow_action *",
-    "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage \u2014 unparks FE-VM",
-    "F_097.py": "fman_pcd.c: T-P1-1 F-08 \u2014 fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
-    "F_098.py": "fman_pcd.c: T-P1-4 F-12 \u2014 fman_pcd_fe_context_build retype void __iomem* \u2192 struct fman_ddr_region* (DDR not MMIO)",
-    "F_099.py": "net/xdp/*.c + dpaa_eth.c: M4 ZC-bind instrumentation \u2014 pr_err at every error return to trace xsk_socket__create() EINVAL",
-    "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation \u2014 pr_err at xsk_pool_dma_map/bman_new_pool failures",
-    "F_101.py": "dpaa_eth.h: M4 ZC workaround \u2014 lower DPAA1_MIN_UMEM_CHUNK 3840\u21922048 for VPP 2K-chunk compatibility",
-    "F_102.py": "qman.c: M4 ZC crash fix \u2014 NULL guard for fq in __poll_portal_fast SDQCR path",
-    "F_103.py": "af_xdp_pool_main.c: SUPERSEDED 2026-07-21 \u2014 BPID reprogram re-enabled (F_102 guards crash path)",
+    "F_089.py": "fman_pcd.c: F-089 §17 FE descriptor static_asserts + KUnit test injection",
+    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain",
+    "F_091.py": "fman_pcd.c: F-091 HIT scaffold — numKeys=1 + FE_ENTER AD at ato+32",
+    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage — build/teardown VM chain via API",
+    "F_093.py": "fman_pcd.c: F-093 dynamic FQID — kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
+    "F_094.py": "fman_pcd.c/h: F-094 retype flow_add → struct fman_pcd_fe_flow_action *",
+    "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage — unparks FE-VM",
+    "F_097.py": "fman_pcd.c: T-P1-1 F-08 — fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
+    "F_098.py": "fman_pcd.c: T-P1-4 F-12 — fman_pcd_fe_context_build retype void __iomem* → struct fman_ddr_region* (DDR not MMIO)",
+    "F_099.py": "net/xdp/*.c + dpaa_eth.c: M4 ZC-bind instrumentation — pr_err at every error return to trace xsk_socket__create() EINVAL",
+    "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation — pr_err at xsk_pool_dma_map/bman_new_pool failures",
+    "F_101.py": "dpaa_eth.h: M4 ZC workaround — lower DPAA1_MIN_UMEM_CHUNK 3840→2048 for VPP 2K-chunk compatibility",
+    "F_102.py": "qman.c: M4 ZC crash fix — NULL guard for fq in __poll_portal_fast SDQCR path",
+    "F_103.py": "af_xdp_pool_main.c: SUPERSEDED 2026-07-21 — BPID reprogram re-enabled (F_102 guards crash path)",
     "F_104.py": "dpaa_ethtool.c: F_104 add get_channels ethtool op (reports 4 combined channels for multi-queue XSK)",
     "F_105.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
@@ -37,21 +37,21 @@
       "description": "rx_hook trace_printk diagnostics at every return-false point (temporary)",
       "date": "2026-07-21"
     },
-    "F_107.py": "fman_pcd.c: F-107 gen_pool double-free prevention \u2014 DECLARE_BITMAP(fe_port_armed) + -EBUSY guard in fe_engage",
+    "F_107.py": "fman_pcd.c: F-107 gen_pool double-free prevention — DECLARE_BITMAP(fe_port_armed) + -EBUSY guard in fe_engage",
     "F_108.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c",
       "description": "Ratelimit Err FD status console log spam for physical frame errors",
       "date": "2026-07-23"
     },
-    "F_109.py": "fman_pcd.c/h: F-109 fman_pcd_fe_enq_get_offset() export \u2014 eliminates debugfs loopback for ENQ FE offset",
+    "F_109.py": "fman_pcd.c/h: F-109 fman_pcd_fe_enq_get_offset() export — eliminates debugfs loopback for ENQ FE offset",
     "F_115.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
-      "description": "M4 ZC recover=0 fix \u2014 DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
+      "description": "M4 ZC recover=0 fix — DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
       "date": "2026-07-22"
     },
     "F_116.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "NULL-guard FE-VM flow-delete (fman_pcd_fe_flow_del + ehash_flow_clear_all) \u2014 crash-safety for FLOW_CLS_DESTROY with NULL fm",
+      "description": "NULL-guard FE-VM flow-delete (fman_pcd_fe_flow_del + ehash_flow_clear_all) — crash-safety for FLOW_CLS_DESTROY with NULL fm",
       "date": "2026-07-24"
     },
     "F_117.py": {
@@ -86,7 +86,7 @@
     },
     "F_128.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-128: F-125(c) \u2014 free ehash on LAST port disengage. Changes F_092's teardown guard from fe_vm_chain_built to fe_vm_chain_built && list_empty(&pcd->fe_ports). The shared FE-VM chain is torn down only when the last port disengages, returning 33280 B MURAM (int_buf) + 512 KiB DDR (bucket table). Runs after F-092.",
+      "description": "F-128: F-125(c) — free ehash on LAST port disengage. Changes F_092's teardown guard from fe_vm_chain_built to fe_vm_chain_built && list_empty(&pcd->fe_ports). The shared FE-VM chain is torn down only when the last port disengages, returning 33280 B MURAM (int_buf) + 512 KiB DDR (bucket table). Runs after F-092.",
       "date": "2026-07-27"
     },
     "F_129.py": {
@@ -101,91 +101,93 @@
     },
     "F_131.py": {
       "action": "keep",
-      "reason": "permanent guard \u2014 gen_pool_has_addr() check in fman_pcd_muram_free() prevents kexec-stale MURAM offset BUG"
+      "reason": "permanent guard — gen_pool_has_addr() check in fman_pcd_muram_free() prevents kexec-stale MURAM offset BUG"
     },
     "F_132.py": {
       "action": "keep",
-      "reason": "permanent \u2014 frees FM_CTL params pages on last port disengage, reclaims 512 B MURAM for multi-cycle reversibility"
+      "reason": "permanent — frees FM_CTL params pages on last port disengage, reclaims 512 B MURAM for multi-cycle reversibility"
     },
     "F_133.py": {
       "action": "keep",
-      "reason": "diagnostic \u2014 muram_allocations debugfs node dumps every outstanding MURAM allocation with offset, size, and label. Identifies the residual after engage\u2192disengage."
+      "reason": "diagnostic — muram_allocations debugfs node dumps every outstanding MURAM allocation with offset, size, and label. Identifies the residual after engage→disengage."
     },
     "F_134.py": {
       "action": "keep",
-      "reason": "permanent \u2014 reorder __fman_pcd_fe_arm_disengage() to disarm KG (FMBM_RCCB=0) BEFORE freeing MURAM. Fixes BMI dereferencing freed scaffold MURAM via stale RCCB \u2192 bus lockup \u2192 hard hang."
+      "reason": "permanent — reorder __fman_pcd_fe_arm_disengage() to disarm KG (FMBM_RCCB=0) BEFORE freeing MURAM. Fixes BMI dereferencing freed scaffold MURAM via stale RCCB → bus lockup → hard hang."
     },
     "F_135.py": {
       "action": "keep",
-      "reason": "permanent \u2014 clear fe_port_armed bit on disengage so re-engage is not blocked by stale idempotency guard"
+      "reason": "permanent — clear fe_port_armed bit on disengage so re-engage is not blocked by stale idempotency guard"
     },
     "F_136.py": {
       "action": "keep",
-      "reason": "permanent \u2014 keep FE-VM chain warm across disengage/re-engage cycles to prevent arena fragmentation and disengage hang"
+      "reason": "permanent — keep FE-VM chain warm across disengage/re-engage cycles to prevent arena fragmentation and disengage hang"
     },
     "F_137.py": {
       "action": "keep",
-      "reason": "permanent \u2014 allocate per-port FE buffer pools from global FMan MURAM instead of PCD gen_pool to avoid arena fragmentation"
+      "reason": "permanent — allocate per-port FE buffer pools from global FMan MURAM instead of PCD gen_pool to avoid arena fragmentation"
     },
     "F_139.py": "fman_pcd.c: F-139 move scaffold tracking from singleton to per-port (fix 304 B/cycle leak)",
-    "F_140.py": "fman_pcd.c: F-140 M6 Piece 2 \u2014 v6 ehash table (key_size=37) + v6 KG scheme",
-    "F_142.py": "fman_pcd.c: F-142 \u2014 dma_alloc_coherent for ehash flow records (fixes F-141 HIT failure)",
-    "F_143.py": "fman_pcd.c: F-143 \u2014 place en_exthash_node descriptor at DDR table base",
-    "F_144.py": "fman_pcd.c: F-144 \u2014 fix EXT_HASH FE word1 byte order (hashShift<<24|contextSize<<16|hashMask)",
-    "F_145.py": "fman_pcd.c: F-145 \u2014 contextSize=255 (DDR record size, not key size)",
-    "F_147.py": "fman_pcd.c: F-147 \u2014 fix RCCB to point directly to FE_ENTER AD (remove fe_enter_off = gro)",
+    "F_140.py": "fman_pcd.c: F-140 M6 Piece 2 — v6 ehash table (key_size=37) + v6 KG scheme",
+    "F_142.py": "fman_pcd.c: F-142 — dma_alloc_coherent for ehash flow records (fixes F-141 HIT failure)",
+    "F_143.py": "fman_pcd.c: F-143 — place en_exthash_node descriptor at DDR table base",
+    "F_144.py": "fman_pcd.c: F-144 — fix EXT_HASH FE word1 byte order (hashShift<<24|contextSize<<16|hashMask)",
+    "F_145.py": "fman_pcd.c: F-145 — contextSize=255 (DDR record size, not key size)",
+    "F_147.py": "fman_pcd.c: F-147 — fix RCCB to point directly to FE_ENTER AD (remove fe_enter_off = gro)",
     "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
     "fe_flow_key_fix.py": "no description",
-    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions",
-    "F_149.py": "fman_pcd.c: F-149 \u2014 revert F-145, restore contextSize = key_size (microcode \u00a77.2)",
-    "F_148.py": "fman_pcd.c: F-148 v4 \u2014 write flow key to CC match table + copy real FE_ENTER AD content into HIT-AD slot",
-    "F_157.py": "fman_pcd.c: F-157 \u2014 wire dedicated TX FQ into FE-VM ENQ (HIT dest distinct from miss-AD kernel FQ 0x200)",
-    "F_158.py": "fman_pcd.c: F-158 \u2014 fe_scaffold debugfs dump node (ground truth on CC match-table layout; STRICT_DEVMEM blocks /dev/mem)",
-    "F_159.py": "fman_pcd_cc.c: F-159 \u2014 fix cc_pack_key() from patch 0108's ask20 EKFC 0x00180206 composite to this branch's real EKFC 0x001C0006 (SIP|DIP|PROTO|SPORT|DPORT); extends cc_test debugfs read with a raw match-table hex dump",
-    "F_160.py": "fman_pcd_kg.c: F-160 \u2014 fix fman_pcd_kg_port_attach_cc()'s next_engine=2 (confirmed no-op CC dispatch) to next_engine=3 (real AC_CC, matching the FE-VM arm path's already-validated encoding)",
-    "F_161.py": "fman_pcd_cc.c: F-161 \u2014 supersedes F-159; realign cc_pack_key() to the board-confirmed live EKFC 0x00180006 (SIP|DIP|SPORT|DPORT, no PROTO) observed via dmesg on hwport 0x11's own scheme4, not the assumed 0x001C0006. Runs after F-159 and F-160.",
-    "F_162.py": "fman_port.c/fman_pcd_kg.c \u2014 F-162: add fman_port_set/clear_kg_direct_scheme() (NIA_KG_DIRECT | scheme_id in fmbm_rfpne, per vendor SDK's FM_PORT_SetPCD directScheme case) and wire into fman_pcd_kg_port_attach_cc()/detach_cc(). Confirmed missing from every board test this session despite everything else matching vendor source exactly.",
-    "F_152.py": "fman_pcd.c: F-152 \u2014 revert F-144, restore original word1 formula (hashMask<<16|contextSize-1<<8|hashShift)",
-    "F_153.py": "fman_pcd.c: F-153 \u2014 fix 0146 MUX/TRANSITION wiring (MUX->TRANSITION->ENQ, not MUX->ENQ direct)",
-    "F_165.py": "fman_pcd.c: F-165 \u2014 __fman_pcd_fe_arm_engage()'s CONT_LOOKUP scaffold unconditionally overwrote the caller's fe_enter_off with its own gro offset (F-091), silently defeating the debugfs fe_arm engage <off> verb's ability to target an arbitrary FE_ENTER AD. Board-confirmed via direct fmbm_rccb register read (0x057100 instead of the intended 0x057000) that this fully explained an earlier byte-correct-chain-still-MISS result -- the ehash lookup was never reached. Guards the overwrite on the caller's original fe_enter_off being 0; production engage (always 0) is unaffected.",
-    "F_167.py": "fman_pcd.c: F-167 \u2014 standalone FMFP_EXTC (FPM External Requests Control, CCSR 0x074) SYNC probe. DPAA RM \u00a75.12.14.1 documents this register's INV0 bit as required by all three officially-documented Custom Classifier table update flows; fman_pcd_ehash_add_key() has never asserted it -- a candidate for both the ehash MISS and the AC_CC/FE_ENTER port-wedge. Adds an inert-by-default debugfs node (fe_extc: cat reads the register, 'echo sync' asserts INV0 and polls for HW to clear it) so the register can be tested standalone without engaging any port. Purely additive; does not touch fman_pcd_ehash_add_key() or any existing fe_* code path.",
-    "F_168.py": "fman_port.c: F-168 \u2014 wires a real FMFP_EXTC SYNC assertion into fman_port_set_cc_base(), between the fmbm_rccb write (repoints the AC_CC dispatch target) and the fmbm_rfpne write (enables dispatch into it). F-167 board-confirmed the register is safe/responsive to touch standalone (echo sync > fe_extc on .185, zero adverse effect, repeated twice); F-168 is the first test with an actual port arm in the picture, testing whether SYNC prevents the port-wedge that has reproducibly occurred on every prior AC_CC arm attempt this session. Scoped to the arm path only (cc_muram_off != 0); teardown is untouched since it has never shown the wedge symptom. Depends on F-167's fman_get_fpm_extc()/fman_set_fpm_extc() accessors.",
-    "F_169.py": "fman_pcd.c: F-169 \u2014 debugfs verb (fe_kg_ekfc: 'set <scheme_id_hex> <ekfc_hex>') to reconfigure a live KeyGen scheme's EKFC. T-M3-R attempt 1 (genuine ehash HIT test) stalled with a real harness gap found: KeyGen scheme4 was never reconfigured off its own 12-byte CC-tree EKFC (0x00180006) to match the 14-byte ehash table's format (F-163's 0x801C0006) before the FE_ENTER-direct arm. The existing fman_pcd_kg_scheme_set_ekfc() (fman_pcd_kg.c) has zero callers because it's buggy -- a single enable=true call against an already-bound scheme is rejected by keygen_scheme_setup()'s own used-scheme guard. F-169 implements the correct disable/mutate/re-enable sequence fresh, directly against fman->keygen->schemes[] via the module-internal fman_keygen_internal.h (designed for exactly this kind of sibling-translation-unit access). Purely additive; only fires on an explicit set write, intended to run immediately before fe_arm engage.",
-    "F_170.py": "dpaa_eth.c + fman_pcd.c: F-170 \u2014 widens the F-072 hash_probe capture hook from eth4-only to eth3+eth4, and records which interface produced the capture (new fman_pcd_hash_ifname global, shown in hash_probe's output). Built to characterize whether F-163/T-M3-R's newly-discovered PORT_ID=0x00 finding (silicon extracts PORT_ID=0x00 for KG_SCH_KN_PORT_ID on eth4/port 0x11, not the raw hw_port_id 0x11 that ask_dpaa_get_fman_port_id() writes) is eth4-specific (a real but different port-numbering convention) or a universal always-zero/non-functional field, by running the same annotation-hash-match brute-force technique against eth3/port 0x10. Purely additive read-only diagnostic widening; no write path touched. (Superseded by the 2026-08-06 PORT_ID resolution \u2014 no longer on the critical path, kept as reusable infrastructure.)",
-    "F_171.py": "fman_pcd.c: F-171 \u2014 adds a `fe_group` debugfs verb that wraps the existing FE_ENTER chain (built by `fe_enter build`) in a genuine CONT_LOOKUP group AD (RM \u00a78.7.4.1/\u00a77.11: numKeys=1, matchTableAddr, adTableAddr, keySize=16) with an all-wildcard match row (mask=0x00 on every byte), instead of writing FE_ENTER directly to FMBM_RCCB as every off!=0 T-M3-R arm this session has done \u2014 the deprecated 'RCCB\u2192FE_ENTER direct' topology the RM says was superseded 2026-07-16. The all-wildcard mask sidesteps F-158's still-open CC-compare-window-layout question entirely: any frame reaching this group AD trivially matches regardless of byte order, and dispatches into the already-built, already-byte-verified FE_ENTER chain. `echo \"build <miss_fqid_hex>\" > fe_group` builds match table (64B) + AD table (32B, ato[0]=verbatim copy of fe_enter's root AD, ato[1]=miss-AD) + the 16B group AD itself; `cat fe_group` shows the group AD's own offset, which is what gets passed to the existing `fe_arm engage <port> <offset> <fqid>` instead of fe_enter's own root_ad offset. Purely additive; fe_arm itself is unmodified.",
-    "F_172.py": "fman_pcd.c: F-172 \u2014 extends F-171's `fe_group` write handler to accept an explicit 16-byte key + 16-byte mask (`echo \"build <miss_fqid_hex> <32-hex key> <32-hex mask>\" > fe_group`), instead of always programming the all-wildcard match row F-171 hardcoded. Motivation: F-171's wildcard test armed cleanly but a discriminator test proved it does not distinguish HIT from MISS (ping and the matching SYN both dispatched to the same FQID regardless of match). Documentation review found the only prior real-key test of this dispatch shape, F-158 (2026-08-01, real key + full participate-mask via `cc_test`, decisive-negative result), predates F-168's FMFP_EXTC SYNC fix (2026-08-06, board-confirmed to fix a real dispatch defect) \u2014 so a real key + real mask has never been tried with F-168 present. Adds `fman_pcd_fe_group_hex2bin()` (self-contained hex parser, no kernel hex2bin() dependency) and widens `fman_pcd_fe_group_build()`'s signature to `(pcd, miss_fqid, key, mask)`; `key`/`mask` NULL reproduces F-171's original wildcard default exactly (fully backward compatible). Purely additive on top of F-171; no other fe_* verb or struct field touched.",
-    "F_173.py": "fman_pcd.c: F-173 \u2014 adds `wmb()` immediately before `fman_pcd_ehash_add_key()`'s bucket-head-pointer publish (`*flow->bucket_h = swab64(rec_phys)`). A deep read of vendor's own original, unmodified source (github.com/we-are-mono/ASK) found their `fix/security-hardening` branch fixing this project's exact symptom class (\"byte-verified-correct key/chain, never a genuine hardware HIT\") via an explicit `wmb()` at this exact point, with the rationale that on weak-ordered ARM64 the flow record's own field writes (header, key, next-FE pointer) can still be in the CPU's store buffer when the separate bucket-head pointer write becomes visible to FMan's independent DMA-capable hash-table walker \u2014 the walker can then dereference a still-stale record. F-142 (2026-07-30) already fixed the adjacent cache-coherency half of this bug class (kzalloc \u2192 dma_alloc_coherent) but never added the write-ordering half; both are independently required. Purely additive \u2014 no other fe_* verb, struct field, or write path touched.",
-    "F_174.py": "fman_pcd.c: F-174 \u2014 strips `FMAN_FE_EXIT_DEALLOCATE` from both the `Transition` and `Exit` singleton FEs in `fman_pcd_fe_singletons_build()`. Built and CI-tested clean (2026-08-07) but **NOT WIRED IN** and never armed on a board: a same-day 2026-07-15 post-mortem (F-069) independently suspects stripping `DEALLOCATE` from `EXIT` of *causing* port-deafness (a BMI internal-buffer leak \u2014 the SDK oracle requires `deallocateBuffer=TRUE`), and that same post-mortem calls F-174's underlying theory (F-062e, \"DEALLOCATE causes FD corruption\") a misattribution. Superseded by F-175, which targets the actual documented gap instead. Kept on disk for the record only.",
-    "F_175.py": "fman_pcd.c: F-175 \u2014 implements a per-flow FE CONTEXT buffer and corrects `ENQ`'s NIA encoding, per a 2026-07-15 finding that this branch only ever implemented layer one of NXP's real two-layer FE-VM design (static singleton FEs + a per-flow context, auto-loaded by hardware into the frame's transient workspace on a genuine HIT). An earlier fixup (F-057) had already removed an inline trailing-bytes write at this same location after finding it corrupts the ehash record; reading the actual SDK oracle source directly (the real, non-stub `FmPcdCcBuildContextByFE()`/`ExternalHashTableAddKey()`) resolves the disagreement \u2014 the FE context is a SEPARATELY allocated 16B DMA buffer (only `MUX`+`ENQ` needed, no HM/replication chain in this branch), never inline in the record; the record instead carries an 8-byte DMA pointer to it (matching the SDK's `t_FmExtHashResult.contex_addr` width). F-057's fix was correct for that location; this fixup's field encoding (`MUX`@0 = ENQ's MURAM offset, `ENQ`@8/12 = `(rspid<<24)|fqid` / `ppid<<16`) is now validated byte-exact against the real SDK encoder. Also corrects `fman_pcd_fe_enq_build()` to the vendor/board-tested encoding (`ws_offset=8`, `NIA_ENG_BMI|NIA_BMI_AC_ENQ_FRAME=0x00500002` in word1 instead of a raw FQID, chains to `EXIT`) \u2014 tried on silicon 2026-07-16 (F-073B), got one frame through before stopping. Adds `ctx`/`ctx_dma` fields to `struct fman_pcd_ehash_flow`, freed alongside the record on drain. `fe_enq`'s debugfs `build` verb drops its fqid argument (ENQ is now a plain singleton); `fe_flow add`'s third argument changes role from an ENQ FE MURAM offset to the target FQID. Updates both call sites sharing `fman_pcd_ehash_add_key()` (the `fe_flow` debugfs path and the `ask.ko`-facing kernel API `fman_pcd_fe_flow_add()`, retyped by F-094) so the build stays consistent \u2014 the public `fman_pcd_fe_flow_action.enq_off` field is reinterpreted as the FQID rather than renamed, avoiding a second breaking header change on top of F-094's.",
+    "mutate.py": "count-gated text replacement helper — F-084 and future conversions",
+    "F_149.py": "fman_pcd.c: F-149 — revert F-145, restore contextSize = key_size (microcode §7.2)",
+    "F_148.py": "fman_pcd.c: F-148 v4 — write flow key to CC match table + copy real FE_ENTER AD content into HIT-AD slot",
+    "F_157.py": "fman_pcd.c: F-157 — wire dedicated TX FQ into FE-VM ENQ (HIT dest distinct from miss-AD kernel FQ 0x200)",
+    "F_158.py": "fman_pcd.c: F-158 — fe_scaffold debugfs dump node (ground truth on CC match-table layout; STRICT_DEVMEM blocks /dev/mem)",
+    "F_159.py": "fman_pcd_cc.c: F-159 — fix cc_pack_key() from patch 0108's ask20 EKFC 0x00180206 composite to this branch's real EKFC 0x001C0006 (SIP|DIP|PROTO|SPORT|DPORT); extends cc_test debugfs read with a raw match-table hex dump",
+    "F_160.py": "fman_pcd_kg.c: F-160 — fix fman_pcd_kg_port_attach_cc()'s next_engine=2 (confirmed no-op CC dispatch) to next_engine=3 (real AC_CC, matching the FE-VM arm path's already-validated encoding)",
+    "F_161.py": "fman_pcd_cc.c: F-161 — supersedes F-159; realign cc_pack_key() to the board-confirmed live EKFC 0x00180006 (SIP|DIP|SPORT|DPORT, no PROTO) observed via dmesg on hwport 0x11's own scheme4, not the assumed 0x001C0006. Runs after F-159 and F-160.",
+    "F_162.py": "fman_port.c/fman_pcd_kg.c — F-162: add fman_port_set/clear_kg_direct_scheme() (NIA_KG_DIRECT | scheme_id in fmbm_rfpne, per vendor SDK's FM_PORT_SetPCD directScheme case) and wire into fman_pcd_kg_port_attach_cc()/detach_cc(). Confirmed missing from every board test this session despite everything else matching vendor source exactly.",
+    "F_152.py": "fman_pcd.c: F-152 — revert F-144, restore original word1 formula (hashMask<<16|contextSize-1<<8|hashShift)",
+    "F_153.py": "fman_pcd.c: F-153 — fix 0146 MUX/TRANSITION wiring (MUX->TRANSITION->ENQ, not MUX->ENQ direct)",
+    "F_165.py": "fman_pcd.c: F-165 — __fman_pcd_fe_arm_engage()'s CONT_LOOKUP scaffold unconditionally overwrote the caller's fe_enter_off with its own gro offset (F-091), silently defeating the debugfs fe_arm engage <off> verb's ability to target an arbitrary FE_ENTER AD. Board-confirmed via direct fmbm_rccb register read (0x057100 instead of the intended 0x057000) that this fully explained an earlier byte-correct-chain-still-MISS result -- the ehash lookup was never reached. Guards the overwrite on the caller's original fe_enter_off being 0; production engage (always 0) is unaffected.",
+    "F_167.py": "fman_pcd.c: F-167 — standalone FMFP_EXTC (FPM External Requests Control, CCSR 0x074) SYNC probe. DPAA RM §5.12.14.1 documents this register's INV0 bit as required by all three officially-documented Custom Classifier table update flows; fman_pcd_ehash_add_key() has never asserted it -- a candidate for both the ehash MISS and the AC_CC/FE_ENTER port-wedge. Adds an inert-by-default debugfs node (fe_extc: cat reads the register, 'echo sync' asserts INV0 and polls for HW to clear it) so the register can be tested standalone without engaging any port. Purely additive; does not touch fman_pcd_ehash_add_key() or any existing fe_* code path.",
+    "F_168.py": "fman_port.c: F-168 — wires a real FMFP_EXTC SYNC assertion into fman_port_set_cc_base(), between the fmbm_rccb write (repoints the AC_CC dispatch target) and the fmbm_rfpne write (enables dispatch into it). F-167 board-confirmed the register is safe/responsive to touch standalone (echo sync > fe_extc on .185, zero adverse effect, repeated twice); F-168 is the first test with an actual port arm in the picture, testing whether SYNC prevents the port-wedge that has reproducibly occurred on every prior AC_CC arm attempt this session. Scoped to the arm path only (cc_muram_off != 0); teardown is untouched since it has never shown the wedge symptom. Depends on F-167's fman_get_fpm_extc()/fman_set_fpm_extc() accessors.",
+    "F_169.py": "fman_pcd.c: F-169 — debugfs verb (fe_kg_ekfc: 'set <scheme_id_hex> <ekfc_hex>') to reconfigure a live KeyGen scheme's EKFC. T-M3-R attempt 1 (genuine ehash HIT test) stalled with a real harness gap found: KeyGen scheme4 was never reconfigured off its own 12-byte CC-tree EKFC (0x00180006) to match the 14-byte ehash table's format (F-163's 0x801C0006) before the FE_ENTER-direct arm. The existing fman_pcd_kg_scheme_set_ekfc() (fman_pcd_kg.c) has zero callers because it's buggy -- a single enable=true call against an already-bound scheme is rejected by keygen_scheme_setup()'s own used-scheme guard. F-169 implements the correct disable/mutate/re-enable sequence fresh, directly against fman->keygen->schemes[] via the module-internal fman_keygen_internal.h (designed for exactly this kind of sibling-translation-unit access). Purely additive; only fires on an explicit set write, intended to run immediately before fe_arm engage.",
+    "F_170.py": "dpaa_eth.c + fman_pcd.c: F-170 — widens the F-072 hash_probe capture hook from eth4-only to eth3+eth4, and records which interface produced the capture (new fman_pcd_hash_ifname global, shown in hash_probe's output). Built to characterize whether F-163/T-M3-R's newly-discovered PORT_ID=0x00 finding (silicon extracts PORT_ID=0x00 for KG_SCH_KN_PORT_ID on eth4/port 0x11, not the raw hw_port_id 0x11 that ask_dpaa_get_fman_port_id() writes) is eth4-specific (a real but different port-numbering convention) or a universal always-zero/non-functional field, by running the same annotation-hash-match brute-force technique against eth3/port 0x10. Purely additive read-only diagnostic widening; no write path touched. (Superseded by the 2026-08-06 PORT_ID resolution — no longer on the critical path, kept as reusable infrastructure.)",
+    "F_171.py": "fman_pcd.c: F-171 — adds a `fe_group` debugfs verb that wraps the existing FE_ENTER chain (built by `fe_enter build`) in a genuine CONT_LOOKUP group AD (RM §8.7.4.1/§7.11: numKeys=1, matchTableAddr, adTableAddr, keySize=16) with an all-wildcard match row (mask=0x00 on every byte), instead of writing FE_ENTER directly to FMBM_RCCB as every off!=0 T-M3-R arm this session has done — the deprecated 'RCCB→FE_ENTER direct' topology the RM says was superseded 2026-07-16. The all-wildcard mask sidesteps F-158's still-open CC-compare-window-layout question entirely: any frame reaching this group AD trivially matches regardless of byte order, and dispatches into the already-built, already-byte-verified FE_ENTER chain. `echo \"build <miss_fqid_hex>\" > fe_group` builds match table (64B) + AD table (32B, ato[0]=verbatim copy of fe_enter's root AD, ato[1]=miss-AD) + the 16B group AD itself; `cat fe_group` shows the group AD's own offset, which is what gets passed to the existing `fe_arm engage <port> <offset> <fqid>` instead of fe_enter's own root_ad offset. Purely additive; fe_arm itself is unmodified.",
+    "F_172.py": "fman_pcd.c: F-172 — extends F-171's `fe_group` write handler to accept an explicit 16-byte key + 16-byte mask (`echo \"build <miss_fqid_hex> <32-hex key> <32-hex mask>\" > fe_group`), instead of always programming the all-wildcard match row F-171 hardcoded. Motivation: F-171's wildcard test armed cleanly but a discriminator test proved it does not distinguish HIT from MISS (ping and the matching SYN both dispatched to the same FQID regardless of match). Documentation review found the only prior real-key test of this dispatch shape, F-158 (2026-08-01, real key + full participate-mask via `cc_test`, decisive-negative result), predates F-168's FMFP_EXTC SYNC fix (2026-08-06, board-confirmed to fix a real dispatch defect) — so a real key + real mask has never been tried with F-168 present. Adds `fman_pcd_fe_group_hex2bin()` (self-contained hex parser, no kernel hex2bin() dependency) and widens `fman_pcd_fe_group_build()`'s signature to `(pcd, miss_fqid, key, mask)`; `key`/`mask` NULL reproduces F-171's original wildcard default exactly (fully backward compatible). Purely additive on top of F-171; no other fe_* verb or struct field touched.",
+    "F_173.py": "fman_pcd.c: F-173 — adds `wmb()` immediately before `fman_pcd_ehash_add_key()`'s bucket-head-pointer publish (`*flow->bucket_h = swab64(rec_phys)`). A deep read of vendor's own original, unmodified source (github.com/we-are-mono/ASK) found their `fix/security-hardening` branch fixing this project's exact symptom class (\"byte-verified-correct key/chain, never a genuine hardware HIT\") via an explicit `wmb()` at this exact point, with the rationale that on weak-ordered ARM64 the flow record's own field writes (header, key, next-FE pointer) can still be in the CPU's store buffer when the separate bucket-head pointer write becomes visible to FMan's independent DMA-capable hash-table walker — the walker can then dereference a still-stale record. F-142 (2026-07-30) already fixed the adjacent cache-coherency half of this bug class (kzalloc → dma_alloc_coherent) but never added the write-ordering half; both are independently required. Purely additive — no other fe_* verb, struct field, or write path touched.",
+    "F_174.py": "fman_pcd.c: F-174 — strips `FMAN_FE_EXIT_DEALLOCATE` from both the `Transition` and `Exit` singleton FEs in `fman_pcd_fe_singletons_build()`. Built and CI-tested clean (2026-08-07) but **NOT WIRED IN** and never armed on a board: a same-day 2026-07-15 post-mortem (F-069) independently suspects stripping `DEALLOCATE` from `EXIT` of *causing* port-deafness (a BMI internal-buffer leak — the SDK oracle requires `deallocateBuffer=TRUE`), and that same post-mortem calls F-174's underlying theory (F-062e, \"DEALLOCATE causes FD corruption\") a misattribution. Superseded by F-175, which targets the actual documented gap instead. Kept on disk for the record only.",
+    "F_175.py": "fman_pcd.c: F-175 — implements a per-flow FE CONTEXT buffer and corrects `ENQ`'s NIA encoding, per a 2026-07-15 finding that this branch only ever implemented layer one of NXP's real two-layer FE-VM design (static singleton FEs + a per-flow context, auto-loaded by hardware into the frame's transient workspace on a genuine HIT). An earlier fixup (F-057) had already removed an inline trailing-bytes write at this same location after finding it corrupts the ehash record; reading the actual SDK oracle source directly (the real, non-stub `FmPcdCcBuildContextByFE()`/`ExternalHashTableAddKey()`) resolves the disagreement — the FE context is a SEPARATELY allocated 16B DMA buffer (only `MUX`+`ENQ` needed, no HM/replication chain in this branch), never inline in the record; the record instead carries an 8-byte DMA pointer to it (matching the SDK's `t_FmExtHashResult.contex_addr` width). F-057's fix was correct for that location; this fixup's field encoding (`MUX`@0 = ENQ's MURAM offset, `ENQ`@8/12 = `(rspid<<24)|fqid` / `ppid<<16`) is now validated byte-exact against the real SDK encoder. Also corrects `fman_pcd_fe_enq_build()` to the vendor/board-tested encoding (`ws_offset=8`, `NIA_ENG_BMI|NIA_BMI_AC_ENQ_FRAME=0x00500002` in word1 instead of a raw FQID, chains to `EXIT`) — tried on silicon 2026-07-16 (F-073B), got one frame through before stopping. Adds `ctx`/`ctx_dma` fields to `struct fman_pcd_ehash_flow`, freed alongside the record on drain. `fe_enq`'s debugfs `build` verb drops its fqid argument (ENQ is now a plain singleton); `fe_flow add`'s third argument changes role from an ENQ FE MURAM offset to the target FQID. Updates both call sites sharing `fman_pcd_ehash_add_key()` (the `fe_flow` debugfs path and the `ask.ko`-facing kernel API `fman_pcd_fe_flow_add()`, retyped by F-094) so the build stays consistent — the public `fman_pcd_fe_flow_action.enq_off` field is reinterpreted as the FQID rather than renamed, avoiding a second breaking header change on top of F-094's.",
     "F_176.py": "fman_pcd.c: F-176 adds a dispatch/FQID-independent HIT discriminator (new debugfs node fe_ehash_stats). Phase 1 of plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md, following Phase 0's CORRECTED verdict (2026-08-07): a first pass misread the wrong vendor function family (ext_hash_add_key()/t_FmPcdCcNodeExtHashInfo, reachable only via FM_PCD_HashTableSet(), never called by cdx_ehash.c) and wrongly concluded the ehash bucket/record format needed a structural rewrite; retracted same day after checking the function cdx_ehash.c actually calls (ExternalHashTableAddKey()/en_exthash_bucket/en_exthash_node/en_ehash_entry) -- this project's format is bit-exact correct, no rewrite needed. Genuinely new: en_ehash_entry's second union view exposes hardware-writeback packet_count/packet_bytes/timestamp counters (320B entries, SET_STATS_ENABLE/SET_TIMESTAMP_ENABLE flag bits) -- enabled unconditionally here, readable via the new debugfs node, giving the first way to confirm hardware performed a compare independent of FQID/dispatch outcome.",
     "F_177.py": "fman_pcd.c: F-177, T-M3-R Phase 2 item 2 (2026-08-07). Phase 1 (F-176 corrected to STATS_EN-only) confirmed the FE-VM ehash zero-HIT result is real. Phase 2 item 1 (byte-for-byte re-check of en_exthash_node.word_1's int_buf_pool_addr/global_mem_offset against vendor's real ExternalHashTableSet()/FM_PCD_Init()) found this project's encoding already bit-exact correct -- closed, no fix. Item 2 (this fixup): F-168 wired an FMFP_EXTC[INV0] SYNC assertion into fman_port_set_cc_base()'s FMBM_RCCB write (RM S5.12.14.1: required after changing a live FMan-controller-walked structure before dispatch into it is safe) and it fixed the historical port-wedge on arm. The ehash bucket table is exactly such a structure, yet fman_pcd_ehash_add_key()'s own bucket-head publish (F-173's wmb()-then-swab64() sequence) has never asserted it. F-177 adds the same SYNC there, on both call sites sharing fman_pcd_ehash_add_key() (the fe_flow debugfs path and the ask.ko-facing fman_pcd_fe_flow_add() API, per F-175's precedent). Weaker hypothesis than F-168's own (vendor's real ExternalHashTableAddKey() fast-insert path calls no sync of any kind), but cheap, additive-only (best-effort: logs a timeout, does not fail the insert), and the last concrete insert-path lead before Phase 3.",
     "F_178.py": "fman_pcd_kg.c: F-178 (2026-08-07), written in direct response to the user's challenge: vendor's real ASK code demonstrably works on this exact board/microcode, so what does this project's own approach do differently? Full read of vendor's real FM_PORT_SetPCD()/SetPcd() documents that for a single-bound-scheme port, vendor ALWAYS ORs NIA_KG_DIRECT | physicalSchemeId into fmbm_rfpne -- without it, KeyGen falls back to the generic SI/match-vector walk (RM sec 4.4) instead of deterministically dispatching to the CC-attached scheme. F-162 (2026-08-05) already found and fixed exactly this gap once, but wired the fix ONLY into fman_pcd_kg_port_attach_cc()/detach_cc() -- the CONT_LOOKUP/group-AD 'CC-graft' mechanism this project's own history has since abandoned. The ACTUAL arm path every T-M3-R test has ever used, fman_pcd_kg_port_arm_fe()/_disarm_fe() (patch 0132), is a separate function pair that reprograms the scheme's next_engine and calls fman_port_set_cc_base(), but NEVER calls F-162's own fman_port_set_kg_direct_scheme() helper -- confirmed directly by this session's own dmesg on every single arm ('rfpne 0x00480200', never '... | NIA_KG_DIRECT | scheme_id'). This means every carefully-configured EKFC/key-format/hash_bytes_offset/PORT_ID value this project has tested on 'scheme 4' may never have actually been consulted for live traffic, if the generic SI/match-vector walk selects a different scheme (or none) instead. Fix: call fman_port_set_kg_direct_scheme(rxport, id) (F-162's existing, already-CI-wired helper -- id already in scope via kg_find_port_scheme()) at the end of arm_fe()'s success path, symmetric fman_port_clear_kg_direct_scheme(rxport) in disarm_fe(). No new register-level code -- two new call sites reusing F-162's own verified mechanism. Dry-run tested (including idempotency) against the exact reconstructed source text before commit.",
     "F_179.py": "fman_keygen.c: F-179 (2026-08-07), follow-up while resolving <combine>/PORT_ID against vendor's real, pristine FMC compiler source (github.com/nxp-qoriq/fmc @ 5b9f4b16a864e9dfa58cdcc860be278a7f66ac18, the exact commit this project's own fmc_git.bb pins). That trace definitively found <combine> builds KeyGen's extractedOrs (FQID-only), correcting an earlier doc claim it was a GEC key mechanism -- and while closing out that context, found KG_SCH_KN_PORT_ID (EKFC bit 31, the real key-extraction path, unrelated to <combine>) draws its value from kgse_dv0/kgse_dv1 (fm_pcd_ext.h's t_FmPcdExtractEntry has no dedicated union member for PORT_PRIVATE_INFO; vendor's fm_kg.c BuildSchemeRegs() assigns kgse_dv0/dv1 straight from the scheme's privateDflt0/1 fields). This project's own fman_keygen.c (mainline-derived, unmodified for this logic) populates kgse_dv0/dv1 with DEFAULT_HASH_KEY_IPv4_ADDR/DEFAULT_HASH_KEY_L4_PORT (0x0A0A0A0A/0x0B0B0B0B) inside the `if (scheme->use_hashing)` branch -- an unrelated mainline RSS-hashing-fallback mechanism. Live-read on .185 scheme 4 confirmed an exact byte-for-byte match. This project's own EKFC override never reprograms these registers, so both existing PORT_ID board measurements (the 2026-07-13 184,320-candidate brute force and the 2026-08-07 16-candidate 0x00-0x0f sweep) were run against this uncontrolled value -- neither result can be trusted to rule the mechanism out. Fix: zero kgse_dv0/kgse_dv1/kgse_ekdv whenever this project's own EKFC override (scheme->ekfc) is in control, so any PORT_ID extraction reads a known 0x00 instead of a leftover RSS constant, making a portid=0x00 retest genuinely controlled for the first time. Dry-run tested (including idempotency) against the exact reconstructed source text before commit.",
-    "F_181.py": "fman_pcd.c: F-181 (2026-08-11) -- source-grounded FE-VM ehash fault-vs-vendor fix.  Compared our fman_pcd_ehash_add_key DDR record to the vendor's genuine ExternalHashTableAddKey() (we-are-mono/ASK 010-ask-fman-dpaa-ehash.patch line 6786) on the running .106 OpenWrt cdx.  Container is bit-identical (en_exthash_bucket {u64 h; pad} + en_ehash_entry).  The ONE delta: the vendor's en_ehash_entry flags u16@0 carries SET_OPC_OFFSET/SET_PARAM_OFFSET pointing to an inline opcode list (terminal ENQUEUE_PKT=0x01) + en_ehash_enqueue_param {mtu u16be, hdr u8, bpid u8, fqid u32be, word, word2} with the flow's TX FQ.  We wrote flags=STATS_EN(0x1000) only and key+u32-ENQ-offset with no opcode-script, so on a HIT the FE-VM walks opc_offset=0 (the header bytes) -> cannot ENQUEUE -> the comparator never completes a HIT (the bracketed zero-HIT fault).  F-181 writes the vendor opcode-script + enqueue_param inline after the key, with flags opc/param offsets computed per the vendor bit packing.  No container change -- 16B bucket/ExternalHashTableAddKey path preserved. Enables the first single-variable HIT test with a genuinely walked action script."
+    "F_181.py": "fman_pcd.c: F-181 (2026-08-11) -- source-grounded FE-VM ehash fault-vs-vendor fix.  Compared our fman_pcd_ehash_add_key DDR record to the vendor's genuine ExternalHashTableAddKey() (we-are-mono/ASK 010-ask-fman-dpaa-ehash.patch line 6786) on the running .106 OpenWrt cdx.  Container is bit-identical (en_exthash_bucket {u64 h; pad} + en_ehash_entry).  The ONE delta: the vendor's en_ehash_entry flags u16@0 carries SET_OPC_OFFSET/SET_PARAM_OFFSET pointing to an inline opcode list (terminal ENQUEUE_PKT=0x01) + en_ehash_enqueue_param {mtu u16be, hdr u8, bpid u8, fqid u32be, word, word2} with the flow's TX FQ.  We wrote flags=STATS_EN(0x1000) only and key+u32-ENQ-offset with no opcode-script, so on a HIT the FE-VM walks opc_offset=0 (the header bytes) -> cannot ENQUEUE -> the comparator never completes a HIT (the bracketed zero-HIT fault).  F-181 writes the vendor opcode-script + enqueue_param inline after the key, with flags opc/param offsets computed per the vendor bit packing.  No container change -- 16B bucket/ExternalHashTableAddKey path preserved. Enables the first single-variable HIT test with a genuinely walked action script.",
+    "F_182.py": "fman_pcd.c: F-182 (2026-08-12, E20 corrected track step 1) -- three ehash DDR record bug fixes found in F-181's first silicon test record dump (@0x81c42000): (1) F-175's per-flow ctx pointer write (8B be64 at 8+align8(keysize)) CLOBBERED F-181's opcode slot (8+ALIGN(keysize,4)) -- both = 24 for keysize 14; dump showed opcode[24]=0x00 under the ctx_dma be64. Relocated the ctx pointer past the opcode area + param block (offset 56 for keysize 14, 80 for the 37B IPv6 key; inside the 256B record, past everything the FE-VM walks). (2) param.fqid carried the ENQ FE MURAM offset (dump [44..47]=0x00055f00) -- vendor writes the flow's actual target FQID there (cdx create_enque_hm: param->fqid = cpu_to_be32(l2_info.fqid)). Now writes the add_key fqid parameter. (3) Cleared SET_STATS_ENABLE -- vendor sets it only with the 320B ext entry (stats at +256) + UPDATE_STATS in the hashfe word; we have neither, so the bit could only be inert-or-overflow; pkt_count was never a valid discriminator (E20 confound #3; M3 gate = fe_obs canary, patch 0169). Anchored on F-175/F-181 outputs; runs after both. Resulting keysize-14 record: flags=0x018A (opc_off=24|param_off=40, no STATS_EN), key@8, opcode 0x01@24, param@40 (mtu=1500, fqid=target FQID), ctx ptr@56.",
+    "F_183.py": "fman_keygen.c/fman_pcd_kg.c/fman_pcd.c: F-183 (2026-08-12, E20 corrected track step 2 -- Delta 1 adapted to what .185 silicon survives). F-181's test stalled on the first dispatched frame: engage used bare-FE_ENTER-root-at-RCCB (known staller) + AC_CC mode 0x80000006 (stalls on .185 mainline, Path A) + KG_DIRECT rfpne 0x00480304 (vendor is 0x00480200). F-183 assembles the ONLY combination where every element is individually proven non-stalling on .185: (A/B) keygen_scheme_setup CCBS word-3 kernel bug fix -- 210.10.1 reads the CCBS dispatch offset from scheme window word 3 (0x10C, struct kgse_bmch), NOT word 19 (0x14C, struct kgse_ccbs) where the kernel wrote it (F-184 board proof 2026-08-10: word-19 writes never fired the walk; AR write word3=group_off fired it with 1:1 miss-row delivery); the word-3 write sits after F-051's kgse_bmch zeroing. (C) arm_fe: next_engine 3->2 (CCBS-implicit, mode stays 0x80500002), cc_bits_sel = group-table offset. (D) F-178's NIA_KG_DIRECT OR removed from arm_fe -- rfpne stays vendor 0x00480200. (H) v6 slot cc_bits_sel zeroed (no stale graft). (E) __fman_pcd_fe_arm_engage scaffold: group ALWAYS numKeys=0; explicit FE_ENTER target rides the MISS slot (ato[0] = verbatim FE_ENTER AD copy) and RCCB always repoints at the group (F-165's bare-direct form is the stalling topology). (F) F-148's numKeys bump pinned at 0 (numKeys=1 would move the miss slot off the FE_ENTER copy after the first insert). (G) ENGAGED dmesg no longer claims AC_CC. Teardown unchanged (detach_cc clears word 3 via the same path). Anchored on F-051/F-148/F-165/F-178 outputs; runs after all of them."
   },
   "count": 82,
   "removed_dead": [
-    "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
+    "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {
-    "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 \u2014 not a duplicate",
-    "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) \u2014 not duplicates"
+    "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 — not a duplicate",
+    "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) — not duplicates"
   },
   "dispositions": {
     "F_054.py": {
       "action": "permanent",
-      "reason": "MUX(AD+4)/Transition AD direct writes \u2014 F_055 correction folded in"
+      "reason": "MUX(AD+4)/Transition AD direct writes — F_055 correction folded in"
     },
     "F_055.py": {
       "action": "fold-into F_054.py",
-      "reason": "Correction to F_054 MUX write target (AD+0\u2192AD+4). Merge into single fixup."
+      "reason": "Correction to F_054 MUX write target (AD+0→AD+4). Merge into single fixup."
     },
     "F_056.py": {
       "action": "permanent",
-      "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage \u2014 workaround for F-047 patch drift"
+      "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage — workaround for F-047 patch drift"
     },
     "F_057.py": {
       "action": "permanent",
@@ -197,7 +199,7 @@
     },
     "F_068.py": {
       "action": "permanent",
-      "reason": "Settled AC_CC direct topology (RCCB\u2192FE_ENTER, not CCBS)"
+      "reason": "Settled AC_CC direct topology (RCCB→FE_ENTER, not CCBS)"
     },
     "F_069.py": {
       "action": "permanent",
@@ -257,15 +259,15 @@
     },
     "F_089.py": {
       "action": "permanent",
-      "reason": "\u00a717 canonical FE descriptor compile-time + KUnit guards (three-tripwire architecture)"
+      "reason": "§17 canonical FE descriptor compile-time + KUnit guards (three-tripwire architecture)"
     },
     "F_090.py": {
       "action": "fold-into 0158",
-      "reason": "fe_chain debugfs node belongs with the builder it calls \u2014 0158 defines __fman_pcd_fe_build_vm_chain"
+      "reason": "fe_chain debugfs node belongs with the builder it calls — 0158 defines __fman_pcd_fe_build_vm_chain"
     },
     "F_091.py": {
       "action": "fold-into 0158",
-      "reason": "Scaffold HIT path \u2014 belongs with the engage/arm code in 0132/0158"
+      "reason": "Scaffold HIT path — belongs with the engage/arm code in 0132/0158"
     },
     "F_093.py": {
       "action": "fold-into 0158",
@@ -273,27 +275,27 @@
     },
     "F_094.py": {
       "action": "permanent",
-      "reason": "API cleanup \u2014 structured params instead of raw (key, size, offset)"
+      "reason": "API cleanup — structured params instead of raw (key, size, offset)"
     },
     "F_107.py": {
       "action": "fold-into 0153+0157",
-      "reason": "gen_pool double-free prevention \u2014 engagement guard belongs with the engage/disengage API patches"
+      "reason": "gen_pool double-free prevention — engagement guard belongs with the engage/disengage API patches"
     },
     "F_122.py": {
       "action": "fold-into 0157",
-      "reason": "Idempotent engage \u2014 test_bit guard in shared core, return 0 when already armed"
+      "reason": "Idempotent engage — test_bit guard in shared core, return 0 when already armed"
     },
     "F_109.py": {
       "action": "fold-into 0153",
-      "reason": "ENQ FE offset getter \u2014 eliminates debugfs loopback, belongs with the FE-VM engage API"
+      "reason": "ENQ FE offset getter — eliminates debugfs loopback, belongs with the FE-VM engage API"
     },
     "F_092.py": {
       "action": "fold-into 0158+0153",
-      "reason": "fe_engage should build VM chain; fe_disengage should tear down \u2014 belongs with the API patches"
+      "reason": "fe_engage should build VM chain; fe_disengage should tear down — belongs with the API patches"
     },
     "F_096.py": {
       "action": "fold-into 0146/0158",
-      "reason": "Context build call belongs with the arm_engage function \u2014 0146 lost call site, F-091/F-092 overwrote it"
+      "reason": "Context build call belongs with the arm_engage function — 0146 lost call site, F-091/F-092 overwrote it"
     },
     "F_097.py": {
       "action": "fold-into 0153",
@@ -305,23 +307,23 @@
     },
     "F_099.py": {
       "action": "remove-after-M4",
-      "reason": "temporary diagnostic \u2014 traces ZC bind failure; remove once root cause identified"
+      "reason": "temporary diagnostic — traces ZC bind failure; remove once root cause identified"
     },
     "F_100.py": {
       "action": "remove-after-M4",
-      "reason": "temporary diagnostic \u2014 traces ZC attach-path failure; remove once root cause identified"
+      "reason": "temporary diagnostic — traces ZC attach-path failure; remove once root cause identified"
     },
     "F_101.py": {
       "action": "remove-after-M4",
-      "reason": "temporary workaround \u2014 VPP uses 2K chunks but driver needs 4K; remove once VPP fixed"
+      "reason": "temporary workaround — VPP uses 2K chunks but driver needs 4K; remove once VPP fixed"
     },
     "F_102.py": {
       "action": "remove-after-M4",
-      "reason": "temporary crash fix \u2014 ZC datapath produces DQRR entries with invalid context_b; remove once ZC RX path properly initializes all FQ context_b"
+      "reason": "temporary crash fix — ZC datapath produces DQRR entries with invalid context_b; remove once ZC RX path properly initializes all FQ context_b"
     },
     "F_103.py": {
       "action": "remove-after-M4",
-      "reason": "temporary crash fix \u2014 FMan RX port BPID reprogram causes QMan context_b corruption; re-enable once ZC RX datapath handles XSK-pool frames"
+      "reason": "temporary crash fix — FMan RX port BPID reprogram causes QMan context_b corruption; re-enable once ZC RX datapath handles XSK-pool frames"
     }
   }
 }
