@@ -2359,3 +2359,62 @@ scheme id is resolved, or read back from the engaged scheme's fqb;
 one flow, one port. Also: full-sequence idempotency re-run is destructive
 (count-gated mutate.py fixups FATAL by design on re-run); per-fixer
 marker-guard idempotency only.
+
+## E26 — F-186 image matrix on .185 (2026-08-12, 6.18.44-vyos, CI run 31644097159, commit d9c8e495)
+
+Committed F-186 (ENQUE miss form + own-port fqb) validated on silicon, then
+the E26 test matrix. Fresh install boot (FMan re-probed clean). All tests
+on eth4/port 0x11 unless noted; injection from .106 with static ARP.
+
+**E26-1 baseline — PASSED.** Arm produced node @0x56d00 =
+`8e400000 fa110000 04d9080c 00000300` from the COMMITTED code:
+miss_action_type=2 (ENQUE), word3 = 0x300 (slot->base_fqid, eth4 own fqb).
+Hit flow 44444 (record fqid 0x300) rc=7 AND miss flow 44448 rc=7; eth4
+rx=3, errs=0, drop=0; spc4=3 (one pass each, no loop). hash_probe =
+crc64(44448) byte-exact. **bpid answer: the record was inserted by the
+code-default bpid=0 and the HIT still delivered rc=7 — the machine does
+NOT need param.bpid on the ENQUEUE_PKT path to own-port. No F-187.**
+
+**E26-2 collision chain — PASSED (the last untested structural
+primitive).** Two flows hashing to the SAME bucket 0xe9f (sports 34142 and
+11487; crc64 0x2e9ff9275a1e784e / 0x4e9f993d8568f250, both >>48&0xfff =
+0xe9f). DDR chain verified: bucket head → 0x81cc0000 (flow B, head-insert)
+→ next 0x81c44000 (flow A) → NULL. BOTH flows HIT (rc=7) — the chain
+`next`-pointer walk works. Per-key delete of flow A (fe_flow del): chain
+unlinked (head → B, B.next=0). Deleted flow MISSes (rc=7 via word3),
+surviving flow still HITs (rc=7). eth4 rx=9, 0 errs/drops.
+
+**E26-3 writeback — PASSED (no hardware writeback).** Full 256 B dump of
+flow B's record after multiple HITs: nonzero words are EXACTLY the
+software-written fields (flags 0x018a @0, key @8, opcode 0x01 @0x18,
+param mtu/fqid @0x28-0x2c, ctx DMA ptr @0x3c). The machine writes nothing
+into the record (no aging/ts/stats) — the minimal 256 B format is stable.
+Note: ctx ptr sits at +0x3c (60), F-182 comment says 56 — cosmetic doc
+drift, software-written, not machine behavior.
+
+**E26-4 UDP — PASSED (proto 17).** UDP record (key
+000a63026a0a6302b911ad9cd903, proto 0x11, bucket 0xf16, fqid 0x300) +
+iperf3 UDP from .106:44444 → .185:55555 (16 B datagrams, 100 kbit/s, t=2):
+**1564 sent, 1564 received, 0% loss** (server on .185 received every
+datagram via the HIT path). eth4 rx=1594, errs=0, drop=0, spc4=1594 = one
+classification per frame (no loop).
+
+**E26-5 eth3/port 0x10 — PASSED structurally; traffic test blocked by
+cabling.** Port 0x10 armed (scheme 3 CC(AC_CC) fqb=0x200, RCCB=0x57100,
+rfpne vendor). Node = `8e400000 fa110000 04d9080c 00000200` —
+miss_action=2, word3 = 0x200 = scheme 3's fqb (eth3 own port): the F-186
+own-port-fqb logic (slot->base_fqid) is correct for a second port. NO L2
+path from .106 to eth3 (ARP incomplete — .106 is cabled eth4↔eth4 only),
+so no traffic-level test possible without a cable/loopback. Follow-up item.
+
+**E26-6 sustained rate — PASSED (~780 pps).** The UDP burst ran ~780 pps
+for 2 s: 1564/1564 delivered, spc = exactly one classification per frame,
+no drift, no FD errors, no wedge. (Flooding remains off-limits per BUG-3a
+history; 780 pps is the validated envelope.)
+
+**Matrix outcome:** all structural + same-port primitives verified; the
+"clear understanding" in decomp/fman-ehash-process.md is now validated on
+every step except multi-port traffic (cabling) and IPv6 (unbuilt). Board
+restored to clean S0 (scheme 4 plain RSS, RCCB 0, eth3 temp IP removed,
+.106 ARP cleaned). MURAM gen_pool leak per engage cycle persists (fixup
+candidate, not blocking).
