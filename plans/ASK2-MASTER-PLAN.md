@@ -30,7 +30,7 @@ confirmed silicon HIT. The only silicon-proven hardware offload today is the
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **The key-format question is CLOSED (2026-08-06/07/08): vendor's real 14-byte `portid`-prefixed key (EKFC=`0x801C0006`, `PORT_ID=0x00` for eth4/port 0x11) is HW-confirmed correct via CRC-64 hash match, independently reproduced 3 times (2026-08-06 discovery, 2026-08-07 16-candidate batch test, 2026-08-08 re-confirmation) — see §1.3 below. A properly-EKFC-synchronized 14-byte key STILL does not HIT, tested 3 independent times with the same result.** Phase 1 (`F-176`), Phase 2 (`F-177`'s sync, `int_buf_pool_addr` cross-check), the `999`-patch forensic finding (`F-053`'s `hash_bytes_offset=1` retracted to `0`), and the corrected 14-byte-key retest have all board-tested negative in turn — the zero-HIT is confirmed genuine across every construction-level, sync-related, key-format, and vendor-value-cross-checked hypothesis tested to date. The fault is now bracketed (via persistent hardware counters `kgse_spc` + `FMBM_RSTC`, 2026-08-07) to somewhere between KeyGen classification completing and the ehash comparator's stats becoming visible. See §4.1 Phase 3 for the current next step. |
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **Key-format CLOSED (2026-08-06/07/08) and now full-path VERIFIED (2026-08-12, E25/E26): the vendor's 14-byte `portid`-prefixed key (EKFC=`0x801C0006`, `PORT_ID=0x00` for eth4/port 0x11) is HW-confirmed via CRC-64 hash match, and the complete HIT path (extraction → hash → bucket → chain walk → opcode-script enqueue → kernel) delivers on silicon.** M3 gate passed: see §3/§4.1 and `decomp/fman-ehash-process.md` (E24–E27 evidence).
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
@@ -226,7 +226,7 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
 ```mermaid
 graph LR
     M2["M2 perf gate<br/>DONE - regression-monitor only"] --> M5["M5 flow automation<br/>DONE - mechanism unresolved"]
-    M3["M3 FE-VM ehash HIT gate<br/>OPEN - attempt 5 ISO building"]
+    M3["M3 FE-VM ehash HIT gate<br/>DONE (E25/E26, M3 gate passed)"]
     M5 --> M6["M6 IPv6 / bridge / IPsec<br/>UNBLOCKED"]
     M5 --> M7["M7 VyOS CLI<br/>DONE - release claim gated by CR-001"]
     M6 --> M8["M8 soak + upstream"]
@@ -240,11 +240,18 @@ ehash mechanism, not a sequencing blocker for M6/M7/M8.
 - **M2 — Performance gate. DONE.** ≥2 Gbps + ≤5% kernel-net CPU; actual 7.37
   Gbps / 0.16% CPU. Regression-monitor: every build changing `fman_pcd.c` or
   `dpaa_eth.c` re-runs the CONT_LOOKUP pass-through iperf3 gate.
-- **M3 — FE-VM ehash HIT gate. OPEN.** Gate: one flow HIT — a matching frame
-  visibly dispatches through `fe_enq`'s target FQID (`0x300` for eth4, traced
-  live, not `0x2B9`) with a discriminator that cannot confuse HIT with
-  MISS→kernel delivery (MISS is a silent `EXIT`-`DEALLOCATE` drop, not
-  kernel delivery — §1.3). Work: §4.1.
+- **M3 — FE-VM ehash HIT gate. DONE (2026-08-12, E25/E26).** Gate: one flow
+  HIT — a matching frame visibly dispatches through the flow record's target
+  FQID with a discriminator that cannot confuse HIT with MISS delivery.
+  Passed on .185 (6.18.44-vyos): record (fqid 0x300, opcode script
+  `ENQUEUE_PKT`) HIT delivers to the kernel (RST, `curl rc=7`), discriminated
+  by the split-target test (miss fqid 0x200/eth3 vs record fqid 0x300/eth4),
+  single-pass `kgse_spc`, and bucket/chain/writeback verification. The old
+  "MISS is a silent `EXIT`-`DEALLOCATE` drop, not kernel delivery" clause is
+  OBSOLETE: E25 proved the miss action (ENQUE, own-port fqb) delivers to the
+  kernel like HIT — the discriminator is the target-FQID split, not
+  drop-vs-deliver. Full E26 matrix (collision chain, per-key delete, UDP,
+  ~780 pps sustained, eth3/0x10 structural) all pass; work: §4.1.
 - **M4 — AF_XDP true-ZC RX. BLOCKED.** Gate: `xsk_zc_rx_redirect` > 0 under
   XDP_ZEROCOPY bind + steered flow. Work: §4.4.
 - **M5 — CC-tree + SW flowtable + manip chain. DONE (throughput), mechanism
@@ -267,13 +274,20 @@ start. Stub-fix IDs per `plans/TF-2026-07-18-001-function-inventory.md`. The
 orphaned P1–P3 closure series (`4493ce8`→`9970745`) is recoverable via
 `git reflog` — re-land behind `bin/test-fixups.sh`, never before it passes.
 
-### 4.1 T-M3-R — first genuine HIT test of the corrected ehash chain ⬅ NEXT ACTION
+### 4.1 T-M3-R — first genuine HIT test of the corrected ehash chain (PASSED 2026-08-12, E25/E26)
 
-**[SPEC — updated 2026-08-06, attempts 2–4 executed]** Attempts 2–4 ran on
-silicon this session (F-169/F-170 ISOs, all with explicit operator go-ahead).
-None produced a confirmed HIT, but they collectively closed out FQID choice,
-key format, and PORT_ID as explanations, and surfaced what is now believed to
-be the actual structural blocker (below). **T-M3-R is not yet passed.**
+**[SPEC — updated 2026-08-12]** T-M3-R is PASSED. The structural blocker
+(wrong AD species at `FMBM_RCCB`) was resolved by F-185 (vendor VARIANT B
+`en_exthash_node` at RCCB, E23 Ghidra decode) and the miss action corrected
+by F-186 (ENQUE + own-port fqb — the NIA form infinitely loops on 210.10.1).
+E25 delivered the first confirmed HIT (record match → opcode script →
+fqid 0x300 → kernel, `curl rc=7`, unambiguous split-target discriminator);
+E26 extended it across collision chains, per-key delete, UDP, and ~780 pps
+sustained with 0% loss. Attempts 2–6 and the three course-correction deltas
+are superseded: Delta 2 (`t_ExtHashResult` record payload) was NOT needed —
+the F-181/F-182 inline opcode-script record delivers; Delta 3
+(`OFFLOAD_SUPPORT_EN`) was proven not a dispatch gatekeeper (E24). Evidence:
+`decomp/experiments.md` E24–E27, `decomp/fman-ehash-process.md`, qdrant.
 
 **Prerequisites (all landed):**
 
@@ -1081,7 +1095,7 @@ the milestone shown.
 
 | ID | Symptom | Status | Gates | Next action |
 |---|---|---|---|---|
-| **F-141** | FE-VM ehash never HITs (umbrella). Root causes fixed: flow-record allocator (F-142), EXT_HASH `contextSize` (F-149), CC match-row mask (F-156), scaffold overwrite (F-165), EKFC reconfiguration (F-169). **F-163 (PORT_ID key) was itself wrong, not a fix — reverted 2026-08-06 (§4.1).** FQID choice and key content both ruled out as explanations (attempts 2–4). Suspected remaining cause: wrong AD species at `FMBM_RCCB` (§4.1, §7.11), not yet tested. **2026-08-11 course-correction** (`plans/ASK2-PRODUCTION-ARCHITECTURE.md` §3.1/§4 Phase 2): attempt 5 = three deltas — (1) RCCB AD species (vendor `copy_td_to_ccbase` ehash-node-in-root form vs our bare form), (2) record-side HIT payload (16 B `t_ExtHashResult` = per-flow MUX context + `monitorAddr` stats, not our u32 ENQ offset — see `arch/fman-fe-ehash.md` §5.2), (3) params-page `OFFLOAD_SUPPORT_EN` (`misc |= 0x40000000`) + FE pool/index at `+0x54/+0x58`. Land Delta 1 alone first to isolate the variable | OPEN — attempt 5 needed | M3 | T-M3-R attempt 5 per `plans/ASK2-PRODUCTION-ARCHITECTURE.md` Phase 2 |
+| **F-141** | FE-VM ehash never HITs (umbrella). Root causes fixed: flow-record allocator (F-142), EXT_HASH `contextSize` (F-149), CC match-row mask (F-156), scaffold overwrite (F-165), EKFC reconfiguration (F-169), **F-185 (wrong AD species at `FMBM_RCCB` — the RM group-AD parses as a garbage node; vendor VARIANT B `en_exthash_node` required) + F-186 (miss action — the KG-direct NIA form infinitely loops on 210.10.1; ENQUE + own-port fqb is correct)**. The three course-correction deltas (2026-08-11 Phase 2) resolved: Delta 1 landed (F-185), Delta 2 proven unnecessary (F-181/F-182 opcode-script record delivers — no `t_ExtHashResult` needed), Delta 3 proven not a dispatch gatekeeper (E24). **HIT CONFIRMED 2026-08-12 (E25/E26): one flow HIT delivers to the kernel with an unambiguous discriminator; full matrix passes (collision chain, per-key delete, writeback, UDP, ~780 pps)** | CLOSED 2026-08-12 | M3 (passed) | Evidence: `decomp/experiments.md` E24–E27; `decomp/fman-ehash-process.md` |
 | **F-076** | Port RX deaf after FE-VM-armed disengage; `fe_arm.engaged` stays YES | CLOSED on the scaffold path (`fe_disengage_full` + `fe_recover` proven); **DIRECT path still deaf** | M3 (T-M3-R uses the direct path) | Observe during T-M3-R; `fman_pcd_port_recover` de-wedge (0163) if hit |
 | **CR-001 / F-123** | Production YNL engage/disengage cycles leave `pcd-snapshot` drift (KG scheme[4], BMI `rfpne`/`rccb`, MURAM delta) | PARTIAL | **M7 release claim**, M8 soak | Validate three consecutive clean engage/disengage cycles per DUT with `engage/disengage rc=0` and byte-clean `pcd-snapshot`; continue HIT/flow validation only if clean |
 | **CR-003** | VyOS commit-path handling was fail-open (rc/stderr confusion + helper-failure masking) | PARTIAL | M7 release claim | Close together with CR-001: one production control path (YNL/genl), fail-closed config behavior, no debugfs control writes from the VyOS commit path |
