@@ -2533,6 +2533,24 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c/fman_pcd_kg.c: F-186 ENQUE miss form + own-port fqb (loop fix)"
 fi
 
+# F-187 (2026-08-12, E26 follow-up): free the fe_hashfe miss-result
+# allocations on hash free. fman_pcd_fe_hash_build() allocates
+# pcd->miss_res_off (16 B MURAM t_ExtHashResult) + pcd->miss_ctx (256 B
+# DMA) per build; fman_pcd_fe_hash_free() returned only the FE object to
+# the pool and never freed them. Measured on .185 (muram_budget): exactly
+# +16 B MURAM per build/clear cycle, linear across cycles (the 256 B DMA
+# leaks alongside, invisible to the MURAM budget). The minimal arm (no
+# hashfe build) leaks 0, isolating the defect to this pair. The hash FE is
+# legacy (node dispatch does not use it), but the leak violates the
+# "used MUST return to baseline" reversibility invariant. Fix: free
+# miss_res_off (fman_pcd_muram_free, 16 B) and miss_ctx
+# (dma_free_coherent via the last ehash table's dev -- same lookup the
+# build uses) in fe_hash_free, resetting both, guarded on non-zero/NULL.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_187.py" 2>&1
+    echo "### fman_pcd.c: F-187 fe_hashfe miss-result leak fix (16B MURAM + 256B DMA/cycle)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
