@@ -2146,3 +2146,50 @@ edited ci-setup-kernel.sh and re-run on a pristine patched scratch worktree
 — 0 FATALs, all 11 blocks apply in order, idempotent re-run clean,
 `bin/test-fixups.sh` 4/4 OK. Compile gate = CI (no local compile per user
 directive).
+
+## E22 — fe_obs arm kernel panic: list_add double add in fe_obs_enq_one (2026-08-12)
+
+First live use of the fe_obs canary discriminator (patch 0169, until now
+only compile-verified) **panicked the kernel on .185** — reproduced twice
+(image 2026.08.12-0223-rolling): the 03:18 "mystery reboot" during arm
+attempt 1 (boot 2) and the console-captured panic at [771.5] during arm
+attempt 2 (boot 4):
+
+    list_add double add: new=ffff000810cbe9c0, prev=ffff000810cbe9c0
+    kernel BUG at lib/list_debug.c:35!
+    Call trace: __list_add_valid_or_report <- fman_pcd_fe_obs_enq_one
+                <- fman_pcd_fe_obs_write <- full_proxy_write <- vfs_write
+    Kernel panic - not syncing: Oops - BUG: Fatal exception
+    Rebooting in 60 seconds..
+
+**Root cause:** `fman_pcd_fe_obs_enq_one()` acquires the canary FE object
+via `list_first_entry_or_null(&pcd->fe_available)` (does NOT unlink) then
+`list_add_tail(&obj->node, &pcd->fe_singletons)` WITHOUT `list_del` — a
+double-add under CONFIG_DEBUG_LIST. Every other fe_available consumer
+(singleton_one, enq builder, hashfe builder) does `list_del` first; fe_obs
+(written later) missed the pattern.
+
+**Fix: F-184** — insert `list_del(&obj->node)` before the list_add_tail,
+matching the in-file pattern. Anchor starts at the unique
+`FMAN_FE_ENQ_CTX_OFF, &c);` line (the tail alone is NOT unique —
+fman_pcd_fe_singleton_one ends identically; the first F-184 draft matched
+the wrong function in dry-run, caught by post-apply verification; the
+shipped fixup is count-gated `count==1`).
+
+**Also confirmed this session (before the panic):** F-182/F-183 work live —
+engage wrote RCCB=0x56d00 (group, not bare FE_ENTER), rfpne=0x00480200
+(no KG_DIRECT), group numKeys=0 with miss slot = verbatim FE_ENTER AD copy
+(40800000 00000000 000000f6 00055e00), scheme4 mode=0x80500002 (CCBS-
+implicit, NOT AC_CC), scheme window WORD 3 = 0x56d00 (the word-3 CCBS
+kernel fix live-verified), word 19 = 0, FMFP_PS[0x11] healthy post-engage.
+The whole F-182/F-183 dispatch model is silicon-verified; only the fe_obs
+canary build step panicked.
+
+**Board quirk noted:** every U-Boot boot of this board is followed by a
+system_option.py hugepages kexec double-boot (config.boot carries
+isolcpus=3 hugepagesz=2M hugepages=512); boots alternate
+hugepages/no-hugepages in `last -x`. Post-panic recovery = panic=60 →
+U-Boot → kexec → stable after ~3-4 min.
+
+**Next:** rebuild with F-184, redeploy, re-arm E21 sequence + fe_obs,
+traffic verdict.
