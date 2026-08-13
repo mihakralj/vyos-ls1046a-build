@@ -47,44 +47,22 @@ for package in $packages; do
   # A cold kernel build peaks at ~14GB transient (10GB tree + ~2GB debs +
   # ccache growth) on top of ~17GB persistent baseline — beyond the 30GB
   # runner disk at bindeb-pkg time. ENOSPC on runs 31674687093 and
-  # 31718015742 (2026-08-13). This host has 94GB RAM, so back the two
-  # places the build tree can live with tmpfs:
-  #   1. the linux-kernel package dir (tarball-path tree + .debs)
-  #   2. the persistent kernel git cache (~/kernel-git-cache/linux — the
-  #      canonical-tree build: .git + worktree + build output)
-  # Both mounts persist across runs on the persistent runner (no-op when
-  # already mounted) and live OUTSIDE $GITHUB_WORKSPACE: actions/checkout
-  # aborts with EBUSY when workspace cleanup hits a mounted directory
-  # (run 31724821391, 2026-08-13). The package dir is replaced by a
-  # symlink to its tmpfs; on a fresh boot the on-disk content is moved
-  # into the new mount and the disk copy deleted, restoring headroom.
-  # Runs as root (job shell is sudo -E bash).
+  # 31718015742 (2026-08-13). This host has 94GB RAM.
+  #
+  # The kernel build compiles the persistent canonical tree at
+  # ~/kernel-git-cache/linux (the package dir's `linux` symlink; build.py
+  # skips the tarball when it exists), so the ~10GB build tree grows
+  # inside the cache — mount the cache on tmpfs (28G) and the whole
+  # compile runs in RAM. The mount lives OUTSIDE $GITHUB_WORKSPACE:
+  # actions/checkout aborts with EBUSY when workspace cleanup hits a
+  # mounted directory (run 31724821391, 2026-08-13), and build.py
+  # resolves relative paths from the package dir's physical location
+  # (../../../data/defaults.toml — a symlink-swapped cwd broke that on
+  # run 31725325868). The on-disk cache copy is moved into the new mount
+  # and the disk copy deleted, restoring headroom; the mount persists
+  # across runs (no-op when already mounted). Runs as root (job shell is
+  # sudo -E bash).
   if [ "$package" == "linux-kernel" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
-    BKDIR="$(pwd)"
-    RAMPATH="${HOME:-/home/vyos}/ramdisk/linux-kernel"
-    if ! mountpoint -q "$RAMPATH"; then
-      mkdir -p "$RAMPATH"
-      mount -t tmpfs -o size=24G,mode=755 tmpfs "$RAMPATH"
-      echo "### Mounted tmpfs (24G) on $RAMPATH"
-    else
-      echo "### tmpfs already mounted on $RAMPATH"
-    fi
-    # Move the staged package dir (package.toml, patches/, config/) into the
-    # tmpfs and leave a symlink in the workspace. NOTE: cwd IS $BKDIR here,
-    # so the real dir is renamed aside (cwd stays valid through the rename),
-    # the symlink is created, and the renamed dir is removed only AFTER
-    # re-entering through the symlink.
-    if [ -d "$BKDIR" ] && [ ! -L "$BKDIR" ]; then
-      mv "$BKDIR" "${BKDIR}.staged"
-      ln -s "$RAMPATH" "$BKDIR"
-      cp -a "${BKDIR}.staged/." "$RAMPATH/"
-      rm -rf "${BKDIR}.staged"
-      cd "$BKDIR"
-      echo "### Package dir now symlinked: $BKDIR -> $RAMPATH"
-    elif [ -L "$BKDIR" ]; then
-      cd "$BKDIR"
-      echo "### Package dir already symlinked: $BKDIR"
-    fi
     CACHE="${HOME:-/home/vyos}/kernel-git-cache/linux"
     if [ -d "$CACHE" ] && ! mountpoint -q "$CACHE"; then
       mv "$CACHE" "${CACHE}.disk"
@@ -96,7 +74,7 @@ for package in $packages; do
     elif [ -d "$CACHE" ]; then
       echo "### tmpfs already mounted on $CACHE"
     fi
-    df -h "$RAMPATH" "$CACHE" 2>/dev/null || df -h "$RAMPATH"
+    df -h "$CACHE" 2>/dev/null || true
 
     # Pin the cache checkout to the kernel version from defaults.toml. The
     # clone step's default (KERNEL_VERSION:-6.18.38 in auto-build.yml) lags
