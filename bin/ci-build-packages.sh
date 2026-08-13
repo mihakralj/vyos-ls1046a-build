@@ -53,20 +53,31 @@ for package in $packages; do
   #   2. the persistent kernel git cache (~/kernel-git-cache/linux — the
   #      canonical-tree build: .git + worktree + build output)
   # Both mounts persist across runs on the persistent runner (no-op when
-  # already mounted). On a fresh boot the on-disk content is moved into
-  # the new mount and the disk copy deleted, restoring headroom. Runs as
-  # root (job shell is sudo -E bash).
+  # already mounted) and live OUTSIDE $GITHUB_WORKSPACE: actions/checkout
+  # aborts with EBUSY when workspace cleanup hits a mounted directory
+  # (run 31724821391, 2026-08-13). The package dir is replaced by a
+  # symlink to its tmpfs; on a fresh boot the on-disk content is moved
+  # into the new mount and the disk copy deleted, restoring headroom.
+  # Runs as root (job shell is sudo -E bash).
   if [ "$package" == "linux-kernel" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
     BKDIR="$(pwd)"
-    if ! mountpoint -q "$BKDIR"; then
-      STASH="$(mktemp -d)"
-      cp -a "$BKDIR/." "$STASH/" 2>/dev/null || true
-      mount -t tmpfs -o size=24G,mode=755 tmpfs "$BKDIR"
-      cp -a "$STASH/." "$BKDIR/" 2>/dev/null || true
-      rm -rf "$STASH"
-      echo "### Mounted tmpfs (24G) on $BKDIR"
+    RAMPATH="${HOME:-/home/vyos}/ramdisk/linux-kernel"
+    if ! mountpoint -q "$RAMPATH"; then
+      mkdir -p "$RAMPATH"
+      mount -t tmpfs -o size=24G,mode=755 tmpfs "$RAMPATH"
+      echo "### Mounted tmpfs (24G) on $RAMPATH"
     else
-      echo "### tmpfs already mounted on $BKDIR"
+      echo "### tmpfs already mounted on $RAMPATH"
+    fi
+    # Move the staged package dir (package.toml, patches/, config/) into the
+    # tmpfs and leave a symlink in the workspace.
+    if [ -d "$BKDIR" ] && [ ! -L "$BKDIR" ]; then
+      cp -a "$BKDIR/." "$RAMPATH/"
+      rm -rf "$BKDIR"
+      ln -s "$RAMPATH" "$BKDIR"
+      echo "### Package dir now symlinked: $BKDIR -> $RAMPATH"
+    elif [ -L "$BKDIR" ]; then
+      echo "### Package dir already symlinked: $BKDIR"
     fi
     CACHE="${HOME:-/home/vyos}/kernel-git-cache/linux"
     if [ -d "$CACHE" ] && ! mountpoint -q "$CACHE"; then
@@ -79,7 +90,7 @@ for package in $packages; do
     elif [ -d "$CACHE" ]; then
       echo "### tmpfs already mounted on $CACHE"
     fi
-    df -h "$BKDIR" "$CACHE" 2>/dev/null || df -h "$BKDIR"
+    df -h "$RAMPATH" "$CACHE" 2>/dev/null || df -h "$RAMPATH"
 
     # Pin the cache checkout to the kernel version from defaults.toml. The
     # clone step's default (KERNEL_VERSION:-6.18.38 in auto-build.yml) lags
