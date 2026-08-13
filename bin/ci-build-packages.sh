@@ -67,6 +67,20 @@ for package in $packages; do
       echo "### tmpfs already mounted on $BKDIR"
     fi
     df -h "$BKDIR"
+
+    # Adaptive prune of the persistent kernel git cache (~8.6GB full-history
+    # clone) when the 30GB runner disk is under pressure. The kernel build
+    # never needs it (build.py uses the tarball inside the tmpfs; the
+    # round-trip check is a guarded skip without linux/.git), so on a tight
+    # disk it is pure dead weight — drop it and let the next run's "Clone
+    # Linux Kernel" step re-fetch. Kept when the disk is roomy so the
+    # round-trip check and the weekly patch-rot canary still see it.
+    PCT=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9')
+    if [ "${PCT:-0}" -ge 80 ] && [ -d "${HOME:-/home/vyos}/kernel-git-cache/linux" ]; then
+      echo "### Disk ${PCT}% full — removing persistent kernel git cache for build headroom"
+      rm -rf "${HOME:-/home/vyos}/kernel-git-cache/linux"
+      df -h /
+    fi
   fi
 
   ### linux-kernel .deb + DTB + accel-ppp-ng cache
