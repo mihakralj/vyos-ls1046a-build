@@ -688,6 +688,21 @@ for package in $packages; do
     fi
   fi
 
+  if [ "$package" == "linux-kernel" ]; then
+    # Free the ~10GB kernel build tree (linux-6.18.x/) BEFORE the ISO phase.
+    # All tree-dependent work (DTB build, ASK2 OOT modules, accel-ppp-ng,
+    # cache population) has already completed above; only the .debs in the
+    # package dir and the staged DTB are needed downstream (Pick Packages /
+    # ci-build-iso.sh). Without this, a cold kernel build (~14GB transient
+    # peak: 10GB tree + ~2GB debs + ccache) exhausts the 30GB runner disk
+    # mid-packaging — seen 2026-08-13 (runs 31674687093 / 31718015742,
+    # linux-6.18.44 upstream bump busted the linux-kernel-cache key).
+    # Pattern `linux-[0-9]*` matches the tarball-extracted tree only, never
+    # linux-firmware/ nor the `linux` symlink to the persistent git cache.
+    rm -rf linux-[0-9]* 2>/dev/null || true
+    df -h /
+  fi
+
   # clean
   df -Th
   apt-get autoremove -y
