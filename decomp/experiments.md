@@ -2496,3 +2496,12 @@ Production-path validation (ask.ko genl + nft flowtable -> FLOW_CLS_REPLACE
    192.168.1.185) or replies leave via its default gw and never return
    through .185. Verified: ping 0% loss + curl http=200 once the return
    route was added.
+
+**CR-003 gating gap (P1-4, same audit):** the production-plan §3.3 debugfs
+gating is NOT implemented: fman_pcd.c has 24 unconditional
+debugfs_create_file calls (fe_arm/fe_flow/fe_pool/fe_ehash/...), and
+ask.ko wires ask_debugfs_init() unconditionally in ask_main.c. No
+CONFIG_ASK_DEBUG_FS / CONFIG_FMAN_PCD_DEBUG_FS symbols exist. F-189
+candidate: Kconfig symbols + #ifdef wrapping both surfaces; production
+config off at release, dev config on (single-ISO constraint: gating is a
+release-time config flip, not a separate image).
