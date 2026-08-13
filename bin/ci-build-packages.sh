@@ -70,13 +70,19 @@ for package in $packages; do
       echo "### tmpfs already mounted on $RAMPATH"
     fi
     # Move the staged package dir (package.toml, patches/, config/) into the
-    # tmpfs and leave a symlink in the workspace.
+    # tmpfs and leave a symlink in the workspace. NOTE: cwd IS $BKDIR here,
+    # so the real dir is renamed aside (cwd stays valid through the rename),
+    # the symlink is created, and the renamed dir is removed only AFTER
+    # re-entering through the symlink.
     if [ -d "$BKDIR" ] && [ ! -L "$BKDIR" ]; then
-      cp -a "$BKDIR/." "$RAMPATH/"
-      rm -rf "$BKDIR"
+      mv "$BKDIR" "${BKDIR}.staged"
       ln -s "$RAMPATH" "$BKDIR"
+      cp -a "${BKDIR}.staged/." "$RAMPATH/"
+      rm -rf "${BKDIR}.staged"
+      cd "$BKDIR"
       echo "### Package dir now symlinked: $BKDIR -> $RAMPATH"
     elif [ -L "$BKDIR" ]; then
+      cd "$BKDIR"
       echo "### Package dir already symlinked: $BKDIR"
     fi
     CACHE="${HOME:-/home/vyos}/kernel-git-cache/linux"
