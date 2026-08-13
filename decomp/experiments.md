@@ -2505,3 +2505,30 @@ CONFIG_ASK_DEBUG_FS / CONFIG_FMAN_PCD_DEBUG_FS symbols exist. F-189
 candidate: Kconfig symbols + #ifdef wrapping both surfaces; production
 config off at release, dev config on (single-ISO constraint: gating is a
 release-time config flip, not a separate image).
+
+## E29 — F-188 production-path validation (2026-08-13, .185, image 2026.08.12-2359-rolling, 6.18.44-vyos, cold boot 7 min)
+
+Image = F-188 (key_size 14, EKFC 0x801C0006, own-port miss targets; CI 31652852650).
+Board booted F-188; S0 baseline: schemes 0-4 RSS, all ports rfpne=0x00480000 rccb=0,
+MURAM used=720. Also: eth3 (port 0x10) DAC link to .106 eth3 confirmed (both UP/LOWER_UP);
+.106 eth3 = 10.99.1.106/24, .185 eth3 given temp 10.99.1.185/24 -> ping 0.3ms (DAC blocker cleared).
+
+1. genl engage (sudo /usr/local/bin/ynl --family ask --do engage --json '{"port-id":17}') ->
+   rfpne 0x00480200, RCCB 0x54b00, MURAM 720->43557. [VERIFIED]
+2. Node @0x54b00 (RDWR mmap, pcd-snapshot method): 8e400000 fa180000 04c7080f 00000300
+   miss_action=2 (ENQUE) key_size=14 table_type=4 (DDR) mask=0x7fff fqid=0x300 (own-port). [VERIFIED]
+   fe_ehash: table keysize=14 DDR=0xfa180000 + v6 table keysize=37.
+3. EKFC 0x801C0006 hash-verified: controlled curl --local-port 44449 to 10.99.2.185:55555 ->
+   hash_probe captured f16253147160f1e5 == crc64_raw(00|SIP|DIP|06|SPORT|DPORT) exactly.
+   (44444 = b508e222f73f6794, 44448 = ce69b25ee00a9c2e bucket 0xf16; earlier aa7cba... = stale
+   capture from background traffic between two curls.) [VERIFIED]
+4. Miss-path delivery: curl rc=7 (kernel RST) for 44444/44448/44449 = classified + delivered
+   to own-port FQID. [VERIFIED]
+5. CR-001 3-cycle: engage/disengage x3 (ynl), pcd-snapshot diff cycle1/2/3-s0 vs ref =
+   "[OK] PCD state matches baseline — S0<->S1 transition fully reversible" for all three. [VERIFIED]
+6. MURAM residual 34736 after disengage = NOT a leak: F-129/F-136 warm-chain design (fman_pcd_fe_disengage
+   keeps ehash int_buf 33280B + tables; freed at module unload). Flat across all 3 cycles
+   (no growth), high-water 43557 from first engage. Per-port resources freed. [VERIFIED]
+
+OPEN: production flowtable HIT still blocked (passive conntrack, nft 1.0.9 ingress-only).
+P1-4 (CR-003 debugfs gating) = F-189 candidate, not yet implemented.
