@@ -42,6 +42,33 @@ for package in $packages; do
 
   [ "$package" == "keepalived" ] && apt-get install -y libsnmp-dev
 
+  ### RAM-back the linux-kernel package dir on tmpfs (30GB runner disk headroom)
+  #
+  # A cold kernel build (linux-kernel-cache key bust, e.g. the upstream
+  # 6.18.44 bump) peaks at ~14GB transient (10GB tree + ~2GB debs +
+  # ccache growth) on top of ~17GB persistent baseline — beyond the 30GB
+  # runner disk at bindeb-pkg time. ENOSPC on runs 31674687093 and
+  # 31718015742 (2026-08-13). This host has 94GB RAM, so mount the
+  # package dir (build tree + .debs + staged patches/config) on tmpfs.
+  # The mount persists across runs on the persistent runner (no-op when
+  # already mounted); on a fresh boot the staged dir content is stashed,
+  # mounted over, and restored so build.py still finds package.toml /
+  # patches / config. Runs as root (job shell is sudo -E bash).
+  if [ "$package" == "linux-kernel" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
+    BKDIR="$(pwd)"
+    if ! mountpoint -q "$BKDIR"; then
+      STASH="$(mktemp -d)"
+      cp -a "$BKDIR/." "$STASH/" 2>/dev/null || true
+      mount -t tmpfs -o size=24G,mode=755 tmpfs "$BKDIR"
+      cp -a "$STASH/." "$BKDIR/" 2>/dev/null || true
+      rm -rf "$STASH"
+      echo "### Mounted tmpfs (24G) on $BKDIR"
+    else
+      echo "### tmpfs already mounted on $BKDIR"
+    fi
+    df -h "$BKDIR"
+  fi
+
   ### linux-kernel .deb + DTB + accel-ppp-ng cache
   #
   # Skip the ~20-minute kernel compile (and the ~3-minute accel-ppp-ng kmod
