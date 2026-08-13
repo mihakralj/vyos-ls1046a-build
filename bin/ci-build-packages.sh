@@ -42,18 +42,20 @@ for package in $packages; do
 
   [ "$package" == "keepalived" ] && apt-get install -y libsnmp-dev
 
-  ### RAM-back the linux-kernel package dir on tmpfs (30GB runner disk headroom)
+  ### RAM-back the kernel build tree on tmpfs (30GB runner disk headroom)
   #
-  # A cold kernel build (linux-kernel-cache key bust, e.g. the upstream
-  # 6.18.44 bump) peaks at ~14GB transient (10GB tree + ~2GB debs +
+  # A cold kernel build peaks at ~14GB transient (10GB tree + ~2GB debs +
   # ccache growth) on top of ~17GB persistent baseline — beyond the 30GB
   # runner disk at bindeb-pkg time. ENOSPC on runs 31674687093 and
-  # 31718015742 (2026-08-13). This host has 94GB RAM, so mount the
-  # package dir (build tree + .debs + staged patches/config) on tmpfs.
-  # The mount persists across runs on the persistent runner (no-op when
-  # already mounted); on a fresh boot the staged dir content is stashed,
-  # mounted over, and restored so build.py still finds package.toml /
-  # patches / config. Runs as root (job shell is sudo -E bash).
+  # 31718015742 (2026-08-13). This host has 94GB RAM, so back the two
+  # places the build tree can live with tmpfs:
+  #   1. the linux-kernel package dir (tarball-path tree + .debs)
+  #   2. the persistent kernel git cache (~/kernel-git-cache/linux — the
+  #      canonical-tree build: .git + worktree + build output)
+  # Both mounts persist across runs on the persistent runner (no-op when
+  # already mounted). On a fresh boot the on-disk content is moved into
+  # the new mount and the disk copy deleted, restoring headroom. Runs as
+  # root (job shell is sudo -E bash).
   if [ "$package" == "linux-kernel" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
     BKDIR="$(pwd)"
     if ! mountpoint -q "$BKDIR"; then
@@ -66,20 +68,30 @@ for package in $packages; do
     else
       echo "### tmpfs already mounted on $BKDIR"
     fi
-    df -h "$BKDIR"
+    CACHE="${HOME:-/home/vyos}/kernel-git-cache/linux"
+    if [ -d "$CACHE" ] && ! mountpoint -q "$CACHE"; then
+      mv "$CACHE" "${CACHE}.disk"
+      mkdir -p "$CACHE"
+      mount -t tmpfs -o size=28G,mode=755 tmpfs "$CACHE"
+      cp -a "${CACHE}.disk/." "$CACHE/"
+      rm -rf "${CACHE}.disk"
+      echo "### Mounted tmpfs (28G) on $CACHE (kernel git cache + build tree)"
+    elif [ -d "$CACHE" ]; then
+      echo "### tmpfs already mounted on $CACHE"
+    fi
+    df -h "$BKDIR" "$CACHE" 2>/dev/null || df -h "$BKDIR"
 
-    # Adaptive prune of the persistent kernel git cache (~8.6GB full-history
-    # clone) when the 30GB runner disk is under pressure. The kernel build
-    # never needs it (build.py uses the tarball inside the tmpfs; the
-    # round-trip check is a guarded skip without linux/.git), so on a tight
-    # disk it is pure dead weight — drop it and let the next run's "Clone
-    # Linux Kernel" step re-fetch. Kept when the disk is roomy so the
-    # round-trip check and the weekly patch-rot canary still see it.
-    PCT=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9')
-    if [ "${PCT:-0}" -ge 80 ] && [ -d "${HOME:-/home/vyos}/kernel-git-cache/linux" ]; then
-      echo "### Disk ${PCT}% full — removing persistent kernel git cache for build headroom"
-      rm -rf "${HOME:-/home/vyos}/kernel-git-cache/linux"
-      df -h /
+    # Pin the cache checkout to the kernel version from defaults.toml. The
+    # clone step's default (KERNEL_VERSION:-6.18.38 in auto-build.yml) lags
+    # upstream bumps; compiling a stale checkout yields linux-image of the
+    # wrong version under a newer linux-kernel-cache key (poisons the cache).
+    KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
+    if [ -n "$KVER" ] && [ -d "$CACHE/.git" ]; then
+      echo "### Pinning kernel git cache checkout to v${KVER}"
+      git -C "$CACHE" fetch --depth=1 origin "tag v${KVER}" 2>/dev/null || true
+      git -C "$CACHE" checkout -f "v${KVER}" 2>/dev/null || \
+        git -C "$CACHE" checkout -f "refs/tags/v${KVER}" 2>/dev/null || true
+      git -C "$CACHE" describe --tags 2>/dev/null || true
     fi
   fi
 
