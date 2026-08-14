@@ -341,8 +341,23 @@ for package in $packages; do
     if [ "$SKIP_KERNEL_BUILD" -eq 1 ]; then
       echo "### Skipping ./build.py for linux-kernel (cache hit)"
     else
-      echo "### Removing any stale linux source tree before kernel build (force re-download)"
-      rm -rf linux linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
+      # Remove stale tarball trees, but PRESERVE the git-cache symlink
+      # (bin/clone-kernel.sh -> $CACHE): build.py uses it as the kernel
+      # source, and its upstream blobs are what make git apply --3way
+      # work for the drifted board series. The blanket `rm -rf linux`
+      # (ada0bfe2, stale-symlink defense) silently forced every kernel
+      # cache MISS onto the tarball path, where the series cannot
+      # bootstrap on a bumped kernel (ARM64-runner2 2026-08-14).
+      if [ -L linux ]; then
+        if [ "$(readlink -f linux)" != "$(readlink -f "$CACHE")" ]; then
+          echo "### Stale linux symlink ($(readlink linux)) — removing"
+          rm -f linux
+        else
+          echo "### Keeping git-cache symlink: linux -> $CACHE"
+        fi
+      fi
+      echo "### Removing stale tarball source trees before kernel build"
+      rm -rf linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
       ./build.py --packages linux-kernel
     fi
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
