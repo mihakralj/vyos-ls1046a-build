@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Thu, 14 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman_pcd: add CONFIG_FMAN_PCD_DEBUG_FS gate (0170)
+
+Add the compile-time gate for the fman_pcd debugfs surface.  The
+production control plane is the generic-netlink "ask" family plus the
+exported fman_pcd_* kernel API; debugfs is a bring-up diagnostic only
+and must be absent from production images (plans/ASK2-PRODUCTION-
+ARCHITECTURE.md Phase 1).
+
+The symbol is consumed by F-191 (bin/kernel-fixups/F_191.py), which
+wraps the debugfs registration block in fman_pcd.c with
+`if (IS_ENABLED(CONFIG_FMAN_PCD_DEBUG_FS))`.  `default n` means the
+nodes are compiled out (dead-code eliminated) unless a dev kernel
+explicitly enables the option.
+
+diff --git a/drivers/net/ethernet/freescale/fman/Kconfig b/drivers/net/ethernet/freescale/fman/Kconfig
+index 5d204b7..aa71ecd 100644
+--- a/drivers/net/ethernet/freescale/fman/Kconfig
++++ b/drivers/net/ethernet/freescale/fman/Kconfig
+@@ -50,3 +50,19 @@ config FSL_FMAN_PCD
+ 	  rate. This skeleton delivers the orchestration scaffold; the
+ 	  per-engine APIs land in follow-up patches.
+ 	  If unsure, say Y.
++
++config FMAN_PCD_DEBUG_FS
++	bool "FMan PCD debugfs diagnostics (dev/bring-up only)"
++	depends on FSL_FMAN_PCD && DEBUG_FS
++	default n
++	help
++	  Expose /sys/kernel/debug/fman_pcd/<id>/ diagnostic nodes
++	  (fe_arm, fe_flow, fe_ehash, muram_budget, ...) for silicon
++	  bring-up and development.
++
++	  This is NOT a production interface. Production images MUST
++	  disable this option so no fman_pcd debugfs nodes exist; the
++	  production control surface is the generic-netlink "ask" family
++	  and the fman_pcd_* kernel API.
++
++	  Say N in production. Say Y when iterating on hardware.

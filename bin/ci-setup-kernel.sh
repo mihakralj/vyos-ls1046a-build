@@ -2608,6 +2608,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-190 en_exthash_node at root AD (CC dispatch fix)"
 fi
 
+# F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
+# surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
+# MUST run after every fixup that registers a debugfs node (F-086, F-167,
+# F-169, F-171, F-172, F-176, F-189) so the wrap covers them all.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_191.py" 2>&1
+    echo "### fman_pcd.c: F-191 debugfs surface gated behind CONFIG_FMAN_PCD_DEBUG_FS"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
