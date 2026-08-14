@@ -2738,7 +2738,16 @@ SNAPSHOT_BLOCK = '''
 # so OOT builds can sign ask.ko with the SAME key embedded in vmlinux's
 # trusted keyring.
 ASK_SNAP_DIR="${CWD}/ask-kernel-snapshot"
+# bindeb-pkg writes the .debs to the PARENT of the physical kernel source
+# dir. Tarball path: that parent is $CWD (the package dir). Git-cache path
+# (linux -> ~/kernel-git-cache/linux): the physical parent is the cache's
+# parent, reachable via $(cd .. && pwd) from the kernel tree. Glob both so
+# the snapshot works on either path.
 ASK_HEADERS_DEB=$(ls "${CWD}"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
+if [ -z "$ASK_HEADERS_DEB" ]; then
+    ASK_DEB_PARENT="$(cd .. && pwd)"
+    ASK_HEADERS_DEB=$(ls "${ASK_DEB_PARENT}"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
+fi
 if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
     echo "I: ASK2 v2 — extracting $ASK_HEADERS_DEB into $ASK_SNAP_DIR/extracted/"
     rm -rf "$ASK_SNAP_DIR"
