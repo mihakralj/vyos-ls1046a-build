@@ -554,15 +554,25 @@ for package in $packages; do
     # linux-firmware/ (just firmware blobs). We must exclude the latter,
     # and also require the presence of arch/arm64/ to distinguish.
     KSRC=""
-    for candidate in $(find . -maxdepth 1 -type d -name 'linux-*' | sort); do
-      case "$(basename "$candidate")" in
-        linux-firmware|linux-headers*|linux-libc-dev*|linux-doc*) continue ;;
-      esac
-      if [ -f "$candidate/Makefile" ] && [ -d "$candidate/arch/arm64" ]; then
-        KSRC="$candidate"
-        break
+    # Git-cache path: the kernel source is the `linux` symlink into
+    # ~/kernel-git-cache/linux — no linux-*/ directory exists under
+    # the package dir. Accept the symlink when it points at the cache.
+    if [ -L linux ] && [ "$(readlink -f linux)" = "$(readlink -f "$CACHE")" ]; then
+      if [ -f linux/Makefile ] && [ -d linux/arch/arm64 ]; then
+        KSRC="linux"
       fi
-    done
+    fi
+    if [ -z "$KSRC" ]; then
+      for candidate in $(find . -maxdepth 1 -type d -name 'linux-*' | sort); do
+        case "$(basename "$candidate")" in
+          linux-firmware|linux-headers*|linux-libc-dev*|linux-doc*) continue ;;
+        esac
+        if [ -f "$candidate/Makefile" ] && [ -d "$candidate/arch/arm64" ]; then
+          KSRC="$candidate"
+          break
+        fi
+      done
+    fi
     if [ -z "$KSRC" ]; then
       echo ""
       echo "################################################################"
