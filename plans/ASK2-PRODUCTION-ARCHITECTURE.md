@@ -229,18 +229,55 @@ start Phase 2 silicon work without the qdrant gate (AGENTS.md S0).
       pointers.
 
 ### Phase 1 — Control plane: genl sole surface, debugfs gated
-- [ ] Implement `get-muram` genl (move `muram_budget` logic off debugfs).
-- [ ] Implement `set-policer` genl.
-- [ ] Make genl `engage`/`disengage` perform the **full** arm/teardown that
+- [x] Implement `get-muram` genl (move `muram_budget` logic off debugfs).
+      DONE pre-Phase-1: `ask_genl_get_muram_doit()` + `ask_genl_fill_muram()`
+      in `kernel/ask/oot-modules/ask/ask_genl.c` wire the exported
+      `fman_pcd_get_muram_budget()` over genl (empty-budget contract when no
+      FMan handle, matching GET_INFO).
+- [x] Implement `set-policer` genl.
+      DONE pre-Phase-1: `ask_genl_set_policer_doit()` wires
+      `fman_pcd_plcr_install(pcd, port_id, port_id, &hw)` (srTCM, colour-blind;
+      profile_id == port_id). No silicon encode logic in ask.ko.
+- [x] Make genl `engage`/`disengage` perform the **full** arm/teardown that
       `fe_arm` debugfs does today (PCD bring-up, KG bind, CC-root, ehash,
       params page). No debugfs dependency.
-- [ ] Gate `ask.ko` debugfs behind `CONFIG_ASK_DEBUG_FS`; gate `fman_pcd`
+      DONE pre-Phase-1: `ask_genl_engage_doit()` → `ask_hw_offload_engage()`
+      → `fman_pcd_fe_engage()` (F-092), which builds the full VM chain
+      (`__fman_pcd_fe_build_vm_chain()`), engages the pool, arms via
+      `__fman_pcd_fe_arm_engage()`, captures the ENQ FE offset via the kernel
+      API (`fman_pcd_fe_enq_get_offset()`, F-109/F-110), and enables the TX
+      HIT-release bypass refcounted (F-108). Disengage mirrors via
+      `fman_pcd_fe_disengage()`. The debugfs `fe_arm` verbs are thin wrappers
+      over the same internals; genl does not touch debugfs.
+- [x] Gate `ask.ko` debugfs behind `CONFIG_ASK_DEBUG_FS`; gate `fman_pcd`
       `fe_*` behind `CONFIG_FMAN_PCD_DEBUG_FS`.
-- [ ] Production kernel config: both off. Verify `ask-check` passes and the
+      ask.ko side: DONE pre-Phase-1 — the whole `ask_debugfs.c` body is
+      wrapped in `#ifdef CONFIG_NET_ASK_DEBUG_FS` (Kconfig `default n`;
+      ask.ko built with only `CONFIG_NET_ASK=m` forced, so the debugfs gate
+      is off in production). fman_pcd side: DONE 2026-08-14 — board patch
+      `0170-fman-pcd-debugfs-kconfig.patch` adds the Kconfig symbol; fixup
+      `F_191.py` wraps the whole debugfs registration block in
+      `fman_pcd_init()` plus the matching `fman_pcd_debugfs_root_put()` in
+      `fman_pcd_release()` in `if (IS_ENABLED(CONFIG_FMAN_PCD_DEBUG_FS))`.
+      IS_ENABLED keeps every fops/handler symbol referenced in source (no
+      `-Wunused` churn) while `-O2` dead-code elimination removes them;
+      verified on the derived tree: `nm fman_pcd.o` shows zero
+      `fman_pcd_debugfs_root_get`/`*_fops` symbols with the gate off, and
+      both configs compile clean. F_191 runs LAST in the fixup sequence
+      (after every fixup that registers a debugfs node) and is idempotent.
+      NB: the dev-loop path (`stage-kernel.sh`) does not run the fixup
+      layer, so dev builds keep the debugfs surface regardless of the
+      symbol — dev images get debugfs, production CI images do not.
+- [x] Production kernel config: both off. Verify `ask-check` passes and the
       VyOS CLI engages ASK with **no** `/sys/kernel/debug/ask*` or
       `fman_pcd` `fe_*` nodes present.
+      Config side DONE 2026-08-14: `CONFIG_NET_ASK_DEBUG_FS` stays `n`
+      (OOT Kconfig default); `# CONFIG_FMAN_PCD_DEBUG_FS is not set` added
+      explicitly to `kernel/common/kernel-config/00-board.config`.
+      Board-side verification (cold-boot, CLI engage, `ask-check` 24/24,
+      no debugfs nodes) remains the operator's deploy task — not yet run.
 - **Validation:** cold-boot, engage via CLI only, `pcd-snapshot` diff clean,
-  M2 throughput regression monitor green.
+  M2 throughput regression monitor green. — PENDING board cycle (operator).
 
 ### Phase 2 — Silicon correctness (M3 attempt 5): the three deltas
 **[SPEC]** Qdrant gate first (S0): query FMan PCD/FE/ehash/KG/CC before any
