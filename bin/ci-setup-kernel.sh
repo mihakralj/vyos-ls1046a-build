@@ -2592,6 +2592,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-188 production-path alignment (14-byte key + own-port flow target)"
 fi
 
+# F-189 (2026-08-14, EHASH-DUAL-FIX Phase 1.1): stats-enabled fe_flow insert
+# ('add stats' form) + bucket pad readback in fe_ehash_stats. Investigative
+# instrument for the Phase 3 board session -- dispatch-independent compare
+# discriminator. Anchored on the exact post-F-188 derived state.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_189.py" 2>&1
+    echo "### fman_pcd.c: F-189 stats-enabled flow insert (EHASH-DUAL-FIX Phase 1.1)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
