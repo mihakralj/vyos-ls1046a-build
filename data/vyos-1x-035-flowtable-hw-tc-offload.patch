@@ -60,7 +60,7 @@ index 32356f6..6d74f78 100644
 +        for flowtable, flowtable_conf in firewall['flowtable'].items():
 +            if dict_search_args(flowtable_conf, 'offload') == 'hardware':
 +                for ifname in flowtable_conf['interface']:
-+                    cmdl(f'ethtool -K {ifname} hw-tc-offload on')
++                    cmdl(['ethtool', '-K', ifname, 'hw-tc-offload', 'on'])
 +
      # Use nft -c option to check current configuration file
      completed_process = subp_run(['nft', '-c', '--file', nftables_conf], capture_output=True)
