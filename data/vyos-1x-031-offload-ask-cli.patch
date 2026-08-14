@@ -1,10 +1,8 @@
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+index 6cf3373f1..06973b34a 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -98,12 +98,18 @@
-               <leafNode name="hw-tc-offload">
-                 <properties>
-                   <help>Enable Hardware Flow Offload</help>
+@@ -101,6 +101,12 @@
                    <valueless/>
                  </properties>
                </leafNode>
@@ -17,16 +15,11 @@ diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-defini
                <leafNode name="lro">
                  <properties>
                    <help>Enable Large Receive Offload</help>
-                   <valueless/>
-                 </properties>
-               </leafNode>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index 7eaf81f84..a19ecb211 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -14,12 +14,16 @@
- # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
- 
- import os
+@@ -17,6 +17,10 @@
  
  from glob import glob
  
@@ -37,13 +30,7 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
  from vyos.base import Warning
  from vyos.ethtool import Ethtool
  from vyos.netlink import coalesce
- from vyos.ifconfig import Section
- from vyos.ifconfig.interface import Interface
- from vyos.utils.dict import dict_search
-@@ -315,12 +319,35 @@ class EthernetIf(Interface):
-             if not fixed:
-                 return self.set_interface('hw-tc-offload', 'on' if state else 'off')
-             else:
+@@ -318,6 +322,29 @@ def set_hw_tc_offload(self, state):
                  print('Adapter does not support changing hw-tc-offload settings!')
          return False
  
@@ -73,13 +60,7 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
      def set_lro(self, state):
          """
          Enable Large Receive offload. State can be either True or False.
-         Example:
-         >>> from vyos.ifconfig import EthernetIf
-         >>> i = EthernetIf('eth0')
-@@ -660,12 +687,15 @@ class EthernetIf(Interface):
-         # GSO (generic segmentation offload)
-         self.set_hw_tc_offload(dict_search('offload.hw_tc_offload', config) is not None)
- 
+@@ -662,6 +689,9 @@ def update(self, config):
          # LRO (large receive offload)
          self.set_lro(dict_search('offload.lro', config) is not None)
  
@@ -89,16 +70,11 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
          # RPS - Receive Packet Steering
          self.set_rps(dict_search('offload.rps', config) is not None)
  
-         # RFS - Receive Flow Steering
-         self.set_rfs(dict_search('offload.rfs', config) is not None)
- 
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 7d42e3f77..26eb1771d 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -298,12 +298,24 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
-      Verify offloading capabilities
-     :param ethernet: dictionary which is received from get_interface_dict
-     :type ethernet: dict
+@@ -302,6 +302,18 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
      :param ethtool: Ethernet object
      :type ethtool: Ethtool
      """
@@ -117,16 +93,11 @@ diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_eth
      if dict_search('offload.rps', ethernet) != None:
          if not os.path.exists(f'/sys/class/net/{ethernet["ifname"]}/queues/rx-0/rps_cpus'):
              raise ConfigError('Interface does not support RPS!')
-     driver = ethtool.get_driver_name()
-     # T3342 - Xen driver requires special treatment
-     if driver == 'vif':
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
+index 5256b6c1f..7c517d0f3 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -569,12 +569,25 @@ def verify(config):
-             removed_iface['iface_name'], config, match_vlans=True
-         )
- 
+@@ -583,6 +583,19 @@ def verify(config):
      if 'settings' not in config:
          raise ConfigError('"settings interface" is required but not set!')
  
@@ -146,6 +117,3 @@ diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
      if 'interface' not in config['settings']:
          raise ConfigError('"settings interface" is required but not set!')
  
-     ipoe_ifaces = list(
-         {
-             iface
