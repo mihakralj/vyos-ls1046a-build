@@ -57,6 +57,9 @@ apt-get install -y \
   protobuf-compiler python3-cracklib python3-protobuf \
   `# Live-build / ISO / U-Boot artifact tooling` \
   live-build dosfstools mtools zstd u-boot-tools xorriso kpartx \
+  `# build-vyos-image live-build chroot assembler (squashfs union) — run` \
+  `# 31762806825 failed at ISO stage with 'Missing packages: squashfs-tools'` \
+  squashfs-tools \
   `# git LFS for board/dtb/ blobs and oversize prebuilt assets` \
   git-lfs \
   `# vyos-build Python helpers (TOML / YAML / Jinja2 / pystache template` \
