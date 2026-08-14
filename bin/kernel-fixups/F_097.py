@@ -51,14 +51,20 @@ static int fman_pcd_fe_verify_internal(struct fman_pcd *pcd, u8 hw_port_id)
 \tif (!muram)
 \t\treturn -ENODEV;
 
-\t/* ── Step 1: params page ────────────────────────────────── */
+\t/* ── Step 1: CC root node ────────────────────────────────── */
 \tif (pcd->fe_root_ad_off) {
 \t\tvoid __iomem *fe = fman_muram_offset_to_vbase(muram, pcd->fe_root_ad_off);
 \t\tu32 w0 = ioread32be(fe);
 
-\t\t/* v17.1: FE_ENTER w0 bit23 (ALLOCATE) must be set (F-046 guard). */
-\t\tif (!(w0 & 0x00800000)) {
-\t\t\tpr_warn("fman_pcd: verify 0x%02x: FE_ENTER w0=0x%08x ALLOCATE missing\\n",
+\t\t/* F-186/F-190: the CC root AD is now the vendor en_exthash_node
+\t\t * (miss_action_type 0b10 = ENQUE, E25-verified loop-free), which
+\t\t * supersedes the old FE_ENTER CONT_LOOKUP (ALLOCATE bit 23).
+\t\t * Accept either form so the gate does not false-fail on the
+\t\t * vendor node (w0 e.g. 0x8e400000 has no ALLOCATE bit).
+\t\t */
+\t\tif ((w0 & 0xC0000000) != 0x80000000 &&
+\t\t    !(w0 & 0x00800000)) {
+\t\t\tpr_warn("fman_pcd: verify 0x%02x: CC root w0=0x%08x (neither vendor node nor FE_ENTER ALLOCATE)\\n",
 \t\t\t\thw_port_id, w0);
 \t\t\terrs++;
 \t\t}
