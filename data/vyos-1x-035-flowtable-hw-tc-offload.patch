@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Thu, 14 Aug 2026 19:30:00 +0000
+Subject: [PATCH] firewall: enable hw-tc-offload for hardware flowtables (035)
+
+On the NXP LS1046A the DPAA1 netdev (fsl_dpa) advertises NETIF_F_HW_TC
+as a toggleable feature that defaults to OFF (board patch
+0104a-dpaa-netdev-advertise-hw-tc), and the standard
+`set interfaces ethernet eth<n> offload hw-tc-offload` config never
+applies the toggle at runtime (the offload `possible` predicate path does
+not fire for this netdev).  As a result `set firewall flowtable ...
+offload hardware` fails its own verify with:
+
+    Interface "eth3" requires "offload hw-tc-offload"
+
+even though `ethtool -K eth3 hw-tc-offload on` succeeds by hand.
+
+Fix, mirroring the vyos-1x-025 ingress-policer pattern (which already
+switches the feature on directly via `ethtool -K` for the same reason):
+
+1. verify_hardware_offload(): only reject when the feature is `fixed`
+   off (adapter cannot support it).  A toggleable-but-off state is no
+   longer an error because apply() switches it on before the flowtable
+   is installed.
+
+2. apply(): for every interface of a `offload hardware` flowtable, run
+   `ethtool -K <ifname> hw-tc-offload on` BEFORE `nft --file` installs
+   the flowtable (nft rejects `flags offload` flowtables on netdevs
+   without NETIF_F_HW_TC).
+
+diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+index 32356f6..6d74f78 100644
+--- a/src/conf_mode/firewall.py
++++ b/src/conf_mode/firewall.py
+@@ -511,8 +511,11 @@ def verify_hardware_offload(ifname):
+     if not enabled and fixed:
+         raise ConfigError(f'Interface "{ifname}" does not support hardware offload')
+ 
+-    if not enabled:
+-        raise ConfigError(f'Interface "{ifname}" requires "offload hw-tc-offload"')
++    # F-192 (LS1046A, 2026-08-14): NETIF_F_HW_TC is toggleable but defaults
++    # OFF on the DPAA1 netdev, and the standard `offload hw-tc-offload`
++    # interface config never applies it at runtime.  apply() switches the
++    # feature on directly (ethtool -K) before the flowtable is installed, so
++    # a toggleable-but-off state here is not an error.
+ 
+ def verify(firewall):
+     if 'flowtable' in firewall:
+@@ -751,6 +754,18 @@ def parse_firewall_error(output):
+     raise ConfigError('\n'.join(error_output))
+ 
+ def apply(firewall):
++    # F-192 (LS1046A, 2026-08-14): the DPAA1 netdev advertises NETIF_F_HW_TC
++    # toggleable but defaults it OFF, and the standard `offload hw-tc-offload`
++    # interface config does not apply it at runtime.  Switch the feature on
++    # for every interface of a hardware flowtable before nft installs it
++    # (nft rejects `flags offload` flowtables on netdevs without
++    # NETIF_F_HW_TC).  Mirrors the vyos-1x-025 ingress-policer pattern.
++    if 'flowtable' in firewall:
++        for flowtable, flowtable_conf in firewall['flowtable'].items():
++            if dict_search_args(flowtable_conf, 'offload') == 'hardware':
++                for ifname in flowtable_conf['interface']:
++                    cmdl(f'ethtool -K {ifname} hw-tc-offload on')
++
+     # Use nft -c option to check current configuration file
+     completed_process = subp_run(['nft', '-c', '--file', nftables_conf], capture_output=True)
+     install_result = completed_process.returncode
