@@ -1,9 +1,8 @@
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+index 06973b34a..ecf9889da 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -102,22 +102,16 @@
-                 </properties>
-               </leafNode>
+@@ -104,18 +104,12 @@
                <leafNode name="ask">
                  <properties>
                    <help>ASK2 offload — FMan FE-VM hardware forwarding for this interface (NXP LS1046A)</help>
@@ -22,11 +21,7 @@ diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-defini
                    <valueless/>
                  </properties>
                </leafNode>
-               <leafNode name="rfs">
-                 <properties>
-@@ -126,22 +120,16 @@
-                 </properties>
-               </leafNode>
+@@ -128,18 +122,12 @@
                <leafNode name="sg">
                  <properties>
                    <help>Enable Scatter-Gather</help>
@@ -45,5 +40,3 @@ diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-defini
              <properties>
                <help>Hardware ingress rate policer (NXP LS1046A FMan Policer offload)</help>
              </properties>
-             <children>
-               <leafNode name="bandwidth">

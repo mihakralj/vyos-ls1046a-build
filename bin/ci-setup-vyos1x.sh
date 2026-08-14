@@ -39,9 +39,14 @@ if [ -d "$VYOS1X_REPO/.git" ]; then
   # stages new-file hunks); a plain checkout won't unstage/remove those.
   # build.py's own `git checkout <commit_id>` runs after this and will land
   # on the right branch/ref regardless of what HEAD currently points to.
-  git -C "$VYOS1X_REPO" reset --hard HEAD
+  # Track upstream: the persistent clone's local refs go stale between
+  # runs; resetting to a stale HEAD + build.py's `git checkout rolling`
+  # then builds an OLD upstream commit against which our patches drift
+  # (ARM64-runner2 2026-08-14: 12 patch failures from a stale clone).
+  git -C "$VYOS1X_REPO" fetch -q origin rolling
+  git -C "$VYOS1X_REPO" reset --hard origin/rolling
   git -C "$VYOS1X_REPO" clean -fdq
-  echo "### $VYOS1X_REPO: reset to clean tracked state (reused local checkout)"
+  echo "### $VYOS1X_REPO: reset to origin/rolling $(git -C "$VYOS1X_REPO" rev-parse --short HEAD) (reused local checkout)"
 fi
 
 # Copy all unified-diff patches. Patch 010 (vpp-platform-bus) and the former
