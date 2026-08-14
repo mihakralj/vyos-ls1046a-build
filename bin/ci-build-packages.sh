@@ -676,7 +676,7 @@ for package in $packages; do
       # struct definition and updated signature.  The ci-setup-kernel.sh
       # fixups target the main kernel tree, but the OOT module builds
       # against the snapshot at ask-kernel-snapshot/extracted/.
-      SNAP_HDR="$KSRC_ABS_ASK/../ask-kernel-snapshot/extracted/usr/src/linux-headers-6.18.38-vyos/include/linux/fsl/fman_pcd.h"
+      SNAP_HDR=$(ls "$KSRC_ABS_ASK"/../ask-kernel-snapshot/extracted/usr/src/linux-headers-*/include/linux/fsl/fman_pcd.h 2>/dev/null | head -1)
       if [ -f "$SNAP_HDR" ]; then
         if ! grep -q 'struct fman_pcd_fe_flow_action {' "$SNAP_HDR"; then
           sed -i '/^int fman_pcd_fe_engage/i/* F-094: Structured flow action.\n */\n#define FMAN_FE_FLOW_KEY_MAX   56\nstruct fman_pcd_fe_flow_action {\n\tu8   key[FMAN_FE_FLOW_KEY_MAX];\n\tu8   key_size;\n\tunsigned long enq_off;\n\tu32  flags;\n};\n' "$SNAP_HDR"
@@ -689,8 +689,12 @@ for package in $packages; do
       fi
       # Cross-build env is already exported by the kernel build above
       # (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-). Pass through.
+      # Pass the package-relative KSRC so ci-build.sh's snapshot lookup
+      # (dirname "$KSRC"/ask-kernel-snapshot) resolves to this package dir
+      # on BOTH paths; the absolute physical path (git-cache path) would
+      # make it look for the snapshot inside ~/kernel-git-cache/.
       ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
-        "$ASK_OOT_BUILDER" "$KSRC_ABS_ASK" "$(pwd)"
+        "$ASK_OOT_BUILDER" "$KSRC" "$(pwd)"
       echo "### ASK OOT module .deb(s) in package dir:"
       ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: no ask-modules-*.deb produced"; exit 1; }
     else
