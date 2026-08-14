@@ -2753,70 +2753,7 @@ SNAPSHOT_BLOCK = '''
 # Makefiles). Copy the persistent signing key into the extracted certs/ dir
 # so OOT builds can sign ask.ko with the SAME key embedded in vmlinux's
 # trusted keyring.
-ASK_SNAP_DIR="${CWD}/ask-kernel-snapshot"
-# bindeb-pkg writes the .debs to the PARENT of the physical kernel source
-# dir. Tarball path: that parent is $CWD (the package dir). Git-cache path
-# (linux -> ~/kernel-git-cache/linux): the physical parent is the cache's
-# parent, reachable via $(cd .. && pwd) from the kernel tree. Glob both so
-# the snapshot works on either path.
-ASK_HEADERS_DEB=$(ls "${CWD}"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
-if [ -z "$ASK_HEADERS_DEB" ]; then
-    ASK_DEB_PARENT="$(readlink -f "$(pwd -P)/..)"
-    ASK_HEADERS_DEB=$(ls "${ASK_DEB_PARENT}"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
-fi
-if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
-    echo "I: ASK2 v2 — extracting $ASK_HEADERS_DEB into $ASK_SNAP_DIR/extracted/"
-    rm -rf "$ASK_SNAP_DIR"
-    mkdir -p "$ASK_SNAP_DIR/extracted"
-    dpkg-deb -x "$ASK_HEADERS_DEB" "$ASK_SNAP_DIR/extracted"
-    ASK_KSRC=$(find "$ASK_SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)
-    if [ -n "$ASK_KSRC" ]; then
-        ln -sfn "$ASK_KSRC" "$ASK_SNAP_DIR/ksrc"
-        mkdir -p "$ASK_KSRC/certs"
-        cp "$ASK_KEY_PEM"  "$ASK_KSRC/certs/signing_key.pem"
-        cp "$ASK_KEY_X509" "$ASK_KSRC/certs/signing_key.x509"
-        # PR14z12-D (2026-05-19): the headers .deb that bindeb-pkg
-        # produces does NOT include private FSL headers like
-        # include/linux/fsl/fman_pcd.h, fman_host_cmd.h, or
-        # dpaa_flow_offload.h — they are added by our ASK patch stack
-        # 0003 / 0004 / 0027 / 0028 etc and are required by the OOT
-        # ask.ko (ask_hw.c includes <linux/fsl/fman_pcd.h>). Without
-        # this rsync the OOT build fails with
-        # "fatal error: linux/fsl/fman_pcd.h: No such file or directory".
-        # Copy them — and any other ASK-injected include/linux/fsl/*.h —
-        # from the original kernel source tree into the snapshot before
-        # signalling .done.
-        if [ -d "${CWD}/${KERNEL_DIR}/include/linux/fsl" ]; then
-            mkdir -p "$ASK_KSRC/include/linux/fsl"
-            cp -av "${CWD}/${KERNEL_DIR}/include/linux/fsl/." \
-                   "$ASK_KSRC/include/linux/fsl/" 2>&1 | tail -5 || true
-            echo "I: ASK2 v2 — copied include/linux/fsl/ headers into snapshot"
-        fi
-        # P4.1: copy include/soc/fsl/qman.h (QMan FQ allocation API) into the
-        # snapshot so the OOT ask.ko can allocate its dedicated TX FQ.
-        if [ -f "${CWD}/${KERNEL_DIR}/include/soc/fsl/qman.h" ]; then
-            mkdir -p "$ASK_KSRC/include/soc/fsl"
-            cp "${CWD}/${KERNEL_DIR}/include/soc/fsl/qman.h" \
-               "$ASK_KSRC/include/soc/fsl/qman.h"
-            echo "I: ASK2 v2 — copied include/soc/fsl/qman.h into snapshot"
-        fi
-        # P4.1a: copy include/soc/fsl/bman.h (BMan buffer-pool API) into the
-        # snapshot so OOT ask.ko can allocate a dedicated BMan pool for the
-        # hardware-enqueued TX FQ (future — BPID currently defaults to 0).
-        if [ -f "${CWD}/${KERNEL_DIR}/include/soc/fsl/bman.h" ]; then
-            mkdir -p "$ASK_KSRC/include/soc/fsl"
-            cp "${CWD}/${KERNEL_DIR}/include/soc/fsl/bman.h" \
-               "$ASK_KSRC/include/soc/fsl/bman.h"
-            echo "I: ASK2 v2 — copied include/soc/fsl/bman.h into snapshot"
-        fi
-        touch "$ASK_SNAP_DIR/.done"
-        echo "I: ASK2 v2 — snapshot ready: $ASK_SNAP_DIR/ksrc -> $ASK_KSRC"
-        ls -la "$ASK_KSRC/Module.symvers" "$ASK_KSRC/scripts/sign-file" "$ASK_KSRC/certs/signing_key.pem" 2>&1 || true
-    else
-        echo "WARNING: ASK2 v2 — extracted .deb but no usr/src/linux-headers-* dir found"
-    fi
-else
-    echo "WARNING: ASK2 v2 — snapshot skipped: ASK_HEADERS_DEB='$ASK_HEADERS_DEB' ASK_KEY_PEM='$ASK_KEY_PEM'"
+# ASK2 v2 snapshot extraction moved to ci-build-packages.sh (post-build.py, after bindeb-pkg)
 fi
 
 
