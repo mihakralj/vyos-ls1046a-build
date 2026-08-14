@@ -714,8 +714,30 @@ for package in $packages; do
       # bindeb-pkg runs `make clean` which removes .config. Regenerate it
       # so OOT module builds (accel-ppp-ng, ask.ko) can find the kernel config.
       if [ ! -f "$KSRC_ABS_ACCEL/.config" ]; then
-        echo "### Regenerating .config after bindeb-pkg clean"
-        make -C "$KSRC_ABS_ACCEL" olddefconfig ARCH=arm64 2>&1 | tail -3
+        echo "### Restoring shipped .config from linux-image .deb"
+        # olddefconfig with no .config silently falls back to the arch
+        # DEFAULT defconfig, which is NOT the shipped kernel config;
+        # extract the exact one from /boot/config-* in the image .deb.
+        KIMG=$(find . -maxdepth 1 -name 'linux-image-*.deb' ! -name '*-dbg*' | head -1)
+        rm -rf /tmp/kimg && mkdir -p /tmp/kimg
+        if [ -n "$KIMG" ] && dpkg-deb -x "$KIMG" /tmp/kimg 2>/dev/null; then
+          KCONF=$(find /tmp/kimg/boot -name 'config-*' 2>/dev/null | head -1)
+          if [ -n "$KCONF" ]; then
+            cp "$KCONF" "$KSRC_ABS_ACCEL/.config"
+            echo "###   restored $KCONF"
+          fi
+        fi
+        make -C "$KSRC_ABS_ACCEL" olddefconfig ARCH=arm64 2>&1 | tail -3 || true
+      fi
+      # bindeb-pkg also wiped Module.symvers; the headers snapshot carries
+      # the complete one (built-ins + modules). Restore it so modpost can
+      # resolve symbols for OOT module builds against this tree.
+      if [ ! -f "$KSRC_ABS_ACCEL/Module.symvers" ]; then
+        SNAP_SYMVERS=$(find ./ask-kernel-snapshot/extracted/usr/src -maxdepth 2 -name 'Module.symvers' 2>/dev/null | head -1)
+        if [ -n "$SNAP_SYMVERS" ]; then
+          cp "$SNAP_SYMVERS" "$KSRC_ABS_ACCEL/Module.symvers"
+          echo "### Restored Module.symvers from headers snapshot"
+        fi
       fi
       echo "### Building accel-ppp-ng ARM64 packages"
       "$GITHUB_WORKSPACE/bin/ci-build-accel-ppp.sh" "$KSRC_ABS_ACCEL" "$(pwd)" || \
