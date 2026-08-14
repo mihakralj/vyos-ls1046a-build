@@ -326,9 +326,15 @@ jobs:
             exit 0
           fi
           cd "$KSRC"
+          # On the git-cache path HEAD sits on top of 1.4M upstream commits
+          # (the clone in ~/kernel-git-cache/linux); the apply loop appends
+          # one commit per patch on top of the pinned upstream tag. Scope
+          # the sweep to the loop's own commits (tag..HEAD) so upstream
+          # subjects cannot false-positive.
+          LOOP_BASE=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")
           # Count applied patches from current branch only
           # (CI apply loop creates one commit per patch: "applied: <name>")
-          PATCH_COUNT=$(git log --oneline HEAD 2>/dev/null | grep -c 'applied:' || echo 0)
+          PATCH_COUNT=$(git log --oneline ${LOOP_BASE:+"${LOOP_BASE}.."}HEAD 2>/dev/null | grep -c 'applied:' || echo 0)
           SERIES_COUNT=$(grep -c '\.patch$' "${GITHUB_WORKSPACE}/kernel/common/patches/board/series" 2>/dev/null || echo 0)
           echo "### Round-trip: $PATCH_COUNT applied commits vs $SERIES_COUNT series patches"
           if [ "$PATCH_COUNT" -eq 0 ]; then
@@ -338,8 +344,8 @@ jobs:
           else
             echo "### Round-trip: patch count matches ($PATCH_COUNT)"
           fi
-          # Verify no patch failed to apply
-          FAIL_COUNT=$(git log --oneline --all 2>/dev/null | grep -c 'FAILED' || echo 0)
+          # Verify no patch failed to apply (loop commits only)
+          FAIL_COUNT=$(git log --oneline ${LOOP_BASE:+"${LOOP_BASE}.."}HEAD 2>/dev/null | grep -c 'FAILED' || echo 0)
           if [ "$FAIL_COUNT" -gt 0 ]; then
             echo "::error::$FAIL_COUNT patch(es) failed to apply — check build log"
             exit 1
