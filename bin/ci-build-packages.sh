@@ -500,7 +500,7 @@ for package in $packages; do
     ASK_KEY_X509="$ASK_KEY_DIR/signing_key.x509"
     KERNEL_DIR="linux"
     if [ -d "$ASK_KEY_DIR" ]; then
-      ASK_HEADERS_DEB=$(ls ./linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
+      ASK_HEADERS_DEB=$(ls ./linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1 || true)
       if [ -z "$ASK_HEADERS_DEB" ]; then
         DEB_PARENT="${CACHE%/linux}"
         ASK_HEADERS_DEB=$(ls "$DEB_PARENT"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1 || true)
