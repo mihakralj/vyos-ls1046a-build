@@ -2601,6 +2601,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-189 stats-enabled flow insert (EHASH-DUAL-FIX Phase 1.1)"
 fi
 
+# F-190 (2026-08-14, Phase 3 fix): write en_exthash_node vendor node to the
+# root AD in fe_enter_build so the CC dispatch reads the correct node type.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_190.py" 2>&1
+    echo "### fman_pcd.c: F-190 en_exthash_node at root AD (CC dispatch fix)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
