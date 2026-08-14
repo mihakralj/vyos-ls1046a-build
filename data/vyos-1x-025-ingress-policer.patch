@@ -1,123 +1,11 @@
-From 306e12132263e79b79ef430394a79c6097cd4306 Mon Sep 17 00:00:00 2001
-From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 03:56:43 +0000
-Subject: [PATCH] temp: vyos-1x-025-ingress-policer.patch
-
----
- .../interfaces_ethernet.xml.in                | 90 +++++++++++++++++++
- python/vyos/ifconfig/ethernet.py              | 69 ++++++++++++++
- src/conf_mode/interfaces_ethernet.py          | 19 ++++
- 3 files changed, 178 insertions(+)
-
-diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index e981481..6cf3373 100644
---- a/interface-definitions/interfaces_ethernet.xml.in
-+++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -133,6 +133,96 @@
-               </leafNode>
-             </children>
-           </node>
-+          <node name="ingress-policer">
-+            <properties>
-+              <help>Hardware ingress rate policer (NXP LS1046A FMan Policer offload)</help>
-+            </properties>
-+            <children>
-+              <leafNode name="bandwidth">
-+                <properties>
-+                  <help>Committed information rate (policer drop threshold)</help>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;</format>
-+                    <description>Bits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;bit</format>
-+                    <description>Bits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;kbit</format>
-+                    <description>Kilobits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;mbit</format>
-+                    <description>Megabits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;gbit</format>
-+                    <description>Gigabits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;tbit</format>
-+                    <description>Terabits per second</description>
-+                  </valueHelp>
-+                  <constraint>
-+                    <validator name="numeric" argument="--positive"/>
-+                    <regex>\d+(bit|kbit|mbit|gbit|tbit)?</regex>
-+                  </constraint>
-+                </properties>
-+              </leafNode>
-+              <leafNode name="burst">
-+                <properties>
-+                  <help>Burst size in bytes</help>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;</format>
-+                    <description>Bytes</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;&lt;suffix&gt;</format>
-+                    <description>Bytes with scaling suffix (kb, mb, gb)</description>
-+                  </valueHelp>
-+                  <constraint>
-+                    <validator name="numeric" argument="--positive"/>
-+                    <regex>\d+(b|kb|mb|gb)?</regex>
-+                  </constraint>
-+                </properties>
-+              </leafNode>
-+              <leafNode name="peak-bandwidth">
-+                <properties>
-+                  <help>Peak information rate (enables two-rate trTCM policing)</help>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;</format>
-+                    <description>Bits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;bit</format>
-+                    <description>Bits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;kbit</format>
-+                    <description>Kilobits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;mbit</format>
-+                    <description>Megabits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;gbit</format>
-+                    <description>Gigabits per second</description>
-+                  </valueHelp>
-+                  <valueHelp>
-+                    <format>&lt;number&gt;tbit</format>
-+                    <description>Terabits per second</description>
-+                  </valueHelp>
-+                  <constraint>
-+                    <validator name="numeric" argument="--positive"/>
-+                    <regex>\d+(bit|kbit|mbit|gbit|tbit)?</regex>
-+                  </constraint>
-+                </properties>
-+              </leafNode>
-+            </children>
-+          </node>
-           <leafNode name="speed">
-             <properties>
-               <help>Link speed</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index b7b7b12..ea7f2f9 100644
+index 0d7fc2521..7eaf81f84 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -335,6 +335,70 @@ def set_lro(self, state):
+@@ -362,6 +362,69 @@ def set_vlan_strip(self, state):
+                     'Adapter does not support changing rx-vlan-offload settings!'
                  )
          return False
- 
 +    def set_ingress_policer(self, config):
 +        """
 +        Install or remove a hardware ingress rate policer. On the NXP LS1046A
@@ -181,11 +69,10 @@ index b7b7b12..ea7f2f9 100644
 +        if err:
 +            print('tc filter for ingress-policer failed')
 +        return None
-+
+ 
      def set_rps(self, state):
          if not isinstance(state, bool):
-             raise ValueError('Value out of range')
-@@ -604,5 +668,10 @@ def update(self, config):
+@@ -632,5 +695,10 @@ def update(self, config):
          # call base class last
          super().update(config)
  
@@ -197,10 +84,10 @@ index b7b7b12..ea7f2f9 100644
          # enable/disable EAPoL (Extensible Authentication Protocol over Local Area Network)
          self.set_eapol()
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 9063bcd..0c67e7b 100755
+index 16ff90300..7d42e3f77 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -384,6 +384,24 @@ def verify_vpp_remove_vif(ethernet: dict):
+@@ -385,6 +385,24 @@ def verify_vpp_remove_vif(ethernet: dict):
      for vlan in vlan_names:
          verify_vpp_remove_interface(vlan, vpp_config)
  
@@ -225,7 +112,7 @@ index 9063bcd..0c67e7b 100755
  def verify(ethernet):
      verify_flowtable(ethernet)
      verify_vpp_remove_vif(ethernet)
-@@ -395,6 +413,7 @@ def verify(ethernet):
+@@ -396,6 +414,7 @@ def verify(ethernet):
      verify_interface_exists(ethernet, ifname, state_required=True)
      verify_eapol(ethernet)
      verify_mirror_redirect(ethernet)
@@ -233,6 +120,3 @@ index 9063bcd..0c67e7b 100755
      # No need to check speed and duplex keys as both have default values
      ethtool = Ethtool(ifname)
      verify_speed_duplex(ethernet, ethtool)
--- 
-2.39.5
-
