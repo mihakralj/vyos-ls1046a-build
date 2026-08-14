@@ -2761,7 +2761,7 @@ ASK_SNAP_DIR="${CWD}/ask-kernel-snapshot"
 # the snapshot works on either path.
 ASK_HEADERS_DEB=$(ls "${CWD}"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
 if [ -z "$ASK_HEADERS_DEB" ]; then
-    ASK_DEB_PARENT="$(readlink -f ..)"
+    ASK_DEB_PARENT="$(readlink -f "$(pwd -P)/..)"
     ASK_HEADERS_DEB=$(ls "${ASK_DEB_PARENT}"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
 fi
 if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
