@@ -512,7 +512,7 @@ for package in $packages; do
         dpkg-deb -x "$ASK_HEADERS_DEB" "$ASK_SNAP_DIR/extracted"
         ASK_KSRC=$(find "$ASK_SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)
         if [ -n "$ASK_KSRC" ]; then
-          ln -sfn "$ASK_KSRC" "$ASK_SNAP_DIR/ksrc"
+          ln -sfn "$(readlink -f "$ASK_KSRC")" "$ASK_SNAP_DIR/ksrc"
           mkdir -p "$ASK_KSRC/certs"
           cp "$ASK_KEY_PEM"  "$ASK_KSRC/certs/signing_key.pem"
           cp "$ASK_KEY_X509" "$ASK_KSRC/certs/signing_key.x509"
