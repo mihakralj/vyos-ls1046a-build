@@ -488,6 +488,58 @@ for package in $packages; do
 
   [ "$package" == "keepalived" ] && apt-get remove -y libsnmp-dev
 
+  # ASK2 v2 snapshot extraction (post-bindeb-pkg): extract headers .deb into
+  # ask-kernel-snapshot/ for OOT ask-modules build. The .debs are in this
+  # package dir after build.py's post-processing (bindeb-pkg wrote them to
+  # the parent of the kernel source tree; the previous ci-setup-kernel.sh
+  # injection ran BEFORE bindeb-pkg and could not find the .debs).
+  if [ "$package" == "linux-kernel" ]; then
+    ASK_SNAP_DIR="./ask-kernel-snapshot"
+    ASK_KEY_DIR="./ask-persistent-keys"
+    ASK_KEY_PEM="$ASK_KEY_DIR/signing_key.pem"
+    ASK_KEY_X509="$ASK_KEY_DIR/signing_key.x509"
+    KERNEL_DIR="linux"
+    if [ -d "$ASK_KEY_DIR" ]; then
+      ASK_HEADERS_DEB=$(ls ./linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
+      if [ -z "$ASK_HEADERS_DEB" ]; then
+        DEB_PARENT="${CACHE%/linux}"
+        ASK_HEADERS_DEB=$(ls "$DEB_PARENT"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
+      fi
+      if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
+        echo "I: ASK2 v2 — extracting $ASK_HEADERS_DEB into $ASK_SNAP_DIR/extracted/"
+        rm -rf "$ASK_SNAP_DIR"
+        mkdir -p "$ASK_SNAP_DIR/extracted"
+        dpkg-deb -x "$ASK_HEADERS_DEB" "$ASK_SNAP_DIR/extracted"
+        ASK_KSRC=$(find "$ASK_SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)
+        if [ -n "$ASK_KSRC" ]; then
+          ln -sfn "$ASK_KSRC" "$ASK_SNAP_DIR/ksrc"
+          mkdir -p "$ASK_KSRC/certs"
+          cp "$ASK_KEY_PEM"  "$ASK_KSRC/certs/signing_key.pem"
+          cp "$ASK_KEY_X509" "$ASK_KSRC/certs/signing_key.x509"
+          if [ -d "${KERNEL_DIR}/include/linux/fsl" ]; then
+            mkdir -p "$ASK_KSRC/include/linux/fsl"
+            cp -av "${KERNEL_DIR}/include/linux/fsl/." "$ASK_KSRC/include/linux/fsl/" 2>&1 | tail -5 || true
+            echo "I: ASK2 v2 — copied include/linux/fsl/ headers into snapshot"
+          fi
+          for f in qman.h bman.h; do
+            if [ -f "${KERNEL_DIR}/include/soc/fsl/$f" ]; then
+              mkdir -p "$ASK_KSRC/include/soc/fsl"
+              cp "${KERNEL_DIR}/include/soc/fsl/$f" "$ASK_KSRC/include/soc/fsl/$f"
+              echo "I: ASK2 v2 — copied include/soc/fsl/$f into snapshot"
+            fi
+          done
+          touch "$ASK_SNAP_DIR/.done"
+          echo "I: ASK2 v2 — snapshot ready: $ASK_SNAP_DIR/ksrc -> $ASK_KSRC"
+          ls -la "$ASK_KSRC/Module.symvers" "$ASK_KSRC/scripts/sign-file" "$ASK_KSRC/certs/signing_key.pem" 2>&1 || true
+        else
+          echo "WARNING: ASK2 v2 — extracted .deb but no usr/src/linux-headers-* dir found"
+        fi
+      else
+        echo "WARNING: ASK2 v2 — snapshot skipped: ASK_HEADERS_DEB='$ASK_HEADERS_DEB' ASK_KEY_PEM='$ASK_KEY_PEM'"
+      fi
+    fi
+  fi
+
   ### Kernel build validation — fail fast on silent failures
   if [ "$package" == "linux-kernel" ]; then
     # bindeb-pkg writes the .debs to the PARENT of the kernel source dir.
