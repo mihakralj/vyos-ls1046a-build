@@ -490,6 +490,17 @@ for package in $packages; do
 
   ### Kernel build validation — fail fast on silent failures
   if [ "$package" == "linux-kernel" ]; then
+    # bindeb-pkg writes the .debs to the PARENT of the kernel source dir.
+    # Tarball path: parent is this package dir. Git-cache path
+    # (linux -> $CACHE): they land in $CACHE's parent instead, and
+    # build.py's copy_packages() globs the package dir, finds nothing,
+    # and prints "Copied generated .deb packages" anyway. Lift them here
+    # so the guard and the cache-staging below see them.
+    if [ -L linux ] && [ "$(readlink -f linux)" = "$(readlink -f "$CACHE")" ]; then
+      DEB_PARENT="${CACHE%/linux}"
+      echo "### Lifting kernel .debs from git-cache parent: $DEB_PARENT"
+      cp -v "$DEB_PARENT"/linux-*_arm64.deb . 2>/dev/null || true
+    fi
     KERNEL_DEB_COUNT=$(find . -maxdepth 1 -name 'linux-image-*.deb' ! -name '*-dbg*' | wc -l)
     if [ "$KERNEL_DEB_COUNT" -eq 0 ]; then
       echo ""
