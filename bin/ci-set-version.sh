@@ -26,7 +26,11 @@ echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 # version.json (the version-{default,ask,vpp}.json aliases mirror it). Fall
 # back to the epoch on the very first build when no feed exists yet.
 if [ -s version.json ]; then
-    PREV_TS=$(jq -r '.[0].timestamp // empty' version.json)
+    if command -v jq >/dev/null 2>&1; then
+        PREV_TS=$(jq -r '.[0].timestamp // empty' version.json)
+    else
+        PREV_TS=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d[0].get("timestamp","") if isinstance(d,list) and d else "")' version.json)
+    fi
 else
     PREV_TS=""
 fi
