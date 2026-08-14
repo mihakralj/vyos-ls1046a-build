@@ -278,3 +278,5 @@
 0167-fman-pcd-cc-match-key-14b.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0169-fman-pcd-fe-obs-canary.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0170-fman-pcd-debugfs-kconfig.patch
