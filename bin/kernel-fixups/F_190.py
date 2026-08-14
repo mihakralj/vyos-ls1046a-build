@@ -1,18 +1,8 @@
 """F-190: write en_exthash_node vendor node to the root AD in fe_enter_build.
-
-The fe_arm engage function writes the vendor node to the group offset (gro),
-but the CC dispatch reads the root AD (off). The fe_enter_build function
-writes a CONT_LOOKUP group to the root AD, which the CC dispatch interprets
-as garbled parameters (numKeys=142). The fix: overwrite the root AD with
-the en_exthash_node when an ehash table exists. Requires a forward
-declaration because struct fman_pcd_ehash_table is defined 160 lines later.
-
 F-190 (2 blocks, fman_pcd.c). Idempotent ("F-190:" markers). CI-only.
 """
-
 import sys
 changes = 0
-
 def edit(path, blocks):
     global changes
     with open(path) as f:
@@ -44,24 +34,26 @@ pcd_blocks = [
      'F-190(fe-enter-vendor-node)',
      "\tpcd->fe_root_ad_off = off;\n",
      "\t/* F-190(fe-enter-vendor-node): write en_exthash_node to root AD */\n"
-     "\t{\n"
-     "\t\tstruct fman_pcd_ehash_table *__et =\n"
-     "\t\t\tlist_first_entry_or_null(&pcd->fe_ehash_tables,\n"
-     "\t\t\t\tstruct fman_pcd_ehash_table, node);\n"
-     "\t\tif (__et && pcd->fe_int_buf_off) {\n"
-     "\t\t\tu64 __tb = (u64)__et->table_dma;\n"
-     "\t\t\tiowrite32be((2U << 30) |\n"
-     "\t\t\t\t    ((u32)(__et->key_size & 0x3f) << 24) |\n"
-     "\t\t\t\t    (4U << 20) |\n"
-     "\t\t\t\t    ((u32)(__et->hash_shift & 0x7) << 16) |\n"
-     "\t\t\t\t    ((u32)(__tb >> 32) & 0xffU), ad + 0);\n"
-     "\t\t\tiowrite32be((u32)(__tb & 0xffffffffU), ad + 1);\n"
-     "\t\t\tiowrite32be(\n"
-     "\t\t\t    ((u32)((pcd->fe_int_buf_off >> 8) & 0xffffU) << 16) |\n"
-     "\t\t\t    (0x80U << 4) |\n"
-     "\t\t\t    (u32)(__et->hash_mask_bits & 0xfU), ad + 2);\n"
-     "\t\t\tiowrite32be(0, ad + 3);\n"
-     "\t\t}\n"
+     "\tpr_info(\"F-190: et=%p int_buf_off=0x%lx\\n\",\n"
+     "\t\t(void *)__et, (unsigned long)pcd->fe_int_buf_off);\n"
+     "\tif (__et && pcd->fe_int_buf_off) {\n"
+     "\t\tu64 __tb = (u64)__et->table_dma;\n"
+     "\t\tpr_info(\"F-190: WRITE root AD 0x%lx tb=0x%llx\\n\",\n"
+     "\t\t\t(unsigned long)off, __tb);\n"
+     "\t\tiowrite32be((2U << 30) |\n"
+     "\t\t\t    ((u32)(__et->key_size & 0x3f) << 24) |\n"
+     "\t\t\t    (4U << 20) |\n"
+     "\t\t\t    ((u32)(__et->hash_shift & 0x7) << 16) |\n"
+     "\t\t\t    ((u32)(__tb >> 32) & 0xffU), ad + 0);\n"
+     "\t\tiowrite32be((u32)(__tb & 0xffffffffU), ad + 1);\n"
+     "\t\tiowrite32be(\n"
+     "\t\t    ((u32)((pcd->fe_int_buf_off >> 8) & 0xffffU) << 16) |\n"
+     "\t\t    (0x80U << 4) |\n"
+     "\t\t    (u32)(__et->hash_mask_bits & 0xfU), ad + 2);\n"
+     "\t\tiowrite32be(0, ad + 3);\n"
+     "\t} else {\n"
+     "\t\tpr_info(\"F-190: SKIP __et=%p int_buf_off=0x%lx\\n\",\n"
+     "\t\t\t(void *)__et, (unsigned long)pcd->fe_int_buf_off);\n"
      "\t}\n"
      "\n"
      "\tpcd->fe_root_ad_off = off;\n"),
