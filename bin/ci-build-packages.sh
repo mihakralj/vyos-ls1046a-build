@@ -676,7 +676,10 @@ for package in $packages; do
       # struct definition and updated signature.  The ci-setup-kernel.sh
       # fixups target the main kernel tree, but the OOT module builds
       # against the snapshot at ask-kernel-snapshot/extracted/.
-      SNAP_HDR=$(ls "$KSRC_ABS_ASK"/../ask-kernel-snapshot/extracted/usr/src/linux-headers-*/include/linux/fsl/fman_pcd.h 2>/dev/null | head -1)
+      # Snapshot lives in this package dir (ASK_SNAP_DIR=${CWD}/ask-kernel-snapshot
+      # in the injected build-kernel.sh block), NOT next to the physical
+      # kernel tree — on the git-cache path KSRC_ABS_ASK/.. is the cache root.
+      SNAP_HDR=$(ls ./ask-kernel-snapshot/extracted/usr/src/linux-headers-*/include/linux/fsl/fman_pcd.h 2>/dev/null | head -1) || true
       if [ -f "$SNAP_HDR" ]; then
         if ! grep -q 'struct fman_pcd_fe_flow_action {' "$SNAP_HDR"; then
           sed -i '/^int fman_pcd_fe_engage/i/* F-094: Structured flow action.\n */\n#define FMAN_FE_FLOW_KEY_MAX   56\nstruct fman_pcd_fe_flow_action {\n\tu8   key[FMAN_FE_FLOW_KEY_MAX];\n\tu8   key_size;\n\tunsigned long enq_off;\n\tu32  flags;\n};\n' "$SNAP_HDR"
