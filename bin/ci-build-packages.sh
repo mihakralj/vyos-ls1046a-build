@@ -503,7 +503,7 @@ for package in $packages; do
       ASK_HEADERS_DEB=$(ls ./linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
       if [ -z "$ASK_HEADERS_DEB" ]; then
         DEB_PARENT="${CACHE%/linux}"
-        ASK_HEADERS_DEB=$(ls "$DEB_PARENT"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
+        ASK_HEADERS_DEB=$(ls "$DEB_PARENT"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1 || true)
       fi
       if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
         echo "I: ASK2 v2 — extracting $ASK_HEADERS_DEB into $ASK_SNAP_DIR/extracted/"
