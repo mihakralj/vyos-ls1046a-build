@@ -86,6 +86,21 @@ for package in $packages; do
       git -C "$CACHE" fetch --depth=1 origin "tag v${KVER}" 2>/dev/null || true
       git -C "$CACHE" checkout -f "v${KVER}" 2>/dev/null || \
         git -C "$CACHE" checkout -f "refs/tags/v${KVER}" 2>/dev/null || true
+      ACTUAL=$(git -C "$CACHE" describe --tags 2>/dev/null || true)
+      if [ "$ACTUAL" != "v${KVER}" ]; then
+        # A stale-version cache clone silently downgrades build.py to the
+        # tarball path (build.py prefers linux/ when it exists, regardless
+        # of what version it holds) and the tarball path has no upstream
+        # blobs for git apply --3way. Never reuse a wrong-version clone:
+        # wipe it and re-clone at the pinned version. (ARM64-runner2
+        # failure 2026-08-14: cache stuck at v6.18.38 while the build
+        # tracked 6.18.44.)
+        echo "::warning::kernel cache at ${ACTUAL:-<unknown>}, want v${KVER} — re-cloning"
+        rm -rf "$CACHE"
+        git clone --depth=1 --branch "v${KVER}" \
+          https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$CACHE"
+        git -C "$CACHE" fetch --unshallow 2>/dev/null || git -C "$CACHE" fetch --depth=100000 2>/dev/null || true
+      fi
       git -C "$CACHE" describe --tags 2>/dev/null || true
     fi
   fi
