@@ -244,4 +244,4 @@ info "running make olddefconfig…"
 
 ok "stage-kernel done (kernel=linux-$KVER)"
 echo "Tree ready at: $KSRC"
-echo "Next: cd $KSRC && make ARCH=$ARCH ${CROSS_COMPILE:+CROSS_COMPILE=$CROSS_COMPILE} -j\$(nproc) Image modules"
+echo "Next: cd $KSRC && make ARCH=$ARCH ${CROSS_COMPILE:+CROSS_COMPILE=$CROSS_COMPILE} -j\$(nproc) Image modules"# F-190 cache bust 1786683464
