@@ -1,5 +1,17 @@
 """F-190: write en_exthash_node vendor node to the root AD in fe_enter_build.
-F-190 (2 blocks, fman_pcd.c). Idempotent ("F-190:" markers). CI-only.
+
+The CC dispatch reads the root AD; fe_enter_build writes a CONT_LOOKUP group
+there, which the CC dispatch interprets as garbled parameters.  The fix
+overwrites the root AD with the vendor en_exthash_node when an ehash table
+exists.
+
+struct fman_pcd_ehash_table is defined AFTER fe_enter_build, so the member
+accesses (table_dma/key_size/hash_shift/hash_mask_bits) cannot live inline
+in fe_enter_build (incomplete type).  The write is therefore a small helper
+defined right after the struct definition, forward-declared before
+fe_enter_build.
+
+F-190 (3 blocks, fman_pcd.c). Idempotent ("F-190:" markers). CI-only.
 """
 import sys
 changes = 0
@@ -29,11 +41,34 @@ pcd_blocks = [
      'F-190(fwd-decl)',
      "static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)\n",
      "struct fman_pcd_ehash_table;\t/* F-190(fwd-decl) */\n"
+     "static void fman_pcd_fe_enter_write_vendor_node(struct fman_pcd *pcd,\n"
+     "\t\t\t\t\t\tu32 __iomem *ad,\n"
+     "\t\t\t\t\t\tunsigned long off);\n"
      "static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)\n"),
-    ('vendor node at root AD',
+    ('vendor node call at root AD',
      'F-190(fe-enter-vendor-node)',
      "\tpcd->fe_root_ad_off = off;\n",
      "\t/* F-190(fe-enter-vendor-node): write en_exthash_node to root AD */\n"
+     "\tfman_pcd_fe_enter_write_vendor_node(pcd, ad, off);\n"
+     "\n"
+     "\tpcd->fe_root_ad_off = off;\n"),
+    ('vendor node helper (after struct definition)',
+     'F-190(fe-enter-vendor-node-helper)',
+     "/* Table teardown cascades to its inserted flow records (defined below). */\n"
+     "static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t);\n",
+     "/* F-190(fe-enter-vendor-node-helper): overwrite the root AD with the\n"
+     " * vendor en_exthash_node when an ehash table exists.  Defined here (not\n"
+     " * inline in fe_enter_build) because struct fman_pcd_ehash_table is\n"
+     " * complete only after this point.\n"
+     " */\n"
+     "static void fman_pcd_fe_enter_write_vendor_node(struct fman_pcd *pcd,\n"
+     "\t\t\t\t\t\tu32 __iomem *ad,\n"
+     "\t\t\t\t\t\tunsigned long off)\n"
+     "{\n"
+     "\tstruct fman_pcd_ehash_table *__et =\n"
+     "\t\tlist_first_entry_or_null(&pcd->fe_ehash_tables,\n"
+     "\t\t\t\t\t struct fman_pcd_ehash_table, node);\n"
+     "\n"
      "\tpr_info(\"F-190: et=%p int_buf_off=0x%lx\\n\",\n"
      "\t\t(void *)__et, (unsigned long)pcd->fe_int_buf_off);\n"
      "\tif (__et && pcd->fe_int_buf_off) {\n"
@@ -55,8 +90,10 @@ pcd_blocks = [
      "\t\tpr_info(\"F-190: SKIP __et=%p int_buf_off=0x%lx\\n\",\n"
      "\t\t\t(void *)__et, (unsigned long)pcd->fe_int_buf_off);\n"
      "\t}\n"
+     "}\n"
      "\n"
-     "\tpcd->fe_root_ad_off = off;\n"),
+     "/* Table teardown cascades to its inserted flow records (defined below). */\n"
+     "static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t);\n"),
 ]
 edit("drivers/net/ethernet/freescale/fman/fman_pcd.c", pcd_blocks)
 if changes:
