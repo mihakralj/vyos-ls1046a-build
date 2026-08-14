@@ -110,6 +110,18 @@ else
 fi
 "$MERGIRAF_BIN" --version || echo "WARN: mergiraf install failed — patches with context drift may produce conflict markers"
 
+# Wire the git merge driver unconditionally. The v0.17 CLI only accepts
+# `merge --git <BASE> <LEFT> <RIGHT>` plus -l; a stale driver definition
+# (e.g. `-s %S -x %X -y %Y -p %P -o %A` from an older mergiraf) makes
+# every git apply --3way conflict invocation die with
+# "the argument '--git' cannot be used with '--output'" and turns a
+# clean 3-way merge into a patch failure (ARM64-runner2 2026-08-14).
+# git apply --3way consults .gitattributes (merge=mergiraf) in the target
+# tree and invokes this driver on every conflict.
+git config --global merge.mergiraf.name "Mergiraf conflict resolver"
+git config --global merge.mergiraf.driver "mergiraf merge --git %O %A %B -l %L"
+git config --global merge.mergiraf.recursive binary
+
 # ---------------------------------------------------------------------------
 # syft — Anchore SBOM generator. NEW hard dependency: upstream vyos-build's
 # build-vyos-image now shells out to `syft chroot ...` after the live-build
