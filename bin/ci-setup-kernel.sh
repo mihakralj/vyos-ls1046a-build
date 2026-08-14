@@ -1037,6 +1037,14 @@ MERGATTR
     git -c user.email=ci@local -c user.name=ci commit -q -m "kernel pristine (pre-patches)" --allow-empty || true
 fi
 
+# Sanitise the persistent tree before re-applying the series. Prior runs
+# can leave uncommitted fixup edits and .rej droppings behind; they must
+# never leak into the per-patch "applied:" commits that later runs use as
+# --3way merge bases (a leaked edit silently rewrites the merge base and
+# downstream patches stop applying -- ARM64-runner2 failure 2026-08-14).
+git -c user.email=ci@local -c user.name=ci reset -q --hard || true
+git clean -fdxq || true
+
 PATCH_FAIL=0
 PATCH_FAIL_LIST=""
 PATCH_FALLBACK_COUNT=0
@@ -1059,15 +1067,26 @@ for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); 
         # the cache accumulates blobs from a successful build, subsequent
         # builds will use the safer --3way path.
         echo "::warning::git apply --3way failed for $pname — falling back to patch -p1" >&2
-        if patch -p1 -s -t --no-backup-if-mismatch < "$patch" 2>/dev/null; then
+        # A failed `git apply --3way` can leave merge-stage entries in the
+        # index; clear them so the commit below records only the fallback's
+        # on-disk result.
+        git reset -q || true
+        # patch(1) exit codes are unreliable: hunks applied with fuzz or
+        # offsets can return 0, and hunks silently skipped in batch mode
+        # can also return 0. The trustworthy failure signal is a .rej file
+        # left behind (--no-backup-if-mismatch writes one per mismatch).
+        _rej_before=$(find . -name '*.rej' 2>/dev/null | wc -l)
+        patch -p1 -s -t --no-backup-if-mismatch < "$patch" >/dev/null 2>&1 || true
+        _rej_after=$(find . -name '*.rej' 2>/dev/null | wc -l)
+        if [ "$_rej_after" -gt "$_rej_before" ]; then
+            echo "::error::Kernel patch FAILED to apply (both git apply --3way and patch -p1): $pname" >&2
+            PATCH_FAIL=$((PATCH_FAIL + 1))
+            PATCH_FAIL_LIST="$PATCH_FAIL_LIST $pname"
+        else
             APPLIED=1
             echo "::warning::patch -p1 fallback succeeded for $pname (cache will be seeded for next build)" >&2
             PATCH_FALLBACK_COUNT=$((PATCH_FALLBACK_COUNT + 1))
             PATCH_FALLBACK_LIST="$PATCH_FALLBACK_LIST $pname(fallback)"
-        else
-            echo "::error::Kernel patch FAILED to apply (both git apply --3way and patch -p1): $pname" >&2
-            PATCH_FAIL=$((PATCH_FAIL + 1))
-            PATCH_FAIL_LIST="$PATCH_FAIL_LIST $pname"
         fi
     fi
     if [ "$APPLIED" -eq 1 ]; then

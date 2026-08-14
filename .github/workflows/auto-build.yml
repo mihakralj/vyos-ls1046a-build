@@ -299,7 +299,10 @@ jobs:
 
       - name: Clone Linux Kernel (git repo, not tarball)
         run: |
-          bin/clone-kernel.sh "${KERNEL_VERSION:-6.18.38}"
+          KVER="${KERNEL_VERSION:-$(awk -F'"' '/^[[:space:]]*kernel_version[[:space:]]*=/{print $2; exit}' vyos-build/data/defaults.toml 2>/dev/null)}"
+          [ -n "$KVER" ] || KVER="6.18.38"
+          echo "### Cloning kernel v${KVER} (source of truth: vyos-build/data/defaults.toml)"
+          bin/clone-kernel.sh "${KVER}"
           # The clone goes to vyos-build/scripts/package-build/linux-kernel/linux/
           # build.py skips the tarball download when this directory exists.
 
