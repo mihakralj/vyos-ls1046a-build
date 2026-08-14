@@ -147,7 +147,11 @@ export VYOS_PERSIST_CHROOT="${VYOS_PERSIST_CHROOT:-1}"
 cd build
 # Rename generic -> LS1046A in artifact filenames. Single image:
 #   vyos-2026.05.09-1830-rolling-LS1046A-arm64.iso
-ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
+if command -v jq >/dev/null 2>&1; then
+  ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
+else
+  ORIG_ISO=$(python3 -c 'import json,sys; print(json.load(open("manifest.json"))["artifacts"][0])')
+fi
 IMAGE_ISO="${ORIG_ISO/generic/LS1046A}"
 IMAGE_NAME="${IMAGE_ISO%.iso}"
 mv "$ORIG_ISO" "$IMAGE_ISO"
