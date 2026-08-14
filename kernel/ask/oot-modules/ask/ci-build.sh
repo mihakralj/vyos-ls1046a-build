@@ -76,7 +76,7 @@ if [ ! -f "$KSRC/Module.symvers" ] || \
     # Resolve the snapshot KSRC. Prefer the convenience symlink; fall back
     # to find under extracted/ if the symlink is missing for some reason.
     if [ -L "$SNAP_DIR/ksrc" ] || [ -d "$SNAP_DIR/ksrc" ]; then
-        SNAP_KSRC="$(readlink -f "$SNAP_DIR/ksrc")"
+        SNAP_KSRC="$(readlink -f "$SNAP_DIR/ksrc" 2>/dev/null || true)"
     else
         SNAP_KSRC="$(find "$SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)"
     fi
