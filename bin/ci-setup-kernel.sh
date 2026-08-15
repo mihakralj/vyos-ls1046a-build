@@ -2624,6 +2624,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-193 production flow-add argument diagnostic"
 fi
 
+# F-194 (2026-08-15): trace the early `-EINVAL` guard above F-193's first
+# log. Diagnostic only; no action, table, or datapath behavior changes.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_194.py" 2>&1
+    echo "### fman_pcd.c: F-194 early flow-add -EINVAL diagnostic"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,

@@ -1338,12 +1338,21 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         }
         action.enq_off  = enq_off;
 
+        /* F-194 caller-side ABI trace: the callee's early -EINVAL guard is
+         * reached before F-193.  Log the exact pointer, layout, selected
+         * table index, and serialized key before the call, without changing
+         * the legacy table-index argument under investigation. */
+        ask_pr_info("F-194 flow-add call fm=%px action=%px hw_port_arg=0x%02x key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
+                    fm, &action, table_idx, action.key_size, sizeof(action),
+                    offsetof(struct fman_pcd_fe_flow_action, key_size),
+                    action.key_size, action.key);
+
         /* Drive the real FMan (fman_get_pcd -> ehash) and surface failures so
          * callers can roll back provisional HW-backed ownership. */
         rc = fman_pcd_fe_flow_add(fm, table_idx, &action);
         if (rc)
-                ask_pr_warn("fe_flow_insert: fman_pcd_fe_flow_add(table=%d) failed: %d\n",
-                            table_idx, rc);
+                ask_pr_warn("F-194 flow-add return=%d fm=%px action=%px hw_port_arg=0x%02x key_size=%u\n",
+                            rc, fm, &action, table_idx, action.key_size);
         return rc;
 }
 
