@@ -766,13 +766,21 @@ EXPORT_SYMBOL_GPL(ask_hw_pcd_cc_v4_udp_for_port);
 int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
                      struct net_device *ingress_dev)
 {
+        int rc;
+
         /*
-         * The board substrate arms each port's CC pipeline at MAC probe;
-         * there is nothing to bind at flow_block time.  Returns 0 so the
-         * ask_flow_offload.c BIND path treats every bind as a no-op.
+         * A successful FLOW_CLS_REPLACE must arm the ingress FE pipeline
+         * before it can add an ehash record.  fman_pcd_fe_engage() publishes
+         * the per-port FE workspace and the shared ENQ FE offset consumed by
+         * ask_fe_flow_insert().  The wrapper is idempotent for subsequent
+         * flows on this port.
          */
-        (void)port_id; (void)dir; (void)ingress_dev;
-        return 0;
+        rc = ask_hw_offload_engage(port_id);
+        if (rc)
+                ask_pr_warn("hw: port-bind engage port 0x%02x dir=%u dev=%s failed: %d\n",
+                            port_id, dir,
+                            ingress_dev ? netdev_name(ingress_dev) : "?", rc);
+        return rc;
 }
 EXPORT_SYMBOL_GPL(ask_hw_port_bind);
 
