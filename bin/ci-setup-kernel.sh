@@ -2615,6 +2615,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-192 bounded read-only FE workspace diagnostic"
 fi
 
+# F-193 (2026-08-15): one-line production flow-add argument/failure trace.
+# Diagnostic only: confirms whether the OOT caller passes a FMan hw port ID,
+# and distinguishes the active ehash table's key-size validation from other
+# flow-add failures before any API or dispatch change is considered.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_193.py" 2>&1
+    echo "### fman_pcd.c: F-193 production flow-add argument diagnostic"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
