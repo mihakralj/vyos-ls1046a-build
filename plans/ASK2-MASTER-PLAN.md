@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.17.0 · 2026-08-07 · HADS 1.0.0**
+**Version 2.22.0 · 2026-08-15 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -20,33 +20,38 @@ documents disagree, they win — update this plan.
 
 ---
 
-## 1. Current state (branch `dpaa1` · kernel 6.18.38-vyos)
+## 1. Current state (branch `dpaa1` · diagnostic DUT `.185`: kernel `6.18.44-vyos`)
 
 ### 1.1 Position
 
-**[SPEC]** No hardware-classification dispatch path on this branch has a
-confirmed silicon HIT. The only silicon-proven hardware offload today is the
-**FMan ingress policer** and **mainline RSS**.
+**[SPEC]** The FE-VM ehash path has discriminator-verified manual silicon HITs
+(E25/E26) and a production nft/YNL flowtable HIT (F-195/F-197, 2026-08-15).
+The production path carries end-to-end transit loss-free through 200 Mbit/s,
+but all HIT reinjection currently targets one literal PCD base FQID and one
+QMan portal/CPU; loss starts near 300 Mbit/s and 500 Mbit/s can hard-wedge the
+FMan. The only release-ready silicon offload remains the **FMan ingress
+policer** and **mainline RSS** until T-M7-2 replaces RX reinjection with the
+hardware TX opcode terminal.
 
 | Dispatch path | Status |
 |---|---|
-| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **Key-format CLOSED (2026-08-06/07/08) and now full-path VERIFIED (2026-08-12, E25/E26): the vendor's 14-byte `portid`-prefixed key (EKFC=`0x801C0006`, `PORT_ID=0x00` for eth4/port 0x11) is HW-confirmed via CRC-64 hash match, and the complete HIT path (extraction → hash → bucket → chain walk → opcode-script enqueue → kernel) delivers on silicon.** M3 gate passed: see §3/§4.1 and `decomp/fman-ehash-process.md` (E24–E27 evidence).
+| **FE-VM ehash** (the vendor's production mechanism) | Code complete. **Topology resolved 2026-08-07: direct `RCCB→FE_ENTER` (not the `CONT_LOOKUP` group-AD RM §7.11 suggested) is vendor's real mechanism** — confirmed by reading `fm_cc.c`'s `copy_td_to_ccbase()`, which writes the ehash node directly into the CC-tree root's own AD slot, no group-AD indirection. Group-AD topology independently confirmed dead 3 ways (F-157/158, T-M3-R attempt 5, this session's F-175). **Key-format CLOSED (2026-08-06/07/08) and full-path VERIFIED (2026-08-12, E25/E26): the vendor's 14-byte `portid`-prefixed key (EKFC=`0x801C0006`, `PORT_ID=0x00` for eth4/port 0x11) is HW-confirmed via CRC-64 hash match, and the complete HIT path (extraction → hash → bucket → chain walk → opcode-script enqueue → kernel) delivers on silicon.** **Production nft/YNL flowtable HIT now delivers too (2026-08-15, F-195/F-197): eth3→`0x200`, eth4→`0x300` own-port targets, `[HW_OFFLOAD]` transit loss-free ≤200 Mbit/s.** M3 gate passed. **OPEN throughput defect (2026-08-15): every HIT enqueues to the single literal PCD base FQID, serviced by one QMan portal/CPU — loss onset ~300 Mbit/s, hard FMan wedge ≥500 Mbit/s (§4.2 T-M7-2).** See §3/§4.1/§4.2 and `decomp/fman-ehash-process.md` (E24–E27 evidence).
 | **CC-tree classification** | No confirmed HIT. `ask.ko` insert path deleted (CR-007). `cc_test` harness architecturally broken — **retired, do not patch further**. Replacement harness pending the NXP-106 deep-dive oracle (§4.2). |
 | M5's 10.259 Gbps | Real throughput number; **mechanism unresolved** — most likely kernel `nf_flowtable` software forwarding, not hardware classification. Do not cite it as HW-offload proof. |
 | M2's 7.37 Gbps CC pass-through | Real — but it is MISS→kernel delivery (CONT_LOOKUP numKeys=0), not offload. |
 
 **[SPEC]** Which mechanism carries >32 concurrent hardware-offloaded flows
 (CC-tree multi-node vs FE-VM ehash) is an **open question**, deferred until one
-path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
+path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.4).
 
 ### 1.2 Layer status
 
 | Layer | Status |
 |---|---|
 | 1. FMan PCD subsystem (KG / CC / HM / PLCR) | Shipping — patches 0092–0118, 0151–0155 |
-| 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete — patches 0124–0131; byte-verified via `fe_*` debugfs; no confirmed HIT |
-| 3. Classifier→FE arm | Both scaffold arm (`off=0`) and FE_ENTER-direct arm (`off != 0`) engage cleanly and stay healthy, cold-boot reproducible (F-168) — port `0x11` has not stalled since F-168 landed. Neither path has produced a confirmed HIT (§4.1) |
-| 4. ask.ko datapath (genl + flow table) | Shipping — engage/disengage via kernel API; conntrack offload + crash-safe teardown; flow insert currently ehash-only (`ask_fe_flow_insert()` → `fman_pcd_fe_flow_add()` → `fman_pcd_ehash_add_key()`) |
+| 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete. Manual E25/E26 proved a discriminator-verified silicon HIT, but F-192 production-adjacent diagnostics remain incomplete; the warm shared diagnostic chain is singleton-global and must be reused rather than rebuilt. |
+| 3. Classifier→FE arm | Direct vendor-node arm is proven. The manual `.185` eth3 arm explicitly applies scheme-4 EKFC and tears down safely; the retained chain is byte-readable. The fixed-tuple SPC capture proves KeyGen scheme-4 traversal but not the succeeding FE workspace/writeback stage. |
+| 4. ask.ko datapath (genl + flow table) | Control plane and production insert path are wired: YNL/genl engage/disengage; nft flowtable `REPLACE`; 14-byte ehash insertion; both directions `[HW_OFFLOAD]`. **Transit HIT now delivers end-to-end (2026-08-15, F-195/F-197):** F-195 passes the real ingress port (`0x10`/`0x11`, not the table index), F-197 resolves the own-port PCD base FQID when the params-page default is zero (eth3→`0x200`, eth4→`0x300`), and bounded UDP transit is loss-free through 200 Mbit/s. **Remaining defect is throughput, not correctness:** the FE terminal reinjects each HIT to the port's own kernel RX FQ, so the frame re-enters single-CPU software forwarding (binding-fact-9 ~1.5 Gbps ceiling). The production terminal is the hardware TX opcode chain to a dedicated per-port TX FQ (§4.2 T-M7-2). |
 | 5. VyOS CLI + mutual exclusion | Shipping — `offload ask` per-interface, ASK↔VPP mutex, `show flows` via ynl. Release claim gated by CR-001 (§5) |
 
 ### 1.3 Binding silicon facts (settled on LS1046A hardware — do not re-litigate)
@@ -135,6 +140,20 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
   normal traffic, so its *absence* on a matching frame is evidence of a
   MISS, not an inconclusive result. `fe_arm`'s 3rd argument is inert on the
   `off != 0` path — the live dispatch target is `fe_enq build <fqid>`.
+- **[SPEC] Production HIT currently reinjects to a kernel RX FQ, which is the
+  ~1.5 Gbps ceiling by design (2026-08-15).** F-197 resolves eth3 to `0x200`
+  and eth4 to `0x300`. These are kernel-delivery RX FQIDs: the E25/E26 gate
+  used own-port RX enqueue precisely so a HIT is observable as ordinary NAPI
+  traffic. On silicon this funnels every HIT to one QMan portal/CPU (portal 0),
+  so loss starts near 300 Mbit/s and 500 Mbit/s can wedge the FMan. This is not
+  a distribution bug to patch by RSS-spreading the RX FQ — binding fact 9 is
+  the intended production terminal: the per-flow opcode chain (vendor-verified)
+  `PREEMPTIVE_CHECKS_ON_PKT(0x05) → STRIP_ALL_VLAN_HDRS(0x12) → UPDATE_TTL(0x21)
+  → INSERT_L2_HDR(0x41) → ENQUEUE_PKT(0x01)` to a **per-egress-interface TX
+  FQ**, bypassing the kernel forward path entirely (vendor cdx.ko 8.58 Gbps).
+  T-M7-2 is to build that TX terminal, not to
+  spread RX reinjection. Own-port constraint still holds; cross-port enqueue
+  remains invalid (E25).
 - **The direct `RCCB→FE_ENTER` topology, not the `CONT_LOOKUP` group-AD RM
   §7.11 describes, is vendor's real dispatch mechanism (2026-08-07).**
   Reading `we-are-mono/ASK`'s `fm_cc.c` completely found `copy_td_to_ccbase()`
@@ -197,11 +216,20 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.3).
    ask.ko engages/disengages via `fman_pcd_fe_engage()`/`_disengage()` and
    inserts via `fman_pcd_fe_flow_add()`/`_del()`; it never writes debugfs
    control nodes.
-9. **The hardware TX opcode chain is the 10 Gbps path:**
-   `STRIP_ETH_HDR → TTL_DECREMENT → ETH_HEADER_REBUILD → ENQUEUE_PKT`,
-   reproduced from lf-5.4 LSDK `FmPcdCcBuildContextByFE` + per-flow DDR
-   records + dedicated TX FQ per port. Kernel software forwarding
-   (NAPI→route→qman_enqueue) caps ~1.5 Gbps.
+9. **The hardware TX opcode chain is the 10 Gbps path** (vendor-verified
+   2026-08-15 against `we-are-mono/ASK@fe36f30` `cdx/cdx_ehash.c` +
+   `fm_ehash.h`): a plain routed IPv4 unicast HIT emits, in order,
+   `PREEMPTIVE_CHECKS_ON_PKT(0x05) → STRIP_ALL_VLAN_HDRS(0x12) →
+   UPDATE_TTL(0x21) → INSERT_L2_HDR(0x41) → ENQUEUE_PKT(0x01)`. Opcodes are
+   1-byte values written into the record's opcode-list region (NOT the 32-bit
+   words in `arch/fman-fe-ehash.md` §10, which are a microcode-internal form).
+   `STRIP_ETH_HDR(0x11)` is emitted ONLY when VLAN/PPPoE/tunnel/IPsec header
+   ops are present; for a plain forward `INSERT_L2_HDR` alone rewrites the
+   14-byte L2 header (dst=next-hop MAC, src=egress MAC, EtherType). The
+   `ENQUEUE_PKT` FQID is a PER-EGRESS-INTERFACE TX FQ (vendor
+   `eth_info->fwd_tx_fqinfo[quenum]`, resolved by output-interface name), not a
+   single shared FQ. Kernel software forwarding (NAPI→route→qman_enqueue) caps
+   ~1.5 Gbps; vendor cdx.ko reaches 8.58 Gbps via this terminal.
 10. **10G DMA page-order policy:** order-4 primary (throughput-first),
     order-3 fallback on memory pressure; avoid the MTU 8192 boundary in
     order-3 paths (multi-descriptor DMA splits). MTU 9000 mandatory for 10G
@@ -228,14 +256,75 @@ graph LR
     M2["M2 perf gate<br/>DONE - regression-monitor only"] --> M5["M5 flow automation<br/>DONE - mechanism unresolved"]
     M3["M3 FE-VM ehash HIT gate<br/>DONE (E25/E26, M3 gate passed)"]
     M5 --> M6["M6 IPv6 / bridge / IPsec<br/>UNBLOCKED"]
-    M5 --> M7["M7 VyOS CLI<br/>DONE - release claim gated by CR-001"]
+    M5 --> M7a["M7 VyOS CLI + production HIT<br/>DONE - transit HIT delivers (F-195/F-197)"]
+    M7a --> M7b["M7-2 HW TX opcode terminal<br/>OPEN - RX-reinjection caps ~300 Mbit/s"]
     M6 --> M8["M8 soak + upstream"]
-    M7 --> M8
+    M7b --> M8
     M4["M4 AF_XDP true-ZC RX<br/>BLOCKED - libxdp ISO install"] -.-> M8
 ```
 
 **[NOTE]** M3 gates nothing downstream; it is the validation track for the
 ehash mechanism, not a sequencing blocker for M6/M7/M8.
+
+**[NOTE] Production-path follow-up — 2026-08-15.** E25/E26 closes the manual
+debugfs ehash mechanism only; it does not prove the `nft`/YNL flowtable path.
+The first F-192 production-adjacent E2 discriminator on `.185` inserted TCP
+source port `51283` while `iperf3` used ephemeral source port `57184`; that
+run was not a lookup result. A second eth3-only fixed-tuple run also remained
+invalid because `vyos-offload-ask hit-engage 14 801c0006` displayed its EKFC
+argument but invoked `fe_arm` only as `<port> <fe_enter_off>`, leaving scheme
+4 at boot-default `0x00180006` (12-byte extraction).
+
+**[NOTE] Corrected F-192 E2 result — 2026-08-15.** The harness now explicitly
+writes F-169 `echo "set 4 <ekfc>" > fe_kg_ekfc` before the arm operation and
+uses only guarded `fe_port del` then `fe_arm disengage` cleanup. On `.185`,
+eth3/port `0x10` armed with the exact 14-byte key
+`000a6301c90a63026a06c8531451` (`00|10.99.1.201|10.99.2.106|TCP|51283|5201`),
+bucket `1431`, and `EKFC=0x801c0006`. The independent KeyGen register reader
+confirmed scheme 4 `ekfc=0x801c0006`; dmesg confirmed F-169's write, zeroed
+`dv0/dv1`, F-190's root-AD write at `0x56c00`, and the AC_CC vendor-node arm.
+A prior bounded exact-tuple injection returned zero and eth3 RX advanced, but
+F-192 workspace remained untouched and F-189 ehash writeback stayed
+`pkt_count=0`, `pkt_bytes=0`. This is a valid negative observation for the
+correct configuration but did not localize the drop because scheme-4 `kgse_spc`
+and raw IC/hash were absent from that capture.
+
+**[NOTE] F-192 SPC discriminator — 2026-08-15.** The retained F-136 shared
+chain is byte-readable and reusable: singleton descriptors, a 14-byte ehash
+table, the key record, `FE_ENTER=0x56c00`, and the eth3 workspace exist.
+Rebuilding it is invalid: `fe_singletons build` returns `-EEXIST` after an
+additional `fe_port set`/`fe_pool get`, because the objects are global. The
+actual controlled source is **lxc202**, not lxc201: on Proxmox `.15`,
+`pct exec 202 -- ip addr` shows `10.99.1.201/24`, with `10.99.2.0/24` routed
+through `.185`; lxc201 instead has only `10.99.1.2/30`. The exact one-shot
+injection is `printf X | nc -n -s 10.99.1.201 -p 51283 -w 1 10.99.2.106 5201`.
+
+**[NOTE] Bounded result.** With scheme 4 explicitly set/read as
+`EKFC=0x801c0006`, eth3/port `0x10` armed against `0x56c00`, and the exact
+14-byte record installed, a direct read of the hardware-native `kgse_spc`
+changed `0 → 5` across one `nc` attempt. Its value is an aggregate sample,
+not a literal one-packet count: normal control/background traffic is also
+classified while eth3 is armed. Nevertheless, the zero baseline immediately
+after arm and nonzero post-injection value, plus `hash_probe` changing from
+`994d63058e39b76f` to `50b43c9cff453b9f`, proves scheme-4 KeyGen traversal.
+F-192 workspace index/pool and depletion remained unchanged, and F-189
+`pkt_count`, `pkt_bytes`, and timestamp remained zero. Eth3 RX rose
+`9345 → 9419` and drops `444 → 450`. Thus the fault is now bracketed after
+KeyGen scheme classification and before observable FE workspace allocation or
+ehash writeback. It is not a source-access, tuple-width, EKFC, or pre-KeyGen
+dispatch failure. This does not identify the post-KeyGen AC_CC/FE handoff
+versus EXT_HASH comparator substage; do not change F-185/F-186 from it.
+
+**[SPEC] F-192 discriminator superseded by production proof (2026-08-15).**
+F-195 corrected the OOT caller to pass the actual ingress hardware port;
+F-196 proved params-page FQID zero with same-port scheme bases `0x200`/`0x300`;
+F-197 added the unique same-port scheme fallback. Image
+`2026.08.15-1855-rolling` then produced `hw_insert OK`, conntrack
+`[HW_OFFLOAD]`, own-port F-193 targets, and end-to-end loss-free transit
+through 200 Mbit/s. The post-KeyGen handoff and production ehash HIT are no
+longer open. Keep F-192/F-193 as diagnostics only; do not modify
+F-185/F-186/F-190. The remaining production blocker is T-M7-2's hardware TX
+opcode terminal, not comparator correctness.
 
 - **M2 — Performance gate. DONE.** ≥2 Gbps + ≤5% kernel-net CPU; actual 7.37
   Gbps / 0.16% CPU. Regression-monitor: every build changing `fman_pcd.c` or
@@ -253,17 +342,21 @@ ehash mechanism, not a sequencing blocker for M6/M7/M8.
   drop-vs-deliver. Full E26 matrix (collision chain, per-key delete, UDP,
   ~780 pps sustained, eth3/0x10 structural) all pass; work: §4.1.
 - **M4 — AF_XDP true-ZC RX. BLOCKED.** Gate: `xsk_zc_rx_redirect` > 0 under
-  XDP_ZEROCOPY bind + steered flow. Work: §4.4.
+  XDP_ZEROCOPY bind + steered flow. Work: §4.5.
 - **M5 — CC-tree + SW flowtable + manip chain. DONE (throughput), mechanism
   unresolved.** 10.259 Gbps line rate at 0.16% CPU / 0% loss (MTU 9000,
   3-node 10G plane). Treat as a throughput result, not HW-classification
   proof (§1.1).
-- **M6 — IPv6 + bridge + IPsec. UNBLOCKED.** Work: §4.5.
-- **M7 — VyOS CLI. DONE (surface wiring).** `set interfaces ethernet eth<n>
-  offload ask` engage/disengage, per-interface ASK↔VPP mutex, `show flows`
-  via ynl (HW vs SW via `offloaded` attr). Board-validated on .185/.106.
-  Release claim gated by CR-001 reversibility (§5).
-- **M8 — Productization soak + upstream.** Work: §4.6.
+- **M6 — IPv6 + bridge + IPsec. UNBLOCKED.** Work: §4.6.
+- **M7 — VyOS CLI + production transit HIT. PARTIAL.** Surface wiring is DONE:
+  `set interfaces ethernet eth<n> offload ask` engage/disengage,
+  per-interface ASK↔VPP mutex, and `show flows` via ynl. Production nft/YNL
+  transit HIT is now proven (F-195/F-197, own-port targets, `[HW_OFFLOAD]`,
+  loss-free through 200 Mbit/s). Release claim remains blocked by T-M7-2:
+  literal-base-FQ enqueue sends every HIT to one QMan portal/CPU, with loss
+  onset near 300 Mbit/s and a hard wedge at 500 Mbit/s. CR-001 MURAM leak is
+  closed; F-133's stale diagnostic tracker caused the false leak signal.
+- **M8 — Productization soak + upstream.** Work: §4.7.
 
 ---
 
@@ -988,7 +1081,90 @@ FE-VM microcode's own bucket-walk/key-compare logic, or a construction-level
 input to that stage not yet found. `F-179`'s `kgse_dv0`/`dv1` fix is the
 most concrete untested candidate for the latter.
 
-### 4.2 NXP-106 deep-dive — vendor oracle track (parallel; unblocks CC-tree)
+### 4.2 PR-001 / T-M7-1 — production transit HIT (DONE 2026-08-15) + T-M7-2 HW TX opcode terminal (CRITICAL PATH)
+
+**[SPEC]** T-M7-1 is complete: the production nft/YNL flowtable flow now
+delivers a real end-to-end HIT via kernel RX reinjection. The remaining sole
+critical path to an honest M7 release claim is **T-M7-2**, replacing that
+RX-reinjection terminal with the hardware TX opcode chain to a dedicated
+per-port TX FQ. Do not start M6 breadth or M8 soak work that assumes
+multi-Gbps production forwarding until T-M7-2 has passed.
+
+- [x] **T-M7-1.1 — F-193 observability build. DONE.** The diagnostic build logs
+  the `fman_pcd_fe_flow_add()` supplied `hw_port_id`, action key size, table-0
+  key size, and resolved target FQID for every insert.
+
+- [x] **T-M7-1.2 — classify the flow-add rejection. DONE.** F-193 showed
+  `hw_port=0x00 target_fqid=0x200`: `ask_fe_flow_insert()` had passed its IPv4
+  table index as the FMan RX-port argument. F-195 corrected the OOT caller in
+  `kernel/ask/oot-modules/ask/ask_flow_offload.c` to pass `key->port_id`
+  (`0x10` eth3, `0x11` eth4); table 0 is still selected internally by
+  `fman_pcd_fe_flow_add()`.
+
+- [x] **T-M7-1.3 — own-port FQID resolution. DONE.** F-196 proved the FM_CTL
+  params-page default FQID is zero for both ports while the same-port KeyGen
+  scheme base is `0x200`/`0x300`. F-197 (`bin/kernel-fixups/F_197.py`) keeps a
+  non-zero params-page value authoritative and otherwise falls back to a unique
+  non-zero base FQID from a used scheme bound to the ingress port; conflicting
+  candidates fail closed. Deployed in image `2026.08.15-1855-rolling`
+  (CI `31902476844`, commit `e8692203`).
+
+- [x] **T-M7-1.4 — production transit HIT gate. DONE (2026-08-15).** On `.185`,
+  both ports engaged, `hw_insert OK`, conntrack `[HW_OFFLOAD]`, F-193
+  own-port targets (eth3→`0x200`, eth4→`0x300`), and bounded UDP transit
+  lxc202 (`10.99.1.201`) → eth3 → eth4 → `.106` is **0% loss through
+  200 Mbit/s**. Clean YNL disengage; MURAM returns to the 34,992 B warm-chain
+  baseline (no leak — the earlier "leak" was F-133's stale diagnostic tracker).
+
+- [ ] **T-M7-2 — hardware TX opcode terminal (CRITICAL PATH, OPEN).**
+  **[BUG] RX-reinjection HIT terminal caps at the kernel-forward ceiling.**
+  **Symptom:** production transit is loss-free ≤200 Mbit/s, 0.19% loss at
+  300 Mbit/s (1 s) / 2.42% (3 s); 500 Mbit/s produces 39% loss then a hard
+  FMan wedge requiring a cold power cycle. At 300 Mbit/s `rx dropped [CPU 0]`
+  rises ~1 per packet with all QMan interrupts on portal 0 / CPU 0; portals
+  1–3 idle; no BMan/QMan/FMan congestion or taildrop error; BMan pool healthy.
+  **Cause:** the current FE record enqueues each HIT to the port's own kernel
+  **RX** FQ (`0x200`/`0x300`), so the frame re-enters NAPI→route→qman_enqueue
+  on a single core — binding fact 9's software-forwarding ~1.5 Gbps ceiling,
+  concentrated on one CPU because a single FQ is serviced by one portal. This
+  matches the E25/E26 gate design (RX enqueue chosen for observability), not a
+  production forwarding terminal.
+  **Fix (direction verified 2026-08-15 against NXP RM + local
+  `we-are-mono/ASK@fe36f30`; live `.106` was unreachable):** replace the
+  RX-reinjection terminal with the vendor plain-forward opcode bytes
+  `PREEMPTIVE_CHECKS_ON_PKT(0x05) → STRIP_ALL_VLAN_HDRS(0x12) → UPDATE_TTL(0x21)
+  → INSERT_L2_HDR(0x41) → ENQUEUE_PKT(0x01)`. `STRIP_ETH_HDR(0x11)` is not
+  present in a plain forward; it is conditional on VLAN/PPPoE/tunnel/IPsec
+  header operations. `INSERT_L2_HDR` writes dst=`key.next_hop_mac`,
+  src=`key.egress_mac`, and IPv4/IPv6 EtherType. `ENQUEUE_PKT` targets a
+  **per-egress-interface TX FQ** on that port's FMan TX DC-portal; the vendor
+  resolves `eth_info->fwd_tx_fqinfo[quenum]` by output-interface name. The
+  flow record already carries an inline opcode script (F-181) and the key
+  already carries both MACs. The current P4.1 ask.ko implementation is not
+  sufficient: it allocates ONE global FQ hardwired to eth4 channel `0x801`
+  and returns it for all flows, so reverse eth3 egress is wrong. Allocate/init
+  one TX FQ per egress port and set any no-TX-confirm/context-A policy in the
+  FQ descriptor (the ehash enqueue-param carries no such bit). The enqueue
+  param's `bpid` is the shared fragmentation spill-pool ID in vendor code,
+  not a no-confirm control. Preserve ingress/egress port scoping.
+  **Validation:** bounded rate sweep (10/50/100/200/300/500 Mbit/s), per-CPU
+  `rx dropped`, `/proc/interrupts` portal spread, and per-port TX-FQ counters;
+  the pass bar is multi-Gbps with no RX reinjection. Never flood before the
+  terminal is in place. Implement one opcode/FQ variable per cold-boot build.
+
+- [ ] **T-M7-3 — three clean cycles + release gate.** After T-M7-2, repeat
+  three engage/disengage cycles with byte-clean `pcd-snapshot` and bounded
+  multi-Gbps transit before declaring CR-001 closed or M7 release-ready.
+
+**[NOTE]** F-193/F-196 are diagnostic and should be folded into durable
+flow-add observability once T-M7-2 lands. F-195/F-197 are real behavior fixes
+and stay: they make the RX-reinjection terminal correct, which is the
+prerequisite the TX terminal builds on. F-133's `muram_allocations` tracker is
+diagnostic-only, does not decrement on free, and produced the false "MURAM
+leak / pcd-snapshot drift" signal in the F-197 validation session — fix or
+remove it so it stops emitting false reversibility failures.
+
+### 4.3 NXP-106 deep-dive — vendor oracle track (parallel; unblocks CC-tree)
 
 **[SPEC]** Owned by `plans/NXP-106-DEEP-DIVE-PLAN.md`. Phase A: `t_ExtHashFe`
 decode of `.106`'s live `FMBM_RCCB` targets — the byte-level oracle for this
@@ -1007,7 +1183,7 @@ record-side `t_ExtHashResult` encoding are written into `arch/fman-fe-ehash.md`
 CC-tree replacement harness is no longer gated on Phase A/C; it follows the
 same three-delta attempt-5.
 
-### 4.3 T-M6-5 — CC-tree scale-out ⛔ BLOCKED on T-M3-R + Phase A/C
+### 4.4 T-M6-5 — CC-tree scale-out ⛔ BLOCKED on T-M3-R + Phase A/C
 
 **[SPEC]** Raising `FMAN_CC_MAX_STATIC_KEYS` alone has zero effect: CR-007
 (commit `dd364494`) deleted every caller of the CC-tree insert functions
@@ -1025,7 +1201,7 @@ those constants gate. Actual scope when unblocked:
 4. Then raise the capacity constants and implement multi-node allocation per
    `plans/CC-TREE-REBUILD-PLAN.md` (Phase 0 oracle test → Phase 4 scale-out).
 
-### 4.4 M4 — AF_XDP true-ZC RX
+### 4.5 M4 — AF_XDP true-ZC RX
 
 - [ ] **T-M4-5a** `@___` — **Install the libxdp VPP ISO on `.185` + cold
   boot** (hugepages/isolcpus come from U-Boot). ISO 0201 (CI 29888749801)
@@ -1043,7 +1219,7 @@ those constants gate. Actual scope when unblocked:
 - [ ] **T-M4-4g** `@___` — Flip M4 to DONE. Gate: `xsk_zc_rx_redirect` > 0
   under a steered flow.
 
-### 4.5 M6 — breadth
+### 4.6 M6 — breadth
 
 - [~] **T-M6-1** `@___` — **IPv6 dual-scheme EXT_HASH.** Pieces 1+4 done (SW
   v6 flow parse; `nd_tbl` in `ask_neigh.c`). Pieces 2+3 implemented (F-140
@@ -1070,7 +1246,7 @@ those constants gate. Actual scope when unblocked:
   **LAST** (silent-drop trap). CAAM descriptor-sharing forward-port (0134
   dormant) + `xfrmdev_ops`. GCM refused (§2.7).
 
-### 4.6 M8 — productization
+### 4.7 M8 — productization
 
 - [x] **T-M8-1** — 100× trafficked engage/disengage soak: DONE (87+ cycles,
   0 B/cycle MURAM leak, budget stable at 34,992 B, 0% ping loss, no panics).
@@ -1093,14 +1269,21 @@ those constants gate. Actual scope when unblocked:
 **[SPEC]** Only open or partially-closed defects are listed here; each gates
 the milestone shown.
 
+**[NOTE] Closed 2026-08-15.** F-141/M3 remains closed by E25/E26. PR-001 and
+T-M7-1 are closed by F-195/F-197 production transit proof. The CR-001 "MURAM
+leak" signal was false: authoritative `muram_budget` returns to the intentional
+34,992 B F-136 warm-chain baseline; F-133's diagnostic allocation tracker does
+not decrement on free and over-reports 52,634 B. Fix or delete F-133, but do
+not change datapath teardown based on that stale node.
+
 | ID | Symptom | Status | Gates | Next action |
 |---|---|---|---|---|
-| **F-141** | FE-VM ehash never HITs (umbrella). Root causes fixed: flow-record allocator (F-142), EXT_HASH `contextSize` (F-149), CC match-row mask (F-156), scaffold overwrite (F-165), EKFC reconfiguration (F-169), **F-185 (wrong AD species at `FMBM_RCCB` — the RM group-AD parses as a garbage node; vendor VARIANT B `en_exthash_node` required) + F-186 (miss action — the KG-direct NIA form infinitely loops on 210.10.1; ENQUE + own-port fqb is correct)**. The three course-correction deltas (2026-08-11 Phase 2) resolved: Delta 1 landed (F-185), Delta 2 proven unnecessary (F-181/F-182 opcode-script record delivers — no `t_ExtHashResult` needed), Delta 3 proven not a dispatch gatekeeper (E24). **HIT CONFIRMED 2026-08-12 (E25/E26): one flow HIT delivers to the kernel with an unambiguous discriminator; full matrix passes (collision chain, per-key delete, writeback, UDP, ~780 pps)** | CLOSED 2026-08-12 | M3 (passed) | Evidence: `decomp/experiments.md` E24–E27; `decomp/fman-ehash-process.md` |
 | **F-076** | Port RX deaf after FE-VM-armed disengage; `fe_arm.engaged` stays YES | CLOSED on the scaffold path (`fe_disengage_full` + `fe_recover` proven); **DIRECT path still deaf** | M3 (T-M3-R uses the direct path) | Observe during T-M3-R; `fman_pcd_port_recover` de-wedge (0163) if hit |
-| **CR-001 / F-123** | Production YNL engage/disengage cycles leave `pcd-snapshot` drift (KG scheme[4], BMI `rfpne`/`rccb`, MURAM delta) | PARTIAL | **M7 release claim**, M8 soak | Validate three consecutive clean engage/disengage cycles per DUT with `engage/disengage rc=0` and byte-clean `pcd-snapshot`; continue HIT/flow validation only if clean |
-| **CR-003** | VyOS commit-path handling was fail-open (rc/stderr confusion + helper-failure masking) | PARTIAL | M7 release claim | Close together with CR-001: one production control path (YNL/genl), fail-closed config behavior, no debugfs control writes from the VyOS commit path |
+| **T-M7-2 / RX-reinjection ceiling** | Production HIT delivers, but the FE terminal enqueues to the port's own kernel RX FQ (`0x200`/`0x300`), re-entering software forwarding on one CPU (portal 0). 0% loss ≤200 Mbit/s; loss starts near 300 Mbit/s; 500 Mbit/s can hard-wedge FMan. | OPEN — root cause confirmed 2026-08-15; TX-terminal direction vendor-verified | **M7 release claim**, M8 soak | Build the vendor TX terminal: opcode bytes `PREEMPTIVE_CHECKS(0x05)→STRIP_ALL_VLAN(0x12)→UPDATE_TTL(0x21)→INSERT_L2_HDR(0x41)→ENQUEUE_PKT(0x01)` to a per-egress-interface TX FQ; per-port FQ alloc in ask.ko; validate portal spread + TX-FQ counters + bounded rate sweep. |
+| **F-133 diagnostic tracker** | `muram_allocations` reports freed per-port objects and falsely contradicts authoritative `muram_budget`, producing a fake leak/CR-001 signal. | OPEN — diagnostic-only | M7/M8 evidence quality | Scope tracker removal to the normal `fman_pcd_muram_free()` path or remove F-133 entirely; require `muram_allocations total == muram_budget used` after a cycle if retained. |
+| **CR-003** | VyOS commit-path handling was fail-open (rc/stderr confusion + helper-failure masking) | PARTIAL | M7 release claim | Close with T-M7-3: one production control path (YNL/genl), fail-closed config behavior, no debugfs control writes from the VyOS commit path |
 | **CR-004** | Stale-MAC remove/reinsert lifecycle can resurrect or lose flows | PARTIAL | M6 (T-M6-3) | Close the lifecycle/tombstone race before declaring stale-MAC handling complete |
-| **CR-007** | Dead Fork-A shadow/HM bookkeeping burdens the FE-VM path; CC-tree insert plumbing deleted | PARTIAL | M6 (T-M6-5) | Finish dead-bookkeeping removal; reimplementation tracked in §4.3 |
+| **CR-007** | Dead Fork-A shadow/HM bookkeeping burdens the FE-VM path; CC-tree insert plumbing deleted | PARTIAL | M6 (T-M6-5) | Finish dead-bookkeeping removal; reimplementation tracked in §4.4 |
 | **CR-011** | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL | M8 (T-M8-5) | Clean with upstream prep |
 | **F-120** | `ASK_CMD_FLUSH_FLOWS` SW/HW divergence | CODE-FIXED; silicon validation OPEN | M6 / M8 | T-M6-6 (§4.5) |
 | **F-122** | `fe_arm engage` returns `-EINVAL` on an already-engaged port (not idempotent) | OPEN | M7 polish / M8 soak | Return 0 when already engaged, mirroring the F-116/F-120 idempotence rule |

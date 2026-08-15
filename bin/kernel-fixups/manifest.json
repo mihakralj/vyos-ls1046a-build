@@ -178,9 +178,10 @@
     "F_193.py": "fman_pcd.c: F-193 (2026-08-15, production diagnostic) -- one-line flow-add argument and failure trace: supplied hw_port_id, action/table key sizes, and resolved own-port FQID; no behavioral change",
     "F_194.py": "fman_pcd.c: F-194 (2026-08-15, production diagnostic) -- traces the early fman_pcd_fe_flow_add -EINVAL guard above F-193, including fm/action pointers, key size, and kernel-side action layout; no behavioral change",
     "F_196.py": "fman_pcd.c: F-196 (2026-08-15, read-only resolver diagnostic) -- logs the populated params-page default FQID and same-port KeyGen base-FQID candidates while preserving the existing resolver return value",
-    "F_197.py": "fman_pcd.c: F-197 (2026-08-15, target-FQID correction) -- preserves non-zero params-page FQIDs and otherwise resolves a unique non-zero base FQID from a used KeyGen scheme bound to the requested ingress port; ambiguous candidates fail closed"
+    "F_197.py": "fman_pcd.c: F-197 (2026-08-15, target-FQID correction) -- preserves non-zero params-page FQIDs and otherwise resolves a unique non-zero base FQID from a used KeyGen scheme bound to the requested ingress port; ambiguous candidates fail closed",
+    "F_198.py": "fman_pcd.c + fman_pcd.h: F-198 (2026-08-15, T-M7-2 S1 hardware TX terminal) -- adds tx_fqid/next_hop_mac/egress_mac/eth_type to struct fman_pcd_fe_flow_action and (l2_dst,l2_src,eth_type) to fman_pcd_ehash_add_key; when the OOT caller supplies a per-egress TX FQ the FE record emits INSERT_L2_HDR(0x41)+ENQUEUE_PKT(0x01) direct-to-wire, else keeps the F-197 own-port RX-FQID reinjection terminal"
   },
-  "count": 87,
+  "count": 88,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],

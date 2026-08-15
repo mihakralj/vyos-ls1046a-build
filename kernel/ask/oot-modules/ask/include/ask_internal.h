@@ -402,6 +402,7 @@ int  ask_hw_flow_insert(const struct ask_flow_key *key,
         enum ask_hw_dir dir,
         u32 *out_hw_id);
 int  ask_hw_flow_remove(u32 hw_flow_id);
+int  ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid);
 int  ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes);
 
 /* ------------------------------------------------------------------------- */
