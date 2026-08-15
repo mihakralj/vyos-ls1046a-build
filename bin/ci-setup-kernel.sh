@@ -2631,6 +2631,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-194 early flow-add -EINVAL diagnostic"
 fi
 
+# F-196 (2026-08-15): resolver evidence for the zero target-FQID blocker.
+# It logs params-page and same-port KeyGen candidates but preserves selection.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_196.py" 2>&1
+    echo "### fman_pcd.c: F-196 read-only target-FQID resolver diagnostic"
+fi
+
+# F-197 (2026-08-15): when the populated params-page FQID is zero, use
+# the unique non-zero base FQID of a used KeyGen scheme bound to this port.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_197.py" 2>&1
+    echo "### fman_pcd.c: F-197 same-port KeyGen target-FQID fallback"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
