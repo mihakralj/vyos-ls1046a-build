@@ -176,9 +176,11 @@
     "F_191.py": "fman_pcd.c: F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1) -- gate the debugfs surface behind CONFIG_FMAN_PCD_DEBUG_FS: wraps the registration block + root_put in if (IS_ENABLED(...)); Kconfig symbol added by board patch 0170",
     "F_192.py": "fman_pcd.c: F-192 (2026-08-15, E2 diagnostic) -- bounded read-only per-port FE workspace snapshot: params-page +0x54/+0x58, owned management index, and first 32 pool bytes; no descriptor or datapath write",
     "F_193.py": "fman_pcd.c: F-193 (2026-08-15, production diagnostic) -- one-line flow-add argument and failure trace: supplied hw_port_id, action/table key sizes, and resolved own-port FQID; no behavioral change",
-    "F_194.py": "fman_pcd.c: F-194 (2026-08-15, production diagnostic) -- traces the early fman_pcd_fe_flow_add -EINVAL guard above F-193, including fm/action pointers, key size, and kernel-side action layout; no behavioral change"
+    "F_194.py": "fman_pcd.c: F-194 (2026-08-15, production diagnostic) -- traces the early fman_pcd_fe_flow_add -EINVAL guard above F-193, including fm/action pointers, key size, and kernel-side action layout; no behavioral change",
+    "F_196.py": "fman_pcd.c: F-196 (2026-08-15, read-only resolver diagnostic) -- logs the populated params-page default FQID and same-port KeyGen base-FQID candidates while preserving the existing resolver return value",
+    "F_197.py": "fman_pcd.c: F-197 (2026-08-15, target-FQID correction) -- preserves non-zero params-page FQIDs and otherwise resolves a unique non-zero base FQID from a used KeyGen scheme bound to the requested ingress port; ambiguous candidates fail closed"
   },
-  "count": 85,
+  "count": 87,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
