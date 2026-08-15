@@ -175,9 +175,10 @@
     "F_190.py": "fman_pcd.c: F-190 (2026-08-14, Phase 3 fix) -- write en_exthash_node vendor node to the root AD in fe_enter_build so the CC dispatch reads the correct node type and routes to the ehash table",
     "F_191.py": "fman_pcd.c: F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1) -- gate the debugfs surface behind CONFIG_FMAN_PCD_DEBUG_FS: wraps the registration block + root_put in if (IS_ENABLED(...)); Kconfig symbol added by board patch 0170",
     "F_192.py": "fman_pcd.c: F-192 (2026-08-15, E2 diagnostic) -- bounded read-only per-port FE workspace snapshot: params-page +0x54/+0x58, owned management index, and first 32 pool bytes; no descriptor or datapath write",
-    "F_193.py": "fman_pcd.c: F-193 (2026-08-15, production diagnostic) -- one-line flow-add argument and failure trace: supplied hw_port_id, action/table key sizes, and resolved own-port FQID; no behavioral change"
+    "F_193.py": "fman_pcd.c: F-193 (2026-08-15, production diagnostic) -- one-line flow-add argument and failure trace: supplied hw_port_id, action/table key sizes, and resolved own-port FQID; no behavioral change",
+    "F_194.py": "fman_pcd.c: F-194 (2026-08-15, production diagnostic) -- traces the early fman_pcd_fe_flow_add -EINVAL guard above F-193, including fm/action pointers, key size, and kernel-side action layout; no behavioral change"
   },
-  "count": 84,
+  "count": 85,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
