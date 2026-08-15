@@ -63,7 +63,7 @@ flowchart TD
 | FE buffer | **none** (FE_ENTER_ALLOCATE never set) | **required** (`FmPortSetFESupport` per port + `AllocFEObjs` pool) |
 | Match store | CC table + 16-byte ADs in **MURAM** | bucket array in **DDR** (`XX_MallocSmart`), AD node + global mem in MURAM |
 | Terminal disposition | exit NIA only — **`CONTRL_FLOW` does not free the FIFO** | FE opcode VM does enqueue/NAT/free |
-| **NXP production TX path (cdx.ko 8.58 Gbps)** | N/A — exact-match path doesn't forward in hardware | **FE opcode VM executes full L3 forwarding chain:** `STRIP_ETH_HDR → TTL_DECREMENT → ETH_HEADER_REBUILD → ENQUEUE_PKT` — strip L2, decrement TTL, rebuild with new src/dst MAC, hardware-enqueue to egress QMan TX FQ. Zero CPU. Encodings from lf-5.4 LSDK `999-layerscape-ask-kernel` patch. |
+| **NXP production TX path (cdx.ko 8.58 Gbps)** | N/A — exact-match path doesn't forward in hardware | **FE opcode VM executes the routed forwarding chain** (plain IPv4): `PREEMPTIVE_CHECKS_ON_PKT(0x05) → STRIP_ALL_VLAN_HDRS(0x12) → UPDATE_TTL(0x21) → INSERT_L2_HDR(0x41) → ENQUEUE_PKT(0x01)` — 1-byte opcodes, `INSERT_L2_HDR` rewrites dst/src MAC + EtherType, hardware-enqueue to the per-egress-interface QMan TX FQ. `STRIP_ETH_HDR(0x11)` only for VLAN/PPPoE/tunnel/IPsec. Verified from `we-are-mono/ASK@fe36f30` (§10). |
 | On 210.10.1 | grafts **park** at ~45 frames (M3-3b) | **flows** (vendor parity run, 2026-06-13) |
 | MURAM cardinality | O(flows) — the ~750-flow ceiling ([`muram.md`](muram.md)) | O(1) MURAM + O(buckets) **DDR** |
 | **Production viability** | ✅ CC pass-through (numKeys=0) → 7.37 Gbps @ 0.16% CPU | ❌ Per-frame DDR lookup ~50–100 ns → ~1.5 Gbps ceiling; ALLOCATE/DEALLOCATE churn; not vendor architecture |
@@ -340,59 +340,105 @@ Every Fork B patch (§3 pool → §4 `FmPortSetFESupport` → §5 `ExternalHashT
 | MURAM budget, the ~750-flow ceiling, Risk #13 | [`muram.md`](muram.md) |
 | Mode-switch reversibility contract (S0↔S1), `pcd-snapshot` | [`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) §2.4(6), §3.1, [`plans/DUAL-DATAPLANE.md`](../plans/DUAL-DATAPLANE.md) §2.2 |
 | 210.10.1 microcode (open-source 106.x vs proprietary 210.10.1), FE opcode VM | [`fman-microcode-210-programming-reference.md`](fman-microcode-210-programming-reference.md) (§1.1) |
-| **NXP cdx.ko hardware TX opcode chain encoding** | **This doc §10** — STRIP_ETH_HDR / TTL_DECREMENT / ETH_HEADER_REBUILD / ENQUEUE_PKT opcodes from lf-5.4 LSDK `999-layerscape-ask-kernel` patch |
+| **NXP cdx.ko hardware TX opcode chain encoding** | **This doc §10** — 1-byte opcodes `PREEMPTIVE_CHECKS(0x05)/STRIP_ALL_VLAN(0x12)/UPDATE_TTL(0x21)/INSERT_L2_HDR(0x41)/ENQUEUE_PKT(0x01)`, verified from `we-are-mono/ASK@fe36f30` `cdx_ehash.c` + `fm_ehash.h` |
 | **Shipping datapath: CC-tree + SW flowtable + manip chain** | [`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md), [`plans/DUAL-DATAPLANE.md`](../plans/DUAL-DATAPLANE.md) |
 
 ---
 
 ## 10. NXP Production Hardware TX Path (cdx.ko 8.58 Gbps reference)
 
-**[SPEC]** The NXP cdx.ko achieves 8.58 Gbps single-stream TX by executing the
-full L3 forwarding chain inside the FMan's FE (Frame Engine) opcode VM —
-zero CPU involvement. This is the reference architecture for ASK2 10 Gbps.
-**Note: the FE-VM ehash HIT path was retired 2026-08-01 and un-retired 2026-08-05 (F-163); see the top banner. No path currently has a confirmed hardware HIT on this branch.**
+The NXP/Mono cdx.ko reaches 8.58 Gbps single-stream TX by executing the routed
+forwarding actions inside the FMan FE opcode VM and enqueueing directly to the
+output interface's QMan TX FQ. This bypasses the kernel NAPI → route →
+qman_enqueue forwarding loop. TX-confirmation policy remains an FQ-descriptor
+property and can still create CPU work unless that TX FQ is configured for no
+confirmation.
 
-### 10.1 Opcode chain (4 opcodes, ~128 bytes per flow entry)
+Production flow HIT is confirmed on ASK2 as of 2026-08-15 (F-195/F-197), but
+the current terminal intentionally reinjects into a kernel RX FQ for
+observability. T-M7-2 replaces that validation terminal with the vendor TX
+terminal documented here.
 
-The per-flow DDR record (256B) contains a complete opcode chain at the record's
-action-data offset. After the EXT_HASH FE dispatches a HIT to the MUX FE, the
-FE opcode VM executes these opcodes in sequence:
+### 10.1 DDR-record opcode chain
 
-| Offset | Opcode | Encoding (u32) | Purpose |
-|--------|--------|----------------|---------|
-| 0x00 | `FM_PCD_OPC_STRIP_ETH_HDR` | `0x80000010` | Remove 14B Ethernet header; `actionSpecific=0x10` (strip 16B rounded up from 14B) |
-| 0x04 | `FM_PCD_OPC_TTL_DECREMENT` | `0x80000200` | Decrement IP TTL by 1; checksum update auto |
-| 0x08 | `FM_PCD_OPC_ETH_HDR_REBUILD` | `0x8000C001` | Rebuild Ethernet: new src MAC[0..5] follows at +0x0C, new dst MAC[0..5] at +0x14, EtherType at +0x1C |
-| 0x0C–0x14 | New src MAC (6B) | From `ask_neigh.c` nexthop resolution | Replaced per-flow based on destination |
-| 0x14–0x1C | New dst MAC (6B) | From `ask_neigh.c` neighbor cache | Replaced per-flow based on destination |
-| 0x1C | EtherType | `0x00000800` (IPv4) | Fixed after IP header |
-| 0x20 | `FM_PCD_OPC_ENQUEUE_PKT` | `0x81000000` | Hardware-enqueue to egress QMan TX FQ; `actionSpecific` = target FQID in bits[23:0] |
+The per-flow DDR record is 256 bytes (`MAX_EN_EHASH_ENTRY_SIZE`). Its 16-bit
+flags carry the opcode-list and parameter offsets in four-byte units. The
+opcode-list itself is a 16-byte region (`MAX_OPCODES`) containing **one-byte
+opcode values**. Do not encode the old 32-bit `0x800…` words here; those were a
+microcode-internal representation incorrectly conflated with the driver ABI.
 
-**[NOTE]** The `ENQUEUE_PKT` opcode `actionSpecific` field carries the egress
-TX FQID from `dpaa_get_tx_fqid()` — resolved per-port per-flow. The FMan
-microcode performs the QMan enqueue directly, bypassing the kernel's
-`qman_enqueue_fq()` call entirely.
+Verified values from local `we-are-mono/ASK@fe36f30` and
+`/mnt/build/opnsense-src/sys/contrib/ncsw/inc/Peripherals/fm_ehash.h`:
 
-### 10.2 Source of truth
+| Opcode | Byte | Plain routed IPv4 flow | Purpose |
+|---|---:|---|---|
+| `PREEMPTIVE_CHECKS_ON_PKT` | `0x05` | Always first | MTU/TX validation; `seal_preemptive_checks_hm()` back-patches its parameter when enqueue is built |
+| `STRIP_ETH_HDR` | `0x11` | **Not emitted** | Conditional on VLAN, PPPoE, tunnel, or IPsec header operations |
+| `STRIP_ALL_VLAN_HDRS` | `0x12` | Emitted with validating word zero | Normalizes VLAN state before the routed action |
+| `UPDATE_TTL` | `0x21` | Emitted for IPv4 | Decrements TTL and updates IPv4 checksum; `UPDATE_HOPLIMIT=0x29` is the IPv6 counterpart |
+| `INSERT_L2_HDR` | `0x41` | Emitted | Replaces the Ethernet header for a plain forward |
+| `ENQUEUE_PKT` | `0x01` | Always last | Enqueues to `en_ehash_enqueue_param.fqid` |
 
-The complete opcode chain encoding is in the lf-5.4 LSDK:
-- `999-layerscape-ask-kernel_linux_5_4_3_00_0.patch` (we-are-mono/ASK repo)
-- Function `FmPcdCcBuildFE` at L8883 — allocates and programs all FE objects
-- Function `FmPcdCcBuildContextByFE` at L8954 — populates per-task working-store context so MUX can read its next-FE pointer
-- Function `get_indexed_hash_bucket` at L7301 — CRC64 bucket indexer
+Thus the plain IPv4 sequence is:
 
-All three are **stubbed** in lf-6.6.y / lf-6.12.49 public source trees and must
-be reproduced from the lf-5.4 LSDK reference.
+`PREEMPTIVE_CHECKS_ON_PKT(0x05) → STRIP_ALL_VLAN_HDRS(0x12) → UPDATE_TTL(0x21) → INSERT_L2_HDR(0x41) → ENQUEUE_PKT(0x01)`.
 
-### 10.3 Preconditions for hardware TX
+`INSERT_L2_HDR` receives an `en_ehash_insert_l2_hdr` parameter: bytes 0–5 are
+the next-hop destination MAC, bytes 6–11 are the output interface's source
+MAC, bytes 12–13 are the EtherType, and its big-endian control word carries
+header length/padding. For a plain forward this action replaces L2 without a
+preceding `STRIP_ETH_HDR`; strip is needed only for the header-operation cases
+listed above.
 
-1. **`FmPortSetFESupport`** — per-port FE workspace pool (✅ ASK2 F-072b, 2026-07-17)
-2. **FE-VM chain built** — FE_ENTER → EXT_HASH → MUX → ENQ (✅ ASK2 F-092, 2026-07-19)
-3. **`FmPcdCcBuildContextByFE`** — working-store context (🔴 STUBBED — must be reproduced)
-4. **Opcode chain in DDR record** — STRIP/TTL/REBUILD/ENQUEUE (🔴 NOT IMPLEMENTED)
-5. **Dedicated TX FQ per port** — `dpaa_get_tx_fqid()` resolution (🟡 partially done — F-093 dynamic FQID)
-| Mainline FE-VM build increments (byte-assembled dormant chain) | `0124` singletons → `0125`/`0130` ehash table (DDR/DMA) → `0127` per-flow ENQ FE + `FE_ENTER` root AD → `0128` CRC64 flow insert → **`0131` `t_ExtHashFe` FE-hash object** (§5 byte table). Each ships DORMANT with its inverse + a `fe_*` debugfs byte-readback for the item-6 oracle gate. The **arm** (D9-B: KG→AC_CC + BMI CC root → `FE_ENTER`) is a separate explicitly-approved experiment, authored only after the dormant chain passes the §8.6-item-6 byte-gate on silicon |
-| M3-3b root cause (first-frame `FMFP_PS[STL]` stall; iter-42 disassembly = AC_CC handler reads only per-frame context → most likely a missing controller-arming step, *not* a FIFO leak and *not* missing FE globals) | qdrant `iter-33`, `iter-42` (2026-06-12), `ASK2 ehash/FE architecture root cause` (2026-06-13) |
+The packed `en_ehash_enqueue_param` is `mtu:u16`, `hdr_xpnd_sz:u8`, `bpid:u8`,
+`fqid:u32`, `word:u32`, `word2:u32`, all hardware-visible multi-byte fields in
+big-endian form. Vendor `create_enque_hm()` sets MTU, the shared fragmentation
+spill-pool BPID, optional stats/DSCP-fragment fields, the per-egress-interface
+TX FQID, seals the preemptive-check action, and appends terminal opcode `0x01`.
+The enqueue parameter carries no no-confirm flag or QMan context-A; those are
+programmed when the destination FQ is initialized.
+
+### 10.2 Egress FQ selection
+
+The vendor does not use one global TX FQ. `dpa_get_tx_fqid_by_name()` resolves
+the output interface by name, then `cdx_get_txfq()` returns
+`eth_info->fwd_tx_fqinfo[quenum]` for that specific interface (or its CEETM
+queue). `create_enque_hm()` writes that FQID into the record.
+
+ASK2's current P4.1 code is therefore incomplete: it allocates one global FQ
+hardwired to eth4's FMan TX DC-portal channel `0x801` and returns it for every
+output interface. T-M7-2 requires one initialized TX FQ per egress port (and
+correct no-confirm/context-A policy at FQ initialization), then passes that
+per-egress FQID into the flow record.
+
+### 10.3 Sources of truth
+
+Current vendor driver ABI and action order:
+
+- `/mnt/build/ASK/cdx/cdx_ehash.c`, `we-are-mono/ASK@fe36f30` —
+  `fill_actions()`, `create_ttl_hm()`, `create_ethernet_hm()`,
+  `create_enque_hm()`, and flow-record offset setup.
+- `/mnt/build/opnsense-src/sys/contrib/ncsw/inc/Peripherals/fm_ehash.h` —
+  one-byte opcode constants and packed parameter structures.
+- `/mnt/build/ASK/cdx/devman.c` and `cdx_ceetm_app.c` — per-interface TX-FQ
+  resolution.
+
+FE construction reference still comes from the lf-5.4 LSDK
+`999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`: `FmPcdCcBuildFE`,
+`FmPcdCcBuildContextByFE`, and `get_indexed_hash_bucket`. Those bodies are
+stubbed in public lf-6.6.y/lf-6.12.49 snapshots.
+
+### 10.4 ASK2 status and preconditions
+
+1. `FmPortSetFESupport` per-port workspace pool — complete.
+2. FE-VM external-hash chain and production HIT — complete (E25/E26,
+   F-195/F-197).
+3. Inline opcode-list record format and terminal `ENQUEUE_PKT(0x01)` — complete
+   and silicon-proven (F-181).
+4. Plain routed action list (`0x05→0x12→0x21→0x41→0x01`) — open T-M7-2;
+   implement and validate one action at a time.
+5. Per-egress-port TX FQ — open T-M7-2; replace the single global eth4 FQ.
+6. Three clean multi-Gbps engage/disengage cycles — open T-M7-3.
 
 ---
 

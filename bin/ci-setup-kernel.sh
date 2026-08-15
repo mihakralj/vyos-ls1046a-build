@@ -2645,6 +2645,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-197 same-port KeyGen target-FQID fallback"
 fi
 
+# F-198 (2026-08-15, T-M7-2 S1): hardware TX terminal. When the OOT caller
+# supplies a per-egress-interface TX FQ + routed L2 rewrite, the FE record
+# emits INSERT_L2_HDR(0x41) + ENQUEUE_PKT(0x01) to that TX FQ (direct-to-wire);
+# otherwise it keeps F-197's own-port RX-FQID reinjection terminal. Must run
+# after F-094 (struct), F-181/F-182 (record writer), and F-188 (flow_add).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_198.py" 2>&1
+    echo "### fman_pcd.c: F-198 hardware TX terminal (INSERT_L2_HDR + ENQUEUE_PKT)"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,

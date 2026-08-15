@@ -1300,7 +1300,7 @@ void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6
  * Key is MSB-first EKFC extraction order: SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2).
  */
 static int ask_fe_flow_insert(const struct ask_flow_key *key,
-                              unsigned long enq_off)
+                              unsigned long enq_off, u32 tx_fqid)
 {
         struct fman_pcd_fe_flow_action action;
         struct fman *fm;
@@ -1337,6 +1337,23 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
                 table_idx = 0;
         }
         action.enq_off  = enq_off;
+
+        /* T-M7-2 S1 (2026-08-15): hardware TX terminal. Supply the resolved
+         * per-egress-interface TX FQID plus the routed L2 rewrite (next-hop
+         * MAC as new destination, egress-port MAC as new source, IPv4/IPv6
+         * EtherType). When tx_fqid is non-zero, the FE record (F-198) emits
+         * INSERT_L2_HDR(0x41) + ENQUEUE_PKT(0x01)-to-tx_fqid so a HIT is
+         * forwarded direct-to-wire, bypassing kernel RX reinjection. When it
+         * is zero the record keeps the F-197 own-port RX-FQID reinjection
+         * terminal (observability / fallback). Both MACs are already resolved
+         * in the key by ask_resolve_neigh_v4() (ARP NUD_VALID) at REPLACE
+         * time; a zero MAC means neigh unresolved and the caller has already
+         * bounced to SW before reaching here. */
+        action.tx_fqid = tx_fqid;
+        ether_addr_copy(action.next_hop_mac, key->next_hop_mac);
+        ether_addr_copy(action.egress_mac, key->egress_mac);
+        action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
+                                ? ETH_P_IPV6 : ETH_P_IP;
 
         /* F-195(prod-flow-ingress-port): fman_pcd_fe_flow_add() uses its
          * second argument exclusively to resolve the flow record's own-port
@@ -1824,7 +1841,18 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                             key.next_hop_mac, key.egress_mac);
         /* Keep offload ownership transactional: only keep the flow in the
          * HW-backed table if the FE-VM record was actually installed. */
-        rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off());
+        {
+                /* T-M7-2 S1: recover the per-egress-interface TX FQID that
+                 * ask_hw_flow_insert() resolved and saved in this hw_id's
+                 * cookie, so the FE record forwards a HIT direct-to-wire.
+                 * On any lookup miss fe_tx_fqid stays 0 and ask_fe_flow_insert
+                 * falls back to the F-197 own-port RX-FQID terminal. */
+                u32 fe_tx_fqid = 0;
+
+                (void)ask_hw_flow_get_sink_fqid(hw_id, &fe_tx_fqid);
+                rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
+                                        fe_tx_fqid);
+        }
         if (rc) {
                 int rrc;
 
