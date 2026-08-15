@@ -1338,21 +1338,30 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         }
         action.enq_off  = enq_off;
 
-        /* F-194 caller-side ABI trace: the callee's early -EINVAL guard is
-         * reached before F-193.  Log the exact pointer, layout, selected
-         * table index, and serialized key before the call, without changing
-         * the legacy table-index argument under investigation. */
-        ask_pr_info("F-194 flow-add call fm=%px action=%px hw_port_arg=0x%02x key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
-                    fm, &action, table_idx, action.key_size, sizeof(action),
+        /* F-195(prod-flow-ingress-port): fman_pcd_fe_flow_add() uses its
+         * second argument exclusively to resolve the flow record's own-port
+         * target FQID. It is not an ehash table selector: the current FMan
+         * implementation selects table 0 internally. Passing table_idx here
+         * made every IPv4 flow look like hw-port 0x00, which maps to eth3's
+         * FQID 0x200 and misroutes eth4 ingress to the foreign queue.
+         *
+         * Keep table_idx only as a protocol-classification diagnostic until
+         * the FMan API grows real v6-table selection; pass the actual ingress
+         * FMan port retained in key.port_id to the current API.
+         */
+        ask_pr_info("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
+                    fm, &action, key->port_id, table_idx, action.key_size,
+                    sizeof(action),
                     offsetof(struct fman_pcd_fe_flow_action, key_size),
                     action.key_size, action.key);
 
         /* Drive the real FMan (fman_get_pcd -> ehash) and surface failures so
          * callers can roll back provisional HW-backed ownership. */
-        rc = fman_pcd_fe_flow_add(fm, table_idx, &action);
+        rc = fman_pcd_fe_flow_add(fm, key->port_id, &action);
         if (rc)
-                ask_pr_warn("F-194 flow-add return=%d fm=%px action=%px hw_port_arg=0x%02x key_size=%u\n",
-                            rc, fm, &action, table_idx, action.key_size);
+                ask_pr_warn("F-195 flow-add return=%d fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u\n",
+                            rc, fm, &action, key->port_id, table_idx,
+                            action.key_size);
         return rc;
 }
 
