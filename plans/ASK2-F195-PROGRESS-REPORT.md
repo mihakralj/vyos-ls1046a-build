@@ -1,5 +1,5 @@
 # ASK2 F-195 Progress and Resolver Diagnosis
-**Version 1.0.0** · VyOS LS1046A · 2026-08-15 · HADS 1.0.0
+**Version 1.1.0** · VyOS LS1046A · 2026-08-15 · HADS 1.0.0
 
 ---
 
@@ -103,3 +103,57 @@ hw_port=0x11 ... target_fqid=0x300
 ```
 
 **[SPEC]** Verify payload delivery, record writeback, workspace state, ehash statistics, interface drops, and conntrack state. Do not use a concurrent two-port manual `hit-engage` test because the FE singleton/ehash objects are global and a second manual arm fails with `-EEXIST`.
+
+## 8. Deployment Result
+
+**[SPEC]** Image `2026.08.15-1855-rolling` (CI `31902476844`, commit
+`e8692203`, kernel `6.18.44-vyos`) contains F-196/F-197. Board `.185` produced
+the required proof on every production flow insert:
+
+```text
+hw_port=0x10 params_fqid=0x0 scheme_fqid=0x200 target_fqid=0x200
+hw_port=0x11 params_fqid=0x0 scheme_fqid=0x300 target_fqid=0x300
+```
+
+**[SPEC]** F-197 is correct. Each ingress port resolves to its own PCD base
+FQID, unused zero-base schemes are ignored, conflicting non-zero candidates
+fail closed, `hw_insert OK` is logged, and conntrack marks the transit flow
+`[HW_OFFLOAD]`. Production UDP transit is loss-free through 200 Mbit/s.
+
+## 9. Next Defect: RX-Reinjection Throughput Ceiling
+
+**[BUG] The HIT terminal reinjects to a kernel RX FQ, capping at single-CPU software forwarding**
+
+**Symptom:** A bounded UDP sweep on the F-197 image passed at 10, 50, 100,
+and 200 Mbit/s; loss began at 300 Mbit/s (0.19% for 1 s, 2.42% for 3 s). A
+500 Mbit/s run lost 39.43% and hard-wedged the FMan until cold power-cycle.
+During the 300 Mbit/s run, eth3 `rx dropped [CPU 0]` rose by 77,610 for 77,595
+packets and QMan portal 0 handled all traffic; portals 1–3 remained idle.
+BMan pool counts remained healthy and no FMan/QMan/BMan congestion or
+taildrop error appeared.
+
+**Cause:** F-197 resolves the own-port kernel RX FQID (eth3 `0x200`, eth4
+`0x300`), and the FE record enqueues each HIT there. This re-enters the kernel
+`NAPI → route → qman_enqueue` software forward path on the single CPU that
+services that FQ's portal — the ~1.5 Gbps software-forwarding ceiling from
+binding fact 9, concentrated on one core. This is the E25/E26 gate design
+(RX enqueue for observability), not a production forwarding terminal.
+
+**Fix:** Build the binding-fact-9 hardware terminal using the exact opcode
+bytes verified from `we-are-mono/ASK@fe36f30`: extend F-181's single
+`ENQUEUE_PKT(0x01)` to the plain-forward chain
+`PREEMPTIVE_CHECKS_ON_PKT(0x05) → STRIP_ALL_VLAN_HDRS(0x12) → UPDATE_TTL(0x21)
+→ INSERT_L2_HDR(0x41) → ENQUEUE_PKT(0x01)`. `STRIP_ETH_HDR(0x11)` is not used
+for a plain flow; it is conditional on VLAN/PPPoE/tunnel/IPsec operations.
+`INSERT_L2_HDR` writes next-hop MAC, egress MAC, and EtherType. Target a
+**per-egress-interface** TX FQ on that port's FMan TX DC-portal — the current
+P4.1 code's one global FQ hardwired to eth4 channel `0x801` is insufficient for
+reverse eth3 egress. Do not RSS-spread the RX FQ. Validate per-portal interrupt
+spread, per-port TX-FQ counters, and the bounded rate sweep before any flood
+test. This is tracked as T-M7-2 in `plans/ASK2-MASTER-PLAN.md`.
+
+**[NOTE]** The earlier MURAM-leak diagnosis was false. Authoritative
+`muram_budget` returns to the intentional F-136 warm-chain baseline of 34,992
+bytes after disengage. F-133's diagnostic `muram_allocations` tracker does not
+decrement on free and over-reports 52,634 bytes; fix or remove that diagnostic,
+but do not change datapath teardown based on it.

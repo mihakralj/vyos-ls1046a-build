@@ -565,6 +565,29 @@ struct fman *ask_hw_get_fman(void)
 }
 EXPORT_SYMBOL_GPL(ask_hw_get_fman);
 
+/* T-M7-2 S1: recover the per-egress-interface TX FQID saved in the
+ * ask_hw_flow_insert() cookie. The caller invokes this immediately after a
+ * successful insert and before the cookie is published to any destroy path;
+ * RCU still protects the xarray load against asynchronous teardown. */
+int ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct ask_hw_flow_cookie *ck;
+
+        if (!h || !fqid || !hw_flow_id)
+                return -EINVAL;
+
+        *fqid = 0;
+        rcu_read_lock();
+        ck = ask_hw_cookie_lookup(h, hw_flow_id);
+        if (ck)
+                *fqid = READ_ONCE(ck->sink_fqid);
+        rcu_read_unlock();
+
+        return *fqid ? 0 : -ENOENT;
+}
+EXPORT_SYMBOL_GPL(ask_hw_flow_get_sink_fqid);
+
 /* ------------------------------------------------------------------------- */
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */
@@ -871,15 +894,16 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
         struct net_device *dev;
         int rc;
 
-        /* P4.1: prefer the dedicated TX FQ for hardware direct-enqueue.
-         * Falls back to the mainline dpaa_eth per-port TX FQID if the
-         * dedicated FQ is not ready (e.g. allocation failed at bringup). */
-        h = ask_hw_pcd_inst;
-        if (h && h->dedicated_fq_ready) {
-                *fqid = h->dedicated_fq.fqid;
-                return 0;
-        }
-
+        /* T-M7-2 S1 (2026-08-15): resolve the PER-EGRESS-INTERFACE TX FQ,
+         * matching the vendor cdx.ko model (eth_info->fwd_tx_fqinfo[quenum],
+         * resolved by output interface). The prior P4.1 behaviour returned a
+         * SINGLE global dedicated_fq hardwired to eth4's TX DC-portal channel
+         * for ALL flows, which is wrong for eth3 egress / the reverse
+         * direction. Each dpaa netdev's queue-0 TX FQ already has its channel
+         * and FQD configured by fsl_dpa; dpaa_get_tx_fqid() returns it. A
+         * per-port no-confirm/dedicated TX FQ is a later optimization once
+         * direct-to-wire delivery is functionally proven. */
+        (void)h;
         dev = dev_get_by_index(&init_net, ifindex);
         if (!dev)
                 return -ENODEV;
