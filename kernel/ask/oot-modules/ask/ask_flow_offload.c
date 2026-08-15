@@ -1767,14 +1767,17 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                                         : ASK_HW_DIR_REV;
 
                                 prc = ask_hw_port_bind(pid, __dir, ingress_dev);
-                                if (prc == -EBUSY)
-                                        ask_pr_dbg("flow_offload: REPLACE %s pid=%u dir=%u: pipeline busy, SW fallback\n",
-                                                   netdev_name(ingress_dev),
-                                                   pid, __dir);
-                                else if (prc && prc != -ENODEV)
-                                        ask_pr_warn("flow_offload: REPLACE %s (pid %u dir %u) port-bind failed: %d\n",
-                                                    netdev_name(ingress_dev),
-                                                    pid, __dir, prc);
+                                if (prc) {
+                                        if (prc == -EBUSY)
+                                                ask_pr_dbg("flow_offload: REPLACE %s pid=%u dir=%u: pipeline busy, SW fallback\n",
+                                                           netdev_name(ingress_dev),
+                                                           pid, __dir);
+                                        else if (prc != -ENODEV)
+                                                ask_pr_warn("flow_offload: REPLACE %s (pid %u dir %u) port-bind failed: %d\n",
+                                                            netdev_name(ingress_dev),
+                                                            pid, __dir, prc);
+                                        return prc;
+                                }
                         } else if (prc != -ENODEV && prc != -ERANGE) {
                                 ask_pr_dbg("flow_offload: REPLACE port-id resolve(%s) failed: %d\n",
                                            netdev_name(ingress_dev), prc);
