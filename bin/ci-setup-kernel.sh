@@ -2655,6 +2655,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-198 hardware TX terminal (INSERT_L2_HDR + ENQUEUE_PKT)"
 fi
 
+# F-199 (2026-08-16, T-M7-2 S4): per-egress no-confirm TX FQ. Adds a
+# FQ_TYPE_TX_NO_CONFIRM dpaa_fq with context_a=0x1c00000080000000 (B0V=0,
+# EBD=1), exports dpaa_alloc_offload_tx_fq(), and leaves the kernel's normal
+# confirm-enabled TX FQs untouched. ask.ko caches one FQ per output netdev.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_199.py" 2>&1
+    echo "### dpaa_eth: F-199 per-egress no-confirm offload TX FQ"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
