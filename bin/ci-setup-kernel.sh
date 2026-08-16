@@ -2664,6 +2664,15 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     echo "### dpaa_eth: F-199 per-egress no-confirm offload TX FQ"
 fi
 
+# F-200 (2026-08-16, T-M7-2 S3): UPDATE_TTL(0x21) for routed IPv4. Prepends the
+# TTL-decrement opcode (+4B zero DSCP param) ahead of INSERT_L2_HDR so the FE
+# decrements TTL and fixes the IPv4 checksum in hardware. IPv4 only; must run
+# AFTER F-198 (extends its TX branch).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_200.py" 2>&1
+    echo "### fman_pcd.c: F-200 UPDATE_TTL routed-IPv4 opcode"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
