@@ -1206,9 +1206,16 @@ multi-Gbps production forwarding until T-M7-2 has passed.
     forwarding. `PREEMPTIVE_CHECKS` → post-release hardening; `STRIP_ALL_VLAN`
     → ships with VLAN support.
 
-- [ ] **T-M7-3 — three clean cycles + release gate.** After T-M7-2, repeat
-  three engage/disengage cycles with byte-clean `pcd-snapshot` and bounded
-  multi-Gbps transit before declaring CR-001 closed or M7 release-ready.
+- [x] **T-M7-3 — three clean cycles + multi-Gbps acceptance. PASS
+  (2026-08-16, image 0240).** With the iperf2 heidi↔HELGA 10G harness, three
+  consecutive flush→engage→`iperf -P8`→flush→disengage cycles each returned
+  7.32–7.34 Gbps at 99.3–99.8% DUT idle, `tx confirm` frozen at 13,
+  `Armed ports: (none)` and MURAM 34,992 B before/after every cycle, mgmt OK,
+  zero RTNL/WARNING/BUG/QMan/BMan errors. F-200 TTL decrement independently
+  proven (heidi TTL 64 → HELGA TTL 63 via pktmon/tshark capture).
+  **Caveat:** clean teardown required the CR-003 workaround (flush conntrack +
+  `fe_flow` before `disengage`); the production helper's `disengage` is still
+  fail-open while flows are live (Step 4 / CR-003).
 
 **[NOTE]** F-193/F-196 are diagnostic and should be folded into durable
 flow-add observability once T-M7-2 lands. F-195/F-197 are real behavior fixes
