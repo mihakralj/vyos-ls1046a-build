@@ -1172,19 +1172,39 @@ multi-Gbps production forwarding until T-M7-2 has passed.
   TX-terminal discriminator; use `rx dropped` flatness + `.106` receipt.
 
   - [x] **S1 — TX-FQ + `INSERT_L2_HDR`.** DONE (above).
-  - [x] **S4 — per-egress no-confirm TX FQ (F-199, 2026-08-16, build-validated;
-    board test pending).** Root cause of the ~2.2 Gbps ceiling confirmed: the
-    S1 target (netdev queue-0 `FQ_TYPE_TX`) has `context_a 0x9a00000080000000`
-    with `B0V=1`, so FMan emits a TX-confirm FD per frame → per-CPU NAPI
-    skb-free with no skb. F-199 adds `FQ_TYPE_TX_NO_CONFIRM` +
+  - [x] **S4 — per-egress no-confirm TX FQ (F-199, 2026-08-16, SILICON-PASS
+    with one fix).** F-199 adds `FQ_TYPE_TX_NO_CONFIRM` +
     `dpaa_alloc_offload_tx_fq()` (context_a `0x1c00000080000000`, `B0V=0`,
-    `EBD=1`) allocated per egress netdev via `dpaa_setup_egress()` (correct FMan
-    TX DC-portal channel, ERN cb, `TO_DCPORTAL`). `ask_hw_resolve_oif_fqid()`
-    caches one no-confirm FQ per ifindex and falls back to the confirmed
-    queue-0 FQ on alloc failure. Kernel's own `priv->egress_fqs[]` untouched.
-  - [ ] **S2/S3 — opcode completeness.** Add `PREEMPTIVE_CHECKS_ON_PKT`,
-    `STRIP_ALL_VLAN_HDRS`, and `UPDATE_TTL` (S1 does not decrement TTL yet),
-    one opcode per cold-boot build.
+    `EBD=1`) allocated per egress netdev via `dpaa_setup_egress()`.
+    `ask_hw_resolve_oif_fqid()` caches one no-confirm FQ per ifindex, fallback
+    to the confirmed queue-0 FQ. Board proof (image 0006): eth3 FQ `0x2bb` on
+    channel `0x800`, eth4 `0x2ba` on `0x801` (correct distinct per-port DC-portal
+    channels); `tx confirm [TOTAL]` stayed frozen at control-plane level while
+    offload traffic flowed — the per-frame TX-confirmation stream is gone. A
+    `RTNL: assertion failed` warning (the nft REPLACE callback runs on a
+    workqueue with no RTNL) was fixed by taking RTNL inside the helper
+    (commit `9d051517`).
+
+    **[NOTE] The ~2.2 Gbps figure is the test harness, not the board.** With
+    4 TCP streams the board is ~80% idle (0% softirq) yet throughput stays
+    ~2.2 Gbps, identical to S1 — the lxc202 generator (4 cores, single
+    src/responder) is the cap. S1's earlier "2.2 Gbps = TX-confirm ceiling"
+    reading was premature; S4 still correctly removes the TX-confirm CPU cost.
+    True multi-Gbps FE throughput needs a faster / multi-source generator.
+  - [x] **S3 — `UPDATE_TTL` (F-200, 2026-08-16, build-validated).** Routed
+    IPv4 HIT now prepends `UPDATE_TTL(0x21)` + a 4-byte zero DSCP param ahead
+    of `INSERT_L2_HDR`, so the FE decrements TTL and fixes the IPv4 header
+    checksum in hardware (RFC-791 correct router). Vendor-exact from
+    `cdx_ehash.c create_ttl_hm()`. IPv4 only (`eth_type 0x0800`); IPv6 keeps
+    the S1 chain pending `UPDATE_HOPLIMIT(0x29)`.
+  - [~] **S2 — DEFERRED for the first IPv4-unicast release (2026-08-16
+    decision).** Vendor source shows neither S2 opcode is used by the plain
+    untagged forward path: `STRIP_ALL_VLAN_HDRS(0x12)` is emitted only by
+    `insert_remove_vlan_hm()` (VLAN/bridge path → M6 breadth), and
+    `PREEMPTIVE_CHECKS_ON_PKT(0x05)` is an ingress-QoS/MTU-validation guard
+    (`mtu_offset` seal, DF-bit honoring) that is not required for basic
+    forwarding. `PREEMPTIVE_CHECKS` → post-release hardening; `STRIP_ALL_VLAN`
+    → ships with VLAN support.
 
 - [ ] **T-M7-3 — three clean cycles + release gate.** After T-M7-2, repeat
   three engage/disengage cycles with byte-clean `pcd-snapshot` and bounded

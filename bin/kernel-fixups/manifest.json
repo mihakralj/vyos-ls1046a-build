@@ -180,9 +180,10 @@
     "F_196.py": "fman_pcd.c: F-196 (2026-08-15, read-only resolver diagnostic) -- logs the populated params-page default FQID and same-port KeyGen base-FQID candidates while preserving the existing resolver return value",
     "F_197.py": "fman_pcd.c: F-197 (2026-08-15, target-FQID correction) -- preserves non-zero params-page FQIDs and otherwise resolves a unique non-zero base FQID from a used KeyGen scheme bound to the requested ingress port; ambiguous candidates fail closed",
     "F_198.py": "fman_pcd.c + fman_pcd.h: F-198 (2026-08-15, T-M7-2 S1 hardware TX terminal) -- adds tx_fqid/next_hop_mac/egress_mac/eth_type to struct fman_pcd_fe_flow_action and (l2_dst,l2_src,eth_type) to fman_pcd_ehash_add_key; when the OOT caller supplies a per-egress TX FQ the FE record emits INSERT_L2_HDR(0x41)+ENQUEUE_PKT(0x01) direct-to-wire, else keeps the F-197 own-port RX-FQID reinjection terminal",
-    "F_199.py": "dpaa_eth.c/.h + dpaa_flow_offload.h: F-199 (2026-08-16, T-M7-2 S4 no-confirm TX FQ) -- adds FQ_TYPE_TX_NO_CONFIRM + exported dpaa_alloc_offload_tx_fq() programming context_a 0x1c00000080000000 (B0V=0, EBD=1) so the FE hardware terminal enqueues with no per-frame TX-confirm FD; kernel's own confirm-enabled TX FQs untouched"
+    "F_199.py": "dpaa_eth.c/.h + dpaa_flow_offload.h: F-199 (2026-08-16, T-M7-2 S4 no-confirm TX FQ) -- adds FQ_TYPE_TX_NO_CONFIRM + exported dpaa_alloc_offload_tx_fq() programming context_a 0x1c00000080000000 (B0V=0, EBD=1) so the FE hardware terminal enqueues with no per-frame TX-confirm FD; kernel's own confirm-enabled TX FQs untouched",
+    "F_200.py": "fman_pcd.c: F-200 (2026-08-16, T-M7-2 S3 UPDATE_TTL) -- extends the F-198 TX branch for routed IPv4 (eth_type 0x0800) to prepend UPDATE_TTL(0x21) + 4-byte zero DSCP param ahead of INSERT_L2_HDR so the FE decrements TTL and fixes the IPv4 header checksum in hardware; IPv6 keeps the S1 two-opcode chain (UPDATE_HOPLIMIT deferred)"
   },
-  "count": 89,
+  "count": 90,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
