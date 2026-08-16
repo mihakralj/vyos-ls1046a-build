@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.22.0 · 2026-08-15 · HADS 1.0.0**
+**Version 2.23.0 · 2026-08-15 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -25,13 +25,15 @@ documents disagree, they win — update this plan.
 ### 1.1 Position
 
 **[SPEC]** The FE-VM ehash path has discriminator-verified manual silicon HITs
-(E25/E26) and a production nft/YNL flowtable HIT (F-195/F-197, 2026-08-15).
-The production path carries end-to-end transit loss-free through 200 Mbit/s,
-but all HIT reinjection currently targets one literal PCD base FQID and one
-QMan portal/CPU; loss starts near 300 Mbit/s and 500 Mbit/s can hard-wedge the
-FMan. The only release-ready silicon offload remains the **FMan ingress
-policer** and **mainline RSS** until T-M7-2 replaces RX reinjection with the
-hardware TX opcode terminal.
+(E25/E26), a production nft/YNL flowtable HIT (F-195/F-197, 2026-08-15), and a
+**silicon-proven hardware TX terminal (T-M7-2 S1 / F-198, 2026-08-15):** a HIT
+rewrites L2 (`INSERT_L2_HDR`) and hardware-enqueues to the per-egress-interface
+TX FQ direct-to-wire. This removed the earlier single-CPU RX-reinjection
+ceiling — 300 Mbit/s went 2.42% → 0.008% loss, 500 Mbit/s no longer wedges, and
+TCP forwards ~2.2 Gbps stably. Remaining T-M7-2 work is the per-egress
+no-confirm TX FQ (S4, the ~2.2 Gbps TX-confirm ceiling) and opcode completeness
+(S2/S3: TTL/VLAN/preemptive-checks). Release still gated on T-M7-3
+(three clean cycles + multi-Gbps acceptance).
 
 | Dispatch path | Status |
 |---|---|
@@ -51,7 +53,7 @@ path demonstrates a genuine, discriminator-verified HIT (§4.1, §4.4).
 | 1. FMan PCD subsystem (KG / CC / HM / PLCR) | Shipping — patches 0092–0118, 0151–0155 |
 | 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete. Manual E25/E26 proved a discriminator-verified silicon HIT, but F-192 production-adjacent diagnostics remain incomplete; the warm shared diagnostic chain is singleton-global and must be reused rather than rebuilt. |
 | 3. Classifier→FE arm | Direct vendor-node arm is proven. The manual `.185` eth3 arm explicitly applies scheme-4 EKFC and tears down safely; the retained chain is byte-readable. The fixed-tuple SPC capture proves KeyGen scheme-4 traversal but not the succeeding FE workspace/writeback stage. |
-| 4. ask.ko datapath (genl + flow table) | Control plane and production insert path are wired: YNL/genl engage/disengage; nft flowtable `REPLACE`; 14-byte ehash insertion; both directions `[HW_OFFLOAD]`. **Transit HIT now delivers end-to-end (2026-08-15, F-195/F-197):** F-195 passes the real ingress port (`0x10`/`0x11`, not the table index), F-197 resolves the own-port PCD base FQID when the params-page default is zero (eth3→`0x200`, eth4→`0x300`), and bounded UDP transit is loss-free through 200 Mbit/s. **Remaining defect is throughput, not correctness:** the FE terminal reinjects each HIT to the port's own kernel RX FQ, so the frame re-enters single-CPU software forwarding (binding-fact-9 ~1.5 Gbps ceiling). The production terminal is the hardware TX opcode chain to a dedicated per-port TX FQ (§4.2 T-M7-2). |
+| 4. ask.ko datapath (genl + flow table) | Control plane and production insert path are wired: YNL/genl engage/disengage; nft flowtable `REPLACE`; 14-byte ehash insertion; both directions `[HW_OFFLOAD]`. **Transit HIT and hardware TX terminal now deliver end-to-end (2026-08-15, F-195/F-197/F-198):** F-195 passes the real ingress port, F-197 keeps the correct own-port RX fallback, and F-198 emits `INSERT_L2_HDR(0x41)→ENQUEUE_PKT(0x01)` to the per-egress TX FQ. Silicon proof: rx_dropped stays flat, 500 Mbit/s no longer wedges, TCP ~2.2 Gbps stable. **Remaining:** S4 no-confirm per-port TX FQ for >2.2 Gbps and S2/S3 TTL/VLAN/preemptive-check opcode completion (§4.2 T-M7-2), then T-M7-3 release soak. |
 | 5. VyOS CLI + mutual exclusion | Shipping — `offload ask` per-interface, ASK↔VPP mutex, `show flows` via ynl. Release claim gated by CR-001 (§5) |
 
 ### 1.3 Binding silicon facts (settled on LS1046A hardware — do not re-litigate)
@@ -257,7 +259,7 @@ graph LR
     M3["M3 FE-VM ehash HIT gate<br/>DONE (E25/E26, M3 gate passed)"]
     M5 --> M6["M6 IPv6 / bridge / IPsec<br/>UNBLOCKED"]
     M5 --> M7a["M7 VyOS CLI + production HIT<br/>DONE - transit HIT delivers (F-195/F-197)"]
-    M7a --> M7b["M7-2 HW TX opcode terminal<br/>OPEN - RX-reinjection caps ~300 Mbit/s"]
+    M7a --> M7b["M7-2 HW TX opcode terminal<br/>S1 SILICON-PASS (F-198): no wedge, 2.2G TCP; S4 no-confirm FQ next"]
     M6 --> M8["M8 soak + upstream"]
     M7b --> M8
     M4["M4 AF_XDP true-ZC RX<br/>BLOCKED - libxdp ISO install"] -.-> M8
@@ -350,12 +352,13 @@ opcode terminal, not comparator correctness.
 - **M6 — IPv6 + bridge + IPsec. UNBLOCKED.** Work: §4.6.
 - **M7 — VyOS CLI + production transit HIT. PARTIAL.** Surface wiring is DONE:
   `set interfaces ethernet eth<n> offload ask` engage/disengage,
-  per-interface ASK↔VPP mutex, and `show flows` via ynl. Production nft/YNL
-  transit HIT is now proven (F-195/F-197, own-port targets, `[HW_OFFLOAD]`,
-  loss-free through 200 Mbit/s). Release claim remains blocked by T-M7-2:
-  literal-base-FQ enqueue sends every HIT to one QMan portal/CPU, with loss
-  onset near 300 Mbit/s and a hard wedge at 500 Mbit/s. CR-001 MURAM leak is
-  closed; F-133's stale diagnostic tracker caused the false leak signal.
+   per-interface ASK↔VPP mutex, and `show flows` via ynl. Production nft/YNL
+   transit HIT is proven (F-195/F-197) and the hardware TX terminal is
+   silicon-proven (T-M7-2 S1 / F-198): direct-to-wire forwarding with no wedge,
+   ~2.2 Gbps TCP. Release claim remains blocked on T-M7-2 S4 (no-confirm
+   per-port TX FQ for >2.2 Gbps) + S2/S3 opcode completeness, then T-M7-3.
+   CR-001 MURAM leak is closed; F-133's stale diagnostic tracker caused the
+   false leak signal.
 - **M8 — Productization soak + upstream.** Work: §4.7.
 
 ---
@@ -1116,7 +1119,7 @@ multi-Gbps production forwarding until T-M7-2 has passed.
   200 Mbit/s**. Clean YNL disengage; MURAM returns to the 34,992 B warm-chain
   baseline (no leak — the earlier "leak" was F-133's stale diagnostic tracker).
 
-- [ ] **T-M7-2 — hardware TX opcode terminal (CRITICAL PATH, OPEN).**
+- [ ] **T-M7-2 — hardware TX opcode terminal (CRITICAL PATH, S1 SILICON-PASS; S2/S3/S4 OPEN).**
   **[BUG] RX-reinjection HIT terminal caps at the kernel-forward ceiling.**
   **Symptom:** production transit is loss-free ≤200 Mbit/s, 0.19% loss at
   300 Mbit/s (1 s) / 2.42% (3 s); 500 Mbit/s produces 39% loss then a hard
@@ -1151,6 +1154,37 @@ multi-Gbps production forwarding until T-M7-2 has passed.
   `rx dropped`, `/proc/interrupts` portal spread, and per-port TX-FQ counters;
   the pass bar is multi-Gbps with no RX reinjection. Never flood before the
   terminal is in place. Implement one opcode/FQ variable per cold-boot build.
+
+  **[SPEC] S1 SILICON-PASS (2026-08-15, F-198, commit `04779515`, image
+  `2026.08.15-2312-rolling`, board `.185`).** F-198 threads the resolved
+  per-egress TX FQ (eth3 TX `0x281`, eth4 TX `0x2a5`, from `dpaa_get_tx_fqid`)
+  and neighbour MACs into the FE record, which now emits `INSERT_L2_HDR(0x41)`
+  (control word `0x4000000e`, then dst=next-hop, src=egress, EtherType) →
+  `ENQUEUE_PKT(0x01)` to that TX FQ. Byte-identical F-197 fallback when
+  `tx_fqid == 0`. Direct-to-wire is proven: pre-S1 RX reinjection grew eth3
+  `rx dropped` ~1 per packet and hard-wedged at 500 Mbit/s; S1 keeps
+  `rx dropped` flat (+1 per whole run), no `Build skb failure`, no wedge, mgmt
+  alive. UDP loss: 1/20/100 Mbit/s = 0%; 300 Mbit/s = 0.008% (was 2.42%);
+  500 Mbit/s = 1.50% with no wedge (was 39% + power-cycle); 1 Gbps = 8% but
+  ~920 Mbit/s delivered. TCP `-P2` = 2.2 Gbps stable (pre-S1 collapsed to 0).
+  Disengage clean; `muram used` returns to the 34,992 B F-136 warm baseline.
+  Note: F-193 `target_fqid` logs the F-197 RX resolver and is NOT the
+  TX-terminal discriminator; use `rx dropped` flatness + `.106` receipt.
+
+  - [x] **S1 — TX-FQ + `INSERT_L2_HDR`.** DONE (above).
+  - [x] **S4 — per-egress no-confirm TX FQ (F-199, 2026-08-16, build-validated;
+    board test pending).** Root cause of the ~2.2 Gbps ceiling confirmed: the
+    S1 target (netdev queue-0 `FQ_TYPE_TX`) has `context_a 0x9a00000080000000`
+    with `B0V=1`, so FMan emits a TX-confirm FD per frame → per-CPU NAPI
+    skb-free with no skb. F-199 adds `FQ_TYPE_TX_NO_CONFIRM` +
+    `dpaa_alloc_offload_tx_fq()` (context_a `0x1c00000080000000`, `B0V=0`,
+    `EBD=1`) allocated per egress netdev via `dpaa_setup_egress()` (correct FMan
+    TX DC-portal channel, ERN cb, `TO_DCPORTAL`). `ask_hw_resolve_oif_fqid()`
+    caches one no-confirm FQ per ifindex and falls back to the confirmed
+    queue-0 FQ on alloc failure. Kernel's own `priv->egress_fqs[]` untouched.
+  - [ ] **S2/S3 — opcode completeness.** Add `PREEMPTIVE_CHECKS_ON_PKT`,
+    `STRIP_ALL_VLAN_HDRS`, and `UPDATE_TTL` (S1 does not decrement TTL yet),
+    one opcode per cold-boot build.
 
 - [ ] **T-M7-3 — three clean cycles + release gate.** After T-M7-2, repeat
   three engage/disengage cycles with byte-clean `pcd-snapshot` and bounded

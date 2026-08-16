@@ -81,6 +81,9 @@ struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
 u8 fman_port_get_id(struct fman_port *port);
 int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
 int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
+/* F-199 (T-M7-2 S4): allocate a dedicated no-confirm TX FQ for the FE
+ * hardware offload terminal (context_a B0V=0). Board patch exports it. */
+int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 
 /*
  * QEF blob structural constants (PR13). The microcode version
@@ -132,6 +135,8 @@ static bool ask_hw_cached_valid;
 
 #define ASK_HW_MAX_PORTS        8       /* LS1046A has 8 BMI RX ports total */
 
+#define ASK_HW_NOCONF_SLOTS     16      /* T-M7-2 S4: no-confirm TX FQ cache */
+
 /*
  * Per-offloaded-port record.  Under the board substrate ask.ko owns no
  * private CC tree / KG scheme / pre-netdev hook — the CC tree lives in
@@ -162,6 +167,24 @@ struct ask_hw_pcd {
          * taildrop bottleneck). */
         struct qman_fq  dedicated_fq;
         bool            dedicated_fq_ready;
+
+        /*
+         * T-M7-2 S4 (2026-08-15): per-egress-interface no-confirm TX FQ cache.
+         * The FE hardware terminal (F-198) must enqueue to a TX FQ whose FQD
+         * has B0V=0 so FMan emits no per-frame TX-confirm FD (the ~2.2 Gbps
+         * ceiling on the shared queue-0 TX FQ). dpaa_alloc_offload_tx_fq()
+         * (board patch F-199) allocates one such FQ per netdev on that
+         * netdev's own QMan channel; the FQ lives in the netdev's
+         * dpaa_fq_list and is freed by fsl_dpa on teardown, so ask.ko only
+         * caches the resolved FQID (never destroys it). Direct-mapped by
+         * ifindex % ASK_HW_NOCONF_SLOTS; a collision falls back to a fresh
+         * alloc without caching (correctness over reuse; impossible with the
+         * board's <=5 dpaa netdevs).
+         */
+        struct {
+                u32     ifindex;
+                u32     fqid;
+        }               noconf_tx[ASK_HW_NOCONF_SLOTS];
 
         /*
          * F-108: Refcount for the FMan-global silicon HIT-release bypass.
@@ -890,26 +913,55 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  */
 static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 {
-        struct ask_hw_pcd *h;
+        struct ask_hw_pcd *h = ask_hw_pcd_inst;
         struct net_device *dev;
+        unsigned int slot;
         int rc;
 
-        /* T-M7-2 S1 (2026-08-15): resolve the PER-EGRESS-INTERFACE TX FQ,
-         * matching the vendor cdx.ko model (eth_info->fwd_tx_fqinfo[quenum],
-         * resolved by output interface). The prior P4.1 behaviour returned a
-         * SINGLE global dedicated_fq hardwired to eth4's TX DC-portal channel
-         * for ALL flows, which is wrong for eth3 egress / the reverse
-         * direction. Each dpaa netdev's queue-0 TX FQ already has its channel
-         * and FQD configured by fsl_dpa; dpaa_get_tx_fqid() returns it. A
-         * per-port no-confirm/dedicated TX FQ is a later optimization once
-         * direct-to-wire delivery is functionally proven. */
-        (void)h;
+        /* T-M7-2 S4 (2026-08-15): resolve a PER-EGRESS-INTERFACE NO-CONFIRM
+         * TX FQ for the FE hardware terminal. S1 used dpaa_get_tx_fqid(dev,0),
+         * the netdev's shared queue-0 TX FQ whose FQD has B0V=1 -> FMan emits
+         * a TX-confirm FD per frame -> per-CPU NAPI skb-free cost -> the
+         * ~2.2 Gbps TCP ceiling. dpaa_alloc_offload_tx_fq() (F-199) returns a
+         * dedicated FQ with B0V=0 (no confirmation) on the same channel; we
+         * cache it per ifindex so each egress port allocates exactly once.
+         * The FQ is owned by fsl_dpa (netdev dpaa_fq_list) — never destroyed
+         * here. On any allocation failure we fall back to the confirmed
+         * queue-0 TX FQ so forwarding still works (just slower). */
         dev = dev_get_by_index(&init_net, ifindex);
         if (!dev)
                 return -ENODEV;
-        rc = dpaa_get_tx_fqid(dev, 0, fqid);
+
+        slot = ifindex % ASK_HW_NOCONF_SLOTS;
+        if (h && h->noconf_tx[slot].fqid &&
+            h->noconf_tx[slot].ifindex == ifindex) {
+                *fqid = h->noconf_tx[slot].fqid;
+                dev_put(dev);
+                return 0;
+        }
+
+        rc = dpaa_alloc_offload_tx_fq(dev, fqid);
+        if (rc) {
+                /* Fallback: confirmed shared TX FQ (S1 behaviour). */
+                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (%d); using confirmed queue-0 FQ\n",
+                            ifindex, rc);
+                rc = dpaa_get_tx_fqid(dev, 0, fqid);
+                dev_put(dev);
+                return rc ? -ENODEV : 0;
+        }
+
+        if (h && h->noconf_tx[slot].fqid == 0) {
+                h->noconf_tx[slot].ifindex = ifindex;
+                h->noconf_tx[slot].fqid = *fqid;
+        } else if (h && h->noconf_tx[slot].ifindex != ifindex) {
+                ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u ifindex=%u (cached %u); not caching\n",
+                            slot, ifindex, h->noconf_tx[slot].ifindex);
+        }
+
+        ask_pr_info("hw: no-confirm TX FQ 0x%x resolved for ifindex=%u\n",
+                    *fqid, ifindex);
         dev_put(dev);
-        return rc ? -ENODEV : 0;
+        return 0;
 }
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
