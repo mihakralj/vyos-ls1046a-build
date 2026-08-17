@@ -1,6 +1,13 @@
 # Performance Benchmarks — .185 ↔ .106 (Mono Gateway DK)
 **Version 1.1.0** · 2026-08-01 · HADS 1.0.0
 
+> **SUPERSEDED / historical results ledger.** This `.185 ↔ .106` benchmark
+> record predates the current harness and the F-198…F-203 datapath work; `.106`
+> is no longer an active harness endpoint. For the authoritative, reproducible
+> procedure and current results (heidi → DUT `.185` → HELGA, mode-verified SW vs
+> HW, MTU battery), use **`plans/ASK2-PERFORMANCE-TEST-HARNESS.md`**. Kept for
+> the historical mainline/NXP-ASK/CC-pass-through numbers only.
+
 ---
 
 ## AI READING INSTRUCTION

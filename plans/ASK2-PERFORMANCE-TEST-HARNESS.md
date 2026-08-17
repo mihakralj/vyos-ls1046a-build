@@ -1,6 +1,6 @@
 # ASK2 Performance Test Harness — Software vs Hardware Forwarding
 
-**Version 1.0.0 · 2026-08-17**
+**Version 1.1.0 · 2026-08-17**
 
 A reproducible procedure for measuring routed IPv4 throughput and DUT CPU cost through the Mono Gateway LS1046A, comparing the Linux software flowtable against ASK2/FMan hardware offload.
 
@@ -283,6 +283,8 @@ ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
 
 Expected: no `flags offload` line, and `Armed ports: (none)`.
 
+**A single pre-traffic check is NOT sufficient.** The FE can re-arm the instant offloadable traffic starts (CR-003 fail-open behaviour), so a software cell that only verified `Armed ports: (none)` *before* iperf will silently run in hardware and report bogus ~9–10 Gbit/s at ~2–3% CPU. A software cell MUST hold the FE disarmed for the **entire** run — see §7.4 (continuous mode gate) and the §7.5 validity discriminator. If the FE arms at any sample during a software cell, the cell is INVALID and its number MUST be discarded, not recorded.
+
 ### 6.2 Hardware mode
 
 Enable the hardware flag and verify the live nftables render. Force a delete/commit then set/commit so the live ruleset is guaranteed to re-render (a plain `set` on an already-present node can be a silent no-op):
@@ -366,16 +368,44 @@ ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
 
 Report cpu0–cpu3 and the arithmetic mean of the four busy percentages.
 
-### 7.4 Verify mode during traffic
+### 7.4 Continuous mode gate (mandatory — a single sample is not enough)
 
-At about four seconds into the run:
+Sample `fe_arm` **every second for the entire run**, not once. Run this on the
+DUT in parallel with the iperf cell:
 
 ```bash
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 \
-  'sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm | grep "Armed ports"'
+ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
+  for i in $(seq 1 12); do
+    a=$(sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm 2>/dev/null \
+          | grep -oE "0x1[01]" | tr "\n" " ")
+    printf "t%02d fe=[%s]\n" "$i" "$a"
+    sleep 1
+  done
+'
 ```
 
-Reject the cell if a SW cell shows any armed port, or a HW cell does not show both `0x10 0x11`.
+Cell validity:
+
+- **Software cell:** every sample MUST be `fe=[]`. If any sample shows an armed
+  port (`0x10`/`0x11`), the FE re-armed mid-run — the cell ran in hardware.
+  Mark it **INVALID** and discard the number; do not record it.
+- **Hardware cell:** every sample MUST show both `0x10 0x11`. If a HW cell is
+  ever unarmed, it fell back to software — INVALID.
+
+### 7.5 Validity discriminator (sanity-check every number)
+
+The mode gate is authoritative, but the throughput/CPU shape is an independent
+cross-check. On this board (order-1 F-203 image):
+
+| Signature | Meaning |
+|---|---|
+| ~5–7 Gbit/s, all four cores ~45–90% busy | genuine **software** forwarding |
+| ~9–11 Gbit/s, all cores ~2–4% busy | **hardware** offload |
+
+A "software" cell reporting ~9–11 Gbit/s at ~2–3% CPU is **hardware-contaminated
+and invalid**, regardless of what the flowtable config said — the FE re-armed.
+Any result that disagrees with its intended mode's signature MUST be re-run
+under a verified continuous gate (§7.4), never published.
 
 ---
 
@@ -425,13 +455,21 @@ For each MTU, run this exact sequence:
 6. Set HELGA `Ethernet 4` MTU.
 7. Wait at least three seconds for link and neighbor state.
 8. Run a short iperf2 connectivity probe.
-9. Enter true SW mode; verify no nft `flags offload` and FE unarmed.
-10. Run the 15-second SW cell; verify FE stays unarmed during traffic.
-11. Enter HW mode; verify nft `flags offload`.
-12. Run the 15-second HW cell; verify both FE ports arm during traffic.
-13. Flush conntrack, clear flows, disengage; verify FE unarmed.
-14. Record health-counter deltas.
-15. Continue to the next MTU.
+9. Enter true SW mode: delete the hardware flowtable flag, commit, flush
+   conntrack/flows, disengage both ports. Poll until `Armed ports: (none)` is
+   stable for at least two seconds before starting traffic.
+10. Run the 15-second SW cell **with the §7.4 1-second continuous FE sampler in
+    parallel**. Every sample must be empty. Any arm event = INVALID; discard the
+    throughput/CPU number and repeat the cell after a clean disengage.
+11. Flush flows/conntrack and verify FE unarmed before changing to HW.
+12. Enter HW mode; force delete/commit + set/commit so live nft has
+    `flags offload`. Verify both ports arm under a short probe.
+13. Run the 15-second HW cell with the same continuous sampler. Every sample
+    must contain `0x10 0x11`; otherwise INVALID.
+14. Flush conntrack, clear flows, disengage; poll until FE is stably unarmed.
+15. Record health-counter **deltas** and compare throughput/CPU with the §7.5
+    validity signature. Reject any contradictory cell.
+16. Continue to the next MTU.
 
 After the final cell or any abort, restore:
 
@@ -448,7 +486,9 @@ FE ports unarmed until traffic starts
 
 ## 10. Validated results
 
-Measured on `2026.08.17-0217-rolling`, kernel `6.18.44-vyos`, iperf2 `--full-duplex -P 8 -t 15`:
+### 10.1 Order-0 baseline (image `2026.08.17-0217-rolling`, kernel `6.18.44-vyos`)
+
+Mode-verified per cell, iperf2 `--full-duplex -P 8 -t 15`:
 
 | MTU | SW throughput | SW CPU mean | HW throughput | HW CPU mean | HW / SW |
 |---:|---:|---:|---:|---:|---:|
@@ -457,14 +497,48 @@ Measured on `2026.08.17-0217-rolling`, kernel `6.18.44-vyos`, iperf2 `--full-dup
 | 2000 | 6.19 Gbit/s | 71% | 10.4 Gbit/s | 3% | 1.68× |
 | 2500 | 6.22 Gbit/s | 70% | 10.1 Gbit/s | 3% | 1.62× |
 
-CPU distribution:
+Signatures: SW = all four cores ~55–83% busy (F-201 RSS working); HW = all cores
+~2–6% busy (FMan forwards). This SW column is the trusted software reference —
+if a later run disagrees, the later run is suspect (§7.5).
 
-- SW — all four cores active, typically 55–83% each; RSS distribution (F-201) is working.
-- HW — all four cores roughly 2–6% busy; FMan performs the forwarding.
+### 10.2 Order-1 jumbo (image `2026.08.17-2012-rolling`, F-203)
 
-Interpretation: hardware forwarding runs at the ~10 Gbit/s harness ceiling while the DUT stays nearly idle; software forwarding is CPU-bound near 6 Gbit/s. Hardware therefore delivers about 1.6× the throughput at roughly one-twentieth of the DUT CPU cost. The hardware ceiling is above what this single 4-core generator/harness can drive.
+F-203 raises the RX buffer to order-1/8 KiB so `dpaa_change_mtu` accepts up to
+7000 and large frames stay contiguous/HW-offloadable. **Hardware jumbo battery
+passed with no FMan RX wedge** (board uptime stable, `dev_alloc_pages` failures
+= 0, physical-error deltas 0 except transient link-settle bumps that did not
+grow):
 
-Stability during the validated run: five flow-create/flush/disengage cycles passed; sustained bidirectional traffic with 40 conntrack flushes passed; the full MTU battery completed with no reboot and no `list_del`/`BUG`/panic/poison/Oops.
+| MTU | HW throughput | HW CPU mean | phys-err delta | wedge |
+|---:|---:|---:|---:|:--:|
+| 1500 | 9.40 Gbit/s | 3% | 0 | no |
+| 3000 | 9.16 Gbit/s | ~2% | 0 | no |
+| 4000 | 9.00 Gbit/s | ~2% | +2 settle | no |
+| 6000 | 9.35 Gbit/s | ~3% | 0 (HW cell) | no |
+| 7000 | 9.25 Gbit/s | ~2% | 0 | no |
+
+Software MTU-1500 on the order-1 image re-measured at **6.53 Gbit/s, cores
+71–89%** — matches the order-0 SW reference (F-203 does not regress the
+software path).
+
+**Pending:** The order-1 **software** jumbo cells (3000/4000/6000/7000) are not
+yet captured with the §7.4 continuous gate. The first jumbo battery's "SW" rows
+read ~9 Gbit/s at ~2% CPU — those are hardware-contaminated (the FE re-armed
+between the HW and SW cells) and were correctly rejected; they are NOT software
+results. Re-run those four SW cells under the continuous gate before publishing
+an order-1 SW column.
+
+### 10.3 Interpretation
+
+Hardware forwarding runs at the ~9–10 Gbit/s harness ceiling while the DUT stays
+near idle; software forwarding is CPU-bound near 6 Gbit/s. Hardware delivers
+~1.6× the throughput at roughly one-twentieth of the DUT CPU cost, and (with
+F-203) does so contiguously up to MTU 7000. The hardware ceiling is above what
+this single 4-core generator can drive.
+
+Stability: order-0 run — five engage/flush/disengage cycles + 40 conntrack
+flushes clean; order-1 jumbo battery — no reboot, no wedge, no
+`list_del`/`BUG`/panic/poison/Oops.
 
 ---
 
@@ -500,7 +574,8 @@ Post-test:
 - TCP routed-IPv4 benchmark only — not a packet-loss or minimum-frame packet-rate test.
 - Aggregate is bounded by the 10G endpoints and physical path; it does not establish the absolute FMan ceiling.
 - VLAN, IPv6, bridge, PPPoE, tunnel, and IPsec offload are out of scope.
-- The published results validate only MTU 1280–2500 on order-0 buffers. F-203's order-1 candidate range (up to 7000) requires a fresh cold-boot battery before publication.
+- Order-0 SW+HW is validated 1280–2500 (§10.1). Order-1/F-203 hardware jumbo is validated 1500–7000 (§10.2); order-1 **software** jumbo (3000–7000) is still pending a continuous-gate run.
+- A "software" cell reading ~9–11 Gbit/s at ~2–3% CPU is hardware-contaminated, not a result — the FE re-armed. Use the §7.4 continuous gate and §7.5 signature to reject it.
 - MTU below 1280 is outside the VyOS interface contract with IPv6 link-local enabled.
 - The physical-error counter is cumulative; interpret it as a delta.
 - ICMP may be blocked by HELGA's Windows firewall; use a short TCP iperf2 probe for path readiness.
@@ -509,4 +584,5 @@ Post-test:
 
 ## 13. Changelog
 
+- **1.1.0 — 2026-08-17** — Add mandatory per-second continuous FE mode gate, SW/HW throughput+CPU validity discriminator, reject/discard rules for hidden FE re-arm, F-203 order-1 hardware jumbo results through MTU 7000, and explicit pending status for software jumbo cells.
 - **1.0.0 — 2026-08-17** — Initial current-harness specification: corrected topology, F-201/F-202 mode validation, deterministic SW/HW switching, MTU safety and recovery, CPU sampling, and validated 1280–2500 results.
