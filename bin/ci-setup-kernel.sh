@@ -1680,14 +1680,18 @@ fi
 #     echo "### F-132: params page cleanup in F-129 teardown"
 # fi
 
-# F-133: MURAM allocation tracking — diagnostic debugfs node.
-# Adds muram_allocations debugfs to dump every outstanding allocation
-# with offset/size/label.  Identifies the 8229 B residual after disengage.
-# Must run AFTER F-129 and F-132 (instruments their allocations too).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_133.py" 2>&1
-    echo "### F-133: MURAM allocation tracking"
-fi
+# F-133: REMOVED 2026-08-17. The muram_allocations diagnostic tracker
+# produced a FALSE MURAM-leak signal: its free-side record removal was
+# mis-anchored (by F-131's stale-offset early-return rewrite) onto the
+# kexec-stale branch only, so normal fman_pcd_muram_free() of valid
+# per-port objects never dropped its tracking record — muram_allocations
+# over-reported (52,634 B) versus the authoritative muram_budget
+# (34,992 B, stable across engage/disengage). It also nested
+# muram_track_lock under pcd->lock on the stale path (latent lock
+# inversion) and leaked orphaned records at teardown. It touches no
+# datapath; muram_budget is the authoritative accounting. Removed
+# entirely (fixup + manifest + invocation) rather than repaired, per the
+# plan's "fix or remove" bar. See qdrant + plan §4.2.
 
 # F-134: Reorder __fman_pcd_fe_arm_disengage — KG disarm BEFORE MURAM free.
 # Fixes the second-cycle disengage hang (bus lockup from BMI dereferencing

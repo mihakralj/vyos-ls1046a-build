@@ -1,0 +1,38 @@
+
+diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+index cc58ead..da385b0 100755
+--- a/src/conf_mode/firewall.py
++++ b/src/conf_mode/firewall.py
+@@ -511,6 +511,32 @@ def verify_hardware_offload(ifname):
+     if not enabled and fixed:
+         raise ConfigError(f'Interface "{ifname}" does not support hardware offload')
+ 
++    # LS1046A ASK2 (2026-08-17): a hardware flowtable engages FMan FE
++    # forwarding, validated across a bounded MTU range (1280..2500, the
++    # smallest and largest sizes exercised end-to-end). The DPAA1 RX pool is
++    # a single order-0 page; frames above the ceiling wedge the FMan RX path
++    # (cold-boot-only recovery), and below the floor is untested. Arming a
++    # hardware flowtable on an interface whose MTU is outside this range can
++    # brick connectivity remotely. Read the authoritative live MTU from sysfs
++    # and fail closed outside [ASK_FT_MTU_MIN, ASK_FT_MTU_MAX]. The default
++    # 1500 is inside the range, so standard interfaces pass. Widen once a
++    # larger range is validated on the FMan RX pool.
++    ASK_FT_MTU_MIN = 1280
++    ASK_FT_MTU_MAX = 2500
++    mtu_path = f'/sys/class/net/{ifname}/mtu'
++    try:
++        with open(mtu_path) as f:
++            mtu = int(f.read().strip())
++    except (OSError, ValueError):
++        mtu = None
++    if mtu is not None and (mtu < ASK_FT_MTU_MIN or mtu > ASK_FT_MTU_MAX):
++        raise ConfigError(
++            f'Interface "{ifname}" hardware flowtable offload requires MTU '
++            f'between {ASK_FT_MTU_MIN} and {ASK_FT_MTU_MAX} (live MTU {mtu} '
++            f'is outside the validated range and can wedge the FMan RX path). '
++            f'Set a supported MTU before enabling "offload hardware".'
++        )
++
+     # F-192 (LS1046A, 2026-08-14): NETIF_F_HW_TC is toggleable but defaults
+     # OFF on the DPAA1 netdev, and the standard `offload hw-tc-offload`
+     # interface config never applies it at runtime.  apply() switches the

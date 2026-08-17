@@ -348,7 +348,8 @@ sudo systemctl start fancontrol
 
 ## 3. Built-in diagnostics — the `*-check` scripts
 
-Every ISO ships seven self-contained diagnostic reporters in
+Every ISO ships eight self-contained diagnostic reporters plus a
+`support-bundle` aggregator in
 `/usr/local/bin/` (sources live in
 [board/scripts/](board/scripts/)). They share one convention:
 human-readable sectioned output with `[OK]`/`[WARN]`/`[FAIL]`/`[SKIP]`
@@ -365,9 +366,10 @@ RNG reads).
 | `fan-check` | All 5 thermal zones (ddr, serdes, fman, cluster, sec) tagged `[COOL]`/`[WARM]`/`[HOT]`/`[CRIT]` against the `fan-pid` setpoints, EMC2305 PWM duty (raw + %) and tach RPM, `fan-pid` daemon health + last log lines, and detection of a conflicting legacy `fancontrol`. | Thermal sanity check; exit 1 if `fan-pid` is dead or any zone is at/above crit. **Regression flag:** `pwm1=255 (100%)` here while the daemon journal says `pwm=51` means the broken sysfs PWM path is back in use. |
 | `caam-check` | CAAM (SEC 5.4) hardware crypto: DT controller node, driver posture (`caam`, `caam_jr` mandatory; `caamalg`/`caamhash`/`caamrng`/`caampkc` optional), active Job Ring count, dmesg banners, CAAM-backed algorithms in `/proc/crypto`, and the hardware RNG (`rng_current` = `caam-rng`, 16-byte sample read). When the ASK offload is engaged it adds a CDX↔SEC FQ wiring section (self-skips otherwise). | Verifying hardware crypto offload is alive — e.g. before relying on it for IPsec or `/dev/hwrng` entropy. |
 | `xsk-zc-check` | The AF_XDP true-zero-copy RX gate counters (`ethtool -S`, default eth3 eth4): `xsk_zc_eligible` / `xsk_zc_rx_armed` / `xsk_fill_guard_block` / `xsk_zc_rx_recovered` plus the wider `xsk_*` block, rendered as the spec §6.1.12 verdict — **dormant** (no ZC bind; the normal shipping state), **ZC-armed** (preconditions met), or **fault** (`xsk_fill_guard_block > 0` / attach-DMA errors — the ZC reprogram WRITE must stay disabled). | AF_XDP/VPP datapath debugging on the SFP+ ports. Accepts an interface list: `xsk-zc-check eth3`. |
-| `ask-check` | The full ASK2 fast-path chain, layer by layer in boot order: kernel posture, the four in-tree patches, `ask.ko`, `ask_bridge.ko`, FMan PCD subsystem, CAAM QI sharing, dpaa-eth flow_block, xfrm offload, `askd`, `ask-cli`, an nft `flags offload` round trip, and dmesg integrity. Uses an extra `[TODO]` tag for milestones not yet landed. | Present in every image; meaningful once the ASK offload is engaged (self-skips otherwise). Tracks ASK2 bring-up progress — `[TODO]` failures map to specific PR rows in `plans/ASK2-IMPLEMENTATION.md`. |
+| `ask-check` | The ASK2 preview datapath, layer by layer in boot order: dataplane posture, FMan PCD subsystem + MURAM budget, reversible mode switch, hardware classification (FE-VM chain), IPv4 forwarding op-set, `ask.ko` genl control plane, per-interface `offload ask` CLI, and dmesg integrity. Capabilities intentionally outside the preview scope — IPv6, NAT/PAT, VLAN rewrite, IPsec/ESP, bridge/L2 switchdev, multicast/non-TCP-UDP — are reported with the `DEFER` tag (software fallback), never as `[FAIL]`. | Present in every image; the single command to confirm the plain-routed-IPv4 hardware datapath is healthy. Exit 0 = supported IPv4 datapath operational; 1 = a required capability is missing/broken; `DEFER` lines are expected for this preview. |
 | `vpp-check` | The VPP AF_XDP Zero-Copy status probe: board & kernel posture (isolcpus=3, 2M hugepages >=512), VPP installation & library linkage (libxdp.so check), BPF object & redirect helper (/usr/share/vpp/xdp_redirect.o, xsks_map), VyOS Python integration (control_vpp.py signature), VPP service status & PID, VPP hardware interfaces & zero-copy flags, kernel DPAA1 ZC driver posture (dmesg ZCBIND logs, bpid, defunct netdev handoff), and summary verdict. | VPP AF_XDP Zero-Copy verification and health check. Exit 0 when VPP is active and AF_XDP Zero-Copy prerequisites are healthy. |
 | `firmware-check` | The complete boot-firmware inventory below the OS: board/SoC identity (DT model, SVR, silicon rev), running U-Boot version vs the copy embedded in QSPI flash, the full `/proc/mtd` partition map with per-partition fingerprints (RCW/PBL preamble, env CRC, FMan-ucode QEF header, recovery-DTB FDT magic, recovery kernel), a deep decode of the running FMan microcode (id, length, SoC code, **proprietary 210.x vs open-source 106.x** classification, md5) cross-checked against the on-flash copy and the kernel's `FMan PCD caps` probe, boot-critical U-Boot env variables + boot targets, and the `/boot/vyos.env` image selector vs the running image. | After any firmware/flash operation, before reporting a bug, or when `add system image` boot selection misbehaves. Run with `sudo` for the full report (flash reads + `fw_printenv`); unprivileged runs skip those sections. A `WARN` on running-vs-flash ucode mismatch means a flash update is pending a reboot. |
+| `support-bundle` | Paste-ready ASK2 issue report: board/kernel identity, non-interactive `show version`, active Ethernet/firewall/VPP offload configuration, live nft/FE-arm/MTU/link state, complete `ask-check` and `firmware-check` output with per-tool exit codes, and a focused kernel-log extract. Never opens an interactive vbash/config session. | Run `sudo support-bundle > ask2-bundle.txt` and attach the file to every preview bug report. Aggregate exit 0 = both health checks passed; 1 = one reported a real fault; 2 = wrong board. |
 
 ```bash
 # Run everything that applies to this board
@@ -375,13 +377,16 @@ for c in dpaa1-check sfp-check fan-check caam-check xsk-zc-check ask-check vpp-c
     echo "== $c =="; "$c"; echo "rc=$?"
 done
 
+# Or, for a bug report, capture one paste-ready file with everything:
+sudo support-bundle > ask2-bundle.txt
+
 # Cron/monitoring probe example (alert on any non-zero exit)
 fan-check >/dev/null || logger -p user.err "fan-check failed rc=$?"
 ```
 
 > When adding a new diagnostic, mirror this style (sectioned report,
 > tag set, 0/1/2 exit convention) and wire the install in
-> `bin/ci-setup-vyos-build.sh` alongside the existing seven.
+> `bin/ci-setup-vyos-build.sh` alongside the existing diagnostics.
 
 ---
 
