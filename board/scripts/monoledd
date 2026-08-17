@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""monoledd — load-driven status LED daemon for the LS1046A Mono Gateway DK.
+
+Drives the LP5812 RGBW status LED to communicate router load at a glance
+using the same 32-step ramp as the manual `led` tool (green -> yellow ->
+orange -> amber -> pink -> purple -> white -> blue): both hue and
+brightness rise with network throughput, so a peripheral glance reads
+"the box is working hard" without ever interpreting a colour.
+
+Design (frozen in plans/LED-DAEMON.md Part 2):
+
+  * Load metric is derived purely from network throughput (no CPU, no
+    conntrack). Per-port rx/tx byte counters are read from
+    /sys/class/net/<ifc>/statistics/{rx,tx}_bytes a few times per second,
+    converted to bps via delta-over-interval, and log10-mapped against a
+    fixed 10 Gbps chassis capacity (1 Mbps floor -> 10 Gbps ceiling).
+
+  * Chassis aggregate is the BUSIEST single port (max, not sum): a
+    saturated 10G WAN glows red even when every other port is idle.
+    Averaging would smear that signal away.
+
+  * The log-scaled load in [0,1] maps to the 32-step ramp (idle = faint
+    green, peak = bright blue). The step changes by at most +/-2 per tick
+    and each transition is a linear fade, so the LED visibly "breathes"
+    with load rather than snapping between colours.
+
+  * Idle heartbeat: at step 0 the faint green baseline is modulated by a
+    slow sine so the LED confirms the daemon is alive without annoying
+    the eye.
+
+Hardware: LP5812 on i2c-15 addr 0x6c, four single-colour LEDs forming one
+logical RGBW indicator, exposed as /sys/class/leds/status:{red,green,blue,
+white}/brightness (8-bit PWM, 0..255). The kernel `trigger` attribute must
+be 'none' for direct brightness writes to stick; this daemon forces it.
+
+Exit codes (mirror led.py / fan-check / caam-check):
+  0  clean shutdown
+  1  LP5812 driver missing (sysfs path absent)
+  3  sysfs write failed
+
+Runs in the foreground under systemd (Type=simple). SIGTERM/SIGINT fade
+the LED to off and exit cleanly. No external Python deps beyond stdlib.
+"""
+
+from __future__ import annotations
+
+import math
+import signal
+import sys
+import time
+from pathlib import Path
+
+PROG = "monoledd"
+
+LED_BASE = Path("/sys/class/leds")
+CHANNELS = ("red", "green", "blue", "white")   # canonical R G B W
+
+# ---- baked-in constants (edit + reinstall to retune) ----------------------
+
+TICK_MS = 333              # sampling + fade interval (~3 Hz); the LED "breathes" at this cadence
+MIN_FRAME_MS = 10          # hard floor on per-frame sleep during a fade
+STEP_CLAMP = 2             # max step change per tick (surge idle->saturated ~= 5 s)
+
+INTERFACES = ("eth0", "eth1", "eth2", "eth3", "eth4")
+
+PORT_CAP_BPS = 10e9        # fixed chassis-wide normaliser (see plan §2.3)
+LOG_FLOOR_BPS = 1e6        # 1 Mbps  -> step ~1
+LOG_CEIL_BPS = 10e9        # 10 Gbps -> step 15
+
+IDLE_HEARTBEAT = True      # slow sine on the faint-green idle colour
+HEARTBEAT_PERIOD_S = 4.0   # one full breathe per period at idle
+HEARTBEAT_DEPTH = 0.5      # +/- fraction of the idle B/G baseline
+
+LOG_INTERVAL_S = 30.0      # periodic status line to the journal
+
+# 32-step load ramp (RRGGBBWW hex) — identical to the manual `led` tool's
+# baked-in PALETTE (board/scripts/led.py), so the two tools agree on colour
+# semantics. Idle = faint green baseline; climbs through green -> yellow ->
+# orange -> amber -> pink -> purple -> white -> blue as load rises.
+PALETTE = (
+    "00020000",   #  0  idle: v.v.v. dim green (min traffic)
+    "00080000",   #  1  v.v. dim light green
+    "00100000",   #  2  v. dim light green
+    "00200000",   #  3  dim green
+    "08200000",   #  4  dim green/yellow
+    "10200000",   #  5  dim yellow/green
+    "20180000",   #  6  dim yellow
+    "30100000",   #  7  dim yellow/orange (slow traffic phase)
+    "40080000",   #  8  orange
+    "50000000",   #  9  dark orange/red
+    "60080000",   # 10  dark orange/amber
+    "80100000",   # 11  dark amber
+    "a0080000",   # 12  amber
+    "a0100000",   # 13  bright amber
+    "a0100200",   # 14  amber/pink
+    "a0100800",   # 15  pink/amber (moderate traffic phase)
+    "80101000",   # 16  bright pink
+    "60101000",   # 17  pink/purple
+    "60101804",   # 18  purple
+    "40081808",   # 19  purple/white
+    "20081010",   # 20  white/purple
+    "08000820",   # 21  dim white (heavy traffic phase)
+    "00000040",   # 22  off-white
+    "00002040",   # 23  neutral white
+    "00004040",   # 24  cool white
+    "00006020",   # 25  ice white
+    "00007010",   # 26  ice blue
+    "00009008",   # 27  light blue
+    "0000a000",   # 28  dim dark blue
+    "0000c000",   # 29  dark blue
+    "0000e000",   # 30  bright Blue
+    "0000ff00",   # 31  v.bright Blue (max traffic)
+)
+
+
+def _parse_hex8(s: str) -> tuple[int, int, int, int]:
+    return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16), int(s[6:8], 16))
+
+
+STATES = tuple(_parse_hex8(c) for c in PALETTE)
+N_STATES = len(STATES)
+
+
+# ---- logging --------------------------------------------------------------
+
+def log(msg: str) -> None:
+    print(f"{PROG}: {msg}", file=sys.stderr, flush=True)
+
+
+def die(msg: str, code: int) -> None:
+    log(msg)
+    sys.exit(code)
+
+
+# ---- low-level sysfs ------------------------------------------------------
+
+def led_path(channel: str) -> Path:
+    return LED_BASE / f"status:{channel}"
+
+
+def verify_driver() -> None:
+    for ch in CHANNELS:
+        if not led_path(ch).is_dir():
+            die(f"{led_path(ch)} not found — LP5812 driver not loaded?", 1)
+
+
+def wait_for_driver(timeout_s: float = 30.0) -> None:
+    """Bounded wait for the LP5812 sysfs nodes. The i2c-15 probe can land
+    slightly after multi-user.target; rather than fail and let systemd
+    restart-storm, poll here for a short window first."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if all(led_path(ch).is_dir() for ch in CHANNELS):
+            return
+        time.sleep(0.5)
+    verify_driver()  # still missing -> hard fail (exit 1)
+
+
+def ensure_trigger_none(channel_dir: Path) -> None:
+    trig = channel_dir / "trigger"
+    try:
+        current = trig.read_text()
+    except OSError:
+        return
+    if "[none]" in current:
+        return
+    try:
+        trig.write_text("none")
+    except OSError as e:
+        die(f"failed to set trigger=none on {channel_dir} ({e})", 3)
+
+
+def claim_triggers() -> None:
+    for ch in CHANNELS:
+        ensure_trigger_none(led_path(ch))
+
+
+def write_brightness(channel: str, value: int) -> None:
+    try:
+        (led_path(channel) / "brightness").write_text(str(value))
+    except OSError as e:
+        die(f"failed to write {value} to {led_path(channel)}/brightness ({e})", 3)
+
+
+def read_brightness(channel: str) -> int:
+    try:
+        return int((led_path(channel) / "brightness").read_text().strip())
+    except OSError:
+        return 0
+
+
+def write_rgbw_now(rgbw: tuple[int, int, int, int]) -> None:
+    for ch, val in zip(CHANNELS, rgbw):
+        write_brightness(ch, val)
+
+
+def fade_to(target: tuple[int, int, int, int], duration_ms: int) -> None:
+    """Linear-fade from the current LED state to `target` over duration_ms.
+
+    Always consumes ~duration_ms of wall-clock (sleeping through it even when
+    there is nothing to animate) so the caller can use it as the tick pacer."""
+    if duration_ms <= 0:
+        write_rgbw_now(target)
+        return
+
+    cur = tuple(read_brightness(ch) for ch in CHANNELS)
+    if cur == target:
+        time.sleep(duration_ms / 1000.0)
+        return
+
+    frame_ms = max(MIN_FRAME_MS, duration_ms // 10)
+    frames = max(1, duration_ms // frame_ms)
+    for i in range(1, frames + 1):
+        t = i / frames
+        write_rgbw_now(tuple(
+            round(c + (g - c) * t) for c, g in zip(cur, target)
+        ))
+        if i < frames:
+            time.sleep(frame_ms / 1000.0)
+
+
+# ---- throughput sampling --------------------------------------------------
+
+def read_counter(path: Path) -> int:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return -1
+
+
+def sample_port_bytes() -> dict[str, int]:
+    """Return {ifc: rx_bytes+tx_bytes} for each configured interface.
+
+    A missing interface yields -1 (skipped by the caller)."""
+    out: dict[str, int] = {}
+    for ifc in INTERFACES:
+        base = Path(f"/sys/class/net/{ifc}/statistics")
+        rx = read_counter(base / "rx_bytes")
+        tx = read_counter(base / "tx_bytes")
+        out[ifc] = rx + tx if (rx >= 0 and tx >= 0) else -1
+    return out
+
+
+def load_to_step(load: float) -> int:
+    """Map load in [0,1] to a ramp index."""
+    return max(0, min(N_STATES - 1, round(load * (N_STATES - 1))))
+
+
+def compute_load(prev: dict[str, int], cur: dict[str, int], dt_s: float) -> float:
+    """Log-scaled chassis load in [0,1] = max over ports of
+    log10(bps) normalised against the fixed capacity curve."""
+    if dt_s <= 0:
+        return 0.0
+
+    log_floor = math.log10(LOG_FLOOR_BPS)
+    log_ceil = math.log10(LOG_CEIL_BPS)
+    span = log_ceil - log_floor
+
+    best = 0.0
+    for ifc in INTERFACES:
+        p, c = prev.get(ifc, -1), cur.get(ifc, -1)
+        if p < 0 or c < 0 or c < p:
+            continue
+        bps = (c - p) * 8 / dt_s
+        if bps <= LOG_FLOOR_BPS:
+            port_log = 0.0
+        else:
+            port_log = (math.log10(bps) - log_floor) / span
+        best = max(best, port_log)
+    return max(0.0, min(1.0, best))
+
+
+def heartbeat_rgbw(t: float) -> tuple[int, int, int, int]:
+    """Faint-green idle colour modulated by a slow sine (breathe)."""
+    base = STATES[0]
+    phase = math.sin(2 * math.pi * t / HEARTBEAT_PERIOD_S)
+    # modulate only the G/B channels around their baseline
+    g = max(0, min(255, round(base[1] * (1 + HEARTBEAT_DEPTH * phase))))
+    b = max(0, min(255, round(base[2] * (1 + HEARTBEAT_DEPTH * phase))))
+    return (base[0], g, b, base[3])
+
+
+# ---- main loop ------------------------------------------------------------
+
+def install_cleanup() -> None:
+    def _cleanup(*_):
+        try:
+            write_rgbw_now((0, 0, 0, 0))
+        finally:
+            sys.exit(0)
+    signal.signal(signal.SIGINT, _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
+
+
+def main() -> int:
+    wait_for_driver()
+    claim_triggers()
+    install_cleanup()
+
+    # Seed the baseline and settle on idle before entering the loop.
+    prev = sample_port_bytes()
+    cur_step = 0
+    fade_to(STATES[0], TICK_MS)
+
+    last_log = time.monotonic()
+    last_t = time.monotonic()
+    missing_logged: set[str] = set()
+
+    log(f"started: {len(INTERFACES)} ports, {N_STATES} states, "
+        f"tick={TICK_MS}ms cap={PORT_CAP_BPS/1e9:.0f}Gbps")
+
+    while True:
+        now = time.monotonic()
+        dt_s = now - last_t
+        last_t = now
+
+        cur = sample_port_bytes()
+
+        # Warn once per missing interface (hot-plug / VPP ports may appear late).
+        for ifc, v in cur.items():
+            if v < 0 and ifc not in missing_logged:
+                log(f"interface {ifc} not present yet — skipping")
+                missing_logged.add(ifc)
+
+        load = compute_load(prev, cur, dt_s)
+        prev = cur
+
+        target_step = load_to_step(load)
+        target_step = max(0, min(N_STATES - 1,
+                                 max(cur_step - STEP_CLAMP,
+                                     min(cur_step + STEP_CLAMP, target_step))))
+        cur_step = target_step
+
+        if IDLE_HEARTBEAT and cur_step == 0:
+            target = heartbeat_rgbw(now)
+        else:
+            target = STATES[cur_step]
+
+        fade_to(target, TICK_MS)
+
+        if now - last_log >= LOG_INTERVAL_S:
+            last_log = now
+            log(f"load={load:.3f} step={cur_step} rgbw={target}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

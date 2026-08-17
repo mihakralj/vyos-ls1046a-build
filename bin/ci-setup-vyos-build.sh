@@ -667,6 +667,17 @@ chmod +x "$CHROOT/usr/local/bin/ynl"
 cp board/scripts/led.py "$CHROOT/usr/local/bin/led"
 chmod +x "$CHROOT/usr/local/bin/led"
 
+### Load-driven status LED daemon: `monoledd` samples per-port rx/tx byte
+### counters ~3x/sec, log-maps the busiest port's throughput to the same
+### 32-step ramp as `led`, and fades the LP5812 RGBW LED so it "breathes"
+### with network load. Self-contained Python 3 (stdlib only), runs as root
+### like fan-pid, enabled via tmpfiles (live-build breaks systemctl enable).
+### Installed as /usr/local/bin/monoledd (no .py suffix, fan-pid/led convention).
+cp board/scripts/monoledd "$CHROOT/usr/local/bin/monoledd"
+chmod +x "$CHROOT/usr/local/bin/monoledd"
+cp board/systemd/monoledd.service "$CHROOT/etc/systemd/system/monoledd.service"
+cp board/systemd/monoledd.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/monoledd.conf"
+
 ### Boot-complete fan whistle is now produced by fan-pid itself
 ### (play_startup_whistle()).  The standalone boot-complete-notify
 ### service was deleted to eliminate the systemd-ordering race over

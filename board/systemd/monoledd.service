@@ -1,0 +1,36 @@
+[Unit]
+Description=Load-driven status LED daemon for LS1046A Mono Gateway DK
+Documentation=file:///usr/local/bin/monoledd
+# Run after sysfs/leds devices exist. The LP5812 status LED is DT-driven and
+# stable across boots (unlike hwmon numbering), but its i2c-15 probe can land
+# slightly after multi-user.target, so the daemon itself does a bounded wait
+# for the sysfs nodes at startup and systemd retries via Restart=on-failure.
+After=sysinit.target systemd-modules-load.service
+# Board gate: only Mono Gateway DK has the LP5812 status LED.
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/monoledd
+Restart=on-failure
+RestartSec=5
+# Daemon fades the LED to off and exits cleanly on SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+# Hardening: needs RW on /sys/class/leds/status:* only; no network, no exec.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# /sys is mounted ro under ProtectSystem=strict; LED brightness writes need rw.
+ReadWritePaths=/sys/class/leds
+
+[Install]
+WantedBy=multi-user.target
