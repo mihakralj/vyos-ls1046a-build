@@ -14,7 +14,7 @@ index 26eb177..9ecc15d 100755
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """
      Return list of blocked options if interface is a bond member
-@@ -313,6 +317,26 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -313,6 +317,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
              raise ConfigError(
                  f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)'
              )
