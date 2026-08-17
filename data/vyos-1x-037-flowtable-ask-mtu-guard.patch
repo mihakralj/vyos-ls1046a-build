@@ -8,9 +8,9 @@ index cc58ead..da385b0 100755
          raise ConfigError(f'Interface "{ifname}" does not support hardware offload')
  
 +    # LS1046A ASK2 (2026-08-17): a hardware flowtable engages FMan FE
-+    # forwarding, validated across a bounded MTU range (1280..2500, the
-+    # smallest and largest sizes exercised end-to-end). The DPAA1 RX pool is
-+    # a single order-0 page; frames above the ceiling wedge the FMan RX path
++    # forwarding is bounded to the order-1 RX buffer's conservative MTU range
++    # (1280..7000). The DPAA1 RX pool is one contiguous 8 KiB order-1 page;
++    # frames above the ceiling can overrun the one-buffer FMan RX contract
 +    # (cold-boot-only recovery), and below the floor is untested. Arming a
 +    # hardware flowtable on an interface whose MTU is outside this range can
 +    # brick connectivity remotely. Read the authoritative live MTU from sysfs
@@ -18,7 +18,7 @@ index cc58ead..da385b0 100755
 +    # 1500 is inside the range, so standard interfaces pass. Widen once a
 +    # larger range is validated on the FMan RX pool.
 +    ASK_FT_MTU_MIN = 1280
-+    ASK_FT_MTU_MAX = 2500
++    ASK_FT_MTU_MAX = 7000
 +    mtu_path = f'/sys/class/net/{ifname}/mtu'
 +    try:
 +        with open(mtu_path) as f:

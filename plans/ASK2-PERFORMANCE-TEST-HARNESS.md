@@ -29,7 +29,7 @@ The validated MTU battery is:
 1280, 1500, 2000, 2500
 ```
 
-Do not test MTU 3000. MTU 576 is rejected by VyOS while IPv6 link-local is enabled, because the minimum interface MTU is then 1280.
+This is the **validated order-0 baseline battery**. F-203 changes the DPAA RX pool to one contiguous order-1/8 KiB buffer and raises the candidate ASK clamp to 7000; that expanded range is pending a separate cold-boot validation battery and must not be treated as validated by the results below. MTU 576 is rejected by VyOS while IPv6 link-local is enabled, because the minimum interface MTU is 1280.
 
 ---
 
@@ -500,7 +500,7 @@ Post-test:
 - TCP routed-IPv4 benchmark only — not a packet-loss or minimum-frame packet-rate test.
 - Aggregate is bounded by the 10G endpoints and physical path; it does not establish the absolute FMan ceiling.
 - VLAN, IPv6, bridge, PPPoE, tunnel, and IPsec offload are out of scope.
-- MTU 3000 is prohibited for this harness.
+- The published results validate only MTU 1280–2500 on order-0 buffers. F-203's order-1 candidate range (up to 7000) requires a fresh cold-boot battery before publication.
 - MTU below 1280 is outside the VyOS interface contract with IPv6 link-local enabled.
 - The physical-error counter is cumulative; interpret it as a delta.
 - ICMP may be blocked by HELGA's Windows firewall; use a short TCP iperf2 probe for path readiness.

@@ -9,7 +9,7 @@ index 26eb177..9ecc15d 100755
  
 +# ASK2 FMan FE offload MTU bounds validated on LS1046A hardware.
 +ASK_OFFLOAD_MTU_MIN = 1280
-+ASK_OFFLOAD_MTU_MAX = 2500
++ASK_OFFLOAD_MTU_MAX = 7000
 +
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """
@@ -18,10 +18,11 @@ index 26eb177..9ecc15d 100755
              raise ConfigError(
                  f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)'
              )
-+        # ASK FMan FE forwarding is validated only across the tested MTU range
-+        # on this board. The DPAA1 RX pool is a single order-0 page; frames
-+        # above the validated ceiling wedge the FMan RX path (cold-boot-only
-+        # recovery), and below the validated floor is untested. Clamp the MTU
++        # ASK FMan FE forwarding is bounded to the order-1 RX buffer range on
++        # this board. The DPAA1 RX pool is one contiguous 8 KiB order-1 page
++        # (F-203); frames above the ceiling overrun the one-buffer FMan RX
++        # contract and wedge RX (cold-boot-only recovery), and below the floor
++        # is untested. Clamp the MTU
 +        # to [ASK_OFFLOAD_MTU_MIN, ASK_OFFLOAD_MTU_MAX] and fail the commit
 +        # closed outside it, so a remote MTU change on an ASK interface cannot
 +        # brick connectivity. The default 1500 is inside the range, so

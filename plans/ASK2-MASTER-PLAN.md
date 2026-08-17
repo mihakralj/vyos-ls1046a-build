@@ -257,13 +257,20 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
    ~5.7–6.6 Gbit/s across MTU 1280–2500 with all four cores loaded; hardware
    reaches ~10 Gbit/s at ~3% CPU. Vendor cdx.ko measured 8.58 Gbit/s via the
    same terminal class.
-10. **Validated MTU / RX-buffer policy (supersedes the old order-4/MTU-9000
-    claim):** the shipping mainline DPAA RX pool uses one order-0 4096-byte
-    page (`DPAA_BP_RAW_SIZE`), no RX scatter/gather reassembly. ASK preview
-    operation is clamped to the end-to-end tested range **1280–2500 inclusive**
-    by the interface and hardware-flowtable validators. MTU 3000 is explicitly
-    prohibited; values below 1280 are outside the VyOS IPv6-link-local
-    contract. Change MTU only while ASK is disengaged, keep every endpoint
+10. **MTU / RX-buffer policy.** Each DPAA RX frame must fit ONE contiguous
+    buffer (`dpaa_change_mtu` enforces it; oversized frames wedge FMan RX,
+    cold-boot recovery only). **F-203 (2026-08-17) raises the RX buffer from
+    order-0/4 KiB to order-1/8 KiB** (`DPAA_BP_ORDER=1`,
+    `DPAA_BP_RAW_SIZE=8192`, usable ~7808), so a large frame stays contiguous
+    and remains ASK-FE-offloadable — the deliberate alternative to RX
+    scatter/gather, which would force jumbo onto the software path. The VyOS
+    interface and hardware-flowtable validators clamp ASK MTU to **1280–7000
+    inclusive** (conservative margin under the ~7530 order-1 ceiling); values
+    below 1280 are outside the VyOS IPv6-link-local contract. **[NOTE]**
+    Order-0-era measurements (1280–2500 battery, ~10 Gbit/s) predate F-203 and
+    the 7000 ceiling is **pending cold-boot board validation**; TX-SGT and
+    XDP-copy scratch pages remain order-0. The old order-4/MTU-9000 claim is
+    superseded. Change MTU only while ASK is disengaged, keep every endpoint
     matched, and restore all endpoints to 1500 on abort.
 11. **MURAM allocation strategy:** slab pools for fixed-size FMan objects (CC
     nodes, HM entries, policer profiles, ADs); segregated-fit power-of-two
@@ -1778,8 +1785,10 @@ open defects.
   `10.99.1.0/24 via 10.99.2.185`. Use iperf2 `--full-duplex -P 8`.
 - **Historical harness:** `plans/TRAFFIC-HARNESS.md` describes the old LXC/
   third-board topology; retain for history, not current performance runs.
-- **MTU contract:** 1280–2500 inclusive for ASK, matched end-to-end; 3000
-  prohibited; restore all endpoints to 1500 on exit/abort (§2.10).
+- **MTU contract:** clamp 1280–7000 inclusive for ASK (order-1 buffers, F-203,
+  §2.10), matched end-to-end; restore all endpoints to 1500 on exit/abort. The
+  7000 ceiling is pending cold-boot board validation; order-0-era batteries
+  topped out at 2500.
 - **ISO deployment invariant:** every successful CI ISO → lxc200
   `/srv/tftp/iso/<versioned>.iso`; refresh **both** symlinks —
   `latest.iso` **and** `latest.iso.minisig` (a stale sidecar fails signature
