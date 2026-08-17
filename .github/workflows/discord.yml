@@ -31,8 +31,8 @@ on:
         type: string
         required: false
         default: 'Rolling'
-      image_name:
-        description: 'ISO image name produced by the build'
+      image_iso:
+        description: 'GitHub release ISO asset filename from build_iso.outputs.image_iso'
         type: string
         required: false
         default: 'n/a'
@@ -55,7 +55,7 @@ jobs:
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_ISO: ${{ inputs.image_iso }}
           BUILD_VERSION: ${{ inputs.build_version }}
           RELEASE_TYPE: ${{ inputs.release_type }}
           BUILD_BRANCH: ${{ inputs.build_branch }}
@@ -80,7 +80,14 @@ jobs:
           INSTALL_URL="https://github.com/${REPO}/blob/main/INSTALL.md"
           NOTES_URL="https://github.com/${REPO}/releases/tag/${BUILD_VERSION}"
           REPO_URL="https://github.com/${REPO}"
-          ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}"
+
+          # build_iso's image_iso output is the actual GitHub release asset
+          # filename (including `.iso`). Normalize defensively so an old/manual
+          # caller that passes the artifact stem still gets exactly one suffix.
+          # The old notification consumed image_name (the suffix-less Actions
+          # artifact name), so its direct-upgrade command always 404'd.
+          ISO_ASSET="${IMAGE_ISO%.iso}.iso"
+          ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${ISO_ASSET}"
 
           NOTES_LINK="[Read changelog](${NOTES_URL})"
           INSTALL_LINK="[View instructions](${INSTALL_URL})"
