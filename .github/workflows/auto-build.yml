@@ -40,6 +40,8 @@ on:
         required: false
       MINISIGN_PRIVATE_KEY:
         required: false
+      DISCORD_BOT_KEY:
+        required: false
 
 env:
   # Reuse the populated ISO-build chroot across runs on this persistent
@@ -553,3 +555,18 @@ jobs:
           delete_tag_pattern: "-rolling"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    needs:
+      - build_iso
+    # Post only for builds on main, and always (so failures are reported too).
+    if: ${{ always() && github.ref_name == 'main' }}
+    uses: ./.github/workflows/discord.yml
+    with:
+      status: ${{ needs.build_iso.result }}
+      build_version: ${{ needs.build_iso.outputs.build_version }}
+      build_branch: ${{ github.ref_name }}
+      release_type: 'Rolling'
+      image_name: ${{ needs.build_iso.outputs.image_name }}
+    secrets:
+      DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
