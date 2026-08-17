@@ -2699,6 +2699,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-202 production ehash flow lifecycle serialization"
 fi
 
+# F-203 (2026-08-17): order-1 (8 KiB) DPAA RX buffers.  The mainline
+# order-0/4K pool caps one contiguous RX frame at ~3.6K even though the
+# mEMAC/FMan port allows 9600; oversized frames hit FM_FD_ERR_PHYSICAL and
+# wedge RX.  Make RX pool alloc/free order-aware (DPAA_BP_ORDER=1) while
+# leaving TX-SGT/XDP-copy scratch pages order-0.  Keeps jumbo-ish frames
+# contiguous and eligible for ASK FE HW offload (unlike RX SG).
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_203.py" 2>&1
+    echo "### dpaa_eth.c: F-203 order-1 8KiB RX buffers (contiguous jumbo)"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
