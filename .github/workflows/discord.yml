@@ -62,9 +62,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${JOB_STATUS}" = "success" ]; then
+          # Channel policy:
+          #   main + success           -> release channel 1494357051378503862
+          #   everything else          -> dev/failure channel 1519025519327318239
+          #     (main failures, and ALL non-main builds success or failure)
+          # Only a successful main build produces a published GitHub release, so
+          # only that case earns the release channel + the rich upgrade embed.
+          if [ "${JOB_STATUS}" = "success" ] && [ "${BUILD_BRANCH}" = "main" ]; then
+            IS_RELEASE=1
             CHANNEL_ID="1494357051378503862"
           else
+            IS_RELEASE=0
             CHANNEL_ID="1519025519327318239"
           fi
 
@@ -94,15 +102,19 @@ jobs:
           REPO_LINK="[Repository](${REPO_URL})"
           UPGRADE_CMD="\`\`\`"$'\n'"add system image ${ISO_URL}"$'\n'"\`\`\`"
 
-          if [ "${JOB_STATUS}" = "success" ]; then
+          if [ "${IS_RELEASE}" = "1" ]; then
             TITLE="📦 New VyOS LS1046A Build"
             COLOR=5763719
+          elif [ "${JOB_STATUS}" = "success" ]; then
+            # Non-main success: report it, but it is not a published release.
+            TITLE="✅ VyOS LS1046A Build Succeeded (${BUILD_BRANCH})"
+            COLOR=5793266
           else
             TITLE="❌ VyOS LS1046A Build Failed"
             COLOR=15548997
           fi
 
-          if [ "${JOB_STATUS}" = "success" ]; then
+          if [ "${IS_RELEASE}" = "1" ]; then
             PAYLOAD=$(jq -n \
               --arg title      "${TITLE}" \
               --argjson color  "${COLOR}" \
@@ -131,12 +143,20 @@ jobs:
                 }]
               }')
           else
+            # Compact embed for main failures and all non-main builds
+            # (success or failure). No release/upgrade URL exists for these.
+            if [ "${JOB_STATUS}" = "success" ]; then
+              STATUS_TEXT="Succeeded (no release published — non-main branch)"
+            else
+              STATUS_TEXT="Failed"
+            fi
             PAYLOAD=$(jq -n \
               --arg title      "${TITLE}" \
               --argjson color  "${COLOR}" \
               --arg version    "${DISPLAY_VERSION}" \
               --arg branch     "${BUILD_BRANCH}" \
               --arg release    "${RELEASE_TYPE}" \
+              --arg status     "${STATUS_TEXT}" \
               --arg run_url    "https://github.com/${REPO}/actions/runs/${RUN_ID}" \
               --arg run_number "${RUN_NUMBER}" \
               --arg footer     "${BUILD_HUMAN}" \
@@ -148,6 +168,7 @@ jobs:
                     { name: "Version", value: $version, inline: true },
                     { name: "Branch",  value: $branch,  inline: true },
                     { name: "Release", value: $release, inline: true },
+                    { name: "Status",  value: $status,  inline: false },
                     { name: "Run",     value: "[#\($run_number)](\($run_url))", inline: false }
                   ],
                   footer: { text: $footer }

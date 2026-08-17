@@ -560,14 +560,15 @@ jobs:
     needs:
       - build_iso
       - publish
-    # Post only for builds on main, and always (so build or publish failures are
-    # reported). A success notification MUST wait for publish: otherwise the
-    # Discord command can race the release upload and return a transient 404
-    # even when its filename is correct.
-    if: ${{ always() && github.ref_name == 'main' }}
+    # Notify for every branch and every outcome. For main, success requires
+    # BOTH build_iso and publish so the release asset exists before Discord
+    # posts its upgrade URL. For non-main branches publish is intentionally
+    # skipped, so status follows build_iso alone. discord.yml routes only
+    # main+success to the release channel; every other case goes to dev/failure.
+    if: ${{ always() }}
     uses: ./.github/workflows/discord.yml
     with:
-      status: ${{ needs.build_iso.result == 'success' && needs.publish.result == 'success' && 'success' || 'failure' }}
+      status: ${{ ((github.ref_name == 'main' && needs.build_iso.result == 'success' && needs.publish.result == 'success') || (github.ref_name != 'main' && needs.build_iso.result == 'success')) && 'success' || 'failure' }}
       build_version: ${{ needs.build_iso.outputs.build_version }}
       build_branch: ${{ github.ref_name }}
       release_type: 'Rolling'
