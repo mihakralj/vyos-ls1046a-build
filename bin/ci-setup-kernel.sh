@@ -2484,6 +2484,18 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c/fman_pcd_kg.c/fman_pcd.c: F-183 Delta-1 dispatch (CCBS word-3, group-root miss-slot FE_ENTER)"
 fi
 
+# F-201 (2026-08-17): F-051 unconditionally zeroed kgse_hc immediately
+# before every scheme write, clobbering the 128-FQ distribution computed by
+# keygen_port_hashing_init() for all five RSS schemes.  Live .185 readback:
+# schemes 0-4 all had range=0/HMASK=0 (one FQ), and 8 distinct software-
+# forwarding flows all landed on CPU0.  Preserve the computed kgse_hc for RSS/
+# policer schemes (next_engine 0/1); retain the clear only for CC/FE exact-match
+# (next_engine 2/3). Must run after F-183 (its anchor includes F-051's block).
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_201.py" 2>&1
+    echo "### fman_keygen.c: F-201 RSS kgse_hc preserved (128-FQ spread)"
+fi
+
 # F-184 (2026-08-12): the first live `fe_obs arm` (patch 0169's canary
 # discriminator, until then only compile-verified) panicked the kernel on
 # .185 -- reproduced twice:
