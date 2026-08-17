@@ -201,9 +201,17 @@ hit_engage() {
         info "HIT-TEST: pre-inserted flow key=$preflow (bucket will be computed by kernel)"
     fi
 
-    # Step 10 (final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active)
-    # fe_arm engage ABI is: engage <port> <fe_enter_off>.
-    # EKFC and MISS FQID are configured/resolved in-kernel, not parsed here.
+    # Step 10: the fe_arm ABI cannot carry EKFC. Reconfigure the bound
+    # scheme explicitly while it is idle so KeyGen extracts exactly the
+    # preinserted key width. F-169 performs disable → mutate → re-enable.
+    # The ASK FE harness uses scheme 4; do not infer this from the port ID.
+    [ -w "$PCD_BASE/fe_kg_ekfc" ] \
+        || die "fe_kg_ekfc unavailable; cannot verify EKFC=0x$ekfc"
+    echo "set 4 $ekfc" > "$PCD_BASE/fe_kg_ekfc" \
+        || die "scheme 4 EKFC configuration failed"
+    info "HIT-TEST: scheme 4 EKFC configured to 0x$ekfc"
+
+    # Step 11 (final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active).
     echo "engage $PORT $fe_enter_off" > "$PCD_BASE/fe_arm" \
         || die "fe_arm engage failed"
 
@@ -220,22 +228,33 @@ hit_engage() {
 # hit_disengage — teardown FE chain in reverse build order.
 # ---------------------------------------------------------------------------
 hit_disengage() {
+    local armed_ports
+
     info "HIT-TEST disengage: port $PORT..."
 
-    # F-074: pool delete BEFORE scheme disarm
-    echo "del $PORT"       > "$PCD_BASE/fe_port"      2>/dev/null || true
-    echo "disengage $PORT" > "$PCD_BASE/fe_arm"       2>/dev/null || true
+    # F-076's handler assumes the requested port has an active FE arm and
+    # dereferences its state without an absent-port guard. Avoid invoking it
+    # after a failed engage or a prior teardown.
+    armed_ports=$(grep '^Armed ports:' "$PCD_BASE/fe_arm" 2>/dev/null || true)
+    case " $armed_ports " in
+        *" $PORT "*) ;;
+        *)
+            info "HIT-TEST: port $PORT is already disarmed — no teardown needed"
+            return
+            ;;
+    esac
 
-    # Tear down FE chain (reverse build order per proven 7-step sequence)
-    echo "clear" > "$PCD_BASE/fe_flow"       2>/dev/null || true
-    echo "clear" > "$PCD_BASE/fe_enter"      2>/dev/null || true
-    echo "clear" > "$PCD_BASE/fe_enq"        2>/dev/null || true
-    echo "clear" > "$PCD_BASE/fe_hashfe"       2>/dev/null || true
-    echo "clear" > "$PCD_BASE/fe_ehash"      2>/dev/null || true
-    echo "clear" > "$PCD_BASE/fe_singletons" 2>/dev/null || true
-    echo "put"   > "$PCD_BASE/fe_pool"       2>/dev/null || true
-
-    info "HIT-TEST: DISENGAGED — FE chain cleared"
+    # F-076's full-recovery handler is unsafe for this debugfs harness: an
+    # inactive call NULL-dereferences, and an active call rebooted the DUT.
+    # F-075's minimal ordering is safe: release the per-port FE workspace
+    # before disarming the FE arm. Do not clear shared objects or put fe_pool;
+    # __fman_pcd_fe_arm_disengage() owns that cleanup and F-136 keeps the
+    # shared chain warm.
+    echo "del $PORT" > "$PCD_BASE/fe_port" \
+        || die "FE per-port workspace release failed"
+    echo "disengage $PORT" > "$PCD_BASE/fe_arm" \
+        || die "FE disarm failed"
+    info "HIT-TEST: DISENGAGED — per-port state released; shared FE chain remains warm"
 }
 
 # ---------------------------------------------------------------------------
