@@ -2685,6 +2685,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-200 UPDATE_TTL routed-IPv4 opcode"
 fi
 
+# F-202 (2026-08-17): production fman_pcd_fe_flow_add/del violated the
+# fman_pcd_ehash_{add,del}_key contract requiring pcd->fe_lock. nft's async
+# nf_ft_offload_del workqueue raced per-key delete against duplicate delete /
+# clear / drain and panicked in list_del with LIST_POISON2. Serialize the
+# production wrappers and make an already-removed key idempotent.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_202.py" 2>&1
+    echo "### fman_pcd.c: F-202 production ehash flow lifecycle serialization"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
