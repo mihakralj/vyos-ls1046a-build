@@ -10,14 +10,18 @@ brightness rise with network throughput, so a peripheral glance reads
 Design (frozen in plans/LED-DAEMON.md Part 2):
 
   * Load metric is derived purely from network throughput (no CPU, no
-    conntrack). Per-port rx/tx byte counters are read from
-    /sys/class/net/<ifc>/statistics/{rx,tx}_bytes a few times per second,
-    converted to bps via delta-over-interval, and log10-mapped against a
-    fixed 10 Gbps chassis capacity (1 Mbps floor -> 10 Gbps ceiling).
+    conntrack). The primary source is the FMan QMI enqueue/dequeue TOTAL
+    FRAME counters (dcsr/qmi_err: fmqm_etfc / fmqm_dtfc), read a few times
+    per second, converted to frames/s via delta-over-interval, and
+    log10-mapped over a frame-rate curve (1 kfps floor -> 3 Mfps ceiling).
+    The FMan counts every frame it moves, so this tracks load whether a
+    frame is forwarded by the Linux kernel OR by the ASK/FMan hardware
+    classifier — the latter bypasses kernel netdev byte counters entirely,
+    so the old sysfs-bytes source read idle at full hardware line rate.
 
-  * Chassis aggregate is the BUSIEST single port (max, not sum): a
-    saturated 10G WAN glows red even when every other port is idle.
-    Averaging would smear that signal away.
+  * Fallback: if the FMan QMI debugfs node is unreadable (debugfs gated
+    off), the daemon degrades to per-port sysfs rx/tx byte rate (busiest
+    port, max not sum). That fallback only sees kernel-forwarded traffic.
 
   * The log-scaled load in [0,1] maps to the 32-step ramp (idle = faint
     green, peak = bright blue). The step changes by at most +/-2 per tick
@@ -61,9 +65,29 @@ TICK_MS = 333              # sampling + fade interval (~3 Hz); the LED "breathes
 MIN_FRAME_MS = 10          # hard floor on per-frame sleep during a fade
 STEP_CLAMP = 2             # max step change per tick (surge idle->saturated ~= 5 s)
 
+# Primary throughput source: the FMan QMI enqueue/dequeue TOTAL FRAME
+# counters. These count every frame that crosses the FMan<->QMan boundary,
+# so they track load whether a frame is forwarded by the Linux kernel OR by
+# the ASK/FMan hardware classifier (which bypasses kernel netdev counters
+# entirely). This is the only signal that reflects hardware-offloaded load.
+#   /sys/kernel/debug/fman_pcd/<N>/dcsr/qmi_err : fmqm_etfc / fmqm_dtfc
+# Both are 32-bit registers (wrap at 2^32) reported as unsigned decimal.
+QMI_ERR_PATH = Path("/sys/kernel/debug/fman_pcd/0/dcsr/qmi_err")
+COUNTER_MASK = 0xFFFFFFFF   # ETFC/DTFC are u32; mask deltas for wrap
+
+# Fallback source (kernel-forwarded traffic only): per-interface sysfs bytes.
+# Used only if the FMan QMI counters are unreadable (debugfs gated off).
 INTERFACES = ("eth0", "eth1", "eth2", "eth3", "eth4")
 
-PORT_CAP_BPS = 10e9        # fixed chassis-wide normaliser (see plan §2.3)
+# Load is log-mapped over FRAME RATE (frames/s), not bytes. Measured on this
+# board: ~1.2 Mfps at ~10 Gbit/s bidirectional 1500B; small frames push
+# higher. Floor -> idle, ceiling -> full ramp. Frame rate (not bps) is the
+# correct metric because the FMan counts frames, and it maps naturally to a
+# qualitative "how busy is the box" indicator regardless of packet size.
+LOG_FLOOR_FPS = 1e3        # 1 kfps  -> step ~0 (idle noise floor)
+LOG_CEIL_FPS = 3e6         # 3 Mfps  -> top of ramp (saturates the gauge)
+
+# Legacy bytes-mode fallback normalisers (only used in the sysfs fallback).
 LOG_FLOOR_BPS = 1e6        # 1 Mbps  -> step ~1
 LOG_CEIL_BPS = 10e9        # 10 Gbps -> step 15
 
@@ -228,10 +252,37 @@ def read_counter(path: Path) -> int:
         return -1
 
 
-def sample_port_bytes() -> dict[str, int]:
-    """Return {ifc: rx_bytes+tx_bytes} for each configured interface.
+def sample_qmi_frames() -> int:
+    """Return the FMan QMI chassis frame counter, or -1 if unavailable.
 
-    A missing interface yields -1 (skipped by the caller)."""
+    Parses fmqm_etfc (enqueue) and fmqm_dtfc (dequeue) from the dcsr/qmi_err
+    node and returns max(etfc, dtfc). Using the max tracks the busier of the
+    ingress/egress directions and avoids under-reporting a one-way flow. Both
+    are u32; wrap is handled by the caller's masked delta."""
+    try:
+        text = QMI_ERR_PATH.read_text()
+    except OSError:
+        return -1
+    etfc = dtfc = -1
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if parts[0] == "fmqm_etfc":
+            try: etfc = int(parts[1])
+            except ValueError: pass
+        elif parts[0] == "fmqm_dtfc":
+            try: dtfc = int(parts[1])
+            except ValueError: pass
+    if etfc < 0 and dtfc < 0:
+        return -1
+    return max(etfc, dtfc)
+
+
+def sample_port_bytes() -> dict[str, int]:
+    """Fallback: {ifc: rx_bytes+tx_bytes} per interface (kernel-forwarded
+    traffic only; blind to ASK hardware offload). A missing interface yields
+    -1 (skipped by the caller)."""
     out: dict[str, int] = {}
     for ifc in INTERFACES:
         base = Path(f"/sys/class/net/{ifc}/statistics")
@@ -241,14 +292,26 @@ def sample_port_bytes() -> dict[str, int]:
     return out
 
 
+def compute_load_fps(prev: int, cur: int, dt_s: float) -> float:
+    """Log-scaled load in [0,1] from the FMan QMI frame-rate delta."""
+    if dt_s <= 0 or prev < 0 or cur < 0:
+        return 0.0
+    frames = (cur - prev) & COUNTER_MASK   # u32 wrap-safe
+    fps = frames / dt_s
+    if fps <= LOG_FLOOR_FPS:
+        return 0.0
+    span = math.log10(LOG_CEIL_FPS) - math.log10(LOG_FLOOR_FPS)
+    val = (math.log10(fps) - math.log10(LOG_FLOOR_FPS)) / span
+    return max(0.0, min(1.0, val))
+
+
 def load_to_step(load: float) -> int:
     """Map load in [0,1] to a ramp index."""
     return max(0, min(N_STATES - 1, round(load * (N_STATES - 1))))
 
 
-def compute_load(prev: dict[str, int], cur: dict[str, int], dt_s: float) -> float:
-    """Log-scaled chassis load in [0,1] = max over ports of
-    log10(bps) normalised against the fixed capacity curve."""
+def compute_load_bytes(prev: dict[str, int], cur: dict[str, int], dt_s: float) -> float:
+    """Fallback-only load: max per-port sysfs byte rate (kernel path)."""
     if dt_s <= 0:
         return 0.0
 
@@ -297,8 +360,17 @@ def main() -> int:
     claim_triggers()
     install_cleanup()
 
-    # Seed the baseline and settle on idle before entering the loop.
-    prev = sample_port_bytes()
+    # Select the throughput source once at startup. Prefer the FMan QMI
+    # frame counters (see them under both SW and HW offload); fall back to
+    # per-interface sysfs bytes only if the debugfs node is unreadable.
+    use_qmi = sample_qmi_frames() >= 0
+    if use_qmi:
+        prev_q = sample_qmi_frames()
+        source = f"FMan QMI frames ({QMI_ERR_PATH})"
+    else:
+        prev_b = sample_port_bytes()
+        source = "sysfs bytes fallback (kernel-forwarded only — HW offload not counted)"
+
     cur_step = 0
     fade_to(STATES[0], TICK_MS)
 
@@ -306,24 +378,32 @@ def main() -> int:
     last_t = time.monotonic()
     missing_logged: set[str] = set()
 
-    log(f"started: {len(INTERFACES)} ports, {N_STATES} states, "
-        f"tick={TICK_MS}ms cap={PORT_CAP_BPS/1e9:.0f}Gbps")
+    log(f"started: {N_STATES} states, tick={TICK_MS}ms, source={source}")
 
     while True:
         now = time.monotonic()
         dt_s = now - last_t
         last_t = now
 
-        cur = sample_port_bytes()
-
-        # Warn once per missing interface (hot-plug / VPP ports may appear late).
-        for ifc, v in cur.items():
-            if v < 0 and ifc not in missing_logged:
-                log(f"interface {ifc} not present yet — skipping")
-                missing_logged.add(ifc)
-
-        load = compute_load(prev, cur, dt_s)
-        prev = cur
+        if use_qmi:
+            cur_q = sample_qmi_frames()
+            if cur_q < 0:
+                # Node vanished (e.g. debugfs unmounted) — degrade to fallback.
+                log("FMan QMI counter unreadable; switching to sysfs fallback")
+                use_qmi = False
+                prev_b = sample_port_bytes()
+                load = 0.0
+            else:
+                load = compute_load_fps(prev_q, cur_q, dt_s)
+                prev_q = cur_q
+        else:
+            cur_b = sample_port_bytes()
+            for ifc, v in cur_b.items():
+                if v < 0 and ifc not in missing_logged:
+                    log(f"interface {ifc} not present yet — skipping")
+                    missing_logged.add(ifc)
+            load = compute_load_bytes(prev_b, cur_b, dt_s)
+            prev_b = cur_b
 
         target_step = load_to_step(load)
         target_step = max(0, min(N_STATES - 1,
