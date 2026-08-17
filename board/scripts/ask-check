@@ -8,11 +8,19 @@
 # WHAT THIS TESTS
 # ============================================================================
 # ASK is the FMan-silicon hardware-offload dataplane: the operator turns it
-# on per-port, and from then on the FMan classifies, forwards, NATs, and
-# IPsec-terminates matching flows entirely in hardware, leaving the CPU idle.
-# When ASK is OFF the board runs the mainline kernel dataplane (RSS to kernel
-# RX queues); the VPP/AF_XDP overlay is a separate dataplane reported by
-# xsk-zc-check, not here.
+# on per-port, and from then on the FMan classifies and forwards matching
+# flows entirely in hardware, leaving the CPU idle. When ASK is OFF the board
+# runs the mainline kernel dataplane (RSS to kernel RX queues); the VPP/AF_XDP
+# overlay is a separate dataplane reported by xsk-zc-check, not here.
+#
+# PREVIEW SCOPE (2026-08-17): the validated hardware datapath is plain routed
+# IPv4 unicast TCP/UDP forwarding (L2 rewrite + TTL/checksum + direct-to-wire
+# TX). IPv6, NAT/PAT, VLAN push/pop, IPsec/ESP, and bridge/L2 switchdev are
+# NOT hardware-offloaded in this build — they fall back to the kernel software
+# path (correct forwarding, higher CPU). This tool reports those deferred
+# capabilities as [NOTE] "deferred", NOT [FAIL]: their absence is expected and
+# is not an ASK datapath failure. A [FAIL] here means a capability the plain
+# IPv4 hardware datapath actually requires is missing or broken.
 #
 # This script walks the ASK datapath bottom-up, from the silicon programming
 # layer to the operator CLI, in the order ASK brings itself up, and reports
@@ -95,6 +103,11 @@ record_ok()   { ok   "$@"; N_OK=$((N_OK+1));     }
 record_warn() { warn "$@"; N_WARN=$((N_WARN+1)); }
 record_fail() { fail "$@"; N_FAIL=$((N_FAIL+1)); EXIT=1; }
 record_skip() { skip "$@"; N_SKIP=$((N_SKIP+1)); }
+# record_defer: a capability intentionally OUT OF PREVIEW SCOPE (IPv6, NAT,
+# VLAN, IPsec, bridge). Reported as [NOTE] "deferred" and counted separately;
+# never sets EXIT. Absence is expected and flows fall back to software.
+N_DEFER=0
+record_defer() { note "deferred (software fallback, not in preview scope): $*"; N_DEFER=$((N_DEFER+1)); }
 
 # ---------------------------------------------------------------------------
 # Board gate
@@ -465,52 +478,35 @@ elif [ -d /sys/module/ask ]; then
     record_fail "ask.ko loaded but $ASK_DBGFS absent — debugfs interface not built"
 fi
 
-# L2 switchdev offload (bridged flows in hardware).
+# L2 switchdev offload is intentionally outside the preview scope. Bridged
+# flows remain in the kernel software path; ask_bridge.ko is not required.
 if [ -d /sys/module/ask_bridge ]; then
-    record_ok "ask_bridge.ko loaded (L2 switchdev offload)"
+    record_defer "bridge/L2 switchdev offload (ask_bridge.ko happens to be loaded)"
 else
-    record_fail "ask_bridge.ko not loaded — bridged/L2 flows will not offload"
+    record_defer "bridge/L2 switchdev offload (ask_bridge.ko not shipped)"
 fi
 
 # ===========================================================================
-# 7. Hardware IPsec offload (ESP packet-mode via CAAM)
+# 7. Deferred hardware features (software fallback)
 # ===========================================================================
-hdr "7) Hardware IPsec offload (ESP via CAAM)"
+hdr "7) Deferred features (kernel software fallback)"
 
-# CAAM (the SEC crypto block) must be healthy and share descriptors with the
-# FMan-initiated dequeue path, and each FMan netdev must advertise ESP offload.
+record_defer "IPv6 routing (v6 parser/key scaffold exists; HW insert returns -EOPNOTSUPP)"
+record_defer "NAT/PAT (FLOW_ACTION_MANGLE rewrite not implemented in FE)"
+record_defer "VLAN push/pop (T-M7-2 S2 opcode chain deferred)"
+record_defer "IPsec/ESP (ask_xfrm_state_add returns -EOPNOTSUPP fail-closed)"
+record_defer "multicast/broadcast and non-TCP/UDP L4"
+
+# CAAM is still useful to the kernel software/IPsec path, but is not an ASK
+# preview gate. Report its health as context without changing this tool's exit.
 if command -v caam-check >/dev/null 2>&1; then
     if caam-check >/dev/null 2>&1; then
-        record_ok "CAAM healthy (Job Rings / RNG / kernel crypto) — see caam-check for detail"
+        note "CAAM kernel crypto path healthy (not wired to ASK FE in this preview)"
     else
-        record_fail "CAAM unhealthy — run 'caam-check'; IPsec offload is impossible without it"
+        note "CAAM health check failed — affects kernel crypto, not ASK IPv4 forwarding"
     fi
-elif [ -d /sys/bus/platform/drivers/caam_jr ]; then
-    jrs=$(find /sys/bus/platform/drivers/caam_jr -maxdepth 1 -type l \
-          ! -name bind ! -name unbind ! -name uevent ! -name module 2>/dev/null | wc -l)
-    [ "$jrs" -gt 0 ] && record_ok "$jrs CAAM Job Ring(s) bound" \
-                     || record_fail "no CAAM Job Rings bound — IPsec offload impossible"
 else
-    record_fail "caam_jr driver absent — no hardware crypto"
-fi
-
-# Descriptor-sharing hook so FMan-dequeued frames reach SEC without the CPU.
-if [ -n "$KALLSYMS" ]; then
-    has_sym caam_qi_ext_consumer_register \
-        && record_ok "CAAM descriptor-sharing API present (FMan->SEC offload hook)" \
-        || record_fail "CAAM descriptor-sharing API missing — ASK cannot offload IPsec to SEC"
-fi
-
-# ESP packet-mode offload advertised on the FMan netdevs.
-if [ "${#DPAA_NETDEVS[@]}" -gt 0 ] && command -v ethtool >/dev/null 2>&1; then
-    iface="${DPAA_NETDEVS[0]}"
-    esp_off=$(ethtool -k "$iface" 2>/dev/null | awk -F: '/^esp-hw-offload/ {gsub(/ /,"",$2); print $2}')
-    case "$esp_off" in
-        on|"on[fixed]") record_ok "$iface advertises ESP hardware offload (esp-hw-offload=$esp_off)" ;;
-        *)              record_fail "$iface does not advertise ESP hardware offload (esp-hw-offload=${esp_off:-absent})" ;;
-    esac
-else
-    record_skip "no DPAA netdevs or ethtool — cannot probe ESP offload advertisement"
+    note "caam-check unavailable — kernel crypto context not collected"
 fi
 
 # ===========================================================================
@@ -543,8 +539,9 @@ if [ -z "$ASK_DMESG" ]; then
     record_warn "no ASK-related lines in dmesg (ring buffer may have wrapped)"
 else
     errs=$(echo "$ASK_DMESG" \
-        | grep -iE 'error|failed|cannot|unable|refused|denied|invalid|-ENOMEM|EOPNOTSUPP|stall|park|drift|leak' \
-        | grep -ivE 'refusing to load.*ucode' || true)
+        | grep -iE 'error|failed|cannot|unable|refused|denied|invalid|-ENOMEM|stall|park|drift|leak' \
+        | grep -ivE 'refusing to load.*ucode' \
+        | grep -ivE 'EOPNOTSUPP|fall.?back|deferred|IPv6|xfrm|esp' || true)
     if [ -z "$errs" ]; then
         record_ok "no error-class lines in the ASK dmesg trail ($(echo "$ASK_DMESG" | wc -l) line(s))"
     else
@@ -564,15 +561,18 @@ total=$((N_OK + N_WARN + N_FAIL + N_SKIP))
 printf "  %3d/%3d %sOK%s  " "$N_OK" "$total" "$C_GREEN" "$C_RST"
 printf "%3d %sWARN%s  "     "$N_WARN" "$C_YELLOW" "$C_RST"
 printf "%3d %sFAIL%s  "     "$N_FAIL" "$C_RED"    "$C_RST"
-printf "%3d %sSKIP%s\n"     "$N_SKIP" "$C_BLUE"   "$C_RST"
+printf "%3d %sSKIP%s  "     "$N_SKIP" "$C_BLUE"   "$C_RST"
+printf "%3d DEFER\n"        "$N_DEFER"
 echo
-note "FAIL = a capability the ASK dataplane requires is missing or broken here"
-note "SKIP = could not be tested in this environment (privilege / tool / board)"
+note "FAIL  = a capability the plain-IPv4 ASK datapath requires is missing/broken"
+note "DEFER = intentionally out of preview scope (IPv6/NAT/VLAN/IPsec/bridge) — software fallback"
+note "SKIP  = could not be tested in this environment (privilege / tool / board)"
 
 if [ "$EXIT" = "0" ]; then
-    ok "ASK hardware-offload dataplane is OPERATIONAL"
+    ok "ASK IPv4 hardware-offload dataplane is OPERATIONAL"
+    [ "$N_DEFER" -gt 0 ] && note "$N_DEFER capability(ies) deferred to software (expected for this preview)"
 else
-    fail "ASK hardware-offload dataplane is NOT operational ($N_FAIL capability gap(s))"
+    fail "ASK IPv4 hardware-offload dataplane is NOT operational ($N_FAIL capability gap(s))"
 fi
 
 exit "$EXIT"

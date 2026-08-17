@@ -584,18 +584,14 @@ chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
 cp board/scripts/vpp-check "$CHROOT/usr/local/bin/vpp-check"
 chmod +x "$CHROOT/usr/local/bin/vpp-check"
 
-### ASK2 stack health helper: `ask-check` reports the landed state of the
-### ASK2 in-tree kernel patches (0001 caam-qi-share, 0002 dpaa-eth-flow-block,
-### 0003 fman-host-command-api, 0004 fman-pcd-subsystem incl. PR14a-PR14g-prep
-### symbol probes), the ask.ko / ask_bridge.ko OOT module load state, askd
-### daemon presence, ask-cli operator tool, VyOS 'set system ask ...' CLI
-### surface, nf_flow_table HW-offload smoke test, and dmesg integrity.
-### Exit 0 healthy / non-zero on fault — usable as a Nagios/monit probe.
-### Mirrors sfp-check / fan-check / caam-check style. Installed
-### unconditionally: with ASK disengaged the ASK-specific
-### sections cleanly emit TODO/SKIP (no false FAILs), making it a useful
-### roadmap-status printer. With ASK engaged it is the single command an
-### operator runs to confirm the modern ASK2 stack came up correctly.
+### ASK2 preview health helper: `ask-check` reports the required plain-routed
+### IPv4 TCP/UDP hardware datapath (FMan PCD/FE-VM, ask.ko genl, per-interface
+### CLI, direct TX terminal, reversibility) and dmesg integrity. Capabilities
+### intentionally outside the preview scope (IPv6, NAT/PAT, VLAN rewrite,
+### IPsec/ESP, bridge/L2 switchdev, multicast/non-TCP/UDP) are reported as
+### DEFER/software-fallback, never false FAILs. Exit 0 means the supported IPv4
+### datapath is healthy; 1 real required-capability fault; 2 wrong board.
+### Mirrors sfp-check / fan-check / caam-check style and installs unconditionally.
 cp board/scripts/ask-check "$CHROOT/usr/local/bin/ask-check"
 chmod +x "$CHROOT/usr/local/bin/ask-check"
 
@@ -616,6 +612,18 @@ chmod +x "$CHROOT/usr/local/bin/ask-check"
 ### firmware chain is identical on every image).
 cp board/scripts/firmware-check "$CHROOT/usr/local/bin/firmware-check"
 chmod +x "$CHROOT/usr/local/bin/firmware-check"
+
+### Community support-bundle aggregator: `support-bundle` stitches one
+### paste-ready diagnostic report — identity (uname/DT model/cmdline),
+### non-interactive `show version` (vyatta-op-cmd-wrapper, never `vbash -c`),
+### the active offload configuration + live state (ethernet/flowtable/VPP
+### config via cli-shell-api, nft flowtables, vyos-offload-ask status, fe_arm,
+### per-port MTU/link/offload features), then runs ask-check and
+### firmware-check capturing each exit code, plus a kernel-log extract. No
+### config session is opened. Aggregate exit 0/1 mirrors the sub-tools; 2 =
+### not LS1046A. This is the single command to attach to a preview bug report.
+cp board/scripts/support-bundle "$CHROOT/usr/local/bin/support-bundle"
+chmod +x "$CHROOT/usr/local/bin/support-bundle"
 
 ### ASK2 reversible-mode-switch gate: `pcd-snapshot` (Python 3) captures and
 ### diffs the FMan PCD silicon state that the S0<->S1 dataplane mode-switch
