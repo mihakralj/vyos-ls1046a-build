@@ -1,0 +1,43 @@
+
+diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 26eb177..9ecc15d 100755
+--- a/src/conf_mode/interfaces_ethernet.py
++++ b/src/conf_mode/interfaces_ethernet.py
+@@ -56,6 +56,10 @@
+ from vyos import airbag
+ airbag.enable()
+ 
++# ASK2 FMan FE offload MTU bounds validated on LS1046A hardware.
++ASK_OFFLOAD_MTU_MIN = 1280
++ASK_OFFLOAD_MTU_MAX = 2500
++
+ def update_bond_options(conf: Config, eth_conf: dict) -> list:
+     """
+     Return list of blocked options if interface is a bond member
+@@ -313,6 +317,26 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+             raise ConfigError(
+                 f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)'
+             )
++        # ASK FMan FE forwarding is validated only across the tested MTU range
++        # on this board. The DPAA1 RX pool is a single order-0 page; frames
++        # above the validated ceiling wedge the FMan RX path (cold-boot-only
++        # recovery), and below the validated floor is untested. Clamp the MTU
++        # to [ASK_OFFLOAD_MTU_MIN, ASK_OFFLOAD_MTU_MAX] and fail the commit
++        # closed outside it, so a remote MTU change on an ASK interface cannot
++        # brick connectivity. The default 1500 is inside the range, so
++        # interfaces that never set an explicit MTU pass unchanged. Widen the
++        # bounds only after validating a larger range on the FMan RX pool.
++        mtu = ethernet.get('mtu')
++        if mtu is not None:
++            mtu_val = int(mtu)
++            if mtu_val < ASK_OFFLOAD_MTU_MIN or mtu_val > ASK_OFFLOAD_MTU_MAX:
++                raise ConfigError(
++                    f'Interface {ifname} ASK offload requires MTU between '
++                    f'{ASK_OFFLOAD_MTU_MIN} and {ASK_OFFLOAD_MTU_MAX} '
++                    f'(configured MTU {mtu} is outside the validated range '
++                    f'and can wedge the FMan RX path). Set a supported MTU '
++                    f'or disable "offload ask" first.'
++                )
+ 
+     if dict_search('offload.rps', ethernet) != None:
+         if not os.path.exists(f'/sys/class/net/{ethernet["ifname"]}/queues/rx-0/rps_cpus'):

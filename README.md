@@ -13,7 +13,7 @@ The hardware earns the effort. The NXP LS1046A brings four Cortex-A72 cores at 1
 | I want to... | Go to |
 |---|---|
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
-| **Control hardware & diagnose problems** on a running system | [HWCTL.md](HWCTL.md): the `led` RGBW status-LED command (palette, fades, demo modes), LED/fan shell recipes, + the seven built-in `*-check` diagnostic scripts (`dpaa1-check`, `sfp-check`, `fan-check`, `caam-check`, `xsk-zc-check`, `ask-check`, `firmware-check`) — health probes for networking, SFP modules, thermals, crypto, AF_XDP, and the boot firmware / FMan microcode chain |
+| **Control hardware & diagnose problems** on a running system | [HWCTL.md](HWCTL.md): the `led` RGBW status-LED command (palette, fades, demo modes), LED/fan shell recipes, + the built-in diagnostic scripts (`dpaa1-check`, `sfp-check`, `fan-check`, `caam-check`, `xsk-zc-check`, `ask-check`, `vpp-check`, `firmware-check`) plus `support-bundle` — health probes for networking, SFP modules, thermals, crypto, AF_XDP/ASK, the boot firmware/FMan microcode chain, and one paste-ready preview bug report |
 | **Update board firmware** (bricked or fresh board) | [plans/FIRMWARE.md](plans/FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
 | **Understand the boot process & U-Boot** | [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, memory map, clock tree, MTD layout, `booti` sequence, failure modes |
 | **See what changed** between releases | [plans/CHANGELOG.md](plans/CHANGELOG.md): per-build changelog |

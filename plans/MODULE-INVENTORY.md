@@ -125,7 +125,8 @@
 | `firmware-check` | Boot firmware / U-Boot env / FMan ucode | DEPLOYED |
 | `pcd-snapshot` | FMan PCD state capture + diff (S0↔S1 gate) | **DEPLOYED, Phase 1 proven** |
 | `xsk-zc-check` | AF_XDP ZC gate counter reader | DEPLOYED |
-| `ask-check` | ASK2 readiness probe | DEPLOYED |
+| `ask-check` | ASK2 plain-IPv4 preview readiness probe; deferred features report software fallback | DEPLOYED |
+| `support-bundle` | Paste-ready ASK2 issue report (identity, version, offload config/live state, ask-check, firmware-check, dmesg) | DEPLOYED |
 | `fman-fq-qdisc` | FMan FQ QMan qdisc helper | DEPLOYED |
 | `sfp-check` | SFP module health reporter | DEPLOYED |
 | `led.py` | LP5812 RGBW LED control | DEPLOYED |

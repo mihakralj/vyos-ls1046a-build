@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# support-bundle — collect a paste-ready ASK2/VyOS diagnostic report.
+#
+# Usage:
+#   support-bundle                 # broad report, privileged probes may SKIP
+#   sudo support-bundle            # full ask-check / firmware-check depth
+#   support-bundle > bundle.txt    # preferred for issue reports
+#
+# No interactive vbash/configure session is used. Active config comes from
+# cli-shell-api showCfg, and op-mode commands use vyatta-op-cmd-wrapper.
+#
+# Exit codes:
+#   0 — ask-check and firmware-check both healthy (or unavailable sections only)
+#   1 — ask-check or firmware-check reported a real failure
+#   2 — not an LS1046A board
+
+set -u
+
+if ! grep -q 'fsl,ls1046a' /proc/device-tree/compatible 2>/dev/null; then
+    echo "support-bundle: not an LS1046A board" >&2
+    exit 2
+fi
+
+EXIT=0
+RUN_AS_ROOT="no"
+[ "$(id -u)" -eq 0 ] && RUN_AS_ROOT="yes"
+
+section() {
+    printf '\n================================================================================\n'
+    printf '%s\n' "$1"
+    printf '================================================================================\n'
+}
+
+run_section() {
+    local title="$1"; shift
+    local rc
+    section "$title"
+    printf '== BEGIN: %s ==\n' "$title"
+    set +e
+    "$@"
+    rc=$?
+    set -e
+    printf '== END: %s (rc=%d) ==\n' "$title" "$rc"
+    case "$rc" in
+        0) ;;
+        1) EXIT=1 ;;
+        2) [ "$EXIT" -eq 0 ] && EXIT=1 ;;
+        *) EXIT=1 ;;
+    esac
+}
+
+identity() {
+    echo "timestamp_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "hostname: $(hostname 2>/dev/null || echo unknown)"
+    echo "run_as_root: $RUN_AS_ROOT"
+    echo "uname: $(uname -a)"
+    echo "kernel: $(uname -r)"
+    if [ -r /proc/device-tree/model ]; then
+        printf 'dt_model: '
+        tr -d '\000' </proc/device-tree/model
+        echo
+    fi
+    echo "cmdline: $(cat /proc/cmdline 2>/dev/null || echo unavailable)"
+    echo "uptime: $(uptime -p 2>/dev/null || uptime)"
+}
+
+show_version_noninteractive() {
+    if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
+        /opt/vyatta/bin/vyatta-op-cmd-wrapper show version
+        return $?
+    fi
+    if [ -x /usr/libexec/vyos/op_mode/version.py ]; then
+        python3 /usr/libexec/vyos/op_mode/version.py show
+        return $?
+    fi
+    echo "show version unavailable: no op-mode wrapper/version script"
+    return 1
+}
+
+show_active_subtree() {
+    local path="$1"
+    if ! command -v cli-shell-api >/dev/null 2>&1; then
+        echo "cli-shell-api unavailable"
+        return 1
+    fi
+    cli-shell-api showCfg --show-active-only "$path" 2>&1 || true
+}
+
+offload_state() {
+    echo "--- active ethernet configuration ---"
+    show_active_subtree interfaces | grep -E -A3 -B3 'ethernet|offload|mtu|address' || true
+
+    echo "--- active firewall flowtable configuration ---"
+    show_active_subtree firewall | grep -E -A5 -B3 'flowtable|offload-target|offload hardware|eth3|eth4' || true
+
+    echo "--- active VPP settings ---"
+    show_active_subtree vpp | grep -E -A4 -B2 'settings|interface|eth3|eth4' || true
+
+    echo "--- live nft flowtables ---"
+    if command -v nft >/dev/null 2>&1; then
+        nft list ruleset 2>&1 | grep -E -A6 'flowtable|flags offload|devices' || true
+    else
+        echo "nft unavailable"
+    fi
+
+    echo "--- ASK per-port helper status ---"
+    if command -v vyos-offload-ask >/dev/null 2>&1; then
+        for port in 0x10 0x11; do
+            echo "port $port:"
+            vyos-offload-ask --port "$port" status 2>&1 || true
+        done
+    else
+        echo "vyos-offload-ask unavailable"
+    fi
+
+    echo "--- FE arm state (read-only) ---"
+    if [ -r /sys/kernel/debug/fman_pcd/0/fe_arm ]; then
+        cat /sys/kernel/debug/fman_pcd/0/fe_arm
+    else
+        echo "fe_arm unavailable/unreadable (run bundle with sudo for debugfs depth)"
+    fi
+
+    echo "--- live interface MTU/link/offload features ---"
+    for iface in eth3 eth4; do
+        [ -d "/sys/class/net/$iface" ] || continue
+        echo "[$iface] mtu=$(cat "/sys/class/net/$iface/mtu" 2>/dev/null) carrier=$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)"
+        if command -v ethtool >/dev/null 2>&1; then
+            ethtool "$iface" 2>/dev/null | grep -E 'Speed:|Duplex:|Link detected:' || true
+            ethtool -k "$iface" 2>/dev/null | grep -E 'hw-tc-offload|rx-checksumming|tx-checksumming|generic-receive-offload|generic-segmentation-offload' || true
+        fi
+    done
+}
+
+run_tool() {
+    local tool="$1"
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "$tool unavailable"
+        return 1
+    fi
+    "$tool"
+}
+
+dmesg_tail() {
+    if ! dmesg >/dev/null 2>&1; then
+        echo "dmesg unavailable (run with sudo for kernel-log depth)"
+        return 0
+    fi
+    dmesg | grep -iE 'ask:|fman_pcd|fe_arm|Err FD status|list_del|list_add|BUG|panic|POISON|Oops|RTNL|WARNING' | tail -200 || true
+}
+
+# run_section uses set -e internally, so enable it only after helper definitions.
+set -e
+
+section "ASK2 SUPPORT BUNDLE"
+identity
+[ "$RUN_AS_ROOT" = "yes" ] || echo "NOTE: re-run with sudo for flash, symbols, debugfs, and dmesg depth."
+
+run_section "SHOW VERSION" show_version_noninteractive
+run_section "OFFLOAD CONFIGURATION AND LIVE STATE" offload_state
+run_section "ASK-CHECK" run_tool ask-check
+run_section "FIRMWARE-CHECK" run_tool firmware-check
+run_section "KERNEL LOG EXTRACT" dmesg_tail
+
+section "BUNDLE SUMMARY"
+echo "aggregate_rc: $EXIT"
+echo "support bundle complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+exit "$EXIT"

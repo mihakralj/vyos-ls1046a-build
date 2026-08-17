@@ -106,12 +106,50 @@ engage() {
 
 # ---------------------------------------------------------------------------
 # disengage — PRODUCTION path teardown via generic-netlink/YNL.
+#
+# CR-003 fail-closed: a bare `disengage` YNL call is a no-op while offloaded
+# flows are still live — the committed hardware flowtable re-arms the FE the
+# instant offloadable traffic reappears, so the port never actually returns to
+# software forwarding. To disengage for real we must FIRST tear down the flows
+# that keep it armed, THEN disengage, THEN verify the port is unarmed and fail
+# loudly if it is not. The VyOS commit path (set_ask_offload) depends on this
+# non-zero exit to fail the commit closed rather than silently leaving the FE
+# armed. Flow teardown uses the production YNL `flush-flows` command plus a
+# conntrack flush (which drops the nft-flowtable offload records that would
+# otherwise re-insert); the fe_arm read is debugfs read-only verification, not
+# a debugfs control write.
 # ---------------------------------------------------------------------------
 disengage() {
-    local port_id
+    local port_id armed
     port_id="$(port_id_dec)"
     info "disengaging port $PORT..."
+
+    # 1. Drop the flow records that keep the FE armed. flush-flows is the
+    #    production genl command; conntrack -F clears the nft-flowtable
+    #    offload entries that would immediately re-insert HW flows.
+    if [ -n "$YNL_BIN" ] && [ -x "$YNL_BIN" ]; then
+        "$YNL_BIN" --family ask --do flush-flows --json '{}' >/dev/null 2>&1 || true
+    fi
+    if command -v conntrack >/dev/null 2>&1; then
+        conntrack -F >/dev/null 2>&1 || true
+    fi
+
+    # 2. Production disengage.
     ynl_do disengage "{\"port-id\": $port_id}"
+
+    # 3. Fail-closed verification: the port MUST NOT remain armed. Read the
+    #    authoritative FE arm state; if this port is still listed, the
+    #    disengage did not hold and we must report failure so the caller
+    #    (VyOS commit) fails closed instead of believing it reached software
+    #    forwarding.
+    if [ -r "$PCD_BASE/fe_arm" ]; then
+        armed=$(grep '^Armed ports:' "$PCD_BASE/fe_arm" 2>/dev/null || true)
+        case " $armed " in
+            *" $PORT "*)
+                die "disengage did not hold for $PORT — still armed ($armed). Flush offloaded flows and retry."
+                ;;
+        esac
+    fi
     info "DISENGAGED"
 }
 
