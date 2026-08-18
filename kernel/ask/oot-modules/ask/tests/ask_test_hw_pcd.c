@@ -155,6 +155,31 @@ static void hw_pcd_test_insert_null_out(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, rc, -EINVAL);
 }
 
+/* ------------------------------------------------------------------------- */
+/* T-M6-A4: resource preflight                                                */
+/* ------------------------------------------------------------------------- */
+
+static void hw_pcd_test_preflight_null_key(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		ask_hw_flow_preflight(NULL, 1, 0, ASK_HW_DIR_FWD),
+		-EINVAL);
+}
+
+static void hw_pcd_test_preflight_no_hw_is_side_effect_free(struct kunit *test)
+{
+	struct ask_flow_key key;
+	int rc;
+
+	make_v4_tcp_key(&key, htonl(0x0a000001), htonl(0x0a000002),
+			htons(1234), htons(80));
+	/* No ask_hw_init()/PCD in the KUnit harness: preflight must return the
+	 * SW-fallback signal without allocating a cookie or touching @key. */
+	rc = ask_hw_flow_preflight(&key, 999, 0, ASK_HW_DIR_FWD);
+	KUNIT_EXPECT_EQ(test, rc, -ENODEV);
+	KUNIT_EXPECT_EQ(test, key.l4_proto, (u8)IPPROTO_TCP);
+}
+
 static void hw_pcd_test_insert_no_hw_backing(struct kunit *test)
 {
 	struct ask_flow_key key;
@@ -471,6 +496,8 @@ KUNIT_CASE(hw_pcd_test_unpack_null_safe),
 KUNIT_CASE(hw_pcd_test_token_sentinels),
 KUNIT_CASE(hw_pcd_test_insert_null_key),
 KUNIT_CASE(hw_pcd_test_insert_null_out),
+KUNIT_CASE(hw_pcd_test_preflight_null_key),
+KUNIT_CASE(hw_pcd_test_preflight_no_hw_is_side_effect_free),
 KUNIT_CASE(hw_pcd_test_insert_no_hw_backing),
 KUNIT_CASE(hw_pcd_test_insert_unsupported_proto),
 KUNIT_CASE(hw_pcd_test_insert_unsupported_l3),
