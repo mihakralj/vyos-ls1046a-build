@@ -26,7 +26,6 @@
     "F_101.py": "dpaa_eth.h: M4 ZC workaround — lower DPAA1_MIN_UMEM_CHUNK 3840→2048 for VPP 2K-chunk compatibility",
     "F_102.py": "qman.c: M4 ZC crash fix — NULL guard for fq in __poll_portal_fast SDQCR path",
     "F_103.py": "af_xdp_pool_main.c: SUPERSEDED 2026-07-21 — BPID reprogram re-enabled (F_102 guards crash path)",
-    "F_104.py": "dpaa_ethtool.c: F_104 add get_channels ethtool op (reports 4 combined channels for multi-queue XSK)",
     "F_105.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
       "description": "rx_hook diagnostics: log why frames are rejected (temporary)",
@@ -176,7 +175,7 @@
     "F_202.py": "fman_pcd.c: F-202 (2026-08-17, P0 flow-lifecycle fix) -- serializes exported production fman_pcd_fe_flow_add/del with pcd->fe_lock, honoring fman_pcd_ehash_{add,del}_key's documented caller-lock contract and matching every debugfs add/del/clear path. Board panic on .185 image 0114: nft nf_ft_offload_del workqueue hit list_del corruption/LIST_POISON2 in fman_pcd_ehash_del_key after async per-key delete raced duplicate delete, clear-all, or drain. Unlocks all error paths and treats -ENOENT after serialized per-key delete as an idempotent no-op. No register/descriptor changes. S0 qdrant-gated against F-117 and CR-003/CR-004 history.",
     "F_203.py": "dpaa_eth.c: F-203 (2026-08-17, contiguous jumbo RX) -- raises the DPAA RX buffer pool from order-0/4KiB to order-1/8KiB via DPAA_BP_ORDER=1 and DPAA_BP_RAW_SIZE=(4096<<order); changes the one RX pool dev_alloc_pages() and all eight RX-buffer free_pages() sites to the matching order while deliberately leaving TX-SGT and XDP-copy scratch pages order-0. Keeps large frames contiguous and ASK-FE-offloadable (unlike RX SG), raises usable one-buffer MTU to ~7.5K; VyOS clamps conservatively to 7000. skb_free_frag compound-head recycle remains valid. S0 qdrant-gated against the 4K-wedge record, RX SG consumer semantics, A050385 runtime-inactive on LS1046A, and BMan sizing."
   },
-  "count": 105,
+  "count": 104,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {
     "F_174.py": "On disk, listed in active, but intentionally NOT invoked from ci-setup-kernel.sh (superseded by F-175; kept for the record). This is the only allowed disk-without-invocation entry."
@@ -186,7 +185,8 @@
   ],
   "folded_into_patches": [
     "F_109.py — folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2 pilot). fman_pcd_fe_enq_get_offset() export regenerated into its owning patch; tree-equivalent to current+F_109 modulo two normalized blank lines. Gated on CI build validation before considered final.",
-    "F_116.py — folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2). Two FE-VM flow-delete NULL guards regenerated into the owning patch; verified byte-identical to current+F_116 across the full series (F-117 anchors on F-116's guarded fe_flow_del body). Gated on CI build validation before considered final."
+    "F_116.py — folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2). Two FE-VM flow-delete NULL guards regenerated into the owning patch; verified byte-identical to current+F_116 across the full series (F-117 anchors on F-116's guarded fe_flow_del body). Gated on CI build validation before considered final.",
+    "F_104.py — folded into 0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch on 2026-08-18 (Phase 2). dpaa_get_channels() ethtool op regenerated into its owning patch (0109 last touches dpaa_ethtool_ops); byte-identical to current+F_104 across the full series. Independent of the FMan HIT-path fixups (dpaa_ethtool.c). Gated on CI build validation before considered final."
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {
