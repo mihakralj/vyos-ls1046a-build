@@ -144,6 +144,16 @@ def _parse_hex8(s: str) -> tuple[int, int, int, int]:
 STATES = tuple(_parse_hex8(c) for c in PALETTE)
 N_STATES = len(STATES)
 
+# True lowest lit value produced while the daemon is running. PALETTE[0] is
+# G=2, but the idle heartbeat's -50% trough reaches G=1. Keep this derived
+# from the configured baseline/depth so startup follows heartbeat retuning.
+IDLE_MIN_STATE = (
+    STATES[0][0],
+    round(STATES[0][1] * (1 - HEARTBEAT_DEPTH)),
+    round(STATES[0][2] * (1 - HEARTBEAT_DEPTH)),
+    STATES[0][3],
+)
+
 
 # ---- logging --------------------------------------------------------------
 
@@ -358,6 +368,14 @@ def install_cleanup() -> None:
 def main() -> int:
     wait_for_driver()
     claim_triggers()
+
+    # Set the lowest LED value immediately and synchronously — before source
+    # selection and the first fade — so the LED reaches its minimum lit state
+    # the instant the driver is ready, rather than after the QMI probe.
+    # IDLE_MIN_STATE is the true floor the daemon ever emits: PALETTE[0]'s
+    # faint green baseline at the idle heartbeat's -50% trough (RGBW 0,1,0,0).
+    write_rgbw_now(IDLE_MIN_STATE)
+
     install_cleanup()
 
     # Select the throughput source once at startup. Prefer the FMan QMI
