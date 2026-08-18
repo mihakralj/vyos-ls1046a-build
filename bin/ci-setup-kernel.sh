@@ -1921,15 +1921,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-098: context_build retype (DDR not MMIO)"
 fi
 
-# F-116 (crash-safety): NULL-guard the FE-VM flow-delete path. On
-# FLOW_CLS_DESTROY, ask_flow_offload.c calls fman_pcd_fe_flow_del(NULL, ...);
-# with no guard fman_pcd_ehash_flow_clear_all(fman_get_pcd(NULL)) dereferenced
-# NULL+0x138 and panicked the box on EVERY offloaded flow that closed
-# (HW 2026-07-24, ISO 2042). Adds NULL guards so the delete is a safe no-op.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_116.py" 2>&1
-    echo "### F-116: FE-VM flow-delete NULL guards"
-fi
+: # F-116 folded into patch 0153 (FE-VM flow-delete NULL guards).
+: # Phase 2 fold 2026-08-18: the two NULL guards (fman_pcd_ehash_flow_clear_all
+: # + fman_pcd_fe_flow_del) were regenerated into 0153-fman-pcd-fe-engage-api.patch.
+: # Verified byte-identical vs current+F_116 across the full series (incl. F-117
+: # which anchors on F-116's guarded fe_flow_del body). CI + board gated.
 
 # F-117 (Fix B pt1): per-key FE-VM ehash delete. Adds fman_pcd_ehash_del_key
 # (head + mid-chain collision-chain unlink, prev_head LIFO invariant kept) and
