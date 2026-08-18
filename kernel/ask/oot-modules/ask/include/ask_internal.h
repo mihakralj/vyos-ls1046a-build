@@ -12,6 +12,7 @@
 #define _ASK_INTERNAL_H
 
 #include <linux/types.h>
+#include <linux/errno.h>        /* -E2BIG in ask_intent_add() inline */
 #include <linux/printk.h>
 #include <linux/skbuff.h>
 #include <linux/rhashtable.h>
@@ -493,6 +494,66 @@ u8  dst_ip[16];
 u8  next_hop_mac[ETH_ALEN]; /* dst MAC the OH chain pushes */
 u8  egress_mac[ETH_ALEN];   /* src MAC = peer port's own MAC */
 } __packed;
+
+/* ------------------------------------------------------------------------- */
+/* Canonical flow intent (T-M6-A1, 2026-08-18).                               */
+/*                                                                            */
+/* The single typed description of what a REPLACE asks the hardware to do.    */
+/* It is the source of truth that ask_parse_action() produces and that        */
+/* ask_intent_lower() lowers to the legacy (oif, action_flags) representation */
+/* the insert/pending/neigh paths still consume. Introducing it now (before   */
+/* NAT/VLAN/IPsec) gives every later M6 feature ONE place to add a typed      */
+/* action and ONE compiler (ask_intent_lower / the future FE action compiler) */
+/* instead of ad-hoc action_flags bits.                                       */
+/*                                                                            */
+/* A1 CONTRACT: for the plain IPv4-unicast flow (REDIRECT, plus the kernel's  */
+/* mandatory ETH-type MANGLE L2 rewrite that INSERT_L2_HDR already performs)  */
+/* the lowering MUST reproduce the exact pre-A1 values — oif = egress ifindex */
+/* and action_flags = 0 — so the stored ask_flow and the FE record are        */
+/* byte-for-byte identical. The ehash key bytes come solely from the match    */
+/* (ask_fe_build_key), which A1 does not touch.                               */
+/* ------------------------------------------------------------------------- */
+enum ask_action_type {
+	ASK_ACTION_REDIRECT   = 0, /* forward to egress netdev (oif) */
+	ASK_ACTION_L2_REWRITE = 1, /* next-hop L2 rewrite (ETH MANGLE) */
+	ASK_ACTION_TTL_DEC    = 2, /* decrement IPv4 TTL / IPv6 hop-limit */
+	/* future: ASK_ACTION_NAT_SRC/DST, ASK_ACTION_PAT, ASK_ACTION_VLAN_* */
+};
+
+#define ASK_INTENT_MAX_ACTIONS 8
+
+struct ask_flow_action_ent {
+	enum ask_action_type type;
+	u32 oif;   /* valid for ASK_ACTION_REDIRECT */
+};
+
+struct ask_flow_intent {
+	const struct ask_flow_key  *match;   /* borrowed; not owned */
+	struct ask_flow_action_ent  actions[ASK_INTENT_MAX_ACTIONS];
+	u8  n_actions;
+	u64 owner;        /* kernel flow cookie that owns this intent */
+	u32 generation;   /* A3 hook: bumped per REPLACE; 0 until A3 lands */
+};
+
+static inline int ask_intent_add(struct ask_flow_intent *in,
+				 enum ask_action_type type, u32 oif)
+{
+	if (in->n_actions >= ASK_INTENT_MAX_ACTIONS)
+		return -E2BIG;
+	in->actions[in->n_actions].type = type;
+	in->actions[in->n_actions].oif  = oif;
+	in->n_actions++;
+	return 0;
+}
+
+/*
+ * Lower a canonical intent to the legacy (oif, action_flags) pair the rest of
+ * the insert path consumes. Kept as the single translation point so the FE
+ * action compiler can later replace the body without touching call sites.
+ * Returns 0 on success; -EOPNOTSUPP if the intent has no egress.
+ */
+int ask_intent_lower(const struct ask_flow_intent *in,
+		     u32 *out_oif, u32 *out_action_flags);
 
 struct ask_flow {
 struct rhash_head node;
