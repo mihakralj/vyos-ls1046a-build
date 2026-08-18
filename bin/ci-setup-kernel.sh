@@ -2030,13 +2030,11 @@ echo "### F-108: Ratelimited Err FD status in dpaa_eth.c"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_103.py" 2>&1
 echo "### F-103: SUPERSEDED — BPID reprogram re-enabled (F_102 guards crash path)"
 
-# F-104: Add get_channels ethtool op to DPAA1 driver.
-# VPP's af_xdp plugin uses ETHTOOL_GCHANNELS to detect available RX queues.
-# DPAA1 doesn't implement get_channels, so VPP defaults to 1 queue.
-# This prevents multi-queue XSK binding needed for ZC RX (FMan RSS spreads
-# across 4 qbands). Reports 4 combined channels (one per qband).
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_104.py" 2>&1
-echo "### F-104: DPAA1 get_channels ethtool op added"
+: # F-104 folded into patch 0109 (DPAA1 get_channels ethtool op).
+: # Phase 2 fold 2026-08-18: dpaa_get_channels() + the ethtool_ops entry were
+: # regenerated into 0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch (its
+: # owning patch — 0109 last touches dpaa_ethtool_ops). Verified byte-identical
+: # to current+F_104 across the full series. CI-gated.
 
 # F-105: rx_hook diagnostics — log why frames are rejected (temporary, remove after root cause found)
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_105.py" 2>&1
