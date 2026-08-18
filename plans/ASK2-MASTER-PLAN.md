@@ -42,6 +42,26 @@ forwarding at **9.92 / 10.4 / 10.4 / 10.1 Gbit/s** for MTU 1280 / 1500 / 2000 /
 2500 at ~3% DUT CPU. Remaining preview work is productization (docs, prerelease
 packaging, external validation), not datapath.
 
+### Plain IPv4-unicast preview release checklist
+
+- [x] Production FE-VM ehash forwarding path; T-M7-2 S1/S3/S4 passed.
+- [x] T-M7-3 mode-churn gate and MTU 1280/1500/2000/2500 performance battery.
+- [x] CR-003 fail-closed commit helper implemented in `3523be05` (YNL
+  `flush-flows`, conntrack flush, YNL disengage, read-only `fe_arm` verify,
+  `ConfigError` on any non-zero helper result).
+- [x] ASK MTU clamps implemented at 1280–7000 in VyOS patches 036/037.
+- [x] F-122 idempotent engage implemented in `F_122.py` and wired in
+  `ci-setup-kernel.sh` (shared debugfs/kernel core and exported wrapper both
+  return success when already armed).
+- [ ] Cold-boot board validation of CR-003 through the actual VyOS CLI commit
+  path, including a forced helper failure proving the commit fails closed.
+- [ ] Cold-boot MTU 7000 battery on the heidi→DUT `.185`→HELGA harness; restore
+  every endpoint to MTU 1500 after every run and on abort.
+- [ ] `ask-check` 24/24 on the candidate image plus byte-exact
+  `pcd-snapshot` disengage diff against the warm S0 baseline.
+- [ ] Prerelease release notes/package and one external validation cycle using
+  the operator procedure in `plans/ASK-ISO-BUILD-AND-INSTALL.md`.
+
 **[NOTE — superseded]** The earlier framing below (F-198-era) described only S1
 as passed with S2/S3/S4 open and release gated on T-M7-3, citing ~2.2 Gbps: that
 was the lxc202-harness-limited result, kept here as history. It is superseded by
@@ -1481,11 +1501,20 @@ record it does not own.
   types and move the existing IPv4 flowtable path onto them without changing
   silicon bytes. Gate: old/new record byte comparison identical; current IPv4
   MTU/performance/lifecycle battery unchanged.
-- [ ] **T-M6-A2 — strict action acceptance.** Audit every accepted
-  `flow_action_id`. Until implemented, NAT MANGLE/ADD and VLAN PUSH/POP MUST
-  return `-EOPNOTSUPP`; add KUnit cases proving no `in_hw` flag and no bucket
-  publication. Gate: NAT/VLAN traffic forwards correctly in software, never
-  with an incomplete HW record.
+- [~] **T-M6-A2 — strict action acceptance.** CODE-COMPLETE 2026-08-18
+  (`ask_parse_action()` in `ask_flow_offload.c`): ETH-type `FLOW_ACTION_MANGLE`
+  is accepted (the next-hop L2 rewrite the FE-VM `INSERT_L2_HDR` already
+  performs — this is the proven IPv4 path); NAT-carrying MANGLE of htype
+  IP4/IP6/TCP/UDP, `FLOW_ACTION_ADD`, and `FLOW_ACTION_VLAN_PUSH/POP` now
+  return `-EOPNOTSUPP` so the flow stays on the kernel SW fastpath instead of
+  publishing an incomplete HW record (the previous silent no-op misforwarded
+  NAT/VLAN traffic; VLAN also only set `action_flags` bits that
+  `ask_hw_flow_insert()` ignores). Ground-truthed against
+  `nf_flow_rule_route_common()`, which emits ETH MANGLE on every flow and
+  IP4/L4 MANGLE only under `NF_FLOW_SNAT/DNAT`. Five new KUnit cases pin the
+  contract (ETH accepted; NAT/ADD/VLAN rejected and never published). **Board
+  gate open:** confirm NAT/VLAN traffic forwards correctly in software with no
+  `in_hw` record on silicon.
 - [ ] **T-M6-A3 — ownership generations/tombstones.** Close CR-004: stale
   DESTROY cannot remove a replacement; neighbour rebuild cannot resurrect a
   deleted flow. Gate: concurrent REPLACE/DESTROY/neighbour-churn stress under
@@ -1720,7 +1749,7 @@ open defects.
 | **CR-007** | Dead Fork-A shadow/HM bookkeeping burdens the FE-VM path; CC-tree insert plumbing deleted | PARTIAL | M6 (T-M6-5) | Finish dead-bookkeeping removal; reimplementation tracked in §4.4 |
 | **CR-011** | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL | M8 (T-M8-5) | Clean with upstream prep |
 | **F-120** | `ASK_CMD_FLUSH_FLOWS` SW/HW divergence | CODE-FIXED; silicon validation OPEN | M6 / M8 | T-M6-6 (§4.5) |
-| **F-122** | `fe_arm engage` returns `-EINVAL` on an already-engaged port (not idempotent) | OPEN | M7 polish / M8 soak | Return 0 when already engaged, mirroring the F-116/F-120 idempotence rule |
+| **F-122** | `fe_arm engage` returns `-EINVAL` on an already-engaged port (not idempotent) | CODE-CLOSED (`F_122.py`, wired `ci-setup-kernel.sh`); board re-confirm at M8 soak | M7 polish / M8 soak | Implemented: `test_bit(port_id, pcd->fe_port_armed)` at the top of the shared `__fman_pcd_fe_arm_engage()` returns 0 (covers both debugfs and kernel-API paths), and the wrapper's F-107 `-EBUSY` guard now returns 0. Mirrors the F-116/F-120 idempotence rule. |
 | **BUG 3b flood half** | iperf3 flood under policer → watchdog reset | OPEN | M8 | Serial capture + cold power-cycle. **Always repro the policer with a few pings, never a flood** |
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; `pcd-snapshot` A/B; prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` |
