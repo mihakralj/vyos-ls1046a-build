@@ -1,6 +1,6 @@
 # ASK2 Performance Test Harness — Software vs Hardware Forwarding
 
-**Version 1.1.0 · 2026-08-17**
+**Version 1.2.0 · 2026-08-17**
 
 A reproducible procedure for measuring routed IPv4 throughput and DUT CPU cost through the Mono Gateway LS1046A, comparing the Linux software flowtable against ASK2/FMan hardware offload.
 
@@ -407,6 +407,67 @@ and invalid**, regardless of what the flowtable config said — the FE re-armed.
 Any result that disagrees with its intended mode's signature MUST be re-run
 under a verified continuous gate (§7.4), never published.
 
+### 7.6 Saturation mode — the true software forwarding ceiling
+
+The default `iperf2 --full-duplex -P 8` measures a **realistic but imbalanced**
+number: the FMan RSS hash frequently clusters the 8 flows onto one RX FQ band /
+one CPU, so a single core saturates (~96–98% softirq) while the others idle. The
+per-core *average* then looks like ~70% even though the bottleneck core is
+maxed, and aggregate throughput is capped by that one core — not by the
+generator, the links, or the board's real capacity.
+
+**Evidence (MTU 1500, software):** with default `-P 8`, RX packets landed
+CPU0 ≈ 80%, CPU1/2/3 ≈ 20% combined; CPU0 96–98% while CPU3 sat at 77%. heidi
+stayed ~90% idle and the same links carry 9–11 Gbit/s under hardware offload, so
+neither generator nor path is the limit — the limit is RSS imbalance.
+
+To measure the **true ceiling**, force an even flow→CPU spread. The RSS 4-tuple
+key is `SIP+DIP+SPORT+DPORT` (EKFC `0x00180006`), so for a fixed src/dst IP pair
+the source port alone selects the RX FQ band / CPU. The FQID-bit selection is
+not HW-confirmed for pure computation, so map ports **empirically**:
+
+1. In software mode, disarmed, send a short UDP burst from a fixed source port
+   (`iperf -B <ip>:<port>` binds a fixed source port, or a tiny `socket` script)
+   and read the per-CPU `rx packets [CPU n]` delta on eth3. The CPU with the
+   largest delta owns that port.
+2. Sweep ~120 ports and bucket them by CPU. On this board the hash is uneven
+   (one CPU may be starved), so sweep wide and keep the highest-delta ports.
+3. Pick N ports per CPU and run N×4 fixed-source-port iperf2 clients:
+
+```bash
+# balanced set example (MTU 1500, src 10.99.1.15, dst 10.99.2.16:5201):
+#   CPU0: 40065 40020   CPU1: 40028 40027
+#   CPU2: 40044 40030   CPU3: 40066 40043
+for p in 40065 40020 40028 40027 40044 40030 40066 40043; do
+  iperf -c 10.99.2.16 -B 10.99.1.15:$p --full-duplex -t 14 &
+done
+wait
+```
+
+Port→CPU mapping is specific to the hash **and** the src/dst IP pair — re-probe
+if either changes. The helper `saturate.sh` (probe + balanced run) automates
+both phases (`FLOWS_PER_CPU`, `DUR`, `MODE`, `REMAP`).
+
+**Validated software ceiling (MTU 1500, order-1 F-203 image):**
+
+| Flow selection | Per-core CPU | Throughput |
+|---|---|---|
+| default `-P 8` (imbalanced) | 98/96/88/77 | ~5.3 Gbit/s bidir |
+| balanced 2/CPU (8 flows) | 79/82/81/85 | 7.02 Gbit/s unidir |
+| balanced 4/CPU (16 flows) | 84/90/72/92 | **12.74 Gbit/s bidir** |
+
+So the board's real single-node software forwarding ceiling is **~12.7 Gbit/s
+bidirectional (~6.4 Gbit/s per direction)** — about 2.4× the naive `-P 8` bidir
+figure. Cores plateau at ~85–92%, not a clean 100%, because the DPAA softirq/
+NAPI path has a small non-CPU component (QMan portal dequeue, memory bandwidth,
+cache misses on scattered flows); adding flows past ~4/CPU raises per-core CPU
+without raising aggregate — the signature of genuine saturation.
+
+**When to use which:** report the default `-P 8` number as the representative
+mixed-traffic figure, and the saturation number as the board's capacity ceiling.
+Real traffic (diverse 5-tuples) spreads naturally and lands between the two; the
+`-P 8` clustering is a synthetic-benchmark artifact, not a production defect.
+
 ---
 
 ## 8. Error and health monitoring
@@ -584,5 +645,6 @@ Post-test:
 
 ## 13. Changelog
 
+- **1.2.0 — 2026-08-17** — Add §7.6 saturation mode: empirical port→CPU mapping, balanced fixed-source-port flow method, and the measured true software ceiling (~12.74 Gbit/s bidirectional, ~2.4× the imbalanced -P8 figure); documents that RSS imbalance, not the generator/links, caps the default number.
 - **1.1.0 — 2026-08-17** — Add mandatory per-second continuous FE mode gate, SW/HW throughput+CPU validity discriminator, reject/discard rules for hidden FE re-arm, F-203 order-1 hardware jumbo results through MTU 7000, and explicit pending status for software jumbo cells.
 - **1.0.0 — 2026-08-17** — Initial current-harness specification: corrected topology, F-201/F-202 mode validation, deterministic SW/HW switching, MTU safety and recovery, CPU sampling, and validated 1280–2500 results.
