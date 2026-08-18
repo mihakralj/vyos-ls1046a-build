@@ -399,6 +399,17 @@ void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie);
  */
 struct ask_flow_key;
 
+/*
+ * T-M6-A4 preflight: validate every resource class the current flow requires
+ * WITHOUT allocating a cookie, writing MURAM/DDR, or changing an FQ. Returns
+ * 0 if the subsequent ask_hw_flow_insert can be attempted; -EOPNOTSUPP /
+ * -ENODEV / -EAGAIN / -ENOSPC otherwise so the caller can fail to software
+ * before any partial programming. The check is advisory against races; the
+ * real insert still validates and rolls back every acquisition.
+ */
+int  ask_hw_flow_preflight(const struct ask_flow_key *key,
+                           u32 oif, u32 action_flags,
+                           enum ask_hw_dir dir);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
         enum ask_hw_dir dir,

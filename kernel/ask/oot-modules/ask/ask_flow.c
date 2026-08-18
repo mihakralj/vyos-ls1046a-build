@@ -421,7 +421,21 @@ u64_stats_init(&f->stats.syncp);
  * argument as an xarray cookie. Never infer HW backing from the
  * numeric value — use struct ask_flow::hw_backed, set just below.
  */
+/*
+ * T-M6-A4: preflight every resource class BEFORE the first allocation or
+ * silicon write. The preflight is advisory against races — the real insert
+ * re-validates and its rollback remains authoritative — but a known
+ * unsupported/exhausted flow fails cleanly to software without any partial
+ * programming. Feed the preflight rc through the existing dispatcher
+ * contract: -ENODEV/-EOPNOTSUPP become SW-only mirrors, -EAGAIN parks on the
+ * pending queue, and -ENOSPC/-ENOMEM are hard "stay in kernel SW" failures.
+ */
+rc = ask_hw_flow_preflight(key, oif, action_flags, dir);
+if (!rc)
 rc = ask_hw_flow_insert(key, oif, action_flags, dir, &hw_id);
+else
+pr_info_ratelimited("ask: flow: resource preflight cookie=0x%llx rc=%d — no HW mutation\n",
+    cookie, rc);
 if (rc == 0) {
 hw_inserted = true;
 pr_info_ratelimited("ask: flow: hw_insert OK cookie=0x%llx oif=%u hw_id=0x%08x\n",

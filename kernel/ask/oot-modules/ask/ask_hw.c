@@ -884,6 +884,28 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h, u8 port_id
 }
 
 /*
+ * T-M6-A4: non-allocating capacity probe. Returns true if @port_id already
+ * has a slot OR a free slot exists, i.e. ask_hw_port_slot_get() would succeed.
+ * Caller holds h->lock. Pure read — no side effects, so a preflight that
+ * ultimately fails elsewhere does not consume a port slot.
+ */
+static bool ask_hw_port_slot_available(struct ask_hw_pcd *h, u8 port_id)
+{
+        unsigned int i;
+        bool have_free = false;
+
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use) {
+                        if (h->port[i].port_id == port_id)
+                                return true;
+                } else {
+                        have_free = true;
+                }
+        }
+        return have_free;
+}
+
+/*
  * Map an ASK flow netdev ifindex to its ingress BMI hwport id via the board
  * resolver chain.  Returns -ENODEV for a non-DPAA / unknown ifindex (the
  * graceful SW-fallback signal).  ASK offload flows on this single-image board
@@ -963,6 +985,70 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
         dev_put(dev);
         return 0;
 }
+
+int ask_hw_flow_preflight(const struct ask_flow_key *key,
+                          u32 oif, u32 action_flags,
+                          enum ask_hw_dir dir)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        u32 tx_fqid = 0;
+        u8  port_id = 0;
+        int rc;
+
+        (void)dir;
+
+        if (!key)
+                return -EINVAL;
+
+        /* No HW backing -> caller keeps the flow in software. */
+        if (!h)
+                return -ENODEV;
+
+        /*
+         * T-M6-A4: resource-class gate. The plain IPv4/IPv6 unicast HW path
+         * consumes exactly one DDR ehash record + one cookie + a pre-existing
+         * per-egress TX FQ; it needs NO per-flow MURAM, policer, or CAAM slot.
+         * Any action that WOULD require an unprovisioned resource class must
+         * fail to software here, before publication, rather than partially
+         * program silicon. NAT/PAT/VLAN are already rejected upstream by the
+         * A2 strict action parser, but re-assert defensively: if action_flags
+         * ever carries a class we cannot back, refuse.
+         */
+        if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT |
+                            ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP |
+                            ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
+                return -EOPNOTSUPP;
+
+        /* Only v4/v6 TCP/UDP have a HW ehash path today. */
+        if ((key->l3_proto != ASK_FLOW_L3_IPV4 &&
+             key->l3_proto != ASK_FLOW_L3_IPV6) ||
+            (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
+                return -EOPNOTSUPP;
+
+        /* Egress L2 header not yet resolved -> defer (SW carries it). */
+        if (is_zero_ether_addr(key->next_hop_mac) ||
+            is_zero_ether_addr(key->egress_mac))
+                return -EAGAIN;
+
+        /* Ingress hwport must resolve (owns the classifier) ... */
+        rc = ask_hw_resolve_iif_port(key->iif, &port_id);
+        if (rc)
+                return rc;
+        /* ... and the egress forward FQ must exist before we publish. */
+        rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+        if (rc)
+                return rc;
+
+        /* Port slot must be available (the CC/FE port context). Non-allocating
+         * probe: this is the -ENOSPC condition the real insert would hit, but
+         * without consuming a slot if the flow later fails to publish. */
+        mutex_lock(&h->lock);
+        rc = ask_hw_port_slot_available(h, port_id) ? 0 : -ENOSPC;
+        mutex_unlock(&h->lock);
+
+        return rc;
+}
+EXPORT_SYMBOL_GPL(ask_hw_flow_preflight);
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
                        u32 oif, u32 action_flags,
