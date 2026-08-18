@@ -1526,10 +1526,27 @@ record it does not own.
   contract (ETH accepted; NAT/ADD/VLAN rejected and never published). **Board
   gate open:** confirm NAT/VLAN traffic forwards correctly in software with no
   `in_hw` record on silicon.
-- [ ] **T-M6-A3 — ownership generations/tombstones.** Close CR-004: stale
-  DESTROY cannot remove a replacement; neighbour rebuild cannot resurrect a
-  deleted flow. Gate: concurrent REPLACE/DESTROY/neighbour-churn stress under
-  CONFIG_DEBUG_LIST; no leak, poison, stale-MAC record, or wrong generation.
+- [~] **T-M6-A3 — ownership generations/tombstones.** CODE-COMPLETE 2026-08-18.
+  Closes CR-004. Added a per-cookie generation/tombstone xarray to
+  `ask_flow_table` (value-encoded, no heap alloc), immutable
+  `ask_flow::generation`, and generation-aware `ask_flow_insert_owned()` /
+  `ask_flow_remove_owned()` while keeping the legacy APIs for
+  administrative/test callers. REPLACE claims a monotonic generation; DESTROY
+  tombstones FIRST, drains every pending duplicate, and cannot delete a newer
+  generation's SW or FE record (stale DESTROY returns -ESTALE → skips the FE
+  per-key delete). Pending entries coalesce by cookie, carry a generation, and
+  are discarded on tombstone/mismatch; neighbour stale-MAC fixups snapshot and
+  re-check generation before remove/reinsert/rollback. The insert path checks
+  generation immediately before the rhashtable publish, and pre/post FE-install
+  re-checks close the publish→FE orphan-record window (a record installed after
+  a racing DESTROY is removed). Registry ops are allocation-free xarray value
+  operations under a dedicated spinlock, never call HW or sleep, and gen_lock is
+  never nested inside pending_lock. Four KUnit cases pin monotonic/tombstone
+  semantics, stale-DESTROY no-op, publish-refusal-after-tombstone, and
+  legacy-path compatibility. Local clean compile vs kernel 6.18.44
+  (`ask_flow.o` + `ask_flow_offload.o`, zero errors). **Board gate open:**
+  concurrent REPLACE/DESTROY/neighbour-churn stress under CONFIG_DEBUG_LIST;
+  no leak, poison, stale-MAC record, or wrong generation.
 - [ ] **T-M6-A4 — resource reservation.** Preflight record bytes, MURAM, DDR,
   FQIDs, policer/CAAM slots before publication; define per-feature ceilings and
   fail to software before partial programming. Gate: forced exhaustion at each
