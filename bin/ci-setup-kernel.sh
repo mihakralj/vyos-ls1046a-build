@@ -1885,13 +1885,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-094: flow_add retype → struct fman_pcd_fe_flow_action *"
 fi
 
-# F-109: Export fman_pcd_fe_enq_get_offset() — eliminates debugfs loopback.
-# Adds kernel API to retrieve ENQ FE MURAM offset so ask.ko can call
-# fman_pcd_fe_flow_add() directly instead of parsing debugfs via filp_open().
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_109.py" 2>&1
-    echo "### F-109: fman_pcd_fe_enq_get_offset() export (eliminates debugfs loopback)"
-fi
+: # F-109 folded into patch 0153 (fman_pcd_fe_enq_get_offset export).
+: # Phase 2 fold 2026-08-18: the fixup edit was regenerated into
+: # 0153-fman-pcd-fe-engage-api.patch (its owning patch); the resulting
+: # fman_pcd.c/.h are byte-identical modulo two normalized blank lines.
+: # Verified: fresh-tree apply clean + tree-equivalence vs current+F_109.
 
 # F-096: Call fman_pcd_fe_build_contexts() during fe_arm engage.
 # Patch 0146 defines the function but the call site was lost when
