@@ -1547,10 +1547,27 @@ record it does not own.
   (`ask_flow.o` + `ask_flow_offload.o`, zero errors). **Board gate open:**
   concurrent REPLACE/DESTROY/neighbour-churn stress under CONFIG_DEBUG_LIST;
   no leak, poison, stale-MAC record, or wrong generation.
-- [ ] **T-M6-A4 — resource reservation.** Preflight record bytes, MURAM, DDR,
-  FQIDs, policer/CAAM slots before publication; define per-feature ceilings and
-  fail to software before partial programming. Gate: forced exhaustion at each
-  resource returns clean fallback and byte-exact baseline after teardown.
+- [~] **T-M6-A4 — resource reservation.** CODE-COMPLETE for the current plain
+  IPv4/IPv6-unicast path (2026-08-18). Added side-effect-free
+  `ask_hw_flow_preflight()` and made `ask_flow_insert_core()` run it before the
+  first cookie allocation or silicon write. Validates the resource classes this
+  path actually consumes: PCD/HW instance exists, protocol has an ehash
+  implementation, neighbour L2 header is resolved, ingress FMan port resolves,
+  per-egress TX FQ resolves, and a port-context slot already exists or is
+  available (non-allocating `ask_hw_port_slot_available()`). Rejects action
+  flags needing unprovisioned NAT/PAT/VLAN/policer/CAAM/offline-port resources
+  with `-EOPNOTSUPP`; unresolved neighbour → `-EAGAIN`; port exhaustion →
+  `-ENOSPC`. All return before any mutation, so the flow stays on the kernel SW
+  path; the real insert still revalidates and keeps its rollback for races.
+  Accounting is deliberately honest: one plain flow consumes one DDR ehash
+  record + one xarray cookie + an existing TX FQ and **zero per-flow MURAM**
+  (the FE chain's MURAM is shared and allocated at engage), so A4 invents no
+  false MURAM-per-flow floor. Future NAT/VLAN/policer/CAAM compilers extend this
+  same preflight with their real per-feature ceilings before A2 permits those
+  actions. Two KUnit cases pin NULL/no-HW side-effect-free fallback. Local
+  6.18.44 compile clean (`ask_hw.o`, `ask_flow.o`, `ask_flow_offload.o`). **Board
+  gate open:** force each resource failure and prove no `in_hw`, no
+  cookie/record publication, no MURAM delta, and correct SW forwarding.
 
 ##### Phase M6-B — extend the proven flowtable path first
 
