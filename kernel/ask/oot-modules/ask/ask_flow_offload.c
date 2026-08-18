@@ -1057,24 +1057,76 @@ static int ask_parse_match(struct flow_cls_offload *f,
 }
 
 /* ------------------------------------------------------------------------- */
+/* Canonical intent lowering (T-M6-A1)                                        */
+/*                                                                            */
+/* Single translation point from the typed ask_flow_intent to the legacy      */
+/* (oif, action_flags) pair the insert/pending/neigh paths still consume.     */
+/* For the plain IPv4-unicast flow this MUST reproduce the exact pre-A1       */
+/* values (oif = egress ifindex, action_flags = 0) so the stored ask_flow     */
+/* and the FE record stay byte-for-byte identical. When NAT/VLAN land, the    */
+/* future FE action compiler replaces this body; call sites do not change.    */
+/* ------------------------------------------------------------------------- */
+int ask_intent_lower(const struct ask_flow_intent *in,
+                     u32 *out_oif, u32 *out_action_flags)
+{
+        u32 oif = 0;
+        u32 flags = 0;
+        u8 i;
+
+        for (i = 0; i < in->n_actions; i++) {
+                switch (in->actions[i].type) {
+                case ASK_ACTION_REDIRECT:
+                        oif = in->actions[i].oif;
+                        break;
+                case ASK_ACTION_L2_REWRITE:
+                        /* Performed by the FE-VM INSERT_L2_HDR opcode from the
+                         * resolved next-hop MAC in the key; no legacy flag. */
+                        break;
+                case ASK_ACTION_TTL_DEC:
+                        /* The FE opcode chain always decrements TTL for a
+                         * routed flow; it is implicit in the record and,
+                         * pre-A1, was never encoded in action_flags. Keep it
+                         * out of the legacy flags to preserve byte-identity. */
+                        break;
+                default:
+                        return -EOPNOTSUPP;
+                }
+        }
+
+        if (oif == 0)
+                return -EOPNOTSUPP;
+
+        *out_oif = oif;
+        *out_action_flags = flags;
+        return 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Action parsing                                                             */
 /*                                                                            */
-/* PR14j extension: also returns the egress net_device * (act->dev) so the    */
-/* caller can run neigh_lookup() and fill key->next_hop_mac / egress_mac.     */
-/* The pointer is borrowed from the rule and is RCU-protected; caller must    */
-/* use it before returning from the FLOW_CLS_REPLACE handler.                 */
+/* T-M6-A1: builds the canonical ask_flow_intent (match + typed actions), then*/
+/* lowers it to (oif, action_flags). Also returns the egress net_device *     */
+/* (act->dev) so the caller can run neigh_lookup() and fill                    */
+/* key->next_hop_mac / egress_mac. The pointer is borrowed from the rule and  */
+/* is RCU-protected; caller must use it before returning from the             */
+/* FLOW_CLS_REPLACE handler.                                                   */
 /* ------------------------------------------------------------------------- */
 
 static int ask_parse_action(struct flow_cls_offload *f,
+                            const struct ask_flow_key *match,
                             u32 *out_action_flags, u32 *out_oif,
                             struct net_device **out_egress_dev)
 {
         struct flow_rule *rule = flow_cls_offload_flow_rule(f);
         struct flow_action_entry *act;
         struct net_device *egress = NULL;
-        u32 flags = 0;
+        struct ask_flow_intent intent = {
+                .match = match,
+                .owner = (u64)f->cookie,
+                .generation = 0, /* A3 assigns real generations */
+        };
         u32 oif = 0;
-        int i;
+        int i, rc;
 
         flow_action_for_each(i, act, &rule->action) {
                 switch (act->id) {
@@ -1084,6 +1136,13 @@ static int ask_parse_action(struct flow_cls_offload *f,
                                 return -EOPNOTSUPP;
                         oif = act->dev->ifindex;
                         egress = act->dev;
+                        rc = ask_intent_add(&intent, ASK_ACTION_REDIRECT, oif);
+                        if (rc)
+                                return rc;
+                        /* Every routed flow decrements TTL in the FE chain. */
+                        rc = ask_intent_add(&intent, ASK_ACTION_TTL_DEC, 0);
+                        if (rc)
+                                return rc;
                         break;
                 case FLOW_ACTION_CSUM:
                         break;
@@ -1121,8 +1180,13 @@ static int ask_parse_action(struct flow_cls_offload *f,
                  * same misforwarding class. Reject until implemented.
                  */
                 case FLOW_ACTION_MANGLE:
-                        if (act->mangle.htype == FLOW_ACT_MANGLE_HDR_TYPE_ETH)
+                        if (act->mangle.htype == FLOW_ACT_MANGLE_HDR_TYPE_ETH) {
+                                rc = ask_intent_add(&intent,
+                                                    ASK_ACTION_L2_REWRITE, 0);
+                                if (rc)
+                                        return rc;
                                 break; /* L2 rewrite done by INSERT_L2_HDR */
+                        }
                         pr_info_ratelimited("ask: flow_offload: MANGLE htype=%u (NAT/L3/L4 rewrite) not offloaded — SW fallback (T-M6-7)\n",
                                             act->mangle.htype);
                         return -EOPNOTSUPP;
@@ -1145,7 +1209,11 @@ static int ask_parse_action(struct flow_cls_offload *f,
                 return -EOPNOTSUPP;
         }
 
-        *out_action_flags = flags;
+        /* Lower the canonical intent to the legacy (oif, action_flags) pair.
+         * For the IPv4-unicast flow this yields the exact pre-A1 values. */
+        rc = ask_intent_lower(&intent, &oif, out_action_flags);
+        if (rc)
+                return rc;
         *out_oif = oif;
         if (out_egress_dev)
                 *out_egress_dev = egress;
@@ -1467,7 +1535,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 key.iif = ingress_dev->ifindex;
         }
 
-        rc = ask_parse_action(f, &action_flags, &oif, &egress_dev);
+        rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
         if (rc) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
                                     rc, f->cookie);

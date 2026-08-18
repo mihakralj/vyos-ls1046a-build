@@ -657,8 +657,60 @@ KUNIT_EXPECT_NE(test, k[10], k[11]);
 KUNIT_EXPECT_NE(test, k[12], k[13]);
 }
 
+/*
+ * T-M6-A1: pin the canonical-intent lowering contract. The plain IPv4-unicast
+ * intent (REDIRECT + TTL_DEC + ETH L2 rewrite) MUST lower to oif = the egress
+ * ifindex and action_flags = 0 — the exact pre-A1 values — so the stored flow
+ * and FE record stay byte-identical. An intent with no REDIRECT lowers to
+ * -EOPNOTSUPP.
+ */
+static void ask_flow_offload_test_intent_lower_ipv4(struct kunit *test)
+{
+struct ask_flow_intent in = { .owner = 0xABCD };
+u32 oif = 0, flags = 0xdeadbeef;
+int rc;
+
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_REDIRECT, 42), 0);
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0), 0);
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_L2_REWRITE, 0), 0);
+
+rc = ask_intent_lower(&in, &oif, &flags);
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_EQ(test, oif, 42u);
+/* Byte-identity anchor: the IPv4 path stored action_flags == 0 pre-A1. */
+KUNIT_EXPECT_EQ(test, flags, 0u);
+}
+
+static void ask_flow_offload_test_intent_lower_no_redirect(struct kunit *test)
+{
+struct ask_flow_intent in = { .owner = 0xABCE };
+u32 oif = 7, flags = 7;
+int rc;
+
+/* TTL_DEC/L2_REWRITE only, no egress → not offloadable. */
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0), 0);
+rc = ask_intent_lower(&in, &oif, &flags);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+}
+
+static void ask_flow_offload_test_intent_add_overflow(struct kunit *test)
+{
+struct ask_flow_intent in = { 0 };
+int i, rc = 0;
+
+for (i = 0; i < ASK_INTENT_MAX_ACTIONS; i++)
+KUNIT_EXPECT_EQ(test, ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0), 0);
+/* One past the cap must fail rather than overrun the array. */
+rc = ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0);
+KUNIT_EXPECT_EQ(test, rc, -E2BIG);
+KUNIT_EXPECT_EQ(test, (int)in.n_actions, ASK_INTENT_MAX_ACTIONS);
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
 KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
+KUNIT_CASE(ask_flow_offload_test_intent_lower_ipv4),
+KUNIT_CASE(ask_flow_offload_test_intent_lower_no_redirect),
+KUNIT_CASE(ask_flow_offload_test_intent_add_overflow),
 KUNIT_CASE(ask_flow_offload_test_replace_minimal),
 KUNIT_CASE(ask_flow_offload_test_destroy_round_trip),
 KUNIT_CASE(ask_flow_offload_test_double_destroy_swallowed),

@@ -1497,10 +1497,21 @@ record it does not own.
 
 ##### Phase M6-A — shared safety substrate (MUST precede new features)
 
-- [ ] **T-M6-A1 — canonical intent.** Introduce match/action/owner/generation
-  types and move the existing IPv4 flowtable path onto them without changing
-  silicon bytes. Gate: old/new record byte comparison identical; current IPv4
-  MTU/performance/lifecycle battery unchanged.
+- [~] **T-M6-A1 — canonical intent.** CODE-COMPLETE 2026-08-18. Added
+  `struct ask_flow_intent` (match / typed `ask_flow_action_ent[]` / owner /
+  generation) and `ask_action_type` (REDIRECT, L2_REWRITE, TTL_DEC) in
+  `ask_internal.h`. `ask_parse_action()` now builds the canonical intent
+  (match = parsed key, owner = cookie, generation = 0) and lowers it via the
+  single `ask_intent_lower()` translation point to the legacy (oif,
+  action_flags) pair the insert/pending/neigh paths still consume. Byte-identity
+  is preserved by construction: the ehash key comes solely from the untouched
+  `ask_fe_build_key()`; `ask_intent_lower()` reproduces the exact pre-A1 values
+  (oif = egress ifindex, action_flags = 0 — verified the IPv4 path stored 0
+  before A1); the FE opcode chain is unchanged. `generation` is an A3 hook
+  (always 0 now). KUnit pins the lowering contract (IPv4 intent → oif set,
+  flags 0; no-redirect → -EOPNOTSUPP; action overflow → -E2BIG). **Board gate
+  open:** run the IPv4 MTU/performance/lifecycle battery and confirm the FE
+  record bytes and throughput are unchanged from the pre-A1 baseline.
 - [~] **T-M6-A2 — strict action acceptance.** CODE-COMPLETE 2026-08-18
   (`ask_parse_action()` in `ask_flow_offload.c`): ETH-type `FLOW_ACTION_MANGLE`
   is accepted (the next-hop L2 rewrite the FE-VM `INSERT_L2_HDR` already
