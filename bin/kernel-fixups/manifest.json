@@ -43,7 +43,6 @@
       "description": "Ratelimit Err FD status console log spam for physical frame errors",
       "date": "2026-07-23"
     },
-    "F_109.py": "fman_pcd.c/h: F-109 fman_pcd_fe_enq_get_offset() export — eliminates debugfs loopback for ENQ FE offset",
     "F_115.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
       "description": "M4 ZC recover=0 fix — DMA index headroom-adjust to match qm_fd_addr(fd)=base+headroom; + recover-miss diagnostic",
@@ -182,9 +181,16 @@
     "F_202.py": "fman_pcd.c: F-202 (2026-08-17, P0 flow-lifecycle fix) -- serializes exported production fman_pcd_fe_flow_add/del with pcd->fe_lock, honoring fman_pcd_ehash_{add,del}_key's documented caller-lock contract and matching every debugfs add/del/clear path. Board panic on .185 image 0114: nft nf_ft_offload_del workqueue hit list_del corruption/LIST_POISON2 in fman_pcd_ehash_del_key after async per-key delete raced duplicate delete, clear-all, or drain. Unlocks all error paths and treats -ENOENT after serialized per-key delete as an idempotent no-op. No register/descriptor changes. S0 qdrant-gated against F-117 and CR-003/CR-004 history.",
     "F_203.py": "dpaa_eth.c: F-203 (2026-08-17, contiguous jumbo RX) -- raises the DPAA RX buffer pool from order-0/4KiB to order-1/8KiB via DPAA_BP_ORDER=1 and DPAA_BP_RAW_SIZE=(4096<<order); changes the one RX pool dev_alloc_pages() and all eight RX-buffer free_pages() sites to the matching order while deliberately leaving TX-SGT and XDP-copy scratch pages order-0. Keeps large frames contiguous and ASK-FE-offloadable (unlike RX SG), raises usable one-buffer MTU to ~7.5K; VyOS clamps conservatively to 7000. skb_free_frag compound-head recycle remains valid. S0 qdrant-gated against the 4K-wedge record, RX SG consumer semantics, A050385 runtime-inactive on LS1046A, and BMan sizing."
   },
-  "count": 92,
+  "count": 106,
+  "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
+  "dormant": {
+    "F_174.py": "On disk, listed in active, but intentionally NOT invoked from ci-setup-kernel.sh (superseded by F-175; kept for the record). This is the only allowed disk-without-invocation entry."
+  },
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
+  ],
+  "folded_into_patches": [
+    "F_109.py — folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2 pilot). fman_pcd_fe_enq_get_offset() export regenerated into its owning patch; tree-equivalent to current+F_109 modulo two normalized blank lines. Gated on CI build validation before considered final."
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {
@@ -196,10 +202,6 @@
       "action": "permanent",
       "reason": "MUX(AD+4)/Transition AD direct writes — F_055 correction folded in"
     },
-    "F_055.py": {
-      "action": "fold-into F_054.py",
-      "reason": "Correction to F_054 MUX write target (AD+0→AD+4). Merge into single fixup."
-    },
     "F_056.py": {
       "action": "permanent",
       "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage — workaround for F-047 patch drift"
@@ -207,10 +209,6 @@
     "F_057.py": {
       "action": "permanent",
       "reason": "SDK-compliant DDR record layout (no per-record next-FE pointer)"
-    },
-    "F_061.py": {
-      "action": "delete-after M2_4_2 upgrade",
-      "reason": "Superseded by M2_4_2.py v6 (64-word probe with non-zero filter). v1 implementation, slot-1 save strategy replaced."
     },
     "F_068.py": {
       "action": "permanent",
@@ -247,10 +245,6 @@
     "F_076.py": {
       "action": "permanent",
       "reason": "Atomic fe_disengage_full debugfs (F-076 board crash fix)"
-    },
-    "M2_4.py": {
-      "action": "fold-into M2_4_2.py",
-      "reason": "Intermediate version (v4: slot-5 save). Superseded by M2_4_2.py v6 (64-word probe)."
     },
     "M2_4_2.py": {
       "action": "permanent",
@@ -299,10 +293,6 @@
     "F_122.py": {
       "action": "fold-into 0157",
       "reason": "Idempotent engage — test_bit guard in shared core, return 0 when already armed"
-    },
-    "F_109.py": {
-      "action": "fold-into 0153",
-      "reason": "ENQ FE offset getter — eliminates debugfs loopback, belongs with the FE-VM engage API"
     },
     "F_092.py": {
       "action": "fold-into 0158+0153",

@@ -73,19 +73,37 @@ referenced = set(m.group(1) for m in re.finditer(
 zombie_disk = on_disk - manifested
 zombie_manifest = manifested - on_disk
 zombie_refs = referenced - manifested
+dormant = set(manifest.get('dormant', {}).keys())
+unreferenced = on_disk - referenced
+bad_dormant = dormant - manifested
+undeclared_dormant = unreferenced - dormant
+stale_dormant = dormant - unreferenced
+declared_count = manifest.get('count')
 
 all_ok = True
 if zombie_disk:
     print(f"FAIL [4]: {len(zombie_disk)} unmanifested fixup files on disk: {zombie_disk}")
     all_ok = False
-elif zombie_manifest:
+if zombie_manifest:
     print(f"FAIL [4]: {len(zombie_manifest)} manifest entries missing from disk: {zombie_manifest}")
     all_ok = False
-elif zombie_refs:
+if zombie_refs:
     print(f"FAIL [4]: {len(zombie_refs)} fixups referenced but not manifest: {zombie_refs}")
     all_ok = False
-else:
-    print(f"OK [4]: all {len(manifested)} fixup files match manifest ({len(referenced)} referenced)")
+if declared_count != len(on_disk):
+    print(f"FAIL [4]: manifest count={declared_count}, but {len(on_disk)} *.py files exist on disk")
+    all_ok = False
+if bad_dormant:
+    print(f"FAIL [4]: dormant entries are not manifested: {bad_dormant}")
+    all_ok = False
+if undeclared_dormant:
+    print(f"FAIL [4]: unreferenced fixups not declared dormant: {undeclared_dormant}")
+    all_ok = False
+if stale_dormant:
+    print(f"FAIL [4]: dormant fixups are now referenced; remove their dormant entries: {stale_dormant}")
+    all_ok = False
+if all_ok:
+    print(f"OK [4]: {len(manifested)} manifested files, {len(referenced)} referenced, {len(dormant)} explicitly dormant")
 ok = ok and all_ok
 
 sys.exit(0 if ok else 1)
