@@ -57,8 +57,13 @@ packaging, external validation), not datapath.
   path, including a forced helper failure proving the commit fails closed.
 - [ ] Cold-boot MTU 7000 battery on the heidi→DUT `.185`→HELGA harness; restore
   every endpoint to MTU 1500 after every run and on abort.
-- [ ] `ask-check` 24/24 on the candidate image plus byte-exact
-  `pcd-snapshot` disengage diff against the warm S0 baseline.
+- [~] Production `ask-check` rewritten 2026-08-18 around the shipping IPv4-
+  unicast contract (no debugfs/milestone/deferred-feature checks). In-place
+  validation on image `2026.08.18-1900` reached 30/30 after fixing the YNL
+  nested-reply schema for `get-info` / `get-muram`; current source additionally
+  requires truthful IPv4 capability, one bound FMan, and ucode 210.10.1 from
+  `get-info`. Gate: **0 required FAIL**, plus byte-exact `pcd-snapshot`
+  disengage diff against the warm S0 baseline on the next built image.
 - [ ] Prerelease release notes/package and one external validation cycle using
   the operator procedure in `plans/ASK-ISO-BUILD-AND-INSTALL.md`.
 
@@ -1758,8 +1763,10 @@ own PCD objects and prove readback.
   final disengage.
 - [ ] **T-M8-3** `@___` — Observability: F-05 `ask_stats.c`, F-16/17/18
   counter readers, F-19 `ASK_CMD_GET_MURAM`.
-- [ ] **T-M8-4** `@___` — `ask-check` 24/24 OK on the board; policer BUG-3b
-  flood characterization (serial capture + cold power-cycle).
+- [~] **T-M8-4** `@___` — production `ask-check` reports 0 required FAIL on
+  the board (contract rewritten 2026-08-18; final truthful `get-info` telemetry
+  awaits the next image); policer BUG-3b flood characterization (serial capture
+  + cold power-cycle).
 - [ ] **T-M8-5** `@___` — Upstream prep: checkpatch/sparse clean; KUnit ≥80%
   on `ask_flow.c`/`ask_genl_attr.c` (maintains the CR-009/010/011
   invariants).

@@ -245,14 +245,29 @@ goto nla_put_failure;
                 goto nla_put_failure;
 }
 
-if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, 0,
+/*
+ * Production capability/status telemetry. Do not advertise planned features:
+ * the shipping hardware path is plain routed IPv4 TCP/UDP only; IPv6, NAT,
+ * VLAN, bridge and ESP deliberately fall back to software. ASK_CAP_IPV4 means
+ * that specific path is compiled and exposed, not that a flow is live now.
+ */
+if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, ASK_CAP_IPV4,
       ASK_INFO_ATTR_UNSPEC))
 goto nla_put_failure;
 
-if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FMAN,  0))
+{
+struct ask_flow_table *t = ask_flow_default_table();
+u32 num_fman = ask_hw_get_fman() ? 1 : 0;
+u32 num_flows = t ? (u32)atomic_read(&t->num_flows) : 0;
+
+if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FMAN, num_fman))
 goto nla_put_failure;
-if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FLOWS, 0))
+if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FLOWS, num_flows))
 goto nla_put_failure;
+}
+/* No fixed per-flow ceiling is exported yet: the external-hash table uses
+ * collision chains and coherent DDR records. Zero means "not a fixed limit",
+ * not "zero capacity". Resource failures are reported by the A4 preflight. */
 if (nla_put_u32(skb, ASK_INFO_ATTR_MAX_FLOWS, 0))
 goto nla_put_failure;
 
