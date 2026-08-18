@@ -13,6 +13,7 @@
 
 #include <linux/types.h>
 #include <linux/errno.h>        /* -E2BIG in ask_intent_add() inline */
+#include <linux/xarray.h>       /* ask_flow_table::gen_by_cookie (A3) */
 #include <linux/printk.h>
 #include <linux/skbuff.h>
 #include <linux/rhashtable.h>
@@ -589,6 +590,12 @@ u8  dir;
  * rcu_read_lock() alongside @hw_flow_id.
  */
 bool hw_backed;
+/*
+ * T-M6-A3: the ownership generation this flow was published under. Set once
+ * at insert, immutable, read under rcu_read_lock alongside hw_flow_id. A
+ * DESTROY/worker carrying an older generation must not act on this flow.
+ */
+u32 generation;
 struct ask_flow_stats stats;
 };
 
@@ -600,9 +607,46 @@ struct ask_flow_stats stats;
  * fman support we can clone the table per fman without touching the
  * core lookup/insert code.
  */
+/*
+ * Per-cookie ownership generation registry (T-M6-A3, 2026-08-18).
+ *
+ * The flow lifecycle keys everything on `cookie`, an unsigned-long slab
+ * pointer to the kernel's flow_offload_tuple that is RECYCLED across a
+ * DESTROY->REPLACE boundary. Without an ownership stamp, a late DESTROY, a
+ * stale neighbour-rebuild worker, or a duplicate pending replay can act on a
+ * cookie that now belongs to a NEWER flow — deleting or resurrecting the wrong
+ * flow (CR-004), or leaving an orphan silicon record if a DESTROY races the
+ * post-publish FE install (a MURAM-leak class per AGENTS.md S6).
+ *
+ * A monotonic per-cookie generation plus a tombstone closes all of these:
+ *  - REPLACE bumps the generation and clears any tombstone (new owner).
+ *  - The generation is checked immediately before the rhashtable publish; a
+ *    superseded REPLACE rolls back its own HW and does not publish.
+ *  - DESTROY tombstones the cookie; it is idempotent but can never affect a
+ *    newer generation.
+ *  - Workers (neigh rebuild, pending replay) snapshot the generation and
+ *    discard on mismatch/tombstone.
+ *
+ * The registry entry must OUTLIVE the ask_flow (which is freed via call_rcu),
+ * so a late worker can still observe "cookie now at gen N, tombstoned". It is
+ * a small xarray guarded by the xarray's own internal lock (xa_lock). Registry
+ * ops take NO hardware action and never sleep, so they are safe to call from
+ * process context outside (but never nested inside) the pending/rht locks.
+ * Lock order, where both are held: xa_lock BEFORE pending_lock.
+ */
+enum ask_gen_state {
+	ASK_GEN_LIVE       = 0,
+	ASK_GEN_TOMBSTONED = 1,
+};
+
+/* gen_by_cookie stores xa_mk_value((generation << 1) | state); no per-flow
+ * allocation, so tombstones can safely outlive ask_flow without leaking heap
+ * objects. Entries are reclaimed wholesale when the flow table is destroyed. */
+
 struct ask_flow_table {
 struct rhashtable rht;
 atomic_t fake_hw_id_seq; /* PR7 placeholder until real hostcmd */
+struct xarray gen_by_cookie;   /* cookie -> xa_value(gen|state), A3 */
 atomic_t num_flows;
 /*
  * Count of entries with ask_flow::hw_backed set. Lets the neigh
@@ -642,8 +686,63 @@ int ask_flow_insert(struct ask_flow_table *t,
     enum ask_hw_dir dir,
     u32 *out_hw_id);
 
-/* Remove by cookie. Returns 0 on success, -ENOENT if not present. */
+/* Remove by cookie. Returns 0 on success, -ENOENT if not present.
+ * Unconditional: used by administrative flush, teardown, and tests. Does not
+ * consult the generation registry. Production DESTROY uses the _owned form. */
 int ask_flow_remove(struct ask_flow_table *t, u64 cookie);
+
+/*
+ * T-M6-A3 generation-aware variants used by the production REPLACE/DESTROY and
+ * the neighbour/pending workers. @generation is the ownership stamp the caller
+ * claimed via ask_flow_gen_next().
+ *
+ * ask_flow_insert_owned(): checks, immediately before the rhashtable publish,
+ * that @generation is still the current non-tombstoned owner of @cookie; if a
+ * newer REPLACE or a DESTROY intervened it rolls back its own HW and returns
+ * -ESTALE without publishing.
+ *
+ * ask_flow_remove_owned(): removes only if @generation is >= the stored flow's
+ * generation (i.e. the caller is the current or a newer owner); a stale caller
+ * returns -ESTALE (internal control signal) and leaves the newer flow intact.
+ * The top-level DESTROY converts -ESTALE to user-visible success but MUST skip
+ * the FE per-key delete, which would otherwise delete the newer HW record.
+ */
+int ask_flow_insert_owned(struct ask_flow_table *t, u64 cookie,
+			  const struct ask_flow_key *key,
+			  u32 oif, u32 action_flags, enum ask_hw_dir dir,
+			  u32 generation, u32 *out_hw_id);
+int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
+			  u32 generation);
+
+/* ------------------------------------------------------------------------- */
+/* T-M6-A3: per-cookie ownership generation registry.                         */
+/*                                                                            */
+/* All keyed by the flow cookie and independent of the ask_flow lifetime.     */
+/* None sleep or touch hardware; safe from process context. Callers must NOT  */
+/* hold ask_flow_pending_lock when calling these (xa_lock is taken first per  */
+/* the documented lock order).                                                */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Claim ownership for a REPLACE: bump the cookie's generation, clear any
+ * tombstone, and return the new generation (>= 1). Returns 0 on OOM; the
+ * caller MUST fail the REPLACE to software rather than publish an unguarded
+ * flow (memory pressure must not reopen CR-004).
+ */
+u32  ask_flow_gen_next(struct ask_flow_table *t, u64 cookie);
+
+/* Current owning generation for a cookie, or 0 if unknown. */
+u32  ask_flow_gen_current(struct ask_flow_table *t, u64 cookie);
+
+/* True iff @gen is the current, non-tombstoned owner of @cookie. */
+bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u32 gen);
+
+/* Mark a cookie tombstoned (DESTROY). Idempotent. */
+void ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie);
+
+/* Drop the registry entry entirely (called when the SW flow is finally
+ * freed and no worker can still reference the cookie). Idempotent. */
+void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie);
 
 /*
  * Snapshot the per-flow stats into the caller-supplied out parameters.

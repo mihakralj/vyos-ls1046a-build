@@ -357,6 +357,7 @@ struct ask_flow_pending {
         int                     ingress_ifindex;
         __be32                  dst_ip;
         unsigned long           jiffies_inserted;
+        u32                     generation; /* A3: owner stamp for replay guard */
 };
 
 static LIST_HEAD(ask_flow_pending_list);
@@ -405,7 +406,8 @@ static bool ask_flow_pending_drop_cookie(u64 cookie)
                         ask_flow_pending_count--;
                         found = true;
                         kfree(p);
-                        break;
+                        /* A3: do not break — drain every legacy duplicate for
+                         * this cookie so none can replay after DESTROY. */
                 }
         }
         spin_unlock_bh(&ask_flow_pending_lock);
@@ -417,9 +419,10 @@ static int ask_flow_pending_enqueue(u64 cookie,
                                     u32 oif, u32 action_flags,
                                     int egress_ifindex,
                                     int ingress_ifindex,
-                                    __be32 dst_ip)
+                                    __be32 dst_ip,
+                                    u32 generation)
 {
-        struct ask_flow_pending *p;
+        struct ask_flow_pending *p, *iter;
 
         p = kzalloc(sizeof(*p), GFP_ATOMIC);
         if (!p)
@@ -433,8 +436,32 @@ static int ask_flow_pending_enqueue(u64 cookie,
         p->ingress_ifindex  = ingress_ifindex;
         p->dst_ip           = dst_ip;
         p->jiffies_inserted = jiffies;
+        p->generation       = generation;
 
         spin_lock_bh(&ask_flow_pending_lock);
+        /*
+         * T-M6-A3 (R3): coalesce by cookie. A flapping neighbour or repeated
+         * REPLACE retries for the same cookie must not accumulate multiple
+         * pending entries — otherwise a DESTROY that drops the first leaves a
+         * second that later replays and resurrects the flow. If an entry for
+         * this cookie already exists, overwrite it in place with the newest
+         * key/generation and keep a single entry per cookie.
+         */
+        list_for_each_entry(iter, &ask_flow_pending_list, node) {
+                if (iter->cookie == cookie) {
+                        iter->key              = *key;
+                        iter->oif              = oif;
+                        iter->action_flags     = action_flags;
+                        iter->egress_ifindex   = egress_ifindex;
+                        iter->ingress_ifindex  = ingress_ifindex;
+                        iter->dst_ip           = dst_ip;
+                        iter->jiffies_inserted = jiffies;
+                        iter->generation       = generation;
+                        spin_unlock_bh(&ask_flow_pending_lock);
+                        kfree(p);
+                        return 0;
+                }
+        }
         if (ask_flow_pending_count >= ASK_FLOW_PENDING_MAX) {
                 spin_unlock_bh(&ask_flow_pending_lock);
                 kfree(p);
@@ -504,9 +531,24 @@ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
                                                      p->oif, p->action_flags,
                                                      p->egress_ifindex,
                                                      p->ingress_ifindex,
-                                                     p->dst_ip) == 0)
+                                                     p->dst_ip,
+                                                     p->generation) == 0)
                                 pr_info_ratelimited("ask: flow_offload: PR14y re-park cookie=0x%llx dev=%s\n",
                                                     p->cookie, netdev_name(dev));
+                        kfree(p);
+                        continue;
+                }
+
+                /*
+                 * T-M6-A3 (R2): discard a pending entry whose cookie was
+                 * destroyed (tombstoned) or superseded by a newer REPLACE
+                 * while it waited for the neighbour. Replaying it would
+                 * resurrect a flow no conntrack owns.
+                 */
+                if (p->generation != 0 &&
+                    !ask_flow_gen_is_current(t, p->cookie, p->generation)) {
+                        pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%u (destroyed/superseded)\n",
+                                            p->cookie, p->generation);
                         kfree(p);
                         continue;
                 }
@@ -531,8 +573,9 @@ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
                  * silicon.  PR14z6 (future) can capture the dir at
                  * defer time and replay it here.
                  */
-                rc = ask_flow_insert(t, p->cookie, &p->key, p->oif,
-                                     p->action_flags, ASK_HW_DIR_FWD, &hw_id);
+                rc = ask_flow_insert_owned(t, p->cookie, &p->key, p->oif,
+                                           p->action_flags, ASK_HW_DIR_FWD,
+                                           p->generation, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
                 if (rc == 0) {
@@ -571,6 +614,7 @@ struct ask_neigh_mac_fixup {
         u32                 oif;
         u32                 action_flags;
         u8                  dir;
+        u32                 generation; /* A3: owner stamp snapshotted at collect */
 };
 
 /*
@@ -617,6 +661,7 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
         fx->oif          = f->oif;
         fx->action_flags = f->action_flags;
         fx->dir          = f->dir;
+        fx->generation   = f->generation;
         list_add_tail(&fx->node, &ctx->fixups);
         ctx->matched++;
         return 0;
@@ -684,7 +729,25 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
                         continue;
                 }
 
-                ask_flow_remove(t, fx->cookie);
+                /*
+                 * T-M6-A3 (R2/R5): only rebuild if the flow we snapshotted at
+                 * collect time is still the current owner. If a DESTROY or a
+                 * newer REPLACE intervened, rebuilding from the stale fixup
+                 * would resurrect a dead flow or clobber the newer one. The
+                 * rebuild reuses the SAME generation (a MAC repoint is not a
+                 * new ownership epoch), and remove_owned/insert_owned enforce
+                 * the bound so a race during the remove->insert window cannot
+                 * revive a concurrently-destroyed cookie.
+                 */
+                if (!ask_flow_gen_is_current(t, fx->cookie, fx->generation)) {
+                        pr_info_ratelimited("ask: neigh: skip stale-MAC rebuild cookie=0x%llx gen=%u (destroyed/superseded)\n",
+                                            fx->cookie, fx->generation);
+                        list_del(&fx->node);
+                        kfree(fx);
+                        continue;
+                }
+
+                ask_flow_remove_owned(t, fx->cookie, fx->generation);
                 rcu_read_lock();
                 cur = ask_flow_lookup(t, fx->cookie);
                 rcu_read_unlock();
@@ -693,16 +756,26 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
                         kfree(fx);
                         continue;
                 }
-                rc = ask_flow_insert(t, fx->cookie, &fx->key, fx->oif,
-                                     fx->action_flags, fx->dir, &hw_id);
+                /* Re-check ownership after the remove: a DESTROY racing the
+                 * remove tombstones the cookie, and insert_owned will then
+                 * refuse to republish (returns -ESTALE) — no resurrection. */
+                rc = ask_flow_insert_owned(t, fx->cookie, &fx->key, fx->oif,
+                                           fx->action_flags, fx->dir,
+                                           fx->generation, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
-                if (rc) {
+                if (rc == -ESTALE) {
+                        /* cookie destroyed during rebuild; leave it gone */
+                        pr_info_ratelimited("ask: neigh: rebuild aborted (destroyed) cookie=0x%llx\n",
+                                            fx->cookie);
+                } else if (rc) {
                         int restore_rc;
 
-                        restore_rc = ask_flow_insert(t, fx->cookie, &old_key, old_oif,
-                                                     old_action_flags, old_dir, &hw_id);
-                        if (restore_rc == -EEXIST)
+                        restore_rc = ask_flow_insert_owned(t, fx->cookie, &old_key,
+                                                           old_oif, old_action_flags,
+                                                           old_dir, fx->generation,
+                                                           &hw_id);
+                        if (restore_rc == -EEXIST || restore_rc == -ESTALE)
                                 restore_rc = 0;
                         if (restore_rc)
                                 pr_warn_ratelimited("ask: neigh: rebuild rollback failed cookie=0x%llx rc=%d\n",
@@ -835,8 +908,17 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
                 int rc;
 
                 list_del(&p->node);
-                rc = ask_flow_insert(t, p->cookie, &p->key, p->oif,
-                                     p->action_flags, ASK_HW_DIR_FWD, &hw_id);
+                /* A3 (R2): skip cookies destroyed/superseded while parked. */
+                if (p->generation != 0 &&
+                    !ask_flow_gen_is_current(t, p->cookie, p->generation)) {
+                        pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%u (poll, destroyed/superseded)\n",
+                                            p->cookie, p->generation);
+                        kfree(p);
+                        continue;
+                }
+                rc = ask_flow_insert_owned(t, p->cookie, &p->key, p->oif,
+                                           p->action_flags, ASK_HW_DIR_FWD,
+                                           p->generation, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
                 if (rc == 0) {
@@ -848,6 +930,8 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
                                             p->ingress_ifindex,
                                             hw_id, p->key.next_hop_mac,
                                             p->key.egress_mac);
+                } else if (rc == -ESTALE) {
+                        /* superseded between the gen check and publish; benign */
                 } else {
                         pr_info_ratelimited("ask: flow_offload: PR14z10 poll-insert FAIL rc=%d cookie=0x%llx eg_if=%d in_if=%d\n",
                                             rc, p->cookie, p->egress_ifindex,
@@ -1495,10 +1579,26 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         u32 hw_id = 0;
         u32 action_flags = 0;
         u32 oif = 0;
+        u32 generation;
         int rc;
 
         if (!t) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE early-return (no default table) cookie=0x%lx\n",
+                                    f->cookie);
+                return -EOPNOTSUPP;
+        }
+
+        /*
+         * T-M6-A3: claim ownership for this REPLACE up front. This bumps the
+         * cookie's generation and clears any prior tombstone, so a DESTROY
+         * that arrives while we resolve neighbours / install the FE record is
+         * observed by the pre-publish gen check (insert_owned) and by the
+         * pending/neigh workers. On registry OOM, fail to software rather
+         * than publish an unguarded flow.
+         */
+        generation = ask_flow_gen_next(t, (u64)f->cookie);
+        if (generation == 0) {
+                pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx gen-alloc failed — SW fallback\n",
                                     f->cookie);
                 return -EOPNOTSUPP;
         }
@@ -1751,8 +1851,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 qrc = ask_flow_pending_enqueue((u64)f->cookie, &key, oif,
                                                action_flags,
                                                egress_dev->ifindex,
-                                               ingress_dev ? ingress_dev->ifindex : 0,
-                                               dst_ip);
+                                                ingress_dev ? ingress_dev->ifindex : 0,
+                                                dst_ip, generation);
                 if (qrc == 0) {
                         pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
                                             f->cookie, oif,
@@ -1893,11 +1993,20 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                         }
                 }
 
-                rc = ask_flow_insert(t, (u64)f->cookie, &key, oif,
-                                     action_flags, __dir, &hw_id);
+                rc = ask_flow_insert_owned(t, (u64)f->cookie, &key, oif,
+                                           action_flags, __dir, generation,
+                                           &hw_id);
         }
         if (rc == -EEXIST)
                 return 0;
+        if (rc == -ESTALE) {
+                /* A3: a DESTROY superseded this REPLACE before publish; the
+                 * flow was intentionally not offloaded and its HW rolled back.
+                 * Report success — the desired end state (cookie gone) holds. */
+                pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx superseded by DESTROY — left in SW\n",
+                                    f->cookie);
+                return 0;
+        }
         if (rc) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE flow_insert=%d cookie=0x%lx oif=%u nh=%pM em=%pM\n",
                                     rc, f->cookie, oif,
@@ -1922,6 +2031,17 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                             f->cookie, hw_id,
                             ingress_dev ? netdev_name(ingress_dev) : "?", oif,
                             key.next_hop_mac, key.egress_mac);
+        /*
+         * T-M6-A3 (R4): close the rht-publish -> FE-install race window.
+         * ask_flow_insert_owned() has published the SW entry and HW cookie,
+         * but the per-key FE record is installed below. A DESTROY can race
+         * between those two operations. Check ownership BEFORE FE install;
+         * if tombstoned/superseded, remove only our generation and stop.
+         */
+        if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
+                (void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
+                return 0;
+        }
         /* Keep offload ownership transactional: only keep the flow in the
          * HW-backed table if the FE-VM record was actually installed. */
         {
@@ -1941,11 +2061,26 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
                 ask_pr_warn("flow_offload: REPLACE rollback cookie=0x%lx fe_flow_insert=%d\n",
                             f->cookie, rc);
-                rrc = ask_flow_remove(t, (u64)f->cookie);
-                if (rrc)
+                /* Owned remove: only tear down if we are still the owner —
+                 * a newer REPLACE that already superseded us must survive. */
+                rrc = ask_flow_remove_owned(t, (u64)f->cookie, generation);
+                if (rrc && rrc != -ESTALE)
                         ask_pr_warn("flow_offload: REPLACE rollback remove=%d cookie=0x%lx\n",
                                     rrc, f->cookie);
                 return rc;
+        }
+
+        /*
+         * T-M6-A3 (R4): a DESTROY may have raced during ask_fe_flow_insert().
+         * If we are no longer the owner, delete the FE record we just wrote
+         * and drop our SW entry so no orphan silicon record survives.
+         */
+        if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
+                ask_fe_flow_remove(&key);
+                (void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
+                pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — record removed\n",
+                                    f->cookie);
+                return 0;
         }
 
         return 0;
@@ -1954,7 +2089,23 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 {
         struct ask_flow_table *t = ask_flow_default_table();
+        u32 destroy_gen;
         int rc;
+
+        if (!t)
+                return -EOPNOTSUPP;
+
+        /*
+         * T-M6-A3: tombstone the cookie FIRST, before touching the pending
+         * queue or the rht. This is the ordering that closes CR-004: once the
+         * tombstone is set, any concurrent pending replay or neigh rebuild
+         * that reads the generation will discard rather than resurrect, and a
+         * REPLACE still in flight for this cookie fails its pre-publish gen
+         * check. Snapshot the generation we are destroying so the owned-remove
+         * below cannot tear down a NEWER REPLACE that raced in after us.
+         */
+        destroy_gen = ask_flow_gen_current(t, (u64)f->cookie);
+        ask_flow_gen_tombstone(t, (u64)f->cookie);
 
         /*
          * PR14y: drop any pending deferred-insert entry for this cookie
@@ -1969,9 +2120,6 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                 /* Fall through — also try the rht remove in case the
                  * cookie was simultaneously promoted by the notifier. */
         }
-
-        if (!t)
-                return -EOPNOTSUPP;
 
         /* Fix B: capture the flow's 5-tuple BEFORE removing it from the rht,
          * so we can delete exactly its FE-VM silicon record (not clear-all). */
@@ -1988,9 +2136,27 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                 }
                 rcu_read_unlock();
 
-                rc = ask_flow_remove(t, (u64)f->cookie);
-                if (rc == -ENOENT)
+                /*
+                 * A3: owned remove bounded by the generation we tombstoned.
+                 * If a newer REPLACE re-claimed this recycled cookie between
+                 * our tombstone and here, remove_owned is a no-op and we must
+                 * NOT delete its FE record — so gate ask_fe_flow_remove on the
+                 * remove actually happening for our generation.
+                 */
+                rc = ask_flow_remove_owned(t, (u64)f->cookie, destroy_gen);
+                if (rc == -ENOENT) {
+                        ask_flow_gen_release(t, (u64)f->cookie);
                         return 0;
+                }
+                if (rc == -ESTALE) {
+                        /* A newer REPLACE re-claimed this recycled cookie
+                         * after our tombstone. It owns the flow and its FE
+                         * record now — do NOT delete it, do NOT release the
+                         * registry (the new owner's generation lives there). */
+                        pr_info_ratelimited("ask: flow_offload: DESTROY cookie=0x%lx superseded by newer REPLACE — FE delete skipped\n",
+                                            f->cookie);
+                        return 0;
+                }
                 if (rc)
                         return rc;
 
@@ -1999,6 +2165,9 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                  * flow's silicon record instead of clearing every flow. */
                 if (have_key)
                         ask_fe_flow_remove(&dkey);
+                /* Registry entry no longer needed: the flow is gone and no
+                 * worker can still be mid-replay for this generation. */
+                ask_flow_gen_release(t, (u64)f->cookie);
         }
         return 0;
 }
