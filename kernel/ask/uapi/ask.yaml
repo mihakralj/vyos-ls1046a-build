@@ -26,16 +26,22 @@ attribute-sets:
     attributes:
       - name: info
         type: nest
+        nested-attributes: info
       - name: muram
         type: nest
+        nested-attributes: muram
       - name: flow
         type: nest
+        nested-attributes: flow
       - name: sa
         type: nest
+        nested-attributes: sa
       - name: event
         type: nest
+        nested-attributes: event
       - name: policer
         type: nest
+        nested-attributes: policer
       - name: port-id
         type: u8
   -
@@ -158,31 +164,20 @@ operations:
   list:
     -
       name: get-info
-      attribute-set: info
+      attribute-set: top
       flags: [ admin-perm ]
       do:
         reply:
           attributes:
-            - driver-version
-            - genl-version
-            - ucode-family
-            - ucode-major
-            - ucode-minor
-            - ucode-patch
-            - capabilities
-            - num-fman
-            - num-flows
-            - max-flows
+            - info
     -
       name: get-muram
-      attribute-set: muram
+      attribute-set: top
       flags: [ admin-perm ]
       do:
         reply:
           attributes:
-            - total-bytes
-            - free-bytes
-            - flow-table-bytes
+            - muram
     -
       name: dump-flows
       attribute-set: flow
