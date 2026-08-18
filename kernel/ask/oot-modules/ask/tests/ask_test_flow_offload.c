@@ -27,10 +27,13 @@
  *                             fills flow_cls_offload->stats.
  *   5. REPLACE idempotent   — second REPLACE for same cookie returns
  *                             0 (EEXIST swallowed).
- *   6. Bad action           — unsupported action_id → -EOPNOTSUPP,
+ *   6. Strict actions       — ETH MANGLE accepted (L2 rewrite is implemented);
+ *                             NAT MANGLE/ADD and VLAN PUSH/POP rejected with
+ *                             -EOPNOTSUPP and nothing inserted (T-M6-A2).
+ *   7. Bad action           — unsupported action_id → -EOPNOTSUPP,
  *                             nothing inserted.
- *   7. Missing redirect     — REPLACE with no oif → -EOPNOTSUPP.
- *   8. IPv6 rejected        — n_proto=ETH_P_IPV6 → -EOPNOTSUPP.
+ *   8. Missing redirect     — REPLACE with no oif → -EOPNOTSUPP.
+ *   9. IPv6 rejected        — n_proto=ETH_P_IPV6 → -EOPNOTSUPP.
  *
  * The suite uses ->suite_init / ->suite_exit to bring up and tear
  * down the default ask_flow_table — neither ask.ko's module_init nor
@@ -342,13 +345,133 @@ KUNIT_ASSERT_NOT_NULL(test, t);
 
 test_rule_set_v4_tcp(r, htonl(0x0a000009), htonl(0x0a00000a),
      htons(1111), htons(2222));
-/* MANGLE is not in our accept list */
+/* A bare MANGLE with htype UNSPEC (0) is not an ETH L2 rewrite, so
+ * T-M6-A2 rejects it (and there is no REDIRECT either). */
 r->rule->action.entries[0].id = FLOW_ACTION_MANGLE;
 
 f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE05, r);
 rc = dispatch(f);
 KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
 KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE05));
+}
+
+/*
+ * T-M6-A2: an ETH-type MANGLE is the next-hop L2 rewrite that the FE-VM
+ * INSERT_L2_HDR already performs, so it MUST be accepted (paired with a
+ * REDIRECT the flow offloads normally). This is the working IPv4 path and
+ * proves the strict-acceptance change did not regress it.
+ */
+static void ask_flow_offload_test_action_mangle_eth_accepted(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 30);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000030), htonl(0x0a000031),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_MANGLE;
+r->rule->action.entries[0].mangle.htype = FLOW_ACT_MANGLE_HDR_TYPE_ETH;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE30, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_NOT_NULL(test, ask_flow_lookup(t, 0xCAFE30));
+
+destroy_cookie(0xCAFE30);
+}
+
+/*
+ * T-M6-A2: an IP4-type MANGLE is a NAT rewrite the HW record does not apply.
+ * It MUST be rejected -EOPNOTSUPP (fall to SW) and MUST NOT publish a flow,
+ * even though a valid REDIRECT is present.
+ */
+static void ask_flow_offload_test_action_mangle_nat_rejected(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 31);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000032), htonl(0x0a000033),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_MANGLE;
+r->rule->action.entries[0].mangle.htype = FLOW_ACT_MANGLE_HDR_TYPE_IP4;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE31, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE31));
+}
+
+/*
+ * T-M6-A2: FLOW_ACTION_ADD (NAT field increment) is not applied in HW and
+ * MUST be rejected, never published.
+ */
+static void ask_flow_offload_test_action_add_rejected(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 32);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000034), htonl(0x0a000035),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_ADD;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE32, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE32));
+}
+
+/*
+ * T-M6-A2: VLAN push/pop are not built into the HW record (deferred T-M6-8).
+ * Previously they set ignored action_flags bits and offloaded without the
+ * tag op; now they MUST be rejected and never published.
+ */
+static void ask_flow_offload_test_action_vlan_rejected(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 33);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000036), htonl(0x0a000037),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_VLAN_PUSH;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE33, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE33));
+
+/* VLAN_POP likewise */
+r->rule->action.entries[0].id = FLOW_ACTION_VLAN_POP;
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE34, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE34));
 }
 
 static void ask_flow_offload_test_action_no_redirect(struct kunit *test)
@@ -542,6 +665,10 @@ KUNIT_CASE(ask_flow_offload_test_double_destroy_swallowed),
 KUNIT_CASE(ask_flow_offload_test_stats_round_trip),
 KUNIT_CASE(ask_flow_offload_test_replace_idempotent),
 KUNIT_CASE(ask_flow_offload_test_action_unknown),
+KUNIT_CASE(ask_flow_offload_test_action_mangle_eth_accepted),
+KUNIT_CASE(ask_flow_offload_test_action_mangle_nat_rejected),
+KUNIT_CASE(ask_flow_offload_test_action_add_rejected),
+KUNIT_CASE(ask_flow_offload_test_action_vlan_rejected),
 KUNIT_CASE(ask_flow_offload_test_action_no_redirect),
 KUNIT_CASE(ask_flow_offload_test_ipv6_rejected),
 /* PR14j: direction classifier null-safety + non-DPAA fallthrough. */

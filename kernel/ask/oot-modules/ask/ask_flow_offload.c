@@ -1085,39 +1085,54 @@ static int ask_parse_action(struct flow_cls_offload *f,
                         oif = act->dev->ifindex;
                         egress = act->dev;
                         break;
-                case FLOW_ACTION_VLAN_PUSH:
-                        flags |= ASK_ACT_VLAN_PUSH;
-                        break;
-                case FLOW_ACTION_VLAN_POP:
-                        flags |= ASK_ACT_VLAN_POP;
-                        break;
                 case FLOW_ACTION_CSUM:
                         break;
                 case FLOW_ACTION_PTYPE:
                 case FLOW_ACTION_ACCEPT:
                         break;
                 /*
-                 * PR14q: kernel 6.18 nft flowtable offload emits
-                 * FLOW_ACTION_MANGLE (L2 dst-MAC + IP TTL decrement at
-                 * minimum, optionally NAT src/dst rewrite) BEFORE the
-                 * FLOW_ACTION_REDIRECT that names the egress netdev.
-                 * PR14p instrumentation on 2026-05-17 caught every
-                 * REPLACE returning -EOPNOTSUPP (-95) from this switch
-                 * because MANGLE was unhandled. The HW path does not
-                 * yet apply MANGLE rewrites (OH-port chain only pushes
-                 * the next-hop L2 header from neigh_lookup); we accept
-                 * the action as a no-op here so that the REDIRECT that
-                 * follows actually gets to set oif. Header rewrite
-                 * fidelity is deferred to PR14r/PR14s.
+                 * T-M6-A2 (strict action acceptance, 2026-08-18).
                  *
-                 * FLOW_ACTION_TUNNEL_ENCAP / FLOW_ACTION_TUNNEL_DECAP
-                 * are similarly accepted as no-ops so a future kernel
-                 * that emits them on the flowtable path does not
-                 * regress us back to silent SW fallback.
+                 * kernel nf_flow_table (nf_flow_rule_route_common) always
+                 * emits FLOW_ACTION_MANGLE of htype ETH for the next-hop
+                 * L2 src/dst rewrite on EVERY forwarded flow. The FE-VM
+                 * hardware path already performs that L2 rewrite via
+                 * INSERT_L2_HDR from the resolved neighbour MAC, so an
+                 * ETH-type MANGLE is genuinely satisfied by the HW record
+                 * and is accepted.
+                 *
+                 * MANGLE of htype IP4/IP6/TCP/UDP is only emitted when the
+                 * flow carries NF_FLOW_SNAT/DNAT — i.e. address/port NAT.
+                 * The HW record does NOT apply those rewrites yet (the NAT
+                 * compiler is T-M6-7). Accepting them as a no-op would
+                 * publish an in_hw record that forwards NAT traffic WITHOUT
+                 * translating it — silent misforwarding. Until T-M6-7,
+                 * return -EOPNOTSUPP so the flow stays on the kernel SW
+                 * fastpath, which translates correctly.
+                 *
+                 * FLOW_ACTION_ADD is a NAT-adjacent field increment with the
+                 * same "not applied in HW" hazard: reject it.
+                 *
+                 * VLAN push/pop and PPPoE push set encap that the HW record
+                 * does not build (VLAN is deferred T-M6-8, PPPoE is M6-C).
+                 * Previously VLAN_PUSH/POP only set action_flags bits that
+                 * ask_hw_flow_insert() ignores (ask_hw.c: (void)action_flags),
+                 * so those flows offloaded WITHOUT the tag operation — the
+                 * same misforwarding class. Reject until implemented.
                  */
                 case FLOW_ACTION_MANGLE:
+                        if (act->mangle.htype == FLOW_ACT_MANGLE_HDR_TYPE_ETH)
+                                break; /* L2 rewrite done by INSERT_L2_HDR */
+                        pr_info_ratelimited("ask: flow_offload: MANGLE htype=%u (NAT/L3/L4 rewrite) not offloaded — SW fallback (T-M6-7)\n",
+                                            act->mangle.htype);
+                        return -EOPNOTSUPP;
                 case FLOW_ACTION_ADD:
-                        break;
+                        pr_info_ratelimited("ask: flow_offload: FLOW_ACTION_ADD (NAT field add) not offloaded — SW fallback (T-M6-7)\n");
+                        return -EOPNOTSUPP;
+                case FLOW_ACTION_VLAN_PUSH:
+                case FLOW_ACTION_VLAN_POP:
+                        pr_info_ratelimited("ask: flow_offload: VLAN push/pop not offloaded — SW fallback (T-M6-8)\n");
+                        return -EOPNOTSUPP;
                 default:
                         pr_info_ratelimited("ask: flow_offload: parse_action: unhandled act->id=%u (treating as -EOPNOTSUPP)\n",
                                             act->id);
