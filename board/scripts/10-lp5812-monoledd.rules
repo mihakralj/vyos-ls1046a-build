@@ -1,0 +1,45 @@
+# 10-lp5812-monoledd.rules — start monoledd.service when the LP5812 status
+# LED controller binds on the i2c bus.
+#
+# Why this exists:
+#   monoledd.service has WantedBy=multi-user.target and is "enabled" via a
+#   tmpfiles.d `L` symlink (live-build's squashfs dereferences absolute
+#   symlinks created by `systemctl enable` in chroot hooks, so the .wants
+#   link is created by systemd-tmpfiles at first boot instead). On the
+#   LS1046A Mono Gateway DK that tmpfiles-created .wants symlink can land
+#   AFTER multi-user.target has already been reached, so systemd never pulls
+#   monoledd into the target on that boot and the daemon never starts.
+#   Observed 2026-08-19 (image 2026.08.19-1609-rolling): the LP5812 sysfs
+#   LEDs existed and the unit was `enabled`, yet `journalctl -u monoledd -b`
+#   showed `-- No entries --` and ActiveEnterTimestamp was empty; a manual
+#   `systemctl start monoledd` ran the daemon fine. This is the identical
+#   race the fan daemon hit (see 10-emc2305-fan-pid.rules, 2026-05-11).
+#
+# This rule guarantees the daemon starts the moment the LP5812 device
+# actually binds, regardless of whether the tmpfiles .wants symlink won the
+# race with multi-user.target. The daemon forces the LED `trigger` to none
+# and is idempotent, so a duplicate `start` from both the .wants path and
+# this rule is harmless — systemd coalesces the request and at most one
+# monoledd process ever runs.
+#
+# Match scope (mirrors the proven EMC2305 fan rule):
+#   - SUBSYSTEM=="i2c"    : i2c device events only
+#   - ACTION=="add|bind"  : BOTH actions, because:
+#                             * `bind` covers hot unbind/rebind cycles.
+#                             * `add` covers cold boot. lp5812 is built-in
+#                               (CONFIG_LEDS_LP5812=y), so the kernel binds
+#                               it BEFORE systemd-udevd starts; udevd's
+#                               coldplug pass synthesises `add` (not `bind`)
+#                               for existing sysfs devices, so a bind-only
+#                               rule is silently skipped at every cold boot.
+#                               By the time the synthesised `add` runs the
+#                               built-in driver is already bound, so
+#                               DRIVER=="lp5812" still matches on the `add`
+#                               path.
+#   - DRIVER=="lp5812"    : the kernel's LP5812 LED controller driver; the
+#                           stable invariant. We deliberately do NOT match
+#                           KERNEL=="15-006c" so this survives any future
+#                           board revision that moves the chip to another
+#                           i2c bus or address.
+ACTION=="add|bind", SUBSYSTEM=="i2c", DRIVER=="lp5812", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}="monoledd.service"

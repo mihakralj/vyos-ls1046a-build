@@ -685,6 +685,13 @@ cp board/scripts/monoledd "$CHROOT/usr/local/bin/monoledd"
 chmod +x "$CHROOT/usr/local/bin/monoledd"
 cp board/systemd/monoledd.service "$CHROOT/etc/systemd/system/monoledd.service"
 cp board/systemd/monoledd.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/monoledd.conf"
+### udev rule: start monoledd.service the moment the kernel binds the LP5812
+### LED controller (SUBSYSTEM=i2c, DRIVER=lp5812). Mirrors the EMC2305 fan
+### rule — the tmpfiles-created multi-user.target.wants symlink can land after
+### multi-user.target is reached, so the daemon never starts on that boot
+### (observed 2026-08-19, image 1609). This guarantees a cold-boot start.
+mkdir -p "$CHROOT/etc/udev/rules.d"
+cp board/scripts/10-lp5812-monoledd.rules "$CHROOT/etc/udev/rules.d/10-lp5812-monoledd.rules"
 
 ### Boot-complete fan whistle is now produced by fan-pid itself
 ### (play_startup_whistle()).  The standalone boot-complete-notify
