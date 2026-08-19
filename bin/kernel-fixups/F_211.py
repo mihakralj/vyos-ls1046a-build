@@ -21,9 +21,19 @@ scheme (mv=0 matches every frame)". To add v6 we simply:
 F-212 adds the parser LCV split that makes QLCV carry V4BIT for IPv4 frames and
 V6BIT for IPv6 frames, which is what the (QLCV & kgse_mv)==kgse_mv walk keys off.
 
-This is EXACTLY the sequence exp-apply + exp-ccobase ran on eth1 (2026-08-19)
-that produced the clean IPv6 HIT into table1 (pkt_count 0->3) with the v4 scheme
-still hitting table0 (distinct kgse_spc on both) — READBACK OK.
+The initial two-scheme sequence reproduced exp-apply + exp-ccobase, but the
+1959 production test revealed a required third scheme: narrowing the original
+mv=0 catch-all to V4BIT left ARP/ND/multicast/L2 with NO matching scheme ->
+FM_FD_ERR_NO_SCHEME -> deaf port even though BOTH v4 and v6 scheme spc counters
+incremented (so parser-stop + CP0 pass-all were correct). Vendor cdx_pcd.xml
+confirms every port policy ends with cdx_ethernet_dist (protocolref ethernet) —
+a universal catch-all. This fixup now arms THREE schemes in ascending order:
+existing low-id v4 (V4BIT, table0), next-free v6 (V6BIT, table1), next-free
+catch-all (ETH slot0 CATCHALLBIT, clone of v4/table0). The catch-all is highest
+id so IP frames match their specific scheme first; non-IP falls through to the
+catch-all and ehash-MISSes to the own-port kernel FQ exactly like today's mv=0
+scheme. F-212 sets slot0/5/6 bits accordingly. READBACK/ordering grounded in
+vendor distribution order and board kgse_spc evidence.
 
 SLOT MECHANICS (verified against 0097/0132/0158 + F-183/F-185/F-186)
 --------------------------------------------------------------------
@@ -69,6 +79,11 @@ ih = os.path.join(kroot, "fman_pcd_internal.h")
 # the same literals for the parser LCV split so QLCV & kgse_mv lines up.
 V4BIT = "0x40000000U"
 V6BIT = "0x80000000U"
+# Slot-0 (Ethernet HXS) catch-all bit: every frame confirms the ETH slot, so
+# this bit is present on ALL frames. A third "catch-all" scheme matches it so
+# non-IPv4/non-IPv6 frames (ARP, IPv6 ND, multicast, L2) still select a scheme
+# instead of NO_SCHEME. Distinct from V4BIT/V6BIT; single-sourced with F-212.
+CATCHALLBIT = "0x20000000U"
 
 changes = 0
 
@@ -233,9 +248,51 @@ arm_new = (
     "\n"
     "\t\t/* 3) bind the v6 scheme into this port's scheme partition */\n"
     "\t\t(void)keygen_bind_port_to_schemes(keygen, v6id, true);\n"
+    "\n"
+    "\t\t/* 4) CATCH-ALL scheme: without it, frames that are neither IPv4 nor\n"
+    "\t\t * IPv6 (ARP, IPv6 ND, multicast, L2) match no scheme -> NO_SCHEME\n"
+    "\t\t * storm -> deaf port (2026-08-19 board result). Every frame confirms\n"
+    "\t\t * the ETH HXS (slot 0), so a scheme with mv=CATCHALLBIT (the slot-0\n"
+    "\t\t * bit set by F-212) matches ALL frames. It MUST have a higher scheme\n"
+    "\t\t * id than v4/v6 so the ascending SI-walk hits v4/v6 first for IP\n"
+    "\t\t * frames (which carry CATCHALLBIT too) and only falls through to the\n"
+    "\t\t * catch-all for non-IP frames. Clone the v4 slot (AC_CC, CCOBASE=0,\n"
+    "\t\t * table0, own-port miss FQID) so a non-IP frame does table0 ehash\n"
+    "\t\t * MISS -> own-port RX FQ -> kernel, exactly as today's mv=0 scheme.\n"
+    "\t\t */\n"
+    "\t\t{\n"
+    "\t\t\tstruct keygen_scheme *caslot = NULL;\n"
+    "\t\t\tu8 caid = 0;\n"
+    "\t\t\tint cerr, j;\n"
+    "\n"
+    "\t\t\tfor (j = 0; j < FM_KG_MAX_NUM_OF_SCHEMES; j++) {\n"
+    "\t\t\t\tif (!keygen->schemes[j].used) {\n"
+    "\t\t\t\t\tcaid = (u8)j;\n"
+    "\t\t\t\t\tcaslot = &keygen->schemes[j];\n"
+    "\t\t\t\t\tbreak;\n"
+    "\t\t\t\t}\n"
+    "\t\t\t}\n"
+    "\t\t\tif (caslot) {\n"
+    "\t\t\t\t*caslot = *v4slot;\t\t/* AC_CC, CCOBASE=0, table0, own fqid */\n"
+    "\t\t\t\tcaslot->hw_port_id   = hw_port_id;\n"
+    "\t\t\t\tcaslot->match_vector = " + CATCHALLBIT + ";\n"
+    "\t\t\t\tcaslot->used         = false;\n"
+    "\t\t\t\tcerr = keygen_scheme_setup(keygen, caid, true);\n"
+    "\t\t\t\tif (cerr) {\n"
+    "\t\t\t\t\tcaslot->used = false;\n"
+    "\t\t\t\t\tpr_warn(\"fman_pcd fe_arm: F-211 catch-all scheme_setup failed (%d)\\n\", cerr);\n"
+    "\t\t\t\t} else {\n"
+    "\t\t\t\t\t(void)keygen_bind_port_to_schemes(keygen, caid, true);\n"
+    "\t\t\t\t\tpr_info(\"fman_pcd fe_arm: F-211 catch-all scheme %u armed on port 0x%02x (mv=%#x)\\n\",\n"
+    "\t\t\t\t\t\tcaid, hw_port_id, " + CATCHALLBIT + ");\n"
+    "\t\t\t\t}\n"
+    "\t\t\t} else {\n"
+    "\t\t\t\tpr_warn(\"fman_pcd fe_arm: F-211 no free slot for catch-all; non-IP frames will NO_SCHEME\\n\");\n"
+    "\t\t\t}\n"
+    "\t\t}\n"
     "\t\tmutex_unlock(lock);\n"
     "\n"
-    "\t\t/* 4) v6 node word3 = the v6 scheme's own base FQID (same port/pool\n"
+    "\t\t/* 5) v6 node word3 = the v6 scheme's own base FQID (same port/pool\n"
     "\t\t * as v4 per E25). The node lives at gro+16 (F-210).\n"
     "\t\t */\n"
     "\t\tfman_pcd_fe_v6node_set_miss_nia(pcd, fe_enter_off, miss_fqid);\n"
