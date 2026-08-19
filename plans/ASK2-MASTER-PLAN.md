@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 2.25.0 · 2026-08-17 · HADS 1.0.0**
+**Version 2.26.0 · 2026-08-18**
 
 ## AI READING INSTRUCTION
 
@@ -20,11 +20,11 @@ documents disagree, they win — update this plan.
 
 ---
 
-## 1. Current state (branch `main` · diagnostic DUT `.185`: kernel `6.18.44-vyos`)
+## 1. Current state (branch `dpaa1` · diagnostic DUT `.185`: kernel `6.18.44-vyos`)
 
 ### 1.1 Position
 
-**[SPEC] CURRENT STATUS (2026-08-17).** The FE-VM ehash path is the proven
+**[SPEC] CURRENT STATUS (2026-08-18).** The FE-VM ehash path is the proven
 production mechanism and **T-M7-2 is complete for the plain-routed-IPv4-unicast
 preview**: S1 (F-198, hardware TX terminal — `INSERT_L2_HDR`→`ENQUEUE_PKT`
 direct-to-wire), S4 (F-199, per-egress `FQ_TYPE_TX_NO_CONFIRM` TX FQ, RTNL fix),
@@ -42,6 +42,19 @@ forwarding at **9.92 / 10.4 / 10.4 / 10.1 Gbit/s** for MTU 1280 / 1500 / 2000 /
 2500 at ~3% DUT CPU. Remaining preview work is productization (docs, prerelease
 packaging, external validation), not datapath.
 
+**M6-A safety substrate is code/CI complete (2026-08-18):** A2 strict action
+acceptance (`70092e57`, CI `32156418969`), A1 canonical intent (`0a9c068f`,
+CI `32164888360`), A3 generation/tombstones (`c65f7793`, CI `32169305393`),
+and A4 preflight resource gating (`3bb5d643`, CI `32174170644`). Their explicit
+board stress/negative gates remain open; code-complete is not silicon-complete.
+Production observability was rewritten in `c905bf6d` (CI `32194485450`): the
+new `ask-check` contract exposed and fixed YNL nested-reply schema defects;
+final truthful `get-info` telemetry is awaiting deployment of that image.
+Five-port IPv4 breadth is now scoped as T-M6-P5/T-M7-P5: kernel port/FQ
+resolution is mostly generic already, but CLI policy, legacy global-FQ
+fallback removal, shared-table ingress discrimination, and 1G/management-port
+silicon acceptance remain open.
+
 ### Plain IPv4-unicast preview release checklist
 
 - [x] Production FE-VM ehash forwarding path; T-M7-2 S1/S3/S4 passed.
@@ -49,14 +62,18 @@ packaging, external validation), not datapath.
 - [x] CR-003 fail-closed commit helper implemented in `3523be05` (YNL
   `flush-flows`, conntrack flush, YNL disengage, read-only `fe_arm` verify,
   `ConfigError` on any non-zero helper result).
-- [x] ASK MTU clamps implemented at 1280–7000 in VyOS patches 036/037.
+- [~] **Raise the order-1 ASK MTU clamp to 1280–7500.** Source patches 036/037
+  now use 7500, a 30-byte margin under the exact contiguous-buffer ceiling:
+  `SKB_WITH_OVERHEAD(8192)=7872 - rx_headroom 320 - VLAN_ETH_HLEN 18 - FCS 4`
+  = MTU 7530. F-203 already silicon-validated MTU 7000 at ~9.25 Gbit/s without
+  a wedge; 7500 still needs a cold-boot, matched-endpoint load gate before the
+  preview claim. MTU 8000 is NOT valid on order-1. Restore every endpoint to
+  1500 on exit/abort.
 - [x] F-122 idempotent engage implemented in `F_122.py` and wired in
   `ci-setup-kernel.sh` (shared debugfs/kernel core and exported wrapper both
   return success when already armed).
 - [ ] Cold-boot board validation of CR-003 through the actual VyOS CLI commit
   path, including a forced helper failure proving the commit fails closed.
-- [ ] Cold-boot MTU 7000 battery on the heidi→DUT `.185`→HELGA harness; restore
-  every endpoint to MTU 1500 after every run and on abort.
 - [~] Production `ask-check` rewritten 2026-08-18 around the shipping IPv4-
   unicast contract (no debugfs/milestone/deferred-feature checks). In-place
   validation on image `2026.08.18-1900` reached 30/30 after fixing the YNL
@@ -101,8 +118,8 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
 | 1. FMan PCD subsystem (KG / CC / HM / PLCR) | Shipping — patches 0092–0118, 0151–0155 |
 | 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete. Manual E25/E26 proved a discriminator-verified silicon HIT, but F-192 production-adjacent diagnostics remain incomplete; the warm shared diagnostic chain is singleton-global and must be reused rather than rebuilt. |
 | 3. Classifier→FE arm | Direct vendor-node arm is proven. The manual `.185` eth3 arm explicitly applies scheme-4 EKFC and tears down safely; the retained chain is byte-readable. The fixed-tuple SPC capture proves KeyGen scheme-4 traversal but not the succeeding FE workspace/writeback stage. |
-| 4. ask.ko datapath (genl + flow table) | **Plain IPv4 production path complete and silicon-passed.** nft/tc `REPLACE`/`DESTROY`; 14-byte ehash; F-198 `INSERT_L2_HDR→ENQUEUE`; F-199 per-egress no-confirm TX FQ; F-200 TTL/checksum; F-201 RSS fallback; F-202 serialized lifecycle. T-M7-3 passed and the MTU 1280–2500 battery sustains ~10 Gbit/s at ~3% DUT CPU. Breadth now follows the canonical-intent/kernel-hook architecture in §4.6; unsupported actions MUST fail to software, never no-op. |
-| 5. VyOS CLI + mutual exclusion | Shipping — `offload ask` per-interface, ASK↔VPP mutex, `show flows` via YNL. CR-001 is closed (stable 34,992 B warm-chain budget); CR-003 fail-closed helper + MTU 1280–2500 clamps are implemented in `3523be05`, board-validation gate remains. |
+| 4. ask.ko datapath (genl + flow table) | **Plain IPv4 production path complete and silicon-passed on eth3/eth4.** nft/tc `REPLACE`/`DESTROY`; 14-byte ehash; F-198 `INSERT_L2_HDR→ENQUEUE`; F-199 per-egress no-confirm TX FQ; F-200 TTL/checksum; F-201 RSS fallback; F-202 serialized lifecycle. T-M7-3 passed and the MTU 1280–2500 battery sustains ~10 Gbit/s at ~3% DUT CPU. M6-A canonical-intent/strict-action/generation/preflight code is CI-complete with board gates open. Five-port breadth is T-M6-P5/T-M7-P5; unsupported actions MUST fail to software, never no-op. |
+| 5. VyOS CLI + mutual exclusion | Shipping for eth3/eth4 — `offload ask` per-interface, ASK↔VPP mutex, `show flows` via YNL. The current VyOS patch explicitly rejects eth0/eth1/eth2; removal is T-M6-P5 and is gated by per-port silicon acceptance. CR-001 is closed (stable warm-chain budget); CR-003 fail-closed helper + MTU guard are implemented, board-validation gate remains. |
 
 ### 1.3 Binding silicon facts (settled on LS1046A hardware — do not re-litigate)
 
@@ -283,20 +300,21 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
    reaches ~10 Gbit/s at ~3% CPU. Vendor cdx.ko measured 8.58 Gbit/s via the
    same terminal class.
 10. **MTU / RX-buffer policy.** Each DPAA RX frame must fit ONE contiguous
-    buffer (`dpaa_change_mtu` enforces it; oversized frames wedge FMan RX,
-    cold-boot recovery only). **F-203 (2026-08-17) raises the RX buffer from
-    order-0/4 KiB to order-1/8 KiB** (`DPAA_BP_ORDER=1`,
-    `DPAA_BP_RAW_SIZE=8192`, usable ~7808), so a large frame stays contiguous
-    and remains ASK-FE-offloadable — the deliberate alternative to RX
-    scatter/gather, which would force jumbo onto the software path. The VyOS
-    interface and hardware-flowtable validators clamp ASK MTU to **1280–7000
-    inclusive** (conservative margin under the ~7530 order-1 ceiling); values
-    below 1280 are outside the VyOS IPv6-link-local contract. **[NOTE]**
-    Order-0-era measurements (1280–2500 battery, ~10 Gbit/s) predate F-203 and
-    the 7000 ceiling is **pending cold-boot board validation**; TX-SGT and
-    XDP-copy scratch pages remain order-0. The old order-4/MTU-9000 claim is
-    superseded. Change MTU only while ASK is disengaged, keep every endpoint
-    matched, and restore all endpoints to 1500 on abort.
+    buffer (`dpaa_change_mtu` enforces it; oversized/mismatched frames wedge
+    FMan RX, cold-boot recovery only). **F-203 (2026-08-17) raises the RX pool
+    from order-0/4 KiB to order-1/8 KiB** (`DPAA_BP_ORDER=1`,
+    `DPAA_BP_RAW_SIZE=8192`) so a jumbo-ish frame stays contiguous and
+    ASK-FE-offloadable — the deliberate alternative to RX scatter/gather (which
+    would force jumbo to software). **Exact order-1 ceiling = MTU 7530**
+    (`SKB_WITH_OVERHEAD(8192)=7872 - rx_headroom 320 - VLAN_ETH_HLEN 18 - FCS 4`).
+    VyOS patches 036/037 clamp ASK to **1280–7500** (30-byte margin). **MTU 8000
+    is not achievable on order-1** — it would need order-2/16 KiB buffers (max
+    ~15.8 K) at 4× the memory and a harder buddy-allocator demand; not adopted.
+    Validation state: MTU 7000 silicon-passed (~9.25 Gbit/s, no wedge,
+    2026-08-17); the 1280–2500 order-0-era battery predates F-203; **7500 is
+    pending a cold-boot matched-endpoint load gate**. TX-SGT and XDP-copy
+    scratch pages stay order-0. Change MTU only while ASK is disengaged, keep
+    every endpoint matched, and restore all endpoints to 1500 on exit/abort.
 11. **MURAM allocation strategy:** slab pools for fixed-size FMan objects (CC
     nodes, HM entries, policer profiles, ADs); segregated-fit power-of-two
     classes for general-purpose allocation; strict object lifecycles tied to
@@ -318,11 +336,15 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
 graph LR
     M2["M2 perf gate<br/>DONE - regression-monitor only"] --> M5["M5 flow automation<br/>DONE - mechanism unresolved"]
     M3["M3 FE-VM ehash HIT gate<br/>DONE (E25/E26, M3 gate passed)"]
-    M5 --> M6["M6 full vendor-capability breadth<br/>kernel hooks + canonical intent + shared FE action compiler<br/>UNBLOCKED / phased gates §4.6"]
-    M5 --> M7a["M7 VyOS CLI + production HIT<br/>DONE - transit HIT delivers (F-195/F-197)"]
-    M7a --> M7b["M7-2 HW TX opcode terminal<br/>S1 F-198 + S4 F-199 + S3 F-200 SILICON-PASS; S2 VLAN deferred; ~10G HW"]
+    M5 --> M6["M6 capability breadth<br/>M6-A code+CI DONE; board gates OPEN<br/>M6-B+ phased gates §4.6"]
+    M5 --> M7a["M7 VyOS CLI + production HIT<br/>DONE on eth3/eth4 - transit HIT delivers"]
+    M7a --> M7b["M7-2 HW TX opcode terminal<br/>S1/S3/S4 SILICON-PASS; S2 VLAN deferred; ~10G HW"]
+    M6 --> P5i["T-M6-P5 five-port implementation<br/>CLI/global-FQ/discriminator work OPEN"]
+    M7b --> P5v["T-M7-P5 eth2→eth1→eth0 acceptance<br/>OPEN; eth0 management LAST"]
+    P5i --> P5v
     M6 --> M8["M8 soak + upstream"]
     M7b --> M8
+    P5v --> M8
     M4["M4 AF_XDP true-ZC RX<br/>BLOCKED - libxdp ISO install"] -.-> M8
 ```
 
@@ -410,15 +432,17 @@ opcode terminal, not comparator correctness.
   unresolved.** 10.259 Gbps line rate at 0.16% CPU / 0% loss (MTU 9000,
   3-node 10G plane). Treat as a throughput result, not HW-classification
   proof (§1.1).
-- **M6 — full vendor-capability breadth. UNBLOCKED, architecture bound.** Kernel
-  offload frameworks remain the control-plane authority; ask.ko normalizes
-  canonical intents and compiles typed FE actions over shared fman_pcd
-  primitives. Phases: safety substrate → IPv6/NAT/VLAN → soft-parser/PPPoE →
-  XFRM/IPsec → bridge/multicast → fragments/tunnels. Full gates and MUST/
+- **M6 — capability breadth. IN PROGRESS.** The mandatory M6-A safety substrate
+  (canonical intent, strict action acceptance, generation/tombstones, resource
+  preflight) is code/CI complete; its board stress/negative gates remain open.
+  Kernel offload frameworks remain authoritative. Next implementation breadth:
+  T-M6-P5 five-port IPv4 mechanics, then IPv6/NAT/VLAN, soft-parser/PPPoE,
+  XFRM/IPsec, bridge/multicast, and fragments/tunnels. Full gates and MUST/
   DO-NOT rules: §4.6.
-- **M7 — VyOS CLI + production IPv4 transit HIT. DONE for preview scope
-  (2026-08-17).** Surface wiring is DONE: per-interface `offload ask`,
-  ASK↔VPP mutex, nft/YNL flow learning, and `show flows`. T-M7-2 S1/F-198
+- **M7 — VyOS CLI + production IPv4 transit HIT. DONE for eth3/eth4 preview
+  scope (2026-08-17); five-port acceptance OPEN as T-M7-P5.** Current surface:
+  per-interface `offload ask` allow-listed to eth3/eth4, ASK↔VPP mutex, nft/YNL
+  flow learning, and `show flows`. T-M7-2 S1/F-198
   direct-to-wire, S4/F-199 no-confirm per-egress TX FQ, and S3/F-200
   TTL/checksum all passed silicon; S2 VLAN/preemptive-checks is explicitly
   deferred and non-blocking for plain untagged IPv4. T-M7-3 passed three clean
@@ -1286,6 +1310,36 @@ intent, kernel-authority, lifecycle, and per-feature gates.
   `fe_flow` before `disengage`); the production helper's `disengage` is still
   fail-open while flows are live (Step 4 / CR-003).
 
+- [ ] **T-M7-P5 — five-port silicon acceptance and management safety.** Runs
+  only after T-M6-P5's discriminator/table-ownership design, CLI changes and
+  KUnit gates pass. Validate 1G ports in increasing blast radius: eth2 (right
+  RJ45, RX/TX `0x09/0x29`, TX channel `0x803`) first, then eth1 (center RJ45,
+  `0x0d/0x2d`, `0x807`), and eth0 management (`0x0c/0x2c`, `0x806`) LAST.
+  **Never engage eth0 while SSH is the only recovery path:** maintain serial
+  console and a tested disengage/rollback channel; a failure must return eth0
+  to kernel RSS without reboot. For each newly-supported port, prove:
+  1. CLI engage is idempotent and the ASK↔VPP mutex remains per-interface;
+  2. its own RX PCD range and a distinct no-confirm TX FQ on the correct DC
+     channel are used (no global `0x801`/`0x200` fallback, no foreign-port FQ);
+  3. TCP+UDP both directions with every already-supported port, TTL 64→63,
+     L2 rewrite/checksum correct, conntrack `[HW_OFFLOAD]`, `show flows` owner/
+     iif/oif correct, TX confirmations flat and no `Build skb failure`;
+  4. identical 5-tuples arriving on two ingress ports remain distinct and
+     delete/flush of one cannot remove or redirect the other;
+  5. MTU 1280/1500/2500/7000/7500 (order-1 ceiling 7530), neighbour change,
+     interface down/up, config remove/reapply, module unload, and cold-boot
+     persistence;
+  6. per-port and all-five 100× engage/forward/flush/disengage churn leave the
+     S0 `pcd-snapshot`/MURAM/FQ baseline byte-clean, with no RX-deaf port,
+     QMan/BMan error, WARN/Oops or management loss.
+  **Performance floors:** each 1G port sustains wire-rate for its tested
+  direction without saturating one DUT CPU; eth3↔eth4 retains the proven
+  ~10-Gbit/s result when 1G ports are simultaneously engaged/trafficked.
+  **Completion meaning:** eth1–eth4 may be declared generally supported after
+  their gates pass; eth0 remains opt-in/high-risk even after passing because it
+  is the management lifeline. ASK 1.x's static all-five XML proves capability
+  only—it does not waive any ASK2 lifecycle/reversibility gate.
+
 **[NOTE]** F-193/F-196 are diagnostic and should be folded into durable
 flow-add observability once T-M7-2 lands. F-195/F-197 are real behavior fixes
 and stay: they make the RX-reinjection terminal correct, which is the
@@ -1484,10 +1538,10 @@ record it does not own.
 
 | Capability | Vendor ASK evidence | Kernel authority / ingest hook | ASK2 FMan implementation | Current status |
 |---|---|---|---|---|
-| IPv4 TCP/UDP unicast route | `cdx_tcp4_cc`, `cdx_udp4_cc`; IPv4 FCI | `nf_flow_table` / tc `FLOW_CLS_REPLACE/DESTROY` | 14-byte ehash key; `UPDATE_TTL` → `INSERT_L2_HDR` → per-egress no-confirm `ENQUEUE` | **DONE, silicon-passed** |
+| IPv4 TCP/UDP unicast route | `cdx_tcp4_cc`, `cdx_udp4_cc`; IPv4 FCI | `nf_flow_table` / tc `FLOW_CLS_REPLACE/DESTROY` | 14-byte ehash key; `UPDATE_TTL` → `INSERT_L2_HDR` → per-egress no-confirm `ENQUEUE` | **DONE on eth3/eth4, silicon-passed; eth0/eth1/eth2 breadth tracked by T-M6-P5/T-M7-P5** |
 | IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | separate v6 KG scheme/table; 38-byte PORT_ID-prefixed key; `UPDATE_HOPLIMIT(0x29)` + L2/TX chain | PARTIAL, silicon gate open |
-| NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | typed address/port rewrites + IPv4/L4 checksum update in the same flow record | **NOT implemented; current no-op acceptance MUST be removed** |
-| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | `STRIP_ALL_VLAN_HDRS(0x12)` and typed insert-VLAN action; key/MTU semantics preserved | deferred S2 |
+| NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | typed address/port rewrites + IPv4/L4 checksum update in the same flow record | Compiler NOT implemented; A2 strict `-EOPNOTSUPP` software fallback landed |
+| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | `STRIP_ALL_VLAN_HDRS(0x12)` and typed insert-VLAN action; key/MTU semantics preserved | deferred S2; A2 strict software fallback landed |
 | IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) |
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
 | IPv4/IPv6 multicast | `cdx_multicast4/6_cc`; MC4/MC6 FCI | switchdev MDB / kernel mroute | group key + bounded replication FQ/egress set | not implemented |
@@ -1512,8 +1566,9 @@ record it does not own.
   is preserved by construction: the ehash key comes solely from the untouched
   `ask_fe_build_key()`; `ask_intent_lower()` reproduces the exact pre-A1 values
   (oif = egress ifindex, action_flags = 0 — verified the IPv4 path stored 0
-  before A1); the FE opcode chain is unchanged. `generation` is an A3 hook
-  (always 0 now). KUnit pins the lowering contract (IPv4 intent → oif set,
+  before A1); the FE opcode chain is unchanged. `generation` entered as an A3
+  hook (0 in the A1 commit); A3 now assigns and enforces real per-cookie
+  generations/tombstones. KUnit pins the lowering contract (IPv4 intent → oif set,
   flags 0; no-redirect → -EOPNOTSUPP; action overflow → -E2BIG). **Board gate
   open:** run the IPv4 MTU/performance/lifecycle battery and confirm the FE
   record bytes and throughput are unchanged from the pre-A1 baseline.
@@ -1545,8 +1600,9 @@ record it does not own.
   generation immediately before the rhashtable publish, and pre/post FE-install
   re-checks close the publish→FE orphan-record window (a record installed after
   a racing DESTROY is removed). Registry ops are allocation-free xarray value
-  operations under a dedicated spinlock, never call HW or sleep, and gen_lock is
-  never nested inside pending_lock. Four KUnit cases pin monotonic/tombstone
+  operations under the xarray's own `xa_lock`, never call HW or sleep, and
+  `xa_lock` is never nested inside `pending_lock`. Four KUnit cases pin
+  monotonic/tombstone
   semantics, stale-DESTROY no-op, publish-refusal-after-tombstone, and
   legacy-path compatibility. Local clean compile vs kernel 6.18.44
   (`ask_flow.o` + `ask_flow_offload.o`, zero errors). **Board gate open:**
@@ -1576,12 +1632,81 @@ record it does not own.
 
 ##### Phase M6-B — extend the proven flowtable path first
 
-- [~] **T-M6-1 — IPv6 dual-scheme EXT_HASH.** Retain existing work: SW v6
-  parse, `nd_tbl`, F-140 v6 table/KG scheme. Correct to the 38-byte
-  PORT_ID-prefixed key, add `UPDATE_HOPLIMIT(0x29)`, and route v4→table 0 /
-  v6→table 1. **Gate:** TCP+UDP both directions; hop-limit 64→63; checksum/L2
-  correct; neighbour replace; flow delete/flush; 1280/1500/2000/2500; IPv4
-  byte-for-byte regression; unsupported extension-header flows remain SW.
+- [ ] **T-M6-P5 — five-port IPv4 implementation (eth0–eth4).** Extend the
+  proven per-interface ASK mechanism from the validated 10G pair to every
+  physical DPAA netdev without introducing the ASK 1.x static XML/control
+  plane. **Vendor capability oracle:** `/mnt/build/ASK/config/gateway-dk/
+  cdx_cfg.xml` programs all three 1G + both 10G Ethernet ports, and vendor
+  `cdx_common.h` sizes `MAX_PORTS_PER_FMAN=5`; this proves silicon capability,
+  not ASK2 correctness. **Current ASK2 audit (2026-08-18):** the kernel resolver
+  is already netdev-generic (`dpaa_get_rx_fman_port()` → `fman_port_get_id()`),
+  the per-egress `dpaa_alloc_offload_tx_fq()` path is generic, the no-confirm
+  cache has 16 slots, and `ASK_HW_MAX_PORTS=8`; basic kernel port discovery is
+  not the blocker. The actual implementation work is:
+  1. remove the VyOS `eth3|eth4` allow-list/`port_map` from patches 031/036 and
+     resolve the hardware RX port from the live DPAA netdev (or one shared
+     board mapping helper) rather than another duplicated literal map;
+  2. delete or fully retire the legacy module-global `dedicated_fq` path and
+     every `0x801`/`0x200` fallback in `ask_hw_offload_engage()` — it is
+     hard-wired to eth4/MAC10 and precedes the proven F-199 per-egress
+     no-confirm allocator. Engage must not arm a 1G ingress with an eth4 TX
+     terminal; per-flow disposition remains the resolved egress FQ;
+  3. make `ask-check`, `support-bundle`, `vyos-offload-ask`, flowtable
+     validation, and show-flow output enumerate configured ASK DPAA interfaces
+     dynamically; diagnostic helpers may retain explicit hardware IDs but are
+     never the production source of truth;
+  4. prove that the shared FE-VM/ehash ownership model supports more than two
+     simultaneous ingress ports. The current key serializes
+     `PORT_ID=0x00` (the controlled E25/E26 value), not the raw RX port ID. A
+     five-port shared table therefore MUST demonstrate a per-port logical
+     discriminator or separate owned table/scheme before identical 5-tuples on
+     different ingress ports can coexist. Never substitute raw `0x09/0x0c/
+     0x0d/0x10/0x11` into the proven key on a hypothesis; Qdrant + RM + a
+     discriminator test decide the encoding;
+  5. preserve the per-interface ASK↔VPP mutex and fail closed when a port lacks
+     DPAA/FMan/TX-FQ resources.
+  **Authoritative Mono mapping (DT + live FQ sysfs, 2026-08-18):** eth2
+  `ethernet@e2000` RX/TX=`0x09/0x29`, TX channel `0x803`; eth0
+  `ethernet@e8000`=`0x0c/0x2c`, channel `0x806`; eth1
+  `ethernet@ea000`=`0x0d/0x2d`, channel `0x807`; eth3=`0x10/0x30`, channel
+  `0x800`; eth4=`0x11/0x31`, channel `0x801`. These values are evidence and
+  acceptance oracles, not new hard-coded control logic.
+  **Gate:** KUnit for dynamic resolver/allow-list removal, five distinct
+  per-egress no-confirm FQs on the correct channels, two identical 5-tuples on
+  different ingress ports cannot alias, and unsupported/non-DPAA ports fail to
+  software before publication. No kernel implementation change is accepted
+  until the port-discriminator/table-ownership design is reviewed against
+  Qdrant and `specs/fman-keygen-flow-key-spec.md`.
+- [~] **T-M6-1 — IPv6 dual-scheme EXT_HASH.** PHASE 0/1 CODE-COMPLETE
+  2026-08-19; dispatch remains intentionally disabled pending the Phase-3
+  silicon decision.
+  - **Phase 0 prerequisite PASSED:** after a true cold boot, production IPv4 HIT
+    was re-confirmed end-to-end on `.185`: two `dump-flows` entries with
+    `offloaded=1`/HW flow IDs, conntrack `[HW_OFFLOAD]`, HELGA→DUT→heidi moved
+    10,264,383,684 B in 12 s (~6.84 Gbit/s), and no RX-deaf/drop runaway.
+  - **Phase 1 dormant plumbing:** v6 SW match parsing and 38-byte key builder
+    already existed. F-140 is corrected from stale 37-byte/pre-PORT_ID values
+    to a **38-byte table-1 key** (`0x00|SIP16|DIP16|PROTO|SPORT|DPORT`, future
+    EKFC `0x801C0006`) matching `ask_fe_build_key_v6()`. The old F-140
+    free-slot "v6 KG scheme" arm is removed/deferred: it had `mv=0`, was
+    unselectable under F-178 KG-direct, and could perturb the proven v4 scheme.
+    `ask_fe_flow_remove()` now builds the same family-specific key/length as
+    insert (prevents a future v6 per-key leak). `ask_hw_flow_preflight()` and
+    `ask_hw_flow_insert()` explicitly reject v6 to software until dispatch is
+    proven. KUnit pins both v4 PORT_ID=0 and the exact 38-byte v6 wire key.
+  - **Phase 2 API (next code):** add an explicit table/family selector to
+    `fman_pcd_fe_flow_action`; honor table 0/1 in add/delete while keeping v4
+    byte-identical; add `UPDATE_HOPLIMIT(0x29)` record packing (fits 320 B).
+  - **Phase 3 dispatch (blocking silicon experiment):** determine the parser
+    IPv4-vs-IPv6 LCV bits / `kgse_mv` values and prove the SI match-vector walk
+    with `NIA_KG_DIRECT` disabled. Every live scheme currently has `mv=0`, and
+    F-178's direct scheme bypasses a second scheme. Do not arm v6 until one v4
+    and one v6 packet increment distinct scheme `kgse_spc` counters in a
+    cold-boot, one-variable test.
+  **Final gate:** TCP+UDP both directions; hop-limit 64→63; checksum/L2 correct;
+  neighbour replace; flow delete/flush; MTU 1280/1500/2500/7000/7500; IPv4
+  byte-for-byte/performance regression; unsupported extension-header flows
+  remain software.
 - [ ] **T-M6-7 — NAT/PAT action compiler.** Stop accepting MANGLE/ADD as no-op.
   Decode kernel flowtable NAT actions into typed src/dst address and port
   rewrites, checksum updates, TTL, L2, enqueue. **Gate:** SNAT, DNAT, PAT in
@@ -1761,8 +1886,13 @@ own PCD objects and prove readback.
   0 B/cycle MURAM leak, budget stable at 34,992 B, 0% ping loss, no panics).
 - [ ] **T-M8-2** `@___` — 24 h alternating ASK/VPP; VPP iperf3 pass after the
   final disengage.
-- [ ] **T-M8-3** `@___` — Observability: F-05 `ask_stats.c`, F-16/17/18
-  counter readers, F-19 `ASK_CMD_GET_MURAM`.
+- [~] **T-M8-3** `@___` — Production observability partially landed:
+  `ASK_CMD_GET_MURAM`, `get-info`, `dump-flows`, YNL nested-schema parity, and
+  the production `ask-check` contract are code/CI complete in `c905bf6d` (CI
+  `32194485450`), awaiting deployment validation. Remaining: coherent live
+  packet/byte/error/fallback counters and owner/generation/resource-failure
+  reasons in `show flows`/support bundle (the useful parts of historical
+  F-05/F-16/F-17/F-18, not their debugfs coupling).
 - [~] **T-M8-4** `@___` — production `ask-check` reports 0 required FAIL on
   the board (contract rewritten 2026-08-18; final truthful `get-info` telemetry
   awaits the next image); policer BUG-3b flood characterization (serial capture
@@ -1797,7 +1927,7 @@ open defects.
 |---|---|---|---|---|
 | **F-076** | Port RX deaf after FE-VM-armed disengage; `fe_arm.engaged` stays YES | CLOSED on the scaffold path (`fe_disengage_full` + `fe_recover` proven); **DIRECT path still deaf** | M3 (T-M3-R uses the direct path) | Observe during T-M3-R; `fman_pcd_port_recover` de-wedge (0163) if hit |
 | **CR-003** | VyOS commit-path handling was fail-open: live flows could immediately re-arm after a bare disengage. | IMPLEMENTED 2026-08-17; board validation pending | Preview release | Helper now uses production YNL `flush-flows` + conntrack flush, YNL disengage, then read-only `fe_arm` verification; non-zero helper rc raises ConfigError (fail closed). Validate on the next image. |
-| **CR-004** | Stale-MAC remove/reinsert lifecycle can resurrect or lose flows | PARTIAL | M6 (T-M6-3) | Close the lifecycle/tombstone race before declaring stale-MAC handling complete |
+| **CR-004** | Stale-MAC remove/reinsert lifecycle can resurrect or lose flows | CODE-FIXED by T-M6-A3 (`c65f7793`); silicon stress OPEN | M6 / M8 | Run concurrent REPLACE/DESTROY/neighbour churn under CONFIG_DEBUG_LIST; require no poison/WARN/stale generation and byte-clean MURAM/snapshot baseline |
 | **CR-007** | Dead Fork-A shadow/HM bookkeeping burdens the FE-VM path; CC-tree insert plumbing deleted | PARTIAL | M6 (T-M6-5) | Finish dead-bookkeeping removal; reimplementation tracked in §4.4 |
 | **CR-011** | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL | M8 (T-M8-5) | Clean with upstream prep |
 | **F-120** | `ASK_CMD_FLUSH_FLOWS` SW/HW divergence | CODE-FIXED; silicon validation OPEN | M6 / M8 | T-M6-6 (§4.5) |
@@ -1844,7 +1974,9 @@ open defects.
   running ISO was built from.**
 - Milestone release claims are updated only after cold-boot silicon
   acceptance through the actual VyOS CLI path.
-- `ask-check` is the burndown chart; exits 0 at M8.
+- `ask-check` is the read-only production IPv4-unicast health contract and
+  exits 0 when all shipping requirements pass; milestone/debugfs/KUnit progress
+  is tracked in this plan and dedicated debug builds, never in its verdict.
 - The M2 regression monitor runs on every `fman_pcd.c`/`dpaa_eth.c` change.
 - **Image deployment is the operator's task.** The agent provides the URL
   only; it never runs `add system image` or `install image` on a board.
@@ -1866,10 +1998,10 @@ open defects.
   `10.99.1.0/24 via 10.99.2.185`. Use iperf2 `--full-duplex -P 8`.
 - **Historical harness:** `plans/TRAFFIC-HARNESS.md` describes the old LXC/
   third-board topology; retain for history, not current performance runs.
-- **MTU contract:** clamp 1280–7000 inclusive for ASK (order-1 buffers, F-203,
-  §2.10), matched end-to-end; restore all endpoints to 1500 on exit/abort. The
-  7000 ceiling is pending cold-boot board validation; order-0-era batteries
-  topped out at 2500.
+- **MTU contract:** order-1 F-203 RX buffers; clamp ASK to 1280–7500
+  inclusive (hard calculated ceiling 7530; MTU 8000 requires order-2 and is not
+  supported). MTU 7000 is silicon-passed; 7500 needs a cold-boot load gate.
+  Match every endpoint and restore all endpoints to 1500 on exit/abort.
 - **ISO deployment invariant:** every successful CI ISO → lxc200
   `/srv/tftp/iso/<versioned>.iso`; refresh **both** symlinks —
   `latest.iso` **and** `latest.iso.minisig` (a stale sidecar fails signature

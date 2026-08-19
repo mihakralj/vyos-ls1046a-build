@@ -9,7 +9,7 @@ index cc58ead..da385b0 100755
  
 +    # LS1046A ASK2 (2026-08-17): a hardware flowtable engages FMan FE
 +    # forwarding is bounded to the order-1 RX buffer's conservative MTU range
-+    # (1280..7000). The DPAA1 RX pool is one contiguous 8 KiB order-1 page;
++    # (1280..7500). The DPAA1 RX pool is one contiguous 8 KiB order-1 page;
 +    # frames above the ceiling can overrun the one-buffer FMan RX contract
 +    # (cold-boot-only recovery), and below the floor is untested. Arming a
 +    # hardware flowtable on an interface whose MTU is outside this range can
@@ -18,7 +18,7 @@ index cc58ead..da385b0 100755
 +    # 1500 is inside the range, so standard interfaces pass. Widen once a
 +    # larger range is validated on the FMan RX pool.
 +    ASK_FT_MTU_MIN = 1280
-+    ASK_FT_MTU_MAX = 7000
++    ASK_FT_MTU_MAX = 7500
 +    mtu_path = f'/sys/class/net/{ifname}/mtu'
 +    try:
 +        with open(mtu_path) as f:

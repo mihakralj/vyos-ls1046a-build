@@ -3,13 +3,17 @@ diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_eth
 index 26eb177..9ecc15d 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -56,6 +56,10 @@
+@@ -56,6 +56,14 @@
  from vyos import airbag
  airbag.enable()
  
-+# ASK2 FMan FE offload MTU bounds validated on LS1046A hardware.
++# ASK2 FMan FE offload MTU bounds on LS1046A. The F-203 order-1 (8 KiB) RX
++# pool holds one contiguous frame up to a computed 7530-byte MTU
++# (SKB_WITH_OVERHEAD(8192) 7872 - rx_headroom 320 - VLAN_ETH_HLEN 18 -
++# ETH_FCS_LEN 4). Clamp to 7500 (30 B margin under the hard ceiling); 1280 is
++# the VyOS IPv6-link-local floor.
 +ASK_OFFLOAD_MTU_MIN = 1280
-+ASK_OFFLOAD_MTU_MAX = 7000
++ASK_OFFLOAD_MTU_MAX = 7500
 +
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """
@@ -35,7 +39,7 @@ index 26eb177..9ecc15d 100755
 +                raise ConfigError(
 +                    f'Interface {ifname} ASK offload requires MTU between '
 +                    f'{ASK_OFFLOAD_MTU_MIN} and {ASK_OFFLOAD_MTU_MAX} '
-+                    f'(configured MTU {mtu} is outside the validated range '
++                    f'(configured MTU {mtu} is outside the contiguous-buffer range '
 +                    f'and can wedge the FMan RX path). Set a supported MTU '
 +                    f'or disable "offload ask" first.'
 +                )
