@@ -1503,7 +1503,12 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
                 action.key_size = ASK_FE_KEY_SIZE;
                 table_idx = 0;
         }
-        action.enq_off  = enq_off;
+        action.enq_off   = enq_off;
+        /* F-204 / T-M6-1 Phase 2a: explicit ehash selector. This is SEPARATE
+         * from key->port_id, which remains the ingress FMan port for F-195's
+         * own-port miss-FQID resolution. v4 passes 0 exactly as before; v6
+         * would pass 1, but preflight still rejects v6 until Phase 3 dispatch. */
+        action.table_idx = (u8)table_idx;
 
         /* T-M7-2 S1 (2026-08-15): hardware TX terminal. Supply the resolved
          * per-egress-interface TX FQID plus the routed L2 rewrite (next-hop
@@ -1522,16 +1527,11 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
                                 ? ETH_P_IPV6 : ETH_P_IP;
 
-        /* F-195(prod-flow-ingress-port): fman_pcd_fe_flow_add() uses its
-         * second argument exclusively to resolve the flow record's own-port
-         * target FQID. It is not an ehash table selector: the current FMan
-         * implementation selects table 0 internally. Passing table_idx here
-         * made every IPv4 flow look like hw-port 0x00, which maps to eth3's
-         * FQID 0x200 and misroutes eth4 ingress to the foreign queue.
-         *
-         * Keep table_idx only as a protocol-classification diagnostic until
-         * the FMan API grows real v6-table selection; pass the actual ingress
-         * FMan port retained in key.port_id to the current API.
+        /* F-195/F-204 contract: the second argument remains exclusively the
+         * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
+         * eth4=0x300). Never overload it with a table index — that historical
+         * bug cross-port dropped eth4 flows. The separate action.table_idx
+         * field now selects ehash table 0/1 inside fman_pcd_fe_flow_add().
          */
         ask_pr_info("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
                     fm, &action, key->port_id, table_idx, action.key_size,

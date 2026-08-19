@@ -1694,9 +1694,19 @@ record it does not own.
     insert (prevents a future v6 per-key leak). `ask_hw_flow_preflight()` and
     `ask_hw_flow_insert()` explicitly reject v6 to software until dispatch is
     proven. KUnit pins both v4 PORT_ID=0 and the exact 38-byte v6 wire key.
-  - **Phase 2 API (next code):** add an explicit table/family selector to
-    `fman_pcd_fe_flow_action`; honor table 0/1 in add/delete while keeping v4
-    byte-identical; add `UPDATE_HOPLIMIT(0x29)` record packing (fits 320 B).
+  - **Phase 2a API selector: CODE-COMPLETE 2026-08-19 (F-204).** Added a
+    dedicated `u8 table_idx` (+reserved) to `struct fman_pcd_fe_flow_action` and
+    made `fman_pcd_fe_flow_add()` select the ehash table via
+    `fman_pcd_ehash_table_by_index(pcd, action->table_idx)`. Critically SEPARATE
+    from `hw_port_id`, which stays the ingress FMan port for F-195's own-port
+    miss-FQID resolution (overloading it previously cross-port-dropped eth4).
+    ask.ko sets `table_idx=0` for v4 (byte-identical) and 1 for v6; v6 still
+    fails to software in preflight, so table 1 is addressable but not yet
+    dispatched. **Phase 2b (deferred with Phase 3):** v6-aware delete-path table
+    selection, node binding for table 1 (F-185/F-190 `list_first_entry`), and
+    `UPDATE_HOPLIMIT(0x29)` record packing (re-verify offsets for the 38-byte
+    key, not the stale 37-byte F-198 arithmetic) — all only testable once v6
+    dispatch exists.
   - **Phase 3 dispatch (blocking silicon experiment):** determine the parser
     IPv4-vs-IPv6 LCV bits / `kgse_mv` values and prove the SI match-vector walk
     with `NIA_KG_DIRECT` disabled. Every live scheme currently has `mv=0`, and
