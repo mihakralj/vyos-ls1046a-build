@@ -15,16 +15,21 @@
 
 set -eu
 
+apply_rps() {
+    dev=$1
+    base="/sys/class/net/$dev/queues"
+    [ -d "$base" ] || return 0
+    for q in "$base"/rx-*/rps_cpus; do
+        [ -e "$q" ] || continue
+        printf '%s\n' e > "$q"
+    done
+}
+
 DEV=${1:-}
 case "$DEV" in
-    eth3|eth4) ;;
-    *) exit 0 ;;
+    eth3|eth4) apply_rps "$DEV" ;;
+    # 'all' is used by dpaa-rps.service (a robust boot-time fallback to the
+    # udev move rule) to steer every transit port in one invocation.
+    all)       apply_rps eth3; apply_rps eth4 ;;
+    *)         exit 0 ;;
 esac
-
-BASE="/sys/class/net/$DEV/queues"
-[ -d "$BASE" ] || exit 0
-
-for q in "$BASE"/rx-*/rps_cpus; do
-    [ -e "$q" ] || continue
-    printf '%s\n' e > "$q"
-done
