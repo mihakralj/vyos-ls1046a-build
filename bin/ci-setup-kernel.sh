@@ -2257,17 +2257,6 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ] && [ -f drivers/net/eth
     echo "### dpaa_eth.c + fman_pcd.c: F-170 hash_probe widened to eth3+eth4"
 fi
 
-# F-213 (2026-08-19, IPv6 silicon research, READ-ONLY): extend hash_probe_show
-# to also dump the captured frame's parser result (L3R/L4R/CPID/LCV) at
-# (hash_off - 0x28). The slot-based LCV discrimination was proven invalid; the
-# vendor selects a per-protocol scheme whose kgse_mv matches the parser's LCV,
-# so we must harvest the real per-family LCV. Investigative debugfs .show edit
-# only -- no datapath/register/scheme writes. MUST run after F-071/F-072/F-170.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_213.py" 2>&1
-    echo "### fman_pcd.c: F-213 hash_probe parse-result (L3R/L4R/CPID/LCV) dump"
-fi
-
 # F-171 (2026-08-06, T-M3-R attempt 5): every off!=0 arm this session has
 # written FE_ENTER directly to FMBM_RCCB -- the deprecated topology RM
 # section 7.11 says was superseded 2026-07-16. Adds a `fe_group` debugfs
