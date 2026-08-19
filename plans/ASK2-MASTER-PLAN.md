@@ -1707,12 +1707,35 @@ record it does not own.
     `UPDATE_HOPLIMIT(0x29)` record packing (re-verify offsets for the 38-byte
     key, not the stale 37-byte F-198 arithmetic) — all only testable once v6
     dispatch exists.
-  - **Phase 3 dispatch (blocking silicon experiment):** determine the parser
-    IPv4-vs-IPv6 LCV bits / `kgse_mv` values and prove the SI match-vector walk
-    with `NIA_KG_DIRECT` disabled. Every live scheme currently has `mv=0`, and
-    F-178's direct scheme bypasses a second scheme. Do not arm v6 until one v4
-    and one v6 packet increment distinct scheme `kgse_spc` counters in a
-    cold-boot, one-variable test.
+  - **Phase 3 dispatch (silicon experiment — mechanism RESOLVED 2026-08-19,
+    execution pending).** Research (vendor NCSW source + RM + decomp) settled
+    how v4/v6 scheme selection works; it is a two-register-class SETUP, not a
+    documented bit to read:
+    * **Parser:** IPv4 parses to HXS header slot 5, IPv6 to slot 6 (silicon-
+      fixed, vendor `GetPrsHdrNum`). Each slot ORs its `pmda[slot].lcv` mask
+      into the per-frame LCV. **Blocker:** mainline programs every
+      `pmda[i].lcv = 0xffffffff` (`fman_port.c:707-711`), so the LCV cannot
+      distinguish protocols today. Must reprogram `pmda[5].lcv` / `pmda[6].lcv`
+      to distinct single bits (e.g. v4 `0x40000000`, v6 `0x80000000`), others 0.
+      This is a driver-side prerequisite, not just a scheme write.
+    * **KeyGen:** set the v4 scheme `kgse_mv` = the v4 bit, the v6 scheme
+      `kgse_mv` = the v6 bit; selection = first `SI=1` scheme with
+      `(QLCV & kgse_mv) == kgse_mv`, `QLCV = plan_mask & LCV`. Requires
+      `NIA_KG_DIRECT` (F-178, `FMBM_RFPNE 0x00480304`) DISABLED so the walk runs
+      (`0x00480200`). Do NOT reuse the in-tree `kg_build_match_vector` constants
+      as `kgse_mv` — those (`KG_SCH_KN_IPSRC1` etc.) are EKFC field-selects, a
+      different register.
+    * **Instruments (all already on the shipped image, no debug ISO needed):**
+      `CONFIG_FMAN_PCD_DEBUG_FS=y` ships all `fman_pcd/0/` nodes; `/dev/mem`
+      works; `bin/kg-scheme-read.py` reads every per-scheme reg (mode/ekfc/mv/
+      spc) via the `fmkg_ar` indirect protocol. Baseline captured on `.185`:
+      schemes 0-2 RSS `ekfc=0x00180006`, schemes 3-4 AC_CC `ekfc=0x801c0006`,
+      **all `mv=0`**.
+    * **Gate/discipline:** cold-boot, one variable, mutate a SACRIFICIAL 1G
+      test port (eth1/eth2, never eth0 mgmt, never the working eth3/4), inject
+      one v4 + one v6 packet, confirm distinct `kgse_spc` movement, readback
+      every write, restore after. Needs a reliable eth4-side Linux v6 generator
+      (the Windows/HELGA v6 TCP path is too intermittent) and serial recovery.
   **Final gate:** TCP+UDP both directions; hop-limit 64→63; checksum/L2 correct;
   neighbour replace; flow delete/flush; MTU 1280/1500/2500/7000/7500; IPv4
   byte-for-byte/performance regression; unsupported extension-header flows
