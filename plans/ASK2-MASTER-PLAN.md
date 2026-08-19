@@ -1734,8 +1734,20 @@ record it does not own.
     * **Gate/discipline:** cold-boot, one variable, mutate a SACRIFICIAL 1G
       test port (eth1/eth2, never eth0 mgmt, never the working eth3/4), inject
       one v4 + one v6 packet, confirm distinct `kgse_spc` movement, readback
-      every write, restore after. Needs a reliable eth4-side Linux v6 generator
-      (the Windows/HELGA v6 TCP path is too intermittent) and serial recovery.
+      every write, restore after.
+    * **Environment READY (2026-08-19):** `bin/kg-lcv-probe.py` reads/writes the
+      parser `pmda[].lcv` (verified addressing on eth2 HWP 0x1a89800) and reads
+      per-scheme `kgse_mv`/`kgse_spc`; scheme 5 is a free slot for the v6 test;
+      the reliable v6 generator is a HELGA Windows SCHEDULED TASK
+      (`ask2_iperf3_v6`, SYSTEM, `-s -B fd99:2::16`) — NOT Start-Process, which
+      dies with the SSH session. DUT v6 ULAs MUST be VyOS config
+      (`set interfaces ethernet eth3/eth4 address fd99:{1,2}::185/64`), never raw
+      `ip -6 addr` (a commit strips non-config addresses).
+    * **CRITICAL test budget:** v6 SW forwarding is a control-plane DoS on this
+      4-core board. Measured A/B: RPS ON survives ~500 Mbit/s/8s but WEDGES at
+      600 Mbit/s (cold-boot required); RPS OFF wedges near-instantly. Cap ALL
+      pre-HIT v6 test traffic at <= 100 Mbit/s (ping-rate or `-b 100M`). This is
+      itself the strongest argument for v6 HW offload.
   **Final gate:** TCP+UDP both directions; hop-limit 64→63; checksum/L2 correct;
   neighbour replace; flow delete/flush; MTU 1280/1500/2500/7000/7500; IPv4
   byte-for-byte/performance regression; unsupported extension-header flows
