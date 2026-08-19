@@ -35,7 +35,7 @@ import sys
 
 kroot = "drivers/net/ethernet/freescale/fman"
 port_c = os.path.join(kroot, "fman_port.c")
-port_h = "include/linux/fsl/fman_port.h"
+port_h = os.path.join(kroot, "fman_port.h")
 
 changes = 0
 
