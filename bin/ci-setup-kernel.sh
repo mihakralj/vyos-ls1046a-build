@@ -2732,7 +2732,7 @@ fi
 # dual-family dispatch recipe. F-210 writes table1's vendor node at gro+16;
 # F-211 arms/binds the v6 scheme with mv=V6BIT + CCOBASE=1 and narrows v4's
 # mv to V4BIT; F-212 applies/restores the parser LCV split. All three are gated
-# by fman_pcd.v6_enable=0 (default); ask.ko v6 preflight remains separately
+# by fsl_dpaa_fman.v6_enable=0 (default; 0644 sysfs knob); ask.ko v6 preflight remains separately
 # -EOPNOTSUPP until the board gate passes. MUST run after F-204 (table1 selector),
 # F-205 (LCV primitive), F-209 (AC_CC CCOBASE), F-185/F-186 (vendor node/miss).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then

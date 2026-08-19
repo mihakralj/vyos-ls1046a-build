@@ -1754,7 +1754,8 @@ record it does not own.
       table1 and IPv6 HW dispatch; F-207 is now justified code, not a
       hypothesis. **Productization steps 1–4 are now implemented, default-OFF
       (CI pending):** F-209 carries `cc_base_offset<<24` in the AC_CC branch;
-      F-210 adds the read-only `fman_pcd.v6_enable` master gate (default 0) and
+      F-210 adds the runtime-writable (0644) `fsl_dpaa_fman.v6_enable` master
+      gate (default 0; `/sys/module/fsl_dpaa_fman/parameters/v6_enable`) and
       writes table1's node at `gro+16` only when enabled; F-211 narrows the v4
       scheme to `kgse_mv=0x40000000`, clones/binds a free v6 scheme with
       `kgse_mv=0x80000000`, EKFC `0x801c0006`, AC_CC CCOBASE=1, and commits the
