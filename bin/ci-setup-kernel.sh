@@ -2500,6 +2500,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-201 RSS kgse_hc preserved (128-FQ spread)"
 fi
 
+# F-209 (T-M6-1 productization step 1, 2026-08-19): carry per-scheme CCOBASE
+# in the AC_CC branch. v4 cc_base_offset=0 -> byte-identical; v6 uses 1.
+# MUST run after F-201 (same keygen_scheme_setup function, separate anchor).
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_209.py" 2>&1
+    echo "### fman_keygen.c: F-209 AC_CC CCOBASE encoding (v6 row select)"
+fi
+
 # F-184 (2026-08-12): the first live `fe_obs arm` (patch 0169's canary
 # discriminator, until then only compile-verified) panicked the kernel on
 # .185 -- reproduced twice:
