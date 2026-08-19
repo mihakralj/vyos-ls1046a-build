@@ -1,5 +1,7 @@
 """F-212 (T-M6-1 IPv6 productization, step 4): call the parser LCV split at
-engage and restore it at disengage. GATED on fsl_dpaa_fman.v6_enable (F-210); no-op
+engage (slot0=ETH catch-all, slot5=IPv4, slot6=IPv6) and restore it at
+disengage; also tears down the v6 AND catch-all schemes (F-211).
+GATED on fsl_dpaa_fman.v6_enable (F-210); no-op
 when OFF, so v4 byte-identical.
 
 WHAT / WHY
@@ -56,7 +58,9 @@ import sys
 
 path = "drivers/net/ethernet/freescale/fman/fman_pcd_kg.c"
 
-# Single-sourced with F-211 / kg-lcv-probe.py
+# Single-sourced with F-211. Slot0/ETH is confirmed on every frame and feeds a
+# highest-id catch-all scheme; slots5/6 discriminate IPv4/IPv6.
+CATCHALLBIT = "0x20000000U"
 V4BIT = "0x40000000U"
 V6BIT = "0x80000000U"
 
@@ -87,30 +91,39 @@ def apply_block(name, marker, old, new):
     print(f"### {path}: F-212 {name} applied")
 
 
-# ── 1. arm_fe: split the parser LCV after the v6 scheme is bound. ──
-# Anchor on F-211's bind + unlock pair (unique to the v6-scheme-arm block).
+# ── 1. arm_fe: split the parser LCV after v6 + catch-all schemes are bound. ──
+# Anchor on the unlock+miss-nia pair that F-211 now emits AFTER the catch-all
+# block (unique to the v6-scheme-arm block tail).
 apply_block(
     "arm_fe LCV split",
     "F-212(arm-lcv-split)",
-    "\t\t(void)keygen_bind_port_to_schemes(keygen, v6id, true);\n"
-    "\t\tmutex_unlock(lock);\n",
-    "\t\t(void)keygen_bind_port_to_schemes(keygen, v6id, true);\n"
     "\t\tmutex_unlock(lock);\n"
     "\n"
-    "\t\t/* F-212(arm-lcv-split): make QLCV carry V4BIT for IPv4 frames and\n"
-    "\t\t * V6BIT for IPv6 frames so the (QLCV & kgse_mv)==kgse_mv walk\n"
-    "\t\t * routes each family to its own scheme (F-205 primitive; proven\n"
-    "\t\t * 2026-08-19). Non-fatal on error — the v6 scheme is armed but\n"
-    "\t\t * would simply not be selected until the split lands.\n"
+    "\t\t/* 5) v6 node word3 = the v6 scheme's own base FQID (same port/pool\n"
+    "\t\t * as v4 per E25). The node lives at gro+16 (F-210).\n"
+    "\t\t */\n"
+    "\t\tfman_pcd_fe_v6node_set_miss_nia(pcd, fe_enter_off, miss_fqid);\n",
+    "\t\tmutex_unlock(lock);\n"
+    "\n"
+    "\t\t/* F-212(arm-lcv-split): make QLCV carry CATCHALLBIT on every frame\n"
+    "\t\t * (ETH slot0 -> catch-all scheme), V4BIT for IPv4 (slot5) and V6BIT\n"
+    "\t\t * for IPv6 (slot6) so the (QLCV & kgse_mv)==kgse_mv walk routes each\n"
+    "\t\t * family to its own scheme and everything else to the catch-all\n"
+    "\t\t * (F-205 primitive; parser-stop bracketed). Non-fatal on error.\n"
     "\t\t */\n"
     "\t\t{\n"
-    "\t\t\tint lerr = fman_port_set_lcv_split(rxport, " + V4BIT +
-    ", " + V6BIT + ");\n"
+    "\t\t\tint lerr = fman_port_set_lcv_split(rxport, " + CATCHALLBIT +
+    ", " + V4BIT + ", " + V6BIT + ");\n"
     "\n"
     "\t\t\tif (lerr)\n"
     "\t\t\t\tpr_warn(\"fman_pcd fe_arm: F-212 LCV split failed (%d) on port 0x%02x\\n\",\n"
     "\t\t\t\t\tlerr, hw_port_id);\n"
-    "\t\t}\n",
+    "\t\t}\n"
+    "\n"
+    "\t\t/* 5) v6 node word3 = the v6 scheme's own base FQID (same port/pool\n"
+    "\t\t * as v4 per E25). The node lives at gro+16 (F-210).\n"
+    "\t\t */\n"
+    "\t\tfman_pcd_fe_v6node_set_miss_nia(pcd, fe_enter_off, miss_fqid);\n",
 )
 
 # ── 2. disarm_fe: tear down the v6 scheme + restore the parser LCV
@@ -156,9 +169,9 @@ apply_block(
     "\t\t\tif (!s->used || s->hw_port_id != hw_port_id)\n"
     "\t\t\t\tcontinue;\n"
     "\t\t\tif (s->cc_base_offset == 1 && s->next_engine == 3) {\n"
-    "\t\t\t\t/* the v6 scheme: unbind, wipe to baseline, disable,\n"
-    "\t\t\t\t * free the slot. Zero the discriminating fields BEFORE\n"
-    "\t\t\t\t * the disable write so the scheme-RAM readback is clean.\n"
+    "\t\t\t\t/* the v6 scheme (CCOBASE=1): unbind, wipe to baseline,\n"
+    "\t\t\t\t * disable, free the slot. Zero the discriminating fields\n"
+    "\t\t\t\t * BEFORE the disable write so the readback is clean.\n"
     "\t\t\t\t */\n"
     "\t\t\t\t(void)keygen_bind_port_to_schemes(keygen, (u8)i, false);\n"
     "\t\t\t\ts->match_vector   = 0;\n"
@@ -171,8 +184,23 @@ apply_block(
     "\t\t\t\ts->hw_port_id     = 0;\n"
     "\t\t\t\ts->used           = false;\n"
     "\t\t\t\tv6_torn_down = true;\n"
+    "\t\t\t} else if (s->match_vector == " + CATCHALLBIT + ") {\n"
+    "\t\t\t\t/* the catch-all scheme (allocated clone, CCOBASE=0):\n"
+    "\t\t\t\t * unbind, wipe, disable, free the slot. */\n"
+    "\t\t\t\t(void)keygen_bind_port_to_schemes(keygen, (u8)i, false);\n"
+    "\t\t\t\ts->match_vector   = 0;\n"
+    "\t\t\t\ts->cc_base_offset = 0;\n"
+    "\t\t\t\ts->cc_bits_sel    = 0;\n"
+    "\t\t\t\ts->ekfc           = 0;\n"
+    "\t\t\t\ts->next_engine    = 0;\n"
+    "\t\t\t\ts->used           = true;\n"
+    "\t\t\t\t(void)keygen_scheme_setup(keygen, (u8)i, false);\n"
+    "\t\t\t\ts->hw_port_id     = 0;\n"
+    "\t\t\t\ts->used           = false;\n"
+    "\t\t\t\tv6_torn_down = true;\n"
     "\t\t\t} else if (s->match_vector) {\n"
-    "\t\t\t\t/* the v4 scheme: restore match-all (mv=0) */\n"
+    "\t\t\t\t/* the v4 scheme (permanent port scheme, mv=V4BIT):\n"
+    "\t\t\t\t * restore match-all (mv=0); do NOT free. */\n"
     "\t\t\t\ts->match_vector = 0;\n"
     "\t\t\t\ts->used = false;\n"
     "\t\t\t\t(void)keygen_scheme_setup(keygen, (u8)i, true);\n"
