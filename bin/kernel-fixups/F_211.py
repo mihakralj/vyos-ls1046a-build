@@ -1,6 +1,6 @@
 """F-211 (T-M6-1 IPv6 productization, step 3): arm the second (IPv6) KeyGen
 scheme at engage — the in-kernel reproduction of bin/kg-lcv-probe.py's proven
-exp-apply/exp-ccobase recipe. GATED on fman_pcd.v6_enable (F-210); v4 byte-
+exp-apply/exp-ccobase recipe. GATED on fsl_dpaa_fman.v6_enable (F-210); v4 byte-
 identical when OFF.
 
 BACKGROUND — why this is now safe to implement (F-140 Part B was deferred)
