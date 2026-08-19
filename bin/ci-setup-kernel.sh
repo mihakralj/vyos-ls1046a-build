@@ -2702,6 +2702,15 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     echo "### dpaa_eth.c: F-203 order-1 8KiB RX buffers (contiguous jumbo)"
 fi
 
+# F-204 (T-M6-1 Phase 2a, 2026-08-19): additive, v4-byte-identical ehash
+# table selector. Adds action->table_idx (0=v4, 1=dormant v6) without
+# overloading hw_port_id — F-195's own-port miss-FQID semantics stay intact.
+# MUST run after F-198 (final action struct), F-194/F-202 (final flow-add body).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_204.py" 2>&1
+    echo "### fman_pcd.c/h: F-204 explicit ehash table_idx selector (v4=0, v6=1)"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
