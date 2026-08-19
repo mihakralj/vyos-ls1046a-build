@@ -103,27 +103,24 @@ else:
     sys.exit(1)
 
 # 2. Repoint the add-path table lookup from index 0 to action->table_idx.
-#    Anchor = the exact F-194 guarded block (the last add-path rewrite).
+#    By the time F-204 runs, F-202 has wrapped the add path in fe_lock, so the
+#    add-path lookup is uniquely preceded by F-202's lock comment+mutex_lock
+#    (the del-path lookup has a different preceding comment). Anchor on that
+#    unique prefix so only the ADD path is repointed, never the del path.
 add_old = (
-    "\tt = fman_pcd_ehash_table_by_index(pcd, 0);\n"
-    "\tif (!t) {\n"
-    "\t\tdev_warn_ratelimited(fman_get_dev(pcd->fman),\n"
-    "\t\t\t\t     \"fe_flow: F-194 no-table0 hw_port=0x%02x key_size=%u\\n\",\n"
-    "\t\t\t\t     hw_port_id, action->key_size);\n"
-    "\t\treturn -ENODEV;\n"
-    "\t}\n"
+    "\t/* F-202(flow-api-lock): serialize production add/delete/clear.\n"
+    "\t * fman_pcd_ehash_{add,del}_key require pcd->fe_lock. */\n"
+    "\tmutex_lock(&pcd->fe_lock);\n\n"
+    "\tt = fman_pcd_ehash_table_by_index(pcd, 0);"
 )
 add_new = (
+    "\t/* F-202(flow-api-lock): serialize production add/delete/clear.\n"
+    "\t * fman_pcd_ehash_{add,del}_key require pcd->fe_lock. */\n"
+    "\tmutex_lock(&pcd->fe_lock);\n\n"
     "\t/* F-204: select the ehash table by the explicit action->table_idx\n"
     "\t * (0=IPv4, 1=dormant IPv6). NOT hw_port_id -- that stays the ingress\n"
     "\t * FMan port for own-port miss-FQID resolution (F-195). */\n"
-    "\tt = fman_pcd_ehash_table_by_index(pcd, action->table_idx);\n"
-    "\tif (!t) {\n"
-    "\t\tdev_warn_ratelimited(fman_get_dev(pcd->fman),\n"
-    "\t\t\t\t     \"fe_flow: F-204 no-table idx=%u hw_port=0x%02x key_size=%u\\n\",\n"
-    "\t\t\t\t     action->table_idx, hw_port_id, action->key_size);\n"
-    "\t\treturn -ENODEV;\n"
-    "\t}\n"
+    "\tt = fman_pcd_ehash_table_by_index(pcd, action->table_idx);"
 )
 patch(pcd_c, "add-path table selector", add_old, add_new, "F-204: select the ehash table")
 
