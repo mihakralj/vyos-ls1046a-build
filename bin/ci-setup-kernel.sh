@@ -2187,6 +2187,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo "### fman_port.c/fman_pcd_kg.c: F-162 KeyGen direct-scheme addressing (NIA_KG_DIRECT)"
 fi
 
+# F-205 (T-M6-1 Phase 3 S1, 2026-08-19): dormant parser LCV-split port
+# primitive. Adds fman_port_set/clear_lcv_split() with readback; no caller yet.
+# MUST run after F-162 (shares its fman_port.c/h tail anchors).
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_205.py" 2>&1
+    echo "### fman_port.c/h: F-205 dormant IPv4/IPv6 parser LCV-split primitive"
+fi
+
 # F-165 (2026-08-05, Task #26 follow-up): fe_arm engage with an explicit
 # non-zero offset must not be silently overwritten by the CONT_LOOKUP
 # scaffold's own fe_enter_off = gro reassignment. Debugfs-test-only;
