@@ -307,6 +307,63 @@ def exp_apply(args):
     print("READBACK OK" if ok else "READBACK MISMATCH")
 
 
+def exp_ccobase(args):
+    """F-207 mechanism proof: give the v6 scheme its own ehash node via CCOBASE.
+
+    node_addr = FMBM_RCCB + CCOBASE*16 (per-scheme CCOBASE = kgse_mode[30:24]).
+    Writes table1's en_exthash_node at RCCB+16 (CCOBASE=1) and sets the v6
+    scheme's CCOBASE to 1, so its AC_CC dispatch reaches table1's node instead
+    of the shared table0 node at RCCB+0. Requires the port already FE-armed
+    (table0 node at RCCB+0) and both schemes AC_CC (exp-apply run first).
+
+    Args: --port-id, --v6-scheme, table1 params (--t1-dma, --t1-keysize,
+    --t1-hash-shift, --t1-mask-bits), --int-buf-off, --miss-nia, --write.
+    """
+    pid = args.port_id
+    s6 = args.v6_scheme
+    # Read the port's RCCB (per-port BMI +0x34) = MURAM byte offset of node group
+    BMI = FMAN_BASE + 0x80000 + pid * 0x1000
+    mmb = _map((BMI + 0x34) & ~0xFFF)
+    rccb = _rd(mmb, (BMI + 0x34) & 0xFFF)
+    mmb.close()
+    node1_off = rccb + 16                     # CCOBASE=1 row
+    tb = int(args.t1_dma, 0)
+    w0 = ((2 << 30) | ((int(args.t1_keysize, 0) & 0x3f) << 24) | (4 << 20) |
+          ((int(args.t1_hash_shift, 0) & 0x7) << 16) | ((tb >> 32) & 0xff))
+    w1 = tb & 0xffffffff
+    w2 = (((int(args.int_buf_off, 0) >> 8) & 0xffff) << 16) | (0x80 << 4) | \
+         (int(args.t1_mask_bits, 0) & 0xf)
+    w3 = int(args.miss_nia, 0)
+
+    if not args.write:
+        print(f"DRY RUN: RCCB=0x{rccb:05x}; would write table1 node at "
+              f"0x{node1_off:05x} (CCOBASE=1): "
+              f"w0=0x{w0:08x} w1=0x{w1:08x} w2=0x{w2:08x} w3=0x{w3:08x}; "
+              f"and set scheme{s6} kgse_mode CCOBASE=1 (|0x01000000).")
+        return
+
+    # 1) write table1 en_exthash_node at RCCB+16 (MURAM is FMAN_BASE + off)
+    node_phys = FMAN_BASE + node1_off
+    mmn = _map(node_phys & ~0xFFF)
+    o = node_phys & 0xFFF
+    for i, w in enumerate((w0, w1, w2, w3)):
+        _wr(mmn, o + i * 4, w)
+    rb = [_rd(mmn, o + i * 4) for i in range(4)]
+    mmn.close()
+
+    # 2) set the v6 scheme's CCOBASE=1 in kgse_mode[30:24] (full-scheme RMW)
+    words = scheme_read_full(s6)
+    words[MODE_IDX] = (words[MODE_IDX] & ~(0x7f << 24)) | (1 << 24)
+    scheme_write_full(s6, words, update_counter=False)
+    mode_rb = scheme_read_full(s6)[MODE_IDX]
+
+    ok = (rb == [w0, w1, w2, w3] and (mode_rb >> 24 & 0x7f) == 1)
+    print(f"RCCB=0x{rccb:05x} table1 node@0x{node1_off:05x} "
+          f"w0=0x{rb[0]:08x} w1=0x{rb[1]:08x} w2=0x{rb[2]:08x} w3=0x{rb[3]:08x}")
+    print(f"scheme{s6} kgse_mode=0x{mode_rb:08x} (CCOBASE={mode_rb >> 24 & 0x7f})")
+    print("READBACK OK" if ok else "READBACK MISMATCH")
+
+
 def exp_restore(args):
     snap = json.load(open(args.file))
     dev, pid = snap["dev"], snap["port_id"]
@@ -350,7 +407,7 @@ def main():
     p = sub.add_parser("port-sp")
     p.add_argument("port_id", type=lambda x: int(x, 0))
 
-    # experiment: snapshot / apply / restore
+    # experiment: snapshot / apply / CCOBASE node / restore
     for name in ("exp-snapshot", "exp-apply", "exp-restore"):
         q = sub.add_parser(name)
         q.add_argument("--file", default="/tmp/kg-exp.json")
@@ -363,6 +420,17 @@ def main():
             q.add_argument("--v4", default="0x40000000")
             q.add_argument("--v6", default="0x80000000")
             q.add_argument("--write", action="store_true")
+
+    q = sub.add_parser("exp-ccobase")
+    q.add_argument("--port-id", type=lambda x: int(x, 0), required=True)
+    q.add_argument("--v6-scheme", type=int, required=True)
+    q.add_argument("--t1-dma", required=True)
+    q.add_argument("--t1-keysize", default="38")
+    q.add_argument("--t1-hash-shift", default="0")
+    q.add_argument("--t1-mask-bits", default="12")
+    q.add_argument("--int-buf-off", required=True)
+    q.add_argument("--miss-nia", required=True)
+    q.add_argument("--write", action="store_true")
 
     a = ap.parse_args()
     if a.cmd == "hwp-dump":
@@ -391,6 +459,8 @@ def main():
         exp_snapshot(a)
     elif a.cmd == "exp-apply":
         exp_apply(a)
+    elif a.cmd == "exp-ccobase":
+        exp_ccobase(a)
     elif a.cmd == "exp-restore":
         exp_restore(a)
 

@@ -1744,10 +1744,20 @@ record it does not own.
       hunt: on the sacrificial eth1 (now cabled), arm a v6 second-table node BY
       HAND via the `fe_*` debugfs verbs + `kg-lcv-probe.py`, and prove a v6
       table-1 `pkt_count` HIT on silicon — cold-boot, one variable, per-attempt
-      go-ahead — BEFORE writing any S2/S3/S4 driver fixup. Writing those fixups
-      first would produce code that compiles but cannot be validated, on the
-      exact path the project's history proves must never be coded on a
-      hypothesis. Test traffic capped ≤100 Mbit/s (v6 SW-forward wedge).
+      go-ahead — BEFORE       writing any S2/S3/S4 driver fixup. **That gate PASSED 2026-08-19:** with
+      production ASK disengaged/cold-booted, eth1 FE-armed in a clean global
+      sandbox, v4 baseline HIT table0, and v6 scheme5 selected by LCV/mv. The
+      F-207 mechanism was then proven: write table1's 16-byte node at
+      `RCCB+16`, set scheme5 `KGSE_MODE.CCOBASE=1` (`0x81000006`), inject 3
+      matching v6 TCP SYNs → **table1 pkt_count 0→3 / pkt_bytes 282**, table0
+      unchanged. Thus `selected_AD = RCCB + CCOBASE*16` is silicon-confirmed for
+      table1 and IPv6 HW dispatch; F-207 is now justified code, not a
+      hypothesis. Remaining productization is concrete: add `cc_base_offset
+      <<24` to the AC_CC branch in `keygen_scheme_setup()` (currently missing),
+      write both table nodes (`gro+0` v4, `gro+16` v6), clone/bind the v6 scheme
+      with CCOBASE=1, then add UPDATE_HOPLIMIT and open the v6 gate. Tool
+      `kg-lcv-probe.py exp-ccobase` captures the proven register recipe.
+      Test traffic remains capped ≤100 Mbit/s until production v6 HIT lands.
 
   Historical (now superseded by the proof above): the mechanism was resolved
   from vendor NCSW source + RM + decomp as a two-register-class SETUP —
