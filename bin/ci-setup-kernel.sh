@@ -2753,6 +2753,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c/kg.c/h: F-211 gated v6 KeyGen scheme arm/bind"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_212.py" 2>&1
     echo "### fman_pcd_kg.c: F-212 gated parser LCV split + restore"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_214.py" 2>&1
+    echo "### fman_keygen.c/pcd_kg.c: F-214 gated cls-plan0 pass-all (QLCV fix)"
 fi
 
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs

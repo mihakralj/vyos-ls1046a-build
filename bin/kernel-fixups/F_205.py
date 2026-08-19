@@ -22,9 +22,22 @@ struct fman_port_hwp_regs at base_addr + HWP_PORT_REGS_OFFSET(0x800); pmda[i] =
 {ssa@+0, lcv@+4}, 8-byte stride; IPv4 = pmda[5], IPv6 = pmda[6]
 (vendor GetPrsHdrNum: IPv4->5, IPv6->6). HWP_HXS_COUNT = 16.
 
+2026-08-19 vendor-source correction: the pmda[].lcv words are hard-parser
+shadow RAM that only commit while the parser is stopped. Vendor SetPcd()
+(fm_port.c:1438/1627) and mainline init_hwp() both bracket every PMDA write with
+PCAC PSTOP -> wait !PSTAT -> write -> PSTART. This primitive now does the same
+via stop_port_hwp()/start_port_hwp() (static helpers in the same TU). Writing
+live (the original F-205) let the register readback pass on the shadow while the
+live parse array kept 0xffffffff — the leading root cause of the board result
+where the split "succeeded" yet slots 5/6 never affected selection. NOTE: the
+parser LCV alone is not sufficient — QLCV = CP_entry_mask & LCV, and the KeyGen
+classification-plan entry 0 must be 0xffffffff (see the companion CP-entry-mask
+fixup) or QLCV is zeroed regardless of the LCV split.
+
 S0 QDRANT GATE satisfied: LCV mechanism + pmda offsets cross-checked against
-arch/fman-microcode-210-programming-reference.md and confirmed by the passing
-silicon experiment (scheme2/scheme5 distinct kgse_spc). Readback per S6 R10.2.
+arch/fman-microcode-210-programming-reference.md and vendor NCSW fm_port.c; the
+parser stop/start requirement is vendor- and mainline-confirmed. Readback per
+S6 R10.2.
 
 Must run AFTER F-162 (shares the fman_port_set_cc_base tail anchor and the
 fman_port.h declaration block). Idempotent via the F-205 markers.
@@ -81,6 +94,14 @@ new_funcs = (
     "\t\treturn -EINVAL;\n"
     "\tregs = port->hwp_regs;\n"
     "\n"
+    "\t/* The pmda[].lcv words are hard-parser shadow RAM; they only commit to\n"
+    "\t * the live parse array while the parser is stopped (PCAC PSTOP/PSTAT).\n"
+    "\t * Mainline init_hwp() and the vendor SetPcd() both bracket every PMDA\n"
+    "\t * write this way; writing them live lets the register readback pass\n"
+    "\t * while the live parse memory silently keeps the old value (root cause\n"
+    "\t * of the 2026-08-19 'split set but slots 5/6 stay dark' board result).\n"
+    "\t */\n"
+    "\tstop_port_hwp(port);\n"
     "\tfor (i = 0; i < HWP_HXS_COUNT; i++)\n"
     "\t\tiowrite32be(0, &regs->pmda[i].lcv);\n"
     "\tiowrite32be(v4_bit, &regs->pmda[FMAN_HWP_HXS_IPV4].lcv);\n"
@@ -88,11 +109,13 @@ new_funcs = (
     "\n"
     "\tif (ioread32be(&regs->pmda[FMAN_HWP_HXS_IPV4].lcv) != v4_bit ||\n"
     "\t    ioread32be(&regs->pmda[FMAN_HWP_HXS_IPV6].lcv) != v6_bit) {\n"
+    "\t\tstart_port_hwp(port);\n"
     "\t\tdev_err(port->dev,\n"
     "\t\t\t\"fman_port: LCV-split readback mismatch (v4=0x%08x v6=0x%08x)\\n\",\n"
     "\t\t\tv4_bit, v6_bit);\n"
     "\t\treturn -EIO;\n"
     "\t}\n"
+    "\tstart_port_hwp(port);\n"
     "\tdev_info(port->dev,\n"
     "\t\t \"fman_port: parser LCV split (IPv4 slot5=0x%08x, IPv6 slot6=0x%08x)\\n\",\n"
     "\t\t v4_bit, v6_bit);\n"
@@ -115,12 +138,16 @@ new_funcs = (
     "\t\treturn;\n"
     "\tregs = port->hwp_regs;\n"
     "\n"
+    "\t/* Same parser-access-control rule as set_lcv_split(): quiesce before\n"
+    "\t * restoring the PMDA shadow RAM, then restart after readback. */\n"
+    "\tstop_port_hwp(port);\n"
     "\tfor (i = 0; i < HWP_HXS_COUNT; i++)\n"
     "\t\tiowrite32be(0xffffffff, &regs->pmda[i].lcv);\n"
     "\n"
     "\tif (ioread32be(&regs->pmda[FMAN_HWP_HXS_IPV6].lcv) != 0xffffffff)\n"
     "\t\tdev_warn(port->dev,\n"
     "\t\t\t \"fman_port: LCV-split clear readback mismatch\\n\");\n"
+    "\tstart_port_hwp(port);\n"
     "}\n"
     "EXPORT_SYMBOL_GPL(fman_port_clear_lcv_split);\n"
 )
