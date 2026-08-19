@@ -180,9 +180,10 @@
     "F_210.py": "fman_pcd.c/internal.h: F-210 (T-M6-1 step 2) default-OFF fsl_dpaa_fman.v6_enable gate (0644 runtime knob; built-in KBUILD_MODNAME corrected) + second VARIANT-B en_exthash_node write at gro+16 for table1 (CCOBASE=1); reproduces silicon-proven exp-ccobase; v4 OFF path byte-identical",
     "F_211.py": "fman_pcd.c/fman_pcd_kg.c/internal.h: F-211 (T-M6-1 step 3) gated v6 scheme arm: v4 kgse_mv=0x40000000, clone free v6 slot kgse_mv=0x80000000/CCOBASE=1/EKFC=0x801C0006, bind into port SP, commit table1 node own-port miss FQID; reproduces 2026-08-19 exp-apply",
     "F_212.py": "fman_pcd_kg.c: F-212 (T-M6-1 step 4) gated engage-time parser LCV split (slot5 v4=0x40000000, slot6 v6=0x80000000) plus disengage restore to all-0xffffffff; calls F-205 readback-verified primitive; v4 OFF path no-op",
-    "F_213.py": "fman_pcd.c: F-213 (2026-08-19, IPv6 silicon research, READ-ONLY) extend hash_probe_show to dump the captured frame's parser result (l3r/l4r/cpid/lcv) at hash_off-0x28, to harvest the real per-family LCV (kgse_mv target) after slot-based discrimination was proven invalid; debugfs .show edit only, no datapath/register writes"
+    "F_213.py": "fman_pcd.c: F-213 (2026-08-19, READ-ONLY) extend hash_probe_show to dump the captured frame's parser result l3r/l4r/cpid (CORRECTED: LCV is NOT in the parse result; the false lcv field was removed); debugfs .show edit only, no datapath/register writes",
+    "F_214.py": "fman_keygen.c/internal.h/fman_pcd_kg.c: F-214 (2026-08-19, gated) keygen_cls_plan0_passall writes classification-plan entry group 0 = 0xffffffff so QLCV=plan_mask&LCV carries the parser LCV; ports the missing vendor CP-entry write (mainline binds CPP=0 but never writes CP masks); wired into F-211 v6 arm before LCV split; readback-verified; default-OFF via v6 gate"
   },
-  "count": 111,
+  "count": 112,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {
     "F_174.py": "On disk, listed in active, but intentionally NOT invoked from ci-setup-kernel.sh (superseded by F-175; kept for the record). This is the only allowed disk-without-invocation entry."
