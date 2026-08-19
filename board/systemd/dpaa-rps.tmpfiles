@@ -1,4 +1,0 @@
-# Create systemd .wants symlink for dpaa-rps at boot.
-# Cannot use systemctl enable — live-build squashfs converts the
-# symlink to a regular file, which systemd ignores.
-L+ /etc/systemd/system/multi-user.target.wants/dpaa-rps.service - - - - /etc/systemd/system/dpaa-rps.service
