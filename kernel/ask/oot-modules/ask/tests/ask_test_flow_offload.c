@@ -614,18 +614,14 @@ static void ask_flow_offload_test_classify_dir_non_dpaa(struct kunit *test)
  * shared the error and therefore agreed with each other — only a comparison
  * against the real extracted key exposes it, which is exactly what this does.
  *
- * F-163 (2026-08-05): a port_id=0x11 prefix byte was added ahead of the
- * silicon-verified 13 bytes above. The 0x11 value itself is a test fixture
- * (this branch's usual hwport-under-test, not an independent silicon
- * capture); what IS independently silicon-confirmed is that PORT_ID lands
- * at byte offset 0, ahead of every other field -- that follows directly
- * from the already-proven MSB-first descending EKFC assembly order (spec
- * §3.4) applied to bit 31, the highest bit KG_SCH_KN_PORT_ID sets.
+ * F-188 (2026-08-12): PORT_ID is byte 0 but its production comparison
+ * value is 0x00 (the scheme's zeroed dv default), NOT the raw hw port id.
+ * This value and the MSB-first field order are silicon-confirmed by E25/E26.
  */
 static void ask_flow_offload_test_fe_key_wire_order(struct kunit *test)
 {
 static const u8 expect[ASK_FE_KEY_SIZE] = {
-0x11,                     /* PORT_ID (test fixture, see comment above) */
+0x00,                     /* PORT_ID (zeroed scheme default, F-188) */
 0x0a, 0x63, 0x02, 0x6a,   /* SIP  10.99.2.106 */
 0x0a, 0x63, 0x02, 0xb9,   /* DIP  10.99.2.185 */
 0x06,                     /* PROTO TCP        */
@@ -648,6 +644,7 @@ key.dport = htons(55555);
 
 ask_fe_build_key(&key, k);
 KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE);
+KUNIT_EXPECT_EQ(test, k[0], (u8)0x00); /* raw key.port_id=0x11 is ignored */
 
 /*
  * Ports must be non-palindromic for this to mean anything: assert the two
@@ -655,6 +652,46 @@ KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE);
  */
 KUNIT_EXPECT_NE(test, k[10], k[11]);
 KUNIT_EXPECT_NE(test, k[12], k[13]);
+}
+
+/*
+ * T-M6-1 Phase 1: pin the 38-byte IPv6 FE key layout so the v6 ehash table
+ * (F-140, key_size=38) and ask_fe_build_key_v6() can never diverge:
+ * PORT_ID(0x00) | SIP(16) | DIP(16) | PROTO | SPORT | DPORT, MSB-first.
+ */
+static void ask_flow_offload_test_fe_key_v6_wire_order(struct kunit *test)
+{
+static const u8 expect[ASK_FE_KEY_SIZE_V6] = {
+0x00,                                           /* PORT_ID (F-188 zeroed) */
+0x20,0x01,0x0d,0xb8,0x00,0x00,0x00,0x00,        /* SIP 2001:db8::1 */
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,
+0x20,0x01,0x0d,0xb8,0x00,0x00,0x00,0x00,        /* DIP 2001:db8::2 */
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,
+0x06,                                           /* PROTO TCP */
+0xad,0x9c,                                      /* SPORT 44444 */
+0xd9,0x03,                                      /* DPORT 55555 */
+};
+struct ask_flow_key key;
+u8 k[ASK_FE_KEY_SIZE_V6];
+
+KUNIT_EXPECT_EQ(test, (int)ASK_FE_KEY_SIZE_V6, 38);
+
+memset(&key, 0, sizeof(key));
+key.l3_proto = ASK_FLOW_L3_IPV6;
+key.l4_proto = IPPROTO_TCP;
+key.port_id  = 0x11;   /* raw hw id must be ignored, byte 0 stays 0x00 */
+key.src_ip[0]=0x20; key.src_ip[1]=0x01; key.src_ip[2]=0x0d; key.src_ip[3]=0xb8;
+key.src_ip[15]=0x01;
+key.dst_ip[0]=0x20; key.dst_ip[1]=0x01; key.dst_ip[2]=0x0d; key.dst_ip[3]=0xb8;
+key.dst_ip[15]=0x02;
+key.sport = htons(44444);
+key.dport = htons(55555);
+
+ask_fe_build_key_v6(&key, k);
+KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE_V6);
+KUNIT_EXPECT_EQ(test, k[0], (u8)0x00);
+KUNIT_EXPECT_NE(test, k[34], k[35]);   /* sport non-palindromic */
+KUNIT_EXPECT_NE(test, k[36], k[37]);   /* dport non-palindromic */
 }
 
 /*
@@ -708,6 +745,7 @@ KUNIT_EXPECT_EQ(test, (int)in.n_actions, ASK_INTENT_MAX_ACTIONS);
 
 static struct kunit_case ask_flow_offload_test_cases[] = {
 KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
+KUNIT_CASE(ask_flow_offload_test_fe_key_v6_wire_order),
 KUNIT_CASE(ask_flow_offload_test_intent_lower_ipv4),
 KUNIT_CASE(ask_flow_offload_test_intent_lower_no_redirect),
 KUNIT_CASE(ask_flow_offload_test_intent_add_overflow),

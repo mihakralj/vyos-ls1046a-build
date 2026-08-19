@@ -1019,9 +1019,16 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
                             ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
                 return -EOPNOTSUPP;
 
-        /* Only v4/v6 TCP/UDP have a HW ehash path today. */
-        if ((key->l3_proto != ASK_FLOW_L3_IPV4 &&
-             key->l3_proto != ASK_FLOW_L3_IPV6) ||
+        /*
+         * T-M6-1 Phase 1: v6 parse/key/table plumbing exists, but HW dispatch
+         * is deliberately dormant. Correct per-family selection needs two KG
+         * schemes selected by parser LCV/kgse_mv with KG-direct disabled; the
+         * concrete LCV values and SI-walk behaviour on 210.10.1 are unresolved
+         * silicon questions. Fail v6 to software until that Phase-3 gate
+         * passes — never publish a record into table 1 that no live scheme can
+         * select. Only plain v4 TCP/UDP is hardware-backed today.
+         */
+        if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
             (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
                 return -EOPNOTSUPP;
 
@@ -1073,9 +1080,10 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         if (!h)
                 return -ENODEV;
 
-        /* Body ships v4/v6 TCP/UDP only; everything else falls back to SW. */
-        if ((key->l3_proto != ASK_FLOW_L3_IPV4 &&
-             key->l3_proto != ASK_FLOW_L3_IPV6) ||
+        /* T-M6-1 Phase 1: hardware path ships plain v4 TCP/UDP only; v6 HW
+         * dispatch is dormant (see ask_hw_flow_preflight), so v6 falls back to
+         * software. Everything non-TCP/UDP also falls back. */
+        if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
             (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
                 return -EOPNOTSUPP;
 

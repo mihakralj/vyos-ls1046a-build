@@ -117,7 +117,7 @@
       "reason": "permanent — allocate per-port FE buffer pools from global FMan MURAM instead of PCD gen_pool to avoid arena fragmentation"
     },
     "F_139.py": "fman_pcd.c: F-139 move scaffold tracking from singleton to per-port (fix 304 B/cycle leak)",
-    "F_140.py": "fman_pcd.c: F-140 M6 Piece 2 — v6 ehash table (key_size=37) + v6 KG scheme",
+    "F_140.py": "fman_pcd.c: F-140 (T-M6-1 Phase 1) dormant v6 ehash table (key_size=38, matches ask_fe_build_key_v6); v6 KG scheme arm DEFERRED to Phase 3 (dispatch unresolved)",
     "F_142.py": "fman_pcd.c: F-142 — dma_alloc_coherent for ehash flow records (fixes F-141 HIT failure)",
     "F_143.py": "fman_pcd.c: F-143 — place en_exthash_node descriptor at DDR table base",
     "F_144.py": "fman_pcd.c: F-144 — fix EXT_HASH FE word1 byte order (hashShift<<24|contextSize<<16|hashMask)",
