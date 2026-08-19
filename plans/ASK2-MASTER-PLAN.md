@@ -1787,13 +1787,30 @@ record it does not own.
       disable-before-disengage); D2 zero the disabled v6 slot's mv/ccobase/ekfc
       (kgse_mv residue drift). The per-port `fmbm_rccb` swap across re-engage is
       pre-existing/v6-independent (gro alloc-order), out of scope.
-      **v6 stays default-OFF; do not enable in production.** NEXT (silicon
-      research, per-attempt go-ahead): faithful eth1 repro — FE-arm eth1, clone
-      its AC_CC scheme, apply mv+LCV split, drive ≤100 Mbit/s TRANSIT v4+v6, and
-      confirm the v4 AC_CC scheme is still selected (no NO_SCHEME) before any
-      further production attempt. Only then: `UPDATE_HOPLIMIT(0x29)`, open the
-      ask.ko v6 gate, production ≤100 Mbit/s v6 HIT. Tool `kg-lcv-probe.py`
-      remains the register oracle.
+      **ROOT CAUSE CLOSED 2026-08-19 — SLOT-BASED LCV DISCRIMINATION IS INVALID
+      FOR TRANSIT.** A live, reversible single-variable ladder on the already
+      FE-engaged eth3 scheme3 (AC_CC `0x80000006`) proved: (A) zero-all +
+      slot5=`0x40000000` with v4 mv=`0x40000000` reproduces NO_SCHEME with the
+      v6 scheme absent; (C) the same v4 mv with all LCV slots left
+      `0xffffffff` works; (D) setting slots5/6 but leaving others all-ones works
+      for v4 but cannot discriminate because both mv bits match. A complete
+      IPv4 single-slot sweep (only slot i set, others zero) found **ONLY HXS
+      slot 0 ACTIVE; slots 1–15, including assumed IPv4 slot 5, all NO_SCHEME.**
+      The equivalent IPv6 sweep also found **ONLY slot 0 ACTIVE; slots 1–7,
+      including assumed IPv6 slot 6, all NO_SCHEME.** Therefore FE-engaged 10G
+      TRANSIT frames of both families derive their selectable LCV from the same
+      slot 0; the earlier eth1 ping/RSS proof exercised a different parse path
+      and cannot justify production transit. F-212's slot5/6 split premise is
+      design-invalid even though the F-210 node + F-211 CCOBASE/scheme arm are
+      byte-perfect. Board was restored live after every attempt and rebooted to
+      pristine: gate OFF, ask-check 36/36, v4 transit both sides, monoledd
+      active. **v6 stays default-OFF; do not enable in production.** NEXT DESIGN
+      RESEARCH (no driver edit until qdrant/RM cross-check): find a per-frame
+      discriminator that actually differs for transit v4/v6 (classification
+      plan/CPP or parse-result field), or redesign table selection without two
+      LCV-selected schemes. Only after a new discriminator is silicon-proven:
+      `UPDATE_HOPLIMIT(0x29)`, open the ask.ko v6 gate, production ≤100 Mbit/s
+      v6 HIT. `kg-lcv-probe.py` remains the register oracle.
 
   Historical (now superseded by the proof above): the mechanism was resolved
   from vendor NCSW source + RM + decomp as a two-register-class SETUP —
