@@ -12,12 +12,17 @@ the parser's per-frame LCV. The open question is the EXACT bits: what LCV (and
 L3R/L4R/CPID) does the hard parser actually produce for a v4 frame vs a v6 frame
 on this microcode/port? That is the value kgse_mv must match.
 
-The parse result lives in the per-frame Internal Context at IC+0x20 (32 bytes):
+CORRECTION 2026-08-19 (vendor t_FmPrsResult + mainline fman_prs_result): the
+32-byte software-visible parse result does NOT contain LCV/QLCV. LCV is
+transient KeyGen state; bytes +0x0C..+0x0F are flags_frag_off/route_type/
+rhp_ip_valid, not LCV. This diagnostic therefore prints only fields genuinely
+present in the parse result:
   +0x04 l3r  (u16; bit15=IPv4, bit14=IPv6)
   +0x06 l4r  (u8;  bit6=UDP, bit5=TCP)
   +0x07 cpid (u8;  classification-plan id)
-  +0x0C lcv  (u32; line-up confirmation vector)  <-- the kgse_mv target
-BMI copies the IC into the RX buffer headroom; F-072 already captures the frame
+plus raw words 0/1. Scheme kgse_spc is the authoritative observable for whether
+an internal QLCV matched kgse_mv. BMI copies the IC into RX buffer headroom;
+F-072 already captures the frame
 vaddr into fman_pcd_ic_vaddr and the KG hash offset into fman_pcd_hash_off at the
 RXHASH anchor (the hash sits at prs_result_offset + 0x28, so the parse result is
 at hash_off - 0x28). hash_probe currently prints only the hash; this adds a
@@ -81,19 +86,18 @@ dump = (
     "\t\tu16 l3r = ((u16)pr[0x04] << 8) | pr[0x05];\n"
     "\t\tu8  l4r = pr[0x06];\n"
     "\t\tu8  cpid = pr[0x07];\n"
-    "\t\tu32 lcv = ((u32)pr[0x0c] << 24) | ((u32)pr[0x0d] << 16) |\n"
-    "\t\t\t  ((u32)pr[0x0e] << 8) | pr[0x0f];\n"
     "\t\tu32 pr0 = ((u32)pr[0x00] << 24) | ((u32)pr[0x01] << 16) |\n"
     "\t\t\t  ((u32)pr[0x02] << 8) | pr[0x03];\n"
     "\t\tu32 pr1 = ((u32)pr[0x04] << 24) | ((u32)pr[0x05] << 16) |\n"
     "\t\t\t  ((u32)pr[0x06] << 8) | pr[0x07];\n"
     "\t\tseq_printf(m,\n"
-    "\t\t\t   \"parse_result: l3r=0x%04x l4r=0x%02x cpid=0x%02x lcv=0x%08x\"\n"
+    "\t\t\t   \"parse_result: l3r=0x%04x l4r=0x%02x cpid=0x%02x\"\n"
     "\t\t\t   \" pr[0..3]=0x%08x pr[4..7]=0x%08x\\n\",\n"
-    "\t\t\t   l3r, l4r, cpid, lcv, pr0, pr1);\n"
+    "\t\t\t   l3r, l4r, cpid, pr0, pr1);\n"
     "\t\tseq_printf(m,\n"
-    "\t\t\t   \"  hint: l3r bit15=IPv4 bit14=IPv6; l4r bit6=UDP bit5=TCP;\"\n"
-    "\t\t\t   \" lcv is the kgse_mv target\\n\");\n"
+    "\t\t\t   \"  hint: l3r bit15=IPv4 bit14=IPv6; l4r bit6=UDP bit5=TCP.\"\n"
+    "\t\t\t   \" NOTE: LCV/QLCV is NOT in the parse result (internal KeyGen\"\n"
+    "\t\t\t   \" state); use kgse_spc to see if a scheme was selected.\\n\");\n"
     "\t}\n"
 )
 
