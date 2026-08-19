@@ -2248,15 +2248,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-169 fe_kg_ekfc live KeyGen scheme EKFC reconfig (debugfs)"
 fi
 
-# F-170 (2026-08-06, Task #26 follow-up): the annotation-hash-match technique
-# just found F-163's PORT_ID byte is wrong for eth4/port 0x11 (silicon
-# extracts 0x00, not the raw hw_port_id). Characterizing whether this is
-# port-specific or universal needs the same test on eth3/port 0x10, but
-# F-072's hash capture hook is hardcoded to eth4 only. Widens it to eth3+eth4
-# and records which interface produced the capture. Purely additive.
-if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ] && [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_170.py" 2>&1
-    echo "### dpaa_eth.c + fman_pcd.c: F-170 hash_probe widened to eth3+eth4"
+# F-216 (2026-08-19, image 2228 panic): dual-port v6 arm produced a separate
+# good-status default-FQ FD with addr==0; rx_default_dqrr phys_to_virt(0) +
+# hash_offset 0x108 panicked at ffffffff80000108. Reject/log zero-address FDs
+# before DMA/headroom access and strip the obsolete F-072/F-170 be64 frame-data
+# diagnostic (F-170 deleted). MUST run after F-072 so it removes its capture.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_216.py" 2>&1
+    echo "### dpaa_eth.c: F-216 zero-FD guard + F-072/F-170 RXHASH diagnostic removal"
 fi
 
 # F-171 (2026-08-06, T-M3-R attempt 5): every off!=0 arm this session has
