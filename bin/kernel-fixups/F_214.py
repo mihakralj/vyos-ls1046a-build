@@ -18,18 +18,26 @@ indirect CP RAM. This fixup ports that single missing write.
 
 WHAT IT DOES
 ------------
-Adds keygen_cls_plan0_passall(keygen, hw_port_id): writes 0xffffffff to all 8
-CP-entry words in the KG indirect window (fmkg_indirect[0..7]), issues the
-cls-plan-entry Action Register (GO|WRITE|SEL_CLS_PLAN_ENTRY | grp0<<16 |
-0xff<<8(entries) | hw_port_id), waits, then reads the entries back and verifies
-all 0xffffffff (S6 R10.2). CPP=0 (set by keygen_init) already selects group 0
-for the port, so pass-all group 0 => QLCV = LCV. Exported for fman_pcd_kg.c.
+Adds keygen_cls_plan0_passall(keygen, hw_port_id): on the FIRST v6-enabled port
+only, writes 0xffffffff to all 8 CP-entry words in the KG indirect window
+(fmkg_indirect[0..7]), issues the cls-plan-entry Action Register
+(GO|WRITE|SEL_CLS_PLAN_ENTRY | grp0<<16 | 0xff<<8(entries) | hw_port_id), waits,
+then reads the entries back and verifies all 0xffffffff (S6 R10.2). It sets
+keygen->cls_plan0_passall=true only after successful readback. Every later port
+engage returns immediately WITHOUT touching the AR/window. CPP=0 (set by
+keygen_init) already selects global group 0 for every port, so one write is
+sufficient and pass-all group 0 => QLCV = LCV. Exported for fman_pcd_kg.c.
+
+This one-time rule is correctness-critical: image 2040 proved single-port eth4
+three-scheme selection works (v4/v6/catch-all spc all move, NO_SCHEME=0), but
+engaging port 0x11 after live port 0x10 rewrote the GLOBAL group0 and caused
+FMFP_EXTC SYNC timeout (INV0 stuck 0x80000000), wedging both ports. Rewriting a
+shared CP group while the first pipeline is active is not harmless; skip all AR
+access after the verified first initialization. F-211 calls under the shared
+PCD mutex, so the first initialization is serialized.
 
 Also wires the call into F-211's v6 arm block (before the F-212 LCV split) so it
-runs only when v6 is enabled — v4-only production is untouched (CP entry 0 stays
-at whatever it was, and mv=0 RSS/AC_CC schemes match regardless of QLCV). The
-call is idempotent and per-port; group 0 is global shared, so repeated writes
-are harmless.
+runs only when v6 is enabled — v4-only production is untouched.
 
 REGISTER FACTS (mainline fman_keygen.c + vendor fman_kg.c, cross-checked)
 - FM_KG_KGAR_SEL_CLS_PLAN_ENTRY = 0x01000000 (already #defined in fman_keygen.c)
@@ -66,6 +74,35 @@ changes = 0
 def fatal(msg):
     print(f"### F-214: FATAL: {msg}")
     sys.exit(1)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 0. fman_keygen_internal.h: add the one-time state flag to struct fman_keygen.
+# ─────────────────────────────────────────────────────────────────────────
+with open(ih) as f:
+    ihsrc = f.read()
+
+if "cls_plan0_passall" not in ihsrc:
+    struct_anchor = ("\tstruct keygen_scheme schemes[FM_KG_MAX_NUM_OF_SCHEMES];\n"
+                     "\tstruct fman_kg_regs __iomem *keygen_regs;\n")
+    if struct_anchor not in ihsrc:
+        fatal("struct fman_keygen body anchor not found in internal header")
+    struct_new = (
+        "\tstruct keygen_scheme schemes[FM_KG_MAX_NUM_OF_SCHEMES];\n"
+        "\tstruct fman_kg_regs __iomem *keygen_regs;\n"
+        "\t/* F-214: set once the global classification-plan group 0 has been\n"
+        "\t * written pass-all (0xffffffff). Rewriting the shared CP group while\n"
+        "\t * another port is already live times out FMFP_EXTC SYNC and wedges\n"
+        "\t * both ports (image 2040), so this must happen exactly once. */\n"
+        "\tbool cls_plan0_passall;\n"
+    )
+    ihsrc = ihsrc.replace(struct_anchor, struct_new, 1)
+    with open(ih, "w") as f:
+        f.write(ihsrc)
+    changes += 1
+    print("### fman_keygen_internal.h: F-214 cls_plan0_passall flag added to struct")
+else:
+    print("### F-214: struct flag already present")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -106,6 +143,14 @@ else:
         "\n"
         "\tif (!keygen || !keygen->keygen_regs)\n"
         "\t\treturn -EINVAL;\n"
+        "\n"
+        "\t/* One-time only: rewriting the shared global CP group 0 while another\n"
+        "\t * port is already live times out FMFP_EXTC SYNC and wedges both ports\n"
+        "\t * (image 2040). Group 0 is global (every port binds CPP=0), so a\n"
+        "\t * single verified write suffices; later port engages skip all AR\n"
+        "\t * access. Serialized by the PCD mutex the caller (F-211) holds. */\n"
+        "\tif (keygen->cls_plan0_passall)\n"
+        "\t\treturn 0;\n"
         "\tregs = keygen->keygen_regs;\n"
         "\n"
         "\t/* 8 CP-entry mask words live at the start of the indirect window. */\n"
@@ -141,7 +186,8 @@ else:
         "\t\t       rv);\n"
         "\t\treturn -EIO;\n"
         "\t}\n"
-        "\tpr_info(\"fman_keygen: F-214 cls-plan group0 pass-all set for port 0x%02x\\n\",\n"
+        "\tkeygen->cls_plan0_passall = true;\n"
+        "\tpr_info(\"fman_keygen: F-214 cls-plan group0 pass-all set once (via port 0x%02x)\\n\",\n"
         "\t\thw_port_id);\n"
         "\treturn 0;\n"
         "}\n"
