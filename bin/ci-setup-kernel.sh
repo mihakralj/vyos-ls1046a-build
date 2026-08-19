@@ -2230,6 +2230,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_168.py" 2>&1
     echo "### fman_port.c: F-168 FMFP_EXTC SYNC assertion in fman_port_set_cc_base() (arm path)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_215.py" 2>&1
+    echo "### fman.c/h + fman_port.c: F-215 gate global INV0 SYNC to first engaged port only"
 fi
 
 # F-169 (2026-08-06, Task #26 / T-M3-R attempt 2 follow-up): T-M3-R attempt 1
