@@ -1,5 +1,5 @@
 """F-212 (T-M6-1 IPv6 productization, step 4): call the parser LCV split at
-engage and restore it at disengage. GATED on fman_pcd.v6_enable (F-210); no-op
+engage and restore it at disengage. GATED on fsl_dpaa_fman.v6_enable (F-210); no-op
 when OFF, so v4 byte-identical.
 
 WHAT / WHY

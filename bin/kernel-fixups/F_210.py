@@ -1,5 +1,5 @@
 """F-210 (T-M6-1 IPv6 productization, step 2): dual-node engage writer + the
-default-OFF `fman_pcd.v6_enable` module-param gate that all v6 productization
+default-OFF `fsl_dpaa_fman.v6_enable` module-param gate that all v6 productization
 code (F-210/F-211/F-212) keys off.
 
 WHAT THIS DOES
@@ -28,7 +28,10 @@ it. With the default (false):
   * F-211 never arms scheme #2, leaves match_vector=0, keeps F-178 KG-direct.
   * F-212 never calls set_lcv_split.
 => the v4 datapath is byte-identical and the whole v6 mechanism is dormant until
-an operator sets `fman_pcd.v6_enable=1` on a validated board (M6 board gate).
+an operator enables it on a validated board (M6 board gate). NOTE: fman_pcd.c
+compiles into the built-in `fsl_dpaa_fman` module, so the runtime knob is
+`/sys/module/fsl_dpaa_fman/parameters/v6_enable` (0644, runtime-writable) and
+the boot-cmdline form is `fsl_dpaa_fman.v6_enable=1` — NOT `fman_pcd.v6_enable`.
 The OOT ask.ko v6 preflight still returns -EOPNOTSUPP (SW fallback) independent
 of this flag until its gate is separately flipped, so a stray module param alone
 cannot publish a v6 flow.
@@ -88,15 +91,21 @@ else:
         " * productization path (dual ehash node at gro+16, the v6 KeyGen scheme\n"
         " * arm with CCOBASE=1/kgse_mv, and the parser LCV split). Everything v6\n"
         " * is gated on this so the v4 datapath stays byte-identical until an\n"
-        " * operator opts in on a board-validated image (fman_pcd.v6_enable=1).\n"
+        " * operator opts in (fsl_dpaa_fman.v6_enable=1 / the 0644 sysfs knob).\n"
         " * The OOT ask.ko v6 preflight is separately gated, so this flag alone\n"
         " * cannot publish a v6 flow.\n"
         " */\n"
         "static bool fman_pcd_v6_enable;\n"
-        "module_param_named(v6_enable, fman_pcd_v6_enable, bool, 0444);\n"
+        "/* 0644: runtime-writable so the gated v6 HIT test can flip it via\n"
+        " * /sys/module/fsl_dpaa_fman/parameters/v6_enable (fman_pcd.c compiles\n"
+        " * into the built-in fsl_dpaa_fman module — the cmdline form is\n"
+        " * fsl_dpaa_fman.v6_enable=1, NOT fman_pcd.v6_enable). Read at each\n"
+        " * engage/disengage, so a change takes effect on the next re-arm.\n"
+        " */\n"
+        "module_param_named(v6_enable, fman_pcd_v6_enable, bool, 0644);\n"
         "MODULE_PARM_DESC(v6_enable,\n"
         "\t\t \"Enable the dormant IPv6 FE offload path (default 0; \"\n"
-        "\t\t \"board-validated opt-in only)\");\n"
+        "\t\t \"board-validated opt-in only; toggle then re-engage ASK)\");\n"
         "\n"
         "bool fman_pcd_v6_enabled(void)\n"
         "{\n"
