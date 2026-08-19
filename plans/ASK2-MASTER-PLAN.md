@@ -1722,10 +1722,32 @@ record it does not own.
     classification-plan mask needed); every non-5/6 HXS `pmda[].lcv` MUST be
     zeroed (they default `0xffffffff` and would OR all bits into every frame's
     LCV). Tool: `bin/kg-lcv-probe.py` (exp-snapshot/apply/restore, JSON +
-    readback). The remaining work is to PRODUCTIZE this into the driver (split
-    `pmda[5/6].lcv` per ASK port, set the v4/v6 scheme `kgse_mv`, bind the v6
-    scheme) so v6 flows reach the F-140 table-1 ehash via the Phase-2a
-    `table_idx` selector.
+    readback).   The remaining work to PRODUCTIZE splits into a MECHANICAL half and a
+    SILICON-RESEARCH half, and the S0 gate (2026-08-19) shows they are NOT the
+    same risk class:
+    * **S1 — MECHANICAL, DONE + CI + deployed (F-205, commit 8b06767a).**
+      `fman_port_set/clear_lcv_split()` port primitive (dormant, no caller) +
+      `pcd-snapshot` parser-LCV reversibility surface. Byte-neutral, CI-safe.
+    * **S2..S6 — SILICON RESEARCH, NOT a code campaign.** Phase 3 proved the
+      *scheme-selection* half (parser LCV → `kgse_mv` → distinct scheme). It did
+      NOT prove that a v6 scheme's AC_CC dispatch into a SECOND ehash table's
+      `en_exthash_node` actually HITs. That dispatch path is the single hardest,
+      most regression-prone part of the system: the IPv4 ehash HIT took the
+      F-053→F-190 investigation weeks (comparator-never-matches, wrong-node-at-
+      RCCB, E23 root cause). The current production v4 path is now proven on
+      eth3+eth4 at ~6.84 Gbit/s, but only the table-0 node species/binding is
+      silicon-proven; a table-1 node is a new dispatch path. Generalizing
+      F-185/F-190 node binding from
+      `list_first_entry(fe_ehash_tables)` (table 0) to a per-scheme
+      `fman_pcd_ehash_table_by_index()` selector is a NEW silicon dispatch
+      experiment, not a byte-neutral refactor. It MUST be run like the IPv4 HIT
+      hunt: on the sacrificial eth1 (now cabled), arm a v6 second-table node BY
+      HAND via the `fe_*` debugfs verbs + `kg-lcv-probe.py`, and prove a v6
+      table-1 `pkt_count` HIT on silicon — cold-boot, one variable, per-attempt
+      go-ahead — BEFORE writing any S2/S3/S4 driver fixup. Writing those fixups
+      first would produce code that compiles but cannot be validated, on the
+      exact path the project's history proves must never be coded on a
+      hypothesis. Test traffic capped ≤100 Mbit/s (v6 SW-forward wedge).
 
   Historical (now superseded by the proof above): the mechanism was resolved
   from vendor NCSW source + RM + decomp as a two-register-class SETUP —
