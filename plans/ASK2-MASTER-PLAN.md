@@ -1707,10 +1707,28 @@ record it does not own.
     `UPDATE_HOPLIMIT(0x29)` record packing (re-verify offsets for the 38-byte
     key, not the stale 37-byte F-198 arithmetic) — all only testable once v6
     dispatch exists.
-  - **Phase 3 dispatch (silicon experiment — mechanism RESOLVED 2026-08-19,
-    execution pending).** Research (vendor NCSW source + RM + decomp) settled
-    how v4/v6 scheme selection works; it is a two-register-class SETUP, not a
-    documented bit to read:
+  - **Phase 3 dispatch — PROVEN ON SILICON 2026-08-19.** The parser-LCV →
+    `kgse_mv` SI-walk cleanly discriminates IPv4 vs IPv6 into distinct KeyGen
+    schemes. Cold-boot experiment on sacrificial eth1 (RX port 0x0d, wired to
+    the switch, isolated test subnet `10.99.3.185`/`fd99:3::185`): cloned the
+    port's scheme 2 → free scheme 5, set scheme2 `kgse_mv=0x40000000` (v4) /
+    scheme5 `kgse_mv=0x80000000` (v6), zeroed all 16 `pmda[].lcv` then set
+    slot 5 (IPv4) = `0x40000000` and slot 6 (IPv6) = `0x80000000`, and bound
+    scheme 5 into eth1's SP. **Result: 20 IPv4 pings → scheme2 `kgse_spc` +20,
+    scheme5 +0; 20 IPv6 pings → scheme5 +20 exactly, scheme2 +0.** Restored
+    byte-exact; eth3/eth4 production schemes untouched and still engaged.
+    Confirmed en route: eth3/eth4 `FMBM_RFPNE=0x00480200` (generic walk already
+    active — no `NIA_KG_DIRECT` to disable); `CPP=0` so `QLCV = LCV` (no
+    classification-plan mask needed); every non-5/6 HXS `pmda[].lcv` MUST be
+    zeroed (they default `0xffffffff` and would OR all bits into every frame's
+    LCV). Tool: `bin/kg-lcv-probe.py` (exp-snapshot/apply/restore, JSON +
+    readback). The remaining work is to PRODUCTIZE this into the driver (split
+    `pmda[5/6].lcv` per ASK port, set the v4/v6 scheme `kgse_mv`, bind the v6
+    scheme) so v6 flows reach the F-140 table-1 ehash via the Phase-2a
+    `table_idx` selector.
+
+  Historical (now superseded by the proof above): the mechanism was resolved
+  from vendor NCSW source + RM + decomp as a two-register-class SETUP —
     * **Parser:** IPv4 parses to HXS header slot 5, IPv6 to slot 6 (silicon-
       fixed, vendor `GetPrsHdrNum`). Each slot ORs its `pmda[slot].lcv` mask
       into the per-frame LCV. **Blocker:** mainline programs every
