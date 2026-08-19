@@ -2845,7 +2845,14 @@ KEY_BLOCK = '''
 # it survives the post-bindeb-pkg `make clean`. Override CONFIG_MODULE_SIG_KEY
 # to point at it; vmlinux will embed this key's cert in the trusted keyring,
 # enabling later signing of OOT ask.ko with the same key.
-ASK_KEY_DIR="${CWD}/ask-persistent-keys"
+# F-217 fix: anchor the persistent key to ONE absolute, symlink-free,
+# non-tmpfs workspace path. ${CWD} inside build-kernel.sh is the kernel source
+# root, which is a symlink into ~/kernel-git-cache/linux (tmpfs) — a DIFFERENT
+# directory than the ./ask-persistent-keys the OOT signing snapshot reads from
+# ci-build-packages.sh's package dir. That divergence signed vmlinux and ask.ko
+# with two different keys (same CN, different SKID) -> "Key was rejected by
+# service" at insmod (image 2323). One absolute GITHUB_WORKSPACE path fixes it.
+ASK_KEY_DIR="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE must be set for ASK persistent key}/ask-persistent-keys"
 mkdir -p "$ASK_KEY_DIR"
 ASK_KEY_PEM="$ASK_KEY_DIR/signing_key.pem"
 ASK_KEY_X509="$ASK_KEY_DIR/signing_key.x509"
