@@ -60,15 +60,21 @@ index 7eaf81f84..a19ecb211 100644
      def set_lro(self, state):
          """
          Enable Large Receive offload. State can be either True or False.
-@@ -662,6 +689,9 @@ def update(self, config):
+@@ -662,6 +689,14 @@ def update(self, config):
          # LRO (large receive offload)
          self.set_lro(dict_search('offload.lro', config) is not None)
  
 +        # ASK offload - NXP LS1046A FMan FE-VM hardware forwarding
-+        self.set_ask_offload(dict_search('offload.ask', config) is not None)
++        ask_on = dict_search('offload.ask', config) is not None
++        self.set_ask_offload(ask_on)
 +
          # RPS - Receive Packet Steering
-         self.set_rps(dict_search('offload.rps', config) is not None)
+-        self.set_rps(dict_search('offload.rps', config) is not None)
++        # ASK's IPv6/NAT/VLAN misses take the kernel RX softirq path; on this
++        # 4-core board an unspread SW flow pins one ksoftirqd and starves
++        # management. Force RPS on whenever ASK is engaged (spread across
++        # CPUs 1-3), independent of the explicit offload.rps knob.
++        self.set_rps(ask_on or dict_search('offload.rps', config) is not None)
  
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
 index 7d42e3f77..26eb1771d 100755
