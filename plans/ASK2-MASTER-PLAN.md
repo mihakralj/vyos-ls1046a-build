@@ -1763,11 +1763,37 @@ record it does not own.
       on engage and reverses the full v6 scheme/SP/mv/LCV state on disengage so
       `pcd-snapshot` can remain byte-exact. With the default gate OFF, no second
       node/scheme/LCV write executes and the proven v4 path remains
-      byte-identical. `bin/test-fixups.sh` and a full anchor replay against the
-      post-fixup kernel tree pass; CI compile + production-board gated regression
-      remain open. After that: add `UPDATE_HOPLIMIT(0x29)`, open the ask.ko v6
-      preflight/insert gate, and run the ≤100 Mbit/s production v6 HIT test.
-      Tool `kg-lcv-probe.py exp-ccobase` remains the proven register oracle.
+      byte-identical.
+      **BOARD TEST 2026-08-19 (image 1730, `.185`) — v6 arm fires perfectly but
+      v4 CO-EXISTENCE REGRESSES; NOT a HIT success.** Enabling
+      `fsl_dpaa_fman.v6_enable=1` + re-engaging eth3/eth4 fired F-210/F-211/F-212
+      exactly as designed (dmesg + byte-perfect register readback): v6 node at
+      `gro+16` (key_size=38), LCV split (slot5 `0x40000000`, slot6 `0x80000000`),
+      v6 scheme 5/6 armed `0x81000006 mv=0x80000000`, v4 schemes 3/4 narrowed to
+      `mv=0x40000000`; v6 scheme `kgse_spc` even incremented (v6 frames were
+      classified by the v6 scheme). BUT once v4 `mv` was narrowed, v4 frames
+      stopped matching on the 10G ports → `Err FD status 0x00004000`
+      (`FM_FD_ERR_NO_SCHEME`) storm → eth3+eth4 went deaf; cold boot recovered
+      cleanly. **Root cause narrowed:** the 2026-08-19 eth1 "proof" validated
+      `parser-LCV → kgse_mv` selection only on ordinary RSS schemes with pings —
+      it never made the v4 scheme `next_engine=3`/AC_CC nor drove transit, so it
+      proved SELECTION but not selection→AC_CC on an FE-engaged scheme. The
+      production failure is that mv-based selection into an FE-engaged AC_CC v4
+      scheme on the 10G ports yields NO_SCHEME (either the FE-engaged port's
+      per-frame IPv4 LCV does not carry `0x40000000`, or the mv-walk + AC_CC
+      dispatch interact differently than the RSS-scheme selection the eth1 test
+      used). **Two teardown defects fixed (F-212 D1/D2, committed `e8543a51`):**
+      D1 self-detecting teardown (was gated on the live gate value → strand on
+      disable-before-disengage); D2 zero the disabled v6 slot's mv/ccobase/ekfc
+      (kgse_mv residue drift). The per-port `fmbm_rccb` swap across re-engage is
+      pre-existing/v6-independent (gro alloc-order), out of scope.
+      **v6 stays default-OFF; do not enable in production.** NEXT (silicon
+      research, per-attempt go-ahead): faithful eth1 repro — FE-arm eth1, clone
+      its AC_CC scheme, apply mv+LCV split, drive ≤100 Mbit/s TRANSIT v4+v6, and
+      confirm the v4 AC_CC scheme is still selected (no NO_SCHEME) before any
+      further production attempt. Only then: `UPDATE_HOPLIMIT(0x29)`, open the
+      ask.ko v6 gate, production ≤100 Mbit/s v6 HIT. Tool `kg-lcv-probe.py`
+      remains the register oracle.
 
   Historical (now superseded by the proof above): the mechanism was resolved
   from vendor NCSW source + RM + decomp as a two-register-class SETUP —
