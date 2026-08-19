@@ -176,9 +176,12 @@
     "F_203.py": "dpaa_eth.c: F-203 (2026-08-17, contiguous jumbo RX) -- raises the DPAA RX buffer pool from order-0/4KiB to order-1/8KiB via DPAA_BP_ORDER=1 and DPAA_BP_RAW_SIZE=(4096<<order); changes the one RX pool dev_alloc_pages() and all eight RX-buffer free_pages() sites to the matching order while deliberately leaving TX-SGT and XDP-copy scratch pages order-0. Keeps large frames contiguous and ASK-FE-offloadable (unlike RX SG), raises usable one-buffer MTU to ~7.5K; VyOS clamps conservatively to 7000. skb_free_frag compound-head recycle remains valid. S0 qdrant-gated against the 4K-wedge record, RX SG consumer semantics, A050385 runtime-inactive on LS1046A, and BMan sizing.",
     "F_204.py": "fman_pcd.c/h: F-204 (T-M6-1 Phase 2a) explicit ehash table_idx selector (v4=0, v6=1 dormant); separate field from hw_port_id so F-195 own-port miss-FQID stays intact; v4 byte-identical",
     "F_205.py": "fman_port.c/h: F-205 (T-M6-1 Phase 3 S1) dormant parser LCV-split primitive; zero all HXS LCVs, set IPv4 slot5 / IPv6 slot6 distinct bits, readback, inverse restores 0xffffffff; no caller yet",
-    "F_209.py": "fman_keygen.c: F-209 (T-M6-1 step 1) encode cc_base_offset<<CCOBASE_SHIFT in the AC_CC (next_engine==3) branch so a scheme selects its own ehash node at RCCB+CCOBASE*16; v4 cc_base_offset=0 byte-identical (0x80000006), v6 uses 1 (0x81000006); silicon-proven 2026-08-19"
+    "F_209.py": "fman_keygen.c: F-209 (T-M6-1 step 1) encode cc_base_offset<<CCOBASE_SHIFT in the AC_CC (next_engine==3) branch so a scheme selects its own ehash node at RCCB+CCOBASE*16; v4 cc_base_offset=0 byte-identical (0x80000006), v6 uses 1 (0x81000006); silicon-proven 2026-08-19",
+    "F_210.py": "fman_pcd.c/internal.h: F-210 (T-M6-1 step 2) default-OFF fman_pcd.v6_enable gate + second VARIANT-B en_exthash_node write at gro+16 for table1 (CCOBASE=1); reproduces silicon-proven exp-ccobase; v4 OFF path byte-identical",
+    "F_211.py": "fman_pcd.c/fman_pcd_kg.c/internal.h: F-211 (T-M6-1 step 3) gated v6 scheme arm: v4 kgse_mv=0x40000000, clone free v6 slot kgse_mv=0x80000000/CCOBASE=1/EKFC=0x801C0006, bind into port SP, commit table1 node own-port miss FQID; reproduces 2026-08-19 exp-apply",
+    "F_212.py": "fman_pcd_kg.c: F-212 (T-M6-1 step 4) gated engage-time parser LCV split (slot5 v4=0x40000000, slot6 v6=0x80000000) plus disengage restore to all-0xffffffff; calls F-205 readback-verified primitive; v4 OFF path no-op"
   },
-  "count": 107,
+  "count": 110,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {
     "F_174.py": "On disk, listed in active, but intentionally NOT invoked from ci-setup-kernel.sh (superseded by F-175; kept for the record). This is the only allowed disk-without-invocation entry."

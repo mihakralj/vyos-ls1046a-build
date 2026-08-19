@@ -1677,9 +1677,9 @@ record it does not own.
   software before publication. No kernel implementation change is accepted
   until the port-discriminator/table-ownership design is reviewed against
   Qdrant and `specs/fman-keygen-flow-key-spec.md`.
-- [~] **T-M6-1 — IPv6 dual-scheme EXT_HASH.** PHASE 0/1 CODE-COMPLETE
-  2026-08-19; dispatch remains intentionally disabled pending the Phase-3
-  silicon decision.
+- [~] **T-M6-1 — IPv6 dual-scheme EXT_HASH.** PHASES 0–3 PROVEN;
+  PRODUCTIZATION STEPS 1–4 IMPLEMENTED DEFAULT-OFF 2026-08-19. Dispatch remains
+  intentionally disabled pending CI and the gated production-board regression.
   - **Phase 0 prerequisite PASSED:** after a true cold boot, production IPv4 HIT
     was re-confirmed end-to-end on `.185`: two `dump-flows` entries with
     `offloaded=1`/HW flow IDs, conntrack `[HW_OFFLOAD]`, HELGA→DUT→heidi moved
@@ -1752,12 +1752,21 @@ record it does not own.
       matching v6 TCP SYNs → **table1 pkt_count 0→3 / pkt_bytes 282**, table0
       unchanged. Thus `selected_AD = RCCB + CCOBASE*16` is silicon-confirmed for
       table1 and IPv6 HW dispatch; F-207 is now justified code, not a
-      hypothesis. Remaining productization is concrete: add `cc_base_offset
-      <<24` to the AC_CC branch in `keygen_scheme_setup()` (currently missing),
-      write both table nodes (`gro+0` v4, `gro+16` v6), clone/bind the v6 scheme
-      with CCOBASE=1, then add UPDATE_HOPLIMIT and open the v6 gate. Tool
-      `kg-lcv-probe.py exp-ccobase` captures the proven register recipe.
-      Test traffic remains capped ≤100 Mbit/s until production v6 HIT lands.
+      hypothesis. **Productization steps 1–4 are now implemented, default-OFF
+      (CI pending):** F-209 carries `cc_base_offset<<24` in the AC_CC branch;
+      F-210 adds the read-only `fman_pcd.v6_enable` master gate (default 0) and
+      writes table1's node at `gro+16` only when enabled; F-211 narrows the v4
+      scheme to `kgse_mv=0x40000000`, clones/binds a free v6 scheme with
+      `kgse_mv=0x80000000`, EKFC `0x801c0006`, AC_CC CCOBASE=1, and commits the
+      table1 node's own-port miss FQID; F-212 applies the F-205 parser-LCV split
+      on engage and reverses the full v6 scheme/SP/mv/LCV state on disengage so
+      `pcd-snapshot` can remain byte-exact. With the default gate OFF, no second
+      node/scheme/LCV write executes and the proven v4 path remains
+      byte-identical. `bin/test-fixups.sh` and a full anchor replay against the
+      post-fixup kernel tree pass; CI compile + production-board gated regression
+      remain open. After that: add `UPDATE_HOPLIMIT(0x29)`, open the ask.ko v6
+      preflight/insert gate, and run the ≤100 Mbit/s production v6 HIT test.
+      Tool `kg-lcv-probe.py exp-ccobase` remains the proven register oracle.
 
   Historical (now superseded by the proof above): the mechanism was resolved
   from vendor NCSW source + RM + decomp as a two-register-class SETUP —
