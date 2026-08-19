@@ -9,4 +9,10 @@ ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[0-4]", RUN+="/usr/sbin/ethtool -K 
 # (IPv6 today, any non-HW-offloaded flow) spreads across CPUs 1-3 instead of
 # pinning one core's ksoftirqd and starving management. eth0-eth2 are left
 # unsteered (mgmt / low-rate). See board/scripts/dpaa-rps for the rationale.
+#
+# Match BOTH add and move: the DPAA netdev is created as e5/e6 and RENAMED to
+# eth3/eth4 by 65-vyos-net.rules, which emits a 'move' uevent. The original
+# 'add' carries the pre-rename name (e5), so an add-only rule matching eth[34]
+# never fires at boot; the 'move' event carries the final eth3/eth4 name.
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[34]", RUN+="/usr/local/sbin/dpaa-rps %k"
+ACTION=="move", SUBSYSTEM=="net", KERNEL=="eth[34]", RUN+="/usr/local/sbin/dpaa-rps %k"
