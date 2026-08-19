@@ -178,7 +178,21 @@ modinfo "$OOT_DIR/ask.ko" || true
 
 # Sign every produced .ko (just `ask.ko` for now; future PRs add
 # ask_bridge.ko under the same Kbuild).
-echo "### Signing OOT modules with kernel's auto-generated signing key"
+#
+# F-217: assert the snapshot key is byte-identical to the ONE persistent key
+# the kernel embedded (both producer/consumer paths now use the absolute
+# ${GITHUB_WORKSPACE}/ask-persistent-keys path). Image 2323 had same CN but
+# different SKIDs and failed at insmod with "Key was rejected by service".
+PERSISTENT_X509="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE required}/ask-persistent-keys/signing_key.x509"
+[ -f "$PERSISTENT_X509" ] || { echo "FATAL: persistent ASK signing cert missing: $PERSISTENT_X509"; exit 1; }
+if ! cmp -s "$PERSISTENT_X509" "$KSRC/certs/signing_key.x509"; then
+    echo "FATAL: ASK signing cert mismatch: persistent=$PERSISTENT_X509 snapshot=$KSRC/certs/signing_key.x509"
+    exit 1
+fi
+ASK_SIGNER_SKID=$(openssl x509 -in "$PERSISTENT_X509" -inform DER -noout \
+    -ext subjectKeyIdentifier 2>/dev/null | tail -1 | tr -d ' ')
+echo "### F-217 signing-key SKID=${ASK_SIGNER_SKID:-unknown} (persistent == kernel snapshot)"
+echo "### Signing OOT modules with kernel's persistent signing key"
 for ko in "$OOT_DIR"/*.ko; do
     [ -f "$ko" ] || continue
     "$KSRC/scripts/sign-file" sha512 \
