@@ -2727,6 +2727,23 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c/h: F-204 explicit ehash table_idx selector (v4=0, v6=1)"
 fi
 
+# F-210/F-211/F-212 (T-M6-1 IPv6 productization steps 2-4, 2026-08-19):
+# default-OFF, byte-identical-for-v4 production plumbing for the silicon-proven
+# dual-family dispatch recipe. F-210 writes table1's vendor node at gro+16;
+# F-211 arms/binds the v6 scheme with mv=V6BIT + CCOBASE=1 and narrows v4's
+# mv to V4BIT; F-212 applies/restores the parser LCV split. All three are gated
+# by fman_pcd.v6_enable=0 (default); ask.ko v6 preflight remains separately
+# -EOPNOTSUPP until the board gate passes. MUST run after F-204 (table1 selector),
+# F-205 (LCV primitive), F-209 (AC_CC CCOBASE), F-185/F-186 (vendor node/miss).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_210.py" 2>&1
+    echo "### fman_pcd.c/h: F-210 v6 gate + dual-node engage writer (gro+16)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_211.py" 2>&1
+    echo "### fman_pcd.c/kg.c/h: F-211 gated v6 KeyGen scheme arm/bind"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_212.py" 2>&1
+    echo "### fman_pcd_kg.c: F-212 gated parser LCV split + restore"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
