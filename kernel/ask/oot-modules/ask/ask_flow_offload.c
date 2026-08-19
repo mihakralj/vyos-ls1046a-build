@@ -1557,12 +1557,26 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
  */
 static void ask_fe_flow_remove(const struct ask_flow_key *key)
 {
-        u8 k[ASK_FE_KEY_SIZE];
+        u8 k[ASK_FE_KEY_SIZE_V6];
+        u8 klen;
 
         if (!key)
                 return;
-        ask_fe_build_key(key, k);
-        fman_pcd_fe_flow_del(ask_hw_get_fman(), 0, k, sizeof(k));
+        /*
+         * T-M6-1 Phase 1: build the SAME key/length the matching insert used,
+         * so per-key fman_pcd_fe_flow_del() unlinks exactly this record. A v6
+         * flow inserted a 38-byte record; removing it with a 14-byte v4 key
+         * would never match and would leak the v6 record. Mirror the family
+         * split in ask_fe_flow_insert().
+         */
+        if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+                ask_fe_build_key_v6(key, k);
+                klen = ASK_FE_KEY_SIZE_V6;
+        } else {
+                ask_fe_build_key(key, k);
+                klen = ASK_FE_KEY_SIZE;
+        }
+        fman_pcd_fe_flow_del(ask_hw_get_fman(), 0, k, klen);
 }
 
 
