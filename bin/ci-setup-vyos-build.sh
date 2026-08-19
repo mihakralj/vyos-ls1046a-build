@@ -448,9 +448,6 @@ chroot "$CHROOT" systemctl enable ls1046a-cpufreq.service || true
 mkdir -p "$CHROOT/etc/udev/rules.d"
 cp board/scripts/10-emc2305-fan-pid.rules "$CHROOT/etc/udev/rules.d/10-emc2305-fan-pid.rules"
 cp board/scripts/99-dpaa1-offloads.rules "$CHROOT/etc/udev/rules.d/99-dpaa1-offloads.rules"
-mkdir -p "$CHROOT/usr/local/sbin"
-cp board/scripts/dpaa-rps "$CHROOT/usr/local/sbin/dpaa-rps"
-chmod +x "$CHROOT/usr/local/sbin/dpaa-rps"
 cp board/scripts/99-ls1046a-cpufreq.rules "$CHROOT/etc/udev/rules.d/99-ls1046a-cpufreq.rules"
 
 ### Board-level power-off GPIO hook (Mono Gateway DK).
@@ -699,11 +696,6 @@ cp board/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"
 chmod +x "$CHROOT/usr/local/bin/fman-fq-qdisc"
 cp board/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.service"
 cp board/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
-
-# dpaa-rps.service: robust boot-time RPS on eth3/eth4 (fallback to the udev
-# add|move rule, which can miss the pre-rename e5/e6 add event).
-cp board/systemd/dpaa-rps.service "$CHROOT/etc/systemd/system/dpaa-rps.service"
-cp board/systemd/dpaa-rps.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/dpaa-rps.conf"
 
 ### SFP TX_DISABLE handling: ASK2 will reuse mainline phylink's SFP
 ### state machine (sfp_state_machine() drives TX_DISABLE via gpiod) — no
