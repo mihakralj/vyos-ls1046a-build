@@ -1,0 +1,30 @@
+#!/bin/sh
+# dpaa-rps — enable Receive Packet Steering on ASK/VPP transit DPAA ports.
+#
+# LS1046A has four A72 cores and four QMan portals (one IRQ per CPU). Without
+# RPS, a software-forwarded flow stays on one portal/core; sustained IPv6 SW
+# forwarding was observed pinning ksoftirqd at 100%, starving eth0 management
+# in both directions while the transit datapath kept forwarding (2026-08-19).
+#
+# Mask 0xe = CPUs 1,2,3. CPU0 remains available for SSH/routing housekeeping,
+# matching VyOS EthernetIf.set_rps() semantics. ASK IPv4 HW flows bypass this
+# software RX path, so their proven datapath bytes/performance are unchanged.
+#
+# Called from udev 99-dpaa1-offloads.rules on netdev add. Idempotent. Production
+# scope is eth3/eth4 only; management eth0 is deliberately NOT steered.
+
+set -eu
+
+DEV=${1:-}
+case "$DEV" in
+    eth3|eth4) ;;
+    *) exit 0 ;;
+esac
+
+BASE="/sys/class/net/$DEV/queues"
+[ -d "$BASE" ] || exit 0
+
+for q in "$BASE"/rx-*/rps_cpus; do
+    [ -e "$q" ] || continue
+    printf '%s\n' e > "$q"
+done

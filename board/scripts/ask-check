@@ -338,6 +338,25 @@ for dev in "${ASK_PORTS[@]}"; do
         fi
     fi
 
+    # Software-fallback safety: ASK's current IPv6/NAT/VLAN misses run through
+    # the kernel RX softirq path. On this 4-core DPAA1 board, RPS=0 let one
+    # sustained v6 flow pin ksoftirqd at 100% and starve eth0 management in both
+    # directions while transit kept forwarding (2026-08-19). Production images
+    # must spread eth3/eth4 RX across CPUs 1-3 (mask 0xe), sparing CPU0.
+    rps_bad=0
+    rps_mask=''
+    for q in /sys/class/net/$dev/queues/rx-*/rps_cpus; do
+        [ -e "$q" ] || continue
+        mask=$(cat "$q" 2>/dev/null || echo 0)
+        [ -z "$rps_mask" ] && rps_mask="$mask"
+        case "$mask" in 0|00000000|'') rps_bad=1 ;; esac
+    done
+    if [ "$rps_bad" -eq 0 ] && [ -n "$rps_mask" ]; then
+        record_ok "$dev RPS enabled on every RX queue (mask=$rps_mask)"
+    else
+        record_fail "$dev RPS disabled on one or more RX queues — software fallback can starve management"
+    fi
+
     fq_file=$(find /sys/devices -path "*/net/$dev/fqids" -print -quit 2>/dev/null)
     if [ -n "$fq_file" ] && grep -q '^Rx PCD:' "$fq_file" \
        && grep -q '^Tx:' "$fq_file"; then

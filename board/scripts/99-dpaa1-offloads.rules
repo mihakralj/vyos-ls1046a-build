@@ -4,3 +4,9 @@
 # restoring full multi-stream GSO throughput across all ports.
 
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[0-4]", RUN+="/usr/sbin/ethtool -K %k sg on gso on gro on"
+
+# Enable RPS on the 10G transit ports (eth3/eth4) so software-forwarded RX
+# (IPv6 today, any non-HW-offloaded flow) spreads across CPUs 1-3 instead of
+# pinning one core's ksoftirqd and starving management. eth0-eth2 are left
+# unsteered (mgmt / low-rate). See board/scripts/dpaa-rps for the rationale.
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[34]", RUN+="/usr/local/sbin/dpaa-rps %k"
