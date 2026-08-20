@@ -65,11 +65,34 @@ if "fe_port_v6" not in src:
     changes += 1
     print("### fman_pcd.c: F-219 fe_port_v6 bitmap added")
 
-# 2. Setter + internal predicate after F-210's global accessor export.
+# 2. Setter + internal predicate. MUST be placed AFTER the struct fman_pcd
+#    definition (it dereferences pcd->fe_port_v6); the F-210 accessor sits
+#    ABOVE the struct. F-219 v1 accidentally inserted here (before the struct)
+#    and failed the full kernel compile with "invalid use of undefined type
+#    struct fman_pcd". The persistent runner may already carry that broken
+#    placement; detect+strip it before re-injecting at the correct location.
+setter_pos = src.find("void fman_pcd_fe_set_port_v6")
+struct_pos = src.find("struct fman_pcd {")
+if setter_pos >= 0 and struct_pos >= 0 and setter_pos < struct_pos:
+    old_start = src.rfind("\n/* F-219: set/clear one RX port", 0, setter_pos)
+    pred_pos = src.find("bool fman_pcd_port_wants_v6", setter_pos)
+    old_end = src.find("}\n", pred_pos)
+    if old_start < 0 or pred_pos < 0 or old_end < 0:
+        fatal("old pre-struct F-219 block found but boundaries are ambiguous")
+    old_end += 2
+    src = src[:old_start] + src[old_end:]
+    changes += 1
+    print("### fman_pcd.c: F-219 removed stale pre-struct setter/predicate block")
+
 if "fman_pcd_fe_set_port_v6" not in src:
-    anchor = "EXPORT_SYMBOL_GPL(fman_pcd_v6_enabled);\n"
+    anchor = (
+        "};\n"
+        "\n"
+        "/*\n"
+        " * Globally-rooted debugfs parent.  Created on the first fman_pcd_init()\n"
+    )
     if anchor not in src:
-        fatal("F-210 v6 accessor export anchor not found")
+        fatal("struct fman_pcd closing-brace anchor not found (layout drift)")
     funcs = (
         anchor +
         "\n"
