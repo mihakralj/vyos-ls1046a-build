@@ -2741,6 +2741,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_210.py" 2>&1
     echo "### fman_pcd.c/h: F-210 v6 gate + dual-node engage writer (gro+16)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_219.py" 2>&1
+    echo "### fman_pcd.c/h: F-219 per-port v6 intent bitmap + setter/predicate"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_211.py" 2>&1
     echo "### fman_pcd.c/kg.c/h: F-211 gated v6 KeyGen scheme arm/bind"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_212.py" 2>&1
