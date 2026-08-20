@@ -2726,6 +2726,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_204.py" 2>&1
     echo "### fman_pcd.c/h: F-204 explicit ehash table_idx selector (v4=0, v6=1)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_218.py" 2>&1
+    echo "### fman_pcd.c: F-218 v6 flow_del selects table1 by 38-byte key length"
 fi
 
 # F-210/F-211/F-212 (T-M6-1 IPv6 productization steps 2-4, 2026-08-19):
