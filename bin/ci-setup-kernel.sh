@@ -2798,7 +2798,7 @@ PYEOF
 #
 # v2 approach (this block):
 #   PRE-bindeb-pkg (run while .config still exists in-tree):
-#     - Pre-generate persistent RSA signing key at ${CWD}/ask-persistent-keys/
+#     - Pre-generate persistent RSA signing key at ${GITHUB_WORKSPACE}/ask-persistent-keys/
 #     - Override CONFIG_MODULE_SIG_KEY to point at it
 #     - Run `make olddefconfig` to resolve the change
 #     - This makes the kernel embed the persistent key's cert in the
@@ -2820,8 +2820,10 @@ PYEOF
 # when its $KSRC/Module.symvers is missing and switches KSRC to the
 # snapshot's extracted headers tree.
 #
-# Idempotency: the marker `# === ASK2 v2 persistent-key + headers-snapshot ===`
-# short-circuits re-injection on re-runs of ci-setup-kernel.sh.
+# Idempotency/update behavior: if the marker already exists in the persistent
+# runner's build-kernel.sh, strip BOTH old injected blocks and re-inject the
+# current templates. A hard no-op here caused the stale ${CWD} key path to
+# survive F-217 forever on the self-hosted runner (images 2323/2348).
 echo "### Injecting ASK2 v2 persistent-key + headers-snapshot blocks into build-kernel.sh"
 python3 - "$KERNEL_BUILD/build-kernel.sh" <<'PYEOF'
 import pathlib, sys
@@ -2829,9 +2831,40 @@ bk = pathlib.Path(sys.argv[1])
 src = bk.read_text()
 
 MARKER = "# === ASK2 v2 persistent-key + headers-snapshot ==="
+# F-217 fix: previously this was a hard no-op when MARKER was present, which
+# on the PERSISTENT self-hosted runner meant a stale injected block (with the
+# old ${CWD}/ask-persistent-keys path) survived forever and every edit to the
+# KEY_BLOCK/SNAPSHOT_BLOCK below was silently ignored — the kernel kept
+# embedding CONFIG_MODULE_SIG_KEY from the OLD package-dir path while ask.ko was
+# signed with the new workspace key (image 2323/2348 "Key was rejected"). Same
+# class of bug the patch-loop injector already fixed (see SENTINEL strip above).
+# Fix: when the markers are present, STRIP both previously-injected blocks so
+# the injection below re-runs fresh EVERY time, keeping build-kernel.sh in sync
+# with the current template.
+KEY_END = "# === end ASK2 v2 persistent-key block ===\n"
+SNAP_BEGIN = "\n\n# === ASK2 v2 post-bindeb-pkg headers snapshot ==="
+SNAP_END = "# === end ASK2 v2 post-bindeb-pkg headers snapshot ===\n"
 if MARKER in src:
-    print(f"### {bk}: ASK2 v2 blocks already injected — no-op")
-    sys.exit(0)
+    print(f"### {bk}: ASK2 v2 blocks present — stripping stale blocks for a fresh re-inject")
+    # Strip the KEY_BLOCK (from its leading MARKER line through KEY_END).
+    ks = src.find(MARKER)
+    ks_line = src.rfind("\n", 0, ks) + 1  # include the block's leading blank line boundary
+    ke = src.find(KEY_END, ks)
+    if ke != -1:
+        ke += len(KEY_END)
+        # also swallow one trailing blank line if present
+        if src[ke:ke+1] == "\n":
+            ke += 1
+        src = src[:ks_line] + src[ke:]
+    # Strip the SNAPSHOT_BLOCK (from SNAP_BEGIN through SNAP_END).
+    ss = src.find(SNAP_BEGIN)
+    if ss != -1:
+        se = src.find(SNAP_END, ss)
+        if se != -1:
+            se += len(SNAP_END)
+            # Preserve a line boundary between the bindeb-pkg command before
+            # the old snapshot block and the command that followed it.
+            src = src[:ss] + "\n" + src[se:]
 
 # The merge_config.sh + olddefconfig sequence is duplicated 4 times in the
 # current build-kernel.sh (one real + three accidental duplicates from prior
