@@ -617,6 +617,28 @@ for package in $packages; do
     fi
     echo "### Kernel build OK: found $KERNEL_DEB_COUNT .deb file(s)"
     ls -lh linux-image-*.deb 2>/dev/null || true
+
+    # F-217/kernel-skew hard guard: a FAILED bindeb-pkg leaves the PREVIOUS
+    # run's stale linux-image .deb in the git-cache parent, which the lift step
+    # above copies in — so the count check passes while shipping an old kernel
+    # (exactly how a broken fixup silently shipped stale vmlinuz + mismatched
+    # signing key). Detect it: the produced .deb version MUST carry the
+    # per-build +b<suffix> we requested. If it only has the bare KERNEL-1
+    # version, the fresh build did not happen -> FAIL instead of masking.
+    if [ -n "${BUILD_VERSION:-}" ]; then
+      EXPECT_SUFFIX="$(printf "%s" "$BUILD_VERSION" | tr -cd '0-9.' | sed 's/^[.]*//;s/[.]*$//')"
+      if [ -n "$EXPECT_SUFFIX" ]; then
+        PRODUCED=$(ls -1 linux-image-*-vyos_*_arm64.deb 2>/dev/null | grep -v -- '-dbg' | head -1)
+        case "$PRODUCED" in
+          *"+b${EXPECT_SUFFIX}"*)
+            echo "### F-217: kernel .deb carries per-build version +b${EXPECT_SUFFIX} (fresh build confirmed)" ;;
+          *)
+            echo "::error::F-217: kernel .deb '$PRODUCED' lacks per-build suffix +b${EXPECT_SUFFIX}"
+            echo "::error::The bindeb-pkg build FAILED and a STALE cached .deb was lifted — refusing to ship a mismatched kernel."
+            exit 1 ;;
+        esac
+      fi
+    fi
   fi
 
   ### Build Mono Gateway DTB from kernel source (before cleanup)
