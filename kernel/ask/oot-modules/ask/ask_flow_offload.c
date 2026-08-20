@@ -50,6 +50,7 @@
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
 #include <net/arp.h>
+#include <net/ndisc.h>
 #include <net/neighbour.h>
 #include <net/netevent.h>
 #include <net/net_namespace.h>
@@ -248,6 +249,45 @@ static void ask_resolve_neigh_v4(struct net_device *egress_dev,
          * in NUD_VALID (NONE/INCOMPLETE/FAILED) has no MAC and must
          * still bounce to SW.
          */
+        read_lock_bh(&n->lock);
+        if (n->nud_state & NUD_VALID)
+                memcpy(out_next_hop_mac, n->ha, ETH_ALEN);
+        read_unlock_bh(&n->lock);
+
+        neigh_release(n);
+}
+
+/*
+ * T-M6-1: IPv6 counterpart of ask_resolve_neigh_v4().  nd_tbl keys are full
+ * struct in6_addr values; accept the same NUD_VALID states because n->ha is
+ * meaningful for REACHABLE/STALE/DELAY/PROBE/PERMANENT/NOARP.  The egress MAC
+ * is the netdev's own source MAC; next-hop MAC comes from IPv6 NDISC.
+ *
+ * First IPv6 HW-HIT iteration intentionally does synchronous lookup only. If
+ * unresolved, the existing preflight returns -EAGAIN and the kernel software
+ * path carries the flow; ask_neigh.c already observes nd_tbl events, but the
+ * legacy pending queue is v4/__be32-specific and will be widened only after
+ * the direct stable-neighbour path is silicon-proven.
+ */
+static void ask_resolve_neigh_v6(struct net_device *egress_dev,
+                                 const struct in6_addr *dst_ip,
+                                 u8 *out_next_hop_mac,
+                                 u8 *out_egress_mac)
+{
+        struct neighbour *n;
+
+        memset(out_next_hop_mac, 0, ETH_ALEN);
+        memset(out_egress_mac,   0, ETH_ALEN);
+
+        if (!egress_dev || !dst_ip)
+                return;
+
+        memcpy(out_egress_mac, egress_dev->dev_addr, ETH_ALEN);
+
+        n = neigh_lookup(&nd_tbl, dst_ip, egress_dev);
+        if (!n)
+                return;
+
         read_lock_bh(&n->lock);
         if (n->nud_state & NUD_VALID)
                 memcpy(out_next_hop_mac, n->ha, ETH_ALEN);
@@ -1400,6 +1440,54 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 }
 
 /*
+ * T-M6-1: IPv6 counterpart of ask_z11_other_src_v4(). Recovers the real
+ * next-hop from the conntrack opposite-direction tuple's src_v6 (the L3 dest
+ * the kernel routed THIS direction's egress against) and the netdev it routed
+ * through, so v6 neighbour resolution and egress selection match what
+ * nf_flow_table's FLOW_OFFLOAD_XMIT_NEIGH path computes. Writes the 16-byte
+ * next-hop into @out (returns true) or leaves it untouched (returns false).
+ * Does NOT mutate key.dst_ip — only local routing state, exactly like v4.
+ */
+static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
+                                 struct net_device **out_iif,
+                                 struct in6_addr *out_nh)
+{
+        struct flow_offload_tuple *t;
+        struct flow_offload_tuple_rhash *rh;
+        struct flow_offload *flow;
+        struct flow_offload_tuple *other;
+        int dir;
+
+        if (out_iif)
+                *out_iif = NULL;
+        if (!cookie || !out_nh)
+                return false;
+
+        t   = (struct flow_offload_tuple *)cookie;
+        dir = t->dir;
+        if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+                return false;
+
+        rh   = container_of(t, struct flow_offload_tuple_rhash, tuple);
+        flow = (struct flow_offload *)((char *)rh -
+                offsetof(struct flow_offload, tuplehash[dir]));
+        if (!flow)
+                return false;
+
+        other = &flow->tuplehash[!dir].tuple;
+
+        if (out_dir)
+                *out_dir = dir;
+        if (out_iif) {
+                rcu_read_lock();
+                *out_iif = dev_get_by_index_rcu(&init_net, other->iifidx);
+                rcu_read_unlock();
+        }
+        *out_nh = other->src_v6;
+        return true;
+}
+
+/*
  * Serialise @key into the 14-byte EKFC record the FE-VM comparator matches.
  *
  * Layout is the silicon's MSB-first extraction order for EKFC 0x801C0006
@@ -1589,7 +1677,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         struct ask_flow_table *t = ask_flow_default_table();
         struct net_device *egress_dev = NULL;
         struct ask_flow_key key;
-        __be32 dst_ip;
+        __be32 dst_ip = 0;
+        struct in6_addr dst_ip6 = {};   /* T-M6-1: v6 next-hop for neigh resolve */
+        bool is_v6;
         u32 hw_id = 0;
         u32 action_flags = 0;
         u32 oif = 0;
@@ -1623,6 +1713,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                     rc, f->cookie);
                 return rc;
         }
+        is_v6 = (key.l3_proto == ASK_FLOW_L3_IPV6);
 
         /*
          * PR14z19 (2026-05-25): populate key.iif from the block_cb's
@@ -1688,19 +1779,37 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          */
         {
                 struct net_device *z11_iif = NULL;
-                __be32 z11_dst;
 
-                z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
-                                               NULL, &z11_iif);
-                if (z11_dst != 0) {
-                        dst_ip = z11_dst;
-                        if (z11_iif) {
-                                egress_dev = z11_iif;
-                                oif = z11_iif->ifindex;
+                if (is_v6) {
+                        struct in6_addr z11_nh6;
+
+                        if (ask_z11_other_src_v6((unsigned long)f->cookie,
+                                                 NULL, &z11_iif, &z11_nh6) &&
+                            !ipv6_addr_any(&z11_nh6)) {
+                                dst_ip6 = z11_nh6;
+                                if (z11_iif) {
+                                        egress_dev = z11_iif;
+                                        oif = z11_iif->ifindex;
+                                }
+                                pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 next-hop cookie=0x%lx nh-dst=%pI6c egress=%s\n",
+                                                    f->cookie, &dst_ip6,
+                                                    egress_dev ? netdev_name(egress_dev) : "?");
                         }
-                        pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
-                                            f->cookie, &z11_dst,
-                                            egress_dev ? netdev_name(egress_dev) : "?");
+                } else {
+                        __be32 z11_dst;
+
+                        z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
+                                                       NULL, &z11_iif);
+                        if (z11_dst != 0) {
+                                dst_ip = z11_dst;
+                                if (z11_iif) {
+                                        egress_dev = z11_iif;
+                                        oif = z11_iif->ifindex;
+                                }
+                                pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
+                                                    f->cookie, &z11_dst,
+                                                    egress_dev ? netdev_name(egress_dev) : "?");
+                        }
                 }
         }
 
@@ -1813,8 +1922,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * If the neighbour is not yet resolved, the HW path returns -EAGAIN
          * and the SW path takes the flow until the neighbour completes.
          */
-        ask_resolve_neigh_v4(egress_dev, dst_ip,
-                             key.next_hop_mac, key.egress_mac);
+        if (is_v6)
+                ask_resolve_neigh_v6(egress_dev, &dst_ip6,
+                                     key.next_hop_mac, key.egress_mac);
+        else
+                ask_resolve_neigh_v4(egress_dev, dst_ip,
+                                     key.next_hop_mac, key.egress_mac);
 
         /*
          * F-111: Reject multicast/broadcast next-hop MACs before HW insert.
@@ -1825,6 +1938,28 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          */
         if (is_multicast_ether_addr(key.next_hop_mac))
                 return -EAGAIN;
+
+        /* T-M6-1 first v6 insert iteration: if NDISC is unresolved, trigger a
+         * neighbour probe and fall back to software. The legacy pending queue
+         * stores a __be32 v4 key; widening/replay is deliberately deferred
+         * until the direct stable-neighbour v6 HIT is proven. Our lab topology
+         * pre-resolves fd99 neighbours, so the HIT path does not take this arm.
+         */
+        if (is_v6 && egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
+                struct neighbour *n;
+
+                n = neigh_lookup(&nd_tbl, &dst_ip6, egress_dev);
+                if (!n)
+                        n = __neigh_create(&nd_tbl, &dst_ip6, egress_dev, true);
+                if (n && !IS_ERR(n)) {
+                        neigh_event_send(n, NULL);
+                        neigh_release(n);
+                }
+                pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 neigh unresolved cookie=0x%lx dst=%pI6c dev=%s — SW fallback\n",
+                                    f->cookie, &dst_ip6,
+                                    netdev_name(egress_dev));
+                return -EAGAIN;
+        }
 
         /*
          * PR14y: if the next-hop MAC is still all-zero, the ARP entry is
@@ -1846,7 +1981,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		 * of indefinite pinning if ARP churns.  M3 eviction policy
 		 * will age out entries stuck > 30 s and force SW path.
 		 */
-        if (egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
+        if (!is_v6 && egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
                 /* PR14y BUG #2: ARP TOCTOU — neighbour resolved but evicted
                  * before insert.  Deferred pending; M3 eviction TBD.
                  */

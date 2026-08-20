@@ -86,6 +86,43 @@ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 
 /*
+ * T-M6-1 IPv6 HW-offload gate. Two independent switches must BOTH be on for a
+ * v6 flow to publish a hardware record:
+ *   1. fman_pcd_v6_enabled() — the kernel-side master gate (F-210, module param
+ *      fsl_dpaa_fman.v6_enable) that arms the v6 KeyGen scheme + table1 node +
+ *      LCV split. Exported by F-210; re-declared here (single-image OOT shim).
+ *   2. ask_v6_offload — this module's own gate (ask.v6_offload), so an operator
+ *      cannot half-enable the path from one knob. Default OFF -> v6 stays
+ *      software-fallback and v4 behaviour is byte-identical.
+ */
+bool fman_pcd_v6_enabled(void);
+static bool ask_v6_offload;
+module_param_named(v6_offload, ask_v6_offload, bool, 0644);
+MODULE_PARM_DESC(v6_offload,
+		 "Enable IPv6 hardware flow offload (default 0; also requires "
+		 "fsl_dpaa_fman.v6_enable=1). Board-validated opt-in only.");
+
+/* True only when BOTH gates are on. */
+static inline bool ask_v6_hw_enabled(void)
+{
+	return ask_v6_offload && fman_pcd_v6_enabled();
+}
+
+/* Shared family/proto acceptance for the preflight + insert gates. v4 TCP/UDP
+ * is always HW-backed; v6 TCP/UDP only when both v6 gates are on. Returns 0 if
+ * the flow may be hardware-offloaded, -EOPNOTSUPP otherwise (SW fallback). */
+static int ask_hw_flow_family_ok(const struct ask_flow_key *key)
+{
+	if (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP)
+		return -EOPNOTSUPP;
+	if (key->l3_proto == ASK_FLOW_L3_IPV4)
+		return 0;
+	if (key->l3_proto == ASK_FLOW_L3_IPV6 && ask_v6_hw_enabled())
+		return 0;
+	return -EOPNOTSUPP;
+}
+
+/*
  * QEF blob structural constants (PR13). The microcode version
  * reported by ASK_CMD_GET_INFO is extracted from the FMan firmware
  * blob the bootloader publishes via the device tree at
@@ -1020,17 +1057,16 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
                 return -EOPNOTSUPP;
 
         /*
-         * T-M6-1 Phase 1: v6 parse/key/table plumbing exists, but HW dispatch
-         * is deliberately dormant. Correct per-family selection needs two KG
-         * schemes selected by parser LCV/kgse_mv with KG-direct disabled; the
-         * concrete LCV values and SI-walk behaviour on 210.10.1 are unresolved
-         * silicon questions. Fail v6 to software until that Phase-3 gate
-         * passes — never publish a record into table 1 that no live scheme can
-         * select. Only plain v4 TCP/UDP is hardware-backed today.
+         * T-M6-1: v4 TCP/UDP is always HW-backed. v6 TCP/UDP is HW-backed only
+         * when BOTH the kernel master gate (fsl_dpaa_fman.v6_enable, arms the
+         * v6 KeyGen scheme + table1 node + LCV split) and this module's gate
+         * (ask.v6_offload) are on. Otherwise fall back to software — never
+         * publish a v6 record into table 1 unless a live v6 scheme can select
+         * it. Non-TCP/UDP always falls back.
          */
-        if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
-            (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
-                return -EOPNOTSUPP;
+        rc = ask_hw_flow_family_ok(key);
+        if (rc)
+                return rc;
 
         /* Egress L2 header not yet resolved -> defer (SW carries it). */
         if (is_zero_ether_addr(key->next_hop_mac) ||
@@ -1080,12 +1116,10 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         if (!h)
                 return -ENODEV;
 
-        /* T-M6-1 Phase 1: hardware path ships plain v4 TCP/UDP only; v6 HW
-         * dispatch is dormant (see ask_hw_flow_preflight), so v6 falls back to
-         * software. Everything non-TCP/UDP also falls back. */
-        if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
-            (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
-                return -EOPNOTSUPP;
+        /* Same family/protocol gate as preflight (v6 requires both gates). */
+        rc = ask_hw_flow_family_ok(key);
+        if (rc)
+                return rc;
 
         /*
          * Neighbour not yet resolved: keep the flow in SW until the egress L2
