@@ -2921,9 +2921,39 @@ src = src[:insert_at] + KEY_BLOCK + src[insert_at:]
 
 # Inject the snapshot block AFTER the `make bindeb-pkg ...` line.
 BINDEB_ANCHOR = "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} KDEB_PKGVERSION=${KERNEL_VERSION}-1"
+# F-217/kernel-skew fix: append a strictly-monotonic per-build suffix to the
+# kernel .deb version. Without it, every rebuild of 6.18.44 produces version
+# "6.18.44-1"; the persistent chroot already has that version installed, so
+# `apt install linux-image-6.18.44-vyos` is a no-op and the ISO ships the
+# PREVIOUS run's vmlinuz (stale kernel, old module-signing keyring) alongside a
+# freshly rebuilt squashfs/ask.ko -> "Key was rejected by service" on the board.
+# BUILD_VERSION (e.g. 2026.08.20-0026-rolling) reduces to digits (20260820.0026)
+# which sorts monotonically; fall back to the epoch second if unset. The
+# ask-modules .deb Depends on the release string (linux-image-<KVER>-vyos), NOT
+# this Debian version, so the OOT dependency stays satisfied.
+BINDEB_REPLACE = (
+    'KDEB_SUFFIX="$(printf "%s" "${BUILD_VERSION:-}" | tr -cd "0-9." | sed "s/^[.]*//;s/[.]*$//")"\n'
+    '[ -n "$KDEB_SUFFIX" ] || KDEB_SUFFIX="$(date -u +%Y%m%d.%H%M%S)"\n'
+    'echo "I: ASK2 kernel .deb version = ${KERNEL_VERSION}-1+b${KDEB_SUFFIX} (per-build, forces chroot upgrade)"\n'
+    "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} "
+    'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
+)
+PERBUILD_MARK = 'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
 bidx = src.find(BINDEB_ANCHOR)
-if bidx < 0:
+if bidx >= 0:
+    # Replace the fixed-version bindeb-pkg line with the per-build-versioned form
+    # so the kernel .deb version is strictly monotonic (forces chroot upgrade).
+    src = src[:bidx] + BINDEB_REPLACE + src[bidx + len(BINDEB_ANCHOR):]
+elif PERBUILD_MARK in src:
+    # Already converted on a prior strip-and-reinject run — leave it in place.
+    print(f"### {bk}: bindeb-pkg already per-build-versioned — keeping")
+else:
     print(f"ERROR: ASK2 v2 bindeb-pkg anchor not found in {bk}", file=sys.stderr)
+    sys.exit(1)
+# Re-find the (now replaced) bindeb line to anchor the snapshot block after it.
+bidx = src.find("KDEB_PKGVERSION=\"${KERNEL_VERSION}-1+b${KDEB_SUFFIX}\"")
+if bidx < 0:
+    print(f"ERROR: ASK2 per-build bindeb line not found after replace in {bk}", file=sys.stderr)
     sys.exit(1)
 # Find end-of-line after the bindeb-pkg invocation.
 eol = src.find("\n", bidx)
