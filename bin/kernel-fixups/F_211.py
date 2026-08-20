@@ -61,6 +61,17 @@ and the passing 2026-08-19 dual-scheme silicon proof (scheme2/scheme5 distinct
 kgse_spc). One variable per the plan: F-211 only arms the scheme; F-212 only
 splits the LCV; F-210 only writes the node.
 
+2026-08-20 QUIESCE FIX (dual-port wedge): the v6 arm now brackets the whole
+scheme rewrite + the F-212 parser LCV split with fman_port_disable(rxport) ...
+fman_port_enable(rxport). Board 0353 proved that rewriting a live port's schemes
++ doing the LCV split's parser (PCAC) stop while the port admits frames wedges
+RX globally. The vendor programs PCD (incl per-header LCV) on a DISABLED port
+before enable (FM_PORT_SetPCD before FM_PORT_Enable); fman_port_disable is the
+BMI graceful-stop (drains in-flight frames, ~<=5ms, keeps all config) and is
+per-port, so the sibling stays up. All early-return paths and the success tail
+re-enable. If a board test shows sibling drop, escalate to disabling all
+fe_port_armed ports for the window (documented fallback).
+
 Must run AFTER F-183 (anchors on F-183(kg-direct-removed)) and AFTER F-186 (miss
 capture) and AFTER F-209 (CCOBASE encode) and AFTER F-140 (table1). Placed after
 F-210 in ci-setup-kernel.sh. Idempotent via the F-211 markers.
@@ -205,10 +216,23 @@ arm_new = (
     "\t\tu8 v4id = 0, v6id = 0;\n"
     "\t\tint i, verr;\n"
     "\n"
+    "\t\t/* QUIESCE (vendor configure-before-enable): drain THIS port's BMI\n"
+    "\t\t * before narrowing its v4 scheme + arming v6/catch-all + the F-212\n"
+    "\t\t * parser LCV split, so no frame is mid-parse/mid-classify through a\n"
+    "\t\t * half-programmed scheme table or during the PMDA commit's parser\n"
+    "\t\t * stop. Root fix for the dual-port v6 wedge: the LCV split + scheme\n"
+    "\t\t * rewrite ran on a LIVE port (board 0353 wedged both ports). Per-port\n"
+    "\t\t * only (PCAC + BMI are per-port); the sibling stays up. Re-enabled at\n"
+    "\t\t * every exit below and after the F-212 split. fman_port_disable()\n"
+    "\t\t * returns 0 even on drain timeout ('forced down'), so treat any\n"
+    "\t\t * return as quiesced. */\n"
+    "\t\t(void)fman_port_disable(rxport);\n"
+    "\n"
     "\t\tmutex_lock(lock);\n"
     "\t\tv4slot = kg_find_port_scheme(keygen, hw_port_id, &v4id);\n"
     "\t\tif (!v4slot) {\n"
     "\t\t\tmutex_unlock(lock);\n"
+    "\t\t\tfman_port_enable(rxport);\n"
     "\t\t\tpr_warn(\"fman_pcd fe_arm: F-211 v4 slot vanished; v6 arm skipped\\n\");\n"
     "\t\t\treturn 0;\n"
     "\t\t}\n"
@@ -224,6 +248,7 @@ arm_new = (
     "\t\t}\n"
     "\t\tif (!v6slot) {\n"
     "\t\t\tmutex_unlock(lock);\n"
+    "\t\t\tfman_port_enable(rxport);\n"
     "\t\t\tpr_warn(\"fman_pcd fe_arm: F-211 no free scheme slot for v6; v6 arm skipped\\n\");\n"
     "\t\t\treturn 0;\n"
     "\t\t}\n"
@@ -246,6 +271,7 @@ arm_new = (
     "\t\tif (verr) {\n"
     "\t\t\tv6slot->used = false;\n"
     "\t\t\tmutex_unlock(lock);\n"
+    "\t\t\tfman_port_enable(rxport);\n"
     "\t\t\tpr_warn(\"fman_pcd fe_arm: F-211 v6 scheme_setup failed (%d); v6 arm skipped\\n\", verr);\n"
     "\t\t\treturn 0;\n"
     "\t\t}\n"
@@ -300,6 +326,8 @@ arm_new = (
     "\t\t * as v4 per E25). The node lives at gro+16 (F-210).\n"
     "\t\t */\n"
     "\t\tfman_pcd_fe_v6node_set_miss_nia(pcd, fe_enter_off, miss_fqid);\n"
+    "\t\t/* Resume this port only after all scheme/LCV/node state is coherent. */\n"
+    "\t\tfman_port_enable(rxport);\n"
     "\t\tpr_info(\"fman_pcd fe_arm: F-211 v6 scheme %u armed on port 0x%02x (v4 scheme %u mv=%#x, v6 mv=%#x, CCOBASE=1)\\n\",\n"
     "\t\t\tv6id, hw_port_id, v4id, " + V4BIT + ", " + V6BIT + ");\n"
     "\t}\n"
