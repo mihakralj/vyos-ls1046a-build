@@ -58,6 +58,8 @@
 #include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
 #include <linux/in.h>                   /* IPPROTO_TCP */
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
+#include <net/addrconf.h>               /* F-219: ipv6_addr_type, in6_dev_get */
+#include <net/if_inet6.h>               /* F-219: struct inet6_dev / inet6_ifaddr */
 #include <soc/fsl/qman.h>          /* qman_alloc_fqid, qman_create_fq, QMAN_FQ_FLAG_NO_ENQUEUE */
 
 #include "include/ask_internal.h"
@@ -96,6 +98,8 @@ int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
  *      software-fallback and v4 behaviour is byte-identical.
  */
 bool fman_pcd_v6_enabled(void);
+/* F-219: set this port's v6-arm intent before fman_pcd_fe_engage(). */
+void fman_pcd_fe_set_port_v6(struct fman *fm, u8 hw_port_id, bool enable);
 static bool ask_v6_offload;
 module_param_named(v6_offload, ask_v6_offload, bool, 0644);
 MODULE_PARM_DESC(v6_offload,
@@ -685,6 +689,63 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
  * routes `set system offload ask` here.
  */
+/*
+ * F-219: true if @dev has at least one usable (non-tentative, non-link-local)
+ * global IPv6 address — i.e. this port actually carries IPv6 and should arm the
+ * v6 offload schemes. Link-local-only ports stay v4-only.
+ */
+static bool ask_netdev_has_global_v6(struct net_device *dev)
+{
+        struct inet6_dev *idev;
+        struct inet6_ifaddr *ifp;
+        bool found = false;
+
+        if (!dev)
+                return false;
+        rcu_read_lock();
+        idev = __in6_dev_get(dev);
+        if (idev) {
+                list_for_each_entry_rcu(ifp, &idev->addr_list, if_list) {
+                        if (ifp->flags & IFA_F_TENTATIVE)
+                                continue;
+                        if (ipv6_addr_src_scope(&ifp->addr) ==
+                            IPV6_ADDR_SCOPE_GLOBAL) {
+                                found = true;
+                                break;
+                        }
+                }
+        }
+        rcu_read_unlock();
+        return found;
+}
+
+/*
+ * F-219: resolve the RX netdev for @hw_port_id and report whether it carries
+ * IPv6. Walks init_net's dpaa netdevs matching the board resolvers
+ * (dpaa_get_rx_fman_port + fman_port_get_id), the same mapping the flow path
+ * uses. Returns false if no netdev matches (v4-only, safe default).
+ */
+static bool ask_port_wants_v6(u8 hw_port_id)
+{
+        struct net_device *dev;
+        bool want = false;
+
+        if (!ask_v6_offload)
+                return false;
+
+        rcu_read_lock();
+        for_each_netdev_rcu(&init_net, dev) {
+                struct fman_port *port = dpaa_get_rx_fman_port(dev);
+
+                if (port && fman_port_get_id(port) == hw_port_id) {
+                        want = ask_netdev_has_global_v6(dev);
+                        break;
+                }
+        }
+        rcu_read_unlock();
+        return want;
+}
+
 int ask_hw_offload_engage(u8 hw_port_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
@@ -704,6 +765,19 @@ int ask_hw_offload_engage(u8 hw_port_id)
         if (p->offload_engaged) {
                 rc = 0;                 /* idempotent */
                 goto out_unlock;
+        }
+
+        /* F-219: protocol intent is PER PORT. The global ask.v6_offload and
+         * fsl_dpaa_fman.v6_enable switches remain fail-closed masters, but only
+         * this named port gets v6 schemes when its netdev has a usable global
+         * IPv6 address. Another engaged port with v4 only stays untouched. */
+        {
+                bool port_v6 = ask_port_wants_v6(hw_port_id);
+
+                fman_pcd_fe_set_port_v6(h->fman, hw_port_id, port_v6);
+                pr_info("ask: hw: port 0x%02x v6 intent=%u (ask gate=%u, auto from netdev IPv6 addrs)\n",
+                        hw_port_id, port_v6 ? 1 : 0,
+                        ask_v6_offload ? 1 : 0);
         }
 
         /* F-092: Build + arm FE-VM via kernel API (not debugfs).
