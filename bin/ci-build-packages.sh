@@ -387,6 +387,21 @@ for package in $packages; do
       fi
       echo "### Removing stale tarball source trees before kernel build"
       rm -rf linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
+      # F-217/kernel-skew: purge stale kernel .debs from BOTH the package dir
+      # and the git-cache parent before building. bindeb-pkg writes into the
+      # cache parent (git-cache symlink path); the later lift step copies
+      # linux-*_arm64.deb from there, so a PREVIOUS run's .deb (different +b
+      # suffix) would otherwise be lifted alongside the fresh one and the guard
+      # could pick the wrong file (run 32325140967 picked +b...0140 over the
+      # fresh +b...0235). Leave only what THIS build produces.
+      rm -f linux-image-*_arm64.deb linux-headers-*_arm64.deb \
+            linux-libc-dev_*_arm64.deb linux-image-*-dbg_*_arm64.deb 2>/dev/null || true
+      if [ -L linux ] && [ "$(readlink -f linux)" = "$(readlink -f "$CACHE")" ]; then
+        rm -f "${CACHE%/linux}"/linux-image-*_arm64.deb \
+              "${CACHE%/linux}"/linux-headers-*_arm64.deb \
+              "${CACHE%/linux}"/linux-libc-dev_*_arm64.deb \
+              "${CACHE%/linux}"/linux-image-*-dbg_*_arm64.deb 2>/dev/null || true
+      fi
       ./build.py --packages linux-kernel
     fi
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
@@ -628,15 +643,15 @@ for package in $packages; do
     if [ -n "${BUILD_VERSION:-}" ]; then
       EXPECT_SUFFIX="$(printf "%s" "$BUILD_VERSION" | tr -cd '0-9.' | sed 's/^[.]*//;s/[.]*$//')"
       if [ -n "$EXPECT_SUFFIX" ]; then
-        PRODUCED=$(ls -1 linux-image-*-vyos_*_arm64.deb 2>/dev/null | grep -v -- '-dbg' | head -1)
-        case "$PRODUCED" in
-          *"+b${EXPECT_SUFFIX}"*)
-            echo "### F-217: kernel .deb carries per-build version +b${EXPECT_SUFFIX} (fresh build confirmed)" ;;
-          *)
-            echo "::error::F-217: kernel .deb '$PRODUCED' lacks per-build suffix +b${EXPECT_SUFFIX}"
-            echo "::error::The bindeb-pkg build FAILED and a STALE cached .deb was lifted — refusing to ship a mismatched kernel."
-            exit 1 ;;
-        esac
+        PRODUCED=$(find . -maxdepth 1 -name "linux-image-*-vyos_*+b${EXPECT_SUFFIX}_arm64.deb" ! -name '*-dbg*' -print | head -1)
+        if [ -n "$PRODUCED" ]; then
+          echo "### F-217: kernel .deb carries per-build version +b${EXPECT_SUFFIX} (fresh build confirmed): $PRODUCED"
+        else
+          echo "::error::F-217: no linux-image .deb carries the required per-build suffix +b${EXPECT_SUFFIX}"
+          echo "::error::The bindeb-pkg build FAILED or only STALE cached .debs were lifted — refusing to ship a mismatched kernel."
+          ls -lh linux-image-*.deb 2>/dev/null || true
+          exit 1
+        fi
       fi
     fi
   fi
