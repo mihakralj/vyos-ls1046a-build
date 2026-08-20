@@ -2973,9 +2973,11 @@ SNAPSHOT_BLOCK = '''
 # Makefiles). Copy the persistent signing key into the extracted certs/ dir
 # so OOT builds can sign ask.ko with the SAME key embedded in vmlinux's
 # trusted keyring.
-# ASK2 v2 snapshot extraction moved to ci-build-packages.sh (post-build.py, after bindeb-pkg)
-fi
-
+# ASK2 v2 snapshot extraction moved to ci-build-packages.sh (post-build.py, after bindeb-pkg).
+# No shell body remains here; importantly, do NOT emit a bare `fi`. The old
+# injector inherited an `fi` from a pre-refactor surrounding conditional; after
+# the body moved out, it became orphaned and made build-kernel.sh exit 2 AFTER a
+# successful bindeb-pkg (run 32324764983).
 
 # === end ASK2 v2 post-bindeb-pkg headers snapshot ===
 '''
