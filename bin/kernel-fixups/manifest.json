@@ -181,7 +181,6 @@
     "F_220.py": "fman_pcd.c: Phase-1 per-port routed-IPv4 ehash table foundation \u2014 table_v4 on struct fman_pcd_fe_port, transient arm handoff, allocate identical 14B/mask0x7fff table per engage, shared/refcounted int-buf pool, per-port free/drain/rollback, table_for_port helper; v6/global table1 untouched",
     "F_221.py": "fman_pcd.c: Phase-1 repoint v4 path to F-220 per-port tables \u2014 F-185 node uses pending per-port table_dma, F-204 add table_idx0 uses (port table), F-218 del v4 uses hw_port_id table; v6 remains global table1",
     "F_222.py": "dpaa_eth.c: revert F-203 DPAA_BP_ORDER 1->0 after sustained-load dev_alloc_pages order-1 fragmentation wedged RX; restores mainline 4KiB order-0 buffers, companion ASK MTU cap 3600",
-    "F_223.py": "dpaa_eth.c: DIAGNOSTIC-ONLY safe eth4 KG-hash capture restore (F-216 removed producer); bounds+eth4-guarded, feeds hash_probe for the IPv6 dual-lane GEC absent-header-default silicon proof; retire after proof",
     "F_224.py": "fman_keygen.c: Phase-A 46-byte dual-lane all-GEC key on AC_CC FE scheme only; EKFC=0, six silicon-proven validated-code GEC commands, zero defaults; v4 regression gate",
     "F_225.py": "fman_pcd.c: Phase-A v4 ehash key_size 14->46 for template + F-220 per-port table; encoders auto-follow; v6 gate remains off",
     "F_226.py": "fman_pcd.c: Phase-B unified dual-lane IPv6 enable \u2014 dead-end F-211/F-212/F-214 LCV/second-scheme via port_wants_v6=false, suppress F-210 gro+16/table1 node, emit UPDATE_HOPLIMIT 0x29 for v6 HIT",
@@ -192,13 +191,14 @@
     "F_216.py": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c: F-216 add ratelimited zero-address FD guard before dma_unmap/phys_to_virt/headroom reads (logs status/format/BPID/offset/length/FQID, consumes without release), and remove obsolete F-072/F-170 be64 frame-data hash capture + normalize RXHASH braces. Image 2228 panic: addr=0 -> phys_to_virt(0)+hash_offset0x108 fault. Defensive/logging, not root malformed-FD fix.",
     "F_218.py": "fman_pcd.c: F-218 (T-M6-1) fman_pcd_fe_flow_del selects ehash table by key_size (38-byte v6 key -> table1, else table0) so v6 FLOW_CLS_DESTROY unlinks the table1 record instead of leaking; no ABI change; v4 byte-identical"
   },
-  "count": 121,
+  "count": 120,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {
     "F_174.py": "On disk, listed in active, but intentionally NOT invoked from ci-setup-kernel.sh (superseded by F-175; kept for the record). This is the only allowed disk-without-invocation entry."
   },
   "removed_dead": [
-    "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
+    "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh",
+    "F_223.py \u2014 diagnostic eth4 KG-hash producer retired 2026-08-21 after dual-lane GEC Stage-1/2 proof completed (exact v4/v6 crc64 matches); F-216 safe zero-FD guard remains, hash_probe reader inert"
   ],
   "folded_into_patches": [
     "F_109.py \u2014 folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2 pilot). fman_pcd_fe_enq_get_offset() export regenerated into its owning patch; tree-equivalent to current+F_109 modulo two normalized blank lines. Gated on CI build validation before considered final.",
