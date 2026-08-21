@@ -1,8 +1,18 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 731f418..468bfa9 100644
+index 0b088e403..76a66dbcc 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2392,6 +2392,101 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
+@@ -1855,6 +1855,9 @@ static void fman_pcd_ehash_flow_clear_all(struct fman_pcd *pcd)
+ {
+ 	struct fman_pcd_ehash_table *t;
+ 
++	if (!pcd)
++		return;
++
+ 	list_for_each_entry(t, &pcd->fe_ehash_tables, node)
+ 		fman_pcd_ehash_flow_drain(t);
+ }
+@@ -2392,6 +2395,123 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
  	.release	= single_release,
  };
  
@@ -95,20 +105,42 @@ index 731f418..468bfa9 100644
 +	(void)hw_port_id;
 +	(void)key;
 +	(void)key_size;
++	if (!fman_get_pcd(fm))
++		return -ENODEV;
 +	fman_pcd_ehash_flow_clear_all(fman_get_pcd(fm));
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_del);
 +
++/* F-109: Return the MURAM offset of the first ENQ FE object.
++ * Returns 0 if the FE pool is not engaged (fe_refcount == 0) or
++ * the enq list is empty.  Caller does NOT need to hold fe_lock
++ * for a read — the list is stable once the pool is engaged. */
++unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm)
++{
++	struct fman_pcd *pcd;
++	struct fman_pcd_fe_obj *obj;
++
++	if (!fm)
++		return 0;
++	pcd = fman_get_pcd(fm);
++	if (!pcd || pcd->fe_refcount == 0)
++		return 0;
++
++	obj = list_first_entry_or_null(&pcd->fe_enq,
++				       struct fman_pcd_fe_obj, node);
++	return obj ? obj->muram_off : 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_enq_get_offset);
 +
  /**
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
   * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 3901c10..3a8ab3d 100644
+index 3901c10c5..408e778d8 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -318,6 +318,16 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+@@ -318,6 +318,21 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
  void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
  				u8 saved_engine);
  
@@ -121,6 +153,11 @@ index 3901c10..3a8ab3d 100644
 +			 const u8 *key, u8 key_size, unsigned long enq_off);
 +int fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
 +			 const u8 *key, u8 key_size);
++
++/* F-109: Return the MURAM offset of the first ENQ FE object, or 0 if
++ * the FE pool is not engaged.  Replaces debugfs fe_enq parsing. */
++unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm);
++
 +
  /**
   * fman_pcd_kg_scheme_destroy() - tear down a previously created scheme.

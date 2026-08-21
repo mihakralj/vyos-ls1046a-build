@@ -50,6 +50,7 @@
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
 #include <net/arp.h>
+#include <net/ndisc.h>
 #include <net/neighbour.h>
 #include <net/netevent.h>
 #include <net/net_namespace.h>
@@ -256,6 +257,45 @@ static void ask_resolve_neigh_v4(struct net_device *egress_dev,
         neigh_release(n);
 }
 
+/*
+ * T-M6-1: IPv6 counterpart of ask_resolve_neigh_v4().  nd_tbl keys are full
+ * struct in6_addr values; accept the same NUD_VALID states because n->ha is
+ * meaningful for REACHABLE/STALE/DELAY/PROBE/PERMANENT/NOARP.  The egress MAC
+ * is the netdev's own source MAC; next-hop MAC comes from IPv6 NDISC.
+ *
+ * First IPv6 HW-HIT iteration intentionally does synchronous lookup only. If
+ * unresolved, the existing preflight returns -EAGAIN and the kernel software
+ * path carries the flow; ask_neigh.c already observes nd_tbl events, but the
+ * legacy pending queue is v4/__be32-specific and will be widened only after
+ * the direct stable-neighbour path is silicon-proven.
+ */
+static void ask_resolve_neigh_v6(struct net_device *egress_dev,
+                                 const struct in6_addr *dst_ip,
+                                 u8 *out_next_hop_mac,
+                                 u8 *out_egress_mac)
+{
+        struct neighbour *n;
+
+        memset(out_next_hop_mac, 0, ETH_ALEN);
+        memset(out_egress_mac,   0, ETH_ALEN);
+
+        if (!egress_dev || !dst_ip)
+                return;
+
+        memcpy(out_egress_mac, egress_dev->dev_addr, ETH_ALEN);
+
+        n = neigh_lookup(&nd_tbl, dst_ip, egress_dev);
+        if (!n)
+                return;
+
+        read_lock_bh(&n->lock);
+        if (n->nud_state & NUD_VALID)
+                memcpy(out_next_hop_mac, n->ha, ETH_ALEN);
+        read_unlock_bh(&n->lock);
+
+        neigh_release(n);
+}
+
 /* ------------------------------------------------------------------------- */
 /* PR14y: deferred-insert pending queue + NETEVENT_NEIGH_UPDATE notifier.    */
 /*                                                                            */
@@ -357,6 +397,7 @@ struct ask_flow_pending {
         int                     ingress_ifindex;
         __be32                  dst_ip;
         unsigned long           jiffies_inserted;
+        u32                     generation; /* A3: owner stamp for replay guard */
 };
 
 static LIST_HEAD(ask_flow_pending_list);
@@ -405,7 +446,8 @@ static bool ask_flow_pending_drop_cookie(u64 cookie)
                         ask_flow_pending_count--;
                         found = true;
                         kfree(p);
-                        break;
+                        /* A3: do not break — drain every legacy duplicate for
+                         * this cookie so none can replay after DESTROY. */
                 }
         }
         spin_unlock_bh(&ask_flow_pending_lock);
@@ -417,9 +459,10 @@ static int ask_flow_pending_enqueue(u64 cookie,
                                     u32 oif, u32 action_flags,
                                     int egress_ifindex,
                                     int ingress_ifindex,
-                                    __be32 dst_ip)
+                                    __be32 dst_ip,
+                                    u32 generation)
 {
-        struct ask_flow_pending *p;
+        struct ask_flow_pending *p, *iter;
 
         p = kzalloc(sizeof(*p), GFP_ATOMIC);
         if (!p)
@@ -433,8 +476,32 @@ static int ask_flow_pending_enqueue(u64 cookie,
         p->ingress_ifindex  = ingress_ifindex;
         p->dst_ip           = dst_ip;
         p->jiffies_inserted = jiffies;
+        p->generation       = generation;
 
         spin_lock_bh(&ask_flow_pending_lock);
+        /*
+         * T-M6-A3 (R3): coalesce by cookie. A flapping neighbour or repeated
+         * REPLACE retries for the same cookie must not accumulate multiple
+         * pending entries — otherwise a DESTROY that drops the first leaves a
+         * second that later replays and resurrects the flow. If an entry for
+         * this cookie already exists, overwrite it in place with the newest
+         * key/generation and keep a single entry per cookie.
+         */
+        list_for_each_entry(iter, &ask_flow_pending_list, node) {
+                if (iter->cookie == cookie) {
+                        iter->key              = *key;
+                        iter->oif              = oif;
+                        iter->action_flags     = action_flags;
+                        iter->egress_ifindex   = egress_ifindex;
+                        iter->ingress_ifindex  = ingress_ifindex;
+                        iter->dst_ip           = dst_ip;
+                        iter->jiffies_inserted = jiffies;
+                        iter->generation       = generation;
+                        spin_unlock_bh(&ask_flow_pending_lock);
+                        kfree(p);
+                        return 0;
+                }
+        }
         if (ask_flow_pending_count >= ASK_FLOW_PENDING_MAX) {
                 spin_unlock_bh(&ask_flow_pending_lock);
                 kfree(p);
@@ -504,9 +571,24 @@ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
                                                      p->oif, p->action_flags,
                                                      p->egress_ifindex,
                                                      p->ingress_ifindex,
-                                                     p->dst_ip) == 0)
+                                                     p->dst_ip,
+                                                     p->generation) == 0)
                                 pr_info_ratelimited("ask: flow_offload: PR14y re-park cookie=0x%llx dev=%s\n",
                                                     p->cookie, netdev_name(dev));
+                        kfree(p);
+                        continue;
+                }
+
+                /*
+                 * T-M6-A3 (R2): discard a pending entry whose cookie was
+                 * destroyed (tombstoned) or superseded by a newer REPLACE
+                 * while it waited for the neighbour. Replaying it would
+                 * resurrect a flow no conntrack owns.
+                 */
+                if (p->generation != 0 &&
+                    !ask_flow_gen_is_current(t, p->cookie, p->generation)) {
+                        pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%u (destroyed/superseded)\n",
+                                            p->cookie, p->generation);
                         kfree(p);
                         continue;
                 }
@@ -531,8 +613,9 @@ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
                  * silicon.  PR14z6 (future) can capture the dir at
                  * defer time and replay it here.
                  */
-                rc = ask_flow_insert(t, p->cookie, &p->key, p->oif,
-                                     p->action_flags, ASK_HW_DIR_FWD, &hw_id);
+                rc = ask_flow_insert_owned(t, p->cookie, &p->key, p->oif,
+                                           p->action_flags, ASK_HW_DIR_FWD,
+                                           p->generation, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
                 if (rc == 0) {
@@ -571,6 +654,7 @@ struct ask_neigh_mac_fixup {
         u32                 oif;
         u32                 action_flags;
         u8                  dir;
+        u32                 generation; /* A3: owner stamp snapshotted at collect */
 };
 
 /*
@@ -617,6 +701,7 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
         fx->oif          = f->oif;
         fx->action_flags = f->action_flags;
         fx->dir          = f->dir;
+        fx->generation   = f->generation;
         list_add_tail(&fx->node, &ctx->fixups);
         ctx->matched++;
         return 0;
@@ -684,7 +769,25 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
                         continue;
                 }
 
-                ask_flow_remove(t, fx->cookie);
+                /*
+                 * T-M6-A3 (R2/R5): only rebuild if the flow we snapshotted at
+                 * collect time is still the current owner. If a DESTROY or a
+                 * newer REPLACE intervened, rebuilding from the stale fixup
+                 * would resurrect a dead flow or clobber the newer one. The
+                 * rebuild reuses the SAME generation (a MAC repoint is not a
+                 * new ownership epoch), and remove_owned/insert_owned enforce
+                 * the bound so a race during the remove->insert window cannot
+                 * revive a concurrently-destroyed cookie.
+                 */
+                if (!ask_flow_gen_is_current(t, fx->cookie, fx->generation)) {
+                        pr_info_ratelimited("ask: neigh: skip stale-MAC rebuild cookie=0x%llx gen=%u (destroyed/superseded)\n",
+                                            fx->cookie, fx->generation);
+                        list_del(&fx->node);
+                        kfree(fx);
+                        continue;
+                }
+
+                ask_flow_remove_owned(t, fx->cookie, fx->generation);
                 rcu_read_lock();
                 cur = ask_flow_lookup(t, fx->cookie);
                 rcu_read_unlock();
@@ -693,16 +796,26 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
                         kfree(fx);
                         continue;
                 }
-                rc = ask_flow_insert(t, fx->cookie, &fx->key, fx->oif,
-                                     fx->action_flags, fx->dir, &hw_id);
+                /* Re-check ownership after the remove: a DESTROY racing the
+                 * remove tombstones the cookie, and insert_owned will then
+                 * refuse to republish (returns -ESTALE) — no resurrection. */
+                rc = ask_flow_insert_owned(t, fx->cookie, &fx->key, fx->oif,
+                                           fx->action_flags, fx->dir,
+                                           fx->generation, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
-                if (rc) {
+                if (rc == -ESTALE) {
+                        /* cookie destroyed during rebuild; leave it gone */
+                        pr_info_ratelimited("ask: neigh: rebuild aborted (destroyed) cookie=0x%llx\n",
+                                            fx->cookie);
+                } else if (rc) {
                         int restore_rc;
 
-                        restore_rc = ask_flow_insert(t, fx->cookie, &old_key, old_oif,
-                                                     old_action_flags, old_dir, &hw_id);
-                        if (restore_rc == -EEXIST)
+                        restore_rc = ask_flow_insert_owned(t, fx->cookie, &old_key,
+                                                           old_oif, old_action_flags,
+                                                           old_dir, fx->generation,
+                                                           &hw_id);
+                        if (restore_rc == -EEXIST || restore_rc == -ESTALE)
                                 restore_rc = 0;
                         if (restore_rc)
                                 pr_warn_ratelimited("ask: neigh: rebuild rollback failed cookie=0x%llx rc=%d\n",
@@ -835,8 +948,17 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
                 int rc;
 
                 list_del(&p->node);
-                rc = ask_flow_insert(t, p->cookie, &p->key, p->oif,
-                                     p->action_flags, ASK_HW_DIR_FWD, &hw_id);
+                /* A3 (R2): skip cookies destroyed/superseded while parked. */
+                if (p->generation != 0 &&
+                    !ask_flow_gen_is_current(t, p->cookie, p->generation)) {
+                        pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%u (poll, destroyed/superseded)\n",
+                                            p->cookie, p->generation);
+                        kfree(p);
+                        continue;
+                }
+                rc = ask_flow_insert_owned(t, p->cookie, &p->key, p->oif,
+                                           p->action_flags, ASK_HW_DIR_FWD,
+                                           p->generation, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
                 if (rc == 0) {
@@ -848,6 +970,8 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
                                             p->ingress_ifindex,
                                             hw_id, p->key.next_hop_mac,
                                             p->key.egress_mac);
+                } else if (rc == -ESTALE) {
+                        /* superseded between the gen check and publish; benign */
                 } else {
                         pr_info_ratelimited("ask: flow_offload: PR14z10 poll-insert FAIL rc=%d cookie=0x%llx eg_if=%d in_if=%d\n",
                                             rc, p->cookie, p->egress_ifindex,
@@ -1057,24 +1181,76 @@ static int ask_parse_match(struct flow_cls_offload *f,
 }
 
 /* ------------------------------------------------------------------------- */
+/* Canonical intent lowering (T-M6-A1)                                        */
+/*                                                                            */
+/* Single translation point from the typed ask_flow_intent to the legacy      */
+/* (oif, action_flags) pair the insert/pending/neigh paths still consume.     */
+/* For the plain IPv4-unicast flow this MUST reproduce the exact pre-A1       */
+/* values (oif = egress ifindex, action_flags = 0) so the stored ask_flow     */
+/* and the FE record stay byte-for-byte identical. When NAT/VLAN land, the    */
+/* future FE action compiler replaces this body; call sites do not change.    */
+/* ------------------------------------------------------------------------- */
+int ask_intent_lower(const struct ask_flow_intent *in,
+                     u32 *out_oif, u32 *out_action_flags)
+{
+        u32 oif = 0;
+        u32 flags = 0;
+        u8 i;
+
+        for (i = 0; i < in->n_actions; i++) {
+                switch (in->actions[i].type) {
+                case ASK_ACTION_REDIRECT:
+                        oif = in->actions[i].oif;
+                        break;
+                case ASK_ACTION_L2_REWRITE:
+                        /* Performed by the FE-VM INSERT_L2_HDR opcode from the
+                         * resolved next-hop MAC in the key; no legacy flag. */
+                        break;
+                case ASK_ACTION_TTL_DEC:
+                        /* The FE opcode chain always decrements TTL for a
+                         * routed flow; it is implicit in the record and,
+                         * pre-A1, was never encoded in action_flags. Keep it
+                         * out of the legacy flags to preserve byte-identity. */
+                        break;
+                default:
+                        return -EOPNOTSUPP;
+                }
+        }
+
+        if (oif == 0)
+                return -EOPNOTSUPP;
+
+        *out_oif = oif;
+        *out_action_flags = flags;
+        return 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Action parsing                                                             */
 /*                                                                            */
-/* PR14j extension: also returns the egress net_device * (act->dev) so the    */
-/* caller can run neigh_lookup() and fill key->next_hop_mac / egress_mac.     */
-/* The pointer is borrowed from the rule and is RCU-protected; caller must    */
-/* use it before returning from the FLOW_CLS_REPLACE handler.                 */
+/* T-M6-A1: builds the canonical ask_flow_intent (match + typed actions), then*/
+/* lowers it to (oif, action_flags). Also returns the egress net_device *     */
+/* (act->dev) so the caller can run neigh_lookup() and fill                    */
+/* key->next_hop_mac / egress_mac. The pointer is borrowed from the rule and  */
+/* is RCU-protected; caller must use it before returning from the             */
+/* FLOW_CLS_REPLACE handler.                                                   */
 /* ------------------------------------------------------------------------- */
 
 static int ask_parse_action(struct flow_cls_offload *f,
+                            const struct ask_flow_key *match,
                             u32 *out_action_flags, u32 *out_oif,
                             struct net_device **out_egress_dev)
 {
         struct flow_rule *rule = flow_cls_offload_flow_rule(f);
         struct flow_action_entry *act;
         struct net_device *egress = NULL;
-        u32 flags = 0;
+        struct ask_flow_intent intent = {
+                .match = match,
+                .owner = (u64)f->cookie,
+                .generation = 0, /* A3 assigns real generations */
+        };
         u32 oif = 0;
-        int i;
+        int i, rc;
 
         flow_action_for_each(i, act, &rule->action) {
                 switch (act->id) {
@@ -1084,12 +1260,13 @@ static int ask_parse_action(struct flow_cls_offload *f,
                                 return -EOPNOTSUPP;
                         oif = act->dev->ifindex;
                         egress = act->dev;
-                        break;
-                case FLOW_ACTION_VLAN_PUSH:
-                        flags |= ASK_ACT_VLAN_PUSH;
-                        break;
-                case FLOW_ACTION_VLAN_POP:
-                        flags |= ASK_ACT_VLAN_POP;
+                        rc = ask_intent_add(&intent, ASK_ACTION_REDIRECT, oif);
+                        if (rc)
+                                return rc;
+                        /* Every routed flow decrements TTL in the FE chain. */
+                        rc = ask_intent_add(&intent, ASK_ACTION_TTL_DEC, 0);
+                        if (rc)
+                                return rc;
                         break;
                 case FLOW_ACTION_CSUM:
                         break;
@@ -1097,27 +1274,53 @@ static int ask_parse_action(struct flow_cls_offload *f,
                 case FLOW_ACTION_ACCEPT:
                         break;
                 /*
-                 * PR14q: kernel 6.18 nft flowtable offload emits
-                 * FLOW_ACTION_MANGLE (L2 dst-MAC + IP TTL decrement at
-                 * minimum, optionally NAT src/dst rewrite) BEFORE the
-                 * FLOW_ACTION_REDIRECT that names the egress netdev.
-                 * PR14p instrumentation on 2026-05-17 caught every
-                 * REPLACE returning -EOPNOTSUPP (-95) from this switch
-                 * because MANGLE was unhandled. The HW path does not
-                 * yet apply MANGLE rewrites (OH-port chain only pushes
-                 * the next-hop L2 header from neigh_lookup); we accept
-                 * the action as a no-op here so that the REDIRECT that
-                 * follows actually gets to set oif. Header rewrite
-                 * fidelity is deferred to PR14r/PR14s.
+                 * T-M6-A2 (strict action acceptance, 2026-08-18).
                  *
-                 * FLOW_ACTION_TUNNEL_ENCAP / FLOW_ACTION_TUNNEL_DECAP
-                 * are similarly accepted as no-ops so a future kernel
-                 * that emits them on the flowtable path does not
-                 * regress us back to silent SW fallback.
+                 * kernel nf_flow_table (nf_flow_rule_route_common) always
+                 * emits FLOW_ACTION_MANGLE of htype ETH for the next-hop
+                 * L2 src/dst rewrite on EVERY forwarded flow. The FE-VM
+                 * hardware path already performs that L2 rewrite via
+                 * INSERT_L2_HDR from the resolved neighbour MAC, so an
+                 * ETH-type MANGLE is genuinely satisfied by the HW record
+                 * and is accepted.
+                 *
+                 * MANGLE of htype IP4/IP6/TCP/UDP is only emitted when the
+                 * flow carries NF_FLOW_SNAT/DNAT — i.e. address/port NAT.
+                 * The HW record does NOT apply those rewrites yet (the NAT
+                 * compiler is T-M6-7). Accepting them as a no-op would
+                 * publish an in_hw record that forwards NAT traffic WITHOUT
+                 * translating it — silent misforwarding. Until T-M6-7,
+                 * return -EOPNOTSUPP so the flow stays on the kernel SW
+                 * fastpath, which translates correctly.
+                 *
+                 * FLOW_ACTION_ADD is a NAT-adjacent field increment with the
+                 * same "not applied in HW" hazard: reject it.
+                 *
+                 * VLAN push/pop and PPPoE push set encap that the HW record
+                 * does not build (VLAN is deferred T-M6-8, PPPoE is M6-C).
+                 * Previously VLAN_PUSH/POP only set action_flags bits that
+                 * ask_hw_flow_insert() ignores (ask_hw.c: (void)action_flags),
+                 * so those flows offloaded WITHOUT the tag operation — the
+                 * same misforwarding class. Reject until implemented.
                  */
                 case FLOW_ACTION_MANGLE:
+                        if (act->mangle.htype == FLOW_ACT_MANGLE_HDR_TYPE_ETH) {
+                                rc = ask_intent_add(&intent,
+                                                    ASK_ACTION_L2_REWRITE, 0);
+                                if (rc)
+                                        return rc;
+                                break; /* L2 rewrite done by INSERT_L2_HDR */
+                        }
+                        pr_info_ratelimited("ask: flow_offload: MANGLE htype=%u (NAT/L3/L4 rewrite) not offloaded — SW fallback (T-M6-7)\n",
+                                            act->mangle.htype);
+                        return -EOPNOTSUPP;
                 case FLOW_ACTION_ADD:
-                        break;
+                        pr_info_ratelimited("ask: flow_offload: FLOW_ACTION_ADD (NAT field add) not offloaded — SW fallback (T-M6-7)\n");
+                        return -EOPNOTSUPP;
+                case FLOW_ACTION_VLAN_PUSH:
+                case FLOW_ACTION_VLAN_POP:
+                        pr_info_ratelimited("ask: flow_offload: VLAN push/pop not offloaded — SW fallback (T-M6-8)\n");
+                        return -EOPNOTSUPP;
                 default:
                         pr_info_ratelimited("ask: flow_offload: parse_action: unhandled act->id=%u (treating as -EOPNOTSUPP)\n",
                                             act->id);
@@ -1130,7 +1333,11 @@ static int ask_parse_action(struct flow_cls_offload *f,
                 return -EOPNOTSUPP;
         }
 
-        *out_action_flags = flags;
+        /* Lower the canonical intent to the legacy (oif, action_flags) pair.
+         * For the IPv4-unicast flow this yields the exact pre-A1 values. */
+        rc = ask_intent_lower(&intent, &oif, out_action_flags);
+        if (rc)
+                return rc;
         *out_oif = oif;
         if (out_egress_dev)
                 *out_egress_dev = egress;
@@ -1233,6 +1440,54 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 }
 
 /*
+ * T-M6-1: IPv6 counterpart of ask_z11_other_src_v4(). Recovers the real
+ * next-hop from the conntrack opposite-direction tuple's src_v6 (the L3 dest
+ * the kernel routed THIS direction's egress against) and the netdev it routed
+ * through, so v6 neighbour resolution and egress selection match what
+ * nf_flow_table's FLOW_OFFLOAD_XMIT_NEIGH path computes. Writes the 16-byte
+ * next-hop into @out (returns true) or leaves it untouched (returns false).
+ * Does NOT mutate key.dst_ip — only local routing state, exactly like v4.
+ */
+static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
+                                 struct net_device **out_iif,
+                                 struct in6_addr *out_nh)
+{
+        struct flow_offload_tuple *t;
+        struct flow_offload_tuple_rhash *rh;
+        struct flow_offload *flow;
+        struct flow_offload_tuple *other;
+        int dir;
+
+        if (out_iif)
+                *out_iif = NULL;
+        if (!cookie || !out_nh)
+                return false;
+
+        t   = (struct flow_offload_tuple *)cookie;
+        dir = t->dir;
+        if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+                return false;
+
+        rh   = container_of(t, struct flow_offload_tuple_rhash, tuple);
+        flow = (struct flow_offload *)((char *)rh -
+                offsetof(struct flow_offload, tuplehash[dir]));
+        if (!flow)
+                return false;
+
+        other = &flow->tuplehash[!dir].tuple;
+
+        if (out_dir)
+                *out_dir = dir;
+        if (out_iif) {
+                rcu_read_lock();
+                *out_iif = dev_get_by_index_rcu(&init_net, other->iifidx);
+                rcu_read_unlock();
+        }
+        *out_nh = other->src_v6;
+        return true;
+}
+
+/*
  * Serialise @key into the 14-byte EKFC record the FE-VM comparator matches.
  *
  * Layout is the silicon's MSB-first extraction order for EKFC 0x801C0006
@@ -1291,6 +1546,35 @@ void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6
         memcpy(&k[36], &key->dport, sizeof(key->dport));
 }
 
+/*
+ * Dual-lane 46-byte key builder (specs/ask2-ipv6-dual-lane-key-design.md).
+ * Mirrors the F-224 GEC extraction order byte-for-byte so the software key
+ * equals what KeyGen emits. The absent family's lane is zero-filled, exactly
+ * as the validated GEC codes (0x0b/0x1b) zero-fill from the reset-0 default
+ * register on a wrong-family frame (silicon-proven 2026-08-21: v4 flow -> v6
+ * lanes 16+16 zero; v6 flow -> v4 lane 8 zero). ask_flow_key.src_ip/dst_ip are
+ * 16-byte; for a v4 flow the address is in the first 4 bytes.
+ */
+void ask_fe_build_key_dual(const struct ask_flow_key *key,
+			   u8 k[ASK_FE_KEY_SIZE_DUAL])
+{
+        memset(k, 0, ASK_FE_KEY_SIZE_DUAL);
+        if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+                k[0] = ASK_FE_FAMILY_V6;
+                /* v4 lane k[1..8] stays zero */
+                memcpy(&k[9],  key->src_ip, 16);   /* IPv6 src */
+                memcpy(&k[25], key->dst_ip, 16);   /* IPv6 dst */
+        } else {
+                k[0] = ASK_FE_FAMILY_V4;
+                memcpy(&k[1], key->src_ip, 4);     /* IPv4 src */
+                memcpy(&k[5], key->dst_ip, 4);     /* IPv4 dst */
+                /* v6 lanes k[9..40] stay zero */
+        }
+        k[41] = key->l4_proto;
+        memcpy(&k[42], &key->sport, sizeof(key->sport));
+        memcpy(&k[44], &key->dport, sizeof(key->dport));
+}
+
 /* ------------------------------------------------------------------------- */
 /* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
  * to FMan hash key (L4PDST+L4PSRC+IPDST+IPSRC) and writes fe_flow debugfs. */
@@ -1305,7 +1589,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         struct fman_pcd_fe_flow_action action;
         struct fman *fm;
         int rc, table_idx;
-        u8 key_buf[ASK_FE_KEY_SIZE_V6];
+        u8 key_buf[ASK_FE_KEY_SIZE_DUAL];
 
         if (!key) {
                 ask_pr_dbg("fe_flow_insert: NULL key (flow destroyed) -- skipping\n");
@@ -1324,19 +1608,20 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 
         memset(&action, 0, sizeof(action));
 
-        /* M6 Piece 3: route v4 to ehash table 0, v6 to table 1 */
-        if (key->l3_proto == ASK_FLOW_L3_IPV6) {
-                ask_fe_build_key_v6(key, key_buf);
-                memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_V6);
-                action.key_size = ASK_FE_KEY_SIZE_V6;
-                table_idx = 1;
-        } else {
-                ask_fe_build_key(key, key_buf);
-                memcpy(action.key, key_buf, ASK_FE_KEY_SIZE);
-                action.key_size = ASK_FE_KEY_SIZE;
-                table_idx = 0;
-        }
-        action.enq_off  = enq_off;
+        /* Dual-lane 46-byte key: ONE key/table/scheme for both families
+         * (specs/ask2-ipv6-dual-lane-key-design.md). The family byte + zeroed
+         * absent lane keep v4 and v6 records disjoint in the one per-port table
+         * (table_idx 0), so no second scheme / parser LCV split. */
+        ask_fe_build_key_dual(key, key_buf);
+        memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_DUAL);
+        action.key_size = ASK_FE_KEY_SIZE_DUAL;
+        table_idx = 0;
+        action.enq_off   = enq_off;
+        /* F-204 / T-M6-1 Phase 2a: explicit ehash selector. This is SEPARATE
+         * from key->port_id, which remains the ingress FMan port for F-195's
+         * own-port miss-FQID resolution. v4 passes 0 exactly as before; v6
+         * would pass 1, but preflight still rejects v6 until Phase 3 dispatch. */
+        action.table_idx = (u8)table_idx;
 
         /* T-M7-2 S1 (2026-08-15): hardware TX terminal. Supply the resolved
          * per-egress-interface TX FQID plus the routed L2 rewrite (next-hop
@@ -1355,16 +1640,11 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
                                 ? ETH_P_IPV6 : ETH_P_IP;
 
-        /* F-195(prod-flow-ingress-port): fman_pcd_fe_flow_add() uses its
-         * second argument exclusively to resolve the flow record's own-port
-         * target FQID. It is not an ehash table selector: the current FMan
-         * implementation selects table 0 internally. Passing table_idx here
-         * made every IPv4 flow look like hw-port 0x00, which maps to eth3's
-         * FQID 0x200 and misroutes eth4 ingress to the foreign queue.
-         *
-         * Keep table_idx only as a protocol-classification diagnostic until
-         * the FMan API grows real v6-table selection; pass the actual ingress
-         * FMan port retained in key.port_id to the current API.
+        /* F-195/F-204 contract: the second argument remains exclusively the
+         * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
+         * eth4=0x300). Never overload it with a table index — that historical
+         * bug cross-port dropped eth4 flows. The separate action.table_idx
+         * field now selects ehash table 0/1 inside fman_pcd_fe_flow_add().
          */
         ask_pr_info("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
                     fm, &action, key->port_id, table_idx, action.key_size,
@@ -1390,12 +1670,24 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
  */
 static void ask_fe_flow_remove(const struct ask_flow_key *key)
 {
-        u8 k[ASK_FE_KEY_SIZE];
+        u8 k[ASK_FE_KEY_SIZE_DUAL];
+        u8 klen;
 
         if (!key)
                 return;
-        ask_fe_build_key(key, k);
-        fman_pcd_fe_flow_del(ask_hw_get_fman(), 0, k, sizeof(k));
+        /*
+         * Build the SAME 46-byte dual-lane key the matching insert used, so
+         * per-key fman_pcd_fe_flow_del() unlinks exactly this record. Both
+         * families now share the one 46-byte key/table (the family byte +
+         * zeroed absent lane keep them distinct).
+         */
+        ask_fe_build_key_dual(key, k);
+        klen = ASK_FE_KEY_SIZE_DUAL;
+        /* Phase 1 (per-port tables): pass the ingress hw port so the delete
+         * selects THIS port's routed-IPv4 table instance (F-220/F-221), matching
+         * the insert side which passed key->port_id. v6 delete still selects the
+         * global table by key length; the port arg is harmless there. */
+        fman_pcd_fe_flow_del(ask_hw_get_fman(), key->port_id, k, klen);
 }
 
 
@@ -1408,14 +1700,32 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         struct ask_flow_table *t = ask_flow_default_table();
         struct net_device *egress_dev = NULL;
         struct ask_flow_key key;
-        __be32 dst_ip;
+        __be32 dst_ip = 0;
+        struct in6_addr dst_ip6 = {};   /* T-M6-1: v6 next-hop for neigh resolve */
+        bool is_v6;
         u32 hw_id = 0;
         u32 action_flags = 0;
         u32 oif = 0;
+        u32 generation;
         int rc;
 
         if (!t) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE early-return (no default table) cookie=0x%lx\n",
+                                    f->cookie);
+                return -EOPNOTSUPP;
+        }
+
+        /*
+         * T-M6-A3: claim ownership for this REPLACE up front. This bumps the
+         * cookie's generation and clears any prior tombstone, so a DESTROY
+         * that arrives while we resolve neighbours / install the FE record is
+         * observed by the pre-publish gen check (insert_owned) and by the
+         * pending/neigh workers. On registry OOM, fail to software rather
+         * than publish an unguarded flow.
+         */
+        generation = ask_flow_gen_next(t, (u64)f->cookie);
+        if (generation == 0) {
+                pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx gen-alloc failed — SW fallback\n",
                                     f->cookie);
                 return -EOPNOTSUPP;
         }
@@ -1426,6 +1736,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                     rc, f->cookie);
                 return rc;
         }
+        is_v6 = (key.l3_proto == ASK_FLOW_L3_IPV6);
 
         /*
          * PR14z19 (2026-05-25): populate key.iif from the block_cb's
@@ -1452,7 +1763,47 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 key.iif = ingress_dev->ifindex;
         }
 
-        rc = ask_parse_action(f, &action_flags, &oif, &egress_dev);
+        /*
+         * MULTI-PORT INGRESS FIX (2026-08-21): ingress_dev is the block_cb's
+         * netdev, which for an nft flowtable spanning >2 interfaces is NOT
+         * reliably the true ingress — the same cookie is delivered to EVERY
+         * device's block_cb, and the PR14r dedup keeps whichever arrived first
+         * (eth3, alphabetically). That mis-attributed every non-eth3 ingress
+         * (e.g. an eth2->eth4 flow) to eth3, so fman_pcd_fe_flow_add() keyed
+         * the record into eth3's per-port ehash table (F-220) instead of the
+         * true ingress port's table -> the true ingress port's RX classifier
+         * looked up its own (empty) table -> permanent MISS -> software forward
+         * (board .185 2026-08-21: eth2 flow, ingress=eth3, pkt_count=0).
+         *
+         * The kernel already encodes the AUTHORITATIVE true ingress in the
+         * flow rule's FLOW_DISSECTOR_KEY_META.ingress_ifindex (populated from
+         * the conntrack tuple iifidx in nf_flow_table_offload.c), which every
+         * mainline offload driver (mlx5/mtk/ocelot/nfp/...) uses. Prefer it
+         * over the block_cb dev so the record lands in the correct per-port
+         * table for ANY of the five ports. eth3/eth4 flows are unaffected
+         * (meta ingress == ingress_dev there).
+         */
+        {
+                struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+
+                if (rule && flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META)) {
+                        struct flow_match_meta mm;
+
+                        flow_rule_match_meta(rule, &mm);
+                        if (mm.key && mm.mask &&
+                            (mm.key->ingress_ifindex & mm.mask->ingress_ifindex)) {
+                                if (key.iif != mm.key->ingress_ifindex)
+                                        pr_info_ratelimited("ask: flow_offload: META iif correction key.iif %d -> %u (block dev=%s) cookie=0x%lx\n",
+                                                            key.iif,
+                                                            mm.key->ingress_ifindex,
+                                                            ingress_dev ? netdev_name(ingress_dev) : "?",
+                                                            f->cookie);
+                                key.iif = mm.key->ingress_ifindex;
+                        }
+                }
+        }
+
+        rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
         if (rc) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
                                     rc, f->cookie);
@@ -1491,19 +1842,37 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          */
         {
                 struct net_device *z11_iif = NULL;
-                __be32 z11_dst;
 
-                z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
-                                               NULL, &z11_iif);
-                if (z11_dst != 0) {
-                        dst_ip = z11_dst;
-                        if (z11_iif) {
-                                egress_dev = z11_iif;
-                                oif = z11_iif->ifindex;
+                if (is_v6) {
+                        struct in6_addr z11_nh6;
+
+                        if (ask_z11_other_src_v6((unsigned long)f->cookie,
+                                                 NULL, &z11_iif, &z11_nh6) &&
+                            !ipv6_addr_any(&z11_nh6)) {
+                                dst_ip6 = z11_nh6;
+                                if (z11_iif) {
+                                        egress_dev = z11_iif;
+                                        oif = z11_iif->ifindex;
+                                }
+                                pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 next-hop cookie=0x%lx nh-dst=%pI6c egress=%s\n",
+                                                    f->cookie, &dst_ip6,
+                                                    egress_dev ? netdev_name(egress_dev) : "?");
                         }
-                        pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
-                                            f->cookie, &z11_dst,
-                                            egress_dev ? netdev_name(egress_dev) : "?");
+                } else {
+                        __be32 z11_dst;
+
+                        z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
+                                                       NULL, &z11_iif);
+                        if (z11_dst != 0) {
+                                dst_ip = z11_dst;
+                                if (z11_iif) {
+                                        egress_dev = z11_iif;
+                                        oif = z11_iif->ifindex;
+                                }
+                                pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
+                                                    f->cookie, &z11_dst,
+                                                    egress_dev ? netdev_name(egress_dev) : "?");
+                        }
                 }
         }
 
@@ -1616,8 +1985,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * If the neighbour is not yet resolved, the HW path returns -EAGAIN
          * and the SW path takes the flow until the neighbour completes.
          */
-        ask_resolve_neigh_v4(egress_dev, dst_ip,
-                             key.next_hop_mac, key.egress_mac);
+        if (is_v6)
+                ask_resolve_neigh_v6(egress_dev, &dst_ip6,
+                                     key.next_hop_mac, key.egress_mac);
+        else
+                ask_resolve_neigh_v4(egress_dev, dst_ip,
+                                     key.next_hop_mac, key.egress_mac);
 
         /*
          * F-111: Reject multicast/broadcast next-hop MACs before HW insert.
@@ -1628,6 +2001,28 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          */
         if (is_multicast_ether_addr(key.next_hop_mac))
                 return -EAGAIN;
+
+        /* T-M6-1 first v6 insert iteration: if NDISC is unresolved, trigger a
+         * neighbour probe and fall back to software. The legacy pending queue
+         * stores a __be32 v4 key; widening/replay is deliberately deferred
+         * until the direct stable-neighbour v6 HIT is proven. Our lab topology
+         * pre-resolves fd99 neighbours, so the HIT path does not take this arm.
+         */
+        if (is_v6 && egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
+                struct neighbour *n;
+
+                n = neigh_lookup(&nd_tbl, &dst_ip6, egress_dev);
+                if (!n)
+                        n = __neigh_create(&nd_tbl, &dst_ip6, egress_dev, true);
+                if (n && !IS_ERR(n)) {
+                        neigh_event_send(n, NULL);
+                        neigh_release(n);
+                }
+                pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 neigh unresolved cookie=0x%lx dst=%pI6c dev=%s — SW fallback\n",
+                                    f->cookie, &dst_ip6,
+                                    netdev_name(egress_dev));
+                return -EAGAIN;
+        }
 
         /*
          * PR14y: if the next-hop MAC is still all-zero, the ARP entry is
@@ -1649,7 +2044,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		 * of indefinite pinning if ARP churns.  M3 eviction policy
 		 * will age out entries stuck > 30 s and force SW path.
 		 */
-        if (egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
+        if (!is_v6 && egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
                 /* PR14y BUG #2: ARP TOCTOU — neighbour resolved but evicted
                  * before insert.  Deferred pending; M3 eviction TBD.
                  */
@@ -1668,8 +2063,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 qrc = ask_flow_pending_enqueue((u64)f->cookie, &key, oif,
                                                action_flags,
                                                egress_dev->ifindex,
-                                               ingress_dev ? ingress_dev->ifindex : 0,
-                                               dst_ip);
+                                                /* true ingress (META-corrected), not block dev */
+                                                key.iif,
+                                                dst_ip, generation);
                 if (qrc == 0) {
                         pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
                                             f->cookie, oif,
@@ -1743,10 +2139,24 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          */
         {
                 enum ask_hw_dir __dir = ASK_HW_DIR_FWD;
+                /*
+                 * MULTI-PORT INGRESS FIX (2026-08-21): resolve the ingress
+                 * hwport from the META-corrected key.iif (the true ingress),
+                 * NOT the block_cb's ingress_dev. key.port_id set below is what
+                 * fman_pcd_fe_flow_add() uses to pick the per-port ehash table
+                 * (F-220); using the block dev put an eth2 flow's record into
+                 * eth3's table -> MISS. Look up the true-ingress netdev by
+                 * key.iif (ref held only within this scope, released before any
+                 * exit). Falls back to ingress_dev if the lookup fails.
+                 */
+                struct net_device *true_iif_dev =
+                        key.iif ? dev_get_by_index(&init_net, key.iif) : NULL;
+                struct net_device *bind_dev = true_iif_dev ? true_iif_dev
+                                                           : ingress_dev;
 
-                if (ingress_dev) {
+                if (bind_dev) {
                         u8 pid;
-                        int prc = ask_dpaa_get_fman_port_id(ingress_dev, &pid);
+                        int prc = ask_dpaa_get_fman_port_id(bind_dev, &pid);
 
                         if (prc == 0) {
                                 u8 expected = 0xff;
@@ -1792,29 +2202,42 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                 __dir = (pid == winner) ? ASK_HW_DIR_FWD
                                                         : ASK_HW_DIR_REV;
 
-                                prc = ask_hw_port_bind(pid, __dir, ingress_dev);
+                                prc = ask_hw_port_bind(pid, __dir, bind_dev);
                                 if (prc) {
                                         if (prc == -EBUSY)
                                                 ask_pr_dbg("flow_offload: REPLACE %s pid=%u dir=%u: pipeline busy, SW fallback\n",
-                                                           netdev_name(ingress_dev),
+                                                           netdev_name(bind_dev),
                                                            pid, __dir);
                                         else if (prc != -ENODEV)
                                                 ask_pr_warn("flow_offload: REPLACE %s (pid %u dir %u) port-bind failed: %d\n",
-                                                            netdev_name(ingress_dev),
+                                                            netdev_name(bind_dev),
                                                             pid, __dir, prc);
+                                        if (true_iif_dev)
+                                                dev_put(true_iif_dev);
                                         return prc;
                                 }
                         } else if (prc != -ENODEV && prc != -ERANGE) {
                                 ask_pr_dbg("flow_offload: REPLACE port-id resolve(%s) failed: %d\n",
-                                           netdev_name(ingress_dev), prc);
+                                           netdev_name(bind_dev), prc);
                         }
                 }
+                if (true_iif_dev)
+                        dev_put(true_iif_dev);
 
-                rc = ask_flow_insert(t, (u64)f->cookie, &key, oif,
-                                     action_flags, __dir, &hw_id);
+                rc = ask_flow_insert_owned(t, (u64)f->cookie, &key, oif,
+                                           action_flags, __dir, generation,
+                                           &hw_id);
         }
         if (rc == -EEXIST)
                 return 0;
+        if (rc == -ESTALE) {
+                /* A3: a DESTROY superseded this REPLACE before publish; the
+                 * flow was intentionally not offloaded and its HW rolled back.
+                 * Report success — the desired end state (cookie gone) holds. */
+                pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx superseded by DESTROY — left in SW\n",
+                                    f->cookie);
+                return 0;
+        }
         if (rc) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE flow_insert=%d cookie=0x%lx oif=%u nh=%pM em=%pM\n",
                                     rc, f->cookie, oif,
@@ -1839,30 +2262,74 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                             f->cookie, hw_id,
                             ingress_dev ? netdev_name(ingress_dev) : "?", oif,
                             key.next_hop_mac, key.egress_mac);
+        /*
+         * T-M6-A3 (R4): close the rht-publish -> FE-install race window.
+         * ask_flow_insert_owned() has published the SW entry and HW cookie,
+         * but the per-key FE record is installed below. A DESTROY can race
+         * between those two operations. Check ownership BEFORE FE install;
+         * if tombstoned/superseded, remove only our generation and stop.
+         */
+        if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
+                (void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
+                return 0;
+        }
         /* Keep offload ownership transactional: only keep the flow in the
          * HW-backed table if the FE-VM record was actually installed. */
         {
                 /* T-M7-2 S1: recover the per-egress-interface TX FQID that
                  * ask_hw_flow_insert() resolved and saved in this hw_id's
                  * cookie, so the FE record forwards a HIT direct-to-wire.
-                 * On any lookup miss fe_tx_fqid stays 0 and ask_fe_flow_insert
-                 * falls back to the F-197 own-port RX-FQID terminal. */
+                 *
+                 * 2026-08-21 PANIC FIX (kernel NULL-deref in
+                 * xdp_return_frame <- dpaa_cleanup_tx_fd): the sink FQID MUST
+                 * be the per-egress NO-CONFIRM TX FQ (F-199, B0V=0). If the
+                 * cookie lookup misses (fe_tx_fqid stays 0), the F-197/F-198
+                 * fallback would enqueue the HIT to the port's CONFIRMED
+                 * KG-default RX FQID (target_fqid, B0V=1). An FMan-forwarded
+                 * HIT frame on a confirmed FQ generates a TX-confirm FD whose
+                 * BMan buffer has no dpaa_eth_swbp -> dpaa_cleanup_tx_fd
+                 * dereferences a garbage xdp_frame and panics the kernel.
+                 * FAIL CLOSED instead: refuse the FE record and keep the flow
+                 * in software (matches the resolver's fail-closed contract in
+                 * ask_hw_resolve_oif_fqid). A HIT must never target a
+                 * confirmed FQ. */
                 u32 fe_tx_fqid = 0;
+                int fqrc = ask_hw_flow_get_sink_fqid(hw_id, &fe_tx_fqid);
 
-                (void)ask_hw_flow_get_sink_fqid(hw_id, &fe_tx_fqid);
-                rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
-                                        fe_tx_fqid);
+                if (fqrc || fe_tx_fqid == 0) {
+                        ask_pr_warn("flow_offload: REPLACE cookie=0x%lx no no-confirm TX FQ (rc=%d fqid=0x%x) - keeping flow in SW\n",
+                                    f->cookie, fqrc, fe_tx_fqid);
+                        rc = -EAGAIN;
+                } else {
+                        rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
+                                                fe_tx_fqid);
+                }
         }
         if (rc) {
                 int rrc;
 
                 ask_pr_warn("flow_offload: REPLACE rollback cookie=0x%lx fe_flow_insert=%d\n",
                             f->cookie, rc);
-                rrc = ask_flow_remove(t, (u64)f->cookie);
-                if (rrc)
+                /* Owned remove: only tear down if we are still the owner —
+                 * a newer REPLACE that already superseded us must survive. */
+                rrc = ask_flow_remove_owned(t, (u64)f->cookie, generation);
+                if (rrc && rrc != -ESTALE)
                         ask_pr_warn("flow_offload: REPLACE rollback remove=%d cookie=0x%lx\n",
                                     rrc, f->cookie);
                 return rc;
+        }
+
+        /*
+         * T-M6-A3 (R4): a DESTROY may have raced during ask_fe_flow_insert().
+         * If we are no longer the owner, delete the FE record we just wrote
+         * and drop our SW entry so no orphan silicon record survives.
+         */
+        if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
+                ask_fe_flow_remove(&key);
+                (void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
+                pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — record removed\n",
+                                    f->cookie);
+                return 0;
         }
 
         return 0;
@@ -1871,7 +2338,23 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 {
         struct ask_flow_table *t = ask_flow_default_table();
+        u32 destroy_gen;
         int rc;
+
+        if (!t)
+                return -EOPNOTSUPP;
+
+        /*
+         * T-M6-A3: tombstone the cookie FIRST, before touching the pending
+         * queue or the rht. This is the ordering that closes CR-004: once the
+         * tombstone is set, any concurrent pending replay or neigh rebuild
+         * that reads the generation will discard rather than resurrect, and a
+         * REPLACE still in flight for this cookie fails its pre-publish gen
+         * check. Snapshot the generation we are destroying so the owned-remove
+         * below cannot tear down a NEWER REPLACE that raced in after us.
+         */
+        destroy_gen = ask_flow_gen_current(t, (u64)f->cookie);
+        ask_flow_gen_tombstone(t, (u64)f->cookie);
 
         /*
          * PR14y: drop any pending deferred-insert entry for this cookie
@@ -1886,9 +2369,6 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                 /* Fall through — also try the rht remove in case the
                  * cookie was simultaneously promoted by the notifier. */
         }
-
-        if (!t)
-                return -EOPNOTSUPP;
 
         /* Fix B: capture the flow's 5-tuple BEFORE removing it from the rht,
          * so we can delete exactly its FE-VM silicon record (not clear-all). */
@@ -1905,9 +2385,27 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                 }
                 rcu_read_unlock();
 
-                rc = ask_flow_remove(t, (u64)f->cookie);
-                if (rc == -ENOENT)
+                /*
+                 * A3: owned remove bounded by the generation we tombstoned.
+                 * If a newer REPLACE re-claimed this recycled cookie between
+                 * our tombstone and here, remove_owned is a no-op and we must
+                 * NOT delete its FE record — so gate ask_fe_flow_remove on the
+                 * remove actually happening for our generation.
+                 */
+                rc = ask_flow_remove_owned(t, (u64)f->cookie, destroy_gen);
+                if (rc == -ENOENT) {
+                        ask_flow_gen_release(t, (u64)f->cookie);
                         return 0;
+                }
+                if (rc == -ESTALE) {
+                        /* A newer REPLACE re-claimed this recycled cookie
+                         * after our tombstone. It owns the flow and its FE
+                         * record now — do NOT delete it, do NOT release the
+                         * registry (the new owner's generation lives there). */
+                        pr_info_ratelimited("ask: flow_offload: DESTROY cookie=0x%lx superseded by newer REPLACE — FE delete skipped\n",
+                                            f->cookie);
+                        return 0;
+                }
                 if (rc)
                         return rc;
 
@@ -1916,6 +2414,9 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                  * flow's silicon record instead of clearing every flow. */
                 if (have_key)
                         ask_fe_flow_remove(&dkey);
+                /* Registry entry no longer needed: the flow is gone and no
+                 * worker can still be mid-replay for this generation. */
+                ask_flow_gen_release(t, (u64)f->cookie);
         }
         return 0;
 }

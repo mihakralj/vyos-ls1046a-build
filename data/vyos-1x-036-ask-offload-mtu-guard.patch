@@ -1,27 +1,31 @@
 
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 26eb177..9ecc15d 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -56,6 +56,10 @@
+@@ -56,6 +56,14 @@
  from vyos import airbag
  airbag.enable()
  
-+# ASK2 FMan FE offload MTU bounds validated on LS1046A hardware.
++# ASK2 FMan FE offload MTU bounds on LS1046A. F-222 reverts F-203's
++# fragmentation-prone order-1 RX buffers to the mainline-proven order-0 4 KiB
++# page. SKB_WITH_OVERHEAD(4096) leaves ~3712 bytes; clamp MTU to 3600 so every
++# accepted frame fits one contiguous RX buffer with safe L2/FCS/headroom margin.
++# 1280 is the VyOS IPv6-link-local floor.
 +ASK_OFFLOAD_MTU_MIN = 1280
-+ASK_OFFLOAD_MTU_MAX = 2500
++ASK_OFFLOAD_MTU_MAX = 3600
 +
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """
      Return list of blocked options if interface is a bond member
-@@ -313,6 +317,26 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -315,6 +319,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
              raise ConfigError(
-                 f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)'
+                 f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
              )
-+        # ASK FMan FE forwarding is validated only across the tested MTU range
-+        # on this board. The DPAA1 RX pool is a single order-0 page; frames
-+        # above the validated ceiling wedge the FMan RX path (cold-boot-only
-+        # recovery), and below the validated floor is untested. Clamp the MTU
++        # ASK FMan FE forwarding is bounded to the order-0 RX buffer range on
++        # this board. The DPAA1 RX pool is one contiguous 4 KiB order-0 page
++        # (F-222); frames above the ~3600 ceiling overrun the one-buffer FMan
++        # RX contract and wedge RX (cold-boot-only recovery), and below the
++        # floor is untested. Clamp the MTU
 +        # to [ASK_OFFLOAD_MTU_MIN, ASK_OFFLOAD_MTU_MAX] and fail the commit
 +        # closed outside it, so a remote MTU change on an ASK interface cannot
 +        # brick connectivity. The default 1500 is inside the range, so
@@ -34,7 +38,7 @@ index 26eb177..9ecc15d 100755
 +                raise ConfigError(
 +                    f'Interface {ifname} ASK offload requires MTU between '
 +                    f'{ASK_OFFLOAD_MTU_MIN} and {ASK_OFFLOAD_MTU_MAX} '
-+                    f'(configured MTU {mtu} is outside the validated range '
++                    f'(configured MTU {mtu} is outside the contiguous-buffer range '
 +                    f'and can wedge the FMan RX path). Set a supported MTU '
 +                    f'or disable "offload ask" first.'
 +                )

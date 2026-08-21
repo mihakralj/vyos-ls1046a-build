@@ -30,7 +30,7 @@ The design specs and deep-dives behind the build. Start here to understand *how*
 | [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md) | **DPAA1 AF_XDP driver modernization** — the flavor-ops abstraction, XSK-backed BMan pools, per-CPU NAPI on dedicated QMan channels, the four FMan HW offloads (CC / HM / Policer / CEETM), and the per-milestone status tracker |
 | [plans/NETWORKING-DEEP-DIVE.md](plans/NETWORKING-DEEP-DIVE.md) | **DPAA1 networking internals** — FMan architecture, QBMan portal allocation, the three-driver split (`fsl_dpaa_mac` / `fsl_dpa` / `fsl_dpaa_eth`), and how packets flow before the CPU sees them |
 | [plans/DUAL-DATAPLANE.md](plans/DUAL-DATAPLANE.md) | **Single-image dual-dataplane model** — one ISO ships every datapath; the silicon mode state machine (mainline/RSS ↔ ASK offload, with VPP as an AF_XDP overlay), runtime switching, and the reversibility contract |
-| [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md) | **ASK2 hardware accelerator** — the modern in-tree rewrite of the FMan/QMan offload engine: `ask.ko`, the PCD subsystem, config-driven per-interface engagement (`set interfaces ethernet eth<n> offload ask`) |
+| [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md) | **ASK2 hardware accelerator** — the modern in-tree rewrite of the FMan/QMan offload engine: `ask.ko`, the PCD subsystem, and independent per-interface IPv4/IPv6 controls (`set interfaces ethernet eth<n> offload ipv4|ipv6`) |
 | [specs/vpp-dpaa1-ls1046a-spec.md](specs/vpp-dpaa1-ls1046a-spec.md) | **VPP AF_XDP overlay** — kernel-bypass dataplane on the 10G SFP+ ports, thermal constraints, and the kernel↔VPP coexistence model |
 | [plans/PORTING.md](plans/PORTING.md) | **Porting postmortem** — driver archaeology, the boot-flow rework, and what broke (and why) bringing mainline VyOS up on the LS1046A |
 
@@ -55,6 +55,7 @@ This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM
 - **U-Boot direct boot.** `vyos.env` on the ext4 partition selects the active image. No GRUB, no OOM, no overhead. Image upgrades write the file automatically.
 - **~80s cold boot to login prompt.** Single boot, no kexec double-reboot. `CONFIG_DEBUG_PREEMPT` suppressed saves ~20s of cosmetic scheduler spam.
 - **HW-accelerated AF_XDP datapath.** The DPAA1 driver is modernized into a single shared kernel binary with `ndo_xsk_wakeup`, XSK-backed BMan pools, per-CPU NAPI on dedicated QMan channels, and FMan HW offloads (CC / HM / Policer / CEETM). The earlier DPDK DPAA PMD path was abandoned (RC#31: `dpaa_bus` probe globally disrupts kernel FMan interfaces); AF_XDP is the production kernel+VPP coexistence path. Design and milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md).
+- **FMan hardware routing offload (ASK2).** Routed IPv4 **and** IPv6 TCP/UDP unicast flows are steered through the Frame Manager's coarse classifier and FE opcode engine — TTL/hop-limit decrement and L2 rebuild happen in hardware, the CPU is bypassed for established flows, and nftables conntrack stays authoritative. Enable per interface and per family: `set interfaces ethernet eth<n> offload ipv4` / `offload ipv6`. ~7.3 Gbit/s unidirectional and ~12.9 Gbit/s bidirectional per 10G port at near-zero CPU; anything the engine can't represent (ICMP, fragments, NAT/VLAN, unresolved neighbours) falls back to software forwarding automatically. Design: [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md).
 
 ## Why VyOS?
 
@@ -181,7 +182,7 @@ The Frame Manager is the unsung hero. It handles packet parsing, core distributi
 
 ### DPAA1 Driver Modernization
 
-An ongoing effort modernizes the mainline DPAA1 driver into a single shared kernel binary (consumed in different runtime modes — kernel `default`, `vpp` AF_XDP, `ask` offload, all shipping in one image) with HW-accelerated AF_XDP and four FMan/QMan hardware offloads. Full design and per-milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md).
+An ongoing effort modernizes the mainline DPAA1 driver into a single shared kernel binary (consumed in different runtime modes — kernel `default`, `vpp` AF_XDP, and `ask` FMan routing offload, all shipping in one image) with HW-accelerated AF_XDP and FMan/QMan hardware offloads. The ASK2 routing offload (IPv4 + IPv6 hardware forwarding, engaged per interface/family via `set interfaces ethernet eth<n> offload ipv4|ipv6`) is silicon-validated on all five ports. Full design and per-milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md) and [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md).
 
 **Shipping and board-validated today:**
 

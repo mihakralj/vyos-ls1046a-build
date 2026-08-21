@@ -567,6 +567,130 @@ ask_flow_table_destroy(&t);
 }
 
 /* ------------------------------------------------------------------------- */
+/* T-M6-A3: ownership generation registry + owned insert/remove              */
+/* ------------------------------------------------------------------------- */
+
+/* Generations are monotonic per cookie, start at 1, survive tombstone. */
+static void ask_flow_test_gen_monotonic(struct kunit *test)
+{
+struct ask_flow_table t;
+u32 g1, g2, g3;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-mono"), 0);
+
+g1 = ask_flow_gen_next(&t, 0xC0DE);
+g2 = ask_flow_gen_next(&t, 0xC0DE);
+KUNIT_EXPECT_EQ(test, g1, 1u);
+KUNIT_EXPECT_EQ(test, g2, 2u);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xC0DE, 2u));
+KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xC0DE, 1u));
+
+/* Tombstone drops is_current for every generation, but a subsequent
+ * claim resumes monotonically (new owner) and clears the tombstone. */
+ask_flow_gen_tombstone(&t, 0xC0DE);
+KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xC0DE, 2u));
+g3 = ask_flow_gen_next(&t, 0xC0DE);
+KUNIT_EXPECT_EQ(test, g3, 3u);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xC0DE, 3u));
+
+ask_flow_table_destroy(&t);
+}
+
+/* R1: a stale DESTROY (older generation) must NOT remove a newer flow. */
+static void ask_flow_test_gen_stale_destroy_noop(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id = 0, gen_old, gen_new;
+struct ask_flow *f;
+int rc;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-stale"), 0);
+make_key_v4(&key, htonl(0x0a000001), htonl(0x0a000002),
+    htons(1234), htons(80));
+
+/* Old owner claims gen 1 but never publishes (simulating a REPLACE
+ * that lost the race); new owner claims gen 2 and publishes. */
+gen_old = ask_flow_gen_next(&t, 0xABCD);
+gen_new = ask_flow_gen_next(&t, 0xABCD);
+KUNIT_ASSERT_EQ(test, gen_old, 1u);
+KUNIT_ASSERT_EQ(test, gen_new, 2u);
+
+rc = ask_flow_insert_owned(&t, 0xABCD, &key, 7, 0, ASK_HW_DIR_FWD,
+   gen_new, &hw_id);
+KUNIT_EXPECT_EQ(test, rc, 0);
+
+/* Stale DESTROY at gen 1 must be an idempotent no-op (-ESTALE),
+ * leaving the gen-2 flow intact. */
+rc = ask_flow_remove_owned(&t, 0xABCD, gen_old);
+KUNIT_EXPECT_EQ(test, rc, -ESTALE);
+rcu_read_lock();
+f = ask_flow_lookup(&t, 0xABCD);
+KUNIT_EXPECT_NOT_NULL(test, f);
+rcu_read_unlock();
+
+/* The current owner CAN remove it. */
+rc = ask_flow_remove_owned(&t, 0xABCD, gen_new);
+KUNIT_EXPECT_EQ(test, rc, 0);
+rcu_read_lock();
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(&t, 0xABCD));
+rcu_read_unlock();
+
+ask_flow_table_destroy(&t);
+}
+
+/* R4: insert_owned must refuse to publish once the cookie is tombstoned,
+ * and must not leave a SW entry behind. */
+static void ask_flow_test_gen_publish_refused_after_tombstone(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id = 0, gen;
+int rc;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-tomb"), 0);
+make_key_v4(&key, htonl(0x0a000003), htonl(0x0a000004),
+    htons(2222), htons(443));
+
+gen = ask_flow_gen_next(&t, 0x5AFE);
+/* DESTROY races in before publish. */
+ask_flow_gen_tombstone(&t, 0x5AFE);
+
+rc = ask_flow_insert_owned(&t, 0x5AFE, &key, 7, 0, ASK_HW_DIR_FWD,
+   gen, &hw_id);
+KUNIT_EXPECT_EQ(test, rc, -ESTALE);
+rcu_read_lock();
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(&t, 0x5AFE));
+rcu_read_unlock();
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 0);
+
+ask_flow_table_destroy(&t);
+}
+
+/* Legacy ask_flow_insert()/ask_flow_remove() stay generation-agnostic:
+ * they claim a fresh generation and remove unconditionally, so existing
+ * callers/tests are unaffected. */
+static void ask_flow_test_gen_legacy_paths_unaffected(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id = 0;
+int rc;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-legacy"), 0);
+make_key_v4(&key, htonl(0x0a000005), htonl(0x0a000006),
+    htons(3333), htons(8080));
+
+rc = ask_flow_insert(&t, 0x1234, &key, 7, 0, ASK_HW_DIR_FWD, &hw_id);
+KUNIT_EXPECT_EQ(test, rc, 0);
+/* Unconditional remove succeeds regardless of generation. */
+KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0x1234), 0);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 0);
+
+ask_flow_table_destroy(&t);
+}
+
+/* ------------------------------------------------------------------------- */
 /* suite                                                                      */
 /* ------------------------------------------------------------------------- */
 
@@ -583,6 +707,10 @@ KUNIT_CASE(ask_flow_test_hw_fallback_eexist_rollback),
 KUNIT_CASE(ask_flow_test_sw_fallback_not_hw_backed),
 KUNIT_CASE(ask_flow_test_flush_is_remove_equivalent),
 KUNIT_CASE(ask_flow_test_default_table_unused_until_init),
+KUNIT_CASE(ask_flow_test_gen_monotonic),
+KUNIT_CASE(ask_flow_test_gen_stale_destroy_noop),
+KUNIT_CASE(ask_flow_test_gen_publish_refused_after_tombstone),
+KUNIT_CASE(ask_flow_test_gen_legacy_paths_unaffected),
 {}
 };
 

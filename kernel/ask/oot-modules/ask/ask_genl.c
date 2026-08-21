@@ -245,14 +245,29 @@ goto nla_put_failure;
                 goto nla_put_failure;
 }
 
-if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, 0,
+/*
+ * Production capability/status telemetry. Do not advertise planned features:
+ * the shipping hardware path is plain routed IPv4 TCP/UDP only; IPv6, NAT,
+ * VLAN, bridge and ESP deliberately fall back to software. ASK_CAP_IPV4 means
+ * that specific path is compiled and exposed, not that a flow is live now.
+ */
+if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, ASK_CAP_IPV4,
       ASK_INFO_ATTR_UNSPEC))
 goto nla_put_failure;
 
-if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FMAN,  0))
+{
+struct ask_flow_table *t = ask_flow_default_table();
+u32 num_fman = ask_hw_get_fman() ? 1 : 0;
+u32 num_flows = t ? (u32)atomic_read(&t->num_flows) : 0;
+
+if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FMAN, num_fman))
 goto nla_put_failure;
-if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FLOWS, 0))
+if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FLOWS, num_flows))
 goto nla_put_failure;
+}
+/* No fixed per-flow ceiling is exported yet: the external-hash table uses
+ * collision chains and coherent DDR records. Zero means "not a fixed limit",
+ * not "zero capacity". Resource failures are reported by the A4 preflight. */
 if (nla_put_u32(skb, ASK_INFO_ATTR_MAX_FLOWS, 0))
 goto nla_put_failure;
 
@@ -774,24 +789,40 @@ return 0;
 /* ------------------------------------------------------------------------- */
 static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 {
-struct nlattr *port_attr;
-u8 port_id;
-int rc;
+	struct nlattr *port_attr;
+	struct nlattr *fam_attr;
+	u8 port_id;
+	u8 fam_mask;
+	int rc;
 
-port_attr = info->attrs[ASK_ATTR_PORT_ID];
-if (!port_attr)
-return -EINVAL;
+	port_attr = info->attrs[ASK_ATTR_PORT_ID];
+	if (!port_attr)
+		return -EINVAL;
 
-port_id = nla_get_u8(port_attr);
+	port_id = nla_get_u8(port_attr);
 
-rc = ask_hw_offload_engage(port_id);
-if (rc) {
-ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
-return rc;
-}
+	/*
+	 * ASK_ATTR_FAMILY_MASK selects which L3 families this port offloads
+	 * (CLI `offload ipv4` / `offload ipv6`). Absent => both, so callers
+	 * that predate the split get the historical behaviour. Set the mask
+	 * BEFORE engage so admission is correct from the first frame.
+	 */
+	fam_attr = info->attrs[ASK_ATTR_FAMILY_MASK];
+	fam_mask = fam_attr ? nla_get_u8(fam_attr) : (ASK_FAM_V4 | ASK_FAM_V6);
+	if (!fam_mask || (fam_mask & ~(ASK_FAM_V4 | ASK_FAM_V6)))
+		return -EINVAL;	/* engage with no/unknown family is nonsensical */
 
-ask_pr_info("genl: engaged port 0x%02x\n", port_id);
-return 0;
+	ask_hw_offload_set_family(port_id, fam_mask);
+
+	rc = ask_hw_offload_engage(port_id);
+	if (rc) {
+		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
+		return rc;
+	}
+
+	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x\n",
+		    port_id, fam_mask);
+	return 0;
 }
 
 static int ask_genl_disengage_doit(struct sk_buff *skb, struct genl_info *info)

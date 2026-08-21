@@ -4,3 +4,9 @@
 # restoring full multi-stream GSO throughput across all ports.
 
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth[0-4]", RUN+="/usr/sbin/ethtool -K %k sg on gso on gro on"
+
+# NOTE: RPS on eth3/eth4 is NOT set here. VyOS's EthernetIf owns rps_cpus and
+# resets it to 0 on every config commit unless offload.rps is set, which
+# clobbers any udev/sysfs write. RPS is instead forced on via the VyOS config
+# apply path (vyos-1x-031: set_rps(True) whenever ASK offload is engaged) —
+# the only writer VyOS does not override. See that patch for rationale.

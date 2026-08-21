@@ -1,71 +1,5 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
-Date: Tue, 10 Jun 2026 14:30:00 +0000
-Subject: [PATCH] dpaa: ethtool ntuple -> FMan CC static-tree bridge (M3-3b
- production consumer)
-
-The fman_cc_tree_install() consumer API (0098/0106/0108) had no
-production caller - only the 0107 debugfs test harness. This patch adds
-the standard-kernel-interface bridge so userspace can drive FMan
-exact-match flow steering through ethtool ntuple (rxnfc), mirroring the
-0104 ingress-policer pattern (userspace -> standard kernel tool ->
-driver bridge):
-
-  ethtool -N ethX flow-type udp4 src-ip A dst-ip B dst-port P \
-          action <queue> loc <prio>
-
-The vyos-1x 'set system offload classify' CLI (vyos-1x-026) is the
-config-mode consumer that emits these ethtool invocations on commit.
-
-What this adds
---------------
-- dpaa_ethtool.c: .get_rxnfc/.set_rxnfc. ETHTOOL_SRXCLSRLINS/SRXCLSRLDEL
-  accumulate per-port rules (struct dpaa_cls_rule, sorted by location =
-  match priority, lowest wins); every mutation rebuilds the port's
-  static CC tree via fman_cc_tree_destroy() + fman_cc_tree_install()
-  (the 0106 install -> get_base -> KGSE_CCBS-graft sequence; destroy
-  detaches the graft before freeing MURAM so silicon never walks a
-  stale tree - the brief steering gap falls back to the RSS path).
-  ETHTOOL_GRXCLSRLCNT/GRXCLSRULE/GRXCLSRLALL give `ethtool -n`
-  visibility; GRXRINGS reports DPAA_ETH_PCD_RXQ_NUM. A failed install
-  on rule insert rolls the rule list back so software state matches
-  silicon.
-
-- action semantics: the ethtool queue index [0..DPAA_ETH_PCD_RXQ_NUM)
-  selects the Nth FQ_TYPE_RX_PCD frame queue on priv->dpaa_fq_list; the
-  FQ's QMan channel determines the servicing CPU - the spec sec 5.4
-  "HW classifier -> right RX FQ -> right CPU" semantic. The resolved
-  FQID is carried in fman_cc_key.target_fqid so the 0108 leaf encoder
-  emits the real RM 8.7.4.3 hardware enqueue-AD. RX_CLS_FLOW_DISC
-  (drop) is rejected (-EOPNOTSUPP, no drop leaf encoding).
-
-- validation (documented limits, not silent): flow-type tcp4/udp4 only;
-  each field mask all-ones or all-zero (the CC record is exact-match -
-  no prefixes); at least one field must participate; at most
-  FMAN_CC_MAX_STATIC_KEYS (32) rules per port; location < 32 (or
-  RX_CLS_LOC_ANY -> lowest free). The KG-emitted compare key carries no
-  protocol byte (0108), so tcp4/udp4 rules with identical address/port
-  tuples match the SAME traffic - accepted, documented in the block
-  comment. Set-side gated on FMAN_CAP_CC_EXACT_MATCH so non-210-ucode
-  boards reject with -EOPNOTSUPP at the first ethtool call.
-
-- dpaa_eth.h: cls_rules/cls_rule_cnt/cls_tree_installed on dpaa_priv
-  (mutated only under rtnl - the rxnfc entry points); dpaa_cls_flush()
-  declaration.
-
-- dpaa_eth.c: INIT_LIST_HEAD(&priv->cls_rules) at probe;
-  dpaa_cls_flush() in dpaa_remove() (detaches the graft + frees the
-  tree before the FQs it steers to are freed).
-
-Native arm64 compile of drivers/net/ethernet/freescale/{dpaa,fman}/
-with LOCALVERSION=-vyos: 0 warnings / 0 errors.
-
-Spec sec 5.4 (M3-3b production consumer).
-
-Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
----
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 48aa3b7..d4eedfc 100644
+index e86f95b7c..b4e76331a 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 @@ -4171,6 +4171,7 @@ priv->egress_fqs = devm_kcalloc(dev, dpaa_max_num_txqs(),
@@ -89,7 +23,7 @@ index 48aa3b7..d4eedfc 100644
  	if (err)
  		dev_err(dev, "Failed to free FQs on remove (%pE)\n",
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-index fc8943b..bd3aa7e 100644
+index fc8943bdc..bd3aa7e93 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 @@ -205,6 +205,17 @@ u32 hm_vlan_strip_handle;
@@ -123,7 +57,7 @@ index fc8943b..bd3aa7e 100644
  void dpaa_eth_sysfs_remove(struct device *dev);
  void dpaa_eth_sysfs_init(struct device *dev);
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
-index 781dab9..a9ed3fb 100644
+index 781dab9d1..a56dda6fd 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 @@ -11,8 +11,11 @@
@@ -138,7 +72,7 @@ index 781dab9..a9ed3fb 100644
  #include "mac.h"
  
  static const char dpaa_stats_percpu[][ETH_GSTRING_LEN] = {
-@@ -535,6 +538,340 @@ revert_values:
+@@ -535,6 +538,349 @@ static int dpaa_set_coalesce(struct net_device *dev,
  	return res;
  }
  
@@ -476,12 +410,23 @@ index 781dab9..a9ed3fb 100644
 +	}
 +}
 +
++
++/* F_104: report 4 combined channels (one per qband) for multi-queue XSK */
++static void dpaa_get_channels(struct net_device *dev,
++			      struct ethtool_channels *ch)
++{
++	ch->max_combined	= DPAA1_XSK_MAX_QBANDS;
++	ch->combined_count	= DPAA1_XSK_MAX_QBANDS;
++}
++
  const struct ethtool_ops dpaa_ethtool_ops = {
  	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS |
  				     ETHTOOL_COALESCE_RX_MAX_FRAMES,
-@@ -552,6 +889,8 @@ const struct ethtool_ops dpaa_ethtool_ops = {
+@@ -551,7 +897,10 @@ const struct ethtool_ops dpaa_ethtool_ops = {
+ 	.get_link_ksettings = dpaa_get_link_ksettings,
  	.set_link_ksettings = dpaa_set_link_ksettings,
  	.get_rxfh_fields = dpaa_get_rxfh_fields,
++	.get_channels = dpaa_get_channels,
  	.set_rxfh_fields = dpaa_set_rxfh_fields,
 +	.get_rxnfc = dpaa_get_rxnfc,
 +	.set_rxnfc = dpaa_set_rxnfc,

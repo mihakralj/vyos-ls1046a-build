@@ -309,6 +309,14 @@ jobs:
           # build.py skips the tarball download when this directory exists.
 
       - name: Build Image Packages
+        env:
+          # F-217/kernel-skew fix: the kernel .deb is versioned KERNEL_VERSION-1
+          # with no build id, so a rebuilt kernel keeps the SAME apt version and
+          # the persistent chroot's apt install is a no-op -> the ISO shipped the
+          # PREVIOUS run's vmlinuz (stale kernel + old signing key) against a
+          # fresh squashfs/ask.ko. Expose BUILD_VERSION so bindeb-pkg can embed a
+          # monotonic per-build suffix and force apt to upgrade every run.
+          BUILD_VERSION: ${{ steps.set_env_variables.outputs.build_version }}
         run: bin/ci-build-packages.sh
 
       - name: Print ccache statistics

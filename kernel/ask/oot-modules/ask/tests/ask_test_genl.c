@@ -194,6 +194,15 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 	KUNIT_EXPECT_NOT_NULL(test, attrs[ASK_INFO_ATTR_NUM_FLOWS]);
 	KUNIT_EXPECT_NOT_NULL(test, attrs[ASK_INFO_ATTR_MAX_FLOWS]);
 
+	/* Shipping capability contract: advertise only the implemented plain
+	 * routed IPv4 hardware path, never planned IPv6/NAT/VLAN/IPsec bits. */
+	KUNIT_EXPECT_EQ(test,
+			nla_get_u64(attrs[ASK_INFO_ATTR_CAPABILITIES]),
+			(u64)ASK_CAP_IPV4);
+	/* KUnit has no bound FMan, so runtime telemetry must honestly report 0. */
+	KUNIT_EXPECT_EQ(test,
+			nla_get_u32(attrs[ASK_INFO_ATTR_NUM_FMAN]), 0u);
+
 	test_free_skb(skb);
 }
 
