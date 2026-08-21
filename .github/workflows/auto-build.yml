@@ -390,6 +390,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      models: read      # GitHub Models inference for AI release notes
     if: github.ref_name == 'main'
     steps:
       - uses: actions/checkout@v6
@@ -410,14 +411,21 @@ jobs:
         name: Get commit IDs for changelog
         run: |
           set -ex
+          # Weekly rolling cadence: summarise upstream changes over a fixed
+          # 7-day window rather than since-last-build, so the release notes
+          # cover the same span regardless of how long ago the previous
+          # successful build ran. The oldest commit inside the window is the
+          # `fromTag` handed to the mikepenz changelog builder below (falls
+          # back to HEAD when a repo had no commits in the last week).
+          SINCE="7 days ago"
           cd vyos-build
-          git log --since "${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse
-          CHANGELOG_COMMIT_VYOS_BUILD=$(git log --since "${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)
+          git log --since "$SINCE" --format="%H" --reverse
+          CHANGELOG_COMMIT_VYOS_BUILD=$(git log --since "$SINCE" --format="%H" --reverse | head -n1)
           [ -z "$CHANGELOG_COMMIT_VYOS_BUILD" ] && CHANGELOG_COMMIT_VYOS_BUILD="HEAD"
           echo "CHANGELOG_COMMIT_VYOS_BUILD=${CHANGELOG_COMMIT_VYOS_BUILD}" >> $GITHUB_OUTPUT
           cd ../vyos-1x
-          git log --since "${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse
-          CHANGELOG_COMMIT_VYOS_1X=$(git log --since "${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)
+          git log --since "$SINCE" --format="%H" --reverse
+          CHANGELOG_COMMIT_VYOS_1X=$(git log --since "$SINCE" --format="%H" --reverse | head -n1)
           [ -z "$CHANGELOG_COMMIT_VYOS_1X" ] && CHANGELOG_COMMIT_VYOS_1X="HEAD"
           echo "CHANGELOG_COMMIT_VYOS_1X=${CHANGELOG_COMMIT_VYOS_1X}" >> $GITHUB_OUTPUT
 
@@ -458,31 +466,127 @@ jobs:
         run: |
           set -e
           SINCE="${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}"
-          # Get commits in THIS repo since last build, excluding CI auto-commits (version bumps)
+          # Local commit subjects since last build, excluding CI version-bump
+          # auto-commits. Kept since-last-build (not the 7-day upstream window)
+          # so a slow release cadence never drops unshipped local work.
           LOCAL_LOG=$(git log --since "$SINCE" --format="- %s" --no-merges \
             --invert-grep --grep="^[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}-[0-9]\{4\}-rolling$" \
             HEAD 2>/dev/null || true)
-          if [ -z "$LOCAL_LOG" ]; then
-            LOCAL_LOG="_No local changes since last build._"
-          fi
-          # Write to file to avoid shell quoting issues with multiline output
+          [ -z "$LOCAL_LOG" ] && LOCAL_LOG="_No local changes since last build._"
           echo "$LOCAL_LOG" > /tmp/local_changes.md
+          # Richer source material for the AI writer: the prose in the newest
+          # (top) section of plans/CHANGELOG.md, up to the next "### " heading.
+          if [ -f plans/CHANGELOG.md ]; then
+            awk '/^### /{n++} n==1{print} n>1{exit}' plans/CHANGELOG.md > /tmp/changelog_top.md || true
+          fi
+          [ -s /tmp/changelog_top.md ] || echo "_No changelog prose available._" > /tmp/changelog_top.md
 
-      - name: "Release publishing: generate release notes"
+      - name: "Release publishing: generate release notes (AI)"
+        id: ai_notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VYOS1X_CHANGELOG: ${{ steps.generate_changelog_for_vyos-1x.outputs.changelog }}
+          VYOSBUILD_CHANGELOG: ${{ steps.generate_changelog_for_vyos-build.outputs.changelog }}
+          AI_MODEL: openai/gpt-4o
         run: |
+          set -e
           LOCAL_CHANGES=$(cat /tmp/local_changes.md)
-          cat <<EOF > /tmp/release_notes.md
-          ## LS1046A Build Changes
+          CHANGELOG_PROSE=$(cat /tmp/changelog_top.md)
+          : "${VYOS1X_CHANGELOG:=_No upstream vyos-1x changes in the last week._}"
+          : "${VYOSBUILD_CHANGELOG:=_No upstream vyos-build changes in the last week._}"
 
+          # System/instruction prompt for the release-notes writer.
+          read -r -d '' INSTRUCTIONS <<'PROMPT' || true
+          You are writing GitHub release notes for "VyOS for the NXP LS1046A (Mono Gateway)",
+          a bare-metal ARM64 router build. Audience: network operators running this on real
+          hardware. Tone: friendly and confident, but technically precise. No marketing fluff,
+          no emojis. Output plain GitHub-Flavored Markdown only (no code fences around the whole
+          thing, no preamble, no sign-off).
+
+          Produce EXACTLY three sections, in this order:
+
+          ## Highlights
+          2-4 sentences of prose leading with the single biggest user-visible change in this
+          release. Say what an operator can now DO that they could not before. When relevant,
+          mention new CLI verbatim (e.g. `set interfaces ethernet eth<n> offload ipv4` /
+          `offload ipv6`) and at most one headline performance number if it appears in the input.
+
+          ## What's New in This Build
+          A categorized bullet list grouped under **Added**, **Fixed**, and **Changed** (include
+          only the groups that apply), derived from the LOCAL COMMITS and LOCAL CHANGELOG PROSE.
+          Rewrite terse commit subjects into operator-facing sentences that explain the EFFECT,
+          not the mechanism. Collapse related commits (e.g. all IPv6 phases) into one bullet.
+          Omit purely internal churn (diagnostics added then removed in the same window, build
+          plumbing, patch-index cleanups) unless it changes runtime behavior. Call out anything
+          that changes config syntax and note that existing configs migrate automatically. Do
+          NOT expose internal patch identifiers (F-nnn, vyos-1x-0nn, commit hashes) in the
+          operator-facing text. If the input mentions hardware validation or testing you may say
+          "validated on hardware" but do not fabricate specifics.
+
+          ## Upstream Changes (last 7 days)
+          Summarize the UPSTREAM vyos-1x and vyos-build inputs as two short sub-lists under
+          **vyos-1x** and **vyos-build**. Preserve any PR links present in the input. If a
+          section's input says there are no changes, write "_No changes in the last week._"
+          under that heading.
+
+          Rules: base every statement ONLY on the provided input. Do not invent features,
+          versions, or numbers. Keep it scannable: an operator should grasp the release in
+          about 20 seconds and find detail if they read on.
+          PROMPT
+
+          # Assemble the user content with all raw material.
+          USER_CONTENT="$INSTRUCTIONS
+
+          == LOCAL COMMITS (this repo, since last build) ==
           ${LOCAL_CHANGES}
 
-          ## Upstream changes since last build
+          == LOCAL CHANGELOG PROSE (newest section of plans/CHANGELOG.md) ==
+          ${CHANGELOG_PROSE}
 
-          ### vyos-1x
-          ${{ steps.generate_changelog_for_vyos-1x.outputs.changelog }}
-          ### vyos-build
-          ${{ steps.generate_changelog_for_vyos-build.outputs.changelog }}
-          EOF
+          == UPSTREAM vyos-1x (last 7 days) ==
+          ${VYOS1X_CHANGELOG}
+
+          == UPSTREAM vyos-build (last 7 days) ==
+          ${VYOSBUILD_CHANGELOG}
+          "
+
+          # Build the request body safely via jq, call GitHub Models inference.
+          jq -n --arg model "$AI_MODEL" --arg content "$USER_CONTENT" \
+            '{model:$model, messages:[{role:"user", content:$content}], temperature:0.3}' \
+            > /tmp/ai_request.json
+
+          HTTP=$(curl -sS -o /tmp/ai_response.json -w '%{http_code}' \
+            https://models.github.ai/inference/chat/completions \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/vnd.github+json" \
+            -d @/tmp/ai_request.json || echo "000")
+
+          NOTES=""
+          if [ "$HTTP" = "200" ]; then
+            NOTES=$(jq -r '.choices[0].message.content // empty' /tmp/ai_response.json)
+          fi
+
+          if [ -n "$NOTES" ]; then
+            printf '%s\n' "$NOTES" > /tmp/release_notes.md
+            echo "AI release notes generated (model=${AI_MODEL})."
+          else
+            # Deterministic fallback: never fail the release on an AI hiccup.
+            echo "::warning::AI release notes unavailable (HTTP ${HTTP}); using raw fallback."
+            {
+              echo "## LS1046A Build Changes"
+              echo
+              echo "${LOCAL_CHANGES}"
+              echo
+              echo "## Upstream Changes (last 7 days)"
+              echo
+              echo "### vyos-1x"
+              echo "${VYOS1X_CHANGELOG}"
+              echo "### vyos-build"
+              echo "${VYOSBUILD_CHANGELOG}"
+            } > /tmp/release_notes.md
+          fi
+          echo "----- release notes -----"
           cat /tmp/release_notes.md
 
       # ─── Single-image update-check feed ───────────────────────────────
