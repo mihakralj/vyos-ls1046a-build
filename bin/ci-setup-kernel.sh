@@ -2717,6 +2717,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_203.py" 2>&1
     echo "### dpaa_eth.c: F-203 order-1 8KiB RX buffers (contiguous jumbo)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_222.py" 2>&1
+    echo "### dpaa_eth.c: F-222 revert DPAA_BP_ORDER 1->0 (order-1 wedges RX under load)"
 fi
 
 # F-204 (T-M6-1 Phase 2a, 2026-08-19): additive, v4-byte-identical ehash
