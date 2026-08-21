@@ -2509,6 +2509,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_209.py" 2>&1
     echo "### fman_keygen.c: F-209 AC_CC CCOBASE encoding (v6 row select)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_224.py" 2>&1
+    echo "### fman_keygen.c: F-224 46-byte dual-lane GEC key on AC_CC FE scheme"
 fi
 
 # F-184 (2026-08-12): the first live `fe_obs arm` (patch 0169's canary
@@ -2736,6 +2738,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-220 per-port routed-IPv4 ehash table lifecycle foundation"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_221.py" 2>&1
     echo "### fman_pcd.c: F-221 repoint v4 node/add/del to per-port table"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_225.py" 2>&1
+    echo "### fman_pcd.c: F-225 v4 ehash key_size 14->46 (dual-lane GEC key)"
 fi
 
 # F-210/F-211/F-212 (T-M6-1 IPv6 productization steps 2-4, 2026-08-19):

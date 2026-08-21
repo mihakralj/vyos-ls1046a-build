@@ -1546,6 +1546,35 @@ void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6
         memcpy(&k[36], &key->dport, sizeof(key->dport));
 }
 
+/*
+ * Dual-lane 46-byte key builder (specs/ask2-ipv6-dual-lane-key-design.md).
+ * Mirrors the F-224 GEC extraction order byte-for-byte so the software key
+ * equals what KeyGen emits. The absent family's lane is zero-filled, exactly
+ * as the validated GEC codes (0x0b/0x1b) zero-fill from the reset-0 default
+ * register on a wrong-family frame (silicon-proven 2026-08-21: v4 flow -> v6
+ * lanes 16+16 zero; v6 flow -> v4 lane 8 zero). ask_flow_key.src_ip/dst_ip are
+ * 16-byte; for a v4 flow the address is in the first 4 bytes.
+ */
+void ask_fe_build_key_dual(const struct ask_flow_key *key,
+			   u8 k[ASK_FE_KEY_SIZE_DUAL])
+{
+        memset(k, 0, ASK_FE_KEY_SIZE_DUAL);
+        if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+                k[0] = ASK_FE_FAMILY_V6;
+                /* v4 lane k[1..8] stays zero */
+                memcpy(&k[9],  key->src_ip, 16);   /* IPv6 src */
+                memcpy(&k[25], key->dst_ip, 16);   /* IPv6 dst */
+        } else {
+                k[0] = ASK_FE_FAMILY_V4;
+                memcpy(&k[1], key->src_ip, 4);     /* IPv4 src */
+                memcpy(&k[5], key->dst_ip, 4);     /* IPv4 dst */
+                /* v6 lanes k[9..40] stay zero */
+        }
+        k[41] = key->l4_proto;
+        memcpy(&k[42], &key->sport, sizeof(key->sport));
+        memcpy(&k[44], &key->dport, sizeof(key->dport));
+}
+
 /* ------------------------------------------------------------------------- */
 /* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
  * to FMan hash key (L4PDST+L4PSRC+IPDST+IPSRC) and writes fe_flow debugfs. */
@@ -1560,7 +1589,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         struct fman_pcd_fe_flow_action action;
         struct fman *fm;
         int rc, table_idx;
-        u8 key_buf[ASK_FE_KEY_SIZE_V6];
+        u8 key_buf[ASK_FE_KEY_SIZE_DUAL];
 
         if (!key) {
                 ask_pr_dbg("fe_flow_insert: NULL key (flow destroyed) -- skipping\n");
@@ -1579,18 +1608,14 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 
         memset(&action, 0, sizeof(action));
 
-        /* M6 Piece 3: route v4 to ehash table 0, v6 to table 1 */
-        if (key->l3_proto == ASK_FLOW_L3_IPV6) {
-                ask_fe_build_key_v6(key, key_buf);
-                memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_V6);
-                action.key_size = ASK_FE_KEY_SIZE_V6;
-                table_idx = 1;
-        } else {
-                ask_fe_build_key(key, key_buf);
-                memcpy(action.key, key_buf, ASK_FE_KEY_SIZE);
-                action.key_size = ASK_FE_KEY_SIZE;
-                table_idx = 0;
-        }
+        /* Dual-lane 46-byte key: ONE key/table/scheme for both families
+         * (specs/ask2-ipv6-dual-lane-key-design.md). The family byte + zeroed
+         * absent lane keep v4 and v6 records disjoint in the one per-port table
+         * (table_idx 0), so no second scheme / parser LCV split. */
+        ask_fe_build_key_dual(key, key_buf);
+        memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_DUAL);
+        action.key_size = ASK_FE_KEY_SIZE_DUAL;
+        table_idx = 0;
         action.enq_off   = enq_off;
         /* F-204 / T-M6-1 Phase 2a: explicit ehash selector. This is SEPARATE
          * from key->port_id, which remains the ingress FMan port for F-195's
@@ -1645,25 +1670,19 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
  */
 static void ask_fe_flow_remove(const struct ask_flow_key *key)
 {
-        u8 k[ASK_FE_KEY_SIZE_V6];
+        u8 k[ASK_FE_KEY_SIZE_DUAL];
         u8 klen;
 
         if (!key)
                 return;
         /*
-         * T-M6-1 Phase 1: build the SAME key/length the matching insert used,
-         * so per-key fman_pcd_fe_flow_del() unlinks exactly this record. A v6
-         * flow inserted a 38-byte record; removing it with a 14-byte v4 key
-         * would never match and would leak the v6 record. Mirror the family
-         * split in ask_fe_flow_insert().
+         * Build the SAME 46-byte dual-lane key the matching insert used, so
+         * per-key fman_pcd_fe_flow_del() unlinks exactly this record. Both
+         * families now share the one 46-byte key/table (the family byte +
+         * zeroed absent lane keep them distinct).
          */
-        if (key->l3_proto == ASK_FLOW_L3_IPV6) {
-                ask_fe_build_key_v6(key, k);
-                klen = ASK_FE_KEY_SIZE_V6;
-        } else {
-                ask_fe_build_key(key, k);
-                klen = ASK_FE_KEY_SIZE;
-        }
+        ask_fe_build_key_dual(key, k);
+        klen = ASK_FE_KEY_SIZE_DUAL;
         /* Phase 1 (per-port tables): pass the ingress hw port so the delete
          * selects THIS port's routed-IPv4 table instance (F-220/F-221), matching
          * the insert side which passed key->port_id. v6 delete still selects the
