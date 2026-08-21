@@ -2,13 +2,19 @@ diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-defini
 index 6cf3373f1..06973b34a 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -101,6 +101,12 @@
+@@ -101,6 +101,18 @@
                    <valueless/>
                  </properties>
                </leafNode>
-+              <leafNode name="ask">
++              <leafNode name="ipv4">
 +                <properties>
-+                  <help>ASK2 offload — FMan FE-VM hardware forwarding for this interface (NXP LS1046A)</help>
++                  <help>ASK2 hardware offload for IPv4 forwarded flows (NXP LS1046A FMan FE-VM)</help>
++                  <valueless/>
++                </properties>
++              </leafNode>
++              <leafNode name="ipv6">
++                <properties>
++                  <help>ASK2 hardware offload for IPv6 forwarded flows (NXP LS1046A FMan FE-VM)</help>
 +                  <valueless/>
 +                </properties>
 +              </leafNode>
@@ -34,14 +40,13 @@ index 7eaf81f84..a19ecb211 100644
                  print('Adapter does not support changing hw-tc-offload settings!')
          return False
  
-+    def set_ask_offload(self, enable: bool):
++    def set_ask_offload(self, family_mask: int):
 +        """
-+        Engage or disengage NXP LS1046A ASK (Accelerated Switching Kernel)
-+        FMan FE-VM hardware forwarding offload on this interface.
++        Apply per-interface ASK2 family selection. bit0=IPv4, bit1=IPv6;
++        mask 0 disengages the port. The kernel scheme/table is family-neutral;
++        ask.ko gates flow admission by this per-port mask.
 +        """
 +        # Physical ingress FMan hwport IDs (DT-authoritative, all five ports).
-+        # eth2=0x09 eth0=0x0c(MGMT) eth1=0x0d eth3=0x10 eth4=0x11. Policy on
-+        # which ports may engage lives in verify_offload(); this map is facts.
 +        port_map = {
 +            'eth0': '0x0c', 'eth1': '0x0d', 'eth2': '0x09',
 +            'eth3': '0x10', 'eth4': '0x11',
@@ -54,25 +59,29 @@ index 7eaf81f84..a19ecb211 100644
 +        if not os.path.exists(tool):
 +            raise ConfigError(f'ASK offload helper not found: {tool}')
 +
-+        verb = 'engage' if enable else 'disengage'
-+        out, rc = self._popen(f'{tool} --port {port} {verb}')
++        out, rc = self._popen(
++            f'{tool} --port {port} family {int(family_mask)}'
++        )
 +        if rc:
 +            msg = (out or '').strip().splitlines()
 +            detail = msg[-1] if msg else f'helper exited with rc={rc}'
 +            raise ConfigError(
-+                f'ASK offload {verb} failed on {self.ifname}: {detail}'
++                f'ASK family-mask {family_mask} failed on {self.ifname}: {detail}'
 +            )
 +
      def set_lro(self, state):
          """
          Enable Large Receive offload. State can be either True or False.
-@@ -662,6 +695,14 @@ def update(self, config):
+@@ -662,6 +693,17 @@ def update(self, config):
          # LRO (large receive offload)
          self.set_lro(dict_search('offload.lro', config) is not None)
  
-+        # ASK offload - NXP LS1046A FMan FE-VM hardware forwarding
-+        ask_on = dict_search('offload.ask', config) is not None
-+        self.set_ask_offload(ask_on)
++        # ASK offload - NXP LS1046A FMan FE-VM hardware forwarding.
++        # Independent per-family selection: offload ipv4 / offload ipv6.
++        # bit0=IPv4, bit1=IPv6; mask 0 disengages the port.
++        ask_mask = ((1 if dict_search('offload.ipv4', config) is not None else 0) |
++                    (2 if dict_search('offload.ipv6', config) is not None else 0))
++        self.set_ask_offload(ask_mask)
 +
          # RPS - Receive Packet Steering
 -        self.set_rps(dict_search('offload.rps', config) is not None)
@@ -80,17 +89,19 @@ index 7eaf81f84..a19ecb211 100644
 +        # 4-core board an unspread SW flow pins one ksoftirqd and starves
 +        # management. Force RPS on whenever ASK is engaged (spread across
 +        # CPUs 1-3), independent of the explicit offload.rps knob.
-+        self.set_rps(ask_on or dict_search('offload.rps', config) is not None)
++        self.set_rps(ask_mask != 0 or dict_search('offload.rps', config) is not None)
  
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
 index 7d42e3f77..26eb1771d 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -302,6 +302,20 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -302,6 +302,22 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
      :param ethtool: Ethernet object
      :type ethtool: Ethtool
      """
-+    if dict_search('offload.ask', ethernet) is not None:
++    _ask_on = (dict_search('offload.ipv4', ethernet) is not None or
++               dict_search('offload.ipv6', ethernet) is not None)
++    if _ask_on:
 +        ifname = ethernet.get('ifname')
 +        vpp_ifaces = dict_search('vpp.settings.interface', ethernet) or {}
 +        if ifname in vpp_ifaces:
@@ -111,7 +122,7 @@ diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
 index 5256b6c1f..7c517d0f3 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -583,6 +583,19 @@ def verify(config):
+@@ -583,6 +583,20 @@ def verify(config):
      if 'settings' not in config:
          raise ConfigError('"settings interface" is required but not set!')
  
@@ -123,7 +134,8 @@ index 5256b6c1f..7c517d0f3 100755
 +            key_mangling=('-', '_'),
 +            get_first_key=True,
 +        )
-+        if iface_config and dict_search('offload.ask', iface_config) is not None:
++        if iface_config and (dict_search('offload.ipv4', iface_config) is not None or
++                             dict_search('offload.ipv6', iface_config) is not None):
 +            raise ConfigError(
 +                f'Interface {iface} cannot be assigned to VPP while configured for ASK offload!'
 +            )

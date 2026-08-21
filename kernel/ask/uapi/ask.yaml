@@ -44,6 +44,8 @@ attribute-sets:
         nested-attributes: policer
       - name: port-id
         type: u8
+      - name: family-mask
+        type: u8
   -
     name: info
     name-prefix: ask-info-attr-
@@ -266,6 +268,7 @@ operations:
         request:
           attributes:
             - port-id
+            - family-mask
     -
       name: disengage
       attribute-set: top
