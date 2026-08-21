@@ -1,5 +1,4 @@
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index 6cf3373f1..06973b34a 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
 @@ -101,6 +101,18 @@
@@ -22,7 +21,6 @@ index 6cf3373f1..06973b34a 100644
                  <properties>
                    <help>Enable Large Receive Offload</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 7eaf81f84..a19ecb211 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
 @@ -17,6 +17,10 @@
@@ -92,7 +90,6 @@ index 7eaf81f84..a19ecb211 100644
 +        self.set_rps(ask_mask != 0 or dict_search('offload.rps', config) is not None)
  
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 7d42e3f77..26eb1771d 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
 @@ -302,6 +302,22 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
@@ -119,7 +116,6 @@ index 7d42e3f77..26eb1771d 100755
          if not os.path.exists(f'/sys/class/net/{ethernet["ifname"]}/queues/rx-0/rps_cpus'):
              raise ConfigError('Interface does not support RPS!')
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index 5256b6c1f..7c517d0f3 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
 @@ -583,6 +583,20 @@ def verify(config):
