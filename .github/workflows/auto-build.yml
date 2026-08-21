@@ -502,8 +502,19 @@ jobs:
           You are writing GitHub release notes for "VyOS for the NXP LS1046A (Mono Gateway)",
           a bare-metal ARM64 router build. Audience: network operators running this on real
           hardware. Tone: friendly and confident, but technically precise. No marketing fluff,
-          no emojis. Output plain GitHub-Flavored Markdown ONLY: no preamble, no sign-off, no
-          surrounding code fence, and do not describe what you are doing — emit only the notes.
+          no emojis. Output GitHub-Flavored Markdown ONLY: no preamble, no sign-off, and do not
+          describe what you are doing — emit only the notes.
+
+          Formatting — use rich Markdown so the notes are easy to scan:
+          - Wrap every command, CLI path, config node, interface name, file path, register,
+            protocol/port, numeric value with a unit, and identifier in inline backticks
+            (e.g. `set interfaces ethernet eth3 offload ipv6`, `eth0`, `~7.3 Gbit/s`, `MTU 1280-3600`).
+          - Show any multi-line command or config snippet as a fenced code block with a language
+            hint (```bash or ```) — but never wrap the whole document in a fence.
+          - Use `**bold**` for the group labels and to emphasize the single most important phrase
+            in a bullet; use `_italics_` sparingly for asides like `_No changes in the last week._`.
+          - Prefer tight, one-idea bullets. Use nested sub-bullets only when a bullet genuinely
+            has sub-points. Link PRs with `[#NNNN](url)` Markdown links.
 
           Produce EXACTLY three sections, in this order:
 
