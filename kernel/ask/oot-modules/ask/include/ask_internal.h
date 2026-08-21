@@ -12,6 +12,8 @@
 #define _ASK_INTERNAL_H
 
 #include <linux/types.h>
+#include <linux/errno.h>        /* -E2BIG in ask_intent_add() inline */
+#include <linux/xarray.h>       /* ask_flow_table::gen_by_cookie (A3) */
 #include <linux/printk.h>
 #include <linux/skbuff.h>
 #include <linux/rhashtable.h>
@@ -109,6 +111,7 @@ void ask_hw_exit(void);
  */
 int  ask_hw_offload_engage(u8 hw_port_id);
 void ask_hw_offload_disengage(u8 hw_port_id);
+void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 
 /*
@@ -397,6 +400,17 @@ void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie);
  */
 struct ask_flow_key;
 
+/*
+ * T-M6-A4 preflight: validate every resource class the current flow requires
+ * WITHOUT allocating a cookie, writing MURAM/DDR, or changing an FQ. Returns
+ * 0 if the subsequent ask_hw_flow_insert can be attempted; -EOPNOTSUPP /
+ * -ENODEV / -EAGAIN / -ENOSPC otherwise so the caller can fail to software
+ * before any partial programming. The check is advisory against races; the
+ * real insert still validates and rolls back every acquisition.
+ */
+int  ask_hw_flow_preflight(const struct ask_flow_key *key,
+                           u32 oif, u32 action_flags,
+                           enum ask_hw_dir dir);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
         enum ask_hw_dir dir,
@@ -494,6 +508,66 @@ u8  next_hop_mac[ETH_ALEN]; /* dst MAC the OH chain pushes */
 u8  egress_mac[ETH_ALEN];   /* src MAC = peer port's own MAC */
 } __packed;
 
+/* ------------------------------------------------------------------------- */
+/* Canonical flow intent (T-M6-A1, 2026-08-18).                               */
+/*                                                                            */
+/* The single typed description of what a REPLACE asks the hardware to do.    */
+/* It is the source of truth that ask_parse_action() produces and that        */
+/* ask_intent_lower() lowers to the legacy (oif, action_flags) representation */
+/* the insert/pending/neigh paths still consume. Introducing it now (before   */
+/* NAT/VLAN/IPsec) gives every later M6 feature ONE place to add a typed      */
+/* action and ONE compiler (ask_intent_lower / the future FE action compiler) */
+/* instead of ad-hoc action_flags bits.                                       */
+/*                                                                            */
+/* A1 CONTRACT: for the plain IPv4-unicast flow (REDIRECT, plus the kernel's  */
+/* mandatory ETH-type MANGLE L2 rewrite that INSERT_L2_HDR already performs)  */
+/* the lowering MUST reproduce the exact pre-A1 values — oif = egress ifindex */
+/* and action_flags = 0 — so the stored ask_flow and the FE record are        */
+/* byte-for-byte identical. The ehash key bytes come solely from the match    */
+/* (ask_fe_build_key), which A1 does not touch.                               */
+/* ------------------------------------------------------------------------- */
+enum ask_action_type {
+	ASK_ACTION_REDIRECT   = 0, /* forward to egress netdev (oif) */
+	ASK_ACTION_L2_REWRITE = 1, /* next-hop L2 rewrite (ETH MANGLE) */
+	ASK_ACTION_TTL_DEC    = 2, /* decrement IPv4 TTL / IPv6 hop-limit */
+	/* future: ASK_ACTION_NAT_SRC/DST, ASK_ACTION_PAT, ASK_ACTION_VLAN_* */
+};
+
+#define ASK_INTENT_MAX_ACTIONS 8
+
+struct ask_flow_action_ent {
+	enum ask_action_type type;
+	u32 oif;   /* valid for ASK_ACTION_REDIRECT */
+};
+
+struct ask_flow_intent {
+	const struct ask_flow_key  *match;   /* borrowed; not owned */
+	struct ask_flow_action_ent  actions[ASK_INTENT_MAX_ACTIONS];
+	u8  n_actions;
+	u64 owner;        /* kernel flow cookie that owns this intent */
+	u32 generation;   /* A3 hook: bumped per REPLACE; 0 until A3 lands */
+};
+
+static inline int ask_intent_add(struct ask_flow_intent *in,
+				 enum ask_action_type type, u32 oif)
+{
+	if (in->n_actions >= ASK_INTENT_MAX_ACTIONS)
+		return -E2BIG;
+	in->actions[in->n_actions].type = type;
+	in->actions[in->n_actions].oif  = oif;
+	in->n_actions++;
+	return 0;
+}
+
+/*
+ * Lower a canonical intent to the legacy (oif, action_flags) pair the rest of
+ * the insert path consumes. Kept as the single translation point so the FE
+ * action compiler can later replace the body without touching call sites.
+ * Returns 0 on success; -EOPNOTSUPP if the intent has no egress.
+ */
+int ask_intent_lower(const struct ask_flow_intent *in,
+		     u32 *out_oif, u32 *out_action_flags);
+
 struct ask_flow {
 struct rhash_head node;
 struct rcu_head rcu;
@@ -528,6 +602,12 @@ u8  dir;
  * rcu_read_lock() alongside @hw_flow_id.
  */
 bool hw_backed;
+/*
+ * T-M6-A3: the ownership generation this flow was published under. Set once
+ * at insert, immutable, read under rcu_read_lock alongside hw_flow_id. A
+ * DESTROY/worker carrying an older generation must not act on this flow.
+ */
+u32 generation;
 struct ask_flow_stats stats;
 };
 
@@ -539,9 +619,46 @@ struct ask_flow_stats stats;
  * fman support we can clone the table per fman without touching the
  * core lookup/insert code.
  */
+/*
+ * Per-cookie ownership generation registry (T-M6-A3, 2026-08-18).
+ *
+ * The flow lifecycle keys everything on `cookie`, an unsigned-long slab
+ * pointer to the kernel's flow_offload_tuple that is RECYCLED across a
+ * DESTROY->REPLACE boundary. Without an ownership stamp, a late DESTROY, a
+ * stale neighbour-rebuild worker, or a duplicate pending replay can act on a
+ * cookie that now belongs to a NEWER flow — deleting or resurrecting the wrong
+ * flow (CR-004), or leaving an orphan silicon record if a DESTROY races the
+ * post-publish FE install (a MURAM-leak class per AGENTS.md S6).
+ *
+ * A monotonic per-cookie generation plus a tombstone closes all of these:
+ *  - REPLACE bumps the generation and clears any tombstone (new owner).
+ *  - The generation is checked immediately before the rhashtable publish; a
+ *    superseded REPLACE rolls back its own HW and does not publish.
+ *  - DESTROY tombstones the cookie; it is idempotent but can never affect a
+ *    newer generation.
+ *  - Workers (neigh rebuild, pending replay) snapshot the generation and
+ *    discard on mismatch/tombstone.
+ *
+ * The registry entry must OUTLIVE the ask_flow (which is freed via call_rcu),
+ * so a late worker can still observe "cookie now at gen N, tombstoned". It is
+ * a small xarray guarded by the xarray's own internal lock (xa_lock). Registry
+ * ops take NO hardware action and never sleep, so they are safe to call from
+ * process context outside (but never nested inside) the pending/rht locks.
+ * Lock order, where both are held: xa_lock BEFORE pending_lock.
+ */
+enum ask_gen_state {
+	ASK_GEN_LIVE       = 0,
+	ASK_GEN_TOMBSTONED = 1,
+};
+
+/* gen_by_cookie stores xa_mk_value((generation << 1) | state); no per-flow
+ * allocation, so tombstones can safely outlive ask_flow without leaking heap
+ * objects. Entries are reclaimed wholesale when the flow table is destroyed. */
+
 struct ask_flow_table {
 struct rhashtable rht;
 atomic_t fake_hw_id_seq; /* PR7 placeholder until real hostcmd */
+struct xarray gen_by_cookie;   /* cookie -> xa_value(gen|state), A3 */
 atomic_t num_flows;
 /*
  * Count of entries with ask_flow::hw_backed set. Lets the neigh
@@ -581,8 +698,63 @@ int ask_flow_insert(struct ask_flow_table *t,
     enum ask_hw_dir dir,
     u32 *out_hw_id);
 
-/* Remove by cookie. Returns 0 on success, -ENOENT if not present. */
+/* Remove by cookie. Returns 0 on success, -ENOENT if not present.
+ * Unconditional: used by administrative flush, teardown, and tests. Does not
+ * consult the generation registry. Production DESTROY uses the _owned form. */
 int ask_flow_remove(struct ask_flow_table *t, u64 cookie);
+
+/*
+ * T-M6-A3 generation-aware variants used by the production REPLACE/DESTROY and
+ * the neighbour/pending workers. @generation is the ownership stamp the caller
+ * claimed via ask_flow_gen_next().
+ *
+ * ask_flow_insert_owned(): checks, immediately before the rhashtable publish,
+ * that @generation is still the current non-tombstoned owner of @cookie; if a
+ * newer REPLACE or a DESTROY intervened it rolls back its own HW and returns
+ * -ESTALE without publishing.
+ *
+ * ask_flow_remove_owned(): removes only if @generation is >= the stored flow's
+ * generation (i.e. the caller is the current or a newer owner); a stale caller
+ * returns -ESTALE (internal control signal) and leaves the newer flow intact.
+ * The top-level DESTROY converts -ESTALE to user-visible success but MUST skip
+ * the FE per-key delete, which would otherwise delete the newer HW record.
+ */
+int ask_flow_insert_owned(struct ask_flow_table *t, u64 cookie,
+			  const struct ask_flow_key *key,
+			  u32 oif, u32 action_flags, enum ask_hw_dir dir,
+			  u32 generation, u32 *out_hw_id);
+int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
+			  u32 generation);
+
+/* ------------------------------------------------------------------------- */
+/* T-M6-A3: per-cookie ownership generation registry.                         */
+/*                                                                            */
+/* All keyed by the flow cookie and independent of the ask_flow lifetime.     */
+/* None sleep or touch hardware; safe from process context. Callers must NOT  */
+/* hold ask_flow_pending_lock when calling these (xa_lock is taken first per  */
+/* the documented lock order).                                                */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Claim ownership for a REPLACE: bump the cookie's generation, clear any
+ * tombstone, and return the new generation (>= 1). Returns 0 on OOM; the
+ * caller MUST fail the REPLACE to software rather than publish an unguarded
+ * flow (memory pressure must not reopen CR-004).
+ */
+u32  ask_flow_gen_next(struct ask_flow_table *t, u64 cookie);
+
+/* Current owning generation for a cookie, or 0 if unknown. */
+u32  ask_flow_gen_current(struct ask_flow_table *t, u64 cookie);
+
+/* True iff @gen is the current, non-tombstoned owner of @cookie. */
+bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u32 gen);
+
+/* Mark a cookie tombstoned (DESTROY). Idempotent. */
+void ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie);
+
+/* Drop the registry entry entirely (called when the SW flow is finally
+ * freed and no worker can still reference the cookie). Idempotent. */
+void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie);
 
 /*
  * Snapshot the per-flow stats into the caller-supplied out parameters.
@@ -718,8 +890,25 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
  */
 #define ASK_FE_KEY_SIZE 14
 #define ASK_FE_KEY_SIZE_V6 38
+/*
+ * Dual-lane 46-byte key (specs/ask2-ipv6-dual-lane-key-design.md, silicon-proven
+ * 2026-08-21). One fixed-width key carries BOTH families so a single match-all
+ * AC_CC scheme + one per-port table serve v4 and v6 with no parser LCV split.
+ * Layout (matches the F-224 GEC extraction order exactly):
+ *   [0]      FAMILY   0x80 v4 / 0x40 v6   (parse-result L3R byte 4)
+ *   [1..8]   IPv4 src(4) dst(4)           (zero on a v6 flow)
+ *   [9..24]  IPv6 src(16)                 (zero on a v4 flow)
+ *   [25..40] IPv6 dst(16)                 (zero on a v4 flow)
+ *   [41]     proto / next-header
+ *   [42..45] L4 sport(2) dport(2)
+ */
+#define ASK_FE_KEY_SIZE_DUAL 46
+#define ASK_FE_FAMILY_V4 0x80
+#define ASK_FE_FAMILY_V6 0x40
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE]);
 void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6]);
+void ask_fe_build_key_dual(const struct ask_flow_key *key,
+			   u8 k[ASK_FE_KEY_SIZE_DUAL]);
 
 void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip);
 void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,

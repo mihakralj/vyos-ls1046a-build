@@ -172,6 +172,28 @@ for package in $packages; do
   KERNEL_CACHE_KEY=""
   KERNEL_CACHE_HIT_DIR=""
   if [ "$package" == "linux-kernel" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
+    # F-217: generate the ONE persistent ASK signing key BEFORE computing the
+    # kernel cache hash. Previously the key was generated only inside
+    # build-kernel.sh (after cache lookup) under the kernel-source CWD, while
+    # OOT signing read a different package-dir key. Generate at the absolute
+    # workspace path first; build-kernel.sh and OOT signing both reuse it.
+    ASK_PERSIST_DIR="${GITHUB_WORKSPACE}/ask-persistent-keys"
+    ASK_PERSIST_PEM="$ASK_PERSIST_DIR/signing_key.pem"
+    ASK_PERSIST_X509="$ASK_PERSIST_DIR/signing_key.x509"
+    mkdir -p "$ASK_PERSIST_DIR"
+    if [ ! -f "$ASK_PERSIST_PEM" ]; then
+      echo "I: ASK2 F-217 — generating persistent module signing key at $ASK_PERSIST_PEM"
+      openssl req -new -nodes -utf8 -sha512 -days 36500 -batch -x509 \
+        -config <(printf '%s\n' '[req]' 'distinguished_name=req_dn' 'prompt=no' 'x509_extensions=req_ext' '[req_dn]' 'CN=ASK2 persistent module signing key' '[req_ext]' 'basicConstraints=critical,CA:FALSE' 'keyUsage=digitalSignature' 'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid') \
+        -keyout "$ASK_PERSIST_PEM" -out "$ASK_PERSIST_PEM"
+    fi
+    if [ ! -f "$ASK_PERSIST_X509" ] || [ "$ASK_PERSIST_PEM" -nt "$ASK_PERSIST_X509" ]; then
+      openssl x509 -in "$ASK_PERSIST_PEM" -outform DER -out "$ASK_PERSIST_X509"
+    fi
+    ASK_PERSIST_SKID=$(openssl x509 -in "$ASK_PERSIST_X509" -inform DER -noout \
+      -ext subjectKeyIdentifier 2>/dev/null | tail -1 | tr -d ' ')
+    echo "I: ASK2 F-217 — cache-key signing SKID=${ASK_PERSIST_SKID:-unknown}"
+
     KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
     KERNEL_HASH=$( {
       find "$GITHUB_WORKSPACE/data/kernel-config" -maxdepth 1 -name '*.config' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
@@ -209,6 +231,13 @@ for package in $packages; do
       # 26488626587). Hashing this script itself also covers the OOT build env.
       find "$GITHUB_WORKSPACE/kernel/ask/oot-modules" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-build-packages.sh" 2>/dev/null
+      # F-217: fold the persistent module-signing key's cert into the hash. The
+      # kernel embeds this key's cert (CONFIG_MODULE_SIG_KEY) and ask.ko is
+      # signed with it; if the key ever rotates/diverges, a cached vmlinux would
+      # trust a dead SKID while ask.ko is freshly signed -> "Key was rejected"
+      # at insmod (image 2323). Hashing the cert busts the kernel cache on any
+      # key change so the kernel is rebuilt to embed the current cert.
+      cat "$GITHUB_WORKSPACE/ask-persistent-keys/signing_key.x509" 2>/dev/null
     } | sha256sum | cut -c1-16)
     KERNEL_CACHE_ROOT="${RUNNER_TOOL_CACHE:-/tmp}/linux-kernel-cache"
     mkdir -p "$KERNEL_CACHE_ROOT"
@@ -358,6 +387,21 @@ for package in $packages; do
       fi
       echo "### Removing stale tarball source trees before kernel build"
       rm -rf linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
+      # F-217/kernel-skew: purge stale kernel .debs from BOTH the package dir
+      # and the git-cache parent before building. bindeb-pkg writes into the
+      # cache parent (git-cache symlink path); the later lift step copies
+      # linux-*_arm64.deb from there, so a PREVIOUS run's .deb (different +b
+      # suffix) would otherwise be lifted alongside the fresh one and the guard
+      # could pick the wrong file (run 32325140967 picked +b...0140 over the
+      # fresh +b...0235). Leave only what THIS build produces.
+      rm -f linux-image-*_arm64.deb linux-headers-*_arm64.deb \
+            linux-libc-dev_*_arm64.deb linux-image-*-dbg_*_arm64.deb 2>/dev/null || true
+      if [ -L linux ] && [ "$(readlink -f linux)" = "$(readlink -f "$CACHE")" ]; then
+        rm -f "${CACHE%/linux}"/linux-image-*_arm64.deb \
+              "${CACHE%/linux}"/linux-headers-*_arm64.deb \
+              "${CACHE%/linux}"/linux-libc-dev_*_arm64.deb \
+              "${CACHE%/linux}"/linux-image-*-dbg_*_arm64.deb 2>/dev/null || true
+      fi
       ./build.py --packages linux-kernel
     fi
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
@@ -495,7 +539,13 @@ for package in $packages; do
   # injection ran BEFORE bindeb-pkg and could not find the .debs).
   if [ "$package" == "linux-kernel" ]; then
     ASK_SNAP_DIR="./ask-kernel-snapshot"
-    ASK_KEY_DIR="./ask-persistent-keys"
+    # F-217 fix: MUST be the SAME absolute path the kernel key-gen used
+    # (ci-setup-kernel.sh injects ASK_KEY_DIR=${GITHUB_WORKSPACE}/ask-persistent-keys
+    # into build-kernel.sh). The old "./ask-persistent-keys" resolved to the
+    # package-build/linux-kernel dir — a different location than the kernel
+    # source root symlink — so ask.ko got signed with a different key than the
+    # one embedded in vmlinux (image 2323 "Key was rejected by service").
+    ASK_KEY_DIR="${GITHUB_WORKSPACE}/ask-persistent-keys"
     ASK_KEY_PEM="$ASK_KEY_DIR/signing_key.pem"
     ASK_KEY_X509="$ASK_KEY_DIR/signing_key.x509"
     KERNEL_DIR="linux"
@@ -516,6 +566,16 @@ for package in $packages; do
           mkdir -p "$ASK_KSRC/certs"
           cp "$ASK_KEY_PEM"  "$ASK_KSRC/certs/signing_key.pem"
           cp "$ASK_KEY_X509" "$ASK_KSRC/certs/signing_key.x509"
+          # F-217 fix: assert the snapshot signing key is byte-identical to the
+          # persistent key vmlinux embedded. If these ever diverge again, fail
+          # the build here instead of shipping an ask.ko the kernel rejects.
+          if ! cmp -s "$ASK_KEY_X509" "$ASK_KSRC/certs/signing_key.x509"; then
+            echo "::error::ASK2 F-217: snapshot signing key differs from persistent key ($ASK_KEY_X509)"
+            exit 1
+          fi
+          ASK_KEY_SKID=$(openssl x509 -in "$ASK_KEY_X509" -inform DER -noout \
+            -ext subjectKeyIdentifier 2>/dev/null | tail -1 | tr -d ' ')
+          echo "I: ASK2 F-217 — persistent signing key SKID=${ASK_KEY_SKID:-unknown}"
           if [ -d "${KERNEL_DIR}/include/linux/fsl" ]; then
             mkdir -p "$ASK_KSRC/include/linux/fsl"
             cp -av "${KERNEL_DIR}/include/linux/fsl/." "$ASK_KSRC/include/linux/fsl/" 2>&1 | tail -5 || true
@@ -572,6 +632,28 @@ for package in $packages; do
     fi
     echo "### Kernel build OK: found $KERNEL_DEB_COUNT .deb file(s)"
     ls -lh linux-image-*.deb 2>/dev/null || true
+
+    # F-217/kernel-skew hard guard: a FAILED bindeb-pkg leaves the PREVIOUS
+    # run's stale linux-image .deb in the git-cache parent, which the lift step
+    # above copies in — so the count check passes while shipping an old kernel
+    # (exactly how a broken fixup silently shipped stale vmlinuz + mismatched
+    # signing key). Detect it: the produced .deb version MUST carry the
+    # per-build +b<suffix> we requested. If it only has the bare KERNEL-1
+    # version, the fresh build did not happen -> FAIL instead of masking.
+    if [ -n "${BUILD_VERSION:-}" ]; then
+      EXPECT_SUFFIX="$(printf "%s" "$BUILD_VERSION" | tr -cd '0-9.' | sed 's/^[.]*//;s/[.]*$//')"
+      if [ -n "$EXPECT_SUFFIX" ]; then
+        PRODUCED=$(find . -maxdepth 1 -name "linux-image-*-vyos_*+b${EXPECT_SUFFIX}_arm64.deb" ! -name '*-dbg*' -print | head -1)
+        if [ -n "$PRODUCED" ]; then
+          echo "### F-217: kernel .deb carries per-build version +b${EXPECT_SUFFIX} (fresh build confirmed): $PRODUCED"
+        else
+          echo "::error::F-217: no linux-image .deb carries the required per-build suffix +b${EXPECT_SUFFIX}"
+          echo "::error::The bindeb-pkg build FAILED or only STALE cached .debs were lifted — refusing to ship a mismatched kernel."
+          ls -lh linux-image-*.deb 2>/dev/null || true
+          exit 1
+        fi
+      fi
+    fi
   fi
 
   ### Build Mono Gateway DTB from kernel source (before cleanup)

@@ -1885,13 +1885,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-094: flow_add retype → struct fman_pcd_fe_flow_action *"
 fi
 
-# F-109: Export fman_pcd_fe_enq_get_offset() — eliminates debugfs loopback.
-# Adds kernel API to retrieve ENQ FE MURAM offset so ask.ko can call
-# fman_pcd_fe_flow_add() directly instead of parsing debugfs via filp_open().
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_109.py" 2>&1
-    echo "### F-109: fman_pcd_fe_enq_get_offset() export (eliminates debugfs loopback)"
-fi
+: # F-109 folded into patch 0153 (fman_pcd_fe_enq_get_offset export).
+: # Phase 2 fold 2026-08-18: the fixup edit was regenerated into
+: # 0153-fman-pcd-fe-engage-api.patch (its owning patch); the resulting
+: # fman_pcd.c/.h are byte-identical modulo two normalized blank lines.
+: # Verified: fresh-tree apply clean + tree-equivalence vs current+F_109.
 
 # F-096: Call fman_pcd_fe_build_contexts() during fe_arm engage.
 # Patch 0146 defines the function but the call site was lost when
@@ -1923,15 +1921,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-098: context_build retype (DDR not MMIO)"
 fi
 
-# F-116 (crash-safety): NULL-guard the FE-VM flow-delete path. On
-# FLOW_CLS_DESTROY, ask_flow_offload.c calls fman_pcd_fe_flow_del(NULL, ...);
-# with no guard fman_pcd_ehash_flow_clear_all(fman_get_pcd(NULL)) dereferenced
-# NULL+0x138 and panicked the box on EVERY offloaded flow that closed
-# (HW 2026-07-24, ISO 2042). Adds NULL guards so the delete is a safe no-op.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_116.py" 2>&1
-    echo "### F-116: FE-VM flow-delete NULL guards"
-fi
+: # F-116 folded into patch 0153 (FE-VM flow-delete NULL guards).
+: # Phase 2 fold 2026-08-18: the two NULL guards (fman_pcd_ehash_flow_clear_all
+: # + fman_pcd_fe_flow_del) were regenerated into 0153-fman-pcd-fe-engage-api.patch.
+: # Verified byte-identical vs current+F_116 across the full series (incl. F-117
+: # which anchors on F-116's guarded fe_flow_del body). CI + board gated.
 
 # F-117 (Fix B pt1): per-key FE-VM ehash delete. Adds fman_pcd_ehash_del_key
 # (head + mid-chain collision-chain unlink, prev_head LIFO invariant kept) and
@@ -2036,13 +2030,11 @@ echo "### F-108: Ratelimited Err FD status in dpaa_eth.c"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_103.py" 2>&1
 echo "### F-103: SUPERSEDED — BPID reprogram re-enabled (F_102 guards crash path)"
 
-# F-104: Add get_channels ethtool op to DPAA1 driver.
-# VPP's af_xdp plugin uses ETHTOOL_GCHANNELS to detect available RX queues.
-# DPAA1 doesn't implement get_channels, so VPP defaults to 1 queue.
-# This prevents multi-queue XSK binding needed for ZC RX (FMan RSS spreads
-# across 4 qbands). Reports 4 combined channels (one per qband).
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_104.py" 2>&1
-echo "### F-104: DPAA1 get_channels ethtool op added"
+: # F-104 folded into patch 0109 (DPAA1 get_channels ethtool op).
+: # Phase 2 fold 2026-08-18: dpaa_get_channels() + the ethtool_ops entry were
+: # regenerated into 0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch (its
+: # owning patch — 0109 last touches dpaa_ethtool_ops). Verified byte-identical
+: # to current+F_104 across the full series. CI-gated.
 
 # F-105: rx_hook diagnostics — log why frames are rejected (temporary, remove after root cause found)
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_105.py" 2>&1
@@ -2195,6 +2187,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo "### fman_port.c/fman_pcd_kg.c: F-162 KeyGen direct-scheme addressing (NIA_KG_DIRECT)"
 fi
 
+# F-205 (T-M6-1 Phase 3 S1, 2026-08-19): dormant parser LCV-split port
+# primitive. Adds fman_port_set/clear_lcv_split() with readback; no caller yet.
+# MUST run after F-162 (shares its fman_port.c/h tail anchors).
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_205.py" 2>&1
+    echo "### fman_port.c/h: F-205 dormant IPv4/IPv6 parser LCV-split primitive"
+fi
+
 # F-165 (2026-08-05, Task #26 follow-up): fe_arm engage with an explicit
 # non-zero offset must not be silently overwritten by the CONT_LOOKUP
 # scaffold's own fe_enter_off = gro reassignment. Debugfs-test-only;
@@ -2230,6 +2230,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_168.py" 2>&1
     echo "### fman_port.c: F-168 FMFP_EXTC SYNC assertion in fman_port_set_cc_base() (arm path)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_215.py" 2>&1
+    echo "### fman.c/h + fman_port.c: F-215 gate global INV0 SYNC to first engaged port only"
 fi
 
 # F-169 (2026-08-06, Task #26 / T-M3-R attempt 2 follow-up): T-M3-R attempt 1
@@ -2246,15 +2248,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-169 fe_kg_ekfc live KeyGen scheme EKFC reconfig (debugfs)"
 fi
 
-# F-170 (2026-08-06, Task #26 follow-up): the annotation-hash-match technique
-# just found F-163's PORT_ID byte is wrong for eth4/port 0x11 (silicon
-# extracts 0x00, not the raw hw_port_id). Characterizing whether this is
-# port-specific or universal needs the same test on eth3/port 0x10, but
-# F-072's hash capture hook is hardcoded to eth4 only. Widens it to eth3+eth4
-# and records which interface produced the capture. Purely additive.
-if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ] && [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_170.py" 2>&1
-    echo "### dpaa_eth.c + fman_pcd.c: F-170 hash_probe widened to eth3+eth4"
+# F-216 (2026-08-19, image 2228 panic): dual-port v6 arm produced a separate
+# good-status default-FQ FD with addr==0; rx_default_dqrr phys_to_virt(0) +
+# hash_offset 0x108 panicked at ffffffff80000108. Reject/log zero-address FDs
+# before DMA/headroom access and strip the obsolete F-072/F-170 be64 frame-data
+# diagnostic (F-170 deleted). MUST run after F-072 so it removes its capture.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_216.py" 2>&1
+    echo "### dpaa_eth.c: F-216 zero-FD guard + F-072/F-170 RXHASH diagnostic removal"
 fi
 
 # F-171 (2026-08-06, T-M3-R attempt 5): every off!=0 arm this session has
@@ -2500,6 +2501,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-201 RSS kgse_hc preserved (128-FQ spread)"
 fi
 
+# F-209 (T-M6-1 productization step 1, 2026-08-19): carry per-scheme CCOBASE
+# in the AC_CC branch. v4 cc_base_offset=0 -> byte-identical; v6 uses 1.
+# MUST run after F-201 (same keygen_scheme_setup function, separate anchor).
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_209.py" 2>&1
+    echo "### fman_keygen.c: F-209 AC_CC CCOBASE encoding (v6 row select)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_224.py" 2>&1
+    echo "### fman_keygen.c: F-224 46-byte dual-lane GEC key on AC_CC FE scheme"
+fi
+
 # F-184 (2026-08-12): the first live `fe_obs arm` (patch 0169's canary
 # discriminator, until then only compile-verified) panicked the kernel on
 # .185 -- reproduced twice:
@@ -2699,6 +2710,61 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-202 production ehash flow lifecycle serialization"
 fi
 
+# F-203 (2026-08-17): order-1 (8 KiB) DPAA RX buffers.  The mainline
+# order-0/4K pool caps one contiguous RX frame at ~3.6K even though the
+# mEMAC/FMan port allows 9600; oversized frames hit FM_FD_ERR_PHYSICAL and
+# wedge RX.  Make RX pool alloc/free order-aware (DPAA_BP_ORDER=1) while
+# leaving TX-SGT/XDP-copy scratch pages order-0.  Keeps jumbo-ish frames
+# contiguous and eligible for ASK FE HW offload (unlike RX SG).
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_203.py" 2>&1
+    echo "### dpaa_eth.c: F-203 order-1 8KiB RX buffers (contiguous jumbo)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_222.py" 2>&1
+    echo "### dpaa_eth.c: F-222 revert DPAA_BP_ORDER 1->0 (order-1 wedges RX under load)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_227.py" 2>&1
+    echo "### dpaa_eth.c: F-227 crash-safe TX-confirm guard (reject FMan HIT FD on confirmed FQ)"
+fi
+
+# F-204 (T-M6-1 Phase 2a, 2026-08-19): additive, v4-byte-identical ehash
+# table selector. Adds action->table_idx (0=v4, 1=dormant v6) without
+# overloading hw_port_id — F-195's own-port miss-FQID semantics stay intact.
+# MUST run after F-198 (final action struct), F-194/F-202 (final flow-add body).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_204.py" 2>&1
+    echo "### fman_pcd.c/h: F-204 explicit ehash table_idx selector (v4=0, v6=1)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_218.py" 2>&1
+    echo "### fman_pcd.c: F-218 v6 flow_del selects table1 by 38-byte key length"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_220.py" 2>&1
+    echo "### fman_pcd.c: F-220 per-port routed-IPv4 ehash table lifecycle foundation"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_221.py" 2>&1
+    echo "### fman_pcd.c: F-221 repoint v4 node/add/del to per-port table"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_225.py" 2>&1
+    echo "### fman_pcd.c: F-225 v4 ehash key_size 14->46 (dual-lane GEC key)"
+fi
+
+# F-210/F-211/F-212 (T-M6-1 IPv6 productization steps 2-4, 2026-08-19):
+# default-OFF, byte-identical-for-v4 production plumbing for the silicon-proven
+# dual-family dispatch recipe. F-210 writes table1's vendor node at gro+16;
+# F-211 arms/binds the v6 scheme with mv=V6BIT + CCOBASE=1 and narrows v4's
+# mv to V4BIT; F-212 applies/restores the parser LCV split. All three are gated
+# by fsl_dpaa_fman.v6_enable=0 (default; 0644 sysfs knob); ask.ko v6 preflight remains separately
+# -EOPNOTSUPP until the board gate passes. MUST run after F-204 (table1 selector),
+# F-205 (LCV primitive), F-209 (AC_CC CCOBASE), F-185/F-186 (vendor node/miss).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_210.py" 2>&1
+    echo "### fman_pcd.c/h: F-210 v6 gate + dual-node engage writer (gro+16)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_219.py" 2>&1
+    echo "### fman_pcd.c/h: F-219 per-port v6 intent bitmap + setter/predicate"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_211.py" 2>&1
+    echo "### fman_pcd.c/kg.c/h: F-211 gated v6 KeyGen scheme arm/bind"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_212.py" 2>&1
+    echo "### fman_pcd_kg.c: F-212 gated parser LCV split + restore"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_214.py" 2>&1
+    echo "### fman_keygen.c/pcd_kg.c: F-214 gated cls-plan0 pass-all (QLCV fix)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_226.py" 2>&1
+    echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
+fi
+
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
 # surface behind CONFIG_FMAN_PCD_DEBUG_FS (board patch 0170 adds the symbol).
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
@@ -2750,7 +2816,7 @@ PYEOF
 #
 # v2 approach (this block):
 #   PRE-bindeb-pkg (run while .config still exists in-tree):
-#     - Pre-generate persistent RSA signing key at ${CWD}/ask-persistent-keys/
+#     - Pre-generate persistent RSA signing key at ${GITHUB_WORKSPACE}/ask-persistent-keys/
 #     - Override CONFIG_MODULE_SIG_KEY to point at it
 #     - Run `make olddefconfig` to resolve the change
 #     - This makes the kernel embed the persistent key's cert in the
@@ -2772,8 +2838,10 @@ PYEOF
 # when its $KSRC/Module.symvers is missing and switches KSRC to the
 # snapshot's extracted headers tree.
 #
-# Idempotency: the marker `# === ASK2 v2 persistent-key + headers-snapshot ===`
-# short-circuits re-injection on re-runs of ci-setup-kernel.sh.
+# Idempotency/update behavior: if the marker already exists in the persistent
+# runner's build-kernel.sh, strip BOTH old injected blocks and re-inject the
+# current templates. A hard no-op here caused the stale ${CWD} key path to
+# survive F-217 forever on the self-hosted runner (images 2323/2348).
 echo "### Injecting ASK2 v2 persistent-key + headers-snapshot blocks into build-kernel.sh"
 python3 - "$KERNEL_BUILD/build-kernel.sh" <<'PYEOF'
 import pathlib, sys
@@ -2781,9 +2849,40 @@ bk = pathlib.Path(sys.argv[1])
 src = bk.read_text()
 
 MARKER = "# === ASK2 v2 persistent-key + headers-snapshot ==="
+# F-217 fix: previously this was a hard no-op when MARKER was present, which
+# on the PERSISTENT self-hosted runner meant a stale injected block (with the
+# old ${CWD}/ask-persistent-keys path) survived forever and every edit to the
+# KEY_BLOCK/SNAPSHOT_BLOCK below was silently ignored — the kernel kept
+# embedding CONFIG_MODULE_SIG_KEY from the OLD package-dir path while ask.ko was
+# signed with the new workspace key (image 2323/2348 "Key was rejected"). Same
+# class of bug the patch-loop injector already fixed (see SENTINEL strip above).
+# Fix: when the markers are present, STRIP both previously-injected blocks so
+# the injection below re-runs fresh EVERY time, keeping build-kernel.sh in sync
+# with the current template.
+KEY_END = "# === end ASK2 v2 persistent-key block ===\n"
+SNAP_BEGIN = "\n\n# === ASK2 v2 post-bindeb-pkg headers snapshot ==="
+SNAP_END = "# === end ASK2 v2 post-bindeb-pkg headers snapshot ===\n"
 if MARKER in src:
-    print(f"### {bk}: ASK2 v2 blocks already injected — no-op")
-    sys.exit(0)
+    print(f"### {bk}: ASK2 v2 blocks present — stripping stale blocks for a fresh re-inject")
+    # Strip the KEY_BLOCK (from its leading MARKER line through KEY_END).
+    ks = src.find(MARKER)
+    ks_line = src.rfind("\n", 0, ks) + 1  # include the block's leading blank line boundary
+    ke = src.find(KEY_END, ks)
+    if ke != -1:
+        ke += len(KEY_END)
+        # also swallow one trailing blank line if present
+        if src[ke:ke+1] == "\n":
+            ke += 1
+        src = src[:ks_line] + src[ke:]
+    # Strip the SNAPSHOT_BLOCK (from SNAP_BEGIN through SNAP_END).
+    ss = src.find(SNAP_BEGIN)
+    if ss != -1:
+        se = src.find(SNAP_END, ss)
+        if se != -1:
+            se += len(SNAP_END)
+            # Preserve a line boundary between the bindeb-pkg command before
+            # the old snapshot block and the command that followed it.
+            src = src[:ss] + "\n" + src[se:]
 
 # The merge_config.sh + olddefconfig sequence is duplicated 4 times in the
 # current build-kernel.sh (one real + three accidental duplicates from prior
@@ -2797,7 +2896,14 @@ KEY_BLOCK = '''
 # it survives the post-bindeb-pkg `make clean`. Override CONFIG_MODULE_SIG_KEY
 # to point at it; vmlinux will embed this key's cert in the trusted keyring,
 # enabling later signing of OOT ask.ko with the same key.
-ASK_KEY_DIR="${CWD}/ask-persistent-keys"
+# F-217 fix: anchor the persistent key to ONE absolute, symlink-free,
+# non-tmpfs workspace path. ${CWD} inside build-kernel.sh is the kernel source
+# root, which is a symlink into ~/kernel-git-cache/linux (tmpfs) — a DIFFERENT
+# directory than the ./ask-persistent-keys the OOT signing snapshot reads from
+# ci-build-packages.sh's package dir. That divergence signed vmlinux and ask.ko
+# with two different keys (same CN, different SKID) -> "Key was rejected by
+# service" at insmod (image 2323). One absolute GITHUB_WORKSPACE path fixes it.
+ASK_KEY_DIR="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE must be set for ASK persistent key}/ask-persistent-keys"
 mkdir -p "$ASK_KEY_DIR"
 ASK_KEY_PEM="$ASK_KEY_DIR/signing_key.pem"
 ASK_KEY_X509="$ASK_KEY_DIR/signing_key.x509"
@@ -2833,9 +2939,39 @@ src = src[:insert_at] + KEY_BLOCK + src[insert_at:]
 
 # Inject the snapshot block AFTER the `make bindeb-pkg ...` line.
 BINDEB_ANCHOR = "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} KDEB_PKGVERSION=${KERNEL_VERSION}-1"
+# F-217/kernel-skew fix: append a strictly-monotonic per-build suffix to the
+# kernel .deb version. Without it, every rebuild of 6.18.44 produces version
+# "6.18.44-1"; the persistent chroot already has that version installed, so
+# `apt install linux-image-6.18.44-vyos` is a no-op and the ISO ships the
+# PREVIOUS run's vmlinuz (stale kernel, old module-signing keyring) alongside a
+# freshly rebuilt squashfs/ask.ko -> "Key was rejected by service" on the board.
+# BUILD_VERSION (e.g. 2026.08.20-0026-rolling) reduces to digits (20260820.0026)
+# which sorts monotonically; fall back to the epoch second if unset. The
+# ask-modules .deb Depends on the release string (linux-image-<KVER>-vyos), NOT
+# this Debian version, so the OOT dependency stays satisfied.
+BINDEB_REPLACE = (
+    'KDEB_SUFFIX="$(printf "%s" "${BUILD_VERSION:-}" | tr -cd "0-9." | sed "s/^[.]*//;s/[.]*$//")"\n'
+    '[ -n "$KDEB_SUFFIX" ] || KDEB_SUFFIX="$(date -u +%Y%m%d.%H%M%S)"\n'
+    'echo "I: ASK2 kernel .deb version = ${KERNEL_VERSION}-1+b${KDEB_SUFFIX} (per-build, forces chroot upgrade)"\n'
+    "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} "
+    'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
+)
+PERBUILD_MARK = 'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
 bidx = src.find(BINDEB_ANCHOR)
-if bidx < 0:
+if bidx >= 0:
+    # Replace the fixed-version bindeb-pkg line with the per-build-versioned form
+    # so the kernel .deb version is strictly monotonic (forces chroot upgrade).
+    src = src[:bidx] + BINDEB_REPLACE + src[bidx + len(BINDEB_ANCHOR):]
+elif PERBUILD_MARK in src:
+    # Already converted on a prior strip-and-reinject run — leave it in place.
+    print(f"### {bk}: bindeb-pkg already per-build-versioned — keeping")
+else:
     print(f"ERROR: ASK2 v2 bindeb-pkg anchor not found in {bk}", file=sys.stderr)
+    sys.exit(1)
+# Re-find the (now replaced) bindeb line to anchor the snapshot block after it.
+bidx = src.find("KDEB_PKGVERSION=\"${KERNEL_VERSION}-1+b${KDEB_SUFFIX}\"")
+if bidx < 0:
+    print(f"ERROR: ASK2 per-build bindeb line not found after replace in {bk}", file=sys.stderr)
     sys.exit(1)
 # Find end-of-line after the bindeb-pkg invocation.
 eol = src.find("\n", bidx)
@@ -2853,9 +2989,11 @@ SNAPSHOT_BLOCK = '''
 # Makefiles). Copy the persistent signing key into the extracted certs/ dir
 # so OOT builds can sign ask.ko with the SAME key embedded in vmlinux's
 # trusted keyring.
-# ASK2 v2 snapshot extraction moved to ci-build-packages.sh (post-build.py, after bindeb-pkg)
-fi
-
+# ASK2 v2 snapshot extraction moved to ci-build-packages.sh (post-build.py, after bindeb-pkg).
+# No shell body remains here; importantly, do NOT emit a bare `fi`. The old
+# injector inherited an `fi` from a pre-refactor surrounding conditional; after
+# the body moved out, it became orphaned and made build-kernel.sh exit 2 AFTER a
+# successful bindeb-pkg (run 32324764983).
 
 # === end ASK2 v2 post-bindeb-pkg headers snapshot ===
 '''

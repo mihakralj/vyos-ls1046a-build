@@ -27,10 +27,13 @@
  *                             fills flow_cls_offload->stats.
  *   5. REPLACE idempotent   — second REPLACE for same cookie returns
  *                             0 (EEXIST swallowed).
- *   6. Bad action           — unsupported action_id → -EOPNOTSUPP,
+ *   6. Strict actions       — ETH MANGLE accepted (L2 rewrite is implemented);
+ *                             NAT MANGLE/ADD and VLAN PUSH/POP rejected with
+ *                             -EOPNOTSUPP and nothing inserted (T-M6-A2).
+ *   7. Bad action           — unsupported action_id → -EOPNOTSUPP,
  *                             nothing inserted.
- *   7. Missing redirect     — REPLACE with no oif → -EOPNOTSUPP.
- *   8. IPv6 rejected        — n_proto=ETH_P_IPV6 → -EOPNOTSUPP.
+ *   8. Missing redirect     — REPLACE with no oif → -EOPNOTSUPP.
+ *   9. IPv6 rejected        — n_proto=ETH_P_IPV6 → -EOPNOTSUPP.
  *
  * The suite uses ->suite_init / ->suite_exit to bring up and tear
  * down the default ask_flow_table — neither ask.ko's module_init nor
@@ -342,13 +345,133 @@ KUNIT_ASSERT_NOT_NULL(test, t);
 
 test_rule_set_v4_tcp(r, htonl(0x0a000009), htonl(0x0a00000a),
      htons(1111), htons(2222));
-/* MANGLE is not in our accept list */
+/* A bare MANGLE with htype UNSPEC (0) is not an ETH L2 rewrite, so
+ * T-M6-A2 rejects it (and there is no REDIRECT either). */
 r->rule->action.entries[0].id = FLOW_ACTION_MANGLE;
 
 f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE05, r);
 rc = dispatch(f);
 KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
 KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE05));
+}
+
+/*
+ * T-M6-A2: an ETH-type MANGLE is the next-hop L2 rewrite that the FE-VM
+ * INSERT_L2_HDR already performs, so it MUST be accepted (paired with a
+ * REDIRECT the flow offloads normally). This is the working IPv4 path and
+ * proves the strict-acceptance change did not regress it.
+ */
+static void ask_flow_offload_test_action_mangle_eth_accepted(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 30);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000030), htonl(0x0a000031),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_MANGLE;
+r->rule->action.entries[0].mangle.htype = FLOW_ACT_MANGLE_HDR_TYPE_ETH;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE30, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_NOT_NULL(test, ask_flow_lookup(t, 0xCAFE30));
+
+destroy_cookie(0xCAFE30);
+}
+
+/*
+ * T-M6-A2: an IP4-type MANGLE is a NAT rewrite the HW record does not apply.
+ * It MUST be rejected -EOPNOTSUPP (fall to SW) and MUST NOT publish a flow,
+ * even though a valid REDIRECT is present.
+ */
+static void ask_flow_offload_test_action_mangle_nat_rejected(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 31);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000032), htonl(0x0a000033),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_MANGLE;
+r->rule->action.entries[0].mangle.htype = FLOW_ACT_MANGLE_HDR_TYPE_IP4;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE31, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE31));
+}
+
+/*
+ * T-M6-A2: FLOW_ACTION_ADD (NAT field increment) is not applied in HW and
+ * MUST be rejected, never published.
+ */
+static void ask_flow_offload_test_action_add_rejected(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 32);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000034), htonl(0x0a000035),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_ADD;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE32, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE32));
+}
+
+/*
+ * T-M6-A2: VLAN push/pop are not built into the HW record (deferred T-M6-8).
+ * Previously they set ignored action_flags bits and offloaded without the
+ * tag op; now they MUST be rejected and never published.
+ */
+static void ask_flow_offload_test_action_vlan_rejected(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 2);
+struct net_device *oif = test_stub_netdev(test, 33);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+test_rule_set_v4_tcp(r, htonl(0x0a000036), htonl(0x0a000037),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_VLAN_PUSH;
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE33, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE33));
+
+/* VLAN_POP likewise */
+r->rule->action.entries[0].id = FLOW_ACTION_VLAN_POP;
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE34, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE34));
 }
 
 static void ask_flow_offload_test_action_no_redirect(struct kunit *test)
@@ -491,18 +614,14 @@ static void ask_flow_offload_test_classify_dir_non_dpaa(struct kunit *test)
  * shared the error and therefore agreed with each other — only a comparison
  * against the real extracted key exposes it, which is exactly what this does.
  *
- * F-163 (2026-08-05): a port_id=0x11 prefix byte was added ahead of the
- * silicon-verified 13 bytes above. The 0x11 value itself is a test fixture
- * (this branch's usual hwport-under-test, not an independent silicon
- * capture); what IS independently silicon-confirmed is that PORT_ID lands
- * at byte offset 0, ahead of every other field -- that follows directly
- * from the already-proven MSB-first descending EKFC assembly order (spec
- * §3.4) applied to bit 31, the highest bit KG_SCH_KN_PORT_ID sets.
+ * F-188 (2026-08-12): PORT_ID is byte 0 but its production comparison
+ * value is 0x00 (the scheme's zeroed dv default), NOT the raw hw port id.
+ * This value and the MSB-first field order are silicon-confirmed by E25/E26.
  */
 static void ask_flow_offload_test_fe_key_wire_order(struct kunit *test)
 {
 static const u8 expect[ASK_FE_KEY_SIZE] = {
-0x11,                     /* PORT_ID (test fixture, see comment above) */
+0x00,                     /* PORT_ID (zeroed scheme default, F-188) */
 0x0a, 0x63, 0x02, 0x6a,   /* SIP  10.99.2.106 */
 0x0a, 0x63, 0x02, 0xb9,   /* DIP  10.99.2.185 */
 0x06,                     /* PROTO TCP        */
@@ -525,6 +644,7 @@ key.dport = htons(55555);
 
 ask_fe_build_key(&key, k);
 KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE);
+KUNIT_EXPECT_EQ(test, k[0], (u8)0x00); /* raw key.port_id=0x11 is ignored */
 
 /*
  * Ports must be non-palindromic for this to mean anything: assert the two
@@ -534,14 +654,111 @@ KUNIT_EXPECT_NE(test, k[10], k[11]);
 KUNIT_EXPECT_NE(test, k[12], k[13]);
 }
 
+/*
+ * T-M6-1 Phase 1: pin the 38-byte IPv6 FE key layout so the v6 ehash table
+ * (F-140, key_size=38) and ask_fe_build_key_v6() can never diverge:
+ * PORT_ID(0x00) | SIP(16) | DIP(16) | PROTO | SPORT | DPORT, MSB-first.
+ */
+static void ask_flow_offload_test_fe_key_v6_wire_order(struct kunit *test)
+{
+static const u8 expect[ASK_FE_KEY_SIZE_V6] = {
+0x00,                                           /* PORT_ID (F-188 zeroed) */
+0x20,0x01,0x0d,0xb8,0x00,0x00,0x00,0x00,        /* SIP 2001:db8::1 */
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,
+0x20,0x01,0x0d,0xb8,0x00,0x00,0x00,0x00,        /* DIP 2001:db8::2 */
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,
+0x06,                                           /* PROTO TCP */
+0xad,0x9c,                                      /* SPORT 44444 */
+0xd9,0x03,                                      /* DPORT 55555 */
+};
+struct ask_flow_key key;
+u8 k[ASK_FE_KEY_SIZE_V6];
+
+KUNIT_EXPECT_EQ(test, (int)ASK_FE_KEY_SIZE_V6, 38);
+
+memset(&key, 0, sizeof(key));
+key.l3_proto = ASK_FLOW_L3_IPV6;
+key.l4_proto = IPPROTO_TCP;
+key.port_id  = 0x11;   /* raw hw id must be ignored, byte 0 stays 0x00 */
+key.src_ip[0]=0x20; key.src_ip[1]=0x01; key.src_ip[2]=0x0d; key.src_ip[3]=0xb8;
+key.src_ip[15]=0x01;
+key.dst_ip[0]=0x20; key.dst_ip[1]=0x01; key.dst_ip[2]=0x0d; key.dst_ip[3]=0xb8;
+key.dst_ip[15]=0x02;
+key.sport = htons(44444);
+key.dport = htons(55555);
+
+ask_fe_build_key_v6(&key, k);
+KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE_V6);
+KUNIT_EXPECT_EQ(test, k[0], (u8)0x00);
+KUNIT_EXPECT_NE(test, k[34], k[35]);   /* sport non-palindromic */
+KUNIT_EXPECT_NE(test, k[36], k[37]);   /* dport non-palindromic */
+}
+
+/*
+ * T-M6-A1: pin the canonical-intent lowering contract. The plain IPv4-unicast
+ * intent (REDIRECT + TTL_DEC + ETH L2 rewrite) MUST lower to oif = the egress
+ * ifindex and action_flags = 0 — the exact pre-A1 values — so the stored flow
+ * and FE record stay byte-identical. An intent with no REDIRECT lowers to
+ * -EOPNOTSUPP.
+ */
+static void ask_flow_offload_test_intent_lower_ipv4(struct kunit *test)
+{
+struct ask_flow_intent in = { .owner = 0xABCD };
+u32 oif = 0, flags = 0xdeadbeef;
+int rc;
+
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_REDIRECT, 42), 0);
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0), 0);
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_L2_REWRITE, 0), 0);
+
+rc = ask_intent_lower(&in, &oif, &flags);
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_EQ(test, oif, 42u);
+/* Byte-identity anchor: the IPv4 path stored action_flags == 0 pre-A1. */
+KUNIT_EXPECT_EQ(test, flags, 0u);
+}
+
+static void ask_flow_offload_test_intent_lower_no_redirect(struct kunit *test)
+{
+struct ask_flow_intent in = { .owner = 0xABCE };
+u32 oif = 7, flags = 7;
+int rc;
+
+/* TTL_DEC/L2_REWRITE only, no egress → not offloadable. */
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0), 0);
+rc = ask_intent_lower(&in, &oif, &flags);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+}
+
+static void ask_flow_offload_test_intent_add_overflow(struct kunit *test)
+{
+struct ask_flow_intent in = { 0 };
+int i, rc = 0;
+
+for (i = 0; i < ASK_INTENT_MAX_ACTIONS; i++)
+KUNIT_EXPECT_EQ(test, ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0), 0);
+/* One past the cap must fail rather than overrun the array. */
+rc = ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0);
+KUNIT_EXPECT_EQ(test, rc, -E2BIG);
+KUNIT_EXPECT_EQ(test, (int)in.n_actions, ASK_INTENT_MAX_ACTIONS);
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
 KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
+KUNIT_CASE(ask_flow_offload_test_fe_key_v6_wire_order),
+KUNIT_CASE(ask_flow_offload_test_intent_lower_ipv4),
+KUNIT_CASE(ask_flow_offload_test_intent_lower_no_redirect),
+KUNIT_CASE(ask_flow_offload_test_intent_add_overflow),
 KUNIT_CASE(ask_flow_offload_test_replace_minimal),
 KUNIT_CASE(ask_flow_offload_test_destroy_round_trip),
 KUNIT_CASE(ask_flow_offload_test_double_destroy_swallowed),
 KUNIT_CASE(ask_flow_offload_test_stats_round_trip),
 KUNIT_CASE(ask_flow_offload_test_replace_idempotent),
 KUNIT_CASE(ask_flow_offload_test_action_unknown),
+KUNIT_CASE(ask_flow_offload_test_action_mangle_eth_accepted),
+KUNIT_CASE(ask_flow_offload_test_action_mangle_nat_rejected),
+KUNIT_CASE(ask_flow_offload_test_action_add_rejected),
+KUNIT_CASE(ask_flow_offload_test_action_vlan_rejected),
 KUNIT_CASE(ask_flow_offload_test_action_no_redirect),
 KUNIT_CASE(ask_flow_offload_test_ipv6_rejected),
 /* PR14j: direction classifier null-safety + non-DPAA fallthrough. */

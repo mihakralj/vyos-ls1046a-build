@@ -1,11 +1,10 @@
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index 06973b34a..ecf9889da 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -104,18 +104,12 @@
-               <leafNode name="ask">
+@@ -110,18 +110,12 @@
+               <leafNode name="ipv6">
                  <properties>
-                   <help>ASK2 offload — FMan FE-VM hardware forwarding for this interface (NXP LS1046A)</help>
+                   <help>ASK2 hardware offload for IPv6 forwarded flows (NXP LS1046A FMan FE-VM)</help>
                    <valueless/>
                  </properties>
                </leafNode>
@@ -21,7 +20,7 @@ index 06973b34a..ecf9889da 100644
                    <valueless/>
                  </properties>
                </leafNode>
-@@ -128,18 +122,12 @@
+@@ -140,18 +134,12 @@
                <leafNode name="sg">
                  <properties>
                    <help>Enable Scatter-Gather</help>

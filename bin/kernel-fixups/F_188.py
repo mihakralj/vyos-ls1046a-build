@@ -51,13 +51,17 @@ changes = 0
 
 
 def edit(path, blocks):
-    """blocks: list of (name, marker, old, new). The marker string MUST
-    appear in new -- it is the per-block idempotency token."""
+    """blocks: list of (name, marker, old, new) or
+    (name, marker, old, new, optional). The marker string MUST appear in new
+    -- it is the per-block idempotency token. optional=True blocks skip (not
+    FATAL) when their anchor is absent."""
     global changes
     with open(path) as f:
         src = f.read()
     file_changes = 0
-    for name, marker, old, new in blocks:
+    for blk in blocks:
+        name, marker, old, new = blk[0], blk[1], blk[2], blk[3]
+        optional = len(blk) > 4 and blk[4]
         if marker not in new:
             print(f"### F-188: FATAL: block '{name}' marker {marker} not "
                   "embedded in its replacement text -- fixup bug.")
@@ -66,6 +70,10 @@ def edit(path, blocks):
             print(f"### F-188: {name} already applied")
             continue
         if old not in src:
+            if optional:
+                print(f"### F-188: {name} anchor absent -- SKIP (optional; "
+                      "F-140 now ships the corrected v6 comment directly).")
+                continue
             print(f"### F-188: FATAL: '{name}' text not found verbatim in "
                   f"{path} -- source drifted. Refusing to guess.")
             sys.exit(1)
@@ -92,10 +100,14 @@ pcd_blocks = [
      "\t */\n"
      "\tconst u8  ehash_key_sz  = 14;\n"
      "\tconst u8  ehash_shift   = 0;\n"),
+    # OPTIONAL: F-140 (T-M6-1 Phase 1, 2026-08-19) was rewritten to ship the
+    # correct 38-byte / EKFC 0x801C0006 v6 comment directly, so the old
+    # "Same EKFC (0x001C0006)" line no longer exists to patch. Skip when absent.
     ('v6 table comment EKFC',
      'F-188(v6-comment)',
      "\t * Same EKFC (0x001C0006) \u2014 silicon determines field size from parse result.\n",
-     "\t * F-188(v6-comment): same EKFC (0x801C0006) \u2014 silicon determines field size from parse result.\n"),
+     "\t * F-188(v6-comment): same EKFC (0x801C0006) \u2014 silicon determines field size from parse result.\n",
+     True),
     ('fe_engage EKFC 14-byte',
      'F-188(prod-ekfc)',
      "\t\terr = __fman_pcd_fe_arm_engage(pcd, hw_port_id, 0, miss_fqid, 0x001C0006);\n",

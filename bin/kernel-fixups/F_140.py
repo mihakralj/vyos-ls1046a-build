@@ -1,23 +1,29 @@
-"""F-140: Add IPv6 ehash table (key_size=37) and v6 KG scheme arm to FE-VM chain.
+"""F-140: Add the IPv6 ehash table (dormant, T-M6-1 Phase 1) to the FE-VM chain.
 
-M6 Piece 2: The v4 FE-VM chain uses a single ehash table with key_size=13 and
-a single KG scheme.  For v6, we need a second ehash table with key_size=37
-(16+16+1+2+2 bytes for SIP+DIP+PROTO+SPORT+DPORT) and a second KG scheme.
+M6 Piece 2 / T-M6-1 Phase 1 (2026-08-19 correction). The v4 FE-VM chain uses a
+single ehash table (14-byte key after F-188) and one KG scheme. For v6 we need
+a SECOND ehash table sized for the 38-byte v6 key.
 
-The EKFC value is identical (0x001C0006) — the silicon determines field size
-from the parse result (IPv4=4B addresses, IPv6=16B addresses).  The extraction
-order is the same MSB-first: SIP → DIP → PROTO → SPORT → DPORT.
+CORRECTED CONTRACT (was 37-byte / EKFC 0x001C0006 — both pre-PORT_ID and wrong):
+  * v6 key is 38 bytes: PORT_ID(1) + SIP(16) + DIP(16) + PROTO(1) + SPORT(2) +
+    DPORT(2), matching ask_fe_build_key_v6() (ASK_FE_KEY_SIZE_V6=38). A 37-byte
+    table can NEVER byte-match the 38-byte record the OOT builder emits — the
+    exact zero-HIT class F-188 fixed for v4.
+  * EKFC is 0x801C0006 (PORT_ID bit 31 set), identical to v4; silicon sizes
+    IPSRC1/IPDST1 from the parse result (v4=4B, v6=16B). Extraction order is the
+    same MSB-first: PORT_ID -> SIP -> DIP -> PROTO -> SPORT -> DPORT.
 
-Changes:
-1. In __fman_pcd_fe_build_vm_chain() (fman_pcd.c), add a second
-   ehash_table_set() call with key_size=37 for v6 (table index 1).
-2. In fman_pcd_kg_port_arm_fe() (fman_pcd_kg.c), also find a free scheme
-   slot and arm it for v6 with the same EKFC.
-3. In fman_pcd_kg_port_disarm_fe(), iterate all schemes and disarm any
-   that match the port (catches both v4 and v6 schemes).
-
-Note: fman_pcd_kg.c only has an opaque struct fman_pcd* (forward-declared),
-so we cannot access pcd->v6_scheme_id.  Instead, disarm iterates all schemes.
+SCOPE — DORMANT PLUMBING ONLY. This fixup allocates the second (table index 1)
+ehash table so v6 flow records have somewhere to live and the data structures
+line up. It deliberately does NOT arm a second KG scheme: dual-scheme per-port
+selection (kgse_mv against the parser v4/v6 LCV, with NIA_KG_DIRECT disabled) is
+an unresolved silicon question (see T-M6-1 Phase 3 in ASK2-MASTER-PLAN and the
+S0 qdrant gate). Arming a second, unselectable scheme with mv=0 while the live
+port runs KG-direct would be dead state at best and could perturb the proven v4
+dispatch at worst. Until the LCV/kgse_mv experiment lands, v6 flows fail to
+software (ask_hw_flow_preflight returns -EOPNOTSUPP for v6 when the v6 path is
+not enabled), so this table stays allocated-but-unreferenced and cannot affect
+the v4 bytes or the v4 scheme programming.
 
 Must run AFTER 0158.
 """
@@ -47,16 +53,19 @@ if os.path.exists(pcd_c):
 \tif (err)
 \t\treturn err;
 
-\t/* F-140: Second ehash table for IPv6 (37-byte key).
-\t * Same EKFC (0x001C0006) — silicon determines field size from parse result.
-\t * Table index 1; v4 flows use table 0, v6 flows use table 1.
+\t/* F-140 (T-M6-1 Phase 1): dormant second ehash table for IPv6.
+\t * 38-byte key = PORT_ID|SIP16|DIP16|PROTO|SPORT|DPORT, matching
+\t * ask_fe_build_key_v6(); EKFC will be 0x801C0006 when the separately
+\t * gated v6 KG scheme is implemented. Table index 1; v4 stays table 0.
+\t * The table is intentionally unreferenced until the LCV/kgse_mv
+\t * dual-scheme selection experiment passes on silicon.
 \t */
 \terr = fman_pcd_ehash_table_set(pcd, ehash_mask,
-\t\t\t\t       37, ehash_shift);"""
-        if "37, ehash_shift" not in src:
+\t\t\t\t       38, ehash_shift);"""
+        if "38, ehash_shift" not in src:
             src = src.replace(v4_ehash, v6_ehash_block, 1)
             changes += 1
-            print("### F-140: added v6 ehash table (key_size=37)")
+            print("### F-140: added dormant v6 ehash table (key_size=38)")
         else:
             print("### F-140: v6 ehash table already present")
     else:
@@ -73,101 +82,28 @@ else:
     print("### F-140: fman_pcd.c not found")
 
 # ═══════════════════════════════════════════════════════════════════════
-# Part B: fman_pcd_kg.c — v6 scheme arm/disarm
+# Part B: fman_pcd_kg.c — v6 scheme arm/disarm  (DEFERRED to T-M6-1 Phase 3)
 # ═══════════════════════════════════════════════════════════════════════
-
-if os.path.exists(kg_c):
-    with open(kg_c) as f:
-        kg_src = f.read()
-    kg_changes = 0
-
-    # B1. In fman_pcd_kg_port_arm_fe(), after setting slot->ekfc, also find
-    #     a free scheme slot and arm it for v6 with the same EKFC.
-    #     Note: fman_pcd_kg.c only has opaque struct fman_pcd*, so we cannot
-    #     access pcd->v6_scheme_id.  We just always try to arm a v6 scheme.
-    v4_arm = "\tif (ekfc)\n\t\tslot->ekfc = ekfc;"
-    if v4_arm in kg_src:
-        v6_arm_block = """\tif (ekfc)
-\t\tslot->ekfc = ekfc;
-
-\t/* F-140: Find a free KG scheme slot and arm it for IPv6.
-\t * Same EKFC — silicon determines field size from parse result.
-\t * Skip slots already used by this port (the v4 slot).
-\t */
-\tif (ekfc) {
-\t\tint vi;
-\t\tfor (vi = 0; vi < FM_KG_MAX_NUM_OF_SCHEMES; vi++) {
-\t\t\tstruct keygen_scheme *vs = &keygen->schemes[vi];
-\t\t\tif (vs->used && vs->hw_port_id == hw_port_id)
-\t\t\t\tcontinue;\t/* already ours (v4 slot) */
-\t\t\tif (!vs->used || vs->hw_port_id == 0) {
-\t\t\t\t/* Free or unbound — take it for v6 */
-\t\t\t\tvs->ekfc = ekfc;
-\t\t\t\tvs->next_engine = 2;\t/* CC (AC_CC dispatch) */
-\t\t\t\tvs->hw_port_id = hw_port_id;
-\t\t\t\tvs->used = true;
-\t\t\t\tpr_info("fman_pcd: v6 KG scheme %d armed for port 0x%02x (EKFC=0x%08x)\\n",
-\t\t\t\t\tvi, hw_port_id, ekfc);
-\t\t\t\tbreak;
-\t\t\t}
-\t\t}
-\t}"""
-        if "v6 KG scheme" not in kg_src:
-            kg_src = kg_src.replace(v4_arm, v6_arm_block, 1)
-            kg_changes += 1
-            print("### F-140: added v6 KG scheme arm in arm_fe()")
-        else:
-            print("### F-140: v6 arm already present in fman_pcd_kg.c")
-    else:
-        print("### F-140: v4 arm block not found in fman_pcd_kg.c")
-
-    # B2. In fman_pcd_kg_port_disarm_fe(), also disarm any v6 scheme bound
-    #     to this port.  Iterate all schemes and clear any matching hw_port_id
-    #     beyond the first one (the v4 slot is already handled by the existing
-    #     disarm code).
-    disarm_end = "\t(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);"
-    if disarm_end in kg_src:
-        v6_disarm = """\t(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
-
-\t/* F-140: Disarm any additional schemes bound to this port (v6).
-\t * The first match is the v4 slot already disarmed above; clear any others.
-\t */
-\t{
-\t\tint vi;
-\t\tint found_v4 = 0;
-\t\tfor (vi = 0; vi < FM_KG_MAX_NUM_OF_SCHEMES; vi++) {
-\t\t\tstruct keygen_scheme *vs = &keygen->schemes[vi];
-\t\t\tif (vs->used && vs->hw_port_id == hw_port_id) {
-\t\t\t\tif (!found_v4) {
-\t\t\t\t\tfound_v4 = 1;\t/* skip the v4 slot */
-\t\t\t\t\tcontinue;
-\t\t\t\t}
-\t\t\t\tvs->used = false;
-\t\t\t\tvs->ekfc = 0;
-\t\t\t\tvs->next_engine = 0;
-\t\t\t\tvs->hw_port_id = 0;
-\t\t\t\tpr_info("fman_pcd: v6 KG scheme %d disarmed\\n", vi);
-\t\t\t}
-\t\t}
-\t}"""
-        if "v6 KG scheme" not in kg_src:
-            kg_src = kg_src.replace(disarm_end, v6_disarm, 1)
-            kg_changes += 1
-            print("### F-140: added v6 KG scheme disarm in disarm_fe()")
-        else:
-            print("### F-140: v6 disarm already present in fman_pcd_kg.c")
-    else:
-        print("### F-140: disarm end not found in fman_pcd_kg.c")
-
-    if kg_changes:
-        with open(kg_c, "w") as f:
-            f.write(kg_src)
-        print(f"### F-140: {kg_changes} change(s) to fman_pcd_kg.c")
-        total_changes += kg_changes
-    else:
-        print("### F-140: no changes to fman_pcd_kg.c")
-else:
-    print("### F-140: fman_pcd_kg.c not found")
+#
+# The original F-140 armed a SECOND KG scheme here by grabbing "any free/unbound
+# slot" and setting next_engine=CC with mv=0. That is intentionally NOT applied:
+#
+#   * The live v4 port runs with NIA_KG_DIRECT | scheme_id (F-178), which
+#     bypasses the SI/match-vector walk. A second scheme with mv=0 can never be
+#     selected under KG-direct, so it is dead state — and worse, an extra armed
+#     scheme on the same port risks perturbing the only proven-working v4
+#     dispatch.
+#   * Correct dual-scheme selection needs the parser IPv4/IPv6 LCV bit driven
+#     into each scheme's kgse_mv with KG-direct turned OFF. The exact LCV/mv
+#     values for the 210.10.1 microcode are unknown and require a cold-boot
+#     silicon experiment (T-M6-1 Phase 3; S0 qdrant gate applies before any
+#     kgse_mv / scheme change).
+#
+# Until that experiment resolves the selection mechanism, the v6 scheme arm is
+# left unimplemented and v6 flows fail to software. Only the dormant v6 ehash
+# table (Part A) is created. Do NOT re-add a free-slot scheme arm here without
+# the LCV/kgse_mv design decision.
+print("### F-140: v6 KG scheme arm DEFERRED to T-M6-1 Phase 3 (dispatch unresolved)")
 
 if total_changes:
     print(f"### F-140: {total_changes} total change(s) applied")

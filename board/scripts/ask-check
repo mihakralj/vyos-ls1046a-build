@@ -1,578 +1,486 @@
 #!/usr/bin/env bash
-# ask-check — health check for the ASK hardware-offload dataplane on the
-# LS1046A Mono Gateway DK.
+# ask-check — production health check for ASK2 plain routed IPv4 unicast
+# hardware offload on the LS1046A Mono Gateway DK.
 #
-# Usage:   ask-check          (re-run with sudo for symbol/debugfs depth)
+# Usage: sudo ask-check
 #
-# ============================================================================
-# WHAT THIS TESTS
-# ============================================================================
-# ASK is the FMan-silicon hardware-offload dataplane: the operator turns it
-# on per-port, and from then on the FMan classifies and forwards matching
-# flows entirely in hardware, leaving the CPU idle. When ASK is OFF the board
-# runs the mainline kernel dataplane (RSS to kernel RX queues); the VPP/AF_XDP
-# overlay is a separate dataplane reported by xsk-zc-check, not here.
+# This is NOT a milestone burndown chart and does not inspect experimental
+# debugfs harnesses. It checks the shipping datapath and its production control
+# plane only:
 #
-# PREVIEW SCOPE (2026-08-17): the validated hardware datapath is plain routed
-# IPv4 unicast TCP/UDP forwarding (L2 rewrite + TTL/checksum + direct-to-wire
-# TX). IPv6, NAT/PAT, VLAN push/pop, IPsec/ESP, and bridge/L2 switchdev are
-# NOT hardware-offloaded in this build — they fall back to the kernel software
-# path (correct forwarding, higher CPU). This tool reports those deferred
-# capabilities as [NOTE] "deferred", NOT [FAIL]: their absence is expected and
-# is not an ASK datapath failure. A [FAIL] here means a capability the plain
-# IPv4 hardware datapath actually requires is missing or broken.
+#   VyOS config -> nft flowtable/conntrack -> nf_flow_table callbacks -> ask.ko
+#   -> FMan PCD FE/ehash -> UPDATE_TTL + INSERT_L2_HDR -> no-confirm TX FQ.
 #
-# This script walks the ASK datapath bottom-up, from the silicon programming
-# layer to the operator CLI, in the order ASK brings itself up, and reports
-# whether each capability is present and healthy. It is a production probe:
-# every section describes a capability the finished ASK dataplane MUST have,
-# so a component that is missing, stubbed, or broken is a [FAIL]. The script
-# returns success only when the whole ASK chain is operational; until ASK is
-# complete it is expected to fail on the not-yet-implemented pieces, and each
-# failure names exactly which capability is absent.
+# Shipping scope: routed IPv4 unicast TCP/UDP. IPv6, NAT/PAT, VLAN actions,
+# bridge, multicast and IPsec are software-fallback features, not failures here.
+# Their safety contract is enforced by strict action rejection in ask.ko.
 #
-# The chain, in bring-up order:
-#
-#   1. Dataplane posture          which dataplane owns the ports right now
-#   2. FMan PCD subsystem         the silicon programming layer (KeyGen / CC /
-#                                 Header-Manip / Policer / FE-VM) + MURAM budget
-#   3. Reversible mode switch     turning ASK on/off must be register-exact and
-#                                 leak-free, verified by snapshot, never reboot
-#   4. Hardware classification    CONT_LOOKUP pass-through (MISS→kernel) +
-#                                 FE-VM singletons / ehash / EXT_HASH / ENQ
-#                                 (HIT path — per-flow hardware dispatch)
-#   5. Hardware forwarding        L3 next-hop rewrite (strip/insert L2, TTL,
-#                                 checksum) applied inline in the FMan
-#   6. Control-plane module       ask.ko: the genl family + flow table + the
-#                                 fe_engage/disengage entry point
-#   7. Hardware IPsec offload     CAAM job rings + descriptor sharing + the
-#                                 ESP packet-mode offload bind on FMan netdevs
-#   8. Operator CLI               'set interfaces ethernet eth<n> offload ask'
-#                                 + the validator enforcing the per-interface
-#                                 ASK↔VPP mutex (a port can't be both)
-#   9. dmesg integrity            no error/stall/leak lines from the datapath
-#
-# Architecture note (2026-07-17):
-#   Debugfs nodes are INSTRUMENTATION ONLY.  The control-plane API is the
-#   exported kernel symbols (fman_pcd_fe_engage / _disengage / _flow_add /
-#   _flow_del / kg_unbind_port / kg_detach_cc).  The debugfs write handlers
-#   are thin wrappers that parse strings and delegate to typed __impl()
-#   functions; the exported API calls those same typed functions directly
-#   — no sprintf/snprintf in the control path (patch 0157).
-#
-# Tags:
-#   [OK]    capability present and healthy
-#   [WARN]  present but degraded — investigate
-#   [FAIL]  capability missing or broken — ASK is not operational here
-#   [SKIP]  cannot test in this environment (not LS1046A, no privilege, or a
-#           probing tool is absent) — NOT a verdict on ASK itself
+# Debugfs is deliberately irrelevant. Production control and observability use
+# generic netlink/YNL, VyOS configuration, nftables, sysfs/ethtool and the
+# current-boot kernel journal. The script never mutates configuration, flows,
+# conntrack, FMan registers, MURAM, FQs or interface state.
 #
 # Exit codes:
-#   0  the ASK dataplane is fully operational
-#   1  at least one capability is missing or broken
+#   0  all required production checks passed (WARN/SKIP do not fail)
+#   1  at least one required production check failed
 #   2  not an LS1046A board
 
 set -u
 
-# ---------------------------------------------------------------------------
-# Colour escapes (TTY only). Same convention as caam-check / fan-check.
-# ---------------------------------------------------------------------------
-if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
-    C_RST=$'\033[0m'
-    C_BOLD=$'\033[1m'
-    C_DIM=$'\033[2m'
-    C_GREEN=$'\033[1;32m'
-    C_YELLOW=$'\033[1;33m'
-    C_RED=$'\033[1;31m'
-    C_BLUE=$'\033[1;34m'
+if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
+    C_RST=$'\033[0m' C_BOLD=$'\033[1m' C_DIM=$'\033[2m'
+    C_GREEN=$'\033[1;32m' C_YELLOW=$'\033[1;33m'
+    C_RED=$'\033[1;31m' C_BLUE=$'\033[1;34m'
 else
     C_RST='' C_BOLD='' C_DIM='' C_GREEN='' C_YELLOW='' C_RED='' C_BLUE=''
 fi
 
-ok()    { printf "  [%sOK%s]   %s\n" "$C_GREEN"  "$C_RST" "$*"; }
-warn()  { printf "  [%sWARN%s] %s\n" "$C_YELLOW" "$C_RST" "$*"; }
-fail()  { printf "  [%sFAIL%s] %s\n" "$C_RED"    "$C_RST" "$*"; }
-skip()  { printf "  [%sSKIP%s] %s\n" "$C_BLUE"   "$C_RST" "$*"; }
-note()  { printf "         %s%s%s\n" "$C_DIM"    "$*"     "$C_RST"; }
-hdr()   { printf "\n%s%s%s\n"        "$C_BOLD"   "$*"     "$C_RST"; }
+ok()   { printf '  [%sOK%s]   %s\n' "$C_GREEN" "$C_RST" "$*"; }
+warn() { printf '  [%sWARN%s] %s\n' "$C_YELLOW" "$C_RST" "$*"; }
+fail() { printf '  [%sFAIL%s] %s\n' "$C_RED" "$C_RST" "$*"; }
+skip() { printf '  [%sSKIP%s] %s\n' "$C_BLUE" "$C_RST" "$*"; }
+note() { printf '         %s%s%s\n' "$C_DIM" "$*" "$C_RST"; }
+hdr()  { printf '\n%s%s%s\n' "$C_BOLD" "$*" "$C_RST"; }
 
 EXIT=0
 N_OK=0 N_WARN=0 N_FAIL=0 N_SKIP=0
+record_ok()   { ok "$@"; N_OK=$((N_OK + 1)); }
+record_warn() { warn "$@"; N_WARN=$((N_WARN + 1)); }
+record_fail() { fail "$@"; N_FAIL=$((N_FAIL + 1)); EXIT=1; }
+record_skip() { skip "$@"; N_SKIP=$((N_SKIP + 1)); }
 
-record_ok()   { ok   "$@"; N_OK=$((N_OK+1));     }
-record_warn() { warn "$@"; N_WARN=$((N_WARN+1)); }
-record_fail() { fail "$@"; N_FAIL=$((N_FAIL+1)); EXIT=1; }
-record_skip() { skip "$@"; N_SKIP=$((N_SKIP+1)); }
-# record_defer: a capability intentionally OUT OF PREVIEW SCOPE (IPv6, NAT,
-# VLAN, IPsec, bridge). Reported as [NOTE] "deferred" and counted separately;
-# never sets EXIT. Absence is expected and flows fall back to software.
-N_DEFER=0
-record_defer() { note "deferred (software fallback, not in preview scope): $*"; N_DEFER=$((N_DEFER+1)); }
+TMPDIR_CHECK=$(mktemp -d /tmp/ask-check.XXXXXX 2>/dev/null || echo /tmp/ask-check.$$)
+mkdir -p "$TMPDIR_CHECK" 2>/dev/null || true
+trap 'rm -rf "$TMPDIR_CHECK"' EXIT HUP INT TERM
 
-# ---------------------------------------------------------------------------
-# Board gate
-# ---------------------------------------------------------------------------
-if [ ! -f /proc/device-tree/compatible ] \
-   || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q 'fsl,ls1046a'; then
-    echo "ask-check: not LS1046A — nothing to report" >&2
+if [ ! -r /proc/device-tree/compatible ] \
+   || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q '^fsl,ls1046a$'; then
+    echo 'ask-check: not an LS1046A board' >&2
     exit 2
 fi
 
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-hostname_str=$(hostname 2>/dev/null || echo "?")
-kernel_str=$(uname -r 2>/dev/null || echo "?")
-printf "%sask-check%s  host=%s  kernel=%s  %s\n" \
-    "$C_BOLD" "$C_RST" "$hostname_str" "$kernel_str" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-if [ "$(id -u)" -ne 0 ]; then
-    note "running unprivileged — symbol/debugfs probes will SKIP; re-run with sudo for full depth"
+IS_ROOT=0
+[ "$(id -u)" -eq 0 ] && IS_ROOT=1
+hostname_str=$(hostname 2>/dev/null || echo '?')
+kernel_str=$(uname -r 2>/dev/null || echo '?')
+printf '%sask-check%s  host=%s  kernel=%s  %s\n' \
+    "$C_BOLD" "$C_RST" "$hostname_str" "$kernel_str" \
+    "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+if [ "$IS_ROOT" -eq 0 ]; then
+    note 'run with sudo for YNL, nftables, kallsyms and kernel-journal checks'
 fi
 
-# ---------------------------------------------------------------------------
-# Cached state
-# ---------------------------------------------------------------------------
-DMESG=$(dmesg 2>/dev/null || true)
-LSMOD=$(lsmod 2>/dev/null || true)
-KALLSYMS=""
-if [ -r /proc/kallsyms ]; then
-    KALLSYMS=$(cat /proc/kallsyms 2>/dev/null || true)
-    if [ "$(id -u)" -ne 0 ] && ! echo "$KALLSYMS" | awk '{print $3}' | grep -q .; then
-        KALLSYMS=""
+KLOG=''
+if [ "$IS_ROOT" -eq 1 ] && command -v journalctl >/dev/null 2>&1; then
+    KLOG=$(journalctl -b -k -o cat --no-pager 2>/dev/null || true)
+fi
+
+CONFIG_CMDS=''
+if command -v cli-shell-api >/dev/null 2>&1; then
+    CONFIG_CMDS=$(cli-shell-api showCfg --show-active-only interfaces 2>/dev/null || true)
+fi
+# The command-form output is easier and authoritative for flowtable membership.
+if [ -x /opt/vyatta/bin/vyatta-op-cmd-wrapper ]; then
+    config_command_output=$(/opt/vyatta/bin/vyatta-op-cmd-wrapper \
+        show configuration commands 2>/dev/null || true)
+else
+    config_command_output=''
+fi
+
+ASK_PORTS=()
+for dev in eth3 eth4; do
+    if echo "$config_command_output" \
+        | grep -qE "^set interfaces ethernet ${dev} offload ask$"; then
+        ASK_PORTS+=("$dev")
     fi
-fi
-
-has_sym()   { [ -n "$KALLSYMS" ] && echo "$KALLSYMS" | awk '{print $3}' | grep -qx "$1"; }
-has_mod()   { echo "$LSMOD" | awk '{print $1}' | grep -qx "$1"; }
-dmesg_has() { echo "$DMESG" | grep -qE "$1"; }
-
-# Probe a debugfs node's existence with root/non-root awareness.
-# Returns: 0 present, 1 absent, 2 indeterminate (no privilege to stat).
-dbg_state() {
-    local p="$1"
-    if [ -e "$p" ]; then return 0; fi
-    if [ "$(id -u)" -ne 0 ] && [ ! -r /sys/kernel/debug ]; then return 2; fi
-    return 1
-}
-
-# Discover FMan/DPAA netdevs once.
-DPAA_NETDEVS=()
-for dev in /sys/class/net/*/device/of_node; do
-    [ -L "$dev" ] || continue
-    target=$(readlink -f "$dev" 2>/dev/null || true)
-    case "$target" in
-        */fman*|*/ethernet@*) DPAA_NETDEVS+=("$(basename "$(dirname "$(dirname "$dev")")")") ;;
-    esac
 done
 
-PCD_DBGFS="/sys/kernel/debug/fman_pcd"
+# ---------------------------------------------------------------------------
+hdr '1) Platform and DPAA1 transit ports'
+# ---------------------------------------------------------------------------
 
-# ===========================================================================
-# 1. Dataplane posture — which dataplane owns the ports right now
-# ===========================================================================
-hdr "1) Dataplane posture"
+model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo '?')
+record_ok "board: $model"
 
-if [ "${#DPAA_NETDEVS[@]}" -gt 0 ]; then
-    record_ok "${#DPAA_NETDEVS[@]} FMan/DPAA netdev(s) present: ${DPAA_NETDEVS[*]}"
-else
-    record_fail "no DPAA/FMan netdevs — the DPAA1 stack did not initialise"
-    note "fsl_dpa creates eth0..ethN under fsl_dpaa_mac parents"
-fi
-
-# ASK and VPP are mutually exclusive: a running VPP means the ports are owned
-# by the AF_XDP overlay, not by ASK.
-if pgrep -x vpp_main >/dev/null 2>&1 || pgrep -x vpp >/dev/null 2>&1; then
-    record_warn "VPP is running — ports are owned by the AF_XDP overlay, not ASK"
-    note "ASK and VPP are mutually exclusive; use xsk-zc-check for the VPP path"
-else
-    note "no VPP process — ASK may own the ports"
-fi
-
-# Is hardware offload currently engaged on any port?
-last_xition=$(echo "$DMESG" | grep -E 'fe_arm.*(ENGAGED|DISENGAGED)|FE engage.*port' | tail -1)
-if echo "$last_xition" | grep -qiE 'ENGAGED|FE engage'; then
-    record_ok "hardware offload currently ENGAGED on an FMan port"
-    note "$last_xition"
-else
-    note "hardware offload not currently engaged (ASK is opt-in per port)"
-fi
-
-# ===========================================================================
-# 2. FMan PCD subsystem — the silicon programming layer
-# ===========================================================================
-hdr "2) FMan PCD subsystem (KeyGen / Classify / Header-Manip / Policer / FE-VM)"
-
-if [ ! -d /sys/kernel/debug ]; then
-    record_skip "debugfs not mounted — mount -t debugfs none /sys/kernel/debug to probe PCD"
-elif [ "$(id -u)" -ne 0 ] && [ ! -r /sys/kernel/debug ]; then
-    record_skip "/sys/kernel/debug is mode 0700 — re-run with sudo to probe the PCD surface"
-elif [ -d "$PCD_DBGFS" ]; then
-    record_ok "PCD subsystem present at $PCD_DBGFS"
-    instances=$(find "$PCD_DBGFS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    if [ "$instances" -eq 0 ]; then
-        record_fail "$PCD_DBGFS has no per-FMan instance — the PCD subsystem never initialised"
-    else
-        note "$instances FMan PCD instance(s)"
+DPAA_PORTS=()
+for dev in eth3 eth4; do
+    if [ -d "/sys/class/net/$dev" ] \
+       && find -L "/sys/class/net/$dev/device" -maxdepth 0 -type d 2>/dev/null \
+          | grep -q .; then
+        DPAA_PORTS+=("$dev")
     fi
-    # MURAM budget — the on-chip memory the PCD programs flows into. Exhaustion
-    # is the classic offload failure (allocations start returning -ENOMEM), so a
-    # zero-free budget is fatal, and a large 'used' while offload is OFF means a
-    # previous disable did not release its allocations (a reversibility leak).
-    budget_file=$(find "$PCD_DBGFS" -mindepth 2 -maxdepth 2 -name muram_budget -type f 2>/dev/null | head -1)
-    if [ -n "$budget_file" ] && [ -r "$budget_file" ]; then
-        budget_str=$(tr '\n' ' ' < "$budget_file" 2>/dev/null | sed 's/  */ /g; s/ *$//')
-        used_bytes=$(echo "$budget_str" | grep -oE 'used[= ]+[0-9]+' | head -1 | grep -oE '[0-9]+')
-        free_bytes=$(echo "$budget_str" | grep -oE 'free[= ]+[0-9]+' | head -1 | grep -oE '[0-9]+')
-        if [ -n "$free_bytes" ] && [ "$free_bytes" -gt 0 ] 2>/dev/null; then
-            if echo "$last_xition" | grep -qiE 'ENGAGED|FE engage'; then
-                # Engaged — some MURAM usage is expected (scaffold 304B + pool ~8KB)
-                record_ok "MURAM budget while ENGAGED (free=${free_bytes}B used=${used_bytes:-?}B)"
-            elif [ -n "${used_bytes:-}" ] && [ "$used_bytes" -gt 4096 ] 2>/dev/null; then
-                record_warn "MURAM used=${used_bytes}B while offload is OFF — possible leaked teardown"
-                note "pcd-snapshot diff vs the boot baseline is the authoritative check"
-                note "pool (F-072) + scaffold (0152) should be freed on disengage (0156)"
-            else
-                record_ok "MURAM budget healthy (free=${free_bytes}B used=${used_bytes:-?}B)"
-            fi
-            note "$budget_str"
-        else
-            record_fail "MURAM budget exhausted (free=0) — no room to program offloaded flows"
-            note "$budget_str"
-        fi
+done
+if [ "${#DPAA_PORTS[@]}" -eq 2 ]; then
+    record_ok 'DPAA1 transit netdevs present: eth3 eth4'
+else
+    record_fail "missing DPAA1 transit netdev(s); found: ${DPAA_PORTS[*]:-(none)}"
+fi
+
+ip_forward=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)
+if [ "$ip_forward" = 1 ]; then
+    record_ok 'IPv4 forwarding enabled'
+else
+    record_fail 'net.ipv4.ip_forward is not enabled'
+fi
+
+for dev in eth3 eth4; do
+    [ -d "/sys/class/net/$dev" ] || continue
+    carrier=$(cat "/sys/class/net/$dev/carrier" 2>/dev/null || echo 0)
+    addr=$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | paste -sd, -)
+    if [ "$carrier" = 1 ] && [ -n "$addr" ]; then
+        record_ok "$dev link/carrier/address healthy ($addr)"
+    elif [ "$carrier" != 1 ]; then
+        record_fail "$dev has no carrier"
     else
-        record_fail "$PCD_DBGFS present but no readable muram_budget node"
+        record_fail "$dev has carrier but no IPv4 address"
     fi
 
-    # FE port buffer readback (F-072: FmPortSetFESupport params page).
-    buf_file=$(find "$PCD_DBGFS" -mindepth 2 -maxdepth 2 -name fe_buffer -type f 2>/dev/null | head -1)
-    if [ -n "$buf_file" ] && [ -r "$buf_file" ]; then
-        record_ok "FE buffer readback present (fe_buffer — params-page +0x54/+0x58)"
-        buf_val=$(cat "$buf_file" 2>/dev/null | tr '\n' ' ')
-        note "$buf_val"
-    else
-        note "fe_buffer node absent — FmPortSetFESupport not probed (F-072)"
-    fi
+done
+
+if echo "$KLOG" | grep -q 'FMan PCD caps = 0x17'; then
+    record_ok 'FMan microcode exposes required PCD capabilities (CC/HM/POL/PARSER)'
+elif echo "$KLOG" | grep -q 'FMan PCD caps'; then
+    caps_line=$(echo "$KLOG" | grep 'FMan PCD caps' | tail -1)
+    record_fail "unexpected FMan PCD capability mask: $caps_line"
 else
-    record_fail "FMan PCD subsystem absent — $PCD_DBGFS missing"
-    note "needs CONFIG_FSL_FMAN_PCD=y"
+    record_warn 'FMan PCD capability banner not present in current-boot journal'
 fi
 
-# PCD engine API — the exported kernel symbols ask.ko calls to program the
-# silicon.  Grouped into classic PCD engines + the new FE-VM surface.
-if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot probe PCD engine APIs (re-run with sudo)"
-else
-    pcd_engines=(
-        "KeyGen (flow distribution):fman_pcd_kg_scheme_create fman_pcd_kg_port_attach_cc fman_pcd_kg_port_attach_policer fman_pcd_kg_unbind_port fman_pcd_kg_detach_cc"
-        "Coarse Classification:fman_pcd_cc_static_install fman_cc_tree_install fman_pcd_cc_static_get_base"
-        "Header Manipulation:fman_pcd_hm_install fman_hm_node_install fman_hm_nexthop_get"
-        "Policer:fman_policer_install fman_pcd_plcr_install fman_policer_caps_supported"
-        "Port primitives:fman_port_set_cc_base fman_port_set_rx_bpool fman_pcd_port_ensure_params_page fman_port_lookup_rx"
-        "FE-VM engage/flow (0153):fman_pcd_fe_engage fman_pcd_fe_disengage fman_pcd_fe_flow_add fman_pcd_fe_flow_del"
-    )
-    for grp in "${pcd_engines[@]}"; do
-        gname="${grp%%:*}"; gsyms="${grp#*:}"
-        missing=""
-        for s in $gsyms; do has_sym "$s" || missing="$missing $s"; done
-        if [ -z "$missing" ]; then
-            record_ok "PCD engine: $gname"
-        else
-            record_fail "PCD engine incomplete — $gname missing:$missing"
-        fi
-    done
-fi
-
-# ===========================================================================
-# 3. Reversible mode switch — turning ASK on/off must not require a reboot
-# ===========================================================================
-hdr "3) Reversible offload mode switch"
-
-# The FE-VM engage/disengage entry point ask.ko (and the operator CLI) call to
-# move a port between the kernel dataplane and the ASK dataplane.
-# Architecture (0157): the exported fman_pcd_fe_engage() calls typed
-# __fman_pcd_fe_arm_engage() directly — no string formatting. The debugfs
-# write handlers are thin wrappers for instrumentation only.
-if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot confirm the FE engage/disengage API"
-elif has_sym fman_pcd_fe_engage && has_sym fman_pcd_fe_disengage; then
-    record_ok "FE-VM engage/disengage API present (fman_pcd_fe_engage/_disengage)"
-    if has_sym fman_pcd_fe_flow_add && has_sym fman_pcd_fe_flow_del; then
-        record_ok "FE-VM flow insert/remove API present (fman_pcd_fe_flow_add/_del)"
-    else
-        record_fail "FE-VM flow API incomplete — per-flow HW dispatch not reachable"
-    fi
-else
-    record_fail "FE-VM engage/disengage API missing — ASK cannot be turned on/off at runtime"
-    note "the legacy fman_pcd_offload_engage (0129, CC-tree wrapper) is superseded by fe_engage (0153)"
-fi
-
-# Scaffold MURAM tracking (0152) — the CONT_LOOKUP group/match/AD tables are
-# tracked and freed on disengage.  Without this every engage/disengage cycle
-# leaks 304 B.
-if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot check scaffold tracking"
-else
-    # The __fman_pcd_fe_arm_disengage function calls free_scaffold + fe_port_del
-    # before disarming.  If free_scaffold is absent the 304B/cycle leak exists.
-    if dmesg_has "fman_pcd_fe_arm_free_scaffold"; then
-        record_ok "scaffold MURAM tracking present (0152 — 304B freed on disengage)"
-    else
-        record_warn "scaffold tracking not confirmed — the 304B/cycle leak may be present (0152)"
-    fi
-fi
-
-# The snapshot verifier proves a disable returns the silicon to a register-exact
-# copy of the offload-off state (the reversibility contract). Without it there is
-# no way to certify that disabling ASK left no residue.
-if command -v pcd-snapshot >/dev/null 2>&1; then
-    record_ok "pcd-snapshot reversibility verifier installed"
-    note "capture the offload-off baseline at boot; diff after every disable — must match"
-else
-    record_fail "pcd-snapshot not installed — offload reversibility cannot be verified"
-fi
-
-# ===========================================================================
-# 4. Hardware classification — CONT_LOOKUP pass-through + FE-VM chain
-# ===========================================================================
-hdr "4) Hardware classification (CONT_LOOKUP pass-through + FE-VM chain)"
-
-# The classification path has two layers:
-#   (a) CONT_LOOKUP pass-through (MISS path): all frames miss → kernel FQ
-#       — PROVEN on hardware (ping 3/3, port survives disengage)
-#   (b) FE-VM HIT chain (future): matched flows → EXT_HASH → ENQ FE → TX FQ
-#       — singletons, ehash, hashfe, enter, enq all have debugfs inspector nodes;
-#         the HIT dispatch path is not yet composed end-to-end
-#
-# Debugfs is INSTRUMENTATION ONLY.  The control path goes through the exported
-# API (fman_pcd_fe_engage, §3 above).
-
-if [ ! -d /sys/kernel/debug ] || { [ "$(id -u)" -ne 0 ] && [ ! -r /sys/kernel/debug ]; }; then
-    record_skip "debugfs unreadable — re-run with sudo to inspect the classification engine"
-else
-    inst_dir=$(find "$PCD_DBGFS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
-    if [ -z "$inst_dir" ]; then
-        record_fail "no PCD instance — cannot locate the classification engine"
-    else
-        # Inspector nodes — all must be present for the full FE-VM chain to be
-        # debugged.  The control path does NOT use these; they are read-only
-        # instrumentation (0157 architecture).
-        fe_present=0 fe_total=0 fe_missing=""
-        for node in fe_pool fe_port fe_singletons fe_ehash fe_enq fe_enter fe_hashfe fe_flow fe_arm fe_buffer; do
-            fe_total=$((fe_total+1))
-            if [ -e "$inst_dir/$node" ]; then
-                fe_present=$((fe_present+1))
-            else
-                fe_missing="$fe_missing $node"
-            fi
-        done
-        if [ "$fe_present" -eq "$fe_total" ]; then
-            record_ok "classification engine inspector nodes present ($fe_present/$fe_total)"
-        elif [ "$fe_present" -gt 0 ]; then
-            record_fail "classification engine incomplete ($fe_present/$fe_total) — missing:$fe_missing"
-        else
-            record_fail "classification engine absent — hardware classify is not built in"
-        fi
-
-        # fe_arm: the CONT_LOOKUP pass-through engagement state.
-        # Reports whether a port is armed, the FE_ENTER root AD offset,
-        # and the miss-FQID for kernel delivery.
-        if [ -r "$inst_dir/fe_arm" ]; then
-            armed_port=$(grep -oE 'port 0x[0-9a-f]+' "$inst_dir/fe_arm" 2>/dev/null | head -1)
-            miss_fqid=$(grep -oE 'MISS FQID: 0x[0-9a-f]+' "$inst_dir/fe_arm" 2>/dev/null | head -1)
-            if echo "$armed_port" | grep -q '0x0[89a-f]\|0x1[0-9a-f]\|0x2[0-7]'; then
-                record_ok "fe_arm: port engaged ($armed_port, $miss_fqid — CONT_LOOKUP pass-through)"
-                note "frames miss the group table → kernel FQ; ping should be 0% loss"
-            else
-                note "fe_arm: not engaged — CONT_LOOKUP pass-through dormant"
-            fi
-        fi
-
-        # fe_buffer: params-page +0x54 readback (FmPortSetFESupport, F-072).
-        # Non-zero values mean the FE workspace pool is armed.
-        if [ -r "$inst_dir/fe_buffer" ]; then
-            buf_idx=$(grep -oE 'idx_off: 0x[0-9a-f]+' "$inst_dir/fe_buffer" 2>/dev/null)
-            if echo "$buf_idx" | grep -qE '0x[1-9a-f]'; then
-                record_ok "FE workspace pool armed ($buf_idx — F-072)"
-            else
-                note "FE workspace pool not armed (fe_buffer idx_off=0)"
-            fi
-        fi
-    fi
-fi
-
-# ===========================================================================
-# 5. Hardware forwarding — inline L3 next-hop rewrite
-# ===========================================================================
-hdr "5) Hardware forwarding (L3 next-hop rewrite)"
-
-if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot probe the forwarding op-set"
-else
-    if has_sym fman_hm_nexthop_get && has_sym fman_hm_nexthop_put; then
-        record_ok "next-hop rewrite cache present (de-dups L2 rewrite per adjacency)"
-    else
-        record_fail "next-hop rewrite cache missing — per-flow rewrite would exhaust MURAM"
-    fi
-    if has_sym dpaa_get_rx_fman_port && has_sym dpaa_get_tx_fqid; then
-        record_ok "netdev->hardware-id resolvers present (maps a route to its FMan port/FQ)"
-    else
-        record_fail "netdev->hardware-id resolvers missing — ask.ko cannot target a forward"
-    fi
-fi
-
-# ===========================================================================
-# 6. Control-plane module — ask.ko
-# ===========================================================================
-hdr "6) Control-plane module (ask.ko)"
+# ---------------------------------------------------------------------------
+hdr '2) ASK module and M6-A safety substrate'
+# ---------------------------------------------------------------------------
 
 if [ -d /sys/module/ask ]; then
-    record_ok "ask.ko loaded"
-    [ -r /sys/module/ask/version ]    && note "version    = $(cat /sys/module/ask/version 2>/dev/null)"
-    [ -r /sys/module/ask/srcversion ] && note "srcversion = $(cat /sys/module/ask/srcversion 2>/dev/null)"
-    [ -r /sys/module/ask/refcnt ]     && note "refcnt     = $(cat /sys/module/ask/refcnt 2>/dev/null)"
+    version=$(cat /sys/module/ask/version 2>/dev/null || echo '?')
+    srcversion=$(cat /sys/module/ask/srcversion 2>/dev/null || echo '?')
+    record_ok "ask.ko loaded (version=$version srcversion=$srcversion)"
 else
     kver=$(uname -r)
     if find "/lib/modules/$kver" -name 'ask.ko*' 2>/dev/null | grep -q .; then
-        record_fail "ask.ko installed but not loaded — try: modprobe ask"
-        [ -f /etc/modules-load.d/ask.conf ] || note "missing /etc/modules-load.d/ask.conf auto-load drop-in"
+        record_fail 'ask.ko installed but not loaded'
     else
-        record_fail "ask.ko not installed — the ASK control plane is absent"
+        record_fail 'ask.ko not installed'
     fi
 fi
 
-# The generic-netlink family is the control-plane RPC surface (flow table query,
-# events). It must be registered for any management tooling to reach ASK.
-if command -v genl >/dev/null 2>&1; then
-    if [ "$(id -u)" -ne 0 ]; then
-        record_skip "genl ctrl list requires root — re-run with sudo to probe the 'ask' genl family"
+if [ "$IS_ROOT" -eq 1 ] && [ -r /proc/kallsyms ]; then
+    required_symbols=(
+        ask_intent_lower
+        ask_flow_gen_next
+        ask_flow_insert_owned
+        ask_flow_remove_owned
+        ask_hw_flow_preflight
+        fman_pcd_fe_engage
+        fman_pcd_fe_disengage
+        fman_pcd_fe_flow_add
+        fman_pcd_fe_flow_del
+        dpaa_get_tx_fqid
+        dpaa_alloc_offload_tx_fq
+    )
+    missing=''
+    for sym in "${required_symbols[@]}"; do
+        grep -qw "$sym" /proc/kallsyms || missing="$missing $sym"
+    done
+    if [ -z "$missing" ]; then
+        record_ok 'M6-A ownership/action/preflight + FE/TX-FQ APIs present'
     else
-        ask_id=$(genl ctrl list 2>/dev/null | awk '/^Name: ask$/ { getline; if ($1=="ID:") { print $2; exit } }')
-        if [ -n "$ask_id" ]; then
-            record_ok "'ask' generic-netlink family registered (id $ask_id)"
+        record_fail "required runtime symbols missing:$missing"
+    fi
+else
+    record_skip 'root kallsyms unavailable; cannot verify M6-A runtime APIs'
+fi
+
+if [ -f /etc/modules-load.d/ask.conf ]; then
+    record_ok 'ASK module is configured for automatic boot loading'
+else
+    record_warn '/etc/modules-load.d/ask.conf absent'
+fi
+
+# ---------------------------------------------------------------------------
+hdr '3) Production generic-netlink / YNL control plane'
+# ---------------------------------------------------------------------------
+
+YNL=$(command -v ynl 2>/dev/null || true)
+if [ -z "$YNL" ]; then
+    record_fail 'ynl not installed; production ASK control plane unavailable'
+elif [ "$IS_ROOT" -eq 0 ]; then
+    record_skip 'YNL operations require root'
+else
+    ops=$($YNL --family ask --list-ops 2>"$TMPDIR_CHECK/ynl-ops.err" || true)
+    required_ops='get-info get-muram dump-flows flush-flows engage disengage'
+    missing=''
+    for op in $required_ops; do
+        echo "$ops" | grep -q "^$op " || missing="$missing $op"
+    done
+    if [ -z "$missing" ]; then
+        record_ok "ASK genl family exposes required operations: $required_ops"
+    else
+        record_fail "ASK genl operations missing:$missing"
+        [ -s "$TMPDIR_CHECK/ynl-ops.err" ] && note "$(head -1 "$TMPDIR_CHECK/ynl-ops.err")"
+    fi
+
+    if $YNL --family ask --do get-info --json '{}' --output-json \
+        >"$TMPDIR_CHECK/get-info.out" 2>"$TMPDIR_CHECK/get-info.err"; then
+        info_json=$(tr '\n' ' ' < "$TMPDIR_CHECK/get-info.out")
+        record_ok 'YNL get-info decodes successfully'
+        note "${info_json:0:220}"
+        driver_version=$(echo "$info_json" | grep -oE '"driver-version"[ :]+"[^"]+"' \
+            | sed 's/.*"driver-version"[ :]*"//; s/"$//')
+        capabilities=$(echo "$info_json" | grep -oE '"capabilities"[ :]+[0-9]+' \
+            | grep -oE '[0-9]+' | tail -1)
+        num_fman=$(echo "$info_json" | grep -oE '"num-fman"[ :]+[0-9]+' \
+            | grep -oE '[0-9]+' | tail -1)
+        ucode=$(echo "$info_json" | grep -oE '"ucode-family"[ :]+[0-9]+|"ucode-major"[ :]+[0-9]+|"ucode-minor"[ :]+[0-9]+' \
+            | grep -oE '[0-9]+' | paste -sd. -)
+        [ "$driver_version" = 'ask 2.1.0' ] \
+            && record_ok "ASK driver version is $driver_version" \
+            || record_fail "unexpected ASK driver version: ${driver_version:-missing}"
+        if [ -n "${capabilities:-}" ] && [ $((capabilities & 1)) -eq 1 ]; then
+            record_ok 'ASK advertises the implemented IPv4 hardware capability'
         else
-            record_fail "'ask' generic-netlink family not registered — control plane unreachable"
+            record_fail "ASK IPv4 capability bit is not advertised (${capabilities:-missing})"
+        fi
+        [ "$num_fman" = 1 ] \
+            && record_ok 'ASK reports one bound FMan instance' \
+            || record_fail "ASK reports ${num_fman:-missing} bound FMan instances"
+        [ "$ucode" = '210.10.1' ] \
+            && record_ok 'ASK reports FMan microcode 210.10.1' \
+            || record_fail "unexpected ASK FMan microcode version: ${ucode:-missing}"
+    else
+        record_fail 'YNL get-info failed or wire/schema decoding is inconsistent'
+        note "$(head -1 "$TMPDIR_CHECK/get-info.err")"
+    fi
+
+    if $YNL --family ask --do get-muram --json '{}' --output-json \
+        >"$TMPDIR_CHECK/get-muram.out" 2>"$TMPDIR_CHECK/get-muram.err"; then
+        record_ok 'YNL get-muram decodes successfully'
+        muram_json=$(tr '\n' ' ' < "$TMPDIR_CHECK/get-muram.out")
+        note "${muram_json:0:220}"
+        # A zero free-byte budget is fatal. JSON formatting is intentionally
+        # parsed loosely so pyYNL formatting changes do not break the probe.
+        free_bytes=$(echo "$muram_json" | grep -oE '"free-bytes"[ :]+[0-9]+' \
+            | grep -oE '[0-9]+' | tail -1)
+        if [ -n "${free_bytes:-}" ] && [ "$free_bytes" -eq 0 ] 2>/dev/null; then
+            record_fail 'FMan PCD MURAM budget is exhausted (free-bytes=0)'
+        elif [ -n "${free_bytes:-}" ]; then
+            record_ok "FMan PCD MURAM has ${free_bytes} free bytes"
+        fi
+    else
+        record_fail 'YNL get-muram failed or wire/schema decoding is inconsistent'
+        note "$(head -1 "$TMPDIR_CHECK/get-muram.err")"
+    fi
+
+    if $YNL --family ask --dump dump-flows --output-json \
+        >"$TMPDIR_CHECK/dump-flows.out" 2>"$TMPDIR_CHECK/dump-flows.err"; then
+        record_ok 'YNL dump-flows works'
+        flow_dump=$(tr '\n' ' ' < "$TMPDIR_CHECK/dump-flows.out")
+        if [ "$flow_dump" = '[]' ] || [ -z "$flow_dump" ]; then
+            note 'no ASK-owned flows at this instant (idle is healthy)'
+        else
+            offloaded=$(grep -o '"offloaded"[ :]*1' "$TMPDIR_CHECK/dump-flows.out" | wc -l)
+            note "live flow dump: ${offloaded} hardware-backed flow(s)"
+        fi
+    else
+        record_fail 'YNL dump-flows failed'
+        note "$(head -1 "$TMPDIR_CHECK/dump-flows.err")"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+hdr '4) VyOS ASK configuration and per-port live state'
+# ---------------------------------------------------------------------------
+
+if [ "${#ASK_PORTS[@]}" -gt 0 ]; then
+    record_ok "ASK configured on: ${ASK_PORTS[*]}"
+else
+    record_fail "no interface has 'offload ask' configured"
+fi
+
+if echo "$config_command_output" | grep -q '^set vpp settings interface '; then
+    conflict=''
+    for dev in "${ASK_PORTS[@]}"; do
+        echo "$config_command_output" \
+            | grep -qE "^set vpp settings interface ['\"]?${dev}['\"]?$" \
+            && conflict="$conflict $dev"
+    done
+    if [ -n "$conflict" ]; then
+        record_fail "ASK/VPP mutex violated on:$conflict"
+    else
+        record_ok 'ASK/VPP per-interface mutex satisfied'
+    fi
+else
+    record_ok 'VPP owns no configured ASK port'
+fi
+
+for dev in "${ASK_PORTS[@]}"; do
+    case "$dev" in
+        eth3) port_hex=0x10 ;;
+        eth4) port_hex=0x11 ;;
+        *)    port_hex='' ;;
+    esac
+    if [ -z "$port_hex" ]; then
+        record_fail "$dev is not a supported ASK transit port"
+        continue
+    fi
+    if echo "$KLOG" | grep -q "offload ENGAGED on port $port_hex"; then
+        record_ok "$dev ($port_hex) engaged through the production ASK path"
+    else
+        record_fail "$dev configured for ASK but current-boot engagement is not confirmed"
+    fi
+
+    if command -v ethtool >/dev/null 2>&1; then
+        hw_tc=$(ethtool -k "$dev" 2>/dev/null \
+            | awk -F': ' '/^hw-tc-offload:/ {print $2; exit}')
+        if [ "$hw_tc" = on ]; then
+            record_ok "$dev hw-tc-offload enabled"
+        else
+            record_fail "$dev hw-tc-offload is not enabled (${hw_tc:-unknown})"
         fi
     fi
-else
-    record_skip "iproute2 'genl' not installed — cannot probe the genl family"
-fi
 
-# The flow table — the live set of offloaded flows — must be inspectable.
-ASK_DBGFS="/sys/kernel/debug/ask"
-dbg_state "$ASK_DBGFS"; rc=$?
-if [ "$rc" -eq 0 ]; then
-    record_ok "ask.ko debugfs interface present at $ASK_DBGFS"
-    if [ -e "$ASK_DBGFS/offload" ]; then
-        note "offload control node present (fe_engage/disengage a port via ask.ko debugfs trigger)"
+    # Software-fallback safety: ASK's current IPv6/NAT/VLAN misses run through
+    # the kernel RX softirq path. On this 4-core DPAA1 board, RPS=0 let one
+    # sustained v6 flow pin ksoftirqd at 100% and starve eth0 management in both
+    # directions while transit kept forwarding (2026-08-19). Production images
+    # must spread eth3/eth4 RX across CPUs 1-3 (mask 0xe), sparing CPU0.
+    rps_bad=0
+    rps_mask=''
+    for q in /sys/class/net/$dev/queues/rx-*/rps_cpus; do
+        [ -e "$q" ] || continue
+        mask=$(cat "$q" 2>/dev/null || echo 0)
+        [ -z "$rps_mask" ] && rps_mask="$mask"
+        case "$mask" in 0|00000000|'') rps_bad=1 ;; esac
+    done
+    if [ "$rps_bad" -eq 0 ] && [ -n "$rps_mask" ]; then
+        record_ok "$dev RPS enabled on every RX queue (mask=$rps_mask)"
     else
-        record_fail "offload control node missing — cannot drive the mode switch from ask.ko"
+        record_fail "$dev RPS disabled on one or more RX queues — software fallback can starve management"
     fi
-    # The new engage path calls fman_pcd_fe_engage() (0153) which composes
-    # CONT_LOOKUP scaffold + FmPortSetFESupport in R10 order.
-    if has_sym fman_pcd_fe_engage 2>/dev/null; then
-        note "engage path: fman_pcd_fe_engage() (0153, typed API — no string formatting)"
-    fi
-elif [ "$rc" -eq 2 ]; then
-    record_skip "$ASK_DBGFS not statable unprivileged — re-run with sudo"
-elif [ -d /sys/module/ask ]; then
-    record_fail "ask.ko loaded but $ASK_DBGFS absent — debugfs interface not built"
-fi
 
-# L2 switchdev offload is intentionally outside the preview scope. Bridged
-# flows remain in the kernel software path; ask_bridge.ko is not required.
-if [ -d /sys/module/ask_bridge ]; then
-    record_defer "bridge/L2 switchdev offload (ask_bridge.ko happens to be loaded)"
-else
-    record_defer "bridge/L2 switchdev offload (ask_bridge.ko not shipped)"
-fi
-
-# ===========================================================================
-# 7. Deferred hardware features (software fallback)
-# ===========================================================================
-hdr "7) Deferred features (kernel software fallback)"
-
-record_defer "IPv6 routing (v6 parser/key scaffold exists; HW insert returns -EOPNOTSUPP)"
-record_defer "NAT/PAT (FLOW_ACTION_MANGLE rewrite not implemented in FE)"
-record_defer "VLAN push/pop (T-M7-2 S2 opcode chain deferred)"
-record_defer "IPsec/ESP (ask_xfrm_state_add returns -EOPNOTSUPP fail-closed)"
-record_defer "multicast/broadcast and non-TCP/UDP L4"
-
-# CAAM is still useful to the kernel software/IPsec path, but is not an ASK
-# preview gate. Report its health as context without changing this tool's exit.
-if command -v caam-check >/dev/null 2>&1; then
-    if caam-check >/dev/null 2>&1; then
-        note "CAAM kernel crypto path healthy (not wired to ASK FE in this preview)"
+    fq_file=$(find /sys/devices -path "*/net/$dev/fqids" -print -quit 2>/dev/null)
+    if [ -n "$fq_file" ] && grep -q '^Rx PCD:' "$fq_file" \
+       && grep -q '^Tx:' "$fq_file"; then
+        rx_default=$(awk '/^Rx default:/ {print $3}' "$fq_file")
+        tx_range=$(awk -F': ' '/^Tx:/ {print $2}' "$fq_file")
+        record_ok "$dev DPAA FQ map present (Rx-default=$rx_default Tx=$tx_range)"
     else
-        note "CAAM health check failed — affects kernel crypto, not ASK IPv4 forwarding"
+        record_fail "$dev DPAA FQ map incomplete"
     fi
+done
+
+# ---------------------------------------------------------------------------
+hdr '5) nft flowtable and conntrack learning path'
+# ---------------------------------------------------------------------------
+
+if [ "$IS_ROOT" -eq 0 ] || ! command -v nft >/dev/null 2>&1; then
+    record_skip 'root+nft required to inspect the production flowtable'
 else
-    note "caam-check unavailable — kernel crypto context not collected"
-fi
-
-# ===========================================================================
-# 8. Operator CLI — 'set interfaces ethernet eth<n> offload ask'
-# ===========================================================================
-hdr "8) Operator CLI ('set interfaces ethernet eth<n> offload ask')"
-
-# The per-interface ASK enable CLI (v1.3 contract, 2026-07-19 — supersedes the
-# retired global 'set system offload ask'), and the validator that enforces the
-# per-interface ASK↔VPP mutex (one port can't be both; other ports free).
-# Probe for the 'offload ask' leaf under the ethernet interface template so the
-# deprecated 'system offload classify' subtree does not false-positive.
-if [ -d /opt/vyatta/share/vyatta-cfg/templates/interfaces/ethernet/node.tag/offload/ask ] \
-   || find /usr/libexec/vyos/conf_mode -maxdepth 1 -name '*ethernet*offload*' 2>/dev/null | grep -q . \
-   || (command -v cli-shell-api >/dev/null 2>&1 && cli-shell-api showCfg --show-active-only interfaces 2>/dev/null | grep -q 'offload ask'); then
-    record_ok "'set interfaces ethernet eth<n> offload ask' CLI present"
-    note "the validator must keep ASK and VPP mutually exclusive per port"
-else
-    record_fail "'set interfaces ethernet eth<n> offload ask' CLI absent — operator cannot enable ASK"
-    note "('system offload classify' CLI is deprecated; mechanism runs as silent default)"
-fi
-
-# ===========================================================================
-# 9. dmesg integrity
-# ===========================================================================
-hdr "9) dmesg integrity (datapath errors / stalls / leaks)"
-
-ASK_DMESG=$(echo "$DMESG" | grep -iE 'ask hw:|ask:|ask_bridge|fman_pcd|fman.*fe[-_]|caam_qi_ext|fe_arm.*(ENGAGED|DISENGAGED)|FE engage|FE disengage' || true)
-if [ -z "$ASK_DMESG" ]; then
-    record_warn "no ASK-related lines in dmesg (ring buffer may have wrapped)"
-else
-    errs=$(echo "$ASK_DMESG" \
-        | grep -iE 'error|failed|cannot|unable|refused|denied|invalid|-ENOMEM|stall|park|drift|leak' \
-        | grep -ivE 'refusing to load.*ucode' \
-        | grep -ivE 'EOPNOTSUPP|fall.?back|deferred|IPv6|xfrm|esp' || true)
-    if [ -z "$errs" ]; then
-        record_ok "no error-class lines in the ASK dmesg trail ($(echo "$ASK_DMESG" | wc -l) line(s))"
+    nft_rules=$(nft list ruleset 2>"$TMPDIR_CHECK/nft.err" || true)
+    if echo "$nft_rules" | grep -q 'flowtable VYOS_FLOWTABLE_' \
+       && echo "$nft_rules" | grep -A8 'flowtable VYOS_FLOWTABLE_' \
+          | grep -q 'flags offload'; then
+        record_ok 'nft hardware flowtable exists with flags offload'
     else
-        record_fail "$(echo "$errs" | wc -l) error-class line(s) in the ASK dmesg trail:"
-        echo "$errs" | head -8 | while IFS= read -r l; do note "$l"; done
+        record_fail 'nft hardware flowtable with flags offload is missing'
     fi
-    echo "$ASK_DMESG" | grep -iE 'registered|MURAM|ucode|ENGAGED|DISENGAGED|FE engage|FE disengage' \
-        | head -6 | while IFS= read -r l; do note "$l"; done
+
+    missing=''
+    for dev in "${ASK_PORTS[@]}"; do
+        echo "$nft_rules" | grep -A8 'flowtable VYOS_FLOWTABLE_' \
+            | grep -qE "devices = .*\b${dev}\b" || missing="$missing $dev"
+    done
+    if [ -z "$missing" ]; then
+        record_ok 'all ASK ports are members of the nft hardware flowtable'
+    else
+        record_fail "ASK port(s) missing from nft flowtable:$missing"
+    fi
+
+    flow_rule=$(echo "$nft_rules" | grep 'flow add @VYOS_FLOWTABLE_' | head -1)
+    if [ -n "$flow_rule" ]; then
+        record_ok 'forward hook contains a flow-add rule'
+        note "$flow_rule"
+    else
+        record_fail 'no nft flow-add rule; connections cannot enter the flowtable'
+    fi
 fi
 
-# ===========================================================================
-# Summary
-# ===========================================================================
-hdr "Summary"
+ct_count=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo '')
+if [ -n "$ct_count" ] && [ "$ct_count" -gt 0 ] 2>/dev/null; then
+    record_ok "conntrack is active (${ct_count} entries)"
+elif [ -n "$ct_count" ]; then
+    record_warn 'conntrack table is empty; offload learning cannot be proven while idle'
+else
+    record_fail 'nf_conntrack_count unavailable'
+fi
 
+# VyOS may retain terminal notrack rules, but the ASK flowtable commit helper
+# must put an ACCEPT in FW_CONNTRACK before them. This is the production fix for
+# the historical no-firewall notrack fast path.
+if [ "$IS_ROOT" -eq 1 ] && command -v nft >/dev/null 2>&1; then
+    ct_rules=$(nft list table ip vyos_conntrack 2>/dev/null || true)
+    if echo "$ct_rules" | grep -A6 'chain FW_CONNTRACK' | grep -q 'accept'; then
+        record_ok 'VyOS conntrack chain accepts ASK traffic before terminal notrack'
+    elif echo "$ct_rules" | grep -q 'notrack'; then
+        record_fail 'terminal notrack is active without FW_CONNTRACK accept; flow learning is disabled'
+    else
+        record_ok 'no terminal notrack fast path detected'
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+hdr '6) Current-boot datapath integrity'
+# ---------------------------------------------------------------------------
+
+if [ -z "$KLOG" ]; then
+    record_skip 'current-boot kernel journal unavailable'
+else
+    fatal=$(echo "$KLOG" | grep -iE \
+        'kernel BUG|BUG:|Oops:|Call trace:|list_del corruption|list_add corruption|LIST_POISON|use-after-free|double free|general protection fault|soft lockup|rcu.*stall|FM_FD_ERR_NO_SCHEME|FM_FD_ERR_PHYSICAL|stale DESTROY.*failed|MURAM.*leak|HW rollback.*failed|rebuild rollback failed' \
+        || true)
+    if [ -z "$fatal" ]; then
+        record_ok 'no fatal ASK/FMan lifecycle, list, DMA, QMan or MURAM errors this boot'
+    else
+        record_fail "$(echo "$fatal" | wc -l) fatal datapath error line(s) in current-boot journal"
+        echo "$fatal" | head -10 | while IFS= read -r line; do note "$line"; done
+    fi
+
+    noconf_fail=$(echo "$KLOG" | grep -c 'no-confirm TX FQ alloc failed' || true)
+    if [ "$noconf_fail" -eq 0 ]; then
+        record_ok 'no no-confirm TX-FQ allocation failure this boot'
+    else
+        record_warn "$noconf_fail no-confirm TX-FQ allocation failure(s); confirmed-FQ fallback may cost CPU"
+    fi
+
+    preflight_fail=$(echo "$KLOG" | grep -c 'resource preflight.*no HW mutation' || true)
+    stale_drop=$(echo "$KLOG" | grep -cE 'drop stale pending|stale DESTROY|superseded before publish' || true)
+    note "M6-A runtime counters from journal: preflight-fallback=$preflight_fail stale-work-discard=$stale_drop"
+fi
+
+if command -v pcd-snapshot >/dev/null 2>&1; then
+    record_ok 'pcd-snapshot installed for operator-run S0↔S1 reversibility gates'
+else
+    record_warn 'pcd-snapshot absent; register-exact disengage validation unavailable'
+fi
+
+# ---------------------------------------------------------------------------
+hdr '7) Scope and verdict'
+# ---------------------------------------------------------------------------
+
+note 'hardware scope: routed IPv4 unicast TCP/UDP with TTL/checksum + L2 rewrite'
+note 'software fallback: IPv6, NAT/PAT, VLAN actions, bridge, multicast, IPsec'
+note 'debugfs and KUnit are debug-build tools and are intentionally not tested'
+
+hdr 'Summary'
 total=$((N_OK + N_WARN + N_FAIL + N_SKIP))
-printf "  %3d/%3d %sOK%s  " "$N_OK" "$total" "$C_GREEN" "$C_RST"
-printf "%3d %sWARN%s  "     "$N_WARN" "$C_YELLOW" "$C_RST"
-printf "%3d %sFAIL%s  "     "$N_FAIL" "$C_RED"    "$C_RST"
-printf "%3d %sSKIP%s  "     "$N_SKIP" "$C_BLUE"   "$C_RST"
-printf "%3d DEFER\n"        "$N_DEFER"
-echo
-note "FAIL  = a capability the plain-IPv4 ASK datapath requires is missing/broken"
-note "DEFER = intentionally out of preview scope (IPv6/NAT/VLAN/IPsec/bridge) — software fallback"
-note "SKIP  = could not be tested in this environment (privilege / tool / board)"
+printf '  %3d/%3d %sOK%s  ' "$N_OK" "$total" "$C_GREEN" "$C_RST"
+printf '%3d %sWARN%s  ' "$N_WARN" "$C_YELLOW" "$C_RST"
+printf '%3d %sFAIL%s  ' "$N_FAIL" "$C_RED" "$C_RST"
+printf '%3d %sSKIP%s\n' "$N_SKIP" "$C_BLUE" "$C_RST"
 
-if [ "$EXIT" = "0" ]; then
-    ok "ASK IPv4 hardware-offload dataplane is OPERATIONAL"
-    [ "$N_DEFER" -gt 0 ] && note "$N_DEFER capability(ies) deferred to software (expected for this preview)"
+if [ "$EXIT" -eq 0 ]; then
+    ok 'ASK2 production IPv4-unicast dataplane is READY'
 else
-    fail "ASK IPv4 hardware-offload dataplane is NOT operational ($N_FAIL capability gap(s))"
+    fail "ASK2 production IPv4-unicast dataplane is NOT READY ($N_FAIL required check(s) failed)"
 fi
 
 exit "$EXIT"

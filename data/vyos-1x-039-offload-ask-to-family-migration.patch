@@ -1,0 +1,52 @@
+diff --git a/interface-definitions/include/version/interfaces-version.xml.i b/interface-definitions/include/version/interfaces-version.xml.i
+--- a/interface-definitions/include/version/interfaces-version.xml.i
++++ b/interface-definitions/include/version/interfaces-version.xml.i
+@@ -1,3 +1,3 @@
+ <!-- include start from include/version/interfaces-version.xml.i -->
+-<syntaxVersion component='interfaces' version='34'></syntaxVersion>
++<syntaxVersion component='interfaces' version='35'></syntaxVersion>
+ <!-- include end -->
+diff --git a/src/migration-scripts/interfaces/34-to-35 b/src/migration-scripts/interfaces/34-to-35
+new file mode 100755
+--- /dev/null
++++ b/src/migration-scripts/interfaces/34-to-35
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python3
++#
++# Copyright VyOS maintainers and contributors <maintainers@vyos.io>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License version 2 or later as
++# published by the Free Software Foundation.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++#
++# LS1046A ASK2: the single `interfaces ethernet <n> offload ask` knob is
++# replaced by independent per-family knobs `offload ipv4` and `offload ipv6`.
++# A stored `offload ask` meant "offload both families", so migrate it to both.
++
++from vyos.configtree import ConfigTree
++
++base = ['interfaces', 'ethernet']
++
++
++def migrate(config: ConfigTree) -> None:
++    if not config.exists(base):
++        return
++
++    for ifname in config.list_nodes(base):
++        ask_path = base + [ifname, 'offload', 'ask']
++        if not config.exists(ask_path):
++            continue
++
++        # `offload ask` == both families. Preserve intent as ipv4 + ipv6,
++        # then drop the retired node.
++        config.delete(ask_path)
++        config.set(base + [ifname, 'offload', 'ipv4'])
++        config.set(base + [ifname, 'offload', 'ipv6'])

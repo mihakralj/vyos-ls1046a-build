@@ -1,0 +1,50 @@
+diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+index da385b0..e1f2a3c 100755
+--- a/src/conf_mode/firewall.py
++++ b/src/conf_mode/firewall.py
+@@ -527,6 +527,44 @@ def verify(firewall):
+ 
+                 for ifname in interfaces:
+                     verify_hardware_offload(ifname)
+ 
++    # LS1046A ASK2 (2026-08-21): a `global-options state-policy established`
++    # (or `related`) with action `accept` compiles to a
++    # VYOS_STATE_POLICY_<HOOK> chain that is JUMPed FIRST in the forward hook
++    # and terminates traversal (accept verdict) for every established/related
++    # packet BEFORE it can reach a `rule ... action offload` (which emits the
++    # `flow add @<flowtable>` expression later in the same chain). The result
++    # is that the flow-add rule matches ZERO packets, no FLOW_CLS_REPLACE ever
++    # fires, the hardware flowtable/ehash record is never inserted, and every
++    # flow silently falls back to software forwarding (observed on .185: HW
++    # offload never engaged despite a byte-correct flowtable config). Fail the
++    # commit closed and tell the operator to move the established/related
++    # accept BEHIND the offload rule (a per-chain forward filter rule with
++    # action accept + state established/related AFTER the action-offload rule),
++    # leaving global state-policy to handle only `invalid` (drop).
++    _sp = dict_search('global_options.state_policy', firewall) or {}
++    _sp_accepts_estd = (
++        dict_search_args(_sp, 'established', 'action') == 'accept' or
++        dict_search_args(_sp, 'related', 'action') == 'accept'
++    )
++    if _sp_accepts_estd:
++        for _fam in ('ipv4', 'ipv6'):
++            _rules = dict_search(f'{_fam}.forward.filter.rule', firewall) or {}
++            for _rnum, _rconf in _rules.items():
++                if _rconf.get('action') == 'offload':
++                    raise ConfigError(
++                        'firewall global-options state-policy '
++                        'established/related action accept shadows the '
++                        f'{_fam} forward filter rule {_rnum} action offload '
++                        '(the state-policy accept terminates established '
++                        'traffic before it reaches the flow-add offload rule, '
++                        'so hardware offload never engages). Remove the '
++                        'established/related accept from global-options '
++                        'state-policy (keep only invalid drop) and add an '
++                        'explicit forward filter accept rule for '
++                        'established/related with a HIGHER rule number than '
++                        'the offload rule.'
++                    )
++
+     if dict_search_args(firewall, 'global_options', 'geoip', 'provider') == 'maxmind':
+         geoip_options = dict_search_args(firewall, 'global_options', 'geoip')
+         required_keys = ['maxmind_account_id', 'maxmind_license_key']
