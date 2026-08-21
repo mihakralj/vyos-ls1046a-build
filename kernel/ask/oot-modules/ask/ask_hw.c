@@ -786,17 +786,20 @@ int ask_hw_offload_engage(u8 hw_port_id)
          * with numKeys=1 (F-091), and arms the port for FE-VM dispatch.
          * This replaces the debugfs bridge — debugfs is for diagnostics only.
          *
-         * F-157 (2026-08-01): pass the dedicated TX FQ as the FE-VM ENQ
-         * target so the HIT disposition is DISTINCT from the CC miss-AD
-         * (kernel FQ 0x200).  This makes HIT observable for the first time:
-         * a matched frame is enqueued to the dedicated TX FQ on channel
-         * 0x801 (eth4 TX), not delivered back to the eth3 kernel RX path
-         * where it was previously indistinguishable from a miss.  Falls back
-         * to 0x200 if the dedicated FQ is not ready.
+         * F-157 (2026-08-01) historically passed h->dedicated_fq (a single
+         * module-global QMan FQ pinned to channel 0x801 = eth4/MAC10 TX) as
+         * the shared FE-VM ENQ-singleton target. That is WRONG for any ingress
+         * port other than eth4: the shared ENQ singleton feeds the record's
+         * next-FE for flows inserted WITHOUT a per-egress action.tx_fqid, so a
+         * non-eth4 ingress flow would enqueue onto eth4's channel and the dpaa
+         * driver drops the cross-port frame (E25/E26). Five-port readiness:
+         * pass 0 so the shared ENQ singleton falls back to the generic 0x200
+         * builder default (F-175), decoupling it from eth4. The production
+         * routed HIT terminal is per-egress via action.tx_fqid (F-198/F-199)
+         * and is unaffected; the CC MISS disposition is already per-ingress-port
+         * via fman_pcd_resolve_miss_fqid() inside fman_pcd_fe_engage().
          */
-        rc = fman_pcd_fe_engage(h->fman, hw_port_id,
-                                h->dedicated_fq_ready ?
-                                h->dedicated_fq.fqid : 0x200);
+        rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
         if (rc == -EBUSY) {
                 /*
                  * F-122/F-124: treat "already armed" as idempotent success.
