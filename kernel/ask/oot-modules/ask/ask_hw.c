@@ -838,9 +838,15 @@ void ask_hw_offload_disengage(u8 hw_port_id)
          * nothing to clear here.
          */
 
-        p->offload_engaged = false;
-        mutex_unlock(&h->lock);
-        ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
+	p->offload_engaged = false;
+	mutex_unlock(&h->lock);
+
+	/* Clear this port's family selection so a later flowtable callback
+	 * cannot re-admit a family the operator disabled. Re-engage sets it
+	 * again from the CLI mask. */
+	ask_hw_offload_set_family(hw_port_id, 0);
+
+	ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
 
