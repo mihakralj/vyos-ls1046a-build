@@ -42,6 +42,8 @@ on:
         required: false
       DISCORD_BOT_KEY:
         required: false
+      OPENROUTER_KEY:
+        required: false
 
 env:
   # Reuse the populated ISO-build chroot across runs on this persistent
@@ -390,7 +392,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      models: read      # AI inference (Copilot CLI) for release notes
     if: github.ref_name == 'main'
     steps:
       - uses: actions/checkout@v6
@@ -481,13 +482,11 @@ jobs:
           fi
           [ -s /tmp/changelog_top.md ] || echo "_No changelog prose available._" > /tmp/changelog_top.md
 
-      - name: "Release publishing: install Copilot CLI"
-        run: npm install -g @github/copilot
-
       - name: "Release publishing: generate release notes (AI)"
         id: ai_notes
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          AI_MODEL: deepseek/deepseek-v4-flash-0731
           VYOS1X_CHANGELOG: ${{ steps.generate_changelog_for_vyos-1x.outputs.changelog }}
           VYOSBUILD_CHANGELOG: ${{ steps.generate_changelog_for_vyos-build.outputs.changelog }}
         run: |
@@ -563,24 +562,38 @@ jobs:
             printf '%s\n' "$VYOSBUILD_CHANGELOG"
           } > /tmp/notes_prompt.md
 
-          # Non-interactive Copilot CLI run: --yolo suppresses approval prompts
-          # (required in Actions), -s/--silent emits only the agent response,
-          # --output-format text keeps it as plain Markdown. Pure text prompt —
-          # no tools are needed or invoked.
+          # OpenRouter Chat Completions API. Build JSON with jq so the full
+          # multi-line prompt is escaped safely; never place the secret in argv
+          # or logs. The model returns Markdown in choices[0].message.content.
+          jq -n --arg model "$AI_MODEL" --rawfile prompt /tmp/notes_prompt.md \
+            '{model:$model, messages:[{role:"user",content:$prompt}], temperature:0.2, max_tokens:8000}' \
+            > /tmp/ai_request.json
+
           set +e
-          copilot --yolo --no-ask-user -s --output-format text \
-            -p "$(cat /tmp/notes_prompt.md)" > /tmp/ai_notes.md 2> /tmp/ai_err.log
+          HTTP=$(curl -sS -o /tmp/ai_response.json -w '%{http_code}' \
+            https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer ${OPENROUTER_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "HTTP-Referer: https://github.com/${GITHUB_REPOSITORY}" \
+            -H "X-Title: VyOS LS1046A release notes" \
+            -d @/tmp/ai_request.json)
           RC=$?
           set -e
 
-          # Keep only from the first "## " heading onward, in case the CLI prints
-          # any leading banner/status lines before the Markdown.
-          if [ "$RC" -eq 0 ] && grep -q '^## ' /tmp/ai_notes.md; then
+          NOTES=""
+          if [ "$RC" -eq 0 ] && [ "$HTTP" = "200" ]; then
+            NOTES=$(jq -r '.choices[0].message.content // empty' /tmp/ai_response.json 2>/dev/null)
+          fi
+          printf '%s\n' "$NOTES" > /tmp/ai_notes.md
+
+          # Keep only from the first "## " heading onward in case the model
+          # includes a short preamble despite the prompt.
+          if [ -n "$NOTES" ] && grep -q '^## ' /tmp/ai_notes.md; then
             sed -n '/^## /,$p' /tmp/ai_notes.md > /tmp/release_notes.md
-            echo "AI release notes generated via Copilot CLI."
+            echo "AI release notes generated via OpenRouter (${AI_MODEL})."
           else
-            echo "::warning::AI release notes unavailable (rc=${RC}); using raw fallback."
-            sed -n '1,20p' /tmp/ai_err.log || true
+            echo "::warning::AI release notes unavailable (curl_rc=${RC}, HTTP=${HTTP}); using raw fallback."
+            jq -r '.error.message // empty' /tmp/ai_response.json 2>/dev/null | head -5 || true
             {
               echo "## LS1046A Build Changes"
               echo
