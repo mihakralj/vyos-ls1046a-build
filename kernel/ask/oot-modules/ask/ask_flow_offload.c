@@ -1664,7 +1664,11 @@ static void ask_fe_flow_remove(const struct ask_flow_key *key)
                 ask_fe_build_key(key, k);
                 klen = ASK_FE_KEY_SIZE;
         }
-        fman_pcd_fe_flow_del(ask_hw_get_fman(), 0, k, klen);
+        /* Phase 1 (per-port tables): pass the ingress hw port so the delete
+         * selects THIS port's routed-IPv4 table instance (F-220/F-221), matching
+         * the insert side which passed key->port_id. v6 delete still selects the
+         * global table by key length; the port arg is harmless there. */
+        fman_pcd_fe_flow_del(ask_hw_get_fman(), key->port_id, k, klen);
 }
 
 
