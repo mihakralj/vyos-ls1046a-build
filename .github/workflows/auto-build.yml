@@ -390,7 +390,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      models: read      # GitHub Models inference for AI release notes
+      copilot-requests: write   # Copilot CLI inference for AI release notes
     if: github.ref_name == 'main'
     steps:
       - uses: actions/checkout@v6
@@ -481,27 +481,29 @@ jobs:
           fi
           [ -s /tmp/changelog_top.md ] || echo "_No changelog prose available._" > /tmp/changelog_top.md
 
+      - name: "Release publishing: install Copilot CLI"
+        run: npm install -g @github/copilot
+
       - name: "Release publishing: generate release notes (AI)"
         id: ai_notes
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           VYOS1X_CHANGELOG: ${{ steps.generate_changelog_for_vyos-1x.outputs.changelog }}
           VYOSBUILD_CHANGELOG: ${{ steps.generate_changelog_for_vyos-build.outputs.changelog }}
-          AI_MODEL: openai/gpt-4o
         run: |
           set -e
-          LOCAL_CHANGES=$(cat /tmp/local_changes.md)
-          CHANGELOG_PROSE=$(cat /tmp/changelog_top.md)
-          : "${VYOS1X_CHANGELOG:=_No upstream vyos-1x changes in the last week._}"
-          : "${VYOSBUILD_CHANGELOG:=_No upstream vyos-build changes in the last week._}"
+          [ -n "$VYOS1X_CHANGELOG" ]   || VYOS1X_CHANGELOG="_No upstream vyos-1x changes in the last week._"
+          [ -n "$VYOSBUILD_CHANGELOG" ] || VYOSBUILD_CHANGELOG="_No upstream vyos-build changes in the last week._"
 
-          # System/instruction prompt for the release-notes writer.
-          read -r -d '' INSTRUCTIONS <<'PROMPT' || true
+          # Build a single self-contained prompt file (instructions + all raw
+          # material). Copilot CLI reads it via -p and writes Markdown to stdout.
+          {
+            cat <<'PROMPT'
           You are writing GitHub release notes for "VyOS for the NXP LS1046A (Mono Gateway)",
           a bare-metal ARM64 router build. Audience: network operators running this on real
           hardware. Tone: friendly and confident, but technically precise. No marketing fluff,
-          no emojis. Output plain GitHub-Flavored Markdown only (no code fences around the whole
-          thing, no preamble, no sign-off).
+          no emojis. Output plain GitHub-Flavored Markdown ONLY: no preamble, no sign-off, no
+          surrounding code fence, and do not describe what you are doing — emit only the notes.
 
           Produce EXACTLY three sections, in this order:
 
@@ -532,58 +534,52 @@ jobs:
           Rules: base every statement ONLY on the provided input. Do not invent features,
           versions, or numbers. Keep it scannable: an operator should grasp the release in
           about 20 seconds and find detail if they read on.
+
+          Here is the input:
           PROMPT
+            echo
+            echo "== LOCAL COMMITS (this repo, since last build) =="
+            cat /tmp/local_changes.md
+            echo
+            echo "== LOCAL CHANGELOG PROSE (newest section of plans/CHANGELOG.md) =="
+            cat /tmp/changelog_top.md
+            echo
+            echo "== UPSTREAM vyos-1x (last 7 days) =="
+            printf '%s\n' "$VYOS1X_CHANGELOG"
+            echo
+            echo "== UPSTREAM vyos-build (last 7 days) =="
+            printf '%s\n' "$VYOSBUILD_CHANGELOG"
+          } > /tmp/notes_prompt.md
 
-          # Assemble the user content with all raw material.
-          USER_CONTENT="$INSTRUCTIONS
+          # Non-interactive Copilot CLI run: --yolo suppresses approval prompts
+          # (required in Actions), -s/--silent emits only the agent response,
+          # --output-format text keeps it as plain Markdown. Pure text prompt —
+          # no tools are needed or invoked.
+          set +e
+          copilot --yolo --no-ask-user -s --output-format text \
+            -p "$(cat /tmp/notes_prompt.md)" > /tmp/ai_notes.md 2> /tmp/ai_err.log
+          RC=$?
+          set -e
 
-          == LOCAL COMMITS (this repo, since last build) ==
-          ${LOCAL_CHANGES}
-
-          == LOCAL CHANGELOG PROSE (newest section of plans/CHANGELOG.md) ==
-          ${CHANGELOG_PROSE}
-
-          == UPSTREAM vyos-1x (last 7 days) ==
-          ${VYOS1X_CHANGELOG}
-
-          == UPSTREAM vyos-build (last 7 days) ==
-          ${VYOSBUILD_CHANGELOG}
-          "
-
-          # Build the request body safely via jq, call GitHub Models inference.
-          jq -n --arg model "$AI_MODEL" --arg content "$USER_CONTENT" \
-            '{model:$model, messages:[{role:"user", content:$content}], temperature:0.3}' \
-            > /tmp/ai_request.json
-
-          HTTP=$(curl -sS -o /tmp/ai_response.json -w '%{http_code}' \
-            https://models.github.ai/inference/chat/completions \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/vnd.github+json" \
-            -d @/tmp/ai_request.json || echo "000")
-
-          NOTES=""
-          if [ "$HTTP" = "200" ]; then
-            NOTES=$(jq -r '.choices[0].message.content // empty' /tmp/ai_response.json)
-          fi
-
-          if [ -n "$NOTES" ]; then
-            printf '%s\n' "$NOTES" > /tmp/release_notes.md
-            echo "AI release notes generated (model=${AI_MODEL})."
+          # Keep only from the first "## " heading onward, in case the CLI prints
+          # any leading banner/status lines before the Markdown.
+          if [ "$RC" -eq 0 ] && grep -q '^## ' /tmp/ai_notes.md; then
+            sed -n '/^## /,$p' /tmp/ai_notes.md > /tmp/release_notes.md
+            echo "AI release notes generated via Copilot CLI."
           else
-            # Deterministic fallback: never fail the release on an AI hiccup.
-            echo "::warning::AI release notes unavailable (HTTP ${HTTP}); using raw fallback."
+            echo "::warning::AI release notes unavailable (rc=${RC}); using raw fallback."
+            sed -n '1,20p' /tmp/ai_err.log || true
             {
               echo "## LS1046A Build Changes"
               echo
-              echo "${LOCAL_CHANGES}"
+              cat /tmp/local_changes.md
               echo
               echo "## Upstream Changes (last 7 days)"
               echo
               echo "### vyos-1x"
-              echo "${VYOS1X_CHANGELOG}"
+              printf '%s\n' "$VYOS1X_CHANGELOG"
               echo "### vyos-build"
-              echo "${VYOSBUILD_CHANGELOG}"
+              printf '%s\n' "$VYOSBUILD_CHANGELOG"
             } > /tmp/release_notes.md
           fi
           echo "----- release notes -----"
