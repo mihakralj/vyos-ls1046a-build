@@ -789,24 +789,40 @@ return 0;
 /* ------------------------------------------------------------------------- */
 static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 {
-struct nlattr *port_attr;
-u8 port_id;
-int rc;
+	struct nlattr *port_attr;
+	struct nlattr *fam_attr;
+	u8 port_id;
+	u8 fam_mask;
+	int rc;
 
-port_attr = info->attrs[ASK_ATTR_PORT_ID];
-if (!port_attr)
-return -EINVAL;
+	port_attr = info->attrs[ASK_ATTR_PORT_ID];
+	if (!port_attr)
+		return -EINVAL;
 
-port_id = nla_get_u8(port_attr);
+	port_id = nla_get_u8(port_attr);
 
-rc = ask_hw_offload_engage(port_id);
-if (rc) {
-ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
-return rc;
-}
+	/*
+	 * ASK_ATTR_FAMILY_MASK selects which L3 families this port offloads
+	 * (CLI `offload ipv4` / `offload ipv6`). Absent => both, so callers
+	 * that predate the split get the historical behaviour. Set the mask
+	 * BEFORE engage so admission is correct from the first frame.
+	 */
+	fam_attr = info->attrs[ASK_ATTR_FAMILY_MASK];
+	fam_mask = fam_attr ? nla_get_u8(fam_attr) : (ASK_FAM_V4 | ASK_FAM_V6);
+	if (!(fam_mask & (ASK_FAM_V4 | ASK_FAM_V6)))
+		return -EINVAL;	/* engage with no family is nonsensical */
 
-ask_pr_info("genl: engaged port 0x%02x\n", port_id);
-return 0;
+	ask_hw_offload_set_family(port_id, fam_mask);
+
+	rc = ask_hw_offload_engage(port_id);
+	if (rc) {
+		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
+		return rc;
+	}
+
+	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x\n",
+		    port_id, fam_mask);
+	return 0;
 }
 
 static int ask_genl_disengage_doit(struct sk_buff *skb, struct genl_info *info)

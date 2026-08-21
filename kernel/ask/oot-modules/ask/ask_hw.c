@@ -87,48 +87,53 @@ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 
 /*
- * T-M6-1 IPv6 HW-offload gate. Two independent switches must BOTH be on for a
- * v6 flow to publish a hardware record:
- *   1. fman_pcd_v6_enabled() — the kernel-side master gate (F-210, module param
- *      fsl_dpaa_fman.v6_enable) that arms the v6 KeyGen scheme + table1 node +
- *      LCV split. Exported by F-210; re-declared here (single-image OOT shim).
- *   2. ask_v6_offload — this module's own gate (ask.v6_offload), so an operator
- *      cannot half-enable the path from one knob. Default OFF -> v6 stays
- *      software-fallback and v4 behaviour is byte-identical.
+ * PER-PORT OFFLOAD FAMILY MASK (2026-08-21). IPv4 and IPv6 are selected
+ * INDEPENDENTLY PER INTERFACE via the CLI `offload ipv4` / `offload ipv6`
+ * knobs (the old single `offload ask` is removed). Userspace sends the mask
+ * with ASK_CMD_ENGAGE (ASK_ATTR_FAMILY_MASK); ask_hw_offload_set_family()
+ * records it here keyed by hardware port id. Flow admission
+ * (ask_hw_flow_family_ok) consults the TRUE INGRESS port's mask — never the
+ * interface's addresses and never engage timing — so late DHCP/SLAAC works
+ * per-flow with no re-engage, exactly like IPv4 always has.
+ *
+ * The unified 46-byte dual-lane scheme/table (F-224/F-225) is family-neutral
+ * and always programmed at engage regardless of the mask; the mask only gates
+ * which families ask.ko publishes flow records for. Index is hw_port_id
+ * (sparse 0x08..0x27, < 64). Default 0 = no family (a port not engaged, or
+ * engaged with an explicit family, is set before its first flow).
  */
-bool fman_pcd_v6_enabled(void);
-/* F-219: set this port's v6-arm intent before fman_pcd_fe_engage(). */
-void fman_pcd_fe_set_port_v6(struct fman *fm, u8 hw_port_id, bool enable);
-/*
- * 2026-08-21: default ON. IPv6 now rides the SAME dual-lane match-all path as
- * IPv4 (46-byte key, F-224/F-225; the old LCV/second-scheme wedge machinery is
- * dead via F-226), so v6 offload is handled exactly like v4 — no per-family
- * gate. Kept as a module param only so an operator can force v6 offload OFF for
- * debugging; the default matches v4 (always offloaded when ASK is engaged).
- */
-static bool ask_v6_offload = true;
-module_param_named(v6_offload, ask_v6_offload, bool, 0644);
-MODULE_PARM_DESC(v6_offload,
-		 "IPv6 hardware flow offload (default 1, same as IPv4; set 0 to "
-		 "force v6 flows to software for debugging).");
+bool fman_pcd_v6_enabled(void);	/* F-210 export; still consulted by kernel */
+static u8 ask_hw_port_family[64];
 
-/* True only when BOTH gates are on. */
-static inline bool ask_v6_hw_enabled(void)
+void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
-	return ask_v6_offload && fman_pcd_v6_enabled();
+	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
+		WRITE_ONCE(ask_hw_port_family[hw_port_id],
+			   family_mask & (ASK_FAM_V4 | ASK_FAM_V6));
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_set_family);
+
+static u8 ask_hw_port_family_get(u8 hw_port_id)
+{
+	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
+		return READ_ONCE(ask_hw_port_family[hw_port_id]);
+	return 0;
 }
 
-/* Shared family/proto acceptance for the preflight + insert gates. v4 TCP/UDP
- * is always HW-backed; v6 TCP/UDP only when both v6 gates are on. Returns 0 if
- * the flow may be hardware-offloaded, -EOPNOTSUPP otherwise (SW fallback). */
-static int ask_hw_flow_family_ok(const struct ask_flow_key *key)
+/* Flow admission for the preflight + insert gates, gated by the INGRESS
+ * port's selected family mask. TCP/UDP only (both families). Returns 0 if the
+ * flow may be hardware-offloaded on @hw_port_id, -EOPNOTSUPP otherwise (SW
+ * fallback). */
+static int ask_hw_flow_family_ok(u8 hw_port_id, const struct ask_flow_key *key)
 {
+	u8 fmask = ask_hw_port_family_get(hw_port_id);
+
 	if (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP)
 		return -EOPNOTSUPP;
 	if (key->l3_proto == ASK_FLOW_L3_IPV4)
-		return 0;
-	if (key->l3_proto == ASK_FLOW_L3_IPV6 && ask_v6_hw_enabled())
-		return 0;
+		return (fmask & ASK_FAM_V4) ? 0 : -EOPNOTSUPP;
+	if (key->l3_proto == ASK_FLOW_L3_IPV6)
+		return (fmask & ASK_FAM_V6) ? 0 : -EOPNOTSUPP;
 	return -EOPNOTSUPP;
 }
 
@@ -682,63 +687,6 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
  * routes `set system offload ask` here.
  */
-/*
- * F-219: true if @dev has at least one usable (non-tentative, non-link-local)
- * global IPv6 address — i.e. this port actually carries IPv6 and should arm the
- * v6 offload schemes. Link-local-only ports stay v4-only.
- */
-static bool ask_netdev_has_global_v6(struct net_device *dev)
-{
-        struct inet6_dev *idev;
-        struct inet6_ifaddr *ifp;
-        bool found = false;
-
-        if (!dev)
-                return false;
-        rcu_read_lock();
-        idev = __in6_dev_get(dev);
-        if (idev) {
-                list_for_each_entry_rcu(ifp, &idev->addr_list, if_list) {
-                        if (ifp->flags & IFA_F_TENTATIVE)
-                                continue;
-                        if (ipv6_addr_src_scope(&ifp->addr) ==
-                            IPV6_ADDR_SCOPE_GLOBAL) {
-                                found = true;
-                                break;
-                        }
-                }
-        }
-        rcu_read_unlock();
-        return found;
-}
-
-/*
- * F-219: resolve the RX netdev for @hw_port_id and report whether it carries
- * IPv6. Walks init_net's dpaa netdevs matching the board resolvers
- * (dpaa_get_rx_fman_port + fman_port_get_id), the same mapping the flow path
- * uses. Returns false if no netdev matches (v4-only, safe default).
- */
-static bool ask_port_wants_v6(u8 hw_port_id)
-{
-        struct net_device *dev;
-        bool want = false;
-
-        if (!ask_v6_offload)
-                return false;
-
-        rcu_read_lock();
-        for_each_netdev_rcu(&init_net, dev) {
-                struct fman_port *port = dpaa_get_rx_fman_port(dev);
-
-                if (port && fman_port_get_id(port) == hw_port_id) {
-                        want = ask_netdev_has_global_v6(dev);
-                        break;
-                }
-        }
-        rcu_read_unlock();
-        return want;
-}
-
 int ask_hw_offload_engage(u8 hw_port_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
@@ -760,20 +708,18 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        /* F-219: protocol intent is PER PORT. The global ask.v6_offload and
-         * fsl_dpaa_fman.v6_enable switches remain fail-closed masters, but only
-         * this named port gets v6 schemes when its netdev has a usable global
-         * IPv6 address. Another engaged port with v4 only stays untouched. */
-        {
-                bool port_v6 = ask_port_wants_v6(hw_port_id);
+	/*
+	 * Family selection is now per-port and address-independent: userspace
+	 * set this port's family mask (ASK_ATTR_FAMILY_MASK) via
+	 * ask_hw_offload_set_family() before this engage. The unified 46-byte
+	 * dual-lane scheme/table (F-224/F-225) is family-neutral and armed
+	 * unconditionally below; ask_hw_flow_family_ok() enforces the mask per
+	 * flow. The retired F-219 netdev-address auto-detect and the dead
+	 * fman_pcd_fe_set_port_v6() intent bitmap (reader forced false by F-226)
+	 * are gone — v6 now behaves exactly like v4.
+	 */
 
-                fman_pcd_fe_set_port_v6(h->fman, hw_port_id, port_v6);
-                pr_info("ask: hw: port 0x%02x v6 intent=%u (ask gate=%u, auto from netdev IPv6 addrs)\n",
-                        hw_port_id, port_v6 ? 1 : 0,
-                        ask_v6_offload ? 1 : 0);
-        }
-
-        /* F-092: Build + arm FE-VM via kernel API (not debugfs).
+	/* F-092: Build + arm FE-VM via kernel API (not debugfs).
          * fman_pcd_fe_engage() now builds the full VM chain via
          * __fman_pcd_fe_build_vm_chain(), creates the CONT_LOOKUP scaffold
          * with numKeys=1 (F-091), and arms the port for FE-VM dispatch.
@@ -1145,31 +1091,29 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
                             ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
                 return -EOPNOTSUPP;
 
-        /*
-         * T-M6-1: v4 TCP/UDP is always HW-backed. v6 TCP/UDP is HW-backed only
-         * when BOTH the kernel master gate (fsl_dpaa_fman.v6_enable, arms the
-         * v6 KeyGen scheme + table1 node + LCV split) and this module's gate
-         * (ask.v6_offload) are on. Otherwise fall back to software — never
-         * publish a v6 record into table 1 unless a live v6 scheme can select
-         * it. Non-TCP/UDP always falls back.
-         */
-        rc = ask_hw_flow_family_ok(key);
-        if (rc)
-                return rc;
+	/* Ingress hwport must resolve first (it owns the classifier AND its
+	 * per-port family mask decides v4/v6 admission). Resolve BEFORE the
+	 * family gate so admission is by TRUE INGRESS PORT, address-independent. */
+	rc = ask_hw_resolve_iif_port(key->iif, &port_id);
+	if (rc)
+		return rc;
 
-        /* Egress L2 header not yet resolved -> defer (SW carries it). */
-        if (is_zero_ether_addr(key->next_hop_mac) ||
-            is_zero_ether_addr(key->egress_mac))
-                return -EAGAIN;
+	/* Per-port family/proto gate: TCP/UDP, and the ingress port must have
+	 * this L3 family selected (CLI offload ipv4 / offload ipv6). Otherwise
+	 * fall back to software. */
+	rc = ask_hw_flow_family_ok(port_id, key);
+	if (rc)
+		return rc;
 
-        /* Ingress hwport must resolve (owns the classifier) ... */
-        rc = ask_hw_resolve_iif_port(key->iif, &port_id);
-        if (rc)
-                return rc;
-        /* ... and the egress forward FQ must exist before we publish. */
-        rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
-        if (rc)
-                return rc;
+	/* Egress L2 header not yet resolved -> defer (SW carries it). */
+	if (is_zero_ether_addr(key->next_hop_mac) ||
+	    is_zero_ether_addr(key->egress_mac))
+		return -EAGAIN;
+
+	/* Egress forward FQ must exist before we publish. */
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	if (rc)
+		return rc;
 
         /* Port slot must be available (the CC/FE port context). Non-allocating
          * probe: this is the -ENOSPC condition the real insert would hit, but
@@ -1205,26 +1149,27 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         if (!h)
                 return -ENODEV;
 
-        /* Same family/protocol gate as preflight (v6 requires both gates). */
-        rc = ask_hw_flow_family_ok(key);
-        if (rc)
-                return rc;
+	/* Ingress hwport owns the CC tree AND its per-port family mask; resolve
+	 * first, then apply the same per-port family/proto gate as preflight. */
+	rc = ask_hw_resolve_iif_port(key->iif, &port_id);
+	if (rc)
+		return rc;
 
-        /*
-         * Neighbour not yet resolved: keep the flow in SW until the egress L2
-         * header is known, then the upper layer re-inserts.
-         */
-        if (is_zero_ether_addr(key->next_hop_mac) ||
-            is_zero_ether_addr(key->egress_mac))
-                return -EAGAIN;
+	rc = ask_hw_flow_family_ok(port_id, key);
+	if (rc)
+		return rc;
 
-        /* Ingress hwport owns the CC tree; egress FQID is the forward target. */
-        rc = ask_hw_resolve_iif_port(key->iif, &port_id);
-        if (rc)
-                return rc;
-        rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
-        if (rc)
-                return rc;
+	/*
+	 * Neighbour not yet resolved: keep the flow in SW until the egress L2
+	 * header is known, then the upper layer re-inserts.
+	 */
+	if (is_zero_ether_addr(key->next_hop_mac) ||
+	    is_zero_ether_addr(key->egress_mac))
+		return -EAGAIN;
+
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	if (rc)
+		return rc;
 
         mutex_lock(&h->lock);
 
