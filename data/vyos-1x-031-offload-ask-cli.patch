@@ -97,11 +97,11 @@ index 7d42e3f77..26eb1771d 100755
 +            raise ConfigError(
 +                f'Interface {ifname} cannot be configured for ASK offload while assigned to VPP!'
 +            )
-+        # eth0 is the management lifeline and is intentionally excluded until
-+        # the serial-console-gated eth0 acceptance step; the kernel admits it.
-+        if ifname not in ('eth1', 'eth2', 'eth3', 'eth4'):
++        # All five DPAA ports can offload (kernel admits eth0=0x0c too). eth0
++        # is management by convention; offloading it is the operator's choice.
++        if ifname not in ('eth0', 'eth1', 'eth2', 'eth3', 'eth4'):
 +            raise ConfigError(
-+                f'Interface {ifname} does not support ASK offload (supported: eth1, eth2, eth3, eth4)'
++                f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
 +            )
 +
      if dict_search('offload.rps', ethernet) != None:
