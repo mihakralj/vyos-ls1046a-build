@@ -2256,6 +2256,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_216.py" 2>&1
     echo "### dpaa_eth.c: F-216 zero-FD guard + F-072/F-170 RXHASH diagnostic removal"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_223.py" 2>&1
+    echo "### dpaa_eth.c: F-223 safe eth4-only KG-hash diagnostic capture (dual-lane GEC proof)"
 fi
 
 # F-171 (2026-08-06, T-M3-R attempt 5): every off!=0 arm this session has
