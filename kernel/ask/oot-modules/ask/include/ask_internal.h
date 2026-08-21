@@ -889,8 +889,25 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
  */
 #define ASK_FE_KEY_SIZE 14
 #define ASK_FE_KEY_SIZE_V6 38
+/*
+ * Dual-lane 46-byte key (specs/ask2-ipv6-dual-lane-key-design.md, silicon-proven
+ * 2026-08-21). One fixed-width key carries BOTH families so a single match-all
+ * AC_CC scheme + one per-port table serve v4 and v6 with no parser LCV split.
+ * Layout (matches the F-224 GEC extraction order exactly):
+ *   [0]      FAMILY   0x80 v4 / 0x40 v6   (parse-result L3R byte 4)
+ *   [1..8]   IPv4 src(4) dst(4)           (zero on a v6 flow)
+ *   [9..24]  IPv6 src(16)                 (zero on a v4 flow)
+ *   [25..40] IPv6 dst(16)                 (zero on a v4 flow)
+ *   [41]     proto / next-header
+ *   [42..45] L4 sport(2) dport(2)
+ */
+#define ASK_FE_KEY_SIZE_DUAL 46
+#define ASK_FE_FAMILY_V4 0x80
+#define ASK_FE_FAMILY_V6 0x40
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE]);
 void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6]);
+void ask_fe_build_key_dual(const struct ask_flow_key *key,
+			   u8 k[ASK_FE_KEY_SIZE_DUAL]);
 
 void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip);
 void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
