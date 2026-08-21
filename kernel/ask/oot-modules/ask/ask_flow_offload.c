@@ -2279,13 +2279,31 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 /* T-M7-2 S1: recover the per-egress-interface TX FQID that
                  * ask_hw_flow_insert() resolved and saved in this hw_id's
                  * cookie, so the FE record forwards a HIT direct-to-wire.
-                 * On any lookup miss fe_tx_fqid stays 0 and ask_fe_flow_insert
-                 * falls back to the F-197 own-port RX-FQID terminal. */
+                 *
+                 * 2026-08-21 PANIC FIX (kernel NULL-deref in
+                 * xdp_return_frame <- dpaa_cleanup_tx_fd): the sink FQID MUST
+                 * be the per-egress NO-CONFIRM TX FQ (F-199, B0V=0). If the
+                 * cookie lookup misses (fe_tx_fqid stays 0), the F-197/F-198
+                 * fallback would enqueue the HIT to the port's CONFIRMED
+                 * KG-default RX FQID (target_fqid, B0V=1). An FMan-forwarded
+                 * HIT frame on a confirmed FQ generates a TX-confirm FD whose
+                 * BMan buffer has no dpaa_eth_swbp -> dpaa_cleanup_tx_fd
+                 * dereferences a garbage xdp_frame and panics the kernel.
+                 * FAIL CLOSED instead: refuse the FE record and keep the flow
+                 * in software (matches the resolver's fail-closed contract in
+                 * ask_hw_resolve_oif_fqid). A HIT must never target a
+                 * confirmed FQ. */
                 u32 fe_tx_fqid = 0;
+                int fqrc = ask_hw_flow_get_sink_fqid(hw_id, &fe_tx_fqid);
 
-                (void)ask_hw_flow_get_sink_fqid(hw_id, &fe_tx_fqid);
-                rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
-                                        fe_tx_fqid);
+                if (fqrc || fe_tx_fqid == 0) {
+                        ask_pr_warn("flow_offload: REPLACE cookie=0x%lx no no-confirm TX FQ (rc=%d fqid=0x%x) - keeping flow in SW\n",
+                                    f->cookie, fqrc, fe_tx_fqid);
+                        rc = -EAGAIN;
+                } else {
+                        rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
+                                                fe_tx_fqid);
+                }
         }
         if (rc) {
                 int rrc;
