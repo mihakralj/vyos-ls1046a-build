@@ -37,7 +37,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/atomic.h>               /* F-108: atomic_t hit_release_refcnt */
+#include <linux/atomic.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -81,7 +81,6 @@ struct fman *fman_bind(struct device *dev);
 struct device *fman_get_dev(struct fman *fman);
 struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
 u8 fman_port_get_id(struct fman_port *port);
-int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
 int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 /* F-199 (T-M7-2 S4): allocate a dedicated no-confirm TX FQ for the FE
  * hardware offload terminal (context_a B0V=0). Board patch exports it. */
@@ -227,15 +226,6 @@ struct ask_hw_pcd {
                 u32     fqid;
         }               noconf_tx[ASK_HW_NOCONF_SLOTS];
 
-        /*
-         * F-108: Refcount for the FMan-global silicon HIT-release bypass.
-         * fman_port_set_silicon_hit_release_all() toggles TX-confirm bypass
-         * across ALL FMan TX ports.  When multiple ports are offloaded,
-         * disengaging one must not disable the bypass for remaining engaged
-         * ports.  Increment on engage (enable hardware bypass only on
-         * 0→1 transition), decrement on disengage (disable only on 1→0).
-         */
-        atomic_t        hit_release_refcnt;
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -473,7 +463,6 @@ int ask_hw_pcd_bringup(void)
         mutex_init(&h->lock);
         h->fman = fman;
         xa_init_flags(&h->flow_cookies, XA_FLAGS_ALLOC1);
-        atomic_set(&h->hit_release_refcnt, 0);  /* F-108: init refcount */
 
         /* F-113: Create kmem_cache for flow cookie entries.
          * Falls back to kzalloc/kfree if cache creation fails (non-fatal). */
@@ -581,11 +570,8 @@ void ask_hw_pcd_teardown(void)
                         kfree(ck);
         }
 
-        /* Restore TX confirm on all ports before tearing down CC trees.
-         * F-108: Unconditional disable on teardown — module unload must
-         * always restore the S0 default regardless of refcount state. */
-        fman_port_set_silicon_hit_release_all(h->fman, false);
-        atomic_set(&h->hit_release_refcnt, 0);
+        /* 2026-08-21 LEAK FIX: global TX-confirm bypass removed (see engage);
+         * no per-port TX register state to restore on teardown. */
 
         /* Disengage any port still in the M1 coarse S1 mode-switch (0129).
          * F-109: Use kernel API fman_pcd_fe_disengage() instead of
@@ -838,8 +824,19 @@ int ask_hw_offload_engage(u8 hw_port_id)
          * reversibility contract).  Also reversed in ask_hw_pcd_teardown()
          * for module-unload cleanup as a belt-and-suspenders.
          */
-        if (atomic_inc_return(&h->hit_release_refcnt) == 1)
-                fman_port_set_silicon_hit_release_all(h->fman, true);
+        /*
+         * 2026-08-21 LEAK FIX: the global TX-confirm bypass
+         * (fman_port_set_silicon_hit_release_all) is REMOVED. It set
+         * NIA_BMI_AC_TX_RELEASE on EVERY TX port, which suppressed the
+         * TX-confirm FD for the kernel's confirmed egress_fqs[] too, so any
+         * kernel-forwarded skb (software flowtable / plain forward) on those
+         * ports was never freed -> ~1.7 GB/s skbuff_head leak -> OOM. No-
+         * confirm behaviour is now provided PER-FRAME by the per-egress-port
+         * no-confirm FQ (F-198/F-199, B0V=0/EBD=1) that the HIT record's
+         * ENQUEUE_PKT targets via ask_hw_resolve_oif_fqid(); the resolver now
+         * fails closed (SW forward) rather than using a confirmed FQ, so a
+         * HIT frame never lands on a confirmed FQ. Nothing to arm here.
+         */
 
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
@@ -884,12 +881,9 @@ void ask_hw_offload_disengage(u8 hw_port_id)
          * default.  Mirrors the engage-side call at line ~598; keeps
          * `pcd-snapshot diff` byte-clean per the DUAL-DATAPLANE.md M1
          * reversibility contract.
-         * F-108: Refcount-guarded — only disable hardware bypass on the
-         * last disengage (1→0 transition).  Intermediate disengages on
-         * other ports decrement the refcount without touching hardware.
+         * 2026-08-21 LEAK FIX: global TX-confirm bypass removed (see engage);
+         * nothing to clear here.
          */
-        if (p->offload_engaged && atomic_dec_return(&h->hit_release_refcnt) == 0)
-                fman_port_set_silicon_hit_release_all(h->fman, false);
 
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
@@ -1078,12 +1072,23 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 
         rc = dpaa_alloc_offload_tx_fq(dev, fqid);
         if (rc) {
-                /* Fallback: confirmed shared TX FQ (S1 behaviour). */
-                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (%d); using confirmed queue-0 FQ\n",
+                /*
+                 * FAIL CLOSED (2026-08-21 leak fix): if we cannot get a
+                 * NO-CONFIRM (B0V=0) TX FQ, we MUST NOT fall back to the
+                 * confirmed queue-0 FQ. Since the global TX-confirm bypass
+                 * (F-108) is removed, an FMan-HIT frame on a confirmed FQ
+                 * would generate a TX-confirm FD that the kernel would
+                 * confirm-process as a bogus skb. Returning an error here
+                 * makes the caller keep the flow in SOFTWARE forwarding
+                 * (whose skbs ARE freed by the normal TX confirm), instead
+                 * of hardware-offloading onto a confirmed FQ. Correctness
+                 * over speed; on this board (<=5 dpaa netdevs) the per-port
+                 * no-confirm FQ alloc does not realistically fail.
+                 */
+                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (%d); NOT offloading (SW forward)\n",
                             ifindex, rc);
-                rc = dpaa_get_tx_fqid(dev, 0, fqid);
                 dev_put(dev);
-                return rc ? -ENODEV : 0;
+                return rc ? rc : -ENODEV;
         }
 
         if (h && h->noconf_tx[slot].fqid == 0) {
