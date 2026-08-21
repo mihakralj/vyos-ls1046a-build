@@ -20,13 +20,13 @@ index 26eb177..9ecc15d 100755
      Return list of blocked options if interface is a bond member
 @@ -315,6 +319,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
              raise ConfigError(
-                 f'Interface {ifname} does not support ASK offload (supported: eth1, eth2, eth3, eth4)'
+                 f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
              )
-+        # ASK FMan FE forwarding is bounded to the order-1 RX buffer range on
-+        # this board. The DPAA1 RX pool is one contiguous 8 KiB order-1 page
-+        # (F-203); frames above the ceiling overrun the one-buffer FMan RX
-+        # contract and wedge RX (cold-boot-only recovery), and below the floor
-+        # is untested. Clamp the MTU
++        # ASK FMan FE forwarding is bounded to the order-0 RX buffer range on
++        # this board. The DPAA1 RX pool is one contiguous 4 KiB order-0 page
++        # (F-222); frames above the ~3600 ceiling overrun the one-buffer FMan
++        # RX contract and wedge RX (cold-boot-only recovery), and below the
++        # floor is untested. Clamp the MTU
 +        # to [ASK_OFFLOAD_MTU_MIN, ASK_OFFLOAD_MTU_MAX] and fail the commit
 +        # closed outside it, so a remote MTU change on an ASK interface cannot
 +        # brick connectivity. The default 1500 is inside the range, so
