@@ -99,11 +99,18 @@ int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 bool fman_pcd_v6_enabled(void);
 /* F-219: set this port's v6-arm intent before fman_pcd_fe_engage(). */
 void fman_pcd_fe_set_port_v6(struct fman *fm, u8 hw_port_id, bool enable);
-static bool ask_v6_offload;
+/*
+ * 2026-08-21: default ON. IPv6 now rides the SAME dual-lane match-all path as
+ * IPv4 (46-byte key, F-224/F-225; the old LCV/second-scheme wedge machinery is
+ * dead via F-226), so v6 offload is handled exactly like v4 — no per-family
+ * gate. Kept as a module param only so an operator can force v6 offload OFF for
+ * debugging; the default matches v4 (always offloaded when ASK is engaged).
+ */
+static bool ask_v6_offload = true;
 module_param_named(v6_offload, ask_v6_offload, bool, 0644);
 MODULE_PARM_DESC(v6_offload,
-		 "Enable IPv6 hardware flow offload (default 0; also requires "
-		 "fsl_dpaa_fman.v6_enable=1). Board-validated opt-in only.");
+		 "IPv6 hardware flow offload (default 1, same as IPv4; set 0 to "
+		 "force v6 flows to software for debugging).");
 
 /* True only when BOTH gates are on. */
 static inline bool ask_v6_hw_enabled(void)
