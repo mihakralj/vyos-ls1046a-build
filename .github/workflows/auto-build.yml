@@ -390,7 +390,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      copilot-requests: write   # Copilot CLI inference for AI release notes
+      models: read      # AI inference (Copilot CLI) for release notes
     if: github.ref_name == 'main'
     steps:
       - uses: actions/checkout@v6
