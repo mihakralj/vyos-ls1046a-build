@@ -111,6 +111,7 @@ void ask_hw_exit(void);
  */
 int  ask_hw_offload_engage(u8 hw_port_id);
 void ask_hw_offload_disengage(u8 hw_port_id);
+void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 
 /*
