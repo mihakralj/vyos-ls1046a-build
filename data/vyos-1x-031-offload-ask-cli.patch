@@ -30,7 +30,7 @@ index 7eaf81f84..a19ecb211 100644
  from vyos.base import Warning
  from vyos.ethtool import Ethtool
  from vyos.netlink import coalesce
-@@ -318,6 +322,29 @@ def set_hw_tc_offload(self, state):
+@@ -318,6 +322,35 @@ def set_hw_tc_offload(self, state):
                  print('Adapter does not support changing hw-tc-offload settings!')
          return False
  
@@ -39,7 +39,13 @@ index 7eaf81f84..a19ecb211 100644
 +        Engage or disengage NXP LS1046A ASK (Accelerated Switching Kernel)
 +        FMan FE-VM hardware forwarding offload on this interface.
 +        """
-+        port_map = {'eth3': '0x10', 'eth4': '0x11'}
++        # Physical ingress FMan hwport IDs (DT-authoritative, all five ports).
++        # eth2=0x09 eth0=0x0c(MGMT) eth1=0x0d eth3=0x10 eth4=0x11. Policy on
++        # which ports may engage lives in verify_offload(); this map is facts.
++        port_map = {
++            'eth0': '0x0c', 'eth1': '0x0d', 'eth2': '0x09',
++            'eth3': '0x10', 'eth4': '0x11',
++        }
 +        port = port_map.get(self.ifname)
 +        if port is None:
 +            return
@@ -60,7 +66,7 @@ index 7eaf81f84..a19ecb211 100644
      def set_lro(self, state):
          """
          Enable Large Receive offload. State can be either True or False.
-@@ -662,6 +689,14 @@ def update(self, config):
+@@ -662,6 +695,14 @@ def update(self, config):
          # LRO (large receive offload)
          self.set_lro(dict_search('offload.lro', config) is not None)
  
@@ -80,7 +86,7 @@ diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_eth
 index 7d42e3f77..26eb1771d 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -302,6 +302,18 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -302,6 +302,20 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
      :param ethtool: Ethernet object
      :type ethtool: Ethtool
      """
@@ -91,9 +97,11 @@ index 7d42e3f77..26eb1771d 100755
 +            raise ConfigError(
 +                f'Interface {ifname} cannot be configured for ASK offload while assigned to VPP!'
 +            )
-+        if ifname not in ('eth3', 'eth4'):
++        # eth0 is the management lifeline and is intentionally excluded until
++        # the serial-console-gated eth0 acceptance step; the kernel admits it.
++        if ifname not in ('eth1', 'eth2', 'eth3', 'eth4'):
 +            raise ConfigError(
-+                f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)'
++                f'Interface {ifname} does not support ASK offload (supported: eth1, eth2, eth3, eth4)'
 +            )
 +
      if dict_search('offload.rps', ethernet) != None:
