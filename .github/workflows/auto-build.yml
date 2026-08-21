@@ -508,10 +508,11 @@ jobs:
           Produce EXACTLY three sections, in this order:
 
           ## Highlights
-          2-4 sentences of prose leading with the single biggest user-visible change in this
-          release. Say what an operator can now DO that they could not before. When relevant,
-          mention new CLI verbatim (e.g. `set interfaces ethernet eth<n> offload ipv4` /
-          `offload ipv6`) and at most one headline performance number if it appears in the input.
+          A short bulleted list (3-5 bullets, one line each) of the most important user-visible
+          changes in this release, biggest first. Each bullet states what an operator can now DO
+          that they could not before. Mention new CLI verbatim where relevant (e.g.
+          `set interfaces ethernet eth<n> offload ipv4` / `offload ipv6`) and at most one headline
+          performance number if it appears in the input. No lead-in paragraph — bullets only.
 
           ## What's New in This Build
           A categorized bullet list grouped under **Added**, **Fixed**, and **Changed** (include
