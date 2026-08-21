@@ -110,11 +110,13 @@ atomic_set(&t->fake_hw_id_seq, 0);
 atomic_set(&t->num_flows, 0);
 atomic_set(&t->num_hw_backed, 0);
 t->tag = tag ? tag : "default";
+xa_init(&t->gen_by_cookie);
 
 rc = rhashtable_init(&t->rht, &ask_flow_rht_params);
 if (rc) {
 ask_pr_err("flow: rhashtable_init('%s') failed: %d\n",
    t->tag, rc);
+xa_destroy(&t->gen_by_cookie);
 return rc;
 }
 
@@ -122,6 +124,135 @@ ask_pr_dbg("flow: table '%s' created\n", t->tag);
 return 0;
 }
 EXPORT_SYMBOL_GPL(ask_flow_table_create);
+
+/* -------------------------------------------------------------------------
+ * T-M6-A3: per-cookie ownership generation registry.
+ *
+ * Value-encoded xarray: entry = xa_mk_value((gen << 1) | state). gen is a
+ * 31-bit monotonic counter per cookie; wrap is a non-issue (2^31 REPLACEs of
+ * one recycled cookie). Value entries need no allocation, so a tombstone can
+ * outlive the ask_flow with zero heap cost and no leak.
+ * ------------------------------------------------------------------------- */
+
+#define ASK_GEN_STATE_BITS 1
+#define ASK_GEN_STATE_MASK ((1UL << ASK_GEN_STATE_BITS) - 1)
+
+static unsigned long ask_gen_encode(u32 gen, u8 state)
+{
+	return ((unsigned long)gen << ASK_GEN_STATE_BITS) |
+	       (state & ASK_GEN_STATE_MASK);
+}
+
+static u32 ask_gen_decode_gen(unsigned long v)
+{
+	return (u32)(v >> ASK_GEN_STATE_BITS);
+}
+
+static u8 ask_gen_decode_state(unsigned long v)
+{
+	return (u8)(v & ASK_GEN_STATE_MASK);
+}
+
+u32 ask_flow_gen_next(struct ask_flow_table *t, u64 cookie)
+{
+	unsigned long flags, old;
+	void *entry;
+	u32 gen;
+	int rc;
+
+	if (!t)
+		return 0;
+
+	xa_lock_irqsave(&t->gen_by_cookie, flags);
+	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
+	old = xa_is_value(entry) ? xa_to_value(entry) : 0;
+	gen = ask_gen_decode_gen(old) + 1;
+	if (gen == 0)
+		gen = 1; /* never hand out generation 0 (means "unknown") */
+	/* GFP_ATOMIC: we hold xa_lock. On failure return 0 so the caller
+	 * fails the REPLACE to software rather than publishing unguarded. */
+	rc = xa_err(__xa_store(&t->gen_by_cookie, (unsigned long)cookie,
+			       xa_mk_value(ask_gen_encode(gen, ASK_GEN_LIVE)),
+			       GFP_ATOMIC));
+	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+	if (rc) {
+		ask_pr_warn("flow: gen registry store failed for cookie=0x%llx rc=%d\n",
+			    cookie, rc);
+		return 0;
+	}
+	return gen;
+}
+EXPORT_SYMBOL_GPL(ask_flow_gen_next);
+
+u32 ask_flow_gen_current(struct ask_flow_table *t, u64 cookie)
+{
+	unsigned long flags;
+	void *entry;
+	u32 gen = 0;
+
+	if (!t)
+		return 0;
+	xa_lock_irqsave(&t->gen_by_cookie, flags);
+	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
+	if (xa_is_value(entry))
+		gen = ask_gen_decode_gen(xa_to_value(entry));
+	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+	return gen;
+}
+EXPORT_SYMBOL_GPL(ask_flow_gen_current);
+
+bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u32 gen)
+{
+	unsigned long flags, v;
+	void *entry;
+	bool ok = false;
+
+	if (!t || gen == 0)
+		return false;
+	xa_lock_irqsave(&t->gen_by_cookie, flags);
+	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
+	if (xa_is_value(entry)) {
+		v = xa_to_value(entry);
+		ok = (ask_gen_decode_gen(v) == gen) &&
+		     (ask_gen_decode_state(v) == ASK_GEN_LIVE);
+	}
+	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+	return ok;
+}
+EXPORT_SYMBOL_GPL(ask_flow_gen_is_current);
+
+void ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie)
+{
+	unsigned long flags;
+	void *entry;
+	u32 gen;
+
+	if (!t)
+		return;
+	xa_lock_irqsave(&t->gen_by_cookie, flags);
+	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
+	gen = xa_is_value(entry) ? ask_gen_decode_gen(xa_to_value(entry)) : 0;
+	/* Preserve the generation, flip state to TOMBSTONED. GFP_ATOMIC under
+	 * lock; a store failure only loses the tombstone hint, and the
+	 * generation compare in insert_owned still blocks a stale publish. */
+	__xa_store(&t->gen_by_cookie, (unsigned long)cookie,
+		   xa_mk_value(ask_gen_encode(gen, ASK_GEN_TOMBSTONED)),
+		   GFP_ATOMIC);
+	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+}
+EXPORT_SYMBOL_GPL(ask_flow_gen_tombstone);
+
+void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie)
+{
+	unsigned long flags;
+
+	if (!t)
+		return;
+	xa_lock_irqsave(&t->gen_by_cookie, flags);
+	__xa_erase(&t->gen_by_cookie, (unsigned long)cookie);
+	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+}
+EXPORT_SYMBOL_GPL(ask_flow_gen_release);
 
 static void ask_flow_free_rcu(struct rcu_head *head)
 {
@@ -169,6 +300,12 @@ rhashtable_free_and_destroy(&t->rht, ask_flow_free_walker, t);
  * fman context).
  */
 rcu_barrier();
+/*
+ * A3: drop the generation registry LAST — after the rht is gone and all
+ * call_rcu callbacks have drained, so no late worker can still consult a
+ * tombstone. Value entries need no per-entry free; xa_destroy suffices.
+ */
+xa_destroy(&t->gen_by_cookie);
 ask_pr_dbg("flow: table '%s' destroyed (%d entries freed)\n",
    t->tag ? t->tag : "?",
    atomic_read(&t->num_flows));
@@ -187,11 +324,12 @@ return rhashtable_lookup_fast(&t->rht, &cookie, ask_flow_rht_params);
 }
 EXPORT_SYMBOL_GPL(ask_flow_lookup);
 
-int ask_flow_insert(struct ask_flow_table *t,
+static int ask_flow_insert_core(struct ask_flow_table *t,
     u64 cookie,
     const struct ask_flow_key *key,
     u32 oif, u32 action_flags,
     enum ask_hw_dir dir,
+    u32 generation,
     u32 *out_hw_id)
 {
 struct ask_flow *f;
@@ -283,7 +421,21 @@ u64_stats_init(&f->stats.syncp);
  * argument as an xarray cookie. Never infer HW backing from the
  * numeric value — use struct ask_flow::hw_backed, set just below.
  */
+/*
+ * T-M6-A4: preflight every resource class BEFORE the first allocation or
+ * silicon write. The preflight is advisory against races — the real insert
+ * re-validates and its rollback remains authoritative — but a known
+ * unsupported/exhausted flow fails cleanly to software without any partial
+ * programming. Feed the preflight rc through the existing dispatcher
+ * contract: -ENODEV/-EOPNOTSUPP become SW-only mirrors, -EAGAIN parks on the
+ * pending queue, and -ENOSPC/-ENOMEM are hard "stay in kernel SW" failures.
+ */
+rc = ask_hw_flow_preflight(key, oif, action_flags, dir);
+if (!rc)
 rc = ask_hw_flow_insert(key, oif, action_flags, dir, &hw_id);
+else
+pr_info_ratelimited("ask: flow: resource preflight cookie=0x%llx rc=%d — no HW mutation\n",
+    cookie, rc);
 if (rc == 0) {
 hw_inserted = true;
 pr_info_ratelimited("ask: flow: hw_insert OK cookie=0x%llx oif=%u hw_id=0x%08x\n",
@@ -348,6 +500,36 @@ return rc;
 }
 f->hw_flow_id = hw_id;
 f->hw_backed  = hw_inserted;
+f->generation = generation;
+
+/*
+ * T-M6-A3: generation gate, checked immediately before publication.
+ *
+ * @generation == 0 means the caller opted out of generation guarding
+ * (ask_flow_insert() legacy/administrative/test path) — publish as before.
+ *
+ * Otherwise verify this REPLACE is STILL the current, non-tombstoned owner
+ * of @cookie. If a newer REPLACE bumped the generation, or a DESTROY
+ * tombstoned the cookie, while we were resolving neighbours / installing
+ * the FE record, we must NOT publish — doing so would either shadow the
+ * newer flow or leave a record the just-run DESTROY already tried to
+ * remove. Roll back our own HW slot and return -ESTALE. This is the
+ * "checked immediately before publication" requirement (CR-004 / R4).
+ */
+if (generation != 0 &&
+    !ask_flow_gen_is_current(t, cookie, generation)) {
+if (hw_inserted) {
+int rm_rc = ask_hw_flow_remove(hw_id);
+
+if (rm_rc && rm_rc != -ENODEV)
+ask_pr_warn("flow: stale-publish HW rollback (cookie=0x%llx gen=%u) rc=%d\n",
+    cookie, generation, rm_rc);
+}
+kfree(f);
+pr_info_ratelimited("ask: flow: REPLACE cookie=0x%llx gen=%u superseded before publish — not offloaded\n",
+    cookie, generation);
+return -ESTALE;
+}
 
 rc = rhashtable_lookup_insert_fast(&t->rht, &f->node,
    ask_flow_rht_params);
@@ -386,9 +568,39 @@ atomic_inc(&t->num_hw_backed);
 *out_hw_id = hw_id;
 return 0;
 }
+
+/*
+ * Legacy / administrative / test entry point: claim a fresh generation for
+ * the cookie so even direct callers get an ownership stamp, then insert.
+ * Callers that must thread a previously-claimed generation (production
+ * REPLACE, pending replay, neigh rebuild) use ask_flow_insert_owned().
+ */
+int ask_flow_insert(struct ask_flow_table *t,
+    u64 cookie,
+    const struct ask_flow_key *key,
+    u32 oif, u32 action_flags,
+    enum ask_hw_dir dir,
+    u32 *out_hw_id)
+{
+u32 gen = t ? ask_flow_gen_next(t, cookie) : 0;
+
+return ask_flow_insert_core(t, cookie, key, oif, action_flags, dir,
+    gen, out_hw_id);
+}
 EXPORT_SYMBOL_GPL(ask_flow_insert);
 
-int ask_flow_remove(struct ask_flow_table *t, u64 cookie)
+int ask_flow_insert_owned(struct ask_flow_table *t, u64 cookie,
+  const struct ask_flow_key *key,
+  u32 oif, u32 action_flags, enum ask_hw_dir dir,
+  u32 generation, u32 *out_hw_id)
+{
+return ask_flow_insert_core(t, cookie, key, oif, action_flags, dir,
+    generation, out_hw_id);
+}
+EXPORT_SYMBOL_GPL(ask_flow_insert_owned);
+
+static int ask_flow_remove_core(struct ask_flow_table *t, u64 cookie,
+u32 generation, bool honor_generation)
 {
 struct ask_flow *f;
 u32 hw_id;
@@ -403,6 +615,21 @@ f = rhashtable_lookup_fast(&t->rht, &cookie, ask_flow_rht_params);
 if (!f) {
 rcu_read_unlock();
 return -ENOENT;
+}
+/*
+ * T-M6-A3: generation-bounded remove. A DESTROY (or worker) that
+ * carries an OLDER generation than the flow currently occupying this
+ * cookie must be a no-op — the cookie was recycled and now owns a newer
+ * flow that this stale caller must not tear down (CR-004 / R1, R5).
+ * honor_generation==false (ask_flow_remove) keeps the unconditional
+ * behaviour for administrative flush / teardown / tests.
+ */
+if (honor_generation && generation != 0 &&
+    f->generation > generation) {
+rcu_read_unlock();
+pr_info_ratelimited("ask: flow: stale DESTROY cookie=0x%llx gen=%u < live gen=%u — ignored\n",
+    cookie, generation, f->generation);
+return -ESTALE;
 }
 /*
  * Snapshot hw_flow_id + hw_backed BEFORE the rht unlink so we can
@@ -458,7 +685,19 @@ atomic_dec(&t->num_flows);
 call_rcu(&f->rcu, ask_flow_free_rcu);
 return 0;
 }
+
+int ask_flow_remove(struct ask_flow_table *t, u64 cookie)
+{
+return ask_flow_remove_core(t, cookie, 0, false);
+}
 EXPORT_SYMBOL_GPL(ask_flow_remove);
+
+int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
+  u32 generation)
+{
+return ask_flow_remove_core(t, cookie, generation, true);
+}
+EXPORT_SYMBOL_GPL(ask_flow_remove_owned);
 
 /* -------------------------------------------------------------------------
  * Stats

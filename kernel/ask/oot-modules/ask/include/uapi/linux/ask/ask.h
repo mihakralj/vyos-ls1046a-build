@@ -69,10 +69,21 @@ enum ask_genl_attr {
     ASK_ATTR_EVENT,         /* nested ask_event_attr */
     ASK_ATTR_POLICER,       /* nested ask_policer_attr */
     ASK_ATTR_PORT_ID,       /* u8, hardware port ID for engage/disengage */
+    ASK_ATTR_FAMILY_MASK,   /* u8, ASK_FAM_* bitmask on engage; absent => both */
 
     __ASK_ATTR_MAX,
 };
 #define ASK_ATTR_MAX (__ASK_ATTR_MAX - 1)
+
+/*
+ * Per-port offload family selection (ASK_ATTR_FAMILY_MASK on ASK_CMD_ENGAGE).
+ * Selects which L3 families this port admits to hardware offload. Absent on
+ * engage means both (back-compat with callers that predate the split). This
+ * is the CLI `offload ipv4` / `offload ipv6` selector; a port engaged with
+ * only ASK_FAM_V4 keeps IPv6 flows in software, and vice versa.
+ */
+#define ASK_FAM_V4  (1u << 0)
+#define ASK_FAM_V6  (1u << 1)
 
 /* ASK_ATTR_INFO nested attributes */
 enum ask_info_attr {

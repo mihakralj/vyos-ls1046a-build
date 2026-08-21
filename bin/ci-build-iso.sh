@@ -181,6 +181,36 @@ for f in "$ISO_CONTENT/live/vmlinuz" "$ISO_CONTENT/live/initrd.img"; do
   [ -s "$f" ] || { echo "FATAL: xorriso failed to extract $f from ISO"; exit 1; }
 done
 
+# ── F-217/kernel-skew assertion ───────────────────────────────────────────
+# The ISO's /live/vmlinuz MUST be byte-identical to the freshly-built
+# linux-image .deb's packaged vmlinuz. If the persistent chroot's apt install
+# was a no-op (stale kernel, same version), the ISO would ship the PREVIOUS
+# run's kernel (old module-signing keyring) against a fresh squashfs/ask.ko ->
+# "Key was rejected by service" on the board. Fail the build here instead.
+KIMG_DEB=$(find "$GITHUB_WORKSPACE/vyos-build/scripts/package-build" \
+  -maxdepth 2 -name 'linux-image-*-vyos_*_arm64.deb' 2>/dev/null | head -1)
+if [ -n "$KIMG_DEB" ]; then
+  KDEB_EXTRACT=/tmp/kimg-deb; rm -rf "$KDEB_EXTRACT"; mkdir -p "$KDEB_EXTRACT"
+  dpkg-deb -x "$KIMG_DEB" "$KDEB_EXTRACT"
+  DEB_VMLINUZ=$(find "$KDEB_EXTRACT/boot" -maxdepth 1 -name 'vmlinuz-*-vyos' 2>/dev/null | head -1)
+  if [ -n "$DEB_VMLINUZ" ]; then
+    if cmp -s "$ISO_CONTENT/live/vmlinuz" "$DEB_VMLINUZ"; then
+      echo "### F-217: ISO /live/vmlinuz matches freshly-built linux-image .deb (no kernel skew)"
+    else
+      echo "::error::ISO /live/vmlinuz does NOT match the freshly-built linux-image .deb"
+      echo "::error::(stale persistent chroot shipped an old kernel — kernel/module signing skew)"
+      echo "ISO vmlinuz: $(sha256sum "$ISO_CONTENT/live/vmlinuz" | cut -d' ' -f1)"
+      echo "deb vmlinuz: $(sha256sum "$DEB_VMLINUZ" | cut -d' ' -f1) ($KIMG_DEB)"
+      exit 1
+    fi
+  else
+    echo "::warning::F-217: no vmlinuz-*-vyos in $KIMG_DEB — skipping skew assertion"
+  fi
+else
+  echo "::warning::F-217: no linux-image-*-vyos .deb found — skipping kernel-skew assertion"
+fi
+# ──────────────────────────────────────────────────────────────────────────
+
 # Generate U-Boot boot script (boot.scr)
 mkimage -A arm64 -T script -C none -n "VyOS LS1046A USB Boot" \
   -d "$GITHUB_WORKSPACE/board/scripts/boot.cmd" "$ISO_CONTENT/boot.scr"

@@ -23,7 +23,7 @@
 #   ... disengage  (S1->S0) ...     # M1 inverse path
 #   pcd-snapshot diff               # MUST be clean (exit 0) or M1 has a leak
 #
-# THE FOUR M1 SURFACES (DUAL-DATAPLANE.md s2.2)
+# THE FIVE REVERSIBILITY SURFACES (DUAL-DATAPLANE.md s2.2 + T-M6-1)
 #   1. KeyGen schemes  — RSS hash (S0) vs AC_CC dispatch (S1).  Read via the
 #      FMan KeyGen indirect Action Register (KG+0x1FC / window KG+0x100); the
 #      same READ op the in-tree fman_keygen driver uses.  32 schemes x 24 words.
@@ -39,6 +39,10 @@
 #   4. CC tree / FM_CTL params-page — the static-tree MURAM region
 #      (0x5AC00..0x5AE00); the params page at +0x5AD80 carries the
 #      FmPortSetFESupport words (+0x54/+0x58) that must zero on teardown.
+#   5. Parser HWP LCV window (per RX port, HWP+0x800, 16x pmda[].lcv) — the
+#      T-M6-1 IPv6-dispatch split sets slots 5/6 to distinct bits and zeroes
+#      the rest; every slot MUST return to the 0xffffffff mainline default on
+#      disengage or the parser is left split (a Phase-3 reversibility leak).
 #
 # SAFETY
 #   - Register reads are non-destructive.  The KeyGen scheme read writes the KG
@@ -90,6 +94,17 @@ BMI_RFPNE = 0x28               # next-engine (RSS-KeyGen at S0 / PRE_CC at S1)
 BMI_RCCB = 0x34                # CC-root MURAM base
 # RX BMI port ids on the Mono Gateway: 6x1G (0x08..0x0d) + 2x10G (0x10,0x11).
 RX_PORT_IDS = [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x11]
+
+# Parser HWP per-port LCV window (T-M6-1 Phase 3 reversibility, F-205).
+# Per RX port: HWP regs at (BMI_COMMON? no) — the port register block base is
+# CCSR + port_off + HWP_PORT_REGS_OFFSET(0x800). port_off = pid*0x1000 relative
+# to BMI_COMMON (matches the RX BMI page base used below). pmda[i] = {ssa@+0,
+# lcv@+4}, 8-byte stride, 16 slots. Mainline default lcv = 0xffffffff on every
+# slot; the Phase-3 v6 arm splits slots 5 (IPv4) / 6 (IPv6) and zeroes the rest,
+# so the LCV window MUST return to all-0xffffffff after disengage or S1->S0 left
+# the parser split (a reversibility leak this diff now catches).
+HWP_PORT_REGS_OFFSET = 0x800
+HWP_HXS_COUNT = 16
 
 # Static CC tree / FM_CTL params-page MURAM region (0098/0105/0116 substrate).
 CC_REGION_OFF = 0x5AC00
@@ -266,6 +281,16 @@ def capture(mem, with_kg=True):
                                for i in range(BMI_CFG_WORDS)]
     snap["bmi"] = bmi
 
+    # Parser HWP LCV window per RX port (F-205 / Phase-3 reversibility). Port
+    # register block base == the BMI per-port base; HWP is at +0x800. Capture
+    # only the 16 lcv registers (pmda[i].lcv @ HWP + i*8 + 4).
+    hwp = {}
+    for pid in RX_PORT_IDS:
+        hwp_base = FMAN_BASE + BMI_COMMON + pid * 0x1000 + HWP_PORT_REGS_OFFSET
+        hwp["0x%02x" % pid] = [hx(mem.rd(hwp_base + i * 8 + 4))
+                               for i in range(HWP_HXS_COUNT)]
+    snap["hwp_lcv"] = hwp
+
     cc = [mem.rd(FMAN_BASE + CC_REGION_OFF + 4 * i)
           for i in range(CC_REGION_WORDS)]
     snap["muram"] = {
@@ -345,6 +370,20 @@ def diff(old, new):
                         lbl = "+0x%02x" % off
                     deltas.append(("fail", "BMI port[%s] %s: %s -> %s"
                                    % (pid, lbl, a, b)))
+
+    # --- Parser HWP LCV window (F-205 / Phase-3 reversibility) ---
+    # Pure config: any change between S0 and a restored S0 is a leak (the v6
+    # arm split slots 5/6 and zeroed the rest; disengage must restore all
+    # 0xffffffff). No volatile fields here.
+    ol, nl = old.get("hwp_lcv", {}), new.get("hwp_lcv", {})
+    for pid in sorted(set(ol) | set(nl)):
+        ow, nw = ol.get(pid, []), nl.get(pid, [])
+        if ow != nw:
+            for i, (a, b) in enumerate(zip(ow, nw)):
+                if a != b:
+                    slot = {5: "(IPv4)", 6: "(IPv6)"}.get(i, "")
+                    deltas.append(("fail", "parser LCV port[%s] pmda[%d]%s: "
+                                   "%s -> %s" % (pid, i, slot, a, b)))
 
     # --- CC tree / params-page MURAM region (item 4) ---
     occ = old.get("muram", {}).get("cc_region", {}).get("w", [])

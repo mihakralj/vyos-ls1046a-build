@@ -22,7 +22,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PATCH_DIR="$REPO_ROOT/kernel/common/patches/board"
 SERIES="$PATCH_DIR/series"
-KERNEL_BRANCH="vyos-6.18.38-dpaa1"
+# Resolve the kernel version from the project's single source of truth rather
+# than hardcoding it (the pin moved 6.18.38 → 6.18.44; a hardcoded branch name
+# silently bootstrapped/verified the wrong version — 2026-08-18).
+if [ -z "${KERNEL_VERSION:-}" ]; then
+    _kv="$(bash "$REPO_ROOT/kernel/common/scripts/sync-kernel-version.sh" 2>/dev/null \
+            | sed -n 's/^KERNEL_VERSION=//p' | head -1)"
+    KERNEL_VERSION="${_kv:-6.18.44}"
+fi
+KERNEL_BRANCH="vyos-${KERNEL_VERSION}-dpaa1"
+KERNEL_TAG="v${KERNEL_VERSION}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -40,28 +49,59 @@ if git rev-parse --verify "$KERNEL_BRANCH" >/dev/null 2>&1; then
     exit 0
 fi
 
-echo "### Bootstrapping canonical branch: $KERNEL_BRANCH"
+echo "### Bootstrapping canonical branch: $KERNEL_BRANCH (base $KERNEL_TAG)"
 
 # Initialize git if not already a repo
 if [ ! -d .git ]; then
     git init -q
     git config user.email "canonical@ls1046a-build"
     git config user.name "LS1046A Canonical"
+    git add -A
+    git commit -q -m "kernel pristine ($KERNEL_TAG base)" --allow-empty
+    git tag -f "$KERNEL_TAG" HEAD
+    git branch -f "$KERNEL_BRANCH" HEAD
+    git checkout -q "$KERNEL_BRANCH"
+else
+    # Existing repo (e.g. persistent clone at the pristine tag): base the
+    # canonical branch on the pristine tag so patches apply onto clean source.
+    # WITHOUT this explicit checkout -b the loop would commit onto whatever
+    # ref happens to be current (bug: silently built no branch on a fresh
+    # git repo — 2026-08-18).
+    if git rev-parse --verify "$KERNEL_TAG" >/dev/null 2>&1; then
+        git checkout -q -b "$KERNEL_BRANCH" "$KERNEL_TAG"
+    else
+        # No tag available — commit whatever pristine state is present and
+        # branch from it (dev-build expanded tree path).
+        git add -A
+        git commit -q -m "kernel pristine ($KERNEL_TAG base)" --allow-empty
+        git checkout -q -b "$KERNEL_BRANCH" HEAD
+    fi
 fi
 
-# Commit pristine state as base
-echo "### Committing pristine kernel source..."
-git add -A
-git commit -q -m "kernel pristine (v6.18.38 base)" --allow-empty || true
-
-# Apply each patch from the series
+# Apply each patch from the series. Skip list mirrors the series' own
+# '# SKIP <name>' ledger; 0150 is the permanent placeholder skip.
 SKIP_LIST="0150-fman-pcd-fe-engage-api"
 PATCH_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
 
+# Carry the series' per-patch metadata comment (the line immediately above a
+# patch filename: '# Upstream-Status: … | Risk-Tier: …') into commit trailers.
+# kernel-roundtrip.sh's exporter reads Patch-Name / Upstream-Status / Risk-Tier
+# trailers to reproduce the exact working filenames + series metadata, so the
+# round-trip identity gate can only go green when these trailers are present.
+pending_status=""; pending_tier=""
+
 while IFS= read -r line; do
-    # Skip comments and blanks
-    [[ "$line" =~ ^# ]] && continue
-    [ -z "$line" ] && continue
+    # Capture a metadata comment for the NEXT patch line, then continue.
+    if [[ "$line" =~ ^# ]]; then
+        if [[ "$line" =~ Upstream-Status:[[:space:]]*([^|]+) ]]; then
+            pending_status="$(echo "${BASH_REMATCH[1]}" | sed 's/[[:space:]]*$//')"
+        fi
+        if [[ "$line" =~ Risk-Tier:[[:space:]]*([A-Za-z0-9]+) ]]; then
+            pending_tier="${BASH_REMATCH[1]}"
+        fi
+        continue
+    fi
+    [ -z "$line" ] && { pending_status=""; pending_tier=""; continue; }
 
     pname="$line"
     ppath="$PATCH_DIR/$pname"
@@ -74,15 +114,26 @@ while IFS= read -r line; do
     if [ $skip -eq 1 ]; then
         echo "SKIP: $pname"
         SKIP_COUNT=$((SKIP_COUNT + 1))
+        pending_status=""; pending_tier=""
         continue
     fi
 
-    [ ! -f "$ppath" ] && { echo "MISSING: $pname"; FAIL_COUNT=$((FAIL_COUNT + 1)); continue; }
+    if [ ! -f "$ppath" ]; then
+        echo "MISSING: $pname"; FAIL_COUNT=$((FAIL_COUNT + 1))
+        pending_status=""; pending_tier=""
+        continue
+    fi
+
+    # Build commit message with identity + metadata trailers.
+    commit_msg="applied: $pname"$'\n\n'"Patch-Name: $pname"
+    [ -n "$pending_status" ] && commit_msg="$commit_msg"$'\n'"Upstream-Status: $pending_status"
+    [ -n "$pending_tier" ]   && commit_msg="$commit_msg"$'\n'"Risk-Tier: $pending_tier"
+    pending_status=""; pending_tier=""
 
     echo "APPLY: $pname"
     if git apply --3way --whitespace=nowarn "$ppath" 2>/dev/null; then
         git add -A
-        git commit -q -m "applied: $pname"
+        git commit -q -m "$commit_msg"
         PATCH_COUNT=$((PATCH_COUNT + 1))
     else
         echo "  FAILED: $pname (context drift)"

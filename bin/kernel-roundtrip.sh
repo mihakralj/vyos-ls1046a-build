@@ -27,7 +27,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PATCH_DIR="$REPO_ROOT/kernel/common/patches/board"
 SERIES="$PATCH_DIR/series"
-KERNEL_VERSION="${KERNEL_VERSION:-6.18.38}"
+# Resolve the kernel version from the project's single source of truth
+# (sync-kernel-version.sh → defaults.toml/versions.lock) unless overridden.
+# Never hardcode a stale version here — the pin moved 6.18.38 → 6.18.44 and
+# left this tool pointing at a nonexistent branch (2026-08-18).
+if [ -z "${KERNEL_VERSION:-}" ]; then
+    _kv="$(bash "$REPO_ROOT/kernel/common/scripts/sync-kernel-version.sh" 2>/dev/null \
+            | sed -n 's/^KERNEL_VERSION=//p' | head -1)"
+    KERNEL_VERSION="${_kv:-6.18.44}"
+fi
 KERNEL_BRANCH="vyos-${KERNEL_VERSION}-dpaa1"
 PATCH_NS_BLACKLIST="^000[13]-"  # protect vyos-build's own patches
 
@@ -79,7 +87,12 @@ cmd_export() {
     local count=0
     for f in $(ls "$tmp"/*.patch | sort); do
         local patch_name
-        patch_name=$(git -C "$KSRC" log --format="%(trailers:key=Patch-Name,valueonly)" -1 "$(head -1 "$f" | sed 's/^From //;s/ .*//')" 2>/dev/null) || true
+        # --zero-commit deliberately writes an all-zero From SHA, so looking
+        # trailers up via `git log <From-SHA>` can NEVER work.  Parse the
+        # trailers directly from the format-patch commit-message body instead.
+        # This latent bug made every export fall back to numbered Subject-based
+        # filenames despite correct Patch-Name trailers (2026-08-18).
+        patch_name=$(sed -n 's/^Patch-Name:[[:space:]]*//p' "$f" | head -1)
         if [ -z "$patch_name" ]; then
             # Fallback: derive from Subject or use existing filename
             patch_name="$(basename "$f")"
@@ -90,12 +103,10 @@ cmd_export() {
             die "Exported patch name '$patch_name' collides with protected namespace ($PATCH_NS_BLACKLIST). Add a Patch-Name trailer to this commit."
         fi
 
-        # Collect metadata from commit trailers for series file
+        # Collect metadata from commit-message trailers for series file.
         local upstream_status risk_tier
-        upstream_status=$(git -C "$KSRC" log --format="%(trailers:key=Upstream-Status,valueonly)" -1 \
-            "$(head -1 "$f" | sed 's/^From //;s/ .*//')" 2>/dev/null) || true
-        risk_tier=$(git -C "$KSRC" log --format="%(trailers:key=Risk-Tier,valueonly)" -1 \
-            "$(head -1 "$f" | sed 's/^From //;s/ .*//')" 2>/dev/null) || true
+        upstream_status=$(sed -n 's/^Upstream-Status:[[:space:]]*//p' "$f" | head -1)
+        risk_tier=$(sed -n 's/^Risk-Tier:[[:space:]]*//p' "$f" | head -1)
 
         # Write metadata comment before the patch filename
         if [ -n "$upstream_status" ] || [ -n "$risk_tier" ]; then
@@ -134,9 +145,10 @@ cmd_verify() {
 
     # Rename using Patch-Name trailers (matching export logic for comparison)
     for f in $(ls "$tmp"/*.patch | sort); do
-        local patch_name patch_sha
-        patch_sha=$(head -1 "$f" | sed 's/^From //;s/ .*//')
-        patch_name=$(git -C "$KSRC" log --format="%(trailers:key=Patch-Name,valueonly)" -1 "$patch_sha" 2>/dev/null) || true
+        local patch_name
+        # See cmd_export: --zero-commit zeros the From SHA.  Read Patch-Name
+        # from the commit-message trailer embedded in the patch body.
+        patch_name=$(sed -n 's/^Patch-Name:[[:space:]]*//p' "$f" | head -1)
         [ -n "$patch_name" ] && mv "$f" "$tmp/$patch_name" || true
     done
 

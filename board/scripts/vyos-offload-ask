@@ -97,11 +97,27 @@ read_fe_offset() {
 # engage — PRODUCTION path via generic-netlink/YNL.
 # ---------------------------------------------------------------------------
 engage() {
-    local port_id
+    local port_id mask="${1:-3}"
     port_id="$(port_id_dec)"
-    info "engaging port $PORT via ask genl (port-id=$port_id)"
-    ynl_do engage "{\"port-id\": $port_id}"
-    info "ENGAGED"
+    # family-mask: bit0=IPv4, bit1=IPv6 (CLI offload ipv4/ipv6). Default 3=both
+    # for the back-compat bare `engage`. mask 0 is nonsensical for engage.
+    info "engaging port $PORT via ask genl (port-id=$port_id family-mask=$mask)"
+    ynl_do engage "{\"port-id\": $port_id, \"family-mask\": $mask}"
+    info "ENGAGED (family-mask=$mask)"
+}
+
+# ---------------------------------------------------------------------------
+# family <mask> — set this port's offload family selection and engage, or
+# disengage when mask==0. Driven by the VyOS CLI `offload ipv4`/`offload ipv6`
+# knobs (userspace computes the effective per-port mask each commit).
+# ---------------------------------------------------------------------------
+family() {
+    local mask="${1:-0}"
+    if [ "$mask" = "0" ]; then
+        disengage
+    else
+        engage "$mask"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -363,7 +379,8 @@ if ! grep -q "fsl,ls1046a" /proc/device-tree/compatible 2>/dev/null; then
 fi
 
 case "$VERB" in
-    engage)         engage ;;
+    engage)         engage "${1:-3}" ;;
+    family)         family "${1:-0}" ;;
     disengage)      disengage ;;
     hit-engage)     hit_engage "$@" ;;
     hit-disengage)  hit_disengage ;;

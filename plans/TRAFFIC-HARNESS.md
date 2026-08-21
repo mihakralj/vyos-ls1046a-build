@@ -1,6 +1,12 @@
 # Traffic Harness — board SFP+ acceptance-gate generator
 **Version 1.0.0** · 2026-06-09 · HADS 1.0.0
 
+> **SUPERSEDED / historical topology.** This document describes the old
+> LXC CT201/CT202 board-as-gateway harness using `iperf3`; that topology is
+> retired and the project standard is now **iperf2** on the heidi → DUT `.185`
+> → HELGA harness. Use **`plans/ASK2-PERFORMANCE-TEST-HARNESS.md`** for all
+> current performance/MTU testing. Kept for historical reference only.
+
 ---
 
 ## AI READING INSTRUCTION

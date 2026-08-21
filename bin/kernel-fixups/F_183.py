@@ -68,13 +68,18 @@ changes = 0
 
 
 def edit(path, blocks):
-    """blocks: list of (name, marker, old, new). The marker string MUST
-    appear in new -- it is the per-block idempotency token."""
+    """blocks: list of (name, marker, old, new) or
+    (name, marker, old, new, optional). The marker string MUST appear in new
+    -- it is the per-block idempotency token. optional=True blocks skip (not
+    FATAL) when their anchor is absent, for anchors that legitimately may not
+    exist depending on other fixups' state."""
     global changes
     with open(path) as f:
         src = f.read()
     file_changes = 0
-    for name, marker, old, new in blocks:
+    for blk in blocks:
+        name, marker, old, new = blk[0], blk[1], blk[2], blk[3]
+        optional = len(blk) > 4 and blk[4]
         if marker not in new:
             print(f"### F-183: FATAL: block '{name}' marker {marker} not "
                   "embedded in its replacement text -- fixup bug.")
@@ -83,6 +88,11 @@ def edit(path, blocks):
             print(f"### F-183: {name} already applied")
             continue
         if old not in src:
+            if optional:
+                print(f"### F-183: {name} anchor absent -- SKIP (optional; "
+                      "the v6 KG scheme arm it guarded is deferred to "
+                      "T-M6-1 Phase 3).")
+                continue
             print(f"### F-183: FATAL: '{name}' text not found verbatim in "
                   f"{path} -- source drifted. Refusing to guess.")
             sys.exit(1)
@@ -187,6 +197,10 @@ pkg_blocks = [
      "\t * fman_port_set_cc_base() wrote (0x00480200) stays unmodified.\n"
      "\t */\n"),
     # H. v6 slot: never inherit a stale CC graft.
+    #    OPTIONAL: this guards F-140's v6 KG scheme arm, which is DEFERRED to
+    #    T-M6-1 Phase 3 (2026-08-19). With the scheme arm removed there is no
+    #    v6 slot to zero, so this block correctly no-ops. Restore it in lockstep
+    #    when the Phase-3 dual-scheme arm is reintroduced.
     ("v6 slot cc_bits_sel zeroed",
      "F-183(v6-ccbs-zero)",
      "\t\t\t\tvs->ekfc = ekfc;\n"
@@ -195,7 +209,8 @@ pkg_blocks = [
      "\t\t\t\tvs->ekfc = ekfc;\n"
      "\t\t\t\tvs->next_engine = 2;\t/* CC (AC_CC dispatch) */\n"
      "\t\t\t\tvs->cc_bits_sel = 0;\t/* F-183(v6-ccbs-zero): v6 slot rides plain RSS; never graft CC onto it */\n"
-     "\t\t\t\tvs->hw_port_id = hw_port_id;\n"),
+     "\t\t\t\tvs->hw_port_id = hw_port_id;\n",
+     True),
 ]
 edit("drivers/net/ethernet/freescale/fman/fman_pcd_kg.c", pkg_blocks)
 

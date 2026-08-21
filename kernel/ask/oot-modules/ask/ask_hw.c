@@ -37,7 +37,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/atomic.h>               /* F-108: atomic_t hit_release_refcnt */
+#include <linux/atomic.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -58,8 +58,11 @@
 #include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
 #include <linux/in.h>                   /* IPPROTO_TCP */
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
+#include <net/addrconf.h>               /* F-219: ipv6_addr_type, in6_dev_get */
+#include <net/if_inet6.h>               /* F-219: struct inet6_dev / inet6_ifaddr */
 #include <soc/fsl/qman.h>          /* qman_alloc_fqid, qman_create_fq, QMAN_FQ_FLAG_NO_ENQUEUE */
 
+#include <uapi/linux/ask/ask.h>	/* ASK_FAM_V4 / ASK_FAM_V6 family-mask bits */
 #include "include/ask_internal.h"
 #include "include/ask_fman_caps.h"      /* fman_cc_*, fman_hm_*, struct fman */
 
@@ -79,11 +82,61 @@ struct fman *fman_bind(struct device *dev);
 struct device *fman_get_dev(struct fman *fman);
 struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
 u8 fman_port_get_id(struct fman_port *port);
-int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
 int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 /* F-199 (T-M7-2 S4): allocate a dedicated no-confirm TX FQ for the FE
  * hardware offload terminal (context_a B0V=0). Board patch exports it. */
 int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
+
+/*
+ * PER-PORT OFFLOAD FAMILY MASK (2026-08-21). IPv4 and IPv6 are selected
+ * INDEPENDENTLY PER INTERFACE via the CLI `offload ipv4` / `offload ipv6`
+ * knobs (the old single `offload ask` is removed). Userspace sends the mask
+ * with ASK_CMD_ENGAGE (ASK_ATTR_FAMILY_MASK); ask_hw_offload_set_family()
+ * records it here keyed by hardware port id. Flow admission
+ * (ask_hw_flow_family_ok) consults the TRUE INGRESS port's mask — never the
+ * interface's addresses and never engage timing — so late DHCP/SLAAC works
+ * per-flow with no re-engage, exactly like IPv4 always has.
+ *
+ * The unified 46-byte dual-lane scheme/table (F-224/F-225) is family-neutral
+ * and always programmed at engage regardless of the mask; the mask only gates
+ * which families ask.ko publishes flow records for. Index is hw_port_id
+ * (sparse 0x08..0x27, < 64). Default 0 = no family (a port not engaged, or
+ * engaged with an explicit family, is set before its first flow).
+ */
+bool fman_pcd_v6_enabled(void);	/* F-210 export; still consulted by kernel */
+static u8 ask_hw_port_family[64];
+
+void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
+{
+	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
+		WRITE_ONCE(ask_hw_port_family[hw_port_id],
+			   family_mask & (ASK_FAM_V4 | ASK_FAM_V6));
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_set_family);
+
+static u8 ask_hw_port_family_get(u8 hw_port_id)
+{
+	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
+		return READ_ONCE(ask_hw_port_family[hw_port_id]);
+	return 0;
+}
+
+/* Flow admission for the preflight + insert gates, gated by the INGRESS
+ * port's selected family mask. TCP/UDP only (both families). Returns 0 if the
+ * flow may be hardware-offloaded on @hw_port_id, -EOPNOTSUPP otherwise (SW
+ * fallback). */
+static int ask_hw_flow_family_ok(u8 hw_port_id, const struct ask_flow_key *key)
+{
+	u8 fmask = ask_hw_port_family_get(hw_port_id);
+
+	if (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP)
+		return -EOPNOTSUPP;
+	if (key->l3_proto == ASK_FLOW_L3_IPV4)
+		return (fmask & ASK_FAM_V4) ? 0 : -EOPNOTSUPP;
+	if (key->l3_proto == ASK_FLOW_L3_IPV6)
+		return (fmask & ASK_FAM_V6) ? 0 : -EOPNOTSUPP;
+	return -EOPNOTSUPP;
+}
 
 /*
  * QEF blob structural constants (PR13). The microcode version
@@ -186,15 +239,6 @@ struct ask_hw_pcd {
                 u32     fqid;
         }               noconf_tx[ASK_HW_NOCONF_SLOTS];
 
-        /*
-         * F-108: Refcount for the FMan-global silicon HIT-release bypass.
-         * fman_port_set_silicon_hit_release_all() toggles TX-confirm bypass
-         * across ALL FMan TX ports.  When multiple ports are offloaded,
-         * disengaging one must not disable the bypass for remaining engaged
-         * ports.  Increment on engage (enable hardware bypass only on
-         * 0→1 transition), decrement on disengage (disable only on 1→0).
-         */
-        atomic_t        hit_release_refcnt;
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -432,7 +476,6 @@ int ask_hw_pcd_bringup(void)
         mutex_init(&h->lock);
         h->fman = fman;
         xa_init_flags(&h->flow_cookies, XA_FLAGS_ALLOC1);
-        atomic_set(&h->hit_release_refcnt, 0);  /* F-108: init refcount */
 
         /* F-113: Create kmem_cache for flow cookie entries.
          * Falls back to kzalloc/kfree if cache creation fails (non-fatal). */
@@ -540,11 +583,8 @@ void ask_hw_pcd_teardown(void)
                         kfree(ck);
         }
 
-        /* Restore TX confirm on all ports before tearing down CC trees.
-         * F-108: Unconditional disable on teardown — module unload must
-         * always restore the S0 default regardless of refcount state. */
-        fman_port_set_silicon_hit_release_all(h->fman, false);
-        atomic_set(&h->hit_release_refcnt, 0);
+        /* 2026-08-21 LEAK FIX: global TX-confirm bypass removed (see engage);
+         * no per-port TX register state to restore on teardown. */
 
         /* Disengage any port still in the M1 coarse S1 mode-switch (0129).
          * F-109: Use kernel API fman_pcd_fe_disengage() instead of
@@ -659,33 +699,54 @@ int ask_hw_offload_engage(u8 hw_port_id)
 
         mutex_lock(&h->lock);
 
-        p = ask_hw_port_slot_get(h, hw_port_id);
-        if (!p) {
-                rc = -ENOSPC;
-                goto out_unlock;
-        }
-        if (p->offload_engaged) {
+	p = ask_hw_port_slot_get(h, hw_port_id);
+	if (!p) {
+		rc = -ENOSPC;
+		goto out_unlock;
+	}
+
+	/* Backward compatibility for in-kernel/debugfs callers that engage without
+	 * first sending ASK_ATTR_FAMILY_MASK: historical engage meant both. The
+	 * normal VyOS/genl path sets the explicit mask before calling us. */
+	if (!ask_hw_port_family_get(hw_port_id))
+		ask_hw_offload_set_family(hw_port_id, ASK_FAM_V4 | ASK_FAM_V6);
+
+	if (p->offload_engaged) {
                 rc = 0;                 /* idempotent */
                 goto out_unlock;
         }
 
-        /* F-092: Build + arm FE-VM via kernel API (not debugfs).
+	/*
+	 * Family selection is now per-port and address-independent: userspace
+	 * set this port's family mask (ASK_ATTR_FAMILY_MASK) via
+	 * ask_hw_offload_set_family() before this engage. The unified 46-byte
+	 * dual-lane scheme/table (F-224/F-225) is family-neutral and armed
+	 * unconditionally below; ask_hw_flow_family_ok() enforces the mask per
+	 * flow. The retired F-219 netdev-address auto-detect and the dead
+	 * fman_pcd_fe_set_port_v6() intent bitmap (reader forced false by F-226)
+	 * are gone — v6 now behaves exactly like v4.
+	 */
+
+	/* F-092: Build + arm FE-VM via kernel API (not debugfs).
          * fman_pcd_fe_engage() now builds the full VM chain via
          * __fman_pcd_fe_build_vm_chain(), creates the CONT_LOOKUP scaffold
          * with numKeys=1 (F-091), and arms the port for FE-VM dispatch.
          * This replaces the debugfs bridge — debugfs is for diagnostics only.
          *
-         * F-157 (2026-08-01): pass the dedicated TX FQ as the FE-VM ENQ
-         * target so the HIT disposition is DISTINCT from the CC miss-AD
-         * (kernel FQ 0x200).  This makes HIT observable for the first time:
-         * a matched frame is enqueued to the dedicated TX FQ on channel
-         * 0x801 (eth4 TX), not delivered back to the eth3 kernel RX path
-         * where it was previously indistinguishable from a miss.  Falls back
-         * to 0x200 if the dedicated FQ is not ready.
+         * F-157 (2026-08-01) historically passed h->dedicated_fq (a single
+         * module-global QMan FQ pinned to channel 0x801 = eth4/MAC10 TX) as
+         * the shared FE-VM ENQ-singleton target. That is WRONG for any ingress
+         * port other than eth4: the shared ENQ singleton feeds the record's
+         * next-FE for flows inserted WITHOUT a per-egress action.tx_fqid, so a
+         * non-eth4 ingress flow would enqueue onto eth4's channel and the dpaa
+         * driver drops the cross-port frame (E25/E26). Five-port readiness:
+         * pass 0 so the shared ENQ singleton falls back to the generic 0x200
+         * builder default (F-175), decoupling it from eth4. The production
+         * routed HIT terminal is per-egress via action.tx_fqid (F-198/F-199)
+         * and is unaffected; the CC MISS disposition is already per-ingress-port
+         * via fman_pcd_resolve_miss_fqid() inside fman_pcd_fe_engage().
          */
-        rc = fman_pcd_fe_engage(h->fman, hw_port_id,
-                                h->dedicated_fq_ready ?
-                                h->dedicated_fq.fqid : 0x200);
+        rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
         if (rc == -EBUSY) {
                 /*
                  * F-122/F-124: treat "already armed" as idempotent success.
@@ -724,8 +785,19 @@ int ask_hw_offload_engage(u8 hw_port_id)
          * reversibility contract).  Also reversed in ask_hw_pcd_teardown()
          * for module-unload cleanup as a belt-and-suspenders.
          */
-        if (atomic_inc_return(&h->hit_release_refcnt) == 1)
-                fman_port_set_silicon_hit_release_all(h->fman, true);
+        /*
+         * 2026-08-21 LEAK FIX: the global TX-confirm bypass
+         * (fman_port_set_silicon_hit_release_all) is REMOVED. It set
+         * NIA_BMI_AC_TX_RELEASE on EVERY TX port, which suppressed the
+         * TX-confirm FD for the kernel's confirmed egress_fqs[] too, so any
+         * kernel-forwarded skb (software flowtable / plain forward) on those
+         * ports was never freed -> ~1.7 GB/s skbuff_head leak -> OOM. No-
+         * confirm behaviour is now provided PER-FRAME by the per-egress-port
+         * no-confirm FQ (F-198/F-199, B0V=0/EBD=1) that the HIT record's
+         * ENQUEUE_PKT targets via ask_hw_resolve_oif_fqid(); the resolver now
+         * fails closed (SW forward) rather than using a confirmed FQ, so a
+         * HIT frame never lands on a confirmed FQ. Nothing to arm here.
+         */
 
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
@@ -770,16 +842,19 @@ void ask_hw_offload_disengage(u8 hw_port_id)
          * default.  Mirrors the engage-side call at line ~598; keeps
          * `pcd-snapshot diff` byte-clean per the DUAL-DATAPLANE.md M1
          * reversibility contract.
-         * F-108: Refcount-guarded — only disable hardware bypass on the
-         * last disengage (1→0 transition).  Intermediate disengages on
-         * other ports decrement the refcount without touching hardware.
+         * 2026-08-21 LEAK FIX: global TX-confirm bypass removed (see engage);
+         * nothing to clear here.
          */
-        if (p->offload_engaged && atomic_dec_return(&h->hit_release_refcnt) == 0)
-                fman_port_set_silicon_hit_release_all(h->fman, false);
 
-        p->offload_engaged = false;
-        mutex_unlock(&h->lock);
-        ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
+	p->offload_engaged = false;
+	mutex_unlock(&h->lock);
+
+	/* Clear this port's family selection so a later flowtable callback
+	 * cannot re-admit a family the operator disabled. Re-engage sets it
+	 * again from the CLI mask. */
+	ask_hw_offload_set_family(hw_port_id, 0);
+
+	ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
 
@@ -884,6 +959,28 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h, u8 port_id
 }
 
 /*
+ * T-M6-A4: non-allocating capacity probe. Returns true if @port_id already
+ * has a slot OR a free slot exists, i.e. ask_hw_port_slot_get() would succeed.
+ * Caller holds h->lock. Pure read — no side effects, so a preflight that
+ * ultimately fails elsewhere does not consume a port slot.
+ */
+static bool ask_hw_port_slot_available(struct ask_hw_pcd *h, u8 port_id)
+{
+        unsigned int i;
+        bool have_free = false;
+
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use) {
+                        if (h->port[i].port_id == port_id)
+                                return true;
+                } else {
+                        have_free = true;
+                }
+        }
+        return have_free;
+}
+
+/*
  * Map an ASK flow netdev ifindex to its ingress BMI hwport id via the board
  * resolver chain.  Returns -ENODEV for a non-DPAA / unknown ifindex (the
  * graceful SW-fallback signal).  ASK offload flows on this single-image board
@@ -942,12 +1039,23 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 
         rc = dpaa_alloc_offload_tx_fq(dev, fqid);
         if (rc) {
-                /* Fallback: confirmed shared TX FQ (S1 behaviour). */
-                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (%d); using confirmed queue-0 FQ\n",
+                /*
+                 * FAIL CLOSED (2026-08-21 leak fix): if we cannot get a
+                 * NO-CONFIRM (B0V=0) TX FQ, we MUST NOT fall back to the
+                 * confirmed queue-0 FQ. Since the global TX-confirm bypass
+                 * (F-108) is removed, an FMan-HIT frame on a confirmed FQ
+                 * would generate a TX-confirm FD that the kernel would
+                 * confirm-process as a bogus skb. Returning an error here
+                 * makes the caller keep the flow in SOFTWARE forwarding
+                 * (whose skbs ARE freed by the normal TX confirm), instead
+                 * of hardware-offloading onto a confirmed FQ. Correctness
+                 * over speed; on this board (<=5 dpaa netdevs) the per-port
+                 * no-confirm FQ alloc does not realistically fail.
+                 */
+                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (%d); NOT offloading (SW forward)\n",
                             ifindex, rc);
-                rc = dpaa_get_tx_fqid(dev, 0, fqid);
                 dev_put(dev);
-                return rc ? -ENODEV : 0;
+                return rc ? rc : -ENODEV;
         }
 
         if (h && h->noconf_tx[slot].fqid == 0) {
@@ -963,6 +1071,74 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
         dev_put(dev);
         return 0;
 }
+
+int ask_hw_flow_preflight(const struct ask_flow_key *key,
+                          u32 oif, u32 action_flags,
+                          enum ask_hw_dir dir)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        u32 tx_fqid = 0;
+        u8  port_id = 0;
+        int rc;
+
+        (void)dir;
+
+        if (!key)
+                return -EINVAL;
+
+        /* No HW backing -> caller keeps the flow in software. */
+        if (!h)
+                return -ENODEV;
+
+        /*
+         * T-M6-A4: resource-class gate. The plain IPv4/IPv6 unicast HW path
+         * consumes exactly one DDR ehash record + one cookie + a pre-existing
+         * per-egress TX FQ; it needs NO per-flow MURAM, policer, or CAAM slot.
+         * Any action that WOULD require an unprovisioned resource class must
+         * fail to software here, before publication, rather than partially
+         * program silicon. NAT/PAT/VLAN are already rejected upstream by the
+         * A2 strict action parser, but re-assert defensively: if action_flags
+         * ever carries a class we cannot back, refuse.
+         */
+        if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT |
+                            ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP |
+                            ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
+                return -EOPNOTSUPP;
+
+	/* Ingress hwport must resolve first (it owns the classifier AND its
+	 * per-port family mask decides v4/v6 admission). Resolve BEFORE the
+	 * family gate so admission is by TRUE INGRESS PORT, address-independent. */
+	rc = ask_hw_resolve_iif_port(key->iif, &port_id);
+	if (rc)
+		return rc;
+
+	/* Per-port family/proto gate: TCP/UDP, and the ingress port must have
+	 * this L3 family selected (CLI offload ipv4 / offload ipv6). Otherwise
+	 * fall back to software. */
+	rc = ask_hw_flow_family_ok(port_id, key);
+	if (rc)
+		return rc;
+
+	/* Egress L2 header not yet resolved -> defer (SW carries it). */
+	if (is_zero_ether_addr(key->next_hop_mac) ||
+	    is_zero_ether_addr(key->egress_mac))
+		return -EAGAIN;
+
+	/* Egress forward FQ must exist before we publish. */
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	if (rc)
+		return rc;
+
+        /* Port slot must be available (the CC/FE port context). Non-allocating
+         * probe: this is the -ENOSPC condition the real insert would hit, but
+         * without consuming a slot if the flow later fails to publish. */
+        mutex_lock(&h->lock);
+        rc = ask_hw_port_slot_available(h, port_id) ? 0 : -ENOSPC;
+        mutex_unlock(&h->lock);
+
+        return rc;
+}
+EXPORT_SYMBOL_GPL(ask_hw_flow_preflight);
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
                        u32 oif, u32 action_flags,
@@ -987,27 +1163,27 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         if (!h)
                 return -ENODEV;
 
-        /* Body ships v4/v6 TCP/UDP only; everything else falls back to SW. */
-        if ((key->l3_proto != ASK_FLOW_L3_IPV4 &&
-             key->l3_proto != ASK_FLOW_L3_IPV6) ||
-            (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
-                return -EOPNOTSUPP;
+	/* Ingress hwport owns the CC tree AND its per-port family mask; resolve
+	 * first, then apply the same per-port family/proto gate as preflight. */
+	rc = ask_hw_resolve_iif_port(key->iif, &port_id);
+	if (rc)
+		return rc;
 
-        /*
-         * Neighbour not yet resolved: keep the flow in SW until the egress L2
-         * header is known, then the upper layer re-inserts.
-         */
-        if (is_zero_ether_addr(key->next_hop_mac) ||
-            is_zero_ether_addr(key->egress_mac))
-                return -EAGAIN;
+	rc = ask_hw_flow_family_ok(port_id, key);
+	if (rc)
+		return rc;
 
-        /* Ingress hwport owns the CC tree; egress FQID is the forward target. */
-        rc = ask_hw_resolve_iif_port(key->iif, &port_id);
-        if (rc)
-                return rc;
-        rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
-        if (rc)
-                return rc;
+	/*
+	 * Neighbour not yet resolved: keep the flow in SW until the egress L2
+	 * header is known, then the upper layer re-inserts.
+	 */
+	if (is_zero_ether_addr(key->next_hop_mac) ||
+	    is_zero_ether_addr(key->egress_mac))
+		return -EAGAIN;
+
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	if (rc)
+		return rc;
 
         mutex_lock(&h->lock);
 
