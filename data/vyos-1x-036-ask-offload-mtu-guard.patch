@@ -18,9 +18,9 @@ index 26eb177..9ecc15d 100755
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """
      Return list of blocked options if interface is a bond member
-@@ -313,6 +317,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -315,6 +319,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
              raise ConfigError(
-                 f'Interface {ifname} does not support ASK offload (supported: eth3, eth4)'
+                 f'Interface {ifname} does not support ASK offload (supported: eth1, eth2, eth3, eth4)'
              )
 +        # ASK FMan FE forwarding is bounded to the order-1 RX buffer range on
 +        # this board. The DPAA1 RX pool is one contiguous 8 KiB order-1 page
