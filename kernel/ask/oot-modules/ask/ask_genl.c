@@ -809,8 +809,8 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	 */
 	fam_attr = info->attrs[ASK_ATTR_FAMILY_MASK];
 	fam_mask = fam_attr ? nla_get_u8(fam_attr) : (ASK_FAM_V4 | ASK_FAM_V6);
-	if (!(fam_mask & (ASK_FAM_V4 | ASK_FAM_V6)))
-		return -EINVAL;	/* engage with no family is nonsensical */
+	if (!fam_mask || (fam_mask & ~(ASK_FAM_V4 | ASK_FAM_V6)))
+		return -EINVAL;	/* engage with no/unknown family is nonsensical */
 
 	ask_hw_offload_set_family(port_id, fam_mask);
 

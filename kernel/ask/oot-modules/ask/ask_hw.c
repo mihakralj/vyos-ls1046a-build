@@ -62,6 +62,7 @@
 #include <net/if_inet6.h>               /* F-219: struct inet6_dev / inet6_ifaddr */
 #include <soc/fsl/qman.h>          /* qman_alloc_fqid, qman_create_fq, QMAN_FQ_FLAG_NO_ENQUEUE */
 
+#include <uapi/linux/ask/ask.h>	/* ASK_FAM_V4 / ASK_FAM_V6 family-mask bits */
 #include "include/ask_internal.h"
 #include "include/ask_fman_caps.h"      /* fman_cc_*, fman_hm_*, struct fman */
 
@@ -698,12 +699,19 @@ int ask_hw_offload_engage(u8 hw_port_id)
 
         mutex_lock(&h->lock);
 
-        p = ask_hw_port_slot_get(h, hw_port_id);
-        if (!p) {
-                rc = -ENOSPC;
-                goto out_unlock;
-        }
-        if (p->offload_engaged) {
+	p = ask_hw_port_slot_get(h, hw_port_id);
+	if (!p) {
+		rc = -ENOSPC;
+		goto out_unlock;
+	}
+
+	/* Backward compatibility for in-kernel/debugfs callers that engage without
+	 * first sending ASK_ATTR_FAMILY_MASK: historical engage meant both. The
+	 * normal VyOS/genl path sets the explicit mask before calling us. */
+	if (!ask_hw_port_family_get(hw_port_id))
+		ask_hw_offload_set_family(hw_port_id, ASK_FAM_V4 | ASK_FAM_V6);
+
+	if (p->offload_engaged) {
                 rc = 0;                 /* idempotent */
                 goto out_unlock;
         }
