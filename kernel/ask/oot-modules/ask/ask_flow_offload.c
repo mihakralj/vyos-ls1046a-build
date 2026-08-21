@@ -1744,6 +1744,46 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 key.iif = ingress_dev->ifindex;
         }
 
+        /*
+         * MULTI-PORT INGRESS FIX (2026-08-21): ingress_dev is the block_cb's
+         * netdev, which for an nft flowtable spanning >2 interfaces is NOT
+         * reliably the true ingress — the same cookie is delivered to EVERY
+         * device's block_cb, and the PR14r dedup keeps whichever arrived first
+         * (eth3, alphabetically). That mis-attributed every non-eth3 ingress
+         * (e.g. an eth2->eth4 flow) to eth3, so fman_pcd_fe_flow_add() keyed
+         * the record into eth3's per-port ehash table (F-220) instead of the
+         * true ingress port's table -> the true ingress port's RX classifier
+         * looked up its own (empty) table -> permanent MISS -> software forward
+         * (board .185 2026-08-21: eth2 flow, ingress=eth3, pkt_count=0).
+         *
+         * The kernel already encodes the AUTHORITATIVE true ingress in the
+         * flow rule's FLOW_DISSECTOR_KEY_META.ingress_ifindex (populated from
+         * the conntrack tuple iifidx in nf_flow_table_offload.c), which every
+         * mainline offload driver (mlx5/mtk/ocelot/nfp/...) uses. Prefer it
+         * over the block_cb dev so the record lands in the correct per-port
+         * table for ANY of the five ports. eth3/eth4 flows are unaffected
+         * (meta ingress == ingress_dev there).
+         */
+        {
+                struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+
+                if (rule && flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META)) {
+                        struct flow_match_meta mm;
+
+                        flow_rule_match_meta(rule, &mm);
+                        if (mm.key && mm.mask &&
+                            (mm.key->ingress_ifindex & mm.mask->ingress_ifindex)) {
+                                if (key.iif != mm.key->ingress_ifindex)
+                                        pr_info_ratelimited("ask: flow_offload: META iif correction key.iif %d -> %u (block dev=%s) cookie=0x%lx\n",
+                                                            key.iif,
+                                                            mm.key->ingress_ifindex,
+                                                            ingress_dev ? netdev_name(ingress_dev) : "?",
+                                                            f->cookie);
+                                key.iif = mm.key->ingress_ifindex;
+                        }
+                }
+        }
+
         rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
         if (rc) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
@@ -2004,7 +2044,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 qrc = ask_flow_pending_enqueue((u64)f->cookie, &key, oif,
                                                action_flags,
                                                egress_dev->ifindex,
-                                                ingress_dev ? ingress_dev->ifindex : 0,
+                                                /* true ingress (META-corrected), not block dev */
+                                                key.iif,
                                                 dst_ip, generation);
                 if (qrc == 0) {
                         pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
@@ -2079,10 +2120,24 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          */
         {
                 enum ask_hw_dir __dir = ASK_HW_DIR_FWD;
+                /*
+                 * MULTI-PORT INGRESS FIX (2026-08-21): resolve the ingress
+                 * hwport from the META-corrected key.iif (the true ingress),
+                 * NOT the block_cb's ingress_dev. key.port_id set below is what
+                 * fman_pcd_fe_flow_add() uses to pick the per-port ehash table
+                 * (F-220); using the block dev put an eth2 flow's record into
+                 * eth3's table -> MISS. Look up the true-ingress netdev by
+                 * key.iif (ref held only within this scope, released before any
+                 * exit). Falls back to ingress_dev if the lookup fails.
+                 */
+                struct net_device *true_iif_dev =
+                        key.iif ? dev_get_by_index(&init_net, key.iif) : NULL;
+                struct net_device *bind_dev = true_iif_dev ? true_iif_dev
+                                                           : ingress_dev;
 
-                if (ingress_dev) {
+                if (bind_dev) {
                         u8 pid;
-                        int prc = ask_dpaa_get_fman_port_id(ingress_dev, &pid);
+                        int prc = ask_dpaa_get_fman_port_id(bind_dev, &pid);
 
                         if (prc == 0) {
                                 u8 expected = 0xff;
@@ -2128,23 +2183,27 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                 __dir = (pid == winner) ? ASK_HW_DIR_FWD
                                                         : ASK_HW_DIR_REV;
 
-                                prc = ask_hw_port_bind(pid, __dir, ingress_dev);
+                                prc = ask_hw_port_bind(pid, __dir, bind_dev);
                                 if (prc) {
                                         if (prc == -EBUSY)
                                                 ask_pr_dbg("flow_offload: REPLACE %s pid=%u dir=%u: pipeline busy, SW fallback\n",
-                                                           netdev_name(ingress_dev),
+                                                           netdev_name(bind_dev),
                                                            pid, __dir);
                                         else if (prc != -ENODEV)
                                                 ask_pr_warn("flow_offload: REPLACE %s (pid %u dir %u) port-bind failed: %d\n",
-                                                            netdev_name(ingress_dev),
+                                                            netdev_name(bind_dev),
                                                             pid, __dir, prc);
+                                        if (true_iif_dev)
+                                                dev_put(true_iif_dev);
                                         return prc;
                                 }
                         } else if (prc != -ENODEV && prc != -ERANGE) {
                                 ask_pr_dbg("flow_offload: REPLACE port-id resolve(%s) failed: %d\n",
-                                           netdev_name(ingress_dev), prc);
+                                           netdev_name(bind_dev), prc);
                         }
                 }
+                if (true_iif_dev)
+                        dev_put(true_iif_dev);
 
                 rc = ask_flow_insert_owned(t, (u64)f->cookie, &key, oif,
                                            action_flags, __dir, generation,
