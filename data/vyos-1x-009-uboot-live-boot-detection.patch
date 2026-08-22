@@ -1,22 +1,26 @@
-From 7e63a6f637b1966d54a5fce1e9fb6904aa930bed Mon Sep 17 00:00:00 2001
+From cf4d6241a498aac7b53f7e5bf4b642ae50ac16a4 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 03:56:42 +0000
+Date: Sat, 22 Aug 2026 14:16:07 +0000
 Subject: [PATCH] temp: vyos-1x-009-uboot-live-boot-detection.patch
 
 ---
- python/vyos/system/image.py | 3 +++
- 1 file changed, 3 insertions(+)
+ python/vyos/system/image.py | 7 +++++++
+ 1 file changed, 7 insertions(+)
 
 diff --git a/python/vyos/system/image.py b/python/vyos/system/image.py
-index ed8a96f..d1868fe 100644
+index 02f2303..f191d9d 100644
 --- a/python/vyos/system/image.py
 +++ b/python/vyos/system/image.py
-@@ -265,6 +265,9 @@ def is_live_boot() -> bool:
+@@ -270,6 +270,13 @@ def is_live_boot() -> bool:
          boot_type: str = running_image_result.groupdict().get('boot_type', '')
          if boot_type == 'boot':
              return False
-+    # U-Boot boards lack BOOT_IMAGE= (GRUB-specific). Check vyos-union= as fallback.
-+    if 'vyos-union=/boot/' in cmdline:
++    # LS1046A U-Boot boards lack BOOT_IMAGE= (it is GRUB-specific), so the
++    # check above never matches on an installed eMMC image and is_live_boot()
++    # would wrongly return True, blocking `add system image`. Installed U-Boot
++    # images carry vyos-union=/boot/<image> instead; treat that as not-live.
++    vyos_union: str = get_kernel_boot_arg('vyos-union') or ''
++    if vyos_union.startswith('/boot/'):
 +        return False
      return True
  
