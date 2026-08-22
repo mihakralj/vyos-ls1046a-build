@@ -137,7 +137,7 @@ jobs:
                     { name: "Direct upgrade command:", value: $upgrade, inline: false },
                     { name: "📝 Release notes:", value: $notes,   inline: true },
                     { name: "🛠️ Install guide:", value: $install, inline: true },
-                    { name: "🐙 Code review:",  value: $repo,    inline: true }
+                    { name: "🐙 Source code:",  value: $repo,    inline: true }
                   ],
                   footer: { text: $footer }
                 }]
