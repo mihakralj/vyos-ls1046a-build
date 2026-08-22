@@ -743,12 +743,70 @@ KUNIT_EXPECT_EQ(test, rc, -E2BIG);
 KUNIT_EXPECT_EQ(test, (int)in.n_actions, ASK_INTENT_MAX_ACTIONS);
 }
 
+/*
+ * T-M6-7.0: ask_intent_add_nat() stores the translated value in the right
+ * union arm per action type and validates address length.
+ */
+static void ask_flow_offload_test_intent_add_nat(struct kunit *test)
+{
+struct ask_flow_intent in = { .owner = 0xCAFE70 };
+u8 v4[4] = { 203, 0, 113, 7 };
+u8 v6[16] = { 0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,1 };
+int rc;
+
+/* SNAT v4 address lands in nat.addr[0..3]. */
+rc = ask_intent_add_nat(&in, ASK_ACTION_NAT_SRC, v4, 4, 0);
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_EQ(test, in.actions[0].type, ASK_ACTION_NAT_SRC);
+KUNIT_EXPECT_EQ(test, memcmp(in.actions[0].nat.addr, v4, 4), 0);
+
+/* DNAT v6 address lands in nat.addr[0..15]. */
+rc = ask_intent_add_nat(&in, ASK_ACTION_NAT_DST, v6, 16, 0);
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_EQ(test, memcmp(in.actions[1].nat.addr, v6, 16), 0);
+
+/* NAPT sport lands in nat.port. */
+rc = ask_intent_add_nat(&in, ASK_ACTION_NAPT_SPORT, NULL, 0, htons(5060));
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_EQ(test, in.actions[2].nat.port, htons(5060));
+
+/* Bad address length is rejected. */
+rc = ask_intent_add_nat(&in, ASK_ACTION_NAT_SRC, v4, 5, 0);
+KUNIT_EXPECT_EQ(test, rc, -EINVAL);
+/* Non-NAT type via the NAT helper is rejected. */
+rc = ask_intent_add_nat(&in, ASK_ACTION_REDIRECT, NULL, 0, 0);
+KUNIT_EXPECT_EQ(test, rc, -EINVAL);
+}
+
+/*
+ * T-M6-7.0: a NAT action lowers to -EOPNOTSUPP (fails closed to SW) until the
+ * FE-VM NAT opcode compiler (T-M6-7.1) lands. A valid REDIRECT is present, so
+ * this proves NAT specifically — not a missing egress — forces SW fallback.
+ */
+static void ask_flow_offload_test_intent_lower_nat_fails_closed(struct kunit *test)
+{
+struct ask_flow_intent in = { .owner = 0xABCF };
+u8 v4[4] = { 198, 51, 100, 9 };
+u32 oif = 0, flags = 0xdeadbeef;
+int rc;
+
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_REDIRECT, 42), 0);
+KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_TTL_DEC, 0), 0);
+KUNIT_ASSERT_EQ(test,
+	ask_intent_add_nat(&in, ASK_ACTION_NAT_SRC, v4, 4, 0), 0);
+
+rc = ask_intent_lower(&in, &oif, &flags);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
 KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
 KUNIT_CASE(ask_flow_offload_test_fe_key_v6_wire_order),
 KUNIT_CASE(ask_flow_offload_test_intent_lower_ipv4),
 KUNIT_CASE(ask_flow_offload_test_intent_lower_no_redirect),
 KUNIT_CASE(ask_flow_offload_test_intent_add_overflow),
+KUNIT_CASE(ask_flow_offload_test_intent_add_nat),
+KUNIT_CASE(ask_flow_offload_test_intent_lower_nat_fails_closed),
 KUNIT_CASE(ask_flow_offload_test_replace_minimal),
 KUNIT_CASE(ask_flow_offload_test_destroy_round_trip),
 KUNIT_CASE(ask_flow_offload_test_double_destroy_swallowed),
