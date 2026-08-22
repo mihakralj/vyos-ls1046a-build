@@ -716,6 +716,43 @@ u64_stats_update_end(&f->stats.syncp);
 }
 EXPORT_SYMBOL_GPL(ask_flow_update_stats);
 
+/*
+ * T-M8-3: store the FMan FE ehash record's ABSOLUTE packet_count/packet_bytes
+ * for dump-flows/get-flow, while also computing the DELTA that the nft
+ * flowtable's flow_stats_update() (which accumulates) expects.
+ *
+ * Silicon totals are monotonic within one record lifetime. A per-key record
+ * is destroyed and re-created on DESTROY->REPLACE, resetting the counters; if
+ * the new absolute is below the previous baseline, report delta=current and
+ * restart the baseline (same pattern as cumulative-counter netdev drivers).
+ * last_seen_ns advances only when at least one new packet arrived.
+ */
+void ask_flow_set_hw_stats(struct ask_flow *f, u64 hw_packets, u64 hw_bytes,
+			   u64 *d_packets, u64 *d_bytes)
+{
+	u64 dp, db;
+
+	if (!f || !d_packets || !d_bytes)
+		return;
+
+	u64_stats_update_begin(&f->stats.syncp);
+	dp = hw_packets >= f->hw_reported_packets ?
+		hw_packets - f->hw_reported_packets : hw_packets;
+	db = hw_bytes >= f->hw_reported_bytes ?
+		hw_bytes - f->hw_reported_bytes : hw_bytes;
+	f->hw_reported_packets = hw_packets;
+	f->hw_reported_bytes   = hw_bytes;
+	if (dp)
+		f->stats.last_seen_ns = ktime_get_ns();
+	f->stats.packets = hw_packets;
+	f->stats.bytes   = hw_bytes;
+	u64_stats_update_end(&f->stats.syncp);
+
+	*d_packets = dp;
+	*d_bytes   = db;
+}
+EXPORT_SYMBOL_GPL(ask_flow_set_hw_stats);
+
 int ask_flow_get_stats(struct ask_flow_table *t, u64 cookie,
        u64 *packets, u64 *bytes, u64 *last_seen_ns)
 {
