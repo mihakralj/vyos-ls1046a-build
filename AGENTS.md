@@ -25,9 +25,8 @@ qdrant MCP is authoritative persistent memory for diagnoses, root causes, failed
 ## S2. Documentation Style
 
 - Mermaid, ¬ASCII art, for all .md diagrams (```` ```mermaid ```` fences).
-- HADS 1.0.0 for all `specs/`, `plans/`, `arch/`, code-documenting `README.md`: `**Version … · HADS 1.0.0**` header, `## AI READING INSTRUCTION` block, numbered `##` sections, paragraphs tagged `**[SPEC]**` (facts/reqs/contracts), `**[NOTE]**` (rationale/history), `**[BUG] Title**` (symptom+cause+fix, all 3), `**[?]**` (unverified). Use `hads-convert` skill. Convert IN PLACE (precedent: `plans/UBOOT.md`, `plans/VPP.md`), on-touch w/ normal edits, ¬bulk pass.
-- Data-loss guard: narrative → `[NOTE]` intact; only verifiable facts → `[SPEC]`. NEVER condense correctness-critical prose (register layouts, MURAM offsets, reversibility contract, risk registers, M3-3b/FE-VM findings). Preserve every command, address, register value, patch number, date, qdrant anchor verbatim. Dropped fact = regression.
-- Exceptions (stay prose): `README.md`, `INSTALL.md` (human entry, Bryson voice), `vyos_sshkey.md` (credential), `arch/fman-microcode-210-programming-reference.md` (deliberately de-HADS'd 2026-08-07 at user request — human-readable reference w/ TOC, unwrapped prose, `Bug —`/`Open question —` lead-ins; do NOT re-convert), `plans/archive/**` (frozen; convert only if un-archived), `AGENTS.md`.
+- Write `specs/`, `plans/`, `arch/`, and code-documenting `README.md` in normal human-readable technical prose. HADS is retired — do NOT add HADS headers/tags (`Version … · HADS`, `## AI READING INSTRUCTION`, `[SPEC]`/`[NOTE]`/`[BUG]`/`[?]`) and do NOT run the `hads-convert` skill. Existing HADS-formatted docs may stay as-is; only de-HADS a doc when you are already editing it and the user asks, converting narrative back to plain prose.
+- Preserve correctness-critical detail verbatim regardless of format: register layouts, MURAM offsets, the reversibility contract, risk registers, and every command, address, register value, patch number, date, and qdrant anchor. Dropped fact = regression.
 
 ## S3. ASK2 (rewrite-in-progress) — single-image runtime offload
 
