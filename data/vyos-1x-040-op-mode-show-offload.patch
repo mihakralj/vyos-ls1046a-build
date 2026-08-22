@@ -1,12 +1,12 @@
-From 86d16a0c158d07fff97d46b4176e4b7b61d4e15e Mon Sep 17 00:00:00 2001
+From d813d4bf927ead9997a070e60dcfc43d9a34a560 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Sat, 22 Aug 2026 15:24:29 +0000
+Date: Sat, 22 Aug 2026 15:34:37 +0000
 Subject: [PATCH] temp: vyos-1x-040-op-mode-show-offload.patch
 
 ---
  op-mode-definitions/show-offload.xml.in |  26 +++
- src/op_mode/show_offload.py             | 234 ++++++++++++++++++++++++
- 2 files changed, 260 insertions(+)
+ src/op_mode/show_offload.py             | 238 ++++++++++++++++++++++++
+ 2 files changed, 264 insertions(+)
  create mode 100644 op-mode-definitions/show-offload.xml.in
  create mode 100755 src/op_mode/show_offload.py
 
@@ -45,7 +45,7 @@ diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
 new file mode 100755
 --- /dev/null
 +++ b/src/op_mode/show_offload.py
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,238 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -107,6 +107,8 @@ new file mode 100755
 +    'eth3': 0x10,   # left SFP+  (MAC9)
 +    'eth4': 0x11,   # right SFP+ (MAC10)
 +}
++# Reverse map (hw port id -> interface name) for ordered per-port listing.
++_HW_PORT_NAME = {v: k for k, v in HW_PORT.items()}
 +
 +# IANA L4 protocol number -> display name.
 +_L4 = {socket.IPPROTO_TCP: 'tcp', socket.IPPROTO_UDP: 'udp',
@@ -141,6 +143,15 @@ new file mode 100755
 +    if len(raw) >= 4:
 +        return str(ip_address(raw[:4]))
 +    return raw.hex()
++
++
++def _fmt_endpoint(val, port):
++    """Format an ip:port endpoint. IPv6 is bracketed ([addr]:port) so the
++    address/port boundary is unambiguous; IPv4 uses plain addr:port."""
++    ip = _fmt_ip(val)
++    if port is None:
++        port = '-'
++    return f'[{ip}]:{port}' if ':' in ip else f'{ip}:{port}'
 +
 +
 +def _armed_hw_ports():
@@ -191,42 +202,38 @@ new file mode 100755
 +    armed = _armed_hw_ports()
 +
 +    rows = []
-+    any_offload = False
-+    for ifname in sorted(HW_PORT):
-+        # Show every physical DPAA port present in sysfs, even when it has no
-+        # VyOS interface stanza/offload configured. This makes the output a
-+        # complete five-port inventory instead of hiding inactive ports.
-+        try:
-+            with open(f'/sys/class/net/{ifname}/ifindex'):
-+                pass
-+        except OSError:
-+            continue
++    for hw_port in sorted(HW_PORT.values()):
++        ifname = _HW_PORT_NAME[hw_port]
 +        base = ['interfaces', 'ethernet', ifname]
-+        hw_port = HW_PORT[ifname]
-+        v4 = conf.exists(base + ['offload', 'ipv4'])
-+        v6 = conf.exists(base + ['offload', 'ipv6'])
-+        if v4 or v6:
-+            any_offload = True
-+        # A port is "active" when the FE-VM is armed for it in silicon.
-+        active = hw_port in armed
++
++        # Build the list of active offload types for this port. Extensible:
++        # add future categories (nat, ipsec, vlan, policer, ...) here as they
++        # become hardware-offloaded.
++        offloads = []
++        if conf.exists(base + ['offload', 'ipv4']):
++            offloads.append('ipv4')
++        if conf.exists(base + ['offload', 'ipv6']):
++            offloads.append('ipv6')
++        if conf.exists(base + ['ingress-policer']):
++            offloads.append('policer')
++
++        # Distinguish configured-but-not-armed from live in silicon: append a
++        # marker rather than hiding it, so an operator sees inconsistent state.
++        if offloads and hw_port not in armed:
++            offloads = [f'{o}*' for o in offloads]
++
 +        rows.append([
-+            ifname,
 +            f'0x{hw_port:02x}',
-+            'yes' if v4 else '-',
-+            'yes' if v6 else '-',
-+            'engaged' if active else ('configured' if (v4 or v6) else '-'),
++            ifname,
++            ', '.join(offloads) if offloads else 'none',
 +        ])
 +
-+    if not rows:
-+        print('No DPAA ethernet interfaces found')
-+        return 0
-+
-+    headers = ['Interface', 'HW-Port', 'IPv4', 'IPv6', 'State']
++    headers = ['HW-Port', 'Interface', 'Offloads']
 +    print('ASK2 hardware routing offload (NXP LS1046A FMan FE-VM)\n')
 +    print(tabulate(rows, headers=headers, tablefmt='simple'))
-+    if not any_offload:
-+        print('\nNo interface has hardware offload configured '
-+              "(set interfaces ethernet eth<n> offload ipv4|ipv6).")
++    if any('*' in r[2] for r in rows):
++        print('\n* configured but not currently engaged in silicon '
++              '(e.g. link down or interface assigned to VPP).')
 +    return 0
 +
 +
@@ -237,15 +244,15 @@ new file mode 100755
 +    for f in flows:
 +        l4 = _get(f, 'l4-proto')
 +        proto = _L4.get(l4, str(l4) if l4 is not None else '-')
++        # Software-forwarded flows are NOT offloaded; label the datapath
++        # honestly as hardware vs software rather than "offload yes/no".
 +        off = _get(f, 'offloaded')
-+        offload = '?' if off is None else ('hw' if int(off) else 'sw')
++        path = '-' if off is None else ('hardware' if int(off) else 'software')
 +        rows.append([
 +            proto,
-+            f'{_fmt_ip(_get(f, "src-ip"))}:{_get(f, "sport", default="-")}',
-+            f'{_fmt_ip(_get(f, "dst-ip"))}:{_get(f, "dport", default="-")}',
-+            _get(f, 'iif', default='-'),
-+            _get(f, 'oif', default='-'),
-+            offload,
++            _fmt_endpoint(_get(f, 'src-ip'), _get(f, 'sport')),
++            _fmt_endpoint(_get(f, 'dst-ip'), _get(f, 'dport')),
++            path,
 +            _get(f, 'packets', default=0),
 +            _get(f, 'bytes', default=0),
 +        ])
@@ -254,13 +261,10 @@ new file mode 100755
 +        print('No flows tracked by ASK offload')
 +        return 0
 +
-+    n_hw = sum(1 for r in rows if r[5] == 'hw')
-+    headers = ['Proto', 'Source', 'Destination', 'IIF', 'OIF',
-+               'Offload', 'Packets', 'Bytes']
-+    print(f'ASK offload flows ({len(rows)} tracked, {n_hw} in hardware):\n')
++    n_hw = sum(1 for r in rows if r[3] == 'hardware')
++    headers = ['Proto', 'Source', 'Destination', 'Path', 'Packets', 'Bytes']
++    print(f'ASK flows ({len(rows)} total, {n_hw} in hardware):\n')
 +    print(tabulate(rows, headers=headers, tablefmt='simple'))
-+    print('\nNote: per-flow counters refresh on the periodic flow-stats poll '
-+          '(delayed); sample >=30s apart to observe growth.')
 +    return 0
 +
 +
@@ -280,6 +284,3 @@ new file mode 100755
 +
 +if __name__ == '__main__':
 +    main()
--- 
-2.39.5
-
