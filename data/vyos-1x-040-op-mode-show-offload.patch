@@ -1,14 +1,7 @@
-From d813d4bf927ead9997a070e60dcfc43d9a34a560 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Sat, 22 Aug 2026 15:34:37 +0000
+Date: Sat, 22 Aug 2026 15:55:00 +0000
 Subject: [PATCH] temp: vyos-1x-040-op-mode-show-offload.patch
-
----
- op-mode-definitions/show-offload.xml.in |  26 +++
- src/op_mode/show_offload.py             | 238 ++++++++++++++++++++++++
- 2 files changed, 264 insertions(+)
- create mode 100644 op-mode-definitions/show-offload.xml.in
- create mode 100755 src/op_mode/show_offload.py
 
 diff --git a/op-mode-definitions/show-offload.xml.in b/op-mode-definitions/show-offload.xml.in
 new file mode 100644
@@ -45,7 +38,7 @@ diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
 new file mode 100755
 --- /dev/null
 +++ b/src/op_mode/show_offload.py
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,259 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -237,34 +230,55 @@ new file mode 100755
 +    return 0
 +
 +
++_ETH_P_IP = 2048       # 0x0800
++_ETH_P_IPV6 = 34525    # 0x86DD
++
++
 +def show_flow():
-+    """All flows the FMan FE-VM has learned, across every port."""
++    """All flows the FMan FE-VM has learned, across every port.
++
++    Flows are grouped by address family (IPv4 first, then IPv6) and sorted
++    within each family so the table is stable and readable rather than
++    following the kernel's hash-random rhashtable iteration order.
++    """
 +    flows = _fetch_flows()
 +    rows = []
 +    for f in flows:
++        l3 = _get(f, 'l3-proto')
++        family = 'ipv6' if l3 == _ETH_P_IPV6 else 'ipv4'
 +        l4 = _get(f, 'l4-proto')
 +        proto = _L4.get(l4, str(l4) if l4 is not None else '-')
 +        # Software-forwarded flows are NOT offloaded; label the datapath
 +        # honestly as hardware vs software rather than "offload yes/no".
 +        off = _get(f, 'offloaded')
 +        path = '-' if off is None else ('hardware' if int(off) else 'software')
-+        rows.append([
-+            proto,
-+            _fmt_endpoint(_get(f, 'src-ip'), _get(f, 'sport')),
-+            _fmt_endpoint(_get(f, 'dst-ip'), _get(f, 'dport')),
++        # Sort key: IPv4 (0) before IPv6 (1), then proto, source, dest.
++        sort_key = (0 if family == 'ipv4' else 1,
++                    proto,
++                    _fmt_ip(_get(f, 'src-ip')),
++                    _get(f, 'sport') or 0,
++                    _fmt_ip(_get(f, 'dst-ip')),
++                    _get(f, 'dport') or 0)
++        source = _fmt_endpoint(_get(f, 'src-ip'), _get(f, 'sport'))
++        destination = _fmt_endpoint(_get(f, 'dst-ip'), _get(f, 'dport'))
++        rows.append((sort_key, [
++            f'{family}/{proto}',
++            f'{source} → {destination}',
 +            path,
 +            _get(f, 'packets', default=0),
 +            _get(f, 'bytes', default=0),
-+        ])
++        ]))
 +
 +    if not rows:
 +        print('No flows tracked by ASK offload')
 +        return 0
 +
-+    n_hw = sum(1 for r in rows if r[3] == 'hardware')
-+    headers = ['Proto', 'Source', 'Destination', 'Path', 'Packets', 'Bytes']
-+    print(f'ASK flows ({len(rows)} total, {n_hw} in hardware):\n')
-+    print(tabulate(rows, headers=headers, tablefmt='simple'))
++    rows.sort(key=lambda r: r[0])
++    data = [r[1] for r in rows]
++    n_hw = sum(1 for r in data if r[2] == 'hardware')
++    headers = ['Protocol', 'Flow', 'Path', 'Packets', 'Bytes']
++    print(f'ASK flows ({len(data)} total, {n_hw} in hardware):\n')
++    print(tabulate(data, headers=headers, tablefmt='simple'))
 +    return 0
 +
 +
