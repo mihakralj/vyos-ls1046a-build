@@ -1,12 +1,12 @@
-From 5143a70ec7fbe6b02a25866cb0b6cf463053d90f Mon Sep 17 00:00:00 2001
+From fbbb6a997a56e74455cf8b8dbacda5654b8ea577 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Sat, 22 Aug 2026 16:04:49 +0000
+Date: Sat, 22 Aug 2026 16:20:39 +0000
 Subject: [PATCH] temp: vyos-1x-040-op-mode-show-offload.patch
 
 ---
  op-mode-definitions/show-offload.xml.in |  26 +++
- src/op_mode/show_offload.py             | 271 ++++++++++++++++++++++++
- 2 files changed, 297 insertions(+)
+ src/op_mode/show_offload.py             | 257 ++++++++++++++++++++++++
+ 2 files changed, 283 insertions(+)
  create mode 100644 op-mode-definitions/show-offload.xml.in
  create mode 100755 src/op_mode/show_offload.py
 
@@ -45,7 +45,7 @@ diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
 new file mode 100755
 --- /dev/null
 +++ b/src/op_mode/show_offload.py
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,257 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -259,14 +259,6 @@ new file mode 100755
 +        family = 'ipv6' if l3 == _ETH_P_IPV6 else 'ipv4'
 +        l4 = _get(f, 'l4-proto')
 +        proto = _L4.get(l4, str(l4) if l4 is not None else '-')
-+        # Datapath for this flow. This table lists ONLY flows ask.ko learned
-+        # via the nft flowtable-offload hook, so the honest values are 'FMan'
-+        # (offloaded into FMan FE-VM silicon) and 'sw' (ASK-eligible but
-+        # running the software path, i.e. not in silicon). It is NOT the whole
-+        # kernel flow table; plain kernel-forwarded traffic that never entered
-+        # the flowtable, and VPP AF_XDP flows, do not appear here.
-+        off = _get(f, 'offloaded')
-+        path = '-' if off is None else ('FMan' if int(off) else 'sw')
 +        # Sort key: IPv4 (0) before IPv6 (1), then proto, source, dest.
 +        sort_key = (0 if family == 'ipv4' else 1,
 +                    proto,
@@ -279,7 +271,6 @@ new file mode 100755
 +        rows.append((sort_key, [
 +            f'{family}/{proto}',
 +            f'{source} → {destination}',
-+            path,
 +            _get(f, 'packets', default=0),
 +            _get(f, 'bytes', default=0),
 +        ]))
@@ -290,14 +281,9 @@ new file mode 100755
 +
 +    rows.sort(key=lambda r: r[0])
 +    data = [r[1] for r in rows]
-+    n_hw = sum(1 for r in data if r[2] == 'FMan')
-+    headers = ['Protocol', 'Flow', 'Path', 'Packets', 'Bytes']
-+    print(f'ASK-tracked flows ({len(data)} total, {n_hw} in FMan, '
-+          f'{len(data) - n_hw} sw):\n')
++    headers = ['Protocol', 'Flow', 'Packets', 'Bytes']
++    print(f'ASK offload flows ({len(data)} total):\n')
 +    print(tabulate(data, headers=headers, tablefmt='simple'))
-+    print('\nOnly flows learned by ASK offload are listed (sw = eligible but '
-+          'not in silicon).\nPlain kernel-forwarded and VPP AF_XDP flows are '
-+          'not tracked here.')
 +    return 0
 +
 +
