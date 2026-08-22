@@ -1,0 +1,285 @@
+From 86d16a0c158d07fff97d46b4176e4b7b61d4e15e Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Sat, 22 Aug 2026 15:24:29 +0000
+Subject: [PATCH] temp: vyos-1x-040-op-mode-show-offload.patch
+
+---
+ op-mode-definitions/show-offload.xml.in |  26 +++
+ src/op_mode/show_offload.py             | 234 ++++++++++++++++++++++++
+ 2 files changed, 260 insertions(+)
+ create mode 100644 op-mode-definitions/show-offload.xml.in
+ create mode 100755 src/op_mode/show_offload.py
+
+diff --git a/op-mode-definitions/show-offload.xml.in b/op-mode-definitions/show-offload.xml.in
+new file mode 100644
+--- /dev/null
++++ b/op-mode-definitions/show-offload.xml.in
+@@ -0,0 +1,26 @@
++<?xml version="1.0"?>
++<interfaceDefinition>
++  <node name="show">
++    <children>
++      <node name="offload">
++        <properties>
++          <help>Show hardware offload state (NXP LS1046A ASK2 FMan FE-VM)</help>
++        </properties>
++        <children>
++          <leafNode name="config">
++            <properties>
++              <help>Show per-interface hardware offload configuration (IPv4/IPv6)</help>
++            </properties>
++            <command>sudo ${vyos_op_scripts_dir}/show_offload.py --action=config</command>
++          </leafNode>
++          <leafNode name="flow">
++            <properties>
++              <help>Show flows offloaded to hardware</help>
++            </properties>
++            <command>sudo ${vyos_op_scripts_dir}/show_offload.py --action=flow</command>
++          </leafNode>
++        </children>
++      </node>
++    </children>
++  </node>
++</interfaceDefinition>
+diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
+new file mode 100755
+--- /dev/null
++++ b/src/op_mode/show_offload.py
+@@ -0,0 +1,234 @@
++#!/usr/bin/env python3
++#
++# Copyright (C) VyOS Inc.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License along
++# with this program; if not, write to the Free Software Foundation, Inc.,
++# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++#
++# op-mode: show offload config
++#          show offload flow
++#
++# LS1046A / ASK2 (Accelerated Switching Kernel) hardware routing offload.
++#
++# `show offload config` lists every DPAA ethernet port and which address
++# families are hardware-offloaded on it (IPv4 / IPv6), from the running
++# configuration, cross-referenced with the live FMan FE-VM armed state in
++# debugfs so the operator can see both intent and what silicon is actually
++# running.
++#
++# `show offload flow` renders the flows the FMan FE-VM has learned, wrapping
++# the standard YNL client talking straight to ask.ko's generic-netlink
++# family (there is no askd daemon):
++#
++#     ynl --family ask --dump dump-flows --output-json
++
++import argparse
++import json
++import socket
++from ipaddress import ip_address
++
++from tabulate import tabulate
++
++from vyos.configquery import ConfigTreeQuery
++from vyos.utils.process import rc_cmd
++
++YNL = '/usr/local/bin/ynl'
++SPEC_FAMILY = 'ask'
++FE_PORT = '/sys/kernel/debug/fman_pcd/0/fe_port'
++
++# Board-fixed physical map for the LS1046A Mono Gateway DK (AGENTS.md port
++# order rule): interface name -> FMan hardware port id. This is the same
++# static mapping ask.ko engages against; there is no per-port family read-back
++# op in the genl family, so configured families come from the running config
++# and the live/armed indicator comes from the fe_port debugfs node.
++HW_PORT = {
++    'eth0': 0x0c,   # left RJ45  (MAC5, mgmt)
++    'eth1': 0x0d,   # center RJ45 (MAC6)
++    'eth2': 0x09,   # right RJ45 (MAC2)
++    'eth3': 0x10,   # left SFP+  (MAC9)
++    'eth4': 0x11,   # right SFP+ (MAC10)
++}
++
++# IANA L4 protocol number -> display name.
++_L4 = {socket.IPPROTO_TCP: 'tcp', socket.IPPROTO_UDP: 'udp',
++       socket.IPPROTO_ICMP: 'icmp', socket.IPPROTO_ESP: 'esp',
++       socket.IPPROTO_SCTP: 'sctp'}
++
++
++def _get(flow: dict, *names, default=None):
++    """Fetch an attr tolerating dash/underscore spelling drift in ynl output."""
++    for n in names:
++        for key in (n, n.replace('-', '_'), n.replace('_', '-')):
++            if key in flow:
++                return flow[key]
++    return default
++
++
++def _fmt_ip(val):
++    """ynl emits `binary` attrs as a hex string; render as an IP address."""
++    if val is None:
++        return '-'
++    if isinstance(val, str):
++        try:
++            raw = bytes.fromhex(val)
++        except ValueError:
++            return val
++    elif isinstance(val, (bytes, bytearray)):
++        raw = bytes(val)
++    else:
++        return str(val)
++    if len(raw) >= 16 and any(raw[4:16]):
++        return str(ip_address(raw[:16]))
++    if len(raw) >= 4:
++        return str(ip_address(raw[:4]))
++    return raw.hex()
++
++
++def _armed_hw_ports():
++    """Return the set of FMan hardware port ids currently FE-armed.
++
++    The fe_port debugfs node lists one line per armed RX port, e.g.
++        port 0x10 pool 0x57000/8448 B mgmt 0x59100/21 B v4_table ffff...
++    Absent (module not loaded / nothing engaged) -> empty set.
++    """
++    armed = set()
++    try:
++        with open(FE_PORT) as f:
++            for line in f:
++                parts = line.split()
++                if len(parts) >= 2 and parts[0] == 'port':
++                    try:
++                        armed.add(int(parts[1], 16))
++                    except ValueError:
++                        pass
++    except OSError:
++        pass
++    return armed
++
++
++def _fetch_flows():
++    """Run the YNL dump and return a flat list of per-flow dicts."""
++    rc, out = rc_cmd(f'{YNL} --family {SPEC_FAMILY} --dump dump-flows --output-json')
++    if rc != 0:
++        raise RuntimeError(out.strip() or 'ynl dump-flows failed '
++                           '(is ask.ko loaded and offload engaged?)')
++    if not out.strip():
++        return []
++    data = json.loads(out)
++    if isinstance(data, dict):
++        data = [data]
++    flows = []
++    for item in data:
++        if isinstance(item, dict) and 'flow' in item and isinstance(item['flow'], dict):
++            flows.append(item['flow'])
++        elif isinstance(item, dict):
++            flows.append(item)
++    return flows
++
++
++def show_config():
++    """Per-port hardware offload configuration and live armed state."""
++    conf = ConfigTreeQuery()
++    armed = _armed_hw_ports()
++
++    rows = []
++    any_offload = False
++    for ifname in sorted(HW_PORT):
++        # Show every physical DPAA port present in sysfs, even when it has no
++        # VyOS interface stanza/offload configured. This makes the output a
++        # complete five-port inventory instead of hiding inactive ports.
++        try:
++            with open(f'/sys/class/net/{ifname}/ifindex'):
++                pass
++        except OSError:
++            continue
++        base = ['interfaces', 'ethernet', ifname]
++        hw_port = HW_PORT[ifname]
++        v4 = conf.exists(base + ['offload', 'ipv4'])
++        v6 = conf.exists(base + ['offload', 'ipv6'])
++        if v4 or v6:
++            any_offload = True
++        # A port is "active" when the FE-VM is armed for it in silicon.
++        active = hw_port in armed
++        rows.append([
++            ifname,
++            f'0x{hw_port:02x}',
++            'yes' if v4 else '-',
++            'yes' if v6 else '-',
++            'engaged' if active else ('configured' if (v4 or v6) else '-'),
++        ])
++
++    if not rows:
++        print('No DPAA ethernet interfaces found')
++        return 0
++
++    headers = ['Interface', 'HW-Port', 'IPv4', 'IPv6', 'State']
++    print('ASK2 hardware routing offload (NXP LS1046A FMan FE-VM)\n')
++    print(tabulate(rows, headers=headers, tablefmt='simple'))
++    if not any_offload:
++        print('\nNo interface has hardware offload configured '
++              "(set interfaces ethernet eth<n> offload ipv4|ipv6).")
++    return 0
++
++
++def show_flow():
++    """All flows the FMan FE-VM has learned, across every port."""
++    flows = _fetch_flows()
++    rows = []
++    for f in flows:
++        l4 = _get(f, 'l4-proto')
++        proto = _L4.get(l4, str(l4) if l4 is not None else '-')
++        off = _get(f, 'offloaded')
++        offload = '?' if off is None else ('hw' if int(off) else 'sw')
++        rows.append([
++            proto,
++            f'{_fmt_ip(_get(f, "src-ip"))}:{_get(f, "sport", default="-")}',
++            f'{_fmt_ip(_get(f, "dst-ip"))}:{_get(f, "dport", default="-")}',
++            _get(f, 'iif', default='-'),
++            _get(f, 'oif', default='-'),
++            offload,
++            _get(f, 'packets', default=0),
++            _get(f, 'bytes', default=0),
++        ])
++
++    if not rows:
++        print('No flows tracked by ASK offload')
++        return 0
++
++    n_hw = sum(1 for r in rows if r[5] == 'hw')
++    headers = ['Proto', 'Source', 'Destination', 'IIF', 'OIF',
++               'Offload', 'Packets', 'Bytes']
++    print(f'ASK offload flows ({len(rows)} tracked, {n_hw} in hardware):\n')
++    print(tabulate(rows, headers=headers, tablefmt='simple'))
++    print('\nNote: per-flow counters refresh on the periodic flow-stats poll '
++          '(delayed); sample >=30s apart to observe growth.')
++    return 0
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--action', required=True, choices=['config', 'flow'],
++                        help='config: per-port offload state; flow: offloaded flows')
++    args = parser.parse_args()
++    try:
++        if args.action == 'config':
++            raise SystemExit(show_config())
++        raise SystemExit(show_flow())
++    except RuntimeError as e:
++        print(e)
++        raise SystemExit(1)
++
++
++if __name__ == '__main__':
++    main()
+-- 
+2.39.5
+
