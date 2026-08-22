@@ -475,18 +475,12 @@ jobs:
             HEAD 2>/dev/null || true)
           [ -z "$LOCAL_LOG" ] && LOCAL_LOG="_No local changes since last build._"
           echo "$LOCAL_LOG" > /tmp/local_changes.md
-          # Richer source material for the AI writer: the prose in the newest
-          # (top) section of plans/CHANGELOG.md, up to the next "### " heading.
-          if [ -f plans/CHANGELOG.md ]; then
-            awk '/^### /{n++} n==1{print} n>1{exit}' plans/CHANGELOG.md > /tmp/changelog_top.md || true
-          fi
-          [ -s /tmp/changelog_top.md ] || echo "_No changelog prose available._" > /tmp/changelog_top.md
 
       - name: "Release publishing: generate release notes (AI)"
         id: ai_notes
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-          AI_MODEL: deepseek/deepseek-v4-flash-0731
+          AI_MODEL: google/gemini-3.7-flash
           VYOS1X_CHANGELOG: ${{ steps.generate_changelog_for_vyos-1x.outputs.changelog }}
           VYOSBUILD_CHANGELOG: ${{ steps.generate_changelog_for_vyos-build.outputs.changelog }}
         run: |
@@ -552,9 +546,6 @@ jobs:
             echo "== LOCAL COMMITS (this repo, since last build) =="
             cat /tmp/local_changes.md
             echo
-            echo "== LOCAL CHANGELOG PROSE (newest section of plans/CHANGELOG.md) =="
-            cat /tmp/changelog_top.md
-            echo
             echo "== UPSTREAM vyos-1x (last 7 days) =="
             printf '%s\n' "$VYOS1X_CHANGELOG"
             echo
@@ -570,7 +561,7 @@ jobs:
             > /tmp/ai_request.json
 
           set +e
-          HTTP=$(curl -sS -o /tmp/ai_response.json -w '%{http_code}' \
+          HTTP=$(curl -sS --max-time 120 -o /tmp/ai_response.json -w '%{http_code}' \
             https://openrouter.ai/api/v1/chat/completions \
             -H "Authorization: Bearer ${OPENROUTER_KEY}" \
             -H "Content-Type: application/json" \
