@@ -336,11 +336,11 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
 graph LR
     M2["M2 perf gate<br/>DONE - regression-monitor only"] --> M5["M5 flow automation<br/>DONE - mechanism unresolved"]
     M3["M3 FE-VM ehash HIT gate<br/>DONE (E25/E26, M3 gate passed)"]
-    M5 --> M6["M6 capability breadth<br/>M6-A code+CI DONE; board gates OPEN<br/>M6-B+ phased gates §4.6"]
-    M5 --> M7a["M7 VyOS CLI + production HIT<br/>DONE on eth3/eth4 - transit HIT delivers"]
-    M7a --> M7b["M7-2 HW TX opcode terminal<br/>S1/S3/S4 SILICON-PASS; S2 VLAN deferred; ~10G HW"]
-    M6 --> P5i["T-M6-P5 five-port implementation<br/>CLI/global-FQ/discriminator work OPEN"]
-    M7b --> P5v["T-M7-P5 eth2→eth1→eth0 acceptance<br/>OPEN; eth0 management LAST"]
+    M5 --> M6["M6 capability breadth<br/>M6-A + P5 implementation DONE<br/>M6-B+ phased gates §4.6"]
+    M5 --> M7a["M7 VyOS CLI + production HIT<br/>DONE IPv4+IPv6 on eth3/eth4"]
+    M7a --> M7b["M7-2 HW TX opcode terminal<br/>IPv4+IPv6 SILICON-PASS; ~10G HW"]
+    M6 --> P5i["T-M6-P5 five-port implementation<br/>DONE - per-port tables + true ingress"]
+    M7b --> P5v["T-M7-P5 silicon acceptance<br/>PARTIAL - eth2 HIT + 4-port matrix PASS<br/>eth1/eth0 routed load OPEN"]
     P5i --> P5v
     M6 --> M8["M8 soak + upstream"]
     M7b --> M8
@@ -439,10 +439,11 @@ opcode terminal, not comparator correctness.
   T-M6-P5 five-port IPv4 mechanics, then IPv6/NAT/VLAN, soft-parser/PPPoE,
   XFRM/IPsec, bridge/multicast, and fragments/tunnels. Full gates and MUST/
   DO-NOT rules: §4.6.
-- **M7 — VyOS CLI + production IPv4 transit HIT. DONE for eth3/eth4 preview
-  scope (2026-08-17); five-port acceptance OPEN as T-M7-P5.** Current surface:
-  per-interface `offload ask` allow-listed to eth3/eth4, ASK↔VPP mutex, nft/YNL
-  flow learning, and `show flows`. T-M7-2 S1/F-198
+- **M7 — VyOS CLI + production IPv4/IPv6 transit HIT. DONE for the 10G
+  production path; five-port acceptance PARTIAL as T-M7-P5.** Current surface:
+  independent per-interface `offload ipv4`/`offload ipv6` on eth0–eth4,
+  ASK↔VPP mutex, nft/YNL flow learning, and `show flows`; migration 34→35
+  rewrites the retired `offload ask` node to both families. T-M7-2 S1/F-198
   direct-to-wire, S4/F-199 no-confirm per-egress TX FQ, and S3/F-200
   TTL/checksum all passed silicon; S2 VLAN/preemptive-checks is explicitly
   deferred and non-blocking for plain untagged IPv4. T-M7-3 passed three clean
@@ -450,7 +451,14 @@ opcode terminal, not comparator correctness.
   extended this to ~10 Gbit/s at ~3% CPU with lifecycle stress clean.
    CR-001 MURAM leak is closed; F-133's stale diagnostic tracker caused the
    false leak signal.
-- **M8 — Productization soak + upstream.** Work: §4.7.
+- **M8 — Productization soak + upstream. IN PROGRESS.** Publish half is DONE:
+  release `2026.08.22-0031-rolling` shipped with AI-generated three-part release
+  notes (OpenRouter/`google/gemini-3.7-flash`) and the Discord release embed
+  (now carrying the AI `Highlights` summary). Bounded durability gates PASS on
+  image `2224`/`0031` (flow churn/aging with byte-clean MURAM, TTL/hop-limit
+  decrement, SW-fallback ICMP/UDP/fragments, four-port engage matrix). Remaining:
+  extended sustained soak (`T-M8-2`), live telemetry/`ask-check` board
+  validation (`T-M8-3`/`T-M8-4`), and upstream prep (`T-M8-5`). Work: §4.7.
 
 ---
 
@@ -1310,11 +1318,19 @@ intent, kernel-authority, lifecycle, and per-feature gates.
   `fe_flow` before `disengage`); the production helper's `disengage` is still
   fail-open while flows are live (Step 4 / CR-003).
 
-- [ ] **T-M7-P5 — five-port silicon acceptance and management safety.** Runs
-  only after T-M6-P5's discriminator/table-ownership design, CLI changes and
-  KUnit gates pass. Validate 1G ports in increasing blast radius: eth2 (right
-  RJ45, RX/TX `0x09/0x29`, TX channel `0x803`) first, then eth1 (center RJ45,
-  `0x0d/0x2d`, `0x807`), and eth0 management (`0x0c/0x2c`, `0x806`) LAST.
+- [~] **T-M7-P5 — five-port silicon acceptance and management safety. PARTIAL
+  (2026-08-21/22).** T-M6-P5 implementation is complete. **PASSED:** eth2 1G
+  routed IPv4 HW HIT with correct true-ingress table ownership (566 MB in FMan,
+  kernel RX +24), eth1 engage with a distinct 1G pool/table, all-four
+  eth1+eth2+eth3+eth4 simultaneous engage with four independent tables and no
+  wedge, eth3↔eth4 7.32 Gbit/s regression while 1G ports are engaged, clean
+  teardown, bounded one-time 256-byte FM_CTL params pages, and order-0 F-222
+  eliminates the prior `dev_alloc_pages()` load wedge. **OPEN:** eth1 routed
+  TCP/UDP HIT/load (no mapped peer subnet in the current lab), eth0 routed
+  HIT/load with serial recovery, all-five simultaneous trafficked churn, and
+  identical-tuple cross-ingress isolation under load. Validate remaining 1G
+  ports in increasing blast radius: eth1 (center RJ45, `0x0d/0x2d`, channel
+  `0x807`) next, and eth0 management (`0x0c/0x2c`, `0x806`) LAST.
   **Never engage eth0 while SSH is the only recovery path:** maintain serial
   console and a tested disengage/rollback channel; a failure must return eth0
   to kernel RSS without reboot. For each newly-supported port, prove:
@@ -1539,7 +1555,7 @@ record it does not own.
 | Capability | Vendor ASK evidence | Kernel authority / ingest hook | ASK2 FMan implementation | Current status |
 |---|---|---|---|---|
 | IPv4 TCP/UDP unicast route | `cdx_tcp4_cc`, `cdx_udp4_cc`; IPv4 FCI | `nf_flow_table` / tc `FLOW_CLS_REPLACE/DESTROY` | 14-byte ehash key; `UPDATE_TTL` → `INSERT_L2_HDR` → per-egress no-confirm `ENQUEUE` | **DONE on eth3/eth4, silicon-passed; eth0/eth1/eth2 breadth tracked by T-M6-P5/T-M7-P5** |
-| IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | separate v6 KG scheme/table; 38-byte PORT_ID-prefixed key; `UPDATE_HOPLIMIT(0x29)` + L2/TX chain | PARTIAL, silicon gate open |
+| IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | **unified dual-lane 46-byte key on ONE match-all AC_CC scheme** (`F-224`/`F-225`/`F-226`), `UPDATE_HOPLIMIT(0x29)` + L2/TX chain, per-port table | **DONE — silicon-passed 2026-08-19/21, shipped in release `2026.08.22-0031-rolling`.** The earlier slot-based LCV two-scheme approach (T-M6-1 §4.6, F-205/210/211/212) was proven design-invalid for transit and abandoned; the dual-lane key superseded it. |
 | NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | typed address/port rewrites + IPv4/L4 checksum update in the same flow record | Compiler NOT implemented; A2 strict `-EOPNOTSUPP` software fallback landed |
 | VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | `STRIP_ALL_VLAN_HDRS(0x12)` and typed insert-VLAN action; key/MTU semantics preserved | deferred S2; A2 strict software fallback landed |
 | IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) |
@@ -1632,10 +1648,21 @@ record it does not own.
 
 ##### Phase M6-B — extend the proven flowtable path first
 
-- [ ] **T-M6-P5 — five-port IPv4 implementation (eth0–eth4).** Extend the
-  proven per-interface ASK mechanism from the validated 10G pair to every
-  physical DPAA netdev without introducing the ASK 1.x static XML/control
-  plane. **Vendor capability oracle:** `/mnt/build/ASK/config/gateway-dk/
+- [x] **T-M6-P5 — five-port IPv4/IPv6 implementation (eth0–eth4). DONE
+  (2026-08-21).** Implementation items 1–5 below all landed and silicon-passed:
+  the VyOS allow-list was removed (all five ports CLI-offloadable via the
+  family-split `offload ipv4`/`offload ipv6`; eth0 allowed by `b5a648a9`); the
+  legacy module-global `dedicated_fq`/`0x801`/`0x200` path was superseded by the
+  F-199 per-egress no-confirm allocator; per-port tables are dynamic (F-220/
+  F-221, one 46-byte dual-lane table per ingress port); the per-port logical
+  discriminator (item 4) is solved by true-ingress attribution via
+  `FLOW_DISSECTOR_KEY_META.ingress_ifindex` (commit `98824e95`) so identical
+  5-tuples on different ingress ports land in their own tables; `ask-check` and
+  helpers enumerate ports dynamically (2026-08-22). Proven: eth2 1G routed HW
+  HIT (image 0601, tbl[4], 566 MB CPU-bypass), four-port simultaneous engage
+  clean with four distinct per-port tables, per-interface ASK↔VPP mutex intact.
+  **Remaining silicon acceptance is tracked by T-M7-P5** (eth1/eth0 routed load).
+  Historical implementation detail retained below: **Vendor capability oracle:** `/mnt/build/ASK/config/gateway-dk/
   cdx_cfg.xml` programs all three 1G + both 10G Ethernet ports, and vendor
   `cdx_common.h` sizes `MAX_PORTS_PER_FMAN=5`; this proves silicon capability,
   not ASK2 correctness. **Current ASK2 audit (2026-08-18):** the kernel resolver
@@ -2041,10 +2068,12 @@ own PCD objects and prove readback.
   packet/byte/error/fallback counters and owner/generation/resource-failure
   reasons in `show flows`/support bundle (the useful parts of historical
   F-05/F-16/F-17/F-18, not their debugfs coupling).
-- [~] **T-M8-4** `@___` — production `ask-check` reports 0 required FAIL on
-  the board (contract rewritten 2026-08-18; final truthful `get-info` telemetry
-  awaits the next image); policer BUG-3b flood characterization (serial capture
-  + cold power-cycle).
+- [x] **T-M8-4** — production `ask-check` reports 0 required FAIL on the board.
+  DONE 2026-08-22 on the shipped `0031` image: `36/36 OK, 0 WARN/FAIL/SKIP`
+  after the family-split fix (recognize `offload ipv4`/`offload ipv6` on all
+  five ports; dual-family scope text). Residual: policer BUG-3b flood
+  characterization (serial capture + cold power-cycle) is unrelated and still
+  open under §5.
 - [ ] **T-M8-5** `@___` — Upstream prep: checkpatch/sparse clean; KUnit ≥80%
   on `ask_flow.c`/`ask_genl_attr.c` (maintains the CR-009/010/011
   invariants).

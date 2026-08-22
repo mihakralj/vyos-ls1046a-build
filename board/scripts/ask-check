@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ask-check — production health check for ASK2 plain routed IPv4 unicast
+# ask-check — production health check for ASK2 plain routed IPv4/IPv6 unicast
 # hardware offload on the LS1046A Mono Gateway DK.
 #
 # Usage: sudo ask-check
@@ -9,9 +9,10 @@
 # plane only:
 #
 #   VyOS config -> nft flowtable/conntrack -> nf_flow_table callbacks -> ask.ko
-#   -> FMan PCD FE/ehash -> UPDATE_TTL + INSERT_L2_HDR -> no-confirm TX FQ.
+#   -> FMan PCD FE/ehash -> UPDATE_TTL/UPDATE_HOPLIMIT + INSERT_L2_HDR
+#   -> TX disposition.
 #
-# Shipping scope: routed IPv4 unicast TCP/UDP. IPv6, NAT/PAT, VLAN actions,
+# Shipping scope: routed IPv4 and IPv6 unicast TCP/UDP. NAT/PAT, VLAN actions,
 # bridge, multicast and IPsec are software-fallback features, not failures here.
 # Their safety contract is enforced by strict action rejection in ask.ko.
 #
@@ -87,10 +88,15 @@ else
     config_command_output=''
 fi
 
+# ASK offload is configured per interface and per address family via
+# `offload ipv4` / `offload ipv6` (the older single `offload ask` node was
+# removed in the family-split CLI). An interface counts as ASK-offloaded when
+# either family is enabled. Enumerate all five DPAA netdevs; do not hard-code
+# the eth3/eth4 pair (five-port breadth).
 ASK_PORTS=()
-for dev in eth3 eth4; do
+for dev in eth0 eth1 eth2 eth3 eth4; do
     if echo "$config_command_output" \
-        | grep -qE "^set interfaces ethernet ${dev} offload ask$"; then
+        | grep -qE "^set interfaces ethernet ${dev} offload (ipv4|ipv6)$"; then
         ASK_PORTS+=("$dev")
     fi
 done
@@ -293,7 +299,7 @@ hdr '4) VyOS ASK configuration and per-port live state'
 if [ "${#ASK_PORTS[@]}" -gt 0 ]; then
     record_ok "ASK configured on: ${ASK_PORTS[*]}"
 else
-    record_fail "no interface has 'offload ask' configured"
+    record_fail "no interface has 'offload ipv4' or 'offload ipv6' configured"
 fi
 
 if echo "$config_command_output" | grep -q '^set vpp settings interface '; then
@@ -466,8 +472,8 @@ fi
 hdr '7) Scope and verdict'
 # ---------------------------------------------------------------------------
 
-note 'hardware scope: routed IPv4 unicast TCP/UDP with TTL/checksum + L2 rewrite'
-note 'software fallback: IPv6, NAT/PAT, VLAN actions, bridge, multicast, IPsec'
+note 'hardware scope: routed IPv4/IPv6 unicast TCP/UDP with TTL/hop-limit + L2 rewrite'
+note 'software fallback: NAT/PAT, VLAN actions, bridge, multicast, IPsec'
 note 'debugfs and KUnit are debug-build tools and are intentionally not tested'
 
 hdr 'Summary'
@@ -478,9 +484,9 @@ printf '%3d %sFAIL%s  ' "$N_FAIL" "$C_RED" "$C_RST"
 printf '%3d %sSKIP%s\n' "$N_SKIP" "$C_BLUE" "$C_RST"
 
 if [ "$EXIT" -eq 0 ]; then
-    ok 'ASK2 production IPv4-unicast dataplane is READY'
+    ok 'ASK2 production IPv4/IPv6-unicast dataplane is READY'
 else
-    fail "ASK2 production IPv4-unicast dataplane is NOT READY ($N_FAIL required check(s) failed)"
+    fail "ASK2 production IPv4/IPv6-unicast dataplane is NOT READY ($N_FAIL required check(s) failed)"
 fi
 
 exit "$EXIT"
