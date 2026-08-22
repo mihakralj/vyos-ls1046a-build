@@ -69,6 +69,22 @@ static_assert(ENQUEUE_KG_DFLT_NIA  == 0x80500002,
 static_assert(FMAN_EHASH_MASK_MAX  == 0x7FFF,
 	"§17: EXT_HASH max hash mask = 0x7FFF");
 
+/* ── §17.8: F-230 NAT/PAT opcode encoding (T-M6-7.1) ──────────────────── */
+/* The FE NAT opcodes are single bytes that F-230 BIT-FUSES (OR) into one
+ * opcode per operation group. These guards pin the exact vendor values and
+ * prove the fused combinations do not alias an unrelated opcode. This is the
+ * single riskiest silicon assumption; the S1 board gate confirms the runtime
+ * behaviour, these asserts prevent an accidental value drift before that. */
+/* Fused L4: SPORT(0x31)|DPORT(0x32) = 0x33, distinct from every L3 opcode. */
+static_assert((0x31 | 0x32) == 0x33, "§17: fused SPORT|DPORT = 0x33");
+static_assert((0x31 | 0x32) != 0x21 && (0x31 | 0x32) != 0x29,
+	"§17: fused port opcode must not alias TTL/HOPLIMIT");
+/* Fused v4 L3: TTL|SIP|DIP = 0x21|0x22|0x24 = 0x27. */
+static_assert((0x21 | 0x22 | 0x24) == 0x27, "§17: fused v4 TTL|SIP|DIP = 0x27");
+/* Fused v6 L3: HOPLIMIT|SIP|DIP = 0x29|0x2a|0x2c = 0x2f. */
+static_assert((0x29 | 0x2a | 0x2c) == 0x2f,
+	"§17: fused v6 HOPLIMIT|SIP|DIP = 0x2f");
+
 /* ── §17.7: Params page FE pool fields ───────────────────────────────── */
 /* +0x54: FE buffer pool MURAM offset (u32, must be non-zero when armed) */
 /* +0x58: FE buffer depletion counter (u32, must be zero at disengage)   */
