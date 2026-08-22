@@ -1911,15 +1911,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-097: fman_pcd_fe_verify arm-time readback gate"
 fi
 
-# F-098 (T-P1-4 / F-12): Retype fman_pcd_fe_context_build DDR writes.
-# Replaces void __iomem *ctx with struct fman_ddr_region *ctx + defines
-# the struct.  Replaces iowrite32be -> __raw_writel(cpu_to_be32(...)),
-# memcpy_toio -> memcpy.  DDR is NOT iomem — writing through iowrite
-# has wrong barrier semantics and hides the error from sparse.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_098.py" 2>&1
-    echo "### F-098: context_build retype (DDR not MMIO)"
-fi
+: # F-098 removed 2026-08-22 (Phase 2 cleanup): dead defensive no-op.
+: # Its owning patch 0135-fman-pcd-fe-context-build.patch already defines
+: # fman_pcd_fe_context_build(void __iomem *ctx, ...) writing (ctx + offset)
+: # with no ctx->cpu dereference, and no other patch/fixup introduces the
+: # bad `struct fman_ddr_region *ctx` retype F_098 guarded against. The
+: # fixup body only fired `if "ctx->cpu" in src`, which is never true in the
+: # current tree, so it was a permanent no-op. S0 qdrant-gated.
 
 : # F-116 folded into patch 0153 (FE-VM flow-delete NULL guards).
 : # Phase 2 fold 2026-08-18: the two NULL guards (fman_pcd_ehash_flow_clear_all
