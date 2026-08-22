@@ -393,6 +393,11 @@ jobs:
     permissions:
       contents: write
     if: github.ref_name == 'main'
+    outputs:
+      # Base64 keeps multiline Markdown safe across the job -> reusable-workflow
+      # input boundary. discord.yml decodes and truncates to Discord's 1024-char
+      # embed-field limit before building the JSON payload.
+      release_highlights_b64: ${{ steps.ai_notes.outputs.release_highlights_b64 }}
     steps:
       - uses: actions/checkout@v6
       - name: Clone vyos-build repo
@@ -598,6 +603,22 @@ jobs:
               printf '%s\n' "$VYOSBUILD_CHANGELOG"
             } > /tmp/release_notes.md
           fi
+
+          # Reuse the top AI summary in the successful-main Discord embed.
+          # Extract only the body of `## Highlights` (not the heading), encode
+          # it as one line for GITHUB_OUTPUT, and leave Discord-specific length
+          # enforcement to discord.yml.
+          HIGHLIGHTS=$(awk '
+            /^## Highlights[[:space:]]*$/ { in_highlights=1; next }
+            in_highlights && /^## / { exit }
+            in_highlights { print }
+          ' /tmp/release_notes.md)
+          if [ -z "$HIGHLIGHTS" ]; then
+            HIGHLIGHTS="_See the full release notes for build highlights._"
+          fi
+          HIGHLIGHTS_B64=$(printf '%s' "$HIGHLIGHTS" | base64 -w0)
+          echo "release_highlights_b64=${HIGHLIGHTS_B64}" >> "$GITHUB_OUTPUT"
+
           echo "----- release notes -----"
           cat /tmp/release_notes.md
 
@@ -697,5 +718,6 @@ jobs:
       build_branch: ${{ github.ref_name }}
       release_type: 'Rolling'
       image_iso: ${{ needs.build_iso.outputs.image_iso }}
+      release_highlights_b64: ${{ needs.publish.outputs.release_highlights_b64 }}
     secrets:
       DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
