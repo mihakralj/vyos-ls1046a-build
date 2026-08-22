@@ -2725,6 +2725,15 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     echo "### dpaa_eth.c: F-227 crash-safe TX-confirm guard (reject FMan HIT FD on confirmed FQ)"
 fi
 
+# F-229 (issue #45, 2026-08-22): the GPY115C-reported link on a 1G RJ45
+# port flaps under sustained LAN->WAN forwarding when pause resolves OFF.
+# After PHY attach, force symmetric 802.3x pause only for SGMII links; leave the
+# eth3/eth4 10G XGMII ASK FE offload path unchanged.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_229.py" 2>&1
+    echo "### dpaa_eth.c: F-229 force symmetric pause on 1G SGMII links (issue #45)"
+fi
+
 # F-204 (T-M6-1 Phase 2a, 2026-08-19): additive, v4-byte-identical ehash
 # table selector. Adds action->table_idx (0=v4, 1=dormant v6) without
 # overloading hw_port_id — F-195's own-port miss-FQID semantics stay intact.
