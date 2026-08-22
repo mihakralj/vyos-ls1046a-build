@@ -2081,11 +2081,21 @@ own PCD objects and prove readback.
   decode. The `dump-flows` schema **already carries** `packets`, `bytes`, and
   `last-seen-ns` fields. **Remaining (post-release enhancement, bounded):** those
   three per-flow counters read `0` because FMan HIT frames bypass the kernel
-  (same reason `btop`/`ethtool -S` cannot see offloaded traffic); populating them
-  means mapping each flow's silicon `fe_ehash_stats` `pkt_count`/`pkt_bytes` back
-  into its `dump-flows` entry. Also `get-info.max-flows` reports `0` (placeholder;
-  should report the per-port table capacity). Neither blocks the release; the
-  observability contract itself is complete.
+  (same reason `btop`/`ethtool -S` cannot see offloaded traffic).
+  **IMPLEMENTED 2026-08-22 (commit `3e6a19a4`, CI `32547145232` SUCCESS, ISO
+  `2026.08.22-0246-rolling`), board-validation pending deploy.** The 210.10.1
+  silicon writes cumulative `packet_count`/`packet_bytes` into every 320-byte
+  ehash record unconditionally (live-confirmed on `0031`: records carry
+  7M-49M pkts). F-228 adds a read-only key-addressed getter
+  `fman_pcd_fe_flow_get_stats()` (mirrors `fman_pcd_fe_flow_del` table-resolve +
+  `fe_lock` + `dma_rmb`); `ask_flow_offload_stats()` refreshes each HW-backed
+  flow's cached absolute total from silicon on the nft STATS poll and reports
+  the per-poll DELTA to the accumulating `flow_stats_update()` (per-flow
+  baseline, silicon-reset handled, generation-guarded two-phase RCU). No
+  insert/HIT datapath change. `get-info.max-flows` stays `0` BY DESIGN
+  (collision-chained DDR table has no fixed per-flow ceiling; `0` = "not a
+  fixed limit", not a placeholder bug). Remaining: install `0246` and confirm
+  `dump-flows`/`get-flow` `packets`/`bytes` grow with offloaded traffic.
 - [x] **T-M8-4** — production `ask-check` reports 0 required FAIL on the board.
   DONE 2026-08-22 on the shipped `0031` image: `36/36 OK, 0 WARN/FAIL/SKIP`
   after the family-split fix (recognize `offload ipv4`/`offload ipv6` on all
