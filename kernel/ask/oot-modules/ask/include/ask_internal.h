@@ -506,6 +506,24 @@ u8  dst_ip[16];
  */
 u8  next_hop_mac[ETH_ALEN]; /* dst MAC the OH chain pushes */
 u8  egress_mac[ETH_ALEN];   /* src MAC = peer port's own MAC */
+
+/*
+ * T-M6-7.0: translated NAT/PAT tuple carried with the stored flow so
+ * DESTROY/pending/neighbour rebuilds preserve the exact action intent.
+ * These fields are NOT part of the FE comparison key (which remains the
+ * original 46-byte ingress tuple); T-M6-7.1 consumes them only as rewrite
+ * parameters in the FE opcode chain. ask_flow_rht_params hashes by cookie,
+ * so widening this struct does not perturb flow lookup.
+ */
+u8     nat_flags;
+#define ASK_NATF_SNAT	BIT(0)
+#define ASK_NATF_DNAT	BIT(1)
+#define ASK_NATF_SPAT	BIT(2)
+#define ASK_NATF_DPAT	BIT(3)
+u8     nat_src_ip[16];
+u8     nat_dst_ip[16];
+__be16 nat_sport;
+__be16 nat_dport;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
@@ -527,10 +545,22 @@ u8  egress_mac[ETH_ALEN];   /* src MAC = peer port's own MAC */
 /* (ask_fe_build_key), which A1 does not touch.                               */
 /* ------------------------------------------------------------------------- */
 enum ask_action_type {
-	ASK_ACTION_REDIRECT   = 0, /* forward to egress netdev (oif) */
-	ASK_ACTION_L2_REWRITE = 1, /* next-hop L2 rewrite (ETH MANGLE) */
-	ASK_ACTION_TTL_DEC    = 2, /* decrement IPv4 TTL / IPv6 hop-limit */
-	/* future: ASK_ACTION_NAT_SRC/DST, ASK_ACTION_PAT, ASK_ACTION_VLAN_* */
+	ASK_ACTION_REDIRECT    = 0, /* forward to egress netdev (oif) */
+	ASK_ACTION_L2_REWRITE  = 1, /* next-hop L2 rewrite (ETH MANGLE) */
+	ASK_ACTION_TTL_DEC     = 2, /* decrement IPv4 TTL / IPv6 hop-limit */
+	/*
+	 * T-M6-7.0 (NAT/PAT parse + carry). The kernel expresses NAT as
+	 * FLOW_ACTION_MANGLE of L3/L4 header bytes; ask_parse_action() decodes
+	 * those into these typed actions and reads the translated values from
+	 * the conntrack reply tuple. ask_intent_lower() carries them into the
+	 * flow key but STILL returns -EOPNOTSUPP (the FE-VM NAT opcode compiler
+	 * is T-M6-7.1), so NAT flows keep falling back to the software fastpath
+	 * until the hardware rewrite is proven. No datapath change vs. today.
+	 */
+	ASK_ACTION_NAT_SRC     = 3, /* rewrite IPv4/IPv6 source address */
+	ASK_ACTION_NAT_DST     = 4, /* rewrite IPv4/IPv6 destination address */
+	ASK_ACTION_NAPT_SPORT  = 5, /* rewrite L4 source port */
+	ASK_ACTION_NAPT_DPORT  = 6, /* rewrite L4 destination port */
 };
 
 #define ASK_INTENT_MAX_ACTIONS 8
@@ -538,6 +568,16 @@ enum ask_action_type {
 struct ask_flow_action_ent {
 	enum ask_action_type type;
 	u32 oif;   /* valid for ASK_ACTION_REDIRECT */
+	/*
+	 * Translated value for the NAT actions (network byte order):
+	 *  - ASK_ACTION_NAT_SRC/DST      -> addr[] (4 bytes v4 / 16 bytes v6)
+	 *  - ASK_ACTION_NAPT_SPORT/DPORT -> port
+	 * Zero for REDIRECT/L2_REWRITE/TTL_DEC.
+	 */
+	union {
+		u8     addr[16];
+		__be16 port;
+	} nat;
 };
 
 struct ask_flow_intent {
@@ -555,6 +595,40 @@ static inline int ask_intent_add(struct ask_flow_intent *in,
 		return -E2BIG;
 	in->actions[in->n_actions].type = type;
 	in->actions[in->n_actions].oif  = oif;
+	memset(&in->actions[in->n_actions].nat, 0,
+	       sizeof(in->actions[in->n_actions].nat));
+	in->n_actions++;
+	return 0;
+}
+
+/*
+ * T-M6-7.0: add a NAT/PAT action carrying its translated value.
+ * @addr (network byte order) is used for ASK_ACTION_NAT_SRC/DST (@addr_len is
+ * 4 for IPv4, 16 for IPv6); @port for ASK_ACTION_NAPT_SPORT/DPORT. The other
+ * field is left zero.
+ */
+static inline int ask_intent_add_nat(struct ask_flow_intent *in,
+				     enum ask_action_type type,
+				     const u8 *addr, u8 addr_len, __be16 port)
+{
+	struct ask_flow_action_ent *e;
+
+	if (in->n_actions >= ASK_INTENT_MAX_ACTIONS)
+		return -E2BIG;
+	e = &in->actions[in->n_actions];
+	e->type = type;
+	e->oif = 0;
+	memset(&e->nat, 0, sizeof(e->nat));
+	if (type == ASK_ACTION_NAT_SRC || type == ASK_ACTION_NAT_DST) {
+		if (addr_len != 4 && addr_len != 16)
+			return -EINVAL;
+		memcpy(e->nat.addr, addr, addr_len);
+	} else if (type == ASK_ACTION_NAPT_SPORT ||
+		   type == ASK_ACTION_NAPT_DPORT) {
+		e->nat.port = port;
+	} else {
+		return -EINVAL;
+	}
 	in->n_actions++;
 	return 0;
 }
