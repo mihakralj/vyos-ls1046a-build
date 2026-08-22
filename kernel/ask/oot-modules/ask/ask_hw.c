@@ -106,6 +106,31 @@ int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 bool fman_pcd_v6_enabled(void);	/* F-210 export; still consulted by kernel */
 static u8 ask_hw_port_family[64];
 
+/*
+ * T-M6-7.1 NAT offload arming gate. Default OFF: NAT/PAT flows fail closed to
+ * software (the shipping contract). When set (modprobe ask nat_offload=1) the
+ * preflight stops rejecting the NAT action classes and ask.ko populates the
+ * F-230 FE-VM rewrite opcodes. This is a silicon-experiment switch for the
+ * S0..S3 gates; the fused-opcode encoding is UNPROVEN on 210.10.1, so this MUST
+ * stay 0 in any shipping image until S1..S3 pass. A per-interface CLI knob
+ * (T-M6-7.7) replaces it once the datapath is proven.
+ */
+#define ASK_HW_PORT_ETH0_MGMT 0x0c
+static bool ask_nat_offload;
+module_param_named(nat_offload, ask_nat_offload, bool, 0644);
+MODULE_PARM_DESC(nat_offload,
+		 "Arm FE-VM NAT/PAT hardware offload (default 0; UNPROVEN silicon, experiment only)");
+
+bool ask_hw_nat_offload_armed(void)
+{
+	bool armed = READ_ONCE(ask_nat_offload);
+
+	if (armed)
+		pr_warn_once("ask: EXPERIMENTAL NAT/PAT hardware offload ARMED — F-230 opcodes unproven on 210.10.1; eth0 remains excluded\n");
+	return armed;
+}
+EXPORT_SYMBOL_GPL(ask_hw_nat_offload_armed);
+
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
 	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
@@ -1096,14 +1121,22 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
          * per-egress TX FQ; it needs NO per-flow MURAM, policer, or CAAM slot.
          * Any action that WOULD require an unprovisioned resource class must
          * fail to software here, before publication, rather than partially
-         * program silicon. NAT/PAT/VLAN are already rejected upstream by the
-         * A2 strict action parser, but re-assert defensively: if action_flags
-         * ever carries a class we cannot back, refuse.
+         * program silicon. VLAN/CAAM/OP are still rejected unconditionally.
+         *
+         * T-M6-7.1: NAT/PAT (ASK_ACT_NAT_SRC/DST/PAT) is admitted to hardware
+         * ONLY when the ask_nat_offload experiment gate is armed AND the flow
+         * is not on the eth0 management port. Disarmed (default) it fails
+         * closed to software exactly as before -- byte-identical shipping
+         * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
+         * ask.ko populates action.nat_* (only done when armed).
          */
-        if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT |
-                            ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP |
+        if (action_flags & (ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP |
                             ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
                 return -EOPNOTSUPP;
+        if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
+                if (!ask_hw_nat_offload_armed())
+                        return -EOPNOTSUPP;
+        }
 
 	/* Ingress hwport must resolve first (it owns the classifier AND its
 	 * per-port family mask decides v4/v6 admission). Resolve BEFORE the
@@ -1111,6 +1144,12 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	rc = ask_hw_resolve_iif_port(key->iif, &port_id);
 	if (rc)
 		return rc;
+
+	/* Never NAT-offload the eth0 management lifeline, even when the global
+	 * experiment gate is armed. It remains available for SSH/recovery. */
+	if ((action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) &&
+	    port_id == ASK_HW_PORT_ETH0_MGMT)
+		return -EOPNOTSUPP;
 
 	/* Per-port family/proto gate: TCP/UDP, and the ingress port must have
 	 * this L3 family selected (CLI offload ipv4 / offload ipv6). Otherwise
