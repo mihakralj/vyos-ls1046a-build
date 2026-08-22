@@ -107,6 +107,61 @@ the corresponding silicon stage passes; advertise the NAT capability LAST.
 - **`ask_hw_flow_preflight()` keeps rejecting NAT bits** — nothing published to
   silicon yet. This stage is pure parse/carry; flows still fall back to SW.
 
+#### T-M6-7.0 concrete implementation (locked design, verified against source)
+
+Files and exact edits (all in `kernel/ask/oot-modules/ask/`):
+
+1. `include/ask_internal.h`
+   - `enum ask_action_type` (currently 0..2): add `ASK_ACTION_NAT_SRC=3`,
+     `ASK_ACTION_NAT_DST=4`, `ASK_ACTION_NAPT_SPORT=5`, `ASK_ACTION_NAPT_DPORT=6`.
+   - `struct ask_flow_action_ent {type; u32 oif;}`: add value union
+     `union { u8 addr[16]; __be16 port; } nat;` (network byte order; unused/zero
+     for REDIRECT/L2_REWRITE/TTL_DEC).
+   - `struct ask_flow_key` (`__packed`): append after `egress_mac[]`
+     `u8 nat_flags; u8 nat_src_ip[16]; u8 nat_dst_ip[16]; __be16 nat_sport;
+     __be16 nat_dport;` where `nat_flags` uses new bits `ASK_NATF_SNAT=BIT(0)`,
+     `ASK_NATF_DNAT=BIT(1)`, `ASK_NATF_SPAT=BIT(2)`, `ASK_NATF_DPAT=BIT(3)`.
+     Zeroed by the `memset(key,0,...)` in `ask_parse_match_v4/v6`. rht hashes on
+     `cookie` only (`ask_flow_rht_params`), so widening the key is safe.
+   - Add helper `ask_intent_add_nat(intent, type, const u8 *addr, __be16 port)`
+     mirroring `ask_intent_add` but filling the `nat` union.
+
+2. `ask_flow_offload.c`
+   - New reader `ask_ct_nat_info(unsigned long cookie, struct ask_nat_info *out)`
+     modeled on `ask_z11_other_src_v4/v6` (same two `container_of` steps to reach
+     `struct flow_offload`). It reads `flow->flags` for `NF_FLOW_SNAT/DNAT`, and
+     from `tuplehash[REPLY].tuple`: translated SNAT src = `reply.dst_v4/_v6`,
+     translated DNAT dst = `reply.src_v4/_v6`, translated sport = `reply.dst_port`,
+     translated dport = `reply.src_port` (matches the kernel's own emission in
+     `nf_flow_rule_route_ipv4`). Guard `dir`, honour the same REPLACE-callback
+     lifetime contract already documented at z11.
+   - `ask_parse_action()`: replace the `FLOW_ACTION_MANGLE` L3/L4 reject and the
+     `FLOW_ACTION_ADD` reject. Detect NAT *presence/kind* from the mangle entry
+     (`htype IP4/IP6` + `offset` == saddr/daddr → SNAT/DNAT; `htype TCP/UDP` +
+     `offset 0` with upper-half mask → SPAT, lower-half → DPAT); fetch the
+     *values* once via `ask_ct_nat_info()`; emit the matching
+     `ASK_ACTION_NAT_*`/`NAPT_*` via `ask_intent_add_nat()`. Adopt bnxt's rule:
+     reject NAPT that appears without any L3 NAT context only if the value
+     lookup fails. `FLOW_ACTION_CSUM` stays a no-op (silicon auto-checksums).
+   - `ask_intent_lower()`: extend the switch — for the NAT/NAPT action types,
+     set `key->nat_flags` bits and copy the addr/port into
+     `key->nat_src_ip/dst_ip/nat_sport/nat_dport` (lowering now needs a mutable
+     `key`; pass it in, or set via the intent's borrowed match pointer's owner
+     struct — implement by having `ask_parse_action` stash NAT into the key it
+     already fills). **After populating, return `-EOPNOTSUPP` whenever any NAT
+     bit is set** so the flow fails closed to SW (T-M6-7.1 opens this). The plain
+     routed path (no NAT actions) keeps returning `0` with `action_flags=0` —
+     byte-identity preserved.
+
+3. `tests/ask_test_flow.c` (KUnit): vectors for SNAT-only, DNAT-only, NAPT
+   sport/dport, SNAT+DNAT+PAT combined, IPv6 SNAT (16-byte addr), the
+   "L4-only NAT with unresolved value → reject" case, and a regression asserting
+   the plain routed flow still lowers to `action_flags=0` (A1 byte-identity).
+
+Behavior after 7.0: NAT flows are fully parsed and their translated tuple is
+carried in the key, but `ask_intent_lower` returns `-EOPNOTSUPP`, so they still
+run in software exactly as today. Zero datapath/byte change for non-NAT flows.
+
 ### T-M6-7.1 — FE record NAT opcode emitter (kernel fixup, gated OFF)
 - New count-gated fixup (after F-198/F-200/F-226, which share the
   `eth_type==0x0800` anchor block in `fman_pcd_ehash_add_key` — order after and
