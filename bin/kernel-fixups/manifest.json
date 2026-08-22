@@ -185,6 +185,7 @@
     "F_225.py": "fman_pcd.c: Phase-A v4 ehash key_size 14->46 for template + F-220 per-port table; encoders auto-follow; v6 gate remains off",
     "F_226.py": "fman_pcd.c: Phase-B unified dual-lane IPv6 enable \u2014 dead-end F-211/F-212/F-214 LCV/second-scheme via port_wants_v6=false, suppress F-210 gro+16/table1 node, emit UPDATE_HOPLIMIT 0x29 for v6 HIT",
     "F_227.py": "dpaa_eth.c: crash-safe TX-confirm guard \u2014 kernel skb/XDP TX confirms carry BPID 0xff; a valid-BPID FMan-forwarded HIT confirm on a confirmed FQ has no dpaa_eth_swbp and its buffer was already EBD-recycled, so ignore it before dereferencing swbp->xdpf (fixes xdp_return_frame NULL-deref panic; no dpaa_fd_release double-free)",
+    "F_228.py": "fman_pcd.c + fman_pcd.h: T-M8-3 key-addressed read-only per-flow stats getter fman_pcd_fe_flow_get_stats() \u2014 mirrors fman_pcd_fe_flow_del table-resolve+fe_lock and ehash_del_key memcmp scan, reads silicon packet_count/packet_bytes @record+256/+264 (dma_rmb before be64), so ask.ko can surface real offloaded counters into dump-flows",
     "F_211.py": "fman_pcd.c/fman_pcd_kg.c/internal.h: F-211 (T-M6-1 step 3) gated THREE-scheme arm: v4 kgse_mv=0x40000000 (table0), free-slot v6 kgse_mv=0x80000000/CCOBASE=1 (table1), free-slot CATCH-ALL kgse_mv=0x20000000 (ETH slot0, clone of v4/table0, highest id=walked last) so non-IP frames don't NO_SCHEME; bind all into port SP, commit table1 node own-port miss FQID",
     "F_212.py": "fman_pcd_kg.c: F-212 (T-M6-1 step 4) gated engage-time parser LCV split (slot0 ETH catch-all=0x20000000, slot5 v4=0x40000000, slot6 v6=0x80000000) plus self-detecting teardown of v6+catch-all slots, v4 mv restore, parser restore all-0xffffffff; calls F-205 parser-stop/readback primitive; v4 OFF no-op",
     "F_214.py": "fman_keygen.c/internal.h/fman_pcd_kg.c: F-214 (2026-08-19, gated) keygen_cls_plan0_passall writes global classification-plan group0=0xffffffff ONCE (keygen->cls_plan0_passall flag set after readback; later port engages skip all AR access) so QLCV carries parser LCV; one-time rule fixes second-port FMFP_EXTC SYNC timeout from rewriting shared CP group while first port live; wired into F-211 v6 arm; default-OFF",
@@ -192,7 +193,7 @@
     "F_216.py": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c: F-216 add ratelimited zero-address FD guard before dma_unmap/phys_to_virt/headroom reads (logs status/format/BPID/offset/length/FQID, consumes without release), and remove obsolete F-072/F-170 be64 frame-data hash capture + normalize RXHASH braces. Image 2228 panic: addr=0 -> phys_to_virt(0)+hash_offset0x108 fault. Defensive/logging, not root malformed-FD fix.",
     "F_218.py": "fman_pcd.c: F-218 (T-M6-1) fman_pcd_fe_flow_del selects ehash table by key_size (38-byte v6 key -> table1, else table0) so v6 FLOW_CLS_DESTROY unlinks the table1 record instead of leaking; no ABI change; v4 byte-identical"
   },
-  "count": 121,
+  "count": 122,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {
     "F_174.py": "On disk, listed in active, but intentionally NOT invoked from ci-setup-kernel.sh (superseded by F-175; kept for the record). This is the only allowed disk-without-invocation entry."

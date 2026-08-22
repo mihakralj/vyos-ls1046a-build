@@ -2421,19 +2421,117 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
         return 0;
 }
 
+/*
+ * T-M8-3: refresh a HW-backed flow's cached counters from the silicon FE
+ * ehash record so offloaded flows (whose frames bypass the kernel) report
+ * real packet/byte totals to nft and to `dump-flows`.
+ *
+ * Lifetime/locking: fman_pcd_fe_flow_get_stats() takes pcd->fe_lock (a mutex),
+ * so it cannot run under rcu_read_lock. We therefore (1) snapshot the flow's
+ * key/port/hw_backed under RCU, (2) drop RCU and read the silicon counters,
+ * (3) re-look-up the cookie under RCU and store the result only if the SAME
+ * live flow is still present — a concurrent DESTROY that freed the original
+ * (call_rcu) simply means we skip the store. Process context (nft STATS
+ * callback) only; the RCU-held genl dump path reads the last cached snapshot.
+ */
+static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
+                                         u64 *d_packets, u64 *d_bytes,
+                                         bool *is_hw_backed)
+{
+        struct ask_flow_key key;
+        u8 kbuf[ASK_FE_KEY_SIZE_DUAL];
+        u64 hw_pkts = 0, hw_bytes = 0;
+        struct ask_flow *fl;
+        struct fman *fm;
+        u32 generation;
+        u8 port_id;
+
+        *d_packets = 0;
+        *d_bytes = 0;
+        *is_hw_backed = false;
+
+        rcu_read_lock();
+        fl = ask_flow_lookup(t, cookie);
+        if (!fl || !fl->hw_backed) {
+                rcu_read_unlock();
+                return false;
+        }
+        *is_hw_backed = true;
+        key = fl->key;          /* value copy; safe to use after unlock */
+        port_id = fl->key.port_id;
+        generation = fl->generation;
+        rcu_read_unlock();
+
+        fm = ask_hw_get_fman();
+        if (!fm)
+                return false;
+
+        ask_fe_build_key_dual(&key, kbuf);
+        if (fman_pcd_fe_flow_get_stats(fm, port_id, kbuf,
+                                       ASK_FE_KEY_SIZE_DUAL,
+                                       &hw_pkts, &hw_bytes, NULL) != 0)
+                return false;
+
+        /*
+         * Re-look-up and store only if the SAME live flow still owns the
+         * cookie. The cookie is a recycled slab pointer; a DESTROY->REPLACE
+         * during the getter's fe_lock window can hand it to a NEWER flow. The
+         * generation stamp (immutable per flow) is the identity check every
+         * other path here uses (ask_flow_gen_is_current); without it we would
+         * write one flow's silicon totals onto an unrelated recycled flow.
+         */
+        rcu_read_lock();
+        fl = ask_flow_lookup(t, cookie);
+        if (fl && fl->hw_backed && fl->generation == generation) {
+                ask_flow_set_hw_stats(fl, hw_pkts, hw_bytes,
+                                      d_packets, d_bytes);
+                rcu_read_unlock();
+                return true;
+        }
+        rcu_read_unlock();
+        return false;
+}
+
 static int ask_flow_offload_stats(struct flow_cls_offload *f)
 {
         struct ask_flow_table *t = ask_flow_default_table();
         u64 packets = 0, bytes = 0, last_seen_ns = 0;
+        u64 d_packets = 0, d_bytes = 0;
+        bool is_hw_backed = false, refreshed;
         int rc;
 
         if (!t)
                 return -EOPNOTSUPP;
 
+        /*
+         * T-M8-3: for a HW-backed flow, pull the silicon counters into the
+         * cached absolute stats (for `dump-flows`/`get-flow`) and get back the
+         * per-poll DELTA to feed the nft flowtable's ACCUMULATING
+         * flow_stats_update(). For a software-fallback flow (no silicon
+         * record) the cached ask_flow.stats already carry SW-path counters, so
+         * fall back to reporting those.
+         */
+        refreshed = ask_fe_flow_refresh_hw_stats(t, (u64)f->cookie,
+                                                 &d_packets, &d_bytes,
+                                                 &is_hw_backed);
+
         rc = ask_flow_get_stats(t, (u64)f->cookie,
                                 &packets, &bytes, &last_seen_ns);
         if (rc)
                 return rc;
+
+        if (!is_hw_backed) {
+                /* SW-fallback: no per-poll HW delta exists. Report the cached
+                 * absolute totals (legacy behaviour; these are the SW-path
+                 * counts maintained by ask_flow_update_stats). */
+                d_packets = packets;
+                d_bytes = bytes;
+        } else if (!refreshed) {
+                /* HW-backed but the silicon read missed this poll (transient):
+                 * keepalive only, no counter delta. */
+                d_packets = 0;
+                d_bytes = 0;
+        }
 
         /*
          * PR14z3 (2026-05-19): keep offloaded flows alive against the
@@ -2479,7 +2577,10 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
          * still want eventually for accurate Gbps reporting via
          * `nft list flowtable`, but is orthogonal to M2 gate pass).
          */
-        flow_stats_update(&f->stats, bytes, packets, 0, jiffies,
+        /* flow_stats_update() ACCUMULATES; cumulative silicon totals must
+         * never be passed directly. d_* is current minus the previous poll's
+         * per-flow baseline (or current after a silicon record reset). */
+        flow_stats_update(&f->stats, d_bytes, d_packets, 0, jiffies,
                           FLOW_ACTION_HW_STATS_DELAYED);
         return 0;
 }

@@ -2680,6 +2680,8 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_198.py" 2>&1
     echo "### fman_pcd.c: F-198 hardware TX terminal (INSERT_L2_HDR + ENQUEUE_PKT)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_228.py" 2>&1
+    echo "### fman_pcd.c: F-228 key-addressed per-flow stats getter (T-M8-3)"
 fi
 
 # F-199 (2026-08-16, T-M7-2 S4): per-egress no-confirm TX FQ. Adds a

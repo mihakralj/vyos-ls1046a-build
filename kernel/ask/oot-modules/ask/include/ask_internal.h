@@ -609,6 +609,20 @@ bool hw_backed;
  */
 u32 generation;
 struct ask_flow_stats stats;
+/*
+ * T-M8-3: baseline of the silicon FE ehash record's cumulative
+ * packet/byte counters as of the previous FLOW_CLS_STATS poll. The
+ * hardware totals are absolute; the nft flowtable's flow_stats_update()
+ * ACCUMULATES, so ask_flow_offload_stats() must report the delta since
+ * this baseline (mirrors sfc/cxgb4/enetc old_* pattern) and then advance
+ * it. Guarded by stats.syncp. A per-key record is destroyed+recreated on
+ * DESTROY->REPLACE, so the absolute can reset to < baseline; that is
+ * treated as a counter reset (delta = current, baseline = current).
+ * Distinct from stats.packets/bytes, which hold the ABSOLUTE total that
+ * dump-flows/get-flow report.
+ */
+u64 hw_reported_packets;
+u64 hw_reported_bytes;
 };
 
 /*
@@ -766,6 +780,17 @@ int ask_flow_get_stats(struct ask_flow_table *t, u64 cookie,
 
 /* Update stats from hardware (used by the 1Hz poller in PR15h). */
 void ask_flow_update_stats(struct ask_flow *f, u64 add_packets, u64 add_bytes);
+
+/* T-M8-3: store ABSOLUTE per-flow counters read back from silicon (FMan FE
+ * ehash record) and, atomically under the same seqcount, compute the DELTA
+ * since the previous poll's baseline (advancing the baseline). @d_packets /
+ * @d_bytes receive the delta the nft flowtable's accumulating
+ * flow_stats_update() must be fed; a silicon reset (absolute < baseline, e.g.
+ * after a per-key DESTROY->REPLACE) is reported as delta = current. The
+ * absolute total lands in f->stats.{packets,bytes} for dump-flows/get-flow.
+ * last_seen_ns advances only when the packet total grew. */
+void ask_flow_set_hw_stats(struct ask_flow *f, u64 hw_packets, u64 hw_bytes,
+			   u64 *d_packets, u64 *d_bytes);
 
 /* Iterate all flows (used by ASK_CMD_DUMP_FLOWS). The walker holds
  * the rht bucket lock across the per-entry callback, so the callback
