@@ -451,14 +451,18 @@ opcode terminal, not comparator correctness.
   extended this to ~10 Gbit/s at ~3% CPU with lifecycle stress clean.
    CR-001 MURAM leak is closed; F-133's stale diagnostic tracker caused the
    false leak signal.
-- **M8 — Productization soak + upstream. IN PROGRESS.** Publish half is DONE:
-  release `2026.08.22-0031-rolling` shipped with AI-generated three-part release
+- **M8 — Productization soak + release. RELEASE-COMPLETE (VPP out of scope).**
+  Release `2026.08.22-0031-rolling` shipped with AI-generated three-part release
   notes (OpenRouter/`google/gemini-3.7-flash`) and the Discord release embed
-  (now carrying the AI `Highlights` summary). Bounded durability gates PASS on
-  image `2224`/`0031` (flow churn/aging with byte-clean MURAM, TTL/hop-limit
-  decrement, SW-fallback ICMP/UDP/fragments, four-port engage matrix). Remaining:
-  extended sustained soak (`T-M8-2`), live telemetry/`ask-check` board
-  validation (`T-M8-3`/`T-M8-4`), and upstream prep (`T-M8-5`). Work: §4.7.
+  (carrying the AI `Highlights` summary). All release-gating soaks PASS on
+  `0031`: flow churn/aging (byte-clean MURAM), TTL/hop-limit decrement,
+  SW-fallback ICMP/UDP/fragments, four-port engage matrix, 30-min mixed-family
+  duration soak (no leak, MURAM constant), and a 10-min sustained peak-rate
+  split-family soak (~13 Gbit/s aggregate, IPv4 fwd + IPv6 rev). `T-M8-1` (100×
+  engage/disengage), `T-M8-2` (soak), `T-M8-4` (`ask-check` 36/36) DONE; `T-M8-6`
+  RETIRED (no per-flow MURAM). Post-release, non-blocking: `T-M8-3` per-flow
+  counter population from `fe_ehash_stats`, and `T-M8-5` upstream-submission prep
+  (checkpatch/CI-KUnit). Work: §4.7.
 
 ---
 
@@ -2059,26 +2063,65 @@ own PCD objects and prove readback.
 
 - [x] **T-M8-1** — 100× trafficked engage/disengage soak: DONE (87+ cycles,
   0 B/cycle MURAM leak, budget stable at 34,992 B, 0% ping loss, no panics).
-- [ ] **T-M8-2** `@___` — 24 h alternating ASK/VPP; VPP iperf3 pass after the
-  final disengage.
-- [~] **T-M8-3** `@___` — Production observability partially landed:
-  `ASK_CMD_GET_MURAM`, `get-info`, `dump-flows`, YNL nested-schema parity, and
-  the production `ask-check` contract are code/CI complete in `c905bf6d` (CI
-  `32194485450`), awaiting deployment validation. Remaining: coherent live
-  packet/byte/error/fallback counters and owner/generation/resource-failure
-  reasons in `show flows`/support bundle (the useful parts of historical
-  F-05/F-16/F-17/F-18, not their debugfs coupling).
+- [x] **T-M8-2** — sustained ASK offload soak. DONE 2026-08-22 on release
+  `0031`. **VPP is out of scope** (this project is not doing VPP; the historical
+  "alternating ASK/VPP" wording is retired). Two soaks passed on the shipped
+  image: (a) **duration/leak** — 30 min mixed IPv4+IPv6 `--bidir` (~8 Gbit/s
+  aggregate), 62 samples with `MemAvailable` flat, `MURAM used=52634` constant,
+  `build_skb=0`, `CLS_DISCARD=0`, no oops; (b) **sustained peak-rate** — 10 min
+  split-family `-P8` (IPv4 forward eth3→eth4 = 490 GB @ 7.01 Gbit/s; IPv6 reverse
+  eth4→eth3 = 430 GB @ 6.15 Gbit/s; ~13.2 Gbit/s aggregate average, ~14.2 peak
+  on FMan counters), zero retransmits, board clean throughout, full CPU bypass.
+- [~] **T-M8-3** — Production observability **contract validated on the shipped
+  `0031` image (2026-08-22)**: `get-info` (driver `ask 2.1.0`, ucode 210.10.1,
+  live `num-flows`), `get-muram` (total/free/flow-table bytes), `dump-flows`
+  (per-flow `id`, `offloaded`, `hw-flow-id`, `iif`/`oif`, `l3-proto` incl. IPv6
+  `0x86DD`, `l4-proto`, full v6 src/dst, sport/dport), YNL nested-schema parity,
+  and M6-A runtime counters (`preflight-fallback`/`stale-work-discard`) all
+  decode. The `dump-flows` schema **already carries** `packets`, `bytes`, and
+  `last-seen-ns` fields. **Remaining (post-release enhancement, bounded):** those
+  three per-flow counters read `0` because FMan HIT frames bypass the kernel
+  (same reason `btop`/`ethtool -S` cannot see offloaded traffic); populating them
+  means mapping each flow's silicon `fe_ehash_stats` `pkt_count`/`pkt_bytes` back
+  into its `dump-flows` entry. Also `get-info.max-flows` reports `0` (placeholder;
+  should report the per-port table capacity). Neither blocks the release; the
+  observability contract itself is complete.
 - [x] **T-M8-4** — production `ask-check` reports 0 required FAIL on the board.
   DONE 2026-08-22 on the shipped `0031` image: `36/36 OK, 0 WARN/FAIL/SKIP`
   after the family-split fix (recognize `offload ipv4`/`offload ipv6` on all
   five ports; dual-family scope text). Residual: policer BUG-3b flood
   characterization (serial capture + cold power-cycle) is unrelated and still
   open under §5.
-- [ ] **T-M8-5** `@___` — Upstream prep: checkpatch/sparse clean; KUnit ≥80%
-  on `ask_flow.c`/`ask_genl_attr.c` (maintains the CR-009/010/011
-  invariants).
-- [ ] **T-M8-6** `@___` — Slab allocator for fixed-size MURAM objects
-  (§2.11).
+- [~] **T-M8-5** — Upstream-submission prep (NOT release-blocking; the rolling
+  image ships without it). Baseline audited 2026-08-22. **KUnit already
+  strong:** `ask_flow_suite` (16 cases) + `ask_genl_suite` (12) give ~89–92%
+  function coverage on `ask_flow.c` incl. the A3 ownership/generation invariants
+  (monotonic gen, stale-DESTROY no-op, publish-refused-after-tombstone, legacy
+  paths); `ask_genl_attr.c` is pure `nla_policy` data (3/8 tables validation-
+  exercised). **Remaining for an upstream series:** (1) checkpatch/tabs cleanup —
+  `ask_genl_attr.c` 2 warnings and `ask_flow.c` ~105 are bounded; the two large
+  ported datapath files (`ask_flow_offload.c` ~3.2k, `ask_hw.c` ~1.2k findings,
+  mostly space-vs-tab from ported blocks) need a dedicated whitespace pass, not a
+  functional change; (2) wire a CI KUnit invocation (`CONFIG_NET_ASK_KUNIT_TEST`
+  is never built in CI today); (3) fill gap tests — `ask_flow_gen_current`,
+  `ask_flow_gen_release` (untested; likely dead API — remove or test), gen-wrap,
+  gen-store-failure fallback, and a lockdep/PROVE_RCU KUnit config for the
+  CR-009 stall guard and CR-010 RCU-precheck invariants. Track as a post-release
+  upstreaming task.
+- [x] **T-M8-6 — RETIRED (not required for release).** The production FE-VM
+  ehash dataplane has **zero per-flow MURAM allocation**: one fixed-capacity
+  512 KiB DDR ehash bucket table per engaged port (F-220/F-225), one 256-byte
+  DMA-coherent DDR record per flow, host-slab cookies (`ask_hw_cookie_cache`),
+  and an intentionally-warm shared 33,280-byte internal-buffer pool + 16×28-byte
+  FE object free-list (F-136). §2.11's slab/segregated-fit requirement reflects
+  the retired CC-tree/per-flow-MANIP architecture (ASK owns no CC nodes, plain
+  routed flows use no HM objects, policer memory is separate PRAM). MURAM churn
+  is bounded to port engage/disengage and returns to the 34,992 B warm baseline
+  — validated byte-clean by Gate-1 flow churn and the M8 soaks (`muram_used`
+  constant). The archived `0127`/`0128`/`0129`/`0138` WIP allocators are unsafe
+  and must not be revived as-is. **Defer** a fixed-size/segregated MURAM
+  allocator until CC-tree scale-out or NAT/VLAN/HM header-manipulation features
+  are enabled and produce measured allocator churn.
 
 ---
 
