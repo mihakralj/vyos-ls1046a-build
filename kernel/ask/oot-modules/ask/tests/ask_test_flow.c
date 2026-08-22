@@ -194,6 +194,55 @@ ask_flow_get_stats(&t, 0xbad, &packets, &bytes, &last_seen_ns),
 ask_flow_table_destroy(&t);
 }
 
+/* T-M8-3: ask_flow_set_hw_stats stores absolute totals for dump-flows and
+ * returns the per-poll delta for the accumulating nft flow_stats_update,
+ * including the DESTROY->REPLACE silicon-reset case. */
+static void ask_flow_test_set_hw_stats(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+struct ask_flow *f;
+u32 hw_id = 0;
+u64 packets = 0, bytes = 0, last_seen_ns = 0;
+u64 dp = 0, db = 0;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-hwstats"), 0);
+
+make_key_v4(&key, htonl(0x0a000007), htonl(0x0a000008),
+	    htons(6666), htons(443));
+KUNIT_ASSERT_EQ(test,
+	ask_flow_insert(&t, 77, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id), 0);
+
+rcu_read_lock();
+f = ask_flow_lookup(&t, 77);
+KUNIT_ASSERT_NOT_NULL(test, f);
+
+/* First poll: absolute 100/14000 -> delta == absolute (baseline was 0). */
+ask_flow_set_hw_stats(f, 100, 14000, &dp, &db);
+KUNIT_EXPECT_EQ(test, dp, 100ULL);
+KUNIT_EXPECT_EQ(test, db, 14000ULL);
+
+/* Second poll: absolute grew to 250/35000 -> delta is the increment. */
+ask_flow_set_hw_stats(f, 250, 35000, &dp, &db);
+KUNIT_EXPECT_EQ(test, dp, 150ULL);
+KUNIT_EXPECT_EQ(test, db, 21000ULL);
+
+/* Silicon reset (record re-created below baseline): delta == new absolute. */
+ask_flow_set_hw_stats(f, 30, 4000, &dp, &db);
+KUNIT_EXPECT_EQ(test, dp, 30ULL);
+KUNIT_EXPECT_EQ(test, db, 4000ULL);
+rcu_read_unlock();
+
+/* Absolute total for dump-flows tracks the latest hardware value. */
+KUNIT_EXPECT_EQ(test,
+	ask_flow_get_stats(&t, 77, &packets, &bytes, &last_seen_ns), 0);
+KUNIT_EXPECT_EQ(test, packets, 30ULL);
+KUNIT_EXPECT_EQ(test, bytes,   4000ULL);
+KUNIT_EXPECT_GT(test, last_seen_ns, 0ULL);
+
+ask_flow_table_destroy(&t);
+}
+
 static void ask_flow_test_walk_and_flush(struct kunit *test)
 {
 struct ask_flow_table t;
@@ -700,6 +749,7 @@ KUNIT_CASE(ask_flow_test_insert_lookup_remove),
 KUNIT_CASE(ask_flow_test_duplicate_rejected),
 KUNIT_CASE(ask_flow_test_remove_missing),
 KUNIT_CASE(ask_flow_test_stats),
+KUNIT_CASE(ask_flow_test_set_hw_stats),
 KUNIT_CASE(ask_flow_test_walk_and_flush),
 KUNIT_CASE(ask_flow_test_stress_walk),
 KUNIT_CASE(ask_flow_test_hw_fallback_insert_remove),

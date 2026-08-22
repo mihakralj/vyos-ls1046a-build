@@ -182,6 +182,10 @@ int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 			   const struct fman_pcd_fe_flow_action *action);
 int  fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
                           const u8 *key, u8 key_size);
+/* T-M8-3: read one flow's silicon packet/byte counters by key (F-228). */
+int  fman_pcd_fe_flow_get_stats(struct fman *fm, u8 hw_port_id,
+                                const u8 *key, u8 key_size,
+                                u64 *packets, u64 *bytes, u32 *timestamp);
 
 /* FMan L3 forwarding hardware opcodes (lf-5.4 LSDK reference) */
 #define FMAN_FE_OP_STRIP_ETH_HDR    0x80000010

@@ -349,9 +349,44 @@ KEEP    pcd-snapshot reversibility gate as-is
 - ✅ §17 static_assert header (11 guards) + KUnit test (8 cases) via F_089. (v1.3)
 - ✅ Versioned duplicates reduced from 5 to 2 (F_068_2 deleted, M2_4 consolidated). (v1.3)
 
+**v1.6 — Phase-2 fold campaign progress (2026-08-22).** The Layer-2 fixup
+count grew far beyond the v1.3 snapshot during the IPv4/IPv6 silicon work
+(peak 122 `*.py`). Folds/removals to date, each S0-qdrant-gated and
+CI-validated:
+- Folded into owning patches: `F_109`→`0153`, `F_116`→`0153`, `F_104`→`0109`
+  (2026-08-18 pilots).
+- Removed dead/dormant (2026-08-22, commit after `3f8e6ad2`): `F_174`
+  (sole dormant, superseded by F-175, DEALLOCATE theory a misattribution)
+  and `F_098` (permanent no-op — only fired `if ctx->cpu in src`, but owning
+  patch `0135` already ships the correct `void __iomem *ctx` form). Count
+  122→120, dormant set now empty.
+
+**Corrected classification for the remaining campaign (S0-gated 2026-08-22 —
+this OVERRIDES the earlier "delete the diagnostics" intent):**
+- **Do NOT delete yet — still needed:** `F_099`/`F_100`/`F_105`/`F_106` are
+  AF_XDP/ZC diagnostics for **M4, which is still open** (VPP ZC unresolved);
+  their `remove-after-M4` condition is unmet. `F_126`/`F_127` are gated on
+  **F-125 closure** (unconfirmed). `F_192`/`F_193`/`F_194` are the E2 FMan
+  diagnostic surface, already inert in production via
+  `CONFIG_FMAN_PCD_DEBUG_FS` (F-191, default-off) and used in board work as
+  recently as 2026-08-15 — deleting removes live debug capability for zero
+  production benefit.
+- **Safe single-owner folds (proven roundtrip+CI+board procedure), when
+  scheduled:** `F_094`→`0153`, `F_057`→`0128`, `F_073D`→`0127`,
+  `F_131`→`0126`, `F_089`→a dedicated tripwire patch.
+- **Cluster-regenerate only (never one-fixup-at-a-time — they anchor on each
+  other's rewritten text):** engage-lifecycle (F_090/091/092/128/129/134/
+  135/136/139/107/122), MURAM (F_130/131/M2_4_3/M2_4_4), ehash-encoding
+  (F_143/144/145/149/152/147/153/148 — contains revert pairs), CC-dispatch
+  (F_181/182/183/185/186/187/190), resolver (F_196/197).
+- **Keep (do not touch):** production HIT path, the active IPv6 dual-lane
+  campaign (F_140/204/205/209–214/218–226), recent board fixes pending soak
+  (F_202/215/216/222/227/228), and every Tier-C hot-file fixup
+  (`dpaa_eth.c`/`fman_keygen.c`/`fman_port.c`).
+
 **Still open:**
 - ❌ Delete remaining 2 versioned duplicates: `M2_4_3.py`, `M2_4_4.py` (independent fixups, not true duplicates — consolidated disposition).
-- ❌ The second writer (Layer 2) still exists — 18 fixup files. Tourniquet, not cure.
+- ❌ The second writer (Layer 2) still exists — ~118 fixup files. Tourniquet, not cure.
 - ❌ Full pixel-perfect round-trip identity gate (needs remote canonical branch or fresh-clone bootstrap).
 - ❌ §17 NIA `static_assert` guards are `#ifdef`-disabled from `fman_pcd.c` (constants in `fman_keygen.c`). Move to shared header to activate.
 
