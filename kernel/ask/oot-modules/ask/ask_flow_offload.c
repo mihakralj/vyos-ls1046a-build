@@ -1212,6 +1212,27 @@ int ask_intent_lower(const struct ask_flow_intent *in,
                          * pre-A1, was never encoded in action_flags. Keep it
                          * out of the legacy flags to preserve byte-identity. */
                         break;
+                case ASK_ACTION_NAT_SRC:
+                case ASK_ACTION_NAT_DST:
+                case ASK_ACTION_NAPT_SPORT:
+                case ASK_ACTION_NAPT_DPORT:
+                        /* T-M6-7.1: NAT/PAT. Admitted to the legacy flags only
+                         * when the experiment gate is armed; otherwise fail
+                         * closed to software (default shipping behaviour). The
+                         * actual rewrite values ride the flow key
+                         * (key->nat_*), stashed by ask_parse_action; the
+                         * preflight re-checks the gate + eth0 exclusion, and
+                         * ask_fe_flow_insert only fills action.nat_* when
+                         * armed, keeping the F-230 emitter dormant otherwise. */
+                        if (!ask_hw_nat_offload_armed())
+                                return -EOPNOTSUPP;
+                        if (in->actions[i].type == ASK_ACTION_NAT_SRC)
+                                flags |= ASK_ACT_NAT_SRC;
+                        else if (in->actions[i].type == ASK_ACTION_NAT_DST)
+                                flags |= ASK_ACT_NAT_DST;
+                        else
+                                flags |= ASK_ACT_PAT;
+                        break;
                 default:
                         return -EOPNOTSUPP;
                 }
@@ -1787,6 +1808,29 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         ether_addr_copy(action.egress_mac, key->egress_mac);
         action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
                                 ? ETH_P_IPV6 : ETH_P_IP;
+
+        /*
+         * T-M6-7.1 arming: copy the parsed/carry NAT tuple into the public
+         * FMan action only when the explicit ask.nat_offload experiment gate
+         * is armed. Disarmed (default), action was memset(0) above and these
+         * fields stay zero -> F-230's `if (nat && nat->flags)` is skipped and
+         * the FE record remains byte-identical to F-200/F-226. NAT flag bit
+         * assignments intentionally match FMAN_PCD_NATF_* (1/2/4/8).
+         */
+        if (key->nat_flags) {
+                /* Close the module-param race between parse/lower/preflight and
+                 * record publication: if the gate was cleared after preflight,
+                 * NEVER insert a plain routed record for a NAT flow (silent
+                 * misforward). Fail closed so the caller removes the tentative
+                 * HW-backed SW entry and keeps this flow in the kernel path. */
+                if (!ask_hw_nat_offload_armed())
+                        return -EOPNOTSUPP;
+                action.nat_flags = key->nat_flags;
+                memcpy(action.nat_sip, key->nat_src_ip, 16);
+                memcpy(action.nat_dip, key->nat_dst_ip, 16);
+                action.nat_sport = key->nat_sport;
+                action.nat_dport = key->nat_dport;
+        }
 
         /* F-195/F-204 contract: the second argument remains exclusively the
          * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
