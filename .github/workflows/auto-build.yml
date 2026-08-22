@@ -557,7 +557,7 @@ jobs:
           # multi-line prompt is escaped safely; never place the secret in argv
           # or logs. The model returns Markdown in choices[0].message.content.
           jq -n --arg model "$AI_MODEL" --rawfile prompt /tmp/notes_prompt.md \
-            '{model:$model, messages:[{role:"user",content:$prompt}], temperature:0.2, max_tokens:8000}' \
+            '{model:$model, messages:[{role:"user",content:$prompt}], temperature:0.2, max_tokens:10000}' \
             > /tmp/ai_request.json
 
           set +e
