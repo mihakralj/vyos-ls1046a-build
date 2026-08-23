@@ -840,10 +840,10 @@ def detect_present_fans(i2c_fd: int, hwmon_dir: str) -> list[dict]:
 CAL_KICK_SETTLE   = 2.5   # settle after re-kicking a fan that fell dark
 CAL_ABORT_TEMP    = 75.0  # warm-restart safety: abort probe and keep known-good hi
 SETTLE_MIN_S      = 2     # ignore the first coast-down second(s) before judging flat
-SETTLE_MAX_S      = 12    # hard cap on how long to wait for one down-step to settle
+SETTLE_MAX_S      = 10    # hard cap on how long to wait for one down-step to settle
 SETTLE_POLL_S     = 1.0   # derivative sampling interval (1 s -> delta is per-second)
 SETTLE_CONFIRM    = 2     # consecutive flat samples required to call it settled
-SETTLE_FLAT_ABS   = 15    # |delta| this small (rpm/s) counts as flat regardless of rpm
+SETTLE_FLAT_ABS   = 25    # |delta| this small (rpm/s) counts as flat regardless of rpm
 SETTLE_FLAT_FRAC  = 0.04  # ...or |delta| <= 4% of current rpm (whichever is larger)
 # The probe must accept a candidate only if it clears RUN_MARGIN_RPM by a comfort
 # band, not merely touches it — otherwise a fan sitting right on the margin (e.g.
