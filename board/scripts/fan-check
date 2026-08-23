@@ -7,7 +7,8 @@
 #   - all 5 thermal zones (ddr, serdes, fman, cluster, sec) with current
 #     temperature, fan-pid setpoint, fan-pid crit_temp, and a
 #     [COOL]/[WARM]/[HOT]/[CRIT] tag based on those thresholds
-#   - EMC2305 PWM duty cycle (raw 0..255 and percent) and fan tachometer RPM
+#   - EMC2305 per-channel PWM duty (raw 0..255 and percent), calibrated
+#     minimum running duty, tachometer RPM, fault flag, and operating state
 #   - fan-pid daemon status + uptime + last log line + per-zone PWM demands
 #   - sysfs hwmon paths used (so the reader can see which hwmonN is the EMC2305
 #     this boot — the index is unstable)
@@ -45,8 +46,22 @@ declare -A CRIT=(
     [sec-thermal]=85
 )
 HARD_FAULT_TEMP=100
-PWM_MIN_RUN=40
 PWM_MAX=255
+# Per-fan spinning floors are NOT hardcoded: fan-pid discovers them at boot (for
+# whatever fan the user plugged into each port) and continuously refines them,
+# publishing the live values to FLOOR_STATE_FILE. fan-check reads them from
+# there; a 0 means "unknown" (daemon not running / hasn't published yet).
+FLOOR_STATE_FILE=/run/fan-pid/floors
+declare -A FAN_MIN_RUN=([1]=0 [2]=0)
+if [ -r "$FLOOR_STATE_FILE" ]; then
+    while IFS='=' read -r reg floor; do
+        [[ "$floor" =~ ^[0-9]+$ ]] || continue   # ignore malformed lines
+        case "$reg" in
+            0x30) FAN_MIN_RUN[1]=$floor ;;
+            0x40) FAN_MIN_RUN[2]=$floor ;;
+        esac
+    done < "$FLOOR_STATE_FILE"
+fi
 
 # Display order (matches the daemon's max-policy combine ordering)
 ZONE_ORDER=(ddr-thermal serdes-thermal fman-thermal cluster-thermal sec-thermal)
@@ -183,27 +198,82 @@ if [ -z "$EMC" ]; then
          "(check i2c bus / driver bind)"
     fan_emc_ok=0
 else
-    pwm=$(cat "$EMC/pwm1" 2>/dev/null || echo '?')
-    rpm=$(cat "$EMC/fan1_input" 2>/dev/null || echo '?')
-    fan2=$(cat "$EMC/fan2_input" 2>/dev/null || echo '?')
-    pwm_pct="?"
-    if [ "$pwm" != "?" ]; then
-        pwm_pct=$(awk -v p="$pwm" -v m="$PWM_MAX" 'BEGIN{printf "%.0f", p*100.0/m}')
-    fi
-    pwm_state="?"
-    if [ "$pwm" != "?" ]; then
-        if [ "$pwm" -eq 0 ]; then pwm_state="${C_GREEN}OFF${C_RST}"
-        elif [ "$pwm" -lt "$PWM_MIN_RUN" ]; then pwm_state="${C_YELLOW}STALL-RISK (<MIN_RUN=${PWM_MIN_RUN})${C_RST}"
-        elif [ "$pwm" -ge "$PWM_MAX" ]; then pwm_state="${C_RED}MAX (failsafe / hard fault)${C_RST}"
-        else pwm_state="${C_BLUE}RUNNING${C_RST}"
-        fi
-    fi
     printf "  hwmon path : %s\n" "$EMC"
-    printf "  PWM duty   : %s/%d  (%s%%)  %s\n" "$pwm" "$PWM_MAX" "$pwm_pct" "$pwm_state"
-    printf "  Fan 1 RPM  : %s\n" "$rpm"
-    [ "$fan2" != "?" ] && [ "$fan2" != "0" ] && \
-        printf "  Fan 2 RPM  : %s  (Mono Gateway has only 1 physical fan; non-zero is unusual)\n" "$fan2"
+    printf "  %-5s  %4s  %4s  %4s  %5s  %8s  %-5s  %s\n" \
+        "fan" "min" "cur" "max" "%" "RPM" "fault" "state"
+    printf "  %s\n" "--------------------------------------------------------------------------"
     fan_emc_ok=1
+    for channel in 1 2; do
+        pwm_path="$EMC/pwm${channel}"
+        rpm_path="$EMC/fan${channel}_input"
+        fault_path="$EMC/fan${channel}_fault"
+        [ -r "$pwm_path" ] && [ -r "$rpm_path" ] || continue
+
+        pwm=$(cat "$pwm_path" 2>/dev/null || echo '?')
+        rpm=$(cat "$rpm_path" 2>/dev/null || echo '?')
+        fault=$(cat "$fault_path" 2>/dev/null || echo '?')
+        min_run=${FAN_MIN_RUN[$channel]}
+        pwm_pct="?"
+        if [[ "$pwm" =~ ^[0-9]+$ ]]; then
+            pwm_pct=$(awk -v p="$pwm" -v m="$PWM_MAX" 'BEGIN{printf "%.0f", p*100.0/m}')
+        fi
+
+        # The EMC2305 tachometer cannot resolve speeds below ~960 RPM, which is
+        # roughly the RPM a fan produces at its calibrated `min` duty. So when
+        # cur < min the tach reads 0 even though the fan is almost certainly
+        # still spinning — that is a BLIND channel (RPM unreadable), NOT a
+        # stall. A genuine fault is only cur >= min with no tach pulses.
+        rpm_disp="$rpm"
+        min_disp="$min_run"
+        [ "$min_run" = "0" ] && min_disp="?"
+        if [ "$fault" = "1" ]; then
+            fault_state="${C_RED}yes${C_RST}"
+            pwm_state="${C_RED}FAULT${C_RST}"
+            fan_emc_ok=0
+        elif [ "$rpm" = "?" ] || [ "$fault" = "?" ] || [ "$pwm" = "?" ]; then
+            fault_state="${C_RED}?${C_RST}"
+            pwm_state="${C_RED}READ-FAIL${C_RST}"
+            fan_emc_ok=0
+        elif [ "$pwm" -eq 0 ]; then
+            fault_state="no"
+            pwm_state="${C_GREEN}OFF${C_RST}"
+        elif [ "$min_run" = "0" ]; then
+            # Floor unknown (fan-pid not running / hasn't published a floor yet):
+            # report raw tach without the blind/stall classification.
+            fault_state="no"
+            if [ "$rpm" -gt 0 ]; then
+                pwm_state="${C_BLUE}RUNNING${C_RST}"
+            else
+                rpm_disp="n/a"
+                pwm_state="${C_DIM}floor unknown${C_RST}"
+            fi
+        elif [ "$pwm" -lt "$min_run" ]; then
+            # Below the tach-visible floor: expected, informational, not a fault.
+            fault_state="no"
+            if [ "$rpm" -gt 0 ]; then
+                pwm_state="${C_BLUE}RUNNING${C_RST}"
+            else
+                rpm_disp="n/a"
+                pwm_state="${C_DIM}BLIND (<min ${min_run})${C_RST}"
+            fi
+        elif [ "$rpm" -eq 0 ]; then
+            # At/above the visible floor but no tach pulses -> genuine problem
+            # (stalled, disconnected, dead fan, or broken tach wire).
+            fault_state="no"
+            pwm_state="${C_RED}NO-TACH (stall/dead?)${C_RST}"
+            fan_emc_ok=0
+        elif [ "$pwm" -ge "$PWM_MAX" ]; then
+            fault_state="no"
+            pwm_state="${C_BLUE}MAX${C_RST}"
+        else
+            fault_state="no"
+            pwm_state="${C_BLUE}RUNNING${C_RST}"
+        fi
+
+        printf "  Fan %-1d  %4s  %4s  %4s  %4s%%  %8s  %-5b  %b\n" \
+            "$channel" "$min_disp" "$pwm" "$PWM_MAX" "$pwm_pct" \
+            "$rpm_disp" "$fault_state" "$pwm_state"
+    done
 fi
 echo
 
