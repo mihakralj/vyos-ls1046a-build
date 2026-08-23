@@ -411,8 +411,9 @@ struct ask_flow_key;
 int  ask_hw_flow_preflight(const struct ask_flow_key *key,
                            u32 oif, u32 action_flags,
                            enum ask_hw_dir dir);
-/* T-M6-7.1 experiment gate (module param ask.nat_offload, default false). */
-bool ask_hw_nat_offload_armed(void);
+/* NAT offload gates: IPv4 is shipping/default-on; NAT66 is experiment/default-off. */
+bool ask_hw_nat44_offload_armed(void);
+bool ask_hw_nat66_offload_armed(void);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
         enum ask_hw_dir dir,

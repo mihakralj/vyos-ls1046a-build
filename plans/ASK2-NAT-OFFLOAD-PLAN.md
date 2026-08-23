@@ -5,12 +5,18 @@
 > S1 SNAT wire-verified (HELGA saw translated src, 0 retr); S2 DNAT
 > wire-verified; S3 SNAT+masquerade TCP -P4 7.3 Gbit/s 0-retr + UDP
 > 500 Mbit/s 0-loss, no leak/wedge. Productized in commit 625d0d2c
-> (default nat_offload=1, get-info advertises IPV4|IPV6|NAT|PAT,
+> (default nat44_offload=1, get-info advertises IPV4|IPV6|NAT|PAT,
 > `show offload config` shows `nat`), CI 32618608347, ISO
 > vyos-2026.08.23-0444-rolling. IPv6 NAT (fused v6 opcode 0x2f) is emitted
 > by F-230 but NOT silicon-tested and is REJECTED in preflight even when the
 > gate is on — it needs its own S-gate before advertising. eth0 management
-> is never NAT-offloaded. Runtime `nat_offload=0` disables for diagnosis.
+> is never NAT-offloaded. Runtime `nat44_offload=0` disables for diagnosis.
+>
+> NAMING/SCOPE: nat44 = IPv4<->IPv4 (shipping). nat66 = IPv6<->IPv6
+> (experiment gate `ask.nat66_offload`, default off, S-gate pending).
+> NAT46/NAT64 (cross-family) are NOT hardware-offloadable — the FE-VM has no
+> L3 header re-synthesis/family-conversion opcode and Linux does not present
+> them via flowtable offload; they always fall back to software.
 
 
 This document now serves as the implementation/validation record for the
@@ -185,7 +191,7 @@ run in software exactly as today. Zero datapath/byte change for non-NAT flows.
   sensitive, mirror F-200/F-226).
 - §17 tripwires: static asserts for the NAT param offsets/sizes; KUnit record
   byte-layout vectors; `fe_verify` MURAM readback NAT cases.
-- Gate behind a default-OFF module param (e.g. `ask.nat_offload`) so v4/v6
+- Gate behind a default-OFF module param (e.g. `ask.nat44_offload`) so v4/v6
   routed byte-identity is preserved until proven.
 
 ### T-M6-7.2 — S0 silicon read-only (no traffic)
