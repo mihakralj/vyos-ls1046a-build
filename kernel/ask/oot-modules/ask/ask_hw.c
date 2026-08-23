@@ -108,7 +108,7 @@ static u8 ask_hw_port_family[64];
 
 /*
  * T-M6-7.1 NAT offload arming gate. Default OFF: NAT/PAT flows fail closed to
- * software (the shipping contract). When set (modprobe ask nat_offload=1) the
+ * software (the shipping contract). When set (modprobe ask nat44_offload=1) the
  * preflight stops rejecting the NAT action classes and ask.ko populates the
  * F-230 FE-VM rewrite opcodes. This is a silicon-experiment switch for the
  * S0..S3 gates; the fused-opcode encoding is UNPROVEN on 210.10.1, so this MUST
@@ -122,20 +122,43 @@ static u8 ask_hw_port_family[64];
  * Default ON for IPv4; remains runtime-disableable for diagnosis. IPv6 NAT is
  * NOT silicon-validated and is rejected in preflight even while this is true.
  */
-static bool ask_nat_offload = true;
-module_param_named(nat_offload, ask_nat_offload, bool, 0644);
-MODULE_PARM_DESC(nat_offload,
-		 "IPv4 NAT/PAT FMan hardware offload (default 1; IPv6 NAT rejected)");
+static bool ask_nat44_offload = true;
+module_param_named(nat44_offload, ask_nat44_offload, bool, 0644);
+MODULE_PARM_DESC(nat44_offload,
+		 "IPv4-to-IPv4 NAT/PAT FMan hardware offload (default 1; nat66 separate, nat46/nat64 not offloadable)");
 
-bool ask_hw_nat_offload_armed(void)
+bool ask_hw_nat44_offload_armed(void)
 {
-	bool armed = READ_ONCE(ask_nat_offload);
+	bool armed = READ_ONCE(ask_nat44_offload);
 
 	if (armed)
 		pr_info_once("ask: IPv4 NAT/PAT hardware offload enabled (silicon-validated); IPv6 NAT and eth0 remain excluded\n");
 	return armed;
 }
-EXPORT_SYMBOL_GPL(ask_hw_nat_offload_armed);
+EXPORT_SYMBOL_GPL(ask_hw_nat44_offload_armed);
+
+/*
+ * T-M6-7.8 NAT66 experiment gate. The F-230 emitter already produces the v6
+ * fused L3 opcode (0x2f = HOPLIMIT|SIP_V6|DIP_V6) with 16-byte address params,
+ * but that path has NEVER been exercised on 210.10.1. Keep it SEPARATE from
+ * the shipping IPv4 nat44_offload gate and default OFF: IPv6 NAT stays software
+ * fallback in production until its own S0..S3 gates pass. Arm only for the
+ * silicon experiment (echo 1 > /sys/module/ask/parameters/nat66_offload).
+ */
+static bool ask_nat66_offload;
+module_param_named(nat66_offload, ask_nat66_offload, bool, 0644);
+MODULE_PARM_DESC(nat66_offload,
+		 "EXPERIMENTAL IPv6 NAT66 FMan hardware offload (default 0; UNPROVEN silicon)");
+
+bool ask_hw_nat66_offload_armed(void)
+{
+	bool armed = READ_ONCE(ask_nat66_offload);
+
+	if (armed)
+		pr_warn_once("ask: EXPERIMENTAL IPv6 NAT66 hardware offload ARMED — F-230 v6 opcode 0x2f unproven on 210.10.1; eth0 excluded\n");
+	return armed;
+}
+EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
 
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
@@ -1130,7 +1153,7 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
          * program silicon. VLAN/CAAM/OP are still rejected unconditionally.
          *
          * T-M6-7.1: NAT/PAT (ASK_ACT_NAT_SRC/DST/PAT) is admitted to hardware
-         * ONLY when the ask_nat_offload experiment gate is armed AND the flow
+         * ONLY when the ask_nat44_offload experiment gate is armed AND the flow
          * is not on the eth0 management port. Disarmed (default) it fails
          * closed to software exactly as before -- byte-identical shipping
          * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
@@ -1140,13 +1163,18 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
                             ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
                 return -EOPNOTSUPP;
         if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
-                if (!ask_hw_nat_offload_armed())
+                /* IPv4 NAT is silicon-validated (S0-S3), shipping default-on.
+                 * IPv6 NAT66 uses the separate experiment gate (fused v6 opcode
+                 * 0x2f unproven); default off -> software fallback. */
+                if (key->l3_proto == ASK_FLOW_L3_IPV4) {
+                        if (!ask_hw_nat44_offload_armed())
+                                return -EOPNOTSUPP;
+                } else if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+                        if (!ask_hw_nat66_offload_armed())
+                                return -EOPNOTSUPP;
+                } else {
                         return -EOPNOTSUPP;
-                /* IPv4 NAT is silicon-validated (S0-S3); IPv6 NAT (fused v6
-                 * opcode 0x2f) is NOT — reject it to software regardless of
-                 * the gate until its own S-gate passes. */
-                if (key->l3_proto != ASK_FLOW_L3_IPV4)
-                        return -EOPNOTSUPP;
+                }
         }
 
 	/* Ingress hwport must resolve first (it owns the classifier AND its

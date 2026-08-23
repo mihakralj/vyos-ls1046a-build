@@ -1224,8 +1224,15 @@ int ask_intent_lower(const struct ask_flow_intent *in,
                          * preflight re-checks the gate + eth0 exclusion, and
                          * ask_fe_flow_insert only fills action.nat_* when
                          * armed, keeping the F-230 emitter dormant otherwise. */
-                        if (!ask_hw_nat_offload_armed())
+                        if (in->match->l3_proto == ASK_FLOW_L3_IPV4) {
+                                if (!ask_hw_nat44_offload_armed())
+                                        return -EOPNOTSUPP;
+                        } else if (in->match->l3_proto == ASK_FLOW_L3_IPV6) {
+                                if (!ask_hw_nat66_offload_armed())
+                                        return -EOPNOTSUPP;
+                        } else {
                                 return -EOPNOTSUPP;
+                        }
                         if (in->actions[i].type == ASK_ACTION_NAT_SRC)
                                 flags |= ASK_ACT_NAT_SRC;
                         else if (in->actions[i].type == ASK_ACTION_NAT_DST)
@@ -1811,7 +1818,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 
         /*
          * T-M6-7.1 arming: copy the parsed/carry NAT tuple into the public
-         * FMan action only when the explicit ask.nat_offload experiment gate
+         * FMan action only when the explicit ask.nat44_offload experiment gate
          * is armed. Disarmed (default), action was memset(0) above and these
          * fields stay zero -> F-230's `if (nat && nat->flags)` is skipped and
          * the FE record remains byte-identical to F-200/F-226. NAT flag bit
@@ -1822,8 +1829,12 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
                  * record publication: if the gate was cleared after preflight,
                  * NEVER insert a plain routed record for a NAT flow (silent
                  * misforward). Fail closed so the caller removes the tentative
-                 * HW-backed SW entry and keeps this flow in the kernel path. */
-                if (!ask_hw_nat_offload_armed())
+                 * HW-backed SW entry and keeps this flow in the kernel path.
+                 * IPv4 uses the shipping gate; IPv6 the NAT66 experiment gate. */
+                bool nat_ok = (key->l3_proto == ASK_FLOW_L3_IPV6)
+                                      ? ask_hw_nat66_offload_armed()
+                                      : ask_hw_nat44_offload_armed();
+                if (!nat_ok)
                         return -EOPNOTSUPP;
                 action.nat_flags = key->nat_flags;
                 memcpy(action.nat_sip, key->nat_src_ip, 16);
