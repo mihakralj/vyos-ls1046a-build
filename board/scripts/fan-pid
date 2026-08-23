@@ -21,12 +21,12 @@ Why a single Python file?
 Hardware refs (LS1046A RM, AGENTS.md):
   EMC2305 at i2c-7 addr 0x2e (hwmon by name, NOT by number — index drifts)
   Cortex-A72 cluster T_J,throttle = 95 C, T_J,max = 105 C
-  Stock DC-axial fan kick-start floor = PWM 39 (1044 RPM); PWM 38 stalls.
-    Daemon enforces PWM_MIN_RUN=40 with 1-PWM margin → 1020 RPM at idle.
-    The chip itself honors arbitrary 0..255 values via /dev/i2c — the floor
-    is the FAN's, not the silicon's. (Earlier "EMC2305 quantizes at 51"
-    lore was actually a kernel 6.18 sysfs driver bug; see the
-    EMC2305_I2C_ADDR comment block.)
+  Per-fan "spinning floor" is NOT hardcoded — it is discovered at boot and
+    refined at runtime (see the calibration/self-heal section below), because
+    users may attach different fans to CH1/CH2. The chip honors arbitrary
+    0..255 values via /dev/i2c — the floor is the FAN's, not the silicon's.
+    (Earlier "EMC2305 quantizes at 51" lore was actually a kernel 6.18 sysfs
+    driver bug; see the EMC2305_I2C_ADDR comment block.)
   Mono Gateway has hardware inverter on TX_DISABLE (irrelevant here, noted only
     so future GPIO-related fan-fault designs don't repeat the misdiagnosis logged
     in qdrant under "SFP+ misdiagnosis log").
@@ -44,12 +44,14 @@ Algorithm summary:
        reset on all zones to prevent overshoot when temps drop again.
     5. Hard fault: if ANY zone >= 100 C, syslog at LOG_CRIT and force PWM = 255
        (silicon damage threshold).  Continue running.
-    6. EMA-smooth the final PWM (alpha = EMA_ALPHA) before writing to sysfs to
-       avoid sub-tick jitter ringing the fan around the audible 80-PWM band.
-    7. Write final PWM if it changed by >= PWM_DEADBAND.  Reduces sysfs traffic
-       and EMC2305 register churn.
-    8. Log every LOG_INTERVAL seconds: per-zone temp, per-zone PWM, final PWM,
-       fan RPM.  At LOG_LEVEL=DEBUG, log every tick.
+    6. EMA-smooth the final shared demand (alpha = EMA_ALPHA), then clamp each
+       physical fan up to its dynamically-learned spinning floor and write both
+       EMC2305 duty registers directly over /dev/i2c.
+    7. Read both tachs every tick and self-heal each floor: raise/re-kick after
+       repeated blind reads at the floor; lower slowly after sustained comfortable
+       RPM. Export live floors to /run/fan-pid/floors for fan-check.
+    8. Log every LOG_INTERVAL seconds: per-zone temp/demand plus each fan's
+       floor/current/max and tach RPM.
 
 Tuning rationale (Kp / Ki / setpoints) — see code constants below.
 
@@ -137,21 +139,53 @@ ZONE_ALIASES = {
 }
 
 PWM_FLOOR    = 0     # PWM applied when all zones at/below setpoint
-PWM_MIN_RUN  = 40    # Kick-start floor — empirically measured 2026-05-11
-                     # on Mono Gateway DK with stock DC-axial fan: from a
-                     # stopped state, PWM=39 is the lowest value that
-                     # spins the fan up (1044 RPM); PWM=38 stays stalled.
-                     # PWM=40 spins to 1020 RPM with 1-PWM margin against
-                     # the kick-start knee. The previous lore that "the
-                     # EMC2305 quantizes PWM at 51" was actually a kernel
-                     # 6.18 sysfs driver bug — see the EMC2305_I2C_ADDR
-                     # comment block — and was wrong about the silicon.
-                     # The chip honors arbitrary 0..255 values when written
-                     # over /dev/i2c. The stall floor is the FAN's, not the
-                     # chip's. If you swap the fan to a different model,
-                     # rerun the kick-start sweep and update this constant.
 PWM_MAX      = 255   # full speed
 PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
+
+# ---------- Per-fan spinning-floor calibration + self-heal ----------------------
+# The "spinning floor" is the lowest duty at which a fan spins fast enough to
+# clear the EMC2305 tach floor (~960 RPM) and STAY visible. It is a property of
+# whatever fan the user has plugged into each port, so it is NOT hardcoded — it
+# is discovered at every boot and then continuously refined by the daemon.
+#
+# Two-stage discovery:
+#   1. BOOT PROBE (fast, ~15-30 s, both fans in parallel): a from-above
+#      bisection gives an optimistic starting guess. It is fast because it does
+#      NOT wait for each candidate to reach thermal steady state — so on a
+#      weak/low-inertia fan it can read a momentum-inflated RPM and guess a
+#      floor a few units too low. That is fine; the daemon fixes it.
+#   2. RUNTIME SELF-HEAL (two-sided): the daemon reads each fan's tach every
+#      tick and already knows its own commanded duty, so it can tell truth from
+#      the blind spot:
+#        - commanded >= floor but tach == 0 for RAISE_TICKS ticks  -> floor was
+#          too low (guess lied): floor += RAISE_STEP and re-kick.
+#        - pinned AT floor with comfortable RPM for LOWER_TICKS ticks -> floor
+#          may be too high: floor -= 1 (slow, single step).
+#      Asymmetric timing/steps + a comfort margin + post-raise cooldown keep the
+#      two directions from oscillating; it settles within ~a minute of boot.
+#
+# Below its floor a fan may still be turning but the tach can't see it (BLIND) —
+# the loop never commands below the floor, so a fan never drops out of view.
+FLOOR_MIN        = 20    # never trust/allow a floor below this
+FLOOR_MAX        = 160   # safety ceiling for a runaway self-heal
+FLOOR_GUESS      = 60    # fallback starting floor if the boot probe fails
+RAISE_TICKS      = 3     # ticks of (cur>=floor & rpm==0) before raising (~6 s)
+RAISE_STEP       = 2     # units to bump the floor up on a blind-spot hit
+LOWER_TICKS      = 15    # ticks pinned-at-floor & with headroom before lowering (~30 s)
+TACH_FLOOR_RPM   = 960   # EMC2305 can't resolve below ~this; at/under it -> reads 0
+LOWER_HEADROOM   = 150   # only lower if the at-floor RPM sits this far ABOVE the
+                         # tach floor (i.e. rpm >= 1110). A fan already near the
+                         # visibility edge (~960-1050) is left alone, so LOWER
+                         # trims a too-high boot guess down toward the true edge
+                         # WITHOUT diving into the blind spot. If it overshoots,
+                         # RAISE bounces it back one step and the cooldown +
+                         # this headroom gap prevent the two from oscillating.
+RAISE_COOLDOWN   = 20    # ticks after a raise during which lowering is blocked
+# Runtime export for fan-check. Lives under the systemd RuntimeDirectory=fan-pid
+# (/run/fan-pid), which is writable under ProtectSystem=strict AND auto-removed
+# when the unit stops — so fan-check never reads a stale floor from a dead daemon.
+FLOOR_STATE_DIR  = "/run/fan-pid"
+FLOOR_STATE_FILE = FLOOR_STATE_DIR + "/floors"
 EMA_ALPHA    = 0.25  # 0 = no smoothing, 1 = no history; 0.25 ~= 3 tick lag.
                      # Lowered from 0.4 on 2026-05-17 alongside the Kp
                      # reduction so a single-tick high P-term contributes
@@ -167,6 +201,20 @@ LOG_INTERVAL = 30.0  # seconds between INFO log lines (use DEBUG for every tick)
 EMC2305_HWMON_NAME = "emc2305"
 PWM_FILE  = "pwm1"
 FAN_FILE  = "fan1_input"
+
+# Physical fans wired to the EMC2305 on the Mono Gateway DK. Each entry pairs a
+# duty register (written via /dev/i2c — the kernel sysfs PWM path is broken on
+# 6.18, see EMC2305_I2C_ADDR) with the tach sysfs file (tach READS are correct
+# via sysfs). Per-fan floors are discovered at boot and refined at runtime.
+#   CH1 (F_1) = reg 0x30 / fan1_input : chassis fan
+#   CH2 (F_2) = reg 0x40 / fan2_input : auxiliary fan (added 2026-08)
+# Both fans track the same max-policy PID output; each is independently clamped
+# up to its own floor and logged separately. A fan whose tach reads 0 at full
+# drive during startup presence-detection is flagged absent and left undriven.
+FAN_DEFS = [
+    {"name": "fan1", "duty_reg": 0x30, "tach_file": "fan1_input"},
+    {"name": "fan2", "duty_reg": 0x40, "tach_file": "fan2_input"},
+]
 
 # Direct-i2c bypass for the broken kernel emc2305 sysfs PWM path.
 #
@@ -212,6 +260,10 @@ WHISTLE_PULSES   = 6
 WHISTLE_LOW_PWM  = 130   # ~50 % duty — soft tone
 WHISTLE_HIGH_PWM = 255   # full speed — loud tone
 WHISTLE_HALF_S   = 0.3   # seconds per half-cycle (low or high)
+PRESENCE_SPINUP_S = 3.0  # hold all channels at MAX this long before presence
+                         # detection, so a slow/heavy arbitrary fan has time to
+                         # cross the tach floor (the whistle's last 255 phase is
+                         # only ~0.3 s — too short to trust a 0-rpm read).
 
 
 # ---------- sysfs helpers --------------------------------------------------------
@@ -287,8 +339,8 @@ def find_emc2305_i2c() -> int:
     raise RuntimeError("No EMC2305 found on any i2c bus (no <bus>-002e entry under /sys/bus/i2c/devices)")
 
 
-def i2c_write_pwm(i2c_fd: int, value: int) -> None:
-    """Write `value` (0..255) to EMC2305 fan1 duty register 0x30.
+def i2c_write_pwm(i2c_fd: int, value: int, duty_reg: int = EMC2305_FAN1_DUTY_REG) -> None:
+    """Write `value` (0..255) to an EMC2305 fan duty register (0x30 fan1, 0x40 fan2).
 
     SMBus byte-data write: send two bytes (register, value). The kernel
     i2c char-dev does the SMBus-vs-i2c framing for us when called via
@@ -299,9 +351,120 @@ def i2c_write_pwm(i2c_fd: int, value: int) -> None:
     the controller; we'll retry next tick).
     """
     try:
-        os.write(i2c_fd, bytes([EMC2305_FAN1_DUTY_REG, value & 0xFF]))
+        os.write(i2c_fd, bytes([duty_reg, value & 0xFF]))
     except OSError as e:
-        syslog.syslog(syslog.LOG_WARNING, f"fan-pid: i2c write failed: {e}")
+        syslog.syslog(syslog.LOG_WARNING, f"fan-pid: i2c write failed (reg 0x{duty_reg:02x}): {e}")
+
+
+def i2c_write_all_fans(i2c_fd: int, value: int) -> None:
+    """Write the same duty to both physical fan channels."""
+    for fan in FAN_DEFS:
+        i2c_write_pwm(i2c_fd, value, fan["duty_reg"])
+
+
+def _emc2305_cdev_names() -> set:
+    """Return the set of cooling_deviceN basenames whose type starts 'emc2305'."""
+    base = "/sys/class/thermal"
+    names = set()
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return names
+    for entry in entries:
+        if not entry.startswith("cooling_device"):
+            continue
+        try:
+            with open(f"{base}/{entry}/type") as f:
+                if f.read().strip().startswith("emc2305"):
+                    names.add(entry)
+        except OSError:
+            continue
+    return names
+
+
+def neutralize_kernel_cooling_devices() -> None:
+    """Stop the kernel thermal governor from driving the EMC2305 fans.
+
+    The mainline emc2305 driver registers thermal cooling devices
+    (emc2305_fan / emc2305_fanN) with pwm_separate=false, so when the governor
+    changes their cooling state it writes the SAME duty to ALL fan channels'
+    drive registers. On this board thermal_zone3 (cluster-thermal) binds the
+    emc2305 cooling device through step_wise cooling-maps, so the governor keeps
+    re-raising the duty (observed: cur_state=2 -> 51 duty on both channels),
+    stomping fan-pid's per-fan values within a few seconds.
+
+    Merely writing cur_state=0 is transient — the step_wise governor recomputes
+    and re-raises it on its next poll. The durable fix is to switch every
+    zone that binds an emc2305 cdev to the 'user_space' governor: that governor
+    performs NO automatic cooling-state selection, so the kernel stops writing
+    the duty registers entirely and fan-pid becomes the sole PWM authority.
+    Critical-trip emergency shutdown is handled by the thermal core independent
+    of the governor, so board thermal protection is unaffected.
+
+    After switching policy we also zero the cdevs once to clear any residual
+    duty the governor left behind. Best-effort: missing sysfs / permission
+    errors are logged, not fatal (a kernel without these bindings has nothing
+    to do here).
+    """
+    base = "/sys/class/thermal"
+    emc_cdevs = _emc2305_cdev_names()
+    if not emc_cdevs:
+        return
+
+    # 1. Switch any zone that binds an emc2305 cdev to the user_space governor.
+    switched = []
+    try:
+        zones = sorted(e for e in os.listdir(base) if e.startswith("thermal_zone"))
+    except OSError:
+        zones = []
+    for zone in zones:
+        zdir = f"{base}/{zone}"
+        # Does this zone bind an emc2305 cooling device via any cdevN link?
+        binds_emc = False
+        try:
+            for link in os.listdir(zdir):
+                if not (link.startswith("cdev") and link[4:].isdigit()):
+                    continue
+                target = os.path.basename(os.path.realpath(f"{zdir}/{link}"))
+                if target in emc_cdevs:
+                    binds_emc = True
+                    break
+        except OSError:
+            continue
+        if not binds_emc:
+            continue
+        # Only switch if user_space is actually available (else leave as-is).
+        try:
+            with open(f"{zdir}/available_policies") as f:
+                avail = f.read().split()
+        except OSError:
+            avail = []
+        if "user_space" not in avail:
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"fan-pid: {zone} binds an emc2305 fan but has no user_space "
+                          f"governor; kernel may still fight fan-pid")
+            continue
+        try:
+            with open(f"{zdir}/policy", "w") as f:
+                f.write("user_space")
+            switched.append(zone)
+        except OSError as e:
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"fan-pid: could not set {zone} policy=user_space: {e}")
+
+    # 2. Zero the emc2305 cdevs once to clear any residual governor duty.
+    for cdev in sorted(emc_cdevs):
+        try:
+            with open(f"{base}/{cdev}/cur_state", "w") as f:
+                f.write("0")
+        except OSError as e:
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"fan-pid: could not zero {cdev}: {e}")
+
+    if switched:
+        syslog.syslog(syslog.LOG_INFO,
+                      "fan-pid: kernel fan governor disabled (user_space) on: "
+                      + ", ".join(switched))
 
 
 def find_thermal_zones() -> dict[str, str]:
@@ -390,32 +553,188 @@ def play_startup_whistle(i2c_fd: int) -> None:
     """
     try:
         for _ in range(WHISTLE_PULSES):
-            i2c_write_pwm(i2c_fd, WHISTLE_LOW_PWM)
+            if not _running:
+                break
+            i2c_write_all_fans(i2c_fd, WHISTLE_LOW_PWM)
             time.sleep(WHISTLE_HALF_S)
-            i2c_write_pwm(i2c_fd, WHISTLE_HIGH_PWM)
+            i2c_write_all_fans(i2c_fd, WHISTLE_HIGH_PWM)
             time.sleep(WHISTLE_HALF_S)
     except Exception as e:
         syslog.syslog(syslog.LOG_WARNING, f"fan-pid: startup whistle failed: {e!r}")
     syslog.syslog(syslog.LOG_INFO, "fan-pid: startup whistle complete — entering control loop")
 
 
+def detect_present_fans(i2c_fd: int, hwmon_dir: str) -> list[dict]:
+    """Return the subset of FAN_DEFS that have a spinning fan attached.
+
+    The whistle has just driven every channel to PWM_MAX, so any wired fan is
+    spinning well above the ~960 RPM tach floor. A channel whose tach still
+    reads 0 at full drive has no fan (or a fan with no/unwired tach) — flag it
+    absent so the loop does not later report a phantom NO-TACH.
+
+    Detection happens ONLY at full drive: at any lower duty a present-but-slow
+    fan (below the tach floor) is indistinguishable from an empty channel.
+    """
+    detected = []
+    for fan in FAN_DEFS:
+        tach_path = os.path.join(hwmon_dir, fan["tach_file"])
+        rpm = read_fan_rpm(tach_path)
+        runtime = {**fan, "tach_ok": bool(rpm and rpm > 0)}
+        detected.append(runtime)
+        if runtime["tach_ok"]:
+            syslog.syslog(syslog.LOG_INFO,
+                          f"fan-pid: {fan['name']} present ({rpm} rpm @ max)")
+        else:
+            # 0@MAX is ambiguous: empty channel, dead fan, or a real cooling fan
+            # with a broken/unwired tach. Driving an empty channel is harmless;
+            # NOT driving a tach-less real fan is thermally unsafe. Therefore
+            # keep driving the channel at PWM_MAX, but disable calibration/self-
+            # heal (there is no trustworthy feedback).
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"fan-pid: {fan['name']} absent or tach-less "
+                          f"(0 rpm @ max on reg 0x{fan['duty_reg']:02x}) — "
+                          f"driving MAX defensively, calibration disabled")
+    return detected
+
+
+# ---- Boot-time spinning-floor probe -------------------------------------------
+CAL_DOWN_SETTLE = 2.0    # settle after a down-step before deciding visible/not
+CAL_KICK_SETTLE = 2.5    # settle after re-kicking a fan that fell dark
+CAL_ABORT_TEMP  = 75.0   # warm-restart safety: abort probe and keep known-good hi
+
+
+def calibrate_floors(i2c_fd: int, fans: list[dict], hwmon_dir: str,
+                     zone_paths: dict[str, str]) -> dict[int, int]:
+    """Fast from-above bisection giving a per-fan spinning-floor GUESS.
+
+    Runs all present fans in parallel (one shared settle per round). This is the
+    optimistic starting point handed to the controller — it can read a few units
+    low on a weak/low-inertia fan because it does not wait for full thermal
+    steady state, but the runtime self-heal corrects that within ~a minute.
+
+    Assumes the fans are already spinning at PWM_MAX (the whistle just ran).
+    Returns {duty_reg: floor_guess}. On any error a fan falls back to FLOOR_GUESS.
+    """
+    def tach(fan):
+        return read_fan_rpm(os.path.join(hwmon_dir, fan["tach_file"])) or 0
+
+    def visible(fan):
+        return tach(fan) > 0
+
+    t0 = time.monotonic()
+    probe_fans = [f for f in fans if f.get("tach_ok", True)]
+    state = {f["duty_reg"]: {"lo": 0, "hi": PWM_MAX, "fan": f}
+             for f in probe_fans}
+    # ensure every channel is at MAX; tach-less/absent channels stay there.
+    for f in fans:
+        i2c_write_pwm(i2c_fd, PWM_MAX, f["duty_reg"])
+    time.sleep(CAL_KICK_SETTLE)
+
+    while (_running and state
+           and any(s["hi"] - s["lo"] > 1 for s in state.values())):
+        mids = {}
+        for reg, s in state.items():
+            if s["hi"] - s["lo"] > 1:
+                mid = (s["lo"] + s["hi"]) // 2
+                mids[reg] = mid
+                i2c_write_pwm(i2c_fd, mid, reg)
+        time.sleep(CAL_DOWN_SETTLE)
+        fails = []
+        for reg, mid in mids.items():
+            s = state[reg]
+            if visible(s["fan"]):
+                s["hi"] = mid            # still visible -> floor <= mid
+            else:
+                s["lo"] = mid            # dark -> floor > mid
+                i2c_write_pwm(i2c_fd, s["hi"], reg)  # re-spin to known-good
+                fails.append(reg)
+        if fails:
+            time.sleep(CAL_KICK_SETTLE)
+
+        # Boot is normally cool/no-load, but a warm restart under traffic is
+        # possible. Abort the exploratory down-sweep if any readable zone is
+        # already hot; each current `hi` is known-spinning, so using it as the
+        # starting floor is conservative and the runtime self-heal still works.
+        temps = [read_temp(path) for path in zone_paths.values()]
+        hottest = max((t for t in temps if t is not None), default=0.0)
+        if hottest >= CAL_ABORT_TEMP:
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"fan-pid: floor probe aborted at {hottest:.1f}C "
+                          f">= {CAL_ABORT_TEMP:.1f}C; using current known-good bounds")
+            break
+
+    # Tach-capable fans get their probed guess; tach-less/absent channels stay
+    # at MAX permanently (safe for a real fan, harmless for an empty channel).
+    floors = {f["duty_reg"]: PWM_MAX for f in fans}
+    for reg, s in state.items():
+        floors[reg] = max(FLOOR_MIN, min(FLOOR_MAX, s["hi"]))
+    # leave everything spinning at MAX; the loop takes over immediately after.
+    for f in fans:
+        i2c_write_pwm(i2c_fd, PWM_MAX, f["duty_reg"])
+    dt = time.monotonic() - t0
+    syslog.syslog(syslog.LOG_INFO,
+                  "fan-pid: floor probe (%.0fs): %s" % (
+                      dt, ", ".join(f"{s['fan']['name']}=0x{reg:02x}:{floors[reg]}"
+                                    for reg, s in state.items())))
+    return floors
+
+
 # ---------- Controller ----------------------------------------------------------
 class Controller:
-    """One PI controller per zone, output combined via max()."""
+    """One PI controller per zone, output combined via max() and sent to all fans."""
 
-    def __init__(self, i2c_fd: int, fan_path: str, zone_paths: dict[str, str]):
-        self.i2c_fd    = i2c_fd
-        self.fan_path  = fan_path
+    def __init__(self, i2c_fd: int, fans: list[dict], hwmon_dir: str,
+                 zone_paths: dict[str, str], floors: dict[int, int]):
+        self.i2c_fd = i2c_fd
         self.zone_paths = zone_paths
-        self.last_written_pwm = -1   # force first write
-        # Initialize EMA at MIN_RUN, not 0. Otherwise the first tick produces
-        # alpha*max_pwm_zone + (1-alpha)*0 = 0.4*40 = 16, which is well below
-        # the kick-start floor and stalls the fan from rest. Once stalled the
-        # PI controller can't recover until temps climb high enough that the
-        # EMA-smoothed output crosses 39 again, by which time the SoC has
-        # been baking for many ticks.
-        self.smoothed_pwm = float(PWM_MIN_RUN)
+        # Runtime fan records: independent duty register, tach path, a MUTABLE
+        # spinning floor (seeded from the boot probe, refined at runtime) and
+        # its self-heal counters. Both fans receive the same PID demand but each
+        # is clamped up to its own current floor.
+        self.fans = []
+        for fan in fans:
+            guess = floors.get(fan["duty_reg"], FLOOR_GUESS)
+            self.fans.append({
+                **fan,
+                "tach_ok": fan.get("tach_ok", True),
+                "tach_path": os.path.join(hwmon_dir, fan["tach_file"]),
+                "floor": max(FLOOR_MIN, min(PWM_MAX, guess)),
+                "last_written_pwm": -1,   # force first write
+                "blind_ticks": 0,         # consecutive (cur>=floor & rpm==0)
+                "vis_ticks": 0,           # consecutive (pinned & comfortable)
+                "cooldown": 0,            # ticks left where lowering is blocked
+                "kick": False,            # request a 255 re-kick this tick
+            })
+        self.export_floors()
+        # Initialize the shared EMA at the lowest current floor, not 0. Individual
+        # outputs are clamped higher as needed; this prevents an initial
+        # below-floor command while preserving one shared max-policy demand.
+        self.smoothed_pwm = float(self.min_floor())
         self.last_log_t = 0.0
+
+    def min_floor(self) -> int:
+        """Lowest current floor across all driven fans (the shared-demand clamp)."""
+        return min((f["floor"] for f in self.fans), default=FLOOR_MIN)
+
+    def export_floors(self) -> None:
+        """Publish current per-fan floors to FLOOR_STATE_FILE for fan-check.
+
+        Format: one 'reg=floor' per line (hex reg), e.g. '0x30=40'. Best-effort;
+        /run is tmpfs so this is cheap and disappears on reboot (floors are
+        relearned every boot anyway).
+        """
+        tmp = f"{FLOOR_STATE_FILE}.tmp.{os.getpid()}"
+        try:
+            os.makedirs(FLOOR_STATE_DIR, exist_ok=True)  # no-op under RuntimeDirectory=
+            lines = [f"0x{f['duty_reg']:02x}={f['floor']}\n" for f in self.fans]
+            with open(tmp, "w") as fh:
+                fh.writelines(lines)
+            os.replace(tmp, FLOOR_STATE_FILE)  # atomic: fan-check never sees half a file
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def integral_clamp(self, z: Zone) -> float:
         """Anti-windup: cap |integral| so it can saturate the actuator but no more."""
@@ -426,8 +745,12 @@ class Controller:
         # zones (which already track via Kp).
         return (PWM_MAX - PWM_FLOOR) / z.ki
 
-    def step(self) -> tuple[int, dict[str, float], dict[str, float]]:
-        """One control tick.  Returns (final_pwm, zone_temps, zone_pwms)."""
+    def step(self) -> tuple[dict[str, int], dict[str, float], dict[str, float]]:
+        """One control tick.
+
+        Returns (fan_pwms, zone_temps, zone_pwms) where fan_pwms maps each
+        driven fan name to the duty actually written this tick.
+        """
         zone_temps: dict[str, float] = {}
         zone_pwms:  dict[str, float] = {}
         any_critical = False
@@ -461,18 +784,15 @@ class Controller:
             if z.integral < -ic: z.integral = -ic
 
             pwm_i = PWM_FLOOR + z.kp * err + z.ki * z.integral
-            # Always enforce PWM_MIN_RUN (=40): the stock DC-axial fan
-            # kick-start floor was empirically measured at PWM 39 (1044 RPM)
-            # on 2026-05-11; PWM 38 stays stalled. The chip itself honors
-            # arbitrary values via /dev/i2c — the limit is the fan's, not
-            # the silicon's. Anything below 40 risks a stalled fan and a
-            # dead spot in the cooling response, so the PI math is clamped
-            # here rather than producing physically-meaningless sub-stall
-            # demand. To run the fan slower, replace it with a smaller one
-            # and re-measure the kick-start knee (see the PWM_MIN_RUN
-            # docstring).
-            if pwm_i < PWM_MIN_RUN:
-                pwm_i = PWM_MIN_RUN
+            # Clamp the shared PID demand to the LOWEST fan floor here; each
+            # fan is then clamped UP to its own floor at the output stage. This
+            # keeps one max-policy demand while ensuring no fan is ever driven
+            # below the duty at which it drops out of the tach's view / stalls.
+            # Per-fan floors are discovered/refined dynamically; clamp the
+            # shared demand to the lowest current one here.
+            current_min_floor = self.min_floor()
+            if pwm_i < current_min_floor:
+                pwm_i = current_min_floor
             pwm_i = max(0.0, min(float(PWM_MAX), pwm_i))
             z.last_pwm = pwm_i
             zone_pwms[z.name] = pwm_i
@@ -504,31 +824,124 @@ class Controller:
             # transition. The fan kick-start floor is a hardware limit —
             # any output below it physically stalls the fan, no matter how
             # the math arrived there.
-            if self.smoothed_pwm < PWM_MIN_RUN:
-                self.smoothed_pwm = float(PWM_MIN_RUN)
+            # Enforce the lowest current floor after smoothing (EMA blending
+            # with a previous low value can still dip below it on a downward
+            # step). Each fan is clamped up to its own floor just below.
+            if self.smoothed_pwm < self.min_floor():
+                self.smoothed_pwm = float(self.min_floor())
             target = self.smoothed_pwm
 
-        out = int(round(target))
-        # Deadband: avoid i2c writes for noise-level changes.  Always write
-        # when crossing 0 (fan stop) or PWM_MAX (full).
-        force = (out == 0 or out == PWM_MAX)
-        if force or self.last_written_pwm < 0 or abs(out - self.last_written_pwm) >= PWM_DEADBAND:
-            i2c_write_pwm(self.i2c_fd, out)
-            self.last_written_pwm = out
+        shared = int(round(target))
+        # Output stage: send the shared demand to every driven fan, clamped up
+        # to that fan's own current floor. Per-fan deadband so a fan pinned at
+        # its floor isn't rewritten every tick, but always write on 0/MAX.
+        # A fan flagged for a re-kick (self-heal just raised its floor) gets a
+        # one-tick PWM_MAX pulse so it isn't stuck coasting below the new floor.
+        fan_pwms: dict[str, int] = {}
+        floors_changed = False
+        for fan in self.fans:
+            if fan["kick"]:
+                out = PWM_MAX
+                fan["kick"] = False
+            else:
+                out = max(shared, fan["floor"])
+            out = max(0, min(PWM_MAX, out))
+            fan_pwms[fan["name"]] = out
+            force = (out == 0 or out == PWM_MAX)
+            if (force or fan["last_written_pwm"] < 0
+                    or abs(out - fan["last_written_pwm"]) >= PWM_DEADBAND):
+                i2c_write_pwm(self.i2c_fd, out, fan["duty_reg"])
+                fan["last_written_pwm"] = out
 
-        return out, zone_temps, zone_pwms
+        # Runtime two-sided floor self-heal (uses this tick's tach + commanded).
+        for fan in self.fans:
+            if self._refine_floor(fan, fan_pwms[fan["name"]]):
+                floors_changed = True
+        if floors_changed:
+            self.export_floors()
 
-    def maybe_log(self, now: float, final_pwm: int,
+        return fan_pwms, zone_temps, zone_pwms
+
+    def _refine_floor(self, fan: dict, commanded: int) -> bool:
+        """Two-sided per-fan floor refinement. Returns True if the floor changed.
+
+        RAISE (fast, safety): if the fan is commanded at/above its floor but its
+        tach reads 0 for RAISE_TICKS consecutive ticks, the floor was too low
+        (a momentum-inflated boot guess) — bump it up by RAISE_STEP and re-kick.
+
+        LOWER (slow, cautious): if the fan is pinned exactly at its floor (heat
+        isn't pushing it higher) and running with real headroom above the tach
+        floor (rpm >= TACH_FLOOR_RPM + LOWER_HEADROOM) for LOWER_TICKS ticks, the
+        floor is higher than necessary — drop it by 1. Blocked for RAISE_COOLDOWN
+        ticks after any raise. The asymmetry (short/big raise vs long/small lower
+        + a headroom gap above the edge + cooldown) keeps the two from
+        oscillating: near the true edge (~960-1050 rpm) LOWER simply stops.
+        """
+        if not fan["tach_ok"]:
+            return False  # tach-less/absent channel: pinned at MAX, no feedback
+        if fan["cooldown"] > 0:
+            fan["cooldown"] -= 1
+        rpm = read_fan_rpm(fan["tach_path"])
+        if rpm is None:
+            return False  # transient read error — don't act on it
+
+        changed = False
+        # --- RAISE: commanded into the visible band but nothing on the tach ---
+        if commanded >= fan["floor"] and rpm == 0:
+            fan["blind_ticks"] += 1
+            fan["vis_ticks"] = 0
+            if fan["blind_ticks"] >= RAISE_TICKS and fan["floor"] < FLOOR_MAX:
+                old = fan["floor"]
+                fan["floor"] = min(FLOOR_MAX, fan["floor"] + RAISE_STEP)
+                fan["blind_ticks"] = 0
+                fan["cooldown"] = RAISE_COOLDOWN
+                fan["kick"] = True   # re-kick so it isn't stuck coasting
+                syslog.syslog(syslog.LOG_INFO,
+                              f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
+                              f"(blind at cur={commanded}, rpm=0)")
+                changed = True
+            return changed
+
+        fan["blind_ticks"] = 0
+
+        # --- LOWER: pinned at floor, real headroom above the tach edge ---
+        pinned = (commanded == fan["floor"])
+        has_headroom = (rpm >= TACH_FLOOR_RPM + LOWER_HEADROOM)
+        if pinned and has_headroom and fan["cooldown"] == 0:
+            fan["vis_ticks"] += 1
+            if fan["vis_ticks"] >= LOWER_TICKS and fan["floor"] > FLOOR_MIN:
+                old = fan["floor"]
+                fan["floor"] = max(FLOOR_MIN, fan["floor"] - 1)
+                fan["vis_ticks"] = 0
+                syslog.syslog(syslog.LOG_INFO,
+                              f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
+                              f"(headroom: {rpm}rpm at floor)")
+                changed = True
+        else:
+            fan["vis_ticks"] = 0
+        return changed
+
+    def maybe_log(self, now: float, fan_pwms: dict[str, int],
                   zt: dict[str, float], zp: dict[str, float]) -> None:
         if now - self.last_log_t < LOG_INTERVAL:
             return
         self.last_log_t = now
-        rpm = read_fan_rpm(self.fan_path)
-        rpm_str = f"{rpm}rpm" if rpm is not None else "?rpm"
+        fan_str_parts = []
+        for fan in self.fans:
+            rpm = read_fan_rpm(fan["tach_path"])
+            pwm = fan_pwms.get(fan["name"], 0)
+            if rpm is None:
+                rpm_disp = "?rpm"
+            elif rpm == 0 and pwm < fan["floor"]:
+                rpm_disp = "blind"   # below tach floor — spinning but unreadable
+            else:
+                rpm_disp = f"{rpm}rpm"
+            fan_str_parts.append(f"{fan['name']}={fan['floor']}/{pwm}/{PWM_MAX}({rpm_disp})")
+        fan_str = " ".join(fan_str_parts)
         zt_str = " ".join(f"{n.split('-')[0]}={t:.1f}" for n, t in zt.items())
         zp_str = " ".join(f"{n.split('-')[0]}={p:.0f}" for n, p in zp.items())
         syslog.syslog(syslog.LOG_INFO,
-                      f"fan-pid: pwm={final_pwm}/{PWM_MAX} {rpm_str} | T[{zt_str}] | demand[{zp_str}]")
+                      f"fan-pid: {fan_str} | T[{zt_str}] | demand[{zp_str}]")
 
 
 # ---------- Main loop -----------------------------------------------------------
@@ -554,11 +967,13 @@ def main() -> int:
         return 0
 
     try:
-        pwm_path, fan_path = find_emc2305_pwm()
+        pwm_path, _fan_path = find_emc2305_pwm()
     except RuntimeError as e:
         syslog.syslog(syslog.LOG_ERR, f"fan-pid: {e} — failing to MAX_PWM if possible, exit 1")
         return 1
-    syslog.syslog(syslog.LOG_INFO, f"fan-pid: hwmon pwm path {pwm_path} (introspection only), fan tach at {fan_path}")
+    hwmon_dir = os.path.dirname(pwm_path)
+    syslog.syslog(syslog.LOG_INFO,
+                  f"fan-pid: hwmon dir {hwmon_dir} (sysfs pwm introspection only; tach reads here)")
 
     # Open raw i2c bypass (kernel sysfs PWM interface is broken on 6.18 — see
     # the EMC2305_I2C_ADDR comment block at top). All PWM writes from here on
@@ -570,11 +985,15 @@ def main() -> int:
         return 1
     syslog.syslog(syslog.LOG_INFO, f"fan-pid: i2c bus claimed at addr 0x{EMC2305_I2C_ADDR:02x}")
 
+    # Become the sole PWM authority: silence the kernel emc2305 cooling devices
+    # so the thermal governor stops writing all fan channels behind our back.
+    neutralize_kernel_cooling_devices()
+
     zone_paths = find_thermal_zones()
     if not zone_paths:
         syslog.syslog(syslog.LOG_ERR, "fan-pid: no usable thermal_zone* found — exiting")
-        # Defensive: leave fan at full so the SoC isn't suffocated by a stuck low PWM.
-        i2c_write_pwm(i2c_fd, PWM_MAX)
+        # Defensive: leave BOTH fans at full so the SoC isn't suffocated.
+        i2c_write_all_fans(i2c_fd, PWM_MAX)
         os.close(i2c_fd)
         return 1
     missing = [z.name for z in ZONES if z.name not in zone_paths]
@@ -584,14 +1003,40 @@ def main() -> int:
     syslog.syslog(syslog.LOG_INFO,
                   f"fan-pid: controlling {len(zone_paths)} zones: {','.join(zone_paths)}")
 
-    play_startup_whistle(i2c_fd)
-
+    # Install the failsafe signal handlers BEFORE the multi-second whistle/probe
+    # so a systemctl stop/restart during startup exits promptly and still hits
+    # the finally block (both fans -> MAX). Everything from the whistle onward
+    # runs inside the try so the failsafe covers the probe too.
     signal.signal(signal.SIGTERM, _on_sigterm)
     signal.signal(signal.SIGINT,  _on_sigterm)
 
-    ctrl = Controller(i2c_fd, fan_path, zone_paths)
-    next_tick = time.monotonic()
     try:
+        # Whistle drives every channel to PWM_MAX (also the kick that guarantees
+        # a stopped fan spins up).
+        play_startup_whistle(i2c_fd)
+        # Hold every channel at MAX and let arbitrary fans reach a speed well
+        # above the tach floor before presence detection (the whistle's final
+        # 255 phase is only ~0.3 s — too short for a slow/heavy fan to register).
+        i2c_write_all_fans(i2c_fd, PWM_MAX)
+        for _ in range(int(PRESENCE_SPINUP_S / 0.2)):
+            if not _running:
+                break
+            time.sleep(0.2)
+        fans = detect_present_fans(i2c_fd, hwmon_dir)
+        syslog.syslog(syslog.LOG_INFO,
+                      "fan-pid: driving fans: " + ",".join(f["name"] for f in fans))
+
+        # Fast optimistic floor probe (parallel). Runtime self-heal in the
+        # Controller corrects momentum-inflated guesses up/down while running.
+        try:
+            floors = calibrate_floors(i2c_fd, fans, hwmon_dir, zone_paths)
+        except Exception as e:
+            syslog.syslog(syslog.LOG_ERR,
+                          f"fan-pid: floor probe failed: {e!r} — using conservative guesses")
+            floors = {f["duty_reg"]: FLOOR_GUESS for f in fans}
+
+        ctrl = Controller(i2c_fd, fans, hwmon_dir, zone_paths, floors)
+        next_tick = time.monotonic()
         while _running:
             now = time.monotonic()
             if now < next_tick:
@@ -604,12 +1049,13 @@ def main() -> int:
             except Exception as e:  # belt-and-braces: never crash on a tick
                 syslog.syslog(syslog.LOG_ERR, f"fan-pid: tick failed: {e!r}")
     finally:
-        # Defensive shutdown: hand control back to the BIOS/firmware default by
-        # writing MAX_PWM.  If a maintainer restarts the daemon under load they
-        # don't want a stale low PWM throttling the SoC during the gap.
+        # Defensive shutdown: drive BOTH fans to MAX. If a maintainer restarts
+        # the daemon under load they don't want a stale low PWM throttling the
+        # SoC during the gap. (The kernel cdevs stay neutralized, so nothing
+        # else will pull the fans down until fan-pid comes back.)
         try:
-            i2c_write_pwm(i2c_fd, PWM_MAX)
-            syslog.syslog(syslog.LOG_INFO, "fan-pid: shutdown — left PWM at MAX as failsafe")
+            i2c_write_all_fans(i2c_fd, PWM_MAX)
+            syslog.syslog(syslog.LOG_INFO, "fan-pid: shutdown — left all fans at MAX as failsafe")
         except Exception:
             pass
         try:
