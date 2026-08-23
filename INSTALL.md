@@ -31,7 +31,7 @@ Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues)
 
 Download the latest `vyos-...-LS1046A-arm64.iso` from [Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases).
 
-> **Note:** The ISO is a hybrid image — write it as a raw disk image, not as extracted files. No decompression or FAT32 formatting needed.
+> **NOTE:** The ISO is a hybrid image — write it as a raw disk image, not as extracted files. No decompression or FAT32 formatting needed.
 
 ### Linux
 
@@ -46,7 +46,7 @@ sudo umount /dev/sdX* 2>/dev/null
 sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-### macOS
+### MacOS
 
 ```bash
 # Identify USB device
@@ -87,9 +87,9 @@ This loads `boot.scr` from the USB FAT32 partition, which loads the kernel, DTB,
 
 Watch the boot log for 60–90 seconds until the VyOS login prompt appears.
 
-> **If `usb start` hangs or shows no devices:** Try a USB 2.0 drive. Some USB 3.0 drives aren't detected by the LS1046A USB controller.
+>**NOTE:** If `usb start` hangs or shows no devices, try a USB 2.0 drive. Some USB 3.0 drives aren't detected by the LS1046A USB controller.
 
-> **USB layout:** The hybrid ISO has two partitions when written to USB: partition 1 (ISO9660 with squashfs) and partition 2 (FAT32 with boot files). U-Boot loads from partition 2 explicitly via `fatload usb 0:2`. After kernel boot, live-boot finds the squashfs on the ISO9660 partition.
+> **NOTE:** The hybrid ISO has two partitions when written to USB: partition 1 (ISO9660 with squashfs) and partition 2 (FAT32 with boot files). U-Boot loads from partition 2 explicitly via `fatload usb 0:2`. After kernel boot, live-boot finds the squashfs on the ISO9660 partition.
 
 ---
 
@@ -119,7 +119,7 @@ reboot
 
 The board will boot VyOS from eMMC automatically. No manual U-Boot configuration needed.
 
-> **First boot may fail once:** After a fresh eMMC format, U-Boot's ext4 driver occasionally fails to read the new filesystem on the very first attempt (`Failed to load '/boot/vyos.env'`). This is a known U-Boot quirk — just reboot again from the recovery shell and it will work.
+>**NOTE:** First boot may fail once. After a fresh eMMC format, U-Boot's ext4 driver occasionally fails to read the new filesystem on the very first attempt (`Failed to load '/boot/vyos.env'`). This is a known U-Boot quirk — just reboot again from the recovery shell and it will work.
 
 ---
 
@@ -142,7 +142,7 @@ add system image <url>
 
 After the upgrade completes, `/boot/vyos.env` is automatically updated to the new image. Reboot when ready.
 
-> **Never use `install image` on an already-installed system.** Use `add system image` instead. `install image` repartitions the eMMC and is only for fresh installs from USB live sessions.
+> **WARNING:** Never use `install image` on an already-installed system. Use `add system image` instead. `install image` repartitions the eMMC and is only for fresh installs from USB live sessions.
 
 ---
 
@@ -276,13 +276,19 @@ chmod 600 ~/.ssh/id_vyos
 ssh-keygen -y -f ~/.ssh/id_vyos_vanity > ~/.ssh/id_vyos_vanity.pub
 ```
 
-> **Note:** This key is shipped openly with the image as a convenience credential for first-boot and recovery access. Treat any device exposed to an untrusted network as compromised until you replace this key with your own and remove the vanity entry from `system login user vyos authentication public-keys`.
+> **NOTE:** This key is shipped openly with the image as a convenience credential for first-boot and recovery access. Treat any device exposed to an untrusted network as compromised until you replace this key with your own and remove the vanity entry from `system login user vyos authentication public-keys`.
 
 ---
 
-## See Also
+## See Also:
 
-- **[plans/FIRMWARE.md](plans/FIRMWARE.md)** — Board firmware update (NOR + eMMC flash procedure, partition offset details, recovery)
-- **[plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md)** — Complete technical specification: U-Boot environment, memory map, clock tree, USB and eMMC boot sequences, `vyos.env` write paths, DTB delivery, kexec prevention, SPI NOR layout, and failure modes
-- **[plans/archive/UBOOT.md](plans/archive/UBOOT.md)** — (Archived) former U-Boot reference, consolidated into `BOOT-PROCESS.md`
-- **[plans/PORTING.md](plans/PORTING.md)** — Why 13 things were broken and how each was fixed
+| **I want to...**                 | **Go to...**                                                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Understand the HW**            | [HARDWARE.md](HARDWARE.md): Physical HW, boot-chain and known quirks                                                |
+| **Update the Firmware**          | [FIRMWARE.md](FIRMWARE.md): A *'how-to'* guide                                                                      |
+| **Control HW & diagnose issues** | [HWCTL.md](HWCTL.md):  Control the main LEDs with `led` & diagnose issues with the seven built-in `*-check` scripts |
+| **Understand HW-Offloading**     | [HW-OFFLOADING.md](HW-OFFLOADING.md): Overview of the DPAA1/ASK network architecture                                |
+| **Manage VyOS via a web UI**     | [VYMANAGER.md](VYMANAGER.md): Manage VyOS using the Vymanager SDN controller & web GUI                              |
+| **See how this started**         | [STARTING-GATE.md](STARTING-GATE.md): Getting mainline VyOS to work (at all)                                        |
+| **See what's changed**           | [plans/CHANGELOG.md](plans/CHANGELOG.md): Per-build changelog                                                       |
+| **Dig into the archives**        | [RABBITHOLE.md](RABBITHOLE.md): Down you go...                                                                      |
