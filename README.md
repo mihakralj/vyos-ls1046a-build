@@ -1,48 +1,56 @@
-[![VyOS LS1046A build](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/auto-build.yml/badge.svg)](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/auto-build.yml)
+[![VyOS LS1046A build](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/self-hosted-build.yml/badge.svg)](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/self-hosted-build.yml)
 
-# VyOS for NXP LS1046A (Mono Gateway)
+# VyOS for Mono Gateway Development Kit (NXP LS1046A)
 
-The [Mono Gateway Development Kit](https://github.com/ryneches/mono-gateway-docs) ships with OpenWrt. This build runs VyOS instead. That is the whole pitch.
+This repo builds VyOS for the aarch64 [Mono Gateway Development Kit](https://docs.mono.si/gateway-development-kit/hardware-description) based on latest [VyOS 1.5.x. 'rolling' release](https://vyos.net/get/nightly-builds/). New [builds](https://github.com/mihakralj/vyos-ls1046a-build/releases) are released each Friday 01:00 UTC.
 
-The hardware earns the effort. The NXP LS1046A brings four Cortex-A72 cores at 1.8 GHz, 8 GB of ECC DDR4, three RJ45 ports, two SFP+ cages, and a hardware Frame Manager that chews through packets before the CPU notices they arrived. NXP sells this chip to telecom carriers and switch vendors, not to people who want a friendly GUI. That gap is the opportunity.
+**This is the first and only VyOS build for bare-metal aarch64 networking hardware targeting support for both ASIC HW-offload *and* VPP.**
 
-**Thirteen things** broke on mainline VyOS before it would run on the LS1046A. All thirteen are fixed here, each documented below with its root cause.
+**The hardware earns the effort.** The Mono Gateway Development Kit is build around the [NXP LS1046A](https://www.nxp.com/docs/en/data-sheet/LS1046A.pdf) SoC - four Cortex-A72 cores at 1.6 GHz, with a hardware ASIC alongside which chews through packets before the CPU even notices they've arrived. The Mono Gateway Development Kit further adds 8 GB of ECC DDR4, three RJ45 ports, and two SFP+ cages - an ideal package for HW-offloaded, wire-speed networking on aarch64.
 
-## Get Started
+**Nothing in this class exists for use as a home router,** and that gap is an opportunity. Historically, NXP sold the LS1046A SoC to telecoms carriers and switch vendors, alongside a generalised [Application Solutions Kit (ASK)](https://www.nxp.com/design/design-center/software/embedded-software/software-for-industrial-networking/gateway-ask:VORTIQA-ASK) to control the HW-offload network accelerator functions. In developing the Gateway Development Kit, Mono purchased and with permission, [released the ASK source](https://github.com/we-are-mono/ASK) under GPL v2.0. 
 
-| I want to... | Go to |
-|---|---|
-| **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
-| **Control hardware & diagnose problems** on a running system | [HWCTL.md](HWCTL.md): the `led` RGBW status-LED command (palette, fades, demo modes), LED/fan shell recipes, + the built-in diagnostic scripts (`dpaa1-check`, `sfp-check`, `fan-check`, `caam-check`, `xsk-zc-check`, `ask-check`, `vpp-check`, `firmware-check`) plus `support-bundle` — health probes for networking, SFP modules, thermals, crypto, AF_XDP/ASK, the boot firmware/FMan microcode chain, and one paste-ready preview bug report |
-| **Update board firmware** (bricked or fresh board) | [plans/FIRMWARE.md](plans/FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
-| **Understand the boot process & U-Boot** | [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, memory map, clock tree, MTD layout, `booti` sequence, failure modes |
-| **See what changed** between releases | [plans/CHANGELOG.md](plans/CHANGELOG.md): per-build changelog |
+The LS1046A SoC uses the Data Path Acceleration Architecture (DPAA1), which defines the ASIC functions, and how they interoperate. 
+
+**VyOS enables pushing this hardware to its full potential now that aarch64 is becoming a first-class citizen in `1.5.x`.**  This repo documents the development of DPAA1/ASK HW-offloading rebuilt to modern standards as `ASK2`, and the compliment this can provide to Vector Packet Processing (VPP) on this HW.
+
+## Overview & Getting Started
+
+| **I want to...**                 | **Go to...**                                                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Use VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: Start here                                                                            |
+| **Understand the HW**            | [HARDWARE.md](HARDWARE.md): Physical HW, boot-chain and known quirks                                                |
+| **Update the Firmware**          | [FIRMWARE.md](FIRMWARE.md): A *'how-to'* guide                                                                      |
+| **Control HW & diagnose issues** | [HWCTL.md](HWCTL.md):  Control the main LEDs with `led` & diagnose issues with the seven built-in `*-check` scripts |
+| **Understand HW-Offloading**     | [HW-OFFLOADING.md](HW-OFFLOADING.md): Overview of the DPAA1/ASK network architecture                                |
+| **Manage VyOS via a web UI**     | [VYMANAGER.md](VYMANAGER.md): Manage VyOS using the Vymanager SDN controller & web GUI                              |
+| **See how this started**         | [STARTING-GATE.md](STARTING-GATE.md): Getting mainline VyOS to work (at all)                                        |
+| **See what's changed**           | [plans/CHANGELOG.md](plans/CHANGELOG.md): Per-build changelog                                                       |
 
 > Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues) before installing. Some limitations are permanent hardware constraints. Better to know before you're three hours into a rack installation.
-
 ## Architecture & Design
 
-The design specs and deep-dives behind the build. Start here to understand *how* it works, not just how to run it.
+The design specs and deep-dives behind the build. Start here to understand *how* it works, not just how to run it. Plans and Specs utilise [HADS](https://github.com/catcam/hads) to structure information.
 
-| Document | What's inside |
-|---|---|
-| [arch/README.md](arch/README.md) | **Hardware architecture reference index** — the in-repo distilled silicon reference (DPAA1/FMan v3/QMan/BMan/SEC): register-level facts, hardware constants, CCSR map, and per-module docs (`fman-pcd.md`, `fman-microcode-210-programming-reference.md`, `fman-pcd-api-reference.md`, `muram.md`, …) for when the NDA manuals aren't open |
+| Document                                                                           | What's inside                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md) | **DPAA1 AF_XDP driver modernization** — the flavor-ops abstraction, XSK-backed BMan pools, per-CPU NAPI on dedicated QMan channels, the four FMan HW offloads (CC / HM / Policer / CEETM), and the per-milestone status tracker |
-| [plans/NETWORKING-DEEP-DIVE.md](plans/NETWORKING-DEEP-DIVE.md) | **DPAA1 networking internals** — FMan architecture, QBMan portal allocation, the three-driver split (`fsl_dpaa_mac` / `fsl_dpa` / `fsl_dpaa_eth`), and how packets flow before the CPU sees them |
-| [plans/DUAL-DATAPLANE.md](plans/DUAL-DATAPLANE.md) | **Single-image dual-dataplane model** — one ISO ships every datapath; the silicon mode state machine (mainline/RSS ↔ ASK offload, with VPP as an AF_XDP overlay), runtime switching, and the reversibility contract |
-| [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md) | **ASK2 hardware accelerator** — the modern in-tree rewrite of the FMan/QMan offload engine: `ask.ko`, the PCD subsystem, and independent per-interface IPv4/IPv6 controls (`set interfaces ethernet eth<n> offload ipv4|ipv6`) |
-| [specs/vpp-dpaa1-ls1046a-spec.md](specs/vpp-dpaa1-ls1046a-spec.md) | **VPP AF_XDP overlay** — kernel-bypass dataplane on the 10G SFP+ ports, thermal constraints, and the kernel↔VPP coexistence model |
-| [plans/PORTING.md](plans/PORTING.md) | **Porting postmortem** — driver archaeology, the boot-flow rework, and what broke (and why) bringing mainline VyOS up on the LS1046A |
+| [plans/NETWORKING-DEEP-DIVE.md](plans/NETWORKING-DEEP-DIVE.md)                     | **DPAA1 networking internals** — FMan architecture, QBMan portal allocation, the three-driver split (`fsl_dpaa_mac` / `fsl_dpa` / `fsl_dpaa_eth`), and how packets flow before the CPU sees them                                |
+| [specs/dual-dataplane.md](specs/dual-dataplane.md)                                 | **Single-image dual-dataplane model** — one ISO ships every datapath; the silicon mode state machine (mainline/RSS ↔ ASK offload, with VPP as an AF_XDP overlay), runtime switching, and the reversibility contract             |
+| [plans/ASK2-MASTER-PLAN.md](plans/ASK2-MASTER-PLAN.md)                             | **Understand work towards ASK2** — what ASK 1.x did right, what's changing in ASK2, and why                                                                                                                                     |
+| [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md)                           | **ASK2 hardware accelerator** — the modern in-tree rewrite of the FMan/QMan offload engine: `ask.ko`, the PCD subsystem, and independent per-interface IPv4/IPv6 controls (`set interfaces ethernet eth offload ipv4 / ipv6`    |
+| [specs/vpp-dpaa1-ls1046a-spec.md](specs/vpp-dpaa1-ls1046a-spec.md)                 | **VPP AF_XDP overlay** — kernel-bypass dataplane on the 10G SFP+ ports, thermal constraints, and the kernel↔VPP coexistence model                                                                                               |
+| [plans/PORTING.md](plans/PORTING.md)                                               | **Porting postmortem** — driver archaeology, the boot-flow rework, and what broke (and why) bringing mainline VyOS up on the LS1046A                                                                                            |
 
 ## Build and Release Assets
 
 Built on demand via GitHub Actions (`workflow_dispatch` — trigger "VyOS LS1046A build (self-hosted)"; no schedule).
 
-| File | Description |
-|------|-------------|
-| `*-LS1046A-arm64.iso` | **Hybrid ISO** — boot from USB (`dd if=...iso of=/dev/sdX bs=4M`) for live install, or `add system image <url>` to upgrade an installed system |
-| `*-LS1046A-arm64.iso.minisig` | ISO signature ([verify key](data/vyos-ls1046a.minisign.pub)) |
-| `vyos-packages.tar` | Built kernel + vyos-1x `.deb` packages |
+| File                          | Description                                                                                                                                    |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `*-LS1046A-arm64.iso`         | **Hybrid ISO** — boot from USB (`dd if=...iso of=/dev/sdX bs=4M`) for live install, or `add system image <url>` to upgrade an installed system |
+| `*-LS1046A-arm64.iso.minisig` | ISO signature ([verify key](data/vyos-ls1046a.minisign.pub))                                                                                   |
+| `vyos-packages.tar`           | Built kernel + vyos-1x `.deb` packages                                                                                                         |
 
 ## What This Build Actually Delivers
 
@@ -71,171 +79,6 @@ This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM
 
 **Full FRRouting integration.** BGP, OSPF, IS-IS, BFD, MPLS, VXLAN, segment routing, PIM: all in the config tree with proper dependency resolution at commit time. Full stack, no glue scripts, no surprises.
 
-## Hardware
-
-| | |
-|---|---|
-| **SoC** | NXP QorIQ LS1046A: 4x Cortex-A72 @ 1.8 GHz, 8 GB DDR4 ECC |
-| **Network** | 5x DPAA1/FMan: 3x RJ45 (SGMII, Maxlinear GPY115C), 2x SFP+ (10GBase-R) |
-| **Storage** | 29.6 GB Kingston iNAND eMMC via eSDHC |
-| **Console** | 8250 UART at `0x21c0500`, 115200 baud (`ttyS0`) |
-| **Boot** | U-Boot 2025.04 via `booti`. EFI/GRUB is broken: DPAA1 reserved-memory OOM. |
-
-### Port Layout
-
-```mermaid
-block-beta
-  columns 7
-  block:rj45:3
-    columns 3
-    eth0["eth0\nRJ45\nSGMII"]
-    eth1["eth1\nRJ45\nSGMII"]
-    eth2["eth2\nRJ45\nSGMII"]
-  end
-  space
-  block:sfp:3
-    columns 3
-    eth3["eth3\nSFP+\n10GBase-R"]
-    space
-    eth4["eth4\nSFP+\n10GBase-R"]
-  end
-
-  style eth0 fill:#4a9,stroke:#333,color:#fff
-  style eth1 fill:#4a9,stroke:#333,color:#fff
-  style eth2 fill:#4a9,stroke:#333,color:#fff
-  style eth3 fill:#49a,stroke:#333,color:#fff
-  style eth4 fill:#49a,stroke:#333,color:#fff
-```
-
-As of firmware 2026-03-29+, the FMan MAC probe order matches physical port positions natively. No udev rename rule needed. Interface names map left-to-right as shown. On older firmware, eth0 was the rightmost port, which made staring at the front panel a Sudoku problem.
-
-### Boot Flow
-
-```mermaid
-flowchart LR
-  NOR["SPI NOR\n64 MB"] --> UB["U-Boot\n2025.04"]
-  UB -->|"booti"| K["Linux Kernel\n6.18.x-vyos"]
-  UB -.->|"❌ OOM"| EFI["GRUB/EFI"]
-  K --> LB["live-boot\ninitramfs"]
-  LB --> SQ["squashfs\n+ overlay"]
-  SQ --> VYOS["VyOS Router"]
-
-  subgraph eMMC ["eMMC (mmcblk0)"]
-    direction TB
-    FW["32 MB firmware zone"]
-    P1["p1: BIOS boot\n1 MB"]
-    P2["p2: EFI FAT32\n256 MB (unused)"]
-    P3["p3: ext4 root\n29.1 GB"]
-  end
-
-  UB -->|"ext4load\nmmc 0:3"| P3
-
-  style EFI fill:#a44,stroke:#333,color:#fff
-  style UB fill:#48a,stroke:#333,color:#fff
-  style K fill:#4a9,stroke:#333,color:#fff
-  style VYOS fill:#4a9,stroke:#333,color:#fff
-  style P2 fill:#666,stroke:#333,color:#aaa
-```
-
-The EFI/GRUB path is permanently broken: DPAA1 reserved-memory nodes in the device tree cause GRUB to OOM during `bootefi`. Nobody plans to fix it. `booti` works, costs nothing, and skips GRUB entirely. Sometimes the universe does you a favor.
-
-### DPAA1 Network Architecture
-
-```mermaid
-flowchart TB
-  subgraph CORES ["4× Cortex-A72"]
-    C0["Core 0"] & C1["Core 1"] & C2["Core 2"] & C3["Core 3"]
-  end
-
-  subgraph PORTALS ["Hardware Portals (1 per core)"]
-    BP["BMan\nBuffer Pool"] & QP["QMan\nQueue Manager"]
-  end
-
-  subgraph FMAN ["FMan (Frame Manager)"]
-    direction LR
-    M0["MEMAC 4\neth0 SGMII"]
-    M1["MEMAC 5\neth1 SGMII"]
-    M2["MEMAC 1\neth2 SGMII"]
-    M3["MEMAC 9\neth3 10G"]
-    M4["MEMAC 10\neth4 10G"]
-  end
-
-  subgraph PHY ["PHY Layer"]
-    direction LR
-    G0["GPY115C\nMDIO :00"] & G1["GPY115C\nMDIO :01"] & G2["GPY115C\nMDIO :02"]
-    S1["SFP+\nfixed-link"] & S2["SFP+\nfixed-link"]
-  end
-
-  CORES <-->|"dequeue/enqueue"| PORTALS
-  PORTALS <-->|"DMA"| FMAN
-  M0 --- G0
-  M1 --- G1
-  M2 --- G2
-  M3 --- S1
-  M4 --- S2
-
-  style FMAN fill:#2a6,stroke:#333,color:#fff
-  style PORTALS fill:#48a,stroke:#333,color:#fff
-```
-
-The Frame Manager is the unsung hero. It handles packet parsing, core distribution, and buffer management in hardware before the CPU ever touches a byte. LS1046A has four QMan/BMan software portals (one per A72 core), plus 28 pool channels and 4 dedicated channels the modernization work claims for per-qband AF_XDP dispatch.
-
-### DPAA1 Driver Modernization
-
-An ongoing effort modernizes the mainline DPAA1 driver into a single shared kernel binary (consumed in different runtime modes — kernel `default`, `vpp` AF_XDP, and `ask` FMan routing offload, all shipping in one image) with HW-accelerated AF_XDP and FMan/QMan hardware offloads. The ASK2 routing offload (IPv4 + IPv6 hardware forwarding, engaged per interface/family via `set interfaces ethernet eth<n> offload ipv4|ipv6`) is silicon-validated on all five ports. Full design and per-milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md) and [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md).
-
-**Shipping and board-validated today:**
-
-- **Flavor-ops abstraction (M0)** — per-`dpaa_priv` ops tables, RCU-NULL-safe; byte-identical to mainline when no flavor module is loaded.
-- **AF_XDP zero-copy plumbing (M1–M3-3)** — `ndo_xsk_wakeup`, XSK-backed BMan pool, per-CPU NAPI + dedicated QMan channels per qband, cluster-aware pinning. Driver proven to drop **0%** at line rate; ~5.57 Gbit/s aggregate RX measured (bottleneck is the single userspace receiver, not the NIC).
-- **HW capability layer** — FMan PCD caps live-probed (`0x17` = CC HM POL PARSER on ucode 210).
-- **HM VLAN-strip offload (M3-3c)** — live on hardware (`ethtool -k` → `rx-vlan-offload: on`).
-- **Policer + CEETM scaffolds (M3-3d/e)** — install/stub APIs compiled in and cap-probed, stable contracts for the VyOS CLI consumers.
-
-**What remains for a feature-complete driver** (see the spec's "What remains for a complete DPAA1 driver" table):
-
-- **Two real kernel forward-ports** — the FMan PCD subsystem (unblocks CC steering and the productive HM/Policer datapaths) and the QMan-CEETM driver (~4500 LOC, absent from mainline 6.18, needed for HW egress shaping).
-- **Non-kernel glue** — vyos-1x CLI consumers for HM/Policer/CEETM, a traffic generator for the functional datapath gates, and a multi-core receiver to record the literal ≥7 Gbps figure.
-
-No further *architectural* work is required — the ops abstraction and capability layer already accommodate every remaining consumer.
-
-## What This Build Fixes
-
-Thirteen things were broken out of the box. Most failed silently. The worst ones looked like they worked but quietly hemorrhaged performance or dropped interfaces without a trace in dmesg.
-
-| # | Problem | Root Cause | Fix |
-|---|---------|------------|-----|
-| 1 | No eMMC | `MMC_SDHCI_OF_ESDHC` not set | `=y` |
-| 2 | No network | DPAA1 stack not enabled | `FSL_FMAN`, `DPAA`, `DPAA_ETH`, `BMAN`, `QMAN` `=y` + `XGMAC_MDIO` |
-| 3 | No console | `ttyAMA0` (PL011) instead of `ttyS0` (8250) | Patch + `earlycon` bootarg |
-| 4 | CPU at 700 MHz | `QORIQ_CPUFREQ=m` loads too late | `=y` + `CPU_FREQ_DEFAULT_GOV_PERFORMANCE` |
-| 5 | eth2 no link | Generic PHY, no SGMII AN workaround | `MAXLINEAR_GPHY=y` (GPY115C) |
-| 6 | No SFP+ | SFP framework + SerDes PHY missing | `SFP=y`, `PHYLINK=y`, `PHY_FSL_LYNX_10G=y` |
-| 7 | Wrong port order | DT probe order mismatched physical layout | DTS aliases + firmware-native MAC probe order (udev rule removed 2026-03-29) |
-| 8 | No auto-boot | `install image` only updates GRUB | `vyos-postinstall` + `fw_setenv` |
-| 9 | Jumbo frames broken | Module param used `fman` (wrong `KBUILD_MODNAME`) | `fsl_dpaa_fman.fsl_fm_max_frm=9600` |
-| 10 | Live mode false positive | `is_live_boot()` needs `BOOT_IMAGE=` (GRUB-only) | Patch 009: `vyos-union=/boot/` fallback |
-| 11 | kexec breaks HW init | `ln -sf /dev/null` broken by live-build | Chroot hook + SysV script removal |
-| 12 | No QSPI flash access | `CONFIG_SPI_FSL_QSPI` not set | `=y` + DTS partition map |
-| 13 | VPP capped at 3290 MTU | AF_XDP max frame ~3304 bytes on DPAA1 | Split-plane: VPP on SFP+ (no jumbo), kernel on RJ45 (full 9578 MTU) |
-
-Full postmortem with driver archaeology and DPAA1 architecture deep-dive: [plans/PORTING.md](plans/PORTING.md).
-
-## Known Boot Messages (Ignore These)
-
-The boot log contains some alarming lines. All of them are fine.
-
-| Message | Why It's Fine |
-|---------|---------------|
-| `smp_processor_id() in preemptible` | Cosmetic: PREEMPT_DYNAMIC on Cortex-A72. Suppressed in current builds. |
-| `could not generate DUID` | No persistent machine-id on live boot. Resolves after `install image`. |
-| `PCIe: no link` / `disabled` | No PCIe devices on this board. The bus exists. The devices do not. |
-| `WARNING failed to get smmu node` | No SMMU/IOMMU nodes in DTB. Harmless. |
-| `binfmt_misc.mount` FAILED | Expected on ARM64 target hardware. No binfmt emulation needed. |
-| kexec double-boot (USB live only) | Normal VyOS live-boot behavior. Installed eMMC systems boot once, straight through. |
-
-Full annotated boot sequences: [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md).
-
 ## License
 
-VyOS sources are GPLv2. ARM64 builder image from [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build). Hardware documentation from [mono-gateway-docs](https://github.com/ryneches/mono-gateway-docs).
+VyOS sources are GPL-2.0. ARM64 builder image from [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build). Hardware documentation from [mono-gateway-docs](https://github.com/we-are-mono/docs/tree/master).
