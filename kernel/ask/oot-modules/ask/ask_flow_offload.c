@@ -2804,6 +2804,20 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
         struct flow_cls_offload *f = type_data;
         struct net_device *dev = ask_flow_block_priv_dev(cb_priv);
 
+        /*
+         * TC_SETUP_CLSMATCHALL is owned by the DPAA1 ingress-policer block
+         * handler (board patch 0104 dpaa_setup_tc_block_cb). Both that cb and
+         * this ASK flow-offload cb are registered on the same ingress tcf
+         * block; when a 'tc ... matchall action police' filter is added the tc
+         * core fans TC_SETUP_CLSMATCHALL out to every registered cb. Decline it
+         * silently here so the policer cb is the one that returns success —
+         * otherwise this cb's -EOPNOTSUPP + a noisy warn is the only verdict
+         * the core sees and the hardware policer never installs (skip_sw ->
+         * EOPNOTSUPP). See 2026-08-23 policer root-cause.
+         */
+        if (type == TC_SETUP_CLSMATCHALL)
+                return -EOPNOTSUPP;
+
         if (type != TC_SETUP_CLSFLOWER) {
                 pr_warn_ratelimited("ask: flow_offload: unexpected tc_setup_type=%u (expected CLSFLOWER)\n",
                                     type);
