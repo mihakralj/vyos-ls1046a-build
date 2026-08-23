@@ -803,16 +803,16 @@ KUNIT_EXPECT_TRUE(test, (flags & ASK_ACT_NAT_SRC) != 0);
 }
 
 /*
- * T-M6-7.8: IPv6 NAT66 is the experiment gate, default OFF, so an IPv6 NAT
- * intent lowers to -EOPNOTSUPP (fails closed to software) even with a valid
- * REDIRECT present — proving NAT66 specifically forces SW fallback.
+ * T-M6-7.8: IPv6 NAT66 is shipping/default-on (silicon-validated S0-S3), so an
+ * IPv6 NAT intent lowers successfully to the ASK_ACT_NAT_SRC flag, mirroring
+ * nat44. A valid REDIRECT is present, so this exercises the NAT66 path.
  */
-static void ask_flow_offload_test_intent_lower_nat66_fails_closed(struct kunit *test)
+static void ask_flow_offload_test_intent_lower_nat66(struct kunit *test)
 {
 struct ask_flow_key k = { .l3_proto = ASK_FLOW_L3_IPV6 };
 struct ask_flow_intent in = { .owner = 0xABD0, .match = &k };
 u8 v6[16] = { 0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,1 };
-u32 oif = 0, flags = 0xdeadbeef;
+u32 oif = 0, flags = 0;
 int rc;
 
 KUNIT_ASSERT_EQ(test, ask_intent_add(&in, ASK_ACTION_REDIRECT, 42), 0);
@@ -821,7 +821,9 @@ KUNIT_ASSERT_EQ(test,
 	ask_intent_add_nat(&in, ASK_ACTION_NAT_SRC, v6, 16, 0), 0);
 
 rc = ask_intent_lower(&in, &oif, &flags);
-KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, rc, 0);
+KUNIT_EXPECT_EQ(test, oif, 42u);
+KUNIT_EXPECT_TRUE(test, (flags & ASK_ACT_NAT_SRC) != 0);
 }
 
 static struct kunit_case ask_flow_offload_test_cases[] = {
@@ -832,7 +834,7 @@ KUNIT_CASE(ask_flow_offload_test_intent_lower_no_redirect),
 KUNIT_CASE(ask_flow_offload_test_intent_add_overflow),
 KUNIT_CASE(ask_flow_offload_test_intent_add_nat),
 KUNIT_CASE(ask_flow_offload_test_intent_lower_nat_v4),
-KUNIT_CASE(ask_flow_offload_test_intent_lower_nat66_fails_closed),
+KUNIT_CASE(ask_flow_offload_test_intent_lower_nat66),
 KUNIT_CASE(ask_flow_offload_test_replace_minimal),
 KUNIT_CASE(ask_flow_offload_test_destroy_round_trip),
 KUNIT_CASE(ask_flow_offload_test_double_destroy_swallowed),

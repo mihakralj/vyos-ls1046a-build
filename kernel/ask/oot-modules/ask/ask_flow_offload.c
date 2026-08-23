@@ -1217,7 +1217,7 @@ int ask_intent_lower(const struct ask_flow_intent *in,
                 case ASK_ACTION_NAPT_SPORT:
                 case ASK_ACTION_NAPT_DPORT:
                         /* T-M6-7.1: NAT/PAT. Admitted to the legacy flags only
-                         * when the experiment gate is armed; otherwise fail
+                         * when the family's NAT gate is enabled (default on); otherwise fail
                          * closed to software (default shipping behaviour). The
                          * actual rewrite values ride the flow key
                          * (key->nat_*), stashed by ask_parse_action; the
@@ -1818,7 +1818,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 
         /*
          * T-M6-7.1 arming: copy the parsed/carry NAT tuple into the public
-         * FMan action only when the explicit ask.nat44_offload experiment gate
+         * FMan action only when the family's NAT gate
          * is armed. Disarmed (default), action was memset(0) above and these
          * fields stay zero -> F-230's `if (nat && nat->flags)` is skipped and
          * the FE record remains byte-identical to F-200/F-226. NAT flag bit
@@ -1830,7 +1830,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
                  * NEVER insert a plain routed record for a NAT flow (silent
                  * misforward). Fail closed so the caller removes the tentative
                  * HW-backed SW entry and keeps this flow in the kernel path.
-                 * IPv4 uses the shipping gate; IPv6 the NAT66 experiment gate. */
+                 * IPv4 uses nat44_offload; IPv6 uses nat66_offload (both default on). */
                 bool nat_ok = (key->l3_proto == ASK_FLOW_L3_IPV6)
                                       ? ask_hw_nat66_offload_armed()
                                       : ask_hw_nat44_offload_armed();

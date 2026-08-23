@@ -138,24 +138,25 @@ bool ask_hw_nat44_offload_armed(void)
 EXPORT_SYMBOL_GPL(ask_hw_nat44_offload_armed);
 
 /*
- * T-M6-7.8 NAT66 experiment gate. The F-230 emitter already produces the v6
- * fused L3 opcode (0x2f = HOPLIMIT|SIP_V6|DIP_V6) with 16-byte address params,
- * but that path has NEVER been exercised on 210.10.1. Keep it SEPARATE from
- * the shipping IPv4 nat44_offload gate and default OFF: IPv6 NAT stays software
- * fallback in production until its own S0..S3 gates pass. Arm only for the
- * silicon experiment (echo 1 > /sys/module/ask/parameters/nat66_offload).
+ * T-M6-7.8 NAT66 (IPv6<->IPv6 NAT). The F-230 emitter produces the fused v6 L3
+ * opcode (0x2f = HOPLIMIT|SIP_V6|DIP_V6) with 16-byte address params. Passed
+ * S0-S3 on 210.10.1 2026-08-23 (SNAT66/DNAT66/masquerade66, TCP -P4 7.13 Gbit/s
+ * 0-retr + UDP 500 Mbit/s 0-loss, fused opcode 0x2d/0x2f + 16-byte v6 param
+ * readback-confirmed, no wedge). Default ON; runtime-disableable for diagnosis.
+ * NAT46/NAT64 (cross-family) are NOT offloadable — no FE family-conversion
+ * opcode — and always fall back to software.
  */
-static bool ask_nat66_offload;
+static bool ask_nat66_offload = true;
 module_param_named(nat66_offload, ask_nat66_offload, bool, 0644);
 MODULE_PARM_DESC(nat66_offload,
-		 "EXPERIMENTAL IPv6 NAT66 FMan hardware offload (default 0; UNPROVEN silicon)");
+		 "IPv6-to-IPv6 NAT FMan hardware offload (default 1; nat44 separate, nat46/nat64 not offloadable)");
 
 bool ask_hw_nat66_offload_armed(void)
 {
 	bool armed = READ_ONCE(ask_nat66_offload);
 
 	if (armed)
-		pr_warn_once("ask: EXPERIMENTAL IPv6 NAT66 hardware offload ARMED — F-230 v6 opcode 0x2f unproven on 210.10.1; eth0 excluded\n");
+		pr_info_once("ask: IPv6 NAT66 hardware offload enabled (silicon-validated); eth0 excluded\n");
 	return armed;
 }
 EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
@@ -1153,7 +1154,7 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
          * program silicon. VLAN/CAAM/OP are still rejected unconditionally.
          *
          * T-M6-7.1: NAT/PAT (ASK_ACT_NAT_SRC/DST/PAT) is admitted to hardware
-         * ONLY when the ask_nat44_offload experiment gate is armed AND the flow
+         * ONLY when the ask_nat44_offload gate is enabled (default on) AND the flow
          * is not on the eth0 management port. Disarmed (default) it fails
          * closed to software exactly as before -- byte-identical shipping
          * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
@@ -1164,7 +1165,7 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
                 return -EOPNOTSUPP;
         if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
                 /* IPv4 NAT is silicon-validated (S0-S3), shipping default-on.
-                 * IPv6 NAT66 uses the separate experiment gate (fused v6 opcode
+                 * IPv6 NAT66 uses the separate nat66_offload gate (default on; fused v6 opcode
                  * 0x2f unproven); default off -> software fallback. */
                 if (key->l3_proto == ASK_FLOW_L3_IPV4) {
                         if (!ask_hw_nat44_offload_armed())
@@ -1185,7 +1186,7 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 		return rc;
 
 	/* Never NAT-offload the eth0 management lifeline, even when the global
-	 * experiment gate is armed. It remains available for SSH/recovery. */
+	 * NAT gate is enabled. It remains available for SSH/recovery. */
 	if ((action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) &&
 	    port_id == ASK_HW_PORT_ETH0_MGMT)
 		return -EOPNOTSUPP;
