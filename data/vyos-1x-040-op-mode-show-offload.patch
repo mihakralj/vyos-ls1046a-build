@@ -1,12 +1,12 @@
-From 5c50d7115543cf6b50c24983dcb6f1a466bd3f69 Mon Sep 17 00:00:00 2001
+From bbff604c86300b05429d43dfec7f303440049e22 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Sun, 23 Aug 2026 05:11:01 +0000
-Subject: [PATCH] temp: show-offload nat44 naming
+Date: Sun, 23 Aug 2026 05:36:54 +0000
+Subject: [PATCH] temp: show-offload nat66
 
 ---
  op-mode-definitions/show-offload.xml.in |  26 +++
- src/op_mode/show_offload.py             | 272 ++++++++++++++++++++++++
- 2 files changed, 298 insertions(+)
+ src/op_mode/show_offload.py             | 285 ++++++++++++++++++++++++
+ 2 files changed, 311 insertions(+)
  create mode 100644 op-mode-definitions/show-offload.xml.in
  create mode 100755 src/op_mode/show_offload.py
 
@@ -45,7 +45,7 @@ diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
 new file mode 100755
 --- /dev/null
 +++ b/src/op_mode/show_offload.py
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,285 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -196,6 +196,15 @@ new file mode 100755
 +    return flows
 +
 +
++def _nat66_offload_enabled():
++    """Return the live ask.ko IPv6 NAT66 hardware-offload gate."""
++    try:
++        with open('/sys/module/ask/parameters/nat66_offload') as f:
++            return f.read().strip().lower() in ('1', 'y', 'yes', 'true')
++    except OSError:
++        return False
++
++
 +def _nat44_offload_enabled():
 +    """Return the live ask.ko NAT44/PAT hardware-offload gate."""
 +    try:
@@ -225,15 +234,19 @@ new file mode 100755
 +            offloads.append('vpp')
 +        else:
 +            v4 = conf.exists(base + ['offload', 'ipv4'])
++            v6 = conf.exists(base + ['offload', 'ipv6'])
 +            if v4:
 +                offloads.append('ipv4')
-+            if conf.exists(base + ['offload', 'ipv6']):
++            if v6:
 +                offloads.append('ipv6')
-+            # NAT44/PAT is a hardware capability layered on the IPv4 path;
-+            # it is active whenever IPv4 offload is on and the ask.ko NAT gate
-+            # is enabled (default on). IPv6 NAT is not offloaded.
++            # NAT is a hardware capability layered on each family's routed
++            # path: nat44 when IPv4 offload + the nat44 gate are on, nat66 when
++            # IPv6 offload + the nat66 gate are on (both default on). NAT46/
++            # NAT64 are not hardware-offloadable.
 +            if v4 and _nat44_offload_enabled():
 +                offloads.append('nat44')
++            if v6 and _nat66_offload_enabled():
++                offloads.append('nat66')
 +            if conf.exists(base + ['ingress-policer']):
 +                offloads.append('policer')
 +            # Distinguish configured-but-not-armed from live in silicon:

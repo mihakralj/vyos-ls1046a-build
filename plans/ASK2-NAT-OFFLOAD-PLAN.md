@@ -1,19 +1,19 @@
 # ASK2 NAT / PAT Hardware Offload — Task Plan (T-M6-7)
 
-> STATUS 2026-08-23: **IPv4 NAT/PAT SHIPPING** (default-on) — all silicon
-> gates PASS. S0 record readback (fused opcode 0x25 TTL|DIP, 0x32 DPORT);
-> S1 SNAT wire-verified (HELGA saw translated src, 0 retr); S2 DNAT
-> wire-verified; S3 SNAT+masquerade TCP -P4 7.3 Gbit/s 0-retr + UDP
-> 500 Mbit/s 0-loss, no leak/wedge. Productized in commit 625d0d2c
-> (default nat44_offload=1, get-info advertises IPV4|IPV6|NAT|PAT,
-> `show offload config` shows `nat`), CI 32618608347, ISO
-> vyos-2026.08.23-0444-rolling. IPv6 NAT (fused v6 opcode 0x2f) is emitted
-> by F-230 but NOT silicon-tested and is REJECTED in preflight even when the
-> gate is on — it needs its own S-gate before advertising. eth0 management
-> is never NAT-offloaded. Runtime `nat44_offload=0` disables for diagnosis.
+> STATUS 2026-08-23: **NAT44 + NAT66 SHIPPING** (both default-on) — all
+> silicon gates PASS. NAT44: S0 readback (fused 0x25 TTL|DIP, 0x32 DPORT),
+> S1 SNAT wire-verified, S2 DNAT, S3 masquerade TCP -P4 7.3 Gbit/s 0-retr +
+> UDP 500 Mbit/s 0-loss. NAT66: S0 readback (fused 0x2d HOPLIMIT|DIP_V6,
+> 16-byte v6 param), S1 SNAT66 wire-verified, S2 DNAT66, S3 masquerade66
+> TCP -P4 7.13 Gbit/s + UDP 500 Mbit/s 0-loss; CLSD=0, no leak/wedge.
+> `nat44_offload=1` and `nat66_offload=1` default; get-info advertises
+> IPV4|IPV6|NAT|PAT; `show offload config` lists `nat44`/`nat66`.
+> NAT46/NAT64 are permanently software-only (no FE family-conversion opcode).
+> eth0 management is never NAT-offloaded. Both gates remain runtime-disableable
+> for diagnosis.
 >
 > NAMING/SCOPE: nat44 = IPv4<->IPv4 (shipping). nat66 = IPv6<->IPv6
-> (experiment gate `ask.nat66_offload`, default off, S-gate pending).
+> (gate `ask.nat66_offload`, default on, silicon-validated S0-S3).
 > NAT46/NAT64 (cross-family) are NOT hardware-offloadable — the FE-VM has no
 > L3 header re-synthesis/family-conversion opcode and Linux does not present
 > them via flowtable offload; they always fall back to software.
