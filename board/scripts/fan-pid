@@ -62,11 +62,13 @@ managing the fan; it will go to full speed.
 """
 from __future__ import annotations
 
+import array
 import errno
 import fcntl
 import os
 import re
 import signal
+import struct
 import sys
 import syslog
 import time
@@ -144,9 +146,12 @@ PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
 
 # ---------- Per-fan spinning-floor calibration + self-heal ----------------------
 # The "spinning floor" is the lowest duty at which a fan spins fast enough to
-# clear the EMC2305 tach floor (~960 RPM) and STAY visible. It is a property of
-# whatever fan the user has plugged into each port, so it is NOT hardcoded — it
-# is discovered at every boot and then continuously refined by the daemon.
+# run HEALTHY — at or above RUN_MARGIN_RPM, which sits safely above the EMC2305
+# tach saturation cliff (~484 RPM at RANGE=500/m=1; ~960 on the sysfs fallback).
+# It is a property of whatever fan the user has plugged into each port, so it is
+# NOT hardcoded — it is discovered at every boot and then continuously refined by
+# the daemon. The margin (not the bare tach floor) is the target so the loop
+# never parks a fan on the stall edge where the reading flaps 0<->~500.
 #
 # Two-stage discovery:
 #   1. BOOT PROBE (fast, ~15-30 s, both fans in parallel): a from-above
@@ -156,11 +161,11 @@ PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
 #      floor a few units too low. That is fine; the daemon fixes it.
 #   2. RUNTIME SELF-HEAL (two-sided): the daemon reads each fan's tach every
 #      tick and already knows its own commanded duty, so it can tell truth from
-#      the blind spot:
-#        - commanded >= floor but tach == 0 for RAISE_TICKS ticks  -> floor was
-#          too low (guess lied): floor += RAISE_STEP and re-kick.
-#        - pinned AT floor with comfortable RPM for LOWER_TICKS ticks -> floor
-#          may be too high: floor -= 1 (slow, single step).
+#      the stall edge:
+#        - commanded >= floor but tach < RUN_MARGIN_RPM for RAISE_TICKS ticks ->
+#          floor was too low: floor += RAISE_STEP. Re-kick only if rpm==0.
+#        - pinned AT floor with sustained headroom above RUN_MARGIN_RPM for
+#          LOWER_TICKS ticks -> floor may be too high: floor -= 1 (slow step).
 #      Asymmetric timing/steps + a comfort margin + post-raise cooldown keep the
 #      two directions from oscillating; it settles within ~a minute of boot.
 #
@@ -169,17 +174,38 @@ PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
 FLOOR_MIN        = 20    # never trust/allow a floor below this
 FLOOR_MAX        = 160   # safety ceiling for a runaway self-heal
 FLOOR_GUESS      = 60    # fallback starting floor if the boot probe fails
-RAISE_TICKS      = 3     # ticks of (cur>=floor & rpm==0) before raising (~6 s)
-RAISE_STEP       = 2     # units to bump the floor up on a blind-spot hit
+RAISE_TICKS      = 3     # ticks of (cur>=floor & near-stall) before raising (~6 s)
+RAISE_STEP       = 2     # base units to bump the floor on the FIRST near-stall hit
+RAISE_STEP_MAX   = 8     # cap on the escalated step (step = RAISE_STEP * raise_run,
+                         # clamped here) so a low boot guess converges in a few
+                         # steps instead of crawling +2/tick, without overshooting
+                         # wildly past the true floor on the last jump
+RAISE_STABLE_TICKS = 10  # healthy pinned-at-floor ticks (~20 s) before resetting
+                         # raise escalation; shorter post-kick coast-down samples
+                         # must NOT masquerade as convergence and restart at +2
 LOWER_TICKS      = 15    # ticks pinned-at-floor & with headroom before lowering (~30 s)
-TACH_FLOOR_RPM   = 960   # EMC2305 can't resolve below ~this; at/under it -> reads 0
-LOWER_HEADROOM   = 150   # only lower if the at-floor RPM sits this far ABOVE the
-                         # tach floor (i.e. rpm >= 1110). A fan already near the
-                         # visibility edge (~960-1050) is left alone, so LOWER
-                         # trims a too-high boot guess down toward the true edge
-                         # WITHOUT diving into the blind spot. If it overshoots,
-                         # RAISE bounces it back one step and the cooldown +
-                         # this headroom gap prevent the two from oscillating.
+TACH_FLOOR_RPM   = 484   # EMC2305 can't resolve below ~this with RANGE=500 (m=1);
+                         # at/under it -> reads 0. Lowered from 960 on 2026-08-23
+                         # when the daemon switched the chip to the 500 RPM range
+                         # and moved to raw 13-bit tach reads (see EMC2305 tach
+                         # comment block); ~484 is the true silicon floor at m=1.
+# RUN_MARGIN_RPM is the lowest speed we consider a HEALTHY running fan. It sits
+# safely ABOVE the ~484 RPM tach saturation cliff so the control loop never parks
+# a fan on the edge where one RPM of real variation flips it between "readable"
+# and "stalled/480" (the fan2 kick-oscillation observed on .185 2026-08-23: fan2
+# stalls just under duty ~59, and a floor at 61/502 rpm sat right on that cliff,
+# so every sag to 480 triggered a full 255 re-kick). Measured fan2 curve:
+# duty 64 -> 530 rpm steady, 61 -> 502, 58 -> 480(stall). 530 keeps a real fan
+# ~50 rpm clear of the cliff while leaving a fast fan (fan1: ~540 rpm at duty 31)
+# at its low floor. A fan whose tach reads BELOW this margin (but nonzero) is
+# treated as near-stall for RAISE, and LOWER will never push a fan under it.
+RUN_MARGIN_RPM   = 530   # healthy-running floor; must stay > TACH_FLOOR_RPM
+LOWER_HEADROOM   = 220   # only LOWER if the at-floor RPM sits this far above the
+                         # run margin (i.e. rpm >= RUN_MARGIN_RPM + 220 = 750), so
+                         # LOWER stops well before the cliff and a one-step drop
+                         # can't land the fan in the near-stall band. Combined with
+                         # the post-raise cooldown this prevents the RAISE/LOWER
+                         # oscillation across a fan's stall edge.
 RAISE_COOLDOWN   = 20    # ticks after a raise during which lowering is blocked
 # Runtime export for fan-check. Lives under the systemd RuntimeDirectory=fan-pid
 # (/run/fan-pid), which is writable under ProtectSystem=strict AND auto-removed
@@ -204,17 +230,24 @@ FAN_FILE  = "fan1_input"
 
 # Physical fans wired to the EMC2305 on the Mono Gateway DK. Each entry pairs a
 # duty register (written via /dev/i2c — the kernel sysfs PWM path is broken on
-# 6.18, see EMC2305_I2C_ADDR) with the tach sysfs file (tach READS are correct
-# via sysfs). Per-fan floors are discovered at boot and refined at runtime.
+# 6.18, see EMC2305_I2C_ADDR) with both its raw TACH register and legacy sysfs
+# tach file. Raw TACH is used after RANGE=500 programming; sysfs is only the m=2
+# fallback. Per-fan floors are discovered at boot and refined at runtime.
 #   CH1 (F_1) = reg 0x30 / fan1_input : chassis fan
 #   CH2 (F_2) = reg 0x40 / fan2_input : auxiliary fan (added 2026-08)
 # Both fans track the same max-policy PID output; each is independently clamped
 # up to its own floor and logged separately. A fan whose tach reads 0 at full
 # drive during startup presence-detection is flagged absent and left undriven.
 FAN_DEFS = [
-    {"name": "fan1", "duty_reg": 0x30, "tach_file": "fan1_input"},
-    {"name": "fan2", "duty_reg": 0x40, "tach_file": "fan2_input"},
+    {"name": "fan1", "duty_reg": 0x30, "tach_file": "fan1_input", "tach_reg": 0x3e},
+    {"name": "fan2", "duty_reg": 0x40, "tach_file": "fan2_input", "tach_reg": 0x4e},
 ]
+
+# Set True once set_tach_range_500() succeeds; the daemon then reads RPM from the
+# raw 13-bit TACH register (m=1, floor ~484 RPM) instead of the sysfs fanN_input
+# path (kernel driver m=2, floor ~960 RPM). If RANGE programming fails we leave
+# this False and fall back to sysfs so RPM is never silently 2x-inflated.
+USE_RAW_TACH = False
 
 # Direct-i2c bypass for the broken kernel emc2305 sysfs PWM path.
 #
@@ -231,10 +264,10 @@ FAN_DEFS = [
 # entirely for PWM writes and goes straight to the chip via
 # /dev/i2c-<bus> + I2C_SLAVE_FORCE.
 #
-# Tach reads are kept on the sysfs path because hwmon's
-# fan1_input/fan2_input numbers are correct (and bypass would
-# require us to reimplement the multi-byte tach-to-RPM conversion
-# the kernel already does for free).
+# Tach reads also use direct i2c after the daemon programs RANGE=500. The kernel
+# driver hard-codes the default m=2 multiplier and ~960 RPM clamp, so its sysfs
+# fanN_input would be 2x too high after RANGE changes to m=1. The raw 13-bit
+# conversion below mirrors the kernel math with the correct m=1 multiplier.
 #
 # Required: i2c-dev module loaded so /dev/i2c-* exists. The
 # `lm-sensors` apt package would normally install
@@ -246,6 +279,51 @@ EMC2305_I2C_ADDR = 0x2e          # SMBus 7-bit address on i2c-7
 EMC2305_FAN1_DUTY_REG = 0x30     # bit7..0 = direct PWM duty 0..255
 EMC2305_FAN2_DUTY_REG = 0x40
 I2C_SLAVE_FORCE = 0x0706         # ioctl: claim addr even if kernel driver bound
+
+# ---------- EMC2305 tachometer: lower the readable floor to ~484 RPM ------------
+# The tachometer does NOT measure RPM directly. It counts ticks of the internal
+# 32.768 kHz clock between fan tach edges over a measurement window, so a SLOWER
+# fan produces a LARGER count. RPM is the inverse of that count:
+#
+#     RPM = (3,932,160 * m) / COUNT          (2-pole fan, 5 edges; SMSC AN 17.4)
+#
+# where m is the RANGE multiplier set by bits [6:5] of the Fan Configuration
+# register (0x32 ch1 / 0x42 ch2):
+#     RANGE bits 00 -> 500 RPM range  -> m=1  -> min measurable ~484 RPM
+#     RANGE bits 01 -> 1000 RPM range -> m=2  -> min measurable ~968 RPM  (chip default)
+#     RANGE bits 10 -> 2000 RPM range -> m=4  -> min measurable ~1935 RPM
+#     RANGE bits 11 -> 4000 RPM range -> m=8  -> min measurable ~3870 RPM
+# Below the min the COUNT saturates at the FFh high byte and reads as "stopped".
+#
+# TWO floors are stacked in the default configuration and coincide near 960 RPM:
+#   1. The kernel emc2305 driver HARD-CODES m=2 (TACH_CNT_MULTIPLIER) and a
+#      clamp `if (rpm <= 480) return 0`, i.e. it reports 0 below 480*2 = 960 RPM
+#      via sysfs fanN_input regardless of the chip's real capability. This is a
+#      software `return 0`, not silicon.
+#   2. The chip itself, left at its m=2 default RANGE, saturates its count near
+#      968 RPM.
+#
+# We lower BOTH: program RANGE=500 (m=1) on each channel's config register, and
+# read the raw 13-bit TACH word ourselves over /dev/i2c applying RPM = FACTOR/COUNT
+# with m=1. This drops the readable floor from ~960 RPM to ~484 RPM (the true
+# silicon limit at m=1 — nothing resolves below it). Accuracy cost is a doubling
+# of the RPM-per-count quantization step (e.g. ~0.6 -> ~1.1 RPM at 1500 RPM,
+# ~19 -> ~38 RPM at 8700 RPM), which is negligible: the chip's own +/-1%
+# oscillator tolerance (+/-87 RPM at 8700) already dwarfs it across the whole
+# operating band. We do NOT touch the kernel driver — sysfs fanN_input stays on
+# the driver's m=2 clamp; the daemon and fan-check use the raw path instead.
+EMC2305_RPM_FACTOR      = 3932160  # (poles=2, edges=5) numerator from SMSC AN 17.4
+EMC2305_TACH_UNUSE_BITS = 3        # low 3 bits of the 16-bit TACH word are unused
+EMC2305_CFG_REG_FAN1    = 0x32     # Fan Configuration 1 register (ch1)
+EMC2305_CFG_REG_FAN2    = 0x42     # Fan Configuration 1 register (ch2)
+EMC2305_TACH_REG_FAN1   = 0x3e     # TACH reading high byte (ch1); word-swapped read
+EMC2305_TACH_REG_FAN2   = 0x4e     # TACH reading high byte (ch2)
+EMC2305_RANGE_MASK      = 0x60     # bits [6:5]
+EMC2305_RANGE_500       = 0x00     # bits [6:5]=00 -> 500 RPM range, m=1
+EMC2305_TACH_MULTIPLIER = 1        # matches RANGE_500 (m=1)
+# Silicon floor at m=1: FACTOR/(0x1FE0>>0 ... last readable count). Anything at or
+# below this reads 0 (blind); the daemon keeps the operating point above it.
+TACH_SILICON_FLOOR_RPM  = 484
 
 HARD_FAULT_TEMP = 100.0  # at/above this any zone triggers a CRIT log
 
@@ -360,6 +438,137 @@ def i2c_write_all_fans(i2c_fd: int, value: int) -> None:
     """Write the same duty to both physical fan channels."""
     for fan in FAN_DEFS:
         i2c_write_pwm(i2c_fd, value, fan["duty_reg"])
+
+
+# ---------- EMC2305 raw register read/modify (SMBus over /dev/i2c) ---------------
+# We must READ registers (config for read-modify-write, TACH for RPM), not just
+# write them. The kernel i2c-dev SMBus ioctl (I2C_SMBUS = 0x0720) gives us
+# atomic byte/word transactions without depending on the (already-claimed)
+# in-kernel emc2305 driver. Structs match <linux/i2c-dev.h> /
+# <linux/i2c.h> i2c_smbus_ioctl_data.
+I2C_SMBUS            = 0x0720
+I2C_SMBUS_READ       = 1
+I2C_SMBUS_WRITE      = 0
+I2C_SMBUS_BYTE_DATA  = 2
+I2C_SMBUS_WORD_DATA  = 3
+
+
+def _smbus_xfer(i2c_fd: int, read_write: int, command: int,
+                size: int, value: int = 0) -> int:
+    """Issue one I2C_SMBUS ioctl. Returns the read value for reads (else 0).
+
+    Builds the i2c_smbus_ioctl_data struct pointing at a 34-byte data block
+    (union i2c_smbus_data: byte/word live in the first 2 bytes). Raises OSError
+    on ioctl failure so callers can decide whether to swallow it.
+    """
+    # union i2c_smbus_data data; (max block is 32+2 bytes)
+    data = bytearray(34)
+    if read_write == I2C_SMBUS_WRITE:
+        if size == I2C_SMBUS_BYTE_DATA:
+            data[0] = value & 0xFF
+        elif size == I2C_SMBUS_WORD_DATA:
+            data[0] = value & 0xFF
+            data[1] = (value >> 8) & 0xFF
+    buf = array.array("B", bytes(data))
+    addr = buf.buffer_info()[0]
+    # struct i2c_smbus_ioctl_data { u8 read_write; u8 command; u32 size; ptr; }
+    ioctl_data = struct.pack("BBIQ", read_write & 0xFF, command & 0xFF,
+                             size, addr)
+    ibuf = array.array("B", ioctl_data)
+    fcntl.ioctl(i2c_fd, I2C_SMBUS, ibuf, True)
+    if read_write == I2C_SMBUS_READ:
+        if size == I2C_SMBUS_WORD_DATA:
+            return buf[0] | (buf[1] << 8)
+        return buf[0]
+    return 0
+
+
+def i2c_read_byte(i2c_fd: int, reg: int) -> Optional[int]:
+    """SMBus read-byte-data from `reg`. Returns None on i2c error."""
+    try:
+        return _smbus_xfer(i2c_fd, I2C_SMBUS_READ, reg, I2C_SMBUS_BYTE_DATA)
+    except OSError as e:
+        syslog.syslog(syslog.LOG_WARNING,
+                      f"fan-pid: i2c read failed (reg 0x{reg:02x}): {e}")
+        return None
+
+
+def i2c_read_word(i2c_fd: int, reg: int) -> Optional[int]:
+    """SMBus read-word-data from `reg`. Returns None on i2c error.
+
+    The EMC2305 TACH reading is High-byte-first (big-endian on the wire); the
+    SMBus word transfer returns it little-endian, so callers that need the
+    High byte in the MSB position must byte-swap. read_fan_rpm_raw() below
+    handles that.
+    """
+    try:
+        return _smbus_xfer(i2c_fd, I2C_SMBUS_READ, reg, I2C_SMBUS_WORD_DATA)
+    except OSError as e:
+        syslog.syslog(syslog.LOG_WARNING,
+                      f"fan-pid: i2c read failed (reg 0x{reg:02x}): {e}")
+        return None
+
+
+def set_tach_range_500(i2c_fd: int) -> None:
+    """Program RANGE=500 RPM (m=1) on both fan config registers.
+
+    Read-modify-write bits [6:5]=00 of the Fan Configuration 1 register for each
+    channel, preserving EDGES/UPDATE and the FSC-enable bit. This lowers the
+    chip's minimum measurable speed from ~968 RPM (m=2 default) to ~484 RPM.
+    Best-effort: an i2c error is logged, not fatal — the daemon still runs, it
+    just keeps the higher floor (and read_fan_rpm_raw would then over-report by
+    ~2x, so on failure we fall back to the sysfs tach path in the caller).
+    """
+    ok = True
+    for reg in (EMC2305_CFG_REG_FAN1, EMC2305_CFG_REG_FAN2):
+        cur = i2c_read_byte(i2c_fd, reg)
+        if cur is None:
+            ok = False
+            continue
+        new = (cur & ~EMC2305_RANGE_MASK) | EMC2305_RANGE_500
+        if new != cur:
+            try:
+                _smbus_xfer(i2c_fd, I2C_SMBUS_WRITE, reg,
+                            I2C_SMBUS_BYTE_DATA, new)
+            except OSError as e:
+                syslog.syslog(syslog.LOG_WARNING,
+                              f"fan-pid: RANGE write failed (reg 0x{reg:02x}): {e}")
+                ok = False
+                continue
+        syslog.syslog(syslog.LOG_INFO,
+                      f"fan-pid: EMC2305 cfg 0x{reg:02x}: 0x{cur:02x} -> 0x{new:02x} "
+                      f"(RANGE=500 RPM, m=1)")
+    if not ok:
+        raise RuntimeError("could not program EMC2305 RANGE=500 on all channels")
+
+
+def read_fan_rpm_raw(i2c_fd: int, tach_reg: int) -> Optional[int]:
+    """Read fan RPM from the raw 13-bit TACH register at m=1 (RANGE=500).
+
+    RPM = EMC2305_RPM_FACTOR / COUNT, where COUNT is the 13-bit value (the low 3
+    bits of the 16-bit TACH word are unused). Returns 0 when the count is in the
+    saturated (fan-stopped / below ~484 RPM) region, None on i2c error. Mirrors
+    the kernel driver math but with m=1 instead of the driver's hard-coded m=2.
+    """
+    word = i2c_read_word(i2c_fd, tach_reg)
+    if word is None:
+        return None
+    # SMBus word read is little-endian; the EMC2305 sends the High byte first
+    # (this is exactly what the kernel driver's i2c_smbus_read_word_swapped does),
+    # so swap to reconstruct the 16-bit register value (High<<8 | Low).
+    raw = ((word & 0xFF) << 8) | ((word >> 8) & 0xFF)
+    count = raw >> EMC2305_TACH_UNUSE_BITS
+    if count == 0:
+        return 0  # guard divide-by-zero (shouldn't occur; FFF8 -> count 0x1FFF)
+    # Same math as the kernel driver (RPM = FACTOR / count) but with the m=1
+    # multiplier that matches RANGE=500 instead of the driver's hard-coded m=2.
+    rpm = (EMC2305_RPM_FACTOR * EMC2305_TACH_MULTIPLIER) // count
+    # At/below the silicon floor the count is in the all-ones stopped region and
+    # the fan is either stopped or too slow to resolve -> report 0 (blind), the
+    # same convention the sysfs path uses at its higher m=2 floor.
+    if rpm <= TACH_SILICON_FLOOR_RPM:
+        return 0
+    return rpm
 
 
 def _emc2305_cdev_names() -> set:
@@ -530,6 +739,26 @@ def read_fan_rpm(path: str) -> Optional[int]:
     except (OSError, ValueError):
         return None
 
+
+def fan_rpm(fan: dict, i2c_fd: int) -> Optional[int]:
+    """Read a fan's RPM via the best available path.
+
+    When USE_RAW_TACH is set (RANGE=500 programmed at startup) read the raw
+    13-bit TACH register over i2c for the lower ~484 RPM floor; otherwise fall
+    back to the sysfs fanN_input path (kernel driver, ~960 RPM floor). `fan` may
+    carry either a "tach_reg" (raw) and/or a "tach_path"/"tach_file" (sysfs).
+    Returns RPM, 0 (below the readable floor / stopped), or None on read error.
+    """
+    if USE_RAW_TACH and "tach_reg" in fan:
+        return read_fan_rpm_raw(i2c_fd, fan["tach_reg"])
+    path = fan.get("tach_path")
+    if path is None and "tach_file" in fan:
+        # legacy/sysfs callers may pass a bare def without a resolved path
+        path = fan["tach_file"]
+    if path is None:
+        return None
+    return read_fan_rpm(path)
+
 def play_startup_whistle(i2c_fd: int) -> None:
     """One-shot audible boot-complete chirp: WHISTLE_PULSES * (low, high) pairs.
 
@@ -568,18 +797,18 @@ def detect_present_fans(i2c_fd: int, hwmon_dir: str) -> list[dict]:
     """Return the subset of FAN_DEFS that have a spinning fan attached.
 
     The whistle has just driven every channel to PWM_MAX, so any wired fan is
-    spinning well above the ~960 RPM tach floor. A channel whose tach still
-    reads 0 at full drive has no fan (or a fan with no/unwired tach) — flag it
-    absent so the loop does not later report a phantom NO-TACH.
+    spinning well above the tach floor (~484 RPM raw / ~960 sysfs). A channel
+    whose tach still reads 0 at full drive has no fan (or a fan with no/unwired
+    tach) — flag it absent so the loop does not later report a phantom NO-TACH.
 
     Detection happens ONLY at full drive: at any lower duty a present-but-slow
     fan (below the tach floor) is indistinguishable from an empty channel.
     """
     detected = []
     for fan in FAN_DEFS:
-        tach_path = os.path.join(hwmon_dir, fan["tach_file"])
-        rpm = read_fan_rpm(tach_path)
-        runtime = {**fan, "tach_ok": bool(rpm and rpm > 0)}
+        runtime = {**fan, "tach_path": os.path.join(hwmon_dir, fan["tach_file"])}
+        rpm = fan_rpm(runtime, i2c_fd)
+        runtime["tach_ok"] = bool(rpm and rpm > 0)
         detected.append(runtime)
         if runtime["tach_ok"]:
             syslog.syslog(syslog.LOG_INFO,
@@ -598,28 +827,99 @@ def detect_present_fans(i2c_fd: int, hwmon_dir: str) -> list[dict]:
 
 
 # ---- Boot-time spinning-floor probe -------------------------------------------
-CAL_DOWN_SETTLE = 2.0    # settle after a down-step before deciding visible/not
-CAL_KICK_SETTLE = 2.5    # settle after re-kicking a fan that fell dark
-CAL_ABORT_TEMP  = 75.0   # warm-restart safety: abort probe and keep known-good hi
+# The probe must decide "is the fan visibly running at this duty?" only AFTER the
+# rotor has settled. A blind fixed sleep is wrong: a heavy/high-inertia fan
+# coasts for many seconds after a down-step, so a short sleep reads a momentum-
+# inflated RPM and the bisection lands far too low (observed on .185: fan2's true
+# floor is ~65 but a 2 s settle guessed 31). Instead we watch the RPM 1st
+# derivative (per-second delta) and stop once it is "reasonably flat", i.e. the
+# remaining approach to the asymptote is small so the current reading is already
+# ~85-90% of the true steady value. Exponential settling means |delta| shrinks
+# geometrically; when |delta| <= max(SETTLE_FLAT_ABS, SETTLE_FLAT_FRAC*rpm) for
+# SETTLE_CONFIRM consecutive seconds, we are close enough to classify.
+CAL_KICK_SETTLE   = 2.5   # settle after re-kicking a fan that fell dark
+CAL_ABORT_TEMP    = 75.0  # warm-restart safety: abort probe and keep known-good hi
+SETTLE_MIN_S      = 2     # ignore the first coast-down second(s) before judging flat
+SETTLE_MAX_S      = 12    # hard cap on how long to wait for one down-step to settle
+SETTLE_POLL_S     = 1.0   # derivative sampling interval (1 s -> delta is per-second)
+SETTLE_CONFIRM    = 2     # consecutive flat samples required to call it settled
+SETTLE_FLAT_ABS   = 15    # |delta| this small (rpm/s) counts as flat regardless of rpm
+SETTLE_FLAT_FRAC  = 0.04  # ...or |delta| <= 4% of current rpm (whichever is larger)
+# The probe must accept a candidate only if it clears RUN_MARGIN_RPM by a comfort
+# band, not merely touches it — otherwise a fan sitting right on the margin (e.g.
+# fan1 ~516-536 rpm at duty 29) reads "ok" during the probe then trips the
+# runtime near-stall RAISE moments later. Requiring the same headroom the LOWER
+# self-heal wants means the probed floor is already where the runtime would
+# settle, so there is no boot-time raise churn.
+PROBE_ACCEPT_RPM  = RUN_MARGIN_RPM + 60   # candidate must settle >= this (590 rpm)
 
 
 def calibrate_floors(i2c_fd: int, fans: list[dict], hwmon_dir: str,
                      zone_paths: dict[str, str]) -> dict[int, int]:
-    """Fast from-above bisection giving a per-fan spinning-floor GUESS.
+    """From-above bisection giving a per-fan spinning-floor guess.
 
-    Runs all present fans in parallel (one shared settle per round). This is the
-    optimistic starting point handed to the controller — it can read a few units
-    low on a weak/low-inertia fan because it does not wait for full thermal
-    steady state, but the runtime self-heal corrects that within ~a minute.
+    Runs all present fans in parallel. Each down-step waits for the RPM 1st
+    derivative to go flat (settle_rpm below) instead of a blind fixed sleep, so a
+    heavy/high-inertia fan is judged on its SETTLED speed, not its coast-down
+    momentum — this is what keeps the guess accurate (a 2 s blind settle guessed
+    fan2=31 vs its true ~65). Candidates are classified against RUN_MARGIN_RPM so
+    the result is a floor that runs HEALTHY, above the stall cliff. The runtime
+    self-heal still fine-tunes +/-, but should have little to do now.
 
     Assumes the fans are already spinning at PWM_MAX (the whistle just ran).
     Returns {duty_reg: floor_guess}. On any error a fan falls back to FLOOR_GUESS.
     """
     def tach(fan):
-        return read_fan_rpm(os.path.join(hwmon_dir, fan["tach_file"])) or 0
+        return fan_rpm({**fan, "tach_path": os.path.join(hwmon_dir, fan["tach_file"])},
+                       i2c_fd) or 0
 
-    def visible(fan):
-        return tach(fan) > 0
+    def settle_rpm(active_regs: dict) -> dict:
+        """Wait until every fan in `active_regs` has a flat RPM 1st derivative,
+        then return {reg: settled_rpm}.
+
+        `active_regs` maps duty_reg -> fan def for the fans that were just
+        down-stepped this round. We sample each fan's RPM once per SETTLE_POLL_S,
+        track the per-second delta, and mark a fan "settled" once |delta| is
+        within max(SETTLE_FLAT_ABS, SETTLE_FLAT_FRAC*rpm) for SETTLE_CONFIRM
+        consecutive samples (exponential decay => small delta means we are near
+        the asymptote, ~85-90% of the true steady value). A fan that reads 0
+        (below the tach floor / stalled) is immediately settled at 0 — there is
+        nothing to converge to. Bounded by SETTLE_MIN_S / SETTLE_MAX_S so the
+        probe can't hang on a noisy tach.
+        """
+        prev = {reg: None for reg in active_regs}
+        flat = {reg: 0 for reg in active_regs}
+        settled = {reg: None for reg in active_regs}
+        elapsed = 0.0
+        while _running and elapsed < SETTLE_MAX_S:
+            time.sleep(SETTLE_POLL_S)
+            elapsed += SETTLE_POLL_S
+            for reg, fan in active_regs.items():
+                if settled[reg] is not None:
+                    continue
+                rpm = tach(fan)
+                if rpm == 0:
+                    settled[reg] = 0          # dark: nothing to settle toward
+                    continue
+                p = prev[reg]
+                prev[reg] = rpm
+                if p is None or elapsed < SETTLE_MIN_S:
+                    continue                  # need a baseline + skip 1st coast second
+                delta = abs(rpm - p)
+                thresh = max(SETTLE_FLAT_ABS, int(SETTLE_FLAT_FRAC * rpm))
+                if delta <= thresh:
+                    flat[reg] += 1
+                    if flat[reg] >= SETTLE_CONFIRM:
+                        settled[reg] = rpm    # derivative flat -> ~at steady state
+                else:
+                    flat[reg] = 0             # still moving -> reset the flat run
+            if all(v is not None for v in settled.values()):
+                break
+        # Timeout: use the last reading (or a fresh one) for any unsettled fan.
+        for reg, fan in active_regs.items():
+            if settled[reg] is None:
+                settled[reg] = prev[reg] if prev[reg] is not None else tach(fan)
+        return settled
 
     t0 = time.monotonic()
     probe_fans = [f for f in fans if f.get("tach_ok", True)]
@@ -638,14 +938,18 @@ def calibrate_floors(i2c_fd: int, fans: list[dict], hwmon_dir: str,
                 mid = (s["lo"] + s["hi"]) // 2
                 mids[reg] = mid
                 i2c_write_pwm(i2c_fd, mid, reg)
-        time.sleep(CAL_DOWN_SETTLE)
+        # Wait for each down-stepped fan's RPM derivative to go flat (not a blind
+        # fixed sleep), then classify against the healthy RUN margin — a fan that
+        # settles BELOW RUN_MARGIN_RPM is "not healthy here", same as dark, so the
+        # bisection converges on a floor that actually runs above the stall cliff.
+        settled = settle_rpm({reg: state[reg]["fan"] for reg in mids})
         fails = []
         for reg, mid in mids.items():
             s = state[reg]
-            if visible(s["fan"]):
-                s["hi"] = mid            # still visible -> floor <= mid
+            if settled[reg] >= PROBE_ACCEPT_RPM:
+                s["hi"] = mid            # healthy with margin -> floor <= mid
             else:
-                s["lo"] = mid            # dark -> floor > mid
+                s["lo"] = mid            # dark/near-stall/on-edge -> floor > mid
                 i2c_write_pwm(i2c_fd, s["hi"], reg)  # re-spin to known-good
                 fails.append(reg)
         if fails:
@@ -699,8 +1003,11 @@ class Controller:
                 "tach_ok": fan.get("tach_ok", True),
                 "tach_path": os.path.join(hwmon_dir, fan["tach_file"]),
                 "floor": max(FLOOR_MIN, min(PWM_MAX, guess)),
+                "rpm": None,              # last raw/sysfs tach sample for fan-check
                 "last_written_pwm": -1,   # force first write
-                "blind_ticks": 0,         # consecutive (cur>=floor & rpm==0)
+                "raise_run": 0,           # consecutive raises (drives adaptive step)
+                "healthy_ticks": 0,       # consecutive rpm>=RUN_MARGIN (resets raise_run)
+                "blind_ticks": 0,         # consecutive (cur>=floor & near-stall)
                 "vis_ticks": 0,           # consecutive (pinned & comfortable)
                 "cooldown": 0,            # ticks left where lowering is blocked
                 "kick": False,            # request a 255 re-kick this tick
@@ -719,7 +1026,11 @@ class Controller:
     def export_floors(self) -> None:
         """Publish current per-fan floors to FLOOR_STATE_FILE for fan-check.
 
-        Format: one 'reg=floor' per line (hex reg), e.g. '0x30=40'. Best-effort;
+        Format: one 'reg=floor' per line (hex reg), e.g. '0x30=40'. When raw
+        tach is active (RANGE=500, m=1) we also publish the last-read RPM as a
+        'reg=rpm' line under a distinct prefix so fan-check can report the CORRECT
+        low-floor RPM: the kernel sysfs fanN_input assumes m=2 and would read 2x
+        the true speed while the chip is in the 500 RPM range. Best-effort;
         /run is tmpfs so this is cheap and disappears on reboot (floors are
         relearned every boot anyway).
         """
@@ -727,6 +1038,13 @@ class Controller:
         try:
             os.makedirs(FLOOR_STATE_DIR, exist_ok=True)  # no-op under RuntimeDirectory=
             lines = [f"0x{f['duty_reg']:02x}={f['floor']}\n" for f in self.fans]
+            # Publish tach source + per-fan RPM so fan-check doesn't misread the
+            # m=2 sysfs value while the chip is at m=1.
+            lines.append(f"tach_source={'raw-m1' if USE_RAW_TACH else 'sysfs-m2'}\n")
+            for f in self.fans:
+                rpm = f.get("rpm")
+                if rpm is not None:
+                    lines.append(f"rpm:0x{f['duty_reg']:02x}={rpm}\n")
             with open(tmp, "w") as fh:
                 fh.writelines(lines)
             os.replace(tmp, FLOOR_STATE_FILE)  # atomic: fan-check never sees half a file
@@ -854,11 +1172,14 @@ class Controller:
                 fan["last_written_pwm"] = out
 
         # Runtime two-sided floor self-heal (uses this tick's tach + commanded).
+        # _refine_floor also refreshes fan["rpm"] for the export below.
         for fan in self.fans:
             if self._refine_floor(fan, fan_pwms[fan["name"]]):
                 floors_changed = True
-        if floors_changed:
-            self.export_floors()
+        # Re-publish every tick: floors change rarely but the RPM sample is fresh
+        # each tick and fan-check reads it (the /run write is a cheap tmpfs
+        # atomic replace). floors_changed only gates the INFO log noise, if any.
+        self.export_floors()
 
         return fan_pwms, zone_temps, zone_pwms
 
@@ -866,47 +1187,84 @@ class Controller:
         """Two-sided per-fan floor refinement. Returns True if the floor changed.
 
         RAISE (fast, safety): if the fan is commanded at/above its floor but its
-        tach reads 0 for RAISE_TICKS consecutive ticks, the floor was too low
-        (a momentum-inflated boot guess) — bump it up by RAISE_STEP and re-kick.
+        tach reads 0 (stalled) OR below RUN_MARGIN_RPM (near-stall) for
+        RAISE_TICKS consecutive ticks, the floor is too low — bump it up by
+        RAISE_STEP. A true stall (rpm==0) also gets a 255 re-kick; a slow-but-
+        spinning fan is only nudged, avoiding a coast-down transient.
 
         LOWER (slow, cautious): if the fan is pinned exactly at its floor (heat
-        isn't pushing it higher) and running with real headroom above the tach
-        floor (rpm >= TACH_FLOOR_RPM + LOWER_HEADROOM) for LOWER_TICKS ticks, the
+        isn't pushing it higher) and running with real headroom above the run
+        margin (rpm >= RUN_MARGIN_RPM + LOWER_HEADROOM) for LOWER_TICKS ticks, the
         floor is higher than necessary — drop it by 1. Blocked for RAISE_COOLDOWN
         ticks after any raise. The asymmetry (short/big raise vs long/small lower
-        + a headroom gap above the edge + cooldown) keeps the two from
-        oscillating: near the true edge (~960-1050 rpm) LOWER simply stops.
+        + a headroom gap above the run margin + cooldown) keeps the two from
+        oscillating: near the run margin (~530 rpm) LOWER simply stops, and RAISE
+        keeps the fan out of the ~484 rpm stall cliff below it.
         """
         if not fan["tach_ok"]:
             return False  # tach-less/absent channel: pinned at MAX, no feedback
         if fan["cooldown"] > 0:
             fan["cooldown"] -= 1
-        rpm = read_fan_rpm(fan["tach_path"])
+        rpm = fan_rpm(fan, self.i2c_fd)
         if rpm is None:
             return False  # transient read error — don't act on it
+        fan["rpm"] = rpm
 
         changed = False
-        # --- RAISE: commanded into the visible band but nothing on the tach ---
-        if commanded >= fan["floor"] and rpm == 0:
+        # --- RAISE: commanded into the running band but the fan reads stalled
+        # (rpm==0) OR is limping in the near-stall band below RUN_MARGIN_RPM.
+        # Only a true stall (rpm==0) gets a disruptive 255 re-kick to break a
+        # stuck rotor; a still-spinning-but-slow fan just needs a gentle floor
+        # bump toward its healthy band, without the kick that would otherwise
+        # inject a coast-down transient and start an oscillation.
+        near_stall = (rpm == 0 or rpm < RUN_MARGIN_RPM)
+        if commanded >= fan["floor"] and near_stall:
             fan["blind_ticks"] += 1
             fan["vis_ticks"] = 0
+            fan["healthy_ticks"] = 0
             if fan["blind_ticks"] >= RAISE_TICKS and fan["floor"] < FLOOR_MAX:
                 old = fan["floor"]
-                fan["floor"] = min(FLOOR_MAX, fan["floor"] + RAISE_STEP)
+                # Adaptive step: a bad boot-probe guess can sit far below the true
+                # floor (the probe reads momentum-inflated RPM on a weak/high-
+                # inertia fan and guesses low). Escalating the step on consecutive
+                # raises converges in seconds instead of crawling +2 for minutes.
+                fan["raise_run"] = fan.get("raise_run", 0) + 1
+                step = min(RAISE_STEP_MAX, RAISE_STEP * fan["raise_run"])
+                fan["floor"] = min(FLOOR_MAX, fan["floor"] + step)
                 fan["blind_ticks"] = 0
                 fan["cooldown"] = RAISE_COOLDOWN
-                fan["kick"] = True   # re-kick so it isn't stuck coasting
+                if rpm == 0:
+                    # Kick only on the FIRST raise of a stall run to break stiction.
+                    # Re-kicking every step injects a coast-down transient that
+                    # delays the next raise decision (the slow-climb bug); during a
+                    # sustained climb we just ramp the floor and let it catch up.
+                    if fan["raise_run"] == 1:
+                        fan["kick"] = True
+                    why = f"stalled, rpm=0 (step +{step})"
+                else:
+                    why = f"near-stall {rpm}rpm < {RUN_MARGIN_RPM} (step +{step})"
                 syslog.syslog(syslog.LOG_INFO,
                               f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
-                              f"(blind at cur={commanded}, rpm=0)")
+                              f"({why} at cur={commanded})")
                 changed = True
             return changed
 
         fan["blind_ticks"] = 0
+        # Reached only when rpm >= RUN_MARGIN_RPM (past the near_stall return).
+        # Reset raise escalation only after the fan has held healthy for
+        # RAISE_STABLE_TICKS consecutive ticks — a single high reading may be
+        # post-kick coast-down, which must not reset the run and drop a still-
+        # climbing fan back to a +2 step.
+        fan["healthy_ticks"] = fan.get("healthy_ticks", 0) + 1
+        if fan["healthy_ticks"] >= RAISE_STABLE_TICKS:
+            fan["raise_run"] = 0
 
-        # --- LOWER: pinned at floor, real headroom above the tach edge ---
+        # --- LOWER: pinned at floor, comfortable headroom above the RUN margin.
+        # Never lower a fan below RUN_MARGIN_RPM: require the at-floor RPM to sit
+        # LOWER_HEADROOM above the margin so a one-step drop still lands safely
+        # inside the healthy band, never on the stall cliff.
         pinned = (commanded == fan["floor"])
-        has_headroom = (rpm >= TACH_FLOOR_RPM + LOWER_HEADROOM)
+        has_headroom = (rpm >= RUN_MARGIN_RPM + LOWER_HEADROOM)
         if pinned and has_headroom and fan["cooldown"] == 0:
             fan["vis_ticks"] += 1
             if fan["vis_ticks"] >= LOWER_TICKS and fan["floor"] > FLOOR_MIN:
@@ -928,7 +1286,7 @@ class Controller:
         self.last_log_t = now
         fan_str_parts = []
         for fan in self.fans:
-            rpm = read_fan_rpm(fan["tach_path"])
+            rpm = fan_rpm(fan, self.i2c_fd)
             pwm = fan_pwms.get(fan["name"], 0)
             if rpm is None:
                 rpm_disp = "?rpm"
@@ -954,6 +1312,7 @@ def _on_sigterm(_sig, _frame):
 
 
 def main() -> int:
+    global USE_RAW_TACH
     syslog.openlog("fan-pid", syslog.LOG_PID, syslog.LOG_DAEMON)
 
     # Board gate — only run on LS1046A.  Same idiom as fancontrol-setup.
@@ -984,6 +1343,20 @@ def main() -> int:
         syslog.syslog(syslog.LOG_ERR, f"fan-pid: i2c open failed: {e!r} — exit 1")
         return 1
     syslog.syslog(syslog.LOG_INFO, f"fan-pid: i2c bus claimed at addr 0x{EMC2305_I2C_ADDR:02x}")
+
+    # Lower the tachometer's real silicon floor from ~968 RPM (RANGE=1000,
+    # m=2) to ~484 RPM (RANGE=500, m=1). Only enable raw-TACH conversion after
+    # BOTH channel config writes succeeded; otherwise sysfs remains correct for
+    # the chip's unchanged m=2 range whereas m=1 math would over-report by 2x.
+    try:
+        set_tach_range_500(i2c_fd)
+        USE_RAW_TACH = True
+        syslog.syslog(syslog.LOG_INFO,
+                      "fan-pid: raw 13-bit tach enabled (RANGE=500, floor ~484 RPM)")
+    except RuntimeError as e:
+        USE_RAW_TACH = False
+        syslog.syslog(syslog.LOG_WARNING,
+                      f"fan-pid: {e}; using kernel sysfs tach (floor ~960 RPM)")
 
     # Become the sole PWM authority: silence the kernel emc2305 cooling devices
     # so the thermal governor stops writing all fan channels behind our back.
