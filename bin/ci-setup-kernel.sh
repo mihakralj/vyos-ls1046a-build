@@ -1126,14 +1126,30 @@ git -c user.email=ci@local -c user.name=ci commit -q -m "kernel post-patches" --
 # reaches flow_indr_dev_setup_offload() — dpaa_setup_tc() returns
 # -EOPNOTSUPP from its default: case.  Injected via sed (not a
 # .patch file) to avoid the git apply --3way context-matching wall.
+#
+# IMPORTANT (2026-08-23 fix): the earlier form of this injection matched
+# 'case TC_SETUP_BLOCK:' and inserted an unconditional
+# 'return dpaa_setup_tc_flow_block(...)' right after it. That predated
+# board patch 0145, which had already rewritten the TC_SETUP_BLOCK case to
+# try the ingress-policer block handler FIRST (dpaa_setup_tc_block) and only
+# fall through to the ASK flow-offload backend on -EOPNOTSUPP. The old
+# injection therefore SHADOWED the policer path: every TC_SETUP_BLOCK bind
+# returned via the ASK backend, dpaa_setup_tc_block() (the matchall/police
+# registrar) was never invoked, and 'tc ... matchall action police skip_sw'
+# failed with EOPNOTSUPP (ask.ko: "unexpected tc_setup_type=4"). This broke
+# the hardware ingress-policer on every shipping image.
+#
+# Correct shape: keep the 0145 policer-first dispatch for TC_SETUP_BLOCK and
+# add TC_SETUP_FT as its OWN case routing to the flow-offload backend. Match
+# the exact 4-line 0145 block so the count-gate hard-fails if 0145 ever drifts.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
         drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
-        'case TC_SETUP_BLOCK:' \
-        'case TC_SETUP_BLOCK:\n\t\tcase TC_SETUP_FT:\n\t\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);' \
+        $'\t\terr = dpaa_setup_tc_block(net_dev, type_data);\n\t\tif (err != -EOPNOTSUPP)\n\t\t\treturn err;\n\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);' \
+        $'\t\terr = dpaa_setup_tc_block(net_dev, type_data);\n\t\tif (err != -EOPNOTSUPP)\n\t\t\treturn err;\n\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);\n\tcase TC_SETUP_FT:\n\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);' \
         1 \
-        "TC_SETUP_FT: case injected after TC_SETUP_BLOCK"
-    echo "### dpaa_eth.c: TC_SETUP_FT case injected (mutate)"
+        "TC_SETUP_FT: separate case added (policer-first TC_SETUP_BLOCK preserved)"
+    echo "### dpaa_eth.c: TC_SETUP_FT case added, policer TC_SETUP_BLOCK dispatch preserved (mutate)"
 fi
 
 # Fix fe_flow debugfs 8-byte key truncation (post-patch fixup)
