@@ -53,12 +53,20 @@ PWM_MAX=255
 # there; a 0 means "unknown" (daemon not running / hasn't published yet).
 FLOOR_STATE_FILE=/run/fan-pid/floors
 declare -A FAN_MIN_RUN=([1]=0 [2]=0)
+# RPM published by fan-pid. When fan-pid has switched the EMC2305 to RANGE=500
+# (m=1) to lower the tach floor to ~484 RPM, the kernel sysfs fanN_input reads
+# 2x the true speed (it assumes the m=2 default range). fan-pid therefore
+# publishes the correctly-scaled RPM here; we prefer it over sysfs when present.
+declare -A FAN_RPM=([1]=- [2]=-)
+TACH_SOURCE=sysfs-m2
 if [ -r "$FLOOR_STATE_FILE" ]; then
-    while IFS='=' read -r reg floor; do
-        [[ "$floor" =~ ^[0-9]+$ ]] || continue   # ignore malformed lines
-        case "$reg" in
-            0x30) FAN_MIN_RUN[1]=$floor ;;
-            0x40) FAN_MIN_RUN[2]=$floor ;;
+    while IFS='=' read -r key val; do
+        case "$key" in
+            0x30) [[ "$val" =~ ^[0-9]+$ ]] && FAN_MIN_RUN[1]=$val ;;
+            0x40) [[ "$val" =~ ^[0-9]+$ ]] && FAN_MIN_RUN[2]=$val ;;
+            rpm:0x30) [[ "$val" =~ ^[0-9]+$ ]] && FAN_RPM[1]=$val ;;
+            rpm:0x40) [[ "$val" =~ ^[0-9]+$ ]] && FAN_RPM[2]=$val ;;
+            tach_source) TACH_SOURCE=$val ;;
         esac
     done < "$FLOOR_STATE_FILE"
 fi
@@ -210,7 +218,17 @@ else
         [ -r "$pwm_path" ] && [ -r "$rpm_path" ] || continue
 
         pwm=$(cat "$pwm_path" 2>/dev/null || echo '?')
-        rpm=$(cat "$rpm_path" 2>/dev/null || echo '?')
+        # Prefer fan-pid's published RPM (correct at m=1 / RANGE=500); fall back
+        # to sysfs fanN_input only when the daemon hasn't published one. The
+        # sysfs value is 2x-inflated whenever tach_source=raw-m1, so never use it
+        # in that state.
+        if [ "${FAN_RPM[$channel]}" != "-" ]; then
+            rpm=${FAN_RPM[$channel]}
+        elif [ "$TACH_SOURCE" = "raw-m1" ]; then
+            rpm="?"   # daemon at m=1 but no sample yet — don't trust 2x sysfs
+        else
+            rpm=$(cat "$rpm_path" 2>/dev/null || echo '?')
+        fi
         fault=$(cat "$fault_path" 2>/dev/null || echo '?')
         min_run=${FAN_MIN_RUN[$channel]}
         pwm_pct="?"
@@ -218,11 +236,13 @@ else
             pwm_pct=$(awk -v p="$pwm" -v m="$PWM_MAX" 'BEGIN{printf "%.0f", p*100.0/m}')
         fi
 
-        # The EMC2305 tachometer cannot resolve speeds below ~960 RPM, which is
-        # roughly the RPM a fan produces at its calibrated `min` duty. So when
-        # cur < min the tach reads 0 even though the fan is almost certainly
-        # still spinning — that is a BLIND channel (RPM unreadable), NOT a
-        # stall. A genuine fault is only cur >= min with no tach pulses.
+        # fan-pid programs EMC2305 RANGE=500 (m=1), lowering the tach-visible
+        # floor from the kernel driver's ~960 RPM default to the silicon minimum
+        # of ~484 RPM. When cur < min the raw tach may still read 0 even though
+        # the fan is almost certainly spinning — that is a BLIND channel (RPM
+        # unreadable), NOT a stall. A genuine fault is only cur >= min with no
+        # tach pulses. If fan-pid is not active, the sysfs fallback retains the
+        # driver's ~960 RPM floor.
         rpm_disp="$rpm"
         min_disp="$min_run"
         [ "$min_run" = "0" ] && min_disp="?"
