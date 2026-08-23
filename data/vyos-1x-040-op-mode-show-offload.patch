@@ -1,12 +1,12 @@
-From fbbb6a997a56e74455cf8b8dbacda5654b8ea577 Mon Sep 17 00:00:00 2001
+From 7b5b62d5fa7300a5bc53fe5b4e15c8f8f6322d41 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Sat, 22 Aug 2026 16:20:39 +0000
+Date: Sun, 23 Aug 2026 04:43:36 +0000
 Subject: [PATCH] temp: vyos-1x-040-op-mode-show-offload.patch
 
 ---
  op-mode-definitions/show-offload.xml.in |  26 +++
- src/op_mode/show_offload.py             | 257 ++++++++++++++++++++++++
- 2 files changed, 283 insertions(+)
+ src/op_mode/show_offload.py             | 272 ++++++++++++++++++++++++
+ 2 files changed, 298 insertions(+)
  create mode 100644 op-mode-definitions/show-offload.xml.in
  create mode 100755 src/op_mode/show_offload.py
 
@@ -45,7 +45,7 @@ diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
 new file mode 100755
 --- /dev/null
 +++ b/src/op_mode/show_offload.py
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,272 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -196,6 +196,15 @@ new file mode 100755
 +    return flows
 +
 +
++def _nat_offload_enabled():
++    """Return the live ask.ko IPv4 NAT/PAT hardware-offload gate."""
++    try:
++        with open('/sys/module/ask/parameters/nat_offload') as f:
++            return f.read().strip().lower() in ('1', 'y', 'yes', 'true')
++    except OSError:
++        return False
++
++
 +def show_config():
 +    """Per-port hardware offload configuration and live armed state."""
 +    conf = ConfigTreeQuery()
@@ -215,10 +224,16 @@ new file mode 100755
 +        if conf.exists(['vpp', 'settings', 'interface', ifname]):
 +            offloads.append('vpp')
 +        else:
-+            if conf.exists(base + ['offload', 'ipv4']):
++            v4 = conf.exists(base + ['offload', 'ipv4'])
++            if v4:
 +                offloads.append('ipv4')
 +            if conf.exists(base + ['offload', 'ipv6']):
 +                offloads.append('ipv6')
++            # IPv4 NAT/PAT is a hardware capability layered on the IPv4 path;
++            # it is active whenever IPv4 offload is on and the ask.ko NAT gate
++            # is enabled (default on). IPv6 NAT is not offloaded.
++            if v4 and _nat_offload_enabled():
++                offloads.append('nat')
 +            if conf.exists(base + ['ingress-policer']):
 +                offloads.append('policer')
 +            # Distinguish configured-but-not-armed from live in silicon:
