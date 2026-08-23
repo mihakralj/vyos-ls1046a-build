@@ -27,7 +27,7 @@
 set -u
 
 # ---------------------------------------------------------------------------
-# Tunables — MUST mirror data/scripts/fan-pid (kept in lockstep manually).
+# Tunables — MUST mirror board/scripts/fan-pid (kept in lockstep manually).
 # Not sourced because /usr/local/bin/fan-pid is a Python file; duplicating
 # the small constants is simpler than adding a JSON sidecar.
 # ---------------------------------------------------------------------------
