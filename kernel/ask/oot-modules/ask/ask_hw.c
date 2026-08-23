@@ -116,17 +116,23 @@ static u8 ask_hw_port_family[64];
  * (T-M6-7.7) replaces it once the datapath is proven.
  */
 #define ASK_HW_PORT_ETH0_MGMT 0x0c
-static bool ask_nat_offload;
+/*
+ * T-M6-7.7 productization: IPv4 NAT/PAT passed S0-S3 on 210.10.1
+ * (SNAT+DNAT+masquerade, TCP 7.3 Gbit/s zero retr, UDP 500 Mbit/s zero loss).
+ * Default ON for IPv4; remains runtime-disableable for diagnosis. IPv6 NAT is
+ * NOT silicon-validated and is rejected in preflight even while this is true.
+ */
+static bool ask_nat_offload = true;
 module_param_named(nat_offload, ask_nat_offload, bool, 0644);
 MODULE_PARM_DESC(nat_offload,
-		 "Arm FE-VM NAT/PAT hardware offload (default 0; UNPROVEN silicon, experiment only)");
+		 "IPv4 NAT/PAT FMan hardware offload (default 1; IPv6 NAT rejected)");
 
 bool ask_hw_nat_offload_armed(void)
 {
 	bool armed = READ_ONCE(ask_nat_offload);
 
 	if (armed)
-		pr_warn_once("ask: EXPERIMENTAL NAT/PAT hardware offload ARMED — F-230 opcodes unproven on 210.10.1; eth0 remains excluded\n");
+		pr_info_once("ask: IPv4 NAT/PAT hardware offload enabled (silicon-validated); IPv6 NAT and eth0 remain excluded\n");
 	return armed;
 }
 EXPORT_SYMBOL_GPL(ask_hw_nat_offload_armed);
@@ -1135,6 +1141,11 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
                 return -EOPNOTSUPP;
         if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
                 if (!ask_hw_nat_offload_armed())
+                        return -EOPNOTSUPP;
+                /* IPv4 NAT is silicon-validated (S0-S3); IPv6 NAT (fused v6
+                 * opcode 0x2f) is NOT — reject it to software regardless of
+                 * the gate until its own S-gate passes. */
+                if (key->l3_proto != ASK_FLOW_L3_IPV4)
                         return -EOPNOTSUPP;
         }
 
