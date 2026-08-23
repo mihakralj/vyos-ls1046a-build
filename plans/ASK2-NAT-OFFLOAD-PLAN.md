@@ -1,9 +1,22 @@
 # ASK2 NAT / PAT Hardware Offload — Task Plan (T-M6-7)
 
-Status: planning (no code yet). Branch `dpaa1`. S0 QDRANT gate: DONE
-(2026-08-22). This plan decomposes the M6-B NAT/PAT compiler into staged,
-independently-validatable tasks with explicit silicon gates and a strict
-software-fallback safety contract.
+> STATUS 2026-08-23: **IPv4 NAT/PAT SHIPPING** (default-on) — all silicon
+> gates PASS. S0 record readback (fused opcode 0x25 TTL|DIP, 0x32 DPORT);
+> S1 SNAT wire-verified (HELGA saw translated src, 0 retr); S2 DNAT
+> wire-verified; S3 SNAT+masquerade TCP -P4 7.3 Gbit/s 0-retr + UDP
+> 500 Mbit/s 0-loss, no leak/wedge. Productized in commit 625d0d2c
+> (default nat_offload=1, get-info advertises IPV4|IPV6|NAT|PAT,
+> `show offload config` shows `nat`), CI 32618608347, ISO
+> vyos-2026.08.23-0444-rolling. IPv6 NAT (fused v6 opcode 0x2f) is emitted
+> by F-230 but NOT silicon-tested and is REJECTED in preflight even when the
+> gate is on — it needs its own S-gate before advertising. eth0 management
+> is never NAT-offloaded. Runtime `nat_offload=0` disables for diagnosis.
+
+
+This document now serves as the implementation/validation record for the
+shipping IPv4 NAT/PAT path and the staged follow-up plan for IPv6 NAT. The
+strict software-fallback safety contract remains binding for every capability
+that has not passed its silicon gate.
 
 ## 1. Goal and non-goals
 
