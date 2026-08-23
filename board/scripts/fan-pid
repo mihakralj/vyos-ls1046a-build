@@ -144,46 +144,31 @@ PWM_FLOOR    = 0     # PWM applied when all zones at/below setpoint
 PWM_MAX      = 255   # full speed
 PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
 
-# ---------- Per-fan spinning-floor calibration + self-heal ----------------------
+# ---------- Per-fan spinning-floor guarded proportional seek --------------------
 # The "spinning floor" is the lowest duty at which a fan spins fast enough to
-# run HEALTHY — at or above RUN_MARGIN_RPM, which sits safely above the EMC2305
-# tach saturation cliff (~484 RPM at RANGE=500/m=1; ~960 on the sysfs fallback).
+# run HEALTHY — at or above RUN_MARGIN_RPM, safely above the EMC2305 tach
+# saturation cliff (~484 RPM at RANGE=500/m=1; ~960 on the sysfs fallback).
 # It is a property of whatever fan the user has plugged into each port, so it is
-# NOT hardcoded — it is discovered at every boot and then continuously refined by
-# the daemon. The margin (not the bare tach floor) is the target so the loop
-# never parks a fan on the stall edge where the reading flaps 0<->~500.
-#
-# Two-stage discovery:
-#   1. BOOT PROBE (fast, ~15-30 s, both fans in parallel): a from-above
-#      bisection gives an optimistic starting guess. It is fast because it does
-#      NOT wait for each candidate to reach thermal steady state — so on a
-#      weak/low-inertia fan it can read a momentum-inflated RPM and guess a
-#      floor a few units too low. That is fine; the daemon fixes it.
-#   2. RUNTIME SELF-HEAL (two-sided): the daemon reads each fan's tach every
-#      tick and already knows its own commanded duty, so it can tell truth from
-#      the stall edge:
-#        - commanded >= floor but tach < RUN_MARGIN_RPM for RAISE_TICKS ticks ->
-#          floor was too low: floor += RAISE_STEP. Re-kick only if rpm==0.
-#        - pinned AT floor with sustained headroom above RUN_MARGIN_RPM for
-#          LOWER_TICKS ticks -> floor may be too high: floor -= 1 (slow step).
-#      Asymmetric timing/steps + a comfort margin + post-raise cooldown keep the
-#      two directions from oscillating; it settles within ~a minute of boot.
-#
-# Below its floor a fan may still be turning but the tach can't see it (BLIND) —
-# the loop never commands below the floor, so a fan never drops out of view.
+# NOT hardcoded. There is no separate boot calibration/probe: every tach-capable
+# fan starts conservatively at FLOOR_START, then while thermal demand is low the
+# daemon continuously seeks the duty that produces SEEK_TARGET_RPM. This makes
+# floor discovery part of normal control — fast at boot and adaptive to fan
+# aging/replacement later. Asymmetric/cliff guards keep the seek safe:
+#   - proportional UP (fast, toward safety) when rpm is below target;
+#   - small, settled-only DOWN moves when rpm is above target;
+#   - no floor learning while thermal PID demand is above the floor;
+#   - rpm==0 uses a fixed recovery bump + one MAX kick, never proportional math.
+# The target margin (not the bare tach floor) prevents parking on the stall edge
+# where the reading would flap 0<->~500.
 FLOOR_MIN        = 20    # never trust/allow a floor below this
-FLOOR_MAX        = 160   # safety ceiling for a runaway self-heal
-FLOOR_GUESS      = 60    # fallback starting floor if the boot probe fails
-RAISE_TICKS      = 3     # ticks of (cur>=floor & near-stall) before raising (~6 s)
-RAISE_STEP       = 2     # base units to bump the floor on the FIRST near-stall hit
-RAISE_STEP_MAX   = 8     # cap on the escalated step (step = RAISE_STEP * raise_run,
-                         # clamped here) so a low boot guess converges in a few
-                         # steps instead of crawling +2/tick, without overshooting
-                         # wildly past the true floor on the last jump
-RAISE_STABLE_TICKS = 10  # healthy pinned-at-floor ticks (~20 s) before resetting
-                         # raise escalation; shorter post-kick coast-down samples
-                         # must NOT masquerade as convergence and restart at +2
-LOWER_TICKS      = 15    # ticks pinned-at-floor & with headroom before lowering (~30 s)
+FLOOR_MAX        = 160   # safety ceiling for a runaway seek
+FLOOR_START      = 96    # duty each tach-capable fan starts at; the seek converges
+                         # DOWN to the real floor from here. Chosen well above any
+                         # real floor (~31/71 measured) so the fan is always
+                         # spinning healthy at start and the seek only ever needs
+                         # to come down through the safe region — never a cold dive
+                         # toward the stall cliff.
+
 TACH_FLOOR_RPM   = 484   # EMC2305 can't resolve below ~this with RANGE=500 (m=1);
                          # at/under it -> reads 0. Lowered from 960 on 2026-08-23
                          # when the daemon switched the chip to the 500 RPM range
@@ -192,21 +177,50 @@ TACH_FLOOR_RPM   = 484   # EMC2305 can't resolve below ~this with RANGE=500 (m=1
 # RUN_MARGIN_RPM is the lowest speed we consider a HEALTHY running fan. It sits
 # safely ABOVE the ~484 RPM tach saturation cliff so the control loop never parks
 # a fan on the edge where one RPM of real variation flips it between "readable"
-# and "stalled/480" (the fan2 kick-oscillation observed on .185 2026-08-23: fan2
-# stalls just under duty ~59, and a floor at 61/502 rpm sat right on that cliff,
-# so every sag to 480 triggered a full 255 re-kick). Measured fan2 curve:
-# duty 64 -> 530 rpm steady, 61 -> 502, 58 -> 480(stall). 530 keeps a real fan
-# ~50 rpm clear of the cliff while leaving a fast fan (fan1: ~540 rpm at duty 31)
-# at its low floor. A fan whose tach reads BELOW this margin (but nonzero) is
-# treated as near-stall for RAISE, and LOWER will never push a fan under it.
+# and "stalled/480". Measured fan2 curve: duty 64 -> 530 rpm, 61 -> 502,
+# 58 -> 480(stall). 530 keeps a real fan ~50 rpm clear of the cliff.
 RUN_MARGIN_RPM   = 530   # healthy-running floor; must stay > TACH_FLOOR_RPM
-LOWER_HEADROOM   = 220   # only LOWER if the at-floor RPM sits this far above the
-                         # run margin (i.e. rpm >= RUN_MARGIN_RPM + 220 = 750), so
-                         # LOWER stops well before the cliff and a one-step drop
-                         # can't land the fan in the near-stall band. Combined with
-                         # the post-raise cooldown this prevents the RAISE/LOWER
-                         # oscillation across a fan's stall edge.
-RAISE_COOLDOWN   = 20    # ticks after a raise during which lowering is blocked
+
+# ---------- Guarded proportional floor SEEK -------------------------------------
+# The per-fan floor is not found by a one-shot boot probe; it is a continuously
+# maintained quantity. Whenever thermal demand is low (the fan would otherwise sit
+# at its floor), a guarded proportional controller nudges the floor so the fan
+# runs at SEEK_TARGET_RPM. This converges fast (proportional: big correction when
+# far, small when close) AND self-corrects for aging / a swapped fan, with none of
+# the bisection probe's fixed per-candidate settle cost.
+#
+# Guards that make a proportional seek safe against the stall cliff:
+#   - It only runs while the fan is pinned at its floor (demand <= floor). When
+#     cooling needs more, the fan runs faster and the floor is left alone.
+#   - Approaches the target from ABOVE (fans start at FLOOR_START), so it converges
+#     down through the healthy region and never cold-dives into the cliff.
+#   - Asymmetric per-tick clamps: UP moves (toward safety) are large and immediate;
+#     DOWN moves (toward the cliff) are small and gated on a settled, flat tach —
+#     so overshoot into stall is structurally impossible.
+#   - A true stall (rpm==0 / below tach floor) bypasses the proportional math: a
+#     fixed recovery bump + a single 255 kick to break stiction.
+#   - A deadband around the target stops micro-churn once converged.
+SEEK_TARGET_RPM  = 590   # where the floor should settle (= RUN_MARGIN + headroom)
+SEEK_DEADBAND    = 60    # no move while |target - rpm| <= this (settle 530..650)
+SEEK_KP          = 0.03  # duty change per rpm of error (err 300 -> ~9 duty)
+SEEK_UP_MAX        = 10  # max duty increase per tick (fast toward safety)
+SEEK_NEAR_BAND     = 400 # rpm above target within which we switch to cautious
+                         # NEAR mode (small settled-only DOWN steps). Above this
+                         # much headroom the cliff is far away -> descend fast.
+SEEK_DOWN_MAX_FAR  = 12  # max duty decrease per tick when far above target
+SEEK_DOWN_MAX_NEAR = 3   # max duty decrease per tick near target (cliff-cautious)
+SEEK_STALL_BUMP    = 6   # fixed floor bump when rpm==0 (stall) — no prop math on 0
+SEEK_STALL_MARGIN  = 2   # learned hard lower bound = stalled duty + this margin
+SEEK_BLACKOUT      = 5   # ticks (~10 s) after a MAX kick to ignore coast-down RPM
+SEEK_DOWN_TICKS    = 2   # consecutive flat ticks before allowing a NEAR DOWN move
+SEEK_STEP_SETTLE   = 2   # control ticks (~4 s) to observe motor/tach response after
+                         # each DOWN floor step before another DOWN is allowed
+SEEK_FLAT_RPM      = 25  # |rpm - last_rpm| <= this counts as a flat/settled tick
+SEEK_MEASURE_TOL   = PWM_DEADBAND  # actual written PWM may remain this far above
+                         # floor because writes smaller than PWM_DEADBAND are
+                         # intentionally suppressed; still representative enough
+                         # for floor RPM measurement without waiting on EMA forever
+SEEK_COOLDOWN      = 8   # ticks after any UP move during which DOWN is blocked
 # Runtime export for fan-check. Lives under the systemd RuntimeDirectory=fan-pid
 # (/run/fan-pid), which is writable under ProtectSystem=strict AND auto-removed
 # when the unit stops — so fan-check never reads a stale floor from a dead daemon.
@@ -826,163 +840,6 @@ def detect_present_fans(i2c_fd: int, hwmon_dir: str) -> list[dict]:
     return detected
 
 
-# ---- Boot-time spinning-floor probe -------------------------------------------
-# The probe must decide "is the fan visibly running at this duty?" only AFTER the
-# rotor has settled. A blind fixed sleep is wrong: a heavy/high-inertia fan
-# coasts for many seconds after a down-step, so a short sleep reads a momentum-
-# inflated RPM and the bisection lands far too low (observed on .185: fan2's true
-# floor is ~65 but a 2 s settle guessed 31). Instead we watch the RPM 1st
-# derivative (per-second delta) and stop once it is "reasonably flat", i.e. the
-# remaining approach to the asymptote is small so the current reading is already
-# ~85-90% of the true steady value. Exponential settling means |delta| shrinks
-# geometrically; when |delta| <= max(SETTLE_FLAT_ABS, SETTLE_FLAT_FRAC*rpm) for
-# SETTLE_CONFIRM consecutive seconds, we are close enough to classify.
-CAL_KICK_SETTLE   = 2.5   # settle after re-kicking a fan that fell dark
-CAL_ABORT_TEMP    = 75.0  # warm-restart safety: abort probe and keep known-good hi
-SETTLE_MIN_S      = 2     # ignore the first coast-down second(s) before judging flat
-SETTLE_MAX_S      = 10    # hard cap on how long to wait for one down-step to settle
-SETTLE_POLL_S     = 1.0   # derivative sampling interval (1 s -> delta is per-second)
-SETTLE_CONFIRM    = 2     # consecutive flat samples required to call it settled
-SETTLE_FLAT_ABS   = 25    # |delta| this small (rpm/s) counts as flat regardless of rpm
-SETTLE_FLAT_FRAC  = 0.04  # ...or |delta| <= 4% of current rpm (whichever is larger)
-# The probe must accept a candidate only if it clears RUN_MARGIN_RPM by a comfort
-# band, not merely touches it — otherwise a fan sitting right on the margin (e.g.
-# fan1 ~516-536 rpm at duty 29) reads "ok" during the probe then trips the
-# runtime near-stall RAISE moments later. Requiring the same headroom the LOWER
-# self-heal wants means the probed floor is already where the runtime would
-# settle, so there is no boot-time raise churn.
-PROBE_ACCEPT_RPM  = RUN_MARGIN_RPM + 60   # candidate must settle >= this (590 rpm)
-
-
-def calibrate_floors(i2c_fd: int, fans: list[dict], hwmon_dir: str,
-                     zone_paths: dict[str, str]) -> dict[int, int]:
-    """From-above bisection giving a per-fan spinning-floor guess.
-
-    Runs all present fans in parallel. Each down-step waits for the RPM 1st
-    derivative to go flat (settle_rpm below) instead of a blind fixed sleep, so a
-    heavy/high-inertia fan is judged on its SETTLED speed, not its coast-down
-    momentum — this is what keeps the guess accurate (a 2 s blind settle guessed
-    fan2=31 vs its true ~65). Candidates are classified against RUN_MARGIN_RPM so
-    the result is a floor that runs HEALTHY, above the stall cliff. The runtime
-    self-heal still fine-tunes +/-, but should have little to do now.
-
-    Assumes the fans are already spinning at PWM_MAX (the whistle just ran).
-    Returns {duty_reg: floor_guess}. On any error a fan falls back to FLOOR_GUESS.
-    """
-    def tach(fan):
-        return fan_rpm({**fan, "tach_path": os.path.join(hwmon_dir, fan["tach_file"])},
-                       i2c_fd) or 0
-
-    def settle_rpm(active_regs: dict) -> dict:
-        """Wait until every fan in `active_regs` has a flat RPM 1st derivative,
-        then return {reg: settled_rpm}.
-
-        `active_regs` maps duty_reg -> fan def for the fans that were just
-        down-stepped this round. We sample each fan's RPM once per SETTLE_POLL_S,
-        track the per-second delta, and mark a fan "settled" once |delta| is
-        within max(SETTLE_FLAT_ABS, SETTLE_FLAT_FRAC*rpm) for SETTLE_CONFIRM
-        consecutive samples (exponential decay => small delta means we are near
-        the asymptote, ~85-90% of the true steady value). A fan that reads 0
-        (below the tach floor / stalled) is immediately settled at 0 — there is
-        nothing to converge to. Bounded by SETTLE_MIN_S / SETTLE_MAX_S so the
-        probe can't hang on a noisy tach.
-        """
-        prev = {reg: None for reg in active_regs}
-        flat = {reg: 0 for reg in active_regs}
-        settled = {reg: None for reg in active_regs}
-        elapsed = 0.0
-        while _running and elapsed < SETTLE_MAX_S:
-            time.sleep(SETTLE_POLL_S)
-            elapsed += SETTLE_POLL_S
-            for reg, fan in active_regs.items():
-                if settled[reg] is not None:
-                    continue
-                rpm = tach(fan)
-                if rpm == 0:
-                    settled[reg] = 0          # dark: nothing to settle toward
-                    continue
-                p = prev[reg]
-                prev[reg] = rpm
-                if p is None or elapsed < SETTLE_MIN_S:
-                    continue                  # need a baseline + skip 1st coast second
-                delta = abs(rpm - p)
-                thresh = max(SETTLE_FLAT_ABS, int(SETTLE_FLAT_FRAC * rpm))
-                if delta <= thresh:
-                    flat[reg] += 1
-                    if flat[reg] >= SETTLE_CONFIRM:
-                        settled[reg] = rpm    # derivative flat -> ~at steady state
-                else:
-                    flat[reg] = 0             # still moving -> reset the flat run
-            if all(v is not None for v in settled.values()):
-                break
-        # Timeout: use the last reading (or a fresh one) for any unsettled fan.
-        for reg, fan in active_regs.items():
-            if settled[reg] is None:
-                settled[reg] = prev[reg] if prev[reg] is not None else tach(fan)
-        return settled
-
-    t0 = time.monotonic()
-    probe_fans = [f for f in fans if f.get("tach_ok", True)]
-    state = {f["duty_reg"]: {"lo": 0, "hi": PWM_MAX, "fan": f}
-             for f in probe_fans}
-    # ensure every channel is at MAX; tach-less/absent channels stay there.
-    for f in fans:
-        i2c_write_pwm(i2c_fd, PWM_MAX, f["duty_reg"])
-    time.sleep(CAL_KICK_SETTLE)
-
-    while (_running and state
-           and any(s["hi"] - s["lo"] > 1 for s in state.values())):
-        mids = {}
-        for reg, s in state.items():
-            if s["hi"] - s["lo"] > 1:
-                mid = (s["lo"] + s["hi"]) // 2
-                mids[reg] = mid
-                i2c_write_pwm(i2c_fd, mid, reg)
-        # Wait for each down-stepped fan's RPM derivative to go flat (not a blind
-        # fixed sleep), then classify against the healthy RUN margin — a fan that
-        # settles BELOW RUN_MARGIN_RPM is "not healthy here", same as dark, so the
-        # bisection converges on a floor that actually runs above the stall cliff.
-        settled = settle_rpm({reg: state[reg]["fan"] for reg in mids})
-        fails = []
-        for reg, mid in mids.items():
-            s = state[reg]
-            if settled[reg] >= PROBE_ACCEPT_RPM:
-                s["hi"] = mid            # healthy with margin -> floor <= mid
-            else:
-                s["lo"] = mid            # dark/near-stall/on-edge -> floor > mid
-                i2c_write_pwm(i2c_fd, s["hi"], reg)  # re-spin to known-good
-                fails.append(reg)
-        if fails:
-            time.sleep(CAL_KICK_SETTLE)
-
-        # Boot is normally cool/no-load, but a warm restart under traffic is
-        # possible. Abort the exploratory down-sweep if any readable zone is
-        # already hot; each current `hi` is known-spinning, so using it as the
-        # starting floor is conservative and the runtime self-heal still works.
-        temps = [read_temp(path) for path in zone_paths.values()]
-        hottest = max((t for t in temps if t is not None), default=0.0)
-        if hottest >= CAL_ABORT_TEMP:
-            syslog.syslog(syslog.LOG_WARNING,
-                          f"fan-pid: floor probe aborted at {hottest:.1f}C "
-                          f">= {CAL_ABORT_TEMP:.1f}C; using current known-good bounds")
-            break
-
-    # Tach-capable fans get their probed guess; tach-less/absent channels stay
-    # at MAX permanently (safe for a real fan, harmless for an empty channel).
-    floors = {f["duty_reg"]: PWM_MAX for f in fans}
-    for reg, s in state.items():
-        floors[reg] = max(FLOOR_MIN, min(FLOOR_MAX, s["hi"]))
-    # leave everything spinning at MAX; the loop takes over immediately after.
-    for f in fans:
-        i2c_write_pwm(i2c_fd, PWM_MAX, f["duty_reg"])
-    dt = time.monotonic() - t0
-    syslog.syslog(syslog.LOG_INFO,
-                  "fan-pid: floor probe (%.0fs): %s" % (
-                      dt, ", ".join(f"{s['fan']['name']}=0x{reg:02x}:{floors[reg]}"
-                                    for reg, s in state.items())))
-    return floors
-
-
 # ---------- Controller ----------------------------------------------------------
 class Controller:
     """One PI controller per zone, output combined via max() and sent to all fans."""
@@ -992,24 +849,25 @@ class Controller:
         self.i2c_fd = i2c_fd
         self.zone_paths = zone_paths
         # Runtime fan records: independent duty register, tach path, a MUTABLE
-        # spinning floor (seeded from the boot probe, refined at runtime) and
-        # its self-heal counters. Both fans receive the same PID demand but each
-        # is clamped up to its own current floor.
+        # spinning floor maintained by the guarded proportional seek, plus its
+        # seek state. Both fans receive the same PID demand but each is clamped
+        # up to its own current floor. The floor starts HIGH (FLOOR_START) and the
+        # seek converges it down to the real value from above.
         self.fans = []
         for fan in fans:
-            guess = floors.get(fan["duty_reg"], FLOOR_GUESS)
+            start = floors.get(fan["duty_reg"], FLOOR_START)
             self.fans.append({
                 **fan,
                 "tach_ok": fan.get("tach_ok", True),
                 "tach_path": os.path.join(hwmon_dir, fan["tach_file"]),
-                "floor": max(FLOOR_MIN, min(PWM_MAX, guess)),
+                "floor": max(FLOOR_MIN, min(PWM_MAX, start)),
                 "rpm": None,              # last raw/sysfs tach sample for fan-check
                 "last_written_pwm": -1,   # force first write
-                "raise_run": 0,           # consecutive raises (drives adaptive step)
-                "healthy_ticks": 0,       # consecutive rpm>=RUN_MARGIN (resets raise_run)
-                "blind_ticks": 0,         # consecutive (cur>=floor & near-stall)
-                "vis_ticks": 0,           # consecutive (pinned & comfortable)
-                "cooldown": 0,            # ticks left where lowering is blocked
+                "seek_flat": 0,           # consecutive in-band+flat ticks (gates DOWN)
+                "seek_settle": 0,         # ticks to observe response after a DOWN step
+                "seek_blackout": 0,       # ticks to ignore post-kick coast-down rpm
+                "floor_lo": FLOOR_MIN,    # learned hard lower bound (raised by stalls)
+                "cooldown": 0,            # ticks left where a DOWN move is blocked
                 "kick": False,            # request a 255 re-kick this tick
             })
         self.export_floors()
@@ -1150,17 +1008,29 @@ class Controller:
             target = self.smoothed_pwm
 
         shared = int(round(target))
-        # Output stage: send the shared demand to every driven fan, clamped up
-        # to that fan's own current floor. Per-fan deadband so a fan pinned at
-        # its floor isn't rewritten every tick, but always write on 0/MAX.
-        # A fan flagged for a re-kick (self-heal just raised its floor) gets a
-        # one-tick PWM_MAX pulse so it isn't stuck coasting below the new floor.
+        # Is thermal demand low enough to run the floor seek? Computed from the
+        # UNSMOOTHED per-zone demand so the EMA's downward lag never blocks it.
+        allow_floor_seek = (not any_critical and not any_fault
+                            and max_pwm_zone <= self.min_floor())
+
+        # Output stage. Two paths, decoupled on purpose:
+        #   - SEEK path (thermal demand low): drive each fan DIRECTLY at its own
+        #     floor, bypassing the shared thermal EMA. This removes EMA lag from
+        #     the idle floor entirely, so the seek always measures rpm AT the
+        #     floor duty and can step every settle window instead of waiting many
+        #     ticks for the smoothed output to coast down. The thermal EMA still
+        #     governs real cooling; it simply doesn't gate idle floor maintenance.
+        #   - THERMAL path (cooling needed): the smoothed shared demand, clamped
+        #     up to each fan's floor, exactly as before.
+        # A fan flagged for a re-kick gets a one-tick PWM_MAX pulse either way.
         fan_pwms: dict[str, int] = {}
         floors_changed = False
         for fan in self.fans:
             if fan["kick"]:
                 out = PWM_MAX
                 fan["kick"] = False
+            elif allow_floor_seek:
+                out = fan["floor"]                 # direct-at-floor (no EMA lag)
             else:
                 out = max(shared, fan["floor"])
             out = max(0, min(PWM_MAX, out))
@@ -1171,10 +1041,9 @@ class Controller:
                 i2c_write_pwm(self.i2c_fd, out, fan["duty_reg"])
                 fan["last_written_pwm"] = out
 
-        # Runtime two-sided floor self-heal (uses this tick's tach + commanded).
-        # _refine_floor also refreshes fan["rpm"] for the export below.
+        # Guarded proportional floor seek (maintains/learns each floor while idle).
         for fan in self.fans:
-            if self._refine_floor(fan, fan_pwms[fan["name"]]):
+            if self._refine_floor(fan, fan_pwms[fan["name"]], allow_floor_seek):
                 floors_changed = True
         # Re-publish every tick: floors change rarely but the RPM sample is fresh
         # each tick and fan-check reads it (the /run write is a cheap tmpfs
@@ -1183,23 +1052,26 @@ class Controller:
 
         return fan_pwms, zone_temps, zone_pwms
 
-    def _refine_floor(self, fan: dict, commanded: int) -> bool:
-        """Two-sided per-fan floor refinement. Returns True if the floor changed.
+    def _refine_floor(self, fan: dict, commanded: int,
+                      allow_seek: bool) -> bool:
+        """Guarded proportional floor SEEK. Returns True if the floor changed.
 
-        RAISE (fast, safety): if the fan is commanded at/above its floor but its
-        tach reads 0 (stalled) OR below RUN_MARGIN_RPM (near-stall) for
-        RAISE_TICKS consecutive ticks, the floor is too low — bump it up by
-        RAISE_STEP. A true stall (rpm==0) also gets a 255 re-kick; a slow-but-
-        spinning fan is only nudged, avoiding a coast-down transient.
+        Runs only while unsmoothed thermal demand is low (`allow_seek`), i.e. the
+        fan would otherwise idle at its floor. It drives the floor so the fan runs
+        at SEEK_TARGET_RPM using proportional control (correction ~ error),
+        converging fast from FLOOR_START down to the real floor, then holding it.
+        When cooling needs more the fan runs faster than the floor and the seek is
+        idle (nothing to do).
 
-        LOWER (slow, cautious): if the fan is pinned exactly at its floor (heat
-        isn't pushing it higher) and running with real headroom above the run
-        margin (rpm >= RUN_MARGIN_RPM + LOWER_HEADROOM) for LOWER_TICKS ticks, the
-        floor is higher than necessary — drop it by 1. Blocked for RAISE_COOLDOWN
-        ticks after any raise. The asymmetry (short/big raise vs long/small lower
-        + a headroom gap above the run margin + cooldown) keeps the two from
-        oscillating: near the run margin (~530 rpm) LOWER simply stops, and RAISE
-        keeps the fan out of the ~484 rpm stall cliff below it.
+        Cliff-safety guards (why this is safe despite the ~484 rpm stall
+        discontinuity):
+          - rpm==0 (stalled) bypasses the prop math: learn a hard lower bound at
+            this duty, bump up SEEK_STALL_BUMP, and kick once (PWM_MAX) to break
+            stiction; a post-kick blackout ignores the coast-down.
+          - UP moves are large & immediate (toward safety). DOWN moves are fast
+            while FAR above target, then small + settled-only when NEAR it, never
+            below the learned lower bound — so overshoot into stall is impossible.
+          - A deadband around the target stops micro-churn once converged.
         """
         if not fan["tach_ok"]:
             return False  # tach-less/absent channel: pinned at MAX, no feedback
@@ -1208,76 +1080,121 @@ class Controller:
         rpm = fan_rpm(fan, self.i2c_fd)
         if rpm is None:
             return False  # transient read error — don't act on it
+        last = fan.get("rpm")
         fan["rpm"] = rpm
 
-        changed = False
-        # --- RAISE: commanded into the running band but the fan reads stalled
-        # (rpm==0) OR is limping in the near-stall band below RUN_MARGIN_RPM.
-        # Only a true stall (rpm==0) gets a disruptive 255 re-kick to break a
-        # stuck rotor; a still-spinning-but-slow fan just needs a gentle floor
-        # bump toward its healthy band, without the kick that would otherwise
-        # inject a coast-down transient and start an oscillation.
-        near_stall = (rpm == 0 or rpm < RUN_MARGIN_RPM)
-        if commanded >= fan["floor"] and near_stall:
-            fan["blind_ticks"] += 1
-            fan["vis_ticks"] = 0
-            fan["healthy_ticks"] = 0
-            if fan["blind_ticks"] >= RAISE_TICKS and fan["floor"] < FLOOR_MAX:
-                old = fan["floor"]
-                # Adaptive step: a bad boot-probe guess can sit far below the true
-                # floor (the probe reads momentum-inflated RPM on a weak/high-
-                # inertia fan and guesses low). Escalating the step on consecutive
-                # raises converges in seconds instead of crawling +2 for minutes.
-                fan["raise_run"] = fan.get("raise_run", 0) + 1
-                step = min(RAISE_STEP_MAX, RAISE_STEP * fan["raise_run"])
-                fan["floor"] = min(FLOOR_MAX, fan["floor"] + step)
-                fan["blind_ticks"] = 0
-                fan["cooldown"] = RAISE_COOLDOWN
-                if rpm == 0:
-                    # Kick only on the FIRST raise of a stall run to break stiction.
-                    # Re-kicking every step injects a coast-down transient that
-                    # delays the next raise decision (the slow-climb bug); during a
-                    # sustained climb we just ramp the floor and let it catch up.
-                    if fan["raise_run"] == 1:
-                        fan["kick"] = True
-                    why = f"stalled, rpm=0 (step +{step})"
-                else:
-                    why = f"near-stall {rpm}rpm < {RUN_MARGIN_RPM} (step +{step})"
+        # Seek only when (a) thermal demand is low (caller's unsmoothed gate, so a
+        # hot board never has its floor learned) AND (b) the fan is actually
+        # running at its floor. The direct-at-floor idle output makes (b) true
+        # without waiting on the thermal EMA; the written-duty guard below covers
+        # the one transition tick when seek mode first becomes active.
+        if not allow_seek:
+            fan["seek_flat"] = 0
+            fan["seek_settle"] = 0
+            return False
+        # With the direct-at-floor seek output path, the duty on the chip equals
+        # the floor while seeking, so rpm already reflects the floor speed. The
+        # tolerance only guards a transient tick right after entering seek mode
+        # (output was still the higher thermal command).
+        written = fan.get("last_written_pwm", commanded)
+        if written > fan["floor"] + SEEK_MEASURE_TOL:
+            return False   # just entered seek mode; one tick for output to land
+
+        # After any DOWN step, spend SEEK_STEP_SETTLE ticks observing the new
+        # (lower) speed before stepping again, so we act on the settled rpm rather
+        # than a still-decelerating one — cheap protection against overshoot.
+        if fan["seek_settle"] > 0:
+            fan["seek_settle"] -= 1
+            return False
+
+        old = fan["floor"]
+
+        # --- Post-kick blackout: after a stall recovery kick (one-tick PWM_MAX),
+        # the fan coasts down from full speed for several seconds. Those readings
+        # are NOT the floor speed — acting on them (they look "far above target")
+        # would drive the floor back down past the very stall point we just found.
+        # Block all seek action until the blackout clears.
+        if fan["seek_blackout"] > 0:
+            fan["seek_blackout"] -= 1
+            return False
+
+        # --- Stall guard: rpm==0 means below the tach floor / stalled. Do NOT run
+        # proportional math on 0 (it would demand a huge jump). Learn a hard lower
+        # bound (this duty stalls, so never seek at/below it again), bump up, and
+        # kick once to break stiction. A post-kick blackout keeps the coast-down
+        # from being misread as "too fast".
+        if rpm == 0:
+            fan["seek_flat"] = 0
+            # The current floor duty stalled -> remember it as a lower bound with
+            # margin so the DOWN path can never return here.
+            fan["floor_lo"] = max(fan.get("floor_lo", FLOOR_MIN),
+                                  fan["floor"] + SEEK_STALL_MARGIN)
+            if fan["floor"] < FLOOR_MAX:
+                fan["floor"] = min(FLOOR_MAX,
+                                   max(fan["floor_lo"],
+                                       fan["floor"] + SEEK_STALL_BUMP))
+                fan["kick"] = True              # break stiction
+                fan["seek_blackout"] = SEEK_BLACKOUT
                 syslog.syslog(syslog.LOG_INFO,
                               f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
-                              f"({why} at cur={commanded})")
-                changed = True
-            return changed
+                              f"(stall rpm=0, lo={fan['floor_lo']}, kick)")
+                return True
+            return False
 
-        fan["blind_ticks"] = 0
-        # Reached only when rpm >= RUN_MARGIN_RPM (past the near_stall return).
-        # Reset raise escalation only after the fan has held healthy for
-        # RAISE_STABLE_TICKS consecutive ticks — a single high reading may be
-        # post-kick coast-down, which must not reset the run and drop a still-
-        # climbing fan back to a +2 step.
-        fan["healthy_ticks"] = fan.get("healthy_ticks", 0) + 1
-        if fan["healthy_ticks"] >= RAISE_STABLE_TICKS:
-            fan["raise_run"] = 0
+        err = SEEK_TARGET_RPM - rpm          # +ve => too slow, need more duty
+        # Deadband: converged, hold.
+        if abs(err) <= SEEK_DEADBAND:
+            fan["seek_flat"] = 0
+            return False
 
-        # --- LOWER: pinned at floor, comfortable headroom above the RUN margin.
-        # Never lower a fan below RUN_MARGIN_RPM: require the at-floor RPM to sit
-        # LOWER_HEADROOM above the margin so a one-step drop still lands safely
-        # inside the healthy band, never on the stall cliff.
-        pinned = (commanded == fan["floor"])
-        has_headroom = (rpm >= RUN_MARGIN_RPM + LOWER_HEADROOM)
-        if pinned and has_headroom and fan["cooldown"] == 0:
-            fan["vis_ticks"] += 1
-            if fan["vis_ticks"] >= LOWER_TICKS and fan["floor"] > FLOOR_MIN:
-                old = fan["floor"]
-                fan["floor"] = max(FLOOR_MIN, fan["floor"] - 1)
-                fan["vis_ticks"] = 0
-                syslog.syslog(syslog.LOG_INFO,
-                              f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
-                              f"(headroom: {rpm}rpm at floor)")
-                changed = True
+        # --- UP: too slow. Proportional, large & immediate (toward safety). ---
+        if err > 0:
+            step = max(1, min(SEEK_UP_MAX, int(round(SEEK_KP * err))))
+            if fan["floor"] >= FLOOR_MAX:
+                return False
+            fan["floor"] = min(FLOOR_MAX, fan["floor"] + step)
+            fan["seek_flat"] = 0
+            fan["cooldown"] = SEEK_COOLDOWN   # block DOWN briefly after any UP
+            syslog.syslog(syslog.LOG_INFO,
+                          f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
+                          f"(seek up: {rpm}rpm < {SEEK_TARGET_RPM}, +{step})")
+            return True
+
+        # --- DOWN: too fast. Two regimes so a fast fan (fan1 reads thousands of
+        # rpm above target at low duty) converges quickly while a slow fan near
+        # the target stays cliff-safe:
+        #   FAR (rpm >> target, huge headroom above the ~484 cliff): take large
+        #        proportional steps immediately — no cliff risk this far up, and
+        #        no flat-gate (rpm is changing precisely because we're stepping).
+        #   NEAR (within SEEK_NEAR_BAND of target): small, settled-only steps
+        #        gated on a flat tach + SEEK_DOWN_TICKS + post-UP cooldown, so we
+        #        creep the last bit without overshooting into the stall cliff.
+        # Hard lower bound: FLOOR_MIN, or a higher learned bound if this fan has
+        # stalled before. Never seek at/below a known stall duty.
+        lo = max(FLOOR_MIN, fan.get("floor_lo", FLOOR_MIN))
+        if fan["floor"] <= lo:
+            return False
+        near = (rpm - SEEK_TARGET_RPM) <= SEEK_NEAR_BAND
+        if near:
+            flat = (last is not None and abs(rpm - last) <= SEEK_FLAT_RPM)
+            if not flat or fan["cooldown"] > 0:
+                fan["seek_flat"] = 0
+                return False
+            fan["seek_flat"] = fan.get("seek_flat", 0) + 1
+            if fan["seek_flat"] < SEEK_DOWN_TICKS:
+                return False
+            cap = SEEK_DOWN_MAX_NEAR
         else:
-            fan["vis_ticks"] = 0
-        return changed
+            cap = SEEK_DOWN_MAX_FAR      # far above target: descend fast
+        step = max(1, min(cap, int(round(SEEK_KP * -err))))
+        fan["floor"] = max(lo, fan["floor"] - step)
+        fan["seek_flat"] = 0
+        fan["seek_settle"] = SEEK_STEP_SETTLE   # observe the new speed before next
+        syslog.syslog(syslog.LOG_INFO,
+                      f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
+                      f"(seek down {'near' if near else 'far'}: "
+                      f"{rpm}rpm > {SEEK_TARGET_RPM}, -{step})")
+        return True
 
     def maybe_log(self, now: float, fan_pwms: dict[str, int],
                   zt: dict[str, float], zp: dict[str, float]) -> None:
@@ -1376,10 +1293,10 @@ def main() -> int:
     syslog.syslog(syslog.LOG_INFO,
                   f"fan-pid: controlling {len(zone_paths)} zones: {','.join(zone_paths)}")
 
-    # Install the failsafe signal handlers BEFORE the multi-second whistle/probe
+    # Install the failsafe signal handlers BEFORE the multi-second whistle/spinup
     # so a systemctl stop/restart during startup exits promptly and still hits
     # the finally block (both fans -> MAX). Everything from the whistle onward
-    # runs inside the try so the failsafe covers the probe too.
+    # runs inside the try so the failsafe covers startup too.
     signal.signal(signal.SIGTERM, _on_sigterm)
     signal.signal(signal.SIGINT,  _on_sigterm)
 
@@ -1399,14 +1316,15 @@ def main() -> int:
         syslog.syslog(syslog.LOG_INFO,
                       "fan-pid: driving fans: " + ",".join(f["name"] for f in fans))
 
-        # Fast optimistic floor probe (parallel). Runtime self-heal in the
-        # Controller corrects momentum-inflated guesses up/down while running.
-        try:
-            floors = calibrate_floors(i2c_fd, fans, hwmon_dir, zone_paths)
-        except Exception as e:
-            syslog.syslog(syslog.LOG_ERR,
-                          f"fan-pid: floor probe failed: {e!r} — using conservative guesses")
-            floors = {f["duty_reg"]: FLOOR_GUESS for f in fans}
+        # No one-shot boot probe: every tach-capable fan starts at FLOOR_START and
+        # the in-loop guarded proportional seek converges the floor down to the
+        # real value from above (fast, and it keeps maintaining/correcting it as
+        # long as thermal demand is low). Tach-less/absent channels stay at MAX.
+        floors = {f["duty_reg"]: (FLOOR_START if f.get("tach_ok", True) else PWM_MAX)
+                  for f in fans}
+        syslog.syslog(syslog.LOG_INFO,
+                      "fan-pid: seeding floors at %d; seek will converge them "
+                      "(target %d rpm)" % (FLOOR_START, SEEK_TARGET_RPM))
 
         ctrl = Controller(i2c_fd, fans, hwmon_dir, zone_paths, floors)
         next_tick = time.monotonic()
