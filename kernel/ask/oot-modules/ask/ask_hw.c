@@ -106,6 +106,61 @@ int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 bool fman_pcd_v6_enabled(void);	/* F-210 export; still consulted by kernel */
 static u8 ask_hw_port_family[64];
 
+/*
+ * T-M6-7.1 NAT offload arming gate. Default OFF: NAT/PAT flows fail closed to
+ * software (the shipping contract). When set (modprobe ask nat44_offload=1) the
+ * preflight stops rejecting the NAT action classes and ask.ko populates the
+ * F-230 FE-VM rewrite opcodes. This is a silicon-experiment switch for the
+ * S0..S3 gates; the fused-opcode encoding is UNPROVEN on 210.10.1, so this MUST
+ * stay 0 in any shipping image until S1..S3 pass. A per-interface CLI knob
+ * (T-M6-7.7) replaces it once the datapath is proven.
+ */
+#define ASK_HW_PORT_ETH0_MGMT 0x0c
+/*
+ * T-M6-7.7 productization: IPv4 NAT/PAT passed S0-S3 on 210.10.1
+ * (SNAT+DNAT+masquerade, TCP 7.3 Gbit/s zero retr, UDP 500 Mbit/s zero loss).
+ * Default ON for IPv4; remains runtime-disableable for diagnosis. IPv6 NAT is
+ * NOT silicon-validated and is rejected in preflight even while this is true.
+ */
+static bool ask_nat44_offload = true;
+module_param_named(nat44_offload, ask_nat44_offload, bool, 0644);
+MODULE_PARM_DESC(nat44_offload,
+		 "IPv4-to-IPv4 NAT/PAT FMan hardware offload (default 1; nat66 separate, nat46/nat64 not offloadable)");
+
+bool ask_hw_nat44_offload_armed(void)
+{
+	bool armed = READ_ONCE(ask_nat44_offload);
+
+	if (armed)
+		pr_info_once("ask: IPv4 NAT/PAT hardware offload enabled (silicon-validated); IPv6 NAT and eth0 remain excluded\n");
+	return armed;
+}
+EXPORT_SYMBOL_GPL(ask_hw_nat44_offload_armed);
+
+/*
+ * T-M6-7.8 NAT66 (IPv6<->IPv6 NAT). The F-230 emitter produces the fused v6 L3
+ * opcode (0x2f = HOPLIMIT|SIP_V6|DIP_V6) with 16-byte address params. Passed
+ * S0-S3 on 210.10.1 2026-08-23 (SNAT66/DNAT66/masquerade66, TCP -P4 7.13 Gbit/s
+ * 0-retr + UDP 500 Mbit/s 0-loss, fused opcode 0x2d/0x2f + 16-byte v6 param
+ * readback-confirmed, no wedge). Default ON; runtime-disableable for diagnosis.
+ * NAT46/NAT64 (cross-family) are NOT offloadable — no FE family-conversion
+ * opcode — and always fall back to software.
+ */
+static bool ask_nat66_offload = true;
+module_param_named(nat66_offload, ask_nat66_offload, bool, 0644);
+MODULE_PARM_DESC(nat66_offload,
+		 "IPv6-to-IPv6 NAT FMan hardware offload (default 1; nat44 separate, nat46/nat64 not offloadable)");
+
+bool ask_hw_nat66_offload_armed(void)
+{
+	bool armed = READ_ONCE(ask_nat66_offload);
+
+	if (armed)
+		pr_info_once("ask: IPv6 NAT66 hardware offload enabled (silicon-validated); eth0 excluded\n");
+	return armed;
+}
+EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
+
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
 	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
@@ -1096,14 +1151,32 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
          * per-egress TX FQ; it needs NO per-flow MURAM, policer, or CAAM slot.
          * Any action that WOULD require an unprovisioned resource class must
          * fail to software here, before publication, rather than partially
-         * program silicon. NAT/PAT/VLAN are already rejected upstream by the
-         * A2 strict action parser, but re-assert defensively: if action_flags
-         * ever carries a class we cannot back, refuse.
+         * program silicon. VLAN/CAAM/OP are still rejected unconditionally.
+         *
+         * T-M6-7.1: NAT/PAT (ASK_ACT_NAT_SRC/DST/PAT) is admitted to hardware
+         * ONLY when the ask_nat44_offload gate is enabled (default on) AND the flow
+         * is not on the eth0 management port. Disarmed (default) it fails
+         * closed to software exactly as before -- byte-identical shipping
+         * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
+         * ask.ko populates action.nat_* (only done when armed).
          */
-        if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT |
-                            ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP |
+        if (action_flags & (ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP |
                             ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
                 return -EOPNOTSUPP;
+        if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
+                /* IPv4 NAT is silicon-validated (S0-S3), shipping default-on.
+                 * IPv6 NAT66 uses the separate nat66_offload gate (default on; fused v6 opcode
+                 * 0x2f unproven); default off -> software fallback. */
+                if (key->l3_proto == ASK_FLOW_L3_IPV4) {
+                        if (!ask_hw_nat44_offload_armed())
+                                return -EOPNOTSUPP;
+                } else if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+                        if (!ask_hw_nat66_offload_armed())
+                                return -EOPNOTSUPP;
+                } else {
+                        return -EOPNOTSUPP;
+                }
+        }
 
 	/* Ingress hwport must resolve first (it owns the classifier AND its
 	 * per-port family mask decides v4/v6 admission). Resolve BEFORE the
@@ -1111,6 +1184,12 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	rc = ask_hw_resolve_iif_port(key->iif, &port_id);
 	if (rc)
 		return rc;
+
+	/* Never NAT-offload the eth0 management lifeline, even when the global
+	 * NAT gate is enabled. It remains available for SSH/recovery. */
+	if ((action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) &&
+	    port_id == ASK_HW_PORT_ETH0_MGMT)
+		return -EOPNOTSUPP;
 
 	/* Per-port family/proto gate: TCP/UDP, and the ingress port must have
 	 * this L3 family selected (CLI offload ipv4 / offload ipv6). Otherwise

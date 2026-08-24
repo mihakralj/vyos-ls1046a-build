@@ -20,21 +20,10 @@
     "F_094.py": "fman_pcd.c/h: F-094 retype flow_add \u2192 struct fman_pcd_fe_flow_action *",
     "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage \u2014 unparks FE-VM",
     "F_097.py": "fman_pcd.c: T-P1-1 F-08 \u2014 fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
-    "F_099.py": "net/xdp/*.c + dpaa_eth.c: M4 ZC-bind instrumentation \u2014 pr_err at every error return to trace xsk_socket__create() EINVAL",
     "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation \u2014 pr_err at xsk_pool_dma_map/bman_new_pool failures",
     "F_101.py": "dpaa_eth.h: M4 ZC workaround \u2014 lower DPAA1_MIN_UMEM_CHUNK 3840\u21922048 for VPP 2K-chunk compatibility",
     "F_102.py": "qman.c: M4 ZC crash fix \u2014 NULL guard for fq in __poll_portal_fast SDQCR path",
     "F_103.py": "af_xdp_pool_main.c: SUPERSEDED 2026-07-21 \u2014 BPID reprogram re-enabled (F_102 guards crash path)",
-    "F_105.py": {
-      "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
-      "description": "rx_hook diagnostics: log why frames are rejected (temporary)",
-      "date": "2026-07-21"
-    },
-    "F_106.py": {
-      "target": "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c",
-      "description": "rx_hook trace_printk diagnostics at every return-false point (temporary)",
-      "date": "2026-07-21"
-    },
     "F_107.py": "fman_pcd.c: F-107 gen_pool double-free prevention \u2014 DECLARE_BITMAP(fe_port_armed) + -EBUSY guard in fe_engage",
     "F_108.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c",
@@ -64,16 +53,6 @@
     "F_125.py": {
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() returned on kg_port_arm_fe failure with pcd->fe_scaffold_* still set; the next attempt overwrote those fields, orphaning the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) permanently. Measured at exactly 304 B per failed engage on .185 and .106, reclaimable only by reboot, and the source of the arena fragmentation that made even single-port engage fail -ENOMEM. Also unwinds a partial 3-way allocation. Reuses the existing fman_pcd_fe_arm_free_scaffold(). Runs after F-118.",
-      "date": "2026-07-27"
-    },
-    "F_126.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-126 DIAGNOSTIC (TEMPORARY): tag every early return in __fman_pcd_fe_arm_engage() with a unique pr_err so the -12 on port 0x10 names its own site. F-125 did not close the 304 B/attempt leak on ISO 0501; dmesg ruled out the scaffold-alloc path and F_097's verify gate, so the failing return is unidentified. DELETE this fixup and its manifest entry when F-125 closes.",
-      "date": "2026-07-27"
-    },
-    "F_127.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-127 DIAGNOSTIC (TEMPORARY): tag every early return in fman_pcd_fe_engage() (the wrapper) with a unique pr_err. On ISO 0530 the genl engage fails with -12 but F-126's tags never fire, proving the -12 comes from the wrapper before __fman_pcd_fe_arm_engage() is called. DELETE when F-125 closes.",
       "date": "2026-07-27"
     },
     "F_128.py": {
@@ -160,13 +139,10 @@
     "F_189.py": "fman_pcd.c: F-189 (2026-08-14, EHASH-DUAL-FIX Phase 1.1) -- stats-enabled fe_flow insert: 'add stats' syntax threads a stats flag into fman_pcd_ehash_add_key() setting SET_STATS_ENABLE(0x1000)/SET_TIMESTAMP_ENABLE(0x2000) entry flags (320B record, F-176 alloc) so fe_ehash_stats' hardware-writeback counters (pkt_count/pkt_bytes/timestamp at +256) become a dispatch-independent compare-stage discriminator; extends fe_ehash_stats with the live bucket pad word (en_exthash_bucket.u64 pad) for Phase 3.2 raw-bucket readback. genl caller passes false (investigative-only).",
     "F_190.py": "fman_pcd.c: F-190 (2026-08-14, Phase 3 fix) -- write en_exthash_node vendor node to the root AD in fe_enter_build so the CC dispatch reads the correct node type and routes to the ehash table",
     "F_191.py": "fman_pcd.c: F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1) -- gate the debugfs surface behind CONFIG_FMAN_PCD_DEBUG_FS: wraps the registration block + root_put in if (IS_ENABLED(...)); Kconfig symbol added by board patch 0170",
-    "F_192.py": "fman_pcd.c: F-192 (2026-08-15, E2 diagnostic) -- bounded read-only per-port FE workspace snapshot: params-page +0x54/+0x58, owned management index, and first 32 pool bytes; no descriptor or datapath write",
-    "F_193.py": "fman_pcd.c: F-193 (2026-08-15, production diagnostic) -- one-line flow-add argument and failure trace: supplied hw_port_id, action/table key sizes, and resolved own-port FQID; no behavioral change",
-    "F_194.py": "fman_pcd.c: F-194 (2026-08-15, production diagnostic) -- traces the early fman_pcd_fe_flow_add -EINVAL guard above F-193, including fm/action pointers, key size, and kernel-side action layout; no behavioral change",
-    "F_196.py": "fman_pcd.c: F-196 (2026-08-15, read-only resolver diagnostic) -- logs the populated params-page default FQID and same-port KeyGen base-FQID candidates while preserving the existing resolver return value",
+    "F_193.py": "fman_pcd.c: F-193 (structural, was a diagnostic; logging removed 2026-08-24) -- hoists the own-port fallback FQID into a local target_fqid and passes it to fman_pcd_ehash_add_key() instead of the inline fman_pcd_resolve_miss_fqid(pcd, hw_port_id). KEPT because F-198's hardware TX terminal computes hit_fqid = action->tx_fqid ? action->tx_fqid : target_fqid and anchors on the target_fqid argument. Functionally identical to the original inline resolve; changes no action/table/descriptor/MURAM/DDR/KeyGen/packet path.",
     "F_197.py": "fman_pcd.c: F-197 (2026-08-15, target-FQID correction) -- preserves non-zero params-page FQIDs and otherwise resolves a unique non-zero base FQID from a used KeyGen scheme bound to the requested ingress port; ambiguous candidates fail closed",
     "F_198.py": "fman_pcd.c + fman_pcd.h: F-198 (2026-08-15, T-M7-2 S1 hardware TX terminal) -- adds tx_fqid/next_hop_mac/egress_mac/eth_type to struct fman_pcd_fe_flow_action and (l2_dst,l2_src,eth_type) to fman_pcd_ehash_add_key; when the OOT caller supplies a per-egress TX FQ the FE record emits INSERT_L2_HDR(0x41)+ENQUEUE_PKT(0x01) direct-to-wire, else keeps the F-197 own-port RX-FQID reinjection terminal",
-    "F_199.py": "dpaa_eth.c/.h + dpaa_flow_offload.h: F-199 (2026-08-16, T-M7-2 S4 no-confirm TX FQ) -- adds FQ_TYPE_TX_NO_CONFIRM + exported dpaa_alloc_offload_tx_fq() programming context_a 0x1c00000080000000 (B0V=0, EBD=1) so the FE hardware terminal enqueues with no per-frame TX-confirm FD; kernel's own confirm-enabled TX FQs untouched",
+    "F_199.py": "dpaa_eth.c/.h + dpaa_flow_offload.h: F-199 (2026-08-16, T-M7-2 S4 no-confirm TX FQ; silicon-validated 2026-08-24) -- adds FQ_TYPE_TX_NO_CONFIRM + exported dpaa_alloc_offload_tx_fq() programming NXP SDK FQ_FLAG_NO_TXCONFIRM context_a 0x9a000000c0000000. Board .185 image 0500 at 7.76 Gbit/s bidirectional HIT (13.6 GB/~9.7M frames): tx-confirm totals moved only +9/+5 control-plane frames, F-227 stayed 0, board idle; the earlier 0x1c00000080000000 B0V-cleared guess generated ~600K confirms/s. Kernel's own confirm-enabled TX FQs remain untouched; F-232 proof diagnostic retired after validation.",
     "F_200.py": "fman_pcd.c: F-200 (2026-08-16, T-M7-2 S3 UPDATE_TTL) -- extends the F-198 TX branch for routed IPv4 (eth_type 0x0800) to prepend UPDATE_TTL(0x21) + 4-byte zero DSCP param ahead of INSERT_L2_HDR so the FE decrements TTL and fixes the IPv4 header checksum in hardware; IPv6 keeps the S1 two-opcode chain (UPDATE_HOPLIMIT deferred)",
     "F_201.py": "fman_keygen.c: F-201 (2026-08-17, software-forwarding multicore fix) -- guards F-051's unconditional `kgse_hc = 0` clear on the active engine role so RSS/direct-enqueue and policer schemes (next_engine 0/1) keep the 128-FQ CRC-64 distribution computed by keygen_port_hashing_init(), while CC/FE exact-match schemes (next_engine 2/3) still get kgse_hc=0. Board-confirmed root cause on .185: F-051 collapsed all five RSS schemes (0-4) to range=0/HMASK=0 = 1 FQ, funnelling every hashed flow to the base FQ (eth3 0x200 / eth4 0x300) -> single QMan portal -> CPU0, capping software (nft flowtable) forwarding at ~2.5 Gbps with CPU0 100% softirq and millions of rx_dropped on CPU0 while CPU1-3 idle. XPS masks disproven as the fix (RX-side funnel, not TX). Runs after F-051 and F-183 (both emit the identical kgse_hc-clear line); ehash terminal ignores FQID distribution by design (spec S5.4). S0 qdrant-gated (RM Ch.5 / microcode ref kgse_fqb range + kgse_hc HMASK / BSP 128-FQ default).",
     "F_202.py": "fman_pcd.c: F-202 (2026-08-17, P0 flow-lifecycle fix) -- serializes exported production fman_pcd_fe_flow_add/del with pcd->fe_lock, honoring fman_pcd_ehash_{add,del}_key's documented caller-lock contract and matching every debugfs add/del/clear path. Board panic on .185 image 0114: nft nf_ft_offload_del workqueue hit list_del corruption/LIST_POISON2 in fman_pcd_ehash_del_key after async per-key delete raced duplicate delete, clear-all, or drain. Unlocks all error paths and treats -ENOENT after serialized per-key delete as an idempotent no-op. No register/descriptor changes. S0 qdrant-gated against F-117 and CR-003/CR-004 history.",
@@ -184,6 +160,8 @@
     "F_226.py": "fman_pcd.c: Phase-B unified dual-lane IPv6 enable \u2014 dead-end F-211/F-212/F-214 LCV/second-scheme via port_wants_v6=false, suppress F-210 gro+16/table1 node, emit UPDATE_HOPLIMIT 0x29 for v6 HIT",
     "F_227.py": "dpaa_eth.c: crash-safe TX-confirm guard \u2014 kernel skb/XDP TX confirms carry BPID 0xff; a valid-BPID FMan-forwarded HIT confirm on a confirmed FQ has no dpaa_eth_swbp and its buffer was already EBD-recycled, so ignore it before dereferencing swbp->xdpf (fixes xdp_return_frame NULL-deref panic; no dpaa_fd_release double-free)",
     "F_228.py": "fman_pcd.c + fman_pcd.h: T-M8-3 key-addressed read-only per-flow stats getter fman_pcd_fe_flow_get_stats() \u2014 mirrors fman_pcd_fe_flow_del table-resolve+fe_lock and ehash_del_key memcmp scan, reads silicon packet_count/packet_bytes @record+256/+264 (dma_rmb before be64), so ask.ko can surface real offloaded counters into dump-flows",
+    "F_229.py": "dpaa_eth.c: issue #45 — after PHY attach, force manual symmetric 802.3x pause on SGMII links so 1G GPY115C RJ45 ingress can back-pressure under sustained forwarding load; eth3/eth4 10G XGMII unchanged",
+    "F_230.py": "fman_pcd.c + fman_pcd.h: T-M6-7.1 FE-VM NAT/PAT opcode emitter \u2014 extends the routed FE chain with UPDATE_SIP/DIP(v4 0x22/0x24, v6 0x2a/0x2c) + fused UPDATE_SPORT/DPORT(0x31|0x32) between UPDATE_TTL/HOPLIMIT and INSERT_L2_HDR, vendor create_nat_hm bit-fused encoding + auto-checksum. DORMANT: only emits when the caller passes nat->flags!=0 (ask.ko never does yet), so the record stays byte-identical to F-200/F-226. UNPROVEN on 210.10.1 \u2014 gated by S0..S3 silicon before advertising.",
     "F_211.py": "fman_pcd.c/fman_pcd_kg.c/internal.h: F-211 (T-M6-1 step 3) gated THREE-scheme arm: v4 kgse_mv=0x40000000 (table0), free-slot v6 kgse_mv=0x80000000/CCOBASE=1 (table1), free-slot CATCH-ALL kgse_mv=0x20000000 (ETH slot0, clone of v4/table0, highest id=walked last) so non-IP frames don't NO_SCHEME; bind all into port SP, commit table1 node own-port miss FQID",
     "F_212.py": "fman_pcd_kg.c: F-212 (T-M6-1 step 4) gated engage-time parser LCV split (slot0 ETH catch-all=0x20000000, slot5 v4=0x40000000, slot6 v6=0x80000000) plus self-detecting teardown of v6+catch-all slots, v4 mv restore, parser restore all-0xffffffff; calls F-205 parser-stop/readback primitive; v4 OFF no-op",
     "F_214.py": "fman_keygen.c/internal.h/fman_pcd_kg.c: F-214 (2026-08-19, gated) keygen_cls_plan0_passall writes global classification-plan group0=0xffffffff ONCE (keygen->cls_plan0_passall flag set after readback; later port engages skip all AR access) so QLCV carries parser LCV; one-time rule fixes second-port FMFP_EXTC SYNC timeout from rewriting shared CP group while first port live; wired into F-211 v6 arm; default-OFF",
@@ -191,14 +169,23 @@
     "F_216.py": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c: F-216 add ratelimited zero-address FD guard before dma_unmap/phys_to_virt/headroom reads (logs status/format/BPID/offset/length/FQID, consumes without release), and remove obsolete F-072/F-170 be64 frame-data hash capture + normalize RXHASH braces. Image 2228 panic: addr=0 -> phys_to_virt(0)+hash_offset0x108 fault. Defensive/logging, not root malformed-FD fix.",
     "F_218.py": "fman_pcd.c: F-218 (T-M6-1) fman_pcd_fe_flow_del selects ehash table by key_size (38-byte v6 key -> table1, else table0) so v6 FLOW_CLS_DESTROY unlinks the table1 record instead of leaking; no ABI change; v4 byte-identical"
   },
-  "count": 120,
+  "count": 114,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {},
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh",
     "F_223.py \u2014 diagnostic eth4 KG-hash producer retired 2026-08-21 after dual-lane GEC Stage-1/2 proof completed (exact v4/v6 crc64 matches); F-216 safe zero-FD guard remains, hash_probe reader inert",
     "F_098.py \u2014 removed 2026-08-22 (Phase 2 cleanup). Dead defensive no-op: only acted `if ctx->cpu in src`, but owning patch 0135-fman-pcd-fe-context-build.patch already defines fman_pcd_fe_context_build(void __iomem *ctx) writing (ctx + offset) and no patch/fixup introduces the struct fman_ddr_region* retype it guarded against. S0 qdrant-gated.",
-    "F_174.py \u2014 removed 2026-08-22 (Phase 2 cleanup). Was the sole dormant (on-disk, never invoked) entry: strips FMAN_FE_EXIT_DEALLOCATE, superseded by F-175 and never armed; F-069 post-mortem calls its underlying theory a misattribution. Git history retains it."
+    "F_174.py \u2014 removed 2026-08-22 (Phase 2 cleanup). Was the sole dormant (on-disk, never invoked) entry: strips FMAN_FE_EXIT_DEALLOCATE, superseded by F-175 and never armed; F-069 post-mortem calls its underlying theory a misattribution. Git history retains it.",
+    "F_232.py \u2014 removed 2026-08-24 after it fulfilled its purpose. The read-only HIT-terminal FQID diagnostic proved F-199's no-confirm FQ record targets 0x2ba/0x2bb and disambiguated the TX-confirm CPU cost; once F-199's context_a 0x9a000000c0000000 was silicon-validated (board .185 image 0500, tx-confirm frozen under 7.76 Gbit/s HIT, F-227=0), the per-HIT-frame dev_info was retired so it does not ship. Git history retains it.",
+    "F_192.py \u2014 removed 2026-08-24 (merge-prep). E2 bounded read-only FE workspace debugfs diagnostic; the HIT-path investigation it served is closed (E25/E26, M3 gate passed). Git history retains it.",
+    "F_194.py \u2014 removed 2026-08-24 (merge-prep). Flow-add early -EINVAL guard trace; flow-add path validated (F-195/F-197), no longer needed. Git history retains it.",
+    "F_196.py \u2014 removed 2026-08-24 (merge-prep). Read-only target-FQID resolver diagnostic; superseded by F-197's real resolver fix. Git history retains it.",
+    "F_099.py \u2014 removed 2026-08-24 (merge-prep). Temporary M4 AF_XDP ZC-bind pr_err instrumentation; not part of the routed-offload release. Git history retains it.",
+    "F_105.py \u2014 removed 2026-08-24 (merge-prep). Temporary M4 rx_hook reject diagnostics; not part of the routed-offload release. Git history retains it.",
+    "F_106.py \u2014 removed 2026-08-24 (merge-prep). Temporary M4 rx_hook dev_info diagnostics; not part of the routed-offload release. Git history retains it.",
+    "F_126.py \u2014 removed 2026-08-24 (merge-prep). Temporary F-125 engage early-return pr_err instrumentation; the engage investigation is closed (genl engage works). Git history retains it.",
+    "F_127.py \u2014 removed 2026-08-24 (merge-prep). Temporary F-125 fe_engage wrapper early-return instrumentation; engage investigation closed. Git history retains it."
   ],
   "folded_into_patches": [
     "F_109.py \u2014 folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2 pilot). fman_pcd_fe_enq_get_offset() export regenerated into its owning patch; tree-equivalent to current+F_109 modulo two normalized blank lines. Gated on CI build validation before considered final.",
@@ -318,10 +305,6 @@
     "F_097.py": {
       "action": "fold-into 0153",
       "reason": "verify call belongs with the arm_engage function that 0153 defines"
-    },
-    "F_099.py": {
-      "action": "remove-after-M4",
-      "reason": "temporary diagnostic \u2014 traces ZC bind failure; remove once root cause identified"
     },
     "F_100.py": {
       "action": "remove-after-M4",
