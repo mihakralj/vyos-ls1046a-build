@@ -2750,6 +2750,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_230.py" 2>&1
     echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_233_vlan.py" 2>&1
+    echo "### fman_pcd.c: F-233 FE-VM VLAN pop/push opcode emitter (T-M6-8, dormant unless vlan->flags)"
 fi
 
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs

@@ -44,6 +44,7 @@
 #include <linux/of.h>
 #include <linux/string.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/etherdevice.h>
 #include <linux/workqueue.h>
 #include <linux/jiffies.h>
@@ -1233,17 +1234,30 @@ int ask_intent_lower(const struct ask_flow_intent *in,
                         } else {
                                 return -EOPNOTSUPP;
                         }
-                        if (in->actions[i].type == ASK_ACTION_NAT_SRC)
-                                flags |= ASK_ACT_NAT_SRC;
-                        else if (in->actions[i].type == ASK_ACTION_NAT_DST)
-                                flags |= ASK_ACT_NAT_DST;
-                        else
-                                flags |= ASK_ACT_PAT;
-                        break;
-                default:
-                        return -EOPNOTSUPP;
-                }
-        }
+			if (in->actions[i].type == ASK_ACTION_NAT_SRC)
+				flags |= ASK_ACT_NAT_SRC;
+			else if (in->actions[i].type == ASK_ACTION_NAT_DST)
+				flags |= ASK_ACT_NAT_DST;
+			else
+				flags |= ASK_ACT_PAT;
+			break;
+		case ASK_ACTION_VLAN_POP:
+		case ASK_ACTION_VLAN_PUSH:
+			/* T-M6-8: admitted to the legacy flags only when the VLAN
+			 * gate is armed (default OFF); otherwise fail closed to
+			 * software. Values ride key->vlan_*; preflight re-checks the
+			 * gate + eth0 exclusion, and ask_fe_flow_insert fills
+			 * action.vlan_* only when armed, keeping the F-233
+			 * emitter dormant otherwise. */
+			if (!ask_hw_vlan_offload_armed())
+				return -EOPNOTSUPP;
+			flags |= (in->actions[i].type == ASK_ACTION_VLAN_POP)
+					? ASK_ACT_VLAN_POP : ASK_ACT_VLAN_PUSH;
+			break;
+		default:
+			return -EOPNOTSUPP;
+		}
+	}
 
         if (oif == 0)
                 return -EOPNOTSUPP;
@@ -1282,11 +1296,17 @@ static int ask_parse_action(struct flow_cls_offload *f,
          * chunks the kernel emits (one flow_action per 32-bit word) before
          * adding a single typed action.
          */
-        u8  v6_snat[16] = {0}, v6_dnat[16] = {0};
-        u32 v6_snat_seen = 0, v6_dnat_seen = 0;
-        bool seen_l3_nat = false;
-        u32 oif = 0;
-        int i, rc;
+	u8  v6_snat[16] = {0}, v6_dnat[16] = {0};
+	u32 v6_snat_seen = 0, v6_dnat_seen = 0;
+	bool seen_l3_nat = false;
+	/*
+	 * T-M6-8: single-tag depth guard. The kernel flowtable can emit up to
+	 * NF_FLOW_TABLE_ENCAP_MAX=2 VLAN_POP/PUSH (QinQ); this release supports
+	 * exactly one tag per direction, so a second pop or push fails closed.
+	 */
+	u8  vlan_pop_seen = 0, vlan_push_seen = 0;
+	u32 oif = 0;
+	int i, rc;
 
         flow_action_for_each(i, act, &rule->action) {
                 switch (act->id) {
@@ -1456,10 +1476,39 @@ static int ask_parse_action(struct flow_cls_offload *f,
                 case FLOW_ACTION_ADD:
                         pr_info_ratelimited("ask: flow_offload: FLOW_ACTION_ADD (NAT field add) not offloaded — SW fallback (T-M6-7)\n");
                         return -EOPNOTSUPP;
-                case FLOW_ACTION_VLAN_PUSH:
-                case FLOW_ACTION_VLAN_POP:
-                        pr_info_ratelimited("ask: flow_offload: VLAN push/pop not offloaded — SW fallback (T-M6-8)\n");
-                        return -EOPNOTSUPP;
+		case FLOW_ACTION_VLAN_POP:
+			/* T-M6-8: POP has no action fields. Single ingress tag only;
+			 * the kernel omits POP when in_vlan_ingress says HW already
+			 * stripped it, so every POP reaching us must be represented. */
+			if (++vlan_pop_seen > 1)
+				return -EOPNOTSUPP;
+			rc = ask_intent_add_vlan(&intent, ASK_ACTION_VLAN_POP,
+						 0, 0, 0);
+			if (rc)
+				return rc;
+			break;
+		case FLOW_ACTION_VLAN_PUSH:
+			/* Single 802.1Q tag only. 802.1ad/QinQ and tc-only PCP/DEI
+			 * semantics stay in software until independently proven. */
+			if (++vlan_push_seen > 1)
+				return -EOPNOTSUPP;
+			if (act->vlan.proto != htons(ETH_P_8021Q) ||
+			    act->vlan.vid > VLAN_VID_MASK ||
+			    act->vlan.prio > 7)
+				return -EOPNOTSUPP;
+			rc = ask_intent_add_vlan(&intent, ASK_ACTION_VLAN_PUSH,
+						 act->vlan.vid, act->vlan.proto,
+						 act->vlan.prio);
+			if (rc)
+				return rc;
+			break;
+		case FLOW_ACTION_VLAN_MANGLE:
+		case FLOW_ACTION_VLAN_PUSH_ETH:
+		case FLOW_ACTION_VLAN_POP_ETH:
+			/* tc-only VLAN mutation / Ethernet-header actions are not emitted
+			 * by the routed nft flowtable path. Fail closed rather than silently
+			 * applying incomplete semantics. */
+			return -EOPNOTSUPP;
                 default:
                         pr_info_ratelimited("ask: flow_offload: parse_action: unhandled act->id=%u (treating as -EOPNOTSUPP)\n",
                                             act->id);
@@ -1496,14 +1545,25 @@ static int ask_parse_action(struct flow_cls_offload *f,
                         key->nat_flags |= ASK_NATF_SPAT;
                         key->nat_sport = e->nat.port;
                         break;
-                case ASK_ACTION_NAPT_DPORT:
-                        key->nat_flags |= ASK_NATF_DPAT;
-                        key->nat_dport = e->nat.port;
-                        break;
-                default:
-                        break;
-                }
-        }
+		case ASK_ACTION_NAPT_DPORT:
+			key->nat_flags |= ASK_NATF_DPAT;
+			key->nat_dport = e->nat.port;
+			break;
+		case ASK_ACTION_VLAN_POP:
+			key->vlan_edit_flags |= ASK_VLANF_POP;
+			break;
+		case ASK_ACTION_VLAN_PUSH:
+			key->vlan_edit_flags |= ASK_VLANF_PUSH;
+			/* Compose the 16-bit TCI: PCP<<13 | DEI(0) | VID. The
+			 * flowtable path supplies prio=0; DEI has no Linux field. */
+			key->vlan_push_tci = htons(((u16)e->nat.vlan.prio << VLAN_PRIO_SHIFT) |
+						   (e->nat.vlan.vid & VLAN_VID_MASK));
+			key->vlan_push_tpid = e->nat.vlan.tpid;
+			break;
+		default:
+			break;
+		}
+	}
 
         /* Lower the canonical intent to the legacy (oif, action_flags) pair.
          * For the IPv4-unicast flow this yields the exact pre-A1 values.
@@ -1836,12 +1896,29 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
                                       : ask_hw_nat44_offload_armed();
                 if (!nat_ok)
                         return -EOPNOTSUPP;
-                action.nat_flags = key->nat_flags;
-                memcpy(action.nat_sip, key->nat_src_ip, 16);
-                memcpy(action.nat_dip, key->nat_dst_ip, 16);
-                action.nat_sport = key->nat_sport;
-                action.nat_dport = key->nat_dport;
-        }
+		action.nat_flags = key->nat_flags;
+		memcpy(action.nat_sip, key->nat_src_ip, 16);
+		memcpy(action.nat_dip, key->nat_dst_ip, 16);
+		action.nat_sport = key->nat_sport;
+		action.nat_dport = key->nat_dport;
+	}
+
+	/*
+	 * T-M6-8 arming: copy the parsed VLAN edit into the public FMan action
+	 * only when the VLAN gate is armed. Disarmed (default), action was
+	 * memset(0) above so vlan_flags stays 0 -> the F-233 emitter's
+	 * `if (vlan && vlan->flags)` is skipped and the FE record is
+	 * byte-identical to the routed/NAT path. Same module-param race close
+	 * as NAT: never publish a VLAN flow's record without the tag op.
+	 * VLAN flag bit values intentionally match FMAN_PCD_VLANF_* (1/2).
+	 */
+	if (key->vlan_edit_flags) {
+		if (!ask_hw_vlan_offload_armed())
+			return -EOPNOTSUPP;
+		action.vlan_flags = key->vlan_edit_flags;
+		action.vlan_tci   = key->vlan_push_tci;
+		action.vlan_tpid  = key->vlan_push_tpid;
+	}
 
         /* F-195/F-204 contract: the second argument remains exclusively the
          * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,

@@ -441,9 +441,11 @@ KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE32));
 }
 
 /*
- * T-M6-A2: VLAN push/pop are not built into the HW record (deferred T-M6-8).
- * Previously they set ignored action_flags bits and offloaded without the
- * tag op; now they MUST be rejected and never published.
+ * T-M6-8: VLAN push/pop are parsed into typed intent but the FE emitter is
+ * gated behind ask_vlan_offload (default OFF). With the gate off, VLAN flows
+ * MUST fail closed to software (-EOPNOTSUPP) and never publish an in_hw record
+ * — the same contract as the pre-T-M6-8 hard reject, now enforced by the gate
+ * rather than a parse-time reject. This pins the shipping default behaviour.
  */
 static void ask_flow_offload_test_action_vlan_rejected(struct kunit *test)
 {
@@ -455,9 +457,14 @@ int rc;
 
 KUNIT_ASSERT_NOT_NULL(test, t);
 
+/* Valid single-tag 802.1Q push — accepted by parse, but the default-off
+ * VLAN gate makes ask_intent_lower() fail closed to software. */
 test_rule_set_v4_tcp(r, htonl(0x0a000036), htonl(0x0a000037),
      htons(1000), htons(2000));
 r->rule->action.entries[0].id = FLOW_ACTION_VLAN_PUSH;
+r->rule->action.entries[0].vlan.vid = 100;
+r->rule->action.entries[0].vlan.proto = htons(ETH_P_8021Q);
+r->rule->action.entries[0].vlan.prio = 0;
 r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
 r->rule->action.entries[1].dev = oif;
 
@@ -466,12 +473,57 @@ rc = dispatch(f);
 KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
 KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE33));
 
-/* VLAN_POP likewise */
+/* VLAN_POP likewise gated off -> software. */
 r->rule->action.entries[0].id = FLOW_ACTION_VLAN_POP;
+memset(&r->rule->action.entries[0].vlan, 0,
+       sizeof(r->rule->action.entries[0].vlan));
 f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE34, r);
 rc = dispatch(f);
 KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
 KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE34));
+}
+
+/*
+ * T-M6-8: fail-closed edges that must be rejected at PARSE regardless of the
+ * gate — 802.1ad TPID and stacked/QinQ (two pushes). These never reach the
+ * gate; parse returns -EOPNOTSUPP so the flow stays in software.
+ */
+static void ask_flow_offload_test_action_vlan_unsupported(struct kunit *test)
+{
+struct ask_test_rule *r = test_rule_alloc(test, 3);
+struct net_device *oif = test_stub_netdev(test, 33);
+struct flow_cls_offload *f;
+struct ask_flow_table *t = ask_flow_default_table();
+int rc;
+
+KUNIT_ASSERT_NOT_NULL(test, t);
+
+/* 802.1ad S-tag TPID is not supported (vendor egress hardcodes 0x8100). */
+test_rule_set_v4_tcp(r, htonl(0x0a000038), htonl(0x0a000039),
+     htons(1000), htons(2000));
+r->rule->action.entries[0].id = FLOW_ACTION_VLAN_PUSH;
+r->rule->action.entries[0].vlan.vid = 100;
+r->rule->action.entries[0].vlan.proto = htons(ETH_P_8021AD);
+r->rule->action.entries[1].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[1].dev = oif;
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE35, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE35));
+
+/* Stacked/QinQ: two VLAN_PUSH -> rejected (single tag only). */
+r->rule->action.entries[0].id = FLOW_ACTION_VLAN_PUSH;
+r->rule->action.entries[0].vlan.vid = 100;
+r->rule->action.entries[0].vlan.proto = htons(ETH_P_8021Q);
+r->rule->action.entries[1].id = FLOW_ACTION_VLAN_PUSH;
+r->rule->action.entries[1].vlan.vid = 200;
+r->rule->action.entries[1].vlan.proto = htons(ETH_P_8021Q);
+r->rule->action.entries[2].id = FLOW_ACTION_REDIRECT;
+r->rule->action.entries[2].dev = oif;
+f = test_cls_alloc(test, FLOW_CLS_REPLACE, 0xCAFE36, r);
+rc = dispatch(f);
+KUNIT_EXPECT_EQ(test, rc, -EOPNOTSUPP);
+KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE36));
 }
 
 static void ask_flow_offload_test_action_no_redirect(struct kunit *test)
@@ -845,6 +897,7 @@ KUNIT_CASE(ask_flow_offload_test_action_mangle_eth_accepted),
 KUNIT_CASE(ask_flow_offload_test_action_mangle_nat_rejected),
 KUNIT_CASE(ask_flow_offload_test_action_add_rejected),
 KUNIT_CASE(ask_flow_offload_test_action_vlan_rejected),
+KUNIT_CASE(ask_flow_offload_test_action_vlan_unsupported),
 KUNIT_CASE(ask_flow_offload_test_action_no_redirect),
 KUNIT_CASE(ask_flow_offload_test_ipv6_rejected),
 /* PR14j: direction classifier null-safety + non-DPAA fallthrough. */
