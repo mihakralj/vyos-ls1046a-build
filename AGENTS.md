@@ -62,7 +62,7 @@ Ref: archived repo `.clinerules/01-shared-vm-runtime.md` (daemon, units, Managed
 
 - No auto-commit/push: NEVER commit/push w/o explicit user request. Stage + present for review.
 - VyOS config: no comments inside `{}` blocks (`//`, `/* */` → parse fail); top-level only.
-- Branch: `main` only (¬`master`). Never feature branches.
+- Branches: `dpaa1` is the active ASK2 development and CI branch; `main` is the release-integration/publish branch that receives reviewed `dpaa1` merges. Never use `master` or create ad hoc feature branches.
 - Kernel symbols: verify vs Kconfig; invalid = silently ignored (`CONFIG_SERIAL_8250_OF` ∄; correct = `CONFIG_SERIAL_OF_PLATFORM`).
 - `CONFIG_FSL_XGMAC_MDIO=y` required for FMan; w/o: all MACs defer "missing pcs", zero interfaces.
 - Driver split: `fsl_dpaa_mac` (MAC/PHY/link, PHYLINK) + `fsl_dpa` (netdev, eth0-ethN, platform devs `dpaa-ethernet.N`). `fsl_dpaa_eth` = different driver, zero devices here. Don't confuse the 3.
