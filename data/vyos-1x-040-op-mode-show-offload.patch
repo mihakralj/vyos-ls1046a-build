@@ -1,7 +1,7 @@
 From bbff604c86300b05429d43dfec7f303440049e22 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
 Date: Sun, 23 Aug 2026 05:36:54 +0000
-Subject: [PATCH] temp: show-offload nat66
+Subject: [PATCH] op-mode: add 'show offload config' and 'show offload flow'
 
 ---
  op-mode-definitions/show-offload.xml.in |  26 +++
