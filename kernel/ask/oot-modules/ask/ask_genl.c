@@ -246,13 +246,14 @@ goto nla_put_failure;
 }
 
 /*
- * Production capability/status telemetry. Do not advertise planned features:
- * the shipping hardware path is plain routed IPv4 AND IPv6 unicast TCP/UDP
- * (dual-lane 46-byte key); NAT, VLAN, bridge and ESP deliberately fall back to
- * software. ASK_CAP_IPV4 means that path is compiled and exposed, not that a
- * flow is live now.
+ * Production capability/status telemetry. Silicon-validated shipping paths:
+ * routed IPv4+IPv6 unicast TCP/UDP (dual-lane 46-byte key) and IPv4 NAT/PAT
+ * (SNAT, DNAT, masquerade; F-230 FE rewrite chain). IPv6 NAT, VLAN, bridge and
+ * ESP deliberately fall back to software. Capability bits mean the path is
+ * compiled/exposed, not that a flow is live now.
  */
-if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, ASK_CAP_IPV4,
+if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES,
+      ASK_CAP_IPV4 | ASK_CAP_IPV6 | ASK_CAP_NAT | ASK_CAP_PAT,
       ASK_INFO_ATTR_UNSPEC))
 goto nla_put_failure;
 

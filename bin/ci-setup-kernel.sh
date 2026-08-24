@@ -1126,14 +1126,30 @@ git -c user.email=ci@local -c user.name=ci commit -q -m "kernel post-patches" --
 # reaches flow_indr_dev_setup_offload() — dpaa_setup_tc() returns
 # -EOPNOTSUPP from its default: case.  Injected via sed (not a
 # .patch file) to avoid the git apply --3way context-matching wall.
+#
+# IMPORTANT (2026-08-23 fix): the earlier form of this injection matched
+# 'case TC_SETUP_BLOCK:' and inserted an unconditional
+# 'return dpaa_setup_tc_flow_block(...)' right after it. That predated
+# board patch 0145, which had already rewritten the TC_SETUP_BLOCK case to
+# try the ingress-policer block handler FIRST (dpaa_setup_tc_block) and only
+# fall through to the ASK flow-offload backend on -EOPNOTSUPP. The old
+# injection therefore SHADOWED the policer path: every TC_SETUP_BLOCK bind
+# returned via the ASK backend, dpaa_setup_tc_block() (the matchall/police
+# registrar) was never invoked, and 'tc ... matchall action police skip_sw'
+# failed with EOPNOTSUPP (ask.ko: "unexpected tc_setup_type=4"). This broke
+# the hardware ingress-policer on every shipping image.
+#
+# Correct shape: keep the 0145 policer-first dispatch for TC_SETUP_BLOCK and
+# add TC_SETUP_FT as its OWN case routing to the flow-offload backend. Match
+# the exact 4-line 0145 block so the count-gate hard-fails if 0145 ever drifts.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
         drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
-        'case TC_SETUP_BLOCK:' \
-        'case TC_SETUP_BLOCK:\n\t\tcase TC_SETUP_FT:\n\t\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);' \
+        $'\t\terr = dpaa_setup_tc_block(net_dev, type_data);\n\t\tif (err != -EOPNOTSUPP)\n\t\t\treturn err;\n\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);' \
+        $'\t\terr = dpaa_setup_tc_block(net_dev, type_data);\n\t\tif (err != -EOPNOTSUPP)\n\t\t\treturn err;\n\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);\n\tcase TC_SETUP_FT:\n\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);' \
         1 \
-        "TC_SETUP_FT: case injected after TC_SETUP_BLOCK"
-    echo "### dpaa_eth.c: TC_SETUP_FT case injected (mutate)"
+        "TC_SETUP_FT: separate case added (policer-first TC_SETUP_BLOCK preserved)"
+    echo "### dpaa_eth.c: TC_SETUP_FT case added, policer TC_SETUP_BLOCK dispatch preserved (mutate)"
 fi
 
 # Fix fe_flow debugfs 8-byte key truncation (post-patch fixup)
@@ -1967,35 +1983,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_122.py" 2>&1
 fi
 
-# F-126 DIAGNOSTIC (TEMPORARY — delete with F-125). Tags every early return in
-# __fman_pcd_fe_arm_engage() with a unique pr_err. ISO 0501 shipped F-125 in
-# full ("2 change(s) applied") yet the 304 B/attempt leak and the -12 on port
-# 0x10 are unchanged, and dmesg has ruled out both the scaffold-alloc path and
-# F_097's verify gate. One board cycle with this in place names the site.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_126.py" 2>&1
-fi
-
-# F-127 DIAGNOSTIC (TEMPORARY — delete with F-125). Tags every early return in
-# fman_pcd_fe_engage() (the wrapper, not the core). On ISO 0530 the genl engage
-# fails with -12 but F-126's tags never fire, proving the -12 comes from the
-# wrapper before __fman_pcd_fe_arm_engage() is called. One board cycle names
-# the exact site in the wrapper.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_127.py" 2>&1
-fi
+# F-126 / F-127 DIAGNOSTICS RETIRED 2026-08-24: the F-125 engage investigation
+# they instrumented is long closed (genl engage works, E25/E26/F-190/F-097).
+# Removed so the per-early-return pr_err instrumentation does not ship.
 
 # F-095 (DELETED — stub, never implemented)
 
 fi
 
-# F-099 (M4 ZC instrumentation): Add pr_err diagnostics at every error
-# return in xp_assign_dev(), xsk_bind(), and dpaa_xdp() to trace which
-# kernel precondition causes xsk_socket__create() EINVAL with XDP_ZEROCOPY.
-# Targets core kernel files net/xdp/xsk_buff_pool.c + net/xdp/xsk.c + dpaa_eth.c.
-# Temporary — remove once M4 root cause is identified.
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_099.py" 2>&1
-echo "### F-099: AF_XDP ZC bind path instrumented"
+# F-099 RETIRED 2026-08-24: AF_XDP ZC bind pr_err instrumentation removed so it
+# does not ship. (M4 ZC diagnostic; not part of the routed-offload release.)
 
 # F-100: Instrument dpaa_eth_afxdp.c attach path for ZC debugging.
 # Runs AFTER all patches (dpaa_eth_afxdp.c is created by patch 0073+).
@@ -2034,13 +2031,8 @@ echo "### F-103: SUPERSEDED — BPID reprogram re-enabled (F_102 guards crash pa
 : # owning patch — 0109 last touches dpaa_ethtool_ops). Verified byte-identical
 : # to current+F_104 across the full series. CI-gated.
 
-# F-105: rx_hook diagnostics — log why frames are rejected (temporary, remove after root cause found)
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_105.py" 2>&1
-echo "### F-105: rx_hook diagnostics added"
-
-# F-106: rx_hook trace_printk diagnostics at every return-false point (temporary, remove after root cause found)
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_106.py" 2>&1
-echo "### F-106: rx_hook trace_printk diagnostics added"
+# F-105 / F-106 RETIRED 2026-08-24: rx_hook reject diagnostics removed so they do
+# not ship. (M4 ZC datapath diagnostics; not part of the routed-offload release.)
 
 # F-115: Fix DMA-index headroom mismatch (recover=0 bug) + diagnostic.
 # dpaa_xsk_build_dma_index stores pool->heads[i].dma (base) but seed/refill
@@ -2633,34 +2625,18 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-190 en_exthash_node at root AD (CC dispatch fix)"
 fi
 
-# F-192 (2026-08-15, E2 discriminator): diagnostic-only bounded workspace
-# snapshot. It must precede F-191 so its debugfs registration is gated too.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_192.py" 2>&1
-    echo "### fman_pcd.c: F-192 bounded read-only FE workspace diagnostic"
-fi
+# F-192 / F-194 / F-196 DIAGNOSTICS RETIRED 2026-08-24: the E2/flow-add
+# investigation they instrumented is closed (F-195/F-197 production path proven,
+# M3 HIT gate passed). Removed so the read-only workspace/flow-add/resolver
+# logging does not ship.
 
-# F-193 (2026-08-15): one-line production flow-add argument/failure trace.
-# Diagnostic only: confirms whether the OOT caller passes a FMan hw port ID,
-# and distinguishes the active ehash table's key-size validation from other
-# flow-add failures before any API or dispatch change is considered.
+# F-193 (STRUCTURAL, was a diagnostic): hoists the own-port fallback FQID into a
+# local `target_fqid` and passes it to fman_pcd_ehash_add_key(). KEPT — F-198's
+# hardware TX terminal depends on this variable (hit_fqid = tx_fqid || target_fqid).
+# All diagnostic logging removed; behavior identical to the original inline resolve.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_193.py" 2>&1
-    echo "### fman_pcd.c: F-193 production flow-add argument diagnostic"
-fi
-
-# F-194 (2026-08-15): trace the early `-EINVAL` guard above F-193's first
-# log. Diagnostic only; no action, table, or datapath behavior changes.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_194.py" 2>&1
-    echo "### fman_pcd.c: F-194 early flow-add -EINVAL diagnostic"
-fi
-
-# F-196 (2026-08-15): resolver evidence for the zero target-FQID blocker.
-# It logs params-page and same-port KeyGen candidates but preserves selection.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_196.py" 2>&1
-    echo "### fman_pcd.c: F-196 read-only target-FQID resolver diagnostic"
+    echo "### fman_pcd.c: F-193 target-fqid hoist (structural prerequisite for F-198)"
 fi
 
 # F-197 (2026-08-15): when the populated params-page FQID is zero, use
@@ -2725,6 +2701,15 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     echo "### dpaa_eth.c: F-227 crash-safe TX-confirm guard (reject FMan HIT FD on confirmed FQ)"
 fi
 
+# F-229 (issue #45, 2026-08-22): the GPY115C-reported link on a 1G RJ45
+# port flaps under sustained LAN->WAN forwarding when pause resolves OFF.
+# After PHY attach, force symmetric 802.3x pause only for SGMII links; leave the
+# eth3/eth4 10G XGMII ASK FE offload path unchanged.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_229.py" 2>&1
+    echo "### dpaa_eth.c: F-229 force symmetric pause on 1G SGMII links (issue #45)"
+fi
+
 # F-204 (T-M6-1 Phase 2a, 2026-08-19): additive, v4-byte-identical ehash
 # table selector. Adds action->table_idx (0=v4, 1=dormant v6) without
 # overloading hw_port_id — F-195's own-port miss-FQID semantics stay intact.
@@ -2763,6 +2748,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_keygen.c/pcd_kg.c: F-214 gated cls-plan0 pass-all (QLCV fix)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_226.py" 2>&1
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_230.py" 2>&1
+    echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
 fi
 
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs

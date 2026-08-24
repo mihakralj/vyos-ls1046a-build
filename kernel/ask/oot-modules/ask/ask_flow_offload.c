@@ -1212,6 +1212,34 @@ int ask_intent_lower(const struct ask_flow_intent *in,
                          * pre-A1, was never encoded in action_flags. Keep it
                          * out of the legacy flags to preserve byte-identity. */
                         break;
+                case ASK_ACTION_NAT_SRC:
+                case ASK_ACTION_NAT_DST:
+                case ASK_ACTION_NAPT_SPORT:
+                case ASK_ACTION_NAPT_DPORT:
+                        /* T-M6-7.1: NAT/PAT. Admitted to the legacy flags only
+                         * when the family's NAT gate is enabled (default on); otherwise fail
+                         * closed to software (default shipping behaviour). The
+                         * actual rewrite values ride the flow key
+                         * (key->nat_*), stashed by ask_parse_action; the
+                         * preflight re-checks the gate + eth0 exclusion, and
+                         * ask_fe_flow_insert only fills action.nat_* when
+                         * armed, keeping the F-230 emitter dormant otherwise. */
+                        if (in->match->l3_proto == ASK_FLOW_L3_IPV4) {
+                                if (!ask_hw_nat44_offload_armed())
+                                        return -EOPNOTSUPP;
+                        } else if (in->match->l3_proto == ASK_FLOW_L3_IPV6) {
+                                if (!ask_hw_nat66_offload_armed())
+                                        return -EOPNOTSUPP;
+                        } else {
+                                return -EOPNOTSUPP;
+                        }
+                        if (in->actions[i].type == ASK_ACTION_NAT_SRC)
+                                flags |= ASK_ACT_NAT_SRC;
+                        else if (in->actions[i].type == ASK_ACTION_NAT_DST)
+                                flags |= ASK_ACT_NAT_DST;
+                        else
+                                flags |= ASK_ACT_PAT;
+                        break;
                 default:
                         return -EOPNOTSUPP;
                 }
@@ -1237,7 +1265,7 @@ int ask_intent_lower(const struct ask_flow_intent *in,
 /* ------------------------------------------------------------------------- */
 
 static int ask_parse_action(struct flow_cls_offload *f,
-                            const struct ask_flow_key *match,
+                            struct ask_flow_key *key,
                             u32 *out_action_flags, u32 *out_oif,
                             struct net_device **out_egress_dev)
 {
@@ -1245,10 +1273,18 @@ static int ask_parse_action(struct flow_cls_offload *f,
         struct flow_action_entry *act;
         struct net_device *egress = NULL;
         struct ask_flow_intent intent = {
-                .match = match,
+                .match = key,
                 .owner = (u64)f->cookie,
                 .generation = 0, /* A3 assigns real generations */
         };
+        /*
+         * T-M6-7.0: accumulate IPv6 NAT addresses across the 4x 32-bit mangle
+         * chunks the kernel emits (one flow_action per 32-bit word) before
+         * adding a single typed action.
+         */
+        u8  v6_snat[16] = {0}, v6_dnat[16] = {0};
+        u32 v6_snat_seen = 0, v6_dnat_seen = 0;
+        bool seen_l3_nat = false;
         u32 oif = 0;
         int i, rc;
 
@@ -1311,9 +1347,112 @@ static int ask_parse_action(struct flow_cls_offload *f,
                                         return rc;
                                 break; /* L2 rewrite done by INSERT_L2_HDR */
                         }
-                        pr_info_ratelimited("ask: flow_offload: MANGLE htype=%u (NAT/L3/L4 rewrite) not offloaded — SW fallback (T-M6-7)\n",
-                                            act->mangle.htype);
-                        return -EOPNOTSUPP;
+                        /*
+                         * T-M6-7.0: an L3/L4 mangle is a NAT/PAT rewrite. Decode
+                         * the translated value straight from the mangle entry
+                         * ({htype, offset, mask, val}), which is already the
+                         * correct per-direction value (the kernel emits distinct
+                         * ORIGINAL/REPLY rules). new = (old & mask) | val, val in
+                         * network byte order. This is exactly how in-tree SoC
+                         * router drivers (MediaTek/Airoha PPE, bnxt) decode NAT.
+                         */
+                        switch (act->mangle.htype) {
+                        case FLOW_ACT_MANGLE_HDR_TYPE_IP4: {
+                                __be32 v = (__be32)act->mangle.val;
+
+                                if (act->mangle.offset ==
+                                    offsetof(struct iphdr, saddr))
+                                        rc = ask_intent_add_nat(&intent,
+                                                ASK_ACTION_NAT_SRC,
+                                                (const u8 *)&v, 4, 0);
+                                else if (act->mangle.offset ==
+                                         offsetof(struct iphdr, daddr))
+                                        rc = ask_intent_add_nat(&intent,
+                                                ASK_ACTION_NAT_DST,
+                                                (const u8 *)&v, 4, 0);
+                                else
+                                        rc = -EOPNOTSUPP;
+                                if (rc)
+                                        return rc;
+                                seen_l3_nat = true;
+                                break;
+                        }
+                        case FLOW_ACT_MANGLE_HDR_TYPE_IP6: {
+                                /* One 32-bit chunk per entry; offset is relative
+                                 * to the ipv6hdr. Accumulate into the 16-byte
+                                 * src/dst buffer and emit the typed action only
+                                 * once all four chunks of that address arrive. */
+                                __be32 v = (__be32)act->mangle.val;
+                                u32 soff = offsetof(struct ipv6hdr, saddr);
+                                u32 doff = offsetof(struct ipv6hdr, daddr);
+
+                                if (act->mangle.offset >= soff &&
+                                    act->mangle.offset <  soff + 16 &&
+                                    !((act->mangle.offset - soff) & 3)) {
+                                        u32 idx = act->mangle.offset - soff;
+
+                                        memcpy(&v6_snat[idx], &v, 4);
+                                        v6_snat_seen |= 1u << (idx >> 2);
+                                        if (v6_snat_seen == 0xf) {
+                                                rc = ask_intent_add_nat(&intent,
+                                                        ASK_ACTION_NAT_SRC,
+                                                        v6_snat, 16, 0);
+                                                if (rc)
+                                                        return rc;
+                                                seen_l3_nat = true;
+                                        }
+                                } else if (act->mangle.offset >= doff &&
+                                           act->mangle.offset <  doff + 16 &&
+                                           !((act->mangle.offset - doff) & 3)) {
+                                        u32 idx = act->mangle.offset - doff;
+
+                                        memcpy(&v6_dnat[idx], &v, 4);
+                                        v6_dnat_seen |= 1u << (idx >> 2);
+                                        if (v6_dnat_seen == 0xf) {
+                                                rc = ask_intent_add_nat(&intent,
+                                                        ASK_ACTION_NAT_DST,
+                                                        v6_dnat, 16, 0);
+                                                if (rc)
+                                                        return rc;
+                                                seen_l3_nat = true;
+                                        }
+                                } else {
+                                        return -EOPNOTSUPP;
+                                }
+                                break;
+                        }
+                        case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
+                        case FLOW_ACT_MANGLE_HDR_TYPE_UDP: {
+                                /* offset 0: upper-half mask => source port,
+                                 * lower-half => dest port (see
+                                 * flow_offload_port_snat/dnat). The port value
+                                 * is packed into val at the masked half. */
+                                u32 hv = ntohl((__be32)act->mangle.val);
+
+                                /* Reject L4 port NAT with no L3 NAT context
+                                 * (bnxt rule) — the FE NAT compiler only
+                                 * rewrites ports alongside an address xlate. */
+                                if (!seen_l3_nat)
+                                        return -EOPNOTSUPP;
+                                if (act->mangle.mask == (u32)~htonl(0xffff0000))
+                                        rc = ask_intent_add_nat(&intent,
+                                                ASK_ACTION_NAPT_SPORT, NULL, 0,
+                                                htons((u16)(hv >> 16)));
+                                else if (act->mangle.mask ==
+                                         (u32)~htonl(0x0000ffff))
+                                        rc = ask_intent_add_nat(&intent,
+                                                ASK_ACTION_NAPT_DPORT, NULL, 0,
+                                                htons((u16)(hv & 0xffff)));
+                                else
+                                        rc = -EOPNOTSUPP;
+                                if (rc)
+                                        return rc;
+                                break;
+                        }
+                        default:
+                                return -EOPNOTSUPP;
+                        }
+                        break;
                 case FLOW_ACTION_ADD:
                         pr_info_ratelimited("ask: flow_offload: FLOW_ACTION_ADD (NAT field add) not offloaded — SW fallback (T-M6-7)\n");
                         return -EOPNOTSUPP;
@@ -1333,8 +1472,45 @@ static int ask_parse_action(struct flow_cls_offload *f,
                 return -EOPNOTSUPP;
         }
 
+        /*
+         * T-M6-7.0: stash any parsed NAT/PAT translation into the flow key so
+         * it round-trips through DESTROY/pending/neighbour rebuilds. This does
+         * NOT change the FE comparison key (still the original ingress tuple);
+         * T-M6-7.1 consumes these as FE opcode rewrite params. The plain routed
+         * flow adds no NAT actions, so key->nat_flags stays 0 and the stored
+         * flow is byte-identical to today.
+         */
+        for (i = 0; i < intent.n_actions; i++) {
+                const struct ask_flow_action_ent *e = &intent.actions[i];
+
+                switch (e->type) {
+                case ASK_ACTION_NAT_SRC:
+                        key->nat_flags |= ASK_NATF_SNAT;
+                        memcpy(key->nat_src_ip, e->nat.addr, 16);
+                        break;
+                case ASK_ACTION_NAT_DST:
+                        key->nat_flags |= ASK_NATF_DNAT;
+                        memcpy(key->nat_dst_ip, e->nat.addr, 16);
+                        break;
+                case ASK_ACTION_NAPT_SPORT:
+                        key->nat_flags |= ASK_NATF_SPAT;
+                        key->nat_sport = e->nat.port;
+                        break;
+                case ASK_ACTION_NAPT_DPORT:
+                        key->nat_flags |= ASK_NATF_DPAT;
+                        key->nat_dport = e->nat.port;
+                        break;
+                default:
+                        break;
+                }
+        }
+
         /* Lower the canonical intent to the legacy (oif, action_flags) pair.
-         * For the IPv4-unicast flow this yields the exact pre-A1 values. */
+         * For the IPv4-unicast flow this yields the exact pre-A1 values.
+         * When NAT actions are present ask_intent_lower() returns -EOPNOTSUPP
+         * (the FE-VM NAT opcode compiler is T-M6-7.1), so the flow fails closed
+         * to the software fastpath — but its translation is now fully parsed
+         * and carried, ready for 7.1 to consume. */
         rc = ask_intent_lower(&intent, &oif, out_action_flags);
         if (rc)
                 return rc;
@@ -1639,6 +1815,33 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
         ether_addr_copy(action.egress_mac, key->egress_mac);
         action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
                                 ? ETH_P_IPV6 : ETH_P_IP;
+
+        /*
+         * T-M6-7.1 arming: copy the parsed/carry NAT tuple into the public
+         * FMan action only when the family's NAT gate
+         * is armed. Disarmed (default), action was memset(0) above and these
+         * fields stay zero -> F-230's `if (nat && nat->flags)` is skipped and
+         * the FE record remains byte-identical to F-200/F-226. NAT flag bit
+         * assignments intentionally match FMAN_PCD_NATF_* (1/2/4/8).
+         */
+        if (key->nat_flags) {
+                /* Close the module-param race between parse/lower/preflight and
+                 * record publication: if the gate was cleared after preflight,
+                 * NEVER insert a plain routed record for a NAT flow (silent
+                 * misforward). Fail closed so the caller removes the tentative
+                 * HW-backed SW entry and keeps this flow in the kernel path.
+                 * IPv4 uses nat44_offload; IPv6 uses nat66_offload (both default on). */
+                bool nat_ok = (key->l3_proto == ASK_FLOW_L3_IPV6)
+                                      ? ask_hw_nat66_offload_armed()
+                                      : ask_hw_nat44_offload_armed();
+                if (!nat_ok)
+                        return -EOPNOTSUPP;
+                action.nat_flags = key->nat_flags;
+                memcpy(action.nat_sip, key->nat_src_ip, 16);
+                memcpy(action.nat_dip, key->nat_dst_ip, 16);
+                action.nat_sport = key->nat_sport;
+                action.nat_dport = key->nat_dport;
+        }
 
         /* F-195/F-204 contract: the second argument remains exclusively the
          * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
@@ -2600,6 +2803,20 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 {
         struct flow_cls_offload *f = type_data;
         struct net_device *dev = ask_flow_block_priv_dev(cb_priv);
+
+        /*
+         * TC_SETUP_CLSMATCHALL is owned by the DPAA1 ingress-policer block
+         * handler (board patch 0104 dpaa_setup_tc_block_cb). Both that cb and
+         * this ASK flow-offload cb are registered on the same ingress tcf
+         * block; when a 'tc ... matchall action police' filter is added the tc
+         * core fans TC_SETUP_CLSMATCHALL out to every registered cb. Decline it
+         * silently here so the policer cb is the one that returns success —
+         * otherwise this cb's -EOPNOTSUPP + a noisy warn is the only verdict
+         * the core sees and the hardware policer never installs (skip_sw ->
+         * EOPNOTSUPP). See 2026-08-23 policer root-cause.
+         */
+        if (type == TC_SETUP_CLSMATCHALL)
+                return -EOPNOTSUPP;
 
         if (type != TC_SETUP_CLSFLOWER) {
                 pr_warn_ratelimited("ask: flow_offload: unexpected tc_setup_type=%u (expected CLSFLOWER)\n",

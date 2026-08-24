@@ -13,8 +13,9 @@ This ports the corrected PR14z23 Option C to the 6.18.44 canonical tree:
     TO_DCPORTAL flag, then splices into priv->dpaa_fq_list (so driver
     teardown frees it), and runs dpaa_fq_init(),
   * a dpaa_fq_init() branch programming context_a = 0x1c00000080000000
-    (OVOM|A2V|A0V|EBD, B0V=0) so FMan emits NO TX-confirm FD but still
-    recycles the BMan buffer (EBD=1), and NO confq association,
+    (superseded by the silicon-validated NXP SDK FQ_FLAG_NO_TXCONFIRM value
+    0x9a000000c0000000) so FMan emits NO TX-confirm FD while preserving the
+    vendor-proven offload TX semantics, and NO confq association,
   * header declaration + non-FSL stub in dpaa_flow_offload.h.
 
 The kernel's own TX path is untouched: priv->egress_fqs[] stay FQ_TYPE_TX
@@ -90,15 +91,25 @@ replace(
     "\t\t}\n"
     "\n"
     "\t\t/* F-199 (T-M7-2 S4): offload TX FQ with NO TX confirmation.\n"
-    "\t\t * context_a = OVOM|A2V|A0V|EBD, B0V=0: FMan uses the ENQUEUE_PKT\n"
-    "\t\t * operand FQID (OVOM), deallocates the buffer in hardware (EBD),\n"
-    "\t\t * and enqueues NO TX-confirm FD (B0V=0) so no per-frame NAPI\n"
-    "\t\t * skb-free runs. No confq is associated. The kernel's own TX FQs\n"
-    "\t\t * (FQ_TYPE_TX) keep B0V=1 confirmation for skb reclaim. */\n"
+    "\t\t * context_a = vendor-proven no-TX-confirm value 0x9a000000c0000000\n"
+    "\t\t * (NXP SDK sdk_dpaa FQ_FLAG_NO_TXCONFIRM; devman.c hi=0x9a000000\n"
+    "\t\t * lo=0xc0000000). FMan deallocates the buffer in hardware and\n"
+    "\t\t * enqueues NO TX-confirm FD, so no per-frame NAPI skb-free runs.\n"
+    "\t\t * The kernel's own TX FQs (FQ_TYPE_TX, 0x1e00000080000000) keep\n"
+    "\t\t * B0V=1 confirmation for skb reclaim.\n"
+    "\t\t * SILICON-VALIDATED 2026-08-24 (board .185, image 0500, 7.76 Gbit/s\n"
+    "\t\t * bidirectional HIT, 13.6 GB / ~9.7M frames): 'tx confirm [TOTAL]'\n"
+    "\t\t * advanced only +9/+5 (control-plane) and F-227 dropped-confirm\n"
+    "\t\t * count stayed 0, board idle. F-232 (now retired) first DISPROVED\n"
+    "\t\t * the earlier guess 0x1c00000080000000 (mainline value with B0V\n"
+    "\t\t * cleared): the record correctly targeted this FQ\n"
+    "\t\t * (hit_fqid=0x2ba/0x2bb) yet F-227 still dropped ~600K confirms/s,\n"
+    "\t\t * proving clearing B0V alone does NOT suppress the confirm FD on\n"
+    "\t\t * 210.10.1; the full vendor value 0x9a000000c0000000 does. */\n"
     "\t\tif (dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {\n"
     "\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);\n"
     "\t\t\tqm_fqd_context_a_set64(&initfq.fqd,\n"
-    "\t\t\t\t\t       0x1c00000080000000ULL);\n"
+    "\t\t\t\t\t       0x9a000000c0000000ULL);\n"
     "\t\t}\n",
 )
 

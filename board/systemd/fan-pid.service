@@ -45,8 +45,16 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-# /sys is mounted ro under ProtectSystem=strict; hwmon writes need explicit rw.
-ReadWritePaths=/sys/class/hwmon
+# /sys is mounted ro under ProtectSystem=strict; the daemon needs explicit rw on:
+#   /sys/class/hwmon   — (introspection; PWM writes actually go via /dev/i2c)
+#   /sys/class/thermal — switch the fan-binding zone's governor to user_space so
+#                        the kernel emc2305 cooling device stops fighting fan-pid
+ReadWritePaths=/sys/class/hwmon /sys/class/thermal
+# /run is read-only under ProtectSystem=strict; RuntimeDirectory gives us a
+# writable /run/fan-pid (auto-created on start, auto-removed on stop) for the
+# live floor export fan-check reads — so a dead daemon never leaves a stale file.
+RuntimeDirectory=fan-pid
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target

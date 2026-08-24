@@ -24,13 +24,20 @@ documents disagree, they win — update this plan.
 
 ### 1.1 Position
 
-**[SPEC] CURRENT STATUS (2026-08-18).** The FE-VM ehash path is the proven
-production mechanism and **T-M7-2 is complete for the plain-routed-IPv4-unicast
-preview**: S1 (F-198, hardware TX terminal — `INSERT_L2_HDR`→`ENQUEUE_PKT`
-direct-to-wire), S4 (F-199, per-egress `FQ_TYPE_TX_NO_CONFIRM` TX FQ, RTNL fix),
-and S3 (F-200, `UPDATE_TTL` + IPv4 checksum, wire-verified TTL 64→63) all passed
-on silicon. **S2 (VLAN strip / preemptive-checks) is intentionally deferred and
-is NOT a blocker for the IPv4-unicast release.** **T-M7-3 PASSED** — three clean
+**[SPEC] CURRENT STATUS (2026-08-24).** The FE-VM ehash path is the proven
+production mechanism and **T-M7-2 is complete for plain routed unicast**: S1
+(F-198, hardware TX terminal — `INSERT_L2_HDR`→`ENQUEUE_PKT` direct-to-wire),
+S4 (F-199, per-egress `FQ_TYPE_TX_NO_CONFIRM` TX FQ, RTNL fix), and S3 (F-200,
+`UPDATE_TTL` + IPv4 checksum, wire-verified TTL 64→63) all passed on silicon.
+**F-199's NXP SDK `FQ_FLAG_NO_TXCONFIRM` context_a `0x9a000000c0000000` was
+independently re-validated 2026-08-24** on `.185` image `0500`: a 7.76 Gbit/s
+bidirectional HIT run moved 13.6 GB (~9.7M frames), while eth4/eth3
+`tx confirm [TOTAL]` advanced only +9/+5 control-plane frames, F-227 remained
+zero, and the board stayed idle. The earlier B0V-cleared guess
+`0x1c00000080000000` is superseded; F-232 proved the record already targeted
+FQs `0x2ba/0x2bb` and was retired after this validation. **S2 (VLAN strip /
+preemptive-checks) is intentionally deferred and is NOT a blocker for the
+plain-unicast release.** **T-M7-3 PASSED** — three clean
 engage/forward/disengage cycles at 7.32–7.34 Gbps, DUT 99.3–99.8% idle, no
 TX-confirm stream, no QMan/BMan/MURAM anomaly. Two follow-on fixes then landed
 and were board-validated: **F-201** (F-051 had collapsed every RSS scheme to one
@@ -1569,7 +1576,7 @@ record it does not own.
 | 3-tuple route | `cdx_tuple3*` tables | flowtable wildcard/coarse flow only when kernel semantics permit | separate key type/scheme/table; never fake by truncating a 5-tuple key | not implemented |
 | IPv4/IPv6 fragments | `cdx_frag4/6_cc`; IP reassembly module | kernel fragment/reassembly framework | fragment key + bounded reassembly/slow-path policy | not implemented |
 | Tunnels / 6-in-4 | tunnel FCI; `cdx_sp.xml` IPv4-nextp 0x29 | tunnel netdev + flowtable | soft-parser re-dispatch; inner-flow intent; explicit encap/decap actions | not implemented |
-| Policer/QoS/CEETM | QM/CEETM FCI, policer NIA | tc police/qdisc | existing FMan PLCR; CEETM separately scoped | policer landed; flood gate open |
+| Policer/QoS/CEETM | QM/CEETM FCI, policer NIA | tc police/qdisc | existing FMan PLCR; CEETM separately scoped | policer SILICON-VALIDATED 2026-08-23 (F-231): installs `in_hw`, meters, rate-cap tracks CIR (10/25/50/80 Mbit → 0.88× L4 egress = L2-overhead-correct), reversible. Applies to non-ASK ports; ASK-engaged ports route AC_CC/FE-VM and bypass PLCR by design. Flood/BUG-3b still open |
 | RTP/RTCP relay, WiFi, voice | vendor appliance-specific modules | none required for VyOS routing | none | **permanently out of scope** |
 
 #### 4.6.4 Program sequence and gates
@@ -2162,7 +2169,8 @@ open defects.
 | **CR-011** | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL | M8 (T-M8-5) | Clean with upstream prep |
 | **F-120** | `ASK_CMD_FLUSH_FLOWS` SW/HW divergence | CODE-FIXED; silicon validation OPEN | M6 / M8 | T-M6-6 (§4.5) |
 | **F-122** | `fe_arm engage` returns `-EINVAL` on an already-engaged port (not idempotent) | CODE-CLOSED (`F_122.py`, wired `ci-setup-kernel.sh`); board re-confirm at M8 soak | M7 polish / M8 soak | Implemented: `test_bit(port_id, pcd->fe_port_armed)` at the top of the shared `__fman_pcd_fe_arm_engage()` returns 0 (covers both debugfs and kernel-API paths), and the wrapper's F-107 `-EBUSY` guard now returns 0. Mirrors the F-116/F-120 idempotence rule. |
-| **BUG 3b flood half** | iperf3 flood under policer → watchdog reset | OPEN | M8 | Serial capture + cold power-cycle. **Always repro the policer with a few pings, never a flood** |
+| **F-231** | Hardware ingress-policer never installed on any shipping image: `tc matchall action police skip_sw` → EOPNOTSUPP, `ask: flow_offload: unexpected tc_setup_type=4` (=`TC_SETUP_CLSMATCHALL`). The post-patch `TC_SETUP_FT` mutation in `ci-setup-kernel.sh` predated board patch 0145 and shadowed the policer-first `TC_SETUP_BLOCK` dispatch, so `dpaa_setup_tc_block()` (0104 matchall/police registrar) was never invoked; ASK's block cb then rejected CLSMATCHALL. Reproduced on ASK-armed eth3 AND ASK-unarmed eth2 (global). | **CLOSED — SILICON-VALIDATED 2026-08-23** (`aaf13008`, image `2026.08.23-1828`, CI `32658134206`). Corrected mutation = policer-first `TC_SETUP_BLOCK` + separate `case TC_SETUP_FT:`; ASK cb silently declines `TC_SETUP_CLSMATCHALL`. Board proof: `tc matchall police skip_sw` → `in_hw` via raw tc AND VyOS CLI; FMPL_GCR=`0xc0500002` (EN\|STEN), PMR window valid; rate-cap sweep on eth1 (ASK-free 100Mbps): 10/25/50/80 Mbit configured → 8.8/21.9/43.7/70.3 Mbit eth4 egress (0.88× = correct L2-overhead accounting on 1400B UDP); delete reverts scheme to `nia=0x02` + restores 86.5 Mbit uncapped forwarding. | M8 | DONE. **This is why the policer "was never finished" — it never installed in HW; BUG-3b flood was moot.** ASK-engaged ports (eth3/eth4) route AC_CC→FE-VM (BMI `rccb`≠0) and bypass the RSS→PLCR scheme by design — policer is for non-ASK ports (matches DUAL-DATAPLANE per-interface mutex). |
+| **BUG 3b flood half** | iperf3 flood under policer → watchdog reset | **CLOSED — NO-REPRO 2026-08-23 on corrected FMPL_PMR build** (`2026.08.23-1828`, `.185`). Original reset was an artifact of the reverted-FMPL_PMR experiment. | M8 | Full staged test on eth3 10G with ASK temporarily disengaged (`rccb=0`, RSS→PLCR), 1gbit policer `in_hw`: 1G offered UDP clean; 5G offered clean; final 9G UDP + TCP `-P8` (`7.25 Gbit/s`) clean. Uptime monotonic `6699→7054s`, load `0.03–0.16`, eth3 kernel `rx_dropped` nearly flat, no watchdog/RCU/lockup/build_skb/panic/ECIR/FMan-error lines. Meter held ~1gbit CIR under 9× overload entirely in FMan hardware. Serial relay was reachable and post-test console showed healthy `vyos login:`; the attempted live serial capture process had a syntax error, so the serial proof is post-hoc rather than continuous, but no reset occurred and SSH/uptime monitoring was continuous. Production eth3 ASK + routes fully restored, 0% loss. |
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; `pcd-snapshot` A/B; prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` |
 | **ZC refill under flood** | `refill_batches` freezes under sustained flood; pool drains at ~256 frames | OPEN | M4 throughput | Investigate after the ZC datapath flows (T-M4-4d) |
