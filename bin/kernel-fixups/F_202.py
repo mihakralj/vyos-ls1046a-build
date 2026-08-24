@@ -52,18 +52,12 @@ blocks = [
     (
         "flow-add lock acquisition",
         "\tpcd = fman_get_pcd(fm);\n"
-        "\tif (!pcd) {\n"
-        "\t\tpr_warn_ratelimited(\"fman_pcd: F-194 flow-add no-pcd fm=%px hw_port=0x%02x key_size=%u\\n\",\n"
-        "\t\t\t\t    fm, hw_port_id, action->key_size);\n"
-        "\t\treturn -ENXIO;\n"
-        "\t}\n\n"
+        "\tif (!pcd)\n"
+        "\t\treturn -ENXIO;\n\n"
         "\tt = fman_pcd_ehash_table_by_index(pcd, 0);",
         "\tpcd = fman_get_pcd(fm);\n"
-        "\tif (!pcd) {\n"
-        "\t\tpr_warn_ratelimited(\"fman_pcd: F-194 flow-add no-pcd fm=%px hw_port=0x%02x key_size=%u\\n\",\n"
-        "\t\t\t\t    fm, hw_port_id, action->key_size);\n"
-        "\t\treturn -ENXIO;\n"
-        "\t}\n\n"
+        "\tif (!pcd)\n"
+        "\t\treturn -ENXIO;\n\n"
         "\t/* F-202(flow-api-lock): serialize production add/delete/clear.\n"
         "\t * fman_pcd_ehash_{add,del}_key require pcd->fe_lock. */\n"
         "\tmutex_lock(&pcd->fe_lock);\n\n"
@@ -71,13 +65,14 @@ blocks = [
     ),
     (
         "flow-add no-table unlock",
-        "\t\treturn -ENODEV;\n"
-        "\t}\n\n"
-        "\t/* F-193(prod-flow-add-diag)",
+        "\tif (!t)\n"
+        "\t\treturn -ENODEV;\n\n"
+        "\t/* F-193(prod-flow-add-target-fqid): resolve the own-port fallback FQID",
+        "\tif (!t) {\n"
         "\t\tmutex_unlock(&pcd->fe_lock);\n"
         "\t\treturn -ENODEV;\n"
         "\t}\n\n"
-        "\t/* F-193(prod-flow-add-diag)",
+        "\t/* F-193(prod-flow-add-target-fqid): resolve the own-port fallback FQID",
     ),
     (
         "flow-add no-enq unlock",
