@@ -595,7 +595,14 @@ enum ask_action_type {
 	ASK_ACTION_VLAN_PUSH   = 8, /* insert one egress 802.1Q tag */
 };
 
-#define ASK_INTENT_MAX_ACTIONS 8
+/*
+ * T-M6-8: raised 8 -> 16 so a composed VLAN+NAT flow fits. The kernel routed
+ * emission for such a flow is eth_src(MANGLE x2) + eth_dst(MANGLE x2) [each ->
+ * one ASK_ACTION_L2_REWRITE] + VLAN_POP + VLAN_PUSH + SNAT + DNAT + SPORT +
+ * DPORT + CSUM + REDIRECT + implicit TTL_DEC ~= 13 typed actions. 16 matches
+ * the FE record's MAX_OPCODES ceiling. Overflow still fails closed (-E2BIG).
+ */
+#define ASK_INTENT_MAX_ACTIONS 16
 
 struct ask_flow_action_ent {
 	enum ask_action_type type;
