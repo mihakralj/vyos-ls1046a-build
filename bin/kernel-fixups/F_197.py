@@ -46,7 +46,7 @@ old = """\tstruct muram_info *muram;
 \tif (!muram)
 \t\treturn 0x200;
 
-\tpage = fman_muram_offset_to_vbase(muram, params_off);
+\tpage = (void *)fman_muram_offset_to_vbase(muram, params_off);
 \tif (!page)
 \t\treturn 0x200;
 
@@ -76,7 +76,7 @@ new = """\tstruct muram_info *muram;
 \tif (!muram)
 \t\treturn 0x200;
 
-\tpage = fman_muram_offset_to_vbase(muram, params_off);
+\tpage = (void *)fman_muram_offset_to_vbase(muram, params_off);
 \tif (!page)
 \t\treturn 0x200;
 
