@@ -1,6 +1,12 @@
 # decomp/ — QEF 210.10.1 Microcode Disassembly Program
 
-**Started 2026-08-07 · Status: Phases 0–2 done, Phase 3 in progress (anchors.json v1), Phase 4 oracle OPERATIONAL (E1/E2 PASS on .185), Phase 5 toolchain installed (Ghidra+MCP)**
+**Started 2026-08-07**
+
+Status:
+- Phases 0–2: complete
+- Phase 3: anchors database available
+- Phase 4: mutation oracle validated by E1 and E2 on the designated test DUT
+- Phase 5: Ghidra toolchain available
 
 Reverse-engineering program for the NXP FMan v3 controller microcode (QEF
 container, version 210.10.1) that runs on the LS1046A's FMan. Goal is
@@ -20,9 +26,9 @@ covers the *code itself*.
 | [findings.md](findings.md) | Dated discovery log — every established fact with evidence, newest first |
 | [correlation-arch.md](correlation-arch.md) | Correlation of decomp findings with `arch/fman-*.md` (verdicts, edits applied, open questions) |
 | [experiments.md](experiments.md) | Silicon-oracle experiment log (delivery pipeline, E1/E2, queue) |
-| [ghidra-setup.md](ghidra-setup.md) | Ghidra 11.3.2 + GhidraMCP install record (ARM64 native build, MCP wiring, operational steps) |
-| [ghidra-decompile-plan.md](ghidra-decompile-plan.md) | Staged plan to decompile 210.10.1 with Ghidra (SLEIGH module G0–G4, cross-validation gate, oracle loop, MCP workflow) |
-| [naming-map.md](naming-map.md) | Authoritative naming/structure vocabulary (context/IC layout, MURAM structs, constants, dispatch-slot function names) harvested from `arch/` + qdrant |
+| [ghidra-setup.md](ghidra-setup.md) | Ghidra 11.3.2 installation on ARM64, including the optional automation bridge |
+| [ghidra-decompile-plan.md](ghidra-decompile-plan.md) | Staged plan to decompile 210.10.1 with Ghidra (SLEIGH module G0–G4, cross-validation gate, oracle loop, automation workflow) |
+| [naming-map.md](naming-map.md) | Authoritative naming and structure vocabulary derived from architecture documents, primary sources, and verified observations |
 | [hitmiss-path.md](hitmiss-path.md) | Locating the EXT_HASH HIT/MISS discriminator (bucket_index + ehash_walker), critical encodings, the decisive E-HM1 oracle experiment |
 | [00-acquisition.md](00-acquisition.md) | Phase 0 — blob acquisition, provenance, hashes, corpus |
 | [01-container.md](01-container.md) | Phase 1 — QEF container parse tooling |
@@ -59,14 +65,14 @@ This program is *not* blind RE. Four assets the AMD/Intel teams lacked:
 4. **A live, brick-safe mutation oracle**: kernel patch
    `0117 load_fman_ctrl_code()` re-streams whatever blob U-Boot injected into
    the DT at every boot. Patched blobs load via TFTP + the `fman_ucode` env
-   var — no SPI flash writes. The dev board (.185) observes the effect.
+    var — no SPI flash writes. The designated test DUT observes the effect.
 
 ## Ground rules
 
 - **Never write SPI flash** for microcode experiments. Mutation = TFTP-loaded
   patched blob → DT injection → kernel re-stream. A bad blob costs one reboot.
-- Experiments run on the **dev board (.185)** only. Never .190 (production-ish
-  SSH lifeline board).
+- Run mutation experiments only on the **designated development DUT**.
+  Reserve the secondary DUT for recovery and independent confirmation.
 - The blob is NXP proprietary, LA_OPT EULA. Do not commit the blob or derived
   disassembly listings to public remotes. Markdown analysis is fine.
 - **No replacement-microcode ambition** — we have no assembler, no signing
@@ -80,8 +86,11 @@ This program is *not* blind RE. Four assets the AMD/Intel teams lacked:
 
 ## Working artifacts (volatile — re-acquire with the recipes in 00)
 
-- `/tmp/kilo/fman-ucode-210.10.1.bin` — canonical blob (SHA-256
+Set `DECOMP_WORKDIR=${DECOMP_WORKDIR:-/tmp/fman-decomp}` before using the
+acquisition and analysis commands.
+
+- `$DECOMP_WORKDIR/fman-ucode-210.10.1.bin` — canonical blob (SHA-256
   `5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d`)
-- `/tmp/kilo/qoriq-fm-ucode/` — 23-blob public corpus
-- `/tmp/kilo/qef_probe.py` — original ad-hoc probe, superseded by
-  `decomp/tools/qef-parse.py` + `decomp/tools/structure-map.py` (committed)
+- `$DECOMP_WORKDIR/qoriq-fm-ucode/` — 23-blob public corpus
+- The original temporary probe is superseded by
+  `decomp/tools/qef-parse.py` and `decomp/tools/structure-map.py`.

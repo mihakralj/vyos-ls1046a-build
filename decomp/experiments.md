@@ -1,10 +1,10 @@
 # decomp/experiments.md — Silicon Oracle Experiment Log
 
 The mutation-oracle log: each experiment's patch, delivery, observables,
-result, and conclusion. Newest at the bottom (append-only). Board: **.185
+result, and conclusion. Newest at the bottom (append-only). Board: **ASK2 test DUT
 only** (dev board). Recovery: any plain reboot returns to eMMC boot with the
 pristine SPI blob (kexec delivery is one-shot); worst case = smart-plug
-power cycle (`restart-dut` skill).
+power cycle (smart-plug cold-power-cycle procedure).
 
 ## Delivery pipeline (proven E1, 2026-08-08)
 
@@ -20,10 +20,10 @@ flowchart LR
   normal bootcmd (`run vyos`) keeps pulling the pristine blob from SPI; only
   the kexec'd kernel sees the patched DTB.
 - Gotcha: `/tmp` is tmpfs — files die on every kexec. Upload DTBs fresh each
-  round; keep baselines under `/home/vyos/` (persistent).
+  round; keep baselines under `$HOME/` (persistent).
 - vbash: only real binaries via full path (`sudo -n /sbin/kexec`,
   `sudo -n /usr/local/bin/pcd-snapshot`); no `which`/`strings`.
-- kexec round-trip on .185: ~90–120 s back to SSH.
+- kexec round-trip on ASK2 test DUT: ~90–120 s back to SSH.
 - Kernel `6.18.41-vyos`, image `2026.08.07-2326-rolling`, U-Boot
   2025.04 (`fman_ucode=fbc11d00` env exists but unused by this path).
 
@@ -72,9 +72,9 @@ flowchart LR
 
 ## E-HM1 — confirm the EXT_HASH HIT/MISS compare on silicon (READY, not yet run)
 
-**Framing correction (2026-08-08, from qdrant)**: flow-HIT is *not* a
+**Framing correction (2026-08-08, from earlier project evidence)**: flow-HIT is *not* a
 never-solved mystery. HIT was **proven working 2026-07-19** (ASK2 M3 + M5
-HIT gates on .185, ISO 1732/2004): a matching flow makes FMan consume the
+HIT gates on ASK2 test DUT, ISO 1732/2004): a matching flow makes FMan consume the
 frame (tcpdump sees 0 packets). The original MISS root cause was **F-053** —
 the DDR record has an 8-byte link header before the key, so the silicon must
 compare starting at record **+8**, not +0. **The decomp corroborates this
@@ -87,7 +87,7 @@ So E-HM1's value now: use the **known-HIT config as a silicon oracle** to
 turning the G3+ black-box pcodeops into verified semantics and reading, not
 inferring, exactly which bytes silicon compares.
 
-**Engage sequence (from the M3 HIT gate, .185):**
+**Engage sequence (from the M3 HIT gate, ASK2 test DUT):**
 ```
 # build the FE-VM chain via /sys/kernel/debug/fman_pcd/0/
 echo get                  > fe_pool
@@ -99,7 +99,7 @@ echo "build 0x4af00"      > fe_enter          # EXT_HASH FE offset
 echo "engage 10 53f00 2B9 1C0006" > fe_arm    # port 0x10=eth3, FE_ENTER_AD, miss_fqid, EKFC
 #   OR the production API:  echo "engage 0x10" > /sys/kernel/debug/ask/offload
 echo "add 0 0A63016A0A6301B90614511451 4b000" > fe_flow  # 13B key, ENQ off
-# observe: matching TCP (10.99.1.106:5201 -> .185:5201) -> tcpdump 0 pkts = HIT
+# observe: matching TCP ($PEER_TRANSIT_IP_A:5201 -> ASK2 test DUT:5201) -> tcpdump 0 pkts = HIT
 ```
 
 **The experiment**: with a HIT confirmed, patch one candidate `ehash_walker`
@@ -112,16 +112,16 @@ instruction (via `qef-patch` -> DTB -> kexec) and re-test:
 Each patch has a directly observable HIT/MISS outcome.
 
 **Prerequisite / risk**: engage has a **teardown-wedge risk** (T-M6-5:
-`fe_pool put`/disengage HARD-WEDGED .185, watchdog-recovered ~2–3 min). Run
-on .185 with `restart-dut` (smart-plug) recovery ready; kexec the patched
+`fe_pool put`/disengage HARD-WEDGED ASK2 test DUT, watchdog-recovered ~2–3 min). Run
+on ASK2 test DUT with `restart-dut` (smart-plug) recovery ready; kexec the patched
 blob per E1/E2. Awaiting greenlight for the live engage + kexec run — this
 touches the ASK datapath, so it's staged, not auto-run.
 
 ### E-HM1 RESULT — RAN 2026-08-08 (safe engage variant, no patch/kexec)
 
 Engaged the FE-VM ehash path on eth4 (port 0x11), drove the matching flow
-from .106 (10.99.2.106:44444 → 10.99.2.185:55555), read the probes, recovered
-by clean reboot (no wedge). Traffic peer: `vyos@192.168.1.106`.
+from vendor-reference system ($PEER_TRANSIT_IP:44444 → $DUT_TRANSIT_IP:55555), read the probes, recovered
+by clean reboot (no wedge). Traffic peer: `vyos@$VENDOR_REFERENCE_HOST`.
 
 **Decomp findings VERIFIED on silicon:**
 - EXT_HASH descriptor `w0=0x06000000 w1=0x0fff0c00` → type=EXT_HASH,
@@ -149,13 +149,13 @@ scheme's `kgse_hc`/EKFC vs the CRC-64 expectation to see why the hash diverges.
 
 **Retraction (2026-08-08, later — see `decomp/hitmiss-path.md`'s matching
 correction):** the "Candidate-2 confirmed" conclusion above does not survive
-cross-checking against qdrant. That exact hypothesis was already
+cross-checking against earlier project evidence. That exact hypothesis was already
 independently disproven 2026-07-13 via a cleaner, isolated RSS-path
 measurement, and there's documented precedent for `hash_probe` capturing
 unrelated background traffic rather than the intended test flow. Treat the
 paragraph above as superseded, not settled. The corrected, independently
 reconfirmed hash-match result is in the "Definitive result" section of
-`decomp/hitmiss-path.md` and the qdrant record dated 2026-08-08.
+`decomp/hitmiss-path.md` and the project evidence record dated 2026-08-08.
 
 ---
 
@@ -210,7 +210,7 @@ with an obviously-detectable side effect, to determine whether
 
 ## E-HM4 — `hash_shift` parameter sweep (0-3): does the silicon use a different hash window than software assumes? — NEGATIVE (all 4 values)
 
-Grew out of the new `nxp_docs` qdrant survey (`decomp/hitmiss-path.md`
+Grew out of the new `nxp_docs` project evidence archive survey (`decomp/hitmiss-path.md`
 "2026-08-08 (new source)" section): LSDKUG documents a "4 lower bits must
 be cleared" convention on hash-index-selection masks for the RM's own
 (different) CC Hash-Table construct. Reading this project's own
@@ -234,7 +234,7 @@ correct" baseline test (`fe_port set` → `fe_ehash set 0xfff 14 <shift>` →
 `fe_pool get` → `fe_singletons build` → `fe_hashfe build` → `fe_enq build`
 → `fe_enter build` → `fe_flow add` → `fe_arm engage`), varying only the
 third `fe_ehash set` argument. Test key unchanged: `000a63026a0a6302
-b906ad9cd903` (portid=00|10.99.2.106|10.99.2.185|TCP|44444|55555), hash
+b906ad9cd903` (portid=00|$PEER_TRANSIT_IP|$DUT_TRANSIT_IP|TCP|44444|55555), hash
 `0xb508e222f73f6794` (the same CRC-64 confirmed 2026-08-08 via `hash_probe`).
 
 **Method, per shift value:** clear prior state → rebuild chain with
@@ -243,7 +243,7 @@ matches `(hash >> (6-shift)*8) & 0xfff` computed independently in Python
 (all 3 matched exactly: shift=1→0x8e2/2274, shift=2→0x222/546,
 shift=3→0x2f7/759) → dump the 320-byte record before arming → `fe_arm
 engage` → verify `FMBM_RCCB` readback equals `enter_off` (wiring) → verify
-fault registers clean → send 3 confirmed-transmitted TCP SYNs from `.106`
+fault registers clean → send 3 confirmed-transmitted TCP SYNs from the vendor-reference system
 (`nping --tcp -c 3 --source-port 44444 -p 55555 --flags SYN`) → re-check
 faults, `fe_ehash_stats`, `FMBM_RCCB`, and the full record.
 
@@ -369,17 +369,17 @@ confirmation before running.
 ## METHODOLOGY CORRECTION — E-HM4/E-HM5/E-HM6 ran with the wrong live KeyGen EKFC; corrected retest (E-HM7) still negative
 
 **Prompted by the user asking "why do we use 13-byte keys" after the ASK 1.x
-comparison** — while checking that question, found that this session's own
+comparison** — while checking that question, found that the test harness's
 test harness (`T26b-shift-sweep.sh`, reused unmodified across E-HM4, E-HM5,
 E-HM6) builds the ehash side (`fe_ehash`/`fe_flow`/`fe_arm`) but **never
 calls `fe_kg_ekfc`** to (re)configure KeyGen scheme 4's live EKFC register.
 KeyGen scheme registers are reset to boot-default by every kexec and every
-reboot — and this session ran a kexec or reboot before *every one* of
+reboot — and the current analysis ran a kexec or reboot before *every one* of
 E-HM4, E-HM5, and E-HM6. Read live via `kg-scheme-read.py`: scheme 4's
 EKFC after the most recent reboot (before any corrective action) was
 **`0x00180006`** — `IPSRC1|IPDST1|L4PSRC|L4PDST`, a **12-byte, no-PROTO,
 no-PORT_ID** extraction (the mainline RSS boot-default, `F-048`'s value) —
-not the 14-byte, portid-prefixed `0x801c0006` every one of this session's
+not the 14-byte, portid-prefixed `0x801c0006` every one of the current
 `fe_flow`-inserted test records assumed.
 
 **Implication:** during E-HM4 (hash_shift sweep), E-HM5 (`cf` alone), and
@@ -402,13 +402,13 @@ all verified as usual. Sent 3 confirmed-transmitted matching TCP SYNs.
 **Result: still byte-for-byte identical / `pkt_count=0`.** Even with
 KeyGen's live extraction genuinely synchronized to the hardware-confirmed-
 correct 14-byte portid-prefixed format for the first time in this
-session's own testing, the DDR record was completely untouched, no
+the earlier test, the DDR record was completely untouched, no
 different from every prior test.
 
 **This does not change the overall picture, but it does two things
 precisely:** (1) it closes out, empirically, for a *third* independent
 time (2026-08-06 original discovery, 2026-08-07 16-candidate batch test,
-now this session), that a properly-EKFC-synchronized 14-byte portid-
+now the current analysis), that a properly-EKFC-synchronized 14-byte portid-
 prefixed key still does not produce a HIT — so the fault genuinely isn't
 explained by this test harness's EKFC-sync gap either; and (2) it means
 E-HM4/E-HM5/E-HM6 should be re-run with `fe_kg_ekfc` correctly included if
@@ -422,14 +422,14 @@ statement at the time it was made.
 
 ## E-HM8 (major, 2026-08-08) — the armed FE-VM path wedges port RX after exactly ONE classified frame; prior "clean negative" results were frame-less
 
-A systematic check this session (prompted by the "why 13-byte keys"
+A systematic check the current analysis (prompted by the "why 13-byte keys"
 question and the follow-on microcode-priority work) revealed that **frames
-were not arriving at `.185`'s eth4 for most of today's armed test
+were not arriving at the ASK2 test DUT's eth4 for most of the current armed test
 cycles** — the eth4 kernel RX counter stayed 0, tcpdump on eth4 captured
-0 packets while `.106` transmitted, and `kgse_spc` never advanced. The
+0 packets while the vendor-reference system transmitted, and `kgse_spc` never advanced. The
 link worked right after a cold boot but the port became RX-deaf after FE-VM
 arming, surviving even disarm, recoverable only by another genuine cold
-boot (smart-plug power cycle). This invalidates today's earlier armed-test
+boot (smart-plug power cycle). This invalidates the earlier armed-test
 null results (E-HM4/5/6/7, the params-page observation, the AD-corruption
 canaries) as tests of the FE-VM — they ran with no arriving frames.
 
@@ -444,7 +444,7 @@ Disarm: tcpdump still captures nothing. The port is wedged and stays wedged
 until a cold boot.
 
 **What this proves / changes:**
-1. **All of today's earlier armed null results are invalid** (E-HM4, E-HM5,
+1. **All of the earlier armed null results are invalid** (E-HM4, E-HM5,
    E-HM6, E-HM7, the params-page `+0x54/+0x58` observation, and the
    w3/w0 AD-corruption canaries) — they were frame-less. The one exception:
    E-HM1 (passive `hash_probe` capture) worked because it never armed.
@@ -467,7 +467,7 @@ until a cold boot.
 - The FM_CTL params-page / `FMBM_RGPR` hypothesis: the debugfs `fe_arm
   engage` path does NOT call `fman_pcd_port_ensure_params_page()` (the
   production `fman_pcd_fe_engage()` does), and `FMBM_RGPR` reads 0 on our
-  armed port — BUT the **working vendor board `.106` also has
+  armed port — BUT the **working vendor board the vendor-reference system also has
   `FMBM_RGPR=0`** on both 10G ports, so a nonzero params-page pointer is
   NOT what makes the vendor path work. Programming it would have diverged
   from the working board. (Also: `/dev/mem` writes to the port BMI register
@@ -526,7 +526,7 @@ FE-VM pool machinery runs.**
 
 **Post-wedge pool state (correct reads):** the FE workspace pool is
 correctly configured — `FMBM_RGPR = 0x0004b600` at **port-base + 0x30C**
-(not 0x38 as this session had been reading; the 0x30C offset was located by
+(not 0x38 as the current analysis had been reading; the 0x30C offset was located by
 scanning the port window for the params offset value), params page at MURAM
 0x4b600 with `+0x40=0x100` (MISC ALWAYS_ON), `+0x44=0x012ee0e8` (errdisc),
 `+0x54=0x4d800` (mgmt free-list offset), `+0x58=0` (depletion). The mgmt
@@ -538,7 +538,7 @@ wedge/consumption is upstream, in the CC engine's dispatch of the frame to
 the FE_ENTER AD.
 
 **Methodological corrections from this turn (important for all future MURAM
-reads):** earlier "params page" reads this session (showing zeros) were
+reads):** earlier "params page" reads the current analysis (showing zeros) were
 invalid — the script mmap'd page 0x1A00000 (the FMan base page, NOT
 page-aligned to the target) and indexed MURAM offsets like 0x4b600 well
 beyond the 0x1000 mapping, silently returning zeros. Correct pattern
@@ -561,13 +561,13 @@ top-of-image dispatch region w40+, or the FM_CTL frame-entry path), then a
 canary/infinite-loop patch with the wedge as the observable.
 
 **Separately, and independent of any of this project's own test scripts:**
-`AGENTS.md` §S6 ("Target EKFC") still states `0x001C0006` (13 bytes, no
+The project guidance still stated `0x001C0006` (13 bytes, no
 PORT_ID) as "the Target" — this is stale relative to the 2026-08-06/07
 PORT_ID discovery (14 bytes, `0x801C0006`, independently hardware-
-confirmed via CRC-64 match twice, including once this session). Flagged
+confirmed via CRC-64 match twice, including once the current analysis). Flagged
 for the user/project owner to correct; not edited unilaterally here since
-`AGENTS.md` is the binding, session-loaded rules document.
-**UPDATE 2026-08-08:** AGENTS.md §S6 has since been corrected to the 14-byte target.
+The project guidance therefore required correction.
+**UPDATE 2026-08-08:** The project guidance was subsequently corrected to the 14-byte target.
 
 ## E-HM12 (2026-08-08) — trap-band redirect: does the FE-VM entry's hardware-trap fall-through cause the wedge? — NEGATIVE (wedge persists)
 
@@ -588,7 +588,7 @@ via `qef-patch.py --fdt` (trailer CRC fixed), delivered via DTB→kexec
 5/5** → kexec E-HM12 → **verified patched+unarmed arrival 5/5** (negative
 control: redirects don't affect RSS path) → arm chain (fe_pool get, ehash
 0xfff/14/0, singletons, hashfe, enq 0x300, enter 0x56c00, kg_ekfc 4 801c0006,
-engage 11) → frame 1 from .106 → frame 2.
+engage 11) → frame 1 from vendor-reference system → frame 2.
 
 **Result — NEGATIVE**:
 - frame 1: `kgse_spc` scheme4 0→1 (classified, consumed; eth4 rx stays 6)
@@ -784,7 +784,7 @@ frames 1-2 classified AND delivered (nping Rcvd:1 each), frame 3 arrival
    sent frame 2, so the wedge-after-one-frame went unnoticed. **HIT works on
    frame 1; the wedge kills frame 2+.** Both are true and compatible.
 3. **The params page (FMBM_RGPR) is configured by production engage but NOT
-   by the debugfs path** — a concrete, testable delta that E-HM8's ".106 also
+   by the debugfs path** — a concrete, testable delta that E-HM8's "vendor-reference system also
    has RGPR=0" did not fully close (vendor board may not engage FE-VM at all).
    The decisive follow-up: does `ensure_params_page` + a REAL off survive
    frame 2? That requires either a kernel-path engage with off != 0 or a
@@ -793,13 +793,13 @@ frames 1-2 classified AND delivered (nping Rcvd:1 each), frame 3 arrival
 **State**: board currently armed via production path (no wedge, port healthy);
 needs disarm + cold boot before any further FE_ENTER-direct test.
 
-## E-HM13 (2026-08-09) — CAND-3 params-page patch STOPPED by qdrant gate (known-negative per E-HM9)
+## E-HM13 (2026-08-09) — CAND-3 params-page patch STOPPED by evidence gate (known-negative per E-HM9)
 
 **Proposed action**: patch debugfs `fe_arm engage` to call
 `fman_pcd_port_ensure_params_page()` when `fe_enter_off != 0`, testing the
 hypothesis "FE_ENTER-direct wedges because FMBM_RGPR=0".
 
-**Qdrant gate result — STOP. E-HM9 (2026-08-08, same build) already ran the
+**Evidence gate result — STOP. E-HM9 (2026-08-08, same build) already ran the
 exact experiment: NEGATIVE.**
 
 1. E-HM9's wedging FE-VM chain had the params page FULLY CONFIGURED at arm
@@ -810,12 +810,12 @@ exact experiment: NEGATIVE.**
    clear, DEALLOCATE clear, EXT_HASH bypass, trap redirect). Params page
    present + real off + frame 2 → **still wedges**.
 2. E-HM8's "cheap negative" claiming the params-page hypothesis was weak
-   ("vendor .106 also has FMBM_RGPR=0") was based on the WRONG register
+   ("vendor-reference system also has FMBM_RGPR=0") was based on the WRONG register
    offset (0x38) — E-HM9 corrected it to 0x30C. So the params-page delta
    CAND-3 observed was itself the artifact: CAND-3's "debugfs path leaves
    FMBM_RGPR=0" was reading the wrong offset; the wedging path had it set
    all along.
-3. Live confirmation (this session): production engage on .185 →
+3. Live confirmation (the current analysis): production engage on ASK2 test DUT →
    RGPR=0x4b600 (params page configured), RCCB=0x54b00 = **scaffold gro**
    (off=0), NOT the real FE_ENTER AD 0x54a00. Production never dispatches
    to OPC_FE_ENTER — consistent with CAND-3's model AND with E-HM9's
@@ -836,25 +836,25 @@ patch.
 **Resolution status**: CAND-3's proposed patch NOT written. Board restored
 to pristine after production-engage disarm + cold boot.
 
-## E-HM14 (2026-08-09) — deep .106 vs .185 FE-VM arm comparison (live registers + nxp-sdk source)
+## E-HM14 (2026-08-09) — deep vendor-reference system vs ASK2 test DUT FE-VM arm comparison (live registers + nxp-sdk source)
 
 **Task**: what differs in calling fe_arm / the FE-VM engage between the working
-vendor stack (.106, cdx.ko + cmm + SDK /dev/fm0*) and our ASK (.185 debugfs
+vendor stack (vendor-reference system, cdx.ko + cmm + SDK /dev/fm0*) and our ASK (ASK2 test DUT debugfs
 fe_arm), in functions and registers.
 
 **Vendor arm model (FM_PORT_SetPCD → SetPcd, fm_port.c:1110, 5006):**
 1. FmPcdCcBindTree → writes FMBM_RCCB = **CC group-tree root** (match table),
-   NOT a bare FE_ENTER AD. Live .106: RCCB=0x48D00 (rows `4F400008 D6D48100
+   NOT a bare FE_ENTER AD. Live vendor-reference system: RCCB=0x48D00 (rows `4F400008 D6D48100
    04020808 004C8000` = CC match-table entries with key/next-engine words).
 2. FmPcdKgSetOrBindToClsPlanGrp + FmPcdKgBindPortToSchemes → KgWriteSp (SP
    register, scheme-per-port vector), NOT a scheme-level AC_CC graft.
 3. Writes FMBM_RFPNE = 0x00480200 = NIA_ENG_KG | NIA_KG_CC_EN (generic
-   SI/match-vector CC dispatch). Live .106 confirmed 0x00480200 on both 10G.
+   SI/match-vector CC dispatch). Live vendor-reference system confirmed 0x00480200 on both 10G.
 4. FM_PORT_ConfigureMuramPage (fm_port.c:4942): params page misc |= 0x40000000
    (FM_CTL_PARAMS_PAGE_OFFLOAD_SUPPORT_EN) when FM_PCD_SetAdvancedOffloadSupport
    was called (dpa_app set_fm_adv_options → FM_PCD_SetAdvancedOffloadSupport),
    sets FMBM_RCMNE = NIA_FM_CTL_AC_POP_TO_N_STEP (0x0e) via UPDATE_NIA_CMNE.
-   Live .106: params misc=0x40000100, RFENE=0x22 (POST_BMI_ENQ), RCMNE=0x0e,
+   Live vendor-reference system: params misc=0x40000100, RFENE=0x22 (POST_BMI_ENQ), RCMNE=0x0e,
    RIM=0x60000000, RPSO=0x60.
 5. ehash node = **16-byte en_exthash_node** (fm_ehash.h:619): word0 =
    table_base_hi:16|hash_bytes_offset:2|reserved:6|key_size:6|miss_action_type:2;
@@ -885,7 +885,7 @@ fe_arm), in functions and registers.
    en_exthash_node.**
 
 **Delta summary (register/function level):**
-| Item | Vendor .106 | Ours .185 | Status |
+| Item | Vendor-reference system | ASK2 test DUT | Status |
 |---|---|---|---|
 | RCCB target | CC group tree (match) | FE_ENTER AD direct | **STRUCTURAL — vendor never RCCB→bare FE_ENTER** |
 | RFPNE | 0x00480200 (generic KG→CC) | 0x00480304 (KG_DIRECT scheme 4) | differs |
@@ -915,15 +915,15 @@ match leaf is the FE_ENTER AD (vendor-faithful root form), with params misc
 ## E-HM15 (2026-08-09) — params-page OFFLOAD_SUPPORT_EN NEGATIVE (wedge persists)
 
 **Test**: E-HM14 identified params misc 0x40000100 (OFFLOAD_SUPPORT_EN|
-ALWAYS_ON) on .106 vs 0x100 on .185 as the only untested register delta.
+ALWAYS_ON) on vendor-reference system vs 0x100 on ASK2 test DUT as the only untested register delta.
 Set it live via /dev/mem (write stuck, read back 0x40000100 = byte-identical
-to .106) on the standard wedging chain (pool 0x54900, ehash 0xfff/14/0,
+to vendor-reference system) on the standard wedging chain (pool 0x54900, ehash 0xfff/14/0,
 hashfe 0x4b900, enter root_ad 0x56c00, ekfc 801c0006, flow bucket 0x0508),
 then armed FE_ENTER-direct (engage 11 56c00 300, RCCB=0x56c00, RFPNE
 0x480304, RGPR=0x54800).
 
-**Result — NEGATIVE (decisive)**: frame 1 from .106 (nping SYN
-10.99.2.106:44444 → 10.99.2.185:55555, "Raw packets sent: 1") → spc stayed
+**Result — NEGATIVE (decisive)**: frame 1 from vendor-reference system (nping SYN
+$PEER_TRANSIT_IP:44444 → $DUT_TRANSIT_IP:55555, "Raw packets sent: 1") → spc stayed
 0x0, eth4 rx counter frozen at 4, subsequent ping 100% loss, tcpdump sees
 wire-level packets the kernel never delivers — port RX-deaf. Disarm does not
 clear (fe_arm still shows engaged, arrival stays dead). Cold boot restores.
@@ -939,7 +939,7 @@ itself.
 wedge cause). Combined with E-HM9 (ALLOCATE clear, DEALLOCATE clear, EXT_HASH
 bypass, trap redirect all wedge) and E-HM8 (RIM vendor value live-tested
 negative), every register-level delta is now closed. The remaining structural
-delta is the RCCB TARGET: vendor .106 points RCCB at a CC GROUP TREE whose
+delta is the RCCB TARGET: vendor-reference system points RCCB at a CC GROUP TREE whose
 match leaf is the FE_ENTER-form AD (FillAdOfTypeContLookup externalHash);
 we point RCCB at the bare FE_ENTER AD as root. E-HM9's M2 scaffold control
 (RCCB→group table numKeys=0) did NOT wedge — group-table root form is what
@@ -952,7 +952,7 @@ offset, or a small patch.
 
 **Test**: built the FE-VM chain (pool 0x54900, ehash 0xfff/14/0, hashfe
 0x4b900, enter root_ad 0x56c00, ekfc 801c0006), then `cc_test install 17 0 6
-10.99.2.106 10.99.2.185 55555` (NOTE: cc_test parses port_id DECIMAL — "17"
+$PEER_TRANSIT_IP $DUT_TRANSIT_IP 55555` (NOTE: cc_test parses port_id DECIMAL — "17"
 = 0x11; "11" = 0x0B → -ENODEV. fe_port uses hex). cc_test built group
 0x56d00 / match 0x56e00 / ad 0x56f00 and bound RCCB=0x56d00 (group tree).
 Then overwrote the AD-leaf at 0x56f00 with the FE_ENTER AD words copied from
@@ -961,8 +961,8 @@ leaf the FE_ENTER-form AD (CONT_LOOKUP|ALLOCATE, gmask=hashfe) exactly per
 vendor FillAdOfTypeContLookup externalHash (fm_cc.c:450-467). Flow inserted
 (bucket 0x0508).
 
-**Result — WEDGES IDENTICALLY.** Frame 1 (nping SYN 10.99.2.106:44444 →
-10.99.2.185:55555, Raw sent 1) → port RX-deaf: RX frozen at 7, tcpdump 0
+**Result — WEDGES IDENTICALLY.** Frame 1 (nping SYN $PEER_TRANSIT_IP:44444 →
+$DUT_TRANSIT_IP:55555, Raw sent 1) → port RX-deaf: RX frozen at 7, tcpdump 0
 packets, ping 100% loss, FMFP_PS port 0x11 = 0x5da0 (no STL bit, E-HM9-style
 zero-fault-signature wedge). spc read via correct KG AR protocol (KG block
 FMAN+0xC1000, AR=0x1FC, GO|READ|(scheme<<16), window KG+0x100, spc=word16):
@@ -979,12 +979,12 @@ FE-VM entry sequence w214–w242 (read AD base from IC [0xd008], read FE word0
 from 0x1b00, >>26 type extract, 2c3f handler dispatch) wedges after consuming
 one frame regardless of how the AD is reached.
 
-**Why .106 doesn't wedge (reconciled)**: per §5.2 "most likely no", .106's
+**Why vendor-reference system doesn't wedge (reconciled)**: per §5.2 "most likely no", vendor-reference system's
 cdx stack never populates a flow (aging-enabled tables require the Host
 Command this blob lacks; cmm inserts zero flows; group-table rows at
-RCCB+0x48E00 have no live DDR-backed ehash downstream) — so .106 NEVER
+RCCB+0x48E00 have no live DDR-backed ehash downstream) — so vendor-reference system NEVER
 dispatches a frame into an FE_ENTER-form AD. Its 400+ frame "success" is
-MISS-path/software-forwarded traffic. .106 was never a live reference for the
+MISS-path/software-forwarded traffic. vendor-reference system was never a live reference for the
 FE_ENTER handoff.
 
 **Conclusion**: the CC→FE_ENTER handoff itself is broken on this silicon
@@ -1002,28 +1002,29 @@ could route through a handler slot whose target is data-resolved").
 **Method**: analyzeHeadless on the existing fman project (program
 fman-code-210.bin, fman-risc SLEIGH). Blob→Ghidra mapping confirmed:
 ghidra_word = blob_byte 0xF4 + w*4 (code starts at blob 0xF4 = 0xb7ff0249).
-GUI-only GhidraMCP not used (server needs manual plugin enable); headless
+The GUI-only automation extension was not used because it requires manual
+enablement; headless
 decompile fully working. New scripts: FmanW214to242.py, FmanW214decomp.py,
 FmanW150to400.py, FmanEntryBlock.py, FmanW240On.py.
 
 **KEY CORRECTION (CAND-1 re-examined)**: DT muram reg = <0x0 0x60000>
-(384 KB @ physical 0x1A00000). Pristine .185 reads of 0x1A0F000 / 0x1A0F800
+(384 KB @ physical 0x1A00000). Pristine ASK2 test DUT reads of 0x1A0F000 / 0x1A0F800
 return clean 0x00000000 (NOT userspace strings). CAND-1's "aliased to
 volatile userspace memory" reads were an artifact of a bad page (0x1A01620
 and neighbors, likely unbacked/aliased window). The 0xf000/0xf800 dmem
 windows ARE real MURAM at 0x1A00000+offset.
 
 **[SUPERSEDED 2026-08-09 by E-HM18]** — this "clean zeros on pristine"
-claim was itself a transient artifact. Repeat live reads on pristine .185
-(and armed .106) show the 0xf000/0xf800 windows contain VOLATILE content:
-.185 reads at 0x1A0F000+0x40 hold mDNS/service strings ("Spotify Desktop
+claim was itself a transient artifact. Repeat live reads on pristine ASK2 test DUT
+(and armed vendor-reference system) show the 0xf000/0xf800 windows contain VOLATILE content:
+ASK2 test DUT reads at 0x1A0F000+0x40 hold mDNS/service strings ("Spotify Desktop
 Launcher", "_spotify-connect._tcp.local"), 0x1A0F020 = 0x8CD66156 (stable
-across 3 s), .106 reads 0x0400015E/0x04008040/0x41B00000. The region is a
+across 3 s), vendor-reference system reads 0x0400015E/0x04008040/0x41B00000. The region is a
 working/staging area (frame buffers/status), NOT a static handler-pointer
 table the kernel populates — CAND-1's original "not a kernel-populated
 MURAM table" conclusion is restored. The FE-type dispatch at w242
 (`2c3ff000` → `dmem[0xf000 + type*4]`) resolves through ENGINE-INTERNAL
-state; the host cannot populate or meaningfully read the handler slots. On .106 (armed vendor), the
+state; the host cannot populate or meaningfully read the handler slots. On vendor-reference system (armed vendor), the
 same physical region reads DHCP/packet/config garbage — consistent with
 ARMED vendor usage, NOT a different base. So the microcode's dmem windows
 are host-readable at the DT base; CAND-1's probe was simply wrong.
@@ -1077,7 +1078,7 @@ as a conditional-skip so the pool guard decompiles past w12663.
 
 ## E-HM18 (2026-08-09) — BRANCH-MODEL CORRECTION: the "0x3FBAC out-of-range trap band" is FALSIFIED (decode artifact)
 
-**Finding (this session, whole-image validation)**: the old branch decode used
+**Finding (the current analysis, whole-image validation)**: the old branch decode used
 `(48+imm16)*4` for `b7ff` (`br`) — the phantom "out-of-range trap band"
 (0x3FBAC-0x40098, words 65259-65574) in wedge-path.md and the E-HM12/13/15
 patch rationale is a DECODE ARTIFACT of that wrong model. The correct encoding
@@ -1113,8 +1114,8 @@ a data-region edge; the only b7ff exception, likely a data word not a branch).
    reads — they were reading the engine's idle PC.
 
 **Also verified**: the `0xf000`/`0xf800` windows on the LIVE boards are NOT
-clean zeros on .185 (contradicting E-HM17's pristine-zero claim): .185 shows
-0x280/0x1194/0x6C00C/etc at slots 4-8, .106 shows 0x0400015E/0x04008040. The
+clean zeros on ASK2 test DUT (contradicting E-HM17's pristine-zero claim): ASK2 test DUT shows
+0x280/0x1194/0x6C00C/etc at slots 4-8, vendor-reference system shows 0x0400015E/0x04008040. The
 values differ per board and are NOT a static handler table — consistent with
 CAND-1's original "FM_CTL register/status window, not a kernel-populated
 MURAM table" reading. The FE-type dispatch at w242 (`2c3ff000` → handler
@@ -1128,7 +1129,7 @@ the host cannot populate or read meaningfully.
 
 **Method**: Python whole-image branch-target census vs the old model; fresh
 Ghidra project (ghidra-proj2) import + FmanPoolGuardRev.py + FmanW214decomp.py
-headless decompile; live /dev/mem reads on .185 (pristine) and .106 (armed).
+headless decompile; live /dev/mem reads on ASK2 test DUT (pristine) and vendor-reference system (armed).
 
 **Open (post-correction)**: with the trap band gone, the wedge mechanism must
 be re-derived from the corrected CFG. Prime candidates now: (a) the
@@ -1217,12 +1218,12 @@ CLEAN — patch does not disturb RSS path) → arm chain (fe_pool get, ehash
 - frame 1: `kgse_spc` scheme4 0→1 (classified, consumed; eth4 rx frozen
   at 12 packets — frame never reaches kernel)
 - frame 2: `kgse_spc` stays 1, **tcpdump on eth4 captures 0 packets**,
-  ping from .106 = 100% loss (RX-deaf at FMan level)
+  ping from vendor-reference system = 100% loss (RX-deaf at FMan level)
 - disarm: port STILL RX-deaf (tcpdump 0) — classic wedge, no recovery
 - fe_pool: `enqueued=1, available=11, refcount=1` (one buffer outstanding,
   never returned — same signature as E-HM13)
 - FMFP_PS portbase+0x28 read 0x00000000 (register-window read; stall not
-  observable this way — consistent with prior sessions)
+  observable this way — consistent with prior tests)
 
 **Conclusion**: with the w242 dispatch cleanly bypassed (first time ever
 tested in isolation), the wedge persists identically. **The FE-type
@@ -1245,7 +1246,7 @@ therefore localized to the **entry machinery w214–w241** OR the
 - Patch D: neutralize the ENTRY gates w224-w230 (correctly targeted this
   time, per E-HM18b: w230 `bc3f0028 → b7ff0028` → w270).
 
-**State**: board .185 armed→disarmed but wedged on A2 microcode (needs cold
+**State**: ASK2 test DUT armed→disarmed but wedged on A2 microcode (needs cold
 boot before next test). Pristine recovery: plain reboot (kexec was
 one-shot; bootcmd pulls pristine SPI blob) or smart-plug.
 
@@ -1273,7 +1274,7 @@ ehash 0xfff/14/0, singletons, hashfe, enq 0x300, enter 0x56c00, kg_ekfc 4
 
 **Result — NEGATIVE (wedge persists, identically)**:
 - frame 1: kgse_spc scheme4 0→1 (classified, consumed; eth4 rx frozen at 6)
-- frame 2: spc stays 1, tcpdump on eth4 captures 0 packets, ping from .106
+- frame 2: spc stays 1, tcpdump on eth4 captures 0 packets, ping from vendor-reference system
   100% loss — RX-deaf at FMan level
 - disarm: no recovery (classic wedge)
 - Wedged-state MURAM reads (host-visible): root AD @0x54900 = 0x40800000 /
@@ -1303,7 +1304,7 @@ receive/dispatch path BEFORE w214.
   w12091–w12271 (frame_epilogue) to find the port re-arm / enqueue step that
   the first frame's processing corrupts.
 
-**State**: board .185 wedged on C1 microcode; cold boot (plain reboot or
+**State**: ASK2 test DUT wedged on C1 microcode; cold boot (plain reboot or
 smart-plug) before next test. QEF blob C1 = 8e36a0a2, A2 = 02f42e63,
 pristine = 6f23090a (all verified byte-exact live).
 
@@ -1346,7 +1347,7 @@ offset 0xF0). Live post-kexec md5 `5b421d1d…` byte-exact.
 
 **Method — CONFOUNDED at the control stage**: on this boot the ask module
 **auto-engaged port 0x11 at T+120s** (restored the armed state left in
-MURAM by the F3 session — MURAM survives kexec; dmesg: ehash keysize 14 +
+MURAM by experiment F3 — MURAM survives kexec; dmesg: ehash keysize 14 +
 scheme4 EKFC 0x801c0006 + `port 0x11 ENGAGED (AC_CC)`), and the port
 wedged on the selftest/classified frame before the manual unarmed control
 ran. Unarmed control showed 0/5 (port already RX-deaf).
@@ -1382,7 +1383,7 @@ disengage held).
 
 **Result — NEGATIVE (wedge persists, identically)**:
 - frame 1: `kgse_spc` scheme4 0→1 (classified, consumed)
-- frame 2: spc stays 1, ping .106→.185 100% loss, RX counter frozen at 6
+- frame 2: spc stays 1, ping vendor-reference system→ASK2 test DUT 100% loss, RX counter frozen at 6
   packets (frame 1's SYN never delivered to kernel), fe_pool `enqueued=1`
   (buffer outstanding, never returned)
 - disarm: no recovery (classic wedge)
@@ -1413,7 +1414,7 @@ host-unreadable engine-internal dmem, same trap as 0xf000).
   for any remaining destructive write before w172, and w12271–w12340 with
   the corrected CFG to map exactly what the completion tail executes.
 
-**State**: board .185 wedged on G2 microcode; cold boot (plain reboot or
+**State**: ASK2 test DUT wedged on G2 microcode; cold boot (plain reboot or
 smart-plug) before next test. Blob md5s: pristine 6f23090a, A2 02f42e63,
 C1 8e36a0a2, D 7fa5a69f, F3 24ea3fba, F4 (standalone) 30fc974a / (DTB)
 5b421d1d, G2 (standalone) ebe45409 / (DTB) a5004d00. All verified
@@ -1470,7 +1471,7 @@ hang in the controller path. Remaining candidates:
   w75–w171 to find the actual buffer-consumption / port-halt step, then
   target it directly.
 
-**State**: board .185 wedged on J microcode; cold boot before next test.
+**State**: ASK2 test DUT wedged on J microcode; cold boot before next test.
 J (DTB) = aa5f0d5f, J (standalone) = fb4686d3.
 
 ## Patch K (2026-08-09) — J + ENQ-block dispatch + island-2 re-entry neutralized — NEGATIVE (wedge persists)
@@ -1526,7 +1527,7 @@ wedge byte-identically. The vector is therefore either:
    workspace/AD context the microcode reads (IC[0xd008] base, slot
    0x1b00) may differ.
 
-**State**: board .185 wedged on K microcode; cold boot before next test.
+**State**: ASK2 test DUT wedged on K microcode; cold boot before next test.
 K (standalone) = 59cf98c3, K (DTB) = 98a61c36.
 
 ## ROOT CAUSE FOUND (2026-08-09) — the wedge is NOT a microcode bug; it is the
@@ -1551,11 +1552,11 @@ garbage offsets, corrupting MURAM cumulatively."
   NOT call ensure_params_page. The port's params-page pointer
   (FMBM/BMI+0x54-style) stays 0xffffffff (measured).
 
-**A/B proof on .185 (pristine blob bb67d36a, cold boot each)**:
+**A/B proof on ASK2 test DUT (pristine blob bb67d36a, cold boot each)**:
 1. Production engage (echo "engage 17" > /sys/kernel/debug/ask/offload,
    port 0x11): params page set at 0x4b600, FE_ENTER root AD 0x54a00,
    MISS FQID 0x200. Frame 1: spc 0→1 then advanced to 0x14 over 15 frames
-   (5 SYN + 10 ping). ping .106→.185 10/10 0% loss. NO WEDGE.
+   (5 SYN + 10 ping). ping vendor-reference system→ASK2 test DUT 10/10 0% loss. NO WEDGE.
 2. Harness engage with IDENTICAL config (EKFC 0x001C0006, keysize 13,
    miss_fqid 0x200, root 0x56c00): NO params page. Frame 1: spc 0→1,
    ping 100% loss, RX-deaf. WEDGE.
@@ -1577,11 +1578,11 @@ harness and by `vyos-offload-ask hit-engage`) must either call
 diagnostics-only. Recommend adding the ensure call to
 `__fman_pcd_fe_arm_engage()` (or its debugfs wrapper) as a minimal fix.
 
-**State**: board .185 wedged (harness 13-byte arm); cold boot to pristine
+**State**: ASK2 test DUT wedged (harness 13-byte arm); cold boot to pristine
 before any further test. All 7 patch blobs (A2..K) are irrelevant to the
 wedge now — the microcode was never broken.
 
-## F-180/F-181 HW verification — board .185, ISO 2026.08.09-1756-rolling (2026-08-09T19:30Z)
+## F-180/F-181 HW verification — ASK2 test DUT, ISO 2026.08.09-1756-rolling (2026-08-09T19:30Z)
 
 **Build**: run 31327702703, kernel 6.18.41-vyos, ISO vyos-2026.08.09-1756-rolling.
 Boot: corrected manual U-Boot sequence (kernel → dtb → **initrd LAST** so
@@ -1606,9 +1607,9 @@ misread by hit-test.sh `awk $3` instead of `$4`).
 expected `(crc64_raw >> 48) & 0x0fff`), ehash `keysz=14`, `pkt_count=0`.
 Result MISS — **VACUOUS**: `hash_probe=idle` and `fe_ehash_stats pkt_count=0`
 prove no test frame arrived. The script's Step 5 "send from test host" is a
-comment, not a sender. Peer 10.99.2.106 was unreachable during the test
+comment, not a sender. Peer $PEER_TRANSIT_IP was unreachable during the test
 (ARP FAILED; reachable earlier at 17:36Z with 0.3 ms ping). Self-injection via
-`nping --tcp --source-ip 10.99.2.106 --source-port 44444 --dest-mac <own-mac>`
+`nping --tcp --source-ip $PEER_TRANSIT_IP --source-port 44444 --dest-mac <own-mac>`
 does NOT loop back through the switch (no hairpin) — hash_probe stayed idle.
 
 **Production path** (ask.ko `engage 17`/`disengage 17`): engage S0→S1 clean
@@ -1618,21 +1619,21 @@ does NOT loop back through the switch (no hairpin) — hash_probe stayed idle.
 **Conclusion**: F-180 + F-181 both verified on HW. The 14-byte PORT_ID-key HIT
 is STILL UNTESTED (unconfounded) — the previous "3 independent misses" and this
 one were all vacuous (no frame reached the ehash). Needs a live peer at
-10.99.2.106 to send the real TCP SYN. Per AGENTS.md §S6, PORT_ID/key-format was
+$PEER_TRANSIT_IP to send the real TCP SYN. PORT_ID/key-format was
 closed as a lead independently (CRC-64 brute force + passive hash_probe), so
 even a real HIT is not the expected outcome — the open question is the flow
 delivery path itself.
 
 **Status**: F-181 contextSize fix ships and is verified. HIT test blocked on
-peer .106 availability.
+peer vendor-reference system availability.
 
 ## F-182 v1 CRASH — live CC AD-table overwrite faults FMan (2026-08-09T21:00Z)
 
-**Build**: ISO 2026.08.09-2033-rolling (run 31334546167), board .185.
+**Build**: ISO 2026.08.09-2033-rolling (run 31334546167), ASK2 test DUT.
 Baseline clean (fmfp_ps port 17 = 0x80000000, eth4 ping 0.4 ms, cc_test node).
 
 **Sequence**: FE chain built (fe_enter root AD 0x56c00), flow inserted
-(bucket 0x508), `cc_test install 0x11 0 6 10.99.2.106 10.99.2.185 55555`
+(bucket 0x508), `cc_test install 0x11 0 6 $PEER_TRANSIT_IP $DUT_TRANSIT_IP 55555`
 (tree group=0x56d00 match=0x56e00 ad=0x56f00, RCCB bound, CC-dispatched),
 then v1 verb `leaf-fe 0x11 0x56c00` → the write **hung** (20 s timeout) and
 the board **watchdog-reset** (serial showed fresh reboot; no ramoops).
@@ -1674,11 +1675,11 @@ fman@1a00000). Verified live group=0x56d00, ad=0x56f00, fe_enter=0x56c00
 
 ## F-182 v3 RESULT — RCCB-target VALIDATED, stall GONE (2026-08-09T22:27Z)
 
-**Build**: ISO 2026.08.09-2131-rolling (run 31337041025), board .185.
+**Build**: ISO 2026.08.09-2131-rolling (run 31337041025), ASK2 test DUT.
 
 **Frame-2 test**: FE chain (fe_enter 0x56c00), flow (bucket 0x508, keysz=14),
-`cc_test install 0x11 0 6 10.99.2.106 10.99.2.185 55555 0 0x56c00` → RC=0,
-NO crash. 3 real SYNs from .106 (tcpdump TX confirmed) →
+`cc_test install 0x11 0 6 $PEER_TRANSIT_IP $DUT_TRANSIT_IP 55555 0 0x56c00` → RC=0,
+NO crash. 3 real SYNs from vendor-reference system (tcpdump TX confirmed) →
 - scheme4 spc 3→7 (frames reached KeyGen)
 - BMI rx stayed 4 (frames did NOT reach kernel/miss path → CC matched → FE path)
 - **fmfp_ps port 17 = 0x80000000 — NO STALL** (bare-FE_ENTER-root stall GONE)
@@ -1694,7 +1695,7 @@ reach the workspace for the EXT_HASH to hash.
 
 ## F-183 ROOT-CAUSE — CC match key packed for wrong EKFC, AC_CC dispatch is correct (2026-08-09T22:55Z)
 
-**Live-state audit (board .185, 2131-rolling, F-182 v3 state intact):**
+**Live-state audit (ASK2 test DUT, 2131-rolling, F-182 v3 state intact):**
 - scheme4: mode=`0x80000006` (AC_CC), ekfc=`0x801c0006`, ccbs=0, hc=0x300, spc 9→10
 - rfpne = `0x00480304` = NIA_KG_DIRECT(0x00480300)|4 → BMI→FPM→KG scheme4 direct
 - RCCB = 0x56d00; params page @0x4b600: +0x54(mgmt_idx)=0x0004d800, +0x58=0; RGPR(0x30C)=0x4b600
@@ -1703,7 +1704,7 @@ reach the workspace for the EXT_HASH to hash.
 - fe_ehash_stats pkt_count=0; AD row0=FE_ENTER, row1=miss (0xa0000000 DATA_FLOW|PLCR_DIS RSS fall-through)
 
 **Root cause — CC comparator window vs match key byte misalignment:**
-- 210 ref §4.2 (board-confirmed .106): AC_CC dispatch IS the vendor form
+- 210 ref §4.2 (board-confirmed vendor-reference system): AC_CC dispatch IS the vendor form
   (modes 0x8b000006..0x80000006, ccbs=0 on all schemes; effective_target =
   FMBM_RCCB + CCOBASE*16). The kernel fman_keygen.c comment calling
   FM_CTL|AC_CC "disproven" contradicts the 210 ref — v3's AC_CC dispatch
@@ -1729,14 +1730,14 @@ row) with the 14-byte EKFC window layout:
   = ffffffff ffffffff ff0000ff ffff0000
 - PORT_ID exact 0, PROTO exact (6), DPORT exact, SPORT wildcard (ehash exact).
 
-**Test**: SYN 10.99.2.106:44444 → 10.99.2.185:55555; watch pool cursor
+**Test**: SYN $PEER_TRANSIT_IP:44444 → $DUT_TRANSIT_IP:55555; watch pool cursor
 (mgmt@0x4d800 byte0 advances), fe_ehash_stats pkt_count, scheme4 spc.
 
 ## F-184 RESULT — AC_CC dispatch is the regression; CCBS graft restored (2026-08-09T23:50Z)
 
 **F-183 test on 2255-rolling (build 31340581078)**: match key VERIFIED correct
 (000a6302 6a0a6302 b9060000 d9030000 / ffffffff ffffffff ff0000ff ffff0000),
-flow bucket 0x508, contextSize=14, tree RCCB=0x57000. SYN from .106: scheme4
+flow bucket 0x508, contextSize=14, tree RCCB=0x57000. SYN from vendor-reference system: scheme4
 spc 0→1 (frame hit KG) BUT mgmt cursor stayed 0x04 (no FE ALLOCATE),
 pkt_count=0, netdev frozen, no DCSR errors. The corrected 14-byte match key
 did NOT reach the FE chain → the CC walk still not firing under AC_CC.
@@ -1749,7 +1750,7 @@ did NOT reach the FE chain → the CC walk still not firing under AC_CC.
 - The CI fixup F_160.py (2026-08-04) OVERRIDES it at build time to
   next_engine=3 (AC_CC, mode 0x80000006, KGSE_CCBS=0). v3/F-183 builds ran
   with AC_CC.
-- 210 ref §7.11a (vendor .106 group-table audit): the AC_CC dispatch expects
+- 210 ref §7.11a (vendor-reference system group-table audit): the AC_CC dispatch expects
   the vendor CONT_LOOKUP encoding — w1 = hash/CRC config (not
   numKeys<<24|LCL_MASK|match_off), w2 = parse-code family (not
   0x50<<16|0x2b), w3 ~ 0x0048030x KG-direct NIA, keysize DIRECT (not −1).
@@ -1770,7 +1771,7 @@ CCBS-implicit dispatch. F-183's 14-byte match key (0167) retained.
 ALLOCATE), fe_ehash_stats pkt_count > 0 (EXT_HASH compare HIT), netdev/QMI
 activity per dispatch.
 
-## F-184 session (2026-08-10 00:57-01:30Z) — CCBS word-3 BUG found; CC compare insensitive to key/mask (vendor format needed)
+## F-184 investigation (2026-08-10 00:57-01:30Z) — CCBS word-3 BUG found; CC compare insensitive to key/mask (vendor format needed)
 
 **Test**: 2350-rolling (F-184, F_160 disabled), f183-test.sh arm + cc_test install. Match key byte-exact in MURAM. scheme4 mode=0x80500002 (CCBS form), CCBS=0 at word 19.
 
@@ -1786,20 +1787,20 @@ activity per dispatch.
 **3. The CC compare is INSENSITIVE to key/mask/keysize — the 0115 SDK-convergent tree format is not what the 210.10.1 walker compares:**
 - Tested live (eth4 idle, low-risk match-table writes): F-183 key (sport wildcard), mask all-0xff, mask+key all-0x00, exact full-window key incl sport (000a6302 6a0a6302 b906ad9c d9030000), keysize field 0x0f/0x0e/0x0d. NO combination produces a HIT (mgmt cursor stays 0x04, pkt_count 0, no DCSR errors). All frames continue to deliver via the miss/fall-through row.
 - The mask row has no effect → the walker is NOT applying the per-key local masks (or not reading our match table at all). Contradicts the 0115 "SDK-convergent" assumption.
-- Per 210 ref §7.11a: the VENDOR .106 CONT_LOOKUP entry has w1 = packed hash/CRC config (NOT numKeys<<24|LCL_MASK|match_off), w2 = 0x0402xx parse-code family (NOT 0x50<<16|0x2b), w3 ~ 0x0048030x (KG-direct NIA), keysize DIRECT (not -1). The vendor format is the one that classifies on 210.10.1; ours is not being compared.
+- Per 210 ref §7.11a: the VENDOR vendor-reference system CONT_LOOKUP entry has w1 = packed hash/CRC config (NOT numKeys<<24|LCL_MASK|match_off), w2 = 0x0402xx parse-code family (NOT 0x50<<16|0x2b), w3 ~ 0x0048030x (KG-direct NIA), keysize DIRECT (not -1). The vendor format is the one that classifies on 210.10.1; ours is not being compared.
 - The 24M-frame "HW-PROVEN" claim (0115 comment, ask20 PR14z20/22) predates the 0115 re-layout and cannot be reproduced with the current tree — either the pre-0115 format differed, or the proof's CCBS write landed on the correct word (3) while our kernel writes 19.
 
-**State at session end**: board .185 on 2350-rolling, armed, tree restored to F-183 form (group w0 0x4f057200, key 000a6302 6a0a6302 b9060000 d9030000, mask ffffffff ffffffff ff0000ff ffff0000), word3 CCBS still 0x57000 (walk fires, frames deliver via miss row).
+**Recorded post-test state**: ASK2 test DUT on 2350-rolling, armed, tree restored to F-183 form (group w0 0x4f057200, key 000a6302 6a0a6302 b9060000 d9030000, mask ffffffff ffffffff ff0000ff ffff0000), word3 CCBS still 0x57000 (walk fires, frames deliver via miss row).
 
 **Next**: (a) fix keygen_scheme_setup CCBS write to window word 3 (real bug, testable); (b) decode the vendor §7.11a w1-w3 CONT_LOOKUP format (NXP-106-DEEP-DIVE-PLAN Phase A/C) to build a tree the 210.10.1 walker actually compares — the compare semantics (hash/CRC config, parse-code family) are the remaining unknown.
 
 ## F-184 followup (2026-08-10 01:50Z) — TRUE VENDOR SOURCE ALIGNMENT: bespoke layout also misses; patch 999 answers the architecture question
 
-**Live test on .185 (2350-rolling, armed, word-3 CCBS active)**: restored the PRE-0115 bespoke group-table layout (w0=0x01057100 numKeys|match_off, w1=0x00057200 ad_off, w2=0x4F000000 CONT_LOOKUP|keylen, w3=0) — the exact 24M-frame-proof-era encoding from patch 0106/0098. SYN from .106: spc 950→951→954, rx tracks 1:1 (miss-row delivery), mgmt cursor stays 0x04, pkt_count=0. **IDENTICAL result to the 0115 layout** — both match-table forms are negative on 210.10.1. Also tested w2=0x0402080f (vendor tcp4 parse-code family) with 0115 w0/w1: still no HIT. That's now **5 independent negative variations** (0115 layout, bespoke layout, all-ff mask, all-zero key+mask, vendor w2).
+**Live test on ASK2 test DUT (2350-rolling, armed, word-3 CCBS active)**: restored the PRE-0115 bespoke group-table layout (w0=0x01057100 numKeys|match_off, w1=0x00057200 ad_off, w2=0x4F000000 CONT_LOOKUP|keylen, w3=0) — the exact 24M-frame-proof-era encoding from patch 0106/0098. SYN from vendor-reference system: spc 950→951→954, rx tracks 1:1 (miss-row delivery), mgmt cursor stays 0x04, pkt_count=0. **IDENTICAL result to the 0115 layout** — both match-table forms are negative on 210.10.1. Also tested w2=0x0402080f (vendor tcp4 parse-code family) with 0115 w0/w1: still no HIT. That's now **5 independent negative variations** (0115 layout, bespoke layout, all-ff mask, all-zero key+mask, vendor w2).
 
 **Vendor source alignment (patch 999 = we-are-mono/ASK true source, + cdx userspace + cdx_pcd.xml + fmc):**
 - The vendor's dispatch is AC_CC (mode 0x80000006, ccbs=grpBits=0, CCOBASE=row index) — the `#if 0 //BMR bypass classification` block in patch 999 EXPLICITLY DISABLES the CCBS-graft BMI mode our stack uses. Vendor tried the graft, abandoned it.
-- The .106 group rows are externalHash=TRUE CONT_LOOKUP (FMC-emitted): w0=CONT_LOOKUP|keysize-DIRECT<<24|0x400008, w1=hash config, w2=0x0402+parse family, w3=0x0048030x KG-NIA. NOT match-table form.
+- The vendor-reference system group rows are externalHash=TRUE CONT_LOOKUP (FMC-emitted): w0=CONT_LOOKUP|keysize-DIRECT<<24|0x400008, w1=hash config, w2=0x0402+parse family, w3=0x0048030x KG-NIA. NOT match-table form.
 - The real compare = FE-VM EXT_HASH engine (t_ExtHashFe + en_exthash_tbl_entry records, key@+8, bucket head swab64) — exactly our 0125/0128/0130/0131 machinery.
 - cdx_pcd.xml tcp4: mask=0x7fff keysize=14 — matches our kernel constants.
 - KGSE_CCBS word-3 bug CONFIRMED by SDK struct (kgse_ccbs at struct 0x4C = window word 19; hardware reads word 3). Vendor avoids by ccbs=0.
@@ -1808,22 +1809,22 @@ activity per dispatch.
 
 ## 2026-08-10 03:03-04:05Z — Path A (AC_CC + en_exthash_node row): 5th/6th negative variants; AC_CC STALL confirmed on silicon; PRC write clears STL flag only
 
-**Setup**: .185 (2350-rolling, 6.18.41-vyos) armed with F-183 tree (session-start state: row0 FE_ENTER AD @0x57000, key/mask @0x57100/0x57110, mode 0x80500002, ccbs w3=0x57000, rx==spc tracking 958). Target: write the .106-validated en_exthash_node row + AC_CC dispatch and observe pkt_count.
+**Setup**: ASK2 test DUT (2350-rolling, 6.18.41-vyos) armed with F-183 tree (initial state: row0 FE_ENTER AD @0x57000, key/mask @0x57100/0x57110, mode 0x80500002, ccbs w3=0x57000, rx==spc tracking 958). Target: write the vendor-reference system-validated en_exthash_node row + AC_CC dispatch and observe pkt_count.
 
-**.106 oracle decode (fully resolved this session):**
+**vendor-reference system oracle decode (fully resolved the current analysis):**
 - Scheme modes: `0x8b000006..0x80000006` = NIA_ENG_FM_CTL(0x80000000) | (CCOBASE<<24) | AC_CC(0x6); ccbs=0 EVERYWHERE. CCOBASE = row index into RCCB group table (sch11=row0 .. sch00=row11).
 - RCCB=0x048e00, 12 populated 16B rows = **non-enhanced en_exthash_node** (EXCLUDE_FMAN_IPR_OFFLOAD not defined → table_type field present):
   - word_0 LE-bitfields: table_base_hi:8 | ipv4_ad_offset:8 | hbo:3 | rsv:1 | table_type:4 | key_size:6 | miss_action_type:2
   - row09 (tcp4) = `4e400008 eb700100 0402080f 00480308`: tbl_hi=8, type=L4(4), keysz=14, miss_action=NIA(1); table_base_lo=0xeb700100 (40-bit base 0x8eb700100 = DDR bucket array — PROBED = all zeros, empty table ✓); word_1 = hash_mask_bits:4=15→0x7fff ✓ (matches cdx_pcd.xml), gmo=0x080, int_buf_pool=0x0402→0x40200; word_2 = miss NIA 0x00480308 (KG direct sch 8).
 - ARM64 LE bitfield order + WRITE_UINT32=out_be32 confirmed: my earlier "keysz=2" decode was the BE-misread; LE decode gives keysz=14.
 
-**Path A test 1 (my encoded row, AC_CC)**: mode 0x80000006, ccbs=0, row0 = `4e400000 fa110000 04b7080c 00480301` (tbl_hi=0, L4, keysz=14, mask_bits=12→0x0fff matching our armed table, pool 0x4b7, miss→KG sch1). SYN from .106: **spc 958→959** (frame hit KG/AC_CC) but rx stayed 958, pkt_count=0, sch1 spc unchanged by the SYN.
+**Path A test 1 (my encoded row, AC_CC)**: mode 0x80000006, ccbs=0, row0 = `4e400000 fa110000 04b7080c 00480301` (tbl_hi=0, L4, keysz=14, mask_bits=12→0x0fff matching our armed table, pool 0x4b7, miss→KG sch1). SYN from vendor-reference system: **spc 958→959** (frame hit KG/AC_CC) but rx stayed 958, pkt_count=0, sch1 spc unchanged by the SYN.
 
-**Path A test 2 (literal .106 row bytes)**: row0 = `4e400008 eb700100 0402080f 00480308` — the EXACT working .106 tcp4 row. SYN: spc stayed 959 (didn't even increment!), rx 958, pkt_count=0, sch8 spc=0 (miss NIA not taken). **The literal working vendor row produced NOTHING on .185.**
+**Path A test 2 (literal vendor-reference system row bytes)**: row0 = `4e400008 eb700100 0402080f 00480308` — the EXACT working vendor-reference system tcp4 row. SYN: spc stayed 959 (didn't even increment!), rx 958, pkt_count=0, sch8 spc=0 (miss NIA not taken). **The literal working vendor row produced NOTHING on ASK2 test DUT.**
 
 **Path A test 3 (CCBS-implicit + my row)**: mode 0x80500002, ccbs w3=0x57000, same en_exthash_node row. SYN: spc 959, rx 958, pkt_count=0. Same negative.
 
-**STALL DISCOVERY**: FMFP_PS port 0x11 = **0x80800000** → **FPM_PS_STALLED (0x00800000) SET**. My AC_CC experiment wedged eth4 RX exactly as 0118 documented ("AC_CC encoding still stalls the FMan port (FMFP_PS[STL]) on the first CC-dispatched frame"). After the stall: spc frozen, tcpdump 0 packets, .185 ARP for .106 FAILED, rx frozen 958.
+**STALL DISCOVERY**: FMFP_PS port 0x11 = **0x80800000** → **FPM_PS_STALLED (0x00800000) SET**. My AC_CC experiment wedged eth4 RX exactly as 0118 documented ("AC_CC encoding still stalls the FMan port (FMFP_PS[STL]) on the first CC-dispatched frame"). After the stall: spc frozen, tcpdump 0 packets, ASK2 test DUT ARP for vendor-reference system FAILED, rx frozen 958.
 
 **Recovery attempt**: 
 - Scheme rewrite back to CCBS (mode 0x80500002, ccbs w3=0x57000): STL stayed 1.
@@ -1831,19 +1832,19 @@ activity per dispatch.
 - **Raw PRC write `(0x11<<24)|0x00800000` to FPM+0x04 (fman_resume_stalled_port)**: **STL → 0** (cleared the flag). BUT frames still not delivered (spc 972 frozen, rx 958, tcpdump 0) — the deeper BMI/FIFO wedge persists. Per 210 ref §5.2 this is the "no software recovery" class (SDK FmResumeStalledPort returns E_NOT_AVAILABLE for rev ≥ 6; silicon rev 10.7.6.3) — only a cold power cycle reliably clears it.
 
 **Conclusions**:
-1. **AC_CC (0x80000006) on OUR silicon stalls port RX on first CC-dispatched frame** — confirmed live on .185 (0118 iter-48 replay). .106 works with AC_CC because it runs the full SDK stack; our mainline driver cannot.
-2. **The .106 en_exthash_node row does NOT classify on .185 under either dispatch** (AC_CC or CCBS-implicit). 6 total negative row variants now (0115, bespoke, all-ff, all-zero, vendor-w2, literal-vendor-row). The row format alone is not sufficient — the walker's compare semantics must be configured elsewhere (FE-VM EXT_HASH engine state, or the RCCB tree needs SDK-style root AD + result AD that our driver doesn't build).
-3. **KGSE_CCBS word-3 bug (F-184) is real** — the only configuration where frames tracked spc 1:1 on .185.
+1. **AC_CC (0x80000006) on OUR silicon stalls port RX on first CC-dispatched frame** — confirmed live on ASK2 test DUT (0118 iter-48 replay). vendor-reference system works with AC_CC because it runs the full SDK stack; our mainline driver cannot.
+2. **The vendor-reference system en_exthash_node row does NOT classify on ASK2 test DUT under either dispatch** (AC_CC or CCBS-implicit). 6 total negative row variants now (0115, bespoke, all-ff, all-zero, vendor-w2, literal-vendor-row). The row format alone is not sufficient — the walker's compare semantics must be configured elsewhere (FE-VM EXT_HASH engine state, or the RCCB tree needs SDK-style root AD + result AD that our driver doesn't build).
+3. **KGSE_CCBS word-3 bug (F-184) is real** — the only configuration where frames tracked spc 1:1 on ASK2 test DUT.
 4. **F-184's CCBS-implicit (0x80500002 + ccbs w3=tree offset) is the correct dispatch for our driver** — it fires the walk and delivers via miss row. AC_CC must NOT be used live.
 
-**Board state at session end**: .185, mode restored to 0x80500002 + ccbs w3=0x57000, tree = F-183 session-start form (row0 FE_ENTER AD @0x57000, key/mask tables), STL flag cleared by PRC write but eth4 RX still wedged (spc 972 frozen, rx 958). Recovery requires cold power cycle (or reboot + re-arm via f183-test.sh).
+**Recorded post-test board state**: ASK2 test DUT, mode restored to 0x80500002 + ccbs w3=0x57000, tree = F-183 initial form (row0 FE_ENTER AD @0x57000, key/mask tables), STL flag cleared by PRC write but eth4 RX still wedged (spc 972 frozen, rx 958). Recovery requires cold power cycle (or reboot + re-arm via f183-test.sh).
 
 ## 2026-08-10 05:07-05:30Z — PORT-TARGET audit: comparator INPUT fully verified; dispatch/comparator-execution is the remaining gap
 
-**Session goal**: port the exact 999-patch HIT semantics. Qdrant-gate correction: the `t_FmExtHashBucket` 256-B set-associative record hypothesis was the WRONG function family (that's `FM_PCD_HashTableSet`'s `ext_hash_add_key`); the production `ExternalHashTableAddKey` (cdx → `insert_entry_in_classif_table`) uses **`en_exthash_bucket` (16 B) + chained `en_ehash_entry`** — bit-exact to our 0125/0128 implementation. **The bucket/table format is NOT the bug** (2026-08-07 retraction stands).
+**Objective**: port the exact 999-patch HIT semantics. Evidence correction: the `t_FmExtHashBucket` 256-B set-associative record hypothesis was the WRONG function family (that's `FM_PCD_HashTableSet`'s `ext_hash_add_key`); the production `ExternalHashTableAddKey` (cdx → `insert_entry_in_classif_table`) uses **`en_exthash_bucket` (16 B) + chained `en_ehash_entry`** — bit-exact to our 0125/0128 implementation. **The bucket/table format is NOT the bug** (2026-08-07 retraction stands).
 
-**LIVE VERIFICATION (board .185, F-184 CCBS-implicit restored state)** — the comparator INPUT side is now fully confirmed in place:
-- **KG hash at IC+0x48 = `0xb508e222f73f6794`** — measured live at 3 independent MURAM sites (0x37c40/0x3f840/0x45640) after 3 SYNs from .106; exactly the expected CRC-64 for the 14-byte portid-prefixed key. **Contradicts F-182 v3's recorded "hw_hash=0"** (that was a broken intermediate state).
+**LIVE VERIFICATION (ASK2 test DUT, F-184 CCBS-implicit restored state)** — the comparator INPUT side is now fully confirmed in place:
+- **KG hash at IC+0x48 = `0xb508e222f73f6794`** — measured live at 3 independent MURAM sites (0x37c40/0x3f840/0x45640) after 3 SYNs from vendor-reference system; exactly the expected CRC-64 for the 14-byte portid-prefixed key. **Contradicts F-182 v3's recorded "hw_hash=0"** (that was a broken intermediate state).
 - **Bucket index correct**: `(0xb508e222f73f6794 >> 48) & 0x0fff = 0x508` = where the flow is inserted.
 - **bucket[0x508] head = `0x0000000081c04000`** (raw phys of record).
 - **Record @0x81c04000 correct**: flags=0x1000 (STATS_EN), key `00 0a 63 02 6a 0a 63 02 b9 06 ad 9c d9 03` at +8, next-FE AD=0x81c05000 at +0x1c.
@@ -1856,11 +1857,11 @@ activity per dispatch.
 
 ## 2026-08-10 15:00-20:00Z — FE-side OBSERVATION TOOL investment (0169 fe_obs canary + fe-obs harness); pkt_count reframe
 
-**Session mandate**: invest in an FE-side observation tool/technique (user decision after the per-key HIT-disposition patch path was reviewed and rejected). Deliverable: a host-observable 3-way discriminator for "frame never dispatched to the FE chain" vs "reached the EXT_HASH comparator and MISSed" vs "HIT".
+**Required diagnostic**: invest in an FE-side observation tool/technique (after the per-key HIT-disposition patch path was reviewed and rejected). Deliverable: a host-observable 3-way discriminator for "frame never dispatched to the FE chain" vs "reached the EXT_HASH comparator and MISSed" vs "HIT".
 
-**0168 review + rejection**: the subagent-produced `0168-fman-pcd-fe-vm-per-key-hit-context.patch` (per-key `t_ExtHashResult` context chain ported from 999-patch) is (a) CORRUPT (malformed hunk at line 107 — does not apply to the series), (b) never committed, (c) REFUTED by the authoritative `t_ExtHashFe` struct (999-patch L10318): the 210.10.1 EXT_HASH FE has **NO per-key hitResult field** — HIT disposition is the single descriptor `nextFEPtr` (w5), MISS is `missNextFEPtr` (w6). Our live hashfe (0x55e00: `06000000 0fff0d00 00000000 fa110000 00056b00 00055b00 00055d00`) is **bit-exact complete and correct**, and the HIT disposition chain (nextFEPtr→MUX 0x55b00→transition→ENQ) ALREADY EXISTS. Per-key result structures cannot be the missing piece. File deleted, series entry removed, verified untracked.
+**0168 review + rejection**: the proposed `0168-fman-pcd-fe-vm-per-key-hit-context.patch` (per-key `t_ExtHashResult` context chain ported from 999-patch) is (a) CORRUPT (malformed hunk at line 107 — does not apply to the series), (b) never committed, (c) REFUTED by the authoritative `t_ExtHashFe` struct (999-patch L10318): the 210.10.1 EXT_HASH FE has **NO per-key hitResult field** — HIT disposition is the single descriptor `nextFEPtr` (w5), MISS is `missNextFEPtr` (w6). Our live hashfe (0x55e00: `06000000 0fff0d00 00000000 fa110000 00056b00 00055b00 00055d00`) is **bit-exact complete and correct**, and the HIT disposition chain (nextFEPtr→MUX 0x55b00→transition→ENQ) ALREADY EXISTS. Per-key result structures cannot be the missing piece. File deleted, series entry removed, verified untracked.
 
-**CRITICAL REFRAME — "pkt_count=0 ⇒ comparator never executes" is UNPROVEN** (this is the session's key insight; also stored to qdrant):
+**CRITICAL REFRAME — "pkt_count=0 ⇒ comparator never executes" is UNPROVEN:**
 1. The flow record's `pkt_count/pkt_bytes/timestamp` can NEVER move because the hashfe word0 carries **no `UPDATE_STATS`/`UPDATE_TS` flags** (live word0 = 0x06000000, type only). The SDK only writes record stats when the FE word0 has FM_PCD_FE_T_HASH_UPDATE_STATS (0x00010000)/UPDATE_TS (0x00020000) set (999-patch L9125-9127).
 2. Even with the flag set it would be UNSAFE: our flow records are **256 B** (`FMAN_EHASH_FLOW_REC_SIZE=256`, `dma_alloc_coherent` in `fman_pcd_ehash_add_key`) while the SDK `en_ehash_entry` is **576 B** with stats at **+256** (`MAX_EN_EHASH_EXT_ENTRY_SIZE=320`, 999-patch L15457: "Stats begins at the 256th byte"). Setting UPDATE_STATS → FE-VM writes past the record → adjacent-DDR corruption (F-047 class). The `fe_ehash_stats` node's "+256/+264/+272" reads land beyond the 256-B record. UPDATE_TS additionally needs the `timestamp_counter` MURAM pointer, never configured.
 3. The only valid verdict signals are the **FE disposition targets** (w5/w6) — exactly what the canary redirects.
@@ -1874,21 +1875,21 @@ activity per dispatch.
 
 **Verdict model**: miss-canary count>0 → frame REACHED hashfe + MISS (comparator ran); hit-canary count>0 → HIT; both 0 while rx tracks spc → frame NEVER dispatched to the FE chain (the dispatch gap, confirming the mgmt-cursor-0x04 evidence directly).
 
-**Validation**: full 108-patch series (incl. 0169) applies cleanly to fresh v6.18.38 (`git apply --3way`); staging-completeness guard passes; `fman_pcd.o` compiles (native arm64, EXIT=0, only pre-existing unused-function warnings for `__fman_pcd_fe_build_vm_chain`/`fman_pcd_fe_build_contexts`); harness validated live on .185 (reads hashfe/fe_ehash_stats/fe_buffer; fqid_of eth3=0x200 eth4=0x300; fe_obs shows "?" because the board's 6.18.41 build predates 0169).
+**Validation**: full 108-patch series (incl. 0169) applies cleanly to fresh v6.18.38 (`git apply --3way`); staging-completeness guard passes; `fman_pcd.o` compiles (native arm64, EXIT=0, only pre-existing unused-function warnings for `__fman_pcd_fe_build_vm_chain`/`fman_pcd_fe_build_contexts`); harness validated live on ASK2 test DUT (reads hashfe/fe_ehash_stats/fe_buffer; fqid_of eth3=0x200 eth4=0x300; fe_obs shows "?" because the board's 6.18.41 build predates 0169).
 
-**Board-state/repo divergence found**: the live .185 kernel (6.18.41-vyos, ISO 2026.08.09-1756) has debugfs nodes (fe_ehash_stats, fe_buffer, fe_extc, fe_hash_probe, fe_kg_ekfc, fe_scaffold, fe_recover, fe_disengage_full, muram_allocations, ic_probe, dcsr) that are NOT in any repo patch — they are injected by **Layer-2 REPLACEMENT-block fixups** in `bin/ci-setup-kernel.sh` (F-086/F-076/F-069a/F-071/F-158/F-180 etc.), which is why they exist on the board but not in the series tree. The repo pins KERNEL_VERSION 6.18.38 (versions.lock + defaults.toml); the 6.18.41 build was an env-override build never reconciled back. Deploying a fresh repo build gives 6.18.38 + 0169 (downgrade from the board's 6.18.41, acceptable for the FE experiment — the FE chain code is identical).
+**Board-state/repo divergence found**: the live ASK2 test DUT kernel (6.18.41-vyos, ISO 2026.08.09-1756) has debugfs nodes (fe_ehash_stats, fe_buffer, fe_extc, fe_hash_probe, fe_kg_ekfc, fe_scaffold, fe_recover, fe_disengage_full, muram_allocations, ic_probe, dcsr) that are NOT in any repo patch — they are injected by **Layer-2 REPLACEMENT-block fixups** in `bin/ci-setup-kernel.sh` (F-086/F-076/F-069a/F-071/F-158/F-180 etc.), which is why they exist on the board but not in the series tree. The repo pins KERNEL_VERSION 6.18.38 (versions.lock + defaults.toml); the 6.18.41 build was an env-override build never reconciled back. Deploying a fresh repo build gives 6.18.38 + 0169 (downgrade from the board's 6.18.41, acceptable for the FE experiment — the FE chain code is identical).
 
-**BLOCKER — no traffic peer for the canary**: the canary needs ingress traffic on the armed port (0x11/eth4). The SFP+ peer `.106` (10.99.2.106, MAC e8:f6:d7:00:16:ad) is **DOWN** (no SSH, no ping, neigh FAILED). The smart-plug DUT is `.190`; `.185` is a separate board — .106 cannot be power-cycled from here. Tool is staged; experiment runs when a peer exists (power up .106 / alternative host / re-cable).
+**BLOCKER — no traffic peer for the canary**: the canary needs ingress traffic on the armed port (0x11/eth4). The SFP+ peer the vendor-reference system ($PEER_TRANSIT_IP, MAC $PEER_MAC) is **DOWN** (no SSH, no ping, neigh FAILED). The smart-plug DUT is `secondary DUT`; the ASK2 test DUT is a separate board — vendor-reference system cannot be power-cycled from here. Tool is staged; experiment runs when a peer exists (power up vendor-reference system / alternative host / re-cable).
 
 **Next steps (decision)**:
-1. Commit the session work (0169 + fe-obs + series; separately the uncommitted decomp docs experiments/findings/slaspec/naming-map/wedge-path from the F-180→05:30Z session).
-2. Build the next ISO (6.18.38 + 0169) and deploy to .185 via lxc200 TFTP (dev-build loop) so the board has fe_obs.
-3. Resolve a traffic peer on eth4 (operator: power up .106, or alternative host on 10.99.2.0/24).
-4. Run `fe-obs run <peer> <n>` on .185 → 3-way verdict → record to qdrant.
+1. Commit the implementation and documentation changes (0169 + fe-obs + series; separately the uncommitted decomp docs experiments/findings/slaspec/naming-map/wedge-path from the F-180 investigation).
+2. Build the next ISO (6.18.38 + 0169) and deploy to ASK2 test DUT via artifact relay TFTP (dev-build loop) so the board has fe_obs.
+3. Resolve a traffic peer on eth4 (operator: power up vendor-reference system, or alternative host on $TRANSIT_SUBNET).
+4. Run `fe-obs run <peer> <n>` on ASK2 test DUT → 3-way verdict → record in the experiment log and relevant architecture document.
 
 ## 2026-08-10 20:00-20:30Z — 6.18.38+0169 build SUCCESS (dev-build native); deploy blocked by network outage
 
-**Build**: `bin/dev-build.sh kernel` on arm64-runner2 (48-core, native) — full 6.18.38-vyos kernel with all 113 patches (incl. **0169** — verified applied in the real CI-equivalent path: `✓ board/0169-fman-pcd-fe-obs-canary.patch`) + Layer-2 fixups (F-086 fe_recover, F-069a ic_probe, F-071 hash_probe, F-158 fe_scaffold, etc. injected). `fe_obs` symbols confirmed in `fman_pcd.o` (fman_pcd_fe_obs_enq_one/arm/disarm/fops). vmlinuz = `Linux version 6.18.38-vyos`, staged at `work/dev-tftp/vmlinuz` (13991343 B, LOCALVERSION=-vyos verified in `include/config/kernel.release`).
+**Build**: `bin/dev-build.sh kernel` on ARM64 build runner (48-core, native) — full 6.18.38-vyos kernel with all 113 patches (incl. **0169** — verified applied in the real CI-equivalent path: `✓ board/0169-fman-pcd-fe-obs-canary.patch`) + Layer-2 fixups (F-086 fe_recover, F-069a ic_probe, F-071 hash_probe, F-158 fe_scaffold, etc. injected). `fe_obs` symbols confirmed in `fman_pcd.o` (fman_pcd_fe_obs_enq_one/arm/disarm/fops). vmlinuz = `Linux version 6.18.38-vyos`, staged at `work/dev-tftp/vmlinuz` (13991343 B, LOCALVERSION=-vyos verified in `include/config/kernel.release`).
 
 **Dev-loop gotchas hit + fixed (worth remembering)**:
 1. Stale `work/.kernel-version` = 6.18.34 broke the 6.18.38 pin — stage-kernel.sh only calls fetch-kernel.sh when `.kernel-version` is ABSENT, and dev-build.sh expects `work/linux-$KVER`; the stale marker made the build stage 6.18.34 then fail the `linux-6.18.38` checkpoint. Fix: `sudo rm work/.kernel-version` (root-owned).
@@ -1896,7 +1897,7 @@ activity per dispatch.
 3. `work/dev-tftp/*` are 444 (read-only) from the previous build → `cp: Permission denied` at the push step. Fix: `chmod u+w work/dev-tftp/*`.
 4. Manual `make Image.gz` WITHOUT `LOCALVERSION=-vyos` clobbers `kernel.release` back to `6.18.38+` (S5 trap — LOCALVERSION is MANDATORY; dev-build passes it on the make line, a manual re-run must too). Fixed: `make ARCH=arm64 LOCALVERSION=-vyos Image.gz`.
 
-**Deploy BLOCKED**: 192.168.1.x LAN went down mid-session (heidi Tailscale subnet-router path lost) — lxc200 (192.168.1.137), .185, .106 all unreachable. `dev-build.sh push` (rsync → lxc200:/srv/tftp/) pending network recovery. Board experiment additionally needs a traffic peer on eth4 (.106 down). Artifact ready locally.
+**Deploy BLOCKED**: private lab LAN went down during the run (lab subnet router subnet-router path lost) — artifact relay ($ARTIFACT_RELAY_HOST), ASK2 test DUT, vendor-reference system all unreachable. `dev-build.sh push` (rsync → artifact relay:/srv/tftp/) pending network recovery. Board experiment additionally needs a traffic peer on eth4 (vendor-reference system down). Artifact ready locally.
 
 ---
 
@@ -1904,8 +1905,7 @@ activity per dispatch.
 
 **NOT a board-mutation experiment.** Infrastructure + static-decomp milestone
 responding to E-HM16's "decompile the FE-VM entry path w214–w242" next step,
-using **headless Ghidra** (per user instruction, instead of the GhidraMCP
-server which requires a live GUI plugin).
+using **headless Ghidra** (because the GUI extension was unavailable,  which requires a live GUI plugin).
 
 - **SLEIGH module built**: `decomp/tools/build-fman-sleigh.sh` compiled
   `decomp/ghidra/fman-risc/data/languages/fman-risc.{slaspec,pspec,cspec,ldefs}`
@@ -1913,15 +1913,15 @@ server which requires a live GUI plugin).
   (3.1 KB, benign `NOP constructors`/`BDEST` warnings). Processor id
   `fman-risc:BE:32:default`, byte-addressed code, word w at byte 4*w.
 - **Blob re-acquired (volatile source)**: canonical `210.10.1` QEF blob
-  extracted from `.106` SPI `mtd4` (`00 00 c9 c4` = length 0xc9c4=51652,
-  then QEF magic). `head -c 51652 /tmp/kilo/mtd4.bin` → SHA-256
+  extracted from the vendor-reference system SPI `mtd4` (`00 00 c9 c4` = length 0xc9c4=51652,
+  then QEF magic). `head -c 51652 $DECOMP_WORKDIR/mtd4.bin` → SHA-256
   `5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d` = exact
   canonical match (per `decomp/00-acquisition.md`). 1 section, code_off=244,
   wcount=12851 dict. Raw code words at `code_off` = 51404 B →
-  `/tmp/kilo/fman-code/code.bin`.
+  `$DECOMP_WORKDIR/fman-code/code.bin`.
 - **Headless import + postScript**:
-  `ghidra-analyzeHeadless /tmp/kilo/ghidra-proj decomp.gpr -import code.bin -processor fman-risc:BE:32:default -postScript decomp/ghidra/scripts/FmanW214decomp.py`
-  → `cc_fe_enter_entry` decompiled (pseudocode in `/tmp/kilo/w214-decomp.txt`).
+  `ghidra-analyzeHeadless $DECOMP_WORKDIR/ghidra-proj decomp.gpr -import code.bin -processor fman-risc:BE:32:default -postScript decomp/ghidra/scripts/FmanW214decomp.py`
+  → `cc_fe_enter_entry` decompiled (pseudocode in `$DECOMP_WORKDIR/w214-decomp.txt`).
 - **Key accesses surfaced (match E-HM16)**: `in_dmem_0000d018` (IC context),
   `in_dmem_00001b00` (FE word0 slot), `0xf800`/`0xfb00`/`0xf907`/`0x83xx`/
   `0x8bxx` handler-window slots — all in the **16-bit `dmem` data space**
@@ -2017,43 +2017,43 @@ L963-975) = F-181's exactly. **F-181 direction CONFIRMED vendor-faithful.**
 Also confirmed: SET_STATS_ENABLE with our 256B record is a mismatch — vendor
 stats block lives at +256 (needs the 320B ext entry); our hashfe w0=0x06000000
 has no UPDATE_STATS (0x00010000) so FE never writes stats → **pkt_count can
-never move (08-10 reframe re-confirmed): today's discriminator was invalid;
+never move (08-10 reframe re-confirmed): the current discriminator was invalid;
 the plan's M3 gate mandates the fe_obs canary (0169), which was not used.**
 
 **Track validation verdict — PARTIAL: right record direction, wrong dispatch +
 order. Three confounds invalidated the test (one-variable rule violated):**
 1. **Dispatch form = bare FE_ENTER root at RCCB — the KNOWN-Stalling form.**
    F-182 v3 (08-09) VALIDATED that the group-tree root form fixes the stall;
-   Path A (08-10) + E-HM15/16 + today re-prove bare FE_ENTER root stalls on
+   Path A (08-10) + E-HM15/16 + the current results re-prove bare FE_ENTER root stalls on
    the first dispatched frame. The plan's own Phase 2 says "land Delta 1
    (RCCB AD species) first, ALONE" — F-181 (Delta 2 variant) was tested
    without Delta 1.
 2. **Engage path still writes AC_CC mode (0x80000006) + KG_DIRECT rfpne
    (0x00480304, F-178)** — F-184's CCBS restore (6efa34c8) only covered the
    cc_test/attach_cc path. Path A (08-10) proved AC_CC mode + dispatched
-   frame STALLS on .185 mainline; vendor RFPNE=0x00480200 (KG|CC_EN, NO
+   frame STALLS on ASK2 test DUT mainline; vendor RFPNE=0x00480200 (KG|CC_EN, NO
    DIRECT bit).
 3. **Discriminator = pkt_count (invalid, see above).**
 
-**.106 oracle LIMIT (binding):** .106's ehash tables are EMPTY — vendor cdx
+**vendor-reference system oracle LIMIT (binding):** vendor-reference system's ehash tables are EMPTY — vendor cdx
 never inserts flows on 210.10.1 (aging-enabled tables need the HC doorbell
 this blob lacks, caps=0x17; E-HM16 + Path A probed table base 0x8eb700100 =
-all zeros). .106 NEVER executed the HIT path; its traffic stability is
-MISS-path delivery (miss NIA → KG-direct distribution scheme). .106 is a
+all zeros). vendor-reference system NEVER executed the HIT path; its traffic stability is
+MISS-path delivery (miss NIA → KG-direct distribution scheme). vendor-reference system is a
 STATIC oracle only: scheme modes 0x8x000006 (FM_CTL|CCOBASE|AC_CC), ccbs=0,
 RFPNE 0x00480200, RCCB=0x48e00 → 12 externalHash CONT_LOOKUP rows (tcp4 row
 4e400008 eb700100 0402080f 00480308: keysz=14, mask_bits=15→0x7fff, pool
 0x40200, miss NIA=KG-direct-sch8), cdx_pcd.xml mask=0x7fff keysize=14.
 
-**Proven-working on .185 mainline (the pieces of the correct track):**
+**Proven-working on ASK2 test DUT mainline (the pieces of the correct track):**
 - CCBS-graft dispatch (mode 0x80500002 + KGSE_CCBS at window **WORD 3** —
   F-184's kernel bug: keygen_scheme_setup writes word 19, HW reads word 3)
-  fires the CC walk; miss-row delivery works (F-184 session, rx tracks spc 1:1).
+  fires the CC walk; miss-row delivery works (F-184 investigation, rx tracks spc 1:1).
 - Group-tree root at RCCB does NOT stall (E-HM9 control, F-182 v3); bare
-  FE_ENTER root stalls (today + history).
+  FE_ENTER root stalls (current and historical evidence).
 - KG extraction + hash BYTE-PERFECT with EKFC 0x801c0006/PORT_ID=0x00:
   staging hash@+0x48 = crc64_raw(14B key) exact, key@+0x50 exact (F-184
-  session; HW-confirmed x3 via brute force 08-06).
+  investigation; HW-confirmed x3 via brute force 08-06).
 - CC comparator INSENSITIVE to match-table rows (5 negative variants, 08-10:
   0115 layout, bespoke 24M-era layout, mask/key/keysize permutations) — the
   CCBS walker does not compare our match table; frames always take the miss
@@ -2067,11 +2067,11 @@ RFPNE 0x00480200, RCCB=0x48e00 → 12 externalHash CONT_LOOKUP rows (tcp4 row
    HIT-observable test), not the ENQ FE offset; (c) clear SET_STATS_ENABLE
    until records grow to 320B + hashfe w0 gains UPDATE_STATS (or keep it and
    accept inert stats — decide; vendor sets it only with the 320B entry).
-2. Dispatch = Delta 1 per plan, adapted to what .185 survives: RCCB → group
+2. Dispatch = Delta 1 per plan, adapted to what ASK2 test DUT survives: RCCB → group
    table (numKeys=0) with the **miss slot = FE_ENTER AD**; scheme dispatch =
    CCBS graft with the WORD-3 CCBS fix (NOT AC_CC, NOT KG_DIRECT rfpne —
    reconcile RFPNE to 0x00480200). This is the only combination where every
-   element is individually proven non-stalling on .185.
+   element is individually proven non-stalling on ASK2 test DUT.
 3. MISS disposition must become kernel delivery (vendor miss = NIA KG-direct),
    not EXIT-DEALLOCATE drop — else the armed port stays deaf to all non-HIT
    traffic (ARP/ICMP death observed every arm).
@@ -2080,14 +2080,14 @@ RFPNE 0x00480200, RCCB=0x48e00 → 12 externalHash CONT_LOOKUP rows (tcp4 row
 
 **Open (carried):** does the 210.10.1 CCBS walker execute a vendor-form
 en_exthash_node row natively (Delta 1 literal form) — Path A said literal
-vendor row + AC_CC did nothing on .185, but it was never tested with the
+vendor row + AC_CC did nothing on ASK2 test DUT, but it was never tested with the
 CCBS word-3 dispatch; that combination is untried and is the vendor-faithful
 fallback if the group-tree/miss-slot form fails.
 
 ## E21 — F-182/F-183 implementation of the E20 corrected track (2026-08-12)
 
 Implementation of E20's corrected track as two count-gated fixups (no
-silicon yet). Qdrant gate passed first (6 queries; all layers of the track
+silicon yet). The evidence gate passed first (6 queries; all layers of the track
 have silicon- or source-grounded entries; the one conflict — the 08-11
 "256B set-associative bucket" entry — is the wrong function family,
 retracted 08-10 and superseded by E20's vendor validation).
@@ -2132,8 +2132,8 @@ vendor-faithful config assembled from individually-proven pieces):**
    `fe_kg_ekfc set 4 801c0006` → `fe_arm engage 11 <fe_enter_off> 0x300`.
 2. `fe_obs arm 11 300 200` (hit canary 0x300/eth4, miss canary 0x200/eth3)
    — the M3-gate discriminator; pcd-snapshot capture before traffic.
-3. Static ARP on .106; SEQUENTIAL `curl --local-port 44444
-   http://10.99.2.185:55555/` (never floods; a few pings max).
+3. Static ARP on vendor-reference system; SEQUENTIAL `curl --local-port 44444
+   http://$DUT_TRANSIT_IP:55555/` (never floods; a few pings max).
 4. Verdict: eth4 rx delta >0 → HIT; eth3 rx delta → MISS (comparator ran,
    key/content next); both 0 + spc tracks rx → never dispatched to FE
    chain. FMFP_PS[0x11] must stay 0x80000000 (group root + CCBS word-3 =
@@ -2144,13 +2144,12 @@ vendor-faithful config assembled from individually-proven pieces):**
 **Verification so far:** full CI REPLACEMENT block re-extracted from the
 edited ci-setup-kernel.sh and re-run on a pristine patched scratch worktree
 — 0 FATALs, all 11 blocks apply in order, idempotent re-run clean,
-`bin/test-fixups.sh` 4/4 OK. Compile gate = CI (no local compile per user
-directive).
+`bin/test-fixups.sh` 4/4 OK. Compile gate = CI (local compilation was intentionally deferred to CI).
 
 ## E22 — fe_obs arm kernel panic: list_add double add in fe_obs_enq_one (2026-08-12)
 
 First live use of the fe_obs canary discriminator (patch 0169, until now
-only compile-verified) **panicked the kernel on .185** — reproduced twice
+only compile-verified) **panicked the kernel on ASK2 test DUT** — reproduced twice
 (image 2026.08.12-0223-rolling): the 03:18 "mystery reboot" during arm
 attempt 1 (boot 2) and the console-captured panic at [771.5] during arm
 attempt 2 (boot 4):
@@ -2176,7 +2175,7 @@ fman_pcd_fe_singleton_one ends identically; the first F-184 draft matched
 the wrong function in dry-run, caught by post-apply verification; the
 shipped fixup is count-gated `count==1`).
 
-**Also confirmed this session (before the panic):** F-182/F-183 work live —
+**Also confirmed the current analysis (before the panic):** F-182/F-183 work live —
 engage wrote RCCB=0x56d00 (group, not bare FE_ENTER), rfpne=0x00480200
 (no KG_DIRECT), group numKeys=0 with miss slot = verbatim FE_ENTER AD copy
 (40800000 00000000 000000f6 00055e00), scheme4 mode=0x80500002 (CCBS-
@@ -2196,17 +2195,16 @@ traffic verdict.
 
 ## E23 — Ghidra CC-dispatch decode + vendor-source convergence (2026-08-12, analysis; no silicon this entry)
 
-**Trigger:** user directive "find and follow the approach the NXP ASK SDK is
-doing — the known working path; re-address the Ghidra-disassembled 210 blob
-for how it dispatches into the CC tree."
+**Objective:** reproduce the known-working NXP ASK SDK approach and use the
+Ghidra-disassembled 210 blob to determine how it dispatches into the CC tree.
 
-**Method:** blob re-fetched rootless from .185 (SHA 5f3ed8d3 exact),
+**Method:** blob re-fetched rootless from ASK2 test DUT (SHA 5f3ed8d3 exact),
 imported headless (fman-risc:BE:32:default) into a PERSISTENT project
-(/home/vyos/.cache/fman-decomp — /tmp/kilo was wiped mid-session by an
-unidentified cleaner; systemd-tmpfiles rules exonerated). Four analysis
+(`${XDG_CACHE_HOME:-$HOME/.cache}/fman-decomp`; the disposable work directory
+had been cleared by an unidentified process, while systemd-tmpfiles was ruled out). Four analysis
 scripts (FmanCcDispatch/2/3 lost with the wipe; FmanCcAll + FmanCcFinal
-re-ran everything). Vendor sources extracted to /tmp/kilo/sdk (also wiped;
-re-extractable from origin/nxp-sdk) + /home/vyos/ask-ref.
+re-ran everything). Vendor sources extracted to $DECOMP_WORKDIR/sdk (also wiped;
+re-extractable from origin/nxp-sdk) + $ASK_REFERENCE_TREE.
 
 **Results (full detail: decomp/findings.md 2026-08-12 entry):**
 1. The CC engine's single AD-type dispatch (w1857, >>30, br_tbl[0xf000])
@@ -2215,7 +2213,7 @@ re-extractable from origin/nxp-sdk) + /home/vyos/ask-ref.
    proven by extraction census (6-bit key_size w1711, 8-bit table_base_hi
    w1610, 4-bit hash_mask_bits w1598, >>16 pool w1557, table_base_lo staged
    dmem[0xe000] w2045/2049, bucket_index w1928 off ctx[0xd048]).
-2. .106 row9 decodes variant-B four independent ways (DDR table probed,
+2. vendor-reference system row9 decodes variant-B four independent ways (DDR table probed,
    mask=0x7fff=cdx, miss NIA = exact SDK KG-direct encoding, keysize 14).
 3. F-183's RM-8.7.4.1 group AD is garbage-as-node (miss_action DONE,
    keysize 0, table_base = MURAM-off-as-DDR, pool out of range) → frames
@@ -2232,16 +2230,16 @@ ccbs=0; HIT via entry opcode ENQUEUE_PKT (F-181/F-182 records); M3
 discriminator = HIT fqid 0x200/eth3 rx delta (fe_obs blind to this
 topology); fallback = same node via CCBS word-3 if AC_CC stalls.
 
-## E24 — F-185 first silicon: machine RUNS, vendor miss-NIA loops, HIT-by-elimination (2026-08-12, .185, image 2026.08.12-1949-rolling, 6.18.44-vyos, CI run 31634513313)
+## E24 — F-185 first silicon: machine RUNS, vendor miss-NIA loops, HIT-by-elimination (2026-08-12, ASK2 test DUT, image 2026.08.12-1949-rolling, 6.18.44-vyos, CI run 31634513313)
 
 F-185 deployed via `add system image` (warm install reboot; FMan re-probed
 clean per the 2026-08-10 recovery finding). Arm sequence (debugfs
 fman_pcd/0): fe_port set 11 → fe_ehash set fff 14 0 → fe_pool get →
 fe_singletons/fe_hashfe/fe_enq/fe_enter build → fe_flow add 0
 000a63026a0a6302b906ad9cd903 **200** (HIT canary = eth3 fqb) → fe_kg_ekfc
-set 4 801c0006 → fe_arm engage 11 0 200. Injection: .106 (root@192.168.1.106,
+set 4 801c0006 → fe_arm engage 11 0 200. Injection: vendor-reference system (traffic peer,
 vyos_key) static ARP + sequential `curl --local-port 44444 --connect-timeout 2
-http://10.99.2.185:55555/` (2 SYNs per curl: initial + 1s retransmit).
+http://$DUT_TRANSIT_IP:55555/` (2 SYNs per curl: initial + 1s retransmit).
 
 **Armed state verified byte-exact live:**
 - node @MURAM 0x56d00 = `4e400000 fa110000 04d9080c 00480304` — variant B:
@@ -2268,9 +2266,9 @@ loop on this blob.** word3 = NIA_ENG_KG|NIA_KG_CC_EN|NIA_KG_DIRECT|scheme
 re-enters FULL KG classification (spc increments every pass) → scheme →
 AC_CC → node → MISS → NIA → ∞. Recovery: `fe_arm disengage 11` restores the
 RSS scheme mid-loop; the looping frames then drain to the kernel via fqb
-(eth4 rx +7). The .106 oracle uses this exact encoding in production with 0%
+(eth4 rx +7). The vendor-reference system oracle uses this exact encoding in production with 0%
 loss — UNRESOLVED: blob-family difference (our proprietary 210.10.1 vs
-open-106.x), or .106 never presents an empty bucket to classified traffic,
+open-106.x), or vendor-reference system never presents an empty bucket to classified traffic,
 or the low bits carry row/CCOBASE semantics we haven't reproduced.
 
 **Finding 3 — HIT-by-elimination.** WITH the record present, spc stayed at
@@ -2295,11 +2293,11 @@ delivery via fqb with no loop (also proves fqb 0x300 is polled); (B) HIT
 enqueue chase: record fqid 0x200 + ethtool -S eth3 deltas + bpid variant
 (read port RX pool id from FMBM_EBMPI, write into param.bpid).
 
-## E25 — M3 GATE ACHIEVED: HIT + MISS both deliver to kernel; miss-action form decoded (2026-08-12, .185, 6.18.44-vyos)
+## E25 — M3 GATE ACHIEVED: HIT + MISS both deliver to kernel; miss-action form decoded (2026-08-12, ASK2 test DUT, 6.18.44-vyos)
 
 Follow-up to E24, live /dev/mem node patching (single variable per test).
 Node at RCCB, all tests with the flow record DELETED except the final HIT
-test. Injection: .106 curls (each curl = 2 SYNs at t=0/t=1s).
+test. Injection: vendor-reference system curls (each curl = 2 SYNs at t=0/t=1s).
 
 **Miss-action decoding (the E24 loop root cause, definitively):**
 - word3 = KG|DIRECT|scheme (with OR without CC_EN, 0x00480104/0x00480304):
@@ -2314,7 +2312,7 @@ test. Injection: .106 curls (each curl = 2 SYNs at t=0/t=1s).
   Direct enqueue, no KG, no re-entry. Node word0 = 0x8E400000 (ENQUE |
   key_size 14 | table_type 4), word3 = fqid.
 - ENQUE miss to the frame's OWN port fqb (0x300): LOOP-FREE, delivers to
-  kernel cleanly (rc=7 = RST from .185 kernel; spc stable at 2 for 2 SYNs).
+  kernel cleanly (rc=7 = RST from ASK2 test DUT kernel; spc stable at 2 for 2 SYNs).
 - ENQUE miss to a CROSS-port fqb (0x200/eth3): delivered to eth3's FQ but
   DROPPED by the dpaa driver (eth3 rx_dropped++, rx_packets 0) — the FD's
   buffer belongs to eth4's BM pool; eth3 can't release it (context
@@ -2342,7 +2340,7 @@ rc=7 with word3=0x300 — both paths deliver.
 **Confound retro-analysis:** the earlier "~50% delivery" chaos (rc=28,
 counters climbing without tcpdump visibility) was cross-experiment
 contamination: multiple injection ports (44444 vs 44445-48), mixed word3
-targets (0x200/0x300), and record state changed mid-session. With a
+targets (0x200/0x300), and record state changed during the run. With a
 controlled single-flow setup the behavior is fully deterministic.
 
 **Teardown deltas (vs pre-arm):** MURAM gen_pool used 720→1808 (+1088 B =
@@ -2360,11 +2358,11 @@ one flow, one port. Also: full-sequence idempotency re-run is destructive
 (count-gated mutate.py fixups FATAL by design on re-run); per-fixer
 marker-guard idempotency only.
 
-## E26 — F-186 image matrix on .185 (2026-08-12, 6.18.44-vyos, CI run 31644097159, commit d9c8e495)
+## E26 — F-186 image matrix on ASK2 test DUT (2026-08-12, 6.18.44-vyos, CI run 31644097159, commit d9c8e495)
 
 Committed F-186 (ENQUE miss form + own-port fqb) validated on silicon, then
 the E26 test matrix. Fresh install boot (FMan re-probed clean). All tests
-on eth4/port 0x11 unless noted; injection from .106 with static ARP.
+on eth4/port 0x11 unless noted; injection from vendor-reference system with static ARP.
 
 **E26-1 baseline — PASSED.** Arm produced node @0x56d00 =
 `8e400000 fa110000 04d9080c 00000300` from the COMMITTED code:
@@ -2394,8 +2392,8 @@ drift, software-written, not machine behavior.
 
 **E26-4 UDP — PASSED (proto 17).** UDP record (key
 000a63026a0a6302b911ad9cd903, proto 0x11, bucket 0xf16, fqid 0x300) +
-iperf3 UDP from .106:44444 → .185:55555 (16 B datagrams, 100 kbit/s, t=2):
-**1564 sent, 1564 received, 0% loss** (server on .185 received every
+iperf3 UDP from vendor-reference system:44444 → ASK2 test DUT:55555 (16 B datagrams, 100 kbit/s, t=2):
+**1564 sent, 1564 received, 0% loss** (server on ASK2 test DUT received every
 datagram via the HIT path). eth4 rx=1594, errs=0, drop=0, spc4=1594 = one
 classification per frame (no loop).
 
@@ -2404,7 +2402,7 @@ cabling.** Port 0x10 armed (scheme 3 CC(AC_CC) fqb=0x200, RCCB=0x57100,
 rfpne vendor). Node = `8e400000 fa110000 04d9080c 00000200` —
 miss_action=2, word3 = 0x200 = scheme 3's fqb (eth3 own port): the F-186
 own-port-fqb logic (slot->base_fqid) is correct for a second port. NO L2
-path from .106 to eth3 (ARP incomplete — .106 is cabled eth4↔eth4 only),
+path from vendor-reference system to eth3 (ARP incomplete — vendor-reference system is cabled eth4↔eth4 only),
 so no traffic-level test possible without a cable/loopback. Follow-up item.
 
 **E26-6 sustained rate — PASSED (~780 pps).** The UDP burst ran ~780 pps
@@ -2416,10 +2414,10 @@ history; 780 pps is the validated envelope.)
 "clear understanding" in decomp/fman-ehash-process.md is now validated on
 every step except multi-port traffic (cabling) and IPv6 (unbuilt). Board
 restored to clean S0 (scheme 4 plain RSS, RCCB 0, eth3 temp IP removed,
-.106 ARP cleaned). MURAM gen_pool leak per engage cycle persists (fixup
+vendor-reference system ARP cleaned). MURAM gen_pool leak per engage cycle persists (fixup
 candidate, not blocking).
 
-## E27 — F-187 leak-fix verification on .185 (2026-08-12, 6.18.44-vyos, CI run 31648385802, commit 04a6f809)
+## E27 — F-187 leak-fix verification on ASK2 test DUT (2026-08-12, 6.18.44-vyos, CI run 31648385802, commit 04a6f809)
 
 Root-caused + fixed the fe_hashfe MURAM leak (F-187): fman_pcd_fe_hash_build()
 allocates pcd->miss_res_off (16 B MURAM t_ExtHashResult) + pcd->miss_ctx
@@ -2450,7 +2448,7 @@ invariant holds in the per-cycle sense (end == start of each cycle). S0
 baseline differs per image (720 here vs 1600 on 2147-rolling) due to
 probe-time allocation order; always compare within a boot.
 
-## E28 — P0-2 production-path audit: genl engage OK, three stale bits found + flowtable/conntrack blocker (2026-08-12, .185 6.18.44-vyos)
+## E28 — P0-2 production-path audit: genl engage OK, three stale bits found + flowtable/conntrack blocker (2026-08-12, ASK2 test DUT 6.18.44-vyos)
 
 Production-path validation (ask.ko genl + nft flowtable -> FLOW_CLS_REPLACE
 -> fman_pcd_fe_flow_add). Findings:
@@ -2483,18 +2481,18 @@ Production-path validation (ask.ko genl + nft flowtable -> FLOW_CLS_REPLACE
    nft 1.0.9 accepts only `hook ingress` flowtables (hook forward =
    "invalid hook forward" — the plan's "use hook forward" defect does not
    apply to this build). Scoped ingress flowtable (eth4, flags offload,
-   rule 10.99.2.106->192.168.1.137:8080) BINDed eth4 but no FLOW_CLS_REPLACE
+   rule $PEER_TRANSIT_IP->$ARTIFACT_RELAY_HOST:8080) BINDed eth4 but no FLOW_CLS_REPLACE
    ever fired: nf_conntrack_count stays 0 even with active forwarding
    (conntrack not tracking the forward path) -> the `ct state new flow add
    @ft` rule never matches -> flows never enter the flowtable -> no offload
    events. Separate integration item: enable conntrack on the forward path
    (or drive ask_fe_flow_insert via a REPLACE-unit test).
 
-4. **Transit-topology note for future production tests:** .106:eth4
-   (10.99.2.106) -> .185 (forward, ip_forward=1) -> eth0 -> 192.168.1.137
-   requires the RETURN route on the destination (10.99.2.0/24 via
-   192.168.1.185) or replies leave via its default gw and never return
-   through .185. Verified: ping 0% loss + curl http=200 once the return
+4. **Transit-topology note for future production tests:** vendor-reference system:eth4
+   ($PEER_TRANSIT_IP) -> ASK2 test DUT (forward, ip_forward=1) -> eth0 -> $ARTIFACT_RELAY_HOST
+   requires the RETURN route on the destination ($TRANSIT_SUBNET via
+   $DUT_MANAGEMENT_IP) or replies leave via its default gw and never return
+   through ASK2 test DUT. Verified: ping 0% loss + curl http=200 once the return
    route was added.
 
 **CR-003 gating gap (P1-4, same audit):** the production-plan §3.3 debugfs
@@ -2506,19 +2504,19 @@ candidate: Kconfig symbols + #ifdef wrapping both surfaces; production
 config off at release, dev config on (single-ISO constraint: gating is a
 release-time config flip, not a separate image).
 
-## E29 — F-188 production-path validation (2026-08-13, .185, image 2026.08.12-2359-rolling, 6.18.44-vyos, cold boot 7 min)
+## E29 — F-188 production-path validation (2026-08-13, ASK2 test DUT, image 2026.08.12-2359-rolling, 6.18.44-vyos, cold boot 7 min)
 
 Image = F-188 (key_size 14, EKFC 0x801C0006, own-port miss targets; CI 31652852650).
 Board booted F-188; S0 baseline: schemes 0-4 RSS, all ports rfpne=0x00480000 rccb=0,
-MURAM used=720. Also: eth3 (port 0x10) DAC link to .106 eth3 confirmed (both UP/LOWER_UP);
-.106 eth3 = 10.99.1.106/24, .185 eth3 given temp 10.99.1.185/24 -> ping 0.3ms (DAC blocker cleared).
+MURAM used=720. Also: eth3 (port 0x10) DAC link to vendor-reference system eth3 confirmed (both UP/LOWER_UP);
+vendor-reference system eth3 = $PEER_TRANSIT_IP_A/24, ASK2 test DUT eth3 given temp $DUT_TRANSIT_IP_A/24 -> ping 0.3ms (DAC blocker cleared).
 
 1. genl engage (sudo /usr/local/bin/ynl --family ask --do engage --json '{"port-id":17}') ->
    rfpne 0x00480200, RCCB 0x54b00, MURAM 720->43557. [VERIFIED]
 2. Node @0x54b00 (RDWR mmap, pcd-snapshot method): 8e400000 fa180000 04c7080f 00000300
    miss_action=2 (ENQUE) key_size=14 table_type=4 (DDR) mask=0x7fff fqid=0x300 (own-port). [VERIFIED]
    fe_ehash: table keysize=14 DDR=0xfa180000 + v6 table keysize=37.
-3. EKFC 0x801C0006 hash-verified: controlled curl --local-port 44449 to 10.99.2.185:55555 ->
+3. EKFC 0x801C0006 hash-verified: controlled curl --local-port 44449 to $DUT_TRANSIT_IP:55555 ->
    hash_probe captured f16253147160f1e5 == crc64_raw(00|SIP|DIP|06|SPORT|DPORT) exactly.
    (44444 = b508e222f73f6794, 44448 = ce69b25ee00a9c2e bucket 0xf16; earlier aa7cba... = stale
    capture from background traffic between two curls.) [VERIFIED]

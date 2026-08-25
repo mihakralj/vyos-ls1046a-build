@@ -63,6 +63,6 @@ data/code tag, cross-blob alignment) + rendered map in
 - A "function extent" is a hypothesis until Phase 4 confirms
   prologue/epilogue encodings. Mark confidence per region.
 - Do not interpret semantics here. Structure only — semantic labels are
-  Phase 3, opcode meaning is Phase 4. Mixing layers produced wrong
-  conclusions in earlier sessions (the hypothetical spec-§12 opcode map
-  being the canonical cautionary tale).
+  Phase 3, opcode meaning is Phase 4. The hypothetical spec-§12 opcode map
+  demonstrates how mixing these layers can produce internally consistent
+  but incorrect conclusions.
