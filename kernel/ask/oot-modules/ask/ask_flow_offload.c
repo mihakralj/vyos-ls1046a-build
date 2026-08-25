@@ -429,15 +429,20 @@ static atomic_t ask_flow_pending_overflow = ATOMIC_INIT(0);
  * dst_ip we stored in the defer entry.
  */
 static struct ask_flow_pending *
-ask_flow_pending_take_one(int ifindex, __be32 dst_ip)
+ask_flow_pending_take_one(int ifindex, int alt_ifindex, __be32 dst_ip)
 {
         struct ask_flow_pending *p, *tmp;
         struct ask_flow_pending *ret = NULL;
 
         spin_lock_bh(&ask_flow_pending_lock);
         list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+                /* T-M6-8: VLAN neighbour events arrive on the vif while
+                 * pending entries may be keyed on the physical lower device.
+                 * Match either form (alt_ifindex==ifindex for non-VLAN). */
                 if ((p->egress_ifindex == ifindex ||
-                     p->ingress_ifindex == ifindex) &&
+                     p->ingress_ifindex == ifindex ||
+                     p->egress_ifindex == alt_ifindex ||
+                     p->ingress_ifindex == alt_ifindex) &&
                     p->dst_ip == dst_ip) {
                         list_del(&p->node);
                         ask_flow_pending_count--;
@@ -543,19 +548,32 @@ static int ask_flow_pending_enqueue(u64 cookie,
  * closes the historical PR14z8 "deferred-insert OK=0" gap (the old inline call
  * from the atomic notifier could not complete a GFP_KERNEL insert).
  */
-void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
-{
+ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
+ {
         struct ask_flow_pending *p;
         struct ask_flow_table *t;
         u32 hw_id = 0;
         int rc;
         unsigned int drained = 0;
+        int drain_ifindex;
 
         if (!dev)
                 return;
 
-        pr_info_ratelimited("ask: neigh: resolved dev=%s ifindex=%d dst_ip=%pI4 pending_count=%u\n",
-                            netdev_name(dev), dev->ifindex, &dst_ip,
+        /*
+         * T-M6-8: the ARP neighbour for a VLAN-egress next-hop lives on the
+         * 802.1Q vif (e.g. eth3.100), so this callback fires with the vif dev.
+         * But pending entries are keyed on the PHYSICAL egress/ingress ifindex
+         * (META-corrected at REPLACE), so a vif ifindex would never match and
+         * the reverse (PUSH) direction would stay pending forever -> data
+         * stall. Drain against the physical lower-device ifindex. Neighbour
+         * re-resolution below stays on @dev (the vif) where the ARP entry is.
+         */
+        drain_ifindex = is_vlan_dev(dev) ? vlan_dev_real_dev(dev)->ifindex
+                                         : dev->ifindex;
+
+        pr_info_ratelimited("ask: neigh: resolved dev=%s ifindex=%d (drain_ifindex=%d) dst_ip=%pI4 pending_count=%u\n",
+                            netdev_name(dev), dev->ifindex, drain_ifindex, &dst_ip,
                             READ_ONCE(ask_flow_pending_count));
 
         t = ask_flow_default_table();
@@ -563,11 +581,12 @@ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
                 return;
 
         /*
-         * Drain ALL pending entries waiting on (dev->ifindex, dst_ip) — a
+         * Drain ALL pending entries waiting on (drain_ifindex, dst_ip) — a
          * single ARP resolution can unblock multiple cookies if several
          * flows are heading at the same next-hop.
          */
-        while ((p = ask_flow_pending_take_one(dev->ifindex, dst_ip))) {
+        while ((p = ask_flow_pending_take_one(drain_ifindex, dev->ifindex,
+                                              dst_ip))) {
                 drained++;
                 /* Re-resolve so we always pick up the fresh n->ha. */
                 ask_resolve_neigh_v4(dev, dst_ip,
