@@ -10,9 +10,19 @@ Vendor create/insert_remove_vlan_hm() opcode set, verified in fm_ehash.h:
     INSERT_VLAN_HDR     0x42  param en_ehash_insert_vlan_hdr      (4 B ctrl + 4/tag)
                               (PUSH: control word | u32 vlanhdr = (TCI<<16)|innerET)
 
-Vendor emission order (fill_actions): PREEMPTIVE(skip) -> STRIP_ETH(skip) ->
-STRIP_ALL_VLAN_HDRS(0x12) -> UPDATE_TTL/HOPLIMIT/NAT -> INSERT_VLAN_HDR(0x42) ->
-INSERT_L2_HDR(0x41) -> ENQUEUE_PKT(0x01). Params pack sequentially in
+Vendor emission order (fill_actions, cdx_ehash.c:710-806): PREEMPTIVE(0x05) ->
+STRIP_ETH_HDR(0x11) -> STRIP_ALL_VLAN_HDRS(0x12) -> UPDATE_TTL/HOPLIMIT/NAT ->
+INSERT_VLAN_HDR(0x42) -> INSERT_L2_HDR(0x41) -> ENQUEUE_PKT(0x01).
+
+STRIP_ETH_HDR(0x11) is MANDATORY on every VLAN flow: the vendor gates it on
+rebuild_l2_hdr (set whenever L2_HDR_OPS = any VLAN present/pushed, cdx_ehash.c:
+76,686-688,720-723). The 2026-08-25 silicon result proved that OMITTING 0x11
+makes the FE-VM VLAN opcodes present-but-inert for forwarding (records correct,
+0 sustained throughput, plain-routed 7.11G fine); vendor ASK1/CDX on the same
+silicon sustains VLAN routing (3000/3000 flood) because it emits 0x11. So this
+emitter now emits 0x11 first when vlan->flags is set. (PREEMPTIVE 0x05 with its
+enqueue-sealed param is a further vendor step, deferred as a second variable if
+0x11 alone is insufficient.) Params pack sequentially in
 opcode-emission order (no per-opcode offset fields), same rule F-198/F-200/F-230
 use. When a tag is pushed, the outer TPID rides the INSERT_L2_HDR EtherType
 (rolled to 0x8100) and the pushed word's low 16 bits carry the inner EtherType
@@ -164,6 +174,7 @@ replace(
     "\t\t\t * the proven F-230 branch below is never entered for VLAN\n"
     "\t\t\t * flows and stays byte-identical when vlan->flags==0. */\n"
     "\t\t\tif (vlan && vlan->flags) {\n"
+    "\t\t\t\t#define FMAN_EHASH_OPC_STRIP_ETH_HDR\t0x11\n"
     "\t\t\t\t#define FMAN_EHASH_OPC_STRIP_ALL_VLAN\t0x12\n"
     "\t\t\t\t#define FMAN_EHASH_OPC_INSERT_VLAN_HDR\t0x42\n"
     "\t\t\t\t#define FMAN_EHASH_OPC_UPDATE_SIP_V4\t0x22\n"
@@ -178,6 +189,17 @@ replace(
     "\n"
     "\t\t\t\toi = 0;\n"
     "\t\t\t\tl2poff = param_off;\n"
+    "\n"
+    "\t\t\t\t/* STRIP_ETH_HDR (opcode-only, no param): MANDATORY first op on any\n"
+    "\t\t\t\t * VLAN (L2-manipulating) flow. Vendor cdx_ehash.c fill_actions()\n"
+    "\t\t\t\t * sets rebuild_l2_hdr=1 for L2_HDR_OPS (any vlan present/pushed)\n"
+    "\t\t\t\t * and emits STRIP_ETH_HDR(0x11) BEFORE STRIP_ALL_VLAN_HDRS(0x12)\n"
+    "\t\t\t\t * and INSERT_VLAN_HDR(0x42). Without it the FE-VM VLAN opcodes are\n"
+    "\t\t\t\t * present but INERT for forwarding (records correct, 0 throughput,\n"
+    "\t\t\t\t * plain-routed fine) because the ingress Ethernet header is never\n"
+    "\t\t\t\t * torn down so the tag pop/push has no valid L2 geometry to act on.\n"
+    "\t\t\t\t * The trailing INSERT_L2_HDR(0x41) rebuilds the full L2 header. */\n"
+    "\t\t\t\tr[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ETH_HDR;\n"
     "\n"
     "\t\t\t\t/* POP: strip all ingress VLAN tags. en_ehash_strip_all_vlan_hdrs\n"
     "\t\t\t\t * base = 12 B: u16 vlan_id[2] (bytes 0-3), u32 word (bytes 4-7,\n"
