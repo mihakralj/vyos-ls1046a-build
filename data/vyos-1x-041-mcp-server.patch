@@ -4,24 +4,44 @@ Date: Mon, 25 Aug 2026 00:00:00 +0000
 Subject: [PATCH] http-api: add Model Context Protocol (MCP) server (default off)
 
 Mounts an MCP Streamable-HTTP endpoint at /mcp/ inside the existing
-vyos-http-api-server (FastAPI). Exposes operational commands, config
-read/modify, image management, and schema introspection as MCP tools,
-resources and prompts for AI-agent integration.
+vyos-http-api-server (FastAPI), proxied through nginx. Exposes operational
+commands, config read/modify, image management, and schema introspection as
+MCP tools, resources and prompts for AI-agent integration.
 
 Config: `set service https api mcp mode <read-only|read-write>` and
 `set service https api mcp introspection`. The node is absent by default,
 so the endpoint ships DORMANT (off) until explicitly configured.
 
-The mcp SDK and its Python deps (httpx, httpx-sse, pydantic-settings,
-sse-starlette) are provided by the vyos-http-api-tools virtualenv rebuilt
-with mcp==1.8.1 (see bin/ci-build-http-api-tools.sh), NOT a system
-python3-mcp package -- so the upstream fork's debian/control python3-mcp
-Depends line is intentionally omitted here.
+Authorization is enforced, not just advertised:
+  - read-only sessions expose only execute_operational_command; hidden write
+    tools are not callable and mutating op-mode verbs are rejected.
+  - schema introspection is refused by direct URI when disabled.
+Prompts are mode-aware and schema-driven. The capabilities overview reflects
+the real read-only/introspection state. VPN provisioning declares validated
+MCP arguments and is exposed only for read-write sessions with introspection.
+Custom prompts cannot shadow built-in safety/workflow prompts.
 
-Origin: mihakralj/vyos-1x branch T9030-mcp.
+The mcp SDK and its Python deps are provided by the vyos-http-api-tools
+virtualenv rebuilt with mcp==1.8.1 (see bin/ci-build-http-api-tools.sh), not a
+system python3-mcp package; the fork's debian/control dependency is omitted.
+
+Origin: mihakralj/vyos-1x branch T9030-mcp, with LS1046A hardening.
 ---
+diff --git a/data/templates/https/nginx.default.j2 b/data/templates/https/nginx.default.j2
+index e0ebe79..966e846 100644
+--- a/data/templates/https/nginx.default.j2
++++ b/data/templates/https/nginx.default.j2
+@@ -49,7 +49,7 @@ server {
+     ssl_ciphers 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!3DES:!MD5:!PSK';
+ 
+     # proxy settings for HTTP API, if enabled; 503, if not
+-    location ~ ^/(retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew) {
++    location ~ ^/(mcp|retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew) {
+ {% if api is vyos_defined %}
+         proxy_pass http://unix:/run/api.sock;
+         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 diff --git a/interface-definitions/service_https.xml.in b/interface-definitions/service_https.xml.in
-index 7bb63fa5a..022c6a399 100644
+index 7bb63fa..022c6a3 100644
 --- a/interface-definitions/service_https.xml.in
 +++ b/interface-definitions/service_https.xml.in
 @@ -131,6 +131,39 @@
@@ -64,55 +84,9 @@ index 7bb63fa5a..022c6a399 100644
              </children>
            </node>
            #include <include/allow-client.xml.i>
-diff --git a/src/services/api/session.py b/src/services/api/session.py
-index c25a444e9..67b9f41f1 100644
---- a/src/services/api/session.py
-+++ b/src/services/api/session.py
-@@ -39,3 +39,6 @@ def _initialize(self):
-         self.auth_type = None
-         self.token_exp = None
-         self.secret_len = None
-+        self.mcp = False
-+        self.mcp_mode = 'read-only'
-+        self.mcp_introspection = False
-diff --git a/src/services/vyos-http-api-server b/src/services/vyos-http-api-server
-index 94697ed4d..53dde89ec 100755
---- a/src/services/vyos-http-api-server
-+++ b/src/services/vyos-http-api-server
-@@ -207,6 +207,15 @@ def initialization(session: SessionState, app: FastAPI = app):
-     else:
-         session.graphql = False
- 
-+    # parse the mcp block from api_config_state into SessionState
-+    mcp_config = server_config.get('mcp', {})
-+    if 'mcp' in server_config:
-+        session.mcp = True
-+        session.mcp_mode = mcp_config.get('mode', 'read-only')
-+        session.mcp_introspection = bool('introspection' in mcp_config)
-+    else:
-+        session.mcp = False
-+
-     # pass session state
-     app.state = session
- 
-@@ -226,6 +235,14 @@ def initialization(session: SessionState, app: FastAPI = app):
-         from api.graphql.routers import graphql_clear
-         graphql_clear(app)
- 
-+    # add MCP route
-+    if session.mcp:
-+        from api.mcp.routers import mcp_init
-+        mcp_init(app)
-+    else:
-+        from api.mcp.routers import mcp_clear
-+        mcp_clear(app)
-+
-     regenerate_docs(app)
- 
-     LOG.debug('Active routes are:')
 diff --git a/src/services/api/mcp/__init__.py b/src/services/api/mcp/__init__.py
 new file mode 100644
-index 000000000..73f76ede1
+index 0000000..73f76ed
 --- /dev/null
 +++ b/src/services/api/mcp/__init__.py
 @@ -0,0 +1 @@
@@ -120,7 +94,7 @@ index 000000000..73f76ede1
 \ No newline at end of file
 diff --git a/src/services/api/mcp/auth.py b/src/services/api/mcp/auth.py
 new file mode 100644
-index 000000000..871452d99
+index 0000000..871452d
 --- /dev/null
 +++ b/src/services/api/mcp/auth.py
 @@ -0,0 +1,51 @@
@@ -178,177 +152,219 @@ index 000000000..871452d99
 \ No newline at end of file
 diff --git a/src/services/api/mcp/prompts.py b/src/services/api/mcp/prompts.py
 new file mode 100644
-index 000000000..90c1c8abd
+index 0000000..7423138
 --- /dev/null
 +++ b/src/services/api/mcp/prompts.py
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,368 @@
++import ipaddress
 +import logging
 +import os
++import re
 +
 +from mcp.server import Server
-+from mcp.types import Prompt, PromptMessage, GetPromptResult, TextContent
++from mcp.types import Prompt, PromptArgument, PromptMessage, GetPromptResult, TextContent
 +
 +LOG = logging.getLogger('http_api.mcp.prompts')
 +
 +_CUSTOM_PROMPTS_DIR = '/config/user-data/mcp/prompts'
 +
++
++def _capabilities_overview_text(read_only, introspection_enabled):
++    read_tools = (
++        '== TOOLS ==\n'
++        '  execute_operational_command(path) — Run any op-mode command. Path is an array: '
++        '["show","interfaces"], ["ping","192.168.1.1"]. First element is the op-mode verb '
++        '(show, ping, monitor, clear, etc.).\n'
++    )
++    write_tools = (
++        '  modify_configuration(operations, commit_confirm_minutes?) — Stage set/delete ops '
++        'and atomically commit. Always use commit_confirm_minutes for changes that could '
++        'break connectivity.\n'
++        '  manage_system_image(action, url?, name?) — Add/delete/set-default system images.\n'
++        '  reboot_system(path?) — Reboot, defaults to ["now"].\n'
++        '  poweroff_system(path?) — Power off, defaults to ["now"].\n'
++        '  save_configuration(file?) — Save running config to disk.\n'
++    )
++    tools = read_tools + ('' if read_only else write_tools) + '\n'
++
++    config_schema_usage = (
++        'inspect valid config paths, types, defaults and constraints.\n'
++        if read_only else
++        'inspect valid paths, types, defaults and constraints BEFORE calling modify_configuration.\n'
++    )
++    schema_resources = (
++        '  vyos-schema://config/{path} — JSON Schema for CLI config nodes; ' + config_schema_usage
++        + '  vyos-schema://op/{path} — Valid op-mode continuations. Use BEFORE '
++        'execute_operational_command to discover available sub-commands.\n'
++    )
++    resources = (
++        '== RESOURCES ==\n'
++        '  vyos-config://running/{path} — Active config subtree as JSON.\n'
++        '  vyos-config://effective/{path} — Check if a node is effectively applied.\n'
++        + (schema_resources if introspection_enabled else '')
++        + '  vyos-state://operational/{path} — Operational state output.\n\n'
++    )
++
++    if read_only:
++        mode_line = (
++            'This session is READ-ONLY: only execute_operational_command and the read '
++            'resources are available. Configuration-changing tools are not exposed. Do not '
++            'claim to have applied changes.'
++        )
++    else:
++        mode_line = (
++            'This session is READ-WRITE: configuration, image management and reboot/poweroff '
++            'tools are available. Treat as root-equivalent and prefer commit-confirm for '
++            'connectivity-affecting changes.'
++        )
++    if not introspection_enabled:
++        mode_line += (
++            ' Schema introspection resources (vyos-schema://) are disabled on this session; '
++            'rely on documented command paths and validation errors instead.'
++        )
++
++    patterns = '== PATTERNS ==\n'
++    if introspection_enabled:
++        patterns += '1. Schema-first: check vyos-schema before modifying config.\n'
++    patterns += (
++        '2. Check current state: read vyos-config before proposing changes.\n'
++    )
++    if not read_only:
++        patterns += (
++            '3. Commit-confirm for risky changes: WAN, routing, firewall.\n'
++            '4. Atomic multi-step: batch all set/delete ops in one modify_configuration call.\n'
++        )
++    patterns += (
++        '5. Op-mode path format: verb first, then sub-path. The server validates path '
++        'prefixes against its command cache.\n\n'
++    )
++
++    return (
++        'You are connected to a VyOS router via the Model Context Protocol (MCP). '
++        'You can monitor and inspect this router'
++        + ('.' if read_only else ', and change its configuration.') + '\n\n'
++        + tools
++        + resources
++        + '== OTHER PROMPTS ==\n'
++        '  troubleshoot_asymmetric_routing — Routing-loop diagnosis workflow\n'
++        + ('' if read_only or not introspection_enabled else
++           '  provision_site_to_site_vpn — IPsec tunnel provisioning workflow\n')
++        + '  audit_firewall_posture — Firewall ruleset security audit\n\n'
++        + patterns
++        + mode_line
++    )
++
++
++def _troubleshoot_routing_text(_read_only, introspection_enabled):
++    schema_step = (
++        '   - Read vyos-schema://op/show/ip/route before running commands to confirm the live command tree.\n'
++        if introspection_enabled else
++        '   - Schema introspection is disabled; start with the conservative path ["show", "ip", "route"] and adapt to validation errors.\n'
++    )
++    return (
++        'You are diagnosing asymmetric routing or a routing-loop issue on a VyOS router.\n\n'
++        '1. Check the routing table:\n'
++        + schema_step
++        + '   - Use execute_operational_command with path ["show", "ip", "route"].\n'
++        '   - Look for unexpected ECMP entries, recursive next-hops, or policy-selected routes.\n\n'
++        '2. Inspect conntrack only after discovering the live op-mode path'
++        + (' through vyos-schema://op/show/conntrack.\n' if introspection_enabled else '.\n')
++        + '   - Look for UNREPLIED or ASSURED flows and direction/address asymmetry.\n\n'
++        '3. Examine BGP if learned routes are involved:\n'
++        '   - Discover the BGP show path when introspection is available; otherwise try ["show", "ip", "bgp", "summary"].\n'
++        '   - Check peer churn, best-path changes, and stale routes.\n\n'
++        '4. Check interface counters with ["show", "interfaces"] and correlate drops/errors with the affected direction.\n\n'
++        '5. Read vyos-config://running/protocols and vyos-config://running/policy.\n'
++        '   - Look for route-maps, policy routes, VRFs, or static routes that create asymmetric paths.\n\n'
++        'Report observations before recommending changes; do not infer a routing loop from one table alone.'
++    )
++
++
++def _audit_firewall_text(_read_only, introspection_enabled):
++    schema_step = (
++        '1. Read vyos-schema://config/firewall and follow the live children; do not assume legacy `name` or `zone-policy` nodes exist.\n'
++        if introspection_enabled else
++        '1. Schema introspection is disabled. Read vyos-config://running/firewall and do not assume legacy `name` or `zone-policy` nodes exist.\n'
++    )
++    return (
++        'You are performing a security audit of the firewall configuration on this VyOS version.\n\n'
++        + schema_step
++        + '2. Read vyos-config://running/firewall and identify the configured model (IPv4, IPv6, bridge, flowtable, groups, global options).\n'
++        '   - Audit each discovered base chain and its default-action; prefer explicit allow rules over broad any/any permits.\n\n'
++        '3. Review rule ordering and coverage:\n'
++        '   - Check state handling, source/destination scope, protocol/port scope, logging, disabled rules, and shadowed or unreachable rules.\n'
++        '   - Treat hardware-offload/flowtable rules separately from filtering policy; offload is not an allow rule by itself.\n\n'
++        '4. Correlate policy with interfaces, VRFs, NAT/NAT66, and routing:\n'
++        '   - Read vyos-config://running/interfaces, /vrf, /nat, and /nat66 where present.\n'
++        '   - Do not recommend legacy interface-level firewall attachment or `zone-policy` unless the live schema exposes it.\n\n'
++        '5. Verify operational state:\n'
++        + ('   - Discover valid commands under vyos-schema://op/show/firewall before execution.\n' if introspection_enabled else
++           '   - Try conservative show-firewall commands and adapt to validation errors.\n')
++        + '   - Compare counters/hit data with the configured rules; zero counters alone do not prove a rule is ineffective.\n\n'
++        'Produce a report containing observed state, evidence, risk, and schema-valid remediation steps. Do not apply changes during an audit unless explicitly requested.'
++    )
++
++
 +_BUILTIN_PROMPTS = {
 +    'vyos_capabilities_overview': {
 +        'description': 'System prompt explaining all VyOS MCP capabilities, tools, resources, and usage patterns',
-+        'messages': [
-+            PromptMessage(
-+                role='user',
-+                content=TextContent(
-+                    type='text',
-+                    text=(
-+                        'You are connected to a VyOS router via the Model Context Protocol (MCP). '
-+                        'You have administrative access to configure, monitor, and manage this router.\n\n'
-+
-+                        '== TOOLS ==\n'
-+                        '  execute_operational_command(path) — Run any op-mode command. Path is an array: '
-+                        '["show","interfaces"], ["ping","192.168.1.1"]. First element is the op-mode verb '
-+                        '(show, ping, monitor, reboot, clear, etc.).\n'
-+                        '  modify_configuration(operations, commit_confirm_minutes?) — Stage set/delete ops '
-+                        'and atomically commit. Always use commit_confirm_minutes for changes that could '
-+                        'break connectivity.\n'
-+                        '  manage_system_image(action, url?, name?) — Add/delete/set-default system images.\n'
-+                        '  reboot_system(path?) — Reboot, defaults to ["now"].\n'
-+                        '  poweroff_system(path?) — Power off, defaults to ["now"].\n'
-+                        '  save_configuration(file?) — Save running config to disk.\n\n'
-+
-+                        '== RESOURCES ==\n'
-+                        '  vyos-config://running/{path} — Active config subtree as JSON.\n'
-+                        '  vyos-config://effective/{path} — Check if a node is effectively applied.\n'
-+                        '  vyos-schema://config/{path} — JSON Schema of valid CLI config nodes. Use BEFORE '
-+                        'calling modify_configuration to find valid paths, types, defaults, constraints.\n'
-+                        '  vyos-schema://op/{path} — Valid op-mode continuations. Use BEFORE '
-+                        'execute_operational_command to discover available sub-commands.\n'
-+                        '  vyos-state://operational/{path} — Operational state output.\n\n'
-+
-+                        '== OTHER PROMPTS ==\n'
-+                        '  troubleshoot_asymmetric_routing — Routing-loop diagnosis workflow\n'
-+                        '  provision_site_to_site_vpn — IPsec tunnel provisioning workflow\n'
-+                        '  audit_firewall_posture — Firewall ruleset security audit\n\n'
-+
-+                        '== PATTERNS ==\n'
-+                        '1. Schema-first: check vyos-schema before modifying config.\n'
-+                        '2. Check current state: read vyos-config before proposing changes.\n'
-+                        '3. Commit-confirm for risky changes: WAN, routing, firewall.\n'
-+                        '4. Atomic multi-step: batch all set/delete ops in one modify_configuration call.\n'
-+                        '5. Op-mode path format: verb first, then sub-path. The server validates path '
-+                        'prefixes against its command cache.\n\n'
-+
-+                        'This session is read-write with introspection enabled. Treat as root-equivalent.'
-+                    )
-+                )
-+            )
-+        ]
++        'text_builder': _capabilities_overview_text,
 +    },
 +    'troubleshoot_asymmetric_routing': {
-+        'description': 'Guide through routing-loop diagnosis (FRR, conntrack, BGP)',
-+        'messages': [
-+            PromptMessage(
-+                role='user',
-+                content=TextContent(
-+                    type='text',
-+                    text=(
-+                        'You are diagnosing an asymmetric routing or routing-loop issue on a VyOS router.\n\n'
-+                        '1. Check the routing table:\n'
-+                        '   - Use the vyos-schema://op/show/ip/route schema to understand available fields.\n'
-+                        '   - Use execute_operational_command with path ["show", "ip", "route"] to dump the FIB.\n'
-+                        '   - Look for unexpected equal-cost multipath entries or recursive next-hops.\n\n'
-+                        '2. Inspect the conntrack table for mid-flow path changes:\n'
-+                        '   - Use execute_operational_command with path ["show", "conntrack", "table", "ipv4"].\n'
-+                        '   - Look for UNREPLIED or ASSURED states with mismatched interfaces.\n\n'
-+                        '3. Examine BGP state if learned routes are involved:\n'
-+                        '   - Use execute_operational_command with path ["show", "ip", "bgp", "summary"].\n'
-+                        '   - Check for flapping peers or stale routes.\n\n'
-+                        '4. Verify interface counters for asymmetric drops:\n'
-+                        '   - Use execute_operational_command with path ["show", "interfaces"].\n\n'
-+                        '5. Review the running config for routing policy:\n'
-+                        '   - Use vyos-config://running/protocols to inspect BGP/OSPF/static route config.\n'
-+                        '   - Look for route-maps or policy-based routing that may cause asymmetry.\n\n'
-+                        'After gathering data, correlate findings and suggest a remediation plan.'
-+                    )
-+                )
-+            )
-+        ]
++        'description': 'Guide through asymmetric-routing and routing-loop diagnosis (FRR, conntrack, policy)',
++        'text_builder': _troubleshoot_routing_text,
 +    },
 +    'provision_site_to_site_vpn': {
 +        'description': 'IPsec tunnel workflow across IKE/ESP/peer config branches',
-+        'messages': [
-+            PromptMessage(
-+                role='user',
-+                content=TextContent(
-+                    type='text',
-+                    text=(
-+                        'You are provisioning a site-to-site IPsec VPN on VyOS.\n\n'
-+                        '1. Gather requirements from the user:\n'
-+                        '   - Local and remote public IP addresses\n'
-+                        '   - Local and remote private subnets\n'
-+                        '   - Pre-shared key or certificate preference\n'
-+                        '   - IKE version (v1 or v2, default: v2)\n'
-+                        '   - Encryption and hash algorithms (default: aes256-sha256)\n\n'
-+                        '2. Validate the VyOS schema for the vpn ipsec subtree:\n'
-+                        '   - Use vyos-schema://config/vpn/ipsec to understand available nodes.\n\n'
-+                        '3. Stage the IKE group:\n'
-+                        '   - modify_configuration: set vpn ipsec ike-group <name> proposal <num> encryption aes256\n'
-+                        '   - set vpn ipsec ike-group <name> proposal <num> hash sha256\n'
-+                        '   - set vpn ipsec ike-group <name> proposal <num> dh-group 14\n'
-+                        '   - set vpn ipsec ike-group <name> key-exchange ikev2\n\n'
-+                        '4. Stage the ESP group:\n'
-+                        '   - modify_configuration: set vpn ipsec esp-group <name> proposal <num> encryption aes256\n'
-+                        '   - set vpn ipsec esp-group <name> proposal <num> hash sha256\n\n'
-+                        '5. Stage the peer and tunnel:\n'
-+                        '   - set vpn ipsec site-to-site peer <remote-ip> authentication pre-shared-secret <psk>\n'
-+                        '   - set vpn ipsec site-to-site peer <remote-ip> ike-group <name>\n'
-+                        '   - set vpn ipsec site-to-site peer <remote-ip> tunnel <num> esp-group <name>\n'
-+                        '   - set vpn ipsec site-to-site peer <remote-ip> tunnel <num> local prefix <local-subnet>\n'
-+                        '   - set vpn ipsec site-to-site peer <remote-ip> tunnel <num> remote prefix <remote-subnet>\n\n'
-+                        '6. Use modify_configuration to commit all changes atomically.\n'
-+                        '   - Consider using commit_confirm_minutes to auto-rollback if connectivity drops.\n\n'
-+                        '7. Verify the tunnel is up:\n'
-+                        '   - Use execute_operational_command with path ["show", "vpn", "ipsec", "sa"].\n'
-+                    )
-+                )
-+            )
-+        ]
++        'write_only': True,
++        'requires_introspection': True,
++        'arguments': [
++            PromptArgument(name='remote_ip', description='Remote peer public IP address', required=True),
++            PromptArgument(name='local_subnet', description="Local private subnet, e.g. 10.0.1.0/24", required=True),
++            PromptArgument(name='remote_subnet', description="Remote private subnet, e.g. 10.0.2.0/24", required=True),
++            PromptArgument(name='group_name', description="Name for the IKE/ESP groups (default: SITE2SITE)", required=False),
++        ],
++        'template': (
++            'You are provisioning a site-to-site IPsec VPN on VyOS.\n\n'
++            'Parameters for this run:\n'
++            '  - remote peer IP: {remote_ip}\n'
++            '  - local subnet:   {local_subnet}\n'
++            '  - remote subnet:  {remote_subnet}\n'
++            '  - IKE/ESP group name: {group_name}\n\n'
++            '1. Ask the user for the pre-shared key (do NOT guess or log it) and confirm the\n'
++            '   IKE version (default: ikev2) and algorithms (default: aes256 / sha256 / dh-group 14).\n\n'
++            '2. Validate the live schema for the vpn ipsec subtree before staging anything:\n'
++            '   - Read vyos-schema://config/vpn/ipsec to confirm node names for THIS VyOS version\n'
++            '     (the ipsec CLI has changed across releases — do not assume node paths).\n\n'
++            '3. Stage the IKE group:\n'
++            '   - set vpn ipsec ike-group {group_name} proposal 1 encryption aes256\n'
++            '   - set vpn ipsec ike-group {group_name} proposal 1 hash sha256\n'
++            '   - set vpn ipsec ike-group {group_name} proposal 1 dh-group 14\n'
++            '   - set vpn ipsec ike-group {group_name} key-exchange ikev2\n\n'
++            '4. Stage the ESP group:\n'
++            '   - set vpn ipsec esp-group {group_name} proposal 1 encryption aes256\n'
++            '   - set vpn ipsec esp-group {group_name} proposal 1 hash sha256\n\n'
++            '5. Stage the peer and tunnel (substitute the PSK the user provides):\n'
++            '   - set vpn ipsec site-to-site peer {remote_ip} authentication pre-shared-secret <psk>\n'
++            '   - set vpn ipsec site-to-site peer {remote_ip} ike-group {group_name}\n'
++            '   - set vpn ipsec site-to-site peer {remote_ip} tunnel 0 esp-group {group_name}\n'
++            '   - set vpn ipsec site-to-site peer {remote_ip} tunnel 0 local prefix {local_subnet}\n'
++            '   - set vpn ipsec site-to-site peer {remote_ip} tunnel 0 remote prefix {remote_subnet}\n\n'
++            '6. Commit all changes atomically via modify_configuration; use commit_confirm_minutes\n'
++            '   so connectivity loss auto-rolls-back.\n\n'
++            '7. Verify the tunnel: execute_operational_command with path ["show", "vpn", "ipsec", "sa"].\n'
++        ),
++        'defaults': {'group_name': 'SITE2SITE'},
++        'validators': {
++            'remote_ip': '_v_ip',
++            'local_subnet': '_v_cidr',
++            'remote_subnet': '_v_cidr',
++            'group_name': '_v_name',
++        },
 +    },
 +    'audit_firewall_posture': {
-+        'description': 'Security audit aware of nftables (1.4+) vs. legacy firewall model',
-+        'messages': [
-+            PromptMessage(
-+                role='user',
-+                content=TextContent(
-+                    type='text',
-+                    text=(
-+                        'You are performing a security audit of the VyOS firewall configuration.\n\n'
-+                        '1. Determine the firewall model in use:\n'
-+                        '   - Check vyos-config://running/firewall for IPv4 firewall rules.\n'
-+                        '   - Check vyos-config://running/firewall/ipv6 for IPv6 rules.\n\n'
-+                        '2. Audit the default policies:\n'
-+                        '   - Use vyos-config://running/firewall to find default-action for INPUT/OUTPUT/FORWARD chains.\n'
-+                        '   - Default DROP or REJECT with explicit allow rules is preferred.\n\n'
-+                        '3. Review rule ordering and coverage:\n'
-+                        '   - List all rules per chain using vyos-config://running/firewall/name.\n'
-+                        '   - Check for: overly permissive rules (any/any), missing state tracking, incorrect rule ordering.\n'
-+                        '   - Verify stateful inspection is enabled (state established/related).\n\n'
-+                        '4. Check zone-based policy if applicable:\n'
-+                        '   - Use vyos-config://running/zone-policy for zone-pair rules.\n'
-+                        '   - Verify intra-zone and inter-zone defaults.\n\n'
-+                        '5. Inspect interface assignments:\n'
-+                        '   - Use vyos-config://running/interfaces to see which firewall policies are applied to each interface.\n\n'
-+                        '6. Verify operational state:\n'
-+                        '   - Use execute_operational_command with path ["show", "firewall", "statistics"] for hit counts.\n'
-+                        '   - Use execute_operational_command with path ["show", "firewall", "summary"].\n\n'
-+                        '7. Produce an audit report with:\n'
-+                        '   - Summary of rules found per chain\n'
-+                        '   - Flagged risks (overly permissive, missing defaults, unexpected interfaces)\n'
-+                        '   - Recommended hardening actions\n'
-+                    )
-+                )
-+            )
-+        ]
++        'description': 'Security audit of the firewall config, driven by the live CLI schema',
++        'text_builder': _audit_firewall_text,
 +    }
 +}
 +
@@ -423,22 +439,76 @@ index 000000000..90c1c8abd
 +    prompts = dict(_BUILTIN_PROMPTS)
 +    try:
 +        custom = _load_custom_prompts()
-+        prompts.update(custom)
++        for name, pdata in custom.items():
++            if name in _BUILTIN_PROMPTS:
++                LOG.warning(f'Ignoring custom prompt shadowing built-in: {name}')
++                continue
++            prompts[name] = pdata
 +    except Exception:
 +        LOG.warning('Failed to load custom prompts', exc_info=True)
 +    return prompts
 +
 +
-+def register_prompts(server: Server):
++def _validate_prompt_value(validator, name, value):
++    try:
++        if validator == '_v_ip':
++            ipaddress.ip_address(value)
++        elif validator == '_v_cidr':
++            ipaddress.ip_network(value, strict=False)
++        elif validator == '_v_name' and not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,31}', value):
++            raise ValueError('must start with a letter and contain only letters, digits, underscore or hyphen')
++    except ValueError as e:
++        raise ValueError(f'Invalid argument {name}: {e}') from e
++
++
++def _render_messages(pdata, read_only, introspection_enabled, arguments):
++    arguments = arguments or {}
++
++    text_builder = pdata.get('text_builder')
++    if text_builder is not None:
++        text = text_builder(read_only, introspection_enabled)
++        return [PromptMessage(role='user', content=TextContent(type='text', text=text))]
++
++    template = pdata.get('template')
++    if template is not None:
++        declared = {a.name for a in pdata.get('arguments', [])}
++        required = {a.name for a in pdata.get('arguments', []) if a.required}
++        missing = sorted(required - {k for k, v in arguments.items() if v})
++        if missing:
++            raise ValueError(f'Missing required argument(s): {", ".join(missing)}')
++        validators = pdata.get('validators', {})
++        values = dict(pdata.get('defaults', {}))
++        for k, v in arguments.items():
++            if k in declared and v is not None:
++                if k in validators:
++                    _validate_prompt_value(validators[k], k, str(v))
++                values[k] = v
++        # Only the declared placeholders are substituted; unknown braces are left intact.
++        text = template
++        for k in declared:
++            text = text.replace('{' + k + '}', str(values.get(k, '{' + k + '}')))
++        return [PromptMessage(role='user', content=TextContent(type='text', text=text))]
++
++    return list(pdata.get('messages', []))
++
++
++def register_prompts(server: Server, read_only: bool = True, introspection_enabled: bool = False):
 +    prompts = _build_prompts()
 +
 +    prompt_list = []
 +    for name, pdata in prompts.items():
++        # Write-only workflows (config provisioning) are hidden on read-only sessions
++        # where the modify_configuration tool isn't even exposed.
++        if read_only and pdata.get('write_only'):
++            continue
++        if not introspection_enabled and pdata.get('requires_introspection'):
++            continue
 +        prompt_list.append(Prompt(
 +            name=name,
 +            description=pdata.get('description', ''),
-+            arguments=[]
++            arguments=list(pdata.get('arguments', []))
 +        ))
++    visible = {p.name for p in prompt_list}
 +
 +    @server.list_prompts()
 +    async def list_prompts():
@@ -446,19 +516,20 @@ index 000000000..90c1c8abd
 +
 +    @server.get_prompt()
 +    async def get_prompt(name: str, arguments: dict | None):
-+        if name not in prompts:
++        if name not in prompts or name not in visible:
 +            raise ValueError(f'Unknown prompt: {name}')
 +        pdata = prompts[name]
++        messages = _render_messages(pdata, read_only, introspection_enabled, arguments)
 +        return GetPromptResult(
 +            description=pdata.get('description', ''),
-+            messages=list(pdata.get('messages', []))
++            messages=messages
 +        )
 diff --git a/src/services/api/mcp/resources.py b/src/services/api/mcp/resources.py
 new file mode 100644
-index 000000000..c6bbd9581
+index 0000000..f072fb0
 --- /dev/null
 +++ b/src/services/api/mcp/resources.py
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,197 @@
 +import json
 +import logging
 +import re
@@ -614,9 +685,15 @@ index 000000000..c6bbd9581
 +    return [t for t in _TEMPLATES if not t.uriTemplate.startswith('vyos-schema://')]
 +
 +
-+async def _handle_read_resource(uri: AnyUrl):
++async def _handle_read_resource(uri: AnyUrl, introspection_enabled=True):
 +    from fastapi.concurrency import run_in_threadpool
 +    scheme, section, path = _parse_uri(uri)
++
++    # Schema introspection is a separate, opt-in capability. When it is off the
++    # templates are hidden from listing; also refuse to serve them by direct URI
++    # so listing and reading agree.
++    if scheme == 'vyos-schema' and not introspection_enabled:
++        raise ValueError('Schema introspection is disabled on this session')
 +
 +    scheme_handlers = _RESOURCE_HANDLERS.get(scheme)
 +    if scheme_handlers is None:
@@ -649,10 +726,10 @@ index 000000000..c6bbd9581
 +
 +    @server.read_resource()
 +    async def read_resource(uri: AnyUrl):
-+        return await _handle_read_resource(uri)
++        return await _handle_read_resource(uri, introspection_enabled=introspection_enabled)
 diff --git a/src/services/api/mcp/routers.py b/src/services/api/mcp/routers.py
 new file mode 100644
-index 000000000..7e030a15f
+index 0000000..7e030a1
 --- /dev/null
 +++ b/src/services/api/mcp/routers.py
 @@ -0,0 +1,113 @@
@@ -771,7 +848,7 @@ index 000000000..7e030a15f
 +    _session_manager = None
 diff --git a/src/services/api/mcp/schema.py b/src/services/api/mcp/schema.py
 new file mode 100644
-index 000000000..8d7223697
+index 0000000..8d72236
 --- /dev/null
 +++ b/src/services/api/mcp/schema.py
 @@ -0,0 +1,240 @@
@@ -1017,7 +1094,7 @@ index 000000000..8d7223697
 +    return json.dumps(schema, separators=(',', ':'))
 diff --git a/src/services/api/mcp/server.py b/src/services/api/mcp/server.py
 new file mode 100644
-index 000000000..180cf5b71
+index 0000000..7bb4817
 --- /dev/null
 +++ b/src/services/api/mcp/server.py
 @@ -0,0 +1,20 @@
@@ -1038,15 +1115,15 @@ index 000000000..180cf5b71
 +    register_tools(server, read_only=read_only)
 +
 +    from .prompts import register_prompts
-+    register_prompts(server)
++    register_prompts(server, read_only=read_only, introspection_enabled=introspection)
 +
 +    return server
 diff --git a/src/services/api/mcp/tools.py b/src/services/api/mcp/tools.py
 new file mode 100644
-index 000000000..da0a43a26
+index 0000000..acdae33
 --- /dev/null
 +++ b/src/services/api/mcp/tools.py
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,330 @@
 +import logging
 +
 +from mcp.server import Server
@@ -1057,6 +1134,10 @@ index 000000000..da0a43a26
 +from ..session import SessionState
 +
 +LOG = logging.getLogger('http_api.mcp.tools')
++
++_READ_ONLY_OP_VERBS = frozenset({
++    'show', 'monitor', 'ping', 'traceroute',
++})
 +
 +TOOL_EXECUTE_OP = 'execute_operational_command'
 +TOOL_MODIFY_CONFIG = 'modify_configuration'
@@ -1357,29 +1438,65 @@ index 000000000..da0a43a26
 +    async def list_tools():
 +        return tools
 +
++    exposed = {t.name for t in tools}
++
 +    @server.call_tool()
 +    async def call_tool(name: str, arguments: dict):
 +        handler = _TOOL_HANDLERS.get(name)
-+        if handler is None:
++        if handler is None or name not in exposed:
 +            raise ValueError(f'Unknown tool: {name}')
 +
-+        if name in (TOOL_MODIFY_CONFIG, TOOL_MANAGE_IMAGE, TOOL_REBOOT,
-+                     TOOL_POWEROFF, TOOL_SAVE_CONFIG):
-+            result = await run_in_threadpool(handler, arguments)
-+        else:
-+            result = await run_in_threadpool(handler, arguments)
++        if read_only and name == TOOL_EXECUTE_OP:
++            op = (arguments.get('path') or [None])[0]
++            if op not in _READ_ONLY_OP_VERBS:
++                raise ValueError(f'Operational verb not allowed in read-only mode: {op}')
++
++        result = await run_in_threadpool(handler, arguments)
 +
 +        return [TextContent(type='text', text=str(result))]
-diff --git a/data/templates/https/nginx.default.j2 b/data/templates/https/nginx.default.j2
-index e0ebe79..966e846 100644
---- a/data/templates/https/nginx.default.j2
-+++ b/data/templates/https/nginx.default.j2
-@@ -49,7 +49,7 @@ server {
-     ssl_ciphers 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!3DES:!MD5:!PSK';
+diff --git a/src/services/api/session.py b/src/services/api/session.py
+index c25a444..67b9f41 100644
+--- a/src/services/api/session.py
++++ b/src/services/api/session.py
+@@ -39,3 +39,6 @@ def _initialize(self):
+         self.auth_type = None
+         self.token_exp = None
+         self.secret_len = None
++        self.mcp = False
++        self.mcp_mode = 'read-only'
++        self.mcp_introspection = False
+diff --git a/src/services/vyos-http-api-server b/src/services/vyos-http-api-server
+index 94697ed..53dde89 100755
+--- a/src/services/vyos-http-api-server
++++ b/src/services/vyos-http-api-server
+@@ -207,6 +207,15 @@ def initialization(session: SessionState, app: FastAPI = app):
+     else:
+         session.graphql = False
  
-     # proxy settings for HTTP API, if enabled; 503, if not
--    location ~ ^/(retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew) {
-+    location ~ ^/(mcp|retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew) {
- {% if api is vyos_defined %}
-         proxy_pass http://unix:/run/api.sock;
-         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++    # parse the mcp block from api_config_state into SessionState
++    mcp_config = server_config.get('mcp', {})
++    if 'mcp' in server_config:
++        session.mcp = True
++        session.mcp_mode = mcp_config.get('mode', 'read-only')
++        session.mcp_introspection = bool('introspection' in mcp_config)
++    else:
++        session.mcp = False
++
+     # pass session state
+     app.state = session
+ 
+@@ -226,6 +235,14 @@ def initialization(session: SessionState, app: FastAPI = app):
+         from api.graphql.routers import graphql_clear
+         graphql_clear(app)
+ 
++    # add MCP route
++    if session.mcp:
++        from api.mcp.routers import mcp_init
++        mcp_init(app)
++    else:
++        from api.mcp.routers import mcp_clear
++        mcp_clear(app)
++
+     regenerate_docs(app)
+ 
+     LOG.debug('Active routes are:')
