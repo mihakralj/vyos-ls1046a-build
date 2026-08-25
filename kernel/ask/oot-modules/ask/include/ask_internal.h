@@ -544,6 +544,18 @@ u8     nat_flags;
 #define ASK_VLANF_PUSH	BIT(1)	/* insert one egress 802.1Q tag */
 	__be16 vlan_push_tci;
 	__be16 vlan_push_tpid;
+	/*
+	 * T-M6-8 (2026-08-25): the ingress VID to hand the STRIP_ALL_VLAN
+	 * opcode. The vendor insert_remove_vlan_hm() writes the real ingress
+	 * VID into en_ehash_strip_all_vlan_hdrs.vlan_id[0] (outer-first, be16)
+	 * and leaves op_flags=0 (VALIDATE) for a routed tagged POP; only bridge
+	 * flows with no tag set OP_SKIP_VLAN_VALIDATE. ASK2 previously emitted a
+	 * zero VID + SKIP, which left the 0x12 strip's parse geometry
+	 * inconsistent and silently dropped bulk POP frames on silicon. Sourced
+	 * from the ingress VLAN vif (vlan_dev_vlan_id) since the flowtable POP
+	 * action carries no VID. Host order 1..4094; 0 = no ingress tag.
+	 */
+	u16    vlan_ingress_vid;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
