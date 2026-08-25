@@ -3,9 +3,12 @@
 fan-pid — multi-zone PID EMC2305 fan controller for the LS1046A Mono Gateway DK.
 
 Drives the EMC2305 PWM from the hottest of the SoC's five thermal zones (ddr,
-serdes, fman, cluster, sec). Each tick: read zones, run a per-zone PI controller,
-take the max demand (any zone can win), EMA-smooth it, clamp each fan up to its
-learned spinning floor, and write the duty registers directly over /dev/i2c.
+serdes, fman, cluster, sec). Each tick: read zones, run a per-zone PI controller
+seeded at the learned idle floor, take the max demand (any zone can win),
+EMA-smooth it, clamp each fan up to its own learned spinning floor at the output
+stage, and write the duty registers directly over /dev/i2c. The floor is a
+minimum idle *output* only — it never masks the PI demand, so a sustained
+above-setpoint temperature ramps the fan instead of idling until crit.
 Any zone >= crit_temp forces MAX; any zone >= HARD_FAULT_TEMP also logs CRIT.
 
 The per-fan spinning floor is learned/maintained continuously by a guarded
@@ -44,12 +47,23 @@ class Zone:
     integral: float = 0.0
 
 
+# Kp restored 2026-08-25 to the pre-48cfcec5 values (4/6/5). The 2026-05-17
+# softening (halving Kp) was compensating for a separate bug: step() clamped
+# each zone's demand UP to the learned idle floor before max(), which masked the
+# PI signal entirely, so temps sat 5-7 C over setpoint with the fans idling
+# (field report 2026-08-24: ddr 70-72 C @ setpoint 65, demand pinned at floor
+# 27). That demand-side clamp is removed and the PI baseline is seeded at the
+# live idle floor (see step()); the EMA (alpha 0.25, ~3-tick lag) already
+# rejects the single-sample spikes 48cfcec5 was worried about, so full Kp gives
+# a genuine proportional ramp across the setpoint->crit band instead of only
+# slamming to MAX at crit. Ki unchanged (same steady-state tracking contract);
+# crit_temp force-MAX unaffected.
 ZONES = [
-    Zone("ddr-thermal",     setpoint=65.0, crit_temp=80.0, kp=2.5,  ki=0.20),
-    Zone("serdes-thermal",  setpoint=70.0, crit_temp=85.0, kp=3.5,  ki=0.30),
-    Zone("fman-thermal",    setpoint=70.0, crit_temp=87.0, kp=3.5,  ki=0.30),
-    Zone("cluster-thermal", setpoint=65.0, crit_temp=85.0, kp=3.0,  ki=0.25),
-    Zone("sec-thermal",     setpoint=65.0, crit_temp=85.0, kp=3.0,  ki=0.25),
+    Zone("ddr-thermal",     setpoint=65.0, crit_temp=80.0, kp=4.0,  ki=0.20),
+    Zone("serdes-thermal",  setpoint=70.0, crit_temp=85.0, kp=6.0,  ki=0.30),
+    Zone("fman-thermal",    setpoint=70.0, crit_temp=87.0, kp=6.0,  ki=0.30),
+    Zone("cluster-thermal", setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
+    Zone("sec-thermal",     setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
 ]
 # Aliases tolerated for thermal_zone "type" string differences across kernels.
 # (mainline 6.18 uses "ddr-thermal"/"cluster-thermal", SDK 6.6 uses
@@ -62,7 +76,8 @@ ZONE_ALIASES = {
     "sec-thermal":     ("sec_thermal",),
 }
 
-PWM_FLOOR    = 0     # PWM applied when all zones at/below setpoint
+PWM_FLOOR    = 0     # PI math origin; the real idle output is the learned
+                     # per-fan floor (step() seeds the PI baseline from it)
 PWM_MAX      = 255   # full speed
 PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
 
@@ -567,16 +582,24 @@ class Controller:
                 any_critical = True
 
             err = t - z.setpoint
-            # Integrate even when saturated; integral_clamp() bounds the windup.
-            z.integral += err
+            # The fan cannot actuate below its learned floor, so a negative
+            # integral has no cooling effect; it only delays the response when
+            # temperature rises again. Let negative error unwind accumulated
+            # positive integral, but never wind below zero.
+            z.integral = max(0.0, z.integral + err)
             ic = self.integral_clamp(z)
-            if z.integral >  ic: z.integral =  ic
-            if z.integral < -ic: z.integral = -ic
+            if z.integral > ic:
+                z.integral = ic
 
-            pwm_i = PWM_FLOOR + z.kp * err + z.ki * z.integral
-            # Clamp the shared demand to the lowest floor; each fan is clamped up
-            # to its own floor at the output stage.
-            pwm_i = max(float(self.min_floor()), pwm_i)
+            # Seed the PI baseline at the live idle floor so the P/I terms are
+            # measured *above* idle. At setpoint (err=0, integral~0) demand sits
+            # at the floor; a sustained overshoot then adds P+I on top of it.
+            baseline = float(self.min_floor())
+            pwm_i = baseline + z.kp * err + z.ki * z.integral
+            # Do NOT clamp the demand up to the floor beyond this baseline: the
+            # baseline already covers the "at setpoint" case, and clamping would
+            # mask a genuine below-baseline (cooling) signal. max() picks the
+            # hottest zone; the per-fan floor is re-applied at the output stage.
             pwm_i = max(0.0, min(float(PWM_MAX), pwm_i))
             zone_pwms[z.name] = pwm_i
             if pwm_i > max_pwm_zone:
