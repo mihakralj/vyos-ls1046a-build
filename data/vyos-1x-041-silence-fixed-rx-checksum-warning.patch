@@ -1,0 +1,30 @@
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index 84c0025..1457726 100644
+--- a/python/vyos/ifconfig/ethernet.py
++++ b/python/vyos/ifconfig/ethernet.py
+@@ -288,11 +288,21 @@ class EthernetIf(Interface):
+             raise ValueError('Value out of range')
+ 
+         enabled, fixed = self.ethtool.get_rx_checksumming()
++
++        # Some drivers (notably the LS1046A DPAA1 fsl_dpa) advertise RX
++        # checksumming as permanently enabled: `rx-checksumming: on [fixed]`.
++        # EthernetIf.update() calls set_rx(False) on every commit whenever the
++        # `offload rx` node is absent (the default), so the fixed-feature branch
++        # printed 'Adapter does not support changing rx-checksumming settings!'
++        # on every unrelated commit even though no change can or should be
++        # attempted. A fixed feature cannot be toggled by ethtool regardless of
++        # the request, so treat it as a silent no-op and keep the current
++        # hardware state authoritative.
++        if fixed:
++            return False
++
+         if enabled != state:
+-            if not fixed:
+-                return self.set_interface('rx', 'on' if state else 'off')
+-            else:
+-                print('Adapter does not support changing rx-checksumming settings!')
++            return self.set_interface('rx', 'on' if state else 'off')
+         return False
+ 
+     def set_gso(self, state):
