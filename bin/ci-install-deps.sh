@@ -69,7 +69,11 @@ apt-get install -y \
   `# Debian packaging stack used by every sub-package's debian/rules` \
   pbuilder python3-setuptools python3-pip python3-build python3-wheel \
   python3-stdeb dh-python debhelper devscripts equivs quilt \
-  fakeroot rsync curl ca-certificates ccache sccache
+  fakeroot rsync curl ca-certificates ccache sccache \
+  `# vyos-http-api-tools rebuild (dh-virtualenv venv + mcp SDK): see` \
+  `# bin/ci-build-http-api-tools.sh. dh-virtualenv drives the venv .deb;` \
+  `# python3-venv provides the builtin venv module it wraps.` \
+  dh-virtualenv python3-venv
 
 # Upgrade after install so that any of the just-installed packages
 # get their security patches — matches what the upstream vyos-builder

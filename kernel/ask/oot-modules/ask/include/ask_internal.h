@@ -414,6 +414,8 @@ int  ask_hw_flow_preflight(const struct ask_flow_key *key,
 /* NAT offload gates: IPv4 is shipping/default-on; NAT66 is experiment/default-off. */
 bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
+/* T-M6-8 VLAN offload gate: default-OFF until S0-S4 silicon gates pass. */
+bool ask_hw_vlan_offload_armed(void);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
         enum ask_hw_dir dir,
@@ -523,10 +525,25 @@ u8     nat_flags;
 #define ASK_NATF_DNAT	BIT(1)
 #define ASK_NATF_SPAT	BIT(2)
 #define ASK_NATF_DPAT	BIT(3)
-u8     nat_src_ip[16];
-u8     nat_dst_ip[16];
-__be16 nat_sport;
-__be16 nat_dport;
+	u8     nat_src_ip[16];
+	u8     nat_dst_ip[16];
+	__be16 nat_sport;
+	__be16 nat_dport;
+
+	/*
+	 * T-M6-8: VLAN pop/push edit carried with the stored flow so
+	 * DESTROY/pending/neighbour rebuilds preserve the exact action intent.
+	 * NOT part of the FE comparison key (VLAN TCI is excluded from the key
+	 * per fman-keygen-flow-key-spec §4.4); consumed only as FE opcode params
+	 * by the F-233 emitter. Single 802.1Q tag: vlan_push_tci is the
+	 * 16-bit TCI (PCP<<13 | DEI<<12 | VID) to insert; vlan_push_tpid is the
+	 * outer EtherType (0x8100). vlan_edit_flags gates each op.
+	 */
+	u8     vlan_edit_flags;
+#define ASK_VLANF_POP	BIT(0)	/* strip all ingress VLAN tags */
+#define ASK_VLANF_PUSH	BIT(1)	/* insert one egress 802.1Q tag */
+	__be16 vlan_push_tci;
+	__be16 vlan_push_tpid;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
@@ -564,9 +581,28 @@ enum ask_action_type {
 	ASK_ACTION_NAT_DST     = 4, /* rewrite IPv4/IPv6 destination address */
 	ASK_ACTION_NAPT_SPORT  = 5, /* rewrite L4 source port */
 	ASK_ACTION_NAPT_DPORT  = 6, /* rewrite L4 destination port */
+	/*
+	 * T-M6-8 (VLAN pop/push). The kernel flowtable expresses VLAN edits as
+	 * FLOW_ACTION_VLAN_POP (no fields) and FLOW_ACTION_VLAN_PUSH
+	 * ({vid, proto, prio}); translation arrives as POP+PUSH. ask_parse_action
+	 * decodes those into these typed actions. ask_intent_lower carries them
+	 * into the flow key but returns -EOPNOTSUPP unless the VLAN gate is armed
+	 * (the FE-VM emitter is F-233 and default-off until S0-S4 pass), so
+	 * VLAN flows fail closed to software. Single 802.1Q tag only; 802.1ad and
+	 * stacked tags are rejected at parse.
+	 */
+	ASK_ACTION_VLAN_POP    = 7, /* strip ingress 802.1Q tag(s) */
+	ASK_ACTION_VLAN_PUSH   = 8, /* insert one egress 802.1Q tag */
 };
 
-#define ASK_INTENT_MAX_ACTIONS 8
+/*
+ * T-M6-8: raised 8 -> 16 so a composed VLAN+NAT flow fits. The kernel routed
+ * emission for such a flow is eth_src(MANGLE x2) + eth_dst(MANGLE x2) [each ->
+ * one ASK_ACTION_L2_REWRITE] + VLAN_POP + VLAN_PUSH + SNAT + DNAT + SPORT +
+ * DPORT + CSUM + REDIRECT + implicit TTL_DEC ~= 13 typed actions. 16 matches
+ * the FE record's MAX_OPCODES ceiling. Overflow still fails closed (-E2BIG).
+ */
+#define ASK_INTENT_MAX_ACTIONS 16
 
 struct ask_flow_action_ent {
 	enum ask_action_type type;
@@ -580,6 +616,16 @@ struct ask_flow_action_ent {
 	union {
 		u8     addr[16];
 		__be16 port;
+		/*
+		 * T-M6-8: VLAN push tag. vid is host order (0-4095), tpid is the
+		 * __be16 EtherType (must be ETH_P_8021Q), prio is host order PCP
+		 * (0 from the flowtable path). POP carries no value.
+		 */
+		struct {
+			u16    vid;
+			__be16 tpid;
+			u8     prio;
+		} vlan;
 	} nat;
 };
 
@@ -631,6 +677,34 @@ static inline int ask_intent_add_nat(struct ask_flow_intent *in,
 		e->nat.port = port;
 	} else {
 		return -EINVAL;
+	}
+	in->n_actions++;
+	return 0;
+}
+
+/*
+ * T-M6-8: add a VLAN pop or push action. For ASK_ACTION_VLAN_PUSH, @vid is the
+ * host-order VLAN id, @tpid the __be16 EtherType (ETH_P_8021Q), @prio the PCP.
+ * For ASK_ACTION_VLAN_POP all value args are ignored.
+ */
+static inline int ask_intent_add_vlan(struct ask_flow_intent *in,
+				      enum ask_action_type type,
+				      u16 vid, __be16 tpid, u8 prio)
+{
+	struct ask_flow_action_ent *e;
+
+	if (in->n_actions >= ASK_INTENT_MAX_ACTIONS)
+		return -E2BIG;
+	if (type != ASK_ACTION_VLAN_POP && type != ASK_ACTION_VLAN_PUSH)
+		return -EINVAL;
+	e = &in->actions[in->n_actions];
+	e->type = type;
+	e->oif = 0;
+	memset(&e->nat, 0, sizeof(e->nat));
+	if (type == ASK_ACTION_VLAN_PUSH) {
+		e->nat.vlan.vid  = vid;
+		e->nat.vlan.tpid = tpid;
+		e->nat.vlan.prio = prio;
 	}
 	in->n_actions++;
 	return 0;

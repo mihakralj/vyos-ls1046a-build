@@ -44,6 +44,7 @@
 #include <linux/of.h>
 #include <linux/string.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/etherdevice.h>
 #include <linux/workqueue.h>
 #include <linux/jiffies.h>
@@ -82,8 +83,22 @@ u8 fman_port_get_id(struct fman_port *port);
 
 static inline int ask_dpaa_get_fman_port_id(struct net_device *dev, u8 *pid)
 {
-        struct fman_port *port = dpaa_get_rx_fman_port(dev);
+        struct fman_port *port;
 
+        /*
+         * T-M6-8: a routed flow whose ingress/egress is an 802.1Q VLAN
+         * sub-interface (eth3.100) resolves against the VIF netdev, but the
+         * FMan classifier and BMI port live on the PHYSICAL lower device. The
+         * VID and the pop/push intent come from the flow's VLAN match/actions
+         * (F-233), NOT from the netdev identity, so it is always correct to
+         * resolve the physical FMan port from the vif's real device here.
+         * dpaa_get_rx_fman_port() returns NULL for a vif, which previously left
+         * VLAN-routed flows unresolved (stuck pending -> SW fallback).
+         */
+        if (is_vlan_dev(dev))
+                dev = vlan_dev_real_dev(dev);
+
+        port = dpaa_get_rx_fman_port(dev);
         if (!port)
                 return -ENODEV;
         *pid = fman_port_get_id(port);
@@ -414,15 +429,20 @@ static atomic_t ask_flow_pending_overflow = ATOMIC_INIT(0);
  * dst_ip we stored in the defer entry.
  */
 static struct ask_flow_pending *
-ask_flow_pending_take_one(int ifindex, __be32 dst_ip)
+ask_flow_pending_take_one(int ifindex, int alt_ifindex, __be32 dst_ip)
 {
         struct ask_flow_pending *p, *tmp;
         struct ask_flow_pending *ret = NULL;
 
         spin_lock_bh(&ask_flow_pending_lock);
         list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+                /* T-M6-8: VLAN neighbour events arrive on the vif while
+                 * pending entries may be keyed on the physical lower device.
+                 * Match either form (alt_ifindex==ifindex for non-VLAN). */
                 if ((p->egress_ifindex == ifindex ||
-                     p->ingress_ifindex == ifindex) &&
+                     p->ingress_ifindex == ifindex ||
+                     p->egress_ifindex == alt_ifindex ||
+                     p->ingress_ifindex == alt_ifindex) &&
                     p->dst_ip == dst_ip) {
                         list_del(&p->node);
                         ask_flow_pending_count--;
@@ -528,19 +548,32 @@ static int ask_flow_pending_enqueue(u64 cookie,
  * closes the historical PR14z8 "deferred-insert OK=0" gap (the old inline call
  * from the atomic notifier could not complete a GFP_KERNEL insert).
  */
-void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
-{
+ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
+ {
         struct ask_flow_pending *p;
         struct ask_flow_table *t;
         u32 hw_id = 0;
         int rc;
         unsigned int drained = 0;
+        int drain_ifindex;
 
         if (!dev)
                 return;
 
-        pr_info_ratelimited("ask: neigh: resolved dev=%s ifindex=%d dst_ip=%pI4 pending_count=%u\n",
-                            netdev_name(dev), dev->ifindex, &dst_ip,
+        /*
+         * T-M6-8: the ARP neighbour for a VLAN-egress next-hop lives on the
+         * 802.1Q vif (e.g. eth3.100), so this callback fires with the vif dev.
+         * But pending entries are keyed on the PHYSICAL egress/ingress ifindex
+         * (META-corrected at REPLACE), so a vif ifindex would never match and
+         * the reverse (PUSH) direction would stay pending forever -> data
+         * stall. Drain against the physical lower-device ifindex. Neighbour
+         * re-resolution below stays on @dev (the vif) where the ARP entry is.
+         */
+        drain_ifindex = is_vlan_dev(dev) ? vlan_dev_real_dev(dev)->ifindex
+                                         : dev->ifindex;
+
+        pr_info_ratelimited("ask: neigh: resolved dev=%s ifindex=%d (drain_ifindex=%d) dst_ip=%pI4 pending_count=%u\n",
+                            netdev_name(dev), dev->ifindex, drain_ifindex, &dst_ip,
                             READ_ONCE(ask_flow_pending_count));
 
         t = ask_flow_default_table();
@@ -548,11 +581,12 @@ void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip)
                 return;
 
         /*
-         * Drain ALL pending entries waiting on (dev->ifindex, dst_ip) — a
+         * Drain ALL pending entries waiting on (drain_ifindex, dst_ip) — a
          * single ARP resolution can unblock multiple cookies if several
          * flows are heading at the same next-hop.
          */
-        while ((p = ask_flow_pending_take_one(dev->ifindex, dst_ip))) {
+        while ((p = ask_flow_pending_take_one(drain_ifindex, dev->ifindex,
+                                              dst_ip))) {
                 drained++;
                 /* Re-resolve so we always pick up the fresh n->ha. */
                 ask_resolve_neigh_v4(dev, dst_ip,
@@ -920,6 +954,28 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
                                 rcu_read_unlock();
                                 continue;
                         }
+                        /*
+                         * T-M6-8: a reverse VLAN direction that PUSHes a tag
+                         * egresses through a VLAN vif (eth3.100), but the
+                         * pending entry is keyed on the physical FMan port
+                         * (eth3). ARP/ND belongs to the VIF: the physical dev
+                         * has a permanent FAILED neigh for the tagged subnet,
+                         * so polling it can never resolve and the PUSH record
+                         * stays pending forever. Map the physical candidate to
+                         * its VLAN upper by the action's TPID/VID, and do ONLY
+                         * the neighbour lookup there. FMan port/TX-FQ remain
+                         * physical (6faab5aa).
+                         */
+                        if (p->key.vlan_edit_flags & ASK_VLANF_PUSH) {
+                                struct net_device *vlan_dev;
+                                u16 vid = ntohs(p->key.vlan_push_tci) &
+                                          VLAN_VID_MASK;
+
+                                vlan_dev = __vlan_find_dev_deep_rcu(
+                                        dev_try, p->key.vlan_push_tpid, vid);
+                                if (vlan_dev)
+                                        dev_try = vlan_dev;
+                        }
                         n = neigh_lookup(&arp_tbl, &dst_key, dev_try);
                         rcu_read_unlock();
                         if (!n)
@@ -1233,17 +1289,30 @@ int ask_intent_lower(const struct ask_flow_intent *in,
                         } else {
                                 return -EOPNOTSUPP;
                         }
-                        if (in->actions[i].type == ASK_ACTION_NAT_SRC)
-                                flags |= ASK_ACT_NAT_SRC;
-                        else if (in->actions[i].type == ASK_ACTION_NAT_DST)
-                                flags |= ASK_ACT_NAT_DST;
-                        else
-                                flags |= ASK_ACT_PAT;
-                        break;
-                default:
-                        return -EOPNOTSUPP;
-                }
-        }
+			if (in->actions[i].type == ASK_ACTION_NAT_SRC)
+				flags |= ASK_ACT_NAT_SRC;
+			else if (in->actions[i].type == ASK_ACTION_NAT_DST)
+				flags |= ASK_ACT_NAT_DST;
+			else
+				flags |= ASK_ACT_PAT;
+			break;
+		case ASK_ACTION_VLAN_POP:
+		case ASK_ACTION_VLAN_PUSH:
+			/* T-M6-8: admitted to the legacy flags only when the VLAN
+			 * gate is armed (default OFF); otherwise fail closed to
+			 * software. Values ride key->vlan_*; preflight re-checks the
+			 * gate + eth0 exclusion, and ask_fe_flow_insert fills
+			 * action.vlan_* only when armed, keeping the F-233
+			 * emitter dormant otherwise. */
+			if (!ask_hw_vlan_offload_armed())
+				return -EOPNOTSUPP;
+			flags |= (in->actions[i].type == ASK_ACTION_VLAN_POP)
+					? ASK_ACT_VLAN_POP : ASK_ACT_VLAN_PUSH;
+			break;
+		default:
+			return -EOPNOTSUPP;
+		}
+	}
 
         if (oif == 0)
                 return -EOPNOTSUPP;
@@ -1282,11 +1351,17 @@ static int ask_parse_action(struct flow_cls_offload *f,
          * chunks the kernel emits (one flow_action per 32-bit word) before
          * adding a single typed action.
          */
-        u8  v6_snat[16] = {0}, v6_dnat[16] = {0};
-        u32 v6_snat_seen = 0, v6_dnat_seen = 0;
-        bool seen_l3_nat = false;
-        u32 oif = 0;
-        int i, rc;
+	u8  v6_snat[16] = {0}, v6_dnat[16] = {0};
+	u32 v6_snat_seen = 0, v6_dnat_seen = 0;
+	bool seen_l3_nat = false;
+	/*
+	 * T-M6-8: single-tag depth guard. The kernel flowtable can emit up to
+	 * NF_FLOW_TABLE_ENCAP_MAX=2 VLAN_POP/PUSH (QinQ); this release supports
+	 * exactly one tag per direction, so a second pop or push fails closed.
+	 */
+	u8  vlan_pop_seen = 0, vlan_push_seen = 0;
+	u32 oif = 0;
+	int i, rc;
 
         flow_action_for_each(i, act, &rule->action) {
                 switch (act->id) {
@@ -1456,10 +1531,39 @@ static int ask_parse_action(struct flow_cls_offload *f,
                 case FLOW_ACTION_ADD:
                         pr_info_ratelimited("ask: flow_offload: FLOW_ACTION_ADD (NAT field add) not offloaded — SW fallback (T-M6-7)\n");
                         return -EOPNOTSUPP;
-                case FLOW_ACTION_VLAN_PUSH:
-                case FLOW_ACTION_VLAN_POP:
-                        pr_info_ratelimited("ask: flow_offload: VLAN push/pop not offloaded — SW fallback (T-M6-8)\n");
-                        return -EOPNOTSUPP;
+		case FLOW_ACTION_VLAN_POP:
+			/* T-M6-8: POP has no action fields. Single ingress tag only;
+			 * the kernel omits POP when in_vlan_ingress says HW already
+			 * stripped it, so every POP reaching us must be represented. */
+			if (++vlan_pop_seen > 1)
+				return -EOPNOTSUPP;
+			rc = ask_intent_add_vlan(&intent, ASK_ACTION_VLAN_POP,
+						 0, 0, 0);
+			if (rc)
+				return rc;
+			break;
+		case FLOW_ACTION_VLAN_PUSH:
+			/* Single 802.1Q tag only. 802.1ad/QinQ and tc-only PCP/DEI
+			 * semantics stay in software until independently proven. */
+			if (++vlan_push_seen > 1)
+				return -EOPNOTSUPP;
+			if (act->vlan.proto != htons(ETH_P_8021Q) ||
+			    act->vlan.vid > VLAN_VID_MASK ||
+			    act->vlan.prio > 7)
+				return -EOPNOTSUPP;
+			rc = ask_intent_add_vlan(&intent, ASK_ACTION_VLAN_PUSH,
+						 act->vlan.vid, act->vlan.proto,
+						 act->vlan.prio);
+			if (rc)
+				return rc;
+			break;
+		case FLOW_ACTION_VLAN_MANGLE:
+		case FLOW_ACTION_VLAN_PUSH_ETH:
+		case FLOW_ACTION_VLAN_POP_ETH:
+			/* tc-only VLAN mutation / Ethernet-header actions are not emitted
+			 * by the routed nft flowtable path. Fail closed rather than silently
+			 * applying incomplete semantics. */
+			return -EOPNOTSUPP;
                 default:
                         pr_info_ratelimited("ask: flow_offload: parse_action: unhandled act->id=%u (treating as -EOPNOTSUPP)\n",
                                             act->id);
@@ -1496,14 +1600,25 @@ static int ask_parse_action(struct flow_cls_offload *f,
                         key->nat_flags |= ASK_NATF_SPAT;
                         key->nat_sport = e->nat.port;
                         break;
-                case ASK_ACTION_NAPT_DPORT:
-                        key->nat_flags |= ASK_NATF_DPAT;
-                        key->nat_dport = e->nat.port;
-                        break;
-                default:
-                        break;
-                }
-        }
+		case ASK_ACTION_NAPT_DPORT:
+			key->nat_flags |= ASK_NATF_DPAT;
+			key->nat_dport = e->nat.port;
+			break;
+		case ASK_ACTION_VLAN_POP:
+			key->vlan_edit_flags |= ASK_VLANF_POP;
+			break;
+		case ASK_ACTION_VLAN_PUSH:
+			key->vlan_edit_flags |= ASK_VLANF_PUSH;
+			/* Compose the 16-bit TCI: PCP<<13 | DEI(0) | VID. The
+			 * flowtable path supplies prio=0; DEI has no Linux field. */
+			key->vlan_push_tci = htons(((u16)e->nat.vlan.prio << VLAN_PRIO_SHIFT) |
+						   (e->nat.vlan.vid & VLAN_VID_MASK));
+			key->vlan_push_tpid = e->nat.vlan.tpid;
+			break;
+		default:
+			break;
+		}
+	}
 
         /* Lower the canonical intent to the legacy (oif, action_flags) pair.
          * For the IPv4-unicast flow this yields the exact pre-A1 values.
@@ -1836,12 +1951,46 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
                                       : ask_hw_nat44_offload_armed();
                 if (!nat_ok)
                         return -EOPNOTSUPP;
-                action.nat_flags = key->nat_flags;
-                memcpy(action.nat_sip, key->nat_src_ip, 16);
-                memcpy(action.nat_dip, key->nat_dst_ip, 16);
-                action.nat_sport = key->nat_sport;
-                action.nat_dport = key->nat_dport;
-        }
+		action.nat_flags = key->nat_flags;
+		memcpy(action.nat_sip, key->nat_src_ip, 16);
+		memcpy(action.nat_dip, key->nat_dst_ip, 16);
+		action.nat_sport = key->nat_sport;
+		action.nat_dport = key->nat_dport;
+	}
+
+	/*
+	 * T-M6-8 arming: copy the parsed VLAN edit into the public FMan action
+	 * only when the VLAN gate is armed. Disarmed (default), action was
+	 * memset(0) above so vlan_flags stays 0 -> the F-233 emitter's
+	 * `if (vlan && vlan->flags)` is skipped and the FE record is
+	 * byte-identical to the routed/NAT path. Same module-param race close
+	 * as NAT: never publish a VLAN flow's record without the tag op.
+	 * VLAN flag bit values intentionally match FMAN_PCD_VLANF_* (1/2).
+	 */
+	if (key->vlan_edit_flags) {
+		if (!ask_hw_vlan_offload_armed())
+			return -EOPNOTSUPP;
+		action.vlan_flags = key->vlan_edit_flags;
+		action.vlan_tci   = key->vlan_push_tci;
+		action.vlan_tpid  = key->vlan_push_tpid;
+		/*
+		 * T-M6-8 DIAGNOSTIC: log exactly what VLAN edit each DIRECTION's
+		 * record carries, keyed by the flow 5-tuple + oif, so a single
+		 * board run unambiguously shows POP on the ingress-strip direction
+		 * and PUSH (with TCI/TPID) on the egress-tag direction — without
+		 * fighting /dev/mem capture timing. Ratelimited; drop once the
+		 * push/pop datapath is validated.
+		 */
+		pr_info_ratelimited("ask: VLAN-DIAG insert %pI4:%u->%pI4:%u proto=%u txfq=0x%x port=0x%02x flags=%s%s tci=0x%04x tpid=0x%04x nh=%pM em=%pM\n",
+				    &key->src_ip[0], ntohs(key->sport),
+				    &key->dst_ip[0], ntohs(key->dport),
+				    key->l4_proto, tx_fqid, key->port_id,
+				    (key->vlan_edit_flags & ASK_VLANF_POP) ? "POP" : "",
+				    (key->vlan_edit_flags & ASK_VLANF_PUSH) ? "PUSH" : "",
+				    ntohs(key->vlan_push_tci),
+				    ntohs(key->vlan_push_tpid),
+				    key->next_hop_mac, key->egress_mac);
+	}
 
         /* F-195/F-204 contract: the second argument remains exclusively the
          * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
@@ -1902,6 +2051,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 {
         struct ask_flow_table *t = ask_flow_default_table();
         struct net_device *egress_dev = NULL;
+        struct net_device *neigh_dev = NULL;
         struct ask_flow_key key;
         __be32 dst_ip = 0;
         struct in6_addr dst_ip6 = {};   /* T-M6-1: v6 next-hop for neigh resolve */
@@ -1910,6 +2060,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         u32 action_flags = 0;
         u32 oif = 0;
         u32 generation;
+        u32 true_iif = 0;
+        bool have_meta_iif = false;
         int rc;
 
         if (!t) {
@@ -2002,6 +2154,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                                             ingress_dev ? netdev_name(ingress_dev) : "?",
                                                             f->cookie);
                                 key.iif = mm.key->ingress_ifindex;
+                                /* T-M6-8: the authoritative true ingress for
+                                 * the egress-echo filter below. */
+                                true_iif = mm.key->ingress_ifindex;
+                                have_meta_iif = true;
                         }
                 }
         }
@@ -2110,7 +2266,28 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * true ingress pid for each cookie and routes FWD vs REV
          * pipelines correctly.
          */
-        if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
+        /*
+         * T-M6-8 FIX: the old heuristic `ingress_dev == egress_dev` broke for
+         * VLAN flows. PR14z11 above overrides egress_dev with the opposite
+         * conntrack tuple's iifidx, which is the PHYSICAL device (eth3), while
+         * the block dev is also physical eth3 — so a HELGA(eth4)->.110(eth3.100)
+         * cookie delivered to the eth3 block had ingress_dev==egress_dev==eth3
+         * and was WRONGLY skipped as an echo, collapsing both directions onto
+         * one and cross-assigning the VLAN action (POP vs PUSH). The rule
+         * already carries the AUTHORITATIVE true ingress in
+         * FLOW_DISSECTOR_KEY_META.ingress_ifindex (captured above as true_iif);
+         * the egress-side echo is exactly the delivery whose block dev is NOT
+         * the true ingress. Use that when available; fall back to the old
+         * heuristic only for rules without META (should not happen on 6.18).
+         */
+        if (have_meta_iif) {
+                if (ingress_dev && ingress_dev->ifindex != true_iif) {
+                        pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
+                                            f->cookie, netdev_name(ingress_dev),
+                                            true_iif);
+                        return 0;
+                }
+        } else if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
                                     f->cookie, netdev_name(ingress_dev));
                 return 0;
@@ -2188,12 +2365,41 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * If the neighbour is not yet resolved, the HW path returns -EAGAIN
          * and the SW path takes the flow until the neighbour completes.
          */
+        /*
+         * T-M6-8: for a reverse VLAN direction that PUSHes a tag, egress_dev is
+         * the PHYSICAL port (eth3, from PR14z11), but the next-hop ARP/ND lives
+         * on the VLAN vif (eth3.100) — the physical port holds only a permanent
+         * FAILED neigh for the tagged subnet. Resolve the neighbour on the vif
+         * (matched by the action's TPID/VID); egress_mac is identical (the vif
+         * inherits the physical MAC, which ask_resolve_neigh uses). FMan
+         * port/TX-FQ stay physical. If the neigh isn't cached yet the flow
+         * parks pending and the poll (also vif-aware) drains it later.
+         */
+        neigh_dev = egress_dev;
+        if (!is_v6 && (key.vlan_edit_flags & ASK_VLANF_PUSH) &&
+            egress_dev && !is_vlan_dev(egress_dev)) {
+                struct net_device *vdev;
+                u16 vid = ntohs(key.vlan_push_tci) & VLAN_VID_MASK;
+
+                rcu_read_lock();
+                vdev = __vlan_find_dev_deep_rcu(egress_dev,
+                                                key.vlan_push_tpid, vid);
+                if (vdev)
+                        dev_hold(vdev);
+                rcu_read_unlock();
+                if (vdev)
+                        neigh_dev = vdev;
+        }
+
         if (is_v6)
-                ask_resolve_neigh_v6(egress_dev, &dst_ip6,
+                ask_resolve_neigh_v6(neigh_dev, &dst_ip6,
                                      key.next_hop_mac, key.egress_mac);
         else
-                ask_resolve_neigh_v4(egress_dev, dst_ip,
+                ask_resolve_neigh_v4(neigh_dev, dst_ip,
                                      key.next_hop_mac, key.egress_mac);
+
+        if (neigh_dev != egress_dev)
+                dev_put(neigh_dev);
 
         /*
          * F-111: Reject multicast/broadcast next-hop MACs before HW insert.

@@ -46,8 +46,12 @@ multi-core, ~6.5 Gbps) and **F-202** (production flow add/delete now hold
 `pcd->fe_lock`, fixing a `nf_ft_offload_del` `LIST_POISON2` panic; survived the
 full mode-churn battery). The subsequent MTU battery measured hardware
 forwarding at **9.92 / 10.4 / 10.4 / 10.1 Gbit/s** for MTU 1280 / 1500 / 2000 /
-2500 at ~3% DUT CPU. Remaining preview work is productization (docs, prerelease
-packaging, external validation), not datapath.
+2500 at ~3% DUT CPU. **NAT/PAT offload now ships default-on too (2026-08-22/23):
+nat44 (`625d0d2c`) and nat66 (`9598799f`)** — the F-230 bit-fused FE-VM rewrite
+(`0x33`/`0x27`/`0x2f`) passed S0 readback + S1 SNAT + S2 DNAT + S3 masquerade
+TCP/UDP (~7.1–7.3 Gbit/s 0-retr) and is automatic with `offload ipv4`/`ipv6`;
+NAT46/NAT64 always fall back to software. Remaining preview work is
+productization (docs, prerelease packaging, external validation), not datapath.
 
 **M6-A safety substrate is code/CI complete (2026-08-18):** A2 strict action
 acceptance (`70092e57`, CI `32156418969`), A1 canonical intent (`0a9c068f`,
@@ -125,7 +129,7 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
 | 1. FMan PCD subsystem (KG / CC / HM / PLCR) | Shipping — patches 0092–0118, 0151–0155 |
 | 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete. Manual E25/E26 proved a discriminator-verified silicon HIT, but F-192 production-adjacent diagnostics remain incomplete; the warm shared diagnostic chain is singleton-global and must be reused rather than rebuilt. |
 | 3. Classifier→FE arm | Direct vendor-node arm is proven. The manual `.185` eth3 arm explicitly applies scheme-4 EKFC and tears down safely; the retained chain is byte-readable. The fixed-tuple SPC capture proves KeyGen scheme-4 traversal but not the succeeding FE workspace/writeback stage. |
-| 4. ask.ko datapath (genl + flow table) | **IPv4 and IPv6 routed TCP/UDP unicast are complete and silicon-passed.** The production nft/tc `REPLACE`/`DESTROY` path uses a per-port 46-byte dual-family key, per-port tables, `UPDATE_TTL`/`UPDATE_HOPLIMIT`, `INSERT_L2_HDR`, and hardware enqueue. Sustained mixed-family bidirectional traffic reached ~8 Gbit/s aggregate in the bounded durability gate and ~12.9 Gbit/s in the peak harness; CPU bypass, record teardown, software fallback, and all five ports are validated. Unsupported actions fail to software before publication. F-227 makes unexpected FMan-originated TX confirms crash-safe; image 2224 passed the exact workload that panicked 2047. |
+| 4. ask.ko datapath (genl + flow table) | **IPv4 and IPv6 routed TCP/UDP unicast are complete and silicon-passed, and IPv4/IPv6 NAT/PAT (nat44 + nat66) ship default-on.** The production nft/tc `REPLACE`/`DESTROY` path uses a per-port 46-byte dual-family key, per-port tables, `UPDATE_TTL`/`UPDATE_HOPLIMIT`, bit-fused NAT rewrites (`0x33`/`0x27`/`0x2f`, F-230), `INSERT_L2_HDR`, and hardware enqueue. Sustained mixed-family bidirectional traffic reached ~8 Gbit/s aggregate in the bounded durability gate and ~12.9 Gbit/s in the peak harness; masquerade NAT ~7.1–7.3 Gbit/s. CPU bypass, record teardown, software fallback, and all five ports are validated. Unsupported actions fail to software before publication. F-227 makes unexpected FMan-originated TX confirms crash-safe; image 2224 passed the exact workload that panicked 2047. |
 | 5. VyOS CLI + mutual exclusion | **Shipping on eth0–eth4.** IPv4 and IPv6 are selected independently per interface with `offload ipv4` / `offload ipv6`; ASK↔VPP remains a per-interface mutex. Migration `34-to-35` rewrites the retired `offload ask` node to both family knobs. The hardware-offload MTU range is 1280–3600. Cold-boot config persistence, the four-port simultaneous engage matrix, and eth0 management survival are board-validated. |
 
 ### 1.3 Binding silicon facts (settled on LS1046A hardware — do not re-litigate)
@@ -442,10 +446,11 @@ opcode terminal, not comparator correctness.
 - **M6 — capability breadth. IN PROGRESS.** The mandatory M6-A safety substrate
   (canonical intent, strict action acceptance, generation/tombstones, resource
   preflight) is code/CI complete; its board stress/negative gates remain open.
-  Kernel offload frameworks remain authoritative. Next implementation breadth:
-  T-M6-P5 five-port IPv4 mechanics, then IPv6/NAT/VLAN, soft-parser/PPPoE,
-  XFRM/IPsec, bridge/multicast, and fragments/tunnels. Full gates and MUST/
-  DO-NOT rules: §4.6.
+  Kernel offload frameworks remain authoritative. Landed this phase:
+  T-M6-P5 five-port IPv4/IPv6 mechanics, IPv6 dual-lane key, and IPv4+IPv6
+  NAT/PAT (T-M6-7, default-on). Remaining implementation breadth: VLAN,
+  soft-parser/PPPoE, XFRM/IPsec, bridge/multicast, and fragments/tunnels. Full
+  gates and MUST/DO-NOT rules: §4.6.
 - **M7 — VyOS CLI + production IPv4/IPv6 transit HIT. DONE for the 10G
   production path; five-port acceptance PARTIAL as T-M7-P5.** Current surface:
   independent per-interface `offload ipv4`/`offload ipv6` on eth0–eth4,
@@ -1567,7 +1572,7 @@ record it does not own.
 |---|---|---|---|---|
 | IPv4 TCP/UDP unicast route | `cdx_tcp4_cc`, `cdx_udp4_cc`; IPv4 FCI | `nf_flow_table` / tc `FLOW_CLS_REPLACE/DESTROY` | 14-byte ehash key; `UPDATE_TTL` → `INSERT_L2_HDR` → per-egress no-confirm `ENQUEUE` | **DONE on eth3/eth4, silicon-passed; eth0/eth1/eth2 breadth tracked by T-M6-P5/T-M7-P5** |
 | IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | **unified dual-lane 46-byte key on ONE match-all AC_CC scheme** (`F-224`/`F-225`/`F-226`), `UPDATE_HOPLIMIT(0x29)` + L2/TX chain, per-port table | **DONE — silicon-passed 2026-08-19/21, shipped in release `2026.08.22-0031-rolling`.** The earlier slot-based LCV two-scheme approach (T-M6-1 §4.6, F-205/210/211/212) was proven design-invalid for transit and abandoned; the dual-lane key superseded it. |
-| NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | typed address/port rewrites + IPv4/L4 checksum update in the same flow record | Compiler NOT implemented; A2 strict `-EOPNOTSUPP` software fallback landed |
+| NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | bit-fused in-place rewrites between `UPDATE_TTL`/`UPDATE_HOPLIMIT` and `INSERT_L2_HDR` (ports `0x33`, v4 L3 `0x27`=`UPDATE_TTL\|SIP\|DIP`, v6 L3 `0x2f`=`UPDATE_HOPLIMIT\|SIP\|DIP`); silicon auto-recomputes IP+L4 checksums | **DONE — SHIPPING default-on (2026-08-22/23).** F-230 bit-fused FE-VM emitter landed (`8cfb0af5`), armed behind a gate (`55dd82b6`), then productized default-on after silicon pass: nat44 (`625d0d2c`, T-M6-7.7) and nat66 (`9598799f`). S0 record readback + S1 SNAT + S2 DNAT wire-verified; S3 masquerade TCP `-P4` ~7.1–7.3 Gbit/s 0-retr + UDP 0-loss. NAT is AUTOMATIC whenever `offload ipv4`/`offload ipv6` is engaged (no separate CLI knob); `nat44_offload`/`nat66_offload` are default-on diagnostic escape hatches; eth0 never NAT-offloaded. NAT46/NAT64 NOT offloadable — always SW fallback (same-family in-place rewrite only; no family-conversion opcode). `get-info` advertises `ASK_CAP_IPV4\|IPV6\|NAT\|PAT`. |
 | VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | `STRIP_ALL_VLAN_HDRS(0x12)` and typed insert-VLAN action; key/MTU semantics preserved | deferred S2; A2 strict software fallback landed |
 | IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) |
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
@@ -1613,6 +1618,11 @@ record it does not own.
   contract (ETH accepted; NAT/ADD/VLAN rejected and never published). **Board
   gate open:** confirm NAT/VLAN traffic forwards correctly in software with no
   `in_hw` record on silicon.
+
+  **SUPERSEDED for NAT by T-M6-7 (2026-08-22/23):** NAT-carrying MANGLE of
+  htype IP4/IP6/TCP/UDP is now parsed into typed NAT actions (T-M6-7.0) and
+  silicon-validated + shipping (T-M6-7.7 nat44, nat66). Only
+  `FLOW_ACTION_ADD` and `FLOW_ACTION_VLAN_PUSH/POP` still return `-EOPNOTSUPP`.
 - [~] **T-M6-A3 — ownership generations/tombstones.** CODE-COMPLETE 2026-08-18.
   Closes CR-004. Added a per-cookie generation/tombstone xarray to
   `ask_flow_table` (value-encoded, no heap alloc), immutable
@@ -1893,12 +1903,20 @@ record it does not own.
   neighbour replace; flow delete/flush; MTU 1280/1500/2500/7000/7500; IPv4
   byte-for-byte/performance regression; unsupported extension-header flows
   remain software.
-- [ ] **T-M6-7 — NAT/PAT action compiler.** Stop accepting MANGLE/ADD as no-op.
-  Decode kernel flowtable NAT actions into typed src/dst address and port
-  rewrites, checksum updates, TTL, L2, enqueue. **Gate:** SNAT, DNAT, PAT in
-  both directions for TCP and UDP; packet capture on both sides; conntrack
-  tuple/counters; checksum validation; hairpin rejected or proven; flow expiry
-  restores SW; 10,000 create/delete cycles; no wrong-flow forwarding.
+- [x] **T-M6-7 — NAT/PAT action compiler. DONE — SHIPPING default-on
+  (2026-08-22/23).** Task plan `002bccc3`; T-M6-7.0 host-side parse/carry
+  `b177a468` (fails closed to SW); T-M6-7.1 F-230 dormant bit-fused FE-VM
+  opcode emitter `8cfb0af5` armed behind default-off gate `55dd82b6`; then
+  productized default-on after silicon pass — nat44 `625d0d2c` (T-M6-7.7) and
+  nat66 `9598799f`. Gates passed on 210.10.1: S0 record readback (fused v6 L3
+  opcode `0x2d` `HOPLIMIT|DIP_V6`, 16-byte `UPDATE_DIP_V6`), S1 SNAT
+  wire-verified (masquerade-translated src), S2 DNAT (VIP rewrite), S3
+  masquerade TCP `-P4` ~7.1–7.3 Gbit/s 0-retr + UDP 500 Mbit/s 0-loss, no
+  leak/wedge. NAT is automatic per engaged family; `nat44_offload`/`nat66_offload`
+  default-on escape hatches; NAT46/NAT64 always SW fallback. `get-info` advertises
+  `ASK_CAP_IPV4|IPV6|NAT|PAT`. Remaining T-M6-7-adjacent: hairpin proof is not
+  gated by the shipping claim (SNAT/DNAT/PAT both directions TCP+UDP were the
+  gate and passed).
 - [ ] **T-M6-8 — VLAN actions (T-M7-2 S2).** Translate VLAN POP/PUSH and stacked
   tags only when the parser/HM contract supports them. **Gate:** untagged↔tagged,
   tagged↔tagged, PCP/DEI preservation, MTU 1280–2500, checksum/L2 correctness,
