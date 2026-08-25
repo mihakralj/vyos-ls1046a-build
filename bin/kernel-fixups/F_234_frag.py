@@ -67,7 +67,12 @@ if "param_end = enqueue_off + 16;" not in _src:
 if "struct fman_pcd_vlan_params *vlan" not in _src:
     print("### F-234: FATAL: F-233 VLAN params absent (F-233 must precede F-234)")
     sys.exit(1)
-if "F-234" in _src:
+# NOTE: do NOT guard on the bare string "F-234" -- F-233 injects a caller
+# comment containing "F-234" (the fman_pcd_get_frag_muram_off() call site), so
+# that would false-positive and skip the helper DEFINITION, leaving an implicit
+# declaration (CI runs 32900442342 / 32900807163). Guard on this fixup's own
+# unique definition instead.
+if "static u32 fman_pcd_get_frag_muram_off(struct fman_pcd *pcd)\n{" in _src:
     print("### F-234: already applied")
     sys.exit(0)
 
