@@ -2020,6 +2020,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         u32 action_flags = 0;
         u32 oif = 0;
         u32 generation;
+        u32 true_iif = 0;
+        bool have_meta_iif = false;
         int rc;
 
         if (!t) {
@@ -2112,6 +2114,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                                             ingress_dev ? netdev_name(ingress_dev) : "?",
                                                             f->cookie);
                                 key.iif = mm.key->ingress_ifindex;
+                                /* T-M6-8: the authoritative true ingress for
+                                 * the egress-echo filter below. */
+                                true_iif = mm.key->ingress_ifindex;
+                                have_meta_iif = true;
                         }
                 }
         }
@@ -2220,7 +2226,28 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * true ingress pid for each cookie and routes FWD vs REV
          * pipelines correctly.
          */
-        if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
+        /*
+         * T-M6-8 FIX: the old heuristic `ingress_dev == egress_dev` broke for
+         * VLAN flows. PR14z11 above overrides egress_dev with the opposite
+         * conntrack tuple's iifidx, which is the PHYSICAL device (eth3), while
+         * the block dev is also physical eth3 — so a HELGA(eth4)->.110(eth3.100)
+         * cookie delivered to the eth3 block had ingress_dev==egress_dev==eth3
+         * and was WRONGLY skipped as an echo, collapsing both directions onto
+         * one and cross-assigning the VLAN action (POP vs PUSH). The rule
+         * already carries the AUTHORITATIVE true ingress in
+         * FLOW_DISSECTOR_KEY_META.ingress_ifindex (captured above as true_iif);
+         * the egress-side echo is exactly the delivery whose block dev is NOT
+         * the true ingress. Use that when available; fall back to the old
+         * heuristic only for rules without META (should not happen on 6.18).
+         */
+        if (have_meta_iif) {
+                if (ingress_dev && ingress_dev->ifindex != true_iif) {
+                        pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
+                                            f->cookie, netdev_name(ingress_dev),
+                                            true_iif);
+                        return 0;
+                }
+        } else if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
                                     f->cookie, netdev_name(ingress_dev));
                 return 0;
