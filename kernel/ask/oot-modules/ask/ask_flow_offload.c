@@ -954,6 +954,28 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
                                 rcu_read_unlock();
                                 continue;
                         }
+                        /*
+                         * T-M6-8: a reverse VLAN direction that PUSHes a tag
+                         * egresses through a VLAN vif (eth3.100), but the
+                         * pending entry is keyed on the physical FMan port
+                         * (eth3). ARP/ND belongs to the VIF: the physical dev
+                         * has a permanent FAILED neigh for the tagged subnet,
+                         * so polling it can never resolve and the PUSH record
+                         * stays pending forever. Map the physical candidate to
+                         * its VLAN upper by the action's TPID/VID, and do ONLY
+                         * the neighbour lookup there. FMan port/TX-FQ remain
+                         * physical (6faab5aa).
+                         */
+                        if (p->key.vlan_edit_flags & ASK_VLANF_PUSH) {
+                                struct net_device *vlan_dev;
+                                u16 vid = ntohs(p->key.vlan_push_tci) &
+                                          VLAN_VID_MASK;
+
+                                vlan_dev = __vlan_find_dev_deep_rcu(
+                                        dev_try, p->key.vlan_push_tpid, vid);
+                                if (vlan_dev)
+                                        dev_try = vlan_dev;
+                        }
                         n = neigh_lookup(&arp_tbl, &dst_key, dev_try);
                         rcu_read_unlock();
                         if (!n)
@@ -2029,6 +2051,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 {
         struct ask_flow_table *t = ask_flow_default_table();
         struct net_device *egress_dev = NULL;
+        struct net_device *neigh_dev = NULL;
         struct ask_flow_key key;
         __be32 dst_ip = 0;
         struct in6_addr dst_ip6 = {};   /* T-M6-1: v6 next-hop for neigh resolve */
@@ -2342,12 +2365,41 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * If the neighbour is not yet resolved, the HW path returns -EAGAIN
          * and the SW path takes the flow until the neighbour completes.
          */
+        /*
+         * T-M6-8: for a reverse VLAN direction that PUSHes a tag, egress_dev is
+         * the PHYSICAL port (eth3, from PR14z11), but the next-hop ARP/ND lives
+         * on the VLAN vif (eth3.100) — the physical port holds only a permanent
+         * FAILED neigh for the tagged subnet. Resolve the neighbour on the vif
+         * (matched by the action's TPID/VID); egress_mac is identical (the vif
+         * inherits the physical MAC, which ask_resolve_neigh uses). FMan
+         * port/TX-FQ stay physical. If the neigh isn't cached yet the flow
+         * parks pending and the poll (also vif-aware) drains it later.
+         */
+        neigh_dev = egress_dev;
+        if (!is_v6 && (key.vlan_edit_flags & ASK_VLANF_PUSH) &&
+            egress_dev && !is_vlan_dev(egress_dev)) {
+                struct net_device *vdev;
+                u16 vid = ntohs(key.vlan_push_tci) & VLAN_VID_MASK;
+
+                rcu_read_lock();
+                vdev = __vlan_find_dev_deep_rcu(egress_dev,
+                                                key.vlan_push_tpid, vid);
+                if (vdev)
+                        dev_hold(vdev);
+                rcu_read_unlock();
+                if (vdev)
+                        neigh_dev = vdev;
+        }
+
         if (is_v6)
-                ask_resolve_neigh_v6(egress_dev, &dst_ip6,
+                ask_resolve_neigh_v6(neigh_dev, &dst_ip6,
                                      key.next_hop_mac, key.egress_mac);
         else
-                ask_resolve_neigh_v4(egress_dev, dst_ip,
+                ask_resolve_neigh_v4(neigh_dev, dst_ip,
                                      key.next_hop_mac, key.egress_mac);
+
+        if (neigh_dev != egress_dev)
+                dev_put(neigh_dev);
 
         /*
          * F-111: Reject multicast/broadcast next-hop MACs before HW insert.
