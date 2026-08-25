@@ -49,6 +49,7 @@
 #include <linux/types.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
@@ -1065,12 +1066,20 @@ static bool ask_hw_port_slot_available(struct ask_hw_pcd *h, u8 port_id)
 static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
 {
         struct net_device *dev;
+        struct net_device *phys;
         struct fman_port *port;
 
         dev = dev_get_by_index(&init_net, ifindex);
         if (!dev)
                 return -ENODEV;
-        port = dpaa_get_rx_fman_port(dev);
+        /*
+         * T-M6-8: if the flow's ingress/egress is an 802.1Q VLAN vif, the FMan
+         * BMI port lives on the physical lower device. Resolve through it. The
+         * VID + pop/push intent ride the flow VLAN match/actions, so this only
+         * corrects the port lookup. (Mirrors ask_dpaa_get_fman_port_id.)
+         */
+        phys = is_vlan_dev(dev) ? vlan_dev_real_dev(dev) : dev;
+        port = dpaa_get_rx_fman_port(phys);
         if (!port) {
                 dev_put(dev);
                 return -ENODEV;
@@ -1088,6 +1097,8 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_inst;
         struct net_device *dev;
+        struct net_device *phys;
+        u32 phys_ifindex;
         unsigned int slot;
         int rc;
 
@@ -1105,15 +1116,21 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
         if (!dev)
                 return -ENODEV;
 
-        slot = ifindex % ASK_HW_NOCONF_SLOTS;
+        /* T-M6-8: egress may be an 802.1Q VLAN vif; the DPAA TX FQ belongs to
+         * the physical lower device. Resolve + cache by the PHYSICAL ifindex so
+         * a vif and its parent share the one per-port no-confirm FQ. */
+        phys = is_vlan_dev(dev) ? vlan_dev_real_dev(dev) : dev;
+        phys_ifindex = phys->ifindex;
+
+        slot = phys_ifindex % ASK_HW_NOCONF_SLOTS;
         if (h && h->noconf_tx[slot].fqid &&
-            h->noconf_tx[slot].ifindex == ifindex) {
+            h->noconf_tx[slot].ifindex == phys_ifindex) {
                 *fqid = h->noconf_tx[slot].fqid;
                 dev_put(dev);
                 return 0;
         }
 
-        rc = dpaa_alloc_offload_tx_fq(dev, fqid);
+        rc = dpaa_alloc_offload_tx_fq(phys, fqid);
         if (rc) {
                 /*
                  * FAIL CLOSED (2026-08-21 leak fix): if we cannot get a
@@ -1128,22 +1145,22 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
                  * over speed; on this board (<=5 dpaa netdevs) the per-port
                  * no-confirm FQ alloc does not realistically fail.
                  */
-                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (%d); NOT offloading (SW forward)\n",
-                            ifindex, rc);
+                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (phys=%u, %d); NOT offloading (SW forward)\n",
+                            ifindex, phys_ifindex, rc);
                 dev_put(dev);
                 return rc ? rc : -ENODEV;
         }
 
         if (h && h->noconf_tx[slot].fqid == 0) {
-                h->noconf_tx[slot].ifindex = ifindex;
+                h->noconf_tx[slot].ifindex = phys_ifindex;
                 h->noconf_tx[slot].fqid = *fqid;
-        } else if (h && h->noconf_tx[slot].ifindex != ifindex) {
-                ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u ifindex=%u (cached %u); not caching\n",
-                            slot, ifindex, h->noconf_tx[slot].ifindex);
+        } else if (h && h->noconf_tx[slot].ifindex != phys_ifindex) {
+                ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u phys_ifindex=%u (cached %u); not caching\n",
+                            slot, phys_ifindex, h->noconf_tx[slot].ifindex);
         }
 
-        ask_pr_info("hw: no-confirm TX FQ 0x%x resolved for ifindex=%u\n",
-                    *fqid, ifindex);
+        ask_pr_info("hw: no-confirm TX FQ 0x%x resolved for ifindex=%u (phys=%u)\n",
+                    *fqid, ifindex, phys_ifindex);
         dev_put(dev);
         return 0;
 }
