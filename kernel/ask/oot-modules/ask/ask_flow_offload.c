@@ -1973,6 +1973,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		action.vlan_flags = key->vlan_edit_flags;
 		action.vlan_tci   = key->vlan_push_tci;
 		action.vlan_tpid  = key->vlan_push_tpid;
+		action.vlan_ingress_vid = key->vlan_ingress_vid;
 		/*
 		 * T-M6-8 DIAGNOSTIC: log exactly what VLAN edit each DIRECTION's
 		 * record carries, keyed by the flow 5-tuple + oif, so a single
@@ -1981,7 +1982,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		 * fighting /dev/mem capture timing. Ratelimited; drop once the
 		 * push/pop datapath is validated.
 		 */
-		pr_info_ratelimited("ask: VLAN-DIAG insert %pI4:%u->%pI4:%u proto=%u txfq=0x%x port=0x%02x flags=%s%s tci=0x%04x tpid=0x%04x nh=%pM em=%pM\n",
+		pr_info_ratelimited("ask: VLAN-DIAG insert %pI4:%u->%pI4:%u proto=%u txfq=0x%x port=0x%02x flags=%s%s tci=0x%04x tpid=0x%04x ivid=%u nh=%pM em=%pM\n",
 				    &key->src_ip[0], ntohs(key->sport),
 				    &key->dst_ip[0], ntohs(key->dport),
 				    key->l4_proto, tx_fqid, key->port_id,
@@ -1989,6 +1990,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 				    (key->vlan_edit_flags & ASK_VLANF_PUSH) ? "PUSH" : "",
 				    ntohs(key->vlan_push_tci),
 				    ntohs(key->vlan_push_tpid),
+				    key->vlan_ingress_vid,
 				    key->next_hop_mac, key->egress_mac);
 	}
 
@@ -2162,14 +2164,43 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 }
         }
 
-        rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
-        if (rc) {
-                pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
-                                    rc, f->cookie);
-                return rc;
-        }
+	rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
+	if (rc) {
+		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
+				    rc, f->cookie);
+		return rc;
+	}
 
-        memcpy(&dst_ip, &key.dst_ip[0], 4);
+	/*
+	 * T-M6-8 (2026-08-25): for a POP flow, capture the real ingress VID so
+	 * STRIP_ALL_VLAN can validate it (vendor insert_remove_vlan_hm parity).
+	 * FLOW_ACTION_VLAN_POP itself is field-less. The VID can arrive either
+	 * in FLOW_DISSECTOR_KEY_VLAN (ask_parse_match stored it in key.vlan_id)
+	 * or as a property of the true-ingress VLAN vif (e.g. eth3.100). Prefer
+	 * the explicit vif value when available; key.iif is already META-
+	 * corrected at this point. A POP with no resolved VID must stay in
+	 * software — publishing zero-VID+SKIP recreates the broken record this
+	 * fix removes, while zero-VID+VALIDATE rejects a real non-zero tag.
+	 */
+	if (key.vlan_edit_flags & ASK_VLANF_POP) {
+		struct net_device *iif_dev = key.iif ?
+			dev_get_by_index(&init_net, key.iif) : NULL;
+
+		key.vlan_ingress_vid = key.vlan_id & VLAN_VID_MASK;
+		if (iif_dev) {
+			if (is_vlan_dev(iif_dev))
+				key.vlan_ingress_vid =
+					vlan_dev_vlan_id(iif_dev);
+			dev_put(iif_dev);
+		}
+		if (!key.vlan_ingress_vid) {
+			pr_info_ratelimited("ask: VLAN POP has no ingress VID cookie=0x%lx iif=%u; software fallback\n",
+					    f->cookie, key.iif);
+			return -EOPNOTSUPP;
+		}
+	}
+
+	memcpy(&dst_ip, &key.dst_ip[0], 4);
 
         /*
          * PR14z11 (2026-05-19): resolve the next-hop dst_ip with the
