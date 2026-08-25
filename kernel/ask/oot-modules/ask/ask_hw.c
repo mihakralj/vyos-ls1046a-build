@@ -49,6 +49,7 @@
 #include <linux/types.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
@@ -160,6 +161,27 @@ bool ask_hw_nat66_offload_armed(void)
 	return armed;
 }
 EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
+
+/*
+ * T-M6-8 VLAN pop/push. Default OFF until S0-S4 validate FE opcodes
+ * STRIP_ALL_VLAN_HDRS(0x12) and INSERT_VLAN_HDR(0x42) on 210.10.1.
+ * Runtime-enable only for bounded board experiments; ASK_CAP_VLAN remains
+ * unadvertised until productization.
+ */
+static bool ask_vlan_offload;
+module_param_named(vlan_offload, ask_vlan_offload, bool, 0644);
+MODULE_PARM_DESC(vlan_offload,
+		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload (default 0; experimental, eth0/802.1ad/QinQ excluded)");
+
+bool ask_hw_vlan_offload_armed(void)
+{
+	bool armed = READ_ONCE(ask_vlan_offload);
+
+	if (armed)
+		pr_info_once("ask: experimental single-tag 802.1Q VLAN hardware offload enabled; eth0/802.1ad/QinQ excluded\n");
+	return armed;
+}
+EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
 
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
@@ -1044,12 +1066,20 @@ static bool ask_hw_port_slot_available(struct ask_hw_pcd *h, u8 port_id)
 static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
 {
         struct net_device *dev;
+        struct net_device *phys;
         struct fman_port *port;
 
         dev = dev_get_by_index(&init_net, ifindex);
         if (!dev)
                 return -ENODEV;
-        port = dpaa_get_rx_fman_port(dev);
+        /*
+         * T-M6-8: if the flow's ingress/egress is an 802.1Q VLAN vif, the FMan
+         * BMI port lives on the physical lower device. Resolve through it. The
+         * VID + pop/push intent ride the flow VLAN match/actions, so this only
+         * corrects the port lookup. (Mirrors ask_dpaa_get_fman_port_id.)
+         */
+        phys = is_vlan_dev(dev) ? vlan_dev_real_dev(dev) : dev;
+        port = dpaa_get_rx_fman_port(phys);
         if (!port) {
                 dev_put(dev);
                 return -ENODEV;
@@ -1067,6 +1097,8 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_inst;
         struct net_device *dev;
+        struct net_device *phys;
+        u32 phys_ifindex;
         unsigned int slot;
         int rc;
 
@@ -1084,15 +1116,21 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
         if (!dev)
                 return -ENODEV;
 
-        slot = ifindex % ASK_HW_NOCONF_SLOTS;
+        /* T-M6-8: egress may be an 802.1Q VLAN vif; the DPAA TX FQ belongs to
+         * the physical lower device. Resolve + cache by the PHYSICAL ifindex so
+         * a vif and its parent share the one per-port no-confirm FQ. */
+        phys = is_vlan_dev(dev) ? vlan_dev_real_dev(dev) : dev;
+        phys_ifindex = phys->ifindex;
+
+        slot = phys_ifindex % ASK_HW_NOCONF_SLOTS;
         if (h && h->noconf_tx[slot].fqid &&
-            h->noconf_tx[slot].ifindex == ifindex) {
+            h->noconf_tx[slot].ifindex == phys_ifindex) {
                 *fqid = h->noconf_tx[slot].fqid;
                 dev_put(dev);
                 return 0;
         }
 
-        rc = dpaa_alloc_offload_tx_fq(dev, fqid);
+        rc = dpaa_alloc_offload_tx_fq(phys, fqid);
         if (rc) {
                 /*
                  * FAIL CLOSED (2026-08-21 leak fix): if we cannot get a
@@ -1107,22 +1145,22 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
                  * over speed; on this board (<=5 dpaa netdevs) the per-port
                  * no-confirm FQ alloc does not realistically fail.
                  */
-                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (%d); NOT offloading (SW forward)\n",
-                            ifindex, rc);
+                ask_pr_warn("hw: no-confirm TX FQ alloc failed on ifindex=%u (phys=%u, %d); NOT offloading (SW forward)\n",
+                            ifindex, phys_ifindex, rc);
                 dev_put(dev);
                 return rc ? rc : -ENODEV;
         }
 
         if (h && h->noconf_tx[slot].fqid == 0) {
-                h->noconf_tx[slot].ifindex = ifindex;
+                h->noconf_tx[slot].ifindex = phys_ifindex;
                 h->noconf_tx[slot].fqid = *fqid;
-        } else if (h && h->noconf_tx[slot].ifindex != ifindex) {
-                ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u ifindex=%u (cached %u); not caching\n",
-                            slot, ifindex, h->noconf_tx[slot].ifindex);
+        } else if (h && h->noconf_tx[slot].ifindex != phys_ifindex) {
+                ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u phys_ifindex=%u (cached %u); not caching\n",
+                            slot, phys_ifindex, h->noconf_tx[slot].ifindex);
         }
 
-        ask_pr_info("hw: no-confirm TX FQ 0x%x resolved for ifindex=%u\n",
-                    *fqid, ifindex);
+        ask_pr_info("hw: no-confirm TX FQ 0x%x resolved for ifindex=%u (phys=%u)\n",
+                    *fqid, ifindex, phys_ifindex);
         dev_put(dev);
         return 0;
 }
@@ -1151,19 +1189,28 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
          * per-egress TX FQ; it needs NO per-flow MURAM, policer, or CAAM slot.
          * Any action that WOULD require an unprovisioned resource class must
          * fail to software here, before publication, rather than partially
-         * program silicon. VLAN/CAAM/OP are still rejected unconditionally.
-         *
-         * T-M6-7.1: NAT/PAT (ASK_ACT_NAT_SRC/DST/PAT) is admitted to hardware
-         * ONLY when the ask_nat44_offload gate is enabled (default on) AND the flow
-         * is not on the eth0 management port. Disarmed (default) it fails
-         * closed to software exactly as before -- byte-identical shipping
-         * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
-         * ask.ko populates action.nat_* (only done when armed).
-         */
-        if (action_flags & (ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP |
-                            ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
-                return -EOPNOTSUPP;
-        if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
+	 * program silicon. CAAM/OP are still rejected unconditionally.
+	 *
+	 * T-M6-7.1: NAT/PAT (ASK_ACT_NAT_SRC/DST/PAT) is admitted to hardware
+	 * ONLY when the ask_nat44_offload gate is enabled (default on) AND the flow
+	 * is not on the eth0 management port. Disarmed (default) it fails
+	 * closed to software exactly as before -- byte-identical shipping
+	 * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
+	 * ask.ko populates action.nat_* (only done when armed).
+	 *
+	 * T-M6-8: VLAN pop/push (ASK_ACT_VLAN_POP/PUSH) is admitted ONLY when the
+	 * ask_vlan_offload gate is enabled (default OFF) AND the flow is not on
+	 * eth0. Disarmed (default) it fails closed to software -- byte-identical
+	 * shipping behaviour. The F-233 FE emitter is dormant unless ask.ko
+	 * populates action.vlan_* (only done when armed).
+	 */
+	if (action_flags & (ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
+		return -EOPNOTSUPP;
+	if (action_flags & (ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP)) {
+		if (!ask_hw_vlan_offload_armed())
+			return -EOPNOTSUPP;
+	}
+	if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
                 /* IPv4 NAT is silicon-validated (S0-S3), shipping default-on.
                  * IPv6 NAT66 uses the separate nat66_offload gate (default on; fused v6 opcode
                  * 0x2f unproven); default off -> software fallback. */
@@ -1185,9 +1232,10 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	if (rc)
 		return rc;
 
-	/* Never NAT-offload the eth0 management lifeline, even when the global
-	 * NAT gate is enabled. It remains available for SSH/recovery. */
-	if ((action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) &&
+	/* Never NAT- or VLAN-offload the eth0 management lifeline, even when the
+	 * corresponding global gate is enabled. It remains available for SSH/recovery. */
+	if ((action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT |
+	                     ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP)) &&
 	    port_id == ASK_HW_PORT_ETH0_MGMT)
 		return -EOPNOTSUPP;
 
