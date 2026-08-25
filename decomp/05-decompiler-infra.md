@@ -1,10 +1,9 @@
 # Phase 5 — Decompiler Infrastructure
 
 **Status: TOOLCHAIN INSTALLED (2026-08-08), awaiting a SLEIGH module.**
-Ghidra 11.3.2 + JDK 21 + the ARM64-built native decompiler/sleigh + GhidraMCP
-1.4 (27 MCP tools, bridge validated) are installed and wired into Kilo
-(`.kilo/kilo.json` → `ghidra`); full record + operational steps in
-`decomp/ghidra-setup.md`. The blocking input is still Phase 4: Ghidra can
+Ghidra 11.3.2, JDK 21, the ARM64-built native decompiler/SLEIGH tools, and
+an optional automation bridge are installed. Setup and operating procedures
+are in `decomp/ghidra-setup.md`. The blocking input is still Phase 4: Ghidra can
 only hold the FMan blob as raw bytes until a `fman-risc.slaspec` exists, so
 the SLEIGH module below is the real work, not the install.
 
@@ -45,7 +44,7 @@ workspace:
 
 Web/terminal viewer over the Phase-2 alignment map: click a 210 region →
 see 106/108 counterpart (or "unique"), labels, decode. Cheap to build on
-the JSON maps; pays for itself during manual reading sessions.
+the JSON maps; pays for itself during manual analysis.
 
 ## Deliverables
 

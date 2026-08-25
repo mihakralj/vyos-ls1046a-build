@@ -29,10 +29,10 @@ params-page offsets with a common error/continue exit into w12551, not a
 self-refresh loop. Naming-map §3 anchor corrected: `pool_status_loop` →
 `pool_slot_walk` (w12667–w12848) + `w12551 shared_status_check`.
 
-## 2026-08-08 (late) — Naming harvest verified against qdrant + NXP; parse-result sub-fields named and applied
+## 2026-08-08 — Naming harvest verified against primary sources; parse-result sub-fields named and applied
 
-Cross-checked the naming vocabulary (qdrant agent-memory + `nxp_docs` on
-LS1046ADPAARM.pdf / LSDKUG_Rev21.08.pdf) against `decomp/naming-map.md`:
+Cross-checked the naming vocabulary against `LS1046ADPAARM.pdf`,
+`LSDKUG_Rev21.08.pdf`, vendor source, and verified board observations against `decomp/naming-map.md`:
 the harvest is correct and complete for FE types, NIA engines, HCOR
 dispatch slots, HM opcodes, FM_CTL params-page fields, and the BMI port
 registers (FMBM_RFPNE/RFQID/RCCB/RICP + NIA decode). Two stale labels
@@ -65,7 +65,7 @@ annotation region (+16 from `struct fman_prs_result` offsets) — a silent
 ctx/parse/window fields at the correct IC base (`0xd020+`); stale
 wrong-base `prs_*` labels (from a first run at `0x20–0x3f`) removed.
 `FmanVerifyNames.py` added for post-verify dumps. Project
-`/tmp/kilo/ghidra-proj/fman.gpr`, program `fman-code-210.bin`.
+`$DECOMP_WORKDIR/ghidra-proj/fman.gpr`, program `fman-code-210.bin`.
 
 ---
 
@@ -108,8 +108,8 @@ m_77/m_78/m_f1/m_f4/op_f0` operands counted) — documented in `naming-map.md`
 
 ## 2026-08-08 — FE-VM decompile restored; the `0x73` family is the FE-VM conditional-test core (the type dispatch is now readable)
 
-Restored the full Ghidra decompile pipeline after `/tmp/kilo` wipe (blob
-re-fetched from `.185`, code region = blob offset 244 → `fman-code-210.bin`,
+Restored the full Ghidra decompile pipeline after `$DECOMP_WORKDIR` wipe (blob
+re-fetched from the test DUT, code region = blob offset 244 → `fman-code-210.bin`,
 12852 words; import MUST use the full language ID `fman-risc:BE:32:default`,
 the short form `fman-risc` fails with "Unsupported language"). Key new decode:
 **the `0x73xx` family (190 sites) is the FE-VM's conditional-test core** —
@@ -130,8 +130,8 @@ region (w9068/w9112/w9242/w9436/w9488) are live code; w1805/w1832/w1844 sit
 in the data table. The FE-VM interpreter core is the enq_builder region
 w9040–w9520 (ENQ constant `0x02010000` materialized at w9055). New scripts in
 `decomp/ghidra/scripts/`: FmanFEVM.py, FmanFEVM2.py, FmanFullListing.py,
-FmanCCDisasm.py. Full listing `/tmp/kilo/fman-listing.txt`, decompiles
-`/tmp/kilo/fevm3.log`.
+FmanCCDisasm.py. Full listing `$DECOMP_WORKDIR/fman-listing.txt`, decompiles
+`$DECOMP_WORKDIR/fevm3.log`.
 
 ## 2026-08-08 — E-HM9: wedge bisection localizes the wedge to the CC-engine dispatch of a frame to the FE_ENTER AD (before the FE-VM pool machinery)
 
@@ -155,11 +155,11 @@ clean.
 ## 2026-08-08 (earlier) — E-HM8: armed FE-VM wedges port RX after one frame; earlier armed nulls were frame-less
 
 See `decomp/experiments.md` E-HM8 for the full writeup. The headline facts:
-(1) frames were not arriving at `.185`'s eth4 for most of today's armed
-test cycles (eth4 kernel RX 0, tcpdump 0 while `.106` transmitted) — the
+(1) frames were not arriving at the test DUT's eth4 for most of the current armed
+test cycles (eth4 kernel RX 0, tcpdump 0 while the vendor-reference system transmitted) — the
 link works after a cold boot, then the port goes RX-deaf after FE-VM
 arming, surviving disarm, recoverable only by another cold boot. (2)
-Today's E-HM4/5/6/7 armed null results, the params-page `+0x54/+0x58`
+The current E-HM4/5/6/7 armed null results, the params-page `+0x54/+0x58`
 observation, and the FE_ENTER AD w3/w0 corruption canaries are all
 invalidated — they were frame-less. (3) With a genuinely-arriving frame
 (cold boot → arm → one SYN → `kgse_spc` 0→1, consumed by FMan, kernel RX
@@ -170,23 +170,22 @@ comparator". (4) The wedge-after-one-frame is a new reproducible silicon
 behavior matching `decomp/wedge-path.md`'s predicted pool-drain mechanism,
 and is the recommended diagnostic observable going forward (patch
 microcode, watch whether the wedge disappears). Also disproven cheaply:
-the FM_CTL params-page/`FMBM_RGPR` hypothesis (working vendor board `.106`
+the FM_CTL params-page/`FMBM_RGPR` hypothesis (working vendor board the vendor-reference system
 has `FMBM_RGPR=0` too); `/dev/mem` port-BMI-block writes don't stick on
 6.18.41 while MURAM writes do, and `m.flush()` EINVALs (writes actually
 succeed — scripts must skip flush); the `w12667`–`w12850` "pool routine"
 is a generic status-refresh loop, not the ALLOCATE pool routine; full-MURAM
 diffing is too noisy on a live board.
 
-## 2026-08-08 (earlier) — Methodology bug found: this session's own test script never re-synced KeyGen EKFC after reboot/kexec; corrected retest (E-HM7) still negative
+## 2026-08-08 (earlier) — Methodology bug found: the test harness's test script never re-synced KeyGen EKFC after reboot/kexec; corrected retest (E-HM7) still negative
 
 Prompted by the user asking why 13-byte (rather than 14-byte) keys were in
 use. Investigating found the live boot-default KeyGen scheme 4 EKFC is
 actually **`0x00180006`** (12-byte, `IPSRC1|IPDST1|L4PSRC|L4PDST`, no
-PROTO, no PORT_ID) — neither the 13 bytes `AGENTS.md` documents as
-"Target EKFC" nor the 14 bytes this whole investigation has otherwise
-assumed. Traced the cause: this session's own `T26b-shift-sweep.sh`
+PROTO, no PORT_ID) — neither the previously documented 13-byte target nor the 14 bytes this whole investigation has otherwise
+assumed. Traced the cause: the test harness's `T26b-shift-sweep.sh`
 (reused unmodified across E-HM4, E-HM5, E-HM6) never calls `fe_kg_ekfc` —
-it only builds the ehash side. Every kexec/reboot this session ran before
+it only builds the ehash side. Every kexec/reboot the current analysis ran before
 those three experiments reset KeyGen back to this 12-byte boot-default,
 meaning E-HM4/E-HM5/E-HM6 ran with KeyGen extracting a fundamentally
 different key than the one written into the ehash table — their specific
@@ -198,12 +197,10 @@ confirmed live via `kg-scheme-read.py` that EKFC was genuinely
 byte-for-byte identical / `pkt_count=0`** — a properly-synchronized
 14-byte portid-prefixed key still does not HIT, now independently
 confirmed a third time (after 2026-08-06's discovery and 2026-08-07's
-16-candidate batch test). Also flagged, not fixed here: `AGENTS.md` §S6
-"Target EKFC" still says `0x001C0006`/13 bytes, stale relative to the
-2026-08-06/07 PORT_ID discovery — needs the project owner's correction
-since `AGENTS.md` is the binding rules document. Full writeup:
+16-candidate batch test). The project guidance still contained the obsolete `0x001C0006`/13-byte
+target and required correction after the 2026-08-06/07 PORT_ID discovery. Full writeup:
 `decomp/experiments.md` "METHODOLOGY CORRECTION" section.
-**UPDATE 2026-08-08:** AGENTS.md §S6 has since been corrected to the 14-byte target.
+**UPDATE 2026-08-08:** The project guidance was subsequently corrected to the 14-byte target.
 
 ## 2026-08-08 (later) — E-HM5 + E-HM6: `ce`/`cf` isolated and compound-zeroed on silicon — both negative
 
@@ -223,7 +220,7 @@ alone, `cf` alone, both together) now all produce identical null results —
 materially stronger evidence for Candidate A (frames never reach this deep
 into `bucket_index`/`ehash_walker`) than any single test, since the
 compound mutation was the one most likely to show *some* divergence if
-these opcodes did anything load-bearing for this flow. Board `.185`
+these opcodes did anything load-bearing for this flow. Board the test DUT
 rebooted after E-HM6 and confirmed fully restored to pristine (blob md5
 `6f23090a3d5ae8b302ea41fd90a14d4d`, no ehash tables, no armed ports, all
 expected links up). Full writeup: `decomp/experiments.md` (E-HM5, E-HM6),
@@ -256,10 +253,9 @@ record never touched" signature. Full writeup:
 `decomp/experiments.md` (E-HM4), `decomp/hitmiss-path.md` "new source"
 section (updated).
 
-## 2026-08-08 (later) — New NXP documentation source surveyed (nxp_docs qdrant)
+## 2026-08-08 — NXP documentation source surveyed
 
-A separate `nxp_docs` qdrant MCP server (distinct from this project's own
-agent-memory qdrant) became available, indexing `LS1046ADPAARM.pdf` (QorIQ
+A searchable documentation corpus provided `LS1046ADPAARM.pdf` (QorIQ
 LS1046A DPAA Reference Manual, Rev 0, 03/2017 — the actual chip-specific RM,
 not the LS1043A analog previously relied on) and `LSDKUG_Rev21.08.pdf`
 (Layerscape SDK User Guide, Rev 21.08, 09/2022 — full FMan PCD driver + FMC
@@ -277,14 +273,13 @@ tried); two RM table references ("Table 8-398. Table Descriptor (Type =
 01)", "Table 8-399. Operation Code Description") that sound directly
 relevant to AD/opcode encoding but whose content did not surface — they
 appear to belong to a different, more generic "DPAA Reference Manual"
-numbering not (yet) present in this qdrant corpus. Nothing found
+numbering not (yet) present in this project evidence archive corpus. Nothing found
 contradicts any previously-settled fact in this project's own docs.
 
 ## 2026-08-08 (later still) — Wedge-mechanism disassembly + key-compare candidate
-User asked to find (a) the key-comparison instruction and (b) why the
-microcode wedges, and how to unwedge — via disassembly, not further qdrant
-archaeology. qdrant was still consulted first (per S1) to gather the
-existing kernel-side model to test against: patch 0163
+The investigation focused on identifying the key-comparison instruction and
+wedge mechanism directly from disassembly. Existing kernel-side evidence
+provided the model to test against: patch 0163
 (`fman_pcd_port_recover`/`fe_recover`) documents a workspace-pool-exhaustion
 wedge mechanism (ring index at per-port params-page **+0x54**, depletion
 counter at **+0x58** — see full mechanism in `decomp/wedge-path.md`), and
@@ -336,15 +331,15 @@ key-compare candidate. Scripts promoted: `FmanWedgeHunt.py`,
 
 ---
 
-## 2026-08-08 (late) — Ghidra disassembly pass on `bucket_index`/`ehash_walker`, re-triggered by the F-053/`hash_bytes_offset` qdrant controversy
+## 2026-08-08 (late) — Ghidra disassembly pass on `bucket_index`/`ehash_walker`, re-triggered by the F-053/`hash_bytes_offset` project evidence archive controversy
 
-User redirected away from a hypothesis (permutation brute-force of the
-E-HM1 hash divergence) and back to ground truth: read the actual microcode.
-Re-staged the blob (`/tmp/kilo` had been cleared; re-fetched from `.185`'s DT
+The analysis abandoned permutation brute force of the E-HM1 hash divergence
+and returned to direct microcode inspection.
+Re-staged the blob (`$DECOMP_WORKDIR` had been cleared; re-fetched from the test DUT's DT
 property, SHA-256 verified identical), re-imported into a fresh headless
 Ghidra project with the `fman-risc:BE:32:default` SLEIGH module (already
 compiled+installed at `/opt/ghidra_11.3.2_PUBLIC/Ghidra/Processors/fman-risc/`
-from earlier this session), disassembled + decompiled `bucket_index` (w1928)
+from earlier the current analysis), disassembled + decompiled `bucket_index` (w1928)
 and `ehash_walker` (w2837) with full raw 32-bit words printed alongside
 whatever mnemonic the slaspec resolves.
 
@@ -362,7 +357,7 @@ whatever mnemonic the slaspec resolves.
   unconfirmed) reads Internal-Context offset **0x40** — 8 bytes *before* the
   hash at 0x48. This is per-frame IC space, not FE-descriptor/scheme-config
   space, so it does **not** look like a read of the AD-word's
-  `hash_bytes_offset` field (F-053/2026-08-07 qdrant finding) — that field
+  `hash_bytes_offset` field (F-053/2026-08-07 project evidence archive finding) — that field
   lives in the scheme/FE-descriptor, addressed differently (via
   MURAM-addressing ops like `op_f0`/`m_77`/`m_78`), not as a fixed IC offset.
 - In `ehash_walker`, the `op_eb`/`op_e1` pair (both modeled pcodeops) computes
@@ -423,7 +418,7 @@ patch one candidate `tst_dc`'s immediate and observe HIT/MISS effect on
 silicon) — the latter is exactly the kind of controlled, falsifiable test
 this program is supposed to prefer over static guessing.
 
-**Bearing on the F-053/`hash_bytes_offset` qdrant controversy (2026-08-07):**
+**Bearing on the F-053/`hash_bytes_offset` project evidence archive controversy (2026-08-07):**
 this pass neither confirms nor refutes the SDK-derived claim that
 `hash_bytes_offset` (AD-word bits 17:16) drives live bucket-index derivation
 — no load of that specific field was located feeding into the bucket-index
@@ -434,8 +429,8 @@ being real while being a different register/field than the AD-word's
 `hash_bytes_offset`. This question remains open pending either deeper
 disassembly or a silicon oracle test.
 
-Tools: `/tmp/kilo/ghidra_scripts/FmanHashOffset.py`,
-`/tmp/kilo/ghidra_scripts/FmanHashOffset2.py` (not yet copied into
+Tools: `$DECOMP_WORKDIR/ghidra_scripts/FmanHashOffset.py`,
+`$DECOMP_WORKDIR/ghidra_scripts/FmanHashOffset2.py` (not yet copied into
 `decomp/ghidra/scripts/` — ad hoc probes, promote if they prove reusable).
 
 ---
@@ -548,10 +543,10 @@ Repo: `fman-risc.slaspec` (G3), `decomp/ghidra/scripts/FmanDecompile.py`.
 
 ---
 
-## 2026-08-08 (mid-4) — Naming/structure map harvested from arch+qdrant, applied to Ghidra
+## 2026-08-08 — Naming and structure map applied to Ghidra
 
-Compared the `fman-risc` disassembly's ad-hoc names against all
-`arch/fman-*.md` + qdrant; harvested the authoritative NXP/SDK/project
+Compared the `fman-risc` disassembly's ad-hoc names against the architecture
+documents, NXP documentation, vendor source, and verified observations; harvested the authoritative NXP/SDK/project
 vocabulary into **`decomp/naming-map.md`** and applied the high-confidence
 parts to the program.
 
@@ -657,12 +652,12 @@ uses the table walker**), recovered from the blob. Output is rough (opaque
 `in_cc` conditions, `while(true)` from park stubs) — exactly the G1
 expectation: control-flow-exact, ALU opaque until G3.
 
-**Step 2 (MCP server) — empirical conclusion**: `:8080` does **not**
+**Automation service — empirical conclusion**: `:8080` does **not**
 auto-start when the GUI opens the project (confirmed under Xvfb); the
-GhidraMCP server needs a one-time manual GUI action (open a program + enable
-`GhidraMCPPlugin`). The **headless `analyzeHeadless` + GhidraScript pipeline
-is the working unattended path** and is what delivered G1 + decompilation. The
-`ghidra_*` MCP tools are loaded in Kilo and go live once the plugin is enabled.
+optional automation extension needs a one-time manual GUI action: open a
+program and enable `GhidraMCPPlugin`. The **headless `analyzeHeadless` plus
+GhidraScript pipeline is the working unattended path** and delivered G1 and
+decompilation.
 
 **Step 4 (E3 oracle) — deferred with rationale**: the branch model is now
 doubly validated (cfg-map + Ghidra SLEIGH, exact agreement), so E3's marginal
@@ -675,27 +670,25 @@ FmanDecompile}.py`, `decomp/tools/build-fman-sleigh.sh`.
 
 ---
 
-## 2026-08-08 (mid) — Ghidra + GhidraMCP installed on Cobalt (ARM64)
+## 2026-08-08 — Ghidra automation toolchain installed on ARM64
 
-Full Phase-5 toolchain stood up on the aarch64 runner (the pasted "Task
-complete" summary had described a machine where none of it was present —
-Java was 17, no Ghidra, no bridge, no Xvfb). Installed: Temurin JDK 21.0.12
+The verified Phase-5 installation superseded earlier unverified assumptions
+about the host environment. Installed: Temurin JDK 21.0.12
 (`/opt/jdk-21.0.12+8`), Ghidra 11.3.2 (`/opt/ghidra_11.3.2_PUBLIC`),
-GhidraMCP 1.4 extension + bridge (`/opt/ghidra-mcp/bridge_mcp_ghidra.py`),
+optional Ghidra automation extension and bridge (`/opt/ghidra-mcp/bridge_mcp_ghidra.py`),
 Xvfb + X11 libs. Full record: `decomp/ghidra-setup.md`.
 
 **ARM64 tax**: Ghidra ships no `linux_arm_64` native decompiler → built
 `decompile` + `sleigh` from the bundled C++ source (fix: `ARCH_TYPE=` empty
-to kill the Makefile's default `-m32`; pre-create `*_opt` obj dirs). GhidraMCP
+to kill the Makefile's default `-m32`; pre-create `*_opt` obj dirs). The automation extension's
 `Module.manifest` used `KEY=value` vs Ghidra's `KEY: value` → emptied it.
 
-**Wired into Kilo**: `.kilo/kilo.json` → `ghidra` MCP server (stdio bridge →
-`http://127.0.0.1:8080/`). **Tests**: bridge MCP handshake exposes **27
-tools** (PASS); decompiler runs headless after the native build (PASS); GUI
-launches under Xvfb on ARM64 (PASS). Live `:8080` is PENDING one manual GUI
-action (open a program + enable GhidraMCPPlugin — the server is a per-tool
-GUI plugin and 11.x default tools are jar resources, so it can't be
-pre-seeded headlessly). **Restart Kilo once** to load the 27 tools.
+**Validation**: the stdio bridge exposes **27 operations**; the decompiler
+runs headlessly after the native build; and the GUI launches under Xvfb on
+ARM64. The loopback `:8080` endpoint requires one manual GUI action: open a
+program and enable `GhidraMCPPlugin`. The extension is a per-tool GUI plugin,
+and Ghidra 11.x stores default tools as jar resources, so this setting cannot
+be pre-seeded headlessly.
 
 **Caveat**: no FMan processor module exists, so the blob only imports as raw
 bytes in Ghidra — lower value than our word-indexed tools until Phase 4
@@ -703,7 +696,7 @@ yields a `fman-risc.slaspec`. The built `sleigh` binary will compile it.
 
 ---
 
-## 2026-08-08 (early) — Silicon oracle OPERATIONAL: E1/E2 PASS on .185
+## 2026-08-08 (early) — Silicon oracle OPERATIONAL: E1/E2 PASS on test DUT
 
 **The mutation oracle works end-to-end.** Delivery pipeline (no flash
 writes, no serial, no U-Boot env edits): `decomp/tools/qef-patch.py` patches
@@ -727,14 +720,10 @@ vs pre-kexec baseline fully clean**. Confirms on silicon that island 2 is
 cold on the mainline/RSS path, and that code-word mutation + CRC fixup is
 behaviorally safe in cold regions.
 
-**Board state note**: .185 is currently running the E2 blob via one-shot
-kexec (datapath-equivalent to pristine); any plain reboot returns it to
-pristine eMMC boot.
-
 **Environment notes**: board shell is vbash — real binaries by full path
 only (`sudo -n /sbin/kexec`, `sudo -n /usr/local/bin/pcd-snapshot`); no
 `which`/`strings`. `/tmp` is tmpfs — wiped per boot; baselines go in
-`/home/vyos/`. U-Boot env on .185 already has `fman_ucode=fbc11d00` (unused
+`$HOME/`. U-Boot env on test DUT already has `fman_ucode=fbc11d00` (unused
 by this path). Full protocol + experiment queue: `decomp/experiments.md`.
 
 ---
@@ -903,12 +892,12 @@ code). Superseded by the distribution-shape analysis in the late entry.
 
 ## 2026-08-07 — Program kickoff recon
 
-**Blob staged locally.** Pulled from board .185's DT property
+**Blob staged locally.** Pulled from board test DUT's DT property
 (`/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware`, rootless
-read) → `/tmp/kilo/fman-ucode-210.10.1.bin`. 51,652 bytes, SHA-256
+read) → `$DECOMP_WORKDIR/fman-ucode-210.10.1.bin`. 51,652 bytes, SHA-256
 `5f3ed8d32b8659aafd8912d5d9920306350cae7a85884d81859152b9723eff0d` — exact
-match to the canonical fingerprint. Board .190 was unreachable from the
-runner ("no route to host"); .185 is the working oracle board.
+match to the canonical fingerprint. Board secondary DUT was unreachable from the
+runner ("no route to host"); test DUT is the working oracle board.
 
 **Public corpus staged.** `git clone --depth 1
 https://github.com/nxp-qoriq/qoriq-fm-ucode.git` → 23 blobs across 12 SoC
@@ -965,7 +954,7 @@ qe_firmware.rst description. Non-blocking (nothing in our load path validates
 it); Phase 1 closes it by brute-forcing CRC scope × variant, cross-checked
 against U-Boot `qe_upload_firmware()`.
 
-**Tooling.** Ad-hoc probe `/tmp/kilo/qef_probe.py` (parse + dispatch table +
+**Tooling.** Ad-hoc probe `$DECOMP_WORKDIR/qef_probe.py` (parse + dispatch table +
 immediate hunt + prefix histogram) — works on all tiers. Hardens into
 `bin/qef-parse.py` in Phase 1.
 
@@ -1032,7 +1021,7 @@ immediate hunt + prefix histogram) — works on all tiers. Hardens into
 ## 2026-08-11 (E19 followup) — Patch A (w242 dispatch redirect) NEGATIVE: wedge is downstream of the FE-type dispatch, in the FE interpreter/enq_builder or epilogue; pool-slot-walk (w12667-w12850) is the never-reached dealloc path
 
 Patch A = w242 `2c3ff000` (br_tbl [0xf000]) → `b7ff0002` (unconditional → w244,
-natural fall-through), delivered via qef-patch→DTB→kexec on .185
+natural fall-through), delivered via qef-patch→DTB→kexec on test DUT
 (Phase-1 ISO, 0117 re-stream, blob md5 609be273... verified live).
 Engage OK (pool YES, port 0x11 armed, FE_ENTER root 0x54900), but traffic
 100% loss with `fe_pool enqueued=1` — one workspace buffer allocated
@@ -1061,11 +1050,11 @@ is the reliable view.
 
 ## 2026-08-12 — CC-tree dispatch DECODED: the CONT_LOOKUP path IS the enhanced external-hash machine (en_exthash_node VARIANT B); F-183 group AD is garbage to it; SDK approach = F-185
 
-Ghidra re-analysis (persistent rebuild at /home/vyos/.cache/fman-decomp after
-/tmp/kilo wipe; blob SHA 5f3ed8d3 verified; FmanCcAll.py + FmanCcFinal.py,
+Ghidra re-analysis (persistent rebuild at ${XDG_CACHE_HOME:-$HOME/.cache}/fman-decomp after
+$DECOMP_WORKDIR wipe; blob SHA 5f3ed8d3 verified; FmanCcAll.py + FmanCcFinal.py,
 ccall.log/ccfinal.log) + vendor source (origin/nxp-sdk fm_ehash.{c,h},
 fm_cc.c FillAdOfTypeContLookup, fm_kg.c BuildSchemeRegs, ask-ref patch 999,
-cdx_ehash.c) + .106 live-row decode, converged:
+cdx_ehash.c) + vendor-reference system live-row decode, converged:
 
 1. The 210.10.1 CC engine has ONE AD-type extraction site: c600001e (>>30)
    at w1857, dispatch via br_tbl[0xf000]. The type-1 (bits[31:30]=01,
@@ -1081,7 +1070,7 @@ cdx_ehash.c) + .106 live-row decode, converged:
    EXCLUDE_FMAN_IPR_OFFLOAD variant A (table_base_hi:16, mask_bits at
    word2[15:12]) is NOT what this blob parses.
 
-2. .106 row9 (tcp4) 4e400008 eb700100 0402080f 00480308 decodes variant-B
+2. vendor-reference system row9 (tcp4) 4e400008 eb700100 0402080f 00480308 decodes variant-B
    four independent ways: word1 = DDR bucket array (probed zeros at
    0x8eb700100); word2[3:0]=0xf = 15 mask bits = cdx_pcd.xml mask 0x7fff;
    word3 = 0x00480308 = NIA_ENG_KG|NIA_KG_CC_EN|NIA_KG_DIRECT|scheme 8 —
@@ -1107,7 +1096,7 @@ cdx_ehash.c) + .106 live-row decode, converged:
    mechanism one step worse: FE_ENTER w0=0x40800000 parses as a node with
    table_base=0 and pool=0 → the machine waits on a workspace allocation
    from pool 0 forever = the silent-WAIT port-stall signature. Prior AC_CC
-   stalls were invalid-CONTENT stalls, not invalid-MODE stalls — .106 runs
+   stalls were invalid-CONTENT stalls, not invalid-MODE stalls — vendor-reference system runs
    AC_CC (0x8x000006, ccbs=0) on this same blob in production.
 
 5. 0125's dormant node template encodes variant A with miss_action_type=0 —

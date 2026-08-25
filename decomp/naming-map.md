@@ -1,11 +1,13 @@
 # decomp/naming-map.md — Authoritative Naming & Structure Map for the Disassembly
 
-**2026-08-08 · Synthesized from qdrant + `arch/fman-*.md` · Consumed by the
+**2026-08-08 · Synthesized from architecture documents, NXP documentation,
+vendor source, and verified board observations · Consumed by the
 Ghidra `fman-risc` module + labeling scripts**
 
 The `fman-risc` disassembly invents ad-hoc names (`dmem`, `r3`, `unk`,
 `slotNN_wM`). This file maps those to the **authoritative NXP/SDK/project
-vocabulary** already established in the arch docs and qdrant, so Ghidra's
+vocabulary** already established in the architecture documents and cited
+primary sources, so Ghidra's
 output is consistent with the rest of the corpus and so labeling actually
 adds meaning. Confidence tags: **[FACT]** documented/verified,
 **[STRONG]** well-supported hypothesis, **[?]** plausible, unverified.
@@ -187,8 +189,7 @@ For when the disassembly touches MURAM descriptors (define as structs so
 4. **Structs**: define §5 layouts; apply at the MURAM store sites.
 
 A starter script can bulk-apply §3 (function renames) + §2 (equates) via the
-GhidraMCP `rename_function`/`set_decompiler_comment` tools or a headless
-GhidraScript. This is the immediate next labeling step once the G3 register
+Ghidra automation API or an equivalent headless GhidraScript. This is the immediate next labeling step once the G3 register
 model firms up the store operands.
 
 ## 7. Address-window map — 2026-08-08 (full-image census)
@@ -209,10 +210,8 @@ model firms up the store operands.
 
 **[IMPORTANT 2026-08-09, E-HM18]** the `0xf000`/`0xf800` dmem windows are
 FM_CTL **engine-internal** (the microcode's own flat 16-bit data space),
-NOT host-visible MURAM at physical 0x1A00000+offset. Live /dev/mem reads at
-0x1A0F000/0x1A0F800 on BOTH boards return volatile aliased content (mDNS
-service strings "Spotify Desktop Launcher", "_spotify-connect._tcp.local"
-on .185; 0x0400015E/0x04008040 on .106) — packet/config data, not a static
+NOT host-visible MURAM at physical 0x1A00000+offset. Live `/dev/mem` reads at `0x1A0F000`/`0x1A0F800` on both test systems
+return differing volatile packet or configuration data rather than a static
 handler table. The host cannot read or populate the FE-type dispatch slots
 that `2c3ff000` at w242 indexes. E-HM17's "pristine reads return clean
 0x00000000" was a transient artifact (misread of the same aliased window);
