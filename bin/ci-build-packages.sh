@@ -973,6 +973,14 @@ for package in $packages; do
   cd ..
 done
 
+### HTTP API virtualenv with MCP SDK
+# vyos-http-api-server runs under /usr/share/vyos-http-api-tools/bin/python3,
+# not system Python. Rebuild that dh-virtualenv package with mcp==1.8.1 and
+# stage the higher-versioned .deb into packages.chroot/ so live-build installs
+# it before apt resolves vyos-1x -> vyos-http-api-tools. The MCP endpoint stays
+# dormant until `set service https api mcp ...` is explicitly configured.
+"$GITHUB_WORKSPACE/bin/ci-build-http-api-tools.sh"
+
 ### ASK2 (rewrite-in-progress): the legacy ASK-consume mode userspace
 ### rebuild block was removed on the ask20 branch along with
 ### ci-consume-ask-kernel.sh and ci-build-ask-userspace.sh. The ASK2
