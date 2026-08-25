@@ -1,0 +1,1372 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LS1046A integration <maintainers@vyos.net>
+Date: Mon, 25 Aug 2026 00:00:00 +0000
+Subject: [PATCH] http-api: add Model Context Protocol (MCP) server (default off)
+
+Mounts an MCP Streamable-HTTP endpoint at /mcp/ inside the existing
+vyos-http-api-server (FastAPI). Exposes operational commands, config
+read/modify, image management, and schema introspection as MCP tools,
+resources and prompts for AI-agent integration.
+
+Config: `set service https api mcp mode <read-only|read-write>` and
+`set service https api mcp introspection`. The node is absent by default,
+so the endpoint ships DORMANT (off) until explicitly configured.
+
+The mcp SDK and its Python deps (httpx, httpx-sse, pydantic-settings,
+sse-starlette) are provided by the vyos-http-api-tools virtualenv rebuilt
+with mcp==1.8.1 (see bin/ci-build-http-api-tools.sh), NOT a system
+python3-mcp package -- so the upstream fork's debian/control python3-mcp
+Depends line is intentionally omitted here.
+
+Origin: mihakralj/vyos-1x branch T9030-mcp.
+---
+diff --git a/interface-definitions/service_https.xml.in b/interface-definitions/service_https.xml.in
+index 7bb63fa5a..022c6a399 100644
+--- a/interface-definitions/service_https.xml.in
++++ b/interface-definitions/service_https.xml.in
+@@ -131,6 +131,39 @@
+                   </node>
+                 </children>
+               </node>
++              <node name="mcp">
++                <properties>
++                  <help>Model Context Protocol (MCP) endpoint for AI agent integration</help>
++                </properties>
++                <children>
++                  <leafNode name="mode">
++                    <properties>
++                      <help>MCP tool access level</help>
++                      <completionHelp>
++                        <list>read-only read-write</list>
++                      </completionHelp>
++                      <valueHelp>
++                        <format>read-only</format>
++                        <description>Read configuration and run operational commands only</description>
++                      </valueHelp>
++                      <valueHelp>
++                        <format>read-write</format>
++                        <description>Additionally allow configuration changes and system management</description>
++                      </valueHelp>
++                      <constraint>
++                        <regex>(read-only|read-write)</regex>
++                      </constraint>
++                    </properties>
++                    <defaultValue>read-only</defaultValue>
++                  </leafNode>
++                  <leafNode name="introspection">
++                    <properties>
++                      <help>Expose schema introspection resources to AI agents</help>
++                      <valueless/>
++                    </properties>
++                  </leafNode>
++                </children>
++              </node>
+             </children>
+           </node>
+           #include <include/allow-client.xml.i>
+diff --git a/src/services/api/session.py b/src/services/api/session.py
+index c25a444e9..67b9f41f1 100644
+--- a/src/services/api/session.py
++++ b/src/services/api/session.py
+@@ -39,3 +39,6 @@ def _initialize(self):
+         self.auth_type = None
+         self.token_exp = None
+         self.secret_len = None
++        self.mcp = False
++        self.mcp_mode = 'read-only'
++        self.mcp_introspection = False
+diff --git a/src/services/vyos-http-api-server b/src/services/vyos-http-api-server
+index 94697ed4d..53dde89ec 100755
+--- a/src/services/vyos-http-api-server
++++ b/src/services/vyos-http-api-server
+@@ -207,6 +207,15 @@ def initialization(session: SessionState, app: FastAPI = app):
+     else:
+         session.graphql = False
+ 
++    # parse the mcp block from api_config_state into SessionState
++    mcp_config = server_config.get('mcp', {})
++    if 'mcp' in server_config:
++        session.mcp = True
++        session.mcp_mode = mcp_config.get('mode', 'read-only')
++        session.mcp_introspection = bool('introspection' in mcp_config)
++    else:
++        session.mcp = False
++
+     # pass session state
+     app.state = session
+ 
+@@ -226,6 +235,14 @@ def initialization(session: SessionState, app: FastAPI = app):
+         from api.graphql.routers import graphql_clear
+         graphql_clear(app)
+ 
++    # add MCP route
++    if session.mcp:
++        from api.mcp.routers import mcp_init
++        mcp_init(app)
++    else:
++        from api.mcp.routers import mcp_clear
++        mcp_clear(app)
++
+     regenerate_docs(app)
+ 
+     LOG.debug('Active routes are:')
+diff --git a/src/services/api/mcp/__init__.py b/src/services/api/mcp/__init__.py
+new file mode 100644
+index 000000000..73f76ede1
+--- /dev/null
++++ b/src/services/api/mcp/__init__.py
+@@ -0,0 +1 @@
++# MCP package
+\ No newline at end of file
+diff --git a/src/services/api/mcp/auth.py b/src/services/api/mcp/auth.py
+new file mode 100644
+index 000000000..871452d99
+--- /dev/null
++++ b/src/services/api/mcp/auth.py
+@@ -0,0 +1,51 @@
++from fastapi import Request, HTTPException, status
++from ..session import SessionState
++
++def check_auth(key_list, key):
++    for api_key in key_list:
++        if api_key.get("key") == key:
++            return api_key.get("id")
++    return None
++
++async def mcp_auth(request: Request):
++    """
++    Dependency to authenticate MCP requests via apikey.
++    Checks the 'apikey' header or query parameter, or 'Authorization: Bearer' token.
++    Throws 401 if unauthorized, otherwise returns the session identity.
++    """
++    session = SessionState()
++    
++    # Check for Bearer token
++    auth_header = request.headers.get("Authorization")
++    if auth_header and auth_header.lower().startswith("bearer "):
++        from ..graphql.libs.token_auth import get_user_context
++        # Use existing logic from graphql token_auth to fetch context which includes verifying the JWT
++        try:
++            # We construct a fake request object with headers that get_user_context expects
++            user, error = get_user_context(request)
++            if error:
++                 raise HTTPException(
++                     status_code=status.HTTP_401_UNAUTHORIZED,
++                     detail=error
++                 )
++            if user:
++               return user
++        except Exception as e:
++            raise HTTPException(
++                status_code=status.HTTP_401_UNAUTHORIZED,
++                detail=str(e)
++            )
++
++    # Check for API key in headers or query parameters
++    api_key = request.headers.get("apikey") or request.query_params.get("apikey")
++    
++    if api_key:
++        api_keys = session.keys
++        key_id = check_auth(api_keys, api_key)
++        if key_id:
++            return key_id
++            
++    raise HTTPException(
++        status_code=status.HTTP_401_UNAUTHORIZED,
++        detail="Invalid or missing authentication credentials"
++    )
+\ No newline at end of file
+diff --git a/src/services/api/mcp/prompts.py b/src/services/api/mcp/prompts.py
+new file mode 100644
+index 000000000..90c1c8abd
+--- /dev/null
++++ b/src/services/api/mcp/prompts.py
+@@ -0,0 +1,271 @@
++import logging
++import os
++
++from mcp.server import Server
++from mcp.types import Prompt, PromptMessage, GetPromptResult, TextContent
++
++LOG = logging.getLogger('http_api.mcp.prompts')
++
++_CUSTOM_PROMPTS_DIR = '/config/user-data/mcp/prompts'
++
++_BUILTIN_PROMPTS = {
++    'vyos_capabilities_overview': {
++        'description': 'System prompt explaining all VyOS MCP capabilities, tools, resources, and usage patterns',
++        'messages': [
++            PromptMessage(
++                role='user',
++                content=TextContent(
++                    type='text',
++                    text=(
++                        'You are connected to a VyOS router via the Model Context Protocol (MCP). '
++                        'You have administrative access to configure, monitor, and manage this router.\n\n'
++
++                        '== TOOLS ==\n'
++                        '  execute_operational_command(path) — Run any op-mode command. Path is an array: '
++                        '["show","interfaces"], ["ping","192.168.1.1"]. First element is the op-mode verb '
++                        '(show, ping, monitor, reboot, clear, etc.).\n'
++                        '  modify_configuration(operations, commit_confirm_minutes?) — Stage set/delete ops '
++                        'and atomically commit. Always use commit_confirm_minutes for changes that could '
++                        'break connectivity.\n'
++                        '  manage_system_image(action, url?, name?) — Add/delete/set-default system images.\n'
++                        '  reboot_system(path?) — Reboot, defaults to ["now"].\n'
++                        '  poweroff_system(path?) — Power off, defaults to ["now"].\n'
++                        '  save_configuration(file?) — Save running config to disk.\n\n'
++
++                        '== RESOURCES ==\n'
++                        '  vyos-config://running/{path} — Active config subtree as JSON.\n'
++                        '  vyos-config://effective/{path} — Check if a node is effectively applied.\n'
++                        '  vyos-schema://config/{path} — JSON Schema of valid CLI config nodes. Use BEFORE '
++                        'calling modify_configuration to find valid paths, types, defaults, constraints.\n'
++                        '  vyos-schema://op/{path} — Valid op-mode continuations. Use BEFORE '
++                        'execute_operational_command to discover available sub-commands.\n'
++                        '  vyos-state://operational/{path} — Operational state output.\n\n'
++
++                        '== OTHER PROMPTS ==\n'
++                        '  troubleshoot_asymmetric_routing — Routing-loop diagnosis workflow\n'
++                        '  provision_site_to_site_vpn — IPsec tunnel provisioning workflow\n'
++                        '  audit_firewall_posture — Firewall ruleset security audit\n\n'
++
++                        '== PATTERNS ==\n'
++                        '1. Schema-first: check vyos-schema before modifying config.\n'
++                        '2. Check current state: read vyos-config before proposing changes.\n'
++                        '3. Commit-confirm for risky changes: WAN, routing, firewall.\n'
++                        '4. Atomic multi-step: batch all set/delete ops in one modify_configuration call.\n'
++                        '5. Op-mode path format: verb first, then sub-path. The server validates path '
++                        'prefixes against its command cache.\n\n'
++
++                        'This session is read-write with introspection enabled. Treat as root-equivalent.'
++                    )
++                )
++            )
++        ]
++    },
++    'troubleshoot_asymmetric_routing': {
++        'description': 'Guide through routing-loop diagnosis (FRR, conntrack, BGP)',
++        'messages': [
++            PromptMessage(
++                role='user',
++                content=TextContent(
++                    type='text',
++                    text=(
++                        'You are diagnosing an asymmetric routing or routing-loop issue on a VyOS router.\n\n'
++                        '1. Check the routing table:\n'
++                        '   - Use the vyos-schema://op/show/ip/route schema to understand available fields.\n'
++                        '   - Use execute_operational_command with path ["show", "ip", "route"] to dump the FIB.\n'
++                        '   - Look for unexpected equal-cost multipath entries or recursive next-hops.\n\n'
++                        '2. Inspect the conntrack table for mid-flow path changes:\n'
++                        '   - Use execute_operational_command with path ["show", "conntrack", "table", "ipv4"].\n'
++                        '   - Look for UNREPLIED or ASSURED states with mismatched interfaces.\n\n'
++                        '3. Examine BGP state if learned routes are involved:\n'
++                        '   - Use execute_operational_command with path ["show", "ip", "bgp", "summary"].\n'
++                        '   - Check for flapping peers or stale routes.\n\n'
++                        '4. Verify interface counters for asymmetric drops:\n'
++                        '   - Use execute_operational_command with path ["show", "interfaces"].\n\n'
++                        '5. Review the running config for routing policy:\n'
++                        '   - Use vyos-config://running/protocols to inspect BGP/OSPF/static route config.\n'
++                        '   - Look for route-maps or policy-based routing that may cause asymmetry.\n\n'
++                        'After gathering data, correlate findings and suggest a remediation plan.'
++                    )
++                )
++            )
++        ]
++    },
++    'provision_site_to_site_vpn': {
++        'description': 'IPsec tunnel workflow across IKE/ESP/peer config branches',
++        'messages': [
++            PromptMessage(
++                role='user',
++                content=TextContent(
++                    type='text',
++                    text=(
++                        'You are provisioning a site-to-site IPsec VPN on VyOS.\n\n'
++                        '1. Gather requirements from the user:\n'
++                        '   - Local and remote public IP addresses\n'
++                        '   - Local and remote private subnets\n'
++                        '   - Pre-shared key or certificate preference\n'
++                        '   - IKE version (v1 or v2, default: v2)\n'
++                        '   - Encryption and hash algorithms (default: aes256-sha256)\n\n'
++                        '2. Validate the VyOS schema for the vpn ipsec subtree:\n'
++                        '   - Use vyos-schema://config/vpn/ipsec to understand available nodes.\n\n'
++                        '3. Stage the IKE group:\n'
++                        '   - modify_configuration: set vpn ipsec ike-group <name> proposal <num> encryption aes256\n'
++                        '   - set vpn ipsec ike-group <name> proposal <num> hash sha256\n'
++                        '   - set vpn ipsec ike-group <name> proposal <num> dh-group 14\n'
++                        '   - set vpn ipsec ike-group <name> key-exchange ikev2\n\n'
++                        '4. Stage the ESP group:\n'
++                        '   - modify_configuration: set vpn ipsec esp-group <name> proposal <num> encryption aes256\n'
++                        '   - set vpn ipsec esp-group <name> proposal <num> hash sha256\n\n'
++                        '5. Stage the peer and tunnel:\n'
++                        '   - set vpn ipsec site-to-site peer <remote-ip> authentication pre-shared-secret <psk>\n'
++                        '   - set vpn ipsec site-to-site peer <remote-ip> ike-group <name>\n'
++                        '   - set vpn ipsec site-to-site peer <remote-ip> tunnel <num> esp-group <name>\n'
++                        '   - set vpn ipsec site-to-site peer <remote-ip> tunnel <num> local prefix <local-subnet>\n'
++                        '   - set vpn ipsec site-to-site peer <remote-ip> tunnel <num> remote prefix <remote-subnet>\n\n'
++                        '6. Use modify_configuration to commit all changes atomically.\n'
++                        '   - Consider using commit_confirm_minutes to auto-rollback if connectivity drops.\n\n'
++                        '7. Verify the tunnel is up:\n'
++                        '   - Use execute_operational_command with path ["show", "vpn", "ipsec", "sa"].\n'
++                    )
++                )
++            )
++        ]
++    },
++    'audit_firewall_posture': {
++        'description': 'Security audit aware of nftables (1.4+) vs. legacy firewall model',
++        'messages': [
++            PromptMessage(
++                role='user',
++                content=TextContent(
++                    type='text',
++                    text=(
++                        'You are performing a security audit of the VyOS firewall configuration.\n\n'
++                        '1. Determine the firewall model in use:\n'
++                        '   - Check vyos-config://running/firewall for IPv4 firewall rules.\n'
++                        '   - Check vyos-config://running/firewall/ipv6 for IPv6 rules.\n\n'
++                        '2. Audit the default policies:\n'
++                        '   - Use vyos-config://running/firewall to find default-action for INPUT/OUTPUT/FORWARD chains.\n'
++                        '   - Default DROP or REJECT with explicit allow rules is preferred.\n\n'
++                        '3. Review rule ordering and coverage:\n'
++                        '   - List all rules per chain using vyos-config://running/firewall/name.\n'
++                        '   - Check for: overly permissive rules (any/any), missing state tracking, incorrect rule ordering.\n'
++                        '   - Verify stateful inspection is enabled (state established/related).\n\n'
++                        '4. Check zone-based policy if applicable:\n'
++                        '   - Use vyos-config://running/zone-policy for zone-pair rules.\n'
++                        '   - Verify intra-zone and inter-zone defaults.\n\n'
++                        '5. Inspect interface assignments:\n'
++                        '   - Use vyos-config://running/interfaces to see which firewall policies are applied to each interface.\n\n'
++                        '6. Verify operational state:\n'
++                        '   - Use execute_operational_command with path ["show", "firewall", "statistics"] for hit counts.\n'
++                        '   - Use execute_operational_command with path ["show", "firewall", "summary"].\n\n'
++                        '7. Produce an audit report with:\n'
++                        '   - Summary of rules found per chain\n'
++                        '   - Flagged risks (overly permissive, missing defaults, unexpected interfaces)\n'
++                        '   - Recommended hardening actions\n'
++                    )
++                )
++            )
++        ]
++    }
++}
++
++_MAX_CUSTOM_FILES = 32
++_MAX_CUSTOM_FILE_SIZE = 65536
++
++
++def _load_custom_prompts():
++    custom = {}
++    prompts_dir = _CUSTOM_PROMPTS_DIR
++    if not os.path.isdir(prompts_dir):
++        return custom
++
++    try:
++        entries = os.listdir(prompts_dir)
++        count = 0
++        for entry in sorted(entries):
++            if count >= _MAX_CUSTOM_FILES:
++                LOG.warning(f'Maximum custom prompt files reached ({_MAX_CUSTOM_FILES})')
++                break
++            filepath = os.path.join(prompts_dir, entry)
++            real = os.path.realpath(filepath)
++            if not real.startswith(os.path.realpath(prompts_dir) + os.sep):
++                LOG.warning(f'Skipping path traversal: {entry}')
++                continue
++            if not os.path.isfile(real):
++                continue
++            try:
++                size = os.path.getsize(real)
++                if size > _MAX_CUSTOM_FILE_SIZE:
++                    LOG.warning(f'Skipping oversized prompt file: {entry} ({size} bytes)')
++                    continue
++            except OSError:
++                continue
++            try:
++                with open(real, 'r', encoding='utf-8') as f:
++                    text = f.read()
++            except Exception:
++                LOG.warning(f'Failed to read prompt file: {entry}')
++                continue
++
++            name = os.path.splitext(entry)[0]
++            if not name or not name[0].isalpha():
++                LOG.warning(f'Skipping invalid prompt name: {entry}')
++                continue
++
++            # Sanitize name to alphanumeric + underscore
++            safe_name = ''.join(c for c in name if c.isalnum() or c == '_')
++            if safe_name != name:
++                LOG.warning(f'Prompt name contains unsafe characters: {name}')
++                continue
++
++            custom[safe_name] = {
++                'description': f'User-defined prompt: {safe_name}',
++                'messages': [
++                    PromptMessage(
++                        role='user',
++                        content=TextContent(type='text', text=text)
++                    )
++                ]
++            }
++            count += 1
++
++            LOG.debug(f'Loaded custom prompt: {safe_name}')
++    except OSError:
++        pass
++
++    return custom
++
++
++def _build_prompts():
++    prompts = dict(_BUILTIN_PROMPTS)
++    try:
++        custom = _load_custom_prompts()
++        prompts.update(custom)
++    except Exception:
++        LOG.warning('Failed to load custom prompts', exc_info=True)
++    return prompts
++
++
++def register_prompts(server: Server):
++    prompts = _build_prompts()
++
++    prompt_list = []
++    for name, pdata in prompts.items():
++        prompt_list.append(Prompt(
++            name=name,
++            description=pdata.get('description', ''),
++            arguments=[]
++        ))
++
++    @server.list_prompts()
++    async def list_prompts():
++        return prompt_list
++
++    @server.get_prompt()
++    async def get_prompt(name: str, arguments: dict | None):
++        if name not in prompts:
++            raise ValueError(f'Unknown prompt: {name}')
++        pdata = prompts[name]
++        return GetPromptResult(
++            description=pdata.get('description', ''),
++            messages=list(pdata.get('messages', []))
++        )
+diff --git a/src/services/api/mcp/resources.py b/src/services/api/mcp/resources.py
+new file mode 100644
+index 000000000..c6bbd9581
+--- /dev/null
++++ b/src/services/api/mcp/resources.py
+@@ -0,0 +1,191 @@
++import json
++import logging
++import re
++from urllib.parse import unquote
++
++from pydantic import AnyUrl
++from mcp.server import Server
++from mcp.types import ResourceTemplate, TextResourceContents
++
++from . import schema as mcp_schema
++from ..session import SessionState
++
++LOG = logging.getLogger('http_api.mcp.resources')
++
++_ILLEGAL_PATH_RE = re.compile(r'\.\.|[;&|`$(){}[\]<>\\\'\"]')
++
++
++def _sanitize_path(path_str):
++    if _ILLEGAL_PATH_RE.search(path_str):
++        raise ValueError(f'Illegal characters in resource path: {path_str}')
++    return path_str
++
++
++def _split_path(path_str):
++    if not path_str:
++        return []
++    segments = path_str.strip('/').split('/')
++    return [unquote(s) for s in segments if s]
++
++
++def _parse_uri(uri):
++    scheme = uri.scheme
++    section = uri.host or ''
++    path_str = uri.path or ''
++    path_str = _sanitize_path(path_str)
++    return scheme, section, _split_path(path_str)
++
++
++def _read_config_running(path_str):
++    from vyos.config import Config
++    state = SessionState()
++    session = state.session
++    env = session.get_session_env()
++    config = Config(session_env=env)
++    try:
++        path = _split_path(path_str)
++        res = config.show_config(path)
++    except Exception as e:
++        LOG.error(f'Failed to read config at {path_str}: {e}')
++        raise
++    try:
++        data = json.loads(res)
++        return json.dumps(data, separators=(',', ':'))
++    except (json.JSONDecodeError, TypeError):
++        return res
++
++
++def _read_config_effective(path_str):
++    from vyos.config import Config
++    state = SessionState()
++    session = state.session
++    env = session.get_session_env()
++    config = Config(session_env=env)
++    path = _split_path(path_str)
++    try:
++        effective = config.exists_effective(path)
++        return json.dumps({'effective': effective}, separators=(',', ':'))
++    except Exception as e:
++        LOG.error(f'Failed to check effective config at {path_str}: {e}')
++        raise
++
++
++def _read_schema_config(path_str, depth=1):
++    path = _split_path(path_str)
++    schema = mcp_schema.project_config_schema(path, depth=depth)
++    return mcp_schema.to_json_schema_string(schema)
++
++
++def _read_schema_op(path_str, depth=1):
++    path = _split_path(path_str)
++    schema = mcp_schema.project_op_schema(path, depth=depth)
++    return mcp_schema.to_json_schema_string(schema)
++
++
++def _read_state_operational(path_str):
++    from vyos.configsession import ConfigSessionError
++    state = SessionState()
++    session = state.session
++    path = _split_path(path_str)
++    if not path:
++        raise ValueError('operational state requires a command path')
++    try:
++        res = session.show(path)
++    except ConfigSessionError as e:
++        raise ValueError(str(e))
++    except Exception as e:
++        LOG.error(f'Failed to run operational command {path}: {e}')
++        raise
++    return res
++
++
++_RESOURCE_HANDLERS = {
++    'vyos-config': {
++        'running': _read_config_running,
++        'effective': _read_config_effective,
++    },
++    'vyos-schema': {
++        'config': _read_schema_config,
++        'op': _read_schema_op,
++    },
++    'vyos-state': {
++        'operational': _read_state_operational,
++    },
++}
++
++_TEMPLATES = [
++    ResourceTemplate(
++        uriTemplate='vyos-config://running/{path}',
++        name='Config: Running',
++        description='Active configuration subtree at the given path',
++        mimeType='application/json',
++    ),
++    ResourceTemplate(
++        uriTemplate='vyos-config://effective/{path}',
++        name='Config: Effective',
++        description='Check if a node is effectively applied in the running config',
++        mimeType='application/json',
++    ),
++    ResourceTemplate(
++        uriTemplate='vyos-schema://config/{path}',
++        name='Schema: Config',
++        description='JSON Schema for valid CLI config nodes at the given path',
++        mimeType='application/json',
++    ),
++    ResourceTemplate(
++        uriTemplate='vyos-schema://op/{path}',
++        name='Schema: Operational',
++        description='Valid op-mode command continuations at the given path',
++        mimeType='application/json',
++    ),
++    ResourceTemplate(
++        uriTemplate='vyos-state://operational/{path}',
++        name='State: Operational',
++        description='Operational state output for the given command path',
++        mimeType='application/json',
++    ),
++]
++
++
++def _filter_templates(introspection_enabled):
++    if introspection_enabled:
++        return _TEMPLATES
++    return [t for t in _TEMPLATES if not t.uriTemplate.startswith('vyos-schema://')]
++
++
++async def _handle_read_resource(uri: AnyUrl):
++    from fastapi.concurrency import run_in_threadpool
++    scheme, section, path = _parse_uri(uri)
++
++    scheme_handlers = _RESOURCE_HANDLERS.get(scheme)
++    if scheme_handlers is None:
++        raise ValueError(f'Unknown resource scheme: {scheme}')
++
++    handler = scheme_handlers.get(section)
++    if handler is None:
++        raise ValueError(f'Unknown resource section: {scheme}://{section}')
++
++    path_str = '/'.join(path)
++
++    if scheme in ('vyos-config', 'vyos-state'):
++        result = await run_in_threadpool(handler, path_str)
++    else:
++        result = handler(path_str)
++
++    return [TextResourceContents(
++        uri=uri,
++        mimeType='application/json',
++        text=result,
++    )]
++
++
++def register_resources(server: Server, introspection_enabled: bool = False):
++    templates = _filter_templates(introspection_enabled)
++
++    @server.list_resource_templates()
++    async def list_resource_templates():
++        return templates
++
++    @server.read_resource()
++    async def read_resource(uri: AnyUrl):
++        return await _handle_read_resource(uri)
+diff --git a/src/services/api/mcp/routers.py b/src/services/api/mcp/routers.py
+new file mode 100644
+index 000000000..7e030a15f
+--- /dev/null
++++ b/src/services/api/mcp/routers.py
+@@ -0,0 +1,113 @@
++import asyncio
++import logging
++
++from starlette.requests import Request as StarletteRequest
++from starlette.responses import Response
++
++from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
++
++from fastapi import FastAPI
++from fastapi import HTTPException
++
++from .server import create_mcp_server
++from .auth import mcp_auth
++from ..session import SessionState
++
++LOG = logging.getLogger('http_api.mcp.routers')
++
++_session_manager = None
++_startup_registered = False
++
++
++async def _mcp_auth_check(scope, receive, send):
++    request = StarletteRequest(scope, receive)
++
++    # If the request already carries a valid MCP session ID, trust it —
++    # the session was authenticated on the initial GET.
++    session_id = request.headers.get('Mcp-Session-Id') or request.headers.get('mcp-session-id')
++    if session_id and _session_manager is not None:
++        if session_id in getattr(_session_manager, '_server_instances', {}):
++            return True
++
++    try:
++        await mcp_auth(request)
++    except HTTPException as e:
++        response = Response(e.detail, status_code=e.status_code)
++        await response(scope, receive, send)
++        return False
++    return True
++
++
++async def _mcp_entry(scope, receive, send):
++    """Handle both /mcp and /mcp/... paths, forwarding to session manager."""
++    if scope['type'] != 'http':
++        await _session_manager.handle_request(scope, receive, send)
++        return
++
++    authorized = await _mcp_auth_check(scope, receive, send)
++    if not authorized:
++        return
++
++    await _session_manager.handle_request(scope, receive, send)
++
++
++def _start_session_manager():
++    global _session_manager
++    if _session_manager is None:
++        return
++    LOG.debug('Starting MCP session manager background task')
++    loop = asyncio.get_event_loop()
++    loop.create_task(_run_session_manager())
++
++
++def _stop_session_manager():
++    global _session_manager
++    LOG.debug('Stopping MCP session manager')
++    _session_manager = None
++
++
++async def _run_session_manager():
++    global _session_manager
++    sm = _session_manager
++    if sm is None:
++        return
++    try:
++        async with sm.run():
++            LOG.debug('MCP session manager running')
++            await asyncio.Event().wait()
++    except asyncio.CancelledError:
++        LOG.debug('MCP session manager cancelled')
++    except Exception:
++        LOG.exception('MCP session manager error')
++
++
++def mcp_init(app: FastAPI):
++    global _session_manager, _startup_registered
++
++    if any(getattr(r, 'path', '') == '/mcp/' for r in app.router.routes):
++        return
++
++    mcp_server = create_mcp_server()
++    session = SessionState()
++    json_resp = session.mcp_mode == 'read-write'
++
++    _session_manager = StreamableHTTPSessionManager(
++        app=mcp_server,
++        event_store=None,
++        json_response=json_resp,
++        stateless=False,
++    )
++
++    if not _startup_registered:
++        app.add_event_handler('startup', _start_session_manager)
++        app.add_event_handler('shutdown', _stop_session_manager)
++        _startup_registered = True
++
++    app.mount('/mcp/', _mcp_entry)
++
++
++def mcp_clear(app: FastAPI):
++    global _session_manager, _startup_registered
++
++    app.router.routes = [r for r in app.router.routes if not getattr(r, 'path', '').startswith('/mcp')]
++    _session_manager = None
+diff --git a/src/services/api/mcp/schema.py b/src/services/api/mcp/schema.py
+new file mode 100644
+index 000000000..8d7223697
+--- /dev/null
++++ b/src/services/api/mcp/schema.py
+@@ -0,0 +1,240 @@
++import json
++import logging
++
++from vyos.xml_ref import load_reference, load_op_reference
++
++LOG = logging.getLogger('http_api.mcp.schema')
++
++_conf_xml = None
++_op_xml = None
++
++def _get_conf_xml():
++    global _conf_xml
++    if _conf_xml is None:
++        _conf_xml = load_reference()
++    return _conf_xml
++
++def _get_op_xml():
++    global _op_xml
++    if _op_xml is None:
++        _op_xml = load_op_reference()
++    return _op_xml
++
++
++def _resolve_conf_ref(path):
++    ref = _get_conf_xml().ref
++    path_copy = list(path)
++    d = ref
++    while path_copy and d:
++        key = path_copy.pop(0)
++        d = d.get(key, {})
++        if _is_tag(d) and path_copy:
++            path_copy.pop(0)
++    return d
++
++
++def _resolve_op_ref(path):
++    ref = _get_op_xml().op_ref
++    d = ref
++    for key in path:
++        if not isinstance(d, dict):
++            return {}
++        d = d.get(key, {})
++    return d
++
++
++def _is_tag(node_dict):
++    return node_dict.get('node_data', {}).get('node_type') == 'tag'
++
++
++def _is_leaf_node(node_dict):
++    return node_dict.get('node_data', {}).get('node_type') == 'leaf'
++
++
++def _is_multi_node(node_dict):
++    return node_dict.get('node_data', {}).get('multi', False)
++
++
++def _is_valueless_node(node_dict):
++    return node_dict.get('node_data', {}).get('valueless', False)
++
++
++def _get_default_value(node_dict):
++    return node_dict.get('node_data', {}).get('default_value')
++
++
++def _get_conf_children(node_dict):
++    if not isinstance(node_dict, dict) or 'node_data' not in node_dict:
++        return []
++    return sorted(k for k in node_dict if k not in ('node_data', 'component_version'))
++
++
++def _get_op_children(node_dict):
++    if not isinstance(node_dict, dict) or '__node_data' not in node_dict:
++        return []
++    return sorted(k for k in node_dict if k != '__node_data')
++
++
++def _project_config_node(node_dict, depth):
++    if _is_leaf_node(node_dict):
++        if _is_valueless_node(node_dict):
++            schema = {'type': 'boolean'}
++        elif _is_multi_node(node_dict):
++            schema = {'type': 'array', 'items': {'type': 'string'}}
++        else:
++            schema = {'type': 'string'}
++        dv = _get_default_value(node_dict)
++        if dv is not None:
++            schema['default'] = dv
++        return schema
++
++    if _is_tag(node_dict):
++        children = _get_conf_children(node_dict)
++        child_schemas = {}
++        for c in children:
++            child_schemas[c] = _project_config_node(node_dict[c], depth - 1 if depth > 0 else 0)
++        return {
++            'type': 'object',
++            'additionalProperties': {
++                'type': 'object',
++                'properties': child_schemas
++            }
++        }
++
++    if depth <= 0:
++        children = _get_conf_children(node_dict)
++        return {'type': 'object', 'x-children': children}
++
++    children = _get_conf_children(node_dict)
++    properties = {}
++    for c in children:
++        properties[c] = _project_config_node(node_dict[c], depth - 1)
++    return {'type': 'object', 'properties': properties}
++
++
++def _project_config_path(path, depth=1):
++    if not path:
++        ref = _get_conf_xml().ref
++        return _project_config_node(ref, depth)
++    node_dict = _resolve_conf_ref(path)
++    if 'node_data' not in node_dict:
++        return {}
++    return _project_config_node(node_dict, depth)
++
++
++def _project_op_node(d, depth):
++    if not isinstance(d, dict) or '__node_data' not in d:
++        return {'type': 'string'}
++
++    nd = d.get('__node_data', {})
++    children = _get_op_children(d)
++
++    if not children:
++        if depth > 0:
++            return _build_op_leaf_schema(nd)
++        return {'type': 'string', 'x-has-dynamic-children': True}
++
++    if depth <= 0:
++        return {'type': 'object', 'x-children': children}
++
++    properties = {}
++    for c in children:
++        properties[c] = _project_op_node(d[c], depth - 1)
++
++    result = {'type': 'object', 'properties': properties}
++    help_text = nd.get('help_text', '')
++    if help_text:
++        result['description'] = help_text
++    command = nd.get('command', '')
++    if command:
++        result['x-command'] = command
++    return result
++
++
++def _build_op_leaf_schema(nd):
++    schema = {'type': 'string'}
++    help_text = nd.get('help_text', '')
++    if help_text:
++        schema['description'] = help_text
++
++    constraints = nd.get('constraints')
++    if constraints:
++        regexes = constraints.get('regexes', [])
++        if regexes:
++            if len(regexes) == 1:
++                schema['pattern'] = regexes[0]
++            else:
++                schema['x-regexes'] = regexes
++        validators = constraints.get('validators', [])
++        for v in validators:
++            name = v.get('name', '')
++            arg = v.get('argument', '')
++            if name == 'numeric':
++                import re
++                m = re.search(r'--range\s+(\d+)-(\d+)', arg or '')
++                if m:
++                    schema['minimum'] = int(m.group(1))
++                    schema['maximum'] = int(m.group(2))
++
++    comp_help = nd.get('comp_help', {})
++    enum_list = comp_help.get('list', [])
++    if enum_list:
++        schema['enum'] = enum_list
++    return schema
++
++
++def _project_op_path(path, depth=1):
++    d = _resolve_op_ref(path)
++    if not d:
++        return {}
++    return _project_op_node(d, depth)
++
++
++def project_config_schema(path=None, depth=1):
++    return _project_config_path(path or [], depth)
++
++
++def project_op_schema(path=None, depth=1):
++    return _project_op_path(path or [], depth)
++
++
++def config_path_valid(path):
++    if not path:
++        return True
++    ref = _get_conf_xml().ref
++    path_copy = list(path)
++    d = ref
++    while path_copy:
++        if not isinstance(d, dict) or 'node_data' not in d:
++            return False
++        key = path_copy.pop(0)
++        if _is_tag(d) and path_copy:
++            path_copy.pop(0)
++            continue
++        next_d = d.get(key)
++        if next_d is None:
++            return True
++        d = next_d
++    return True
++
++
++def op_path_valid(path):
++    if not path:
++        return True
++
++    xml = _get_op_xml()
++    d = xml.op_ref
++    for key in path:
++        if not isinstance(d, dict):
++            return False
++        next_d = d.get(key)
++        if next_d is None:
++            return True
++        if '__node_data' not in next_d:
++            return False
++        d = next_d
++    return True
++
++
++def to_json_schema_string(schema):
++    return json.dumps(schema, separators=(',', ':'))
+diff --git a/src/services/api/mcp/server.py b/src/services/api/mcp/server.py
+new file mode 100644
+index 000000000..180cf5b71
+--- /dev/null
++++ b/src/services/api/mcp/server.py
+@@ -0,0 +1,20 @@
++from mcp.server import Server
++from ..session import SessionState
++
++
++def create_mcp_server() -> Server:
++    server = Server("VyOS")
++    state = SessionState()
++    introspection = bool(state.mcp_introspection)
++    read_only = state.mcp_mode != 'read-write'
++
++    from .resources import register_resources
++    register_resources(server, introspection_enabled=introspection)
++
++    from .tools import register_tools
++    register_tools(server, read_only=read_only)
++
++    from .prompts import register_prompts
++    register_prompts(server)
++
++    return server
+diff --git a/src/services/api/mcp/tools.py b/src/services/api/mcp/tools.py
+new file mode 100644
+index 000000000..da0a43a26
+--- /dev/null
++++ b/src/services/api/mcp/tools.py
+@@ -0,0 +1,323 @@
++import logging
++
++from mcp.server import Server
++from mcp.types import Tool, TextContent
++from fastapi.concurrency import run_in_threadpool
++
++from . import schema as mcp_schema
++from ..session import SessionState
++
++LOG = logging.getLogger('http_api.mcp.tools')
++
++TOOL_EXECUTE_OP = 'execute_operational_command'
++TOOL_MODIFY_CONFIG = 'modify_configuration'
++TOOL_MANAGE_IMAGE = 'manage_system_image'
++TOOL_REBOOT = 'reboot_system'
++TOOL_POWEROFF = 'poweroff_system'
++TOOL_SAVE_CONFIG = 'save_configuration'
++
++_READ_ONLY_TOOLS = [
++    Tool(
++        name=TOOL_EXECUTE_OP,
++        description='Run a VyOS operational-mode (show/monitor/...) command.',
++        inputSchema={
++            'type': 'object',
++            'properties': {
++                'path': {
++                    'type': 'array',
++                    'items': {'type': 'string'},
++                    'description': 'Command path (e.g. ["show", "interfaces"])'
++                }
++            },
++            'required': ['path']
++        }
++    ),
++]
++
++_WRITE_TOOLS = [
++    Tool(
++        name=TOOL_MODIFY_CONFIG,
++        description='Stage set/delete operations and atomically commit them.',
++        inputSchema={
++            'type': 'object',
++            'properties': {
++                'operations': {
++                    'type': 'array',
++                    'items': {
++                        'type': 'object',
++                        'properties': {
++                            'op': {'enum': ['set', 'delete']},
++                            'path': {'type': 'array', 'items': {'type': 'string'}},
++                            'value': {'type': 'string'}
++                        },
++                        'required': ['op', 'path']
++                    }
++                },
++                'commit_confirm_minutes': {
++                    'type': 'integer',
++                    'description': 'If set, use commit-confirm with this many minutes.'
++                }
++            },
++            'required': ['operations']
++        }
++    ),
++    Tool(
++        name=TOOL_MANAGE_IMAGE,
++        description='Manage VyOS system images (add, delete, set-default).',
++        inputSchema={
++            'type': 'object',
++            'properties': {
++                'action': {'enum': ['add', 'delete', 'set']},
++                'url': {'type': 'string', 'description': 'URL for add action'},
++                'name': {'type': 'string', 'description': 'Image name for delete/set'}
++            },
++            'required': ['action']
++        }
++    ),
++    Tool(
++        name=TOOL_REBOOT,
++        description='Reboot the VyOS system.',
++        inputSchema={
++            'type': 'object',
++            'properties': {
++                'path': {
++                    'type': 'array',
++                    'items': {'type': 'string'},
++                    'description': 'Reboot command path (default: ["now"])'
++                }
++            }
++        }
++    ),
++    Tool(
++        name=TOOL_POWEROFF,
++        description='Power off the VyOS system.',
++        inputSchema={
++            'type': 'object',
++            'properties': {
++                'path': {
++                    'type': 'array',
++                    'items': {'type': 'string'},
++                    'description': 'Poweroff command path (default: ["now"])'
++                }
++            }
++        }
++    ),
++    Tool(
++        name=TOOL_SAVE_CONFIG,
++        description='Save running configuration to file.',
++        inputSchema={
++            'type': 'object',
++            'properties': {
++                'file': {
++                    'type': 'string',
++                    'description': 'Optional file path to save config to'
++                }
++            }
++        }
++    ),
++]
++
++
++def _execute_operational_command(arguments):
++    from vyos.configsession import ConfigSessionError
++
++    path = arguments.get('path', [])
++    if not path:
++        raise ValueError('path is required')
++
++    if not mcp_schema.op_path_valid(path):
++        raise ValueError(f'Invalid operational command path: {path}')
++
++    state = SessionState()
++    session = state.session
++
++    op = path[0]
++    remainder = list(path[1:])
++
++    try:
++        if op == 'show':
++            return session.show(remainder)
++        elif op == 'generate':
++            return session.generate(remainder)
++        elif op == 'reboot':
++            return session.reboot(remainder if remainder else ['now'])
++        elif op == 'poweroff':
++            return session.poweroff(remainder if remainder else ['now'])
++        elif op == 'ping':
++            return session.ping(remainder)
++        elif op == 'traceroute':
++            return session.traceroute(remainder)
++        elif op == 'monitor':
++            return session.monitor(remainder)
++        elif op == 'restart':
++            return session.restart(remainder)
++        elif op == 'reset':
++            return session.reset(remainder)
++        elif op == 'clear':
++            return session.clear(remainder)
++        elif op == 'set':
++            return session.set(remainder)
++        elif op == 'delete':
++            return session.delete(remainder)
++        elif op == 'renew':
++            return session.renew(remainder)
++        elif op == 'release':
++            return session.release(remainder)
++        elif op == 'connect':
++            return session.connect(remainder)
++        elif op == 'disconnect':
++            return session.disconnect(remainder)
++        else:
++            return session.show(path)
++    except ConfigSessionError as e:
++        raise ValueError(str(e))
++    except AttributeError:
++        return session.show(path)
++
++
++def _modify_configuration(arguments):
++    from vyos.configsession import ConfigSessionError, ConfigSession
++    from api.rest.routers import lock, asynclock
++    import asyncio
++    import os
++
++    operations = arguments.get('operations', [])
++    if not operations:
++        raise ValueError('operations is required')
++
++    commit_confirm_minutes = arguments.get('commit_confirm_minutes')
++
++    state = SessionState()
++    session = state.session
++    env = session.get_session_env()
++    uid = os.getpid()
++
++    try:
++        loop = asyncio.get_running_loop()
++    except RuntimeError:
++        loop = None
++
++    async def _do_commit():
++        cfg_session = ConfigSession(uid, app='vyos-mcp-agent')
++
++        for op_spec in operations:
++            op = op_spec.get('op')
++            path = op_spec.get('path', [])
++            value = op_spec.get('value')
++
++            if not mcp_schema.config_path_valid(path):
++                cfg_session.discard()
++                raise ValueError(f'Invalid config path: {path}')
++
++            if op == 'set':
++                cfg_session.set(path, value or '')
++            elif op == 'delete':
++                cfg_session.delete(path)
++            else:
++                cfg_session.discard()
++                raise ValueError(f'Unknown operation: {op}')
++
++        if commit_confirm_minutes:
++            out = cfg_session.commit_confirm(minutes=commit_confirm_minutes)
++        else:
++            out = cfg_session.commit()
++
++        return out
++
++    if loop is not None:
++        def _run_sync():
++            import asyncio as _asyncio
++            lock.acquire()
++            try:
++                return _asyncio.run(_do_commit())
++            finally:
++                lock.release()
++
++        return _run_sync()
++    else:
++        lock.acquire()
++        try:
++            return asyncio.run(_do_commit())
++        finally:
++            lock.release()
++
++
++def _manage_system_image(arguments):
++    action = arguments.get('action')
++    url = arguments.get('url', '')
++    name = arguments.get('name', '')
++
++    state = SessionState()
++    session = state.session
++
++    if action == 'add':
++        if not url:
++            raise ValueError('url is required for add action')
++        return session.show(['image', 'add', url])
++    elif action == 'delete':
++        if not name:
++            raise ValueError('name is required for delete action')
++        return session.show(['image', 'delete', name])
++    elif action == 'set':
++        if not name:
++            raise ValueError('name is required for set action')
++        return session.set_default_image(name)
++    else:
++        raise ValueError(f'Unknown image action: {action}')
++
++
++def _reboot_system(arguments):
++    path = arguments.get('path', ['now'])
++    state = SessionState()
++    session = state.session
++    return session.reboot(path)
++
++
++def _poweroff_system(arguments):
++    path = arguments.get('path', ['now'])
++    state = SessionState()
++    session = state.session
++    return session.poweroff(path)
++
++
++def _save_configuration(arguments):
++    file_path = arguments.get('file')
++    state = SessionState()
++    session = state.session
++    if file_path:
++        return session.save_config(file_path)
++    return session.save_config()
++
++
++_TOOL_HANDLERS = {
++    TOOL_EXECUTE_OP: _execute_operational_command,
++    TOOL_MODIFY_CONFIG: _modify_configuration,
++    TOOL_MANAGE_IMAGE: _manage_system_image,
++    TOOL_REBOOT: _reboot_system,
++    TOOL_POWEROFF: _poweroff_system,
++    TOOL_SAVE_CONFIG: _save_configuration,
++}
++
++
++def register_tools(server: Server, read_only: bool = True):
++    tools = _READ_ONLY_TOOLS[:]
++    if not read_only:
++        tools.extend(_WRITE_TOOLS)
++
++    @server.list_tools()
++    async def list_tools():
++        return tools
++
++    @server.call_tool()
++    async def call_tool(name: str, arguments: dict):
++        handler = _TOOL_HANDLERS.get(name)
++        if handler is None:
++            raise ValueError(f'Unknown tool: {name}')
++
++        if name in (TOOL_MODIFY_CONFIG, TOOL_MANAGE_IMAGE, TOOL_REBOOT,
++                     TOOL_POWEROFF, TOOL_SAVE_CONFIG):
++            result = await run_in_threadpool(handler, arguments)
++        else:
++            result = await run_in_threadpool(handler, arguments)
++
++        return [TextContent(type='text', text=str(result))]
