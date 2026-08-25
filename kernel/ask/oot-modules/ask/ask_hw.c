@@ -728,6 +728,99 @@ int ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid)
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_get_sink_fqid);
 
+/*
+ * T-M6-8 DIAGNOSTIC (2026-08-25): no-confirm TX FQ backlog probe.
+ *
+ * The VLAN offload freezes after ~20 packets with no ErrFD / no FMFP stall /
+ * no FE workspace depletion, and F-234 (bpid + MURAM frag word2) did not help.
+ * The routed path sustains 7.12G on the SAME per-port no-confirm TX FQ, so the
+ * question is whether the VLAN-rebuilt (STRIP_ETH+INSERT_L2) frames actually
+ * REACH and DRAIN that FQ, or pile up. qman_query_fq_np() reads the FQD's
+ * non-programmable fields including frm_cnt (frames enqueued-not-dequeued =
+ * backlog) and state. Writing 1 to /sys/module/ask/parameters/fq_probe walks
+ * the cached per-port no-confirm FQs and logs each FQ's live state + backlog.
+ *
+ * Interpretation while a VLAN flow is frozen:
+ *   frm_cnt stuck high / rising -> frames enqueued but NOT draining (QMan/TX/
+ *       EBD buffer-recycle side): the FQ is backlogged.
+ *   frm_cnt ~0 + byte_cnt ~0    -> frames never reach the FQ; the FE-VM stops
+ *       enqueuing after ~20 (FE-VM lookup/execute side).
+ *   state != ACTIVE/SCHED       -> the FQ retired/parked/held-active (OAC /
+ *       congestion / order-restoration wedge).
+ * Read-only: issues QM MC QUERYFQ_NP commands only; touches no datapath state.
+ */
+static int ask_fq_probe_set(const char *val, const struct kernel_param *kp)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_inst;
+	unsigned int i, shown = 0;
+	bool trig;
+	int rc;
+
+	rc = kstrtobool(val, &trig);
+	if (rc)
+		return rc;
+	if (!trig)
+		return 0;
+	if (!h) {
+		pr_info("ask: FQ-PROBE: no HW instance (offload not engaged)\n");
+		return 0;
+	}
+
+	mutex_lock(&h->lock);
+
+	if (h->dedicated_fq_ready) {
+		struct qman_fq fq = { .fqid = h->dedicated_fq.fqid };
+		struct qm_mcr_queryfq_np np;
+
+		memset(&np, 0, sizeof(np));
+		rc = qman_query_fq_np(&fq, &np);
+		if (rc)
+			pr_info("ask: FQ-PROBE dedicated fqid=0x%x query rc=%d\n",
+				fq.fqid, rc);
+		else
+			pr_info("ask: FQ-PROBE dedicated fqid=0x%x state=0x%02x frm_cnt=%u byte_cnt=%u\n",
+				fq.fqid, np.state & QM_MCR_NP_STATE_MASK,
+				qm_mcr_np_get(&np, frm_cnt), np.byte_cnt);
+	}
+
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		struct qman_fq fq;
+		struct qm_mcr_queryfq_np np;
+
+		if (!h->noconf_tx[i].fqid)
+			continue;
+		memset(&fq, 0, sizeof(fq));
+		fq.fqid = h->noconf_tx[i].fqid;
+		memset(&np, 0, sizeof(np));
+		rc = qman_query_fq_np(&fq, &np);
+		if (rc) {
+			pr_info("ask: FQ-PROBE slot=%u ifindex=%u fqid=0x%x query rc=%d\n",
+				i, h->noconf_tx[i].ifindex, fq.fqid, rc);
+		} else {
+			pr_info("ask: FQ-PROBE slot=%u ifindex=%u fqid=0x%x state=0x%02x frm_cnt=%u byte_cnt=%u fqd_link=0x%x\n",
+				i, h->noconf_tx[i].ifindex, fq.fqid,
+				np.state & QM_MCR_NP_STATE_MASK,
+				qm_mcr_np_get(&np, frm_cnt), np.byte_cnt,
+				qm_mcr_np_get(&np, fqd_link));
+		}
+		shown++;
+	}
+
+	mutex_unlock(&h->lock);
+
+	if (!shown)
+		pr_info("ask: FQ-PROBE: no no-confirm TX FQs cached yet (no HW flow inserted)\n");
+	return 0;
+}
+
+static const struct kernel_param_ops ask_fq_probe_ops = {
+	.set = ask_fq_probe_set,
+	/* write-only trigger; no .get */
+};
+module_param_cb(fq_probe, &ask_fq_probe_ops, NULL, 0200);
+MODULE_PARM_DESC(fq_probe,
+		 "T-M6-8 diagnostic: write 1 to log no-confirm TX FQ state + backlog (frm_cnt) via QMan QUERYFQ_NP");
+
 /* ------------------------------------------------------------------------- */
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */
