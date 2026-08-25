@@ -2048,6 +2048,59 @@ static void ask_fe_flow_remove(const struct ask_flow_key *key)
 /* FLOW_CLS_* dispatch                                                        */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * T-M6-8: resolve the ingress VLAN VID for a POP flow.
+ *
+ * FLOW_ACTION_VLAN_POP carries no VID and the block_cb only gives us the
+ * PHYSICAL ingress port (@iif). The popped tag is a property of the ingress
+ * VLAN vif, so find the single-tag 802.1Q upper of the physical ingress dev
+ * whose configured IPv4 subnet contains @peer_v4 (the flow's ingress-side peer
+ * address, i.e. key.src_ip for the POP direction). Returns the VID (1..4094)
+ * or 0 if no matching vif is found (caller fails closed to software).
+ */
+static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
+{
+	struct net_device *phys, *upper;
+	struct list_head *iter;
+	u16 vid = 0;
+
+	if (!iif || !peer_v4)
+		return 0;
+
+	phys = dev_get_by_index(&init_net, iif);
+	if (!phys)
+		return 0;
+
+	rcu_read_lock();
+	netdev_for_each_upper_dev_rcu(phys, upper, iter) {
+		struct in_device *in_dev;
+		const struct in_ifaddr *ifa;
+
+		if (!is_vlan_dev(upper) ||
+		    vlan_dev_vlan_proto(upper) != htons(ETH_P_8021Q))
+			continue;
+
+		in_dev = __in_dev_get_rcu(upper);
+		if (!in_dev)
+			continue;
+
+		in_dev_for_each_ifa_rcu(ifa, in_dev) {
+			__be32 mask = ifa->ifa_mask;
+
+			if ((peer_v4 & mask) == (ifa->ifa_address & mask)) {
+				vid = vlan_dev_vlan_id(upper);
+				break;
+			}
+		}
+		if (vid)
+			break;
+	}
+	rcu_read_unlock();
+
+	dev_put(phys);
+	return vid;
+}
+
 static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                     struct flow_cls_offload *f)
 {
@@ -2174,28 +2227,31 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	/*
 	 * T-M6-8 (2026-08-25): for a POP flow, capture the real ingress VID so
 	 * STRIP_ALL_VLAN can validate it (vendor insert_remove_vlan_hm parity).
-	 * FLOW_ACTION_VLAN_POP itself is field-less. The VID can arrive either
-	 * in FLOW_DISSECTOR_KEY_VLAN (ask_parse_match stored it in key.vlan_id)
-	 * or as a property of the true-ingress VLAN vif (e.g. eth3.100). Prefer
-	 * the explicit vif value when available; key.iif is already META-
-	 * corrected at this point. A POP with no resolved VID must stay in
-	 * software — publishing zero-VID+SKIP recreates the broken record this
-	 * fix removes, while zero-VID+VALIDATE rejects a real non-zero tag.
+	 * FLOW_ACTION_VLAN_POP is field-less, and by the time the block_cb runs
+	 * key.iif is the PHYSICAL ingress port (e.g. eth3, not the vif eth3.100)
+	 * — so dev_get_by_index(key.iif) is never a VLAN dev and the dissector
+	 * key.vlan_id comes back 0 for vif-routed flows. The tag being popped is
+	 * a property of the ingress VLAN vif; resolve it by finding the 802.1Q
+	 * upper of the physical ingress dev whose configured IPv4 subnet contains
+	 * the flow's ingress-peer address (key.src_ip for the POP direction, e.g.
+	 * 10.99.100.110 on eth3.100's 10.99.100.0/24). Deterministic for routed
+	 * VLAN, no cross-cookie state. Try the dissector VID first if present.
+	 * A POP with no resolved VID stays in software (fail closed): a zero VID
+	 * with VALIDATE rejects the real tag, and zero+SKIP is the broken record
+	 * this fix removes.
 	 */
 	if (key.vlan_edit_flags & ASK_VLANF_POP) {
-		struct net_device *iif_dev = key.iif ?
-			dev_get_by_index(&init_net, key.iif) : NULL;
+		__be32 peer_v4 = 0;
 
 		key.vlan_ingress_vid = key.vlan_id & VLAN_VID_MASK;
-		if (iif_dev) {
-			if (is_vlan_dev(iif_dev))
-				key.vlan_ingress_vid =
-					vlan_dev_vlan_id(iif_dev);
-			dev_put(iif_dev);
+		if (!key.vlan_ingress_vid && !is_v6 && key.iif) {
+			memcpy(&peer_v4, &key.src_ip[0], 4);
+			key.vlan_ingress_vid =
+				ask_resolve_ingress_vlan_vid(key.iif, peer_v4);
 		}
 		if (!key.vlan_ingress_vid) {
-			pr_info_ratelimited("ask: VLAN POP has no ingress VID cookie=0x%lx iif=%u; software fallback\n",
-					    f->cookie, key.iif);
+			pr_info_ratelimited("ask: VLAN POP unresolved ingress VID cookie=0x%lx iif=%u peer=%pI4; software fallback\n",
+					    f->cookie, key.iif, &peer_v4);
 			return -EOPNOTSUPP;
 		}
 	}
