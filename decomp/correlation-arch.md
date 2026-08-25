@@ -12,7 +12,7 @@ edited as a result; which questions the correlation opened. Verdicts:
 
 | decomp finding | arch claim | Verdict |
 |---|---|---|
-| Trailer = raw CRC-32 (init 0, xorout 0) over `blob[:len-4]`, all 24 blobs | (no arch claim; qe_firmware.rst's zlib formula assumed in a qdrant entry) | **EXTENDS** — §3 header table gained the trailer row |
+| Trailer = raw CRC-32 (init 0, xorout 0) over `blob[:len-4]`, all 24 blobs | (no arch claim; an earlier project note assumed the `qe_firmware.rst` zlib formula) | **EXTENDS** — §3 header table gained the trailer row |
 | Dispatch table re-parse (24 slots, `0xb7ff`, base 0xC0) | §1.2 table + addressing | **CONFIRMS** (and fixed a 24-word base bug in *our own* tools, not the doc) |
 | `0xb3ff` low16 bimodal (small + `0xffxx`) | §1.2 "most plausibly load 16-bit immediate" | **CONTRADICTS** — relative-branch shape; see §1.2 follow-up note |
 | `0xb7df` low16 ≈ `0xffff`/`0xfffe` only | (our own evening-pass guess: load-imm16) | **CONTRADICTS** that guess — park/halt stubs |
@@ -106,7 +106,7 @@ edited as a result; which questions the correlation opened. Verdicts:
   different opcode space from the controller RISC ISA this program
   disassembles. Recorded so future readers don't conflate the two spaces.
 
-## Edits applied (same commit as this file)
+## Documents updated from this correlation
 
 1. `arch/fman-microcode-210-programming-reference.md` §3 — trailer row +
    solved-CRC note (pointer to `decomp/01-container.md`).

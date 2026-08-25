@@ -1,7 +1,7 @@
 # Phase 4 — ISA Inference (oracle-assisted)
 
 **Status: ORACLE OPERATIONAL (2026-08-08)** — E1 (cosmetic id patch) and E2
-(cold-region word patch) both PASS on .185; the delivery pipeline is proven
+(cold-region word patch) both PASS on the designated test DUT; the delivery pipeline is proven
 byte-exact (see `decomp/experiments.md`). **Kill gate stands: if control-flow
 encodings are not cracked after ~2 weeks of oracle time, stop ISA work** and
 fall back to the observability stack (fe_probe / pcd-snapshot / behavioral
@@ -34,7 +34,7 @@ operand layouts. Candidate starting interpretations from arch doc §1.2:
 `0xb3ffNNNN` ≈ load-imm16; `0xe9c9` ≈ store/index; `0x1409d0c4` ≈
 call/branch bracket.
 
-## Method B — mutation oracle on .185 (dynamic, decisive)
+## Method B — mutation oracle on the test DUT (dynamic, decisive)
 
 **As built and proven (2026-08-08, E1/E2 — supersedes the TFTP/`fman_ucode`
 design sketched earlier):** the delivery path is `qef-patch.py` (patch words
@@ -46,7 +46,7 @@ kexec boots). Full protocol + gotchas: `decomp/experiments.md`.
 
 - **No SPI flash writes, no serial, no U-Boot env edits.** Recovery = any
   plain reboot (kexec is one-shot; eMMC boot pulls the pristine SPI blob);
-  worst case = smart-plug power cycle (`restart-dut`).
+  worst case = a smart-plug cold power cycle.
 - Observables: dmesg `0117` id line, DT property md5 (precomputed per
   patch), `pcd-snapshot` diff, link state, ping.
 - Experiment classes:

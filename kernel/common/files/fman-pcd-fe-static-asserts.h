@@ -90,6 +90,9 @@ static_assert((0x29 | 0x2a | 0x2c) == 0x2f,
  * alias any routed/NAT opcode. These pin the vendor values and prove the FE
  * VM cannot confuse a VLAN op with an L3/L4/L2 op. S0 board readback confirms
  * runtime bytes; these prevent value drift before that. */
+static_assert(0x05 != 0x11 && 0x05 != 0x12 && 0x05 != 0x21 &&
+	      0x05 != 0x41 && 0x05 != 0x42 && 0x05 != 0x01,
+	"§17: PREEMPTIVE_CHECKS(0x05) must not alias STRIP/VLAN/TTL/L2/ENQ opcodes");
 static_assert(0x11 != 0x12 && 0x11 != 0x21 && 0x11 != 0x41 &&
 	      0x11 != 0x42 && 0x11 != 0x01,
 	"§17: STRIP_ETH_HDR(0x11) must not alias VLAN/TTL/L2/ENQ opcodes");

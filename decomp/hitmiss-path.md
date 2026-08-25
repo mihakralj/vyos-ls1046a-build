@@ -6,7 +6,7 @@ Feeds: the months-old ASK2 flow-MISS mystery**
 
 ## Why this matters
 
-Flow-HIT was **proven working 2026-07-19** (ASK2 M3+M5 gates on .185) — the
+Flow-HIT was **proven working 2026-07-19** (ASK2 M3+M5 gates on the test DUT) — the
 original MISS was **F-053** (compare must start at DDR record **+8**, past the
 8-byte link header, not +0). The current open MISS (task #26) is a
 regression/config-drift, not a never-solved failure. Reading the discriminator
@@ -26,7 +26,7 @@ the record+8 key offset. The live confirmation experiment is **E-HM1** in
 6. Match → HIT → `nextFE` (`w5`, MUX→ENQ). End-of-chain → MISS → `missNextFE`
    (`w6`, EXIT→DEALLOCATE).
 
-## Localization (this session)
+## Localization results
 
 All 210-only, in the unique islands. Decompiled with the G3+ SLEIGH.
 
@@ -137,7 +137,7 @@ high-leverage — not the whole ISA.
 
 ## Silicon verification (2026-08-08, E-HM1 safe variant)
 
-Engaged the FE-VM ehash path on eth4 and drove the matching flow from .106
+Engaged the FE-VM ehash path on eth4 and drove the matching flow from the traffic peer
 (`decomp/experiments.md` E-HM1 RESULT). **Decomp findings confirmed on
 silicon**: EXT_HASH descriptor `w1=0x0fff0c00` (mask 0x0fff, contextSize=13,
 shift 0); flow in **bucket 0x008 = (sw_crc>>48)&mask** — verifying the
@@ -145,8 +145,8 @@ decomp's `bucket=(hash>>48)&mask` + the `e9&0xffff` mask.
 
 **Correction (same day, later):** the initial write-up here concluded "the
 silicon KG hash isn't the software CRC-64" (HW `0x50b43c9c…` ≠ SW
-`0x600824e7…`). That conclusion doesn't survive cross-checking against
-qdrant — the "KG-hash-vs-CRC64" hypothesis (2026-07-10 "Candidate 2") was
+`0x600824e7…`). That conclusion does not survive cross-checking against the earlier
+2026-07-13 RSS-path measurement — the "KG-hash-vs-CRC64" hypothesis (2026-07-10 "Candidate 2") was
 already independently disproven back on 2026-07-13 via a cleaner,
 RSS-path-only measurement, and there's a documented precedent for
 `hash_probe` capturing unrelated background traffic (not the intended test
@@ -158,7 +158,7 @@ flow) rather than a genuine algorithm mismatch. Retracted; do not cite the
 
 Re-ran the armed test with the CRC-64-independently-reconfirmed
 `portid=0x00` 14-byte key (`decomp/wedge-path.md`'s companion investigation
-covers the same session). Two things nailed down that go beyond anything
+covers the companion investigation). Two findings go beyond the earlier evidence
 above:
 
 1. **`FMBM_RCCB` read back via `/dev/mem` immediately after arming equals
@@ -180,16 +180,16 @@ This sharpens (does not just repeat) the open question. With wiring, key
 content, bucket index, and DDR linkage all independently confirmed correct,
 the two live candidates are: **(A)** something upstream of the ehash walker
 silently drops or redirects the frame per-frame, without wedging the port
-(a different failure shape than this session's `park`-forever wedge
+(a different failure shape than the observed `park`-forever wedge
 mechanism); or **(B)** the microcode's *live* bucket-index computation
 doesn't match the `(hash>>48)&mask` software assumption — i.e. the
 `ce`/`cf` opcodes chained onto the hash register after the `e9` mask
-(`e9(r0,0xffff)→ce(r0,0x0189)→cf(r0,0x0241)`, found earlier this session,
+(`e9(r0,0xffff)→ce(r0,0x0189)→cf(r0,0x0241)`, found in the preceding disassembly,
 semantics still unconfirmed) apply some further transformation, so the
 microcode looks in a different bucket than 0x508 at runtime, finds it
 empty, and correctly (from its own perspective) returns MISS without ever
-touching this record. **(B) directly connects this session's disassembly
-work to this silicon result** and is now the most concrete, targeted next
+touching this record. **(B) directly connects the disassembly to this
+silicon result** and is now the most concrete, targeted next
 oracle experiment: patch one of `ce`/`cf`'s immediates and observe whether
 the bucket a known-good key lands in changes.
 
@@ -250,8 +250,8 @@ turned out to be two of **eight** slots (`0x20, 0x24, 0x28, 0x14, 0x18,
 `op_f0 r1,[0xb01]` (combine with a fixed hardware-status address, the same
 DMA-poll idiom found earlier in `ehash_walker`) → error-check → write
 back. The offset match is coincidental, not a targeted descriptor read.
-**Retracted before being written up as a finding** — left here so the next
-session doesn't re-chase the same coincidence.
+**Retracted before being written up as a finding.** It remains documented
+as a false lead to prevent repetition.
 
 **Where this leaves the search:** the exact instruction(s) that read
 `nextFEPtr`/`missNextFE` and dispatch to `MUX`/`EXIT` have not been
@@ -287,7 +287,7 @@ block `w12144`'s branch can skip entirely, so its incoming value isn't
 reliably consulted either. This specific hypothesis doesn't hold up.
 
 **More significant: re-read the "key-compare loop" through the decompiler
-and revised the framing.** Earlier this session, the tight loop at
+and revised the framing.** The tight loop at
 `w3304`–`w3309` (reading `[0x1b00]`/`[0x1b01]`) was described as the
 best candidate for a byte-by-byte key-compare loop. Decompiling the region
 (`decomp/ghidra/scripts/FmanCompareDecompile.py`) shows `fman_test_dc`
@@ -322,8 +322,8 @@ way.
 ## 2026-08-08 (E-HM8) — armed FE-VM wedges port RX after one frame; the comparator-confirmed findings are valid but earlier armed nulls were frame-less
 
 **Full writeup: `decomp/experiments.md` E-HM8.** Headlines for this path:
-(1) frames were NOT arriving at `.185`'s eth4 during most of today's armed
-test cycles — the port wedges RX-deaf after FE-VM arming (reproduced
+(1) frames were NOT arriving at the test DUT's eth4 during most E-HM4
+through E-HM7 armed cycles — the port wedges RX-deaf after FE-VM arming (reproduced
 twice, cold-boot-verified; survives disarm; only a cold boot recovers), so
 E-HM4/5/6/7 and the AD-corruption canaries were frame-less and their nulls
 are invalid as FE-VM tests. (2) The **record-never-touched finding is now
@@ -336,17 +336,15 @@ definitively "after KeyGen classification, before the ehash comparator".
 the next microcode experiment (patch FE_ENTER/ALLOCATE/EXIT-path
 instructions and watch whether the wedge disappears), very likely the same
 root cause that keeps the comparator unreachable. (4) The params-page /
-`FMBM_RGPR` hypothesis was disproven cheaply (working vendor board `.106`
+`FMBM_RGPR` hypothesis was disproven cheaply (the vendor-reference system
 also has `FMBM_RGPR=0`), and `/dev/mem` port-BMI-block writes don't stick
 on 6.18.41 (MURAM writes do; `m.flush()` EINVALs — writes actually
 succeed, skip flush).
 
-## 2026-08-08 (new source) — NXP documentation cross-reference (nxp_docs qdrant)
+## 2026-08-08 — NXP documentation cross-reference
 
-A second NXP documentation corpus became available this session via a
-dedicated `nxp_docs` qdrant MCP server, distinct from this project's own
-agent-memory qdrant. It indexes at least two PDFs not previously searchable
-by this project: `LS1046ADPAARM.pdf` (QorIQ LS1046A DPAA Reference Manual,
+A searchable NXP documentation corpus provided two PDFs not previously
+available to this analysis: `LS1046ADPAARM.pdf` (QorIQ LS1046A DPAA Reference Manual,
 Rev 0, 03/2017 — chip-specific, not the LS1043A analog this project relied
 on before) and `LSDKUG_Rev21.08.pdf` (Layerscape SDK User Guide, Rev 21.08,
 09/2022 — a full FMan PCD driver + FMC XML reference, much more detailed
@@ -449,8 +447,8 @@ placement. Getting the same "nothing happens" result at every perturbation
 strength favors **frames never executing this code at all** over "the code
 runs but these particular immediates happen not to matter here." Combined
 with E-HM2, E-HM3, E-HM4, this is the fifth/sixth independent
-parameter/patch variation converging on the same signature. Board `.185`
-rebooted (not just re-kexec'd) after E-HM6 to restore the pristine SPI
+parameter/patch variation converging on the same signature. The test DUT
+was rebooted (not just re-kexec'd) after E-HM6 to restore the pristine SPI
 blob.
 
 - **Result Array byte map** (LSDKUG Table 79, §8.2.6.11.6.1, FMC
@@ -476,9 +474,9 @@ blob.
   same pattern KeyGen uses for its *own*, unrelated FQID-distribution
   purpose — architecturally consistent with, not proof of, this project's
   EXT_HASH bucket-index formula.
-- Could not retrieve actual LS1046A DPAA RM **Chapter 5** ("Frame Manager
-  (FMan)") register-level content through this qdrant server despite
-  several attempts — every `LS1046ADPAARM.pdf` hit so far has come from
+- The available document extract did not include LS1046A DPAA RM **Chapter
+  5** ("Frame Manager (FMan)") register-level content. The available
+  `LS1046ADPAARM.pdf` material came from
   Chapter 1 (DPAA Overview), which repeatedly says "See Chapter 5" without
   surfacing it. Two references inside LSDKUG point to specific RM tables
   that would likely matter here — **"Table 8-398. Table Descriptor (Type =
@@ -486,6 +484,4 @@ blob.
   §8.2.6.12.15, the `nonheader`/`ic_index_mask` element) — but these appear
   to belong to a different, more generic "DPAA Reference Manual" numbering
   than the LS1046A-specific one, and no hit surfaced their actual content.
-  Worth a follow-up search if this qdrant server's corpus grows, or if a
-  copy of that specific manual is identified.
-way.
+  Obtain the complete manual before relying on those register tables.
