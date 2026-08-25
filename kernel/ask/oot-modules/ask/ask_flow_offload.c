@@ -83,8 +83,22 @@ u8 fman_port_get_id(struct fman_port *port);
 
 static inline int ask_dpaa_get_fman_port_id(struct net_device *dev, u8 *pid)
 {
-        struct fman_port *port = dpaa_get_rx_fman_port(dev);
+        struct fman_port *port;
 
+        /*
+         * T-M6-8: a routed flow whose ingress/egress is an 802.1Q VLAN
+         * sub-interface (eth3.100) resolves against the VIF netdev, but the
+         * FMan classifier and BMI port live on the PHYSICAL lower device. The
+         * VID and the pop/push intent come from the flow's VLAN match/actions
+         * (F-233), NOT from the netdev identity, so it is always correct to
+         * resolve the physical FMan port from the vif's real device here.
+         * dpaa_get_rx_fman_port() returns NULL for a vif, which previously left
+         * VLAN-routed flows unresolved (stuck pending -> SW fallback).
+         */
+        if (is_vlan_dev(dev))
+                dev = vlan_dev_real_dev(dev);
+
+        port = dpaa_get_rx_fman_port(dev);
         if (!port)
                 return -ENODEV;
         *pid = fman_port_get_id(port);
