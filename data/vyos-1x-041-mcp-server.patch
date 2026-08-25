@@ -17,9 +17,13 @@ Authorization is enforced, not just advertised:
     tools are not callable and mutating op-mode verbs are rejected.
   - schema introspection is refused by direct URI when disabled.
 Prompts are mode-aware and schema-driven. The capabilities overview reflects
-the real read-only/introspection state. VPN provisioning declares validated
-MCP arguments and is exposed only for read-write sessions with introspection.
-Custom prompts cannot shadow built-in safety/workflow prompts.
+the real read-only/introspection state. Home-oriented read-only prompts ship
+by default: troubleshoot_internet_connectivity (WAN-down triage) and
+analyze_security_posture (an educational, plain-language security review for
+home users — WAN firewalling, IPv4/IPv6 parity, exposed management services,
+and zone segmentation). VPN provisioning declares validated MCP arguments and
+is exposed only for read-write sessions with introspection. Custom prompts
+cannot shadow built-in safety/workflow prompts.
 
 The mcp SDK and its Python deps are provided by the vyos-http-api-tools
 virtualenv rebuilt with mcp==1.8.1 (see bin/ci-build-http-api-tools.sh), not a
@@ -155,7 +159,7 @@ new file mode 100644
 index 0000000..7423138
 --- /dev/null
 +++ b/src/services/api/mcp/prompts.py
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,477 @@
 +import ipaddress
 +import logging
 +import os
@@ -246,10 +250,12 @@ index 0000000..7423138
 +        + tools
 +        + resources
 +        + '== OTHER PROMPTS ==\n'
++        '  troubleshoot_internet_connectivity — Guided home internet-down diagnosis\n'
++        '  analyze_security_posture — Educational home-router security review\n'
 +        '  troubleshoot_asymmetric_routing — Routing-loop diagnosis workflow\n'
 +        + ('' if read_only or not introspection_enabled else
 +           '  provision_site_to_site_vpn — IPsec tunnel provisioning workflow\n')
-+        + '  audit_firewall_posture — Firewall ruleset security audit\n\n'
++        + '  audit_firewall_posture — Expert firewall ruleset audit\n\n'
 +        + patterns
 +        + mode_line
 +    )
@@ -305,14 +311,121 @@ index 0000000..7423138
 +    )
 +
 +
++def _troubleshoot_internet_text(read_only, introspection_enabled):
++    schema_step = (
++        '   - When unsure of a command, read vyos-schema://op/show before running it to confirm the live path.\n'
++        if introspection_enabled else
++        '   - Schema introspection is disabled; use the conservative paths below and adapt to validation errors.\n'
++    )
++    fix_note = (
++        'If you find the cause, propose the exact `set` command(s) and explain them, then apply with '
++        'modify_configuration using commit_confirm_minutes so a mistake auto-rolls-back.'
++        if not read_only else
++        'This session is READ-ONLY: report the cause and the exact `set` command the owner should run; do not claim to have fixed anything.'
++    )
++    return (
++        'The home internet connection is down or unreliable and you are diagnosing it on this VyOS router.\n'
++        'Work OUTWARD one layer at a time and stop at the first broken layer — do not guess. Explain each\n'
++        'finding in plain language a non-expert can follow.\n\n'
++        '1. Identify the WAN (internet-facing) interface and check the physical link:\n'
++        + schema_step
++        + '   - ["show", "interfaces", "summary"] to see which interface faces the ISP (it holds the default route / public-ish address).\n'
++        '   - ["show", "interfaces", "ethernet", "<wan>"] — is it admin up, is carrier/link present? No carrier = cable/ISP/ONT problem, not the router.\n\n'
++        '2. Confirm the WAN actually obtained an address:\n'
++        '   - DHCP WAN: ["show", "dhcp", "client", "leases"] — is there a lease with a gateway?\n'
++        '   - PPPoE WAN: ["show", "pppoe-client"] — is the session up? A down session is usually ISP credentials or line.\n'
++        '   - Static WAN: read vyos-config://running/interfaces to confirm the address/gateway are set.\n'
++        '   - No WAN address = the layers below cannot work; fix this first.\n\n'
++        '3. Confirm a default route exists and points at the ISP gateway:\n'
++        '   - ["show", "ip", "route", "0.0.0.0/0"] — there should be one default route via the WAN interface/gateway.\n'
++        '   - No default route = the router does not know where "the internet" is.\n\n'
++        '4. Test reachability BY IP to separate routing/NAT from DNS:\n'
++        '   - ["ping", "<isp-gateway>"] then ["ping", "1.1.1.1"]. Use a numeric target on purpose.\n'
++        '   - Gateway pings but 1.1.1.1 does not = upstream/ISP or NAT issue. Nothing pings = local link/route issue (recheck steps 1-3).\n\n'
++        '5. Test DNS separately — "can ping 1.1.1.1 but websites fail" is almost always DNS:\n'
++        '   - ["ping", "google.com"]. If the IP ping in step 4 worked but the name does not resolve, it is a name-resolution problem.\n'
++        '   - If this router is the LAN resolver: ["show", "dns", "forwarding", "statistics"] to see if the forwarder is answering.\n\n'
++        '6. Confirm outbound NAT (masquerade) is translating LAN traffic to the WAN address:\n'
++        '   - ["show", "nat", "source", "statistics"] — the masquerade rule for the LAN should show its translation counter climbing.\n'
++        '   - No source-NAT rule matching the WAN = LAN devices have no return path even when the router itself works.\n\n'
++        '7. Rule out the firewall dropping return traffic:\n'
++        '   - Read vyos-config://running/firewall and check the WAN input/local default-action and any state handling.\n'
++        '   - Established/related return traffic must be allowed; an overly strict WAN rule can break browsing while ping-from-router still works.\n\n'
++        'Only after locating the single broken layer, summarize: what is broken, the evidence, and the fix. ' + fix_note
++    )
++
++
++def _analyze_security_text(read_only, introspection_enabled):
++    schema_step = (
++        '   - Read vyos-schema://config/firewall to learn the exact node names THIS VyOS version uses before judging anything.\n'
++        if introspection_enabled else
++        '   - Schema introspection is off; read vyos-config://running/firewall directly and do not assume node names from other versions.\n'
++    )
++    apply_note = (
++        'When the owner asks you to harden something, propose the specific `set` commands, explain in one sentence WHAT each does '
++        'and WHY it helps, and apply them with modify_configuration using commit_confirm_minutes so a lockout auto-reverts.'
++        if not read_only else
++        'This session is READ-ONLY. For each gap, give the exact `set` commands the owner can run and explain why — but do not claim to have applied anything.'
++    )
++    return (
++        'You are reviewing the security posture of a HOME VyOS router for an owner who knows they SHOULD be\n'
++        'secured but is not a network engineer. Be educational and encouraging: for every finding, explain in\n'
++        'plain language WHAT it is, WHY it matters for a home network, and the concrete fix. Never lecture; guide.\n'
++        'Prioritize findings as CRITICAL / IMPORTANT / NICE-TO-HAVE so the owner knows what to fix first.\n'
++        'Read only in this review; do not change config unless the owner explicitly asks.\n\n'
++        'Begin by orienting yourself:\n'
++        + schema_step
++        + '   - Read vyos-config://running/interfaces to learn which interface is the WAN (internet) side and which are LAN.\n'
++        '     Everything below hinges on "trust the LAN, distrust the WAN".\n\n'
++        '=== 1. The front door: is the WAN firewalled at all? (CRITICAL) ===\n'
++        '   - A home router MUST drop unsolicited traffic arriving from the internet while allowing replies to traffic\n'
++        '     the LAN started. In modern VyOS this is the input/forward filter with a default-action of drop plus a rule\n'
++        '     that accepts state established/related.\n'
++        '   - Check the WAN "input" (traffic TO the router, e.g. its own SSH/GUI) and "forward" (traffic THROUGH it to the LAN).\n'
++        '   - If either default-action is accept, or there is no established/related accept rule, explain that the home is\n'
++        '     effectively exposed to the internet and this is the #1 thing to fix.\n\n'
++        '=== 2. IPv6 is a real network too — check it has the SAME protection (CRITICAL, often missed) ===\n'
++        '   - Home users routinely firewall IPv4 and forget IPv6, yet ISPs increasingly hand out globally-routable IPv6 to\n'
++        '     every LAN device (no NAT to hide behind). An open IPv6 forward chain exposes every device directly.\n'
++        '   - Verify the IPv6 input/forward filters mirror the IPv4 ones (default drop + established/related accept, and\n'
++        '     permit the ICMPv6 types IPv6 needs to function). Call out any IPv4/IPv6 asymmetry explicitly.\n\n'
++        '=== 3. Are management services exposed? (CRITICAL) ===\n'
++        '   - Read vyos-config://running/service and vyos-config://running/system login. Look at SSH (service ssh), the HTTP\n'
++        '     API/GUI (service https), SNMP, Telnet, and DNS forwarding.\n'
++        '   - For each, decide: is it reachable from the WAN? SSH/GUI/SNMP open to the internet is a top cause of home-router\n'
++        '     compromise. Recommend binding these to the LAN interface or restricting source addresses, disabling password\n'
++        '     SSH login in favor of keys, and turning off anything unused (Telnet should never be on).\n\n'
++        '=== 4. Zone-based thinking for multi-segment homes (IMPORTANT) ===\n'
++        '   - Many homes now have guest Wi-Fi, IoT, or a lab VLAN. Explain the principle: untrusted zones (guest, IoT)\n'
++        '     should reach the internet but NOT the trusted LAN, and should never reach the router\'s management.\n'
++        '   - If multiple LAN segments/VLANs exist, check whether inter-zone rules enforce that separation. If the home is a\n'
++        '     single flat LAN, say so plainly and suggest segmentation only as a NICE-TO-HAVE, not a scare tactic.\n\n'
++        '=== 5. Hygiene and visibility (IMPORTANT / NICE-TO-HAVE) ===\n'
++        '   - Logging: are dropped/blocked events logged so the owner can SEE attacks? Recommend logging on the WAN drop rule.\n'
++        '   - Default credentials / weak login: check for a non-default admin and key-based SSH.\n'
++        '   - Firmware currency: mention keeping the image updated as part of posture.\n'
++        '   - Overly broad rules: flag any any/any accept, and note that hardware-offload/flowtable entries are NOT filtering rules.\n\n'
++        'Finish with a short, friendly report: a one-line overall verdict, then findings grouped CRITICAL -> IMPORTANT ->\n'
++        'NICE-TO-HAVE, each with a plain-language why and the exact schema-valid fix. ' + apply_note
++    )
++
++
 +_BUILTIN_PROMPTS = {
 +    'vyos_capabilities_overview': {
 +        'description': 'System prompt explaining all VyOS MCP capabilities, tools, resources, and usage patterns',
 +        'text_builder': _capabilities_overview_text,
 +    },
++    'troubleshoot_internet_connectivity': {
++        'description': 'Home internet-down triage: link -> WAN address -> default route -> ping-by-IP -> DNS -> NAT -> firewall',
++        'text_builder': _troubleshoot_internet_text,
++    },
 +    'troubleshoot_asymmetric_routing': {
 +        'description': 'Guide through asymmetric-routing and routing-loop diagnosis (FRR, conntrack, policy)',
 +        'text_builder': _troubleshoot_routing_text,
++    },
++    'analyze_security_posture': {
++        'description': 'Educational home-security review: WAN firewall, IPv4/IPv6 parity, exposed services, zone segmentation, hygiene',
++        'text_builder': _analyze_security_text,
 +    },
 +    'provision_site_to_site_vpn': {
 +        'description': 'IPsec tunnel workflow across IKE/ESP/peer config branches',
