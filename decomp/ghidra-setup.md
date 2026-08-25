@@ -1,9 +1,8 @@
-# decomp/ghidra-setup.md — Ghidra + GhidraMCP on the Cobalt runner (ARM64)
+# Ghidra automation setup on ARM64
 
-**Installed 2026-08-08 on the aarch64 build host.** This is the *real*
-install record for this machine (the earlier "Task complete" summary
-described paths/versions that were never present here). Reproducible; every
-non-obvious step is the ARM64 tax.
+**Installed 2026-08-08 on the AArch64 build host.** This records the verified
+installation. Earlier unverified path and version assumptions are superseded
+by the values below.
 
 ## What's installed
 
@@ -12,13 +11,13 @@ non-obvious step is the ARM64 tax.
 | Temurin JDK | 21.0.12+8 | `/opt/jdk-21.0.12+8` |
 | Ghidra | 11.3.2 (PUBLIC 20250415) | `/opt/ghidra_11.3.2_PUBLIC` |
 | Ghidra native decompiler + sleigh | built from source (aarch64) | `…/Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` |
-| GhidraMCP extension | 1.4 | `…/Ghidra/Extensions/GhidraMCP` |
-| GhidraMCP Python bridge | 1.4 | `/opt/ghidra-mcp/bridge_mcp_ghidra.py` |
+| Optional Ghidra automation extension | 1.4 | `…/Ghidra/Extensions/GhidraMCP` |
+| Optional Python automation bridge | 1.4 | `/opt/ghidra-mcp/bridge_mcp_ghidra.py` |
 | Xvfb + X11 libs | 21.1.7 | apt |
-| Kilo MCP entry | — | `.kilo/kilo.json` → `ghidra` (stdio bridge → `http://127.0.0.1:8080/`) |
+| Automation endpoint | — | stdio bridge to `http://127.0.0.1:8080/` |
 | PATH/env | — | `/etc/profile.d/ghidra.sh`, `ghidraRun` + `ghidra-analyzeHeadless` in `/usr/local/bin` |
 
-## The ARM64 tax (non-obvious)
+## ARM64-specific build requirements
 
 Ghidra ships prebuilt native binaries only for `linux_x86_64`, `mac_*`,
 `win_x86_64` — **no `linux_arm_64`**. Without them the decompiler dies with
@@ -42,16 +41,16 @@ object dirs or the `-j` build races. Result: aarch64 ELF `decompile`
 (3.7 MB) + `sleigh` (944 KB). The `sleigh` binary also lets us compile a
 custom FMan `.slaspec` later (Phase 5 proper).
 
-Also: GhidraMCP's `Module.manifest` uses `KEY=value`; Ghidra wants `KEY:
-value`, so it errored on every scan — emptied it (`truncate -s 0`), which is
-a valid Ghidra module manifest.
+The optional automation extension's `Module.manifest` uses `KEY=value`, while
+Ghidra expects `KEY: value`. An empty manifest (`truncate -s 0`) is valid and
+prevents extension-scan errors.
 
 ## Test results (2026-08-08)
 
-- **Bridge MCP handshake — PASS.** `python3 bridge_mcp_ghidra.py --transport
-  stdio` responds to `initialize` + `tools/list` with **27 tools**
-  (`decompile_function`, `list_methods`, `rename_function`, `list_segments`,
-  `search_functions_by_name`, …). This is what Kilo will register.
+- **Automation bridge handshake — PASS.** `python3 bridge_mcp_ghidra.py
+  --transport stdio` responds to `initialize` and `tools/list` with **27
+  operations** (`decompile_function`, `list_methods`, `rename_function`,
+  `list_segments`, `search_functions_by_name`, …).
 - **Decompiler headless — PASS.** `analyzeHeadless` on a test ELF now runs
   the Decompiler analyzers (no `does not exist` error) after the native build.
 - **GUI under Xvfb — PASS.** `ghidraRun` launches its Swing JVM cleanly under
@@ -59,17 +58,16 @@ a valid Ghidra module manifest.
 - **Live `:8080` — PENDING one-time GUI action** (below). It is closed until
   the plugin is enabled on an open program.
 
-## Bringing the server up (operational)
+## Starting the automation service
 
-1. **Restart Kilo once** so it loads the `ghidra` MCP server from
-   `.kilo/kilo.json` (the 27 tools appear after reload).
-2. Start Ghidra under Xvfb: `decomp/tools/ghidra-mcp-server.sh
-   [/tmp/kilo/ghidra-proj/decomp.gpr]`.
-3. **One-time per project**: open a program in the CodeBrowser, then
+1. Start Ghidra under Xvfb: `decomp/tools/ghidra-mcp-server.sh
+   [${DECOMP_WORKDIR:-/tmp/fman-decomp}/ghidra-proj/decomp.gpr]`.
+2. **One-time per project**: open a program in the CodeBrowser, then
    `File > Configure > Miscellaneous > check GhidraMCPPlugin > OK`. The plugin
    binds `127.0.0.1:8080` and the setting persists.
-4. Verify: `curl -s http://127.0.0.1:8080/methods` lists the program's
-   functions. Now the Kilo `ghidra` tools return real data.
+3. Verify that `curl -s http://127.0.0.1:8080/methods` lists the program's
+   functions.
+4. Start the stdio bridge if an external automation client is required.
 
 Because the server lives in a per-tool GUI plugin and Ghidra 11.x keeps its
 default tools as jar resources (no on-disk `.tool` to pre-seed), step 3
