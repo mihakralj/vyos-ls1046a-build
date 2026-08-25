@@ -7,7 +7,7 @@ Consumes: naming-map.md, the tail-of-image disassembly · Feeds: `fe_recover`
 
 ## Why this matters
 
-Every board session in this project's history that engages the FE-VM/AC_CC
+All recorded FE-VM/AC_CC engage tests
 datapath carries a **teardown-wedge risk** (T-M6-5) and, in its worst form,
 an **arm-time wedge** that hangs the port before any traffic is even sent
 (2026-08-05 finding: "not one fault latched ... the walk does not error —
@@ -27,7 +27,7 @@ kernel-side mitigations already exist and are board-validated:
   deaf." Depletion counter at **+0x58** must stay 0.
 
 Neither mitigation was derived from reading the microcode itself — both
-came from kernel-side/SDK inference. This session went looking for the
+came from kernel-side/SDK inference. The disassembly analysis examined the
 actual silicon mechanism the numbers `+0x54`/`+0x58` correspond to.
 
 ## What the disassembly shows
@@ -76,7 +76,7 @@ depletion counter" vs. "an ordinary slot"). Two readings are both
 consistent with this: (a) patch 0163's semantic labels for `+0x54`/`+0x58`
 are an SDK-derived approximation that doesn't exactly match how *this*
 compiled microcode organizes its own bookkeeping, or (b) the real
-distinguishing logic lives in a base-register computation this session
+distinguishing logic lives in a base-register computation that remains
 didn't trace, and `+0x54`/`+0x58` genuinely are special but the microcode
 doesn't need different *code* to treat them that way. Either way: a soft
 recovery routine that only touches `+0x54`/`+0x58` (as documented) is
@@ -126,7 +126,7 @@ structure:
    appear. No fault register trips (this is a legitimate resource-wait, not
    an error), matching the documented "silent WAIT, no fault latched"
    signature exactly. Re-seeding the table (what `fe_recover` does, per
-   this session's finding possibly needing to cover more than `+0x54`/
+   the current evidence suggests recovery may need to cover more than `+0x54`/
    `+0x58` alone) can restore it without a reboot. **Re-checked under the
    corrected CFG**: w12667 (the per-slot walk) is reached from **w654**
    (`b7ff2eed`), NOT from w12663 — the "guard" at w12663 branches to w12340
@@ -134,7 +134,7 @@ structure:
    wedge-path.md assumed.
 2. **Hard/unrecoverable tier — FALSIFIED.** There is no out-of-range trap
    branch; w12665 is a normal branch to w12340. Every prior "cold-power-
-   cycle-only recovery" case in qdrant is still real, but the mechanism is
+   cycle-only recovery" case remains valid, but the mechanism is
    NOT a microcode branch into a hardware halt vector.
 
 **Open after E-HM18**: the wedge mechanism must be re-derived from the
@@ -149,7 +149,7 @@ claimed w270/w280/w290) is a candidate next oracle experiment.
 ## The per-field key-compare candidate (side finding, feeds hitmiss-path.md)
 
 While extending `ehash_walker`'s window (`w3096`–`w3500`) looking for the
-byte-compare this session's earlier pass didn't find, several **tight
+byte-compare the earlier disassembly pass did not find, several **tight
 backward loops** turned up — much better shaped than anything in the
 `w2837`–`w3096` window (which was dominated by DMA-poll idioms):
 
@@ -172,7 +172,7 @@ block per key field" is a plausible structural hypothesis, **not yet
 oracle-confirmed** — the operation `tst_dc` performs and what `0x1b01`
 actually streams from remain unverified.
 
-## Follow-ups (oracle-gated, not run this session)
+## Follow-ups not yet executed
 
 - **Re-test the E-HM12/13/15 patch sites under the CORRECTED branch model.**
   E-HM18 showed those patches actually landed on w512/w452/w511/w531 (not the

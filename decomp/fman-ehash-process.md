@@ -2,8 +2,8 @@
 
 How a frame goes from the wire to a kernel FQ through the FMan's enhanced
 external-hash machine, as decoded and silicon-verified on the Mono Gateway
-LS1046A (210.10.1 microcode, board .185, kernel 6.18.44-vyos, CI run
-31634513313). Sources: Ghidra decode (E23), live register/counter/hash
+LS1046A (210.10.1 microcode, designated test DUT, kernel 6.18.44-vyos,
+CI run 31634513313). Sources: Ghidra decode (E23), live register/counter/hash
 measurements (E24/E25), vendor 999-patch / fm_ehash.c source. Items marked
 `[VERIFIED]` were observed on silicon; `[OPEN]` is unverified/next-test.
 
@@ -87,7 +87,7 @@ Debugfs verbs under `/sys/kernel/debug/fman_pcd/0/` (all `echo ... | sudo tee`):
 
 ## Phase 3 — per-frame classification path (silicon)
 
-[VERIFIED at each observable point on .185]
+[VERIFIED at each observable point on the designated test DUT]
 
 1. **BMI → parser → KeyGen**: rfpne `0x00480200` routes RX to KG with CC
    enabled; parser runs first (rfne = HWP `0x00440000`).

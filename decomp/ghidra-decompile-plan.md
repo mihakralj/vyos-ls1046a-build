@@ -24,7 +24,7 @@ So "use Ghidra to decompile 210.10.1" is not an import-and-go task; it is:
 > author `fman-risc` SLEIGH incrementally from the ISA facts we have already
 > silicon-validated, cross-validate each layer against our independent
 > `cfg-map.py` results, confirm every new encoding on the mutation oracle,
-> and drive labeling/decompilation with the 27 GhidraMCP tools.
+> and drive labeling/decompilation with the 27 Ghidra automation API tools.
 
 Ghidra is a **force multiplier on the ISA we crack**, not a shortcut around
 cracking it. The 2026-07-11 "don't blind-RE the ISA" decision still holds for
@@ -59,16 +59,6 @@ Silicon/statistically established (see `anchors.json`, `findings.md`):
 Unknown (the SLEIGH gaps to fill): the **register file** (size, operand-field
 position), the **ALU** ops, the **condition** encoding for conditional
 branches, exact **load/store** operand layout.
-
-## Operational preconditions (once)
-
-1. **Restart Kilo** → loads the `ghidra` MCP server (27 tools) from
-   `.kilo/kilo.json`.
-2. `decomp/tools/ghidra-mcp-server.sh` → Ghidra GUI under Xvfb.
-3. Open a program in CodeBrowser → enable **GhidraMCPPlugin**
-   (`File > Configure > Miscellaneous`) → server binds `127.0.0.1:8080`.
-4. `curl -s http://127.0.0.1:8080/methods` must list functions before the MCP
-   tools return data.
 
 ## Stages
 
@@ -153,7 +143,7 @@ start with a provisional bank and widen.
 
 ### G4 — Decompile the Phase-6 targets
 
-With G1–G3 in place, drive GhidraMCP over the ranked targets
+With G1–G3 in place, drive Ghidra automation API over the ranked targets
 (`06-algorithm-extraction.md`), best-understood first:
 1. **Aging walker** (slot 19 → w8676–w12072, B02) — the structurally clearest
    210-only routine; recovers the aging-update algorithm and helps answer Q02
@@ -163,10 +153,10 @@ With G1–G3 in place, drive GhidraMCP over the ranked targets
 4. **Table walker** (B01, w2837 nest) — the largest routine; likely the CC /
    match-table walk.
 
-## GhidraMCP-driven workflow (the 27 tools)
+## Ghidra automation API-driven workflow (the 27 tools)
 
-Once G1 loads and analyzes, the agent (post-Kilo-restart) works the program
-through MCP:
+Once G1 loads and analyzes, use the automation API or equivalent headless
+scripts to inspect the program:
 - `list_methods` / `list_segments` — enumerate the auto-created functions;
   confirm they map to slot handlers + branch-target functions.
 - `rename_function` — apply `anchors.json` labels (`FUN_…@w8669` →
@@ -186,7 +176,7 @@ survive re-analysis.
 
 | Milestone | Deliverable | Gate |
 |---|---|---|
-| G0 | blob imported raw; MCP `:8080` live | `list_methods` returns |
+| G0 | blob imported raw; automation endpoint live | `list_methods` returns |
 | G1 | SLEIGH v0 (branches + catch-all) | **Ghidra CFG == cfg-map** (2201 blocks, w2837/w8676 loops) |
 | G2 | SLEIGH v1 (loads/stores, spaces) | w9055 decompiles to `ctx[0xd0d4]`→ENQ pattern |
 | G3 | SLEIGH v2 (ALU/regs/cond), oracle-confirmed | ≥3 encodings each confirmed by an E-experiment |
@@ -210,7 +200,7 @@ coverage (the AMD/Intel benchmark reached ~40% over years).
 
 ## Immediate next actions
 
-1. Restart Kilo; bring up the MCP server (preconditions above).
+1. Start the automation bridge or use the equivalent headless GhidraScript workflow.
 2. Author `fman-risc` SLEIGH v0; compile with the built `sleigh`; import the
    blob under it (G0→G1).
 3. Run the G1 cross-validation against `decomp/maps/210.10.1-blocks.json`.

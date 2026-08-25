@@ -12,9 +12,9 @@ same-ISA corpus used for differential analysis.
 
 | Artifact | Location | Note |
 |---|---|---|
-| 210.10.1 blob | `/tmp/kilo/fman-ucode-210.10.1.bin` (runner, volatile) | 51,652 B, SHA-256 `5f3ed8d3…eff0d` |
-| Public corpus (23 blobs) | `/tmp/kilo/qoriq-fm-ucode/` (runner, volatile) | `git clone --depth 1` |
-| Official RSR copy | Windows workstation `C:\github\vyos-ls1046a-build\RSR\ls1046a-rdb\…firmware.bin` @ `0x900000` | third provenance source |
+| 210.10.1 blob | `$DECOMP_WORKDIR/fman-ucode-210.10.1.bin` (volatile) | 51,652 B, SHA-256 `5f3ed8d3…eff0d` |
+| Public corpus (23 blobs) | `$DECOMP_WORKDIR/qoriq-fm-ucode/` (volatile) | `git clone --depth 1` |
+| Official RSR copy | Locally obtained NXP RSR firmware image at offset `0x900000` | third provenance source |
 
 Do **not** commit the blob to git (NXP LA_OPT EULA — proprietary
 redistribution). The repo records hashes and recipes, not the binary.
@@ -39,23 +39,30 @@ flowchart LR
 Re-acquisition recipes:
 
 ```bash
+DECOMP_WORKDIR="${DECOMP_WORKDIR:-/tmp/fman-decomp}"
+DUT_HOST="${DUT_HOST:?set DUT_HOST}"
+DUT_SSH_KEY="${DUT_SSH_KEY:?set DUT_SSH_KEY}"
+
 # 1. Live board, no root (preferred):
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 \
+ssh -i "$DUT_SSH_KEY" "vyos@$DUT_HOST" \
   'cat /proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware' \
-  > fman-ucode-210.10.1.bin
-sha256sum fman-ucode-210.10.1.bin   # expect 5f3ed8d3…eff0d
+  > "$DECOMP_WORKDIR/fman-ucode-210.10.1.bin"
+sha256sum "$DECOMP_WORKDIR/fman-ucode-210.10.1.bin"
 
 # 2. Board raw flash (needs sudo; partition number has shifted between builds):
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 'cat /proc/mtd'   # confirm fman-ucode
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 \
-  'sudo dd if=/dev/mtd3 bs=1 count=51652 2>/dev/null' > fman-ucode-210.10.1.bin
+ssh -i "$DUT_SSH_KEY" "vyos@$DUT_HOST" 'cat /proc/mtd'
+ssh -i "$DUT_SSH_KEY" "vyos@$DUT_HOST" \
+  'sudo dd if=/dev/mtd3 bs=1 count=51652 2>/dev/null' \
+  > "$DECOMP_WORKDIR/fman-ucode-210.10.1.bin"
 
 # 3. Official NXP RSR image (offline):
 dd if=openwrt-layerscape-armv8_64b-fsl_ls1046a-rdb-ls1046a_10.3.0.B1-squashfs-firmware.bin \
-   bs=1 skip=$((0x900000)) count=51652 of=fman-ucode-210.10.1.bin
+  bs=1 skip=$((0x900000)) count=51652 \
+  of="$DECOMP_WORKDIR/fman-ucode-210.10.1.bin"
 
 # Public corpus:
-git clone --depth 1 https://github.com/nxp-qoriq/qoriq-fm-ucode.git
+git clone --depth 1 https://github.com/nxp-qoriq/qoriq-fm-ucode.git \
+  "$DECOMP_WORKDIR/qoriq-fm-ucode"
 ```
 
 ## Corpus inventory (differential set)
@@ -75,8 +82,7 @@ Same-generation cross-SoC pairs (e.g. LS1043 vs LS1046 106.4.18, or the five
 
 ## Notes
 
-- Board .185 is the acquisition/oracle board; .190 was unreachable from the
-  runner on 2026-08-07 — retry .190 only for cross-board confirmation, never
-  for experiments.
-- `/tmp/kilo` on the runner is scratch space: re-run the recipes after any
-  runner rebuild. Hashes above detect a bad re-pull.
+- Use the designated development DUT for acquisition and mutation experiments.
+  Reserve the secondary DUT for independent confirmation and recovery.
+- `$DECOMP_WORKDIR` is disposable. Re-run the recipes after it is cleared;
+  the hashes above detect an invalid acquisition.

@@ -7,8 +7,9 @@
 Per target routine: recovered pseudocode + a prose algorithm description in
 `decomp/out/NN-<name>.md`, cross-checked against (a) the register/AD-level
 contract in `arch/fman-microcode-210-programming-reference.md` and (b) at
-least one board observation. The doc gets corrections where the code
-contradicts it; qdrant gets the deltas.
+least one board observation. Correct the architecture documentation when
+recovered code contradicts it, and record the evidence and rationale in the
+relevant findings document.
 
 ## Ranked targets
 
