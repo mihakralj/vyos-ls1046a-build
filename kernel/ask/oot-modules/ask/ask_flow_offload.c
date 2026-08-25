@@ -1951,6 +1951,23 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		action.vlan_flags = key->vlan_edit_flags;
 		action.vlan_tci   = key->vlan_push_tci;
 		action.vlan_tpid  = key->vlan_push_tpid;
+		/*
+		 * T-M6-8 DIAGNOSTIC: log exactly what VLAN edit each DIRECTION's
+		 * record carries, keyed by the flow 5-tuple + oif, so a single
+		 * board run unambiguously shows POP on the ingress-strip direction
+		 * and PUSH (with TCI/TPID) on the egress-tag direction — without
+		 * fighting /dev/mem capture timing. Ratelimited; drop once the
+		 * push/pop datapath is validated.
+		 */
+		pr_info_ratelimited("ask: VLAN-DIAG insert %pI4:%u->%pI4:%u proto=%u txfq=0x%x port=0x%02x flags=%s%s tci=0x%04x tpid=0x%04x nh=%pM em=%pM\n",
+				    &key->src_ip[0], ntohs(key->sport),
+				    &key->dst_ip[0], ntohs(key->dport),
+				    key->l4_proto, tx_fqid, key->port_id,
+				    (key->vlan_edit_flags & ASK_VLANF_POP) ? "POP" : "",
+				    (key->vlan_edit_flags & ASK_VLANF_PUSH) ? "PUSH" : "",
+				    ntohs(key->vlan_push_tci),
+				    ntohs(key->vlan_push_tpid),
+				    key->next_hop_mac, key->egress_mac);
 	}
 
         /* F-195/F-204 contract: the second argument remains exclusively the
