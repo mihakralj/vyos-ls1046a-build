@@ -71,6 +71,19 @@ if "F-234" in _src:
     print("### F-234: already applied")
     sys.exit(0)
 
+# ---- 0. Forward declaration (the F-233 production caller that calls this can
+# be emitted at a source line before the definition below, depending on the
+# cumulative fixup injection order; the CI build hit an implicit-declaration
+# -Werror on exactly this. Anchor on the unique fman_pcd_muram_alloc definition,
+# which is early and before every caller). -----------------------------------
+replace(
+    SRC, "frag helper forward declaration",
+    "unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size)\n",
+    "static u32 fman_pcd_get_frag_muram_off(struct fman_pcd *pcd);\t/* F-234 */\n"
+    "\n"
+    "unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size)\n",
+)
+
 # ---- 1. Static frag-info-block offset + lazy allocator/init helper ----------
 # Inserted immediately before the base-tree fman_pcd_fe_pool_alloc().
 replace(
