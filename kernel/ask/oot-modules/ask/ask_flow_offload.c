@@ -1875,7 +1875,8 @@ void ask_fe_build_key_dual(const struct ask_flow_key *key,
  * Key is MSB-first EKFC extraction order: SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2).
  */
 static int ask_fe_flow_insert(const struct ask_flow_key *key,
-                              unsigned long enq_off, u32 tx_fqid)
+                              unsigned long enq_off, u32 tx_fqid,
+                              const struct net_device *egress_dev)
 {
         struct fman_pcd_fe_flow_action action;
         struct fman *fm;
@@ -1974,6 +1975,13 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		action.vlan_tci   = key->vlan_push_tci;
 		action.vlan_tpid  = key->vlan_push_tpid;
 		action.vlan_ingress_vid = key->vlan_ingress_vid;
+		if (egress_dev && is_vlan_dev(egress_dev))
+			egress_dev = vlan_dev_real_dev(egress_dev);
+		/* Reuse this board's seeded DPAA RX pool pending a dedicated frag pool. */
+		if (egress_dev && !strcmp(netdev_name(egress_dev), "eth3"))
+			action.frag_bpid = 3;
+		else if (egress_dev && !strcmp(netdev_name(egress_dev), "eth4"))
+			action.frag_bpid = 4;
 		/*
 		 * T-M6-8 DIAGNOSTIC: log exactly what VLAN edit each DIRECTION's
 		 * record carries, keyed by the flow 5-tuple + oif, so a single
@@ -2798,7 +2806,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                         rc = -EAGAIN;
                 } else {
                         rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
-                                                fe_tx_fqid);
+                                                fe_tx_fqid, egress_dev);
                 }
         }
         if (rc) {

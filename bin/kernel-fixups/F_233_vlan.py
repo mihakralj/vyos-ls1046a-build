@@ -104,6 +104,8 @@ replace(
     "\t__be16 vlan_tci;\n"
     "\t__be16 vlan_tpid;\n"
     "\tu16  vlan_ingress_vid;\n"
+    "\tu8   frag_bpid;      /* egress BMan pool for VLAN L2-rebuild buffer acquire; 0 = none */\n"
+    "\tu32  frag_muram_off; /* MURAM offset of the cdx-style frag-info block; 0 = none */\n"
     "};",
 )
 replace(
@@ -134,6 +136,8 @@ replace(
     "\t__be16 push_tci;\n"
     "\t__be16 push_tpid;\n"
     "\tu16    ingress_vid;\t/* host order; STRIP_ALL_VLAN validate VID */\n"
+    "\tu8     frag_bpid;\n"
+    "\tu32    frag_muram_off;\n"
     "};",
 )
 
@@ -334,7 +338,15 @@ replace(
     "\t\t\t.push_tci    = action->vlan_tci,\n"
     "\t\t\t.push_tpid   = action->vlan_tpid,\n"
     "\t\t\t.ingress_vid = action->vlan_ingress_vid,\n"
+    "\t\t\t.frag_bpid   = action->frag_bpid,\n"
     "\t\t};\n"
+    "\t\t/* F-234: lazily allocate+init the MURAM frag-info block and thread\n"
+    "\t\t * its offset into the VLAN record's ENQUEUE param.word2 so the FE-VM\n"
+    "\t\t * L2-rebuild path (STRIP_ETH+INSERT_L2) can acquire rebuild buffers.\n"
+    "\t\t * Only for VLAN flows carrying a valid egress bpid; routed/NAT keep 0. */\n"
+    "\t\tif (action->vlan_flags && action->frag_bpid)\n"
+    "\t\t\t_vlan.frag_muram_off =\n"
+    "\t\t\t\tfman_pcd_get_frag_muram_off(pcd);\n"
     "\n"
     "\t\tmemcpy(_nat.sip, action->nat_sip, 16);\n"
     "\t\tmemcpy(_nat.dip, action->nat_dip, 16);\n"
