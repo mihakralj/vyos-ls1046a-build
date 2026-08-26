@@ -1,0 +1,212 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: FMan PCD VLAN header-manip dedup (fman_hm_vlan_get/put)
+
+T-M6-8 VLAN re-architecture R2 (plans/ASK2-VLAN-REARCH.md).
+
+The inline FE-VM VLAN opcode path is retired (it froze at 5+tnums; an
+enhanced-external-hash record has no HMTD chaining field). VLAN pop/push is
+reintroduced through the FMan Header-Manipulation engine: a CC leaf action
+references a VLAN HMTD via NADEN, and the HM engine does the tag edit (a
+separate engine from the FE-VM, so the freeze cannot recur; PAHM
+re-establishes the parse result).
+
+This adds the VLAN HMTD builder + refcounted dedup, mirroring the next-hop
+dedup (board patch 0120). One shared HMTD per
+(direction, vid, tpid, pcp, egress_tx_fqid): POP -> 1-op {VLAN_STRIP};
+PUSH -> 1-op {VLAN_INSERT} (vid/tpid/pcp). Installed via the productive
+fman_hm_node_install() (0099); the RM 8.7.5 generic RMV/INSRT encoders are
+already proven by the 0101 RX-strip path on 210.10.1. MURAM scales O(VLAN
+adjacencies) not O(flows). Both symbols are EXPORT_SYMBOL_GPL and dormant
+in-tree (the ask.ko CC consumer that embeds the handle lands in R3/R4).
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 6c0efff..56ee0e0 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -765,6 +765,158 @@ int fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle)
+ }
+ EXPORT_SYMBOL_GPL(fman_hm_nexthop_put);
+ 
++/* ------------------------------------------------------------------ *
++ * VLAN HM dedup (T-M6-8 R2): one shared HMTD per VLAN tag-edit adjacency.
++ *
++ * A VLAN flow's per-key CC action references a header-manip handle that
++ * either strips the outermost ingress VLAN tag (POP) or inserts one egress
++ * tag (PUSH).  As with the L3 next-hop dedup, installing one HMTD per *flow*
++ * would exhaust MURAM, so every flow that needs the same tag edit toward the
++ * same egress FQ shares one node keyed by
++ * (is_push, vid, tpid, pcp, egress_tx_fqid) and refcounted.
++ *
++ * The install path sleeps (fman_hm_node_install does GFP_KERNEL) and callers
++ * hold no spinlock, so a plain mutex guards the table.
++ * ------------------------------------------------------------------ */
++struct fman_hm_vlan_ent {
++	struct list_head	node;
++	struct fman		*fm;
++	u32			egress_tx_fqid;
++	u16			vid;
++	u16			tpid;
++	u8			pcp;
++	bool			is_push;
++	u8			port_id;
++	u32			handle;
++	refcount_t		refcount;
++};
++
++static LIST_HEAD(fman_hm_vlan_cache);
++static DEFINE_MUTEX(fman_hm_vlan_lock);
++
++static struct fman_hm_vlan_ent *
++fman_hm_vlan_lookup(struct fman *fm, bool is_push, u16 vid, u16 tpid, u8 pcp,
++		    u32 egress_tx_fqid)
++{
++	struct fman_hm_vlan_ent *v;
++
++	list_for_each_entry(v, &fman_hm_vlan_cache, node) {
++		if (v->fm == fm &&
++		    v->is_push == is_push &&
++		    v->egress_tx_fqid == egress_tx_fqid &&
++		    (!is_push ||
++		     (v->vid == vid && v->tpid == tpid && v->pcp == pcp)))
++			return v;
++	}
++	return NULL;
++}
++
++/*
++ * fman_hm_vlan_get - resolve (and refcount) the shared VLAN HM node for a
++ * tag-edit adjacency, installing it on first use.  @is_push selects INSERT
++ * (push @vid/@tpid/@pcp) vs STRIP (pop the outermost tag).  On success
++ * *handle receives the HMTD MURAM offset to embed as a CC leaf hm_handle.
++ */
++int fman_hm_vlan_get(struct fman *fm, u8 port_id, bool is_push,
++		     u16 vid, u16 tpid, u8 pcp, u32 egress_tx_fqid,
++		     u32 *handle)
++{
++	struct fman_hm_vlan_ent *v;
++	struct fman_hm_spec spec;
++	struct fman_hm_op *op;
++	int err;
++
++	if (!fm || !handle)
++		return -EINVAL;
++	*handle = 0;
++	if (!fman_hm_caps_supported())
++		return -ENOTSUPP;
++	if (is_push && (vid == 0 || vid > 4094))
++		return -EINVAL;
++
++	mutex_lock(&fman_hm_vlan_lock);
++
++	v = fman_hm_vlan_lookup(fm, is_push, vid, tpid, pcp, egress_tx_fqid);
++	if (v) {
++		refcount_inc(&v->refcount);
++		*handle = v->handle;
++		mutex_unlock(&fman_hm_vlan_lock);
++		return 0;
++	}
++
++	v = kzalloc(sizeof(*v), GFP_KERNEL);
++	if (!v) {
++		mutex_unlock(&fman_hm_vlan_lock);
++		return -ENOMEM;
++	}
++
++	memset(&spec, 0, sizeof(spec));
++	spec.num_ops = 1;
++	op = &spec.ops[0];
++	if (is_push) {
++		op->type = FMAN_HM_OP_VLAN_INSERT;
++		op->vlan_insert.vlan_id = vid;
++		op->vlan_insert.tpid = tpid ? tpid : 0x8100;
++		op->vlan_insert.pcp = pcp & 0x7;
++	} else {
++		op->type = FMAN_HM_OP_VLAN_STRIP;
++	}
++
++	err = fman_hm_node_install(fm, port_id, &spec, &v->handle);
++	if (err) {
++		kfree(v);
++		mutex_unlock(&fman_hm_vlan_lock);
++		return err;
++	}
++
++	v->fm = fm;
++	v->egress_tx_fqid = egress_tx_fqid;
++	v->vid = vid;
++	v->tpid = tpid ? tpid : 0x8100;
++	v->pcp = pcp & 0x7;
++	v->is_push = is_push;
++	v->port_id = port_id;
++	refcount_set(&v->refcount, 1);
++	list_add(&v->node, &fman_hm_vlan_cache);
++
++	*handle = v->handle;
++	mutex_unlock(&fman_hm_vlan_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_get);
++
++/*
++ * fman_hm_vlan_put - drop a reference taken by fman_hm_vlan_get().  Destroys
++ * the shared HM node and reclaims its MURAM when the last user goes away.
++ * Idempotent for an unknown handle (returns 0).
++ */
++int fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle)
++{
++	struct fman_hm_vlan_ent *v, *found = NULL;
++	int err = 0;
++
++	if (!fm)
++		return 0;
++
++	mutex_lock(&fman_hm_vlan_lock);
++	list_for_each_entry(v, &fman_hm_vlan_cache, node) {
++		if (v->fm == fm && v->handle == handle) {
++			found = v;
++			break;
++		}
++	}
++	if (found && refcount_dec_and_test(&found->refcount)) {
++		list_del(&found->node);
++		err = fman_hm_node_destroy(found->fm, found->port_id,
++					   found->handle);
++		kfree(found);
++	}
++	mutex_unlock(&fman_hm_vlan_lock);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_put);
++
++
+ 
+ /* ------------------------------------------------------------------ *
+  * M3-3c stub: HM (Header Manipulation) API.
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index e54381a..2f757ab 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -369,6 +369,20 @@ int  fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
+  */
+ int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
+ 
++/**
++ * fman_hm_vlan_get - shared VLAN header-manip node for a tag-edit adjacency
++ *                    (T-M6-8 R2; plans/ASK2-VLAN-REARCH.md)
++ * @is_push:        true = INSERT; false = STRIP
++ * @egress_tx_fqid: egress TX FQ (dedup key)
++ * @handle:         HMTD MURAM offset for a CC leaf hm_handle
++ */
++int  fman_hm_vlan_get(struct fman *fm, u8 port_id, bool is_push,
++		      u16 vid, u16 tpid, u8 pcp, u32 egress_tx_fqid,
++		      u32 *handle);
++
++/** fman_hm_vlan_put - release a VLAN reference from fman_hm_vlan_get() */
++int  fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle);
++
+ /* ------------------------------------------------------------------ *
+  * OOT CC-target resolvers (board patch 0121)
+  *
