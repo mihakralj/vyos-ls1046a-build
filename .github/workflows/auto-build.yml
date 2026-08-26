@@ -471,15 +471,18 @@ jobs:
         id: local_changes
         run: |
           set -e
-          SINCE="${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}"
-          # Local commit subjects since last build, excluding CI version-bump
-          # auto-commits. Kept since-last-build (not the 7-day upstream window)
-          # so a slow release cadence never drops unshipped local work.
-          LOCAL_LOG=$(git log --since "$SINCE" --format="- %s" --no-merges \
+          # Match the upstream changelog cadence: give the notes generator every
+          # local commit from a fixed seven-day window, including merge commits.
+          # Subjects keep the AI input concise while still exposing feature work
+          # that reaches main through a later dpaa1 merge. Exclude only generated
+          # rolling-version commits, which add no release-note content.
+          SINCE="7 days ago"
+          LOCAL_LOG=$(git log --since "$SINCE" --date=short \
+            --format="- %ad — %s" \
             --invert-grep --grep="^[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}-[0-9]\{4\}-rolling$" \
             HEAD 2>/dev/null || true)
-          [ -z "$LOCAL_LOG" ] && LOCAL_LOG="_No local changes since last build._"
-          echo "$LOCAL_LOG" > /tmp/local_changes.md
+          [ -z "$LOCAL_LOG" ] && LOCAL_LOG="_No local changes in the last 7 days._"
+          printf '%s\n' "$LOCAL_LOG" > /tmp/local_changes.md
 
       - name: "Release publishing: generate release notes (AI)"
         id: ai_notes
@@ -528,7 +531,9 @@ jobs:
           only the groups that apply), derived from the LOCAL COMMITS and LOCAL CHANGELOG PROSE.
           Rewrite terse commit subjects into operator-facing sentences that explain the EFFECT,
           not the mechanism. Collapse related commits (e.g. all IPv6 phases) into one bullet.
-          Omit purely internal churn (diagnostics added then removed in the same window, build
+          Every user-visible LOCAL COMMIT must be represented here, either directly or within a
+          collapsed related bullet; the 3-5 bullet limit applies only to Highlights. Omit purely
+          internal churn (diagnostics added then removed in the same window, build
           plumbing, patch-index cleanups) unless it changes runtime behavior. Call out anything
           that changes config syntax and note that existing configs migrate automatically. Do
           NOT expose internal patch identifiers (F-nnn, vyos-1x-0nn, commit hashes) in the
@@ -548,7 +553,7 @@ jobs:
           Here is the input:
           PROMPT
             echo
-            echo "== LOCAL COMMITS (this repo, since last build) =="
+            echo "== LOCAL COMMITS (this repo, last 7 days) =="
             cat /tmp/local_changes.md
             echo
             echo "== UPSTREAM vyos-1x (last 7 days) =="
