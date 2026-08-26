@@ -1298,14 +1298,25 @@ int ask_intent_lower(const struct ask_flow_intent *in,
 			break;
 		case ASK_ACTION_VLAN_POP:
 		case ASK_ACTION_VLAN_PUSH:
-			/* T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26): the inline
-			 * FE-VM VLAN path is retired (freezes at 5+tnums; cannot
-			 * chain an HMTD). VLAN now ALWAYS fails closed to software
-			 * here regardless of the legacy diagnostic gate, until the
-			 * CC-leaf-AD -> NADEN -> HMTD path lands
-			 * (plans/ASK2-VLAN-REARCH.md). Intent is still parsed into
-			 * key->vlan_* for that future path. */
-			return -EOPNOTSUPP;
+			/* T-M6-8 VLAN RE-ARCHITECTURE R4c-2 (2026-08-26): the
+			 * inline FE-VM VLAN path is retired; VLAN now offloads via
+			 * a CC leaf AD -> combined VLAN HMTD, with the CC miss row
+			 * falling through to the FE_ENTER ehash (routed/NAT). The
+			 * replace path branches to ask_vlan_cc_flow_add() BEFORE
+			 * ask_fe_flow_insert() for any flow carrying a VLAN edit.
+			 *
+			 * Carry the VLAN action flag in the lowered flags so the
+			 * intent survives, but ONLY when the VLAN gate is armed;
+			 * when the gate is off VLAN still fails closed to software
+			 * (default-off preserved). key->vlan_* already holds the
+			 * parsed tag edit for the CC path. */
+			if (!ask_hw_vlan_offload_armed())
+				return -EOPNOTSUPP;
+			if (in->actions[i].type == ASK_ACTION_VLAN_POP)
+				flags |= ASK_ACT_VLAN_POP;
+			else
+				flags |= ASK_ACT_VLAN_PUSH;
+			break;
 		default:
 			return -EOPNOTSUPP;
 		}
@@ -2771,6 +2782,13 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                         ask_pr_warn("flow_offload: REPLACE cookie=0x%lx no no-confirm TX FQ (rc=%d fqid=0x%x) - keeping flow in SW\n",
                                     f->cookie, fqrc, fe_tx_fqid);
                         rc = -EAGAIN;
+                } else if (key.vlan_edit_flags) {
+                        /* T-M6-8 R4c-2: a VLAN flow classifies via the per-port
+                         * CC tree (CC key HIT -> combined HMTD -> TX FQ; CC miss
+                         * -> FE_ENTER ehash), NOT the ehash record path. Gated
+                         * on ask_hw_vlan_offload_armed() inside; fails closed to
+                         * SW when the gate is off. */
+                        rc = ask_vlan_cc_flow_add(&key, fe_tx_fqid, egress_dev);
                 } else {
                         rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
                                                 fe_tx_fqid, egress_dev);
@@ -2796,7 +2814,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * and drop our SW entry so no orphan silicon record survives.
          */
         if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
-                ask_fe_flow_remove(&key);
+                if (key.vlan_edit_flags)
+                        ask_vlan_cc_flow_del(&key);
+                else
+                        ask_fe_flow_remove(&key);
                 (void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
                 pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — record removed\n",
                                     f->cookie);
@@ -2882,9 +2903,15 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 
                 ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
                 /* Fix B: per-key FE-VM delete (F-117) — removes just this
-                 * flow's silicon record instead of clearing every flow. */
-                if (have_key)
-                        ask_fe_flow_remove(&dkey);
+                 * flow's silicon record instead of clearing every flow.
+                 * T-M6-8 R4c-2: a VLAN flow lives in the per-port CC shadow,
+                 * not the ehash table, so remove it via ask_vlan_cc_flow_del(). */
+                if (have_key) {
+                        if (dkey.vlan_edit_flags)
+                                ask_vlan_cc_flow_del(&dkey);
+                        else
+                                ask_fe_flow_remove(&dkey);
+                }
                 /* Registry entry no longer needed: the flow is gone and no
                  * worker can still be mid-replay for this generation. */
                 ask_flow_gen_release(t, (u64)f->cookie);
