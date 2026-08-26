@@ -170,6 +170,8 @@
 0121e-fman-pcd-cc-test-vlan-route.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c)
 0121f-fman-pcd-cc-test-teardown-quiesce.patch
+# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c-pre)
+0121g-fman-pcd-cc-test-vlan-coex.patch
 
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
