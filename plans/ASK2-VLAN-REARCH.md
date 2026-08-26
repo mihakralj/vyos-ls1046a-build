@@ -164,6 +164,66 @@ OFFLOAD-CAPABILITY-PLAN.md`) calls for: the same primitives serve IPsec ESP
 encap, tunnels (encap/decap), PPPoE, and MPLS. Building VLAN on HMTD is the first
 and smallest consumer of infrastructure every future encap capability needs.
 
+## 7b. R4 production design — CORRECTED after R3b (2026-08-26)
+
+R3b PASSED: a hand-armed CC leaf → NADEN → **VLAN_STRIP-only** HMTD sustained
+273k pkts/5s (~54.6k pps), ErrFD=0, kernel vif RX flat — the FE-VM 5+tnums
+freeze is gone and the CC+HMTD mechanism is silicon-validated. Two production
+facts R3b surfaced that R4 MUST honour:
+
+1. **A routed-VLAN flow needs a COMBINED HMTD, not VLAN-only.** The CC leaf
+   enqueue does NOT rebuild L2 (verified: `cc_write_leaf_ad` word2 is just
+   BMI ENQ|NADEN; the HM engine owns all header edits). A real routed-VLAN flow
+   must, in ONE HMTD chain, do both the tag edit AND the L3 next-hop rewrite the
+   ehash path's opcodes did:
+   - **POP + route** (tagged ingress → untagged egress):
+     `{VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(dstMAC=nexthop, srcMAC=egress,
+       ethertype), IPV4_FORWARD(dec_ttl, l4_csum)}`
+   - **PUSH + route** (untagged ingress → tagged egress):
+     `{RMV_ETHERNET, INSRT_GENERIC(new L2), IPV4_FORWARD, VLAN_INSERT(vid,tpid,pcp)}`
+   i.e. R4 composes R2's VLAN op with the existing next-hop ops
+   (`fman_hm_nexthop_get`'s `{RMV_ETHERNET, INSRT_GENERIC(14B L2), IPV4_FORWARD}`).
+   The R2 `fman_hm_vlan_get` (VLAN-only) stays for a *bridged* (non-routed) VLAN
+   flow; routed-VLAN uses the new combined builder.
+
+2. **CC and ehash cannot both own a port's KG dispatch simultaneously.**
+   `fman_pcd_kg_port_attach_cc` grafts the port's scheme to the CC tree
+   (KGSE_CCBS → CC group); the production ehash path grafts the same scheme to
+   RCCB→FE_ENTER. They are mutually exclusive per physical port. Coexistence
+   options, ranked:
+   - **(pref) Unified CC tree with FE fall-through:** RCCB → one CC tree per
+     port; VLAN flows are CC keys (combined HMTD); the CC **miss** chains to the
+     FE_ENTER ehash root (routed/NAT). The F-182 `fe_off` path in `cc_test`
+     already proves a CC leaf can carry the FE_ENTER AD form, so miss→FE is
+     reachable. Highest effort, cleanest.
+   - **(interim) Per-port capability mutex:** a port doing VLAN offload uses the
+     CC path for ALL its offloaded flows (VLAN + routed-via-CC), a port with no
+     VLAN uses ehash. Simpler; VLAN implies that port's routed flows also move
+     to CC (which R3b shows sustains). Acceptable first cut.
+
+**CC add/del is whole-tree:** only `fman_pcd_cc_static_install` exists (atomic
+rebuild), no per-flow dynamic CC add. So `ask.ko` keeps a per-port software
+shadow of the CC key set and rebuilds the `fman_pcd_cc_hw_spec` on each VLAN
+flow add/del. `FMAN_PCD_CC_HW_MAX_KEYS` bounds concurrent CC flows/port (fail
+closed to SW past the cap). Static reinstall briefly rebuilds the live tree —
+acceptable at modest VLAN flow counts; revisit if churn is high.
+
+### R4 increments (staged, each build+silicon-gated, mirrors R2/R3)
+- **R4a:** combined VLAN+route HMTD builder `fman_hm_vlan_route_get/put`
+  (compose R2 VLAN op + next-hop L3/L2 ops; refcounted dedup by
+  (vlan-op,vid,tpid,pcp,nexthop-adjacency,egress_fqid)). DORMANT.
+- **R4b (de-risk):** extend `cc_test install_vlan` to arm the COMBINED HMTD
+  (add nexthop dst/src MAC args) and verify on silicon a routed-VLAN flow
+  forwards with correct L2 (dst=nexthop MAC at the sink) + TTL-decrement +
+  sustains. This closes the R3b L2-rebuild gap before any ask.ko change.
+- **R4c:** `ask.ko` production path — per-port CC shadow + rebuild; VLAN flow
+  intent → resolve VID/TPID/egress+nexthop → `fman_hm_vlan_route_get` →
+  add CC key (target_fqid + hm_handle) → `fman_pcd_cc_static_install` +
+  `kg_port_attach_cc`; choose the coexistence model above. Reuse the correct
+  vif/ingress-VID resolvers (6faab5aa/d976ea38).
+- **R4d:** teardown/lifecycle (flow del → rebuild tree, put HMTD; disengage →
+  detach CC, restore ehash/RSS; pcd-snapshot byte-clean).
+
 ## 8. Provenance
 - Constraint (ehash HIT = inline opcodes only): `decomp/en-exthash-lookup.asm`
   `execute_fe_actions`.
