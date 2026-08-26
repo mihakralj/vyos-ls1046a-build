@@ -162,6 +162,8 @@
 0121-dpaa-export-cc-target-resolvers.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A (new file/API; T-M6-8 VLAN R2)
 0121a-fman-pcd-hm-vlan-dedup.patch
+# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R3a)
+0121c-fman-pcd-cc-test-vlan-hm.patch
 
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
