@@ -1,0 +1,209 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: cc_test install_vlanr - hand-arm combined routed-VLAN HMTD
+
+T-M6-8 VLAN re-architecture R4b de-risk (plans/ASK2-VLAN-REARCH.md §7b).
+
+Extends the cc_test harness with install_vlanr, like install_vlan but the CC
+leaf chains the COMBINED routed-VLAN HMTD: the tag edit PLUS the L3 next-hop
+rewrite (rebuild egress L2 to dst-mac/src-mac + decrement IPv4 TTL). Proves on
+silicon that a real routed-VLAN flow forwards through CC+HMTD with correct
+egress L2 and TTL, closing the R3b gap (which armed VLAN_STRIP only) before the
+ask.ko rewire (R4c).
+
+  install_vlanr <port> <proto> <sip> <dip> <sport> <dport> <fqid-hex>
+                <pop|push> <vid> <dst-mac> <src-mac> [tpid-hex] [pcp]
+
+  POP+route : VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD
+  PUSH+route: RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD, VLAN_INSERT
+
+Builds the 4-op fman_pcd_hm_hw_spec inline (fman-local) and reuses the R3a
+handle-tracking + the proven cc bring-up sequence. Debug-only; no production
+path. clear <port> frees the HMTD as before.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+index f3ebdd0..1bcc1f0 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -35,6 +35,8 @@
+ #include <linux/debugfs.h>
+ #include <linux/err.h>
+ #include <linux/errno.h>
++#include <linux/etherdevice.h>
++#include <linux/hex.h>
+ #include <linux/inet.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
+@@ -362,6 +364,159 @@ out_put_hm:
+ 	return err;
+ }
+ 
++/*
++ * install_vlanr <port> <proto> <sip> <dip> <sport> <dport> <fqid-hex>
++ *               <pop|push> <vid> <dst-mac> <src-mac> [tpid-hex] [pcp]
++ *
++ * T-M6-8 R4b de-risk: like install_vlan but the HMTD is the COMBINED
++ * routed-VLAN chain - the tag edit PLUS the L3 next-hop rewrite (rebuild L2
++ * to dst-mac/src-mac + decrement IPv4 TTL).  Proves a real routed-VLAN flow
++ * forwards through CC+HMTD with correct egress L2 and TTL, closing the R3b
++ * gap (VLAN_STRIP-only) before the ask.ko rewire (R4c).
++ *   POP+route : VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD
++ *   PUSH+route: RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD, VLAN_INSERT
++ */
++static int cc_test_install_vlanr(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec = NULL;
++	struct fman_pcd_hm_hw_spec hm;
++	struct fman_pcd_hm_hw_op *op;
++	struct fman_port *rxport;
++	struct fman *fm;
++	char src_str[40], dst_str[40], dir[8], dmac[24], smac[24];
++	u32 src_ip, dst_ip, fqid, cc_base, hm_handle = 0;
++	unsigned int tpid = 0x8100, pcp = 0;
++	u8 port_id, proto, dmb[ETH_ALEN], smb[ETH_ALEN];
++	u16 sport, dport, vid;
++	bool is_push;
++	int n, err;
++
++	n = sscanf(args,
++		   "install_vlanr %hhi %hhu %39s %39s %hu %hu %x %7s %hu %23s %23s %x %u",
++		   &port_id, &proto, src_str, dst_str, &sport, &dport, &fqid,
++		   dir, &vid, dmac, smac, &tpid, &pcp);
++	if (n < 11 || n > 13 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++	    !(proto == 6 || proto == 17) || !fqid)
++		return -EINVAL;
++	is_push = !strcmp(dir, "push");
++	if (!is_push && strcmp(dir, "pop"))
++		return -EINVAL;
++	if (is_push && (vid == 0 || vid > 4094 || tpid > 0xffff || pcp > 7))
++		return -EINVAL;
++	if (!in4_pton(src_str, -1, (u8 *)&src_ip, -1, NULL) ||
++	    !in4_pton(dst_str, -1, (u8 *)&dst_ip, -1, NULL))
++		return -EINVAL;
++	if (!mac_pton(dmac, dmb) || !mac_pton(smac, smb))
++		return -EINVAL;
++
++	fm = fman_pcd_get_fman(pcd);
++	if (!fm)
++		return -ENODEV;
++	if (cc_test_vlan_hm[port_id])
++		return -EBUSY;
++
++	memset(&hm, 0, sizeof(hm));
++	if (is_push) {
++		hm.ops[0].type = FMAN_PCD_HM_HW_OP_RMV_ETHERNET;
++		op = &hm.ops[1];
++		op->type = FMAN_PCD_HM_HW_OP_INSRT_GENERIC;
++		op->insrt_generic.size = 2 * ETH_ALEN + 2;
++		memcpy(&op->insrt_generic.hdr[0], dmb, ETH_ALEN);
++		memcpy(&op->insrt_generic.hdr[ETH_ALEN], smb, ETH_ALEN);
++		op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08;
++		op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00;
++		op = &hm.ops[2];
++		op->type = FMAN_PCD_HM_HW_OP_IPV4_FORWARD;
++		op->ipv4_forward.dec_ttl = 1;
++		op->ipv4_forward.l4_csum = 1;
++		op = &hm.ops[3];
++		op->type = FMAN_PCD_HM_HW_OP_VLAN_INSERT;
++		op->vlan_insert.tpid_be = (u16)tpid;
++		op->vlan_insert.vid = vid;
++		op->vlan_insert.pcp = (u8)pcp;
++		hm.num_ops = 4;
++	} else {
++		hm.ops[0].type = FMAN_PCD_HM_HW_OP_VLAN_STRIP;
++		hm.ops[1].type = FMAN_PCD_HM_HW_OP_RMV_ETHERNET;
++		op = &hm.ops[2];
++		op->type = FMAN_PCD_HM_HW_OP_INSRT_GENERIC;
++		op->insrt_generic.size = 2 * ETH_ALEN + 2;
++		memcpy(&op->insrt_generic.hdr[0], dmb, ETH_ALEN);
++		memcpy(&op->insrt_generic.hdr[ETH_ALEN], smb, ETH_ALEN);
++		op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08;
++		op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00;
++		op = &hm.ops[3];
++		op->type = FMAN_PCD_HM_HW_OP_IPV4_FORWARD;
++		op->ipv4_forward.dec_ttl = 1;
++		op->ipv4_forward.l4_csum = 1;
++		hm.num_ops = 4;
++	}
++
++	err = fman_pcd_hm_install(pcd, port_id, &hm, &hm_handle);
++	if (err)
++		return err;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec) {
++		err = -ENOMEM;
++		goto out_put_hm;
++	}
++	spec->num_keys = 1;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_ETHERTYPE |
++			       FMAN_PCD_CC_HW_F_PROTO |
++			       FMAN_PCD_CC_HW_F_SRC_IP |
++			       FMAN_PCD_CC_HW_F_DST_IP |
++			       FMAN_PCD_CC_HW_F_SRC_PORT |
++			       FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].ethertype_be = cpu_to_be16(ETH_P_IP);
++	spec->keys[0].proto = proto;
++	spec->keys[0].src_ip_be = src_ip;
++	spec->keys[0].dst_ip_be = dst_ip;
++	spec->keys[0].src_port_be = cpu_to_be16(sport);
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_fqid = fqid;
++	spec->keys[0].hm_handle = hm_handle;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	spec = NULL;
++	if (err)
++		goto out_put_hm;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err)
++		goto out_destroy_cc;
++	rxport = fman_port_lookup_rx(fm, port_id);
++	if (!rxport) {
++		err = -ENODEV;
++		goto out_destroy_cc;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_port_set_cc_base(rxport, cc_base);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_pcd_kg_port_attach_cc(pcd, port_id, cc_base);
++	if (err) {
++		(void)fman_port_set_cc_base(rxport, 0);
++		goto out_destroy_cc;
++	}
++
++	cc_test_vlan_hm[port_id] = hm_handle;
++	pr_info("fman_pcd cc_test: VLANR-%s port 0x%02x CC base 0x%x HMTD 0x%x -> fqid 0x%x dst %pM src %pM\n",
++		is_push ? "PUSH" : "POP", port_id, cc_base, hm_handle, fqid,
++		dmb, smb);
++	return 0;
++
++out_destroy_cc:
++	(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++out_put_hm:
++	(void)fman_pcd_hm_destroy(pcd, port_id, hm_handle);
++	return err;
++}
++
+ static ssize_t cc_test_write(struct file *file, const char __user *buf,
+ 			     size_t count, loff_t *ppos)
+ {
+@@ -399,6 +554,10 @@ static ssize_t cc_test_write(struct file *file, const char __user *buf,
+ 		pr_info("fman_pcd cc_test: port 0x%02x graft detached, tree/HMTD destroyed\n",
+ 			port_id);
+ 		ret = count;
++	} else if (strncmp(kbuf, "install_vlanr ", 14) == 0) {
++		ret = cc_test_install_vlanr(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
+ 	} else if (strncmp(kbuf, "install_vlan ", 13) == 0) {
+ 		ret = cc_test_install_vlan(pcd, kbuf);
+ 		if (ret == 0)

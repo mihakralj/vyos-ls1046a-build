@@ -1298,16 +1298,24 @@ int ask_intent_lower(const struct ask_flow_intent *in,
 			break;
 		case ASK_ACTION_VLAN_POP:
 		case ASK_ACTION_VLAN_PUSH:
-			/* T-M6-8: admitted to the legacy flags only when the VLAN
-			 * gate is armed (default OFF); otherwise fail closed to
-			 * software. Values ride key->vlan_*; preflight re-checks the
-			 * gate + eth0 exclusion, and ask_fe_flow_insert fills
-			 * action.vlan_* only when armed, keeping the F-233
-			 * emitter dormant otherwise. */
+			/* T-M6-8 VLAN RE-ARCHITECTURE R4c-2 (2026-08-26): the
+			 * inline FE-VM VLAN path is retired; VLAN now offloads via
+			 * a CC leaf AD -> combined VLAN HMTD, with the CC miss row
+			 * falling through to the FE_ENTER ehash (routed/NAT). The
+			 * replace path branches to ask_vlan_cc_flow_add() BEFORE
+			 * ask_fe_flow_insert() for any flow carrying a VLAN edit.
+			 *
+			 * Carry the VLAN action flag in the lowered flags so the
+			 * intent survives, but ONLY when the VLAN gate is armed;
+			 * when the gate is off VLAN still fails closed to software
+			 * (default-off preserved). key->vlan_* already holds the
+			 * parsed tag edit for the CC path. */
 			if (!ask_hw_vlan_offload_armed())
 				return -EOPNOTSUPP;
-			flags |= (in->actions[i].type == ASK_ACTION_VLAN_POP)
-					? ASK_ACT_VLAN_POP : ASK_ACT_VLAN_PUSH;
+			if (in->actions[i].type == ASK_ACTION_VLAN_POP)
+				flags |= ASK_ACT_VLAN_POP;
+			else
+				flags |= ASK_ACT_VLAN_PUSH;
 			break;
 		default:
 			return -EOPNOTSUPP;
@@ -1875,7 +1883,8 @@ void ask_fe_build_key_dual(const struct ask_flow_key *key,
  * Key is MSB-first EKFC extraction order: SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2).
  */
 static int ask_fe_flow_insert(const struct ask_flow_key *key,
-                              unsigned long enq_off, u32 tx_fqid)
+                              unsigned long enq_off, u32 tx_fqid,
+                              const struct net_device *egress_dev)
 {
         struct fman_pcd_fe_flow_action action;
         struct fman *fm;
@@ -1959,38 +1968,17 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	}
 
 	/*
-	 * T-M6-8 arming: copy the parsed VLAN edit into the public FMan action
-	 * only when the VLAN gate is armed. Disarmed (default), action was
-	 * memset(0) above so vlan_flags stays 0 -> the F-233 emitter's
-	 * `if (vlan && vlan->flags)` is skipped and the FE record is
-	 * byte-identical to the routed/NAT path. Same module-param race close
-	 * as NAT: never publish a VLAN flow's record without the tag op.
-	 * VLAN flag bit values intentionally match FMAN_PCD_VLANF_* (1/2).
+	 * T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26): the FE-VM inline
+	 * VLAN action emitter (F-233/F-234) is retired. Enhanced-external-hash
+	 * records cannot chain to an HMTD and their inline strip/rebuild opcode
+	 * path exhausts a 5+tnums FE-VM resource after ~21 frames. VLAN intent is
+	 * still parsed and carried above, but publication fails closed here until
+	 * the replacement path lands: CC leaf AD -> NADEN -> VLAN HMTD -> egress
+	 * TX FQ (plans/ASK2-VLAN-REARCH.md R2-R4). Never publish a plain routed
+	 * record for a VLAN flow -- that would silently omit the tag edit.
 	 */
-	if (key->vlan_edit_flags) {
-		if (!ask_hw_vlan_offload_armed())
-			return -EOPNOTSUPP;
-		action.vlan_flags = key->vlan_edit_flags;
-		action.vlan_tci   = key->vlan_push_tci;
-		action.vlan_tpid  = key->vlan_push_tpid;
-		/*
-		 * T-M6-8 DIAGNOSTIC: log exactly what VLAN edit each DIRECTION's
-		 * record carries, keyed by the flow 5-tuple + oif, so a single
-		 * board run unambiguously shows POP on the ingress-strip direction
-		 * and PUSH (with TCI/TPID) on the egress-tag direction — without
-		 * fighting /dev/mem capture timing. Ratelimited; drop once the
-		 * push/pop datapath is validated.
-		 */
-		pr_info_ratelimited("ask: VLAN-DIAG insert %pI4:%u->%pI4:%u proto=%u txfq=0x%x port=0x%02x flags=%s%s tci=0x%04x tpid=0x%04x nh=%pM em=%pM\n",
-				    &key->src_ip[0], ntohs(key->sport),
-				    &key->dst_ip[0], ntohs(key->dport),
-				    key->l4_proto, tx_fqid, key->port_id,
-				    (key->vlan_edit_flags & ASK_VLANF_POP) ? "POP" : "",
-				    (key->vlan_edit_flags & ASK_VLANF_PUSH) ? "PUSH" : "",
-				    ntohs(key->vlan_push_tci),
-				    ntohs(key->vlan_push_tpid),
-				    key->next_hop_mac, key->egress_mac);
-	}
+	if (key->vlan_edit_flags)
+		return -EOPNOTSUPP;
 
         /* F-195/F-204 contract: the second argument remains exclusively the
          * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
@@ -2045,6 +2033,59 @@ static void ask_fe_flow_remove(const struct ask_flow_key *key)
 
 /* FLOW_CLS_* dispatch                                                        */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * T-M6-8: resolve the ingress VLAN VID for a POP flow.
+ *
+ * FLOW_ACTION_VLAN_POP carries no VID and the block_cb only gives us the
+ * PHYSICAL ingress port (@iif). The popped tag is a property of the ingress
+ * VLAN vif, so find the single-tag 802.1Q upper of the physical ingress dev
+ * whose configured IPv4 subnet contains @peer_v4 (the flow's ingress-side peer
+ * address, i.e. key.src_ip for the POP direction). Returns the VID (1..4094)
+ * or 0 if no matching vif is found (caller fails closed to software).
+ */
+static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
+{
+	struct net_device *phys, *upper;
+	struct list_head *iter;
+	u16 vid = 0;
+
+	if (!iif || !peer_v4)
+		return 0;
+
+	phys = dev_get_by_index(&init_net, iif);
+	if (!phys)
+		return 0;
+
+	rcu_read_lock();
+	netdev_for_each_upper_dev_rcu(phys, upper, iter) {
+		struct in_device *in_dev;
+		const struct in_ifaddr *ifa;
+
+		if (!is_vlan_dev(upper) ||
+		    vlan_dev_vlan_proto(upper) != htons(ETH_P_8021Q))
+			continue;
+
+		in_dev = __in_dev_get_rcu(upper);
+		if (!in_dev)
+			continue;
+
+		in_dev_for_each_ifa_rcu(ifa, in_dev) {
+			__be32 mask = ifa->ifa_mask;
+
+			if ((peer_v4 & mask) == (ifa->ifa_address & mask)) {
+				vid = vlan_dev_vlan_id(upper);
+				break;
+			}
+		}
+		if (vid)
+			break;
+	}
+	rcu_read_unlock();
+
+	dev_put(phys);
+	return vid;
+}
 
 static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                     struct flow_cls_offload *f)
@@ -2162,14 +2203,46 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 }
         }
 
-        rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
-        if (rc) {
-                pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
-                                    rc, f->cookie);
-                return rc;
-        }
+	rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
+	if (rc) {
+		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
+				    rc, f->cookie);
+		return rc;
+	}
 
-        memcpy(&dst_ip, &key.dst_ip[0], 4);
+	/*
+	 * T-M6-8 (2026-08-25): for a POP flow, capture the real ingress VID so
+	 * STRIP_ALL_VLAN can validate it (vendor insert_remove_vlan_hm parity).
+	 * FLOW_ACTION_VLAN_POP is field-less, and by the time the block_cb runs
+	 * key.iif is the PHYSICAL ingress port (e.g. eth3, not the vif eth3.100)
+	 * — so dev_get_by_index(key.iif) is never a VLAN dev and the dissector
+	 * key.vlan_id comes back 0 for vif-routed flows. The tag being popped is
+	 * a property of the ingress VLAN vif; resolve it by finding the 802.1Q
+	 * upper of the physical ingress dev whose configured IPv4 subnet contains
+	 * the flow's ingress-peer address (key.src_ip for the POP direction, e.g.
+	 * 10.99.100.110 on eth3.100's 10.99.100.0/24). Deterministic for routed
+	 * VLAN, no cross-cookie state. Try the dissector VID first if present.
+	 * A POP with no resolved VID stays in software (fail closed): a zero VID
+	 * with VALIDATE rejects the real tag, and zero+SKIP is the broken record
+	 * this fix removes.
+	 */
+	if (key.vlan_edit_flags & ASK_VLANF_POP) {
+		__be32 peer_v4 = 0;
+
+		key.vlan_ingress_vid = key.vlan_id & VLAN_VID_MASK;
+		if (!key.vlan_ingress_vid && !is_v6 && key.iif) {
+			memcpy(&peer_v4, &key.src_ip[0], 4);
+			key.vlan_ingress_vid =
+				ask_resolve_ingress_vlan_vid(key.iif, peer_v4);
+		}
+		if (!key.vlan_ingress_vid) {
+			pr_info_ratelimited("ask: VLAN POP unresolved ingress VID cookie=0x%lx iif=%u peer=%pI4; software fallback\n",
+					    f->cookie, key.iif, &peer_v4);
+			return -EOPNOTSUPP;
+		}
+	}
+
+	memcpy(&dst_ip, &key.dst_ip[0], 4);
 
         /*
          * PR14z11 (2026-05-19): resolve the next-hop dst_ip with the
@@ -2709,9 +2782,16 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                         ask_pr_warn("flow_offload: REPLACE cookie=0x%lx no no-confirm TX FQ (rc=%d fqid=0x%x) - keeping flow in SW\n",
                                     f->cookie, fqrc, fe_tx_fqid);
                         rc = -EAGAIN;
+                } else if (key.vlan_edit_flags) {
+                        /* T-M6-8 R4c-2: a VLAN flow classifies via the per-port
+                         * CC tree (CC key HIT -> combined HMTD -> TX FQ; CC miss
+                         * -> FE_ENTER ehash), NOT the ehash record path. Gated
+                         * on ask_hw_vlan_offload_armed() inside; fails closed to
+                         * SW when the gate is off. */
+                        rc = ask_vlan_cc_flow_add(&key, fe_tx_fqid, egress_dev);
                 } else {
                         rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
-                                                fe_tx_fqid);
+                                                fe_tx_fqid, egress_dev);
                 }
         }
         if (rc) {
@@ -2734,7 +2814,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * and drop our SW entry so no orphan silicon record survives.
          */
         if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
-                ask_fe_flow_remove(&key);
+                if (key.vlan_edit_flags)
+                        ask_vlan_cc_flow_del(&key);
+                else
+                        ask_fe_flow_remove(&key);
                 (void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
                 pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — record removed\n",
                                     f->cookie);
@@ -2820,9 +2903,15 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 
                 ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
                 /* Fix B: per-key FE-VM delete (F-117) — removes just this
-                 * flow's silicon record instead of clearing every flow. */
-                if (have_key)
-                        ask_fe_flow_remove(&dkey);
+                 * flow's silicon record instead of clearing every flow.
+                 * T-M6-8 R4c-2: a VLAN flow lives in the per-port CC shadow,
+                 * not the ehash table, so remove it via ask_vlan_cc_flow_del(). */
+                if (have_key) {
+                        if (dkey.vlan_edit_flags)
+                                ask_vlan_cc_flow_del(&dkey);
+                        else
+                                ask_fe_flow_remove(&dkey);
+                }
                 /* Registry entry no longer needed: the flow is gone and no
                  * worker can still be mid-replay for this generation. */
                 ask_flow_gen_release(t, (u64)f->cookie);
@@ -2892,9 +2981,22 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
         rcu_read_lock();
         fl = ask_flow_lookup(t, cookie);
         if (fl && fl->hw_backed && fl->generation == generation) {
+                u32 rx_ifindex, tx_ifindex;
+
                 ask_flow_set_hw_stats(fl, hw_pkts, hw_bytes,
                                       d_packets, d_bytes);
+                rx_ifindex = fl->key.iif;
+                tx_ifindex = fl->oif;
                 rcu_read_unlock();
+
+                /*
+                 * Design 2: attribute this poll's offloaded delta to the
+                 * flow's ingress interface (RX) and egress interface (TX).
+                 * Runs OUTSIDE RCU so the lazy xarray entry create inside
+                 * ask_port_stats_add() may allocate with GFP_KERNEL.
+                 */
+                ask_port_stats_add(rx_ifindex, *d_packets, *d_bytes, 0, 0);
+                ask_port_stats_add(tx_ifindex, 0, 0, *d_packets, *d_bytes);
                 return true;
         }
         rcu_read_unlock();
@@ -3186,6 +3288,11 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
                         }
                 }
                 WRITE_ONCE(ask_flow_first_pid, 0xff);
+                /* Design 2: offload is now disengaged for this port — reset
+                 * its offload-only bandwidth counters so /proc/net/dev falls
+                 * back to software-only totals until the next engage. */
+                if (dev)
+                        ask_port_stats_zero(dev->ifindex);
 
                 ask_pr_dbg("flow_offload: UNBIND %s — un-grafted + first_pid latch reset\n",
                            netdev_name(dev));
@@ -3284,9 +3391,26 @@ static int ask_flow_offload_setup_tc_block(struct net_device *dev,
                                       fbo, NULL, NULL);
 }
 
+/*
+ * DPAA ndo_get_stats64 fold-in hook (Design 2). dpaa_get_stats64() sums the
+ * software per-CPU counters first, then calls this with the netdev whose
+ * stats are being read. We add only the OFFLOADED deltas accumulated for that
+ * ifindex — disjoint from the software counters, so there is no double count,
+ * and /proc/net/dev (btop, ip -s, vnstat, ...) sees software + offloaded
+ * totals. Runs under rcu_read_lock from the dpaa driver (non-sleeping path),
+ * so only xa_load + atomic64 reads happen here.
+ */
+static void ask_flow_offload_stats_cb(struct net_device *dev,
+				      struct rtnl_link_stats64 *hw)
+{
+	if (dev)
+		ask_port_stats_get(dev->ifindex, hw);
+}
+
 static const struct dpaa_flow_offload_ops ask_flow_offload_ops = {
         .owner          = THIS_MODULE,
         .setup_tc_block = ask_flow_offload_setup_tc_block,
+        .offload_stats  = ask_flow_offload_stats_cb,
 };
 
 int ask_flow_offload_init(void)

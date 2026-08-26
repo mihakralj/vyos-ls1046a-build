@@ -248,14 +248,25 @@ goto nla_put_failure;
 /*
  * Production capability/status telemetry. Silicon-validated shipping paths:
  * routed IPv4+IPv6 unicast TCP/UDP (dual-lane 46-byte key) and IPv4 NAT/PAT
- * (SNAT, DNAT, masquerade; F-230 FE rewrite chain). IPv6 NAT, VLAN, bridge and
- * ESP deliberately fall back to software. Capability bits mean the path is
- * compiled/exposed, not that a flow is live now.
+ * (SNAT, DNAT, masquerade; F-230 FE rewrite chain). Bridge and ESP deliberately
+ * fall back to software. Capability bits mean the path is compiled/exposed, not
+ * that a flow is live now.
+ *
+ * T-M6-8 R5: VLAN pop/push offload (CC leaf -> combined HMTD -> egress FQ, with
+ * CC miss -> FE_ENTER ehash for routed/NAT coexistence) is silicon-validated end
+ * to end (R4c-2/R4c-3). It ships default-OFF behind the ask_vlan_offload gate,
+ * so ASK_CAP_VLAN is advertised ONLY when the gate is armed -- the advertised
+ * capability then honestly tracks what a flow would actually get offloaded.
  */
-if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES,
-      ASK_CAP_IPV4 | ASK_CAP_IPV6 | ASK_CAP_NAT | ASK_CAP_PAT,
-      ASK_INFO_ATTR_UNSPEC))
-goto nla_put_failure;
+{
+	u64 caps = ASK_CAP_IPV4 | ASK_CAP_IPV6 | ASK_CAP_NAT | ASK_CAP_PAT;
+
+	if (ask_hw_vlan_offload_armed())
+		caps |= ASK_CAP_VLAN;
+	if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, caps,
+			      ASK_INFO_ATTR_UNSPEC))
+		goto nla_put_failure;
+}
 
 {
 struct ask_flow_table *t = ask_flow_default_table();

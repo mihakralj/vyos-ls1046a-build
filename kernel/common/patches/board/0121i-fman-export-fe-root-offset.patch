@@ -1,0 +1,56 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman: export fman_pcd_fe_root_get_offset (T-M6-8 R4c-2)
+
+ask.ko's unified VLAN CC front-end needs the engaged port's FE_ENTER root AD
+MURAM offset to set fman_cc_static_tree.miss_fe_off (so a CC miss continues
+into the enhanced-external-hash routed/NAT path). Add the exported getter,
+mirroring fman_pcd_fe_enq_get_offset. Returns 0 when the FE path is not
+engaged. Read-only; no datapath change.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index c3d2527..0dc980a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -5160,6 +5160,25 @@ unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm)
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_fe_enq_get_offset);
+ 
++/*
++ * fman_pcd_fe_root_get_offset - MURAM offset of the engaged FE_ENTER root AD,
++ * or 0 if the FE path is not engaged. T-M6-8 R4c: ask.ko passes this as
++ * fman_cc_static_tree.miss_fe_off so a CC miss continues into the
++ * enhanced-external-hash routed/NAT path (unified CC front-end).
++ */
++unsigned long fman_pcd_fe_root_get_offset(struct fman *fm)
++{
++	struct fman_pcd *pcd;
++
++	if (!fm)
++		return 0;
++	pcd = fman_get_pcd(fm);
++	if (!pcd || pcd->fe_refcount == 0)
++		return 0;
++	return pcd->fe_root_ad_off;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_root_get_offset);
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index a792fa1..29ee969 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -386,6 +386,9 @@ int fman_pcd_fe_flow_get_stats(struct fman *fm, u8 hw_port_id,
+  * the FE pool is not engaged.  Replaces debugfs fe_enq parsing. */
+ unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm);
+ 
++/* R4c: MURAM offset of the engaged FE_ENTER root AD (0 if not engaged). */
++unsigned long fman_pcd_fe_root_get_offset(struct fman *fm);
++
+ 
+ /**
+  * fman_pcd_kg_scheme_destroy() - tear down a previously created scheme.
