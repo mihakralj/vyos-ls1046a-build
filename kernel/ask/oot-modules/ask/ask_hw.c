@@ -1291,18 +1291,19 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	 * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
 	 * ask.ko populates action.nat_* (only done when armed).
 	 *
-	 * T-M6-8: VLAN pop/push (ASK_ACT_VLAN_POP/PUSH) is admitted ONLY when the
-	 * ask_vlan_offload gate is enabled (default OFF) AND the flow is not on
-	 * eth0. Disarmed (default) it fails closed to software -- byte-identical
-	 * shipping behaviour. The F-233 FE emitter is dormant unless ask.ko
-	 * populates action.vlan_* (only done when armed).
+	 * T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26): the inline FE-VM
+	 * VLAN opcode path (F-233/F-234) is retired. It freezes after exactly
+	 * 5+tnums frames and cannot chain to an HMTD: the enhanced-external-hash
+	 * microcode consumes only its inline opcode/parameter lists. VLAN will be
+	 * reintroduced through a CC leaf AD with NADEN -> HMTD (Header-Manipulation
+	 * engine), whose HMTD and NADEN encodings are already silicon-proven.
+	 * Until that path lands, VLAN MUST fail closed here even when the legacy
+	 * diagnostic module parameter is set. Parsed VLAN intent is retained for
+	 * the new HMTD path; no incomplete/plain routed record may be published.
 	 */
-	if (action_flags & (ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
+	if (action_flags & (ASK_ACT_TO_CAAM | ASK_ACT_TO_OP |
+			    ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP))
 		return -EOPNOTSUPP;
-	if (action_flags & (ASK_ACT_VLAN_PUSH | ASK_ACT_VLAN_POP)) {
-		if (!ask_hw_vlan_offload_armed())
-			return -EOPNOTSUPP;
-	}
 	if (action_flags & (ASK_ACT_NAT_SRC | ASK_ACT_NAT_DST | ASK_ACT_PAT)) {
                 /* IPv4 NAT is silicon-validated (S0-S3), shipping default-on.
                  * IPv6 NAT66 uses the separate nat66_offload gate (default on; fused v6 opcode
