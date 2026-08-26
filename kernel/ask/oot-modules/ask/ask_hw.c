@@ -1009,9 +1009,13 @@ void ask_hw_offload_disengage(u8 hw_port_id)
         /* T-M6-8 R4c-3: tear down any VLAN CC tree fronting this port BEFORE
          * disengaging the FE-VM, so the CC graft never outlives the FE_ENTER
          * root its miss row points at (a dangling miss -> freed FE AD would
-         * fault the controller). Safe lock order: we hold h->lock and
-         * ask_vlan_cc_teardown_port takes ask_vlan_cc_lock (h->lock ->
-         * vlan_cc_lock); no path takes them the other way. */
+         * fault the controller). ask_vlan_cc_teardown_port detaches/drains the
+         * CC tree before freeing HMTD MURAM (F-134 order).
+         *
+         * Lock order is h->lock -> ask_vlan_cc_lock here. That never inverts:
+         * ask_vlan_cc_flow_del holds ask_vlan_cc_lock alone and only calls back
+         * into h->lock (ask_hw_fe_reengage) AFTER dropping ask_vlan_cc_lock, so
+         * no path ever holds ask_vlan_cc_lock while taking h->lock. */
         ask_vlan_cc_teardown_port(hw_port_id);
 
         /* F-092: Disarm + tear down FE-VM via kernel API (not debugfs).
