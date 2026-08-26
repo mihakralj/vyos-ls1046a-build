@@ -1,0 +1,125 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa/fman: CC miss->FE_ENTER production API (T-M6-8 R4c-1)
+
+Turn the R4c-pre-proven unified dispatch into a production API so ask.ko can
+front the enhanced-external-hash path with a CC tree that classifies VLAN
+flows and passes everything else through to routed/NAT ehash - without any
+cross-driver MURAM pokes.
+
+- struct fman_pcd_cc_hw_spec / fman_cc_static_tree gain a miss_fe_off field.
+- fman_pcd_cc_static_install(), while it still holds t->ad and BEFORE the
+  tree is published/live, copies the four-word FE_ENTER AD at miss_fe_off
+  into the trailing miss row (row num_keys). This is the exact pre-live
+  AD-copy the cc_test install_vlanr ... fe_miss_off verb used to PASS the
+  R4c-pre coexistence gate (routed 5.68G via CC-miss->FE + VLAN 495Kpps via
+  CC-key->HMTD, simultaneous, no wedge). Post-attach AD writes need FMFP_EXTC
+  sync and watchdog-reset the board (F-182 / RM 5.12.14.1).
+- fman_cc_tree_install() passes miss_fe_off through; fman_cc_tree_destroy()
+  gains the F-135 ~5 ms drain between clearing RCCB and freeing the CC MURAM
+  (the R4b teardown-wedge fix, now in the production path).
+
+Dormant until ask.ko R4c-2 builds a VLAN CC tree with miss_fe_off set to the
+engaged port's FE_ENTER root AD. No behaviour change for miss_fe_off==0.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 6255f71..afe39ec 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -21,6 +21,7 @@
+ #include <linux/printk.h>
+ #include <linux/slab.h>
+ #include <linux/types.h>
++#include <linux/delay.h>
+ #include <linux/etherdevice.h>
+ #include <linux/list.h>
+ #include <linux/mutex.h>
+@@ -295,6 +296,7 @@ return -ENOMEM;
+ hw->num_keys = spec->num_keys;
+ hw->miss_qband = spec->miss_qband;
+ hw->miss_fqid = spec->miss_fqid;
++hw->miss_fe_off = spec->miss_fe_off;
+ for (i = 0; i < spec->num_keys; i++)
+ dpaa_cc_key_to_hw(&spec->keys[i], &hw->keys[i]);
+ 
+@@ -370,6 +372,9 @@ return;
+ 		if (rxport)
+ 			(void)fman_port_set_cc_base(rxport, 0);
+ 	}
++	/* F-135/F-136 + R4b wedge: let in-flight FMan tasks drain after
++	 * detaching/clearing RCCB before freeing live-walked CC/HMTD MURAM. */
++	usleep_range(5000, 6000);
+ 	fman_pcd_cc_static_destroy(pcd, port_id);
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 9de68d4..cff1a25 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -198,6 +198,8 @@ struct fman_cc_static_tree {
+ 	u16 num_keys;
+ 	u16 miss_qband;
+ 	u32 miss_fqid;
++	/* R4c: non-zero FE_ENTER MURAM AD offset for CC-miss -> ehash. */
++	u32 miss_fe_off;
+ 	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
+ };
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index ad32441..5bbfba4 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -490,6 +490,28 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 	 */
+ 	cc_write_leaf_ad(t->ad, hw->num_keys, hw->miss_fqid, hw->miss_qband, 0);
+ 
++	/*
++	 * T-M6-8 R4c unified dispatch: a non-zero miss_fe_off makes the CC
++	 * tree a front-end for the production enhanced-external-hash path.
++	 * Copy the four-word FE_ENTER AD into the trailing miss row BEFORE the
++	 * tree is published/live. Post-attach AD writes require FMFP_EXTC sync
++	 * and have watchdog-reset the board (F-182 / RM 5.12.14.1).
++	 */
++	if (hw->miss_fe_off) {
++		void __iomem *fe;
++		void __iomem *miss_ad;
++		u16 w;
++
++		fe = (void __iomem *)fman_muram_offset_to_vbase(muram,
++							      hw->miss_fe_off);
++		miss_ad = (void __iomem *)((u8 __iomem *)t->ad +
++						 (size_t)hw->num_keys * CC_AD_ENTRY_SIZE);
++		for (w = 0; w < 4; w++)
++			iowrite32be(ioread32be((u32 __iomem *)
++					 ((u8 __iomem *)fe + 4 * w)),
++				    (u32 __iomem *)((u8 __iomem *)miss_ad + 4 * w));
++	}
++
+ 	/* Point the walker at the tables via the group-table[0] CONT_LOOKUP. */
+ 	cc_write_group0(t);
+ 
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index a792fa1..9e26226 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -475,12 +475,18 @@ struct fman_pcd_cc_hw_key {
+  *               enqueue-AD in the miss slot (steers ALL non-matching
+  *               traffic - use deliberately), 0 = miss traffic stays on
+  *               the port's existing RSS path (the default)
++ * @miss_fe_off: FE_ENTER AD MURAM offset for the unified CC-fronted model;
++ *               non-zero copies the four-word FE_ENTER AD into the trailing
++ *               miss row before the tree is published, so CC misses continue
++ *               through the enhanced-external-hash routed/NAT path. 0 keeps
++ *               the legacy miss_fqid/RSS behaviour.
+  * @keys:        evaluated in order; first match wins
+  */
+ struct fman_pcd_cc_hw_spec {
+ 	u16 num_keys;
+ 	u16 miss_qband;
+ 	u32 miss_fqid;
++	u32 miss_fe_off;
+ 	struct fman_pcd_cc_hw_key keys[FMAN_PCD_CC_HW_MAX_KEYS];
+ };
+ 
