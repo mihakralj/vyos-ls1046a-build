@@ -224,6 +224,94 @@ acceptable at modest VLAN flow counts; revisit if churn is high.
 - **R4d:** teardown/lifecycle (flow del → rebuild tree, put HMTD; disengage →
   detach CC, restore ehash/RSS; pcd-snapshot byte-clean).
 
+## 7c. R4c staging + the coexistence de-risk gate (2026-08-26, after R4b PASS)
+
+R4b PASSED end-to-end: the combined routed-VLAN HMTD (VLAN_STRIP + RMV_ETHERNET
++ INSRT_GENERIC(L2) + IPV4_FORWARD) behind a CC leaf forwarded frames that
+arrived at the sink with the **correct next-hop dst MAC, egress src MAC, VLAN
+stripped, and TTL decremented (64→63)**, sustaining ~55k pps, kernel vif RX = 0,
+Err FD = 0. The full production header edit works in the HM engine.
+
+**But R4b (like R3b) ran with ASK ehash DISENGAGED** so the CC tree was the sole
+KG dispatch on the port. Production is different: a real VLAN-routing box
+(tagged `eth3.100` ↔ untagged `eth4`) carries BOTH tagged flows (need CC+HMTD)
+AND untagged routed/NAT flows (use ehash) **on the same physical ports**. CC and
+ehash both graft the port's KG scheme (KGSE_CCBS/RCCB) — they are mutually
+exclusive per port. So the per-port "capability mutex" idea does NOT fit the real
+topology; production VLAN **requires** the unified model:
+
+> **RCCB → one CC tree per port. CC keys = VLAN flows (combined HMTD leaf).
+> CC MISS → the FE_ENTER ehash root** (so untagged routed/NAT flows still hit the
+> proven ehash path).
+
+The primitive exists: the F-182 `fe_off` path already overwrites a CC AD row
+with the FE_ENTER AD's 4 words (pre-attach, per RM 5.12.14.1 — a post-attach raw
+overwrite faults the controller / watchdog-resets). Applying that to the **miss
+row** yields CC-miss→FE.
+
+### THE GATING UNKNOWN — coexistence de-risk (R4c-pre), silicon
+Whether CC(VLAN) + ehash(routed) coexist on one live port via CC-miss→FE is a
+**new, unproven silicon question**. It MUST be de-risked on the `cc_test` harness
+before any ask.ko production wiring:
+- Extend `cc_test` to install a VLAN CC key AND set the **miss row = FE_ENTER AD**
+  (reuse the F-182 write, applied to the miss slot), then engage ASK ehash on the
+  same port.
+- Prove BOTH simultaneously on silicon: a tagged VLAN flow forwards via CC+HMTD
+  AND an untagged routed flow still forwards via ehash (CC miss → FE), both
+  sustained, Err FD = 0, no wedge.
+- Only if this passes is the unified model viable; else fall back to a
+  design where VLAN forces the whole port to CC and routed flows also move to
+  CC leaves (heavier, but R3b shows CC sustains routed too).
+
+### R4c sub-increments (staged; the risky wiring is gated on R4c-pre)
+- **R4c-1 (SAFE, dormant — implement now):** production CC-shadow + HMTD
+  lifecycle in `ask.ko` — a per-port software shadow of the VLAN CC key set,
+  `fman_hm_vlan_route_get`/`put` for the HMTD, and rebuild via
+  `fman_pcd_cc_static_install`, with **correct teardown ordering**
+  (detach graft → quiesce → restore RCCB/RSS → free MURAM; NEVER churn VyOS
+  config on the port mid-teardown — the 2026-08-26 wedge lesson). Ships DORMANT
+  (no flowtable wiring), exercised via a genl/debug trigger. Zero risk to the
+  10G ehash path.
+- **R4c-pre (silicon de-risk, gates the rest):** the coexistence proof above.
+- **R4c-2 (wire, gated on R4c-pre PASS):** hook `ask_flow_offload_replace/destroy`
+  so a VLAN flow → CC-shadow add/rebuild; routed/NAT → ehash unchanged; CC miss →
+  FE. Per-flow add/del rebuilds the tree (bounded by `FMAN_PCD_CC_HW_MAX_KEYS`,
+  fail closed past the cap).
+- **R4c-3:** teardown/disengage integration + `pcd-snapshot` byte-clean gate.
+
+### Teardown ordering (binding — from the 2026-08-26 wedge + qdrant prior art)
+The R4b wedge was the SAME class as the 2026-07/08 CC teardown bugs. The
+authoritative rules from that history (0106/0147, F-129, F-134, F-136/137):
+
+1. **`detach_cc` MUST restore RSS `next_engine=2`, never 0.** Board patch
+   0106/0147: `fman_pcd_kg_port_detach_cc()` setting `next_engine=0` disables
+   the KG scheme entirely (hc/fqb/mv zeroed) → port needs a cold reboot. It must
+   restore `next_engine=2` (RSS/bmi-enqueue). **This is the likely R4b wedge
+   root cause** — confirm the in-tree detach restores 2, not 0.
+2. **Order (F-134): disarm/detach BEFORE freeing MURAM.** Write RCCB back to the
+   RSS/scheme form FIRST; only then free the CC tree + HMTD MURAM. Freeing MURAM
+   while `FMBM_RCCB` still points at it → BMI dereferences freed memory → bus
+   lockup / hard hang.
+3. **Quiesce in-flight frames** between detach and free (F-136/137: freeing MURAM
+   with frames in flight through an armed port = bus lockup). A short drain
+   delay (F-135 used ~5 ms) or a dispatch-idle check.
+4. **Never churn VyOS config / delete the vif on the port during teardown**
+   (the R4b compounding factor).
+5. **Scope teardown to the production function** (F-129 v4): match the specific
+   function body, not the first occurrence of a helper call.
+6. Cold-boot before/after CC experiments.
+
+Sequence: `kg_port_detach_cc` (restore next_engine=2, RCCB→RSS) → quiesce →
+`fman_port_set_cc_base(port, 0)` → `fman_pcd_cc_static_destroy` +
+`fman_hm_vlan_route_put`.
+
+### R4c-1 open item to verify first
+Before writing R4c-1, confirm on the current tree whether
+`fman_pcd_kg_port_detach_cc()` restores `next_engine=2` (0106/0147 landed) — if
+so, the R4b wedge came from the vif-config churn (rule 4) + destroying under a
+live graft, and the production teardown just needs rules 2–4. If not, that fix
+lands first.
+
 ## 8. Provenance
 - Constraint (ehash HIT = inline opcodes only): `decomp/en-exthash-lookup.asm`
   `execute_fe_actions`.
