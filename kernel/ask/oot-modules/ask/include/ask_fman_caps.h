@@ -105,6 +105,7 @@ struct fman_cc_static_tree {
 	u16 num_keys;
 	u16 miss_qband;
 	u32 miss_fqid;
+	u32 miss_fe_off;
 	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
 };
 
@@ -147,6 +148,29 @@ int  fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
  * a prior _get() returned.  Idempotent for an unknown handle (returns 0).
  */
 int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
+
+/* ---- combined VLAN-edit + L3 next-hop HM dedup (board patch 0121d) --- */
+
+/**
+ * fman_hm_vlan_route_get - resolve (and refcount) the shared combined
+ * VLAN-edit + L3 next-hop HM node for a ROUTED-VLAN adjacency (T-M6-8 R4a).
+ *
+ * Builds one HMTD that does the tag edit AND {RMV_ETHERNET,
+ * INSRT_GENERIC(14-byte egress L2), IPV4_FORWARD(dec_ttl,l4_csum)} -
+ * everything a routed-VLAN frame needs. @is_push selects PUSH (@vid/@tpid/@pcp
+ * inserted after the L2 rebuild) vs POP (strip the ingress tag before the
+ * rebuild). @src_mac is the egress port's own MAC, @dst_mac the next-hop MAC.
+ * On success @handle receives the HMTD MURAM offset to embed in a CC key's
+ * @hm_handle (with a non-zero @target_fqid). Refcounted; sleepable; process
+ * context only.  Mirrors board patch 0121d.
+ */
+int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
+			    u16 vid, u16 tpid, u8 pcp,
+			    const u8 *src_mac, const u8 *dst_mac,
+			    u32 egress_tx_fqid, u32 *handle);
+
+/** fman_hm_vlan_route_put - release a ref from fman_hm_vlan_route_get(). */
+int  fman_hm_vlan_route_put(struct fman *fm, u8 port_id, u32 handle);
 
 /* ---- coarse offload mode-switch (board patch 0129) ------------------ */
 
@@ -196,6 +220,12 @@ int  fman_pcd_fe_flow_get_stats(struct fman *fm, u8 hw_port_id,
 /* F-109: Return the MURAM offset of the first ENQ FE object, or 0 if
  * the FE pool is not engaged.  Replaces debugfs fe_enq parsing. */
 unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm);
+
+/* T-M6-8 R4c (board patch 0121i): Return the MURAM offset of the engaged
+ * port's FE_ENTER root AD, or 0 if the FE path is not engaged. ask.ko passes
+ * this as fman_cc_static_tree.miss_fe_off so a CC miss continues into the
+ * enhanced-external-hash routed/NAT path (unified CC front-end). */
+unsigned long fman_pcd_fe_root_get_offset(struct fman *fm);
 
 #endif /* __ASK_FMAN_CAPS_H */
 
