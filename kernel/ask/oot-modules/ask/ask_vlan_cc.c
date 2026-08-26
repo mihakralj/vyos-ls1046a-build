@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/if_ether.h>
 #include <linux/in.h>
@@ -206,18 +207,49 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 	       sizeof(port->keys[port->nkeys]));
 	port->hm_handles[port->nkeys] = 0;
 
-	fman_hm_vlan_route_put(fm, port_id, hm_handle);
+	/*
+	 * TEARDOWN ORDERING (2026-08-26 vif-delete wedge fix, F-134 rule):
+	 * the removed flow's HMTD (hm_handle) is still referenced by the
+	 * LIVE CC leaf AD until we detach/rebuild the CC tree. fman_hm_vlan_
+	 * route_put() can free that HMTD MURAM, so it MUST run AFTER the CC
+	 * graft no longer points at it and after in-flight frames have
+	 * drained -- otherwise the HM engine walks freed MURAM and faults the
+	 * FMan controller (cold-boot-only wedge, observed on `delete vif`
+	 * under live nft-DESTROY traffic). Both fman_cc_tree_destroy (last
+	 * key) and fman_cc_tree_install/rebuild (remaining keys) already
+	 * detach->clear-RCCB->5ms-drain before freeing/swapping MURAM, so by
+	 * the time they return the old leaf AD is no longer walked. Do the CC
+	 * operation FIRST, then put the HMTD.
+	 */
 	if (!port->nkeys) {
+		ask_pr_info("vlan_cc: port 0x%02x last-flow detach+drain before HMTD put 0x%x\n",
+			    port_id, hm_handle);
 		fman_cc_tree_destroy(fm, port_id);
 		port->installed = false;
 		tree_destroyed = true;
 	} else {
-		int rc = ask_vlan_cc_rebuild_locked(fm, port_id, port);
+		int rc;
+
+		ask_pr_info("vlan_cc: port 0x%02x rebuild %u remaining keys before HMTD put 0x%x\n",
+			    port_id, port->nkeys, hm_handle);
+		rc = ask_vlan_cc_rebuild_locked(fm, port_id, port);
 
 		if (rc)
 			ask_pr_warn("vlan_cc: port 0x%02x rebuild failed: %d\n",
 				    port_id, rc);
+		/*
+		 * Defensive quiesce: the rebuild re-grafts a NEW CC tree whose
+		 * leaves no longer reference the removed HMTD, but give any
+		 * frame that entered the OLD tree before the swap time to drain
+		 * out of the HM pipeline before we free the removed HMTD MURAM
+		 * just below. Mirrors the F-135 ~5ms DPAA1 drain that
+		 * fman_cc_tree_destroy applies on the last-key path.
+		 */
+		usleep_range(5000, 6000);
 	}
+
+	/* Old leaf AD is detached/replaced and drained: safe to free HMTD. */
+	fman_hm_vlan_route_put(fm, port_id, hm_handle);
 	mutex_unlock(&ask_vlan_cc_lock);
 
 	/*
