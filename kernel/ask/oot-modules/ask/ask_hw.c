@@ -163,22 +163,27 @@ bool ask_hw_nat66_offload_armed(void)
 EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
 
 /*
- * T-M6-8 VLAN pop/push. Default OFF until S0-S4 validate FE opcodes
- * STRIP_ALL_VLAN_HDRS(0x12) and INSERT_VLAN_HDR(0x42) on 210.10.1.
- * Runtime-enable only for bounded board experiments; ASK_CAP_VLAN remains
- * unadvertised until productization.
+ * T-M6-8 VLAN pop/push offload. The datapath is the silicon-validated
+ * CC-leaf -> combined HMTD (VLAN strip/insert + L2 rewrite + TTL) -> egress
+ * no-confirm TX FQ, with the CC miss row chaining to the FE_ENTER ehash so
+ * routed/NAT coexist on the same engaged port (R4c-2/R4c-3, sustained both
+ * directions, ehash graft restored on VLAN churn, clean disengage). It ships
+ * default-OFF pending the R5 matrix + soak; ASK_CAP_VLAN is advertised only
+ * while this gate is armed (ask_genl.c), so the capability honestly tracks
+ * what a flow would actually get. Single 802.1Q tag only; eth0/802.1ad/QinQ
+ * fall back to software.
  */
 static bool ask_vlan_offload;
 module_param_named(vlan_offload, ask_vlan_offload, bool, 0644);
 MODULE_PARM_DESC(vlan_offload,
-		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload (default 0; experimental, eth0/802.1ad/QinQ excluded)");
+		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload via CC+HMTD (default 0; eth0/802.1ad/QinQ excluded)");
 
 bool ask_hw_vlan_offload_armed(void)
 {
 	bool armed = READ_ONCE(ask_vlan_offload);
 
 	if (armed)
-		pr_info_once("ask: experimental single-tag 802.1Q VLAN hardware offload enabled; eth0/802.1ad/QinQ excluded\n");
+		pr_info_once("ask: single-tag 802.1Q VLAN hardware offload enabled (CC+HMTD); eth0/802.1ad/QinQ excluded\n");
 	return armed;
 }
 EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
