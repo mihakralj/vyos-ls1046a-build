@@ -2750,10 +2750,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_230.py" 2>&1
     echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_233_vlan.py" 2>&1
-    echo "### fman_pcd.c: F-233 FE-VM VLAN pop/push opcode emitter (T-M6-8, dormant unless vlan->flags)"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_234_frag.py" 2>&1
-    echo "### fman_pcd.c: F-234 VLAN L2-rebuild frag-info MURAM + bpid/word2"
+    # T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26, plans/ASK2-VLAN-REARCH.md):
+    # the inline FE-VM VLAN opcode path (F-233) is silicon-proven dead -- it
+    # freezes at exactly 5+tnums=21 packets (a per-task FE-VM management-index
+    # resource the strip/rebuild handlers consume without release), and two
+    # microcode oracle patches on the action-interpreter epilogue both failed.
+    # VLAN is being re-architected onto the FMan HMCD/HMTD engine (a separate
+    # engine from the FE-VM, so the freeze cannot occur) referenced from a CC
+    # leaf action via NADEN. F-233 (inline VLAN opcode emitter) and F-234 (its
+    # frag-info context) are RETIRED from the build here; ask.ko's VLAN gate
+    # now fails closed to software until the HMTD path (R2-R5) lands. The
+    # fixup files are kept as the vendor-encoding reference only. Routed/NAT
+    # records are byte-identical to the pre-F-233 baseline (F-230 unchanged).
+    #python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_233_vlan.py" 2>&1  # RETIRED (R1)
+    #python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_234_frag.py" 2>&1  # RETIRED (R1)
+    echo "### VLAN: F-233/F-234 inline FE-VM path RETIRED (R1); HMTD re-arch pending"
 fi
 
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs
