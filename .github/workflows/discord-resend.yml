@@ -1,0 +1,63 @@
+name: Discord resend (manual)
+
+# Manual, on-demand resend of a release notification to Discord WITHOUT
+# rebuilding the ISO. This is a thin workflow_dispatch caller that invokes the
+# reusable notify job in discord.yml with the same inputs auto-build.yml would
+# pass. It exists as a SEPARATE file (rather than adding workflow_dispatch to
+# discord.yml) because GitHub leaves dispatched runs stuck un-queued when a
+# workflow it had only ever run via workflow_call suddenly gains a dispatch
+# trigger. A brand-new file registers its trigger cleanly.
+#
+# Use when a published release's highlights were corrected after the fact.
+# Provide the base64-encoded Markdown Highlights body (matches how the publish
+# job hands `## Highlights` to the reusable job):
+#   HIGHLIGHTS_B64=$(base64 -w0 highlights.md)
+#   gh workflow run discord-resend.yml --ref main \
+#     -f status=success \
+#     -f build_version=2026.08.26-1454-rolling \
+#     -f image_iso=vyos-2026.08.26-1454-rolling-LS1046A-arm64.iso \
+#     -f release_highlights_b64="$HIGHLIGHTS_B64"
+
+on:
+  workflow_dispatch:
+    inputs:
+      status:
+        description: 'Build result (success posts the rich release embed)'
+        type: choice
+        options: [success, failure]
+        default: success
+        required: true
+      build_version:
+        description: 'Published release/build version (e.g. 2026.08.26-1454-rolling)'
+        type: string
+        required: true
+      build_branch:
+        description: 'Release branch (main earns the release channel + upgrade embed)'
+        type: string
+        default: main
+        required: true
+      release_type:
+        description: 'Release type'
+        type: string
+        default: Rolling
+        required: true
+      image_iso:
+        description: 'Published ISO asset filename (with .iso)'
+        type: string
+        required: true
+      release_highlights_b64:
+        description: 'Base64-encoded Markdown Highlights body'
+        type: string
+        required: true
+
+jobs:
+  resend:
+    uses: ./.github/workflows/discord.yml
+    with:
+      status: ${{ inputs.status }}
+      build_version: ${{ inputs.build_version }}
+      build_branch: ${{ inputs.build_branch }}
+      release_type: ${{ inputs.release_type }}
+      image_iso: ${{ inputs.image_iso }}
+      release_highlights_b64: ${{ inputs.release_highlights_b64 }}
+    secrets: inherit
