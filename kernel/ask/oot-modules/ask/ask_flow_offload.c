@@ -1298,17 +1298,14 @@ int ask_intent_lower(const struct ask_flow_intent *in,
 			break;
 		case ASK_ACTION_VLAN_POP:
 		case ASK_ACTION_VLAN_PUSH:
-			/* T-M6-8: admitted to the legacy flags only when the VLAN
-			 * gate is armed (default OFF); otherwise fail closed to
-			 * software. Values ride key->vlan_*; preflight re-checks the
-			 * gate + eth0 exclusion, and ask_fe_flow_insert fills
-			 * action.vlan_* only when armed, keeping the F-233
-			 * emitter dormant otherwise. */
-			if (!ask_hw_vlan_offload_armed())
-				return -EOPNOTSUPP;
-			flags |= (in->actions[i].type == ASK_ACTION_VLAN_POP)
-					? ASK_ACT_VLAN_POP : ASK_ACT_VLAN_PUSH;
-			break;
+			/* T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26): the inline
+			 * FE-VM VLAN path is retired (freezes at 5+tnums; cannot
+			 * chain an HMTD). VLAN now ALWAYS fails closed to software
+			 * here regardless of the legacy diagnostic gate, until the
+			 * CC-leaf-AD -> NADEN -> HMTD path lands
+			 * (plans/ASK2-VLAN-REARCH.md). Intent is still parsed into
+			 * key->vlan_* for that future path. */
+			return -EOPNOTSUPP;
 		default:
 			return -EOPNOTSUPP;
 		}
@@ -1960,47 +1957,17 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	}
 
 	/*
-	 * T-M6-8 arming: copy the parsed VLAN edit into the public FMan action
-	 * only when the VLAN gate is armed. Disarmed (default), action was
-	 * memset(0) above so vlan_flags stays 0 -> the F-233 emitter's
-	 * `if (vlan && vlan->flags)` is skipped and the FE record is
-	 * byte-identical to the routed/NAT path. Same module-param race close
-	 * as NAT: never publish a VLAN flow's record without the tag op.
-	 * VLAN flag bit values intentionally match FMAN_PCD_VLANF_* (1/2).
+	 * T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26): the FE-VM inline
+	 * VLAN action emitter (F-233/F-234) is retired. Enhanced-external-hash
+	 * records cannot chain to an HMTD and their inline strip/rebuild opcode
+	 * path exhausts a 5+tnums FE-VM resource after ~21 frames. VLAN intent is
+	 * still parsed and carried above, but publication fails closed here until
+	 * the replacement path lands: CC leaf AD -> NADEN -> VLAN HMTD -> egress
+	 * TX FQ (plans/ASK2-VLAN-REARCH.md R2-R4). Never publish a plain routed
+	 * record for a VLAN flow -- that would silently omit the tag edit.
 	 */
-	if (key->vlan_edit_flags) {
-		if (!ask_hw_vlan_offload_armed())
-			return -EOPNOTSUPP;
-		action.vlan_flags = key->vlan_edit_flags;
-		action.vlan_tci   = key->vlan_push_tci;
-		action.vlan_tpid  = key->vlan_push_tpid;
-		action.vlan_ingress_vid = key->vlan_ingress_vid;
-		if (egress_dev && is_vlan_dev(egress_dev))
-			egress_dev = vlan_dev_real_dev(egress_dev);
-		/* Reuse this board's seeded DPAA RX pool pending a dedicated frag pool. */
-		if (egress_dev && !strcmp(netdev_name(egress_dev), "eth3"))
-			action.frag_bpid = 3;
-		else if (egress_dev && !strcmp(netdev_name(egress_dev), "eth4"))
-			action.frag_bpid = 4;
-		/*
-		 * T-M6-8 DIAGNOSTIC: log exactly what VLAN edit each DIRECTION's
-		 * record carries, keyed by the flow 5-tuple + oif, so a single
-		 * board run unambiguously shows POP on the ingress-strip direction
-		 * and PUSH (with TCI/TPID) on the egress-tag direction — without
-		 * fighting /dev/mem capture timing. Ratelimited; drop once the
-		 * push/pop datapath is validated.
-		 */
-		pr_info_ratelimited("ask: VLAN-DIAG insert %pI4:%u->%pI4:%u proto=%u txfq=0x%x port=0x%02x flags=%s%s tci=0x%04x tpid=0x%04x ivid=%u nh=%pM em=%pM\n",
-				    &key->src_ip[0], ntohs(key->sport),
-				    &key->dst_ip[0], ntohs(key->dport),
-				    key->l4_proto, tx_fqid, key->port_id,
-				    (key->vlan_edit_flags & ASK_VLANF_POP) ? "POP" : "",
-				    (key->vlan_edit_flags & ASK_VLANF_PUSH) ? "PUSH" : "",
-				    ntohs(key->vlan_push_tci),
-				    ntohs(key->vlan_push_tpid),
-				    key->vlan_ingress_vid,
-				    key->next_hop_mac, key->egress_mac);
-	}
+	if (key->vlan_edit_flags)
+		return -EOPNOTSUPP;
 
         /* F-195/F-204 contract: the second argument remains exclusively the
          * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
