@@ -160,6 +160,8 @@
 0120-fman-pcd-hm-nexthop-dedup.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0121-dpaa-export-cc-target-resolvers.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A (new file/API; T-M6-8 VLAN R2)
+0121a-fman-pcd-hm-vlan-dedup.patch
 
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
