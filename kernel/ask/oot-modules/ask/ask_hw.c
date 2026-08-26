@@ -163,22 +163,27 @@ bool ask_hw_nat66_offload_armed(void)
 EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
 
 /*
- * T-M6-8 VLAN pop/push. Default OFF until S0-S4 validate FE opcodes
- * STRIP_ALL_VLAN_HDRS(0x12) and INSERT_VLAN_HDR(0x42) on 210.10.1.
- * Runtime-enable only for bounded board experiments; ASK_CAP_VLAN remains
- * unadvertised until productization.
+ * T-M6-8 VLAN pop/push offload. The datapath is the silicon-validated
+ * CC-leaf -> combined HMTD (VLAN strip/insert + L2 rewrite + TTL) -> egress
+ * no-confirm TX FQ, with the CC miss row chaining to the FE_ENTER ehash so
+ * routed/NAT coexist on the same engaged port (R4c-2/R4c-3, sustained both
+ * directions, ehash graft restored on VLAN churn, clean disengage). It ships
+ * default-OFF pending the R5 matrix + soak; ASK_CAP_VLAN is advertised only
+ * while this gate is armed (ask_genl.c), so the capability honestly tracks
+ * what a flow would actually get. Single 802.1Q tag only; eth0/802.1ad/QinQ
+ * fall back to software.
  */
 static bool ask_vlan_offload;
 module_param_named(vlan_offload, ask_vlan_offload, bool, 0644);
 MODULE_PARM_DESC(vlan_offload,
-		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload (default 0; experimental, eth0/802.1ad/QinQ excluded)");
+		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload via CC+HMTD (default 0; eth0/802.1ad/QinQ excluded)");
 
 bool ask_hw_vlan_offload_armed(void)
 {
 	bool armed = READ_ONCE(ask_vlan_offload);
 
 	if (armed)
-		pr_info_once("ask: experimental single-tag 802.1Q VLAN hardware offload enabled; eth0/802.1ad/QinQ excluded\n");
+		pr_info_once("ask: single-tag 802.1Q VLAN hardware offload enabled (CC+HMTD); eth0/802.1ad/QinQ excluded\n");
 	return armed;
 }
 EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
@@ -728,6 +733,99 @@ int ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid)
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_get_sink_fqid);
 
+/*
+ * T-M6-8 DIAGNOSTIC (2026-08-25): no-confirm TX FQ backlog probe.
+ *
+ * The VLAN offload freezes after ~20 packets with no ErrFD / no FMFP stall /
+ * no FE workspace depletion, and F-234 (bpid + MURAM frag word2) did not help.
+ * The routed path sustains 7.12G on the SAME per-port no-confirm TX FQ, so the
+ * question is whether the VLAN-rebuilt (STRIP_ETH+INSERT_L2) frames actually
+ * REACH and DRAIN that FQ, or pile up. qman_query_fq_np() reads the FQD's
+ * non-programmable fields including frm_cnt (frames enqueued-not-dequeued =
+ * backlog) and state. Writing 1 to /sys/module/ask/parameters/fq_probe walks
+ * the cached per-port no-confirm FQs and logs each FQ's live state + backlog.
+ *
+ * Interpretation while a VLAN flow is frozen:
+ *   frm_cnt stuck high / rising -> frames enqueued but NOT draining (QMan/TX/
+ *       EBD buffer-recycle side): the FQ is backlogged.
+ *   frm_cnt ~0 + byte_cnt ~0    -> frames never reach the FQ; the FE-VM stops
+ *       enqueuing after ~20 (FE-VM lookup/execute side).
+ *   state != ACTIVE/SCHED       -> the FQ retired/parked/held-active (OAC /
+ *       congestion / order-restoration wedge).
+ * Read-only: issues QM MC QUERYFQ_NP commands only; touches no datapath state.
+ */
+static int ask_fq_probe_set(const char *val, const struct kernel_param *kp)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_inst;
+	unsigned int i, shown = 0;
+	bool trig;
+	int rc;
+
+	rc = kstrtobool(val, &trig);
+	if (rc)
+		return rc;
+	if (!trig)
+		return 0;
+	if (!h) {
+		pr_info("ask: FQ-PROBE: no HW instance (offload not engaged)\n");
+		return 0;
+	}
+
+	mutex_lock(&h->lock);
+
+	if (h->dedicated_fq_ready) {
+		struct qman_fq fq = { .fqid = h->dedicated_fq.fqid };
+		struct qm_mcr_queryfq_np np;
+
+		memset(&np, 0, sizeof(np));
+		rc = qman_query_fq_np(&fq, &np);
+		if (rc)
+			pr_info("ask: FQ-PROBE dedicated fqid=0x%x query rc=%d\n",
+				fq.fqid, rc);
+		else
+			pr_info("ask: FQ-PROBE dedicated fqid=0x%x state=0x%02x frm_cnt=%u byte_cnt=%u\n",
+				fq.fqid, np.state & QM_MCR_NP_STATE_MASK,
+				qm_mcr_np_get(&np, frm_cnt), np.byte_cnt);
+	}
+
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		struct qman_fq fq;
+		struct qm_mcr_queryfq_np np;
+
+		if (!h->noconf_tx[i].fqid)
+			continue;
+		memset(&fq, 0, sizeof(fq));
+		fq.fqid = h->noconf_tx[i].fqid;
+		memset(&np, 0, sizeof(np));
+		rc = qman_query_fq_np(&fq, &np);
+		if (rc) {
+			pr_info("ask: FQ-PROBE slot=%u ifindex=%u fqid=0x%x query rc=%d\n",
+				i, h->noconf_tx[i].ifindex, fq.fqid, rc);
+		} else {
+			pr_info("ask: FQ-PROBE slot=%u ifindex=%u fqid=0x%x state=0x%02x frm_cnt=%u byte_cnt=%u fqd_link=0x%x\n",
+				i, h->noconf_tx[i].ifindex, fq.fqid,
+				np.state & QM_MCR_NP_STATE_MASK,
+				qm_mcr_np_get(&np, frm_cnt), np.byte_cnt,
+				qm_mcr_np_get(&np, fqd_link));
+		}
+		shown++;
+	}
+
+	mutex_unlock(&h->lock);
+
+	if (!shown)
+		pr_info("ask: FQ-PROBE: no no-confirm TX FQs cached yet (no HW flow inserted)\n");
+	return 0;
+}
+
+static const struct kernel_param_ops ask_fq_probe_ops = {
+	.set = ask_fq_probe_set,
+	/* write-only trigger; no .get */
+};
+module_param_cb(fq_probe, &ask_fq_probe_ops, NULL, 0200);
+MODULE_PARM_DESC(fq_probe,
+		 "T-M6-8 diagnostic: write 1 to log no-confirm TX FQ state + backlog (frm_cnt) via QMan QUERYFQ_NP");
+
 /* ------------------------------------------------------------------------- */
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */
@@ -908,6 +1006,18 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 return;                 /* idempotent no-op */
         }
 
+        /* T-M6-8 R4c-3: tear down any VLAN CC tree fronting this port BEFORE
+         * disengaging the FE-VM, so the CC graft never outlives the FE_ENTER
+         * root its miss row points at (a dangling miss -> freed FE AD would
+         * fault the controller). ask_vlan_cc_teardown_port detaches/drains the
+         * CC tree before freeing HMTD MURAM (F-134 order).
+         *
+         * Lock order is h->lock -> ask_vlan_cc_lock here. That never inverts:
+         * ask_vlan_cc_flow_del holds ask_vlan_cc_lock alone and only calls back
+         * into h->lock (ask_hw_fe_reengage) AFTER dropping ask_vlan_cc_lock, so
+         * no path ever holds ask_vlan_cc_lock while taking h->lock. */
+        ask_vlan_cc_teardown_port(hw_port_id);
+
         /* F-092: Disarm + tear down FE-VM via kernel API (not debugfs).
          * fman_pcd_fe_disengage() now tears down the VM chain after disarming.
          */
@@ -988,6 +1098,63 @@ int ask_hw_port_unbind(u8 port_id)
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_port_unbind);
+
+/*
+ * T-M6-8 R4c-3: re-assert the FE-VM ehash graft on an ASK-engaged port after
+ * the VLAN CC tree that was fronting it is torn down.
+ *
+ * While VLAN flows exist, ask_vlan_cc grafts the port to a CC tree (RCCB -> CC,
+ * CC miss -> FE_ENTER) so routed/NAT still reach ehash via the miss row. When
+ * the LAST VLAN flow on the port is deleted, fman_cc_tree_destroy reverts the
+ * port to bare RSS (RCCB=0) — which would silently drop routed/NAT off the
+ * ehash HW path onto the software RSS path until the next port re-engage.
+ * fman_pcd_fe_engage() alone will NOT fix this: the port's fe_port_armed bit is
+ * still set, so it returns early without re-writing the RCCB. Do a full
+ * disengage->engage cycle instead: disengage clears the armed bit and the FE
+ * chain stays warm (F-136), so the re-engage cheaply re-writes RCCB -> FE_ENTER
+ * and re-captures the ENQ FE offset. Only touches ports we actually engaged.
+ * Process context; takes h->lock. Called by ask_vlan_cc_flow_del outside its
+ * own lock to avoid nesting ask_vlan_cc_lock under h->lock.
+ */
+int ask_hw_fe_reengage(u8 hw_port_id)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	struct ask_hw_port *p;
+	unsigned int i;
+	int rc = 0;
+
+	if (!h)
+		return -ENODEV;
+
+	mutex_lock(&h->lock);
+	p = NULL;
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
+			p = &h->port[i];
+			break;
+		}
+	}
+	/* Only re-assert on a port ASK actually has engaged. */
+	if (!p || !p->offload_engaged) {
+		mutex_unlock(&h->lock);
+		return 0;
+	}
+
+	fman_pcd_fe_disengage(h->fman, hw_port_id);
+	rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
+	if (rc) {
+		ask_pr_warn("hw: FE re-engage port 0x%02x after VLAN CC teardown failed: %d\n",
+			    hw_port_id, rc);
+	} else {
+		WRITE_ONCE(ask_hw_enq_fe_off,
+			   fman_pcd_fe_enq_get_offset(h->fman));
+		ask_pr_info("hw: FE re-engaged port 0x%02x after VLAN CC teardown (RCCB restored)\n",
+			    hw_port_id);
+	}
+	mutex_unlock(&h->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(ask_hw_fe_reengage);
 
 u32 ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx)
 {
@@ -1198,11 +1365,14 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	 * behaviour. The F-230 FE-VM NAT emitter is likewise dormant unless
 	 * ask.ko populates action.nat_* (only done when armed).
 	 *
-	 * T-M6-8: VLAN pop/push (ASK_ACT_VLAN_POP/PUSH) is admitted ONLY when the
-	 * ask_vlan_offload gate is enabled (default OFF) AND the flow is not on
-	 * eth0. Disarmed (default) it fails closed to software -- byte-identical
-	 * shipping behaviour. The F-233 FE emitter is dormant unless ask.ko
-	 * populates action.vlan_* (only done when armed).
+	 * T-M6-8 VLAN RE-ARCHITECTURE R4c-2 (2026-08-26): VLAN offloads via a
+	 * CC leaf AD -> combined VLAN HMTD, with the CC miss row falling through
+	 * to the FE_ENTER ehash (routed/NAT) — the coexistence model proven on
+	 * silicon (R4c-pre). VLAN is admitted here ONLY when the ask_vlan_offload
+	 * gate is armed AND the flow is not on the eth0 management port (below);
+	 * disarmed (default) it fails closed to software exactly as before. The
+	 * replace path routes an armed VLAN flow to ask_vlan_cc_flow_add()
+	 * (the CC path), never ask_fe_flow_insert() (the ehash record path).
 	 */
 	if (action_flags & (ASK_ACT_TO_CAAM | ASK_ACT_TO_OP))
 		return -EOPNOTSUPP;

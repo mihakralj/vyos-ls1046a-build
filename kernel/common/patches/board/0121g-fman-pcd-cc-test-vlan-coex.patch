@@ -1,0 +1,105 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: cc_test install_vlanr CC-miss->FE_ENTER (T-M6-8 R4c-pre)
+
+The production coexistence gate: a real VLAN-routing port carries BOTH tagged
+flows (CC+HMTD) and untagged routed/NAT flows (ehash) on the same physical
+port, but CC and ehash both graft the port's KG scheme. The unified model is
+RCCB -> CC tree, VLAN keys HIT -> HMTD, CC MISS -> FE_ENTER ehash root.
+
+This adds an optional final fe_miss_off arg to install_vlanr: after
+fman_pcd_cc_static_install and BEFORE attach, it overwrites the trailing CC
+MISS AD row (row num_keys==1, 16 bytes) with the FE_ENTER AD's four words -
+the F-182 pre-live AD-copy mechanism applied to the miss row (a post-attach
+overwrite faults the controller, RM 5.12.14.1). This lets one hand-armed port
+prove on silicon that CC(VLAN) + ehash(routed) coexist: tagged flow hits the
+VLAN key -> HMTD, untagged flow misses -> FE_ENTER -> ehash record.
+
+  install_vlanr <...existing args...> <dst-mac> <src-mac> [tpid] [pcp] [fe_miss_off]
+
+Debug harness only; no production path. Gates R4c-1/2 production wiring.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+index 1bcc1f0..bb70deb 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -385,17 +385,20 @@ static int cc_test_install_vlanr(struct fman_pcd *pcd, const char *args)
+ 	struct fman *fm;
+ 	char src_str[40], dst_str[40], dir[8], dmac[24], smac[24];
+ 	u32 src_ip, dst_ip, fqid, cc_base, hm_handle = 0;
+-	unsigned int tpid = 0x8100, pcp = 0;
++	u32 fe_miss_off = 0, ad_off;
++	unsigned int tpid = 0x8100, pcp = 0, i;
++	struct muram_info *muram;
++	void __iomem *group, *ad, *fe;
+ 	u8 port_id, proto, dmb[ETH_ALEN], smb[ETH_ALEN];
+ 	u16 sport, dport, vid;
+ 	bool is_push;
+ 	int n, err;
+ 
+ 	n = sscanf(args,
+-		   "install_vlanr %hhi %hhu %39s %39s %hu %hu %x %7s %hu %23s %23s %x %u",
++		   "install_vlanr %hhi %hhu %39s %39s %hu %hu %x %7s %hu %23s %23s %x %u %x",
+ 		   &port_id, &proto, src_str, dst_str, &sport, &dport, &fqid,
+-		   dir, &vid, dmac, smac, &tpid, &pcp);
+-	if (n < 11 || n > 13 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++		   dir, &vid, dmac, smac, &tpid, &pcp, &fe_miss_off);
++	if (n < 11 || n > 14 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
+ 	    !(proto == 6 || proto == 17) || !fqid)
+ 		return -EINVAL;
+ 	is_push = !strcmp(dir, "push");
+@@ -486,6 +489,40 @@ static int cc_test_install_vlanr(struct fman_pcd *pcd, const char *args)
+ 	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
+ 	if (err)
+ 		goto out_destroy_cc;
++
++	/*
++	 * R4c-pre coexistence gate: when @fe_miss_off is supplied, overwrite the
++	 * trailing CC MISS AD row (row num_keys == 1) with the FE_ENTER AD's four
++	 * words BEFORE the tree is attached. Topology:
++	 *   RCCB -> CC tree -- VLAN key HIT -> NADEN VLANR HMTD -> TX FQ
++	 *                   `- MISS -> FE_ENTER -> ehash routed/NAT
++	 * F-182 pre-live AD-copy applied to the miss row; a post-attach overwrite
++	 * faults the FMan controller (RM 5.12.14.1 FMFP_EXTC sync).
++	 */
++	if (fe_miss_off) {
++		muram = fman_get_muram(fm);
++		if (!muram) {
++			err = -ENXIO;
++			goto out_destroy_cc;
++		}
++		group = (void __iomem *)fman_muram_offset_to_vbase(muram,
++								   cc_base);
++		ad_off = ioread32be((u32 __iomem *)group) & 0xFFFFFF;
++		if (!ad_off) {
++			err = -EINVAL;
++			goto out_destroy_cc;
++		}
++		ad = (void __iomem *)fman_muram_offset_to_vbase(muram, ad_off);
++		fe = (void __iomem *)fman_muram_offset_to_vbase(muram,
++								fe_miss_off);
++		/* one key => miss row is row 1; each AD row is 16 bytes */
++		ad = (void __iomem *)((u8 __iomem *)ad + 16);
++		for (i = 0; i < 4; i++)
++			iowrite32be(ioread32be((u32 __iomem *)((u8 __iomem *)fe +
++								 4 * i)),
++				    (u32 __iomem *)((u8 __iomem *)ad + 4 * i));
++	}
++
+ 	rxport = fman_port_lookup_rx(fm, port_id);
+ 	if (!rxport) {
+ 		err = -ENODEV;
+@@ -504,9 +541,9 @@ static int cc_test_install_vlanr(struct fman_pcd *pcd, const char *args)
+ 	}
+ 
+ 	cc_test_vlan_hm[port_id] = hm_handle;
+-	pr_info("fman_pcd cc_test: VLANR-%s port 0x%02x CC base 0x%x HMTD 0x%x -> fqid 0x%x dst %pM src %pM\n",
++	pr_info("fman_pcd cc_test: VLANR-%s port 0x%02x CC base 0x%x HMTD 0x%x -> fqid 0x%x dst %pM src %pM%s\n",
+ 		is_push ? "PUSH" : "POP", port_id, cc_base, hm_handle, fqid,
+-		dmb, smb);
++		dmb, smb, fe_miss_off ? " miss->FE coexist" : "");
+ 	return 0;
+ 
+ out_destroy_cc:

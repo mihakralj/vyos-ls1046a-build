@@ -194,11 +194,15 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 	KUNIT_EXPECT_NOT_NULL(test, attrs[ASK_INFO_ATTR_NUM_FLOWS]);
 	KUNIT_EXPECT_NOT_NULL(test, attrs[ASK_INFO_ATTR_MAX_FLOWS]);
 
-	/* Shipping capability contract: advertise only the implemented plain
-	 * routed IPv4 hardware path, never planned IPv6/NAT/VLAN/IPsec bits. */
+	/* Shipping capability contract (2026-08-26): routed IPv4+IPv6 and
+	 * NAT/PAT are implemented and always advertised. VLAN is also
+	 * silicon-validated (CC+HMTD) but its runtime gate defaults OFF, so the
+	 * capability bit is absent until the operator explicitly arms it.
+	 * Bridge/multicast/IPsec remain unadvertised. */
 	KUNIT_EXPECT_EQ(test,
 			nla_get_u64(attrs[ASK_INFO_ATTR_CAPABILITIES]),
-			(u64)ASK_CAP_IPV4);
+			(u64)(ASK_CAP_IPV4 | ASK_CAP_IPV6 |
+			      ASK_CAP_NAT | ASK_CAP_PAT));
 	/* KUnit has no bound FMan, so runtime telemetry must honestly report 0. */
 	KUNIT_EXPECT_EQ(test,
 			nla_get_u32(attrs[ASK_INFO_ATTR_NUM_FMAN]), 0u);

@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Tue, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: fold ASK2 HW-offload stats into ndo_get_stats64 (0171)
+
+ASK2 forwards offloaded flows entirely in the FMan FE engine, so the
+DPAA netdev software per-CPU counters never see them and /proc/net/dev
+(and tools such as btop, ip -s, vnstat) under-report offloaded
+throughput.
+
+Add an optional offload_stats hook to struct dpaa_flow_offload_ops and
+invoke it from dpaa_get_stats64() after the software per-CPU counters
+have been summed. The backend (ask.ko) adds only its own disjoint
+offload counters, so there is no double counting. The hook runs under
+rcu_read_lock() from ndo_get_stats64, which may be called in atomic
+context, and must therefore not sleep.
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index f890101..1de740e 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -376,6 +376,9 @@ static void dpaa_tx_timeout(struct net_device *net_dev, unsigned int txqueue)
+ /* Calculates the statistics for the given device by adding the statistics
+  * collected by each CPU.
+  */
++static void dpaa_get_offload_stats(struct net_device *net_dev,
++				   struct rtnl_link_stats64 *s);
++
+ static void dpaa_get_stats64(struct net_device *net_dev,
+ 			     struct rtnl_link_stats64 *s)
+ {
+@@ -395,6 +398,11 @@ static void dpaa_get_stats64(struct net_device *net_dev,
+ 		for (j = 0; j < numstats; j++)
+ 			netstats[j] += cpustats[j];
+ 	}
++
++	/* Fold in hardware-offloaded packets/bytes (ASK2) which bypassed
++	 * the software per-CPU counters above. The backend adds only its
++	 * own disjoint counters, so there is no double counting. */
++	dpaa_get_offload_stats(net_dev, s);
+ }
+ 
+ static int dpaa_setup_tc_mqprio(struct net_device *net_dev, void *type_data)
+@@ -707,6 +715,22 @@ int dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops
+ }
+ EXPORT_SYMBOL_GPL(dpaa_unregister_flow_offload_handler);
+ 
++/* ASK2 hardware-offload bandwidth fold-in. Called from dpaa_get_stats64().
++ * The registered offload backend (ask.ko) adds only the counters for flows
++ * forwarded in silicon, which are disjoint from the software per-CPU totals
++ * already summed into *s. Runs under rcu_read_lock(), never sleeps. */
++static void dpaa_get_offload_stats(struct net_device *net_dev,
++				   struct rtnl_link_stats64 *s)
++{
++	const struct dpaa_flow_offload_ops *ops;
++
++	rcu_read_lock();
++	ops = rcu_dereference(dpaa_fo_ops_slot);
++	if (ops && ops->offload_stats)
++		ops->offload_stats(net_dev, s);
++	rcu_read_unlock();
++}
++
+ static int dpaa_setup_tc_flow_block(struct net_device *net_dev,
+ 				struct flow_block_offload *f)
+ {
+diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
+index 17951e8..e634bb4 100644
+--- a/include/linux/fsl/dpaa_flow_offload.h
++++ b/include/linux/fsl/dpaa_flow_offload.h
+@@ -31,6 +31,7 @@
+ struct module;
+ struct net_device;
+ struct flow_block_offload;
++struct rtnl_link_stats64;
+ 
+ /**
+  * struct dpaa_flow_offload_ops - external flow-offload backend hooks
+@@ -40,11 +41,21 @@ struct flow_block_offload;
+  * 			FLOW_BLOCK_UNBIND dance against fbo. Returns 0 on
+  * 			success or a negative errno; -EOPNOTSUPP is treated
+  * 			by the upper layer as 'try software fallback'.
++ * @offload_stats: invoked from dpaa_get_stats64() after the software
++ * 			per-CPU counters have been summed, so the backend
++ * 			can fold in hardware-offloaded packets/bytes that
++ * 			bypassed the kernel datapath (ASK2). The counters
++ * 			must be DISJOINT from the software path to avoid
++ * 			double counting; the backend adds into *hw, it does
++ * 			not overwrite. Runs under rcu_read_lock() from a
++ * 			non-sleeping context, so it must not sleep.
+  */
+ struct dpaa_flow_offload_ops {
+ 	struct module *owner;
+ 	int (*setup_tc_block)(struct net_device *dev,
+ 			      struct flow_block_offload *fbo);
++	void (*offload_stats)(struct net_device *dev,
++			      struct rtnl_link_stats64 *hw);
+ };
+ 
+ #if IS_ENABLED(CONFIG_FSL_DPAA)
