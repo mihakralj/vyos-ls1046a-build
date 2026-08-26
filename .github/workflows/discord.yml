@@ -1,8 +1,12 @@
 name: Discord notification (reusable)
 
+# Reusable-only workflow — no `workflow_dispatch:` trigger.
 # Invoked automatically from auto-build.yml's `notify` job via
-# `uses: ./.github/workflows/discord.yml`, or manually to resend a corrected
-# release notification without rebuilding the ISO.
+# `uses: ./.github/workflows/discord.yml`. To resend a corrected release
+# notification without rebuilding the ISO, use the dedicated
+# `discord-resend.yml` caller (a thin workflow_dispatch wrapper around this
+# reusable job); adding workflow_dispatch directly to a workflow GitHub had
+# only ever run via workflow_call leaves dispatched runs stuck un-queued.
 #
 # Posts a build-result embed to Discord. The channel is chosen by outcome:
 #   success  -> 1494357051378503862
@@ -10,36 +14,6 @@ name: Discord notification (reusable)
 # (cancelled/skipped are treated as failure).
 
 on:
-  workflow_dispatch:
-    inputs:
-      status:
-        description: 'Build result'
-        type: choice
-        options: [success, failure]
-        default: success
-        required: true
-      build_version:
-        description: 'Published release/build version'
-        type: string
-        required: true
-      build_branch:
-        description: 'Release branch'
-        type: string
-        default: main
-        required: true
-      release_type:
-        description: 'Release type'
-        type: string
-        default: Rolling
-        required: true
-      image_iso:
-        description: 'Published ISO asset filename'
-        type: string
-        required: true
-      release_highlights_b64:
-        description: 'Base64-encoded Markdown Highlights body'
-        type: string
-        required: true
   workflow_call:
     inputs:
       status:
