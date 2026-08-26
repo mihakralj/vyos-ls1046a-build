@@ -1161,11 +1161,24 @@ void ask_op_exit(void);
 #define ASK_ACT_TO_OP               (1U << 7)
 
 /* ------------------------------------------------------------------------- */
-/* ask_stats.c — u64_stats_sync wrappers                                      */
-/* PR7 fills these in.                                                       */
+/* ask_stats.c — per-interface ASK2 HW-offload bandwidth accounting (Design 2) */
+/*                                                                            */
+/* Offloaded flows are forwarded by the FMan FE engine, bypassing the DPAA    */
+/* netdev software counters, so /proc/net/dev under-reports offloaded         */
+/* throughput. The per-flow silicon deltas read by ask_flow_offload.c's       */
+/* FLOW_CLS_STATS poll are also attributed here to the flow's ingress (RX)    */
+/* and egress (TX) ifindex, and the DPAA driver folds them into               */
+/* ndo_get_stats64() via struct dpaa_flow_offload_ops::offload_stats          */
+/* (board patch 0171).                                                        */
 /* ------------------------------------------------------------------------- */
+struct rtnl_link_stats64;
+
 int  ask_stats_init(void);
 void ask_stats_exit(void);
+void ask_port_stats_add(int ifindex, u64 rx_packets, u64 rx_bytes,
+			u64 tx_packets, u64 tx_bytes);
+void ask_port_stats_zero(int ifindex);
+void ask_port_stats_get(int ifindex, struct rtnl_link_stats64 *hw);
 
 /* ------------------------------------------------------------------------- */
 /* ask_debugfs.c - /sys/kernel/debug/ask (gated on CONFIG_DEBUG_FS)           */

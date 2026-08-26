@@ -2954,9 +2954,22 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
         rcu_read_lock();
         fl = ask_flow_lookup(t, cookie);
         if (fl && fl->hw_backed && fl->generation == generation) {
+                u32 rx_ifindex, tx_ifindex;
+
                 ask_flow_set_hw_stats(fl, hw_pkts, hw_bytes,
                                       d_packets, d_bytes);
+                rx_ifindex = fl->key.iif;
+                tx_ifindex = fl->oif;
                 rcu_read_unlock();
+
+                /*
+                 * Design 2: attribute this poll's offloaded delta to the
+                 * flow's ingress interface (RX) and egress interface (TX).
+                 * Runs OUTSIDE RCU so the lazy xarray entry create inside
+                 * ask_port_stats_add() may allocate with GFP_KERNEL.
+                 */
+                ask_port_stats_add(rx_ifindex, *d_packets, *d_bytes, 0, 0);
+                ask_port_stats_add(tx_ifindex, 0, 0, *d_packets, *d_bytes);
                 return true;
         }
         rcu_read_unlock();
@@ -3248,6 +3261,11 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
                         }
                 }
                 WRITE_ONCE(ask_flow_first_pid, 0xff);
+                /* Design 2: offload is now disengaged for this port — reset
+                 * its offload-only bandwidth counters so /proc/net/dev falls
+                 * back to software-only totals until the next engage. */
+                if (dev)
+                        ask_port_stats_zero(dev->ifindex);
 
                 ask_pr_dbg("flow_offload: UNBIND %s — un-grafted + first_pid latch reset\n",
                            netdev_name(dev));
@@ -3346,9 +3364,26 @@ static int ask_flow_offload_setup_tc_block(struct net_device *dev,
                                       fbo, NULL, NULL);
 }
 
+/*
+ * DPAA ndo_get_stats64 fold-in hook (Design 2). dpaa_get_stats64() sums the
+ * software per-CPU counters first, then calls this with the netdev whose
+ * stats are being read. We add only the OFFLOADED deltas accumulated for that
+ * ifindex — disjoint from the software counters, so there is no double count,
+ * and /proc/net/dev (btop, ip -s, vnstat, ...) sees software + offloaded
+ * totals. Runs under rcu_read_lock from the dpaa driver (non-sleeping path),
+ * so only xa_load + atomic64 reads happen here.
+ */
+static void ask_flow_offload_stats_cb(struct net_device *dev,
+				      struct rtnl_link_stats64 *hw)
+{
+	if (dev)
+		ask_port_stats_get(dev->ifindex, hw);
+}
+
 static const struct dpaa_flow_offload_ops ask_flow_offload_ops = {
         .owner          = THIS_MODULE,
         .setup_tc_block = ask_flow_offload_setup_tc_block,
+        .offload_stats  = ask_flow_offload_stats_cb,
 };
 
 int ask_flow_offload_init(void)
