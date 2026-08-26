@@ -18,6 +18,7 @@ ask_genl_attr.o \
 ask_hw.o \
 ask_flow.o \
 ask_flow_offload.o \
+ask_vlan_cc.o \
 ask_xfrm.o \
 ask_caam.o \
 ask_bridge.o \

@@ -160,6 +160,22 @@
 0120-fman-pcd-hm-nexthop-dedup.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0121-dpaa-export-cc-target-resolvers.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A (new file/API; T-M6-8 VLAN R2)
+0121a-fman-pcd-hm-vlan-dedup.patch
+# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R3a)
+0121c-fman-pcd-cc-test-vlan-hm.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A (new API; T-M6-8 VLAN R4a)
+0121d-fman-pcd-hm-vlan-route-dedup.patch
+# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4b)
+0121e-fman-pcd-cc-test-vlan-route.patch
+# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c)
+0121f-fman-pcd-cc-test-teardown-quiesce.patch
+# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c-pre)
+0121g-fman-pcd-cc-test-vlan-coex.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-1)
+0121h-fman-cc-miss-fe-production-api.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
+0121i-fman-export-fe-root-offset.patch
 
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
@@ -280,3 +296,5 @@
 0169-fman-pcd-fe-obs-canary.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0170-fman-pcd-debugfs-kconfig.patch
+# Upstream-Status: Inappropriate | Risk-Tier: C
+0171-dpaa-netdev-offload-stats-hook.patch

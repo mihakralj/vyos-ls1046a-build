@@ -416,6 +416,13 @@ bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
 /* T-M6-8 VLAN offload gate: default-OFF until S0-S4 silicon gates pass. */
 bool ask_hw_vlan_offload_armed(void);
+int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
+			  struct net_device *egress_dev);
+void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
+void ask_vlan_cc_teardown_port(u8 port_id);
+/* R4c-3: re-assert the FE-VM ehash graft after a VLAN CC tree teardown so
+ * routed/NAT stays HW-offloaded on an ASK-engaged port. No-op if not engaged. */
+int  ask_hw_fe_reengage(u8 hw_port_id);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
         enum ask_hw_dir dir,
@@ -544,6 +551,18 @@ u8     nat_flags;
 #define ASK_VLANF_PUSH	BIT(1)	/* insert one egress 802.1Q tag */
 	__be16 vlan_push_tci;
 	__be16 vlan_push_tpid;
+	/*
+	 * T-M6-8 (2026-08-25): the ingress VID to hand the STRIP_ALL_VLAN
+	 * opcode. The vendor insert_remove_vlan_hm() writes the real ingress
+	 * VID into en_ehash_strip_all_vlan_hdrs.vlan_id[0] (outer-first, be16)
+	 * and leaves op_flags=0 (VALIDATE) for a routed tagged POP; only bridge
+	 * flows with no tag set OP_SKIP_VLAN_VALIDATE. ASK2 previously emitted a
+	 * zero VID + SKIP, which left the 0x12 strip's parse geometry
+	 * inconsistent and silently dropped bulk POP frames on silicon. Sourced
+	 * from the ingress VLAN vif (vlan_dev_vlan_id) since the flowtable POP
+	 * action carries no VID. Host order 1..4094; 0 = no ingress tag.
+	 */
+	u16    vlan_ingress_vid;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
@@ -1149,11 +1168,24 @@ void ask_op_exit(void);
 #define ASK_ACT_TO_OP               (1U << 7)
 
 /* ------------------------------------------------------------------------- */
-/* ask_stats.c — u64_stats_sync wrappers                                      */
-/* PR7 fills these in.                                                       */
+/* ask_stats.c — per-interface ASK2 HW-offload bandwidth accounting (Design 2) */
+/*                                                                            */
+/* Offloaded flows are forwarded by the FMan FE engine, bypassing the DPAA    */
+/* netdev software counters, so /proc/net/dev under-reports offloaded         */
+/* throughput. The per-flow silicon deltas read by ask_flow_offload.c's       */
+/* FLOW_CLS_STATS poll are also attributed here to the flow's ingress (RX)    */
+/* and egress (TX) ifindex, and the DPAA driver folds them into               */
+/* ndo_get_stats64() via struct dpaa_flow_offload_ops::offload_stats          */
+/* (board patch 0171).                                                        */
 /* ------------------------------------------------------------------------- */
+struct rtnl_link_stats64;
+
 int  ask_stats_init(void);
 void ask_stats_exit(void);
+void ask_port_stats_add(int ifindex, u64 rx_packets, u64 rx_bytes,
+			u64 tx_packets, u64 tx_bytes);
+void ask_port_stats_zero(int ifindex);
+void ask_port_stats_get(int ifindex, struct rtnl_link_stats64 *hw);
 
 /* ------------------------------------------------------------------------- */
 /* ask_debugfs.c - /sys/kernel/debug/ask (gated on CONFIG_DEBUG_FS)           */

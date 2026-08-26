@@ -6,27 +6,35 @@ HIT can strip an ingress 802.1Q tag and/or insert one egress tag in silicon.
 Vendor create/insert_remove_vlan_hm() opcode set, verified in fm_ehash.h:
 
     STRIP_ALL_VLAN_HDRS 0x12  param en_ehash_strip_all_vlan_hdrs  (12 B base)
-                              (POP: removes ALL ingress tags; validate disabled)
+                              (POP: vlan_id[0]=ingress VID + op_flags=0 VALIDATE)
     INSERT_VLAN_HDR     0x42  param en_ehash_insert_vlan_hdr      (4 B ctrl + 4/tag)
                               (PUSH: control word | u32 vlanhdr = (TCI<<16)|innerET)
 
-Vendor emission order (fill_actions, cdx_ehash.c:710-806): PREEMPTIVE(0x05) ->
+VENDOR-FAITHFUL to fill_bridge_actions() (the VLAN forwarding generator,
+cdx_ehash.c:1196-1299), NOT fill_actions() (routed/QoS). Byte-diff 2026-08-25
+established fill_bridge_actions is the correct model and it does NOT emit
+PREEMPTIVE_CHECKS(0x05). Emission order:
 STRIP_ETH_HDR(0x11) -> STRIP_ALL_VLAN_HDRS(0x12) -> UPDATE_TTL/HOPLIMIT/NAT ->
 INSERT_VLAN_HDR(0x42) -> INSERT_L2_HDR(0x41) -> ENQUEUE_PKT(0x01).
 
-STRIP_ETH_HDR(0x11) is MANDATORY on every VLAN flow: the vendor gates it on
-rebuild_l2_hdr (set whenever L2_HDR_OPS = any VLAN present/pushed, cdx_ehash.c:
-76,686-688,720-723). The 2026-08-25 silicon result proved that OMITTING 0x11
-makes the FE-VM VLAN opcodes present-but-inert for forwarding (records correct,
-0 sustained throughput, plain-routed 7.11G fine); vendor ASK1/CDX on the same
-silicon sustains VLAN routing (3000/3000 flood) because it emits 0x11. So this
-emitter now emits 0x11 first when vlan->flags is set. (PREEMPTIVE 0x05 with its
-enqueue-sealed param is a further vendor step, deferred as a second variable if
-0x11 alone is insufficient.) Params pack sequentially in
-opcode-emission order (no per-opcode offset fields), same rule F-198/F-200/F-230
-use. When a tag is pushed, the outer TPID rides the INSERT_L2_HDR EtherType
-(rolled to 0x8100) and the pushed word's low 16 bits carry the inner EtherType
-(0x0800/0x86dd).
+STRIP_ETH_HDR(0x11) is MANDATORY on every VLAN flow (vendor gates it on
+rebuild_l2_hdr = any VLAN present/pushed). Two 2026-08-25 corrections vs the
+first (still-broken) VLAN builds, both from the vendor byte-diff:
+  1. STRIP_ALL_VLAN param: write the REAL ingress VID into vlan_id[0] (be16) and
+     leave op_flags=0 (VALIDATE) on the POP direction, exactly as
+     insert_remove_vlan_hm() does for a routed tagged flow (cdx_ehash.c:
+     2004-2020). The earlier zero-VID + OP_SKIP_VLAN_VALIDATE left the 0x12
+     strip's parse geometry inconsistent and silently dropped BULK frames
+     (POP-bulk=0 even though POP shrinks the frame — which falsified every
+     bpid/hdr_xpnd_sz/headroom theory). SKIP is kept only for the pure-PUSH
+     (untagged ingress) case where there is no ingress tag to validate.
+  2. Do NOT emit PREEMPTIVE_CHECKS(0x05): fill_bridge_actions never does; only
+     the routed fill_actions() emits+seals it. Dropping it keeps the record
+     byte-faithful to the vendor VLAN path.
+Params pack sequentially in opcode-emission order (no per-opcode offset fields),
+same rule F-198/F-200/F-230 use. When a tag is pushed, the outer TPID rides the
+INSERT_L2_HDR EtherType (rolled to 0x8100) and the pushed word's low 16 bits
+carry the inner EtherType (0x0800/0x86dd).
 
 DESIGN — ZERO PERTURBATION OF SHIPPING PATHS: when vlan->flags == 0 the emitter
 is not entered at all, so the routed and F-230 NAT records are BYTE-IDENTICAL to
@@ -90,10 +98,14 @@ replace(
     "\t/* F-233 (T-M6-8): single-tag 802.1Q pop/push. vlan_flags==0 =>\n"
     "\t * no VLAN edit (record byte-identical to the routed/NAT path).\n"
     "\t * vlan_tci is the 16-bit TCI (PCP<<13|DEI<<12|VID) to push;\n"
-    "\t * vlan_tpid is the outer EtherType (0x8100). */\n"
+    "\t * vlan_tpid is the outer EtherType (0x8100). vlan_ingress_vid is the\n"
+    "\t * VID (host order) the STRIP_ALL_VLAN opcode validates on POP. */\n"
     "\tu8   vlan_flags;\n"
     "\t__be16 vlan_tci;\n"
     "\t__be16 vlan_tpid;\n"
+    "\tu16  vlan_ingress_vid;\n"
+    "\tu8   frag_bpid;      /* egress BMan pool for VLAN L2-rebuild buffer acquire; 0 = none */\n"
+    "\tu32  frag_muram_off; /* MURAM offset of the cdx-style frag-info block; 0 = none */\n"
     "};",
 )
 replace(
@@ -123,6 +135,9 @@ replace(
     "\tu8     flags;\n"
     "\t__be16 push_tci;\n"
     "\t__be16 push_tpid;\n"
+    "\tu16    ingress_vid;\t/* host order; STRIP_ALL_VLAN validate VID */\n"
+    "\tu8     frag_bpid;\n"
+    "\tu32    frag_muram_off;\n"
     "};",
 )
 
@@ -174,7 +189,6 @@ replace(
     "\t\t\t * the proven F-230 branch below is never entered for VLAN\n"
     "\t\t\t * flows and stays byte-identical when vlan->flags==0. */\n"
     "\t\t\tif (vlan && vlan->flags) {\n"
-    "\t\t\t\t#define FMAN_EHASH_OPC_PREEMPTIVE_CHK\t0x05\n"
     "\t\t\t\t#define FMAN_EHASH_OPC_STRIP_ETH_HDR\t0x11\n"
     "\t\t\t\t#define FMAN_EHASH_OPC_STRIP_ALL_VLAN\t0x12\n"
     "\t\t\t\t#define FMAN_EHASH_OPC_INSERT_VLAN_HDR\t0x42\n"
@@ -188,19 +202,14 @@ replace(
     "\t\t\t\tu8 port_opc = 0;\n"
     "\t\t\t\tu8 l3_opc;\n"
     "\n"
-    "\t\t\t\tvlan_is_v6 = pv6; /* capture before PUSH rolls eth_type to TPID */\n"
-    "\n"
     "\t\t\t\toi = 0;\n"
     "\t\t\t\tl2poff = param_off;\n"
     "\n"
-    "\t\t\t\t/* PREEMPTIVE_CHECKS_ON_PKT(0x05) MUST be first on vendor routed\n"
-    "\t\t\t\t * flows. Its 8-byte en_ehash_preempt_op param is reserved FIRST in\n"
-    "\t\t\t\t * the param blob and sealed after enqueue_off is known (mtu_offset\n"
-    "\t\t\t\t * + PREEMPT_TX_VALIDATE [+DFBIT_HONOR for v4]). An unsealed 0x05\n"
-    "\t\t\t\t * is inert; the seal is the length-change validation ASK2 omitted. */\n"
-    "\t\t\t\tr[opc_off + oi++] = FMAN_EHASH_OPC_PREEMPTIVE_CHK;\n"
-    "\t\t\t\tmemset(r + l2poff, 0, 8);\n"
-    "\t\t\t\tl2poff += 8;\n"
+    "\t\t\t\t/* Vendor fill_bridge_actions() (the VLAN forwarding\n"
+    "\t\t\t\t * generator) starts with STRIP_ETH_HDR and emits NO\n"
+    "\t\t\t\t * PREEMPTIVE_CHECKS(0x05); only fill_actions()'s routed/QoS\n"
+    "\t\t\t\t * path emits and seals 0x05. Keep this record byte-faithful to\n"
+    "\t\t\t\t * the vendor VLAN path. */\n"
     "\n"
     "\t\t\t\t/* STRIP_ETH_HDR (opcode-only, no param): mandatory on any\n"
     "\t\t\t\t * VLAN (L2-manipulating) flow. Vendor cdx_ehash.c fill_actions()\n"
@@ -230,27 +239,37 @@ replace(
     "\t\t\t\t * en_ehash_strip_all_vlan_hdrs = 12 B: u16 vlan_id[2] (0-3), u32\n"
     "\t\t\t\t * word (4-7, ifstats off => 0), u8 op_flags (8).\n"
     "\t\t\t\t *\n"
-    "\t\t\t\t * op_flags: the vendor sets OP_SKIP_VLAN_VALIDATE ONLY for bridge\n"
-    "\t\t\t\t * flows (cdx_ehash.c:2016 `if (info->flags & EHASH_BRIDGE_FLOW)`);\n"
-    "\t\t\t\t * for ROUTED flows it leaves op_flags=0 = VALIDATE (comment: 'in\n"
-    "\t\t\t\t * routing, untagged packets should not be accepted by VLAN logical\n"
-    "\t\t\t\t * interface'). That validate step normalizes the parse context so\n"
-    "\t\t\t\t * the rebuilt frame forwards.\n"
-    "\t\t\t\t *   - PUSH (untagged ingress): op_flags=0, vlan_id=0 => validate\n"
-    "\t\t\t\t *     ZERO ingress tags. SKIPPING this (our old bug) left the PUSH\n"
-    "\t\t\t\t *     rebuild's parse context inconsistent -> the FE-VM silently\n"
-    "\t\t\t\t *     dropped the offloaded PUSH data frames (handshake forwarded\n"
-    "\t\t\t\t *     pre-offload, then WSL->.110 length-1 replies never arrived,\n"
-    "\t\t\t\t *     0 sustained). Fixed: op_flags=0 for the pure-PUSH case.\n"
-    "\t\t\t\t *   - POP: keep OP_SKIP_VLAN_VALIDATE because our classification\n"
-    "\t\t\t\t *     key excludes VLAN TCI so we don't carry the ingress VID to\n"
-    "\t\t\t\t *     validate against; a zeroed vlan_id with validate would\n"
-    "\t\t\t\t *     reject the real non-zero ingress VID. POP already forwards. */\n"
+    "\t\t\t\t * op_flags + vlan_id (VENDOR-FAITHFUL, 2026-08-25): the vendor\n"
+    "\t\t\t\t * insert_remove_vlan_hm() writes the REAL ingress VID(s) into\n"
+    "\t\t\t\t * param->vlan_id[i] (outer-first, be16) whenever ingress tags are\n"
+    "\t\t\t\t * present (cdx_ehash.c:2004-2012) and leaves op_flags=0 (VALIDATE)\n"
+    "\t\t\t\t * for a ROUTED tagged flow; it sets OP_SKIP_VLAN_VALIDATE ONLY for\n"
+    "\t\t\t\t * a BRIDGE flow whose ingress has NO tag (:2016-2020). The 0x12\n"
+    "\t\t\t\t * microcode uses vlan_id[] to know which tag(s) to validate/strip,\n"
+    "\t\t\t\t * so a zeroed VID leaves the strip's parse geometry inconsistent\n"
+    "\t\t\t\t * and silently drops bulk frames (the 2026-08-25 POP-bulk=0 /\n"
+    "\t\t\t\t * PUSH-data-drop signature — falsified the earlier bpid/hdr_xpnd\n"
+    "\t\t\t\t * theories since POP shrinks the frame).\n"
+    "\t\t\t\t *   - POP (tagged ingress): vlan_id[0] = ingress VID, op_flags=0\n"
+    "\t\t\t\t *     => validate & strip the real tag. vlan->ingress_vid is\n"
+    "\t\t\t\t *     sourced from the ingress VLAN vif by ask.ko.\n"
+    "\t\t\t\t *   - PUSH-only (untagged ingress, no VID): vlan_id=0 +\n"
+    "\t\t\t\t *     OP_SKIP_VLAN_VALIDATE so the strip does not reject the\n"
+    "\t\t\t\t *     untagged frame (there is no ingress tag to validate).\n"
+    "\t\t\t\t * If a POP flow somehow arrives with ingress_vid==0 (no vif VID\n"
+    "\t\t\t\t * resolved) fall back to SKIP rather than validate-against-zero. */\n"
     "\t\t\t\t#define FMAN_EHASH_OP_SKIP_VLAN_VALIDATE\t0x01\n"
     "\t\t\t\tr[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ALL_VLAN;\n"
     "\t\t\t\tmemset(r + l2poff, 0, 12);\n"
-    "\t\t\t\tif (vlan->flags & FMAN_PCD_VLANF_POP)\n"
+    "\t\t\t\tif ((vlan->flags & FMAN_PCD_VLANF_POP) &&\n"
+    "\t\t\t\t    vlan->ingress_vid) {\n"
+    "\t\t\t\t\t/* validate & strip the real ingress tag */\n"
+    "\t\t\t\t\t*(__be16 *)(r + l2poff + 0) =\n"
+    "\t\t\t\t\t\tcpu_to_be16(vlan->ingress_vid);\n"
+    "\t\t\t\t} else {\n"
+    "\t\t\t\t\t/* untagged ingress (pure PUSH) or unresolved VID */\n"
     "\t\t\t\t\tr[l2poff + 8] = FMAN_EHASH_OP_SKIP_VLAN_VALIDATE;\n"
+    "\t\t\t\t}\n"
     "\t\t\t\tl2poff += 12;\n"
     "\n"
     "\t\t\t\t/* Composed NAT ports (fused), if any. */\n"
@@ -308,40 +327,6 @@ replace(
     "\t\t\t\t#define FMAN_EHASH_OPC_UPDATE_SIP_V4\t0x22\n",
 )
 
-# ---- 4a. Declare vlan_is_v6 in the emitter block (captured before eth_type roll)
-replace(
-    SRC, "declare vlan_is_v6",
-    "\t\tsize_t enqueue_off;\n",
-    "\t\tsize_t enqueue_off;\n"
-    "\t\tbool vlan_is_v6 = false;\t/* F-233: family for preempt seal */\n",
-)
-
-# ---- 4b. Seal PREEMPTIVE_CHECKS after enqueue_off is known -----------------
-# Vendor seal_preemptive_checks_hm (cdx_ehash.c:2469): the preempt param at
-# param_off gets mtu_offset = enqueue_off - param_off (points at the ENQUEUE
-# param's mtu at enqueue_off+0), and OpMask |= PREEMPT_TX_VALIDATE(0x01)
-# [+ PREEMPT_DFBIT_HONOR(0x02) for non-v6]. Family from vlan_is_v6, captured in
-# the VLAN branch before eth_type is rolled to the pushed TPID. Guarded by
-# vlan->flags so no-VLAN routed/NAT records stay byte-identical.
-replace(
-    SRC, "seal preemptive checks for VLAN records",
-    "\t\tparam_end = enqueue_off + 16;\n"
-    "\t}\n",
-    "\t\tparam_end = enqueue_off + 16;\n"
-    "\n"
-    "\t\t/* F-233 seal: back-patch the PREEMPTIVE_CHECKS param so the FE-VM\n"
-    "\t\t * re-validates the length-changed (VLAN) frame before enqueue. */\n"
-    "\t\tif (vlan && vlan->flags) {\n"
-    "\t\t\t#define FMAN_EHASH_PREEMPT_TX_VALIDATE\t0x01\n"
-    "\t\t\t#define FMAN_EHASH_PREEMPT_DFBIT_HONOR\t0x02\n"
-    "\t\t\tr[param_off + 0] = (u8)(enqueue_off - param_off);\n"
-    "\t\t\tr[param_off + 1] = FMAN_EHASH_PREEMPT_TX_VALIDATE |\n"
-    "\t\t\t\t\t   (vlan_is_v6 ? 0 :\n"
-    "\t\t\t\t\t    FMAN_EHASH_PREEMPT_DFBIT_HONOR);\n"
-    "\t\t}\n"
-    "\t}\n",
-)
-
 # ---- 5. Production caller: build _vlan and pass it --------------------------
 replace(
     SRC, "production add_key caller +vlan build",
@@ -349,10 +334,19 @@ replace(
     "\t\tmemcpy(_nat.dip, action->nat_dip, 16);\n"
     "\t\terr = fman_pcd_ehash_add_key(t, action->key, action->key_size,\n",
     "\t\tstruct fman_pcd_vlan_params _vlan = {\n"
-    "\t\t\t.flags     = action->vlan_flags,\n"
-    "\t\t\t.push_tci  = action->vlan_tci,\n"
-    "\t\t\t.push_tpid = action->vlan_tpid,\n"
+    "\t\t\t.flags       = action->vlan_flags,\n"
+    "\t\t\t.push_tci    = action->vlan_tci,\n"
+    "\t\t\t.push_tpid   = action->vlan_tpid,\n"
+    "\t\t\t.ingress_vid = action->vlan_ingress_vid,\n"
+    "\t\t\t.frag_bpid   = action->frag_bpid,\n"
     "\t\t};\n"
+    "\t\t/* F-234: lazily allocate+init the MURAM frag-info block and thread\n"
+    "\t\t * its offset into the VLAN record's ENQUEUE param.word2 so the FE-VM\n"
+    "\t\t * L2-rebuild path (STRIP_ETH+INSERT_L2) can acquire rebuild buffers.\n"
+    "\t\t * Only for VLAN flows carrying a valid egress bpid; routed/NAT keep 0. */\n"
+    "\t\tif (action->vlan_flags && action->frag_bpid)\n"
+    "\t\t\t_vlan.frag_muram_off =\n"
+    "\t\t\t\tfman_pcd_get_frag_muram_off(pcd);\n"
     "\n"
     "\t\tmemcpy(_nat.sip, action->nat_sip, 16);\n"
     "\t\tmemcpy(_nat.dip, action->nat_dip, 16);\n"

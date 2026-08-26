@@ -1,0 +1,260 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: combined routed-VLAN HMTD dedup (VLAN + next-hop L3/L2)
+
+T-M6-8 VLAN re-architecture R4a (plans/ASK2-VLAN-REARCH.md §7b).
+
+R3b proved a VLAN_STRIP HMTD behind a CC leaf/NADEN sustains hardware
+forwarding (273k pkts/5s, no FE-VM 5+tnums freeze).  A production ROUTED-VLAN
+flow needs more than the VLAN op, however: the CC enqueue rewrites nothing, so
+one HMTD must also rebuild the egress L2 header and decrement the IPv4 TTL.
+
+Adds refcounted fman_hm_vlan_route_get/put, composing R2's VLAN op with the
+proven next-hop op-set (0119/0120):
+  POP+route : VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(new L2), IPV4_FORWARD
+  PUSH+route: RMV_ETHERNET, INSRT_GENERIC(new L2), IPV4_FORWARD, VLAN_INSERT
+
+Keyed by (direction,vid,tpid,pcp,src/dst MAC,egress TX FQ), so MURAM is
+O(routed-VLAN adjacencies), not O(flows).  fman_hm_vlan_get remains the
+VLAN-only builder for bridged flows.  Symbols are exported but dormant until
+R4b/R4c wire the CC consumer.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index c9f645f..6255f71 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -664,6 +664,198 @@ int fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle)
+ EXPORT_SYMBOL_GPL(fman_hm_vlan_put);
+ 
+ 
++/* ------------------------------------------------------------------ *
++ * VLAN+route HM dedup (T-M6-8 R4a): one shared HMTD that does BOTH the
++ * VLAN tag edit AND the L3 next-hop rewrite for a routed-VLAN flow.
++ *
++ * R3b proved a VLAN-only strip HMTD sustains, but a real routed-VLAN flow
++ * must, in one HMTD chain, edit the tag AND rebuild L2 (dst=next-hop MAC,
++ * src=egress MAC) + decrement the IPv4 TTL - the CC enqueue itself rewrites
++ * nothing.  This composes R2's VLAN op with the next-hop op-set (0119/0120):
++ *   POP+route :  {VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD}
++ *   PUSH+route:  {RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD, VLAN_INSERT}
++ * (VLAN_INSERT last so the tag rides the rebuilt L2 header.)
++ *
++ * Refcounted like the other dedup caches, keyed by the full
++ * (is_push, vid, tpid, pcp, dst_mac, src_mac, egress_tx_fqid) adjacency, so
++ * MURAM stays O(routed-VLAN adjacencies) not O(flows).  Sleepable; process
++ * context only.  For a *bridged* (non-routed) VLAN flow keep using the
++ * VLAN-only fman_hm_vlan_get().
++ * ------------------------------------------------------------------ */
++struct fman_hm_vlan_route_ent {
++	struct list_head	node;
++	struct fman		*fm;
++	u32			egress_tx_fqid;
++	u16			vid;
++	u16			tpid;
++	u8			pcp;
++	bool			is_push;
++	u8			src_mac[ETH_ALEN];
++	u8			dst_mac[ETH_ALEN];
++	u8			port_id;
++	u32			handle;
++	refcount_t		refcount;
++};
++
++static LIST_HEAD(fman_hm_vlan_route_cache);
++static DEFINE_MUTEX(fman_hm_vlan_route_lock);
++
++static struct fman_hm_vlan_route_ent *
++fman_hm_vlan_route_lookup(struct fman *fm, bool is_push, u16 vid, u16 tpid,
++			  u8 pcp, const u8 *src_mac, const u8 *dst_mac,
++			  u32 egress_tx_fqid)
++{
++	struct fman_hm_vlan_route_ent *v;
++
++	list_for_each_entry(v, &fman_hm_vlan_route_cache, node) {
++		if (v->fm == fm &&
++		    v->is_push == is_push &&
++		    v->egress_tx_fqid == egress_tx_fqid &&
++		    ether_addr_equal(v->src_mac, src_mac) &&
++		    ether_addr_equal(v->dst_mac, dst_mac) &&
++		    (!is_push ||
++		     (v->vid == vid && v->tpid == tpid && v->pcp == pcp)))
++			return v;
++	}
++	return NULL;
++}
++
++static void fman_hm_vlan_route_l3(struct fman_hm_spec *spec, unsigned int i,
++				  const u8 *dst_mac, const u8 *src_mac)
++{
++	struct fman_hm_op *op;
++
++	spec->ops[i].type = FMAN_HM_OP_RMV_ETHERNET;
++	op = &spec->ops[i + 1];
++	op->type = FMAN_HM_OP_INSRT_GENERIC;
++	op->insrt_generic.size = 2 * ETH_ALEN + 2;
++	memcpy(&op->insrt_generic.hdr[0], dst_mac, ETH_ALEN);
++	memcpy(&op->insrt_generic.hdr[ETH_ALEN], src_mac, ETH_ALEN);
++	op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08; /* ETH_P_IP >> 8 */
++	op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00; /* ETH_P_IP & 0xff */
++	op = &spec->ops[i + 2];
++	op->type = FMAN_HM_OP_IPV4_FORWARD;
++	op->ipv4_forward.dec_ttl = 1;
++	op->ipv4_forward.l4_csum = 1;
++}
++
++/*
++ * fman_hm_vlan_route_get - resolve (and refcount) the shared combined
++ * VLAN-edit + L3-forward HM node for a routed-VLAN adjacency, installing it on
++ * first use.  @is_push selects PUSH (@vid/@tpid/@pcp inserted after the L2
++ * rebuild) vs POP (strip the ingress tag before the rebuild).  @dst_mac/@src_mac
++ * are the egress next-hop and egress-port MACs.  On success *handle receives the
++ * HMTD MURAM offset for a CC leaf hm_handle.  Sleepable; process context only.
++ */
++int fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
++			   u16 vid, u16 tpid, u8 pcp,
++			   const u8 *src_mac, const u8 *dst_mac,
++			   u32 egress_tx_fqid, u32 *handle)
++{
++	struct fman_hm_vlan_route_ent *v;
++	struct fman_hm_spec spec;
++	struct fman_hm_op *op;
++	int err;
++
++	if (!fm || !src_mac || !dst_mac || !handle)
++		return -EINVAL;
++	*handle = 0;
++	if (!fman_hm_caps_supported())
++		return -ENOTSUPP;
++	if (is_push && (vid == 0 || vid > 4094))
++		return -EINVAL;
++
++	mutex_lock(&fman_hm_vlan_route_lock);
++
++	v = fman_hm_vlan_route_lookup(fm, is_push, vid, tpid, pcp,
++				      src_mac, dst_mac, egress_tx_fqid);
++	if (v) {
++		refcount_inc(&v->refcount);
++		*handle = v->handle;
++		mutex_unlock(&fman_hm_vlan_route_lock);
++		return 0;
++	}
++
++	v = kzalloc(sizeof(*v), GFP_KERNEL);
++	if (!v) {
++		mutex_unlock(&fman_hm_vlan_route_lock);
++		return -ENOMEM;
++	}
++
++	memset(&spec, 0, sizeof(spec));
++	if (is_push) {
++		/* rebuild L2 first, then push the tag onto the new header */
++		fman_hm_vlan_route_l3(&spec, 0, dst_mac, src_mac);
++		op = &spec.ops[3];
++		op->type = FMAN_HM_OP_VLAN_INSERT;
++		op->vlan_insert.vlan_id = vid;
++		op->vlan_insert.tpid = tpid ? tpid : 0x8100;
++		op->vlan_insert.pcp = pcp & 0x7;
++		spec.num_ops = 4;
++	} else {
++		/* strip the ingress tag first, then rebuild L2 for the route */
++		spec.ops[0].type = FMAN_HM_OP_VLAN_STRIP;
++		fman_hm_vlan_route_l3(&spec, 1, dst_mac, src_mac);
++		spec.num_ops = 4;
++	}
++
++	err = fman_hm_node_install(fm, port_id, &spec, &v->handle);
++	if (err) {
++		kfree(v);
++		mutex_unlock(&fman_hm_vlan_route_lock);
++		return err;
++	}
++
++	v->fm = fm;
++	v->egress_tx_fqid = egress_tx_fqid;
++	v->vid = vid;
++	v->tpid = tpid ? tpid : 0x8100;
++	v->pcp = pcp & 0x7;
++	v->is_push = is_push;
++	v->port_id = port_id;
++	ether_addr_copy(v->src_mac, src_mac);
++	ether_addr_copy(v->dst_mac, dst_mac);
++	refcount_set(&v->refcount, 1);
++	list_add(&v->node, &fman_hm_vlan_route_cache);
++
++	*handle = v->handle;
++	mutex_unlock(&fman_hm_vlan_route_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_route_get);
++
++/*
++ * fman_hm_vlan_route_put - drop a reference taken by fman_hm_vlan_route_get().
++ * Destroys the shared HM node and reclaims its MURAM when the last user goes
++ * away.  Idempotent for an unknown handle (returns 0).
++ */
++int fman_hm_vlan_route_put(struct fman *fm, u8 port_id, u32 handle)
++{
++	struct fman_hm_vlan_route_ent *v, *found = NULL;
++	int err = 0;
++
++	if (!fm)
++		return 0;
++
++	mutex_lock(&fman_hm_vlan_route_lock);
++	list_for_each_entry(v, &fman_hm_vlan_route_cache, node) {
++		if (v->fm == fm && v->handle == handle) {
++			found = v;
++			break;
++		}
++	}
++	if (found && refcount_dec_and_test(&found->refcount)) {
++		list_del(&found->node);
++		err = fman_hm_node_destroy(found->fm, found->port_id,
++					   found->handle);
++		kfree(found);
++	}
++	mutex_unlock(&fman_hm_vlan_route_lock);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_route_put);
++
++
+ 
+ /* ------------------------------------------------------------------ *
+  * M3-3d stub: Policer (srTCM/trTCM) API.
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 76601ba..9de68d4 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -399,6 +399,29 @@ int  fman_hm_vlan_get(struct fman *fm, u8 port_id, bool is_push,
+ /** fman_hm_vlan_put - release a VLAN reference from fman_hm_vlan_get() */
+ int  fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle);
+ 
++/**
++ * fman_hm_vlan_route_get - combined VLAN-edit + L3 next-hop HM node for a
++ *                          ROUTED-VLAN adjacency (T-M6-8 R4a)
++ * @is_push:        true = PUSH tag (after L2 rebuild); false = POP (before)
++ * @vid/@tpid/@pcp: pushed tag params (PUSH only)
++ * @src_mac:        egress-port source MAC for the rebuilt L2 header
++ * @dst_mac:        next-hop destination MAC for the rebuilt L2 header
++ * @egress_tx_fqid: egress TX FQ (dedup key)
++ * @handle:         on success, HMTD MURAM offset for a CC leaf hm_handle
++ *
++ * Builds one HMTD that does the tag edit AND {RMV_ETHERNET, INSRT_GENERIC(L2),
++ * IPV4_FORWARD(dec_ttl,l4_csum)} - everything a routed-VLAN frame needs.  Use
++ * fman_hm_vlan_get() (VLAN-only) for a bridged VLAN flow instead.  Refcounted;
++ * sleepable; process context.
++ */
++int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
++			    u16 vid, u16 tpid, u8 pcp,
++			    const u8 *src_mac, const u8 *dst_mac,
++			    u32 egress_tx_fqid, u32 *handle);
++
++/** fman_hm_vlan_route_put - release a ref from fman_hm_vlan_route_get() */
++int  fman_hm_vlan_route_put(struct fman *fm, u8 port_id, u32 handle);
++
+ /* ------------------------------------------------------------------ *
+  * OOT CC-target resolvers (board patch 0121)
+  *
