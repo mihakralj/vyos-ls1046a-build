@@ -1001,6 +1001,14 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 return;                 /* idempotent no-op */
         }
 
+        /* T-M6-8 R4c-3: tear down any VLAN CC tree fronting this port BEFORE
+         * disengaging the FE-VM, so the CC graft never outlives the FE_ENTER
+         * root its miss row points at (a dangling miss -> freed FE AD would
+         * fault the controller). Safe lock order: we hold h->lock and
+         * ask_vlan_cc_teardown_port takes ask_vlan_cc_lock (h->lock ->
+         * vlan_cc_lock); no path takes them the other way. */
+        ask_vlan_cc_teardown_port(hw_port_id);
+
         /* F-092: Disarm + tear down FE-VM via kernel API (not debugfs).
          * fman_pcd_fe_disengage() now tears down the VM chain after disarming.
          */
@@ -1081,6 +1089,63 @@ int ask_hw_port_unbind(u8 port_id)
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_port_unbind);
+
+/*
+ * T-M6-8 R4c-3: re-assert the FE-VM ehash graft on an ASK-engaged port after
+ * the VLAN CC tree that was fronting it is torn down.
+ *
+ * While VLAN flows exist, ask_vlan_cc grafts the port to a CC tree (RCCB -> CC,
+ * CC miss -> FE_ENTER) so routed/NAT still reach ehash via the miss row. When
+ * the LAST VLAN flow on the port is deleted, fman_cc_tree_destroy reverts the
+ * port to bare RSS (RCCB=0) — which would silently drop routed/NAT off the
+ * ehash HW path onto the software RSS path until the next port re-engage.
+ * fman_pcd_fe_engage() alone will NOT fix this: the port's fe_port_armed bit is
+ * still set, so it returns early without re-writing the RCCB. Do a full
+ * disengage->engage cycle instead: disengage clears the armed bit and the FE
+ * chain stays warm (F-136), so the re-engage cheaply re-writes RCCB -> FE_ENTER
+ * and re-captures the ENQ FE offset. Only touches ports we actually engaged.
+ * Process context; takes h->lock. Called by ask_vlan_cc_flow_del outside its
+ * own lock to avoid nesting ask_vlan_cc_lock under h->lock.
+ */
+int ask_hw_fe_reengage(u8 hw_port_id)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	struct ask_hw_port *p;
+	unsigned int i;
+	int rc = 0;
+
+	if (!h)
+		return -ENODEV;
+
+	mutex_lock(&h->lock);
+	p = NULL;
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
+			p = &h->port[i];
+			break;
+		}
+	}
+	/* Only re-assert on a port ASK actually has engaged. */
+	if (!p || !p->offload_engaged) {
+		mutex_unlock(&h->lock);
+		return 0;
+	}
+
+	fman_pcd_fe_disengage(h->fman, hw_port_id);
+	rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
+	if (rc) {
+		ask_pr_warn("hw: FE re-engage port 0x%02x after VLAN CC teardown failed: %d\n",
+			    hw_port_id, rc);
+	} else {
+		WRITE_ONCE(ask_hw_enq_fe_off,
+			   fman_pcd_fe_enq_get_offset(h->fman));
+		ask_pr_info("hw: FE re-engaged port 0x%02x after VLAN CC teardown (RCCB restored)\n",
+			    hw_port_id);
+	}
+	mutex_unlock(&h->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(ask_hw_fe_reengage);
 
 u32 ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx)
 {

@@ -170,6 +170,7 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 	u32 hm_handle;
 	u8 port_id;
 	u16 i;
+	bool tree_destroyed = false;
 
 	if (!key)
 		return;
@@ -209,6 +210,7 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 	if (!port->nkeys) {
 		fman_cc_tree_destroy(fm, port_id);
 		port->installed = false;
+		tree_destroyed = true;
 	} else {
 		int rc = ask_vlan_cc_rebuild_locked(fm, port_id, port);
 
@@ -217,6 +219,16 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 				    port_id, rc);
 	}
 	mutex_unlock(&ask_vlan_cc_lock);
+
+	/*
+	 * R4c-3: the last VLAN flow left this port, so fman_cc_tree_destroy
+	 * reverted it to bare RSS. Re-assert the FE-VM ehash graft (RCCB ->
+	 * FE_ENTER) OUTSIDE ask_vlan_cc_lock so routed/NAT stays HW-offloaded
+	 * (ask_hw_fe_reengage takes h->lock; never nest it under our lock).
+	 * No-op on a port ASK has not engaged.
+	 */
+	if (tree_destroyed)
+		(void)ask_hw_fe_reengage(port_id);
 }
 
 void ask_vlan_cc_teardown_port(u8 port_id)

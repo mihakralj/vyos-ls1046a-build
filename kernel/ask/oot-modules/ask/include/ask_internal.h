@@ -420,6 +420,9 @@ int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);
 void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
 void ask_vlan_cc_teardown_port(u8 port_id);
+/* R4c-3: re-assert the FE-VM ehash graft after a VLAN CC tree teardown so
+ * routed/NAT stays HW-offloaded on an ASK-engaged port. No-op if not engaged. */
+int  ask_hw_fe_reengage(u8 hw_port_id);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
         enum ask_hw_dir dir,
