@@ -105,6 +105,16 @@ shared epilogue.
 
 ## The load-bearing structural finding — per-task management index at IC+0xb8
 
+> **STATUS — HISTORICAL ROOT CAUSE, DATAPATH RESOLVED (2026-08-26).** This
+> analysis applies only to the retired F-233/F-234 inline FE-VM VLAN opcode
+> path. Its ~20-packet freeze is closed architecturally: production VLAN
+> pop/push now runs through a CC-leaf → combined HMTD in the separate header-
+> manipulation engine, never these FE-VM strip/rebuild handlers, and is
+> silicon-validated through R4c. `ask_fe_flow_insert()` rejects VLAN intent so
+> this interpreter path cannot be re-entered accidentally. The analysis below
+> remains the forensic explanation for why the old path was abandoned; the
+> proposed microcode experiments are no longer required for shipping VLAN.
+
 **Every** handler epilogue in the island touches the **per-task management index
 at IC `[0xd0b8]`** via the same template (`ld [0xd0b8]` → `m_77 [0x9104]` →
 `st [0xd010]` → `st r14=0,[0xd0b8]`), and the reset-to-0 store at the end

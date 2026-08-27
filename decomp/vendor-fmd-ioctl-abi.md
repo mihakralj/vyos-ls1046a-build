@@ -23,9 +23,18 @@ authoritative for `.110`.
 ## Why we went looking for it
 
 `.110` runs the original vendor ASK 1.0 (OpenWrt 6.12.103, CDX + cmm) and
-**sustains hardware VLAN offload** on the same LS1046A silicon where ASK2
-freezes at ~22 packets. To find what the vendor does differently, we wanted to
-read its **live FE/ehash record and FQ wiring**. Two blockers:
+**sustains hardware VLAN offload** on the same LS1046A silicon where ASK2's
+**then-current inline FE-VM VLAN path** froze at ~22 packets. To find what the
+vendor did differently, we wanted to read its **live FE/ehash record and FQ
+wiring**. Two blockers:
+
+> **RESOLVED (2026-08-26):** the ~22-packet freeze motivating this investigation
+> is closed. ASK2 retired the inline FE-VM VLAN opcodes and moved VLAN pop/push
+> onto the SDK-style CC-leaf → HMTD header-manip engine (the same class of
+> mechanism the vendor uses), silicon-validated through R4c. This document is
+> retained as the record of the vendor-oracle read attempt; the "leading
+> explanation" below (inline-ehash vs SDK-HM-pipeline) turned out to be correct
+> and was acted on.
 
 1. `.110` has `CONFIG_DEVMEM=n` — `/dev/mem` open returns `ENXIO` even after
    `mknod`. No arbitrary physical reads.
@@ -139,10 +148,13 @@ channels 6–9, oh1/oh2 = reassembly, two-stage FQ path with context stashing).
 - **Architecture answer (from the header + live harvest):** the vendor uses the
   **SDK FMD/PCD pipeline** (parser→KeyGen→CC→policer, OH ports for reassembly,
   per-port FQID ranges, VSPs, two-stage CPU-pool-channel FQs with stashing).
-  ASK2 instead uses a bespoke **inline-opcode FE-VM ehash record** that enqueues
-  **directly** to a single no-confirm TX FQ. That architectural gap — not any
-  single record field — is the leading remaining explanation for why the
-  vendor sustains VLAN and ASK2 freezes.
+  ASK2's *retired* VLAN path used a bespoke **inline-opcode FE-VM ehash record**
+  that enqueued **directly** to a single no-confirm TX FQ. That architectural
+  gap — not any single record field — was the correct explanation for why the
+  vendor sustained VLAN and ASK2 froze. **Acted on (2026-08-26):** ASK2 VLAN now
+  uses a CC-leaf → HMTD header-manip path (vendor-shaped), and the freeze is
+  gone. Routed/NAT unicast still use the inline FE-VM ehash record — that path
+  never had the freeze (it takes no STRIP/rebuild opcodes).
 
 ## Files
 

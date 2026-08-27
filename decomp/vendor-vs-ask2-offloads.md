@@ -94,21 +94,32 @@ FPP instead of an ehash record.
 - **Verdict:** parity on the policer block itself. Vendor drives it per ingress
   queue via cmm; ASK2 drives it per-interface via tc — same hardware.
 
-### 7. VLAN pop/push — VENDOR WORKS, ASK2 BLOCKED
+### 7. VLAN pop/push — VENDOR WORKS, ASK2 RE-ARCHITECTED TO MATCH (RESOLVED 2026-08-26)
 - **Vendor:** VLAN is a property of the PCD parser + the SDK header-manipulation
   chain, applied through `set rx bridge` (svlanprio/cvlanprio/vlan queue),
   `tx` DSCP-VLAN-PCP map, and the parser's `set_vlan_tpid1/2`. Forwarding uses
   the standard parser→KG→CC path + OH reassembly ports. `cmm -c "query vlan"`
   shows `eth3.100 VID 100`. **Sustains** on the same silicon.
-- **ASK2:** bespoke inline VLAN opcodes (STRIP_ETH 0x11, STRIP_ALL_VLAN 0x12,
-  INSERT_VLAN 0x42, INSERT_L2 0x41) in the ehash record. Records byte-correct,
-  but **freezes after ~22 packets** (T-M6-8 blocked; `ask_vlan_offload` gate
-  default-off, `ASK_CAP_VLAN` unadvertised).
-- **Verdict:** THE gap. The vendor does VLAN through the SDK PCD/header-manip
-  pipeline (a proven path); ASK2 tries to do it inline in the FE-VM ehash record
-  (an unproven path that hits a ~22-frame FE-VM resource limit). This is the
-  strongest architectural evidence that ASK2's inline-ehash approach to VLAN is
-  the wrong mechanism vs the vendor's parser+HM-chain approach.
+- **ASK2 (old, retired):** bespoke inline VLAN opcodes (STRIP_ETH 0x11,
+  STRIP_ALL_VLAN 0x12, INSERT_VLAN 0x42, INSERT_L2 0x41) in the ehash record.
+  Records byte-correct, but **froze after ~22 packets** — the FE-VM strip/rebuild
+  handlers exhausted a 5+tnums per-task management index (see
+  `decomp/fe-action-interpreter.md`). This is the F-233/F-234 path.
+- **ASK2 (current, RESOLVED):** the inline path is retired
+  (`ask_fe_flow_insert()` returns `-EOPNOTSUPP` for any VLAN flow). VLAN pop/push
+  now uses the vendor-shaped mechanism: a per-port CC leaf whose HIT invokes a
+  combined VLAN-edit + L2-rewrite + IPv4-forward **HMTD** (the SDK
+  header-manipulation engine, NOT the FE-VM), with the CC miss row chaining to
+  FE_ENTER so routed/NAT still hit the ehash. Silicon-validated through
+  R4c-2/R4c-3; R5 (`36bf83de`) fixed vif-delete teardown. Ships **default-off**
+  behind `ask_vlan_offload` (`ASK_CAP_VLAN` advertised only when armed), IPv4 /
+  single 802.1Q tag / non-eth0. R5b matrix + full gate-off regression PASSED on
+  image 0713 / `36bf83de`; merge-ready.
+- **Verdict (updated):** the gap is CLOSED by adopting the vendor's engine
+  choice. ASK2 no longer does VLAN inline in the FE-VM ehash record; it does the
+  tag edit in the HM engine behind a CC leaf, exactly the class of path the
+  vendor uses — which is why the ~22-frame freeze cannot recur. Remaining
+  difference is scope (single tag / IPv4 / no OH-reassembly), not mechanism.
 
 ## Capabilities the VENDOR has that ASK2 does NOT (scope reference)
 
