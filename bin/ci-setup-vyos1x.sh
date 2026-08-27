@@ -40,7 +40,14 @@ cp data/reftree.cache "$PATCH_STAGING/"
 cat > "$VYOS1X_BUILD/package.toml" <<'EOF'
 [[packages]]
 name = "vyos-1x"
-commit_id = "rolling"
+# Pinned to the upstream vyos-1x snapshot the nxp-ask LS1046A patches were
+# written against (2026-06-19, the last successful nxp-ask build
+# 2026.06.21-1858-rolling used g6c0fd9909). This branch is frozen historical
+# "original NXP ASK" content; tracking live "rolling" rots the patches
+# (005/010/019/022/023 stopped applying — upstream even removed
+# src/conf_mode/vpp.py). Pinning reproduces the original image faithfully.
+# Do NOT bump this on nxp-ask; refresh patches on dpaa1 instead.
+commit_id = "6c0fd99099a6251a12bc2287d5ba2ab115cd8015"
 scm_url = "https://github.com/vyos/vyos-1x.git"
 pre_build_hook = '''
   set -ex
