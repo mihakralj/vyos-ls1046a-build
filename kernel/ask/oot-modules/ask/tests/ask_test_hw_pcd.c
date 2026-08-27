@@ -490,6 +490,49 @@ static void hw_pcd_test_remove_unknown_cookie(struct kunit *test)
         KUNIT_EXPECT_TRUE(test, rc == -EINVAL || rc == -ENODEV);
 }
 
+/* ------------------------------------------------------------------------- */
+/* T-M6-8: per-port VLAN offload gate (offload ask vlan)                       */
+/*                                                                            */
+/* The gate is a pure static-array + module-param decision (no FMan needed).  */
+/* In the KUnit harness ask_hw_get_fman() returns NULL, so the disarm         */
+/* transition's ask_vlan_cc_teardown_port() early-returns — the setter/getter */
+/* logic is exercised in isolation. Default (unarmed) must fail closed.       */
+/* ------------------------------------------------------------------------- */
+
+static void hw_vlan_gate_default_off(struct kunit *test)
+{
+	/* Nothing armed and the global override defaults off: every port is
+	 * unarmed and the port-agnostic OR is false. */
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x10));
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x11));
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed());
+}
+
+static void hw_vlan_gate_is_per_port(struct kunit *test)
+{
+	/* Arm only port 0x10. It must read armed; a different port must not,
+	 * and the port-agnostic OR must report "some port armed". */
+	ask_hw_offload_set_vlan(0x10, true);
+	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed_port(0x10));
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x11));
+	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed());
+
+	/* Disarm restores fail-closed on that port (and, since it was the only
+	 * armed port, on the port-agnostic OR). */
+	ask_hw_offload_set_vlan(0x10, false);
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x10));
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed());
+}
+
+static void hw_vlan_gate_out_of_range_safe(struct kunit *test)
+{
+	/* A port id beyond the array must never read armed and must not crash. */
+	ask_hw_offload_set_vlan(0xff, true);
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0xff));
+	/* And it must not have flipped the port-agnostic OR either. */
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed());
+}
+
 static struct kunit_case ask_hw_pcd_test_cases[] = {
 KUNIT_CASE(hw_pcd_test_pack_unpack_roundtrip),
 KUNIT_CASE(hw_pcd_test_unpack_null_safe),
@@ -513,6 +556,10 @@ KUNIT_CASE(hw_pcd_test_insert_zero_mac_eagain),
 KUNIT_CASE(hw_pcd_test_insert_zero_dst_mac_only_eagain),
 KUNIT_CASE(hw_pcd_test_remove_cookie_zero_is_noop),
 KUNIT_CASE(hw_pcd_test_remove_unknown_cookie),
+/* T-M6-8: per-port VLAN offload gate. */
+KUNIT_CASE(hw_vlan_gate_default_off),
+KUNIT_CASE(hw_vlan_gate_is_per_port),
+KUNIT_CASE(hw_vlan_gate_out_of_range_safe),
 {}
 };
 
