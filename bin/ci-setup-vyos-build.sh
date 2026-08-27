@@ -666,6 +666,20 @@ exec python3 /usr/share/ynl/pyynl/cli.py "$@"
 YNLWRAP
 chmod +x "$CHROOT/usr/local/bin/ynl"
 
+### VyOS MCP stdio transport: `mcp-stdio-endpoint.py` is the stdio front-end to
+### the HTTP MCP server added by data/vyos-1x-041-mcp-server.patch (imports
+### api.mcp.server). It lets a local AI agent drive VyOS op-mode over an SSH
+### stdio pipe: `ssh vyos@host vyos-mcp`. The endpoint implementation lives
+### under /usr/libexec/vyos/ (not on $PATH); we install it there verbatim and add a
+### `vyos-mcp` symlink in /usr/local/bin so it has a friendly, PATH-resolvable
+### mnemonic (mirrors the `ynl` transport wrapper above). The endpoint is inert
+### until `set service https api mcp` is configured — it exits non-zero with
+### "MCP is not enabled" otherwise — so shipping it unconditionally is safe.
+mkdir -p "$CHROOT/usr/libexec/vyos" "$CHROOT/usr/local/bin"
+cp board/scripts/mcp-stdio-endpoint.py "$CHROOT/usr/libexec/vyos/mcp-stdio-endpoint.py"
+chmod +x "$CHROOT/usr/libexec/vyos/mcp-stdio-endpoint.py"
+ln -sfn /usr/libexec/vyos/mcp-stdio-endpoint.py "$CHROOT/usr/local/bin/vyos-mcp"
+
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit
 ### hex RRGGBBWW. Auto-creates /config/led.json with a 32-entry default
