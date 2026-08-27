@@ -70,6 +70,8 @@ enum ask_genl_attr {
     ASK_ATTR_POLICER,       /* nested ask_policer_attr */
     ASK_ATTR_PORT_ID,       /* u8, hardware port ID for engage/disengage */
     ASK_ATTR_FAMILY_MASK,   /* u8, ASK_FAM_* bitmask on engage; absent => both */
+    ASK_ATTR_VLAN,          /* u8 bool, per-port single-tag 802.1Q VLAN offload
+                             * on engage; absent => leave unchanged (default off) */
 
     __ASK_ATTR_MAX,
 };
@@ -84,6 +86,18 @@ enum ask_genl_attr {
  */
 #define ASK_FAM_V4  (1u << 0)
 #define ASK_FAM_V6  (1u << 1)
+
+/*
+ * Per-port VLAN offload selection (ASK_ATTR_VLAN on ASK_CMD_ENGAGE).
+ * u8 bool: 1 arms single-tag 802.1Q pop/push HW offload (CC-leaf -> combined
+ * HMTD -> egress FQ, CC miss -> FE_ENTER ehash) on this port; 0 disarms it.
+ * This is the CLI `offload ask vlan` per-interface selector, mirroring the
+ * family-mask model. The legacy global `ask.vlan_offload` module param is an
+ * OR'd master override that arms every port (default 0). eth0/802.1ad/QinQ/
+ * IPv6-VLAN always fall back to software regardless of this bit.
+ */
+#define ASK_VLAN_OFF 0u
+#define ASK_VLAN_ON  1u
 
 /* ASK_ATTR_INFO nested attributes */
 enum ask_info_attr {

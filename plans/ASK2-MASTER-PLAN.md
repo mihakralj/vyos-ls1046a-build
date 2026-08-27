@@ -24,7 +24,7 @@ documents disagree, they win — update this plan.
 
 ### 1.1 Position
 
-**[SPEC] CURRENT STATUS (2026-08-24).** The FE-VM ehash path is the proven
+**[SPEC] CURRENT STATUS (2026-08-26).** The FE-VM ehash path is the proven
 production mechanism and **T-M7-2 is complete for plain routed unicast**: S1
 (F-198, hardware TX terminal — `INSERT_L2_HDR`→`ENQUEUE_PKT` direct-to-wire),
 S4 (F-199, per-egress `FQ_TYPE_TX_NO_CONFIRM` TX FQ, RTNL fix), and S3 (F-200,
@@ -35,9 +35,16 @@ bidirectional HIT run moved 13.6 GB (~9.7M frames), while eth4/eth3
 `tx confirm [TOTAL]` advanced only +9/+5 control-plane frames, F-227 remained
 zero, and the board stayed idle. The earlier B0V-cleared guess
 `0x1c00000080000000` is superseded; F-232 proved the record already targeted
-FQs `0x2ba/0x2bb` and was retired after this validation. **S2 (VLAN strip /
-preemptive-checks) is intentionally deferred and is NOT a blocker for the
-plain-unicast release.** **T-M7-3 PASSED** — three clean
+FQs `0x2ba/0x2bb` and was retired after this validation. **The old S2 inline
+FE-VM VLAN strip/insert path is retired, not pending:** it exhausted a 5+tnums
+FE-VM management resource after 21 frames. VLAN pop/push now uses the separate
+CC-leaf → combined-HMTD path and is DONE and silicon-validated end-to-end
+(R1–R5b, image 0713 / commit `36bf83de`): R5b matrix (no-wrong-forward, PCP/DEI,
+MTU sweep, 100× churn) and full gate-off regression (routed ~11.6G / NAT44
+~11.7G, zero VLAN interference) both PASSED, and the feature is merge-ready. It
+ships default-off (`vlan_offload`), IPv4 / single 802.1Q tag / non-eth0.
+`PREEMPTIVE_CHECKS_ON_PKT` remains post-release hardening and is not required for
+plain unicast.** **T-M7-3 PASSED** — three clean
 engage/forward/disengage cycles at 7.32–7.34 Gbps, DUT 99.3–99.8% idle, no
 TX-confirm stream, no QMan/BMan/MURAM anomaly. Two follow-on fixes then landed
 and were board-validated: **F-201** (F-051 had collapsed every RSS scheme to one
@@ -129,7 +136,7 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
 | 1. FMan PCD subsystem (KG / CC / HM / PLCR) | Shipping — patches 0092–0118, 0151–0155 |
 | 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete. Manual E25/E26 proved a discriminator-verified silicon HIT, but F-192 production-adjacent diagnostics remain incomplete; the warm shared diagnostic chain is singleton-global and must be reused rather than rebuilt. |
 | 3. Classifier→FE arm | Direct vendor-node arm is proven. The manual `.185` eth3 arm explicitly applies scheme-4 EKFC and tears down safely; the retained chain is byte-readable. The fixed-tuple SPC capture proves KeyGen scheme-4 traversal but not the succeeding FE workspace/writeback stage. |
-| 4. ask.ko datapath (genl + flow table) | **IPv4 and IPv6 routed TCP/UDP unicast are complete and silicon-passed, and IPv4/IPv6 NAT/PAT (nat44 + nat66) ship default-on.** The production nft/tc `REPLACE`/`DESTROY` path uses a per-port 46-byte dual-family key, per-port tables, `UPDATE_TTL`/`UPDATE_HOPLIMIT`, bit-fused NAT rewrites (`0x33`/`0x27`/`0x2f`, F-230), `INSERT_L2_HDR`, and hardware enqueue. Sustained mixed-family bidirectional traffic reached ~8 Gbit/s aggregate in the bounded durability gate and ~12.9 Gbit/s in the peak harness; masquerade NAT ~7.1–7.3 Gbit/s. CPU bypass, record teardown, software fallback, and all five ports are validated. Unsupported actions fail to software before publication. F-227 makes unexpected FMan-originated TX confirms crash-safe; image 2224 passed the exact workload that panicked 2047. |
+| 4. ask.ko datapath (genl + flow table) | **IPv4 and IPv6 routed TCP/UDP unicast are complete and silicon-passed; IPv4/IPv6 NAT/PAT (nat44 + nat66) ship default-on; single-tag IPv4 802.1Q VLAN pop/push is implemented and silicon-validated behind a default-off gate.** Routed/NAT uses per-port 46-byte dual-family ehash tables, `UPDATE_TTL`/`UPDATE_HOPLIMIT`, bit-fused NAT rewrites (`0x33`/`0x27`/`0x2f`, F-230), `INSERT_L2_HDR`, and hardware enqueue. VLAN uses a per-port CC shadow whose HIT leaf invokes a combined tag-edit + L2 rewrite + TTL/checksum HMTD and whose miss row falls through to FE_ENTER, preserving routed/NAT coexistence. The retired inline FE-VM VLAN path's 21-frame freeze cannot recur in the separate HM engine. R4c-2/R4c-3 passed silicon; R5 fixed vif-delete teardown ordering; R5b matrix (no-wrong-forward, PCP/DEI, MTU sweep, 100× churn) and full gate-off regression (routed ~11.6G / NAT44 ~11.7G) both PASSED — VLAN is done and merge-ready, shipping default-off; eth0, 802.1ad, QinQ, IPv6 VLAN and stacked tags fall back to software. Sustained mixed-family routed traffic reached ~8 Gbit/s aggregate in the bounded durability gate and ~12.9 Gbit/s in the peak harness; masquerade NAT ~7.1–7.3 Gbit/s. Unsupported actions fail to software before publication. |
 | 5. VyOS CLI + mutual exclusion | **Shipping on eth0–eth4.** IPv4 and IPv6 are selected independently per interface with `offload ipv4` / `offload ipv6`; ASK↔VPP remains a per-interface mutex. Migration `34-to-35` rewrites the retired `offload ask` node to both family knobs. The hardware-offload MTU range is 1280–3600. Cold-boot config persistence, the four-port simultaneous engage matrix, and eth0 management survival are board-validated. |
 
 ### 1.3 Binding silicon facts (settled on LS1046A hardware — do not re-litigate)
@@ -447,9 +454,11 @@ opcode terminal, not comparator correctness.
   (canonical intent, strict action acceptance, generation/tombstones, resource
   preflight) is code/CI complete; its board stress/negative gates remain open.
   Kernel offload frameworks remain authoritative. Landed this phase:
-  T-M6-P5 five-port IPv4/IPv6 mechanics, IPv6 dual-lane key, and IPv4+IPv6
-  NAT/PAT (T-M6-7, default-on). Remaining implementation breadth: VLAN,
-  soft-parser/PPPoE, XFRM/IPsec, bridge/multicast, and fragments/tunnels. Full
+  T-M6-P5 five-port IPv4/IPv6 mechanics, IPv6 dual-lane key, IPv4+IPv6 NAT/PAT
+  (T-M6-7, default-on), and single-tag IPv4 802.1Q VLAN pop/push through the
+  silicon-validated CC+HMTD path (T-M6-8 DONE, ships default-off, merge-ready).
+  Remaining implementation breadth: soft-parser/PPPoE, XFRM/IPsec,
+  bridge/multicast, fragments/tunnels, stacked tags and wider VLAN scope. Full
   gates and MUST/DO-NOT rules: §4.6.
 - **M7 — VyOS CLI + production IPv4/IPv6 transit HIT. DONE for the 10G
   production path; five-port acceptance PARTIAL as T-M7-P5.** Current surface:
@@ -457,8 +466,10 @@ opcode terminal, not comparator correctness.
   ASK↔VPP mutex, nft/YNL flow learning, and `show flows`; migration 34→35
   rewrites the retired `offload ask` node to both families. T-M7-2 S1/F-198
   direct-to-wire, S4/F-199 no-confirm per-egress TX FQ, and S3/F-200
-  TTL/checksum all passed silicon; S2 VLAN/preemptive-checks is explicitly
-  deferred and non-blocking for plain untagged IPv4. T-M7-3 passed three clean
+  TTL/checksum all passed silicon. The old inline-FE-VM S2 VLAN arm is retired;
+  VLAN pop/push is now complete via the T-M6-8 CC+HMTD path (R5b + gate-off
+  regression PASS, ships default-off). Only `PREEMPTIVE_CHECKS_ON_PKT` remains
+  deferred as non-blocking post-release hardening. T-M7-3 passed three clean
   cycles at 7.32–7.34 Gbps / 99% idle; F-201/F-202 and the later MTU battery
   extended this to ~10 Gbit/s at ~3% CPU with lifecycle stress clean.
    CR-001 MURAM leak is closed; F-133's stale diagnostic tracker caused the
@@ -1573,7 +1584,7 @@ record it does not own.
 | IPv4 TCP/UDP unicast route | `cdx_tcp4_cc`, `cdx_udp4_cc`; IPv4 FCI | `nf_flow_table` / tc `FLOW_CLS_REPLACE/DESTROY` | 14-byte ehash key; `UPDATE_TTL` → `INSERT_L2_HDR` → per-egress no-confirm `ENQUEUE` | **DONE on eth3/eth4, silicon-passed; eth0/eth1/eth2 breadth tracked by T-M6-P5/T-M7-P5** |
 | IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | **unified dual-lane 46-byte key on ONE match-all AC_CC scheme** (`F-224`/`F-225`/`F-226`), `UPDATE_HOPLIMIT(0x29)` + L2/TX chain, per-port table | **DONE — silicon-passed 2026-08-19/21, shipped in release `2026.08.22-0031-rolling`.** The earlier slot-based LCV two-scheme approach (T-M6-1 §4.6, F-205/210/211/212) was proven design-invalid for transit and abandoned; the dual-lane key superseded it. |
 | NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | bit-fused in-place rewrites between `UPDATE_TTL`/`UPDATE_HOPLIMIT` and `INSERT_L2_HDR` (ports `0x33`, v4 L3 `0x27`=`UPDATE_TTL\|SIP\|DIP`, v6 L3 `0x2f`=`UPDATE_HOPLIMIT\|SIP\|DIP`); silicon auto-recomputes IP+L4 checksums | **DONE — SHIPPING default-on (2026-08-22/23).** F-230 bit-fused FE-VM emitter landed (`8cfb0af5`), armed behind a gate (`55dd82b6`), then productized default-on after silicon pass: nat44 (`625d0d2c`, T-M6-7.7) and nat66 (`9598799f`). S0 record readback + S1 SNAT + S2 DNAT wire-verified; S3 masquerade TCP `-P4` ~7.1–7.3 Gbit/s 0-retr + UDP 0-loss. NAT is AUTOMATIC whenever `offload ipv4`/`offload ipv6` is engaged (no separate CLI knob); `nat44_offload`/`nat66_offload` are default-on diagnostic escape hatches; eth0 never NAT-offloaded. NAT46/NAT64 NOT offloadable — always SW fallback (same-family in-place rewrite only; no family-conversion opcode). `get-info` advertises `ASK_CAP_IPV4\|IPV6\|NAT\|PAT`. |
-| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | `STRIP_ALL_VLAN_HDRS(0x12)` and typed insert-VLAN action; key/MTU semantics preserved | deferred S2; A2 strict software fallback landed |
+| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | per-port CC key → combined VLAN-edit + L2 rewrite + IPv4-forward HMTD → per-egress no-confirm TX FQ; CC miss → FE_ENTER ehash for routed/NAT coexistence | **DONE — SILICON-VALIDATED end-to-end (2026-08-26, image 0713, commit `36bf83de`); ships default-OFF; merge-ready.** The retired inline FE-VM F-233/F-234 path froze after 21 frames; the replacement runs tag edits in the separate HM engine. R4c-2/R4c-3 validated the datapath/lifecycle; `36bf83de` fixed vif-delete teardown (detach/drain CC before HMTD free). R5b PASSED: no-wrong-forward/zero-tag-leak, bidirectional, coexistence, PCP/DEI (`p 0`, TPID 0x8100), MTU sweep 100–1472 B, 100× churn (ErrFD 0). Gate-off regression PASSED: routed ~11.6G / NAT44 ~11.7G, `vlan_cc_activity=0`. Scope: IPv4, one 802.1Q tag, non-eth0; 802.1ad/QinQ/stacked/IPv6 VLAN fall back to software. `ASK_CAP_VLAN` advertised only while armed. **Per-port CLI landed 2026-08-27 (`vyos-1x-044`):** `set interfaces ethernet ethN offload vlan` → `vyos-offload-ask family <mask> <vlan>` → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]` (mirrors the family-mask model; the `ask.vlan_offload` module param stays as an OR'd global override). Remaining is non-silicon: `dpaa1`→`main` merge + default-on decision. |
 | IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) |
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
 | IPv4/IPv6 multicast | `cdx_multicast4/6_cc`; MC4/MC6 FCI | switchdev MDB / kernel mroute | group key + bounded replication FQ/egress set | not implemented |
@@ -1621,8 +1632,12 @@ record it does not own.
 
   **SUPERSEDED for NAT by T-M6-7 (2026-08-22/23):** NAT-carrying MANGLE of
   htype IP4/IP6/TCP/UDP is now parsed into typed NAT actions (T-M6-7.0) and
-  silicon-validated + shipping (T-M6-7.7 nat44, nat66). Only
-  `FLOW_ACTION_ADD` and `FLOW_ACTION_VLAN_PUSH/POP` still return `-EOPNOTSUPP`.
+  silicon-validated + shipping (T-M6-7.7 nat44, nat66). **SUPERSEDED for VLAN by
+  T-M6-8 (2026-08-26):** `FLOW_ACTION_VLAN_PUSH/POP` is now parsed into a typed
+  VLAN intent and, when the default-off `vlan_offload` gate is armed, routed to
+  the CC+HMTD path (silicon-validated R4c); disarmed it still returns
+  `-EOPNOTSUPP` (fail closed to software). Only `FLOW_ACTION_ADD` still
+  unconditionally returns `-EOPNOTSUPP`.
 - [~] **T-M6-A3 — ownership generations/tombstones.** CODE-COMPLETE 2026-08-18.
   Closes CR-004. Added a per-cookie generation/tombstone xarray to
   `ask_flow_table` (value-encoded, no heap alloc), immutable
@@ -1917,10 +1932,46 @@ record it does not own.
   `ASK_CAP_IPV4|IPV6|NAT|PAT`. Remaining T-M6-7-adjacent: hairpin proof is not
   gated by the shipping claim (SNAT/DNAT/PAT both directions TCP+UDP were the
   gate and passed).
-- [ ] **T-M6-8 — VLAN actions (T-M7-2 S2).** Translate VLAN POP/PUSH and stacked
-  tags only when the parser/HM contract supports them. **Gate:** untagged↔tagged,
-  tagged↔tagged, PCP/DEI preservation, MTU 1280–2500, checksum/L2 correctness,
-  unsupported tag depth cleanly SW, IPv4-unicast regression.
+- [x] **T-M6-8 — VLAN actions. DONE + SILICON-VALIDATED end-to-end; ships
+  default-OFF; merge-ready (2026-08-26, image 0713, commit `36bf83de`).** The
+  original inline FE-VM F-233/F-234 opcode path is retired: it froze after
+  exactly 5+tnums = 21 frames. The production replacement routes VLAN
+  REPLACE/DESTROY through a per-port CC shadow: HIT → combined VLAN pop/push + L2
+  rewrite + IPv4 TTL/checksum HMTD → per-egress no-confirm TX FQ; MISS → FE_ENTER
+  ehash so ordinary routed/NAT flows coexist on the same port. R3b/R4b sustained
+  ~55k pps with correct tag, next-hop/source MAC and TTL 64→63; R4c-2/R4c-3
+  validated production wiring, ehash-graft restoration and clean disengage; R5
+  commit `36bf83de` fixed the vif-delete wedge (detach/rebuild + drain the CC
+  tree before HMTD release). The old ~20-packet FE-VM freeze is closed and cannot
+  recur in the HM engine. **R5b matrix PASSED on silicon (image 0713):**
+  no-wrong-forward/zero-tag-leak, bidirectional forward, VLAN+routed coexistence,
+  PCP/DEI transparency (egress `p 0`, correct TPID 0x8100/VID), MTU sweep
+  100–1472 B, and 100× paced VLAN churn (0 fail cycles, ErrFD 0, no fault).
+  **Full gate-off regression PASSED on the merge tip:** with `vlan_offload=N`,
+  routed IPv4 ~11.6 Gbit/s and NAT44 ~11.7 Gbit/s at line rate, ehash HW path
+  confirmed, `vlan_cc_activity=0` — zero regression to the shipped path. Current
+  scope is IPv4, one 802.1Q tag, non-eth0; 802.1ad, QinQ, stacked tags and IPv6
+  VLAN fail closed to software. `ASK_CAP_VLAN` is advertised only when the
+  per-port VLAN gate is armed. **Per-port VyOS CLI landed 2026-08-27
+  (`vyos-1x-044`):** `set interfaces ethernet ethN offload vlan` is applied
+  atomically with the interface's IPv4/IPv6 family mask via genl
+  `ASK_ATTR_VLAN`; the legacy `ask.vlan_offload` module param remains an OR'd
+  global master override. **Remaining (non-silicon, tracked outside T-M6-8):**
+  merge `dpaa1`→`main` (Option A) and decide default-on vs default-off for the
+  fielded release. **VyOS control-plane fix (2026-08-27, patch `vyos-1x-043`):** adding a VLAN
+  vif (e.g. `eth4.8`) to a `firewall flowtable ... offload hardware` was
+  rejected at commit — `Interface "eth4.8" does not support hardware offload` —
+  because `verify_hardware_offload()` read the `hw-tc-offload` NETIF_F_HW_TC
+  feature on the vif, which never carries it; the feature lives on the physical
+  DPAA1 lower. 043 resolves a VLAN vif to its single physical lower (sysfs
+  `DEVTYPE=vlan` + `/sys/class/net/<vif>/lower_*`) for the ethtool check, the
+  MTU-range guard, and the `apply()` `ethtool -K` enable, while nft still
+  registers the logical vif. Non-VLAN interfaces are byte-identical. Board gate
+  still open: confirm `set firewall flowtable ft01 interface eth4.8` +
+  `offload hardware` now commits and inter-VLAN traffic HW-offloads.
+  **Lab caveat (not a defect, not merge-gating):** sustained max-rate (~55k pps)
+  + churn latches an eth0 mgmt-RTT/martian-storm degradation cleared only by cold
+  boot — a lab mgmt-LAN broadcast-overlap artifact; paced traffic avoids it.
 
 ##### Phase M6-C — soft parser and PPPoE/tunnel recognition
 

@@ -8,16 +8,16 @@ Subject: [PATCH] temp: vyos-1x-005-fix_podman_service.patch
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/src/conf_mode/container.py b/src/conf_mode/container.py
-index 91f44d2..b2464f7 100755
+index 764c26d..b2464f7 100755
 --- a/src/conf_mode/container.py
 +++ b/src/conf_mode/container.py
-@@ -470,7 +470,7 @@ def generate_run_arguments(name, container_config, host_ident):
+@@ -489,7 +489,7 @@ def generate_run_arguments(name, container_config, host_ident):
          name_server = ''
  
      container_base_cmd = f'--detach --interactive --tty --replace {capabilities} {privileged} --cpus {cpu_quota} {sysctl_opt} ' \
 -                         f'--memory {memory}m --shm-size {shared_memory}m --memory-swap 0 --restart {restart} --log-driver={log_driver} ' \
 +                         f'--memory {memory}m --shm-size {shared_memory}m --restart {restart} --log-driver={log_driver} ' \
-                          f'--name {name} {hostname} {device} {port} {name_server} {volume} {tmpfs} {env_opt} {label} {uid} {host_pid}'
+                          f'--name {name} {hostname} {device} {port} {name_server} {volume} {tmpfs} {env_opt} {label} {uid} {host_pid} {cgroupns}'
  
      entrypoint = ''
 -- 
