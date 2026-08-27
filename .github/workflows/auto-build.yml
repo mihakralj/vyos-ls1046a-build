@@ -139,14 +139,18 @@ jobs:
           # step ever gets to run.  Reset ownership unconditionally so
           # checkout can repopulate the workspace cleanly.
           set -e
-          if [ -d "$GITHUB_WORKSPACE" ]; then
-            chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || \
-              chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
+          # This step runs under the job-level `sudo -E bash` shell, so
+          # `id -un` here is `root` — chowning to `$(id -un)` would hand the
+          # whole workspace to root:root and make the very next
+          # actions/checkout@v6 (which runs as the unprivileged `vyos` user)
+          # fail with the EACCES it is meant to prevent. Always chown to the
+          # runner user explicitly.
+          RUNNER_WORK_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          if [ -d "$RUNNER_WORK_ROOT" ]; then
+            chown -R vyos:vyos "$RUNNER_WORK_ROOT" 2>/dev/null || true
           fi
-          # Also drop any prior root-owned content under the runner work root
-          # in case the workspace dir itself has the wrong owner.
-          if [ -d "/mnt/nvme/_work" ]; then
-            chown -R vyos:vyos /mnt/nvme/_work 2>/dev/null || true
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
           fi
 
       - uses: actions/checkout@v6
