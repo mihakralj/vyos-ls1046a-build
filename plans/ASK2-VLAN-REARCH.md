@@ -3,6 +3,33 @@
 **2026-08-26 · dpaa1 · T-M6-8 · Supersedes the inline-FE-VM-opcode VLAN approach
 (F-233/F-234) which is silicon-proven dead.**
 
+> **STATUS — COMPLETE / MERGE-READY (2026-08-26, image 0713, commit
+> `36bf83de`).** This re-architecture is DONE and silicon-validated end-to-end
+> (R1–R5b): datapath + lifecycle (R4c-2/R4c-3), vif-delete teardown wedge fixed
+> (`36bf83de`), the **R5b matrix PASSED** (no-wrong-forward/zero-tag-leak,
+> bidirectional, VLAN+routed coexistence, PCP/DEI transparency `p 0` + TPID
+> 0x8100, MTU sweep 100–1472 B, 100× churn, ErrFD 0), and the **full gate-off
+> regression PASSED** on the merge tip (routed ~11.6 Gbit/s, NAT44 ~11.7 Gbit/s,
+> `vlan_cc_activity=0` — zero regression to the shipped path). The ~20-packet
+> FE-VM freeze that motivated this document is CLOSED — the inline emitter is
+> retired (`ask_fe_flow_insert()` returns `-EOPNOTSUPP` for any VLAN flow) and
+> VLAN pop/push runs on the separate CC-leaf → combined-HMTD engine, where the
+> 5+tnums FE-VM management resource is never touched. The feature ships
+> **default-off**, scoped to IPv4 / single 802.1Q tag / non-eth0.
+> `ASK_CAP_VLAN` is advertised only when armed. **Per-port CLI arming landed
+> 2026-08-27** (`vyos-1x-044`): `set interfaces ethernet ethN offload vlan`
+> (sibling of `offload ipv4`/`ipv6`) → `vyos-offload-ask family <mask> <vlan>`
+> → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]`; the legacy
+> `ask.vlan_offload` module param remains an OR'd global master override for
+> one-shot debug. **Remaining work is non-silicon:** merge `dpaa1`→`main`
+> (Option A) and the default-on vs default-off decision for the fielded
+> release. **Lab caveat (not a defect, not
+> merge-gating):** sustained max-rate (~55k pps) + churn latches an eth0
+> mgmt-RTT/martian-storm degradation cleared only by cold boot — a lab mgmt-LAN
+> broadcast-overlap artifact; paced traffic avoids it. Everything below is the
+> design/build record that produced this result; read it as history, not open
+> work.
+
 ## 1. Why the current architecture is dead (established, not re-litigated)
 
 ASK2's VLAN offload emitted the vendor's VLAN header-manip as **inline FE-VM

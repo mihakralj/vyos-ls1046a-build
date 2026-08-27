@@ -666,6 +666,32 @@ exec python3 /usr/share/ynl/pyynl/cli.py "$@"
 YNLWRAP
 chmod +x "$CHROOT/usr/local/bin/ynl"
 
+### VyOS MCP stdio transport: `mcp-stdio-endpoint.py` is the stdio front-end to
+### the HTTP MCP server added by data/vyos-1x-041-mcp-server.patch (imports
+### api.mcp.server). It lets a local AI agent drive VyOS op-mode over an SSH
+### stdio pipe: `ssh vyos@host vyos-mcp`. The endpoint implementation lives
+### under /usr/libexec/vyos/ (not on $PATH); we install it there verbatim and add a
+### PATH-resolvable `vyos-mcp` wrapper in /usr/local/bin (mirrors the `ynl`
+### transport wrapper above). It MUST be a real wrapper script, not a symlink:
+### build-vyos-image copies includes.chroot with shutil.copytree() which
+### dereferences symlinks, and an absolute `/usr/libexec/vyos/...` symlink
+### target does not exist on the build host → ENOENT aborts the whole ISO
+### build. The endpoint is inert until `set service https api mcp` is
+### configured — it exits non-zero with "MCP is not enabled" otherwise — so
+### shipping it unconditionally is safe.
+mkdir -p "$CHROOT/usr/libexec/vyos" "$CHROOT/usr/local/bin"
+cp board/scripts/mcp-stdio-endpoint.py "$CHROOT/usr/libexec/vyos/mcp-stdio-endpoint.py"
+chmod +x "$CHROOT/usr/libexec/vyos/mcp-stdio-endpoint.py"
+cat > "$CHROOT/usr/local/bin/vyos-mcp" <<'MCPWRAP'
+#!/bin/sh
+# PATH-resolvable mnemonic for the VyOS MCP stdio endpoint. The real
+# implementation lives at /usr/libexec/vyos/mcp-stdio-endpoint.py (off $PATH).
+# A wrapper, not a symlink, so build-vyos-image's shutil.copytree() staging
+# does not dereference a build-host-absent target.
+exec /usr/libexec/vyos/mcp-stdio-endpoint.py "$@"
+MCPWRAP
+chmod +x "$CHROOT/usr/local/bin/vyos-mcp"
+
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit
 ### hex RRGGBBWW. Auto-creates /config/led.json with a 32-entry default
