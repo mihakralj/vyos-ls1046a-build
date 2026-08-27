@@ -27,6 +27,7 @@ const struct nla_policy ask_top_policy[ASK_ATTR_MAX + 1] = {
 [ASK_ATTR_POLICER]     = { .type = NLA_NESTED },
 [ASK_ATTR_PORT_ID]     = { .type = NLA_U8 },
 [ASK_ATTR_FAMILY_MASK] = { .type = NLA_U8 },
+[ASK_ATTR_VLAN]        = { .type = NLA_U8 },
 };
 
 const struct nla_policy ask_info_policy[ASK_INFO_ATTR_MAX + 1] = {

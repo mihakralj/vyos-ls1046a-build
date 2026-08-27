@@ -2758,13 +2758,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # VLAN is being re-architected onto the FMan HMCD/HMTD engine (a separate
     # engine from the FE-VM, so the freeze cannot occur) referenced from a CC
     # leaf action via NADEN. F-233 (inline VLAN opcode emitter) and F-234 (its
-    # frag-info context) are RETIRED from the build here; ask.ko's VLAN gate
-    # now fails closed to software until the HMTD path (R2-R5) lands. The
-    # fixup files are kept as the vendor-encoding reference only. Routed/NAT
-    # records are byte-identical to the pre-F-233 baseline (F-230 unchanged).
+    # frag-info context) are RETIRED from the build here. The HMTD path (R2-R5)
+    # HAS landed in ask.ko (ask_vlan_cc.c + board patches 0121a/0121c/0121d):
+    # VLAN pop/push now offloads via CC-leaf -> combined HMTD, silicon-validated
+    # through R4c, gated default-off (ask_vlan_offload) and fail-closed to
+    # software when disarmed. The retired fixup files are kept as the
+    # vendor-encoding reference only. Routed/NAT records are byte-identical to
+    # the pre-F-233 baseline (F-230 unchanged).
     #python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_233_vlan.py" 2>&1  # RETIRED (R1)
     #python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_234_frag.py" 2>&1  # RETIRED (R1)
-    echo "### VLAN: F-233/F-234 inline FE-VM path RETIRED (R1); HMTD re-arch pending"
+    echo "### VLAN: F-233/F-234 inline FE-VM path RETIRED (R1); VLAN offloads via ask.ko CC-leaf->HMTD (silicon-validated R4c, default-off gate)"
 fi
 
 # F-191 (2026-08-14, ASK2-PRODUCTION-ARCHITECTURE Phase 1): gate the debugfs

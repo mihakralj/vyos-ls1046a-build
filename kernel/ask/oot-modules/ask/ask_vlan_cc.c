@@ -103,7 +103,8 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 
 	if (!key)
 		return -EINVAL;
-	if (!ask_hw_vlan_offload_armed())
+	/* Per-port gate: armed on this flow's ingress port (key->port_id). */
+	if (!ask_hw_vlan_offload_armed_port(key->port_id))
 		return -EOPNOTSUPP;
 	if (key->l3_proto != ASK_FLOW_L3_IPV4)
 		return -EOPNOTSUPP;

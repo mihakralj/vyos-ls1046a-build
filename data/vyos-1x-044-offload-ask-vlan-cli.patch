@@ -1,0 +1,94 @@
+diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+index 1e9f870..750e036 100644
+--- a/interface-definitions/interfaces_ethernet.xml.in
++++ b/interface-definitions/interfaces_ethernet.xml.in
+@@ -113,6 +113,12 @@
+                   <valueless/>
+                 </properties>
+               </leafNode>
++              <leafNode name="vlan">
++                <properties>
++                  <help>ASK2 hardware offload for single-tag 802.1Q VLAN pop/push on forwarded flows (NXP LS1046A FMan CC+HMTD)</help>
++                  <valueless/>
++                </properties>
++              </leafNode>
+               <leafNode name="rps">
+                 <properties>
+                   <help>Enable Receive Packet Steering</help>
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index 950b669..0a81508 100644
+--- a/python/vyos/ifconfig/ethernet.py
++++ b/python/vyos/ifconfig/ethernet.py
+@@ -353,11 +353,15 @@ def set_hw_tc_offload(self, state):
+                 print('Adapter does not support changing hw-tc-offload settings!')
+         return False
+ 
+-    def set_ask_offload(self, family_mask: int):
++    def set_ask_offload(self, family_mask: int, vlan: bool = False):
+         """
+         Apply per-interface ASK2 family selection. bit0=IPv4, bit1=IPv6;
+         mask 0 disengages the port. The kernel scheme/table is family-neutral;
+         ask.ko gates flow admission by this per-port mask.
++
++        @vlan arms this port's single-tag 802.1Q VLAN pop/push offload
++        (CLI `offload vlan`), carried to ask.ko as the genl ASK_ATTR_VLAN
++        bit alongside the family mask so both are set atomically on engage.
+         """
+         # Physical ingress FMan hwport IDs (DT-authoritative, all five ports).
+         port_map = {
+@@ -372,9 +376,15 @@ def set_ask_offload(self, family_mask: int):
+         if not os.path.exists(tool):
+             raise ConfigError(f'ASK offload helper not found: {tool}')
+ 
+-        out, rc = self._popen(
+-            f'{tool} --port {port} family {int(family_mask)}'
+-        )
++        # `family <mask> [vlan]` sets the per-port family mask and, when the
++        # port stays engaged (mask != 0), the per-port VLAN bit in one engage.
++        # A disengaging call (mask 0) drops the port entirely; the kernel
++        # disengage path also disarms the port's VLAN bit, so no explicit
++        # vlan arg is needed there.
++        cmd = f'{tool} --port {port} family {int(family_mask)}'
++        if int(family_mask) != 0:
++            cmd += f' {1 if vlan else 0}'
++        out, rc = self._popen(cmd)
+         if rc:
+             msg = (out or '').strip().splitlines()
+             detail = msg[-1] if msg else f'helper exited with rc={rc}'
+@@ -731,7 +741,11 @@ def update(self, config):
+         # bit0=IPv4, bit1=IPv6; mask 0 disengages the port.
+         ask_mask = ((1 if dict_search('offload.ipv4', config) is not None else 0) |
+                     (2 if dict_search('offload.ipv6', config) is not None else 0))
+-        self.set_ask_offload(ask_mask)
++        # offload vlan is a per-port modifier of an engaged port (verified to
++        # require ipv4 or ipv6). Passed with the family mask so ask.ko arms
++        # both atomically; ignored by the helper on a disengaging (mask 0) call.
++        ask_vlan = dict_search('offload.vlan', config) is not None
++        self.set_ask_offload(ask_mask, ask_vlan)
+ 
+         # RPS - Receive Packet Steering
+         # ASK's IPv6/NAT/VLAN misses take the kernel RX softirq path; on this
+diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 7c60f89..6f5c73d 100755
+--- a/src/conf_mode/interfaces_ethernet.py
++++ b/src/conf_mode/interfaces_ethernet.py
+@@ -325,6 +325,19 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+             raise ConfigError(
+                 f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
+             )
++
++    # `offload vlan` is a modifier on an ASK-engaged port: it needs ipv4 or
++    # ipv6 offload on the same interface (VLAN flows classify via the CC tree
++    # whose miss row chains to the routed/NAT ehash path). eth0 is management;
++    # VLAN offload on it is rejected (matches the kernel eth0 exclusion).
++    if dict_search('offload.vlan', ethernet) is not None:
++        ifname = ethernet.get('ifname')
++        if not _ask_on:
++            raise ConfigError(
++                f'Interface {ifname}: "offload vlan" requires "offload ipv4" and/or "offload ipv6"'
++            )
++        if ifname == 'eth0':
++            raise ConfigError('ASK VLAN offload is not supported on the eth0 management port')
+         # ASK FMan FE forwarding is bounded to the order-0 RX buffer range on
+         # this board. The DPAA1 RX pool is one contiguous 4 KiB order-0 page
+         # (F-222); frames above the ~3600 ceiling overrun the one-buffer FMan
