@@ -1,8 +1,8 @@
 diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
-index 51c95fc..b55b3a2 100755
+index 22a4a371e..f549fcc9d 100755
 --- a/src/conf_mode/system_console.py
 +++ b/src/conf_mode/system_console.py
-@@ -23,13 +23,55 @@
+@@ -23,13 +23,55 @@ from vyos.utils.process import call
  from vyos.utils.serial import restart_login_consoles
  from vyos.utils.serial import is_tty
  from vyos.system import grub_util
@@ -173,7 +173,7 @@ index 51c95fc..b55b3a2 100755
  
      if not console:
          return None
-@@ -158,4 +258,4 @@ def apply(console):
+@@ -158,4 +258,4 @@ if __name__ == '__main__':
          apply(c)
      except ConfigError as e:
          print(e)
