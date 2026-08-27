@@ -98,8 +98,9 @@ typed action/param; **heavier** = provably needs a vendor-like separate primitiv
   vif-delete teardown fix, R5b matrix (no-wrong-forward, PCP/DEI, MTU sweep, 100×
   churn) and full gate-off regression (routed ~11.6G / NAT44 ~11.7G) both PASSED.
   The freeze cannot recur (no inline FE-VM VLAN opcodes execute). Scope: IPv4,
-  single 802.1Q tag, non-eth0. Remaining is non-silicon: `dpaa1`→`main` merge,
-  the default-on decision, and optional per-interface CLI grammar.
+  single 802.1Q tag, non-eth0. Per-port CLI landed 2026-08-27 (`vyos-1x-044`:
+  `set interfaces ethernet ethN offload vlan`). Remaining is non-silicon:
+  `dpaa1`→`main` merge and the default-on decision.
 - **Recommendation — TAKEN. The inline ehash record was abandoned for VLAN; the
   HMCD header-manip node (option 1 below) is the shipping implementation.**
   History of the two ranked options considered, master-plan T-M6-8:
@@ -127,10 +128,14 @@ typed action/param; **heavier** = provably needs a vendor-like separate primitiv
   TX FQ. Unknown-unicast/broadcast/STP-blocked stay software.
 - **Kernel authority:** switchdev **FDB** add/del/flush; bridge owns STP/port
   state, VLAN filtering, learn/static, ageing.
-- **Recommendation: lean inline with a new L2 key type** — no HMCD needed for a
-  plain forward (dst is already correct at L2 for a bridged frame; no L3 rewrite).
-  This is close to the routed template with a different key. Master plan T-M6-2.
-  Reuse VLAN's HMCD infra (1.4) only if VLAN-aware bridging needs tag edits.
+- **Recommendation: lean, CC DA-match leaf → plain enqueue, CC-miss → FE_ENTER**
+  — no HMCD needed for a plain forward (dst is already correct at L2 for a bridged
+  frame; no L3 rewrite). Close to the routed template with a DA key and a simpler
+  action, reusing the silicon-proven CC + CC-miss→FE substrate the VLAN
+  re-architecture shipped. Reuse VLAN's HMCD infra (1.4) only if VLAN-aware
+  bridging needs tag edits. Master plan T-M6-2. **Detailed implementation plan:
+  `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md`** (switchdev-FDB authority, staged B0–B5
+  silicon-gated progression, topology decision, gates, open silicon questions).
 
 ### 1.6 IPv4 / IPv6 multicast — NOT IMPLEMENTED (needs heavier primitive)
 - **Vendor:** `set mc4/mc6 ... group {mask}{src}{dst} mode {bridged|routed}

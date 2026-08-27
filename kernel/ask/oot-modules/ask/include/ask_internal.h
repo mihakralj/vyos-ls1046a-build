@@ -414,7 +414,17 @@ int  ask_hw_flow_preflight(const struct ask_flow_key *key,
 /* NAT offload gates: IPv4 is shipping/default-on; NAT66 is experiment/default-off. */
 bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
-/* T-M6-8 VLAN offload gate: default-OFF until S0-S4 silicon gates pass. */
+/*
+ * T-M6-8 VLAN offload gate (default-OFF). Per-port model mirroring the family
+ * mask: ask_hw_offload_set_vlan() arms/disarms one port from the genl engage
+ * path (ASK_ATTR_VLAN); ask_hw_vlan_offload_armed_port() is the authoritative
+ * per-ingress-port gate at preflight + CC insert; ask_hw_vlan_offload_armed()
+ * is the port-agnostic OR used only where no ingress port is in hand (capability
+ * advertise, intent-lower fail-closed pre-check). The legacy global
+ * ask.vlan_offload module param is an OR'd master override.
+ */
+void ask_hw_offload_set_vlan(u8 hw_port_id, bool on);
+bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
 bool ask_hw_vlan_offload_armed(void);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);

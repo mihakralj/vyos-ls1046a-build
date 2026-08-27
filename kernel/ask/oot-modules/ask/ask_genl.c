@@ -804,8 +804,10 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr *port_attr;
 	struct nlattr *fam_attr;
+	struct nlattr *vlan_attr;
 	u8 port_id;
 	u8 fam_mask;
+	u8 vlan_on;
 	int rc;
 
 	port_attr = info->attrs[ASK_ATTR_PORT_ID];
@@ -827,14 +829,31 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 
 	ask_hw_offload_set_family(port_id, fam_mask);
 
+	/*
+	 * ASK_ATTR_VLAN (u8 bool) arms/disarms single-tag 802.1Q VLAN offload
+	 * on this port (CLI `offload ask vlan`). Absent => leave the per-port
+	 * bit unchanged, so a family-only engage from an older helper does not
+	 * clobber VLAN state. Set BEFORE engage so the first frame is gated
+	 * correctly. eth0/802.1ad/QinQ/IPv6-VLAN still fall back to software.
+	 */
+	vlan_attr = info->attrs[ASK_ATTR_VLAN];
+	if (vlan_attr) {
+		vlan_on = nla_get_u8(vlan_attr);
+		if (vlan_on > 1)
+			return -EINVAL;
+		ask_hw_offload_set_vlan(port_id, vlan_on);
+	}
+
 	rc = ask_hw_offload_engage(port_id);
 	if (rc) {
+		if (vlan_attr && vlan_on)
+			ask_hw_offload_set_vlan(port_id, false);
 		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
 		return rc;
 	}
 
-	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x\n",
-		    port_id, fam_mask);
+	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x vlan=%d\n",
+		    port_id, fam_mask, vlan_attr ? vlan_on : -1);
 	return 0;
 }
 
@@ -849,9 +868,14 @@ return -EINVAL;
 
 port_id = nla_get_u8(port_attr);
 
+/* Clear the per-port VLAN admission bit BEFORE the full disengage so the
+ * setter's live-transition teardown does not fire (disengage already tears the
+ * VLAN CC tree down in F-134 order and restores RSS). Ordering avoids a
+ * redundant teardown + fe_reengage on an about-to-be-disengaged port. */
+ask_hw_offload_set_vlan(port_id, false);
 ask_hw_offload_disengage(port_id);
 
-ask_pr_info("genl: disengaged port 0x%02x\n", port_id);
+ask_pr_info("genl: disengaged port 0x%02x (VLAN offload disarmed)\n", port_id);
 return 0;
 }
 

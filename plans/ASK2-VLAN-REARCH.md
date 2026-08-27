@@ -15,12 +15,15 @@
 > retired (`ask_fe_flow_insert()` returns `-EOPNOTSUPP` for any VLAN flow) and
 > VLAN pop/push runs on the separate CC-leaf → combined-HMTD engine, where the
 > 5+tnums FE-VM management resource is never touched. The feature ships
-> **default-off** behind the `vlan_offload` module param (`ASK_CAP_VLAN`
-> advertised only when armed), scoped to IPv4 / single 802.1Q tag / non-eth0.
-> **Remaining work is non-silicon:** merge `dpaa1`→`main` (Option A), the
-> default-on vs default-off decision for the fielded release, and the optional
-> per-interface VyOS CLI grammar (deferred — today the control is the global
-> module param on ASK-engaged ports). **Lab caveat (not a defect, not
+> **default-off**, scoped to IPv4 / single 802.1Q tag / non-eth0.
+> `ASK_CAP_VLAN` is advertised only when armed. **Per-port CLI arming landed
+> 2026-08-27** (`vyos-1x-044`): `set interfaces ethernet ethN offload vlan`
+> (sibling of `offload ipv4`/`ipv6`) → `vyos-offload-ask family <mask> <vlan>`
+> → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]`; the legacy
+> `ask.vlan_offload` module param remains an OR'd global master override for
+> one-shot debug. **Remaining work is non-silicon:** merge `dpaa1`→`main`
+> (Option A) and the default-on vs default-off decision for the fielded
+> release. **Lab caveat (not a defect, not
 > merge-gating):** sustained max-rate (~55k pps) + churn latches an eth0
 > mgmt-RTT/martian-storm degradation cleared only by cold boot — a lab mgmt-LAN
 > broadcast-overlap artifact; paced traffic avoids it. Everything below is the
