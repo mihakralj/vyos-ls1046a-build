@@ -46,6 +46,8 @@ attribute-sets:
         type: u8
       - name: family-mask
         type: u8
+      - name: vlan
+        type: u8
   -
     name: info
     name-prefix: ask-info-attr-
@@ -269,6 +271,7 @@ operations:
           attributes:
             - port-id
             - family-mask
+            - vlan
     -
       name: disengage
       attribute-set: top
