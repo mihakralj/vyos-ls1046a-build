@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Thu, 27 Aug 2026 07:30:00 +0000
+Subject: [PATCH] firewall: resolve VLAN vif to physical lower for hardware
+ flowtable offload (043)
+
+On the NXP LS1046A a VLAN sub-interface (e.g. eth4.8) added to a hardware
+flowtable fails commit with:
+
+    Interface "eth4.8" does not support hardware offload
+
+because verify_hardware_offload() queries the `hw-tc-offload` ethtool
+feature (NETIF_F_HW_TC) on the vif itself.  A VLAN upper does NOT carry
+that feature; it is a property of the physical DPAA1 netdev (fsl_dpa), so
+the check reads enabled=False, fixed=True and rejects a perfectly
+offloadable interface.  With `offload hardware` unset the same vifs add to
+the software flowtable and inter-VLAN traffic routes in software as
+expected -- confirming the datapath is fine and only this preflight is
+wrong.
+
+The kernel's nf_flow_table already resolves a routed-VLAN path to the
+PHYSICAL lower device for the flow/hw ifindex (net_device_path walks
+DEV_PATH_VLAN then the trailing DEV_PATH_ETHERNET), and ask.ko unwraps the
+vif to the physical FMan port for all its resolvers (commit 6faab5aa).  So
+the correct thing for VyOS to validate/enable is the physical lower, while
+nft still registers the logical vif in the flowtable (VyOS observes the
+logical interface at the forward hook -- registering a sub-interface is
+supported and offloads only that VLAN).
+
+Fix:
+
+1. get_hardware_offload_interface(ifname): if the interface is a VLAN vif
+   (sysfs uevent DEVTYPE=vlan), resolve its single physical lower via the
+   `/sys/class/net/<vif>/lower_*` symlink and return that; otherwise return
+   the interface unchanged.  A vif without exactly one lower is a hard
+   error (should never happen for an 802.1Q vif).
+
+2. verify_hardware_offload(): run the ethtool hw-tc-offload check AND the
+   MTU-range guard against the resolved physical device (the FMan RX
+   one-buffer contract is a property of the physical port, not the vif).
+
+3. apply(): enable `hw-tc-offload` on the resolved physical lower before
+   nft installs the flowtable (nft rejects `flags offload` flowtables on a
+   netdev whose real device lacks NETIF_F_HW_TC).
+
+Non-VLAN interfaces are byte-identical to the previous behaviour
+(get_hardware_offload_interface returns the name unchanged).
+
+diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+--- a/src/conf_mode/firewall.py
++++ b/src/conf_mode/firewall.py
+@@ -481,8 +481,29 @@ def verify_nested_group(group_name, group, groups, seen):
+         if 'include' in groups[g]:
+             verify_nested_group(g, groups[g], groups, seen)
+ 
++def get_hardware_offload_interface(ifname):
++    try:
++        with open(f'/sys/class/net/{ifname}/uevent') as f:
++            is_vlan = any(line.strip() == 'DEVTYPE=vlan' for line in f)
++    except OSError:
++        return ifname
++
++    if not is_vlan:
++        return ifname
++
++    lower_interfaces = glob(f'/sys/class/net/{ifname}/lower_*')
++    if len(lower_interfaces) != 1:
++        raise ConfigError(
++            f'Interface "{ifname}" has no unique physical lower interface for hardware offload'
++        )
++
++    lower_name = os.path.basename(lower_interfaces[0])
++    return lower_name[len('lower_'):]
++
++
+ def verify_hardware_offload(ifname):
+-    ethtool = Ethtool(ifname)
++    hardware_ifname = get_hardware_offload_interface(ifname)
++    ethtool = Ethtool(hardware_ifname)
+     enabled, fixed = ethtool.get_hw_tc_offload()
+ 
+     if not enabled and fixed:
+@@ -500,7 +521,7 @@ def verify_hardware_offload(ifname):
+     # larger range is validated on the FMan RX pool.
+     ASK_FT_MTU_MIN = 1280
+     ASK_FT_MTU_MAX = 3600
+-    mtu_path = f'/sys/class/net/{ifname}/mtu'
++    mtu_path = f'/sys/class/net/{hardware_ifname}/mtu'
+     try:
+         with open(mtu_path) as f:
+             mtu = int(f.read().strip())
+@@ -767,7 +788,8 @@ def apply(firewall):
+         for flowtable, flowtable_conf in firewall['flowtable'].items():
+             if dict_search_args(flowtable_conf, 'offload') == 'hardware':
+                 for ifname in flowtable_conf['interface']:
+-                    cmdl(['ethtool', '-K', ifname, 'hw-tc-offload', 'on'])
++                    hardware_ifname = get_hardware_offload_interface(ifname)
++                    cmdl(['ethtool', '-K', hardware_ifname, 'hw-tc-offload', 'on'])
+ 
+     # Use nft -c option to check current configuration file
+     completed_process = subp_run(['nft', '-c', '--file', nftables_conf], capture_output=True)
