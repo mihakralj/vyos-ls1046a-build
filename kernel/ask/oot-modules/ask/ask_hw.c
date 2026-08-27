@@ -734,22 +734,32 @@ int ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid)
 EXPORT_SYMBOL_GPL(ask_hw_flow_get_sink_fqid);
 
 /*
- * T-M6-8 DIAGNOSTIC (2026-08-25): no-confirm TX FQ backlog probe.
+ * T-M6-8 DIAGNOSTIC: no-confirm TX FQ backlog probe.
  *
- * The VLAN offload freezes after ~20 packets with no ErrFD / no FMFP stall /
- * no FE workspace depletion, and F-234 (bpid + MURAM frag word2) did not help.
- * The routed path sustains 7.12G on the SAME per-port no-confirm TX FQ, so the
- * question is whether the VLAN-rebuilt (STRIP_ETH+INSERT_L2) frames actually
- * REACH and DRAIN that FQ, or pile up. qman_query_fq_np() reads the FQD's
- * non-programmable fields including frm_cnt (frames enqueued-not-dequeued =
- * backlog) and state. Writing 1 to /sys/module/ask/parameters/fq_probe walks
- * the cached per-port no-confirm FQs and logs each FQ's live state + backlog.
+ * ORIGIN (2026-08-25, HISTORICAL): the retired inline FE-VM VLAN path
+ * (F-233/F-234) froze after ~20 packets with no ErrFD / no FMFP stall / no FE
+ * workspace depletion, and F-234 (bpid + MURAM frag word2) did not help. The
+ * FQ-probe verdict was frm_cnt=0 -- the VLAN-rebuilt (STRIP_ETH+INSERT_L2)
+ * frames never reached the TX FQ; the FE-VM stopped enqueuing after ~20 (a
+ * 5+tnums per-task management-index the strip/rebuild handlers consume and
+ * never release). That freeze is RESOLVED: the 2026-08-26 R1-R5
+ * re-architecture retired the inline FE-VM VLAN emitter and moved VLAN
+ * pop/push to a CC-leaf AD -> combined VLAN HMTD (a separate HM engine, not
+ * the FE-VM), so the freeze cannot recur (silicon-validated R4c-2/R4c-3; see
+ * ask_vlan_cc.c and plans/ASK2-VLAN-REARCH.md). ask_fe_flow_insert() now
+ * rejects any VLAN flow with -EOPNOTSUPP; the FE-VM never touches a VLAN frame.
  *
- * Interpretation while a VLAN flow is frozen:
+ * The probe itself is kept as a general-purpose read-only backlog inspector
+ * for ANY per-port no-confirm TX FQ (routed/NAT/VLAN). qman_query_fq_np()
+ * reads the FQD's non-programmable fields including frm_cnt (frames
+ * enqueued-not-dequeued = backlog) and state. Writing 1 to
+ * /sys/module/ask/parameters/fq_probe walks the cached per-port no-confirm FQs
+ * and logs each FQ's live state + backlog.
+ *
+ * Interpretation while inspecting a suspect flow:
  *   frm_cnt stuck high / rising -> frames enqueued but NOT draining (QMan/TX/
  *       EBD buffer-recycle side): the FQ is backlogged.
- *   frm_cnt ~0 + byte_cnt ~0    -> frames never reach the FQ; the FE-VM stops
- *       enqueuing after ~20 (FE-VM lookup/execute side).
+ *   frm_cnt ~0 + byte_cnt ~0    -> frames never reach the FQ (producer side).
  *   state != ACTIVE/SCHED       -> the FQ retired/parked/held-active (OAC /
  *       congestion / order-restoration wedge).
  * Read-only: issues QM MC QUERYFQ_NP commands only; touches no datapath state.

@@ -1,9 +1,21 @@
 # ASK2 VLAN HW Offload Plan (T-M6-8)
 
-Status: planning only — no code. S0 QDRANT gate satisfied 2026-08-24 (FMan HM/FE
-VLAN opcodes cross-checked against `arch/fman-microcode-210-programming-reference.md`,
+> **SUPERSEDED (2026-08-26) by `plans/ASK2-VLAN-REARCH.md`.** This plan proposed
+> the **inline FE-VM ehash-record** approach; that approach was built (F-233/F-234)
+> and proven silicon-dead — it froze after ~22 packets on a 5+tnums FE-VM
+> management resource. The shipping implementation instead uses a CC-leaf →
+> combined HMTD in the separate header-manipulation engine (silicon-validated
+> end-to-end through R5b; gate-off regression PASSED; default-off;
+> merge-ready). Read
+> `plans/ASK2-VLAN-REARCH.md` and `plans/ASK2-MASTER-PLAN.md` §4.6 (T-M6-8) for
+> the current design; this document is retained only for the intent/gate
+> progression it shares with the final approach.
+
+Status: SUPERSEDED — see banner above. (Originally: planning only — no code.
+S0 QDRANT gate satisfied 2026-08-24, FMan HM/FE VLAN opcodes cross-checked
+against `arch/fman-microcode-210-programming-reference.md`,
 `specs/fman-keygen-flow-key-spec.md`, vendor `we-are-mono/ASK cdx/cdx_ehash.c` +
-`ncsw .../fm_ehash.h`, and kernel 6.18.44 `nf_flow_table_offload.c`).
+`ncsw .../fm_ehash.h`, and kernel 6.18.44 `nf_flow_table_offload.c`.)
 
 This plan mirrors the proven, safe progression used for NAT (T-M6-7): host-side
 typed intent with strict `-EOPNOTSUPP` fallback → dormant gated FE emitter →
