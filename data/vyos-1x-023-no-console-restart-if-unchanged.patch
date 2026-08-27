@@ -1,8 +1,8 @@
 diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
-index 22a4a371e..f549fcc9d 100755
+index fbf96c0a4..29356b792 100755
 --- a/src/conf_mode/system_console.py
 +++ b/src/conf_mode/system_console.py
-@@ -23,13 +23,55 @@ from vyos.utils.process import call
+@@ -23,13 +23,55 @@
  from vyos.utils.serial import restart_login_consoles
  from vyos.utils.serial import is_tty
  from vyos.system import grub_util
@@ -156,7 +156,7 @@ index 22a4a371e..f549fcc9d 100755
      grub_util.update_serial_console(*default_tty_console)
      return None
  
-@@ -139,7 +231,15 @@ def apply(console):
+@@ -147,7 +239,15 @@ def apply(console):
      # Service control moved to vyos.utils.serial to unify checks and prompts.
      # If users are connected, we want to show an informational message on completing
      # the process, but not halt configuration processing with an interactive prompt.
@@ -171,9 +171,9 @@ index 22a4a371e..f549fcc9d 100755
 +    if _serial_getty_files_changed:
 +        restart_login_consoles(prompt_user=False, quiet=False)
  
-     if not console:
-         return None
-@@ -158,4 +258,4 @@ if __name__ == '__main__':
+     if 'powersave' in console.keys():
+         # Configure screen blank powersaving on VGA console
+@@ -163,4 +263,4 @@ def apply(console):
          apply(c)
      except ConfigError as e:
          print(e)
