@@ -60,7 +60,7 @@ Spec sec 5.4.
 Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-index eb90518..686d2f0 100644
+index eb9051868857..686d2f05b54f 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
 @@ -23,7 +23,10 @@
@@ -201,7 +201,7 @@ index eb90518..686d2f0 100644
  EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
  
 diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
-index 24a886b..912290f 100644
+index 24a886bf6757..912290fcf4f7 100644
 --- a/drivers/net/ethernet/freescale/fman/Makefile
 +++ b/drivers/net/ethernet/freescale/fman/Makefile
 @@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
@@ -214,10 +214,10 @@ index 24a886b..912290f 100644
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 new file mode 100644
-index 0000000..b9492be
+index 000000000000..665c7d0c3478
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,428 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD Coarse Classifier (CC) - static-tree silicon programming layer.
@@ -564,15 +564,24 @@ index 0000000..b9492be
 +	/* Point the walker at the tables via the group-table[0] CONT_LOOKUP. */
 +	cc_write_group0(t);
 +
-+	/* Publish: replace any existing tree for this port (commit rebuild). */
++	/* Publish: replace any existing tree for this port (commit rebuild).
++	 * The old tree's MURAM free (cc_tree_free -> fman_pcd_muram_free) takes
++	 * pcd->lock internally, so freeing under the held lock self-deadlocks
++	 * every rebuild that replaces a tree (observed 2026-08-28: the
++	 * nf_ft_offload_add worker hung in fman_pcd_muram_free; only the first
++	 * tree was ever published, so VLAN CC keys never matched).  Mirror
++	 * fman_pcd_cc_static_destroy(): detach under the lock, free after
++	 * releasing it.
++	 */
 +	mutex_lock(lock);
 +	old = cc_find_locked(pcd, port_id);
-+	if (old) {
++	if (old)
 +		list_del(&old->node);
-+		cc_tree_free(old);
-+	}
 +	list_add_tail(&t->node, fman_pcd_get_cc_list(pcd));
 +	mutex_unlock(lock);
++
++	if (old)
++		cc_tree_free(old);
 +
 +	return 0;
 +
@@ -638,10 +647,10 @@ index 0000000..b9492be
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_cc_static_get_base);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 80ecfa9..d4a0091 100644
+index 0e861386f0e5..68f8a1ac85d8 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -220,4 +220,119 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+@@ -256,4 +256,119 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
   */
  void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
  
@@ -761,3 +770,6 @@ index 80ecfa9..d4a0091 100644
 +void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
 +
  #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5
+

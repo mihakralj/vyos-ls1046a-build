@@ -637,12 +637,110 @@ index 0000000..7423138
 +            description=pdata.get('description', ''),
 +            messages=messages
 +        )
+diff --git a/src/services/api/mcp/redaction.py b/src/services/api/mcp/redaction.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/services/api/mcp/redaction.py
+@@ -0,0 +1,92 @@
++# Shared secret-redaction policy for the MCP config surfaces (the
++# vyos-config:// resource and the `show configuration` tool path).
++#
++# Policy: mask genuine SECRETS (private keys, password hashes, API keys,
++# pre-shared secrets, RADIUS keys, ...) but keep PUBLIC material visible
++# (SSH/host public keys, X.509 certificates, CRLs). Public keys and certs
++# are not confidential -- masking them protects nothing and only breaks
++# legitimate read-only audit tasks ("is user X's key still the expected one?",
++# "which cert is bound to HTTPS?").
++#
++# Rather than maintain a parallel secret list (which would drift from VyOS),
++# we reuse vyos.utils.strip_config's own computed secret-path list and SUBTRACT
++# the known-public entries from it. That way any NEW secret upstream adds is
++# still masked automatically; we only ever remove known-public paths. If the
++# strip_config internals ever change shape, we fail CLOSED -- fall back to the
++# full upstream strip_config_tree() (over-redact rather than leak).
++
++import copy
++import logging
++
++import vyos.utils.strip_config as _sc
++
++LOG = logging.getLogger('http_api.mcp.redaction')
++
++# Public-material secret-path signatures to keep VISIBLE (drop from redaction).
++# Each tuple is base_path + secret_path (or a standalone path) as strip_config
++# stores it.
++_PUBLIC_SIGNATURES = {
++    ('pki', 'ca', 'certificate'),
++    ('pki', 'ca', 'crl'),
++    ('pki', 'certificate', 'certificate'),
++    ('pki', 'key-pair', 'public', 'key'),
++    ('pki', 'openssh', 'public', 'key'),
++}
++
++
++def _signature(sp):
++    if 'base_path' in sp:
++        return tuple(sp['base_path']) + tuple(sp.get('secret_path', []))
++    return tuple(sp.get('path', []))
++
++
++def _is_public(sp):
++    if _signature(sp) in _PUBLIC_SIGNATURES:
++        return True
++    # `system login user <u> authentication public-keys <id> key` is generated
++    # dynamically by strip_config with base_path ending .../authentication/
++    # public-keys and secret_path == ['key']. That is an SSH PUBLIC key -> keep.
++    if ('base_path' in sp and sp.get('secret_path') == ['key']
++            and tuple(sp['base_path'][-2:]) == ('authentication', 'public-keys')):
++        return True
++    return False
++
++
++def _redact(_value):
++    return '<REDACTED>'
++
++
++def strip_mcp_secrets(config_tree):
++    """Redact secrets in-place on a ConfigTree, keeping public keys/certs.
++
++    Password-class secrets use the neutral ``<REDACTED>`` marker. Private-key
++    material keeps VyOS' more specific ``<KEY DATA REDACTED>`` marker.
++    Fails closed: on any internal mismatch, applies the full upstream
++    strip_config_tree() so a broken filter over-redacts rather than leaks.
++    """
++    try:
++        prepare = getattr(_sc, '__prepare_secret_paths')
++        base_paths = getattr(_sc, '__secret_paths')
++        strip_private = getattr(_sc, '__strip_private')
++        password_redactor = getattr(_sc, '__anonymize_password')
++    except AttributeError as e:
++        LOG.warning('strip_config internals unavailable (%s); '
++                    'falling back to full redaction', e)
++        _sc.strip_config_tree(config_tree)
++        return config_tree
++
++    try:
++        full = prepare(config_tree, copy.deepcopy(base_paths))
++        secret_only = [sp for sp in full if not _is_public(sp)]
++        for sp in secret_only:
++            if sp.get('func') is password_redactor:
++                sp['func'] = _redact
++        strip_private(config_tree, secret_only)
++        return config_tree
++    except Exception as e:
++        LOG.warning('secret-only redaction failed (%s); '
++                    'falling back to full redaction', e)
++        # config_tree may be partially modified; a full pass is idempotent for
++        # already-redacted nodes and closes anything the partial pass missed.
++        _sc.strip_config_tree(config_tree)
++        return config_tree
 diff --git a/src/services/api/mcp/resources.py b/src/services/api/mcp/resources.py
 new file mode 100644
 index 0000000..f072fb0
 --- /dev/null
 +++ b/src/services/api/mcp/resources.py
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,209 @@
 +import json
 +import logging
 +import re
@@ -682,22 +780,34 @@ index 0000000..f072fb0
 +
 +
 +def _read_config_running(path_str):
++    # Never surface credential material through the config-read resource. Read
++    # the full tree before stripping because VyOS' canonical secret map starts at
++    # fixed top-level paths, then project the requested subtree. Public material
++    # (SSH public keys, certificates and CRLs) intentionally remains visible.
 +    from vyos.config import Config
++    from vyos.configtree import ConfigTree
++    from .redaction import strip_mcp_secrets
 +    state = SessionState()
 +    session = state.session
 +    env = session.get_session_env()
 +    config = Config(session_env=env)
++    path = _split_path(path_str)
 +    try:
-+        path = _split_path(path_str)
-+        res = config.show_config(path)
++        full = config.show_config([])
 +    except Exception as e:
 +        LOG.error(f'Failed to read config at {path_str}: {e}')
 +        raise
 +    try:
-+        data = json.loads(res)
-+        return json.dumps(data, separators=(',', ':'))
-+    except (json.JSONDecodeError, TypeError):
-+        return res
++        ct = ConfigTree(full)
++        strip_mcp_secrets(ct)
++        if path:
++            if not ct.exists(path):
++                return '{}'
++            ct = ct.get_subtree(path, with_node=True)
++        return ct.to_json()
++    except Exception as e:
++        LOG.error(f'Failed to strip/project config at {path_str}: {e}')
++        raise
 +
 +
 +def _read_config_effective(path_str):
@@ -1233,16 +1343,18 @@ index 0000000..7bb4817
 +    return server
 diff --git a/src/services/api/mcp/tools.py b/src/services/api/mcp/tools.py
 new file mode 100644
-index 0000000..acdae33
+index 0000000..1111111
 --- /dev/null
 +++ b/src/services/api/mcp/tools.py
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,347 @@
 +import logging
++import subprocess
 +
 +from mcp.server import Server
 +from mcp.types import Tool, TextContent
 +from fastapi.concurrency import run_in_threadpool
 +
++from vyos.configsession import ConfigSessionError
 +from . import schema as mcp_schema
 +from ..session import SessionState
 +
@@ -1353,7 +1465,7 @@ index 0000000..acdae33
 +            'properties': {
 +                'file': {
 +                    'type': 'string',
-+                    'description': 'Optional file path to save config to'
++                    'description': 'Optional file path to save config to (defaults to /config/config.boot)'
 +                }
 +            }
 +        }
@@ -1361,9 +1473,46 @@ index 0000000..acdae33
 +]
 +
 +
-+def _execute_operational_command(arguments):
-+    from vyos.configsession import ConfigSessionError
++def _redacted_show_configuration(remainder):
++    # Secret hardening for the op-mode surface. `show configuration
++    # [commands|json|all|<path>]` is a read-only verb, so it passes the
++    # read-only allow-list -- but the stock op-mode renderer emits credential
++    # material (user password hashes, HTTP API keys, PKI private keys, IPsec/
++    # RADIUS/WireGuard/... secrets) in the clear. The vyos-config:// resource is
++    # already stripped; this closes the equivalent hole in the tool surface so
++    # an agent cannot bypass redaction by asking `show configuration` instead.
++    #
++    # We rebuild the requested rendering from a stripped ConfigTree rather than
++    # calling session.show(), reusing the shared MCP redaction policy (secrets
++    # masked, public keys/certs kept). Only the presentation verbs are handled
++    # here; anything else (e.g. a bare subtree path) is rendered from the
++    # stripped tree too.
++    from vyos.config import Config
++    from vyos.configtree import ConfigTree
++    from .redaction import strip_mcp_secrets
 +
++    state = SessionState()
++    session = state.session
++    env = session.get_session_env() if session is not None else None
++    config = Config(session_env=env)
++    ct = ConfigTree(config.show_config([]))
++    strip_mcp_secrets(ct)
++
++    # remainder is the tokens after 'configuration'
++    fmt = remainder[0] if remainder else None
++    if fmt == 'commands':
++        return ct.to_commands()
++    if fmt == 'json':
++        return ct.to_json()
++    if fmt in (None, 'all'):
++        return ct.to_string()
++    # Treat any other remainder as a config path to render (stripped).
++    if ct.exists(remainder):
++        return ct.get_subtree(remainder, with_node=True).to_string()
++    return ''
++
++
++def _execute_operational_command(arguments):
 +    path = arguments.get('path', [])
 +    if not path:
 +        raise ValueError('path is required')
@@ -1374,55 +1523,30 @@ index 0000000..acdae33
 +    state = SessionState()
 +    session = state.session
 +
-+    op = path[0]
-+    remainder = list(path[1:])
++    # Intercept `show configuration ...` and serve it from a stripped
++    # ConfigTree so secrets never reach the agent via the op-mode tool.
++    if len(path) >= 2 and path[0] == 'show' and path[1] == 'configuration':
++        return _redacted_show_configuration(path[2:])
 +
-+    try:
-+        if op == 'show':
-+            return session.show(remainder)
-+        elif op == 'generate':
-+            return session.generate(remainder)
-+        elif op == 'reboot':
-+            return session.reboot(remainder if remainder else ['now'])
-+        elif op == 'poweroff':
-+            return session.poweroff(remainder if remainder else ['now'])
-+        elif op == 'ping':
-+            return session.ping(remainder)
-+        elif op == 'traceroute':
-+            return session.traceroute(remainder)
-+        elif op == 'monitor':
-+            return session.monitor(remainder)
-+        elif op == 'restart':
-+            return session.restart(remainder)
-+        elif op == 'reset':
-+            return session.reset(remainder)
-+        elif op == 'clear':
-+            return session.clear(remainder)
-+        elif op == 'set':
-+            return session.set(remainder)
-+        elif op == 'delete':
-+            return session.delete(remainder)
-+        elif op == 'renew':
-+            return session.renew(remainder)
-+        elif op == 'release':
-+            return session.release(remainder)
-+        elif op == 'connect':
-+            return session.connect(remainder)
-+        elif op == 'disconnect':
-+            return session.disconnect(remainder)
-+        else:
-+            return session.show(path)
-+    except ConfigSessionError as e:
-+        raise ValueError(str(e))
-+    except AttributeError:
-+        return session.show(path)
++    # All VyOS operational commands are driven by vyatta-op-cmd-wrapper
++    cmd = ['/opt/vyatta/bin/vyatta-op-cmd-wrapper'] + list(path)
++    env = session.get_session_env() if session is not None else None
++
++    p = subprocess.Popen(
++        cmd,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        env=env,
++    )
++    stdout_data, _ = p.communicate()
++    output = stdout_data.decode() if stdout_data else ''
++    if p.returncode != 0:
++        raise ValueError(output.strip() or f'Operational command failed with exit status {p.returncode}')
++    return output
 +
 +
 +def _modify_configuration(arguments):
-+    from vyos.configsession import ConfigSessionError, ConfigSession
-+    from api.rest.routers import lock, asynclock
-+    import asyncio
-+    import os
++    from api.rest.routers import lock
 +
 +    operations = arguments.get('operations', [])
 +    if not operations:
@@ -1432,57 +1556,42 @@ index 0000000..acdae33
 +
 +    state = SessionState()
 +    session = state.session
-+    env = session.get_session_env()
-+    uid = os.getpid()
++    if session is None:
++        raise ValueError('Config session is not initialized')
 +
++    lock.acquire()
 +    try:
-+        loop = asyncio.get_running_loop()
-+    except RuntimeError:
-+        loop = None
-+
-+    async def _do_commit():
-+        cfg_session = ConfigSession(uid, app='vyos-mcp-agent')
-+
 +        for op_spec in operations:
 +            op = op_spec.get('op')
 +            path = op_spec.get('path', [])
 +            value = op_spec.get('value')
 +
 +            if not mcp_schema.config_path_valid(path):
-+                cfg_session.discard()
++                session.discard()
 +                raise ValueError(f'Invalid config path: {path}')
 +
 +            if op == 'set':
-+                cfg_session.set(path, value or '')
++                session.set(path, value=value or '')
 +            elif op == 'delete':
-+                cfg_session.delete(path)
++                session.delete(path, value=value)
 +            else:
-+                cfg_session.discard()
++                session.discard()
 +                raise ValueError(f'Unknown operation: {op}')
 +
 +        if commit_confirm_minutes:
-+            out = cfg_session.commit_confirm(minutes=commit_confirm_minutes)
++            out = session.commit_confirm(minutes=commit_confirm_minutes)
 +        else:
-+            out = cfg_session.commit()
++            out = session.commit()
 +
-+        return out
-+
-+    if loop is not None:
-+        def _run_sync():
-+            import asyncio as _asyncio
-+            lock.acquire()
-+            try:
-+                return _asyncio.run(_do_commit())
-+            finally:
-+                lock.release()
-+
-+        return _run_sync()
-+    else:
-+        lock.acquire()
-+        try:
-+            return asyncio.run(_do_commit())
-+        finally:
-+            lock.release()
++        return out or 'Configuration committed successfully.'
++    except ConfigSessionError as e:
++        session.discard()
++        raise ValueError(str(e))
++    except Exception:
++        session.discard()
++        raise
++    finally:
++        lock.release()
 +
 +
 +def _manage_system_image(arguments):
@@ -1492,44 +1601,62 @@ index 0000000..acdae33
 +
 +    state = SessionState()
 +    session = state.session
++    if session is None:
++        raise ValueError('Config session is not initialized')
 +
-+    if action == 'add':
-+        if not url:
-+            raise ValueError('url is required for add action')
-+        return session.show(['image', 'add', url])
-+    elif action == 'delete':
-+        if not name:
-+            raise ValueError('name is required for delete action')
-+        return session.show(['image', 'delete', name])
-+    elif action == 'set':
-+        if not name:
-+            raise ValueError('name is required for set action')
-+        return session.set_default_image(name)
-+    else:
-+        raise ValueError(f'Unknown image action: {action}')
++    try:
++        if action == 'add':
++            if not url:
++                raise ValueError('url is required for add action')
++            return session.install_image(url)
++        elif action == 'delete':
++            if not name:
++                raise ValueError('name is required for delete action')
++            return session.remove_image(name)
++        elif action == 'set':
++            if not name:
++                raise ValueError('name is required for set action')
++            return session.set_default_image(name)
++        else:
++            raise ValueError(f'Unknown image action: {action}')
++    except ConfigSessionError as e:
++        raise ValueError(str(e))
 +
 +
 +def _reboot_system(arguments):
 +    path = arguments.get('path', ['now'])
 +    state = SessionState()
 +    session = state.session
-+    return session.reboot(path)
++    if session is None:
++        raise ValueError('Config session is not initialized')
++    try:
++        return session.reboot(path)
++    except ConfigSessionError as e:
++        raise ValueError(str(e))
 +
 +
 +def _poweroff_system(arguments):
 +    path = arguments.get('path', ['now'])
 +    state = SessionState()
 +    session = state.session
-+    return session.poweroff(path)
++    if session is None:
++        raise ValueError('Config session is not initialized')
++    try:
++        return session.poweroff(path)
++    except ConfigSessionError as e:
++        raise ValueError(str(e))
 +
 +
 +def _save_configuration(arguments):
-+    file_path = arguments.get('file')
++    file_path = arguments.get('file') or '/config/config.boot'
 +    state = SessionState()
 +    session = state.session
-+    if file_path:
++    if session is None:
++        raise ValueError('Config session is not initialized')
++    try:
 +        return session.save_config(file_path)
-+    return session.save_config()
++    except ConfigSessionError as e:
++        raise ValueError(str(e))
 +
 +
 +_TOOL_HANDLERS = {
