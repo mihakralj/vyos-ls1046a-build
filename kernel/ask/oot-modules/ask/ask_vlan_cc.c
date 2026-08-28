@@ -2,9 +2,11 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/in.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/net_namespace.h>
 #include <linux/netdevice.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -18,6 +20,16 @@ struct ask_vlan_cc_port {
 	u32 hm_handles[FMAN_CC_MAX_STATIC_KEYS];
 	u16 nkeys;
 	bool installed;
+	/*
+	 * Port aggregate stats: the CC-tree path has no per-key counters on
+	 * this silicon, so dump-flows reports the egress-port HW-forwarded
+	 * delta instead.  Snapshot the PHYSICAL port's dev stats (the vif's
+	 * own stats only count SW-stack traffic) at the moment the port's
+	 * first VLAN flow installs; clear when the last flow leaves.
+	 */
+	u64 agg_pkts_snap;
+	u64 agg_bytes_snap;
+	int phys_ifindex;
 };
 
 static struct ask_vlan_cc_port ports[64];
@@ -88,6 +100,8 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			 struct net_device *egress_dev)
 {
 	struct ask_vlan_cc_port *port;
+	struct rtnl_link_stats64 st;
+	struct net_device *phys_dev;
 	struct fman_cc_key cc_key;
 	struct fman *fm;
 	u32 hm_handle;
@@ -98,8 +112,6 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 	u8 pcp;
 	bool is_push;
 	int rc;
-
-	(void)egress_dev;
 
 	if (!key)
 		return -EINVAL;
@@ -145,6 +157,25 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 		return -ENOSPC;
 	}
 
+	/*
+	 * First flow on this port: snapshot the PHYSICAL egress port's
+	 * tx stats so dump-flows can report the HW-forwarded aggregate
+	 * (vif stats only count SW-stack traffic; HW bypass lands in the
+	 * parent's dpaa stats).
+	 */
+	if (port->nkeys == 0 && egress_dev) {
+		phys_dev = egress_dev;
+		if (is_vlan_dev(phys_dev))
+			phys_dev = vlan_dev_priv(phys_dev)->real_dev;
+		if (phys_dev) {
+			memset(&st, 0, sizeof(st));
+			dev_get_stats(phys_dev, &st);
+			port->agg_pkts_snap = st.tx_packets;
+			port->agg_bytes_snap = st.tx_bytes;
+			port->phys_ifindex = phys_dev->ifindex;
+		}
+	}
+
 	port->keys[port->nkeys] = cc_key;
 	port->hm_handles[port->nkeys] = hm_handle;
 	port->nkeys++;
@@ -155,6 +186,11 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 		memset(&port->keys[port->nkeys], 0,
 		       sizeof(port->keys[port->nkeys]));
 		port->hm_handles[port->nkeys] = 0;
+		if (!port->nkeys) {
+			port->agg_pkts_snap = 0;
+			port->agg_bytes_snap = 0;
+			port->phys_ifindex = 0;
+		}
 	}
 	mutex_unlock(&ask_vlan_cc_lock);
 
@@ -227,6 +263,9 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 			    port_id, hm_handle);
 		fman_cc_tree_destroy(fm, port_id);
 		port->installed = false;
+		port->agg_pkts_snap = 0;
+		port->agg_bytes_snap = 0;
+		port->phys_ifindex = 0;
 		tree_destroyed = true;
 	} else {
 		int rc;
@@ -287,3 +326,48 @@ void ask_vlan_cc_teardown_port(u8 port_id)
 	mutex_unlock(&ask_vlan_cc_lock);
 }
 EXPORT_SYMBOL_GPL(ask_vlan_cc_teardown_port);
+
+/*
+ * Port aggregate stats for dump-flows: the CC-tree path has no per-key
+ * counters (no stats AD exists for CC nodes on this microcode), so report
+ * the HW-forwarded delta on the flow's physical egress port since the
+ * first VLAN flow was installed there.  Honest aggregate, not a per-flow
+ * attribution.
+ */
+int ask_vlan_cc_agg_stats(u8 port_id, u64 *packets, u64 *bytes)
+{
+	struct ask_vlan_cc_port *port;
+	struct rtnl_link_stats64 st;
+	struct net_device *dev;
+	u64 p, b;
+	int ret = -ENODATA;
+
+	if (port_id >= ARRAY_SIZE(ports) || !packets || !bytes)
+		return -EINVAL;
+
+	mutex_lock(&ask_vlan_cc_lock);
+	port = &ports[port_id];
+	if (!port->nkeys || !port->phys_ifindex)
+		goto out;
+
+	dev = dev_get_by_index(&init_net, port->phys_ifindex);
+	if (!dev) {
+		ret = -ENODEV;
+		goto out;
+	}
+	memset(&st, 0, sizeof(st));
+	dev_get_stats(dev, &st);
+	dev_put(dev);
+
+	p = (st.tx_packets > port->agg_pkts_snap) ?
+	    st.tx_packets - port->agg_pkts_snap : 0;
+	b = (st.tx_bytes > port->agg_bytes_snap) ?
+	    st.tx_bytes - port->agg_bytes_snap : 0;
+	*packets = p;
+	*bytes = b;
+	ret = 0;
+out:
+	mutex_unlock(&ask_vlan_cc_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ask_vlan_cc_agg_stats);

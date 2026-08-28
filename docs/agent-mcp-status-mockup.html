@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent + VyOS MCP — Network Status Interaction</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2430; --border:#30363d;
+    --txt:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --amber:#d29922; --red:#f85149; --violet:#bc8cff; --cyan:#39c5cf;
+    --mono:"SFMono-Regular",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);
+    line-height:1.5;font-size:15px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:900px;margin:0 auto;padding:28px 20px 80px}
+  header.page{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  header.page h1{font-size:20px;margin:0;font-weight:650}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 26px}
+  .sub code{font-family:var(--mono);color:var(--cyan);background:#0b1220;
+    padding:1px 6px;border-radius:4px;font-size:12px}
+
+  /* chat rows */
+  .row{display:flex;gap:12px;margin:0 0 20px}
+  .avatar{flex:0 0 34px;height:34px;border-radius:8px;display:flex;
+    align-items:center;justify-content:center;font-size:15px;font-weight:700;
+    font-family:var(--mono)}
+  .av-user{background:#1f6feb;color:#fff}
+  .av-agent{background:linear-gradient(135deg,#bc8cff,#39c5cf);color:#0d1117}
+  .bubble{flex:1;min-width:0}
+  .who{font-size:12px;color:var(--muted);margin-bottom:5px;font-weight:600;
+    letter-spacing:.3px;text-transform:uppercase}
+  .msg{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:14px 16px}
+  .msg.user{background:#132033;border-color:#1f3a5f}
+
+  /* reasoning line */
+  .think{color:var(--muted);font-size:13px;font-style:italic;
+    padding:4px 2px 2px;display:flex;gap:8px;align-items:flex-start}
+  .think::before{content:"›";color:var(--violet);font-style:normal;font-weight:700}
+
+  /* tool call card */
+  .tool{background:#0b1220;border:1px solid #21324a;border-radius:10px;
+    margin:10px 0;overflow:hidden}
+  .tool-head{display:flex;align-items:center;gap:8px;padding:8px 12px;
+    background:#101a2c;border-bottom:1px solid #21324a;font-family:var(--mono);
+    font-size:12.5px}
+  .tool-head .tag{color:var(--cyan);font-weight:700}
+  .tool-head .name{color:var(--txt)}
+  .tool-head .status{margin-left:auto;color:var(--green);font-size:11px;
+    font-weight:700;display:flex;align-items:center;gap:5px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--green);
+    box-shadow:0 0 6px var(--green)}
+  .tool-args{padding:8px 12px;font-family:var(--mono);font-size:12.5px;
+    color:var(--muted);border-bottom:1px solid #17233a}
+  .tool-args .k{color:var(--violet)}
+  .tool-args .s{color:var(--green)}
+  pre.out{margin:0;padding:11px 13px;font-family:var(--mono);font-size:12px;
+    color:#c9d4e2;white-space:pre;overflow-x:auto;line-height:1.55}
+  .out .h{color:var(--muted)}
+  .out .g{color:var(--green)} .out .a{color:var(--amber)}
+  .out .r{color:var(--red)} .out .c{color:var(--cyan)} .out .v{color:var(--violet)}
+
+  /* final rendered report */
+  .report{border:1px solid var(--border);border-radius:12px;background:var(--panel);
+    padding:0;overflow:hidden;margin-top:2px}
+  .verdict{padding:16px 18px;background:linear-gradient(135deg,#0f2a17,#132033);
+    border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px}
+  .verdict .big{font-size:19px;font-weight:700}
+  .verdict .big b{color:var(--green)}
+  .verdict .pill{margin-left:auto;font-family:var(--mono);font-size:11px;
+    color:var(--muted)}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+    background:var(--border)}
+  .cell{background:var(--panel);padding:12px 14px}
+  .cell .lbl{font-size:10.5px;color:var(--muted);letter-spacing:.5px;
+    text-transform:uppercase}
+  .cell .val{font-size:15px;font-weight:650;margin-top:3px}
+  .cell .val.g{color:var(--green)} .cell .val.a{color:var(--amber)}
+  .cell .sm{font-size:11px;color:var(--muted);margin-top:1px}
+
+  section.blk{padding:14px 18px;border-top:1px solid var(--border)}
+  section.blk h3{margin:0 0 10px;font-size:12px;letter-spacing:.6px;
+    text-transform:uppercase;color:var(--muted);font-weight:700;
+    display:flex;align-items:center;gap:8px}
+  section.blk h3 .live{font-family:var(--mono);font-size:10px;color:var(--cyan);
+    font-weight:600;text-transform:none;letter-spacing:0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--muted);font-weight:600;font-size:10.5px;
+    letter-spacing:.4px;text-transform:uppercase;padding:5px 8px;
+    border-bottom:1px solid var(--border)}
+  td{padding:6px 8px;border-bottom:1px solid #21262d;font-family:var(--mono);
+    font-size:12.5px}
+  tr:last-child td{border-bottom:none}
+  .up{color:var(--green)} .down{color:var(--muted)} .wan{color:var(--cyan)}
+  .kv{display:grid;grid-template-columns:130px 1fr;gap:2px 14px;
+    font-size:13px}
+  .kv .k{color:var(--muted)} .kv .v{font-family:var(--mono);font-size:12.5px}
+  .na{color:var(--muted);font-style:italic}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10.5px;
+    padding:1px 6px;border-radius:4px;background:#182338;color:var(--cyan)}
+  .foot{color:var(--muted);font-size:12px;margin-top:14px;text-align:center}
+  .foot code{font-family:var(--mono);color:var(--violet)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page">
+    <div class="avatar av-agent">K</div>
+    <h1>Agent &times; VyOS MCP — live status interaction</h1>
+  </header>
+  <p class="sub">Mock transcript. The agent answers a status request by calling the
+    <code>vyos</code> MCP server (<code>ssh vyos@192.168.1.185 vyos-mcp</code>),
+    tool <code>vyos_execute_operational_command</code>, then renders the same
+    data shape as the Mono dashboard.</p>
+
+  <!-- USER REQUEST -->
+  <div class="row">
+    <div class="avatar av-user">U</div>
+    <div class="bubble">
+      <div class="who">Request</div>
+      <div class="msg user">Give me full router status — system health, WAN addressing,
+        per-interface links, live WAN throughput, firewall zones and DHCP leases.
+        Pull it live from the board.</div>
+    </div>
+  </div>
+
+  <!-- AGENT -->
+  <div class="row">
+    <div class="avatar av-agent">K</div>
+    <div class="bubble">
+      <div class="who">Agent · via vyos MCP</div>
+      <div class="msg">
+
+        <div class="think">Collecting live state. Batching independent operational
+          commands over the MCP tool.</div>
+
+        <!-- tool call 1 -->
+        <div class="tool">
+          <div class="tool-head">
+            <span class="tag">MCP</span>
+            <span class="name">vyos_execute_operational_command</span>
+            <span class="status"><span class="dot"></span>200 · 0.4s</span>
+          </div>
+          <div class="tool-args">{ <span class="k">"path"</span>: [<span class="s">"show"</span>, <span class="s">"system"</span>, <span class="s">"uptime"</span>] }</div>
+<pre class="out"><span class="h">10:42:07 up 6 days,  4:11,  1 user,  load average: 0.34, 0.28, 0.22</span></pre>
+        </div>
+
+        <!-- tool call 2 -->
+        <div class="tool">
+          <div class="tool-head">
+            <span class="tag">MCP</span>
+            <span class="name">vyos_execute_operational_command</span>
+            <span class="status"><span class="dot"></span>200 · 0.3s</span>
+          </div>
+          <div class="tool-args">{ <span class="k">"path"</span>: [<span class="s">"show"</span>, <span class="s">"interfaces"</span>] }</div>
+<pre class="out"><span class="h">Codes: S - State, L - Link, u - Up, D - Down, A - Admin Down</span>
+<span class="h">Interface    IP Address              S/L   Description</span>
+<span class="h">---------    ----------              ---   -----------</span>
+eth0         -                       u/<span class="r">D</span>   
+eth1         192.168.1.1/24          <span class="g">u/u</span>   lan
+eth2         192.168.30.1/24         <span class="g">u/u</span>   iot
+eth3         -                       <span class="g">u/u</span>   
+eth4         198.51.100.155/32       <span class="g">u/u</span>   <span class="c">WAN</span>
+pppoe0       198.51.100.155/32       <span class="g">u/u</span>   </pre>
+        </div>
+
+        <!-- tool call 3 -->
+        <div class="tool">
+          <div class="tool-head">
+            <span class="tag">MCP</span>
+            <span class="name">vyos_execute_operational_command</span>
+            <span class="status"><span class="dot"></span>200 · 0.3s</span>
+          </div>
+          <div class="tool-args">{ <span class="k">"path"</span>: [<span class="s">"show"</span>, <span class="s">"interfaces"</span>, <span class="s">"ethernet"</span>, <span class="s">"eth4"</span>] }</div>
+<pre class="out">eth4: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc fq
+    link/ether 68:05:ca:16:00:03
+    <span class="c">Speed: 10000Mb/s  Duplex: Full  Link detected: yes</span>
+    RX: bytes  packets  errors     TX: bytes  packets  errors
+    <span class="g">18.4 GB</span>   14.2M    0          <span class="g">2.1 GB</span>    9.8M     0</pre>
+        </div>
+
+        <!-- tool call 4 -->
+        <div class="tool">
+          <div class="tool-head">
+            <span class="tag">MCP</span>
+            <span class="name">vyos_execute_operational_command</span>
+            <span class="status"><span class="dot"></span>200 · 1.0s</span>
+          </div>
+          <div class="tool-args">{ <span class="k">"path"</span>: [<span class="s">"monitor"</span>, <span class="s">"interfaces"</span>, <span class="s">"ethernet"</span>, <span class="s">"eth4"</span>], <span class="k">"samples"</span>: <span class="s">2</span> }</div>
+<pre class="out"><span class="h">eth4   rx/s        tx/s</span>
+<span class="c">       142.6 Mbps  11.3 Mbps</span></pre>
+        </div>
+
+        <!-- tool call 5 -->
+        <div class="tool">
+          <div class="tool-head">
+            <span class="tag">MCP</span>
+            <span class="name">vyos_execute_operational_command</span>
+            <span class="status"><span class="dot"></span>200 · 0.3s</span>
+          </div>
+          <div class="tool-args">{ <span class="k">"path"</span>: [<span class="s">"show"</span>, <span class="s">"dhcp"</span>, <span class="s">"server"</span>, <span class="s">"leases"</span>] }</div>
+<pre class="out"><span class="h">IP            MAC                Hostname         Expires</span>
+192.168.1.104 a4:83:e7:2b:19:0c  Gaming-PC        11h 12m
+192.168.1.140 dc:a6:32:44:8f:2e  Living-Room-TV    9h 03m
+192.168.1.156 f0:18:98:1d:77:a1  family-laptop     6h 44m
+192.168.1.181 b8:e6:0c:5a:3f:d2  Alices-iPhone     2h 20m
+192.168.20.44 9e:2f:11:c4:08:5b  <span class="a">(unknown)</span>            30m</pre>
+        </div>
+
+        <!-- tool call 6 -->
+        <div class="tool">
+          <div class="tool-head">
+            <span class="tag">MCP</span>
+            <span class="name">vyos_execute_operational_command</span>
+            <span class="status"><span class="dot"></span>200 · 0.5s</span>
+          </div>
+          <div class="tool-args">{ <span class="k">"path"</span>: [<span class="s">"show"</span>, <span class="s">"firewall"</span>] } &nbsp;<span class="h">+ show system memory / storage, show ipv6 dhcpv6-client, fan-check</span></div>
+<pre class="out"><span class="h">Zone     Subnet            Default-Action   Members</span>
+lan      192.168.1.0/24    accept           7 hosts
+guest    192.168.20.0/24   drop (isolated)  2 hosts
+iot      192.168.30.0/24   drop (isolated)  3 hosts
+<span class="h">mem: 41% of 8 GB ECC   storage: 22% of 32 GB   temp: 52 C   fan: 1980 rpm</span></pre>
+        </div>
+
+        <div class="think">All sections collected. Rendering unified status report.</div>
+
+        <!-- FINAL REPORT -->
+        <div class="report">
+          <div class="verdict">
+            <div class="big">Your network is <b>healthy</b></div>
+            <div class="pill">source: vyos-mcp @ 192.168.1.185 · live</div>
+          </div>
+
+          <div class="grid4">
+            <div class="cell"><div class="lbl">Internet</div>
+              <div class="val g">Connected</div><div class="sm">PPPoE · up 2h 14m</div></div>
+            <div class="cell"><div class="lbl">Security</div>
+              <div class="val g">Firewall on</div><div class="sm">3 zones</div></div>
+            <div class="cell"><div class="lbl">Load (1m)</div>
+              <div class="val">0.34</div><div class="sm">4 cores · 1.6 GHz</div></div>
+            <div class="cell"><div class="lbl">Uptime</div>
+              <div class="val">6d 4h</div><div class="sm">6.18.44-vyos</div></div>
+          </div>
+
+          <!-- system -->
+          <section class="blk">
+            <h3>System <span class="live">hardware · live</span></h3>
+            <div class="kv">
+              <div class="k">Model</div><div class="v">Mono Gateway Development Kit (LS1046A)</div>
+              <div class="k">Firmware</div><div class="v">VyOS rolling 2026.08.22-0031</div>
+              <div class="k">Kernel</div><div class="v">Linux 6.18.44-vyos</div>
+              <div class="k">CPU / Memory</div><div class="v">4&times;A72 &middot; mem 41% of 8 GB ECC</div>
+              <div class="k">Storage</div><div class="v">22% of 32 GB eMMC</div>
+              <div class="k">Temp / Fan</div><div class="v">52&deg;C Normal &middot; 1980 rpm</div>
+              <div class="k">Power / Sensors</div><div class="v">8 power &middot; 2 thermal <span class="badge">fan-check</span></div>
+            </div>
+          </section>
+
+          <!-- WAN -->
+          <section class="blk">
+            <h3>WAN &amp; IP <span class="live">eth4 · PPPoE</span></h3>
+            <div class="kv">
+              <div class="k">IPv4</div><div class="v">198.51.100.155/32 &middot; gw 198.51.100.1</div>
+              <div class="k">IPv4 DNS</div><div class="v">203.0.113.10 &nbsp; 203.0.113.11</div>
+              <div class="k">IPv6 prefix</div><div class="v">2001:db8:2d00:2e00::/56</div>
+              <div class="k">IPv6 addr</div><div class="v">2001:db8:f02c:242:1a2b:3c4d:5e6f:7a8b/64</div>
+              <div class="k">IPv6 gw / DNS</div><div class="v">fe80::1a2b:3cff:fe4d:5e6f &middot; 2001:db8:d::23</div>
+              <div class="k">Lease expires</div><div class="v">0h 10m</div>
+            </div>
+          </section>
+
+          <!-- interfaces -->
+          <section class="blk">
+            <h3>Interfaces <span class="live">5 ports · live link</span></h3>
+            <table>
+              <tr><th>Port</th><th>Link</th><th>Speed</th><th>RX / TX today</th></tr>
+              <tr><td>eth0</td><td class="down">No link</td><td>&mdash;</td><td>&mdash;</td></tr>
+              <tr><td>eth1</td><td class="up">Up</td><td>1 Gbps full</td><td>4.1 / 0.9 GB</td></tr>
+              <tr><td>eth2</td><td class="up">Up</td><td>1 Gbps full</td><td>0.3 / 0.1 GB</td></tr>
+              <tr><td>eth3</td><td class="up">Up</td><td>10 Gbps</td><td>2.7 / 1.2 GB</td></tr>
+              <tr><td>eth4 <span class="wan">WAN</span></td><td class="up">Up</td><td>10 Gbps</td><td>18.4 / 2.1 GB</td></tr>
+            </table>
+          </section>
+
+          <!-- throughput -->
+          <section class="blk">
+            <h3>Internet traffic <span class="live">live · WAN eth4</span></h3>
+            <div class="kv">
+              <div class="k">Download</div><div class="v"><span class="wan">142.6 Mbps</span> of 300 Mbps plan</div>
+              <div class="k">Upload</div><div class="v"><span class="wan">11.3 Mbps</span> of 40 Mbps plan</div>
+            </div>
+          </section>
+
+          <!-- firewall zones -->
+          <section class="blk">
+            <h3>Firewall zones <span class="live">3 zones</span></h3>
+            <table>
+              <tr><th>Zone</th><th>Subnet</th><th>DHCP range</th><th>Policy</th><th>Hosts</th></tr>
+              <tr><td>lan</td><td>192.168.1.0/24</td><td>.100&ndash;.200</td><td class="up">accept</td><td>7</td></tr>
+              <tr><td>guest</td><td>192.168.20.0/24</td><td>.100&ndash;.150</td><td class="down">isolated</td><td>2</td></tr>
+              <tr><td>iot</td><td>192.168.30.0/24</td><td>.100&ndash;.180</td><td class="down">isolated</td><td>3</td></tr>
+            </table>
+          </section>
+
+          <!-- dhcp leases -->
+          <section class="blk">
+            <h3>DHCP leases <span class="live">5 active</span></h3>
+            <table>
+              <tr><th>Device</th><th>MAC</th><th>IP</th><th>Expires</th></tr>
+              <tr><td>Gaming PC</td><td>a4:83:e7:2b:19:0c</td><td>192.168.1.104</td><td>11h 12m</td></tr>
+              <tr><td>Living Room TV</td><td>dc:a6:32:44:8f:2e</td><td>192.168.1.140</td><td>9h 03m</td></tr>
+              <tr><td>family-laptop</td><td>f0:18:98:1d:77:a1</td><td>192.168.1.156</td><td>6h 44m</td></tr>
+              <tr><td>Alice's iPhone</td><td>b8:e6:0c:5a:3f:d2</td><td>192.168.1.181</td><td>2h 20m</td></tr>
+              <tr><td class="na">Unknown device</td><td>9e:2f:11:c4:08:5b</td><td>192.168.20.44</td><td>30m</td></tr>
+            </table>
+          </section>
+
+          <!-- not available -->
+          <section class="blk">
+            <h3>Not available on VyOS</h3>
+            <div class="kv">
+              <div class="k">Wi-Fi bands</div><div class="v na">n/a — no radio on LS1046A</div>
+              <div class="k">Per-device usage</div><div class="v na">n/a — no accounting</div>
+              <div class="k">Update available</div><div class="v na">n/a — firmware version reported above</div>
+            </div>
+          </section>
+        </div>
+
+        <div class="foot">8 sections rendered from 6 batched
+          <code>vyos_execute_operational_command</code> calls · unavailable fields marked <span class="na">n/a</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

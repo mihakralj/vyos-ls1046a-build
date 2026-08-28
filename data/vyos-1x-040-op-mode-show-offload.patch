@@ -45,7 +45,7 @@ diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
 new file mode 100755
 --- /dev/null
 +++ b/src/op_mode/show_offload.py
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,297 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -282,6 +282,7 @@ new file mode 100755
 +    """
 +    flows = _fetch_flows()
 +    rows = []
++    port_agg = {}
 +    for f in flows:
 +        l3 = _get(f, 'l3-proto')
 +        family = 'ipv6' if l3 == _ETH_P_IPV6 else 'ipv4'
@@ -302,6 +303,13 @@ new file mode 100755
 +            _get(f, 'packets', default=0),
 +            _get(f, 'bytes', default=0),
 +        ]))
++        # VLAN CC-path flows carry a per-port HW-forwarded aggregate
++        # (no per-key counters exist on silicon); collect once per port.
++        pid = _get(f, 'port-id')
++        apkts = _get(f, 'agg-packets')
++        abytes = _get(f, 'agg-bytes')
++        if pid is not None and apkts is not None and pid not in port_agg:
++            port_agg[pid] = (apkts, abytes)
 +
 +    if not rows:
 +        print('No flows tracked by ASK offload')
@@ -312,6 +320,10 @@ new file mode 100755
 +    headers = ['Protocol', 'Flow', 'Packets', 'Bytes']
 +    print(f'ASK offload flows ({len(data)} total):\n')
 +    print(tabulate(data, headers=headers, tablefmt='simple'))
++    for pid in sorted(port_agg):
++        apkts, abytes = port_agg[pid]
++        print(f'\nVLAN port {pid:#04x} hardware aggregate '
++              f'(since first flow on port): {apkts} packets / {abytes} bytes')
 +    return 0
 +
 +

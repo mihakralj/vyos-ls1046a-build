@@ -116,6 +116,16 @@ attribute-sets:
         type: u32
       - name: offloaded
         type: u8
+      - name: agg-packets
+        type: u64
+        doc: |
+          VLAN CC flows only: HW-forwarded packet delta on the flow's port
+          since the first VLAN flow was installed there.
+      - name: agg-bytes
+        type: u64
+        doc: |
+          VLAN CC flows only: HW-forwarded byte delta on the flow's port
+          since the first VLAN flow was installed there.
   -
     name: sa
     name-prefix: ask-sa-attr-
