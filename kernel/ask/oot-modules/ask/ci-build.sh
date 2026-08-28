@@ -188,8 +188,11 @@ if [ "${KUNIT:-false}" = "true" ]; then
     make -C "$KSRC" M="$OOT_DIR" \
         CONFIG_NET_ASK=m CONFIG_NET_ASK_KUNIT_TEST=m \
         modules
-    [ -f "$OOT_DIR/ask_kunit.ko" ] || { echo "FATAL: ask_kunit.ko was not produced"; exit 1; }
-    file "$OOT_DIR/ask_kunit.ko"
+    # The harness is a SEPARATE module built in the tests/ subdir
+    # (tests/Kbuild -> obj-m ask_kunit.o), so it lands at
+    # $OOT_DIR/tests/ask_kunit.ko, not next to ask.ko.
+    [ -f "$OOT_DIR/tests/ask_kunit.ko" ] || { echo "FATAL: tests/ask_kunit.ko was not produced"; exit 1; }
+    file "$OOT_DIR/tests/ask_kunit.ko"
 fi
 
 # Sign every produced .ko (just `ask.ko` for now; future PRs add
@@ -209,7 +212,9 @@ ASK_SIGNER_SKID=$(openssl x509 -in "$PERSISTENT_X509" -inform DER -noout \
     -ext subjectKeyIdentifier 2>/dev/null | tail -1 | tr -d ' ')
 echo "### F-217 signing-key SKID=${ASK_SIGNER_SKID:-unknown} (persistent == kernel snapshot)"
 echo "### Signing OOT modules with kernel's persistent signing key"
-for ko in "$OOT_DIR"/*.ko; do
+# ask_kunit.ko (KUnit builds only) lives in the tests/ subdir; the extra
+# glob is unmatched in production builds and the [ -f ] guard skips it.
+for ko in "$OOT_DIR"/*.ko "$OOT_DIR"/tests/*.ko; do
     [ -f "$ko" ] || continue
     "$KSRC/scripts/sign-file" sha512 \
         "$KSRC/certs/signing_key.pem" \
@@ -243,6 +248,9 @@ mkdir -p "$STAGE/DEBIAN"
 mkdir -p "$STAGE/lib/modules/${KVER}/extra"
 
 cp "$OOT_DIR"/*.ko "$STAGE/lib/modules/${KVER}/extra/"
+if [ "${KUNIT:-false}" = "true" ]; then
+    cp "$OOT_DIR"/tests/ask_kunit.ko "$STAGE/lib/modules/${KVER}/extra/"
+fi
 
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: ${DEB_NAME}
