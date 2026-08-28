@@ -900,12 +900,19 @@ scripts/config --disable CONFIG_THERMAL_GOV_BANG_BANG
 scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
 scripts/config --disable CONFIG_STRICT_DEVMEM
 scripts/config --disable CONFIG_IO_STRICT_DEVMEM
+make olddefconfig
 
 # KUnit debug build (opt-in): force the ask KUnit symbols in AFTER
 # merge_config.sh so VyOS snippets cannot disable them, and enable the
 # lockdep/PROVE_RCU instrumentation the ASK2 ownership/RCU invariants
 # (CR-009 flush stall guard, CR-010 RCU read-side precheck) run under.
 # KUNIT is inherited from the workflow step env (auto-build.yml).
+#
+# Placement note: this block MUST sit AFTER the final `make olddefconfig`
+# above — the ASK2 v2 persistent-key injection (further below in
+# ci-setup-kernel.sh) anchors on the exact adjacent line pair
+# "scripts/config --disable CONFIG_IO_STRICT_DEVMEM" + "make olddefconfig"
+# and a block between them breaks that anchor.
 if [ "${KUNIT:-false}" = "true" ]; then
     echo "I: LS1046A — KUnit build: forcing CONFIG_KUNIT + PROVE_RCU/PROVE_LOCKING"
     scripts/config --set-val CONFIG_KUNIT y
@@ -915,8 +922,6 @@ if [ "${KUNIT:-false}" = "true" ]; then
     scripts/config --enable CONFIG_PROVE_LOCKING
     make olddefconfig
 fi
-
-make olddefconfig
 
 LS1046A_POSTDEFCONFIG_EOF
 
