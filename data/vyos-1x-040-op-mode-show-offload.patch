@@ -45,7 +45,7 @@ diff --git a/src/op_mode/show_offload.py b/src/op_mode/show_offload.py
 new file mode 100755
 --- /dev/null
 +++ b/src/op_mode/show_offload.py
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,297 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -280,51 +280,51 @@ new file mode 100755
 +    within each family so the table is stable and readable rather than
 +    following the kernel's hash-random rhashtable iteration order.
 +    """
- +    flows = _fetch_flows()
- +    rows = []
- +    port_agg = {}
- +    for f in flows:
- +        l3 = _get(f, 'l3-proto')
- +        family = 'ipv6' if l3 == _ETH_P_IPV6 else 'ipv4'
- +        l4 = _get(f, 'l4-proto')
- +        proto = _L4.get(l4, str(l4) if l4 is not None else '-')
- +        # Sort key: IPv4 (0) before IPv6 (1), then proto, source, dest.
- +        sort_key = (0 if family == 'ipv4' else 1,
- +                    proto,
- +                    _fmt_ip(_get(f, 'src-ip')),
- +                    _get(f, 'sport') or 0,
- +                    _fmt_ip(_get(f, 'dst-ip')),
- +                    _get(f, 'dport') or 0)
- +        source = _fmt_endpoint(_get(f, 'src-ip'), _get(f, 'sport'))
- +        destination = _fmt_endpoint(_get(f, 'dst-ip'), _get(f, 'dport'))
- +        rows.append((sort_key, [
- +            f'{family}/{proto}',
- +            f'{source} → {destination}',
- +            _get(f, 'packets', default=0),
- +            _get(f, 'bytes', default=0),
- +        ]))
- +        # VLAN CC-path flows carry a per-port HW-forwarded aggregate
- +        # (no per-key counters exist on silicon); collect once per port.
- +        pid = _get(f, 'port-id')
- +        apkts = _get(f, 'agg-packets')
- +        abytes = _get(f, 'agg-bytes')
- +        if pid is not None and apkts is not None and pid not in port_agg:
- +            port_agg[pid] = (apkts, abytes)
- +
- +    if not rows:
- +        print('No flows tracked by ASK offload')
- +        return 0
- +
- +    rows.sort(key=lambda r: r[0])
- +    data = [r[1] for r in rows]
- +    headers = ['Protocol', 'Flow', 'Packets', 'Bytes']
- +    print(f'ASK offload flows ({len(data)} total):\n')
- +    print(tabulate(data, headers=headers, tablefmt='simple'))
- +    for pid in sorted(port_agg):
- +        apkts, abytes = port_agg[pid]
- +        print(f'\nVLAN port {pid:#04x} hardware aggregate '
- +              f'(since first flow on port): {apkts} packets / {abytes} bytes')
- +    return 0
++    flows = _fetch_flows()
++    rows = []
++    port_agg = {}
++    for f in flows:
++        l3 = _get(f, 'l3-proto')
++        family = 'ipv6' if l3 == _ETH_P_IPV6 else 'ipv4'
++        l4 = _get(f, 'l4-proto')
++        proto = _L4.get(l4, str(l4) if l4 is not None else '-')
++        # Sort key: IPv4 (0) before IPv6 (1), then proto, source, dest.
++        sort_key = (0 if family == 'ipv4' else 1,
++                    proto,
++                    _fmt_ip(_get(f, 'src-ip')),
++                    _get(f, 'sport') or 0,
++                    _fmt_ip(_get(f, 'dst-ip')),
++                    _get(f, 'dport') or 0)
++        source = _fmt_endpoint(_get(f, 'src-ip'), _get(f, 'sport'))
++        destination = _fmt_endpoint(_get(f, 'dst-ip'), _get(f, 'dport'))
++        rows.append((sort_key, [
++            f'{family}/{proto}',
++            f'{source} → {destination}',
++            _get(f, 'packets', default=0),
++            _get(f, 'bytes', default=0),
++        ]))
++        # VLAN CC-path flows carry a per-port HW-forwarded aggregate
++        # (no per-key counters exist on silicon); collect once per port.
++        pid = _get(f, 'port-id')
++        apkts = _get(f, 'agg-packets')
++        abytes = _get(f, 'agg-bytes')
++        if pid is not None and apkts is not None and pid not in port_agg:
++            port_agg[pid] = (apkts, abytes)
++
++    if not rows:
++        print('No flows tracked by ASK offload')
++        return 0
++
++    rows.sort(key=lambda r: r[0])
++    data = [r[1] for r in rows]
++    headers = ['Protocol', 'Flow', 'Packets', 'Bytes']
++    print(f'ASK offload flows ({len(data)} total):\n')
++    print(tabulate(data, headers=headers, tablefmt='simple'))
++    for pid in sorted(port_agg):
++        apkts, abytes = port_agg[pid]
++        print(f'\nVLAN port {pid:#04x} hardware aggregate '
++              f'(since first flow on port): {apkts} packets / {abytes} bytes')
++    return 0
 +
 +
 +def main():
