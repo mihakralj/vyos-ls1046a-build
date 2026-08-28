@@ -9,6 +9,17 @@
 ccflags-y += -I$(src)/include
 ccflags-y += -I$(src)/include/uapi
 
+# KUnit harness builds: ci-build.sh passes CONFIG_NET_ASK_KUNIT_TEST on the
+# make command line (the OOT Kconfig is inert for M= builds). Only then is
+# ASK_KUNIT_EXPORTS defined, which flips in the six conditional
+# EXPORT_SYMBOL_GPL()s the separate ask_kunit.ko links against (the suite
+# pins internals: the key builders, intent lowering, the flow lifecycle and
+# the PCD handle getter). Production ask.ko is compiled without the define,
+# so its export surface is byte-identical to before.
+ifeq ($(origin CONFIG_NET_ASK_KUNIT_TEST),command line)
+ccflags-y += -DASK_KUNIT_EXPORTS
+endif
+
 obj-$(CONFIG_NET_ASK) += ask.o
 
 ask-y := \
