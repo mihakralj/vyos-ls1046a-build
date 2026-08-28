@@ -176,6 +176,22 @@ make -C "$KSRC" M="$OOT_DIR" \
 file "$OOT_DIR/ask.ko"
 modinfo "$OOT_DIR/ask.ko" || true
 
+# KUnit debug build (opt-in via the self-hosted-build.yml `kunit` input,
+# forwarded as the KUNIT env): also compile the ASK2 kunit test harness
+# (ask_kunit.ko). Production builds skip this and ship only ask.ko. The
+# kernel must have been built with CONFIG_KUNIT for this to link —
+# ci-setup-kernel.sh enables it in $KUNIT builds. On a misconfigured
+# build modpost fails loudly on the unresolved kunit_* symbols, so a
+# broken kunit build cannot pass silently.
+if [ "${KUNIT:-false}" = "true" ]; then
+    echo "### KUnit build: compiling ask_kunit.ko test harness"
+    make -C "$KSRC" M="$OOT_DIR" \
+        CONFIG_NET_ASK=m CONFIG_NET_ASK_KUNIT_TEST=m \
+        modules
+    [ -f "$OOT_DIR/ask_kunit.ko" ] || { echo "FATAL: ask_kunit.ko was not produced"; exit 1; }
+    file "$OOT_DIR/ask_kunit.ko"
+fi
+
 # Sign every produced .ko (just `ask.ko` for now; future PRs add
 # ask_bridge.ko under the same Kbuild).
 #

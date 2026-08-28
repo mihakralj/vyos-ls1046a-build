@@ -21,6 +21,10 @@ on:
         description: 'Wipe kernel/vyos-1x build caches before building (debug only, default false)'
         type: boolean
         default: false
+      kunit:
+        description: 'KUnit debug build: enable CONFIG_KUNIT + FMan PCD suites (run at boot) + ship ask_kunit.ko (default false)'
+        type: boolean
+        default: false
 
 jobs:
   # ── Step 1: Power on the Azure ARM64 VM ──────────────────────────
@@ -109,6 +113,7 @@ jobs:
       BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
       build_version: ${{ github.event.inputs.build_version }}
       force_clean_caches: ${{ github.event.inputs.force_clean_caches == 'true' }}
+      kunit: ${{ github.event.inputs.kunit == 'true' }}
     secrets:
       MOK_KEY: ${{ secrets.MOK_KEY }}
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
