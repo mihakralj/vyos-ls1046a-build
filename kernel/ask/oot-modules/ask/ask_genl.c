@@ -613,7 +613,7 @@ if (nla_put_be16(skb, ASK_FLOW_ATTR_DPORT, f->key.dport))
 goto nla_put_failure;
 if (nla_put_u32(skb, ASK_FLOW_ATTR_IIF, f->key.iif))
 goto nla_put_failure;
-if (nla_put_u8(skb, ASK_ATTR_PORT_ID, f->key.port_id))
+if (nla_put_u8(skb, ASK_FLOW_ATTR_PORT_ID, f->key.port_id))
 goto nla_put_failure;
 
 do {
