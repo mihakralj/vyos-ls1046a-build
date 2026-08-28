@@ -2180,20 +2180,60 @@ own PCD objects and prove readback.
   open under §5.
 - [~] **T-M8-5** — Upstream-submission prep (NOT release-blocking; the rolling
   image ships without it). Baseline audited 2026-08-22. **KUnit already
-  strong:** `ask_flow_suite` (16 cases) + `ask_genl_suite` (12) give ~89–92%
-  function coverage on `ask_flow.c` incl. the A3 ownership/generation invariants
-  (monotonic gen, stale-DESTROY no-op, publish-refused-after-tombstone, legacy
-  paths); `ask_genl_attr.c` is pure `nla_policy` data (3/8 tables validation-
-  exercised). **Remaining for an upstream series:** (1) checkpatch/tabs cleanup —
-  `ask_genl_attr.c` 2 warnings and `ask_flow.c` ~105 are bounded; the two large
-  ported datapath files (`ask_flow_offload.c` ~3.2k, `ask_hw.c` ~1.2k findings,
-  mostly space-vs-tab from ported blocks) need a dedicated whitespace pass, not a
-  functional change; (2) wire a CI KUnit invocation (`CONFIG_NET_ASK_KUNIT_TEST`
-  is never built in CI today); (3) fill gap tests — `ask_flow_gen_current`,
-  `ask_flow_gen_release` (untested; likely dead API — remove or test), gen-wrap,
-  gen-store-failure fallback, and a lockdep/PROVE_RCU KUnit config for the
-  CR-009 stall guard and CR-010 RCU-precheck invariants. Track as a post-release
-  upstreaming task.
+  strong:** `ask_flow_suite` (19 cases after this task) + `ask_genl_suite` (12)
+  give ~89–92% function coverage on `ask_flow.c` incl. the A3
+  ownership/generation invariants (monotonic gen, stale-DESTROY no-op,
+  publish-refused-after-tombstone, legacy paths); `ask_genl_attr.c` is pure
+  `nla_policy` data. **All three remaining items IMPLEMENTED 2026-08-28
+  (dpaa1, uncommitted-pending-CI at the time of writing):**
+  (1) **checkpatch/tabs cleanup** — mechanical `checkpatch --fix-inplace` pass
+  plus manual review over the OOT sources and the KUnit test files, verified
+  semantically-neutral (`diff -w` shows only blank-line insertions; all
+  unsafe initializer removals restored). Result: `ask_flow_offload.c`
+  2378→0 errors / 1487→48 warnings, `ask_hw.c` 695→0 / 531→38, `ask_genl.c`
+  10→0, `ask_test_flow_offload.c` 86→0, `ask_test_hw_pcd.c` 93→4,
+  `ask_test_flow.c` 8→8. Residual 13 errors are `GLOBAL_INITIALISERS` FALSE
+  POSITIVES (5 in `ask_flow.c`, 8 in `ask_test_flow.c`): the ported col-0
+  function-body indentation defeats checkpatch's depth tracking, so local
+  declarations like `int rc = 0;` are misclassified as globals. Removing the
+  initialisers is NOT acceptable (two sites genuinely need them:
+  `ask_flow_walk`'s empty-table return and `ask_flow_flush`'s `++stalls`
+  first pass); closing them for real requires a structural re-indent of
+  those two files — tracked as the follow-up that would finish the upstream
+  series. (2) **CI KUnit wiring** — `self-hosted-build.yml` gained a `kunit`
+  boolean input, forwarded through `auto-build.yml` as the `KUNIT` env.
+  `ci-setup-kernel.sh` merges `kernel/ask/kernel-config/90-kunit.config`
+  (now also `CONFIG_PROVE_RCU=y` + `CONFIG_PROVE_LOCKING=y`) ONLY when
+  `KUNIT=true` and force-sets `KUNIT`/`KUNIT_DEBUGFS`/
+  `FSL_FMAN_PCD_KUNIT_TEST`/`PROVE_RCU`/`PROVE_LOCKING` after
+  `merge_config.sh` so VyOS snippets cannot drop them; the F-089
+  `fman_pcd_fe_test` built-in suites then run at boot and print KTAP.
+  `ci-build.sh` additionally compiles `ask_kunit.ko`
+  (`CONFIG_NET_ASK_KUNIT_TEST=m`) on KUnit builds and packages it into the
+  ask-modules .deb; production builds skip all of this and stay
+  byte-identical. Board usage: install the KUnit ISO, then
+  `modprobe ask_kunit` → KTAP in dmesg + `/sys/kernel/debug/kunit/`.
+  (3) **gap tests** — three new KUnit cases: `gen_current_contract` (unknown
+  cookie = 0, live value, tombstone preserves gen while `is_current` goes
+  false), `gen_release_contract` (erase → 0 → next claim restarts at 1;
+  NULL-table defensive no-ops), `gen_wrap_never_zero` (crafted xa_store at
+  `U32_MAX` generation → next claim wraps to 1, generation 0 never handed
+  out). Both files compile-clean against the canonical 6.18.44 field.
+  Gen-store-failure (return-0-on-xa_store-error) has no kunit injection
+  hook for xarray node-allocation failure; the 3-line path is review-pinned
+  by the `gen_next(NULL)=0` assertion and the CR-009/CR-010 lockdep build
+  (the KUnit ISO runs all suites under PROVE_RCU/PROVE_LOCKING). **CR-011
+  CLOSED with it:** the obsolete fake-ID/-EAGAIN/to-one contracts in
+  `ask_test_flow.c` and `ask_test_hw_pcd.c` were rewritten to the live
+  mechanisms (plain atomic-counter fake ids, `hw_backed` gating, PR14y
+  -EAGAIN pending queue, idempotent `ask_hw_flow_remove`), and
+  `hw_pcd_test_remove_unknown_cookie` now pins the current idempotent-0
+  contract (it previously asserted the retired `-EINVAL` contract and would
+  fail the first CI run). **Remaining for the upstream series:** (a) the
+  structural re-indent of `ask_flow.c`/`ask_test_flow.c` that closes the 13
+  false-positive errors; (b) actually run the KUnit ISO on a board (operator
+  install + `modprobe ask_kunit`); (c) upstream-format patch series
+  packaging.
 - [x] **T-M8-6 — RETIRED (not required for release).** The production FE-VM
   ehash dataplane has **zero per-flow MURAM allocation**: one fixed-capacity
   512 KiB DDR ehash bucket table per engaged port (F-220/F-225), one 256-byte
@@ -2235,7 +2275,7 @@ open defects.
 | **CR-003** | VyOS commit-path handling was fail-open: live flows could immediately re-arm after a bare disengage. | IMPLEMENTED 2026-08-17; board validation pending | Preview release | Helper now uses production YNL `flush-flows` + conntrack flush, YNL disengage, then read-only `fe_arm` verification; non-zero helper rc raises ConfigError (fail closed). Validate on the next image. |
 | **CR-004** | Stale-MAC remove/reinsert lifecycle can resurrect or lose flows | CODE-FIXED by T-M6-A3 (`c65f7793`); silicon stress OPEN | M6 / M8 | Run concurrent REPLACE/DESTROY/neighbour churn under CONFIG_DEBUG_LIST; require no poison/WARN/stale generation and byte-clean MURAM/snapshot baseline |
 | **CR-007** | Dead Fork-A shadow/HM bookkeeping burdens the FE-VM path; CC-tree insert plumbing deleted | PARTIAL | M6 (T-M6-5) | Finish dead-bookkeeping removal; reimplementation tracked in §4.4 |
-| **CR-011** | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | PARTIAL | M8 (T-M8-5) | Clean with upstream prep |
+| **CR-011** | Tests/comments still encode obsolete fake-ID and `-EAGAIN` contracts | **CLOSED 2026-08-28 with T-M8-5** — the stale packed-token/TOKEN_NONE fake-id prose in `ask_test_flow.c` and `ask_test_hw_pcd.c` now describes the live mechanisms (plain atomic-counter fake ids, `ask_flow::hw_backed` gating, PR14y `-EAGAIN` pending queue); `hw_pcd_test_remove_unknown_cookie` was asserting the retired `-EINVAL` contract and now pins the live idempotent-0 contract (F-116/F-120 rule). Compile-verified against the canonical 6.18.44 field. | M8 (T-M8-5) | None — closed; residual structural re-indent lives in T-M8-5 |
 | **F-120** | `ASK_CMD_FLUSH_FLOWS` SW/HW divergence | CODE-FIXED; silicon validation OPEN | M6 / M8 | T-M6-6 (§4.5) |
 | **F-122** | `fe_arm engage` returns `-EINVAL` on an already-engaged port (not idempotent) | CODE-CLOSED (`F_122.py`, wired `ci-setup-kernel.sh`); board re-confirm at M8 soak | M7 polish / M8 soak | Implemented: `test_bit(port_id, pcd->fe_port_armed)` at the top of the shared `__fman_pcd_fe_arm_engage()` returns 0 (covers both debugfs and kernel-API paths), and the wrapper's F-107 `-EBUSY` guard now returns 0. Mirrors the F-116/F-120 idempotence rule. |
 | **F-231** | Hardware ingress-policer never installed on any shipping image: `tc matchall action police skip_sw` → EOPNOTSUPP, `ask: flow_offload: unexpected tc_setup_type=4` (=`TC_SETUP_CLSMATCHALL`). The post-patch `TC_SETUP_FT` mutation in `ci-setup-kernel.sh` predated board patch 0145 and shadowed the policer-first `TC_SETUP_BLOCK` dispatch, so `dpaa_setup_tc_block()` (0104 matchall/police registrar) was never invoked; ASK's block cb then rejected CLSMATCHALL. Reproduced on ASK-armed eth3 AND ASK-unarmed eth2 (global). | **CLOSED — SILICON-VALIDATED 2026-08-23** (`aaf13008`, image `2026.08.23-1828`, CI `32658134206`). Corrected mutation = policer-first `TC_SETUP_BLOCK` + separate `case TC_SETUP_FT:`; ASK cb silently declines `TC_SETUP_CLSMATCHALL`. Board proof: `tc matchall police skip_sw` → `in_hw` via raw tc AND VyOS CLI; FMPL_GCR=`0xc0500002` (EN\|STEN), PMR window valid; rate-cap sweep on eth1 (ASK-free 100Mbps): 10/25/50/80 Mbit configured → 8.8/21.9/43.7/70.3 Mbit eth4 egress (0.88× = correct L2-overhead accounting on 1400B UDP); delete reverts scheme to `nia=0x02` + restores 86.5 Mbit uncapped forwarding. | M8 | DONE. **This is why the policer "was never finished" — it never installed in HW; BUG-3b flood was moot.** ASK-engaged ports (eth3/eth4) route AC_CC→FE-VM (BMI `rccb`≠0) and bypass the RSS→PLCR scheme by design — policer is for non-ASK ports (matches DUAL-DATAPLANE per-interface mutex). |
