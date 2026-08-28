@@ -2184,8 +2184,9 @@ own PCD objects and prove readback.
   give ~89–92% function coverage on `ask_flow.c` incl. the A3
   ownership/generation invariants (monotonic gen, stale-DESTROY no-op,
   publish-refused-after-tombstone, legacy paths); `ask_genl_attr.c` is pure
-  `nla_policy` data. **All three remaining items IMPLEMENTED 2026-08-28
-  (dpaa1, uncommitted-pending-CI at the time of writing):**
+  `nla_policy` data. **All three remaining items IMPLEMENTED + CI-VALIDATED
+  2026-08-28 (dpaa1 `69d1fcc2`→`8639beca`; KUnit CI build run `33205744129`
+  SUCCESS):**
   (1) **checkpatch/tabs cleanup** — mechanical `checkpatch --fix-inplace` pass
   plus manual review over the OOT sources and the KUnit test files, verified
   semantically-neutral (`diff -w` shows only blank-line insertions; all
@@ -2212,7 +2213,19 @@ own PCD objects and prove readback.
   (`CONFIG_NET_ASK_KUNIT_TEST=m`) on KUnit builds and packages it into the
   ask-modules .deb; production builds skip all of this and stay
   byte-identical. Board usage: install the KUnit ISO, then
-  `modprobe ask_kunit` → KTAP in dmesg + `/sys/kernel/debug/kunit/`.
+  `modprobe ask && modprobe ask_kunit` → KTAP in dmesg +
+  `/sys/kernel/debug/kunit/`. Validated end-to-end by CI run `33205744129`
+  (fragment merge → post-merge forcing → `ask_kunit.ko` link → sign →
+  package, full ISO SUCCESS). Two CI failures fixed along the way: the
+  forcing block initially broke the ASK2 v2 `ANCHOR_FIRST` line pair
+  (relocated after the final `olddefconfig`, `ddfe9f5f`), and
+  `ask_kunit.ko` could not link until the six internals the suite pins
+  (`ask_flow_init`/`_exit`, `ask_hw_pcd_get`, `ask_intent_lower`,
+  `ask_fe_build_key`/`_v6`) gained `ASK_KUNIT_EXPORTS`-gated
+  `EXPORT_SYMBOL_GPL()`s (Kbuild `origin=command line` conditional,
+  `885db350`; the harness lands in `tests/`, sign/package globs fixed in
+  `8639beca` — the suite had never actually linked since real coverage
+  replaced the PR4 dummy, which is exactly the rot T-M8-5 aimed at).
   (3) **gap tests** — three new KUnit cases: `gen_current_contract` (unknown
   cookie = 0, live value, tombstone preserves gen while `is_current` goes
   false), `gen_release_contract` (erase → 0 → next claim restarts at 1;
