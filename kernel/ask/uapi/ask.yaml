@@ -116,6 +116,10 @@ attribute-sets:
         type: u32
       - name: offloaded
         type: u8
+      - name: port-id
+        type: u8
+        doc: |
+          FMan hardware port the flow lives on.
       - name: agg-packets
         type: u64
         doc: |
