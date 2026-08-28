@@ -763,6 +763,9 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
 {
 	return ask_hw_pcd_inst;
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_hw_pcd_get);
+#endif
 
 /*
  * Fix B: expose the cached FMan handle (resolved via fman_bind() at bringup)

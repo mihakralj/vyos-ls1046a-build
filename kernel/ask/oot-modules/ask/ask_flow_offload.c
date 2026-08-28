@@ -1329,6 +1329,9 @@ int ask_intent_lower(const struct ask_flow_intent *in,
 	*out_action_flags = flags;
 	return 0;
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_intent_lower);
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* Action parsing                                                             */
@@ -1829,6 +1832,9 @@ void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE])
 	memcpy(&k[10], &key->sport, sizeof(key->sport));
 	memcpy(&k[12], &key->dport, sizeof(key->dport));
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_fe_build_key);
+#endif
 
 /*
  * M6 Piece 3: v6 ehash key builder.  Same MSB-first EKFC extraction order
@@ -1844,6 +1850,9 @@ void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6
 	memcpy(&k[34], &key->sport, sizeof(key->sport));
 	memcpy(&k[36], &key->dport, sizeof(key->dport));
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_fe_build_key_v6);
+#endif
 
 /*
  * Dual-lane 46-byte key builder (specs/ask2-ipv6-dual-lane-key-design.md).

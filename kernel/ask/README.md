@@ -88,10 +88,11 @@ Dispatch the self-hosted build with input `kunit=true`. The build then:
   ask-modules package.
 
 On the board: install the KUnit ISO, boot (KTAP from the built-in FMan
-suites lands in dmesg), then `sudo modprobe ask_kunit` to run every ASK
-suite under PROVE_RCU/PROVE_LOCKING; results land in dmesg and
-`/sys/kernel/debug/kunit/`. Production images never set `kunit` and carry
-none of this.
+suites lands in dmesg), then `sudo modprobe ask && sudo modprobe ask_kunit`
+to run every ASK suite under PROVE_RCU/PROVE_LOCKING; results land in
+dmesg and `/sys/kernel/debug/kunit/`. `ask.ko` must load first: the suites
+drive its live tables through the exported API. Production images never set
+`kunit` and carry none of this.
 
 ## Implementation order
 
