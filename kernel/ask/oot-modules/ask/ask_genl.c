@@ -613,6 +613,8 @@ if (nla_put_be16(skb, ASK_FLOW_ATTR_DPORT, f->key.dport))
 goto nla_put_failure;
 if (nla_put_u32(skb, ASK_FLOW_ATTR_IIF, f->key.iif))
 goto nla_put_failure;
+if (nla_put_u8(skb, ASK_ATTR_PORT_ID, f->key.port_id))
+goto nla_put_failure;
 
 do {
 seq = u64_stats_fetch_begin(&f->stats.syncp);
@@ -630,6 +632,24 @@ goto nla_put_failure;
 if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_LAST_SEEN_NS, last_seen_ns,
       ASK_FLOW_ATTR_UNSPEC))
 goto nla_put_failure;
+
+/*
+ * VLAN CC-path flows have no per-key silicon counters, so their per-flow
+ * packets/bytes above stay 0.  Attach the port's HW-forwarded aggregate
+ * (delta since the port's first VLAN flow) so `show offload flow` can
+ * tell a working offload from a dead one.
+ */
+if (f->key.vlan_edit_flags) {
+u64 apkts, abytes;
+
+if (!ask_vlan_cc_agg_stats(f->key.port_id, &apkts, &abytes)) {
+if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_AGG_PACKETS, apkts,
+      ASK_FLOW_ATTR_UNSPEC) ||
+    nla_put_u64_64bit(skb, ASK_FLOW_ATTR_AGG_BYTES, abytes,
+      ASK_FLOW_ATTR_UNSPEC))
+goto nla_put_failure;
+}
+}
 
 return 0;
 
