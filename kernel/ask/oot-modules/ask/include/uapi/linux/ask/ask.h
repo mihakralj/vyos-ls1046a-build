@@ -148,6 +148,7 @@ enum ask_flow_attr {
     ASK_FLOW_ATTR_LAST_SEEN_NS, /* u64 */
     ASK_FLOW_ATTR_HW_FLOW_ID,   /* u32, opaque; omitted when not offloaded */
     ASK_FLOW_ATTR_OFFLOADED,    /* u8, 1 = programmed into silicon */
+    ASK_FLOW_ATTR_PORT_ID,      /* u8, FMan hardware port the flow lives on */
     ASK_FLOW_ATTR_AGG_PACKETS,  /* u64, VLAN CC flows only: HW-forwarded
 				 * packet delta on the flow's port since the
 				 * first VLAN flow was installed there */
