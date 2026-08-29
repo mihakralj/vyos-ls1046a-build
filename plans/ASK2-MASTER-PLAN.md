@@ -2206,9 +2206,14 @@ own PCD objects and prove readback.
   `ci-setup-kernel.sh` merges `kernel/ask/kernel-config/90-kunit.config`
   (now also `CONFIG_PROVE_RCU=y` + `CONFIG_PROVE_LOCKING=y`) ONLY when
   `KUNIT=true` and force-sets `KUNIT`/`KUNIT_DEBUGFS`/
-  `FSL_FMAN_PCD_KUNIT_TEST`/`PROVE_RCU`/`PROVE_LOCKING` after
-  `merge_config.sh` so VyOS snippets cannot drop them; the F-089
-  `fman_pcd_fe_test` built-in suites then run at boot and print KTAP.
+   `FSL_FMAN_PCD_KUNIT_TEST`/`PROVE_RCU`/`PROVE_LOCKING` after
+   `merge_config.sh` so VyOS snippets cannot drop them. **NOTE 2026-08-29
+   (board-observed):** the F-089 `fman_pcd_fe_test` built-in suite does NOT
+   run — `CONFIG_FSL_FMAN_PCD_KUNIT_TEST` has no live Kconfig declaration
+   anywhere in the tree (F-089 injects the test .c + `IS_ENABLED` guard but
+   never the Kconfig entry), so syncconfig silently drops the forced symbol
+   and the boot-time executor prints `KTAP 1..0`. Fix pending in
+   `bin/kernel-fixups/F_089.py` (qdrant-gated per AGENTS S0).
   `ci-build.sh` additionally compiles `ask_kunit.ko`
   (`CONFIG_NET_ASK_KUNIT_TEST=m`) on KUnit builds and packages it into the
   ask-modules .deb; production builds skip all of this and stay
@@ -2241,12 +2246,33 @@ own PCD objects and prove readback.
   mechanisms (plain atomic-counter fake ids, `hw_backed` gating, PR14y
   -EAGAIN pending queue, idempotent `ask_hw_flow_remove`), and
   `hw_pcd_test_remove_unknown_cookie` now pins the current idempotent-0
-  contract (it previously asserted the retired `-EINVAL` contract and would
-  fail the first CI run). **Remaining for the upstream series:** (a) the
-  structural re-indent of `ask_flow.c`/`ask_test_flow.c` that closes the 13
-  false-positive errors; (b) actually run the KUnit ISO on a board (operator
-  install + `modprobe ask_kunit`); (c) upstream-format patch series
-  packaging.
+   contract (it previously asserted the retired `-EINVAL` contract and would
+   fail the first CI run). **BOARD-VALIDATED GREEN 2026-08-29 (DUT .185,
+   KUnit ISO `vyos-2026.08.29-0242-rolling`, CI run `33229593634`, commits
+   `136fc794` + `fad54f15`):** first-ever full on-DUT pass of
+   `modprobe ask_kunit` — `ask_dummy` ok, `ask_flow` 20/20,
+   `ask_flow_offload` 11 pass + 12 skip, `ask_genl` 12/12, `ask_hw_pcd`
+   20 pass + 4 skip, ZERO failures, no crash, board stable. The first board
+   run (`0159` image) crashed on `ask_flow_offload` test 9:
+   `ask_z11_other_src_v4/v6` dereferenced the synthetic KUnit cookie as a
+   `flow_offload_tuple*` (production-safe; cookie is always a real tuple
+   pointer in the nft path) — fixed with a `virt_addr_valid()` guard
+   (`136fc794`), and the 12 REPLACE-path cases now `kunit_skip()` (they
+   require a registered netdev + live FMan PCD; covered by the
+   hw-integration harness). The crash then exposed 11 masked failures
+   (`fad54f15`): genl `ask_flow_policy` missing `OFFLOADED`/`PORT_ID`/
+   `AGG_*` entries (strict `nla_parse` -EINVAL), `test_init_flow`
+   `hw_backed=0`, `test_alloc_skb_tiny` not tiny (SKB_DATA_ALIGN rounding
+   vs grown T-M7-2 fills), and live-DUT state leaks via shared `ask.ko`
+   globals (CAPABILITIES+VLAN, NUM_FMAN=1, populated PCD ctx, config-armed
+   VLAN gate) — the affected pins are now predicate-based and the
+   state-dependent cases skip on an engaged board. **Remaining for the
+   upstream series:** (a) the structural re-indent of `ask_flow.c`/
+   `ask_test_flow.c` that closes the 13 false-positive errors; (b) add the
+   missing `CONFIG_FSL_FMAN_PCD_KUNIT_TEST` Kconfig declaration via F-089
+   (qdrant-gated) so the in-image built-in suite actually runs; (c)
+   upstream-format patch series packaging; (d) dpaa1→main merge of
+   `136fc794`+`fad54f15` (test-only + policy-completeness + the z11 guard).
 - [x] **T-M8-6 — RETIRED (not required for release).** The production FE-VM
   ehash dataplane has **zero per-flow MURAM allocation**: one fixed-capacity
   512 KiB DDR ehash bucket table per engaged port (F-220/F-225), one 256-byte
