@@ -35,6 +35,11 @@ on:
         type: boolean
         required: false
         default: false
+      kunit:
+        description: 'KUnit debug build (opt-in): enable CONFIG_KUNIT + FMan PCD suites in the kernel (they run at boot and emit KTAP) and compile the ask_kunit.ko OOT test harness. Production images must leave this false — the KUnit fragment is never applied to production builds.'
+        type: boolean
+        required: false
+        default: false
     secrets:
       MOK_KEY:
         required: false
@@ -262,6 +267,8 @@ jobs:
         run: bin/ci-setup-vyos1x.sh
 
       - name: Setup kernel config and patches
+        env:
+          KUNIT: ${{ inputs.kunit }}
         run: |
           # P3: validate fixup files before running them (2-second gate)
           python3 bin/test-fixups.sh
@@ -312,6 +319,12 @@ jobs:
 
       - name: Build Image Packages
         env:
+          # KUnit debug build (opt-in): forwarded to ci-setup-kernel.sh's
+          # injected post-defconfig block (kernel CONFIG_KUNIT etc.) and to
+          # bin/ci-build-packages.sh -> kernel/ask/.../ci-build.sh which
+          # additionally compiles ask_kunit.ko. Production builds never set
+          # this and stay byte-identical.
+          KUNIT: ${{ inputs.kunit }}
           # F-217/kernel-skew fix: the kernel .deb is versioned KERNEL_VERSION-1
           # with no build id, so a rebuilt kernel keeps the SAME apt version and
           # the persistent chroot's apt install is a no-op -> the ISO shipped the

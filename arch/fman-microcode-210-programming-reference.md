@@ -868,7 +868,7 @@ pool (100 slots × 28 B = 2800 B total, allocated by `AllocFEObjs`).
 | `0x01000000` | - | **HM** (Hash Match) | 16 B | Header Manipulation FE: executes HMCD/HMCT chains inline |
 | `0x02000000` | `0x02010000` | **ENQ** | 16 B | Terminal enqueue to QMan FQ. Word1 encodes the 24-bit FQID |
 | `0x03000000` | `0x03800000` | **EXIT** (DEALLOCATE) | 4 B | Free workspace allocation, terminate frame. Terminal MISS disposition |
-| `0x04000000` | `0x04000000` | **MUX** | 8 B | Multiplexer: branches HIT → nextFE / MISS → implied EXIT. Singleton |
+| `0x04000000` | `0x04000000` | **MUX** | 4 B | Multiplexer: branches HIT → nextFE / MISS → implied EXIT. Singleton |
 | `0x05000000` | - | **TRANSITION** | 8 B | State transition relay for HIT forwarding. Singleton |
 | `0x06000000` | `0x06000000` | **EXT_HASH** | 28 B | External hash table lookup in DDR: core FE-VM fastpath |
 
@@ -945,10 +945,15 @@ reset.
 
 ### 7.5 MUX FE: byte layout
 
+The MUX FE object is a SINGLE word (4 B): the type header only. The
+dispatch target lives in its working-store context at `+0x04` — the SDK
+writes it at `h_FE + feSize + contextOffset` = `AD + 4` (F-060, 2026-07-11),
+so it is NOT part of the FE object and must not be counted in its size.
+
 | Word | Offset | Contents |
 |---|---|---|
 | `w0` | `0x00` | `FMAN_FE_TYPE_MUX (0x04000000)` |
-| `w1` | `0x04` | next-FE MURAM offset (TRANSITION singleton) |
+| `w1` | `0x04` | next-FE MURAM offset (TRANSITION singleton) — working-store context, not part of the 4 B object |
 
 ### 7.6 TRANSITION FE: byte layout
 
