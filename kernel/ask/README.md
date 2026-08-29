@@ -29,8 +29,11 @@ touching the binary.
 kernel/ask/
 ├── README.md                  # this file
 ├── kernel-config/
-│   └── 90-kunit.config        # OPT-IN kunit fragment; NOT applied to
-│                              # production builds (see stage-kernel.sh)
+│   └── 90-kunit.config        # OPT-IN kunit fragment: merged by
+│                              # ci-setup-kernel.sh only for KUnit debug
+│                              # builds (self-hosted-build.yml input
+│                              # `kunit`); never applied to production
+│                              # builds
 ├── uapi/
 │   └── ask.yaml               # YNL generic-netlink family spec; copied to
 │                              # /usr/share/ynl/specs/ in the chroot and
@@ -70,6 +73,26 @@ plus the VyOS CLI: configuration through
 `set interfaces ethernet eth<n> offload ask`, observability through
 `show interfaces ethernet eth<n> offload ask flows` (a thin `ynl` wrapper).
 The `userspace/askd/` directory is a leftover placeholder.
+
+## KUnit debug builds (T-M8-5, 2026-08-28)
+
+Dispatch the self-hosted build with input `kunit=true`. The build then:
+
+- merges `kernel-config/90-kunit.config` into the kernel defconfig and
+  force-sets `CONFIG_KUNIT=y`, `KUNIT_DEBUGFS`, `FSL_FMAN_PCD_KUNIT_TEST`,
+  `PROVE_RCU`, `PROVE_LOCKING` after the VyOS fragment merge
+  (`bin/ci-setup-kernel.sh`), so the built-in FMan PCD suites run at boot
+  and print KTAP on the serial console;
+- compiles the OOT harness `ask_kunit.ko`
+  (`CONFIG_NET_ASK_KUNIT_TEST=m` in `ci-build.sh`) and ships it in the
+  ask-modules package.
+
+On the board: install the KUnit ISO, boot (KTAP from the built-in FMan
+suites lands in dmesg), then `sudo modprobe ask && sudo modprobe ask_kunit`
+to run every ASK suite under PROVE_RCU/PROVE_LOCKING; results land in
+dmesg and `/sys/kernel/debug/kunit/`. `ask.ko` must load first: the suites
+drive its live tables through the exported API. Production images never set
+`kunit` and carry none of this.
 
 ## Implementation order
 
