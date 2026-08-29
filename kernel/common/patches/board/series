@@ -174,8 +174,6 @@
 0121g-fman-pcd-cc-test-vlan-coex.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-1)
 0121h-fman-cc-miss-fe-production-api.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
-0121i-fman-export-fe-root-offset.patch
 
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
@@ -242,6 +240,8 @@
 # ── FE-VM engage/flow API (ask.ko, replaces 0150) ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0153-fman-pcd-fe-engage-api.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
+0153i-fman-export-fe-root-offset.patch
 
 # ── T1 typing fix (§16.2) ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -281,8 +281,8 @@
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0157-fman-pcd-fe-arm-typed-impl.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
-# Upstream-Status: Inappropriate | Risk-Tier: A
 0158-fman-pcd-fqid-resolution-compose.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A
 0163-fman-pcd-port-recover.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch
