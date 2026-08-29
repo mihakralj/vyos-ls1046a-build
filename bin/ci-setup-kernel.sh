@@ -1307,10 +1307,16 @@ fi
 : # regenerated into 0169-fman-pcd-fe-obs-canary.patch (last patch
 : # touching fman_pcd.c) via canonical per-patch-commit rebase (13
 : # descendant commits replayed with zero conflicts) + byte-exact
-: # tree-equivalence verification, alongside F_069b/F_071/F_072_2/
-: # F_158/F_173 (folded together, same base commit, same verification
-: # pass). Gated on CI build + board validation before considered
-: # final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
+: # tree-equivalence verification, alongside F_054/F_076/F_072_2/
+: # F_173/F_093/F_096/F_097/F_117/F_118/F_184 (folded together,
+: # same base commit, same verification pass). F_069b, F_071, and F_158
+: # were tried in the same batch and reverted after a full end-to-end
+: # replay: F_069b/F_071 anchor on text that M2_4_2.py (a fixup, not a
+: # patch) adds, and F_158's own comment text contains the literal
+: # substring "F-148", which falsely satisfies F_148.py's whole-file
+: # idempotency check. All three remain active fixups (see their own
+: # markers below). Gated on CI build + board validation before
+: # considered final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 : # F-073D folded into patch 0127 (ENQ FE terminal w3=fe_exit_off,
 : # per 210.10.1 §7.3). Patch-fold campaign 2026-08-29: regenerated into
@@ -1589,15 +1595,34 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_072.py" 2>&1
 fi
 
-: # F-069b folded into patch 0169 (ic_probe debugfs node). See the
-: # F-069 fold marker above for the combined verification note.
+# F-069b: IC probe debugfs node — reads buffer captured by F-069a.
+# Shows 32 u32 words (128 bytes) from the DMA buffer headroom.
+# NOTE (2026-08-29 patch-fold campaign): kept as an active fixup rather
+# than folded into a patch. Its anchor ("static int fman_pcd_fe_probe_show")
+# is added by M2_4_2.py, itself a fixup that runs after all patches --
+# baking F-069b into an early patch would insert before an anchor that
+# does not exist yet at patch-apply time. Confirmed by a full end-to-end
+# replay of the real fixup sequence (see plans/PATCH-FOLD-CAMPAIGN-PLAN.md);
+# an earlier attempt folded this and silently produced only its "extern
+# declarations" sub-block (the anchor lookup returned not-found, and this
+# script's own "if [ -f ... ]" wrapping does not check python3's exit
+# status, so the gap went unnoticed until the full replay caught it).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069b.py" 2>&1
+fi
 
 # Strip EXPORT_SYMBOL_GPL placed before #include by F-069b v3.
 # EXPORT_SYMBOL_GPL needs <linux/export.h> which isn't included yet.
 # Both fsl_dpaa_fman and dpaa_eth are built-in, so the symbol resolves 
 
-: # F-071 folded into patch 0169 (hash_probe debugfs node). See the
-: # F-069 fold marker above for the combined verification note.
+# F-071: hash_probe debugfs — read full 8-byte KG CRC-64 hash from annotation.
+# Uses fman_pcd_ic_vaddr (from F-069a) and fman_pcd_hash_off (from F-070).
+# NOTE (2026-08-29 patch-fold campaign): kept as an active fixup, same
+# reason as F-069b above (M2_4_2.py anchor dependency) -- an earlier
+# fold attempt silently produced only its "globals added" sub-block.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_071.py" 2>&1
+fi
 
 # without exporting.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
@@ -1620,8 +1645,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         drivers/net/ethernet/freescale/fman/fman_pcd.c \
         'fman_muram_offset_to_vbase(muram,' \
         '(void *)fman_muram_offset_to_vbase(muram,' \
-        34 \
-        "F-085: cast addition on muram_offset_to_vbase (34 occ.)"
+        43 \
+        "F-085: cast addition on muram_offset_to_vbase (43 occ., was 34 before the 2026-08-29 patch-fold campaign folded F_072_2/F_173/F_054/F_076/F_093/F_096/F_097/F_117/F_118/F_184 into patches 0126/0127/0128/0153/0169 (F_069b/F_071 reverted, don't affect this count since both run before this gate anyway; F_158 also reverted and DOES affect this count since it runs after this gate at its original position) -- their fman_muram_offset_to_vbase() call sites now exist from the start of the fixup phase instead of arriving later via those fixups, adding 9 occurrences by the time this gate runs. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.)"
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
@@ -2064,8 +2089,26 @@ fi
 : # setup/teardown). See the F-069 fold marker above for the combined
 : # verification note.
 
-: # F-158 folded into patch 0169 (fe_scaffold debugfs dump node). See
-: # the F-069 fold marker above for the combined verification note.
+# F-158: debugfs dump node (fe_scaffold) — ground truth on CC match-table
+# layout.  STRICT_DEVMEM blocks /dev/mem MURAM reads, so this kernel node is
+# the only way to see what F-148 actually wrote (key+mask) vs what the CC
+# comparator reads.  Dumps group/match/AD tables for every armed port.
+# Runs after F-072 (which also anchors on fe_arm_show) to keep function order.
+# NOTE (2026-08-29 patch-fold campaign): kept as an active fixup rather
+# than folded into a patch. F_148.py's own idempotency check for its
+# struct-field addition is `if "F-148" not in src` -- a whole-file
+# substring scan, not scoped to its own struct. F-158's own comment text
+# (this very header, verbatim) contains the literal substring "F-148",
+# so folding F-158 into an early patch made that substring present
+# before F_148.py's fixup ever runs, causing it to falsely conclude its
+# field was already added and skip adding it for real. Confirmed by a
+# full end-to-end replay of the real fixup sequence (see
+# plans/PATCH-FOLD-CAMPAIGN-PLAN.md); F_148 is itself unfolded/unmodified
+# and still needs to run before this comment's "F-148" text exists.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_158.py" 2>&1
+    echo "### fman_pcd.c: F-158 fe_scaffold debugfs dump node"
+fi
 
 # F-159 (2026-08-04, CC-Tree Rebuild Plan Phase 0): fix cc_pack_key()'s KG
 # composite from patch 0108's ask20-branch layout (SIP|DIP|SPI=0|SPORT|DPORT,
@@ -2467,12 +2510,16 @@ fi
 : # belongs with it). This closes round 2 of the patch-fold campaign:
 : # F-054, F-076, F-093, F-096, F-097, F-117, F-118, F-184 -- all
 : # confirmed mutually independent and independent of round 1 via a
-: # batch dry-run, then folded together with round 1's F-069/F-069b/
-: # F-071/F-072_2/F-158/F-173 into one combined 0169 patch, applied in
-: # exact real ci-setup-kernel.sh execution order. 13 descendant
+: # batch dry-run, then folded together with round 1's F-069/F-072_2/
+: # F-173 into one combined 0169 patch, applied in
+: # exact real ci-setup-kernel.sh execution order. F-069b, F-071, and
+: # F-158 were tried in this same batch and reverted (see F-069's
+: # marker above); they remain active fixups just below (F-158's own
+: # marker sits at its usual position further down). 11 descendant
 : # commits (0170/0171/0172/fixes-120/fixes-130) replayed with zero
-: # conflicts; byte-exact vs current+all-14-fixups (real order)
-: # confirmed on fman_pcd.c. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
+: # conflicts; byte-exact vs current+all-12-fixups (real order,
+: # M2_4_2/F-069b/F-071/F-148/F-158 correctly present as active
+: # fixups) confirmed on fman_pcd.c. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-185 (2026-08-12, E23): vendor-faithful CC dispatch -- AC_CC mode +
 # VARIANT B en_exthash_node at RCCB (the NXP ASK SDK production path;
