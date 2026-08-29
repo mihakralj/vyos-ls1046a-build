@@ -7,8 +7,8 @@ name: VyOS LS1046A build (self-hosted)
 # CI must NOT call `az vm deallocate`.
 
 on:
-  schedule:
-    - cron: "0 5 * * 6"  # Friday 21:00 PST (UTC-8) 
+  # schedule:
+  #   - cron: "0 5 * * 6"  # Friday 21:00 PST (UTC-8) — DISABLED 2026-08-29 on request
   workflow_dispatch:
     inputs:
       BUILD_BY:
