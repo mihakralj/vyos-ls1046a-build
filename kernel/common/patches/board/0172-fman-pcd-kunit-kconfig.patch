@@ -1,0 +1,38 @@
+From dd3d25a9e6c5b13c4283023f5f8f7eaa4a128ac2 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Sat, 29 Aug 2026 03:07:12 +0000
+Subject: [PATCH] fman_pcd: add CONFIG_FSL_FMAN_PCD_KUNIT_TEST Kconfig entry
+ (0172)
+
+---
+ drivers/net/ethernet/freescale/fman/Kconfig | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/Kconfig b/drivers/net/ethernet/freescale/fman/Kconfig
+index aa71ecd..a91e156 100644
+--- a/drivers/net/ethernet/freescale/fman/Kconfig
++++ b/drivers/net/ethernet/freescale/fman/Kconfig
+@@ -66,3 +66,20 @@ config FMAN_PCD_DEBUG_FS
+ 	  and the fman_pcd_* kernel API.
+ 
+ 	  Say N in production. Say Y when iterating on hardware.
++
++config FSL_FMAN_PCD_KUNIT_TEST
++	bool "FMan PCD FE descriptor KUnit tests"
++	depends on FSL_FMAN_PCD && KUNIT
++	help
++	  Build the FMan PCD FE descriptor KUnit suite
++	  (tests/fman_pcd_fe_test.c, injected by fixup F-089) into the
++	  kernel image.  The suite validates the six FE descriptor types,
++	  NIA encodings and descriptor sizes against the section-17
++	  static-assert tripwires at boot, printing KTAP on the console.
++
++	  This is a dev/kunit-build option only: the kunit=true CI build
++	  force-sets it after merge_config.sh (bin/ci-setup-kernel.sh) and
++	  the suite runs at boot.  Production builds leave it unset and the
++	  test source compiles out (IS_ENABLED guard in fman_pcd.c).
++
++	  If unsure, say N.
+-- 
+2.39.5
+

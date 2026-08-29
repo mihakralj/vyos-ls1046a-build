@@ -324,15 +324,18 @@ ask_flow_table_destroy(&t);
 /* ------------------------------------------------------------------------- */
 /* PR14g-body-4: HW-fallback round-trip cases                                 */
 /*                                                                            */
-/* These exercise the body-3 dispatcher integration in ask_flow_insert /     */
-/* ask_flow_remove. On the kunit harness ask_hw_pcd_get() returns NULL so    */
-/* ask_hw_flow_insert() returns -ENODEV and the SW-fallback path runs:       */
-/* hw_id = atomic_inc_return(&t->fake_hw_id_seq) yielding a packed (token=0, */
-/* idx=N) value where token=0 == ASK_HW_FLOW_ID_TOKEN_NONE. ask_flow_remove  */
-/* then calls ask_hw_flow_remove(hw_id) unconditionally; the TOKEN_NONE arm  */
-/* of the dispatcher silently succeeds without touching hardware. This is    */
-/* the safe-by-construction contract that lets body-3 avoid having to        */
-/* inspect the token before calling the dispatcher tear-down.                */
+/* These exercise the dispatcher integration in ask_flow_insert /            */
+/* ask_flow_remove (CR-011: comment brought to the live contract             */
+/* 2026-08-28). On the kunit harness ask_hw_pcd_get() returns NULL so        */
+/* ask_hw_flow_insert() returns -ENODEV and the SW-fallback path runs: the   */
+/* flow still lands in the rhashtable with                                    */
+/* hw_id = atomic_inc_return(&t->fake_hw_id_seq) — a PLAIN COUNTER, not a    */
+/* packed (token=N, idx=M) value. There is no TOKEN_NONE arm anywhere in     */
+/* the live teardown path: ask_flow_remove() consults ask_flow::hw_backed    */
+/* before calling ask_hw_flow_remove(), so a SW-fallback id never reaches    */
+/* the HW dispatcher. Real HW cookies (xarray, starting at 1) and fake ids   */
+/* (starting at 1) share one u32 space — that collision is exactly why       */
+/* hw_backed, and never the id value, is the HW-backing predicate.           */
 /* ------------------------------------------------------------------------- */
 
 static void ask_flow_test_hw_fallback_insert_remove(struct kunit *test)
@@ -739,6 +742,86 @@ KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 0);
 ask_flow_table_destroy(&t);
 }
 
+/* gen_current: 0 for unknown cookies, the live generation afterwards, and
+ * the tombstone preserves the value while is_current() goes false. */
+static void ask_flow_test_gen_current_contract(struct kunit *test)
+{
+struct ask_flow_table t;
+u32 g1, g2;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-curr"), 0);
+
+/* Unknown cookie reads back 0 (the "unknown" generation). */
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), 0u);
+
+g1 = ask_flow_gen_next(&t, 0xBEEF);
+KUNIT_EXPECT_EQ(test, g1, 1u);
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), g1);
+
+ask_flow_gen_tombstone(&t, 0xBEEF);
+/* Tombstone preserves the generation; only is_current() goes false. */
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), g1);
+KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xBEEF, g1));
+
+g2 = ask_flow_gen_next(&t, 0xBEEF);
+KUNIT_EXPECT_EQ(test, g2, g1 + 1);
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), g2);
+
+ask_flow_table_destroy(&t);
+}
+
+/* gen_release: the registry entry is erased so gen_current() reads 0 and a
+ * fresh claim restarts at 1. NULL-table entry points are defensive no-ops. */
+static void ask_flow_test_gen_release_contract(struct kunit *test)
+{
+struct ask_flow_table t;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-rel"), 0);
+
+KUNIT_ASSERT_EQ(test, ask_flow_gen_next(&t, 0xFEED), 1u);
+ask_flow_gen_release(&t, 0xFEED);
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xFEED), 0u);
+KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xFEED, 1u));
+/* A released cookie claims generation 1 again on the next REPLACE. */
+KUNIT_EXPECT_EQ(test, ask_flow_gen_next(&t, 0xFEED), 1u);
+
+ask_flow_gen_tombstone(NULL, 0xFEED);
+ask_flow_gen_release(NULL, 0xFEED);
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(NULL, 0xFEED), 0u);
+KUNIT_EXPECT_EQ(test, ask_flow_gen_next(NULL, 0xFEED), 0u);
+
+ask_flow_table_destroy(&t);
+}
+
+/* gen wrap: seeded at the u32 maximum via a crafted xa_store, the next claim
+ * wraps to 1 — generation 0 is never handed out (it means "unknown"). */
+static void ask_flow_test_gen_wrap_never_zero(struct kunit *test)
+{
+struct ask_flow_table t;
+unsigned long flags;
+void *stale;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-wrap"), 0);
+
+xa_lock_irqsave(&t.gen_by_cookie, flags);
+stale = __xa_store(&t.gen_by_cookie, 0xDEAD,
+		   xa_mk_value(((unsigned long)U32_MAX << 1) |
+			       ASK_GEN_LIVE),
+		   GFP_ATOMIC);
+xa_unlock_irqrestore(&t.gen_by_cookie, flags);
+KUNIT_ASSERT_FALSE(test, xa_is_err(stale));
+
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xDEAD), U32_MAX);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xDEAD, U32_MAX));
+
+/* decode == U32_MAX, +1 wraps to 0 — the "never hand out 0" guard
+ * (it means "unknown") forces the fresh claim to 1. */
+KUNIT_EXPECT_EQ(test, ask_flow_gen_next(&t, 0xDEAD), 1u);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xDEAD, 1u));
+
+ask_flow_table_destroy(&t);
+}
+
 /* ------------------------------------------------------------------------- */
 /* suite                                                                      */
 /* ------------------------------------------------------------------------- */
@@ -761,6 +844,9 @@ KUNIT_CASE(ask_flow_test_gen_monotonic),
 KUNIT_CASE(ask_flow_test_gen_stale_destroy_noop),
 KUNIT_CASE(ask_flow_test_gen_publish_refused_after_tombstone),
 KUNIT_CASE(ask_flow_test_gen_legacy_paths_unaffected),
+KUNIT_CASE(ask_flow_test_gen_current_contract),
+KUNIT_CASE(ask_flow_test_gen_release_contract),
+KUNIT_CASE(ask_flow_test_gen_wrap_never_zero),
 {}
 };
 

@@ -75,6 +75,15 @@ const struct nla_policy ask_flow_policy[ASK_FLOW_ATTR_MAX + 1] = {
 [ASK_FLOW_ATTR_BYTES]        = { .type = NLA_U64 },
 [ASK_FLOW_ATTR_LAST_SEEN_NS] = { .type = NLA_U64 },
 [ASK_FLOW_ATTR_HW_FLOW_ID]   = { .type = NLA_U32 },
+/*
+ * T-M7-2/T-M7-5 added these to the emitted flow attr stream; they must be
+ * policied so a strict nla_parse() of our own fill output does not reject
+ * them as unsupported (NLA_UNSPEC under NL_VALIDATE_STRICT -> -EINVAL).
+ */
+[ASK_FLOW_ATTR_OFFLOADED]   = { .type = NLA_U8 },
+[ASK_FLOW_ATTR_PORT_ID]     = { .type = NLA_U8 },
+[ASK_FLOW_ATTR_AGG_PACKETS] = { .type = NLA_U64 },
+[ASK_FLOW_ATTR_AGG_BYTES]   = { .type = NLA_U64 },
 };
 
 const struct nla_policy ask_sa_policy[ASK_SA_ATTR_MAX + 1] = {

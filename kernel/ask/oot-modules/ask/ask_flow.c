@@ -938,6 +938,9 @@ ask_flow_global_initialised = true;
 ask_pr_info("flow: subsystem ready (rhashtable + RCU)\n");
 return 0;
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_flow_init);
+#endif
 
 void ask_flow_exit(void)
 {
@@ -948,3 +951,6 @@ ask_flow_table_destroy(&ask_flow_global);
 ask_flow_global_initialised = false;
 ask_pr_dbg("flow: subsystem exit\n");
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_flow_exit);
+#endif

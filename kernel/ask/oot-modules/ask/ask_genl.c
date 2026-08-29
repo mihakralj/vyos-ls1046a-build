@@ -231,18 +231,18 @@ goto nla_put_failure;
  * cause appears in dmesg without spamming on every get-info call.
  */
 {
-        struct ask_hw_ucode_version v = {0};
+	struct ask_hw_ucode_version v = {0};
 
-        (void)ask_hw_ucode_get_version(&v);
+	(void)ask_hw_ucode_get_version(&v);
 
-        if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_FAMILY, v.family))
-                goto nla_put_failure;
-        if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MAJOR,  v.major))
-                goto nla_put_failure;
-        if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MINOR,  v.minor))
-                goto nla_put_failure;
-        if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_PATCH,  v.patch))
-                goto nla_put_failure;
+	if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_FAMILY, v.family))
+		goto nla_put_failure;
+	if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MAJOR,  v.major))
+		goto nla_put_failure;
+	if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MINOR,  v.minor))
+		goto nla_put_failure;
+	if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_PATCH,  v.patch))
+		goto nla_put_failure;
 }
 
 /*

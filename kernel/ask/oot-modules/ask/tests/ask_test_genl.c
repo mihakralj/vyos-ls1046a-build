@@ -119,17 +119,19 @@ static void test_free_skb(struct sk_buff *skb)
 }
 
 /*
- * Allocate a skb that is intentionally too small to fit even one nested
- * info/flow attribute. nlmsg_new(0, ...) gives an alloc just large enough
- * for the netlink header — any nla_put after nla_nest_start fails with
- * -EMSGSIZE because skb_tailroom() is exhausted on the first put.
+ * Allocate a skb with exactly 8 bytes of tailroom. nlmsg-sized allocations
+ * are rounded up by SKB_DATA_ALIGN (>=64 bytes), so reserving a fixed
+ * header count does NOT yield a truly tiny skb — the grown T-M7-2 info/flow
+ * fills still fit. Size against skb_tailroom() instead: 8 bytes lets
+ * nla_nest_start/genlmsg_put succeed (4-byte header) but any real attribute
+ * write after it fails with -EMSGSIZE.
  */
 static struct sk_buff *test_alloc_skb_tiny(struct kunit *test)
 {
 	struct sk_buff *skb = alloc_skb(NLMSG_HDRLEN + 8, GFP_KERNEL);
 
 	KUNIT_ASSERT_NOT_NULL(test, skb);
-	skb_reserve(skb, NLMSG_HDRLEN);
+	skb_reserve(skb, skb_tailroom(skb) - 8);
 	return skb;
 }
 
@@ -151,6 +153,12 @@ static void test_init_flow(struct ask_flow *f, u64 cookie,
 	f->cookie       = cookie;
 	f->hw_flow_id   = hw_id;
 	f->oif          = oif;
+	/*
+	 * Mark the flow HW-backed: ask_genl_fill_one_flow() only emits
+	 * ASK_FLOW_ATTR_HW_FLOW_ID for hw_backed flows (a SW-fallback fake
+	 * id would be meaningless), and the happy-path tests pin that attr.
+	 */
+	f->hw_backed    = 1;
 	u64_stats_init(&f->stats.syncp);
 	f->stats.packets      = packets;
 	f->stats.bytes        = bytes;
@@ -198,14 +206,30 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 	 * NAT/PAT are implemented and always advertised. VLAN is also
 	 * silicon-validated (CC+HMTD) but its runtime gate defaults OFF, so the
 	 * capability bit is absent until the operator explicitly arms it.
-	 * Bridge/multicast/IPsec remain unadvertised. */
+	 * Bridge/multicast/IPsec remain unadvertised.
+	 *
+	 * On a live engaged DUT the gate may already be armed by the boot
+	 * config, so compute the expected mask from the same predicate the
+	 * fill uses — the pin is "caps == base exactly when the gate is off,
+	 * base|VLAN exactly when it is armed", not a hardcoded mask.
+	 */
+	{
+		u64 exp_caps = ASK_CAP_IPV4 | ASK_CAP_IPV6 |
+			       ASK_CAP_NAT | ASK_CAP_PAT;
+
+		if (ask_hw_vlan_offload_armed())
+			exp_caps |= ASK_CAP_VLAN;
+		KUNIT_EXPECT_EQ(test,
+				nla_get_u64(attrs[ASK_INFO_ATTR_CAPABILITIES]),
+				exp_caps);
+	}
+	/* NUM_FMAN must honestly track the bound-FMan predicate: 0 on the
+	 * non-DPAA kunit harness, 1 on a live board. Pin the predicate truth,
+	 * not a hardcoded 0.
+	 */
 	KUNIT_EXPECT_EQ(test,
-			nla_get_u64(attrs[ASK_INFO_ATTR_CAPABILITIES]),
-			(u64)(ASK_CAP_IPV4 | ASK_CAP_IPV6 |
-			      ASK_CAP_NAT | ASK_CAP_PAT));
-	/* KUnit has no bound FMan, so runtime telemetry must honestly report 0. */
-	KUNIT_EXPECT_EQ(test,
-			nla_get_u32(attrs[ASK_INFO_ATTR_NUM_FMAN]), 0u);
+			nla_get_u32(attrs[ASK_INFO_ATTR_NUM_FMAN]),
+			ask_hw_get_fman() ? 1u : 0u);
 
 	test_free_skb(skb);
 }

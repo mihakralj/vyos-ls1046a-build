@@ -39,11 +39,12 @@ sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 # canonical location kernel/common/kernel-config/. Files are numbered
 # (00-board.config .. 08-dpaa1.config) so a plain glob expansion sorts
 # alphabetically into the intended load order. kernel/ask/kernel-config/
-# holds an opt-in kunit fragment only, and is NOT picked up
-# here. ASK2 (per specs/ask2-rewrite-spec.md) does not currently
-# add any ASK-specific kernel-config fragments; if it grows them they
-# would live under kernel/ask/kernel-config/ and need explicit
-# wiring at that point.
+# holds one opt-in kunit fragment (90-kunit.config), merged ONLY for
+# KUnit debug builds (workflow input kunit=true -> KUNIT env): production
+# builds never apply it. ASK2 (per specs/ask2-rewrite-spec.md) does not
+# currently add any ASK-specific kernel-config fragments beyond that; if
+# it grows them they would live under kernel/ask/kernel-config/ and need
+# explicit wiring at that point.
 #
 # History: prior to Phase 1c of the repo-layout refactor (2026-05-11)
 # these fragments were duplicated under data/kernel-config/ls1046a-*.config
@@ -57,6 +58,19 @@ for frag in kernel/common/kernel-config/*.config; do
   echo "### Appending kernel config fragment: $(basename "$frag")"
   cat "$frag" >> "$DEFCONFIG"
 done
+
+# KUnit debug build (opt-in via the self-hosted-build.yml `kunit` input,
+# forwarded as the KUNIT env): merge the ask KUnit fragment into the
+# defconfig. The injected post-defconfig block below force-sets the same
+# symbols with scripts/config AFTER merge_config.sh so VyOS snippets
+# cannot silently drop them. Production builds skip both and stay
+# byte-identical.
+if [ "${KUNIT:-false}" = "true" ]; then
+  for frag in kernel/ask/kernel-config/*.config; do
+    echo "### KUnit build: appending kernel config fragment: $(basename "$frag")"
+    cat "$frag" >> "$DEFCONFIG"
+  done
+fi
 
 # Override the VyOS-merged net-sched fragment for NET_SCH_FQ.
 # vyos-build/scripts/package-build/linux-kernel/config/13-net-sched.config
@@ -887,6 +901,27 @@ scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
 scripts/config --disable CONFIG_STRICT_DEVMEM
 scripts/config --disable CONFIG_IO_STRICT_DEVMEM
 make olddefconfig
+
+# KUnit debug build (opt-in): force the ask KUnit symbols in AFTER
+# merge_config.sh so VyOS snippets cannot disable them, and enable the
+# lockdep/PROVE_RCU instrumentation the ASK2 ownership/RCU invariants
+# (CR-009 flush stall guard, CR-010 RCU read-side precheck) run under.
+# KUNIT is inherited from the workflow step env (auto-build.yml).
+#
+# Placement note: this block MUST sit AFTER the final `make olddefconfig`
+# above — the ASK2 v2 persistent-key injection (further below in
+# ci-setup-kernel.sh) anchors on the exact adjacent line pair
+# "scripts/config --disable CONFIG_IO_STRICT_DEVMEM" + "make olddefconfig"
+# and a block between them breaks that anchor.
+if [ "${KUNIT:-false}" = "true" ]; then
+    echo "I: LS1046A — KUnit build: forcing CONFIG_KUNIT + PROVE_RCU/PROVE_LOCKING"
+    scripts/config --set-val CONFIG_KUNIT y
+    scripts/config --set-val CONFIG_KUNIT_DEBUGFS y
+    scripts/config --set-val CONFIG_FSL_FMAN_PCD_KUNIT_TEST y
+    scripts/config --enable CONFIG_PROVE_RCU
+    scripts/config --enable CONFIG_PROVE_LOCKING
+    make olddefconfig
+fi
 
 LS1046A_POSTDEFCONFIG_EOF
 
