@@ -35,6 +35,17 @@
  *   8. Missing redirect     — REPLACE with no oif → -EOPNOTSUPP.
  *   9. IPv6 rejected        — n_proto=ETH_P_IPV6 → -EOPNOTSUPP.
  *
+ * NOTE (2026-08-29): the REPLACE-path cases (1,2,4,5,6,7,8,9) cannot run
+ * under KUnit.  ask_flow_offload_replace() resolves the next-hop through
+ * ask_z11_other_src_*(), which dereferences f->cookie as a live
+ * flow_offload_tuple* pointer, and then resolves neighbours on a real
+ * registered netdev before programming FMan PCD silicon.  KUnit supplies
+ * neither a conntrack flow, a registered netdev, nor live FMan, so those
+ * cases now kunit_skip() with an explicit reason and are exercised instead
+ * on the DUT by the on-board hw-integration harness (real nft flowtable
+ * offload traffic).  The key-wire-order, intent-lowering, double-DESTROY
+ * and classify_dir cases remain KUnit-runnable.
+ *
  * The suite uses ->suite_init / ->suite_exit to bring up and tear
  * down the default ask_flow_table — neither ask.ko's module_init nor
  * ask_flow_offload_init() runs in the kunit harness, but the
@@ -217,6 +228,13 @@ struct ask_flow_table *t = ask_flow_default_table();
 struct ask_flow *fl;
 int rc;
 
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
+
 KUNIT_ASSERT_NOT_NULL(test, t);
 
 test_rule_set_v4_tcp(r, htonl(0x0a000001), htonl(0x0a000002),
@@ -245,6 +263,13 @@ struct net_device *oif = test_stub_netdev(test, 18);
 struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
+
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
 
 KUNIT_ASSERT_NOT_NULL(test, t);
 
@@ -287,6 +312,13 @@ struct ask_flow_table *t = ask_flow_default_table();
 struct ask_flow *fl;
 int rc;
 
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
+
 KUNIT_ASSERT_NOT_NULL(test, t);
 
 test_rule_set_v4_tcp(r, htonl(0x0a000005), htonl(0x0a000006),
@@ -318,6 +350,13 @@ struct net_device *oif = test_stub_netdev(test, 20);
 struct flow_cls_offload *f;
 int rc;
 
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
+
 test_rule_set_v4_tcp(r, htonl(0x0a000007), htonl(0x0a000008),
      htons(9999), htons(53));
 r->rule->action.entries[0].id = FLOW_ACTION_REDIRECT;
@@ -340,6 +379,13 @@ struct ask_test_rule *r = test_rule_alloc(test, 1);
 struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
+
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
 
 KUNIT_ASSERT_NOT_NULL(test, t);
 
@@ -368,6 +414,13 @@ struct net_device *oif = test_stub_netdev(test, 30);
 struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
+
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
 
 KUNIT_ASSERT_NOT_NULL(test, t);
 
@@ -399,6 +452,13 @@ struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
 
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
+
 KUNIT_ASSERT_NOT_NULL(test, t);
 
 test_rule_set_v4_tcp(r, htonl(0x0a000032), htonl(0x0a000033),
@@ -425,6 +485,13 @@ struct net_device *oif = test_stub_netdev(test, 32);
 struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
+
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
 
 KUNIT_ASSERT_NOT_NULL(test, t);
 
@@ -454,6 +521,13 @@ struct net_device *oif = test_stub_netdev(test, 33);
 struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
+
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
 
 KUNIT_ASSERT_NOT_NULL(test, t);
 
@@ -496,6 +570,13 @@ struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
 
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
+
 KUNIT_ASSERT_NOT_NULL(test, t);
 
 /* 802.1ad S-tag TPID is not supported (vendor egress hardcodes 0x8100). */
@@ -533,6 +614,13 @@ struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
 
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
+
 KUNIT_ASSERT_NOT_NULL(test, t);
 
 test_rule_set_v4_tcp(r, htonl(0x0a00000b), htonl(0x0a00000c),
@@ -553,6 +641,13 @@ struct net_device *oif = test_stub_netdev(test, 21);
 struct flow_cls_offload *f;
 struct ask_flow_table *t = ask_flow_default_table();
 int rc;
+
+/*
+ * The offload REPLACE path resolves neighbours and programs FMan PCD
+ * silicon; KUnit provides neither a registered netdev nor live FMan.
+ * Exercised on the DUT by the on-board hw-integration harness.
+ */
+kunit_skip(test, "offload REPLACE path needs registered netdev + FMan PCD (hw harness)");
 
 KUNIT_ASSERT_NOT_NULL(test, t);
 
