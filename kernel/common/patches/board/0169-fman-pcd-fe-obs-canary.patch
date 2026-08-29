@@ -46,13 +46,26 @@ valid in both the pre-fixup and post-fixup trees.
 Signed-off-by: VyOS LS1046A <ask20@vyos-ls1046a-build>
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 7fdb1fb..1b91853 100644
+index 04e5fa0..bc44520 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -142,6 +142,18 @@ struct fman_pcd {
- 	u8  fe_probe_key[32];
+@@ -24,6 +24,9 @@
+  * state machine is touched here.
+  */
+ 
++extern void *fman_pcd_ic_vaddr;
++extern void *fman_pcd_ic_buf_base;
++
+ #include <linux/debugfs.h>
+ #include <linux/device.h>
+ #include <linux/dma-mapping.h>
+@@ -143,6 +146,22 @@ struct fman_pcd {
  	int fe_probe_key_len;
  	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
+ 
++	void *miss_ctx;			/* F-069: 256B DDR miss context */
++	dma_addr_t miss_ctx_phys;		/* F-069: physical addr */
++	unsigned long miss_res_off;		/* F-069: MURAM result */
 +	/* FE-VM observation canary (0169): redirect the hashfe HIT/MISS
 +	 * dispositions (w5/w6) at two countable ENQ FEs so a probe can
 +	 * discriminate "frame reached the EXT_HASH comparator and MISSed"
@@ -65,10 +78,87 @@ index 7fdb1fb..1b91853 100644
 +	u32 fe_obs_hit_fqid;
 +	u32 fe_obs_miss_fqid;
 +	bool fe_obs_armed;
- 
++
  	struct dentry *debugfs_dir;
  };
-@@ -2171,6 +2183,271 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+ 
+@@ -151,6 +170,9 @@ struct fman_pcd {
+  * and cleaned up on the last fman_pcd_release().  Each FMan instance
+  * gets a subdirectory named by its FMan id (typically "0" on LS1046A).
+  */
++u64 fman_pcd_kg_hash;
++unsigned int fman_pcd_hash_off;
++void *fman_pcd_ic_vaddr;
+ static struct dentry *fman_pcd_debugfs_root;
+ static DEFINE_MUTEX(fman_pcd_debugfs_lock);
+ static int fman_pcd_debugfs_refcount;
+@@ -1826,6 +1848,16 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 
+ 	/* Head-insert: bucket head = swab64(dma_addr(record)). */
+ 	rec_phys = (u64)rdma;
++
++	/* F-173: order the record's field writes above (header, key,
++	 * next-FE pointer) before this bucket-head publish becomes
++	 * visible to FMan's independent DMA-capable hash-table walker.
++	 * Without this, a weak-ordered CPU can let the pointer write
++	 * reach visibility before the pointee's field writes do, so
++	 * FMan dereferences a still-stale record -- same bug class and
++	 * fix as vendor's own we-are-mono/ASK commit cb8fc275.
++	 */
++	wmb();
+ 	*flow->bucket_h = swab64(rec_phys);
+ 
+ 	flow->record = r;
+@@ -2025,7 +2057,8 @@ static void fman_pcd_fe_hash_encode(struct muram_info *muram,
+ 				    unsigned long fe_off,
+ 				    const struct fman_pcd_ehash_table *t,
+ 				    unsigned long mux_off,
+-				    unsigned long miss_off)
++				    unsigned long miss_off,
++				    unsigned long miss_res_off)
+ {
+ 	u32 __iomem *fe = (u32 __iomem *)
+ 		fman_muram_offset_to_vbase(muram, fe_off);
+@@ -2037,7 +2070,7 @@ static void fman_pcd_fe_hash_encode(struct muram_info *muram,
+ 		    (u32)(t->hash_shift & 0xff), fe + 1);
+ 	iowrite32be((u32)((tblphys >> 32) & 0xffff), fe + 2);	/* tbl hi     */
+ 	iowrite32be((u32)(tblphys & 0xffffffff), fe + 3);	/* tbl lo     */
+-	iowrite32be(0, fe + 4);					/* missResult */
++	iowrite32be((u32)miss_res_off, fe + 4);		/* missResult -> t_ExtHashResult */
+ 	iowrite32be((u32)mux_off, fe + 5);			/* HIT  -> MUX  */
+ 	iowrite32be((u32)miss_off, fe + 6);			/* MISS -> Exit */
+ }
+@@ -2074,8 +2107,28 @@ static int fman_pcd_fe_hash_build(struct fman_pcd *pcd)
+ 		return -ENOSPC;
+ 
+ 	list_del(&obj->node);
++		/* F-069: allocate 256B DDR miss context + 16B MURAM t_ExtHashResult */
++	pcd->miss_ctx = dma_alloc_coherent(t->dev, 256, &pcd->miss_ctx_phys, GFP_KERNEL);
++	if (!pcd->miss_ctx)
++		return -ENOMEM;
++	pcd->miss_res_off = fman_pcd_muram_alloc(pcd, 16);
++	if (IS_ERR_VALUE(pcd->miss_res_off)) {
++		dma_free_coherent(t->dev, 256, pcd->miss_ctx, pcd->miss_ctx_phys);
++		pcd->miss_ctx = NULL;
++		return -ENOMEM;
++	}
++	/* Write t_ExtHashResult: {LIODN=0|phys_hi, phys_lo, 0, 0} */
++	{
++		void __iomem *mr = (void __iomem *)fman_muram_offset_to_vbase(muram, pcd->miss_res_off);
++		u32 plo = (u32)(pcd->miss_ctx_phys & 0xFFFFFFFF);
++		u32 phi = (u32)((pcd->miss_ctx_phys >> 32) & 0xFFFF);
++		iowrite32be(phi, mr + 0);
++		iowrite32be(plo, mr + 4);
++		iowrite32be(0, mr + 8);
++		iowrite32be(0, mr + 12);
++	}
+ 	fman_pcd_fe_hash_encode(muram, obj->muram_off, t,
+-				pcd->fe_mux_off, pcd->fe_exit_off);
++				pcd->fe_mux_off, pcd->fe_exit_off, pcd->miss_res_off);
+ 	pcd->fe_hash_off = obj->muram_off;
+ 	list_add_tail(&obj->node, &pcd->fe_singletons);
+ 	return 0;
+@@ -2174,6 +2227,271 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
  	.release	= single_release,
  };
  
@@ -340,8 +430,246 @@ index 7fdb1fb..1b91853 100644
  /*
   * Build FE-VM runtime contexts after the full dormant chain is assembled.
   * Called by fe_arm engage before reprogramming KeyGen/BMI.
-@@ -2877,6 +3154,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
- 			debugfs_create_file("fe_arm", 0600,
+@@ -2347,6 +2665,80 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ }
+ 
+ /* Debugfs wrapper — parse string, delegate to __fman_pcd_fe_arm_engage(). */
++/* F-072 v3: Port FmPortSetFESupport. Internal FE buffer pool + mgmt index in MURAM.
++ * SDK 999-patch ~L14545. tnums*512B pool (256-align auto via gen_pool granule),
++ * (5+tnums) byte index. Params page +0x54=index MURAM off, +0x58=0.
++ * port_id is u8 hw port number (not port->port_id — struct fman_port is opaque).
++ */
++static int fman_pcd_fe_buffer_setup(struct fman_pcd *pcd,
++                                    struct fman_port *port, u8 port_id)
++{
++    struct muram_info *muram = fman_get_muram(pcd->fman);
++    u8 tnums;
++    unsigned long pool_off, idx_off;
++    u32 pp_off;
++    void __iomem *pp, *idx;
++    int i;
++
++    static const unsigned int BMI_FIFO_UNITS = 0x100;
++
++    if (!muram || !port)
++        return -EINVAL;
++
++    tnums = fman_port_get_total_tnums(port);
++    if (!tnums)
++        return -EINVAL;
++
++    pp_off = fman_port_get_params_page(port);
++    if (IS_ERR_VALUE(pp_off))
++        return (int)pp_off;
++
++    /* gen_pool MURAM granule is 256 (MURAM_ORDER=8), so alloc is 256-aligned */
++    pool_off = fman_pcd_muram_alloc(pcd, tnums * BMI_FIFO_UNITS * 2);
++    if (IS_ERR_VALUE(pool_off))
++        return (int)pool_off;
++
++    memset_io(fman_muram_offset_to_vbase(muram, pool_off), 0,
++              tnums * BMI_FIFO_UNITS * 2);
++
++    idx_off = fman_pcd_muram_alloc(pcd, 5 + tnums);
++    if (IS_ERR_VALUE(idx_off)) {
++        fman_pcd_muram_free(pcd, pool_off, tnums * BMI_FIFO_UNITS * 2);
++        return (int)idx_off;
++    }
++
++    idx = fman_muram_offset_to_vbase(muram, idx_off);
++    iowrite32be(pool_off, idx);
++    iowrite8(4, idx);
++    for (i = 0; i < tnums; i++)
++        iowrite8(i, (void __iomem *)((u8 __iomem *)idx + 4 + i));
++    iowrite8(0xFF, (void __iomem *)((u8 __iomem *)idx + 4 + tnums));
++
++    pp = fman_muram_offset_to_vbase(muram, pp_off);
++    iowrite32be((u32)idx_off, (void __iomem *)((u8 __iomem *)pp + 0x54));
++    iowrite32be(0,          (void __iomem *)((u8 __iomem *)pp + 0x58));
++
++    pr_info("fman_pcd: F-072 port 0x%02x FE buffer pool=%#lx idx=%#lx tnums=%u\n",
++            port_id, pool_off, idx_off, tnums);
++    return 0;
++}
++
++static void fman_pcd_fe_buffer_teardown(struct fman_pcd *pcd,
++                                       struct fman_port *port)
++{
++    struct muram_info *muram = fman_get_muram(pcd->fman);
++    u32 pp_off;
++    void __iomem *pp;
++
++    if (!muram || !port)
++        return;
++    pp_off = fman_port_get_params_page(port);
++    if (IS_ERR_VALUE(pp_off))
++        return;
++    pp = fman_muram_offset_to_vbase(muram, pp_off);
++    iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x54));
++}
++
+ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ {
+ 	unsigned int port_id = 0;
+@@ -2404,6 +2796,150 @@ static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
+ 	return __fman_pcd_fe_arm_disengage(pcd, port_id);
+ }
+ 
++static int fman_pcd_fe_buffer_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	int port_id;
++	void __iomem *pp;
++	u32 v54, v58;
++
++	for (port_id = 0x08; port_id <= 0x11; port_id++) {
++		struct fman_port *port = fman_port_lookup_rx(pcd->fman, port_id);
++		u32 pp_off;
++		if (!port)
++			continue;
++		pp_off = fman_port_get_params_page(port);
++		if (IS_ERR_VALUE(pp_off))
++			continue;
++		pp = fman_muram_offset_to_vbase(muram, pp_off);
++		v54 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x54));
++		v58 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x58));
++		seq_printf(s, "port 0x%02x: +0x54=%#010x +0x58=%#010x tnums=%u\n",
++			   port_id, v54, v58, fman_port_get_total_tnums(port));
++	}
++	return 0;
++}
++
++static int fman_pcd_fe_buffer_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_buffer_show, inode->i_private);
++}
++
++static const struct file_operations fman_pcd_fe_buffer_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_buffer_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++/* F-158: ground-truth dump of the CC CONT_LOOKUP scaffold MURAM.
++ * STRICT_DEVMEM blocks /dev/mem, so this kernel node is the only way
++ * to see what F-148 actually wrote vs what the CC comparator reads.
++ */
++static void fman_pcd_fe_dump_bytes(struct seq_file *s, void __iomem *base,
++				  int len)
++{
++	int i;
++
++	for (i = 0; i < len; i++) {
++		if (i % 16 == 0)
++			seq_printf(s, "\n  %04x:", i);
++		seq_printf(s, " %02x", ioread8((u8 __iomem *)base + i));
++	}
++	seq_puts(s, "\n");
++}
++
++static int fman_pcd_fe_scaffold_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct fman_pcd_fe_port *fp;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++
++	if (!muram)
++		return 0;
++
++	seq_puts(s, "fe_scaffold dump (per armed port)\n");
++	list_for_each_entry(fp, &pcd->fe_ports, node) {
++		if (!fp->scaffold_gro && !fp->scaffold_mto && !fp->scaffold_ato)
++			continue;
++
++		seq_printf(s, "\nport 0x%02x\n", fp->port_id);
++		seq_printf(s, "  gro=0x%lx mto=0x%lx ato=0x%lx root_ad=0x%lx\n",
++			   fp->scaffold_gro, fp->scaffold_mto, fp->scaffold_ato,
++			   pcd->fe_root_ad_off);
++
++		/* group table: 4 words */
++		if (fp->scaffold_gro) {
++			void __iomem *gt = (void __iomem *)
++				fman_muram_offset_to_vbase(muram, fp->scaffold_gro);
++			u32 w0 = ioread32be(gt + 0);
++			u32 w1 = ioread32be(gt + 4);
++			u32 w2 = ioread32be(gt + 8);
++			u32 w3 = ioread32be(gt + 12);
++
++			seq_printf(s, "  group: w0=%08x w1=%08x w2=%08x w3=%08x\n",
++				   w0, w1, w2, w3);
++			seq_printf(s, "    numKeys=%u matchTableAddr=0x%06x "
++				   "adTableAddr=0x%06x keySize8=%u\n",
++				   (w0 >> 24) & 0xff, w0 & 0xffffff, w1 & 0xffffff,
++				   ((w2 >> 24) & 0xff) + 1);
++		}
++
++		/* match table: 2 rows x 32B (key16+mask16), 64 B */
++		if (fp->scaffold_mto) {
++			void __iomem *mt = (void __iomem *)
++				fman_muram_offset_to_vbase(muram, fp->scaffold_mto);
++			seq_puts(s, "  match table (64 B = row0 key+mask, row1 key+mask):");
++			fman_pcd_fe_dump_bytes(s, mt, 64);
++			/* decode row0 key bytes 0..12 as the likely EKFC 5-tuple */
++			{
++				u8 k[16];
++				int j;
++				for (j = 0; j < 16; j++)
++					k[j] = ioread8((u8 __iomem *)mt + j);
++				seq_printf(s, "    row0.key: %02x%02x%02x%02x %02x%02x%02x%02x "
++					   "%02x %02x%02x %02x%02x [%02x%02x%02x]\n",
++					   k[0],k[1],k[2],k[3], k[4],k[5],k[6],k[7], k[8],
++					   k[9],k[10], k[11],k[12], k[13],k[14],k[15]);
++				seq_printf(s, "    row0.mask: %02x%02x%02x%02x %02x%02x%02x%02x "
++					   "%02x %02x%02x %02x%02x [%02x%02x%02x]\n",
++					   ioread8((u8 __iomem *)mt+16), ioread8((u8 __iomem *)mt+17),
++					   ioread8((u8 __iomem *)mt+18), ioread8((u8 __iomem *)mt+19),
++					   ioread8((u8 __iomem *)mt+20), ioread8((u8 __iomem *)mt+21),
++					   ioread8((u8 __iomem *)mt+22), ioread8((u8 __iomem *)mt+23),
++					   ioread8((u8 __iomem *)mt+24), ioread8((u8 __iomem *)mt+25),
++					   ioread8((u8 __iomem *)mt+26), ioread8((u8 __iomem *)mt+27),
++					   ioread8((u8 __iomem *)mt+28), ioread8((u8 __iomem *)mt+29),
++					   ioread8((u8 __iomem *)mt+30), ioread8((u8 __iomem *)mt+31));
++			}
++		}
++
++		/* AD table: 2 x 16B AD entries */
++		if (fp->scaffold_ato) {
++			void __iomem *at = (void __iomem *)
++				fman_muram_offset_to_vbase(muram, fp->scaffold_ato);
++			seq_puts(s, "  AD table (32 B):");
++			fman_pcd_fe_dump_bytes(s, at, 32);
++		}
++	}
++	return 0;
++}
++
++static int fman_pcd_fe_scaffold_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_scaffold_show, inode->i_private);
++}
++
++static const struct file_operations fman_pcd_fe_scaffold_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_scaffold_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ static int fman_pcd_fe_arm_show(struct seq_file *s, void *unused)
+ {
+ 	struct fman_pcd *pcd = s->private;
+@@ -2918,9 +3454,14 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_hash_probe", 0600,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_hash_probe_fops);
+-			debugfs_create_file("fe_arm", 0600,
++			debugfs_create_file("fe_buffer", 0444, pcd->debugfs_dir, pcd, &fman_pcd_fe_buffer_fops);
++					debugfs_create_file("fe_scaffold", 0444, pcd->debugfs_dir, pcd, &fman_pcd_fe_scaffold_fops);
++	debugfs_create_file("fe_arm", 0600,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_arm_fops);
 +			debugfs_create_file("fe_obs", 0600,
