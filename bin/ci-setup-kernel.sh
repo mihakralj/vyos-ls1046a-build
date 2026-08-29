@@ -1302,18 +1302,15 @@ else:
     echo "### fman_keygen.c: F-062c-R2 pure AC_CC (0x80000006)"
 fi
 
-# F-069: MISS context (DDR + MURAM t_ExtHashResult) with exact anchors.
-# FIXME: Fixup anchors are NOT count()==1 asserted — bin/test-fixups.sh is the current gate.
-# Four prior silent no-ops cost four board sessions (F-062a, F-062g, F-069a v1/v2).
-# Per NXP LSDK ExternalHashTableSet (999-layerscape-ask):
-#  - Adds miss_res_off (6th parameter, distinct from w6 miss_off)
-#  - w4 = miss_res_off MURAM offset of 16B t_ExtHashResult
-#  - DDR miss context (256B, dma_alloc_coherent via t->dev from 0130)
-#  - Persists in struct fman_pcd, freed on hash_free teardown
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069.py" 2>&1
-    echo "### F-069: MISS context + DDR alloc (count-asserted anchors)"
-fi
+: # F-069 folded into patch 0169 (MISS context: DDR + MURAM
+: # t_ExtHashResult). Patch-fold campaign 2026-08-29 continuation:
+: # regenerated into 0169-fman-pcd-fe-obs-canary.patch (last patch
+: # touching fman_pcd.c) via canonical per-patch-commit rebase (13
+: # descendant commits replayed with zero conflicts) + byte-exact
+: # tree-equivalence verification, alongside F_069b/F_071/F_072_2/
+: # F_158/F_173 (folded together, same base commit, same verification
+: # pass). Gated on CI build + board validation before considered
+: # final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 : # F-073D folded into patch 0127 (ENQ FE terminal w3=fe_exit_off,
 : # per 210.10.1 §7.3). Patch-fold campaign 2026-08-29: regenerated into
@@ -1597,21 +1594,15 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_072.py" 2>&1
 fi
 
-# F-069b: IC probe debugfs node — reads buffer captured by F-069a.
-# Shows 32 u32 words (128 bytes) from the DMA buffer headroom.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069b.py" 2>&1
-fi
+: # F-069b folded into patch 0169 (ic_probe debugfs node). See the
+: # F-069 fold marker above for the combined verification note.
 
 # Strip EXPORT_SYMBOL_GPL placed before #include by F-069b v3.
 # EXPORT_SYMBOL_GPL needs <linux/export.h> which isn't included yet.
 # Both fsl_dpaa_fman and dpaa_eth are built-in, so the symbol resolves 
 
-# F-071: hash_probe debugfs — read full 8-byte KG CRC-64 hash from annotation.
-# Uses fman_pcd_ic_vaddr (from F-069a) and fman_pcd_hash_off (from F-070).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_071.py" 2>&1
-fi
+: # F-071 folded into patch 0169 (hash_probe debugfs node). See the
+: # F-069 fold marker above for the combined verification note.
 
 # without exporting.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
@@ -2102,23 +2093,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 fi
 
-# F-072 v3: FmPortSetFESupport — internal FE buffer pool.
-# SDK 999-patch ~L14545. Uses gen_pool MURAM granule (256B auto-align).
-# port_id passed as u8 (struct fman_port is opaque — no port->port_id).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_072_2.py" 2>&1
-    echo "### fman_pcd.c: F-072 v3 FmPortSetFESupport ported"
-fi
+: # F-072_2 folded into patch 0169 (FmPortSetFESupport port buffer
+: # setup/teardown). See the F-069 fold marker above for the combined
+: # verification note.
 
-# F-158: debugfs dump node (fe_scaffold) — ground truth on CC match-table
-# layout.  STRICT_DEVMEM blocks /dev/mem MURAM reads, so this kernel node is
-# the only way to see what F-148 actually wrote (key+mask) vs what the CC
-# comparator reads.  Dumps group/match/AD tables for every armed port.
-# Runs after F-072 (which also anchors on fe_arm_show) to keep function order.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_158.py" 2>&1
-    echo "### fman_pcd.c: F-158 fe_scaffold debugfs dump node"
-fi
+: # F-158 folded into patch 0169 (fe_scaffold debugfs dump node). See
+: # the F-069 fold marker above for the combined verification note.
 
 # F-159 (2026-08-04, CC-Tree Rebuild Plan Phase 0): fix cc_pack_key()'s KG
 # composite from patch 0108's ask20-branch layout (SIP|DIP|SPI=0|SPORT|DPORT,
@@ -2301,10 +2281,9 @@ fi
 # bug (kzalloc -> dma_alloc_coherent) but never added the ordering half.
 # Adds wmb() immediately before this branch's own bucket-head publish in
 # fman_pcd_ehash_add_key(), matching vendor's exact fix location/rationale.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_173.py" 2>&1
-    echo "### fman_pcd.c: F-173 wmb() before ehash bucket-head publish"
-fi
+: # F-173 folded into patch 0169 (wmb() before ehash bucket-head
+: # publish). See the F-069 fold marker above for the combined
+: # verification note.
 
 # F-174: NOT WIRED IN. Built and CI-tested clean (2026-08-07) but never
 # armed on a board. A same-day 2026-07-15 post-mortem (F-069) found that
