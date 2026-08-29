@@ -32,7 +32,7 @@ static void fe_sizes(struct kunit *test)
 	/* Singletons */
 	KUNIT_EXPECT_EQ(test, (u32)FMAN_FE_ENQ_SIZE,        16);
 	KUNIT_EXPECT_EQ(test, (u32)FMAN_FE_EXIT_SIZE,        4);
-	KUNIT_EXPECT_EQ(test, (u32)FMAN_FE_MUX_SIZE,         8);
+	KUNIT_EXPECT_EQ(test, (u32)FMAN_FE_MUX_SIZE,         4);
 	KUNIT_EXPECT_EQ(test, (u32)FMAN_FE_TRANSITION_SIZE,  8);
 	/* Core FE */
 	KUNIT_EXPECT_EQ(test, (u32)FMAN_FE_HASH_SIZE,       28);
@@ -63,8 +63,10 @@ static void fe_enter_ad_encoding(struct kunit *test)
 	/* §17.1 w0: CONT_LOOKUP (0x40) + ALLOCATE (0x00800000) */
 	KUNIT_EXPECT_EQ(test, FMAN_AD_CONT_LOOKUP_TYPE  & 0xFF000000, 0x40000000U);
 	KUNIT_EXPECT_EQ(test, FMAN_AD_FE_ENTER_ALLOCATE,              0x00800000U);
-	/* §17.1 w2: OPC_FE_ENTER (0xF6 in bits [31:16]) */
-	KUNIT_EXPECT_EQ(test, (FMAN_AD_FE_ENTER_OPCODE & 0xFFFF0000), 0x00F60000U);
+	/* §17.1 w2: OPC_FE_ENTER (0xF6 in the LOW byte; the full word2 is
+	 * 0x000000F6 = pcAndOffsets, per the 210.10.1 reference §7.7 and
+	 * board patch 0127) */
+	KUNIT_EXPECT_EQ(test, (FMAN_AD_FE_ENTER_OPCODE & 0xFF), 0xF6U);
 }
 
 /* ── Test 5: ENQ FE word encodings ───────────────────────────────────── */
