@@ -2,7 +2,6 @@
   "active": {
     "F_054.py": "fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)",
     "F_056.py": "fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)",
-    "F_057.py": "fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)",
     "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB\u2192FE_ENTER)",
     "F_069.py": "F-069: MISS context + DDR alloc (count-asserted anchors)",
     "F_069a.py": "dpaa_eth.c: F-069a v9 buf_base + vaddr captures\\n",
@@ -10,14 +9,12 @@
     "F_071.py": "no description",
     "F_072.py": "no description",
     "F_072_2.py": "fman_pcd.c: F-072 v3 FmPortSetFESupport ported",
-    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 \u00a77.1/\u00a77.3",
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)",
     "F_089.py": "fman_pcd.c: F-089 \u00a717 FE descriptor static_asserts + KUnit test injection",
     "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs \u2014 wires __fman_pcd_fe_build_vm_chain",
     "F_091.py": "fman_pcd.c: F-091 HIT scaffold \u2014 numKeys=1 + FE_ENTER AD at ato+32",
     "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage \u2014 build/teardown VM chain via API",
     "F_093.py": "fman_pcd.c: F-093 dynamic FQID \u2014 kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
-    "F_094.py": "fman_pcd.c/h: F-094 retype flow_add \u2192 struct fman_pcd_fe_flow_action *",
     "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage \u2014 unparks FE-VM",
     "F_097.py": "fman_pcd.c: T-P1-1 F-08 \u2014 fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
     "F_100.py": "af_xdp_pool/af_xdp_pool_main.c: M4 ZC attach-path instrumentation \u2014 pr_err at xsk_pool_dma_map/bman_new_pool failures",
@@ -69,10 +66,6 @@
       "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
       "description": "F-130: grow PCD MURAM arena 64 KiB -> 84 KiB. The ehash int_buf (33280 B) + two per-port pools (~9029 B each) = 51338 B fits by total bytes but fails on placement because the int_buf at offset 0x4c100 fragments the arena. Contiguous MURAM extent 0x4ac00->0x60000 = 86016 B (84 KiB). Must run BEFORE F-092 (VM chain build) so gen_pool is sized before any allocation.",
       "date": "2026-07-27"
-    },
-    "F_131.py": {
-      "action": "keep",
-      "reason": "permanent guard \u2014 gen_pool_has_addr() check in fman_pcd_muram_free() prevents kexec-stale MURAM offset BUG"
     },
     "F_132.py": {
       "action": "keep",
@@ -171,7 +164,7 @@
     "F_218.py": "fman_pcd.c: F-218 (T-M6-1) fman_pcd_fe_flow_del selects ehash table by key_size (38-byte v6 key -> table1, else table0) so v6 FLOW_CLS_DESTROY unlinks the table1 record instead of leaking; no ABI change; v4 byte-identical",
     "F_234_frag.py": "fman_pcd.c: F-234 (T-M6-8) RETIRED 2026-08-26 (R1) — NOT wired in ci-setup-kernel.sh. It was the frag-context attempt to fix the inline FE-VM VLAN freeze (MURAM cdx_ucode_frag_info_t + VLAN-record bpid/word2), but it did NOT fix the ~20-packet freeze — the freeze was the FE-VM 5+tnums management-index exhaustion, not rebuild-buffer starvation, and was closed instead by retiring the inline path entirely and moving VLAN pop/push to the CC-leaf -> combined-HMTD engine (silicon-validated R4c; see plans/ASK2-VLAN-REARCH.md). Script retained dormant for history. Depended on F-198 + F-233."
   },
-  "count": 116,
+  "count": 112,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {},
   "removed_dead": [
@@ -192,7 +185,11 @@
   "folded_into_patches": [
     "F_109.py \u2014 folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2 pilot). fman_pcd_fe_enq_get_offset() export regenerated into its owning patch; tree-equivalent to current+F_109 modulo two normalized blank lines. Gated on CI build validation before considered final.",
     "F_116.py \u2014 folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-18 (Phase 2). Two FE-VM flow-delete NULL guards regenerated into the owning patch; verified byte-identical to current+F_116 across the full series (F-117 anchors on F-116's guarded fe_flow_del body). Gated on CI build validation before considered final.",
-    "F_104.py \u2014 folded into 0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch on 2026-08-18 (Phase 2). dpaa_get_channels() ethtool op regenerated into its owning patch (0109 last touches dpaa_ethtool_ops); byte-identical to current+F_104 across the full series. Independent of the FMan HIT-path fixups (dpaa_ethtool.c). Gated on CI build validation before considered final."
+    "F_104.py \u2014 folded into 0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch on 2026-08-18 (Phase 2). dpaa_get_channels() ethtool op regenerated into its owning patch (0109 last touches dpaa_ethtool_ops); byte-identical to current+F_104 across the full series. Independent of the FMan HIT-path fixups (dpaa_ethtool.c). Gated on CI build validation before considered final.",
+    "F_131.py \u2014 folded into 0126-fman-pcd-muram-genpool.patch on 2026-08-29 (Phase-fold campaign, patch-provenance review). gen_pool_has_addr() kexec-stale-MURAM guard regenerated into its owning patch via canonical per-patch-commit rebase (43 descendant commits replayed with zero conflicts) + byte-exact tree-equivalence verification against current+F_131 (fman_pcd.c identical). Gated on CI build + board validation before considered final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.",
+    "F_073D.py \u2014 folded into 0127-fman-pcd-fe-vm-enq-root.patch on 2026-08-29 (Phase-fold campaign). Terminal ENQ FE w3=fe_exit_off (210.10.1 \u00a77.3) regenerated into its owning patch; 43 descendant commits replayed with zero conflicts; byte-exact vs current+F_073D. Gated on CI build + board validation before considered final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.",
+    "F_057.py \u2014 folded into 0128-fman-pcd-fe-vm-flow-insert.patch on 2026-08-29 (Phase-fold campaign). Per-record next-FE DDR write removal (SDK-compliant) regenerated into its owning patch; 41 descendant commits replayed with zero conflicts; byte-exact vs current+F_057 (including its pre-existing double-tab indentation artifact on the `if (key_size == 0 ...)` line, preserved verbatim for behavioral fidelity \u2014 a cosmetic nit worth a separate whitespace-only cleanup later, not silently fixed here). Gated on CI build + board validation before considered final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.",
+    "F_094.py \u2014 folded into 0153-fman-pcd-fe-engage-api.patch on 2026-08-29 (Phase-fold campaign). Structured fman_pcd_fe_flow_action retype (fman_pcd.c + include/linux/fsl/fman_pcd.h) regenerated into its owning patch; 25 descendant commits replayed with zero conflicts; byte-exact vs current+F_094 across both files. Gated on CI build + board validation before considered final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md."
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {
@@ -207,10 +204,6 @@
     "F_056.py": {
       "action": "permanent",
       "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage \u2014 workaround for F-047 patch drift"
-    },
-    "F_057.py": {
-      "action": "permanent",
-      "reason": "SDK-compliant DDR record layout (no per-record next-FE pointer)"
     },
     "F_068.py": {
       "action": "permanent",
@@ -239,10 +232,6 @@
     "F_072_2.py": {
       "action": "permanent",
       "reason": "FmPortSetFESupport porting: FE buffer pool alloc/teardown, params page setup"
-    },
-    "F_073D.py": {
-      "action": "permanent",
-      "reason": "Settled terminal ENQ descriptor (w0=0x02010000, w3=0) per 210.10.1"
     },
     "F_076.py": {
       "action": "permanent",
@@ -283,10 +272,6 @@
     "F_093.py": {
       "action": "fold-into 0158",
       "reason": "Dynamic FQID belongs with the arm_engage/chain builder in 0158"
-    },
-    "F_094.py": {
-      "action": "permanent",
-      "reason": "API cleanup \u2014 structured params instead of raw (key, size, offset)"
     },
     "F_107.py": {
       "action": "fold-into 0153+0157",
