@@ -34,6 +34,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mm.h>			/* virt_addr_valid() guard in ask_z11_other_src_* */
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -1710,6 +1711,18 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 	if (!cookie)
 		return 0;
 
+	/*
+	 * The cookie in the live nft-flowtable offload path is the kernel
+	 * address of flow->tuplehash[dir].tuple (see nf_flow_table_offload.c),
+	 * so dereferencing it below is safe.  Defensive guard: if a cookie ever
+	 * arrives that is not a valid kernel virtual address (e.g. a synthetic
+	 * value fed by the kunit harness, or a malformed/legacy caller) do NOT
+	 * dereference it — skip the PR14z11 next-hop override instead of taking
+	 * a page fault.  In normal operation this check is always true.
+	 */
+	if (!virt_addr_valid((void *)cookie))
+		return 0;
+
 	t   = (struct flow_offload_tuple *)cookie;
 	dir = t->dir;
 	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
@@ -1763,6 +1776,15 @@ static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
 	if (out_iif)
 		*out_iif = NULL;
 	if (!cookie || !out_nh)
+		return false;
+
+	/*
+	 * Mirror the v4 guard: the cookie is a kernel pointer to
+	 * flow->tuplehash[dir].tuple in the live offload path.  Skip the
+	 * PR14z11/T-M6-1 next-hop override if it is not a valid kernel virtual
+	 * address rather than dereferencing a bogus pointer.
+	 */
+	if (!virt_addr_valid((void *)cookie))
 		return false;
 
 	t   = (struct flow_offload_tuple *)cookie;
