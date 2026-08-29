@@ -2212,8 +2212,11 @@ own PCD objects and prove readback.
    run — `CONFIG_FSL_FMAN_PCD_KUNIT_TEST` has no live Kconfig declaration
    anywhere in the tree (F-089 injects the test .c + `IS_ENABLED` guard but
    never the Kconfig entry), so syncconfig silently drops the forced symbol
-   and the boot-time executor prints `KTAP 1..0`. Fix pending in
-   `bin/kernel-fixups/F_089.py` (qdrant-gated per AGENTS S0).
+   and the boot-time executor prints `KTAP 1..0`. **FIXED 2026-08-29 via
+   board series patch `0172-fman-pcd-kunit-kconfig.patch`** (declares the
+   symbol; mirrors 0170's pattern, not F-089): the suite now boots on the
+   DUT and passes 7/7 (`8813a3a7` fixed its two stale size/opcode
+   expectations).
   `ci-build.sh` additionally compiles `ask_kunit.ko`
   (`CONFIG_NET_ASK_KUNIT_TEST=m`) on KUnit builds and packages it into the
   ask-modules .deb; production builds skip all of this and stay
@@ -2266,13 +2269,26 @@ own PCD objects and prove readback.
    vs grown T-M7-2 fills), and live-DUT state leaks via shared `ask.ko`
    globals (CAPABILITIES+VLAN, NUM_FMAN=1, populated PCD ctx, config-armed
    VLAN gate) — the affected pins are now predicate-based and the
-   state-dependent cases skip on an engaged board. **Remaining for the
-   upstream series:** (a) the structural re-indent of `ask_flow.c`/
-   `ask_test_flow.c` that closes the 13 false-positive errors; (b) add the
-   missing `CONFIG_FSL_FMAN_PCD_KUNIT_TEST` Kconfig declaration via F-089
-   (qdrant-gated) so the in-image built-in suite actually runs; (c)
-   upstream-format patch series packaging; (d) dpaa1→main merge of
-   `136fc794`+`fad54f15` (test-only + policy-completeness + the z11 guard).
+   state-dependent cases skip on an engaged board. **COMPLETE GREEN
+   2026-08-29 (second DUT pass, KUnit ISO `vyos-2026.08.29-0335-rolling`,
+   CI run `33231753881`, commits `23bb53ce` + `8813a3a7`):** the missing
+   Kconfig declaration was added as board series patch
+   `0172-fman-pcd-kunit-kconfig.patch` (mirrors 0170's
+   `FMAN_PCD_DEBUG_FS` pattern; inert `=y` removed from the production
+   `00-board.config`), so the F-089 in-image `fman_pcd_fe` suite now
+   boots and passes **7/7** on the DUT — after fixing its two stale
+   expectations (`8813a3a7`): MUX FE is 4 B per patch 0124 + §17 static
+   assert + NXP SDK F-056/F-060 trail (reference §7.1/§7.5 corrected),
+   and OPC_FE_ENTER sits in the LOW byte of word2 (`0x000000F6`, §7.7)
+   not bits [31:16]. Same image: `modprobe ask_kunit` re-validated green
+   (`ask_flow` 20/20, `ask_flow_offload` 11 pass + 12 skip, `ask_genl`
+   12/12, `ask_hw_pcd` 20 pass + 4 skip), zero `not ok`, board stable.
+   **Remaining for the upstream series:** (a) the structural re-indent
+   of `ask_flow.c`/`ask_test_flow.c` that closes the 13 false-positive
+   errors; (b) upstream-format patch series packaging; (c) dpaa1→main
+   merge of `136fc794`+`fad54f15`+`23bb53ce`+`8813a3a7` (test-only +
+   policy-completeness + z11 guard + 0172 Kconfig + built-in-suite
+   expectation pins).
 - [x] **T-M8-6 — RETIRED (not required for release).** The production FE-VM
   ehash dataplane has **zero per-flow MURAM allocation**: one fixed-capacity
   512 KiB DDR ehash bucket table per engaged port (F-220/F-225), one 256-byte
