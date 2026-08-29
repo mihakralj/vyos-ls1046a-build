@@ -664,17 +664,15 @@ unset _count _series _src _p
 # This catches orphaned patches with no series entry (the old guard
 # caught forgotten cp lines — now the loop reads series directly so
 # the failure mode is a patch file committed without a series entry).
-# 2026-08-04: 0127/0128/0129 filenames below are untracked on-disk WIP that
-# collides with the REAL, already-committed, in-series patches of the same
-# number (0127-fman-pcd-fe-vm-enq-root.patch, 0128-fman-pcd-fe-vm-flow-
-# insert.patch, 0129-fman-pcd-offload-engage.patch — unrelated FE-VM/ehash
-# work). Content looks like a genuine MURAM segregated-fit allocator +
-# Risk #13 fix, but it was never renumbered/reviewed, so it is excluded
-# here rather than either overwriting the real 0127-0129 or guessing new
-# numbers for unreviewed content. 0138 has no number collision but is
-# skipped alongside it for the same reason (unreviewed, depends on 0128/0129
-# APIs). Revisit: renumber to free slots (0165+) and review before staging.
-BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch 0127-fman-pcd-cc-node-slab.patch 0128-fman-pcd-muram-segpool.patch 0129-fman-pcd-muram-largest-free.patch 0138-fman-pcd-manip-frag-check.patch"
+# 2026-08-04: the WIP filenames that used to collide with the real, in-series
+# 0127/0128/0129/0138 (an unreviewed MURAM segregated-fit allocator + Risk #13
+# fix, never renumbered) have since moved to
+# kernel/ask/patches/archive-2026-08-10-excluded-wip/ and no longer exist
+# under board/, so this whitelist is pruned back to just the one patch that
+# is still physically absent from board/ (0150, superseded by 0153).
+# 2026-08-29: pruned the 4 stale WIP entries (patch review found they no
+# longer exist under board/ — see plans/PATCH-FOLD-CAMPAIGN-PLAN.md §2).
+BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch"
 _missing=""
 # Cross-check: every .patch in board/ must be in series or SKIP list
 {
@@ -1317,14 +1315,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-069: MISS context + DDR alloc (count-asserted anchors)"
 fi
 
-# F-073D: Terminal ENQ per 210.10.1 §7.3 — ws_offset=0, w3=0 (no chain).
-# w0 = TYPE_ENQ | FMAN_FE_ENQ_FQID = 0x02010000 (terminal, no ws_offset).
-# w1 = fqid (24-bit FQID). w3 = 0 (terminal, per §7.1 "Terminal enqueue").
-# + F-070b w6→ENQ rewire + F-070c params zeroing on disengage.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_073D.py" 2>&1
-    echo "### F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3"
-fi
+: # F-073D folded into patch 0127 (ENQ FE terminal w3=fe_exit_off,
+: # per 210.10.1 §7.3). Patch-fold campaign 2026-08-29: regenerated into
+: # 0127-fman-pcd-fe-vm-enq-root.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_073D across the full remaining series (43 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 
 # M2-4: fix fman_port_lookup_rx — all LS1046A fman_port->port_id==0
@@ -1459,19 +1455,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)"
 fi
 
-# F-057: Remove per-record next-FE from DDR flow records.
-# The NXP SDK's en_ehash_entry struct has NO per-record next-FE pointer.
-# The HIT dispatch target is in the hash FE descriptor's word 5 (nextFEPtr
-# = MUX -> ENQ).  Our code was writing enq_off at byte 24 of each DDR
-# record (8-byte header + 13-byte key + 3-byte pad = 24).  The hardware
-# reads this as garbage and crashes.
-#
-# The enq_fe_off parameter becomes unused (kept for ABI compatibility).
-# All HIT flows now dispatch through the hash FE's word 5, not per-record.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_057.py" 2>&1
-    echo "### fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)"
-fi
+: # F-057 folded into patch 0128 (removed per-record next-FE from DDR,
+: # SDK-compliant). Patch-fold campaign 2026-08-29: regenerated into
+: # 0128-fman-pcd-fe-vm-flow-insert.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_057 across the full remaining series (41 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 
 
@@ -1661,20 +1650,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-130: PCD MURAM arena 64 KiB -> 84 KiB"
 fi
 
-# F-131: Guard fman_pcd_muram_free() against kexec-stale MURAM offsets.
-# After a kexec reboot, the new kernel's gen_pool has a fresh chunk at a
-# potentially different muram_offset.  Offsets from the previous kernel are
-# not valid, and calling gen_pool_free() on them hits BUG() in lib/genalloc.c.
-# Adds gen_pool_has_addr() check before gen_pool_free() with a pr_warn and
-# budget adjustment for stale offsets.  Board-verified 2026-07-28 on .185
-# (ISO 0422): disengaging from kexec-preserved state triggered:
-#   kernel BUG at lib/genalloc.c:508!
-#   gen_pool_free_owner -> fman_pcd_muram_free -> fman_pcd_fe_pool_free ->
-#   fman_pcd_fe_pool_put -> fman_pcd_fe_disengage
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_131.py" 2>&1
-    echo "### F-131: gen_pool_has_addr() guard in fman_pcd_muram_free()"
-fi
+: # F-131 folded into patch 0126 (gen_pool_has_addr() kexec-stale-MURAM
+: # guard). Patch-fold campaign 2026-08-29: regenerated into
+: # 0126-fman-pcd-muram-genpool.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_131 across the full remaining series (43 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-090: MISS→kernel bypass ENQ — route non-matching frames to kernel FQ.
 # Adds a second ENQ FE that enqueues MISS frames to miss_fqid instead of EXIT drop.
@@ -1928,13 +1909,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-107: gen_pool double-free prevention (fe_port_armed bitmap)"
 fi
 
-# F-094: Retype fman_pcd_fe_flow_add to use structured flow_action.
-# Replaces raw (key, key_size, enq_off) with const struct fman_pcd_fe_flow_action *.
-# Breaking API change before anyone depends on the old signature.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_094.py" 2>&1
-    echo "### F-094: flow_add retype → struct fman_pcd_fe_flow_action *"
-fi
+: # F-094 folded into patch 0153 (structured fman_pcd_fe_flow_action
+: # retype). Patch-fold campaign 2026-08-29: regenerated into
+: # 0153-fman-pcd-fe-engage-api.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_094 across the full remaining series (25 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 : # F-109 folded into patch 0153 (fman_pcd_fe_enq_get_offset export).
 : # Phase 2 fold 2026-08-18: the fixup edit was regenerated into
