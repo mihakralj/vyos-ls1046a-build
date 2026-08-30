@@ -3,12 +3,19 @@ From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Sun, 9 Aug 2026 09:30:00 +0000
 Subject: [PATCH] fman-pcd: ensure FM_CTL params page in __fman_pcd_fe_arm_engage (F-180)
 
+2026-08-30 (fold): re-derived against the true post-0164 state. The prior
+version anchored on a 2-brace-deep close and a bare "if (err)", but the
+real function has an extra nesting level (F-125 partial-alloc unwind) and
+"if (err) {" -- so it never applied from a clean checkout. Same insertion,
+correct anchor. Verified against a pristine linux-6.18.44 + 0068..0164
+baseline, extracted fresh from the cached tarball, not an already-patched
+dev tree.
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 8958b304d..50ff1dcad 100644
+index 473a39026..a788793b5 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2310,6 +2310,28 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+@@ -2374,6 +2374,28 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  		}
  	}
  
@@ -36,4 +43,4 @@ index 8958b304d..50ff1dcad 100644
 +
  	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
  				      (u32)fe_enter_off, &saved_engine, ekfc);
- 	if (err)
+ 	if (err) {

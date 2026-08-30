@@ -22,21 +22,31 @@ handle-tracking + the proven cc bring-up sequence. Debug-only; no production
 path. clear <port> frees the HMTD as before.
 
 Signed-off-by: vyos-ls1046a-build CI <ci@local>
+
+2026-08-30 (fold): re-derived against the true post-0121d state. The
+prior version's include hunk anchored on "#include <linux/io.h>" as
+pre-existing context; that header was never actually added to this file
+by any patch in the series, so the hunk never applied from a clean
+checkout. Now adds it alongside etherdevice.h/hex.h instead of assuming
+it. Verified against a pristine linux-6.18.44 + 0068..0121d baseline,
+extracted fresh, not an already-patched dev tree.
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
-index f3ebdd0..1bcc1f0 100644
+index 4c808b996..39df35b32 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
-@@ -35,6 +35,8 @@
+@@ -35,7 +35,10 @@
  #include <linux/debugfs.h>
  #include <linux/err.h>
  #include <linux/errno.h>
 +#include <linux/etherdevice.h>
 +#include <linux/hex.h>
  #include <linux/inet.h>
- #include <linux/io.h>
++#include <linux/io.h>
  #include <linux/kernel.h>
-@@ -362,6 +364,159 @@ out_put_hm:
+ #include <linux/module.h>
+ #include <linux/seq_file.h>
+@@ -268,6 +271,159 @@ static int cc_test_install_vlan(struct fman_pcd *pcd, const char *args)
  	return err;
  }
  
@@ -196,7 +206,7 @@ index f3ebdd0..1bcc1f0 100644
  static ssize_t cc_test_write(struct file *file, const char __user *buf,
  			     size_t count, loff_t *ppos)
  {
-@@ -399,6 +554,10 @@ static ssize_t cc_test_write(struct file *file, const char __user *buf,
+@@ -305,6 +461,10 @@ static ssize_t cc_test_write(struct file *file, const char __user *buf,
  		pr_info("fman_pcd cc_test: port 0x%02x graft detached, tree/HMTD destroyed\n",
  			port_id);
  		ret = count;
