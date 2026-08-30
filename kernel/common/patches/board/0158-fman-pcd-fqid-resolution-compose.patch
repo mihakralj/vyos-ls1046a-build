@@ -41,10 +41,42 @@ index a78fedd51..38c8a90c1 100644
  		 * Select the 24 bits out of the 64 hash result.
  		 * 0 means using the 24 LSB's, otherwise
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index f3290c41b..171ca2b46 100644
+index 91540e208..9ecb5a801 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -138,6 +138,9 @@ struct fman_pcd {
+@@ -36,6 +36,7 @@
+ #include <linux/mutex.h>
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/bitmap.h>	/* F-107: DECLARE_BITMAP for fe_port_armed */
+ #include <linux/io.h>
+ #include <linux/uaccess.h>
+ 
+@@ -69,7 +70,7 @@
+  * reservation.  Without the sub-pool the reservation was dead-weight and
+  * fman_pcd_muram_alloc() silently fell back to the tiny global tail.
+  */
+-#define FMAN_PCD_MURAM_RESERVED_BYTES	(64U * 1024U)
++#define FMAN_PCD_MURAM_RESERVED_BYTES	(84U * 1024U)
+ #define FMAN_PCD_MURAM_ORDER		8	/* 256-byte gen_pool granule */
+ 
+ /*
+@@ -126,18 +127,23 @@ struct fman_pcd {
+ 	unsigned long fe_mux_off;
+ 	unsigned long fe_transition_off;
+ 	unsigned long fe_exit_off;
++	bool fe_vm_chain_built;		/* F-090/F-092: chain built flag */
++	unsigned long fe_enter_ad_off;	/* F-090/F-092: FE_ENTER root AD MURAM offset */
+ 	struct list_head fe_ehash_tables; /* sec.5 ExternalHashTableSet */
+ 	unsigned long fe_int_buf_off;	  /* int-buf pool MURAM, 256-aligned */
+ 	unsigned long fe_int_buf_raw_off; /* unaligned off handed to free() */
+ 	size_t fe_int_buf_raw_size;
+ 	int fe_int_buf_refcount;
+ 	unsigned long fe_root_ad_off;	/* sec.5 FE_ENTER root AD (16 B) */
+-	u8 fe_armed_port;		/* F-079-R4: last engaged port */
++	DECLARE_BITMAP(fe_port_armed, 32);	/* F-107: per-port engagement guard (gen_pool double-free prevention) */
+ 	unsigned int fe_miss_fqid;	/* F-079-R4: miss-AD delivery FQ */
+ 	/* Scaffold MURAM tracking — freed on disengage (0152). */
  	unsigned long fe_scaffold_gro;	/* group table (256 B) */
  	unsigned long fe_scaffold_mto;	/* match table (16 B) */
  	unsigned long fe_scaffold_ato;	/* AD table    (32 B) */
@@ -54,7 +86,16 @@ index f3290c41b..171ca2b46 100644
  	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
  
  	struct dentry *debugfs_dir;
-@@ -461,6 +464,7 @@ static const struct file_operations fman_pcd_fe_pool_fops = {
+@@ -295,6 +301,8 @@ static void fman_pcd_fe_pool_free(struct fman_pcd *pcd)
+ 	pcd->fe_mux_off = 0;
+ 	pcd->fe_transition_off = 0;
+ 	pcd->fe_exit_off = 0;
++	pcd->fe_vm_chain_built = false;	/* F-090 */
++	pcd->fe_enter_ad_off = 0;		/* F-090 */
+ 	pcd->fe_hash_off = 0;
+ 
+ 	/* sec.5 FE_ENTER root AD is a separate MURAM alloc - free it too. */
+@@ -461,6 +469,7 @@ static const struct file_operations fman_pcd_fe_pool_fops = {
  };
  
  /* FM_CTL ctrl-params page FE fields (SDK t_FmPcdCtrlParamsPage). */
@@ -62,7 +103,85 @@ index f3290c41b..171ca2b46 100644
  #define FMAN_PP_FE_MGMT_IDX_OFF	0x54
  #define FMAN_PP_FE_DEPL_CNT_OFF	0x58
  /* BMI FIFO unit; FE internal-buffer pool size unit and alignment. */
-@@ -2257,7 +2261,8 @@ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
+@@ -485,6 +494,9 @@ struct fman_pcd_fe_port {
+ 	size_t pool_raw_size;
+ 	unsigned long mgmt_off;
+ 	size_t mgmt_size;
++	unsigned long scaffold_gro;	/* CONT_LOOKUP group table (256 B) */
++	unsigned long scaffold_mto;	/* match table (64 B; key+mask rows per RM 8.7.4.2) */
++	unsigned long scaffold_ato;	/* AD table (32 B) */
+ };
+ 
+ static struct fman_pcd_fe_port *
+@@ -594,6 +606,15 @@ static int fman_pcd_fe_port_set(struct fman_pcd *pcd, u8 port_id)
+ 	fp->mgmt_off = mgmt_off;
+ 	fp->mgmt_size = mgmt_size;
+ 	list_add_tail(&fp->node, &pcd->fe_ports);
++	/* F-139: Copy scaffold offsets from singleton (set during engage before
++	 * the port was in fe_ports) to per-port struct for teardown in fe_port_del.
++	 */
++	fp->scaffold_gro = pcd->fe_scaffold_gro;
++	fp->scaffold_mto = pcd->fe_scaffold_mto;
++	fp->scaffold_ato = pcd->fe_scaffold_ato;
++	pcd->fe_scaffold_gro = 0;
++	pcd->fe_scaffold_mto = 0;
++	pcd->fe_scaffold_ato = 0;
+ 
+ 	dev_info(fman_get_dev(pcd->fman),
+ 		 "fman_pcd: FE support on port 0x%x (tnums %u, pool 0x%lx/%zu B, mgmt 0x%lx/%zu B)\n",
+@@ -640,6 +661,16 @@ static int fman_pcd_fe_port_del(struct fman_pcd *pcd, u8 port_id)
+ 
+ 	fman_pcd_muram_free(pcd, fp->mgmt_off, fp->mgmt_size);
+ 	fman_pcd_muram_free(pcd, fp->pool_raw_off, fp->pool_raw_size);
++	/* F-139: Free per-port CONT_LOOKUP scaffold (gro 256 + mto 64 + ato 32 = 352 B).
++	 * Formerly a singleton in pcd->fe_scaffold_* that was overwritten by the
++	 * second port's engage, orphaning the first port's scaffold permanently.
++	 */
++	if (fp->scaffold_ato)
++		fman_pcd_muram_free(pcd, fp->scaffold_ato, 32);
++	if (fp->scaffold_mto)
++		fman_pcd_muram_free(pcd, fp->scaffold_mto, 64);
++	if (fp->scaffold_gro)
++		fman_pcd_muram_free(pcd, fp->scaffold_gro, 256);
+ 	list_del(&fp->node);
+ 	dev_info(fman_get_dev(pcd->fman),
+ 		 "fman_pcd: FE support removed on port 0x%x\n", port_id);
+@@ -654,6 +685,12 @@ static void fman_pcd_fe_port_drain(struct fman_pcd *pcd)
+ 	list_for_each_entry_safe(fp, tmp, &pcd->fe_ports, node) {
+ 		fman_pcd_muram_free(pcd, fp->mgmt_off, fp->mgmt_size);
+ 		fman_pcd_muram_free(pcd, fp->pool_raw_off, fp->pool_raw_size);
++		if (fp->scaffold_ato)
++			fman_pcd_muram_free(pcd, fp->scaffold_ato, 32);
++		if (fp->scaffold_mto)
++			fman_pcd_muram_free(pcd, fp->scaffold_mto, 64);
++		if (fp->scaffold_gro)
++			fman_pcd_muram_free(pcd, fp->scaffold_gro, 256);
+ 		list_del(&fp->node);
+ 		kfree(fp);
+ 	}
+@@ -2227,18 +2264,9 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
+  */
+ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
+ {
+-	if (pcd->fe_scaffold_ato) {
+-		fman_pcd_muram_free(pcd, pcd->fe_scaffold_ato, 32);
+-		pcd->fe_scaffold_ato = 0;
+-	}
+-	if (pcd->fe_scaffold_mto) {
+-		fman_pcd_muram_free(pcd, pcd->fe_scaffold_mto, 16);
+-		pcd->fe_scaffold_mto = 0;
+-	}
+-	if (pcd->fe_scaffold_gro) {
+-		fman_pcd_muram_free(pcd, pcd->fe_scaffold_gro, 256);
+-		pcd->fe_scaffold_gro = 0;
+-	}
++	/* F-139: Scaffold is now per-port, freed in fman_pcd_fe_port_del().
++	 * This function is retained as a no-op for any legacy callers.
++	 */
+ }
+ 
+ /*
+@@ -2260,7 +2288,8 @@ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
  static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  				    unsigned int port_id,
  				    unsigned long fe_enter_off,
@@ -72,25 +191,74 @@ index f3290c41b..171ca2b46 100644
  {
  	u8 saved_engine = 0;
  	int err;
-@@ -2267,7 +2272,7 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
- 	if (miss_fqid == 0)
- 		miss_fqid = 0x200;
+@@ -2276,15 +2305,31 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  
--	{
-+	if (fe_enter_off == 0) {
- 		struct muram_info *muram = fman_get_muram(pcd->fman);
- 		unsigned long gro, mto, ato;
+ 		if (muram) {
+ 			gro = fman_pcd_muram_alloc(pcd, 256);
+-			mto = fman_pcd_muram_alloc(pcd, 16);
++			mto = fman_pcd_muram_alloc(pcd, 64);
+ 			ato = fman_pcd_muram_alloc(pcd, 32);
+-			if (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) &&
+-			    !IS_ERR_VALUE(ato)) {
++			if (IS_ERR_VALUE(gro) || IS_ERR_VALUE(mto) ||
++			    IS_ERR_VALUE(ato)) {
++				/*
++				 * F-125: unwind the partial allocation. The old
++				 * code only guarded the *use* of these offsets, so
++				 * whichever of the three succeeded was stranded for
++				 * the lifetime of the module.
++				 */
++				if (!IS_ERR_VALUE(gro))
++					fman_pcd_muram_free(pcd, gro, 256);
++				if (!IS_ERR_VALUE(mto))
++					fman_pcd_muram_free(pcd, mto, 64);
++				if (!IS_ERR_VALUE(ato))
++					fman_pcd_muram_free(pcd, ato, 32);
++				pr_warn("fman_pcd fe_arm: FE_ENTER scaffold alloc failed (needs 352 B of PCD MURAM)\n");
++				return -ENOMEM;
++			}
++			if (1) {
+ 				void __iomem *c;
  
-@@ -2306,7 +2311,7 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 				c = (void __iomem *)
+ 					fman_muram_offset_to_vbase(muram, gro);
+-				iowrite32be((0u << 24) | (mto & 0xFFFFFF),
++				iowrite32be(((fe_enter_off != 0 ? 1 : 0) << 24) | (mto & 0xFFFFFF),
+ 					    c + 0);
+ 				iowrite32be((ato & 0xFFFFFF), c + 4);
+ 				iowrite32be(0x4F000000, c + 8);
+@@ -2309,11 +2354,27 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  	}
  
  	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
 -				      (u32)fe_enter_off, &saved_engine);
+-	if (err)
 +				      (u32)fe_enter_off, &saved_engine, ekfc);
- 	if (err)
++	if (err) {
++		/*
++		 * F-125: release the scaffold we just built. Returning with
++		 * pcd->fe_scaffold_* still populated meant the next engage
++		 * re-entered the fe_enter_off == 0 path and OVERWROTE those
++		 * fields, orphaning this triple permanently — 304 bytes per
++		 * failed attempt, monotonic, reclaimable only by reboot.
++		 *
++		 * Freed unconditionally: the scaffold is single-owner in this
++		 * driver — __fman_pcd_fe_arm_disengage() already releases it for
++		 * whichever port disengages, without a per-port guard — so a
++		 * failed arm has no other owner to protect. An earlier revision
++		 * guarded on pcd->fe_armed_port, but that member does not exist
++		 * in the staged tree and broke the build (run 30238415728).
++		 */
++		/* F-139: scaffold now freed in fe_port_del */
  		return err;
++	}
  
-@@ -2319,13 +2324,31 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+-	pcd->fe_armed_port = (u8)port_id;
++	set_bit(port_id, pcd->fe_port_armed);	/* F-107: per-port engagement guard */
+ 	pcd->fe_miss_fqid = miss_fqid;
+ 	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED (AC_CC)\n", port_id);
+ 	return 0;
+@@ -2322,13 +2383,31 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  /* Debugfs wrapper — parse string, delegate to __fman_pcd_fe_arm_engage(). */
  static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
  {
@@ -126,7 +294,43 @@ index f3290c41b..171ca2b46 100644
  }
  
  
-@@ -2401,6 +2424,115 @@ static ssize_t fman_pcd_fe_arm_write(struct file *file,
+@@ -2342,8 +2421,11 @@ static int __fman_pcd_fe_arm_disengage(struct fman_pcd *pcd,
+ 	if (port_id < 0x08 || port_id >= 0x28)
+ 		return -EINVAL;
+ 
++	/* F-107: clear engagement guard BEFORE teardown (idempotent). */
++	clear_bit(port_id, pcd->fe_port_armed);
++
+ 	fman_pcd_fe_port_del(pcd, (u8)port_id);
+-	fman_pcd_fe_arm_free_scaffold(pcd);
++	/* F-139: scaffold now freed in fe_port_del */
+ 	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
+ 	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
+ 	return 0;
+@@ -2367,7 +2449,21 @@ static int fman_pcd_fe_arm_show(struct seq_file *s, void *unused)
+ 	seq_printf(s, "fe_pool engaged:  %s\n",
+ 		   pcd->fe_refcount ? "YES" : "NO");
+ 	seq_printf(s, "FE_ENTER root AD: 0x%lx\n", pcd->fe_root_ad_off);
+-	seq_printf(s, "MISS FQID: 0x%x (port 0x%02x)\n", pcd->fe_miss_fqid, pcd->fe_armed_port);
++	seq_printf(s, "MISS FQID: 0x%x\n", pcd->fe_miss_fqid);
++	seq_puts(s, "Armed ports:");
++	{
++		int _i;
++		bool _any = false;
++		for (_i = 0; _i < 32; _i++) {
++			if (test_bit(_i, pcd->fe_port_armed)) {
++				seq_printf(s, " 0x%02x", _i);
++				_any = true;
++			}
++		}
++		if (!_any)
++			seq_puts(s, " (none)");
++	}
++	seq_putc(s, '\n');
+ 	mutex_unlock(&pcd->fe_lock);
+ 	seq_puts(s,
+ 		 "verbs: engage <port_hex> <off_hex> [fqid_hex] | disengage <port_hex>\n");
+@@ -2404,6 +2500,115 @@ static ssize_t fman_pcd_fe_arm_write(struct file *file,
  	return ret ? ret : count;
  }
  
@@ -242,7 +446,7 @@ index f3290c41b..171ca2b46 100644
  static const struct file_operations fman_pcd_fe_arm_fops = {
  	.owner		= THIS_MODULE,
  	.open		= fman_pcd_fe_arm_open,
-@@ -2410,6 +2542,102 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
+@@ -2413,6 +2618,102 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
  	.release	= single_release,
  };
  
@@ -345,11 +549,19 @@ index f3290c41b..171ca2b46 100644
  /* ---- FE-VM engage/flow API for ask.ko (0153) ---- */
  
  int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
-@@ -2429,13 +2657,13 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+@@ -2432,13 +2733,39 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
  	if (!rxport)
  		return -ENODEV;
  
 -	miss_fqid = (hw_port_id == 0x10) ? 0x200 : 0x2B9;
++	/* F-107/F-122: idempotent engage — return success if already armed. */
++	if (test_bit(hw_port_id, pcd->fe_port_armed)) {
++		pr_info("fman_pcd: FE engage port 0x%02x already armed (idempotent)\n",
++			hw_port_id);
++		return 0;
++	}
++
++
 +	miss_fqid = fman_pcd_resolve_miss_fqid(pcd, hw_port_id);
  
  	err = fman_pcd_port_ensure_params_page(pcd, rxport);
@@ -357,11 +569,62 @@ index f3290c41b..171ca2b46 100644
  		return err;
  
 -	err = __fman_pcd_fe_arm_engage(pcd, hw_port_id, 0, miss_fqid);
-+	err = __fman_pcd_fe_arm_engage(pcd, hw_port_id, 0, miss_fqid, 0x001C0006);
++/* F-092: Build FE-VM chain before arming (idempotent).
++	 * The ehash/fe_pool may already exist from FMan microcode pre-init
++	 * (U-Boot loads ucode into MURAM).  If so, just mark built and skip
++	 * the allocation to avoid double-allocating the arena.
++	 */
++	if (!pcd->fe_vm_chain_built) {
++		if (!list_empty(&pcd->fe_ehash_tables)) {
++			pcd->fe_vm_chain_built = true;
++		} else {
++			err = __fman_pcd_fe_build_vm_chain(pcd);
++			if (err) {
++				pr_err("fman_pcd: FE engage: VM chain build failed: %d\n", err);
++				return err;
++			}
++			pcd->fe_vm_chain_built = true;
++		}
++	}
++
++		err = __fman_pcd_fe_arm_engage(pcd, hw_port_id, 0, miss_fqid, 0x001C0006);
  	if (err)
  		return err;
  
-@@ -2621,6 +2849,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -2465,6 +2792,21 @@ void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id)
+ 		return;
+ 
+ 	__fman_pcd_fe_arm_disengage(pcd, hw_port_id);
++	/* F-129: Tear down shared FE-VM chain on last port disengage.
++	 * Gate on fe_refcount (set by fe_pool_get, cleared by fe_pool_put).
++	 * When the last port disengages and fe_ports is empty, tear down
++	 * the shared chain (pool, singletons, ehash, hashfe, enq).
++	 */
++	if (list_empty(&pcd->fe_ports) && pcd->fe_refcount) {
++		pr_info("fman_pcd: F-129 tearing down FE-VM chain (last port disengaged)\n");
++		fman_pcd_fe_enq_free(pcd);
++		fman_pcd_fe_hash_free(pcd);
++		fman_pcd_ehash_drain(pcd);
++		fman_pcd_fe_singletons_free(pcd);
++		fman_pcd_fe_pool_put(pcd);
++		pcd->fe_vm_chain_built = false;
++	}
++
+ 
+ 	pr_info("fman_pcd: FE disengage port 0x%02x\n", hw_port_id);
+ }
+@@ -2556,6 +2898,10 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_root_get_offset);
+  * caller (fman_probe) is responsible for storing the returned pointer
+  * on struct fman and arranging teardown via fman_pcd_release().
+  */
++static const struct file_operations fman_pcd_fe_chain_fops;
++static const struct file_operations fman_pcd_fe_disengage_full_fops;
++static const struct file_operations fman_pcd_fe_buffer_fops;
++
+ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ {
+ 	struct fman_pcd *pcd;
+@@ -2665,6 +3011,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_hashfe", 0644,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_hashfe_fops);
@@ -422,7 +685,7 @@ index 69b28da94..b45c2152d 100644
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_set_ekfc);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 3a8ab3dda..055df6891 100644
+index dbac05a2d..6bea63753 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
 @@ -303,7 +303,8 @@ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id);
