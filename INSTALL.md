@@ -106,7 +106,7 @@ install image
 - Accept defaults for the rest
 
 The installer automatically:
-1. Partitions the eMMC (GPT with 32 MiB firmware reserved zone)
+1. Partitions the eMMC (4-entry shrunk GPT with 64 MiB firmware reserved zone)
 2. Copies the VyOS image to eMMC partition 3 (ext4)
 3. Writes `/boot/vyos.env` pointing to the installed image
 4. **Configures U-Boot for eMMC boot** via `fw_setenv` — writes `vyos`, `usb_vyos`, and `bootcmd` to SPI flash
@@ -152,10 +152,10 @@ After `install image`, the Mono Gateway eMMC (`mmcblk0`) has:
 
 | Partition | U-Boot ref | Type | Contents |
 |-----------|-----------|------|---------|
-| *(reserved)* | — | 32 MiB firmware zone | NXP firmware boundary — no partitions here |
-| p1 | `mmc 0:1` | Raw (1 MiB) | BIOS boot gap — no filesystem |
-| p2 | `mmc 0:2` | FAT32 (256 MiB) | EFI partition — exists but unused on this board |
-| **p3** | **`mmc 0:3`** | **ext4** | **VyOS root — kernel, DTB, initrd, squashfs** |
+| *(reserved)* | — | 64 MiB firmware zone | NXP firmware boundary (4 KiB to 64 MiB) — no partitions here |
+| p1 | `mmc 0:1` | Raw (1 MiB) | BIOS boot gap @ 64 MiB — no filesystem |
+| p2 | `mmc 0:2` | FAT32 (256 MiB) | EFI partition @ 65 MiB — exists but unused on this board |
+| **p3** | **`mmc 0:3`** | **ext4** | **VyOS root @ ~321 MiB — kernel, DTB, initrd, squashfs** |
 
 `/boot/vyos.env` lives on p3 (ext4). U-Boot loads it with `ext4load mmc 0:3`.
 
