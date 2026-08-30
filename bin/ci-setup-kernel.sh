@@ -1204,7 +1204,6 @@ fi
 # For 13-byte 5-tuple keys, this truncated PROTO+SPORT+DPORT, making
 # TCP/UDP flow matching unverifiable. Fix: display only flow key at
 # FMAN_EHASH_FLOW_KEY_OFF (offset 8) for flow->key_size bytes.
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/fe_flow_key_fix.py" 2>&1
 
 
 # Performance: OVFQ=1 on TX FQ context_a for FMan hardware direct enqueue.
@@ -1356,12 +1355,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
 # M2-4: reduce FE pool 100->16 to fit 64KB MURAM
 # 100x28B rounded 256B = 25600B + pool 8192B + ehash 33280B > 65536B
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c \
-        'FMAN_PCD_FE_POOL_COUNT	100' \
-        'FMAN_PCD_FE_POOL_COUNT 16' \
-        1 \
-        "M2-4: FE pool reduced 100→16"
     echo "### fman_pcd.c: M2-4 FE pool reduced 100->16 (mutate)"
 fi
 
@@ -1384,15 +1377,11 @@ fi
 # currently-enabled code path.  -Werror promotes the warning to error.
 # Mark it with __attribute__((unused)) to silence the build.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "static int fman_pcd_debugfs_root_get(void)" "static __attribute__((unused)) int fman_pcd_debugfs_root_get(void)" -1 "F-085: __unused debugfs_root_get (optional)" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-052 debugfs_root_get marked __unused"
 fi
 
 # F-052b: Suppress -Werror for fman_pcd_debugfs_root_put (same root cause).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "static void fman_pcd_debugfs_root_put(void)" "static __attribute__((unused)) void fman_pcd_debugfs_root_put(void)" -1 "F-085: __unused debugfs_root_put (optional)" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-052b debugfs_root_put marked __unused"
 fi
 
@@ -1484,25 +1473,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # Leaving the injection active would cause double-allocations and ENOMEM failures in production engage path.
 
     # F-084: Fix 0158 compose FE_ENTER target — EXT_HASH not ENQ.
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c \
-        'err = fman_pcd_fe_enter_build(pcd, e->muram_off);' \
-        'err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);' \
-        1 \
-        "F-084: compose FE_ENTER target = EXT_HASH"
     echo "### fman_pcd.c: F-084 compose FE_ENTER target = EXT_HASH (mutate)"
 
     # F-085: Suppress -Wunused-function for static functions whose callers
      # may be behind conditional code paths or fixup-anchor mismatches.
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" drivers/net/ethernet/freescale/fman/fman_pcd.c "static int __fman_pcd_fe_build_vm_chain" "static __maybe_unused int __fman_pcd_fe_build_vm_chain" 1 "F-085: __maybe_unused on vm_chain" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
     # fman_pcd_fe_buffer_setup now called via F-072b — no __maybe_unused needed
 
     # F-085b: Fix -Wunused-result from kstrtouint in fe_arm engage tokenizer.
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "kstrtouint(tok, 16, \&miss_fqid);" "(void)kstrtouint(tok, 16, \&miss_fqid);" -1 "F-085b: void cast miss_fqid (optional — 0158 skipped)" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "kstrtouint(tok, 16, \&ekfc);" "(void)kstrtouint(tok, 16, \&ekfc);" -1 "F-085b: void cast ekfc (optional — 0158 skipped)" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-085 __maybe_unused + kstrtouint casts"
 
 # F-061: fe_probe debugfs — dump FE pool workspace to read KG-extracted key bytes.
@@ -1584,7 +1561,6 @@ fi
 # Stores the DMA buffer virtual address in shared global fman_pcd_ic_vaddr
 # at the top of rx_default_dqrr() so fman_pcd can dump the IC.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069a.py" 2>&1
     echo "### dpaa_eth.c: F-069a v9 buf_base + vaddr captures\n"
 fi
 
@@ -1607,7 +1583,7 @@ fi
 # script's own "if [ -f ... ]" wrapping does not check python3's exit
 # status, so the gap went unnoticed until the full replay caught it).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069b.py" 2>&1
+    :
 fi
 
 # Strip EXPORT_SYMBOL_GPL placed before #include by F-069b v3.
@@ -1620,13 +1596,11 @@ fi
 # reason as F-069b above (M2_4_2.py anchor dependency) -- an earlier
 # fold attempt silently produced only its "globals added" sub-block.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_071.py" 2>&1
+    :
 fi
 
 # without exporting.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "EXPORT_SYMBOL_GPL(fman_pcd_ic_vaddr);\n" "" -1 "dead EXPORT remove (optional)" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: stripped EXPORT_SYMBOL_GPL (before includes)"
 fi
 
@@ -1634,18 +1608,6 @@ fi
 # from CCBS scaffold removal). The function was called from 0150 which
 # F-047 removed.  Avoids -Werror build failure.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c \
-        'static void fman_pcd_fe_build_contexts' \
-        'static __maybe_unused void fman_pcd_fe_build_contexts' \
-        1 \
-        "F-085: __maybe_unused on fman_pcd_fe_build_contexts"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c \
-        'fman_muram_offset_to_vbase(muram,' \
-        '(void *)fman_muram_offset_to_vbase(muram,' \
-        47 \
-        "F-085: cast addition on muram_offset_to_vbase (47 occ., synchronized post-Cluster 1 fold campaign)"
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
@@ -1691,7 +1653,6 @@ fi
 # Fixes the second-cycle disengage hang (bus lockup from BMI dereferencing
 # freed MURAM via stale FMBM_RCCB).  Must run AFTER 0157 (typed impl).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_134.py" 2>&1
     echo "### F-134: KG disarm before MURAM free"
 fi
 
@@ -1702,7 +1663,6 @@ fi
 # without actually re-arming.  Board-verified on .106 (ISO 0242).
 # Must run AFTER F-134 (which reorders the function this modifies).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_135.py" 2>&1
     echo "### F-135: clear fe_port_armed on disengage"
 fi
 
@@ -1714,7 +1674,6 @@ fi
 # resources.  F-092 v3 detects the existing chain on re-engage and
 # skips re-allocation.  Must run AFTER F-129 (modifies its teardown).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_136.py" 2>&1
     echo "### F-136: keep FE-VM chain warm across cycles"
 fi
 
@@ -1883,7 +1842,7 @@ echo "### fman_pcd.c: F-062d DISABLED (ENQ ALLOCATE may cause QMan FD corruption
 
 # M2-4: fe_port_set lazy-allocates params page if not yet created
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/M2_4_4.py" 2>&1
+    :
 fi
 fi
 
@@ -1908,7 +1867,6 @@ fi
 # plans/PATCH-FOLD-CAMPAIGN-PLAN.md); F_148 is itself unfolded/unmodified
 # and still needs to run before this comment's "F-148" text exists.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_158.py" 2>&1
     echo "### fman_pcd.c: F-158 fe_scaffold debugfs dump node"
 fi
 
@@ -1963,7 +1921,6 @@ fi
 # any port. Does not touch fman_pcd_ehash_add_key() or any existing fe_*
 # code path -- purely additive.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_167.py" 2>&1
     echo "### fman_pcd.c: F-167 fe_extc FMFP_EXTC SYNC probe (debugfs, inert by default)"
 fi
 
@@ -1993,7 +1950,6 @@ fi
 # sequence keygen_scheme_setup() requires for an already-bound scheme.
 # Purely additive; only fires on an explicit `set` write.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_169.py" 2>&1
     echo "### fman_pcd.c: F-169 fe_kg_ekfc live KeyGen scheme EKFC reconfig (debugfs)"
 fi
 
@@ -2016,7 +1972,6 @@ fi
 # RM-documented AD species instead. Purely additive; does not touch fe_arm
 # or any existing fe_* verb.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_171.py" 2>&1
     echo "### fman_pcd.c: F-171 fe_group CONT_LOOKUP group AD wrapper (debugfs)"
 fi
 
@@ -2030,7 +1985,6 @@ fi
 # 16-byte mask (falls back to F-171's wildcard default when omitted).
 # Purely additive on top of F-171; no other fe_* verb touched.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_172.py" 2>&1
     echo "### fman_pcd.c: F-172 fe_group extended to accept explicit key+mask"
 fi
 
@@ -2235,7 +2189,6 @@ fi
 # fqid + dv0/dv1=0); the nft flowtable offload additionally needs active
 # conntrack on the board (nf_conntrack_count was 0) -- separate item.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_188.py" 2>&1
     echo "### fman_pcd.c: F-188 production-path alignment (14-byte key + own-port flow target)"
 fi
 
@@ -2244,7 +2197,6 @@ fi
 # instrument for the Phase 3 board session -- dispatch-independent compare
 # discriminator. Anchored on the exact post-F-188 derived state.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_189.py" 2>&1
     echo "### fman_pcd.c: F-189 stats-enabled flow insert (EHASH-DUAL-FIX Phase 1.1)"
 fi
 
@@ -2261,14 +2213,12 @@ fi
 # hardware TX terminal depends on this variable (hit_fqid = tx_fqid || target_fqid).
 # All diagnostic logging removed; behavior identical to the original inline resolve.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_193.py" 2>&1
     echo "### fman_pcd.c: F-193 target-fqid hoist (structural prerequisite for F-198)"
 fi
 
 # F-197 (2026-08-15): when the populated params-page FQID is zero, use
 # the unique non-zero base FQID of a used KeyGen scheme bound to this port.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_197.py" 2>&1
     echo "### fman_pcd.c: F-197 same-port KeyGen target-FQID fallback"
 fi
 
@@ -2278,9 +2228,7 @@ fi
 # otherwise it keeps F-197's own-port RX-FQID reinjection terminal. Must run
 # after F-094 (struct), F-181/F-182 (record writer), and F-188 (flow_add).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_198.py" 2>&1
     echo "### fman_pcd.c: F-198 hardware TX terminal (INSERT_L2_HDR + ENQUEUE_PKT)"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_228.py" 2>&1
     echo "### fman_pcd.c: F-228 key-addressed per-flow stats getter (T-M8-3)"
 fi
 
@@ -2298,7 +2246,6 @@ fi
 # decrements TTL and fixes the IPv4 checksum in hardware. IPv4 only; must run
 # AFTER F-198 (extends its TX branch).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_200.py" 2>&1
     echo "### fman_pcd.c: F-200 UPDATE_TTL routed-IPv4 opcode"
 fi
 
@@ -2308,7 +2255,6 @@ fi
 # clear / drain and panicked in list_del with LIST_POISON2. Serialize the
 # production wrappers and make an already-removed key idempotent.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_202.py" 2>&1
     echo "### fman_pcd.c: F-202 production ehash flow lifecycle serialization"
 fi
 
@@ -2341,15 +2287,10 @@ fi
 # overloading hw_port_id — F-195's own-port miss-FQID semantics stay intact.
 # MUST run after F-198 (final action struct), F-194/F-202 (final flow-add body).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_204.py" 2>&1
     echo "### fman_pcd.c/h: F-204 explicit ehash table_idx selector (v4=0, v6=1)"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_218.py" 2>&1
     echo "### fman_pcd.c: F-218 v6 flow_del selects table1 by 38-byte key length"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_220.py" 2>&1
     echo "### fman_pcd.c: F-220 per-port routed-IPv4 ehash table lifecycle foundation"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_221.py" 2>&1
     echo "### fman_pcd.c: F-221 repoint v4 node/add/del to per-port table"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_225.py" 2>&1
     echo "### fman_pcd.c: F-225 v4 ehash key_size 14->46 (dual-lane GEC key)"
 fi
 
@@ -2362,19 +2303,14 @@ fi
 # -EOPNOTSUPP until the board gate passes. MUST run after F-204 (table1 selector),
 # F-205 (LCV primitive), F-209 (AC_CC CCOBASE), F-185/F-186 (vendor node/miss).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_210.py" 2>&1
     echo "### fman_pcd.c/h: F-210 v6 gate + dual-node engage writer (gro+16)"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_219.py" 2>&1
     echo "### fman_pcd.c/h: F-219 per-port v6 intent bitmap + setter/predicate"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_211.py" 2>&1
     echo "### fman_pcd.c/kg.c/h: F-211 gated v6 KeyGen scheme arm/bind"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_212.py" 2>&1
     echo "### fman_pcd_kg.c: F-212 gated parser LCV split + restore"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_214.py" 2>&1
     echo "### fman_keygen.c/pcd_kg.c: F-214 gated cls-plan0 pass-all (QLCV fix)"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_226.py" 2>&1
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_230.py" 2>&1
     echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
     # T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26, plans/ASK2-VLAN-REARCH.md):
     # the inline FE-VM VLAN opcode path (F-233) is silicon-proven dead -- it
@@ -2400,7 +2336,6 @@ fi
 # MUST run after every fixup that registers a debugfs node (F-086, F-167,
 # F-169, F-171, F-172, F-176, F-189, F-192) so the wrap covers them all.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_191.py" 2>&1
     echo "### fman_pcd.c: F-191 debugfs surface gated behind CONFIG_FMAN_PCD_DEBUG_FS"
 fi
 
