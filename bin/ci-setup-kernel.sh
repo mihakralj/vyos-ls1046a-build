@@ -1654,8 +1654,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         drivers/net/ethernet/freescale/fman/fman_pcd.c \
         'fman_muram_offset_to_vbase(muram,' \
         '(void *)fman_muram_offset_to_vbase(muram,' \
-        43 \
-        "F-085: cast addition on muram_offset_to_vbase (43 occ., verified post-Phase A fold campaign)"
+        46 \
+        "F-085: cast addition on muram_offset_to_vbase (46 occ., synchronized post-Phase B fold campaign)"
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
@@ -1741,124 +1741,14 @@ fi
 : # F-139 folded into patch 0158 (per-port scaffold tracking). See
 : # F-130 marker above for the combined Phase A verification note.
 
-# F-140: M6 Piece 2 — IPv6 ehash table (key_size=37) + v6 KG scheme.
-# Adds second ehash table and v6 KG scheme to FE-VM chain build.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_140.py" 2>&1
-    echo "### F-140: v6 ehash table + KG scheme"
-fi
-
-# F-142: Convert ehash flow records from kzalloc to dma_alloc_coherent.
-# Fixes F-141: the FMan DMA engine reads flow records from DDR and needs
-# uncached memory (dma_alloc_coherent), not cacheable kmalloc memory.
-# Without this, the FE-VM ehash path (Fork-B) cannot produce a HIT.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_142.py" 2>&1
-    echo "### F-142: dma_alloc_coherent for ehash flow records"
-fi
-
-# F-143: Place en_exthash_node descriptor at start of DDR table allocation.
-# The FE-VM EXT_HASH FE reads the en_exthash_node from DDR at table_base to
-# get hash_bytes_offset, key_size, hash_mask_bits, etc.  Without this, the
-# FE-VM reads garbage and cannot configure the ehash lookup correctly.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_143.py" 2>&1
-    echo "### F-143: en_exthash_node at DDR table base"
-fi
-
-# F-144: Fix EXT_HASH FE word1 byte order to match SDK's packed struct.
-# The NXP SDK's t_ExtHashFe is _Packed (little-endian fields).  The FMan
-# reads word1 as big-endian: hashShift<<24 | contextSize<<16 | hashMask.
-# Our code was writing hashMask<<16 | contextSize<<8 | hashShift — reversed.
-# This caused the microcode to use hashShift=0x7F (high byte of hashMask)
-# and hashMask=0x0C00 (contextSize+hashShift packed), producing wrong buckets.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_144.py" 2>&1
-    echo "### F-144: EXT_HASH FE word1 byte order fixed"
-fi
-
-# F-145: Fix contextSize to 256 (DDR record size, not key size).
-# The NXP SDK passes contextSize=256 (MAX_EN_EHASH_ENTRY_SIZE), not the key
-# size.  The microcode uses this for DMA read sizing of the full DDR record.
-# The F-063 "fix" that changed it to key_size was incorrect — the BMI stall
-# was actually caused by the word1 byte order bug (F-144), not contextSize.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_145.py" 2>&1
-    echo "### F-145: contextSize=255 (DDR record size) — REVERTED by F-149 below"
-fi
-
-# F-149: Revert F-145 — restore contextSize = key_size (microcode §7.2).
-# F-145 changed contextSize to 256 (DDR record allocation size), but the
-# EXT_HASH FE uses contextSize for KEY COMPARISON, not DMA read sizing.
-# With contextSize=256, the FE compares 256 bytes per entry — bytes 21-255
-# are uninitialized padding, so the comparison can never match.
-# This is the root cause of F-141 (ehash HIT failure).
-# The microcode reference explicitly documents this bug and its fix.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_149.py" 2>&1
-    echo "### F-149: contextSize = key_size (revert F-145)"
-fi
-
-# F-152: Revert F-144 — restore original EXT_HASH FE word1 bit-position
-# formula.  F-144 changed the encoding to hashShift<<24|contextSize<<16|
-# hashMask based on an unverified theory, without first checking
-# arch/fman-microcode-210-programming-reference.md — which already
-# documented (since 2026-07-17) that the ORIGINAL patch 0131 formula
-# (hashMask<<16)|((contextSize-1)<<8)|hashShift is correct (verified
-# value 0x7fff0c00).  F-144 produced 0x000C7FFF instead — hashMask,
-# contextSize, and hashShift all in the wrong bit positions.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_152.py" 2>&1
-    echo "### F-152: revert F-144 (restore hashMask<<16|contextSize-1<<8|hashShift)"
-fi
-
-# F-147: Fix RCCB to point directly to FE_ENTER AD (not group table).
-# F-091 introduced a bug: fe_enter_off = gro overrides the correct
-# fe_enter_off = ato+32.  The settled architecture requires RCCB→FE_ENTER
-# direct dispatch (no CC group table).  This was proven working on
-# 2026-07-04 (the only confirmed HIT in program history).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_147.py" 2>&1
-    echo "### F-147: hybrid CONT_LOOKUP + FE-VM topology (fe_enter_off = gro)"
-fi
-
-# F-153: Fix 0146's MUX/TRANSITION wiring.  0146 wires MUX directly to
-# ENQ (skipping TRANSITION) and mislabels TRANSITION as a "MISS -> Exit"
-# relay wired to fe_exit_off.  Per microcode reference Sec 7.5/7.6/7.1
-# (line 60, "DDR -->|HIT| MUX[MUX FE]") and Sec 7.3 line 384 ("ENQ's
-# proven role is the HIT terminal: MUX -> TRANSITION -> ENQ -> TX FQ"),
-# the correct wiring is MUX->TRANSITION->ENQ.  TRANSITION is a MUX-HIT
-# relay, not a MISS-path object (MISS is EXT_HASH's own missNextFE, w6).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_153.py" 2>&1
-    echo "### F-153: MUX->TRANSITION->ENQ wiring (was MUX->ENQ direct)"
-fi
-
-# F-148 v4: Write flow key to CC match table on ehash insert.
-# The CONT_LOOKUP group table has numKeys=0, routing ALL frames to miss-AD.
-# To enter the FE-VM, the CC engine must match a key.  This fixup writes
-# the flow key to the CC match table and increments numKeys when a flow
-# is inserted.  Matching frames → FE_ENTER → EXT_HASH → ehash → HIT →
-# MUX → TRANSITION → ENQ.  Non-matching frames → miss-AD → kernel.
-# Limited to 32 entries.  v4 copies the real FE_ENTER AD content (4 words)
-# into the HIT-AD slot instead of writing the raw offset as word0 (v3 bug).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_148.py" 2>&1
-    echo "### F-148 v4: CC match table key write + real FE_ENTER AD copy"
-fi
-
-# F-157: Wire the dedicated TX FQ into the FE-VM ENQ (HIT destination).
-# __fman_pcd_fe_build_vm_chain() built ENQ with tx_fqid=0x200, identical to
-# the CC miss-AD target — HIT and MISS converged on kernel FQ 0x200 and no
-# instrument could discriminate them.  R1: fman_pcd_fe_engage() now takes a
-# caller-supplied enq_fqid (ask.ko's dedicated TX FQ, P4.1, ch 0x801 = eth4
-# TX), stored on pcd->fe_enq_fqid and used by the chain builder (fallback
-# 0x200).  A HIT frame now goes to the dedicated TX FQ (observable) while a
-# miss still goes miss-AD -> kernel FQ 0x200 on eth3.  Runs after F-148.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_157.py" 2>&1
-    echo "### F-157: dedicated TX FQ wired into FE-VM ENQ (HIT destination)"
-fi
+: # Phase B: EHash Record Encoding & Opcode Cluster (F-140..F-157).
+: # F-140, F-142, F-143, F-144, F-145, F-149, F-152, F-153, F-148, F-157
+: # folded together into 0169-fman-pcd-fe-obs-canary.patch on 2026-08-30
+: # (Phase B fold campaign). F-147 retired no-op revert. Settle ehash table
+: # creation, dma_alloc_coherent, en_exthash_node DDR base layout, and
+: # resolve revert-pairs (F-144/152 and F-145/149) into patch 0169.
+: # Replayed all descendant commits with zero conflicts; verified 100%
+: # byte-exact vs current on fman_pcd.c and fman_pcd.h. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 : # F-093 folded into patch 0169 (dynamic FQID resolution, kill
 : # hardcoded 0x200). Round-2 fold, see F-054's marker above / F-184's
@@ -2208,71 +2098,11 @@ fi
 # F-073B, got one frame through before stopping). Updates both call sites
 # that share fman_pcd_ehash_add_key() (the fe_flow debugfs path and the
 # ask.ko-facing kernel API) so the build stays consistent.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_175.py" 2>&1
-    echo "### fman_pcd.c: F-175 per-flow FE context buffer + vendor ENQ NIA"
-fi
-
-# F-176 (2026-08-07, Phase 1 of plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md):
-# adds a dispatch/FQID-independent HIT discriminator. Phase 0 of that plan
-# first misread the wrong vendor function family (ext_hash_add_key() /
-# t_FmPcdCcNodeExtHashInfo, reachable only via FM_PCD_HashTableSet(), never
-# called by cdx_ehash.c) and concluded this project's ehash bucket/record
-# format needed a 16x-stride structural rewrite -- WRONG, retracted same
-# day. The function cdx_ehash.c actually calls, ExternalHashTableAddKey(),
-# operates on en_exthash_bucket/en_exthash_node/en_ehash_entry -- checked
-# field-by-field, this project's existing 16-byte bucket, 4-word DDR
-# descriptor encoding, and flow-record header are bit-exact correct. No
-# format fix needed (see arch/fman-microcode-210-programming-reference.md
-# section 10 for the full correction). What IS new: en_ehash_entry is a
-# union whose second view exposes hardware-writeback packet_count/
-# packet_bytes/timestamp counters at offset 256, gated by
-# SET_STATS_ENABLE/SET_TIMESTAMP_ENABLE flag bits, in a 320B (not 256B)
-# entry. F-176 enables this unconditionally (diagnostic build) and adds a
-# new debugfs node "fe_ehash_stats" to read it back -- the first way to
-# tell, independent of FQID/dispatch, whether hardware ever actually
-# performed a compare against an inserted key.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_176.py" 2>&1
-    echo "### fman_pcd.c: F-176 ehash stats/timestamp HIT discriminator"
-fi
-
-# F-181 (2026-08-11): vendor-faithful per-key opcode-script in the ehash DDR
-# record.  Source-grounded against the genuine vendor ExternalHashTableAddKey()
-# (we-are-mono/ASK 010-ask-fman-dpaa-ehash.patch): the vendor en_ehash_entry
-# flags carry SET_OPC_OFFSET/SET_PARAM_OFFSET + an inline ENQUEUE_PKT opcode
-# list + en_ehash_enqueue_param(flow fqid).  Our record had flags=STATS_EN only
-# + key + u32 ENQ offset, so on a HIT the FE-VM walks opc_offset=0 (header
-# bytes) and cannot ENQUEUE -- the ehash comparator never completes.  F-181
-# writes the vendor opcode-script.  MUST run AFTER F-176 (sets STATS_EN in
-# flags) and BEFORE F-175's record-model blocks (which F-181's payload
-# supersedes for the dispatch).  No container change -- 16B bucket path kept.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_181.py" 2>&1
-    echo "### fman_pcd.c: F-181 ehash record opcode-script + ENQ fqid"
-fi
-
-# F-177 (2026-08-07, T-M3-R Phase 2 item 2): Phase 1 (F-176 corrected to
-# STATS_EN-only) confirmed the FE-VM ehash zero-HIT result is real. Phase 2
-# item 1 (int_buf_pool_addr/global_mem_offset byte-for-byte re-check against
-# vendor's ExternalHashTableSet()) found this project's encoding already
-# bit-exact correct -- no fix, no board risk, closed by code review alone.
-# Item 2 (this fixup): F-168 wired an FMFP_EXTC[INV0] SYNC assertion into
-# fman_port_set_cc_base()'s FMBM_RCCB write (the AC_CC dispatch topology)
-# and it fixed the historical port-wedge on arm. RM S5.12.14.1 documents
-# this SYNC as required after changing ANY live FMan-controller-walked
-# structure before dispatch into it is safe -- the ehash bucket table is
-# exactly such a structure, yet fman_pcd_ehash_add_key()'s own bucket-head
-# publish (F-173's wmb()-then-publish) has never asserted it. Weaker
-# hypothesis than F-168's (vendor's own ExternalHashTableAddKey() fast
-# insert path calls no sync of any kind -- see fm_ehash.c, arch/fman-
-# microcode-210-programming-reference.md sec 12.1), but cheap and the last
-# concrete insert-path lead before Phase 3 (new diagnostic capability /
-# Fork-B viability reassessment).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_177.py" 2>&1
-    echo "### fman_pcd.c: F-177 FMFP_EXTC SYNC on ehash bucket-head publish"
-fi
+: # F-175, F-176, F-181, F-177 folded into patch 0169 (EHash Record
+: # Encoding & Opcode Cluster Phase B). Patch-fold campaign 2026-08-30:
+: # regenerated into 0169-fman-pcd-fe-obs-canary.patch. Verified
+: # byte-identical vs current on fman_pcd.c and fman_pcd.h. See
+: # plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-178 (2026-08-07, direct response to: "vendor's real ASK code works on
 # this exact board -- what are we doing differently?"). Vendor's real
@@ -2319,24 +2149,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-179 kgse_dv0/dv1/ekdv zeroed under EKFC override"
 fi
 
-# F-182 (2026-08-12, E20 corrected track step 1): the F-181 first silicon
-# test's DDR record dump exposed three record bugs independent of dispatch:
-# (1) F-175's per-flow ctx pointer write (8B be64 at 8+align8(keysize))
-# CLOBBERS F-181's opcode slot (8+ALIGN(keysize,4)) -- both = 24 for
-# keysize 14; dump showed opcode[24]=0x00 under the ctx_dma be64. Relocate
-# the ctx pointer past opcode area + param block (offset 56 for keysize 14).
-# (2) param.fqid carried the ENQ FE MURAM offset (dump: 0x00055f00) -- the
-# vendor writes the flow's actual target FQID there (cdx create_enque_hm:
-# param->fqid = cpu_to_be32(l2_info.fqid)). Write the add_key fqid param.
-# (3) SET_STATS_ENABLE on a 256B record: vendor sets it only with the 320B
-# ext entry (stats at +256) + UPDATE_STATS in the hashfe word; we have
-# neither, so clear it (pkt_count was never a valid discriminator -- the
-# M3 gate is the fe_obs canary, patch 0169). Anchored on F-175/F-181
-# outputs; MUST run after both.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_182.py" 2>&1
-    echo "### fman_pcd.c: F-182 ehash record fixes (opcode-slot clobber, fqid source, STATS_EN)"
-fi
+: # F-182 folded into patch 0169 (ehash record opcode-slot clobber,
+: # fqid source, and STATS_EN). See Phase B marker above.
 
 # F-183 (2026-08-12, E20 corrected track step 2 -- Delta 1 adapted to what
 # .185 silicon survives): the F-181 test stalled on the first dispatched
