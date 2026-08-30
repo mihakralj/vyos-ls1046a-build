@@ -138,10 +138,10 @@ index ff82979dd..5e9af64cf 100644
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
   * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 0cd3c8e64..2fdbcceae 100644
+index 0cd3c8e64..7e452ce07 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -318,6 +318,33 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+@@ -318,6 +318,34 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
  void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
  				u8 saved_engine);
  
@@ -160,7 +160,8 @@ index 0cd3c8e64..2fdbcceae 100644
 +	u32  flags;			/* reserved for future use */
 +};
 +
-+int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id);
++int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id,
++			 u32 enq_fqid);
 +void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);
 +int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 +			 const struct fman_pcd_fe_flow_action *action);
