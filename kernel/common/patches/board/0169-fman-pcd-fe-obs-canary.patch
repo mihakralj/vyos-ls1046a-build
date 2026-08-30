@@ -46,7 +46,7 @@ valid in both the pre-fixup and post-fixup trees.
 Signed-off-by: VyOS LS1046A <ask20@vyos-ls1046a-build>
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 04e5fa0a0..6d16ba835 100644
+index 04e5fa0a0..1feb33e90 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 @@ -143,6 +143,22 @@ struct fman_pcd {
@@ -258,7 +258,35 @@ index 04e5fa0a0..6d16ba835 100644
  	pcd->fe_hash_off = obj->muram_off;
  	list_add_tail(&obj->node, &pcd->fe_singletons);
  	return 0;
-@@ -2174,6 +2327,282 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+@@ -2101,6 +2254,27 @@ static void fman_pcd_fe_hash_free(struct fman_pcd *pcd)
+ 		list_add_tail(&obj->node, &pcd->fe_available);
+ 		break;
+ 	}
++	/* F-187(hash-free-miss-res): release the miss-result allocations
++	 * made by fe_hash_build -- the 16 B MURAM t_ExtHashResult and the
++	 * 256 B DMA miss context. fe_hash_free previously returned only
++	 * the FE object to the pool, leaking exactly 16 B MURAM + 256 B
++	 * DMA per build/clear cycle (measured on .185, E26). The hash AD
++	 * was already zeroed above (FMAN_PCD_FE_MAX_SIZE memset), so the
++	 * missResult pointer reference is gone before we free the target.
++	 */
++	if (pcd->miss_res_off) {
++		fman_pcd_muram_free(pcd, pcd->miss_res_off, 16);
++		pcd->miss_res_off = 0;
++	}
++	if (pcd->miss_ctx) {
++		struct fman_pcd_ehash_table *__t =
++			list_last_entry_or_null(&pcd->fe_ehash_tables,
++				struct fman_pcd_ehash_table, node);
++		if (__t)
++			dma_free_coherent(__t->dev, 256, pcd->miss_ctx,
++					  pcd->miss_ctx_phys);
++		pcd->miss_ctx = NULL;
++	}
+ 	pcd->fe_hash_off = 0;
+ }
+ 
+@@ -2174,6 +2348,282 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
  	.release	= single_release,
  };
  
@@ -541,7 +569,7 @@ index 04e5fa0a0..6d16ba835 100644
  /*
   * Build FE-VM runtime contexts after the full dormant chain is assembled.
   * Called by fe_arm engage before reprogramming KeyGen/BMI.
-@@ -2207,20 +2636,18 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
+@@ -2207,20 +2657,18 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
  	/* MUX context: HIT -> ENQ */
  	if (pcd->fe_mux_off && enq) {
  		fe = fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
@@ -568,7 +596,7 @@ index 04e5fa0a0..6d16ba835 100644
  	}
  }
  
-@@ -2261,6 +2688,8 @@ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
+@@ -2261,6 +2709,8 @@ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
   * Typed engage — called by both the debugfs wrapper and the exported
   * fman_pcd_fe_engage() (0153).  No string parsing.
   */
@@ -577,7 +605,7 @@ index 04e5fa0a0..6d16ba835 100644
  static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  				    unsigned int port_id,
  				    unsigned long fe_enter_off,
-@@ -2272,10 +2701,7 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+@@ -2272,10 +2722,7 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  
  	if (port_id < 0x08 || port_id >= 0x28)
  		return -EINVAL;
@@ -589,7 +617,7 @@ index 04e5fa0a0..6d16ba835 100644
  		struct muram_info *muram = fman_get_muram(pcd->fman);
  		unsigned long gro, mto, ato;
  
-@@ -2335,18 +2761,107 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+@@ -2335,18 +2782,107 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  			return err;
  	}
  
@@ -698,7 +726,7 @@ index 04e5fa0a0..6d16ba835 100644
  static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
  {
  	unsigned int port_id = 0;
-@@ -2404,6 +2919,44 @@ static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
+@@ -2404,6 +2940,44 @@ static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
  	return __fman_pcd_fe_arm_disengage(pcd, port_id);
  }
  
@@ -743,7 +771,7 @@ index 04e5fa0a0..6d16ba835 100644
  static int fman_pcd_fe_arm_show(struct seq_file *s, void *unused)
  {
  	struct fman_pcd *pcd = s->private;
-@@ -2743,13 +3296,27 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_add);
+@@ -2743,13 +3317,27 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_add);
  int fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
  			 const u8 *key, u8 key_size)
  {
@@ -776,7 +804,7 @@ index 04e5fa0a0..6d16ba835 100644
  }
  EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_del);
  
-@@ -2806,6 +3373,95 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_root_get_offset);
+@@ -2806,6 +3394,95 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_root_get_offset);
   * caller (fman_probe) is responsible for storing the returned pointer
   * on struct fman and arranging teardown via fman_pcd_release().
   */
@@ -872,7 +900,7 @@ index 04e5fa0a0..6d16ba835 100644
  struct fman_pcd *fman_pcd_init(struct fman *fman)
  {
  	struct fman_pcd *pcd;
-@@ -2918,9 +3574,14 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -2918,9 +3595,14 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_hash_probe", 0600,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_hash_probe_fops);
@@ -887,7 +915,7 @@ index 04e5fa0a0..6d16ba835 100644
  		}
  	}
  
-@@ -3048,6 +3709,53 @@ static int fman_pcd_fe_recover_open(struct inode *inode, struct file *file)
+@@ -3048,6 +3730,53 @@ static int fman_pcd_fe_recover_open(struct inode *inode, struct file *file)
  	return single_open(file, NULL, inode->i_private);
  }
  
