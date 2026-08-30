@@ -25,7 +25,7 @@ engaged port's FE_ENTER root AD. No behaviour change for miss_fe_off==0.
 Signed-off-by: vyos-ls1046a-build CI <ci@local>
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-index 6255f71..afe39ec 100644
+index be766fc02..1c9c79006 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
 @@ -21,6 +21,7 @@
@@ -55,7 +55,7 @@ index 6255f71..afe39ec 100644
  }
  EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index 9de68d4..cff1a25 100644
+index 9de68d4a3..cff1a258e 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 @@ -198,6 +198,8 @@ struct fman_cc_static_tree {
@@ -68,10 +68,53 @@ index 9de68d4..cff1a25 100644
  };
  
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-index ad32441..5bbfba4 100644
+index 9615a9379..e6b414447 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -490,6 +490,28 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+@@ -233,6 +233,16 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ 	memset(key, 0, sizeof(key));
+ 	memset(msk, 0, sizeof(msk));
+ 
++	/* F-161 (2026-08-05): dpaa1 EKFC=0x00180006 order — board-confirmed
++	 * DIRECTLY (not assumed) via dmesg on hwport 0x11's own live scheme
++	 * (scheme4): "ASK2-DBG scheme4 hashing: ekfc=0x00180006", captured
++	 * during a cc_test install/detach cycle immediately preceding the
++	 * "KG CC-dispatched" log line for that same port. Supersedes F-159's
++	 * 0x001C0006 (SIP|DIP|PROTO|SPORT|DPORT), which was extrapolated
++	 * from the EHASH/FE-VM path and never independently confirmed
++	 * against this scheme. 0x00180006 = KG_SCH_KN_IPSRC1|IPDST1|
++	 * L4PSRC|L4PDST — SIP|DIP|SPORT|DPORT, no PROTO, 12 bytes.
++	 */
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
+ 		memcpy(&key[0], &k->src_ip_be, 4);
+ 		msk[0] = msk[1] = msk[2] = msk[3] = 0xff;
+@@ -241,18 +251,17 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ 		memcpy(&key[4], &k->dst_ip_be, 4);
+ 		msk[4] = msk[5] = msk[6] = msk[7] = 0xff;
+ 	}
+-	/* bytes 8..11: IPsec SPI — exact-match zero (HW-proven shape). */
+-	msk[8] = msk[9] = msk[10] = msk[11] = 0xff;
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
+-		key[12] = (u8)(k->src_port_be & 0xff);
+-		key[13] = (u8)(k->src_port_be >> 8);
+-		msk[12] = msk[13] = 0xff;
++		key[8] = (u8)(k->src_port_be & 0xff);
++		key[9] = (u8)(k->src_port_be >> 8);
++		msk[8] = msk[9] = 0xff;
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
+-		key[14] = (u8)(k->dst_port_be & 0xff);
+-		key[15] = (u8)(k->dst_port_be >> 8);
+-		msk[14] = msk[15] = 0xff;
++		key[10] = (u8)(k->dst_port_be & 0xff);
++		key[11] = (u8)(k->dst_port_be >> 8);
++		msk[10] = msk[11] = 0xff;
+ 	}
++	/* bytes 12..15: unused by this EKFC -- stay wildcard (mask 0). */
+ 
+ 	/* Each match row is key followed by mask, 2 * CC_KEY_SIZE bytes. */
+ 	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE;
+@@ -481,6 +490,28 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
  	 */
  	cc_write_leaf_ad(t->ad, hw->num_keys, hw->miss_fqid, hw->miss_qband, 0);
  
@@ -100,11 +143,52 @@ index ad32441..5bbfba4 100644
  	/* Point the walker at the tables via the group-table[0] CONT_LOOKUP. */
  	cc_write_group0(t);
  
+@@ -557,14 +588,37 @@ void fman_pcd_cc_seq_dump(struct fman_pcd *pcd, struct seq_file *m)
+ 		return;
+ 
+ 	mutex_lock(fman_pcd_get_lock(pcd));
+-	if (list_empty(head))
++	if (list_empty(head)) {
+ 		seq_puts(m, "(no CC trees installed)\n");
+-	else
+-		list_for_each_entry(t, head, node)
++	} else {
++		struct muram_info *muram = fman_get_muram(fman_pcd_get_fman(pcd));
++
++		list_for_each_entry(t, head, node) {
+ 			seq_printf(m,
+ 				   "port 0x%02x: %u keys, group=0x%lx match=0x%lx ad=0x%lx\n",
+ 				   t->port_id, t->num_keys, t->group_off,
+ 				   t->match_off, t->ad_off);
++			/* F-159: raw match-table ground truth -- (num_keys) rows of
++			 * key(16B)+mask(16B)=32B, so the actual written bytes can be
++			 * checked against the cc_pack_key() composite directly,
++			 * instead of trusting the packer blindly (same philosophy as
++			 * F-158's fe_scaffold dump for the FE-VM/ehash path). */
++			if (muram && t->match_off) {
++				void __iomem *mt = (void __iomem *)
++					fman_muram_offset_to_vbase(muram, t->match_off);
++				unsigned int i, len = (unsigned int)t->num_keys * 32;
++
++				seq_puts(m, "  match table (row = 16B key + 16B mask):");
++				for (i = 0; i < len; i++) {
++					if (i % 16 == 0)
++						seq_printf(m, "\n    %04x:", i);
++					seq_printf(m, " %02x",
++						   ioread8((u8 __iomem *)mt + i));
++				}
++				seq_puts(m, "\n");
++			}
++		}
++	}
+ 	mutex_unlock(fman_pcd_get_lock(pcd));
+ }
+ 
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index a792fa1..9e26226 100644
+index 498758aef..b349d30f2 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -475,12 +475,18 @@ struct fman_pcd_cc_hw_key {
+@@ -366,12 +366,18 @@ struct fman_pcd_cc_hw_key {
   *               enqueue-AD in the miss slot (steers ALL non-matching
   *               traffic - use deliberately), 0 = miss traffic stays on
   *               the port's existing RSS path (the default)

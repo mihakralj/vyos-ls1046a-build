@@ -1992,11 +1992,13 @@ fi
 # F-099 RETIRED 2026-08-24: AF_XDP ZC bind pr_err instrumentation removed so it
 # does not ship. (M4 ZC diagnostic; not part of the routed-offload release.)
 
-# F-100: Instrument dpaa_eth_afxdp.c attach path for ZC debugging.
-# Runs AFTER all patches (dpaa_eth_afxdp.c is created by patch 0073+).
-# Temporary — remove once M4 root cause is identified.
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_100.py" 2>&1
-echo "### F-100: AF_XDP pool attach path instrumented"
+: # F-100 folded into patch 0164 (AF_XDP attach path ZC pr_err
+: # instrumentation). Patch-fold campaign 2026-08-30: regenerated into
+: # 0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch (its
+: # owning patch) alongside F-115 via canonical per-patch-commit rebase (17
+: # descendant commits replayed with zero conflicts) + byte-exact
+: # tree-equivalence verification against current+F_100+F_115 on
+: # af_xdp_pool_main.c. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-101: Lower DPAA1_MIN_UMEM_CHUNK 3840→2048 for M4 ZC testing.
 # VPP's af_xdp plugin creates 2048-byte UMEM chunks but the driver
@@ -2015,13 +2017,7 @@ echo "### F-102: NULL fq guard in QMan poll path"
 python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_108.py" 2>&1
 echo "### F-108: Ratelimited Err FD status in dpaa_eth.c"
 
-# F-103: SUPERSEDED 2026-07-21 — BPID reprogram re-enabled.
-# F_102 (NULL fq guard) provides sufficient protection against the
-# QMan context_b corruption crash. The BPID reprogram is required
-# for true-ZC RX — without it, FMan DMA writes to kernel page-pool,
-# not XSK UMEM, and xsk_zc_rx_redirect stays at 0.
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_103.py" 2>&1
-echo "### F-103: SUPERSEDED — BPID reprogram re-enabled (F_102 guards crash path)"
+# F-103 RETIRED 2026-08-30: pure no-op (superseded 2026-07-21, F-102 protects crash path).
 
 : # F-104 folded into patch 0109 (DPAA1 get_channels ethtool op).
 : # Phase 2 fold 2026-08-18: dpaa_get_channels() + the ethtool_ops entry were
@@ -2032,12 +2028,10 @@ echo "### F-103: SUPERSEDED — BPID reprogram re-enabled (F_102 guards crash pa
 # F-105 / F-106 RETIRED 2026-08-24: rx_hook reject diagnostics removed so they do
 # not ship. (M4 ZC datapath diagnostics; not part of the routed-offload release.)
 
-# F-115: Fix DMA-index headroom mismatch (recover=0 bug) + diagnostic.
-# dpaa_xsk_build_dma_index stores pool->heads[i].dma (base) but seed/refill
-# store xsk_buff_xdp_get_dma (base+headroom); FMan reports base+headroom so
-# the bsearch misses every frame → recover=0. Adds headroom to the index key.
-python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_115.py" 2>&1
-echo "### F-115: DMA-index headroom fix + recover-miss diagnostic"
+: # F-115 folded into patch 0164 (DMA-index headroom mismatch fix).
+: # Patch-fold campaign 2026-08-30: regenerated into 0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch
+: # alongside F-100; byte-exact vs current+F_100+F_115 confirmed on
+: # af_xdp_pool_main.c. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
@@ -2073,11 +2067,7 @@ echo "### F-115: DMA-index headroom fix + recover-miss diagnostic"
 
 echo "### fman_pcd.c: F-062d DISABLED (ENQ ALLOCATE may cause QMan FD corruption)"
 
-# M2-4: free params page on disengage (was leaking 256 B per cycle)
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/M2_4_3.py" 2>&1
-    echo "### fman_pcd_kg.c: M2-4 params page freed on disarm"
-fi
+# M2_4_3 RETIRED 2026-08-30: pure no-op (disabled since params page is safely kept warm per port).
 
 # M2-4: fe_port_set lazy-allocates params page if not yet created
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
@@ -2110,59 +2100,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-158 fe_scaffold debugfs dump node"
 fi
 
-# F-159 (2026-08-04, CC-Tree Rebuild Plan Phase 0): fix cc_pack_key()'s KG
-# composite from patch 0108's ask20-branch layout (SIP|DIP|SPI=0|SPORT|DPORT,
-# EKFC 0x00180206) to this branch's real EKFC 0x001C0006 (SIP|DIP|PROTO|
-# SPORT|DPORT) — running the 0107/0108 debugfs CC-tree harness against the
-# wrong composite would produce a false-negative MISS.  Also extends the
-# cc_test debugfs read handler with a raw match-table hex dump (F-158's
-# ground-truth philosophy, applied to the CC-tree harness).  Runs after 0108
-# is applied (fman_pcd_cc.c must already have 0108's cc_pack_key() body).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_159.py" 2>&1
-    echo "### fman_pcd_cc.c: F-159 dpaa1 EKFC cc_pack_key fix + match-table dump"
-fi
+: # F-159 and F-161 folded into patch 0121h (cc_pack_key EKFC 0x801c0006
+: # 14-byte packing + cc_test hex dump). Patch-fold campaign 2026-08-30:
+: # regenerated into 0121h-fman-cc-miss-fe-production-api.patch (its
+: # owning patch) via canonical per-patch-commit rebase (52 descendant
+: # commits replayed with zero conflicts) + byte-exact tree-equivalence
+: # verification against current+F_159+F_161 on fman_pcd_cc.c. See
+: # plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
-# F-160 (2026-08-04, CC-Tree Rebuild Plan Phase 1): fix fman_pcd_kg_port_
-# attach_cc()'s KeyGen NIA dispatch mode. next_engine=2 (unchanged since
-# patch 0106) is a project-confirmed no-op for CC dispatch (patch 0133's
-# own commit message: "NEVER invokes the CC walk"). Board-tested on .185:
-# a byte-exact match table (F-159) with FMBM_RCCB correctly bound still
-# produced a clean MISS via a real fqid-redirect HIT/MISS test. Switches
-# to next_engine=3, the real AC_CC encoding already used by the FE-VM arm
-# path (patch 0133) but never wired into the CC-tree graft path until now.
-#
-# DISABLED (F-184, 2026-08-09): the AC_CC flip is a REGRESSION, not a fix.
-# With AC_CC (next_engine=3, mode 0x80000006, CCBS=0) a frame that reaches
-# KG scheme4 (spc++) never produces a CC match against THIS branch's
-# CONT_LOOKUP tree (w1 = numKeys<<24|LCL_MASK|match_off) -- the 210 ref
-# 7.11a vendor-group-table audit shows AC_CC expects the vendor .106
-# encoding (w1 = hash/CRC config, w2 = parse-code family, w3 ~ KG-direct
-# NIA, keysize direct). Observed twice (F-182 v3, F-183): pkt_count=0,
-# FE pool mgmt cursor frozen, netdev frozen, no errors. The committed
-# HEAD form (next_engine=2, CCBS = group offset, 24M+ frames through CC
-# match per fman_keygen.c CC chaining comment) is restored by disabling
-# this fixup. F-162 (KG-direct rfpne) remains active.
-if false; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_160.py" 2>&1
-    echo "### fman_pcd_kg.c: F-160 CC-tree graft real-AC_CC NIA fix (DISABLED by F-184)"
-fi
-
-# F-161 (2026-08-05, CC-Tree Rebuild Plan Phase 1 board test): supersedes
-# F-159's cc_pack_key() layout. Board-testing F-160 on .185 caused hwport
-# 0x11's RX to go totally silent (matching AND non-matching traffic) on
-# every cc_test install, requiring a reboot to recover — surviving `clear`.
-# dmesg from the install/detach cycle directly observed hwport 0x11's own
-# live KeyGen scheme (scheme4) using EKFC 0x00180006 (SIP|DIP|SPORT|DPORT,
-# NO proto), not F-159's assumed 0x001C0006 (which added PROTO based on the
-# separate EHASH/FE-VM path, never confirmed against the CC comparator).
-# Realigns cc_pack_key()'s software match-table layout to this directly
-# observed hardware EKFC. Must run after F-159 (targets F-159's own output
-# text) and after F-160 (same board-test cycle that surfaced this).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_161.py" 2>&1
-    echo "### fman_pcd_cc.c: F-161 board-confirmed EKFC cc_pack_key fix (supersedes F-159)"
-fi
+# F-160 RETIRED 2026-08-30: was disabled via `if false` since 2026-08-09 (F-184 AC_CC flip regression).
+# F-162 (KG-direct rfpne) remains active.
 
 # F-162 (2026-08-05, CC-Tree Rebuild Plan): F-159/F-160/F-161 all confirmed
 # correct against vendor source and board dmesg, yet hwport 0x11 still goes
@@ -2409,6 +2356,8 @@ fi
 # meaning every carefully-configured EKFC/key-format/hash_bytes_offset/
 # PORT_ID value tested on "scheme 4" so far may never have been consulted
 # for live traffic if the generic walk selects a different scheme.
+# NOTE (2026-08-30): F-183 block D explicitly drops F-178's NIA_KG_DIRECT
+# OR via anchor search for F-178's comment. Kept active together with F-183.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_178.py" 2>&1
     echo "### fman_pcd_kg.c: F-178 NIA_KG_DIRECT wired into the FE-VM arm path"
