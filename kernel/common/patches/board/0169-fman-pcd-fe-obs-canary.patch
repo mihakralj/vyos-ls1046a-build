@@ -87,61 +87,25 @@ word1 hunk's context to match 0131's F-144 fix (hashShift:8|contextSize:8|
 hashMask:16 byte order) instead of the pre-F-144 order it still expected --
 0131 was corrected first, which broke this hunk's context; the miss_res_off
 addition itself (word4) is unchanged, just re-anchored. Re-verified against
-a pristine linux-6.18.44 + 0068..0167 baseline with 0131's fix applied.
 
-2026-08-30 (fold-audit correction, round 2): re-anchored this hunk's
-context on 0131's word1 formula after reverting 0131's own erroneous
-"F-144" edit back to the original (correct, per
-arch/fman-microcode-210-programming-reference.md sec 7.2) hashMask<<16
-formula -- see 0131's own fold-audit note. This hunk only ever wanted
-word4 (missResult -> miss_res_off); word1 is untouched, just re-derived
-against the restored context.
+2026-08-30 (CI failure correction): the fman.c/fman.h/fman_port.c/
+fman_port.h sections previously in this patch (fman_get_fpm_extc,
+fman_set_fpm_extc, fman_port_clear_kg_direct_scheme, NIA_KG_DIRECT) have
+been removed. bin/kernel-fixups/F_162.py and F_167.py -- both still
+active in this branch's own fixup pipeline (invoked unconditionally by
+ci-setup-kernel.sh, run after board patches apply and before compile --
+never checked locally, since local verification only ran board patches
++ make, not the full ci-setup-kernel.sh fixup phase) -- already supply
+these exact symbols. Adding them again in this patch caused a real CI
+failure: "redefinition of 'fman_port_clear_kg_direct_scheme'" and
+"'NIA_KG_DIRECT' undeclared" (F-162's own idempotency check for the
+NIA_KG_DIRECT #define was fooled by this patch's comment text merely
+mentioning the name, so it skipped adding the actual #define while still
+adding its own copy of the function that collided with this patch's).
+fman_pcd.c's F-177 poll loop (calling fman_get/set_fpm_extc, added by
+0130/0165's predecessors) is unaffected -- it only calls these functions,
+and F-167 supplies their declaration/definition before compile.
 ---
-diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
-index 507b77831..db3e5b4e7 100644
---- a/drivers/net/ethernet/freescale/fman/fman.c
-+++ b/drivers/net/ethernet/freescale/fman/fman.c
-@@ -2465,6 +2465,22 @@ u32 fman_get_bmi_max_fifo_size(struct fman *fman)
- }
- EXPORT_SYMBOL(fman_get_bmi_max_fifo_size);
- 
-+/* F-177: FMFP_EXTC (FPM External Requests Control, RM 5.12.14.1) raw
-+ * accessors -- used to poll/clear the SYNC-in-progress bit after writes
-+ * to FMan-controller-walked structures (AC_CC dispatch, ehash buckets).
-+ */
-+u32 fman_get_fpm_extc(struct fman *fman)
-+{
-+	return ioread32be(&fman->fpm_regs->fmfp_extc);
-+}
-+EXPORT_SYMBOL_GPL(fman_get_fpm_extc);
-+
-+void fman_set_fpm_extc(struct fman *fman, u32 val)
-+{
-+	iowrite32be(val, &fman->fpm_regs->fmfp_extc);
-+}
-+EXPORT_SYMBOL_GPL(fman_set_fpm_extc);
-+
- /**
-  * fman_get_revision
-  * @fman:		- Pointer to the FMan module
-diff --git a/drivers/net/ethernet/freescale/fman/fman.h b/drivers/net/ethernet/freescale/fman/fman.h
-index c7b431705..ebc0d0c9e 100644
---- a/drivers/net/ethernet/freescale/fman/fman.h
-+++ b/drivers/net/ethernet/freescale/fman/fman.h
-@@ -372,6 +372,13 @@ int fman_set_mac_max_frame(struct fman *fman, u8 mac_id, u16 mfl);
- 
- u32 fman_get_qman_channel_id(struct fman *fman, u32 port_id);
- 
-+/* F-177: FMFP_EXTC (FPM External Requests Control, RM 5.12.14.1) raw
-+ * accessors -- used to poll/clear the SYNC-in-progress bit after writes
-+ * to FMan-controller-walked structures (AC_CC dispatch, ehash buckets).
-+ */
-+u32 fman_get_fpm_extc(struct fman *fman);
-+void fman_set_fpm_extc(struct fman *fman, u32 val);
-+
- struct resource *fman_get_mem_region(struct fman *fman);
- 
- u16 fman_get_max_frm(void);
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 index cff3df7ed..2a03ea8f7 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
@@ -2377,49 +2341,3 @@ index b45c2152d..f2ebd79d3 100644
  	(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_port_disarm_fe);
-diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
-index 01482f639..ebf9103be 100644
---- a/drivers/net/ethernet/freescale/fman/fman_port.c
-+++ b/drivers/net/ethernet/freescale/fman/fman_port.c
-@@ -1661,6 +1661,29 @@ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
- }
- EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
- 
-+/* F-178: disarm_fe teardown counterpart to fman_port_set_cc_base()'s
-+ * NIA_KG_CC_EN OR-in above. F-183 removed the separate NIA_KG_DIRECT OR
-+ * from the arm path (vendor RFPNE 0x00480200 = KG|CC_EN, no DIRECT bit),
-+ * so there is no longer a distinct "direct scheme" bit to clear; this
-+ * clears NIA_KG_CC_EN the same way fman_port_set_cc_base(port, 0) does,
-+ * for symmetry with the arm side and as a defensive clear of any
-+ * KeyGen/CC association left over from a prior engage.
-+ */
-+void fman_port_clear_kg_direct_scheme(struct fman_port *port)
-+{
-+	u32 rfpne;
-+
-+	if (!port || port->port_type != FMAN_PORT_TYPE_RX)
-+		return;
-+
-+	rfpne = ioread32be(&port->bmi_regs->rx.fmbm_rfpne);
-+	if ((rfpne & 0x007C0000) == NIA_ENG_HWK && (rfpne & NIA_KG_CC_EN)) {
-+		rfpne &= ~NIA_KG_CC_EN;
-+		iowrite32be(rfpne, &port->bmi_regs->rx.fmbm_rfpne);
-+	}
-+}
-+EXPORT_SYMBOL_GPL(fman_port_clear_kg_direct_scheme);
-+
- /* fman_port_set_silicon_hit_release_mode -- toggle TX confirm bypass */
- int fman_port_set_silicon_hit_release_mode(struct fman_port *port, bool enable)
- {
-diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
-index 4cedb38ec..63a29e6b4 100644
---- a/drivers/net/ethernet/freescale/fman/fman_port.h
-+++ b/drivers/net/ethernet/freescale/fman/fman_port.h
-@@ -165,6 +165,7 @@ u32 fman_port_get_liodn(struct fman_port *port);
-  * scheme bind) is the DUT-gated final sub-increment.
-  */
- int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off);
-+void fman_port_clear_kg_direct_scheme(struct fman_port *port);
- int fman_port_set_silicon_hit_release_mode(struct fman_port *port,
- 					   bool enable);
- int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
