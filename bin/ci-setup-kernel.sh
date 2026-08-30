@@ -1959,14 +1959,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     echo "### fman_port.c/h: F-205 dormant IPv4/IPv6 parser LCV-split primitive"
 fi
 
-# F-165 (2026-08-05, Task #26 follow-up): fe_arm engage with an explicit
-# non-zero offset must not be silently overwritten by the CONT_LOOKUP
-# scaffold's own fe_enter_off = gro reassignment. Debugfs-test-only;
-# production engage (fe_enter_off always 0) is unaffected.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_165.py" 2>&1
-    echo "### fman_pcd.c: F-165 fe_arm engage honors caller's explicit fe_enter_off"
-fi
+: # F-165 folded into patch 0169 (CONT_LOOKUP scaffold override guard).
+: # Patch-fold campaign Cluster 1: regenerated into 0169-fman-pcd-fe-obs-canary.patch.
+: # Verified 100% byte-exact vs current on fman_pcd.c. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-167 (2026-08-06, Task #26 follow-up, Option D): standalone FMFP_EXTC
 # (FPM External Requests Control, CCSR 0x074) SYNC probe. RM §5.12.14.1
@@ -2118,12 +2113,11 @@ fi
 # meaning every carefully-configured EKFC/key-format/hash_bytes_offset/
 # PORT_ID value tested on "scheme 4" so far may never have been consulted
 # for live traffic if the generic walk selects a different scheme.
-# NOTE (2026-08-30): F-183 block D explicitly drops F-178's NIA_KG_DIRECT
-# OR via anchor search for F-178's comment. Kept active together with F-183.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_178.py" 2>&1
-    echo "### fman_pcd_kg.c: F-178 NIA_KG_DIRECT wired into the FE-VM arm path"
-fi
+: # F-178 and F-183 folded into patch 0169 (Cluster 1: CC-Dispatch
+: # & AC_CC Topology). Patch-fold campaign 2026-08-30: regenerated
+: # into 0169-fman-pcd-fe-obs-canary.patch alongside F-165, F-185, F-186,
+: # and F-190. Verified 100% byte-exact on fman_pcd.c, fman_pcd_kg.c,
+: # fman_pcd_internal.h, and fman_keygen.c. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-179 (2026-08-07, follow-up while resolving <combine>/PORT_ID from
 # vendor's real FMC compiler source). fm_pcd_ext.h's t_FmPcdExtractEntry has
@@ -2151,32 +2145,6 @@ fi
 
 : # F-182 folded into patch 0169 (ehash record opcode-slot clobber,
 : # fqid source, and STATS_EN). See Phase B marker above.
-
-# F-183 (2026-08-12, E20 corrected track step 2 -- Delta 1 adapted to what
-# .185 silicon survives): the F-181 test stalled on the first dispatched
-# frame because engage used the bare-FE_ENTER-root-at-RCCB form (known
-# staller) + AC_CC mode (stalls on .185 mainline) + KG_DIRECT rfpne
-# (0x00480304, vendor is 0x00480200). Assembles the ONLY combination where
-# every element is individually proven non-stalling on .185:
-#   - CCBS-graft dispatch: KGSE_MODE stays EN|ENQUEUE_KG_DFLT_NIA
-#     (0x80500002), KGSE_CCBS = group-table offset -- written to scheme
-#     window WORD 3 (struct kgse_bmch, 0x10C), NOT word 19 (kgse_ccbs,
-#     0x14C) which 210.10.1 ignores (F-184 board proof 2026-08-10). This
-#     is a real kernel bug fix in keygen_scheme_setup().
-#   - RCCB -> group table numKeys=0 with the MISS SLOT = verbatim copy of
-#     the caller's FE_ENTER AD: the CC comparator is proven INSENSITIVE to
-#     match rows (5 negative variants), so FE_ENTER cannot ride a match
-#     leaf; every frame -> FE_ENTER -> the ehash decides HIT/MISS.
-#   - rfpne stays 0x00480200 (F-178's KG_DIRECT OR removed from arm_fe).
-#   - F-148's numKeys bump is pinned at 0 (numKeys=1 would move the miss
-#     slot off the FE_ENTER copy after the first flow insert).
-# Teardown unchanged: detach_cc restores next_engine=0 + cc_bits_sel=0,
-# clearing word 3 via the same path. Anchored on F-051/F-148/F-165/F-178
-# outputs; MUST run after all of them.
-if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_183.py" 2>&1
-    echo "### fman_keygen.c/fman_pcd_kg.c/fman_pcd.c: F-183 Delta-1 dispatch (CCBS word-3, group-root miss-slot FE_ENTER)"
-fi
 
 # F-201 (2026-08-17): F-051 unconditionally zeroed kgse_hc immediately
 # before every scheme write, clobbering the 128-FQ distribution computed by
@@ -2241,33 +2209,11 @@ fi
 # (6) ENGAGED dmesg. HIT = DDR entry opcode script ENQUEUE_PKT ->
 # param.fqid (F-181/F-182 records); MISS = word3 NIA -> KG-direct
 # re-entry -> scheme fqb -> kernel. Anchored on F-183/F-184 outputs.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_185.py" 2>&1
-    echo "### fman_pcd.c/fman_pcd_kg.c/fman_pcd_internal.h: F-185 vendor AC_CC + VARIANT B node dispatch"
-fi
-
-# F-186 (2026-08-12, E25 silicon-proof): correct the F-185 node miss-action
-# to the form that actually works on 210.10.1. E25 (live /dev/mem patches,
-# .185 6.18.44-vyos) proved the F-185 miss form (miss_action_type=NIA, word3
-# = KG-direct NIA) is FATAL: empty-bucket MISS -> KG re-classification into
-# the AC_CC scheme -> node -> MISS -> NIA = INFINITE LOOP (~4.5M
-# classifications/sec, no hop limit, no stall); KG-direct to a foreign
-# scheme -> FM_FD_ERR_NO_SCHEME 0x00004000 -> error FQ 0x291. The correct
-# form (999 patch e_FM_PCD_DONE + E25 verified): miss_action_type=ENQUE
-# (word0 bits[31:30]=0b10) + word3 = fqid = direct enqueue, loop-free, and
-# the fqid MUST be the frame's own-port base fqid (0x300/eth4): cross-port
-# fqb (0x200/eth3) delivers to eth3's FQ but the dpaa driver drops it (FD
-# buffer belongs to the frame's own BM pool). 2 blocks / 2 files:
-# (1) fman_pcd.c engage node word0 -> 0b10 ENQUE; (2) fman_pcd_kg.c arm_fe
-# captures slot->base_fqid under the lock and commits it as node word3 via
-# fman_pcd_fe_node_set_miss_nia() instead of the KG-direct NIA. bpid
-# intentionally NOT changed (record stays bpid=0; whether the machine uses
-# param.bpid on the ENQUEUE_PKT path is an E26 matrix test, F-187 if it
-# matters). Anchored on the exact F-185 derived output; runs after F-185.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_186.py" 2>&1
-    echo "### fman_pcd.c/fman_pcd_kg.c: F-186 ENQUE miss form + own-port fqb (loop fix)"
-fi
+: # F-185, F-186, F-190 folded into patch 0169 (Cluster 1: CC-Dispatch
+: # & AC_CC Topology). Patch-fold campaign 2026-08-30: regenerated
+: # into 0169-fman-pcd-fe-obs-canary.patch. Verified 100% byte-exact on
+: # fman_pcd.c, fman_pcd_kg.c, fman_pcd_internal.h, and fman_keygen.c.
+: # See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-187 (2026-08-12, E26 follow-up): free the fe_hashfe miss-result
 # allocations on hash free. fman_pcd_fe_hash_build() allocates
@@ -2312,12 +2258,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-189 stats-enabled flow insert (EHASH-DUAL-FIX Phase 1.1)"
 fi
 
-# F-190 (2026-08-14, Phase 3 fix): write en_exthash_node vendor node to the
-# root AD in fe_enter_build so the CC dispatch reads the correct node type.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_190.py" 2>&1
-    echo "### fman_pcd.c: F-190 en_exthash_node at root AD (CC dispatch fix)"
-fi
+: # F-190 folded into patch 0169 (en_exthash_node at root AD). See
+: # Cluster 1 marker above.
 
 # F-192 / F-194 / F-196 DIAGNOSTICS RETIRED 2026-08-24: the E2/flow-add
 # investigation they instrumented is closed (F-195/F-197 production path proven,
