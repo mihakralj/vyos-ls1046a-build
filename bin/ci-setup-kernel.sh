@@ -1374,20 +1374,10 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
 fi
 
 # 
-# F-051: Force-clear kgse_bmch, kgse_bmcl, kgse_hc, and kgse_ekdv to zero
-# inside keygen_scheme_setup() AFTER the scheme_regs struct is populated but
-# BEFORE it's written to hardware.  The DPAA1 RSS driver may leave byte masks
-# or hash config that interfere with exact-match ehash.  Anchored on the
-# '/* Write scheme registers */' comment that precedes the write call.
-if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-        drivers/net/ethernet/freescale/fman/fman_keygen.c \
-        '\t/* Write scheme registers */' \
-        '\t/* F-051: force-clear RSS mask/hash config for exact-match ehash */\n\tscheme_regs.kgse_bmch = 0;\n\tscheme_regs.kgse_bmcl = 0;\n\tscheme_regs.kgse_hc   = 0;\n\tscheme_regs.kgse_ekdv = 0;\n\t/* Write scheme registers */' \
-        1 \
-        "F-051: BM/HC/EKDV zeroed before scheme write"
-    echo "### fman_keygen.c: F-051 BM/HC/EKDV zeroed (RSS isolation) (mutate)"
-fi
+: # F-051 folded into patch 0169 alongside F-183 (Cluster 1).
+: # F-183's CCBS word-3 write sits directly below F-051's zeroing in fman_keygen.c;
+: # both are baked into patch 0169. Mutating F-051 here would duplicate the block
+: # and cause F_201's single-match anchor check to fail.
 
 # F-052: Suppress -Werror=unused-function for fman_pcd_debugfs_root_get.
 # This static helper is defined in patch 0092/0126 but not called from any
