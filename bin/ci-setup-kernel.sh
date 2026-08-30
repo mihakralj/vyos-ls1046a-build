@@ -742,19 +742,32 @@ fi
 # ASK2's kernel surface is now entirely: kernel/common/patches/board/ (in-tree)
 # plus kernel/ask/oot-modules/ask/ (ask.ko, out-of-tree).
 
-# Stage FMD Shim + LP5812 source from the new common files layout.
-# Source of truth: kernel/common/files/{fsl_fmd_shim.c,lp5812/}.
+# Stage FMD Shim + LP5812 + FMan PCD assert/test source from common files layout.
+# Source of truth: kernel/common/files/{fsl_fmd_shim.c,lp5812/,fman-pcd-fe-static-asserts.h,fman_pcd_fe_test.c}.
 FILES_DIR=kernel/common/files
 [ -f "$FILES_DIR/fsl_fmd_shim.c" ] || { echo "ERROR: $FILES_DIR/fsl_fmd_shim.c missing"; exit 1; }
 [ -d "$FILES_DIR/lp5812" ]         || { echo "ERROR: $FILES_DIR/lp5812 missing"; exit 1; }
+[ -f "$FILES_DIR/fman-pcd-fe-static-asserts.h" ] || { echo "ERROR: $FILES_DIR/fman-pcd-fe-static-asserts.h missing"; exit 1; }
+[ -f "$FILES_DIR/fman_pcd_fe_test.c" ]           || { echo "ERROR: $FILES_DIR/fman_pcd_fe_test.c missing"; exit 1; }
 cp "$FILES_DIR/fsl_fmd_shim.c" "$KERNEL_BUILD/"
 cp -r "$FILES_DIR/lp5812"      "$KERNEL_BUILD/"
+cp "$FILES_DIR/fman-pcd-fe-static-asserts.h" "$KERNEL_BUILD/"
+cp "$FILES_DIR/fman_pcd_fe_test.c"           "$KERNEL_BUILD/"
 
 # Write injection block to temp file (heredoc avoids all quoting issues).
 # Note: the former phylink / dpaa-xdp / xhci-ls1046a Python patchers have
 # been retired — their effects are now carried by the 4005/4006/4007 unified
 # diff patches staged above and applied by build-kernel.sh's patch loop.
 cat > /tmp/kernel-inject.sh << 'INJECT_EOF'
+
+# FMan PCD: inject §17 compile-time static assert header and KUnit test suite
+if [ -f "${CWD}/fman-pcd-fe-static-asserts.h" ]; then
+  FMAN_DIR=drivers/net/ethernet/freescale/fman
+  cp "${CWD}/fman-pcd-fe-static-asserts.h" "$FMAN_DIR/"
+  mkdir -p "$FMAN_DIR/tests"
+  cp "${CWD}/fman_pcd_fe_test.c" "$FMAN_DIR/tests/"
+  echo "FMan PCD: injected §17 static assert header and KUnit test suite into $FMAN_DIR"
+fi
 
 # FMD Shim: inject /dev/fm0* chardev module for DPDK fmlib RSS
 if [ -f "${CWD}/fsl_fmd_shim.c" ]; then
