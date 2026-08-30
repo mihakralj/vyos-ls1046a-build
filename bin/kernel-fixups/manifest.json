@@ -6,41 +6,12 @@
     "F_069b.py": "fman_pcd.c: F-069b v23 ic_probe debugfs node (reads buffer captured by F-069a). Kept active (not folded, 2026-08-29): anchors on M2_4_2.py's fman_pcd_fe_probe_show, unavailable at patch-apply time.",
     "F_071.py": "fman_pcd.c: F-071 v18 hash_probe debugfs node (full 8-byte KG CRC-64 hash). Kept active (not folded, 2026-08-29): anchors on M2_4_2.py's fe_probe debugfs registration, unavailable at patch-apply time.",
     "F_072.py": "dpaa_eth.c: F-072 v7 full 8-byte KG CRC-64 hash capture from RXHASH path",
-    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs \u2014 wires __fman_pcd_fe_build_vm_chain",
-    "F_091.py": "fman_pcd.c: F-091 HIT scaffold \u2014 numKeys=1 + FE_ENTER AD at ato+32",
-    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage \u2014 build/teardown VM chain via API",
     "F_101.py": "dpaa_eth.h: M4 ZC workaround \u2014 lower DPAA1_MIN_UMEM_CHUNK 3840\u21922048 for VPP 2K-chunk compatibility",
     "F_102.py": "qman.c: M4 ZC crash fix \u2014 NULL guard for fq in __poll_portal_fast SDQCR path",
-    "F_107.py": "fman_pcd.c: F-107 gen_pool double-free prevention \u2014 DECLARE_BITMAP(fe_port_armed) + -EBUSY guard in fe_engage",
     "F_108.py": {
       "target": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c",
       "description": "Ratelimit Err FD status console log spam for physical frame errors",
       "date": "2026-07-23"
-    },
-    "F_122.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-122: make fe_arm engage idempotent. Adds test_bit(fe_port_armed) check at top of __fman_pcd_fe_arm_engage() (shared core, protects both debugfs and API paths) returning 0 with pr_info when already engaged. Also changes F-107 -EBUSY guard in fman_pcd_fe_engage() to idempotent return 0. Runs before F-125/F-126.",
-      "date": "2026-07-27"
-    },
-    "F_125.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() returned on kg_port_arm_fe failure with pcd->fe_scaffold_* still set; the next attempt overwrote those fields, orphaning the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) permanently. Measured at exactly 304 B per failed engage on .185 and .106, reclaimable only by reboot, and the source of the arena fragmentation that made even single-port engage fail -ENOMEM. Also unwinds a partial 3-way allocation. Reuses the existing fman_pcd_fe_arm_free_scaffold(). Runs after F-118.",
-      "date": "2026-07-27"
-    },
-    "F_128.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-128: F-125(c) \u2014 free ehash on LAST port disengage. Changes F_092's teardown guard from fe_vm_chain_built to fe_vm_chain_built && list_empty(&pcd->fe_ports). The shared FE-VM chain is torn down only when the last port disengages, returning 33280 B MURAM (int_buf) + 512 KiB DDR (bucket table). Runs after F-092.",
-      "date": "2026-07-27"
-    },
-    "F_129.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-129: add FE-VM chain teardown to production fman_pcd_fe_disengage(). F_092 inserted teardown into the DEBUGFS handler only; the production YNL/genl path had ZERO teardown. Board-verified 2026-07-27: disengage leaves ehash int_buf refcount=1, 33280 B held. Inserts teardown with list_empty guard after __fman_pcd_fe_arm_disengage() in the production function. Runs after F-128.",
-      "date": "2026-07-27"
-    },
-    "F_130.py": {
-      "target": "drivers/net/ethernet/freescale/fman/fman_pcd.c",
-      "description": "F-130: grow PCD MURAM arena 64 KiB -> 84 KiB. The ehash int_buf (33280 B) + two per-port pools (~9029 B each) = 51338 B fits by total bytes but fails on placement because the int_buf at offset 0x4c100 fragments the arena. Contiguous MURAM extent 0x4ac00->0x60000 = 86016 B (84 KiB). Must run BEFORE F-092 (VM chain build) so gen_pool is sized before any allocation.",
-      "date": "2026-07-27"
     },
     "F_132.py": {
       "action": "dormant",
@@ -62,7 +33,6 @@
       "action": "dormant",
       "reason": "BYPASSED (commented out in ci-setup-kernel.sh, not applied) \u2014 the global FMan MURAM has no contiguous space for 8.4 KB allocations; since F-072b/c is disabled there is no double-allocation, and the per-port pools fit comfortably within the 46 KB tail fragment of the 84 KB PCD arena instead. Manifest previously said \u0022keep\u0022/\u0022permanent\u0022, which did not match the commented-out invocation \u2014 corrected 2026-08-29 during the patch-fold campaign."
     },
-    "F_139.py": "fman_pcd.c: F-139 move scaffold tracking from singleton to per-port (fix 304 B/cycle leak)",
     "F_140.py": "fman_pcd.c: F-140 (T-M6-1 Phase 1) dormant v6 ehash table (key_size=38, matches ask_fe_build_key_v6); v6 KG scheme arm DEFERRED to Phase 3 (dispatch unresolved)",
     "F_142.py": "fman_pcd.c: F-142 \u2014 dma_alloc_coherent for ehash flow records (fixes F-141 HIT failure)",
     "F_143.py": "fman_pcd.c: F-143 \u2014 place en_exthash_node descriptor at DDR table base",
@@ -130,7 +100,7 @@
     "F_216.py": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c: F-216 add ratelimited zero-address FD guard before dma_unmap/phys_to_virt/headroom reads (logs status/format/BPID/offset/length/FQID, consumes without release), and remove obsolete F-072/F-170 be64 frame-data hash capture + normalize RXHASH braces. Image 2228 panic: addr=0 -> phys_to_virt(0)+hash_offset0x108 fault. Defensive/logging, not root malformed-FD fix.",
     "F_218.py": "fman_pcd.c: F-218 (T-M6-1) fman_pcd_fe_flow_del selects ehash table by key_size (38-byte v6 key -> table1, else table0) so v6 FLOW_CLS_DESTROY unlinks the table1 record instead of leaking; no ABI change; v4 byte-identical"
   },
-  "count": 90,
+  "count": 80,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {},
   "removed_dead": [
@@ -161,7 +131,8 @@
     "F_054.py, F_076.py, F_093.py, F_096.py, F_097.py, F_117.py, F_118.py, F_184.py \u2014 round 2, all eight also folded into 0169-fman-pcd-fe-obs-canary.patch on 2026-08-29 (same session, continuing the campaign), superseding the older 'fold-into 0158'/'fold-into 0146/0158'/'fold-into 0153' hints recorded in this manifest's dispositions section for F-093/F-096/F-097 (0169 turned out to be the more practical common target since it is the LAST patch touching fman_pcd.c, minimizing descendant-commit rebase scope). Confirmed mutually independent of each other AND of round 1 via a batch dry-run (several other candidates tested in the same pass -- F_056, F_068, F_157, F_161, F_175, F_177, F_188, F_189 -- failed with an explicit chain-dependency error and were correctly left alone, not forced). F-054: MUX/Transition AD direct writes (context_build corruption fix). F-076: atomic fe_disengage_full debugfs. F-093: dynamic FQID (kill hardcoded 0x200). F-096: fe_build_contexts() call in engage (unparks FE-VM). F-097: fe_verify arm-time readback gate. F-117/F-118: per-key FE-VM ehash delete (Fix B pt1+pt2). F-184: fe_obs_enq_one list_del arm-panic fix. First attempt at this batch used the wrong relative fixup order (round 1 fully before round 2) and the byte-exact check correctly caught a real debugfs-registration-order mismatch (fe_disengage_full vs fe_buffer) before anything was committed; redone in exact real ci-setup-kernel.sh line-number order (F_069, F_054, F_076, F_069b, F_071, F_093, F_096, F_097, F_117, F_118, F_072_2, F_158, F_173, F_184) and reverified byte-exact. 13 descendant commits replayed with zero conflicts both times. Gated on CI build + board validation before considered final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.",
     "F_100.py, F_115.py \u2014 folded together into 0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch on 2026-08-30 (Phase-fold campaign Set A). F-100: AF_XDP ZC attach-path pr_err instrumentation; F-115: DMA-index headroom mismatch fix (recover=0 bug). Verified byte-identical to current+F_100+F_115 on af_xdp_pool_main.c; 17 descendant commits replayed with zero conflicts. (F-103 retired no-op). Gated on CI build validation.",
     "F_159.py, F_161.py \u2014 folded together into 0121h-fman-cc-miss-fe-production-api.patch on 2026-08-30 (Phase-fold campaign Set C). Real dpaa1 EKFC 0x001C0006 key packing + 14-byte 0x801c0006 EKFC layout (PORT_ID prefix) + cc_test hex dump. Verified byte-identical to current+F_159+F_161 on fman_pcd_cc.c; 52 descendant commits replayed with zero conflicts. (F-160 retired/disabled, M2_4_3 retired no-op). Gated on CI build validation.",
-    "F_089.py \u2014 folded into 0172-fman-pcd-kunit-kconfig.patch on 2026-08-30 (Phase-fold campaign Set 1). Injects compile-time §17 static assert header and KUnit test suite into fman_pcd.c directly via patch 0172 (the owning Kconfig patch for the KUnit suite). 10 descendant commits replayed with zero conflicts; byte-exact vs current+F_089 on fman_pcd.c. Gated on CI build validation."
+    "F_089.py \u2014 folded into 0172-fman-pcd-kunit-kconfig.patch on 2026-08-30 (Phase-fold campaign Set 1). Injects compile-time §17 static assert header and KUnit test suite into fman_pcd.c directly via patch 0172 (the owning Kconfig patch for the KUnit suite). 10 descendant commits replayed with zero conflicts; byte-exact vs current+F_089 on fman_pcd.c. Gated on CI build validation.",
+    "F_090.py, F_091.py, F_092.py, F_107.py, F_122.py, F_125.py, F_128.py, F_129.py, F_130.py, F_139.py \u2014 folded together into 0158-fman-pcd-fqid-resolution-compose.patch on 2026-08-30 (Phase A: Engage-Lifecycle Cluster). F-090: fe_chain debugfs; F-091: numKeys=1 scaffold; F-092: production fe_engage/disengage API; F-107: fe_port_armed bitmap guard; F-122: idempotent engage; F-125: transactional engage rollback; F-128: free ehash on LAST port disengage; F-129: chain teardown in production disengage; F-130: grow PCD MURAM arena 64 -> 84 KiB; F-139: per-port scaffold tracking. All 10 applied sequentially on 0158; 19 descendant commits replayed with zero conflicts; 100% byte-exact vs current+all-10-fixups confirmed on fman_pcd.c. Gated on CI build validation."
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {

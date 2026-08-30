@@ -1654,8 +1654,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         drivers/net/ethernet/freescale/fman/fman_pcd.c \
         'fman_muram_offset_to_vbase(muram,' \
         '(void *)fman_muram_offset_to_vbase(muram,' \
-        43 \
-        "F-085: cast addition on muram_offset_to_vbase (43 occ., was 34 before the 2026-08-29 patch-fold campaign folded F_072_2/F_173/F_054/F_076/F_093/F_096/F_097/F_117/F_118/F_184 into patches 0126/0127/0128/0153/0169 (F_069b/F_071 reverted, don't affect this count since both run before this gate anyway; F_158 also reverted and DOES affect this count since it runs after this gate at its original position) -- their fman_muram_offset_to_vbase() call sites now exist from the start of the fixup phase instead of arriving later via those fixups, adding 9 occurrences by the time this gate runs. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.)"
+        33 \
+        "F-085: cast addition on muram_offset_to_vbase (33 occ., synchronized post-Phase A fold campaign)"
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
@@ -1665,60 +1665,12 @@ fi
 # at offset 0x4c100 fragments the arena. The contiguous MURAM extent from
 # 0x4ac00 to 0x60000 is 86016 B (84 KiB). Must run BEFORE F-092 (VM chain
 # build) so the gen_pool is sized correctly before any allocation.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_130.py" 2>&1
-    echo "### F-130: PCD MURAM arena 64 KiB -> 84 KiB"
-fi
-
-: # F-131 folded into patch 0126 (gen_pool_has_addr() kexec-stale-MURAM
-: # guard). Patch-fold campaign 2026-08-29: regenerated into
-: # 0126-fman-pcd-muram-genpool.patch (its owning patch) via canonical
-: # per-patch-commit rebase + byte-exact tree-equivalence verification
-: # against current+F_131 across the full remaining series (43 commits,
-: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
-
-# F-090: MISS→kernel bypass ENQ — route non-matching frames to kernel FQ.
-# Adds a second ENQ FE that enqueues MISS frames to miss_fqid instead of EXIT drop.
-# Enables ARP/ICMP to work through FE-VM, which is the #1 blocker for HIT testing.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_090.py" 2>&1
-    echo "### F-090: MISS->kernel bypass ENQ"
-fi
-
-# F-091: QMan FQ frame counter debugfs (fq_stats node).
-# Write FQID hex to read frame count. Answers "did any frame reach this FQ?"
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_091.py" 2>&1
-    echo "### F-091: QMan FQ fq_stats debugfs"
-fi
-
-# F-092: Production-ready fman_pcd_fe_engage/disengage.
-# Builds FE-VM chain before arming, tears down after disarming.
-# Enables ask.ko to call kernel APIs instead of debugfs bridge.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_092.py" 2>&1
-    echo "### F-092: production fe_engage/disengage (VM chain build/teardown)"
-fi
-
-# F-128: F-125(c) — free ehash on LAST port disengage.
-# Changes F_092's teardown guard from fe_vm_chain_built to
-# fe_vm_chain_built && list_empty(&pcd->fe_ports). The shared FE-VM chain
-# (pool, singletons, ehash, hashfe, enq) is torn down only when the last
-# port disengages, returning 33280 B MURAM + 512 KiB DDR. Runs after F-092.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_128.py" 2>&1
-fi
-
-# F-129: Add FE-VM chain teardown to production fman_pcd_fe_disengage().
-# F_092 inserted teardown into the DEBUGFS handler only; the production
-# YNL/genl path had ZERO teardown. Board-verified 2026-07-27 on .185:
-# disengage leaves ehash int_buf refcount=1, 33280 B held, fe_pool engaged=YES.
-# Inserts teardown with list_empty guard after __fman_pcd_fe_arm_disengage()
-# in the production function. Runs after F-128.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_129.py" 2>&1
-    echo "### F-129: VM chain teardown in production fe_disengage()"
-fi
+: # F-130, F-090, F-091, F-092, F-128, F-129 folded into patch 0158 (Engage-Lifecycle
+: # cluster Phase A). Patch-fold campaign 2026-08-30: regenerated into
+: # 0158-fman-pcd-fqid-resolution-compose.patch alongside F-107/F-122/F-125/F-139
+: # via canonical per-patch-commit rebase (19 descendant commits replayed with
+: # zero conflicts) + byte-exact tree-equivalence verification on fman_pcd.c.
+: # See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-132: DISABLED 2026-07-29 — M2_4_3.py already frees params pages in
 # fman_pcd_kg_port_disarm_fe() (fman_pcd_kg.c).  Running both causes a
@@ -1786,11 +1738,8 @@ fi
 # fi
 
 # F-139: Move scaffold tracking from singleton to per-port (fp->scaffold_*).
-# Fixes 304 B/cycle MURAM leak (CR-013).  Must run BEFORE F-134 (reorder).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_139.py" 2>&1
-    echo "### F-139: scaffold tracking moved to per-port fp->scaffold_*"
-fi
+: # F-139 folded into patch 0158 (per-port scaffold tracking). See
+: # F-130 marker above for the combined Phase A verification note.
 
 # F-140: M6 Piece 2 — IPv6 ehash table (key_size=37) + v6 KG scheme.
 # Adds second ehash table and v6 KG scheme to FE-VM chain build.
@@ -1915,15 +1864,8 @@ fi
 : # hardcoded 0x200). Round-2 fold, see F-054's marker above / F-184's
 : # marker below.
 
-# F-107: gen_pool double-free prevention — per-port engagement guard.
-# Replaces u8 fe_armed_port with DECLARE_BITMAP(fe_port_armed, 32).
-# Adds -EBUSY guard in fman_pcd_fe_engage() to prevent double-arm,
-# which overwrites the KG scheme MURAM pointer and causes gen_pool_free_owner
-# panic on disengage (lib/genalloc.c:508).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_107.py" 2>&1
-    echo "### F-107: gen_pool double-free prevention (fe_port_armed bitmap)"
-fi
+: # F-107 folded into patch 0158 (fe_port_armed bitmap engagement guard). See
+: # F-130 marker above for the combined Phase A verification note.
 
 : # F-094 folded into patch 0153 (structured fman_pcd_fe_flow_action
 : # retype). Patch-fold campaign 2026-08-29: regenerated into
@@ -1967,28 +1909,9 @@ fi
 : # F-118 folded into patch 0169 (fe_flow 'del <key>' unit-test hook).
 : # Round-2 fold, see F-054's marker above / F-184's marker below.
 
-# F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() allocated
-# the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) and, when
-# fman_pcd_kg_port_arm_fe() failed, returned with pcd->fe_scaffold_* still set.
-# The next attempt re-entered the fe_enter_off == 0 path and OVERWROTE those
-# fields, orphaning the triple permanently — measured at exactly 304 B per
-# failed engage on both .185 and .106, reclaimable only by reboot, and the
-# source of the arena fragmentation that made even a single-port engage fail
-# -ENOMEM with plenty of free bytes. Also unwinds a partial 3-way allocation.
-# Reuses the existing fman_pcd_fe_arm_free_scaffold(); adds no second helper.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_125.py" 2>&1
-fi
-
-# F-122: make fe_arm engage idempotent. Adds test_bit(fe_port_armed) check at
-# the top of __fman_pcd_fe_arm_engage() (shared core, protects both debugfs and
-# API paths) and changes the F-107 -EBUSY guard in fman_pcd_fe_engage() to
-# return 0 with pr_info. The caller asked for the port to be engaged and it
-# already is — the desired state is achieved. Runs before F-125/F-126 so the
-# idempotency check is the first thing in the function.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_122.py" 2>&1
-fi
+: # F-125 and F-122 folded into patch 0158 (transactional engage rollback +
+: # idempotent engage guard). See F-130 marker above for the combined Phase A
+: # verification note.
 
 # F-126 / F-127 DIAGNOSTICS RETIRED 2026-08-24: the F-125 engage investigation
 # they instrumented is long closed (genl engage works, E25/E26/F-190/F-097).
