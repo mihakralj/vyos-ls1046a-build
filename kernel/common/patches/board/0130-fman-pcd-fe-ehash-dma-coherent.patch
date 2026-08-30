@@ -28,7 +28,10 @@ stores the dma_handle alongside each object:
     t->table_dma; %pa -> %pad.  encode_node() takes dma_addr_t.
   - fman_pcd_ehash_table_free(): kfree -> dma_free_coherent.
   - fman_pcd_ehash_add_key(): kzalloc(256) -> dma_alloc_coherent(t->dev);
-    bucket head = swab64(dma_addr); record_dma stored.
+    bucket head = swab64(dma_addr); record_dma stored. Also carries the
+    fe_ptr_off/enq_fe_off record write-out that 0128 wired as a parameter
+    but never stored into the record -- folded in here since it shares
+    the same record-layout hunk (see 2026-08-30 fold note below).
   - fman_pcd_ehash_flow_drain(): kfree -> dma_free_coherent(t->dev).
   - the two show nodes print the stored dma handle, not virt_to_phys.
 
@@ -45,12 +48,21 @@ head and table-base words now hold bus addresses (== physical on a PAMU
 bypass/1:1 mapping, which is why the dormant gate is unchanged).  A dma_pool
 would avoid the per-record page rounding - noted as a future optimization.
 
-Validated: git apply --3way --check clean against the post-0129
-reconstruction (applied file byte-identical to the edited tree);
-brace-balanced; LF-only.  Compile gate is CI.
+Validated: git apply --check clean against a genuinely pristine linux-6.18.44
++ patches 0068..0129 baseline (extracted fresh from the cached tarball, not
+an already-patched dev tree).
+
+2026-08-30 (fold): re-derived against the true post-0129 state. The prior
+version of this patch had the fe_ptr_off/enq_fe_off record write-out as
+unchanged context (assuming a prior patch already added it); no patch in
+the series actually did, so it silently failed to apply from a clean
+checkout ("patch does not apply" at the add_key hunk) while looking fine
+against an already-built dev tree where the drift was masked. Folded the
+missing write-out into this patch's add_key hunk instead of introducing a
+new one, since it's the same record-layout change.
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 9e73ae3..0df6585 100644
+index 127e2bf12..7ae1a966c 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 @@ -26,6 +26,7 @@
@@ -61,7 +73,7 @@ index 9e73ae3..0df6585 100644
  #include <linux/err.h>
  #include <linux/genalloc.h>
  #include <linux/init.h>
-@@ -1339,7 +1340,9 @@ static const struct file_operations fman_pcd_fe_enter_fops = {
+@@ -1361,7 +1362,9 @@ static const struct file_operations fman_pcd_fe_enter_fops = {
  
  struct fman_pcd_ehash_table {
  	struct list_head node;
@@ -72,7 +84,7 @@ index 9e73ae3..0df6585 100644
  	size_t table_size;
  	u32 hash_mask;
  	u8 key_size;
-@@ -1413,7 +1416,7 @@ static void fman_pcd_ehash_int_buf_put(struct fman_pcd *pcd)
+@@ -1435,7 +1438,7 @@ static void fman_pcd_ehash_int_buf_put(struct fman_pcd *pcd)
   *   word3: miss NIA (deferred to the FE_ENTER increment)
   */
  static void fman_pcd_ehash_encode_node(struct fman_pcd_ehash_table *t,
@@ -81,7 +93,7 @@ index 9e73ae3..0df6585 100644
  				       unsigned long int_buf_off)
  {
  	u32 base_hi = (u32)(((u64)tblphys >> 32) & 0xffff);
-@@ -1434,8 +1437,9 @@ static void fman_pcd_ehash_encode_node(struct fman_pcd_ehash_table *t,
+@@ -1456,8 +1459,9 @@ static void fman_pcd_ehash_encode_node(struct fman_pcd_ehash_table *t,
  static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
  				    u8 key_size, u8 hash_shift)
  {
@@ -92,7 +104,7 @@ index 9e73ae3..0df6585 100644
  	size_t tablesize;
  	int ii, err;
  
-@@ -1457,11 +1461,13 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+@@ -1479,11 +1483,13 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
  	if (err)
  		goto err_free_t;
  
@@ -107,7 +119,7 @@ index 9e73ae3..0df6585 100644
  	t->table_size = tablesize;
  	t->hash_mask = mask;
  	t->key_size = key_size;
-@@ -1469,12 +1475,12 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+@@ -1491,12 +1497,12 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
  	t->hash_mask_bits = (u8)ii;
  	INIT_LIST_HEAD(&t->flows);
  
@@ -122,7 +134,7 @@ index 9e73ae3..0df6585 100644
  		 mask, key_size, ii, tablesize, &tblphys);
  	return 0;
  
-@@ -1490,7 +1496,7 @@ static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+@@ -1512,7 +1518,7 @@ static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
  {
  	list_del(&t->node);
  	fman_pcd_ehash_flow_drain(t);
@@ -131,7 +143,7 @@ index 9e73ae3..0df6585 100644
  	kfree(t);
  	fman_pcd_ehash_int_buf_put(pcd);
  }
-@@ -1518,10 +1524,10 @@ static int fman_pcd_ehash_show(struct seq_file *s, void *unused)
+@@ -1540,10 +1546,10 @@ static int fman_pcd_ehash_show(struct seq_file *s, void *unused)
  		seq_puts(s, "no ehash tables\n");
  	} else {
  		list_for_each_entry(t, &pcd->fe_ehash_tables, node) {
@@ -144,7 +156,7 @@ index 9e73ae3..0df6585 100644
  				   t->hash_mask, t->key_size,
  				   t->hash_mask_bits, t->table_size, &p);
  			seq_printf(s, "  node %08x %08x %08x %08x\n",
-@@ -1613,8 +1619,9 @@ static const struct file_operations fman_pcd_ehash_fops = {
+@@ -1635,8 +1641,9 @@ static const struct file_operations fman_pcd_ehash_fops = {
   *     follow the SDK get_indexed_hash_bucket idiom but need a HW-dump confirm;
   *   - the en_ehash_entry header field offsets and the next-FE pointer
   *     placement after the key;
@@ -156,7 +168,7 @@ index 9e73ae3..0df6585 100644
   * ---------------------------------------------------------------------------
   */
  #define FMAN_EHASH_FLOW_REC_SIZE	256	/* MAX_EN_EHASH_ENTRY_SIZE */
-@@ -1624,7 +1631,8 @@ static const struct file_operations fman_pcd_ehash_fops = {
+@@ -1646,7 +1653,8 @@ static const struct file_operations fman_pcd_ehash_fops = {
  
  struct fman_pcd_ehash_flow {
  	struct list_head node;
@@ -166,15 +178,19 @@ index 9e73ae3..0df6585 100644
  	u64 *bucket_h;			/* the bucket head u64 it links into */
  	u64 prev_head;			/* old bucket->h, for byte-exact undo */
  	u16 index;			/* bucket index (for the show node) */
-@@ -1699,6 +1707,7 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+@@ -1721,8 +1729,11 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
  {
  	struct fman_pcd_ehash_flow *flow;
  	u64 prev_head, old_native, rec_phys;
 +	dma_addr_t rdma;
  	u8 *r;
  	u16 index;
- 	size_t fe_ptr_off;
-@@ -1715,8 +1724,9 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
++	size_t fe_ptr_off;
++
+ 		if (key_size == 0 || key_size != t->key_size)
+ 		return -EINVAL;
+ 	if (key_size > FMAN_EHASH_FLOW_KEY_MAX)
+@@ -1735,8 +1746,9 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
  	if (!flow)
  		return -ENOMEM;
  
@@ -186,9 +202,12 @@ index 9e73ae3..0df6585 100644
  	if (!r) {
  		kfree(flow);
  		return -ENOMEM;
-@@ -1737,11 +1747,12 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
- 	fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);
- 	*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);
+@@ -1753,12 +1765,15 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 	*(__be32 *)(r + 4) = cpu_to_be32((u32)(old_native & 0xffffffff));
+ 	memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);
+ 
++	fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);
++	*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);
  
 -	/* Head-insert: bucket head = swab64(phys(record)). */
 -	rec_phys = (u64)virt_to_phys(r);
@@ -201,7 +220,7 @@ index 9e73ae3..0df6585 100644
  	flow->prev_head = prev_head;
  	flow->index = index;
  	flow->key_size = key_size;
-@@ -1761,7 +1772,8 @@ static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t)
+@@ -1778,7 +1793,8 @@ static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t)
  	list_for_each_entry_safe(flow, tmp, &t->flows, node) {
  		*flow->bucket_h = flow->prev_head;
  		list_del(&flow->node);
@@ -211,7 +230,7 @@ index 9e73ae3..0df6585 100644
  		kfree(flow);
  	}
  }
-@@ -1791,7 +1803,7 @@ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
+@@ -1808,7 +1824,7 @@ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
  		unsigned int n = 0;
  
  		list_for_each_entry(flow, &t->flows, node) {
