@@ -551,7 +551,7 @@ The `99-mask-services.chroot` hook runs inside the build chroot. The old approac
 |-------|---------------|---------|
 | `vyos-1x-001` | `system_console.xml.in` | Add ttyAMA/ttyFIQ serial types + 1500000 baud |
 | `vyos-1x-003` | `vyshim.c` | Increase ZMQ init timer 10ms→30ms (ARM64 slower) |
-| `vyos-1x-005` | `container.py` | Remove `--memory-swap 0` (broken on ARM64 cgroups) |
+| ~~`vyos-1x-005`~~ | ~~`container.py`~~ | RETIRED 2026-08-29: removed `--memory-swap 0` (broken on ARM64 cgroups), but upstream's Quadlet-based container-management rewrite (`generate_quadlet_options()`, replacing the old `container_base_cmd` string-building `generate_run_arguments()`) no longer sets `--memory-swap` at all — only `PodmanArgs=--memory={memory}m` remains. The underlying ARM64 cgroups bug is inherently avoided by omission; nothing left to patch. |
 | `vyos-1x-006` | `disk.py`, `image_installer.py` | 32 MiB firmware boundary compliance + updated success message |
 | `vyos-1x-007` | `image_installer.py` | Prefer mmcblk (eMMC) as default disk in `install image` |
 | `vyos-1x-008` | `image_installer.py` | Default RAID-1 mirroring answer to "No" (single eMMC) |

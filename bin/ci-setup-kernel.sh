@@ -664,17 +664,15 @@ unset _count _series _src _p
 # This catches orphaned patches with no series entry (the old guard
 # caught forgotten cp lines — now the loop reads series directly so
 # the failure mode is a patch file committed without a series entry).
-# 2026-08-04: 0127/0128/0129 filenames below are untracked on-disk WIP that
-# collides with the REAL, already-committed, in-series patches of the same
-# number (0127-fman-pcd-fe-vm-enq-root.patch, 0128-fman-pcd-fe-vm-flow-
-# insert.patch, 0129-fman-pcd-offload-engage.patch — unrelated FE-VM/ehash
-# work). Content looks like a genuine MURAM segregated-fit allocator +
-# Risk #13 fix, but it was never renumbered/reviewed, so it is excluded
-# here rather than either overwriting the real 0127-0129 or guessing new
-# numbers for unreviewed content. 0138 has no number collision but is
-# skipped alongside it for the same reason (unreviewed, depends on 0128/0129
-# APIs). Revisit: renumber to free slots (0165+) and review before staging.
-BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch 0127-fman-pcd-cc-node-slab.patch 0128-fman-pcd-muram-segpool.patch 0129-fman-pcd-muram-largest-free.patch 0138-fman-pcd-manip-frag-check.patch"
+# 2026-08-04: the WIP filenames that used to collide with the real, in-series
+# 0127/0128/0129/0138 (an unreviewed MURAM segregated-fit allocator + Risk #13
+# fix, never renumbered) have since moved to
+# kernel/ask/patches/archive-2026-08-10-excluded-wip/ and no longer exist
+# under board/, so this whitelist is pruned back to just the one patch that
+# is still physically absent from board/ (0150, superseded by 0153).
+# 2026-08-29: pruned the 4 stale WIP entries (patch review found they no
+# longer exist under board/ — see plans/PATCH-FOLD-CAMPAIGN-PLAN.md §2).
+BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch"
 _missing=""
 # Cross-check: every .patch in board/ must be in series or SKIP list
 {
@@ -1304,27 +1302,28 @@ else:
     echo "### fman_keygen.c: F-062c-R2 pure AC_CC (0x80000006)"
 fi
 
-# F-069: MISS context (DDR + MURAM t_ExtHashResult) with exact anchors.
-# FIXME: Fixup anchors are NOT count()==1 asserted — bin/test-fixups.sh is the current gate.
-# Four prior silent no-ops cost four board sessions (F-062a, F-062g, F-069a v1/v2).
-# Per NXP LSDK ExternalHashTableSet (999-layerscape-ask):
-#  - Adds miss_res_off (6th parameter, distinct from w6 miss_off)
-#  - w4 = miss_res_off MURAM offset of 16B t_ExtHashResult
-#  - DDR miss context (256B, dma_alloc_coherent via t->dev from 0130)
-#  - Persists in struct fman_pcd, freed on hash_free teardown
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069.py" 2>&1
-    echo "### F-069: MISS context + DDR alloc (count-asserted anchors)"
-fi
+: # F-069 folded into patch 0169 (MISS context: DDR + MURAM
+: # t_ExtHashResult). Patch-fold campaign 2026-08-29 continuation:
+: # regenerated into 0169-fman-pcd-fe-obs-canary.patch (last patch
+: # touching fman_pcd.c) via canonical per-patch-commit rebase (13
+: # descendant commits replayed with zero conflicts) + byte-exact
+: # tree-equivalence verification, alongside F_054/F_076/F_072_2/
+: # F_173/F_093/F_096/F_097/F_117/F_118/F_184 (folded together,
+: # same base commit, same verification pass). F_069b, F_071, and F_158
+: # were tried in the same batch and reverted after a full end-to-end
+: # replay: F_069b/F_071 anchor on text that M2_4_2.py (a fixup, not a
+: # patch) adds, and F_158's own comment text contains the literal
+: # substring "F-148", which falsely satisfies F_148.py's whole-file
+: # idempotency check. All three remain active fixups (see their own
+: # markers below). Gated on CI build + board validation before
+: # considered final. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
-# F-073D: Terminal ENQ per 210.10.1 §7.3 — ws_offset=0, w3=0 (no chain).
-# w0 = TYPE_ENQ | FMAN_FE_ENQ_FQID = 0x02010000 (terminal, no ws_offset).
-# w1 = fqid (24-bit FQID). w3 = 0 (terminal, per §7.1 "Terminal enqueue").
-# + F-070b w6→ENQ rewire + F-070c params zeroing on disengage.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_073D.py" 2>&1
-    echo "### F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3"
-fi
+: # F-073D folded into patch 0127 (ENQ FE terminal w3=fe_exit_off,
+: # per 210.10.1 §7.3). Patch-fold campaign 2026-08-29: regenerated into
+: # 0127-fman-pcd-fe-vm-enq-root.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_073D across the full remaining series (43 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 
 # M2-4: fix fman_port_lookup_rx — all LS1046A fman_port->port_id==0
@@ -1432,17 +1431,15 @@ fi
 # F-054: Fix context_build overwriting FE Action Descriptors.
 # fman_pcd_fe_build_contexts() calls fman_pcd_fe_context_build(fe, offset, &p)
 # where fe is the AD base address and offset is 0 for MUX.  context_build
-# writes at fe+offset = fe+0 — the MUX AD type header (0x04000000) gets
-# replaced with enq->muram_off.  The hardware reads a garbage FE type and
-# crashes when HIT fires and tries to follow the next-FE pointer.
-#
-# Fix: replace context_build for MUX and Transition with direct AD writes.
-# MUX AD word 0 becomes FMAN_FE_TYPE_MUX|enq_off (type+next-FE in one word).
-# Transition AD word 1 becomes the exit FE offset (correct 2-word layout).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_054.py" 2>&1
-    echo "### fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)"
-fi
+: # F-054 folded into patch 0169 (MUX/Transition AD direct writes,
+: # fix context_build corruption). Patch-fold campaign 2026-08-29
+: # round 2: regenerated into 0169-fman-pcd-fe-obs-canary.patch
+: # alongside the round-1 batch and 7 more round-2 fixups, in exact
+: # real ci-setup-kernel.sh execution order (interleaved, not simply
+: # appended) -- byte-exact vs current+all-14-fixups confirmed after
+: # an initial wrong-order attempt caught a real debugfs-registration
+: # ordering mismatch and was corrected. See F-184's marker below for
+: # the full round-2 file list and plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-056: MUX/Transition AD writes in fe_arm_engage (SDK-compliant — raw MURAM offsets).
 # The 0146 patch tried to add fman_pcd_fe_build_contexts() call into
@@ -1459,19 +1456,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)"
 fi
 
-# F-057: Remove per-record next-FE from DDR flow records.
-# The NXP SDK's en_ehash_entry struct has NO per-record next-FE pointer.
-# The HIT dispatch target is in the hash FE descriptor's word 5 (nextFEPtr
-# = MUX -> ENQ).  Our code was writing enq_off at byte 24 of each DDR
-# record (8-byte header + 13-byte key + 3-byte pad = 24).  The hardware
-# reads this as garbage and crashes.
-#
-# The enq_fe_off parameter becomes unused (kept for ABI compatibility).
-# All HIT flows now dispatch through the hash FE's word 5, not per-record.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_057.py" 2>&1
-    echo "### fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)"
-fi
+: # F-057 folded into patch 0128 (removed per-record next-FE from DDR,
+: # SDK-compliant). Patch-fold campaign 2026-08-29: regenerated into
+: # 0128-fman-pcd-fe-vm-flow-insert.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_057 across the full remaining series (41 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 
 
@@ -1576,12 +1566,9 @@ fi
 
 # F-080 (DELETED — folded into F-069)
 
-# F-076: atomic fe_disengage_full debugfs — SDK-correct ordered teardown.
-# Replaces 7-step manual sequence that crashes board (F-076, 2026-07-18).
-# Calls __fman_pcd_fe_arm_disengage + fman_pcd_port_recover in one write.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_076.py" 2>&1
-fi
+: # F-076 folded into patch 0169 (atomic fe_disengage_full debugfs,
+: # SDK-correct ordered teardown). Round-2 fold, see F-054's marker
+: # above / F-184's marker below.
 
 # F-068: IC key probe — extend dpaa_eth IC copy to include KG key region.
 # The mainline dpaa_eth IC copy (FMBM_RICP: iciof=0, size=48B) only copies
@@ -1610,6 +1597,16 @@ fi
 
 # F-069b: IC probe debugfs node — reads buffer captured by F-069a.
 # Shows 32 u32 words (128 bytes) from the DMA buffer headroom.
+# NOTE (2026-08-29 patch-fold campaign): kept as an active fixup rather
+# than folded into a patch. Its anchor ("static int fman_pcd_fe_probe_show")
+# is added by M2_4_2.py, itself a fixup that runs after all patches --
+# baking F-069b into an early patch would insert before an anchor that
+# does not exist yet at patch-apply time. Confirmed by a full end-to-end
+# replay of the real fixup sequence (see plans/PATCH-FOLD-CAMPAIGN-PLAN.md);
+# an earlier attempt folded this and silently produced only its "extern
+# declarations" sub-block (the anchor lookup returned not-found, and this
+# script's own "if [ -f ... ]" wrapping does not check python3's exit
+# status, so the gap went unnoticed until the full replay caught it).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069b.py" 2>&1
 fi
@@ -1620,6 +1617,9 @@ fi
 
 # F-071: hash_probe debugfs — read full 8-byte KG CRC-64 hash from annotation.
 # Uses fman_pcd_ic_vaddr (from F-069a) and fman_pcd_hash_off (from F-070).
+# NOTE (2026-08-29 patch-fold campaign): kept as an active fixup, same
+# reason as F-069b above (M2_4_2.py anchor dependency) -- an earlier
+# fold attempt silently produced only its "globals added" sub-block.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_071.py" 2>&1
 fi
@@ -1645,8 +1645,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         drivers/net/ethernet/freescale/fman/fman_pcd.c \
         'fman_muram_offset_to_vbase(muram,' \
         '(void *)fman_muram_offset_to_vbase(muram,' \
-        34 \
-        "F-085: cast addition on muram_offset_to_vbase (34 occ.)"
+        43 \
+        "F-085: cast addition on muram_offset_to_vbase (43 occ., was 34 before the 2026-08-29 patch-fold campaign folded F_072_2/F_173/F_054/F_076/F_093/F_096/F_097/F_117/F_118/F_184 into patches 0126/0127/0128/0153/0169 (F_069b/F_071 reverted, don't affect this count since both run before this gate anyway; F_158 also reverted and DOES affect this count since it runs after this gate at its original position) -- their fman_muram_offset_to_vbase() call sites now exist from the start of the fixup phase instead of arriving later via those fixups, adding 9 occurrences by the time this gate runs. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.)"
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
@@ -1661,20 +1661,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-130: PCD MURAM arena 64 KiB -> 84 KiB"
 fi
 
-# F-131: Guard fman_pcd_muram_free() against kexec-stale MURAM offsets.
-# After a kexec reboot, the new kernel's gen_pool has a fresh chunk at a
-# potentially different muram_offset.  Offsets from the previous kernel are
-# not valid, and calling gen_pool_free() on them hits BUG() in lib/genalloc.c.
-# Adds gen_pool_has_addr() check before gen_pool_free() with a pr_warn and
-# budget adjustment for stale offsets.  Board-verified 2026-07-28 on .185
-# (ISO 0422): disengaging from kexec-preserved state triggered:
-#   kernel BUG at lib/genalloc.c:508!
-#   gen_pool_free_owner -> fman_pcd_muram_free -> fman_pcd_fe_pool_free ->
-#   fman_pcd_fe_pool_put -> fman_pcd_fe_disengage
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_131.py" 2>&1
-    echo "### F-131: gen_pool_has_addr() guard in fman_pcd_muram_free()"
-fi
+: # F-131 folded into patch 0126 (gen_pool_has_addr() kexec-stale-MURAM
+: # guard). Patch-fold campaign 2026-08-29: regenerated into
+: # 0126-fman-pcd-muram-genpool.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_131 across the full remaining series (43 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-090: MISS→kernel bypass ENQ — route non-matching frames to kernel FQ.
 # Adds a second ENQ FE that enqueues MISS frames to miss_fqid instead of EXIT drop.
@@ -1910,13 +1902,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-157: dedicated TX FQ wired into FE-VM ENQ (HIT destination)"
 fi
 
-# F-093: Dynamic FQID resolution — kill hardcoded 0x200.
-# Uses fman_pcd_resolve_miss_fqid() from port params page instead.
-# Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_093.py" 2>&1
-    echo "### F-093: dynamic FQID (kill hardcoded 0x200)"
-fi
+: # F-093 folded into patch 0169 (dynamic FQID resolution, kill
+: # hardcoded 0x200). Round-2 fold, see F-054's marker above / F-184's
+: # marker below.
 
 # F-107: gen_pool double-free prevention — per-port engagement guard.
 # Replaces u8 fe_armed_port with DECLARE_BITMAP(fe_port_armed, 32).
@@ -1928,13 +1916,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-107: gen_pool double-free prevention (fe_port_armed bitmap)"
 fi
 
-# F-094: Retype fman_pcd_fe_flow_add to use structured flow_action.
-# Replaces raw (key, key_size, enq_off) with const struct fman_pcd_fe_flow_action *.
-# Breaking API change before anyone depends on the old signature.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_094.py" 2>&1
-    echo "### F-094: flow_add retype → struct fman_pcd_fe_flow_action *"
-fi
+: # F-094 folded into patch 0153 (structured fman_pcd_fe_flow_action
+: # retype). Patch-fold campaign 2026-08-29: regenerated into
+: # 0153-fman-pcd-fe-engage-api.patch (its owning patch) via canonical
+: # per-patch-commit rebase + byte-exact tree-equivalence verification
+: # against current+F_094 across the full remaining series (25 commits,
+: # zero conflicts). See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 : # F-109 folded into patch 0153 (fman_pcd_fe_enq_get_offset export).
 : # Phase 2 fold 2026-08-18: the fixup edit was regenerated into
@@ -1942,25 +1929,13 @@ fi
 : # fman_pcd.c/.h are byte-identical modulo two normalized blank lines.
 : # Verified: fresh-tree apply clean + tree-equivalence vs current+F_109.
 
-# F-096: Call fman_pcd_fe_build_contexts() during fe_arm engage.
-# Patch 0146 defines the function but the call site was lost when
-# F-091/F-092 modified __fman_pcd_fe_arm_engage(). Without working-store
-# context, the FE-VM MUX cannot read its next-FE pointer and parks on
-# first frame under load. This unparks the FE-VM for hardware forwarding.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_096.py" 2>&1
-    echo "### F-096: FE-VM context build call (unparks FE-VM)"
-fi
+: # F-096 folded into patch 0169 (fman_pcd_fe_build_contexts() call
+: # during fe_arm engage, unparks FE-VM). Round-2 fold, see F-054's
+: # marker above / F-184's marker below.
 
-# F-097 (T-P1-1 / F-08): fman_pcd_fe_verify — arm-time readback gate.
-# Injects fman_pcd_fe_verify_internal() + call in engage path BEFORE KG arm.
-# Catches F-072..F-079 silent-write defects (params page, EXT_HASH, MUX,
-# EXIT, ENQ descriptor validation) before frames reach the silicon.
-# Approximately 60 LOC.  Full 150-LOC version re-land incrementally.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_097.py" 2>&1
-    echo "### F-097: fman_pcd_fe_verify arm-time readback gate"
-fi
+: # F-097 folded into patch 0169 (fman_pcd_fe_verify arm-time
+: # readback gate). Round-2 fold, see F-054's marker above / F-184's
+: # marker below.
 
 : # F-098 removed 2026-08-22 (Phase 2 cleanup): dead defensive no-op.
 : # Its owning patch 0135-fman-pcd-fe-context-build.patch already defines
@@ -1976,24 +1951,12 @@ fi
 : # Verified byte-identical vs current+F_116 across the full series (incl. F-117
 : # which anchors on F-116's guarded fe_flow_del body). CI + board gated.
 
-# F-117 (Fix B pt1): per-key FE-VM ehash delete. Adds fman_pcd_ehash_del_key
-# (head + mid-chain collision-chain unlink, prev_head LIFO invariant kept) and
-# rewrites fman_pcd_fe_flow_del to delete by key (NULL key => clear-all). Runs
-# AFTER F-116 (matches F-116's guarded fe_flow_del body). Pairs with the
-# ask.ko real-fm + built-key wiring in ask_flow_offload.c.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_117.py" 2>&1
-    echo "### F-117: FE-VM per-key ehash delete"
-fi
+: # F-117 folded into patch 0169 (per-key FE-VM ehash delete,
+: # fman_pcd_ehash_del_key + fe_flow_del rewrite). Round-2 fold, see
+: # F-054's marker above / F-184's marker below.
 
-# F-118 (Fix B pt2): add a "del <key>" verb to the fe_flow debugfs node routing
-# to fman_pcd_ehash_del_key (table 0), so Fix B's per-key collision-chain unlink
-# is unit-testable via pure ehash ops (fe_ehash set / fe_flow add / fe_flow del)
-# with NO fe_arm. Additive; runs AFTER F-117 (needs fman_pcd_ehash_del_key).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_118.py" 2>&1
-    echo "### F-118: fe_flow 'del <key>' unit-test hook"
-fi
+: # F-118 folded into patch 0169 (fe_flow 'del <key>' unit-test hook).
+: # Round-2 fold, see F-054's marker above / F-184's marker below.
 
 # F-125: make FE-VM engage transactional. __fman_pcd_fe_arm_engage() allocated
 # the 304-byte FE_ENTER scaffold (gro 256 + mto 16 + ato 32) and, when
@@ -2122,19 +2085,26 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 fi
 
-# F-072 v3: FmPortSetFESupport — internal FE buffer pool.
-# SDK 999-patch ~L14545. Uses gen_pool MURAM granule (256B auto-align).
-# port_id passed as u8 (struct fman_port is opaque — no port->port_id).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_072_2.py" 2>&1
-    echo "### fman_pcd.c: F-072 v3 FmPortSetFESupport ported"
-fi
+: # F-072_2 folded into patch 0169 (FmPortSetFESupport port buffer
+: # setup/teardown). See the F-069 fold marker above for the combined
+: # verification note.
 
 # F-158: debugfs dump node (fe_scaffold) — ground truth on CC match-table
 # layout.  STRICT_DEVMEM blocks /dev/mem MURAM reads, so this kernel node is
 # the only way to see what F-148 actually wrote (key+mask) vs what the CC
 # comparator reads.  Dumps group/match/AD tables for every armed port.
 # Runs after F-072 (which also anchors on fe_arm_show) to keep function order.
+# NOTE (2026-08-29 patch-fold campaign): kept as an active fixup rather
+# than folded into a patch. F_148.py's own idempotency check for its
+# struct-field addition is `if "F-148" not in src` -- a whole-file
+# substring scan, not scoped to its own struct. F-158's own comment text
+# (this very header, verbatim) contains the literal substring "F-148",
+# so folding F-158 into an early patch made that substring present
+# before F_148.py's fixup ever runs, causing it to falsely conclude its
+# field was already added and skip adding it for real. Confirmed by a
+# full end-to-end replay of the real fixup sequence (see
+# plans/PATCH-FOLD-CAMPAIGN-PLAN.md); F_148 is itself unfolded/unmodified
+# and still needs to run before this comment's "F-148" text exists.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_158.py" 2>&1
     echo "### fman_pcd.c: F-158 fe_scaffold debugfs dump node"
@@ -2321,10 +2291,9 @@ fi
 # bug (kzalloc -> dma_alloc_coherent) but never added the ordering half.
 # Adds wmb() immediately before this branch's own bucket-head publish in
 # fman_pcd_ehash_add_key(), matching vendor's exact fix location/rationale.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_173.py" 2>&1
-    echo "### fman_pcd.c: F-173 wmb() before ehash bucket-head publish"
-fi
+: # F-173 folded into patch 0169 (wmb() before ehash bucket-head
+: # publish). See the F-069 fold marker above for the combined
+: # verification note.
 
 # F-174: NOT WIRED IN. Built and CI-tested clean (2026-08-07) but never
 # armed on a board. A same-day 2026-07-15 post-mortem (F-069) found that
@@ -2536,20 +2505,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-224 46-byte dual-lane GEC key on AC_CC FE scheme"
 fi
 
-# F-184 (2026-08-12): the first live `fe_obs arm` (patch 0169's canary
-# discriminator, until then only compile-verified) panicked the kernel on
-# .185 -- reproduced twice:
-#   list_add double add ... kernel BUG at lib/list_debug.c:35!
-#   fman_pcd_fe_obs_enq_one -> __list_add_valid_or_report -> panic=60 reboot
-# Root cause: fe_obs_enq_one() takes the canary FE object via
-# list_first_entry_or_null(&pcd->fe_available) (which does NOT unlink) and
-# list_add_tail's it onto fe_singletons WITHOUT list_del -- a double-add.
-# Every other fe_available consumer (singletons/enq/hashfe builders) does
-# list_del first; fe_obs missed the pattern. Insert the list_del.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_184.py" 2>&1
-    echo "### fman_pcd.c: F-184 fe_obs_enq_one list_del fix (arm-panic)"
-fi
+: # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
+: # fix -- fe_obs itself is native 0169 content, so this bug fix
+: # belongs with it). This closes round 2 of the patch-fold campaign:
+: # F-054, F-076, F-093, F-096, F-097, F-117, F-118, F-184 -- all
+: # confirmed mutually independent and independent of round 1 via a
+: # batch dry-run, then folded together with round 1's F-069/F-072_2/
+: # F-173 into one combined 0169 patch, applied in
+: # exact real ci-setup-kernel.sh execution order. F-069b, F-071, and
+: # F-158 were tried in this same batch and reverted (see F-069's
+: # marker above); they remain active fixups just below (F-158's own
+: # marker sits at its usual position further down). 11 descendant
+: # commits (0170/0171/0172/fixes-120/fixes-130) replayed with zero
+: # conflicts; byte-exact vs current+all-12-fixups (real order,
+: # M2_4_2/F-069b/F-071/F-148/F-158 correctly present as active
+: # fixups) confirmed on fman_pcd.c. See plans/PATCH-FOLD-CAMPAIGN-PLAN.md.
 
 # F-185 (2026-08-12, E23): vendor-faithful CC dispatch -- AC_CC mode +
 # VARIANT B en_exthash_node at RCCB (the NXP ASK SDK production path;
