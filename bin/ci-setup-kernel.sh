@@ -1555,14 +1555,10 @@ if changed:
 F086PY
 fi
 
-# F-089: §17 FE descriptor static_asserts + KUnit test injection.
-# Injects fman-pcd-fe-static-asserts.h (compile-time BUILD_BUG_ON guards
-# for all 6 FE types, NIA encodings, sizes) and fman_pcd_fe_test.c
-# (KUnit suite, 8 test cases). Both copied from kernel/common/files/.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_089.py" 2>&1
-    echo "### F-089: §17 static_asserts + KUnit injected"
-fi
+: # F-089 folded into patch 0172 (§17 static asserts + KUnit test #includes).
+: # Patch-fold campaign 2026-08-30: regenerated into 0172-fman-pcd-kunit-kconfig.patch
+: # (its owning patch). Compile-time asserts and KUnit test suite are copied
+: # by ci-setup-kernel.sh from kernel/common/files/ and wired directly via patch 0172.
 
 # F-080 (DELETED — folded into F-069)
 
@@ -2531,15 +2527,9 @@ fi
 # +16 B MURAM per build/clear cycle, linear across cycles (the 256 B DMA
 # leaks alongside, invisible to the MURAM budget). The minimal arm (no
 # hashfe build) leaks 0, isolating the defect to this pair. The hash FE is
-# legacy (node dispatch does not use it), but the leak violates the
-# "used MUST return to baseline" reversibility invariant. Fix: free
-# miss_res_off (fman_pcd_muram_free, 16 B) and miss_ctx
-# (dma_free_coherent via the last ehash table's dev -- same lookup the
-# build uses) in fe_hash_free, resetting both, guarded on non-zero/NULL.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_187.py" 2>&1
-    echo "### fman_pcd.c: F-187 fe_hashfe miss-result leak fix (16B MURAM + 256B DMA/cycle)"
-fi
+: # F-187 folded into patch 0169 (free miss_res_off and miss_ctx in
+: # fe_hash_free). Patch-fold campaign 2026-08-30: regenerated into
+: # 0169-fman-pcd-fe-obs-canary.patch. Verified byte-identical to current+F_187 on fman_pcd.c.
 
 # F-188 (2026-08-12, P0-2 production-path audit): align the production
 # genl/flowtable path with the E25/E26-verified 14-byte mechanism. Three
@@ -2719,8 +2709,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # software when disarmed. The retired fixup files are kept as the
     # vendor-encoding reference only. Routed/NAT records are byte-identical to
     # the pre-F-233 baseline (F-230 unchanged).
-    #python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_233_vlan.py" 2>&1  # RETIRED (R1)
-    #python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_234_frag.py" 2>&1  # RETIRED (R1)
+    # F-233 / F-234 RETIRED 2026-08-26 (R1): inline FE-VM path retired; VLAN offloads via ask.ko CC-leaf->HMTD.
     echo "### VLAN: F-233/F-234 inline FE-VM path RETIRED (R1); VLAN offloads via ask.ko CC-leaf->HMTD (silicon-validated R4c, default-off gate)"
 fi
 
