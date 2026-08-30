@@ -174,9 +174,6 @@
 0121g-fman-pcd-cc-test-vlan-coex.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-1)
 0121h-fman-cc-miss-fe-production-api.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
-0121i-fman-export-fe-root-offset.patch
-
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
 #            MURAM genpool, ENQ root, flow insert, offload engage,
@@ -242,6 +239,14 @@
 # ── FE-VM engage/flow API (ask.ko, replaces 0150) ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0153-fman-pcd-fe-engage-api.patch
+
+# 2026-08-30 (fold): relocated from its old series slot right after 0121h.
+# 0121i's diff targets fman_pcd_fe_enq_get_offset as anchor context, but
+# that function is only introduced by 0153 (above) -- applying 0121i in
+# its original numeric position always failed with "does not apply"
+# because the anchor didn't exist yet. Content unchanged, order-only fix.
+# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
+0121i-fman-export-fe-root-offset.patch
 
 # ── T1 typing fix (§16.2) ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
