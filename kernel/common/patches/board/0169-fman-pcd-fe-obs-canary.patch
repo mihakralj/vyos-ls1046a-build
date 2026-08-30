@@ -172,7 +172,7 @@ index bb7659c42..2d6571000 100644
  	 * SDK), so the raw mgmt_off is what the FE ucode expects.
  	 */
 -	page_v = (void __iomem *)fman_muram_offset_to_vbase(muram, params_off);
-+	page_v = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, params_off);
++	page_v = (void __iomem *)fman_muram_offset_to_vbase(muram, params_off);
  	iowrite32be(0, (u8 __iomem *)page_v + FMAN_PP_FE_DEPL_CNT_OFF);
  	iowrite32be((u32)mgmt_off, (u8 __iomem *)page_v + FMAN_PP_FE_MGMT_IDX_OFF);
  
@@ -181,7 +181,7 @@ index bb7659c42..2d6571000 100644
  		if (params_off && muram) {
  			void __iomem *page_v = (void __iomem *)
 -				fman_muram_offset_to_vbase(muram, params_off);
-+				(void *)fman_muram_offset_to_vbase(muram, params_off);
++				fman_muram_offset_to_vbase(muram, params_off);
  
  			iowrite32be(0, (u8 __iomem *)page_v + FMAN_PP_FE_MGMT_IDX_OFF);
  			iowrite32be(0, (u8 __iomem *)page_v + FMAN_PP_FE_DEPL_CNT_OFF);
@@ -1824,7 +1824,7 @@ index bb7659c42..2d6571000 100644
  		fp = list_first_entry(&pcd->fe_ports, struct fman_pcd_fe_port, node);
  		pool_raw_off = fp->pool_raw_off;
 -		pool_base = (void __iomem *)fman_muram_offset_to_vbase(muram, fp->pool_raw_off);
-+		pool_base = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, fp->pool_raw_off);
++		pool_base = (void __iomem *)fman_muram_offset_to_vbase(muram, fp->pool_raw_off);
  	}
  	mutex_unlock(&pcd->fe_lock);
  
@@ -1833,7 +1833,7 @@ index bb7659c42..2d6571000 100644
  		return 0x200;
  
 -	page = fman_muram_offset_to_vbase(muram, params_off);
-+	page = (void *)fman_muram_offset_to_vbase(muram, params_off);
++	page = fman_muram_offset_to_vbase(muram, params_off);
  	if (!page)
  		return 0x200;
  
