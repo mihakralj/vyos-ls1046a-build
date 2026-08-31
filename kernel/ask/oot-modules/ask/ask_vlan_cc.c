@@ -113,7 +113,8 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 	u16 i;
 	u8 port_id;
 	u8 pcp;
-	bool is_push;
+	bool do_pop;
+	bool do_push;
 	int rc;
 
 	if (!key)
@@ -132,19 +133,34 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 	if (port_id >= ARRAY_SIZE(ports))
 		return -EINVAL;
 
-	is_push = !!(key->vlan_edit_flags & ASK_VLANF_PUSH);
-	if (is_push) {
+	/*
+	 * POP and PUSH are independent bits (ask_flow_offload.c ORs them in
+	 * separately per FLOW_ACTION_VLAN_POP/_PUSH). Both set means a
+	 * same-port VID-to-VID TRANSLATE (e.g. two 802.1Q vifs on one
+	 * physical port routing to each other) -- thread both through so
+	 * fman_hm_vlan_route_get() builds a combined strip+insert HMTD
+	 * instead of silently dropping the strip half (T-M6-8 VLAN
+	 * throughput investigation, 2026-08-31: collapsing this to a single
+	 * is_push bool meant translate flows only ever got a PUSH-only HMTD
+	 * that never stripped the ingress tag).
+	 */
+	do_pop = !!(key->vlan_edit_flags & ASK_VLANF_POP);
+	do_push = !!(key->vlan_edit_flags & ASK_VLANF_PUSH);
+	if (!do_pop && !do_push)
+		return -EOPNOTSUPP;
+
+	if (do_push) {
 		tci = ntohs(key->vlan_push_tci);
 		vid = tci & 0x0fff;
 		pcp = (tci >> 13) & 0x7;
 		tpid = ntohs(key->vlan_push_tpid);
 	} else {
-		vid = key->vlan_ingress_vid;
+		vid = 0;
 		pcp = 0;
-		tpid = ETH_P_8021Q;
+		tpid = 0;
 	}
 
-	rc = fman_hm_vlan_route_get(fm, port_id, is_push, vid, tpid, pcp,
+	rc = fman_hm_vlan_route_get(fm, port_id, do_pop, do_push, vid, tpid, pcp,
 				    key->egress_mac, key->next_hop_mac,
 				    tx_fqid, &hm_handle);
 	if (rc)

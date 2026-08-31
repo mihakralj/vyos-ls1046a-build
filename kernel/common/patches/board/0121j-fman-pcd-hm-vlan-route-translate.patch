@@ -1,0 +1,226 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 31 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: combined VLAN STRIP+INSERT (translate) HMTD for routed-VLAN
+
+T-M6-8 VLAN throughput investigation (board evidence, 2026-08-31).
+
+fman_hm_vlan_route_get() took a single `bool is_push` and could only ever
+build a PUSH-only or POP-only combined HMTD, never both. Every caller
+(ask_vlan_cc_flow_add()) only inspected ASK_VLANF_PUSH, so a flow with BOTH
+ASK_VLANF_POP and ASK_VLANF_PUSH set -- a same-port VID-to-VID TRANSLATE,
+e.g. two 802.1Q vifs (VLAN 6 <-> VLAN 8) on one physical port routing to
+each other -- silently got a PUSH-only HMTD that never stripped the
+ingress tag.
+
+Board reproduction (8-stream bidirectional iperf3 across two VLANs on one
+physical port): ~1M TCP retransmissions for ~6 GB transferred, eth3
+rx_dropped climbing by thousands during the run, and 30 distinct
+flow-offload cookies observed for a test that should only ever produce
+~16 -- consistent with malformed frames on the wire driving TCP resets,
+which floods conntrack/nf_flowtable churn and exhausts the per-port
+CC-tree's FMAN_CC_MAX_STATIC_KEYS(32) cap (see the companion OOT fix in
+ask_vlan_cc.c, commit 21b774da).
+
+Replace `bool is_push` with independent `bool do_pop, bool do_push`
+throughout fman_hm_vlan_route_get()/_lookup()/_ent: POP-only and PUSH-only
+behave exactly as before; BOTH set builds a 5-op translate chain
+{VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD, VLAN_INSERT}
+-- strip the old tag, rebuild L2/L3 (unchanged from the existing single-edit
+path), insert the new tag last so it rides the rebuilt header, matching the
+vendor fill_actions op-order convention already documented for the
+single-edit cases. Neither flag set is now explicitly rejected with
+-EINVAL (previously silently built a same-thing-as-POP-only spec). Still
+within FMAN_HM_MAX_OPS(8).
+
+The refcounted dedup cache key gains do_pop as a discriminant alongside the
+existing do_push (renamed from is_push); PUSH-only fields (vid/tpid/pcp)
+still only participate in the match when do_push is set, matching the prior
+behaviour for that case.
+
+Companion change (separate commit, OOT ask.ko): ask_vlan_cc_flow_add()
+threads key->vlan_edit_flags' POP and PUSH bits independently instead of
+collapsing them into one is_push bool.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (changed exported API; T-M6-8 VLAN R4d)
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 2bf50c641..3ad140772 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -951,7 +951,8 @@ struct fman_hm_vlan_route_ent {
+ 	u16			vid;
+ 	u16			tpid;
+ 	u8			pcp;
+-	bool			is_push;
++	bool			do_pop;
++	bool			do_push;
+ 	u8			src_mac[ETH_ALEN];
+ 	u8			dst_mac[ETH_ALEN];
+ 	u8			port_id;
+@@ -963,19 +964,21 @@ static LIST_HEAD(fman_hm_vlan_route_cache);
+ static DEFINE_MUTEX(fman_hm_vlan_route_lock);
+
+ static struct fman_hm_vlan_route_ent *
+-fman_hm_vlan_route_lookup(struct fman *fm, bool is_push, u16 vid, u16 tpid,
+-			  u8 pcp, const u8 *src_mac, const u8 *dst_mac,
++fman_hm_vlan_route_lookup(struct fman *fm, bool do_pop, bool do_push,
++			  u16 vid, u16 tpid, u8 pcp,
++			  const u8 *src_mac, const u8 *dst_mac,
+ 			  u32 egress_tx_fqid)
+ {
+ 	struct fman_hm_vlan_route_ent *v;
+
+ 	list_for_each_entry(v, &fman_hm_vlan_route_cache, node) {
+ 		if (v->fm == fm &&
+-		    v->is_push == is_push &&
++		    v->do_pop == do_pop &&
++		    v->do_push == do_push &&
+ 		    v->egress_tx_fqid == egress_tx_fqid &&
+ 		    ether_addr_equal(v->src_mac, src_mac) &&
+ 		    ether_addr_equal(v->dst_mac, dst_mac) &&
+-		    (!is_push ||
++		    (!do_push ||
+ 		     (v->vid == vid && v->tpid == tpid && v->pcp == pcp)))
+ 			return v;
+ 	}
+@@ -1004,12 +1007,17 @@ static void fman_hm_vlan_route_l3(struct fman_hm_spec *spec, unsigned int i,
+ /*
+  * fman_hm_vlan_route_get - resolve (and refcount) the shared combined
+  * VLAN-edit + L3-forward HM node for a routed-VLAN adjacency, installing it on
+- * first use.  @is_push selects PUSH (@vid/@tpid/@pcp inserted after the L2
+- * rebuild) vs POP (strip the ingress tag before the rebuild).  @dst_mac/@src_mac
+- * are the egress next-hop and egress-port MACs.  On success *handle receives the
+- * HMTD MURAM offset for a CC leaf hm_handle.  Sleepable; process context only.
++ * first use.  @do_pop and @do_push are independent: POP-only strips the
++ * ingress tag before the L2/L3 rebuild; PUSH-only inserts (@vid/@tpid/@pcp)
++ * after it; BOTH set builds a same-port VID-to-VID TRANSLATE chain (strip the
++ * old tag, rebuild L2/L3, insert the new tag last) -- e.g. two 802.1Q vifs on
++ * one physical port routing between each other. At least one of @do_pop/
++ * @do_push must be set. @dst_mac/@src_mac are the egress next-hop and
++ * egress-port MACs. On success *handle receives the HMTD MURAM offset for a
++ * CC leaf hm_handle. Sleepable; process context only.
+  */
+-int fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
++int fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
++			   bool do_pop, bool do_push,
+ 			   u16 vid, u16 tpid, u8 pcp,
+ 			   const u8 *src_mac, const u8 *dst_mac,
+ 			   u32 egress_tx_fqid, u32 *handle)
+@@ -1017,6 +1025,7 @@ int fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
+ 	struct fman_hm_vlan_route_ent *v;
+ 	struct fman_hm_spec spec;
+ 	struct fman_hm_op *op;
++	unsigned int n;
+ 	int err;
+
+ 	if (!fm || !src_mac || !dst_mac || !handle)
+@@ -1024,12 +1033,14 @@ int fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
+ 	*handle = 0;
+ 	if (!fman_hm_caps_supported())
+ 		return -ENOTSUPP;
+-	if (is_push && (vid == 0 || vid > 4094))
++	if (!do_pop && !do_push)
++		return -EINVAL;
++	if (do_push && (vid == 0 || vid > 4094))
+ 		return -EINVAL;
+
+ 	mutex_lock(&fman_hm_vlan_route_lock);
+
+-	v = fman_hm_vlan_route_lookup(fm, is_push, vid, tpid, pcp,
++	v = fman_hm_vlan_route_lookup(fm, do_pop, do_push, vid, tpid, pcp,
+ 				      src_mac, dst_mac, egress_tx_fqid);
+ 	if (v) {
+ 		refcount_inc(&v->refcount);
+@@ -1044,22 +1055,30 @@ int fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
+ 		return -ENOMEM;
+ 	}
+
++	/*
++	 * Op order matches the vendor fill_actions convention (strip before,
++	 * insert after the L2/L3 rebuild): STRIP (if popping) -> RMV_ETHERNET
++	 * + INSRT_GENERIC(L2) + IPV4_FORWARD -> INSERT (if pushing). A
++	 * translate chain is simply both ends present; the L3 rebuild in the
++	 * middle is identical to the single-edit cases. Max 5 of
++	 * FMAN_HM_MAX_OPS(8).
++	 */
+ 	memset(&spec, 0, sizeof(spec));
+-	if (is_push) {
+-		/* rebuild L2 first, then push the tag onto the new header */
+-		fman_hm_vlan_route_l3(&spec, 0, dst_mac, src_mac);
+-		op = &spec.ops[3];
++	n = 0;
++	if (do_pop)
++		spec.ops[n++].type = FMAN_HM_OP_VLAN_STRIP;
++
++	fman_hm_vlan_route_l3(&spec, n, dst_mac, src_mac);
++	n += 3;
++
++	if (do_push) {
++		op = &spec.ops[n++];
+ 		op->type = FMAN_HM_OP_VLAN_INSERT;
+ 		op->vlan_insert.vlan_id = vid;
+ 		op->vlan_insert.tpid = tpid ? tpid : 0x8100;
+ 		op->vlan_insert.pcp = pcp & 0x7;
+-		spec.num_ops = 4;
+-	} else {
+-		/* strip the ingress tag first, then rebuild L2 for the route */
+-		spec.ops[0].type = FMAN_HM_OP_VLAN_STRIP;
+-		fman_hm_vlan_route_l3(&spec, 1, dst_mac, src_mac);
+-		spec.num_ops = 4;
+ 	}
++	spec.num_ops = n;
+
+ 	err = fman_hm_node_install(fm, port_id, &spec, &v->handle);
+ 	if (err) {
+@@ -1073,7 +1092,8 @@ int fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
+ 	v->vid = vid;
+ 	v->tpid = tpid ? tpid : 0x8100;
+ 	v->pcp = pcp & 0x7;
+-	v->is_push = is_push;
++	v->do_pop = do_pop;
++	v->do_push = do_push;
+ 	v->port_id = port_id;
+ 	ether_addr_copy(v->src_mac, src_mac);
+ 	ether_addr_copy(v->dst_mac, dst_mac);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 7cb43afce..9144232fc 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -403,20 +403,25 @@ int  fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle);
+
+ /**
+  * fman_hm_vlan_route_get - combined VLAN-edit + L3 next-hop HM node for a
+- *                          ROUTED-VLAN adjacency (T-M6-8 R4a)
+- * @is_push:        true = PUSH tag (after L2 rebuild); false = POP (before)
+- * @vid/@tpid/@pcp: pushed tag params (PUSH only)
+- * @src_mac:        egress-port source MAC for the rebuilt L2 header
+- * @dst_mac:        next-hop destination MAC for the rebuilt L2 header
+- * @egress_tx_fqid: egress TX FQ (dedup key)
+- * @handle:         on success, HMTD MURAM offset for a CC leaf hm_handle
+- *
+- * Builds one HMTD that does the tag edit AND {RMV_ETHERNET, INSRT_GENERIC(L2),
+- * IPV4_FORWARD(dec_ttl,l4_csum)} - everything a routed-VLAN frame needs.  Use
+- * fman_hm_vlan_get() (VLAN-only) for a bridged VLAN flow instead.  Refcounted;
++ *                          ROUTED-VLAN adjacency (T-M6-8 R4a; translate R4d)
++ * @do_pop:          strip the ingress tag before the L2/L3 rebuild
++ * @do_push:         insert (@vid/@tpid/@pcp) after the L2/L3 rebuild
++ * @vid/@tpid/@pcp:  pushed tag params (@do_push only)
++ * @src_mac:         egress-port source MAC for the rebuilt L2 header
++ * @dst_mac:         next-hop destination MAC for the rebuilt L2 header
++ * @egress_tx_fqid:  egress TX FQ (dedup key)
++ * @handle:          on success, HMTD MURAM offset for a CC leaf hm_handle
++ *
++ * @do_pop and @do_push are independent -- POP-only, PUSH-only, or BOTH (a
++ * same-port VID-to-VID TRANSLATE, e.g. two 802.1Q vifs on one physical port
++ * routing to each other) are all valid; at least one must be set. Builds one
++ * HMTD that does the tag edit(s) AND {RMV_ETHERNET, INSRT_GENERIC(L2),
++ * IPV4_FORWARD(dec_ttl,l4_csum)} - everything a routed-VLAN frame needs. Use
++ * fman_hm_vlan_get() (VLAN-only) for a bridged VLAN flow instead. Refcounted;
+  * sleepable; process context.
+  */
+-int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
++int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
++			    bool do_pop, bool do_push,
+ 			    u16 vid, u16 tpid, u8 pcp,
+ 			    const u8 *src_mac, const u8 *dst_mac,
+ 			    u32 egress_tx_fqid, u32 *handle);
