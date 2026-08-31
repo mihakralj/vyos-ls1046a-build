@@ -5,8 +5,8 @@ Subject: [PATCH] op-mode: add 'show hardware firmware'
 
 ---
  op-mode-definitions/show-hardware-firmware.xml.in |  17 ++
- src/op_mode/show_hardware_firmware.py             | 591 ++++++++++++++++++++++
- 2 files changed, 608 insertions(+)
+ src/op_mode/show_hardware_firmware.py             | 585 ++++++++++++++++++++++
+ 2 files changed, 602 insertions(+)
 diff --git a/op-mode-definitions/show-hardware-firmware.xml.in b/op-mode-definitions/show-hardware-firmware.xml.in
 new file mode 100644
 index 000000000..9fa259a9f
@@ -35,7 +35,7 @@ new file mode 100755
 index 000000000..6b1580aa1
 --- /dev/null
 +++ b/src/op_mode/show_hardware_firmware.py
-@@ -0,0 +1,591 @@
+@@ -0,0 +1,585 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -406,54 +406,54 @@ index 000000000..6b1580aa1
 +    n_fails = 0
 +    for dev, size_hex, name in mtds:
 +        size_kib = int(size_hex, 16) // 1024
-+        status = 'SKIP - not root' if not root else 'WARN - /dev/%s absent' % dev
++        detail = 'not root' if not root else '/dev/%s absent' % dev
 +        if root and os.path.exists(f'{SYS_ROOT}/dev/{dev}'):
 +            head = flash_head(dev) or b''
 +            if name == 'rcw-bl2':
-+                status = ('OK - RCW/PBL preamble present'
-+                          if '55aa55aa' in head.hex()
-+                          else 'WARN - no 55aa55aa preamble in first 16 bytes')
++                if '55aa55aa' in head.hex():
++                    detail = 'RCW/PBL preamble present'
++                else:
++                    detail = 'WARN: no 55aa55aa preamble in first 16 bytes'
 +            elif name == 'uboot':
 +                flash_uboot = uboot_version_search(
 +                    _read_bytes(f'{SYS_ROOT}/dev/{dev}', 2 * 1024 * 1024))
-+                status = ('OK - %s' % flash_uboot if flash_uboot
-+                          else "WARN - no embedded 'U-Boot 20xx.yy' version found")
++                detail = flash_uboot or 'no embedded version string found'
 +            elif name == 'uboot-env':
-+                state, detail = fw_env_ok()
++                state, err_detail = fw_env_ok()
 +                if state == 'ok':
-+                    status = 'OK - environment CRC valid (fw_printenv)'
++                    detail = 'environment CRC valid'
 +                elif state == 'fail':
-+                    status = 'FAIL - fw_printenv failed - bad CRC or wrong /etc/fw_env.config'
++                    detail = f'FAIL: fw_printenv failed ({err_detail or "bad CRC"})'
 +                    n_fails += 1
 +                else:
-+                    status = 'SKIP - %s' % detail
++                    detail = err_detail or 'CRC probe skipped'
 +            elif name == 'fman-ucode':
 +                qef = qef_decode(flash_head(dev, QEF_LEN) or b'')
 +                if qef:
 +                    flash_ucode = qef['id']
-+                    status = f'OK - QEF ok - "{qef["id"]}" ({qef["length"]} B)'
++                    detail = f'QEF "{qef["id"]}" ({qef["length"]} B)'
 +                else:
-+                    status = 'FAIL - no valid QEF microcode header'
++                    detail = 'FAIL: no valid QEF microcode header'
 +                    n_fails += 1
 +            elif name == 'recovery-dtb':
 +                if head.hex().startswith('d00dfeed'):
 +                    compat = re.search(
 +                        rb'(?:mono|fsl),[ -~]+',
 +                        _read_bytes(f'{SYS_ROOT}/dev/{dev}', 128 * 1024) or b'')
-+                    status = 'OK - valid FDT' + (
++                    detail = 'FDT valid' + (
 +                        f' (compatible: {compat.group().decode()})'
 +                        if compat else '')
 +                else:
-+                    status = 'WARN - FDT magic d00dfeed absent - recovery DTB missing/corrupt'
++                    detail = 'WARN: FDT magic d00dfeed absent'
 +            elif name == 'kernel-initramfs':
 +                if nor_rec_ver:
-+                    status = f'OK - Recovery OS (v{nor_rec_ver})'
++                    detail = f'Recovery OS (v{nor_rec_ver})'
 +                else:
-+                    status = 'OK - %s - recovery kernel (`run recovery` in U-Boot)' % content_sniff(head)
++                    detail = f'{content_sniff(head)} - recovery kernel'
 +            else:
-+                status = '- %s' % content_sniff(head)
-+        rows.append([dev, size_kib, name, status])
-+    render_table(rows, ['MTD', 'Size (KiB)', 'Name', 'Status'], [5, 11, 16, 44])
++                detail = content_sniff(head)
++        rows.append([dev, size_kib, f'{name} ({detail})'])
++    render_table(rows, ['MTD', 'Size (KiB)', 'Partition / Content'], [5, 11, 58])
 +    return True, flash_uboot, flash_ucode, n_fails
 +
 +
@@ -468,44 +468,38 @@ index 000000000..6b1580aa1
 +        qef = qef_decode(data)
 +        if qef:
 +            running = qef['id']
-+            rows.append(['Running microcode', f'"{running}"', 'OK'])
++            rows.append(['Running microcode', f'"{running}"'])
 +            rows.append(['QEF header',
 +                         f'length={qef["length"]} B, layout v{qef["version"]}, '
 +                         f"split-IRAM={qef['split_iram']}, "
-+                         f"microcode count={qef['count']}", '-'])
++                         f"microcode count={qef['count']}"])
 +            rows.append(['SoC code',
 +                         f'model=0x{qef["soc_model"]:04x} rev '
-+                         f'{qef["soc_major"]}.{qef["soc_minor"]}', '-'])
-+            rows.append(['Class', ucode_classify(running),
-+                         'OK' if (running.split()[2].split('.')[0].isdigit()
-+                                  and int(running.split()[2].split('.')[0])
-+                                  >= 210)
-+                         else 'WARN'])
++                         f'{qef["soc_major"]}.{qef["soc_minor"]}'])
++            rows.append(['Class', ucode_classify(running)])
 +            h = hashlib.md5()
 +            maxlen = min(qef['length'], 16 * 1024 * 1024)
 +            h.update(data[:maxlen])
-+            rows.append(['MD5 (first %d B)' % maxlen, h.hexdigest(), '-'])
++            rows.append(['MD5 (first %d B)' % maxlen, h.hexdigest()])
 +        else:
-+            rows.append(['Running microcode', 'invalid QEF header',
-+                         'FAIL - DT fman-firmware present but QEF invalid'])
++            rows.append(['Running microcode',
++                         'FAIL: DT fman-firmware present but QEF invalid'])
 +            n_fails += 1
 +    else:
-+        rows.append(['Running microcode', '-',
-+                     'FAIL - no %s (U-Boot did not inject FMan microcode)'
-+                     % DT_FW])
++        rows.append(['Running microcode',
++                     f'FAIL: no {DT_FW} (U-Boot did not inject FMan microcode)'])
 +        n_fails += 1
 +
 +    if running and flash_ucode:
-+        rows.append(['Flash match',
-+                     'on-flash mtd3: "%s"' % flash_ucode,
-+                     'OK - running matches on-flash' if running == flash_ucode
-+                     else 'WARN - running != on-flash (flash updated; reboot to load)'])
++        match_str = ('matches on-flash mtd3 copy' if running == flash_ucode
++                     else f'differs from on-flash mtd3 (\"{flash_ucode}\")')
++        rows.append(['Flash match', match_str])
 +    elif flash_ucode:
-+        rows.append(['Flash match', 'on-flash: "%s"' % flash_ucode, '-'])
++        rows.append(['Flash match', f'on-flash: "{flash_ucode}"'])
 +    else:
-+        rows.append(['Flash match', '-', 'SKIP - fman-ucode partition not read'])
++        rows.append(['Flash match', 'fman-ucode partition not read'])
 +
-+    render_table(rows, ['Property', 'Value', 'Status'], [20, 38, 22])
++    render_table(rows, ['Property', 'Value'], [20, 56])
 +    return n_fails
 +
 +
