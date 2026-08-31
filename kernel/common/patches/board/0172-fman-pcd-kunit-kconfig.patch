@@ -4,12 +4,8 @@ Date: Sat, 29 Aug 2026 03:07:12 +0000
 Subject: [PATCH] fman_pcd: add CONFIG_FSL_FMAN_PCD_KUNIT_TEST Kconfig entry
  (0172)
 
----
- drivers/net/ethernet/freescale/fman/Kconfig | 17 +++++++++++++++++
- 1 file changed, 17 insertions(+)
-
 diff --git a/drivers/net/ethernet/freescale/fman/Kconfig b/drivers/net/ethernet/freescale/fman/Kconfig
-index aa71ecd..a91e156 100644
+index aa71ecd30..a91e156b1 100644
 --- a/drivers/net/ethernet/freescale/fman/Kconfig
 +++ b/drivers/net/ethernet/freescale/fman/Kconfig
 @@ -66,3 +66,20 @@ config FMAN_PCD_DEBUG_FS
@@ -33,6 +29,25 @@ index aa71ecd..a91e156 100644
 +	  test source compiles out (IS_ENABLED guard in fman_pcd.c).
 +
 +	  If unsure, say N.
--- 
-2.39.5
-
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 46f42a6e4..0dd2d24c6 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2021,6 +2021,8 @@ static const struct file_operations fman_pcd_fe_flow_fops = {
+  * ---------------------------------------------------------------------------
+  */
+ #define FMAN_FE_HASH_SIZE		28	/* t_ExtHashFe: 7 words */
++
++#include "fman-pcd-fe-static-asserts.h"
+ #define FMAN_FE_HASH_CONTEXT_SIZE	256	/* FE_MAX_CONTEXT_SIZE */
+ /* word0 optional flags - 0 while dormant (no aging, no stats). */
+ #define FMAN_FE_HASH_UPDATE_TS		0x00020000
+@@ -3578,3 +3580,8 @@ struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd)
+ {
+ 	return pcd ? &pcd->replic_groups : NULL;
+ }
++
++
++#if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
++#include "tests/fman_pcd_fe_test.c"
++#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */

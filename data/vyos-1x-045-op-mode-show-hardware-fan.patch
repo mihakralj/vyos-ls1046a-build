@@ -1,0 +1,376 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Sat, 29 Aug 2026 21:56:00 +0000
+Subject: [PATCH] op-mode: add 'show hardware fan'
+
+---
+ op-mode-definitions/show-hardware-fan.xml.in |  17 ++
+ src/op_mode/show_hardware_fan.py             | 337 +++++++++++++++++++++++++++
+ 2 files changed, 354 insertions(+)
+diff --git a/op-mode-definitions/show-hardware-fan.xml.in b/op-mode-definitions/show-hardware-fan.xml.in
+new file mode 100644
+index 000000000..20700f7c3
+--- /dev/null
++++ b/op-mode-definitions/show-hardware-fan.xml.in
+@@ -0,0 +1,17 @@
++<?xml version="1.0"?>
++<interfaceDefinition>
++  <node name="show">
++    <children>
++      <node name="hardware">
++        <children>
++          <leafNode name="fan">
++            <properties>
++              <help>Show thermal zones and fan controller status</help>
++            </properties>
++            <command>${vyos_op_scripts_dir}/show_hardware_fan.py</command>
++          </leafNode>
++        </children>
++      </node>
++    </children>
++  </node>
++</interfaceDefinition>
+diff --git a/src/op_mode/show_hardware_fan.py b/src/op_mode/show_hardware_fan.py
+new file mode 100755
+index 000000000..0dc19a42a
+--- /dev/null
++++ b/src/op_mode/show_hardware_fan.py
+@@ -0,0 +1,337 @@
++#!/usr/bin/env python3
++#
++# Copyright (C) VyOS Inc.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License along
++# with this program; if not, write to the Free Software Foundation, Inc.,
++# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++#
++# op-mode: show hardware fan
++#
++# Thermal zone and cooling fan status for the NXP LS1046A Mono Gateway DK.
++#
++# Op-mode layer over the same data /usr/local/bin/fan-check reads:
++#   - the five SoC thermal zones from /sys/class/thermal
++#   - the EMC2305 PWM fan controller from /sys/class/hwmon
++#   - fan-pid's live floor/RPM export from /run/fan-pid/floors
++#
++# Setpoint/critical limits are fan-pid's PI tuning constants (kept in
++# lockstep with board/scripts/fan-pid — see board/scripts/fan-check).
++
++import os
++
++from tabulate import tabulate
++
++# ---------------------------------------------------------------------------
++# Layout constants — MUST mirror board/scripts/fan-pid (kept in lockstep).
++# ---------------------------------------------------------------------------
++# zone type, PI setpoint (degC), force-MAX critical limit (degC)
++ZONES = [
++    ('ddr-thermal',     65.0, 80.0),
++    ('serdes-thermal',  70.0, 85.0),
++    ('fman-thermal',    70.0, 87.0),
++    ('cluster-thermal', 65.0, 85.0),
++    ('sec-thermal',     65.0, 85.0),
++]
++# type-string aliases tolerated across kernels (mainline 6.18 vs SDK 6.6).
++ZONE_ALIASES = {
++    'ddr-thermal':     ('ddr_thermal',),
++    'serdes-thermal':  ('serdes_thermal',),
++    'fman-thermal':    ('fman_thermal',),
++    'cluster-thermal': ('cluster_thermal', 'core_cluster'),
++    'sec-thermal':     ('sec_thermal',),
++}
++HARD_FAULT_TEMP = 100.0
++PWM_MAX = 255
++FLOOR_STATE_FILE = '/run/fan-pid/floors'
++HWMON_NAME = 'emc2305'
++# Test hook: prepend a fake sysfs root (used by the sanity harness only).
++SYS_ROOT = os.environ.get('VYOS_FAN_SYS_ROOT', '')
++
++# fanN -> EMC2305 duty register exported by fan-pid in the floors file.
++FAN_REGS = {1: '0x30', 2: '0x40'}
++
++
++def _read_text(path: str):
++    try:
++        with open(path) as f:
++            return f.read().strip()
++    except OSError:
++        return None
++
++
++def _read_int(path: str):
++    val = _read_text(path)
++    try:
++        return int(val)
++    except (TypeError, ValueError):
++        return None
++
++
++def _read_temp_c(zone_path: str):
++    """MillidegC zone temp -> degC float (1 decimal), or None."""
++    m = _read_int(zone_path)
++    if m is None:
++        return None
++    return round(m / 1000.0, 1)
++
++
++def _is_ls1046a() -> bool:
++    compat = _read_text(f'{SYS_ROOT}/proc/device-tree/compatible')
++    return bool(compat and 'fsl,ls1046a' in compat)
++
++
++def _find_thermal_zones():
++    """Map canonical zone names to their <zone>/temp paths."""
++    found = {}
++    base = f'{SYS_ROOT}/sys/class/thermal'
++    if not os.path.isdir(base):
++        return found
++    for entry in sorted(os.listdir(base)):
++        if not entry.startswith('thermal_zone'):
++            continue
++        zone_dir = f'{base}/{entry}'
++        ztype = _read_text(f'{zone_dir}/type')
++        if ztype is None or not os.path.isfile(f'{zone_dir}/temp'):
++            continue
++        for name, _, _ in ZONES:
++            if ztype == name or ztype in ZONE_ALIASES.get(name, ()):
++                found[name] = f'{zone_dir}/temp'
++                break
++    return found
++
++
++def _find_emc2305():
++    """hwmon dir of the EMC2305 controller, or None."""
++    base = f'{SYS_ROOT}/sys/class/hwmon'
++    if not os.path.isdir(base):
++        return None
++    for entry in sorted(os.listdir(base)):
++        hwmon_dir = f'{base}/{entry}'
++        if _read_text(f'{hwmon_dir}/name') == HWMON_NAME:
++            return hwmon_dir
++    return None
++
++
++def _read_floor_state():
++    """Parse fan-pid's live export.
++
++    Returns (floors, published_rpm, tach_source):
++      floors        {duty-reg: min-run duty}  (0 => unknown)
++      published_rpm {duty-reg: rpm}           (m=1-corrected + boot-sampled)
++      tach_source   'raw-m1' | 'sysfs-m2' | None
++    """
++    floors = {}
++    rpms = {}
++    tach_source = None
++    path = f'{SYS_ROOT}{FLOOR_STATE_FILE}'
++    if not os.path.isfile(path):
++        return floors, rpms, tach_source
++    try:
++        with open(path) as f:
++            lines = f.read().splitlines()
++    except OSError:
++        return floors, rpms, tach_source
++    for line in lines:
++        key, sep, val = line.partition('=')
++        if not sep:
++            continue
++        if key in ('0x30', '0x40'):
++            try:
++                floors[key] = int(val)
++            except ValueError:
++                pass
++        elif key.startswith('rpm:'):
++            try:
++                rpms[key[4:]] = int(val)
++            except ValueError:
++                pass
++        elif key == 'tach_source':
++            tach_source = val
++    return floors, rpms, tach_source
++
++
++def _classify_zone(temp: float, setpoint: float, crit: float) -> str:
++    if temp >= HARD_FAULT_TEMP or temp >= crit:
++        return 'crit'
++    if temp >= setpoint:
++        return 'hot'
++    if temp >= setpoint - 5:
++        return 'warm'
++    return 'cool'
++
++
++def _fan_state(exists, fault, pwm, rpm, floor) -> str:
++    """One-word EMC2305 channel state, mirroring fan-check's classification.
++
++    Order matters: an absent channel has nothing to classify; electrical
++    drive-fail wins over everything else; below the learned min-run floor a
++    zero tach reading is expected (BLIND channel, not a stall); at/above the
++    floor zero tach pulses indicate a dead, stalled or missing fan. A
++    boot-published floor of 255 means fan-pid never detected the fan at
++    spin-up (no tach feedback).
++    """
++    if not exists:
++        return 'missing'
++    if fault == 1:
++        return 'fault'
++    if pwm is None:
++        return 'read-error'
++    if pwm == 0:
++        return 'off'
++    # Zero-tach classifications take precedence over the duty-level ones:
++    # an absent fan is held at MAX by fan-pid (floor published as 255), so
++    # duty==255 alone must not read as 'max'.
++    if rpm == 0:
++        if floor == PWM_MAX:
++            return 'missing'
++        if floor and pwm >= floor:
++            return 'stalled'
++        if floor and pwm < floor:
++            return 'blind'
++        return 'no-tach'
++    if pwm >= PWM_MAX:
++        return 'max'
++    return 'running'
++
++
++def show_thermal_zones(zones_found, floors, rpms, tach_source):
++    rows = []
++    for name, setpoint, crit in ZONES:
++        zone_path = zones_found.get(name)
++        if zone_path is None:
++            rows.append([name, '-', 'missing', f'{setpoint:.0f}', f'{crit:.0f}'])
++            continue
++        temp = _read_temp_c(zone_path)
++        if temp is None:
++            rows.append([name, '-', 'unreadable', f'{setpoint:.0f}', f'{crit:.0f}'])
++            continue
++        rows.append([name, f'{temp:.1f}', _classify_zone(temp, setpoint, crit),
++                     f'{setpoint:.0f}', f'{crit:.0f}'])
++
++    print('Thermal zones (setpoint/critical from fan-pid PI tuning):')
++    print(tabulate(rows, headers=['Zone', 'Temp (degC)', 'State',
++                                  'Setpoint (degC)', 'Critical (degC)'],
++                   tablefmt='simple'))
++
++
++def show_fans(hwmon, floors, rpms, tach_source):
++    rows = []
++    for fan_num in (1, 2):
++        reg = FAN_REGS[fan_num]
++        label = f'fan{fan_num}'
++
++        pwm_path = f'{hwmon}/pwm{fan_num}' if hwmon else ''
++        rpm_path = f'{hwmon}/fan{fan_num}_input' if hwmon else ''
++        fault_path = f'{hwmon}/fan{fan_num}_fault' if hwmon else ''
++
++        pwm = _read_int(pwm_path) if os.path.isfile(pwm_path) else None
++        fault = _read_int(fault_path) if os.path.isfile(fault_path) else None
++        floor = floors.get(reg, 0)
++
++        # A channel without pwm+tach attributes does not exist in silicon.
++        exists = pwm_path and rpm_path and \
++            os.path.isfile(pwm_path) and os.path.isfile(rpm_path)
++
++        # RPM: prefer fan-pid's published sample (corrected for the m=1
++        # RANGE=500 tach mode); trust sysfs only when the daemon is not in
++        # raw-m1 mode (sysfs then reads 2x the true speed).
++        rpm = rpms.get(reg)
++        if rpm is None and exists and tach_source != 'raw-m1':
++            rpm = _read_int(rpm_path)
++
++        if not exists:
++            rows.append([label, '-', '-', '-', '-', '-', 'missing'])
++            continue
++
++        duty = pwm if pwm is not None else '-'
++        pct = round(pwm * 100 / PWM_MAX) if pwm is not None else '-'
++        rpm_disp = rpm if rpm is not None else '-'
++        floor_disp = floor if floor else '?'
++        state = _fan_state(exists, fault, pwm, rpm, floor)
++        rows.append([label, duty, f'{pct}', rpm_disp, floor_disp, PWM_MAX, state])
++
++    print('\nFan controller (EMC2305):')
++    print(tabulate(rows, headers=['Fan', 'Duty', '%', 'RPM',
++                                  'Min', 'Max', 'State'],
++                   tablefmt='simple'))
++    if hwmon is None:
++        print('\nEMC2305 hwmon entry not found — check i2c bus / driver bind.')
++
++
++def show(raw: bool):
++    if not _is_ls1046a():
++        print('This platform is not the NXP LS1046A Mono Gateway DK; '
++              'no fan controller to report.')
++        return 0
++
++    zones_found = _find_thermal_zones()
++    hwmon = _find_emc2305()
++    floors, rpms, tach_source = _read_floor_state()
++
++    if not raw:
++        print('Fan and thermal status')
++        print('=====================')
++
++        show_thermal_zones(zones_found, floors, rpms, tach_source)
++        show_fans(hwmon, floors, rpms, tach_source)
++        return 0
++
++    result = {'zones': [], 'fans': []}
++    for name, setpoint, crit in ZONES:
++        zone_path = zones_found.get(name)
++        temp = _read_temp_c(zone_path) if zone_path else None
++        result['zones'].append({
++            'zone': name,
++            'temp_c': temp,
++            'state': _classify_zone(temp, setpoint, crit)
++                     if temp is not None else 'missing',
++            'setpoint_c': setpoint,
++            'critical_c': crit,
++        })
++    for fan_num in (1, 2):
++        reg = FAN_REGS[fan_num]
++        pwm_path = f'{hwmon}/pwm{fan_num}' if hwmon else ''
++        rpm_path = f'{hwmon}/fan{fan_num}_input' if hwmon else ''
++        fault_path = f'{hwmon}/fan{fan_num}_fault' if hwmon else ''
++        exists = bool(hwmon and os.path.isfile(pwm_path)
++                      and os.path.isfile(rpm_path))
++        pwm = _read_int(pwm_path) if exists else None
++        fault = _read_int(fault_path) if exists else None
++        rpm = rpms.get(reg)
++        if rpm is None and exists and tach_source != 'raw-m1':
++            rpm = _read_int(rpm_path)
++        result['fans'].append({
++            'fan': f'fan{fan_num}',
++            'exists': exists,
++            'duty': pwm,
++            'rpm': rpm,
++            'min_duty': floors.get(reg, 0),
++            'max_duty': PWM_MAX,
++            'state': _fan_state(exists, fault, pwm, rpm, floors.get(reg, 0)),
++        })
++    import json
++    print(json.dumps(result, indent=2))
++    return 0
++
++
++def main():
++    # op-mode scripts may receive arbitrary CLI arguments (e.g. '--help').
++    # fan has no subcommands; accept 'raw' for machine-readable use.
++    import sys
++    raw = len(sys.argv) > 1 and sys.argv[1] == 'raw'
++    raise SystemExit(show(raw=raw))
++
++
++if __name__ == '__main__':
++    main()
+\ No newline at end of file

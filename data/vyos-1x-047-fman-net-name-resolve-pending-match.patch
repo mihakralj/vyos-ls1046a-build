@@ -1,0 +1,103 @@
+From ce292d3aab8bf523b2174465439fb18f5d5d8c8f Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 31 Aug 2026 01:16:16 +0000
+Subject: [PATCH] temp: vyos-1x-047-fman-net-name-resolve-pending-match.patch
+
+---
+ src/system/vyos-net-name-resolve.py | 66 ++++++++++++++++++++++++++++-
+ 1 file changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/src/system/vyos-net-name-resolve.py b/src/system/vyos-net-name-resolve.py
+index 5b1f36533..c2840c10e 100755
+--- a/src/system/vyos-net-name-resolve.py
++++ b/src/system/vyos-net-name-resolve.py
+@@ -32,6 +32,7 @@
+ import json
+ import logging
+ import logging.handlers
++import os
+ import re
+ import tempfile
+ import time
+@@ -378,6 +379,63 @@ def unmatched_candidates(configured: dict, current: dict, existing_plan: dict) -
+             if mac not in configured]
+ 
+ 
++def get_fman_predefined(intf_name: str) -> str:
++    """NXP LS1046A (Mono Gateway DK): FMan MACs probe in DT unit-address
++    order, which does not match the physical front-panel port order. Map
++    the netdev's FMan MAC of_node to the canonical physical name so this
++    board's ports are identified deterministically, from a fixed hardware
++    property rather than probe order: eth0/eth1/eth2 = left/center/right
++    RJ45, eth3/eth4 = left/right SFP+. Returns '' on any other hardware,
++    or for any interface whose of_node isn't a known FMan MAC.
++    """
++    try:
++        with open('/proc/device-tree/compatible', 'rb') as f:
++            if b'fsl,ls1046a' not in f.read():
++                return ''
++    except OSError:
++        return ''
++    fman_map = {
++        'ethernet@e8000': 'eth0',  # FMan MAC5,  left RJ45
++        'ethernet@ea000': 'eth1',  # FMan MAC6,  center RJ45
++        'ethernet@e2000': 'eth2',  # FMan MAC2,  right RJ45
++        'ethernet@f0000': 'eth3',  # FMan MAC9,  left SFP+
++        'ethernet@f2000': 'eth4',  # FMan MAC10, right SFP+
++    }
++    try:
++        of_node = os.path.basename(
++            os.path.realpath(f'/sys/class/net/{intf_name}/device/of_node')
++        )
++    except OSError:
++        return ''
++    return fman_map.get(of_node, '')
++
++
++def match_fman_pending_nodes(pending: dict, candidates: list) -> dict:
++    """NXP LS1046A (Mono Gateway DK): resolve pending ethernet nodes by
++    physical port identity instead of match_pending_nodes()'s "exactly one
++    pending node and one candidate" ambiguity guard. This board always
++    presents all 5 physical ports at once, so that guard can never fire
++    here - every boot with an unpopulated hw-id sees 5 pending nodes and 5
++    candidates, never "exactly one" - even though there is nothing
++    ambiguous about it: get_fman_predefined() identifies each candidate's
++    physical port from its FMan MAC's DT of_node, a fixed hardware
++    property, not a probe-order artifact.
++
++    Returns {mac: node_name} for every candidate whose deterministic port
++    name is one of the pending ethernet nodes.
++    """
++    ethernet_pending = pending.get('ethernet', set())
++    if not ethernet_pending:
++        return {}
++
++    matched = {}
++    for mac, name in candidates:
++        target = get_fman_predefined(name)
++        if target and target in ethernet_pending:
++            matched[mac] = target
++    return matched
++
++
+ def match_pending_nodes(pending: dict, candidates: list) -> dict:
+     """Match this boot's unconfigured candidates to pending (hw-id-less)
+     config nodes, one type (ethernet/wireless) at a time. Conservative by
+@@ -660,7 +718,13 @@ def main():
+         # orphaning that config - only when unambiguous, see
+         # match_pending_nodes()
+         candidates = unmatched_candidates(configured, current, plan)
+-        reclaimed = match_pending_nodes(pending, candidates)
++        reclaimed = match_fman_pending_nodes(pending, candidates)
++        leftover_pending = {
++            'ethernet': pending.get('ethernet', set()) - set(reclaimed.values()),
++            'wireless': pending.get('wireless', set()),
++        }
++        leftover_candidates = [c for c in candidates if c[0] not in reclaimed]
++        reclaimed.update(match_pending_nodes(leftover_pending, leftover_candidates))
+         candidate_by_mac = dict(candidates)
+         for mac, target in reclaimed.items():
+             name = candidate_by_mac[mac]
+-- 
+2.39.5
+

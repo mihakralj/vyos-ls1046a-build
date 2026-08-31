@@ -21,12 +21,22 @@ adjacencies) not O(flows). Both symbols are EXPORT_SYMBOL_GPL and dormant
 in-tree (the ask.ko CC consumer that embeds the handle lands in R3/R4).
 
 Signed-off-by: vyos-ls1046a-build CI <ci@local>
+
+2026-08-30 (fold): re-derived against the true post-0121 state. The prior
+version anchored the new block on a repeated "M3-3c stub: HM (Header
+Manipulation) API." heading appearing a second time near EOF; only one
+copy of that heading exists in this series' dpaa_fman_caps.c (the section
+opener, well before fman_hm_nexthop_put), so the hunk never applied from
+a clean checkout. Same content, inserted directly after
+EXPORT_SYMBOL_GPL(fman_hm_nexthop_put) and before MODULE_LICENSE (the
+actual end of file). Verified against a pristine linux-6.18.44 +
+0068..0121 baseline, extracted fresh, not an already-patched dev tree.
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-index 6c0efff..56ee0e0 100644
+index 457e97c3c..f93b78989 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-@@ -765,6 +765,158 @@ int fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle)
+@@ -769,5 +769,157 @@ int fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle)
  }
  EXPORT_SYMBOL_GPL(fman_hm_nexthop_put);
  
@@ -182,14 +192,14 @@ index 6c0efff..56ee0e0 100644
 +EXPORT_SYMBOL_GPL(fman_hm_vlan_put);
 +
 +
- 
- /* ------------------------------------------------------------------ *
-  * M3-3c stub: HM (Header Manipulation) API.
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
+\ No newline at end of file
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index e54381a..2f757ab 100644
+index 010198159..76601bab3 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-@@ -369,6 +369,20 @@ int  fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
+@@ -385,6 +385,20 @@ int  fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
   */
  int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
  

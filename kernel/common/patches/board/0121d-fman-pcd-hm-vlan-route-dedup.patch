@@ -20,14 +20,20 @@ VLAN-only builder for bridged flows.  Symbols are exported but dormant until
 R4b/R4c wire the CC consumer.
 
 Signed-off-by: vyos-ls1046a-build CI <ci@local>
+
+2026-08-30 (fold): re-derived against the true post-0121c state, same
+repeated-heading anchor issue as 0121a (see its fold note). Inserted
+directly after EXPORT_SYMBOL_GPL(fman_hm_vlan_put) and before
+MODULE_LICENSE. Verified against a pristine linux-6.18.44 + 0068..0121c
+baseline, extracted fresh, not an already-patched dev tree.
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-index c9f645f..6255f71 100644
+index f93b78989..f1f34d3a7 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-@@ -664,6 +664,198 @@ int fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle)
+@@ -920,6 +920,196 @@ int fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle)
+ }
  EXPORT_SYMBOL_GPL(fman_hm_vlan_put);
- 
  
 +/* ------------------------------------------------------------------ *
 + * VLAN+route HM dedup (T-M6-8 R4a): one shared HMTD that does BOTH the
@@ -219,13 +225,12 @@ index c9f645f..6255f71 100644
 +	return err;
 +}
 +EXPORT_SYMBOL_GPL(fman_hm_vlan_route_put);
-+
-+
  
- /* ------------------------------------------------------------------ *
-  * M3-3d stub: Policer (srTCM/trTCM) API.
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
+\ No newline at end of file
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index 76601ba..9de68d4 100644
+index 76601bab3..9de68d4a3 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 @@ -399,6 +399,29 @@ int  fman_hm_vlan_get(struct fman *fm, u8 port_id, bool is_push,

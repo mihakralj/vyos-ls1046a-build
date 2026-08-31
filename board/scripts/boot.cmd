@@ -15,6 +15,15 @@ echo ""
 
 # --- Load kernel, DTB, initrd from FAT32 USB ---
 
+# ramdisk_addr_r is not defined in this board's U-Boot environment, so it
+# must be set here — an unset var expands to empty, silently breaking the
+# fatload below (prints usage instead of loading) and leaving booti to
+# boot whatever stale data is left in RAM as the ramdisk. Address chosen
+# clear of kernel_addr_r (0x82000000), fdt_addr_r (0x88000000), and
+# kernel_comp_addr_r/kernel_comp_size (0x90000000-0x91600000, kernel
+# decompression scratch — see AGENTS.md).
+setenv ramdisk_addr_r 0xa4000000
+
 usb start
 fatload usb 0:2 ${kernel_addr_r} live/vmlinuz
 fatload usb 0:2 ${fdt_addr_r} mono-gw.dtb

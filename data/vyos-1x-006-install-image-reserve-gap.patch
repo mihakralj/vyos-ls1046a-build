@@ -1,65 +1,165 @@
-From 9887af6efa640e0fee5a25e8cec3d81a329863f7 Mon Sep 17 00:00:00 2001
+From b271f4b8f6c0d70cd1cf4fb0491f1103a15d18c2 Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
 Date: Mon, 20 Jul 2026 03:56:42 +0000
 Subject: [PATCH] temp: vyos-1x-006-install-image-reserve-gap.patch
 
 ---
- python/vyos/system/disk.py     | 76 ++++++++++++++++++++++++++++------
- src/op_mode/image_installer.py |  9 ++++
- 2 files changed, 72 insertions(+), 13 deletions(-)
+ python/vyos/system/disk.py     | 176 ++++++++++++++++++++++++++++++---
+ src/op_mode/image_installer.py |  33 ++++++-
+ 2 files changed, 196 insertions(+), 13 deletions(-)
 
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 359afa2..fde330e 100644
+index 359afa2aa..5cfae8353 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,9 @@
  
  from json import loads as json_loads
  from os import sync
 +from os.path import basename as _basename
++import struct
++import zlib
  from dataclasses import dataclass
  from time import sleep
  
-@@ -30,6 +31,20 @@ class DiskDetails:
+@@ -30,6 +33,115 @@ class DiskDetails:
      partition: dict[str, str]
  
  
-+# LS1046A eMMC: first 32 MiB reserved for NXP firmware (U-Boot, RCW, PBI).
++# LS1046A eMMC: first 64 MiB reserved for NXP firmware (U-Boot, RCW, PBI, recovery).
 +# Partitions must start AFTER this zone. The GPT structures themselves
-+# (protective MBR at LBA 0, GPT header at LBA 1, partition entries at
-+# LBAs 2-33) live within this zone — sgdisk -Z writes them safely.
-+_FIRMWARE_RESERVED_SECTORS = 65536   # 32 MiB / 512 bytes per sector
-+_BIOS_BOOT_START           = 65536   # sector (32 MiB)
-+_BIOS_BOOT_END             = 67583   # sector (32 MiB + 1 MiB - 1)
-+_EFI_START                 = 67584   # sector (33 MiB)
++# (protective MBR at LBA 0, GPT header at LBA 1, 4 partition entries at
++# LBA 2) occupy 1.5 KiB, safely below the 4 KiB firmware start (LBA 8).
++_FIRMWARE_RESERVED_SECTORS = 131072  # 64 MiB / 512 bytes per sector
++_BIOS_BOOT_START           = 131072  # sector (64 MiB)
++_BIOS_BOOT_END             = 133119  # sector (64 MiB + 1 MiB - 1)
++_EFI_START                 = 133120  # sector (65 MiB)
++
 +
 +def _is_emmc(drive_path: str) -> bool:
 +    """Return True if drive_path is an eMMC device (mmcblk)."""
 +    return 'mmcblk' in _basename(drive_path)
 +
 +
++def gpt_probe(drive_path: str) -> dict:
++    """Probe a block device for GPT presence, validity, and entry table size."""
++    try:
++        with open(drive_path, 'rb') as f:
++            mbr = f.read(512)
++            if len(mbr) < 512 or mbr[510:512] != b'\x55\xaa':
++                return {'present': False, 'reason': 'Invalid MBR signature'}
++            hdr = bytearray(f.read(512))
++            if len(hdr) < 512 or hdr[:8] != b'EFI PART':
++                return {'present': False, 'reason': 'No EFI PART signature'}
++            hdr_size = struct.unpack_from('<I', hdr, 12)[0]
++            hdr_crc = struct.unpack_from('<I', hdr, 16)[0]
++            my_lba = struct.unpack_from('<Q', hdr, 24)[0]
++            alt_lba = struct.unpack_from('<Q', hdr, 32)[0]
++            first_usable = struct.unpack_from('<Q', hdr, 40)[0]
++            last_usable = struct.unpack_from('<Q', hdr, 48)[0]
++            entry_lba = struct.unpack_from('<Q', hdr, 72)[0]
++            num_entries = struct.unpack_from('<I', hdr, 80)[0]
++            entry_size = struct.unpack_from('<I', hdr, 84)[0]
++            entries_crc = struct.unpack_from('<I', hdr, 88)[0]
++            struct.pack_into('<I', hdr, 16, 0)
++            calc_hdr_crc = zlib.crc32(hdr[:hdr_size]) & 0xFFFFFFFF
++            if calc_hdr_crc != hdr_crc:
++                return {'present': True, 'valid': False, 'reason': 'Header CRC mismatch'}
++            f.seek(entry_lba * 512)
++            table_size = num_entries * entry_size
++            entries = f.read(table_size)
++            if len(entries) < table_size:
++                return {'present': True, 'valid': False, 'reason': 'Truncated partition table'}
++            calc_entries_crc = zlib.crc32(entries) & 0xFFFFFFFF
++            if calc_entries_crc != entries_crc:
++                return {'present': True, 'valid': False, 'reason': 'Entries CRC mismatch'}
++            gpt_footprint_bytes = (entry_lba * 512) + table_size
++            # Track the lowest first_lba among in-use entries (non-zero type
++            # GUID). A shrunk-but-valid GPT is only safe to retain on eMMC if
++            # every partition it describes actually starts at/after the
++            # firmware zone - a valid, correctly-sized table can still
++            # describe partitions that overlap firmware (e.g. written by a
++            # different tool/board layout).
++            min_partition_lba = None
++            for i in range(num_entries):
++                entry = entries[i * entry_size:(i + 1) * entry_size]
++                if len(entry) < 40 or entry[0:16] == b'\x00' * 16:
++                    continue
++                first_lba = struct.unpack_from('<Q', entry, 32)[0]
++                if min_partition_lba is None or first_lba < min_partition_lba:
++                    min_partition_lba = first_lba
++            return {
++                'present': True,
++                'valid': True,
++                'num_entries': num_entries,
++                'entry_size': entry_size,
++                'table_size_bytes': table_size,
++                'gpt_footprint_bytes': gpt_footprint_bytes,
++                'is_shrunk': gpt_footprint_bytes <= 4096,
++                'min_partition_lba': min_partition_lba,
++                'partitions_clear_firmware': (
++                    min_partition_lba is None
++                    or min_partition_lba >= _BIOS_BOOT_START
++                ),
++                'my_lba': my_lba,
++                'alt_lba': alt_lba,
++                'first_usable': first_usable,
++                'last_usable': last_usable,
++            }
++    except Exception as e:
++        return {'present': False, 'error': str(e)}
++
++
++def gpt_repair(drive_path: str) -> None:
++    """Repair and mirror GPT table to the backup position at the end of the disk."""
++    run(f'sgdisk -e {drive_path}')
++    sync()
++    run(f'partx -u {drive_path}')
++
++
++def from_drive(drive_path: str) -> DiskDetails:
++    """Return DiskDetails for an existing partitioned drive."""
++    partitions: list[str] = partition_list(drive_path)
++    efi_part = next((x for x in partitions if x.endswith('2')), None)
++    root_part = next((x for x in partitions if x.endswith('3')), None)
++    if efi_part is None or root_part is None:
++        raise OSError(
++            f'Cannot detect partitions on {drive_path}: '
++            f'found {partitions} (expected EFI=*2, root=*3)')
++    return DiskDetails(
++        name=drive_path,
++        partition={
++            'efi': efi_part,
++            'root': root_part,
++        }
++    )
++
++
  def disk_cleanup(drive_path: str) -> None:
      """Clean up disk partition table (MBR and GPT)
      Remove partition and device signatures.
-@@ -42,8 +57,15 @@ def disk_cleanup(drive_path: str) -> None:
+@@ -42,8 +154,18 @@ def disk_cleanup(drive_path: str) -> None:
      partitions: list[str] = partition_list(drive_path)
      for partition in partitions:
          run(f'wipefs -af {partition}')
 -    run(f'wipefs -af {drive_path}')
 -    run(f'sgdisk -Z {drive_path}')
 +    if _is_emmc(drive_path):
-+        # eMMC: sgdisk -Z writes GPT structures (protective MBR + header
-+        # + partition entries) at LBA 0-33, within the 32 MiB firmware
-+        # zone.  sgdisk -o refuses on MBR-only disks ("Non-GPT disk;
-+        # not saving changes"); -Z always works.
-+        run(f'sgdisk -Z {drive_path}')
++        # eMMC: restrict wipefs to the dos/gpt signatures at LBA 0-1 and the
++        # backup GPT at the end of the disk. A bare 'wipefs -af' also probes
++        # ~20 other filesystem/RAID/LVM/crypto magic offsets across the whole
++        # device, which could land inside the firmware zone (4 KiB-64 MiB) and
++        # erase bytes that coincidentally match one of them. Do NOT run
++        # sgdisk -Z here either, as it zeroes 34 sectors (17 KiB), clobbering
++        # the eMMC firmware at 4 KiB (LBA 8).
++        run(f'wipefs -af -t dos -t gpt {drive_path}')
 +    else:
 +        run(f'wipefs -af {drive_path}')
 +        run(f'sgdisk -Z {drive_path}')
  
  
  def find_persistence() -> str:
-@@ -69,25 +91,46 @@ def parttable_create(drive_path: str, root_size: int) -> None:
+@@ -69,25 +191,48 @@ def parttable_create(drive_path: str, root_size: int) -> None:
      Args:
          drive_path (str): path to a drive
      """
@@ -70,17 +170,19 @@ index 359afa2..fde330e 100644
 +    # must not produce '++100%K' - we construct the arg explicitly.
 +    if root_size == 0 or not root_size:
 +        p3_end = '0'
-+    else:
-+        p3_end = f'+{root_size}K'
-+    if _is_emmc(drive_path):
-+        # LS1046A eMMC: partitions start after 32 MiB firmware zone.
-+        command = f'sgdisk -a1 -n1:{_BIOS_BOOT_START}:{_BIOS_BOOT_END} -t1:EF02 \
-+            -n2:{_EFI_START}:+256M -t2:EF00 \
-+            -n3:0:0 -t3:8300 {drive_path}'
      else:
 -        root_size_text: str = str(root_size)
 -    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
 -        -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
++        p3_end = f'+{root_size}K'
++    if _is_emmc(drive_path):
++        # LS1046A eMMC: partitions start after 64 MiB firmware zone.
++        # -S 4 restricts the partition table to 4 entries (occupies only LBA 2, 512B),
++        # keeping the entire primary GPT below the 4 KiB (LBA 8) eMMC firmware offset.
++        command = f'sgdisk -o -S 4 -a1 -n1:{_BIOS_BOOT_START}:{_BIOS_BOOT_END} -t1:EF02 \
++            -n2:{_EFI_START}:+256M -t2:EF00 \
++            -n3:0:0 -t3:8300 {drive_path}'
++    else:
 +        command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
 +            -n3:0:{p3_end} -t3:8300 {drive_path}'
  
@@ -114,7 +216,7 @@ index 359afa2..fde330e 100644
          }
      )
  
-@@ -128,11 +171,18 @@ def from_partition(partition_path: str) -> DiskDetails:
+@@ -128,11 +273,18 @@ def from_partition(partition_path: str) -> DiskDetails:
      drive_path: str = partition_parent(partition_path)
      partitions: list[str] = partition_list(drive_path)
  
@@ -135,20 +237,49 @@ index 359afa2..fde330e 100644
          }
      )
  
-@@ -171,7 +221,7 @@ def partition_mount(partition: str,
-     """
-     if fsype in ['squashfs', 'iso9660']:
-         command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
--    if fsype == 'overlay' and overlay_params:
-+    elif fsype == 'overlay' and overlay_params:
-         command: str = f'mount -t overlay -o noatime,\
-             upperdir={overlay_params["upperdir"]},\
-             lowerdir={overlay_params["lowerdir"]},\
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index ea5aed0..fdb80df 100755
+index fb28f182e..876c6358c 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -1034,6 +1034,10 @@ def install_image() -> None:
+@@ -131,7 +131,7 @@
+ CONST_MIN_DISK_SIZE: int = 2147483648  # 2 GB
+ CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
+ # a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
+-CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
++CONST_RESERVED_SPACE: int = (64 + 1 + 256) * 1024**2
+ 
+ # define directories and paths
+ DIR_CONFIG: str = directories['config']
+@@ -238,6 +238,28 @@ def create_partitions(target_disk: str, target_size: int,
+         target_disk (str): a target disk
+         target_size (int): size of disk in bytes
+     """
++    if disk._is_emmc(target_disk):
++        probe = disk.gpt_probe(target_disk)
++        if (probe.get('present') and probe.get('valid') and probe.get('is_shrunk')
++                and probe.get('partitions_clear_firmware')):
++            print(f'Found valid 4 KB shrunk GPT partition table on {target_disk}.')
++            if ask_yes_no('Retain existing partition table and eMMC firmware?', default=False):
++                print('Repairing/syncing backup GPT to end of disk...')
++                disk.gpt_repair(target_disk)
++                try:
++                    return disk.from_drive(target_disk)
++                except Exception as e:
++                    print(f'Warning: Could not read existing partitions ({e}), recreating...')
++        elif probe.get('present'):
++            if not probe.get('valid'):
++                print(f'Existing GPT table on {target_disk} is corrupt.')
++            elif not probe.get('is_shrunk'):
++                print(f'Existing GPT table on {target_disk} exceeds 4 KB ({probe.get("num_entries")} entries).')
++            elif not probe.get('partitions_clear_firmware'):
++                print(f'Existing GPT table on {target_disk} has a partition starting at '
++                      f'LBA {probe.get("min_partition_lba")}, inside the firmware zone.')
++            print('Creating a new 4 KB shrunk GPT partition table...')
++
+     # define target rootfs size in KB (smallest unit acceptable by sgdisk)
+     available_size: int = (target_size - CONST_RESERVED_SPACE) // 1024
+     if prompt:
+@@ -1060,6 +1082,10 @@ def install_image() -> None:
          for file in Path(DIR_KERNEL_SRC).iterdir():
              if file.is_file():
                  copy(file, f'{DIR_DST_ROOT}/boot/{image_name}/')
@@ -159,7 +290,7 @@ index ea5aed0..fdb80df 100755
          copy(FILE_ROOTFS_SRC,
               f'{DIR_DST_ROOT}/boot/{image_name}/{image_name}.squashfs')
  
-@@ -1312,6 +1316,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+@@ -1403,6 +1429,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
          copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
               f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
  
