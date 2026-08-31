@@ -65,6 +65,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
  1 file changed, 17 insertions(+), 5 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 40984d9eb..057ecdb00 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 @@ -46,8 +46,10 @@
@@ -78,7 +79,54 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c 
  
  /*
   * mac_dev->port[] is indexed by dpaa_eth.c's file-local
-@@ -521,7 +523,11 @@ priv->xsk_pool_attach_fail++;
+@@ -224,6 +226,17 @@ if (unlikely(!base || !cnt || !priv->xsk_chunk_dma_idx[band]))
+ return false;
+ 
+ hit = bsearch(&dma, base, cnt, sizeof(*base), dpaa_xsk_dma_cmp);
++	if (unlikely(!hit)) {
++		static int _f115_n;
++		if (_f115_n < 8) {
++			_f115_n++;
++			pr_err("F-115 recover-miss: fd_dma=0x%llx band=%u cnt=%u base[0]=0x%llx base[cnt-1]=0x%llx delta0=%lld\n",
++			       (unsigned long long)dma, band, cnt,
++			       (unsigned long long)base[0],
++			       (unsigned long long)base[cnt-1],
++			       (long long)((s64)dma - (s64)base[0]));
++		}
++	}
+ if (!hit)
+ return false;
+ 
+@@ -271,8 +284,17 @@ priv->xsk_chunk_dma_idx[band] = NULL;
+ return;
+ }
+ 
++dev_info_ratelimited(priv->net_dev->dev.parent,
++
++	"F-115 build: band=%u cnt=%u pool_headroom=%u first_head_dma=0x%llx\n",
++
++	band, cnt, pool->headroom,
++
++	(unsigned long long)pool->heads[0].dma);
++
++
+ for (i = 0; i < cnt; i++) {
+-priv->xsk_chunk_dma[band][i]     = pool->heads[i].dma;
++priv->xsk_chunk_dma[band][i]     = xsk_buff_xdp_get_dma(&pool->heads[i].xdp); /* F-115 v4: use xsk_buff_xdp_get_dma to get real DMA address */
+ priv->xsk_chunk_dma_idx[band][i] = i;
+ }
+ 
+@@ -474,7 +496,8 @@ struct bman_pool *bpool;
+ int ret;
+ u32 seeded, batch, n, i;
+ 
+-if (!priv || !pool)
++pr_err("ZCBIND: af_xdp_pool_attach ENTER pool=%px qid=%u\n", pool, queue_id);
++	if (!priv || !pool)
+ return -EINVAL;
+ 
+ ndev = priv->net_dev;
+@@ -521,7 +544,11 @@ priv->xsk_pool_attach_fail++;
  return -ENODEV;
  }
  
@@ -91,7 +139,33 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c 
  if (!rxp) {
  priv->xsk_pamu_window_fail++;
  priv->xsk_pool_attach_fail++;
-@@ -803,6 +809,15 @@ xsk_pool_set_rxq_info(pool, &priv->xsk_zc_rxq[queue_id]);
+@@ -545,6 +572,7 @@ return -ENODEV;
+ ret = xsk_pool_dma_map(pool, priv->rx_dma_dev,
+ 			       DMA_ATTR_SKIP_CPU_SYNC);
+ 	if (ret) {
++		pr_err("ZCBIND: af_xdp_pool_attach FAIL: xsk_pool_dma_map ret=%d\n", ret);
+ 		priv->xsk_dma_map_fail++;
+ 		priv->xsk_pool_attach_fail++;
+ 		return -EFAULT;
+@@ -558,6 +586,7 @@ ret = xsk_pool_dma_map(pool, priv->rx_dma_dev,
+ 	 */
+ 	bpool = bman_new_pool();
+ 	if (!bpool) {
++		pr_err("ZCBIND: af_xdp_pool_attach FAIL: bman_new_pool ENOMEM\n");
+ 		ret = -ENOMEM;
+ 		priv->xsk_pool_attach_fail++;
+ 		goto err_unmap;
+@@ -709,7 +738,8 @@ WRITE_ONCE(priv->qmap[queue_id].napi, &pcpu->np.napi);
+ WRITE_ONCE(priv->qmap[queue_id].cpu, target_cpu);
+ }
+ 
+-priv->xsk_pool_attach_ok++;
++pr_err("ZCBIND: af_xdp_pool_attach OK pool=%px bpid=%u\n", pool, priv->xsk_bpid[queue_id]);
++	priv->xsk_pool_attach_ok++;
+ 
+ /*
+  * M3-3 step 7 sub-increment 2 (patch 0094): true-ZC RX arm
+@@ -803,6 +833,15 @@ xsk_pool_set_rxq_info(pool, &priv->xsk_zc_rxq[queue_id]);
   */
  if (rxp) {
  int wret;
@@ -107,7 +181,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c 
  
  wret = fman_port_disable(rxp);
  if (!wret) {
-@@ -949,7 +964,9 @@ if (!priv->mac_dev || !priv->mac_dev->port[DPAA_MAC_PORT_RX]) {
+@@ -949,7 +988,9 @@ if (!priv->mac_dev || !priv->mac_dev->port[DPAA_MAC_PORT_RX]) {
   * touching FMan but still tear down the rest. */
  rxp = NULL;
  } else {
@@ -118,5 +192,3 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c 
  }
  
  /* Step 1: hide the pool pointer from new readers. */
--- 
-2.39.5

@@ -1,17 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Copilot <223556219+Copilot@users.noreply.github.com>
-Date: Mon, 16 Jun 2026 00:00:00 +0000
-Subject: [PATCH] fman_pcd: FE-VM increment 3 - per-flow ehash insertion
-
- arch/fman-fe-ehash.md section 5: CRC64 bucket indexer + 256-byte DDR
- flow-record head-insert linking a classified 5-tuple to its ENQ FE.
- Ships DORMANT; forward (add) + inverse (LIFO drain) in one patch.
-
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 235beb1..d8a080d 100644
+index 97bb729fd..286f24b1d 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -1346,8 +1346,12 @@ struct fman_pcd_ehash_table {
+@@ -1368,8 +1368,12 @@ struct fman_pcd_ehash_table {
  	u8 hash_shift;
  	u8 hash_mask_bits;		/* ii = log2(mask + 1) */
  	u32 ad[4];			/* en_exthash_node DDR template */
@@ -24,7 +15,7 @@ index 235beb1..d8a080d 100644
  /* Lazily reserve the per-PCD internal-buffer-management MURAM pool. */
  static int fman_pcd_ehash_int_buf_get(struct fman_pcd *pcd)
  {
-@@ -1463,6 +1467,7 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+@@ -1485,6 +1489,7 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
  	t->key_size = key_size;
  	t->hash_shift = hash_shift;
  	t->hash_mask_bits = (u8)ii;
@@ -32,7 +23,7 @@ index 235beb1..d8a080d 100644
  
  	tblphys = virt_to_phys(t->table_base);
  	fman_pcd_ehash_encode_node(t, tblphys, pcd->fe_int_buf_off);
-@@ -1484,6 +1489,7 @@ static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+@@ -1506,6 +1511,7 @@ static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
  				      struct fman_pcd_ehash_table *t)
  {
  	list_del(&t->node);
@@ -40,7 +31,7 @@ index 235beb1..d8a080d 100644
  	kfree(t->table_base);
  	kfree(t);
  	fman_pcd_ehash_int_buf_put(pcd);
-@@ -1570,6 +1576,319 @@ static const struct file_operations fman_pcd_ehash_fops = {
+@@ -1592,6 +1598,314 @@ static const struct file_operations fman_pcd_ehash_fops = {
  	.release	= single_release,
  };
  
@@ -169,9 +160,7 @@ index 235beb1..d8a080d 100644
 +	u64 prev_head, old_native, rec_phys;
 +	u8 *r;
 +	u16 index;
-+	size_t fe_ptr_off;
-+
-+	if (key_size == 0 || key_size != t->key_size)
++		if (key_size == 0 || key_size != t->key_size)
 +		return -EINVAL;
 +	if (key_size > FMAN_EHASH_FLOW_KEY_MAX)
 +		return -EINVAL;
@@ -201,9 +190,6 @@ index 235beb1..d8a080d 100644
 +	*(__be32 *)(r + 4) = cpu_to_be32((u32)(old_native & 0xffffffff));
 +	memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);
 +
-+	/* next-FE pointer (ENQ FE MURAM offset) after the 8-byte-aligned key. */
-+	fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);
-+	*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);
 +
 +	/* Head-insert: bucket head = swab64(phys(record)). */
 +	rec_phys = (u64)virt_to_phys(r);
@@ -360,7 +346,7 @@ index 235beb1..d8a080d 100644
  /**
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
   * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
-@@ -1686,6 +2005,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -1708,6 +2022,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_enter", 0644,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_enter_fops);
@@ -370,5 +356,3 @@ index 235beb1..d8a080d 100644
  		}
  	}
  
--- 
-2.39.5
