@@ -44,15 +44,140 @@ authoritative guards) and the show() port line removed, so the patch is
 valid in both the pre-fixup and post-fixup trees.
 
 Signed-off-by: VyOS LS1046A <ask20@vyos-ls1046a-build>
+
+2026-08-30 (fold): re-derived the fman_pcd.c hunk covering
+fman_pcd_ehash_add_key() against the true post-0167 state. The prior
+version's failing hunk assumed the simple enq_fe_off write-out from
+0130's original (pre-fold) form as pre-existing context; that form was
+folded into 0130 differently (F-181/F-182 vendor opcode encoding did not
+exist there), so this hunk never applied from a clean checkout -- it
+only looked fine against an already-built dev tree where 0130's and
+0169's outputs had already reconciled by hand. Same end state (vendor
+opcode-script record + separate FE context buffer + wmb() ordering);
+this version also removes 0130's now-superseded fe_ptr_off/enq_fe_off
+write and its now-unused outer declaration, which the old hunk boundary
+didn't account for. Verified against a pristine linux-6.18.44 +
+0068..0167 baseline, extracted fresh, not an already-patched dev tree.
+
+2026-08-30 (fold): added missing definitions for three symbols this
+patch's F-177/F-178 fixup code calls but never defines -- dropped during
+the earlier consolidation (confirmed: no other patch in the series
+defines them either, and main's un-folded 0169 is ~2000 lines smaller
+and never reaches this code, so there's no upstream copy to restore).
+Full clean-room build (pristine linux-6.18.44 + all 119 patches, real
+vyos_defconfig) confirmed these were the only undefined symbols left:
+
+  - fman_get_fpm_extc()/fman_set_fpm_extc() in fman.c/fman.h: raw
+    ioread32be/iowrite32be accessors for FMFP_EXTC (FPM External
+    Requests Control, RM 5.12.14.1, offset 0x74 of struct fman_fpm_regs
+    -- the field already existed, just had no exported accessor).
+  - fman_port_clear_kg_direct_scheme() in fman_port.c/fman_port.h: the
+    disarm-side counterpart to fman_port_set_cc_base()'s NIA_KG_CC_EN
+    OR-in. F-183 already removed the separate NIA_KG_DIRECT bit from the
+    arm path (see the comment at its call site in fman_pcd_kg.c), so
+    there's no longer a distinct "direct" bit to clear; this clears
+    NIA_KG_CC_EN the same way fman_port_set_cc_base(port, 0) does, for
+    symmetry with the arm side and as a defensive clear of any leftover
+    KeyGen/CC association.
+  - #include <linux/delay.h> in fman_pcd.c for udelay(), used by the
+    F-177 FMFP_EXTC SYNC poll loop.
+
+2026-08-30 (fold-audit vs main, round 2): fixed the fman_pcd_fe_hash_encode()
+word1 hunk's context to match 0131's F-144 fix (hashShift:8|contextSize:8|
+hashMask:16 byte order) instead of the pre-F-144 order it still expected --
+0131 was corrected first, which broke this hunk's context; the miss_res_off
+addition itself (word4) is unchanged, just re-anchored. Re-verified against
+
+2026-08-30 (CI failure correction): the fman.c/fman.h/fman_port.c/
+fman_port.h sections previously in this patch (fman_get_fpm_extc,
+fman_set_fpm_extc, fman_port_clear_kg_direct_scheme, NIA_KG_DIRECT) have
+been removed. bin/kernel-fixups/F_162.py and F_167.py -- both still
+active in this branch's own fixup pipeline (invoked unconditionally by
+ci-setup-kernel.sh, run after board patches apply and before compile --
+never checked locally, since local verification only ran board patches
++ make, not the full ci-setup-kernel.sh fixup phase) -- already supply
+these exact symbols. Adding them again in this patch caused a real CI
+failure: "redefinition of 'fman_port_clear_kg_direct_scheme'" and
+"'NIA_KG_DIRECT' undeclared" (F-162's own idempotency check for the
+NIA_KG_DIRECT #define was fooled by this patch's comment text merely
+mentioning the name, so it skipped adding the actual #define while still
+adding its own copy of the function that collided with this patch's).
+fman_pcd.c's F-177 poll loop (calling fman_get/set_fpm_extc, added by
+0130/0165's predecessors) is unaffected -- it only calls these functions,
+and F-167 supplies their declaration/definition before compile.
 ---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index cff3df7ed..2a03ea8f7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -608,8 +608,12 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 	 * on FMan v3 (HW-proven; the NIA stays BMI direct-enqueue).  Zero
+ 	 * (from the memset above) on every non-CC path.
+ 	 */
+-	if (enable && scheme->next_engine == 2)
+-		scheme_regs.kgse_ccbs = scheme->cc_bits_sel;
++	/* F-183(ccbs-w19-removed): the ccbs word-3 write sits below the
++	 * F-051 zeroing (it must land AFTER kgse_bmch is cleared there).
++	 * Writing kgse_ccbs here targets scheme window word 19 (0x14C),
++	 * which 210.10.1 does not read for CC dispatch -- F-184 board
++	 * proof 2026-08-10. kgse_ccbs stays 0 from the memset.
++	 */
+ 
+ 	scheme_regs.kgse_mv = scheme->match_vector;
+ 
+@@ -678,6 +682,21 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 	scheme_regs.kgse_bmcl = 0;
+ 	scheme_regs.kgse_spc = 0;
+ 
++	/* F-051: force-clear RSS mask/hash config for exact-match ehash */
++	scheme_regs.kgse_bmch = 0;
++	scheme_regs.kgse_bmcl = 0;
++	scheme_regs.kgse_hc   = 0;
++	scheme_regs.kgse_ekdv = 0;
++	/* F-183(ccbs-w3-write): 210.10.1 reads the CCBS dispatch offset
++	 * from scheme window word 3 (0x10C), the field the kernel struct
++	 * labels kgse_bmch, NOT word 19 (kgse_ccbs). Proven live on .185
++	 * (F-184, 2026-08-10): word-19 writes never fired the CC walk;
++	 * an AR write of word 3 = group offset fired it with 1:1 miss-row
++	 * delivery. Must sit after F-051's kgse_bmch zeroing above,
++	 * which would otherwise clobber it.
++	 */
++	if (enable && scheme->next_engine == 2)
++		scheme_regs.kgse_bmch = scheme->cc_bits_sel & 0x00FFFFFF;
+ 	/* Write scheme registers */
+ 	err = keygen_write_scheme(keygen_regs, scheme_id, &scheme_regs, true);
+ 	if (err != 0) {
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 7fdb1fb..1b91853 100644
+index af2c81303..ad73ad589 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -142,6 +142,18 @@ struct fman_pcd {
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include <linux/debugfs.h>
++#include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/err.h>
+@@ -122,6 +123,7 @@ struct fman_pcd {
+ 	struct list_head fe_available;
+ 	struct list_head fe_enq;
+ 	int fe_refcount;
++	unsigned long fe_pool_off;	/* F-061 v6: mid-pool FE slot MURAM offset for fe_probe */
+ 	struct list_head fe_ports;	/* FmPortSetFESupport records (sec.4) */
+ 	struct list_head fe_singletons;	/* sec.5 MUX/Transition/Exit FEs */
+ 	unsigned long fe_mux_off;
+@@ -144,7 +146,24 @@ struct fman_pcd {
+ 	/* E2 workspace hash probe (0159) */
  	u8  fe_probe_key[32];
  	int fe_probe_key_len;
- 	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
+-	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
++	unsigned long fe_hash_off;
++	u32 fe_enq_fqid;	/* F-157: FE-VM ENQ target on HIT (dedicated TX FQ) */	/* sec.5 t_ExtHashFe FE-hash object */
++
++	void *miss_ctx;			/* F-069: 256B DDR miss context */
++	dma_addr_t miss_ctx_phys;		/* F-069: physical addr */
++	unsigned long miss_res_off;		/* F-069: MURAM result */
 +	/* FE-VM observation canary (0169): redirect the hashfe HIT/MISS
 +	 * dispositions (w5/w6) at two countable ENQ FEs so a probe can
 +	 * discriminate "frame reached the EXT_HASH comparator and MISSed"
@@ -68,7 +193,1085 @@ index 7fdb1fb..1b91853 100644
  
  	struct dentry *debugfs_dir;
  };
-@@ -2171,6 +2183,271 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+@@ -154,6 +173,9 @@ struct fman_pcd {
+  * and cleaned up on the last fman_pcd_release().  Each FMan instance
+  * gets a subdirectory named by its FMan id (typically "0" on LS1046A).
+  */
++u64 fman_pcd_kg_hash;
++unsigned int fman_pcd_hash_off;
++void *fman_pcd_ic_vaddr;
+ static struct dentry *fman_pcd_debugfs_root;
+ static DEFINE_MUTEX(fman_pcd_debugfs_lock);
+ static int fman_pcd_debugfs_refcount;
+@@ -374,11 +396,13 @@ static int fman_pcd_fe_pool_alloc(struct fman_pcd *pcd)
+ 
+ 		/* MURAM is iomem and gen_pool does not zero - memset_io. */
+ 		memset_io((void __iomem *)
+-			  fman_muram_offset_to_vbase(muram, off),
++			  (void *)fman_muram_offset_to_vbase(muram, off),
+ 			  0, FMAN_PCD_FE_MAX_SIZE);
+ 
+ 		obj->muram_off = off;
+ 		list_add_tail(&obj->node, &pcd->fe_available);
++		if (i == 5)	/* F-061 v7: slot 5 past 3 singletons */
++			pcd->fe_pool_off = off;
+ 	}
+ 
+ 	return 0;
+@@ -589,7 +613,7 @@ static int fman_pcd_fe_port_set(struct fman_pcd *pcd, u8 port_id)
+ 	}
+ 	aligned_off = (pool_raw_off + (FMAN_PCD_BMI_FIFO_UNITS - 1)) &
+ 		      ~(unsigned long)(FMAN_PCD_BMI_FIFO_UNITS - 1);
+-	pool_v = (void __iomem *)fman_muram_offset_to_vbase(muram, aligned_off);
++	pool_v = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, aligned_off);
+ 	memset_io(pool_v, 0, pool_size);
+ 
+ 	/*
+@@ -605,7 +629,7 @@ static int fman_pcd_fe_port_set(struct fman_pcd *pcd, u8 port_id)
+ 		err = (int)mgmt_off;
+ 		goto err_pool;
+ 	}
+-	mgmt_v = (void __iomem *)fman_muram_offset_to_vbase(muram, mgmt_off);
++	mgmt_v = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, mgmt_off);
+ 	iowrite32be((u32)aligned_off, mgmt_v);		/* [0..3] pool off (BE) */
+ 	iowrite8(4, mgmt_v);				/* [0] read index = 4 */
+ 	for (i = 0; i < total_tnums; i++)
+@@ -718,6 +742,141 @@ static void fman_pcd_fe_port_drain(struct fman_pcd *pcd)
+ 	}
+ }
+ 
++/* F-061 v6: fe_probe debugfs - scan FE workspace for KG key
++ * Reads 64 u32 words (256B), past the 246B ALLOCATE workspace.
++ * Shows only non-zero words to find the key wherever it lands.
++ */
++/* F-069b v23: page-boundary-aware scan from frame-data vaddr, BOTH directions.
++ * vaddr = phys_to_virt(fd.addr) = frame-data address.
++ * IC is at vaddr - data_offset (data_offset typically 64-256).
++ * Safe backward scan: only up to the page boundary of vaddr.
++ * v23: v22 bounded the backward scan to the page boundary but left the
++ * forward scan fixed at +512 with no check against the page/mapping
++ * extent -- a forward-direction read past the mapped page causes a
++ * level-1 translation fault (board-reproduced 2026-07-31, PC in
++ * fman_pcd_ic_probe_show).  v23 bounds the forward scan symmetrically:
++ * stop 16 bytes (one scan block) before the page end so the last
++ * 4-word read never crosses into the next (possibly unmapped) page.
++ */
++extern void *fman_pcd_ic_vaddr;
++extern void *fman_pcd_ic_buf_base;
++
++static int fman_pcd_hash_probe_show(struct seq_file *m, void *v)
++{
++	if (!fman_pcd_hash_off) {
++		seq_puts(m, "idle (no eth4 frame captured)\n");
++		return 0;
++	}
++	seq_printf(m, "hash_off=%u captured=%016llx\n",
++		fman_pcd_hash_off, fman_pcd_kg_hash);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(fman_pcd_hash_probe);
++
++
++static int fman_pcd_ic_probe_show(struct seq_file *s, void *unused)
++{
++	void *vaddr;
++	long page_off;
++	int off, max_back, max_fwd;
++	unsigned int i, v, nonzero;
++
++	smp_rmb();
++	vaddr = fman_pcd_ic_vaddr;
++	if (!vaddr) {
++		seq_puts(s, "no frame captured\n");
++		return 0;
++	}
++	page_off = (unsigned long)vaddr & 0xFFF;
++	max_back = page_off < 256 ? page_off : 256;
++	/* v23: cap forward scan to stay within vaddr's page, minus one
++	 * 16-byte block so the last read (off..off+15) never crosses the
++	 * page boundary into unmapped memory.
++	 */
++	max_fwd = 4096 - (int)page_off - 16;
++	if (max_fwd > 512)
++		max_fwd = 512;
++	if (max_fwd < 0)
++		max_fwd = 0;
++	seq_printf(s, "vaddr=%px page_off=0x%03lx max_back=%d max_fwd=%d\n",
++		   vaddr, page_off, max_back, max_fwd);
++	/* Scan -max_back .. +max_fwd around vaddr (covers IC + frame start),
++	 * bounded on both ends by vaddr's containing page.
++	 */
++	for (off = -max_back; off < max_fwd; off += 16) {
++		nonzero = 0;
++		for (i = 0; i < 4; i++) {
++			if (((u32 *)vaddr)[off/4 + i]) nonzero++;
++		}
++		if (nonzero) {
++			seq_printf(s, "%+05d:", off);
++			for (i = 0; i < 4; i++) {
++				v = be32_to_cpu(((u32 *)vaddr)[off/4 + i]);
++				seq_printf(s, " %08x", v);
++			}
++			seq_puts(s, "\n");
++		}
++	}
++	return 0;
++}
++
++static int fman_pcd_ic_probe_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_ic_probe_show, inode->i_private);
++}
++
++static const struct file_operations fman_pcd_ic_probe_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_ic_probe_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++static int fman_pcd_fe_probe_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	void __iomem *ws_base;
++	unsigned int i;
++	u32 v;
++
++	mutex_lock(&pcd->fe_lock);
++	if (!muram || pcd->fe_refcount == 0) {
++		seq_puts(s, "fe pool not engaged\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	if (!pcd->fe_pool_off) {
++		seq_puts(s, "fe pool not allocated\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	ws_base = (void *)fman_muram_offset_to_vbase(muram, pcd->fe_pool_off);
++	seq_printf(s, "pool=0x%05lx\n", pcd->fe_pool_off);
++	for (i = 0; i < 64; i++) {
++		v = ioread32be((u32 __iomem *)ws_base + i);
++		if (v)
++			seq_printf(s, " [%02d]=%08x", i, v);
++	}
++	seq_puts(s, "\n");
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_fe_probe_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_probe_show, inode->i_private);
++}
++
++static const struct file_operations fman_pcd_fe_probe_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_probe_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ static int fman_pcd_fe_port_show(struct seq_file *s, void *unused)
+ {
+ 	struct fman_pcd *pcd = s->private;
+@@ -866,7 +1025,7 @@ static void fman_pcd_fe_build(struct muram_info *muram, unsigned long fe_off,
+ 			      const struct fman_pcd_fe_params *p)
+ {
+ 	u32 __iomem *fe = (u32 __iomem *)
+-		fman_muram_offset_to_vbase(muram, fe_off);
++		(void *)fman_muram_offset_to_vbase(muram, fe_off);
+ 	u32 w[FMAN_FE_MAX_WORDS] = { 0 };
+ 	unsigned int size = 0, i;
+ 
+@@ -976,7 +1135,7 @@ static void fman_pcd_fe_singletons_free(struct fman_pcd *pcd)
+ 		list_del(&obj->node);
+ 		if (muram)
+ 			memset_io((void __iomem *)
+-				  fman_muram_offset_to_vbase(muram,
++				  (void *)fman_muram_offset_to_vbase(muram,
+ 							     obj->muram_off),
+ 				  0, FMAN_PCD_FE_MAX_SIZE);
+ 		list_add_tail(&obj->node, &pcd->fe_available);
+@@ -1050,7 +1209,7 @@ static void fman_pcd_fe_dump_one(struct seq_file *s, struct muram_info *muram,
+ 		seq_printf(s, "%-10s (not built)\n", name);
+ 		return;
+ 	}
+-	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram, off);
++	fe = (u32 __iomem *)(void *)fman_muram_offset_to_vbase(muram, off);
+ 	seq_printf(s, "%-10s off=0x%05lx ", name, off);
+ 	for (i = 0; i < words; i++)
+ 		seq_printf(s, "%08x ", ioread32be(fe + i));
+@@ -1155,6 +1314,21 @@ static const struct file_operations fman_pcd_fe_singletons_fops = {
+ 
+ /* ENQ FE word1 holds the 24-bit target FQID when FMAN_FE_ENQ_FQID is set. */
+ #define FMAN_FE_ENQ_NIA_MASK		0x00ffffff
++/* F-175: vendor-correct ENQ encoding (board-tested, F-073B, 2026-07-16).
++ * word1 carries a genuine NIA, not a raw FQID; the FQID is read from
++ * the per-frame workspace at ws_offset 8 (FE_ENQUEUE_CONTEXT_OFFSET).
++ */
++#define FMAN_FE_ENQ_CONTEXT_OFFSET	8
++#define FMAN_NIA_BMI_AC_ENQ_FRAME	0x00500002
++/* F-175: per-flow FE context buffer (SDK: separately allocated, NEVER
++ * inline in the ehash record -- see FmPcdCcBuildContextByFE). Only
++ * MUX (offset 0, ENQ's own MURAM offset) and ENQ (offset 8/12,
++ * (rspid<<24)|fqid and ppid<<16) are needed -- this branch has no
++ * header-manipulation/replication chain, so Transition/HM are unused.
++ */
++#define FMAN_FE_CTX_SIZE		16
++#define FMAN_FE_CTX_MUX_OFF		0
++#define FMAN_FE_CTX_ENQ_OFF		8
+ 
+ /* FE_ENTER root action-descriptor (SDK t_AdOfTypeContLookup) field bits. */
+ #define FMAN_AD_CONT_LOOKUP_TYPE	0x40000000	/* word0 ccAdBase type */
+@@ -1169,8 +1343,7 @@ static const struct file_operations fman_pcd_fe_singletons_fops = {
+  * shortfall nothing is committed, so silicon is never half-programmed.
+  * Caller holds pcd->fe_lock.
+  */
+-static int fman_pcd_fe_enq_build(struct fman_pcd *pcd, u32 fqid,
+-				 unsigned long next_fe_off)
++static int fman_pcd_fe_enq_build(struct fman_pcd *pcd)
+ {
+ 	struct muram_info *muram = fman_get_muram(pcd->fman);
+ 	struct fman_pcd_fe_params p;
+@@ -1180,19 +1353,26 @@ static int fman_pcd_fe_enq_build(struct fman_pcd *pcd, u32 fqid,
+ 		return -ENXIO;
+ 	if (pcd->fe_refcount == 0)
+ 		return -ENXIO;		/* engage the pool first */
+-	if (fqid & ~FMAN_FE_ENQ_NIA_MASK)
+-		return -EINVAL;		/* FQIDs are 24-bit */
++	if (!pcd->fe_exit_off)
++		return -ENOENT;	/* F-175: fe_singletons build first */
+ 
+ 	obj = list_first_entry_or_null(&pcd->fe_available,
+ 				       struct fman_pcd_fe_obj, node);
+ 	if (!obj)
+ 		return -ENOSPC;
+ 
++	/* F-175: vendor-correct ENQ (board-tested, F-073B) -- word1 is a
++	 * genuine NIA (BMI enqueue action), not a raw FQID; the target FQID
++	 * is read from the per-frame workspace at ws+8, populated by
++	 * hardware from the matched flow record's context buffer on a
++	 * genuine HIT. ENQ always chains to EXIT (SDK: never terminal).
++	 */
+ 	memset(&p, 0, sizeof(p));
+ 	p.type = FMAN_FE_TYPE_ENQ;
++	p.ws_offset = FMAN_FE_ENQ_CONTEXT_OFFSET;
+ 	p.flags = FMAN_FE_ENQ_FQID;
+-	p.nia = fqid;
+-	p.next_fe_off = pcd->fe_exit_off;	/* F-073D: chain to EXIT(DEALLOCATE) */
++	p.nia = FMAN_NIA_BMI_AC_ENQ_FRAME;
++	p.next_fe_off = pcd->fe_exit_off;
+ 
+ 	list_del(&obj->node);
+ 	fman_pcd_fe_build(muram, obj->muram_off, &p);
+@@ -1210,7 +1390,7 @@ static void fman_pcd_fe_enq_free(struct fman_pcd *pcd)
+ 		list_del(&obj->node);
+ 		if (muram)
+ 			memset_io((void __iomem *)
+-				  fman_muram_offset_to_vbase(muram,
++				  (void *)fman_muram_offset_to_vbase(muram,
+ 							     obj->muram_off),
+ 				  0, FMAN_PCD_FE_MAX_SIZE);
+ 		list_add_tail(&obj->node, &pcd->fe_available);
+@@ -1232,7 +1412,7 @@ static int fman_pcd_fe_enq_show(struct seq_file *s, void *unused)
+ 	}
+ 	list_for_each_entry(obj, &pcd->fe_enq, node) {
+ 		u32 __iomem *fe = (u32 __iomem *)
+-			fman_muram_offset_to_vbase(muram, obj->muram_off);
++			(void *)fman_muram_offset_to_vbase(muram, obj->muram_off);
+ 
+ 		seq_printf(s, "enq[%u]     off=0x%05lx ", n++, obj->muram_off);
+ 		for (i = 0; i < FMAN_FE_ENQ_SIZE / 4; i++)
+@@ -1256,8 +1436,6 @@ static ssize_t fman_pcd_fe_enq_write(struct file *file,
+ {
+ 	struct seq_file *s = file->private_data;
+ 	struct fman_pcd *pcd = s->private;
+-	unsigned long next_fe_off;
+-	unsigned int fqid;
+ 	char buf[48];
+ 	int err;
+ 
+@@ -1268,10 +1446,12 @@ static ssize_t fman_pcd_fe_enq_write(struct file *file,
+ 	buf[count] = '\0';
+ 
+ 	mutex_lock(&pcd->fe_lock);
+-	if (sscanf(buf, "build %x %lx", &fqid, &next_fe_off) == 2) {
+-		err = fman_pcd_fe_enq_build(pcd, fqid, next_fe_off);
+-	} else if (sscanf(buf, "build %x", &fqid) == 1) {
+-		err = fman_pcd_fe_enq_build(pcd, fqid, 0);
++	if (!strncmp(buf, "build", 5)) {
++		/* F-175: no fqid argument -- ENQ is a plain singleton now;
++		 * the per-flow FQID lives in the flow record's own context
++		 * buffer (see fe_flow), not this shared FE descriptor.
++		 */
++		err = fman_pcd_fe_enq_build(pcd);
+ 	} else if (!strncmp(buf, "clear", 5)) {
+ 		fman_pcd_fe_enq_free(pcd);
+ 		err = 0;
+@@ -1301,6 +1481,10 @@ static const struct file_operations fman_pcd_fe_enq_fops = {
+  * built in increment 1).  Allocated from the reserved MURAM partition; the
+  * inverse re-zeros and frees it.  Caller holds pcd->fe_lock.
+  */
++struct fman_pcd_ehash_table;	/* F-190(fwd-decl) */
++static void fman_pcd_fe_enter_write_vendor_node(struct fman_pcd *pcd,
++						u32 __iomem *ad,
++						unsigned long off);
+ static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)
+ {
+ 	struct muram_info *muram = fman_get_muram(pcd->fman);
+@@ -1328,13 +1512,16 @@ static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)
+ 	if (IS_ERR_VALUE(off))
+ 		return (int)off;
+ 
+-	ad = (u32 __iomem *)fman_muram_offset_to_vbase(muram, off);
++	ad = (u32 __iomem *)(void *)fman_muram_offset_to_vbase(muram, off);
+ 	iowrite32be(FMAN_AD_CONT_LOOKUP_TYPE | FMAN_AD_FE_ENTER_ALLOCATE,
+ 		    ad + 0);				/* ccAdBase          */
+ 	iowrite32be(0, ad + 1);				/* matchTblPtr       */
+ 	iowrite32be(FMAN_AD_FE_ENTER_OPCODE, ad + 2);	/* pcAndOffsets      */
+ 	iowrite32be((u32)fe_off, ad + 3);		/* gmask = FE offset */
+ 
++	/* F-190(fe-enter-vendor-node): write en_exthash_node to root AD */
++	fman_pcd_fe_enter_write_vendor_node(pcd, ad, off);
++
+ 	pcd->fe_root_ad_off = off;
+ 	return 0;
+ }
+@@ -1348,7 +1535,7 @@ static void fman_pcd_fe_enter_free(struct fman_pcd *pcd)
+ 		return;
+ 	if (muram)
+ 		memset_io((void __iomem *)
+-			  fman_muram_offset_to_vbase(muram,
++			  (void *)fman_muram_offset_to_vbase(muram,
+ 						     pcd->fe_root_ad_off),
+ 			  0, FMAN_FE_ROOT_AD_SIZE);
+ 	fman_pcd_muram_free(pcd, pcd->fe_root_ad_off, FMAN_FE_ROOT_AD_SIZE);
+@@ -1373,7 +1560,7 @@ static int fman_pcd_fe_enter_show(struct seq_file *s, void *unused)
+ 		mutex_unlock(&pcd->fe_lock);
+ 		return 0;
+ 	}
+-	ad = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++	ad = (u32 __iomem *)(void *)fman_muram_offset_to_vbase(muram,
+ 						       pcd->fe_root_ad_off);
+ 	seq_printf(s, "root_ad    off=0x%05lx ", pcd->fe_root_ad_off);
+ 	for (i = 0; i < FMAN_FE_ROOT_AD_SIZE / 4; i++)
+@@ -1467,6 +1654,7 @@ static const struct file_operations fman_pcd_fe_enter_fops = {
+ #define FMAN_EHASH_INT_BUF_TOTAL \
+ 	(FMAN_EHASH_INT_BUF_POOL_SIZE + FMAN_EHASH_GLOBAL_MEM_SIZE)
+ #define FMAN_EHASH_ALIGN		256		/* EN_EXTHASH_TBL_ALIGNMENT */
++#define FMAN_EHASH_NODE_SIZE		16	/* en_exthash_node descriptor */
+ #define FMAN_EHASH_BUCKET_SIZE		16		/* lf-5.4 {u64 h; u64 pad} */
+ #define FMAN_EHASH_MASK_MAX		0x7fff		/* hash_mask_bits: 4-bit field */
+ 
+@@ -1475,6 +1663,7 @@ struct fman_pcd_ehash_table {
+ 	void *table_base;		/* DDR bucket array (dma_alloc_coherent) */
+ 	dma_addr_t table_dma;		/* bus address of table_base (FE VM reads) */
+ 	struct device *dev;		/* DMA device (fman_get_dev), for record alloc */
++	struct fman_pcd *pcd;		/* F-148: back-pointer for CC match table */
+ 	size_t table_size;
+ 	u32 hash_mask;
+ 	u8 key_size;
+@@ -1484,6 +1673,42 @@ struct fman_pcd_ehash_table {
+ 	struct list_head flows;		/* sec.5 inserted flow records (DDR) */
+ };
+ 
++/* F-190(fe-enter-vendor-node-helper): overwrite the root AD with the
++ * vendor en_exthash_node when an ehash table exists.  Defined here (not
++ * inline in fe_enter_build) because struct fman_pcd_ehash_table is
++ * complete only after this point.
++ */
++static void fman_pcd_fe_enter_write_vendor_node(struct fman_pcd *pcd,
++						u32 __iomem *ad,
++						unsigned long off)
++{
++	struct fman_pcd_ehash_table *__et =
++		list_first_entry_or_null(&pcd->fe_ehash_tables,
++					 struct fman_pcd_ehash_table, node);
++
++	pr_info("F-190: et=%p int_buf_off=0x%lx\n",
++		(void *)__et, (unsigned long)pcd->fe_int_buf_off);
++	if (__et && pcd->fe_int_buf_off) {
++		u64 __tb = (u64)__et->table_dma;
++		pr_info("F-190: WRITE root AD 0x%lx tb=0x%llx\n",
++			(unsigned long)off, __tb);
++		iowrite32be((2U << 30) |
++			    ((u32)(__et->key_size & 0x3f) << 24) |
++			    (4U << 20) |
++			    ((u32)(__et->hash_shift & 0x7) << 16) |
++			    ((u32)(__tb >> 32) & 0xffU), ad + 0);
++		iowrite32be((u32)(__tb & 0xffffffffU), ad + 1);
++		iowrite32be(
++		    ((u32)((pcd->fe_int_buf_off >> 8) & 0xffffU) << 16) |
++		    (0x80U << 4) |
++		    (u32)(__et->hash_mask_bits & 0xfU), ad + 2);
++		iowrite32be(0, ad + 3);
++	} else {
++		pr_info("F-190: SKIP __et=%p int_buf_off=0x%lx\n",
++			(void *)__et, (unsigned long)pcd->fe_int_buf_off);
++	}
++}
++
+ /* Table teardown cascades to its inserted flow records (defined below). */
+ static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t);
+ 
+@@ -1515,7 +1740,7 @@ static int fman_pcd_ehash_int_buf_get(struct fman_pcd *pcd)
+ 		return (int)raw_off;
+ 	aligned_off = (raw_off + (FMAN_EHASH_ALIGN - 1)) &
+ 		      ~(unsigned long)(FMAN_EHASH_ALIGN - 1);
+-	v = (void __iomem *)fman_muram_offset_to_vbase(muram, aligned_off);
++	v = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, aligned_off);
+ 	memset_io(v, 0, FMAN_EHASH_INT_BUF_TOTAL);
+ 
+ 	pcd->fe_int_buf_raw_off = raw_off;
+@@ -1600,16 +1825,23 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+ 		goto err_put_buf;
+ 	}
+ 	t->dev = dev;
++	t->pcd = pcd;	/* F-148 */
+ 	t->table_size = tablesize;
+ 	t->hash_mask = mask;
+ 	t->key_size = key_size;
+ 	t->hash_shift = hash_shift;
+ 	t->hash_mask_bits = (u8)ii;
+ 	INIT_LIST_HEAD(&t->flows);
++	t->dev = fman_get_dev(pcd->fman);	/* F-142 */
+ 
+ 	tblphys = t->table_dma;
+ 	fman_pcd_ehash_encode_node(t, tblphys, pcd->fe_int_buf_off);
+ 
++	/* F-143: Write en_exthash_node descriptor to first 16 bytes of DDR allocation.
++	 * The FE-VM reads this to get hash_bytes_offset, key_size, hash_mask_bits, etc.
++	 */
++	memcpy(t->table_base, t->ad, FMAN_EHASH_NODE_SIZE);
++
+ 	list_add_tail(&t->node, &pcd->fe_ehash_tables);
+ 	dev_info(fman_get_dev(pcd->fman),
+ 		 "fman_pcd: ehash table mask 0x%x keysize %u ii %d size %zu DDR %pad\n",
+@@ -1756,7 +1988,7 @@ static const struct file_operations fman_pcd_ehash_fops = {
+  *     a dma_pool would avoid per-record page rounding (future optimization).
+  * ---------------------------------------------------------------------------
+  */
+-#define FMAN_EHASH_FLOW_REC_SIZE	256	/* MAX_EN_EHASH_ENTRY_SIZE */
++#define FMAN_EHASH_FLOW_REC_SIZE	320	/* MAX_EN_EHASH_ENTRY_SIZE */	/* F-176: 320B = MAX_EN_EHASH_EXT_ENTRY_SIZE, room for stats */
+ #define FMAN_EHASH_FLOW_KEY_OFF		8	/* en_ehash_entry.key[0] */
+ #define FMAN_EHASH_FLOW_KEY_MAX		56	/* fits rec - header - fe ptr */
+ #define FMAN_EHASH_CRC64_POLY		0xC96C5795D7870F42ULL	/* ECMA-182, reflected */
+@@ -1765,6 +1997,8 @@ struct fman_pcd_ehash_flow {
+ 	struct list_head node;
+ 	void *record;			/* DDR 256-B flow record (dma_alloc_coherent) */
+ 	dma_addr_t record_dma;		/* bus address of record (bucket head holds it) */
++	void *ctx;			/* F-175: separate 16B FE context buffer */
++	dma_addr_t ctx_dma;		/* F-175: bus address of ctx (stored in record) */
+ 	u64 *bucket_h;			/* the bucket head u64 it links into */
+ 	u64 prev_head;			/* old bucket->h, for byte-exact undo */
+ 	u16 index;			/* bucket index (for the show node) */
+@@ -1835,14 +2069,13 @@ fman_pcd_ehash_table_by_index(struct fman_pcd *pcd, unsigned int idx)
+  */
+ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				  const u8 *key, u8 key_size,
+-				  unsigned long enq_fe_off)
++				  u32 enq_off, u32 fqid)
+ {
+ 	struct fman_pcd_ehash_flow *flow;
+ 	u64 prev_head, old_native, rec_phys;
+ 	dma_addr_t rdma;
+ 	u8 *r;
+ 	u16 index;
+-	size_t fe_ptr_off;
+ 
+ 		if (key_size == 0 || key_size != t->key_size)
+ 		return -EINVAL;
+@@ -1869,17 +2102,102 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 	prev_head = *flow->bucket_h;		/* swab'd phys of old head */
+ 	old_native = swab64(prev_head);		/* unswap to native phys */
+ 
++	/* F-181: vendor opcode ENQUEUE_PKT (vendor #define ENQUEUE_PKT 0x01). */
++	#define FMAN_EHASH_OPC_ENQUEUE_PKT	0x01
+ 	/* en_ehash_entry header: chain THIS record to the previous head. */
+-	*(__be16 *)(r + 0) = cpu_to_be16(0);				/* flags */
+-	*(__be16 *)(r + 2) = cpu_to_be16((u16)((old_native >> 32) & 0xffff));
+-	*(__be32 *)(r + 4) = cpu_to_be32((u32)(old_native & 0xffffffff));
+-	memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);
++	/* F-181: vendor opcode-script record -- flags carry opc/param offsets
++	 * (SET_OPC_OFFSET/SET_PARAM_OFFSET).  The FE-VM reads opc_offset on a
++	 * HIT, walks the opcode list, and ENQUEUEs to enqueue_param.fqid --
++	 * without this there is no action script to walk and the comparator
++	 * can never complete a HIT.
++	 * F-182: STATS_EN cleared -- vendor sets it only with the 320B ext
++	 * entry (stats at +256) plus UPDATE_STATS in the hashfe word; we have
++	 * neither, and pkt_count was never a valid discriminator anyway (E20
++	 * confound #3; the M3 gate is the fe_obs canary, patch 0169).
++	 */
++	{
++		size_t opc_off = FMAN_EHASH_FLOW_KEY_OFF + ALIGN(key_size, sizeof(u32));
++		size_t param_off = opc_off + 16;	/* MAX_OPCODES */
++		u16 flags = 0;	/* F-182: no STATS_EN (256B record) */
++
++		/* vendor SET_OPC_OFFSET / SET_PARAM_OFFSET (hi: 5-bit opc, lo: 6-bit param, word>>2) */
++		flags |= (u16)(((u16)(opc_off >> 2)) << 6);
++		flags |= (u16)((u16)(param_off >> 2) & 0x3f);
++		*(__be16 *)(r + 0) = cpu_to_be16(flags);
++		*(__be16 *)(r + 2) = cpu_to_be16((u16)((old_native >> 32) & 0xffff));
++		*(__be32 *)(r + 4) = cpu_to_be32((u32)(old_native & 0xffffffff));
++		memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);
++
++		/* opcode list: terminal ENQUEUE_PKT (0x01) -- the action the FE-VM runs. */
++		r[opc_off] = FMAN_EHASH_OPC_ENQUEUE_PKT;
++
++		/* en_ehash_enqueue_param (packed): mtu u16@0 | hdr u8@2 | bpid u8@3 |
++		 * fqid u32@4 | word u32@8 | word2 u32@12.  fqid = this record's ENQ
++		 * target (24-bit TX FQ); all BE.  mtu=1500, hdr/bpid/word/word2=0.
++		 */
++		*(__be16 *)(r + param_off + 0) = cpu_to_be16(1500);	/* mtu */
++		*(r + param_off + 2) = 0;	/* hdr_xpnd_sz */
++		*(r + param_off + 3) = 0;	/* bpid */
++		/* F-182: param.fqid = the flow's target FQID (vendor cdx
++		 * create_enque_hm: param->fqid = cpu_to_be32(l2_info.fqid)) --
++		 * NOT the ENQ FE MURAM offset F-181 v1 wrote here by mistake.
++		 */
++		*(__be32 *)(r + param_off + 4) = cpu_to_be32((u32)fqid & 0x00ffffff);	/* fqid */
++		*(__be32 *)(r + param_off + 8) = cpu_to_be32(0);	/* stats word */
++		*(__be32 *)(r + param_off + 12) = cpu_to_be32(0);	/* dscp word */
++	}
+ 
+-	fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);
+-	*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);
++	/* F-175: separate per-flow FE context buffer (SDK
++	 * FmPcdCcBuildContextByFE, ~line 8954 of the real oracle) --
++	 * NEVER inline in the ehash record (F-057 correctly found that
++	 * corrupts it). MUX's context (offset 0) points at the ENQ FE
++	 * directly (no Transition -- this branch has no HM/replication
++	 * chain); ENQ's context (offset 8/12) carries (rspid<<24)|fqid
++	 * and ppid<<16, byte-exact to the SDK's real encoder. rspid and
++	 * ppid are both 0 in this branch's design.
++	 */
++	{
++		/* F-182: relocate the ctx pointer past F-181's opcode slot
++		 * (ALIGN(keysize,4) after the key) + the 16B opcode area + the
++		 * 16B param block. The old 8+align8(keysize) offset EQUALLED
++		 * opc_off for keysize 14 (both 24) and this be64 write clobbered
++		 * the ENQUEUE_PKT opcode byte (E20 DDR dump: opcode[24]=0x00,
++		 * [24..31]=ctx_dma). New home (56 for keysize 14, 80 for the
++		 * 37B IPv6 key) stays inside the 256B record, past everything
++		 * the FE-VM walks.
++		 */
++		size_t fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF +
++				     ALIGN(key_size, sizeof(u32)) + 16 + 16;
++		dma_addr_t ctx_dma;
++		u8 *ctx = dma_alloc_coherent(t->dev, FMAN_FE_CTX_SIZE, &ctx_dma,
++					     GFP_KERNEL);
++
++		if (!ctx) {
++			dma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE, r, rdma);
++			kfree(flow);
++			return -ENOMEM;
++		}
++		*(__be32 *)(ctx + FMAN_FE_CTX_MUX_OFF) = cpu_to_be32(enq_off);
++		*(__be32 *)(ctx + FMAN_FE_CTX_ENQ_OFF) = cpu_to_be32(fqid & 0x00ffffff);
++		*(__be32 *)(ctx + FMAN_FE_CTX_ENQ_OFF + 4) = cpu_to_be32(0);	/* ppid<<16 */
++		flow->ctx = ctx;
++		flow->ctx_dma = ctx_dma;
++
++		*(__be64 *)(r + fe_ptr_off) = cpu_to_be64((u64)ctx_dma);
++	}
+ 
+ 	/* Head-insert: bucket head = swab64(dma_addr(record)). */
+ 	rec_phys = (u64)rdma;
++
++	/* F-173: order the record's field writes above (header, key,
++	 * next-FE pointer) before this bucket-head publish becomes
++	 * visible to FMan's independent DMA-capable hash-table walker.
++	 * Without this, a weak-ordered CPU can let the pointer write
++	 * reach visibility before the pointee's field writes do, so
++	 * FMan dereferences a still-stale record -- same bug class and
++	 * fix as vendor's own we-are-mono/ASK commit cb8fc275.
++	 */
++	wmb();
+ 	*flow->bucket_h = swab64(rec_phys);
+ 
+ 	flow->record = r;
+@@ -1887,6 +2205,116 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 	flow->prev_head = prev_head;
+ 	flow->index = index;
+ 	flow->key_size = key_size;
++	/* F-148 v6: Write key + mask to CC match table so the CC engine can dispatch
++	 * matching frames to FE_ENTER.  Without this, numKeys=0 routes ALL
++	 * frames to the miss-AD and the FE-VM ehash is never consulted.
++	 *
++	 * v5 FIX (2026-07-31): capped at nkeys<1 (single-key only).  mto is
++	 * allocated as bare 16 bytes (F-091) -- room for exactly ONE 16-byte
++	 * key row.  ato is allocated as 32 bytes -- room for exactly one
++	 * key's HIT-AD plus one miss-AD (RM 8.7.4.3's (numKeys+1)*16 for the
++	 * 0->1 transition only).  v4's "nkeys < 32" guard borrowed the name
++	 * FMAN_CC_MAX_STATIC_KEYS from an unrelated subsystem (patch 0086b's
++	 * official fman_cc_tree, which has its own properly sized storage)
++	 * without the scaffold here ever actually being sized for more than
++	 * one key.  A second key insert wrote to mt + 1*16, 16 bytes past
++	 * mto's allocation -- a real MURAM overflow reachable via ordinary
++	 * multi-flow use, not just test-only paths.  Supporting more than
++	 * one key correctly needs a bigger redesign (enlarge mto/ato AND
++	 * slide the miss-AD to the new top slot on every insert, matching
++	 * the official ask20/patch-0050 CC implementation) -- out of scope
++	 * here; this fix only prevents the overflow.
++	 *
++	 * v4 fixes bug (a): the HIT-AD slot must contain a COPY of the four
++	 * words already at pcd->fe_root_ad_off (the standalone FE_ENTER AD:
++	 * w0=0x40800000 CONT_LOOKUP|NIA_ORDER_RESTOR, w1=0, w2=0x000000F6
++	 * OPC_FE_ENTER, w3=EXT_HASH offset -- microcode reference Sec 7.7),
++	 * NOT the raw offset NUMBER written as word0.  A bare word0 with a
++	 * zero top byte decodes as an enqueue-AD to FQID=that number (RM
++	 * 8.7.4.3), which is a nonexistent FQ -- v3's bug.
++	 */
++	if (t->pcd) {
++		struct fman_pcd_fe_port *fp;
++		unsigned long mto = 0, gro = 0, ato = 0;
++
++		/* Find the armed port's per-port scaffold (F-139). */
++		list_for_each_entry(fp, &t->pcd->fe_ports, node) {
++			if (fp->scaffold_gro) {
++				gro = fp->scaffold_gro;
++				mto = fp->scaffold_mto;
++				ato = fp->scaffold_ato;
++				break;
++			}
++		}
++		if (mto && gro) {
++			struct muram_info *muram = fman_get_muram(t->pcd->fman);
++			void __iomem *mt = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, mto);
++			void __iomem *gt = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, gro);
++			u32 gw0 = ioread32be(gt);
++			u32 nkeys = (gw0 >> 24) & 0xFF;
++			int i;
++
++			if (nkeys < 1) {
++				/* F-148 v6 (2026-07-31): correct CC match-row format per RM
++				 * 8.7.4.2 / in-tree cc_pack_key (patch 0098).  Each match row
++				 * is key(16B) followed by mask(16B) = 32 bytes per row; row
++				 * base = idx * 32.  v5 wrote ONLY the key at idx*16 and never
++				 * wrote the mask, so the CC engine read uninitialized MURAM as
++				 * the mask and could never match -- the confirmed reason HIT
++				 * dispatch has never worked.  (16/32 are the CC_KEY_SIZE /
++				 * row-stride literals resolved earlier in fman_pcd_cc.c; not
++				 * referenced by symbol here because that TU defines them.)
++				 *
++				 * Key: bytes 0..key_size-1 = real extracted key (13B for v4,
++				 * MSB-first SIP DIP PROTO SPORT DPORT), bytes ..15 = 0 pad.
++				 * Mask mirrored on the 16B-aligned mask half: 0xff = participate
++				 * (exact match) for the key bytes, 0x00 = wildcard for bytes
++				 * 13..15.  keySize in group word2 is 16 but KG extracts only
++				 * 13B, so bytes 13..15 of the compare window are UNDEFINED
++				 * silicon padding; the 0x00 mask makes the comparator ignore
++				 * them -- this also resolves the long-standing H2
++				 * (padding-bytes) question structurally.
++				 */
++				for (i = 0; i < key_size && i < 16; i++)
++					iowrite8(key[i], mt + nkeys * 32 + i);
++				for (; i < 16; i++)
++					iowrite8(0, mt + nkeys * 32 + i);
++				/* Mask half (row + 16). */
++				for (i = 0; i < key_size && i < 16; i++)
++					iowrite8(0xff, mt + nkeys * 32 + 16 + i);
++				for (; i < 16; i++)
++					iowrite8(0x00, mt + nkeys * 32 + 16 + i);
++
++				if (ato && t->pcd->fe_root_ad_off) {
++					void __iomem *at = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, ato);
++					void __iomem *root = (void __iomem *)fman_muram_offset_to_vbase(
++						muram, t->pcd->fe_root_ad_off);
++					/* Copy the real FE_ENTER AD content (4 words), not the offset. */
++					iowrite32be(ioread32be(root + 0), at + nkeys * 16 + 0);
++					iowrite32be(ioread32be(root + 4), at + nkeys * 16 + 4);
++					iowrite32be(ioread32be(root + 8), at + nkeys * 16 + 8);
++					iowrite32be(ioread32be(root + 12), at + nkeys * 16 + 12);
++				}
++
++				nkeys++;
++				/* F-183(numkeys-pinned): do NOT publish the numKeys bump
++				 * to the group word. The walker is proven insensitive
++				 * to match rows (frames always take the miss slot);
++				 * publishing numKeys=1 would move the miss slot from
++				 * ato[0] (FE_ENTER copy) to ato[1] (kernel enq-AD)
++				 * and bypass the FE-VM entirely after the first flow
++				 * insert. The match-row + ato[0] writes above stay
++				 * (inert; ato[0] gets the same FE_ENTER copy).
++				 */
++
++				pr_info("fman_pcd: F-148 CC key[%u] written (numKeys pinned 0, F-183)\n",
++					 nkeys - 1);
++			} else {
++				pr_warn("fman_pcd: F-148 CC match table full (1 key max -- scaffold not sized for more)\n");
++			}
++		}
++	}
++
+ 	list_add(&flow->node, &t->flows);	/* head-add => LIFO drain */
+ 	return 0;
+ }
+@@ -1905,10 +2333,77 @@ static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t)
+ 		list_del(&flow->node);
+ 		dma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE,
+ 				  flow->record, flow->record_dma);
++		if (flow->ctx)	/* F-175 */
++			dma_free_coherent(t->dev, FMAN_FE_CTX_SIZE, flow->ctx,
++					  flow->ctx_dma);
+ 		kfree(flow);
+ 	}
+ }
+ 
++/*
++ * F-117: delete ONE flow whose key matches @key, keeping the live silicon
++ * collision chain AND the prev_head LIFO-drain invariant intact. O(n).
++ * Caller holds pcd->fe_lock (same contract as add_key).
++ */
++static int fman_pcd_ehash_del_key(struct fman_pcd_ehash_table *t,
++				  const u8 *key, u8 key_size)
++{
++	struct fman_pcd_ehash_flow *x = NULL, *y, *f;
++	u64 x_phys, x_next;
++
++	if (!t || !key || key_size == 0 || key_size != t->key_size)
++		return -EINVAL;
++
++	list_for_each_entry(f, &t->flows, node) {
++		if (f->key_size == key_size &&
++		    !memcmp((u8 *)f->record + FMAN_EHASH_FLOW_KEY_OFF,
++			    key, key_size)) {
++			x = f;
++			break;
++		}
++	}
++	if (!x)
++		return -ENOENT;
++
++	x_phys = (u64)virt_to_phys(x->record);
++	/* x's own next-pointer: native phys of the record x chains to. */
++	x_next = ((u64)be16_to_cpu(*(__be16 *)((u8 *)x->record + 2)) << 32) |
++		 be32_to_cpu(*(__be32 *)((u8 *)x->record + 4));
++
++	if (swab64(*x->bucket_h) == x_phys) {
++		/* x is the bucket head: restore head to x's saved prev_head. */
++		*x->bucket_h = x->prev_head;
++	} else {
++		/* mid-chain: find predecessor y (same bucket, next == x). */
++		list_for_each_entry(y, &t->flows, node) {
++			u64 y_next;
++
++			if (y == x || y->index != x->index)
++				continue;
++			y_next = ((u64)be16_to_cpu(*(__be16 *)((u8 *)y->record + 2)) << 32) |
++				 be32_to_cpu(*(__be32 *)((u8 *)y->record + 4));
++			if (y_next != x_phys)
++				continue;
++			/* y now chains to x's next; keep the drain invariant. */
++			*(__be16 *)((u8 *)y->record + 2) =
++				cpu_to_be16((u16)((x_next >> 32) & 0xffff));
++			*(__be32 *)((u8 *)y->record + 4) =
++				cpu_to_be32((u32)(x_next & 0xffffffff));
++			y->prev_head = x->prev_head;
++			break;
++		}
++	}
++
++	list_del(&x->node);
++	/* record is dma_alloc_coherent (0130) — free it the same way
++	 * fman_pcd_ehash_flow_drain() does, NOT kfree (which trips
++	 * free_large_kmalloc and corrupts the coherent allocator). */
++	dma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE,
++			  x->record, x->record_dma);
++	kfree(x);
++	return 0;
++}
++
+ static void fman_pcd_ehash_flow_clear_all(struct fman_pcd *pcd)
+ {
+ 	struct fman_pcd_ehash_table *t;
+@@ -1959,6 +2454,60 @@ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
+ 	return 0;
+ }
+ 
++
++/*
++ * F-176: dispatch/FQID-independent HIT discriminator. Dumps, per inserted
++ * ehash flow, the hardware-writeback stats fields (packet_count/
++ * packet_bytes valid once F-176's flags=0x1000/STATS_EN has been armed and
++ * a matching frame has been sent -- timestamp intentionally not populated,
++ * see the Phase 1 correction in this file's module docstring) plus the
++ * bucket head pointer re-read live (not cached) so a stale/overwritten
++ * head is visible without a separate probe.
++ */
++static int fman_pcd_fe_ehash_stats_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct fman_pcd_ehash_table *t;
++	struct fman_pcd_ehash_flow *flow;
++	unsigned int ti = 0;
++
++	mutex_lock(&pcd->fe_lock);
++	list_for_each_entry(t, &pcd->fe_ehash_tables, node) {
++		list_for_each_entry(flow, &t->flows, node) {
++			const u8 *r = flow->record;
++			u64 head_now = *flow->bucket_h;
++			u64 pkt_count = be64_to_cpu(*(const __be64 *)(r + 256));
++			u64 pkt_bytes = be64_to_cpu(*(const __be64 *)(r + 264));
++			u32 ts = be32_to_cpu(*(const __be32 *)(r + 272));
++
++			seq_printf(s,
++				   "tbl[%u] idx=%u keysz=%u record_dma=0x%llx bucket_head_now=0x%016llx pkt_count=%llu pkt_bytes=%llu timestamp=0x%08x\n",
++				   ti, flow->index, flow->key_size,
++				   (unsigned long long)flow->record_dma,
++				   (unsigned long long)head_now,
++				   (unsigned long long)pkt_count,
++				   (unsigned long long)pkt_bytes,
++				   ts);
++		}
++		ti++;
++	}
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_fe_ehash_stats_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_ehash_stats_show, inode->i_private);
++}
++
++static const struct file_operations fman_pcd_fe_ehash_stats_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_ehash_stats_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ static int fman_pcd_fe_flow_open(struct inode *inode, struct file *file)
+ {
+ 	return single_open(file, fman_pcd_fe_flow_show, inode->i_private);
+@@ -1971,7 +2520,8 @@ static ssize_t fman_pcd_fe_flow_write(struct file *file,
+ 	struct seq_file *s = file->private_data;
+ 	struct fman_pcd *pcd = s->private;
+ 	struct fman_pcd_ehash_table *t;
+-	unsigned long enq_fe_off = 0;
++	struct fman_pcd_fe_obj *enq_obj;
++	unsigned long fqid = 0;	/* F-175: was an ENQ FE MURAM offset */
+ 	unsigned int tbl_idx;
+ 	char buf[160], keytok[2 * FMAN_EHASH_FLOW_KEY_MAX + 2];
+ 	u8 key[FMAN_EHASH_FLOW_KEY_MAX];
+@@ -1992,7 +2542,53 @@ static ssize_t fman_pcd_fe_flow_write(struct file *file,
+ 		return count;
+ 	}
+ 
+-	nf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &enq_fe_off);
++	/*
++	 * F-118: per-key delete unit-test hook — "del <keyhex>" removes the one
++	 * flow whose key matches (F-117 fman_pcd_ehash_del_key on table 0), so
++	 * Fix B's collision-chain unlink is testable without arming the FE VM.
++	 */
++	if (!strncmp(buf, "del ", 4)) {
++		char dkeytok[2 * FMAN_EHASH_FLOW_KEY_MAX + 2];
++		u8 dkey[FMAN_EHASH_FLOW_KEY_MAX];
++		u8 dks = 0;
++		const char *dk;
++		struct fman_pcd_ehash_table *dt;
++		int derr;
++
++		if (sscanf(buf, "del %113s", dkeytok) != 1) {
++			mutex_unlock(&pcd->fe_lock);
++			return -EINVAL;
++		}
++		for (dk = dkeytok; dk[0] && dk[1]; dk += 2) {
++			int hi = fman_pcd_hexval(dk[0]);
++			int lo = fman_pcd_hexval(dk[1]);
++
++			if (hi < 0 || lo < 0 ||
++			    dks >= FMAN_EHASH_FLOW_KEY_MAX) {
++				mutex_unlock(&pcd->fe_lock);
++				return -EINVAL;
++			}
++			dkey[dks++] = (u8)((hi << 4) | lo);
++		}
++		if (dks == 0 || dkeytok[2 * dks] != '\0') {
++			mutex_unlock(&pcd->fe_lock);
++			return -EINVAL;
++		}
++		dt = fman_pcd_ehash_table_by_index(pcd, 0);
++		if (!dt) {
++			mutex_unlock(&pcd->fe_lock);
++			return -ENODEV;
++		}
++		derr = fman_pcd_ehash_del_key(dt, dkey, dks);
++		mutex_unlock(&pcd->fe_lock);
++		return derr ? derr : count;
++	}
++
++	/* F-175: 3rd arg is now the target FQID, not an ENQ FE MURAM
++	 * offset -- the real per-flow dispatch target lives in a separate
++	 * context buffer (see fman_pcd_ehash_add_key).
++	 */
++	nf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &fqid);
+ 	if (nf < 2) {
+ 		mutex_unlock(&pcd->fe_lock);
+ 		return -EINVAL;
+@@ -2020,7 +2616,57 @@ static ssize_t fman_pcd_fe_flow_write(struct file *file,
+ 		return -ENODEV;
+ 	}
+ 
+-	err = fman_pcd_ehash_add_key(t, key, key_size, enq_fe_off);
++	enq_obj = list_first_entry_or_null(&pcd->fe_enq,
++					   struct fman_pcd_fe_obj, node);
++	if (!enq_obj) {
++		mutex_unlock(&pcd->fe_lock);
++		return -ENOENT;	/* fe_enq build first */
++	}
++
++	err = fman_pcd_ehash_add_key(t, key, key_size,
++				     (u32)enq_obj->muram_off, (u32)fqid);
++
++	if (!err) {
++		/* F-177 (T-M3-R Phase 2 item 2): assert FMFP_EXTC[INV0] SYNC
++		 * after the bucket-head publish, mirroring F-168's SYNC on
++		 * FMBM_RCCB (RM S5.12.14.1: required after changing a live
++		 * FMan-controller-walked structure, before dispatch into it
++		 * is safe). Best-effort: a timeout is logged but does not
++		 * fail the insert -- this is a diagnostic probe of whether
++		 * the ehash bucket table needs the same nudge as AC_CC
++		 * dispatch did, not a confirmed hardware requirement yet.
++		 */
++		struct fman *__f177_fman = fman_pcd_get_fman(pcd);
++
++		if (__f177_fman) {
++			/* Local constants, not F-167's FMAN_FPM_EXTC_* macros --
++			 * those are #defined later in this file (near fe_arm's
++			 * fops), after this insertion point, so they are not yet
++			 * visible here. Matches F-168's own precedent of a
++			 * self-contained local const for the same register.
++			 */
++			const u32 __f177_inv0 = 0x80000000U;
++			const unsigned int __f177_poll_max = 100000U;
++			u32 __f177_extc;
++			unsigned int __f177_i;
++
++			fman_set_fpm_extc(__f177_fman, __f177_inv0);
++			for (__f177_i = 0; __f177_i < __f177_poll_max; __f177_i++) {
++				__f177_extc = fman_get_fpm_extc(__f177_fman);
++				if (!(__f177_extc & __f177_inv0))
++					break;
++				udelay(1);
++			}
++			if (__f177_extc & __f177_inv0)
++				dev_warn(fman_get_dev(pcd->fman),
++					 "fe_flow: F-177 FMFP_EXTC SYNC timed out after %u polls (fmfp_extc=0x%08x)\n",
++					 __f177_poll_max, __f177_extc);
++			else
++				dev_info(fman_get_dev(pcd->fman),
++					 "fe_flow: F-177 FMFP_EXTC SYNC cleared after %u poll(s)\n",
++					 __f177_i);
++		}
++	}
+ 	mutex_unlock(&pcd->fe_lock);
+ 
+ 	return err ? err : count;
+@@ -2079,10 +2725,11 @@ static void fman_pcd_fe_hash_encode(struct muram_info *muram,
+ 				    unsigned long fe_off,
+ 				    const struct fman_pcd_ehash_table *t,
+ 				    unsigned long mux_off,
+-				    unsigned long miss_off)
++				    unsigned long miss_off,
++				    unsigned long miss_res_off)
+ {
+ 	u32 __iomem *fe = (u32 __iomem *)
+-		fman_muram_offset_to_vbase(muram, fe_off);
++		(void *)fman_muram_offset_to_vbase(muram, fe_off);
+ 	u64 tblphys = (u64)t->table_dma;
+ 
+ 	iowrite32be(FMAN_FE_TYPE_EXT_HASH, fe + 0);		/* misc       */
+@@ -2099,7 +2746,7 @@ static void fman_pcd_fe_hash_encode(struct muram_info *muram,
+ 		    (u32)(t->hash_shift & 0xff), fe + 1);
+ 	iowrite32be((u32)((tblphys >> 32) & 0xffff), fe + 2);	/* tbl hi     */
+ 	iowrite32be((u32)(tblphys & 0xffffffff), fe + 3);	/* tbl lo     */
+-	iowrite32be(0, fe + 4);					/* missResult */
++	iowrite32be((u32)miss_res_off, fe + 4);		/* missResult -> t_ExtHashResult */
+ 	iowrite32be((u32)mux_off, fe + 5);			/* HIT  -> MUX  */
+ 	iowrite32be((u32)miss_off, fe + 6);			/* MISS -> Exit */
+ }
+@@ -2136,8 +2783,28 @@ static int fman_pcd_fe_hash_build(struct fman_pcd *pcd)
+ 		return -ENOSPC;
+ 
+ 	list_del(&obj->node);
++		/* F-069: allocate 256B DDR miss context + 16B MURAM t_ExtHashResult */
++	pcd->miss_ctx = dma_alloc_coherent(t->dev, 256, &pcd->miss_ctx_phys, GFP_KERNEL);
++	if (!pcd->miss_ctx)
++		return -ENOMEM;
++	pcd->miss_res_off = fman_pcd_muram_alloc(pcd, 16);
++	if (IS_ERR_VALUE(pcd->miss_res_off)) {
++		dma_free_coherent(t->dev, 256, pcd->miss_ctx, pcd->miss_ctx_phys);
++		pcd->miss_ctx = NULL;
++		return -ENOMEM;
++	}
++	/* Write t_ExtHashResult: {LIODN=0|phys_hi, phys_lo, 0, 0} */
++	{
++		void __iomem *mr = (void __iomem *)(void *)fman_muram_offset_to_vbase(muram, pcd->miss_res_off);
++		u32 plo = (u32)(pcd->miss_ctx_phys & 0xFFFFFFFF);
++		u32 phi = (u32)((pcd->miss_ctx_phys >> 32) & 0xFFFF);
++		iowrite32be(phi, mr + 0);
++		iowrite32be(plo, mr + 4);
++		iowrite32be(0, mr + 8);
++		iowrite32be(0, mr + 12);
++	}
+ 	fman_pcd_fe_hash_encode(muram, obj->muram_off, t,
+-				pcd->fe_mux_off, pcd->fe_exit_off);
++				pcd->fe_mux_off, pcd->fe_exit_off, pcd->miss_res_off);
+ 	pcd->fe_hash_off = obj->muram_off;
+ 	list_add_tail(&obj->node, &pcd->fe_singletons);
+ 	return 0;
+@@ -2157,12 +2824,33 @@ static void fman_pcd_fe_hash_free(struct fman_pcd *pcd)
+ 		list_del(&obj->node);
+ 		if (muram)
+ 			memset_io((void __iomem *)
+-				  fman_muram_offset_to_vbase(muram,
++				  (void *)fman_muram_offset_to_vbase(muram,
+ 							     obj->muram_off),
+ 				  0, FMAN_PCD_FE_MAX_SIZE);
+ 		list_add_tail(&obj->node, &pcd->fe_available);
+ 		break;
+ 	}
++	/* F-187(hash-free-miss-res): release the miss-result allocations
++	 * made by fe_hash_build -- the 16 B MURAM t_ExtHashResult and the
++	 * 256 B DMA miss context. fe_hash_free previously returned only
++	 * the FE object to the pool, leaking exactly 16 B MURAM + 256 B
++	 * DMA per build/clear cycle (measured on .185, E26). The hash AD
++	 * was already zeroed above (FMAN_PCD_FE_MAX_SIZE memset), so the
++	 * missResult pointer reference is gone before we free the target.
++	 */
++	if (pcd->miss_res_off) {
++		fman_pcd_muram_free(pcd, pcd->miss_res_off, 16);
++		pcd->miss_res_off = 0;
++	}
++	if (pcd->miss_ctx) {
++		struct fman_pcd_ehash_table *__t =
++			list_last_entry_or_null(&pcd->fe_ehash_tables,
++				struct fman_pcd_ehash_table, node);
++		if (__t)
++			dma_free_coherent(__t->dev, 256, pcd->miss_ctx,
++					  pcd->miss_ctx_phys);
++		pcd->miss_ctx = NULL;
++	}
+ 	pcd->fe_hash_off = 0;
+ }
+ 
+@@ -2184,7 +2872,7 @@ static int fman_pcd_fe_hashfe_show(struct seq_file *s, void *unused)
+ 		mutex_unlock(&pcd->fe_lock);
+ 		return 0;
+ 	}
+-	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram, pcd->fe_hash_off);
++	fe = (u32 __iomem *)(void *)fman_muram_offset_to_vbase(muram, pcd->fe_hash_off);
+ 	seq_printf(s, "hash_fe    off=0x%05lx ", pcd->fe_hash_off);
+ 	for (i = 0; i < FMAN_FE_HASH_SIZE / 4; i++)
+ 		seq_printf(s, "%08x ", ioread32be(fe + i));
+@@ -2236,6 +2924,282 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
  	.release	= single_release,
  };
  
@@ -133,10 +1336,21 @@ index 7fdb1fb..1b91853 100644
 +	c.type = FMAN_FE_TYPE_ENQ;
 +	c.u.enq.fqid = fqid;
 +	fman_pcd_fe_context_build((void __iomem *)
-+				  fman_muram_offset_to_vbase(muram,
++				  (void *)fman_muram_offset_to_vbase(muram,
 +							     obj->muram_off),
 +				  FMAN_FE_ENQ_CTX_OFF, &c);
 +	*out_off = obj->muram_off;
++	/* F-184: obj came from list_first_entry_or_null(), which does NOT
++	 * unlink -- list_del is required before list_add_tail, exactly as
++	 * every other fe_available consumer in this file does (singletons,
++	 * enq, hashfe builders). Without it the node stays on fe_available
++	 * and the add is a double-add: CONFIG_DEBUG_LIST BUGs at
++	 * lib/list_debug.c:35, panicking the kernel on every fe_obs arm.
++	 * Reproduced twice on .185 (2026-08-12): trace
++	 * fman_pcd_fe_obs_enq_one -> __list_add_valid_or_report, panic=60
++	 * reboot both times.
++	 */
++	list_del(&obj->node);
 +	list_add_tail(&obj->node, &pcd->fe_singletons);
 +	return 0;
 +}
@@ -154,7 +1368,7 @@ index 7fdb1fb..1b91853 100644
 +		list_del(&obj->node);
 +		if (muram)
 +			memset_io((void __iomem *)
-+				  fman_muram_offset_to_vbase(muram, off),
++				  (void *)fman_muram_offset_to_vbase(muram, off),
 +				  0, FMAN_PCD_FE_MAX_SIZE);
 +		list_add_tail(&obj->node, &pcd->fe_available);
 +		break;
@@ -185,7 +1399,7 @@ index 7fdb1fb..1b91853 100644
 +	    (miss_fqid & ~FMAN_FE_ENQ_NIA_MASK))
 +		return -EINVAL;
 +
-+	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++	fe = (u32 __iomem *)(void *)fman_muram_offset_to_vbase(muram,
 +						      pcd->fe_hash_off);
 +	saved_hit = ioread32be(fe + 5);
 +	saved_miss = ioread32be(fe + 6);
@@ -234,7 +1448,7 @@ index 7fdb1fb..1b91853 100644
 +	if (!muram)
 +		return -EINVAL;
 +
-+	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++	fe = (u32 __iomem *)(void *)fman_muram_offset_to_vbase(muram,
 +						      pcd->fe_hash_off);
 +	iowrite32be(pcd->fe_obs_saved_hit, fe + 5);
 +	iowrite32be(pcd->fe_obs_saved_miss, fe + 6);
@@ -272,7 +1486,7 @@ index 7fdb1fb..1b91853 100644
 +			   pcd->fe_obs_saved_hit, pcd->fe_obs_saved_miss);
 +	}
 +	if (pcd->fe_hash_off) {
-+		fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++		fe = (u32 __iomem *)(void *)fman_muram_offset_to_vbase(muram,
 +							      pcd->fe_hash_off);
 +		seq_puts(s, "hashfe:      ");
 +		for (i = 0; i < FMAN_FE_HASH_SIZE / 4; i++)
@@ -340,7 +1554,609 @@ index 7fdb1fb..1b91853 100644
  /*
   * Build FE-VM runtime contexts after the full dormant chain is assembled.
   * Called by fe_arm engage before reprogramming KeyGen/BMI.
-@@ -2877,6 +3154,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -2256,7 +3220,7 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
+ 	enq = list_first_entry_or_null(&pcd->fe_enq,
+ 				       struct fman_pcd_fe_obj, node);
+ 	if (enq) {
+-		fe = fman_muram_offset_to_vbase(muram, enq->muram_off);
++		fe = (void *)fman_muram_offset_to_vbase(muram, enq->muram_off);
+ 		fqid = ioread32be((u32 __iomem *)fe + 1) & 0x00FFFFFFu;
+ 		if (fqid) {
+ 			p.type = FMAN_FE_TYPE_ENQ;
+@@ -2268,21 +3232,19 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
+ 
+ 	/* MUX context: HIT -> ENQ */
+ 	if (pcd->fe_mux_off && enq) {
+-		fe = fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
+-		memset(&p, 0, sizeof(p));
+-		p.type = FMAN_FE_TYPE_MUX;
+-		p.u.mux.next_fe_off = enq->muram_off;
+-		fman_pcd_fe_context_build(fe, FMAN_FE_MUX_CTX_OFF, &p);
++		fe = (void *)fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
++		/* F-054+F-055: MUX AD word 1 = next-FE offset.
++		 * AD+0 overwriting the type header, crashing hardware. */
++		iowrite32be(FMAN_FE_TYPE_MUX | (u32)pcd->fe_transition_off, fe);	/* F-153: MUX -> TRANSITION (was -> ENQ) */
+ 	}
+ 
+ 	/* Transition: MISS -> Exit (deallocate) */
+ 	if (pcd->fe_transition_off && pcd->fe_exit_off) {
+-		fe = fman_muram_offset_to_vbase(muram,
++		fe = (void *)fman_muram_offset_to_vbase(muram,
+ 					pcd->fe_transition_off);
+-		memset(&p, 0, sizeof(p));
+-		p.type = FMAN_FE_TYPE_TRANSITION;
+-		p.u.transition.next_ad_off = pcd->fe_exit_off;
+-		fman_pcd_fe_context_build(fe, FMAN_FE_TRANSITION_CTX_OFF, &p);
++		/* F-054: Transition AD word 1 = next-AD offset.
++		 * Same context_build corruption bug as MUX. */
++		iowrite32be((u32)enq->muram_off, (u32 __iomem *)fe + 1);	/* F-153: TRANSITION -> ENQ (was -> EXIT) */
+ 	}
+ }
+ 
+@@ -2314,6 +3276,8 @@ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
+  * Typed engage — called by both the debugfs wrapper and the exported
+  * fman_pcd_fe_engage() (0153).  No string parsing.
+  */
++static int fman_pcd_fe_verify_internal(struct fman_pcd *pcd, u8 hw_port_id);
++
+ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 				    unsigned int port_id,
+ 				    unsigned long fe_enter_off,
+@@ -2325,10 +3289,7 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 
+ 	if (port_id < 0x08 || port_id >= 0x28)
+ 		return -EINVAL;
+-	if (miss_fqid == 0)
+-		miss_fqid = 0x200;
+-
+-	{
++		{
+ 		struct muram_info *muram = fman_get_muram(pcd->fman);
+ 		unsigned long gro, mto, ato;
+ 
+@@ -2357,22 +3318,71 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 				void __iomem *c;
+ 
+ 				c = (void __iomem *)
+-					fman_muram_offset_to_vbase(muram, gro);
+-				iowrite32be(((fe_enter_off != 0 ? 1 : 0) << 24) | (mto & 0xFFFFFF),
+-					    c + 0);
+-				iowrite32be((ato & 0xFFFFFF), c + 4);
+-				iowrite32be(0x4F000000, c + 8);
+-				iowrite32be(0, c + 12);
+-				c = (void __iomem *)
+-					fman_muram_offset_to_vbase(muram, ato);
+-				iowrite32be((u32)miss_fqid, c + 0);
+-				iowrite32be(0, c + 4);
+-				iowrite32be(0, c + 8);
+-				iowrite32be(0, c + 12);
+-				iowrite32be((u32)miss_fqid, c + 16);
+-				iowrite32be(0, c + 20);
+-				iowrite32be(0, c + 24);
+-				iowrite32be(0, c + 28);
++					(void *)fman_muram_offset_to_vbase(muram, gro);
++								/* F-185(vendor-node): the 210.10.1 CC engine's CONT_LOOKUP
++				 * path is the enhanced external-hash machine -- it parses
++				 * the 16B AD at RCCB+CCOBASE*16 as an en_exthash_node
++				 * VARIANT B (Ghidra decode E23, 2026-08-12; .106 row
++				 * confirmed 4 ways). F-183's RM-8.7.4.1 group AD parses
++				 * as garbage-as-node (miss_action DONE, keysize 0,
++				 * table_base = MURAM-off-as-DDR, pool out of range) ->
++				 * frames terminated with no disposition (E23 root
++				 * cause). Write the vendor node: HIT = the DDR entry's
++				 * opcode script ENQUEUE_PKT -> param.fqid (F-181/F-182
++				 * records); MISS = word3 NIA, patched by arm_fe
++				 * (KG-direct|CC_EN|scheme, byte-exact the .106
++				 * 0x0048030x encoding). Needs the fe_ehash table +
++				 * fe_int_buf pool; without them fall back to the
++				 * numKeys=0 miss-enq group (production pass-through).
++				 */
++				{
++					struct fman_pcd_ehash_table *et =
++						list_first_entry_or_null(&pcd->fe_ehash_tables,
++							struct fman_pcd_ehash_table, node);
++
++					if (et && pcd->fe_int_buf_off) {
++						u64 tb = (u64)et->table_dma;
++
++						/* F-186(enque-miss): word0 bits[31:30] = 0b10 =
++						 * EN_EHASH_MISS_ACTION_ENQUE (E25, 2026-08-12): word3
++						 * is then an fqid and the miss is a DIRECT enqueue --
++						 * loop-free. F-185's 0b01 (NIA) made word3 a
++						 * KG-direct NIA which INFINITELY LOOPS on an empty
++						 * bucket on 210.10.1 (~4.5M class/sec, no hop limit,
++						 * no stall; KG-direct to a foreign scheme instead =
++						 * FM_FD_ERR_NO_SCHEME 0x00004000 -> error FQ). The
++						 * fallback RM group form is untouched (not a node).
++						 */
++						iowrite32be((2U << 30) |
++							    ((u32)(et->key_size & 0x3f) << 24) |
++							    (4U << 20) |
++							    ((u32)(et->hash_shift & 0x7) << 16) |
++							    ((u32)(tb >> 32) & 0xffU), c + 0);
++						iowrite32be((u32)(tb & 0xffffffffU), c + 4);
++						iowrite32be(((u32)((pcd->fe_int_buf_off >> 8) &
++								   0xffffU) << 16) |
++							    (0x80U << 4) |
++							    (u32)(et->hash_mask_bits & 0xfU),
++							    c + 8);
++						/* word3 = miss NIA: patched by arm_fe via
++						 * fman_pcd_fe_node_set_miss_nia() before the
++						 * EXTC SYNC in fman_port_set_cc_base().
++						 */
++						iowrite32be(0, c + 12);
++					} else {
++						iowrite32be((0U << 24) | (mto & 0xFFFFFF), c + 0);
++						iowrite32be((ato & 0xFFFFFF), c + 4);
++						iowrite32be(0x4F000000, c + 8);
++						iowrite32be(0, c + 12);
++						c = (void __iomem *)
++							(void *)fman_muram_offset_to_vbase(muram, ato);
++						iowrite32be((u32)miss_fqid, c + 0);
++						iowrite32be(0, c + 4);
++						iowrite32be(0, c + 8);
++						iowrite32be(0, c + 12);
++					}
++				}
++				/* F-185: RCCB always points at gro (node or group). */
+ 				fe_enter_off = gro;
+ 
+ 				pcd->fe_scaffold_gro = gro;
+@@ -2404,7 +3414,16 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 			return err;
+ 	}
+ 
+-	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
++	/* C2 readback gate (F-008): validate MURAM before KG arm.
++	 * Catches silent-write defects before frames hit silicon. */
++	{		int _verify_err = fman_pcd_fe_verify_internal(pcd, (u8)port_id);
++		if (_verify_err) {
++			pr_err("fman_pcd: arm_engage 0x%02x ABORTED — verify failed\n",
++			       (u8)port_id);
++			return _verify_err;
++		}	}
++
++		err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
+ 				      (u32)fe_enter_off, &saved_engine, ekfc);
+ 	if (err) {
+ 		/*
+@@ -2427,11 +3446,111 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 
+ 	set_bit(port_id, pcd->fe_port_armed);	/* F-107: per-port engagement guard */
+ 	pcd->fe_miss_fqid = miss_fqid;
+-	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED (AC_CC)\n", port_id);
++	/* F-096 / 0146: Build FE-VM runtime contexts so MUX can
++	 * read its next-FE pointer from the working store.
++	 * Without this, the FE-VM parks on first frame under load.
++	 */
++	fman_pcd_fe_build_contexts(pcd);
++
++	/* F-185(engaged-dmesg): vendor AC_CC + VARIANT B node model. */
++	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED (AC_CC vendor-node)\n", port_id);
+ 	return 0;
+ }
+ 
++/* F-185(miss-nia-setter): write word3 (miss NIA) of the vendor node
++ * at node_off. No-op unless the node form was built (ehash table
++ * present) -- the fallback RM group needs word3 = 0. Called from
++ * arm_fe after scheme-id resolution, before fman_port_set_cc_base()
++ * asserts EXTC SYNC.
++ */
++void fman_pcd_fe_node_set_miss_nia(struct fman_pcd *pcd, u32 node_off,
++				   u32 nia)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	void __iomem *nd;
++
++	if (!muram || !node_off || list_empty(&pcd->fe_ehash_tables))
++		return;
++	nd = (void __iomem *)(void *)
++		fman_muram_offset_to_vbase(muram, node_off);
++	iowrite32be(nia, nd + 12);
++}
++
+ /* Debugfs wrapper — parse string, delegate to __fman_pcd_fe_arm_engage(). */
++/* F-072 v3: Port FmPortSetFESupport. Internal FE buffer pool + mgmt index in MURAM.
++ * SDK 999-patch ~L14545. tnums*512B pool (256-align auto via gen_pool granule),
++ * (5+tnums) byte index. Params page +0x54=index MURAM off, +0x58=0.
++ * port_id is u8 hw port number (not port->port_id — struct fman_port is opaque).
++ */
++static int fman_pcd_fe_buffer_setup(struct fman_pcd *pcd,
++                                    struct fman_port *port, u8 port_id)
++{
++    struct muram_info *muram = fman_get_muram(pcd->fman);
++    u8 tnums;
++    unsigned long pool_off, idx_off;
++    u32 pp_off;
++    void __iomem *pp, *idx;
++    int i;
++
++    static const unsigned int BMI_FIFO_UNITS = 0x100;
++
++    if (!muram || !port)
++        return -EINVAL;
++
++    tnums = fman_port_get_total_tnums(port);
++    if (!tnums)
++        return -EINVAL;
++
++    pp_off = fman_port_get_params_page(port);
++    if (IS_ERR_VALUE(pp_off))
++        return (int)pp_off;
++
++    /* gen_pool MURAM granule is 256 (MURAM_ORDER=8), so alloc is 256-aligned */
++    pool_off = fman_pcd_muram_alloc(pcd, tnums * BMI_FIFO_UNITS * 2);
++    if (IS_ERR_VALUE(pool_off))
++        return (int)pool_off;
++
++    memset_io((void *)fman_muram_offset_to_vbase(muram, pool_off), 0,
++              tnums * BMI_FIFO_UNITS * 2);
++
++    idx_off = fman_pcd_muram_alloc(pcd, 5 + tnums);
++    if (IS_ERR_VALUE(idx_off)) {
++        fman_pcd_muram_free(pcd, pool_off, tnums * BMI_FIFO_UNITS * 2);
++        return (int)idx_off;
++    }
++
++    idx = (void *)fman_muram_offset_to_vbase(muram, idx_off);
++    iowrite32be(pool_off, idx);
++    iowrite8(4, idx);
++    for (i = 0; i < tnums; i++)
++        iowrite8(i, (void __iomem *)((u8 __iomem *)idx + 4 + i));
++    iowrite8(0xFF, (void __iomem *)((u8 __iomem *)idx + 4 + tnums));
++
++    pp = (void *)fman_muram_offset_to_vbase(muram, pp_off);
++    iowrite32be((u32)idx_off, (void __iomem *)((u8 __iomem *)pp + 0x54));
++    iowrite32be(0,          (void __iomem *)((u8 __iomem *)pp + 0x58));
++
++    pr_info("fman_pcd: F-072 port 0x%02x FE buffer pool=%#lx idx=%#lx tnums=%u\n",
++            port_id, pool_off, idx_off, tnums);
++    return 0;
++}
++
++static void fman_pcd_fe_buffer_teardown(struct fman_pcd *pcd,
++                                       struct fman_port *port)
++{
++    struct muram_info *muram = fman_get_muram(pcd->fman);
++    u32 pp_off;
++    void __iomem *pp;
++
++    if (!muram || !port)
++        return;
++    pp_off = fman_port_get_params_page(port);
++    if (IS_ERR_VALUE(pp_off))
++        return;
++    pp = (void *)fman_muram_offset_to_vbase(muram, pp_off);
++    iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x54));
++}
++
+ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ {
+ 	unsigned int port_id = 0;
+@@ -2492,6 +3611,44 @@ static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
+ 	return __fman_pcd_fe_arm_disengage(pcd, port_id);
+ }
+ 
++static int fman_pcd_fe_buffer_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	int port_id;
++	void __iomem *pp;
++	u32 v54, v58;
++
++	for (port_id = 0x08; port_id <= 0x11; port_id++) {
++		struct fman_port *port = fman_port_lookup_rx(pcd->fman, port_id);
++		u32 pp_off;
++		if (!port)
++			continue;
++		pp_off = fman_port_get_params_page(port);
++		if (IS_ERR_VALUE(pp_off))
++			continue;
++		pp = (void *)fman_muram_offset_to_vbase(muram, pp_off);
++		v54 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x54));
++		v58 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x58));
++		seq_printf(s, "port 0x%02x: +0x54=%#010x +0x58=%#010x tnums=%u\n",
++			   port_id, v54, v58, fman_port_get_total_tnums(port));
++	}
++	return 0;
++}
++
++static int fman_pcd_fe_buffer_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_buffer_show, inode->i_private);
++}
++
++static const struct file_operations fman_pcd_fe_buffer_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_buffer_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ static int fman_pcd_fe_arm_show(struct seq_file *s, void *unused)
+ {
+ 	struct fman_pcd *pcd = s->private;
+@@ -2721,7 +3878,6 @@ static int __fman_pcd_fe_build_vm_chain(struct fman_pcd *pcd)
+ 	const u32 ehash_mask    = 0x7FFF;
+ 	const u8  ehash_key_sz  = 13;
+ 	const u8  ehash_shift   = 0;
+-	const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
+ 
+ 	err = fman_pcd_fe_pool_get(pcd);
+ 	if (err)
+@@ -2736,11 +3892,23 @@ static int __fman_pcd_fe_build_vm_chain(struct fman_pcd *pcd)
+ 	if (err)
+ 		return err;
+ 
++	/* F-140 (T-M6-1 Phase 1): dormant second ehash table for IPv6.
++	 * 38-byte key = PORT_ID|SIP16|DIP16|PROTO|SPORT|DPORT, matching
++	 * ask_fe_build_key_v6(); EKFC will be 0x801C0006 when the separately
++	 * gated v6 KG scheme is implemented. Table index 1; v4 stays table 0.
++	 * The table is intentionally unreferenced until the LCV/kgse_mv
++	 * dual-scheme selection experiment passes on silicon.
++	 */
++	err = fman_pcd_ehash_table_set(pcd, ehash_mask,
++				       38, ehash_shift);
++	if (err)
++		return err;
++
+ 	err = fman_pcd_fe_hash_build(pcd);
+ 	if (err)
+ 		return err;
+ 
+-	err = fman_pcd_fe_enq_build(pcd, tx_fqid, 0);
++	err = fman_pcd_fe_enq_build(pcd);	/* F-175: no per-call fqid */
+ 	if (err)
+ 		return err;
+ 
+@@ -2767,7 +3935,8 @@ static int __fman_pcd_fe_build_vm_chain(struct fman_pcd *pcd)
+ 
+ /* ---- FE-VM engage/flow API for ask.ko (0153) ---- */
+ 
+-int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
++int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id,
++			 u32 enq_fqid)
+ {
+ 	struct fman_pcd *pcd;
+ 	struct fman_port *rxport;
+@@ -2803,6 +3972,8 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+ 	 * (U-Boot loads ucode into MURAM).  If so, just mark built and skip
+ 	 * the allocation to avoid double-allocating the arena.
+ 	 */
++	pcd->fe_enq_fqid = enq_fqid;	/* F-157: HIT ENQ target */
++
+ 	if (!pcd->fe_vm_chain_built) {
+ 		if (!list_empty(&pcd->fe_ehash_tables)) {
+ 			pcd->fe_vm_chain_built = true;
+@@ -2868,6 +4039,7 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ {
+ 	struct fman_pcd *pcd;
+ 	struct fman_pcd_ehash_table *t;
++	struct fman_pcd_fe_obj *enq_obj;
+ 
+ 	if (!fm || !action || action->key_size == 0)
+ 		return -EINVAL;
+@@ -2879,21 +4051,90 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 	if (!t)
+ 		return -ENODEV;
+ 
+-	return fman_pcd_ehash_add_key(t, action->key, action->key_size,
+-				      action->enq_off);
++	/* F-175: action->enq_off is now interpreted as the target FQID;
++	 * the ENQ singleton offset is looked up here, matching the
++	 * fe_flow debugfs path (fman_pcd_fe_flow_write).
++	 */
++	enq_obj = list_first_entry_or_null(&pcd->fe_enq,
++					   struct fman_pcd_fe_obj, node);
++	if (!enq_obj)
++		return -ENOENT;
++
++	{
++		int err = fman_pcd_ehash_add_key(t, action->key, action->key_size,
++						 (u32)enq_obj->muram_off,
++						 (u32)action->enq_off);
++
++	if (!err) {
++		/* F-177 (T-M3-R Phase 2 item 2): assert FMFP_EXTC[INV0] SYNC
++		 * after the bucket-head publish, mirroring F-168's SYNC on
++		 * FMBM_RCCB (RM S5.12.14.1: required after changing a live
++		 * FMan-controller-walked structure, before dispatch into it
++		 * is safe). Best-effort: a timeout is logged but does not
++		 * fail the insert -- this is a diagnostic probe of whether
++		 * the ehash bucket table needs the same nudge as AC_CC
++		 * dispatch did, not a confirmed hardware requirement yet.
++		 */
++		struct fman *__f177_fman = fman_pcd_get_fman(pcd);
++
++		if (__f177_fman) {
++			/* Local constants, not F-167's FMAN_FPM_EXTC_* macros --
++			 * those are #defined later in this file (near fe_arm's
++			 * fops), after this insertion point, so they are not yet
++			 * visible here. Matches F-168's own precedent of a
++			 * self-contained local const for the same register.
++			 */
++			const u32 __f177_inv0 = 0x80000000U;
++			const unsigned int __f177_poll_max = 100000U;
++			u32 __f177_extc;
++			unsigned int __f177_i;
++
++			fman_set_fpm_extc(__f177_fman, __f177_inv0);
++			for (__f177_i = 0; __f177_i < __f177_poll_max; __f177_i++) {
++				__f177_extc = fman_get_fpm_extc(__f177_fman);
++				if (!(__f177_extc & __f177_inv0))
++					break;
++				udelay(1);
++			}
++			if (__f177_extc & __f177_inv0)
++				dev_warn(fman_get_dev(pcd->fman),
++					 "fe_flow: F-177 FMFP_EXTC SYNC timed out after %u polls (fmfp_extc=0x%08x)\n",
++					 __f177_poll_max, __f177_extc);
++			else
++				dev_info(fman_get_dev(pcd->fman),
++					 "fe_flow: F-177 FMFP_EXTC SYNC cleared after %u poll(s)\n",
++					 __f177_i);
++		}
++	}
++		return err;
++	}
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_add);
+ 
+ int fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
+ 			 const u8 *key, u8 key_size)
+ {
++	struct fman_pcd *pcd = fman_get_pcd(fm);
++	struct fman_pcd_ehash_table *t;
++	static bool f117_announced;
++
+ 	(void)hw_port_id;
+-	(void)key;
+-	(void)key_size;
+-	if (!fman_get_pcd(fm))
++	if (!pcd)
+ 		return -ENODEV;
+-	fman_pcd_ehash_flow_clear_all(fman_get_pcd(fm));
+-	return 0;
++	/* F-117 presence marker: one-shot on the first per-key delete. */
++	if (!f117_announced) {
++		f117_announced = true;
++		pr_info("fman_pcd: F-117 per-key ehash delete active\n");
++	}
++	/* No key => legacy clear-all (admin flush / disengage). */
++	if (!key || key_size == 0) {
++		fman_pcd_ehash_flow_clear_all(pcd);
++		return 0;
++	}
++	t = fman_pcd_ehash_table_by_index(pcd, 0);
++	if (!t)
++		return -ENODEV;
++	return fman_pcd_ehash_del_key(t, key, key_size);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_del);
+ 
+@@ -2954,6 +4195,95 @@ static const struct file_operations fman_pcd_fe_chain_fops;
+ static const struct file_operations fman_pcd_fe_disengage_full_fops;
+ static const struct file_operations fman_pcd_fe_buffer_fops;
+ 
++/*
++ * fman_pcd_fe_verify_internal - pre-flight FE-VM descriptor graph validation.
++ * (F-008 / T-P1-1) Walk the engaged port's FE-VM chain and validate critical
++ * descriptor words against known-good encodings.  Returns 0 (PASS) or
++ * -EPROTO (FAIL — mismatch logged to dmesg).
++ *
++ * Called automatically by __fman_pcd_fe_arm_engage() BEFORE the KG arm
++ * (C2 readback gate: every un-erroring MURAM write is validated before
++ * any frame can reach it).  This catches the F-072…F-079 silent-write
++ * defect class in milliseconds instead of hours of board probing.
++ */
++static int fman_pcd_fe_verify_internal(struct fman_pcd *pcd, u8 hw_port_id)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	int errs = 0;
++
++	if (!muram)
++		return -ENODEV;
++
++	/* ── Step 1: CC root node ────────────────────────────────── */
++	if (pcd->fe_root_ad_off) {
++		void __iomem *fe = (void *)fman_muram_offset_to_vbase(muram, pcd->fe_root_ad_off);
++		u32 w0 = ioread32be(fe);
++
++		/* F-186/F-190: the CC root AD is now the vendor en_exthash_node
++		 * (miss_action_type 0b10 = ENQUE, E25-verified loop-free), which
++		 * supersedes the old FE_ENTER CONT_LOOKUP (ALLOCATE bit 23).
++		 * Accept either form so the gate does not false-fail on the
++		 * vendor node (w0 e.g. 0x8e400000 has no ALLOCATE bit).
++		 */
++		if ((w0 & 0xC0000000) != 0x80000000 &&
++		    !(w0 & 0x00800000)) {
++			pr_warn("fman_pcd: verify 0x%02x: CC root w0=0x%08x (neither vendor node nor FE_ENTER ALLOCATE)\n",
++				hw_port_id, w0);
++			errs++;
++		}
++	}
++
++	/* ── Step 2: EXT_HASH FE ─────────────────────────────────── */
++	if (pcd->fe_hash_off) {
++		void __iomem *fe = (void *)fman_muram_offset_to_vbase(muram, pcd->fe_hash_off);
++		u32 w0 = ioread32be(fe);
++
++		/* type must be 0x06 */
++		if ((w0 & 0xFF000000) != 0x06000000) {
++			pr_warn("fman_pcd: verify 0x%02x: EXT_HASH type 0x%02x != 0x06\n",
++				hw_port_id, (w0 >> 24) & 0xFF);
++			errs++;
++		}
++
++		/* w5 (HIT nextFE) and w6 (MISS nextFE) must be non-zero */
++		if (!ioread32be(fe + 20)) {
++			pr_warn("fman_pcd: verify 0x%02x: EXT_HASH HIT nextFE == 0\n", hw_port_id);
++			errs++;
++		}
++		if (!ioread32be(fe + 24)) {
++			pr_warn("fman_pcd: verify 0x%02x: EXT_HASH MISS nextFE == 0\n", hw_port_id);
++			errs++;
++		}
++	}
++
++	/* ── Step 3: MUX singleton ────────────────────────────────── */
++	if (pcd->fe_mux_off) {
++		void __iomem *fe = (void *)fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
++		if ((ioread32be(fe) & 0xFF000000) != 0x04000000) {
++			pr_warn("fman_pcd: verify 0x%02x: MUX type mismatch\n", hw_port_id);
++			errs++;
++		}
++	}
++
++	/* ── Step 4: EXIT singleton ───────────────────────────────── */
++	if (pcd->fe_exit_off) {
++		void __iomem *fe = (void *)fman_muram_offset_to_vbase(muram, pcd->fe_exit_off);
++		u32 w0 = ioread32be(fe);
++		if ((w0 & 0xFF800000) != 0x03800000) {
++			pr_warn("fman_pcd: verify 0x%02x: EXIT w0=0x%08x (DEALLOCATE missing?)\n",
++				hw_port_id, w0);
++			errs++;
++		}
++	}
++
++	if (errs == 0)
++		pr_debug("fman_pcd: verify 0x%02x PASSED\n", hw_port_id);
++	else
++		pr_err("fman_pcd: verify 0x%02x FAILED (%d errors)\n", hw_port_id, errs);
++
++	return errs ? -EPROTO : 0;
++}
++
+ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ {
+ 	struct fman_pcd *pcd;
+@@ -3060,15 +4390,33 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_flow", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_flow_fops);
++			debugfs_create_file("fe_ehash_stats", 0444,
++						    pcd->debugfs_dir, pcd,
++						    &fman_pcd_fe_ehash_stats_fops);
++						debugfs_create_file("fe_probe", 0444,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_probe_fops);
++
++	if (!debugfs_create_file("hash_probe", 0444, pcd->debugfs_dir, pcd,
++			       &fman_pcd_hash_probe_fops))
++		pr_warn("%s: error creating hash_probe\n", __func__);
++			debugfs_create_file("ic_probe", 0444,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_ic_probe_fops);
+ 			debugfs_create_file("fe_hashfe", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_hashfe_fops);
+ 			debugfs_create_file("fe_hash_probe", 0600,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_hash_probe_fops);
++					debugfs_create_file("fe_disengage_full", 0200, pcd->debugfs_dir, pcd, &fman_pcd_fe_disengage_full_fops);
++debugfs_create_file("fe_buffer", 0444, pcd->debugfs_dir, pcd, &fman_pcd_fe_buffer_fops);
  			debugfs_create_file("fe_arm", 0600,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_arm_fops);
@@ -350,3 +2166,178 @@ index 7fdb1fb..1b91853 100644
  		}
  	}
  
+@@ -3125,7 +4473,7 @@ int fman_pcd_port_recover(struct fman_pcd *pcd, u8 port_id)
+ 	pp_off = fman_port_get_params_page(port);
+ 	if (!pp_off || IS_ERR_VALUE(pp_off))
+ 		return 0;
+-	pp = fman_muram_offset_to_vbase(muram, pp_off);
++	pp = (void *)fman_muram_offset_to_vbase(muram, pp_off);
+ 	if (!pp)
+ 		return 0;
+ 
+@@ -3140,10 +4488,10 @@ int fman_pcd_port_recover(struct fman_pcd *pcd, u8 port_id)
+ 
+ 	/* Pool base = index_off - tnums*512, rounded to 256-byte boundary. */
+ 	pool_off  = (idx_off - (u32)tnums * 512u) & ~0xFFu;
+-	pool_base = fman_muram_offset_to_vbase(muram, pool_off);
++	pool_base = (void *)fman_muram_offset_to_vbase(muram, pool_off);
+ 	if (!pool_base)
+ 		return -EIO;
+-	idx_base  = fman_muram_offset_to_vbase(muram, idx_off);
++	idx_base  = (void *)fman_muram_offset_to_vbase(muram, idx_off);
+ 	if (!idx_base)
+ 		return -EIO;
+ 
+@@ -3196,6 +4544,53 @@ static int fman_pcd_fe_recover_open(struct inode *inode, struct file *file)
+ 	return single_open(file, NULL, inode->i_private);
+ }
+ 
++/* F-076: atomic fe_disengage_full — SDK-correct ordered teardown + port de-wedge.
++ * Replaces the manual 7-step sequence that crashes the board (double-free in gen_pool).
++ * Order per FmPortDeleteFESupport:
++ *   1. fe_port_del: zero +0x54, free mgmt index, free pool MURAM
++ *   2. fe_arm_free_scaffold: free group/AD/AD tables
++ *   3. kg_port_disarm_fe: clear RCCB, restore RSS scheme
++ *   4. port_recover: de-wedge the port (zero workspace + ring, re-init BMI)
++ */
++static ssize_t fman_pcd_fe_disengage_full_write(struct file *filp,
++    const char __user *buf, size_t count, loff_t *offp)
++{
++    struct fman_pcd *pcd = filp->private_data;
++    char kbuf[16];
++    unsigned int port_id;
++    int ret;
++
++    if (count >= sizeof(kbuf))
++        count = sizeof(kbuf) - 1;
++    if (copy_from_user(kbuf, buf, count))
++        return -EFAULT;
++    kbuf[count] = '\0';
++
++    if (sscanf(kbuf, "%x", &port_id) != 1)
++        return -EINVAL;
++    if (port_id < 0x08 || port_id >= 0x28)
++        return -EINVAL;
++
++    pr_info("fman_pcd fe_disengage_full: port 0x%02x START\n", port_id);
++
++    /* Step 1-3: SDK-correct ordered teardown (same as fe_arm disengage) */
++    __fman_pcd_fe_arm_disengage(pcd, (u8)port_id);
++
++    /* Step 4: de-wedge the port (zero workspace, re-init ring, restart BMI) */
++    ret = fman_pcd_port_recover(pcd, (u8)port_id);
++    if (ret)
++        pr_warn("fman_pcd fe_disengage_full: port 0x%02x recover returned %d\n",
++            port_id, ret);
++
++    pr_info("fman_pcd fe_disengage_full: port 0x%02x DONE\n", port_id);
++    return count;
++}
++
++static const struct file_operations fman_pcd_fe_disengage_full_fops = {
++    .owner = THIS_MODULE,
++    .write = fman_pcd_fe_disengage_full_write,
++};
++
+ static ssize_t fman_pcd_fe_recover_write(struct file *f,
+ 					  const char __user *ubuf,
+ 					  size_t len, loff_t *pos)
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index 16dfc279e..aa04d56c5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -37,6 +37,9 @@ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
+ struct fman *fman_pcd_get_fman(struct fman_pcd *pcd);
+ struct mutex *fman_pcd_get_lock(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_kg_list(struct fman_pcd *pcd);
++/* F-185(miss-nia-decl): vendor-node miss-NIA commit (arm_fe path). */
++void fman_pcd_fe_node_set_miss_nia(struct fman_pcd *pcd, u32 node_off,
++				   u32 nia);
+ struct list_head *fman_pcd_get_cc_list(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_manip_list(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_plcr_list(struct fman_pcd *pcd);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index b45c2152d..f2ebd79d3 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -812,16 +812,29 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 		slot->ekfc = ekfc;
+ 	*saved_engine = slot->next_engine;
+ 
+-	/*
+-	 * Arm the FE datapath (Fork B, Phase 1 D9-B, 0132 v3).
+-	 * Use AC_CC dispatch (next_engine=3, mode 0x80000006, KGSE_CCBS=0):
+-	 * the FMan controller walks the CC root named by the BMI port's
+-	 * fmbm_rccb (set in step 2 below), which points at the FE_ENTER
+-	 * CONT_LOOKUP root AD (group table).  The CCBS graft (next_engine=2,
++		/*
++	 * F-185(arm-fe-accc): vendor dispatch mode (NXP ASK SDK production
++	 * path, .106: 12 schemes 0x8x000006, ccbs=0, 0% loss under load).
++	 * E23 (2026-08-12) decoded the 210.10.1 CC dispatch: the
++	 * CONT_LOOKUP path is the enhanced external-hash machine parsing
++	 * the RCCB-target AD as an en_exthash_node VARIANT B -- F-185's
++	 * engage scaffold writes it. F-183's CCBS-implicit + RM-group-AD
++	 * form feeds the machine garbage (frames consumed, no
++	 * disposition). The historical AC_CC stalls (0118 iter-48,
++	 * Path A 08-10) were invalid-CONTENT stalls (bare FE_ENTER =
++	 * node with table_base=0, pool=0 -> pool-0 wait), now fixed by
++	 * the node. Vendor: EN|NIA_ENG_FM_CTL|AC_CC, CCOBASE=0, ccbs=0.
+ 	 */
+ 	slot->next_engine    = 3;
+ 	slot->cc_base_offset = 0;
+ 	slot->cc_bits_sel    = 0;
++	/* F-186(miss-fqid-capture): the node word3 miss action is a
++	 * direct ENQUE to the scheme's OWN base FQID (E25: cross-port
++	 * fqb enqueues drop in the dpaa driver -- the FD's buffer
++	 * belongs to the frame's own BM pool). Capture under the lock;
++	 * committed after mutex_unlock, before the EXTC SYNC.
++	 */
++	u32 miss_fqid = slot->base_fqid;
+ 	slot->used = false;
+ 	err = keygen_scheme_setup(keygen, id, true);
+ 	if (err) {
+@@ -833,6 +846,17 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 	}
+ 	mutex_unlock(lock);
+ 
++	/* F-186(miss-fqid-commit): complete the vendor node before it
++	 * goes live -- with miss_action_type = ENQUE (F-186(enque-miss)),
++	 * word3 is the miss FQID: a direct enqueue to the scheme's own
++	 * base FQID (slot->base_fqid, e.g. 0x300 for eth4). E25 proved
++	 * the F-185 KG-direct NIA form loops forever on 210.10.1 and
++	 * cross-port fqb enqueues drop in the dpaa driver. No-op unless
++	 * engage built the node form. Lands before
++	 * fman_port_set_cc_base() asserts EXTC SYNC.
++	 */
++	fman_pcd_fe_node_set_miss_nia(pcd, fe_enter_off, miss_fqid);
++
+ 	rxport = fman_port_lookup_rx(fman, hw_port_id);
+ 	if (!rxport)
+ 		return -ENODEV;
+@@ -850,6 +874,14 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 		return err;
+ 	}
+ 
++	/* F-183(kg-direct-removed): F-178's NIA_KG_DIRECT OR is gone from
++	 * this path. The vendor RFPNE for the ehash dispatch is
++	 * 0x00480200 (KG|CC_EN, no DIRECT bit) per the .106 static
++	 * oracle; E20 recorded the engage writing 0x00480304
++	 * (DIRECT|sch4) as confound #2. The rfpne value
++	 * fman_port_set_cc_base() wrote (0x00480200) stays unmodified.
++	 */
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_port_arm_fe);
+@@ -863,8 +895,10 @@ void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 		return;
+ 
+ 	rxport = fman_port_lookup_rx(fman, hw_port_id);
+-	if (rxport)
++	if (rxport) {
+ 		(void)fman_port_set_cc_base(rxport, 0);
++		fman_port_clear_kg_direct_scheme(rxport);	/* F-178: disarm_fe direct-scheme teardown */
++	}
+ 	(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_port_disarm_fe);

@@ -47,9 +47,33 @@ stay in DDR (section 6), so no new MURAM pressure.
 git apply --3way --check clean vs the post-0130 reconstruction (applied file
 byte-identical to the edited tree); brace-balanced; LF-only.  Compile gate is
 CI.
+
+2026-08-30 (fold-audit vs main): fixed a real bug this patch shipped with
+and that no later patch corrected. word1 packed as
+hashMask:16 | contextSize:8 | hashShift:8, but the FMan microcode reads
+it as hashShift:8 | contextSize:8 | hashMask:16 (NXP SDK's t_ExtHashFe is
+_Packed big-endian) -- the reversed layout puts hashShift in hashMask's
+low byte and vice versa, producing wrong bucket indexing. Confirmed via
+main branch's active (non-`if false`-gated) F_144.py kernel-fixup, which
+this series never folded in -- audited by diffing this patch's fully-
+applied output against what every currently-active kernel-fixup on main
+still finds to fix, to make sure the fold campaign didn't silently drop
+anything real. Verified against a pristine linux-6.18.44 + 0068..0130
+baseline, extracted fresh, not an already-patched dev tree.
+
+2026-08-30 (fold-audit correction): reverted the previous fold-audit
+entry above. That entry ("fixed a real bug... F_144.py") turned out to
+be wrong: main's own fixup history shows F-144 was an unverified theory
+that F-149 initially praised, then F-152 (checking
+arch/fman-microcode-210-programming-reference.md sec 7.2 directly, with
+a worked hex example) explicitly reverted, restoring this exact original
+formula. F-144, F-145, F-149 and F-152 net to zero change on main's real
+build (all four are active, unconditional fixups, in that order) --
+this patch's original word1 encoding was correct all along. Re-verified
+against a pristine linux-6.18.44 + 0068..0130 baseline.
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 0df6585..0fb8c0a 100644
+index 7ae1a966c..b5ea4b588 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 @@ -132,6 +132,9 @@ struct fman_pcd {
@@ -62,7 +86,7 @@ index 0df6585..0fb8c0a 100644
  
  	struct dentry *debugfs_dir;
  };
-@@ -288,6 +289,7 @@ static void fman_pcd_fe_pool_free(struct fman_pcd *pcd)
+@@ -310,6 +313,7 @@ static void fman_pcd_fe_pool_free(struct fman_pcd *pcd)
  	pcd->fe_mux_off = 0;
  	pcd->fe_transition_off = 0;
  	pcd->fe_exit_off = 0;
@@ -70,7 +94,7 @@ index 0df6585..0fb8c0a 100644
  
  	/* sec.5 FE_ENTER root AD is a separate MURAM alloc - free it too. */
  	if (pcd->fe_root_ad_off) {
-@@ -859,6 +861,7 @@ static void fman_pcd_fe_singletons_free(struct fman_pcd *pcd)
+@@ -881,6 +885,7 @@ static void fman_pcd_fe_singletons_free(struct fman_pcd *pcd)
  	pcd->fe_mux_off = 0;
  	pcd->fe_transition_off = 0;
  	pcd->fe_exit_off = 0;
@@ -78,7 +102,7 @@ index 0df6585..0fb8c0a 100644
  }
  
  /*
-@@ -1187,8 +1190,14 @@ static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)
+@@ -1209,8 +1214,14 @@ static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)
  		return -ENXIO;		/* engage the pool first */
  	if (pcd->fe_root_ad_off)
  		return -EEXIST;
@@ -95,7 +119,7 @@ index 0df6585..0fb8c0a 100644
  	if (!fe_off)
  		return -EINVAL;			/* no target FE built yet */
  
-@@ -1901,6 +1910,199 @@ static const struct file_operations fman_pcd_fe_flow_fops = {
+@@ -1922,6 +1933,207 @@ static const struct file_operations fman_pcd_fe_flow_fops = {
  	.release	= single_release,
  };
  
@@ -150,6 +174,14 @@ index 0df6585..0fb8c0a 100644
 +	u64 tblphys = (u64)t->table_dma;
 +
 +	iowrite32be(FMAN_FE_TYPE_EXT_HASH, fe + 0);		/* misc       */
++	/* word1 = hashMask:16 | (contextSize-1):8 | hashShift:8, per
++	 * arch/fman-microcode-210-programming-reference.md sec 7.2 (line
++	 * 358 formula, line 638 worked example: word1=0x7fff0c00 decodes
++	 * as hashMask=0x7fff, contextSize-1=0x0c, hashShift=0x00). A
++	 * same-session hashShift<<24|contextSize<<16|hashMask "fix" was
++	 * tried and reverted after checking this reference -- the
++	 * original layout below is correct as written.
++	 */
 +	iowrite32be(((u32)(t->hash_mask & 0xffff) << 16) |
 +		    ((u32)((t->key_size - 1) & 0xff) << 8) |
 +		    (u32)(t->hash_shift & 0xff), fe + 1);
@@ -295,7 +327,7 @@ index 0df6585..0fb8c0a 100644
  /**
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
   * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
-@@ -2020,6 +2222,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -2041,6 +2253,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_flow", 0644,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_flow_fops);
