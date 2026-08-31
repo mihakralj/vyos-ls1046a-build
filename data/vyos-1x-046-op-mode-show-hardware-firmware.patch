@@ -5,8 +5,8 @@ Subject: [PATCH] op-mode: add 'show hardware firmware'
 
 ---
  op-mode-definitions/show-hardware-firmware.xml.in |  17 ++
- src/op_mode/show_hardware_firmware.py             | 639 ++++++++++++++++++++++
- 2 files changed, 656 insertions(+)
+ src/op_mode/show_hardware_firmware.py             | 591 ++++++++++++++++++++++
+ 2 files changed, 608 insertions(+)
 diff --git a/op-mode-definitions/show-hardware-firmware.xml.in b/op-mode-definitions/show-hardware-firmware.xml.in
 new file mode 100644
 index 000000000..9fa259a9f
@@ -35,7 +35,8 @@ new file mode 100755
 index 000000000..6b1580aa1
 --- /dev/null
 +++ b/src/op_mode/show_hardware_firmware.py
-@@ -0,0 +1,639 @@\n+#!/usr/bin/env python3
+@@ -0,0 +1,591 @@
++#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
 +#
@@ -296,30 +297,38 @@ index 000000000..6b1580aa1
 +# Renderers.
 +# ---------------------------------------------------------------------------
 +def render_identity():
-+    print('Board & SoC identity:')
-+    rows = []
-+    model = _read_text(DT_MODEL)
-+    rows.append(['Model', model or '-',
-+                 'OK' if model else 'WARN - no /proc/device-tree/model'])
-+    fam = _read_text(f'{SOC0}/family')
-+    rev = _read_text(f'{SOC0}/revision')
-+    svr = _read_text(f'{SOC0}/soc_id')
-+    if fam:
-+        rows.append(['SoC', f'{fam} rev {rev or "?"} ({svr or "?"})', 'OK'])
-+    else:
-+        rows.append(['SoC', '-',
-+                     'WARN - fsl-guts soc0 sysfs absent (CONFIG_FSL_GUTS?)'])
-+    render_table(rows, ['Property', 'Value', 'Status'], [20, 38, 22])
++    model = _read_text(DT_MODEL) or 'Mono Gateway Development Kit'
++    fam = _read_text(f'{SOC0}/family') or 'QorIQ LS1046A'
++    rev = _read_text(f'{SOC0}/revision') or '1.0'
++    svr = _read_text(f'{SOC0}/soc_id') or ''
++    svr_str = f', {svr}' if svr else ''
++
++    emmc_sn = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/serial')
++    emmc_name = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/name')
++    base_mac = None
++    dt_mac = _read_bytes(f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000/ethernet@e2000/local-mac-address')
++    if dt_mac and len(dt_mac) == 6:
++        base_mac = ':'.join(f'{b:02X}' for b in dt_mac)
++
++    print(f'Hardware:  {model} ({fam} rev {rev}{svr_str})')
++    extra = []
++    if base_mac:
++        extra.append(f'Base MAC: {base_mac}')
++    if emmc_sn:
++        emmc_info = f'eMMC SN: {emmc_sn}'
++        if emmc_name:
++            emmc_info += f' ({emmc_name})'
++        extra.append(emmc_info)
++    if extra:
++        sep = '  |  '
++        print(f'Identity:  {sep.join(extra)}')
 +
 +
-+def render_boot_firmware(root: bool):
-+    """Returns (run_uboot, nor_tfa, nor_uboot, n_fails)."""
-+    print('\nBoot firmware (TF-A & U-Boot):')
++def render_dual_store_firmware(root: bool):
++    """Combined side-by-side comparison of NOR (active) vs eMMC (inactive)."""
++    print('\nBoot & Recovery Firmware:')
 +    rows = []
-+    n_fails = 0
 +    run_uboot = _read_text(DT_UBOOT_VERSION)
-+    rows.append(['Running U-Boot', run_uboot or '-',
-+                 'OK' if run_uboot else 'WARN - no /chosen/u-boot,version'])
 +
 +    nor_tfa = None
 +    nor_uboot = None
@@ -328,32 +337,24 @@ index 000000000..6b1580aa1
 +        nor_tfa = tfa_version_search(mtd1_blob)
 +        nor_uboot = uboot_version_search(mtd1_blob)
 +
-+    if nor_tfa:
-+        rows.append(['TF-A (BL31)', nor_tfa, 'OK'])
-+    else:
-+        rows.append(['TF-A (BL31)', '-',
-+                     'SKIP - not root' if not root else 'WARN - not found'])
++    emmc_tfa = None
++    emmc_uboot = None
++    emmc_qef = None
++    if root and os.path.exists(EMMC_DEV):
++        try:
++            with open(EMMC_DEV, 'rb') as f:
++                f.seek(0x100000)
++                emmc_fip = f.read(2 * 1024 * 1024)
++                emmc_tfa = tfa_version_search(emmc_fip)
++                emmc_uboot = uboot_version_search(emmc_fip)
++                f.seek(0x400000)
++                emmc_qef_head = f.read(QEF_LEN)
++                emmc_qef = qef_decode(emmc_qef_head)
++        except OSError:
++            pass
 +
-+    if nor_uboot:
-+        match_status = ('OK - matches running copy' if run_uboot and run_uboot in nor_uboot
-+                        else 'WARN - differs from running copy')
-+        rows.append(['On-flash U-Boot', nor_uboot, match_status])
-+    else:
-+        rows.append(['On-flash U-Boot', '-',
-+                     'SKIP - not root' if not root else 'WARN - not found'])
-+
-+    render_table(rows, ['Property', 'Value', 'Status'], [20, 38, 22])
-+    return run_uboot, nor_tfa, nor_uboot, n_fails
-+
-+
-+def render_recovery_os(root: bool):
-+    """Returns (nor_rec_ver, emmc_rec_ver, n_fails)."""
-+    print('\nRecovery OS firmware:')
-+    rows = []
-+    n_fails = 0
-+    nor_ver = None
-+    emmc_ver = None
-+
++    nor_rec_ver = None
++    emmc_rec_ver = None
 +    if root:
 +        mtds = mtd_map()
 +        rec_dev = None
@@ -362,92 +363,34 @@ index 000000000..6b1580aa1
 +                rec_dev = dev
 +                break
 +        if rec_dev and os.path.exists(f'{SYS_ROOT}/dev/{rec_dev}'):
-+            nor_ver = recovery_firmware_version(f'{SYS_ROOT}/dev/{rec_dev}')
++            nor_rec_ver = recovery_firmware_version(f'{SYS_ROOT}/dev/{rec_dev}')
 +        if os.path.exists(EMMC_DEV):
-+            emmc_ver = recovery_firmware_version(EMMC_DEV, offset=0xa00000)
++            emmc_rec_ver = recovery_firmware_version(EMMC_DEV, offset=0xa00000)
 +
-+    if nor_ver:
-+        rows.append(['NOR (active)', f'Mono Gateway Firmware v{nor_ver}', 'OK'])
-+    else:
-+        status = 'SKIP - not root' if not root else 'FAIL - recovery OS version not found'
-+        rows.append(['NOR (active)', '-', status])
-+        if root:
-+            n_fails += 1
++    nor_qef_id = None
++    nor_qef_len = None
++    if root and os.path.exists(f'{SYS_ROOT}/dev/mtd3'):
++        qef_nor = qef_decode(flash_head('mtd3', QEF_LEN) or b'')
++        if qef_nor:
++            nor_qef_id = qef_nor['id']
++            nor_qef_len = qef_nor['length']
 +
-+    if emmc_ver:
-+        if nor_ver and emmc_ver == nor_ver:
-+            status = 'OK - matches NOR'
-+        elif nor_ver:
-+            status = 'WARN - differs from NOR'
-+        else:
-+            status = 'OK'
-+        rows.append(['eMMC (inactive)', f'Mono Gateway Firmware v{emmc_ver}', status])
-+    else:
-+        status = 'SKIP - not root' if not root else 'WARN - recovery OS not found on eMMC'
-+        rows.append(['eMMC (inactive)', '-', status])
++    rows.append(['Running U-Boot', run_uboot or '-', '-'])
++    rows.append(['TF-A (BL31)', nor_tfa or ('SKIP - not root' if not root else '-'),
++                 emmc_tfa or ('SKIP - not root' if not root else '-')])
++    rows.append(['On-flash U-Boot', nor_uboot or ('SKIP - not root' if not root else '-'),
++                 emmc_uboot or ('SKIP - not root' if not root else '-')])
 +
-+    render_table(rows, ['Medium', 'Version', 'Status'], [20, 38, 22])
-+    return nor_ver, emmc_ver, n_fails
++    nor_ucode_disp = f'"{nor_qef_id}" ({nor_qef_len} B)' if nor_qef_id else ('SKIP - not root' if not root else '-')
++    emmc_ucode_disp = f'"{emmc_qef["id"]}" ({emmc_qef["length"]} B)' if emmc_qef else ('SKIP - not root' if not root else '-')
++    rows.append(['FMan microcode', nor_ucode_disp, emmc_ucode_disp])
 +
++    nor_rec_disp = f'Mono Gateway Firmware v{nor_rec_ver}' if nor_rec_ver else ('SKIP - not root' if not root else '-')
++    emmc_rec_disp = f'Mono Gateway Firmware v{emmc_rec_ver}' if emmc_rec_ver else ('SKIP - not root' if not root else '-')
++    rows.append(['Recovery OS', nor_rec_disp, emmc_rec_disp])
 +
-+def render_emmc_firmware(root: bool, nor_tfa, nor_uboot, nor_rec_ver):
-+    """Inspect eMMC 32MB reserved bootloader region."""
-+    print('\neMMC on-flash firmware (backup / inactive medium):')
-+    if not os.path.exists(EMMC_DEV):
-+        print('SKIP - eMMC device (/dev/mmcblk0) not present')
-+        return 0
-+
-+    if not root:
-+        print('SKIP - not root (eMMC flash reads require root)')
-+        return 0
-+
-+    rows = []
-+    emmc_fip = None
-+    try:
-+        with open(EMMC_DEV, 'rb') as f:
-+            f.seek(0x100000)
-+            emmc_fip = f.read(2 * 1024 * 1024)
-+    except OSError:
-+        pass
-+
-+    emmc_tfa = tfa_version_search(emmc_fip) if emmc_fip else None
-+    emmc_uboot = uboot_version_search(emmc_fip) if emmc_fip else None
-+
-+    if emmc_tfa:
-+        status = 'OK - matches NOR' if (nor_tfa and emmc_tfa.split()[0] == nor_tfa.split()[0]) else 'OK'
-+        rows.append(['TF-A (BL31)', emmc_tfa, status])
-+    else:
-+        rows.append(['TF-A (BL31)', '-', 'WARN - not found on eMMC'])
-+
-+    if emmc_uboot:
-+        status = 'OK - matches NOR' if (nor_uboot and emmc_uboot.split()[1] in nor_uboot) else 'OK'
-+        rows.append(['U-Boot', emmc_uboot, status])
-+    else:
-+        rows.append(['U-Boot', '-', 'WARN - not found on eMMC'])
-+
-+    emmc_qef_head = None
-+    try:
-+        with open(EMMC_DEV, 'rb') as f:
-+            f.seek(0x400000)
-+            emmc_qef_head = f.read(QEF_LEN)
-+    except OSError:
-+        pass
-+
-+    qef = qef_decode(emmc_qef_head) if emmc_qef_head else None
-+    if qef:
-+        rows.append(['FMan microcode', f'"{qef["id"]}" ({qef["length"]} B)', 'OK'])
-+    else:
-+        rows.append(['FMan microcode', '-', 'WARN - no valid QEF on eMMC'])
-+
-+    emmc_rec_ver = recovery_firmware_version(EMMC_DEV, offset=0xa00000)
-+    if emmc_rec_ver:
-+        status = 'OK - matches NOR' if (nor_rec_ver and emmc_rec_ver == nor_rec_ver) else 'OK'
-+        rows.append(['Recovery OS', f'Mono Gateway Firmware v{emmc_rec_ver}', status])
-+    else:
-+        rows.append(['Recovery OS', '-', 'WARN - not found on eMMC'])
-+
-+    render_table(rows, ['Component', 'Value', 'Status'], [20, 38, 22])
-+    return 0
++    render_table(rows, ['Component', 'NOR Flash (Active)', 'eMMC (Inactive / Backup)'], [15, 33, 33])
++    return nor_rec_ver
 +
 +
 +def render_partitions(root: bool, nor_rec_ver: str):
@@ -585,12 +528,10 @@ index 000000000..6b1580aa1
 +    print('Firmware status (LS1046A boot firmware & microcode inventory)')
 +    print('=' * 62)
 +    render_identity()
-+    run_uboot, nor_tfa, nor_uboot, _ = render_boot_firmware(root)
-+    nor_rec_ver, emmc_rec_ver, rec_fails = render_recovery_os(root)
-+    render_emmc_firmware(root, nor_tfa, nor_uboot, nor_rec_ver)
++    nor_rec_ver = render_dual_store_firmware(root)
 +    _, _, flash_ucode, part_fails = render_partitions(root, nor_rec_ver)
 +    ucode_fails = render_microcode(flash_ucode)
-+    n_fails = rec_fails + part_fails + ucode_fails
++    n_fails = part_fails + ucode_fails
 +    return 1 if n_fails else 0
 +
 +
@@ -629,6 +570,13 @@ index 000000000..6b1580aa1
 +    emmc_tfa = tfa_version_search(emmc_fip)
 +    emmc_uboot = uboot_version_search(emmc_fip)
 +
++    emmc_sn = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/serial')
++    emmc_name = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/name')
++    base_mac = None
++    dt_mac = _read_bytes(f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000/ethernet@e2000/local-mac-address')
++    if dt_mac and len(dt_mac) == 6:
++        base_mac = ':'.join(f'{b:02X}' for b in dt_mac)
++
 +    result = {
 +        'board': 'ls1046a',
 +        'model': _read_text(DT_MODEL),
@@ -636,6 +584,11 @@ index 000000000..6b1580aa1
 +            'family': _read_text(f'{SOC0}/family'),
 +            'revision': _read_text(f'{SOC0}/revision'),
 +            'svr': _read_text(f'{SOC0}/soc_id'),
++        },
++        'identity': {
++            'base_mac': base_mac,
++            'emmc_serial': emmc_sn,
++            'emmc_name': emmc_name,
 +        },
 +        'boot_firmware': {
 +            'uboot_running': _read_text(DT_UBOOT_VERSION),

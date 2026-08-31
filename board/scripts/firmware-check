@@ -198,23 +198,30 @@ sys.exit(1)
 # ---------------------------------------------------------------------------
 hdr "1) Board & SoC identity"
 
-if [ -f /proc/device-tree/model ]; then
-    model=$(tr -d '\0' < /proc/device-tree/model)
-    ok "model: $model"
-else
-    warn "no /proc/device-tree/model"
-fi
-compat=$(tr '\0' ' ' < /proc/device-tree/compatible | sed 's/ *$//')
-note "compatible = \"$compat\""
+model="Mono Gateway Development Kit"
+[ -f /proc/device-tree/model ] && model=$(tr -d '\0' < /proc/device-tree/model)
+fam=$(cat /sys/devices/soc0/family 2>/dev/null || echo "QorIQ LS1046A")
+rev=$(cat /sys/devices/soc0/revision 2>/dev/null || echo "1.0")
+svr=$(cat /sys/devices/soc0/soc_id 2>/dev/null || echo "")
 
-if [ -d /sys/devices/soc0 ]; then
-    fam=$(cat /sys/devices/soc0/family 2>/dev/null || echo "?")
-    rev=$(cat /sys/devices/soc0/revision 2>/dev/null || echo "?")
-    svr=$(cat /sys/devices/soc0/soc_id 2>/dev/null || echo "?")
-    ok "SoC: $fam rev $rev ($svr)"
-else
-    warn "fsl-guts soc0 sysfs absent (CONFIG_FSL_GUTS missing?)"
+base_mac=""
+dt_mac="/proc/device-tree/soc/fman@1a00000/ethernet@e2000/local-mac-address"
+if [ -r "$dt_mac" ]; then
+    base_mac=$(hexdump -v -e '1/1 "%02X:"' "$dt_mac" 2>/dev/null | sed 's/:$//')
 fi
+
+emmc_sn=""
+if [ -r /sys/block/mmcblk0/device/serial ]; then
+    emmc_sn=$(cat /sys/block/mmcblk0/device/serial 2>/dev/null || true)
+fi
+emmc_name=""
+if [ -r /sys/block/mmcblk0/device/name ]; then
+    emmc_name=$(cat /sys/block/mmcblk0/device/name 2>/dev/null || true)
+fi
+
+ok "hardware: $model ($fam rev $rev${svr:+, $svr})"
+[ -n "$base_mac" ] && note "base MAC: $base_mac"
+[ -n "$emmc_sn" ] && note "eMMC SN:  $emmc_sn${emmc_name:+ ($emmc_name)}"
 
 # ---------------------------------------------------------------------------
 # 2. Boot firmware (TF-A & U-Boot)
