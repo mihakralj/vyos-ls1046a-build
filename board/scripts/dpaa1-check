@@ -68,6 +68,9 @@ hdr()   { printf "\n%s%s%s\n"          "$C_BOLD"   "$*"     "$C_RST"; }
 EXIT=0
 mark_fail() { EXIT=1; }
 
+IS_ROOT=0
+[ "$(id -u)" = "0" ] && IS_ROOT=1
+
 # Helper: count real bound device symlinks under a platform-driver dir
 # (skips the bind/unbind/uevent/module pseudo-entries).
 count_bound() {
@@ -310,6 +313,38 @@ declare -A MEMAC_NAME=(
     [1af2000]="MAC10"
 )
 
+# Collect active flowtable offloads if root
+declare -A FT_OFFLOAD
+if command -v nft >/dev/null 2>&1 && [ "$IS_ROOT" = "1" ]; then
+    ft_out=$(nft list flowtables 2>/dev/null || true)
+    if [ -n "$ft_out" ]; then
+        cur_devs=""
+        has_offload=0
+        while IFS= read -r line; do
+            if echo "$line" | grep -q 'devices = {'; then
+                cur_devs=$(echo "$line" | sed 's/.*devices = {\([^}]*\)}.*/\1/' | tr -d ' ')
+            fi
+            if echo "$line" | grep -q 'flags offload'; then
+                has_offload=1
+            fi
+            if echo "$line" | grep -q '}'; then
+                if [ -n "$cur_devs" ]; then
+                    IFS=',' read -ra dev_arr <<< "$cur_devs"
+                    for d in "${dev_arr[@]}"; do
+                        if [ "$has_offload" -eq 1 ]; then
+                            FT_OFFLOAD[$d]="ASK2"
+                        else
+                            FT_OFFLOAD[$d]="SW-Flowtable"
+                        fi
+                    done
+                fi
+                cur_devs=""
+                has_offload=0
+            fi
+        done <<< "$ft_out"
+    fi
+fi
+
 found_eth=0
 for i in 0 1 2 3 4; do
     iface="eth${i}"
@@ -323,10 +358,18 @@ for i in 0 1 2 3 4; do
         addr=${dev_target%%.*}
         memac=${MEMAC_NAME[$addr]:-?}
         kind="1G SGMII"; [ "$i" -ge 3 ] && kind="10G XFI"
+
+        offload="none"
+        if [ "$operstate" = "down" ]; then
+            offload="N/A (down)"
+        elif [ -n "${FT_OFFLOAD[$iface]:-}" ]; then
+            offload="${FT_OFFLOAD[$iface]}"
+        fi
+
         case "$operstate" in
-            up)   ok   "${iface} UP   (${kind}, MTU=${mtu}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
-            down) note "${iface} down (${kind}, MTU=${mtu}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
-            *)    note "${iface} ${operstate} (${kind}, MTU=${mtu}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
+            up)   ok   "${iface} UP   (${kind}, MTU=${mtu}, offload=${offload}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
+            down) note "${iface} down (${kind}, MTU=${mtu}, offload=${offload}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
+            *)    note "${iface} ${operstate} (${kind}, MTU=${mtu}, offload=${offload}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
         esac
         # dpaa_eth's AF_XDP RX path requires the frame to fit a single BMan
         # buffer; on the 10G ports the safe AF_XDP MTU ceiling is 3290.
