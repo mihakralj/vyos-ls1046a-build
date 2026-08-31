@@ -103,11 +103,14 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 	struct rtnl_link_stats64 st;
 	struct net_device *phys_dev;
 	struct fman_cc_key cc_key;
+	struct fman_cc_key old_key;
 	struct fman *fm;
 	u32 hm_handle;
+	u32 old_handle;
 	u16 tci;
 	u16 vid;
 	u16 tpid;
+	u16 i;
 	u8 port_id;
 	u8 pcp;
 	bool is_push;
@@ -151,6 +154,61 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 
 	mutex_lock(&ask_vlan_cc_lock);
 	port = &ports[port_id];
+
+	/*
+	 * Idempotent re-install: nf_flowtable calls ->replace again for a
+	 * flow that is already offloaded (periodic refresh, or a retry
+	 * after a REPLACE that failed for an unrelated reason) using the
+	 * SAME 5-tuple. port->keys[] is a flat array with no dedup by
+	 * itself -- unlike the ehash path, which is a hash table keyed by
+	 * the flow tuple and naturally upserts. Without this check every
+	 * such re-REPLACE appended a brand-new duplicate CC key for the
+	 * same logical flow, so nkeys grew unbounded on any retry storm
+	 * and ran the port's FMAN_CC_MAX_STATIC_KEYS (32) static tree out
+	 * of space within about a second under real concurrent multi-flow
+	 * load, permanently failing every subsequent install with -ENOSPC
+	 * and falling the flow back to kernel software forwarding (T-M6-8
+	 * VLAN throughput investigation, 2026-08-31 board evidence: 61/65
+	 * REPLACEs failed -ENOSPC, nkeys churned 0->31->0 within 1s, an
+	 * 8-stream bidirectional iperf3 test never exceeded software
+	 * throughput). Match first and update/no-op in place; never grow
+	 * nkeys for a flow this port already tracks.
+	 */
+	for (i = 0; i < port->nkeys; i++) {
+		if (!ask_vlan_cc_key_match(&port->keys[i], &cc_key))
+			continue;
+
+		if (port->hm_handles[i] == hm_handle) {
+			/* Unchanged refresh: drop the redundant ref this
+			 * call just took and leave the live tree alone. */
+			mutex_unlock(&ask_vlan_cc_lock);
+			fman_hm_vlan_route_put(fm, port_id, hm_handle);
+			return 0;
+		}
+
+		/* Egress adjacency changed (route/neigh update): swap the
+		 * HMTD in place and rebuild once, same slot. */
+		old_handle = port->hm_handles[i];
+		old_key = port->keys[i];
+		port->keys[i] = cc_key;
+		port->hm_handles[i] = hm_handle;
+		rc = ask_vlan_cc_rebuild_locked(fm, port_id, port);
+		if (rc) {
+			/* Install failed; the live tree still reflects the
+			 * old entry (fman_cc_tree_install leaves it in place
+			 * on error). Restore both fields so the software
+			 * shadow keeps matching what silicon actually has. */
+			port->keys[i] = old_key;
+			port->hm_handles[i] = old_handle;
+			mutex_unlock(&ask_vlan_cc_lock);
+			fman_hm_vlan_route_put(fm, port_id, hm_handle);
+			return rc;
+		}
+		mutex_unlock(&ask_vlan_cc_lock);
+		fman_hm_vlan_route_put(fm, port_id, old_handle);
+		return 0;
+	}
+
 	if (port->nkeys >= FMAN_CC_MAX_STATIC_KEYS) {
 		mutex_unlock(&ask_vlan_cc_lock);
 		fman_hm_vlan_route_put(fm, port_id, hm_handle);
