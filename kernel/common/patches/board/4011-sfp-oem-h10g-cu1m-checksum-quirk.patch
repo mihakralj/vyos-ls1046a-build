@@ -1,77 +1,50 @@
 From: VyOS LS1046A Build <build@vyos.io>
 Date: Mon, 31 Aug 2026 23:36:00 +0000
-Subject: [PATCH] net: sfp: tolerate checksum-broken OEM SFP-H10G-B-CU1M DAC
+Subject: [PATCH] net: sfp: fix OEM SFP-H10GB-CU1M part-number match (no
+ dash)
 
-The unbranded "OEM" 10G DAC module (vendor_pn "SFP-H10G-B-CU1M", a 1 m
-direct-attach copper cable) ships with a base-structure EEPROM checksum
-byte that never matches the computed value:
+Follow-up to this same patch's first version: the EEPROM base
+structure checksum quirk added for the OEM 10G DAC module compared
+id.base.vendor_pn against "SFP-H10G-B-CU1M" (15 bytes), but the
+module's actual EEPROM field reads "SFP-H10GB-CU1M" -- no dash
+between "H10G" and "B". The extra dash was a misread of the raw hex
+dump's ASCII rendering (dmesg wraps "sfp EE:" lines at 16 bytes, and
+the '-' in the *following* row, "-CU1M", visually lined up with the
+break between "H10G" and "B" in the row above).
 
-  sfp sfp-xfi0: EEPROM base structure checksum failure: 0xf0 != 0xf3
-  sfp sfp-xfi1: EEPROM base structure checksum failure: 0xf0 != 0xf3
-
-This is deterministic (same 0xf0-computed/0xf3-stored mismatch on
-every probe, on both cages, across power cycles) -- a firmware/
-programming defect of this generic OEM module's EEPROM contents, not
-an I2C read glitch or a damaged/untrustworthy module. All other base-
-structure fields (vendor name, vendor PN, vendor rev, phys id,
-connector, bitrate, length) read back correctly and consistently.
-
-sfp_sm_mod_probe() in drivers/net/phy/sfp.c already tolerates this
-exact situation for Cotsworks modules (their comment: "Cotsworks do
-not seem to update the checksums when they do the final programming
-...") by downgrading the checksum mismatch to a warning instead of
-returning -EINVAL. For any other vendor the mismatch is fatal: the SFP
-state machine never leaves probe, the port never reaches
-SFP_S_LINK_UP, and the netdev is permanently stuck at NO-CARRIER --
-confirmed on hardware (LS1046A Mono Gateway, eth3/eth4, both cages)
-where carrier_changes stayed 0 indefinitely, surviving both a warm
-reboot and a full cold power-cycle, until this module's checksum
-failure was made non-fatal.
-
-Extend the existing Cotsworks leniency to this specific OEM PN,
-matching the file's own precedent rather than relaxing the check
-generally for all vendors.
+Board-verified via a raw hex dump of the live EEPROM
+(vendor_name="OEM"+13 spaces at offset 20, vendor_pn="SFP-H10GB-CU1M"
++ 2 spaces at offset 40): with the wrong 15-byte "SFP-H10G-B-CU1M"
+string, memcmp() never matched, oem_h10g_cu1m stayed false, and the
+checksum mismatch kept hitting the fatal dev_err()/-EINVAL path --
+confirmed on hardware (eth3/eth4 still NO-CARRIER, dmesg still showing
+the print_hex_dump'd fatal-path message) after deploying the first
+version of this patch. Corrected to the true 14-byte prefix
+"SFP-H10GB-CU1M".
 
 Signed-off-by: VyOS LS1046A Build <build@vyos.io>
 ---
- drivers/net/phy/sfp.c | 17 ++++++++++++++++-
- 1 file changed, 16 insertions(+), 1 deletion(-)
+ drivers/net/phy/sfp.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -2324,6 +2324,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
- 	struct sfp_eeprom_id id;
- 	bool cotsworks_sfbg;
- 	unsigned int mask;
-+	bool oem_h10g_cu1m;
- 	bool cotsworks;
- 	u8 check;
- 	int ret;
-@@ -2389,10 +2390,25 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
- 			return ret;
+@@ -2391,7 +2391,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
  	}
 
-+	/*
-+	 * OEM SFP-H10G-B-CU1M (unbranded 10G DAC) ships with a base-structure
-+	 * checksum byte that never matches the computed value (observed
-+	 * 0xf0 != 0xf3, deterministic across reads/modules, not an I2C
-+	 * glitch) -- a firmware/programming defect of this generic module,
-+	 * not an unreadable/untrustworthy EEPROM. All other fields (vendor
-+	 * name/PN/rev, phys id, connector, bitrate, length) read back
-+	 * correctly. Treat the same as the existing Cotsworks leniency:
-+	 * warn and continue, rather than sfp_sm_mod_probe() failing the
-+	 * module permanently (SFP_S_FAIL) and leaving the port at
-+	 * NO-CARRIER forever.
-+	 */
-+	oem_h10g_cu1m = !memcmp(id.base.vendor_name, "OEM             ", 16) &&
-+			!memcmp(id.base.vendor_pn, "SFP-H10G-B-CU1M", 15);
-+
+ 	/*
+-	 * OEM SFP-H10G-B-CU1M (unbranded 10G DAC) ships with a base-structure
++	 * OEM SFP-H10GB-CU1M (unbranded 10G DAC) ships with a base-structure
+ 	 * checksum byte that never matches the computed value (observed
+ 	 * 0xf0 != 0xf3, deterministic across reads/modules, not an I2C
+ 	 * glitch) -- a firmware/programming defect of this generic module,
+@@ -2403,7 +2403,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ 	 * NO-CARRIER forever.
+ 	 */
+ 	oem_h10g_cu1m = !memcmp(id.base.vendor_name, "OEM             ", 16) &&
+-			!memcmp(id.base.vendor_pn, "SFP-H10G-B-CU1M", 15);
++			!memcmp(id.base.vendor_pn, "SFP-H10GB-CU1M", 14);
+
  	/* Validate the checksum over the base structure */
  	check = sfp_check(&id.base, sizeof(id.base) - 1);
- 	if (check != id.base.cc_base) {
--		if (cotsworks) {
-+		if (cotsworks || oem_h10g_cu1m) {
- 			dev_warn(sfp->dev,
- 				 "EEPROM base structure checksum failure (0x%02x != 0x%02x)\n",
- 				 check, id.base.cc_base);
