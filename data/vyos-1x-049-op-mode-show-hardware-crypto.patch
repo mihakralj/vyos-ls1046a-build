@@ -49,7 +49,7 @@ new file mode 100755
 index 000000000..718a20df1
 --- /dev/null
 +++ b/src/op_mode/show_hardware_crypto.py
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,269 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -75,8 +75,6 @@ index 000000000..718a20df1
 +
 +import json
 +import os
-+import re
-+import subprocess
 +import sys
 +import textwrap
 +from collections import Counter, defaultdict
