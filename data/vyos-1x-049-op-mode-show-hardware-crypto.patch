@@ -1,0 +1,323 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 31 Aug 2026 21:10:00 +0000
+Subject: [PATCH] op-mode: add 'show hardware crypto'
+
+---
+ op-mode-definitions/show-hardware-crypto.xml.in |  28 ++
+ src/op_mode/show_hardware_crypto.py             | 271 ++++++++++++++++++++++
+ 2 files changed, 302 insertions(+)
+diff --git a/op-mode-definitions/show-hardware-crypto.xml.in b/op-mode-definitions/show-hardware-crypto.xml.in
+new file mode 100644
+index 000000000..348af9082
+--- /dev/null
++++ b/op-mode-definitions/show-hardware-crypto.xml.in
+@@ -0,0 +1,31 @@
++<?xml version="1.0"?>
++<interfaceDefinition>
++  <node name="show">
++    <children>
++      <node name="hardware">
++        <children>
++          <node name="crypto">
++            <properties>
++              <help>Show hardware cryptographic acceleration (CAAM / SEC 5.4)</help>
++            </properties>
++            <command>sudo ${vyos_op_scripts_dir}/show_hardware_crypto.py</command>
++            <children>
++              <leafNode name="all">
++                <properties>
++                  <help>Show all registered hardware crypto algorithms</help>
++                </properties>
++                <command>sudo ${vyos_op_scripts_dir}/show_hardware_crypto.py --all</command>
++              </leafNode>
++              <leafNode name="raw">
++                <properties>
++                  <help>Show raw hardware crypto data as JSON</help>
++                </properties>
++                <command>sudo ${vyos_op_scripts_dir}/show_hardware_crypto.py --raw</command>
++              </leafNode>
++            </children>
++          </node>
++        </children>
++      </node>
++    </children>
++  </node>
++</interfaceDefinition>
+diff --git a/src/op_mode/show_hardware_crypto.py b/src/op_mode/show_hardware_crypto.py
+new file mode 100755
+index 000000000..718a20df1
+--- /dev/null
++++ b/src/op_mode/show_hardware_crypto.py
+@@ -0,0 +1,271 @@
++#!/usr/bin/env python3
++#
++# Copyright (C) VyOS Inc.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License along
++# with this program; if not, write to the Free Software Foundation, Inc.,
++# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++#
++# op-mode: show hardware crypto
++#
++# Cryptographic Acceleration and Assurance Module (CAAM / SEC 5.4)
++# status and hardware-accelerated algorithms for the NXP LS1046A.
++
++import json
++import os
++import re
++import subprocess
++import sys
++import textwrap
++from collections import Counter, defaultdict
++
++from tabulate import tabulate
++
++SYS_ROOT = os.environ.get('VYOS_CRYPTO_SYS_ROOT', '')
++DT_COMPATIBLE = f'{SYS_ROOT}/proc/device-tree/compatible'
++HWRNG_DEV = f'{SYS_ROOT}/dev/hwrng'
++HWRNG_SYS = f'{SYS_ROOT}/sys/class/misc/hw_random'
++PROC_CRYPTO = f'{SYS_ROOT}/proc/crypto'
++PROC_INTERRUPTS = f'{SYS_ROOT}/proc/interrupts'
++JR_DRV_DIR = f'{SYS_ROOT}/sys/bus/platform/drivers/caam_jr'
++
++
++def _read_text(path: str):
++    try:
++        with open(path) as f:
++            return f.read().strip('\x00\n\r ')
++    except OSError:
++        return None
++
++
++def _is_ls1046a() -> bool:
++    compat = _read_text(DT_COMPATIBLE)
++    return bool(compat and 'fsl,ls1046a' in compat)
++
++
++def _is_root() -> bool:
++    return os.geteuid() == 0
++
++
++def render_table(rows, headers, widths=None):
++    if not widths:
++        print(tabulate(rows, headers=headers, tablefmt='simple'))
++        return
++    wrapped_rows = []
++    for r in rows:
++        wrapped_row = []
++        for i, val in enumerate(r):
++            w = widths[i] if i < len(widths) else None
++            val_str = '' if val is None else str(val)
++            if w and len(val_str) > w:
++                wrapped_val = textwrap.fill(val_str, w, break_long_words=True,
++                                            break_on_hyphens=False)
++            else:
++                wrapped_val = val_str
++            wrapped_row.append(wrapped_val)
++        wrapped_rows.append(wrapped_row)
++    print(tabulate(wrapped_rows, headers=headers, tablefmt='simple'))
++
++
++def get_job_rings():
++    """Discover bound Job Ring platform devices and their IRQs."""
++    jrs = []
++    irq_map = {}
++    if os.path.exists(PROC_INTERRUPTS):
++        try:
++            with open(PROC_INTERRUPTS) as f:
++                for line in f:
++                    parts = line.strip().split()
++                    if len(parts) >= 4 and '.jr' in line:
++                        for jr_name in [parts[-1], parts[-2]]:
++                            if '.jr' in jr_name:
++                                irq_num = parts[0].rstrip(':')
++                                irq_type = ' '.join(parts[-4:-1])
++                                counts = [int(p) for p in parts[1:] if p.isdigit()]
++                                irq_map[jr_name] = {
++                                    'irq': irq_num,
++                                    'type': irq_type,
++                                    'count': sum(counts),
++                                }
++        except OSError:
++            pass
++
++    if os.path.isdir(JR_DRV_DIR):
++        for entry in sorted(os.listdir(JR_DRV_DIR)):
++            link = os.path.join(JR_DRV_DIR, entry)
++            if os.path.islink(link) and entry.endswith('.jr'):
++                addr = '0x' + entry.split('.')[0]
++                irq_info = irq_map.get(entry, {})
++                jrs.append({
++                    'name': entry,
++                    'address': addr,
++                    'irq': irq_info.get('irq', '-'),
++                    'interrupt': irq_info.get('type', 'Level'),
++                    'count': irq_info.get('count', 0),
++                    'status': 'active',
++                })
++    return jrs
++
++
++def get_caam_algorithms():
++    """Parse /proc/crypto for all CAAM hardware-backed algorithms."""
++    algs = []
++    if not os.path.exists(PROC_CRYPTO):
++        return algs
++    try:
++        with open(PROC_CRYPTO) as f:
++            blocks = f.read().split('\n\n')
++        for block in blocks:
++            if not block.strip():
++                continue
++            d = {}
++            for line in block.splitlines():
++                k, sep, v = line.partition(':')
++                if sep:
++                    d[k.strip()] = v.strip()
++            if 'caam' in d.get('driver', ''):
++                algs.append(d)
++    except OSError:
++        pass
++    return algs
++
++
++def get_hwrng_info():
++    cur = _read_text(f'{HWRNG_SYS}/rng_current')
++    avail = _read_text(f'{HWRNG_SYS}/rng_available')
++    sample = None
++    if os.path.exists(HWRNG_DEV) and _is_root():
++        try:
++            with open(HWRNG_DEV, 'rb') as f:
++                sample = f.read(16).hex()
++        except OSError:
++            pass
++    return {
++        'current': cur,
++        'available': avail,
++        'sample': sample,
++        'present': os.path.exists(HWRNG_DEV),
++    }
++
++
++def show_crypto(raw: bool = False, show_all: bool = False):
++    if not _is_ls1046a():
++        print('This platform is not the NXP LS1046A Mono Gateway DK; '
++              'no CAAM crypto engine to report.')
++        return 2
++
++    jrs = get_job_rings()
++    algs = get_caam_algorithms()
++    hwrng = get_hwrng_info()
++
++    if raw:
++        data = {
++            'engine': {
++                'model': 'NXP SEC 5.4 / CAAM',
++                'era': 8,
++                'mmio_base': '0x1700000',
++                'job_rings_count': len(jrs),
++                'qi_enabled': True,
++            },
++            'hwrng': hwrng,
++            'job_rings': jrs,
++            'algorithms_count': len(algs),
++            'algorithms': algs if show_all else [a.get('name') for a in algs],
++            'failed': len(jrs) == 0 or len(algs) == 0,
++        }
++        print(json.dumps(data, indent=2))
++        return 0 if not data['failed'] else 1
++
++    print('Crypto Acceleration (NXP CAAM / SEC 5.4)')
++    print('=' * 62)
++    print('Engine:         NXP SEC 5.4 / CAAM (Era 8, ID 0x0a11030100000000)')
++    print('Architecture:   3 Job Rings (JR) + Queue Interface (QI)')
++    print('MMIO Base:      0x1700000 (fsl,sec-v5.4)')
++    hwrng_str = f'/dev/hwrng (Source: {hwrng["current"] or "unknown"}, Active)' if hwrng['present'] else 'absent'
++    print(f'Hardware RNG:   {hwrng_str}')
++    if hwrng['sample']:
++        print(f'Entropy Sample: {hwrng["sample"]}')
++    elif not _is_root():
++        print('Entropy Sample: (run with sudo to sample /dev/hwrng)')
++
++    # Job Rings Table
++    print('\nJob Ring Status:')
++    if jrs:
++        jrows = []
++        for i, jr in enumerate(jrs):
++            jrows.append([f'caam_jr{i}', jr['address'], jr['interrupt'], jr['count'], 'caam_jr', jr['status']])
++        render_table(jrows, ['Ring', 'Address', 'Interrupt', 'IRQs', 'Driver', 'Status'], [10, 11, 18, 8, 10, 8])
++    else:
++        print('FAIL - No active CAAM Job Rings detected')
++
++    # Algorithms Table
++    print('\nHardware-Accelerated Algorithms (/proc/crypto):')
++    if algs:
++        cat_counts = Counter()
++        cat_algs = defaultdict(list)
++
++        for a in algs:
++            typ = a.get('type', '')
++            name = a.get('name', '')
++            if typ == 'aead':
++                cat_counts['aead'] += 1
++                if name in ('gcm(aes)', 'ccm(aes)', 'rfc4106(gcm(aes))') and name not in cat_algs['aead']:
++                    cat_algs['aead'].append(name)
++            elif typ == 'skcipher':
++                cat_counts['cipher'] += 1
++                base_cipher = name.split('(')[0]
++                if base_cipher in ('cbc', 'ctr', 'ecb', 'xts') and name not in cat_algs['cipher']:
++                    cat_algs['cipher'].append(name)
++            elif typ in ('ahash', 'shash'):
++                cat_counts['hash'] += 1
++                if name in ('sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'md5') and name not in cat_algs['hash']:
++                    cat_algs['hash'].append(name)
++            elif typ in ('akcipher', 'sig', 'kpp'):
++                cat_counts['pkc'] += 1
++                if name not in cat_algs['pkc']:
++                    cat_algs['pkc'].append(name)
++            elif typ == 'rng':
++                cat_counts['rng'] += 1
++                if name not in cat_algs['rng']:
++                    cat_algs['rng'].append(name)
++
++        arows = [
++            ['AEAD (IPsec / ESP)', cat_counts['aead'], ', '.join(cat_algs['aead']) + ', authenc(*)'],
++            ['Symmetric (Cipher)', cat_counts['cipher'], ', '.join(cat_algs['cipher'])],
++            ['Hashes & Digests', cat_counts['hash'], ', '.join(cat_algs['hash']) + ', hmac(*)'],
++            ['Asymmetric (PKC)', cat_counts['pkc'], ', '.join(cat_algs['pkc'])],
++            ['Random Number Gen', cat_counts['rng'], 'prng-caam, rng-caam'],
++        ]
++        render_table(arows, ['Category', 'Count', 'Key Hardware Algorithms'], [18, 7, 50])
++        print('-' * 18 + '  ' + '-' * 7 + '  ' + '-' * 50)
++        print(f'Total Registered  {len(algs):>7}  Hardware priority 2000 (QI) / 3000 (JR)')
++
++        if show_all:
++            print('\nAll Registered Hardware Algorithms:')
++            full_rows = [[a.get('name', '-'), a.get('driver', '-'), a.get('type', '-'), a.get('priority', '-')]
++                         for a in algs]
++            render_table(full_rows, ['Name', 'Driver', 'Type', 'Priority'], [32, 38, 10, 8])
++    else:
++        print('WARN - No CAAM-accelerated algorithms found in /proc/crypto')
++
++    return 0 if (jrs and algs) else 1
++
++
++def main():
++    raw = '--raw' in sys.argv or 'raw' in sys.argv
++    show_all = '--all' in sys.argv or 'all' in sys.argv
++    raise SystemExit(show_crypto(raw=raw, show_all=show_all))
++
++
++if __name__ == '__main__':
++    main()
