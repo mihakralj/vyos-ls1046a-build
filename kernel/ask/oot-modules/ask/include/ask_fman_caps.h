@@ -83,10 +83,13 @@ struct fman_cc_key {
 };
 
 /*
- * Bounds the static tree at the ~5 KiB MURAM budget (32 keys x ~150 B).
- * Mirrors board patch 0086b.
+ * Bounds the static tree at the ~10 KiB MURAM budget (64 keys x ~150 B;
+ * raised from 32 2026-08-31, T-M6-8 VLAN throughput investigation -- an
+ * 8-stream bidirectional iperf3 test needs 32 concurrent CC keys on one
+ * port with zero headroom, tipping into -ENOSPC on any setup/teardown
+ * overlap). Mirrors board patches 0086b, 0121k.
  */
-#define FMAN_CC_MAX_STATIC_KEYS	32
+#define FMAN_CC_MAX_STATIC_KEYS	64
 
 /**
  * struct fman_cc_static_tree - a port's complete static CC table
