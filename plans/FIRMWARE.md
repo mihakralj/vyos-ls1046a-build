@@ -35,25 +35,25 @@ Use this procedure when:
 ## 3. ORDERING REQUIREMENT
 
 **[SPEC]**
-- Always update firmware BEFORE installing VyOS.
-- Firmware flashing writes the first 32 MB of eMMC, destroying the GPT partition table.
-- If firmware is flashed AFTER VyOS install, re-run `install image` from USB.
+- Firmware and VyOS can be flashed in either order without mutual corruption.
+- VyOS uses a 4-entry shrunk GPT (< 2 KiB, occupying LBAs 0–2), which ends well before the 4 KiB (LBA 8) firmware start.
+- When flashing firmware with `dd if=firmware-emmc.bin of=/dev/mmcblk0 bs=4096 skip=1 seek=1`, the 4 KiB GPT region is skipped and the primary GPT is preserved.
+- When installing VyOS via `install image`, the installer probes for an existing valid shrunk GPT and prompts to retain it and the eMMC firmware.
 
 **[SPEC]**
 Re-flash after VyOS install (data survival):
 - All VyOS data survives a firmware re-flash.
-- The entire GPT and all partitions (p1 at 32 MiB, p2 at 33 MiB, p3 at ~289 MiB) sit beyond the 32 MiB firmware zone — no reinstall needed, just reboot.
+- The primary GPT (LBAs 0–2) and all partitions (p1 at 64 MiB, p2 at 65 MiB, p3 at ~321 MiB) sit outside the 4 KiB–64 MiB firmware zone — no reinstall needed, just reboot.
 
 ---
 
 ## 4. PARTITION OFFSET COMPLIANCE
 
 **[SPEC]**
-- NXP requires custom OS images place all partitions ≥ 32 MiB from eMMC start.
-- VyOS GPT layout complies: p1 (BIOS boot) at 32 MiB, p2 (EFI) at 33 MiB, p3 (VyOS root) at ~289 MiB.
-- Firmware re-flash (`dd` to first 32 MiB) destroys nothing — all partitions and data survive.
-- No need to re-run `install image` after a firmware update.
-- VyOS boots from SPI NOR (DIP switch on NOR position); the eMMC bootloader region is never executed.
+- Firmware images place payload starting at 4 KiB offset up to 64 MiB.
+- VyOS GPT layout complies: primary GPT at LBAs 0–2 (< 2 KiB), firmware zone from 4 KiB to 64 MiB, p1 (BIOS boot) at 64 MiB, p2 (EFI) at 65 MiB, p3 (VyOS root) at ~321 MiB.
+- Firmware re-flash (`dd bs=4096 skip=1 seek=1`) writes strictly into the 4 KiB–64 MiB zone — all partitions and GPT structures survive.
+- VyOS boots from SPI NOR (DIP switch on NOR position); the eMMC bootloader region serves as fallback/recovery.
 
 ---
 

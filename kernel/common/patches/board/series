@@ -174,9 +174,6 @@
 0121g-fman-pcd-cc-test-vlan-coex.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-1)
 0121h-fman-cc-miss-fe-production-api.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
-0121i-fman-export-fe-root-offset.patch
-
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
 #            MURAM genpool, ENQ root, flow insert, offload engage,
@@ -243,6 +240,14 @@
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0153-fman-pcd-fe-engage-api.patch
 
+# 2026-08-30 (fold): relocated from its old series slot right after 0121h.
+# 0121i's diff targets fman_pcd_fe_enq_get_offset as anchor context, but
+# that function is only introduced by 0153 (above) -- applying 0121i in
+# its original numeric position always failed with "does not apply"
+# because the anchor didn't exist yet. Content unchanged, order-only fix.
+# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
+0121i-fman-export-fe-root-offset.patch
+
 # ── T1 typing fix (§16.2) ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0154-fman-port-lookup-rx-typing.patch
@@ -281,8 +286,8 @@
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0157-fman-pcd-fe-arm-typed-impl.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
-# Upstream-Status: Inappropriate | Risk-Tier: A
 0158-fman-pcd-fqid-resolution-compose.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A
 0163-fman-pcd-port-recover.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch
@@ -300,3 +305,12 @@
 0171-dpaa-netdev-offload-stats-hook.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0172-fman-pcd-kunit-kconfig.patch
+
+# ── fman_pcd.c/fman_pcd.h fixup fold (2026-08-30) ──
+# Consolidates 30 kernel-fixups (fe_flow_key_fix.py + 5 inline mutate.py
+# calls + F_069a/F_069b/F_071/F_134/F_135/F_136/M2_4_4/F_158/F_167/F_169/
+# F_171/F_172/F_188/F_189/F_193/F_197/F_198/F_228/F_200/F_202/F_204/
+# F_218/F_220/F_221/F_225/F_210/F_219/F_211/F_226/F_230/F_191) that
+# previously ran as source mutations on every build. See patch body.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0173-fman-pcd-fixup-fold.patch
