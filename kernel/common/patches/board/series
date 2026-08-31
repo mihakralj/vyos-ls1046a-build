@@ -178,6 +178,8 @@
 0121j-fman-pcd-hm-vlan-route-translate.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B (widens an existing bound, no new API)
 0121k-fman-pcd-cc-max-keys-64.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A (changes live CC match-key format + scheme EKFC)
+0121l-fman-pcd-cc-ekfc-port-id.patch
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
 #            MURAM genpool, ENQ root, flow insert, offload engage,
