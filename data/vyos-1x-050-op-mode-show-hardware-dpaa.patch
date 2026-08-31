@@ -5,8 +5,8 @@ Subject: [PATCH] op-mode: add 'show hardware dpaa'
 
 ---
  op-mode-definitions/show-hardware-dpaa.xml.in |  34 ++
- src/op_mode/show_hardware_dpaa.py             | 299 ++++++++++++++++++++++
- 2 files changed, 336 insertions(+)
+ src/op_mode/show_hardware_dpaa.py             | 363 ++++++++++++++++++++++
+ 2 files changed, 400 insertions(+)
 diff --git a/op-mode-definitions/show-hardware-dpaa.xml.in b/op-mode-definitions/show-hardware-dpaa.xml.in
 new file mode 100644
 index 000000000..892bb1c7a
@@ -55,7 +55,7 @@ new file mode 100755
 index 000000000..9912a76f2
 --- /dev/null
 +++ b/src/op_mode/show_hardware_dpaa.py
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,363 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -96,14 +96,15 @@ index 000000000..9912a76f2
 +DT_BMAN = f'{SYS_ROOT}/proc/device-tree/soc/bman@1890000'
 +DT_FW = f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware'
 +MURAM_DEBUGFS = f'{SYS_ROOT}/sys/kernel/debug/fman_pcd/0/muram_budget'
++FE_PORT = f'{SYS_ROOT}/sys/kernel/debug/fman_pcd/0/fe_port'
 +CMDLINE = f'{SYS_ROOT}/proc/cmdline'
 +
 +MEMAC_MAP = {
-+    '1ae8000': {'memac': 'MAC5', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth0'},
-+    '1aea000': {'memac': 'MAC6', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth1'},
-+    '1ae2000': {'memac': 'MAC2', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth2'},
-+    '1af0000': {'memac': 'MAC9', 'speed': '10G XFI',  'phy': 'SFP+ (in-band PCS)', 'port': 'eth3'},
-+    '1af2000': {'memac': 'MAC10', 'speed': '10G XFI', 'phy': 'SFP+ (in-band PCS)', 'port': 'eth4'},
++    '1ae8000': {'memac': 'MAC5', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth0', 'hw_port': 0x12},
++    '1aea000': {'memac': 'MAC6', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth1', 'hw_port': 0x13},
++    '1ae2000': {'memac': 'MAC2', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth2', 'hw_port': 0x14},
++    '1af0000': {'memac': 'MAC9', 'speed': '10G XFI',  'phy': 'SFP+ (in-band PCS)', 'port': 'eth3', 'hw_port': 0x10},
++    '1af2000': {'memac': 'MAC10', 'speed': '10G XFI', 'phy': 'SFP+ (in-band PCS)', 'port': 'eth4', 'hw_port': 0x11},
 +}
 +
 +
@@ -118,6 +119,10 @@ index 000000000..9912a76f2
 +def _is_ls1046a() -> bool:
 +    compat = _read_text(DT_COMPATIBLE)
 +    return bool(compat and 'fsl,ls1046a' in compat)
++
++
++def _is_root() -> bool:
++    return os.geteuid() == 0
 +
 +
 +def count_bound(driver_dir: str) -> int:
@@ -153,8 +158,53 @@ index 000000000..9912a76f2
 +    print(tabulate(wrapped_rows, headers=headers, tablefmt='simple'))
 +
 +
-+def get_interfaces_info():
++def get_armed_ports() -> set:
++    armed = set()
++    if os.path.exists(FE_PORT):
++        try:
++            with open(FE_PORT) as f:
++                for line in f:
++                    p = line.split()
++                    if len(p) >= 2 and p[0] == 'port':
++                        armed.add(int(p[1], 16))
++        except (OSError, ValueError):
++            pass
++    return armed
++
++
++def get_nft_flowtable_offloads() -> dict:
++    """Scan nftables flowtables for offload status per interface."""
++    devs = {}
++    if not _is_root():
++        return devs
++    try:
++        res = subprocess.run(['nft', 'list', 'flowtables'],
++                             capture_output=True, text=True, check=False)
++        if res.returncode == 0:
++            cur_devs = []
++            has_offload = False
++            for line in res.stdout.splitlines():
++                if 'devices = {' in line:
++                    m = re.search(r'devices\s*=\s*\{\s*([^}]+)\s*\}', line)
++                    if m:
++                        cur_devs = [d.strip() for d in m.group(1).split(',')]
++                if 'flags offload' in line:
++                    has_offload = True
++                if '}' in line and cur_devs:
++                    for d in cur_devs:
++                        devs[d] = 'ASK2' if has_offload else 'SW-Flowtable'
++                    cur_devs = []
++                    has_offload = False
++    except OSError:
++        pass
++    return devs
++
++
++def get_interfaces_info(xsk_info: dict):
 +    ifaces = []
++    armed_ports = get_armed_ports()
++    nft_offloads = get_nft_flowtable_offloads()
++
 +    for i in range(5):
 +        iface = f'eth{i}'
 +        sysdir = f'{SYS_ROOT}/sys/class/net/{iface}'
@@ -166,7 +216,20 @@ index 000000000..9912a76f2
 +
 +        dev_target = os.path.basename(os.path.realpath(f'{sysdir}/device'))
 +        addr = dev_target.split('.')[0]
-+        info = MEMAC_MAP.get(addr, {'memac': '?', 'speed': '?', 'phy': '?'})
++        info = MEMAC_MAP.get(addr, {'memac': '?', 'speed': '?', 'phy': '?', 'hw_port': None})
++
++        # Determine offload state
++        if operstate == 'down':
++            offload_state = 'N/A (down)'
++        elif xsk_info.get(iface, {}).get('armed', 0) > 0 or xsk_info.get(iface, {}).get('redirect', 0) > 0:
++            offload_state = 'AF_XDP'
++        elif info['hw_port'] in armed_ports:
++            offload_state = 'ASK2'
++        elif iface in nft_offloads:
++            offload_state = nft_offloads[iface]
++        else:
++            offload_state = 'None'
++
 +        ifaces.append({
 +            'iface': iface,
 +            'memac': info['memac'],
@@ -176,12 +239,13 @@ index 000000000..9912a76f2
 +            'mac': mac,
 +            'mtu': mtu,
 +            'link': operstate,
++            'offload': offload_state,
 +        })
 +    return ifaces
 +
 +
 +def get_xsk_status():
-+    status = []
++    status = {}
 +    for iface in ('eth3', 'eth4'):
 +        sysdir = f'{SYS_ROOT}/sys/class/net/{iface}'
 +        if not os.path.exists(sysdir):
@@ -206,13 +270,13 @@ index 000000000..9912a76f2
 +        state = 'active (ZC)' if redir > 0 else ('armed' if armed > 0 else 'dormant')
 +        if guard > 0:
 +            state = f'guard-block ({guard})'
-+        status.append({
++        status[iface] = {
 +            'port': iface,
 +            'redirect': redir,
 +            'armed': armed,
 +            'guard': guard,
 +            'state': state,
-+        })
++        }
 +    return status
 +
 +
@@ -237,8 +301,8 @@ index 000000000..9912a76f2
 +              'no DPAA1 hardware complex to report.')
 +        return 2
 +
-+    ifaces = get_interfaces_info()
-+    xsk_list = get_xsk_status()
++    xsk_dict = get_xsk_status()
++    ifaces = get_interfaces_info(xsk_dict)
 +    muram = get_muram_info()
 +
 +    # Packet counters
@@ -278,7 +342,7 @@ index 000000000..9912a76f2
 +                'muram': muram,
 +            },
 +            'interfaces': ifaces,
-+            'af_xdp': xsk_list,
++            'af_xdp': list(xsk_dict.values()),
 +            'failed': len(ifaces) == 0,
 +        }
 +        print(json.dumps(data, indent=2))
@@ -286,10 +350,10 @@ index 000000000..9912a76f2
 +
 +    if ports_only:
 +        print('Network Interfaces & MEMAC Mapping:')
-+        prows = [[i['iface'], i['memac'], i['addr'], i['speed'], i['phy'], i['mac'], i['mtu'], i['link']]
++        prows = [[i['iface'], i['memac'], i['addr'], i['speed'], i['phy'], i['mac'], i['mtu'], i['link'], i['offload']]
 +                 for i in ifaces]
-+        render_table(prows, ['Interface', 'MEMAC', 'Address', 'Speed', 'PHY / Link', 'MAC Address', 'MTU', 'Link'],
-+                     [10, 8, 11, 10, 20, 18, 6, 6])
++        render_table(prows, ['Interface', 'MEMAC', 'Address', 'Speed', 'PHY / Link', 'MAC Address', 'MTU', 'Link', 'Offload'],
++                     [10, 8, 11, 10, 20, 18, 5, 5, 11])
 +        return 0
 +
 +    print('DPAA1 Network Acceleration (NXP Data Path Acceleration Architecture)')
@@ -320,10 +384,10 @@ index 000000000..9912a76f2
 +
 +    # Table 1: Interfaces & MEMAC Mapping
 +    print('\nNetwork Interfaces & MEMAC Mapping:')
-+    prows = [[i['iface'], i['memac'], i['addr'], i['speed'], i['phy'], i['mac'], i['mtu'], i['link']]
++    prows = [[i['iface'], i['memac'], i['addr'], i['speed'], i['phy'], i['mac'], i['mtu'], i['link'], i['offload']]
 +             for i in ifaces]
-+    render_table(prows, ['Interface', 'MEMAC', 'Address', 'Speed', 'PHY / Link', 'MAC Address', 'MTU', 'Link'],
-+                 [10, 8, 11, 10, 20, 18, 6, 6])
++    render_table(prows, ['Interface', 'MEMAC', 'Address', 'Speed', 'PHY / Link', 'MAC Address', 'MTU', 'Link', 'Offload'],
++                 [10, 8, 11, 10, 20, 18, 5, 5, 11])
 +
 +    # Table 2: Drivers & Controllers
 +    print('\nController & Driver Status:')
@@ -340,7 +404,7 @@ index 000000000..9912a76f2
 +
 +    # Table 3: AF_XDP Zero-Copy Status
 +    print('\nAF_XDP Zero-Copy Status (10G SFP+ Ports):')
-+    xrows = [[x['port'], x['redirect'], x['armed'], x['guard'], x['state']] for x in xsk_list]
++    xrows = [[x['port'], x['redirect'], x['armed'], x['guard'], x['state']] for x in xsk_dict.values()]
 +    render_table(xrows, ['Port', 'Redirected (RX)', 'Armed', 'Fill Guard Block', 'State'], [8, 16, 8, 18, 14])
 +
 +    return 0 if len(ifaces) >= 5 else 1
