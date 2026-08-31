@@ -5,8 +5,8 @@ Subject: [PATCH] op-mode: add 'show hardware dpaa'
 
 ---
  op-mode-definitions/show-hardware-dpaa.xml.in |  34 ++
- src/op_mode/show_hardware_dpaa.py             | 363 ++++++++++++++++++++++
- 2 files changed, 400 insertions(+)
+ src/op_mode/show_hardware_dpaa.py             | 365 ++++++++++++++++++++++
+ 2 files changed, 402 insertions(+)
 diff --git a/op-mode-definitions/show-hardware-dpaa.xml.in b/op-mode-definitions/show-hardware-dpaa.xml.in
 new file mode 100644
 index 000000000..892bb1c7a
@@ -55,7 +55,7 @@ new file mode 100755
 index 000000000..9912a76f2
 --- /dev/null
 +++ b/src/op_mode/show_hardware_dpaa.py
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,365 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -100,11 +100,11 @@ index 000000000..9912a76f2
 +CMDLINE = f'{SYS_ROOT}/proc/cmdline'
 +
 +MEMAC_MAP = {
-+    '1ae8000': {'memac': 'MAC5', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth0', 'hw_port': 0x12},
-+    '1aea000': {'memac': 'MAC6', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth1', 'hw_port': 0x13},
-+    '1ae2000': {'memac': 'MAC2', 'speed': '1G SGMII', 'phy': 'MaxLinear GPY115C', 'port': 'eth2', 'hw_port': 0x14},
-+    '1af0000': {'memac': 'MAC9', 'speed': '10G XFI',  'phy': 'SFP+ (in-band PCS)', 'port': 'eth3', 'hw_port': 0x10},
-+    '1af2000': {'memac': 'MAC10', 'speed': '10G XFI', 'phy': 'SFP+ (in-band PCS)', 'port': 'eth4', 'hw_port': 0x11},
++    '1ae8000': {'memac': 'MAC5', 'type': '1G SGMII (GPY115C)', 'port': 'eth0', 'hw_port': 0x12},
++    '1aea000': {'memac': 'MAC6', 'type': '1G SGMII (GPY115C)', 'port': 'eth1', 'hw_port': 0x13},
++    '1ae2000': {'memac': 'MAC2', 'type': '1G SGMII (GPY115C)', 'port': 'eth2', 'hw_port': 0x14},
++    '1af0000': {'memac': 'MAC9', 'type': '10G XFI (SFP+)',     'port': 'eth3', 'hw_port': 0x10},
++    '1af2000': {'memac': 'MAC10', 'type': '10G XFI (SFP+)',    'port': 'eth4', 'hw_port': 0x11},
 +}
 +
 +
@@ -216,7 +216,7 @@ index 000000000..9912a76f2
 +
 +        dev_target = os.path.basename(os.path.realpath(f'{sysdir}/device'))
 +        addr = dev_target.split('.')[0]
-+        info = MEMAC_MAP.get(addr, {'memac': '?', 'speed': '?', 'phy': '?', 'hw_port': None})
++        info = MEMAC_MAP.get(addr, {'memac': '?', 'type': '?', 'hw_port': None})
 +
 +        # Determine offload state
 +        if operstate == 'down':
@@ -234,8 +234,7 @@ index 000000000..9912a76f2
 +            'iface': iface,
 +            'memac': info['memac'],
 +            'addr': f'0x{addr}',
-+            'speed': info['speed'],
-+            'phy': info['phy'],
++            'type': info['type'],
 +            'mac': mac,
 +            'mtu': mtu,
 +            'link': operstate,
@@ -332,6 +331,7 @@ index 000000000..9912a76f2
 +
 +    if raw:
 +        data = {
++            'interfaces': ifaces,
 +            'complex': {
 +                'fman': 'FMan v3 @ 0x1a00000',
 +                'microcode': ucode_str,
@@ -341,7 +341,6 @@ index 000000000..9912a76f2
 +                'total_packets': total_pkts,
 +                'muram': muram,
 +            },
-+            'interfaces': ifaces,
 +            'af_xdp': list(xsk_dict.values()),
 +            'failed': len(ifaces) == 0,
 +        }
@@ -350,25 +349,21 @@ index 000000000..9912a76f2
 +
 +    if ports_only:
 +        print('Network Interfaces & MEMAC Mapping:')
-+        prows = [[i['iface'], i['memac'], i['addr'], i['speed'], i['phy'], i['mac'], i['mtu'], i['link'], i['offload']]
++        prows = [[i['iface'], i['memac'], i['type'], i['mac'], i['mtu'], i['link'], i['offload']]
 +                 for i in ifaces]
-+        render_table(prows, ['Interface', 'MEMAC', 'Address', 'Speed', 'PHY / Link', 'MAC Address', 'MTU', 'Link', 'Offload'],
-+                     [10, 8, 11, 10, 20, 18, 5, 5, 11])
++        render_table(prows, ['Port', 'MEMAC', 'Type / PHY', 'MAC Address', 'MTU', 'Link', 'Offload'],
++                     [6, 7, 18, 17, 5, 6, 10])
 +        return 0
 +
 +    print('DPAA1 Network Acceleration (NXP Data Path Acceleration Architecture)')
 +    print('=' * 69)
-+    print(f'Frame Manager:  FMan v3 @ 0x1a00000 (ucode {ucode_str}, PCD-capable: CC HM POL PARSER)')
-+    if muram:
-+        used_kib = int(muram.get('used', 0)) // 1024
-+        res_kib = int(muram.get('reserved', 0)) // 1024
-+        print(f'MURAM Memory:   {used_kib} KiB used / {res_kib} KiB reserved ({muram.get("free", 0)} B free)')
-+    else:
-+        print('MURAM Memory:   64 KiB total (MURAM base 0x1a00000)')
-+    print('Queue Manager:  QMan @ 0x1880000 (4 CPU portals @ 0x500000000, 32 MB PFDR)')
-+    print('Buffer Manager: BMan @ 0x1890000 (4 CPU portals @ 0x508000000, 16 MB FBPR)')
-+    print(f'Frame Size Cap: {max_frm} B ({jumbo_status})')
-+    print(f'Datapath Load:  {total_pkts} pkts processed across FQs/pools')
++
++    # 1. Interfaces Table at TOP
++    print('Network Interfaces & MEMAC Mapping:')
++    prows = [[i['iface'], i['memac'], i['type'], i['mac'], i['mtu'], i['link'], i['offload']]
++             for i in ifaces]
++    render_table(prows, ['Port', 'MEMAC', 'Type / PHY', 'MAC Address', 'MTU', 'Link', 'Offload'],
++                 [6, 7, 18, 17, 5, 6, 10])
 +
 +    if fman_only:
 +        print('\nFMan Subsystems & Drivers:')
@@ -382,14 +377,21 @@ index 000000000..9912a76f2
 +        render_table(frows, ['Subsystem', 'Driver', 'Bound', 'Description'], [18, 16, 7, 36])
 +        return 0
 +
-+    # Table 1: Interfaces & MEMAC Mapping
-+    print('\nNetwork Interfaces & MEMAC Mapping:')
-+    prows = [[i['iface'], i['memac'], i['addr'], i['speed'], i['phy'], i['mac'], i['mtu'], i['link'], i['offload']]
-+             for i in ifaces]
-+    render_table(prows, ['Interface', 'MEMAC', 'Address', 'Speed', 'PHY / Link', 'MAC Address', 'MTU', 'Link', 'Offload'],
-+                 [10, 8, 11, 10, 20, 18, 5, 5, 11])
++    # 2. Hardware Subsystems
++    print('\nHardware Subsystems:')
++    print(f'Frame Manager:  FMan v3 @ 0x1a00000 (ucode {ucode_str}, PCD-capable: CC HM POL PARSER)')
++    if muram:
++        used_kib = int(muram.get('used', 0)) // 1024
++        res_kib = int(muram.get('reserved', 0)) // 1024
++        print(f'MURAM Memory:   {used_kib} KiB used / {res_kib} KiB reserved ({muram.get("free", 0)} B free)')
++    else:
++        print('MURAM Memory:   64 KiB total (MURAM base 0x1a00000)')
++    print('Queue Manager:  QMan @ 0x1880000 (4 CPU portals @ 0x500000000, 32 MB PFDR)')
++    print('Buffer Manager: BMan @ 0x1890000 (4 CPU portals @ 0x508000000, 16 MB FBPR)')
++    print(f'Frame Size Cap: {max_frm} B ({jumbo_status})')
++    print(f'Datapath Load:  {total_pkts} pkts processed across FQs/pools')
 +
-+    # Table 2: Drivers & Controllers
++    # 3. Drivers & Controllers
 +    print('\nController & Driver Status:')
 +    drows = [
 +        ['FMan Controller', 'fsl-fman', f'{count_bound("fsl-fman")} device', 'FMan controller @ 0x1a00000'],
@@ -402,7 +404,7 @@ index 000000000..9912a76f2
 +    ]
 +    render_table(drows, ['Subsystem', 'Driver', 'Bound', 'Details'], [16, 16, 12, 34])
 +
-+    # Table 3: AF_XDP Zero-Copy Status
++    # 4. AF_XDP Zero-Copy Status
 +    print('\nAF_XDP Zero-Copy Status (10G SFP+ Ports):')
 +    xrows = [[x['port'], x['redirect'], x['armed'], x['guard'], x['state']] for x in xsk_dict.values()]
 +    render_table(xrows, ['Port', 'Redirected (RX)', 'Armed', 'Fill Guard Block', 'State'], [8, 16, 8, 18, 14])
