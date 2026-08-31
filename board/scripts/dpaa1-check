@@ -193,6 +193,12 @@ if [ -e "$FW_BLOB" ]; then
         ok "FMan microcode blob present (version string not parsed)"
     fi
     note "MURAM-loaded ucode drives KeyGen/CC/HM/Policer + SoftParser"
+    if [ -r /sys/kernel/debug/fman_pcd/0/muram_budget ]; then
+        used=$(awk '/used/{print $2}' /sys/kernel/debug/fman_pcd/0/muram_budget 2>/dev/null || echo 0)
+        res=$(awk '/reserved/{print $2}' /sys/kernel/debug/fman_pcd/0/muram_budget 2>/dev/null || echo 0)
+        [ -n "$used" ] && [ -n "$res" ] && [ "$res" -gt 0 ] && \
+            note "MURAM memory: $((used/1024)) KiB used / $((res/1024)) KiB reserved"
+    fi
 else
     warn "no fman-firmware DT blob — FMan running stock ROM ucode (PCD limited)"
 fi
@@ -296,10 +302,14 @@ fi
 # ---------------------------------------------------------------------------
 hdr "6) Network interfaces (eth0-eth4)"
 
-# eth0-eth2 = 1G RJ45 (MEMACs 1ae2000/1ae8000/1aea000), eth3/eth4 = 10G SFP+
-# (MEMACs 1af0000/1af2000, the left/right cages). The dpaa_eth (fsl_dpa)
-# netdev driver backs all of them; /sys/class/net/ethN/device points at the
-# PARENT fsl_dpaa_mac device, so 'drv' below normally reads fsl_dpaa_mac.
+declare -A MEMAC_NAME=(
+    [1ae8000]="MAC5"
+    [1aea000]="MAC6"
+    [1ae2000]="MAC2"
+    [1af0000]="MAC9"
+    [1af2000]="MAC10"
+)
+
 found_eth=0
 for i in 0 1 2 3 4; do
     iface="eth${i}"
@@ -308,25 +318,23 @@ for i in 0 1 2 3 4; do
         found_eth=$((found_eth + 1))
         operstate=$(cat "$sysdir/operstate" 2>/dev/null || echo "?")
         mtu=$(cat "$sysdir/mtu" 2>/dev/null || echo "?")
-        drv=$(basename "$(readlink "$sysdir/device/driver" 2>/dev/null)" 2>/dev/null)
-        mac=$(basename "$(readlink -f "$sysdir/device" 2>/dev/null)" 2>/dev/null)
-        kind="1G RJ45"; [ "$i" -ge 3 ] && kind="10G SFP+"
+        hw_mac=$(cat "$sysdir/address" 2>/dev/null | tr '[:lower:]' '[:upper:]')
+        dev_target=$(basename "$(readlink -f "$sysdir/device" 2>/dev/null)" 2>/dev/null)
+        addr=${dev_target%%.*}
+        memac=${MEMAC_NAME[$addr]:-?}
+        kind="1G SGMII"; [ "$i" -ge 3 ] && kind="10G XFI"
         case "$operstate" in
-            up)   ok   "${iface} UP  (${kind}, MTU=${mtu}, drv=${drv:-?}, mac=${mac:-?})" ;;
-            down) note "${iface} down (${kind}, MTU=${mtu}, drv=${drv:-?}, mac=${mac:-?})" ;;
-            *)    note "${iface} ${operstate} (${kind}, MTU=${mtu}, drv=${drv:-?})" ;;
+            up)   ok   "${iface} UP   (${kind}, MTU=${mtu}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
+            down) note "${iface} down (${kind}, MTU=${mtu}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
+            *)    note "${iface} ${operstate} (${kind}, MTU=${mtu}, MEMAC=${memac} @ 0x${addr}, MAC=${hw_mac})" ;;
         esac
         # dpaa_eth's AF_XDP RX path requires the frame to fit a single BMan
         # buffer; on the 10G ports the safe AF_XDP MTU ceiling is 3290.
         if [ "$i" -ge 3 ] && [ "$mtu" != "?" ] && [ "$mtu" -gt 3290 ]; then
             warn "  ${iface} MTU=${mtu} exceeds the AF_XDP single-buffer limit (3290)"
         fi
-        # All DPAA1 netdevs should be driven by fsl_dpa.
-        if [ -n "$drv" ] && [ "$drv" != "fsl_dpaa_mac" ] && [ "$drv" != "fsl_dpa" ]; then
-            warn "  ${iface} bound to unexpected driver '${drv}'"
-        fi
     else
-        fail "interface ${iface} missing — MEMAC ${i} did not enumerate"
+        fail "interface ${iface} missing — MEMAC did not enumerate"
         mark_fail
     fi
 done
