@@ -1,0 +1,72 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 31 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa/fman: raise CC-tree static key cap 32 -> 64
+
+T-M6-8 VLAN throughput investigation, board evidence (2026-08-31).
+
+FMAN_CC_MAX_STATIC_KEYS/FMAN_PCD_CC_HW_MAX_KEYS were both set to 32,
+chosen as a conservative MURAM budget (~5 KiB) rather than any hardware
+limit -- the CC-tree hardware supports up to 255 keys/node. That
+software cap turned out to sit exactly on the edge of a routine
+workload: an 8-stream bidirectional iperf3 test (`-P 8 --bidir`) opens
+16 separate TCP connections (8 forward + 8 reverse), and nf_flowtable
+offloads both the orig and reply tuple per connection, needing 32
+concurrent CC keys on one port for a clean run. With zero headroom,
+any transient overlap during stream setup/teardown (an old flow not yet
+torn down while a new one arrives) pushes a fresh install over the cap,
+observed on the board as ~91% of REPLACE attempts failing with
+fe_flow_insert=-28 (-ENOSPC) and the bulk of that test's traffic falling
+back to kernel software forwarding (matching the CPU softirq jumping
+from ~0% idle to ~50% the instant traffic starts).
+
+Raise both caps to 64, giving 2x headroom over that measured minimum.
+64 keys x ~150 B is ~10 KiB of the 64 KiB MURAM budget -- comfortable
+headroom even with multiple ports concurrently using VLAN CC-tree
+offload. FMAN_CC_MAX_STATIC_KEYS (dpaa_fman_caps.h, consumed by
+ask_vlan_cc.c's per-port key array and rebuild-tree allocation) and
+FMAN_PCD_CC_HW_MAX_KEYS (fman_pcd.h, the silicon-programming layer's
+own bound in fman_pcd_cc_static_install()) are two independently
+defined constants kept in sync by review (per the existing comment on
+the latter) -- both must move together or fman_pcd_cc_static_install()
+would reject any tree above the old 32-key silicon-side cap regardless
+of the software-side array growing.
+
+Companion change (separate commit, OOT ask.ko mirror header): the
+ask_fman_caps.h copy of FMAN_CC_MAX_STATIC_KEYS is bumped identically.
+
+Upstream-Status: Inappropriate | Risk-Tier: B (widens an existing bound, no new API)
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 9144232fc..3a1c8e8f1 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -190,9 +190,10 @@
+  * Passed to fman_cc_tree_install() for the static (default/vpp) lifecycle.
+  * The dynamic (ask) lifecycle builds the same key one-at-a-time via
+  * fman_cc_tree_add_key(). FMAN_CC_MAX_STATIC_KEYS bounds the static tree
+- * at the ~5 KiB MURAM budget from spec sec 3.5 (32 keys x ~150 B).
++ * at the ~10 KiB MURAM budget from spec sec 3.5 (64 keys x ~150 B; raised
++ * from 32 2026-08-31, T-M6-8 VLAN throughput investigation).
+  */
+-#define FMAN_CC_MAX_STATIC_KEYS	32
++#define FMAN_CC_MAX_STATIC_KEYS	64
+
+ struct fman_cc_static_tree {
+ 	u16 num_keys;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 68f8a1ac85d8..1a2b3c4d5e6f 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -272,9 +272,10 @@
+  */
+
+ /* Bounds mirror FMAN_CC_MAX_STATIC_KEYS in dpaa_fman_caps.h (kept in sync
+- * by review; the install body re-checks num_keys against this).
++ * by review; the install body re-checks num_keys against this). Raised
++ * 32 -> 64 2026-08-31, T-M6-8 VLAN throughput investigation.
+  */
+-#define FMAN_PCD_CC_HW_MAX_KEYS	32
++#define FMAN_PCD_CC_HW_MAX_KEYS	64
+
+ /* Match-key field-presence bitmask for struct fman_pcd_cc_hw_key.present. */
+ #define FMAN_PCD_CC_HW_F_ETHERTYPE	BIT(0)
