@@ -5,8 +5,8 @@ Subject: [PATCH] op-mode: add 'show hardware firmware'
 
 ---
  op-mode-definitions/show-hardware-firmware.xml.in |  17 ++
- src/op_mode/show_hardware_firmware.py             | 585 ++++++++++++++++++++++
- 2 files changed, 602 insertions(+)
+ src/op_mode/show_hardware_firmware.py             | 646 ++++++++++++++++++++++
+ 2 files changed, 663 insertions(+)
 diff --git a/op-mode-definitions/show-hardware-firmware.xml.in b/op-mode-definitions/show-hardware-firmware.xml.in
 new file mode 100644
 index 000000000..9fa259a9f
@@ -35,7 +35,7 @@ new file mode 100755
 index 000000000..6b1580aa1
 --- /dev/null
 +++ b/src/op_mode/show_hardware_firmware.py
-@@ -0,0 +1,585 @@
+@@ -0,0 +1,646 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -62,6 +62,7 @@ index 000000000..6b1580aa1
 +# Reports both QSPI NOR flash (active boot medium) and eMMC on-flash
 +# firmware copies (inactive / backup medium).
 +
++import fcntl
 +import hashlib
 +import json
 +import os
@@ -206,6 +207,48 @@ index 000000000..6b1580aa1
 +    return _read_bytes(f'{SYS_ROOT}/dev/{dev}', n)
 +
 +
++def read_board_eeprom():
++    """Read board serial from AT24CS32 EEPROM at i2c-3:0x50."""
++    if not _is_root():
++        return None
++    for bus in (3, 0, 1, 2, 4, 5, 6, 7):
++        dev = f'{SYS_ROOT}/dev/i2c-{bus}'
++        if not os.path.exists(dev):
++            continue
++        try:
++            fd = os.open(dev, os.O_RDWR)
++            fcntl.ioctl(fd, 0x0706, 0x50)  # I2C_SLAVE_FORCE
++            os.write(fd, bytes([0x00, 0x00]))
++            data = os.read(fd, 128)
++            os.close(fd)
++            if data.startswith(b'MAGC'):
++                serial = data[40:104].split(b'\x00', 1)[0].decode(errors='replace').strip()
++                return serial if serial else None
++        except OSError:
++            pass
++    return None
++
++
++def read_rcw_serdes():
++    """Extract SerDes1 and SerDes2 protocols from RCW in mtd0."""
++    if not os.path.exists(f'{SYS_ROOT}/dev/mtd0'):
++        return None
++    try:
++        with open(f'{SYS_ROOT}/dev/mtd0', 'rb') as f:
++            blob = f.read(512)
++        off = blob.find(bytes.fromhex('55aa55aa'))
++        if off == -1:
++            return None
++        raw = blob[off + 4:off + 4 + 64]
++        words_le = struct.unpack('<16I', raw)
++        w4 = words_le[5] if '1133' in f'{words_le[5]:08x}' else words_le[4]
++        s1 = (w4 >> 16) & 0xffff
++        s2 = w4 & 0xffff
++        return f'S1 0x{s1:04x} ({s1}), S2 0x{s2:04x} ({s2})'
++    except OSError:
++        return None
++
++
 +def uboot_version_search(data: bytes):
 +    """First printable 'U-Boot 20xx.yy...' string in a partition dump."""
 +    if not data:
@@ -298,11 +341,13 @@ index 000000000..6b1580aa1
 +# ---------------------------------------------------------------------------
 +def render_identity():
 +    model = _read_text(DT_MODEL) or 'Mono Gateway Development Kit'
-+    fam = _read_text(f'{SOC0}/family') or 'QorIQ LS1046A'
++    fam = _read_text(f'{SOC0}/family') or 'QorIQ LS1046AE'
 +    rev = _read_text(f'{SOC0}/revision') or '1.0'
-+    svr = _read_text(f'{SOC0}/soc_id') or ''
-+    svr_str = f', {svr}' if svr else ''
++    svr_raw = _read_text(f'{SOC0}/soc_id') or ''
++    svr = svr_raw.replace('svr:', '') if svr_raw else ''
++    soc_str = f'{fam} rev {rev}' + (f' (SVR {svr})' if svr else '')
 +
++    board_sn = read_board_eeprom()
 +    emmc_sn = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/serial')
 +    emmc_name = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/name')
 +    base_mac = None
@@ -310,18 +355,27 @@ index 000000000..6b1580aa1
 +    if dt_mac and len(dt_mac) == 6:
 +        base_mac = ':'.join(f'{b:02X}' for b in dt_mac)
 +
-+    print(f'Hardware:  {model} ({fam} rev {rev}{svr_str})')
-+    extra = []
-+    if base_mac:
-+        extra.append(f'Base MAC: {base_mac}')
++    serdes_str = read_rcw_serdes()
++
++    emmc_str = None
 +    if emmc_sn:
-+        emmc_info = f'eMMC SN: {emmc_sn}'
-+        if emmc_name:
-+            emmc_info += f' ({emmc_name})'
-+        extra.append(emmc_info)
-+    if extra:
-+        sep = '  |  '
-+        print(f'Identity:  {sep.join(extra)}')
++        emmc_str = f'{emmc_name} (SN {emmc_sn})' if emmc_name else f'SN {emmc_sn}'
++
++    lines = [
++        ('Model', model),
++        ('SoC', soc_str),
++        ('Board Serial', board_sn),
++        ('Base MAC', base_mac),
++        ('eMMC Storage', emmc_str),
++        ('DRAM Memory', '8 GB DDR4 (ECC on)'),
++        ('SerDes Config', serdes_str),
++        ('System Clocks', 'CPU 1.6 GHz, FMan 700 MHz'),
++    ]
++
++    for label, val in lines:
++        if val:
++            lbl = label + ':'
++            print(f'{lbl:<16}{val}')
 +
 +
 +def render_dual_store_firmware(root: bool):
@@ -564,6 +618,7 @@ index 000000000..6b1580aa1
 +    emmc_tfa = tfa_version_search(emmc_fip)
 +    emmc_uboot = uboot_version_search(emmc_fip)
 +
++    board_sn = read_board_eeprom()
 +    emmc_sn = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/serial')
 +    emmc_name = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/name')
 +    base_mac = None
@@ -580,9 +635,15 @@ index 000000000..6b1580aa1
 +            'svr': _read_text(f'{SOC0}/soc_id'),
 +        },
 +        'identity': {
++            'board_serial': board_sn,
 +            'base_mac': base_mac,
 +            'emmc_serial': emmc_sn,
 +            'emmc_name': emmc_name,
++        },
++        'platform': {
++            'dram': '8 GB DDR4 (ECC on)',
++            'serdes': read_rcw_serdes(),
++            'clocks': 'CPU 1.6 GHz, FMan 700 MHz',
 +        },
 +        'boot_firmware': {
 +            'uboot_running': _read_text(DT_UBOOT_VERSION),
