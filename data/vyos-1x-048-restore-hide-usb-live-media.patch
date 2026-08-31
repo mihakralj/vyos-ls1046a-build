@@ -1,0 +1,58 @@
+From 62849c49d5bd65390fb2090f77193e0a4f5956d5 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 31 Aug 2026 01:24:26 +0000
+Subject: [PATCH] temp: vyos-1x-048-restore-hide-usb-live-media.patch
+
+---
+ src/op_mode/image_installer.py | 35 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index ffd0769ca..6e8f76568 100755
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -195,6 +195,41 @@ def find_disks() -> dict[str, int]:
+     for disk_name, disk_size in disks_available.copy().items():
+         if disk_size < CONST_MIN_DISK_SIZE:
+             del disks_available[disk_name]
++
++    # Hide USB-attached drives -- they are typically install media or
++    # removable storage, not legitimate install targets on this platform.
++    for disk_name in list(disks_available):
++        try:
++            transport = cmdl(['lsblk', '-ndo', 'TRAN', disk_name]).strip()
++        except OSError:
++            transport = ''
++        if transport == 'usb':
++            del disks_available[disk_name]
++
++    # Exclude the live boot media so it cannot be chosen as install
++    # target and does not inflate the disk count (which triggers the
++    # RAID-1 prompt). Try well-known live-boot mount points
++    # (VyOS / Debian bookworm / older Debian) until one resolves.
++    live_src: str = ''
++    for _mnt in ('/usr/lib/live/mount/medium',
++                 '/run/live/medium',
++                 '/lib/live/mount/medium'):
++        try:
++            live_src = cmdl(['findmnt', '-n', '-o', 'SOURCE', _mnt]).strip()
++            if live_src:
++                break
++        except OSError:
++            continue
++
++    if live_src:
++        try:
++            pkname = cmdl(['lsblk', '-n', '-o', 'PKNAME', live_src]).strip()
++            live_disk = f'/dev/{pkname}' if pkname else live_src
++            if live_disk in disks_available:
++                del disks_available[live_disk]
++        except OSError:
++            pass  # lsblk failed -- keep all disks (safe fallback)
++
+     if not disks_available:
+         print(MSG_ERR_NO_DISK)
+         exit(MSG_INFO_INSTALL_EXIT)
+-- 
+2.39.5
+
