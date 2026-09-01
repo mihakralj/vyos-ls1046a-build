@@ -363,3 +363,11 @@
 # (no functional effect) but noisy; O/H now takes the TX branch.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0179-fman-port-oh-fifo-size-warn.patch
+
+# Phase 1d step 1: "bringup" accepts an optional target-FQID hex arg
+# (FMBM_OFQID/OEFQID), and a new "enable <port> <0|1>" verb wraps
+# fman_port_oh_enable() (FMBM_OCFG[EN]) -- built in 0176, never exposed
+# until now. Still no CC tree, no QMan test FQ, nothing feeding the port
+# traffic -- FMBM_OCFG[EN]=1 gets tested in isolation first.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0180-fman-port-oh-enable-target-fqid.patch
