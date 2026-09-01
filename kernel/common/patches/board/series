@@ -338,3 +338,11 @@
 # yet. See plans/ASK2-VLAN-REARCH.md.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0176-fman-port-oh-bringup.patch
+
+# Phase 1c: hand-arm debugfs (/sys/kernel/debug/fman_port_oh_test/bringup)
+# to exercise 0176's fman_port_config()/fman_port_init() for the first time
+# on real silicon. FMBM_OCFG[EN] stays 0 -- de-risk only, no live traffic
+# path yet. Self-contained in fman_port.c (see patch body for why, not
+# routed through fman_pcd.c's cc_test debugfs tree).
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0177-fman-port-oh-test-debugfs.patch
