@@ -26,6 +26,27 @@ documentation exists for any FMan microcode family** — the `qoriq-fm-ucode`
 repo ships only binary blobs and feature-changelog PDFs, no bit layouts, no
 descriptor formats, no opcode encodings.
 
+**Companion resource (2026-09-01):** `arch/fman-instruction-table.html`
+(local copy, source `https://large-files.moshe.nl/fman-instruction-table.html`)
+is a *different* layer than anything above — a reverse-engineered ISA
+reference for the **FM_CTL microcontroller's raw 32-bit instruction set**
+(the actual machine code the FM_CTL engine executes: `task.set_end_nia`,
+`task.redispatch`, `tnum.alloc`, `dma.read256`, `memw.read`, etc.), not the
+BMI/Classification/Policer register blocks or NIA action-code table this
+document covers. Explicitly self-described as "not an NXP-authored manual";
+201 instruction forms, 191 "confirmed" / 10 "strong" evidence status,
+sourced from `isa/encodings.yaml` + `isa/mnemonics-readable.yaml` with a
+SHA-256 verification hash. Contains **no** VLAN, frame-release, or
+buffer-dequeue instructions, and no PRE_BMI_ENQ_FRAME (NIA 0x28) or other
+action-code entries — those live at the BMI/CC layer this document already
+covers, not the FM_CTL controller ISA layer. Useful groundwork for a future
+disassembly-level investigation of what a specific NIA action actually
+executes at the FM_CTL instruction level, but that is a substantially
+larger, higher-risk undertaking (live-microcode patching territory) than
+anything attempted in this document — see the T-M6-8 VLAN cross-port
+throttle investigation (qdrant, 2026-09-01) for the specific open question
+that motivated pulling this resource in.
+
 ---
 
 ## 1. Identity and Scope
