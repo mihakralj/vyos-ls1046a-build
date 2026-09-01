@@ -1,0 +1,290 @@
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Tue, 01 Sep 2026 02:00:00 +0000
+Subject: [PATCH] fman_pcd: adopt vendor ehash model for VLAN HW offload (0174)
+
+Implements routed VLAN hardware acceleration via the FMan External Hash table
+inline opcode datapath, matching vendor ASK 1.0 (cdx_ehash.c:720-809).
+
+- STRIP_ALL_VLAN_HDRS (0x12) is emitted on ingress VLAN POP with the actual
+  ingress VID (outer-first, be16) and op_flags=0 (VALIDATE).
+- UPDATE_TTL (0x21) / UPDATE_HOPLIMIT (0x29) / NAT fused opcodes perform L3 rewrite.
+- INSERT_VLAN_HDR (0x42) is emitted on egress VLAN PUSH with (TCI<<16)|innerET,
+  and outer EtherType rolled to 0x8100.
+- INSERT_L2_HDR (0x41) writes Destination MAC, Source MAC, and outer EtherType.
+- ENQUEUE_PKT (0x01) enqueues to the target physical TX FQID.
+
+Upstream-Status: Inappropriate | Risk-Tier: A
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 6bfa09767d7f..56fd4f1dafb8 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2190,7 +2190,8 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				  u32 enq_off, u32 fqid, bool stats,
+ 				  const u8 *l2_dst, const u8 *l2_src,
+ 				  u16 eth_type,
+-				  const struct fman_pcd_nat_params *nat);
++				  const struct fman_pcd_nat_params *nat,
++				  const struct fman_pcd_vlan_params *vlan);
+ /* F-230: debugfs fe_flow add path never performs NAT. */
+ static int fman_pcd_ehash_add_key_natwrap_dbgfs(
+ 				  struct fman_pcd_ehash_table *t,
+@@ -2200,14 +2201,15 @@ static int fman_pcd_ehash_add_key_natwrap_dbgfs(
+ 				  u16 eth_type)
+ {
+ 	return fman_pcd_ehash_add_key(t, key, key_size, enq_off, fqid, stats,
+-				      l2_dst, l2_src, eth_type, NULL);
++				      l2_dst, l2_src, eth_type, NULL, NULL);
+ }
+ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				  const u8 *key, u8 key_size,
+ 				  u32 enq_off, u32 fqid, bool stats,
+ 				  const u8 *l2_dst, const u8 *l2_src,
+ 				  u16 eth_type,
+-				  const struct fman_pcd_nat_params *nat)
++				  const struct fman_pcd_nat_params *nat,
++				  const struct fman_pcd_vlan_params *vlan)
+ {
+ 	struct fman_pcd_ehash_flow *flow;
+ 	u64 prev_head, old_native, rec_phys;
+@@ -2243,7 +2245,18 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 
+ 	/* F-198 (T-M7-2 S1): vendor ordered opcode/parameter record. */
+ 	#define FMAN_EHASH_OPC_ENQUEUE_PKT		0x01
+-	#define FMAN_EHASH_OPC_INSERT_L2_HDR	0x41
++	#define FMAN_EHASH_OPC_STRIP_ALL_VLAN		0x12
++	#define FMAN_EHASH_OPC_UPDATE_TTL		0x21
++	#define FMAN_EHASH_OPC_UPDATE_SIP_V4		0x22
++	#define FMAN_EHASH_OPC_UPDATE_DIP_V4		0x24
++	#define FMAN_EHASH_OPC_UPDATE_HOPLIMIT		0x29
++	#define FMAN_EHASH_OPC_UPDATE_SIP_V6		0x2a
++	#define FMAN_EHASH_OPC_UPDATE_DIP_V6		0x2c
++	#define FMAN_EHASH_OPC_UPDATE_SPORT		0x31
++	#define FMAN_EHASH_OPC_UPDATE_DPORT		0x32
++	#define FMAN_EHASH_OPC_INSERT_L2_HDR		0x41
++	#define FMAN_EHASH_OPC_INSERT_VLAN_HDR		0x42
++	#define FMAN_EHASH_OP_SKIP_VLAN_VALIDATE	0x01
+ 	{
+ 		size_t opc_off = FMAN_EHASH_FLOW_KEY_OFF + ALIGN(key_size, sizeof(u32));
+ 		size_t param_off = opc_off + 16;	/* MAX_OPCODES */
+@@ -2258,97 +2271,79 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 		memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);
+ 
+ 		if (l2_dst && l2_src && eth_type) {
+-			/* F-200 (T-M7-2 S3): for routed IPv4, prepend UPDATE_TTL
+-			 * (0x21) so the FE decrements TTL and fixes the IPv4 header
+-			 * checksum in hardware.  Vendor create_ttl_hm() always emits
+-			 * a 4-byte en_ehash_update_dscp param (zero = no DSCP mark)
+-			 * for UPDATE_TTL, which must precede the INSERT_L2_HDR param
+-			 * in emission order.  IPv6 (eth_type 0x86dd) is deferred: it
+-			 * needs UPDATE_HOPLIMIT(0x29), so keep the S1 two-opcode
+-			 * chain there for now.
+-			 *
+-			 * Vendor create_ethernet_hm(): INSERT_L2_HDR parameter
+-			 * follows; hdrlen=14; the 4-byte struct header + 14-byte L2
+-			 * payload needs two pad bytes, so word = 14 | (2 << 29) =
+-			 * 0x4000000e. L2 param consumes 20B. */
+-			#define FMAN_EHASH_OPC_UPDATE_TTL	0x21
+ 			size_t l2poff = param_off;
+ 			size_t oi = 0;
+-
+-			if (eth_type == 0x0800) {
+-				/* UPDATE_TTL opcode + 4B zero DSCP param first. */
+-				r[opc_off + oi++] = FMAN_EHASH_OPC_UPDATE_TTL;
+-				*(__be32 *)(r + param_off + 0) = cpu_to_be32(0);
+-				l2poff = param_off + 4;
+-			} else if (eth_type == 0x86dd) {
+-				/* F-226(hoplimit): IPv6 hop-limit decrement, the v6
+-				 * counterpart of UPDATE_TTL (vendor fm_ehash.h
+-				 * UPDATE_HOPLIMIT = 0x29, single-byte opcode). Same 4B
+-				 * zero traffic-class param slot as v4. A router MUST
+-				 * decrement the hop limit on forward. */
+-				#define FMAN_EHASH_OPC_UPDATE_HOPLIMIT	0x29
+-				r[opc_off + oi++] = FMAN_EHASH_OPC_UPDATE_HOPLIMIT;
+-				*(__be32 *)(r + param_off + 0) = cpu_to_be32(0);
+-				l2poff = param_off + 4;
+-			}
+-			/* F-230 (T-M6-7.1): vendor create_nat_hm encoding.
+-			 * NAT opcodes are BIT-FUSED (OR'd into one byte per operation
+-			 * group), not emitted as separate bytes:
+-			 *   ports: UPDATE_SPORT(0x31)|UPDATE_DPORT(0x32)
+-			 *   L3:    TTL/HOPLIMIT | UPDATE_SIP | UPDATE_DIP
+-			 * Opcode order is ports first, then fused L3, then L2+enqueue.
+-			 * Params follow that same order: {dport,sport}, DSCP(4),
+-			 * SIP, DIP, L2, enqueue. Silicon auto-fixes IP+L4 checksums.
+-			 * DORMANT unless nat->flags != 0; UNPROVEN on 210.10.1. */
+-			if (nat && nat->flags) {
+-				#define FMAN_EHASH_OPC_UPDATE_SIP_V4	0x22
+-				#define FMAN_EHASH_OPC_UPDATE_DIP_V4	0x24
+-				#define FMAN_EHASH_OPC_UPDATE_SIP_V6	0x2a
+-				#define FMAN_EHASH_OPC_UPDATE_DIP_V6	0x2c
+-				#define FMAN_EHASH_OPC_UPDATE_SPORT	0x31
+-				#define FMAN_EHASH_OPC_UPDATE_DPORT	0x32
+-				u8 port_opc = 0;
+-				u8 l3_opc;
+-				bool pv6 = nat->is_v6;
+-
+-				/* Rebuild the opcode list + params from param_off in the
+-				 * vendor NAT order. The no-NAT branch below never executes
+-				 * this reset, preserving F-200/F-226 byte identity. */
+-				oi = 0;
+-				l2poff = param_off;
+-				if (nat->flags & FMAN_PCD_NATF_SPAT)
+-					port_opc |= FMAN_EHASH_OPC_UPDATE_SPORT;
+-				if (nat->flags & FMAN_PCD_NATF_DPAT)
+-					port_opc |= FMAN_EHASH_OPC_UPDATE_DPORT;
+-				if (port_opc) {
+-					r[opc_off + oi++] = port_opc;
+-					*(__be16 *)(r + l2poff + 0) = nat->dport;
+-					*(__be16 *)(r + l2poff + 2) = nat->sport;
+-					l2poff += 4;
++			u8 port_opc = 0;
++			u8 l3_opc;
++			bool pv6 = (eth_type == 0x86dd);
++
++			/* 1. Ingress VLAN POP (0x12): STRIP_ALL_VLAN_HDRS.
++			 * Vendor insert_remove_vlan_hm() (cdx_ehash.c:1943-2040)
++			 * writes real ingress VID into vlan_id[0] (outer-first, be16)
++			 * and op_flags=0 (VALIDATE) for routed tagged flows. */
++			if (vlan && (vlan->flags & FMAN_PCD_VLANF_POP)) {
++				r[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ALL_VLAN;
++				memset(r + l2poff, 0, 12);
++				if (vlan->ingress_vid) {
++					*(__be16 *)(r + l2poff + 0) =
++						cpu_to_be16(vlan->ingress_vid);
++				} else {
++					r[l2poff + 8] = FMAN_EHASH_OP_SKIP_VLAN_VALIDATE;
+ 				}
++				l2poff += 12;
++			}
+ 
+-				/* One fused L3 opcode: TTL/hoplimit plus selected addr
+-				 * rewrites. DSCP param always first for TTL/hoplimit. */
+-				l3_opc = pv6 ? FMAN_EHASH_OPC_UPDATE_HOPLIMIT :
+-						  FMAN_EHASH_OPC_UPDATE_TTL;
+-				if (nat->flags & FMAN_PCD_NATF_SNAT)
+-					l3_opc |= pv6 ? FMAN_EHASH_OPC_UPDATE_SIP_V6 :
+-						       FMAN_EHASH_OPC_UPDATE_SIP_V4;
+-				if (nat->flags & FMAN_PCD_NATF_DNAT)
+-					l3_opc |= pv6 ? FMAN_EHASH_OPC_UPDATE_DIP_V6 :
+-						       FMAN_EHASH_OPC_UPDATE_DIP_V4;
+-				r[opc_off + oi++] = l3_opc;
+-				*(__be32 *)(r + l2poff) = cpu_to_be32(0); /* DSCP */
++			/* 2. Composed NAT ports (fused), if any. */
++			if (nat && (nat->flags & FMAN_PCD_NATF_SPAT))
++				port_opc |= FMAN_EHASH_OPC_UPDATE_SPORT;
++			if (nat && (nat->flags & FMAN_PCD_NATF_DPAT))
++				port_opc |= FMAN_EHASH_OPC_UPDATE_DPORT;
++			if (port_opc) {
++				r[opc_off + oi++] = port_opc;
++				*(__be16 *)(r + l2poff + 0) = nat->dport;
++				*(__be16 *)(r + l2poff + 2) = nat->sport;
+ 				l2poff += 4;
+-				if (nat->flags & FMAN_PCD_NATF_SNAT) {
+-					memcpy(r + l2poff, nat->sip, pv6 ? 16 : 4);
+-					l2poff += pv6 ? 16 : 4;
+-				}
+-				if (nat->flags & FMAN_PCD_NATF_DNAT) {
+-					memcpy(r + l2poff, nat->dip, pv6 ? 16 : 4);
+-					l2poff += pv6 ? 16 : 4;
+-				}
+ 			}
++
++			/* 3. L3 modification: UPDATE_TTL / UPDATE_HOPLIMIT plus NAT IPs */
++			l3_opc = pv6 ? FMAN_EHASH_OPC_UPDATE_HOPLIMIT :
++					  FMAN_EHASH_OPC_UPDATE_TTL;
++			if (nat && (nat->flags & FMAN_PCD_NATF_SNAT))
++				l3_opc |= pv6 ? FMAN_EHASH_OPC_UPDATE_SIP_V6 :
++					       FMAN_EHASH_OPC_UPDATE_SIP_V4;
++			if (nat && (nat->flags & FMAN_PCD_NATF_DNAT))
++				l3_opc |= pv6 ? FMAN_EHASH_OPC_UPDATE_DIP_V6 :
++					       FMAN_EHASH_OPC_UPDATE_DIP_V4;
++			r[opc_off + oi++] = l3_opc;
++			*(__be32 *)(r + l2poff) = cpu_to_be32(0); /* DSCP */
++			l2poff += 4;
++			if (nat && (nat->flags & FMAN_PCD_NATF_SNAT)) {
++				memcpy(r + l2poff, nat->sip, pv6 ? 16 : 4);
++				l2poff += pv6 ? 16 : 4;
++			}
++			if (nat && (nat->flags & FMAN_PCD_NATF_DNAT)) {
++				memcpy(r + l2poff, nat->dip, pv6 ? 16 : 4);
++				l2poff += pv6 ? 16 : 4;
++			}
++
++			/* 4. Egress VLAN PUSH (0x42): INSERT_VLAN_HDR.
++			 * Vendor create_vlan_ins_hm() (cdx_ehash.c:1731-1813):
++			 * word = num_hdrs(1) << 24
++			 * vlanhdr[0] = (TCI << 16) | inner EtherType.
++			 * Outer EtherType then rolls to TPID (0x8100). */
++			if (vlan && (vlan->flags & FMAN_PCD_VLANF_PUSH)) {
++				u16 inner_et = eth_type;
++				u16 tci = vlan->push_tci;
++
++				r[opc_off + oi++] = FMAN_EHASH_OPC_INSERT_VLAN_HDR;
++				*(__be32 *)(r + l2poff + 0) = cpu_to_be32(1u << 24);
++				*(__be32 *)(r + l2poff + 4) =
++					cpu_to_be32(((u32)tci << 16) | inner_et);
++				l2poff += 8;
++				eth_type = vlan->push_tpid ? vlan->push_tpid : 0x8100;
++			}
++
++			/* 5. INSERT_L2_HDR (0x41) */
+ 			r[opc_off + oi++] = FMAN_EHASH_OPC_INSERT_L2_HDR;
+ 			r[opc_off + oi++] = FMAN_EHASH_OPC_ENQUEUE_PKT;
+ 			*(__be32 *)(r + l2poff + 0) = cpu_to_be32(0x4000000e);
+@@ -4981,6 +4976,12 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 			.sport  = action->nat_sport,
+ 			.dport  = action->nat_dport,
+ 		};
++		struct fman_pcd_vlan_params _vlan = {
++			.flags       = action->vlan_flags,
++			.ingress_vid = action->vlan_ingress_vid,
++			.push_tci    = action->vlan_push_tci,
++			.push_tpid   = action->vlan_push_tpid,
++		};
+ 		int err;
+ 
+ 		memcpy(_nat.sip, action->nat_sip, 16);
+@@ -4989,7 +4990,7 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 						 (u32)enq_obj->muram_off, hit_fqid,
+ 						 false /* F-189(genl-stats-false) */,
+ 						 l2_dst, l2_src, l2_eth,
+-						 &_nat);
++						 &_nat, &_vlan);
+ 
+ 	if (!err) {
+ 		/* F-177 (T-M3-R Phase 2 item 2): assert FMFP_EXTC[INV0] SYNC
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index f385675600a3..6331098ccf8d 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -353,6 +353,12 @@ struct fman_pcd_fe_flow_action {
+ 	u8   nat_dip[16];
+ 	__be16 nat_sport;
+ 	__be16 nat_dport;
++	/* VLAN pop/push (matches vendor ehash opcode layout).
++	 * vlan_flags == 0 => no VLAN modification. */
++	u8   vlan_flags;
++	u16  vlan_ingress_vid;
++	u16  vlan_push_tci;
++	u16  vlan_push_tpid;
+ };
+ 
+ /* F-230: NAT rewrite parameters threaded into the ehash record emitter.
+@@ -370,6 +376,16 @@ struct fman_pcd_nat_params {
+ 	__be16 dport;
+ };
+ 
++/* VLAN rewrite parameters threaded into the ehash record emitter. */
++#define FMAN_PCD_VLANF_POP	(1u << 0)
++#define FMAN_PCD_VLANF_PUSH	(1u << 1)
++struct fman_pcd_vlan_params {
++	u8   flags;
++	u16  ingress_vid;
++	u16  push_tci;
++	u16  push_tpid;
++};
++
+ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id,
+ 			 u32 enq_fqid);
+ void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);
