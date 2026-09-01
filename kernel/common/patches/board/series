@@ -270,7 +270,7 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4009-sfp-oem-rollball-quirk.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
-4011-sfp-oem-h10g-cu1m-checksum-quirk.patch
+4011-sfp-oem-h10g-cu1m-eeprom-self-heal.patch
 
 # ── CPU stuck at 700MHz: clk-qoriq's create_one_cmux() trusts whatever
 #    clksel the core mux register is set to at Linux probe time as the
