@@ -5,8 +5,8 @@ Subject: [PATCH] op-mode: add 'show hardware fan'
 
 ---
  op-mode-definitions/show-hardware-fan.xml.in |  17 ++
- src/op_mode/show_hardware_fan.py             | 337 +++++++++++++++++++++++++++
- 2 files changed, 354 insertions(+)
+ src/op_mode/show_hardware_fan.py             | 345 +++++++++++++++++++++++++++
+ 2 files changed, 362 insertions(+)
 diff --git a/op-mode-definitions/show-hardware-fan.xml.in b/op-mode-definitions/show-hardware-fan.xml.in
 new file mode 100644
 index 000000000..20700f7c3
@@ -32,10 +32,10 @@ index 000000000..20700f7c3
 +</interfaceDefinition>
 diff --git a/src/op_mode/show_hardware_fan.py b/src/op_mode/show_hardware_fan.py
 new file mode 100755
-index 000000000..0dc19a42a
+index 000000000..342b59ec2
 --- /dev/null
 +++ b/src/op_mode/show_hardware_fan.py
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,345 @@
 +#!/usr/bin/env python3
 +#
 +# Copyright (C) VyOS Inc.
@@ -164,22 +164,24 @@ index 000000000..0dc19a42a
 +def _read_floor_state():
 +    """Parse fan-pid's live export.
 +
-+    Returns (floors, published_rpm, tach_source):
++    Returns (floors, published_rpm, tach_source, presents):
 +      floors        {duty-reg: min-run duty}  (0 => unknown)
 +      published_rpm {duty-reg: rpm}           (m=1-corrected + boot-sampled)
 +      tach_source   'raw-m1' | 'sysfs-m2' | None
++      presents      {duty-reg: bool}          (from present:0xNN)
 +    """
 +    floors = {}
 +    rpms = {}
++    presents = {}
 +    tach_source = None
 +    path = f'{SYS_ROOT}{FLOOR_STATE_FILE}'
 +    if not os.path.isfile(path):
-+        return floors, rpms, tach_source
++        return floors, rpms, tach_source, presents
 +    try:
 +        with open(path) as f:
 +            lines = f.read().splitlines()
 +    except OSError:
-+        return floors, rpms, tach_source
++        return floors, rpms, tach_source, presents
 +    for line in lines:
 +        key, sep, val = line.partition('=')
 +        if not sep:
@@ -189,6 +191,8 @@ index 000000000..0dc19a42a
 +                floors[key] = int(val)
 +            except ValueError:
 +                pass
++        elif key.startswith('present:'):
++            presents[key[8:]] = (val.strip() == '1')
 +        elif key.startswith('rpm:'):
 +            try:
 +                rpms[key[4:]] = int(val)
@@ -196,7 +200,7 @@ index 000000000..0dc19a42a
 +                pass
 +        elif key == 'tach_source':
 +            tach_source = val
-+    return floors, rpms, tach_source
++    return floors, rpms, tach_source, presents
 +
 +
 +def _classify_zone(temp: float, setpoint: float, crit: float) -> str:
@@ -209,35 +213,34 @@ index 000000000..0dc19a42a
 +    return 'cool'
 +
 +
-+def _fan_state(exists, fault, pwm, rpm, floor) -> str:
++def _fan_state(exists, fault, pwm, rpm, floor, present=True) -> str:
 +    """One-word EMC2305 channel state, mirroring fan-check's classification.
 +
 +    Order matters: an absent channel has nothing to classify; electrical
 +    drive-fail wins over everything else; below the learned min-run floor a
 +    zero tach reading is expected (BLIND channel, not a stall); at/above the
 +    floor zero tach pulses indicate a dead, stalled or missing fan. A
-+    boot-published floor of 255 means fan-pid never detected the fan at
-+    spin-up (no tach feedback).
++    boot-published floor of 255 or present=0 means fan-pid never detected the
++    fan at spin-up (no tach feedback).
 +    """
-+    if not exists:
-+        return 'missing'
++    if not exists or not present:
++        return 'not present'
++    if floor == PWM_MAX and (rpm == 0 or rpm is None):
++        return 'not present'
++    if floor == 0 and (rpm == 0 or rpm is None) and (pwm == 0 or pwm is None):
++        return 'not present'
 +    if fault == 1:
 +        return 'fault'
 +    if pwm is None:
 +        return 'read-error'
 +    if pwm == 0:
 +        return 'off'
-+    # Zero-tach classifications take precedence over the duty-level ones:
-+    # an absent fan is held at MAX by fan-pid (floor published as 255), so
-+    # duty==255 alone must not read as 'max'.
 +    if rpm == 0:
-+        if floor == PWM_MAX:
-+            return 'missing'
 +        if floor and pwm >= floor:
 +            return 'stalled'
 +        if floor and pwm < floor:
 +            return 'blind'
-+        return 'no-tach'
++        return 'not present' if floor == 0 else 'no-tach'
 +    if pwm >= PWM_MAX:
 +        return 'max'
 +    return 'running'
@@ -263,7 +266,7 @@ index 000000000..0dc19a42a
 +                   tablefmt='simple'))
 +
 +
-+def show_fans(hwmon, floors, rpms, tach_source):
++def show_fans(hwmon, floors, rpms, tach_source, presents):
 +    rows = []
 +    for fan_num in (1, 2):
 +        reg = FAN_REGS[fan_num]
@@ -276,10 +279,11 @@ index 000000000..0dc19a42a
 +        pwm = _read_int(pwm_path) if os.path.isfile(pwm_path) else None
 +        fault = _read_int(fault_path) if os.path.isfile(fault_path) else None
 +        floor = floors.get(reg, 0)
++        present = presents.get(reg, True)
 +
 +        # A channel without pwm+tach attributes does not exist in silicon.
-+        exists = pwm_path and rpm_path and \
-+            os.path.isfile(pwm_path) and os.path.isfile(rpm_path)
++        exists = bool(pwm_path and rpm_path and
++                      os.path.isfile(pwm_path) and os.path.isfile(rpm_path))
 +
 +        # RPM: prefer fan-pid's published sample (corrected for the m=1
 +        # RANGE=500 tach mode); trust sysfs only when the daemon is not in
@@ -288,15 +292,15 @@ index 000000000..0dc19a42a
 +        if rpm is None and exists and tach_source != 'raw-m1':
 +            rpm = _read_int(rpm_path)
 +
-+        if not exists:
-+            rows.append([label, '-', '-', '-', '-', '-', 'missing'])
++        state = _fan_state(exists, fault, pwm, rpm, floor, present)
++        if state == 'not present':
++            rows.append([label, '-', '-', '-', '-', '-', 'not present'])
 +            continue
 +
 +        duty = pwm if pwm is not None else '-'
 +        pct = round(pwm * 100 / PWM_MAX) if pwm is not None else '-'
 +        rpm_disp = rpm if rpm is not None else '-'
 +        floor_disp = floor if floor else '?'
-+        state = _fan_state(exists, fault, pwm, rpm, floor)
 +        rows.append([label, duty, f'{pct}', rpm_disp, floor_disp, PWM_MAX, state])
 +
 +    print('\nFan controller (EMC2305):')
@@ -315,14 +319,14 @@ index 000000000..0dc19a42a
 +
 +    zones_found = _find_thermal_zones()
 +    hwmon = _find_emc2305()
-+    floors, rpms, tach_source = _read_floor_state()
++    floors, rpms, tach_source, presents = _read_floor_state()
 +
 +    if not raw:
 +        print('Fan and thermal status')
 +        print('=====================')
 +
 +        show_thermal_zones(zones_found, floors, rpms, tach_source)
-+        show_fans(hwmon, floors, rpms, tach_source)
++        show_fans(hwmon, floors, rpms, tach_source, presents)
 +        return 0
 +
 +    result = {'zones': [], 'fans': []}
@@ -342,21 +346,25 @@ index 000000000..0dc19a42a
 +        pwm_path = f'{hwmon}/pwm{fan_num}' if hwmon else ''
 +        rpm_path = f'{hwmon}/fan{fan_num}_input' if hwmon else ''
 +        fault_path = f'{hwmon}/fan{fan_num}_fault' if hwmon else ''
-+        exists = bool(hwmon and os.path.isfile(pwm_path)
-+                      and os.path.isfile(rpm_path))
++        exists = bool(hwmon and os.path.isfile(pwm_path) and os.path.isfile(rpm_path))
 +        pwm = _read_int(pwm_path) if exists else None
 +        fault = _read_int(fault_path) if exists else None
++        floor = floors.get(reg, 0)
++        present = presents.get(reg, True)
 +        rpm = rpms.get(reg)
 +        if rpm is None and exists and tach_source != 'raw-m1':
 +            rpm = _read_int(rpm_path)
++        state = _fan_state(exists, fault, pwm, rpm, floor, present)
++        is_present = exists and (state != 'not present')
 +        result['fans'].append({
 +            'fan': f'fan{fan_num}',
 +            'exists': exists,
-+            'duty': pwm,
-+            'rpm': rpm,
-+            'min_duty': floors.get(reg, 0),
-+            'max_duty': PWM_MAX,
-+            'state': _fan_state(exists, fault, pwm, rpm, floors.get(reg, 0)),
++            'present': is_present,
++            'duty': pwm if is_present else None,
++            'rpm': rpm if is_present else None,
++            'min_duty': floor if is_present else None,
++            'max_duty': PWM_MAX if is_present else None,
++            'state': state,
 +        })
 +    import json
 +    print(json.dumps(result, indent=2))
@@ -373,4 +381,3 @@ index 000000000..0dc19a42a
 +
 +if __name__ == '__main__':
 +    main()
-\ No newline at end of file

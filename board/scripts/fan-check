@@ -58,12 +58,15 @@ declare -A FAN_MIN_RUN=([1]=0 [2]=0)
 # 2x the true speed (it assumes the m=2 default range). fan-pid therefore
 # publishes the correctly-scaled RPM here; we prefer it over sysfs when present.
 declare -A FAN_RPM=([1]=- [2]=-)
+declare -A FAN_PRESENT=([1]=1 [2]=1)
 TACH_SOURCE=sysfs-m2
 if [ -r "$FLOOR_STATE_FILE" ]; then
     while IFS='=' read -r key val; do
         case "$key" in
             0x30) [[ "$val" =~ ^[0-9]+$ ]] && FAN_MIN_RUN[1]=$val ;;
             0x40) [[ "$val" =~ ^[0-9]+$ ]] && FAN_MIN_RUN[2]=$val ;;
+            present:0x30) [[ "$val" =~ ^[01]$ ]] && FAN_PRESENT[1]=$val ;;
+            present:0x40) [[ "$val" =~ ^[01]$ ]] && FAN_PRESENT[2]=$val ;;
             rpm:0x30) [[ "$val" =~ ^[0-9]+$ ]] && FAN_RPM[1]=$val ;;
             rpm:0x40) [[ "$val" =~ ^[0-9]+$ ]] && FAN_RPM[2]=$val ;;
             tach_source) TACH_SOURCE=$val ;;
@@ -217,6 +220,9 @@ else
         fault_path="$EMC/fan${channel}_fault"
         [ -r "$pwm_path" ] && [ -r "$rpm_path" ] || continue
 
+        min_run=${FAN_MIN_RUN[$channel]}
+        present=${FAN_PRESENT[$channel]:-1}
+
         pwm=$(cat "$pwm_path" 2>/dev/null || echo '?')
         # Prefer fan-pid's published RPM (correct at m=1 / RANGE=500); fall back
         # to sysfs fanN_input only when the daemon hasn't published one. The
@@ -230,10 +236,20 @@ else
             rpm=$(cat "$rpm_path" 2>/dev/null || echo '?')
         fi
         fault=$(cat "$fault_path" 2>/dev/null || echo '?')
-        min_run=${FAN_MIN_RUN[$channel]}
         pwm_pct="?"
         if [[ "$pwm" =~ ^[0-9]+$ ]]; then
             pwm_pct=$(awk -v p="$pwm" -v m="$PWM_MAX" 'BEGIN{printf "%.0f", p*100.0/m}')
+        fi
+
+        # Not present detection:
+        # 1) fan-pid explicitly reported present=0
+        # 2) fan-pid pinned floor at PWM_MAX with 0 RPM / no sample
+        # 3) fan-pid not running (min_run=0) and tach reads 0 (no pulses on channel)
+        if [ "$present" = "0" ] || { [ "$min_run" -eq "$PWM_MAX" ] && [ "$rpm" = "0" -o "$rpm" = "?" -o "${FAN_RPM[$channel]}" = "0" ]; } \
+           || { [ "$min_run" -eq 0 ] && [ "$rpm" = "0" ]; }; then
+            printf "  Fan %-1d  %4s  %4s  %4s  %5s  %8s  %-5b  %b\n" \
+                "$channel" "-" "-" "-" "-" "-" "no" "${C_DIM}not present${C_RST}"
+            continue
         fi
 
         # fan-pid programs EMC2305 RANGE=500 (m=1), lowering the tach-visible
@@ -264,8 +280,11 @@ else
             if [ "$rpm" -gt 0 ]; then
                 pwm_state="${C_BLUE}RUNNING${C_RST}"
             else
-                rpm_disp="n/a"
-                pwm_state="${C_DIM}floor unknown${C_RST}"
+                rpm_disp="-"
+                min_disp="-"
+                pwm="-"
+                pwm_pct="-"
+                pwm_state="${C_DIM}not present${C_RST}"
             fi
         elif [ "$pwm" -lt "$min_run" ]; then
             # Below the tach-visible floor: expected, informational, not a fault.

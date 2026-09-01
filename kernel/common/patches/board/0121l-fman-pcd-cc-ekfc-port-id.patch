@@ -1,0 +1,264 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 31 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman: pcd: CC-tree EKFC/key-format fix — PORT_ID-prefixed 14-byte window (F-190)
+
+T-M6-8 VLAN throughput investigation, board + vendor-source evidence
+(2026-08-31).
+
+Root cause of the long-standing "VLAN CC-tree flow installs cleanly at
+the control-plane level but real traffic never gets a hardware hit"
+symptom (observed across every topology tested this session: same-port
+translate, cross-port single-edit): the CC comparator never re-extracts
+from the frame -- it compares the KeyGen-EXTRACTED composite, i.e.
+exactly the bytes the port's scheme emits per its KGSE_EKFC register.
+Two independent things were wrong:
+
+1. fman_pcd_kg_port_attach_cc() (fman_pcd_kg.c) set next_engine,
+   cc_base_offset and cc_bits_sel for the CC graft, but never touched
+   the scheme's ekfc field -- unlike its sibling fman_pcd_kg_port_arm_fe()
+   (the FE-VM/ehash engage path), which explicitly sets it. A freshly-used
+   CC scheme's ekfc therefore stayed at its zero reset value (confirmed
+   live via `pcd-snapshot capture`: scheme3/4 ekfc=0x00000000 on a fresh
+   board), or inherited whatever value a *different* engage path (ehash)
+   last left behind on the same shared scheme slot -- never a
+   deterministic, correct value.
+
+2. cc_pack_key() (fman_pcd_cc.c) built a 12-byte SIP|DIP|SPORT|DPORT
+   composite (no PORT_ID, no PROTO), based on F-161's single dmesg
+   observation of scheme4 mid-cycle ("EKFC=0x00180006"). Three
+   independent, stronger sources say the real composite is 14 bytes,
+   PORT_ID-prefixed:
+     - The vendor's own kernel patch (ASK/patches/kernel/
+       010-ask-fman-dpaa-ehash.patch), BuildSchemeRegs() in fm_kg.c:
+       `knownTmp |= KG_SCH_KN_PORT_ID;` unconditionally, for every
+       scheme -- not a special case for one dispatch mode.
+     - This project's own F-183 (board patch 0167): the cc_test debug
+       harness independently derived and silicon-verified the same
+       14-byte PORT_ID(1)|SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2)
+       window (EKFC 0x801C0006, PORT_ID always extracting as a constant
+       0x00 on this ucode) -- but the fix was applied only to the debug
+       harness's own key builder, never ported to this production one.
+     - Live board captures this session: scheme3/scheme4 repeatedly
+       converged on ekfc=0x801c0006 after normal production engage
+       cycles, matching the above, not F-161's value.
+
+Whichever of (1)/(2) happened to "win" on a given engage cycle, the
+production CC key format and the scheme's actual live EKFC never
+agreed with each other -- guaranteeing every real packet permanently
+misses the CC comparator (byte-for-byte mismatch from byte 0 onward),
+regardless of topology, VLAN tagging, or POP/PUSH/translate mode. This
+fully explains the session's board evidence: near-zero rx_dropped
+(frames aren't corrupted, just never hardware-forwarded), zero
+-ENOSPC after the capacity fix, yet kernel-visible interface byte
+counters accounting for ~100% of actual transferred traffic in every
+topology tested.
+
+Fix:
+  - cc_pack_key(): pack the 14-byte PORT_ID(0x00 exact-match)|SIP|DIP|
+    PROTO|SPORT|DPORT window instead of the old 12-byte one.
+  - fman_pcd_kg_port_attach_cc(): deterministically set
+    slot->ekfc = 0x801C0006 on every CC graft (saved/restored on the
+    existing failure-rollback path), so the scheme's EKFC always
+    matches what cc_pack_key() now builds, independent of whatever the
+    port's scheme last inherited from an ehash engage or RSS default.
+
+Both call sites of fman_pcd_kg_port_attach_cc() (dpaa_fman_caps.c's
+fman_cc_tree_install() and fman_pcd.c's fman_pcd_offload_engage())
+need no changes -- the fix is internal to the function, signature
+unchanged.
+
+Not yet board-validated (needs a fresh build + deploy + the same
+VLAN6<->VLAN8 / VLAN<->native cross-port iperf3 reproduction used to
+find this bug). The three independent lines of evidence above give
+much higher confidence than F-161's original single-observation value,
+but this exact function has already been "corrected" more than once
+in this project's history (0098's original shape, an intermediate
+SPI-inclusive shape, then F-161's 12-byte shape) without actually
+fixing the underlying miss -- so treat this as the strongest evidence
+yet, not a guaranteed final answer, until it's confirmed on silicon.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (changes the live CC match-key format and a scheme's KGSE_EKFC)
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index e6b414447..030c35258 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -191,34 +191,44 @@ static struct fman_pcd_cc_tree *cc_find_locked(struct fman_pcd *pcd, u8 port_id)
+  * Pack one normalised key into the CC_KEY_SIZE-byte composite the silicon
+  * compares, plus its mask, written into the match record at row @idx.
+  *
+- * SILICON-TRUTH LAYOUT (ask20 PR14z14/PR14z22, DUT-proven 2026-05-23):
+- * under the KGSE_CCBS graft model (board patch 0106) the CC walker
+- * compares the KeyGen-EXTRACTED composite, i.e. the bytes the port's
+- * existing RSS scheme emits per its KGSE_EKFC.  The mainline default
+- * scheme's EKFC is 0x00180206 = IPSRC1 | IPDST1 | IPSEC_SPI | L4PSRC |
+- * L4PDST, which extracts exactly 16 bytes:
++ * SILICON-TRUTH LAYOUT (F-190, 2026-08-31, supersedes F-161): under the
++ * KGSE_CCBS graft model (board patch 0106) the CC walker compares the
++ * KeyGen-EXTRACTED composite, i.e. the bytes the port's scheme emits per
++ * its KGSE_EKFC — it does not re-extract from the frame itself.
+  *
+- *   bytes 0..3   IPv4 src (network order)
+- *   bytes 4..7   IPv4 dst (network order)
+- *   bytes 8..11  IPsec SPI (0x00000000 for plain IP/TCP/UDP frames)
+- *   bytes 12..13 L4 src port (network order)
+- *   bytes 14..15 L4 dst port (network order)
++ * F-161's "board-confirmed EKFC=0x00180006" (SIP|DIP|SPORT|DPORT, no
++ * PORT_ID, 12 bytes) was a single dmesg observation of scheme4 mid-cycle,
++ * not the steady-state value. Three independent, later sources agree the
++ * real composite is 14 bytes, PORT_ID-prefixed:
++ *   1. The vendor's own kernel patch (ASK/patches/kernel/
++ *      010-ask-fman-dpaa-ehash.patch), BuildSchemeRegs() in fm_kg.c:
++ *      `knownTmp |= KG_SCH_KN_PORT_ID; p_SchemeRegs->kgse_ekfc = knownTmp;`
++ *      — unconditional, for every scheme, not just the FE-VM/ehash one.
++ *   2. F-183 (board patch 0167, fman_pcd_cc_test.c): the *cc_test* debug
++ *      harness independently derived and silicon-verified the same 14-byte
++ *      PORT_ID(1)|SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2) window
++ *      (EKFC 0x801C0006) — but the fix was applied only to the debug
++ *      harness's own key builder, never ported to this production one.
++ *   3. Live board captures (T-M6-8 VLAN throughput investigation,
++ *      2026-08-31): scheme3/scheme4 repeatedly converged on
++ *      ekfc=0x801c0006 after normal production engage cycles, matching
++ *      (1)/(2), not F-161's 0x00180006.
+  *
+- * The DROP-miss diagnostic (ask20 patch 0053) proved silicon HITs with
+- * this exact layout: 24M frames matched and forwarded with miss=DROP and
+- * throughput unchanged.  The previous 0098 composite
+- * (ethertype/proto/flags/IP/ports) could NEVER match because the walker
+- * does not re-extract — it compares the KG-emitted bytes.
++ * PORT_ID extracts as a constant 0x00 on this ucode/scheme setup (F-183's
++ * "E25/E26-verified... PORT_ID=0x00 from the zeroed dv default"), so it is
++ * an exact-match wildcard-free byte, not a per-port value to compute.
++ *
++ *   byte  0      PORT_ID (always 0x00 on this ucode)
++ *   bytes 1..4   IPv4 src (network order)
++ *   bytes 5..8   IPv4 dst (network order)
++ *   byte  9      L4 protocol
++ *   bytes 10..11 L4 src port (network order)
++ *   bytes 12..13 L4 dst port (network order)
++ *   bytes 14..15 unused, wildcard
+  *
+  * Consequences (documented limitations, not silent):
+- *  - ETHERTYPE / PROTO cannot participate: the KG composite carries
+- *    neither.  A TCP and a UDP flow with identical addresses+ports are
+- *    indistinguishable to this tree.  The presence flags are accepted
+- *    (the dpaa-side translator sets them) but do not contribute bytes.
+  *  - IPv6 keys cannot match a v4-shaped 16-byte composite;
+  *    fman_pcd_cc_static_install() rejects them with -ENOTSUPP.
+- *  - The SPI field is exact-matched as zero (the HW-proven shape for
+- *    plain IP traffic); ESP flows are out of scope for this tree.
+  *
+  * The mask row mirrors the layout: 0xff for participating bytes, 0x00
+  * for wildcard.
+@@ -233,35 +243,33 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ 	memset(key, 0, sizeof(key));
+ 	memset(msk, 0, sizeof(msk));
+ 
+-	/* F-161 (2026-08-05): dpaa1 EKFC=0x00180006 order — board-confirmed
+-	 * DIRECTLY (not assumed) via dmesg on hwport 0x11's own live scheme
+-	 * (scheme4): "ASK2-DBG scheme4 hashing: ekfc=0x00180006", captured
+-	 * during a cc_test install/detach cycle immediately preceding the
+-	 * "KG CC-dispatched" log line for that same port. Supersedes F-159's
+-	 * 0x001C0006 (SIP|DIP|PROTO|SPORT|DPORT), which was extrapolated
+-	 * from the EHASH/FE-VM path and never independently confirmed
+-	 * against this scheme. 0x00180006 = KG_SCH_KN_IPSRC1|IPDST1|
+-	 * L4PSRC|L4PDST — SIP|DIP|SPORT|DPORT, no PROTO, 12 bytes.
+-	 */
++	/* byte 0: PORT_ID, always extracted as 0x00 on this ucode (F-183). */
++	key[0] = 0x00;
++	msk[0] = 0xff;
++
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
+-		memcpy(&key[0], &k->src_ip_be, 4);
+-		msk[0] = msk[1] = msk[2] = msk[3] = 0xff;
++		memcpy(&key[1], &k->src_ip_be, 4);
++		msk[1] = msk[2] = msk[3] = msk[4] = 0xff;
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
+-		memcpy(&key[4], &k->dst_ip_be, 4);
+-		msk[4] = msk[5] = msk[6] = msk[7] = 0xff;
++		memcpy(&key[5], &k->dst_ip_be, 4);
++		msk[5] = msk[6] = msk[7] = msk[8] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
++		key[9] = k->proto;
++		msk[9] = 0xff;
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
+-		key[8] = (u8)(k->src_port_be & 0xff);
+-		key[9] = (u8)(k->src_port_be >> 8);
+-		msk[8] = msk[9] = 0xff;
++		key[10] = (u8)(k->src_port_be & 0xff);
++		key[11] = (u8)(k->src_port_be >> 8);
++		msk[10] = msk[11] = 0xff;
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
+-		key[10] = (u8)(k->dst_port_be & 0xff);
+-		key[11] = (u8)(k->dst_port_be >> 8);
+-		msk[10] = msk[11] = 0xff;
++		key[12] = (u8)(k->dst_port_be & 0xff);
++		key[13] = (u8)(k->dst_port_be >> 8);
++		msk[12] = msk[13] = 0xff;
+ 	}
+-	/* bytes 12..15: unused by this EKFC -- stay wildcard (mask 0). */
++	/* bytes 14..15: unused by this EKFC -- stay wildcard (mask 0). */
+ 
+ 	/* Each match row is key followed by mask, 2 * CC_KEY_SIZE bytes. */
+ 	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index f2ebd79d3..f0f867bb3 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -685,7 +685,7 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 	struct keygen_scheme *slot;
+ 	struct fman *fman;
+ 	struct mutex *lock;
+-	u32 saved_ccbs;
++	u32 saved_ccbs, saved_ekfc;
+ 	u8 saved_engine, id;
+ 	int err;
+ 
+@@ -710,6 +710,7 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 
+ 	saved_engine = slot->next_engine;
+ 	saved_ccbs   = slot->cc_bits_sel;
++	saved_ekfc   = slot->ekfc;
+ 
+ 	/*
+ 	 * HW-proven CC graft (see fman_keygen.c CC chaining comment):
+@@ -717,17 +718,34 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 	 * stays BMI direct-enqueue and the CC walk fires implicitly.
+ 	 * use_hashing / base_fqid / match_vector are untouched, so on a
+ 	 * CC miss the frame still spreads over the same hashed RX FQs.
++	 *
++	 * F-190 (2026-08-31): the CC walker compares the KeyGen-EXTRACTED
++	 * composite (it never re-extracts), so this scheme's EKFC must
++	 * deterministically match what cc_pack_key() (this file) packs, not
++	 * whatever a scheme slot happened to inherit from a prior RSS or
++	 * FE-VM/ehash engage on the same port. Without this the CC-tree
++	 * installs cleanly (control plane) but every real packet
++	 * permanently misses (data plane), because the extracted bytes
++	 * never match the installed key. 0x801C0006 = KG_SCH_KN_PORT_ID |
++	 * IPSRC1 | IPDST1 | PROTO | L4PSRC | L4PDST, the 14-byte
++	 * PORT_ID(1)|SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2) window
++	 * cc_pack_key() now builds -- confirmed against the vendor's own
++	 * unconditional `knownTmp |= KG_SCH_KN_PORT_ID` in BuildSchemeRegs()
++	 * (ASK/patches/kernel/010-ask-fman-dpaa-ehash.patch) and this
++	 * project's own F-183/board patch 0167 debug-harness proof.
+ 	 */
+ 	slot->next_engine    = 2;
+ 	slot->cc_base_offset = 0;
+ 	slot->cc_bits_sel    = cc_group_off;
++	slot->ekfc           = 0x801C0006;
+ 
+ 	slot->used = false;
+ 	err = keygen_scheme_setup(keygen, id, true);
+ 	if (err) {
+-		/* Restore the previous next-engine on failure. */
++		/* Restore the previous state on failure. */
+ 		slot->next_engine = saved_engine;
+ 		slot->cc_bits_sel = saved_ccbs;
++		slot->ekfc        = saved_ekfc;
+ 		slot->used = false;
+ 		(void)keygen_scheme_setup(keygen, id, true);
+ 		mutex_unlock(lock);

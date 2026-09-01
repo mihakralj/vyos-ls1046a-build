@@ -1,0 +1,423 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Mon, 31 Aug 2026 21:25:00 +0000
+Subject: [PATCH] op-mode: add 'show hardware dpaa'
+
+---
+ op-mode-definitions/show-hardware-dpaa.xml.in |  34 ++
+ src/op_mode/show_hardware_dpaa.py             | 365 ++++++++++++++++++++++
+ 2 files changed, 402 insertions(+)
+diff --git a/op-mode-definitions/show-hardware-dpaa.xml.in b/op-mode-definitions/show-hardware-dpaa.xml.in
+new file mode 100644
+index 000000000..892bb1c7a
+--- /dev/null
++++ b/op-mode-definitions/show-hardware-dpaa.xml.in
+@@ -0,0 +1,37 @@
++<?xml version="1.0"?>
++<interfaceDefinition>
++  <node name="show">
++    <children>
++      <node name="hardware">
++        <children>
++          <node name="dpaa">
++            <properties>
++              <help>Show DPAA1 network acceleration complex status</help>
++            </properties>
++            <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py</command>
++            <children>
++              <leafNode name="ports">
++                <properties>
++                  <help>Show physical MEMAC to Linux interface mapping</help>
++                </properties>
++                <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py --ports</command>
++              </leafNode>
++              <leafNode name="fman">
++                <properties>
++                  <help>Show Frame Manager (FMan) and MURAM status</help>
++                </properties>
++                <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py --fman</command>
++              </leafNode>
++              <leafNode name="raw">
++                <properties>
++                  <help>Show raw DPAA1 status as JSON</help>
++                </properties>
++                <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py --raw</command>
++              </leafNode>
++            </children>
++          </node>
++        </children>
++      </node>
++    </children>
++  </node>
++</interfaceDefinition>
+diff --git a/src/op_mode/show_hardware_dpaa.py b/src/op_mode/show_hardware_dpaa.py
+new file mode 100755
+index 000000000..9912a76f2
+--- /dev/null
++++ b/src/op_mode/show_hardware_dpaa.py
+@@ -0,0 +1,365 @@
++#!/usr/bin/env python3
++#
++# Copyright (C) VyOS Inc.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License along
++# with this program; if not, write to the Free Software Foundation, Inc.,
++# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++#
++# op-mode: show hardware dpaa
++#
++# Data Path Acceleration Architecture (DPAA1) hardware status,
++# Frame Manager (FMan), Queue Manager (QMan), Buffer Manager (BMan),
++# MEMAC mapping, and AF_XDP zero-copy status for NXP LS1046A.
++
++import json
++import os
++import re
++import subprocess
++import sys
++import textwrap
++
++from tabulate import tabulate
++
++SYS_ROOT = os.environ.get('VYOS_DPAA_SYS_ROOT', '')
++DT_COMPATIBLE = f'{SYS_ROOT}/proc/device-tree/compatible'
++DT_FMAN = f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000'
++DT_QMAN = f'{SYS_ROOT}/proc/device-tree/soc/qman@1880000'
++DT_BMAN = f'{SYS_ROOT}/proc/device-tree/soc/bman@1890000'
++DT_FW = f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware'
++MURAM_DEBUGFS = f'{SYS_ROOT}/sys/kernel/debug/fman_pcd/0/muram_budget'
++FE_PORT = f'{SYS_ROOT}/sys/kernel/debug/fman_pcd/0/fe_port'
++CMDLINE = f'{SYS_ROOT}/proc/cmdline'
++
++MEMAC_MAP = {
++    '1ae8000': {'memac': 'MAC5', 'type': '1G SGMII (GPY115C)', 'port': 'eth0', 'hw_port': 0x12},
++    '1aea000': {'memac': 'MAC6', 'type': '1G SGMII (GPY115C)', 'port': 'eth1', 'hw_port': 0x13},
++    '1ae2000': {'memac': 'MAC2', 'type': '1G SGMII (GPY115C)', 'port': 'eth2', 'hw_port': 0x14},
++    '1af0000': {'memac': 'MAC9', 'type': '10G XFI (SFP+)',     'port': 'eth3', 'hw_port': 0x10},
++    '1af2000': {'memac': 'MAC10', 'type': '10G XFI (SFP+)',    'port': 'eth4', 'hw_port': 0x11},
++}
++
++
++def _read_text(path: str):
++    try:
++        with open(path) as f:
++            return f.read().strip('\x00\n\r ')
++    except OSError:
++        return None
++
++
++def _is_ls1046a() -> bool:
++    compat = _read_text(DT_COMPATIBLE)
++    return bool(compat and 'fsl,ls1046a' in compat)
++
++
++def _is_root() -> bool:
++    return os.geteuid() == 0
++
++
++def count_bound(driver_dir: str) -> int:
++    path = f'{SYS_ROOT}/sys/bus/platform/drivers/{driver_dir}'
++    if not os.path.isdir(path):
++        return 0
++    count = 0
++    for link in os.listdir(path):
++        if link in ('bind', 'unbind', 'uevent', 'module'):
++            continue
++        if os.path.exists(os.path.join(path, link)):
++            count += 1
++    return count
++
++
++def render_table(rows, headers, widths=None):
++    if not widths:
++        print(tabulate(rows, headers=headers, tablefmt='simple'))
++        return
++    wrapped_rows = []
++    for r in rows:
++        wrapped_row = []
++        for i, val in enumerate(r):
++            w = widths[i] if i < len(widths) else None
++            val_str = '' if val is None else str(val)
++            if w and len(val_str) > w:
++                wrapped_val = textwrap.fill(val_str, w, break_long_words=True,
++                                            break_on_hyphens=False)
++            else:
++                wrapped_val = val_str
++            wrapped_row.append(wrapped_val)
++        wrapped_rows.append(wrapped_row)
++    print(tabulate(wrapped_rows, headers=headers, tablefmt='simple'))
++
++
++def get_armed_ports() -> set:
++    armed = set()
++    if os.path.exists(FE_PORT):
++        try:
++            with open(FE_PORT) as f:
++                for line in f:
++                    p = line.split()
++                    if len(p) >= 2 and p[0] == 'port':
++                        armed.add(int(p[1], 16))
++        except (OSError, ValueError):
++            pass
++    return armed
++
++
++def get_nft_flowtable_offloads() -> dict:
++    """Scan nftables flowtables for offload status per interface."""
++    devs = {}
++    if not _is_root():
++        return devs
++    try:
++        res = subprocess.run(['nft', 'list', 'flowtables'],
++                             capture_output=True, text=True, check=False)
++        if res.returncode == 0:
++            cur_devs = []
++            has_offload = False
++            for line in res.stdout.splitlines():
++                if 'devices = {' in line:
++                    m = re.search(r'devices\s*=\s*\{\s*([^}]+)\s*\}', line)
++                    if m:
++                        cur_devs = [d.strip() for d in m.group(1).split(',')]
++                if 'flags offload' in line:
++                    has_offload = True
++                if '}' in line and cur_devs:
++                    for d in cur_devs:
++                        devs[d] = 'ASK2' if has_offload else 'SW-Flowtable'
++                    cur_devs = []
++                    has_offload = False
++    except OSError:
++        pass
++    return devs
++
++
++def get_interfaces_info(xsk_info: dict):
++    ifaces = []
++    armed_ports = get_armed_ports()
++    nft_offloads = get_nft_flowtable_offloads()
++
++    for i in range(5):
++        iface = f'eth{i}'
++        sysdir = f'{SYS_ROOT}/sys/class/net/{iface}'
++        if not os.path.exists(sysdir):
++            continue
++        operstate = _read_text(f'{sysdir}/operstate') or 'unknown'
++        mtu = _read_text(f'{sysdir}/mtu') or '-'
++        mac = (_read_text(f'{sysdir}/address') or '-').upper()
++
++        dev_target = os.path.basename(os.path.realpath(f'{sysdir}/device'))
++        addr = dev_target.split('.')[0]
++        info = MEMAC_MAP.get(addr, {'memac': '?', 'type': '?', 'hw_port': None})
++
++        # Determine offload state
++        if operstate == 'down':
++            offload_state = 'N/A (down)'
++        elif xsk_info.get(iface, {}).get('armed', 0) > 0 or xsk_info.get(iface, {}).get('redirect', 0) > 0:
++            offload_state = 'AF_XDP'
++        elif info['hw_port'] in armed_ports:
++            offload_state = 'ASK2'
++        elif iface in nft_offloads:
++            offload_state = nft_offloads[iface]
++        else:
++            offload_state = 'None'
++
++        ifaces.append({
++            'iface': iface,
++            'memac': info['memac'],
++            'addr': f'0x{addr}',
++            'type': info['type'],
++            'mac': mac,
++            'mtu': mtu,
++            'link': operstate,
++            'offload': offload_state,
++        })
++    return ifaces
++
++
++def get_xsk_status():
++    status = {}
++    for iface in ('eth3', 'eth4'):
++        sysdir = f'{SYS_ROOT}/sys/class/net/{iface}'
++        if not os.path.exists(sysdir):
++            continue
++        redir = 0
++        armed = 0
++        guard = 0
++        try:
++            res = subprocess.run(['ethtool', '-S', iface],
++                                 capture_output=True, text=True, check=False)
++            if res.returncode == 0:
++                for line in res.stdout.splitlines():
++                    if 'xsk_zc_rx_redirect:' in line:
++                        redir = int(line.split(':')[1].strip())
++                    elif 'xsk_zc_rx_armed:' in line:
++                        armed = int(line.split(':')[1].strip())
++                    elif 'xsk_fill_guard_block:' in line:
++                        guard = int(line.split(':')[1].strip())
++        except (OSError, ValueError):
++            pass
++
++        state = 'active (ZC)' if redir > 0 else ('armed' if armed > 0 else 'dormant')
++        if guard > 0:
++            state = f'guard-block ({guard})'
++        status[iface] = {
++            'port': iface,
++            'redirect': redir,
++            'armed': armed,
++            'guard': guard,
++            'state': state,
++        }
++    return status
++
++
++def get_muram_info():
++    if not os.path.exists(MURAM_DEBUGFS):
++        return None
++    info = {}
++    try:
++        with open(MURAM_DEBUGFS) as f:
++            for line in f:
++                parts = line.split()
++                if len(parts) >= 2:
++                    info[parts[0]] = parts[1]
++    except OSError:
++        pass
++    return info
++
++
++def show_dpaa(raw: bool = False, ports_only: bool = False, fman_only: bool = False):
++    if not _is_ls1046a():
++        print('This platform is not the NXP LS1046A Mono Gateway DK; '
++              'no DPAA1 hardware complex to report.')
++        return 2
++
++    xsk_dict = get_xsk_status()
++    ifaces = get_interfaces_info(xsk_dict)
++    muram = get_muram_info()
++
++    # Packet counters
++    total_pkts = 0
++    for iface in ifaces:
++        rx = _read_text(f'{SYS_ROOT}/sys/class/net/{iface["iface"]}/statistics/rx_packets') or '0'
++        tx = _read_text(f'{SYS_ROOT}/sys/class/net/{iface["iface"]}/statistics/tx_packets') or '0'
++        total_pkts += int(rx) + int(tx)
++
++    # Max frame
++    cmdline = _read_text(CMDLINE) or ''
++    m = re.search(r'fsl_fm_max_frm=(\d+)', cmdline)
++    max_frm = m.group(1) if m else 'default (1522)'
++    jumbo_status = 'Jumbo enabled' if (m and int(m.group(1)) >= 9600) else 'Standard MTU'
++
++    # Microcode version
++    ucode_str = 'unknown'
++    if os.path.exists(DT_FW):
++        try:
++            with open(DT_FW, 'rb') as f:
++                blob = f.read(128)
++            m = re.search(rb'Microcode version ([0-9.]+)', blob)
++            if m:
++                ucode_str = f'v{m.group(1).decode()}'
++        except OSError:
++            pass
++
++    if raw:
++        data = {
++            'interfaces': ifaces,
++            'complex': {
++                'fman': 'FMan v3 @ 0x1a00000',
++                'microcode': ucode_str,
++                'qman': 'QMan @ 0x1880000 (4 CPU portals @ 0x500000000)',
++                'bman': 'BMan @ 0x1890000 (4 CPU portals @ 0x508000000)',
++                'max_frame': max_frm,
++                'total_packets': total_pkts,
++                'muram': muram,
++            },
++            'af_xdp': list(xsk_dict.values()),
++            'failed': len(ifaces) == 0,
++        }
++        print(json.dumps(data, indent=2))
++        return 0 if not data['failed'] else 1
++
++    if ports_only:
++        print('Network Interfaces & MEMAC Mapping:')
++        prows = [[i['iface'], i['memac'], i['type'], i['mac'], i['mtu'], i['link'], i['offload']]
++                 for i in ifaces]
++        render_table(prows, ['Port', 'MEMAC', 'Type / PHY', 'MAC Address', 'MTU', 'Link', 'Offload'],
++                     [6, 7, 18, 17, 5, 6, 10])
++        return 0
++
++    print('DPAA1 Network Acceleration (NXP Data Path Acceleration Architecture)')
++    print('=' * 69)
++
++    # 1. Interfaces Table at TOP
++    print('Network Interfaces & MEMAC Mapping:')
++    prows = [[i['iface'], i['memac'], i['type'], i['mac'], i['mtu'], i['link'], i['offload']]
++             for i in ifaces]
++    render_table(prows, ['Port', 'MEMAC', 'Type / PHY', 'MAC Address', 'MTU', 'Link', 'Offload'],
++                 [6, 7, 18, 17, 5, 6, 10])
++
++    if fman_only:
++        print('\nFMan Subsystems & Drivers:')
++        frows = [
++            ['FMan Controller', 'fsl-fman', count_bound('fsl-fman'), 'Frame Manager v3 main controller'],
++            ['BMI Ports', 'fsl-fman-port', count_bound('fsl-fman-port'), '8 RX + 8 TX hardware BMI ports'],
++            ['mEMAC MDIO Buses', 'fsl-fman_xmdio', count_bound('fsl-fman_xmdio'), 'Internal SGMII + SFP+ MDIO buses'],
++            ['MEMAC Controllers', 'fsl_dpaa_mac', count_bound('fsl_dpaa_mac'), 'Active MAC controllers (MAC2,5,6,9,10)'],
++            ['DPAA Ethernet', 'fsl_dpa', count_bound('fsl_dpa'), 'Linux netdevs (eth0-eth4)'],
++        ]
++        render_table(frows, ['Subsystem', 'Driver', 'Bound', 'Description'], [18, 16, 7, 36])
++        return 0
++
++    # 2. Hardware Subsystems
++    print('\nHardware Subsystems:')
++    print(f'Frame Manager:  FMan v3 @ 0x1a00000 (ucode {ucode_str}, PCD-capable: CC HM POL PARSER)')
++    if muram:
++        used_kib = int(muram.get('used', 0)) // 1024
++        res_kib = int(muram.get('reserved', 0)) // 1024
++        print(f'MURAM Memory:   {used_kib} KiB used / {res_kib} KiB reserved ({muram.get("free", 0)} B free)')
++    else:
++        print('MURAM Memory:   64 KiB total (MURAM base 0x1a00000)')
++    print('Queue Manager:  QMan @ 0x1880000 (4 CPU portals @ 0x500000000, 32 MB PFDR)')
++    print('Buffer Manager: BMan @ 0x1890000 (4 CPU portals @ 0x508000000, 16 MB FBPR)')
++    print(f'Frame Size Cap: {max_frm} B ({jumbo_status})')
++    print(f'Datapath Load:  {total_pkts} pkts processed across FQs/pools')
++
++    # 3. Drivers & Controllers
++    print('\nController & Driver Status:')
++    drows = [
++        ['FMan Controller', 'fsl-fman', f'{count_bound("fsl-fman")} device', 'FMan controller @ 0x1a00000'],
++        ['BMI Ports', 'fsl-fman-port', f'{count_bound("fsl-fman-port")} devices', '8 RX + 8 TX hardware BMI ports'],
++        ['MDIO Buses', 'fsl-fman_xmdio', f'{count_bound("fsl-fman_xmdio")} devices', 'Internal SGMII + SFP+ MDIO'],
++        ['MEMAC MACs', 'fsl_dpaa_mac', f'{count_bound("fsl_dpaa_mac")} devices', 'MAC controllers (MAC2,5,6,9,10)'],
++        ['Netdevs', 'fsl_dpa', f'{count_bound("fsl_dpa")} devices', 'Linux netdevs (eth0-eth4)'],
++        ['QMan Portals', 'qbman_portal', '4 portals', 'CPU0-CPU3 portals @ 0x500000000'],
++        ['BMan Portals', 'qbman_portal', '4 portals', 'CPU0-CPU3 portals @ 0x508000000'],
++    ]
++    render_table(drows, ['Subsystem', 'Driver', 'Bound', 'Details'], [16, 16, 12, 34])
++
++    # 4. AF_XDP Zero-Copy Status
++    print('\nAF_XDP Zero-Copy Status (10G SFP+ Ports):')
++    xrows = [[x['port'], x['redirect'], x['armed'], x['guard'], x['state']] for x in xsk_dict.values()]
++    render_table(xrows, ['Port', 'Redirected (RX)', 'Armed', 'Fill Guard Block', 'State'], [8, 16, 8, 18, 14])
++
++    return 0 if len(ifaces) >= 5 else 1
++
++
++def main():
++    raw = '--raw' in sys.argv or 'raw' in sys.argv
++    ports = '--ports' in sys.argv or 'ports' in sys.argv
++    fman = '--fman' in sys.argv or 'fman' in sys.argv
++    raise SystemExit(show_dpaa(raw=raw, ports_only=ports, fman_only=fman))
++
++
++if __name__ == '__main__':
++    main()
