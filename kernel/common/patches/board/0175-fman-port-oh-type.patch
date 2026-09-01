@@ -1,0 +1,264 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Tue, 01 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: bind Offline/Host-command (O/H) ports (ASK2 OH-port re-enqueue infra, T-M6-8 rearch phase 1a)
+
+Phase 1a of the OH-port-based VLAN re-architecture (see
+plans/ASK2-VLAN-REARCH.md), itself the proving ground for the same
+OH-port re-enqueue primitive IPsec ESP offload needs (FE/CC ->
+offline port -> CAAM QI -> SEC -> offline port re-parse -> TX FQ;
+plans/OFFLOAD-CAPABILITY-PLAN.md S1.7, patch 0134-caam-qi-share
+already lands the CAAM-side half of that hook).
+
+mainline drivers/net/ethernet/freescale/fman/fman_port.c has never
+matched or probed Offline/Host-command (O/H) ports at all --
+fman_port_match[] only lists fsl,fman-v3/v2-port-{rx,tx}. Confirmed
+live on board .185 (image vyos-2026.09.01-0436-rolling) 2026-09-01:
+/proc/device-tree/soc/fman@1a00000/ enumerates SIX
+fsl,fman-v3-port-oh nodes (port@82000..port@87000, cell-index /
+hw port id 0x02-0x07 -- more than arch/fman.md's "4 active O/H
+ports 0x02-0x05" claimed; corrected there separately), none bound
+to any driver. This patch makes them bindable.
+
+Register layout (struct fman_port_oh_bmi_regs) is transcribed
+field-for-field from LS1046ADPAARM.pdf S5.5.4.7 "Offline Port/Host
+Command Port Registers Description" (FMBM_OCFG at O/H port block
+base FMan_base + 0x1000*n, n = hw port id, mirroring the existing
+RX/TX port-page formula this project's board/scripts/pcd-snapshot
+already relies on) -- offsets cross-checked against the RM's own
+register-offset lines for every FMBM_O* register, not guessed.
+
+Scope, deliberately narrow:
+ - New FMAN_PORT_TYPE_OH enum value (fman.h).
+ - New struct fman_port_oh_bmi_regs + union member (fman_port.c).
+ - New "fsl,fman-v3-port-oh" of_device_id match + a probe() branch
+   that only sets port_type/port_speed=0 -- IDENTICAL to the
+   existing RX/TX branches in that no register is written; probe()
+   as a whole never touches hardware, only maps the register window
+   and stashes drvdata (see the existing function body, unchanged).
+ - Extended the qman_channel_id lookup gate (previously TX-only) to
+   also cover OH, since fman_get_qman_channel_id()'s port_ids[]
+   table already carries 0x2/0x3/0x4/0x5/0x7 for O/H hw ids on this
+   silicon rev (major<6) -- confirmed by reading fman.c, not by
+   trial. Hw port 0x06 has no table entry and will simply fail this
+   lookup and not register, which is fine (unused).
+ - fman_port_lookup_oh(), mirroring the existing
+   fman_port_lookup_rx() (patch 0115) active-port-registry pattern
+   exactly, for a later increment to resolve the live struct
+   fman_port once one exists.
+
+Deliberately NOT in this patch: fman_port_config()/fman_port_init()
+wiring for FMAN_PORT_TYPE_OH (the RM 5.5.7.6 13-step FMBM_OCFG
+bring-up: DMA attrs, internal-context params, dequeue/parser next-
+engine, CC base, FQID, rate limiter, EN). No devicetree consumer
+references any O/H node via fsl,fman-ports (only the six ethernet@
+MAC nodes are referenced that way), so nothing calls config()/init()
+on these new port objects -- this patch is provably inert as shipped:
+it only makes six previously-invisible struct fman_port objects
+enumerable, zero register writes, zero behavior change to any
+existing RX/TX/CC/ehash/HMTD path. The bring-up sequence needs the
+same register-exact care as this patch and touches the
+resource-sizing helpers (get_dflt_num_of_{fifo_bufs,open_dmas,tasks})
+shared with every RX/TX port on the chip -- a separate, board-gated
+increment (phase 1b), not rushed into this one.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (new O/H port subsystem; probe-only, no register writes, no existing port type touched)
+---
+ drivers/net/ethernet/freescale/fman/fman.h      |   9 ++
+ drivers/net/ethernet/freescale/fman/fman_port.c | 111 ++++++++++++++++++++++++-
+ drivers/net/ethernet/freescale/fman/fman_port.h |   9 ++
+ 3 files changed, 128 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman.h b/drivers/net/ethernet/freescale/fman/fman.h
+index c7b431705..0b8a68081 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.h
++++ b/drivers/net/ethernet/freescale/fman/fman.h
+@@ -83,6 +83,15 @@ struct fman; /* FMan data */
+ enum fman_port_type {
+ 	FMAN_PORT_TYPE_TX = 0,	/* TX Port */
+ 	FMAN_PORT_TYPE_RX,	/* RX Port */
++	/*
++	 * Offline/Host-command (O/H) port -- RM 5.3.1 "FMan Hardware Ports
++	 * Types". No MAC; dequeues re-circulated frames from QMan, walks
++	 * Parser/KeyGen/CC via its own FMBM_O* BMI register block, then
++	 * re-enqueues. ASK2 OH-port re-enqueue infra (dpaa1); see
++	 * plans/ASK2-VLAN-REARCH.md and the board-patch series near
++	 * 0175-fman-port-oh-type.patch for the bring-up this unlocks.
++	 */
++	FMAN_PORT_TYPE_OH,
+ };
+
+ struct fman_rev_info {
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 01482f639..95ef9982b 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -273,10 +273,71 @@ struct fman_port_tx_bmi_regs {
+ 	u32 reserved0310[0x3a]; /* (0x310-0x3FF) */
+ };
+
++/*
++ * BMI Offline/Host-command (O/H) port register map -- RM 5.5.4.7, register
++ * offsets confirmed against LS1046ADPAARM.pdf (each O/H port's block lives
++ * at FMan_base + 0x1000*n, n = hw O/H port id; ASK2 dpaa1 board uses n=0x04,
++ * live-confirmed unbound 2026-09-01, see plans/ASK2-VLAN-REARCH.md). Field
++ * order/offsets match the RM table exactly -- do not reorder.
++ */
++struct fman_port_oh_bmi_regs {
++	u32 fmbm_ocfg;		/* O/H Configuration */
++	u32 fmbm_ost;		/* O/H Status */
++	u32 fmbm_oda;		/* O/H DMA attributes */
++	u32 fmbm_oicp;		/* O/H Internal Context Parameters */
++	u32 fmbm_ofdne;		/* O/H Frame Dequeue Next Engine */
++	u32 fmbm_ofne;		/* O/H Frame Next Engine */
++	u32 fmbm_ofca;		/* O/H Frame Command Attributes */
++	u32 fmbm_ofpne;		/* O/H Frame Parser Next Engine */
++	u32 fmbm_opso;		/* O/H Parsing Start Offset */
++	u32 fmbm_opp;		/* O/H Policer Profile */
++	u32 fmbm_occb;		/* O/H Custom (Coarse) Classification Base */
++	u32 fmbm_oim;		/* O/H Internal Margins */
++	u32 fmbm_ofp;		/* O/H FIFO Parameters */
++	u32 fmbm_ofed;		/* O/H Frame End Data */
++	u32 reserved0038[0x2];	/* (0x038-0x03F) */
++	u32 fmbm_opri[PORT_PRS_RESULT_WORDS_NUM];
++	/* O/H Parse Result Initialization */
++	u32 fmbm_ofqid;		/* O/H Frame Queue ID */
++	u32 fmbm_oefqid;	/* O/H Error Frame Queue ID */
++	u32 fmbm_ofsdm;		/* O/H Frame Status Discard Mask */
++	u32 fmbm_ofsem;		/* O/H Frame Status Error Mask */
++	u32 fmbm_ofene;		/* O/H Frame Enqueue Next Engine */
++	u32 fmbm_orlmts;	/* O/H Rate Limiter Scale */
++	u32 fmbm_orlmt;		/* O/H Rate Limiter */
++	u32 fmbm_ocmne;		/* O/H Continuous Mode Next Engine */
++	u32 reserved0080[0x38]; /* (0x080-0x15F) */
++	u32 fmbm_ocgm[PORT_CG_MAP_NUM];	/* Observed Congestion Grp Map */
++	u32 reserved0180[0x20]; /* (0x180-0x1FF) */
++	u32 fmbm_ostc;		/* O/H Statistics Counters */
++	u32 fmbm_ofrc;		/* O/H Frame Counter */
++	u32 fmbm_ofdc;		/* O/H Frames Discard Counter */
++	u32 fmbm_ofledc;	/* O/H Frames Length Error Discard Counter */
++	u32 fmbm_ofufdc;	/* O/H Frames Unsupported Format Discard Cntr */
++	u32 fmbm_offc;		/* O/H Filter Frames Counter */
++	u32 fmbm_ofwdc;		/* O/H Frames WRED Discard Counter */
++	u32 fmbm_ofldec;	/* O/H Frames List DMA Error Counter */
++	u32 fmbm_obdc;		/* O/H Buffers Deallocate Counter */
++	u32 fmbm_oodc;		/* O/H Out of Buffers Discard Counter */
++	u32 fmbm_opec;		/* O/H Prepare to Enqueue Counter */
++	u32 reserved022c[0x15]; /* (0x22C-0x27F) */
++	u32 fmbm_opc;		/* O/H Performance Counters */
++	u32 fmbm_opcp;		/* O/H Performance Count Parameters */
++	u32 fmbm_occn;		/* O/H Cycle Counter */
++	u32 fmbm_otuc;		/* O/H Tasks Utilization Counter */
++	u32 fmbm_oduc;		/* O/H DMA Utilization Counter */
++	u32 fmbm_ofuc;		/* O/H FIFO Utilization Counter */
++	u32 reserved0298[0x1a]; /* (0x298-0x2FF) */
++	u32 fmbm_odcfg[0x3];	/* O/H Debug Configuration */
++	u32 fmbm_ogpr;		/* O/H General Purpose Register */
++	u32 reserved0310[0x3c]; /* (0x310-0x3FF) */
++};
++
+ /* BMI port register map */
+ union fman_port_bmi_regs {
+ 	struct fman_port_rx_bmi_regs rx;
+ 	struct fman_port_tx_bmi_regs tx;
++	struct fman_port_oh_bmi_regs oh;
+ };
+
+ /* QMI port register map */
+@@ -1563,6 +1624,32 @@ struct fman_port *fman_port_lookup_rx(struct fman *fm, u8 port_id)
+ }
+ EXPORT_SYMBOL_GPL(fman_port_lookup_rx);
+
++/*
++ * fman_port_lookup_oh() -- mirrors fman_port_lookup_rx() (0115) for O/H
++ * ports. ASK2 OH-port re-enqueue infra (dpaa1): lets a later bring-up path
++ * resolve the live struct fman_port for (fman, hw O/H port id) once
++ * fman_port_probe() has registered it -- the same active-port registry, no
++ * new bookkeeping. Returns NULL if the port never probed successfully
++ * (e.g. fman_get_qman_channel_id() found no channel for that hw id) or
++ * hasn't reached fman_port_init() yet.
++ */
++struct fman_port *fman_port_lookup_oh(struct fman *fm, u8 port_id)
++{
++	struct fman_port *p, *found = NULL;
++
++	mutex_lock(&fman_port_active_lock);
++	list_for_each_entry(p, &fman_port_active_list, node) {
++		if (p->fm == fm && p->port_id == port_id &&
++		    p->port_type == FMAN_PORT_TYPE_OH) {
++			found = p;
++			break;
++		}
++	}
++	mutex_unlock(&fman_port_active_lock);
++	return found;
++}
++EXPORT_SYMBOL_GPL(fman_port_lookup_oh);
++
+ /*
+  * fman_port_set_silicon_hit_release_all -- TX bypass on all TX ports
+  *
+@@ -2216,6 +2303,20 @@ static int fman_port_probe(struct platform_device *of_dev)
+ 			port_speed = 1000;
+ 		port_type = FMAN_PORT_TYPE_RX;
+
++	} else if (of_device_is_compatible(port_node, "fsl,fman-v3-port-oh")) {
++		/*
++		 * O/H port: no MAC, no link speed (RM 5.3.1). ASK2 OH-port
++		 * re-enqueue infra (dpaa1) -- probe only creates the
++		 * fman_port object and maps its BMI/QMI/HWP register window;
++		 * no register is written here (see fman_port_probe() below,
++		 * unchanged for this branch). The FMBM_OCFG[EN] bring-up
++		 * sequence (RM 5.5.7.6, 13 steps) is a separate, later
++		 * increment -- this port stays completely inert until that
++		 * lands and is explicitly armed.
++		 */
++		port_type = FMAN_PORT_TYPE_OH;
++		port_speed = 0;
++
+ 	}  else {
+ 		dev_err(port->dev, "%s: Illegal port type\n", __func__);
+ 		err = -EINVAL;
+@@ -2225,7 +2326,7 @@ static int fman_port_probe(struct platform_device *of_dev)
+ 	port->dts_params.type = port_type;
+ 	port->dts_params.speed = port_speed;
+
+-	if (port_type == FMAN_PORT_TYPE_TX) {
++	if (port_type == FMAN_PORT_TYPE_TX || port_type == FMAN_PORT_TYPE_OH) {
+ 		u32 qman_channel_id;
+
+ 		qman_channel_id = fman_get_qman_channel_id(fman, port_id);
+@@ -2282,6 +2383,14 @@ static const struct of_device_id fman_port_match[] = {
+ 	{.compatible = "fsl,fman-v2-port-rx"},
+ 	{.compatible = "fsl,fman-v3-port-tx"},
+ 	{.compatible = "fsl,fman-v2-port-tx"},
++	/*
++	 * ASK2 OH-port re-enqueue infra (dpaa1): mainline never bound O/H
++	 * ports (confirmed live 2026-09-01 -- all 6 O/H nodes on this board,
++	 * hw id 0x02-0x07, had no driver attached). This makes them probe
++	 * and register a struct fman_port (inert -- see fman_port_probe()),
++	 * nothing more.
++	 */
++	{.compatible = "fsl,fman-v3-port-oh"},
+ 	{}
+ };
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index 4cedb38ec..38d1eee94 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -171,6 +171,15 @@ int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
+
+ struct fman_port *fman_port_lookup_rx(struct fman *fm, u8 port_id);
+
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1): mirrors fman_port_lookup_rx() for
++ * O/H ports (FMAN_PORT_TYPE_OH). Returns NULL until the port has both
++ * probed (fsl,fman-v3-port-oh match, fman_port_probe()) AND been through
++ * fman_port_config()+fman_port_init() -- the latter is not wired for any
++ * O/H port yet (0175: probe-only skeleton), so this is presently dormant.
++ */
++struct fman_port *fman_port_lookup_oh(struct fman *fm, u8 port_id);
++
+ /* 0116: FM_CTL ctrl-params page (required by CC result-AD NIA AC 0x28) */
+ u32 fman_port_get_params_page(struct fman_port *port);
+ int fman_port_set_params_page(struct fman_port *port, u32 muram_off,
