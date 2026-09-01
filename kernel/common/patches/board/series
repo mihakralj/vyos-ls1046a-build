@@ -355,3 +355,11 @@
 # than port_id/port_type (only set by fman_port_config() itself).
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0178-fman-port-oh-probe-time-registry.patch
+
+# Polish, board-found 2026-09-01: "bringup 4" succeeded after 0178 (both
+# fman_port_config()/fman_port_init() returned 0) but dmesg showed a
+# spurious WARN_ON from verify_size_of_fifo() -- unmodified upstream,
+# only ever handled TX/RX, left both size sums at 0 for O/H. Harmless
+# (no functional effect) but noisy; O/H now takes the TX branch.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0179-fman-port-oh-fifo-size-warn.patch

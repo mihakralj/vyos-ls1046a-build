@@ -1,0 +1,73 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Tue, 01 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: quiet spurious WARN_ON in O/H fifo-size verification (phase 1c polish)
+
+Board-tested 2026-09-01 on .185 (image vyos-2026.09.01-1756-rolling,
+commit 4fa5d70c): "bringup 4" succeeded (fman_port_config()+
+fman_port_init() both returned 0, expected "oh_test bringup 0x04 OK"
+logged) -- 0178's fix worked. But dmesg also showed a WARN_ON splat
+from fman_port_init()+0x230, inside verify_size_of_fifo().
+
+Root cause: verify_size_of_fifo() is unmodified upstream mainline --
+it only ever handled FMAN_PORT_TYPE_TX and FMAN_PORT_TYPE_RX via an
+if/else-if chain, with both size sums initialized to 0 and never
+otherwise touched for any other type. For O/H, neither branch matches,
+so min_fifo_size_required stays 0 and WARN_ON(min_fifo_size_required
+<= 0) fires on every call. This has no functional consequence --
+port->fifo_bufs.num is never negative, so the two dev_dbg comparisons
+just below were already a silent no-op for O/H either way -- but it's
+a noisy, spurious warning that would fire on every future bring-up,
+and is worth fixing properly rather than leaving in place.
+
+Fix: O/H now takes the TX branch, not a new one. Justified because
+O/H is architecturally closer to TX here, not RX: FMBM_OFDNE and
+FMBM_TFDNE both use NIA_ENG_QMI_DEQ (see init_bmi_oh(), 0176) --
+both are QMI-dequeue-driven, unlike RX which receives directly from
+the wire. Every field the TX formula reads is already populated
+generically for O/H: max_frame_length (DFLT_PORT_MAX_FRAME_LENGTH,
+set unconditionally in fman_port_config()) and
+cfg->tx_fifo_deq_pipeline_depth (BMI_DEQUEUE_PIPELINE_DEPTH(), set
+unconditionally in set_dflt_cfg() for every port type). port_speed
+is simply 0 for O/H, which only selects which back-to-back margin
+constant applies, not correctness.
+
+Not yet re-tested on hardware after this fix (queued for the next
+board session, alongside re-confirming "bringup 4" is now
+warning-free).
+
+Upstream-Status: Inappropriate | Risk-Tier: A (adds one type to an existing TX-only branch condition; RX path and every other type untouched)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 3142258cc..868a4fe0b 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1038,8 +1038,24 @@ static int verify_size_of_fifo(struct fman_port *port)
+ {
+ 	u32 min_fifo_size_required = 0, opt_fifo_size_for_b2b = 0;
+
+-	/* TX Ports */
+-	if (port->port_type == FMAN_PORT_TYPE_TX) {
++	/*
++	 * TX Ports. ASK2 OH-port re-enqueue infra (dpaa1) also takes this
++	 * branch, not RX's. Board-tested 2026-09-01 on .185: this upstream
++	 * function only ever handled TX/RX, so both sums stayed 0 for O/H,
++	 * tripping the WARN_ON below on every bringup call. Harmless --
++	 * fifo_bufs.num is never negative, so the dev_dbg verification a
++	 * few lines down was a silent no-op either way -- but noisy, and
++	 * worth fixing properly since O/H is architecturally closer to TX
++	 * here. Both are QMI-dequeue-driven: FMBM_OFDNE and FMBM_TFDNE both
++	 * use NIA_ENG_QMI_DEQ, see init_bmi_oh(). Every field this formula
++	 * reads is already populated generically for O/H: max_frame_length
++	 * and cfg->tx_fifo_deq_pipeline_depth by set_dflt_cfg() for every
++	 * port type, unconditionally; port_speed is simply 0 for O/H, which
++	 * only changes which b2b-margin constant applies below, not
++	 * correctness.
++	 */
++	if (port->port_type == FMAN_PORT_TYPE_TX ||
++	    port->port_type == FMAN_PORT_TYPE_OH) {
+ 		min_fifo_size_required = (u32)
+ 		    (roundup(port->max_frame_length,
+ 			     FMAN_BMI_FIFO_UNITS) + (3 * FMAN_BMI_FIFO_UNITS));
