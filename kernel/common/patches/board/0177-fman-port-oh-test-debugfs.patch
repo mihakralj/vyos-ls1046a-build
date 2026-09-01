@@ -1,0 +1,187 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Tue, 01 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: O/H bring-up hand-arm debugfs (phase 1c de-risk)
+
+Phase 1c of the OH-port-based VLAN re-architecture (T-M6-8,
+plans/ASK2-VLAN-REARCH.md). Phases 1a (0175, probe) and 1b (0176,
+FMBM_O* register programming) are both silicon-validated as inert:
+nothing in production calls fman_port_config()/fman_port_init() for
+an O/H port, so none of that code has ever actually executed. This
+patch adds the smallest possible hand-arm to change that.
+
+New debugfs node /sys/kernel/debug/fman_port_oh_test/bringup, write
+"bringup <hw_port_id>" (decimal). Looks up the target O/H port in
+the existing active-port registry, then calls fman_port_config()+
+fman_port_init() -- nothing else. Deliberately does NOT touch
+FMBM_OCFG[EN] (stays 0/disabled, see fman_port_oh_enable()) and does
+NOT arm a CC tree (fman_port_set_oh_cc_base()): a disabled port's
+register contents have no effect on the datapath, so this step is
+the safest possible way to exercise 0176's register-write sequence
+for the first time on real hardware -- prove it runs without error
+and writes what's expected, before anything downstream can act on
+those writes.
+
+Implemented as a new self-contained top-level debugfs node inside
+fman_port.c rather than extending the existing fman_pcd.c/cc_test.c
+debugfs tree: this project's own local kernel-source build cache was
+found to have drifted into an inconsistent state for those specific
+files (unrelated git-apply-3way artifacts and a missing source file,
+confirmed not to reflect what CI actually builds from a fresh
+checkout) partway through this work, so a node with zero dependency
+on that tree's exact current shape was the safer choice for this
+increment. fman_port.c itself is unaffected by that drift -- it's
+the same file this project has been directly authoring across 0175/
+0176, verified by git apply --check each time.
+
+Next steps (not in this patch): run "bringup 4" on the board and
+confirm no error + a live register readback matches init_bmi_oh()'s
+expected values; then a further increment to actually arm
+FMBM_OCFG[EN] and a CC tree, and prove a real frame flows through
+the OH-port re-enqueue hop.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (new debug-only tool, gated behind a manual debugfs write, touches only the target O/H port's own private register page, never called automatically)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 110 +++++++++++++++++++++++
+ 1 file changed, 110 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 87a6279db..e8a7678a6 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -14,6 +14,11 @@
+ #include <linux/of_address.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt_env.h>
++#include <linux/debugfs.h>
++#include <linux/err.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
+
+ #include "fman.h"
+ #include "fman_port.h"
+@@ -2606,6 +2611,106 @@ static int fman_port_probe(struct platform_device *of_dev)
+ 	return err;
+ }
+
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1c de-risk tool:
++ * /sys/kernel/debug/fman_port_oh_test/bringup -- hand-arm the ONE call that
++ * exercises phase 1b's dormant code (init_bmi_oh()/set_oh_dflt_cfg()/the
++ * fman_set_port_params() mac_mfl fix) on real silicon for the first time,
++ * decomposed as its own smallest-possible step: fman_port_config()+
++ * fman_port_init() only. FMBM_OCFG[EN] is NOT touched here (stays 0, see
++ * fman_port_oh_enable()) -- a misconfigured-but-disabled port's registers
++ * take no effect, so this step alone is provably as safe as writing static
++ * config to a private per-port page can be, before anything is armed.
++ *
++ * Self-contained in this module rather than routed through fman_pcd.c's
++ * existing per-FMan debugfs tree (cc_test etc.): deliberate choice after
++ * finding this project's own local kernel-source build cache had drifted
++ * into an inconsistent state for those files (unrelated to O/H work) --
++ * a top-level debugfs node here has zero dependency on that tree's exact
++ * current shape.
++ *
++ * Write "bringup <hw_port_id>" (decimal, e.g. "bringup 4" for hw port
++ * 0x04).  Do not write it twice for the same port without a reboot --
++ * fman_port_config() unconditionally kzalloc's a fresh port->cfg with no
++ * double-call guard, so a second call leaks the first allocation (a few
++ * hundred bytes; harmless to hardware, just untidy) rather than doing
++ * anything unsafe. err_fqid/dflt_fqid are left at 0 (no fallback target)
++ * since this step's only goal is proving the register-write sequence
++ * itself succeeds -- CC-tree arming (fman_port_set_oh_cc_base()) and real
++ * traffic are later, separate steps.
++ */
++static ssize_t fman_port_oh_test_write(struct file *file,
++				       const char __user *buf,
++				       size_t count, loff_t *ppos)
++{
++	struct fman_port *port, *p;
++	struct fman_port_params params;
++	char kbuf[32];
++	u8 port_id;
++	int err;
++
++	if (count == 0 || count >= sizeof(kbuf))
++		return -EINVAL;
++	if (copy_from_user(kbuf, buf, count))
++		return -EFAULT;
++	kbuf[count] = '\0';
++	kbuf[strcspn(kbuf, "\n")] = '\0';
++
++	if (sscanf(kbuf, "bringup %hhu", &port_id) != 1)
++		return -EINVAL;
++
++	port = NULL;
++	mutex_lock(&fman_port_active_lock);
++	list_for_each_entry(p, &fman_port_active_list, node) {
++		if (p->port_id == port_id && p->port_type == FMAN_PORT_TYPE_OH) {
++			port = p;
++			break;
++		}
++	}
++	mutex_unlock(&fman_port_active_lock);
++	if (!port) {
++		pr_err("fman_port: oh_test bringup 0x%02x: no such O/H port (never probed?)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	memset(&params, 0, sizeof(params));
++	err = fman_port_config(port, &params);
++	if (err) {
++		pr_err("fman_port: oh_test bringup 0x%02x: fman_port_config() = %d\n",
++		       port_id, err);
++		return err;
++	}
++	err = fman_port_init(port);
++	if (err) {
++		pr_err("fman_port: oh_test bringup 0x%02x: fman_port_init() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	pr_info("fman_port: oh_test bringup 0x%02x OK (FMBM_OCFG[EN] still 0 -- see fman_port_oh_enable())\n",
++		port_id);
++	return count;
++}
++
++static const struct file_operations fman_port_oh_test_fops = {
++	.owner = THIS_MODULE,
++	.write = fman_port_oh_test_write,
++};
++
++static struct dentry *fman_port_oh_test_dir;
++
++static void fman_port_oh_test_debugfs_init(void)
++{
++	fman_port_oh_test_dir = debugfs_create_dir("fman_port_oh_test", NULL);
++	if (IS_ERR_OR_NULL(fman_port_oh_test_dir)) {
++		fman_port_oh_test_dir = NULL;
++		return;
++	}
++	debugfs_create_file("bringup", 0200, fman_port_oh_test_dir, NULL,
++			    &fman_port_oh_test_fops);
++}
++
+ static const struct of_device_id fman_port_match[] = {
+ 	{.compatible = "fsl,fman-v3-port-rx"},
+ 	{.compatible = "fsl,fman-v2-port-rx"},
+@@ -2642,12 +2747,17 @@ static int __init fman_port_load(void)
+ 	if (err < 0)
+ 		pr_err("Error, platform_driver_register() = %d\n", err);
+
++	/* ASK2 OH-port re-enqueue infra (dpaa1): non-fatal if debugfs is
++	 * unavailable, matching fman_pcd.c's own debugfs-root handling. */
++	fman_port_oh_test_debugfs_init();
++
+ 	return err;
+ }
+ module_init(fman_port_load);
+
+ static void __exit fman_port_unload(void)
+ {
++	debugfs_remove_recursive(fman_port_oh_test_dir);
+ 	platform_driver_unregister(&fman_port_driver);
+ }
+ module_exit(fman_port_unload);
