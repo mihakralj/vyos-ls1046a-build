@@ -320,4 +320,3 @@
 # previously ran as source mutations on every build. See patch body.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0173-fman-pcd-fixup-fold.patch
-0174-fman-pcd-fe-vlan-ehash.patch
