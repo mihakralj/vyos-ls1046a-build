@@ -672,20 +672,7 @@ unset _count _series _src _p
 # is still physically absent from board/ (0150, superseded by 0153).
 # 2026-08-29: pruned the 4 stale WIP entries (patch review found they no
 # longer exist under board/ — see plans/PATCH-FOLD-CAMPAIGN-PLAN.md §2).
-# 2026-09-01: 4011-sfp-oem-h10g-cu1m-checksum-quirk.patch was renamed to
-# 4011-sfp-oem-h10g-cu1m-eeprom-self-heal.patch (self-heal replaced the
-# tolerance-quirk approach) and removed from git, but the old filename
-# keeps rematerializing on disk mid-checkout on the self-hosted runner
-# (observed birth-time falls inside the actions/checkout@v6 step itself,
-# not left over from any later build stage -- looks like a runner/
-# checkout-cache artifact, not a repo content issue: `git status` on the
-# runner's own checkout reports this exact path as clean at the commit
-# that deletes it). The apply loop only ever reads $BOARD_PATCH_DIR/series
-# (see "Staging LS1046A board patches ... (series file)" above), so an
-# orphaned file here is inert either way -- whitelisting it here only
-# silences this completeness guard, it does not cause the stale content
-# to be applied.
-BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch 4011-sfp-oem-h10g-cu1m-checksum-quirk.patch"
+BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch"
 _missing=""
 # Cross-check: every .patch in board/ must be in series or SKIP list
 {
