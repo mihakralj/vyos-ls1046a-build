@@ -320,3 +320,13 @@
 # previously ran as source mutations on every build. See patch body.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0173-fman-pcd-fixup-fold.patch
+
+# ── ASK2 OH-port re-enqueue infra, phase 1a (2026-09-01) ──
+# T-M6-8 VLAN-via-OH-port re-architecture (plans/ASK2-VLAN-REARCH.md),
+# proving ground for the same OH-port primitive IPsec ESP offload needs.
+# Binds the 6 fsl,fman-v3-port-oh devicetree nodes (hw id 0x02-0x07,
+# live-confirmed unbound 2026-09-01) mainline never matched. Probe-only:
+# maps the register window, writes nothing. FMBM_OCFG bring-up is a
+# separate later increment.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0175-fman-port-oh-type.patch
