@@ -330,3 +330,11 @@
 # separate later increment.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0175-fman-port-oh-type.patch
+
+# Phase 1b: RM 5.5.7.6 FMBM_O* register bring-up + the fman_set_port_params()
+# mac_mfl aliasing fix found by review (hw_port_id_to_sw_port_id() silently
+# maps every O/H hw id to mac_id 0). Still fully dormant: FMBM_OCFG[EN] and
+# fman_port_set_oh_cc_base() are new exported functions, called from nowhere
+# yet. See plans/ASK2-VLAN-REARCH.md.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0176-fman-port-oh-bringup.patch
