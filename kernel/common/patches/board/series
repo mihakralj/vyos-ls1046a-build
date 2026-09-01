@@ -371,3 +371,17 @@
 # traffic -- FMBM_OCFG[EN]=1 gets tested in isolation first.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0180-fman-port-oh-enable-target-fqid.patch
+
+# Regression fix, board-found 2026-09-01: calling "bringup" on an O/H
+# port (0177/0178's probe-time fman_port_active_list registration,
+# followed by fman_port_init()'s own unconditional list_add_tail() on
+# the same node) double-inserts that port into the shared list,
+# corrupting it for EVERY port on the fman. Silently broke
+# fman_port_lookup_rx() for unrelated physical ports (-ENODEV from
+# fman_cc_tree_install(), surfaced as "fe_flow_insert=-19" board-wide)
+# -- found while diagnosing an unrelated VLAN offload bug report.
+# Guards both list_add_tail() call sites with a new bool field so the
+# node links at most once regardless of call order. Boards that
+# already ran "bringup" need a reboot to clear the corrupted list.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0181-fman-port-active-list-double-add.patch
