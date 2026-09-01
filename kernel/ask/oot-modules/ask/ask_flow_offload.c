@@ -1999,17 +1999,20 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	}
 
 	/*
-	 * T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26): the FE-VM inline
-	 * VLAN action emitter (F-233/F-234) is retired. Enhanced-external-hash
-	 * records cannot chain to an HMTD and their inline strip/rebuild opcode
-	 * path exhausts a 5+tnums FE-VM resource after ~21 frames. VLAN intent is
-	 * still parsed and carried above, but publication fails closed here until
-	 * the replacement path lands: CC leaf AD -> NADEN -> VLAN HMTD -> egress
-	 * TX FQ (plans/ASK2-VLAN-REARCH.md R2-R4). Never publish a plain routed
-	 * record for a VLAN flow -- that would silently omit the tag edit.
+	 * Vendor eHash model for VLAN pop/push: populate vlan_flags,
+	 * vlan_ingress_vid, vlan_push_tci, vlan_push_tpid into the action
+	 * passed to fman_pcd_fe_flow_add(). Gated on the per-port vlan arming check.
 	 */
-	if (key->vlan_edit_flags)
-		return -EOPNOTSUPP;
+	if (key->vlan_edit_flags) {
+		if (!ask_hw_vlan_offload_armed_port(key->port_id))
+			return -EOPNOTSUPP;
+		action.vlan_flags =
+			(key->vlan_edit_flags & ASK_VLANF_POP ? FMAN_PCD_VLANF_POP : 0) |
+			(key->vlan_edit_flags & ASK_VLANF_PUSH ? FMAN_PCD_VLANF_PUSH : 0);
+		action.vlan_ingress_vid = key->vlan_ingress_vid;
+		action.vlan_push_tci    = ntohs(key->vlan_push_tci);
+		action.vlan_push_tpid   = ntohs(key->vlan_push_tpid);
+	}
 
 	/* F-195/F-204 contract: the second argument remains exclusively the
 	 * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
@@ -2813,13 +2816,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			ask_pr_warn("flow_offload: REPLACE cookie=0x%lx no no-confirm TX FQ (rc=%d fqid=0x%x) - keeping flow in SW\n",
 				    f->cookie, fqrc, fe_tx_fqid);
 			rc = -EAGAIN;
-		} else if (key.vlan_edit_flags) {
-			/* T-M6-8 R4c-2: a VLAN flow classifies via the per-port
-			 * CC tree (CC key HIT -> combined HMTD -> TX FQ; CC miss
-			 * -> FE_ENTER ehash), NOT the ehash record path. Gated
-			 * on ask_hw_vlan_offload_armed() inside; fails closed to
-			 * SW when the gate is off. */
-			rc = ask_vlan_cc_flow_add(&key, fe_tx_fqid, egress_dev);
 		} else {
 			rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
 						fe_tx_fqid, egress_dev);
@@ -2845,10 +2841,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * and drop our SW entry so no orphan silicon record survives.
 	 */
 	if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
-		if (key.vlan_edit_flags)
-			ask_vlan_cc_flow_del(&key);
-		else
-			ask_fe_flow_remove(&key);
+		ask_fe_flow_remove(&key);
 		(void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
 		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — record removed\n",
 				    f->cookie);
@@ -2934,14 +2927,9 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 
 		ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
 		/* Fix B: per-key FE-VM delete (F-117) — removes just this
-		 * flow's silicon record instead of clearing every flow.
-		 * T-M6-8 R4c-2: a VLAN flow lives in the per-port CC shadow,
-		 * not the ehash table, so remove it via ask_vlan_cc_flow_del(). */
+		 * flow's silicon record from the ehash table. */
 		if (have_key) {
-			if (dkey.vlan_edit_flags)
-				ask_vlan_cc_flow_del(&dkey);
-			else
-				ask_fe_flow_remove(&dkey);
+			ask_fe_flow_remove(&dkey);
 		}
 		/* Registry entry no longer needed: the flow is gone and no
 		 * worker can still be mid-replay for this generation. */
