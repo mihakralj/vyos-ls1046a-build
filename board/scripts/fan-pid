@@ -472,23 +472,23 @@ def play_startup_whistle(i2c_fd: int) -> None:
 def detect_present_fans(i2c_fd: int, hwmon_dir: str) -> list[dict]:
     """Flag each channel present/absent from its tach at full drive (post-whistle).
 
-    A channel reading 0 at MAX has no fan or an unwired tach; it is kept at MAX
-    (thermally safe) with the seek disabled since there is no feedback.
+    A channel reading 0 at MAX has no fan or an unwired tach; it is marked not
+    present with seek disabled.
     """
     detected = []
     for fan in FAN_DEFS:
         runtime = {**fan, "tach_path": os.path.join(hwmon_dir, fan["tach_file"])}
         rpm = fan_rpm(runtime, i2c_fd)
         runtime["tach_ok"] = bool(rpm and rpm > 0)
+        runtime["present"] = runtime["tach_ok"]
         detected.append(runtime)
         if runtime["tach_ok"]:
             syslog.syslog(syslog.LOG_INFO,
                           f"fan-pid: {fan['name']} present ({rpm} rpm @ max)")
         else:
-            syslog.syslog(syslog.LOG_WARNING,
-                          f"fan-pid: {fan['name']} absent or tach-less "
-                          f"(0 rpm @ max on reg 0x{fan['duty_reg']:02x}) — "
-                          f"driving MAX defensively, seek disabled")
+            syslog.syslog(syslog.LOG_INFO,
+                          f"fan-pid: {fan['name']} not present "
+                          f"(0 rpm @ max on reg 0x{fan['duty_reg']:02x})")
     return detected
 
 
@@ -506,12 +506,14 @@ class Controller:
         self.fans = []
         for fan in fans:
             start = floors.get(fan["duty_reg"], FLOOR_START)
+            present = fan.get("present", fan.get("tach_ok", True))
             self.fans.append({
                 **fan,
-                "tach_ok": fan.get("tach_ok", True),
+                "present": present,
+                "tach_ok": present,
                 "tach_path": os.path.join(hwmon_dir, fan["tach_file"]),
-                "floor": max(FLOOR_MIN, min(PWM_MAX, start)),
-                "rpm": None,              # last tach sample (for fan-check)
+                "floor": PWM_MAX if not present else max(FLOOR_MIN, min(PWM_MAX, start)),
+                "rpm": 0 if not present else None,        # last tach sample (for fan-check)
                 "last_written_pwm": -1,   # force first write
                 "seek_flat": 0,           # consecutive flat ticks (gates NEAR DOWN)
                 "seek_settle": 0,         # ticks to observe response after a DOWN step
@@ -526,10 +528,10 @@ class Controller:
 
     def min_floor(self) -> int:
         """Lowest floor across driven fans (the shared-demand clamp)."""
-        return min((f["floor"] for f in self.fans), default=FLOOR_MIN)
+        return min((f["floor"] for f in self.fans if f.get("present", True)), default=FLOOR_MIN)
 
     def export_floors(self) -> None:
-        """Atomically publish floors, tach_source and per-fan RPM for fan-check.
+        """Atomically publish floors, presence, tach_source and per-fan RPM for fan-check.
 
         RPM is published because at m=1 the kernel sysfs fanN_input reads 2x high.
         """
@@ -537,6 +539,8 @@ class Controller:
         try:
             os.makedirs(FLOOR_STATE_DIR, exist_ok=True)
             lines = [f"0x{f['duty_reg']:02x}={f['floor']}\n" for f in self.fans]
+            for f in self.fans:
+                lines.append(f"present:0x{f['duty_reg']:02x}={1 if f.get('present', True) else 0}\n")
             lines.append(f"tach_source={'raw-m1' if USE_RAW_TACH else 'sysfs-m2'}\n")
             for f in self.fans:
                 rpm = f.get("rpm")
@@ -634,6 +638,9 @@ class Controller:
 
         fan_pwms: dict[str, int] = {}
         for fan in self.fans:
+            if not fan.get("present", True):
+                fan_pwms[fan["name"]] = 0
+                continue
             if fan["kick"]:
                 out = PWM_MAX
                 fan["kick"] = False
@@ -650,7 +657,8 @@ class Controller:
                 fan["last_written_pwm"] = out
 
         for fan in self.fans:
-            self._refine_floor(fan, allow_floor_seek)
+            if fan.get("present", True):
+                self._refine_floor(fan, allow_floor_seek)
         self.export_floors()   # cheap tmpfs write; keeps the RPM sample fresh
 
         return fan_pwms, zone_temps, zone_pwms
@@ -662,7 +670,7 @@ class Controller:
         then ignores coast-down. DOWN is fast when far above target, but small and
         settled-only near it. The deadband prevents steady-state churn.
         """
-        if not fan["tach_ok"]:
+        if not fan.get("present", True) or not fan["tach_ok"]:
             return
         if fan["cooldown"] > 0:
             fan["cooldown"] -= 1
@@ -740,9 +748,9 @@ class Controller:
         fan["seek_flat"] = 0
         fan["seek_settle"] = SEEK_STEP_SETTLE
         syslog.syslog(syslog.LOG_INFO,
-                      f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
-                      f"(seek down {'near' if near else 'far'}: "
-                      f"{rpm}rpm > {SEEK_TARGET_RPM}, -{step})")
+                          f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
+                          f"(seek down {'near' if near else 'far'}: "
+                          f"{rpm}rpm > {SEEK_TARGET_RPM}, -{step})")
 
     def maybe_log(self, now: float, fan_pwms: dict[str, int],
                   zt: dict[str, float], zp: dict[str, float]) -> None:
@@ -751,6 +759,9 @@ class Controller:
         self.last_log_t = now
         fan_str_parts = []
         for fan in self.fans:
+            if not fan.get("present", True):
+                fan_str_parts.append(f"{fan['name']}=not-present")
+                continue
             rpm = fan_rpm(fan, self.i2c_fd)
             pwm = fan_pwms.get(fan["name"], 0)
             if rpm is None:

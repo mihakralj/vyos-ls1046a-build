@@ -83,10 +83,13 @@ struct fman_cc_key {
 };
 
 /*
- * Bounds the static tree at the ~5 KiB MURAM budget (32 keys x ~150 B).
- * Mirrors board patch 0086b.
+ * Bounds the static tree at the ~10 KiB MURAM budget (64 keys x ~150 B;
+ * raised from 32 2026-08-31, T-M6-8 VLAN throughput investigation -- an
+ * 8-stream bidirectional iperf3 test needs 32 concurrent CC keys on one
+ * port with zero headroom, tipping into -ENOSPC on any setup/teardown
+ * overlap). Mirrors board patches 0086b, 0121k.
  */
-#define FMAN_CC_MAX_STATIC_KEYS	32
+#define FMAN_CC_MAX_STATIC_KEYS	64
 
 /**
  * struct fman_cc_static_tree - a port's complete static CC table
@@ -149,22 +152,26 @@ int  fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
  */
 int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
 
-/* ---- combined VLAN-edit + L3 next-hop HM dedup (board patch 0121d) --- */
+/* ---- combined VLAN-edit + L3 next-hop HM dedup (board patches 0121d, 0121j) --- */
 
 /**
  * fman_hm_vlan_route_get - resolve (and refcount) the shared combined
- * VLAN-edit + L3 next-hop HM node for a ROUTED-VLAN adjacency (T-M6-8 R4a).
+ * VLAN-edit + L3 next-hop HM node for a ROUTED-VLAN adjacency (T-M6-8 R4a;
+ * translate R4d).
  *
- * Builds one HMTD that does the tag edit AND {RMV_ETHERNET,
+ * Builds one HMTD that does the tag edit(s) AND {RMV_ETHERNET,
  * INSRT_GENERIC(14-byte egress L2), IPV4_FORWARD(dec_ttl,l4_csum)} -
- * everything a routed-VLAN frame needs. @is_push selects PUSH (@vid/@tpid/@pcp
- * inserted after the L2 rebuild) vs POP (strip the ingress tag before the
- * rebuild). @src_mac is the egress port's own MAC, @dst_mac the next-hop MAC.
- * On success @handle receives the HMTD MURAM offset to embed in a CC key's
- * @hm_handle (with a non-zero @target_fqid). Refcounted; sleepable; process
- * context only.  Mirrors board patch 0121d.
+ * everything a routed-VLAN frame needs. @do_pop and @do_push are
+ * independent: POP-only strips the ingress tag before the L2 rebuild,
+ * PUSH-only inserts (@vid/@tpid/@pcp) after it, and BOTH set builds a
+ * same-port VID-to-VID TRANSLATE chain (strip, rebuild, insert last). At
+ * least one must be set. @src_mac is the egress port's own MAC, @dst_mac
+ * the next-hop MAC. On success @handle receives the HMTD MURAM offset to
+ * embed in a CC key's @hm_handle (with a non-zero @target_fqid).
+ * Refcounted; sleepable; process context only.  Mirrors board patch 0121j.
  */
-int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id, bool is_push,
+int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
+			    bool do_pop, bool do_push,
 			    u16 vid, u16 tpid, u8 pcp,
 			    const u8 *src_mac, const u8 *dst_mac,
 			    u32 egress_tx_fqid, u32 *handle);
