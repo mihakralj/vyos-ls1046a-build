@@ -346,3 +346,12 @@
 # routed through fman_pcd.c's cc_test debugfs tree).
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0177-fman-port-oh-test-debugfs.patch
+
+# Fix, board-found 2026-09-01: 0177's bringup lookup only searched
+# fman_port_active_list, which fman_port_init() populates -- but nothing
+# had ever called it for an O/H port (that's what bringup exists to do),
+# so the list was empty. Registers O/H ports at probe time instead and
+# fixes the lookup to match dts_params.id/.type (valid pre-init) rather
+# than port_id/port_type (only set by fman_port_config() itself).
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0178-fman-port-oh-probe-time-registry.patch

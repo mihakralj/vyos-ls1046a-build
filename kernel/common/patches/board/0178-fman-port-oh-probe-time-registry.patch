@@ -1,0 +1,103 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Tue, 01 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: fix O/H port discoverability before first bring-up (phase 1c fix)
+
+Board-tested 2026-09-01 on .185 (image vyos-2026.09.01-1737-rolling,
+commit deab7141): "echo 'bringup 4' > /sys/kernel/debug/
+fman_port_oh_test/bringup" failed with ENODEV ("no such O/H port
+(never probed?)"), even though hw port 0x04 was confirmed bound
+(/sys/bus/platform/devices/1a84000.port/driver -> fsl-fman-port).
+
+Root cause: 0177's bringup handler searches fman_port_active_list,
+which fman_port_init() populates -- but nothing had ever called
+fman_port_init() for this port (that's the whole point of the
+bringup tool), so the list was empty for it. Chicken-and-egg: the
+lookup only finds ports that have already been through the exact
+sequence the tool exists to run for the first time.
+
+Fix, two parts:
+1. fman_port_probe() now registers O/H ports into
+   fman_port_active_list at PROBE time, not init time. Safe to add
+   without touching RX/TX: they still register (a second time) at
+   init time as before, unaffected; O/H has no other consumer that
+   will ever call fman_port_init() for it, so probe time is the only
+   sensible registration point. port->node is kzalloc'd/zeroed at
+   this point, which list_add_tail() handles fine (it only writes
+   through the node, never reads it as an existing link).
+2. The bringup handler's lookup now matches on dts_params.id/.type
+   instead of port_id/port_type. The latter two are only populated
+   by fman_port_config() itself -- before that call they're still
+   zero, so matching on them would have kept failing even with fix
+   1 alone. dts_params is set at probe time and never changes, so
+   it's valid at every point in an O/H port's life. (This is exactly
+   why fman_port_lookup_oh()'s own port_id/port_type match is
+   correct for ITS contract -- finding an already-initialized port
+   -- but was the wrong thing to copy into a pre-init lookup.)
+
+Not yet re-tested on hardware after this fix (queued for the next
+board session). Calling bringup twice for the same port without a
+reboot between calls now also leaves a second, duplicate
+fman_port_active_list entry for the same pointer (in addition to
+the already-documented port->cfg leak) -- harmless (same pointer
+both times, any future is-this-a-TX-port-style list walk still just
+sees it twice and skips it on the type filter) but still a
+single-use-per-boot debug tool, not a repeatable one.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (fixes newly-added debug-only tooling from 0177/0176; no RX/TX/CC/ehash/HMTD path touched)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 32 +++++++++++++++++++++++++-
+ 1 file changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index e8a7678a6..3142258cc 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -2600,6 +2600,24 @@ static int fman_port_probe(struct platform_device *of_dev)
+
+ 	dev_set_drvdata(&of_dev->dev, port);
+
++	/*
++	 * ASK2 OH-port re-enqueue infra (dpaa1): RX/TX ports join the
++	 * active-port registry (0115, fman_port_active_list) inside
++	 * fman_port_init(), once a netdev consumer has driven them through
++	 * fman_port_config()+fman_port_init(). O/H ports have no such
++	 * consumer -- nothing else will ever call config()/init() for one,
++	 * a debugfs/production caller has to find it FIRST in order to do
++	 * so. Register here at probe time instead, so a probed-but-not-yet-
++	 * brought-up O/H port is still discoverable. Safe: port->node is
++	 * kzalloc'd (zeroed), and list_add_tail() only writes through it,
++	 * never reads it as an existing link first.
++	 */
++	if (port_type == FMAN_PORT_TYPE_OH) {
++		mutex_lock(&fman_port_active_lock);
++		list_add_tail(&port->node, &fman_port_active_list);
++		mutex_unlock(&fman_port_active_lock);
++	}
++
+ 	return 0;
+
+ put_device:
+@@ -2659,10 +2677,22 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 	if (sscanf(kbuf, "bringup %hhu", &port_id) != 1)
+ 		return -EINVAL;
+
++	/*
++	 * Match on dts_params.id/.type, NOT port_id/port_type: those two
++	 * are only populated by fman_port_config(), which this function
++	 * exists to call for the FIRST time -- before that, they're still
++	 * zero from kzalloc(). dts_params is populated at probe time and
++	 * never changes, so it's the only field valid at every point in an
++	 * O/H port's life, whether or not fman_port_config() has run yet.
++	 * (Found this the hard way: the port_id/port_type match here
++	 * originally mirrored fman_port_lookup_oh()'s -- correct for THAT
++	 * function's post-init contract, wrong for this pre-init one.)
++	 */
+ 	port = NULL;
+ 	mutex_lock(&fman_port_active_lock);
+ 	list_for_each_entry(p, &fman_port_active_list, node) {
+-		if (p->port_id == port_id && p->port_type == FMAN_PORT_TYPE_OH) {
++		if (p->dts_params.id == port_id &&
++		    p->dts_params.type == FMAN_PORT_TYPE_OH) {
+ 			port = p;
+ 			break;
+ 		}
