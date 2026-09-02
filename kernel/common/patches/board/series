@@ -385,3 +385,12 @@
 # already ran "bringup" need a reboot to clear the corrupted list.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0181-fman-port-active-list-double-add.patch
+
+# Phase 1e of the O/H-port re-enqueue infra: schedule a QMan FQ onto the
+# O/H port's own dequeue channel (fman_port_get_qman_channel_id(), already
+# populated for O/H ports by 0175) via new "sched_fq"/"unsched_fq" debugfs
+# verbs, mirroring ask_hw.c's dedicated-TX-FQ pattern. Board port 0x04 is
+# armed+idle after 0175-0181 (2026-09-02) but nothing has ever fed it a
+# frame; this is the piece that lets a frame actually reach it.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0182-fman-port-oh-input-fq.patch
