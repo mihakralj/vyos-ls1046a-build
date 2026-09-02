@@ -1,0 +1,337 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: pcd: dual-lane 46-byte CC-tree key packer (T-M6-8 VLAN-v6, V6-1)
+
+First increment of extending Option A's VLAN offload (CC-tree +
+HMTD, shipped 2026-08-26, plans/ASK2-VLAN-REARCH.md) from IPv4-only
+to IPv4+IPv6. Staged, silicon-gated sequence (V6-1..V6-6); this is
+V6-1, dormant/software-only, no behavior change.
+
+PROBLEM: the CC-tree hardware match-table row (cc_pack_key(),
+CC_KEY_SIZE=16 bytes) is IPv4-only -- PORT_ID+sip(4)+dip(4)+proto+
+ports, no room for a 16-byte v6 address let alone a src/dst pair.
+Both software structs that feed it -- struct fman_cc_key (ask.ko)
+and struct fman_pcd_cc_hw_key (this layer) -- already carry unused
+is_ipv6/src_ip6[16]/dst_ip6[16] fields, and dpaa_cc_key_to_hw()
+(dpaa_fman_caps.c) already correctly translates them into the
+FMAN_PCD_CC_HW_F_IPV6 present bit. cc_pack_key() is the one link in
+that chain that never got built.
+
+FIX (this patch): a new cc_pack_key_dual() packer, entirely
+additive -- cc_pack_key()/CC_KEY_SIZE are byte-for-byte untouched,
+so every existing (v4-only, shipped) CC-tree consumer, including the
+production VLAN feature, is unaffected. The new 46-byte layout
+mirrors ask.ko's ask_fe_build_key_dual() (ask_flow_offload.c)
+exactly -- the same family-discriminated dual-lane key already
+silicon-proven for the routed ehash path (F-224/F-225/F-226, zero
+throughput regression at this width) -- rather than inventing a new
+format:
+
+  byte 0       FAMILY: 0x80 (v4) / 0x40 (v6). Replaces cc_pack_key()'s
+               byte-0 PORT_ID: port identity is already implicit in
+               which per-port CC tree got installed
+               (fman_cc_tree_install(fm, port_id, ...)), so PORT_ID
+               was redundant key content -- safe to repurpose.
+  bytes 1..4   IPv4 src, v4 keys only; zero for v6.
+  bytes 5..8   IPv4 dst, v4 keys only; zero for v6.
+  bytes 9..24  IPv6 src, v6 keys only; zero for v4.
+  bytes 25..40 IPv6 dst, v6 keys only; zero for v4.
+  byte 41      L4 proto.
+  bytes 42..43 L4 src port.
+  bytes 44..45 L4 dst port.
+
+Marked __maybe_unused (matches this file's own established idiom
+for "written, not yet wired in", e.g. fman_pcd.c's
+__fman_pcd_fe_build_vm_chain) -- nothing calls it yet. Actually
+using it requires a CC-tree KeyGen scheme reconfigured for the same
+GEC-style generic extraction the ehash dual-lane scheme already
+uses, which is V6-2 (silicon de-risk on cc_test, sacrificial port,
+not yet done) -- the one genuinely new-territory step in this whole
+increment sequence.
+
+KUnit coverage (drivers/net/ethernet/freescale/fman/tests/
+fman_pcd_cc_dual_key_test.c, included as a trailer under
+CONFIG_FSL_FMAN_PCD_KUNIT_TEST like this file's existing
+fman_pcd_fe_test.c): pins the exact v4 and v6 byte layouts (computed
+by hand and cross-checked against ask_fe_build_key_dual()'s
+identical field offsets so the two independently-compiled layers
+can't silently drift), the row stride (idx=1 doesn't overlap idx=0),
+and that CC_KEY_SIZE itself is untouched at 16.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (new dormant function +
+KUnit-only test file; cc_pack_key()/CC_KEY_SIZE and every existing
+caller of fman_cc_tree_install() untouched, byte-identical)
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_cc.c | 99 +++++++++++++++++
+ .../freescale/fman/tests/fman_pcd_cc_dual_key_test.c | 151 +++++++++++++++++++++++++++
+ 2 files changed, 250 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 030c35258b77..3b15eb3b54f5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -277,6 +277,99 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ 	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE), msk, CC_KEY_SIZE);
+ }
+
++/*
++ * T-M6-8 VLAN-v6: dual-lane 46-byte CC key packer, dormant (no caller yet).
++ *
++ * cc_pack_key() above is IPv4-only and CC_KEY_SIZE=16 has no room for a
++ * 16-byte v6 address, let alone a src/dst pair. Rather than invent a new
++ * layout, this mirrors ask.ko's ask_fe_build_key_dual() (ask_flow_offload.c)
++ * byte-for-byte -- the SAME family-discriminated dual-lane key already
++ * silicon-proven for the routed ehash path (F-224/F-225/F-226, zero
++ * throughput regression at 46 bytes):
++ *
++ *   byte  0      FAMILY: 0x80 (v4) / 0x40 (v6) -- see ASK_FE_FAMILY_V4/_V6.
++ *                Replaces cc_pack_key()'s byte-0 PORT_ID: port identity is
++ *                already implicit in which per-port CC tree got installed
++ *                (fman_cc_tree_install(fm, port_id, ...)), so PORT_ID was
++ *                redundant key content to begin with -- safe to repurpose.
++ *   bytes 1..4   IPv4 src (network order), v4 keys only; zero for v6.
++ *   bytes 5..8   IPv4 dst (network order), v4 keys only; zero for v6.
++ *   bytes 9..24  IPv6 src (16B), v6 keys only; zero for v4.
++ *   bytes 25..40 IPv6 dst (16B), v6 keys only; zero for v4.
++ *   byte  41     L4 proto.
++ *   bytes 42..43 L4 src port (network order).
++ *   bytes 44..45 L4 dst port (network order).
++ *
++ * Per-key family comes from dpaa_cc_key_to_hw()'s existing
++ * FMAN_PCD_CC_HW_F_IPV6 present bit (already correctly set from
++ * struct fman_cc_key.is_ipv6 -- that translation was already complete;
++ * only this packer and its EKFC/GEC producer were missing).
++ *
++ * Requires a CC-tree KeyGen scheme reconfigured for the same GEC-style
++ * generic extraction the ehash dual-lane scheme already uses (T-M6-8 V6-2,
++ * silicon de-risk on cc_test, not yet done) -- this function alone changes
++ * no behavior: nothing calls it, and cc_pack_key()/CC_KEY_SIZE above are
++ * untouched, so every existing (v4-only, shipped) CC-tree consumer is
++ * byte-identical.
++ */
++#define CC_KEY_SIZE_DUAL	46U
++#define CC_KEY_DUAL_FAMILY_V4	0x80U
++#define CC_KEY_DUAL_FAMILY_V6	0x40U
++
++static __maybe_unused void cc_pack_key_dual(void __iomem *match, u16 idx,
++					    const struct fman_pcd_cc_hw_key *k)
++{
++	u8 key[CC_KEY_SIZE_DUAL];
++	u8 msk[CC_KEY_SIZE_DUAL];
++	u8 *row;
++	bool is_v6 = !!(k->present & FMAN_PCD_CC_HW_F_IPV6);
++
++	memset(key, 0, sizeof(key));
++	memset(msk, 0, sizeof(msk));
++
++	key[0] = is_v6 ? CC_KEY_DUAL_FAMILY_V6 : CC_KEY_DUAL_FAMILY_V4;
++	msk[0] = 0xff;
++
++	if (is_v6) {
++		if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++			memcpy(&key[9], k->src_ip6, 16);
++			memset(&msk[9], 0xff, 16);
++		}
++		if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++			memcpy(&key[25], k->dst_ip6, 16);
++			memset(&msk[25], 0xff, 16);
++		}
++	} else {
++		if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++			memcpy(&key[1], &k->src_ip_be, 4);
++			msk[1] = msk[2] = msk[3] = msk[4] = 0xff;
++		}
++		if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++			memcpy(&key[5], &k->dst_ip_be, 4);
++			msk[5] = msk[6] = msk[7] = msk[8] = 0xff;
++		}
++	}
++
++	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
++		key[41] = k->proto;
++		msk[41] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
++		key[42] = (u8)(k->src_port_be & 0xff);
++		key[43] = (u8)(k->src_port_be >> 8);
++		msk[42] = msk[43] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
++		key[44] = (u8)(k->dst_port_be & 0xff);
++		key[45] = (u8)(k->dst_port_be >> 8);
++		msk[44] = msk[45] = 0xff;
++	}
++
++	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE_DUAL;
++	memcpy_toio((void __iomem *)row, key, CC_KEY_SIZE_DUAL);
++	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE_DUAL), msk, CC_KEY_SIZE_DUAL);
++}
++
+ /*
+  * Encode one leaf (result) action descriptor at AD row @idx - SDK-convergent
+  * RESULT AD (0115; SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
+@@ -665,3 +758,7 @@ int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_static_get_base);
++
++#if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
++#include "tests/fman_pcd_cc_dual_key_test.c"
++#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
+diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_dual_key_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_dual_key_test.c
+new file mode 100644
+index 000000000000..252e5ad1d427
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_dual_key_test.c
+@@ -0,0 +1,151 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * fman_pcd_cc_dual_key_test.c — T-M6-8 VLAN-v6 dual-lane CC key KUnit tests.
++ *
++ * Pins cc_pack_key_dual()'s exact byte layout against the same values
++ * ask_fe_build_key_dual() (ask.ko, ask_flow_offload.c) produces for
++ * equivalent input, so the two independently-compiled layers cannot
++ * silently drift apart. Also pins that the existing v4-only cc_pack_key()/
++ * CC_KEY_SIZE=16 path is untouched (V6-1 is purely additive).
++ *
++ * Included as a trailer at the end of fman_pcd_cc.c via
++ *   #if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
++ *   #include "tests/fman_pcd_cc_dual_key_test.c"
++ *   #endif
++ */
++#include <kunit/test.h>
++
++static void cc_dual_key_size_unchanged(struct kunit *test)
++{
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE, 16U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE_DUAL, 46U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V4, 0x80U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V6, 0x40U);
++}
++
++static void cc_dual_key_v4(struct kunit *test)
++{
++	struct fman_pcd_cc_hw_key k;
++	u8 *buf;
++	u8 *key, *msk;
++	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
++		0x80,				  /* [0]  family V4 */
++		0x0a, 0x00, 0x00, 0x01,		  /* [1..4]   src 10.0.0.1 */
++		0x0a, 0x00, 0x00, 0x02,		  /* [5..8]   dst 10.0.0.2 */
++		/* [9..40] v6 lanes: zero */
++		[41] = 6,			  /* proto TCP */
++		[42] = 0x04, [43] = 0xd2,	  /* sport 1234 */
++		[44] = 0x00, [45] = 0x50,	  /* dport 80 */
++	};
++
++	buf = kunit_kzalloc(test, 2 * CC_KEY_SIZE_DUAL, GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, buf);
++
++	memset(&k, 0, sizeof(k));
++	k.present = FMAN_PCD_CC_HW_F_SRC_IP | FMAN_PCD_CC_HW_F_DST_IP |
++		    FMAN_PCD_CC_HW_F_PROTO | FMAN_PCD_CC_HW_F_SRC_PORT |
++		    FMAN_PCD_CC_HW_F_DST_PORT;
++	k.src_ip_be = cpu_to_be32(0x0a000001);
++	k.dst_ip_be = cpu_to_be32(0x0a000002);
++	k.proto = 6;
++	k.src_port_be = cpu_to_be16(1234);
++	k.dst_port_be = cpu_to_be16(80);
++
++	cc_pack_key_dual((void __iomem *)buf, 0, &k);
++
++	key = buf;
++	msk = buf + CC_KEY_SIZE_DUAL;
++	KUNIT_EXPECT_MEMEQ(test, key, expect_key, CC_KEY_SIZE_DUAL);
++	/* Mask: 0xff at family + every present field, 0x00 elsewhere. */
++	KUNIT_EXPECT_EQ(test, msk[0], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[4], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[8], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[9], 0x00);   /* v6 lane wildcard */
++	KUNIT_EXPECT_EQ(test, msk[40], 0x00);
++	KUNIT_EXPECT_EQ(test, msk[41], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[45], 0xff);
++}
++
++static void cc_dual_key_v6(struct kunit *test)
++{
++	struct fman_pcd_cc_hw_key k;
++	u8 *buf;
++	u8 *key, *msk;
++	static const u8 src6[16] = {
++		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
++	};
++	static const u8 dst6[16] = {
++		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
++	};
++	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
++		0x40,				 /* [0] family V6 */
++		/* [1..8] v4 lane: zero */
++		[9]  = 0x20, [10] = 0x01, [11] = 0x0d, [12] = 0xb8,
++		[24] = 0x01,			 /* src6 tail */
++		[25] = 0x20, [26] = 0x01, [27] = 0x0d, [28] = 0xb8,
++		[40] = 0x02,			 /* dst6 tail */
++		[41] = 17,			 /* proto UDP */
++		[42] = 0x00, [43] = 0x35,	 /* sport 53 */
++		[44] = 0x14, [45] = 0xe9,	 /* dport 5353 */
++	};
++
++	buf = kunit_kzalloc(test, 2 * CC_KEY_SIZE_DUAL, GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, buf);
++
++	memset(&k, 0, sizeof(k));
++	k.present = FMAN_PCD_CC_HW_F_IPV6 | FMAN_PCD_CC_HW_F_SRC_IP |
++		    FMAN_PCD_CC_HW_F_DST_IP | FMAN_PCD_CC_HW_F_PROTO |
++		    FMAN_PCD_CC_HW_F_SRC_PORT | FMAN_PCD_CC_HW_F_DST_PORT;
++	memcpy(k.src_ip6, src6, 16);
++	memcpy(k.dst_ip6, dst6, 16);
++	k.proto = 17;
++	k.src_port_be = cpu_to_be16(53);
++	k.dst_port_be = cpu_to_be16(5353);
++
++	cc_pack_key_dual((void __iomem *)buf, 0, &k);
++
++	key = buf;
++	msk = buf + CC_KEY_SIZE_DUAL;
++	KUNIT_EXPECT_MEMEQ(test, key, expect_key, CC_KEY_SIZE_DUAL);
++	KUNIT_EXPECT_EQ(test, msk[0], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[1], 0x00);   /* v4 lane wildcard */
++	KUNIT_EXPECT_EQ(test, msk[8], 0x00);
++	KUNIT_EXPECT_EQ(test, msk[9], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[40], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[41], 0xff);
++	KUNIT_EXPECT_EQ(test, msk[45], 0xff);
++}
++
++static void cc_dual_key_row_stride(struct kunit *test)
++{
++	struct fman_pcd_cc_hw_key k;
++	u8 *buf;
++
++	/* idx=1 must land at byte offset 2*CC_KEY_SIZE_DUAL, not overlap row 0. */
++	buf = kunit_kzalloc(test, 2 * 2 * CC_KEY_SIZE_DUAL, GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, buf);
++
++	memset(&k, 0, sizeof(k));
++	k.present = FMAN_PCD_CC_HW_F_PROTO;
++	k.proto = 0xab;
++
++	cc_pack_key_dual((void __iomem *)buf, 1, &k);
++
++	KUNIT_EXPECT_EQ(test, buf[0], 0);				/* row 0 untouched */
++	KUNIT_EXPECT_EQ(test, buf[2 * CC_KEY_SIZE_DUAL + 0], CC_KEY_DUAL_FAMILY_V4);
++	KUNIT_EXPECT_EQ(test, buf[2 * CC_KEY_SIZE_DUAL + 41], 0xab);
++}
++
++static struct kunit_case fman_pcd_cc_dual_key_cases[] = {
++	KUNIT_CASE(cc_dual_key_size_unchanged),
++	KUNIT_CASE(cc_dual_key_v4),
++	KUNIT_CASE(cc_dual_key_v6),
++	KUNIT_CASE(cc_dual_key_row_stride),
++	{}
++};
++
++static struct kunit_suite fman_pcd_cc_dual_key_suite = {
++	.name = "fman_pcd_cc_dual_key",
++	.test_cases = fman_pcd_cc_dual_key_cases,
++};
++kunit_test_suite(fman_pcd_cc_dual_key_suite);
