@@ -1,0 +1,301 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: O/H frame injection + capture sink debugfs verbs (phase 1f)
+
+Phase 1f of the O/H-port re-enqueue infra (T-M6-8,
+plans/ASK2-VLAN-REARCH.md section 3, Option D). Phase 1e (0182,
+board-validated 2026-09-02) proved a QMan FQ can be scheduled onto the
+O/H port's own channel, but nothing has ever enqueued a frame into it
+-- the port has never actually processed anything. This closes that
+loop.
+
+Two new verbs on the existing fman_port_oh_test debugfs tool:
+
+- "capture_init" / "capture_fini" -- create/destroy ONE software-owned
+  sink FQ (QMAN_FQ_FLAG_NO_ENQUEUE, scheduled on this CPU's own
+  software portal channel via qman_affine_channel(), with a dqrr
+  callback that logs each arrival's fqid/status/length/address and
+  bumps a counter). Deliberately NOT reusing eth3/eth4's live kernel
+  RX default FQID (0x200/0x300, per earlier F-197 board notes) as the
+  observation point: dpaa_eth's RX handler expects every buffer
+  arriving on ITS OWN FQs to carry ITS OWN private per-buffer
+  bookkeeping (struct dpaa_eth_swbp etc.) at a fixed dpaa_bp-registered
+  headroom -- handing it a foreign, hand-rolled buffer from this debug
+  tool would have the RX handler misinterpret that region as driver
+  state, a real corruption/crash risk on a live production interface.
+  A fully separate, software-only sink FQ sidesteps that entirely:
+  this file owns 100% of the interpretation of whatever lands in it.
+  Teardown mirrors dpaa_eth.c's own dpaa_fq_free_entry() pattern
+  (qman_retire_fq -> qman_oos_fq -> qman_destroy_fq -> release_fqid)
+  for a scheduled consumer FQ -- phase 1e's unsched_fq() skips
+  retire/oos because that FQ is QMAN_FQ_FLAG_TO_DCPORTAL (hardware
+  consumer, not software-scheduled), a different class.
+
+- "inject <hw_port_id>" -- build one minimal 64-byte frame (broadcast
+  dst, dummy src, EtherType 0x0800; payload zeroed) in a kzalloc'd
+  buffer, dma_map_single() it against the O/H port's own device
+  (mirrors dpaa_eth.c's dpaa_tx() FD-building: qm_fd_clear_fd +
+  fd.bpid = 0xff (FSL_DPAA_BPID_INV, "not BMan-pool-owned, don't
+  auto-release") + qm_fd_set_contig + qm_fd_addr_set64), then
+  qman_enqueue() it into that port's phase-1e input FQ. Requires
+  sched_fq to have already run. The buffer is deliberately leaked (one
+  64-byte kzalloc per call, never freed/unmapped): there is no
+  completion signal back to this debug tool telling it when the O/H
+  port hardware has actually finished reading the buffer, so freeing
+  it here would be a genuine use-after-free -- an accepted, bounded
+  cost for a manual one-frame-at-a-time silicon de-risk tool, not
+  something a production path would ever do.
+
+Whether the injected frame's parse succeeds (-> dflt_fqid) or takes a
+parser gross-error (-> err_fqid) is not the point of this first test;
+"bringup"'s existing target_fqid_hex argument (0180) should point BOTH
+at the same capture_init sink so either outcome is observable.
+
+Full board-test sequence for the next session (not yet run):
+  capture_init                 # note the printed sink fqid
+  bringup 4 <sink_fqid_hex>    # both dflt_fqid and err_fqid -> sink
+  enable 4 1
+  sched_fq 4
+  inject 4
+  # check dmesg for "oh_test capture: frame #1 ..."; confirm no wedge
+  # (ping across eth3/eth4) throughout
+  unsched_fq 4
+  enable 4 0
+  capture_fini
+
+Upstream-Status: Inappropriate | Risk-Tier: A (new debug-only tool
+extending 0177/0180/0182's existing verbs; the sink FQ is entirely
+new and software-owned, the injected frame's buffer belongs to this
+tool alone, gated behind manual debugfs writes, no automatic wiring,
+RX/TX/existing TX FQ and phase-1e input-FQ paths untouched)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 202 +++++++++++++++++++++++++++++++
+ 1 file changed, 202 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 62e3b51..3e7d10f 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -14,6 +14,9 @@
+ #include <linux/of_address.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt_env.h>
++#include <linux/dma-mapping.h>
++#include <linux/atomic.h>
++#include <linux/smp.h>
+ #include <soc/fsl/qman.h>
+ #include <linux/debugfs.h>
+ #include <linux/err.h>
+@@ -2879,6 +2882,199 @@ static ssize_t fman_port_oh_test_unsched_fq(u8 port_id)
+ 	return 0;
+ }
+
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1f: close the loop on
++ * phase 1e's input FQ with an actual frame. Two new verbs:
++ *
++ * "capture_init" / "capture_fini" -- create/destroy ONE software-owned
++ * sink FQ (QMAN_FQ_FLAG_NO_ENQUEUE, scheduled on this CPU's own software
++ * portal channel via qman_affine_channel(), with a dqrr callback that
++ * just logs arrivals) completely decoupled from dpaa_eth's own RX FQs.
++ * Deliberately NOT reusing eth3/eth4's live kernel RX default FQID
++ * (0x200/0x300) as the observation point: dpaa_eth's RX handler expects
++ * every buffer arriving on its own FQs to carry its own private
++ * per-buffer bookkeeping (struct dpaa_eth_swbp etc.) at a fixed
++ * dpaa_bp-registered headroom -- handing it a foreign, hand-rolled
++ * buffer from this debug tool would misinterpret that region as driver
++ * state. A fully separate, software-only sink FQ has no such contract:
++ * this file owns 100% of the interpretation of whatever lands in it.
++ *
++ * "inject <hw_port_id>" -- build one minimal frame in a DMA-mapped
++ * buffer and qman_enqueue() it into that port's phase-1e input FQ.
++ * Requires sched_fq to have already run for the port. Does NOT require
++ * capture_init to have run first, but the injected frame's disposition
++ * (dflt_fqid/err_fqid, set by "bringup <port> [target_fqid_hex]") only
++ * lands somewhere observable if capture_init's printed sink fqid was
++ * passed as bringup's target_fqid_hex -- see this patch's commit
++ * message for the full board-test sequence.
++ */
++#define FMAN_PORT_OH_TEST_BPID_INV 0xff
++
++static struct {
++	struct qman_fq fq;
++	u32 fqid;
++	bool ready;
++	atomic_t rx_count;
++} fman_port_oh_capture;
++
++static enum qman_cb_dqrr_result
++fman_port_oh_capture_dqrr(struct qman_portal *portal, struct qman_fq *fq,
++			  const struct qm_dqrr_entry *dqrr, bool sched_napi)
++{
++	const struct qm_fd *fd = &dqrr->fd;
++	int count = atomic_inc_return(&fman_port_oh_capture.rx_count);
++
++	pr_info("fman_port: oh_test capture: frame #%d fqid=0x%x status=0x%x len=%d addr=0x%llx\n",
++		count, qman_fq_fqid(fq), be32_to_cpu(fd->status),
++		qm_fd_get_length(fd), (unsigned long long)qm_fd_addr(fd));
++	return qman_cb_dqrr_consume;
++}
++
++static ssize_t fman_port_oh_test_capture_init(void)
++{
++	struct qm_mcc_initfq initfq;
++	u32 fqid;
++	int err;
++
++	if (fman_port_oh_capture.ready)
++		return -EBUSY;
++
++	err = qman_alloc_fqid(&fqid);
++	if (err) {
++		pr_err("fman_port: oh_test capture_init: qman_alloc_fqid() = %d\n", err);
++		return err;
++	}
++
++	memset(&fman_port_oh_capture.fq, 0, sizeof(fman_port_oh_capture.fq));
++	fman_port_oh_capture.fq.fqid = fqid;
++	fman_port_oh_capture.fq.cb.dqrr = fman_port_oh_capture_dqrr;
++	err = qman_create_fq(fqid, QMAN_FQ_FLAG_NO_ENQUEUE, &fman_port_oh_capture.fq);
++	if (err) {
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test capture_init: qman_create_fq(0x%x) = %d\n",
++		       fqid, err);
++		return err;
++	}
++
++	memset(&initfq, 0, sizeof(initfq));
++	initfq.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ);
++	initfq.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
++	qm_fqd_set_destwq(&initfq.fqd, qman_affine_channel(raw_smp_processor_id()), 0);
++	err = qman_init_fq(&fman_port_oh_capture.fq, QMAN_INITFQ_FLAG_SCHED, &initfq);
++	if (err) {
++		qman_destroy_fq(&fman_port_oh_capture.fq);
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test capture_init: qman_init_fq(0x%x) = %d\n",
++		       fqid, err);
++		return err;
++	}
++
++	fman_port_oh_capture.fqid = fqid;
++	atomic_set(&fman_port_oh_capture.rx_count, 0);
++	fman_port_oh_capture.ready = true;
++	pr_info("fman_port: oh_test capture_init OK, sink fqid=0x%x\n", fqid);
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_capture_fini(void)
++{
++	u32 fqid;
++	int err;
++
++	if (!fman_port_oh_capture.ready)
++		return -ENODEV;
++
++	fqid = fman_port_oh_capture.fqid;
++	err = qman_retire_fq(&fman_port_oh_capture.fq, NULL);
++	if (err < 0)
++		pr_err("fman_port: oh_test capture_fini: qman_retire_fq(0x%x) = %d\n",
++		       fqid, err);
++	err = qman_oos_fq(&fman_port_oh_capture.fq);
++	if (err < 0)
++		pr_err("fman_port: oh_test capture_fini: qman_oos_fq(0x%x) = %d\n",
++		       fqid, err);
++	qman_destroy_fq(&fman_port_oh_capture.fq);
++	qman_release_fqid(fqid);
++	fman_port_oh_capture.ready = false;
++	pr_info("fman_port: oh_test capture_fini: sink fqid=0x%x released, saw %d frame(s)\n",
++		fqid, atomic_read(&fman_port_oh_capture.rx_count));
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_inject(u8 port_id)
++{
++	struct fman_port *port;
++	struct qm_fd fd;
++	dma_addr_t addr;
++	u8 *buf;
++	size_t len = 64;
++	int err;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++	if (!fman_port_oh_input_fq[port_id].ready) {
++		pr_err("fman_port: oh_test inject 0x%02x: no input FQ (run sched_fq first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port)
++		return -ENODEV;
++
++	/*
++	 * Deliberately leaked: this is a one-shot debug tool with no
++	 * completion signal back to this function, so freeing (or
++	 * dma_unmap'ing) this buffer here -- before the O/H port hardware
++	 * has necessarily finished reading it -- would be a genuine
++	 * use-after-free. A 64-byte leak per "inject" call is the accepted
++	 * cost of a manual, one-frame-at-a-time silicon de-risk tool.
++	 */
++	buf = kzalloc(len, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	/*
++	 * Minimal Ethernet header so the hard parser has something to
++	 * chew on: broadcast dst, dummy locally-administered src,
++	 * EtherType 0x0800 (IPv4). Payload left zeroed. Whether this
++	 * parses clean (-> dflt_fqid) or takes a parser gross-error
++	 * (-> err_fqid) is not the point of this test -- "bringup"'s
++	 * target_fqid_hex should point BOTH at the same capture_init sink
++	 * so either outcome is observable.
++	 */
++	memset(buf, 0xff, 6);
++	buf[6] = 0x02;
++	buf[11] = 0x01;
++	buf[12] = 0x08;
++	buf[13] = 0x00;
++
++	addr = dma_map_single(port->dev, buf, len, DMA_TO_DEVICE);
++	if (dma_mapping_error(port->dev, addr)) {
++		kfree(buf);
++		pr_err("fman_port: oh_test inject 0x%02x: dma_map_single() failed\n",
++		       port_id);
++		return -EIO;
++	}
++
++	qm_fd_clear_fd(&fd);
++	fd.bpid = FMAN_PORT_OH_TEST_BPID_INV;
++	qm_fd_set_contig(&fd, 0, len);
++	qm_fd_addr_set64(&fd, addr);
++
++	err = qman_enqueue(&fman_port_oh_input_fq[port_id].fq, &fd);
++	if (err) {
++		pr_err("fman_port: oh_test inject 0x%02x: qman_enqueue() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	pr_info("fman_port: oh_test inject 0x%02x OK, input fqid=0x%x addr=0x%llx len=%zu (watch dmesg for oh_test capture)\n",
++		port_id, fman_port_oh_input_fq[port_id].fqid,
++		(unsigned long long)addr, len);
++	return 0;
++}
++
+ static ssize_t fman_port_oh_test_write(struct file *file,
+ 				       const char __user *buf,
+ 				       size_t count, loff_t *ppos)
+@@ -2903,6 +3099,12 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 		err = fman_port_oh_test_sched_fq(port_id);
+ 	else if (sscanf(kbuf, "unsched_fq %hhu", &port_id) == 1)
+ 		err = fman_port_oh_test_unsched_fq(port_id);
++	else if (strcmp(kbuf, "capture_init") == 0)
++		err = fman_port_oh_test_capture_init();
++	else if (strcmp(kbuf, "capture_fini") == 0)
++		err = fman_port_oh_test_capture_fini();
++	else if (sscanf(kbuf, "inject %hhu", &port_id) == 1)
++		err = fman_port_oh_test_inject(port_id);
+ 	else
+ 		return -EINVAL;
+

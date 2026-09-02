@@ -394,3 +394,13 @@
 # frame; this is the piece that lets a frame actually reach it.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0182-fman-port-oh-input-fq.patch
+
+# Phase 1f: close the loop on phase 1e's input FQ with an actual frame.
+# New "capture_init"/"capture_fini" verbs create a software-owned sink FQ
+# (own dqrr callback, decoupled from dpaa_eth's own RX FQs -- injecting
+# into eth3/eth4's live kernel RX FQ would misinterpret this tool's
+# hand-rolled buffer as dpaa_eth's own per-buffer bookkeeping). New
+# "inject <port>" builds one minimal frame and qman_enqueue()s it into
+# the port's phase-1e input FQ. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0183-fman-port-oh-inject-capture.patch
