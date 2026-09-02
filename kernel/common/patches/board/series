@@ -454,3 +454,15 @@
 # (which itself depends on F_236.py). Not yet board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0188-fman-pcd-cc-hybrid-ekfc-gec-isolating.patch
+
+# T-M6-8 Option D phase 1h: O/H CC-tree AD-target de-risk. 0188's V6-2c
+# result proved CC-tree is EKFC-only (GEC never visible), closing the
+# door on CC-tree for IPv6; the vendor-bpid VLAN hypothesis is also now
+# confirmed dead (silicon-tested, falsified 2026-08-25). Pivots to
+# Option D (ehash classify -> OH-port HM edit), the vendor's actual
+# mechanism. Adds "cc_arm"/"cc_disarm" debugfs verbs exercising
+# fman_port_set_oh_cc_base() (0176, dormant) to test whether the O/H
+# port's phase-1g frame-loss (dequeues but never reaches FMBM_OFQID)
+# is fixed by giving it a CC-tree AD target. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0189-fman-port-oh-cc-arm-derisk.patch
