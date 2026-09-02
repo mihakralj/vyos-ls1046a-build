@@ -2112,6 +2112,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-224 46-byte dual-lane GEC key on AC_CC FE scheme"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_236.py" 2>&1
     echo "### fman_keygen.c/internal.h/pcd_kg.c: F-236 CC-tree dual-lane GEC opt-in (T-M6-8 VLAN-v6 V6-2)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_238.py" 2>&1
+    echo "### fman_keygen.c/internal.h/pcd_kg.c: F-238 CC-tree GEC ekfc-trigger isolating test (T-M6-8 VLAN-v6 V6-2c)"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic

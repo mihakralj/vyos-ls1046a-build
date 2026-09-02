@@ -442,3 +442,15 @@
 # board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0187-fman-pcd-cc-test-v4gec-isolating.patch
+
+# T-M6-8 VLAN-v6 V6-2c hybrid EKFC+GEC isolating experiment, added after
+# install_v6/install_v4gec's board-confirmed family-independent null
+# result (all-GEC, EKFC=0 composites are invisible to the CC-tree
+# comparator). Keeps KGSE_EKFC nonzero (PORT_ID-only, 0x80000000) instead
+# of zeroing it, via fman_pcd_kg_port_attach_cc_dual_ekfc() (companion
+# fixup F_238.py) and a new 47-byte PORT_ID-prefixed key packer
+# (cc_pack_key_dual_pid(), does not touch the proven cc_pack_key_dual()).
+# Adds "install_v6pid" cc_test verb. Depends on fixup F_238.py having run
+# (which itself depends on F_236.py). Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0188-fman-pcd-cc-hybrid-ekfc-gec-isolating.patch
