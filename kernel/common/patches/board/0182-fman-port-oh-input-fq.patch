@@ -1,0 +1,200 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: O/H input FQ scheduling debugfs verb (phase 1e)
+
+Phase 1e of the O/H-port re-enqueue infra (T-M6-8,
+plans/ASK2-VLAN-REARCH.md section 3, Option D) -- this track is the
+shared header-manipulation-reinject substrate the plan doc's section 7
+calls out as eventually needed for multicast replication and IPsec
+reinject, with VLAN as the first exerciser; it is a parallel
+infrastructure build alongside (not a replacement for) the already-
+shipped, gated-off Option A CC+HMTD VLAN path.
+
+Phases 1a-1d (0175-0181, board-validated 2026-09-01/02) got an O/H
+port probed, register-programmed, and FMBM_OCFG[EN]=1 armed -- but
+fully idle: nothing has ever fed it a frame, because nothing has ever
+scheduled a QMan FQ onto the O/H port's own dequeue channel (the
+init_bmi_oh() FMBM_OFDNE=NIA_ENG_QMI_DEQ setting from 0176 means the
+port dequeues from QMan, but there was no FQ scheduled for it to
+dequeue FROM).
+
+Building block already in place, unexpectedly: 0175 extended the
+vanilla driver's TX-only qman_channel_id lookup gate
+(`if (port_type == FMAN_PORT_TYPE_TX)` in fman_port_probe()) to also
+cover FMAN_PORT_TYPE_OH, because fman_get_qman_channel_id()'s
+rev>=6 port_ids[] table already listed the O/H hw port ids (0x2-0x7)
+alongside the RX/TX ones. So port->dts_params.qman_channel_id is
+already correctly populated for O/H ports today, exported via the
+existing fman_port_get_qman_channel_id() -- no new channel-discovery
+work needed, just a consumer.
+
+New debugfs verbs (same tool, /sys/kernel/debug/fman_port_oh_test/
+bringup):
+- "sched_fq <hw_port_id>" -- allocate a QMan FQID (qman_alloc_fqid),
+  create it QMAN_FQ_FLAG_TO_DCPORTAL (the O/H port is a hardware
+  DC-portal consumer, same class as a MAC TX port -- not a software
+  CPU portal), and schedule it (QMAN_INITFQ_FLAG_SCHED) onto the O/H
+  port's own channel via qm_fqd_set_destwq(channel, 0). This mirrors
+  ask_hw.c's dedicated_fq pattern byte-for-byte (P4.1, dedicated TX FQ
+  on channel 0x801) substituting fman_port_get_qman_channel_id(port)
+  for the hardcoded MAC10/eth4 TX channel. Requires the port already
+  configured (non-NULL bmi_regs, i.e. "bringup" already ran) --
+  scheduling an FQ onto an unconfigured port's channel id is
+  meaningless. Prints the allocated FQID: this becomes the O/H port's
+  "input FQID" a later CC-leaf FORWARD_FQ action would target.
+- "unsched_fq <hw_port_id>" -- qman_destroy_fq + qman_release_fqid,
+  mirroring ask_hw_pcd_teardown()'s P4.1 unwind exactly.
+
+One static per-O/H-port-id slot (array sized FMAN_PORT_TYPE_OH's hw id
+range 0x2-0x7, i.e. 8 entries indexed by port_id, matching the
+existing fman_port_oh_test_lookup() port_id space) holds the struct
+qman_fq + fqid + ready bool -- no dynamic allocation, no xarray,
+mirroring this tool's existing minimal-state style (0177/0180 use a
+plain list_for_each_entry lookup, no cache).
+
+Deliberately still does NOT touch the O/H port's CC-tree base
+(fman_port_set_oh_cc_base(), built in 0176, still has no debugfs
+exposure) and does NOT inject any frame into the new FQ. This step
+only proves the FQ can be created and scheduled onto a real O/H
+channel without a wedge, on an otherwise traffic-free FQ (nothing
+enqueues to it yet, so the O/H port's dequeue side stays idle even
+after sched_fq -- next step after this is a frame-injection verb).
+
+Not yet board-tested. Plan for the next board session: "bringup 4",
+"enable 4 1", "sched_fq 4", confirm no wedge and the reported FQID is
+sane (0x2-range, not 0 or an eth3/eth4 TX FQID collision), then
+"unsched_fq 4" + "enable 4 0" to leave the board clean.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (new debug-only tool
+extending 0177/0180's existing verbs; QMan FQ scheduled onto a
+previously-idle O/H channel that nothing else uses, gated behind a
+manual debugfs write, no automatic wiring, RX/TX/existing TX FQ paths
+untouched)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 99 +++++++++++++++++++++++
+ 1 file changed, 99 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 1dea6a0..d6774cd 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -14,6 +14,7 @@
+ #include <linux/of_address.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt_env.h>
++#include <soc/fsl/qman.h>
+ #include <linux/debugfs.h>
+ #include <linux/err.h>
+ #include <linux/kernel.h>
+@@ -2784,6 +2785,100 @@ static ssize_t fman_port_oh_test_enable(u8 port_id, unsigned int on)
+ 	return 0;
+ }
+
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1e: one QMan FQ slot per
++ * O/H hw port id (0x2-0x7). See fman_port_oh_test_sched_fq()/unsched_fq().
++ */
++static struct {
++	struct qman_fq fq;
++	u32 fqid;
++	bool ready;
++} fman_port_oh_input_fq[8];
++
++static ssize_t fman_port_oh_test_sched_fq(u8 port_id)
++{
++	struct fman_port *port;
++	struct qm_mcc_initfq initfq;
++	u32 channel, fqid;
++	int err;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++	if (fman_port_oh_input_fq[port_id].ready)
++		return -EBUSY;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test sched_fq 0x%02x: not configured yet (run bringup first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	channel = fman_port_get_qman_channel_id(port);
++	if (!channel) {
++		pr_err("fman_port: oh_test sched_fq 0x%02x: no qman channel id\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	err = qman_alloc_fqid(&fqid);
++	if (err) {
++		pr_err("fman_port: oh_test sched_fq 0x%02x: qman_alloc_fqid() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	memset(&fman_port_oh_input_fq[port_id].fq, 0,
++	       sizeof(fman_port_oh_input_fq[port_id].fq));
++	fman_port_oh_input_fq[port_id].fq.fqid = fqid;
++	err = qman_create_fq(fqid, QMAN_FQ_FLAG_TO_DCPORTAL,
++			      &fman_port_oh_input_fq[port_id].fq);
++	if (err) {
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test sched_fq 0x%02x: qman_create_fq(0x%x) = %d\n",
++		       port_id, fqid, err);
++		return err;
++	}
++
++	memset(&initfq, 0, sizeof(initfq));
++	initfq.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ);
++	initfq.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
++	qm_fqd_set_destwq(&initfq.fqd, channel, 0);
++	err = qman_init_fq(&fman_port_oh_input_fq[port_id].fq,
++			    QMAN_INITFQ_FLAG_SCHED, &initfq);
++	if (err) {
++		qman_destroy_fq(&fman_port_oh_input_fq[port_id].fq);
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test sched_fq 0x%02x: qman_init_fq(0x%x) ch=0x%x = %d\n",
++		       port_id, fqid, channel, err);
++		return err;
++	}
++
++	fman_port_oh_input_fq[port_id].fqid = fqid;
++	fman_port_oh_input_fq[port_id].ready = true;
++	pr_info("fman_port: oh_test sched_fq 0x%02x OK, input fqid=0x%x ch=0x%x\n",
++		port_id, fqid, channel);
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_unsched_fq(u8 port_id)
++{
++	u32 fqid;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++	if (!fman_port_oh_input_fq[port_id].ready)
++		return -ENODEV;
++
++	fqid = fman_port_oh_input_fq[port_id].fqid;
++	qman_destroy_fq(&fman_port_oh_input_fq[port_id].fq);
++	qman_release_fqid(fqid);
++	fman_port_oh_input_fq[port_id].ready = false;
++	pr_info("fman_port: oh_test unsched_fq 0x%02x: input fqid=0x%x released\n",
++		port_id, fqid);
++	return 0;
++}
++
+ static ssize_t fman_port_oh_test_write(struct file *file,
+ 				       const char __user *buf,
+ 				       size_t count, loff_t *ppos)
+@@ -2804,6 +2900,10 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 		err = fman_port_oh_test_bringup(kbuf, port_id);
+ 	else if (sscanf(kbuf, "enable %hhu %u", &port_id, &on) == 2)
+ 		err = fman_port_oh_test_enable(port_id, on);
++	else if (sscanf(kbuf, "sched_fq %hhu", &port_id) == 1)
++		err = fman_port_oh_test_sched_fq(port_id);
++	else if (sscanf(kbuf, "unsched_fq %hhu", &port_id) == 1)
++		err = fman_port_oh_test_unsched_fq(port_id);
+ 	else
+ 		return -EINVAL;
+
