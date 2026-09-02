@@ -1,0 +1,95 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: extend FM_CTL ctrl-params page to O/H ports
+
+0189's "cc_arm" verb failed on real hardware with
+fman_pcd_port_ensure_params_page() = -EINVAL. Root cause:
+fman_port_set_params_page() unconditionally rejects any port whose
+port_type != FMAN_PORT_TYPE_RX -- it was only ever wired for RX ports,
+even though the FM_CTL AC 0x28 PRE_BMI_ENQ_FRAME ucode requirement this
+page satisfies ("every CC result AD exits through" it, per the existing
+comment) is a general CC-dispatch requirement, not RX-specific -- and
+0189's cc_arm now arms exactly that dispatch mode (NIA_ENG_HWK|
+NIA_KG_CC_EN) on an O/H port for the first time.
+
+The O/H BMI register set already has the exact equivalents of every
+register this function touches: fmbm_ogpr (O/H General Purpose
+Register, mirrors fmbm_rgpr) and fmbm_ofsdm/fmbm_ofsem (O/H Frame
+Status Discard/Error Mask, mirrors fmbm_rfsdm/fmbm_rfsem) -- already
+defined in struct fman_port_oh_bmi_regs and already written elsewhere
+during O/H bring-up (set_oh_dflt_cfg()). This just completes the
+RX-only helper to branch on port_type and use the correct register set;
+RX behaviour is byte-identical (same fields, same order, same values).
+
+Verified via ~/kernel-git-cache/linux (canonical, series-through-0189)
++ git apply --check against a fresh HEAD checkout. Board-tested
+2026-09-02: cc_arm 0x04 failed with fman_pcd_port_ensure_params_page()
+= -22 on the pre-fix image; this is the fix, not yet re-tested.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (mechanical extension of
+an existing RX-only helper to a second port type using pre-existing
+register fields; RX code path unchanged, only a new O/H branch added)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 29 +++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index e6f6ef33a060..8ea8bb249010 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -2249,7 +2249,7 @@ EXPORT_SYMBOL_GPL(fman_port_get_params_page);
+ 
+ /**
+  * fman_port_set_params_page() - program the FM_CTL ctrl-params page (0116)
+- * @port:      the FMan RX port
++ * @port:      the FMan RX or O/H port
+  * @muram_off: MURAM byte offset of the zeroed 256-byte page
+  * @page:      ioremapped virtual address of that page
+  *
+@@ -2258,22 +2258,42 @@ EXPORT_SYMBOL_GPL(fman_port_get_params_page);
+  * FMBM_RGPR = page offset.  Required by the FM_CTL AC 0x28
+  * PRE_BMI_ENQ_FRAME ucode that every CC result AD exits through on
+  * A006675/SW006 silicon.  Caller zeroes the page.
++ *
++ * T-M6-8 Option D phase 1h: an O/H port arming a CC tree via
++ * fman_port_set_oh_cc_base() needs this same page, since NIA_ENG_HWK|
++ * NIA_KG_CC_EN dispatch also exits through the AC 0x28 ucode -- but the
++ * page setup was only ever wired for RX (fmbm_rfsdm/rfsem/rgpr). The
++ * O/H BMI register set has the exact same fields under different names
++ * (fmbm_ofsdm/ofsem/ogpr, already used elsewhere for O/H bring-up, e.g.
++ * set_oh_dflt_cfg()'s fmbm_ofsdm/ofsem writes) -- this just completes
++ * the RX-only helper to also cover O/H, RX behaviour unchanged.
+  */
+ int fman_port_set_params_page(struct fman_port *port, u32 muram_off,
+ 			      void __iomem *page)
+ {
+ 	u32 sdm, sem;
+ 
+-	if (!port || !page || port->port_type != FMAN_PORT_TYPE_RX)
++	if (!port || !page)
+ 		return -EINVAL;
+ 
+-	sdm = ioread32be(&port->bmi_regs->rx.fmbm_rfsdm);
+-	sem = ioread32be(&port->bmi_regs->rx.fmbm_rfsem);
++	if (port->port_type == FMAN_PORT_TYPE_RX) {
++		sdm = ioread32be(&port->bmi_regs->rx.fmbm_rfsdm);
++		sem = ioread32be(&port->bmi_regs->rx.fmbm_rfsem);
++	} else if (port->port_type == FMAN_PORT_TYPE_OH) {
++		sdm = ioread32be(&port->bmi_regs->oh.fmbm_ofsdm);
++		sem = ioread32be(&port->bmi_regs->oh.fmbm_ofsem);
++	} else {
++		return -EINVAL;
++	}
++
+ 	iowrite32be(FMAN_PP_MISC_ALWAYS_ON,
+ 		    (u32 __iomem *)((u8 __iomem *)page + FMAN_PP_MISC_OFF));
+ 	iowrite32be(sdm | sem,
+ 		    (u32 __iomem *)((u8 __iomem *)page + FMAN_PP_ERRDISC_OFF));
+-	iowrite32be(muram_off, &port->bmi_regs->rx.fmbm_rgpr);
++	if (port->port_type == FMAN_PORT_TYPE_RX)
++		iowrite32be(muram_off, &port->bmi_regs->rx.fmbm_rgpr);
++	else
++		iowrite32be(muram_off, &port->bmi_regs->oh.fmbm_ogpr);
+ 	port->ctrl_params_page = muram_off;
+ 
+ 	dev_info(port->dev,
