@@ -422,3 +422,13 @@
 # KUnit-covered (fman_pcd_cc_dual_key_test.c).
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0185-fman-pcd-cc-dual-lane-key-dormant.patch
+
+# T-M6-8 VLAN-v6 V6-2: wires 0185's cc_pack_key_dual() into
+# fman_pcd_cc_static_install() via a new dual_lane flag (default false,
+# byte-identical for every existing caller), fixes the CONT_LOOKUP
+# KeyLength field to use the tree's real key width instead of the global
+# v4 constant, and adds a cc_test "install_v6" debugfs verb for the
+# silicon de-risk. Depends on fixup F_236.py (bin/kernel-fixups/, KeyGen
+# GEC opt-in for CC-tree schemes) having run. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0186-fman-pcd-cc-dual-lane-install.patch
