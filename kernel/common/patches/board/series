@@ -413,3 +413,12 @@
 # Not yet board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0184-fman-port-oh-dump-diagnostics.patch
+
+# T-M6-8 VLAN-v6 V6-1 (first increment of extending Option A's shipped
+# CC-tree+HMTD VLAN offload from IPv4-only to IPv4+IPv6): dormant
+# cc_pack_key_dual(), a 46-byte family-discriminated CC-tree match key
+# mirroring ask.ko's already-proven ehash dual-lane key byte-for-byte.
+# Purely additive -- cc_pack_key()/CC_KEY_SIZE untouched, no caller yet.
+# KUnit-covered (fman_pcd_cc_dual_key_test.c).
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0185-fman-pcd-cc-dual-lane-key-dormant.patch
