@@ -404,3 +404,12 @@
 # the port's phase-1e input FQ. Not yet board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0183-fman-port-oh-inject-capture.patch
+
+# Phase 1g: read-only diagnostic after phase 1f's clean NULL result
+# (inject succeeded, capture saw 0 frames, no wedge). New "dump <port>"
+# reads back FMBM_OCFG/OFDNE/OFNE/OFPNE/OFQID/OEFQID/OCCB plus
+# qman_query_fq_np() on the input+capture FQs, to tell whether the O/H
+# port ever dequeued the injected frame at all vs. lost it downstream.
+# Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0184-fman-port-oh-dump-diagnostics.patch
