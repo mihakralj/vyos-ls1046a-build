@@ -432,3 +432,13 @@
 # GEC opt-in for CC-tree schemes) having run. Not yet board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0186-fman-pcd-cc-dual-lane-install.patch
+
+# T-M6-8 VLAN-v6 V6-2 isolating experiment, added after install_v6's
+# board-confirmed null result (F-236's GEC scheme reconfig genuinely
+# works, but a real v6 frame still misses the CC-tree comparator). Adds
+# "install_v4gec" -- identical GEC/EKFC=0 dual-lane machinery but a real
+# IPv4 5-tuple, to determine whether EKFC=0 sourcing itself (not width,
+# not v6-specific GEC codes) is what the comparator can't see. Not yet
+# board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0187-fman-pcd-cc-test-v4gec-isolating.patch
