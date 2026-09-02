@@ -466,3 +466,11 @@
 # is fixed by giving it a CC-tree AD target. Not yet board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0189-fman-port-oh-cc-arm-derisk.patch
+
+# 0189's cc_arm verb board-tested -22 (EINVAL) from
+# fman_pcd_port_ensure_params_page(): fman_port_set_params_page() was
+# RX-only, but O/H CC-tree dispatch exits through the same AC 0x28
+# ucode and needs the same params page. O/H already has the exact
+# register equivalents (fmbm_ogpr/ofsdm/ofsem); this wires them in.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0190-fman-port-oh-params-page.patch
