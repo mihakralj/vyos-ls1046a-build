@@ -1,0 +1,155 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: O/H register + FQ-state readback debugfs verb (phase 1g)
+
+Phase 1g of the O/H-port re-enqueue infra (T-M6-8,
+plans/ASK2-VLAN-REARCH.md section 3, Option D). Phase 1f (0183,
+board-tested 2026-09-02) produced a clean NULL result: capture_init +
+bringup 4 <sink> + enable 4 1 + sched_fq 4 + inject 4 all returned 0
+(qman_enqueue() accepted the frame into the O/H port's input FQ), but
+the capture sink never saw it arrive -- "capture_fini: ... saw 0
+frame(s)". No wedge, no crash, board stayed fully healthy throughout.
+
+That result narrows nothing on its own: qman_enqueue() succeeding only
+proves QMan accepted the frame into the software-owned input FQ, not
+that the O/H port ever dequeued it. This patch adds one read-only
+diagnostic verb to distinguish between three different failure
+classes before guessing at a fix:
+
+  (a) the O/H port never dequeued the frame at all (an FMBM_OCFG[EN]/
+      channel-id/scheduling problem)
+  (b) it dequeued the frame but lost it somewhere downstream in its
+      own BMI/parser/enqueue pipeline
+  (c) the "bringup"/"enable"/"sched_fq" writes didn't actually stick
+      the way this tool has been assuming
+
+New verb "dump <hw_port_id>":
+- Reads back the O/H port's own BMI config registers (FMBM_OCFG,
+  OFDNE, OFNE, OFPNE, OFQID, OEFQID, OCCB) directly via ioread32be --
+  confirms what's actually programmed on silicon right now, not just
+  what earlier writes believed they set. Rules in/out failure class
+  (c).
+- qman_query_fq_np() on the phase-1e input FQ (if sched_fq has run):
+  reports frm_cnt/state/byte_cnt. The decisive read: after an
+  "inject", frm_cnt still 1 means the O/H port never pulled the frame
+  off its channel (class a); frm_cnt back to 0 means it WAS dequeued
+  and the loss happened after that (class b).
+- The same query on the phase-1f capture sink FQ, for symmetry.
+
+Purely additive and read-only (no register writes, no FQ mutation) --
+safe to run at any point after "bringup", independent of whether
+sched_fq/capture_init have run yet (each half degrades gracefully with
+an informative message if its prerequisite verb hasn't been called).
+
+Board-test plan for the next session: repeat the phase 1f sequence
+(capture_init; bringup 4 <sink>; enable 4 1; sched_fq 4) then run
+"dump 4" BEFORE "inject 4" as a baseline (expect input frm_cnt=0), run
+"inject 4", then "dump 4" again immediately after -- the input FQ's
+frm_cnt in that second dump is the answer to which failure class this
+is.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (new debug-only,
+read-only diagnostic verb extending 0177/0180/0182/0183's existing
+tool; no register writes, no FQ mutation, gated behind a manual
+debugfs write, RX/TX/existing paths untouched)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 79 +++++++++++++++++++++++
+ 1 file changed, 79 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 3e7d10f..f2391ca 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -3075,6 +3075,83 @@ static ssize_t fman_port_oh_test_inject(u8 port_id)
+ 	return 0;
+ }
+
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1g: register + FQ-state
++ * readback, added after phase 1f's "inject" produced a clean NULL result
++ * (qman_enqueue() succeeded but the capture sink never saw the frame, no
++ * wedge). This does not guess at a fix -- it narrows which of three
++ * failure classes actually happened: (a) the O/H port never dequeued the
++ * frame at all (config/EN/channel problem), (b) it dequeued but the
++ * frame vanished downstream (BMI/parser/enqueue problem), or (c) the
++ * "bringup"/"enable"/"sched_fq" register writes did not stick the way
++ * this tool assumes.
++ *
++ * "dump <hw_port_id>" prints:
++ * - a raw readback of the O/H port's own BMI config registers (OCFG,
++ *   OFDNE, OFNE, OFPNE, OFQID, OEFQID, OCCB) -- confirms what's actually
++ *   programmed, not just what "bringup"/"enable" believed they wrote.
++ * - qman_query_fq_np() on the port's phase-1e input FQ (if sched_fq has
++ *   run): frm_cnt/state. If frm_cnt is still 1 after an "inject", the
++ *   O/H port never pulled the frame off its channel at all -- failure
++ *   class (a). If frm_cnt is 0, the port DID dequeue it and the frame
++ *   was lost somewhere after that -- failure class (b).
++ * - the same query on the phase-1f capture sink FQ (if capture_init has
++ *   run), for symmetry (expected empty/0 either way in the NULL-result
++ *   case already observed).
++ */
++static void fman_port_oh_test_dump_fq_np(const char *label, struct qman_fq *fq)
++{
++	struct qm_mcr_queryfq_np np;
++	int err;
++
++	err = qman_query_fq_np(fq, &np);
++	if (err) {
++		pr_info("fman_port: oh_test dump: %s fqid=0x%x query_fq_np() = %d\n",
++			label, qman_fq_fqid(fq), err);
++		return;
++	}
++	pr_info("fman_port: oh_test dump: %s fqid=0x%x state=0x%x frm_cnt=%u byte_cnt=%u\n",
++		label, qman_fq_fqid(fq), np.state, np.frm_cnt & 0xffffffU, np.byte_cnt);
++}
++
++static ssize_t fman_port_oh_test_dump(u8 port_id)
++{
++	struct fman_port *port;
++	struct fman_port_oh_bmi_regs __iomem *regs;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test dump 0x%02x: not configured yet (run bringup first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	regs = &port->bmi_regs->oh;
++	pr_info("fman_port: oh_test dump 0x%02x: OCFG=0x%08x OFDNE=0x%08x OFNE=0x%08x OFPNE=0x%08x OFQID=0x%08x OEFQID=0x%08x OCCB=0x%08x\n",
++		port_id,
++		ioread32be(&regs->fmbm_ocfg), ioread32be(&regs->fmbm_ofdne),
++		ioread32be(&regs->fmbm_ofne), ioread32be(&regs->fmbm_ofpne),
++		ioread32be(&regs->fmbm_ofqid), ioread32be(&regs->fmbm_oefqid),
++		ioread32be(&regs->fmbm_occb));
++
++	if (fman_port_oh_input_fq[port_id].ready)
++		fman_port_oh_test_dump_fq_np("input", &fman_port_oh_input_fq[port_id].fq);
++	else
++		pr_info("fman_port: oh_test dump 0x%02x: input FQ not scheduled (run sched_fq)\n",
++			port_id);
++
++	if (fman_port_oh_capture.ready)
++		fman_port_oh_test_dump_fq_np("capture", &fman_port_oh_capture.fq);
++	else
++		pr_info("fman_port: oh_test dump 0x%02x: capture sink not created (run capture_init)\n",
++			port_id);
++
++	return 0;
++}
++
+ static ssize_t fman_port_oh_test_write(struct file *file,
+ 				       const char __user *buf,
+ 				       size_t count, loff_t *ppos)
+@@ -3105,6 +3182,8 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 		err = fman_port_oh_test_capture_fini();
+ 	else if (sscanf(kbuf, "inject %hhu", &port_id) == 1)
+ 		err = fman_port_oh_test_inject(port_id);
++	else if (sscanf(kbuf, "dump %hhu", &port_id) == 1)
++		err = fman_port_oh_test_dump(port_id);
+ 	else
+ 		return -EINVAL;
+
