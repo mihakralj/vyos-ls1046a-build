@@ -40,7 +40,7 @@
     "F_216.py": "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c: F-216 add ratelimited zero-address FD guard before dma_unmap/phys_to_virt/headroom reads (logs status/format/BPID/offset/length/FQID, consumes without release), and remove obsolete F-072/F-170 be64 frame-data hash capture + normalize RXHASH braces. Image 2228 panic: addr=0 -> phys_to_virt(0)+hash_offset0x108 fault. Defensive/logging, not root malformed-FD fix.",
     "F_239.py": "fman_pcd.c/dpaa_eth.c: F-239 (T-M6-8 VLAN-v6 dig, 2026-09-03) adds a third, deliberately safer per-frame capture (synchronous only, no pointer stashed for later, unlike the removed F-072/F-170 diagnostic) after both ic_probe (TX-path pointer, crash-prone) and hash_probe (capture removed by F-216 after a zero-address-FD panic) turned out unusable. eth1-scoped only (sacrificial test port); captures a 176-byte window from parse-result base into a new probe2 debugfs node, to see whether the CC-tree dual-lane GEC composite (F-224/F-236/F-238) lands anywhere in the host-visible frame annotation. Must run after F-216 (anchors on its normalized RXHASH block); placed at the end of the fixup sequence for that reason."
   },
-  "count": 28,
+  "count": 29,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {},
   "removed_dead": [
