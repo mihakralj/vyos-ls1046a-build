@@ -346,4 +346,70 @@ open question is still §5's original one — what the CC-tree comparator
 actually reads — not the scheme-selection mechanism. CPID-based per-protocol
 selection is a legitimate but expensive-to-test alternative architecture, not
 a quick fix; log it as future work, not a near-term redirect.
+
+### 9.1 Same-session follow-up: chasing §5's open question, three more negatives, one real path forward
+
+Went looking for a way to observe the CC comparator's actual per-frame
+compare-window content (§5's still-open question) without new kernel code.
+Three checks, three clean negatives — each closes a real possibility rather
+than just failing:
+
+1. **`probe2`'s capture window (F-239) cannot see it, structurally, not just
+   by bad luck.** Traced the exact buffer-offset math
+   (`fman_sp_build_buffer_struct()`, `fman_sp.c`): `prs_result_offset` =
+   `vaddr + 0xE0` (16-byte-aligned `priv_data_size`), `hash_result_offset` =
+   `prs_result_offset + sizeof(fman_prs_result) + 8` = `vaddr + 0x108`
+   (matches F-216's constant exactly), and real frame data starts at
+   `prs_result_offset + DPAA_HWA_SIZE(48)` = `vaddr + 0x110` — i.e.
+   `probe2`'s window (`vaddr + hash_offset - 0x28` = `vaddr + 0xE0`) is
+   *exactly* the 48-byte parse-result/timestamp/hash-result region followed
+   by real frame bytes. This fully explains this session's earlier "dead
+   end" finding (offsets past ~+90 are stale buffer-reuse residue — that's
+   just past the real frame's actual length, nothing to do with IC/GEC
+   content). `struct fman_buffer_prefix_content` (`fman_sp.h`) exposes
+   exactly three copy options — `pass_prs_result`/`pass_hash_result`/
+   `pass_time_stamp` — and dpaa_eth.c requests all three and nothing else.
+   None of the three is the KeyGen/CC-tree extraction result. The vendor
+   SDK's own comment in `fman_sp_build_buffer_struct()` alludes to a second,
+   wider "all IC context (from AD) not including debug" copy mode — it was
+   never ported into this mainline-derived driver at all. No offset fix to
+   `probe2` can ever reach the CC comparator's input; the data structurally
+   never leaves the FMan into host-visible memory under the current
+   buffer-prefix configuration.
+
+2. **The `hash_result` slot can't be repurposed as a side channel either.**
+   It's populated by KeyGen's own `kgse_hc` ("Hash Command") register, which
+   drives the RSS-style FQID-distribution hash — a different hardware
+   function from GEC extraction, coincidentally reusing the word "hash".
+   `fman_keygen.c` (F-201) explicitly force-zeros `kgse_hc` for
+   `next_engine == 2 || next_engine == 3` ("only clear the hash-distribution
+   word for CC/FE exact-match schemes... the ehash terminal ignores FQID
+   distribution"), by design, unconditionally. CC-tree schemes never compute
+   or write anything into that slot. (Confirmed live this session too: the
+   `ASK2-DBG scheme2 hashing` dmesg line from cleanup showed `hc=0x00000000`.)
+
+3. **The dual-lane table-building code itself is not the bug.** Checked
+   whether `fman_pcd_cc.c`'s match-table infrastructure actually honors a
+   46/47-byte key end to end, or silently truncates to the original
+   `CC_KEY_SIZE=16` somewhere. It doesn't truncate: `t->key_size` is
+   correctly set to `CC_KEY_SIZE_DUAL`(46)/`CC_KEY_SIZE_DUAL_PID`(47) for
+   dual-lane trees, and every consumer (row stride `2*t->key_size`, the AD
+   `word0` `(key_size-1)<<24` extraction-size field) scales off that field,
+   not the constant. F-236/F-238's widening work holds up under a fresh
+   read. This rules out "the table only ever compared the first 16 bytes"
+   as an explanation for the three MISSes.
+
+**What's actually needed:** genuine new host-visible capture of IC offset
+`CC_IC_KG_KEY_OFFSET` (0x50) at the moment KeyGen writes it for a CC-tree
+scheme — which requires either (a) new buffer-prefix-content plumbing
+(request the vendor SDK's wider IC-copy mode, not currently exposed by
+`struct fman_buffer_prefix_content` in this driver at all), or (b) an FE-VM
+opcode that can copy internal workspace/IC bytes into the frame's enqueue
+context (the mechanism `decomp/fe-action-interpreter.md`'s ISA
+reverse-engineering effort would need to identify first — not yet
+established whether one exists). Both are materially larger, riskier
+changes than a debugfs capture node — new register/ISA-level work in the
+same silicon area that has already produced two kernel panics this project
+(`ic_probe`'s stale-pointer dereference, `hash_probe`'s zero-address-FD
+issue). Not started; needs its own scoped design pass before any board time.
   "IPv6 PATH DECISION".
