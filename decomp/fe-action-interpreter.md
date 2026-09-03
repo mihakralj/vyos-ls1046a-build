@@ -547,6 +547,81 @@ forensic history. It just no longer has any bearing on whether VLAN offload
 works, which this section answers directly: yes, confirmed on live silicon,
 today.
 
+## 2026-09-03 (cont'd) — the vendor's actual FmPortSetFESupport source, and the free-list array read live for the first time
+
+Pivoted to the still-open "why does the vendor's identical opcode chain
+sustain while ASK2's freezes" question. `.116` (the OpenWrt lab peer)
+confirmed via `dmesg` as running **the exact same microcode**
+(`FMan-Controller code (ver 210.10.1)`) as `.185` — rules out a
+microcode/firmware difference outright; whatever the asymmetry is, it's in
+the driver/software layer.
+
+### The real vendor structure, from source, not inference
+
+This repo has the actual NXP SDK patch (`/mnt/builds/ASK/patches/kernel/
+010-ask-fman-dpaa-ehash.patch`, `FmPortSetFESupport`) — the source the
+"5+tnums management index" naming was always inferred from, never actually
+read until now. It is a **byte-array free-list**, not a bare counter:
+
+```c
+totalNumOfTnums = p_FmPort->tasks.num + p_FmPort->tasks.extra;   // 16 here
+internalFEBufferPoolManagementIndexAddr =
+    FM_MURAM_AllocMem(muram, 5 + totalNumOfTnums, 4);
+// byte 0: cursor, initialized to 4; bytes 1-3: low bytes of the FE
+// buffer pool's own MURAM address (packed into the same word)
+// bytes 4..4+tnums-1: free-list of tnum indices 0..tnums-1
+// byte 4+tnums: 0xFF terminator
+```
+
+Also confirmed vendor's own `fill_actions()` (the *routed*-flow action
+builder in `cdx_ehash.c`, the same generator `fill_bridge_actions` shares
+its VLAN opcodes with) calls `insert_remove_vlan_hm`/`create_vlan_ins_hm`
+**completely unconditionally on IPv4 vs IPv6** — only the TTL/Hop-Limit step
+branches on family. So vendor's IPv6 VLAN support isn't some undiscovered
+OH-port mechanism; it's the identical inline-FE-VM-opcode `ehash` path,
+just also used for v6 because `ehash` keys can be wide (37 bytes, confirmed
+present as `ipv6_tcpudp_key`) where the CC-tree cannot. Adopting "the same
+mechanism as `.116`" for IPv6 means re-adopting the exact path already
+proven to freeze at 21 packets for IPv4 on this silicon.
+
+### Board patch 0192 — read the array live, for the first time ever
+
+Every prior session read only `fe_buffer`'s two params-page fields (`+0x54`
+pointer, `+0x58` depletion counter); nobody had dumped what `+0x54` points
+*at*. `kernel/common/patches/board/0192-fman-pcd-fe-buffer-mgmt-index-dump.patch`
+extends the existing `fe_buffer` debugfs show function with a read-only hex
+dump of the full `5+tnums`-byte array, gated on `+0x54` being non-zero (FE
+armed). Built via the normal CI pipeline (`dpaa1` run `33717144707`, 9m41s,
+patch applied clean — "Verify round-trip patch identity" raised no
+complaint against it), published to the `lxc200` artifact host, installed
+on `.185` as image `2026.09.03-0501-rolling`, board rebooted into it clean.
+
+First live read, both armed ports, board otherwise idle:
+
+```
+port 0x10: +0x54=0x00059100 +0x58=0x00000000 tnums=16
+  idx[0x59100] cursor=4: 04 05 70 00 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f ff
+port 0x11: +0x54=0x00056900 +0x58=0x00000000 tnums=16
+  idx[0x56900] cursor=4: 04 05 48 00 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f ff
+```
+
+Matches the vendor init code byte-for-byte: cursor `04`, pristine free-list
+`00..0f`, `ff` terminator. Confirms the recovered structure is right and the
+new debugfs read works correctly on real hardware.
+
+**Still blocked on the actual payoff** — capturing this array while a
+genuine plain-routed (non-VLAN) TCP/UDP flow is actively HW-hitting through
+the ehash/FE-VM path, to see the cursor move and (hopefully) return, would
+finally give a real "healthy" baseline to compare a reproduced freeze
+against. That needs a flow crossing eth3↔eth4 through actual L3 forwarding
+with a cooperating TCP/UDP endpoint on the eth4 side — the only live host
+there (`HELGA`, `10.99.2.16`) accepts ICMP but silently drops inbound TCP
+(Windows Firewall, matches prior sessions' finding), and ICMP was never
+HW-offloaded by ASK2's flowtable to begin with. The OpenWrt peer's own
+eth4 port isn't physically wired to that segment (confirmed this session).
+Unblocking this needs either HELGA's firewall opened / a listener started
+there, or another real host reachable from the DUT's eth4 side.
+
 ## Tooling added
 - `decomp/tools/fman-isa-xref.py` — field-level cross-reference: for a given
   word range, matches each blob word against the full 201-entry table in
