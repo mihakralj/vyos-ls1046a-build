@@ -991,3 +991,9 @@ workaround if the root mechanism proves hard to fix.
      - `kgse_gec[0] = 0x80F07B00` (was `0x80FF2004`)
    - Completely bypasses the metadata defect by utilizing the silicon's proven
      frame-header reading engine (which already extracts 5 of 6 fields bit-perfect).
+
+3. **2026-09-03 Live Silicon Discovery & Resolution on DUT (.185):**
+   - Live hardware captures on `2026.09.03-1835-rolling` confirmed that in AC_CC mode, GEC slot 0 emits `0x00` (silicon default register substitution `FMKG_GDV0R = 0x00`).
+   - Concurrently, live captures on both IPv4 and IPv6 proved that bytes `[1..45]` are extracted **100% bit-perfect** and the absent address lane is **deterministically zero-filled in hardware** (IPv4 produces 32 zeros in `[9..40]`; IPv6 produces 8 zeros in `[1..8]`).
+   - The CC-tree miss was caused entirely by `cc_pack_key_dual()` asserting `key[0] = 0x40/0x60` under `msk[0] = 0xff` while hardware emits `0x00`.
+   - Resolution: Set `CC_KEY_DUAL_FAMILY_V4 = 0x00U` and `CC_KEY_DUAL_FAMILY_V6 = 0x00U` (and `ASK_FE_FAMILY_V4/V6 = 0x00`), and assert mask `0xff` on the absent lane (requiring zeros). The key space is strictly disjoint, and hardware comparator matching succeeds.
