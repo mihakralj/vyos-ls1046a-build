@@ -834,3 +834,66 @@ still "does the composite even reach host memory," which is now answered.
 Full writeup with the RICP register design/safety rationale:
 `bin/kernel-fixups/F_240.py`. Board left clean (RICP restored, port
 detached, sink released, verified via dmesg before ending the session).
+
+## 2026-09-03 (same day, second follow-up): the "narrow exposure window" isn't narrow enough over the slow console relay — real, measured corruption, and the follow-up experiment is unreliable
+
+Attempted a follow-up test to isolate whether the FAMILY-byte defect above
+is specific to the hybrid EKFC+GEC mode: same RICP-widen technique, but
+arming the plain all-GEC `install_v6` scheme (EKFC=0, no PORT_ID byte)
+instead of `install_v6pid`. This surfaced an important safety correction
+to F-240's design, and the experiment's own result is not trustworthy.
+
+**What happened:** after `ricp_widen` + `install_v6`, three consecutive
+`probe2` reads came back byte-for-byte identical — including the
+timestamp bytes, which should differ per frame — proving no new frame was
+being captured at all, not that the composite was genuinely all-zero.
+Forcing fresh traffic (ping from the OpenWrt peer) didn't change the
+capture either. Checked port health directly: `ip -s link show eth1`
+showed **1413 RX errors out of 5831 packets (~24%)**, climbing, with
+`dmesg` flooding `net_ratelimit: N callbacks suppressed` — real,
+measured corruption of concurrent background traffic, exactly the
+mechanism F-240's own safety comment warned about (an skb built against
+the stale 48-byte headroom assumption once BMI's copy window is 96 bytes)
+but had not yet been observed to actually manifest at scale.
+
+**Root cause of the exposure-window failure**: each debugfs round-trip
+over the slow serial-console relay (`192.168.1.16:5555`) takes several
+seconds (login handshake + drain timeouts), and this experiment needed
+several sequential commands (`ricp_widen`, `install_v6`, three `probe2`
+reads, a fresh-traffic ping, a health check) before `ricp_restore` ran —
+the window was open for on the order of a minute or more, not the few
+seconds the design assumed. On a port with continuous real background
+broadcast traffic (mDNS/SSDP/ARP, as this eth1 segment has throughout this
+session), that's long enough to corrupt on the order of a thousand real
+frames.
+
+**Restoring immediately stopped it**: `ricp_restore` brought the error
+count to a hard stop (1512 errors both immediately after and ~15s later,
+vs. climbing before) and the `net_ratelimit` spam ceased entirely. No
+lasting damage — this is a live, transient, fully-reversible effect, not
+persistent corruption, and matches the "narrow exposure window" safety
+design's *intent* even though this particular sequence violated it in
+practice.
+
+**Consequence for this specific experiment: inconclusive, not negative.**
+The plain-GEC all-zero-looking capture cannot be trusted — it's the same
+stale buffer read three times, almost certainly predating (or coinciding
+with) the port's degraded state, not a genuine live capture of a
+successfully-processed frame's GEC output. It neither confirms nor refutes
+whether the FAMILY-byte defect is hybrid-EKFC-specific. **The earlier
+hybrid-mode result stands**: that capture's timestamp bytes were fresh
+each read, and 5 of 6 fields decoded to correct, verifiable real values
+(the exact mDNS multicast address, the exact mDNS port) — strong evidence
+that specific capture was clean, unlike this one.
+
+**Operational lesson for any future RICP-widen use**: this technique is
+not currently safe for a multi-step interactive session over the slow
+console relay on a port carrying real background traffic. Before trying
+again: either (a) do the whole widen→arm→send→capture→restore sequence
+as a single atomic kernel-side operation (no debugfs round-trips in
+between), or (b) run it on a port genuinely guaranteed to be idle for the
+full test duration, or (c) accept the corruption as a bounded, reversible
+cost and keep the window as short as achievable. Board is healthy now
+(errors stopped, port cleared, sink released) — this was a real but
+fully self-contained and recovered incident, not something requiring a
+reboot.

@@ -347,6 +347,21 @@ actually reads — not the scheme-selection mechanism. CPID-based per-protocol
 selection is a legitimate but expensive-to-test alternative architecture, not
 a quick fix; log it as future work, not a near-term redirect.
 
+**2026-09-03 correction, same day:** a follow-up test isolating whether the
+§9.2 FAMILY-byte defect is specific to the hybrid EKFC+GEC mode (arming the
+plain all-GEC `install_v6` instead) came back inconclusive, not negative —
+the RICP-widen exposure window, over the slow console relay's multi-second
+per-command round-trip, stayed open long enough to measurably corrupt real
+concurrent eth1 traffic (~1500 RX errors, confirmed causally: stopped
+climbing the instant `ricp_restore` ran). The three `probe2` reads during
+that window were byte-identical, stale-buffer reads, not fresh captures —
+untrustworthy. §9.2's hybrid-mode result stands (fresh timestamps each
+read, 5/6 fields independently verified correct); whether the defect is
+hybrid-specific remains open. Full incident writeup:
+`decomp/fe-action-interpreter.md` "2026-09-03 (same day, second
+follow-up)". Any future RICP-widen use needs a tighter (ideally
+single-round-trip) exposure window or a genuinely idle test port.
+
 ### 9.1 Same-session follow-up: chasing §5's open question, three more negatives, one real path forward
 
 Went looking for a way to observe the CC comparator's actual per-frame
