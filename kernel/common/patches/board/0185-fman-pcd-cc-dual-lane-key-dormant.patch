@@ -62,18 +62,18 @@ Upstream-Status: Inappropriate | Risk-Tier: A (new dormant function +
 KUnit-only test file; cc_pack_key()/CC_KEY_SIZE and every existing
 caller of fman_cc_tree_install() untouched, byte-identical)
 ---
- drivers/net/ethernet/freescale/fman/fman_pcd_cc.c | 99 +++++++++++++++++
+ drivers/net/ethernet/freescale/fman/fman_pcd_cc.c | 103 +++++++++++++++++++
  .../freescale/fman/tests/fman_pcd_cc_dual_key_test.c | 151 +++++++++++++++++++++++++++
- 2 files changed, 250 insertions(+)
+ 2 files changed, 254 insertions(+)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-index 030c35258b77..3b15eb3b54f5 100644
+index 030c35258b77..d73ec7d30985 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -277,6 +277,99 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+@@ -277,6 +277,104 @@ static void cc_pack_key(void __iomem *match, u16 idx,
  	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE), msk, CC_KEY_SIZE);
  }
-
+ 
 +/*
 + * T-M6-8 VLAN-v6: dual-lane 46-byte CC key packer, dormant (no caller yet).
 + *
@@ -110,8 +110,8 @@ index 030c35258b77..3b15eb3b54f5 100644
 + * byte-identical.
 + */
 +#define CC_KEY_SIZE_DUAL	46U
-+#define CC_KEY_DUAL_FAMILY_V4	0x40U
-+#define CC_KEY_DUAL_FAMILY_V6	0x60U
++#define CC_KEY_DUAL_FAMILY_V4	0x00U
++#define CC_KEY_DUAL_FAMILY_V6	0x00U
 +
 +static __maybe_unused void cc_pack_key_dual(void __iomem *match, u16 idx,
 +					    const struct fman_pcd_cc_hw_key *k)
@@ -128,6 +128,9 @@ index 030c35258b77..3b15eb3b54f5 100644
 +	msk[0] = 0xff;
 +
 +	if (is_v6) {
++		/* Enforce zero in IPv4 lane [1..8] */
++		memset(&msk[1], 0xff, 8);
++
 +		if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
 +			memcpy(&key[9], k->src_ip6, 16);
 +			memset(&msk[9], 0xff, 16);
@@ -145,6 +148,8 @@ index 030c35258b77..3b15eb3b54f5 100644
 +			memcpy(&key[5], &k->dst_ip_be, 4);
 +			msk[5] = msk[6] = msk[7] = msk[8] = 0xff;
 +		}
++		/* Enforce zero in IPv6 lane [9..40] */
++		memset(&msk[9], 0xff, 32);
 +	}
 +
 +	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
@@ -170,7 +175,7 @@ index 030c35258b77..3b15eb3b54f5 100644
  /*
   * Encode one leaf (result) action descriptor at AD row @idx - SDK-convergent
   * RESULT AD (0115; SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
-@@ -665,3 +758,7 @@ int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
+@@ -665,3 +763,7 @@ int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
  	return err;
  }
  EXPORT_SYMBOL_GPL(fman_pcd_cc_static_get_base);
@@ -180,7 +185,7 @@ index 030c35258b77..3b15eb3b54f5 100644
 +#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
 diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_dual_key_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_dual_key_test.c
 new file mode 100644
-index 000000000000..252e5ad1d427
+index 000000000000..c00cdc9c3a2f
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_dual_key_test.c
 @@ -0,0 +1,151 @@
@@ -205,8 +210,8 @@ index 000000000000..252e5ad1d427
 +{
 +	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE, 16U);
 +	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE_DUAL, 46U);
-+	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V4, 0x40U);
-+	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V6, 0x60U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V4, 0x00U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V6, 0x00U);
 +}
 +
 +static void cc_dual_key_v4(struct kunit *test)
@@ -215,7 +220,7 @@ index 000000000000..252e5ad1d427
 +	u8 *buf;
 +	u8 *key, *msk;
 +	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
-+		0x40,				  /* [0]  family V4 */
++		0x00,				  /* [0]  family V4 */
 +		0x0a, 0x00, 0x00, 0x01,		  /* [1..4]   src 10.0.0.1 */
 +		0x0a, 0x00, 0x00, 0x02,		  /* [5..8]   dst 10.0.0.2 */
 +		/* [9..40] v6 lanes: zero */
@@ -242,12 +247,12 @@ index 000000000000..252e5ad1d427
 +	key = buf;
 +	msk = buf + CC_KEY_SIZE_DUAL;
 +	KUNIT_EXPECT_MEMEQ(test, key, expect_key, CC_KEY_SIZE_DUAL);
-+	/* Mask: 0xff at family + every present field, 0x00 elsewhere. */
++	/* Mask: 0xff at family + every present field + absent lane zero-assert. */
 +	KUNIT_EXPECT_EQ(test, msk[0], 0xff);
 +	KUNIT_EXPECT_EQ(test, msk[4], 0xff);
 +	KUNIT_EXPECT_EQ(test, msk[8], 0xff);
-+	KUNIT_EXPECT_EQ(test, msk[9], 0x00);   /* v6 lane wildcard */
-+	KUNIT_EXPECT_EQ(test, msk[40], 0x00);
++	KUNIT_EXPECT_EQ(test, msk[9], 0xff);   /* v6 lane zero-assert */
++	KUNIT_EXPECT_EQ(test, msk[40], 0xff);
 +	KUNIT_EXPECT_EQ(test, msk[41], 0xff);
 +	KUNIT_EXPECT_EQ(test, msk[45], 0xff);
 +}
@@ -264,7 +269,7 @@ index 000000000000..252e5ad1d427
 +		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
 +	};
 +	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
-+		0x60,				 /* [0] family V6 */
++		0x00,				 /* [0] family V6 */
 +		/* [1..8] v4 lane: zero */
 +		[9]  = 0x20, [10] = 0x01, [11] = 0x0d, [12] = 0xb8,
 +		[24] = 0x01,			 /* src6 tail */
@@ -294,8 +299,8 @@ index 000000000000..252e5ad1d427
 +	msk = buf + CC_KEY_SIZE_DUAL;
 +	KUNIT_EXPECT_MEMEQ(test, key, expect_key, CC_KEY_SIZE_DUAL);
 +	KUNIT_EXPECT_EQ(test, msk[0], 0xff);
-+	KUNIT_EXPECT_EQ(test, msk[1], 0x00);   /* v4 lane wildcard */
-+	KUNIT_EXPECT_EQ(test, msk[8], 0x00);
++	KUNIT_EXPECT_EQ(test, msk[1], 0xff);   /* v4 lane zero-assert */
++	KUNIT_EXPECT_EQ(test, msk[8], 0xff);
 +	KUNIT_EXPECT_EQ(test, msk[9], 0xff);
 +	KUNIT_EXPECT_EQ(test, msk[40], 0xff);
 +	KUNIT_EXPECT_EQ(test, msk[41], 0xff);
@@ -335,3 +340,6 @@ index 000000000000..252e5ad1d427
 +	.test_cases = fman_pcd_cc_dual_key_cases,
 +};
 +kunit_test_suite(fman_pcd_cc_dual_key_suite);
+-- 
+2.39.5
+

@@ -77,26 +77,28 @@ ingress).
 ```text
 offset  size  field                         source (GEC header code)
 ------  ----  ----------------------------  ------------------------------
-0       1     FAMILY  (0x40 v4 / 0x80 v6)   parse-result L3R byte (0x20)
-1       8     V4_SRC(4) V4_DST(4)           validated IPv4 hdr @+12 (0x0b)
-9       16    V6_SRC(16)                    validated IPv6 hdr  @+8  (0x1b)
-25      16    V6_DST(16)                    validated IPv6 hdr  @+24 (0x1b)
+0       1     FAMILY (0x00)                 GEC slot 0 (0x00 in silicon)
+1..8    8     V4_SRC(4) V4_DST(4)           validated IPv4 hdr @+12 (0x0b)
+9..24   16    V6_SRC(16)                    validated IPv6 hdr  @+8  (0x1b)
+25..40  16    V6_DST(16)                    validated IPv6 hdr  @+24 (0x1b)
 41      1     PROTO / NEXTHDR               IP proto, no-validate (0x72)
-42      4     SPORT(2) DPORT(2)             L4, no-validate     (0x7e)
+42..45  4     SPORT(2) DPORT(2)             L4, no-validate     (0x7e)
 ------  ----
 46 bytes total  (KeyGen limit is 56; uses 6 of 8 GEC slots)
 ```
 
-- An **IPv4** frame fills FAMILY=0x40 (IP version 4 masked from L3 byte 0),
-  the V4 lane with its 8 address bytes, the two V6 lanes with zero (IPv6 header
-  absent → GEC zero default), PROTO, ports.
-- An **IPv6** frame fills FAMILY=0x60 (IP version 6 masked from L3 byte 0),
-  the V4 lane with zero (IPv4 header absent), both V6 lanes with its 32 address
+- An **IPv4** frame fills FAMILY=0x00, the V4 lane with its 8 address bytes,
+  the two V6 lanes with 32 deterministic zero bytes (IPv6 header absent → GEC
+  zero default), PROTO, ports.
+- An **IPv6** frame fills FAMILY=0x00, the V4 lane with 8 deterministic zero
+  bytes (IPv4 header absent → GEC zero default), both V6 lanes with its 32 address
   bytes, NEXTHDR, ports.
 
-Because FAMILY differs and the absent lanes are deterministic zeros, v4 and v6
-flows occupy **disjoint** key space in one table — no aliasing, one CRC-64
-bucket space, one comparator width.
+Because the absent address lane is deterministically zero-filled in silicon,
+the CC tree and ehash tables enforce disjointness by asserting mask `0xff` on
+the absent lane (asserting zeros). Thus, v4 and v6 flows occupy **strictly
+disjoint** key space in one table — no aliasing, one CRC-64 bucket space, one
+comparator width.
 
 ### 3.2 Why not the compact 39-byte `FAMILY|src16|dst16|proto|ports`
 
@@ -501,3 +503,37 @@ why `kgse_gec[0] = 0x80FF2004` (`HT=0x20/offset=4/size=1`) emitted `0x00`.
      - `kgse_gec[0] = 0x80F07B00` (was `0x80FF2004`)
    - This bypasses the metadata defect entirely and uses the silicon's proven
      frame-header reading engine (which already extracts 5 of 6 fields bit-perfect).
+
+### 9.4 2026-09-03 Live Silicon Findings on DUT (.185): Absent-Lane Zero Enforcement
+
+1. **Live Hardware Captures:**
+   - On image `2026.09.03-1835-rolling` (`6.18.48-vyos`), live packet captures on
+     both IPv4 (DHCP broadcast) and IPv6 (mDNS multicast) confirmed:
+     - 45 of 46 bytes (`[1..45]`) are extracted **bit-perfect** on hardware.
+     - The absent address lane is **deterministically zero-filled** in hardware
+       by the validated GEC address commands:
+       - IPv4 frame: bytes `[1..8]` carry IPv4 addresses; bytes `[9..40]` carry
+         exactly 32 zero bytes.
+       - IPv6 frame: bytes `[1..8]` carry exactly 8 zero bytes; bytes `[9..40]`
+         carry IPv6 addresses.
+   - GEC slot 0 in AC_CC mode substitutes the default value register (`0x00`)
+     for all incoming frames on this silicon/microcode revision.
+
+2. **Root Cause of CC Mismatch:**
+   - In `cc_pack_key_dual()`, software programmed `key[0] = 0x40` or `0x60`
+     under mask `0xff`, while silicon emits `0x00`.
+   - The hardware comparator evaluated `hw_key[0] (0x00) & msk[0] (0xff) != key[0]`,
+     causing every frame to miss.
+
+3. **Definitive Architectural Resolution:**
+   - Byte 0 is not required to discriminate family because the address lanes are
+     disjoint and zero-filled by silicon.
+   - Set `CC_KEY_DUAL_FAMILY_V4 = 0x00U` and `CC_KEY_DUAL_FAMILY_V6 = 0x00U` (and
+     `ASK_FE_FAMILY_V4 = 0x00`, `ASK_FE_FAMILY_V6 = 0x00`).
+   - In `cc_pack_key_dual()`, assert mask `0xff` on the absent lane:
+     - IPv4 rule: asserts `msk[9..40] = 0xff` (requiring the 32 zero bytes that
+       only an IPv4 frame produces).
+     - IPv6 rule: asserts `msk[1..8] = 0xff` (requiring the 8 zero bytes that
+       only an IPv6 frame produces).
+   - This aligns software with silicon reality, achieves strict key-space
+     disjointness, and eliminates the byte-0 mismatch in the CC comparator.

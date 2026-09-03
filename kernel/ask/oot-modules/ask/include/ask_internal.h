@@ -1109,8 +1109,8 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
  *   [42..45] L4 sport(2) dport(2)
  */
 #define ASK_FE_KEY_SIZE_DUAL 46
-#define ASK_FE_FAMILY_V4 0x80
-#define ASK_FE_FAMILY_V6 0x40
+#define ASK_FE_FAMILY_V4 0x00
+#define ASK_FE_FAMILY_V6 0x00
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE]);
 void ask_fe_build_key_v6(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE_V6]);
 void ask_fe_build_key_dual(const struct ask_flow_key *key,
