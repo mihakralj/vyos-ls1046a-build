@@ -8,7 +8,7 @@ table serve both families with NO parser LCV split (the LCV split is the
 D-1-proven dual-v6 wedge).
 
 46-byte key layout (GEC concatenation order):
-  [0]    FAMILY   parse-result L3R byte4 (0x80 v4 / 0x40 v6)   gec=0x80FF2004
+  [0]    FAMILY   L3 header byte 0 masked 0xF0 (0x40 v4 / 0x60 v6) gec=0x80F07B00
   [1..8] IPv4 src+dst @ IP hdr +12, VALIDATED code 0x0b        gec=0x87FF0B0C
   [9..24]  IPv6 src @ IP6 hdr +8,  VALIDATED code 0x1b         gec=0x8FFF1B08
   [25..40] IPv6 dst @ IP6 hdr +24, VALIDATED code 0x1b         gec=0x8FFF1B18
@@ -69,12 +69,13 @@ new = (
     "\t\t * one per-port table (no parser LCV split). EKFC=0 => no known\n"
     "\t\t * fields, key is purely the concatenated GEC outputs. VALIDATED\n"
     "\t\t * IPv4(0x0b)/IPv6(0x1b) address codes zero-fill the absent family's\n"
-    "\t\t * lane from the (zeroed) default register. gec: [0]=family PR byte4,\n"
-    "\t\t * [1]=v4 src+dst@+12, [2]=v6 src@+8, [3]=v6 dst@+24, [4]=proto,\n"
-    "\t\t * [5]=L4 ports. RSS/policer/CCBS schemes are untouched. */\n"
+    "\t\t * lane from the (zeroed) default register. gec: [0]=family L3 byte 0\n"
+    "\t\t * (0x7b msk 0xF0: 0x40 v4 / 0x60 v6), [1]=v4 src+dst@+12, [2]=v6 src@+8,\n"
+    "\t\t * [3]=v6 dst@+24, [4]=proto, [5]=L4 ports. RSS/policer/CCBS schemes\n"
+    "\t\t * are untouched. */\n"
     "\t\tif (scheme->next_engine == 3) {\n"
     "\t\t\tscheme_regs.kgse_ekfc = 0;\n"
-    "\t\t\tscheme_regs.kgse_gec[0] = 0x80FF2004;\n"
+    "\t\t\tscheme_regs.kgse_gec[0] = 0x80F07B00;\n"
     "\t\t\tscheme_regs.kgse_gec[1] = 0x87FF0B0C;\n"
     "\t\t\tscheme_regs.kgse_gec[2] = 0x8FFF1B08;\n"
     "\t\t\tscheme_regs.kgse_gec[3] = 0x8FFF1B18;\n"
