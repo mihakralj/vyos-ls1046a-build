@@ -35,6 +35,18 @@ that port, not just a wasted read. Restore immediately after the capture.
 Sacrificial test port only (0x0d/eth1 throughout this investigation), never
 eth0/management, never eth3/eth4 production.
 
+CONFIRMED, not just theoretical (2026-09-03, same-day follow-up): a
+multi-command interactive session over the slow serial-console relay left
+the window open long enough (~a minute, several sequential debugfs
+round-trips) to measurably corrupt real eth1 background traffic -- ~1500
+RX errors accumulated (ip -s link show eth1), climbing, with dmesg
+flooding net_ratelimit warnings; stopped instantly and cleanly on
+ricp_restore. Fully reversible, no lasting damage, no reboot needed -- but
+treat every widen/restore pair as one atomic, fast operation (ideally a
+single round-trip), not a sequence of separate interactive commands, on
+any port carrying real traffic. Full incident: decomp/fe-action-interpreter.md
+"2026-09-03 (same day, second follow-up)".
+
 Sections:
   1. fman_port.h: declare fman_port_widen_ricp()/fman_port_restore_ricp().
   2. fman_port.c: implement them, anchored after fman_port_clear_lcv_split()
