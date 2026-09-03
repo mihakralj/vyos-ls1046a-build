@@ -110,8 +110,8 @@ index 030c35258b77..3b15eb3b54f5 100644
 + * byte-identical.
 + */
 +#define CC_KEY_SIZE_DUAL	46U
-+#define CC_KEY_DUAL_FAMILY_V4	0x80U
-+#define CC_KEY_DUAL_FAMILY_V6	0x40U
++#define CC_KEY_DUAL_FAMILY_V4	0x40U
++#define CC_KEY_DUAL_FAMILY_V6	0x60U
 +
 +static __maybe_unused void cc_pack_key_dual(void __iomem *match, u16 idx,
 +					    const struct fman_pcd_cc_hw_key *k)
@@ -205,8 +205,8 @@ index 000000000000..252e5ad1d427
 +{
 +	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE, 16U);
 +	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE_DUAL, 46U);
-+	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V4, 0x80U);
-+	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V6, 0x40U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V4, 0x40U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V6, 0x60U);
 +}
 +
 +static void cc_dual_key_v4(struct kunit *test)
@@ -215,7 +215,7 @@ index 000000000000..252e5ad1d427
 +	u8 *buf;
 +	u8 *key, *msk;
 +	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
-+		0x80,				  /* [0]  family V4 */
++		0x40,				  /* [0]  family V4 */
 +		0x0a, 0x00, 0x00, 0x01,		  /* [1..4]   src 10.0.0.1 */
 +		0x0a, 0x00, 0x00, 0x02,		  /* [5..8]   dst 10.0.0.2 */
 +		/* [9..40] v6 lanes: zero */
@@ -264,7 +264,7 @@ index 000000000000..252e5ad1d427
 +		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
 +	};
 +	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
-+		0x40,				 /* [0] family V6 */
++		0x60,				 /* [0] family V6 */
 +		/* [1..8] v4 lane: zero */
 +		[9]  = 0x20, [10] = 0x01, [11] = 0x0d, [12] = 0xb8,
 +		[24] = 0x01,			 /* src6 tail */

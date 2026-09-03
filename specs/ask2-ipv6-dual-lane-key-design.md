@@ -87,10 +87,12 @@ offset  size  field                         source (GEC header code)
 46 bytes total  (KeyGen limit is 56; uses 6 of 8 GEC slots)
 ```
 
-- An **IPv4** frame fills FAMILY=0x40, the V4 lane with its 8 address bytes, the
-  two V6 lanes with zero (IPv6 header absent → GEC zero default), PROTO, ports.
-- An **IPv6** frame fills FAMILY=0x80, the V4 lane with zero (IPv4 header absent),
-  both V6 lanes with its 32 address bytes, NEXTHDR, ports.
+- An **IPv4** frame fills FAMILY=0x40 (IP version 4 masked from L3 byte 0),
+  the V4 lane with its 8 address bytes, the two V6 lanes with zero (IPv6 header
+  absent → GEC zero default), PROTO, ports.
+- An **IPv6** frame fills FAMILY=0x60 (IP version 6 masked from L3 byte 0),
+  the V4 lane with zero (IPv4 header absent), both V6 lanes with its 32 address
+  bytes, NEXTHDR, ports.
 
 Because FAMILY differs and the absent lanes are deterministic zeros, v4 and v6
 flows occupy **disjoint** key space in one table — no aliasing, one CRC-64
@@ -120,14 +122,14 @@ HT "generic code" bytes (`fm_kg.h:88-129`): parse-result `0x20`, IPv4-validated
 
 Concrete dual-lane commands:
 
-| Lane | HT | size | off | gec (BE) |
-|---|---|---|---|---|
-| FAMILY (parse-result L3R byte 4) | 0x20 | 1 | 4 | `0x80FF2004` |
-| IPv4 src+dst @ IPhdr+12 (validated) | 0x0b | 8 | 12 | `0x87FF0B0C` |
-| IPv6 src @ IP6hdr+8 (validated) | 0x1b | 16 | 8 | `0x8FFF1B08` |
-| IPv6 dst @ IP6hdr+24 (validated) | 0x1b | 16 | 24 | `0x8FFF1B18` |
-| proto/nexthdr (IP_PID_NO_V) | 0x72 | 1 | 0 | `0x80FF7200` |
-| L4 src+dst (L4_NO_V) | 0x7e | 4 | 0 | `0x83FF7E00` |
+| Lane | HT | size | off | mask | gec (BE) |
+|---|---|---|---|---|---|
+| FAMILY (L3 header byte 0, masked IP version) | 0x7b | 1 | 0 | 0xF0 | `0x80F07B00` |
+| IPv4 src+dst @ IPhdr+12 (validated) | 0x0b | 8 | 12 | 0xFF | `0x87FF0B0C` |
+| IPv6 src @ IP6hdr+8 (validated) | 0x1b | 16 | 8 | 0xFF | `0x8FFF1B08` |
+| IPv6 dst @ IP6hdr+24 (validated) | 0x1b | 16 | 24 | 0xFF | `0x8FFF1B18` |
+| proto/nexthdr (IP_PID_NO_V) | 0x72 | 1 | 0 | 0xFF | `0x80FF7200` |
+| L4 src+dst (L4_NO_V) | 0x7e | 4 | 0 | 0xFF | `0x83FF7E00` |
 
 ### 3.4 Absent-header zero-fill — RESOLVED (must use VALIDATED codes)
 
@@ -464,14 +466,38 @@ from software, yet extracts the wrong value.
 **This resolves §5/§9.1's core open question.** GEC composites do reach
 host-visible memory (once RICP is widened); the byte *positions* in the
 software model are correct for 5 of 6 fields — refuting any "wrong layout
-entirely" hypothesis. What remains is one narrow, concrete defect: why the
-`HT=0x20/offset=4/size=1` GEC command doesn't extract the byte at the
-location its own configuration points to. Candidate: the GEC engine's
-live in-pipeline parse-result register may not share the same byte layout
-as the post-hoc host-DMA-copied `struct fman_prs_result` despite both
-notionally describing "the same" parser output — unverified, next scoped
-question. This is real, reproducible, board-observed progress, not
-another dead end — the first time this project has directly observed the
-CC comparator's actual input rather than inferring it. Board left clean
-(RICP restored, port detached, sink released, dmesg-verified).
-  "IPv6 PATH DECISION".
+entirely" hypothesis. What remained was the FAMILY-byte extraction defect:
+why `kgse_gec[0] = 0x80FF2004` (`HT=0x20/offset=4/size=1`) emitted `0x00`.
+
+### 9.3 2026-09-03 Defect Resolution: `HT=0x20` Root Cause & `HT=0x7b` Solution
+
+1. **Root Cause of `0x20` Failure:**
+   - DPAA RM §5.10.3.12.9 (Table 5-380, p. 5-443) documents that `HT=7'h20`
+     extracts from a 35-byte address space (`EO[2:7]=0x00..0x1F` for the 32-byte
+     Parse Result, `0x20..0x22` for the 3-byte FQID in `IC[AD]`). This matches
+     vendor `fman_kg.c:201-213`.
+   - In Table 5-380, code `0x20` lacks the `0x70` unvalidated flag. In AC_CC
+     scheme mode (`kgse_mode = 0x80000006`), if KeyGen evaluates generic
+     extraction from `0x20` as unfulfilled or invalid, it silently substitutes
+     the configured default register (`DV=00` -> `FMKG_GDV0R` = `0x00`).
+   - The vendor never uses `0x20` for classifier keys (only for FQID `extractedOrs`
+     at offset 0 or CAPWAP reassembly at offset 20).
+
+2. **The `HT=0x7b` (`L3_NO_V`) Solution:**
+   - Rather than extracting non-header metadata, the family discriminator is
+     extracted directly from Layer 3 header byte 0.
+   - Every IPv4 header begins with `Version = 4` (byte 0 = `0x45` or `0x4x`).
+   - Every IPv6 header begins with `Version = 6` (byte 0 = `0x60` or `0x6x`).
+   - Code `0x7b` (`KG_SCH_GEN_L3_NO_V`) extracts relative to `IPOffset_1`
+     without validation.
+   - Programming `kgse_gec[0] = 0x80F07B00` (VALID=1, DEF=0, SIZE=1, MASK=0xF0,
+     HT=0x7b, OFFSET=0) extracts byte 0 and resets the low nibble:
+     - IPv4 frame: `0x45 & 0xF0 = 0x40`.
+     - IPv6 frame: `0x60 & 0xF0 = 0x60`.
+     - Non-IP frame (ARP): `IPOffset_1 = 0xFF` -> default substitute `0x00`.
+   - Software contract update:
+     - `CC_KEY_DUAL_FAMILY_V4 = 0x40` (was `0x80`)
+     - `CC_KEY_DUAL_FAMILY_V6 = 0x60` (was `0x40`)
+     - `kgse_gec[0] = 0x80F07B00` (was `0x80FF2004`)
+   - This bypasses the metadata defect entirely and uses the silicon's proven
+     frame-header reading engine (which already extracts 5 of 6 fields bit-perfect).
