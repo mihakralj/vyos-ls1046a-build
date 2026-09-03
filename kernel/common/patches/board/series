@@ -502,3 +502,19 @@
 # correlated between a sustaining routed flow and a freezing VLAN flow.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0192-fman-pcd-fe-buffer-mgmt-index-dump.patch
+
+# T-M6-8 VLAN-v6 dig: the dual-lane CC-tree experiments (0185-0188) all
+# board-tested a clean MISS -- KeyGen's GEC registers reprogram correctly
+# (byte-for-byte identical to the proven ehash dual-lane extraction) but
+# a real matching frame never reaches the CC-tree comparator. Both
+# existing capture facilities (ic_probe, hash_probe) turned out to be
+# dead -- ic_probe captures the TX path by mistake and crashes on read;
+# hash_probe's capture was removed by F-216 after it panicked on a
+# zero-address FD. Adds a third, deliberately safer one: synchronous
+# capture only (no pointer stashed for later), eth1-scoped, right after
+# the existing proven-safe mainline RX-hash dereference. New read-only
+# debugfs node fman_pcd/0/probe2 hex-dumps a 176-byte window from
+# parse-result base, to see directly whether GEC's extracted composite
+# lands anywhere in the host-visible frame annotation at all.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0193-fman-pcd-probe2-cc-capture.patch
