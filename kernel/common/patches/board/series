@@ -489,3 +489,16 @@
 # cc_arm/cc_disarm. Not yet board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0191-fman-port-oh-cc-gaps.patch
+
+# T-M6-8 VLAN-freeze dig: fe_buffer already exposes the two params-page
+# fields (+0x54 pointer, +0x58 depletion counter) for the FE per-port
+# "5+tnums management index", but nobody had ever dumped what +0x54
+# actually points at. Recovered the real vendor layout from NXP SDK
+# source in this repo (ASK/patches/kernel/010-ask-fman-dpaa-ehash.patch,
+# FmPortSetFESupport): it's a byte-array free-list (cursor byte + packed
+# pool-offset bytes + a literal list of free tnum indices + 0xFF
+# terminator), not a bare counter. Adds one read-only hex-dump line per
+# armed port to fe_buffer so the free-list's live cursor/contents can be
+# correlated between a sustaining routed flow and a freezing VLAN flow.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0192-fman-pcd-fe-buffer-mgmt-index-dump.patch
