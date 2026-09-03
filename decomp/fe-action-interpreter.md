@@ -666,3 +666,84 @@ untouched, or it's the VLAN path's problem specifically.
   w9055/w9307 = `0x02010000` (ENQ const) exactly as findings.md records. Lets the
   enq_builder island be decoded without a full Ghidra install (Ghidra was wiped
   with `/tmp/kilo`; blob re-fetched from board mtd3 this session).
+
+## 2026-09-03: V6-2c hybrid EKFC+GEC live probe — `probe2` capture window is not usable as built, and the armed test never matched
+
+Deployed patch `0192` (5+tnums array dump, see above) plus a new fixup
+`F-239` (`probe2`, a synchronous eth1-scoped 176-byte raw capture off the
+F-216 RXHASH block, `vaddr + hash_offset - 0x28`) specifically to observe
+whether F-224/F-236/F-238's 46-byte dual-lane GEC composite lands anywhere
+in host-visible frame annotation, and if so at what offset relative to
+`CC_IC_KG_KEY_OFFSET` (0x50).
+
+Armed a V6-2c hybrid EKFC+GEC dual-lane CC key on sacrificial port `0x0d`
+(`install_v6pid`, src `fe80::eaf6:d7ff:fe00:16aa:33333` -> dst
+`fe80::eaf6:d7ff:fe00:1601:44444`, proto 17), confirmed live via dmesg
+(`CC base 0x59600 -> fqid 0x2ba`). Sent the matching UDP6 frame from the
+OpenWrt peer (`.116`, real interface, real source address). `socat`
+reported `Connection refused` (ICMPv6 port-unreachable came back), and
+`capture_fini` afterward reported **`saw 0 frame(s)`** at the sink FQID —
+the frame took the normal RX path, not the armed dual-lane match. This is
+itself informative: for this specific 5-tuple/config the dual-lane CC key
+did not hit, consistent with the standing "GEC dual-lane widened to
+CC-tree, still MISSes" result already recorded for V6-2/V6-2c elsewhere in
+this investigation.
+
+Separately, three `probe2` reads (retried in a tight send+read race against
+background eth1 traffic) initially looked promising: try 3's window
+contained, at byte offset +138, a bit-perfect 16-byte match for our test
+source address (`fe80:0000:0000:0000:eaf6:d7ff:fe00:16aa`), immediately
+followed by what looked like a truncated second lane (`fe80::` prefix then
+16 zero bytes, where the real 16-byte destination should have been) — an
+initially exciting "found the dual-lane truncation bug" candidate.
+
+**This does not hold up and should not be treated as a finding about GEC.**
+Cross-referencing all three captures killed it:
+
+- The real Ethernet frame in each capture starts at a fixed window offset
+  (+48, right after a ~48-byte parse-result-style header whose EtherType
+  lands at +60 instead of the normal +12 — the window's first ~48 bytes are
+  FMan parse-result/metadata, not raw frame bytes).
+- The captured frames themselves in all three tries were unrelated
+  background traffic (ARP requests, an mDNS/Bonjour packet), not our test
+  frame — confirming `probe2`'s 176-byte capture radius is far larger than
+  any actual frame + parse-result on this traffic (ARP/mDNS frames are
+  <90 bytes total), so everything past roughly window offset +90-110 in
+  every capture is **uninitialized DMA-buffer reuse residue from whatever
+  frame previously occupied that ring slot**, unrelated to the frame the
+  capture nominally describes.
+- Try 2's tail region (offset +112 to +176, the *same* offset range as try
+  3's "match") contained a completely unrelated JSON fragment
+  (`"chipCap":1,"fa...`) — proving that region varies frame-to-frame with
+  arbitrary prior content, not with anything the current frame's KeyGen/CC
+  processing wrote.
+- The address that "matched" in try 3, `fe80::eaf6:d7ff:fe00:16aa`, is not
+  an arbitrary test value — it's the OpenWrt peer's own real SLAAC
+  link-local address (EUI-64 from its actual eth1 MAC `e8:f6:d7:00:16:aa`,
+  confirmed via the ARP capture in try 2), which is broadcast constantly in
+  ordinary ND/mDNS background traffic on that link. Its "intact" appearance
+  is exactly what plain buffer-reuse residue from unrelated real traffic
+  would produce; the fabricated destination address
+  (`fe80::eaf6:d7ff:fe00:1601`, never real on-wire) correspondingly never
+  appears intact anywhere, because no genuine frame ever carries it.
+
+**Conclusion: `probe2` as built cannot observe GEC/CC-tree extraction
+output.** Its capture window is anchored to `hash_offset` (the F-216 RXHASH
+result location, 0x108 from `vaddr`), not to the Internal Context region
+KeyGen actually writes GEC results into
+(`CC_IC_KG_KEY_OFFSET` = 0x50, offset unknown/unverified relative to
+`vaddr` for this driver's buffer layout). The two are different regions of
+the same buffer; `probe2`'s window happens to straddle the tail end of one
+frame and spill into reused-buffer garbage, never the IC/KeyGen-result
+area. Fixing this needs the capture anchored at the real IC base (the
+pointer `fman_pcd_ic_vaddr` was *meant* to be before the stale-pointer bug
+that caused the `ic_probe` panics, per the earlier root-cause note above),
+not at `hash_offset - 0x28`.
+
+**Net result of this probe cycle**: no evidence either way on where/whether
+the GEC composite reaches host-visible memory; genuinely inconclusive, not
+negative. The one solid result is the CC key MISS (0 frames at the sink),
+reconfirming the standing V6-2/V6-2c MISS. `probe2`/`F-239` needs a
+redesign (correct IC-base anchor) before another live capture attempt is
+worth running. Port `0x0d` cleared, sink FQID `0x2ba` released — board left
+clean.
