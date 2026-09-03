@@ -272,4 +272,78 @@ healthy baseline throughout.
 - `/mnt/build/ASK/dpa_app/files/etc/cdx_pcd.xml` — vendor v4 14 B / v6 38 B
   fixed-width tables (why we must diverge, not approximate).
 - Qdrant 2026-08-21 "dual-v6 wedge ROOT CAUSE ISOLATED" (D-1/D-2), 2026-08-20
+
+## 9. 2026-09-03: vendor oracle re-check — confirms §8's rejection was correct, narrows what's actually still open
+
+Live silicon re-test this session (V6-2c hybrid EKFC+GEC on port 0x0d) MISSed
+again — third distinct dual-lane variant to MISS (pure-GEC widened to CC-tree,
+then hybrid EKFC+GEC). Went back to first principles: re-read the vendor's own
+proven-working `cdx_pcd.xml` (`specs/reference/nxp-ask-fmc/`, the byte-verified
+oracle this doc already cites at line 272) end to end instead of just the
+14B/38B keysize line already quoted here.
+
+**Confirmed:** the vendor does not use anything resembling a dual-lane key.
+Every protocol (`cdx_udp4_dist`, `cdx_tcp4_dist`, `cdx_udp6_dist`,
+`cdx_tcp6_dist`, `cdx_esp4/6_dist`, `cdx_multicast4/6_dist`, ...) is a fully
+separate `<distribution>` with its own natural-width key
+(`ipv4.src|dst|nextp|sport|dport` = 13B; `ipv6.src|dst|nexthdr|sport|dport` =
+37B) and its own `<classification>` table, selected by the FMan's native
+per-protocol dispatch — no family-discriminator byte, no zero-fill lane, one
+scheme per protocol. `vlan` does not appear anywhere in the vendor's
+soft-parser (`cdx_sp.xml`) or PCD (`cdx_pcd.xml`) config at all — the hard
+parser evidently strips/accounts for the tag transparently, upstream of all of
+this, symmetrically for both families.
+
+This looked, briefly, like it reopened the LCV-split / per-protocol-scheme
+avenue this doc's §8 rejected ("any further parser LCV split (silicon-proven
+to discard)") — the working theory being that F-205/F-212's narrow 3-slot
+LCV zeroing (ETH/IPv4/IPv6 only, see `bin/kernel-fixups/F_205.py`) simply
+broke on any real transit frame that touches a header slot outside that set
+(VLAN included), and a *correctly broad* LCV configuration might succeed
+where the narrow one didn't.
+
+**That theory does not survive contact with the project's own prior work.**
+`plans/ASK2-MASTER-PLAN.md` §1.3a (2026-08-19, "ROOT CAUSE CLOSED — SLOT-BASED
+LCV DISCRIMINATION IS INVALID FOR TRANSIT") already ran the *rigorous* version
+of this exact experiment on live FE-engaged 10G transit traffic: a full
+single-slot sweep (only slot *i* nonzero, all others zero, for every
+`i in 0..15`) found **only HXS slot 0 ever activates for transit frames on
+either family** — slot 5 (assumed IPv4) and slot 6 (assumed IPv6) stayed
+`NO_SCHEME` in every configuration tried, including the "everything else left
+at the mainline `0xffffffff` default, only 5/6 touched" case that would have
+ruled out the VLAN-zeroing theory above. In other words: it isn't that other
+slots' LCV bits were wrongly zeroed and need restoring — slots 5/6 themselves
+never confirm-enable at all for this port's actual transit parse path,
+independent of every other slot's configuration. This is *why* the project
+pivoted to the single-scheme GEC dual-lane design (§2-§3 above) in the first
+place, and it's a harder, already-proven negative than the one this session
+nearly re-derived from a narrower slice of the same history. No new
+LCV-split attempt is worth running.
+
+**What the vendor cross-check actually leaves open:** the vendor's own
+mechanism for reaching separate per-protocol schemes is not necessarily the
+raw per-slot `pmda[].lcv` register at all. `fman_pcd_kg.c` documents a second,
+independent register class in the same match equation —
+`QLCV = CP_entry_mask[CPGBASE | (CPID & CPGMASK)] & LCV` — and this doc's own
+§2 already noted "CPID is 0 for both families (parser never sets it
+per-protocol)" without ASK2 ever having *tried* setting it. CPID is assigned
+by the soft parser (NetPDL classification, e.g. `cdx_sp.xml`'s `before`
+schemas), not by the hard-parser HXS slot table the 2026-08-19 experiment
+swept — a genuinely different mechanism, untested, and not ruled out by that
+closed result. This is the one remaining avenue that matches the vendor's
+proven architecture and has not been silicon-tested. It requires implementing
+soft-parser CPID assignment (currently absent from ASK2 entirely) before it
+can be tested at all, which is a materially larger, riskier change than
+anything tried so far (soft-parser NetPDL-equivalent programming, not just a
+register write) — not something to start without sign-off given this
+project's history of port-deafness incidents from parser-level changes.
+
+**Net effect on §8's decision: unchanged, reaffirmed.** The dual-lane GEC
+design remains the only currently-viable path to a single shared scheme; its
+three implementation variants (F-224 plain, F-236/F-238 CC-tree-widened,
+this session's hybrid EKFC+GEC) have all MISSed on real hardware, and the
+open question is still §5's original one — what the CC-tree comparator
+actually reads — not the scheme-selection mechanism. CPID-based per-protocol
+selection is a legitimate but expensive-to-test alternative architecture, not
+a quick fix; log it as future work, not a near-term redirect.
   "IPv6 PATH DECISION".
