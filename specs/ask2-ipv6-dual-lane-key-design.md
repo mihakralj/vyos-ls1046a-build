@@ -412,4 +412,51 @@ changes than a debugfs capture node — new register/ISA-level work in the
 same silicon area that has already produced two kernel panics this project
 (`ic_probe`'s stale-pointer dereference, `hash_probe`'s zero-address-FD
 issue). Not started; needs its own scoped design pass before any board time.
+
+### 9.2 RESOLVED, same day: option (a) turned out much smaller than estimated — first direct observation of the CC comparator's input
+
+§9.1 estimated new buffer-prefix-content plumbing as a big, risky,
+core-RX-path change. It wasn't. `FMBM_RICP` — the BMI register that
+actually controls the IC-to-host-buffer copy (`fman_port.c:566-573`,
+`IC_TO_EXT | IC_FROM_INT | IC_SIZE`, all 16-byte units) — is a plain
+per-port register, not parser shadow RAM, with no PCAC stop/start bracket
+anywhere in the mainline init path. Widening `IC_SIZE` from 48 to 96 bytes
+(`F-240`, `bin/kernel-fixups/F_240.py`, two new `cc_test` debugfs verbs
+`ricp_widen`/`ricp_restore`, S6 R10.2 readback-verified, narrow-exposure-
+window) extends the host-visible copy to cover the full 46/47-byte
+dual-lane key, landing at `probe2`/F-239's *existing* window offset +48 —
+zero changes needed to the F-239 capture code itself. Board-confirmed
+register math: `0x000e0203 -> 0x000e0206`.
+
+Live capture (full detail: `decomp/fe-action-interpreter.md`, "2026-09-03
+(same day, follow-up)"): armed the V6-2c hybrid EKFC+GEC key on port
+`0x0d`, widened RICP, and captured real background mDNS traffic (KeyGen
+extracts unconditionally for every frame the armed scheme processes,
+match or not, so any captured frame — not just our synthetic test frame —
+reveals the real output). Cross-referenced byte-for-byte against
+`cc_pack_key_dual_pid()`'s table layout: **5 of 6 fields (PORT_ID, V6_SRC,
+V6_DST, PROTO, DPORT) land at exactly the predicted byte offsets and
+decode to correct, real values** (`V6_DST` decoded to the exact mDNS
+multicast address `ff02::fb`; `DPORT` decoded to exactly 5353). **One
+field is wrong: FAMILY reads `0x00` where `CC_KEY_DUAL_FAMILY_V6`=`0x40`
+is expected**, even though the frame's own parse-result (`l3r` high byte,
+independently verified in the same capture, untouched by the RICP widen)
+correctly shows `0x40` — the parser knows this is IPv6; the GEC family-byte
+command's *configured* source offset (`0x04`, from `kgse_gec[0] =
+0x80FF2004`) matches the correct struct location by every check available
+from software, yet extracts the wrong value.
+
+**This resolves §5/§9.1's core open question.** GEC composites do reach
+host-visible memory (once RICP is widened); the byte *positions* in the
+software model are correct for 5 of 6 fields — refuting any "wrong layout
+entirely" hypothesis. What remains is one narrow, concrete defect: why the
+`HT=0x20/offset=4/size=1` GEC command doesn't extract the byte at the
+location its own configuration points to. Candidate: the GEC engine's
+live in-pipeline parse-result register may not share the same byte layout
+as the post-hoc host-DMA-copied `struct fman_prs_result` despite both
+notionally describing "the same" parser output — unverified, next scoped
+question. This is real, reproducible, board-observed progress, not
+another dead end — the first time this project has directly observed the
+CC comparator's actual input rather than inferring it. Board left clean
+(RICP restored, port detached, sink released, dmesg-verified).
   "IPv6 PATH DECISION".

@@ -1,8 +1,16 @@
 # CC Comparator Compare-Window Hypothesis — What Bytes Does the Coarse Classifier Actually Compare?
 
-**Status:** Open question, narrowed to a testable hypothesis with a validated methodology (not a guess). 2026-08-01.
+**Status:** PARTIALLY RESOLVED 2026-09-03 (methodology gap closed, one concrete defect isolated) — see §7 below. Originally: open question, narrowed to a testable hypothesis with a validated methodology (not a guess), 2026-08-01.
 **Branch:** dpaa1 (cross-referencing the ask20 branch's resolution of the analogous question)
 **One-sentence summary:** We know our match-table *write* is byte-perfect against our own model (F-158). We do not know whether our model of what the CC engine's comparator *reads* is correct — and a sibling branch already proved, on different silicon config, that the obvious model (a hand-derived "canonical" field composite) is wrong by construction.
+
+**2026-09-03 update:** the "we don't know" above is no longer fully true.
+`F-240` (`bin/kernel-fixups/F_240.py`, a widened `FMBM_RICP` capture) gave
+the first direct, board-verified look at this exact question for the
+CC-tree dual-lane path — see §7. The compare-window *positions* match the
+software model for 5 of 6 fields; one field (the v4/v6 FAMILY
+discriminator byte) is confirmed wrong. This doesn't close the file, but it
+replaces "unknown" with a scoped, concrete remaining question.
 
 ---
 
@@ -88,9 +96,67 @@ The production scale-out decision (`plans/ASK2-MASTER-PLAN.md` §3 decision 14: 
 
 A confirmed HIT from this experiment would close out a genuine intellectual gap (and might inform IPv6 dual-scheme EHASH work, T-M6-1) but would not, by itself, reopen FE-VM ehash as a production scale path — the throughput-ceiling and Linux-model arguments above would still need to hold up under Phase 3 scrutiny. A refuted hypothesis narrows the remaining unknown for anyone who picks this up again later.
 
+## 7. 2026-09-03 — direct observation, first time this project has actually seen the CC comparator's input
+
+Everything above (§1-§6) was written without ever having put a probe on the
+CC engine's actual compare-window content — §5 proposed a methodology,
+never executed. That gap is now closed, for the CC-tree dual-lane path
+specifically (`next_engine==2`, the V6-2c hybrid EKFC+GEC scheme, not the
+EHASH/`next_engine==3` path this document was originally scoped to).
+
+**What made the capture possible:** `probe2` (F-239, a prior attempt this
+same week) turned out structurally incapable of it — its capture window
+covers exactly the `pass_prs_result`/`pass_hash_result`/`pass_time_stamp`
+48 bytes mainline's buffer-prefix API can request, which ends **exactly**
+at `CC_IC_KG_KEY_OFFSET` (0x50) — the GEC/CC-tree key starts one byte past
+where the copy stops. `F-240` (`bin/kernel-fixups/F_240.py`) widens the
+underlying BMI register (`FMBM_RICP`, a plain per-port register, not
+parser shadow RAM) to extend that copy to 96 bytes, reaching the full
+46/47-byte dual-lane key with no changes to `probe2` itself — the new
+bytes land at its existing window offset +48.
+
+**What it showed:** captured a real (background mDNS) frame processed by
+the armed scheme — KeyGen extracts unconditionally for every frame the
+scheme sees, match or not, so a captured frame need not be the specific
+test frame to reveal genuine extraction output. Cross-referenced
+byte-for-byte against `cc_pack_key_dual_pid()`'s table-packing layout
+(`fman_pcd_cc.c:398-453`):
+
+- PORT_ID, V6_SRC, V6_DST, PROTO, DPORT (5 of 6 fields) land at exactly
+  the byte positions the software model predicts, and decode to correct,
+  verifiable real values (`V6_DST` = the exact mDNS multicast address
+  `ff02::fb`; `DPORT` = exactly 5353).
+- FAMILY (the v4/v6 discriminator byte, expected `CC_KEY_DUAL_FAMILY_V6`=
+  `0x40`) reads `0x00`. The frame's own parse-result `l3r` high byte,
+  captured in the same read via `probe2`'s untouched parse-result region,
+  independently confirms the parser correctly saw this as IPv6 (`0x40` at
+  the expected struct offset). The GEC command responsible
+  (`kgse_gec[0] = 0x80FF2004`, decoding to `HT=0x20, offset=4, size=1`)
+  has a configured source offset that matches the verified struct location
+  by every check available from software — yet extracts the wrong value.
+
+**Conclusion.** The layout hypothesis in §2-§3 (our match-table write
+byte-perfect against our own model) is now also confirmed *positionally
+correct* against the live silicon read for 5 of 6 fields — this refutes
+any "the whole composite lands somewhere else / different order" theory.
+The gap narrows to one concrete, scoped defect: the `HT=0x20` GEC
+header-code's source addressing. Leading candidate, not yet verified: the
+GEC engine may read from the *live in-pipeline* parse-result representation
+during extraction, which need not share the exact byte layout of the
+*post-hoc, DMA-copied* `struct fman_prs_result` the host reads afterward,
+despite both nominally describing "the same" parser output — these could
+be genuinely different internal representations that happen to agree on
+struct size/shape for most fields. Unverified; the next concrete step for
+whoever picks this up.
+
+Full capture data, table, and register math:
+`decomp/fe-action-interpreter.md` "2026-09-03 (same day, follow-up)";
+design-doc framing: `specs/ask2-ipv6-dual-lane-key-design.md` §9.2.
+
 ## References
 
 - `plans/ASK2-MASTER-PLAN.md` §1.3a — full M3/M5 false-positive timeline, F-156/F-157/F-158 board evidence, architectural assessment
 - `specs/fman-keygen-flow-key-spec.md` §6.1.3, §3.4 — CC match-table row format, EHASH extraction-order settlement and its scope caveat
 - `arch/fman-microcode-210-programming-reference.md` §7.2 (EXT_HASH FE), §10 (DDR ehash flow store) — byte-level reference for the EHASH path
 - ask20 branch, patch `kernel/common/patches/board/0108-fman-pcd-cc-per-key-fq-enqueue-ad.patch` (2026-06-10) — the precedent this document generalizes from
+- `bin/kernel-fixups/F_240.py`, `decomp/fe-action-interpreter.md` §"2026-09-03 (same day, follow-up)", `specs/ask2-ipv6-dual-lane-key-design.md` §9.2 — the 2026-09-03 direct-observation capture (§7 above)
