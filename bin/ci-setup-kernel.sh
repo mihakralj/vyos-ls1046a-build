@@ -2126,6 +2126,18 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ] && \
     echo "### fman_pcd.c/dpaa_eth.c: F-239 CC-tree comparator input capture (probe2, T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-240 (T-M6-8 VLAN-v6 dig, 2026-09-03): widen/restore a sacrificial RX
+# port's BMI Internal-Context copy window (FMBM_RICP) so probe2/F-239 can
+# actually reach CC_IC_KG_KEY_OFFSET. No ordering dependency on F-239 itself
+# (different anchors: fman_port.c/.h + fman_pcd_cc_test.c, not fman_pcd.c/
+# dpaa_eth.c) -- placed here to stay with the rest of the VLAN-v6 dig work.
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_port.h ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_240.py" 2>&1
+    echo "### fman_port.c/.h/pcd_cc_test.c: F-240 RICP widen/restore for CC-comparator capture (T-M6-8 VLAN-v6 dig)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
