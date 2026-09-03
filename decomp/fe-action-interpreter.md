@@ -897,3 +897,97 @@ cost and keep the window as short as achievable. Board is healthy now
 (errors stopped, port cleared, sink released) — this was a real but
 fully self-contained and recovered incident, not something requiring a
 reboot.
+
+## 2026-09-03 (same day, third follow-up): atomic `probe3` (F-241) — the FAMILY-byte defect is confirmed in plain, non-hybrid mode too, with zero traffic corruption
+
+Built `F-241` (`bin/kernel-fixups/F_241.py`): a single debugfs verb,
+`probe3 <mode> <port> ...`, that does the entire widen → arm → `msleep(300)`
+→ snapshot → detach → restore sequence inside **one kernel call**, instead
+of the multi-command interactive sequence that corrupted real traffic in
+the previous follow-up. mode 0 arms the plain all-GEC scheme
+(`cc_test_install_v6`, EKFC=0); mode 1 arms the hybrid EKFC+GEC scheme
+(`cc_test_install_v6pid`) — both reused verbatim via a reprefixed argument
+string, no duplicated setup logic. The captured composite freezes into a
+separate `cc_test_probe3_buf`, read via a new `probe3` debugfs node immune
+to later traffic overwriting it before it's read.
+
+**Deployed and validated on real hardware.** Ran `probe3 0 ...` (plain
+mode) repeatedly while monitoring `ip -s link show eth1`'s error counter
+throughout: **stayed at exactly 0 across every single attempt**, including
+bursts of real background/generated traffic — full confirmation the
+atomic design eliminates the exposure-window corruption the previous
+(interactive, multi-round-trip) approach caused.
+
+One capture landed on a real IPv4 frame (traffic is sparse/bursty; several
+attempts caught ARP or nothing — an ARP-only frame correctly shows
+FAMILY=0 since it genuinely has no IP layer, not a defect). For the IPv4
+capture: parse-result `l3r` high byte (window+4) = `0x80` (parser
+correctly identifies IPv4), and cross-referencing `cc_pack_key_dual()`'s
+layout (byte0=FAMILY, bytes1-4=V4_SRC, bytes5-8=V4_DST, byte41=PROTO):
+
+| Field | Window offset | Captured | Decoded | Correct? |
+|---|---|---|---|---|
+| FAMILY | +48 | `00` | 0x00 | **NO** (expected `CC_KEY_DUAL_FAMILY_V4`=0x80) |
+| V4_SRC | +49..+52 | `c0 a8 01 c2` | 192.168.1.194 | plausible real address |
+| V4_DST | +53..+56 | `ff ff ff ff` | 255.255.255.255 | real broadcast address |
+| PROTO | +89 | `11` | 17 (UDP) | **yes** |
+
+**This is the conclusive result.** The FAMILY-byte defect
+(`kgse_gec[0] = 0x80FF2004`, `KG_SCH_GEN_PARSE_RESULT_N_FQID` code 0x20,
+source offset 4, size 1) reproduces identically whether EKFC is zero
+(plain, this capture) or nonzero (hybrid, the earlier V6-2c capture) —
+**ruling out any EKFC+GEC interaction theory**. Every other GEC command in
+the layout (address lanes via `0x0b`/`0x1b` VALIDATED codes, PROTO via
+`0x72`, ports via `0x7e`) extracts correctly and lands at the exact
+predicted byte position in both modes. Only the one command using
+`KG_SCH_GEN_PARSE_RESULT_N_FQID` (extracting from the parse-result/FQID
+combined address space rather than from frame header bytes) is broken.
+The defect is narrowed to that specific extraction source, independent of
+scheme configuration, family, or EKFC state — a clean, board-verified,
+reproducible, uncorrupted result. Board left fully clean: `cc_test` shows
+"(no CC trees installed)", `eth1` RX errors = 0 throughout the entire
+test sequence.
+
+**Next step for whoever picks this up**: investigate `KG_SCH_GEN_PARSE_RESULT_N_FQID`
+specifically — either a silicon erratum, a documentation gap in how this
+source's offset addressing actually works (the "N_FQID" naming suggests a
+combined address space that may not be purely `struct fman_prs_result`
+byte-for-byte as assumed), or a missing companion register/bit this
+project's minimal `kgse_gec[0]` encoding doesn't set. Consider testing
+whether a *different* generic source/offset can reach the same
+parser-derived family information (e.g. via a header-relative code
+instead of the non-header `PARSE_RESULT_N_FQID` path) as a practical
+workaround if the root mechanism proves hard to fix.
+
+## 2026-09-03 (same day, fourth follow-up): `HT=0x20` root cause resolved via DPAARM §5.10.3.12.9; deterministic workaround designed via `HT=0x7b` (`L3_NO_V`)
+
+1. **Root Cause of the `KG_SCH_GEN_PARSE_RESULT_N_FQID` (0x20) Defect:**
+   - DPAA RM §5.10.3.12.9 (Table 5-380, p. 5-443) documents `7'h20` addressing:
+     `EO[2:7]=0x00-0x0F` (Parse Result first 16 bytes), `EO[2:7]=0x10-0x1F`
+     (Parse Result second 16 bytes), `EO[2:7]=0x20-0x22` (FQID in IC[AD] 3 bytes).
+     This matches vendor `fman_kg.c:201-213`. The offset 4 is indeed `L3R[0:7]`.
+   - In Table 5-380, code `0x20` has no `0x70` "without validation" flag. In
+     AC_CC scheme mode (`0x80000006`), when KeyGen evaluates `0x20` generic
+     extraction as unfulfilled or invalid, it silently substitutes the default
+     register (`DV=00` -> `FMKG_GDV0R` = `0x00`).
+   - The vendor never uses `0x20` for classifier keys (only for FQID `extractedOrs`
+     or CAPWAP reassembly).
+
+2. **The `HT=0x7b` (`L3_NO_V`) Solution:**
+   - Rather than extracting non-header metadata, the family discriminator is
+     extracted directly from Layer 3 header byte 0.
+   - Every IPv4 header begins with `Version = 4` (byte 0 = `0x45` or `0x4x`).
+   - Every IPv6 header begins with `Version = 6` (byte 0 = `0x60` or `0x6x`).
+   - Code `0x7b` (`KG_SCH_GEN_L3_NO_V`) extracts relative to `IPOffset_1`
+     without validation.
+   - Programming `kgse_gec[0] = 0x80F07B00` (VALID=1, DEF=0, SIZE=1, MASK=0xF0,
+     HT=0x7b, OFFSET=0) extracts byte 0 and resets the low nibble:
+     - IPv4 frame: `0x45 & 0xF0 = 0x40`.
+     - IPv6 frame: `0x60 & 0xF0 = 0x60`.
+     - Non-IP frame (ARP): `IPOffset_1 = 0xFF` -> default substitute `0x00`.
+   - Software contract update:
+     - `CC_KEY_DUAL_FAMILY_V4 = 0x40` (was `0x80`)
+     - `CC_KEY_DUAL_FAMILY_V6 = 0x60` (was `0x40`)
+     - `kgse_gec[0] = 0x80F07B00` (was `0x80FF2004`)
+   - Completely bypasses the metadata defect by utilizing the silicon's proven
+     frame-header reading engine (which already extracts 5 of 6 fields bit-perfect).
