@@ -2116,6 +2116,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c/internal.h/pcd_kg.c: F-238 CC-tree GEC ekfc-trigger isolating test (T-M6-8 VLAN-v6 V6-2c)"
 fi
 
+# F-239 (T-M6-8 VLAN-v6 dig, 2026-09-03): CC-tree comparator input capture
+# (probe2). Must run AFTER F-216 (anchors on its normalized RXHASH block) --
+# placed at the end of the fixup sequence for that reason, same rationale
+# as F-236 needing F-224 to have already run.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ] && \
+   [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_239.py" 2>&1
+    echo "### fman_pcd.c/dpaa_eth.c: F-239 CC-tree comparator input capture (probe2, T-M6-8 VLAN-v6 dig)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
