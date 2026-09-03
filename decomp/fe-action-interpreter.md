@@ -747,3 +747,90 @@ reconfirming the standing V6-2/V6-2c MISS. `probe2`/`F-239` needs a
 redesign (correct IC-base anchor) before another live capture attempt is
 worth running. Port `0x0d` cleared, sink FQID `0x2ba` released — board left
 clean.
+
+## 2026-09-03 (same day, follow-up): FMBM_RICP widened — first-ever direct observation of the CC comparator's input, and a concrete byte-level defect found
+
+Traced the exact cause of the dead end above: `fman_sp_build_buffer_struct()`
+(`fman_sp.c`) computes `prs_result_offset = vaddr+0xE0`,
+`hash_result_offset = prs_result_offset + 40 = vaddr+0x108` — and 0x108-0xE0
+is exactly the 48-byte `pass_prs_result`/`pass_time_stamp`/`pass_hash_result`
+copy window mainline's `struct fman_buffer_prefix_content` can express. That
+window covers IC source bytes `[32,80)`. `CC_IC_KG_KEY_OFFSET` is `0x50` = 80
+decimal — the copy stops **exactly** where the GEC/CC-tree key starts. Not
+bad luck; the driver's buffer-prefix API structurally cannot reach it.
+
+The fix (`F-240`, `bin/kernel-fixups/F_240.py`) is much smaller than
+expected: `FMBM_RICP` is a plain per-port BMI register (`IC_TO_EXT |
+IC_FROM_INT | IC_SIZE`, all in 16-byte units, `fman_port.c:566-573`) — not
+parser shadow RAM, no PCAC stop/start needed. Two new `cc_test` debugfs
+verbs, `ricp_widen <port>` / `ricp_restore <port>`, widen `IC_SIZE` from 48
+to 96 bytes (`fman_port_widen_ricp()`/`fman_port_restore_ricp()`,
+S6 R10.2 readback-verified, narrow-exposure-window by design — any real
+frame arriving on the widened port before restore gets an skb built
+against the stale 48-byte headroom assumption). This required zero changes
+to `probe2`/F-239: the widened bytes land exactly at its existing window
+offset +48 (register readback on the board confirmed the math precisely:
+`0x000e0203 -> 0x000e0206`, size field 3->6 = 48->96 bytes, everything else
+unchanged).
+
+**Live result.** Armed the V6-2c hybrid EKFC+GEC key (`install_v6pid`) on
+port `0x0d`, widened RICP, and read `probe2` repeatedly while real
+background eth1 traffic flowed (our synthetic test frame kept losing the
+race against it — `capture_fini` again showed 0 frames at the sink for our
+frame specifically). But this is not a problem: KeyGen's GEC/EKFC
+extraction runs on **every** frame processed by the armed scheme
+(`kgse_mv=0`, match-all), independent of whether that frame matches the
+CC-tree table — so *any* captured frame reveals the real extraction
+output. A captured mDNS packet (real background traffic) gave a clean,
+fully decodable result. Cross-referencing byte-for-byte against
+`cc_pack_key_dual_pid()`'s table layout (`fman_pcd_cc.c:398-453`: byte0
+PORT_ID, byte1 FAMILY, bytes10-25 V6_SRC, bytes26-41 V6_DST, byte42 PROTO,
+bytes43-46 ports) mapped onto probe2's window (`window_offset =
+IC_offset - 0x50 + 48`, so key-byte N sits at window offset N+48):
+
+| Field | Window offset | Captured bytes | Decoded | Expected | Match? |
+|---|---|---|---|---|---|
+| PORT_ID | +48 | `00` | 0x00 | 0x00 | **yes** |
+| FAMILY | +49 | `00` | 0x00 | `CC_KEY_DUAL_FAMILY_V6`=0x40 | **NO** |
+| V6_SRC | +58..+73 | `fe80::34:a8f5:8b1e:d74a` | real link-local addr | (whatever the frame's real src is) | plausible, unverified against ground truth |
+| V6_DST | +74..+89 | `ff02::fb` | mDNS multicast | matches real mDNS dst exactly | **yes** |
+| PROTO | +90 | `11` | 17 (UDP) | 17 | **yes** |
+| DPORT | +93..+94 | `14 e9` | 5353 (big-endian) | 5353 (mDNS port) | **yes** |
+
+Five of six fields land exactly where the table-packing code says they
+should and decode to real, sensible values for a genuine mDNS packet —
+strong confirmation the widened capture is reading the actual live
+GEC/EKFC composite, not noise, and that the byte *positions* in
+`cc_pack_key_dual_pid()`'s layout are correct. **One field is wrong: FAMILY
+reads `0x00`, not the expected `0x40`.**
+
+Cross-checked independently: `probe2`'s own untouched parse-result region
+(window offset 0-31, `struct fman_prs_result`, unaffected by the RICP
+widen) shows `l3r` (struct offset 4-5, big-endian) = `0x4020` for this
+same capture — high byte `0x40` at window offset **4**, exactly matching
+`FM_L3_PARSE_RESULT_IPV6` (`0x4000`)'s top byte. **The parser correctly
+identified this as an IPv6 frame.** The GEC family-byte command
+(`kgse_gec[0] = 0x80FF2004`, `fman_keygen.c:789`) decodes to `HT=0x20,
+offset=4, size=1` — its configured *source* offset (4) exactly matches
+the struct offset where we independently verified `0x40` lives. Yet the
+*extracted* value the CC comparator actually receives is `0x00`.
+
+**This is the first direct, board-verified evidence of what the CC-tree
+comparator's compare-window content actually is** — the open question
+`specs/cc-comparator-compare-window-hypothesis.md` posed on 2026-08-01 and
+that nothing before F-240 could observe. It resolves the *methodology* gap
+completely (yes, GEC composites do land in host-visible memory once RICP
+is widened; yes, position/layout matches the software model for 5 of 6
+fields) and narrows the *defect* to one specific, concrete claim: the GEC
+engine's `HT=0x20/offset=4/size=1` family-byte command, whose configured
+source offset matches the correct struct location by every check available
+from software, is not producing the value that location holds. Whether
+`HT=0x20` addresses parse-result-struct-relative offset 4 the way the host
+DMA copy does, or some other base (live in-pipeline parse-result register
+layout may differ from the post-hoc host copy despite notionally
+describing "the same" data) is the next concrete, scoped question — not
+still "does the composite even reach host memory," which is now answered.
+
+Full writeup with the RICP register design/safety rationale:
+`bin/kernel-fixups/F_240.py`. Board left clean (RICP restored, port
+detached, sink released, verified via dmesg before ending the session).
