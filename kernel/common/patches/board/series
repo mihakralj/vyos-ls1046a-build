@@ -474,3 +474,18 @@
 # register equivalents (fmbm_ogpr/ofsdm/ofsem); this wires them in.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0190-fman-port-oh-params-page.patch
+
+# 0189+0190's cc_arm still board-tested a MISS despite genuinely
+# correct register state. ISA-coverage audit (comparing every RX-port
+# mechanism against its O/H equivalent) found the real cause plus two
+# related gaps: (1) fman_port_set_oh_cc_base() missing the RM-mandated
+# FMFP_EXTC[INV0] SYNC barrier fman_port_set_cc_base() (RX) already
+# has; (2) fman_port_set_kg_direct_scheme()/_clear() hardcoded
+# RX-only, same bug class as 0190; (3) ROOT CAUSE -- no function ever
+# created+bound a KeyGen scheme to an O/H port at all (RX ports get
+# one automatically via fman_port_init(), O/H bring-up never does),
+# so NIA_ENG_HWK had nothing for KeyGen to select. New
+# fman_pcd_kg_port_attach_oh_cc()/_detach_oh_cc() fix that, wired into
+# cc_arm/cc_disarm. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0191-fman-port-oh-cc-gaps.patch
