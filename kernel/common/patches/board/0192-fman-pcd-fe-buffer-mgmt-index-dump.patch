@@ -1,0 +1,95 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 03 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: pcd: dump the raw FE management-index free-list in fe_buffer
+
+T-M6-8 VLAN-freeze dig. The retired inline-FE-VM-opcode VLAN path
+freezes at exactly 5+tnums=21 packets, and every session that
+investigated it (decomp/fe-action-interpreter.md) read only the two
+params-page pointer/counter fields fe_buffer already exposes
+(+0x54 = internalFEBufferManagementIndexAddr, +0x58 =
+internalFEBufferDepletionCounter) -- nobody ever dumped what +0x54
+actually points AT.
+
+Recovered the real vendor layout from the NXP SDK source in this repo
+(kernel/patches or, canonically, ASK/patches/kernel/
+010-ask-fman-dpaa-ehash.patch, FmPortSetFESupport, ~L9117):
+FM_MURAM_AllocMem(pcd, 5 + totalNumOfTnums, 4) is not a bare counter,
+it is a byte-array free-list:
+
+  byte 0          cursor (initialized to 4)
+  bytes 1..3      low bytes of the FE internal buffer pool's own
+                  MURAM offset (packed into the same 32-bit word
+                  whose top byte becomes the cursor)
+  bytes 4..4+n-1  free-list of tnum indices 0..tnums-1
+  byte 4+n        0xFF terminator
+
+fman_pcd_fe_buffer_show() already loops every armed port and prints
++0x54/+0x58; this patch adds one more line per port, reading and
+hex-dumping the full (5+tnums)-byte array +0x54 points at (skipped
+when +0x54 is 0, i.e. FE support not armed on that port). Read-only,
+debugfs-gated (root), same ioread8()/fman_muram_offset_to_vbase()
+pattern already used elsewhere in this file (see the cc_test key-dump
+code a few hundred lines below).
+
+Purpose: correlate the free-list's live cursor/contents between a
+sustaining routed flow and a freezing VLAN flow (once the retired F-233
+inline-opcode path is rebuilt on the fevm-vlan-investigation branch)
+to see directly whether entries are handed out but never pushed back,
+rather than continuing to infer it from IC-level microcode reads.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (read-only debugfs
+addition to an existing root-only node; no new state, no write path,
+no behavior change when FE support is unarmed)
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 30 +++++++++++++++++++++---
+ 1 file changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 6bfa0976..70abbbb8 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -3940,6 +3940,7 @@ static int fman_pcd_fe_buffer_show(struct seq_file *s, void *unused)
+ 	for (port_id = 0x08; port_id <= 0x11; port_id++) {
+ 		struct fman_port *port = fman_port_lookup_rx(pcd->fman, port_id);
+ 		u32 pp_off;
++		u8 tnums;
+ 		if (!port)
+ 			continue;
+ 		pp_off = fman_port_get_params_page(port);
+@@ -3948,8 +3949,35 @@ static int fman_pcd_fe_buffer_show(struct seq_file *s, void *unused)
+ 		pp = (void *)(void *)fman_muram_offset_to_vbase(muram, pp_off);
+ 		v54 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x54));
+ 		v58 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x58));
++		tnums = fman_port_get_total_tnums(port);
+ 		seq_printf(s, "port 0x%02x: +0x54=%#010x +0x58=%#010x tnums=%u\n",
+-			   port_id, v54, v58, fman_port_get_total_tnums(port));
++			   port_id, v54, v58, tnums);
++
++		/*
++		 * T-M6-8 VLAN-freeze dig: dump the raw (5+tnums)-byte
++		 * management-index array v54 points at (FmPortSetFESupport,
++		 * SDK 999-patch ~L14545 / F-072): byte 0 = cursor, bytes
++		 * 1-3 = low bytes of the FE internal buffer pool's MURAM
++		 * offset, bytes 4..4+tnums-1 = the free-list of tnum
++		 * indices (0..tnums-1), byte 4+tnums = 0xFF terminator.
++		 * Nobody has read this array's live contents before - every
++		 * prior probe only read the +0x54/+0x58 pointer/counter
++		 * pair, never what the pointer actually points at. v54 is
++		 * only valid once FE support has been armed on this port.
++		 */
++		if (v54) {
++			void __iomem *idx = (void *)(void *)
++				fman_muram_offset_to_vbase(muram, v54);
++			int n = 5 + tnums;
++			int i;
++
++			seq_printf(s, "  idx[%#06x] cursor=%u:",
++				   v54, ioread8(idx));
++			for (i = 0; i < n; i++)
++				seq_printf(s, " %02x", ioread8(
++					(void __iomem *)((u8 __iomem *)idx + i)));
++			seq_puts(s, "\n");
++		}
+ 	}
+ 	return 0;
+ }
