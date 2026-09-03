@@ -609,18 +609,46 @@ Matches the vendor init code byte-for-byte: cursor `04`, pristine free-list
 `00..0f`, `ff` terminator. Confirms the recovered structure is right and the
 new debugfs read works correctly on real hardware.
 
-**Still blocked on the actual payoff** — capturing this array while a
-genuine plain-routed (non-VLAN) TCP/UDP flow is actively HW-hitting through
-the ehash/FE-VM path, to see the cursor move and (hopefully) return, would
-finally give a real "healthy" baseline to compare a reproduced freeze
-against. That needs a flow crossing eth3↔eth4 through actual L3 forwarding
-with a cooperating TCP/UDP endpoint on the eth4 side — the only live host
-there (`HELGA`, `10.99.2.16`) accepts ICMP but silently drops inbound TCP
-(Windows Firewall, matches prior sessions' finding), and ICMP was never
-HW-offloaded by ASK2's flowtable to begin with. The OpenWrt peer's own
-eth4 port isn't physically wired to that segment (confirmed this session).
-Unblocking this needs either HELGA's firewall opened / a listener started
-there, or another real host reachable from the DUT's eth4 side.
+### The payoff: plain routed traffic never touches this array at all
+
+`HELGA`'s Windows Firewall was disabled on the relevant adapter and an
+`iperf3 -s` server started there this session — unblocking the thing the
+previous pass was stuck on. Ran a genuine plain-routed (no VLAN) flow
+through the DUT: OpenWrt peer `10.99.1.106` (eth3, untagged) → `iperf3 -c`
+→ `HELGA 10.99.2.16` (eth4 side), an explicit host route forcing it via the
+DUT (`10.99.2.16/32 via 10.99.1.185 dev eth3`) so it's real L3 forwarding,
+not same-segment L2. Confirmed via DUT `conntrack -L`: `[HW_OFFLOAD]`, both
+directions. Confirmed via `fe_ehash_stats`: real active records with
+multi-million packet counts — this is genuinely hitting the ehash/FE-VM
+HIT path, not falling back to software.
+
+**30 seconds sustained, 15.7 GBytes, 4.50 Gbit/s average, 297 retransmits
+(ordinary TCP behavior, not a freeze signature).** Read the management-index
+array three times across the run (start, mid, end):
+
+```
+port 0x10: idx[0x59100] cursor=4: 04 05 70 00 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f ff
+```
+
+**Byte-for-byte identical, all three reads, across the entire 30-second,
+multi-gigabyte, millions-of-packets sustained flow.** The cursor never
+moved off 4; the free-list never lost a single entry. This is a real,
+decisive result, not a null one: **plain `ENQUEUE_PKT`/routed processing
+does not touch this pool at all**, regardless of volume or duration. Whatever
+resource actually gets exhausted at the historical 5+tnums=21 ceiling, it
+isn't drawn from by the traffic class that's proven to sustain forever —
+only by whatever's different about the VLAN STRIP/INSERT rebuild path,
+which remains the sole candidate consumer in this entire investigation.
+
+**Why this matters going forward:** it establishes a clean, zero-noise
+baseline. If the retired FE-VM VLAN path is ever rebuilt (the
+`fevm-vlan-investigation` branch, still just sitting at commit `64268521`,
+not yet updated with patch `0192`) and re-tested, this exact byte sequence
+is the "healthy" reference — any deviation during a VLAN flow, at any
+packet count, would be unambiguous, with no risk of routed-traffic noise
+muddying the signal the way it might have if this pool turned out to be
+shared, high-churn, general-purpose infrastructure. It isn't. It's either
+untouched, or it's the VLAN path's problem specifically.
 
 ## Tooling added
 - `decomp/tools/fman-isa-xref.py` — field-level cross-reference: for a given
