@@ -2186,6 +2186,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     echo "### fman_pcd_cc_test.c: F-244 soft-parser magic-byte PoC (T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-245 (T-M6-8 VLAN-v6 dig, 2026-09-04): generalizes F-243/F-244's
+# sp_arm/sp_disarm from a hardcoded IPv6 HXS slot (6) to an arbitrary HXS
+# slot (cc_test's `sp_arm <port> [slot]`, defaults to 6), so the F-244
+# magic-byte hook can be armed on slot 0 (ETH catch-all) as a decisive
+# test of whether the soft-parser trigger mechanism works at all versus
+# slot 6 specifically never being live for real transit frames. Must run
+# after F-243 (fman_port_sp_arm/disarm, cc_test_saved_ssa/armed anchors).
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_port.h ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_245.py" 2>&1
+    echo "### fman_port.c/.h/pcd_cc_test.c: F-245 sp_arm any-HXS-slot generalization (T-M6-8 VLAN-v6 dig)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
