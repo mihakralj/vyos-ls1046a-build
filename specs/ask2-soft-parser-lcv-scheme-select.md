@@ -764,3 +764,100 @@ state, or the real trigger may be a global/parser-block-level enable
 this project hasn't identified yet. This is a bigger, more open-ended
 engineering question than the slot-0 test was -- worth a scoping
 check-in before continuing.
+
+## 6m. Deep vendor comparison (dpa_app init sequence + live .185 register read) -- found it
+
+User asked for a fine-combed comparison against the .116 reference
+board and NXP sources to find exactly what differs. Traced the real
+vendor init sequence rather than just the register-write call sites:
+
+`/mnt/builds/ASK/dpa_app/dpa.c` (the actual daemon .116 runs,
+`dpa_init()`, lines 258-265 and 826) calls, in order:
+
+1. `FM_PCD_Disable(handle)` -- comment: "Disable PCD before we set
+   advanced features"
+2. `FM_PCD_SetAdvancedOffloadSupport(handle)` -- comment: "enable
+   Advanced pcd function before fmc_execute enables PCD"
+3. `fmc_compile(...)` -- compiles cdx_cfg.xml/cdx_pcd.xml/cdx_sp.xml
+   (assembles the soft-parser bytecode, per-port PCD, everything)
+4. `fmc_execute(&cmodel)` -- pushes it all to hardware, and per (2)'s
+   comment, this is also where PCD gets **re-enabled** at the end
+
+So the vendor's real sequence is disable-PCD-globally -> load
+everything (including soft-parser code + every port's pmda[].ssa) ->
+enable-PCD-globally. This project's F-243/F-244/F-245 only ever did a
+*per-port* stop/start bracket (`stop_port_hwp`/`start_port_hwp`,
+F-205) around individual `pmda[]` writes -- never touching a global
+enable.
+
+Traced `FM_PCD_Disable()`/`FM_PCD_Enable()` (`fm_pcd.c:1434,1490`) ->
+`PrsDisable()`/`PrsEnable()` (`fm_prs.c:180,188`) ->
+`fman_prs_disable()`/`fman_prs_enable()` (`fman_prs.c:97-111`, the flib
+layer):
+
+```c
+void fman_prs_enable(struct fman_prs_regs *regs)
+{
+    uint32_t tmp;
+    tmp = ioread32be(&regs->fmpr_rpimac) | FM_PCD_PRS_RPIMAC_EN;
+    iowrite32be(tmp, &regs->fmpr_rpimac);
+}
+```
+
+`FM_PCD_PRS_RPIMAC_EN = 0x00000001` (`fsl_fman_prs.h`).
+`struct fman_prs_regs` starts `{ u32 fmpr_rpclim; u32 fmpr_rpimac; ...
+}` at the FMan Parser block base -- **the exact same `FM_MM_PRS`
+(`FMAN_BASE+0xc7000` = `0x01ac7000`) block this project's own
+`SP_CODE_PHYS_BASE` already targets**, just at byte offset `+0x04`
+instead of `+0x040`. This is a GLOBAL, whole-parser-block register --
+not per-port shadow RAM, a completely different register class from
+everything F-205/F-243/F-244/F-245 have touched so far.
+
+**Live read-only confirmation on .185** (board running the F-245
+image, read via the same `/dev/mem` technique used throughout this
+investigation):
+
+```
+fmpr_rpclim=0x00000000 fmpr_rpimac=0x00000000
+```
+
+`fmpr_rpimac` bit 0 is **clear**. `fmpr_rpclim` at 0 matches the
+vendor's own `DEFAULT_MAX_PRS_CYC_LIM=0`, so that register is fine as-
+is. But `FM_PCD_PRS_RPIMAC_EN` being unset means **the soft-parser
+execution unit itself has never been powered into its running state**
+on this board. Mainline's `init_hwp()` never implements the optional
+soft-parser feature, so it never has reason to touch this bit --
+it simply stays at its POR/reset default of off.
+
+**This fully explains every negative result so far in one stroke.**
+`pmda[].ssa`'s `PRS_HDR_SW_PRS_EN` bit correctly tells the *hard*
+parser to branch into soft-parser code for a given HXS slot -- and
+F-243/F-244/F-245 proved that branch decision itself is being made
+correctly (readback-verified, byte-identical to vendor encoding, on
+both slot 6 and slot 0). But if the soft-parser *processor* that would
+execute the branched-to code was never enabled, the branch presumably
+just falls through / no-ops, regardless of which slot points at it --
+matching the observed "silent on every slot tried" result exactly, and
+requiring no theory about HXS routing, code addressing, or bytecode
+correctness being wrong at all.
+
+Confirmed via `git log`/`git blame` equivalent reasoning that no
+existing fixup (F-205 through F-245) ever touches `FM_MM_PRS+0x04` --
+this genuinely is new ground, not a rediscovery of something already
+tried.
+
+**F-246 adds `sp_global_enable`/`sp_global_disable` cc_test verbs**
+(readback-verified RMW of `fmpr_rpimac` bit 0, no `stop_port_hwp`
+bracket needed since this is a plain always-live control register --
+matches the vendor's own `PrsEnable()`/`PrsDisable()`, which write it
+directly with no port-level bracket either). This is a **global**
+toggle (affects every port's soft-parser availability simultaneously),
+but setting it alone should be inert -- no port's `pmda[].ssa` points
+at soft-parser code unless separately armed, so it's safe to test
+standalone before combining with F-245's slot-0 arm. Board- and CI-
+build-tested pending; a raw `/dev/mem` write to verify this live
+without a rebuild was attempted but blocked by the sandbox's own
+safety classifier (a *global*, whole-parser-block write is more
+invasive than the per-port debugfs writes approved so far) -- routing
+through the proper kernel-fixup + CI cycle instead, per the standing
+build-via-CI rule.
