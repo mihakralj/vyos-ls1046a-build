@@ -172,6 +172,47 @@ isolates "does the injection mechanism work" from "does the walk consume it
 correctly," matching this project's established one-variable-at-a-time
 discipline.
 
+## 6a. 2026-09-04 follow-up: addresses pinned down, confirmed live on `.185`
+
+Per §5 step 1. From vendor `fm_prs.c`/`fm_pcd_ext.h`/`fm_common.h`:
+
+```
+FM_MM_PRS       = 0x000c7000   (offset within the FMan block, cross-checked
+                                against this project's own already-validated
+                                FM_MM_KG = 0x0000c1000 == kg-scheme-read.py's
+                                KG_OFFSET=0xc1000 -- same source, same silicon)
+SW-parser code base = FMAN_BASE(0x01a00000) + FM_MM_PRS = 0x01ac7000
+PRS_SW_DATA          = 0x800   -> per-header entry-point table at 0x01ac7800
+PRS_REGS_OFFSET      = 0x840   -> parser register block at 0x01ac7840
+FM_PCD_PRS_NUM_OF_HDRS = 16    -> table is exactly [0x800,0x840), 16 words
+```
+
+The 16-entry size exactly matches this project's own already-established
+16-slot HXS numbering (`HWP_HXS_COUNT` in `fman_port.c`, IPv4=slot5,
+IPv6=slot6 per F-205's vendor-confirmed `GetPrsHdrNum` mapping) — strong
+circumstantial evidence `swPrsDataParams[6]` is the IPv6 entry point, though
+not yet proven.
+
+**Confirmed live via read-only `/dev/mem` check on `.185`**: the code
+region `[0x01ac7000, 0x01ac7800)` and the per-header table
+`[0x01ac7800, 0x01ac7840)` are both all-zero — exactly matching "mainline
+never loads soft-parser code," and the register block at `0x01ac7840`
+begins with plausible-looking nonzero content, confirming the address
+computation is correct on real silicon, not just on paper. No writes
+attempted; this was a pure read.
+
+**Still open**: `pmda[slot].ssa` (`fman_port.c`, "Soft Sequence
+Attachment") is a *port-level* register (`struct fman_port_hwp_regs`,
+already used by this driver via F-205), separate from the *PCD-level*
+`swPrsDataParams[]` table above — the term "ssa"/"Soft Sequence
+Attachment" does not appear anywhere in the vendor NCSW source at all, so
+its field encoding (code offset? a flag bit distinguishing "offset" from
+the existing `HWP_HXS_SH_PAD_REM=0x80000000` checksum-padding flag
+already stored there for TCP/UDP slots? does it need to agree with
+`swPrsDataParams[]`, override it, or is it independent?) is not resolved
+by anything found so far. This is the next concrete unknown before any
+code can be written or loaded.
+
 ## 7. Risk and scope assessment
 
 This is a materially larger undertaking than anything attempted so far in
