@@ -2200,6 +2200,23 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
     echo "### fman_port.c/.h/pcd_cc_test.c: F-245 sp_arm any-HXS-slot generalization (T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-246 (T-M6-8 VLAN-v6 dig, 2026-09-04): global FMan Parser soft-parser
+# execution-unit enable (FMPR_RPIMAC bit 0). Live read-only check on .185
+# found this register at 0x00000000 -- the soft-parser processor is
+# globally OFF under mainline's init_hwp() (an optional feature mainline
+# never implements), independent of any port's pmda[].ssa trigger bit --
+# fully explaining F-243/F-244/F-245's identical silent result on both
+# HXS slot 6 and slot 0. Traced from dpa_app's real init sequence
+# (FM_PCD_Disable() before PCD/soft-parser load, fmc_execute() enables at
+# the end) down through PrsEnable()/PrsDisable() to fman_prs_enable()/
+# fman_prs_disable() in the real vendor SDK source. Adds
+# sp_global_enable/sp_global_disable cc_test verbs. Must run after F-243
+# (SP_CODE_PHYS_BASE/SP_CODE_REGION_SIZE anchors).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_246.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-246 global soft-parser execution-unit enable (T-M6-8 VLAN-v6 dig)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
