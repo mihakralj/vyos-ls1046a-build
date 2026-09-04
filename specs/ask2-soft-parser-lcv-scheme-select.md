@@ -213,6 +213,112 @@ already stored there for TCP/UDP slots? does it need to agree with
 by anything found so far. This is the next concrete unknown before any
 code can be written or loaded.
 
+## 6b. 2026-09-04, same day: `pmda[].ssa` fully resolved — the trigger mechanism is now completely understood
+
+RM §5.9.3/Table 5-324 (via the same channel that supplied the `kgse_bmch`
+bit-table earlier this session) fully resolves this. `pmda[slot].ssa` is a
+32-bit register with:
+
+```
+bits[0:15]   protocol-specific hard-HXS options (per header type; e.g. the
+             PAD_REM flag this driver already sets for TCP/UDP slots)
+bits[16:19]  CP_OFFSET -- per-header CPID sub-offset (a THIRD mechanism,
+             separate from both OR_IV_LCV and the auto-increment conditions
+             in Sec2 -- not needed for this design, noted for completeness)
+bit[20]      PRS_HDR_ERROR_DIS -- suppress FD[STATUS].PHE for this header
+bit[21]      PRS_HDR_SW_PRS_EN (0x00000400) -- THE trigger: on completing
+             this hard HXS stage, branch to Parser Instruction RAM at the
+             offset below instead of continuing hard-parse state transitions
+bits[22:31]  PRS_HDR_SW_PRS_OFFSET (0x000003FF, 10 bits) -- 2-byte-resolution
+             instruction index into Parser Instruction RAM (byte_offset/2)
+```
+
+**`swPrsDataParams[]` is not an entry-point table at all** — it's a 16-word
+*scratch parameter bank* (`FMPR_SXPAW0-15`) the running bytecode can read
+via `LOAD_BYTES_PA_TO_WR`, for runtime constants the bytecode needs (e.g. a
+PPPoE relay offset). It does not participate in triggering or overriding
+`.ssa` in any way — §4's speculation about a relationship between the two
+was wrong; they're independent, and this design doesn't need
+`swPrsDataParams[]` at all (the LCV bit to inject can be a bytecode
+immediate).
+
+**Instruction RAM layout**, 2048 bytes at `0x01ac7000`-`0x01ac77ff`
+(matches §6a's confirmed base exactly):
+- `0x000-0x03f` (instructions `0x00-0x1f`): reserved, hardware HXS entry
+  points.
+- `0x040-0x7ef` (instructions `0x20-0x3f7`): user bytecode region — matches
+  the vendor `SP_OFFSET=0x20` constant already found in `dpa_app/dpa.c`
+  (§4, original citation), now fully explained.
+- `0x7f0-0x7ff`: tail padding.
+
+**Worked value, confirmed against the vendor's own convention**: loading
+code at byte offset `0x040` (instruction index `0x020`, the start of the
+user region) and wiring it to fire on IPv6 (`pmda[6].ssa`, HXS slot 6):
+
+```
+pmda[6].ssa = PRS_HDR_SW_PRS_EN(0x00000400) | 0x020 = 0x00000420
+```
+
+**§5 items 1-2 (address pinning, SSA/`swPrsDataParams[]` relationship) are
+now fully resolved.** What remains before writing any code: item 3, the
+exact bit-level encoding of the `OR_IV_LCV` opcode (currently only known
+by name/pseudocode from the qdrant ISA summary, not its machine-code
+bits) and whatever terminator/return mechanism ends a soft sequence and
+resumes normal hard-parse flow.
+
+**One more pre-existing-header note (§5)**: `HEADER_TYPE_NONE`/pre-parser
+hooks (firing before any hard-parse stage) go through a *different*
+mechanism entirely — overriding the port's `FMBM_RFNE` (Rx Frame Next
+Engine, already read this session during the CC-tree register dump, §9.6
+of the dual-lane doc) to launch directly into soft-parser code instead of
+the Ethernet HXS. Not needed here (IPv6 detection naturally happens via
+the normal hard-parse chain, so `pmda[6].ssa` is the correct, simpler
+hook), but worth recording since `FMBM_RFNE` is a register this driver
+already reads/knows about.
+
+## 6c. 2026-09-04, same day: the real remaining blocker — bytecode encoding, not addressing
+
+Looked for `OR_IV_LCV`'s exact bit-level machine-code encoding to actually
+assemble the hook. Found a genuine, deeper gap than expected.
+
+This project already has a real, hardware-validated ISA capture for the
+**FE-VM Controller** (the 201-instruction table at `large-files.moshe.nl`,
+used throughout this session's — and prior sessions' — `decomp/` work:
+`fman-isa-xref.py`, `fman-disasm.py`, the whole FE action-interpreter
+effort). That capture is specifically for the Controller/FE-VM execution
+unit (IRAM-resident microcode driving FE_ENTER/CC-tree action chains) —
+confirmed by this project's own 2026-08-29 cross-decode analysis, which
+explicitly separated "the controller ISA... executes from IRAM" from "the
+FE-VM action opcodes our C emits as DATA... are NOT in the controller ISA
+table" as two distinct decode domains.
+
+**The soft parser is a third, separate execution unit** (within the FMan
+Parser block, not the Controller block) with its own bytecode format.
+What's captured so far (`OR_IV_LCV`, `JMP_PROTOCOL_IP`, etc., §2 above) are
+opcode *names* and pseudocode extracted from `FMCSPCreateCode.h`'s C++
+enum — the FMC *compiler's own source*, describing its internal IR
+representation. That is not the same thing as the runtime bit-pattern
+those enum values get lowered to when the compiler emits final bytecode.
+No (value, mask, bit-layout) table exists yet for this ISA anywhere in
+this project's knowledge base, unlike the Controller ISA.
+
+**Getting from opcode name to assemblable machine code needs one of:**
+- the FMC compiler's actual emission/encoding logic (a different part of
+  its source than the enum declaration — not yet located), or
+- real compiled soft-parser bytecode to reverse-engineer from (e.g. if the
+  vendor's `cdx_sp.xml` was ever run through the actual FMC tool and its
+  binary output captured/preserved somewhere), or
+- a dedicated reverse-engineering effort against this specific VM, on the
+  same scale as the FE-VM Controller ISA capture already completed for
+  this project (which was itself substantial, standalone work).
+
+**Net effect on scoping: the trigger/loading mechanism is now fully
+resolved (§6a, §6b — addresses, `pmda[].ssa` encoding, code layout, all
+confirmed live where checkable) but the actual bytecode *content* remains
+blocked on a genuinely unsolved, separate reverse-engineering problem, not
+a lookup.** This is a materially different kind of gap than everything
+else pinned down today — not something more RM section lookups can close.
+
 ## 7. Risk and scope assessment
 
 This is a materially larger undertaking than anything attempted so far in
