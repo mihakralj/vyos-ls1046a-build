@@ -381,6 +381,46 @@ direct confirmation of the Parse-Array context-selector value from a
 source with RM detail deep enough to cover it (the register-table
 sections used successfully today did not).
 
+## 6e. 2026-09-04, same day: research avenues exhausted for now
+
+Tried two more safe, independent angles before concluding:
+
+1. **Read-only silicon check**: the full 2048-byte soft-parser instruction
+   RAM (`0x01ac7000`-`0x017ff`), including the first 64 bytes documented as
+   "reserved for hardware HXS entry points," is genuinely all-zero on live
+   `.185` — no fixed/silicon-resident microcode there to learn an
+   addressing model from empirically. Either those entry points are
+   implemented as fixed-function logic with no readable instruction bytes
+   at all, or they're simply unpopulated until first use; either way,
+   nothing to decode.
+2. **Searched for the soft-sequence exit/return mechanism** (how execution
+   resumes normal hard-parse flow after a triggered soft sequence
+   completes) — found no matching instruction. The closest candidate,
+   `task.complete` (`0x9c09f401`, confirmed encoding), is a Controller-side
+   "terminate current invocation, return task to FPM" operation — an
+   entire *frame's* processing being ended, not a benign "resume parsing"
+   return. Using it (or guessing at some other mechanism) risks dropping
+   or mishandling every frame that traverses the hook, not just failing to
+   inject the LCV bit.
+
+**Conclusion: this is not a remaining lookup gap, it's a genuine, unstarted
+reverse-engineering project**, on the same scale as the FE-VM Controller
+ISA capture this project already has (`large-files.moshe.nl`) — which
+itself represents real, dedicated, standalone effort (201 instruction
+forms, hardware-confirmed one at a time). Nothing available today
+(RM chapters, vendor NCSW source, the FMC compiler's opcode-name enum, or
+live read-only silicon inspection) supplies the soft-parser VM's actual
+bit-level encoding or control-flow semantics. Continuing to search this
+same set of sources is unlikely to produce a different result.
+
+**Stopping the soft-parser path here.** Not because the design is wrong —
+§2-§6b's mechanism (trigger via `pmda[].ssa`, injection via a generic OR
+targeting the Parse Array's LCV location) remains the best-reasoned
+approach found, and everything about *loading and triggering* code is
+now solid. What's missing is the soft-parser VM's own instruction
+encoding — a standalone capture effort, not a continuation of today's
+research.
+
 ## 7. Risk and scope assessment
 
 This is a materially larger undertaking than anything attempted so far in
