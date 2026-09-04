@@ -939,3 +939,58 @@ this soft-parser/LCV-injection thread exists specifically for the
 IPv6 dual-lane KeyGen scheme-selection problem, which may have other
 viable approaches worth weighing against continued soft-parser
 investigation cost.
+
+## 6o. 2026-09-04, same day: F-246 itself had an addressing bug -- the board test never touched the real register
+
+Before spending hours standing up a `.116` live-capture build (the 6n
+recommendation), re-derived the FMPR_RPIMAC address directly against
+the vendor SDK source rather than trusting the earlier paraphrase.
+Ground truth (`fm_prs.h:308`, `fm_prs.c:112`, `fsl_fman_prs.h:50-52` in
+`/tmp/kilo/nxpwt/.../sdk_fman/`, cross-checked against the identical
+files under `/mnt/builds/linux/drivers/net/ethernet/freescale/sdk_fman/`
+and `/mnt/builds/opnsense-src/sys/contrib/ncsw/`):
+
+```c
+#define PRS_REGS_OFFSET 0x00000840
+...
+p_FmPcdPrs->p_SwPrsCode    = (uint32_t *)UINT_TO_PTR(baseAddr);
+p_FmPcdPrs->p_FmPcdPrsRegs = (struct fman_prs_regs *)UINT_TO_PTR(baseAddr + PRS_REGS_OFFSET);
+```
+
+```c
+struct fman_prs_regs {
+	uint32_t fmpr_rpclim;   /* +0x00 within the register block */
+	uint32_t fmpr_rpimac;   /* +0x04 within the register block */
+	...
+```
+
+So `fmpr_rpimac`'s real address is `SP_CODE_PHYS_BASE + PRS_REGS_OFFSET
++ 0x04` = `SP_CODE_PHYS_BASE + 0x844` -- **not** `SP_CODE_PHYS_BASE +
+0x04` as F-246 (6m/6n) used. `SP_CODE_PHYS_BASE + 0x004` falls inside
+the soft-parser code RAM's own reserved/empty header region (the same
+region that reads as all-zero for every unloaded-code test in this
+document), not the real control register.
+
+**This means the F-246 board test in 6n never touched FMPR_RPIMAC at
+all.** `sp_global_enable` read 0 at the wrong address, OR'd in bit 0,
+wrote it back, read back 1 -- a perfectly consistent RMW-with-readback
+sequence, entirely within plain RAM. The dmesg line "confirmed
+FMPR_RPIMAC=0x00000001" was real and accurate about *that address*,
+just the wrong one. This fully explains the "necessary but not
+sufficient" result from 6n: it was never proven necessary at all --
+the real register was never exercised, board-tested, or ruled out.
+
+Every other finding in 6a-6n (bytecode encoding, `pmda[].ssa` trigger
+bit and PMDA/PCAC addressing, slot-0 vs slot-6 negative results, the
+vendor operation-ordering trace itself) is unaffected by this --
+those all address different registers, verified independently. This
+also means the `.116` live-capture detour (6n's recommendation) is
+premature: fix the address, rebuild via CI, retest with the *real*
+FMPR_RPIMAC first, since this may turn out to be the actual missing
+piece.
+
+Fixed in `bin/kernel-fixups/F_246.py` (`SP_RPIMAC_BYTE_OFF` `0x004U` ->
+`0x844U`, corrected docstring/comments with file:line citations,
+`SP_CODE_REGION_SIZE` unchanged at `0x1000` -- already covers the
+corrected offset). `python3 bin/test-fixups.sh` 4/4. **Not yet
+board-tested** -- that's the next step, not this one.
