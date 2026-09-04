@@ -516,6 +516,56 @@ run the §6 first validation step (load + arm on the sacrificial port,
 confirm via `probe2`/`probe3` that the injected LCV bit is visible, no
 scheme/CC-tree changes yet).
 
+## 6h. 2026-09-04, same day: deployed and safe, but the verification test itself is flawed
+
+**`sp_load`'s first attempt failed safely**: 16-bit `iowrite16be()` writes
+were silently dropped (readback immediately showed the old value, no
+corruption). Root cause: the vendor's own `FM_PCD_PrsLoadSw()` treats this
+RAM as 32-bit words (`WRITE_UINT32`) despite the semantically-16-bit
+instruction format — this specific MMIO block needs full 32-bit-
+granularity access. Fixed by packing pairs of 16-bit BE instruction words
+into 32-bit BE writes (byte-identical result, matches the vendor loader
+exactly); `sp_load` then succeeded cleanly on the next deploy.
+
+**`sp_arm`/`sp_disarm` both worked exactly as designed**: `pmda[6].ssa`
+went `0x00000000 -> 0x00000420` on arm (the precise worked value from
+§6b) and back to `0x00000000` on disarm, both readback-verified.
+**Critically, `eth1` processed ~1250 real packets — including at least
+one genuine IPv6 frame (`l3r=0x4020`) that should have triggered the
+hook — with the soft-sequence armed the entire time, and stayed at 0 RX
+errors throughout.** This is real, board-verified confirmation that the
+load/arm/disarm mechanism itself is safe: no crash, no corruption, no
+parser wedge, even with a previously-never-exercised code path active on
+live traffic.
+
+**But the verification method (comparing the raw LCV field before/after)
+cannot work as designed, independent of whether injection succeeded.**
+`pmda[].lcv` defaults to `0xFFFFFFFF` for every HXS slot under mainline
+(`init_hwp()`), so the per-frame `LCV` value is already all-ones for any
+real transit frame regardless of family — confirmed directly in this same
+capture (`lcv=ffffffff` on every try, IPv6 included). `OR_IV_LCV`ing any
+bit into an already-all-ones value is undetectable by construction — a
+math fact, not a signal about whether the soft-parser hook actually ran.
+This was already implicit in §6c's own reasoning about the "shared
+scheme, saturated LCV" case but wasn't carried forward to this specific
+test's design.
+
+**What this doesn't resolve**: whether the soft-sequence actually
+executed at all. A cleaner test would use a different opcode with an
+unambiguous, non-saturated target — e.g. `STORE_WR_TO_RA` (write a
+literal, arbitrary "magic byte" into an unused/padding byte of the Parse
+Result via `LOAD_BITS_IV_TO_WR` + `STORE_WR_TO_RA`, both real opcodes
+per §2/§6f) instead of `OR_IV_LCV`. This needs the same ground-truth
+verification rigor §6g applied to the current sequence (ground-truth
+byte-encoding for two more opcodes not yet checked against
+`/tmp/kilo/fmc/source/spa/`) before assembling and deploying — not yet
+done.
+
+Board left clean (disarmed, 0 RX errors, `pmda[6].ssa` restored to
+mainline default). Loaded code stays inert in the shared parser RAM
+(harmless — nothing points at it with `PRS_HDR_SW_PRS_EN` set now) but
+could be cleared in a future pass if desired.
+
 ## 7. Risk and scope assessment
 
 This is a materially larger undertaking than anything attempted so far in
