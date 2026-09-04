@@ -711,3 +711,56 @@ transit frames"; if it's silent there too, the trigger path itself
 (not just slot 6) is broken. `cc_test`'s `sp_arm <port_hex> [slot_hex]`
 now takes an optional slot (default 6, backward-compatible with the
 F-244 procedure) — `sp_arm 0x0d 0` arms slot 0.
+
+## 6l. F-245 board-tested: slot 0 is ALSO silent -- trigger mechanism itself suspect, not slot 6
+
+Built via CI (run `33893879911`, commit `0da58593`), deployed as image
+`2026.09.04-1613-rolling`. Loaded the identical F-244 bytecode, armed on
+port `0x0d`'s HXS slot 0 (ETH catch-all -- per the 2026-08-19 sweep, the
+one slot proven to activate its LCV contribution on every real transit
+frame, so no waiting for a specific protocol was needed).
+
+Two fresh `probe2` captures while armed (confirmed fresh by differing
+checksum/l3r fields -- an ARP frame, then a broadcast IPv4 frame) both
+showed **Parse Result byte 14 still `0xff`**. Board stayed at 0
+`rx_errors` throughout. Disarmed cleanly.
+
+**This changes the conclusion from Sec6j/6k.** Slot 0 is not a
+scheme-selection edge case -- it is the ONE slot independently proven
+(via LCV, a completely different signal) to be live for every frame.
+If the soft-parser branch mechanism worked at all, this is the easiest
+possible case to observe it in, and it stayed silent. Combined with
+6k's byte-for-byte confirmation that the register/bit-layout/slot-
+constant are all vendor-correct, this points away from
+"wrong slot" and toward **the soft-parser trigger not firing at all on
+this driver/hardware configuration, independent of which HXS slot is
+armed.**
+
+**Leading untested hypothesis**: code-load timing relative to parser
+enable. `FM_PCD_PrsLoadSw()` in the vendor stack is called by `dpa_app`
+once during its own PCD profile bring-up -- before ports are actively
+processing production traffic in the vendor's normal boot sequence.
+F-243's `cc_test_sp_load()` does a bare `ioremap`/write/readback with
+**no stop/enable bracket at all** (unlike `pmda[].lcv`/`pmda[].ssa`
+writes, which F-205 already established need a stop-parser/write/
+readback/start-parser bracket because they're hard-parser *shadow RAM*
+that only commits to live state around a parser stop/start cycle). If
+the soft-parser code RAM has the same shadow-RAM commit semantics -- or
+if the execution unit's instruction fetch is otherwise snapshotted at
+parser-enable time rather than read live per frame -- then loading code
+into an already-running, hours-uptime parser (as every test so far has
+done) could leave the write visible to `/dev/mem` readback (a plain
+memory read) while genuinely invisible to the actual fetch path the
+hardware parser execution unit uses. This would explain the identical
+silent result on both slot 6 and slot 0 in one stroke, without needing
+any further slot-routing explanation.
+
+**Not yet tested**: whether wrapping `cc_test_sp_load()` in the same
+`stop_port_hwp`/`start_port_hwp` bracket already used for `pmda[]`
+writes changes anything (cheap, in-place fixup, no new bytecode) --
+note this bracket is per-port, so it would need to run once per RX
+port to have any chance of affecting the shared code RAM's commit
+state, or the real trigger may be a global/parser-block-level enable
+this project hasn't identified yet. This is a bigger, more open-ended
+engineering question than the slot-0 test was -- worth a scoping
+check-in before continuing.
