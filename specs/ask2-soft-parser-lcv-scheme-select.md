@@ -664,3 +664,50 @@ bytecode. This is the same class of "is LCV/soft-parser reachable for
 transit frames at all" question §6h's F-243 test was trying to answer —
 now with a second independent negative, worth a fresh scoping/priority
 call before continuing further down this path.
+
+## 6k. F-245: byte-for-byte vendor comparison — mechanism confirmed correct; adding a slot-0 discriminator
+
+User question: "soft-parser should be identical to reference nxp ask —
+we have source and working board on .116 — what are we doing
+differently so it fails for ask2?" Answer, after a direct diff against
+the real vendor SDK source
+(`/tmp/kilo/nxpwt/kernel/flavors/ask/sdk-sources/drivers/net/ethernet/
+freescale/sdk_fman/Peripherals/FM/Port/fm_port.c`, the actual
+`SetPortPrsOptions`/`FM_PORT_SetPCD` implementation) and the vendor's
+own NetPDL soft-parser source
+(`/mnt/builds/ASK/dpa_app/files/etc/cdx_sp.xml`): **nothing verifiable
+by static comparison is different.**
+
+- Register/field layout: vendor `t_FmPortPrsRegs` is
+  `struct { u32 softSeqAttach; u32 lcv; } hdrs[N]` (`fm_port.h:437-443`)
+  — same field order as mainline's `struct fman_port_hwp_regs { u32 ssa;
+  u32 lcv; } pmda[N]`.
+- Bit layout: vendor `PRS_HDR_SW_PRS_EN = 0x00000400` (`fm_port.h:681`),
+  OR'd with the unshifted offset at the low bits
+  (`SetPortPrsOptions`: `tmpReg |= (PRS_HDR_SW_PRS_EN | tmpPrsOffset)`)
+  — exactly matches our `0x00000420` (`0x400 | 0x020`).
+- Slot constant: vendor `GetPrsHdrNum(HEADER_TYPE_IPv6)` hardcodes
+  `return 6` (`fm_common.h:647`) — exactly matches
+  `FMAN_HWP_HXS_IPV6 = 6`.
+- Offset units confirmed 2-byte ("instruction") resolution via
+  `FM_PCD_PrsLoadSw()`'s labelsTable population
+  (`FMCSP.cpp`'s `createExtensions()`/`byte_position` → divided
+  consistently with our `SP_USER_CODE_BYTE_OFF/2 = 0x020`).
+
+So the write itself is provably byte-identical to what the vendor's own
+driver does for the same intent. The defect isn't mechanical, it's
+topological: whether HXS slot 6 is ever the *live* hard-parser state
+for a real transit frame on this driver/silicon combination — which is
+exactly what the 2026-08-19 per-slot LCV sweep already found evidence
+against (only slot 0/ETH-catchall reliably activates).
+
+F-245 makes the cheap, decisive follow-up test possible without a new
+bytecode change: arm the *same* F-244 magic-byte hook on slot 0 instead
+of slot 6. Slot 0 fires on every frame (no need to wait for IPv6
+traffic specifically). If it fires there, the soft-parser
+load/arm/trigger mechanism is proven fully working end-to-end and the
+defect narrows cleanly to "slot 6 specifically is unreachable for
+transit frames"; if it's silent there too, the trigger path itself
+(not just slot 6) is broken. `cc_test`'s `sp_arm <port_hex> [slot_hex]`
+now takes an optional slot (default 6, backward-compatible with the
+F-244 procedure) — `sp_arm 0x0d 0` arms slot 0.
