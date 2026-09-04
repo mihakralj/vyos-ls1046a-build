@@ -1018,3 +1018,99 @@ comparison has now genuinely been tried. The remaining paths are
 semantics; an undocumented model/errata requirement; a slot/HXS
 numbering mismatch) or the `.116` live-capture route -- which is now
 back on the table as the highest-value next step, not a premature one.
+
+## 6p. `.116` live capture: real vendor register state and real bytecode obtained -- confirms this project's model is correct, doesn't reveal a new gate
+
+Built a cross-compiled, vermagic-matched read-only diagnostic kernel
+module (`decomp/fmprs_dump.c`) and loaded it on `.116` (a real NXP
+OpenWrt/Mono gateway-dk board running the vendor soft-parser in
+production) while live traffic transited it. `.116`'s actual production
+image build system was identified as `we-are-mono/openwrt` branch
+`mono` (confirmed via `.116`'s own `/proc/version` toolchain string,
+`aarch64-openwrt-linux-musl-gcc` -- an OpenWrt buildroot toolchain, not
+Yocto; `meta-mono`, the Yocto BSP layer, only builds the boot-firmware
+region + a BusyBox recovery initramfs, a separate artifact). Built the
+kernel-only target (`target/linux/compile`, not a full image) from that
+branch, vermagic confirmed byte-identical to `.116`'s
+(`6.12.103 SMP preempt mod_unload modversions aarch64` via
+`readelf -p .modinfo`).
+
+**Capture 1 -- global/per-port register state:**
+```
+prs_regs @0x01ac7840: rpclim=0x00000000 rpimac=0x00000001 (SW_PRS_EN=1)
+  pmeec=0x00000000 pevr=0xd84c0000 pever=0x00004000 perr=0x00000000
+  perer=0x00004000 ppsc=0x00000000
+```
+`FMPR_RPIMAC=1` on the real board -- confirms this project's F-246
+(corrected) understanding that this bit must be set, and that it
+genuinely is set in production. `pever`/`perer` bit14
+(`FM_PCD_PRS_SINGLE_ECC`/`DOUBLE_ECC`, `fsl_fman_prs.h:44-45`) differs
+from `.185`'s all-zero baseline -- checked and it's a RAS/ECC
+error-reporting enable for the parser's internal memory, unrelated to
+soft-parser dispatch; not a lead.
+
+Per-port `pmda[]` on all 5 active ports (`0x09,0x0c,0x0d,0x10,0x11`):
+identical `slot0(ETH) ssa=0x00000437`, `slot6(IPv6) ssa=0x00000488`
+across every port. Decoding: `PRS_HDR_SW_PRS_EN=0x400` bit set in both
+(matches this project's own encoding exactly), remaining field
+`0x037`/`0x088` is the code-RAM word-index -> byte offset `0x06e` (ETH)
+/ `0x110` (IPv6) using this project's own `byte = index*2` formula from
+`SP_CODE_PHYS_BASE`. **Also checked and ruled out** a third,
+previously-unexamined mechanism found while tracing `fm_port.c`'s
+`SetPcd()`: `fmbm_rfne` ("Rx Frame Next Engine", a BMI-block register
+distinct from the Parser-block registers) can in one specific vendor
+code path (`HEADER_TYPE_NONE`/no-per-header-attach) carry a direct
+soft-parser entry offset instead of a normal hard-parser header-type
+constant. Captured on `.116`: `rfne=0x10440000 (HXS=0x00)` on every
+port -- a plain header-type constant, confirming `.116` uses the
+per-header `pmda[].ssa` path (the one this project has tested
+exhaustively), not this alternate one.
+
+**Capture 2 -- real vendor soft-parser bytecode**, first 320 bytes of
+code RAM (`0x01ac7000`+). Decoded against the full opcode table
+(`/tmp/kilo/fmc/source/spa/fm_sp_private.h:96-127`, same ground-truth
+assembler source this project's own §6g already verified against):
+- Byte `0x06e` (the real ETH-slot-0 entry point, per the ssa decode
+  above): `0x3100` = `LOAD_BYTES_RA_TO_WR` family (`0x3000` range,
+  operand `0x100`) -- a clean, valid, real opcode.
+- A few words later (`0x078`/`0x080`): two parallel
+  `COMPARE_WR0_TO_IV` (`0x4000` family) sequences against immediates
+  `0x0800` and `0x86dd` -- IPv4 and IPv6 EtherType constants,
+  respectively. This is a real, sensible ETH-stage protocol dispatcher,
+  independently recognizable without any project documentation to lean
+  on.
+- Byte `0x110` (the real IPv6-slot-6 entry point): `0x0000` = `NOP`
+  (also a valid opcode -- alignment/entry-table artifact, not a
+  concern).
+
+**Conclusion**: this capture independently validates, against genuine
+production code rather than vendor header/source reading, every piece
+of this project's soft-parser model: the `PRS_HDR_SW_PRS_EN` bit
+position, the code-RAM word-index arithmetic, the HXS slot numbering
+(0=ETH, 6=IPv6 -- matching exactly, not just plausibly), and the
+opcode table itself (this project's own F-244 `STORE_IV_TO_RA`
+encoding, `08 0e 00 c3 1f fe 00 00`, decodes cleanly under the same
+table: `0x080e`=`STORE_IV_TO_RA` operand `0x00e`/dest-byte-14,
+`0x00c3`=immediate, `0x1ffe`=`JMP HXS RETURN_HXS`, matching §6i/6j
+exactly). **It does not reveal a new gate.** Every mechanism this
+project can locate via either static vendor-source comparison or live
+production-board comparison now matches between `.116` (working) and
+`.185` (silent). `.116` cleanly unloaded/verified healthy after (0
+`rx_errors` all 5 interfaces throughout, both capture sessions).
+
+**This is a genuine dead end for the register/mechanism-comparison
+approach specifically** -- not proof the soft-parser is unusable, but
+strong evidence the remaining gap (if any) is not something visible to
+comparative register/bytecode inspection at all. Remaining paths,
+now that this one is exhausted: (a) instrument `.116` itself to prove
+*when* during real traffic its own soft-parser genuinely executes (e.g.
+a counter/side-channel independent of both register state and Parse
+Result content) and compare execution *timing/frequency*, not just
+static configuration -- a materially different, more invasive
+experiment than this session's static captures; (b) step back from
+soft-parser as the vehicle for the original IPv6 dual-lane KeyGen
+scheme-selection problem entirely, given VLAN offload (the actual
+shipping feature) already works via the separate CC-tree/HMTD path.
+Recommend a fresh scoping conversation before further soft-parser work
+-- this thread has now had multiple genuinely thorough, honest negative
+results in a row.
