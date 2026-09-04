@@ -992,5 +992,29 @@ piece.
 Fixed in `bin/kernel-fixups/F_246.py` (`SP_RPIMAC_BYTE_OFF` `0x004U` ->
 `0x844U`, corrected docstring/comments with file:line citations,
 `SP_CODE_REGION_SIZE` unchanged at `0x1000` -- already covers the
-corrected offset). `python3 bin/test-fixups.sh` 4/4. **Not yet
-board-tested** -- that's the next step, not this one.
+corrected offset). `python3 bin/test-fixups.sh` 4/4.
+
+**Board-tested same day** (CI run `33918150346`, commit `0ab3c66b`,
+image `2026.09.04-2049-rolling`): `sp_load` -> `sp_arm 0x0d 0` (slot 0)
+-> `sp_global_enable`, dmesg confirmed `FMPR_RPIMAC=0x00000001` (the
+*real* register this time -- readback at the corrected `+0x844`
+address). Two fresh `probe2` captures on eth1 (confirmed fresh by
+differing hash/MAC bytes -- both ARP), **both still showed Parse
+Result byte 14 at `0xff`.** All five interfaces stayed at 0
+`rx_errors` throughout. Cleanly reverted (`sp_global_disable`,
+`sp_disarm 0x0d`), dmesg confirms `FMPR_RPIMAC=0x00000000` and the
+soft-sequence disarmed.
+
+**So the addressing bug was real and worth fixing, but it was not the
+missing piece.** With the actually-correct FMPR_RPIMAC now verifiably
+toggled, the soft-parser execution unit still produces no observable
+effect on a real transiting frame, on the one HXS slot independently
+proven live on every frame. This restores 6l/6n's original
+"necessary but not sufficient" framing -- just now against the real
+register instead of a RAM address that merely looked like one. Every
+register and sequencing item locatable via static vendor-source
+comparison has now genuinely been tried. The remaining paths are
+6n's three unranked hypotheses (atomic `fmc_execute()` transaction
+semantics; an undocumented model/errata requirement; a slot/HXS
+numbering mismatch) or the `.116` live-capture route -- which is now
+back on the table as the highest-value next step, not a premature one.
