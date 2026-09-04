@@ -110,8 +110,8 @@ index 030c35258b77..d73ec7d30985 100644
 + * byte-identical.
 + */
 +#define CC_KEY_SIZE_DUAL	48U
-+#define CC_KEY_DUAL_FAMILY_V4	0x00U
-+#define CC_KEY_DUAL_FAMILY_V6	0x00U
++#define CC_KEY_DUAL_FAMILY_V4	0x40U
++#define CC_KEY_DUAL_FAMILY_V6	0x60U
 +
 +static __maybe_unused void cc_pack_key_dual(void __iomem *match, u16 idx,
 +					    const struct fman_pcd_cc_hw_key *k)
@@ -210,8 +210,8 @@ index 000000000000..c00cdc9c3a2f
 +{
 +	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE, 16U);
 +	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_SIZE_DUAL, 48U);
-+	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V4, 0x00U);
-+	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V6, 0x00U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V4, 0x40U);
++	KUNIT_EXPECT_EQ(test, (u32)CC_KEY_DUAL_FAMILY_V6, 0x60U);
 +}
 +
 +static void cc_dual_key_v4(struct kunit *test)
