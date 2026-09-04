@@ -163,8 +163,24 @@ on this exact 210.10.1 image), and confirm the parse-result L3R byte-4 values
 Stage-1 partial proof already CONFIRMED (2026-08-21, board .185, F-223): a single
 `GEC0=0x80FF2004` parse-result extract produced a hardware hash exactly equal to
 `crc64_raw([0x40])` for an IPv6 frame — proving GEC parse-result extraction works
-and the KG hash is `crc64_raw` over the GEC key. Only the validated-code absent-
-lane substitution remains to confirm.
+and the KG hash is `crc64_raw` over the GEC key.
+
+### 3.5 Silicon Proof Confirmed (2026-09-03, LS1046A, 6.18.48-vyos)
+
+On image `2026.09.03-1916-rolling` (`6.18.48-vyos`), live atomic `probe3` captures on both IPv4 (DHCP/traffic) and IPv6 (mDNS/traffic) proved:
+
+1. **Validated Address Extraction and Deterministic Zero-Fill:**
+   - On IPv4 packets, GEC slot 1 (`0x87FF0B0C`) extracts 8 address bytes bit-perfect, while GEC slots 2 & 3 (`0x8FFF1B08` and `0x8FFF1B18`) deterministically emit 32 zero bytes in `k[9..40]`.
+   - On IPv6 packets, GEC slot 1 (`0x87FF0B0C`) deterministically emits 8 zero bytes in `k[1..8]`, while GEC slots 2 & 3 extract all 32 IPv6 address bytes bit-perfect.
+2. **Family Byte Emission (Byte 0):**
+   - In AC_CC scheme mode, GEC slot 0 (`0x80F07B00`) emits `0x00` (substituting `FMKG_GDV0R` = 0x00).
+   - Therefore, `ASK_FE_FAMILY_V4 = 0x00` and `ASK_FE_FAMILY_V6 = 0x00` match silicon reality bit-for-bit. Strict key space disjointness is guaranteed by the 32 zero bytes in IPv4 vs 8 zero bytes in IPv6.
+3. **CC-Tree Key Size Silicon Invariant (RM §5.12):**
+   - Valid hardware CC table entry sizes are strictly `1, 2, 4, 8, 16, 24, 32, 40, 48, 56` bytes.
+   - 46 bytes is invalid in hardware CC trees; any CC tree comparing the dual-lane key must pad the entry size to 48 bytes (2 bytes zero padding).
+4. **KeyGen Scheme BMCH & Mode Invariants:**
+   - `FMKG_SE_BMCH` (0x10C) is the Bit Mask Command High register, NOT CCBS. Writing a MURAM offset into `kgse_bmch` inadvertently masks key bytes.
+   - AC_CC dispatch uses `next_engine = 3` (`kgse_mode = 0x80000006`) with `kgse_bmch = 0`, as proven by production schemes 3 and 4.
 
 ## 4. Table and dispatch model
 
