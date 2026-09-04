@@ -604,3 +604,61 @@ current blocking issue for any dual-lane CC-tree HIT — the FAMILY-byte
 and key-size fixes (§9.3-9.5 committed `b31d8ad2` and earlier) are
 necessary but not sufficient. Board state at last report: healthy, all
 trees detached (per the F-241 atomic `probe3` teardown design).
+
+### 9.6 2026-09-04 — `kgse_bmcl` fixed (F-242); FAMILY reverted to 0x40/0x60 — extraction now bit-perfect for BOTH families; still no HIT
+
+Resolved §9.5's `kgse_bmcl` question using the RM's `FMKG_SE_BMCH`/`BMCL`
+bit-field tables (§5.10.3.12.4/.5): `kgse_bmch`'s 4 mask-command selectors
+(`MCS0-3`/`MO0-1`) get armed *incidentally* by whatever bits the CC MURAM
+offset happens to contain; the actual byte-mask value for those 4
+commands is `kgse_bmcl` (`BM0-3`), which this driver hard-codes to `0`
+and never rewrites for any scheme. `BM=0x00` means "AND with 0x00" —
+force the target byte to zero, regardless of which byte the incidentally-
+armed command targets. `F-242` (`bin/kernel-fixups/F_242.py`, commit
+`e7b9cf7b`) sets `kgse_bmcl = 0xFFFFFFFF` (all four `BM` fields = `0xFF`,
+a true AND-no-op) — neutralizing the corruption while leaving F-183's
+`kgse_bmch` CC-dispatch write completely untouched.
+
+**This also retroactively explains §9.3/9.4's "silicon emits `0x00` for
+FAMILY" conclusion — it was wrong, a second symptom of the same bug.**
+Byte 0 (FAMILY) turns out to have been *another* incidentally-masked
+byte all along, not a genuine default-register substitution. Live
+`probe3` captures on the F-242-fixed image (commit `f3978439` reverts
+`CC_KEY_DUAL_FAMILY_V4/V6` from `0x00U` back to `0x40U`/`0x60U`) confirm
+this directly and symmetrically for **both** families on real traffic:
+
+| Family | l3r (window+4) | FAMILY (window+48) | Notes |
+|---|---|---|---|
+| IPv4 | `8030` | `40` | reproduced across multiple captures, real src/dst addresses |
+| IPv6 | `4020` | `60` | real mDNS-over-IPv6 frame, full field decode below |
+
+The IPv6 capture decoded **completely bit-perfect** across every field:
+`V6_SRC` = `fe80::1c1f:474f:d730:ed27` (a real host on the segment),
+`V6_DST` = `ff02::fb` (mDNS IPv6 multicast), `PROTO` = `0x11` (17, UDP),
+`SPORT`/`DPORT` = `5353`/`5353` (mDNS). The V4 lane correctly zero-filled
+(`[1..8]` all zero, matching `cc_pack_key_dual()`'s absent-lane mask
+assertion). Every byte of the 46 meaningful bytes now checks out for
+both families — GEC extraction, the family discriminator, and the
+table-packing logic are no longer under any doubt.
+
+**Yet the actual end-to-end HIT test still shows 0 frames at the
+sink.** Armed `install_v6` on port `0x0d` with a known 5-tuple
+(confirmed via `ip -6 addr show` that the peer's source address genuinely
+matches what was armed — ruled out a test-methodology error), sent 20
+matching UDP6 frames from the peer, `capture_fini` reported `saw 0
+frame(s)`. `eth1` stayed at 0 RX errors throughout (F-241's atomic design
+continues to hold up under repeated use).
+
+**Conclusion: the remaining defect is not in KeyGen/GEC extraction or key
+construction — every byte of those is now independently verified correct
+for both families.** It must be in a different layer: CC-tree group/AD
+chain addressing, the RESULT AD's `target_fqid` encoding, or some other
+dispatch-path mechanism unrelated to key *content*. This project has
+never, across this entire multi-week investigation, observed a confirmed
+dual-lane CC-tree HIT — only ever inferred correctness of the extraction
+side. The next investigation needs to shift focus from "is the key right"
+(now settled: yes) to "does a byte-perfect key even get compared/dispatch
+correctly at all" — closer to the original, still-unresolved question in
+`specs/cc-comparator-compare-window-hypothesis.md`, but now with a fully
+trustworthy key to test against. Board left clean (all trees detached,
+sink released, 0 RX errors).
