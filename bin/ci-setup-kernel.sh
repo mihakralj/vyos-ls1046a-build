@@ -2161,6 +2161,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-242 kgse_bmcl no-op mask fix (T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-243 (T-M6-8 VLAN-v6 dig, 2026-09-04): soft-parser LCV-injection PoC.
+# Ground-truth-verified bytecode (OR_IV_LCV; JMP HXS RETURN_HXS) plus
+# sp_load/sp_arm/sp_disarm cc_test debugfs verbs, for the first safe
+# validation step of specs/ask2-soft-parser-lcv-scheme-select.md -- does
+# the injected LCV bit actually reach host-visible parse-result content.
+# Must run after F-205 (pmda[]/stop_port_hwp/start_port_hwp,
+# FMAN_HWP_HXS_IPV6) and F-240 (cc_test_saved_ricp array anchor).
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_port.h ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_243.py" 2>&1
+    echo "### fman_port.c/.h/pcd_cc_test.c: F-243 soft-parser LCV-injection PoC (T-M6-8 VLAN-v6 dig)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:

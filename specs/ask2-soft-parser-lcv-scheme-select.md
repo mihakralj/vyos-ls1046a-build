@@ -421,6 +421,101 @@ now solid. What's missing is the soft-parser VM's own instruction
 encoding — a standalone capture effort, not a continuation of today's
 research.
 
+## 6f. 2026-09-04, same day: full soft-parser ISA and a complete worked example obtained
+
+Direct confirmation obtained: the soft-parser VM is a 16-bit RISC engine
+executing from the same instruction RAM already pinned down in §6a
+(`0x01ac7000`, user code starting at instruction `0x020`/byte `0x040`).
+Full opcode inventory obtained, including exactly the two instructions
+this design needs:
+
+- **`OR_IV_LCV`** (base code `0x0003`) is a genuine dedicated opcode, not a
+  generic ALU op needing a context-selector guess as §6c/6d speculated —
+  it operates directly on LCV as its own addressable target: `LCV |=
+  imm32`, encoded as 3 words (opcode, imm low 16, imm high 16).
+- **`JMP HXS RETURN_HXS`** (`0x1C00 | 0x3FE = 0x1FFE`) is the soft-sequence
+  exit mechanism §6e found no trace of — "return to calling hardware
+  parser stage," i.e. resume normal hard-parse flow exactly where our hook
+  interrupted it. (`0x1FFF`/`END_PARSE` is the other exit, terminating
+  parsing entirely — not what this design wants.)
+
+**Complete worked example, ready to assemble** (8 bytes, PC `0x020`-`0x023`):
+
+```
+Word0 (PC 0x020): 00 03      OR_IV_LCV
+Word1 (PC 0x021): 00 00      imm low 16 bits  (of 0x80000000)
+Word2 (PC 0x022): 80 00      imm high 16 bits
+Word3 (PC 0x023): 1F FE      JMP HXS RETURN_HXS
+```
+
+Loaded at byte offset `0x040` and wired via `pmda[6].ssa = 0x00000420`
+(§6b's own worked example — now fully consistent end to end).
+
+**§6c/6d/6e's "separate ISA, unconfirmed addressing, no exit mechanism"
+conclusions are superseded** — this is a real, complete, internally
+consistent specification, not a guess. `$RA[]` (the 32-byte Parse Result,
+IC `0x20`-`0x3F`), `$PA[]` (the `0x01ac7800` parameter array from §6b,
+confirmed as the same region), `$FW[]` (frame window), and `LCV` itself
+are all directly addressable VM concepts — no indirect context-selector
+trick needed for this specific design at all.
+
+**§5's implementation list is now fully unblocked.** Next: implement the
+loader (a plain `ioremap()`'d write to `0x01ac7000+0x040`, matching
+`FM_PCD_PrsLoadSw`'s simple-copy behavior — no indirect-AR protocol) and
+the trigger (`pmda[6].ssa`, reusing F-205's already-mapped
+`port->hwp_regs->pmda[]` struct and stop/write/start bracket verbatim —
+SSA is the same PMDA shadow-RAM class as the `.lcv` field F-205 already
+handles correctly). First live test: load + arm on the sacrificial port
+only, verify via the existing `probe3` tooling that LCV's injected bit
+actually differs v4 vs v6 — **no scheme or CC-tree changes yet**, isolating
+injection correctness from consumption, per §6's original staged plan.
+
+## 6g. 2026-09-04, same day: ground-truth ISA source found on local disk (`/tmp/kilo/fmc/source/spa/`), fully verified, implemented
+
+The real NXP FMC Soft Parser Assembler source exists locally
+(`/tmp/kilo/fmc/source/spa/fm_sp_private.h`, `fm_sp_private.c`,
+`fm_sp_assembler.tab.c`) — missed by the earlier filesystem search in
+§6c/6d/6e (which checked for a compiler *binary* and `FMCSPCreateCode.h`
+specifically, not this actual assembler source tree). Independently
+verified every claim in §6f directly against this source before writing
+any code:
+
+- `_FMSP_INSTR_CODE_OR_IV_LCV = 0x0003` (`fm_sp_private.h:99`) — exact
+  match.
+- `_fmsp_set_lcv_bits_action()` (`fm_sp_assembler.tab.c:2195`) confirms the
+  3-word layout precisely: opcode word, then
+  `immediate_value & 0xffff` (low), then `(immediate_value >> 16) & 0xffff`
+  (high).
+- `_FMSP_INSTR_CODE_JUMP = 0x1800`, `_FMSP_INSTR_MOD_JMP_HXS = 0x0400`,
+  `_FMSP_RETURN_HXS = 0x3fe`, `_FMSP_END_PARSE = 0x3ff`
+  (`fm_sp_private.h:123,137,191,192`) — exact matches.
+- The label-resolution pass (`fm_sp_private.c:1508-1509`) confirms the
+  final word construction: `program_counter = program_counter & 0x3ff;
+  instr_p->hw_words_p[0] = instr_p->hw_words_p[0] | program_counter;` —
+  i.e. `(0x1800 | 0x0400) | (0x3fe & 0x3ff) = 0x1FFE`, matching §6f's
+  worked example exactly.
+- Final byte serialization (`fm_sp_private.c:2532`) confirms big-endian,
+  high byte first: `buffer_p[cur_byte] = (hw_words_p[count] >> 8) & 0xff`
+  then `hw_words_p[count] & 0xff`.
+
+**§6c/6d/6e's "separate/unconfirmed ISA" concerns are fully resolved with
+independent, ground-truth confirmation — not just a transcription
+accepted on faith.** Every byte of the 8-byte PoC sequence is now verified
+twice over (against the transcription and against the compiler source
+directly).
+
+**Implemented**: `F-243` (`bin/kernel-fixups/F_243.py`) adds `sp_load`
+(loads the 8-byte sequence into `0x01ac7000+0x040`, `ioremap`'d, readback-
+verified, iounmapped after) and `sp_arm <port>`/`sp_disarm <port>`
+(`pmda[6].ssa` read-modify-write, reusing F-205's
+`stop_port_hwp`/`start_port_hwp` bracket verbatim — same PMDA shadow-RAM
+class as the already-proven `.lcv` field) as new `cc_test` debugfs verbs.
+Applies cleanly and idempotently against the current tree; local
+brace-balance and diff review done before deployment. Next: deploy and
+run the §6 first validation step (load + arm on the sacrificial port,
+confirm via `probe2`/`probe3` that the injected LCV bit is visible, no
+scheme/CC-tree changes yet).
+
 ## 7. Risk and scope assessment
 
 This is a materially larger undertaking than anything attempted so far in
