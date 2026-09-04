@@ -2175,6 +2175,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
     echo "### fman_port.c/.h/pcd_cc_test.c: F-243 soft-parser LCV-injection PoC (T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-244 (T-M6-8 VLAN-v6 dig, 2026-09-04): soft-parser magic-byte PoC,
+# replaces F-243's OR_IV_LCV bytecode with STORE_IV_TO_RA -- F-243's LCV-
+# based verification is mathematically unusable (pmda[].lcv defaults to
+# 0xFFFFFFFF, saturated regardless of injection). Writes an unambiguous
+# 0xC3 into Parse Result byte 14 (route_type) instead. Must run after
+# F-243 (replaces its cc_test_sp_poc_code32 initializer).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_244.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-244 soft-parser magic-byte PoC (T-M6-8 VLAN-v6 dig)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
