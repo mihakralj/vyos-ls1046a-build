@@ -616,3 +616,51 @@ failed to connect (`CONNECT_TIMEOUT`) this session — board access is
 blocked until it's restored. `bin/kernel-fixups/manifest.json` and
 `ci-setup-kernel.sh` are both updated (F-244, count 34,
 `test-fixups.sh` passes all 4 checks).
+
+## 6j. F-244 board-tested: clean negative — hook did not fire on a real IPv6 frame
+
+Board access restored (TCP-serial console at 192.168.1.16:5555, reachable
+directly — see the memory note this discovery produced). Built via CI
+(`.github/workflows/self-hosted-build.yml`, run `33887320076`, commit
+`a592eb10`) per this session's new standing rule — no more local/dev-loop
+kernel builds — deployed as image `2026.09.04-1504-rolling` via
+`add system image` + reboot. Confirmed byte-exact in code RAM before
+arming (`0x01ac7000+0x040`: `08 0e 00 c3 1f fe 00 00`, matching F-244's
+encoding exactly).
+
+Armed on port `0x0d` (eth1). `probe2` caught a real IPv6 frame within the
+first capture window: an MLD report (`l3r=0x41b0`, dest MAC `33:33:...`,
+`ethertype=0x86dd`, IPv6 hop-by-hop-options extension header, final
+`nxthdr=0x3a`/ICMPv6) — genuinely IPv6, genuinely transiting the armed
+port. **Parse Result byte 14 (`route_type`) stayed `0xff`** — the `0xC3`
+magic byte was never observed. A second poll cycle only caught ARP/IPv4
+broadcast frames (no second IPv6 sample), so this is one clean data point,
+not an exhaustive sweep — but it's unambiguous on its own terms: no
+saturation confound like F-243's LCV test, and STORE_IV_TO_RA's
+correctness was independently verified byte-exact via `objdump`/`readelf`
+before this session's build even ran (§6i). Disarmed cleanly afterward
+(`pmda[6].ssa` restored to `0`, dmesg confirms), board healthy throughout
+(`eth1` 0 `rx_errors` before, during, and after).
+
+**Conclusion**: the soft-parser hook attached via `pmda[6].ssa` (IPv6 HXS
+slot, `PRS_HDR_SW_PRS_EN | instruction-index 0x020` = `0x00000420`) does
+not visibly execute for a real transit IPv6 frame on this port, at least
+not in a way that reaches the host-visible Parse Result. Two independent
+tests (F-243's LCV injection, methodologically flawed but also silent;
+F-244's magic-byte injection, methodologically clean and silent) now both
+point the same way. Candidate explanations, unranked, none yet
+investigated: (a) the trigger condition needs more than
+`PRS_HDR_SW_PRS_EN` set — some other `pmda[].ssa` bit-16:19 `CP_OFFSET` or
+hard-HXS option field this project hasn't pinned down; (b) HXS slot 6 (via
+F-205's `FMAN_HWP_HXS_IPV6`/`GetPrsHdrNum` mapping) isn't the hard-parser
+node that MLD-class (extension-header-bearing) IPv6 frames actually route
+through, despite it being expected to be the common IPv6 entry stage; (c)
+the instruction-index encoding (`0x020`, 2-byte resolution) or the
+physical/virtual addressing of the code RAM (`0x01ac7000`) doesn't line up
+with what the live parser actually dereferences, despite the readback
+match on write. (b) is the most testable next step (arm on a *different*
+HXS slot, or capture a plain non-extension IPv6 frame) without new
+bytecode. This is the same class of "is LCV/soft-parser reachable for
+transit frames at all" question §6h's F-243 test was trying to answer —
+now with a second independent negative, worth a fresh scoping/priority
+call before continuing further down this path.
