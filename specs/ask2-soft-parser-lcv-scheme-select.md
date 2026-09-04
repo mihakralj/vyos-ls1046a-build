@@ -861,3 +861,81 @@ safety classifier (a *global*, whole-parser-block write is more
 invasive than the per-port debugfs writes approved so far) -- routing
 through the proper kernel-fixup + CI cycle instead, per the standing
 build-via-CI rule.
+
+## 6n. F-246 board-tested: FMPR_RPIMAC enable alone is NOT sufficient either
+
+Built via CI, deployed, board-tested with explicit user sign-off (the
+sandbox's own safety classifier correctly flagged `sp_global_enable` as
+a global, all-ports-affecting write and required confirmation before
+running it -- same as it flagged the raw `/dev/mem` write attempt in
+6m).
+
+Sequence: `sp_load` -> `sp_arm 0x0d 0` (slot 0) -> `sp_global_enable`
+(confirmed via dmesg: `FMPR_RPIMAC=0x00000001`) -> two fresh `probe2`
+captures. **Both still showed Parse Result byte 14 at `0xff`.** All
+five interfaces (eth0-eth4) stayed at 0 `rx_errors` throughout. Cleanly
+reverted (`sp_global_disable`, `sp_disarm`), re-verified 0 `rx_errors`
+board-wide after.
+
+**So FMPR_RPIMAC was a real, board-confirmed-necessary condition
+(genuinely 0x00000000 under mainline, genuinely part of the vendor's
+real enable sequence) but proven NOT sufficient by itself.** The
+mechanism now matches the vendor at three independent levels --
+register/bit-layout/slot-constant (6k), operation ordering matching
+dpa_app's real disable->load->arm->enable sequence (6m), and the global
+execution-unit enable bit itself (6n) -- and it still doesn't produce
+the expected write.
+
+Checked and ruled out as the remaining gap:
+- `FM_PCD_SetAdvancedOffloadSupport()` (dpa_app's step 2, before
+  `fmc_execute()`): pure software bookkeeping in the vendor stack (sets
+  a driver-internal flag, zero register writes), and it hard-requires
+  the Host Command (HC) interface to be initialized -- which this
+  project's own `arch/fman-function-inventory.md` notes ASK2
+  deliberately runs WITHOUT ("cap bitmask 0x17 with the HC bit
+  deliberately clear"). Not applicable to mainline.
+- Other `fman_prs_regs` fields read live on `.185`
+  (`fmpr_pmeec/pevr/pever/perr/perer/ppsc` all `0x00000000`):
+  `ppsc`/`fman_prs_set_stst()` is confirmed (via its own vendor call
+  site, `FM_PCD_SetPrsStatistics()`) to be a pure per-port statistics-
+  counter toggle, unrelated to soft-parser execution. The
+  exception/error registers (`pevr/pever/perr/perer`) gate interrupt
+  *reporting*, not execution, per their naming and vendor
+  `fman_prs_init()` usage.
+- The microcode's own static capability field is documented (prior
+  qdrant-recorded static analysis of the 210.10.1 firmware blob) as
+  including `PARSER_SOFTSEQ` (bit 4) in cap mask `0x17` -- but this
+  wasn't independently re-verified as a *live* register this session
+  (mainline's driver doesn't parse or expose it; it's a static field in
+  the firmware blob's own QEF header, not a runtime-readable status
+  bit this project has located yet).
+
+**Where this leaves the investigation**: every register-level and
+sequencing-level discrepancy locatable via static source comparison
+against the real vendor SDK has now been checked, board-tested, and
+either fixed (FMPR_RPIMAC, still needed regardless) or ruled out. The
+remaining gap is either (a) something in `fmc_execute()`'s *combined*
+transaction that a piecemeal, separately-timed reproduction (multiple
+debugfs writes seconds apart, vs. the vendor's single call) doesn't
+capture -- possibly a hardware state machine that only latches
+correctly within one atomic setup window; (b) an undocumented
+model/errata-specific requirement not present in the vendor SDK
+snippets available locally; or (c) something about the specific test
+frames or HXS state numbering not actually matching what the
+2026-08-19 LCV sweep's "slot 0 activates on every frame" finding
+established (worth a skeptical re-check, though that finding used an
+independent signal from a different investigation).
+
+**Recommendation**: this has reached the point of diminishing returns
+for further black-box register comparison against static vendor
+source. The highest-value next step, if this path continues, is a
+live register-state capture from `.116` (the real reference board,
+under load, WHILE its soft-parser is actively executing) rather than
+more source reading -- a true runtime side-by-side diff instead of a
+source-vs-source one. Worth weighing against the fact that VLAN
+offload itself (the actual shipping feature) already works via the
+separate CC-tree/HMTD path (2026-09-03 live-silicon re-validation);
+this soft-parser/LCV-injection thread exists specifically for the
+IPv6 dual-lane KeyGen scheme-selection problem, which may have other
+viable approaches worth weighing against continued soft-parser
+investigation cost.
