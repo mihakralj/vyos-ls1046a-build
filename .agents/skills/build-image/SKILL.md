@@ -123,14 +123,29 @@ rsync -av --rsync-path='sudo rsync' -e "ssh -i ~/.ssh/admin_key" \
   "$ISO" "$SIG" admin@192.168.1.137:/srv/tftp/iso/
 ```
 
-Then refresh the canonical `latest.iso` symlink (plus the back-compat per-flavor
-aliases, for installs that pinned an old URL) atomically:
+Then refresh the canonical `latest.iso` symlink **and its `.minisig`
+sidecar** (plus the back-compat per-flavor ISO aliases, for installs that
+pinned an old URL) atomically:
 
 ```bash
 ssh -i ~/.ssh/admin_key admin@192.168.1.137 \
   "sudo ln -sfn '$BASENAME' /srv/tftp/iso/latest.iso && \
+   sudo ln -sfn '$BASENAME.minisig' /srv/tftp/iso/latest.iso.minisig && \
    for a in default vpp ask; do sudo ln -sfn '$BASENAME' /srv/tftp/iso/latest-\$a.iso; done"
 ```
+
+**Do not skip the `.minisig` line.** `add system image` fetches
+`<url>.minisig` alongside the ISO, so if `latest.iso.minisig` is left
+pointing at an older build while `latest.iso` moves on, the board's
+signature check fails against a perfectly good image (`AGENTS.md`'s ISO
+deployment invariant calls this out by name as "the recurring trap" —
+observed again 2026-09-04). Verify after refreshing:
+
+```bash
+ssh -i ~/.ssh/admin_key admin@192.168.1.137 \
+  "readlink /srv/tftp/iso/latest.iso /srv/tftp/iso/latest.iso.minisig"
+```
+Both must resolve to files sharing the same `$BASENAME` stem.
 
 ### 5. Verify the HTTP relay serves it
 
