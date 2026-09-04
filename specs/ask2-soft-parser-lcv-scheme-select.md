@@ -319,6 +319,68 @@ blocked on a genuinely unsolved, separate reverse-engineering problem, not
 a lookup.** This is a materially different kind of gap than everything
 else pinned down today — not something more RM section lookups can close.
 
+## 6d. 2026-09-04, same day: `OR_IV_LCV` likely isn't a unique opcode — but the addressing model is still genuinely unresolved
+
+Reconsidered whether the FE-VM Controller ISA (§6c) and the soft-parser VM
+are really separate instruction sets, per a direct question about whether
+`OR_IV_LCV` might already be in the same `large-files.moshe.nl` table under
+a different (independently reverse-engineered) mnemonic. This is plausible
+and likely: if the FMan's parser soft-sequence engine and the FE-VM
+Controller share the same underlying RISC core type (architecturally
+sensible — NXP's "FMan Controller" block is documented as containing
+multiple RISC cores), then `OR_IV_LCV` is FMC's *high-level* name for the
+compiler emitting a **generic** OR instruction targeting whatever workspace
+address represents LCV during parser execution — exactly the same pattern
+this project's own FE-VM decomp work already established for opcodes like
+`task.set_fqid` (a generic memory-write instruction targeting a known
+workspace offset, not a dedicated "set FQID" opcode).
+
+Candidate generic instructions found in the table (`or32`, `ori16`,
+`orhi16`, `ori16c`, `orlane8`) all operate on `operand[operand_20_16]` — an
+**indexed operand**, not a flat memory address. Memory-class instructions
+in this ISA (`memb.read`, `memw.read`, `memw.write`, etc.) use a similar
+`address_operand` field that, on the FE-VM side, is sometimes a literal
+register and sometimes a **special context-selector constant** (e.g.
+"address operand 26 selects current frame internal context" — not a real
+register, a hardware-recognized alias). If the soft parser shares this
+addressing model, there should be an analogous selector for "current
+frame's Parse Array" — but this is not yet confirmed.
+
+Two candidate "prepare an address context" instructions were found
+(`addrctx`, `0xc6000000`; `framewin`, `0xfb000000`, explicitly tied to
+"Parse Result" data) — but both carry only **"strong"** evidence status
+(not "confirmed"), and neither's documented usage directly confirms it's
+the mechanism for addressing the Parse Array from *within* soft-parser
+execution specifically, as opposed to their documented FE-VM-side roles.
+
+**This is a materially different confidence level than anything else
+resolved today.** The `kgse_bmch`/`kgse_bmcl` and `pmda[].ssa` register
+work earlier was based on complete, RM-sourced bit-field tables before any
+code was written or loaded. Here, assembling a real instruction sequence
+would mean guessing at a context-selector value for hardware that, unlike
+the CC-tree state (scoped to whichever port has it armed), is a **shared,
+single physical parser block** — a malformed or wrongly-addressed
+sequence, once triggered via `pmda[6].ssa` on the sacrificial port, risks
+more than "this one port's classification misbehaves"; a runaway or
+faulting soft-sequence could plausibly disrupt parser throughput or state
+more broadly. Not confirmed either way, but the asymmetry (limited
+upside from a guess vs. a worse failure mode than anything tried this
+session) argues against attempting to hand-assemble and load bytecode on
+this confidence level.
+
+**Decision: stop here, not proceed to writing/loading bytecode.** Real
+progress was made (the loading/trigger mechanism is fully solved; the
+likely nature of `OR_IV_LCV` as a generic-instruction-plus-context pattern
+is a genuine, useful insight) but the specific context-selector value
+needed to actually assemble a correct sequence remains unconfirmed, and
+the cost of being wrong here is higher than earlier in this session. Next
+step, whenever this is picked up again: either dedicated reverse-
+engineering work on the soft-parser's addressing model specifically
+(distinct from, though related to, the existing FE-VM ISA capture), or
+direct confirmation of the Parse-Array context-selector value from a
+source with RM detail deep enough to cover it (the register-table
+sections used successfully today did not).
+
 ## 7. Risk and scope assessment
 
 This is a materially larger undertaking than anything attempted so far in
