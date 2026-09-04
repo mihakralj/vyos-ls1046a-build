@@ -577,3 +577,42 @@ production v4 path too, so any change here needs the same care as F-183's
 original discovery). Not a quick fix; a multi-session effort with its own
 staged validation plan, most of which (§6's first step) can be done
 read-only on the sacrificial test port with no CC-tree engagement at all.
+
+## 6i. F-244: magic-byte bytecode designed, compiled, not yet board-tested
+
+Resolved §6h's open item. Ground-truth-verified `STORE_IV_TO_RA`
+(opcode `0x0800`, `/tmp/kilo/fmc/source/spa/fm_sp_assembler.tab.c`
+`_fmsp_store_iv_to_ra_action()`: `hw_words[0] = 0x0800 |
+((num_bytes-1)<<7) | range_end`, `hw_words[1] = imm & 0xffff`) — a single
+instruction, no working-register load needed, simpler than the
+originally-planned `LOAD_BITS_IV_TO_WR`+`STORE_WR_TO_RA` pair. Target:
+`struct fman_prs_result` (`fman.h`) byte 14, `route_type` — IPv6-only,
+absent-by-default on ordinary transit traffic, not re-written by any
+later hard-parse stage, and already known (from every prior probe2/probe3
+capture) to read `0xff` on real traffic, making the chosen magic value
+`0xC3` unambiguous. New sequence (`F_244.py`, applied after F-243):
+
+```
+08 0E   STORE_IV_TO_RA, 1 byte, RA[14]
+00 C3   imm 0xC3
+1F FE   JMP HXS RETURN_HXS
+00 00   pad (unreached)
+```
+
+Same code offset (`0x040`), same `sp_load`/`sp_arm`/`sp_disarm` verbs,
+same `pmda[6].ssa=0x00000420` arm value as F-243 — only
+`cc_test_sp_poc_code32[]`'s content changed. Applied to
+`~/kernel-git-cache/linux` (git-tracked, F-243 state confirmed present
+first) and compile-verified in isolation:
+`make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.o` — clean, no
+warnings. Extracted `.rodata` bytes (`c3 00 0e 08 00 00 fe 1f`, little-
+endian) confirm the compiled object holds exactly `0x080E00C3` /
+`0x1FFE0000`, byte-identical to the hand-derived encoding.
+
+**Not yet done**: full kernel build, flash, and live board test. The
+`vyos` MCP server (this project's hardware console/control channel)
+failed to connect (`CONNECT_TIMEOUT`) this session — board access is
+blocked until it's restored. `bin/kernel-fixups/manifest.json` and
+`ci-setup-kernel.sh` are both updated (F-244, count 34,
+`test-fixups.sh` passes all 4 checks).
