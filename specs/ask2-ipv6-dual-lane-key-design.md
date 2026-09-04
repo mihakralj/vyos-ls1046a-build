@@ -553,3 +553,54 @@ why `kgse_gec[0] = 0x80FF2004` (`HT=0x20/offset=4/size=1`) emitted `0x00`.
        only an IPv6 frame produces).
    - This aligns software with silicon reality, achieves strict key-space
      disjointness, and eliminates the byte-0 mismatch in the CC comparator.
+
+### 9.5 2026-09-03, later same day (image `2026.09.03-1916-rolling`) — STILL MISSING, new defect found: `kgse_bmch` corrupts key byte 42
+
+With the §9.4 fix applied (`CC_KEY_DUAL_FAMILY_V4/V6 = 0x00`, absent-lane
+mask enforcement, `CC_KEY_SIZE_DUAL = 48`, §3.5 above), `install_v6` and
+`install_v4gec` on eth1 (port `0x0d`) **still did not steer frames to the
+capture sink FQ** — the byte-0 fix alone was not sufficient. A fresh
+`probe3` capture found the actual remaining cause: **byte 42 (the high
+byte of `sport`) reads zeroed, while every other byte (`0..41`, `43..45`)
+matches bit-perfect.**
+
+**Root cause**: `fman_keygen.c`'s F-183 write (`keygen_scheme_setup()`,
+~line 842-843):
+
+```c
+if (enable && scheme->next_engine == 2)
+	scheme_regs.kgse_bmch = scheme->cc_bits_sel & 0x00FFFFFF;
+```
+
+`kgse_bmch` is genuinely named and documented (RM §5.10.3.12.4) as the
+KeyGen scheme's **Bit Mask Command High** register (`FMKG_SE_BMCH`,
+window word 3 / offset `0x10C`) — it configures `MCS0..3`/`MO0..1` bit-mask
+commands that mask OUT specific extracted key bytes. F-183 (2026-08-10,
+`decomp/experiments.md`) empirically found that writing the CC-tree's
+MURAM group offset into this *same* register/word is what actually fires
+CC-tree dispatch on this silicon (contradicting the RM's `kgse_ccbs`/word
+19 naming) — proven live and load-bearing for the shipped, production,
+7.29 Gbit/s v4 CC-tree path (`next_engine == 2` schemes generally). That
+finding is not in question and must not be reverted.
+
+What's new: for the wider 46/48-byte dual-lane key specifically, the
+*same* 24-bit MURAM offset value (`cc_bits_sel & 0x00FFFFFF`), when its
+bit pattern is also interpreted through BMCH's genuine mask-command
+sub-fields, happens to additionally mask out key byte 42 as an unwanted
+side effect. The v4-only, shipped, 16-byte CC-tree scheme never hit this
+because its key never reaches that byte position. Whether this is a
+narrow, offset-value-specific collision (a *particular* MURAM group
+offset's bits happening to program a mask covering byte 42) or a more
+structural incompatibility between "use BMCH for CC dispatch" and "use a
+key wide enough to reach whichever bytes BMCH's mask sub-fields address"
+is not yet determined — needs `FMKG_SE_BMCH`'s exact `MCS0..3`/`MO0..1`
+bit-field layout (RM §5.10.3.12.4) to reason about precisely, or a fresh
+empirical bit-by-bit isolation (matching this project's established
+one-variable-at-a-time methodology) if the RM table isn't available in
+enough detail.
+
+**Status: open, unresolved, no fix attempted yet in code.** This is the
+current blocking issue for any dual-lane CC-tree HIT — the FAMILY-byte
+and key-size fixes (§9.3-9.5 committed `b31d8ad2` and earlier) are
+necessary but not sufficient. Board state at last report: healthy, all
+trees detached (per the F-241 atomic `probe3` teardown design).
