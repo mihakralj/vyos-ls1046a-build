@@ -1,0 +1,185 @@
+# ASK2 soft-parser LCV injection — scoping a genuine per-protocol scheme select
+
+**Status:** Scoping only. No code written, no board time spent. This document
+exists to capture research done 2026-09-04 before committing to
+implementation.
+**Depends on:** the CC-tree dual-lane key work (`specs/ask2-ipv6-dual-lane-key-design.md`)
+remaining unresolved after exhaustive byte-level verification (§9.6) — this
+is the alternative architectural path, not a continuation of that one.
+
+## 1. Why this document exists
+
+`specs/ask2-ipv6-dual-lane-key-design.md` §9.6 exhaustively verified every
+register and MURAM structure involved in the CC-tree dual-lane key (GEC
+extraction, the match table write, both action descriptors, `FMBM_RCCB`) and
+found all of it byte-perfect against the model — yet the CC-tree still never
+dispatches a matching frame to the sink. The vendor's real, working
+`.116` mechanism (`specs/ask2-ipv6-dual-lane-key-design.md` §9) never uses a
+shared wide key at all — it uses fully separate KeyGen schemes and CC tables
+per protocol, selected by the FMan's own scheme-match-vector walk.
+
+Replicating that requires two things this driver doesn't currently have:
+
+1. **Scheme selection via the QLCV walk instead of direct-scheme addressing.**
+   Every CC-tree consumer in this driver (`fman_pcd_kg_port_attach_cc()`,
+   `_dual()`, `_dual_ekfc()`, and the O/H variant) calls
+   `fman_port_set_kg_direct_scheme()`, which hardwires the port to one
+   specific scheme index — bypassing match-vector selection entirely. There
+   is currently no code path that lets two schemes coexist and be chosen
+   between per-frame.
+2. **A per-frame signal that reliably differs between IPv4 and IPv6 transit
+   traffic**, for the walk's `(QLCV & kgse_mv) == kgse_mv` test to key off.
+   The raw per-slot hard-parser LCV mechanism (`pmda[].lcv`) is closed,
+   proven invalid for this (`plans/ASK2-MASTER-PLAN.md` §1.3a, 2026-08-19: a
+   full single-slot sweep on live 10G transit frames found only HXS slot 0
+   ever activates; slots 5/6, the documented IPv4/IPv6 slots, never do,
+   regardless of configuration). Any design that re-derives family
+   discrimination from `pmda[].lcv` bits is re-litigating a closed question.
+
+## 2. The mechanism: soft-parser `OR_IV_LCV`, not CPID
+
+Two RM-documented mechanisms could inject family-specific information
+without touching `pmda[].lcv`:
+
+- **CPID** (RM §5.9.4.7/§5.10.3.14.2): the hard parser auto-increments an
+  8-bit Classification Plan ID for specific conditions — broadcast,
+  multicast, VLAN/MPLS stacking, IP-in-IP tunneling. **It does not fire for
+  plain unicast IPv4 vs IPv6** — the exact case this needs. CPID can be
+  overridden by soft-parser code, so it's usable, but only via the same
+  soft-parser mechanism as the option below, and it adds a layer of
+  indirection (`QLCV = LCV & FMKG_CPE[Final_CPID]`) that only matters if LCV
+  itself varies — which brings back the same closed per-slot-LCV question
+  unless `pmda[].lcv` stays untouched (see §3).
+- **`OR_IV_LCV`**, a real soft-parser VM opcode (confirmed from vendor
+  `FMCSPCreateCode.h`'s opcode enum, qdrant 2026-08-19): "OR immediate into
+  the LCV computed vector that KeyGen classification consumes." This lets
+  soft-parser code running in an IPv6-specific hook directly OR a
+  distinguishing bit into the frame's LCV, independent of CPID or the
+  per-slot hard-parser mechanism entirely.
+
+**`OR_IV_LCV` is the simpler, more direct mechanism and is what this
+document scopes.** It needs no `FMKG_PE_CPP`/`FMKG_CPE[]` table
+programming, no `Final_CPID` partitioning — just one soft-parser hook and
+two scheme match-vectors.
+
+## 3. Why this avoids the 2026-08-19 failure mode entirely
+
+The closed finding was specifically about **`pmda[].lcv`**, the hard
+parser's per-HXS-slot contribution register (`struct fman_port_hwp_regs`,
+already in this driver via F-205). If those registers are left at
+mainline's default (`0xffffffff` for every slot, written by `init_hwp()`),
+every touched HXS slot ORs in an all-ones contribution, and for any real
+transit frame `LCV` ends up `0xFFFFFFFF` (or very close to it) regardless of
+family — **untouched, not narrowed, not broken**.
+
+`OR_IV_LCV` doesn't replace or narrow that; it ADDS one more OR term from an
+entirely separate execution path (soft-parser bytecode, not the hard-parser
+HXS chain). Since `0xFFFFFFFF | anything == 0xFFFFFFFF`, injecting a bit
+into an already-all-ones LCV is a no-op for QLCV **unless** the OR'd bit
+lands in the one dimension that's still meaningful downstream — the
+`kgse_mv` match test itself doesn't care whether other bits are also set,
+only whether the *required* bits are present. Concretely:
+
+- Scheme_v6 (checked first): `kgse_mv = V6_BIT` (a bit chosen to be 1 only
+  when the IPv6 hook fires `OR_IV_LCV V6_BIT`, and — critically — this
+  requires `pmda[].lcv` for at least one slot to leave that specific bit at
+  0 by default, or the walk can't distinguish; see §6 open question).
+- Scheme_v4 (checked second, catch-all): `kgse_mv = 0` (always matches).
+
+This is architecturally the same shape as F-212's original (failed) LCV-split
+attempt — but the *injection* now comes from soft-parser code targeting one
+specific header type, not from zeroing 15 of 16 hard-parser HXS slots. It
+never touches `pmda[].lcv` at all, so it cannot reproduce the `PRS_HDR_ERR`/
+`CLS_DISCARD` failure mode that killed F-212 (that failure was `pmda[].lcv`
+zeroing making the *parser itself* reject headers it no longer considered
+enabled — an orthogonal mechanism to the one proposed here).
+
+## 4. Loading mechanism (from vendor NCSW source, `fm_prs.c`)
+
+Contrary to expectation, `FM_PCD_PrsLoadSw()` is **not** an indirect
+AR-protocol register dance (unlike KeyGen's scheme registers) — it's a
+direct memory copy into a mapped code region:
+
+```c
+p_LoadTarget = p_FmPcd->p_FmPcdPrs->p_SwPrsCode + p_SwPrs->base*2/4;
+for (i = 0; i < DIV_CEIL(p_SwPrs->size, 4); i++)
+    WRITE_UINT32(p_LoadTarget[i], GET_UINT32(p_TmpCode[i]));
+/* per-header entry-point table, one word per FM_PCD_PRS_NUM_OF_HDRS */
+for (i = 0; i < FM_PCD_PRS_NUM_OF_HDRS; i++)
+    WRITE_UINT32(*(p_SwPrsCode + PRS_SW_DATA/4 + i), p_SwPrs->swPrsDataParams[i]);
+```
+
+`p_SwPrsCode`'s base address comes from `FmGetPcdPrsBaseAddr()` — a
+dedicated memory-mapped code region separate from the parser's own register
+block (`p_FmPcdPrsRegs` is `baseAddr + PRS_REGS_OFFSET`, a different
+offset). **Not yet pinned down**: the actual physical offset
+(`FmGetPcdPrsBaseAddr`'s real computation) and `PRS_SW_DATA`'s byte offset
+within that space — both findable via more RM cross-reference or a live
+`/proc/device-tree` walk of the FMan parser node, not yet done.
+
+The per-header entry-point table (`swPrsDataParams[FM_PCD_PRS_NUM_OF_HDRS]`)
+is very likely how "fire this code when header type X is reached" is wired
+— each entry probably holds a code offset (or 0 for "no soft sequence").
+This may connect to, or be independent of, `pmda[slot].ssa` (Soft Sequence
+Attachment) — the same register this driver already writes via F-205's
+`fman_port_hwp_regs` struct, currently always 0 except for the
+TCP/UDP-checksum-padding flag in `init_hwp()`. **Not yet pinned down**:
+whether `pmda[].ssa` and `swPrsDataParams[]` are the same mechanism viewed
+from two angles, or two separate wiring points that both need setting.
+
+## 5. What's needed, concretely
+
+1. Pin down `FmGetPcdPrsBaseAddr()`'s real offset and `PRS_SW_DATA`'s byte
+   offset (RM cross-reference or device-tree read, no board risk).
+2. Pin down the `pmda[].ssa` field encoding and its relationship to
+   `swPrsDataParams[]` (same source).
+3. Hand-assemble a minimal soft-parser bytecode sequence using the already-
+   decoded ISA (qdrant 2026-08-19 opcode inventory) — realistically 2-4
+   instructions: detect IPv6 is the current header (likely free, since the
+   hook only fires when reached via the IPv6 entry point), `OR_IV_LCV
+   V6_BIT`, return/continue to hard parser. No FMC compiler needed for
+   something this small.
+4. New kernel code: a loader for the SW-parser code region (mirroring
+   `FM_PCD_PrsLoadSw`'s simple copy loop — no indirect-AR protocol) and the
+   `pmda[].ssa`/`swPrsDataParams[]` wiring, both currently absent from this
+   driver entirely.
+5. Revert the CC-tree scheme-selection path from `fman_port_set_kg_direct_scheme()`
+   to enabling two schemes with real match-vectors and letting the walk
+   choose — a change to `fman_pcd_kg_port_attach_cc*()`, not yet designed.
+6. Regenerate `cc_pack_key_dual()`'s callers to no longer need the FAMILY
+   byte in the key at all (family is now the scheme-selection axis, not key
+   content) — likely simplifies back toward `cc_pack_key()`'s original
+   13/37-byte natural-width tables, closer to the vendor's actual approach.
+
+## 6. Open question before any board time
+
+Does `OR_IV_LCV`'s injected bit actually reach the KeyGen match-vector
+comparison unmodified, or does something in the AC_CC/direct-scheme
+dispatch path (independent of the walk itself) also interfere here the way
+`kgse_bmch`/`kgse_bmcl` turned out to for GEC-extracted key bytes
+(`specs/ask2-ipv6-dual-lane-key-design.md` §9.6)? Given how many
+independent, individually-plausible-looking mechanisms turned out to have
+silicon-specific quirks this session (FAMILY byte, key size, BMCL masking),
+budget for at least one more surprise here. Recommended first validation
+step once the register addresses are pinned down: load a **trivial**
+soft-parser sequence (unconditional `OR_IV_LCV` on any header, no
+conditional logic) on the sacrificial test port, with **no scheme/CC-tree
+changes at all**, and confirm via the existing `probe2`/`probe3` capture
+tooling (which already reads the parse-result's LCV field, part of the
+already-decoded `struct fman_prs_result` window) that the injected bit is
+visible — before touching scheme selection or CC-tree dispatch at all. This
+isolates "does the injection mechanism work" from "does the walk consume it
+correctly," matching this project's established one-variable-at-a-time
+discipline.
+
+## 7. Risk and scope assessment
+
+This is a materially larger undertaking than anything attempted so far in
+the VLAN-v6 investigation — new parser-code-loading infrastructure, hand-
+assembled bytecode in a previously-untouched execution environment, and a
+scheme-selection-mechanism reversion that affects the *shared* CC-tree
+attach path (`fman_pcd_kg_port_attach_cc()` — used by the shipped,
+production v4 path too, so any change here needs the same care as F-183's
+original discovery). Not a quick fix; a multi-session effort with its own
+staged validation plan, most of which (§6's first step) can be done
+read-only on the sacrificial test port with no CC-tree engagement at all.
