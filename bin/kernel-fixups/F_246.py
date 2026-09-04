@@ -15,19 +15,30 @@ PrsEnable()/PrsDisable() (fm_prs.c), which call fman_prs_enable()/
 fman_prs_disable() (fman_prs.c) -- these toggle FMPR_RPIMAC bit 0
 (FM_PCD_PRS_RPIMAC_EN, fsl_fman_prs.h), a GLOBAL, whole-parser-block
 register (struct fman_prs_regs, base FM_MM_PRS = FMAN_BASE+0xc7000 --
-the SAME block this project's SP_CODE_PHYS_BASE already targets, at
-byte offset +0x04) -- completely distinct from the per-port pmda[]
-shadow RAM (pcac/ssa/lcv) this project has been bracketing all along.
+the SAME block this project's SP_CODE_PHYS_BASE already targets). The
+register block itself sits at PRS_REGS_OFFSET=0x840 past that base
+(fm_prs.c:112, fm_prs.h:308: p_FmPcdPrsRegs = baseAddr + PRS_REGS_OFFSET),
+and fmpr_rpimac is the struct's *second* word (fsl_fman_prs.h:50-52:
+fmpr_rpclim then fmpr_rpimac) -- so the real absolute offset from
+SP_CODE_PHYS_BASE is 0x840+0x04 = 0x844, completely distinct from the
+per-port pmda[] shadow RAM (pcac/ssa/lcv) this project has been
+bracketing all along.
 
-Live read-only check on .185 (2026-09-04, board running the F-245
-image): fmpr_rpimac == 0x00000000 -- the soft-parser EXECUTION UNIT
-itself is globally disabled under mainline's init_hwp(), which never
-implements this optional feature. This fully explains F-243/F-244/
-F-245's identical silent result on both HXS slot 6 and slot 0: the
-PRS_HDR_SW_PRS_EN trigger bit correctly tells the hard parser to branch
-into soft-parser code, but the soft-parser processor that would execute
-that code was never powered/clocked into its running state to begin
-with, regardless of which slot points at it.
+CORRECTION (2026-09-04, same day, post board-test): the first cut of
+this fixup used byte offset +0x04 -- missing the +0x840 register-block
+offset entirely -- so every "board-tested" read/write in this fixup's
+original form landed at SP_CODE_PHYS_BASE+0x004, inside the soft-parser
+code RAM's reserved/empty header region (reads as 0 for the same reason
+the whole unloaded code region reads as 0), not the real FMPR_RPIMAC
+control register. The F-246 board test's "confirmed FMPR_RPIMAC=1 via
+dmesg, still silent" result never touched the real register at all --
+it was a complete no-op that happened to read back what it wrote (RAM,
+not a live bit). This alone fully explains F-243/F-244/F-245/F-246's
+identical silent result: the PRS_HDR_SW_PRS_EN trigger bit correctly
+tells the hard parser to branch into soft-parser code, and (as far as
+this fixup ever actually tested) the execution-unit enable was never
+touched at all. Fixed below to the correct 0x844 offset; retest needed
+before drawing any further conclusion about the soft-parser mechanism.
 
 Adds `sp_global_enable`/`sp_global_disable` cc_test debugfs verbs
 (read-modify-write FMPR_RPIMAC bit 0, S6 R10.2 readback-verified, plain
@@ -80,16 +91,20 @@ if src.count(anchor1) != 1:
     sys.exit(1)
 
 global_fns = (
-    f"/* {marker}: FMPR_RPIMAC (FM_MM_PRS+0x04) bit 0 -- the global,\n"
+    f"/* {marker}: FMPR_RPIMAC (FM_MM_PRS+PRS_REGS_OFFSET+0x04, i.e.\n"
+    " * SP_CODE_PHYS_BASE+0x844 -- fm_prs.c:112 baseAddr+PRS_REGS_OFFSET\n"
+    " * (fm_prs.h:308, =0x840) locates struct fman_prs_regs, whose 2nd\n"
+    " * word is fmpr_rpimac, fsl_fman_prs.h:50-52) bit 0 -- the global,\n"
     " * whole-parser-block soft-parser EXECUTION UNIT enable. Distinct\n"
     " * from pmda[]'s per-port shadow RAM (no stop_port_hwp bracket needed\n"
     " * -- matches the vendor's own PrsEnable()/PrsDisable(), fman_prs.c,\n"
     " * which write this register directly with no port bracket either).\n"
-    " * Confirmed live on .185 (2026-09-04): reads 0x00000000 under\n"
-    " * mainline's init_hwp() -- the soft-parser processor is globally\n"
-    " * off by default since mainline never implements this optional\n"
-    " * feature, independent of any port's pmda[].ssa trigger bit. */\n"
-    "#define SP_RPIMAC_BYTE_OFF 0x004U\n"
+    " * CORRECTION 2026-09-04: original cut of this fixup used +0x04\n"
+    " * (missing the +0x840 register-block offset), landing inside the\n"
+    " * soft-parser code RAM's empty header instead of the real register\n"
+    " * -- board test never actually exercised FMPR_RPIMAC. Retest\n"
+    " * needed with the corrected offset before drawing conclusions. */\n"
+    "#define SP_RPIMAC_BYTE_OFF 0x844U\n"
     "#define SP_RPIMAC_EN 0x00000001U\n"
     "\n"
     "static int cc_test_sp_global_set(bool enable)\n"
