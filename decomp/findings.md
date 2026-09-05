@@ -1166,3 +1166,23 @@ combination, E20's named vendor-faithful fallback).
      - *Island 6 (`w12667`–`w12850`, 184 words)*: Secondary dispatch exit traps, error reporting, and cleanup stubs.
   5. **Host Command Evolution**: Preserves the 44-record base table from 108 (`w681` in 210 vs `w673` in 108), strips CAPWAP-specific command opcodes, and inserts extended validation at `w654` jumping to `w12667`.
 
+---
+
+## 2026-09-05 — ntuple-bridge "only-last-field-filters" reconciled: the CC match walker RUNS; comparison honors only trailing row bytes
+
+Board session on `.185` (CI `33978703626`, image `2026.09.05-1642-rolling`) chasing an ethtool-ntuple bridge bug (see `plans/CC-ACL-OFFLOAD-PLAN.md` §4). Retracts an intermediate chat-level conclusion from the same session ("every frame is a hash-machine miss; VLAN works via uniform miss-action"), which conflicts with the project's own silicon records.
+
+1. **Software fully exonerated.** Live MURAM capture (targeted /dev/mem scan of the gen_pool chunks around the leaf AD — group table at ad-512, match table at ad-256 under the observed allocation order) read back the installed ntuple rule byte-perfect: key row `00|SIP|DIP|06|SPORT|DPORT|00 00`, mask row per-field exact/wildcard exactly as `cc_pack_key()` (post-`0193`) writes. The bug is in the silicon comparison, not the write.
+
+2. **Behavioral matrix (FQID-ground-truth kprobe on `rx_default_dqrr`):** dst-port rules filter (matched→leaf RESULT AD ENQUEUE FQID 512; unmatched→miss row `FE_ENTER` copy→RSS FQID 287 — Phase 0, re-observed this session). Exact-match and single-byte-isolated src-ip rules do NOT filter; a `udp4`-only rule (proto unconditionally participates) steers real TCP. Untested behaviorally: src-port, dst-ip, PORT_ID, pad bytes.
+
+3. **Walker-runs proof, from existing records:** the Phase 0 dual-exit (two distinct FQIDs gated by frame content) is incompatible with any single-exit model, including the `en_exthash_node` miss-action parse of the current group0 AD. The walker traverses, compares, and dispatches both match leaves and the R4c miss row. VLAN R5b does NOT discriminate (single-peer/single-VLAN tests pass under either model — VLAN keys are full-5-tuple exact, and a trailing-window comparison still matches uniformly for one peer), so "VLAN works" was never evidence for or against the walker; Phase 0's dual FQID is.
+
+4. **Scope correction for the 2026-08-12 "no match-table walker" entry:** that verdict was derived from the PRE-`0115` bespoke group0 layout (no AD-type bits → immediate DONE — F-183's symptom) and from type-1 nodes with `table_type` (word0[23:20]) = 4. The current `0115` SDK-convergent group0 (`cc_write_group0`: word0 = CONT_LOOKUP type-1 | (key_size-1)<<24 | ad_off; word1 = num_keys<<24 | LCL_MASK | match_off; word2 = IC@0x50<<16 | GENERIC_IC_GMASK 0x2B; word3 = 0) was never characterized against the dispatch. The branch semantics of `table_type` ≠ 4 are open.
+
+5. **Landmine in the `0115` encode:** word0[23:20] carries `ad_off`'s top nibble (MURAM offsets ≈0x50000 → ~5), i.e. the ehash census's `table_type` field is nonzero garbage under the SDK layout. That trees still behave consistently as walker trees (stable dual exit across installs) suggests the dispatch does not read those bits for this species — but it must be verified in the walker branch, not assumed.
+
+6. **Comparison window:** everything observed is consistent with "only trailing bytes of the 16-byte row participate" (dst-port 12-13 yes; src-ip 1-4 no; proto 9 no). If src-port (10-11) filters and dst-ip (5-8) doesn't, the window is the last 4 bytes. Candidates (unranked): walker branch's real group0 field positions differ from the `0115` encode (note `01-cc-match-walker.c`'s claimed key_size word0[13:8] / num_entries word0[21:16] match NEITHER the `0115` encode NOR the census — no existing model is authoritative); IC composite at 0x50 partial; group0 word3=0 global-mask default semantics.
+
+7. **Next:** (a) board: src-port-only rule and dst-ip-varied rule (bracket the window); (b) decomp: island-1 dispatch region `fman-210.10.1-full.asm` w1846–w2106 — the bits[7:5]==0b010 test (`andi16 r3,0xe0` / `subi16 r3,0x40` @w1882, byte from dmem+0x26) and gates w1891/w1892/w1893 need decoding against BOTH the `0115` encode and the 01-walker model; (c) any fix lands in `cc_write_group0()`/row layout — the packer is proven correct.
+
