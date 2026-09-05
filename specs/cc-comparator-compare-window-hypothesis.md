@@ -62,7 +62,7 @@ Not yet run. Estimated cost: one board session, using tooling that already exist
 3. **If they match:** the layout hypothesis is refuted. The CC engine sees the right bytes and still doesn't dispatch — the defect is elsewhere (group/AD table addressing, dispatch-stage logic, or something not yet modeled), and warrants a fresh, narrower investigation independent of this document.
 4. **If they don't match:** write the observed layout to the match table and re-run the F-157 dedicated-TX-FQ discriminator. A genuine HIT would confirm the hypothesis and be new information — a 13-byte, non-vendor EKFC scheme successfully dispatching through FE-VM ehash, which nothing on this project has ever achieved.
 
-**Independent, complementary evidence source:** `.106` runs a genuine, working NXP vendor ASK 1.x stack on the same silicon — a system where the CC/hash-table dispatch mechanism is known to function. `plans/NXP-106-ORACLE-VALIDATION-PLAN.md` is a read-mostly test plan to directly observe, on that working system, whether its compare-window content is raw KG-emitted bytes or something else.
+**Independent, complementary evidence source:** `.106` runs a genuine, working NXP vendor ASK 1.x stack on the same silicon — a system where the CC/hash-table dispatch mechanism is known to function. `plans/archive/NXP-106-ORACLE-VALIDATION-PLAN.md` is a read-mostly test plan to directly observe, on that working system, whether its compare-window content is raw KG-emitted bytes or something else.
 
 ## 5a. Live `.106` evidence (2026-08-01) — the field order matches; the byte *count* doesn't
 

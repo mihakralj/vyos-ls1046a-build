@@ -8,7 +8,7 @@ Status:
 - Phase 4: mutation oracle validated by E1 and E2 on the designated test DUT
 - Phase 5: Ghidra toolchain available
 - Phase 6: targeted algorithms extracted (ehash lookup in en-exthash-lookup.asm, FE-VM island in fe-action-interpreter.md)
-- Phase 7: full deep understanding master plan active (201-instruction ISA reference, 99.99% coverage)
+- Phase 7: full deep understanding delivered (201-instruction ISA reference, 99.99% coverage; polished into `arch/fman-microcode-210-full-reference.md`)
 
 Reverse-engineering program for the NXP FMan v3 controller microcode (QEF
 container, version 210.10.1) that runs on the LS1046A's FMan. Initially scoped
@@ -16,9 +16,14 @@ to ~10 named routines, now elevated under Phase 7 to full-image comprehension
 of all 12,851 words leveraging the 201-instruction controller ISA table.
 
 This directory holds the plan, the running discovery log, and per-phase
-notes. The register/AD-level contract the microcode implements is documented
-separately in `arch/fman-microcode-210-programming-reference.md`; decomp/
-covers the *code itself*.
+notes — process artifacts, not a reference to read cold. The register/AD-level
+contract the microcode implements is documented separately in
+`arch/fman-microcode-210-programming-reference.md` (the host/driver side: what
+you write into hardware tables). The controller's own execution — what the
+firmware actually does with those tables once they're loaded — is written up
+as a standalone manual in `arch/fman-microcode-210-full-reference.md`,
+derived from this directory's Phase 7 decompilation but polished for reading
+start to finish. decomp/ itself remains the audit trail behind both.
 
 ## Contents
 
@@ -39,8 +44,10 @@ covers the *code itself*.
 | [04-isa-inference.md](04-isa-inference.md) | Phase 4 — opcode cracking with the live silicon oracle |
 | [05-decompiler-infra.md](05-decompiler-infra.md) | Phase 5 — Ghidra SLEIGH module, emulation |
 | [06-algorithm-extraction.md](06-algorithm-extraction.md) | Phase 6 — ranked algorithm extraction targets |
-| [tools/](tools/) | committed tooling: `qef-parse.py` (container parse/CRC), `structure-map.py` (zero-ISA structure) |
+| [tools/](tools/) | committed tooling: `qef-parse.py` (container parse/CRC), `structure-map.py` (zero-ISA structure), `fman-corpus-diff.py` (24-blob differential corpus), `generate-sleigh.py` (Ghidra SLEIGH generation) |
 | [maps/](maps/) | generated structure maps: `210.10.1-structure.json` + human summary |
+| [out/corpus-differential.md](out/corpus-differential.md) | Phase 7 — differential findings across the 24-blob same-ISA corpus |
+| [out/subsystem-map.md](out/subsystem-map.md) | Phase 7 — subsystem map of the fully-decoded 210.10.1 image |
 
 ## Why this is tractable (and why it was previously judged not to be)
 
