@@ -502,3 +502,32 @@
 # correlated between a sustaining routed flow and a freezing VLAN flow.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0192-fman-pcd-fe-buffer-mgmt-index-dump.patch
+
+# CC-ACL-OFFLOAD-PLAN.md Phase 1: silicon-verified 2026-09-05 that patch
+# 0109's ethtool-ntuple -> CC-tree bridge produces a genuine hardware HIT
+# (two identical TCP transfers, one matching a rule and one not, landed on
+# two different real FQIDs: 512 steered vs 287 default-RSS). Investigating
+# Phase 1's mask-granularity question (0109 rejects any src-ip/dst-ip mask
+# other than all-ones/all-zero, blaming "the KG composite is not
+# prefix-aligned") found the real cause reading cc_pack_key() directly: the
+# composite IS byte-aligned (bytes 1-4 SIP, 5-8 DIP), but cc_pack_key()
+# hardcodes msk[]=0xff for every byte of a participating SRC_IP/DST_IP
+# field, silently discarding whatever mask value the caller supplied -
+# struct fman_cc_key.src_ip_mask/dst_ip_mask were already declared and
+# documented ("prefix-style mask") but never wired through
+# struct fman_pcd_cc_hw_key (which had no mask fields at all) into the
+# actual match-table byte write. This patch adds src_ip_mask_be/
+# dst_ip_mask_be to the hw key struct, passes them through
+# dpaa_cc_key_to_hw() (defaulting to exact-match 0xffffffff when unset, so
+# every existing caller - ask_vlan_cc.c, 0109's own exact-match rules - is
+# byte-identical), writes them verbatim into the CC row's mask bytes in
+# cc_pack_key() instead of the old hardcoded 0xff, and relaxes 0109's
+# dpaa_cls_validate()/dpaa_cls_reinstall() to accept and forward a real
+# mask for ip4src/ip4dst (e.g. 255.255.255.0) instead of rejecting it. No
+# NIA/register/graft changes - purely which mask bytes land in the
+# already-working match table, so it carries none of the task-pool-leak
+# risk a leaf-AD NIA change would (see the 0136/F-108 tfene=RELEASE
+# incident this project already hit on this exact silicon). Ports/tos stay
+# exact-or-wildcard only, out of scope for this pass. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0193-fman-pcd-cc-key-mask-passthrough.patch
