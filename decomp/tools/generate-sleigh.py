@@ -212,9 +212,9 @@ def generate_sleigh(table, out_path):
         elif mn in ("cbrnc14",):
             semantics.append(f"if (C == 0) goto {target_token};")
         elif mn.startswith("brbitclr"):
-            semantics.append(f"if (cc == 0) goto {target_token};")
+            semantics.append(f"local b:4 = 0x1f:4 - (f_25_21:4); if ((((f_20_16 >> b) & 1:4) == 0:4)) goto {target_token};")
         elif mn.startswith("brbitset"):
-            semantics.append(f"if (cc != 0) goto {target_token};")
+            semantics.append(f"local b:4 = 0x1f:4 - (f_25_21:4); if ((((f_20_16 >> b) & 1:4) != 0:4)) goto {target_token};")
         elif mn.startswith("brctrl0"):
             semantics.append(f"if (cc != 0) goto {target_token};")
         elif mn.startswith("brnotctrl0"):
@@ -290,8 +290,31 @@ def generate_sleigh(table, out_path):
         elif mn == "asr32i":
             semantics.append("f_10_6 = f_20_16 s>> f_15_11_imm;")
         elif mn == "cmp32":
-            semantics.append("Z = (f_20_16 == f_15_11); N = (f_20_16 < f_15_11);")
-        elif mn == "cmpi16" or mn == "cmpeqi16":
+            # r31 is the condition register. The real unit publishes ONE bit
+            # selected by raw_10_6 (selector S -> r31[31-S]); model the four
+            # most-used selectors 0-3 (ult/eq/sign/eq|sign) as always
+            # refreshed - approximation, but makes br* on r31[31:28] decode.
+            semantics.extend([
+                "local lt:4 = 0:4;",
+                "if (f_20_16 < f_15_11) goto <lt_set>;",
+                "goto <eq_chk>;",
+                "<lt_set> lt = 0x80000000:4;",
+                "<eq_chk> local eq:4 = 0:4;",
+                "if (f_20_16 == f_15_11) goto <eq_set>;",
+                "goto <sig_chk>;",
+                "<eq_set> eq = 0x40000000:4;",
+                "<sig_chk> if ((f_20_16 - f_15_11) s< 0:4) goto <sig_set>;",
+                "goto <publish>;",
+                "<sig_set> lt = 0x20000000:4;",
+                "<publish> r31 = (r31 & 0x0fffffff:4) | lt | eq;",
+            ])
+        elif mn == "cmpi16":
+            semantics.extend([
+                "Z = (f_20_16 == (f_15_0:4));",
+                "N = ((f_20_16 - (f_15_0:4)) s< 0:4);",
+                "C = (f_20_16 < (f_15_0:4));",
+            ])
+        elif mn == "cmpeqi16":
             semantics.append("Z = (f_20_16 == (f_15_0:4));")
         elif mn == "test32":
             semantics.append("Z = (r2 == 0:4);")
@@ -306,9 +329,23 @@ def generate_sleigh(table, out_path):
         elif mn == "tstandhi16":
             semantics.append("Z = ((f_20_16 & ((f_15_0:4) << 16)) == 0:4);")
         elif mn == "tstori16":
-            semantics.append("Z = ((f_20_16 | (f_15_0:4)) == 0:4);")
+            semantics.extend([
+                "local o:4 = f_20_16 | (f_15_0:4);",
+                "C = 0:1;",
+                "Z = (o == 0:4);",
+                "N = (o s< 0:4);",
+            ])
+        elif mn == "tstaddi16":
+            semantics.extend([
+                "local s:4 = f_20_16 + (f_15_0:4);",
+                "C = (s < f_20_16);",
+                "Z = (s == 0:4);",
+                "N = (s s< 0:4);",
+            ])
         elif mn == "tstimm16":
             semantics.append("Z = (f_15_0 == 0:2);")
+        elif mn == "andi16z":
+            semantics.append("r0 = r0 & (f_15_0:4); Z = (r0 == 0:4);")
         elif mn.startswith("memw.readz"):
             semantics.extend([
                 "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
@@ -376,7 +413,7 @@ def generate_sleigh(table, out_path):
         elif mn.startswith("csum"):
             semantics.append("fman_csum_accum();")
         elif mn.startswith("keycmp"):
-            semantics.append("fman_keycmp_run();")
+            semantics.append("r0 = fman_keycmp_run();")
         else:
             semantics.append("")
 

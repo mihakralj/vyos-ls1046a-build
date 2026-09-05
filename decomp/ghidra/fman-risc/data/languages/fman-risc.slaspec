@@ -126,7 +126,7 @@ define pcodeop fman_unit_submit;
 :andhi16c f_20_16 f_15_0 is f_31_21=0x70b & f_20_16 & f_15_0 {  }
 :andi16 f_20_16 f_15_0 is f_31_21=0x74a & f_20_16 & f_15_0 { f_20_16 = f_20_16 & (f_15_0:4); }
 :andi16 f_20_16 f_15_0 is f_31_21=0x74b & f_20_16 & f_15_0 { f_20_16 = f_20_16 & (f_15_0:4); }
-:andi16z f_15_0 is f_31_16=0xe960 & f_15_0 {  }
+:andi16z f_15_0 is f_31_16=0xe960 & f_15_0 { r0 = r0 & (f_15_0:4); Z = (r0 == 0:4); }
 :andlane8 f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78a & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :andlane8c f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78b & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :andni8 f_20_16 f_15_11 f_10_8 f_7_0 is f_31_21=0x7ab & f_20_16 & f_15_11 & f_10_8 & f_7_0 {  }
@@ -153,10 +153,10 @@ define pcodeop fman_unit_submit;
 :bitfield_merge f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x32 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
 :bitfield_wrap10 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x43c {  }
 :bitfield_xform f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x33 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
-:brbitclr14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2f & f_25_21 & f_20_16 & rel16_dest { if (cc == 0) goto rel16_dest; }
-:brbitclr14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2e & f_25_21 & f_20_16 & rel16_dest { delayslot(1); if (cc == 0) goto rel16_dest; }
-:brbitset14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2d & f_25_21 & f_20_16 & rel16_dest { if (cc != 0) goto rel16_dest; }
-:brbitset14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2c & f_25_21 & f_20_16 & rel16_dest { delayslot(1); if (cc != 0) goto rel16_dest; }
+:brbitclr14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2f & f_25_21 & f_20_16 & rel16_dest { local b:4 = 0x1f:4 - (f_25_21:4); if ((((f_20_16 >> b) & 1:4) == 0:4)) goto rel16_dest; }
+:brbitclr14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2e & f_25_21 & f_20_16 & rel16_dest { delayslot(1); local b:4 = 0x1f:4 - (f_25_21:4); if ((((f_20_16 >> b) & 1:4) == 0:4)) goto rel16_dest; }
+:brbitset14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2d & f_25_21 & f_20_16 & rel16_dest { local b:4 = 0x1f:4 - (f_25_21:4); if ((((f_20_16 >> b) & 1:4) != 0:4)) goto rel16_dest; }
+:brbitset14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2c & f_25_21 & f_20_16 & rel16_dest { delayslot(1); local b:4 = 0x1f:4 - (f_25_21:4); if ((((f_20_16 >> b) & 1:4) != 0:4)) goto rel16_dest; }
 :brctrl0_comp rel16_dest is f_31_16=0xb21f & rel16_dest { delayslot(1); if (cc != 0) goto rel16_dest; }
 :brnotctrl0_comp rel16_dest is f_31_16=0xba1f & rel16_dest { delayslot(1); if (cc == 0) goto rel16_dest; }
 :bset32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d6 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 {  }
@@ -176,9 +176,9 @@ define pcodeop fman_unit_submit;
 :cckey_emit f_26_21 f_20_16 is f_31_27=0x9 & f_26_21 & f_20_16 & f_15_0=0xc800 {  }
 :cckey_prepare  is f_31_0=0x73f8c420 {  }
 :clz32_r7_r1  is f_31_0=0xdb5f387d { r7 = lzcount(r1); }
-:cmp32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = (f_20_16 == f_15_11); N = (f_20_16 < f_15_11); }
+:cmp32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { local lt:4 = 0:4; if (f_20_16 < f_15_11) goto <lt_set>; goto <eq_chk>; <lt_set> lt = 0x80000000:4; <eq_chk> local eq:4 = 0:4; if (f_20_16 == f_15_11) goto <eq_set>; goto <sig_chk>; <eq_set> eq = 0x40000000:4; <sig_chk> if ((f_20_16 - f_15_11) s< 0:4) goto <sig_set>; goto <publish>; <sig_set> lt = 0x20000000:4; <publish> r31 = (r31 & 0x0fffffff:4) | lt | eq; }
 :cmpeqi16 f_20_16 f_15_0 is f_31_21=0x751 & f_20_16 & f_15_0 { Z = (f_20_16 == (f_15_0:4)); }
-:cmpi16 f_20_16 f_15_0 is f_31_21=0x761 & f_20_16 & f_15_0 { Z = (f_20_16 == (f_15_0:4)); }
+:cmpi16 f_20_16 f_15_0 is f_31_21=0x761 & f_20_16 & f_15_0 { Z = (f_20_16 == (f_15_0:4)); N = ((f_20_16 - (f_15_0:4)) s< 0:4); C = (f_20_16 < (f_15_0:4)); }
 :cmpi8_lane f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x7a1 & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :commit32  is f_31_0=0x7362f300 {  }
 :condimm f_25_21 f_20_16 f_15_0 is f_31_26=0x39 & f_25_21 & f_20_16 & f_15_0 {  }
@@ -213,7 +213,7 @@ define pcodeop fman_unit_submit;
 :jmptbl16 f_20_16 f_15_0 is f_31_21=0x4bb & f_20_16 & f_15_0 {  }
 :jmptbl4 f_20_16 f_15_0 is f_31_21=0x4b9 & f_20_16 & f_15_0 {  }
 :jmptbl8 f_20_16 f_15_0 is f_31_21=0x4ba & f_20_16 & f_15_0 {  }
-:keycmp_run  is f_31_0=0x48109000 { fman_keycmp_run(); }
+:keycmp_run  is f_31_0=0x48109000 { r0 = fman_keycmp_run(); }
 :ld_sm f_26_25 f_20_16 f_15_11 f_10_0 is f_31_27=0x0 & f_26_25 & f_24_21=0x4 & f_20_16 & f_15_11 & f_10_0 {  }
 :lea14 f_20_16 f_15_14 f_13_0 is f_31_21=0x608 & f_20_16 & f_15_14 & f_13_0 {  }
 :li16 f_20_16 f_15_0 is f_31_21=0x75e & f_20_16 & f_15_0 { f_20_16 = f_15_0:4; }
@@ -280,11 +280,11 @@ define pcodeop fman_unit_submit;
 :testxor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 ^ f_15_11) == 0:4); }
 :tnum_alloc f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xf900 { f_20_16 = fman_tnum_alloc(); }
 :tstadci16 f_20_16 f_15_0 is f_31_21=0x745 & f_20_16 & f_15_0 {  }
-:tstaddi16 f_20_16 f_15_0 is f_31_21=0x741 & f_20_16 & f_15_0 {  }
+:tstaddi16 f_20_16 f_15_0 is f_31_21=0x741 & f_20_16 & f_15_0 { local s:4 = f_20_16 + (f_15_0:4); C = (s < f_20_16); Z = (s == 0:4); N = (s s< 0:4); }
 :tstandhi16 f_20_16 f_15_0 is f_31_21=0x709 & f_20_16 & f_15_0 { Z = ((f_20_16 & ((f_15_0:4) << 16)) == 0:4); }
 :tstandi16 f_20_16 f_15_0 is f_31_21=0x749 & f_20_16 & f_15_0 { Z = ((f_20_16 & (f_15_0:4)) == 0:4); }
 :tstimm16 f_20_16 f_15_0 is f_31_21=0x75d & f_20_16 & f_15_0 { Z = (f_15_0 == 0:2); }
-:tstori16 f_20_16 f_15_0 is f_31_21=0x74d & f_20_16 & f_15_0 { Z = ((f_20_16 | (f_15_0:4)) == 0:4); }
+:tstori16 f_20_16 f_15_0 is f_31_21=0x74d & f_20_16 & f_15_0 { local o:4 = f_20_16 | (f_15_0:4); C = 0:1; Z = (o == 0:4); N = (o s< 0:4); }
 :unit_config f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x1c & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
 :unit_read0 f_20_16 f_10_6 f_5_0 is f_31_21=0x3c0 & f_20_16 & f_15_11=0x1f & f_10_6 & f_5_0 {  }
 :unit_read32 f_20_16 f_10_6 f_5_0 is f_31_21=0x3e0 & f_20_16 & f_15_11=0x1f & f_10_6 & f_5_0 {  }
