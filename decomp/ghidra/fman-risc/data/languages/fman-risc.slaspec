@@ -63,6 +63,7 @@ define token instr(32)
     f_8_0          = (0,8)
     f_7_0          = (0,7)
     f_5_0          = (0,5)
+    f_15_11_imm    = (11,15)
 ;
 
 # Register attachments for standard 5-bit register fields
@@ -109,9 +110,9 @@ define pcodeop fman_unit_submit;
 :add32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c2 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 + f_15_11; }
 :add32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c3 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 + f_15_11; }
 :add32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c6 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 + f_15_11; }
-:addhi16 f_20_16 f_15_0 is f_31_21=0x702 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + (f_15_0 << 16); }
-:addi16 f_20_16 f_15_0 is f_31_21=0x742 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + f_15_0; }
-:addi16 f_20_16 f_15_0 is f_31_21=0x743 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + f_15_0; }
+:addhi16 f_20_16 f_15_0 is f_31_21=0x702 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + ((f_15_0:4) << 16); }
+:addi16 f_20_16 f_15_0 is f_31_21=0x742 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + (f_15_0:4); }
+:addi16 f_20_16 f_15_0 is f_31_21=0x743 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + (f_15_0:4); }
 :addlane8 f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x782 & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :addlane8c f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x783 & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :addrctx f_23_0 is f_31_24=0xc6 & f_23_0 {  }
@@ -121,19 +122,19 @@ define pcodeop fman_unit_submit;
 :alu_special f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x37 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
 :and32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6ca & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 & f_15_11; }
 :and32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6cb & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 & f_15_11; }
-:andhi16 f_20_16 f_15_0 is f_31_21=0x76a & f_20_16 & f_15_0 { f_20_16 = f_20_16 & (f_15_0 << 16); }
+:andhi16 f_20_16 f_15_0 is f_31_21=0x76a & f_20_16 & f_15_0 { f_20_16 = f_20_16 & ((f_15_0:4) << 16); }
 :andhi16c f_20_16 f_15_0 is f_31_21=0x70b & f_20_16 & f_15_0 {  }
-:andi16 f_20_16 f_15_0 is f_31_21=0x74a & f_20_16 & f_15_0 { f_20_16 = f_20_16 & f_15_0; }
-:andi16 f_20_16 f_15_0 is f_31_21=0x74b & f_20_16 & f_15_0 { f_20_16 = f_20_16 & f_15_0; }
+:andi16 f_20_16 f_15_0 is f_31_21=0x74a & f_20_16 & f_15_0 { f_20_16 = f_20_16 & (f_15_0:4); }
+:andi16 f_20_16 f_15_0 is f_31_21=0x74b & f_20_16 & f_15_0 { f_20_16 = f_20_16 & (f_15_0:4); }
 :andi16z f_15_0 is f_31_16=0xe960 & f_15_0 {  }
 :andlane8 f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78a & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :andlane8c f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78b & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :andni8 f_20_16 f_15_11 f_10_8 f_7_0 is f_31_21=0x7ab & f_20_16 & f_15_11 & f_10_8 & f_7_0 {  }
-:asr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x14 { f_10_6 = f_20_16 s>> (f_15_11 & 0x1f); }
-:asr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x15 { f_10_6 = f_20_16 s>> f_5_0; }
+:asr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x14 { f_10_6 = f_20_16 s>> (f_15_11 & 0x1f:4); }
+:asr32i f_20_16 f_15_11_imm f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11_imm & f_10_6 & f_5_0=0x15 { f_10_6 = f_20_16 s>> f_15_11_imm; }
 :bclr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6da & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 {  }
 :bclr32_0 f_15_11 is f_31_16=0xfbe0 & f_15_11 & f_10_0=0x41 {  }
-:bclr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x69a & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3e {  }
+:bclr32i f_20_16 f_15_11_imm f_10_6 is f_31_21=0x69a & f_20_16 & f_15_11_imm & f_10_6 & f_5_0=0x3e {  }
 :bfi1i_d1 f_16_16 f_15_11 is f_31_17=0x7de0 & f_16_16 & f_15_11 & f_10_0=0x43 {  }
 :bfi1i_d2 f_17_17 f_15_11 is f_31_18=0x3ee8 & f_17_17 & f_16_16=0x0 & f_15_11 & f_10_0=0x45 {  }
 :bfi1i_d3 f_18_18 f_15_11 is f_31_19=0x1f70 & f_18_18 & f_17_16=0x0 & f_15_11 & f_10_0=0x47 {  }
@@ -153,31 +154,31 @@ define pcodeop fman_unit_submit;
 :bitfield_wrap10 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x43c {  }
 :bitfield_xform f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x33 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
 :brbitclr14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2f & f_25_21 & f_20_16 & rel16_dest { if (cc == 0) goto rel16_dest; }
-:brbitclr14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2e & f_25_21 & f_20_16 & rel16_dest [ delayslot(1); ] { if (cc == 0) goto rel16_dest; }
+:brbitclr14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2e & f_25_21 & f_20_16 & rel16_dest { delayslot(1); if (cc == 0) goto rel16_dest; }
 :brbitset14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2d & f_25_21 & f_20_16 & rel16_dest { if (cc != 0) goto rel16_dest; }
-:brbitset14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2c & f_25_21 & f_20_16 & rel16_dest [ delayslot(1); ] { if (cc != 0) goto rel16_dest; }
-:brctrl0_comp rel16_dest is f_31_16=0xb21f & rel16_dest [ delayslot(1); ] { if (cc != 0) goto rel16_dest; }
-:brnotctrl0_comp rel16_dest is f_31_16=0xba1f & rel16_dest [ delayslot(1); ] { if (cc == 0) goto rel16_dest; }
+:brbitset14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2c & f_25_21 & f_20_16 & rel16_dest { delayslot(1); if (cc != 0) goto rel16_dest; }
+:brctrl0_comp rel16_dest is f_31_16=0xb21f & rel16_dest { delayslot(1); if (cc != 0) goto rel16_dest; }
+:brnotctrl0_comp rel16_dest is f_31_16=0xba1f & rel16_dest { delayslot(1); if (cc == 0) goto rel16_dest; }
 :bset32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d6 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 {  }
-:bset32i f_20_16 f_15_11 f_10_6 is f_31_21=0x696 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3e {  }
+:bset32i f_20_16 f_15_11_imm f_10_6 is f_31_21=0x696 & f_20_16 & f_15_11_imm & f_10_6 & f_5_0=0x3e {  }
 :byte_setlo8 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x41 {  }
 :call rel16_dest is f_31_16=0xa7ff & rel16_dest { call rel16_dest; }
-:call_comp rel16_dest is f_31_16=0xa3ff & rel16_dest [ delayslot(1); ] { call rel16_dest; }
-:cbrc14 f_26_26 rel16_dest is f_31_27=0x16 & f_26_26 & f_25_16=0x1f & rel16_dest [ delayslot(1); ] { if (C != 0) goto rel16_dest; }
+:call_comp rel16_dest is f_31_16=0xa3ff & rel16_dest { delayslot(1); call rel16_dest; }
+:cbrc14 f_26_26 rel16_dest is f_31_27=0x16 & f_26_26 & f_25_16=0x1f & rel16_dest { delayslot(1); if (C != 0) goto rel16_dest; }
 :cbrn14 rel16_dest is f_31_16=0xb45f & rel16_dest { if (N != 0) goto rel16_dest; }
-:cbrnc14 f_26_26 rel16_dest is f_31_27=0x17 & f_26_26 & f_25_16=0x1f & rel16_dest [ delayslot(1); ] { if (C == 0) goto rel16_dest; }
-:cbrnn14_comp rel16_dest is f_31_16=0xb85f & rel16_dest [ delayslot(1); ] { if (N == 0) goto rel16_dest; }
+:cbrnc14 f_26_26 rel16_dest is f_31_27=0x17 & f_26_26 & f_25_16=0x1f & rel16_dest { delayslot(1); if (C == 0) goto rel16_dest; }
+:cbrnn14_comp rel16_dest is f_31_16=0xb85f & rel16_dest { delayslot(1); if (N == 0) goto rel16_dest; }
 :cbrnp14 rel16_dest is f_31_16=0xb47f & rel16_dest { goto rel16_dest; }
 :cbrnz14 rel16_dest is f_31_16=0xbc3f & rel16_dest { if (Z == 0) goto rel16_dest; }
-:cbrnz14_comp rel16_dest is f_31_16=0xb83f & rel16_dest [ delayslot(1); ] { if (Z == 0) goto rel16_dest; }
+:cbrnz14_comp rel16_dest is f_31_16=0xb83f & rel16_dest { delayslot(1); if (Z == 0) goto rel16_dest; }
 :cbrz14 rel16_dest is f_31_16=0xb43f & rel16_dest { if (Z != 0) goto rel16_dest; }
-:cbrz14_comp rel16_dest is f_31_16=0xb03f & rel16_dest [ delayslot(1); ] { if (Z != 0) goto rel16_dest; }
+:cbrz14_comp rel16_dest is f_31_16=0xb03f & rel16_dest { delayslot(1); if (Z != 0) goto rel16_dest; }
 :cckey_emit f_26_21 f_20_16 is f_31_27=0x9 & f_26_21 & f_20_16 & f_15_0=0xc800 {  }
 :cckey_prepare  is f_31_0=0x73f8c420 {  }
 :clz32_r7_r1  is f_31_0=0xdb5f387d { r7 = lzcount(r1); }
 :cmp32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = (f_20_16 == f_15_11); N = (f_20_16 < f_15_11); }
-:cmpeqi16 f_20_16 f_15_0 is f_31_21=0x751 & f_20_16 & f_15_0 { Z = (f_20_16 == f_15_0); }
-:cmpi16 f_20_16 f_15_0 is f_31_21=0x761 & f_20_16 & f_15_0 { Z = (f_20_16 == f_15_0); }
+:cmpeqi16 f_20_16 f_15_0 is f_31_21=0x751 & f_20_16 & f_15_0 { Z = (f_20_16 == (f_15_0:4)); }
+:cmpi16 f_20_16 f_15_0 is f_31_21=0x761 & f_20_16 & f_15_0 { Z = (f_20_16 == (f_15_0:4)); }
 :cmpi8_lane f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x7a1 & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :commit32  is f_31_0=0x7362f300 {  }
 :condimm f_25_21 f_20_16 f_15_0 is f_31_26=0x39 & f_25_21 & f_20_16 & f_15_0 {  }
@@ -198,53 +199,52 @@ define pcodeop fman_unit_submit;
 :dma_write2 f_20_16 f_15_11 is f_31_21=0x291 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
 :dma_write64 f_20_16 f_15_11 is f_31_21=0x2a9 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
 :dma_write64 f_20_16 f_15_11 is f_31_21=0x2e9 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
-:fill  is f_31_0=0xffffffff { goto inst_start; }
 :frame_base f_20_16 is f_31_21=0x3e0 & f_20_16 & f_15_0=0xf903 {  }
 :framewin f_20_16 f_15_11 f_10_9 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_9 & f_8_0=0x0 {  }
 :imm14 f_20_16 f_15_14 f_13_0 is f_31_21=0x75f & f_20_16 & f_15_14 & f_13_0 {  }
 :imm16_link f_23_21 f_20_16 f_15_0 is f_31_24=0xeb & f_23_21 & f_20_16 & f_15_0 {  }
 :immhi16 f_20_16 f_15_0 is f_31_21=0x71e & f_20_16 & f_15_0 {  }
-:indirect f_15_11 is f_31_16=0x9fff & f_15_11 & f_10_0=0x400 { goto [f_20_16]; }
-:indirect_comp f_15_11 is f_31_16=0x9bff & f_15_11 & f_10_0=0x400 [ delayslot(1); ] { goto [f_20_16]; }
-:indirect_m5 f_15_11 is f_31_16=0x9fff & f_15_11 & f_10_0=0x500 { goto [f_20_16]; }
-:indirect_m5_comp f_15_11 is f_31_16=0x9bff & f_15_11 & f_10_0=0x500 [ delayslot(1); ] { goto [f_20_16]; }
-:jmptbl_comp_r3 f_15_0 is f_31_16=0x9363 & f_15_0 [ delayslot(1); ] {  }
-:jmptbl_comp_r6 f_15_0 is f_31_16=0x93e6 & f_15_0 [ delayslot(1); ] {  }
+:indirect f_15_11 is f_31_16=0x9fff & f_15_11 & f_10_0=0x400 { goto [f_15_11]; }
+:indirect_comp f_15_11 is f_31_16=0x9bff & f_15_11 & f_10_0=0x400 { delayslot(1); goto [f_15_11]; }
+:indirect_m5 f_15_11 is f_31_16=0x9fff & f_15_11 & f_10_0=0x500 { goto [f_15_11]; }
+:indirect_m5_comp f_15_11 is f_31_16=0x9bff & f_15_11 & f_10_0=0x500 { delayslot(1); goto [f_15_11]; }
+:jmptbl_comp_r3 f_15_0 is f_31_16=0x9363 & f_15_0 { delayslot(1);  }
+:jmptbl_comp_r6 f_15_0 is f_31_16=0x93e6 & f_15_0 { delayslot(1);  }
 :jmptbl16 f_20_16 f_15_0 is f_31_21=0x4bb & f_20_16 & f_15_0 {  }
 :jmptbl4 f_20_16 f_15_0 is f_31_21=0x4b9 & f_20_16 & f_15_0 {  }
 :jmptbl8 f_20_16 f_15_0 is f_31_21=0x4ba & f_20_16 & f_15_0 {  }
 :keycmp_run  is f_31_0=0x48109000 { fman_keycmp_run(); }
 :ld_sm f_26_25 f_20_16 f_15_11 f_10_0 is f_31_27=0x0 & f_26_25 & f_24_21=0x4 & f_20_16 & f_15_11 & f_10_0 {  }
 :lea14 f_20_16 f_15_14 f_13_0 is f_31_21=0x608 & f_20_16 & f_15_14 & f_13_0 {  }
-:li16 f_20_16 f_15_0 is f_31_21=0x75e & f_20_16 & f_15_0 { f_20_16 = f_15_0; }
-:lihi16 f_20_16 f_15_0 is f_31_21=0x77e & f_20_16 & f_15_0 { f_20_16 = f_15_0 << 16; }
-:lsl32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3c { f_10_6 = f_20_16 << (f_15_11 & 0x1f); }
-:lsl32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3d { f_10_6 = f_20_16 << f_5_0; }
-:lsr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x1c { f_10_6 = f_20_16 >> (f_15_11 & 0x1f); }
-:lsr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x1d { f_10_6 = f_20_16 >> f_5_0; }
-:lsr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6df & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x1d { f_10_6 = f_20_16 >> f_5_0; }
+:li16 f_20_16 f_15_0 is f_31_21=0x75e & f_20_16 & f_15_0 { f_20_16 = f_15_0:4; }
+:lihi16 f_20_16 f_15_0 is f_31_21=0x77e & f_20_16 & f_15_0 { f_20_16 = (f_15_0:4) << 16; }
+:lsl32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3c { f_10_6 = f_20_16 << (f_15_11 & 0x1f:4); }
+:lsl32i f_20_16 f_15_11_imm f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11_imm & f_10_6 & f_5_0=0x3d { f_10_6 = f_20_16 << f_15_11_imm; }
+:lsr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x1c { f_10_6 = f_20_16 >> (f_15_11 & 0x1f:4); }
+:lsr32i f_20_16 f_15_11_imm f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11_imm & f_10_6 & f_5_0=0x1d { f_10_6 = f_20_16 >> f_15_11_imm; }
+:lsr32i f_20_16 f_15_11_imm f_10_6 is f_31_21=0x6df & f_20_16 & f_15_11_imm & f_10_6 & f_5_0=0x1d { f_10_6 = f_20_16 >> f_15_11_imm; }
 :mem24_write f_20_16 f_15_11 f_10_0 is f_31_21=0xa8 & f_20_16 & f_15_11 & f_10_0 {  }
-:memb_read f_20_16 f_15_11 f_10_0 is f_31_21=0x0 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:1 (f_15_11 + f_10_0)); }
-:memb_write f_20_16 f_15_11 f_10_0 is f_31_21=0x80 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:1 (f_15_11 + f_10_0) = f_20_16[0,8]; }
-:membs_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x9 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = sext(*[dmem]:1 (f_15_11 + f_10_0)); Z = (f_20_16 == 0); }
-:membu_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x1 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:1 (f_15_11 + f_10_0)); Z = (f_20_16 == 0); }
-:memd_read f_20_16 f_15_11 f_10_0 is f_31_21=0x30 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); }
-:memd_write f_20_16 f_15_11 f_10_0 is f_31_21=0xb0 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:4 (f_15_11 + f_10_0) = f_20_16; }
-:memh_read f_20_16 f_15_11 f_10_0 is f_31_21=0x10 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:2 (f_15_11 + f_10_0)); }
-:memh_write f_20_16 f_15_11 f_10_0 is f_31_21=0x90 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:2 (f_15_11 + f_10_0) = f_20_16[0,16]; }
-:memhu_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x11 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:2 (f_15_11 + f_10_0)); Z = (f_20_16 == 0); }
+:memb_read f_20_16 f_15_11 f_10_0 is f_31_21=0x0 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = zext(*[dmem]:1 addr); }
+:memb_write f_20_16 f_15_11 f_10_0 is f_31_21=0x80 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; *[dmem]:1 addr = f_20_16[0,8]; }
+:membs_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x9 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = sext(*[dmem]:1 addr); Z = (f_20_16 == 0:4); }
+:membu_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x1 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = zext(*[dmem]:1 addr); Z = (f_20_16 == 0:4); }
+:memd_read f_20_16 f_15_11 f_10_0 is f_31_21=0x30 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = *[dmem]:4 addr; }
+:memd_write f_20_16 f_15_11 f_10_0 is f_31_21=0xb0 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; *[dmem]:4 addr = f_20_16; }
+:memh_read f_20_16 f_15_11 f_10_0 is f_31_21=0x10 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = zext(*[dmem]:2 addr); }
+:memh_write f_20_16 f_15_11 f_10_0 is f_31_21=0x90 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; *[dmem]:2 addr = f_20_16[0,16]; }
+:memhu_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x11 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = zext(*[dmem]:2 addr); Z = (f_20_16 == 0:4); }
 :memhu2_read f_20_16 f_15_11 f_10_0 is f_31_21=0x38 & f_20_16 & f_15_11 & f_10_0 {  }
-:memw_read f_20_16 f_15_11 f_10_0 is f_31_21=0x20 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); }
-:memw_read f_20_16 f_15_11 f_10_0 is f_31_21=0x28 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); }
-:memw_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x21 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); Z = (f_20_16 == 0); }
-:memw_write f_20_16 f_15_11 f_10_0 is f_31_21=0xa0 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:4 (f_15_11 + f_10_0) = f_20_16; }
+:memw_read f_20_16 f_15_11 f_10_0 is f_31_21=0x20 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = *[dmem]:4 addr; }
+:memw_read f_20_16 f_15_11 f_10_0 is f_31_21=0x28 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = *[dmem]:4 addr; }
+:memw_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x21 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; f_20_16 = *[dmem]:4 addr; Z = (f_20_16 == 0:4); }
+:memw_write f_20_16 f_15_11 f_10_0 is f_31_21=0xa0 & f_20_16 & f_15_11 & f_10_0 { local addr:2 = f_10_0; addr = addr + f_15_11[0,16]; *[dmem]:4 addr = f_20_16; }
 :merge8 f_20_16 f_15_11 f_10_6 is f_31_21=0x658 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x0 {  }
 :not32 f_20_16 is f_31_21=0x772 & f_20_16 & f_15_0=0x0 { f_20_16 = ~f_20_16; }
 :not32_r10  is f_31_0=0xdddf52b8 { r10 = ~r10; }
 :not32_r9  is f_31_0=0xdddf4a78 { r9 = ~r9; }
 :or32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6ce & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 | f_15_11; }
-:orhi16 f_20_16 f_15_0 is f_31_21=0x70e & f_20_16 & f_15_0 { f_20_16 = f_20_16 | (f_15_0 << 16); }
-:ori16 f_20_16 f_15_0 is f_31_21=0x74e & f_20_16 & f_15_0 { f_20_16 = f_20_16 | f_15_0; }
+:orhi16 f_20_16 f_15_0 is f_31_21=0x70e & f_20_16 & f_15_0 { f_20_16 = f_20_16 | ((f_15_0:4) << 16); }
+:ori16 f_20_16 f_15_0 is f_31_21=0x74e & f_20_16 & f_15_0 { f_20_16 = f_20_16 | (f_15_0:4); }
 :ori16c f_20_16 f_15_0 is f_31_21=0x74f & f_20_16 & f_15_0 {  }
 :orlane8 f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78e & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
 :park_cont rel16_dest is f_31_16=0x2e1f & rel16_dest { goto rel16_dest; }
@@ -252,7 +252,7 @@ define pcodeop fman_unit_submit;
 :pcrel24_pos f_15_0 is f_31_16=0xc200 & f_15_0 {  }
 :pipeline_setup f_26_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_27=0xd & f_26_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
 :ret  is f_31_0=0x9ffff400 { return [r30]; }
-:ret_comp  is f_31_0=0x9bfff400 [ delayslot(1); ] { return [r30]; }
+:ret_comp  is f_31_0=0x9bfff400 { delayslot(1); return [r30]; }
 :retry_sm rel16_dest is f_31_16=0xb7df & rel16_dest { goto rel16_dest; }
 :special_241f  is f_31_0=0x241f2800 {  }
 :special_4800  is f_31_0=0x48000800 {  }
@@ -260,8 +260,8 @@ define pcodeop fman_unit_submit;
 :st_sm f_26_25 f_20_16 f_15_11 f_10_0 is f_31_27=0x2 & f_26_25 & f_24_21=0x4 & f_20_16 & f_15_11 & f_10_0 {  }
 :sub32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e2 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 - f_15_11; }
 :sub32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e3 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 - f_15_11; }
-:subi16 f_20_16 f_15_0 is f_31_21=0x762 & f_20_16 & f_15_0 { f_20_16 = f_20_16 - f_15_0; }
-:subi16 f_20_16 f_15_0 is f_31_21=0x763 & f_20_16 & f_15_0 { f_20_16 = f_20_16 - f_15_0; }
+:subi16 f_20_16 f_15_0 is f_31_21=0x762 & f_20_16 & f_15_0 { f_20_16 = f_20_16 - (f_15_0:4); }
+:subi16 f_20_16 f_15_0 is f_31_21=0x763 & f_20_16 & f_15_0 { f_20_16 = f_20_16 - (f_15_0:4); }
 :subi8 f_20_16 f_15_11 f_10_8 f_7_0 is f_31_21=0x7a3 & f_20_16 & f_15_11 & f_10_8 & f_7_0 {  }
 :task_boundary f_20_16 f_15_11 is f_31_21=0x161 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_task_boundary(f_20_16, f_15_11); }
 :task_complete  is f_31_0=0x9c09f401 { fman_task_complete(); return [r30]; }
@@ -274,17 +274,17 @@ define pcodeop fman_unit_submit;
 :task_set_end_nia f_20_16 f_15_11 is f_31_21=0x39f & f_20_16 & f_15_11 & f_10_0=0x106 { fman_task_set_end_nia(f_20_16, f_15_11); }
 :task_set_fqid f_20_16 f_15_11 is f_31_21=0x3ba & f_20_16 & f_15_11 & f_10_0=0x104 { fman_task_set_fqid(f_20_16, f_15_11); }
 :taskctx_load2 f_20_16 is f_31_21=0x3c8 & f_20_16 & f_15_0=0xf800 { fman_taskctx_load2(f_20_16); }
-:test32  is f_31_0=0xd9ff10b8 { Z = (r2 == 0); }
-:testand32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c9 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 & f_15_11) == 0); }
-:testor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6cd & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 | f_15_11) == 0); }
-:testxor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 ^ f_15_11) == 0); }
+:test32  is f_31_0=0xd9ff10b8 { Z = (r2 == 0:4); }
+:testand32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c9 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 & f_15_11) == 0:4); }
+:testor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6cd & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 | f_15_11) == 0:4); }
+:testxor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 ^ f_15_11) == 0:4); }
 :tnum_alloc f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xf900 { f_20_16 = fman_tnum_alloc(); }
 :tstadci16 f_20_16 f_15_0 is f_31_21=0x745 & f_20_16 & f_15_0 {  }
 :tstaddi16 f_20_16 f_15_0 is f_31_21=0x741 & f_20_16 & f_15_0 {  }
-:tstandhi16 f_20_16 f_15_0 is f_31_21=0x709 & f_20_16 & f_15_0 { Z = ((f_20_16 & (f_15_0 << 16)) == 0); }
-:tstandi16 f_20_16 f_15_0 is f_31_21=0x749 & f_20_16 & f_15_0 { Z = ((f_20_16 & f_15_0) == 0); }
-:tstimm16 f_20_16 f_15_0 is f_31_21=0x75d & f_20_16 & f_15_0 { Z = (f_15_0 == 0); }
-:tstori16 f_20_16 f_15_0 is f_31_21=0x74d & f_20_16 & f_15_0 { Z = ((f_20_16 | f_15_0) == 0); }
+:tstandhi16 f_20_16 f_15_0 is f_31_21=0x709 & f_20_16 & f_15_0 { Z = ((f_20_16 & ((f_15_0:4) << 16)) == 0:4); }
+:tstandi16 f_20_16 f_15_0 is f_31_21=0x749 & f_20_16 & f_15_0 { Z = ((f_20_16 & (f_15_0:4)) == 0:4); }
+:tstimm16 f_20_16 f_15_0 is f_31_21=0x75d & f_20_16 & f_15_0 { Z = (f_15_0 == 0:2); }
+:tstori16 f_20_16 f_15_0 is f_31_21=0x74d & f_20_16 & f_15_0 { Z = ((f_20_16 | (f_15_0:4)) == 0:4); }
 :unit_config f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x1c & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
 :unit_read0 f_20_16 f_10_6 f_5_0 is f_31_21=0x3c0 & f_20_16 & f_15_11=0x1f & f_10_6 & f_5_0 {  }
 :unit_read32 f_20_16 f_10_6 f_5_0 is f_31_21=0x3e0 & f_20_16 & f_15_11=0x1f & f_10_6 & f_5_0 {  }
@@ -294,16 +294,16 @@ define pcodeop fman_unit_submit;
 :unit16_read0 f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xfc00 {  }
 :unit16_submit1 f_20_16 f_15_11 is f_31_21=0x3bb & f_20_16 & f_15_11 & f_10_0=0x401 {  }
 :wait_cont rel16_dest is f_31_16=0x2e3f & rel16_dest { goto rel16_dest; }
-:xfer14 rel16_dest is f_31_16=0x2e5f & rel16_dest [ delayslot(1); ] { goto rel16_dest; }
+:xfer14 rel16_dest is f_31_16=0x2e5f & rel16_dest { delayslot(1); goto rel16_dest; }
 :xfer14 rel16_dest is f_31_16=0xb7ff & rel16_dest { goto rel16_dest; }
 :xfer14 f_15_14 rel14_dest is f_31_16=0xbfff & f_15_14 & rel14_dest { goto rel14_dest; }
-:xfer14_comp f_15_14 rel14_dest is f_31_16=0x937d & f_15_14 & rel14_dest [ delayslot(1); ] { goto rel14_dest; }
-:xfer14_comp rel16_dest is f_31_16=0xb3ff & rel16_dest [ delayslot(1); ] { goto rel16_dest; }
-:xfer14_comp f_15_14 rel14_dest is f_31_16=0xbbff & f_15_14 & rel14_dest [ delayslot(1); ] { goto rel14_dest; }
+:xfer14_comp f_15_14 rel14_dest is f_31_16=0x937d & f_15_14 & rel14_dest { delayslot(1); goto rel14_dest; }
+:xfer14_comp rel16_dest is f_31_16=0xb3ff & rel16_dest { delayslot(1); goto rel16_dest; }
+:xfer14_comp f_15_14 rel14_dest is f_31_16=0xbbff & f_15_14 & rel14_dest { delayslot(1); goto rel14_dest; }
 :xfer16 f_23_20 rel16_dest is f_31_24=0x93 & f_23_20 & f_19_16=0xd & rel16_dest { goto rel16_dest; }
 :xform f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x3d & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
 :xor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d2 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 ^ f_15_11; }
-:xori16 f_20_16 f_15_0 is f_31_21=0x752 & f_20_16 & f_15_0 { f_20_16 = f_20_16 ^ f_15_0; }
+:xori16 f_20_16 f_15_0 is f_31_21=0x752 & f_20_16 & f_15_0 { f_20_16 = f_20_16 ^ (f_15_0:4); }
 :xori16c f_20_16 f_15_0 is f_31_21=0x753 & f_20_16 & f_15_0 {  }
 
 # Catch-all opcode (least specific)
