@@ -190,15 +190,15 @@ define pcodeop fman_unit_submit;
 :csum_result f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xfc01 { fman_csum_accum(); }
 :csum_setup  is f_31_0=0x6f60fc06 { fman_csum_accum(); }
 :dma_bufop f_26_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_27=0x8 & f_26_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 { fman_dma_read(); }
-:dma_read256 f_20_16 f_15_11 is f_31_21=0x2ac & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
-:dma_read64 f_20_16 f_15_11 is f_31_21=0x2a8 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
-:dma_read8 f_20_16 f_15_11 is f_31_21=0x2a0 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
-:dma_read8_muramimm f_20_16 f_10_0 is f_31_21=0x2a0 & f_20_16 & f_15_11=0x1a & f_10_0 { fman_dma_read(); }
+:dma_read256 f_20_16 f_15_11 is f_31_21=0x2ac & f_20_16 & f_15_11 & f_10_0=0x0 { local src:2 = f_20_16[0,16]; local dst:2 = f_15_11[0,16]; *[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0); *[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4); *[dmem]:4 (dst + 8) = *[dmem]:4 (src + 8); *[dmem]:4 (dst + 12) = *[dmem]:4 (src + 12); fman_dma_read(); }
+:dma_read64 f_20_16 f_15_11 is f_31_21=0x2a8 & f_20_16 & f_15_11 & f_10_0=0x0 { local src:2 = f_20_16[0,16]; local dst:2 = f_15_11[0,16]; *[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0); *[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4); *[dmem]:4 (dst + 8) = *[dmem]:4 (src + 8); *[dmem]:4 (dst + 12) = *[dmem]:4 (src + 12); fman_dma_read(); }
+:dma_read8 f_20_16 f_15_11 is f_31_21=0x2a0 & f_20_16 & f_15_11 & f_10_0=0x0 { local src:2 = f_20_16[0,16]; local dst:2 = f_15_11[0,16]; *[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0); *[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4); fman_dma_read(); }
+:dma_read8_muramimm f_20_16 f_10_0 is f_31_21=0x2a0 & f_20_16 & f_15_11=0x1a & f_10_0 { local src:2 = f_20_16[0,16]; local dst:2 = f_10_0; *[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0); *[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4); fman_dma_read(); }
 :dma_special  is f_31_0=0x55a23800 { fman_dma_read(); }
 :dma_status64 f_20_16 f_15_11 is f_31_21=0x2e8 & f_20_16 & f_15_11 & f_10_0=0x8 { fman_dma_read(); }
-:dma_write2 f_20_16 f_15_11 is f_31_21=0x291 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
-:dma_write64 f_20_16 f_15_11 is f_31_21=0x2a9 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
-:dma_write64 f_20_16 f_15_11 is f_31_21=0x2e9 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
+:dma_write2 f_20_16 f_15_11 is f_31_21=0x291 & f_20_16 & f_15_11 & f_10_0=0x0 { local dst:2 = f_20_16[0,16]; local src:2 = f_15_11[0,16]; *[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0); *[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4); fman_dma_write(); }
+:dma_write64 f_20_16 f_15_11 is f_31_21=0x2a9 & f_20_16 & f_15_11 & f_10_0=0x0 { local dst:2 = f_20_16[0,16]; local src:2 = f_15_11[0,16]; *[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0); *[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4); fman_dma_write(); }
+:dma_write64 f_20_16 f_15_11 is f_31_21=0x2e9 & f_20_16 & f_15_11 & f_10_0=0x0 { local dst:2 = f_20_16[0,16]; local src:2 = f_15_11[0,16]; *[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0); *[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4); fman_dma_write(); }
 :frame_base f_20_16 is f_31_21=0x3e0 & f_20_16 & f_15_0=0xf903 {  }
 :framewin f_20_16 f_15_11 f_10_9 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_9 & f_8_0=0x0 {  }
 :imm14 f_20_16 f_15_14 f_13_0 is f_31_21=0x75f & f_20_16 & f_15_14 & f_13_0 {  }

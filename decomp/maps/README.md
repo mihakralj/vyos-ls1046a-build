@@ -13,13 +13,8 @@ python3 decomp/tools/structure-map.py \
 
 ## 210.10.1 structure (2026-08-07, `210.10.1-structure.json`)
 
-- 12,851 code words. **85 candidate function entries** (24-slot dispatch
-  table + in-range targets of the `0xb7xx` branch family). **9 pad/data
-  runs** (`0xffffffff` ≥ 4 words).
-- Exact-sequence alignment (≥4 identical consecutive words, matched
-  anywhere): 210↔106 = **22.2%** covered (107 shared runs); 210↔108 =
-  **25.6%** (67 shared runs). Strict method; the looser 2026-08-06
-  byte-chunk method said 30–42%. Both agree: ~3/4 of 210 is new code.
+- 12,851 code words. **85 candidate function entries** (24-slot dispatch table + in-range targets of the `0xb7xx` branch family). **9 pad/data runs** (`0xffffffff` ≥ 4 words).
+- Exact-sequence alignment (≥4 identical consecutive words, matched anywhere): 210↔106 = **22.2%** covered (107 shared runs); 210↔108 = **25.6%** (67 shared runs). Strict method; the looser 2026-08-06 byte-chunk method said 30–42%. Both agree: ~3/4 of 210 is new code.
 
 ### 210-only regions (unique runs vs 108, ≥ 25 words)
 
@@ -38,31 +33,15 @@ python3 decomp/tools/structure-map.py \
 | w8584–w8632 | 49 | directly precedes slot 19 region |
 | w0–w44 | 45 | dispatch table itself (expected) |
 
-**Slot-19 corroboration**: slot 19 (the structurally 210-only dispatch
-entry, candidate "dynamic CC-table update, aging-specific" — matching the
-ASK-added `HC_HCOR_OPCODE_CC_UPDATE_WITH_AGING` in
-`arch/fman-function-inventory.md`) targets w8669, 21 words inside the
-1,615-word unique-vs-public island w8648–w10262. Dispatch hypothesis and
-alignment map corroborate each other. Slot 6 (w8622) lands in the short
-w8584–w8632 unique run at the head of that same cluster; slot 3 (w1626)
-lands inside the w1581–w1644 unique run. Slot 7 (w12172) sits ~80 words
-*past* the w10349–w12090 island — that island is reached by in-code
-branches, not by a dispatch slot. 210's new machinery is concentrated in
-two big islands: **w2972–w8096** (~5.0K words) and **w8584–w12090**
-(~3.4K words).
+**Slot-19 corroboration**: slot 19 (the structurally 210-only dispatch entry, candidate "dynamic CC-table update, aging-specific" — matching the ASK-added `HC_HCOR_OPCODE_CC_UPDATE_WITH_AGING` in `arch/fman-function-inventory.md`) targets w8669, 21 words inside the 1,615-word unique-vs-public island w8648–w10262. Dispatch hypothesis and alignment map corroborate each other. Slot 6 (w8622) lands in the short w8584–w8632 unique run at the head of that same cluster; slot 3 (w1626) lands inside the w1581–w1644 unique run. Slot 7 (w12172) sits ~80 words *past* the w10349–w12090 island — that island is reached by in-code branches, not by a dispatch slot. 210's new machinery is concentrated in two big islands: **w2972–w8096** (~5.0K words) and **w8584–w12090** (~3.4K words).
 
 ### Pad runs as function separators
 
-`0xffffffff` runs at w1184–1207 (24), w1235–1247 (13), w1574–1583 (10)
-immediately precede dispatch entries (slot 3 → w1626) — alignment padding
-before function starts. Useful CFG-skeleton signal.
+`0xffffffff` runs at w1184–1207 (24), w1235–1247 (13), w1574–1583 (10) immediately precede dispatch entries (slot 3 → w1626) — alignment padding before function starts. Useful CFG-skeleton signal.
 
 ### Low-16-bit field distribution analysis (2026-08-07 late)
 
-Early "in-range target %" stats could not distinguish *branch-to-anywhere*
-from *small-immediate* (small values are trivially in-range for a 12.8K-word
-code). Distribution shape (min/median/p90/max + value histograms) is the
-discriminator. Results:
+Early "in-range target %" stats could not distinguish *branch-to-anywhere* from *small-immediate* (small values are trivially in-range for a 12.8K-word code). Distribution shape (min/median/p90/max + value histograms) is the discriminator. Results:
 
 | Prefix | n | low16 distribution | Reading (hypothesis) |
 |---|---|---|---|
@@ -79,36 +58,17 @@ discriminator. Results:
 | `0x04xx`/`0x1xxx` families | ~2,100 combined | include **`0xd0xx` in 779 words** | **per-task context-page access** — corroborates the iter-42 claim (see below) |
 | `0xe9c9` | **13** | — | blob-wide rare; locally significant in the slot-8 construct only |
 
-**Supersedes two earlier guesses**: arch doc §1.2's "`0xb3ff` = load 16-bit
-immediate" (its low16 is bimodal branch-offset-shaped, not immediate-shaped)
-and this directory's own first-pass "`0xb7df` = load-imm16" (its low16 is
-almost always `0xffff` — a park encoding). Confidence: statistical +
-one structural proof (slot-8 cascade); Phase 4 oracle confirms.
+**Supersedes two earlier guesses**: arch doc §1.2's "`0xb3ff` = load 16-bit immediate" (its low16 is bimodal branch-offset-shaped, not immediate-shaped) and this directory's own first-pass "`0xb7df` = load-imm16" (its low16 is almost always `0xffff` — a park encoding). Confidence: statistical + one structural proof (slot-8 cascade); Phase 4 oracle confirms.
 
-**iter-42 context-page corroboration** (`arch/fman-fe-ehash.md` §8.1 item 3
-claimed the AC_CC handler reads per-task context page `0xd0xx`): 779 words
-blob-wide carry `0xd0xx` in low16, carried by the `0x04xx`/`0x1xxx` classes —
-which are also the classes that grew most in 210 (`0x0400`: 160→421). 210's
-new features do proportionally more per-task context access.
+**iter-42 context-page corroboration** (`arch/fman-fe-ehash.md` §8.1 item 3 claimed the AC_CC handler reads per-task context page `0xd0xx`): 779 words blob-wide carry `0xd0xx` in low16, carried by the `0x04xx`/`0x1xxx` classes — which are also the classes that grew most in 210 (`0x0400`: 160→421). 210's new features do proportionally more per-task context access.
 
 ## CFG skeleton v2 (2026-08-07 night, `210.10.1-blocks.json`)
 
-Built by `decomp/tools/cfg-map.py` from the branch models (anchors C01–C06).
-Regenerate: `python3 decomp/tools/cfg-map.py <blob> --tag 210.10.1`.
+Built by `decomp/tools/cfg-map.py` from the branch models (anchors C01–C06). Regenerate: `python3 decomp/tools/cfg-map.py <blob> --tag 210.10.1`.
 
-- **2,201 block starts** from 97 absolute + 1,075 relative + 285 park
-  branches (+ fall-throughs, pad boundaries).
-- **Relative-model validation**: 100.0% of 1,075 relative targets in range;
-  134 convergent targets (≥2 predecessors — real join points); 121 backward
-  branches, 116 loop-shaped (2–4000 words). The model produces sane CFGs;
-  ±1 on the PC base is the only residual.
-- **No secondary jump tables, no raw offset tables** (runs of consecutive
-  `b7ff` words; runs of in-range data words). **Q05 answered negatively**:
-  FE descriptor types are NOT dispatched through a data table. Remaining
-  mechanisms: compare-and-branch cascade (most likely — the ISA is
-  branch-rich and FE types are small constants 1–6, invisible as immediates)
-  or a computed indirect branch (needs Phase 4's compare/indirect-branch
-  encodings).
+- **2,201 block starts** from 97 absolute + 1,075 relative + 285 park branches (+ fall-throughs, pad boundaries).
+- **Relative-model validation**: 100.0% of 1,075 relative targets in range; 134 convergent targets (≥2 predecessors — real join points); 121 backward branches, 116 loop-shaped (2–4000 words). The model produces sane CFGs; ±1 on the PC base is the only residual.
+- **No secondary jump tables, no raw offset tables** (runs of consecutive `b7ff` words; runs of in-range data words). **Q05 answered negatively**: FE descriptor types are NOT dispatched through a data table. Remaining mechanisms: compare-and-branch cascade (most likely — the ISA is branch-rich and FE types are small constants 1–6, invisible as immediates) or a computed indirect branch (needs Phase 4's compare/indirect-branch encodings).
 
 ### Hot join points (convergence = infrastructure everyone uses)
 
@@ -124,32 +84,15 @@ Regenerate: `python3 decomp/tools/cfg-map.py <blob> --tag 210.10.1`.
 
 ### The two mega-structures
 
-1. **w2837 loop nest** — 9 nested backward loops spanning up to
-   w2837–w5127 (2,290 words), 12 predecessors at the head, reaching deep
-   into the first unique island. Reads as a **table walker** (per-entry
-   processing over a large structure) — the largest single control-flow
-   feature in the blob.
-2. **w8676–w12072 loop** (3,396 words) — slot 19 (aging CC update, w8669)
-   falls through into this loop head after a 6-word preamble. One loop
-   spanning nearly the whole second island = **the aging walker** (iterate
-   all CC hash-table entries, update timestamps). First concrete code-level
-   confirmation of what slot 19 does.
+1. **w2837 loop nest** — 9 nested backward loops spanning up to w2837–w5127 (2,290 words), 12 predecessors at the head, reaching deep into the first unique island. Reads as a **table walker** (per-entry processing over a large structure) — the largest single control-flow feature in the blob.
+2. **w8676–w12072 loop** (3,396 words) — slot 19 (aging CC update, w8669) falls through into this loop head after a 6-word preamble. One loop spanning nearly the whole second island = **the aging walker** (iterate all CC hash-table entries, update timestamps). First concrete code-level confirmation of what slot 19 does.
 
 ### Slot-handler shape
 
-Dispatch slots are trampolines, not handlers: slot 1 (KeyGen HC) is a 2-word
-block w653–w654 then an absolute branch to w12061 (inside the hot tail
-region); slot 8 is a 1-word block branching to the w104 helper; slot 6
-(QMI_ENQ) is 3 words then absolute branch to w72 (early shared region). The
-real handler bodies live in the w12061–w12271 convergence zone and the
-islands.
+Dispatch slots are trampolines, not handlers: slot 1 (KeyGen HC) is a 2-word block w653–w654 then an absolute branch to w12061 (inside the hot tail region); slot 8 is a 1-word block branching to the w104 helper; slot 6 (QMI_ENQ) is 3 words then absolute branch to w72 (early shared region). The real handler bodies live in the w12061–w12271 convergence zone and the islands.
 
 ## Caveats
 
-- Alignment is *exact word sequence* matching: compiler-relocated but
-  semantically identical code counts as unique. Unique ≠ functionally new;
-  unique = "not byte-identical to public blobs".
-- Entry points from branch-target harvest are candidates until Phase 4
-  confirms prologue encodings.
-- Slot→feature attributions remain hypotheses (arch doc §1.2 evidence
-  columns); the w8645/w8648 corroboration raises slot 19's confidence.
+- Alignment is *exact word sequence* matching: compiler-relocated but semantically identical code counts as unique. Unique ≠ functionally new; unique = "not byte-identical to public blobs".
+- Entry points from branch-target harvest are candidates until Phase 4 confirms prologue encodings.
+- Slot→feature attributions remain hypotheses (arch doc §1.2 evidence columns); the w8645/w8648 corroboration raises slot 19's confidence.

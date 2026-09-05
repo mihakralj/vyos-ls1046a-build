@@ -408,6 +408,40 @@ def generate_sleigh(table, out_path):
             ])
         elif mn.startswith("clz32"):
             semantics.append("r7 = lzcount(r1);")
+        elif mn.startswith("dma.read256") or mn.startswith("dma.read64"):
+            semantics.extend([
+                "local src:2 = f_20_16[0,16];",
+                "local dst:2 = f_15_11[0,16];",
+                "*[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0);",
+                "*[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4);",
+                "*[dmem]:4 (dst + 8) = *[dmem]:4 (src + 8);",
+                "*[dmem]:4 (dst + 12) = *[dmem]:4 (src + 12);",
+                "fman_dma_read();",
+            ])
+        elif mn == "dma.read8":
+            semantics.extend([
+                "local src:2 = f_20_16[0,16];",
+                "local dst:2 = f_15_11[0,16];",
+                "*[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0);",
+                "*[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4);",
+                "fman_dma_read();",
+            ])
+        elif mn == "dma.read8.muramimm":
+            semantics.extend([
+                "local src:2 = f_20_16[0,16];",
+                "local dst:2 = f_10_0;",
+                "*[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0);",
+                "*[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4);",
+                "fman_dma_read();",
+            ])
+        elif mn.startswith("dma.write"):
+            semantics.extend([
+                "local dst:2 = f_20_16[0,16];",
+                "local src:2 = f_15_11[0,16];",
+                "*[dmem]:4 (dst + 0) = *[dmem]:4 (src + 0);",
+                "*[dmem]:4 (dst + 4) = *[dmem]:4 (src + 4);",
+                "fman_dma_write();",
+            ])
         elif "dma" in mn:
             semantics.append("fman_dma_read();")
         elif mn.startswith("csum"):

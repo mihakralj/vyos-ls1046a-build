@@ -4,26 +4,14 @@
 
 ## 1. Context and Objective
 
-When this reverse-engineering program began on 2026-08-07, the goal was intentionally scoped down:
-semantic recovery of ~10 named routines (the FE-VM ehash interpreter, KeyGen HC handler, CC walker,
-policer path, parser error paths) rather than a full decompile of all 12,851 code words. At the time,
-the controller RISC ISA had no public reference, requiring slow empirical cracking via a live silicon
-mutation oracle (`E1`–`E29` in `decomp/experiments.md`).
+When this reverse-engineering program began on 2026-08-07, the goal was intentionally scoped down: semantic recovery of ~10 named routines (the FE-VM ehash interpreter, KeyGen HC handler, CC walker, policer path, parser error paths) rather than a full decompile of all 12,851 code words. At the time, the controller RISC ISA had no public reference, requiring slow empirical cracking via a live silicon mutation oracle (`E1`–`E29` in `decomp/experiments.md`).
 
-On 2026-08-29, a major breakthrough occurred: an external reverse-engineered reference containing
-**201 canonical instruction forms** for the FMan controller RISC ISA was acquired and documented in
-`arch/fman-instruction-table.html` (and indexed into Qdrant). Cross-referencing this table against
-the canonical 210.10.1 microcode blob revealed that **12,850 of 12,851 words (99.99%) match the 201-instruction
-table**, with the single unmatched word (`w1`) being the BCD version constant `0x00d20a01` (`210.10.1`).
-100% of executable instruction words in the microcode now have a known opcode, mnemonic, operand layout,
-and pseudocode definition.
+On 2026-08-29, a major breakthrough occurred: an external reverse-engineered reference containing **201 canonical instruction forms** for the FMan controller RISC ISA was acquired and documented in `arch/fman-instruction-table.html` (and indexed into Qdrant). Cross-referencing this table against the canonical 210.10.1 microcode blob revealed that **12,850 of 12,851 words (99.99%) match the 201-instruction table**, with the single unmatched word (`w1`) being the BCD version constant `0x00d20a01` (`210.10.1`). 100% of executable instruction words in the microcode now have a known opcode, mnemonic, operand layout, and pseudocode definition.
 
-The objective of Phase 7 is to translate this 100% ISA decode into **full deep understanding of the entire
-microcode 210.10.1 image (all 12,851 words)**:
+The objective of Phase 7 is to translate this 100% ISA decode into **full deep understanding of the entire microcode 210.10.1 image (all 12,851 words)**:
 1. Complete whole-image disassembly and control-flow graph (CFG) recovery.
 2. Partitioning of all code words into functional subsystems mapped from the 24 dispatch vectors.
-3. High-level algorithmic C reconstruction for every subsystem (extending the gold standard set by
-   `decomp/en-exthash-lookup.asm`).
+3. High-level algorithmic C reconstruction for every subsystem (extending the gold standard set by `decomp/en-exthash-lookup.asm`).
 4. Publication of the definitive `arch/fman-microcode-210-full-reference.md`.
 
 ---
@@ -68,11 +56,9 @@ flowchart TD
 ## 3. Stage Details & Deliverables
 
 ### Stage 1: Tooling & Full-Fidelity Disassembly Engine
-- **Objective**: Build an automated disassembler and analyzer that decodes every word with exact operand extraction,
-  symbol resolution, and architectural context.
+- **Objective**: Build an automated disassembler and analyzer that decodes every word with exact operand extraction, symbol resolution, and architectural context.
 - **Key Requirements**:
-  1. **Instruction Decoding**: Parse all 201 canonical forms from `arch/fman-instruction-table.html`, matching by
-     tightest mask (`popcount(mask)`).
+  1. **Instruction Decoding**: Parse all 201 canonical forms from `arch/fman-instruction-table.html`, matching by tightest mask (`popcount(mask)`).
   2. **Operand Parsing**:
      - Register fields: Data registers `r0..r31`, Base registers (e.g., `r26` = IC base `0xd000`, `r28` = Frame window).
      - Address calculation: Base register + 11-bit offset for `memw.write` (`1409d0b8` -> `*[r26 + 0xb8] = r9`).
@@ -97,15 +83,13 @@ flowchart TD
      - Identify block boundaries at branch targets, delay slots, and unconditional transfers (`xfer14`, `task.boundary`).
      - Resolve computed jump tables (`jmptbl.r0`, `jmptbl.comp.r3`, `task.redispatch`).
   3. Overlay differential corpus data:
-     - Tag each block as **Shared Mainline** (common with 106.4.18 / 108.4.9) or **210-Unique Island**
-       (e.g., Island 1 `w8648`–`w10262`, Island 2 `w12124`–`w12550`).
+     - Tag each block as **Shared Mainline** (common with 106.4.18 / 108.4.9) or **210-Unique Island** (e.g., Island 1 `w8648`–`w10262`, Island 2 `w12124`–`w12550`).
 - **Deliverables**:
   - `decomp/out/fman-210.10.1-full.asm`: Complete annotated disassembly with line-by-line semantics and symbols.
   - `decomp/out/fman-210.10.1-cfg.json`: Machine-readable CFG with nodes, edges, delay slots, and corpus tags.
 
 ### Stage 3: Subsystem Partitioning & Boundary Mapping
-- **Objective**: Trace all 24 dispatch-table vectors (`w0`–`w23`) and secondary dispatch cascades to assign 100% of
-  code words to functional subsystems.
+- **Objective**: Trace all 24 dispatch-table vectors (`w0`–`w23`) and secondary dispatch cascades to assign 100% of code words to functional subsystems.
 - **Subsystem Allocations**:
   | Subsystem | Primary Vectors / Roots | Word Range (Approx) | Status |
   |---|---|---|---|
@@ -122,10 +106,8 @@ flowchart TD
 ### Stage 4: Systematic C Reconstruction
 - **Objective**: Reconstruct exact, compilable C models of each subsystem matching the standard of `en-exthash-lookup.asm`.
 - **Target Files**:
-  1. `decomp/out/01-cc-match-walker.c`: CC group/key row evaluation, mask comparisons, action-descriptor resolution,
-     and chaining ceiling enforcement.
-  2. `decomp/out/02-fe-vm-action-interpreter.c`: Complete FE-VM opcode execution loop, including all packet modification
-     ops (`ENQUEUE_PKT`, `INSERT_L2_HDR`, `VLAN_STRIP`, `VLAN_INSERT`, NAT TTL/IP/Port rewrites) and the `5+tnums` management index.
+  1. `decomp/out/01-cc-match-walker.c`: CC group/key row evaluation, mask comparisons, action-descriptor resolution, and chaining ceiling enforcement.
+  2. `decomp/out/02-fe-vm-action-interpreter.c`: Complete FE-VM opcode execution loop, including all packet modification ops (`ENQUEUE_PKT`, `INSERT_L2_HDR`, `VLAN_STRIP`, `VLAN_INSERT`, NAT TTL/IP/Port rewrites) and the `5+tnums` management index.
   3. `decomp/out/03-keygen-host-command.c`: Dynamic scheme reprogramming via Host Command and the indirect AR protocol.
   4. `decomp/out/04-policer-state-machine.c`: Token-bucket updates (srTCM/trTCM), color marking, and discard decisions.
   5. `decomp/out/05-parser-error-and-bmi.c`: Gross error handling, L4 checksum verification, BMI FIFO recycling, and error FQ routing.
@@ -135,8 +117,7 @@ flowchart TD
 - **Objective**: Ensure that every reconstructed algorithm agrees with live silicon behavior and publish the master specification.
 - **Tasks**:
   1. Use the proven kexec mutation oracle (`decomp/experiments.md`) to run targeted verification on critical ambiguity points.
-  2. Author `arch/fman-microcode-210-full-reference.md`, integrating register mappings, descriptor contracts, memory layouts,
-     and hardware failure models (e.g. key-size stalls, pool starvation, management index exhaustion).
+  2. Author `arch/fman-microcode-210-full-reference.md`, integrating register mappings, descriptor contracts, memory layouts, and hardware failure models (e.g. key-size stalls, pool starvation, management index exhaustion).
 
 ---
 
