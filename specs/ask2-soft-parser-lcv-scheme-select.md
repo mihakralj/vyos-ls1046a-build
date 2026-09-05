@@ -1114,3 +1114,135 @@ shipping feature) already works via the separate CC-tree/HMTD path.
 Recommend a fresh scoping conversation before further soft-parser work
 -- this thread has now had multiple genuinely thorough, honest negative
 results in a row.
+
+## 6q. `.116` full-source rebuild + kprobe netboot: real per-header offset table captured, but `FM_PCD_PrsLoadSw` never fires -- FMan state survives warm reboots
+
+Following 6p's dead end (kprobes categorically unavailable in `.116`'s
+shipped kernel, `CONFIG_KPROBES` off), rebuilt the *entire* relevant
+stack from source in one consistent pass rather than trying to patch
+around the shipped kernel: `we-are-mono/openwrt` branch `mono` (the
+confirmed real source of `.116`'s image, see 6p) with
+`CONFIG_KERNEL_KPROBES=y` (which OpenWrt's `Config-kernel.in` also
+`select`s `KERNEL_FTRACE`+`KERNEL_PERF_EVENTS` for), plus the pinned
+ASK commit's `kmod-ask-cdx`/`kmod-ask-fci`/`kmod-ask-auto-bridge`/
+`cmm`/`dpa-app` packages, all built together so nothing pre-built gets
+mixed in (this sidesteps the CONFIG_MODVERSIONS CRC-mismatch dead end
+a minimal-diff kernel-only rebuild hit earlier the same day). Full
+`make world` failed on an unrelated package (`sqlite3`, a host-compiler
+toolchain issue orthogonal to anything here); built only the specific
+targets needed (`package/kernel/linux`, the ASK packages) instead --
+all succeeded cleanly. `cmm`/`dpa_app` userspace binaries came out
+byte-identical to the already-running stock ones (unaffected by kernel
+config, unlike the `.ko` files).
+
+**Deployment**: no NOR/eMMC flash at all (physical DIP-switch/board
+access isn't available remotely, and the vendor `firmware update` tool
+only flashes vendor-signed images anyway -- see the AGENTS.md-violation
+process note from earlier this session). Instead: backed up the real
+`/lib/modules/6.12.103/{cdx,fci,auto_bridge}.ko` and `/usr/bin/{cmm,
+dpa_app}` (checksummed), replaced them with the freshly-built matched
+versions, added a kprobe tracer module (`decomp/fmtrace.c`, kretprobes
+on `FM_PCD_PrsLoadSw`/`FmPcdGetSwPrsOffset`, kprobes on
+`fman_prs_enable`/`fman_prs_disable`/`fman_prs_is_enabled`, all
+read-only, logged to `/proc/fmtrace`), then interrupted U-Boot autoboot
+over the serial relay and `tftpboot`'d the custom kernel `Image` +
+matching `mono-gateway-dk.dtb` into RAM, booting with the *unmodified*
+`root=/dev/mmcblk0p4` (the real, live rootfs) and the exact real
+`bootargs` read from a prior boot's own console log. This is a
+non-persistent override -- nothing survives a normal reboot except the
+files deliberately staged on the rootfs.
+
+**First attempt**: `fmtrace` was loaded via a low-priority `/etc/init.d/`
+script -- too late. dmesg showed `cdx`/`dpa_app` already running before
+our script's turn came. Root cause: OpenWrt's `kmodloader` autoloads
+`cdx.ko` via `/etc/modules.d/30-ask-cdx`, a *separate, earlier*
+mechanism than the numbered `/etc/init.d/` sequence -- no `init.d`
+priority, however low, can beat it. Fixed by registering `fmtrace` the
+same way `cdx` is registered: copied `fmtrace.ko` into
+`/lib/modules/6.12.103/`, added `/etc/modules.d/00-fmtrace` (sorts
+before `30-ask-cdx`; this system has no `depmod`/`modules.dep` at all --
+`kmodloader` resolves module names by direct filename match, confirmed
+empirically). Also had to fix a real bug in `fmtrace.c` along the way:
+`fmtrace_show()` declared a 30 KB array on the kernel stack, caught as
+a hard `-Werror=frame-larger-than=2048` build failure against this
+kernel's stricter config -- fixed with a bounded `kmalloc_array()`
+instead.
+
+**Capture, ordering now confirmed correct** (`cdx`/`fmtrace` lsmod
+order, dmesg timestamps): `FmPcdGetSwPrsOffset` fired immediately and
+repeatedly -- the *real* production per-header offset table, genuine
+ground truth never seen before:
+
+| hdr (`e_NetHeaderType`) | offset returned |
+|---|---|
+| 2 | `0x37` |
+| 4 | `0x63` |
+| 5 | `0x88` |
+| 8 | `0xa4` |
+| 7 | `0xed` |
+| 26 | `0x12b` |
+| 13 | `0x20` |
+
+This exact 7-entry sequence repeated 7 times (~20ms apart, ~120ms
+total, then stopped) -- almost certainly once per DPA-Ethernet port
+being attached to the same shared soft-parser label table. `hdr=5`
+returning `0x88` matches this project's own earlier decode of `.116`'s
+live `pmda[].ssa` slot6(IPv6) value (`0x488` -> index `0x088`, 6n/6p) --
+independent confirmation via a completely different signal (a live
+function-return value, not a memory readback) that this project's
+addressing math is right, and that `hdr=5` is the IPv6 `e_NetHeaderType`
+value in this vendor tree.
+
+**But `FM_PCD_PrsLoadSw`, `fman_prs_enable`, `fman_prs_disable`, and
+`fman_prs_is_enabled` never fired at all** -- on either attempt,
+including the second one with kmodloader ordering provably fixed.
+dmesg confirmed `dpa_app` genuinely ran and exited cleanly this boot
+(`cdx: FMAN firmware 210.10.1 - ASK supported`, `start_dpa_app::calling
+dpa_app`, `cdx_module_init::start_dpa_app successful`) -- so this isn't
+a timing miss. Cross-checked live register state *during this same
+boot* via `fmprs_dump.ko` (rebuilt fresh against the current kernel):
+`fmpr_rpimac=0x00000001` and the real bytecode were already resident,
+despite no reload/enable call happening this boot at all.
+
+**Conclusion: FMan hardware state survives a warm (software-triggered)
+`reboot`.** Every reboot this session (including all three in this
+`.116` sub-thread) was a `reboot` command from a running Linux, never a
+genuine power cycle -- and `.116`, unlike `.185`, has no confirmed
+remote power control (no smart-plug equivalent). The parser
+execution-unit enable bit and its loaded code plainly are not reset by
+a warm restart, so by the time `dpa_app` ran on any of these boots, the
+FMan block was already in its previously-configured state from
+whenever `.116` was last truly power-cycled. The most likely
+explanation for the missing `FM_PCD_PrsLoadSw` call is that
+`fmc_execute()` (or dpa_app itself) diffs the desired configuration
+against live hardware state and skips the disable/load/enable cycle
+when nothing has changed -- consistent with "successful" completion in
+dmesg with none of the expected calls firing.
+
+**This means the real `FM_PCD_PrsLoadSw` call sequence -- the thing
+this whole `.116` sub-investigation set out to observe -- cannot be
+captured without a genuine cold boot, which requires physically power-
+cycling `.116`.** That's the same physical-access wall 6p's reflash
+path hit, for a different reason. Not a dead end on the underlying
+question, but a hard stop for what's achievable remotely right now.
+
+**Cleanup**: all original files restored and checksum-verified
+identical to the pre-experiment backups (`cdx.ko`/`fci.ko`/
+`auto_bridge.ko`/`cmm`/`dpa_app`), the temporary `/etc/modules.d/00-
+fmtrace` and `/etc/init.d/05fmtrace` removed, board rebooted normally
+(no netboot override) back onto the stock kernel from eMMC. Verified
+healthy afterward: stock `cdx.ko` size restored, `cmm` running as a
+normal persistent daemon, 0 `rx_errors` on all five interfaces, no
+panic/Oops/BUG in dmesg.
+
+**If this thread continues**: get physical access to `.116` for one
+genuine power cycle (unplug/replug, or add a remote-controllable smart
+plug matching `.185`'s Hubitat setup) with `fmtrace.ko` pre-staged via
+the same `00-fmtrace` mechanism (already proven to work and correctly
+ordered), then capture cold-boot dmesg + `/proc/fmtrace` immediately.
+That single capture would settle 6n's "necessary but not sufficient"
+question directly, on real vendor hardware and code, at the exact
+mechanism this project's own soft-parser work has been trying to
+exercise. Absent that, this is a reasonable point to step back and
+weigh continued soft-parser investment against the fact that VLAN
+offload already ships via the separate CC-tree/HMTD path.
