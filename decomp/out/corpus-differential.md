@@ -1,9 +1,6 @@
 # FMan Microcode Corpus Differential Analysis: 106.4.18 vs 108.4.9 vs 210.10.1
 
-**Generated:** 2026-09-05  
-**Target ISA:** NXP FMan v3 Controller RISC (201 Canonical Forms)  
-**Reference Table:** `arch/fman-instruction-table.html`  
-**Authoritative Spec:** `arch/fman-microcode-210-full-reference.md`
+**Generated:** 2026-09-05 · **Target ISA:** NXP FMan v3 Controller RISC (201 Canonical Forms) · **Reference Table:** `arch/fman-instruction-table.html` · **Authoritative Spec:** `arch/fman-microcode-210-full-reference.md`
 
 ```mermaid
 flowchart TD
@@ -27,8 +24,7 @@ flowchart TD
 
 ## 2. Full 24-Slot Dispatch Vector Matrix
 
-The 24 entry-point vectors at words `w0`–`w47` define the initial hardware dispatch from FMan FPM/BMI/KeyGen.
-Target formula: $\text{Target Word} = 48 + \text{raw}[15:0]$ (counted from byte `0xC0`).
+The 24 entry-point vectors at words `w0`–`w47` define the initial hardware dispatch from FMan FPM/BMI/KeyGen. Target formula: $\text{Target Word} = 48 + \text{raw}[15:0]$ (counted from byte `0xC0`).
 
 | Slot | Functional Subsystem | 106.4.18 Target | 108.4.9 Target | 210.10.1 Target | Status / Shift Analysis |
 |---|---|---|---|---|---|
@@ -59,8 +55,7 @@ Target formula: $\text{Target Word} = 48 + \text{raw}[15:0]$ (counted from byte 
 
 ## 3. Structural Map of 210-Unique Islands
 
-Differential sequence analysis between 108.4.9 and 210.10.1 isolates the exact code additions in 210.10.1.
-These regions represent the hardware offload logic, table traversal engines, and runtime flow modification scripts:
+Differential sequence analysis between 108.4.9 and 210.10.1 isolates the exact code additions in 210.10.1. These regions represent the hardware offload logic, table traversal engines, and runtime flow modification scripts:
 
 | Island | Word Range | Word Count | Primary Instructions | Functional Subsystem & Role |
 |---|---|---|---|---|
@@ -78,15 +73,12 @@ Host Commands are sent from the host CPU to FMan via `FMKG_AR` or the Host Comma
 
 ### Key Differences Identified:
 
-1. **Direct Scheme Reprogramming (`FMKG_AR`)**: In 106 and 108, host command entry at Slot 1 dispatched through generic scheme initialization.
-   In 210.10.1, `w654` executes `xfer14 w12667` to jump directly into an extended validator before vectoring to `w656`.
-2. **Host Command Stripping**: In 108, the jump table at `w673` handled 44 table records plus CAPWAP command extensions.
-   In 210.10.1, CAPWAP command records were completely stripped and replaced by:
+1. **Direct Scheme Reprogramming (`FMKG_AR`)**: In 106 and 108, host command entry at Slot 1 dispatched through generic scheme initialization. In 210.10.1, `w654` executes `xfer14 w12667` to jump directly into an extended validator before vectoring to `w656`.
+2. **Host Command Stripping**: In 108, the jump table at `w673` handled 44 table records plus CAPWAP command extensions. In 210.10.1, CAPWAP command records were completely stripped and replaced by:
    - `0x10`: Direct Flow Table Invalidation (`ask_hw_flush`)
    - `0x11`: Dynamic Scheme Key Mask Update
    - `0x12`: Policer Profile Binding Command
-3. **Context PortID Propagation**: Word `w106..w107` in 210 copies `IC[0x10]` (port ID) into `IC[0xb8]`, preserving port identity for the FE-VM.
-   This copy is entirely absent in 106.4.18 and 108.4.9.
+3. **Context PortID Propagation**: Word `w106..w107` in 210 copies `IC[0x10]` (port ID) into `IC[0xb8]`, preserving port identity for the FE-VM. This copy is entirely absent in 106.4.18 and 108.4.9.
 
 ## 5. CAPWAP in 108 vs Flow Offload in 210
 
@@ -100,8 +92,6 @@ Host Commands are sent from the host CPU to FMan via `FMKG_AR` or the Host Comma
 
 ## 6. Synthesis & Conclusions
 
-1. **Lineage Confirmation**: Microcode 210.10.1 is directly derived from the 108.x mainline tree, preserving the core 44-record Host Command table
-   and the standard KeyGen dispatch vectors (Slot 8 @ `w80`, Slot 12 @ `w75`).
+1. **Lineage Confirmation**: Microcode 210.10.1 is directly derived from the 108.x mainline tree, preserving the core 44-record Host Command table and the standard KeyGen dispatch vectors (Slot 8 @ `w80`, Slot 12 @ `w75`).
 2. **Architectural Replacement**: The ~1,820-word CAPWAP module in 108 was replaced and expanded into the ~3,550-word FE-VM Flow Offload Engine.
-3. **Single-Image Implication**: The presence of the complete 106/108 shared mainline code within 210.10.1 explains why 210.10.1 operates perfectly
-   as a drop-in replacement for standard Linux / VyOS RSS software forwarding, while providing the dormant hardware hooks required for ASK2 offload.
+3. **Single-Image Implication**: The presence of the complete 106/108 shared mainline code within 210.10.1 explains why 210.10.1 operates perfectly as a drop-in replacement for standard Linux / VyOS RSS software forwarding, while providing the dormant hardware hooks required for ASK2 offload.
