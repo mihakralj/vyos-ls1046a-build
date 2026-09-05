@@ -7,12 +7,13 @@ Status:
 - Phase 3: anchors database available
 - Phase 4: mutation oracle validated by E1 and E2 on the designated test DUT
 - Phase 5: Ghidra toolchain available
+- Phase 6: targeted algorithms extracted (ehash lookup in en-exthash-lookup.asm, FE-VM island in fe-action-interpreter.md)
+- Phase 7: full deep understanding master plan active (201-instruction ISA reference, 99.99% coverage)
 
 Reverse-engineering program for the NXP FMan v3 controller microcode (QEF
-container, version 210.10.1) that runs on the LS1046A's FMan. Goal is
-**semantic recovery of ~10 named routines** (FE-VM ehash interpreter, KeyGen
-HC handler, CC walker, policer path, parser error paths, …) — *not* a full
-decompile of all 12,851 code words.
+container, version 210.10.1) that runs on the LS1046A's FMan. Initially scoped
+to ~10 named routines, now elevated under Phase 7 to full-image comprehension
+of all 12,851 words leveraging the 201-instruction controller ISA table.
 
 This directory holds the plan, the running discovery log, and per-phase
 notes. The register/AD-level contract the microcode implements is documented
@@ -23,6 +24,7 @@ covers the *code itself*.
 
 | File | Covers |
 |---|---|
+| [07-plan-full-understanding.md](07-plan-full-understanding.md) | Phase 7 — master plan for full deep understanding (all 12,851 words, 5-stage roadmap) |
 | [findings.md](findings.md) | Dated discovery log — every established fact with evidence, newest first |
 | [correlation-arch.md](correlation-arch.md) | Correlation of decomp findings with `arch/fman-*.md` (verdicts, edits applied, open questions) |
 | [experiments.md](experiments.md) | Silicon-oracle experiment log (delivery pipeline, E1/E2, queue) |

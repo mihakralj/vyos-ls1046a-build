@@ -54,6 +54,7 @@
 #include <linux/uaccess.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
+#include <linux/atomic.h>
 
 #define LOG_MAX		96
 #define LOG_LINE	320
@@ -147,17 +148,30 @@ static struct kretprobe krp_prsloadsw = {
 };
 
 /* --- FmPcdGetSwPrsOffset(h_FmPcd, hdr, indexPerHdr) --- */
+/* Found live 2026-09-05: this is called every ~20ms in steady state (a
+ * periodic PCD/soft-parser table poll, not boot-only), which would flood
+ * and wrap the small ring buffer in ~200ms and evict a one-shot event
+ * (e.g. FM_PCD_PrsLoadSw) logged earlier. Cap logging so a handful of
+ * cycles are visible (enough to prove the periodic pattern) without
+ * drowning out rarer events. */
+static atomic_t getoffset_calls = ATOMIC_INIT(0);
+#define GETOFFSET_LOG_CAP 40
+
 static int h_getoffset_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	u32 hdr = (u32)regs_get_kernel_argument(regs, 1);
 	u8 idx = (u8)regs_get_kernel_argument(regs, 2);
 
+	if (atomic_inc_return(&getoffset_calls) > GETOFFSET_LOG_CAP)
+		return 0;
 	log_add("FmPcdGetSwPrsOffset(hdr=%u, indexPerHdr=%u) called", hdr, idx);
 	return 0;
 }
 
 static int h_getoffset_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+	if (atomic_read(&getoffset_calls) > GETOFFSET_LOG_CAP)
+		return 0;
 	log_add("FmPcdGetSwPrsOffset returned 0x%lx", regs_return_value(regs));
 	return 0;
 }
