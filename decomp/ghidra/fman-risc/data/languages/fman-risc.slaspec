@@ -1,153 +1,311 @@
-# fman-risc.slaspec
-# NXP FMan v3 Controller microcode RISC ISA - reverse-engineered, PARTIAL.
-# Stage G2: control flow (G1, silicon+cfg-map validated) + memory access
-# (HYPOTHESIS - load/store format derived from field analysis, not yet
-# oracle-confirmed; load/store direction of 0x04 vs 0x14 is a guess).
-# Encodings: decomp/maps/anchors.json, decomp/findings.md.
+# fman-risc.slaspec — NXP FMan v3 Controller Microcode RISC ISA
+# Automatically generated from arch/fman-instruction-table.html (201 canonical forms).
+# Target: Ghidra 11.x SLEIGH Compiler.
 
 define endian=big;
 define alignment=4;
 
-# Code is byte-addressed; instruction word w lives at byte 4*w.
+# Address spaces
 define space code     type=ram_space       size=4  default;
 define space register type=register_space  size=4;
-# Data address space: the per-task context page (0xd0xx) and the internal
-# MURAM window live here (16-bit addresses). One flat space for dataflow.
 define space dmem     type=ram_space       size=2;
 
-# Provisional register file: reg operand = bits[20:16] (5-bit, r0..r31).
-# bits[23:21] treated as flags/sub-op for now (Stage G3 resolves the full
-# 8-bit operand field; observed values reach 0x99).
+# Register file (32 general registers + special registers)
 define register offset=0x00 size=4
   [ r0  r1  r2  r3  r4  r5  r6  r7  r8  r9  r10 r11 r12 r13 r14 r15
     r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 ];
 define register offset=0x100 size=4 [ pc sp cc ];
+define register offset=0x110 size=1 [ Z N C P ];
 
+# Instruction token definitions
 define token instr(32)
-    prefix16 = (16,31)
-    prefix8  = (24,31)
-    imm16    = (0,15)
-    simm16   = (0,15) signed
-    regfld   = (16,20)
-    addr16   = (0,15)
+    f_31_27        = (27,31)
+    f_31_26        = (26,31)
+    f_31_24        = (24,31)
+    f_31_21        = (21,31)
+    f_31_20        = (20,31)
+    f_31_19        = (19,31)
+    f_31_18        = (18,31)
+    f_31_17        = (17,31)
+    f_31_16        = (16,31)
+    f_31_0         = (0,31)
+    f_26_26        = (26,26)
+    f_26_25        = (25,26)
+    f_26_21        = (21,26)
+    f_25_21        = (21,25)
+    f_25_16        = (16,25)
+    f_24_21        = (21,24)
+    f_23_21        = (21,23)
+    f_23_20        = (20,23)
+    f_23_0         = (0,23)
+    f_23_0_s       = (0,23) signed
+    f_20_20        = (20,20)
+    f_20_16        = (16,20)
+    f_19_19        = (19,19)
+    f_19_16        = (16,19)
+    f_18_18        = (18,18)
+    f_18_16        = (16,18)
+    f_17_17        = (17,17)
+    f_17_16        = (16,17)
+    f_16_16        = (16,16)
+    f_15_14        = (14,15)
+    f_15_11        = (11,15)
+    f_15_0         = (0,15)
+    f_15_0_s       = (0,15) signed
+    f_13_0         = (0,13)
+    f_13_0_s       = (0,13) signed
+    f_10_10        = (10,10)
+    f_10_9         = (9,10)
+    f_10_8         = (8,10)
+    f_10_6         = (6,10)
+    f_10_0         = (0,10)
+    f_9_8          = (8,9)
+    f_8_0          = (0,8)
+    f_7_0          = (0,7)
+    f_5_0          = (0,5)
 ;
-attach variables [ regfld ]
+
+# Register attachments for standard 5-bit register fields
+attach variables [ f_20_16 f_15_11 f_10_6 ]
   [ r0  r1  r2  r3  r4  r5  r6  r7  r8  r9  r10 r11 r12 r13 r14 r15
     r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 ];
 
-# --- control flow (G1: targets validated; conditions provisional) ---
-# 2026-08-09 correction: b7ff ("br") uses the SAME signed-relative-word
-# encoding as the brc family (target = inst + s16(low16)), NOT the old
-# (48+imm16)*4 unsigned-byte formula. Whole-image validation: 97 b7ff sites,
-# 96 land on valid code (the old model was wrong 42/97 incl. the phantom
-# "0x3FBAC out-of-range trap" at w12665, which actually targets w12340).
-# BDEST retained only as a named alias for the shared sub-rule.
-BDEST: rel is imm16  [ rel = (48 + imm16) * 4; ]        { export *:1 rel; }
-RDEST: rel is simm16 [ rel = inst_start + simm16 * 4; ] { export *:1 rel; }
+# Sub-rules for branch targets
+rel16_dest: rel is f_15_0_s [ rel = inst_start + f_15_0_s * 4; ] { export *:1 rel; }
+rel14_dest: rel is f_13_0_s [ rel = inst_start + f_13_0_s * 4; ] { export *:1 rel; }
 
-:br   RDEST is prefix16=0xb7ff & RDEST { goto RDEST; }
-:brc  RDEST is prefix16=0xb3ff & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xb43f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xbc3f & RDEST { if (cc != 0) goto RDEST; }
-# additional conditional-branch classes (2026-08-08: found via family scan;
-# same _f branch-suffix, 100% relative-in-range; the opcode byte encodes the
-# condition — differentiation is future work, edges added for CFG completeness)
-:brc  RDEST is prefix16=0xb03f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xb83f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xb41f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xbc1f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xb81f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xb01f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xb45f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xb17f & RDEST { if (cc != 0) goto RDEST; }
-:brc  RDEST is prefix16=0xa7ff & RDEST { if (cc != 0) goto RDEST; }
-:jmp  RDEST is prefix16=0xa3ff & RDEST { goto RDEST; }
-:park       is prefix16=0xb7df & imm16 { goto inst_start; }
+# Black-box and special pipeline pcodeops
+define pcodeop fman_bitfield_xform;
+define pcodeop fman_cckey_emit;
+define pcodeop fman_cckey_prepare;
+define pcodeop fman_csum_accum;
+define pcodeop fman_csum_init;
+define pcodeop fman_csum_result;
+define pcodeop fman_csum_setup;
+define pcodeop fman_dma_read;
+define pcodeop fman_dma_write;
+define pcodeop fman_keycmp_run;
+define pcodeop fman_ld_sm;
+define pcodeop fman_pipeline_setup;
+define pcodeop fman_st_sm;
+define pcodeop fman_task_boundary;
+define pcodeop fman_task_complete;
+define pcodeop fman_task_handoff;
+define pcodeop fman_task_info;
+define pcodeop fman_task_redispatch;
+define pcodeop fman_task_set_end_nia;
+define pcodeop fman_task_set_fqid;
+define pcodeop fman_taskctx_load2;
+define pcodeop fman_tnum_alloc;
+define pcodeop fman_unit_config;
+define pcodeop fman_unit_read0;
+define pcodeop fman_unit_read32;
+define pcodeop fman_unit_submit;
 
-# --- G3+ 0x2e3f/0x2e5f family: conditional relative branch (2026-08-09) ---
-# 52 + 49 sites. Encoding validated against the brc convention: prefix16 =
-# 0x2e3f/0x2e5f, low16 = signed relative WORD offset (target = i + s16(low16),
-# i.e. inst_start + simm16*4 in the byte-addressed code space). Whole-image
-# validation: 101/101 targets land on non-0xffffffff code words (vs the old
-# unsigned (48+imm16)*4 model which was wrong 42/97 for b7ff). The word that
-# follows every site is 0xffffffff (trap/pad on fall-through). Semantics
-# provisional: branch-on-cc like the brc family; the cc source is the
-# preceding 0x48xx/0x4cxx/0x4exx ALU or 0x70e0/0x1000 op. Modeled with
-# conditional-goto so the CFG resolves past the pool-guard sites (w12663).
-:brc2e3f RDEST is prefix16=0x2e3f & RDEST { if (cc != 0) goto RDEST; }
-:brc2e5f RDEST is prefix16=0x2e5f & RDEST { if (cc != 0) goto RDEST; }
-:brc2e1f RDEST is prefix16=0x2e1f & RDEST { if (cc != 0) goto RDEST; }
+# Instruction constructors
 
-# --- memory access (G2 HYPOTHESIS: reg=bits[20:16], addr=bits[15:0]) ---
-# 0x04 = load, 0x14 = store, 0x10 = load (directions are a guess pending G3).
-:ld  regfld, [addr16] is prefix8=0x04 & regfld & addr16 { local a:2 = addr16; regfld = *[dmem]:4 a; }
-:st  [addr16], regfld is prefix8=0x14 & regfld & addr16 { local a:2 = addr16; *[dmem]:4 a = regfld; }
-:ldb regfld, [addr16] is prefix8=0x10 & regfld & addr16 { local a:2 = addr16; regfld = *[dmem]:4 a; }
+:adci16 f_20_16 f_15_0 is f_31_21=0x746 & f_20_16 & f_15_0 {  }
+:adci16c f_20_16 f_15_0 is f_31_21=0x747 & f_20_16 & f_15_0 {  }
+:add32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c2 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 + f_15_11; }
+:add32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c3 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 + f_15_11; }
+:add32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c6 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 + f_15_11; }
+:addhi16 f_20_16 f_15_0 is f_31_21=0x702 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + (f_15_0 << 16); }
+:addi16 f_20_16 f_15_0 is f_31_21=0x742 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + f_15_0; }
+:addi16 f_20_16 f_15_0 is f_31_21=0x743 & f_20_16 & f_15_0 { f_20_16 = f_20_16 + f_15_0; }
+:addlane8 f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x782 & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
+:addlane8c f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x783 & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
+:addrctx f_23_0 is f_31_24=0xc6 & f_23_0 {  }
+:alu f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x34 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:alu_special f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x35 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:alu_special f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x36 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:alu_special f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x37 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:and32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6ca & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 & f_15_11; }
+:and32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6cb & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 & f_15_11; }
+:andhi16 f_20_16 f_15_0 is f_31_21=0x76a & f_20_16 & f_15_0 { f_20_16 = f_20_16 & (f_15_0 << 16); }
+:andhi16c f_20_16 f_15_0 is f_31_21=0x70b & f_20_16 & f_15_0 {  }
+:andi16 f_20_16 f_15_0 is f_31_21=0x74a & f_20_16 & f_15_0 { f_20_16 = f_20_16 & f_15_0; }
+:andi16 f_20_16 f_15_0 is f_31_21=0x74b & f_20_16 & f_15_0 { f_20_16 = f_20_16 & f_15_0; }
+:andi16z f_15_0 is f_31_16=0xe960 & f_15_0 {  }
+:andlane8 f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78a & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
+:andlane8c f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78b & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
+:andni8 f_20_16 f_15_11 f_10_8 f_7_0 is f_31_21=0x7ab & f_20_16 & f_15_11 & f_10_8 & f_7_0 {  }
+:asr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x14 { f_10_6 = f_20_16 s>> (f_15_11 & 0x1f); }
+:asr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x15 { f_10_6 = f_20_16 s>> f_5_0; }
+:bclr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6da & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 {  }
+:bclr32_0 f_15_11 is f_31_16=0xfbe0 & f_15_11 & f_10_0=0x41 {  }
+:bclr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x69a & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3e {  }
+:bfi1i_d1 f_16_16 f_15_11 is f_31_17=0x7de0 & f_16_16 & f_15_11 & f_10_0=0x43 {  }
+:bfi1i_d2 f_17_17 f_15_11 is f_31_18=0x3ee8 & f_17_17 & f_16_16=0x0 & f_15_11 & f_10_0=0x45 {  }
+:bfi1i_d3 f_18_18 f_15_11 is f_31_19=0x1f70 & f_18_18 & f_17_16=0x0 & f_15_11 & f_10_0=0x47 {  }
+:bfi1i_d4 f_19_19 f_15_11 is f_31_20=0xfb6 & f_19_19 & f_18_16=0x0 & f_15_11 & f_10_0=0x49 {  }
+:bfi1i_d5 f_20_20 f_15_11 is f_31_21=0x7da & f_20_20 & f_19_16=0x0 & f_15_11 & f_10_0=0x4b {  }
+:bfi1i_d6 f_20_20 f_15_11 is f_31_21=0x7d9 & f_20_20 & f_19_16=0x0 & f_15_11 & f_10_0=0x8d {  }
+:bfi1i_d7 f_20_20 f_15_11 is f_31_21=0x7d8 & f_20_20 & f_19_16=0x0 & f_15_11 & f_10_0=0xcf {  }
+:bfi4_s0_d4 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x108 {  }
+:bfi4_s4_d0 f_20_16 f_15_11 is f_31_21=0x7dc & f_20_16 & f_15_11 & f_10_0=0x700 {  }
+:bfi4_s4_d4 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x8 {  }
+:bfi5_s0_d2 f_20_16 f_15_11 is f_31_21=0x7d9 & f_20_16 & f_15_11 & f_10_0=0x84 {  }
+:bitfield f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x3e & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:bitfield_ins2 f_20_16 f_15_11 is f_31_21=0x7de & f_20_16 & f_15_11 & f_10_0=0x400 {  }
+:bitfield_ins3 f_20_16 f_15_11 is f_31_21=0x7dd & f_20_16 & f_15_11 & f_10_0=0x400 {  }
+:bitfield_ins6 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x404 {  }
+:bitfield_merge f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x32 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:bitfield_wrap10 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x43c {  }
+:bitfield_xform f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x33 & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:brbitclr14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2f & f_25_21 & f_20_16 & rel16_dest { if (cc == 0) goto rel16_dest; }
+:brbitclr14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2e & f_25_21 & f_20_16 & rel16_dest [ delayslot(1); ] { if (cc == 0) goto rel16_dest; }
+:brbitset14 f_25_21 f_20_16 rel16_dest is f_31_26=0x2d & f_25_21 & f_20_16 & rel16_dest { if (cc != 0) goto rel16_dest; }
+:brbitset14_comp f_25_21 f_20_16 rel16_dest is f_31_26=0x2c & f_25_21 & f_20_16 & rel16_dest [ delayslot(1); ] { if (cc != 0) goto rel16_dest; }
+:brctrl0_comp rel16_dest is f_31_16=0xb21f & rel16_dest [ delayslot(1); ] { if (cc != 0) goto rel16_dest; }
+:brnotctrl0_comp rel16_dest is f_31_16=0xba1f & rel16_dest [ delayslot(1); ] { if (cc == 0) goto rel16_dest; }
+:bset32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d6 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 {  }
+:bset32i f_20_16 f_15_11 f_10_6 is f_31_21=0x696 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3e {  }
+:byte_setlo8 f_20_16 f_15_11 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_0=0x41 {  }
+:call rel16_dest is f_31_16=0xa7ff & rel16_dest { call rel16_dest; }
+:call_comp rel16_dest is f_31_16=0xa3ff & rel16_dest [ delayslot(1); ] { call rel16_dest; }
+:cbrc14 f_26_26 rel16_dest is f_31_27=0x16 & f_26_26 & f_25_16=0x1f & rel16_dest [ delayslot(1); ] { if (C != 0) goto rel16_dest; }
+:cbrn14 rel16_dest is f_31_16=0xb45f & rel16_dest { if (N != 0) goto rel16_dest; }
+:cbrnc14 f_26_26 rel16_dest is f_31_27=0x17 & f_26_26 & f_25_16=0x1f & rel16_dest [ delayslot(1); ] { if (C == 0) goto rel16_dest; }
+:cbrnn14_comp rel16_dest is f_31_16=0xb85f & rel16_dest [ delayslot(1); ] { if (N == 0) goto rel16_dest; }
+:cbrnp14 rel16_dest is f_31_16=0xb47f & rel16_dest { goto rel16_dest; }
+:cbrnz14 rel16_dest is f_31_16=0xbc3f & rel16_dest { if (Z == 0) goto rel16_dest; }
+:cbrnz14_comp rel16_dest is f_31_16=0xb83f & rel16_dest [ delayslot(1); ] { if (Z == 0) goto rel16_dest; }
+:cbrz14 rel16_dest is f_31_16=0xb43f & rel16_dest { if (Z != 0) goto rel16_dest; }
+:cbrz14_comp rel16_dest is f_31_16=0xb03f & rel16_dest [ delayslot(1); ] { if (Z != 0) goto rel16_dest; }
+:cckey_emit f_26_21 f_20_16 is f_31_27=0x9 & f_26_21 & f_20_16 & f_15_0=0xc800 {  }
+:cckey_prepare  is f_31_0=0x73f8c420 {  }
+:clz32_r7_r1  is f_31_0=0xdb5f387d { r7 = lzcount(r1); }
+:cmp32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = (f_20_16 == f_15_11); N = (f_20_16 < f_15_11); }
+:cmpeqi16 f_20_16 f_15_0 is f_31_21=0x751 & f_20_16 & f_15_0 { Z = (f_20_16 == f_15_0); }
+:cmpi16 f_20_16 f_15_0 is f_31_21=0x761 & f_20_16 & f_15_0 { Z = (f_20_16 == f_15_0); }
+:cmpi8_lane f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x7a1 & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
+:commit32  is f_31_0=0x7362f300 {  }
+:condimm f_25_21 f_20_16 f_15_0 is f_31_26=0x39 & f_25_21 & f_20_16 & f_15_0 {  }
+:const00400000_r1  is f_31_0=0xd2dfb07e {  }
+:controller_id f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xf800 {  }
+:coord24_neg f_15_0 is f_31_16=0xc2ff & f_15_0 {  }
+:csum_accum f_20_16 f_15_11 is f_31_21=0x200 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_csum_accum(); }
+:csum_init  is f_31_0=0x73fffc01 { fman_csum_accum(); }
+:csum_result f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xfc01 { fman_csum_accum(); }
+:csum_setup  is f_31_0=0x6f60fc06 { fman_csum_accum(); }
+:dma_bufop f_26_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_27=0x8 & f_26_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 { fman_dma_read(); }
+:dma_read256 f_20_16 f_15_11 is f_31_21=0x2ac & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
+:dma_read64 f_20_16 f_15_11 is f_31_21=0x2a8 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
+:dma_read8 f_20_16 f_15_11 is f_31_21=0x2a0 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
+:dma_read8_muramimm f_20_16 f_10_0 is f_31_21=0x2a0 & f_20_16 & f_15_11=0x1a & f_10_0 { fman_dma_read(); }
+:dma_special  is f_31_0=0x55a23800 { fman_dma_read(); }
+:dma_status64 f_20_16 f_15_11 is f_31_21=0x2e8 & f_20_16 & f_15_11 & f_10_0=0x8 { fman_dma_read(); }
+:dma_write2 f_20_16 f_15_11 is f_31_21=0x291 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
+:dma_write64 f_20_16 f_15_11 is f_31_21=0x2a9 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
+:dma_write64 f_20_16 f_15_11 is f_31_21=0x2e9 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_dma_read(); }
+:fill  is f_31_0=0xffffffff { goto inst_start; }
+:frame_base f_20_16 is f_31_21=0x3e0 & f_20_16 & f_15_0=0xf903 {  }
+:framewin f_20_16 f_15_11 f_10_9 is f_31_21=0x7d8 & f_20_16 & f_15_11 & f_10_9 & f_8_0=0x0 {  }
+:imm14 f_20_16 f_15_14 f_13_0 is f_31_21=0x75f & f_20_16 & f_15_14 & f_13_0 {  }
+:imm16_link f_23_21 f_20_16 f_15_0 is f_31_24=0xeb & f_23_21 & f_20_16 & f_15_0 {  }
+:immhi16 f_20_16 f_15_0 is f_31_21=0x71e & f_20_16 & f_15_0 {  }
+:indirect f_15_11 is f_31_16=0x9fff & f_15_11 & f_10_0=0x400 { goto [f_20_16]; }
+:indirect_comp f_15_11 is f_31_16=0x9bff & f_15_11 & f_10_0=0x400 [ delayslot(1); ] { goto [f_20_16]; }
+:indirect_m5 f_15_11 is f_31_16=0x9fff & f_15_11 & f_10_0=0x500 { goto [f_20_16]; }
+:indirect_m5_comp f_15_11 is f_31_16=0x9bff & f_15_11 & f_10_0=0x500 [ delayslot(1); ] { goto [f_20_16]; }
+:jmptbl_comp_r3 f_15_0 is f_31_16=0x9363 & f_15_0 [ delayslot(1); ] {  }
+:jmptbl_comp_r6 f_15_0 is f_31_16=0x93e6 & f_15_0 [ delayslot(1); ] {  }
+:jmptbl16 f_20_16 f_15_0 is f_31_21=0x4bb & f_20_16 & f_15_0 {  }
+:jmptbl4 f_20_16 f_15_0 is f_31_21=0x4b9 & f_20_16 & f_15_0 {  }
+:jmptbl8 f_20_16 f_15_0 is f_31_21=0x4ba & f_20_16 & f_15_0 {  }
+:keycmp_run  is f_31_0=0x48109000 { fman_keycmp_run(); }
+:ld_sm f_26_25 f_20_16 f_15_11 f_10_0 is f_31_27=0x0 & f_26_25 & f_24_21=0x4 & f_20_16 & f_15_11 & f_10_0 {  }
+:lea14 f_20_16 f_15_14 f_13_0 is f_31_21=0x608 & f_20_16 & f_15_14 & f_13_0 {  }
+:li16 f_20_16 f_15_0 is f_31_21=0x75e & f_20_16 & f_15_0 { f_20_16 = f_15_0; }
+:lihi16 f_20_16 f_15_0 is f_31_21=0x77e & f_20_16 & f_15_0 { f_20_16 = f_15_0 << 16; }
+:lsl32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3c { f_10_6 = f_20_16 << (f_15_11 & 0x1f); }
+:lsl32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x3d { f_10_6 = f_20_16 << f_5_0; }
+:lsr32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x1c { f_10_6 = f_20_16 >> (f_15_11 & 0x1f); }
+:lsr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6de & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x1d { f_10_6 = f_20_16 >> f_5_0; }
+:lsr32i f_20_16 f_15_11 f_10_6 is f_31_21=0x6df & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x1d { f_10_6 = f_20_16 >> f_5_0; }
+:mem24_write f_20_16 f_15_11 f_10_0 is f_31_21=0xa8 & f_20_16 & f_15_11 & f_10_0 {  }
+:memb_read f_20_16 f_15_11 f_10_0 is f_31_21=0x0 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:1 (f_15_11 + f_10_0)); }
+:memb_write f_20_16 f_15_11 f_10_0 is f_31_21=0x80 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:1 (f_15_11 + f_10_0) = f_20_16[0,8]; }
+:membs_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x9 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = sext(*[dmem]:1 (f_15_11 + f_10_0)); Z = (f_20_16 == 0); }
+:membu_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x1 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:1 (f_15_11 + f_10_0)); Z = (f_20_16 == 0); }
+:memd_read f_20_16 f_15_11 f_10_0 is f_31_21=0x30 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); }
+:memd_write f_20_16 f_15_11 f_10_0 is f_31_21=0xb0 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:4 (f_15_11 + f_10_0) = f_20_16; }
+:memh_read f_20_16 f_15_11 f_10_0 is f_31_21=0x10 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:2 (f_15_11 + f_10_0)); }
+:memh_write f_20_16 f_15_11 f_10_0 is f_31_21=0x90 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:2 (f_15_11 + f_10_0) = f_20_16[0,16]; }
+:memhu_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x11 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = zext(*[dmem]:2 (f_15_11 + f_10_0)); Z = (f_20_16 == 0); }
+:memhu2_read f_20_16 f_15_11 f_10_0 is f_31_21=0x38 & f_20_16 & f_15_11 & f_10_0 {  }
+:memw_read f_20_16 f_15_11 f_10_0 is f_31_21=0x20 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); }
+:memw_read f_20_16 f_15_11 f_10_0 is f_31_21=0x28 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); }
+:memw_readz f_20_16 f_15_11 f_10_0 is f_31_21=0x21 & f_20_16 & f_15_11 & f_10_0 { f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); Z = (f_20_16 == 0); }
+:memw_write f_20_16 f_15_11 f_10_0 is f_31_21=0xa0 & f_20_16 & f_15_11 & f_10_0 { *[dmem]:4 (f_15_11 + f_10_0) = f_20_16; }
+:merge8 f_20_16 f_15_11 f_10_6 is f_31_21=0x658 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x0 {  }
+:not32 f_20_16 is f_31_21=0x772 & f_20_16 & f_15_0=0x0 { f_20_16 = ~f_20_16; }
+:not32_r10  is f_31_0=0xdddf52b8 { r10 = ~r10; }
+:not32_r9  is f_31_0=0xdddf4a78 { r9 = ~r9; }
+:or32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6ce & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 | f_15_11; }
+:orhi16 f_20_16 f_15_0 is f_31_21=0x70e & f_20_16 & f_15_0 { f_20_16 = f_20_16 | (f_15_0 << 16); }
+:ori16 f_20_16 f_15_0 is f_31_21=0x74e & f_20_16 & f_15_0 { f_20_16 = f_20_16 | f_15_0; }
+:ori16c f_20_16 f_15_0 is f_31_21=0x74f & f_20_16 & f_15_0 {  }
+:orlane8 f_20_16 f_15_11 f_9_8 f_7_0 is f_31_21=0x78e & f_20_16 & f_15_11 & f_10_10=0x0 & f_9_8 & f_7_0 {  }
+:park_cont rel16_dest is f_31_16=0x2e1f & rel16_dest { goto rel16_dest; }
+:pcrel24_c3 f_23_0 is f_31_24=0xc3 & f_23_0 {  }
+:pcrel24_pos f_15_0 is f_31_16=0xc200 & f_15_0 {  }
+:pipeline_setup f_26_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_27=0xd & f_26_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:ret  is f_31_0=0x9ffff400 { return [r30]; }
+:ret_comp  is f_31_0=0x9bfff400 [ delayslot(1); ] { return [r30]; }
+:retry_sm rel16_dest is f_31_16=0xb7df & rel16_dest { goto rel16_dest; }
+:special_241f  is f_31_0=0x241f2800 {  }
+:special_4800  is f_31_0=0x48000800 {  }
+:special_9bff  is f_31_0=0x9bff3800 {  }
+:st_sm f_26_25 f_20_16 f_15_11 f_10_0 is f_31_27=0x2 & f_26_25 & f_24_21=0x4 & f_20_16 & f_15_11 & f_10_0 {  }
+:sub32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e2 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 - f_15_11; }
+:sub32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6e3 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 - f_15_11; }
+:subi16 f_20_16 f_15_0 is f_31_21=0x762 & f_20_16 & f_15_0 { f_20_16 = f_20_16 - f_15_0; }
+:subi16 f_20_16 f_15_0 is f_31_21=0x763 & f_20_16 & f_15_0 { f_20_16 = f_20_16 - f_15_0; }
+:subi8 f_20_16 f_15_11 f_10_8 f_7_0 is f_31_21=0x7a3 & f_20_16 & f_15_11 & f_10_8 & f_7_0 {  }
+:task_boundary f_20_16 f_15_11 is f_31_21=0x161 & f_20_16 & f_15_11 & f_10_0=0x0 { fman_task_boundary(f_20_16, f_15_11); }
+:task_complete  is f_31_0=0x9c09f401 { fman_task_complete(); return [r30]; }
+:task_handoff  is f_31_0=0x281ff800 { fman_task_handoff(); return [r30]; }
+:task_info f_20_16 is f_31_21=0x3e0 & f_20_16 & f_15_0=0xf801 { f_20_16 = fman_task_info(); }
+:task_redispatch  is f_31_0=0x283ff800 { fman_task_redispatch(); return [r30]; }
+:task_retrigger  is f_31_0=0x203ff800 {  }
+:task_retrigger_default_cont  is f_31_0=0x263f003d {  }
+:task_set_cont f_15_0 is f_31_16=0x261f & f_15_0 {  }
+:task_set_end_nia f_20_16 f_15_11 is f_31_21=0x39f & f_20_16 & f_15_11 & f_10_0=0x106 { fman_task_set_end_nia(f_20_16, f_15_11); }
+:task_set_fqid f_20_16 f_15_11 is f_31_21=0x3ba & f_20_16 & f_15_11 & f_10_0=0x104 { fman_task_set_fqid(f_20_16, f_15_11); }
+:taskctx_load2 f_20_16 is f_31_21=0x3c8 & f_20_16 & f_15_0=0xf800 { fman_taskctx_load2(f_20_16); }
+:test32  is f_31_0=0xd9ff10b8 { Z = (r2 == 0); }
+:testand32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6c9 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 & f_15_11) == 0); }
+:testor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6cd & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 | f_15_11) == 0); }
+:testxor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d1 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { Z = ((f_20_16 ^ f_15_11) == 0); }
+:tnum_alloc f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xf900 { f_20_16 = fman_tnum_alloc(); }
+:tstadci16 f_20_16 f_15_0 is f_31_21=0x745 & f_20_16 & f_15_0 {  }
+:tstaddi16 f_20_16 f_15_0 is f_31_21=0x741 & f_20_16 & f_15_0 {  }
+:tstandhi16 f_20_16 f_15_0 is f_31_21=0x709 & f_20_16 & f_15_0 { Z = ((f_20_16 & (f_15_0 << 16)) == 0); }
+:tstandi16 f_20_16 f_15_0 is f_31_21=0x749 & f_20_16 & f_15_0 { Z = ((f_20_16 & f_15_0) == 0); }
+:tstimm16 f_20_16 f_15_0 is f_31_21=0x75d & f_20_16 & f_15_0 { Z = (f_15_0 == 0); }
+:tstori16 f_20_16 f_15_0 is f_31_21=0x74d & f_20_16 & f_15_0 { Z = ((f_20_16 | f_15_0) == 0); }
+:unit_config f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x1c & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:unit_read0 f_20_16 f_10_6 f_5_0 is f_31_21=0x3c0 & f_20_16 & f_15_11=0x1f & f_10_6 & f_5_0 {  }
+:unit_read32 f_20_16 f_10_6 f_5_0 is f_31_21=0x3e0 & f_20_16 & f_15_11=0x1f & f_10_6 & f_5_0 {  }
+:unit_submit f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x1d & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:unit12_read f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xfb00 {  }
+:unit12_submit f_20_16 f_15_11 is f_31_21=0x3bb & f_20_16 & f_15_11 & f_10_0=0x300 {  }
+:unit16_read0 f_20_16 is f_31_21=0x3c0 & f_20_16 & f_15_0=0xfc00 {  }
+:unit16_submit1 f_20_16 f_15_11 is f_31_21=0x3bb & f_20_16 & f_15_11 & f_10_0=0x401 {  }
+:wait_cont rel16_dest is f_31_16=0x2e3f & rel16_dest { goto rel16_dest; }
+:xfer14 rel16_dest is f_31_16=0x2e5f & rel16_dest [ delayslot(1); ] { goto rel16_dest; }
+:xfer14 rel16_dest is f_31_16=0xb7ff & rel16_dest { goto rel16_dest; }
+:xfer14 f_15_14 rel14_dest is f_31_16=0xbfff & f_15_14 & rel14_dest { goto rel14_dest; }
+:xfer14_comp f_15_14 rel14_dest is f_31_16=0x937d & f_15_14 & rel14_dest [ delayslot(1); ] { goto rel14_dest; }
+:xfer14_comp rel16_dest is f_31_16=0xb3ff & rel16_dest [ delayslot(1); ] { goto rel16_dest; }
+:xfer14_comp f_15_14 rel14_dest is f_31_16=0xbbff & f_15_14 & rel14_dest [ delayslot(1); ] { goto rel14_dest; }
+:xfer16 f_23_20 rel16_dest is f_31_24=0x93 & f_23_20 & f_19_16=0xd & rel16_dest { goto rel16_dest; }
+:xform f_25_21 f_20_16 f_15_11 f_10_6 f_5_0 is f_31_26=0x3d & f_25_21 & f_20_16 & f_15_11 & f_10_6 & f_5_0 {  }
+:xor32 f_20_16 f_15_11 f_10_6 is f_31_21=0x6d2 & f_20_16 & f_15_11 & f_10_6 & f_5_0=0x38 { f_10_6 = f_20_16 ^ f_15_11; }
+:xori16 f_20_16 f_15_0 is f_31_21=0x752 & f_20_16 & f_15_0 { f_20_16 = f_20_16 ^ f_15_0; }
+:xori16c f_20_16 f_15_0 is f_31_21=0x753 & f_20_16 & f_15_0 {  }
 
-# --- ALU / op classes (G3 HYPOTHESIS: operand STRUCTURE decoded; the exact
-# operation is UNVERIFIED, so each is a black-box pcodeop that tracks dataflow
-# without asserting semantics. reg = bits[20:16], operand = low16.
-# 0xeb = reg-immediate (small imm); 0xf0 = MURAM-addressing; 0xdc = the
-# dominant pre-branch op, hypothesised as the condition-setter. ---
-define pcodeop fman_alu_eb;
-define pcodeop fman_alu_f0;
-define pcodeop fman_alu_d8;
-define pcodeop fman_alu_db;
-define pcodeop fman_test_dc;
-
-:op_eb  regfld, imm16 is prefix8=0xeb & regfld & imm16 { regfld = fman_alu_eb(regfld, imm16:4); }
-:op_f0  regfld, [addr16] is prefix8=0xf0 & regfld & addr16 { local a:2 = addr16; regfld = fman_alu_f0(regfld, *[dmem]:4 a); }
-:op_d8  regfld, imm16 is prefix8=0xd8 & regfld & imm16 { regfld = fman_alu_d8(regfld, imm16:4); }
-:op_db  regfld, imm16 is prefix8=0xdb & regfld & imm16 { regfld = fman_alu_db(regfld, imm16:4); }
-:tst_dc regfld, imm16 is prefix8=0xdc & regfld & imm16 { cc = fman_test_dc(regfld, imm16:4); }
-
-# --- G3+ 0x73-family: the FE-VM conditional-test core (2026-08-08) ---
-# 190 sites. Encoding confirmed against the existing conventions:
-#   prefix8 = 0x73, reg = bits[20:16], imm16 = low16.
-# Semantics: test reg against (MURAM word at imm16 | immediate) and set cc;
-# the following brc/b43f/... consumes cc.  The paired FE-type dispatch idiom
-# is `ebce001a` (shift >>26 = extract FE type field) then `73ee7106` where
-# reg=r14 and low-byte 0x06 = EXT_HASH type (highest FE type 1..6).  Modeled
-# as a black-box cc-setter so the decompiler can resolve the branch skeleton.
-define pcodeop fman_test_73;
-
-:tst_73 regfld, imm16 is prefix8=0x73 & regfld & imm16 { cc = fman_test_73(regfld, imm16:4); }
-
-# --- G3+ 0x2c3f family: computed-branch / table trampoline (2026-08-08) ---
-# 29 sites. low16 = table base in the flat dmem space; the handler index is
-# in a register at runtime.  Typical: `2c3ff000` before the FM_CTL
-# action-dispatch table (w583, followed by the 0x79 table at w585) = "jump to
-# the handler whose pointer is stored at the 0xf000-window (f8xx) slot indexed
-# by the current action code".  Modeled as an opaque indirect branch to a
-# data-space location (tables are data, never walked as code).
-# 0x2c3f = computed-branch (table trampoline) - modeled as a plain nop so
-# disassembly stays in sync; the runtime target is data (never walked).
-:br_tbl [addr16] is prefix16=0x2c3f & addr16 { }
-
-# --- G3+ HIT/MISS-path classes (black-box; modeled to make the EXT_HASH
-# walker readable). Small-immediate: 0xe1 (byte offset/count), 0xef.
-# ALU: 0xd9. Address-carrying (memory-touching): 0x77 0x78 0xf1 0xf4. ---
-define pcodeop fman_op_e1;
-define pcodeop fman_op_ef;
-define pcodeop fman_alu_d9;
-define pcodeop fman_mem_77;
-define pcodeop fman_mem_78;
-define pcodeop fman_mem_f1;
-define pcodeop fman_mem_f4;
-
-:op_e1 regfld, imm16 is prefix8=0xe1 & regfld & imm16 { regfld = fman_op_e1(regfld, imm16:4); }
-:op_ef regfld, imm16 is prefix8=0xef & regfld & imm16 { regfld = fman_op_ef(regfld, imm16:4); }
-:op_d9 regfld, imm16 is prefix8=0xd9 & regfld & imm16 { regfld = fman_alu_d9(regfld, imm16:4); }
-:m_77  regfld, [addr16] is prefix8=0x77 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_77(regfld, *[dmem]:4 a); }
-:m_78  regfld, [addr16] is prefix8=0x78 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_78(regfld, *[dmem]:4 a); }
-:m_f1  regfld, [addr16] is prefix8=0xf1 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_f1(regfld, *[dmem]:4 a); }
-:m_f4  regfld, [addr16] is prefix8=0xf4 & regfld & addr16 { local a:2 = addr16; regfld = fman_mem_f4(regfld, *[dmem]:4 a); }
-
-# Fixed-width catch-all keeps disassembly synchronized (least specific).
-:unk prefix16, imm16 is prefix16 & imm16 { }
-
-# 0xffffffff = explicit NOP/pad (2026-08-09). 449 occurrences, almost always
-# immediately after a branch (2c3f: 56, 2e3f: 52, b7ff: 50, 2e5f: 49, 283f:
-# 33) or in runs within the entry vector region. Must come AFTER :unk so the
-# more-specific match wins.
-:nop is prefix16=0xffff & imm16 { }
+# Catch-all opcode (least specific)
+:unk f_31_0 is f_31_0 { }
+:nop is f_31_0=0xffffffff { }

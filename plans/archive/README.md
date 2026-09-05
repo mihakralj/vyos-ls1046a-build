@@ -19,7 +19,7 @@ For current state, see (in order of authority):
 
 - `plans/ASK2-MASTER-PLAN.md` — **THE authoritative ASK2 execution plan — start here.** Ground state, gaps, binding architecture decisions, milestone chain M2–M8 with gates, live TODO list, open defects, harness/gate mechanics, and the superseded-document register (§8) that maps every archived ASK2 plan's content forward.
 - `specs/dpaa1-afxdp-modernization-spec.md` — **the authoritative cross-flavor source-of-truth** (one DPAA1 driver core + `pcd_ops`/`qmgmt_ops`; the FMan PCD subsystem now lives in the common board stack, built-in for default/vpp/ask).
-- `specs/ask2-rewrite-spec.md` — ASK2 architecture index (v1.10).
+- `specs/ask2-rewrite-spec.md` — ASK2 architecture index (v1.12).
 - `specs/vpp-dpaa1-ls1046a-spec.md` — VPP-flavor (AF_XDP) design spec.
 - `plans/DUAL-DATAPLANE.md` — S0↔S1↔S2 state machine + per-interface CLI contract.
 - `plans/archive/ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md` — **combined Path A decision record** (merged 2026-07-14) in three parts: (1) ASK-vs-ASK2 comparative analysis, (2) architecture review, (3) course-correction execution plan.
@@ -58,12 +58,23 @@ For current state, see (in order of authority):
 | `ASK2-F3-F6-UNBLOCK-PROPOSAL.md` | F3/F6 blocker analysis + regression bisect | Findings folded into master plan §6 + §5 (2026-07-19); redirect note at `ASK2-F3-F6-UNBLOCK-PROPOSAL.md.archive-note.md` |
 | `ASK-PLANS.md` | 2026-06-09 ASK/ASK2 documentation hub | Hub role superseded by `plans/ASK2-MASTER-PLAN.md` §8 + `specs/ask2-rewrite-spec.md` v1.10 (2026-07-19); hub maintenance rules carried into this README; redirect note at `ASK-PLANS.md.archive-note.md` |
 | `UBOOT.md` | U-Boot hardware and environment reference | Consolidated into `plans/BOOT-PROCESS.md` v1.1.0 (2026-07-22) to eliminate ~80% documentation overlap; redirect note at `UBOOT.md.archive-note.md` |
+| `ASK2-VLAN-OFFLOAD-PLAN.md` | Inline FE-VM ehash-record VLAN push/pop design (T-M6-8) | Self-declared SUPERSEDED 2026-08-26 — approach proven silicon-dead (froze ~22 pkts); superseded by `plans/ASK2-VLAN-REARCH.md` (still live) |
+| `ASK2-NAT-OFFLOAD-PLAN.md` | NAT44/NAT66 hardware offload task plan (T-M6-7) | Shipped — NAT44+NAT66 SHIPPING default-on, all gates PASS (2026-09-05) |
+| `ASK2-F195-PROGRESS-REPORT.md` | F-195 resolver diagnosis progress report | Dated snapshot (2026-08-15), folded into master plan's F-195/F-197 narrative (2026-09-05) |
+| `ask2-code-review.md` | 2026-08-05 code review | Historical churn record (multi-round self-correction banners); findings tracked in master plan defect register (2026-09-05) |
+| `NXP-106-ORACLE-VALIDATION-PLAN.md` | `.106` vendor-stack oracle validation (Phase 0-3) | All phases executed 2026-08-01; successor is the still-live `NXP-106-DEEP-DIVE-PLAN.md` (2026-09-05) |
+| `SOFT-PARSER-PPPOE.md` | 2026-07-14 soft-parser PPPoE roadmap stub | Superseded by full design specs (`specs/ask2-soft-parser-lcv-scheme-select.md` et al.); host-sequencing question closed (2026-09-05) |
+| `PERFORMANCE-BENCHMARKS.md` | `.185 ↔ .106` benchmark record | Self-declared SUPERSEDED — predates current harness/F-198…F-203 work; `.106` no longer an active harness endpoint (2026-09-05) |
+| `OFFLOAD-CAPABILITIES.md` | 2026-08-05 silicon-verified capability inventory (v2.1) | Dated snapshot; superseded by the actively cross-referenced `OFFLOAD-CAPABILITY-PLAN.md` (2026-09-05) |
+| `TRAFFIC-HARNESS.md` | LXC CT201/CT202 board-as-gateway traffic harness | Self-declared SUPERSEDED — retired topology; current standard is `ASK2-PERFORMANCE-TEST-HARNESS.md` (2026-09-05) |
 
 Archived 2026-05-25 as part of the v1.3 doc consolidation following PR14z21 M2 gate run.
 
 Archived 2026-06-08 as part of the dpaa1 cross-flavor doc consolidation: the ASK2 `ask20`-era execution/triage/test-parity trackers and the completed repo-layout / patch-migration plans (the last seven rows above) were superseded once the FMan PCD subsystem moved into the common board stack and `specs/dpaa1-afxdp-modernization-spec.md` became the cross-flavor source-of-truth.
 
 Archived 2026-07-19 as part of the ASK2 master-plan consolidation: the seven plan documents above (journey review, development plan, completion plan, phase-2 automation, performance modernization, F3/F6 unblock proposal, and the ASK-PLANS hub) were superseded by the single authoritative `plans/ASK2-MASTER-PLAN.md`. Later the same day (user decision), the redirect stubs at their old `plans/` paths were moved into this archive as `<name>.md.archive-note.md` files, leaving `plans/` with live documents only.
+
+Archived 2026-09-05 as part of a full `/arch`, `/decomp`, `/plans`, `/specs` doc consolidation pass: nine `plans/` documents (the nine rows above dated 2026-09-05) were retired — two because their tracked work shipped and folded into `plans/ASK2-MASTER-PLAN.md` (NAT offload task plan, F-195 progress report), one historical-churn code review whose findings are tracked in the master plan's defect register, two dated/superseded snapshots each already carrying their own `SUPERSEDED` banner (performance benchmarks, offload-capabilities inventory), one superseded old plan (VLAN offload plan, replaced by the still-live `ASK2-VLAN-REARCH.md`), one completed oracle-validation phase (NXP-106 oracle validation, superseded by the still-live NXP-106 deep-dive plan), and one roadmap stub absorbed into full design specs (soft-parser PPPoE). `plans/ASK2-MASTER-PLAN.md` §8's stale `TRAFFIC-HARNESS.md` row was removed in the same change (that file was archived too). Files still cited as live/authoritative by other current documents were deliberately left in `plans/` despite an initial read suggesting they were fully superseded: `CC-TREE-REBUILD-PLAN.md`, `NXP-106-DEEP-DIVE-PLAN.md`, `TF-2026-07-18-001-function-inventory.md`, and `ZC-RX-SCOPE.md` (all still depended on by `ASK2-MASTER-PLAN.md` §8), plus `ASK2-PRODUCTION-ARCHITECTURE.md` (cited as authoritative by `specs/ask2-rewrite-spec.md`), `EHASH-DUAL-FIX-VERIFICATION-PLAN.md` (cited from `arch/fman-microcode-210-programming-reference.md`), and `ASK2-VLAN-REARCH.md` (cited as current evidence from `ASK2-BRIDGE-OFFLOAD-PLAN.md` and `specs/ask2-vlan-cli-grammar.md`) — these three were archived and then reverted once the cross-reference check surfaced the dependency.
 
 ## Maintenance rules (carried over from the archived ASK-PLANS hub)
 

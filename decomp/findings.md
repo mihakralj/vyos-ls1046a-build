@@ -1137,3 +1137,32 @@ vendor-faithful) — fe_obs cannot observe this topology; the M3 discriminator
 becomes a HIT fqid on the OTHER netdev's kernel-polled FQ (0x200/eth3).
 Fallback if AC_CC stalls again: same node via CCBS word-3 dispatch (untried
 combination, E20's named vendor-faithful fallback).
+
+---
+
+## 2026-09-05 — Tasks B & C: Ghidra SLEIGH 201-ISA Compiler Upgrade & Corpus Differential Analysis
+
+### Task B: Ghidra SLEIGH 201-ISA Compiler Upgrade
+- **Automated Synthesis Tool**: Authored `decomp/tools/generate-sleigh.py` which ingests `arch/fman-instruction-table.html` and deterministically synthesizes `decomp/ghidra/fman-risc/data/languages/fman-risc.slaspec`.
+- **Coverage**: Generated 201 canonical instruction constructors (plus 2 fallback catch-alls `:unk` and `:nop`), 44 unique token bit-slices, and 26 specialized pcodeops (`fman_dma_read`, `fman_tnum_alloc`, `fman_keycmp_run`, `fman_csum_accum`, etc.).
+- **Architectural Delay Slots**: Implemented `[ delayslot(1); ]` directives for all `.comp` instructions and instructions with `execute(pc + 1)` in their pseudocode (e.g. `call.comp`, `ret.comp`, `xfer14.comp`, `cbrz14.comp`, `jmptbl.comp.r3`).
+- **Condition Flags**: Integrated condition registers `Z`, `N`, `C`, `P` into the register file to model exact condition testing for `cbrz14`, `cbrnz14`, `cmp32`, `testand32`, `tstandi16`, and related branch/test forms.
+- **Language Spec Bump**: Updated `decomp/ghidra/fman-risc/data/languages/fman-risc.ldefs` to version 2.0 with updated description.
+
+### Task C: Corpus Differential Analysis (106.4.18 vs 108.4.9 vs 210.10.1)
+- **Differential Engine**: Created `decomp/tools/fman-corpus-diff.py` to compare QEF container headers, 24-slot dispatch tables, sequence alignments, and subsystem expansions across 106.4.18 (8,089 words), 108.4.9 (9,328 words), and 210.10.1 (12,851 words).
+- **Comprehensive Report**: Published `decomp/out/corpus-differential.md`.
+- **Key Differential Insights**:
+  1. **Slot 19 Activation**: Slot 19 is NULL/inactive in 106.4.18 and 108.4.9. It is exclusively active in 210.10.1, targeting `w8669` (the FE Aging Handler & Dynamic Offload Timer).
+  2. **Pinned Vectors**: KeyGen Scheme vector (Slot 8 @ `w80`) and CC Group vector (Slot 12 @ `w75`) maintain identical fixed word addresses across all three versions.
+  3. **Major Vector Rewrites**: Slot 3 (CC Match Walker) was moved from `w706` in 108 to `w1626` in 210 (+920 word offset) to decouple classifier traversal into a dedicated DMA fetch engine.
+  4. **Seven 210-Unique Islands Isolated**:
+     - *Island 0 (`w0065`–`w0075`, 11 words)*: Context PortID propagation (`IC[0x10] -> IC[0xb8]`) and vector alignment padding.
+     - *Island 1 (`w1576`–`w1860`, 285 words)*: Custom Classifier Match Walker & DMA Fetch Engine (`w1626`).
+     - *Island 2 (`w2837`–`w3650`, 814 words)*: MURAM synchronization lock acquisition (`ld.sm`, `retry.sm`), multi-task allocation (`tnum.alloc`), and external hash table walk.
+     - *Island 3 (`w8628`–`w10262`, 1,635 words)*: Full FE-VM Opcode Execution Loop (`ENQUEUE_PKT`, `INSERT_L2_HDR`, VLAN strip/insert, NAT TTL/IP/port rewrites).
+     - *Island 4 (`w10731`–`w12090`, 1,360 words)*: Slot 19 Flow Offload Aging Timer, DDR table sweep, inactive flow invalidation.
+     - *Island 5 (`w12124`–`w12550`, 427 words)*: Extended Frame Epilogue, hardware forward terminal, direct QMI enqueue bypassing kernel stack.
+     - *Island 6 (`w12667`–`w12850`, 184 words)*: Secondary dispatch exit traps, error reporting, and cleanup stubs.
+  5. **Host Command Evolution**: Preserves the 44-record base table from 108 (`w681` in 210 vs `w673` in 108), strips CAPWAP-specific command opcodes, and inserts extended validation at `w654` jumping to `w12667`.
+

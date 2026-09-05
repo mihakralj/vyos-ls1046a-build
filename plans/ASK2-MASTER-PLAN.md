@@ -2398,7 +2398,7 @@ open defects.
   + `10.99.1.15`; DUT eth3→route/offload→eth4; direct-DAC HELGA `Ethernet 4`
   `10.99.2.16`. heidi route `10.99.2.0/24 via 10.99.1.185`; HELGA return route
   `10.99.1.0/24 via 10.99.2.185`. Use iperf2 `--full-duplex -P 8`.
-- **Historical harness:** `plans/TRAFFIC-HARNESS.md` describes the old LXC/
+- **Historical harness:** `plans/archive/TRAFFIC-HARNESS.md` describes the old LXC/
   third-board topology; retain for history, not current performance runs.
 - **MTU contract:** order-1 F-203 RX buffers; clamp ASK to 1280–7500
   inclusive (hard calculated ceiling 7530; MTU 8000 requires order-2 and is not
@@ -2429,7 +2429,6 @@ ASK2 plan documents — extend this plan or the owning reference.
 | `plans/NXP-106-DEEP-DIVE-PLAN.md` | Vendor-stack oracle (Phase A `t_ExtHashFe` decode → Phase C gap list) |
 | `specs/reference/nxp-ask-fmc/` | Literal vendor FMC/NetPDL oracle (`cdx_sp.xml`, `cdx_pcd.xml`, cfg variants) from `we-are-mono/ASK@fe36f30`; reference only, never runtime config |
 | `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Current heidi→DUT `.185`→HELGA throughput harness, SW/HW mode proof, MTU 1280–2500 operation |
-| `plans/TRAFFIC-HARNESS.md` | Historical LXC/third-board harness; not the current performance topology |
 | `plans/TF-2026-07-18-001-function-inventory.md` | Stub/type inventory behind §4 task IDs |
 | `plans/ZC-RX-SCOPE.md` | M4 follow-up scope |
 | `plans/ASK-ISO-BUILD-AND-INSTALL.md` | Operator build/install how-to |

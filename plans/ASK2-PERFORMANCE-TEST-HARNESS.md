@@ -4,7 +4,7 @@
 
 A reproducible procedure for measuring routed IPv4 throughput and DUT CPU cost through the Mono Gateway LS1046A, comparing the Linux software flowtable against ASK2/FMan hardware offload.
 
-This document is authoritative for the current heidi → DUT `.185` → HELGA harness. The older `plans/TRAFFIC-HARNESS.md` (LXC/third-board) and the dual-board sections of `plans/PERFORMANCE-BENCHMARKS.md` describe different topologies and must not be used to configure this harness.
+This document is authoritative for the current heidi → DUT `.185` → HELGA harness. The older `plans/archive/TRAFFIC-HARNESS.md` (LXC/third-board) and the dual-board sections of `plans/archive/PERFORMANCE-BENCHMARKS.md` describe different topologies and must not be used to configure this harness.
 
 ---
 

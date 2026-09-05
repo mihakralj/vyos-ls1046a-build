@@ -4,11 +4,11 @@
             endian="big"
             size="32"
             variant="default"
-            version="1.0"
+            version="2.0"
             slafile="fman-risc.sla"
             processorspec="fman-risc.pspec"
             id="fman-risc:BE:32:default">
-    <description>NXP FMan v3 Controller microcode RISC (reverse-engineered, partial - Stage G1 control flow)</description>
+    <description>NXP FMan v3 Controller microcode RISC (full 201 canonical ISA forms, 210.10.1 microcode)</description>
     <compiler name="default" spec="fman-risc.cspec" id="default"/>
   </language>
 </language_definitions>
