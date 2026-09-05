@@ -114,3 +114,6 @@ _fixup_bash_check.sh
 
 # Extracted ISO / build-output dirs (large; never commit)
 vyos-*-rolling-LS1046A-arm64/
+
+# Derived full microcode disassembly listings (NXP proprietary EULA)
+decomp/out/*.asm

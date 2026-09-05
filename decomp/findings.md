@@ -9,9 +9,33 @@ blob and its corpus. Phase files hold the *plan*; this file holds the
 (register/AD-level contract, §1.2 has the quantified blob comparison and
 dispatch-table attribution).
 
+## 2026-09-05 (newest) — Phase 7: 99.99% whole-image ISA match, full disassembly, CFG, and subsystem C reconstruction
+
+Cross-referencing all 12,851 words of the canonical 210.10.1 microcode blob
+against the 201-instruction canonical ISA table (`arch/fman-instruction-table.html`)
+yielded **12,850 matches (99.99%)**, with the sole unmatched word being `w1`
+(`0x00d20a01`), the BCD version constant `210.10.1`. 100% of executable words
+now have a known instruction definition, operand structure, and pseudocode.
+
+Built `decomp/tools/fman-full-disasm.py` providing full-image disassembly with
+symbolic memory mapping (`ctx[0xd0xx]`, MURAM `0x0300+n·0x800`, FM_CTL `0xf8xx`),
+accurate branch target resolution (`target = 48 + imm16` for dispatch table
+vectors `w0`–`w47`, signed relative displacements for code bodies), and delay
+slot tracking (`[DELAY_SLOT]`).
+
+Generated whole-image artifacts in `decomp/out/`:
+- `fman-210.10.1-full.asm`: 12,851 words fully annotated (1.1 MB).
+- `fman-210.10.1-cfg.json`: 2,368 basic blocks with delay-slot boundaries.
+- `subsystem-map.md`: all 24 dispatch table slots and major subsystems mapped.
+- `01-cc-match-walker.c`: reconstructed C model for Custom Classifier match tree.
+- `02-fe-vm-action-interpreter.c`: reconstructed C model for FE-VM opcode execution.
+- `03-keygen-host-command.c`: reconstructed C model for KeyGen Host Command engine.
+- `04-policer-state-machine.c`: reconstructed C model for Policer rate limiting.
+- `05-parser-error-and-bmi.c`: reconstructed C model for Parser error and frame epilogue.
+
 ---
 
-## 2026-08-08 (newest) — CORRECTION: w12849 branches to w12551, not w12830; pool tail is a one-pass slot walk with a shared error/continue exit
+## 2026-08-08 — CORRECTION: w12849 branches to w12551, not w12830; pool tail is a one-pass slot walk with a shared error/continue exit
 
 **The earlier "pool_status_loop loop-back" reading misdecoded the branch
 immediate.** w12849 is `b3fffed6` — imm16 `0xfed6` sign-extends to **−298**,
