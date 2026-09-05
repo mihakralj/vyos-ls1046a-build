@@ -72,6 +72,16 @@ def generate_sleigh(table, out_path):
             if "target" in label or "signed" in label or "displacement" in label:
                 all_slices.add((hi, lo, True))
 
+    # Fields used as immediates that alias attached register slices need a
+    # separate unattached token field (e.g. shift_u5 at bits 15-11).
+    imm_aliases = set()
+    for e in table:
+        for bits, kind, label in e["fields"]:
+            if "immediate" in label and ".." in bits:
+                hi, lo = [int(x) for x in bits.split("..")]
+                if (hi, lo) in {(20, 16), (15, 11), (10, 6)}:
+                    imm_aliases.add((hi, lo))
+
     lines = []
     lines.append("# fman-risc.slaspec — NXP FMan v3 Controller Microcode RISC ISA")
     lines.append("# Automatically generated from arch/fman-instruction-table.html (201 canonical forms).")
@@ -100,6 +110,8 @@ def generate_sleigh(table, out_path):
         else:
             hi, lo = sl
             lines.append(f"    {slice_name(hi, lo):<14s} = ({lo},{hi})")
+    for hi, lo in sorted(imm_aliases, key=lambda x: (x[0], x[1]), reverse=True):
+        lines.append(f"    {slice_name(hi, lo) + '_imm':<14s} = ({lo},{hi})")
     lines.append(";\n")
 
     # Attach registers to 5-bit register slices
@@ -136,6 +148,8 @@ def generate_sleigh(table, out_path):
 
     for idx, e in enumerate(table):
         mn = e["mn"]
+        if mn == "fill":
+            continue
         sleigh_mn = mn.replace(".", "_")
         has_delay_slot = e["delay_slot"]
         pseudo = e["pseudo"]
@@ -170,6 +184,8 @@ def generate_sleigh(table, out_path):
                         target_token = "rel14_dest"
                 else:
                     sl = slice_name(hi, lo)
+                    if "immediate" in label and (hi, lo) in imm_aliases:
+                        sl += "_imm"
                     pat_parts.append(sl)
                     op_parts.append(sl)
 
@@ -180,7 +196,7 @@ def generate_sleigh(table, out_path):
         if mn in ("ret", "ret.comp"):
             semantics.append("return [r30];")
         elif mn in ("indirect", "indirect.comp", "indirect.m5", "indirect.m5.comp"):
-            semantics.append("goto [f_20_16];")
+            semantics.append("goto [f_15_11];")
         elif mn in ("call", "call.comp"):
             semantics.append(f"call {target_token};")
         elif mn in ("cbrz14", "cbrz14.comp"):
@@ -226,25 +242,25 @@ def generate_sleigh(table, out_path):
         elif mn == "taskctx.load2":
             semantics.append("fman_taskctx_load2(f_20_16);")
         elif mn == "li16":
-            semantics.append("f_20_16 = f_15_0;")
+            semantics.append("f_20_16 = f_15_0:4;")
         elif mn == "lihi16":
-            semantics.append("f_20_16 = f_15_0 << 16;")
+            semantics.append("f_20_16 = (f_15_0:4) << 16;")
         elif mn == "addi16":
-            semantics.append("f_20_16 = f_20_16 + f_15_0;")
+            semantics.append("f_20_16 = f_20_16 + (f_15_0:4);")
         elif mn == "addhi16":
-            semantics.append("f_20_16 = f_20_16 + (f_15_0 << 16);")
+            semantics.append("f_20_16 = f_20_16 + ((f_15_0:4) << 16);")
         elif mn == "subi16":
-            semantics.append("f_20_16 = f_20_16 - f_15_0;")
+            semantics.append("f_20_16 = f_20_16 - (f_15_0:4);")
         elif mn == "andi16":
-            semantics.append("f_20_16 = f_20_16 & f_15_0;")
+            semantics.append("f_20_16 = f_20_16 & (f_15_0:4);")
         elif mn == "andhi16":
-            semantics.append("f_20_16 = f_20_16 & (f_15_0 << 16);")
+            semantics.append("f_20_16 = f_20_16 & ((f_15_0:4) << 16);")
         elif mn == "ori16":
-            semantics.append("f_20_16 = f_20_16 | f_15_0;")
+            semantics.append("f_20_16 = f_20_16 | (f_15_0:4);")
         elif mn == "orhi16":
-            semantics.append("f_20_16 = f_20_16 | (f_15_0 << 16);")
+            semantics.append("f_20_16 = f_20_16 | ((f_15_0:4) << 16);")
         elif mn == "xori16":
-            semantics.append("f_20_16 = f_20_16 ^ f_15_0;")
+            semantics.append("f_20_16 = f_20_16 ^ (f_15_0:4);")
         elif mn == "not32":
             semantics.append("f_20_16 = ~f_20_16;")
         elif mn == "not32.r10":
@@ -262,61 +278,97 @@ def generate_sleigh(table, out_path):
         elif mn == "xor32":
             semantics.append("f_10_6 = f_20_16 ^ f_15_11;")
         elif mn == "lsl32":
-            semantics.append("f_10_6 = f_20_16 << (f_15_11 & 0x1f);")
+            semantics.append("f_10_6 = f_20_16 << (f_15_11 & 0x1f:4);")
         elif mn == "lsl32i":
-            semantics.append("f_10_6 = f_20_16 << f_5_0;")
+            semantics.append("f_10_6 = f_20_16 << f_15_11_imm;")
         elif mn == "lsr32":
-            semantics.append("f_10_6 = f_20_16 >> (f_15_11 & 0x1f);")
+            semantics.append("f_10_6 = f_20_16 >> (f_15_11 & 0x1f:4);")
         elif mn == "lsr32i":
-            semantics.append("f_10_6 = f_20_16 >> f_5_0;")
+            semantics.append("f_10_6 = f_20_16 >> f_15_11_imm;")
         elif mn == "asr32":
-            semantics.append("f_10_6 = f_20_16 s>> (f_15_11 & 0x1f);")
+            semantics.append("f_10_6 = f_20_16 s>> (f_15_11 & 0x1f:4);")
         elif mn == "asr32i":
-            semantics.append("f_10_6 = f_20_16 s>> f_5_0;")
+            semantics.append("f_10_6 = f_20_16 s>> f_15_11_imm;")
         elif mn == "cmp32":
             semantics.append("Z = (f_20_16 == f_15_11); N = (f_20_16 < f_15_11);")
         elif mn == "cmpi16" or mn == "cmpeqi16":
-            semantics.append("Z = (f_20_16 == f_15_0);")
+            semantics.append("Z = (f_20_16 == (f_15_0:4));")
         elif mn == "test32":
-            semantics.append("Z = (r2 == 0);")
+            semantics.append("Z = (r2 == 0:4);")
         elif mn == "testand32":
-            semantics.append("Z = ((f_20_16 & f_15_11) == 0);")
+            semantics.append("Z = ((f_20_16 & f_15_11) == 0:4);")
         elif mn == "testor32":
-            semantics.append("Z = ((f_20_16 | f_15_11) == 0);")
+            semantics.append("Z = ((f_20_16 | f_15_11) == 0:4);")
         elif mn == "testxor32":
-            semantics.append("Z = ((f_20_16 ^ f_15_11) == 0);")
+            semantics.append("Z = ((f_20_16 ^ f_15_11) == 0:4);")
         elif mn == "tstandi16":
-            semantics.append("Z = ((f_20_16 & f_15_0) == 0);")
+            semantics.append("Z = ((f_20_16 & (f_15_0:4)) == 0:4);")
         elif mn == "tstandhi16":
-            semantics.append("Z = ((f_20_16 & (f_15_0 << 16)) == 0);")
+            semantics.append("Z = ((f_20_16 & ((f_15_0:4) << 16)) == 0:4);")
         elif mn == "tstori16":
-            semantics.append("Z = ((f_20_16 | f_15_0) == 0);")
+            semantics.append("Z = ((f_20_16 | (f_15_0:4)) == 0:4);")
         elif mn == "tstimm16":
-            semantics.append("Z = (f_15_0 == 0);")
+            semantics.append("Z = (f_15_0 == 0:2);")
         elif mn.startswith("memw.readz"):
-            semantics.append("f_20_16 = *[dmem]:4 (f_15_11 + f_10_0); Z = (f_20_16 == 0);")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = *[dmem]:4 addr;", "Z = (f_20_16 == 0:4);",
+            ])
         elif mn.startswith("memw.read"):
-            semantics.append("f_20_16 = *[dmem]:4 (f_15_11 + f_10_0);")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = *[dmem]:4 addr;",
+            ])
         elif mn.startswith("memw.write"):
-            semantics.append("*[dmem]:4 (f_15_11 + f_10_0) = f_20_16;")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "*[dmem]:4 addr = f_20_16;",
+            ])
         elif mn.startswith("memh.read"):
-            semantics.append("f_20_16 = zext(*[dmem]:2 (f_15_11 + f_10_0));")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = zext(*[dmem]:2 addr);",
+            ])
         elif mn.startswith("memhu.readz"):
-            semantics.append("f_20_16 = zext(*[dmem]:2 (f_15_11 + f_10_0)); Z = (f_20_16 == 0);")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = zext(*[dmem]:2 addr);", "Z = (f_20_16 == 0:4);",
+            ])
         elif mn.startswith("memh.write"):
-            semantics.append("*[dmem]:2 (f_15_11 + f_10_0) = f_20_16[0,16];")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "*[dmem]:2 addr = f_20_16[0,16];",
+            ])
         elif mn.startswith("memb.read"):
-            semantics.append("f_20_16 = zext(*[dmem]:1 (f_15_11 + f_10_0));")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = zext(*[dmem]:1 addr);",
+            ])
         elif mn.startswith("membu.readz"):
-            semantics.append("f_20_16 = zext(*[dmem]:1 (f_15_11 + f_10_0)); Z = (f_20_16 == 0);")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = zext(*[dmem]:1 addr);", "Z = (f_20_16 == 0:4);",
+            ])
         elif mn.startswith("membs.readz"):
-            semantics.append("f_20_16 = sext(*[dmem]:1 (f_15_11 + f_10_0)); Z = (f_20_16 == 0);")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = sext(*[dmem]:1 addr);", "Z = (f_20_16 == 0:4);",
+            ])
         elif mn.startswith("memb.write"):
-            semantics.append("*[dmem]:1 (f_15_11 + f_10_0) = f_20_16[0,8];")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "*[dmem]:1 addr = f_20_16[0,8];",
+            ])
         elif mn.startswith("memd.read"):
-            semantics.append("f_20_16 = *[dmem]:4 (f_15_11 + f_10_0);")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "f_20_16 = *[dmem]:4 addr;",
+            ])
         elif mn.startswith("memd.write"):
-            semantics.append("*[dmem]:4 (f_15_11 + f_10_0) = f_20_16;")
+            semantics.extend([
+                "local addr:2 = f_10_0;", "addr = addr + f_15_11[0,16];",
+                "*[dmem]:4 addr = f_20_16;",
+            ])
         elif mn.startswith("clz32"):
             semantics.append("r7 = lzcount(r1);")
         elif "dma" in mn:
@@ -329,13 +381,13 @@ def generate_sleigh(table, out_path):
             semantics.append("")
 
         sem_str = " ".join(semantics)
-        delay_str = " [ delayslot(1); ]" if has_delay_slot else ""
-        
+        delay_stmt = "delayslot(1); " if has_delay_slot else ""
+
         # Format constructor
-        sig = f":{sleigh_mn} {ops_str} is {pat_str}{delay_str}"
+        sig = f":{sleigh_mn} {ops_str} is {pat_str}"
         if sig not in seen_signatures:
             seen_signatures.add(sig)
-            lines.append(f"{sig} {{ {sem_str} }}")
+            lines.append(f"{sig} {{ {delay_stmt}{sem_str} }}")
 
     # Catch-all
     lines.append("\n# Catch-all opcode (least specific)")
