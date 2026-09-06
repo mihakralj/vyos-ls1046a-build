@@ -94,3 +94,30 @@ genuine per-flow VLAN).
   HIT/mismatch counters.
 - The Fork-A freeze probe: the ~20-packet sustained-VLAN soak with the
   [0xd0b8] readback.
+
+## 6. Fork C implementation state (2026-09-06)
+
+Active path mapped: `ask_flow_offload.c:2822` → `ask_vlan_cc_flow_add()`
+(the VLAN intent), 2849 → `ask_vlan_cc_flow_del()`; the CC-tree install =
+`fman_cc_tree_install()` with the kernel-side `struct fman_pcd_cc_hw_key`
+(present-bitset generation, `FMAN_PCD_CC_HW_F_IPV6` = BIT(6), the
+src_ip6/dst_ip6 fields present). The ask-side `ask_fman_caps.h` mirror
+`struct fman_cc_key` predates that generation — the first edit must
+reconcile the two (the fill_key writes the old-named fields; the packer
+reads the present-bit ones), or the v6 fill will compile against the
+wrong shape.
+
+Step mapping (the blueprint's 4 steps, to the actual files):
+1. `ask_vlan_cc.c` `ask_vlan_cc_fill_key()`: the l3_proto branch —
+   the IPv6 case sets the present bit + copies src_ip6/dst_ip6; the
+   match adds the v6 comparisons. (Requires the struct reconcile.)
+2. `fman_pcd_cc.c`: `cc_pack_key_v6()` — the 40-byte row (PORT_ID |
+   src6[16] | dst6[16] | nexthdr | sport | dport | pad[2]); the tree
+   key_size = 40 (the group0 (key_size-1)<<24), the match_sz = nrows
+   × 80.
+3. The KG scheme: the plain EKFC (0x801c0006) — the v6 = the RM
+   auto-16B IPSRC1/IPDST1 extraction, the 38-byte composite at
+   IC+0x50 — no GEC needed; the dual-GEC installers (the V6-2
+   install_v6) stay dormant.
+4. `ask_flow_offload.c`: the v6 `-EOPNOTSUPP` gates open for the VLAN
+   intent (the ~1128–1190 block).
