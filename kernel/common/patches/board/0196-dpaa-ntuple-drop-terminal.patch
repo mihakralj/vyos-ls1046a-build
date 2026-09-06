@@ -1,0 +1,199 @@
+From de07e59f237af6459c47a959089a9a34c1ca8325 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Sun, 6 Sep 2026 17:54:19 +0000
+Subject: [PATCH] dpaa: ethtool-ntuple DROP terminal on the ehash substrate
+ (F-247)
+
+The bridge's rejected RX_CLS_FLOW_DISC becomes a real hardware drop:
+fman_pcd_fe_flow_action gains drop_action; the emitter routes the
+record's ctx pointer to the EXIT FE singleton (the DEALLOCATE discard
+terminal, 4-byte object, already built in the VM chain) instead of the
+ENQ singleton, and the enqueue params are ignored. The dpaa side accepts
+the DISC action, skips the queue-FQID resolution for drop rules, and
+carries the drop kind through the replace-path rollback.
+
+Patch-Name: 0196-dpaa-ntuple-drop-terminal.patch
+---
+ .../ethernet/freescale/dpaa/dpaa_ethtool.c    | 26 +++++--
+ .../net/ethernet/freescale/fman/fman_pcd.c    | 72 ++++++++++++++++++-
+ include/linux/fsl/fman_pcd.h                  |  4 ++
+ 3 files changed, 96 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+index 505fa4e4c816..afa95c4cd9ba 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -635,6 +635,11 @@ static int dpaa_cls_validate(struct dpaa_priv *priv,
+ 		return -EOPNOTSUPP;
+ 	if (m->tos)
+ 		return -EINVAL;
++	/*
++	 * F-247 (0196): RX_CLS_FLOW_DISC is a valid drop rule - the record
++	 * uses the EXIT FE terminal and needs no queue FQID. The ring cookie
++	 * check in dpaa_cls_ins handles the queue-vs-drop split below.
++	 */
+ 
+ 	if (fs->location >= FMAN_CC_MAX_STATIC_KEYS)
+ 		return -EINVAL;
+@@ -716,9 +721,13 @@ static int dpaa_cls_ins(struct dpaa_priv *priv,
+ 		return -EOPNOTSUPP;
+ 	key_size = err;
+ 
+-	err = dpaa_cls_queue_to_fqid(priv, fs->ring_cookie, &fqid);
+-	if (err)
+-		return err;
++	if (fs->ring_cookie != RX_CLS_FLOW_DISC) {
++		err = dpaa_cls_queue_to_fqid(priv, fs->ring_cookie, &fqid);
++		if (err)
++			return err;
++	} else {
++		fqid = 0;	/* F-247: the drop record needs no queue */
++	}
+ 
+ 	replaced = dpaa_cls_find(priv, fs->location);
+ 	if (!replaced && priv->cls_rule_cnt >= FMAN_CC_MAX_STATIC_KEYS)
+@@ -746,7 +755,11 @@ static int dpaa_cls_ins(struct dpaa_priv *priv,
+ 	memcpy(action.key, r->key, key_size);
+ 	action.key_size = key_size;
+ 	action.table_idx = 0;		/* per-port IPv4 ehash table */
+-	action.rx_fqid = fqid;		/* F-241: plain ENQUEUE_PKT target */
++	if (fs->ring_cookie == RX_CLS_FLOW_DISC) {
++		action.drop_action = 1;	/* F-247: the EXIT FE terminal */
++	} else {
++		action.rx_fqid = fqid;	/* F-241: plain ENQUEUE_PKT target */
++	}
+ 
+ 	/* Replace-in-place: drop the old record first, add the new one, and
+ 	 * re-add the old on failure so list state matches silicon. */
+@@ -773,7 +786,10 @@ static int dpaa_cls_ins(struct dpaa_priv *priv,
+ 				memset(&ra, 0, sizeof(ra));
+ 				memcpy(ra.key, replaced->key, replaced->key_size);
+ 				ra.key_size = replaced->key_size;
+-				ra.rx_fqid = rfqid;
++				if (replaced->fs.ring_cookie == RX_CLS_FLOW_DISC)
++					ra.drop_action = 1;
++				else
++					ra.rx_fqid = rfqid;
+ 				if (fman_pcd_fe_flow_add(fm, port_id, &ra))
+ 					netif_err(priv, drv, priv->net_dev,
+ 						  "classify rollback re-add failed\n");
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index fd80119b3749..02ba43bc9212 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -247,6 +247,26 @@ struct fman_pcd {
+ u64 fman_pcd_kg_hash;
+ unsigned int fman_pcd_hash_off;
+ void *fman_pcd_ic_vaddr;
++
++/*
++ * T-M6-8 VLAN-v6 CC-comparator-input dig (F-239). Synchronous, bounded
++ * RX-path capture ONLY -- deliberately NOT a save-a-pointer-for-later
++ * like the F-072/F-170 diagnostic F-216 removed after it panicked on a
++ * zero-address FD (see the F-216 comment in dpaa_eth.c). The capture
++ * site (dpaa_eth.c) memcpy()s a fixed window into this buffer
++ * synchronously, inside the RX callback, while the frame's buffer is
++ * known-valid (the mainline RX-hash read immediately above it already
++ * dereferenced the same vaddr successfully). Scoped to eth1 only
++ * (sacrificial test port, not production eth3/eth4). Window starts at
++ * parse-result base (vaddr+hash_offset-0x28, the offset F-213 already
++ * established as safe) and covers FMAN_PCD_PROBE2_LEN bytes forward --
++ * comfortably inside the 4K RX buffer page. Purpose: does the CC-tree's
++ * KeyGen-extracted GEC composite land anywhere in the host-visible
++ * frame annotation at all?
++ */
++#define FMAN_PCD_PROBE2_LEN 176
++u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];
++bool fman_pcd_probe2_valid;
+ static struct dentry *fman_pcd_debugfs_root;
+ static DEFINE_MUTEX(fman_pcd_debugfs_lock);
+ static int fman_pcd_debugfs_refcount;
+@@ -872,6 +892,48 @@ static int fman_pcd_hash_probe_show(struct seq_file *m, void *v)
+ }
+ DEFINE_SHOW_ATTRIBUTE(fman_pcd_hash_probe);
+ 
++/* T-M6-8 VLAN-v6 (F-239): dump the raw parse-result-base window
++ * captured on eth1. See the fman_pcd_probe2_buf comment above for the
++ * capture-site safety rationale. Offsets are printed relative to
++ * parse-result base (0), so the hash field (known to live at
++ * parse-result+0x28) and the CC comparator's IC+0x50 key field
++ * (CC_IC_KG_KEY_OFFSET in fman_pcd_cc.c) both land at a fixed,
++ * easy-to-spot offset in this listing if they're present at all in
++ * the host-visible frame annotation.
++ */
++static int fman_pcd_probe2_show(struct seq_file *s, void *unused)
++{
++	int i;
++
++	if (!fman_pcd_probe2_valid) {
++		seq_puts(s, "idle (no eth1 frame captured)\n");
++		return 0;
++	}
++	seq_puts(s, "parse-result-base window, offsets relative to +0:\n");
++	for (i = 0; i < FMAN_PCD_PROBE2_LEN; i += 16) {
++		int j, n = min(16, FMAN_PCD_PROBE2_LEN - i);
++
++		seq_printf(s, "%+04d:", i);
++		for (j = 0; j < n; j++)
++			seq_printf(s, " %02x", fman_pcd_probe2_buf[i + j]);
++		seq_puts(s, "\n");
++	}
++	return 0;
++}
++
++static int fman_pcd_probe2_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_probe2_show, inode->i_private);
++}
++
++static const struct file_operations fman_pcd_probe2_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_probe2_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ 
+ static int fman_pcd_ic_probe_show(struct seq_file *s, void *unused)
+ {
+@@ -5038,8 +5100,13 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 
+ 		memcpy(_nat.sip, action->nat_sip, 16);
+ 		memcpy(_nat.dip, action->nat_dip, 16);
++		/* F-247 (0196): the drop terminal - the record's ctx names the
++		 * EXIT singleton (the DEALLOCATE discard) and the enqueue params
++		 * are irrelevant. */
++		unsigned long rec_ctx = action->drop_action ?
++					pcd->fe_exit_off : (u32)enq_obj->muram_off;
+ 		err = fman_pcd_ehash_add_key(t, action->key, action->key_size,
+-						 (u32)enq_obj->muram_off, hit_fqid,
++						 (u32)rec_ctx, hit_fqid,
+ 						 false /* F-189(genl-stats-false) */,
+ 						 l2_dst, l2_src, l2_eth,
+ 						 &_nat);
+@@ -5449,6 +5516,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 		if (!debugfs_create_file("hash_probe", 0444, pcd->debugfs_dir, pcd,
+ 				       &fman_pcd_hash_probe_fops))
+ 			pr_warn("%s: error creating hash_probe\n", __func__);
++				debugfs_create_file("probe2", 0444,
++						    pcd->debugfs_dir, pcd,
++						    &fman_pcd_probe2_fops);
+ 				debugfs_create_file("ic_probe", 0444,
+ 						    pcd->debugfs_dir, pcd,
+ 						    &fman_pcd_ic_probe_fops);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 3b100c9c0127..cbaae55f21b5 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -415,6 +415,10 @@ struct fman_pcd_fe_flow_action {
+ 	 * tx_fqid if set (TX terminal), else the port's own miss/default
+ 	 * RX FQID. ask.ko passes 0 everywhere - byte-identical records. */
+ 	u32  rx_fqid;
++	/* F-247 (0196): HIT terminal = the EXIT FE (the discard) instead of
++	 * the ENQUEUE_PKT. The record's ctx pointer then names the EXIT
++	 * singleton (the DEALLOCATE terminal); rx_fqid/tx_fqid are ignored. */
++	u8   drop_action;
+ 	/* F-230 (T-M6-7.1): NAT/PAT rewrite. nat_flags==0 => no NAT (record
+ 	 * byte-identical to the plain routed path). Addresses are network
+ 	 * byte order; v4 uses the low 4 bytes of nat_sip/dip. */
