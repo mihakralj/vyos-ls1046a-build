@@ -1,6 +1,6 @@
-From c541f8011da1d6c0335d8bb246c72a0d0fafd48b Mon Sep 17 00:00:00 2001
+From 4f0b8caf192e60506a35a01c606fc7a549860351 Mon Sep 17 00:00:00 2001
 From: LS1046A Canonical <canonical@ls1046a-build>
-Date: Sun, 6 Sep 2026 19:49:42 +0000
+Date: Sun, 6 Sep 2026 19:54:49 +0000
 Subject: [PATCH] dpaa: tc-flower static-ACL hook onto the ehash records
  (F-249)
 MIME-Version: 1.0
@@ -18,15 +18,23 @@ software (-EOPNOTSUPP), matching the bridge's exact-match boundary.
 
 Patch-Name: 0198-dpaa-tc-flower-acl-hook.patch
 ---
- .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 229 +++++++++++++++++-
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 230 +++++++++++++++++-
  .../net/ethernet/freescale/dpaa/dpaa_eth.h    |   3 +
- 2 files changed, 222 insertions(+), 10 deletions(-)
+ 2 files changed, 223 insertions(+), 10 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 5af8000b2524..14b1872ff5fd 100644
+index 5af8000b2524..2371f483ced3 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -638,26 +638,235 @@ static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
+@@ -17,6 +17,7 @@
+ #include <linux/icmp.h>
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
++#include <net/ipv6.h>
+ #include <linux/platform_device.h>
+ #include <linux/udp.h>
+ #include <linux/tcp.h>
+@@ -638,26 +639,235 @@ static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
  	return 0;
  }
  
@@ -79,8 +87,8 @@ index 5af8000b2524..14b1872ff5fd 100644
 +		if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV6_ADDRS))
 +			return -EOPNOTSUPP;
 +		flow_rule_match_ipv6_addrs(rule, &m6);
-+		if (!ipv6_addr_equal(&m6.mask->src, &in6addr_any) ||
-+		    !ipv6_addr_equal(&m6.mask->dst, &in6addr_any))
++		if (!ipv6_addr_any(&m6.mask->src) ||
++		    !ipv6_addr_any(&m6.mask->dst))
 +			return -EOPNOTSUPP;
 +	} else {
 +		if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS))
