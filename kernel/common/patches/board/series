@@ -539,3 +539,5 @@
 0196-dpaa-ntuple-drop-terminal.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0197-fman-fe-flow-add-drop-verb.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0198-dpaa-tc-flower-acl-hook.patch
