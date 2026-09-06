@@ -1,6 +1,6 @@
-From 79f9ae40570cfb042d6d5709bf2d390ee4610b1b Mon Sep 17 00:00:00 2001
+From c541f8011da1d6c0335d8bb246c72a0d0fafd48b Mon Sep 17 00:00:00 2001
 From: LS1046A Canonical <canonical@ls1046a-build>
-Date: Sun, 6 Sep 2026 19:41:56 +0000
+Date: Sun, 6 Sep 2026 19:49:42 +0000
 Subject: [PATCH] dpaa: tc-flower static-ACL hook onto the ehash records
  (F-249)
 MIME-Version: 1.0
@@ -18,66 +18,15 @@ software (-EOPNOTSUPP), matching the bridge's exact-match boundary.
 
 Patch-Name: 0198-dpaa-tc-flower-acl-hook.patch
 ---
- .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 437 ++++++++++++++++--
- .../net/ethernet/freescale/dpaa/dpaa_eth.h    |   6 +-
- 2 files changed, 416 insertions(+), 27 deletions(-)
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 229 +++++++++++++++++-
+ .../net/ethernet/freescale/dpaa/dpaa_eth.h    |   3 +
+ 2 files changed, 222 insertions(+), 10 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 5af8000b2524..f3422bd7e3ec 100644
+index 5af8000b2524..14b1872ff5fd 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -51,8 +51,18 @@
- #include "dpaa_eth_trace.h"
- #include "dpaa_ceetm.h"
- 
--extern void *fman_pcd_ic_vaddr;
--extern void *fman_pcd_ic_buf_base;
-+void *fman_pcd_ic_vaddr;
-+void *fman_pcd_ic_buf_base;
-+extern u64 fman_pcd_kg_hash;
-+extern unsigned int fman_pcd_hash_off;
-+/* T-M6-8 VLAN-v6 CC-comparator-input dig (F-239); see the buffer's own
-+ * comment in fman_pcd.c for the full rationale and the
-+ * synchronous-capture safety argument (this is deliberately NOT a
-+ * repeat of the F-072/F-170 pattern F-216 removed after a panic -- no
-+ * pointer is stashed here). */
-+#define FMAN_PCD_PROBE2_LEN 176
-+extern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];
-+extern bool fman_pcd_probe2_valid;
- static int debug = -1;
- module_param(debug, int, 0444);
- MODULE_PARM_DESC(debug, "Module/Driver verbosity level (0=none,...,16=all)");
-@@ -84,7 +94,7 @@ MODULE_PARM_DESC(tx_timeout, "The Tx timeout in ms");
-  */
- 
- /* Size in bytes of the FQ taildrop threshold */
--#define DPAA_FQ_TD 0x200000
-+#define DPAA_FQ_TD 0x400000
- 
- #define DPAA_CS_THRESHOLD_1G 0x06000000
- /* Egress congestion threshold on 1G ports, range 0x1000 .. 0x10000000
-@@ -188,7 +198,19 @@ struct fm_port_fqs {
- /* All the dpa bps in use at any moment */
- static struct dpaa_bp *dpaa_bp_array[BM_MAX_NUM_OF_POOLS];
- 
--#define DPAA_BP_RAW_SIZE 4096
-+/* F-203: order-1 (8 KiB) RX buffers so jumbo-ish MTU frames arrive in a
-+ * single contiguous buffer (keeps them eligible for ASK FE HW offload).
-+ */
-+/* F-222(order0-revert): order-1 (8 KiB) RX buffers wedge the port under
-+ * sustained load via dev_alloc_pages() failure on a fragmented Normal zone
-+ * (board .185 2026-08-21, ~800 Mbit/s routed transit, MemFree ~6.8 GB).
-+ * Revert to the mainline-proven order-0 single-4 KiB-page RX buffer. All
-+ * F-203 sites derive from this define, so this one line reverts them all;
-+ * DPAA_BP_RAW_SIZE becomes 4096 and the ASK MTU clamp is lowered to ~3600
-+ * (vyos-1x-036/037). ASK FE offload at standard MTU is unaffected (E25/E26
-+ * HITs and F-220/F-221 per-port tables ran on order-0). */
-+#define DPAA_BP_ORDER 0
-+#define DPAA_BP_RAW_SIZE (4096 << DPAA_BP_ORDER)
- 
- #ifdef CONFIG_DPAA_ERRATUM_A050385
- #define dpaa_bp_size(raw_size) (SKB_WITH_OVERHEAD(raw_size) & \
-@@ -638,26 +660,246 @@ static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
+@@ -638,26 +638,235 @@ static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
  	return 0;
  }
  
@@ -115,7 +64,6 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +	bool is_v6;
 +	int err;
 +
-+	/* The basic match: the exact eth type + the exact L4 proto. */
 +	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC))
 +		return -EOPNOTSUPP;
 +	flow_rule_match_basic(rule, &mb);
@@ -127,7 +75,6 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +	if (!is_v6 && mb.key->n_proto != cpu_to_be16(ETH_P_IP))
 +		return -EOPNOTSUPP;
 +
-+	/* The addresses: the full masks only. */
 +	if (is_v6) {
 +		if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV6_ADDRS))
 +			return -EOPNOTSUPP;
@@ -144,8 +91,6 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +			return -EOPNOTSUPP;
 +	}
 +
-+	/* The L4 ports: the full masks only (the L4 proto is non-zero by the
-+	 * basic check above; the non-port protos keep the port words zero). */
 +	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
 +		flow_rule_match_ports(rule, &mp);
 +		if (mp.mask->src != cpu_to_be16(0xffff) ||
@@ -153,7 +98,6 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +			return -EOPNOTSUPP;
 +	}
 +
-+	/* The action: the single DROP. */
 +	if (rule->action.num_entries != 1 ||
 +	    rule->action.entries[0].id != FLOW_ACTION_DROP)
 +		return -EOPNOTSUPP;
@@ -172,9 +116,6 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +		return -EOPNOTSUPP;
 +	key_size = err;
 +
-+	/* Build the record key (the same dual-lane family format as the
-+	 * ntuple bridge: family 0x40/0x60, the v4 lane or the v6 lanes,
-+	 * proto at 41/33, the ports at 42-45/34-37). */
 +	memset(key, 0, sizeof(key));
 +	if (key_size == 14) {
 +		if (is_v6)
@@ -208,7 +149,6 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +		}
 +	}
 +
-+	/* Same cookie = replace in place. */
 +	spin_lock(&priv->flower_lock);
 +	list_for_each_entry(pos, &priv->cls_flowers, node) {
 +		if (pos->cookie_lo == (u32)f->cookie) {
@@ -229,7 +169,7 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +	memset(&action, 0, sizeof(action));
 +	memcpy(action.key, key, key_size);
 +	action.key_size = key_size;
-+	action.table_idx = 0;	/* the per-port table */
++	action.table_idx = 0;
 +	action.drop_action = 1;	/* F-247: the EXIT FE terminal */
 +
 +	err = fman_pcd_fe_flow_add(fm, port_id, &action);
@@ -247,8 +187,6 @@ index 5af8000b2524..f3422bd7e3ec 100644
 +		list_add_tail(&fl->node, &priv->cls_flowers);
 +		spin_unlock(&priv->flower_lock);
 +	} else {
-+		/* The replace: the old record is gone via the overwrite-add
-+		 * semantics of the collision chain; just refresh the key. */
 +		memcpy(fl->key, key, key_size);
 +		fl->key_size = key_size;
 +	}
@@ -334,315 +272,11 @@ index 5af8000b2524..f3422bd7e3ec 100644
  }
  
  static LIST_HEAD(dpaa_block_cb_list);
-@@ -836,6 +1078,8 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
- 		if (err != -EOPNOTSUPP)
- 			return err;
- 		return dpaa_setup_tc_flow_block(net_dev, type_data);
-+	case TC_SETUP_FT:
-+		return dpaa_setup_tc_flow_block(net_dev, type_data);
- 	case TC_SETUP_QDISC_HTB:
- 		return dpaa_ceetm_setup_htb(net_dev, type_data);
- 	default:
-@@ -1562,7 +1806,8 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
- 		 */
- 		if (dpaa_fq->fq_type == FQ_TYPE_TX ||
- 		    dpaa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||
--		    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ) {
-+		    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ ||
-+		    dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {
- 			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);
- 			initfq.fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CGE);
- 			initfq.fqd.cgid = (u8)priv->cgr_data.cgr.cgrid;
-@@ -1604,10 +1849,32 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
- 			 * ContextB B0(ASPID): 0 (absolute Virtual Storage ID)
- 			 */
- 				qm_fqd_context_a_set64(&initfq.fqd,
--						       0x1e00000080000000ULL);
-+						       0x9a00000080000000ULL);
- 			}
- 		}
- 
-+		/* F-199 (T-M7-2 S4): offload TX FQ with NO TX confirmation.
-+		 * context_a = vendor-proven no-TX-confirm value 0x9a000000c0000000
-+		 * (NXP SDK sdk_dpaa FQ_FLAG_NO_TXCONFIRM; devman.c hi=0x9a000000
-+		 * lo=0xc0000000). FMan deallocates the buffer in hardware and
-+		 * enqueues NO TX-confirm FD, so no per-frame NAPI skb-free runs.
-+		 * The kernel's own TX FQs (FQ_TYPE_TX, 0x1e00000080000000) keep
-+		 * B0V=1 confirmation for skb reclaim.
-+		 * SILICON-VALIDATED 2026-08-24 (board .185, image 0500, 7.76 Gbit/s
-+		 * bidirectional HIT, 13.6 GB / ~9.7M frames): 'tx confirm [TOTAL]'
-+		 * advanced only +9/+5 (control-plane) and F-227 dropped-confirm
-+		 * count stayed 0, board idle. F-232 (now retired) first DISPROVED
-+		 * the earlier guess 0x1c00000080000000 (mainline value with B0V
-+		 * cleared): the record correctly targeted this FQ
-+		 * (hit_fqid=0x2ba/0x2bb) yet F-227 still dropped ~600K confirms/s,
-+		 * proving clearing B0V alone does NOT suppress the confirm FD on
-+		 * 210.10.1; the full vendor value 0x9a000000c0000000 does. */
-+		if (dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {
-+			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);
-+			qm_fqd_context_a_set64(&initfq.fqd,
-+					       0x9a000000c0000000ULL);
-+		}
-+
- 		/* Put all the ingress queues in our "ingress CGR". */
- 		if (priv->use_ingress_cgr &&
- 		    (dpaa_fq->fq_type == FQ_TYPE_RX_DEFAULT ||
-@@ -2056,7 +2323,7 @@ static int dpaa_bp_add_8_bufs(const struct dpaa_bp *dpaa_bp)
- 	u8 i;
- 
- 	for (i = 0; i < 8; i++) {
--		p = dev_alloc_pages(0);
-+		p = dev_alloc_pages(DPAA_BP_ORDER);
- 		if (unlikely(!p)) {
- 			netdev_err(net_dev, "dev_alloc_pages() failed\n");
- 			goto release_previous_buffs;
-@@ -2293,7 +2560,7 @@ static struct sk_buff *contig_fd_to_skb(const struct dpaa_priv *priv,
- 	return skb;
- 
- free_buffer:
--	free_pages((unsigned long)vaddr, 0);
-+	free_pages((unsigned long)vaddr, DPAA_BP_ORDER);
- 	return NULL;
- }
- 
-@@ -2400,7 +2667,7 @@ static struct sk_buff *sg_fd_to_skb(const struct dpaa_priv *priv,
- 	WARN_ONCE(i == DPAA_SGT_MAX_ENTRIES, "No final bit on SGT\n");
- 
- 	/* free the SG table buffer */
--	free_pages((unsigned long)vaddr, 0);
-+	free_pages((unsigned long)vaddr, DPAA_BP_ORDER);
- 
- 	return skb;
- 
-@@ -2413,7 +2680,7 @@ static struct sk_buff *sg_fd_to_skb(const struct dpaa_priv *priv,
- 		if (j > i)
- 			dma_unmap_page(priv->rx_dma_dev, qm_sg_addr(&sgt[j]),
- 				       DPAA_BP_RAW_SIZE, DMA_FROM_DEVICE);
--		free_pages((unsigned long)sg_vaddr, 0);
-+		free_pages((unsigned long)sg_vaddr, DPAA_BP_ORDER);
- 		/* counters 0..i-1 were decremented */
- 		if (j >= i) {
- 			dpaa_bp = dpaa_bpid2pool(sgt[j].bpid);
-@@ -2427,7 +2694,7 @@ static struct sk_buff *sg_fd_to_skb(const struct dpaa_priv *priv,
- 			break;
- 	}
- 	/* free the SGT fragment */
--	free_pages((unsigned long)vaddr, 0);
-+	free_pages((unsigned long)vaddr, DPAA_BP_ORDER);
- 
- 	return NULL;
- }
-@@ -3235,7 +3502,7 @@ static u32 dpaa_run_xdp(struct dpaa_priv *priv, struct qm_fd *fd, void *vaddr,
- 		xdp.frame_sz = DPAA_BP_RAW_SIZE;
- 		xdpf = xdp_convert_buff_to_frame(&xdp);
- 		if (unlikely(!xdpf)) {
--			free_pages((unsigned long)vaddr, 0);
-+			free_pages((unsigned long)vaddr, DPAA_BP_ORDER);
- 			break;
- 		}
- 
-@@ -3251,7 +3518,7 @@ static u32 dpaa_run_xdp(struct dpaa_priv *priv, struct qm_fd *fd, void *vaddr,
- 		err = xdp_do_redirect(priv->net_dev, &xdp, xdp_prog);
- 		if (err) {
- 			trace_xdp_exception(priv->net_dev, xdp_prog, xdp_act);
--			free_pages((unsigned long)vaddr, 0);
-+			free_pages((unsigned long)vaddr, DPAA_BP_ORDER);
- 		}
- 		break;
- 	default:
-@@ -3262,7 +3529,7 @@ static u32 dpaa_run_xdp(struct dpaa_priv *priv, struct qm_fd *fd, void *vaddr,
- 		fallthrough;
- 	case XDP_DROP:
- 		/* Free the buffer */
--		free_pages((unsigned long)vaddr, 0);
-+		free_pages((unsigned long)vaddr, DPAA_BP_ORDER);
- 		break;
- 	}
- 
-@@ -3435,6 +3702,21 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
- 		return qman_cb_dqrr_consume;
- 	}
- 
-+	/* F-216(zero-fd-guard): dual-port v6 arm can transiently deliver a
-+	 * good-status default-FQ descriptor with addr==0. phys_to_virt(0)
-+	 * plus hash_offset (0x108) panicked at ffffffff80000108. Reject and
-+	 * log before ANY DMA-unmap/headroom access; no valid buffer exists
-+	 * to release. */
-+	if (unlikely(!addr)) {
-+		if (net_ratelimit())
-+			netdev_warn(net_dev,
-+				"zero-address RX FD: status=0x%08x format=%u bpid=%u off=%u len=%u fqid=%u\n",
-+				fd_status, (unsigned int)fd_format, dq->fd.bpid,
-+				qm_fd_get_offset(fd), qm_fd_get_length(fd), fq->fqid);
-+		percpu_stats->rx_errors++;
-+		return qman_cb_dqrr_consume;
-+	}
-+
- 	dma_unmap_page(dpaa_bp->priv->rx_dma_dev, addr, DPAA_BP_RAW_SIZE,
- 		       DMA_FROM_DEVICE);
- 
-@@ -3459,12 +3741,34 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
- 			WARN_ONCE(1, "fman_port_get_tstamp failed!\n");
- 	}
- 
--	/* Extract the hash stored in the headroom before running XDP */
-+	/* Extract the hash stored in the headroom before running XDP.
-+	 * F-216(rxhash-normalized): the obsolete F-072/F-170 be64 frame-data
-+	 * diagnostic was removed after it amplified a zero-address FD into a
-+	 * kernel panic. Valid descriptors retain the original mainline be32
-+	 * RX-hash extraction only. */
- 	if (net_dev->features & NETIF_F_RXHASH && priv->keygen_in_use &&
- 	    !fman_port_get_hash_result_offset(priv->mac_dev->port[RX],
- 					      &hash_offset)) {
- 		hash = be32_to_cpu(*(__be32 *)(vaddr + hash_offset));
- 		hash_valid = true;
-+
-+		/* T-M6-8 VLAN-v6 CC-comparator-input dig (F-239): synchronous,
-+		 * bounded capture only, right here in the RX callback while
-+		 * vaddr is known-valid (just dereferenced successfully above)
-+		 * -- NOT a save-a-pointer-for-later like the diagnostic F-216
-+		 * removed after it panicked on a zero-address FD. Scoped to
-+		 * eth1 only (sacrificial test port). hash_offset >= 0x28
-+		 * guards the window start against underflow (0x28 is the
-+		 * established parse-result-base back-offset, see
-+		 * fman_pcd_cc.c CC_IC_KG_KEY_OFFSET's own comment for the
-+		 * provenance). */
-+		if (vaddr && !strcmp(net_dev->name, "eth1") &&
-+		    hash_offset >= 0x28) {
-+			memcpy(fman_pcd_probe2_buf,
-+			       vaddr + hash_offset - 0x28,
-+			       FMAN_PCD_PROBE2_LEN);
-+			fman_pcd_probe2_valid = true;
-+		}
- 	}
- 
- 	if (likely(fd_format == qm_fd_contig)) {
-@@ -3485,7 +3789,7 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
- 			WARN_ONCE(1, "S/G frames not supported under XDP\n");
- 			sgt = vaddr + qm_fd_get_offset(fd);
- 			dpaa_release_sgt_members(sgt);
--			free_pages((unsigned long)vaddr, 0);
-+			free_pages((unsigned long)vaddr, DPAA_BP_ORDER);
- 			return qman_cb_dqrr_consume;
- 		}
- 		skb = sg_fd_to_skb(priv, fd);
-@@ -3646,6 +3950,27 @@ static int dpaa_open(struct net_device *net_dev)
- 	if (err)
- 		goto phy_init_failed;
- 
-+	/* F-229(force-sgmii-pause): issue #45 -- the GPY115C 1G RJ45
-+	 * links resolved with flow control off and lost carrier under sustained
-+	 * ingress forwarding load. Select manual symmetric 802.3x pause after
-+	 * PHY attach, before enabling traffic. The 10G XGMII ports are untouched.
-+	 */
-+	if (mac_dev->phy_if == PHY_INTERFACE_MODE_SGMII) {
-+		struct ethtool_pauseparam pause = {
-+			.autoneg = 0,
-+			.rx_pause = 1,
-+			.tx_pause = 1,
-+		};
-+
-+		err = phylink_ethtool_set_pauseparam(mac_dev->phylink, &pause);
-+		if (err) {
-+			netif_err(priv, ifup, net_dev,
-+				  "failed to enable symmetric pause: %d\n", err);
-+			phylink_disconnect_phy(mac_dev->phylink);
-+			goto phy_init_failed;
-+		}
-+	}
-+
- 	for (i = 0; i < ARRAY_SIZE(mac_dev->port); i++) {
- 		err = fman_port_enable(mac_dev->port[i]);
- 		if (err)
-@@ -4566,6 +4891,66 @@ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
- }
- EXPORT_SYMBOL_GPL(dpaa_get_tx_fqid);
- 
-+/* F-199 (T-M7-2 S4): allocate a dedicated no-confirm TX FQ on @dev's QMan
-+ * channel for the ASK2 FE hardware offload terminal. The FQ is spliced
-+ * into priv->dpaa_fq_list so it is torn down with the netdev. The nft
-+ * flow-offload REPLACE callback runs on a workqueue WITHOUT RTNL (S4
-+ * board proof, 2026-08-16), so this helper acquires RTNL internally to
-+ * serialize list mutation against netdev teardown. Returns 0 and the
-+ * dynamic FQID in *fqid, or a negative errno. */
-+int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid)
-+{
-+	struct dpaa_priv *priv;
-+	struct dpaa_fq *dpaa_fq;
-+	int ret;
-+
-+	if (!dev || !fqid)
-+		return -EINVAL;
-+
-+	/* Serialize priv->dpaa_fq_list mutation + FQ init against netdev
-+	 * teardown. The caller (nft flow-offload workqueue) does NOT hold
-+	 * RTNL, so take it here; no ASK caller holds it, so no deadlock. */
-+	rtnl_lock();
-+
-+	if (dev->netdev_ops != &dpaa_ops) {
-+		ret = -ENODEV;
-+		goto out_unlock;
-+	}
-+	priv = netdev_priv(dev);
-+
-+	dpaa_fq = devm_kzalloc(dev->dev.parent, sizeof(*dpaa_fq), GFP_KERNEL);
-+	if (!dpaa_fq) {
-+		ret = -ENOMEM;
-+		goto out_unlock;
-+	}
-+
-+	dpaa_fq->fq_type = FQ_TYPE_TX_NO_CONFIRM;
-+	dpaa_fq->fqid = 0;		/* dynamic */
-+	/* Reuse the driver's egress setup so the FQ lands on the FMan TX
-+	 * DC-portal channel with the ERN callback and TO_DCPORTAL flag,
-+	 * exactly like FQ_TYPE_TX; dpaa_fq_init() then applies the
-+	 * no-confirm context_a for FQ_TYPE_TX_NO_CONFIRM. */
-+	dpaa_setup_egress(priv, dpaa_fq, priv->mac_dev->port[TX],
-+			  &dpaa_fq_cbs.egress_ern);
-+	list_add_tail(&dpaa_fq->list, &priv->dpaa_fq_list);
-+
-+	ret = dpaa_fq_init(dpaa_fq, false);
-+	if (ret < 0) {
-+		list_del(&dpaa_fq->list);
-+		devm_kfree(dev->dev.parent, dpaa_fq);
-+		goto out_unlock;
-+	}
-+
-+	*fqid = dpaa_fq->fqid;
-+	netdev_info(dev, "F-199: offload no-confirm TX FQ 0x%x on channel %u\n",
-+		    dpaa_fq->fqid, dpaa_fq->channel);
-+	ret = 0;
-+out_unlock:
-+	rtnl_unlock();
-+	return ret;
-+}
-+EXPORT_SYMBOL_GPL(dpaa_alloc_offload_tx_fq);
-+
- static int __init dpaa_load(void)
- {
- 	int err;
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-index 9afa818e2e4e..af8ed749a16a 100644
+index 9afa818e2e4e..36c518b5ebf2 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-@@ -37,6 +37,7 @@ enum dpaa_fq_type {
- 	FQ_TYPE_TX_CONFIRM,	/* Tx default Conf FQ (actually an Rx FQ) */
- 	FQ_TYPE_TX_CONF_MQ,	/* Tx conf FQs (one for each Tx FQ) */
- 	FQ_TYPE_TX_ERROR,	/* Tx Error FQs (these are actually Rx FQs) */
-+	FQ_TYPE_TX_NO_CONFIRM,	/* F-199: offload TX FQ, no TX-confirm FD */
- };
- 
- struct dpaa_fq {
-@@ -152,7 +153,7 @@ struct dpaa_qmgmt_ops;
- #define DPAA1_XSK_INITIAL_SEED      8192
- #define DPAA1_XSK_REFILL_THRESHOLD  256
- #define DPAA1_XSK_MIN_DEPTH         64
--#define DPAA1_MIN_UMEM_CHUNK        3840
-+#define DPAA1_MIN_UMEM_CHUNK        1792
- /* Phase 3a TX backpressure thresholds (spec sec 5.4 "Strict Tx
-  * backpressure"). At 7 Gbps / 1500 B = 583 Kpps; 1024 in-flight FDs =
-  * ~1.75 ms of buffering at line rate. LOW_WATER at half gives hysteresis
-@@ -209,6 +210,9 @@ u32 hm_vlan_strip_handle;
+@@ -209,6 +209,9 @@ u32 hm_vlan_strip_handle;
  	 * Spec sec 5.6; board patch 0104.
  	 */
  	bool ingress_police_installed;
