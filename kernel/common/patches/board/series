@@ -531,3 +531,5 @@
 # exact-or-wildcard only, out of scope for this pass. Not yet board-tested.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0193-fman-pcd-cc-key-mask-passthrough.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0194-dpaa-ethtool-ntuple-ehash-bridge.patch
