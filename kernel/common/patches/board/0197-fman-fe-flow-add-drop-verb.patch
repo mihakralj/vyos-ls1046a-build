@@ -1,0 +1,64 @@
+From b73a758f85f96e0add3047594e82c6207b08a0c5 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Sun, 6 Sep 2026 19:16:14 +0000
+Subject: [PATCH] =?UTF-8?q?fman:=20fe=5Fflow=20'add=20drop'=20verb=20(F-24?=
+ =?UTF-8?q?8)=20=E2=80=94=20the=20EXIT=20FE=20drop-terminal=20records?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The debugfs fe_flow gains 'add drop <tbl> <keyhex>': the record's ctx
+names the EXIT FE singleton (the DEALLOCATE discard), no FQID and no
+ENQ-singleton requirement. Serves as the drop-emitter's board trigger
+(the ethtool 6.10 CLI refuses 'action -2') and doubles as the
+tc-flower record-emission prototype.
+
+Patch-Name: 0197-fman-fe-flow-add-drop-verb.patch
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 02ba43bc9212..7b78497f0031 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2822,6 +2822,7 @@ static ssize_t fman_pcd_fe_flow_write(struct file *file,
+ 	u8 key[FMAN_EHASH_FLOW_KEY_MAX];
+ 	u8 key_size = 0;
+ 	bool stats = false;	/* F-189(stats-decl) */
++	bool drop = false;	/* F-248: 'add drop' = the EXIT FE terminal */
+ 	int nf, err;
+ 	const char *k;
+ 
+@@ -2887,7 +2888,12 @@ static ssize_t fman_pcd_fe_flow_write(struct file *file,
+ 	/* F-189(fe-flow-stats-parse): optional 'add stats' form arms the
+ 	 * hardware-writeback counters on the inserted entry.
+ 	 */
+-	if (!strncmp(buf, "add stats ", 10)) {
++	if (!strncmp(buf, "add drop ", 9)) {
++		/* F-248 (0196): the drop terminal - the record's ctx names the
++		 * EXIT FE singleton (the DEALLOCATE discard); no FQID. */
++		drop = true;
++		nf = sscanf(buf + 9, "%u %113s", &tbl_idx, keytok);
++	} else if (!strncmp(buf, "add stats ", 10)) {
+ 		stats = true;
+ 		nf = sscanf(buf + 10, "%u %113s %lx", &tbl_idx, keytok, &fqid);
+ 	} else {
+@@ -2922,13 +2928,15 @@ static ssize_t fman_pcd_fe_flow_write(struct file *file,
+ 
+ 	enq_obj = list_first_entry_or_null(&pcd->fe_enq,
+ 					   struct fman_pcd_fe_obj, node);
+-	if (!enq_obj) {
++	if (!drop && !enq_obj) {
+ 		mutex_unlock(&pcd->fe_lock);
+ 		return -ENOENT;	/* fe_enq build first */
+ 	}
+ 
++	/* F-248: the drop records point at the EXIT singleton instead. */
+ 	err = fman_pcd_ehash_add_key_natwrap_dbgfs(t, key, key_size,
+-				     (u32)enq_obj->muram_off, (u32)fqid,
++				     drop ? (u32)pcd->fe_exit_off :
++					    (u32)enq_obj->muram_off, (u32)fqid,
+ 				     stats, NULL, NULL, 0);
+ 
+ 	if (!err) {
