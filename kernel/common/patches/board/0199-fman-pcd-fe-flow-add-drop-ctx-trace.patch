@@ -1,0 +1,46 @@
+From 1a2c3d4e5f6071829384756abcdef0123456789 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Sun, 6 Sep 2026 21:30:00 +0000
+Subject: [PATCH] fman: fe_flow_add drop-ctx live trace (F-251)
+
+The tc-flower hook (0198) inserts an EXIT-FE drop record via
+fman_pcd_fe_flow_add(drop_action=1), but the board shows the delivered
+record still ENQUEUEs instead of discarding (decomp/findings.md #42/43:
+observed ctx=0x1, not the expected EXIT-singleton MURAM offset). The
+debugfs 'add drop' verb (0197) exercises the *same* pcd->fe_exit_off
+value directly and is silicon-proven to discard -- so this traces the
+one code path (0196's rec_ctx ternary inside fman_pcd_fe_flow_add) that
+has never been exercised by a live caller before 0198. One pr_info,
+gated on drop_action, right where rec_ctx is computed: prints
+pcd->fe_exit_off, enq_obj->muram_off, and the resulting rec_ctx at the
+moment the flower path reaches this call, so a board dmesg capture
+during a flower insert tells us directly whether fe_exit_off itself is
+sane here or whether the bug is downstream of this computation.
+
+Patch-Name: 0199-fman-pcd-fe-flow-add-drop-ctx-trace.patch
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 02ba43bc9212..1b2c3d4e5f60 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -5113,6 +5113,15 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 		 * are irrelevant. */
+ 		unsigned long rec_ctx = action->drop_action ?
+ 					pcd->fe_exit_off : (u32)enq_obj->muram_off;
++		/* F-251 (0199): live trace of the drop-ctx computation -- is
++		 * pcd->fe_exit_off actually the sane nonzero MURAM offset the
++		 * debugfs 'add drop' path (0197) observed, at the moment a
++		 * production caller (the tc-flower hook, 0198) reaches here? */
++		if (action->drop_action)
++			pr_info("fman_pcd: F-251 drop-ctx port=%u fe_exit_off=%#lx enq_muram=%#x rec_ctx=%#lx hit_fqid=%u key_size=%u tbl_idx=%u\n",
++				hw_port_id, pcd->fe_exit_off, enq_obj->muram_off,
++				rec_ctx, hit_fqid, action->key_size,
++				action->table_idx);
+ 		err = fman_pcd_ehash_add_key(t, action->key, action->key_size,
+ 						 (u32)rec_ctx, hit_fqid,
+ 						 false /* F-189(genl-stats-false) */,
+--
+2.43.0
