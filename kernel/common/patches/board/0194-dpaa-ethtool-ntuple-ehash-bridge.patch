@@ -1,4 +1,4 @@
-From 4aeafcf7bf87e9abe8944b177c356fb5e0afb472 Mon Sep 17 00:00:00 2001
+From 15736c359fcbcef9284c7830490dcb8a645446ef Mon Sep 17 00:00:00 2001
 From: LS1046A Canonical <canonical@ls1046a-build>
 Date: Sun, 6 Sep 2026 01:29:39 +0000
 Subject: [PATCH] dpaa: ethtool ntuple -> enhanced external-hash bridge
@@ -23,11 +23,37 @@ the bridge onto the enhanced external-hash machine:
 
 Patch-Name: 0194-dpaa-ethtool-ntuple-ehash-bridge.patch
 ---
+ .../net/ethernet/freescale/dpaa/dpaa_eth.h    |  11 +-
  .../ethernet/freescale/dpaa/dpaa_ethtool.c    | 333 ++++++++++--------
  .../net/ethernet/freescale/fman/fman_pcd.c    |  27 +-
  include/linux/fsl/fman_pcd.h                  |  12 +
- 3 files changed, 224 insertions(+), 148 deletions(-)
+ 4 files changed, 230 insertions(+), 153 deletions(-)
 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 1551fa671d4f..9afa818e2e4e 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -212,14 +212,15 @@ u32 hm_vlan_strip_handle;
+ 	/* M3-3b production consumer (patch 0109): ethtool ntuple -> FMan CC
+ 	 * static-tree bridge. cls_rules holds the ETHTOOL_SRXCLSRLINS rules
+ 	 * (struct dpaa_cls_rule, sorted by location); cls_rule_cnt counts
+-	 * them; cls_tree_installed tracks whether a CC tree is currently
+-	 * grafted for this port. Mutated only under rtnl (the rxnfc paths).
+-	 * Spec sec 5.4; the CLI consumer is vyos-1x 'system offload classify'
+-	 * shelling out to ethtool -N.
++	 * them; cls_fe_engaged tracks whether the enhanced external-hash
++	 * machine was armed on the RX port (patch 0194, idempotent via
++	 * fman_pcd_fe_engage; never disengaged - an empty table falls
++	 * through to the port default RX FQ). Mutated only under rtnl
++	 * (the rxnfc paths).
+ 	 */
+ 	struct list_head cls_rules;
+ 	unsigned int cls_rule_cnt;
+-	bool cls_tree_installed;
++	bool cls_fe_engaged;
+ 	/* KeyGen catch-all scheme that routes every RX frame on this port
+ 	 * through the policer profile (next_engine = PLCR). NULL when no
+ 	 * ingress policer is installed. Created/bound in
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 index 893f80d9acc9..95ba0fadec41 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
