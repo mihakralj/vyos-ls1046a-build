@@ -129,3 +129,33 @@ Contingent on Phase 1's CC-tree builder (masks + drop + priority) being real and
 - `specs/fman-keygen-flow-key-spec.md` §6.1.3/§6.1.4 — CC-node capacity math and the `FE_ENTER` root AD format the miss leg targets.
 - `kernel/common/patches/board/0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch`, `0118`, `0121h`, `0121j`, `0121k` — the active patch chain Phase 0 verifies and Phase 1 extends.
 - `kernel/ask/oot-modules/ask/ask_vlan_cc.c`, `kernel/ask/oot-modules/ask/ask_flow_offload.c` — the two existing CC-tree/flow-offload callers this plan's new code sits alongside.
+
+## 6. Phase 2 — static ACL (tc-flower/nft) on the ehash substrate: drop design (2026-09-06)
+
+The governing facts, all verified this session: the RM-style CC-tree has
+no walker; the enhanced external-hash machine is the substrate (exact
+full-key records, per-port tables, proven gating/isolation); the record's
+HIT action = the FE-VM opcode script (flags-driven OPC/PARAM offsets,
+the ENQUEUE_PKT/INSERT_L2/VLAN handlers decoded). The drop action
+therefore = a record whose FE chain ends in the **EXIT FE object**
+(the 4-byte discard terminal; the FE pool's sizes: EXT_HASH 28 / HM 16 /
+ENQ 16 / TRANSITION 8 / EXIT 4) — the vendor's per-flow MUX→ENQ context
+pattern extended to a MUX→EXIT discard chain. The descriptor-level
+miss-side DROP exists (miss_action_type 3 → PRE_BMI_DISCARD_FRAME) but
+that drops the MISS, not the match; the ACL needs the HIT-side discard.
+
+Design increments:
+1. **Emitter:** `fman_pcd_fe_flow_add()` gains a drop terminal — the
+   action flags select the EXIT-chain record emission (the EXIT FE
+   object + the record's opcode script routing to it) instead of the
+   ENQUEUE_PKT terminal. The errata A006675/SW006 caution applies to
+   the CC-leaf ADs, not this FE-record path; the record format
+   (key@8, flags, OPC/PARAM, the ctx pointer) is unchanged.
+2. **Hook:** the tc-flower/nft netdev-hook translates the exact-match
+   matchall entries into the drop-terminal records via the same
+   `fman_pcd_fe_flow_add()` path the bridge uses; masks/prefixes fail
+   closed to software exactly as the ntuple bridge does.
+3. **Verification:** the drop-terminal record for a known tuple; the
+   matched flow must vanish (zero delivery, the error-free discard),
+   the mismatched flow must pass — the stats-flagged counters and the
+   FQID differential are the instruments.
