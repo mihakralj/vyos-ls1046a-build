@@ -1,4 +1,4 @@
-From 4f0b8caf192e60506a35a01c606fc7a549860351 Mon Sep 17 00:00:00 2001
+From 284502768f3ec86038571c21f71d74dc78d7a4f0 Mon Sep 17 00:00:00 2001
 From: LS1046A Canonical <canonical@ls1046a-build>
 Date: Sun, 6 Sep 2026 19:54:49 +0000
 Subject: [PATCH] dpaa: tc-flower static-ACL hook onto the ehash records
@@ -18,12 +18,12 @@ software (-EOPNOTSUPP), matching the bridge's exact-match boundary.
 
 Patch-Name: 0198-dpaa-tc-flower-acl-hook.patch
 ---
- .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 230 +++++++++++++++++-
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 234 +++++++++++++++++-
  .../net/ethernet/freescale/dpaa/dpaa_eth.h    |   3 +
- 2 files changed, 223 insertions(+), 10 deletions(-)
+ 2 files changed, 227 insertions(+), 10 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 5af8000b2524..2371f483ced3 100644
+index 5af8000b2524..f086c296d1c3 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 @@ -17,6 +17,7 @@
@@ -34,7 +34,18 @@ index 5af8000b2524..2371f483ced3 100644
  #include <linux/platform_device.h>
  #include <linux/udp.h>
  #include <linux/tcp.h>
-@@ -638,26 +639,235 @@ static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
+@@ -213,6 +214,10 @@ static int dpaa_netdev_init(struct net_device *net_dev,
+ 	struct dpaa_priv *priv = netdev_priv(net_dev);
+ 	struct device *dev = net_dev->dev.parent;
+ 	struct mac_device *mac_dev = priv->mac_dev;
++
++	/* 0198: the tc-flower static-ACL rule list (the DESTROY lookup). */
++	spin_lock_init(&priv->flower_lock);
++	INIT_LIST_HEAD(&priv->cls_flowers);
+ 	struct dpaa_percpu_priv *percpu_priv;
+ 	const u8 *mac_addr;
+ 	int i, err;
+@@ -638,26 +643,235 @@ static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
  	return 0;
  }
  
