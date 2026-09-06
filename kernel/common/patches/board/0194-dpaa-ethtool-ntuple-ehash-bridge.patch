@@ -1,6 +1,6 @@
-From 7a21704a615ce265792ab02d4fbfe28135ec8a17 Mon Sep 17 00:00:00 2001
+From 7d597ead139919d6daab894d389dcefce1fb2f92 Mon Sep 17 00:00:00 2001
 From: LS1046A Canonical <canonical@ls1046a-build>
-Date: Sun, 6 Sep 2026 00:16:38 +0000
+Date: Sun, 6 Sep 2026 00:45:22 +0000
 Subject: [PATCH] dpaa: ethtool ntuple -> enhanced external-hash bridge (F-241)
 
 The RM-style CC match-table walker does not exist in the 210.10.1
@@ -26,34 +26,17 @@ acceleration already uses:
 
 Patch-Name: 0194-dpaa-ethtool-ntuple-ehash-bridge.patch
 ---
- .../net/ethernet/freescale/dpaa/dpaa_eth.h    |  14 +-
- .../ethernet/freescale/dpaa/dpaa_ethtool.c    | 299 +++++++++---------
- .../net/ethernet/freescale/fman/fman_pcd.c    |  71 ++++-
+ .../net/ethernet/freescale/dpaa/dpaa_eth.h    |  11 +-
+ .../ethernet/freescale/dpaa/dpaa_ethtool.c    | 292 +++++++++---------
+ .../net/ethernet/freescale/fman/fman_pcd.c    |   6 +-
  include/linux/fsl/fman_pcd.h                  |   6 +
- 4 files changed, 237 insertions(+), 153 deletions(-)
+ 4 files changed, 163 insertions(+), 152 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-index 1551fa671d4f..c29b64331a1c 100644
+index 1551fa671d4f..9afa818e2e4e 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-@@ -37,6 +37,7 @@ enum dpaa_fq_type {
- 	FQ_TYPE_TX_CONFIRM,	/* Tx default Conf FQ (actually an Rx FQ) */
- 	FQ_TYPE_TX_CONF_MQ,	/* Tx conf FQs (one for each Tx FQ) */
- 	FQ_TYPE_TX_ERROR,	/* Tx Error FQs (these are actually Rx FQs) */
-+	FQ_TYPE_TX_NO_CONFIRM,	/* F-199: offload TX FQ, no TX-confirm FD */
- };
- 
- struct dpaa_fq {
-@@ -152,7 +153,7 @@ struct dpaa_qmgmt_ops;
- #define DPAA1_XSK_INITIAL_SEED      8192
- #define DPAA1_XSK_REFILL_THRESHOLD  256
- #define DPAA1_XSK_MIN_DEPTH         64
--#define DPAA1_MIN_UMEM_CHUNK        3840
-+#define DPAA1_MIN_UMEM_CHUNK        1792
- /* Phase 3a TX backpressure thresholds (spec sec 5.4 "Strict Tx
-  * backpressure"). At 7 Gbps / 1500 B = 583 Kpps; 1024 in-flight FDs =
-  * ~1.75 ms of buffering at line rate. LOW_WATER at half gives hysteresis
-@@ -212,14 +213,15 @@ u32 hm_vlan_strip_handle;
+@@ -212,14 +212,15 @@ u32 hm_vlan_strip_handle;
  	/* M3-3b production consumer (patch 0109): ethtool ntuple -> FMan CC
  	 * static-tree bridge. cls_rules holds the ETHTOOL_SRXCLSRLINS rules
  	 * (struct dpaa_cls_rule, sorted by location); cls_rule_cnt counts
@@ -75,7 +58,7 @@ index 1551fa671d4f..c29b64331a1c 100644
  	 * through the policer profile (next_engine = PLCR). NULL when no
  	 * ingress policer is installed. Created/bound in
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
-index 893f80d9acc9..4514e394944c 100644
+index 893f80d9acc9..e704350e5291 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 @@ -539,38 +539,32 @@ static int dpaa_set_coalesce(struct net_device *dev,
@@ -189,7 +172,7 @@ index 893f80d9acc9..4514e394944c 100644
  
  	if (fs->location >= FMAN_CC_MAX_STATIC_KEYS)
  		return -EINVAL;
-@@ -647,147 +639,157 @@ static int dpaa_cls_validate(struct dpaa_priv *priv,
+@@ -647,147 +639,150 @@ static int dpaa_cls_validate(struct dpaa_priv *priv,
  	return 0;
  }
  
@@ -293,7 +276,6 @@ index 893f80d9acc9..4514e394944c 100644
  {
 +	struct fman_pcd_fe_flow_action action;
  	struct dpaa_cls_rule *r, *pos, *replaced = NULL;
-+	bool replaced_removed = false;
 +	struct fman *fm;
 +	u8 port_id;
 +	u32 fqid;
@@ -348,7 +330,6 @@ index 893f80d9acc9..4514e394944c 100644
 +		if (!err) {
 +			list_del(&replaced->node);
 +			priv->cls_rule_cnt--;
-+			replaced_removed = true;
 +		}
 +		/* On del failure, fall through: the add below may still succeed
 +		 * (duplicate-key chain); do not roll the list back for that case.
@@ -370,22 +351,17 @@ index 893f80d9acc9..4514e394944c 100644
 -		priv->cls_rule_cnt--;
 -		kfree(r);
 -		if (replaced) {
-+		if (replaced_removed) {
-+			/* roll the replaced rule back into the list + silicon, with
-+			 * ITS OWN queue FQID (not the new rule's) */
++		if (replaced && !dpaa_cls_find(priv, fs->location)) {
++			/* roll the replaced rule back into the list + silicon */
 +			struct fman_pcd_fe_flow_action ra;
-+			u32 rfqid;
 +
-+			if (!dpaa_cls_queue_to_fqid(priv,
-+						    replaced->fs.ring_cookie, &rfqid)) {
-+				memset(&ra, 0, sizeof(ra));
-+				memcpy(ra.key, replaced->key, sizeof(replaced->key));
-+				ra.key_size = sizeof(replaced->key);
-+				ra.rx_fqid = rfqid;
-+				if (fman_pcd_fe_flow_add(fm, port_id, &ra))
-+					netif_err(priv, drv, priv->net_dev,
-+						  "classify rollback re-add failed\n");
-+			}
++			memset(&ra, 0, sizeof(ra));
++			memcpy(ra.key, replaced->key, sizeof(replaced->key));
++			ra.key_size = sizeof(replaced->key);
++			ra.rx_fqid = fqid;
++			if (fman_pcd_fe_flow_add(fm, port_id, &ra))
++				netif_err(priv, drv, priv->net_dev,
++					  "classify rollback re-add failed\n");
  			list_for_each_entry(pos, &priv->cls_rules, node)
  				if (pos->fs.location > replaced->fs.location)
  					break;
@@ -400,7 +376,7 @@ index 893f80d9acc9..4514e394944c 100644
  	}
  
 -	kfree(replaced);
-+	if (replaced_removed)
++	if (replaced && !list_empty(&replaced->node))
 +		kfree(replaced);
 +
 +	/* Insert sorted by location (= priority, lowest first). */
@@ -440,7 +416,7 @@ index 893f80d9acc9..4514e394944c 100644
  }
  
  void dpaa_cls_flush(struct net_device *net_dev)
-@@ -795,19 +797,24 @@ void dpaa_cls_flush(struct net_device *net_dev)
+@@ -795,19 +790,24 @@ void dpaa_cls_flush(struct net_device *net_dev)
  	struct dpaa_priv *priv = netdev_priv(net_dev);
  	struct dpaa_cls_rule *r, *tmp;
  
@@ -477,86 +453,10 @@ index 893f80d9acc9..4514e394944c 100644
  
  static int dpaa_get_rxnfc(struct net_device *net_dev,
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index c73dd501e861..24ea2e659fa7 100644
+index 07fb8b89d250..91f2af6eeec6 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -247,6 +247,26 @@ struct fman_pcd {
- u64 fman_pcd_kg_hash;
- unsigned int fman_pcd_hash_off;
- void *fman_pcd_ic_vaddr;
-+
-+/*
-+ * T-M6-8 VLAN-v6 CC-comparator-input dig (F-239). Synchronous, bounded
-+ * RX-path capture ONLY -- deliberately NOT a save-a-pointer-for-later
-+ * like the F-072/F-170 diagnostic F-216 removed after it panicked on a
-+ * zero-address FD (see the F-216 comment in dpaa_eth.c). The capture
-+ * site (dpaa_eth.c) memcpy()s a fixed window into this buffer
-+ * synchronously, inside the RX callback, while the frame's buffer is
-+ * known-valid (the mainline RX-hash read immediately above it already
-+ * dereferenced the same vaddr successfully). Scoped to eth1 only
-+ * (sacrificial test port, not production eth3/eth4). Window starts at
-+ * parse-result base (vaddr+hash_offset-0x28, the offset F-213 already
-+ * established as safe) and covers FMAN_PCD_PROBE2_LEN bytes forward --
-+ * comfortably inside the 4K RX buffer page. Purpose: does the CC-tree's
-+ * KeyGen-extracted GEC composite land anywhere in the host-visible
-+ * frame annotation at all?
-+ */
-+#define FMAN_PCD_PROBE2_LEN 176
-+u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];
-+bool fman_pcd_probe2_valid;
- static struct dentry *fman_pcd_debugfs_root;
- static DEFINE_MUTEX(fman_pcd_debugfs_lock);
- static int fman_pcd_debugfs_refcount;
-@@ -872,6 +892,48 @@ static int fman_pcd_hash_probe_show(struct seq_file *m, void *v)
- }
- DEFINE_SHOW_ATTRIBUTE(fman_pcd_hash_probe);
- 
-+/* T-M6-8 VLAN-v6 (F-239): dump the raw parse-result-base window
-+ * captured on eth1. See the fman_pcd_probe2_buf comment above for the
-+ * capture-site safety rationale. Offsets are printed relative to
-+ * parse-result base (0), so the hash field (known to live at
-+ * parse-result+0x28) and the CC comparator's IC+0x50 key field
-+ * (CC_IC_KG_KEY_OFFSET in fman_pcd_cc.c) both land at a fixed,
-+ * easy-to-spot offset in this listing if they're present at all in
-+ * the host-visible frame annotation.
-+ */
-+static int fman_pcd_probe2_show(struct seq_file *s, void *unused)
-+{
-+	int i;
-+
-+	if (!fman_pcd_probe2_valid) {
-+		seq_puts(s, "idle (no eth1 frame captured)\n");
-+		return 0;
-+	}
-+	seq_puts(s, "parse-result-base window, offsets relative to +0:\n");
-+	for (i = 0; i < FMAN_PCD_PROBE2_LEN; i += 16) {
-+		int j, n = min(16, FMAN_PCD_PROBE2_LEN - i);
-+
-+		seq_printf(s, "%+04d:", i);
-+		for (j = 0; j < n; j++)
-+			seq_printf(s, " %02x", fman_pcd_probe2_buf[i + j]);
-+		seq_puts(s, "\n");
-+	}
-+	return 0;
-+}
-+
-+static int fman_pcd_probe2_open(struct inode *inode, struct file *file)
-+{
-+	return single_open(file, fman_pcd_probe2_show, inode->i_private);
-+}
-+
-+static const struct file_operations fman_pcd_probe2_fops = {
-+	.owner		= THIS_MODULE,
-+	.open		= fman_pcd_probe2_open,
-+	.read		= seq_read,
-+	.llseek		= seq_lseek,
-+	.release	= single_release,
-+};
-+
- 
- static int fman_pcd_ic_probe_show(struct seq_file *s, void *unused)
- {
-@@ -4999,7 +5061,11 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+@@ -4999,7 +4999,11 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
  		 * offset via action->enq_off -- an invalid FQID). Resolve it
  		 * from the port, same source the miss path uses.
  		 */
@@ -569,18 +469,8 @@ index c73dd501e861..24ea2e659fa7 100644
  		const u8 *l2_dst = action->tx_fqid ? action->next_hop_mac : NULL;
  		const u8 *l2_src = action->tx_fqid ? action->egress_mac : NULL;
  		u16 l2_eth = action->tx_fqid ? action->eth_type : 0;
-@@ -5424,6 +5490,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
- 		if (!debugfs_create_file("hash_probe", 0444, pcd->debugfs_dir, pcd,
- 				       &fman_pcd_hash_probe_fops))
- 			pr_warn("%s: error creating hash_probe\n", __func__);
-+				debugfs_create_file("probe2", 0444,
-+						    pcd->debugfs_dir, pcd,
-+						    &fman_pcd_probe2_fops);
- 				debugfs_create_file("ic_probe", 0444,
- 						    pcd->debugfs_dir, pcd,
- 						    &fman_pcd_ic_probe_fops);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 7f3cc7ff50cd..6d57db0b392b 100644
+index ee2130fa344f..6a9e0177753c 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
 @@ -409,6 +409,12 @@ struct fman_pcd_fe_flow_action {
