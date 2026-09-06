@@ -1,8 +1,8 @@
-From 15736c359fcbcef9284c7830490dcb8a645446ef Mon Sep 17 00:00:00 2001
+From 59be753b26a336c58bd0f0c34e5135ffe210325a Mon Sep 17 00:00:00 2001
 From: LS1046A Canonical <canonical@ls1046a-build>
-Date: Sun, 6 Sep 2026 01:29:39 +0000
+Date: Sun, 6 Sep 2026 02:33:22 +0000
 Subject: [PATCH] dpaa: ethtool ntuple -> enhanced external-hash bridge
- (F-241/F-242)
+ (F-241/F-242/F-243)
 
 The RM-style CC match-table walker does not exist in the 210.10.1
 microcode (decomp/findings.md 2026-09-05 entries 10-16). Re-architect
@@ -13,21 +13,20 @@ the bridge onto the enhanced external-hash machine:
   default byte-identical for ask.ko.
 - fman_pcd_fe_ehash_keysize() (F-242): expose the port table's key size
   so the bridge builds matching record keys: 14 = single-lane 5-tuple,
-  46 = dual-lane family format (ask_fe_build_key_dual-identical);
-  anything else fails closed (-EOPNOTSUPP).
-- dpaa_cls_*: exact-key records (PORT_ID=0x00|5-tuple or the dual-lane
-  layout), ENQUEUE_PKT to the rule's queue FQID, fe_engage once per
-  port (idempotent, shared with ask.ko), per-key fe_flow_del,
-  exact-only validation, replace-path with rollback.
-  cls_tree_installed -> cls_fe_engaged.
+  46 = dual-lane family format; anything else fails closed.
+- dpaa_cls_*: exact-key records, ENQUEUE_PKT to the rule's queue FQID,
+  fe_engage once per port, per-key fe_flow_del, exact-only validation,
+  replace-path with rollback. cls_tree_installed -> cls_fe_engaged.
+- F-243: the dual-lane family byte = 0x40 (live-captured silicon v4
+  family = L3 byte 0 & 0xF0), not 0x00.
 
 Patch-Name: 0194-dpaa-ethtool-ntuple-ehash-bridge.patch
 ---
  .../net/ethernet/freescale/dpaa/dpaa_eth.h    |  11 +-
- .../ethernet/freescale/dpaa/dpaa_ethtool.c    | 333 ++++++++++--------
+ .../ethernet/freescale/dpaa/dpaa_ethtool.c    | 334 ++++++++++--------
  .../net/ethernet/freescale/fman/fman_pcd.c    |  27 +-
  include/linux/fsl/fman_pcd.h                  |  12 +
- 4 files changed, 230 insertions(+), 153 deletions(-)
+ 4 files changed, 231 insertions(+), 153 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 index 1551fa671d4f..9afa818e2e4e 100644
@@ -55,7 +54,7 @@ index 1551fa671d4f..9afa818e2e4e 100644
  	 * through the policer profile (next_engine = PLCR). NULL when no
  	 * ingress policer is installed. Created/bound in
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
-index 893f80d9acc9..95ba0fadec41 100644
+index 893f80d9acc9..505fa4e4c816 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 @@ -539,47 +539,45 @@ static int dpaa_set_coalesce(struct net_device *dev,
@@ -174,7 +173,7 @@ index 893f80d9acc9..95ba0fadec41 100644
  
  	if (fs->location >= FMAN_CC_MAX_STATIC_KEYS)
  		return -EINVAL;
-@@ -647,147 +642,186 @@ static int dpaa_cls_validate(struct dpaa_priv *priv,
+@@ -647,147 +642,187 @@ static int dpaa_cls_validate(struct dpaa_priv *priv,
  	return 0;
  }
  
@@ -208,6 +207,7 @@ index 893f80d9acc9..95ba0fadec41 100644
 +		memcpy(key + 12, &h->pdst, 2);
 +	} else if (key_size == DPAA_CLS_KEY_MAX) {
 +		memset(key, 0, DPAA_CLS_KEY_MAX);
++		key[0] = 0x40;	/* F-243: silicon v4 family byte (L3 byte 0 & 0xF0) */
 +		memcpy(key + 1, &h->ip4src, 4);
 +		memcpy(key + 5, &h->ip4dst, 4);
 +		key[41] = proto;
@@ -455,7 +455,7 @@ index 893f80d9acc9..95ba0fadec41 100644
  }
  
  void dpaa_cls_flush(struct net_device *net_dev)
-@@ -795,19 +829,24 @@ void dpaa_cls_flush(struct net_device *net_dev)
+@@ -795,19 +830,24 @@ void dpaa_cls_flush(struct net_device *net_dev)
  	struct dpaa_priv *priv = netdev_priv(net_dev);
  	struct dpaa_cls_rule *r, *tmp;
  
