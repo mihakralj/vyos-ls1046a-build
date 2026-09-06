@@ -537,3 +537,5 @@
 0195-fman-plain-v6-cc-key-40.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0196-dpaa-ntuple-drop-terminal.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0197-fman-fe-flow-add-drop-verb.patch
