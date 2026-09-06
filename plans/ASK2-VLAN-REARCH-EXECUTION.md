@@ -32,36 +32,42 @@ machine, now fully live-verified (family bytes 0x40/0x60, dual-lane
 The classification side is solved. The VLAN edit on an ehash HIT has
 two live options:
 
-### Fork A — FE-VM VLAN opcodes in the record script
+### Fork A — FE-VM VLAN opcodes in the record script — **RETIRED (2026-09-06 correction)**
 
 Record opcode chain = `VLAN_STRIP/VLAN_INSERT + ENQUEUE_PKT(rule FQID)`.
-Immediate, no new microcode, reuses the shipped interpreter.
+**This fork is closed, not merely risky.** The oracle was already run
+(`decomp/fe-action-interpreter.md`): E-VLAN-1/E-VLAN-2 patched the
+`[0xd0b8]` epilogue guard both directions via qef-patch→kexec — both
+NEGATIVE, the management-index hypothesis FALSIFIED. The ~20-packet
+freeze on the FE-VM VLAN opcode path is unrooted, and the project
+retired that path architecturally on 2026-08-26, pivoting production
+VLAN to the CC-leaf→HMTD (silicon-validated R4c). `ask_fe_flow_insert()`
+rejects VLAN intent so the interpreter path cannot be re-entered.
+Do not resurrect it.
 
-**Known risk (the gate for this fork):** the 2026-08-25 disassembly
-found the VLAN handlers (0x12/0x42 group) drive the per-task management
-index (`IC[0xd0b8]`) epilogue WITHOUT the conditional reset the routed
-path takes — the candidate root cause of the ~20-packet freeze
-(`decomp/fe-action-interpreter.md`; the same family as the blueprint's
-"5+tnums leak"). The deciding oracle, already designed there: read
-`IC[0xd0b8]` during a frozen VLAN flow vs a sustaining routed flow via
-the IC-context probe (pinned-at-ceiling = exhaustion confirmed), then
-the qef-patch -> kexec experiment (make the reset unconditional) to
-prove it.
-
-### Fork B — OH-port + HMTD (the blueprint's Option D)
+### Fork B — OH-port + HMTD (the blueprint's Option D, deferred)
 
 Classification in the ehash; the HIT enqueues to the internal offline
 port (patch 0175/0176, unfinished); the OH port runs the HMTD edit
-with PAHM and re-enqueues to the wire. Matches the NXP ASK 1.x
-pattern and sidesteps the FE-VM VLAN opcodes entirely — but requires
-finishing the OH-port PCD bringup, a substantially larger workstream.
+with PAHM and re-enqueues to the wire. The genuine per-flow VLAN
+(multi-VLAN-per-port correct). A substantially larger workstream
+(the OH-port PCD bringup) — scheduled after the Option A-v6 parity
+work, not before.
 
-**Recommendation:** run the Fork-A oracle FIRST (one board session,
-no code changes: the IC probe + the existing VLAN flow on eth3.6/8).
-If the [0xd0b8] exhaustion confirms, the fix is a microcode patch
-(the reset unguarding), not a host-side change — and Fork A becomes
-the production path. If the freeze is something else, escalate to
-Fork B.
+### Fork C — Option A-v6 CC-tree parity (RECOMMENDED NOW)
+
+The blueprint's own choice, re-validated by the session: a dedicated
+CC-tree for the v6 VLAN keys (the 40-byte layout per RM §5.12) with
+the CC-leaf→HMTD action — **the exact mechanism the v4 VLAN ships
+today**, uniform application included. It delivers v6 parity with the
+current v4 behavior (single-VLAN-per-port correct; the multi-VLAN
+caveat is identical to the v4 path's today), at the lowest risk, with
+zero dependence on the falsified FE-VM path or the unfinished OH port.
+The blueprint's four steps apply as written (ask_vlan_cc v6 key fill,
+cc_pack_key_v6 40B, the KG scheme, the gate opening).
+
+**Recommendation:** Fork C now (the v6 parity), Fork B later (the
+genuine per-flow VLAN).
 
 ## 3. Host-side implementation (Fork A, after the oracle)
 
