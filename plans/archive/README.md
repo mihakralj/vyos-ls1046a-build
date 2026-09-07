@@ -8,12 +8,7 @@ Historical design and forensic documents preserved for bisect/audit purposes. Th
 2. They document why we chose the path we are on (the alternatives we ruled out).
 3. They are reachable from older Qdrant memory entries that pre-date the archive move; preserving the filenames keeps those memory entries valid.
 
-**Redirect-note policy (2026-07-19, user decision):** archived docs do **not**
-keep a redirect stub at their old `plans/` path — `plans/` holds live documents
-only. Instead each archived doc has a sibling `<name>.archive-note.md` here
-recording where the content went and which qdrant-cited old path it replaces.
-Old `plans/<name>.md` paths cited in pre-2026-07-19 memory entries resolve by
-looking up `<name>.md` (or `<name>.md.archive-note.md`) in this directory.
+**Redirect-note policy (2026-07-19, user decision):** archived docs do **not** keep a redirect stub at their old `plans/` path — `plans/` holds live documents only. Instead each archived doc has a sibling `<name>.archive-note.md` here recording where the content went and which qdrant-cited old path it replaces. Old `plans/<name>.md` paths cited in pre-2026-07-19 memory entries resolve by looking up `<name>.md` (or `<name>.md.archive-note.md`) in this directory.
 
 For current state, see (in order of authority):
 

@@ -1,8 +1,6 @@
 # ASK / ASK2 Documentation Hub → ARCHIVED
 
-> **ARCHIVED 2026-07-19** — Hub role superseded by the single authoritative execution plan
-> [`plans/ASK2-MASTER-PLAN.md`](../ASK2-MASTER-PLAN.md) (v1.0.0) and the architecture index
-> `specs/ask2-rewrite-spec.md` (v1.10). Hub maintenance rules moved to `plans/archive/README.md`.
+> **ARCHIVED 2026-07-19** — Hub role superseded by the single authoritative execution plan [`plans/ASK2-MASTER-PLAN.md`](../ASK2-MASTER-PLAN.md) (v1.0.0) and the architecture index `specs/ask2-rewrite-spec.md` (v1.10). Hub maintenance rules moved to `plans/archive/README.md`.
 >
 > Original content preserved verbatim at [`plans/archive/ASK-PLANS.md`](ASK-PLANS.md).
 
