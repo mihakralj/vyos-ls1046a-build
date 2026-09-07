@@ -194,7 +194,9 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 		tpid = 0;
 	}
 
-	rc = fman_hm_vlan_route_get(fm, port_id, do_pop, do_push, vid, tpid, pcp,
+	rc = fman_hm_vlan_route_get(fm, port_id, do_pop, do_push,
+				    key->l3_proto == ASK_FLOW_L3_IPV6,
+				    vid, tpid, pcp,
 				    key->egress_mac, key->next_hop_mac,
 				    tx_fqid, &hm_handle);
 	if (rc)
