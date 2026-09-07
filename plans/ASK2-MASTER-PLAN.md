@@ -1585,7 +1585,7 @@ record it does not own.
 | IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | **unified dual-lane 46-byte key on ONE match-all AC_CC scheme** (`F-224`/`F-225`/`F-226`), `UPDATE_HOPLIMIT(0x29)` + L2/TX chain, per-port table | **DONE — silicon-passed 2026-08-19/21, shipped in release `2026.08.22-0031-rolling`.** The earlier slot-based LCV two-scheme approach (T-M6-1 §4.6, F-205/210/211/212) was proven design-invalid for transit and abandoned; the dual-lane key superseded it. |
 | NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | bit-fused in-place rewrites between `UPDATE_TTL`/`UPDATE_HOPLIMIT` and `INSERT_L2_HDR` (ports `0x33`, v4 L3 `0x27`=`UPDATE_TTL\|SIP\|DIP`, v6 L3 `0x2f`=`UPDATE_HOPLIMIT\|SIP\|DIP`); silicon auto-recomputes IP+L4 checksums | **DONE — SHIPPING default-on (2026-08-22/23).** F-230 bit-fused FE-VM emitter landed (`8cfb0af5`), armed behind a gate (`55dd82b6`), then productized default-on after silicon pass: nat44 (`625d0d2c`, T-M6-7.7) and nat66 (`9598799f`). S0 record readback + S1 SNAT + S2 DNAT wire-verified; S3 masquerade TCP `-P4` ~7.1–7.3 Gbit/s 0-retr + UDP 0-loss. NAT is AUTOMATIC whenever `offload ipv4`/`offload ipv6` is engaged (no separate CLI knob); `nat44_offload`/`nat66_offload` are default-on diagnostic escape hatches; eth0 never NAT-offloaded. NAT46/NAT64 NOT offloadable — always SW fallback (same-family in-place rewrite only; no family-conversion opcode). `get-info` advertises `ASK_CAP_IPV4\|IPV6\|NAT\|PAT`. |
 | VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | per-port CC key → combined VLAN-edit + L2 rewrite + IPv4-forward HMTD → per-egress no-confirm TX FQ; CC miss → FE_ENTER ehash for routed/NAT coexistence | **DONE — SILICON-VALIDATED end-to-end (2026-08-26, image 0713, commit `36bf83de`); ships default-OFF; merge-ready.** The retired inline FE-VM F-233/F-234 path froze after 21 frames; the replacement runs tag edits in the separate HM engine. R4c-2/R4c-3 validated the datapath/lifecycle; `36bf83de` fixed vif-delete teardown (detach/drain CC before HMTD free). R5b PASSED: no-wrong-forward/zero-tag-leak, bidirectional, coexistence, PCP/DEI (`p 0`, TPID 0x8100), MTU sweep 100–1472 B, 100× churn (ErrFD 0). Gate-off regression PASSED: routed ~11.6G / NAT44 ~11.7G, `vlan_cc_activity=0`. Scope: IPv4, one 802.1Q tag, non-eth0; 802.1ad/QinQ/stacked/IPv6 VLAN fall back to software. `ASK_CAP_VLAN` advertised only while armed. **Per-port CLI landed 2026-08-27 (`vyos-1x-044`):** `set interfaces ethernet ethN offload vlan` → `vyos-offload-ask family <mask> <vlan>` → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]` (mirrors the family-mask model; the `ask.vlan_offload` module param stays as an OR'd global override). Remaining is non-silicon: `dpaa1`→`main` merge + default-on decision. |
-| IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) |
+| IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) — sequencing plan in `plans/ASK2-IPSEC-OFFLOAD-PLAN.md` (DRAFT, not started) |
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
 | IPv4/IPv6 multicast | `cdx_multicast4/6_cc`; MC4/MC6 FCI | switchdev MDB / kernel mroute | group key + bounded replication FQ/egress set | not implemented |
 | PPPoE | `cdx_pppoe_cc`; PPPoE FCI; `cdx_sp.xml` | PPPoE netdev + normal flowtable after parser recognition | soft-parser sequence exposes inner IP; normal route/NAT/VLAN intent follows | source found; loader/compiler gate open |
@@ -2023,6 +2023,11 @@ own PCD objects and prove readback.
 
 ##### Phase M6-D — IPsec through XFRM + CAAM
 
+See `plans/ASK2-IPSEC-OFFLOAD-PLAN.md` for the full sequencing (DRAFT,
+2026-09-06, not started): a Tier 1 (CAAM crypto acceleration under the
+existing software XFRM datapath, config-only) / Tier 2 (this phase's full
+FMan→CAAM→FMan fast path) split, with a measurement gate between them.
+
 - [ ] **T-M6-4 — IPsec landing series.** Replace the `ask_xfrm_state_add()`
   `-EOPNOTSUPP` stub with XFRM-owned SA objects: add/delete/update/lifetime,
   transport/tunnel mode, ESN/anti-replay, NAT-T, inbound/outbound direction,
@@ -2398,7 +2403,7 @@ open defects.
   + `10.99.1.15`; DUT eth3→route/offload→eth4; direct-DAC HELGA `Ethernet 4`
   `10.99.2.16`. heidi route `10.99.2.0/24 via 10.99.1.185`; HELGA return route
   `10.99.1.0/24 via 10.99.2.185`. Use iperf2 `--full-duplex -P 8`.
-- **Historical harness:** `plans/TRAFFIC-HARNESS.md` describes the old LXC/
+- **Historical harness:** `plans/archive/TRAFFIC-HARNESS.md` describes the old LXC/
   third-board topology; retain for history, not current performance runs.
 - **MTU contract:** order-1 F-203 RX buffers; clamp ASK to 1280–7500
   inclusive (hard calculated ceiling 7530; MTU 8000 requires order-2 and is not
@@ -2429,7 +2434,6 @@ ASK2 plan documents — extend this plan or the owning reference.
 | `plans/NXP-106-DEEP-DIVE-PLAN.md` | Vendor-stack oracle (Phase A `t_ExtHashFe` decode → Phase C gap list) |
 | `specs/reference/nxp-ask-fmc/` | Literal vendor FMC/NetPDL oracle (`cdx_sp.xml`, `cdx_pcd.xml`, cfg variants) from `we-are-mono/ASK@fe36f30`; reference only, never runtime config |
 | `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Current heidi→DUT `.185`→HELGA throughput harness, SW/HW mode proof, MTU 1280–2500 operation |
-| `plans/TRAFFIC-HARNESS.md` | Historical LXC/third-board harness; not the current performance topology |
 | `plans/TF-2026-07-18-001-function-inventory.md` | Stub/type inventory behind §4 task IDs |
 | `plans/ZC-RX-SCOPE.md` | M4 follow-up scope |
 | `plans/ASK-ISO-BUILD-AND-INSTALL.md` | Operator build/install how-to |

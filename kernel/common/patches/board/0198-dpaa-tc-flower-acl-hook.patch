@@ -1,0 +1,307 @@
+From 284502768f3ec86038571c21f71d74dc78d7a4f0 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Sun, 6 Sep 2026 19:54:49 +0000
+Subject: [PATCH] dpaa: tc-flower static-ACL hook onto the ehash records
+ (F-249)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The ndo_setup_tc block callback gains the TC_SETUP_CLSFLOWER dispatch:
+exact-match flower filters (the basic eth-type/L4-proto, the fully
+masked v4/v6 addresses and L4 ports) with the single DROP action become
+ehash records via fman_pcd_fe_flow_add(drop_action=1) — the dual-lane
+family key (0x40/0x60) sized to the port table, the per-port table, the
+EXIT FE terminal. The per-netdev flower list tracks the cookies for the
+DESTROY (the per-key flow_del). Everything else fails closed to
+software (-EOPNOTSUPP), matching the bridge's exact-match boundary.
+
+Patch-Name: 0198-dpaa-tc-flower-acl-hook.patch
+---
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 234 +++++++++++++++++-
+ .../net/ethernet/freescale/dpaa/dpaa_eth.h    |   3 +
+ 2 files changed, 227 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 5af8000b2524..f086c296d1c3 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -17,6 +17,7 @@
+ #include <linux/icmp.h>
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
++#include <net/ipv6.h>
+ #include <linux/platform_device.h>
+ #include <linux/udp.h>
+ #include <linux/tcp.h>
+@@ -213,6 +214,10 @@ static int dpaa_netdev_init(struct net_device *net_dev,
+ 	struct dpaa_priv *priv = netdev_priv(net_dev);
+ 	struct device *dev = net_dev->dev.parent;
+ 	struct mac_device *mac_dev = priv->mac_dev;
++
++	/* 0198: the tc-flower static-ACL rule list (the DESTROY lookup). */
++	spin_lock_init(&priv->flower_lock);
++	INIT_LIST_HEAD(&priv->cls_flowers);
+ 	struct dpaa_percpu_priv *percpu_priv;
+ 	const u8 *mac_addr;
+ 	int i, err;
+@@ -638,26 +643,235 @@ static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
+ 	return 0;
+ }
+ 
++/* 0198: tc-flower static-ACL rules tracked for the DESTROY lookup. */
++struct dpaa_cls_flower {
++	struct list_head node;
++	u32 cookie_lo;	/* the tc cookie's low 32 bits identify the rule */
++	u8 key[46];	/* the dual-lane family key (the table size variant) */
++	u8 key_size;
++};
++
++#define DPAA_CLS_FLOWER_KEY_MAX	46
++
++/*
++ * 0198: translate one tc-flower filter into an ehash record. Exact-match
++ * only: the basic (the eth type + the L4 proto), the v4/v6 addresses and
++ * the L4 ports must all be fully masked; the sole supported action is
++ * the DROP (the EXIT FE terminal via the action.drop_action flag).
++ */
++static int dpaa_setup_tc_flower_replace(struct net_device *net_dev,
++					struct flow_cls_offload *f)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
++	struct fman_pcd_fe_flow_action action = {};
++	struct flow_match_basic mb;
++	struct flow_match_ipv4_addrs m4;
++	struct flow_match_ipv6_addrs m6;
++	struct flow_match_ports mp;
++	struct dpaa_cls_flower *fl, *pos;
++	struct fman *fm;
++	u8 port_id;
++	u8 key[DPAA_CLS_FLOWER_KEY_MAX];
++	u8 key_size = 0;
++	bool is_v6;
++	int err;
++
++	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC))
++		return -EOPNOTSUPP;
++	flow_rule_match_basic(rule, &mb);
++	if (mb.mask->n_proto != cpu_to_be16(0xffff) ||
++	    mb.mask->ip_proto != 0xff)
++		return -EOPNOTSUPP;
++
++	is_v6 = (mb.key->n_proto == cpu_to_be16(ETH_P_IPV6));
++	if (!is_v6 && mb.key->n_proto != cpu_to_be16(ETH_P_IP))
++		return -EOPNOTSUPP;
++
++	if (is_v6) {
++		if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV6_ADDRS))
++			return -EOPNOTSUPP;
++		flow_rule_match_ipv6_addrs(rule, &m6);
++		if (!ipv6_addr_any(&m6.mask->src) ||
++		    !ipv6_addr_any(&m6.mask->dst))
++			return -EOPNOTSUPP;
++	} else {
++		if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS))
++			return -EOPNOTSUPP;
++		flow_rule_match_ipv4_addrs(rule, &m4);
++		if (m4.mask->src != cpu_to_be32(0xffffffff) ||
++		    m4.mask->dst != cpu_to_be32(0xffffffff))
++			return -EOPNOTSUPP;
++	}
++
++	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
++		flow_rule_match_ports(rule, &mp);
++		if (mp.mask->src != cpu_to_be16(0xffff) ||
++		    mp.mask->dst != cpu_to_be16(0xffff))
++			return -EOPNOTSUPP;
++	}
++
++	if (rule->action.num_entries != 1 ||
++	    rule->action.entries[0].id != FLOW_ACTION_DROP)
++		return -EOPNOTSUPP;
++
++	if (!priv->mac_dev)
++		return -ENODEV;
++	fm = fman_bind(priv->mac_dev->fman_dev);
++	if (!fm)
++		return -ENODEV;
++	port_id = fman_port_get_id(priv->mac_dev->port[0]);
++
++	err = fman_pcd_fe_ehash_keysize(fm, port_id);
++	if (err < 0)
++		return err;
++	if (err != 14 && err != DPAA_CLS_FLOWER_KEY_MAX)
++		return -EOPNOTSUPP;
++	key_size = err;
++
++	memset(key, 0, sizeof(key));
++	if (key_size == 14) {
++		if (is_v6)
++			return -EOPNOTSUPP;	/* the 14-byte table is v4-only */
++		key[0] = 0;
++		memcpy(key + 1, &m4.key->src, 4);
++		memcpy(key + 5, &m4.key->dst, 4);
++		key[9] = mb.key->ip_proto;
++		if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
++			memcpy(key + 10, &mp.key->src, 2);
++			memcpy(key + 12, &mp.key->dst, 2);
++		}
++	} else {
++		key[0] = is_v6 ? 0x60 : 0x40;
++		if (is_v6) {
++			memcpy(key + 9, &m6.key->src, 16);
++			memcpy(key + 25, &m6.key->dst, 16);
++			key[41] = mb.key->ip_proto;
++			if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
++				memcpy(key + 42, &mp.key->src, 2);
++				memcpy(key + 44, &mp.key->dst, 2);
++			}
++		} else {
++			memcpy(key + 1, &m4.key->src, 4);
++			memcpy(key + 5, &m4.key->dst, 4);
++			key[41] = mb.key->ip_proto;
++			if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
++				memcpy(key + 42, &mp.key->src, 2);
++				memcpy(key + 44, &mp.key->dst, 2);
++			}
++		}
++	}
++
++	spin_lock(&priv->flower_lock);
++	list_for_each_entry(pos, &priv->cls_flowers, node) {
++		if (pos->cookie_lo == (u32)f->cookie) {
++			fl = pos;
++			goto have_slot;
++		}
++	}
++	fl = NULL;
++have_slot:
++	spin_unlock(&priv->flower_lock);
++
++	if (!fl) {
++		fl = kzalloc(sizeof(*fl), GFP_KERNEL);
++		if (!fl)
++			return -ENOMEM;
++	}
++
++	memset(&action, 0, sizeof(action));
++	memcpy(action.key, key, key_size);
++	action.key_size = key_size;
++	action.table_idx = 0;
++	action.drop_action = 1;	/* F-247: the EXIT FE terminal */
++
++	err = fman_pcd_fe_flow_add(fm, port_id, &action);
++	if (err) {
++		if (!fl || list_empty(&fl->node))
++			kfree(fl);
++		return err;
++	}
++
++	if (!fl->cookie_lo) {
++		fl->cookie_lo = (u32)f->cookie;
++		memcpy(fl->key, key, key_size);
++		fl->key_size = key_size;
++		spin_lock(&priv->flower_lock);
++		list_add_tail(&fl->node, &priv->cls_flowers);
++		spin_unlock(&priv->flower_lock);
++	} else {
++		memcpy(fl->key, key, key_size);
++		fl->key_size = key_size;
++	}
++
++	return 0;
++}
++
++static int dpaa_setup_tc_flower_destroy(struct net_device *net_dev,
++					struct flow_cls_offload *f)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct dpaa_cls_flower *pos, *tmp;
++	struct fman *fm;
++	u8 port_id;
++	int err = 0;
++
++	if (!priv->mac_dev)
++		return -ENODEV;
++	fm = fman_bind(priv->mac_dev->fman_dev);
++	if (!fm)
++		return -ENODEV;
++	port_id = fman_port_get_id(priv->mac_dev->port[0]);
++
++	spin_lock(&priv->flower_lock);
++	list_for_each_entry_safe(pos, tmp, &priv->cls_flowers, node) {
++		if (pos->cookie_lo != (u32)f->cookie)
++			continue;
++		list_del(&pos->node);
++		spin_unlock(&priv->flower_lock);
++		err = fman_pcd_fe_flow_del(fm, port_id, pos->key,
++					   pos->key_size);
++		kfree(pos);
++		return err;
++	}
++	spin_unlock(&priv->flower_lock);
++	return 0;
++}
++
+ static int dpaa_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
+ 				  void *cb_priv)
+ {
+ 	struct net_device *net_dev = cb_priv;
+ 	struct tc_cls_matchall_offload *f = type_data;
+ 
+-	if (type != TC_SETUP_CLSMATCHALL)
+-		return -EOPNOTSUPP;
+-
+ 	if (!tc_cls_can_offload_and_chain0(net_dev, type_data))
+ 		return -EOPNOTSUPP;
+ 
+-	switch (f->command) {
+-	case TC_CLSMATCHALL_REPLACE:
+-		return dpaa_setup_tc_matchall_replace(net_dev, f);
+-	case TC_CLSMATCHALL_DESTROY:
+-		return dpaa_setup_tc_matchall_destroy(net_dev);
+-	default:
+-		return -EOPNOTSUPP;
++	if (type == TC_SETUP_CLSMATCHALL) {
++		switch (f->command) {
++		case TC_CLSMATCHALL_REPLACE:
++			return dpaa_setup_tc_matchall_replace(net_dev, f);
++		case TC_CLSMATCHALL_DESTROY:
++			return dpaa_setup_tc_matchall_destroy(net_dev);
++		default:
++			return -EOPNOTSUPP;
++		}
++	}
++
++	if (type == TC_SETUP_CLSFLOWER) {
++		struct flow_cls_offload *clsf = type_data;
++
++		switch (clsf->command) {
++		case FLOW_CLS_REPLACE:
++			return dpaa_setup_tc_flower_replace(net_dev, clsf);
++		case FLOW_CLS_DESTROY:
++			return dpaa_setup_tc_flower_destroy(net_dev, clsf);
++		default:
++			return -EOPNOTSUPP;
++		}
+ 	}
++
++	return -EOPNOTSUPP;
+ }
+ 
+ static LIST_HEAD(dpaa_block_cb_list);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 9afa818e2e4e..36c518b5ebf2 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -209,6 +209,9 @@ u32 hm_vlan_strip_handle;
+ 	 * Spec sec 5.6; board patch 0104.
+ 	 */
+ 	bool ingress_police_installed;
++	/* 0198: tc-flower static-ACL rule tracking (the DESTROY lookup). */
++	spinlock_t flower_lock;
++	struct list_head cls_flowers;
+ 	/* M3-3b production consumer (patch 0109): ethtool ntuple -> FMan CC
+ 	 * static-tree bridge. cls_rules holds the ETHTOOL_SRXCLSRLINS rules
+ 	 * (struct dpaa_cls_rule, sorted by location); cls_rule_cnt counts

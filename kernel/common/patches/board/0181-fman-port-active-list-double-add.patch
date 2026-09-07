@@ -1,0 +1,126 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Tue, 01 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: fix fman_port_active_list double-insertion for O/H ports (phase 1c/1d fix)
+
+Board-found 2026-09-01 while diagnosing an unrelated production VLAN
+offload bug report on .185: a plain routed (non-VLAN) TCP flow through
+a completely unrelated physical port (eth3, hw port 0x10) failed
+hardware offload with "REPLACE rollback fe_flow_insert=-19" (ENODEV)
+on every single attempt, forever. Traced to
+fman_cc_tree_install()'s (dpaa_fman_caps.c) call to
+fman_port_lookup_rx(fm, 0x10), which returned NULL for a port that has
+been working since well before this session.
+
+Root cause: 0177/0178 register an O/H port into fman_port_active_list
+at PROBE time (fman_port_probe()) so a not-yet-brought-up O/H port is
+discoverable by the "bringup" debugfs tool. But the ORIGINAL 0115
+registration point, at the end of fman_port_init(), unconditionally
+does its own list_add_tail() on the same port->node -- and this
+session's Phase 1c/1d board testing did call "bringup 4" (dmesg:
+"oh_test bringup 0x04 OK" at boot+140s), which drives
+fman_port_config()+fman_port_init() for that same, already-probe-time-
+registered O/H port object. That second list_add_tail() on an already-
+linked struct list_head splices the node into the list a second time
+without unlinking it from its first position, corrupting the shared
+doubly-linked list for every port on the fman -- not just the O/H
+port. fman_port_lookup_rx()'s list_for_each_entry walk over the
+corrupted list then silently fails to reach unrelated RX ports
+(eth3/0x10 in this case), and every caller (fman_cc_tree_install(),
+i.e. every port's VLAN CC-tree AND plain ehash-vs-CC-tree dispatch)
+gets -ENODEV. No crash, no WARN -- list.h's plain (non-DEBUG_LIST)
+list_add_tail() has no double-add detection, so this was a silent,
+board-wide production regression from a debug-only test tool call.
+
+0175's probe-time registration comment claimed this was "safe" because
+port->node is kzalloc'd/zeroed and list_add_tail() "only writes
+through it, never reads it as an existing link first" -- true for the
+FIRST call, but that reasoning never accounted for fman_port_init()
+making a SECOND, unconditional call on the same node later. It also
+can't be fixed with list_empty(&port->node) as the guard: kzalloc
+leaves ->next/->prev NULL rather than self-pointing, since port->node
+is never INIT_LIST_HEAD'd, so list_empty() is not well-defined for a
+never-linked node here.
+
+Fix: add struct fman_port::active_list_added (kzalloc-zeroed, so
+false until set), checked and set under fman_port_active_lock at BOTH
+call sites (fman_port_init()'s original 0115 site, and 0175/0178's
+probe-time site). The node is now linked into fman_port_active_list at
+most once regardless of call order -- probe-then-init (O/H ports) or
+init-only (RX/TX ports, unaffected: active_list_added starts false, so
+their existing single list_add_tail() still fires exactly as before).
+
+Board-tested 2026-09-01: this exact double-registration state (from
+the "bringup 4" call earlier in .185's current uptime) is why the live
+VLAN offload investigation this session was giving inconsistent
+results -- it was chasing a live-corrupted port registry, not a VLAN-
+specific defect. A reboot is required to clear the already-corrupted
+in-memory list on any board that already ran "bringup" before this
+fix; this patch only prevents the corruption going forward.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (adds one bool field + a
+guard around two pre-existing list_add_tail() call sites; RX/TX ports
+take the exact same single-add path as before, byte-identical
+behavior for every port type except O/H, where it now prevents a
+double-add instead of allowing one)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 30 ++++++++++++++++++++-----
+ 1 file changed, 25 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 6cabfcb4dad4..1dea6a057aec 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -491,6 +491,7 @@ struct fman_port_dts_params {
+ struct fman_port {
+ 	void *fm;
+ 	struct list_head node;		/* fman_port_active_list (0115) */
++	bool active_list_added;	/* guards list_add_tail() idempotency (0181) */
+ 	u32 ctrl_params_page;	/* FM_CTL params page MURAM off (0116) */
+ 	struct device *dev;
+ 	struct fman_rev_info rev_info;
+@@ -2187,7 +2188,10 @@ int fman_port_init(struct fman_port *port)
+ 	port->cfg = NULL;
+
+ 	mutex_lock(&fman_port_active_lock);
+-	list_add_tail(&port->node, &fman_port_active_list);
++	if (!port->active_list_added) {
++		list_add_tail(&port->node, &fman_port_active_list);
++		port->active_list_added = true;
++	}
+ 	mutex_unlock(&fman_port_active_lock);
+
+ 	return 0;
+@@ -2624,13 +2628,29 @@ static int fman_port_probe(struct platform_device *of_dev)
+ 	 * consumer -- nothing else will ever call config()/init() for one,
+ 	 * a debugfs/production caller has to find it FIRST in order to do
+ 	 * so. Register here at probe time instead, so a probed-but-not-yet-
+-	 * brought-up O/H port is still discoverable. Safe: port->node is
+-	 * kzalloc'd (zeroed), and list_add_tail() only writes through it,
+-	 * never reads it as an existing link first.
++	 * brought-up O/H port is still discoverable.
++	 *
++	 * 0181 fix: a "bringup" debugfs call later drives this SAME port
++	 * object through fman_port_config()+fman_port_init(), and
++	 * fman_port_init() unconditionally did its own list_add_tail() (the
++	 * original 0115 RX/TX registration point) with no check for an
++	 * already-linked node. Since port->node is never INIT_LIST_HEAD'd
++	 * (kzalloc leaves ->next/->prev NULL, so list_empty() can't be used
++	 * as the guard), a second list_add_tail() on the same node spliced
++	 * it into fman_port_active_list a second time without unlinking the
++	 * first, corrupting the shared list for EVERY port on the fman
++	 * (silently breaks fman_port_lookup_rx() for real RX ports, e.g.
++	 * ENODEV from fman_cc_tree_install() on a completely unrelated
++	 * physical port -- board-found 2026-09-01 chasing an unrelated VLAN
++	 * offload bug report). port->active_list_added now guards both call
++	 * sites so the node is linked at most once regardless of order.
+ 	 */
+ 	if (port_type == FMAN_PORT_TYPE_OH) {
+ 		mutex_lock(&fman_port_active_lock);
+-		list_add_tail(&port->node, &fman_port_active_list);
++		if (!port->active_list_added) {
++			list_add_tail(&port->node, &fman_port_active_list);
++			port->active_list_added = true;
++		}
+ 		mutex_unlock(&fman_port_active_lock);
+ 	}
+

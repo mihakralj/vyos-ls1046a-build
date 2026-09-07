@@ -39,19 +39,29 @@ static void ask_vlan_cc_fill_key(struct fman_cc_key *cc_key,
 				 const struct ask_flow_key *key,
 				 u32 tx_fqid, u32 hm_handle)
 {
-	__be32 src_ip;
-	__be32 dst_ip;
-
-	memcpy(&src_ip, key->src_ip, sizeof(src_ip));
-	memcpy(&dst_ip, key->dst_ip, sizeof(dst_ip));
-
 	memset(cc_key, 0, sizeof(*cc_key));
-	cc_key->ethertype = FMAN_CC_ETHERTYPE_IPV4;
+
+	if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+		/* F-245 (0195): IPv6 VLAN key - the full 16-byte addresses
+		 * (already network order), matched by cc_pack_key_v6()'s
+		 * 40-byte row against the plain-EKFC v6 composite. */
+		cc_key->ethertype = FMAN_CC_ETHERTYPE_IPV6;
+		cc_key->is_ipv6 = 1;
+		memcpy(cc_key->src_ip6, key->src_ip, 16);
+		memcpy(cc_key->dst_ip6, key->dst_ip, 16);
+	} else {
+		__be32 src_ip, dst_ip;
+
+		memcpy(&src_ip, key->src_ip, sizeof(src_ip));
+		memcpy(&dst_ip, key->dst_ip, sizeof(dst_ip));
+		cc_key->ethertype = FMAN_CC_ETHERTYPE_IPV4;
+		cc_key->src_ip = ntohl(src_ip);
+		cc_key->dst_ip = ntohl(dst_ip);
+		cc_key->src_ip_mask = 0xffffffff;
+		cc_key->dst_ip_mask = 0xffffffff;
+	}
+
 	cc_key->proto = key->l4_proto;
-	cc_key->src_ip = ntohl(src_ip);
-	cc_key->dst_ip = ntohl(dst_ip);
-	cc_key->src_ip_mask = 0xffffffff;
-	cc_key->dst_ip_mask = 0xffffffff;
 	cc_key->src_port = ntohs(key->sport);
 	cc_key->dst_port = ntohs(key->dport);
 	cc_key->target_fqid = tx_fqid;
@@ -61,6 +71,14 @@ static void ask_vlan_cc_fill_key(struct fman_cc_key *cc_key,
 static bool ask_vlan_cc_key_match(const struct fman_cc_key *a,
 				  const struct fman_cc_key *b)
 {
+	if (a->is_ipv6 != b->is_ipv6)
+		return false;
+	if (a->is_ipv6)
+		return a->proto == b->proto &&
+		       !memcmp(a->src_ip6, b->src_ip6, sizeof(a->src_ip6)) &&
+		       !memcmp(a->dst_ip6, b->dst_ip6, sizeof(a->dst_ip6)) &&
+		       a->src_port == b->src_port &&
+		       a->dst_port == b->dst_port;
 	return a->proto == b->proto &&
 	       a->src_ip == b->src_ip &&
 	       a->dst_ip == b->dst_ip &&
@@ -122,7 +140,23 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 	/* Per-port gate: armed on this flow's ingress port (key->port_id). */
 	if (!ask_hw_vlan_offload_armed_port(key->port_id))
 		return -EOPNOTSUPP;
-	if (key->l3_proto != ASK_FLOW_L3_IPV4)
+	/*
+	 * T-M6-8c: this v4-only gate predates F-245/0195's IPv6 VLAN CC key
+	 * support. ask_vlan_cc_fill_key() below already builds a correct v6
+	 * cc_key (is_ipv6, src_ip6/dst_ip6, cc_pack_key_v6()'s 40-byte row),
+	 * ask_vlan_cc_key_match() already compares v6 keys, and
+	 * fman_hm_vlan_route_get() below is pure L2 (MAC/VID/TPID/PCP) with
+	 * no L3-family parameter at all -- there is no hardware reason to
+	 * reject v6 here. Board testing (2026-09-07) found this gate was the
+	 * sole reason IPv6 VLAN flows (both VLAN-tagged ingress and egress)
+	 * never got hardware-offloaded: fe_flow_insert returned -EOPNOTSUPP
+	 * from here every ~1s (nft flowtable retrying the REPLACE), which
+	 * conntrack either reflected as no HW_OFFLOAD ever, or -- if an
+	 * earlier non-VLAN attempt had briefly set the flag -- left a stale
+	 * HW_OFFLOAD label on a flow actually running in software.
+	 */
+	if (key->l3_proto != ASK_FLOW_L3_IPV4 &&
+	    key->l3_proto != ASK_FLOW_L3_IPV6)
 		return -EOPNOTSUPP;
 
 	fm = ask_hw_get_fman();
@@ -160,7 +194,9 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 		tpid = 0;
 	}
 
-	rc = fman_hm_vlan_route_get(fm, port_id, do_pop, do_push, vid, tpid, pcp,
+	rc = fman_hm_vlan_route_get(fm, port_id, do_pop, do_push,
+				    key->l3_proto == ASK_FLOW_L3_IPV6,
+				    vid, tpid, pcp,
 				    key->egress_mac, key->next_hop_mac,
 				    tx_fqid, &hm_handle);
 	if (rc)
