@@ -1,17 +1,22 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
-index 6f051c01c3c4..4a1eebf7388d 100644
+index f1f6cc46cb55..4a1eebf7388d 100644
 --- a/drivers/net/ethernet/freescale/fman/fman.c
 +++ b/drivers/net/ethernet/freescale/fman/fman.c
-@@ -315,17 +315,22 @@ struct fman_iram_regs {
+@@ -15,6 +15,8 @@
+ #include <linux/clk.h>
+ #include <linux/of_address.h>
+ #include <linux/of_irq.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ #include <linux/interrupt.h>
+ #include <linux/libfdt_env.h>
  
- static struct dentry *fman_imem_debugfs_dir;
+@@ -311,6 +313,87 @@ struct fman_iram_regs {
+ 	u32 iready;	/* FM IRAM ready register */
+ };
  
--/* P0 diagnostic (0193): read the FM_CTL engine's current instruction via
-- * the IMEM idata register. While the controller is RUNNING the load port
-- * mirrors the fetch unit, so successive idata reads return the instruction
-- * at the current PC (E-HM17 "stuck read": idle engine parks at w1,
-- * 0x00d20a01). A stuck engine therefore reveals its PC directly; a
-- * spinning one shows the advancing loop extent. Read-only.
++static struct dentry *fman_imem_debugfs_dir;
++
 +/* P0 diagnostic (0193): FM_CTL engine-state reader.
 + *
 + * Shows the IMEM load-port registers (iadd/data/itcfg/iready) plus the FPM
@@ -22,19 +27,21 @@ index 6f051c01c3c4..4a1eebf7388d 100644
 + *   dra  <hex>   set FPM Data-RAM access address
 + * Read-only with respect to execution state; used to locate the stuck
 + * instruction during the FE-VM VLAN freeze.
-  */
- static int fman_imem_pc_show(struct seq_file *s, void *unused)
- {
- 	struct fman *fman = s->private;
- 	struct fman_iram_regs __iomem *iram = fman->base_addr + IMEM_OFFSET;
++ */
++static int fman_imem_pc_show(struct seq_file *s, void *unused)
++{
++	struct fman *fman = s->private;
++	struct fman_iram_regs __iomem *iram = fman->base_addr + IMEM_OFFSET;
 +	struct fman_fpm_regs __iomem *fpm = fman->fpm_regs;
- 	int i;
- 
- 	seq_printf(s, "iadd=0x%08x itcfg=0x%08x iready=0x%08x\n",
-@@ -335,9 +340,59 @@ static int fman_imem_pc_show(struct seq_file *s, void *unused)
- 	for (i = 0; i < 8; i++)
- 		seq_printf(s, "idata[%d]=0x%08x\n", i,
- 			   ioread32be(&iram->idata));
++	int i;
++
++	seq_printf(s, "iadd=0x%08x itcfg=0x%08x iready=0x%08x\n",
++		   ioread32be(&iram->iadd),
++		   ioread32be(&iram->itcfg),
++		   ioread32be(&iram->iready));
++	for (i = 0; i < 8; i++)
++		seq_printf(s, "idata[%d]=0x%08x\n", i,
++			   ioread32be(&iram->idata));
 +	seq_printf(s, "brkc=0x%08x cld=0x%08x rstc=0x%08x extc=0x%08x\n",
 +		   ioread32be(&fpm->fmfp_brkc),
 +		   ioread32be(&fpm->fm_cld),
@@ -44,9 +51,8 @@ index 6f051c01c3c4..4a1eebf7388d 100644
 +	for (i = 0; i < 16; i++)
 +		seq_printf(s, "drd[%d]=0x%08x\n", i,
 +			   ioread32be(&fpm->fmfp_drd[i]));
- 	return 0;
- }
--DEFINE_SHOW_ATTRIBUTE(fman_imem_pc);
++	return 0;
++}
 +
 +static ssize_t fman_imem_pc_write(struct file *file, const char __user *buf,
 +				  size_t count, loff_t *ppos)
@@ -89,19 +95,20 @@ index 6f051c01c3c4..4a1eebf7388d 100644
 +	.llseek = seq_lseek,
 +	.release = single_release,
 +};
- 
++
  struct fman_fpm_regs {
  	u32 fmfp_tnc;		/* FPM TNUM Control 0x00 */
-@@ -3144,10 +3199,10 @@ static int fman_probe(struct platform_device *of_dev)
+ 	u32 fmfp_prc;		/* FPM Port_ID FmCtl Association 0x04 */
+@@ -3116,6 +3199,12 @@ static int fman_probe(struct platform_device *of_dev)
  
  	dev_set_drvdata(dev, fman);
  
--	/* P0 diagnostic (0193): FM_CTL engine-PC reader (read-only). */
 +	/* P0 diagnostic (0193): FM_CTL engine-state reader. */
- 	if (!fman_imem_debugfs_dir)
- 		fman_imem_debugfs_dir = debugfs_create_dir("fman_imem", NULL);
--	debugfs_create_file("pc0", 0444, fman_imem_debugfs_dir, fman,
++	if (!fman_imem_debugfs_dir)
++		fman_imem_debugfs_dir = debugfs_create_dir("fman_imem", NULL);
 +	debugfs_create_file("pc0", 0644, fman_imem_debugfs_dir, fman,
- 			    &fman_imem_pc_fops);
- 
++			    &fman_imem_pc_fops);
++
  	/*
+ 	 * Initialise the PCD subsystem. fman->muram is live at this point
+ 	 * (fman_config() called fman_muram_init()). On failure leave
