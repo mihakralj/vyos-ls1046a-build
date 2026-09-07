@@ -349,3 +349,11 @@
 # be verified against intent. Throwaway experiment branch only.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0194-fman-pcd-fe-flow-fullrecord-dump.patch
+
+# P0.6 (2026-09-07): FE-VM VLAN parse-geometry fix — re-point both VLAN
+# handler exits at a synthesized IC parse-result offset-tail update
+# routine streamed from the fman node's fsl,firmware-extra property;
+# fail-open expect guards, applied every boot before the IRAM stream.
+# Throwaway experiment branch only.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0195-fman-fe-vm-vlan-geometry-fix.patch

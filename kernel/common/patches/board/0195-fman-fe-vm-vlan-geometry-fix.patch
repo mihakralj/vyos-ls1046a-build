@@ -1,0 +1,145 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
+index aef7570b73a2..2ae79684f8b3 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -1551,6 +1551,60 @@ static int clear_iram(struct fman *fman)
+  * clear_iram(), before FPM/BMI/QMI init): setting IRAM_READY on a live
+  * FMan crashes the datapath.
+  */
++/*
++ * P0.6 (0195): FE-VM VLAN parse-geometry fix for the 210.10.1 inline
++ * 0x12/0x42 opcode path. The VLAN handlers rebuild the frame but never
++ * rewrite the per-task IC parse-result offset tail (IC 0x33/0x37/0x3B/
++ * 0x3C/0x3E/0x3F), so the Pre-BMI (0x1a) proof reads stale geometry and
++ * drops the frame (the 21-packet freeze). The fix = (a) re-point both
++ * handler exits at a synthesized routine streamed into the IRAM tail
++ * from the "fsl,firmware-extra" property on the fman node, (b) the
++ * routine shifts the offset tail by -4 (POP) / +4 (PUSH) and returns
++ * to w11911. Applied to the in-memory blob on EVERY boot before the
++ * IRAM stream: no SPI writes, no modified-blob redistribution.
++ * Fail-open: any expect mismatch (unknown microcode) leaves the word
++ * untouched and warns once.
++ */
++struct fman_ucode_fix_entry {
++	u32 word_off;
++	u32 expect;
++	u32 write;
++};
++
++static const struct fman_ucode_fix_entry fman_ucode_vlan_fix[] = {
++	/* STRIP_ALL_VLAN exit (w9485) -> POP entry at word 12852 */
++	{ 9485, 0xb3ff097a, 0xb3ff0d27 },
++	/* INSERT_VLAN_HDR fork exit (w9552) -> PUSH entry at word 12872 */
++	{ 9552, 0xb3ff0937, 0xb3ff0cf8 },
++	/* INSERT_VLAN_HDR body exit (w9673, plain xfer14) -> PUSH entry */
++	{ 9673, 0xb7ff08be, 0xb7ff0c7f },
++};
++
++static bool fman_ucode_fix_warned;
++
++static u32 fman_ucode_apply_vlan_fix(struct fman *fman, u32 word_off,
++				     u32 word)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(fman_ucode_vlan_fix); i++) {
++		const struct fman_ucode_fix_entry *e = &fman_ucode_vlan_fix[i];
++
++		if (e->word_off != word_off)
++			continue;
++		if (e->expect != word) {
++			if (!fman_ucode_fix_warned)
++				dev_warn(fman->dev,
++					 "%s: VLAN-fix expect mismatch at word %u (0x%08x != 0x%08x); leaving microcode unpatched\n",
++					 __func__, word_off, word, e->expect);
++			fman_ucode_fix_warned = true;
++			return word;
++		}
++		return e->write;
++	}
++	return word;
++}
++
+ static int load_fman_ctrl_code(struct fman *fman)
+ {
+ 	struct fman_iram_regs __iomem *iram;
+@@ -1559,6 +1613,8 @@ static int load_fman_ctrl_code(struct fman *fman)
+ 	const __be32 *code;
+ 	u32 wcount, code_off, iram_off, size;
+ 	int blob_len, i, count, pad_words;
++	const __be32 *extra;
++	int extra_len, extra_words;
+ 
+ 	fw_node = of_get_child_by_name(fman->dev->of_node, "fman-firmware");
+ 	if (!fw_node) {
+@@ -1604,6 +1660,26 @@ static int load_fman_ctrl_code(struct fman *fman)
+ 	code = (const __be32 *)(blob + code_off);
+ 	iram = fman->base_addr + IMEM_OFFSET;
+ 
++	/* P0.6 (0195): optional parse-geometry fix routine tail. The property
++	 * lives on the fman node itself (the fman-firmware child is U-Boot's);
++	 * its words are streamed right after the image + burst padding.
++	 */
++	extra = of_get_property(fman->dev->of_node, "fsl,firmware-extra",
++			       &extra_len);
++	extra_words = extra_len > 0 ? extra_len / 4 : 0;
++	if (extra_len > 0 && extra_len % 4)
++		dev_warn(fman->dev,
++			 "%s: fsl,firmware-extra length %d not word-aligned; tail fix disabled\n",
++			 __func__, extra_len);
++	if (extra_words &&
++	    (iram_off + size + 16 > fman->state->fm_iram_size ||
++	     extra_words > (fman->state->fm_iram_size - iram_off - size - 16) )) {
++		dev_warn(fman->dev,
++			 "%s: firmware-extra tail does not fit IRAM; tail fix disabled\n",
++			 __func__);
++		extra_words = 0;
++	}
++
+ 	/* Enable auto-increment and stream the image */
+ 	iowrite32be(IRAM_IADD_AIE | iram_off, &iram->iadd);
+ 	count = 100;
+@@ -1614,8 +1690,16 @@ static int load_fman_ctrl_code(struct fman *fman)
+ 	if (count == 0)
+ 		return -EBUSY;
+ 
+-	for (i = 0; i < wcount; i++)
+-		iowrite32be(be32_to_cpup(&code[i]), &iram->idata);
++	for (i = 0; i < wcount; i++) {
++		u32 word = be32_to_cpup(&code[i]);
++
++		iowrite32be(fman_ucode_apply_vlan_fix(fman, i, word),
++			     &iram->idata);
++	}
++
++	/* P0.6 (0195): stream the VLAN geometry-fix routine tail. */
++	for (i = 0; i < extra_words; i++)
++		iowrite32be(be32_to_cpup(&extra[i]), &iram->idata);
+ 
+ 	/* Pad to the 16-byte IRAM burst boundary (SDK fm.c:445-448) */
+ 	pad_words = ((16 - (size % 16)) / 4) % 4;
+@@ -1641,13 +1725,21 @@ static int load_fman_ctrl_code(struct fman *fman)
+ 		 --count);
+ 	if (count == 0)
+ 		return -EBUSY;
+-	for (i = 0; i < wcount; i++) {
++	for (i = 0; i < wcount + pad_words + extra_words; i++) {
+ 		u32 word = ioread32be(&iram->idata);
++		u32 expect;
+ 
+-		if (word != be32_to_cpup(&code[i])) {
++		if (i < wcount)
++			expect = fman_ucode_apply_vlan_fix(fman, i,
++							be32_to_cpup(&code[i]));
++		else if (i < wcount + pad_words)
++			expect = 0xffffffff;
++		else
++			expect = be32_to_cpup(&extra[i - wcount - pad_words]);
++		if (word != expect) {
+ 			dev_err(fman->dev,
+ 				"%s: IRAM verify mismatch at word %d (read 0x%08x expect 0x%08x)\n",
+-				__func__, i, word, be32_to_cpup(&code[i]));
++				__func__, i, word, expect);
+ 			return -EIO;
+ 		}
+ 	}
