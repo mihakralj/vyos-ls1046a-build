@@ -1,0 +1,233 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Tue, 01 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: O/H target-FQID bring-up + enable debugfs verb (phase 1d, step 1)
+
+Phase 1d of the OH-port-based VLAN re-architecture (T-M6-8,
+plans/ASK2-VLAN-REARCH.md). Phases 1a-1c proved the port probes,
+configures, and initializes cleanly on real silicon (0175-0179),
+but always with dflt_fqid/err_fqid=0 and FMBM_OCFG[EN] left
+deliberately off -- config-only, no way for the port to actually do
+anything. This is the first step toward a real traffic test:
+
+1. "bringup <hw_port_id> [target_fqid_hex]" now accepts an optional
+   target FQID, feeding cfg->dflt_fqid/err_fqid (FMBM_OFQID/
+   FMBM_OEFQID, RM 5.5.7.6 step 6) -- the port's fallback egress once
+   armed. Omit or pass 0 for the same dry-run behavior as before.
+2. New "enable <hw_port_id> <0|1>" verb, wrapping fman_port_oh_enable()
+   (FMBM_OCFG[EN], RM step 13) -- built in 0176, never exposed until
+   now. Guarded to only accept an already-configured port (checked via
+   a non-NULL bmi_regs, which fman_port_config() sets): calling enable
+   before bringup would dereference a NULL port->bmi_regs.
+
+Both verbs now share a small fman_port_oh_test_lookup(port_id,
+require_configured) helper instead of duplicating the active-list scan
+inline. kernel vsscanf doesn't support '%*' assignment suppression
+combined with the 'hh' length modifier, so the target-FQID re-parse in
+fman_port_oh_test_bringup() reads port_id into a throwaway variable a
+second time rather than skipping it -- noted inline.
+
+Deliberately still does NOT wire up a real traffic path: no CC-tree
+arm on the O/H port (fman_port_set_oh_cc_base(), built in 0176, still
+has no debugfs exposure) and no QMan FQ scheduled on the port's own
+channel yet (the actual "new subsystem" piece -- creating and
+scheduling a QMan FQ bound to the port's channel, mirroring ask_hw.c's
+existing dedicated-TX-FQ pattern). Kept as its own next step so
+FMBM_OCFG[EN]=1 -- the first time this port is actually live -- gets
+tested in isolation first, on an otherwise idle port with no traffic
+source, before adding anything that could make it not idle.
+
+Not yet board-tested. Plan for the next board session: "bringup 4",
+then "enable 4 1", confirm no wedge and no unexpected dmesg output
+with the port armed but nothing feeding it.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (extends debug-only tooling from 0177; the enable verb reaches fman_port_oh_enable(), gated to O/H ports only, port stays otherwise idle -- no CC tree, no QMan FQ, nothing to feed it traffic yet)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 147 +++++++++++++++--------
+ 1 file changed, 99 insertions(+), 48 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 868a4fe0b..6cabfcb4d 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -2646,7 +2646,7 @@ static int fman_port_probe(struct platform_device *of_dev)
+ }
+
+ /*
+- * ASK2 OH-port re-enqueue infra (dpaa1), phase 1c de-risk tool:
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1c/1d de-risk tool:
+  * /sys/kernel/debug/fman_port_oh_test/bringup -- hand-arm the ONE call that
+  * exercises phase 1b's dormant code (init_bmi_oh()/set_oh_dflt_cfg()/the
+  * fman_set_port_params() mac_mfl fix) on real silicon for the first time,
+@@ -2663,57 +2663,57 @@ static int fman_port_probe(struct platform_device *of_dev)
+  * a top-level debugfs node here has zero dependency on that tree's exact
+  * current shape.
+  *
+- * Write "bringup <hw_port_id>" (decimal, e.g. "bringup 4" for hw port
+- * 0x04).  Do not write it twice for the same port without a reboot --
+- * fman_port_config() unconditionally kzalloc's a fresh port->cfg with no
+- * double-call guard, so a second call leaks the first allocation (a few
+- * hundred bytes; harmless to hardware, just untidy) rather than doing
+- * anything unsafe. err_fqid/dflt_fqid are left at 0 (no fallback target)
+- * since this step's only goal is proving the register-write sequence
+- * itself succeeds -- CC-tree arming (fman_port_set_oh_cc_base()) and real
+- * traffic are later, separate steps.
++ * Write "bringup <hw_port_id> [target_fqid_hex]" (decimal port id, e.g.
++ * "bringup 4" for hw port 0x04; optional target_fqid_hex feeds
++ * cfg->dflt_fqid/err_fqid -- FMBM_OFQID/FMBM_OEFQID, RM 5.5.7.6 step 6 --
++ * the port's fallback egress once FMBM_OCFG[EN] is later set; omit or 0 for
++ * a dry-run config-only pass with no real target). Do not write it twice
++ * for the same port without a reboot -- fman_port_config() unconditionally
++ * kzalloc's a fresh port->cfg with no double-call guard, so a second call
++ * leaks the first allocation (a few hundred bytes; harmless to hardware,
++ * just untidy) rather than doing anything unsafe.
++ *
++ * Board-tested 2026-09-01 (0178/0179): "bringup 4" with no target_fqid
++ * succeeds cleanly, config()+init() both return 0, no warnings.
++ *
++ * Write "enable <hw_port_id> <0|1>" to call fman_port_oh_enable()
++ * (FMBM_OCFG[EN], RM step 13) -- only meaningful AFTER a successful
++ * "bringup" for the same port (bmi_regs is NULL before fman_port_config()
++ * has run; guarded below by requiring the port to already be registered
++ * with non-NULL bmi_regs, not just probed).
+  */
+-static ssize_t fman_port_oh_test_write(struct file *file,
+-				       const char __user *buf,
+-				       size_t count, loff_t *ppos)
++static struct fman_port *fman_port_oh_test_lookup(u8 port_id, bool require_configured)
+ {
+-	struct fman_port *port, *p;
+-	struct fman_port_params params;
+-	char kbuf[32];
+-	u8 port_id;
+-	int err;
+-
+-	if (count == 0 || count >= sizeof(kbuf))
+-		return -EINVAL;
+-	if (copy_from_user(kbuf, buf, count))
+-		return -EFAULT;
+-	kbuf[count] = '\0';
+-	kbuf[strcspn(kbuf, "\n")] = '\0';
+-
+-	if (sscanf(kbuf, "bringup %hhu", &port_id) != 1)
+-		return -EINVAL;
++	struct fman_port *p, *found = NULL;
+
+-	/*
+-	 * Match on dts_params.id/.type, NOT port_id/port_type: those two
+-	 * are only populated by fman_port_config(), which this function
+-	 * exists to call for the FIRST time -- before that, they're still
+-	 * zero from kzalloc(). dts_params is populated at probe time and
+-	 * never changes, so it's the only field valid at every point in an
+-	 * O/H port's life, whether or not fman_port_config() has run yet.
+-	 * (Found this the hard way: the port_id/port_type match here
+-	 * originally mirrored fman_port_lookup_oh()'s -- correct for THAT
+-	 * function's post-init contract, wrong for this pre-init one.)
+-	 */
+-	port = NULL;
+ 	mutex_lock(&fman_port_active_lock);
+ 	list_for_each_entry(p, &fman_port_active_list, node) {
+-		if (p->dts_params.id == port_id &&
+-		    p->dts_params.type == FMAN_PORT_TYPE_OH) {
+-			port = p;
+-			break;
+-		}
++		if (p->dts_params.id != port_id ||
++		    p->dts_params.type != FMAN_PORT_TYPE_OH)
++			continue;
++		if (require_configured && !p->bmi_regs)
++			continue;
++		found = p;
++		break;
+ 	}
+ 	mutex_unlock(&fman_port_active_lock);
++	return found;
++}
++
++static ssize_t fman_port_oh_test_bringup(const char *kbuf, u8 port_id)
++{
++	struct fman_port *port;
++	struct fman_port_params params;
++	u32 fqid = 0;
++	u8 unused_id;
++	int err;
++
++	/* kernel vsscanf doesn't support '%*' assignment suppression with
++	 * the 'hh' length modifier, so re-parse port_id into a throwaway
++	 * rather than skip it. */
++	sscanf(kbuf, "bringup %hhu %x", &unused_id, &fqid);
++
++	port = fman_port_oh_test_lookup(port_id, false);
+ 	if (!port) {
+ 		pr_err("fman_port: oh_test bringup 0x%02x: no such O/H port (never probed?)\n",
+ 		       port_id);
+@@ -2721,6 +2721,8 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 	}
+
+ 	memset(&params, 0, sizeof(params));
++	params.specific_params.non_rx_params.dflt_fqid = fqid;
++	params.specific_params.non_rx_params.err_fqid = fqid;
+ 	err = fman_port_config(port, &params);
+ 	if (err) {
+ 		pr_err("fman_port: oh_test bringup 0x%02x: fman_port_config() = %d\n",
+@@ -2734,9 +2736,58 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 		return err;
+ 	}
+
+-	pr_info("fman_port: oh_test bringup 0x%02x OK (FMBM_OCFG[EN] still 0 -- see fman_port_oh_enable())\n",
+-		port_id);
+-	return count;
++	pr_info("fman_port: oh_test bringup 0x%02x OK, target_fqid=0x%x (FMBM_OCFG[EN] still 0 -- see enable)\n",
++		port_id, fqid);
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_enable(u8 port_id, unsigned int on)
++{
++	struct fman_port *port;
++	int err;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test enable 0x%02x: not configured yet (run bringup first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	err = fman_port_oh_enable(port, !!on);
++	if (err) {
++		pr_err("fman_port: oh_test enable 0x%02x: fman_port_oh_enable() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	pr_info("fman_port: oh_test enable 0x%02x: FMBM_OCFG[EN]=%u\n", port_id, !!on);
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_write(struct file *file,
++				       const char __user *buf,
++				       size_t count, loff_t *ppos)
++{
++	char kbuf[32];
++	u8 port_id;
++	unsigned int on;
++	ssize_t err;
++
++	if (count == 0 || count >= sizeof(kbuf))
++		return -EINVAL;
++	if (copy_from_user(kbuf, buf, count))
++		return -EFAULT;
++	kbuf[count] = '\0';
++	kbuf[strcspn(kbuf, "\n")] = '\0';
++
++	if (sscanf(kbuf, "bringup %hhu", &port_id) == 1)
++		err = fman_port_oh_test_bringup(kbuf, port_id);
++	else if (sscanf(kbuf, "enable %hhu %u", &port_id, &on) == 2)
++		err = fman_port_oh_test_enable(port_id, on);
++	else
++		return -EINVAL;
++
++	return err ? err : count;
+ }
+
+ static const struct file_operations fman_port_oh_test_fops = {

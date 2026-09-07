@@ -4,9 +4,7 @@
 
 ## Goal
 
-Obtain the canonical 210.10.1 blob from multiple independent provenance
-sources, hash-verify them against each other, and stage the public
-same-ISA corpus used for differential analysis.
+Obtain the canonical 210.10.1 blob from multiple independent provenance sources, hash-verify them against each other, and stage the public same-ISA corpus used for differential analysis.
 
 ## Artifacts
 
@@ -16,8 +14,7 @@ same-ISA corpus used for differential analysis.
 | Public corpus (23 blobs) | `$DECOMP_WORKDIR/qoriq-fm-ucode/` (volatile) | `git clone --depth 1` |
 | Official RSR copy | Locally obtained NXP RSR firmware image at offset `0x900000` | third provenance source |
 
-Do **not** commit the blob to git (NXP LA_OPT EULA — proprietary
-redistribution). The repo records hashes and recipes, not the binary.
+Do **not** commit the blob to git (NXP LA_OPT EULA — proprietary redistribution). The repo records hashes and recipes, not the binary.
 
 ## Canonical fingerprint
 
@@ -77,12 +74,9 @@ git clone --depth 1 https://github.com/nxp-qoriq/qoriq-fm-ucode.git \
 | 160.0.18 | P1023 | v2-lite | — | reduced ISA subset |
 | **210.10.1** | LS1043/LS1046 (shared pkg) | v3 | 12,851 | **target** |
 
-Same-generation cross-SoC pairs (e.g. LS1043 vs LS1046 106.4.18, or the five
-106.1 targets) isolate SoC-specific code from core algorithms.
+Same-generation cross-SoC pairs (e.g. LS1043 vs LS1046 106.4.18, or the five 106.1 targets) isolate SoC-specific code from core algorithms.
 
 ## Notes
 
-- Use the designated development DUT for acquisition and mutation experiments.
-  Reserve the secondary DUT for independent confirmation and recovery.
-- `$DECOMP_WORKDIR` is disposable. Re-run the recipes after it is cleared;
-  the hashes above detect an invalid acquisition.
+- Use the designated development DUT for acquisition and mutation experiments. Reserve the secondary DUT for independent confirmation and recovery.
+- `$DECOMP_WORKDIR` is disposable. Re-run the recipes after it is cleared; the hashes above detect an invalid acquisition.

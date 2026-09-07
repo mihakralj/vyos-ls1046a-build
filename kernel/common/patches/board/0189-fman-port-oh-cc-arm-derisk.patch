@@ -1,0 +1,231 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: O/H CC-tree AD-target de-risk (T-M6-8 Option D phase 1h)
+
+Context: V6-2c (patch 0188) proved the CC-tree comparator is fundamentally
+EKFC-only -- GEC-sourced IPv6 composites are never visible to it, confirmed
+twice on silicon (all-GEC and hybrid EKFC+GEC, both clean MISSes). This
+closes the door on CC-tree exact-match for IPv6, matching this project's
+own prior vendor-source finding (arch/fman-pcd.md: "the CC comparator
+reads KG-emitted bytes... EKFC-only, no GEC").
+
+Separately, the "fix VLAN via a real BMan bpid on the ehash ENQUEUE param"
+hypothesis (fman_pcd.c's hardcoded bpid=0, "fragmentation is S2") is ALSO
+now confirmed dead: it was fully implemented in-kernel and silicon-tested
+back on 2026-08-25 (the retired F-233/F-234 fixups -- git history only,
+folded out 2026-08-30) and produced the exact same ~20-packet VLAN freeze,
+unchanged. Follow-up microcode oracle patches (forcing the suspected
+FE-VM management-index release block to always-skip and always-run) also
+came back negative, localizing the freeze to an FE-VM task-management-index
+release that VLAN-rebuild frames skip somewhere in 210.10.1 microcode --
+not something fixable from kernel driver code.
+
+Both v4's "make ehash do the VLAN edit inline" and v6's "make CC-tree see
+GEC-extracted addresses" are now dead ends. Live inspection of the vendor
+reference board (2026-09-01 finding) showed the vendor's actual production
+VLAN mechanism is neither of these: ehash classifies, then hands off to a
+dedicated Offline-Host (OH) port with its own Header-Manipulation queue for
+the tag edit -- Option D from plans/ASK2-VLAN-REARCH.md, deprioritized in
+favor of the simpler CC+HMTD Option A specifically because Option A worked
+for v4 without needing OH-port complexity. Since v6 can't use Option A,
+Option D's OH-port substrate (parked mid-investigation, phases 1a-1g, T-M6-8
+OH-port rearch) needs to be completed.
+
+Phase 1g's board-tested "dump" verb decisively localized the OH-port's
+open bug: it genuinely dequeues an injected frame off its input FQ (QMan
+FQ state TEN_SCHED->TRU_SCHED, byte_cnt accounted for the exact 64-byte
+frame) but the frame then vanishes before reaching either FMBM_OFQID or
+FMBM_OEFQID -- never even taking the error disposition. The leading,
+not-yet-tested hypothesis: init_bmi_oh()'s plain BMI-enqueue disposition
+(FMBM_OFPNE = NIA_ENG_BMI|NIA_BMI_AC_ENQ_FRAME, set once in phase 1b and
+never revisited) may have nowhere valid to deliver a frame without a
+CC-tree AD target -- unlike an RX port, where the RM documents this same
+disposition working standalone.
+
+This adds two debugfs verbs to fman_port_oh_test that exercise the fix:
+
+  "cc_arm <hw_port_id> <fqid_hex>" -- calls fman_port_set_oh_cc_base()
+  (patch 0176, dormant until now) to flip FMBM_OFPNE to
+  NIA_ENG_HWK|NIA_KG_CC_EN and point FMBM_OCCB at a minimal CC tree: a
+  zero-key tree whose MISS slot alone carries a real hardware enqueue-AD
+  to the given FQID (fman_pcd_cc_hw_spec.miss_fqid's documented "steers
+  ALL non-matching traffic" behavior), so every frame the O/H port
+  dequeues takes the miss path straight to a target FQ. No HMTD/NADEN
+  chain at this step -- deliberately the smallest possible CC-tree
+  presence, isolating "does a CC-tree AD target unblock O/H delivery at
+  all" from any header-manipulation question.
+
+  "cc_disarm <hw_port_id>" -- reverses it (fman_port_set_oh_cc_base(...,
+  0) + fman_pcd_cc_static_destroy()).
+
+Board sequence: capture_init (sink fqid) -> bringup -> cc_arm <port>
+<sink_fqid> -> sched_fq -> inject -> dump (check whether the capture
+sink's frm_cnt/byte_cnt now move, vs phase 1f/1g's confirmed-zero
+baseline) -> cc_disarm -> unsched_fq -> enable 0 -> capture_fini.
+
+Verified via ~/kernel-git-cache/linux (canonical, series-through-0184 +
+already-shipped fixups applied) + git apply --check against a fresh HEAD
+checkout. NOT YET BOARD-TESTED.
+
+Upstream-Status: Inappropriate | Risk-Tier: B (new debug-only verbs on
+the existing O/H test harness; reuses fman_pcd_cc_static_install()/
+fman_port_set_oh_cc_base(), both already-exported and already used
+elsewhere in production; no change to any existing verb or production
+RX-port path)
+---
+ drivers/net/ethernet/freescale/fman/fman_port.c | 130 +++++++++++++++++++
+ 1 file changed, 130 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 53f64ff14fed..e6f6ef33a060 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -28,6 +28,7 @@
+ #include "fman_port.h"
+ #include "fman_sp.h"
+ #include "fman_keygen.h"
++#include <linux/fsl/fman_pcd.h>
+ 
+ /* Queue ID */
+ #define DFLT_FQ_ID		0x00FFFFFF
+@@ -3347,6 +3348,121 @@ static ssize_t fman_port_oh_test_dump(u8 port_id)
+ 	return 0;
+ }
+ 
++/*
++ * T-M6-8 Option D de-risk (phase 1h): "cc_arm <hw_port_id> <fqid_hex>" /
++ * "cc_disarm <hw_port_id>".
++ *
++ * Phase 1g's "dump" verb proved the O/H port genuinely DEQUEUES an injected
++ * frame off its input FQ (state TEN_SCHED->TRU_SCHED, byte_cnt accounted)
++ * but the frame then vanishes before reaching either FMBM_OFQID or
++ * FMBM_OEFQID -- init_bmi_oh()'s plain BMI-enqueue disposition
++ * (fmbm_ofpne = NIA_ENG_BMI|NIA_BMI_AC_ENQ_FRAME) appears to have nowhere
++ * valid to actually deliver the frame without a CC-tree AD target, unlike
++ * an RX port where the same disposition works standalone.
++ *
++ * This verb exercises the untested fix: fman_port_set_oh_cc_base() (patch
++ * 0176, dormant until now) flips fmbm_ofpne to NIA_ENG_HWK|NIA_KG_CC_EN and
++ * points FMBM_OCCB at a minimal CC tree -- here, a zero-key tree whose
++ * MISS slot alone carries a real hardware enqueue-AD to @fqid_hex (see
++ * fman_pcd_cc_hw_spec.miss_fqid: "non-zero = steers ALL non-matching
++ * traffic"), so every frame the O/H port dequeues takes the miss path
++ * straight to the capture sink. No HMTD/NADEN chain -- deliberately the
++ * smallest possible CC-tree presence, isolating "does a CC-tree AD target
++ * unblock O/H delivery at all" from any header-manipulation question.
++ *
++ * Sequence: capture_init -> bringup -> cc_arm <port> <sink_fqid> ->
++ * sched_fq -> inject -> dump (confirm capture sink frm_cnt/byte_cnt moved,
++ * vs phase 1f/1g's confirmed-zero baseline) -> cc_disarm -> unsched_fq ->
++ * enable 0 -> capture_fini.
++ */
++static ssize_t fman_port_oh_test_cc_arm(u8 port_id, u32 fqid)
++{
++	struct fman_pcd_cc_hw_spec spec;
++	struct fman_pcd *pcd;
++	struct fman_port *port;
++	u32 cc_base;
++	int err;
++
++	if (!fqid)
++		return -EINVAL;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test cc_arm 0x%02x: not configured yet (run bringup first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	pcd = fman_get_pcd(port->fm);
++	if (!pcd) {
++		pr_err("fman_port: oh_test cc_arm 0x%02x: no PCD subsystem\n",
++		       port_id);
++		return -ENXIO;
++	}
++
++	memset(&spec, 0, sizeof(spec));
++	spec.num_keys = 0;
++	spec.miss_qband = 0;
++	spec.miss_fqid = fqid;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, &spec);
++	if (err) {
++		pr_err("fman_port: oh_test cc_arm 0x%02x: fman_pcd_cc_static_install() = %d\n",
++		       port_id, err);
++		return err;
++	}
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err) {
++		pr_err("fman_port: oh_test cc_arm 0x%02x: fman_pcd_cc_static_get_base() = %d\n",
++		       port_id, err);
++		goto out_destroy;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, port);
++	if (err) {
++		pr_err("fman_port: oh_test cc_arm 0x%02x: fman_pcd_port_ensure_params_page() = %d\n",
++		       port_id, err);
++		goto out_destroy;
++	}
++	err = fman_port_set_oh_cc_base(port, cc_base);
++	if (err) {
++		pr_err("fman_port: oh_test cc_arm 0x%02x: fman_port_set_oh_cc_base() = %d\n",
++		       port_id, err);
++		goto out_destroy;
++	}
++
++	pr_info("fman_port: oh_test cc_arm 0x%02x OK, CC base 0x%x, miss->fqid=0x%x\n",
++		port_id, cc_base, fqid);
++	return 0;
++
++out_destroy:
++	fman_pcd_cc_static_destroy(pcd, port_id);
++	return err;
++}
++
++static ssize_t fman_port_oh_test_cc_disarm(u8 port_id)
++{
++	struct fman_pcd *pcd;
++	struct fman_port *port;
++	int err;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test cc_disarm 0x%02x: not configured yet\n",
++		       port_id);
++		return -ENODEV;
++	}
++	pcd = fman_get_pcd(port->fm);
++	if (!pcd)
++		return -ENXIO;
++
++	err = fman_port_set_oh_cc_base(port, 0);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++
++	pr_info("fman_port: oh_test cc_disarm 0x%02x: %s\n",
++		port_id, err ? "fman_port_set_oh_cc_base() failed" : "OK");
++	return err;
++}
++
+ static ssize_t fman_port_oh_test_write(struct file *file,
+ 				       const char __user *buf,
+ 				       size_t count, loff_t *ppos)
+@@ -3354,6 +3470,7 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 	char kbuf[32];
+ 	u8 port_id;
+ 	unsigned int on;
++	u32 fqid;
+ 	ssize_t err;
+ 
+ 	if (count == 0 || count >= sizeof(kbuf))
+@@ -3379,6 +3496,10 @@ static ssize_t fman_port_oh_test_write(struct file *file,
+ 		err = fman_port_oh_test_inject(port_id);
+ 	else if (sscanf(kbuf, "dump %hhu", &port_id) == 1)
+ 		err = fman_port_oh_test_dump(port_id);
++	else if (sscanf(kbuf, "cc_arm %hhu %x", &port_id, &fqid) == 2)
++		err = fman_port_oh_test_cc_arm(port_id, fqid);
++	else if (sscanf(kbuf, "cc_disarm %hhu", &port_id) == 1)
++		err = fman_port_oh_test_cc_disarm(port_id);
+ 	else
+ 		return -EINVAL;
+ 

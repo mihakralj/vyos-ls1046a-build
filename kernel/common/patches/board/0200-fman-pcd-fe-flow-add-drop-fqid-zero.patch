@@ -1,0 +1,61 @@
+From 2b3c4d5e6f7081920384756abcdef0123456790 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Sun, 6 Sep 2026 21:50:00 +0000
+Subject: [PATCH] fman: fe_flow_add drop records force embedded fqid=0 (F-252)
+
+Board test after the F-251 trace (0199): pcd->fe_exit_off resolves to a
+sane, correct, nonzero MURAM offset (0x4b300) at the moment the
+tc-flower hook (0198) inserts a drop record -- rec_ctx is computed
+correctly, ruling out the software ctx-selection bug findings #42/43
+suspected. Yet a forwarded-flow board test (ARP-observability on the
+egress port, matched vs mismatched dport probes) still shows the
+matched frames reaching IP forwarding: the drop still doesn't discard.
+
+The remaining difference from the debugfs 'add drop' path (0197,
+silicon-proven to discard) is the record's OWN embedded ENQUEUE_PKT
+parameter block, written unconditionally by fman_pcd_ehash_add_key
+regardless of drop_action: the debugfs path never parses an fqid for
+'add drop' and its local default stays 0 (F-175), while
+fman_pcd_fe_flow_add's hit_fqid resolves to a real, valid port FQID
+(512, the port's own miss/default queue) even for drop records. F-247's
+comment claiming "the enqueue params are irrelevant" for drop records
+was never verified against silicon -- this makes the record byte-for-
+byte match the proven-working debugfs shape by forcing the embedded
+fqid to 0 whenever drop_action is set, so ctx is the only path left for
+hardware to resolve the terminal.
+
+Patch-Name: 0200-fman-pcd-fe-flow-add-drop-fqid-zero.patch
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 1b2c3d4e5f60..3c4d5e6f7082 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -5093,8 +5093,21 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 		/* F-241 (0194): per-record RX target first (plain ENQUEUE_PKT),
+ 		 * then the F-198 TX terminal, then the port default (F-188/F-193).
+ 		 * The L2/TX terminal stays gated on tx_fqid alone below. */
+-		u32 hit_fqid = action->rx_fqid ? action->rx_fqid :
+-			       (action->tx_fqid ? action->tx_fqid : target_fqid);
++		/* F-252 (0200): F-251's live trace showed rec_ctx correctly
++		 * resolving to pcd->fe_exit_off, yet matched frames still
++		 * deliver -- the debugfs 'add drop' path (0197) that DOES
++		 * discard on this silicon never parses an fqid and leaves its
++		 * local default at 0 (F-175), while this path was still
++		 * writing the record's own embedded ENQUEUE_PKT param with a
++		 * real, valid port FQID regardless of drop_action. F-247's
++		 * comment ("the enqueue params are irrelevant") was the
++		 * unverified assumption -- force the embedded fqid to 0 for
++		 * drop records so the only difference from the proven-working
++		 * debugfs record is the source (production vs debugfs), not
++		 * the record contents. */
++		u32 hit_fqid = action->drop_action ? 0 :
++			       (action->rx_fqid ? action->rx_fqid :
++			       (action->tx_fqid ? action->tx_fqid : target_fqid));
+ 		const u8 *l2_dst = action->tx_fqid ? action->next_hop_mac : NULL;
+ 		const u8 *l2_src = action->tx_fqid ? action->egress_mac : NULL;
+ 		u16 l2_eth = action->tx_fqid ? action->eth_type : 0;
+--
+2.43.0

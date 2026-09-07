@@ -1,6 +1,6 @@
 # NXP `.106` Deep-Dive Plan — Resolving the CC-Tree Architecture Question
 
-**Status:** Drafted 2026-08-05, not yet executed. Continues `plans/NXP-106-ORACLE-VALIDATION-PLAN.md` (executed 2026-08-01, all phases run, Phase 3 blocked on topology — see that doc for Phase 0–2 results this plan builds on).
+**Status:** Drafted 2026-08-05, not yet executed. Continues `plans/archive/NXP-106-ORACLE-VALIDATION-PLAN.md` (executed 2026-08-01, all phases run, Phase 3 blocked on topology — see that doc for Phase 0–2 results this plan builds on).
 **Board:** `.106` — genuine NXP vendor ASK 1.x stack (`cdx.ko`/`fci.ko`/`auto_bridge.ko`, `cmm`, `dpa_app`, `fmc`), version `2026.07.02-2130-rolling`, kernel `6.12.49-vyos`. Contrast with `.185`, which runs this project's from-scratch `dpaa1` branch (currently through F-162).
 **Why now:** the 2026-08-05 session ran a decisive stress test — `.106`'s real vendor stack survived 400+ frames of classified TCP/ICMP traffic with 0% loss, while `.185`'s `cc_test`-driven bare `CONT_LOOKUP` mechanism freezes within 17–30 frames, across five independently vendor-verified register fixes (F-159 through F-162). This settles *that* `cc_test`'s architecture is the problem, not any individual register. It does not yet settle *what to build instead* at the byte level — that's this plan's job.
 

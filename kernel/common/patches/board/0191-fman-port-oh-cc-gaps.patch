@@ -1,0 +1,639 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: fix three O/H port completeness gaps found by ISA-coverage audit
+
+Patches 0189/0190 gave the O/H port's CC-tree dispatch a genuinely
+correct AD target (register readback confirmed: OCCB/OFPNE both
+right, input FQ dequeued) but the capture sink still saw 0 frames.
+An audit comparing every RX-port mechanism against its O/H
+equivalent -- prompted by cross-checking our driver functions against
+the full local FMan ISA table (arch/fman-instruction-table.html) --
+found three real, concrete gaps in the O/H CC-arm path:
+
+1. fman_port_set_oh_cc_base() never asserted the RM Sec5.12.14.1
+   FMFP_EXTC[INV0] SYNC barrier that fman_port_set_cc_base() (RX)
+   already implements (F-168/F-215) before dispatch into a freshly
+   armed, live FM_CTL-controller-walked structure is safe. fmbm_occb
+   is the O/H equivalent of fmbm_rccb -- the exact same class of
+   structure the RX comment documents this requirement for. Fixed by
+   mirroring the RX barrier exactly, sharing the same global
+   fman_cc_engaged_get/inc/dec counter (one FMan controller instance
+   backs both port types).
+
+2. fman_port_set_kg_direct_scheme()/_clear() (F-162, deterministic
+   scheme addressing) were hardcoded RX-only -- same bug class as
+   fman_port_set_params_page()'s pre-0190 gap. Extended to branch on
+   port_type and use fmbm_ofpne for O/H, same NIA_KG_DIRECT|
+   scheme_id[4:0] encoding.
+
+3. THE ROOT CAUSE: no function existed to create+bind a KeyGen scheme
+   to an O/H port at all. fman_pcd_kg_port_attach_cc() and its
+   variants all REPROGRAM an EXISTING scheme (found via
+   kg_find_port_scheme()) -- valid for RX ports, which always get a
+   default RSS scheme bound during normal fman_port_init()
+   (keygen_port_hashing_init(), gated on cfg->pcd_fqs_count != 0).
+   An O/H port brought up via fman_port_oh_test_bringup() never sets
+   pcd_fqs_count, so it NEVER gets a scheme bound. Routing fmbm_ofpne
+   to NIA_ENG_HWK (fman_port_set_oh_cc_base()) with nothing bound
+   gives KeyGen nothing to select -- the actual explanation for the
+   phase-1h MISS. New fman_pcd_kg_port_attach_oh_cc()/_detach_oh_cc()
+   allocate and bind a FRESH catch-all scheme (match_vector=0, the
+   documented convention this driver already uses for policer
+   pass-through) with next_engine=2 pointed at the CC tree, using the
+   same hardware-proven KGSE_MODE recipe (ENQUEUE_KG_DFLT_NIA kept,
+   KGSE_CCBS set) the RX attach_cc family already relies on.
+
+cc_arm/cc_disarm updated to call the new attach/detach functions
+alongside the existing register-level calls.
+
+Verified via ~/kernel-git-cache/linux (canonical, series-through-0190)
++ git apply --check against a fresh HEAD checkout, all three files
+together. NOT YET BOARD-TESTED.
+
+Upstream-Status: Inappropriate | Risk-Tier: B (extends two existing
+RX-only helpers to a second port type using pre-existing register
+fields; adds one new create+bind function and its detach counterpart,
+both new/dormant-until-called from the debug harness only; no change
+to any existing RX-port behavior or verb)
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_kg.c | 149 ++++++++++++++++++
+ drivers/net/ethernet/freescale/fman/fman_port.c   | 111 ++++++++++++--
+ include/linux/fsl/fman_pcd.h                      |  38 +++++
+ 3 files changed, 285 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index 421c13a0..de6644fc 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -757,6 +757,150 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_cc);
+ 
++/*
++ * fman_pcd_kg_port_attach_oh_cc() - create and bind a catch-all KeyGen
++ * scheme routing an O/H port's frames into a CC tree (T-M6-8 Option D
++ * phase 1h).
++ *
++ * Unlike fman_pcd_kg_port_attach_cc()/_dual()/_dual_ekfc() above, which
++ * all REPROGRAM an EXISTING scheme found via kg_find_port_scheme() --
++ * valid for RX ports, which always get a default RSS scheme bound during
++ * normal fman_port_init() (keygen_port_hashing_init(), gated on
++ * cfg->pcd_fqs_count != 0) -- an O/H port brought up via
++ * fman_port_oh_test_bringup() never goes through that path (O/H's cfg
++ * never sets pcd_fqs_count), so it has NO bound scheme at all. Routing
++ * fmbm_ofpne to NIA_ENG_HWK (fman_port_set_oh_cc_base()) with nothing
++ * bound gives KeyGen nothing to select -- the likely explanation for
++ * phase 1h's confirmed MISS despite the CC-tree AD target being
++ * genuinely armed (register readback correct: OCCB/OFPNE both right,
++ * input FQ genuinely dequeued -- but the capture sink still saw 0
++ * frames).
++ *
++ * This allocates a FRESH scheme (kg_alloc_scheme_id(), not
++ * kg_find_port_scheme()) with match_vector=0 -- the documented catch-all
++ * convention already used elsewhere in this driver for a policer
++ * pass-through scheme ("num_extracts==0 ... match_vector is left 0 so
++ * every frame on the bound port selects this scheme") -- so no key
++ * extraction is needed for this minimal de-risk step: the CC tree's own
++ * miss slot (armed with a real hardware enqueue-AD, see cc_arm's
++ * spec.miss_fqid) handles dispatch for every frame. next_engine=2 drives
++ * the SAME hardware-proven KGSE_MODE recipe the RX attach_cc family
++ * already uses (ENQUEUE_KG_DFLT_NIA kept, KGSE_CCBS/kgse_bmch set --
++ * flipping the scheme's own NIA to FM_CTL|AC_CC is proven to stall
++ * dispatch, per keygen_scheme_setup()'s next_engine==2 comment).
++ *
++ * @pcd:           PCD subsystem handle
++ * @hw_port_id:    O/H hardware port id (0x02-0x07)
++ * @cc_group_off:  MURAM byte offset of the CC tree root
++ * @scheme_id_out: out param, the allocated scheme id -- the caller must
++ *                 keep it to later call fman_pcd_kg_port_detach_oh_cc()
++ *
++ * Return: 0 on success, negative errno otherwise.
++ */
++int fman_pcd_kg_port_attach_oh_cc(struct fman_pcd *pcd, u8 hw_port_id,
++				  u32 cc_group_off, u8 *scheme_id_out)
++{
++	struct fman_pcd_kg_scheme_params alloc_params = { .id = -1 };
++	struct fman_keygen *keygen;
++	struct keygen_scheme *slot;
++	struct fman *fman;
++	struct mutex *lock;
++	int id, err;
++
++	if (!pcd || !cc_group_off || !scheme_id_out)
++		return -EINVAL;
++	if (hw_port_id < 0x02 || hw_port_id > 0x07)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++
++	id = kg_alloc_scheme_id(keygen, &alloc_params);
++	if (id < 0) {
++		mutex_unlock(lock);
++		return id;
++	}
++	slot = &keygen->schemes[id];
++
++	memset(slot, 0, sizeof(*slot));
++	slot->hw_port_id    = hw_port_id;
++	slot->next_engine    = 2;
++	slot->cc_base_offset = 0;
++	slot->cc_bits_sel    = cc_group_off;
++
++	err = keygen_scheme_setup(keygen, id, true);
++	if (err) {
++		mutex_unlock(lock);
++		return err;
++	}
++
++	err = keygen_bind_port_to_schemes(keygen, id, true);
++	if (err) {
++		slot->used = false;
++		(void)keygen_scheme_setup(keygen, id, true);
++		mutex_unlock(lock);
++		return err;
++	}
++
++	{
++		struct fman_port *ohport = fman_port_lookup_oh(fman, hw_port_id);
++
++		if (ohport)
++			(void)fman_port_set_kg_direct_scheme(ohport, (u8)id);
++	}
++
++	mutex_unlock(lock);
++	*scheme_id_out = (u8)id;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_oh_cc);
++
++/*
++ * fman_pcd_kg_port_detach_oh_cc() - reverse of
++ * fman_pcd_kg_port_attach_oh_cc(): unbind and free the scheme it created.
++ * Idempotent -- a scheme already gone (or an out-of-range id) is a no-op.
++ */
++void fman_pcd_kg_port_detach_oh_cc(struct fman_pcd *pcd, u8 scheme_id)
++{
++	struct fman_keygen *keygen;
++	struct fman *fman;
++	struct mutex *lock;
++
++	if (!pcd || scheme_id >= FM_KG_MAX_NUM_OF_SCHEMES)
++		return;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++	if (!keygen->schemes[scheme_id].used) {
++		mutex_unlock(lock);
++		return;
++	}
++
++	{
++		struct fman_port *ohport = fman_port_lookup_oh(fman,
++			keygen->schemes[scheme_id].hw_port_id);
++
++		if (ohport)
++			fman_port_clear_kg_direct_scheme(ohport);
++	}
++
++	(void)keygen_bind_port_to_schemes(keygen, scheme_id, false);
++	keygen->schemes[scheme_id].used = false;
++	(void)keygen_scheme_setup(keygen, scheme_id, false);
++	mutex_unlock(lock);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_port_detach_oh_cc);
++
+ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id)
+ {
+ 	struct fman_keygen *keygen;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 91ab749a6785..0ee2290b715c 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -303,6 +303,43 @@ int fman_pcd_kg_port_attach_cc_dual(struct fman_pcd *pcd, u8 hw_port_id,
+ int fman_pcd_kg_port_attach_cc_dual_ekfc(struct fman_pcd *pcd, u8 hw_port_id,
+ 					 u32 cc_group_off);
+ 
++/**
++ * fman_pcd_kg_port_attach_oh_cc() - create and bind a catch-all KeyGen
++ * scheme routing an O/H port's frames into a CC tree (T-M6-8 Option D
++ * phase 1h).
++ *
++ * Unlike the RX attach_cc family above, which all REPROGRAM an existing
++ * scheme (valid only because RX ports always get a default RSS scheme
++ * bound during normal fman_port_init()), an O/H port brought up via the
++ * debug harness never gets any scheme bound -- this allocates a FRESH
++ * one instead. match_vector is left 0 (the documented catch-all
++ * convention this driver already uses for policer pass-through schemes),
++ * so no key extraction happens; the CC tree's own miss slot (a real
++ * hardware enqueue-AD) handles dispatch for every frame.
++ *
++ * @pcd:           PCD subsystem handle (fman_get_pcd())
++ * @hw_port_id:    O/H hardware port id (0x02-0x07)
++ * @cc_group_off:  MURAM byte offset of the CC tree root
++ *                 (fman_pcd_cc_static_get_base())
++ * @scheme_id_out: out param, the allocated scheme id -- keep it to later
++ *                 call fman_pcd_kg_port_detach_oh_cc()
++ *
++ * Return: 0 on success; -EINVAL bad args; -ENXIO no KeyGen; -ENOSPC no
++ * free scheme id.
++ */
++int fman_pcd_kg_port_attach_oh_cc(struct fman_pcd *pcd, u8 hw_port_id,
++				  u32 cc_group_off, u8 *scheme_id_out);
++
++/**
++ * fman_pcd_kg_port_detach_oh_cc() - reverse of
++ * fman_pcd_kg_port_attach_oh_cc(): unbind and free the scheme it created.
++ * @pcd:        PCD subsystem handle
++ * @scheme_id:  the id returned by fman_pcd_kg_port_attach_oh_cc().
++ *              Idempotent -- an already-gone or out-of-range id is a
++ *              no-op.
++ */
++void fman_pcd_kg_port_detach_oh_cc(struct fman_pcd *pcd, u8 scheme_id);
++
+ /**
+  * fman_pcd_kg_port_detach_cc() - restore an RX port's RSS scheme to the
+  * plain BMI-enqueue path (reverse of fman_pcd_kg_port_attach_cc()).
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 1ba6b352626e..17ea7b1678b5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -171,6 +171,7 @@
+ #define NIA_ENG_HWP					0x00440000
+ #define NIA_ENG_HWK					0x00480000
+ #define NIA_KG_CC_EN					0x00000200
++#define NIA_KG_DIRECT					0x00000100	/* F-162 */
+ #define NIA_BMI_AC_ENQ_FRAME				0x00000002
+ #define NIA_BMI_AC_TX_RELEASE				0x000002C0
+ #define NIA_BMI_AC_RELEASE				0x000000C0
+@@ -1940,6 +1941,53 @@ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
+ 
+ 	iowrite32be(cc_muram_off, &port->bmi_regs->rx.fmbm_rccb);
+ 
++	/*
++	 * F-168 (Task #26, 2026-08-06): RM §5.12.14.1 documents FMFP_EXTC[INV0]
++	 * SYNC as required after changing a live FMan-controller-walked
++	 * structure, before dispatch into it is safe. fmbm_rccb just repointed
++	 * the AC_CC dispatch target; assert SYNC here, before fmbm_rfpne below
++	 * enables dispatch into it -- testing whether this prevents the
++	 * port-wedge that has reproducibly occurred on every prior arm attempt
++	 * this session. Scoped to the arm path only (cc_muram_off != 0);
++	 * teardown (cc_muram_off == 0) is untouched -- it has never shown the
++	 * wedge symptom, so there is no hypothesis to test there. F-167
++	 * board-confirmed this register is safe/responsive to touch standalone;
++	 * this is the first test with an actual port arm in the picture.
++	 */
++	/* F-215(sync-gate): assert the GLOBAL FMFP_EXTC[INV0] SYNC only when
++	 * this is the FIRST engaged RX port on the FMan. A live sibling keeps
++	 * the FMan controller non-quiescent, so INV0 could never clear and
++	 * asserting it on the 2nd port wedges both (image 2040/2129). The
++	 * vendor never asserts INV0 on an arm path with siblings live. */
++	if (cc_muram_off && fman_cc_engaged_get(port->fm) == 0) {
++		const u32 inv0 = 0x80000000U;
++		const unsigned int poll_max = 100000U;
++		u32 extc;
++		unsigned int i;
++
++		fman_set_fpm_extc(port->fm, inv0);
++		for (i = 0; i < poll_max; i++) {
++			extc = fman_get_fpm_extc(port->fm);
++			if (!(extc & inv0))
++				break;
++			udelay(1);
++		}
++		if (extc & inv0)
++			dev_warn(port->dev,
++				 "fman_port: FMFP_EXTC SYNC timed out after %u polls (fmfp_extc=0x%08x)\n",
++				 poll_max, extc);
++		else
++			dev_info(port->dev,
++				 "fman_port: FMFP_EXTC SYNC cleared after %u poll(s)\n", i);
++	}
++
++	/* F-215(sync-gate): maintain the engaged-port counter used above.
++	 * arm (cc_muram_off != 0) -> ++, teardown (== 0) -> -- (floored). */
++	if (cc_muram_off)
++		fman_cc_engaged_inc(port->fm);
++	else
++		fman_cc_engaged_dec(port->fm);
++
+ 	/*
+ 	 * SDK FM_PORT_SetPCD concurrence: for the PRS->KG->CC chain the
+ 	 * parser-to-KeyGen NIA carries NIA_KG_CC_EN so KeyGen hands the
+@@ -1966,6 +2014,175 @@ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
+ }
+ EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
+ 
++/**
++ * fman_port_set_kg_direct_scheme() - address a single KeyGen scheme
++ * directly in fmbm_rfpne (F-162)
++ * @port: the FMan RX port
++ * @scheme_id: physical scheme id (0-31) to address directly
++ *
++ * SDK FM_PORT_SetPCD's PRS_AND_KG_AND_CC case (fm_port.c SetPcd())
++ * ORs NIA_KG_DIRECT | physicalSchemeId into fmbm_rfpne whenever the
++ * port has exactly one (non-match-vector-selected) scheme bound --
++ * this project's CC-graft model exactly. Without this, the KeyGen
++ * falls back to the generic SI/match-vector scheme-selection walk
++ * instead of deterministically using the CC-attached scheme.
++ *
++ * Returns 0 on success, -EINVAL on a NULL/unsupported port type.
++ *
++ * T-M6-8 Option D phase 1h (gap found by ISA-coverage audit): the NIA
++ * encoding (NIA_KG_DIRECT | scheme_id[4:0]) is the same universal FMan
++ * NIA field format used by fmbm_rfpne AND fmbm_ofpne alike -- this was
++ * hardcoded RX-only with no O/H branch, same bug class as
++ * fman_port_set_params_page()'s pre-0190 gap. Extended rather than left
++ * RX-only since an O/H port's CC-attached scheme needs the identical
++ * deterministic-addressing fix.
++ */
++int fman_port_set_kg_direct_scheme(struct fman_port *port, u8 scheme_id)
++{
++	u32 __iomem *fpne;
++	u32 val;
++
++	if (!port)
++		return -EINVAL;
++	if (port->port_type == FMAN_PORT_TYPE_RX)
++		fpne = &port->bmi_regs->rx.fmbm_rfpne;
++	else if (port->port_type == FMAN_PORT_TYPE_OH)
++		fpne = &port->bmi_regs->oh.fmbm_ofpne;
++	else
++		return -EINVAL;
++
++	val = ioread32be(fpne);
++	val = (val & ~0x1Fu) | NIA_KG_DIRECT | ((u32)scheme_id & 0x1Fu);
++	iowrite32be(val, fpne);
++
++	dev_info(port->dev,
++		 "fman_port: KG direct-scheme addressing set, scheme %u (fpne 0x%08x)\n",
++		 scheme_id, val);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_kg_direct_scheme);
++
++/**
++ * fman_port_clear_kg_direct_scheme() - inverse of
++ * fman_port_set_kg_direct_scheme() (F-162)
++ * @port: the FMan RX or O/H port
++ */
++void fman_port_clear_kg_direct_scheme(struct fman_port *port)
++{
++	u32 __iomem *fpne;
++	u32 val;
++
++	if (!port)
++		return;
++	if (port->port_type == FMAN_PORT_TYPE_RX)
++		fpne = &port->bmi_regs->rx.fmbm_rfpne;
++	else if (port->port_type == FMAN_PORT_TYPE_OH)
++		fpne = &port->bmi_regs->oh.fmbm_ofpne;
++	else
++		return;
++
++	val = ioread32be(fpne);
++	val &= ~(NIA_KG_DIRECT | 0x1Fu);
++	iowrite32be(val, fpne);
++}
++EXPORT_SYMBOL_GPL(fman_port_clear_kg_direct_scheme);
++
++/* F-205 (T-M6-1 Phase 3): parser LCV slots for the hard-parse HXS graph.
++ * Ethernet = slot 0 (universal catch-all), IPv4 = slot 5, IPv6 = slot 6
++ * (silicon-fixed; vendor GetPrsHdrNum). */
++#define FMAN_HWP_HXS_ETH	0
++#define FMAN_HWP_HXS_IPV4	5
++#define FMAN_HWP_HXS_IPV6	6
++
++/**
++ * fman_port_set_lcv_split() - split this RX port's parser LCV so the ETH
++ * (slot 0, catch-all), IPv4 (slot 5) and IPv6 (slot 6) HXS contribute
++ * distinct bits.
++ * @port: the FMan RX port
++ * @catchall_bit: LCV bit ORed by the ETH HXS (slot 0) — present on EVERY
++ *   frame, so a catch-all scheme (mv=catchall_bit) matches non-IP frames
++ *   (ARP, ND, multicast, L2) that would otherwise NO_SCHEME (0x20000000)
++ * @v4_bit: single LCV bit ORed by the IPv4 HXS (e.g. 0x40000000)
++ * @v6_bit: single LCV bit ORed by the IPv6 HXS (e.g. 0x80000000)
++ *
++ * Zeroes every pmda[].lcv, then sets slot0=catchall, slot5=v4, slot6=v6,
++ * and reads back to verify (S6 R10.2). An IPv4 frame's LCV = v4|catchall,
++ * IPv6 = v6|catchall, non-IP = catchall only. DO NOT zero slot 0 — that was
++ * the 2026-08-19 NO_SCHEME/deaf-port root cause. Enables per-family KeyGen
++ * scheme selection via kgse_mv with a catch-all fallback.
++ *
++ * Returns 0 on success, -EINVAL on a NULL/non-RX port, -EIO on readback
++ * mismatch.
++ */
++int fman_port_set_lcv_split(struct fman_port *port, u32 catchall_bit,
++			   u32 v4_bit, u32 v6_bit)
++{
++	struct fman_port_hwp_regs __iomem *regs;
++	int i;
++
++	if (!port || port->port_type != FMAN_PORT_TYPE_RX || !port->hwp_regs)
++		return -EINVAL;
++	regs = port->hwp_regs;
++
++	/* The pmda[].lcv words are hard-parser shadow RAM; they only commit to
++	 * the live parse array while the parser is stopped (PCAC PSTOP/PSTAT).
++	 * Mainline init_hwp() and the vendor SetPcd() both bracket every PMDA
++	 * write this way; writing them live lets the register readback pass
++	 * while the live parse memory silently keeps the old value (root cause
++	 * of the 2026-08-19 'split set but slots 5/6 stay dark' board result).
++	 */
++	stop_port_hwp(port);
++	for (i = 0; i < HWP_HXS_COUNT; i++)
++		iowrite32be(0, &regs->pmda[i].lcv);
++	iowrite32be(catchall_bit, &regs->pmda[FMAN_HWP_HXS_ETH].lcv);
++	iowrite32be(v4_bit, &regs->pmda[FMAN_HWP_HXS_IPV4].lcv);
++	iowrite32be(v6_bit, &regs->pmda[FMAN_HWP_HXS_IPV6].lcv);
++
++	if (ioread32be(&regs->pmda[FMAN_HWP_HXS_ETH].lcv) != catchall_bit ||
++	    ioread32be(&regs->pmda[FMAN_HWP_HXS_IPV4].lcv) != v4_bit ||
++	    ioread32be(&regs->pmda[FMAN_HWP_HXS_IPV6].lcv) != v6_bit) {
++		start_port_hwp(port);
++		dev_err(port->dev,
++			"fman_port: LCV-split readback mismatch (ca=0x%08x v4=0x%08x v6=0x%08x)\n",
++			catchall_bit, v4_bit, v6_bit);
++		return -EIO;
++	}
++	start_port_hwp(port);
++	dev_info(port->dev,
++		 "fman_port: parser LCV split (ETH slot0=0x%08x, IPv4 slot5=0x%08x, IPv6 slot6=0x%08x)\n",
++		 catchall_bit, v4_bit, v6_bit);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_lcv_split);
++
++/**
++ * fman_port_clear_lcv_split() - restore this RX port's parser LCV to the
++ * mainline default (all HXS lcv = 0xffffffff). Reversibility anchor for
++ * disengage. Readback-verified.
++ * @port: the FMan RX port
++ */
++void fman_port_clear_lcv_split(struct fman_port *port)
++{
++	struct fman_port_hwp_regs __iomem *regs;
++	int i;
++
++	if (!port || port->port_type != FMAN_PORT_TYPE_RX || !port->hwp_regs)
++		return;
++	regs = port->hwp_regs;
++
++	/* Same parser-access-control rule as set_lcv_split(): quiesce before
++	 * restoring the PMDA shadow RAM, then restart after readback. */
++	stop_port_hwp(port);
++	for (i = 0; i < HWP_HXS_COUNT; i++)
++		iowrite32be(0xffffffff, &regs->pmda[i].lcv);
++
++	if (ioread32be(&regs->pmda[FMAN_HWP_HXS_IPV6].lcv) != 0xffffffff)
++		dev_warn(port->dev,
++			 "fman_port: LCV-split clear readback mismatch\n");
++	start_port_hwp(port);
++}
++EXPORT_SYMBOL_GPL(fman_port_clear_lcv_split);
++
+ /**
+  * fman_port_set_oh_cc_base() - arm/disarm an O/H port's CC-tree dispatch
+  * @port: the FMan O/H port
+@@ -1983,6 +2200,17 @@ EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
+  * unconditionally, not via the RMW guard fman_port_set_cc_base() uses,
+  * since there's no third fmbm_ofpne state to preserve here.
+  *
++ * T-M6-8 Option D phase 1h (gap found by ISA-coverage audit): fmbm_occb
++ * is the O/H equivalent of fmbm_rccb -- the SAME class of live,
++ * FM_CTL-controller-walked structure that fman_port_set_cc_base()'s F-168
++ * comment documents RM Sec5.12.14.1's FMFP_EXTC[INV0] SYNC as required
++ * for, before dispatch into it is safe. That barrier was only ever
++ * implemented on the RX path; this mirrors it here (same F-215 sync-gate
++ * discipline, same shared fman_cc_engaged_get/inc/dec counter -- a single
++ * FMan controller instance backs both RX and O/H ports, so the global
++ * INV0 sync and its "only when no live sibling" gating apply identically
++ * regardless of which port type is arming).
++ *
+  * Returns 0 on success, -EINVAL on a NULL or non-O/H port.
+  */
+ int fman_port_set_oh_cc_base(struct fman_port *port, u32 cc_muram_off)
+@@ -1992,6 +2220,33 @@ int fman_port_set_oh_cc_base(struct fman_port *port, u32 cc_muram_off)
+ 
+ 	iowrite32be(cc_muram_off, &port->bmi_regs->oh.fmbm_occb);
+ 
++	if (cc_muram_off && fman_cc_engaged_get(port->fm) == 0) {
++		const u32 inv0 = 0x80000000U;
++		const unsigned int poll_max = 100000U;
++		u32 extc;
++		unsigned int i;
++
++		fman_set_fpm_extc(port->fm, inv0);
++		for (i = 0; i < poll_max; i++) {
++			extc = fman_get_fpm_extc(port->fm);
++			if (!(extc & inv0))
++				break;
++			udelay(1);
++		}
++		if (extc & inv0)
++			dev_warn(port->dev,
++				 "fman_port: O/H FMFP_EXTC SYNC timed out after %u polls (fmfp_extc=0x%08x)\n",
++				 poll_max, extc);
++		else
++			dev_info(port->dev,
++				 "fman_port: O/H FMFP_EXTC SYNC cleared after %u poll(s)\n", i);
++	}
++
++	if (cc_muram_off)
++		fman_cc_engaged_inc(port->fm);
++	else
++		fman_cc_engaged_dec(port->fm);
++
+ 	iowrite32be(cc_muram_off ? (NIA_ENG_HWK | NIA_KG_CC_EN) :
+ 				  (NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME),
+ 		    &port->bmi_regs->oh.fmbm_ofpne);
+@@ -3199,17 +3454,33 @@ static ssize_t fman_port_oh_test_dump(u8 port_id)
+  * sched_fq -> inject -> dump (confirm capture sink frm_cnt/byte_cnt moved,
+  * vs phase 1f/1g's confirmed-zero baseline) -> cc_disarm -> unsched_fq ->
+  * enable 0 -> capture_fini.
++ *
++ * gap-fix update: phase 1h's first silicon result (CC-tree AD target
++ * genuinely armed, register readback correct) STILL missed. Root cause
++ * found by an ISA-coverage audit: an O/H port never gets a KeyGen scheme
++ * bound (fman_port_init()'s keygen_port_hashing_init() is gated on
++ * pcd_fqs_count, which O/H bring-up never sets), so routing fmbm_ofpne to
++ * NIA_ENG_HWK had nothing for KeyGen to select. cc_arm now also calls the
++ * new fman_pcd_kg_port_attach_oh_cc() to create+bind a catch-all scheme.
+  */
++#define FMAN_PORT_OH_CC_SCHEME_NONE	0xffU
++static u8 fman_port_oh_cc_scheme[8] = {
++	[0 ... 7] = FMAN_PORT_OH_CC_SCHEME_NONE,
++};
++
+ static ssize_t fman_port_oh_test_cc_arm(u8 port_id, u32 fqid)
+ {
+ 	struct fman_pcd_cc_hw_spec spec;
+ 	struct fman_pcd *pcd;
+ 	struct fman_port *port;
+ 	u32 cc_base;
++	u8 scheme_id;
+ 	int err;
+ 
+ 	if (!fqid)
+ 		return -EINVAL;
++	if (port_id >= ARRAY_SIZE(fman_port_oh_cc_scheme))
++		return -EINVAL;
+ 
+ 	port = fman_port_oh_test_lookup(port_id, true);
+ 	if (!port) {
+@@ -3255,10 +3526,20 @@ static ssize_t fman_port_oh_test_cc_arm(u8 port_id, u32 fqid)
+ 		goto out_destroy;
+ 	}
+ 
+-	pr_info("fman_port: oh_test cc_arm 0x%02x OK, CC base 0x%x, miss->fqid=0x%x\n",
+-		port_id, cc_base, fqid);
++	err = fman_pcd_kg_port_attach_oh_cc(pcd, port_id, cc_base, &scheme_id);
++	if (err) {
++		pr_err("fman_port: oh_test cc_arm 0x%02x: fman_pcd_kg_port_attach_oh_cc() = %d\n",
++		       port_id, err);
++		goto out_disarm;
++	}
++	fman_port_oh_cc_scheme[port_id] = scheme_id;
++
++	pr_info("fman_port: oh_test cc_arm 0x%02x OK, CC base 0x%x, scheme %u, miss->fqid=0x%x\n",
++		port_id, cc_base, scheme_id, fqid);
+ 	return 0;
+ 
++out_disarm:
++	(void)fman_port_set_oh_cc_base(port, 0);
+ out_destroy:
+ 	fman_pcd_cc_static_destroy(pcd, port_id);
+ 	return err;
+@@ -3270,6 +3551,9 @@ static ssize_t fman_port_oh_test_cc_disarm(u8 port_id)
+ 	struct fman_port *port;
+ 	int err;
+ 
++	if (port_id >= ARRAY_SIZE(fman_port_oh_cc_scheme))
++		return -EINVAL;
++
+ 	port = fman_port_oh_test_lookup(port_id, true);
+ 	if (!port) {
+ 		pr_err("fman_port: oh_test cc_disarm 0x%02x: not configured yet\n",
+@@ -3280,6 +3564,11 @@ static ssize_t fman_port_oh_test_cc_disarm(u8 port_id)
+ 	if (!pcd)
+ 		return -ENXIO;
+ 
++	if (fman_port_oh_cc_scheme[port_id] != FMAN_PORT_OH_CC_SCHEME_NONE) {
++		fman_pcd_kg_port_detach_oh_cc(pcd, fman_port_oh_cc_scheme[port_id]);
++		fman_port_oh_cc_scheme[port_id] = FMAN_PORT_OH_CC_SCHEME_NONE;
++	}
++
+ 	err = fman_port_set_oh_cc_base(port, 0);
+ 	fman_pcd_cc_static_destroy(pcd, port_id);
+ 

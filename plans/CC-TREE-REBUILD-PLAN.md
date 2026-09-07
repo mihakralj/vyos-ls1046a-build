@@ -32,7 +32,7 @@ promiscuous noise, not a real signal; no bridging exists between the two.)
 
 **Root cause found — not byte layout.** Reading `fman_pcd_kg_port_attach_cc()`'s actual implementation
 (patch 0106) shows it grafts the CC-tree pointer into the KeyGen scheme's `KGSE_CCBS` register. But the
-earlier `.106` oracle investigation (`plans/NXP-106-ORACLE-VALIDATION-PLAN.md` Phase 2e, run on genuine
+earlier `.106` oracle investigation (`plans/archive/NXP-106-ORACLE-VALIDATION-PLAN.md` Phase 2e, run on genuine
 working NXP vendor hardware before that board was reimaged today) found `kgse_ccbs = 0` on **every**
 AC_CC-mode scheme on a board that *was* dispatching hardware classification successfully — the real
 group-table pointer for AC_CC mode lives in the per-port `FMBM_RCCB` BMI register instead, which that
@@ -79,7 +79,7 @@ project may never have silicon-confirmed a genuine hardware-classified HIT at pr
 any point in its history.** Full evidence trail: qdrant `agent_memory`, tag `ask2-code-review`, entries
 dated 2026-08-04 (including the `RETRACTION` / `no-confirmed-hw-hit-ever` entry).
 
-**Ground rule (same convention as `plans/NXP-106-ORACLE-VALIDATION-PLAN.md`):** prefer read-only /
+**Ground rule (same convention as `plans/archive/NXP-106-ORACLE-VALIDATION-PLAN.md`):** prefer read-only /
 local-build work by default. Any step that writes to live board PCD/MURAM state, flashes an image, or
 otherwise mutates shared board state requires explicit user confirmation before executing, even within
 an already-approved phase. Every phase below is annotated with a risk level.
@@ -187,5 +187,5 @@ and flip the correction banners in `arch/fman-pcd.md`, `arch/software-stack-ask.
 
 - This plan supersedes T-M6-5's prior scope in `plans/ASK2-MASTER-PLAN.md` §5; that entry should point
   here once this doc is committed.
-- Reuses tooling from `plans/NXP-106-ORACLE-VALIDATION-PLAN.md` (`bin/muram-mmap-dump.py`,
+- Reuses tooling from `plans/archive/NXP-106-ORACLE-VALIDATION-PLAN.md` (`bin/muram-mmap-dump.py`,
   `bin/kg-scheme-read.py`) if MURAM/KG-register-level verification is needed during Phase 0/1.

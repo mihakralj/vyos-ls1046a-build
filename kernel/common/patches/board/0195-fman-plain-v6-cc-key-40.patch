@@ -1,0 +1,143 @@
+From 2e4322ef40feeee25d6d68fcf3d1552f84d1587b Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Sun, 6 Sep 2026 04:24:32 +0000
+Subject: [PATCH] fman: plain IPv6 CC match-row support (F-245)
+
+The plain (non-dual-lane) CC tree gains the 40-byte IPv6 key: cc_pack_key_v6()
+packs PORT_ID|SRC6[16]|DST6[16]|NEXTHDR|SPORT|DPORT|pad[2] (RM 5.12-valid
+40), mirroring cc_pack_key()'s key+mask row conventions; the install's
+-ENOTSUPP rejection for plain+v6 keys is removed, the tree key_size selects
+40 when any key carries FMAN_PCD_CC_HW_F_IPV6, and the packer dispatch
+routes v6 keys to cc_pack_key_v6(). Matched against the plain-EKFC
+(0x801c0006) 38-byte v6 composite (the RM auto-16B IPSRC1/IPDST1
+extraction); the pad bytes are never compared.
+
+Patch-Name: 0195-fman-plain-v6-cc-key-40.patch
+---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 84 ++++++++++++++++---
+ 1 file changed, 72 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 2c270167e787..b5340efac4e5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -83,6 +83,11 @@
+ #define CC_GROUP_TABLE_SZ	256
+ #define CC_AD_ENTRY_SIZE	16
+ #define CC_KEY_SIZE		16
++/* F-245 (0195): plain (non-dual-lane) IPv6 CC key width - the
++ * 40-byte RM 5.12-valid row (PORT_ID|SRC6|DST6|NEXTHDR|ports|pad),
++ * matched against the plain-EKFC 38-byte v6 composite (the pad 2
++ * bytes are never compared). */
++#define CC_KEY_SIZE_V6		40
+ 
+ /*
+  * CONT_LOOKUP action descriptor (RM 8.7.4.1; SDK FillAdOfTypeContLookup,
+@@ -290,6 +295,57 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ 	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE), msk, CC_KEY_SIZE);
+ }
+ 
++/*
++ * F-245 (0195): plain IPv6 CC match-row packer - the 40-byte row
++ * (PORT_ID|SRC6[16]|DST6[16]|NEXTHDR|SPORT|DPORT|pad[2]), mirroring
++ * cc_pack_key()'s conventions. The port's KG scheme must remain the
++ * plain EKFC (0x801c0006): for IPv6 frames the RM auto-extracts the
++ * full 16-byte IPSRC1/IPDST1, producing the 38-byte composite that
++ * compares against this row's first 38 bytes.
++ */
++static void cc_pack_key_v6(void __iomem *match, u16 idx,
++			   const struct fman_pcd_cc_hw_key *k)
++{
++	u8 key[CC_KEY_SIZE_V6];
++	u8 msk[CC_KEY_SIZE_V6];
++	u8 *row;
++
++	memset(key, 0, sizeof(key));
++	memset(msk, 0, sizeof(msk));
++
++	/* byte 0: PORT_ID, always extracted as 0x00 on this ucode (F-183). */
++	key[0] = 0x00;
++	msk[0] = 0xff;
++
++	if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++		memcpy(&key[1], k->src_ip6, 16);
++		memset(&msk[1], 0xff, 16);
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++		memcpy(&key[17], k->dst_ip6, 16);
++		memset(&msk[17], 0xff, 16);
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
++		key[33] = k->proto;
++		msk[33] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
++		key[34] = (u8)(k->src_port_be >> 8);
++		key[35] = (u8)(k->src_port_be & 0xff);
++		msk[34] = msk[35] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
++		key[36] = (u8)(k->dst_port_be >> 8);
++		key[37] = (u8)(k->dst_port_be & 0xff);
++		msk[36] = msk[37] = 0xff;
++	}
++	/* bytes 38..39: pad - never compared, stay wildcard (mask 0). */
++
++	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE_V6;
++	memcpy_toio((void __iomem *)row, key, CC_KEY_SIZE_V6);
++	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE_V6), msk, CC_KEY_SIZE_V6);
++}
++
+ /*
+  * T-M6-8 VLAN-v6: dual-lane 46-byte CC key packer. Used by
+  * fman_pcd_cc_static_install() when struct fman_pcd_cc_hw_spec.dual_lane is
+@@ -615,16 +671,11 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 	if (hw->num_keys > FMAN_PCD_CC_HW_MAX_KEYS)
+ 		return -EINVAL;
+ 	/*
+-	 * IPv6 keys cannot match the v4-shaped 16-byte KG-emitted composite
+-	 * a plain (non-dual_lane) tree compares (see cc_pack_key()); reject
+-	 * loudly rather than install a key that can never hit. A dual_lane
+-	 * tree (T-M6-8 VLAN-v6 V6-2) uses cc_pack_key_dual()'s 46-byte
+-	 * family-discriminated layout instead, which has room for both.
++	 * F-245 (0195): a plain (non-dual_lane) tree may now carry IPv6 keys
++	 * via cc_pack_key_v6()'s 40-byte row (the RM auto-16B v6 extraction);
++	 * the earlier -ENOTSUPP rejection is gone. A dual_lane tree still
++	 * uses the 46-byte family-discriminated layout (V6-2).
+ 	 */
+-	if (!hw->dual_lane)
+-		for (i = 0; i < hw->num_keys; i++)
+-			if (hw->keys[i].present & FMAN_PCD_CC_HW_F_IPV6)
+-				return -ENOTSUPP;
+ 
+ 	muram = fman_get_muram(fman_pcd_get_fman(pcd));
+ 	if (!muram)
+@@ -637,9 +688,16 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 	t->pcd = pcd;
+ 	t->port_id = port_id;
+ 	t->num_keys = hw->num_keys;
+-	t->key_size = hw->dual_lane ?
+-		(hw->dual_lane_pid ? CC_KEY_SIZE_DUAL_PID : CC_KEY_SIZE_DUAL) :
+-		CC_KEY_SIZE;
++	{
++		bool v6 = false;
++
++		for (i = 0; i < hw->num_keys; i++)
++			if (hw->keys[i].present & FMAN_PCD_CC_HW_F_IPV6)
++				v6 = true;
++		t->key_size = hw->dual_lane ?
++			(hw->dual_lane_pid ? CC_KEY_SIZE_DUAL_PID : CC_KEY_SIZE_DUAL) :
++			(v6 ? CC_KEY_SIZE_V6 : CC_KEY_SIZE);
++	}
+ 	INIT_LIST_HEAD(&t->node);
+ 
+ 	/* (num_keys + 1) rows: trailing row is the miss slot (RM 8.7.4.2/3). */
+@@ -684,6 +742,8 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 			cc_pack_key_dual_pid(t->match, i, &hw->keys[i]);
+ 		else if (hw->dual_lane)
+ 			cc_pack_key_dual(t->match, i, &hw->keys[i]);
++		else if (hw->keys[i].present & FMAN_PCD_CC_HW_F_IPV6)
++			cc_pack_key_v6(t->match, i, &hw->keys[i]);
+ 		else
+ 			cc_pack_key(t->match, i, &hw->keys[i]);
+ 		cc_write_leaf_ad(t->ad, i, hw->keys[i].target_fqid,

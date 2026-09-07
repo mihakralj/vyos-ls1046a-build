@@ -160,18 +160,20 @@ int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
  * translate R4d).
  *
  * Builds one HMTD that does the tag edit(s) AND {RMV_ETHERNET,
- * INSRT_GENERIC(14-byte egress L2), IPV4_FORWARD(dec_ttl,l4_csum)} -
- * everything a routed-VLAN frame needs. @do_pop and @do_push are
- * independent: POP-only strips the ingress tag before the L2 rebuild,
- * PUSH-only inserts (@vid/@tpid/@pcp) after it, and BOTH set builds a
- * same-port VID-to-VID TRANSLATE chain (strip, rebuild, insert last). At
- * least one must be set. @src_mac is the egress port's own MAC, @dst_mac
- * the next-hop MAC. On success @handle receives the HMTD MURAM offset to
- * embed in a CC key's @hm_handle (with a non-zero @target_fqid).
- * Refcounted; sleepable; process context only.  Mirrors board patch 0121j.
+ * INSRT_GENERIC(14-byte egress L2), IPV4_FORWARD(dec_ttl,l4_csum) or
+ * IPV6_FORWARD(dec_hl)} - everything a routed-VLAN frame needs. @do_pop and
+ * @do_push are independent: POP-only strips the ingress tag before the L2
+ * rebuild, PUSH-only inserts (@vid/@tpid/@pcp) after it, and BOTH set builds
+ * a same-port VID-to-VID TRANSLATE chain (strip, rebuild, insert last). At
+ * least one must be set. @is_v6 selects the L3 rebuild family (board patch
+ * 0201) and is part of the dedup key. @src_mac is the egress port's own
+ * MAC, @dst_mac the next-hop MAC. On success @handle receives the HMTD
+ * MURAM offset to embed in a CC key's @hm_handle (with a non-zero
+ * @target_fqid). Refcounted; sleepable; process context only.  Mirrors
+ * board patch 0121j / 0201.
  */
 int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
-			    bool do_pop, bool do_push,
+			    bool do_pop, bool do_push, bool is_v6,
 			    u16 vid, u16 tpid, u8 pcp,
 			    const u8 *src_mac, const u8 *dst_mac,
 			    u32 egress_tx_fqid, u32 *handle);

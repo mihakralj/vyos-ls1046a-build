@@ -320,3 +320,227 @@
 # previously ran as source mutations on every build. See patch body.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0173-fman-pcd-fixup-fold.patch
+
+# ── ASK2 OH-port re-enqueue infra, phase 1a (2026-09-01) ──
+# T-M6-8 VLAN-via-OH-port re-architecture (plans/ASK2-VLAN-REARCH.md),
+# proving ground for the same OH-port primitive IPsec ESP offload needs.
+# Binds the 6 fsl,fman-v3-port-oh devicetree nodes (hw id 0x02-0x07,
+# live-confirmed unbound 2026-09-01) mainline never matched. Probe-only:
+# maps the register window, writes nothing. FMBM_OCFG bring-up is a
+# separate later increment.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0175-fman-port-oh-type.patch
+
+# Phase 1b: RM 5.5.7.6 FMBM_O* register bring-up + the fman_set_port_params()
+# mac_mfl aliasing fix found by review (hw_port_id_to_sw_port_id() silently
+# maps every O/H hw id to mac_id 0). Still fully dormant: FMBM_OCFG[EN] and
+# fman_port_set_oh_cc_base() are new exported functions, called from nowhere
+# yet. See plans/ASK2-VLAN-REARCH.md.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0176-fman-port-oh-bringup.patch
+
+# Phase 1c: hand-arm debugfs (/sys/kernel/debug/fman_port_oh_test/bringup)
+# to exercise 0176's fman_port_config()/fman_port_init() for the first time
+# on real silicon. FMBM_OCFG[EN] stays 0 -- de-risk only, no live traffic
+# path yet. Self-contained in fman_port.c (see patch body for why, not
+# routed through fman_pcd.c's cc_test debugfs tree).
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0177-fman-port-oh-test-debugfs.patch
+
+# Fix, board-found 2026-09-01: 0177's bringup lookup only searched
+# fman_port_active_list, which fman_port_init() populates -- but nothing
+# had ever called it for an O/H port (that's what bringup exists to do),
+# so the list was empty. Registers O/H ports at probe time instead and
+# fixes the lookup to match dts_params.id/.type (valid pre-init) rather
+# than port_id/port_type (only set by fman_port_config() itself).
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0178-fman-port-oh-probe-time-registry.patch
+
+# Polish, board-found 2026-09-01: "bringup 4" succeeded after 0178 (both
+# fman_port_config()/fman_port_init() returned 0) but dmesg showed a
+# spurious WARN_ON from verify_size_of_fifo() -- unmodified upstream,
+# only ever handled TX/RX, left both size sums at 0 for O/H. Harmless
+# (no functional effect) but noisy; O/H now takes the TX branch.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0179-fman-port-oh-fifo-size-warn.patch
+
+# Phase 1d step 1: "bringup" accepts an optional target-FQID hex arg
+# (FMBM_OFQID/OEFQID), and a new "enable <port> <0|1>" verb wraps
+# fman_port_oh_enable() (FMBM_OCFG[EN]) -- built in 0176, never exposed
+# until now. Still no CC tree, no QMan test FQ, nothing feeding the port
+# traffic -- FMBM_OCFG[EN]=1 gets tested in isolation first.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0180-fman-port-oh-enable-target-fqid.patch
+
+# Regression fix, board-found 2026-09-01: calling "bringup" on an O/H
+# port (0177/0178's probe-time fman_port_active_list registration,
+# followed by fman_port_init()'s own unconditional list_add_tail() on
+# the same node) double-inserts that port into the shared list,
+# corrupting it for EVERY port on the fman. Silently broke
+# fman_port_lookup_rx() for unrelated physical ports (-ENODEV from
+# fman_cc_tree_install(), surfaced as "fe_flow_insert=-19" board-wide)
+# -- found while diagnosing an unrelated VLAN offload bug report.
+# Guards both list_add_tail() call sites with a new bool field so the
+# node links at most once regardless of call order. Boards that
+# already ran "bringup" need a reboot to clear the corrupted list.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0181-fman-port-active-list-double-add.patch
+
+# Phase 1e of the O/H-port re-enqueue infra: schedule a QMan FQ onto the
+# O/H port's own dequeue channel (fman_port_get_qman_channel_id(), already
+# populated for O/H ports by 0175) via new "sched_fq"/"unsched_fq" debugfs
+# verbs, mirroring ask_hw.c's dedicated-TX-FQ pattern. Board port 0x04 is
+# armed+idle after 0175-0181 (2026-09-02) but nothing has ever fed it a
+# frame; this is the piece that lets a frame actually reach it.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0182-fman-port-oh-input-fq.patch
+
+# Phase 1f: close the loop on phase 1e's input FQ with an actual frame.
+# New "capture_init"/"capture_fini" verbs create a software-owned sink FQ
+# (own dqrr callback, decoupled from dpaa_eth's own RX FQs -- injecting
+# into eth3/eth4's live kernel RX FQ would misinterpret this tool's
+# hand-rolled buffer as dpaa_eth's own per-buffer bookkeeping). New
+# "inject <port>" builds one minimal frame and qman_enqueue()s it into
+# the port's phase-1e input FQ. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0183-fman-port-oh-inject-capture.patch
+
+# Phase 1g: read-only diagnostic after phase 1f's clean NULL result
+# (inject succeeded, capture saw 0 frames, no wedge). New "dump <port>"
+# reads back FMBM_OCFG/OFDNE/OFNE/OFPNE/OFQID/OEFQID/OCCB plus
+# qman_query_fq_np() on the input+capture FQs, to tell whether the O/H
+# port ever dequeued the injected frame at all vs. lost it downstream.
+# Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0184-fman-port-oh-dump-diagnostics.patch
+
+# T-M6-8 VLAN-v6 V6-1 (first increment of extending Option A's shipped
+# CC-tree+HMTD VLAN offload from IPv4-only to IPv4+IPv6): dormant
+# cc_pack_key_dual(), a 46-byte family-discriminated CC-tree match key
+# mirroring ask.ko's already-proven ehash dual-lane key byte-for-byte.
+# Purely additive -- cc_pack_key()/CC_KEY_SIZE untouched, no caller yet.
+# KUnit-covered (fman_pcd_cc_dual_key_test.c).
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0185-fman-pcd-cc-dual-lane-key-dormant.patch
+
+# T-M6-8 VLAN-v6 V6-2: wires 0185's cc_pack_key_dual() into
+# fman_pcd_cc_static_install() via a new dual_lane flag (default false,
+# byte-identical for every existing caller), fixes the CONT_LOOKUP
+# KeyLength field to use the tree's real key width instead of the global
+# v4 constant, and adds a cc_test "install_v6" debugfs verb for the
+# silicon de-risk. Depends on fixup F_236.py (bin/kernel-fixups/, KeyGen
+# GEC opt-in for CC-tree schemes) having run. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0186-fman-pcd-cc-dual-lane-install.patch
+
+# T-M6-8 VLAN-v6 V6-2 isolating experiment, added after install_v6's
+# board-confirmed null result (F-236's GEC scheme reconfig genuinely
+# works, but a real v6 frame still misses the CC-tree comparator). Adds
+# "install_v4gec" -- identical GEC/EKFC=0 dual-lane machinery but a real
+# IPv4 5-tuple, to determine whether EKFC=0 sourcing itself (not width,
+# not v6-specific GEC codes) is what the comparator can't see. Not yet
+# board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0187-fman-pcd-cc-test-v4gec-isolating.patch
+
+# T-M6-8 VLAN-v6 V6-2c hybrid EKFC+GEC isolating experiment, added after
+# install_v6/install_v4gec's board-confirmed family-independent null
+# result (all-GEC, EKFC=0 composites are invisible to the CC-tree
+# comparator). Keeps KGSE_EKFC nonzero (PORT_ID-only, 0x80000000) instead
+# of zeroing it, via fman_pcd_kg_port_attach_cc_dual_ekfc() (companion
+# fixup F_238.py) and a new 47-byte PORT_ID-prefixed key packer
+# (cc_pack_key_dual_pid(), does not touch the proven cc_pack_key_dual()).
+# Adds "install_v6pid" cc_test verb. Depends on fixup F_238.py having run
+# (which itself depends on F_236.py). Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0188-fman-pcd-cc-hybrid-ekfc-gec-isolating.patch
+
+# T-M6-8 Option D phase 1h: O/H CC-tree AD-target de-risk. 0188's V6-2c
+# result proved CC-tree is EKFC-only (GEC never visible), closing the
+# door on CC-tree for IPv6; the vendor-bpid VLAN hypothesis is also now
+# confirmed dead (silicon-tested, falsified 2026-08-25). Pivots to
+# Option D (ehash classify -> OH-port HM edit), the vendor's actual
+# mechanism. Adds "cc_arm"/"cc_disarm" debugfs verbs exercising
+# fman_port_set_oh_cc_base() (0176, dormant) to test whether the O/H
+# port's phase-1g frame-loss (dequeues but never reaches FMBM_OFQID)
+# is fixed by giving it a CC-tree AD target. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0189-fman-port-oh-cc-arm-derisk.patch
+
+# 0189's cc_arm verb board-tested -22 (EINVAL) from
+# fman_pcd_port_ensure_params_page(): fman_port_set_params_page() was
+# RX-only, but O/H CC-tree dispatch exits through the same AC 0x28
+# ucode and needs the same params page. O/H already has the exact
+# register equivalents (fmbm_ogpr/ofsdm/ofsem); this wires them in.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0190-fman-port-oh-params-page.patch
+
+# 0189+0190's cc_arm still board-tested a MISS despite genuinely
+# correct register state. ISA-coverage audit (comparing every RX-port
+# mechanism against its O/H equivalent) found the real cause plus two
+# related gaps: (1) fman_port_set_oh_cc_base() missing the RM-mandated
+# FMFP_EXTC[INV0] SYNC barrier fman_port_set_cc_base() (RX) already
+# has; (2) fman_port_set_kg_direct_scheme()/_clear() hardcoded
+# RX-only, same bug class as 0190; (3) ROOT CAUSE -- no function ever
+# created+bound a KeyGen scheme to an O/H port at all (RX ports get
+# one automatically via fman_port_init(), O/H bring-up never does),
+# so NIA_ENG_HWK had nothing for KeyGen to select. New
+# fman_pcd_kg_port_attach_oh_cc()/_detach_oh_cc() fix that, wired into
+# cc_arm/cc_disarm. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0191-fman-port-oh-cc-gaps.patch
+
+# T-M6-8 VLAN-freeze dig: fe_buffer already exposes the two params-page
+# fields (+0x54 pointer, +0x58 depletion counter) for the FE per-port
+# "5+tnums management index", but nobody had ever dumped what +0x54
+# actually points at. Recovered the real vendor layout from NXP SDK
+# source in this repo (ASK/patches/kernel/010-ask-fman-dpaa-ehash.patch,
+# FmPortSetFESupport): it's a byte-array free-list (cursor byte + packed
+# pool-offset bytes + a literal list of free tnum indices + 0xFF
+# terminator), not a bare counter. Adds one read-only hex-dump line per
+# armed port to fe_buffer so the free-list's live cursor/contents can be
+# correlated between a sustaining routed flow and a freezing VLAN flow.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0192-fman-pcd-fe-buffer-mgmt-index-dump.patch
+
+# CC-ACL-OFFLOAD-PLAN.md Phase 1: silicon-verified 2026-09-05 that patch
+# 0109's ethtool-ntuple -> CC-tree bridge produces a genuine hardware HIT
+# (two identical TCP transfers, one matching a rule and one not, landed on
+# two different real FQIDs: 512 steered vs 287 default-RSS). Investigating
+# Phase 1's mask-granularity question (0109 rejects any src-ip/dst-ip mask
+# other than all-ones/all-zero, blaming "the KG composite is not
+# prefix-aligned") found the real cause reading cc_pack_key() directly: the
+# composite IS byte-aligned (bytes 1-4 SIP, 5-8 DIP), but cc_pack_key()
+# hardcodes msk[]=0xff for every byte of a participating SRC_IP/DST_IP
+# field, silently discarding whatever mask value the caller supplied -
+# struct fman_cc_key.src_ip_mask/dst_ip_mask were already declared and
+# documented ("prefix-style mask") but never wired through
+# struct fman_pcd_cc_hw_key (which had no mask fields at all) into the
+# actual match-table byte write. This patch adds src_ip_mask_be/
+# dst_ip_mask_be to the hw key struct, passes them through
+# dpaa_cc_key_to_hw() (defaulting to exact-match 0xffffffff when unset, so
+# every existing caller - ask_vlan_cc.c, 0109's own exact-match rules - is
+# byte-identical), writes them verbatim into the CC row's mask bytes in
+# cc_pack_key() instead of the old hardcoded 0xff, and relaxes 0109's
+# dpaa_cls_validate()/dpaa_cls_reinstall() to accept and forward a real
+# mask for ip4src/ip4dst (e.g. 255.255.255.0) instead of rejecting it. No
+# NIA/register/graft changes - purely which mask bytes land in the
+# already-working match table, so it carries none of the task-pool-leak
+# risk a leaf-AD NIA change would (see the 0136/F-108 tfene=RELEASE
+# incident this project already hit on this exact silicon). Ports/tos stay
+# exact-or-wildcard only, out of scope for this pass. Not yet board-tested.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0193-fman-pcd-cc-key-mask-passthrough.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0194-dpaa-ethtool-ntuple-ehash-bridge.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0195-fman-plain-v6-cc-key-40.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0196-dpaa-ntuple-drop-terminal.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0197-fman-fe-flow-add-drop-verb.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0198-dpaa-tc-flower-acl-hook.patch
+0199-fman-pcd-fe-flow-add-drop-ctx-trace.patch
+0200-fman-pcd-fe-flow-add-drop-fqid-zero.patch
+0201-fman-vlan-route-ipv6-l3-forward.patch

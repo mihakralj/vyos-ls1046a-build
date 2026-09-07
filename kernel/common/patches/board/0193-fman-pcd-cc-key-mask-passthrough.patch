@@ -1,0 +1,134 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+index a56dda6fdbcd..893f80d9acc9 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -554,10 +554,16 @@ static int dpaa_set_coalesce(struct net_device *dev,
+  *    walker compares (0108: [SIP|DIP|SPI=0|SPORT|DPORT]) carries NO
+  *    protocol byte, so a tcp4 and a udp4 rule with identical
+  *    addresses+ports match the SAME traffic. Both spellings accepted.
+- *  - each field mask is all-ones (participates) or all-zero (wildcard);
+- *    partial prefixes are rejected (-EINVAL) - the CC record is
+- *    exact-match per masked byte and the KG composite is not prefix-
+- *    aligned.
++ *  - src-ip/dst-ip accept any mask (a real CIDR prefix like
++ *    255.255.255.0 works): the CC comparator ANDs both sides of the
++ *    compare with the stored per-byte mask (RM 8.7.4.2), so partial
++ *    masks are a genuine hardware capability, not just exact-or-
++ *    wildcard. (Previously rejected here on the mistaken assumption
++ *    that the KG composite wasn't byte-aligned for this - it is; the
++ *    real gap was cc_pack_key() hardcoding 0xff and dropping whatever
++ *    mask this file passed down, now fixed.) src-port/dst-port stay
++ *    exact-or-wildcard only - no ACL use case for partial port masks
++ *    yet, so that path is untouched.
+  *  - action = RX queue index [0 .. DPAA_ETH_PCD_RXQ_NUM), resolved to
+  *    the Nth FQ_TYPE_RX_PCD frame queue on priv->dpaa_fq_list; the FQ's
+  *    channel determines the servicing CPU (the spec sec 5.4 "HW
+@@ -619,11 +625,12 @@ static int dpaa_cls_validate(struct dpaa_priv *priv,
+ 	if (fs->flow_type != TCP_V4_FLOW && fs->flow_type != UDP_V4_FLOW)
+ 		return -EOPNOTSUPP;
+ 
+-	/* Exact-match-or-wildcard per field; no prefixes, no tos. */
+-	if (m->ip4src != 0 && m->ip4src != cpu_to_be32(0xffffffff))
+-		return -EINVAL;
+-	if (m->ip4dst != 0 && m->ip4dst != cpu_to_be32(0xffffffff))
+-		return -EINVAL;
++	/* SIP/DIP: any mask is valid - the CC row ANDs both sides of the
++	 * compare with it (RM 8.7.4.2), so a real prefix (255.255.255.0)
++	 * works, not just exact-match or full-wildcard. Ports/tos below are
++	 * unchanged: the composite's port bytes have no established ACL use
++	 * case for partial masking yet, so they stay exact-or-wildcard.
++	 */
+ 	if (m->psrc != 0 && m->psrc != cpu_to_be16(0xffff))
+ 		return -EINVAL;
+ 	if (m->pdst != 0 && m->pdst != cpu_to_be16(0xffff))
+@@ -690,11 +697,11 @@ static int dpaa_cls_reinstall(struct dpaa_priv *priv)
+ 			   FMAN_CC_PROTO_TCP : FMAN_CC_PROTO_UDP;
+ 		if (m->ip4src) {
+ 			k->src_ip = be32_to_cpu(h->ip4src);
+-			k->src_ip_mask = 0xffffffff;
++			k->src_ip_mask = be32_to_cpu(m->ip4src);
+ 		}
+ 		if (m->ip4dst) {
+ 			k->dst_ip = be32_to_cpu(h->ip4dst);
+-			k->dst_ip_mask = 0xffffffff;
++			k->dst_ip_mask = be32_to_cpu(m->ip4dst);
+ 		}
+ 		if (m->psrc)
+ 			k->src_port = be16_to_cpu(h->psrc);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 0d011e851aef..fa53237fa207 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -232,10 +232,12 @@ hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
+ } else {
+ if (k->src_ip || k->src_ip_mask) {
+ hw->src_ip_be = cpu_to_be32(k->src_ip);
++hw->src_ip_mask_be = k->src_ip_mask ? cpu_to_be32(k->src_ip_mask) : cpu_to_be32(0xffffffffu);
+ hw->present |= FMAN_PCD_CC_HW_F_SRC_IP;
+ }
+ if (k->dst_ip || k->dst_ip_mask) {
+ hw->dst_ip_be = cpu_to_be32(k->dst_ip);
++hw->dst_ip_mask_be = k->dst_ip_mask ? cpu_to_be32(k->dst_ip_mask) : cpu_to_be32(0xffffffffu);
+ hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
+ }
+ }
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 5817343bfb51..2c270167e787 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -237,7 +237,14 @@ static struct fman_pcd_cc_tree *cc_find_locked(struct fman_pcd *pcd, u8 port_id)
+  *    fman_pcd_cc_static_install() rejects them with -ENOTSUPP.
+  *
+  * The mask row mirrors the layout: 0xff for participating bytes, 0x00
+- * for wildcard.
++ * for wildcard non-participating fields. Within a participating SRC_IP/
++ * DST_IP field, msk[] is now copied verbatim from the caller's
++ * src_ip_mask_be/dst_ip_mask_be (previously hardcoded to 0xff for all 4
++ * bytes, silently discarding any prefix mask the public struct fman_cc_key
++ * API already documented). The CC comparator ANDs both the extracted
++ * composite and the stored key with this mask before comparing (RM
++ * 8.7.4.2), so any per-byte pattern is valid - a real CIDR prefix like
++ * 255.255.255.0 works, not just all-ones or all-zero.
+  */
+ static void cc_pack_key(void __iomem *match, u16 idx,
+ 			const struct fman_pcd_cc_hw_key *k)
+@@ -255,11 +262,11 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ 
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
+ 		memcpy(&key[1], &k->src_ip_be, 4);
+-		msk[1] = msk[2] = msk[3] = msk[4] = 0xff;
++		memcpy(&msk[1], &k->src_ip_mask_be, 4);
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
+ 		memcpy(&key[5], &k->dst_ip_be, 4);
+-		msk[5] = msk[6] = msk[7] = msk[8] = 0xff;
++		memcpy(&msk[5], &k->dst_ip_mask_be, 4);
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
+ 		key[9] = k->proto;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 0f0def8e4c88..0f98ecc726dd 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -466,6 +466,12 @@ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+  * @proto:        L4 protocol (IANA), single byte
+  * @src_ip_be:    IPv4 source (BE) when !FMAN_PCD_CC_HW_F_IPV6
+  * @dst_ip_be:    IPv4 dest   (BE)
++ * @src_ip_mask_be: per-byte AND mask for @src_ip_be, same BE byte order.
++ *                The CC match row ANDs both the extracted composite and the
++ *                stored key with this mask before comparing (RM 8.7.4.2),
++ *                so any byte pattern is valid, not just 0x00/0xff per byte -
++ *                a real prefix mask (e.g. 255.255.255.0) works.
++ * @dst_ip_mask_be: per-byte AND mask for @dst_ip_be, same BE byte order
+  * @src_ip6:      IPv6 source (16 bytes, network order)
+  * @dst_ip6:      IPv6 dest   (16 bytes, network order)
+  * @src_port_be:  L4 source port (BE)
+@@ -491,6 +497,8 @@ struct fman_pcd_cc_hw_key {
+ 	u8  dst_ip6[16];
+ 	u32 src_ip_be;
+ 	u32 dst_ip_be;
++	u32 src_ip_mask_be;
++	u32 dst_ip_mask_be;
+ 	u16 src_port_be;
+ 	u16 dst_port_be;
+ 	u16 target_qband;

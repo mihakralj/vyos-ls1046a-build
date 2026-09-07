@@ -1,0 +1,325 @@
+From 3c4d5e6f70819203847561928374650abcdefa1 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Mon, 7 Sep 2026 02:10:00 +0000
+Subject: [PATCH] fman: routed-VLAN HM node honors the flow's real L3 family
+ (T-M6-8c/F-253)
+
+fman_hm_vlan_route_l3() -- the L2/L3 rebuild step shared by every routed-
+VLAN adjacency (push, pop, and same-port VID-to-VID translate) -- hardcoded
+an IPv4 EtherType into the rebuilt Ethernet header and unconditionally
+appended an IPv4-specific TTL-decrement/checksum-recompute HM opcode,
+regardless of the flow's actual L3 family. Every v6 flow through a VLAN
+CC-tree route (test J: VLAN->VLAN v6) got a wrong 0x0800 EtherType and an
+inapplicable IPv4 field-update op, corrupting the frame: throughput
+collapsed to ~1.87 Gbps with two cores pegged near 100% softirq, the
+signature of a TCP retransmission storm processing malformed frames
+disguised as [HW_OFFLOAD].
+
+Threads a new @is_v6 through the whole call chain instead of guessing at
+the encoder:
+
+ - dpaa_fman_caps.h: new FMAN_HM_OP_IPV6_FORWARD op / fman_hm_ipv6_forward
+   params (dec_hl only -- IPv6 has no header checksum and Hop Limit isn't
+   part of the L4 pseudo-header, so there is no l4_csum flag to carry).
+ - fman_pcd.h: matching FMAN_PCD_HM_HW_OP_IPV6_FORWARD / ipv6_forward on
+   the neutral fman-side descriptor.
+ - dpaa_fman_caps.c: dpaa_hm_spec_to_hw() translates the new op;
+   fman_hm_vlan_route_l3() branches EtherType (0x0800/0x86dd) and forward
+   op by @is_v6; struct fman_hm_vlan_route_ent gains an is_v6 field that is
+   part of the dedup key (lookup + fman_hm_vlan_route_get()), so a v4 and
+   v6 flow sharing every other adjacency parameter never share a cached
+   HMTD built for the wrong family.
+ - fman_pcd_manip.c: real vendor opcode HMCD_OPCODE_IPV6_UPDATE=0x10,
+   HMCD_IPV6_UPDATE_HL=0x01 (cross-referenced against the NXP SDK's
+   fm_manip.c BuildHmct, HMCD_OPCODE_IPV6_UPDATE branch -- Peripherals/FM/
+   Pcd/fm_manip.c in the vendor sdk_fman tree), a new
+   hm_encode_ipv6_forward() mirroring hm_encode_ipv4_forward(), wired into
+   fman_pcd_hm_install()'s op dispatch (the generic ordered-op-list
+   encoder that fman_hm_node_install() -- and so fman_hm_vlan_route_get()
+   -- actually calls; confirmed this is NOT the separate "standalone MANIP
+   template" API before touching it).
+
+The ask.ko call site (ask_vlan_cc.c, tracked source not part of this board
+patch) passes key->l3_proto == ASK_FLOW_L3_IPV6 as the new argument.
+
+Patch-Name: 0201-fman-vlan-route-ipv6-l3-forward.patch
+---
+ drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c | 52 +++++++++++++++++++++++++++++++++++-----------
+ drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h | 28 +++++++++++++++++++++---
+ drivers/net/ethernet/freescale/fman/fman_pcd_manip.c | 27 +++++++++++++++++++++++
+ include/linux/fsl/fman_pcd.h                         |  4 ++++
+ 4 files changed, 94 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 00001a2b3c4d..00005e6f7081 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -260,6 +260,8 @@
+ 	FMAN_HM_OP_RMV_ETHERNET	= 4,
+ 	FMAN_HM_OP_INSRT_GENERIC = 5,
+ 	FMAN_HM_OP_IPV4_FORWARD	= 6,
++	/* IPv6 L3-forward counterpart (board patch 0201). */
++	FMAN_HM_OP_IPV6_FORWARD	= 7,
+ };
+ 
+ /* Parameters for FMAN_HM_OP_VLAN_INSERT. */
+@@ -292,6 +294,17 @@
+ 	u8 l4_csum;/* nonzero: recompute L3+L4 checksums in silicon */
+ };
+ 
++/*
++ * Parameters for FMAN_HM_OP_IPV6_FORWARD: routed-frame IPv6 edits (board
++ * patch 0201). IPv6 has no header checksum and hop-limit is not part of
++ * the L4 pseudo-header, so unlike IPV4_FORWARD there is no l4_csum flag --
++ * decrementing the hop limit needs no checksum recompute at all (NXP SDK
++ * fm_manip.c BuildHmct, HMCD_OPCODE_IPV6_UPDATE branch).
++ */
++struct fman_hm_ipv6_forward {
++	u8 dec_hl;/* nonzero: decrement the IPv6 Hop Limit */
++};
++
+ /**
+  * struct fman_hm_op - one entry in an HM node's op list
+  * @type:        which mutation (enum fman_hm_op_type)
+@@ -308,6 +321,7 @@
+ 		struct fman_hm_mpls_push   mpls_push;
+ 		struct fman_hm_insrt_generic insrt_generic;
+ 		struct fman_hm_ipv4_forward  ipv4_forward;
++		struct fman_hm_ipv6_forward  ipv6_forward;
+ 	};
+ };
+ 
+@@ -407,6 +421,12 @@
+  *                          ROUTED-VLAN adjacency (T-M6-8 R4a; translate R4d)
+  * @do_pop:          strip the ingress tag before the L2/L3 rebuild
+  * @do_push:         insert (@vid/@tpid/@pcp) after the L2/L3 rebuild
++ * @is_v6:           the routed frame's L3 family (board patch 0201) --
++ *                   selects IPV4_FORWARD(dec_ttl,l4_csum) vs
++ *                   IPV6_FORWARD(dec_hl) for the L3 rebuild step, and the
++ *                   rebuilt L2 header's EtherType (0x0800 vs 0x86dd). Part
++ *                   of the dedup key: a v4 and v6 flow sharing every other
++ *                   parameter must NEVER share a cached HMTD.
+  * @vid/@tpid/@pcp:  pushed tag params (@do_push only)
+  * @src_mac:         egress-port source MAC for the rebuilt L2 header
+  * @dst_mac:         next-hop destination MAC for the rebuilt L2 header
+@@ -417,12 +437,12 @@
+  * same-port VID-to-VID TRANSLATE, e.g. two 802.1Q vifs on one physical port
+  * routing to each other) are all valid; at least one must be set. Builds one
+  * HMTD that does the tag edit(s) AND {RMV_ETHERNET, INSRT_GENERIC(L2),
+- * IPV4_FORWARD(dec_ttl,l4_csum)} - everything a routed-VLAN frame needs. Use
+- * fman_hm_vlan_get() (VLAN-only) for a bridged VLAN flow instead. Refcounted;
+- * sleepable; process context.
++ * IPV4_FORWARD(dec_ttl,l4_csum) or IPV6_FORWARD(dec_hl)} - everything a
++ * routed-VLAN frame needs. Use fman_hm_vlan_get() (VLAN-only) for a bridged
++ * VLAN flow instead. Refcounted; sleepable; process context.
+  */
+ int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
+-			    bool do_pop, bool do_push,
++			    bool do_pop, bool do_push, bool is_v6,
+ 			    u16 vid, u16 tpid, u8 pcp,
+ 			    const u8 *src_mac, const u8 *dst_mac,
+ 			    u32 egress_tx_fqid, u32 *handle);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 00001a2b3c4e..00005e6f7082 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -446,6 +446,10 @@
+ 			dst->ipv4_forward.dec_ttl = src->ipv4_forward.dec_ttl;
+ 			dst->ipv4_forward.l4_csum = src->ipv4_forward.l4_csum;
+ 			break;
++		case FMAN_HM_OP_IPV6_FORWARD:
++			dst->type = FMAN_PCD_HM_HW_OP_IPV6_FORWARD;
++			dst->ipv6_forward.dec_hl = src->ipv6_forward.dec_hl;
++			break;
+ 		}
+ 	}
+ }
+@@ -954,6 +958,7 @@
+ 	u8			pcp;
+ 	bool			do_pop;
+ 	bool			do_push;
++	bool			is_v6;
+ 	u8			src_mac[ETH_ALEN];
+ 	u8			dst_mac[ETH_ALEN];
+ 	u8			port_id;
+@@ -966,7 +971,7 @@
+ 
+ static struct fman_hm_vlan_route_ent *
+ fman_hm_vlan_route_lookup(struct fman *fm, bool do_pop, bool do_push,
+-			  u16 vid, u16 tpid, u8 pcp,
++			  bool is_v6, u16 vid, u16 tpid, u8 pcp,
+ 			  const u8 *src_mac, const u8 *dst_mac,
+ 			  u32 egress_tx_fqid)
+ {
+@@ -976,6 +981,7 @@
+ 		if (v->fm == fm &&
+ 		    v->do_pop == do_pop &&
+ 		    v->do_push == do_push &&
++		    v->is_v6 == is_v6 &&
+ 		    v->egress_tx_fqid == egress_tx_fqid &&
+ 		    ether_addr_equal(v->src_mac, src_mac) &&
+ 		    ether_addr_equal(v->dst_mac, dst_mac) &&
+@@ -986,8 +992,15 @@
+ 	return NULL;
+ }
+ 
++/*
++ * Ethertype and L3-forward op differ by family; hop-limit decrement (v6)
++ * needs no checksum recompute (no header checksum, hop limit is outside the
++ * L4 pseudo-header) unlike TTL decrement (v4, l4_csum re-covers the pseudo-
++ * header). NXP SDK fm_manip.c BuildHmct, HMCD_OPCODE_IPV6_UPDATE branch.
++ */
+ static void fman_hm_vlan_route_l3(struct fman_hm_spec *spec, unsigned int i,
+-				  const u8 *dst_mac, const u8 *src_mac)
++				  const u8 *dst_mac, const u8 *src_mac,
++				  bool is_v6)
+ {
+ 	struct fman_hm_op *op;
+ 
+@@ -997,12 +1010,22 @@
+ 	op->insrt_generic.size = 2 * ETH_ALEN + 2;
+ 	memcpy(&op->insrt_generic.hdr[0], dst_mac, ETH_ALEN);
+ 	memcpy(&op->insrt_generic.hdr[ETH_ALEN], src_mac, ETH_ALEN);
+-	op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08; /* ETH_P_IP >> 8 */
+-	op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00; /* ETH_P_IP & 0xff */
++	if (is_v6) {
++		op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x86; /* ETH_P_IPV6 >> 8 */
++		op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0xdd; /* ETH_P_IPV6 & 0xff */
++	} else {
++		op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08; /* ETH_P_IP >> 8 */
++		op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00; /* ETH_P_IP & 0xff */
++	}
+ 	op = &spec->ops[i + 2];
+-	op->type = FMAN_HM_OP_IPV4_FORWARD;
+-	op->ipv4_forward.dec_ttl = 1;
+-	op->ipv4_forward.l4_csum = 1;
++	if (is_v6) {
++		op->type = FMAN_HM_OP_IPV6_FORWARD;
++		op->ipv6_forward.dec_hl = 1;
++	} else {
++		op->type = FMAN_HM_OP_IPV4_FORWARD;
++		op->ipv4_forward.dec_ttl = 1;
++		op->ipv4_forward.l4_csum = 1;
++	}
+ }
+ 
+ /*
+@@ -1013,12 +1036,14 @@
+  * after it; BOTH set builds a same-port VID-to-VID TRANSLATE chain (strip the
+  * old tag, rebuild L2/L3, insert the new tag last) -- e.g. two 802.1Q vifs on
+  * one physical port routing between each other. At least one of @do_pop/
+- * @do_push must be set. @dst_mac/@src_mac are the egress next-hop and
+- * egress-port MACs. On success *handle receives the HMTD MURAM offset for a
+- * CC leaf hm_handle. Sleepable; process context only.
++ * @do_push must be set. @is_v6 selects the L3 rebuild family (IPV4_FORWARD
++ * vs IPV6_FORWARD, and the rebuilt L2 EtherType) and is part of the dedup
++ * key. @dst_mac/@src_mac are the egress next-hop and egress-port MACs. On
++ * success *handle receives the HMTD MURAM offset for a CC leaf hm_handle.
++ * Sleepable; process context only.
+  */
+ int fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
+-			   bool do_pop, bool do_push,
++			   bool do_pop, bool do_push, bool is_v6,
+ 			   u16 vid, u16 tpid, u8 pcp,
+ 			   const u8 *src_mac, const u8 *dst_mac,
+ 			   u32 egress_tx_fqid, u32 *handle)
+@@ -1041,7 +1066,7 @@
+ 
+ 	mutex_lock(&fman_hm_vlan_route_lock);
+ 
+-	v = fman_hm_vlan_route_lookup(fm, do_pop, do_push, vid, tpid, pcp,
++	v = fman_hm_vlan_route_lookup(fm, do_pop, do_push, is_v6, vid, tpid, pcp,
+ 				      src_mac, dst_mac, egress_tx_fqid);
+ 	if (v) {
+ 		refcount_inc(&v->refcount);
+@@ -1069,7 +1094,7 @@
+ 	if (do_pop)
+ 		spec.ops[n++].type = FMAN_HM_OP_VLAN_STRIP;
+ 
+-	fman_hm_vlan_route_l3(&spec, n, dst_mac, src_mac);
++	fman_hm_vlan_route_l3(&spec, n, dst_mac, src_mac, is_v6);
+ 	n += 3;
+ 
+ 	if (do_push) {
+@@ -1095,6 +1120,7 @@
+ 	v->pcp = pcp & 0x7;
+ 	v->do_pop = do_pop;
+ 	v->do_push = do_push;
++	v->is_v6 = is_v6;
+ 	v->port_id = port_id;
+ 	ether_addr_copy(v->src_mac, src_mac);
+ 	ether_addr_copy(v->dst_mac, dst_mac);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 00001a2b3c4f..00005e6f7083 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -177,6 +177,13 @@
+ #define FMAN_PCD_HMCD_IP_L4_CS_CALC	0x00040000u
+ #define FMAN_PCD_HMCD_IPV4_UPDATE_TTL	0x00000001u
+ 
++/* IPv6 counterpart: HMCD_OPCODE_IPV6_UPDATE = 0x10, HMCD_IPV6_UPDATE_HL =
++ * 0x01.  IPv6 has no header checksum and Hop Limit is not part of the L4
++ * pseudo-header, so there is no checksum-recompute flag to set.
++ */
++#define FMAN_PCD_HMCD_OP_IPV6_UPDATE	0x10u
++#define FMAN_PCD_HMCD_IPV6_UPDATE_HL	0x00000001u
++
+ /* A whole-frame egress L2 (Ethernet) header is inserted at / removed from
+  * frame offset 0; ETH_HLEN (14) bytes for the remove.
+  */
+@@ -413,6 +420,23 @@
+ 	return cur;
+ }
+ 
++static void __iomem *
++hm_encode_ipv6_forward(const struct fman_pcd_hm_hw_op *op,
++			void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++
++	cmd = (u32)FMAN_PCD_HMCD_OP_IPV6_UPDATE << FMAN_PCD_HMCD_OC_SHIFT;
++	if (op->ipv6_forward.dec_hl)
++		cmd |= FMAN_PCD_HMCD_IPV6_UPDATE_HL;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	return cur;
++}
++
+ /**
+  * fman_pcd_hm_install() - program one ordered-op-list HM node.
+  * @pcd:     the PCD subsystem (from fman_get_pcd())
+@@ -551,6 +575,9 @@
+ 		case FMAN_PCD_HM_HW_OP_IPV4_FORWARD:
+ 			cur = hm_encode_ipv4_forward(op, cur, &last_cmd);
+ 			break;
++		case FMAN_PCD_HM_HW_OP_IPV6_FORWARD:
++			cur = hm_encode_ipv6_forward(op, cur, &last_cmd);
++			break;
+ 		default:
+ 			spin_unlock_irqrestore(&hm->lock, flags);
+ 			goto err_free_hmct;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 00001a2b3c50..00005e6f7084 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -588,6 +588,7 @@
+ 	FMAN_PCD_HM_HW_OP_RMV_ETHERNET	= 4,
+ 	FMAN_PCD_HM_HW_OP_INSRT_GENERIC	= 5,
+ 	FMAN_PCD_HM_HW_OP_IPV4_FORWARD	= 6,
++	FMAN_PCD_HM_HW_OP_IPV6_FORWARD	= 7,
+ };
+ 
+ /**
+@@ -622,6 +623,9 @@
+ 			u8 dec_ttl;	/* nonzero: decrement IPv4 TTL */
+ 			u8 l4_csum;	/* nonzero: recompute L3+L4 checksums */
+ 		} ipv4_forward;
++		struct {
++			u8 dec_hl;	/* nonzero: decrement IPv6 Hop Limit */
++		} ipv6_forward;
+ 	};
+ };
+ 

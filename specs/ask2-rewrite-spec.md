@@ -35,7 +35,7 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 | §12 (Wire format) | CDX ↔ kernel serialization — deleted v1.3 | `plans/archive/ASK2-IMPLEMENTATION.md` |
 | §13 (fman_pcd subsystem) | KeyGen, CC, HM, Policer, replicator | `arch/fman-pcd.md` (pipeline narrative), `arch/fman-microcode-210-programming-reference.md` (register reference) |
 | §13.3 (MURAM exhaustion) | gen_pool reservation, chain_create -ENOMEM | `arch/muram.md` |
-| §15 (Implementation status) | Per-module STARTED/NOT_STARTED | `plans/OFFLOAD-CAPABILITIES.md`, `plans/MODULE-INVENTORY.md` |
+| §15 (Implementation status) | Per-module STARTED/NOT_STARTED | `plans/OFFLOAD-CAPABILITY-PLAN.md`, `plans/MODULE-INVENTORY.md` |
 | §16 (Risk register) | MURAM sizing, HM chain caps | `arch/muram.md`, `plans/DUAL-DATAPLANE.md` |
 
 ## 2. Design intent documents (active)
@@ -69,8 +69,8 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 | `plans/ASK2-PRODUCTION-ARCHITECTURE.md` | **Course-correction (2026-08-11).** Production architecture + 6-phase plan. See the top correction banner for the M3 reframe and the genl-only/no-debugfs binding requirement. |
 | `plans/DUAL-DATAPLANE.md` | Dataplane mode state machine (S0/S1/S2) + CLI contract. v1.3 (2026-07-19). S1 = CC-tree + SW flowtable + manip chain. |
 | `plans/TF-2026-07-18-001-function-inventory.md` | Stub/type-drift inventory (F-01–F-23) feeding the master plan §5 re-land series. |
-| `plans/TRAFFIC-HARNESS.md` | Board SFP+ acceptance-gate traffic generator (CT201/CT202). |
-| `plans/OFFLOAD-CAPABILITIES.md` | Living inventory of silicon-verified offload capabilities. |
+| `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Current heidi→DUT `.185`→HELGA throughput harness (supersedes the retired LXC/third-board `plans/archive/TRAFFIC-HARNESS.md`). |
+| `plans/OFFLOAD-CAPABILITY-PLAN.md` | Per-capability vendor-vs-ASK2 mechanism reference (supersedes the dated `plans/archive/OFFLOAD-CAPABILITIES.md` v2.1 snapshot). |
 | `plans/MODULE-INVENTORY.md` | Delivered kernel patch inventory (107 board patches as of 2026-07-18). |
 
 ## 5. Architecture decision records (archive)
