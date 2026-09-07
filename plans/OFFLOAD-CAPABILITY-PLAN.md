@@ -164,6 +164,8 @@ typed action/param; **heavier** = provably needs a vendor-like separate primitiv
   plane (vs cmm's XFRM listener). Start AES-CBC-SHA256 only; keep the binding GCM
   refusal (CAAM A24a erratum). Advertise `NETIF_F_HW_ESP` LAST. Master plan
   T-M6-4 / IP1 / IP2. This is the largest capability; sequence after HMCD infra.
+  Full sequencing (including a config-only CAAM-crypto-acceleration tier that
+  ships ahead of the full FMan fast path): `plans/ASK2-IPSEC-OFFLOAD-PLAN.md`.
 
 ### 1.8 PPPoE — NOT IMPLEMENTED (soft-parser)
 - **Vendor:** `cdx_pppoe_cc` + PPPoE FCI + `cdx_sp.xml` soft-parser (`ccbase +=

@@ -2110,6 +2110,111 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-209 AC_CC CCOBASE encoding (v6 row select)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_224.py" 2>&1
     echo "### fman_keygen.c: F-224 46-byte dual-lane GEC key on AC_CC FE scheme"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_236.py" 2>&1
+    echo "### fman_keygen.c/internal.h/pcd_kg.c: F-236 CC-tree dual-lane GEC opt-in (T-M6-8 VLAN-v6 V6-2)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_238.py" 2>&1
+    echo "### fman_keygen.c/internal.h/pcd_kg.c: F-238 CC-tree GEC ekfc-trigger isolating test (T-M6-8 VLAN-v6 V6-2c)"
+fi
+
+# F-239 (T-M6-8 VLAN-v6 dig, 2026-09-03): CC-tree comparator input capture
+# (probe2). Must run AFTER F-216 (anchors on its normalized RXHASH block) --
+# placed at the end of the fixup sequence for that reason, same rationale
+# as F-236 needing F-224 to have already run.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ] && \
+   [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_239.py" 2>&1
+    echo "### fman_pcd.c/dpaa_eth.c: F-239 CC-tree comparator input capture (probe2, T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-240 (T-M6-8 VLAN-v6 dig, 2026-09-03): widen/restore a sacrificial RX
+# port's BMI Internal-Context copy window (FMBM_RICP) so probe2/F-239 can
+# actually reach CC_IC_KG_KEY_OFFSET. No ordering dependency on F-239 itself
+# (different anchors: fman_port.c/.h + fman_pcd_cc_test.c, not fman_pcd.c/
+# dpaa_eth.c) -- placed here to stay with the rest of the VLAN-v6 dig work.
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_port.h ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_240.py" 2>&1
+    echo "### fman_port.c/.h/pcd_cc_test.c: F-240 RICP widen/restore for CC-comparator capture (T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-241 (T-M6-8 VLAN-v6 dig, 2026-09-03): atomic probe3 verb replacing the
+# multi-command F-240 sequence that measurably corrupted real eth1 traffic
+# when its widen/restore window stayed open across slow interactive
+# console round-trips. Must run after F-240 (widen/restore + saved-state
+# arrays) and F-239 (fman_pcd_probe2_buf/valid).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_241.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-241 atomic probe3 capture (T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-242 (T-M6-8 VLAN-v6 dig, 2026-09-04): kgse_bmcl no-op mask fix. F-183's
+# CC-dispatch write to kgse_bmch (0x10C) incidentally arms up to 4 mask
+# commands (RM 5.10.3.12.4 MCS0-3/MO0-1); kgse_bmcl staying 0 (RM
+# 5.10.3.12.5 BM0-3) forces their incidentally-selected target bytes to
+# zero -- confirmed live as the dual-lane key's byte-42 corruption. No
+# ordering dependency (anchor is in the base file, unrelated to the
+# F-224/F-236/F-238 ekfc/gec block).
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_242.py" 2>&1
+    echo "### fman_keygen.c: F-242 kgse_bmcl no-op mask fix (T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-243 (T-M6-8 VLAN-v6 dig, 2026-09-04): soft-parser LCV-injection PoC.
+# Ground-truth-verified bytecode (OR_IV_LCV; JMP HXS RETURN_HXS) plus
+# sp_load/sp_arm/sp_disarm cc_test debugfs verbs, for the first safe
+# validation step of specs/ask2-soft-parser-lcv-scheme-select.md -- does
+# the injected LCV bit actually reach host-visible parse-result content.
+# Must run after F-205 (pmda[]/stop_port_hwp/start_port_hwp,
+# FMAN_HWP_HXS_IPV6) and F-240 (cc_test_saved_ricp array anchor).
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_port.h ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_243.py" 2>&1
+    echo "### fman_port.c/.h/pcd_cc_test.c: F-243 soft-parser LCV-injection PoC (T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-244 (T-M6-8 VLAN-v6 dig, 2026-09-04): soft-parser magic-byte PoC,
+# replaces F-243's OR_IV_LCV bytecode with STORE_IV_TO_RA -- F-243's LCV-
+# based verification is mathematically unusable (pmda[].lcv defaults to
+# 0xFFFFFFFF, saturated regardless of injection). Writes an unambiguous
+# 0xC3 into Parse Result byte 14 (route_type) instead. Must run after
+# F-243 (replaces its cc_test_sp_poc_code32 initializer).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_244.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-244 soft-parser magic-byte PoC (T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-245 (T-M6-8 VLAN-v6 dig, 2026-09-04): generalizes F-243/F-244's
+# sp_arm/sp_disarm from a hardcoded IPv6 HXS slot (6) to an arbitrary HXS
+# slot (cc_test's `sp_arm <port> [slot]`, defaults to 6), so the F-244
+# magic-byte hook can be armed on slot 0 (ETH catch-all) as a decisive
+# test of whether the soft-parser trigger mechanism works at all versus
+# slot 6 specifically never being live for real transit frames. Must run
+# after F-243 (fman_port_sp_arm/disarm, cc_test_saved_ssa/armed anchors).
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_port.h ] && \
+   [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_245.py" 2>&1
+    echo "### fman_port.c/.h/pcd_cc_test.c: F-245 sp_arm any-HXS-slot generalization (T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-246 (T-M6-8 VLAN-v6 dig, 2026-09-04): global FMan Parser soft-parser
+# execution-unit enable (FMPR_RPIMAC bit 0). Live read-only check on .185
+# found this register at 0x00000000 -- the soft-parser processor is
+# globally OFF under mainline's init_hwp() (an optional feature mainline
+# never implements), independent of any port's pmda[].ssa trigger bit --
+# fully explaining F-243/F-244/F-245's identical silent result on both
+# HXS slot 6 and slot 0. Traced from dpa_app's real init sequence
+# (FM_PCD_Disable() before PCD/soft-parser load, fmc_execute() enables at
+# the end) down through PrsEnable()/PrsDisable() to fman_prs_enable()/
+# fman_prs_disable() in the real vendor SDK source. Adds
+# sp_global_enable/sp_global_disable cc_test verbs. Must run after F-243
+# (SP_CODE_PHYS_BASE/SP_CODE_REGION_SIZE anchors).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_246.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-246 global soft-parser execution-unit enable (T-M6-8 VLAN-v6 dig)"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
