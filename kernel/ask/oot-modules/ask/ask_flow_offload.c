@@ -55,6 +55,8 @@
 #include <net/ndisc.h>
 #include <net/neighbour.h>
 #include <net/netevent.h>
+#include <net/ipv6.h>
+#include <net/addrconf.h>
 #include <net/net_namespace.h>
 #include <net/netfilter/nf_flow_table.h>
 #include "include/ask_internal.h"
@@ -2066,20 +2068,134 @@ static void ask_fe_flow_remove(const struct ask_flow_key *key)
 /* ------------------------------------------------------------------------- */
 
 /*
- * T-M6-8: resolve the ingress VLAN VID for a POP flow.
+ * T-M6-8b: does @dev (physical or VLAN vif) own @addr -- i.e. addr falls
+ * inside one of dev's own configured subnets? @addr is always the 16-byte
+ * ask_flow_key.src_ip/dst_ip form (v4 packed into the first 4 bytes, v6
+ * using all 16). Caller holds rcu_read_lock().
+ */
+static bool ask_dev_owns_addr_v4(struct net_device *dev, const u8 *addr16)
+{
+	struct in_device *in_dev;
+	const struct in_ifaddr *ifa;
+	__be32 addr;
+
+	memcpy(&addr, addr16, 4);
+	if (!addr)
+		return false;
+
+	in_dev = __in_dev_get_rcu(dev);
+	if (!in_dev)
+		return false;
+
+	in_dev_for_each_ifa_rcu(ifa, in_dev) {
+		__be32 mask = ifa->ifa_mask;
+
+		if ((addr & mask) == (ifa->ifa_address & mask))
+			return true;
+	}
+	return false;
+}
+
+static bool ask_dev_owns_addr_v6(struct net_device *dev, const u8 *addr16)
+{
+	const struct in6_addr *addr = (const struct in6_addr *)addr16;
+	struct inet6_dev *in6_dev;
+	struct inet6_ifaddr *ifa;
+
+	if (ipv6_addr_any(addr))
+		return false;
+
+	in6_dev = __in6_dev_get(dev);
+	if (!in6_dev)
+		return false;
+
+	list_for_each_entry_rcu(ifa, &in6_dev->addr_list, if_list) {
+		if (ipv6_prefix_equal(addr, &ifa->addr, ifa->prefix_len))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * T-M6-8b: unified ingress/egress VLAN-identity resolver.
  *
- * FLOW_ACTION_VLAN_POP carries no VID and the block_cb only gives us the
- * PHYSICAL ingress port (@iif). The popped tag is a property of the ingress
- * VLAN vif, so find the single-tag 802.1Q upper of the physical ingress dev
- * whose configured IPv4 subnet contains @peer_v4 (the flow's ingress-side peer
- * address, i.e. key.src_ip for the POP direction). Returns the VID (1..4094)
- * or 0 if no matching vif is found (caller fails closed to software).
+ * Both the "true ingress" echo-skip filter and the PR14z11 egress
+ * override used to compare raw ifindex values (block_cb dev vs. the
+ * kernel-reported conntrack-meta ingress_ifindex / the opposite-tuple
+ * next-hop iif). That comparison collapses the VLAN-vif-vs-physical
+ * distinction: is_vlan_dev(dev) ? vlan_dev_real_dev(dev) : dev always
+ * resolves a VLAN vif and its physical parent to the same FMan port,
+ * so an ifindex that happens to name the physical device is
+ * indistinguishable from one naming its own VLAN vif at the port-ID
+ * level -- yet the two need very different treatment for VLAN PUSH/
+ * POP tag handling and (for v6 especially) neighbour resolution, whose
+ * ND entries live on the VLAN vif, not the physical device.
+ *
+ * Given a physical net_device and the flow's peer address on that side
+ * (src_ip for ingress, next-hop dst for egress), this returns the ONE
+ * device -- the physical dev itself, or exactly one of its 802.1Q VLAN
+ * uppers -- whose configured subnet actually contains that address.
+ * NULL if none owns it (caller fails closed to software, same as
+ * today's behaviour when ask_resolve_ingress_vlan_vid() returned 0).
+ *
+ * This mirrors the vendor cdx stack's userspace route registration
+ * (control_ipv4.c IP_HandleIP_ROUTE_RESOLVE inputDevice/outputDevice/
+ * UnderlyingInputDevice: the ingress/egress/VLAN identity is resolved
+ * once and stored on the route), except computed live in-kernel per
+ * flow instead of pre-resolved once by a userspace connection-manager
+ * daemon -- there is no ask.ko equivalent of that daemon today.
+ *
+ * Returns a reference-counted device (dev_hold()'d); caller must
+ * dev_put() it.
+ */
+static struct net_device *ask_resolve_owning_dev(struct net_device *phys,
+						  bool is_v6,
+						  const u8 *peer_addr16)
+{
+	struct net_device *upper, *owner = NULL;
+	struct list_head *iter;
+
+	if (!phys || !peer_addr16)
+		return NULL;
+
+	rcu_read_lock();
+	if (is_v6 ? ask_dev_owns_addr_v6(phys, peer_addr16)
+		  : ask_dev_owns_addr_v4(phys, peer_addr16)) {
+		owner = phys;
+		goto out;
+	}
+	netdev_for_each_upper_dev_rcu(phys, upper, iter) {
+		if (!is_vlan_dev(upper) ||
+		    vlan_dev_vlan_proto(upper) != htons(ETH_P_8021Q))
+			continue;
+		if (is_v6 ? ask_dev_owns_addr_v6(upper, peer_addr16)
+			  : ask_dev_owns_addr_v4(upper, peer_addr16)) {
+			owner = upper;
+			break;
+		}
+	}
+out:
+	if (owner)
+		dev_hold(owner);
+	rcu_read_unlock();
+	return owner;
+}
+
+/*
+ * T-M6-8: resolve the ingress VLAN VID for a POP flow (thin wrapper over
+ * ask_resolve_owning_dev(), preserved for its one existing call site: the
+ * POP-direction dissector-empty fallback below). FLOW_ACTION_VLAN_POP
+ * carries no VID and the block_cb only gives us the PHYSICAL ingress port
+ * (@iif); find the 802.1Q upper of the physical ingress dev whose
+ * configured IPv4 subnet contains @peer_v4 (the flow's ingress-side peer
+ * address, i.e. key.src_ip for the POP direction). Returns the VID
+ * (1..4094) or 0 if no matching vif is found (caller fails closed to SW).
  */
 static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
 {
-	struct net_device *phys, *upper;
-	struct list_head *iter;
+	struct net_device *phys, *owner;
 	u16 vid = 0;
+	u8 addr16[16] = {};
 
 	if (!iif || !peer_v4)
 		return 0;
@@ -2088,31 +2204,12 @@ static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
 	if (!phys)
 		return 0;
 
-	rcu_read_lock();
-	netdev_for_each_upper_dev_rcu(phys, upper, iter) {
-		struct in_device *in_dev;
-		const struct in_ifaddr *ifa;
-
-		if (!is_vlan_dev(upper) ||
-		    vlan_dev_vlan_proto(upper) != htons(ETH_P_8021Q))
-			continue;
-
-		in_dev = __in_dev_get_rcu(upper);
-		if (!in_dev)
-			continue;
-
-		in_dev_for_each_ifa_rcu(ifa, in_dev) {
-			__be32 mask = ifa->ifa_mask;
-
-			if ((peer_v4 & mask) == (ifa->ifa_address & mask)) {
-				vid = vlan_dev_vlan_id(upper);
-				break;
-			}
-		}
-		if (vid)
-			break;
-	}
-	rcu_read_unlock();
+	memcpy(addr16, &peer_v4, 4);
+	owner = ask_resolve_owning_dev(phys, false, addr16);
+	if (owner && is_vlan_dev(owner))
+		vid = vlan_dev_vlan_id(owner);
+	if (owner)
+		dev_put(owner);
 
 	dev_put(phys);
 	return vid;
@@ -2230,6 +2327,49 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				 * the egress-echo filter below. */
 				true_iif = mm.key->ingress_ifindex;
 				have_meta_iif = true;
+
+				/*
+				 * T-M6-8b: the kernel's conntrack-meta
+				 * ingress_ifindex is reliable at the FMan-port
+				 * level (is_vlan_dev collapses a vif and its
+				 * physical parent identically), but for a VLAN
+				 * flow it can legitimately name either the vif
+				 * or the physical parent depending on which
+				 * direction's tuple produced it -- ambiguous
+				 * exactly where VLAN PUSH/POP tag handling and
+				 * neighbour resolution need the vif specifically.
+				 * Re-resolve via subnet ownership: find which of
+				 * this port's candidates (itself, or one of its
+				 * VLAN uppers) actually owns the flow's src_ip,
+				 * and use THAT as true_iif/key.iif. When it's a
+				 * VLAN vif, thread its VID through directly --
+				 * no dependency on the POP-direction dissector
+				 * key.vlan_id below being non-zero.
+				 */
+				{
+					struct net_device *ti_dev, *ti_phys, *owner;
+
+					ti_dev = dev_get_by_index(&init_net, true_iif);
+					if (ti_dev) {
+						ti_phys = is_vlan_dev(ti_dev) ?
+							  vlan_dev_real_dev(ti_dev) : ti_dev;
+						owner = ask_resolve_owning_dev(ti_phys, is_v6,
+										key.src_ip);
+						if (owner) {
+							if (owner->ifindex != true_iif)
+								pr_info_ratelimited("ask: flow_offload: T-M6-8b ingress owner %s (was ifindex %u) cookie=0x%lx\n",
+										    netdev_name(owner),
+										    true_iif, f->cookie);
+							true_iif = owner->ifindex;
+							key.iif = owner->ifindex;
+							if (is_vlan_dev(owner))
+								key.vlan_ingress_vid =
+									vlan_dev_vlan_id(owner);
+							dev_put(owner);
+						}
+						dev_put(ti_dev);
+					}
+				}
 			}
 		}
 	}
@@ -2260,7 +2400,17 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	if (key.vlan_edit_flags & ASK_VLANF_POP) {
 		__be32 peer_v4 = 0;
 
-		key.vlan_ingress_vid = key.vlan_id & VLAN_VID_MASK;
+		/*
+		 * T-M6-8b: the ingress-owning-device resolution in the META
+		 * block above already threads key.vlan_ingress_vid through
+		 * directly (both families) whenever a VLAN vif genuinely owns
+		 * this flow's src_ip -- don't clobber that with the dissector
+		 * key.vlan_id (usually 0 for a pure L3-routed VLAN flow, since
+		 * VLAN membership isn't part of the 5-tuple match) or the
+		 * v4-only subnet-heuristic fallback below.
+		 */
+		if (!key.vlan_ingress_vid)
+			key.vlan_ingress_vid = key.vlan_id & VLAN_VID_MASK;
 		if (!key.vlan_ingress_vid && !is_v6 && key.iif) {
 			memcpy(&peer_v4, &key.src_ip[0], 4);
 			key.vlan_ingress_vid =
@@ -2336,6 +2486,41 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						    f->cookie, &z11_dst,
 						    egress_dev ? netdev_name(egress_dev) : "?");
 			}
+		}
+	}
+
+	/*
+	 * T-M6-8b: re-resolve egress_dev through the same subnet-ownership
+	 * check as ingress, for the same reason -- whatever set egress_dev
+	 * above (the REDIRECT/MIRRED action's act->dev, or PR14z11's
+	 * opposite-tuple iif) can legitimately be the physical device even
+	 * when the real next hop lives on one of its VLAN uppers. Every
+	 * downstream consumer of egress_dev (the neighbour-resolution vif
+	 * lookup below, ask_vlan_cc_flow_add()'s egress_dev param, the
+	 * FMan TX-FQ resolution in ask_hw.c) needs the actual VLAN vif when
+	 * one owns the next hop, not just its physical parent.
+	 */
+	if (egress_dev) {
+		struct net_device *eg_phys, *owner;
+		u8 nh_addr16[16] = {};
+
+		eg_phys = is_vlan_dev(egress_dev) ?
+			  vlan_dev_real_dev(egress_dev) : egress_dev;
+		if (is_v6)
+			memcpy(nh_addr16, &dst_ip6, 16);
+		else
+			memcpy(nh_addr16, &dst_ip, 4);
+
+		owner = ask_resolve_owning_dev(eg_phys, is_v6, nh_addr16);
+		if (owner) {
+			if (owner != egress_dev)
+				pr_info_ratelimited("ask: flow_offload: T-M6-8b egress owner %s (was %s) cookie=0x%lx\n",
+						    netdev_name(owner),
+						    netdev_name(egress_dev),
+						    f->cookie);
+			egress_dev = owner;
+			oif = owner->ifindex;
+			dev_put(owner);
 		}
 	}
 
