@@ -1,0 +1,59 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
+index f1f6cc46cb55..6f051c01c3c4 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -15,6 +15,8 @@
+ #include <linux/clk.h>
+ #include <linux/of_address.h>
+ #include <linux/of_irq.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ #include <linux/interrupt.h>
+ #include <linux/libfdt_env.h>
+ 
+@@ -311,6 +313,32 @@ struct fman_iram_regs {
+ 	u32 iready;	/* FM IRAM ready register */
+ };
+ 
++static struct dentry *fman_imem_debugfs_dir;
++
++/* P0 diagnostic (0193): read the FM_CTL engine's current instruction via
++ * the IMEM idata register. While the controller is RUNNING the load port
++ * mirrors the fetch unit, so successive idata reads return the instruction
++ * at the current PC (E-HM17 "stuck read": idle engine parks at w1,
++ * 0x00d20a01). A stuck engine therefore reveals its PC directly; a
++ * spinning one shows the advancing loop extent. Read-only.
++ */
++static int fman_imem_pc_show(struct seq_file *s, void *unused)
++{
++	struct fman *fman = s->private;
++	struct fman_iram_regs __iomem *iram = fman->base_addr + IMEM_OFFSET;
++	int i;
++
++	seq_printf(s, "iadd=0x%08x itcfg=0x%08x iready=0x%08x\n",
++		   ioread32be(&iram->iadd),
++		   ioread32be(&iram->itcfg),
++		   ioread32be(&iram->iready));
++	for (i = 0; i < 8; i++)
++		seq_printf(s, "idata[%d]=0x%08x\n", i,
++			   ioread32be(&iram->idata));
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(fman_imem_pc);
++
+ struct fman_fpm_regs {
+ 	u32 fmfp_tnc;		/* FPM TNUM Control 0x00 */
+ 	u32 fmfp_prc;		/* FPM Port_ID FmCtl Association 0x04 */
+@@ -3116,6 +3144,12 @@ static int fman_probe(struct platform_device *of_dev)
+ 
+ 	dev_set_drvdata(dev, fman);
+ 
++	/* P0 diagnostic (0193): FM_CTL engine-PC reader (read-only). */
++	if (!fman_imem_debugfs_dir)
++		fman_imem_debugfs_dir = debugfs_create_dir("fman_imem", NULL);
++	debugfs_create_file("pc0", 0444, fman_imem_debugfs_dir, fman,
++			    &fman_imem_pc_fops);
++
+ 	/*
+ 	 * Initialise the PCD subsystem. fman->muram is live at this point
+ 	 * (fman_config() called fman_muram_init()). On failure leave

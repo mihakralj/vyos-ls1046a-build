@@ -335,3 +335,11 @@
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0192-fman-pcd-fe-buffer-mgmt-index-dump.patch
 
+
+# P0 diagnostic (2026-09-07): FM_CTL engine-PC reader via the IMEM idata
+# fetch mirror (/sys/kernel/debug/fman_imem/pc0). Read-only; reveals the
+# stuck/spinning instruction during the FE-VM VLAN freeze so the freeze
+# location can be located by word index instead of blind single-word
+# mutation. Throwaway experiment branch only.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0193-fman-imem-pc-reader.patch
