@@ -175,6 +175,15 @@ find vyos-build -name '*.py' -exec \
 # which does not exist on this SoC (the UART is a Synopsys 8250 at
 # 0x21c0500, exposed as ttyS0).
 if [ -f vyos-build/data/defaults.toml ]; then
+  # P0: pin the kernel version to KERNEL_VERSION (upstream bumps the pin
+  # mid-experiment; live-build's package list is generated from this file,
+  # so the ISO side must match the kernel .deb version we built).
+  if [ -n "${KERNEL_VERSION:-}" ]; then
+    sed -i "s/^\(\s*kernel_version\s*=\s*\).*/\1\"${KERNEL_VERSION}\"/" \
+      vyos-build/data/defaults.toml
+    echo "### defaults.toml kernel_version pinned to ${KERNEL_VERSION}:"
+    grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
+  fi
   sed -i \
     -e 's/^\(\s*console_type\s*=\s*\)"ttyAMA"/\1"ttyS"/' \
     -e "s/^\\(\\s*console_type\\s*=\\s*\\)'ttyAMA'/\\1'ttyS'/" \
