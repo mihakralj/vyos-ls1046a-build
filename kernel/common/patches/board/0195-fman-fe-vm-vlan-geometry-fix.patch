@@ -1,5 +1,5 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
-index aef7570b73a2..d2d83c0fc723 100644
+index aef7570b73a2..6e64919bd25b 100644
 --- a/drivers/net/ethernet/freescale/fman/fman.c
 +++ b/drivers/net/ethernet/freescale/fman/fman.c
 @@ -1551,6 +1551,60 @@ static int clear_iram(struct fman *fman)
@@ -100,7 +100,7 @@ index aef7570b73a2..d2d83c0fc723 100644
  	/* Enable auto-increment and stream the image */
  	iowrite32be(IRAM_IADD_AIE | iram_off, &iram->iadd);
  	count = 100;
-@@ -1614,8 +1691,16 @@ static int load_fman_ctrl_code(struct fman *fman)
+@@ -1614,14 +1691,26 @@ static int load_fman_ctrl_code(struct fman *fman)
  	if (count == 0)
  		return -EBUSY;
  
@@ -112,14 +112,24 @@ index aef7570b73a2..d2d83c0fc723 100644
 +		iowrite32be(fman_ucode_apply_vlan_fix(fman, i, word),
 +			     &iram->idata);
 +	}
-+
-+	/* P0.6 (0195): stream the VLAN geometry-fix routine tail. */
-+	for (i = 0; i < extra_words; i++)
-+		iowrite32be(be32_to_cpup(&extra[i]), &iram->idata);
  
  	/* Pad to the 16-byte IRAM burst boundary (SDK fm.c:445-448) */
  	pad_words = ((16 - (size % 16)) / 4) % 4;
-@@ -1641,13 +1726,21 @@ static int load_fman_ctrl_code(struct fman *fman)
+ 	for (i = 0; i < pad_words; i++)
+ 		iowrite32be(0xffffffff, &iram->idata);
+ 
++	/* P0.6 (0195): stream the VLAN geometry-fix routine tail AFTER the
++	 * burst pad so the routine words land at wcount+pad_words (12852) —
++	 * the base the call-site displacement patches in fman_ucode_vlan_fix
++	 * were computed for. The verify loop below walks the same order.
++	 */
++	for (i = 0; i < extra_words; i++)
++		iowrite32be(be32_to_cpup(&extra[i]), &iram->idata);
++
+ 	/* Write-complete handshake on the last code word */
+ 	iowrite32be(iram_off + size - 4, &iram->iadd);
+ 	count = 100;
+@@ -1641,13 +1730,21 @@ static int load_fman_ctrl_code(struct fman *fman)
  		 --count);
  	if (count == 0)
  		return -EBUSY;
