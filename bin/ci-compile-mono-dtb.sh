@@ -47,6 +47,8 @@ LINUX_SRC="$WORK/linux-src"
 # repo is checked out, fall back to data/kernel-version (simple text file),
 # fall back to whatever is hard-coded below.
 KVER=""
+# P0: honor an explicit KERNEL_VERSION pin from the environment first.
+KVER="${KERNEL_VERSION:-}"
 if [ -z "$KVER" ] && [ -f vyos-build/data/defaults.toml ]; then
     KVER=$(awk -F'"' '/^kernel_version/ {print $2; exit}' vyos-build/data/defaults.toml)
 fi

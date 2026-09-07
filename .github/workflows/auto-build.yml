@@ -60,6 +60,11 @@ env:
   # every time regardless of the Python-side persist_chroot check.
   VYOS_PERSIST_CHROOT: "1"
   DEBIAN_MIRROR: http://deb.debian.org/debian/
+  # P0 experiment pin: upstream vyos-build moved to 6.18.50; this branch's
+  # kernel stack is built and board-validated on 6.18.48 (and the persistent
+  # kernel cache holds that canonical state). Pin so builds don't chase the
+  # upstream bump mid-experiment.
+  KERNEL_VERSION: "6.18.48"
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
   # VyOS retired the `current/` apt path (its dist moved current->rolling). The
   # apt entry is `deb {VYOS_MIRROR} {vyos_branch} main` and vyos_branch is now
