@@ -80,7 +80,7 @@ for package in $packages; do
     # clone step's default (KERNEL_VERSION:-6.18.38 in auto-build.yml) lags
     # upstream bumps; compiling a stale checkout yields linux-image of the
     # wrong version under a newer linux-kernel-cache key (poisons the cache).
-    KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
+    KVER="${KERNEL_VERSION:-$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)}"
     if [ -n "$KVER" ] && [ -d "$CACHE/.git" ]; then
       echo "### Pinning kernel git cache checkout to v${KVER}"
       git -C "$CACHE" fetch --depth=1 origin "tag v${KVER}" 2>/dev/null || true
@@ -194,7 +194,7 @@ for package in $packages; do
       -ext subjectKeyIdentifier 2>/dev/null | tail -1 | tr -d ' ')
     echo "I: ASK2 F-217 — cache-key signing SKID=${ASK_PERSIST_SKID:-unknown}"
 
-    KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
+    KVER="${KERNEL_VERSION:-$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)}"
     KERNEL_HASH=$( {
       find "$GITHUB_WORKSPACE/data/kernel-config" -maxdepth 1 -name '*.config' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       find "$GITHUB_WORKSPACE/data/kernel-patches" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
