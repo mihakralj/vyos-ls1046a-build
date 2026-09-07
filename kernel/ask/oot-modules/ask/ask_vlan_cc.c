@@ -140,7 +140,23 @@ int ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 	/* Per-port gate: armed on this flow's ingress port (key->port_id). */
 	if (!ask_hw_vlan_offload_armed_port(key->port_id))
 		return -EOPNOTSUPP;
-	if (key->l3_proto != ASK_FLOW_L3_IPV4)
+	/*
+	 * T-M6-8c: this v4-only gate predates F-245/0195's IPv6 VLAN CC key
+	 * support. ask_vlan_cc_fill_key() below already builds a correct v6
+	 * cc_key (is_ipv6, src_ip6/dst_ip6, cc_pack_key_v6()'s 40-byte row),
+	 * ask_vlan_cc_key_match() already compares v6 keys, and
+	 * fman_hm_vlan_route_get() below is pure L2 (MAC/VID/TPID/PCP) with
+	 * no L3-family parameter at all -- there is no hardware reason to
+	 * reject v6 here. Board testing (2026-09-07) found this gate was the
+	 * sole reason IPv6 VLAN flows (both VLAN-tagged ingress and egress)
+	 * never got hardware-offloaded: fe_flow_insert returned -EOPNOTSUPP
+	 * from here every ~1s (nft flowtable retrying the REPLACE), which
+	 * conntrack either reflected as no HW_OFFLOAD ever, or -- if an
+	 * earlier non-VLAN attempt had briefly set the flag -- left a stale
+	 * HW_OFFLOAD label on a flow actually running in software.
+	 */
+	if (key->l3_proto != ASK_FLOW_L3_IPV4 &&
+	    key->l3_proto != ASK_FLOW_L3_IPV6)
 		return -EOPNOTSUPP;
 
 	fm = ask_hw_get_fman();
