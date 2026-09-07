@@ -1,0 +1,171 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 02 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fman: pcd: cc_test install_v4gec isolating experiment (T-M6-8 VLAN-v6 V6-2)
+
+V6-2's install_v6 verb (0186) proved F-236's KeyGen reconfiguration
+genuinely works (ekfc really zeroed, GEC words really written) but a
+real, confirmed-arriving matching IPv6 frame still misses the
+CC-tree comparator (board-tested 2026-09-02, saved to qdrant).
+
+A qdrant/RM alignment review surfaced a specific, well-precedented
+reason to suspect EKFC=0 itself, not width or offset: this project's
+own history (F-190, 2026-08-31) found the CC comparator's behavior
+is sensitive to the scheme's EKFC value, not just the final
+extracted byte content -- "this scheme's EKFC must deterministically
+match what cc_pack_key() packs". My dual-lane scheme forces EKFC=0
+(GEC-only sourcing), a configuration this project has never
+validated against the CC-tree comparator before.
+
+This adds "install_v4gec <port> <proto> <src-ip> <dst-ip> <sport>
+<dport> <fqid-hex>": IDENTICAL machinery to install_v6 -- same
+fman_pcd_kg_port_attach_cc_dual() (EKFC=0, GEC words written), same
+cc_pack_key_dual() 46-byte packer via spec->dual_lane -- but a real
+IPv4 5-tuple, exercising the different (already production-proven
+elsewhere) v4 GEC codes and family-byte lane instead of v6's.
+
+If a confirmed-arriving matching v4 frame ALSO misses under this
+identical GEC/EKFC=0 machinery, that's a clean, family-independent
+result: GEC-sourced composites don't reach wherever the CC
+comparator reads from, full stop -- not a v6-specific quirk. If it
+HITS, the v6 miss is narrowed to something v6-specific (the 0x1b
+codes, the wider address lanes, etc), not the EKFC=0 sourcing mode
+itself.
+
+Verified via the same scratch/kernel-git-cache diff-generation method
+as 0182-0186: edited ~/kernel-git-cache/linux directly (canonical,
+series-through-0186 state) and generated this diff for real.
+
+NOT YET BOARD-TESTED. Board sequence: capture_init (sink fqid), then
+on a sacrificial port: "install_v4gec <port> 17 <src4> <dst4> <sport>
+<dport> <sink-fqid-hex>", drive one real matching IPv4 UDP packet
+from a real peer, check dmesg for "oh_test capture: frame #1 ...".
+Then "clear <port>" + capture_fini.
+
+Upstream-Status: Inappropriate | Risk-Tier: B (new debug-only cc_test
+verb, same risk class as 0186's install_v6 -- exercises the F-236
+GEC-CC combination again, this time with v4 addressing; no change to
+any existing verb or production path)
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c | 104 ++++++++++++++++++++
+ 1 file changed, 104 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+index 6dd169247a8d..81e3b7d6a2b1 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -338,6 +338,104 @@ static int cc_test_install_v6(struct fman_pcd *pcd, const char *args)
+ 	return err;
+ }
+
++/*
++ * install_v4gec <port> <proto> <src-ip> <dst-ip> <sport> <dport> <fqid-hex>
++ *
++ * T-M6-8 VLAN-v6 V6-2 isolating experiment (2026-09-02, after install_v6's
++ * null result): identical dual-lane machinery to install_v6 -- same
++ * fman_pcd_kg_port_attach_cc_dual() (F-236, EKFC forced to 0, GEC words
++ * written), same cc_pack_key_dual() 46-byte packer via spec->dual_lane --
++ * but a real IPv4 5-tuple instead of IPv6, exercising the DIFFERENT GEC
++ * codes (0x0b family/addr vs 0x1b) and the v4 lane of the family byte.
++ *
++ * Purpose: isolate whether EKFC=0 (GEC-only sourcing) itself is what the
++ * CC-tree comparator can't see, independent of anything IPv6-specific.
++ * If this ALSO misses a confirmed-arriving matching v4 frame, that's a
++ * clean, family-independent result: GEC-sourced composites (EKFC=0) don't
++ * reach wherever the CC comparator reads from, full stop -- not a v6
++ * quirk, not an offset-for-this-width quirk. If it HITS, the v6 miss is
++ * specific to something else (the v6 GEC codes, the wider key, etc).
++ */
++static int cc_test_install_v4gec(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec = NULL;
++	struct fman_port *rxport;
++	struct fman *fm;
++	char src_str[40], dst_str[40];
++	u32 src_ip, dst_ip, fqid, cc_base;
++	u8 port_id, proto;
++	u16 sport, dport;
++	int n, err;
++
++	n = sscanf(args, "install_v4gec %hhi %hhu %39s %39s %hu %hu %x",
++		   &port_id, &proto, src_str, dst_str, &sport, &dport, &fqid);
++	if (n != 7 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++	    !(proto == 6 || proto == 17) || !fqid)
++		return -EINVAL;
++	if (!in4_pton(src_str, -1, (u8 *)&src_ip, -1, NULL) ||
++	    !in4_pton(dst_str, -1, (u8 *)&dst_ip, -1, NULL))
++		return -EINVAL;
++
++	fm = fman_pcd_get_fman(pcd);
++	if (!fm)
++		return -ENODEV;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec)
++		return -ENOMEM;
++	spec->num_keys = 1;
++	spec->miss_qband = 0;
++	spec->miss_fqid = 0;	/* miss stays on the existing RSS/SW path */
++	spec->dual_lane = true;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_PROTO |
++			       FMAN_PCD_CC_HW_F_SRC_IP |
++			       FMAN_PCD_CC_HW_F_DST_IP |
++			       FMAN_PCD_CC_HW_F_SRC_PORT |
++			       FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].proto = proto;
++	spec->keys[0].src_ip_be = src_ip;
++	spec->keys[0].dst_ip_be = dst_ip;
++	spec->keys[0].src_port_be = cpu_to_be16(sport);
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_qband = 0;
++	spec->keys[0].target_fqid = fqid;
++	spec->keys[0].hm_handle = 0;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	if (err)
++		return err;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err)
++		goto out_destroy_cc;
++	rxport = fman_port_lookup_rx(fm, port_id);
++	if (!rxport) {
++		err = -ENODEV;
++		goto out_destroy_cc;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_port_set_cc_base(rxport, cc_base);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_pcd_kg_port_attach_cc_dual(pcd, port_id, cc_base);
++	if (err) {
++		(void)fman_port_set_cc_base(rxport, 0);
++		goto out_destroy_cc;
++	}
++
++	pr_info("fman_pcd cc_test: IPv4 dual-lane (GEC-only isolating test) port 0x%02x CC base 0x%x -> fqid 0x%x %pI4:%u -> %pI4:%u proto %u\n",
++		port_id, cc_base, fqid, &src_ip, sport, &dst_ip, dport, proto);
++	return 0;
++
++out_destroy_cc:
++	(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++	return err;
++}
++
+ /*
+  * install_vlan <port> <proto> <src-ip> <dst-ip> <sport> <dport>
+  *              <target-fqid-hex> <pop|push> <vid> [tpid-hex] [pcp]
+@@ -703,6 +801,10 @@ static ssize_t cc_test_write(struct file *file, const char __user *buf,
+ 		ret = cc_test_install_v6(pcd, kbuf);
+ 		if (ret == 0)
+ 			ret = count;
++	} else if (strncmp(kbuf, "install_v4gec ", 14) == 0) {
++		ret = cc_test_install_v4gec(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
+ 	} else if (strncmp(kbuf, "install_vlan ", 13) == 0) {
+ 		ret = cc_test_install_vlan(pcd, kbuf);
+ 		if (ret == 0)

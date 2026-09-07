@@ -23,7 +23,18 @@
 > `ask.vlan_offload` module param remains an OR'd global master override for
 > one-shot debug. **Remaining work is non-silicon:** merge `dpaa1`→`main`
 > (Option A) and the default-on vs default-off decision for the fielded
-> release. **Lab caveat (not a defect, not
+> release.
+>
+> **2026-09-02 addendum:** a parallel Option D (O/H-port re-enqueue,
+> section 3) build started after this completion, phases 1a-1e
+> (`0175`-`0182`, board-validated through phase 1d). This is **not** a
+> replacement for the shipped Option A path above -- it's the shared
+> header-manipulation-reinject substrate section 7 flags as eventually
+> needed for multicast replication and IPsec reinject, with VLAN as the
+> first exerciser. See qdrant ("ASK2 OH-port rearch phase 1d
+> BOARD-VALIDATED 2026-09-02") for current state and the next step.
+>
+> **Lab caveat (not a defect, not
 > merge-gating):** sustained max-rate (~55k pps) + churn latches an eth0
 > mgmt-RTT/martian-storm degradation cleared only by cold boot — a lab mgmt-LAN
 > broadcast-overlap artifact; paced traffic avoids it. Everything below is the
