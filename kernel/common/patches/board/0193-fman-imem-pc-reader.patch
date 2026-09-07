@@ -1,5 +1,5 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
-index f1f6cc46cb55..4a1eebf7388d 100644
+index f1f6cc46cb55..aef7570b73a2 100644
 --- a/drivers/net/ethernet/freescale/fman/fman.c
 +++ b/drivers/net/ethernet/freescale/fman/fman.c
 @@ -15,6 +15,8 @@
@@ -11,8 +11,8 @@ index f1f6cc46cb55..4a1eebf7388d 100644
  #include <linux/interrupt.h>
  #include <linux/libfdt_env.h>
  
-@@ -311,6 +313,87 @@ struct fman_iram_regs {
- 	u32 iready;	/* FM IRAM ready register */
+@@ -362,6 +364,90 @@ struct fman_fpm_regs {
+ 	u32 res0600[0x400 - 384];
  };
  
 +static struct dentry *fman_imem_debugfs_dir;
@@ -20,13 +20,12 @@ index f1f6cc46cb55..4a1eebf7388d 100644
 +/* P0 diagnostic (0193): FM_CTL engine-state reader.
 + *
 + * Shows the IMEM load-port registers (iadd/data/itcfg/iready) plus the FPM
-+ * block's controller-debug surface (breakpoint control, classifier debug,
-+ * and the Data-RAM access window fmfp_dra/fmfp_drd[16] which windows the
-+ * controller's internal data memory). Accepts two write commands:
++ * block's controller-debug surface: breakpoint control, classifier debug,
++ * the Data-RAM access window (fmfp_dra/fmfp_drd[16]), and the per-task
++ * FPM Task Status array (fmfp_ts[128], FPM+0x400). Accepts write commands:
 + *   iadd <hex>   set IRAM_IADD (AIE|<hex>) to probe idata addressing
 + *   dra  <hex>   set FPM Data-RAM access address
-+ * Read-only with respect to execution state; used to locate the stuck
-+ * instruction during the FE-VM VLAN freeze.
++ * Used to locate the stuck engine state during the FE-VM VLAN freeze.
 + */
 +static int fman_imem_pc_show(struct seq_file *s, void *unused)
 +{
@@ -51,6 +50,10 @@ index f1f6cc46cb55..4a1eebf7388d 100644
 +	for (i = 0; i < 16; i++)
 +		seq_printf(s, "drd[%d]=0x%08x\n", i,
 +			   ioread32be(&fpm->fmfp_drd[i]));
++	seq_printf(s, "ts:\n");
++	for (i = 0; i < 128; i++)
++		seq_printf(s, "%08x%c", ioread32be(&fpm->fmfp_ts[i]),
++			   (i % 8 == 7) ? '\n' : ' ');
 +	return 0;
 +}
 +
@@ -96,10 +99,10 @@ index f1f6cc46cb55..4a1eebf7388d 100644
 +	.release = single_release,
 +};
 +
- struct fman_fpm_regs {
- 	u32 fmfp_tnc;		/* FPM TNUM Control 0x00 */
- 	u32 fmfp_prc;		/* FPM Port_ID FmCtl Association 0x04 */
-@@ -3116,6 +3199,12 @@ static int fman_probe(struct platform_device *of_dev)
+ struct fman_bmi_regs {
+ 	u32 fmbm_init;		/* BMI Initialization 0x00 */
+ 	u32 fmbm_cfg1;		/* BMI Configuration 1 0x04 */
+@@ -3116,6 +3202,12 @@ static int fman_probe(struct platform_device *of_dev)
  
  	dev_set_drvdata(dev, fman);
  
