@@ -1,0 +1,20 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index c30608f703a4..b6087ca96da0 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2665,6 +2665,15 @@ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
+ 				   (unsigned long long)rec_phys);
+ 			for (i = 0; i < flow->key_size; i++)
+ 				seq_printf(s, "%02x", key[i]);
++			/* P0 diagnostic (0194): full software-record hex dump.
++			 * record[] layout: header(40) | key | opcodes(16)
++			 * | params | ... | stats tail at +256/+264. Dump 208
++			 * bytes per record so the emitter's opcode/param
++			 * region is verifiable by eye against the intended
++			 * vendor layout during the FE-VM VLAN freeze dig. */
++			seq_puts(s, "\n  rec:");
++			for (i = 0; i < 208; i++)
++				seq_printf(s, "%02x", r[i]);
+ 			seq_puts(s, "\n");
+ 			total++;
+ 		}

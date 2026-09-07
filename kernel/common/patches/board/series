@@ -343,3 +343,9 @@
 # mutation. Throwaway experiment branch only.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0193-fman-imem-pc-reader.patch
+
+# P0 diagnostic (2026-09-07): full software-record hex dump per FE flow
+# (key + opcodes + params) so the frozen VLAN record's emitted bytes can
+# be verified against intent. Throwaway experiment branch only.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0194-fman-pcd-fe-flow-fullrecord-dump.patch
