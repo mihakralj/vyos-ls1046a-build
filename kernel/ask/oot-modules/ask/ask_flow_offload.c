@@ -2345,27 +2345,47 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				 * VLAN vif, thread its VID through directly --
 				 * no dependency on the POP-direction dissector
 				 * key.vlan_id below being non-zero.
+				 *
+				 * Cost guard: nft flowtable broadcasts this
+				 * REPLACE to every interface in the flowtable's
+				 * device list (PR14z6 above), so this function
+				 * runs once per registered interface per cookie
+				 * -- up to 6x in our topology, only one of which
+				 * ever installs. The subnet walk below is cheap
+				 * per call but not free; skip it immediately for
+				 * every invocation whose OWN physical port isn't
+				 * even a candidate, using a plain ifindex compare
+				 * (no RCU list walking) before touching it. Only
+				 * the (at most two: physical + its own VLAN
+				 * sibling) callbacks sharing true_iif's physical
+				 * port pay the subnet-walk cost.
 				 */
-				{
-					struct net_device *ti_dev, *ti_phys, *owner;
+				if (ingress_dev) {
+					struct net_device *my_phys =
+						is_vlan_dev(ingress_dev) ?
+						vlan_dev_real_dev(ingress_dev) : ingress_dev;
+					struct net_device *ti_dev, *ti_phys;
 
 					ti_dev = dev_get_by_index(&init_net, true_iif);
 					if (ti_dev) {
 						ti_phys = is_vlan_dev(ti_dev) ?
 							  vlan_dev_real_dev(ti_dev) : ti_dev;
-						owner = ask_resolve_owning_dev(ti_phys, is_v6,
-										key.src_ip);
-						if (owner) {
-							if (owner->ifindex != true_iif)
-								pr_info_ratelimited("ask: flow_offload: T-M6-8b ingress owner %s (was ifindex %u) cookie=0x%lx\n",
-										    netdev_name(owner),
-										    true_iif, f->cookie);
-							true_iif = owner->ifindex;
-							key.iif = owner->ifindex;
-							if (is_vlan_dev(owner))
-								key.vlan_ingress_vid =
-									vlan_dev_vlan_id(owner);
-							dev_put(owner);
+						if (my_phys->ifindex == ti_phys->ifindex) {
+							struct net_device *owner =
+								ask_resolve_owning_dev(ti_phys, is_v6,
+											key.src_ip);
+							if (owner) {
+								if (owner->ifindex != true_iif)
+									pr_info_ratelimited("ask: flow_offload: T-M6-8b ingress owner %s (was ifindex %u) cookie=0x%lx\n",
+											    netdev_name(owner),
+											    true_iif, f->cookie);
+								true_iif = owner->ifindex;
+								key.iif = owner->ifindex;
+								if (is_vlan_dev(owner))
+									key.vlan_ingress_vid =
+										vlan_dev_vlan_id(owner);
+								dev_put(owner);
+							}
 						}
 						dev_put(ti_dev);
 					}
@@ -2490,41 +2510,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	}
 
 	/*
-	 * T-M6-8b: re-resolve egress_dev through the same subnet-ownership
-	 * check as ingress, for the same reason -- whatever set egress_dev
-	 * above (the REDIRECT/MIRRED action's act->dev, or PR14z11's
-	 * opposite-tuple iif) can legitimately be the physical device even
-	 * when the real next hop lives on one of its VLAN uppers. Every
-	 * downstream consumer of egress_dev (the neighbour-resolution vif
-	 * lookup below, ask_vlan_cc_flow_add()'s egress_dev param, the
-	 * FMan TX-FQ resolution in ask_hw.c) needs the actual VLAN vif when
-	 * one owns the next hop, not just its physical parent.
-	 */
-	if (egress_dev) {
-		struct net_device *eg_phys, *owner;
-		u8 nh_addr16[16] = {};
-
-		eg_phys = is_vlan_dev(egress_dev) ?
-			  vlan_dev_real_dev(egress_dev) : egress_dev;
-		if (is_v6)
-			memcpy(nh_addr16, &dst_ip6, 16);
-		else
-			memcpy(nh_addr16, &dst_ip, 4);
-
-		owner = ask_resolve_owning_dev(eg_phys, is_v6, nh_addr16);
-		if (owner) {
-			if (owner != egress_dev)
-				pr_info_ratelimited("ask: flow_offload: T-M6-8b egress owner %s (was %s) cookie=0x%lx\n",
-						    netdev_name(owner),
-						    netdev_name(egress_dev),
-						    f->cookie);
-			egress_dev = owner;
-			oif = owner->ifindex;
-			dev_put(owner);
-		}
-	}
-
-	/*
 	 * PR14z6 (2026-05-19): ingress-side filter.
 	 *
 	 * The kernel's nft flowtable offload delivers every
@@ -2580,6 +2565,48 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
 				    f->cookie, netdev_name(ingress_dev));
 		return 0;
+	}
+
+	/*
+	 * T-M6-8b: re-resolve egress_dev through the same subnet-ownership
+	 * check as ingress, for the same reason -- whatever set egress_dev
+	 * earlier (the REDIRECT/MIRRED action's act->dev, or PR14z11's
+	 * opposite-tuple iif) can legitimately be the physical device even
+	 * when the real next hop lives on one of its VLAN uppers. Every
+	 * downstream consumer of egress_dev (the neighbour-resolution vif
+	 * lookup below, ask_vlan_cc_flow_add()'s egress_dev param, the
+	 * FMan TX-FQ resolution in ask_hw.c) needs the actual VLAN vif when
+	 * one owns the next hop, not just its physical parent.
+	 *
+	 * Deliberately placed AFTER the echo-skip checks above (unlike the
+	 * ingress resolution, which has to run before them so its true_iif
+	 * correction feeds the check itself): by this point only the one
+	 * surviving block_cb invocation for this cookie is still running,
+	 * so the subnet walk below pays its cost once per cookie, not once
+	 * per registered interface.
+	 */
+	if (egress_dev) {
+		struct net_device *eg_phys, *owner;
+		u8 nh_addr16[16] = {};
+
+		eg_phys = is_vlan_dev(egress_dev) ?
+			  vlan_dev_real_dev(egress_dev) : egress_dev;
+		if (is_v6)
+			memcpy(nh_addr16, &dst_ip6, 16);
+		else
+			memcpy(nh_addr16, &dst_ip, 4);
+
+		owner = ask_resolve_owning_dev(eg_phys, is_v6, nh_addr16);
+		if (owner) {
+			if (owner != egress_dev)
+				pr_info_ratelimited("ask: flow_offload: T-M6-8b egress owner %s (was %s) cookie=0x%lx\n",
+						    netdev_name(owner),
+						    netdev_name(egress_dev),
+						    f->cookie);
+			egress_dev = owner;
+			oif = owner->ifindex;
+			dev_put(owner);
+		}
 	}
 
 	/*
