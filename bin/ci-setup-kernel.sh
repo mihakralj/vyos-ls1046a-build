@@ -1256,6 +1256,7 @@ fi
 # dispatch mode but the missing missResult/w4 causing wild DMA (fix follows separately).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_068.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_239.py" 2>&1
     echo "### F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)"
 fi
 
