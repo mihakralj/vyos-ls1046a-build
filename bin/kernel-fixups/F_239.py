@@ -201,14 +201,7 @@ with open(dpaa_c) as f:
 if "fman_pcd_probe2_buf" in dsrc:
     print("### F-239: dpaa_eth.c already has probe2")
 else:
-    anchor_extern = (
-        "extern u64 fman_pcd_kg_hash;\n"
-        "extern unsigned int fman_pcd_hash_off;\n"
-    )
-    if anchor_extern not in dsrc:
-        fatal("fman_pcd_kg_hash/hash_off extern anchor not found in dpaa_eth.c")
-    new_extern = (
-        anchor_extern +
+    extern_block = (
         "/* T-M6-8 VLAN-v6 CC-comparator-input dig (F-239); see the buffer's own\n"
         " * comment in fman_pcd.c for the full rationale and the\n"
         " * synchronous-capture safety argument (this is deliberately NOT a\n"
@@ -218,9 +211,21 @@ else:
         "extern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
         "extern bool fman_pcd_probe2_valid;\n"
     )
-    dsrc = dsrc.replace(anchor_extern, new_extern, 1)
-    changes += 1
-    print("### dpaa_eth.c: F-239 probe2 extern decls added")
+    anchor_extern = (
+        "extern u64 fman_pcd_kg_hash;\n"
+        "extern unsigned int fman_pcd_hash_off;\n"
+    )
+    anchor_local = "u64 fman_pcd_kg_hash;\n"
+    if anchor_extern in dsrc:
+        dsrc = dsrc.replace(anchor_extern, anchor_extern + extern_block, 1)
+        changes += 1
+        print("### dpaa_eth.c: F-239 probe2 extern decls added (extern anchor)")
+    elif anchor_local in dsrc:
+        dsrc = dsrc.replace(anchor_local, anchor_local + extern_block, 1)
+        changes += 1
+        print("### dpaa_eth.c: F-239 probe2 extern decls added (local-def anchor)")
+    else:
+        fatal("fman_pcd_kg_hash extern/local anchor not found in dpaa_eth.c")
 
     anchor_capture = (
         "\t\thash = be32_to_cpu(*(__be32 *)(vaddr + hash_offset));\n"
