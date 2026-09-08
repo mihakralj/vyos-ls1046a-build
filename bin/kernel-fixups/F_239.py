@@ -104,7 +104,7 @@ else:
         " */\n"
         "#define FMAN_PCD_PROBE2_LEN 176\n"
         "u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
-        "char fman_pcd_probe2_dev[IFNAMSIZ];\n"
+        "char fman_pcd_probe2_dev[16]; /* IFNAMSIZ */\n"
         "bool fman_pcd_probe2_valid;\n"
     )
     fsrc = fsrc.replace(anchor_globals, new_globals, 1)
@@ -224,7 +224,7 @@ capture = (
     "#define FMAN_PCD_PROBE2_LEN 176\n"
     "\textern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
     "\textern bool fman_pcd_probe2_valid;\n"
-    "\textern char fman_pcd_probe2_dev[IFNAMSIZ];\n"
+    "\textern char fman_pcd_probe2_dev[16]; /* IFNAMSIZ */\n"
     "\n"
     "\tif (vaddr && !strcmp(net_dev->name, \"eth3\")) {\n"
     "\t\tmemcpy(fman_pcd_probe2_buf, vaddr + 0xE0,\n"
