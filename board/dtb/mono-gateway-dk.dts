@@ -605,27 +605,26 @@ status = "disabled";
 
 &fman0 {
 	/*
-	 * P0.6 stage-2 (0195): FE-VM VLAN fix — frame-HWA parse-result rewrite,
-	 * derived 2026-09-08 from the live probe2 captures + the INSERT handler's
-	 * base-register lineage (w9520: r5 = r28 + r0 — r28 = the frame window).
-	 * The HWA PR occupies r28+0xE0..0xFF. POP entry (word 12852, 42 words):
-	 * l2r &= ~0x4080, vlan_off -> [0x0c][0xFF], guarded -4 on
-	 * etype_off/ip_off[0..1]/l4_off/nxthdr_off. PUSH entry (word 12894,
-	 * 42 words): the mirror (+0x4080 byte-adds, +4, same vlan_off consts).
-	 * Both return to w11911. The v3 IC-mirror form was falsified on the
-	 * board (the proof reads the frame annotation); this rewrites it.
-	 * Lives on the fman0 node (the fman-firmware child is U-Boot's).
+	 * P0.6 stage-2 final (0195): POP-corrected HWA rewrite. The register
+	 * trace resolved the Stage-2 mis-anchor: the STRIP exit's r28 = the raw
+	 * buffer base + 4 (w9461 li16 r3,4 -> w9471 r28 += r3), so the HWA
+	 * (raw+0xE0..0xFF) maps to r28+0xDC..0xFB. POP entry (word 12852):
+	 * l2r &= ~0x4080 at DE/DF, vlan_off -> [0x0c][0xFF] at F1/F2, guarded
+	 * -4 on etype/ip/l4/nxthdr_off at F3/F7/F8/FA/FB. The PUSH entry
+	 * (word 12894) is kept as-is this round (its r0 shift is clobbered in
+	 * the body; correcting it needs the deeper base trace) — the POP-side
+	 * gates alone decide the mechanism. Both return to w11911.
 	 */
-	fsl,firmware-extra = <			0x0120e0e2 0xf00003bf 0x1000e0e2 0x0120e0e3
-			0xf000037f 0x1000e0e3 0xebc0000c 0x1000e0f5
-			0xebc000ff 0x1000e0f6 0x0120e0f7 0xb43f0005
-			0xe5c000ff 0xb43f0003 0xf04003fc 0x1000e0f7
-			0x0120e0fb 0xb43f0005 0xe5c000ff 0xb43f0003
-			0xf04003fc 0x1000e0fb 0x0120e0fc 0xb43f0005
-			0xe5c000ff 0xb43f0003 0xf04003fc 0x1000e0fc
-			0x0120e0fe 0xb43f0005 0xe5c000ff 0xb43f0003
-			0xf04003fc 0x1000e0fe 0x0120e0ff 0xb43f0005
-			0xe5c000ff 0xb43f0003 0xf04003fc 0x1000e0ff
+	fsl,firmware-extra = <			0x0120e0de 0xf00003bf 0x1000e0de 0x0120e0df
+			0xf000037f 0x1000e0df 0xebc0000c 0x1000e0f1
+			0xebc000ff 0x1000e0f2 0x0120e0f3 0xb43f0005
+			0xe5c000ff 0xb43f0003 0xf04003fc 0x1000e0f3
+			0x0120e0f7 0xb43f0005 0xe5c000ff 0xb43f0003
+			0xf04003fc 0x1000e0f7 0x0120e0f8 0xb43f0005
+			0xe5c000ff 0xb43f0003 0xf04003fc 0x1000e0f8
+			0x0120e0fa 0xb43f0005 0xe5c000ff 0xb43f0003
+			0xf04003fc 0x1000e0fa 0x0120e0fb 0xb43f0005
+			0xe5c000ff 0xb43f0003 0xf04003fc 0x1000e0fb
 			0xb3ff3c2b 0xffffffff 0x0120e0e2 0xf0400340
 			0x1000e0e2 0x0120e0e3 0xf0400380 0x1000e0e3
 			0xebc0000c 0x1000e0f5 0xebc000ff 0x1000e0f6
@@ -638,6 +637,7 @@ status = "disabled";
 			0x0120e0ff 0xb43f0005 0xe5c000ff 0xb43f0003
 			0xf0400304 0x1000e0ff 0xb3ff3c01 0xffffffff
 	>;
+
 
 
 
