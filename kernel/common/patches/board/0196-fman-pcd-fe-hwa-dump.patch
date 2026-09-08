@@ -1,8 +1,8 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index b6087ca96da0..5132a621c1c2 100644
+index b6087ca96da0..755bc55ba0f6 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -4264,6 +4264,99 @@ static ssize_t fman_pcd_fe_hash_probe_write(struct file *file,
+@@ -4264,6 +4264,101 @@ static ssize_t fman_pcd_fe_hash_probe_write(struct file *file,
  	return count;
  }
  
@@ -20,6 +20,7 @@ index b6087ca96da0..5132a621c1c2 100644
 +	struct muram_info *muram;
 +	void __iomem *pool_base = NULL;
 +	unsigned long pool_raw_off = 0;
++	size_t pool_raw_size = 0;
 +	int i;
 +
 +	if (!fman || !(muram = fman_get_muram(fman))) {
@@ -33,6 +34,7 @@ index b6087ca96da0..5132a621c1c2 100644
 +		fp = list_first_entry(&pcd->fe_ports, struct fman_pcd_fe_port,
 +				      node);
 +		pool_raw_off = fp->pool_raw_off;
++		pool_raw_size = fp->pool_raw_size;
 +		pool_base = (void __iomem *)(void *)fman_muram_offset_to_vbase(
 +			muram, fp->pool_raw_off);
 +	}
@@ -48,7 +50,7 @@ index b6087ca96da0..5132a621c1c2 100644
 +	 * frame's context lives in the slot its tnum processed, not slot 0.
 +	 */
 +	{
-+		unsigned int slots = fp->pool_raw_size / FMAN_PCD_BMI_FIFO_UNITS;
++		unsigned int slots = pool_raw_size / FMAN_PCD_BMI_FIFO_UNITS;
 +		unsigned int n;
 +
 +		for (n = 0; n < slots; n++) {
@@ -102,7 +104,7 @@ index b6087ca96da0..5132a621c1c2 100644
  static const struct file_operations fman_pcd_fe_hash_probe_fops = {
  	.owner		= THIS_MODULE,
  	.open		= fman_pcd_fe_hash_probe_open,
-@@ -5443,6 +5536,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -5443,6 +5538,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  				debugfs_create_file("fe_hash_probe", 0600,
  						    pcd->debugfs_dir, pcd,
  						    &fman_pcd_fe_hash_probe_fops);
