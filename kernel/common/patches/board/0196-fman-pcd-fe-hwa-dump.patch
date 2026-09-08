@@ -1,8 +1,8 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index b6087ca96da0..6aeb11a9e465 100644
+index b6087ca96da0..5132a621c1c2 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -4264,6 +4264,82 @@ static ssize_t fman_pcd_fe_hash_probe_write(struct file *file,
+@@ -4264,6 +4264,99 @@ static ssize_t fman_pcd_fe_hash_probe_write(struct file *file,
  	return count;
  }
  
@@ -44,40 +44,57 @@ index b6087ca96da0..6aeb11a9e465 100644
 +		return 0;
 +	}
 +
-+	seq_puts(s, "raw00_1f:");
-+	for (i = 0; i < 32; i++)
-+		seq_printf(s, "%02x", ioread8((u8 __iomem *)pool_base + i));
-+	seq_puts(s, "\nraw20_3f:");
-+	for (i = 0x20; i < 0x40; i++)
-+		seq_printf(s, "%02x", ioread8((u8 __iomem *)pool_base + i));
-+	seq_puts(s, "\nraw40_4f:");
-+	for (i = 0x40; i < 0x50; i++)
-+		seq_printf(s, "%02x", ioread8((u8 __iomem *)pool_base + i));
-+	seq_puts(s, "\n");
++	/* Walk every 256-byte internal-buffer slot (tnums x 2). The frozen
++	 * frame's context lives in the slot its tnum processed, not slot 0.
++	 */
++	{
++		unsigned int slots = fp->pool_raw_size / FMAN_PCD_BMI_FIFO_UNITS;
++		unsigned int n;
 +
-+	seq_printf(s, "l2r=0x%04x l3r=0x%04x l4r=0x%02x cplan=0x%02x nxthdr=0x%04x cksum=0x%04x\n",
-+		   ioread16be((u16 __iomem *)pool_base + 0x22/2),
-+		   ioread16be((u16 __iomem *)pool_base + 0x24/2),
-+		   ioread8((u8 __iomem *)pool_base + 0x26),
-+		   ioread8((u8 __iomem *)pool_base + 0x27),
-+		   ioread16be((u16 __iomem *)pool_base + 0x28/2),
-+		   ioread16be((u16 __iomem *)pool_base + 0x2a/2));
-+	seq_printf(s, "off: shim1=%02x ip_pid=%02x eth=%02x llc=%02x vlan0=%02x vlan1=%02x etype=%02x pppoe=%02x mpls0=%02x mpls1=%02x ip0=%02x ip1=%02x gre=%02x l4=%02x nxthdr=%02x\n",
-+		   ioread8((u8 __iomem *)pool_base + 0x31),
-+		   ioread8((u8 __iomem *)pool_base + 0x32),
-+		   ioread8((u8 __iomem *)pool_base + 0x33),
-+		   ioread8((u8 __iomem *)pool_base + 0x34),
-+		   ioread8((u8 __iomem *)pool_base + 0x35),
-+		   ioread8((u8 __iomem *)pool_base + 0x36),
-+		   ioread8((u8 __iomem *)pool_base + 0x37),
-+		   ioread8((u8 __iomem *)pool_base + 0x38),
-+		   ioread8((u8 __iomem *)pool_base + 0x39),
-+		   ioread8((u8 __iomem *)pool_base + 0x3a),
-+		   ioread8((u8 __iomem *)pool_base + 0x3b),
-+		   ioread8((u8 __iomem *)pool_base + 0x3c),
-+		   ioread8((u8 __iomem *)pool_base + 0x3d),
-+		   ioread8((u8 __iomem *)pool_base + 0x3e),
-+		   ioread8((u8 __iomem *)pool_base + 0x3f));
++		for (n = 0; n < slots; n++) {
++			void __iomem *sl = (void __iomem *)((u8 __iomem *)pool_base +
++							n * FMAN_PCD_BMI_FIFO_UNITS);
++			u8 *b;
++			int j;
++			bool nonzero = false;
++
++			for (j = 0; j < 80 && !nonzero; j++)
++				if (ioread8((u8 __iomem *)sl + j))
++					nonzero = true;
++			if (!nonzero)
++				continue;
++			seq_printf(s, "slot%u raw:", n);
++			for (j = 0; j < 80; j++)
++				seq_printf(s, "%02x",
++					   ioread8((u8 __iomem *)sl + j));
++			seq_puts(s, "\n");
++			seq_printf(s, "slot%u l2r=0x%04x l3r=0x%04x l4r=0x%02x cplan=0x%02x nxthdr=0x%04x cksum=0x%04x\n",
++				   n,
++				   ioread16be((u16 __iomem *)sl + 0x22/2),
++				   ioread16be((u16 __iomem *)sl + 0x24/2),
++				   ioread8((u8 __iomem *)sl + 0x26),
++				   ioread8((u8 __iomem *)sl + 0x27),
++				   ioread16be((u16 __iomem *)sl + 0x28/2),
++				   ioread16be((u16 __iomem *)sl + 0x2a/2));
++			seq_printf(s, "slot%u off: shim1=%02x ip_pid=%02x eth=%02x llc=%02x vlan0=%02x vlan1=%02x etype=%02x pppoe=%02x mpls0=%02x mpls1=%02x ip0=%02x ip1=%02x gre=%02x l4=%02x nxthdr=%02x\n",
++				   n,
++				   ioread8((u8 __iomem *)sl + 0x31),
++				   ioread8((u8 __iomem *)sl + 0x32),
++				   ioread8((u8 __iomem *)sl + 0x33),
++				   ioread8((u8 __iomem *)sl + 0x34),
++				   ioread8((u8 __iomem *)sl + 0x35),
++				   ioread8((u8 __iomem *)sl + 0x36),
++				   ioread8((u8 __iomem *)sl + 0x37),
++				   ioread8((u8 __iomem *)sl + 0x38),
++				   ioread8((u8 __iomem *)sl + 0x39),
++				   ioread8((u8 __iomem *)sl + 0x3a),
++				   ioread8((u8 __iomem *)sl + 0x3b),
++				   ioread8((u8 __iomem *)sl + 0x3c),
++				   ioread8((u8 __iomem *)sl + 0x3d),
++				   ioread8((u8 __iomem *)sl + 0x3e),
++				   ioread8((u8 __iomem *)sl + 0x3f));
++		}
++	}
 +	return 0;
 +}
 +DEFINE_SHOW_ATTRIBUTE(fman_pcd_fe_hwa);
@@ -85,7 +102,7 @@ index b6087ca96da0..6aeb11a9e465 100644
  static const struct file_operations fman_pcd_fe_hash_probe_fops = {
  	.owner		= THIS_MODULE,
  	.open		= fman_pcd_fe_hash_probe_open,
-@@ -5443,6 +5519,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -5443,6 +5536,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  				debugfs_create_file("fe_hash_probe", 0600,
  						    pcd->debugfs_dir, pcd,
  						    &fman_pcd_fe_hash_probe_fops);
