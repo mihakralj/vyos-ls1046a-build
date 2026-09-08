@@ -199,39 +199,41 @@ else:
 with open(dpaa_c) as f:
     dsrc = f.read()
 
-if "fman_pcd_probe2_buf" in dsrc:
-    print("### F-239: dpaa_eth.c already has probe2")
-else:
-    mcap = re.search(
-        r'hash = be32_to_cpu\(\*\(__be32 \*\)\(vaddr \+ hash_offset\)\);\n'
-        r'\s*hash_valid = true;\n'
-        r'\s*\}\n', dsrc)
-    if not mcap:
-        fatal("F-216 normalized RXHASH block anchor not found in dpaa_eth.c "
-              "-- F-239 must run after F-216")
-    capture = (
-        "\n"
-        "\t/* F-239 (unconditional variant): the F-216 RXHASH guard does not\n"
-        "\t * hold at runtime on the VLAN harness port, so capture OUTSIDE it\n"
-        "\t * at the constant annotation offset (hash 0x108 - 0x28 = 0xE0).\n"
-        "\t * Block-scope decls; the definitions live in fman_pcd.c on this\n"
-        "\t * tree state. */\n"
-        "#define FMAN_PCD_PROBE2_LEN 176\n"
-        "\textern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
-        "\textern bool fman_pcd_probe2_valid;\n"
-        "\n"
-        "\tif (vaddr && !strcmp(net_dev->name, \"eth3\")) {\n"
-        "\t\tmemcpy(fman_pcd_probe2_buf, vaddr + 0xE0,\n"
-        "\t\t       FMAN_PCD_PROBE2_LEN);\n"
-        "\t\tfman_pcd_probe2_valid = true;\n"
-        "\t}\n"
-    )
-    dsrc = dsrc[:mcap.end()] + capture + dsrc[mcap.end():]
-    changes += 1
-    print("### dpaa_eth.c: F-239 probe2 unconditional capture added")
-    with open(dpaa_c, "w") as f:
-        f.write(dsrc)
-    print("### dpaa_eth.c: F-239 probe2 synchronous capture added")
+# Idempotent-correct: strip ANY pre-existing probe2 capture (older
+# variants persist via the CI's committed post-patches state), then
+# install the unconditional capture.
+dsrc = re.sub(
+    r'/\* F-239.*?fman_pcd_probe2_valid = true;\n\t\}\n',
+    '', dsrc, flags=re.S)
+mcap = re.search(
+    r'hash = be32_to_cpu\(\*\(__be32 \*\)\(vaddr \+ hash_offset\)\);\n'
+    r'\s*hash_valid = true;\n'
+    r'\s*\}\n', dsrc)
+if not mcap:
+    fatal("F-216 normalized RXHASH block anchor not found in dpaa_eth.c "
+          "-- F-239 must run after F-216")
+capture = (
+    "\n"
+    "\t/* F-239 (unconditional variant): the F-216 RXHASH guard does not\n"
+    "\t * hold at runtime on the VLAN harness port, so capture OUTSIDE it\n"
+    "\t * at the constant annotation offset (hash 0x108 - 0x28 = 0xE0).\n"
+    "\t * Block-scope decls; the definitions live in fman_pcd.c on this\n"
+    "\t * tree state. */\n"
+    "#define FMAN_PCD_PROBE2_LEN 176\n"
+    "\textern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
+    "\textern bool fman_pcd_probe2_valid;\n"
+    "\n"
+    "\tif (vaddr && !strcmp(net_dev->name, \"eth3\")) {\n"
+    "\t\tmemcpy(fman_pcd_probe2_buf, vaddr + 0xE0,\n"
+    "\t\t       FMAN_PCD_PROBE2_LEN);\n"
+    "\t\tfman_pcd_probe2_valid = true;\n"
+    "\t}\n"
+)
+dsrc = dsrc[:mcap.end()] + capture + dsrc[mcap.end():]
+changes += 1
+print("### dpaa_eth.c: F-239 probe2 unconditional capture added")
+with open(dpaa_c, "w") as f:
+    f.write(dsrc)
 
 if changes:
     print(f"### F-239 complete ({changes} change(s))")
