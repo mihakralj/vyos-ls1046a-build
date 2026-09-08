@@ -202,33 +202,18 @@ with open(dpaa_c) as f:
 if "fman_pcd_probe2_buf" in dsrc:
     print("### F-239: dpaa_eth.c already has probe2")
 else:
-    extern_block = (
-        "/* T-M6-8 VLAN-v6 CC-comparator-input dig (F-239); see the buffer's own\n"
-        " * comment in fman_pcd.c for the full rationale and the\n"
-        " * synchronous-capture safety argument (this is deliberately NOT a\n"
-        " * repeat of the F-072/F-170 pattern F-216 removed after a panic -- no\n"
-        " * pointer is stashed here). */\n"
-        "#define FMAN_PCD_PROBE2_LEN 176\n"
-        "extern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
-        "extern bool fman_pcd_probe2_valid;\n"
-    )
-    anchor_extern = (
-        "extern u64 fman_pcd_kg_hash;\n"
-        "extern unsigned int fman_pcd_hash_off;\n"
-    )
-    m = re.search(r'^.*fman_pcd_kg_hash.*$\n', dsrc, re.M)
-    if not m:
-        fatal("fman_pcd_kg_hash extern/local anchor not found in dpaa_eth.c")
-    dsrc = dsrc[:m.end()] + extern_block + dsrc[m.end():]
-    changes += 1
-    print("### dpaa_eth.c: F-239 probe2 extern decls added (fuzzy anchor)")
-
     mcap = re.search(r'^.*hash = be32_to_cpu\(\*\(__be32 \*\)\(vaddr \+ hash_offset\)\).*$\n', dsrc, re.M)
     if not mcap:
         fatal("F-216 normalized RXHASH block anchor not found in dpaa_eth.c "
               "-- F-239 must run after F-216")
     dsrc = dsrc[:mcap.end()] + "\t\thash_valid = true;\n" + dsrc[mcap.end():]
     capture = (
+        "\n"
+        "\t\t/* F-239 (block-scope decls; the definition lives in\n"
+        "\t\t * fman_pcd.c on this tree state). */\n"
+        "#define FMAN_PCD_PROBE2_LEN 176\n"
+        "\t\textern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
+        "\t\textern bool fman_pcd_probe2_valid;\n"
         "\n"
         "\t\t/* T-M6-8 VLAN-v6 CC-comparator-input dig (F-239): synchronous,\n"
         "\t\t * bounded capture only, right here in the RX callback while\n"
