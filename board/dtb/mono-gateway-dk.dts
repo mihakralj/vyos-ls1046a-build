@@ -605,30 +605,34 @@ status = "disabled";
 
 &fman0 {
 	/*
-	 * P0.6 (0195): FE-VM VLAN parse-geometry fix routine tail, streamed
-	 * by load_fman_ctrl_code() right after the microcode image (words
-	 * 12852..12891). POP entry (word 12852): shifts the IC parse-result
-	 * offset tail (eth_off 0x33, etype_off 0x37, ip_off[0..1] 0x3B/3C,
-	 * l4_off 0x3E, nxthdr_off 0x3F) by -4; PUSH entry (word 12872): +4.
-	 * Both return to the shared continuation w11911. Lives on the fman0
-	 * node because the fman-firmware child node is U-Boot's.
+	 * P0.6 v2 (0195): FE-VM VLAN parse-geometry fix routine tail, streamed
+	 * by load_fman_ctrl_code() right after the microcode image. POP entry
+	 * (word 12852, 31 words): shifts the IC parse-result offset tail
+	 * (eth_off 0x33, etype_off 0x37, ip_off[0..1] 0x3B/3C, l4_off 0x3E,
+	 * nxthdr_off 0x3F) by -4 and collapses the vlan_off pair (guarded:
+	 * single-tag -> both cleared; inner-tag -> outer <- inner-4, inner=0).
+	 * PUSH entry (word 12883, 31 words): the mirror (+4, vlan_off[0]=0,
+	 * vlan_off[1] <- old outer+4). Both return to w11911. Lives on the
+	 * fman0 node because the fman-firmware child node is U-Boot's.
 	 */
-	fsl,firmware-extra = <
-		0x0120d033 0xf04003fc 0x1000d033
-		0x0120d037 0xf04003fc 0x1000d037
-		0x0120d03b 0xf04003fc 0x1000d03b
-		0x0120d03c 0xf04003fc 0x1000d03c
-		0x0120d03e 0xf04003fc 0x1000d03e
-		0x0120d03f 0xf04003fc 0x1000d03f
-		0xb3ff3c41 0xffffffff
-		0x0120d033 0xf0400304 0x1000d033
-		0x0120d037 0xf0400304 0x1000d037
-		0x0120d03b 0xf0400304 0x1000d03b
-		0x0120d03c 0xf0400304 0x1000d03c
-		0x0120d03e 0xf0400304 0x1000d03e
-		0x0120d03f 0xf0400304 0x1000d03f
-		0xb3ff3c2d 0xffffffff
+	fsl,firmware-extra = <			0x0120d033 0xf04003fc 0x1000d033 0x0120d037
+			0xf04003fc 0x1000d037 0x0120d03b 0xf04003fc
+			0x1000d03b 0x0120d03c 0xf04003fc 0x1000d03c
+			0x0120d03e 0xf04003fc 0x1000d03e 0x0120d03f
+			0xf04003fc 0x1000d03f 0x0120d036 0xb43f0007
+			0xf04003fc 0x1000d035 0xebc00000 0x1000d036
+			0xb3ff3c3b 0xffffffff 0xebc00000 0x1000d035
+			0x1000d036 0xb3ff3c35 0xffffffff 0x0120d033
+			0xf0400304 0x1000d033 0x0120d037 0xf0400304
+			0x1000d037 0x0120d03b 0xf0400304 0x1000d03b
+			0x0120d03c 0xf0400304 0x1000d03c 0x0120d03e
+			0xf0400304 0x1000d03e 0x0120d03f 0xf0400304
+			0x1000d03f 0x0120d035 0xb43f0007 0xf0400304
+			0x1000d036 0xebc00000 0x1000d035 0xb3ff3c1c
+			0xffffffff 0xebc00000 0x1000d035 0x1000d036
+			0xb3ff3c16 0xffffffff
 	>;
+
 
 	ethernet@e0000 {
 		status = "disabled";
