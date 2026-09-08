@@ -1,8 +1,8 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
-index aef7570b73a2..6e64919bd25b 100644
+index aef7570b73a2..4c621b2c155e 100644
 --- a/drivers/net/ethernet/freescale/fman/fman.c
 +++ b/drivers/net/ethernet/freescale/fman/fman.c
-@@ -1551,6 +1551,60 @@ static int clear_iram(struct fman *fman)
+@@ -1551,6 +1551,66 @@ static int clear_iram(struct fman *fman)
   * clear_iram(), before FPM/BMI/QMI init): setting IRAM_READY on a live
   * FMan crashes the datapath.
   */
@@ -33,6 +33,12 @@ index aef7570b73a2..6e64919bd25b 100644
 +	{ 9552, 0xb3ff0937, 0xb3ff0cf8 },
 +	/* INSERT_VLAN_HDR body exit (w9673, plain xfer14) -> PUSH entry */
 +	{ 9673, 0xb7ff08be, 0xb7ff0c7f },
++	/* STRIP_ALL_VLAN fork (w9460 cbrnz14 -> w9487 short-circuit
++	 * epilogue) — the path REAL stripped frames take (P0c2's null
++	 * result proves the section path w9461-9484 never executes for
++	 * them); redirect the fork to the POP entry instead.
++	 */
++	{ 9460, 0xb83f001b, 0xb83f0d40 },
 +};
 +
 +static bool fman_ucode_fix_warned;
@@ -63,7 +69,7 @@ index aef7570b73a2..6e64919bd25b 100644
  static int load_fman_ctrl_code(struct fman *fman)
  {
  	struct fman_iram_regs __iomem *iram;
-@@ -1559,6 +1613,8 @@ static int load_fman_ctrl_code(struct fman *fman)
+@@ -1559,6 +1619,8 @@ static int load_fman_ctrl_code(struct fman *fman)
  	const __be32 *code;
  	u32 wcount, code_off, iram_off, size;
  	int blob_len, i, count, pad_words;
@@ -72,7 +78,7 @@ index aef7570b73a2..6e64919bd25b 100644
  
  	fw_node = of_get_child_by_name(fman->dev->of_node, "fman-firmware");
  	if (!fw_node) {
-@@ -1604,6 +1660,27 @@ static int load_fman_ctrl_code(struct fman *fman)
+@@ -1604,6 +1666,27 @@ static int load_fman_ctrl_code(struct fman *fman)
  	code = (const __be32 *)(blob + code_off);
  	iram = fman->base_addr + IMEM_OFFSET;
  
@@ -100,7 +106,7 @@ index aef7570b73a2..6e64919bd25b 100644
  	/* Enable auto-increment and stream the image */
  	iowrite32be(IRAM_IADD_AIE | iram_off, &iram->iadd);
  	count = 100;
-@@ -1614,14 +1691,26 @@ static int load_fman_ctrl_code(struct fman *fman)
+@@ -1614,14 +1697,26 @@ static int load_fman_ctrl_code(struct fman *fman)
  	if (count == 0)
  		return -EBUSY;
  
@@ -129,7 +135,7 @@ index aef7570b73a2..6e64919bd25b 100644
  	/* Write-complete handshake on the last code word */
  	iowrite32be(iram_off + size - 4, &iram->iadd);
  	count = 100;
-@@ -1641,13 +1730,21 @@ static int load_fman_ctrl_code(struct fman *fman)
+@@ -1641,13 +1736,21 @@ static int load_fman_ctrl_code(struct fman *fman)
  		 --count);
  	if (count == 0)
  		return -EBUSY;
