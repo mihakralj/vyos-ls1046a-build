@@ -50,6 +50,7 @@ Idempotent via per-section markers, same convention as F-236/F-238.
 
 import os
 import sys
+import re
 
 fman_c = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
 dpaa_c = "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c"
@@ -215,29 +216,19 @@ else:
         "extern u64 fman_pcd_kg_hash;\n"
         "extern unsigned int fman_pcd_hash_off;\n"
     )
-    anchor_local = "u64 fman_pcd_kg_hash;\n"
-    if anchor_extern in dsrc:
-        dsrc = dsrc.replace(anchor_extern, anchor_extern + extern_block, 1)
-        changes += 1
-        print("### dpaa_eth.c: F-239 probe2 extern decls added (extern anchor)")
-    elif anchor_local in dsrc:
-        dsrc = dsrc.replace(anchor_local, anchor_local + extern_block, 1)
-        changes += 1
-        print("### dpaa_eth.c: F-239 probe2 extern decls added (local-def anchor)")
-    else:
+    m = re.search(r'^.*fman_pcd_kg_hash.*$\n', dsrc, re.M)
+    if not m:
         fatal("fman_pcd_kg_hash extern/local anchor not found in dpaa_eth.c")
+    dsrc = dsrc[:m.end()] + extern_block + dsrc[m.end():]
+    changes += 1
+    print("### dpaa_eth.c: F-239 probe2 extern decls added (fuzzy anchor)")
 
-    anchor_capture = (
-        "\t\thash = be32_to_cpu(*(__be32 *)(vaddr + hash_offset));\n"
-        "\t\thash_valid = true;\n"
-        "\t}\n"
-    )
-    if anchor_capture not in dsrc:
+    mcap = re.search(r'^.*hash = be32_to_cpu\(\*\(__be32 \*\)\(vaddr \+ hash_offset\)\).*$\n', dsrc, re.M)
+    if not mcap:
         fatal("F-216 normalized RXHASH block anchor not found in dpaa_eth.c "
               "-- F-239 must run after F-216")
-    new_capture = (
-        "\t\thash = be32_to_cpu(*(__be32 *)(vaddr + hash_offset));\n"
-        "\t\thash_valid = true;\n"
+    dsrc = dsrc[:mcap.end()] + "\t\thash_valid = true;\n" + dsrc[mcap.end():]
+    capture = (
         "\n"
         "\t\t/* T-M6-8 VLAN-v6 CC-comparator-input dig (F-239): synchronous,\n"
         "\t\t * bounded capture only, right here in the RX callback while\n"
@@ -256,10 +247,13 @@ else:
         "\t\t\t       FMAN_PCD_PROBE2_LEN);\n"
         "\t\t\tfman_pcd_probe2_valid = true;\n"
         "\t\t}\n"
-        "\t}\n"
     )
-    dsrc = dsrc.replace(anchor_capture, new_capture, 1)
+    anchor2 = re.search(r'^.*hash_valid = true;.*$\n', dsrc, re.M)
+    if not anchor2:
+        fatal("hash_valid anchor not found after F-216 block")
+    dsrc = dsrc[:anchor2.end()] + capture + dsrc[anchor2.end():]
     changes += 1
+    print("### dpaa_eth.c: F-239 probe2 synchronous capture added")
     with open(dpaa_c, "w") as f:
         f.write(dsrc)
     print("### dpaa_eth.c: F-239 probe2 synchronous capture added")
