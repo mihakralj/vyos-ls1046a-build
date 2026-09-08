@@ -1,5 +1,5 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
-index aef7570b73a2..0cc67c7d8aa5 100644
+index aef7570b73a2..56f03f7c1f02 100644
 --- a/drivers/net/ethernet/freescale/fman/fman.c
 +++ b/drivers/net/ethernet/freescale/fman/fman.c
 @@ -1551,6 +1551,66 @@ static int clear_iram(struct fman *fman)
@@ -29,10 +29,10 @@ index aef7570b73a2..0cc67c7d8aa5 100644
 +static const struct fman_ucode_fix_entry fman_ucode_vlan_fix[] = {
 +	/* STRIP_ALL_VLAN exit (w9485) -> POP entry at word 12852 */
 +	{ 9485, 0xb3ff097a, 0xb3ff0d27 },
-+	/* INSERT_VLAN_HDR fork exit (w9552) -> PUSH entry at word 12883 */
-+	{ 9552, 0xb3ff0937, 0xb3ff0d03 },
++	/* INSERT_VLAN_HDR fork exit (w9552) -> PUSH entry at word 12894 */
++	{ 9552, 0xb3ff0937, 0xb3ff0d0e },
 +	/* INSERT_VLAN_HDR body exit (w9673, plain xfer14) -> PUSH entry */
-+	{ 9673, 0xb7ff08be, 0xb7ff0c8a },
++	{ 9673, 0xb7ff08be, 0xb7ff0c95 },
 +	/* STRIP_ALL_VLAN fork (w9460 cbrnz14 -> w9487 short-circuit
 +	 * epilogue) — the path REAL stripped frames take (P0c2's null
 +	 * result proves the section path w9461-9484 never executes for
