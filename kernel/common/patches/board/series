@@ -357,3 +357,10 @@
 # Throwaway experiment branch only.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0195-fman-fe-vm-vlan-geometry-fix.patch
+
+# P0.7 (2026-09-08): fe_hwa debugfs — host-side dump of the FE-VM's
+# per-frame context mirror (parse result at +0x20..0x3f, timestamp, KG
+# hash) from the per-port MURAM pool. Differential diagnosis of the
+# frozen-VLAN vs routed frame geometry. Throwaway experiment branch.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0196-fman-pcd-fe-hwa-dump.patch
