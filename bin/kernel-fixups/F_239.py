@@ -202,43 +202,33 @@ with open(dpaa_c) as f:
 if "fman_pcd_probe2_buf" in dsrc:
     print("### F-239: dpaa_eth.c already has probe2")
 else:
-    mcap = re.search(r'^.*hash = be32_to_cpu\(\*\(__be32 \*\)\(vaddr \+ hash_offset\)\).*$\n', dsrc, re.M)
+    mcap = re.search(
+        r'hash = be32_to_cpu\(\*\(__be32 \*\)\(vaddr \+ hash_offset\)\);\n'
+        r'\s*hash_valid = true;\n'
+        r'\s*\}\n', dsrc)
     if not mcap:
         fatal("F-216 normalized RXHASH block anchor not found in dpaa_eth.c "
               "-- F-239 must run after F-216")
-    dsrc = dsrc[:mcap.end()] + "\t\thash_valid = true;\n" + dsrc[mcap.end():]
     capture = (
         "\n"
-        "\t\t/* F-239 (block-scope decls; the definition lives in\n"
-        "\t\t * fman_pcd.c on this tree state). */\n"
+        "\t/* F-239 (unconditional variant): the F-216 RXHASH guard does not\n"
+        "\t * hold at runtime on the VLAN harness port, so capture OUTSIDE it\n"
+        "\t * at the constant annotation offset (hash 0x108 - 0x28 = 0xE0).\n"
+        "\t * Block-scope decls; the definitions live in fman_pcd.c on this\n"
+        "\t * tree state. */\n"
         "#define FMAN_PCD_PROBE2_LEN 176\n"
-        "\t\textern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
-        "\t\textern bool fman_pcd_probe2_valid;\n"
+        "\textern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
+        "\textern bool fman_pcd_probe2_valid;\n"
         "\n"
-        "\t\t/* T-M6-8 VLAN-v6 CC-comparator-input dig (F-239): synchronous,\n"
-        "\t\t * bounded capture only, right here in the RX callback while\n"
-        "\t\t * vaddr is known-valid (just dereferenced successfully above)\n"
-        "\t\t * -- NOT a save-a-pointer-for-later like the diagnostic F-216\n"
-        "\t\t * removed after it panicked on a zero-address FD. Scoped to\n"
-        "\t\t * eth3 only (sacrificial test port). hash_offset >= 0x28\n"
-        "\t\t * guards the window start against underflow (0x28 is the\n"
-        "\t\t * established parse-result-base back-offset, see\n"
-        "\t\t * fman_pcd_cc.c CC_IC_KG_KEY_OFFSET's own comment for the\n"
-        "\t\t * provenance). */\n"
-        "\t\tif (vaddr && !strcmp(net_dev->name, \"eth3\") &&\n"
-        "\t\t    hash_offset >= 0x28) {\n"
-        "\t\t\tmemcpy(fman_pcd_probe2_buf,\n"
-        "\t\t\t       vaddr + hash_offset - 0x28,\n"
-        "\t\t\t       FMAN_PCD_PROBE2_LEN);\n"
-        "\t\t\tfman_pcd_probe2_valid = true;\n"
-        "\t\t}\n"
+        "\tif (vaddr && !strcmp(net_dev->name, \"eth3\")) {\n"
+        "\t\tmemcpy(fman_pcd_probe2_buf, vaddr + 0xE0,\n"
+        "\t\t       FMAN_PCD_PROBE2_LEN);\n"
+        "\t\tfman_pcd_probe2_valid = true;\n"
+        "\t}\n"
     )
-    anchor2 = re.search(r'^.*hash_valid = true;.*$\n', dsrc, re.M)
-    if not anchor2:
-        fatal("hash_valid anchor not found after F-216 block")
-    dsrc = dsrc[:anchor2.end()] + capture + dsrc[anchor2.end():]
+    dsrc = dsrc[:mcap.end()] + capture + dsrc[mcap.end():]
     changes += 1
-    print("### dpaa_eth.c: F-239 probe2 synchronous capture added")
+    print("### dpaa_eth.c: F-239 probe2 unconditional capture added")
     with open(dpaa_c, "w") as f:
         f.write(dsrc)
     print("### dpaa_eth.c: F-239 probe2 synchronous capture added")
