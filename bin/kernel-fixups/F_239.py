@@ -208,28 +208,29 @@ dsrc = re.sub(
     r'/\* F-239.*?fman_pcd_probe2_valid = true;\n\t\}\n',
     '', dsrc, flags=re.S)
 mcap = re.search(
-    r'hash = be32_to_cpu\(\*\(__be32 \*\)\(vaddr \+ hash_offset\)\);\n'
-    r'\s*hash_valid = true;\n'
-    r'\s*\}\n', dsrc)
+    r'vaddr = phys_to_virt\(addr\);\n'
+    r'\s*prefetch\(vaddr \+ qm_fd_get_offset\(fd\)\);\n', dsrc)
 if not mcap:
-    fatal("F-216 normalized RXHASH block anchor not found in dpaa_eth.c "
+    fatal("vaddr-assignment anchor not found in rx_default_dqrr "
           "-- F-239 must run after F-216")
 capture = (
     "\n"
-    "\t/* F-239 (unconditional variant): the F-216 RXHASH guard does not\n"
-    "\t * hold at runtime on the VLAN harness port, so capture OUTSIDE it\n"
-    "\t * at the constant annotation offset (hash 0x108 - 0x28 = 0xE0).\n"
-    "\t * Block-scope decls; the definitions live in fman_pcd.c on this\n"
-    "\t * tree state. */\n"
+    "\t/* F-239 (unconditional, post-vaddr): annotate the frame from the\n"
+    "\t * buffer prefix (parse result at vaddr+0xE0 per the RICP copy\n"
+    "\t * layout). The F-216 hash block runs BEFORE vaddr is assigned,\n"
+    "\t * so anchor immediately after the assignment below. */\n"
     "#define FMAN_PCD_PROBE2_LEN 176\n"
     "\textern u8 fman_pcd_probe2_buf[FMAN_PCD_PROBE2_LEN];\n"
     "\textern bool fman_pcd_probe2_valid;\n"
     "\textern char fman_pcd_probe2_dev[16]; /* IFNAMSIZ */\n"
     "\n"
-    "\tif (vaddr && !strcmp(net_dev->name, \"eth3\")) {\n"
+    "\tif (vaddr) {\n"
     "\t\tmemcpy(fman_pcd_probe2_buf, vaddr + 0xE0,\n"
     "\t\t       FMAN_PCD_PROBE2_LEN);\n"
     "\t\tfman_pcd_probe2_valid = true;\n"
+    "\t\tstrncpy(fman_pcd_probe2_dev,\n"
+    "\t\t\t net_dev ? net_dev->name : \"(none)\",\n"
+    "\t\t\t sizeof(fman_pcd_probe2_dev));\n"
     "\t}\n"
 )
 dsrc = dsrc[:mcap.end()] + capture + dsrc[mcap.end():]
