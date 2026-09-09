@@ -364,3 +364,11 @@
 # frozen-VLAN vs routed frame geometry. Throwaway experiment branch.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0196-fman-pcd-fe-hwa-dump.patch
+
+# P0.8 (2026-09-09): CC-automation — auto-build the F-171 fe_group
+# CONT_LOOKUP wrap at engage (prebuilt state; production vendor-node
+# dispatch unchanged) and free it on last-port disengage. Removes the
+# manual debugfs build step from the oracle procedure. Throwaway
+# experiment branch.
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0197-fman-pcd-fe-group-autobuild.patch

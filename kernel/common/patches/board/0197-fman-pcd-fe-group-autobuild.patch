@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Tue, 9 Sep 2026 03:30:00 +0000
+Subject: [PATCH] fman: P0 CC-automation — auto-build F-171 fe_group at engage
+
+The F-171 CONT_LOOKUP group wrap (fe_group) is currently debugfs-only:
+the board procedure must hand-build it (`echo build > fe_group`) and
+re-engage with the returned group_ad offset before the experimental
+group dispatch can be exercised. Automate the build so the manual step
+disappears:
+
+- __fman_pcd_fe_arm_engage() pre-builds the group (wrapping the FE_ENTER
+  root AD, miss -> miss_fqid, all-wildcard match row) whenever the root
+  AD exists. Production dispatch is UNCHANGED: RCCB still targets the
+  vendor node at gro; the group is prebuilt state only, consumed when
+  the debugfs engage verb is given its group_ad offset.
+- __fman_pcd_fe_arm_disengage() frees the shared group once the last
+  armed port disengages (fe_group is per-PCD, not per-port).
+
+Both call sites precede the definitions (engaged ~3708, disengage
+~3917 vs definitions at 4637/4714), so forward declarations are
+added after the includes.
+
+Throwaway experiment branch (P0.8). Guarded by the existing
+-EEXIST/-ENOENT returns of fman_pcd_fe_group_build(); any build failure
+degrades to the current behavior with a warning.
+
+Patch-Name: 0197-fman-pcd-fe-group-autobuild.patch
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -47,8 +47,14 @@
+ #include "fman.h"
+ #include "fman_muram.h"
+ #include "fman_port.h"
+ #include "fman_keygen_internal.h"
+ 
++/* Forward declarations (0197): both defined later (0173 fe_group
++ * section); engage/disengage call them before their definitions. */
++static int fman_pcd_fe_group_build(struct fman_pcd *pcd, u32 miss_fqid,
++				   const u8 *key, const u8 *mask);
++static void fman_pcd_fe_group_free(struct fman_pcd *pcd);
++
+ /* F-210(v6-enable-gate): IPv6 FE offload master switch. 2026-08-21:
+  * DEFAULT ON. IPv6 now uses the SAME dual-lane match-all scheme + per-
+  * port 46-byte table as IPv4 (F-224/F-225); the old v6-only machinery
+@@ -3708,14 +3714,31 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+ 	/* C2 readback gate (F-008): validate MURAM before KG arm.
+ 	 * Catches silent-write defects before frames hit silicon. */
+ 	{		int _verify_err = fman_pcd_fe_verify_internal(pcd, (u8)port_id);
+ 		if (_verify_err) {
+ 			pr_err("fman_pcd: arm_engage 0x%02x ABORTED — verify failed\n",
+ 			       (u8)port_id);
+ 			return _verify_err;
+ 		}	}
+ 
++	/* P0 CC-automation (0197): pre-build the F-171 CONT_LOOKUP group
++	 * wrap (fe_group) when the FE_ENTER root AD exists, so the
++	 * experimental group dispatch is available without the manual
++	 * debugfs build step. Production dispatch is unchanged: RCCB
++	 * still targets the vendor node at gro; the group is prebuilt
++	 * state only, consumed by the debugfs engage verb.
++	 * -EEXIST = already built (e.g. second port's engage).
++	 */
++	if (pcd->fe_root_ad_off && !pcd->fe_group_off) {
++		int _grp_err = fman_pcd_fe_group_build(pcd,
++					      miss_fqid ? miss_fqid : 0x200,
++					      NULL, NULL);
++		if (_grp_err && _grp_err != -EEXIST)
++			pr_warn("fman_pcd: fe_group prebuild failed (%d)\n",
++				_grp_err);
++	}
++
+ 		err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
+ 				      (u32)fe_enter_off, &saved_engine, ekfc);
+ 	if (err) {
+ 		/*
+ 		 * F-125: release the scaffold we just built. Returning with
+@@ -3917,8 +3940,14 @@ static int __fman_pcd_fe_arm_disengage(struct fman_pcd *pcd,
+ 	}
+ 	fsleep(5000);
+ 	fman_pcd_fe_port_del(pcd, (u8)port_id);
+ 	/* F-139: scaffold now freed in fe_port_del */
+ 
++	/* P0 CC-automation (0197): release the shared F-171 group wrap
++	 * once the last armed port disengages (fe_group is per-PCD,
++	 * not per-port). */
++	if (bitmap_empty(pcd->fe_port_armed, 32))
++		fman_pcd_fe_group_free(pcd);
++
+ 	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
+ 	return 0;
+ }

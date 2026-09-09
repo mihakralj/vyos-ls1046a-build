@@ -610,10 +610,21 @@ status = "disabled";
 	 * buffer base + 4 (w9461 li16 r3,4 -> w9471 r28 += r3), so the HWA
 	 * (raw+0xE0..0xFF) maps to r28+0xDC..0xFB. POP entry (word 12852):
 	 * l2r &= ~0x4080 at DE/DF, vlan_off -> [0x0c][0xFF] at F1/F2, guarded
-	 * -4 on etype/ip/l4/nxthdr_off at F3/F7/F8/FA/FB. The PUSH entry
-	 * (word 12894) is kept as-is this round (its r0 shift is clobbered in
-	 * the body; correcting it needs the deeper base trace) — the POP-side
-	 * gates alone decide the mechanism. Both return to w11911.
+	 * -4 on etype/ip/l4/nxthdr_off at F3/F7/F8/FA/FB.
+	 *
+	 * P0.8 PUSH correction (2026-09-09): the INSERT window math is the
+	 * mirror of STRIP's. w9519 r0 = r4 - IC[0xd4]; w9520 r5 = r28 + r0;
+	 * w9522 r28 = r5 (delay slot of the w9521 cbrz — unconditional).
+	 * The same r0 feeds w9528 r1 -= r0 where r1 = [IC+0xc0] (frame length,
+	 * the STRIP twin of w9466-9468 subtracts 4 there): INSERT must GROW the
+	 * frame by 4, so r0 = -4 and the exit r28 = raw - 4. HWA (raw+0xE0..0xFF)
+	 * therefore maps to r28+0xE4..0x103. PUSH entry (word 12894): l2r byte
+	 * adds +0x40/+0x80 at E6/E7, vlan_off -> [0x0c][0xFF] at F9/FA, guarded
+	 * +4 on etype/ip/l4/nxthdr_off at FB/FF/100/102/103. Same 42-word size,
+	 * same entry word, same call-site displacements (0195 unchanged).
+	 * Cross-check pending: the 0193 pc0 reader's dra/drd window during a
+	 * frozen INSERT flow reads the live r28 if this derivation is wrong.
+	 * Both entries return to w11911.
 	 */
 	fsl,firmware-extra = <			0x0120e0de 0xf00003bf 0x1000e0de 0x0120e0df
 			0xf000037f 0x1000e0df 0xebc0000c 0x1000e0f1
@@ -625,17 +636,17 @@ status = "disabled";
 			0x0120e0fa 0xb43f0005 0xe5c000ff 0xb43f0003
 			0xf04003fc 0x1000e0fa 0x0120e0fb 0xb43f0005
 			0xe5c000ff 0xb43f0003 0xf04003fc 0x1000e0fb
-			0xb3ff3c2b 0xffffffff 0x0120e0e2 0xf0400340
-			0x1000e0e2 0x0120e0e3 0xf0400380 0x1000e0e3
-			0xebc0000c 0x1000e0f5 0xebc000ff 0x1000e0f6
-			0x0120e0f7 0xb43f0005 0xe5c000ff 0xb43f0003
-			0xf0400304 0x1000e0f7 0x0120e0fb 0xb43f0005
-			0xe5c000ff 0xb43f0003 0xf0400304 0x1000e0fb
-			0x0120e0fc 0xb43f0005 0xe5c000ff 0xb43f0003
-			0xf0400304 0x1000e0fc 0x0120e0fe 0xb43f0005
-			0xe5c000ff 0xb43f0003 0xf0400304 0x1000e0fe
-			0x0120e0ff 0xb43f0005 0xe5c000ff 0xb43f0003
-			0xf0400304 0x1000e0ff 0xb3ff3c01 0xffffffff
+			0xb3ff3c2b 0xffffffff 0x0120e0e6 0xf0400340
+			0x1000e0e6 0x0120e0e7 0xf0400380 0x1000e0e7
+			0xebc0000c 0x1000e0f9 0xebc000ff 0x1000e0fa
+			0x0120e0fb 0xb43f0005 0xe5c000ff 0xb43f0003
+			0xf0400304 0x1000e0fb 0x0120e0ff 0xb43f0005
+			0xe5c000ff 0xb43f0003 0xf0400304 0x1000e0ff
+			0x0120e100 0xb43f0005 0xe5c000ff 0xb43f0003
+			0xf0400304 0x1000e100 0x0120e102 0xb43f0005
+			0xe5c000ff 0xb43f0003 0xf0400304 0x1000e102
+			0x0120e103 0xb43f0005 0xe5c000ff 0xb43f0003
+			0xf0400304 0x1000e103 0xb3ff3c01 0xffffffff
 	>;
 
 
