@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Wed, 10 Sep 2026 07:20:00 +0000
+Subject: [PATCH] fman: P0 diagnostic (0198) — full MURAM hexdump node
+
+The FE-VM VLAN-freeze investigation has now validly falsified fixes
+targeting BOTH known parse-result copies: the engine-private dmem IC
+page (v1/v3, r26-based convention-correct updates — inert) and the
+DDR frame-side Hardware Annotation (2026-09-09 raw-anchored POP table,
+IRAM-verified live — inert). A third copy exists: the per-frame
+context slots in host-visible MURAM with the IC layout (parse result
++0x20..0x3f, timestamp +0x40..0x47, KG hash +0x48..0x4f) — the
+"IC mirror" 0196's fe_hwa intended to dump but cannot reach on the
+vendor-node engage path (fp->pool_raw_off is stale there, so no slots
+print).
+
+muram_hex dumps the whole 128 KiB MURAM (nonzero 32-byte lines,
+gap-marked) so a baseline-vs-frozen-flow diff reveals EVERY per-frame
+context slot, pool, and counter the FE-VM touches — whichever
+structure holds the geometry the Pre-BMI 0x1a proof actually reads.
+
+Read-only (ioread8), same safety class as fe_hwa/fe_buffer.
+
+Patch-Name: 0198-fman-pcd-muram-hexdump.patch
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 62 +++++++++++++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -4454,5 +4454,64 @@ static int fman_pcd_fe_hwa_show(struct seq_file *s, void *unused)
+ DEFINE_SHOW_ATTRIBUTE(fman_pcd_fe_hwa);
+ 
++/* P0 diagnostic (0198): full MURAM hexdump.
++ *
++ * Prints every nonzero 32-byte line across the whole 128 KiB MURAM
++ * (zero runs gap-marked), so a baseline-vs-frozen-flow diff reveals
++ * every per-frame context slot, pool, and counter the FE-VM touches —
++ * including the per-tnum IC-mirror slots (layout: parse result
++ * +0x20..0x3f, timestamp +0x40..0x47, KG hash +0x48..0x4f) that
++ * fe_hwa's per-port pointer misses on the vendor-node engage path.
++ */
++static int fman_pcd_muram_hex_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct fman *fman = fman_pcd_get_fman(pcd);
++	struct muram_info *muram;
++	void __iomem *base;
++	u32 off;
++	int skipping = 0;
++
++	if (!fman || !(muram = fman_get_muram(fman))) {
++		seq_puts(s, "MURAM not available\n");
++		return 0;
++	}
++	base = fman_muram_offset_to_vbase(muram, 0);
++	if (!base) {
++		seq_puts(s, "MURAM base not mappable\n");
++		return 0;
++	}
++
++	for (off = 0; off < 0x20000; off += 32) {
++		u8 __iomem *line = (u8 __iomem *)base + off;
++		u8 b[32];
++		bool nonzero = false;
++		int j;
++
++		for (j = 0; j < 32; j++) {
++			b[j] = ioread8(line + j);
++			if (b[j])
++				nonzero = true;
++		}
++		if (!nonzero) {
++			skipping++;
++			continue;
++		}
++		if (skipping) {
++			seq_printf(s, "gap %06x-%06x\n",
++				   off - skipping * 32, off - 32);
++			skipping = 0;
++		}
++		seq_printf(s, "%06x ", off);
++		for (j = 0; j < 32; j++)
++			seq_printf(s, "%02x", b[j]);
++		seq_puts(s, "\n");
++	}
++	if (skipping)
++		seq_printf(s, "gap %06x-01ffff\n", 0x20000 - skipping * 32);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(fman_pcd_muram_hex);
++
+ static const struct file_operations fman_pcd_fe_hash_probe_fops = {
+ 	.owner		= THIS_MODULE,
+ 	.open		= fman_pcd_fe_hash_probe_open,
+@@ -5638,6 +5697,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 				debugfs_create_file("fe_hwa", 0444,
+ 						    pcd->debugfs_dir, pcd,
+ 						    &fman_pcd_fe_hwa_fops);
++				debugfs_create_file("muram_hex", 0444,
++						    pcd->debugfs_dir, pcd,
++						    &fman_pcd_muram_hex_fops);
+ 						debugfs_create_file("fe_disengage_full", 0200, pcd->debugfs_dir, pcd, &fman_pcd_fe_disengage_full_fops);
+ 	debugfs_create_file("fe_buffer", 0444, pcd->debugfs_dir, pcd, &fman_pcd_fe_buffer_fops);
+ 							debugfs_create_file("fe_recover", 0200, pcd->debugfs_dir, pcd, &fman_pcd_fe_recover_fops);

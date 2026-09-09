@@ -372,3 +372,7 @@
 # experiment branch.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0197-fman-pcd-fe-group-autobuild.patch
+0198-fman-pcd-muram-hexdump.patch
+# P0 diagnostic: full MURAM hexdump (baseline-vs-frozen diff instrument).
+# Reveals the per-frame context slots (third parse-result copy) that
+# fe_hwa cannot reach on the vendor-node engage path. Read-only.
