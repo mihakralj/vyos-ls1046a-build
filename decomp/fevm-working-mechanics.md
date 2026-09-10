@@ -271,3 +271,59 @@ choice — lift the limit (microcode research) vs the vendor architecture
 - The 0193 iadd port: IRAM word readback (word×4 byte addressing; EINVAL-on-
   newline is a benign VFS artifact); the fmfp_dra/drd window is NOT a
   random-access Data-RAM read instrument (dead)
+
+## 11. Live re-verification (2026-09-10, board .185, image 2049-rolling): the staging failure is NON-DETERMINISTIC, not a fixed 192B cutoff
+
+Re-ran the exact repro (iperf3 UDP, .116 eth3.10 10.99.10.116 → HELGA
+ask2vlan20 10.99.20.16, `-b 2M -t 6 -l 1400`) on a freshly cold-booted
+board. Wedge reproduced immediately and identically: iperf3 client hung
+past its own timeout, forward record (tbl[3]) climbed to pkt_count=17→19,
+reply record (tbl[2]) held at pkt_count=11, `ts[4]=0x81000016` (the
+cycling park signature, consistent with the documented +2-per-retry
+sequence).
+
+**New observation that complicates §10.3's "192-byte cutoff" model.**
+iperf3's UDP parameter-exchange JSON (`{"udp":true,"omit":0,"time":6,
+"num":0,"blockcount":0,"parallel":1,"len":1400,"bandwidth":200000,
+"pacing_timer":1000,"client_version":"3.20"}`, retransmitted repeatedly
+since the reply never completes) was found byte-identical across 5
+separate ring slots in a single `muram_hex` capture (grep on the literal
+`"parallel":1,"len` substring, which lands at the same slot-relative
+offset — slot+0x80 — in every occurrence, since the message content and
+Ethernet/IP/UDP header lengths are identical between retransmits):
+
+- **3 of 5 copies are byte-perfect** (`0x1ac80`, `0x1ba80`, `0x1f780`):
+  `...,"len":1400,"bandwidth":200000,"pacing_timer":1000,
+  "client_version":"3.20"}` followed by clean zero padding.
+- **2 of 5 copies are corrupted at the identical text position**
+  (`0xb380`, `0x1f580`): `...,"len` is followed not by `":1400,...` but
+  by raw non-ASCII bytes (`00 50 00 02 00 00 00 00 00 05 0[4|5] 00`) that
+  don't match the source message at all, before an unrelated `"widt`
+  fragment reappears a few bytes later — i.e. the copy didn't cleanly
+  truncate-to-zero, it left behind bytes that look like a **different,
+  unrelated prior occupant of that ring slot**, consistent with the copy
+  simply stopping partway and never overwriting the slot's stale tail.
+
+Since this is the *same* message (same total frame size, same content,
+same slot-relative landing position) landing sometimes intact and
+sometimes truncated, the failure is **not a hard fixed-byte-count
+ceiling** — a fixed limit would corrupt this message every time or never.
+This looks instead like a **race/timing-dependent truncation**: the
+staging copy (or the pre-BMI op that depends on it) sometimes gets
+preempted or interrupted before finishing, and how far it got varies
+between attempts of an identical-size frame. This doesn't overturn the
+wire-level threshold finding (≤107B delivers / ≥213B never delivers
+still stands as an observed correlation), but it means the mechanism
+behind that threshold is probably contention-driven (e.g. two frames'
+staging copies overlapping in time, or the pre-BMI checksum/DMA unit
+being busy with the previous frame when the next one's copy starts) —
+not a simple "the slot has room for N bytes and no more."
+
+**Next-round implication**: instrument the copy's *timing*, not just its
+end state — e.g. capture the same retransmitted message across many more
+occurrences to get a corruption rate, and check whether corrupted copies
+correlate with shorter inter-frame spacing (retransmit timing) than clean
+ones. If corruption rate tracks inter-frame gap, the fix target shifts
+from "the slot is too small" to "the pre-BMI/staging pipeline isn't
+re-entrant across back-to-back frames on the VLAN-opcode path" — a
+different, and more tractable, class of bug than a hard capacity wall.
