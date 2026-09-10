@@ -69,14 +69,18 @@ if [ -n "$need_pkg" ]; then
 fi
 
 ### 3. Sparse clone of just the DTS includes and dt-bindings at the right tag.
-# Using github.com/gregkh/linux (canonical stable mirror). Sparse + blob:none
-# keeps this to ~20-30 MB and well under a minute.
+# Using git.kernel.org directly (not the github.com/gregkh/linux mirror --
+# that mirror lags real upstream by days/weeks around point-release bumps,
+# e.g. missing v6.18.50 entirely on 2026-09-10 while kernel.org already had
+# it; this project has hit the same "kernel bumped mid-day, CI desynced"
+# class of failure before). Sparse + blob:none keeps this to ~20-30 MB and
+# well under a minute either way.
 mkdir -p "$WORK"
 if [ ! -d "$LINUX_SRC/.git" ]; then
     echo "### Sparse-cloning Linux $TAG (blob:none, sparse)"
     git clone --depth 1 --filter=blob:none --sparse \
         --branch "$TAG" \
-        https://github.com/gregkh/linux.git "$LINUX_SRC"
+        https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$LINUX_SRC"
     git -C "$LINUX_SRC" sparse-checkout set \
         arch/arm64/boot/dts/freescale \
         include/dt-bindings \
