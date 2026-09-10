@@ -250,6 +250,73 @@ bool ask_hw_vlan_offload_armed(void)
 }
 EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
 
+/*
+ * T-M6-2 B0: per-port L2 bridge offload arm bit, mirroring ask_hw_port_vlan[]
+ * exactly. No CLI leafNode sets this directly -- VyOS's `interfaces bridge`
+ * conf_mode arms it automatically for a member port that already has
+ * `offload ipv4`/`offload ipv6` set (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md: "no
+ * separate opt-in, automatic when at least one member port has ASK hardware
+ * offload enabled"). No global master-override module param exists for this
+ * bit (unlike ask_vlan_offload) -- bridge admission with no member port
+ * engaged makes no sense to force on, so there is nothing sensible for a
+ * bare master override to mean here.
+ */
+static bool ask_hw_port_bridge[64];
+
+void ask_hw_offload_set_bridge(u8 hw_port_id, bool on)
+{
+	bool old;
+
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_bridge))
+		return;
+
+	old = READ_ONCE(ask_hw_port_bridge[hw_port_id]);
+	WRITE_ONCE(ask_hw_port_bridge[hw_port_id], on);
+
+	/*
+	 * B0: no CC-tree/FDB install path exists yet (ask_bridge.c is an
+	 * observer only), so there is nothing to tear down on a live
+	 * true->false transition. B3's real switchdev wiring adds the
+	 * equivalent of ask_vlan_cc_teardown_port()'s live-disarm handling
+	 * here once bridge FDB entries are actually installed into hardware.
+	 */
+	(void)old;
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_set_bridge);
+
+/*
+ * Authoritative per-port bridge gate, mirroring ask_hw_vlan_offload_armed_
+ * port(). A bridge FDB entry on this ingress port is admitted to hardware
+ * only when this returns true -- once B1-B3 give it something to gate.
+ */
+bool ask_hw_bridge_offload_armed_port(u8 hw_port_id)
+{
+	bool armed;
+
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_bridge))
+		return false;
+	armed = READ_ONCE(ask_hw_port_bridge[hw_port_id]);
+	if (armed)
+		pr_info_once("ask: L2 bridge FDB hardware offload enabled (CC+plain enqueue) on at least one port\n");
+	return armed;
+}
+EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed_port);
+
+/*
+ * Port-agnostic gate for the capability-advertise (ask_genl.c), mirroring
+ * ask_hw_vlan_offload_armed(). True iff ANY port is armed.
+ */
+bool ask_hw_bridge_offload_armed(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ask_hw_port_bridge); i++)
+		if (READ_ONCE(ask_hw_port_bridge[i]))
+			return true;
+	return false;
+}
+EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed);
+
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
 	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))

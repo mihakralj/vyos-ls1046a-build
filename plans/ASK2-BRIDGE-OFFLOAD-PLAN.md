@@ -471,3 +471,67 @@ Coalesce first (debounce timer keyed per port), then rebuild once. This is in
 addition to, not instead of, §11's unlock-before-drain lesson — the two
 compose: fewer rebuild events (this section), each one not serializing
 unrelated ports (§11).
+
+## 13. Per-port arming ABI + automatic CLI trigger — 2026-09-10
+
+Extended the same genl engage mechanism VLAN uses (`ASK_CMD_ENGAGE` +
+`ASK_ATTR_FAMILY_MASK`/`ASK_ATTR_VLAN`) with a parallel `ASK_ATTR_BRIDGE`
+(u8 bool) attribute, and the matching kernel-side per-port array
+(`ask_hw_port_bridge[]`, `ask_hw_offload_set_bridge()`,
+`ask_hw_bridge_offload_armed_port()`/`_armed()` in `ask_hw.c` — byte-for-byte
+mirroring the VLAN functions). `ask_bridge.c`'s FDB observer now reports the
+real per-port armed state instead of the placeholder global module param B0
+shipped with (removed — see below). `ASK_CAP_BRIDGE` deliberately stays
+unadvertised through B0-B2 even though the arm/gate functions now exist for
+real, since there is still no CC-tree/FDB install path consuming them (that's
+B3).
+
+**Design decision (explicit user direction): no CLI leafNode for bridge
+offload.** Unlike VLAN's `offload vlan` (an explicit per-port opt-in the user
+sets), bridge offload arms **automatically**: whenever a member port already
+has `offload ipv4`/`offload ipv6` armed, joining a bridge (or the bridge
+itself being created around it) arms that port's bridge bit with no separate
+command. There is intentionally no global master-override module param either
+(unlike `ask_vlan_offload`) — forcing bridge offload on for a port with no
+family offload armed at all would have nothing to ride on, so a bare
+"force everything on" debug knob doesn't mean anything here.
+
+Implementation spans three layers, all now silicon-independent (dormant, same
+B0 risk profile — this only changes when the genl bit gets set, not whether
+anything installs into hardware):
+
+1. **`board/scripts/vyos-offload-ask`** — `engage`/`family` gained an optional
+   3rd `bridge` arg (mirroring `vlan`'s 2nd arg), plus a standalone `bridge
+   <0|1>` verb (mirroring `vlan <0|1>`) for re-arming just that bit without
+   touching family.
+2. **vyos-1x `python/vyos/ifconfig/ethernet.py`** (`data/vyos-1x-051-bridge-
+   hw-offload-auto.patch`) — `set_ask_offload()` gained a `bridge: bool`
+   param threaded into the tool call. `update()` computes it automatically:
+   `ask_mask != 0 and is_bridge_member is not None` — `is_bridge_member` is
+   already populated generically for every interface by `configdict.py`'s
+   `get_interface_dict()` (the same field `interfaces_bridge.py` itself
+   reads), so this needed no new cross-tree lookup. Covers the "toggle
+   `offload ipv4` on a port that's already in a bridge" direction entirely
+   within ethernet.py's own existing commit path.
+3. **vyos-1x `src/conf_mode/interfaces_bridge.py`** (same patch) — new
+   `apply_ask_bridge_offload()`, called from `apply()`. Covers the reverse
+   direction: a bridge's own commit (member added/removed) doesn't re-trigger
+   `interfaces_ethernet.py`'s conf_mode script by itself, so this function
+   directly reads each changed member's current `offload ipv4`/`ipv6`/`vlan`
+   config (via `get_interface_dict(conf, ['interfaces', 'ethernet'],
+   ifname=interface)`, the identical pattern this file already uses for
+   vxlan/openvpn members) and calls `EthernetIf(interface).set_ask_offload(
+   mask, vlan, bridge=<joined>)` directly. Deliberately does **not** use
+   VyOS's declarative `set_dependents`/`call_dependents` dependency-graph
+   machinery (the pattern the file uses for vxlan/wlan/firewall deps) —
+   registering a new dependency type there needs an entry in a separate
+   build-generated dependency-graph file, more moving parts than this
+   self-contained direct call needs for what is still a B0-risk-profile,
+   log-only change.
+
+**Not yet done:** no full-CI build/deploy verification of this specific
+patch (T-M6-2 B0's baseline commit `d4e50ac4` + these ABI/CLI additions were
+built and syntax-checked locally — `ask.ko` against the CI kernel cache,
+both vyos-1x Python files with `py_compile` plus a full patch-series
+round-trip against a fresh vyos-1x clone — but not yet run through a real CI
+build+deploy+live-bridge-test cycle the way B0 itself was).

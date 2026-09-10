@@ -426,6 +426,17 @@ bool ask_hw_nat66_offload_armed(void);
 void ask_hw_offload_set_vlan(u8 hw_port_id, bool on);
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
 bool ask_hw_vlan_offload_armed(void);
+/*
+ * T-M6-2 L2 bridge offload gate (default-OFF, B0: no install path yet).
+ * Per-port model mirroring VLAN's, but with no global master-override param
+ * and no dedicated CLI leafNode -- ask_hw_offload_set_bridge() is called
+ * automatically by VyOS's `interfaces bridge` conf_mode for a member port
+ * that already has `offload ipv4`/`offload ipv6` armed, never directly by
+ * the user.
+ */
+void ask_hw_offload_set_bridge(u8 hw_port_id, bool on);
+bool ask_hw_bridge_offload_armed_port(u8 hw_port_id);
+bool ask_hw_bridge_offload_armed(void);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);
 void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
