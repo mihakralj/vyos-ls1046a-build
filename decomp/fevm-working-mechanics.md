@@ -481,3 +481,42 @@ holds the loop's trip count and where it's set — if it's a fixed
 constant (not derived from frame length at all), that alone would
 falsify the "large frame needs more chunks" framing independent of any
 board access, and sharpen the live probe to target the right register.
+
+### 12.4 Follow-up (same session): the trip-count trace hit a real wall, and a labeling note
+
+Attempted the concrete next step above. `w11918` reads `IC+0x9d` (a
+byte adjacent to but distinct from `IC+0x9c`, the PCP field
+`STRIP_ALL_VLAN` writes — not the same field, so this isn't a
+VLAN-specific check) gating an early exit to `w12551` if nonzero; past
+that, `w11919` reassigns the IC-base alias register (`r26 = r13 + 0x20`)
+and `w11924` reads a word off *that* new base, feeding a
+`bitfield.xform` (`w11925`) whose selector/operand semantics aren't
+resolvable from the ISA table's generic pseudocode (`selected_operand =
+field_transform(...)`, no vendor-documented meaning for this selector
+value) — the same class of black-box op the project's own docs have
+flagged elsewhere (`fe-action-interpreter.md`'s "G3 caveat"). Tracing
+further would require either the vendor's actual semantics for this
+instruction class (not present anywhere in this repo) or re-running
+`decomp/tools/fman-isa-xref.py` against a fresh microcode blob — its
+hardcoded path (`/tmp/kilo/fman-ucode-mtd3.bin`) no longer exists on
+this machine; the tool itself is fine, it just needs the blob re-pulled
+from the board's `mtd3` partition. Not attempted this round (would need
+board access, and is a small enough step that whoever picks this up
+next should just do it before more manual byte-reading).
+
+**Labeling note, not a contradiction**: `corpus-differential.md`'s
+structural island table (§3) buckets this entire address range under
+"Island 4 (Offload Aging & Timer Scan), `w10731–w12090`" — sounds
+unrelated to per-frame checksum handling. This is not a real conflict:
+that table is a coarse differential-clustering pass (grouping
+*all* code added between firmware versions 108.4.9→210.10.1 in a given
+address range under one label), not a control-flow-verified boundary.
+This document's own direct trace — `INSERT_VLAN_HDR` (inside Island 3,
+w9502–9673) exits via `xfer14 → w11911`, landing in what Island 4's
+table would call aging-sweep code — plus the live silicon correlation
+(`ts[N]=0x81000006` appearing exactly here during real wedge repros) is
+stronger evidence than the coarse label. Most likely Island 4's 1360
+words contain several unrelated subroutines that happen to be
+physically adjacent and both new-in-210.10.1, not one aging-only
+mechanism. Flagged here so a future pass cross-referencing both docs
+isn't thrown by the apparent mismatch.
