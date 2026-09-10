@@ -504,6 +504,95 @@ from the board's `mtd3` partition. Not attempted this round (would need
 board access, and is a small enough step that whoever picks this up
 next should just do it before more manual byte-reading).
 
+### 12.5 Follow-up (same session): blob re-pulled from board mtd3, the trip-count and unit12 mechanisms both resolved with field-level precision
+
+Re-dumped `/dev/mtd3` (`fman-ucode`, 1MiB) from a freshly-booted `.185`
+and re-ran `decomp/tools/fman-isa-xref.py` against it (its cached blob
+path was gone, this is a fresh pull, image `2049-rolling` unchanged).
+This resolves real register indices (not the guesses in §12.4) and
+closes both of that section's open items with much higher confidence.
+
+**The loop's chunk-clamp register traces cleanly to the 256-byte slot
+size.** `w11926: r9 = r28(FRAME) >> 24` (top byte of whatever value the
+interpreter's shared exit staged into r28 across the redispatch — almost
+certainly the frame_delta byte, `IC[0xd4]`'s top byte, per the existing
+frame-delta contract in §1/§4). `w11927: r0 = 0x100` (256, literal).
+`w11931: r10 = r0 - r9` = **`256 - frame_delta`** — a fully-resolved,
+black-box-free computation, and it lands on exactly the 256-byte
+staging-slot size the original wedge diagnosis (§10.3) already flagged
+as architecturally significant. `w11930`'s `bitfield.xform` (combining
+`r1` = `IC[0x08]`, the AD-base field, with the same `0x100` constant)
+still isn't resolvable from the ISA table's generic pseudocode, but its
+inputs are now known precisely, narrowing what's actually missing to
+one selector's exact bit-transform, not the whole computation.
+
+**The loop's back-edge is gated by the checksum unit's own hardware
+status, not a software counter reaching zero.** `w11944`/`w11962` do
+decrement `r11` by the clamped chunk amounts (`r10`, then `r9`) each
+pass, but the actual branch test at `w11946`/`w11964` compares against
+`r31`, which was just overwritten by `unit16.read0` two instructions
+earlier — the loop continues *while the hardware unit's own readback
+says so*, with `r11` supplying the chunk sizes fed into each submission
+rather than directly gating the exit. A loop whose termination depends
+on a hardware status flag, not a value the software fully controls, is
+exactly the shape that can fail to terminate if that flag's behavior
+diverges from the software's assumption for some input class.
+
+**`w12091` is a hardware arbitration/ownership handshake for `unit12`,
+shared across FMan's multiple controller cores — not a data-processing
+loop:**
+
+- `w12110`: `controller.id` — reads which physical RISC core is
+  currently executing (FMan runs several parallel microcode controllers).
+- `w12111–12112`: builds a token, `(controller_id + 1) << 28`.
+- `w12113`: writes that token into `unit12`'s config.
+- `w12114–12117`: submits, reads back, and **loops (`cbrnz14 → w12113`)
+  until the readback echoes that exact token** — claiming exclusive
+  ownership of a resource other controllers can also claim.
+- `w12118–12127`: only once ownership is confirmed, submits the actual
+  DMA/checksum operation and reads its result.
+- `w12128`: writes `0` into the same config field — **releasing
+  ownership**.
+- `w12129–12130`: compares the operation's result against an expected
+  value (derived from `IC` state carried in from the caller); **if it
+  doesn't match, loops all the way back to `w12110`** — release, then
+  re-claim and retry the *entire* handshake, not just the DMA op.
+
+`w12105–12106` gates the *whole* `w12107–12130` block behind a
+first-pass check of that same expected-value comparison — most calls
+into `w12091` likely skip the retry machinery entirely (fast path), and
+it only engages on a genuine mismatch.
+
+**What this sharpens the hypothesis to**: this is not simply "unit16
+gets called more times for VLAN frames" (§12's framing) — it's
+specifically that the outer `w12110–12130` retry can spin forever on a
+result *mismatch*, and `unit12`'s ownership is shared across controller
+cores. `INSERT_VLAN_HDR` runs its own three incremental (RFC-1624-style)
+`unit16` checksum-fold passes *before* this verification ever runs. If
+pre-BMI's expected-value check assumes a checksum computed fresh over
+unmodified frame content, but `INSERT_VLAN_HDR` already adjusted it
+incrementally upstream (or the reverse — pre-BMI's check itself assumes
+a state `INSERT_VLAN_HDR`'s adjustment invalidates), that would produce
+exactly a persistent mismatch → infinite retry, specific to the
+VLAN-opcode path, independent of anything about r11/chunk count at all.
+Plain routed frames, having never called `unit16`/`unit12` before
+reaching this block, would never hit whatever precondition mismatch
+this is.
+
+**Still open, needs live data**: which of the two directions the
+mismatch runs (pre-BMI expects post-fold state and doesn't get it, or
+expects pre-fold state and INSERT_VLAN_HDR already changed it), and
+whether the *inner* ownership poll (w12113–12117) or the *outer* result
+retry (w12110–12130) is where a >192B VLAN frame's task actually gets
+stuck — these determine different fixes (a checksum-contract fix in one
+handler vs. an arbitration/release bug). Concretely testable now that
+the mechanism is understood: probe `unit12`'s live config/status during
+a wedge (the `w12113`/`w12128` config field specifically) to see if a
+parked task is stuck spinning the *inner* poll (never gets ownership —
+implicates a stale/unreleased token from a prior use) or the *outer*
+retry (keeps re-claiming and re-submitting — implicates the
+expected-value mismatch instead).
+
 **Labeling note, not a contradiction**: `corpus-differential.md`'s
 structural island table (§3) buckets this entire address range under
 "Island 4 (Offload Aging & Timer Scan), `w10731–w12090`" — sounds
