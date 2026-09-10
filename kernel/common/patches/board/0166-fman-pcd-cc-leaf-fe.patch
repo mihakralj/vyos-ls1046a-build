@@ -138,7 +138,7 @@ index 6d88d1a..8a7e069 100644
  	 * F-183 (2026-08-09): the CC CONT_LOOKUP comparator compares the
  	 * KeyGen-EXTRACTED composite at IC byte 0x50 (CC_IC_KG_KEY_OFFSET),
  	 * 16 bytes.  With the FE-VM harness EKFC 0x801c0006 the extraction
-@@ -198,14 +245,16 @@
+@@ -198,13 +245,15 @@
  		if (err)
  			(void)fman_port_set_cc_base(rxport, 0);
  	}
