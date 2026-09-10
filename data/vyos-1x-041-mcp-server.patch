@@ -32,15 +32,15 @@ system python3-mcp package; the fork's debian/control dependency is omitted.
 Origin: mihakralj/vyos-1x branch T9030-mcp, with LS1046A hardening.
 ---
 diff --git a/data/templates/https/nginx.default.j2 b/data/templates/https/nginx.default.j2
-index e0ebe79..966e846 100644
+index 0f1a79ad7..966e846 100644
 --- a/data/templates/https/nginx.default.j2
 +++ b/data/templates/https/nginx.default.j2
-@@ -49,7 +49,7 @@ server {
-     ssl_ciphers 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!3DES:!MD5:!PSK';
- 
+@@ -55,7 +55,7 @@
+     ssl_verify_depth 2;
+ {% endif %}
      # proxy settings for HTTP API, if enabled; 503, if not
--    location ~ ^/(retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew) {
-+    location ~ ^/(mcp|retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew) {
+-    location ~ ^/(retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew|token) {
++    location ~ ^/(mcp|retrieve|configure|config-file|image|import-pki|container-image|generate|show|reboot|reset|poweroff|ping|traceroute|info|docs|openapi.json|redoc|graphql|renew|token) {
  {% if api is vyos_defined %}
          proxy_pass http://unix:/run/api.sock;
          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1695,13 +1695,13 @@ index 0000000..1111111
 +
 +        return [TextContent(type='text', text=str(result))]
 diff --git a/src/services/api/session.py b/src/services/api/session.py
-index c25a444..67b9f41 100644
+index c1eb534d8..67b9f41 100644
 --- a/src/services/api/session.py
 +++ b/src/services/api/session.py
-@@ -39,3 +39,6 @@ def _initialize(self):
-         self.auth_type = None
-         self.token_exp = None
-         self.secret_len = None
+@@ -42,3 +42,6 @@ def _initialize(self):
+         self.oidc_issuer = None
+         self.oidc_jwks_uri = None
+         self.oidc_audience = None
 +        self.mcp = False
 +        self.mcp_mode = 'read-only'
 +        self.mcp_introspection = False
