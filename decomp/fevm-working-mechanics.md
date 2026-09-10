@@ -593,6 +593,51 @@ implicates a stale/unreleased token from a prior use) or the *outer*
 retry (keeps re-claiming and re-submitting — implicates the
 expected-value mismatch instead).
 
+### 12.6 Live probe attempt (same session): `dra` auto-advances on every read — the instrument cannot observe a fixed register over time
+
+Attempted the live probe §12.5 called for: reproduce the wedge, then
+take several rapid `fman_imem/pc0` reads to see whether `unit12`'s state
+is stable (stuck in the inner ownership poll) or changing (actively
+retrying the outer handshake). Repro was clean (same signature as every
+other round this session, `ts[4]=0x81000006`).
+
+**This resolves — differently than hoped — the "which task does
+`dra`/`drd` sample" ambiguity flagged in §11 and by an earlier campaign
+round (the "r28=0 in frozen register dump" note).** Explicitly wrote
+`dra 0`, then read `pc0` three times in immediate succession with no
+write in between: `dra` came back `0x00000000`, then `0x01000000`, then
+`0x02000000` — auto-advancing by one on *every read*, write or no
+write, and `drd[0]`'s content genuinely differed once `dra` moved past
+1 (`0x31000000` → `0x31000000` → `0x2c000000`), confirming these are
+real distinct register banks, not noise. **The instrument is a
+read-and-advance sweep, structurally incapable of re-sampling the same
+bank to observe its value change over time** — the same "consumes and
+advances" behavior already documented for the separate `iadd`/`idata`
+IMEM port. Every prior session's repeated `drd[]` reads were therefore
+sweeping through different banks each time, not confusingly resampling
+the wrong task — there was never a "right task" to target with this
+read primitive in the first place.
+
+**What did work**: the `ts[]` array is a full, un-advancing dump on
+every read (unrelated to `dra`), and it showed `ts[4]=0x81000006`
+identically across 5 reads spanning ~4.7 seconds — genuinely stable
+across that whole window, not cycling on a sub-5-second cadence. That's
+consistent with the wedge's retry cadence being paced by TCP's own RTO
+backoff (§11.1's pcap showed gaps from 18ms up to 3.44s between
+retransmit attempts) rather than a tight spin — but it does not, and
+with this instrument cannot, distinguish the inner-poll-stuck vs.
+outer-retry-cycling question §12.5 posed.
+
+**Conclusion for this line of investigation**: answering that question
+needs a *new* debugfs verb — one that reads `unit12`'s actual live
+config/status content directly (not the auto-advancing generic register
+sweep), ideally while explicitly correlated to the specific parked task
+index (`ts[4]` in every capture this session, though whether that index
+is stable across reboots isn't established either). That's a small,
+well-scoped kernel patch (mirroring how `0193` itself was built) rather
+than something answerable with existing tooling — a natural unit of
+future work, not something to keep probing blindly for tonight.
+
 **Labeling note, not a contradiction**: `corpus-differential.md`'s
 structural island table (§3) buckets this entire address range under
 "Island 4 (Offload Aging & Timer Scan), `w10731–w12090`" — sounds
