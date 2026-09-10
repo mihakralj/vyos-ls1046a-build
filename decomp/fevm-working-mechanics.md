@@ -327,3 +327,47 @@ ones. If corruption rate tracks inter-frame gap, the fix target shifts
 from "the slot is too small" to "the pre-BMI/staging pipeline isn't
 re-entrant across back-to-back frames on the VLAN-opcode path" — a
 different, and more tractable, class of bug than a hard capacity wall.
+
+### 11.1 CORRECTION (same session, ~10 min later): the race hypothesis is FALSIFIED — delivery failure is deterministic, not timing-dependent
+
+Re-ran the repro with a synchronized capture: `tcpdump -tt` on `.116`'s
+egress (real wall-clock, nanosecond-ish precision) alongside the DUT-side
+`muram_hex` snapshot, same message (`.116` iperf3 UDP settings JSON, 146B
+TCP payload after the first coalesced retransmit, ~220B on the wire with
+headers — squarely in the documented "≥213B never delivers" band).
+
+**The wire timeline (real timestamps, `10.99.10.116:33132 <-> 10.99.20.16:5201`):**
+the 146B payload (`seq 38:184`) was retransmitted by TCP **7 times** over
+~7 seconds, with inter-attempt gaps of 18ms, 239ms, 430ms, 890ms, 1.76s,
+3.44s (classic exponential RTO backoff) — and **every single attempt
+failed identically**: the server's ack never advanced past byte 38, for
+the entire window including the most isolated retry (3.44s of silence
+before and after it, nothing else from this flow anywhere nearby in
+time).
+
+This directly falsifies §11's race/timing-contention hypothesis: if the
+failure were about the staging copy losing a race with an adjacent
+frame's processing, sufficiently isolating one attempt (3.44s clear gap)
+should let it through at least once in 7 tries. It never does. The
+failure is **deterministic for this frame class**, not probabilistic.
+
+**What this means for the §11 muram corruption finding**: it still stands
+as a real, reproduced phenomenon (identical retransmitted content landing
+intact in some ring slots and corrupted at the same text offset in
+others), but it does NOT track delivery outcome — round 2 of this same
+session captured only clean copies (2/2) of the identical message, yet
+the wire-level outcome was the same total non-delivery as round 1's
+2-corrupted/3-clean mix. So slot-copy corruption is a **separate,
+independent symptom** riding alongside the wedge, not its cause. The
+actual delivery-blocking mechanism sits in a stage that fails the same
+way for this frame every time — most consistent with the original
+docs' pre-BMI checksum/DMA hypothesis (§10.4's "the pre-BMI checksum/DMA
+op for LARGE frames" candidate), gated on frame size/content rather than
+arrival timing.
+
+**Revised next-round target**: drop the timing-correlation angle. Go
+back to instrumenting the pre-BMI block itself (`csum.setup`/`dma.bufop`
+w11941/w11958) for a frame in this exact size class — e.g. a register
+snapshot (`fmfp_dra/drd`, `0193`) taken while a >192B frame is parked at
+the pre-BMI wait, to see what the DMA/checksum unit's actual length or
+window field reads for a frame this size vs one that completes.
