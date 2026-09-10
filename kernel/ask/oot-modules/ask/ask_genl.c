@@ -263,6 +263,12 @@ goto nla_put_failure;
 
 	if (ask_hw_vlan_offload_armed())
 		caps |= ASK_CAP_VLAN;
+	/* T-M6-2: ASK_CAP_BRIDGE stays unadvertised through B0-B2 even though
+	 * ask_hw_offload_set_bridge()/ask_hw_bridge_offload_armed() already
+	 * exist -- there is no CC-tree/FDB install path yet (ask_bridge.c is
+	 * an observer only), so advertising the capability now would claim a
+	 * flow could actually get bridge-offloaded when none can. Add
+	 * `caps |= ASK_CAP_BRIDGE` here once B3's real switchdev wiring lands. */
 	if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, caps,
 			      ASK_INFO_ATTR_UNSPEC))
 		goto nla_put_failure;
@@ -825,9 +831,11 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	struct nlattr *port_attr;
 	struct nlattr *fam_attr;
 	struct nlattr *vlan_attr;
+	struct nlattr *bridge_attr;
 	u8 port_id;
 	u8 fam_mask;
 	u8 vlan_on;
+	u8 bridge_on;
 	int rc;
 
 	port_attr = info->attrs[ASK_ATTR_PORT_ID];
@@ -864,16 +872,34 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 		ask_hw_offload_set_vlan(port_id, vlan_on);
 	}
 
+	/*
+	 * ASK_ATTR_BRIDGE (u8 bool, T-M6-2) arms/disarms this port's L2 bridge
+	 * FDB offload bit. Absent => leave the per-port bit unchanged, same
+	 * contract as ASK_ATTR_VLAN. No CLI leafNode sets this directly --
+	 * VyOS's `interfaces bridge` conf_mode passes it automatically for a
+	 * member port that already has family offload armed.
+	 */
+	bridge_attr = info->attrs[ASK_ATTR_BRIDGE];
+	if (bridge_attr) {
+		bridge_on = nla_get_u8(bridge_attr);
+		if (bridge_on > 1)
+			return -EINVAL;
+		ask_hw_offload_set_bridge(port_id, bridge_on);
+	}
+
 	rc = ask_hw_offload_engage(port_id);
 	if (rc) {
 		if (vlan_attr && vlan_on)
 			ask_hw_offload_set_vlan(port_id, false);
+		if (bridge_attr && bridge_on)
+			ask_hw_offload_set_bridge(port_id, false);
 		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
 		return rc;
 	}
 
-	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x vlan=%d\n",
-		    port_id, fam_mask, vlan_attr ? vlan_on : -1);
+	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x vlan=%d bridge=%d\n",
+		    port_id, fam_mask, vlan_attr ? vlan_on : -1,
+		    bridge_attr ? bridge_on : -1);
 	return 0;
 }
 
@@ -893,9 +919,11 @@ port_id = nla_get_u8(port_attr);
  * VLAN CC tree down in F-134 order and restores RSS). Ordering avoids a
  * redundant teardown + fe_reengage on an about-to-be-disengaged port. */
 ask_hw_offload_set_vlan(port_id, false);
+/* Same reasoning for the bridge admission bit (T-M6-2). */
+ask_hw_offload_set_bridge(port_id, false);
 ask_hw_offload_disengage(port_id);
 
-ask_pr_info("genl: disengaged port 0x%02x (VLAN offload disarmed)\n", port_id);
+ask_pr_info("genl: disengaged port 0x%02x (VLAN/bridge offload disarmed)\n", port_id);
 return 0;
 }
 

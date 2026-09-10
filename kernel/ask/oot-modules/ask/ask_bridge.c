@@ -33,15 +33,16 @@
 #include "include/ask_internal.h"
 
 /*
- * Forward-looking gate for B3's real installer (currently nothing checks
- * this beyond the B0 log message below — there is no install path yet).
- * Default off, matching every other ASK2 offload gate (ask_vlan_offload,
- * ask_nat44_offload's sibling nat66_offload) at introduction.
+ * T-M6-2 gate: no standalone module param here (unlike ask_vlan_offload).
+ * Arming is per-port only, via ask_hw_offload_set_bridge() / genl
+ * ASK_ATTR_BRIDGE (kernel/ask_hw.c), driven automatically by VyOS's
+ * `interfaces bridge` conf_mode for a member port that already has
+ * `offload ipv4`/`offload ipv6` armed — no separate opt-in, and no CLI
+ * leafNode a user sets directly. Forcing bridge offload on regardless of
+ * a port's family engagement wouldn't mean anything (there is no dispatch
+ * for it to ride on), so a master override doesn't make sense here the way
+ * it does for VLAN.
  */
-static bool ask_bridge_offload;
-module_param_named(bridge_offload, ask_bridge_offload, bool, 0644);
-MODULE_PARM_DESC(bridge_offload,
-		 "Arm L2 bridge FDB hardware offload (T-M6-2). B0: observer only, no install path exists yet regardless of this setting.");
 
 /* One coalesced FDB event. @dev is dev_hold()'d at capture, dev_put() in
  * the worker. Identified for coalescing by (dev, addr, vid) — the same
@@ -104,9 +105,9 @@ static void ask_bridge_fdb_work_fn(struct work_struct *w)
 				    ev->add ? "add" : "del", ev->addr, ev->vid,
 				    netdev_name(ev->dev),
 				    ev->added_by_user ? "static" : "dynamic",
-				    READ_ONCE(ask_bridge_offload) ?
-				    "bridge_offload armed, no B1/B2 installer yet (B0)" :
-				    "bridge_offload disarmed, observer only");
+				    ask_hw_bridge_offload_armed() ?
+				    "bridge offload armed on at least one port, no B1/B2 installer yet (B0)" :
+				    "bridge offload not armed on any port, observer only");
 		}
 
 		dev_put(ev->dev);
