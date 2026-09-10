@@ -2051,6 +2051,13 @@ FMan→CAAM→FMan fast path) split, with a measurement gate between them.
   ASK must follow STP/port state, VLAN filtering, learning/static flags, and
   ageing. Gate: learn/move/delete/age, port down, STP blocked, VLAN-aware
   bridge, unknown-unicast/broadcast software behavior, no routing regression.
+  Plan: `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md` (staged B0-B5, silicon-gated).
+  **B0 done 2026-09-10** (dormant host plumbing, zero datapath change):
+  switchdev FDB/blocking/netdevice notifiers registered and observing (log
+  only, no install path), coalesced+bounded event queue, `bridge_offload`
+  module param (default off), dormant `FMAN_PCD_CC_HW_F_MAC_DST` CC key
+  field (patch `0202`). `ASK_CAP_BRIDGE` still unadvertised. Next: B1 (CC
+  DA-match key builder + KUnit).
 - [ ] **T-M6-MC — multicast/MDB adapter.** Implement MDB/mroute-owned group
   objects and bounded replication resources. Do not encode multicast as many
   unrelated unicast records. Gate: join/leave, multiple listeners/ports,

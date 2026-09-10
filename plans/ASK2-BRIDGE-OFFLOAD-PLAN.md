@@ -2,7 +2,15 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS — PLANNING.** No code written. This plan turns the high-level
+> **STATUS — B0 DONE (2026-09-10), B1 NEXT.** `ask_bridge.c` now registers
+> the switchdev FDB/blocking/netdevice notifier chains and observes FDB
+> events (coalesced + bounded queue, §12 debounce lesson applied from the
+> start), gated by a new `bridge_offload` module param (default off) that
+> nothing installs against yet; `ASK_CAP_BRIDGE` stays unadvertised. Kernel
+> patch `0202-fman-pcd-cc-bridge-mac-dst-key-dormant.patch` adds the dormant
+> `FMAN_PCD_CC_HW_F_MAC_DST` CC key field for B1's builder to target. Zero
+> live-path change — routed/NAT/VLAN untouched, nothing is installed into
+> hardware. This plan turns the high-level
 > `plans/OFFLOAD-CAPABILITY-PLAN.md` §1.5 sketch into a concrete, silicon-gated
 > build. It reuses the CC-tree + HMTD + CC-miss→FE_ENTER substrate the VLAN
 > re-architecture (`plans/ASK2-VLAN-REARCH.md`, T-M6-8) proved on silicon (R4c
@@ -227,12 +235,21 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
 Mirrors the NAT/VLAN safe progression: dormant host plumbing first, silicon
 de-risk on the `cc_test` harness before any production wiring, then a matrix.
 
-- **B0 — S0 gate + host plumbing (dormant, zero datapath change).**
-  Add the CC DA match-key fields (§5.1), the `ASK_TABLE_L2` per-port shadow, the
-  `ask_bridge_offload` module param (default-off), and the switchdev notifier
-  skeleton that **logs** offloadable FDB events but installs nothing. Gate: builds
-  clean; static-asserts + KUnit key vectors pass; routed/NAT/VLAN byte-identical
-  (regression oracle untouched); `ask-check` shows bridge dormant.
+- **B0 — DONE 2026-09-10 — S0 gate + host plumbing (dormant, zero datapath
+  change).** Added the `FMAN_PCD_CC_HW_F_MAC_DST` CC match-key field (§5.1,
+  patch `0202`, purely additive — no packer emits it yet), the
+  `ask_bridge_offload` module param (default-off), and the switchdev
+  notifier skeleton (`ask_bridge.c`, replacing the 21-line stub) that
+  **logs** offloadable FDB events (coalesced+bounded queue) but installs
+  nothing. Local module build against the CI kernel cache is clean, no
+  warnings. **Deferred to B1, not done in B0:** the `ASK_TABLE_L2` per-port
+  shadow registry — it exists to serve the real DA-match builder, which is
+  B1's job, so building the shadow before the builder it shadows would be
+  premature structure. Gate: builds clean (verified locally; full-CI pass
+  still pending); routed/NAT/VLAN byte-identical (untouched by this change);
+  `ask-check` already reports bridge under its existing generic "software
+  fallback" note — no change needed there since bridge is legitimately
+  dormant, not broken.
 
 - **B1 — CC DA-match builder + KUnit.** `fman_pcd_cc_bridge_key_add/remove` (host
   shadow → `fman_pcd_cc_hw_spec` with DA leaves + `miss_fe_off`). Dormant readback
@@ -368,3 +385,80 @@ not build it into the base case.
   `am65-cpsw-switchdev.c`, `adin1110.c`.
 - Stub to replace: `kernel/ask/oot-modules/ask/ask_bridge.c`; capability bit
   `ASK_CAP_BRIDGE` `kernel/ask/oot-modules/ask/include/uapi/linux/ask/ask.h:204`.
+
+## 11. 2026-09-10 update — VLAN CC-tree work validates and sharpens §8.5
+
+The VLAN re-architecture's production code (`ask_vlan_cc.c`, `vlan-offload-rework`
+branch) hit and fixed exactly the failure class §8 point 5 warned about, now with
+live silicon evidence instead of a hypothesis:
+
+- **Confirmed on hardware:** `ask_vlan_cc_flow_del()` held its per-port-table
+  global mutex across a full CC-tree rebuild *and* the ~5-6 ms post-rebuild
+  drain sleep, serializing every VLAN flow add/delete on *every* port behind
+  one flow's teardown. Under concurrent multi-flow churn this measured 65% CPU
+  at *lower* throughput than the unaffected routed/NAT path — the exact
+  "whole-tree rebuild under churn" risk this plan already flagged, now with a
+  number attached. Fixed by unlocking before the drain (keeps the rebuild +
+  drain + HMTD-free ordering intact; only the lock's *span* shrinks). **Build
+  the bridge FDB workqueue (§5.5/B3) with this pattern from the start** — do
+  not hold one global lock across a CC rebuild + drain; bridge FDB churn is
+  expected to be *higher* frequency than routed-VLAN flow churn (§8.5's own
+  premise), so a naive port-wide-serializing lock here would be worse, not
+  equivalent.
+- **Confirmed on hardware:** the CC-tree/HMTD path genuinely forwards bulk
+  traffic with the CPU bypassed for the matched frames — verified live via
+  `ynl --family ask --dump dump-flows`, whose per-port aggregate
+  packet/byte counters climbed at real multi-Gbps rates matching achieved
+  throughput during a sustained run. This is independent, current-silicon
+  confirmation of the same substrate §2 already argued for from static
+  evidence — the CC-miss→FE_ENTER coexistence model this bridge plan depends
+  on is not just proven-in-principle, it's proven-in-current-production-code.
+- **New tool available for B5's performance gate:** a statically-linked `perf`
+  binary was built for this board's exact kernel (6.18.50-vyos, arm64;
+  build recipe in [[project_vlan_offload_rework_status]] — no cross-compiler
+  needed, this build sandbox is native aarch64). Use it for B5's throughput/
+  CPU acceptance runs instead of the `/proc/stat`-delta-only technique; it
+  gives real function-level attribution (e.g. it was what separated "CC-tree
+  not working" from "CC-tree working, cost is elsewhere" for the VLAN case)
+  and would answer §8 point 5's churn-rate question directly rather than by
+  inference.
+
+## 12. FDB churn prevention (design, not just survival) — 2026-09-10
+
+Churn has four distinct sources; each gets its own lever rather than one
+generic "handle churn better" fix:
+
+1. **Ageing-induced churn (self-inflicted, avoidable by construction).** The
+   CPU never sees the source MAC of a HW-forwarded flow, so kernel ageing can
+   expire an entry that's still actively forwarding in hardware — DEL, then a
+   fresh ADD the moment the next frame is punted and relearned.
+   **Decision: B3 offloads only static (`added_by_user`) FDB entries by
+   default.** Static entries never age — zero ageing-churn by construction.
+   §8 point 4 already floated this as *an* option; given the measured cost of
+   churn (§11), make it the shipped default, not a fallback. Dynamic-entry
+   ageing-refresh (HW hit-counter → kernel FDB `used` touch, or
+   `SWITCHDEV_FDB_ADD_TO_BRIDGE` sync) stays a B5+ increment, deliberately out
+   of the first cut.
+2. **STP topology-change mass-flush.** Deliberate bridge behavior on a TC
+   event (fast-age the whole FDB) — must not be prevented, only absorbed
+   cheaply. **Add a coalescing/debounce window** (a few ms, e.g. via
+   `mod_delayed_work`) between an FDB notifier event and the CC-tree rebuild
+   it triggers: batch every FDB add/del that arrives inside the window into
+   one whole-tree rebuild instead of one rebuild per entry. The CC-tree
+   rebuild is already a whole-tree atomic op (no per-flow dynamic add exists),
+   so batching costs nothing semantically and directly cuts rebuild-event
+   count during a flush storm.
+3. **MAC-move churn.** A DEL on the old port + ADD on the new port, close
+   together — the same debounce window coalesces this into one rebuild instead
+   of two rebuild+drain cycles.
+4. **Table-pressure thrashing.** Fail-install → SW fallback → retry-on-
+   relearn can loop at the `FMAN_CC_MAX_STATIC_KEYS` boundary under a churn
+   burst. Keep deliberate headroom below the cap (do not fill to 100%) so a
+   burst doesn't oscillate at the boundary.
+
+**Consequence for B3's design:** the FDB workqueue item must NOT react to
+every individual switchdev notification with an immediate CC-tree rebuild.
+Coalesce first (debounce timer keyed per port), then rebuild once. This is in
+addition to, not instead of, §11's unlock-before-drain lesson — the two
+compose: fewer rebuild events (this section), each one not serializing
+unrelated ports (§11).
