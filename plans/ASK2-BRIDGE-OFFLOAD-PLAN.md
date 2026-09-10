@@ -10,7 +10,16 @@
 > patch `0202-fman-pcd-cc-bridge-mac-dst-key-dormant.patch` adds the dormant
 > `FMAN_PCD_CC_HW_F_MAC_DST` CC key field for B1's builder to target. Zero
 > live-path change — routed/NAT/VLAN untouched, nothing is installed into
-> hardware. This plan turns the high-level
+> hardware. **Full CI build verified 2026-09-10** (run
+> `34525313747`, branch `dpaa1`): kernel + `ask.ko` + ISO all build clean
+> end-to-end. Two unrelated pre-existing CI infra bugs were found and fixed
+> along the way (didn't exist on `dpaa1` before tonight's bridge work
+> needed a green build to land): the same `0166` kernel-patch corruption
+> already fixed on `vlan-offload-rework` earlier tonight, ported over; and
+> a `vyos-build/data/architectures/arm64.toml` corruption in our own
+> `bin/ci-setup-vyos-build.sh` (a sed assumed TOML disallows trailing
+> commas in arrays -- it doesn't -- and broke once upstream inserted a new
+> package entry). This plan turns the high-level
 > `plans/OFFLOAD-CAPABILITY-PLAN.md` §1.5 sketch into a concrete, silicon-gated
 > build. It reuses the CC-tree + HMTD + CC-miss→FE_ENTER substrate the VLAN
 > re-architecture (`plans/ASK2-VLAN-REARCH.md`, T-M6-8) proved on silicon (R4c
