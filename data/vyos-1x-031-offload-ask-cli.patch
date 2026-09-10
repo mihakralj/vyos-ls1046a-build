@@ -1,4 +1,15 @@
+temp: vyos-1x-031-offload-ask-cli.patch (v2, refreshed 2026-09-10)
+
+v2: pure context drift against current upstream (rolling). ethernet.py's
+top-of-file imports lost `from vyos.netlink import coalesce` (moved to a
+local import inside set_interrupt_coalescing() to avoid paying the
+pyroute2 import cost for every vyos.ifconfig consumer) since this patch
+was first written; the ConfigError import hunk anchored on it and no
+longer matched. No other file's target region shifted meaningfully.
+Re-applied by hand against the current tree; no logic changed.
+
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+index b7df88fab..28d115638 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
 @@ -101,6 +101,18 @@
@@ -21,6 +32,7 @@ diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-defini
                  <properties>
                    <help>Enable Large Receive Offload</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index ace16f11d..4f402f8e7 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
 @@ -17,6 +17,10 @@
@@ -33,8 +45,8 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
 +from vyos.base import ConfigError
  from vyos.base import Warning
  from vyos.ethtool import Ethtool
- from vyos.netlink import coalesce
-@@ -318,6 +322,35 @@ def set_hw_tc_offload(self, state):
+ from vyos.ifconfig import Section
+@@ -338,6 +342,35 @@ def set_hw_tc_offload(self, state):
                  print('Adapter does not support changing hw-tc-offload settings!')
          return False
  
@@ -70,7 +82,7 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
      def set_lro(self, state):
          """
          Enable Large Receive offload. State can be either True or False.
-@@ -662,6 +693,17 @@ def update(self, config):
+@@ -687,8 +720,19 @@ def update(self, config):
          # LRO (large receive offload)
          self.set_lro(dict_search('offload.lro', config) is not None)
  
@@ -89,7 +101,10 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
 +        # CPUs 1-3), independent of the explicit offload.rps knob.
 +        self.set_rps(ask_mask != 0 or dict_search('offload.rps', config) is not None)
  
+         # RFS - Receive Flow Steering
+         self.set_rfs(dict_search('offload.rfs', config) is not None)
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 7d42e3f77..8992d0602 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
 @@ -302,6 +302,22 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
@@ -116,9 +131,10 @@ diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_eth
          if not os.path.exists(f'/sys/class/net/{ethernet["ifname"]}/queues/rx-0/rps_cpus'):
              raise ConfigError('Interface does not support RPS!')
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
+index 95a8f9803..86a77e779 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -583,6 +583,20 @@ def verify(config):
+@@ -579,6 +579,20 @@ def verify(config):
      if 'settings' not in config:
          raise ConfigError('"settings interface" is required but not set!')
  
