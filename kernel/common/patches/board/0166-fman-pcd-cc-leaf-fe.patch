@@ -26,43 +26,48 @@ Board test (frame-2, E-HM8-correct): build FE chain + flow, then
 install with fe_off, send matching SYN, check fe_ehash_stats pkt_count
 vs the fmfp_ps stall.
 
-v4 (2026-09-10): regenerated against the current tree. The hand-written
-diff had drifted from a clean v6.18.50 baseline (two unrelated earlier
-patches -- <linux/etherdevice.h>/<linux/hex.h> includes and this
-function's own body -- added lines this patch's context didn't expect),
-so both `git apply --3way` and `patch -p1` failed in CI ("repository
-lacks the necessary blob to perform 3-way merge"). Same logical change
-as v3, re-cut against the actual current file content; no behavior
-change from v3's intent. This is also the patch that
-0167-fman-pcd-cc-match-key-14b.patch's F-183 block depends on (it reuses
-this patch's `group`/`muram` locals) -- 0166 failing to apply left
-0167's already-applied code referencing undeclared variables, which is
-what actually broke the CI kernel compile (fman_pcd_cc_test.c:
-'fe_off'/'group'/'muram'/'i' undeclared, 'fman_muram_offset_to_vbase'
-implicit-declaration, label 'out_destroy' undefined).
+v4 (2026-09-10): regenerated against the CI's actual persistent
+kernel-git-cache tree, at the true pre-0166 checkpoint commit
+("applied: 0165-fman-pcd-fe-arm-ensure-params-page.patch"). This patch
+has never successfully applied in this series -- its committed-history
+"applied: 0166-..." entry does not exist anywhere (the log jumps
+0165 -> 0167) -- because CI's patch loop does not abort on a single
+patch's failure, it continues through the rest of the series and only
+fails the build after the full loop completes. That let
+0167-fman-pcd-cc-match-key-14b.patch's own block (which reuses this
+patch's `group`/`muram` locals and assumes this patch's declarations
+already landed) apply successfully via git apply's fuzzy 3-way merge --
+textually, with no semantic/compile-time check -- leaving
+fman_pcd_cc_test.c referencing undeclared variables
+(fe_off/group/muram/ad/i), an undefined `fman_muram_offset_to_vbase`,
+and an undefined `out_destroy` label. That's what actually broke the
+kernel compile; "patch 0166 failed to apply" in the CI log was the
+proximate trigger, not a cosmetic warning.
+
+The v3 diff itself had also drifted: its first hunk tried to add
+`#include <linux/io.h>`, but an earlier patch in the series already
+added that exact line (verified directly against the true pre-0166
+tree) -- making the whole patch read as "previously applied" to `patch`
+and fail outright, before even reaching the hunks that actually still
+apply. v4 drops that redundant hunk; every other hunk is the same
+logical change as v3, unchanged in intent. Round-trip verified: applying
+this to the true pre-0166 checkpoint byte-for-byte reproduces the
+intended fixed file.
 
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
 index 6d88d1a..8a7e069 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
-@@ -38,6 +38,7 @@
- #include <linux/etherdevice.h>
- #include <linux/hex.h>
- #include <linux/inet.h>
-+#include <linux/io.h>
- #include <linux/kernel.h>
- #include <linux/module.h>
- #include <linux/seq_file.h>
-@@ -48,6 +49,7 @@
-
+@@ -49,6 +49,7 @@
+ 
  #include <linux/fsl/fman_pcd.h>
  #include "fman.h"
 +#include "fman_muram.h"
  #include "fman_pcd_internal.h"
  #include "fman_port.h"
-
-@@ -91,17 +93,20 @@
+ 
+@@ -73,17 +74,20 @@
  static int cc_test_install(struct fman_pcd *pcd, const char *args)
  {
  	struct fman_pcd_cc_hw_spec *spec;
@@ -78,7 +83,7 @@ index 6d88d1a..8a7e069 100644
  	u16 qband, dport;
 -	int n, err;
 +	int n, err, i;
-
+ 
 -	n = sscanf(args, "install %hhi %hu %hhu %39s %39s %hu %x",
 -		   &port_id, &qband, &proto, src_str, dst_str, &dport, &fqid);
 -	if (n != 6 && n != 7)
@@ -87,12 +92,13 @@ index 6d88d1a..8a7e069 100644
 +		   &fe_off);
 +	if (n != 6 && n != 7 && n != 8)
  		return -EINVAL;
-
+ 
  	if (qband > 3 || !(proto == 6 || proto == 17))
-@@ -139,6 +144,48 @@
+@@ -120,6 +124,48 @@
+ 	if (err)
  		return err;
-
- 	/*
+ 
++	/*
 +	 * F-182 (RCCB-target, optional 8th arg fe_off_hex): overwrite the
 +	 * match-leaf AD row 0 with the FE_ENTER AD's four words BEFORE the
 +	 * tree goes live (attach_cc below).  Implements the vendor .106
@@ -134,11 +140,10 @@ index 6d88d1a..8a7e069 100644
 +				    (u32 __iomem *)((u8 __iomem *)ad + 4 * i));
 +	}
 +
-+	/*
- 	 * F-183 (2026-08-09): the CC CONT_LOOKUP comparator compares the
- 	 * KeyGen-EXTRACTED composite at IC byte 0x50 (CC_IC_KG_KEY_OFFSET),
- 	 * 16 bytes.  With the FE-VM harness EKFC 0x801c0006 the extraction
-@@ -198,13 +245,15 @@
+ 	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
+ 	if (!err) {
+ 		rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
+@@ -135,13 +181,15 @@
  		if (err)
  			(void)fman_port_set_cc_base(rxport, 0);
  	}
@@ -147,7 +152,7 @@ index 6d88d1a..8a7e069 100644
  		fman_pcd_cc_static_destroy(pcd, port_id);
  		return err;
  	}
-
+ 
 -	pr_info("fman_pcd cc_test: port 0x%02x tree installed, FMBM_RCCB bound to 0x%x, KG CC-dispatched, key fqid 0x%x%s\n",
 +	pr_info("fman_pcd cc_test: port 0x%02x tree installed, FMBM_RCCB bound to 0x%x, KG CC-dispatched, key fqid 0x%x%s%s\n",
  		port_id, cc_base, fqid,
