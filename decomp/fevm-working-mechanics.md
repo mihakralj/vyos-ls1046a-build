@@ -371,3 +371,113 @@ w11941/w11958) for a frame in this exact size class — e.g. a register
 snapshot (`fmfp_dra/drd`, `0193`) taken while a >192B frame is parked at
 the pre-BMI wait, to see what the DMA/checksum unit's actual length or
 window field reads for a frame this size vs one that completes.
+
+## 12. Static microcode analysis (2026-09-10, offline): INSERT_VLAN_HDR pre-loads the pre-BMI block's own checksum unit — a structural asymmetry, not yet oracle-tested
+
+Following §11.1's redirect back to the pre-BMI checksum/DMA stage, this
+is a from-scratch disassembly read of the pre-BMI block itself
+(`decomp/out/fman-210.10.1-full.asm`, which already reflects the
+full field-level cross-reference — proper mnemonics, not the old
+`op_eb`/`tst_73` placeholders) plus a fresh read of `INSERT_VLAN_HDR`
+and `STRIP_ALL_VLAN`'s bodies specifically for checksum/DMA-unit traffic.
+Nothing here required board access; it is pure static analysis.
+
+### 12.1 The pre-BMI block contains a real chunked loop calling a second, separately-addressed unit
+
+`w11934–w11965` is a loop (back-edge at `w11965: cbrnz14 → w11935`) whose
+body runs, per pass: a `csum.setup` + `unit16.submit1` + `dma.bufop`
+group (w11938–11941), an `unit16.read0` status read, a **conditional
+call** to `w12091` in the delay slot of the loop's own exit test
+(`w11947: cbrz14 w11966`, delay slot `w11948: call.comp w12091`) — so
+`w12091` runs on *every* pass through the loop, not just once — then a
+**second** `csum.setup`/`unit16.submit1`/`dma.bufop`/`unit16.read0`
+group (w11952–11964) before the back-edge test. `w12091` itself
+(`w12091–w12132`) submits to a *second* addressed unit via the generic
+`unit.config`/`unit12.submit`/`unit12.read` instruction family
+(`unit_selector=0xc`, i.e. literally "12"), gated behind a status check
+(`w12105–12106: cmp32 ... cbrz14 w12131`) that can skip a nested
+retry block (`w12107–12130`) entirely — or, if taken, spin on
+`w12110→w12130`'s own back-edge (`cbrnz14 w12110`, disp=-20) waiting for
+a status word to read a specific value. This is exactly the kind of
+open-ended wait the pre-BMI park state (`ts[N]=0x81000006`, "action-6
+wait") would produce if the awaited condition never resolves.
+
+The ISA table's own pseudocode for these instructions is generic
+(`unit16_submit(1, source_a, source_b)`, `unit12_submit(source_a,
+source_b)` — confirmed real, named hardware-unit operations, but with
+no vendor-documented semantics beyond "submit"/"read result"), so the
+exact trip condition for the `w12110` retry and the loop's own overall
+iteration count (presumably driven by frame length, but not confirmed
+by register-level tracing) remain open. What's directly readable from
+the bytes, not inferred, is the *structure*: two distinct
+fixed-function units (`unit16`, a checksum/DMA helper; `unit12`,
+reached via the generic `unit.config/submit/read` triplet) are both
+touched per pass through this loop, and `unit12`'s access is gated by a
+retry loop that can in principle spin indefinitely.
+
+### 12.2 STRIP_ALL_VLAN touches neither unit; INSERT_VLAN_HDR touches unit16 up to 3 times, before the pre-BMI block ever runs
+
+Re-read both VLAN handler bodies specifically hunting for `csum.*`/
+`unit16.*`/`unit12.*`/`unit.submit` references:
+
+- **`STRIP_ALL_VLAN` (w9451–9500, the POP/0x12 handler): zero hits.**
+  Its entire body is the length fixup (`w9466–9468`, `IC[0xc0] -= 4`),
+  the semaphore-protected counter (`w9477–9484`, `ld.sm`/`retry.sm`/
+  `st.sm` on address register r4 — a lock+increment, not a checksum
+  op), and the shared epilogue (`w9487–9500`). No checksum or
+  fixed-function-unit instruction anywhere in this handler.
+
+- **`INSERT_VLAN_HDR` (w9502–9673, the PUSH/0x42 handler): up to 3
+  separate `csum.init`/`csum.setup`/`dma.bufop`/`csum.result` groups**
+  (w9585–9596, w9598–9611, w9613–9627 — the third gated off by
+  `brbitclr14 bit=0x1d` and conditionally skipped), **each followed by
+  its own `unit16.submit1`** (w9592, w9606, w9621) — the *exact same*
+  `unit16` interface the pre-BMI block's own loop uses two sections
+  later. This matches what `fe-action-interpreter.md` already
+  characterized structurally as "RFC-1624-style incremental fold
+  updates" for the tag-insertion checksum fixup — the new fact here is
+  that it's the same physical hardware interface (`unit16`), not just
+  a similar-looking checksum operation.
+
+### 12.3 What this does and doesn't establish
+
+A VID-to-VID translate record runs the full `[12, 21, 42, 41, 01]`
+opcode chain in one interpreter pass per frame — meaning every
+translated frame (both directions of the 2026-09-10 repro, since a
+cross-port translate needs both STRIP and INSERT in the same chain)
+picks up INSERT_VLAN_HDR's up to 3 extra `unit16` submissions **before**
+the shared pre-BMI block runs its own `unit16`-based loop and its
+nested `unit12` call. A plain routed frame (`[21, 41, 01]`, no VLAN
+opcodes at all) never touches `unit16`/`unit12` before reaching pre-BMI,
+regardless of how large it is.
+
+This reframes "frame size" as a plausible *proxy* rather than the
+direct driver: the routed path sustains 1500B frames not because size
+doesn't matter in general, but because it never pre-loads the shared
+checksum/DMA units with extra calls the way VLAN's INSERT handler does
+— so if there's a resource-pairing or serialization hazard between
+INSERT_VLAN_HDR's own `unit16` calls and the pre-BMI block's later
+`unit16`/`unit12` calls, VLAN frames would hit it at a much lower
+absolute byte count than routed frames ever could, independent of the
+VLAN frame's own length. This is consistent with, and gives a concrete
+mechanism for, the pre-existing "pre-BMI checksum/DMA op for large
+frames" candidate (§10.4) — but it is **not yet oracle-tested**: this
+whole section is static analysis, and specifically does NOT establish
+(a) what the pre-BMI loop's actual per-frame iteration count is driven
+by, (b) whether `unit16` and `unit12` are genuinely the same shared
+hardware resource or independent ones, or (c) what condition the
+`w12110` retry loop is actually waiting on. All three are one-word
+constants or register values a live register probe (or a proper
+field-level trace of the `w11918–11933` entry sequence's register
+producers) could resolve — the same `dra`/`drd`-targeting gap that
+stopped the previous live-probing round (§11) is the blocker for (c)
+specifically, since confirming a hang requires reading `unit12`'s own
+status register while a >192B VLAN frame — not a routed frame — is
+parked mid-loop.
+
+**Concrete next step**: before another live round, trace `w11918–11933`
+(the pre-BMI entry sequence, before the loop) to find what register
+holds the loop's trip count and where it's set — if it's a fixed
+constant (not derived from frame length at all), that alone would
+falsify the "large frame needs more chunks" framing independent of any
+board access, and sharpen the live probe to target the right register.
