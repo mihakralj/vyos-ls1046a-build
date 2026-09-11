@@ -1,0 +1,28 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
+index 89ee24812..f41324847 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
+@@ -806,8 +806,7 @@ bool dpa_bpid2pool_use(int bpid)
+ 
+ #ifdef CONFIG_FMAN_PFC
+ u16 dpa_select_queue(struct net_device *net_dev, struct sk_buff *skb,
+-		     struct net_device *sb_dev,
+-		     select_queue_fallback_t fallback)
++		     struct net_device *sb_dev)
+ {
+ 	return dpa_get_queue_mapping(skb);
+ }
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.h b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.h
+index 46816dcda..36261d697 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.h
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.h
+@@ -193,8 +193,7 @@ void __cold __attribute__((nonnull))
+ _dpa_bp_free(struct dpa_bp *dpa_bp);
+ #ifdef CONFIG_FMAN_PFC
+ u16 dpa_select_queue(struct net_device *net_dev, struct sk_buff *skb,
+-		     struct net_device *sb_dev,
+-		     select_queue_fallback_t fallback);
++		     struct net_device *sb_dev);
+ #endif
+ struct dpa_fq *dpa_fq_alloc(struct device *dev,
+ 			    u32 fq_start,
