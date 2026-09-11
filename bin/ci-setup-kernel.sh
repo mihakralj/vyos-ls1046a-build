@@ -168,6 +168,21 @@ done < "$_series"
 echo "### Staged $_count LS1046A board patches"
 unset _count _series _src _p
 
+# patch-series-cleanup (2026-09-11): stage the plain new-file source tree
+# alongside the patches. A "new file mode" patch hunk IS the file's content
+# with no upstream original to diff against, so tracking these files
+# directly (kernel/common/files/, mirroring the real kernel tree paths)
+# carries none of the diff-drift risk a patch does. Copied into the kernel
+# tree by the injected REPLACEMENT block below, before the (now smaller)
+# patch loop runs, so any remaining patch hunk that references these files
+# (a Makefile/Kconfig registration) applies against an already-populated
+# tree. See data/vyos-1x-files/ for the same mechanism on the vyos-1x side.
+echo "### Staging LS1046A new-file source tree (kernel/common/files)"
+rm -rf "$KERNEL_BUILD/files"
+if [ -d kernel/common/files ]; then
+    cp -a kernel/common/files "$KERNEL_BUILD/files"
+fi
+
 # ── Staging-completeness guard
 # 0078 (dpaa MODULE_SOFTDEP on af_xdp_pool) intentionally NOT staged:
 # under CONFIG_FSL_DPAA_ETH=y and CONFIG_DPAA_AF_XDP_POOL=y the softdep
@@ -1090,6 +1105,19 @@ fi
 # downstream patches stop applying -- ARM64-runner2 failure 2026-08-14).
 git -c user.email=ci@local -c user.name=ci reset -q --hard || true
 git clean -fdxq || true
+
+# Plain new-file source tree: copy first so any remaining patch hunk that
+# references these files (a Makefile/Kconfig registration) applies against
+# an already-populated tree. cp -a preserves file modes. `git add` them into
+# the index right away -- git apply --3way's blob lookups (and its "does
+# not exist in index" / "does not match index" failure mode) need these
+# files tracked, not just present on disk, or every LATER patch that
+# touches one of them fails even though the file is right there.
+if [ -d "${PATCH_DIR}/../files" ]; then
+    cp -a "${PATCH_DIR}/../files/." .
+    git -c user.email=ci@local -c user.name=ci add -A -- $(cd "${PATCH_DIR}/../files" && find . -type f | sed 's#^\./##')
+    git -c user.email=ci@local -c user.name=ci commit -q -m "kernel pristine + LS1046A new-file source tree" --allow-empty
+fi
 
 PATCH_FAIL=0
 PATCH_FAIL_LIST=""
