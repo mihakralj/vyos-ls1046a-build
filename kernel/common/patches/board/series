@@ -143,33 +143,12 @@
 # Upstream-Status: Inappropriate | Risk-Tier: A (changes live CC match-key format + scheme EKFC)
 0121-fman-cc-hm-vlan-route-support.patch
 # ── FE-VM / ehash / FE chain ──
-# 0122–0133: FE ehash init, port support, singletons, ehash table,
-#            MURAM genpool, ENQ root, flow insert, offload engage,
-#            DMA coherent, hash object, arm debugfs, AC_CC
+# patch-series-cleanup (2026-09-11): squashed 0122-0133 (12 sequential
+# patches building one FE-VM/ehash arc, per this section's own original
+# comment) into one patch. See its header for the CI checkpoints used
+# to verify byte-identical content.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0122-fman-pcd-fe-ehash-init.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0123-fman-pcd-fe-port-support.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0124-fman-pcd-fe-vm-singletons.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0125-fman-pcd-fe-ehash-table.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0126-fman-pcd-muram-genpool.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0127-fman-pcd-fe-vm-enq-root.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0128-fman-pcd-fe-vm-flow-insert.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0129-fman-pcd-offload-engage.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0130-fman-pcd-fe-ehash-dma-coherent.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0131-fman-pcd-fe-hash-object.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0132-fman-pcd-fe-arm-debugfs.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0133-fman-pcd-fe-arm-real-accc.patch
+0122-fman-pcd-fe-vm-chain.patch
 
 # ── CAAM + FE context + TX bypass + manip ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
