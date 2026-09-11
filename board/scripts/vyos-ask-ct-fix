@@ -41,7 +41,10 @@ fi
 echo "ASK: loading kernel modules..."
 for mod in cdx fci auto_bridge nf_conntrack_netlink; do
     if ! lsmod | grep -q "^${mod} "; then
-        insmod "${MODDIR}/${mod}.ko" 2>/dev/null || modprobe "${mod}" 2>/dev/null || true
+        insmod "${MODDIR}/${mod}.ko" || modprobe "${mod}" || true
+        if ! lsmod | grep -q "^${mod} "; then
+            echo "ASK: WARNING: ${mod} failed to load -- see dmesg" >&2
+        fi
     fi
 done
 

@@ -179,122 +179,34 @@ sed -i '/^#include "cdx.h"/a\
 #include <linux/proc_fs.h>' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: added linux/proc_fs.h include"
 
-# ── Patch: pre-populate fman_info MURAM handle via /dev/fm0pcd ──────────────
-# Normally dpa_app opens /dev/fm0pcd and passes the fd number via
-# CDX_CTRL_DPA_SET_PARAMS ioctl, which then calls cdxdrv_get_fman_handles()
-# to populate fman_info[0].muram_handle. Since START_DPA_APP is disabled,
-# this never happens. Open /dev/fm0pcd directly from cdx_module_init()
-# BEFORE cdx_init_frag_module() so the MURAM handle is available.
-sed -i '/^#include "lnxwrp_fsl_fman.h"/a\
-#include <linux/file.h>\
-#include "lnxwrp_fm.h"' "$ASK_DIR/cdx/cdx_main.c"
-sed -i '/^#include "lnxwrp_fm.h"/a\
-\
-extern uint32_t num_fmans;' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: added extern uint32_t num_fmans"
-
-# Pre-populate FMan MURAM handle before cdx_init_frag_module.
-# First: make num_fmans non-static (dpa_cfg.c:33) so cdx_main.c can set it.
-sed -i 's/^static uint32_t num_fmans;/uint32_t num_fmans;/' "$ASK_DIR/cdx/dpa_cfg.c"
-echo "### Patched dpa_cfg.c: num_fmans no longer static"
-
-# Un-static cdx's offline_port_info array in devoh.c
-sed -i 's/^static struct oh_port_info offline_port_info/struct oh_port_info offline_port_info/' "$ASK_DIR/cdx/devoh.c"
-echo "### Patched devoh.c: offline_port_info no longer static"
-
-# Add OH port import function to devoh.c (struct oh_port_info visible here)
-sed -i '/^int alloc_offline_port/i\
-void cdxdrv_import_oh_ports(void);\
-\
-/* Import OH ports from kernel fsl_oh driver into cdx array */\
-void cdxdrv_import_oh_ports(void)\
-{\
-\tint oi;\
-	\tprintk("cdx: scanning kernel OH ports...\\n");\
-\tfor (oi = 0; oi < 2; oi++) {\
-\t\tstruct fman_offline_port_info kinfo;\
-\t\tchar name[32];\
-\t\tint slot;\
-\t\tmemset(\&kinfo, 0, sizeof(kinfo));\
-\t\tsnprintf(name, sizeof(name), "dpa-fman0-oh@%d", oi+2);\
-\t\tstrncpy(kinfo.port_name, name, sizeof(kinfo.port_name)-1);\
-\t\tif (oh_port_driver_get_port_info(\&kinfo) == 0) {\
-\t\t\tfor (slot = 0; slot < MAX_OF_PORTS; slot++)\
-\t\t\t\tif (!(offline_port_info[0][slot].flags \& PORT_VALID)) break;\
-\t\t\tif (slot < MAX_OF_PORTS) {\
-\t\t\t\tint ai;\
-\t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
-\t\t\t\tfor (ai = 0; ai < MAX_OH_PORT_ASSIGN; ai++) {\
-\t\t\t\t\tif (strcmp(ohport_assign[ai].name, name) == 0) {\
-\t\t\t\t\t\toffline_port_info[0][slot].flags |= ohport_assign[ai].type;\
-\t\t\t\t\t\tbreak;\
-\t\t\t\t\t}\
-\t\t\t\t}\
-\t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
-\t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
-	\t\t\t\tprintk("cdx: OH port %s imported type=0x%x (ch %d egr_fq %d err_fq %d)\\n",\
-\t\t\t\t\tname, ohport_assign[ai].type, kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
-\t\t\t}\
-\t\t} else {\
-	\t\t\tprintk("cdx: OH port %s NOT found in kernel\\n", name);\
-\t\t}\
-\t}\
-}\
-' "$ASK_DIR/cdx/devoh.c"
-echo "### Patched devoh.c: added cdxdrv_import_oh_ports()"
-
-# Add headers needed by the import function
-sed -i '/^#include "portdefs.h"/a\
-#include <linux/fsl_oh_port.h>\n\
-extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);' "$ASK_DIR/cdx/devoh.c"
-echo "### Patched devoh.c: added fsl_oh_port.h include"
-
-# Also forward-declare in cdx_main.c for the call
-sed -i '/^#include "dpa_ipsec.h"/i\
-void cdxdrv_import_oh_ports(void);' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: forward-declare cdxdrv_import_oh_ports"
-
-# ── Insert FMan MURAM init block BEFORE cdx_init_fqid_procfs() ──────────────
-# This MUST run first so the printk target exists for the python call insertion.
-sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
-\t/* Pre-populate FMan info via /dev/fm0pcd so MURAM handle is available */\
-\t{\
-\t\tstruct file *fm_file = filp_open("/dev/fm0-pcd", O_RDWR, 0);\
-\t\tif (!IS_ERR(fm_file)) {\
-\t\t\tt_LnxWrpFmDev *wrapper = (t_LnxWrpFmDev *)fm_file->private_data;\
-\t\t\tif (wrapper \&\& wrapper->h_MuramDev) {\
-\t\t\t\tfman_info = kzalloc(sizeof(*fman_info), GFP_KERNEL);\
-\t\t\t\tfman_info->muram_handle = wrapper->h_MuramDev;\
-\t\t\t\tfman_info->physicalMuramBase = wrapper->fmMuramPhysBaseAddr;\
-\t\t\t\tfman_info->fmMuramMemSize = wrapper->fmMuramMemSize;\
-\t\t\t\tnum_fmans = 1;\
-\t\t\t\tprintk("cdx: pre-populated MURAM handle from /dev/fm0-pcd\\n");\
-\t\t\t}\
-\t\t\tfilp_close(fm_file, NULL);\
-\t\t}\
-\t}\
-' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: pre-populate fman_info MURAM handle before frag init"
-
-# ── Patch: insert cdxdrv_import_oh_ports() call BEFORE the MURAM printk ──────
-# The MURAM block (above) creates the printk line; this python replaces it
-# with a version that calls the OH import function first. Must run AFTER the
-# MURAM sed so the target string exists.
-python3 -c "
-import re
-with open('$ASK_DIR/cdx/cdx_main.c', 'r') as f:
-    src = f.read()
-# Insert call right before the MURAM pre-populate printk
-src = src.replace(
-    '\t\t\t\tprintk(\"cdx: pre-populated MURAM handle',
-    '\t\t\t\tcdxdrv_import_oh_ports();\n\t\t\t\tprintk(\"cdx: pre-populated MURAM handle'
-)
-with open('$ASK_DIR/cdx/cdx_main.c', 'w') as f:
-    f.write(src)
-print('### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM printk')
-"
-
-echo "### Patched cdx_main.c: added procfs cleanup in cdx_module_deinit"
+# NOTE: this used to carry a "pre-populate fman_info MURAM handle via
+# /dev/fm0pcd" hack plus a cdxdrv_import_oh_ports() OH-port-array stub,
+# both dating from when START_DPA_APP was disabled below (dpa_app never
+# ran, so nothing else would ever populate fman_info/offline_port_info).
+# Removed 2026-09-11: START_DPA_APP was re-enabled (see above) without
+# reconciling this, and the two directly conflicted. The pre-populate
+# hack set the file-scope `fman_info` pointer unconditionally, first,
+# on every module load -- so when dpa_app ran moments later and sent its
+# own CDX_CTRL_DPA_SET_PARAMS ioctl (the ONLY code path that actually
+# calls cdx_add_oh_iface()/cdx_add_eth_onif() to populate
+# offline_port_info[].ohinfo and register real onifs), it always hit
+# cdx_ioc_set_dpa_params()'s own idempotency guard --
+#   if (fman_info) { DPA_ERROR("dpa params already set"); return -EBUSY; }
+# -- and returned immediately without doing any real work. Confirmed on
+# hardware: "cdx_ioc_set_dpa_params::dpa params already set" fires on
+# every single boot (not just reloads), ohinfo is never populated,
+# ipsec_init_ohport() always fails via the NULL-ohinfo guards below, and
+# -- more importantly -- ordinary eth ports were never being registered
+# as onifs either, since that's gated behind the exact same early return.
+#
+# Safe to remove outright: cdx_init_frag_module()'s own MURAM-handle
+# check is already patched non-fatal below (falls back to degraded mode
+# without frag/IP-reassembly), and start_dpa_app() runs BEFORE
+# cdx_init_frag_module() and blocks (UMH_WAIT_PROC) until dpa_app exits,
+# so if dpa_app's real ioctl call succeeds, fman_info[0].muram_handle is
+# already genuinely populated (via cdxdrv_get_fman_handles()) by the time
+# frag_module needs it -- no pre-populate required.
+echo "### Skipped: MURAM pre-populate / cdxdrv_import_oh_ports (obsoleted by re-enabled START_DPA_APP, was blocking dpa_app's real init)"
 
 sed -i '/^static void cdx_module_deinit/,/^}$/ {
     /kfree(cdx_info);/i\
@@ -304,9 +216,11 @@ sed -i '/^static void cdx_module_deinit/,/^}$/ {
 echo "### Patched cdx_main.c: added procfs cleanup in cdx_module_deinit"
 
 # ── Guard NULL ohinfo in get_ofport_portid ──────────────────────────────────
-# After alloc_offline_port finds a slot (which now works since we set the type),
 # get_ofport_portid() and get_ofport_info() dereference info->ohinfo->portid.
-# ohinfo is only populated by dpa_app ioctl (not yet running), so we guard it.
+# ohinfo is only populated by dpa_app's ioctl (cdx_add_oh_iface(), via
+# cdx_ioc_set_dpa_params()) -- if dpa_app fails/crashes before that ioctl
+# completes, ohinfo stays NULL here. Guard defensively; a real failure here
+# means dpa_app didn't finish, which is visible separately in the log.
 sed -i '/^\t\*portid = info->ohinfo->portid;$/ {
     i\
 \tif (!info->ohinfo) return -1;
