@@ -280,18 +280,14 @@ sed -i 's/ttyAMA0/ttyS0/g' \
 # Our config.boot.* defaults do NOT use `set system flow-accounting netflow`,
 # so the OOT iptables-NETFLOW kmod + the small VyOS glue package are dead
 # weight on this board. Strip the entry from arm64.toml before
-# build-vyos-image renders custom.list.chroot. The companion sed normalizes
-# the trailing comma on the preceding `"grub-efi-arm64"` entry so the TOML
-# array stays syntactically valid after deletion.
+# build-vyos-image renders custom.list.chroot.
 #
 # If upstream republishes the package later, this sed becomes a no-op
-# (the line will simply not exist to delete and the grub entry will not
-# have the trailing comma to strip), and we can revert this block.
+# (the line will simply not exist to delete) and we can revert this block.
 if [ -f vyos-build/data/architectures/arm64.toml ]; then
   if grep -q '"vyos-ipt-netflow"' vyos-build/data/architectures/arm64.toml; then
     sed -i -E \
       -e '/^[[:space:]]*"vyos-ipt-netflow"[[:space:]]*,?[[:space:]]*$/d' \
-      -e 's/^([[:space:]]*"grub-efi-arm64")[[:space:]]*,[[:space:]]*$/\1/' \
       vyos-build/data/architectures/arm64.toml
     echo "### Stripped vyos-ipt-netflow from arm64.toml (upstream apt repo no longer ships it):"
     cat vyos-build/data/architectures/arm64.toml
@@ -313,12 +309,33 @@ fi
 if [ -f vyos-build/data/architectures/arm64.toml ]; then
   if ! grep -q '"libatomic1"' vyos-build/data/architectures/arm64.toml; then
     sed -i -E \
-      -e 's/^([[:space:]]*"grub-efi-arm64")[[:space:]]*$/\1,\n  "libatomic1"/' \
-      -e 's/^([[:space:]]*"grub-efi-arm64")[[:space:]]*,[[:space:]]*$/\1,\n  "libatomic1",/' \
+      -e 's/^([[:space:]]*)("grub-efi-arm64")[[:space:]]*,?[[:space:]]*$/\1\2,\n\1"libatomic1"/' \
       vyos-build/data/architectures/arm64.toml
     echo "### Injected libatomic1 into arm64.toml:"
     cat vyos-build/data/architectures/arm64.toml
   fi
+fi
+
+### Normalize trailing commas in arm64.toml's packages array.
+#
+# The strip/inject steps above only ever delete or append whole array-entry
+# lines -- they never track which line ends up immediately before the
+# closing `]`, so trying to conditionally add/remove that one entry's
+# trailing comma (the previous approach) breaks the moment upstream adds or
+# reorders entries around the ones we touch (e.g. root-caused 2026-09-11:
+# upstream's arm64.toml gained a "vyos-linux-firmware" entry AFTER
+# "grub-efi-arm64", so unconditionally stripping grub-efi-arm64's comma on
+# vyos-ipt-netflow deletion left two adjacent string literals with no
+# separator -- `tomli.TOMLDecodeError: Unclosed array`).
+#
+# TOML explicitly permits a trailing comma on an array's last element too,
+# so sidestep the "which one is last" tracking entirely: unconditionally
+# ensure every bare-quoted-string line in the file ends with a comma. Valid
+# whether or not it's actually last, and idempotent (already-comma'd lines
+# are left alone by requiring no comma present before matching).
+if [ -f vyos-build/data/architectures/arm64.toml ]; then
+  sed -i -E '/^[[:space:]]*"[^"]+"[[:space:]]*$/ s/$/,/' \
+    vyos-build/data/architectures/arm64.toml
 fi
 
 ### MOK certificate for kernel module signing
