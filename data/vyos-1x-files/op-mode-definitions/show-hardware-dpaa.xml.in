@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="show">
+    <children>
+      <node name="hardware">
+        <children>
+          <node name="dpaa">
+            <properties>
+              <help>Show DPAA1 network acceleration complex status</help>
+            </properties>
+            <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py</command>
+            <children>
+              <leafNode name="ports">
+                <properties>
+                  <help>Show physical MEMAC to Linux interface mapping</help>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py --ports</command>
+              </leafNode>
+              <leafNode name="fman">
+                <properties>
+                  <help>Show Frame Manager (FMan) and MURAM status</help>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py --fman</command>
+              </leafNode>
+              <leafNode name="raw">
+                <properties>
+                  <help>Show raw DPAA1 status as JSON</help>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/show_hardware_dpaa.py --raw</command>
+              </leafNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
