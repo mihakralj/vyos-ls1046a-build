@@ -72,15 +72,11 @@ SYSROOT="$SRC_CACHE/sysroot"
 mkdir -p "$SYSROOT" "$SYSROOT/lib" "$SYSROOT/include" "$SYSROOT/lib/pkgconfig"
 
 # Pinned (not a floating branch) -- the pin lives in
-# kernel/flavors/ask/ask-version.env as ASK_MODULES_VERSION, shared with
-# ci-build-ask-modules.sh so the two builds can never disagree with EACH
-# OTHER. Deliberately separate from ASK_VERSION (the kernel-patch pin) --
-# see ask-version.env's own comment: hardware-boot testing found the OOT
-# module/userspace build regresses at ASK_VERSION's current commit
-# (cdx.ko missing exports, fci.ko fails to load, cmm crash-loops).
+# kernel/flavors/ask/ask-version.env, shared with ci-build-ask-modules.sh
+# so the two builds can never disagree.
 # shellcheck disable=SC1091
 . "$REPO_ROOT/kernel/flavors/ask/ask-version.env"
-ASK_COMMIT="$ASK_MODULES_VERSION"
+ASK_COMMIT="$ASK_VERSION"
 ASK_CACHE="${RUNNER_TOOL_CACHE:-/tmp}/ask-clone-cache"
 ASK_DIR="$ASK_CACHE/ask-mt-6.12.y"
 
@@ -434,10 +430,8 @@ DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Per
 
 $CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
 $CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
-# testapp.c exists at the current ASK_MODULES_VERSION pin (a211ea8) but was
-# removed upstream by 5d96de36 (no dangling references in main.c/dpa.c --
-# confirmed by grep) -- guard it so a future ASK_MODULES_VERSION bump past
-# that point doesn't hard-fail on a file that's gone.
+# testapp.c removed upstream at ASK_VERSION 5d96de36 (no dangling references
+# in main.c/dpa.c -- confirmed by grep before dropping it here).
 if [ -f "$DPA_SRC/testapp.c" ]; then
     $CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
     TESTAPP_OBJ="$DPA_SRC/testapp.o"
