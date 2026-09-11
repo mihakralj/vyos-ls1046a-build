@@ -15,6 +15,20 @@ directory (plus `patches/ask/` and `patches/fixes/` if present,
 children device nodes for the Mono Gateway DK) — not part of upstream
 ASK.
 
+`007-sdk-dpaa-select-phylink` is a local, one-line Kconfig fix: NXP's
+vendored `sdk_dpaa/Kconfig` `select`s PHYLIB but not PHYLINK, yet
+`sdk_dpaa/mac.c` calls `phylink_interface_max_speed()` directly.
+`PHYLINK` is a promptless `tristate` (no config-fragment text can set
+it — its value is entirely computed from what `select`s it), so with
+`FSL_SDK_DPAA_ETH=y` and no `select PHYLINK`, `CONFIG_PHYLINK` resolves
+to `m` and the `vmlinux` link fails with `undefined reference to
+'phylink_interface_max_speed'`. Verified via actual link failure and a
+`make olddefconfig` reproduction, not assumption. Adding `select
+PHYLINK` here (rather than to `kernel/flavors/ask/ask.config`, which
+was tried first and does nothing for a promptless symbol) is the
+correct fix location and keeps `sdk-sources/` itself exactly what
+`sync-ask-kernel.sh` produces.
+
 `010` through the top of the manifest are a **direct, unmodified import**
 of the upstream `we-are-mono/ASK` repo at the commit pinned in
 `kernel/flavors/ask/ask-version.env` — the same commit the
@@ -85,9 +99,8 @@ fallback, 2026-09-11):
     PHYLIB, not PHYLINK — with `FSL_SDK_DPAA_ETH=y` (built in) and
     `CONFIG_PHYLINK=m` (module, the general default), that's an
     `undefined reference` at vmlinux link time regardless of base tree.
-    Fixed by forcing `CONFIG_PHYLINK=y` in `kernel/flavors/ask/
-    ask.config` instead of patching the pristine sdk-sources Kconfig or
-    reviving 110's un-static+export approach.
+    Fixed via `007-sdk-dpaa-select-phylink.patch` (see above) rather
+    than reviving 110's un-static+export approach.
   - `120-emc2305-dt-fan-control.patch` — an in-kernel DT-driven
     cooling-device rewrite of the EMC2305 fan controller, unrelated to
     ASK/DPAA1 networking and built against Linux v6.12.103 (54 point
