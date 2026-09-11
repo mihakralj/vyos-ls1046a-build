@@ -86,11 +86,18 @@ fi
 # ── Clone we-are-mono/ASK, pinned to a fixed commit ───────────────────────
 # Pinned (not a floating branch) so upstream drift can never silently break
 # the sed/python source patches below without a deliberate bump. The pin
-# lives in kernel/flavors/ask/ask-version.env -- shared with
-# ci-build-ask-userspace.sh so the two builds can never disagree.
+# lives in kernel/flavors/ask/ask-version.env as ASK_MODULES_VERSION --
+# deliberately SEPARATE from ASK_VERSION (the kernel-patch pin) as of
+# 2026-09-11: hardware-boot testing found the OOT module build at
+# ASK_VERSION (5d96de36) produces a cdx.ko missing its
+# comcerto_fpp_send_command/_register_event_cb exports, breaking fci.ko
+# load and crash-looping cmm. See ask-version.env's own comment for the
+# full story. ASK_MODULES_VERSION stays on the last commit confirmed
+# working for cdx.ko/fci.ko/cmm until a future ASK commit is verified
+# compatible on both the kernel-patch and module sides at once.
 # shellcheck disable=SC1091
 . "$(cd "$(dirname "$0")/.." && pwd)/kernel/flavors/ask/ask-version.env"
-ASK_COMMIT="$ASK_VERSION"
+ASK_COMMIT="$ASK_MODULES_VERSION"
 ASK_CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/ask-clone-cache"
 ASK_DIR="$ASK_CACHE_DIR/ask-mt-6.12.y"
 
