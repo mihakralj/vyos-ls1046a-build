@@ -175,10 +175,19 @@ jobs:
           # aborts the job before the "Initialization: set env variables"
           # step ever gets to run.  Reset ownership unconditionally so
           # checkout can repopulate the workspace cleanly.
+          #
+          # This step itself runs as root (job-level `shell: sudo -E bash`),
+          # so `$(id -un):$(id -gn)` here is root:root, not the runner user
+          # -- that previous version of this step silently re-chowned
+          # everything to root (chown-as-root never errors, so the intended
+          # `|| chown -R vyos:vyos` fallback never ran), undoing the one fix
+          # that did work (the job-started-reset-ownership.sh hook, which
+          # genuinely elevates via sudo from the unprivileged vyos context)
+          # right before checkout. Target vyos:vyos directly; the runner
+          # user on this host is always vyos.
           set -e
           if [ -d "$GITHUB_WORKSPACE" ]; then
-            chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || \
-              chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
           fi
           # Also drop any prior root-owned content under the runner work root
           # in case the workspace dir itself has the wrong owner.
