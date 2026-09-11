@@ -158,28 +158,12 @@
 0119-fman-pcd-hm-l3-forward-ops.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0120-fman-pcd-hm-nexthop-dedup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0121-dpaa-export-cc-target-resolvers.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A (new file/API; T-M6-8 VLAN R2)
-0121a-fman-pcd-hm-vlan-dedup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R3a)
-0121c-fman-pcd-cc-test-vlan-hm.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A (new API; T-M6-8 VLAN R4a)
-0121d-fman-pcd-hm-vlan-route-dedup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4b)
-0121e-fman-pcd-cc-test-vlan-route.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c)
-0121f-fman-pcd-cc-test-teardown-quiesce.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c-pre)
-0121g-fman-pcd-cc-test-vlan-coex.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-1)
-0121h-fman-cc-miss-fe-production-api.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A (changed exported API; T-M6-8 VLAN R4d)
-0121j-fman-pcd-hm-vlan-route-translate.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B (widens an existing bound, no new API)
-0121k-fman-pcd-cc-max-keys-64.patch
+# patch-series-cleanup (2026-09-11): squashed 0121/0121a/0121c-0121l (11
+# incremental review slices) into one patch. See its header for the full
+# list of originals and the CI checkpoints used to verify byte-identical
+# content.
 # Upstream-Status: Inappropriate | Risk-Tier: A (changes live CC match-key format + scheme EKFC)
-0121l-fman-pcd-cc-ekfc-port-id.patch
+0121-fman-cc-hm-vlan-route-support.patch
 # ── FE-VM / ehash / FE chain ──
 # 0122–0133: FE ehash init, port support, singletons, ehash table,
 #            MURAM genpool, ENQ root, flow insert, offload engage,
@@ -245,14 +229,6 @@
 # ── FE-VM engage/flow API (ask.ko, replaces 0150) ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0153-fman-pcd-fe-engage-api.patch
-
-# 2026-08-30 (fold): relocated from its old series slot right after 0121h.
-# 0121i's diff targets fman_pcd_fe_enq_get_offset as anchor context, but
-# that function is only introduced by 0153 (above) -- applying 0121i in
-# its original numeric position always failed with "does not apply"
-# because the anchor didn't exist yet. Content unchanged, order-only fix.
-# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
-0121i-fman-export-fe-root-offset.patch
 
 # ── T1 typing fix (§16.2) ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
