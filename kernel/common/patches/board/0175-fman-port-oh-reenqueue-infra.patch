@@ -1,0 +1,1303 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman: port: O/H port re-enqueue infra, phase 1a-1g (ASK2 T-M6-8)
+
+Consolidates the full "ASK2 OH-port re-enqueue infra, phase 1a" arc
+(0175-0184, 10 patches, all dated 2026-09-01/02) into one patch:
+
+  0175  bind Offline/Host-command (O/H) ports (phase 1a)
+  0176  O/H bring-up: FMBM_O* register programming (phase 1b)
+  0177  O/H bring-up hand-arm debugfs (phase 1c de-risk)
+  0178  fix O/H port discoverability before first bring-up (phase 1c fix)
+  0179  quiet spurious WARN_ON in O/H fifo-size verification (phase 1c polish)
+  0180  O/H target-FQID bring-up + enable debugfs verb (phase 1d step 1)
+  0181  fix fman_port_active_list double-insertion for O/H ports (phase 1c/1d fix)
+  0182  O/H input FQ scheduling debugfs verb (phase 1e)
+  0183  O/H frame injection + capture sink debugfs verbs (phase 1f)
+  0184  O/H register + FQ-state readback debugfs verb (phase 1g)
+
+All ten touch only fman_port.c (plus fman.{c,h}/fman_port.h in 0175/
+0176), applied in strict sequence with nothing else interleaved.
+
+0181 is not a routine review-slice and its full original narrative is
+preserved verbatim below, since it documents a real board-found
+incident whose root cause is two other patches in this same cluster:
+
+Board-found 2026-09-01 while diagnosing an unrelated production VLAN
+offload bug report on .185: a plain routed (non-VLAN) TCP flow through
+a completely unrelated physical port (eth3, hw port 0x10) failed
+hardware offload with "REPLACE rollback fe_flow_insert=-19" (ENODEV)
+on every single attempt, forever. Traced to
+fman_cc_tree_install()'s (dpaa_fman_caps.c) call to
+fman_port_lookup_rx(fm, 0x10), which returned NULL for a port that has
+been working since well before this session.
+
+Root cause: 0177/0178 register an O/H port into fman_port_active_list
+at PROBE time (fman_port_probe()) so a not-yet-brought-up O/H port is
+discoverable by the "bringup" debugfs tool. But the ORIGINAL 0115
+registration point, at the end of fman_port_init(), unconditionally
+does its own list_add_tail() on the same port->node -- and this
+session's Phase 1c/1d board testing did call "bringup 4" (dmesg:
+"oh_test bringup 0x04 OK" at boot+140s), which drives
+fman_port_config()+fman_port_init() for that same, already-probe-time-
+registered O/H port object. That second list_add_tail() on an already-
+linked struct list_head splices the node into the list a second time
+without unlinking it from its first position, corrupting the shared
+doubly-linked list for every port on the fman -- not just the O/H
+port. fman_port_lookup_rx()'s list_for_each_entry walk over the
+corrupted list then silently fails to reach unrelated RX ports
+(eth3/0x10 in this case), and every caller (fman_cc_tree_install(),
+i.e. every port's VLAN CC-tree AND plain ehash-vs-CC-tree dispatch)
+gets -ENODEV. No crash, no WARN -- list.h's plain (non-DEBUG_LIST)
+list_add_tail() has no double-add detection, so this was a silent,
+board-wide production regression from a debug-only test tool call.
+
+0175's probe-time registration comment claimed this was "safe" because
+port->node is kzalloc'd/zeroed and list_add_tail() "only writes
+through it, never reads it as an existing link first" -- true for the
+FIRST call, but that reasoning never accounted for fman_port_init()
+making a SECOND, unconditional call on the same node later. It also
+can't be fixed with list_empty(&port->node) as the guard: kzalloc
+leaves ->next/->prev NULL rather than self-pointing, since port->node
+is never INIT_LIST_HEAD'd, so list_empty() is not well-defined for a
+never-linked node here.
+
+Fix: add struct fman_port::active_list_added (kzalloc-zeroed, so
+false until set), checked and set under fman_port_active_lock at BOTH
+call sites (fman_port_init()'s original 0115 site, and 0175/0178's
+probe-time site). The node is now linked into fman_port_active_list at
+most once regardless of call order -- probe-then-init (O/H ports) or
+init-only (RX/TX ports, unaffected: active_list_added starts false, so
+their existing single list_add_tail() still fires exactly as before).
+
+Board-tested 2026-09-01: this exact double-registration state (from
+the "bringup 4" call earlier in .185's current uptime) is why the live
+VLAN offload investigation this session was giving inconsistent
+results -- it was chasing a live-corrupted port registry, not a VLAN-
+specific defect. A reboot is required to clear the already-corrupted
+in-memory list on any board that already ran "bringup" before this
+fix; this patch only prevents the corruption going forward.
+
+Upstream-Status: Inappropriate | Risk-Tier: A (adds one bool field + a
+guard around two pre-existing list_add_tail() call sites; RX/TX ports
+take the exact same single-add path as before, byte-identical
+behavior for every port type except O/H, where it now prevents a
+double-add instead of allowing one)
+
+Verified against the real CI checkpoint commits in the persistent
+kernel-git-cache (run 34563593304, checkpoints 96ca6c89c5b1 "applied:
+0173..." to 3564a9b357a7 "applied: 0184..."), round-trip verified
+byte-identical via `patch -p1`.
+
+Touches: fman.c, fman.h, fman_port.{c,h}.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -2320,15 +2320,30 @@
+ 	if (fman->state->rev_info.major < 6)
+ 		set_port_order_restoration(fman->fpm_regs, port_id);
+ 
+-	mac_id = hw_port_id_to_sw_port_id(fman->state->rev_info.major, port_id);
++	/*
++	 * ASK2 OH-port re-enqueue infra (dpaa1): O/H ports have no MAC, so
++	 * there is no per-MAC MTU to check or track here. Without this guard
++	 * hw_port_id_to_sw_port_id() -- which was only ever written for
++	 * RX/TX hw ids -- silently aliases every O/H hw id (0x02-0x07, all
++	 * below BASE_RX_PORTID) to mac_id 0, and the write below would
++	 * corrupt whichever real MAC happens to live at index 0 in
++	 * mac_mfl[]/port_mfl[]. Confirmed by reading hw_port_id_to_sw_port_id()
++	 * (fman.c) against BASE_RX_PORTID/BASE_TX_PORTID before writing this.
++	 */
++	if (port_params->port_type != FMAN_PORT_TYPE_OH) {
++		mac_id = hw_port_id_to_sw_port_id(fman->state->rev_info.major,
++						  port_id);
+ 
+-	if (port_params->max_frame_length >= fman->state->mac_mfl[mac_id]) {
+-		fman->state->port_mfl[mac_id] = port_params->max_frame_length;
+-	} else {
+-		dev_warn(fman->dev, "%s: Port (%d) max_frame_length is smaller than MAC (%d) current MTU\n",
+-			 __func__, port_id, mac_id);
+-		err = -EINVAL;
+-		goto return_err;
++		if (port_params->max_frame_length >=
++		    fman->state->mac_mfl[mac_id]) {
++			fman->state->port_mfl[mac_id] =
++				port_params->max_frame_length;
++		} else {
++			dev_warn(fman->dev, "%s: Port (%d) max_frame_length is smaller than MAC (%d) current MTU\n",
++				 __func__, port_id, mac_id);
++			err = -EINVAL;
++			goto return_err;
++		}
+ 	}
+ 
+ 	spin_unlock_irqrestore(&fman->spinlock, flags);
+diff --git a/drivers/net/ethernet/freescale/fman/fman.h b/drivers/net/ethernet/freescale/fman/fman.h
+--- a/drivers/net/ethernet/freescale/fman/fman.h
++++ b/drivers/net/ethernet/freescale/fman/fman.h
+@@ -83,6 +83,15 @@
+ enum fman_port_type {
+ 	FMAN_PORT_TYPE_TX = 0,	/* TX Port */
+ 	FMAN_PORT_TYPE_RX,	/* RX Port */
++	/*
++	 * Offline/Host-command (O/H) port -- RM 5.3.1 "FMan Hardware Ports
++	 * Types". No MAC; dequeues re-circulated frames from QMan, walks
++	 * Parser/KeyGen/CC via its own FMBM_O* BMI register block, then
++	 * re-enqueues. ASK2 OH-port re-enqueue infra (dpaa1); see
++	 * plans/ASK2-VLAN-REARCH.md and the board-patch series near
++	 * 0175-fman-port-oh-type.patch for the bring-up this unlocks.
++	 */
++	FMAN_PORT_TYPE_OH,
+ };
+ 
+ struct fman_rev_info {
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -14,6 +14,15 @@
+ #include <linux/of_address.h>
+ #include <linux/delay.h>
+ #include <linux/libfdt_env.h>
++#include <linux/dma-mapping.h>
++#include <linux/atomic.h>
++#include <linux/smp.h>
++#include <soc/fsl/qman.h>
++#include <linux/debugfs.h>
++#include <linux/err.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
+ 
+ #include "fman.h"
+ #include "fman_port.h"
+@@ -273,10 +282,71 @@
+ 	u32 reserved0310[0x3a]; /* (0x310-0x3FF) */
+ };
+ 
++/*
++ * BMI Offline/Host-command (O/H) port register map -- RM 5.5.4.7, register
++ * offsets confirmed against LS1046ADPAARM.pdf (each O/H port's block lives
++ * at FMan_base + 0x1000*n, n = hw O/H port id; ASK2 dpaa1 board uses n=0x04,
++ * live-confirmed unbound 2026-09-01, see plans/ASK2-VLAN-REARCH.md). Field
++ * order/offsets match the RM table exactly -- do not reorder.
++ */
++struct fman_port_oh_bmi_regs {
++	u32 fmbm_ocfg;		/* O/H Configuration */
++	u32 fmbm_ost;		/* O/H Status */
++	u32 fmbm_oda;		/* O/H DMA attributes */
++	u32 fmbm_oicp;		/* O/H Internal Context Parameters */
++	u32 fmbm_ofdne;		/* O/H Frame Dequeue Next Engine */
++	u32 fmbm_ofne;		/* O/H Frame Next Engine */
++	u32 fmbm_ofca;		/* O/H Frame Command Attributes */
++	u32 fmbm_ofpne;		/* O/H Frame Parser Next Engine */
++	u32 fmbm_opso;		/* O/H Parsing Start Offset */
++	u32 fmbm_opp;		/* O/H Policer Profile */
++	u32 fmbm_occb;		/* O/H Custom (Coarse) Classification Base */
++	u32 fmbm_oim;		/* O/H Internal Margins */
++	u32 fmbm_ofp;		/* O/H FIFO Parameters */
++	u32 fmbm_ofed;		/* O/H Frame End Data */
++	u32 reserved0038[0x2];	/* (0x038-0x03F) */
++	u32 fmbm_opri[PORT_PRS_RESULT_WORDS_NUM];
++	/* O/H Parse Result Initialization */
++	u32 fmbm_ofqid;		/* O/H Frame Queue ID */
++	u32 fmbm_oefqid;	/* O/H Error Frame Queue ID */
++	u32 fmbm_ofsdm;		/* O/H Frame Status Discard Mask */
++	u32 fmbm_ofsem;		/* O/H Frame Status Error Mask */
++	u32 fmbm_ofene;		/* O/H Frame Enqueue Next Engine */
++	u32 fmbm_orlmts;	/* O/H Rate Limiter Scale */
++	u32 fmbm_orlmt;		/* O/H Rate Limiter */
++	u32 fmbm_ocmne;		/* O/H Continuous Mode Next Engine */
++	u32 reserved0080[0x38]; /* (0x080-0x15F) */
++	u32 fmbm_ocgm[PORT_CG_MAP_NUM];	/* Observed Congestion Grp Map */
++	u32 reserved0180[0x20]; /* (0x180-0x1FF) */
++	u32 fmbm_ostc;		/* O/H Statistics Counters */
++	u32 fmbm_ofrc;		/* O/H Frame Counter */
++	u32 fmbm_ofdc;		/* O/H Frames Discard Counter */
++	u32 fmbm_ofledc;	/* O/H Frames Length Error Discard Counter */
++	u32 fmbm_ofufdc;	/* O/H Frames Unsupported Format Discard Cntr */
++	u32 fmbm_offc;		/* O/H Filter Frames Counter */
++	u32 fmbm_ofwdc;		/* O/H Frames WRED Discard Counter */
++	u32 fmbm_ofldec;	/* O/H Frames List DMA Error Counter */
++	u32 fmbm_obdc;		/* O/H Buffers Deallocate Counter */
++	u32 fmbm_oodc;		/* O/H Out of Buffers Discard Counter */
++	u32 fmbm_opec;		/* O/H Prepare to Enqueue Counter */
++	u32 reserved022c[0x15]; /* (0x22C-0x27F) */
++	u32 fmbm_opc;		/* O/H Performance Counters */
++	u32 fmbm_opcp;		/* O/H Performance Count Parameters */
++	u32 fmbm_occn;		/* O/H Cycle Counter */
++	u32 fmbm_otuc;		/* O/H Tasks Utilization Counter */
++	u32 fmbm_oduc;		/* O/H DMA Utilization Counter */
++	u32 fmbm_ofuc;		/* O/H FIFO Utilization Counter */
++	u32 reserved0298[0x1a]; /* (0x298-0x2FF) */
++	u32 fmbm_odcfg[0x3];	/* O/H Debug Configuration */
++	u32 fmbm_ogpr;		/* O/H General Purpose Register */
++	u32 reserved0310[0x3c]; /* (0x310-0x3FF) */
++};
++
+ /* BMI port register map */
+ union fman_port_bmi_regs {
+ 	struct fman_port_rx_bmi_regs rx;
+ 	struct fman_port_tx_bmi_regs tx;
++	struct fman_port_oh_bmi_regs oh;
+ };
+ 
+ /* QMI port register map */
+@@ -425,6 +495,7 @@
+ struct fman_port {
+ 	void *fm;
+ 	struct list_head node;		/* fman_port_active_list (0115) */
++	bool active_list_added;	/* guards list_add_tail() idempotency (0181) */
+ 	u32 ctrl_params_page;	/* FM_CTL params page MURAM off (0116) */
+ 	struct device *dev;
+ 	struct fman_rev_info rev_info;
+@@ -608,6 +679,107 @@
+ 	return 0;
+ }
+ 
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1): O/H equivalent of init_bmi_rx()/
++ * init_bmi_tx(), implementing RM 5.5.7.6 "Initialization Steps for Offline
++ * Ports" steps 1-8 (DMA attrs, internal-context params, dequeue/parser/
++ * frame next-engine, frame command attrs, FQID/EFQID, discard/error masks,
++ * enqueue next-engine). Steps 9-12 (rate limiter, congestion-group map,
++ * continuous-mode next-engine, stats counters) are all RM-documented as
++ * optional ("if desired"/"if necessary") and left at hardware reset (0) --
++ * not needed for the de-risk build. Step 13 (FMBM_OCFG[EN]) is
++ * DELIBERATELY NOT done here: this function leaves the port fully
++ * configured but disabled, matching this project's established
++ * dormant-until-armed pattern (fman_port_use_kg_hash() is likewise called
++ * separately from fman_port_init(), not from init_bmi_rx()). See
++ * fman_port_oh_enable() for the explicit arm step.
++ *
++ * FMBM_OFPNE (parser's own next engine) is set to plain BMI-enqueue here,
++ * the same safe default init_bmi_rx() gives fmbm_rfpne before
++ * fman_port_use_kg_hash() flips it to KeyGen -- the O/H equivalent flip
++ * (to KeyGen + CC-tree dispatch) is fman_port_set_oh_cc_base(), called
++ * only once a real CC tree exists, not from here.
++ */
++static int init_bmi_oh(struct fman_port *port)
++{
++	struct fman_port_oh_bmi_regs __iomem *regs = &port->bmi_regs->oh;
++	struct fman_port_cfg *cfg = port->cfg;
++	u32 tmp;
++
++	/* DMA attributes (step 1) */
++	tmp = (u32)cfg->dma_swap_data << BMI_DMA_ATTR_SWP_SHIFT;
++	tmp |= BMI_DMA_ATTR_WRITE_OPTIMIZE;
++	iowrite32be(tmp, &regs->fmbm_oda);
++
++	/* Internal context parameters (step 2) */
++	tmp = ((cfg->int_context.ext_buf_offset / PORT_IC_OFFSET_UNITS) &
++		BMI_IC_TO_EXT_MASK) << BMI_IC_TO_EXT_SHIFT;
++	tmp |= ((cfg->int_context.int_context_offset / PORT_IC_OFFSET_UNITS) &
++		BMI_IC_FROM_INT_MASK) << BMI_IC_FROM_INT_SHIFT;
++	tmp |= (cfg->int_context.size / PORT_IC_OFFSET_UNITS) &
++		BMI_IC_SIZE_MASK;
++	iowrite32be(tmp, &regs->fmbm_oicp);
++
++	/* Internal buffer offset margin (mirrors init_bmi_rx()'s fmbm_rim) */
++	tmp = ((cfg->int_buf_start_margin / PORT_IC_OFFSET_UNITS) &
++		BMI_INT_BUF_MARG_MASK) << BMI_INT_BUF_MARG_SHIFT;
++	iowrite32be(tmp, &regs->fmbm_oim);
++
++	/* Dequeue next engine (step 3): BMI kicks off via QMI dequeue */
++	iowrite32be(NIA_ENG_QMI_DEQ, &regs->fmbm_ofdne);
++
++	/* Frame next engine (step 4): once BMI has the fetched frame,
++	 * hand to the hard parser.
++	 */
++	iowrite32be(NIA_ENG_HWP, &regs->fmbm_ofne);
++
++	/* Frame command attributes (step 4). No MR bits: TX's own
++	 * BMI_CMD_TX_MR_DEF is 0 and O/H's confirmation semantics are
++	 * TX-like (see init_qmi()'s FMQM_OnEN comment) -- only order +
++	 * sync, matching what classification ordering needs.
++	 */
++	tmp = BMI_CMD_ATTR_ORDER;
++	tmp |= (u32)cfg->color << BMI_CMD_ATTR_COLOR_SHIFT;
++	tmp |= BMI_CMD_ATTR_SYNC;
++	iowrite32be(tmp, &regs->fmbm_ofca);
++
++	/* Parser next engine (step 5): plain enqueue until a CC tree is
++	 * armed via fman_port_set_oh_cc_base() -- see function comment.
++	 */
++	iowrite32be(NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME, &regs->fmbm_ofpne);
++
++	/* Default/error queues (step 6) */
++	iowrite32be((cfg->dflt_fqid & DFLT_FQ_ID), &regs->fmbm_ofqid);
++	iowrite32be((cfg->err_fqid & DFLT_FQ_ID), &regs->fmbm_oefqid);
++
++	/* Discard/error masks (step 7) -- permissive (0) for the de-risk
++	 * build; O/H has no set_rx_dflt_cfg()-style discard_mask source.
++	 */
++	iowrite32be(cfg->discard_mask, &regs->fmbm_ofsdm);
++	iowrite32be(cfg->err_mask, &regs->fmbm_ofsem);
++
++	/* Enqueue next engine (step 8) */
++	iowrite32be(NIA_ENG_QMI_ENQ | NIA_ORDER_RESTOR, &regs->fmbm_ofene);
++
++	return 0;
++}
++
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1): explicit FMBM_OCFG[EN] arm/disarm
++ * (RM 5.5.7.6 step 13), kept separate from init_bmi_oh() -- see that
++ * function's comment. Returns -EINVAL on a NULL or non-O/H port.
++ */
++int fman_port_oh_enable(struct fman_port *port, bool enable)
++{
++	if (!port || port->port_type != FMAN_PORT_TYPE_OH)
++		return -EINVAL;
++
++	iowrite32be(enable ? BMI_PORT_CFG_EN : 0,
++		    &port->bmi_regs->oh.fmbm_ocfg);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_oh_enable);
++
+ static int init_qmi(struct fman_port *port)
+ {
+ 	struct fman_port_qmi_regs __iomem *regs = port->qmi_regs;
+@@ -630,6 +802,27 @@
+ 		iowrite32be(NIA_ENG_BMI | NIA_BMI_AC_TX, &regs->fmqm_pndn);
+ 	}
+ 
++	/*
++	 * ASK2 OH-port re-enqueue infra (dpaa1): O/H QMI configuration.
++	 * Dequeue NIA (RM 5.5.7.6 step 3, "set QMI dequeue as the next
++	 * module in FMBM_OFDNE") is the BMI-side half, written by
++	 * init_bmi_oh(); this is the QMI-side half -- once QMI has
++	 * dequeued a frame it hands back to BMI to fetch it (mirrors the
++	 * RM's "fetch frame and execute" host-command action code, already
++	 * defined as NIA_BMI_AC_FETCH_ALL_FRAME 0x20c and otherwise unused
++	 * in this driver). Enqueue NIA uses the same release semantics as
++	 * the RX branch above (an O/H port's incoming buffer, like RX's,
++	 * needs releasing back to BM once processing completes) rather
++	 * than TX's wire-confirmation-oriented release -- least-certain
++	 * field in this bring-up; revisit if BMan pool behaviour under
++	 * sustained OH traffic suggests otherwise.
++	 */
++	if (port->port_type == FMAN_PORT_TYPE_OH) {
++		iowrite32be(NIA_ENG_BMI | NIA_BMI_AC_RELEASE, &regs->fmqm_pnen);
++		iowrite32be(NIA_ENG_BMI | NIA_BMI_AC_FETCH_ALL_FRAME,
++			    &regs->fmqm_pndn);
++	}
++
+ 	/* Dequeue Configuration register */
+ 	tmp = 0;
+ 	if (cfg->deq_high_priority)
+@@ -731,6 +924,26 @@
+ 	case FMAN_PORT_TYPE_TX:
+ 		err = init_bmi_tx(port);
+ 		break;
++	case FMAN_PORT_TYPE_OH:
++		/*
++		 * ASK2 OH-port re-enqueue infra (dpaa1): deliberately no
++		 * init_hwp() call here, matching TX (RX is the only type
++		 * that calls it). Two independent reasons: (1) the RM's
++		 * O/H init steps (5.5.7.6) never mention per-port parser
++		 * HXS/PMDA/LCV setup at all -- only "set hard parser as
++		 * next module in FMBM_OFNE", which init_bmi_oh() already
++		 * does; (2) this project's own IPv6 dual-port-engage
++		 * investigation (2026-08-19/20) left open whether the hard
++		 * parser's PCAC stop/start is genuinely per-port or a
++		 * shared physical block across all ports -- init_hwp()
++		 * brackets its PMDA writes with a PCAC stop/start, and
++		 * calling that for a new O/H port while eth3/eth4 carry
++		 * live traffic is exactly the untested cross-port
++		 * interaction that investigation flagged as a real wedge
++		 * risk. Skip it; nothing in the O/H bring-up needs it.
++		 */
++		err = init_bmi_oh(port);
++		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -830,8 +1043,24 @@
+ {
+ 	u32 min_fifo_size_required = 0, opt_fifo_size_for_b2b = 0;
+ 
+-	/* TX Ports */
+-	if (port->port_type == FMAN_PORT_TYPE_TX) {
++	/*
++	 * TX Ports. ASK2 OH-port re-enqueue infra (dpaa1) also takes this
++	 * branch, not RX's. Board-tested 2026-09-01 on .185: this upstream
++	 * function only ever handled TX/RX, so both sums stayed 0 for O/H,
++	 * tripping the WARN_ON below on every bringup call. Harmless --
++	 * fifo_bufs.num is never negative, so the dev_dbg verification a
++	 * few lines down was a silent no-op either way -- but noisy, and
++	 * worth fixing properly since O/H is architecturally closer to TX
++	 * here. Both are QMI-dequeue-driven: FMBM_OFDNE and FMBM_TFDNE both
++	 * use NIA_ENG_QMI_DEQ, see init_bmi_oh(). Every field this formula
++	 * reads is already populated generically for O/H: max_frame_length
++	 * and cfg->tx_fifo_deq_pipeline_depth by set_dflt_cfg() for every
++	 * port type, unconditionally; port_speed is simply 0 for O/H, which
++	 * only changes which b2b-margin constant applies below, not
++	 * correctness.
++	 */
++	if (port->port_type == FMAN_PORT_TYPE_TX ||
++	    port->port_type == FMAN_PORT_TYPE_OH) {
+ 		min_fifo_size_required = (u32)
+ 		    (roundup(port->max_frame_length,
+ 			     FMAN_BMI_FIFO_UNITS) + (3 * FMAN_BMI_FIFO_UNITS));
+@@ -1208,6 +1437,16 @@
+ 		default:
+ 			return 0;
+ 		}
++	case FMAN_PORT_TYPE_OH:
++		/*
++		 * ASK2 OH-port re-enqueue infra (dpaa1): O/H ports have no
++		 * link speed, so the RX/TX speed switch above doesn't apply.
++		 * Modest, conservative fixed budget for a de-risk build --
++		 * matches this rev's RX 1G-class task count (get_dflt_num_of_
++		 * open_dmas/fifo_bufs below use the same reasoning). Revisit
++		 * once real OH throughput needs are known.
++		 */
++		return 4;
+ 	default:
+ 		return 0;
+ 	}
+@@ -1252,6 +1491,11 @@
+ 			else
+ 				val = 2;
+ 			break;
++		case FMAN_PORT_TYPE_OH:
++			/* ASK2 OH-port re-enqueue infra (dpaa1): see
++			 * get_dflt_num_of_tasks() above. */
++			val = 2;
++			break;
+ 		default:
+ 			return 0;
+ 		}
+@@ -1311,6 +1555,11 @@
+ 			else
+ 				val = 50;
+ 			break;
++		case FMAN_PORT_TYPE_OH:
++			/* ASK2 OH-port re-enqueue infra (dpaa1): see
++			 * get_dflt_num_of_tasks() above. */
++			val = 50;
++			break;
+ 		default:
+ 			val = 0;
+ 		}
+@@ -1408,6 +1657,28 @@
+ 	port->cfg->deq_high_priority = true;
+ }
+ 
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1): O/H equivalent of
++ * set_tx_dflt_cfg() -- deliberately mirrors it field-for-field rather
++ * than introducing a new union member, since union fman_port_specific_params
++ * already names its non-RX member generically (non_rx_params) and TX is its
++ * only current user. deq_sp/deq_high_priority are what init_qmi()'s generic
++ * (non-RX) tail needs to program FMQM_OnDC; dflt_fqid/err_fqid feed
++ * FMBM_OFQID/FMBM_OEFQID (RM 5.5.7.6 step 6) via init_bmi_oh().
++ */
++static void set_oh_dflt_cfg(struct fman_port *port,
++			    struct fman_port_params *port_params,
++			    struct fman_port_dts_params *dts_params)
++{
++	port->cfg->err_fqid =
++		port_params->specific_params.non_rx_params.err_fqid;
++	port->cfg->deq_sp =
++		(u8)(dts_params->qman_channel_id & QMI_DEQ_CFG_SUBPORTAL_MASK);
++	port->cfg->dflt_fqid =
++		port_params->specific_params.non_rx_params.dflt_fqid;
++	port->cfg->deq_high_priority = true;
++}
++
+ /**
+  * fman_port_config
+  * @port:	Pointer to the port structure
+@@ -1455,6 +1726,13 @@
+ 		fallthrough;
+ 	default:
+ 		set_dflt_cfg(port, params);
++		break;
++	case FMAN_PORT_TYPE_OH:
++		/* ASK2 OH-port re-enqueue infra (dpaa1): own dflt_fqid/
++		 * err_fqid/deq_sp source (not TX's), then the same generic
++		 * tail as every other type. */
++		set_oh_dflt_cfg(port, params, &port->dts_params);
++		set_dflt_cfg(port, params);
+ 	}
+ 
+ 	/* Continue with other parameters */
+@@ -1564,6 +1842,32 @@
+ EXPORT_SYMBOL_GPL(fman_port_lookup_rx);
+ 
+ /*
++ * fman_port_lookup_oh() -- mirrors fman_port_lookup_rx() (0115) for O/H
++ * ports. ASK2 OH-port re-enqueue infra (dpaa1): lets a later bring-up path
++ * resolve the live struct fman_port for (fman, hw O/H port id) once
++ * fman_port_probe() has registered it -- the same active-port registry, no
++ * new bookkeeping. Returns NULL if the port never probed successfully
++ * (e.g. fman_get_qman_channel_id() found no channel for that hw id) or
++ * hasn't reached fman_port_init() yet.
++ */
++struct fman_port *fman_port_lookup_oh(struct fman *fm, u8 port_id)
++{
++	struct fman_port *p, *found = NULL;
++
++	mutex_lock(&fman_port_active_lock);
++	list_for_each_entry(p, &fman_port_active_list, node) {
++		if (p->fm == fm && p->port_id == port_id &&
++		    p->port_type == FMAN_PORT_TYPE_OH) {
++			found = p;
++			break;
++		}
++	}
++	mutex_unlock(&fman_port_active_lock);
++	return found;
++}
++EXPORT_SYMBOL_GPL(fman_port_lookup_oh);
++
++/*
+  * fman_port_set_silicon_hit_release_all -- TX bypass on all TX ports
+  *
+  * Iterates fman_port_active_list, finds TX ports for this fman,
+@@ -1661,6 +1965,43 @@
+ }
+ EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
+ 
++/**
++ * fman_port_set_oh_cc_base() - arm/disarm an O/H port's CC-tree dispatch
++ * @port: the FMan O/H port
++ * @cc_muram_off: the RAW MURAM byte offset of the CC tree root (same
++ *	  convention as fman_port_set_cc_base()), or 0 to disarm
++ *
++ * ASK2 OH-port re-enqueue infra (dpaa1): O/H equivalent of
++ * fman_port_set_cc_base(), but combines what RX splits across two calls
++ * (fman_port_use_kg_hash() flips fmbm_rfpne to KeyGen, then
++ * fman_port_set_cc_base() ORs in NIA_KG_CC_EN) into one, since O/H has no
++ * existing fman_port_use_kg_hash()-equivalent precedent to reuse and only
++ * this one caller: init_bmi_oh() leaves fmbm_ofpne at plain BMI-enqueue
++ * (NIA_ENG_BMI|NIA_BMI_AC_ENQ_FRAME), and this function is what flips it to
++ * NIA_ENG_HWK|NIA_KG_CC_EN when arming a real CC tree (or back on disarm) --
++ * unconditionally, not via the RMW guard fman_port_set_cc_base() uses,
++ * since there's no third fmbm_ofpne state to preserve here.
++ *
++ * Returns 0 on success, -EINVAL on a NULL or non-O/H port.
++ */
++int fman_port_set_oh_cc_base(struct fman_port *port, u32 cc_muram_off)
++{
++	if (!port || port->port_type != FMAN_PORT_TYPE_OH)
++		return -EINVAL;
++
++	iowrite32be(cc_muram_off, &port->bmi_regs->oh.fmbm_occb);
++
++	iowrite32be(cc_muram_off ? (NIA_ENG_HWK | NIA_KG_CC_EN) :
++				  (NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME),
++		    &port->bmi_regs->oh.fmbm_ofpne);
++
++	dev_info(port->dev,
++		 "fman_port: O/H coarse-classification base set to MURAM off 0x%x\n",
++		 cc_muram_off);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_oh_cc_base);
++
+ /* fman_port_set_silicon_hit_release_mode -- toggle TX confirm bypass */
+ int fman_port_set_silicon_hit_release_mode(struct fman_port *port, bool enable)
+ {
+@@ -1851,7 +2192,10 @@
+ 	port->cfg = NULL;
+ 
+ 	mutex_lock(&fman_port_active_lock);
+-	list_add_tail(&port->node, &fman_port_active_list);
++	if (!port->active_list_added) {
++		list_add_tail(&port->node, &fman_port_active_list);
++		port->active_list_added = true;
++	}
+ 	mutex_unlock(&fman_port_active_lock);
+ 
+ 	return 0;
+@@ -2216,6 +2560,20 @@
+ 			port_speed = 1000;
+ 		port_type = FMAN_PORT_TYPE_RX;
+ 
++	} else if (of_device_is_compatible(port_node, "fsl,fman-v3-port-oh")) {
++		/*
++		 * O/H port: no MAC, no link speed (RM 5.3.1). ASK2 OH-port
++		 * re-enqueue infra (dpaa1) -- probe only creates the
++		 * fman_port object and maps its BMI/QMI/HWP register window;
++		 * no register is written here (see fman_port_probe() below,
++		 * unchanged for this branch). The FMBM_OCFG[EN] bring-up
++		 * sequence (RM 5.5.7.6, 13 steps) is a separate, later
++		 * increment -- this port stays completely inert until that
++		 * lands and is explicitly armed.
++		 */
++		port_type = FMAN_PORT_TYPE_OH;
++		port_speed = 0;
++
+ 	}  else {
+ 		dev_err(port->dev, "%s: Illegal port type\n", __func__);
+ 		err = -EINVAL;
+@@ -2225,7 +2583,7 @@
+ 	port->dts_params.type = port_type;
+ 	port->dts_params.speed = port_speed;
+ 
+-	if (port_type == FMAN_PORT_TYPE_TX) {
++	if (port_type == FMAN_PORT_TYPE_TX || port_type == FMAN_PORT_TYPE_OH) {
+ 		u32 qman_channel_id;
+ 
+ 		qman_channel_id = fman_get_qman_channel_id(fman, port_id);
+@@ -2266,6 +2624,40 @@
+ 
+ 	dev_set_drvdata(&of_dev->dev, port);
+ 
++	/*
++	 * ASK2 OH-port re-enqueue infra (dpaa1): RX/TX ports join the
++	 * active-port registry (0115, fman_port_active_list) inside
++	 * fman_port_init(), once a netdev consumer has driven them through
++	 * fman_port_config()+fman_port_init(). O/H ports have no such
++	 * consumer -- nothing else will ever call config()/init() for one,
++	 * a debugfs/production caller has to find it FIRST in order to do
++	 * so. Register here at probe time instead, so a probed-but-not-yet-
++	 * brought-up O/H port is still discoverable.
++	 *
++	 * 0181 fix: a "bringup" debugfs call later drives this SAME port
++	 * object through fman_port_config()+fman_port_init(), and
++	 * fman_port_init() unconditionally did its own list_add_tail() (the
++	 * original 0115 RX/TX registration point) with no check for an
++	 * already-linked node. Since port->node is never INIT_LIST_HEAD'd
++	 * (kzalloc leaves ->next/->prev NULL, so list_empty() can't be used
++	 * as the guard), a second list_add_tail() on the same node spliced
++	 * it into fman_port_active_list a second time without unlinking the
++	 * first, corrupting the shared list for EVERY port on the fman
++	 * (silently breaks fman_port_lookup_rx() for real RX ports, e.g.
++	 * ENODEV from fman_cc_tree_install() on a completely unrelated
++	 * physical port -- board-found 2026-09-01 chasing an unrelated VLAN
++	 * offload bug report). port->active_list_added now guards both call
++	 * sites so the node is linked at most once regardless of order.
++	 */
++	if (port_type == FMAN_PORT_TYPE_OH) {
++		mutex_lock(&fman_port_active_lock);
++		if (!port->active_list_added) {
++			list_add_tail(&port->node, &fman_port_active_list);
++			port->active_list_added = true;
++		}
++		mutex_unlock(&fman_port_active_lock);
++	}
++
+ 	return 0;
+ 
+ put_device:
+@@ -2277,11 +2669,558 @@
+ 	return err;
+ }
+ 
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1c/1d de-risk tool:
++ * /sys/kernel/debug/fman_port_oh_test/bringup -- hand-arm the ONE call that
++ * exercises phase 1b's dormant code (init_bmi_oh()/set_oh_dflt_cfg()/the
++ * fman_set_port_params() mac_mfl fix) on real silicon for the first time,
++ * decomposed as its own smallest-possible step: fman_port_config()+
++ * fman_port_init() only. FMBM_OCFG[EN] is NOT touched here (stays 0, see
++ * fman_port_oh_enable()) -- a misconfigured-but-disabled port's registers
++ * take no effect, so this step alone is provably as safe as writing static
++ * config to a private per-port page can be, before anything is armed.
++ *
++ * Self-contained in this module rather than routed through fman_pcd.c's
++ * existing per-FMan debugfs tree (cc_test etc.): deliberate choice after
++ * finding this project's own local kernel-source build cache had drifted
++ * into an inconsistent state for those files (unrelated to O/H work) --
++ * a top-level debugfs node here has zero dependency on that tree's exact
++ * current shape.
++ *
++ * Write "bringup <hw_port_id> [target_fqid_hex]" (decimal port id, e.g.
++ * "bringup 4" for hw port 0x04; optional target_fqid_hex feeds
++ * cfg->dflt_fqid/err_fqid -- FMBM_OFQID/FMBM_OEFQID, RM 5.5.7.6 step 6 --
++ * the port's fallback egress once FMBM_OCFG[EN] is later set; omit or 0 for
++ * a dry-run config-only pass with no real target). Do not write it twice
++ * for the same port without a reboot -- fman_port_config() unconditionally
++ * kzalloc's a fresh port->cfg with no double-call guard, so a second call
++ * leaks the first allocation (a few hundred bytes; harmless to hardware,
++ * just untidy) rather than doing anything unsafe.
++ *
++ * Board-tested 2026-09-01 (0178/0179): "bringup 4" with no target_fqid
++ * succeeds cleanly, config()+init() both return 0, no warnings.
++ *
++ * Write "enable <hw_port_id> <0|1>" to call fman_port_oh_enable()
++ * (FMBM_OCFG[EN], RM step 13) -- only meaningful AFTER a successful
++ * "bringup" for the same port (bmi_regs is NULL before fman_port_config()
++ * has run; guarded below by requiring the port to already be registered
++ * with non-NULL bmi_regs, not just probed).
++ */
++static struct fman_port *fman_port_oh_test_lookup(u8 port_id, bool require_configured)
++{
++	struct fman_port *p, *found = NULL;
++
++	mutex_lock(&fman_port_active_lock);
++	list_for_each_entry(p, &fman_port_active_list, node) {
++		if (p->dts_params.id != port_id ||
++		    p->dts_params.type != FMAN_PORT_TYPE_OH)
++			continue;
++		if (require_configured && !p->bmi_regs)
++			continue;
++		found = p;
++		break;
++	}
++	mutex_unlock(&fman_port_active_lock);
++	return found;
++}
++
++static ssize_t fman_port_oh_test_bringup(const char *kbuf, u8 port_id)
++{
++	struct fman_port *port;
++	struct fman_port_params params;
++	u32 fqid = 0;
++	u8 unused_id;
++	int err;
++
++	/* kernel vsscanf doesn't support '%*' assignment suppression with
++	 * the 'hh' length modifier, so re-parse port_id into a throwaway
++	 * rather than skip it. */
++	sscanf(kbuf, "bringup %hhu %x", &unused_id, &fqid);
++
++	port = fman_port_oh_test_lookup(port_id, false);
++	if (!port) {
++		pr_err("fman_port: oh_test bringup 0x%02x: no such O/H port (never probed?)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	memset(&params, 0, sizeof(params));
++	params.specific_params.non_rx_params.dflt_fqid = fqid;
++	params.specific_params.non_rx_params.err_fqid = fqid;
++	err = fman_port_config(port, &params);
++	if (err) {
++		pr_err("fman_port: oh_test bringup 0x%02x: fman_port_config() = %d\n",
++		       port_id, err);
++		return err;
++	}
++	err = fman_port_init(port);
++	if (err) {
++		pr_err("fman_port: oh_test bringup 0x%02x: fman_port_init() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	pr_info("fman_port: oh_test bringup 0x%02x OK, target_fqid=0x%x (FMBM_OCFG[EN] still 0 -- see enable)\n",
++		port_id, fqid);
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_enable(u8 port_id, unsigned int on)
++{
++	struct fman_port *port;
++	int err;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test enable 0x%02x: not configured yet (run bringup first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	err = fman_port_oh_enable(port, !!on);
++	if (err) {
++		pr_err("fman_port: oh_test enable 0x%02x: fman_port_oh_enable() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	pr_info("fman_port: oh_test enable 0x%02x: FMBM_OCFG[EN]=%u\n", port_id, !!on);
++	return 0;
++}
++
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1e: one QMan FQ slot per
++ * O/H hw port id (0x2-0x7). See fman_port_oh_test_sched_fq()/unsched_fq().
++ */
++static struct {
++	struct qman_fq fq;
++	u32 fqid;
++	bool ready;
++} fman_port_oh_input_fq[8];
++
++static ssize_t fman_port_oh_test_sched_fq(u8 port_id)
++{
++	struct fman_port *port;
++	struct qm_mcc_initfq initfq;
++	u32 channel, fqid;
++	int err;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++	if (fman_port_oh_input_fq[port_id].ready)
++		return -EBUSY;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test sched_fq 0x%02x: not configured yet (run bringup first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	channel = fman_port_get_qman_channel_id(port);
++	if (!channel) {
++		pr_err("fman_port: oh_test sched_fq 0x%02x: no qman channel id\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	err = qman_alloc_fqid(&fqid);
++	if (err) {
++		pr_err("fman_port: oh_test sched_fq 0x%02x: qman_alloc_fqid() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	memset(&fman_port_oh_input_fq[port_id].fq, 0,
++	       sizeof(fman_port_oh_input_fq[port_id].fq));
++	fman_port_oh_input_fq[port_id].fq.fqid = fqid;
++	err = qman_create_fq(fqid, QMAN_FQ_FLAG_TO_DCPORTAL,
++			      &fman_port_oh_input_fq[port_id].fq);
++	if (err) {
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test sched_fq 0x%02x: qman_create_fq(0x%x) = %d\n",
++		       port_id, fqid, err);
++		return err;
++	}
++
++	memset(&initfq, 0, sizeof(initfq));
++	initfq.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ);
++	initfq.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
++	qm_fqd_set_destwq(&initfq.fqd, channel, 0);
++	err = qman_init_fq(&fman_port_oh_input_fq[port_id].fq,
++			    QMAN_INITFQ_FLAG_SCHED, &initfq);
++	if (err) {
++		qman_destroy_fq(&fman_port_oh_input_fq[port_id].fq);
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test sched_fq 0x%02x: qman_init_fq(0x%x) ch=0x%x = %d\n",
++		       port_id, fqid, channel, err);
++		return err;
++	}
++
++	fman_port_oh_input_fq[port_id].fqid = fqid;
++	fman_port_oh_input_fq[port_id].ready = true;
++	pr_info("fman_port: oh_test sched_fq 0x%02x OK, input fqid=0x%x ch=0x%x\n",
++		port_id, fqid, channel);
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_unsched_fq(u8 port_id)
++{
++	u32 fqid;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++	if (!fman_port_oh_input_fq[port_id].ready)
++		return -ENODEV;
++
++	fqid = fman_port_oh_input_fq[port_id].fqid;
++	qman_destroy_fq(&fman_port_oh_input_fq[port_id].fq);
++	qman_release_fqid(fqid);
++	fman_port_oh_input_fq[port_id].ready = false;
++	pr_info("fman_port: oh_test unsched_fq 0x%02x: input fqid=0x%x released\n",
++		port_id, fqid);
++	return 0;
++}
++
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1f: close the loop on
++ * phase 1e's input FQ with an actual frame. Two new verbs:
++ *
++ * "capture_init" / "capture_fini" -- create/destroy ONE software-owned
++ * sink FQ (QMAN_FQ_FLAG_NO_ENQUEUE, scheduled on this CPU's own software
++ * portal channel via qman_affine_channel(), with a dqrr callback that
++ * just logs arrivals) completely decoupled from dpaa_eth's own RX FQs.
++ * Deliberately NOT reusing eth3/eth4's live kernel RX default FQID
++ * (0x200/0x300) as the observation point: dpaa_eth's RX handler expects
++ * every buffer arriving on its own FQs to carry its own private
++ * per-buffer bookkeeping (struct dpaa_eth_swbp etc.) at a fixed
++ * dpaa_bp-registered headroom -- handing it a foreign, hand-rolled
++ * buffer from this debug tool would misinterpret that region as driver
++ * state. A fully separate, software-only sink FQ has no such contract:
++ * this file owns 100% of the interpretation of whatever lands in it.
++ *
++ * "inject <hw_port_id>" -- build one minimal frame in a DMA-mapped
++ * buffer and qman_enqueue() it into that port's phase-1e input FQ.
++ * Requires sched_fq to have already run for the port. Does NOT require
++ * capture_init to have run first, but the injected frame's disposition
++ * (dflt_fqid/err_fqid, set by "bringup <port> [target_fqid_hex]") only
++ * lands somewhere observable if capture_init's printed sink fqid was
++ * passed as bringup's target_fqid_hex -- see this patch's commit
++ * message for the full board-test sequence.
++ */
++#define FMAN_PORT_OH_TEST_BPID_INV 0xff
++
++static struct {
++	struct qman_fq fq;
++	u32 fqid;
++	bool ready;
++	atomic_t rx_count;
++} fman_port_oh_capture;
++
++static enum qman_cb_dqrr_result
++fman_port_oh_capture_dqrr(struct qman_portal *portal, struct qman_fq *fq,
++			  const struct qm_dqrr_entry *dqrr, bool sched_napi)
++{
++	const struct qm_fd *fd = &dqrr->fd;
++	int count = atomic_inc_return(&fman_port_oh_capture.rx_count);
++
++	pr_info("fman_port: oh_test capture: frame #%d fqid=0x%x status=0x%x len=%d addr=0x%llx\n",
++		count, qman_fq_fqid(fq), be32_to_cpu(fd->status),
++		qm_fd_get_length(fd), (unsigned long long)qm_fd_addr(fd));
++	return qman_cb_dqrr_consume;
++}
++
++static ssize_t fman_port_oh_test_capture_init(void)
++{
++	struct qm_mcc_initfq initfq;
++	u32 fqid;
++	int err;
++
++	if (fman_port_oh_capture.ready)
++		return -EBUSY;
++
++	err = qman_alloc_fqid(&fqid);
++	if (err) {
++		pr_err("fman_port: oh_test capture_init: qman_alloc_fqid() = %d\n", err);
++		return err;
++	}
++
++	memset(&fman_port_oh_capture.fq, 0, sizeof(fman_port_oh_capture.fq));
++	fman_port_oh_capture.fq.fqid = fqid;
++	fman_port_oh_capture.fq.cb.dqrr = fman_port_oh_capture_dqrr;
++	err = qman_create_fq(fqid, QMAN_FQ_FLAG_NO_ENQUEUE, &fman_port_oh_capture.fq);
++	if (err) {
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test capture_init: qman_create_fq(0x%x) = %d\n",
++		       fqid, err);
++		return err;
++	}
++
++	memset(&initfq, 0, sizeof(initfq));
++	initfq.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ);
++	initfq.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
++	qm_fqd_set_destwq(&initfq.fqd, qman_affine_channel(raw_smp_processor_id()), 0);
++	err = qman_init_fq(&fman_port_oh_capture.fq, QMAN_INITFQ_FLAG_SCHED, &initfq);
++	if (err) {
++		qman_destroy_fq(&fman_port_oh_capture.fq);
++		qman_release_fqid(fqid);
++		pr_err("fman_port: oh_test capture_init: qman_init_fq(0x%x) = %d\n",
++		       fqid, err);
++		return err;
++	}
++
++	fman_port_oh_capture.fqid = fqid;
++	atomic_set(&fman_port_oh_capture.rx_count, 0);
++	fman_port_oh_capture.ready = true;
++	pr_info("fman_port: oh_test capture_init OK, sink fqid=0x%x\n", fqid);
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_capture_fini(void)
++{
++	u32 fqid;
++	int err;
++
++	if (!fman_port_oh_capture.ready)
++		return -ENODEV;
++
++	fqid = fman_port_oh_capture.fqid;
++	err = qman_retire_fq(&fman_port_oh_capture.fq, NULL);
++	if (err < 0)
++		pr_err("fman_port: oh_test capture_fini: qman_retire_fq(0x%x) = %d\n",
++		       fqid, err);
++	err = qman_oos_fq(&fman_port_oh_capture.fq);
++	if (err < 0)
++		pr_err("fman_port: oh_test capture_fini: qman_oos_fq(0x%x) = %d\n",
++		       fqid, err);
++	qman_destroy_fq(&fman_port_oh_capture.fq);
++	qman_release_fqid(fqid);
++	fman_port_oh_capture.ready = false;
++	pr_info("fman_port: oh_test capture_fini: sink fqid=0x%x released, saw %d frame(s)\n",
++		fqid, atomic_read(&fman_port_oh_capture.rx_count));
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_inject(u8 port_id)
++{
++	struct fman_port *port;
++	struct qm_fd fd;
++	dma_addr_t addr;
++	u8 *buf;
++	size_t len = 64;
++	int err;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++	if (!fman_port_oh_input_fq[port_id].ready) {
++		pr_err("fman_port: oh_test inject 0x%02x: no input FQ (run sched_fq first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port)
++		return -ENODEV;
++
++	/*
++	 * Deliberately leaked: this is a one-shot debug tool with no
++	 * completion signal back to this function, so freeing (or
++	 * dma_unmap'ing) this buffer here -- before the O/H port hardware
++	 * has necessarily finished reading it -- would be a genuine
++	 * use-after-free. A 64-byte leak per "inject" call is the accepted
++	 * cost of a manual, one-frame-at-a-time silicon de-risk tool.
++	 */
++	buf = kzalloc(len, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	/*
++	 * Minimal Ethernet header so the hard parser has something to
++	 * chew on: broadcast dst, dummy locally-administered src,
++	 * EtherType 0x0800 (IPv4). Payload left zeroed. Whether this
++	 * parses clean (-> dflt_fqid) or takes a parser gross-error
++	 * (-> err_fqid) is not the point of this test -- "bringup"'s
++	 * target_fqid_hex should point BOTH at the same capture_init sink
++	 * so either outcome is observable.
++	 */
++	memset(buf, 0xff, 6);
++	buf[6] = 0x02;
++	buf[11] = 0x01;
++	buf[12] = 0x08;
++	buf[13] = 0x00;
++
++	addr = dma_map_single(port->dev, buf, len, DMA_TO_DEVICE);
++	if (dma_mapping_error(port->dev, addr)) {
++		kfree(buf);
++		pr_err("fman_port: oh_test inject 0x%02x: dma_map_single() failed\n",
++		       port_id);
++		return -EIO;
++	}
++
++	qm_fd_clear_fd(&fd);
++	fd.bpid = FMAN_PORT_OH_TEST_BPID_INV;
++	qm_fd_set_contig(&fd, 0, len);
++	qm_fd_addr_set64(&fd, addr);
++
++	err = qman_enqueue(&fman_port_oh_input_fq[port_id].fq, &fd);
++	if (err) {
++		pr_err("fman_port: oh_test inject 0x%02x: qman_enqueue() = %d\n",
++		       port_id, err);
++		return err;
++	}
++
++	pr_info("fman_port: oh_test inject 0x%02x OK, input fqid=0x%x addr=0x%llx len=%zu (watch dmesg for oh_test capture)\n",
++		port_id, fman_port_oh_input_fq[port_id].fqid,
++		(unsigned long long)addr, len);
++	return 0;
++}
++
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1), phase 1g: register + FQ-state
++ * readback, added after phase 1f's "inject" produced a clean NULL result
++ * (qman_enqueue() succeeded but the capture sink never saw the frame, no
++ * wedge). This does not guess at a fix -- it narrows which of three
++ * failure classes actually happened: (a) the O/H port never dequeued the
++ * frame at all (config/EN/channel problem), (b) it dequeued but the
++ * frame vanished downstream (BMI/parser/enqueue problem), or (c) the
++ * "bringup"/"enable"/"sched_fq" register writes did not stick the way
++ * this tool assumes.
++ *
++ * "dump <hw_port_id>" prints:
++ * - a raw readback of the O/H port's own BMI config registers (OCFG,
++ *   OFDNE, OFNE, OFPNE, OFQID, OEFQID, OCCB) -- confirms what's actually
++ *   programmed, not just what "bringup"/"enable" believed they wrote.
++ * - qman_query_fq_np() on the port's phase-1e input FQ (if sched_fq has
++ *   run): frm_cnt/state. If frm_cnt is still 1 after an "inject", the
++ *   O/H port never pulled the frame off its channel at all -- failure
++ *   class (a). If frm_cnt is 0, the port DID dequeue it and the frame
++ *   was lost somewhere after that -- failure class (b).
++ * - the same query on the phase-1f capture sink FQ (if capture_init has
++ *   run), for symmetry (expected empty/0 either way in the NULL-result
++ *   case already observed).
++ */
++static void fman_port_oh_test_dump_fq_np(const char *label, struct qman_fq *fq)
++{
++	struct qm_mcr_queryfq_np np;
++	int err;
++
++	err = qman_query_fq_np(fq, &np);
++	if (err) {
++		pr_info("fman_port: oh_test dump: %s fqid=0x%x query_fq_np() = %d\n",
++			label, qman_fq_fqid(fq), err);
++		return;
++	}
++	pr_info("fman_port: oh_test dump: %s fqid=0x%x state=0x%x frm_cnt=%u byte_cnt=%u\n",
++		label, qman_fq_fqid(fq), np.state, np.frm_cnt & 0xffffffU, np.byte_cnt);
++}
++
++static ssize_t fman_port_oh_test_dump(u8 port_id)
++{
++	struct fman_port *port;
++	struct fman_port_oh_bmi_regs __iomem *regs;
++
++	if (port_id >= ARRAY_SIZE(fman_port_oh_input_fq))
++		return -EINVAL;
++
++	port = fman_port_oh_test_lookup(port_id, true);
++	if (!port) {
++		pr_err("fman_port: oh_test dump 0x%02x: not configured yet (run bringup first)\n",
++		       port_id);
++		return -ENODEV;
++	}
++
++	regs = &port->bmi_regs->oh;
++	pr_info("fman_port: oh_test dump 0x%02x: OCFG=0x%08x OFDNE=0x%08x OFNE=0x%08x OFPNE=0x%08x OFQID=0x%08x OEFQID=0x%08x OCCB=0x%08x\n",
++		port_id,
++		ioread32be(&regs->fmbm_ocfg), ioread32be(&regs->fmbm_ofdne),
++		ioread32be(&regs->fmbm_ofne), ioread32be(&regs->fmbm_ofpne),
++		ioread32be(&regs->fmbm_ofqid), ioread32be(&regs->fmbm_oefqid),
++		ioread32be(&regs->fmbm_occb));
++
++	if (fman_port_oh_input_fq[port_id].ready)
++		fman_port_oh_test_dump_fq_np("input", &fman_port_oh_input_fq[port_id].fq);
++	else
++		pr_info("fman_port: oh_test dump 0x%02x: input FQ not scheduled (run sched_fq)\n",
++			port_id);
++
++	if (fman_port_oh_capture.ready)
++		fman_port_oh_test_dump_fq_np("capture", &fman_port_oh_capture.fq);
++	else
++		pr_info("fman_port: oh_test dump 0x%02x: capture sink not created (run capture_init)\n",
++			port_id);
++
++	return 0;
++}
++
++static ssize_t fman_port_oh_test_write(struct file *file,
++				       const char __user *buf,
++				       size_t count, loff_t *ppos)
++{
++	char kbuf[32];
++	u8 port_id;
++	unsigned int on;
++	ssize_t err;
++
++	if (count == 0 || count >= sizeof(kbuf))
++		return -EINVAL;
++	if (copy_from_user(kbuf, buf, count))
++		return -EFAULT;
++	kbuf[count] = '\0';
++	kbuf[strcspn(kbuf, "\n")] = '\0';
++
++	if (sscanf(kbuf, "bringup %hhu", &port_id) == 1)
++		err = fman_port_oh_test_bringup(kbuf, port_id);
++	else if (sscanf(kbuf, "enable %hhu %u", &port_id, &on) == 2)
++		err = fman_port_oh_test_enable(port_id, on);
++	else if (sscanf(kbuf, "sched_fq %hhu", &port_id) == 1)
++		err = fman_port_oh_test_sched_fq(port_id);
++	else if (sscanf(kbuf, "unsched_fq %hhu", &port_id) == 1)
++		err = fman_port_oh_test_unsched_fq(port_id);
++	else if (strcmp(kbuf, "capture_init") == 0)
++		err = fman_port_oh_test_capture_init();
++	else if (strcmp(kbuf, "capture_fini") == 0)
++		err = fman_port_oh_test_capture_fini();
++	else if (sscanf(kbuf, "inject %hhu", &port_id) == 1)
++		err = fman_port_oh_test_inject(port_id);
++	else if (sscanf(kbuf, "dump %hhu", &port_id) == 1)
++		err = fman_port_oh_test_dump(port_id);
++	else
++		return -EINVAL;
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_port_oh_test_fops = {
++	.owner = THIS_MODULE,
++	.write = fman_port_oh_test_write,
++};
++
++static struct dentry *fman_port_oh_test_dir;
++
++static void fman_port_oh_test_debugfs_init(void)
++{
++	fman_port_oh_test_dir = debugfs_create_dir("fman_port_oh_test", NULL);
++	if (IS_ERR_OR_NULL(fman_port_oh_test_dir)) {
++		fman_port_oh_test_dir = NULL;
++		return;
++	}
++	debugfs_create_file("bringup", 0200, fman_port_oh_test_dir, NULL,
++			    &fman_port_oh_test_fops);
++}
++
+ static const struct of_device_id fman_port_match[] = {
+ 	{.compatible = "fsl,fman-v3-port-rx"},
+ 	{.compatible = "fsl,fman-v2-port-rx"},
+ 	{.compatible = "fsl,fman-v3-port-tx"},
+ 	{.compatible = "fsl,fman-v2-port-tx"},
++	/*
++	 * ASK2 OH-port re-enqueue infra (dpaa1): mainline never bound O/H
++	 * ports (confirmed live 2026-09-01 -- all 6 O/H nodes on this board,
++	 * hw id 0x02-0x07, had no driver attached). This makes them probe
++	 * and register a struct fman_port (inert -- see fman_port_probe()),
++	 * nothing more.
++	 */
++	{.compatible = "fsl,fman-v3-port-oh"},
+ 	{}
+ };
+ 
+@@ -2305,12 +3244,17 @@
+ 	if (err < 0)
+ 		pr_err("Error, platform_driver_register() = %d\n", err);
+ 
++	/* ASK2 OH-port re-enqueue infra (dpaa1): non-fatal if debugfs is
++	 * unavailable, matching fman_pcd.c's own debugfs-root handling. */
++	fman_port_oh_test_debugfs_init();
++
+ 	return err;
+ }
+ module_init(fman_port_load);
+ 
+ static void __exit fman_port_unload(void)
+ {
++	debugfs_remove_recursive(fman_port_oh_test_dir);
+ 	platform_driver_unregister(&fman_port_driver);
+ }
+ module_exit(fman_port_unload);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -171,6 +171,33 @@
+ 
+ struct fman_port *fman_port_lookup_rx(struct fman *fm, u8 port_id);
+ 
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1): mirrors fman_port_lookup_rx() for
++ * O/H ports (FMAN_PORT_TYPE_OH). Returns NULL until the port has both
++ * probed (fsl,fman-v3-port-oh match, fman_port_probe(), patch 0175) AND
++ * been through fman_port_config()+fman_port_init() (patch 0176's
++ * init_bmi_oh()/set_oh_dflt_cfg()) -- neither call site exists yet outside
++ * this driver; the next increment (a cc_test debugfs hand-arm verb) is
++ * what will actually invoke them.
++ */
++struct fman_port *fman_port_lookup_oh(struct fman *fm, u8 port_id);
++
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1): explicit FMBM_OCFG[EN] arm/disarm
++ * (RM 5.5.7.6 step 13), kept separate from fman_port_init() so a port can
++ * be fully configured-but-dormant before traffic reaches it. Returns
++ * -EINVAL on a NULL or non-O/H port.
++ */
++int fman_port_oh_enable(struct fman_port *port, bool enable);
++
++/*
++ * ASK2 OH-port re-enqueue infra (dpaa1): O/H equivalent of
++ * fman_port_set_cc_base(), arming/disarming CC-tree dispatch on an O/H
++ * port's own PCD instance (fmbm_occb + the fmbm_ofpne KeyGen/CC-EN flip).
++ * Returns -EINVAL on a NULL or non-O/H port.
++ */
++int fman_port_set_oh_cc_base(struct fman_port *port, u32 cc_muram_off);
++
+ /* 0116: FM_CTL ctrl-params page (required by CC result-AD NIA AC 0x28) */
+ u32 fman_port_get_params_page(struct fman_port *port);
+ int fman_port_set_params_page(struct fman_port *port, u32 muram_off,
