@@ -1,4 +1,4 @@
-From 053a3221678978de03873742f2cfb703685a0fb9 Mon Sep 17 00:00:00 2001
+From f331d5814aaf244cad69ef4f40caedf54cb0aecb Mon Sep 17 00:00:00 2001
 From: Tomaz Zaman <tomaz@mono.si>
 Date: Tue, 28 Apr 2026 15:11:07 +0200
 Subject: [PATCH] sdk_fman: MAC hash address allocation NULL check
@@ -29,6 +29,8 @@ the box.
 
 Add the NULL check; return E_NO_MEMORY so callers (set_multi loop in
 dpaa_eth) propagate the failure cleanly.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
 ---
  .../net/ethernet/freescale/sdk_fman/Peripherals/FM/MAC/memac.c  | 2 ++
  1 file changed, 2 insertions(+)

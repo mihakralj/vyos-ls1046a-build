@@ -2,8 +2,6 @@
 # Makefile for the Freescale Ethernet controllers
 #
 ccflags-y += -DVERSION=\"\"
-# Keep legacy vendor helpers boxed without churning private declaration scaffolding.
-subdir-ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations
 #
 # Include netcomm SW specific definitions
 include $(srctree)/drivers/net/ethernet/freescale/sdk_fman/ncsw_config.mk

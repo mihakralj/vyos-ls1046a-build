@@ -579,20 +579,6 @@ t_Error FM_MAC_SetPromiscuous (t_Handle h_FmMac, bool newVal)
 
 /* ......................................................................... */
 
-t_Error FM_MAC_SetAllMulti (t_Handle h_FmMac, bool newVal)
-{
-    t_FmMacControllerDriver *p_FmMacControllerDriver = (t_FmMacControllerDriver *)h_FmMac;
-
-    SANITY_CHECK_RETURN_ERROR(p_FmMacControllerDriver, E_INVALID_HANDLE);
-
-    if (p_FmMacControllerDriver->f_FM_MAC_SetAllMulti)
-        return p_FmMacControllerDriver->f_FM_MAC_SetAllMulti(h_FmMac, newVal);
-
-    RETURN_ERROR(MINOR, E_NOT_SUPPORTED, NO_MSG);
-}
-
-/* ......................................................................... */
-
 t_Error FM_MAC_AdjustLink(t_Handle h_FmMac, e_EnetSpeed speed, bool fullDuplex)
 {
     t_FmMacControllerDriver *p_FmMacControllerDriver = (t_FmMacControllerDriver *)h_FmMac;

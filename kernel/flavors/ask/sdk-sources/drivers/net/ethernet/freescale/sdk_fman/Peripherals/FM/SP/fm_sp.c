@@ -441,7 +441,6 @@ t_Handle FM_VSP_Config(t_FmVspParams *p_FmVspParams)
 
    return p_FmVspEntry;
 }
-EXPORT_SYMBOL(FM_VSP_Config);
 
 t_Error FM_VSP_Init(t_Handle h_FmVsp)
 {
@@ -554,7 +553,6 @@ t_Error FM_VSP_Init(t_Handle h_FmVsp)
 
     return E_OK;
 }
-EXPORT_SYMBOL(FM_VSP_Init);
 
 t_Error FM_VSP_Free(t_Handle h_FmVsp)
 {
@@ -563,7 +561,6 @@ t_Error FM_VSP_Free(t_Handle h_FmVsp)
     XX_Free(p_FmVspEntry);
     return E_OK;
 }
-EXPORT_SYMBOL(FM_VSP_Free);
 
 t_Error FM_VSP_ConfigBufferPrefixContent(t_Handle h_FmVsp, t_FmBufferPrefixContent *p_FmBufferPrefixContent)
 {
@@ -579,7 +576,6 @@ t_Error FM_VSP_ConfigBufferPrefixContent(t_Handle h_FmVsp, t_FmBufferPrefixConte
 
     return E_OK;
 }
-EXPORT_SYMBOL(FM_VSP_ConfigBufferPrefixContent);
 
 t_Error FM_VSP_ConfigDmaSwapData(t_Handle h_FmVsp, e_FmDmaSwapOption swapData)
 {
@@ -748,13 +744,3 @@ uint8_t * FM_VSP_GetBufferHashResult(t_Handle h_FmVsp, char *p_Data)
 
     return (uint8_t *)PTR_MOVE(p_Data, p_FmVspEntry->bufferOffsets.hashResultOffset);
 }
-
-uint8_t FM_VSP_GetRelativeProfileId(t_Handle h_FmVsp)
-{
-    t_FmVspEntry *p_FmVspEntry = (t_FmVspEntry*)h_FmVsp;
-
-    SANITY_CHECK_RETURN_VALUE(p_FmVspEntry, E_INVALID_HANDLE, 0);
-    SANITY_CHECK_RETURN_VALUE(!p_FmVspEntry->p_FmVspEntryDriverParams, E_INVALID_STATE, 0);
-    return p_FmVspEntry->relativeProfileId;
-}
-EXPORT_SYMBOL(FM_VSP_GetRelativeProfileId);

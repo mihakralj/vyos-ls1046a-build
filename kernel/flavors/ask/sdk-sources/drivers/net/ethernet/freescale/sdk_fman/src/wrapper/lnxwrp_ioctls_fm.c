@@ -2173,11 +2173,6 @@ invalid_port_id:
 #endif
         case FM_PCD_IOC_HASH_TABLE_GET_MISS_STAT:
         {
-#ifdef USE_ENHANCED_EHASH
-            RETURN_ERROR(MINOR, E_INVALID_SELECTION,
-                ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr: %d.\n",
-                cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
-#else
             ioc_fm_pcd_cc_tbl_get_stats_t param;
 
 #if defined(CONFIG_COMPAT)
@@ -2242,7 +2237,7 @@ invalid_port_id:
                                   sizeof(ioc_fm_pcd_cc_tbl_get_stats_t)))
                     RETURN_ERROR(MINOR, E_READ_FAILED, NO_MSG);
             }
-#endif //USE_ENHANCED_EHASH
+
             break;
         }
 
@@ -2352,11 +2347,6 @@ invalid_port_id:
 #endif
         case FM_PCD_IOC_HASH_TABLE_DELETE:
         {
-#ifdef USE_ENHANCED_EHASH
-            RETURN_ERROR(MINOR, E_INVALID_SELECTION,
-                ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr: %d.\n",
-                cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
-#else
             ioc_fm_obj_t id;
 
             memset(&id, 0, sizeof(ioc_fm_obj_t));
@@ -2379,7 +2369,6 @@ invalid_port_id:
             }
 
             err = FM_PCD_HashTableDelete(id.obj);
-#endif  // USE_ENHANCED_EHASH
             break;
         }
 
@@ -2509,11 +2498,6 @@ invalid_port_id:
 #endif
         case FM_PCD_IOC_HASH_TABLE_REMOVE_KEY:
         {
-#ifdef USE_ENHANCED_EHASH
-            RETURN_ERROR(MINOR, E_INVALID_SELECTION,
-                ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr: %d.\n",
-                cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
-#else
             ioc_fm_pcd_hash_table_remove_key_params_t *param = NULL;
 
             param = (ioc_fm_pcd_hash_table_remove_key_params_t*) XX_Malloc(
@@ -2590,7 +2574,6 @@ invalid_port_id:
             if (param->p_key)
                 XX_Free(param->p_key);
             XX_Free(param);
-#endif // USE_ENHANCED_EHASH
             break;
         }
 
@@ -3396,9 +3379,6 @@ invalid_port_id:
     }
 
         default:
-            /* Silently ignore TTY ioctls - they're not meant for us */
-            if (_IOC_TYPE(cmd) == 'T')
-                return E_OK;
             RETURN_ERROR(MINOR, E_INVALID_SELECTION,
                 ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr: %d.\n",
                 cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
@@ -3668,30 +3648,6 @@ t_Error LnxwrpFmIOCTL(t_LnxWrpFmDev *p_LnxWrpFmDev, unsigned int cmd, unsigned l
 
             if (copy_to_user(param.p_mon, &mon, sizeof(t_FmCtrlMon)))
                 RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
-        }
-        break;
-
-        case FM_IOC_READ_TIMESTAMP:
-        {
-            uint32_t ts;
-
-            ts = FM_ReadTimeStamp(p_LnxWrpFmDev->h_Dev);
-
-            if (copy_to_user((uint32_t *)arg, &ts, sizeof(uint32_t)))
-                err = E_READ_FAILED;
-
-        }
-        break;
-
-        case FM_IOC_GET_TIMESTAMP_INCREMENT:
-        {
-            uint32_t ts_inc;
-
-            ts_inc = FM_GetTimeStampIncrementPerUsec(p_LnxWrpFmDev->h_Dev);
-
-            if (copy_to_user((uint32_t *)arg, &ts_inc, sizeof(uint32_t)))
-                err = E_READ_FAILED;
-
         }
         break;
 

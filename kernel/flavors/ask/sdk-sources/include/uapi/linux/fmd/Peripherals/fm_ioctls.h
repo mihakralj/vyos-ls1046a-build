@@ -606,34 +606,6 @@ typedef struct ioc_fm_ctrl_mon_counters_params_t {
 #endif
 #define FM_IOC_CTRL_MON_GET_COUNTERS                       _IOW(FM_IOC_TYPE_BASE, FM_IOC_NUM(17), ioc_fm_ctrl_mon_counters_params_t)
 
-/**************************************************************************//**
- @Function      FM_ReadTimeStamp
-
- @Description   Reads the FMan engine's timestamp.
-
- @Param[out]    uint32_t                   The indicated engine's timestamp
-
- @Return        E_OK on success; Error code otherwise.
-
- @Cautions      Allowed only following FM_Init().
-*//***************************************************************************/
-#define FM_IOC_READ_TIMESTAMP                              _IOWR(FM_IOC_TYPE_BASE, FM_IOC_NUM(18), uint32_t)
-
-/**************************************************************************//**
- @Function      FM_GetTimeStampIncrementPerUsec
-
- @Description   Provides the value of the FMan engine's timestamp increment
-                per microsecond.
-
- @Param[out]    uint32_t                   The value the timestamp is
-                                           incremented with each microsecond
-
- @Return        E_OK on success; Error code otherwise.
-
- @Cautions      Allowed only following FM_Init().
-*//***************************************************************************/
-#define FM_IOC_GET_TIMESTAMP_INCREMENT                     _IOWR(FM_IOC_TYPE_BASE, FM_IOC_NUM(19), uint32_t)
-
 /** @} */ /* end of lnx_ioctl_FM_runtime_control_grp group */
 /** @} */ /* end of lnx_ioctl_FM_lib_grp group */
 /** @} */ /* end of lnx_ioctl_FM_grp */

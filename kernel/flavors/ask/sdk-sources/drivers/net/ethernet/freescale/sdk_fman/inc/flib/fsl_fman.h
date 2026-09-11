@@ -34,7 +34,6 @@
 #define __FSL_FMAN_H
 
 #include "std_ext.h"
-// AUTO_FIRMWARE_LOAD - used to compile microcode in the driver
 
 struct fman_ext_pool_params {
 	uint8_t                 id;    /**< External buffer pool id */

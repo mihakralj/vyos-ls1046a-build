@@ -148,7 +148,6 @@ static void ceetm_ern(struct qman_portal *portal, struct qman_fq *fq,
 	struct ceetm_class *cls;
 	struct sk_buff *skb;
 
-	printk("%s::\n", __FUNCTION__);
 	ceetm_fq = container_of(fq, struct ceetm_fq, fq);
 	net_dev = ceetm_fq->net_dev;
 	dpa_priv = netdev_priv(net_dev);

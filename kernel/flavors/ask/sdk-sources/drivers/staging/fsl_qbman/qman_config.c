@@ -963,7 +963,6 @@ int qman_sp_enable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal)
 	qm_out(DCP_CFG(portal), dcp_cfg);
 	return 0;
 }
-EXPORT_SYMBOL(qman_sp_enable_ceetm_mode);
 
 int qman_sp_disable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal)
 {
@@ -976,7 +975,6 @@ int qman_sp_disable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal)
 	qm_out(DCP_CFG(portal), dcp_cfg);
 	return 0;
 }
-EXPORT_SYMBOL(qman_sp_disable_ceetm_mode);
 
 int qman_ceetm_get_xsfdr(enum qm_dc_portal portal, unsigned int *num)
 {

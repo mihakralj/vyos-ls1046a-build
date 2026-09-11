@@ -1,5 +1,4 @@
-subdir-ccflags-y := -Werror -Wno-missing-prototypes -Wno-missing-declarations
-KASAN_SANITIZE := n
+subdir-ccflags-y := -Werror
 
 # Include netcomm SW specific definitions
 include $(srctree)/drivers/net/ethernet/freescale/sdk_fman/ncsw_config.mk

@@ -286,9 +286,7 @@ struct fman_port_oh_bmi_regs {
 	uint32_t fmbm_ofwdc;		/**< Rx Frames WRED Discard Counter  */
 	uint32_t fmbm_ofldec;		/**< O/H Frames List DMA Error Cntr */
 	uint32_t fmbm_obdc;		/**< O/H Buffers Deallocate Counter */
-	uint32_t fmbm_oodc;      	/**< O/H Out of Buffers Discard Counter */
-	uint32_t fmbm_opec;      	/**< O/H Prepare to enqueue Counter */
-	uint32_t reserved0218[0x15];	/**< (0x218 - 0x27F) */
+	uint32_t reserved0218[0x17];	/**< (0x218 - 0x27F) */
 	uint32_t fmbm_opc;		/**< O/H Performance Counters  */
 	uint32_t fmbm_opcp;		/**< O/H Performance Count Parameters */
 	uint32_t fmbm_occn;		/**< O/H Cycle Counter  */

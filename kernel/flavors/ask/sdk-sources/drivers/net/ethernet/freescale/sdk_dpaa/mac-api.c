@@ -636,7 +636,6 @@ static void setup_memac(struct mac_device *mac_dev)
 	mac_dev->stop		= stop;
 	mac_dev->set_promisc	= fm_mac_set_promiscuous;
 	mac_dev->change_addr    = fm_mac_modify_mac_addr;
-	mac_dev->set_allmulti	= fm_mac_set_allmulti;
 	mac_dev->set_multi      = set_multi;
 	mac_dev->uninit		= uninit;
 	mac_dev->get_mac_handle		= get_mac_handle;

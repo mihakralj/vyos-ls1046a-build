@@ -45,14 +45,6 @@
 
 #include "fm_pcd.h"
 
-#if (DPAA_VERSION >= 11)
-void get_indexed_hash_bucket(uint8_t key_size,
-                             uint8_t *key_ptr,
-                             uint8_t crc_shift,
-                             uint16_t mask,
-                             uint16_t *bucket_index);
-#endif
-
 
 /***********************************************************************/
 /*          Coarse classification defines                              */
@@ -140,43 +132,6 @@ void get_indexed_hash_bucket(uint8_t key_size,
 #define CC_PC_ILLEGAL                       0xff
 #define CC_SIZE_ILLEGAL                     0
 
-#if (DPAA_VERSION >= 11)
-#define FM_PCD_AD_FE_ENTER_ALLOCATE         0x00800000
-#define FM_PCD_AD_FE_ENTER_OPCODE           0x000000F6
-
-#define FM_PCD_FE_TYPE_MASK           		0x3f000000
-#define FM_PCD_FE_TYPE_HM           		0x01000000
-#define FM_PCD_FE_TYPE_ENQ           		0x02000000
-#define FM_PCD_FE_TYPE_EXIT           		0x03000000
-#define FM_PCD_FE_TYPE_MUX           		0x04000000
-#define FM_PCD_FE_TYPE_TRANSITION      		0x05000000
-#define FM_PCD_FE_TYPE_EXT_HASH      		0x06000000
-
-#define FM_PCD_FE_WS_OFFSET_MASK       		0x0000ffff
-#define FM_PCD_FE_NEXT_FE_ADDR_MASK    		0x00ffffff
-
-#define FM_PCD_FE_T_HM_PAHM         		0x00800000
-
-#define FM_PCD_FE_T_ENQ_MPPN                0x00800000
-#define FM_PCD_FE_T_ENQ_PP         			0x00040000
-#define FM_PCD_FE_T_ENQ_SP         			0x00020000
-#define FM_PCD_FE_T_ENQ_FQID       			0x00010000
-#define FM_PCD_FE_T_ENQ_NIA_MASK   			0x00ffffff
-
-#define FM_PCD_FE_T_EXIT_DEALLOCATE        	0x00800000
-
-#define FM_PCD_FE_T_TRANSITION_DEALLOCATE   0x00800000
-#define FM_PCD_FE_T_TRANSITION_AD_FROM_WS   0x00400000
-
-#define FM_PCD_FE_T_HASH_UPDATE_TS          0x00020000
-#define FM_PCD_FE_T_HASH_UPDATE_STATS       0x00010000
-#define FM_PCD_FE_T_HASH_LIODN_MASK         0x0000003F
-#define FM_PCD_FE_T_HASH_LIODN_SHIFT        56
-#define FM_PCD_FE_T_HASH_ELIODN_MASK        0x000003c0
-#define FM_PCD_FE_T_HASH_ELIODN_SHIFT       38
-
-#endif /* (DPAA_VERSION >= 11) */
-
 #define FM_PCD_CC_KEYS_MATCH_TABLE_ALIGN    16
 #define FM_PCD_CC_AD_TABLE_ALIGN            16
 #define FM_PCD_CC_AD_ENTRY_SIZE             16
@@ -229,40 +184,12 @@ typedef uint32_t ccPrivateInfo_t; /**< private info of CC: */
 #define CC_PRIVATE_INFO_IC_DEQ_FQID_INDEX_LOOKUP   0x10000000
 
 #define CC_BUILD_AGING_MASK(numOfKeys)      ((((1LL << ((numOfKeys) + 1)) - 1)) << (31 - (numOfKeys)))
-
-#define CC_EXT_HASH_BUCKET_SIZE					256
-
 /***********************************************************************/
 /*          Memory map                                                 */
 /***********************************************************************/
 #if defined(__MWERKS__) && !defined(__GNUC__)
 #pragma pack(push,1)
 #endif /* defined(__MWERKS__) && ... */
-
-#if (DPAA_VERSION >= 11)
-typedef _Packed struct t_ExtHashFe {
-    volatile uint32_t misc;
-    volatile uint16_t hashMask;
-    volatile uint8_t contextSize;
-    volatile uint8_t hashShift;
-    volatile uint32_t liodnTableAndTablePtrHi;
-    volatile uint32_t tablePtrLow;
-    volatile uint32_t missResultPtr;
-    volatile uint32_t nextFEPtr;
-    volatile uint32_t missNextFEPtr;
-} _PackedType t_ExtHashFe;
-
-typedef struct
-{
-    volatile uint32_t general;
-    volatile uint32_t maskOffset;
-    volatile uint32_t addrHigh;
-    volatile uint32_t addrLow;
-    volatile uint32_t missResultPointer;
-    volatile uint32_t nextFEPointer;
-    volatile uint32_t missNextFEPointer;
-} t_FEOfTypeHash;
-#endif /* (DPAA_VERSION >= 11) */
 
 typedef struct
 {
@@ -302,32 +229,6 @@ typedef union
 /***********************************************************************/
 /*  Driver's internal structures                                       */
 /***********************************************************************/
-
-#pragma pack(push,1)
-typedef struct
-{
-    uint32_t		next_bucket_addr;
-    uint32_t		prev_last_bucket_ptr;
-    uint8_t			not_last;
-    uint8_t			valid_keys;
-    uint16_t		reserved1[0x3];
-    uint8_t			key_result[0xF0];
-} t_FmExtHashBucket;
-
-typedef struct {
-	uint64_t contex_addr;
-	uint64_t monitoring_addr;
-} t_FmExtHashResult;
-
-#pragma pack(pop)
-
-
-typedef struct
-{
-	uint8_t *bucket_pool_base_ptr;
-	int last_bucket;
-	t_FmExtHashBucket **bucket_stack;
-} t_FmExtHashBucketPool;
 
 typedef struct t_FmPcdStatsObj
 {
@@ -379,7 +280,6 @@ typedef struct
     t_Handle            h_FrmReplicForAdd;
     t_Handle            h_FrmReplicForRmv;
     bool                tree;
-    e_ModifyState   modifyState;
 
     t_FmPcdCcKeyAndNextEngineParams  keyAndNextEngineParams[CC_MAX_NUM_OF_KEYS];
 } t_FmPcdModifyCcKeyAdditionalParams;
@@ -389,37 +289,6 @@ typedef struct
     t_Handle    h_Manip;
     t_Handle    h_CcNode;
 } t_CcNextEngineInfo;
-
-#if (DPAA_VERSION >= 11)
-typedef struct {
-    uint8_t     *p_Context;
-    t_List      node;
-} t_FmPcdCcNodeFEContextObj;
-#define FM_PCD_FE_CONTEXT_OBJ(ptr)  LIST_OBJECT(ptr, t_FmPcdCcNodeFEContextObj, node)
-
-typedef struct
-{
-    bool                allocateBuffer;
-    t_ExtHashFe         *p_FE;
-    t_Handle            h_MissFE;
-    t_ExtHashResult     *p_MissResult;
-    uint8_t             dataMemId;
-    uint16_t            dataLiodnOffset;
-    uintptr_t           missMonitorAddr;
-    bool                drvAllocMissMonitorAddr;
-    t_List              availableContextLst;
-    t_List              usedContextLst;
- 
-	t_FmExtHashBucketPool hash_bucket_pool;
-	t_FmExtHashBucket 	*table_base_ptr;
-	uint16_t 			hash_mask;
-	uint8_t 			hash_size;
-	uint8_t 			crc_shift;
-	uint8_t 			key_size;
-	uint8_t 			aligned_key_size;
-	uint8_t 			max_ways;
-} t_FmPcdCcNodeExtHashInfo;
-#endif /* (DPAA_VERSION >= 11) */
 
 typedef struct
 {
@@ -434,7 +303,6 @@ typedef struct
     uint32_t            countersArraySize;
 
     bool                isHashBucket;               /**< Valid for match table node that is a bucket of a hash table only */
-    bool                agingSupport;               /**< Valid for match table node that is a bucket of a hash table only */
     t_Handle            h_MissStatsCounters;        /**< Valid for hash table node and match table that is a bucket;
                                                          Holds the statistics counters allocated by the hash table and
                                                          are shared by all hash table buckets; */
@@ -476,12 +344,6 @@ typedef struct
     uint32_t            shadowAction;
     uint8_t             userSizeOfExtraction;
     uint8_t             userOffset;
- 
-#if (DPAA_VERSION >= 11)
-    bool                externalHash;
-    t_FmPcdCcNodeExtHashInfo extHashInfo;
-#endif /* (DPAA_VERSION >= 11) */
-
     uint8_t             kgHashShift;            /* used in hash-table */
 
     t_Handle            h_Spinlock;
