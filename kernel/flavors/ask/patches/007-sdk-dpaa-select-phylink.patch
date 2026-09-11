@@ -1,0 +1,12 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/Kconfig b/drivers/net/ethernet/freescale/sdk_dpaa/Kconfig
+index 0000000..0000000 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/Kconfig
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/Kconfig
+@@ -2,6 +2,7 @@ menuconfig FSL_SDK_DPAA_ETH
+ 	tristate "DPAA Ethernet"
+ 	depends on (FSL_SOC || ARM64 || ARM) && FSL_SDK_BMAN && FSL_SDK_QMAN && FSL_SDK_FMAN && !FSL_DPAA_ETH
+ 	select PHYLIB
++	select PHYLINK
+ 	help
+ 	  Data Path Acceleration Architecture Ethernet driver,
+ 	  supporting the Freescale QorIQ chips.

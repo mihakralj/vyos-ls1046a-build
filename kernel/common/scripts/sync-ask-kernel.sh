@@ -64,7 +64,7 @@ ASK_SDK_PIN="pins/nxp-sdk-srcrev.inc"   # ASK's format-neutral NXP SDK SRCREV pi
 # drifted, since they are intentionally not byte-identical to ASK's raw
 # patch. See kernel/flavors/ask/patches/README.md for what changed in each
 # and why; re-verify (not blindly re-copy) when ASK_VERSION bumps.
-LOCAL_PATCHES=" 005-fman-populate-mac-children.patch 006-proxy-populate-dpaa-eth-children.patch "
+LOCAL_PATCHES=" 005-fman-populate-mac-children.patch 006-proxy-populate-dpaa-eth-children.patch 007-sdk-dpaa-select-phylink.patch "
 LSDK_FWD=" 010-ask-fman-dpaa-ehash.patch 020-ask-bridge-hooks.patch 030-ask-ipv4-ipv6-forwarding.patch 040-ask-xfrm-ipsec-offload.patch 097-xfrm-trans-queue-force-dst-refcount.patch "
 
 SDK_DIR="kernel/flavors/ask/sdk-sources"
