@@ -29,6 +29,23 @@ was tried first and does nothing for a promptless symbol) is the
 correct fix location and keeps `sdk-sources/` itself exactly what
 `sync-ask-kernel.sh` produces.
 
+`140-sdk-dpaa-select-queue-3arg` is a local, two-line signature fix,
+numbered to apply LAST (after every ASK patch, not alongside 005-007)
+because it touches the exact declaration/definition lines several ASK
+patches (010, 098, 099, 101) use as unchanged context — applying it
+early shifted that context and broke those patches' own hunks (found
+by testing, not assumption). The actual bug: NXP's vendored
+`dpa_select_queue()` (pristine, not touched by any ASK patch) has the
+signature `(net_dev, skb, sb_dev, select_queue_fallback_t fallback)`,
+matching an older `ndo_select_queue` prototype. This kernel's actual
+`ndo_select_queue` (`include/linux/netdevice.h`) only takes 3 args —
+mainline dropped the fallback parameter years before this NXP LSDK
+snapshot's driver code was last touched — so assigning
+`.ndo_select_queue = dpa_select_queue` fails to compile
+(`-Werror=incompatible-pointer-types`) once `CONFIG_FMAN_PFC=y` (see
+next paragraph) activates that assignment. Drops the unused `fallback`
+parameter from both the declaration and definition to match.
+
 `010` through the top of the manifest are a **direct, unmodified import**
 of the upstream `we-are-mono/ASK` repo at the commit pinned in
 `kernel/flavors/ask/ask-version.env` — the same commit the
