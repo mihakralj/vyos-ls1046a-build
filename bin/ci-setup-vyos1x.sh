@@ -17,11 +17,26 @@ VYOS1X_BUILD=vyos-build/scripts/package-build/vyos-1x
 PATCH_STAGING="$VYOS1X_BUILD/ls1046a-patches"
 mkdir -p "$PATCH_STAGING"
 
-# Copy all unified-diff patches. Patch 010 (vpp-platform-bus) and the former
-# patch-mmcblk-default were Python patchers; both have been folded back into
-# proper git-format unified diffs (vyos-1x-010-*.patch handles vpp; the mmcblk
-# default is now part of vyos-1x-007-prefer-emmc-default.patch).
+# NXP ASK owns the DPAA1 ports at the kernel/PCD level from boot (see
+# plans/enumerated-forging-pie.md) -- there is no port left to hand to a
+# userspace VPP dataplane on this branch, unlike dpaa1 where mainline
+# dpaa_eth + AF_XDP allows the two to coexist. Skip the VPP patches and
+# verification entirely here rather than trying to keep them apply-clean
+# for a dataplane this flavor can never use.
+IS_NXP_SDK=false
+case "${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}" in
+  nxp-sdk*) IS_NXP_SDK=true ;;
+esac
+
+# Copy all unified-diff patches except the VPP ones on nxp-sdk (see above).
+# The former patch-mmcblk-default was a Python patcher; folded back into a
+# proper git-format unified diff (now part of vyos-1x-007-prefer-emmc-default.patch).
 for p in data/vyos-1x-*.patch; do
+  case "$(basename "$p")" in
+    vyos-1x-010-vpp-platform-bus.patch|vyos-1x-022-vpp-af-xdp-no-dpaa-rebind.patch)
+      [ "$IS_NXP_SDK" = true ] && { echo "### SKIP (no VPP dataplane on nxp-sdk): $(basename "$p")"; continue; }
+      ;;
+  esac
   cp "$p" "$PATCH_STAGING/"
 done
 cp data/reftree.cache "$PATCH_STAGING/"
@@ -135,14 +150,18 @@ GITATTR
       patch_fail=1
     fi
   done
-  echo "### VERIFY: VPP patches in source tree"
-  grep -c 'fsl_dpa' src/conf_mode/vpp.py || echo "MISSING: fsl_dpa in vpp.py"
-  grep -c 'namespace' data/templates/vpp/startup.conf.j2 || echo "MISSING: namespace in startup.conf.j2"
-  grep -c '1 << 28' python/vyos/vpp/config_verify.py || echo "MISSING: 256M in config_verify.py"
-  grep -c 'min_cpus.*2' python/vyos/vpp/config_resource_checks/resource_defaults.py || echo "MISSING: min_cpus 2 in resource_defaults.py"
-  if grep -qE '_dpaa_unbind_ifaces|vpp-dpaa-unbound|DPDK DPAA PMD' src/conf_mode/vpp.py; then
-    echo "::error::legacy DPAA PMD unbind path is still present in vpp.py" >&2
-    patch_fail=1
+  if [ "@@SKIP_VPP_VERIFY@@" = "true" ]; then
+    echo "### SKIP: VPP verification (no VPP dataplane on nxp-sdk)"
+  else
+    echo "### VERIFY: VPP patches in source tree"
+    grep -c 'fsl_dpa' src/conf_mode/vpp.py || echo "MISSING: fsl_dpa in vpp.py"
+    grep -c 'namespace' data/templates/vpp/startup.conf.j2 || echo "MISSING: namespace in startup.conf.j2"
+    grep -c '1 << 28' python/vyos/vpp/config_verify.py || echo "MISSING: 256M in config_verify.py"
+    grep -c 'min_cpus.*2' python/vyos/vpp/config_resource_checks/resource_defaults.py || echo "MISSING: min_cpus 2 in resource_defaults.py"
+    if grep -qE '_dpaa_unbind_ifaces|vpp-dpaa-unbound|DPDK DPAA PMD' src/conf_mode/vpp.py; then
+      echo "::error::legacy DPAA PMD unbind path is still present in vpp.py" >&2
+      patch_fail=1
+    fi
   fi
   # Neuter the upstream Makefile `test:` target's nose2 invocation.
   # debian/rules:51 (override_dh_auto_build) runs `make test`, which on
@@ -178,5 +197,11 @@ GITATTR
   exit 0
 '''
 EOF
+
+# Substitute @@SKIP_VPP_VERIFY@@ the same way @@FLAVOR@@ is substituted above:
+# literal placeholder in the heredoc (which must stay single-quoted, see the
+# note above), replaced on the generated file so pre_build_hook's embedded
+# bash sees a real `true`/`false` at build time.
+sed -i "s/@@SKIP_VPP_VERIFY@@/${IS_NXP_SDK}/g" "$VYOS1X_BUILD/package.toml"
 
 echo "### vyos-1x patch staging complete: $(ls "$PATCH_STAGING" | wc -l) files staged"
