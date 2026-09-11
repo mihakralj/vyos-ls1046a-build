@@ -1,5 +1,5 @@
 diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
-index 51c95fc..b55b3a2 100755
+index 22a4a37..f549fcc 100755
 --- a/src/conf_mode/system_console.py
 +++ b/src/conf_mode/system_console.py
 @@ -23,13 +23,55 @@
