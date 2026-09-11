@@ -526,27 +526,47 @@ XEOF
         echo "WARNING: mainline DTB build failed (rc=$MAKE_RC)"
       fi
 
+      # A DTB is usable by the SDK DPAA stack only if it carries BOTH the BMan
+      # ethernet buffer-pool config and the bpid-range node. Raw .dtb strings
+      # are greppable with `grep -a`, so no dtc/decompile step is needed here.
+      # (mono-gw-mainline.dtb has bpool-ethernet-cfg but NO bman-bpids, so both
+      # markers are required to distinguish SDK from mainline.)
+      dtb_is_sdk() {
+        grep -aq 'fsl,bpool-ethernet-cfg' "$1" 2>/dev/null &&
+        grep -aq 'bman-bpids' "$1" 2>/dev/null
+      }
+
       # Select PRIMARY mono-gw.dtb based on FLAVOR.
       case "$FLAVOR" in
         ask)
-          # For ASK, prefer the git-tracked pre-compiled DTB which is known-good
-          # (verified 54 cell-index entries, fsl,bpool-ethernet-cfg, FQ properties).
-          # The SDK DTB recompilation inside the NXP kernel tree can produce DTBs
-          # with subtle differences in QMan/BMan portal configuration that cause
-          # "Invalid Enqueue State" errors. The pre-compiled DTB was the one used
-          # on the working build (Jun 24, 941 Mbps iperf3).
-          if [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ]; then
+          # The SDK sdk_dpaa driver requires a DTB carrying BOTH
+          #   * fsl,bpool-ethernet-cfg  (BMan ethernet buffer-pool config)
+          #   * bman-bpids              (fsl,bpid-range = <32 32>)
+          # Without them BMan pool creation fails, sdk_dpaa registers no netdevs,
+          # and the board boots with ZERO ports and no connectivity.
+          #
+          # board/dtb/mono-gw.dtb is NO LONGER the known-good SDK blob this branch
+          # used to prefer: 4f4127bb + af97542e replaced it with an OpenWrt-ASK
+          # *recovery* DTB (73 cell-index, no fsl,bpool-ethernet-cfg). Shipping it
+          # is what produced the "ISO shows no ports / loses connectivity"
+          # regression. It is now accepted only when it actually passes the
+          # criteria the old comment merely asserted.
+          if [ "$SDK_DTB_OK" = true ] && dtb_is_sdk "$SDK_DTB"; then
+            cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+            cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+            echo "### FLAVOR=ask → in-tree SDK DTB (mono-gateway-dk-sdk.dts) selected as PRIMARY mono-gw.dtb"
+          elif [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ] && dtb_is_sdk "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb"; then
             cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw.dtb"
             cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "### FLAVOR=ask → pre-compiled board/dtb/mono-gw.dtb selected as PRIMARY mono-gw.dtb"
+            echo "### FLAVOR=ask → pre-compiled board/dtb/mono-gw.dtb PRIMARY (verified SDK: bpool-ethernet-cfg + bman-bpids)"
           elif [ "$SDK_DTB_OK" = true ]; then
             cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
             cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "### FLAVOR=ask → SDK DTB selected as PRIMARY mono-gw.dtb (fallback: pre-compiled missing)"
+            echo "WARNING: FLAVOR=ask → in-tree SDK DTB PRIMARY but it FAILED the SDK marker check (missing bpool-ethernet-cfg/bman-bpids)"
           elif [ "$MAINLINE_DTB_OK" = true ]; then
             cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
             cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "WARNING: FLAVOR=ask but no DTB available — falling back to mainline DTB as PRIMARY"
+            echo "WARNING: FLAVOR=ask but no SDK-qualified DTB available — falling back to mainline DTB as PRIMARY (expect ZERO ports)"
           else
             echo "FATAL: FLAVOR=ask and no DTB available."
             exit 1
