@@ -1,5 +1,5 @@
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 7ae9a15..d27d15f 100644
+index 359afa2aa..5783978f3 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
 @@ -15,6 +15,7 @@
@@ -82,10 +82,10 @@ index 7ae9a15..d27d15f 100644
              upperdir={overlay_params["upperdir"]},\
              lowerdir={overlay_params["lowerdir"]},\
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index 07f69cc..68db05f 100755
+index b325df9bd..b510cf1f2 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -130,7 +130,7 @@
+@@ -131,7 +131,7 @@
  CONST_MIN_DISK_SIZE: int = 2147483648  # 2 GB
  CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
  # a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
@@ -94,7 +94,7 @@ index 07f69cc..68db05f 100755
  
  # define directories and paths
  DIR_CONFIG: str = directories['config']
-@@ -194,6 +194,41 @@ def find_disks() -> dict[str, int]:
+@@ -195,6 +195,44 @@ def find_disks() -> dict[str, int]:
      for disk_name, disk_size in disks_available.copy().items():
          if disk_size < CONST_MIN_DISK_SIZE:
              del disks_available[disk_name]
@@ -103,7 +103,8 @@ index 07f69cc..68db05f 100755
 +    # removable storage, not legitimate install targets on this platform.
 +    for disk_name in list(disks_available):
 +        try:
-+            transport = cmd(f"lsblk -ndo TRAN {disk_name}").strip()
++            _rc, transport = rc_cmd(f"lsblk -ndo TRAN {disk_name}")
++            transport = transport.strip() if _rc == 0 else ""
 +        except Exception:
 +            transport = ""
 +        if transport == "usb":
@@ -118,7 +119,8 @@ index 07f69cc..68db05f 100755
 +                 '/run/live/medium',
 +                 '/lib/live/mount/medium'):
 +        try:
-+            live_src = cmd(f'findmnt -n -o SOURCE {_mnt}').strip()
++            _rc, live_src = rc_cmd(f'findmnt -n -o SOURCE {_mnt}')
++            live_src = live_src.strip() if _rc == 0 else ''
 +            if live_src:
 +                break
 +        except Exception:
@@ -126,7 +128,8 @@ index 07f69cc..68db05f 100755
 +
 +    if live_src:
 +        try:
-+            pkname = cmd(f'lsblk -n -o PKNAME {live_src}').strip()
++            _rc, pkname = rc_cmd(f'lsblk -n -o PKNAME {live_src}')
++            pkname = pkname.strip() if _rc == 0 else ''
 +            live_disk = f'/dev/{pkname}' if pkname else live_src
 +            if live_disk in disks_available:
 +                del disks_available[live_disk]
@@ -136,7 +139,7 @@ index 07f69cc..68db05f 100755
      if not disks_available:
          print(MSG_ERR_NO_DISK)
          exit(MSG_INFO_INSTALL_EXIT)
-@@ -208,17 +243,30 @@ def ask_root_size(available_space: int) -> int:
+@@ -209,17 +247,30 @@ def ask_root_size(available_space: int) -> int:
      """Define a size of root partition
  
      Args:
@@ -171,7 +174,7 @@ index 07f69cc..68db05f 100755
  
          if root_size_kbytes > available_space:
              print(MSG_WARN_ROOT_SIZE_TOOBIG)
-@@ -396,6 +444,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
+@@ -397,6 +448,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
      """
      print(MSG_INFO_INSTALL_DISKS_LIST)
      default_disk: str = list(disks_available)[0]
@@ -183,7 +186,7 @@ index 07f69cc..68db05f 100755
      for disk_name, disk_size in disks_available.items():
          disk_size_human: str = bytes_to_gb(disk_size)
          print(f'Drive: {disk_name} ({disk_size_human} GB)')
-@@ -1058,6 +1111,94 @@ def install_image() -> None:
+@@ -1086,6 +1142,94 @@ def install_image() -> None:
          grub.set_default(image_name, DIR_DST_ROOT)
          grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
  
@@ -278,7 +281,7 @@ index 07f69cc..68db05f 100755
          if is_raid_install(install_target):
              # add RAID specific modules
              grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
-@@ -1095,7 +1236,7 @@ def install_image() -> None:
+@@ -1123,7 +1267,7 @@ def install_image() -> None:
          exit()
  
      except Exception as err:
@@ -287,7 +290,7 @@ index 07f69cc..68db05f 100755
          # unmount filesystems and cleanup
          try:
              if install_target is not None:
-@@ -1307,6 +1448,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+@@ -1400,6 +1544,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
          copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
               f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
  
