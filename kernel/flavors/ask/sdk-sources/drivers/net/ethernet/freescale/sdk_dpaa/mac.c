@@ -83,97 +83,6 @@ static const struct of_device_id mac_match[] = {
 };
 MODULE_DEVICE_TABLE(of, mac_match);
 
-/*
- * phylink keeps this mapping private; the vendor MAC code still needs the
- * interface-derived ceiling to seed its initial link state.
- */
-static int mac_interface_max_speed(phy_interface_t interface)
-{
-	switch (interface) {
-	case PHY_INTERFACE_MODE_100BASEX:
-	case PHY_INTERFACE_MODE_REVRMII:
-	case PHY_INTERFACE_MODE_RMII:
-	case PHY_INTERFACE_MODE_SMII:
-	case PHY_INTERFACE_MODE_REVMII:
-	case PHY_INTERFACE_MODE_MII:
-		return SPEED_100;
-
-	case PHY_INTERFACE_MODE_TBI:
-	case PHY_INTERFACE_MODE_MOCA:
-	case PHY_INTERFACE_MODE_RTBI:
-	case PHY_INTERFACE_MODE_1000BASEX:
-	case PHY_INTERFACE_MODE_1000BASEKX:
-	case PHY_INTERFACE_MODE_TRGMII:
-	case PHY_INTERFACE_MODE_RGMII_TXID:
-	case PHY_INTERFACE_MODE_RGMII_RXID:
-	case PHY_INTERFACE_MODE_RGMII_ID:
-	case PHY_INTERFACE_MODE_RGMII:
-	case PHY_INTERFACE_MODE_PSGMII:
-	case PHY_INTERFACE_MODE_QSGMII:
-	case PHY_INTERFACE_MODE_QUSGMII:
-	case PHY_INTERFACE_MODE_SGMII:
-	case PHY_INTERFACE_MODE_GMII:
-		return SPEED_1000;
-
-	case PHY_INTERFACE_MODE_2500SGMII:
-	case PHY_INTERFACE_MODE_2500BASEX:
-	case PHY_INTERFACE_MODE_10G_QXGMII:
-		return SPEED_2500;
-
-	case PHY_INTERFACE_MODE_5GBASER:
-		return SPEED_5000;
-
-	case PHY_INTERFACE_MODE_XGMII:
-	case PHY_INTERFACE_MODE_RXAUI:
-	case PHY_INTERFACE_MODE_XAUI:
-	case PHY_INTERFACE_MODE_10GBASER:
-	case PHY_INTERFACE_MODE_10GKR:
-	case PHY_INTERFACE_MODE_USXGMII:
-		return SPEED_10000;
-
-	case PHY_INTERFACE_MODE_25GBASER:
-		return SPEED_25000;
-
-	case PHY_INTERFACE_MODE_XLGMII:
-		return SPEED_40000;
-
-	case PHY_INTERFACE_MODE_INTERNAL:
-	case PHY_INTERFACE_MODE_NA:
-	case PHY_INTERFACE_MODE_MAX:
-		return SPEED_UNKNOWN;
-	}
-
-	WARN_ON_ONCE(1);
-	return SPEED_UNKNOWN;
-}
-
-static bool mac_uses_inband_status(struct device_node *mac_node)
-{
-	const char *managed;
-
-	return !of_property_read_string(mac_node, "managed", &managed) &&
-	       !strcmp(managed, "in-band-status");
-}
-
-static struct device_node *mac_parse_pcs_node(struct device_node *mac_node)
-{
-	int index;
-	struct device_node *pcs_node;
-
-	index = of_property_match_string(mac_node, "pcs-handle-names", "xfi");
-	if (index < 0)
-		index = of_property_match_string(mac_node, "pcs-handle-names",
-						 "sgmii");
-	if (index < 0)
-		index = 0;
-
-	pcs_node = of_parse_phandle(mac_node, "pcs-handle", index);
-	if (!pcs_node)
-		pcs_node = of_parse_phandle(mac_node, "pcsphy-handle", index);
-
-	return pcs_node;
-}
-
 static int __cold mac_probe(struct platform_device *_of_dev)
 {
 	int			 _errno, i;
@@ -361,7 +270,7 @@ static int __cold mac_probe(struct platform_device *_of_dev)
 
 	mac_dev->link		= false;
 	mac_dev->half_duplex	= false;
-	mac_dev->speed		= mac_interface_max_speed(mac_dev->phy_if);
+	mac_dev->speed		= phylink_interface_max_speed(mac_dev->phy_if);
 	mac_dev->max_speed	= mac_dev->speed;
 	mac_dev->if_support = MEMAC_SUPPORTED;
 	/* We don't support half-duplex in SGMII mode */
@@ -391,16 +300,6 @@ static int __cold mac_probe(struct platform_device *_of_dev)
 
 	/* Get the rest of the PHY information */
 	mac_dev->phy_node = of_parse_phandle(mac_node, "phy-handle", 0);
-	if (!mac_dev->phy_node && mac_uses_inband_status(mac_node)) {
-		/*
-		 * The boxed vendor MAC stack predates phylink. On modern
-		 * kernels, managed="in-band-status" also matches the legacy
-		 * fixed-link helpers, which would fabricate a zero-speed
-		 * pseudo-PHY and warn in swphy. Prefer the MAC PCS node when
-		 * the DTS exposes one.
-		 */
-		mac_dev->phy_node = mac_parse_pcs_node(mac_node);
-	}
 	if (!mac_dev->phy_node) {
 		struct phy_device *phy;
 

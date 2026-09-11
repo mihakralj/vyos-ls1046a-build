@@ -76,7 +76,6 @@
 #define FM_PCD_PLCR_PEMODE_FLS_L4             0x0000E000
 #define FM_PCD_PLCR_PEMODE_FLS_FULL           0x0000F000
 #define FM_PCD_PLCR_PEMODE_RBFLS              0x00000800
-#define FM_PCD_PLCR_PEMODE_FCS                0x00000400
 #define FM_PCD_PLCR_PEMODE_TRA                0x00000004
 #define FM_PCD_PLCR_PEMODE_TRB                0x00000002
 #define FM_PCD_PLCR_PEMODE_TRC                0x00000001

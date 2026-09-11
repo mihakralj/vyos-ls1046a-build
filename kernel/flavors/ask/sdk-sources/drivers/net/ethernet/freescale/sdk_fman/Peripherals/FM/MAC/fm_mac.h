@@ -112,7 +112,6 @@ typedef struct {
     t_Error (*f_FM_MAC_RemovelExactMatchMacAddr) (t_Handle h_FmMac, t_EnetAddr *p_EnetAddr);
 
     t_Error (*f_FM_MAC_SetPromiscuous) (t_Handle h_FmMac, bool newVal);
-    t_Error (*f_FM_MAC_SetAllMulti) (t_Handle h_FmMac, bool newVal);
     t_Error (*f_FM_MAC_AdjustLink)     (t_Handle h_FmMac, e_EnetSpeed speed, bool fullDuplex);
     t_Error (*f_FM_MAC_RestartAutoneg) (t_Handle h_FmMac);
 

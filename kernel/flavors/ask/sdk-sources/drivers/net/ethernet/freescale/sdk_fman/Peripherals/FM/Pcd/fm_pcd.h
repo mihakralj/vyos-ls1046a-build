@@ -198,28 +198,6 @@ typedef struct {
                                 portId for PLCR in any environment */
 } t_FmPcdAllocMng;
 
-#if (DPAA_VERSION >= 11)
-typedef struct {
-    t_FmPcdFEParams feParams;
-    t_Handle        h_FE;
-    t_List          node;
-} t_FmPcdFEObj;
-#define FM_PCD_FE_OBJ(ptr)  LIST_OBJECT(ptr, t_FmPcdFEObj, node)
-
-typedef struct {
-    t_Handle    h_Mux;
-    t_Handle    h_Exit;
-    t_Handle    h_Transition;
-    struct {
-        t_Handle    h_HmWParse;
-        t_Handle    h_HmWOParse;
-    } hm[FM_MAX_HM_CONTEXTS];
-
-    t_List      availableFeLst;
-    t_List      enqLst;
-} t_FmPcdFEInfo;
-#endif /* DPAA_VERSION >= 11 */
-
 typedef struct {
     volatile bool       lock;
     bool                used;
@@ -390,14 +368,6 @@ typedef struct {
     uintptr_t                   capwapFrameIdAddr;
     bool                        advancedOffloadSupport;
 
-#if (DPAA_VERSION >= 11)
-    t_FmPcdFEInfo               feInfo;
-#endif /* DPAA_VERSION >= 11 */
- 
-#ifdef USE_ENHANCED_EHASH
-    uint32_t			InternalBufMgmtMuramArea; // MURAM address area used for internal buffers in EHASH
-    void *pIntMuramPtr; // MURAM pointer for internal buffers in EHASH
-#endif //USE_ENHANCED_EHASH
     t_FmPcdDriverParam          *p_FmPcdDriverParam;
 } t_FmPcd;
 
@@ -484,16 +454,6 @@ void DequeueNodeInfoFromRelevantLst(t_List *p_List, t_Handle h_Info, t_Handle h_
 t_CcNodeInformation* FindNodeInfoInReleventLst(t_List *p_List, t_Handle h_Info, t_Handle h_Spinlock);
 t_List *FmPcdManipGetSpinlock(t_Handle h_Manip);
 t_List *FmPcdManipGetNodeLstPointedOnThisManip(t_Handle h_Manip);
-
-typedef struct
-{
-    uint8_t     *p_Hmct;
-    uint16_t    tableSize;
-    bool        parseAfterHm;
-} t_FmPcdManipHmCcParams;
-
-void FmPcdManipLocalHMGetParams(t_Handle h_Manip, t_FmPcdManipHmCcParams *p_Params, t_Handle *h_ManipIter);
-void FmPcdManipGetInternaltHmTdAndNonHmAd(t_Handle h_Manip, t_Handle *p_InernalHmtd, t_Handle *p_NonHmAd);
 
 typedef struct
 {

@@ -1,0 +1,718 @@
+From c80759ace0c367137cbf2a1a9ab74fc3b77174f6 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Mon, 17 Aug 2026 20:17:28 +0200
+Subject: [PATCH] sdk_fman: fix IRQ handling in FMan sysfs show handlers
+
+show_fm_risc_load() ran its FM_CtrlMonStart()/msleep(1000)/FM_CtrlMonStop()
+measurement window under local_irq_save(): sleeping with hardirqs disabled is
+illegal, and __schedule() re-enables IRQs on the context switch, so the guard
+protected nothing while stalling a world-readable sysfs read for a full second.
+Drop it (there is no shared FMan-wrapper lock to serialise concurrent readers;
+that pre-existing race is unchanged).
+
+More broadly, the show handlers used local_irq_save() as a pseudo-lock with no
+cross-CPU effect. Drop it where it guards nothing:
+  - handlers that only read idempotent MMIO / format into the buffer
+    (dma_stats, stats, muram_free_sz, ctrl_code_ver, pcd_stats, regs,
+     kg_regs, fpm_regs, prs_regs, plcr_regs);
+  - indirect KG/policer dumps (cls_plan, profiles, schemes, kg_pe_regs) whose
+    dump helper already takes the KG/policer HW spinlock internally.
+
+Keep it only on the three handlers whose helper does an unprotected indirect
+register-select (fm_dump_ccqueue -> dma_cam_queue/dma_cmd_queue via fmdmccqdr;
+fm_dump_tnum_dbg via fmfp_dra): there local_irq_save() is a weak local-CPU
+guard, documented as pending a proper FM-level lock. For those kept sites and
+the fm_port handlers, validity checks stay hoisted above local_irq_save() so an
+early return cannot leak hardirqs disabled.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ .../sdk_fman/src/wrapper/lnxwrp_sysfs_fm.c    | 213 ++++++------------
+ .../src/wrapper/lnxwrp_sysfs_fm_port.c        |  57 ++---
+ 2 files changed, 104 insertions(+), 166 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm.c b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm.c
+index ee473326b9e7..60f2f450ca20 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm.c
+@@ -235,7 +235,6 @@ static ssize_t show_fm_risc_load(struct device *dev,
+ 			struct device_attribute *attr, char *buf)
+ {
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+-	unsigned long flags;
+ 	int m =0;
+ 	int err =0;
+ 	unsigned n = 0;
+@@ -252,8 +251,12 @@ static ssize_t show_fm_risc_load(struct device *dev,
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_Dev)
+ 		return -EIO;
+ 
+-	local_irq_save(flags);
+-
++	/* Measure RISC utilisation over a 1s window.  This must not run with
++	 * hardirqs disabled: msleep() sleeps (illegal with IRQs off) and
++	 * __schedule() re-enables IRQs on the context switch anyway, so the
++	 * former local_irq_save() here was both wrong and ineffective.  There
++	 * is no shared FMan-wrapper lock to serialise concurrent readers of
++	 * this debug attribute; that pre-existing race is unchanged. */
+ 	/* Calculate risc load */
+ 	FM_CtrlMonStart(p_wrp_fm_dev->h_Dev);
+ 	msleep(1000);
+@@ -262,7 +265,6 @@ static ssize_t show_fm_risc_load(struct device *dev,
+ 	for (i = 0; i < FM_NUM_OF_CTRL; i++) {
+ 		err = FM_CtrlMonGetCounters(p_wrp_fm_dev->h_Dev, i, &util);
+ 		if (err) {
+-			local_irq_restore(flags);
+ 			return -EINVAL;
+ 		}
+ 
+@@ -271,8 +273,6 @@ static ssize_t show_fm_risc_load(struct device *dev,
+ 		n=m+n;
+ 	}
+ 
+-	local_irq_restore(flags);
+-
+ 	return n;
+ }
+ 
+@@ -282,7 +282,6 @@ static ssize_t show_fm_dma_stats(struct device *dev,
+ {
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+ 	t_FmDmaStatus dma_status;
+-	unsigned long flags = 0;
+ 	unsigned n = 0;
+ 	uint8_t counter_value = 0, counter = 0;
+ 
+@@ -300,8 +299,6 @@ static ssize_t show_fm_dma_stats(struct device *dev,
+ 			attr->attr.name,
+ 			fm_sysfs_stats, NULL);
+ 
+-	local_irq_save(flags);
+-
+ 	memset(&dma_status, 0, sizeof(dma_status));
+ 	FM_GetDmaStatus(p_wrp_fm_dev->h_Dev, &dma_status);
+ 
+@@ -330,8 +327,6 @@ static ssize_t show_fm_dma_stats(struct device *dev,
+ 	n = snprintf(buf, PAGE_SIZE, "\tFM %u counter: %c\n",
+ 		p_wrp_fm_dev->id, counter_value ? 'T' : 'F');
+ 
+-	local_irq_restore(flags);
+-
+ 	return n;
+ }
+ 
+@@ -391,7 +386,6 @@ static ssize_t show_fm_stats(struct device *dev,
+ 			     struct device_attribute *attr, char *buf)
+ {
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+-	unsigned long flags = 0;
+ 	unsigned n = 0, cnt_e = 0;
+ 	uint32_t cnt_val;
+ 	int err;
+@@ -414,13 +408,9 @@ static ssize_t show_fm_stats(struct device *dev,
+ 	if (err)
+ 		return err;
+ 
+-	local_irq_save(flags);
+-
+ 	n = snprintf(buf, PAGE_SIZE, "\tFM %d counter: %d\n",
+ 			p_wrp_fm_dev->id, cnt_val);
+ 
+-	local_irq_restore(flags);
+-
+ 	return n;
+ }
+ 
+@@ -428,7 +418,6 @@ static ssize_t show_fm_muram_free_sz(struct device *dev,
+ 				struct device_attribute *attr, char *buf)
+ {
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+-	unsigned long flags = 0;
+ 	unsigned n = 0;
+ 	uint64_t muram_free_size = 0;
+ 
+@@ -444,13 +433,9 @@ static ssize_t show_fm_muram_free_sz(struct device *dev,
+ 
+ 	muram_free_size = FM_MURAM_GetFreeMemSize(p_wrp_fm_dev->h_MuramDev);
+ 
+-	local_irq_save(flags);
+-
+ 	n = snprintf(buf, PAGE_SIZE, "\tFM %d muram_free_size: %lld\n",
+ 			p_wrp_fm_dev->id, muram_free_size);
+ 
+-	local_irq_restore(flags);
+-
+ 	return n;
+ }
+ 
+@@ -458,7 +443,6 @@ static ssize_t show_fm_ctrl_code_ver(struct device *dev,
+ 				struct device_attribute *attr, char *buf)
+ {
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+-	unsigned long flags = 0;
+ 	unsigned n = 0;
+ 	t_FmCtrlCodeRevisionInfo rv_info;
+ 
+@@ -474,15 +458,11 @@ static ssize_t show_fm_ctrl_code_ver(struct device *dev,
+ 
+ 	FM_GetFmanCtrlCodeRevision((t_Fm *)p_wrp_fm_dev->h_Dev, &rv_info);
+ 
+-	local_irq_save(flags);
+-
+ 	FM_DMP_LN(buf, n, "- FM %d ctrl code pkg info:\n", p_wrp_fm_dev->id);
+ 	FM_DMP_LN(buf, n, "Package rev: %d\n", rv_info.packageRev);
+ 	FM_DMP_LN(buf, n, "major rev: %d\n", rv_info.majorRev);
+ 	FM_DMP_LN(buf, n, "minor rev: %d\n", rv_info.minorRev);
+ 
+-	local_irq_restore(flags);
+-
+ 	return n;
+ }
+ 
+@@ -490,7 +470,6 @@ static ssize_t show_fm_pcd_stats(struct device *dev,
+ 				struct device_attribute *attr, char *buf)
+ {
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+-	unsigned long flags = 0;
+ 	unsigned n = 0, counter = 0;
+ 
+ 	if (attr == NULL || buf == NULL || dev == NULL)
+@@ -508,15 +487,11 @@ static ssize_t show_fm_pcd_stats(struct device *dev,
+ 			attr->attr.name,
+ 			fm_sysfs_stats, NULL);
+ 
+-	local_irq_save(flags);
+-
+ 	n = snprintf(buf, PAGE_SIZE, "\tFM %d counter: %d\n",
+ 			p_wrp_fm_dev->id,
+ 			FM_PCD_GetCounter(p_wrp_fm_dev->h_PcdDev,
+ 					(e_FmPcdCounters) counter));
+ 
+-	local_irq_restore(flags);
+-
+ 	return n;
+ }
+ 
+@@ -528,6 +503,7 @@ static ssize_t show_fm_tnum_dbg(struct device *dev,
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
++	int tn_s;
+ #endif
+ 
+ 	if (attr == NULL || buf == NULL || dev == NULL)
+@@ -539,19 +515,22 @@ static ssize_t show_fm_tnum_dbg(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-
+ 	if (!p_wrp_fm_dev->active)
+ 		return -EIO;
+-	else {
+-		int tn_s;
+ 
+-		if (!sscanf(attr->attr.name, "tnum_dbg_%d", &tn_s))
+-			return -EINVAL;
++	if (!sscanf(attr->attr.name, "tnum_dbg_%d", &tn_s))
++		return -EINVAL;
++
++	/* Kept: fm_dump_tnum_dbg() does an unprotected indirect register-select
++	 * (write fmfp_dra, then read the debug-data registers) that genuinely
++	 * needs serialisation.  local_irq_save() is only a weak local-CPU guard
++	 * here and does not serialise other CPUs; a proper fix needs an FM-level
++	 * lock around the FPM debug register file. */
++	local_irq_save(flags);
++
++	n = fm_dump_tnum_dbg(p_wrp_fm_dev->h_Dev,
++				tn_s, tn_s + 15, buf, n);
+ 
+-		n = fm_dump_tnum_dbg(p_wrp_fm_dev->h_Dev,
+-					tn_s, tn_s + 15, buf, n);
+-	}
+ 	local_irq_restore(flags);
+ #else
+ 
+@@ -568,10 +547,10 @@ static ssize_t show_fm_cls_plan(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
++	int cpn;
+ #endif
+ 
+ 	if (attr == NULL || buf == NULL || dev == NULL)
+@@ -582,26 +561,20 @@ static ssize_t show_fm_cls_plan(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-
+-	n = snprintf(buf, PAGE_SIZE, "\n FM-KG classification plan dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
+ 		return -EIO;
+-	else {
+-		int cpn;
+ 
+-		if (!sscanf(attr->attr.name, "cls_plan_%d", &cpn))
+-			return -EINVAL;
++	if (!sscanf(attr->attr.name, "cls_plan_%d", &cpn))
++		return -EINVAL;
+ 
+-		n = fm_dump_cls_plan(p_wrp_fm_dev->h_PcdDev, cpn, buf, n);
+-	}
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "\n FM-KG classification plan dump.\n");
++
++	/* fm_dump_cls_plan() serialises the indirect KG access with the KG
++	 * HW spinlock internally; no outer IRQ guard is needed here. */
++	n = fm_dump_cls_plan(p_wrp_fm_dev->h_PcdDev, cpn, buf, n);
+ #else
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+ 	return n;
+@@ -611,10 +584,10 @@ static ssize_t show_fm_profiles(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
++	int pn;
+ #endif
+ 
+ 	if (attr == NULL || buf == NULL || dev == NULL)
+@@ -626,26 +599,20 @@ static ssize_t show_fm_profiles(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-
+-	n = snprintf(buf, PAGE_SIZE, "FM policer profile dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
+ 		return -EIO;
+-	else {
+-		int pn;
+ 
+-		if (!sscanf(attr->attr.name, "profile_%d", &pn))
+-			return -EINVAL;
++	if (!sscanf(attr->attr.name, "profile_%d", &pn))
++		return -EINVAL;
+ 
+-		n = fm_profile_dump_regs(p_wrp_fm_dev->h_PcdDev, pn, buf, n);
+-	}
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "FM policer profile dump.\n");
++
++	/* fm_profile_dump_regs() serialises the indirect policer access with
++	 * the policer HW spinlock internally; no outer IRQ guard is needed. */
++	n = fm_profile_dump_regs(p_wrp_fm_dev->h_PcdDev, pn, buf, n);
+ #else
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+ 	return n;
+@@ -655,10 +622,10 @@ static ssize_t show_fm_schemes(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
++	int sn;
+ #endif
+ 
+ 	if (attr == NULL || buf == NULL || dev == NULL)
+@@ -670,27 +637,21 @@ static ssize_t show_fm_schemes(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-
+-	n = snprintf(buf, PAGE_SIZE, "FM-KG driver schemes dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
+ 		return -EIO;
+-	else {
+-		int sn;
+ 
+-		if (!sscanf(attr->attr.name, "scheme_%d", &sn))
+-			return -EINVAL;
++	if (!sscanf(attr->attr.name, "scheme_%d", &sn))
++		return -EINVAL;
+ 
+-		n = fm_dump_scheme(p_wrp_fm_dev->h_PcdDev, sn, buf, n);
+-	}
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "FM-KG driver schemes dump.\n");
++
++	/* fm_dump_scheme() serialises the indirect KG access with the KG
++	 * HW spinlock internally; no outer IRQ guard is needed here. */
++	n = fm_dump_scheme(p_wrp_fm_dev->h_PcdDev, sn, buf, n);
+ #else
+ 
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 		     "Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+ 	return n;
+@@ -1169,6 +1130,11 @@ static ssize_t show_fm_dma_cam_queue(struct device *dev,
+ 
+ 	n = snprintf(buf, PAGE_SIZE, "FM DMA CAM queue dump.\n");
+ 
++	/* Kept: fm_dump_ccqueue() does an unprotected indirect register-select
++	 * (write fmdmccqdr, then read the value registers) that genuinely needs
++	 * serialisation.  local_irq_save() is only a weak local-CPU guard here
++	 * and does not serialise other CPUs; a proper fix needs an FM-level lock
++	 * around the DMA debug register file. */
+ 	local_irq_save(flags);
+ 
+ 	n = fm_dump_ccqueue(p_wrp_fm_dev->h_Dev, buf, n,
+@@ -1214,6 +1180,11 @@ static ssize_t show_fm_dma_cmd_queue(struct device *dev,
+ 
+ 	n = snprintf(buf, PAGE_SIZE, "FM DMA CMD queue dump.\n");
+ 
++	/* Kept: fm_dump_ccqueue() does an unprotected indirect register-select
++	 * (write fmdmccqdr, then read the value registers) that genuinely needs
++	 * serialisation.  local_irq_save() is only a weak local-CPU guard here
++	 * and does not serialise other CPUs; a proper fix needs an FM-level lock
++	 * around the DMA debug register file. */
+ 	local_irq_save(flags);
+ 
+ 	n = fm_dump_ccqueue(p_wrp_fm_dev->h_Dev, buf, n,
+@@ -1237,7 +1208,6 @@ static ssize_t show_fm_regs(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+@@ -1251,22 +1221,16 @@ static ssize_t show_fm_regs(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-
+-	n = snprintf(buf, PAGE_SIZE, "FM driver registers dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_Dev)
+ 		return -EIO;
+-	else
+-		n = fm_dump_regs(p_wrp_fm_dev->h_Dev, buf, n);
+ 
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "FM driver registers dump.\n");
++
++	n = fm_dump_regs(p_wrp_fm_dev->h_Dev, buf, n);
+ #else
+ 
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+ 	return n;
+@@ -1276,7 +1240,6 @@ static ssize_t show_fm_kg_pe_regs(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+@@ -1291,23 +1254,19 @@ static ssize_t show_fm_kg_pe_regs(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
++	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
++		return -EIO;
+ 
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"\n FM-KG Port Partition Config registers dump.\n");
+ 
+-	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
+-		return -EIO;
+-	else
+-		n = fm_kg_pe_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+-
+-	local_irq_restore(flags);
++	/* fm_kg_pe_dump_regs() serialises the indirect KG access with the KG
++	 * HW spinlock internally; no outer IRQ guard is needed here. */
++	n = fm_kg_pe_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+ #else
+ 
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+ 	return n;
+@@ -1317,7 +1276,6 @@ static ssize_t show_fm_kg_regs(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+@@ -1332,22 +1290,16 @@ static ssize_t show_fm_kg_regs(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-
+-	n = snprintf(buf, PAGE_SIZE, "FM-KG registers dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
+ 		return -EIO;
+-	else
+-		n = fm_kg_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+ 
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "FM-KG registers dump.\n");
++
++	n = fm_kg_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+ #else
+ 
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+ 	return n;
+@@ -1358,7 +1310,6 @@ static ssize_t show_fm_fpm_regs(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+@@ -1373,22 +1324,16 @@ static ssize_t show_fm_fpm_regs(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-
+-	n = snprintf(buf, PAGE_SIZE, "FM-FPM registers dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_Dev)
+ 		return -EIO;
+-	else
+-		n = fm_fpm_dump_regs(p_wrp_fm_dev->h_Dev, buf, n);
+ 
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "FM-FPM registers dump.\n");
++
++	n = fm_fpm_dump_regs(p_wrp_fm_dev->h_Dev, buf, n);
+ #else
+ 
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+ 	return n;
+@@ -1397,7 +1342,6 @@ static ssize_t show_fm_fpm_regs(struct device *dev,
+ static ssize_t show_prs_regs(struct device *dev,
+ 			     struct device_attribute *attr, char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+@@ -1411,21 +1355,16 @@ static ssize_t show_prs_regs(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-	n = snprintf(buf, PAGE_SIZE, "FM Policer registers dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
+ 		return -EIO;
+-	else
+-		n = fm_prs_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+ 
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "FM Policer registers dump.\n");
++
++	n = fm_prs_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+ #else
+ 
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 		     "Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ 
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+@@ -1436,7 +1375,6 @@ static ssize_t show_plcr_regs(struct device *dev,
+ 				struct device_attribute *attr,
+ 				char *buf)
+ {
+-	unsigned long flags;
+ 	unsigned n = 0;
+ #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
+ 	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
+@@ -1450,21 +1388,16 @@ static ssize_t show_plcr_regs(struct device *dev,
+ 	if (WARN_ON(p_wrp_fm_dev == NULL))
+ 		return -EINVAL;
+ 
+-	local_irq_save(flags);
+-	n = snprintf(buf, PAGE_SIZE, "FM Policer registers dump.\n");
+-
+ 	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_PcdDev)
+ 		return -EIO;
+-	else
+-		n = fm_plcr_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+ 
+-	local_irq_restore(flags);
++	n = snprintf(buf, PAGE_SIZE, "FM Policer registers dump.\n");
++
++	n = fm_plcr_dump_regs(p_wrp_fm_dev->h_PcdDev, buf, n);
+ #else
+ 
+-	local_irq_save(flags);
+ 	n = snprintf(buf, PAGE_SIZE,
+ 			"Debug level is too low to dump registers!!!\n");
+-	local_irq_restore(flags);
+ 
+ #endif /* (defined(DEBUG_ERRORS) && ... */
+ 
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm_port.c b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm_port.c
+index ee0ada81f0ea..05a4a6a88438 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm_port.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_sysfs_fm_port.c
+@@ -255,17 +255,18 @@ static ssize_t show_fm_port_regs(struct device *dev,
+ 		(t_LnxWrpFmPortDev *) dev_get_drvdata(dev);
+ 
+ 
+-	local_irq_save(flags);
+-
+ 	if (!p_LnxWrpFmPortDev->h_Dev) {
+ 		n = snprintf(buf, PAGE_SIZE, "\tFM Port not configured...\n");
+ 		return n;
+-	} else {
+-		n = snprintf(buf, PAGE_SIZE,
+-				"FM port driver registers dump.\n");
+-		n = fm_port_dump_regs(p_LnxWrpFmPortDev->h_Dev, buf, n);
+ 	}
+ 
++	n = snprintf(buf, PAGE_SIZE,
++			"FM port driver registers dump.\n");
++
++	local_irq_save(flags);
++
++	n = fm_port_dump_regs(p_LnxWrpFmPortDev->h_Dev, buf, n);
++
+ 	local_irq_restore(flags);
+ 
+ 	return n;
+@@ -296,22 +297,24 @@ static ssize_t show_fm_port_ipv4_options(struct device *dev,
+ 	p_LnxWrpFmPortDev =
+ 		(t_LnxWrpFmPortDev *) dev_get_drvdata(dev);
+ 
+-	local_irq_save(flags);
+-
+ 	if (!p_LnxWrpFmPortDev->h_Dev) {
+ 		n = snprintf(buf, PAGE_SIZE, "\tFM Port not configured...\n");
+ 		return n;
+-	} else if (((t_FmPort *)p_LnxWrpFmPortDev->h_Dev)->p_ParamsPage
+-					== NULL) {
++	}
++
++	if (((t_FmPort *)p_LnxWrpFmPortDev->h_Dev)->p_ParamsPage == NULL) {
+ 		n = snprintf(buf, PAGE_SIZE,
+ 			"\tPort: FMan-controller params page not set\n");
+ 		return n;
+-	} else {
+-		n = snprintf(buf, PAGE_SIZE,
+-			"Counter for fragmented pkt with IP header options\n");
+-		n = fm_port_dump_ipv4_opt(p_LnxWrpFmPortDev->h_Dev, buf, n);
+ 	}
+ 
++	n = snprintf(buf, PAGE_SIZE,
++		"Counter for fragmented pkt with IP header options\n");
++
++	local_irq_save(flags);
++
++	n = fm_port_dump_ipv4_opt(p_LnxWrpFmPortDev->h_Dev, buf, n);
++
+ 	local_irq_restore(flags);
+ 
+ 	return n;
+@@ -342,17 +345,18 @@ static ssize_t show_fm_port_bmi_regs(struct device *dev,
+ 	p_LnxWrpFmPortDev =
+ 		(t_LnxWrpFmPortDev *) dev_get_drvdata(dev);
+ 
+-	local_irq_save(flags);
+-
+ 	if (!p_LnxWrpFmPortDev->h_Dev) {
+ 		n = snprintf(buf, PAGE_SIZE, "\tFM Port not configured...\n");
+ 		return n;
+-	} else {
+-		n = snprintf(buf, PAGE_SIZE,
+-				"FM port driver registers dump.\n");
+-		n = fm_port_dump_regs_bmi(p_LnxWrpFmPortDev->h_Dev, buf, n);
+ 	}
+ 
++	n = snprintf(buf, PAGE_SIZE,
++			"FM port driver registers dump.\n");
++
++	local_irq_save(flags);
++
++	n = fm_port_dump_regs_bmi(p_LnxWrpFmPortDev->h_Dev, buf, n);
++
+ 	local_irq_restore(flags);
+ 
+ 	return n;
+@@ -383,17 +387,18 @@ static ssize_t show_fm_port_qmi_regs(struct device *dev,
+ 	p_LnxWrpFmPortDev =
+ 		(t_LnxWrpFmPortDev *) dev_get_drvdata(dev);
+ 
+-	local_irq_save(flags);
+-
+ 	if (!p_LnxWrpFmPortDev->h_Dev) {
+ 		n = snprintf(buf, PAGE_SIZE, "\tFM Port not configured...\n");
+ 		return n;
+-	} else {
+-		n = snprintf(buf, PAGE_SIZE,
+-				"FM port driver registers dump.\n");
+-		n = fm_port_dump_regs_qmi(p_LnxWrpFmPortDev->h_Dev, buf, n);
+ 	}
+ 
++	n = snprintf(buf, PAGE_SIZE,
++			"FM port driver registers dump.\n");
++
++	local_irq_save(flags);
++
++	n = fm_port_dump_regs_qmi(p_LnxWrpFmPortDev->h_Dev, buf, n);
++
+ 	local_irq_restore(flags);
+ 
+ 	return n;
+-- 
+2.47.3
+

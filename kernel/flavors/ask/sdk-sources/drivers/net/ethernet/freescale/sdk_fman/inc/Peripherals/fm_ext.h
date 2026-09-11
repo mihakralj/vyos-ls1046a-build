@@ -182,21 +182,6 @@ typedef _Packed struct t_FmPrsResult {
                                          FM_FD_ERR_LENGTH               | \
                                          FM_FD_ERR_DMA) /**< TX Error FD bits */
 
-#define FM_RFSDM_DEFAULT		(FM_FD_ERR_DMA |\
-					 FM_FD_ERR_PHYSICAL |\
-					 FM_FD_ERR_SIZE |\
-					 FM_FD_ERR_CLS_DISCARD |\
-					 FM_FD_ERR_EXTRACTION |\
-					 FM_FD_ERR_NO_SCHEME |\
-					 FM_FD_ERR_KEYSIZE_OVERFLOW |\
-					 FM_FD_ERR_ILL_PLCR|\
-					 FM_FD_ERR_PRS_TIMEOUT|\
-					 FM_FD_ERR_PLCR_FRAME_LEN|\
-					 FM_FD_ERR_PRS_ILL_INSTRUCT|\
-					 FM_FD_ERR_PRS_HDR_ERR|\
-					 FM_FD_ERR_BLOCK_LIMIT_EXCEEDED)
-
-
 #define FM_FD_RX_STATUS_ERR_MASK        (FM_FD_ERR_UNSUPPORTED_FORMAT   | \
                                          FM_FD_ERR_LENGTH               | \
                                          FM_FD_ERR_DMA                  | \
@@ -1492,38 +1477,6 @@ t_Error FM_SetPortsBandwidth(t_Handle h_Fm, t_FmPortsBandwidthParams *p_PortsBan
                 (i.e. guestId != NCSW_MASTER_ID)
 *//***************************************************************************/
 t_Handle FM_GetMuramHandle(t_Handle h_Fm);
-
-/**************************************************************************//*
- @Function      FM_ReadTimeStamp
-
- @Description   Reads the FMan engine's timestamp.
-
- @Param[in]     h_Fm                A handle to an FM Module.
-
- @Return        The indicated engine's timestamp on success; zero otherwise.
-
- @Cautions      Allowed only following FM_Init().
-                This routine should NOT be called from guest-partition
-                (i.e. guestId != NCSW_MASTER_ID)
-*//***************************************************************************/
-uint32_t FM_ReadTimeStamp(t_Handle h_Fm);
-
-/**************************************************************************//*
- @Function      FM_GetTimeStampIncrementPerUsec
-
- @Description   Provides the value of the FMan engine's timestamp increment
-                per microsecond.
-
- @Param[in]     h_Fm                A handle to an FM Module.
-
- @Return        The value the timestamp is incremented with each microsecond
-                on success; zero otherwise.
-
- @Cautions      Allowed only following FM_Init().
-                This routine should NOT be called from guest-partition
-                (i.e. guestId != NCSW_MASTER_ID)
-*//***************************************************************************/
-uint32_t FM_GetTimeStampIncrementPerUsec(t_Handle h_Fm);
 
 /** @} */ /* end of FM_runtime_control_grp group */
 /** @} */ /* end of FM_lib_grp group */

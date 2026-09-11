@@ -92,22 +92,18 @@ EXPORT_SYMBOL(FM_PCD_MatchTableGetKeyCounter);
 EXPORT_SYMBOL(FM_PCD_MatchTableGetKeyStatistics);
 EXPORT_SYMBOL(FM_PCD_MatchTableFindNGetKeyStatistics);
 EXPORT_SYMBOL(FM_PCD_MatchTableGetMissStatistics);
-EXPORT_SYMBOL(FM_PCD_HashTableSet);
-EXPORT_SYMBOL(FM_PCD_HashTableAddKey);
-#ifndef USE_ENHANCED_EHASH
-EXPORT_SYMBOL(FM_PCD_HashTableDelete);
 EXPORT_SYMBOL(FM_PCD_HashTableGetMissStatistics);
+EXPORT_SYMBOL(FM_PCD_HashTableSet);
+EXPORT_SYMBOL(FM_PCD_HashTableDelete);
+EXPORT_SYMBOL(FM_PCD_HashTableAddKey);
 EXPORT_SYMBOL(FM_PCD_HashTableRemoveKey);
-EXPORT_SYMBOL(FM_PCD_HashTableFindNGetKeyStatistics);
 EXPORT_SYMBOL(FM_PCD_HashTableModifyNextEngine);
-EXPORT_SYMBOL(FM_PCD_HashTableGetMissNextEngine);
-EXPORT_SYMBOL(FM_PCD_HashTableModifyMissMonitorAddr);
-#endif //USE_ENHANCED_EHASH
 EXPORT_SYMBOL(FM_PCD_HashTableModifyMissNextEngine);
+EXPORT_SYMBOL(FM_PCD_HashTableGetMissNextEngine);
+EXPORT_SYMBOL(FM_PCD_HashTableFindNGetKeyStatistics);
 EXPORT_SYMBOL(FM_PCD_PlcrProfileSet);
 EXPORT_SYMBOL(FM_PCD_PlcrProfileDelete);
 EXPORT_SYMBOL(FM_PCD_PlcrProfileGetCounter);
-EXPORT_SYMBOL(FmPcdPlcrProfileGetAbsoluteId);
 EXPORT_SYMBOL(FM_PCD_PlcrProfileSetCounter);
 EXPORT_SYMBOL(FM_PCD_ManipNodeSet);
 EXPORT_SYMBOL(FM_PCD_ManipNodeDelete);

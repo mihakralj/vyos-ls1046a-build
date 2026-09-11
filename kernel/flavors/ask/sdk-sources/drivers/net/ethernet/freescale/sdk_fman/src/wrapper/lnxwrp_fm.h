@@ -52,8 +52,7 @@
 
 #define FM_MAX_NUM_OF_ADV_SETTINGS          10
 
-/*#define LNXWRP_FM_NUM_OF_SHARED_PROFILES    16  default value */
-#define LNXWRP_FM_NUM_OF_SHARED_PROFILES    144 /* currently 140 shared profiles are in use */
+#define LNXWRP_FM_NUM_OF_SHARED_PROFILES    16
 
 #if defined(CONFIG_FMAN_DISABLE_OH_TO_REUSE_RESOURCES)
 #define FM_10G_OPENDMA_MIN_TRESHOLD 8 /* 10g minimum treshold if only HC is enabled and no OH port enabled */

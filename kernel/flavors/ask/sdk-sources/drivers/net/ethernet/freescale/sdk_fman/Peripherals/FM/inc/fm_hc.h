@@ -69,8 +69,6 @@ t_Error     FmHcPcdKgSetSchemeCounter(t_Handle h_FmHc, t_Handle h_Scheme, uint32
 uint32_t    FmHcPcdKgGetSchemeCounter(t_Handle h_FmHc, t_Handle h_Scheme);
 
 t_Error     FmHcPcdCcDoDynamicChange(t_Handle h_FmHc, uint32_t oldAdAddrOffset, uint32_t newAdAddrOffset);
-t_Error     FmHcPcdCcDoDynamicChangeWithAging(t_Handle h_FmHc, uint32_t oldAdAddrOffset, uint32_t newAdAddrOffset, e_ModifyState modifyState, uint16_t keyIndex);
-t_Error     FmHcPcdCcResetAgingMask(t_Handle h_FmHc, uint32_t adAddrOffset, uint32_t newAgeMask, uint32_t *p_OldAgeMask);
 
 t_Error     FmHcPcdPlcrSetProfile(t_Handle h_FmHc, t_Handle h_Profile, t_FmPcdPlcrProfileRegs *p_PlcrRegs);
 t_Error     FmHcPcdPlcrDeleteProfile(t_Handle h_FmHc, t_Handle h_Profile);
@@ -91,20 +89,5 @@ void     	FmAllowHcUsage(t_Handle h_FmHc, bool allow);
 bool     	FmIsHcUsageAllowed(t_Handle h_FmHc);
 
 
-#ifdef CONFIG_DBG_UCODE_INFRA
-t_Error FmHcPcdDbgUcodeHCmd(t_Handle h_FmHc,
-			   uint32_t muram_offset,
-			   uint8_t  *data,
-			   uint8_t	size);
 
-t_Error FmHcPcdDbgUcodeTest(t_Handle h_FmHc,
-				uint32_t opcode,
-				uint32_t *data,
-				uint16_t data_size);
-
-#ifdef CONFIG_DMAR_TEST
-t_Error FmHcPcdDMAreadTest(t_Handle h_FmPcd,
-						uint32_t muram_addr_offset, uint8_t *ptr, uint8_t size);
-#endif //CONFIG_DMAR_TEST
-#endif // CONFIG_DBG_UCODE_INFRA
 #endif /* __FM_HC_H */

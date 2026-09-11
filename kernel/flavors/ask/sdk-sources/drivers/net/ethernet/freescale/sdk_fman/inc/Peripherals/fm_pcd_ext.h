@@ -45,10 +45,8 @@
 #include "list_ext.h"
 #include "fm_ext.h"
 #include "fsl_fman_kg.h"
-#include "fm_eh_types.h"
 
-//use enhanced external hash implementation
-#define USE_ENHANCED_EHASH 1
+
 /**************************************************************************//**
  @Group         FM_grp Frame Manager API
 
@@ -509,22 +507,6 @@ t_Error FM_PCD_Disable(t_Handle h_FmPcd);
                 disabled counter is accessed.
 *//***************************************************************************/
 uint32_t FM_PCD_GetCounter(t_Handle h_FmPcd, e_FmPcdCounters counter);
-
-/**************************************************************************//**
- @Function      FmPcdPlcrProfileGetAbsoluteId
-
- @Description   Returns absolute profile Id by profile handle.
-
-
- @Param[in]     h_Profile       A handle to the profile.
-
- @Return        Absolute profile ID.
-
- @Cautions      Allowed only following FM_PCD_Init().
-*//***************************************************************************/
-
-uint16_t     FmPcdPlcrProfileGetAbsoluteId(t_Handle h_Profile);
-
 
 /**************************************************************************//**
 @Function       FM_PCD_PrsLoadSw
@@ -1717,7 +1699,6 @@ typedef struct t_FmPcdKgSchemeParams {
         uint8_t                         relativeSchemeId;       /**< if modify=FALSE:Partition relative scheme id */
         t_Handle                        h_Scheme;               /**< if modify=TRUE: a handle of the existing scheme */
     } id;
-    bool                                shared;           	/**< This scheme is shared */
     bool                                alwaysDirect;           /**< This scheme is reached only directly, i.e. no need
                                                                      for match vector; KeyGen will ignore it when matching */
     struct {                                                    /**< HL Relevant only if alwaysDirect = FALSE */
@@ -1963,7 +1944,8 @@ typedef struct t_FmPcdHashTableParams {
     uint16_t                    maxNumOfKeys;               /**< Maximum Number Of Keys that will (ever) be used in this Hash-table */
     e_FmPcdCcStatsMode          statisticsMode;             /**< If not e_FM_PCD_CC_STATS_MODE_NONE, the required structures for the
                                                                  requested statistics mode will be allocated according to maxNumOfKeys. */
-    uint8_t                     kgHashShift;                /**< Obsolete; will be considered as '0'. */
+    uint8_t                     kgHashShift;                /**< KG-Hash-shift as it was configured in the KG-scheme
+                                                                 that leads to this hash-table. */
     uint16_t                    hashResMask;                /**< Mask that will be used on the hash-result;
                                                                  The number-of-sets for this hash will be calculated
                                                                  as (2^(number of bits set in 'hashResMask'));
@@ -1974,28 +1956,6 @@ typedef struct t_FmPcdHashTableParams {
 
     t_FmPcdCcNextEngineParams   ccNextEngineParamsForMiss;  /**< Parameters for defining the next engine when a key is not matched */
 
-    bool                        agingSupport;               /**< TRUE to enable aging support for all keys of this hash table */
-
-#if (DPAA_VERSION >= 11)
-    bool                        externalHash;               /**< TRUE to use external hash table */
-
-#ifndef EXCLUDE_FMAN_IPR_OFFLOAD
-    uint32_t                    table_type;                 /**< ip reassembly table type */
-    struct {
-        uint32_t                timeout_val;                /**< reassembly timeout */
-        uint32_t                timeout_fqid;               /**< fqid for reassembly failures */
-        uint32_t                max_frags;                  /**< max allowed fragments */
-        uint32_t                min_frag_size;              /**< min allowed frag size except last frag */
-        uint32_t                max_sessions;               /**< max conn reassembly sessions */
-    };
-#endif
-
-    struct {
-        uint8_t                 dataMemId;                  /**< Memory partition ID for external hash table */
-        uint16_t                dataLiodnOffs;              /**< LIODN offset for external hash access */
-        uintptr_t               missMonitorAddr;            /**< User-allocated miss monitor address */
-    } externalHashParams;
-#endif /* (DPAA_VERSION >= 11) */
 } t_FmPcdHashTableParams;
 
 /**************************************************************************//**
@@ -3402,7 +3362,8 @@ t_Error FM_PCD_MatchTableGetNextEngine(t_Handle                     h_CcNode,
  @Param[in]     p_KgKey                 Pointer to the key; must be like the key
                                         that the KG is generated, i.e. the same
                                         extraction and with mask if exist.
- @Param[in]     kgHashShift             Obsolete; will be considered as '0'
+ @Param[in]     kgHashShift             Hash-shift as it was configured in the KG
+                                        scheme that leads to this hash.
  @Param[out]    p_CcNodeBucketHandle    Pointer to the bucket of the provided key.
  @Param[out]    p_BucketIndex           Index to the bucket of the provided key
  @Param[out]    p_LastIndex             Pointer to last index in the bucket of the
@@ -3484,7 +3445,6 @@ t_Error FM_PCD_HashTableAddKey(t_Handle            h_HashTbl,
                                uint8_t             keySize,
                                t_FmPcdCcKeyParams  *p_KeyParams);
 
-#ifndef USE_ENHANCED_EHASH
 /**************************************************************************//**
  @Function      FM_PCD_HashTableRemoveKey
 
@@ -3502,6 +3462,7 @@ t_Error FM_PCD_HashTableAddKey(t_Handle            h_HashTbl,
 t_Error FM_PCD_HashTableRemoveKey(t_Handle h_HashTbl,
                                   uint8_t  keySize,
                                   uint8_t  *p_Key);
+
 /**************************************************************************//**
  @Function      FM_PCD_HashTableModifyNextEngine
 
@@ -3525,7 +3486,6 @@ t_Error FM_PCD_HashTableModifyNextEngine(t_Handle                  h_HashTbl,
                                          uint8_t                   keySize,
                                          uint8_t                   *p_Key,
                                          t_FmPcdCcNextEngineParams *p_FmPcdCcNextEngineParams);
-#endif  // USE_ENHANCED_EHASH
 
 /**************************************************************************//**
  @Function      FM_PCD_HashTableModifyMissNextEngine
@@ -3561,21 +3521,6 @@ t_Error FM_PCD_HashTableModifyMissNextEngine(t_Handle                  h_HashTbl
 *//***************************************************************************/
 t_Error FM_PCD_HashTableGetMissNextEngine(t_Handle                     h_HashTbl,
                                           t_FmPcdCcNextEngineParams    *p_FmPcdCcNextEngineParams);
-
-/**************************************************************************//*
- @Function      FM_PCD_HashTableModifyMissMonitorAddr
-
- @Description   Modifies the miss monitor address.
-
- @Param[in]     h_HashTbl                   A handle to a hash table
- @Param[out]    monitorAddr   				Miss monitor address to be modified
-
- @Return        E_OK on success; Error code otherwise.
-
- @Cautions      Allowed only following FM_PCD_HashTableSet().
-*//***************************************************************************/
-t_Error FM_PCD_HashTableModifyMissMonitorAddr(t_Handle h_HashTbl,
-        									  uintptr_t monitorAddr);
 
 /**************************************************************************//**
  @Function      FM_PCD_HashTableFindNGetKeyStatistics
@@ -3629,75 +3574,6 @@ t_Error FM_PCD_HashTableFindNGetKeyStatistics(t_Handle                 h_HashTbl
 *//***************************************************************************/
 t_Error FM_PCD_HashTableGetMissStatistics(t_Handle                 h_HashTbl,
                                           t_FmPcdCcKeyStatistics   *p_MissStatistics);
-
-/**************************************************************************//**
-@Function      FM_PCD_HashTableGetKeyAging
-
-@Description   This routine may be used to retrieve the aging status for the
-               provided key.
-
-@Param[in]     h_HashTbl       A handle to a hash table
-@Param[in]     p_Key           Pointer to a key
-@Param[in]     keySize         Size of provided key
-@Param[in]     reset           TRUE if the user wishes to reset the aging
-                               status of this key to 1 after reading it;
-                               FALSE otherwise (key aging status will be
-                               read and not changed);
-@Param[out]    p_KeyAging      FALSE if the provided key was accessed since
-                               it's status was last set, TRUE otherwise.
-
-@Return        E_OK on success; Error code otherwise.
-
-@Cautions      Allowed only following FM_PCD_HashTableSet() with aging support
-               enabled.
-*//***************************************************************************/
-t_Error FM_PCD_HashTableGetKeyAging(t_Handle h_HashTbl,
-                                    uint8_t *p_Key,
-                                    uint8_t keySize,
-                                    bool reset,
-                                    bool *p_KeyAging);
-
-/**************************************************************************//**
-@Function      FM_PCD_HashTableGetBucketAging
-
-@Description   This routine may be used to retrieve the aging status for the
-               hash table bucket.
-
-@Param[in]     h_HashTbl            A handle to a hash table
-@Param[in]     bucketId             Id of the requested bucket
-@Param[in]     reset                TRUE if the user wishes to reset the aging
-                                    status of this bucket to all 1-s after reading;
-                                    FALSE otherwise (aging mask will be read
-                                    and not changed)
-@Param[out]    p_BucketAgingMask    Aging mask of the requested bucket;
-                                    A zero bit in the mask means that the key
-                                    represented by that bit was accessed since the
-                                    bit was last set, otherwise the bit remains
-                                    set to 1;
-                                    The MSB bit represents the first key in the
-                                    bucket, the 2nd MSB bit represents the second
-                                    key, etc..
-@Param[out]    agedKeysArray        If the user will provide a handle to a
-                                    preallocated array, this routine will copy
-                                    into that array all the keys from the requested
-                                    bucket for which the aging status is non-zero,
-                                    meaning all the keys that were not accessed since
-                                    their aging mask was last set;
-                                    The user may set this parameters to NULL to
-                                    disable this option
-
-@Return        E_OK on success; Error code otherwise
-
-@Cautions      Allowed only following FM_PCD_HashTableSet() with aging support
-               Enabled;
-               If 'agedKeysArray' is provided, it must have 31 entries large enough
-               to hold the entire keys
-*//***************************************************************************/
-t_Error FM_PCD_HashTableGetBucketAging(t_Handle h_HashTbl,
-                                       uint16_t bucketId,
-                                       bool reset,
-                                       uint32_t *p_BucketAgingMask,
-                                       uint8_t *agedKeysArray[31]);
 
 /**************************************************************************//**
  @Function      FM_PCD_ManipNodeSet
@@ -3820,28 +3696,5 @@ t_Error FM_PCD_FrmReplicRemoveMember(t_Handle h_FrmReplicGroup,
 /** @} */ /* end of FM_PCD_Runtime_grp group */
 /** @} */ /* end of FM_PCD_grp group */
 /** @} */ /* end of FM_grp group */
-
-//external hash table time stamp options
-#define MAX_EXT_TS_TIMERS       4
-#define EXT_TS_TYPE             uint32_t
-#define EXT_TS_SIZE             sizeof(EXT_TS_TYPE)
-struct ext_hash_ts_info {
-        uint32_t max_ext_ts_timers;
-        void *ptr;
-        uint32_t offset;
-};
-#define FM_PCD_UpdateExtTimeStamp(id, val) \
-{\
-        *((EXT_TS_TYPE *)extHashTsInfo.ptr + id) = (EXT_TS_TYPE)val;\
-}
-#define FM_PCD_GetExtTimeStampAddr(id) \
-	(extHashTsInfo.offset + (id * EXT_TS_SIZE))
-
-#define FM_PCD_GetExtTsRef(id)\
-        (extHashTsInfo.offset + (id * EXT_TS_SIZE))
-extern struct ext_hash_ts_info extHashTsInfo;
-
-
-
 
 #endif /* __FM_PCD_EXT */

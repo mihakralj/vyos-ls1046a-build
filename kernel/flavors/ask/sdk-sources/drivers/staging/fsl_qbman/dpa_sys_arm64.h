@@ -49,15 +49,6 @@
 #define dcbi(p) { asm volatile("dc ivac, %0" : : "r"(p) : "memory"); }
 #define dcbz(p) { asm volatile("dc zva, %0" : : "r" (p) : "memory"); }
 
-/*
- * The vendor QBMan code expects the older non-secure cache mapping helper.
- * Keep the compat shim local to the boxed vendor port instead of reviving it
- * in the arm64 core headers.
- */
-#ifndef ioremap_cache_ns
-#define ioremap_cache_ns(addr, size) ioremap_cache((addr), (size))
-#endif
-
 #define dcbz_64(p) \
 	do { \
 		dcbz(p);	\

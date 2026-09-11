@@ -101,7 +101,6 @@ static int init_bmi_rx(struct fman_port *port,
     tmp |= ((uint32_t)cfg->ic_int_offset / FMAN_PORT_IC_OFFSET_UNITS) <<
             BMI_IC_FROM_INT_SHIFT;
     tmp |= cfg->ic_size / FMAN_PORT_IC_OFFSET_UNITS;
-    tmp = 0x00000007;
     iowrite32be(tmp, &regs->fmbm_ricp);
 
     /* Internal buffer offset */
@@ -526,9 +525,6 @@ static void get_oh_stats_reg(struct fman_port *port,
         break;
     case E_FMAN_PORT_STATS_CNT_DEALLOC_BUF:
         *stats_reg = &regs->fmbm_obdc;
-        break;
-    case E_FMAN_PORT_STATS_CNT_RX_OUT_OF_BUF:
-        *stats_reg = &regs->fmbm_oodc;
         break;
     case E_FMAN_PORT_STATS_CNT_FILTERED_FRAME:
         *stats_reg = &regs->fmbm_offc;
@@ -1570,34 +1566,3 @@ int fman_port_remove_congestion_grps(struct fman_port *port,
     }
     return 0;
 }
-
-void fman_set_ohport_ofne(void *handle, uint32_t ofne_val)
-{
-	uint32_t tmp;
-	struct fman_port *port = (struct fman_port *)handle;
-
-	tmp = ioread32be(&port->bmi_regs->oh.fmbm_ofne);
-	tmp &= 0xff000000;
-	tmp |= ofne_val;
-	printk("%s::setting ofne for port %p as %08x\n", __FUNCTION__, handle, tmp);
-	iowrite32be(tmp, &port->bmi_regs->oh.fmbm_ofne);
-
-}
-EXPORT_SYMBOL(fman_set_ohport_ofne);
-
-void fman_set_ohport_rda(void *handle, uint32_t val)
-{
-	uint32_t tmp;
-	struct fman_port *port = (struct fman_port *)handle;
-
-	tmp = ioread32be(&port->bmi_regs->oh.fmbm_oda);
-	pr_info("%s::read rda reg value for port %p is %x\n", __FUNCTION__, handle, tmp);
-
-	tmp &= ~(0x00300000);
-	if(val)
-		tmp |= BMI_DMA_ATTR_WRITE_OPTIMIZE;
-
-	pr_info("%s::setting dma attributes for port %p as %x\n", __FUNCTION__, handle, tmp);
-	iowrite32be(tmp, &port->bmi_regs->oh.fmbm_oda);
-}
-EXPORT_SYMBOL(fman_set_ohport_rda);

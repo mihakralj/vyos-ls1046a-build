@@ -268,6 +268,10 @@ jobs:
           cp -v vyos-build/scripts/package-build/linux-*.deb \
             vyos-build/data/live-build-config/packages.chroot/
 
+      - name: Check ASK kernel patches/sdk-sources match the pin (nxp-sdk only)
+        if: ${{ startsWith(github.ref_name, 'nxp-sdk') }}
+        run: kernel/common/scripts/sync-ask-kernel.sh --check
+
       - name: Stage kernel tree (FLAVOR-aware)
         run: bin/ci-stage-kernel.sh
 
