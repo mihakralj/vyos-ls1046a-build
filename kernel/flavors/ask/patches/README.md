@@ -76,8 +76,18 @@ fallback, 2026-09-11):
   not applicable to this base at all (not merely redundant):
   - `110-sdk-mainline-build-compat.patch` — by its own commit message,
     exists only for consumers that build on mainline kernel.org rather
-    than the NXP vendor tag. We are the vendor tag; every API/wiring
-    gap it fills already exists natively.
+    than the NXP vendor tag. We are the vendor tag; most of the API/
+    wiring gaps it fills already exist natively (verified: applying it
+    fails outright against real NXP headers/Makefiles that already have
+    what it adds). One exception found via actual link failure, not
+    assumption: `sdk_dpaa/mac.c` calls `phylink_interface_max_speed()`
+    directly, and NXP's vendored `sdk_dpaa/Kconfig` only `select`s
+    PHYLIB, not PHYLINK — with `FSL_SDK_DPAA_ETH=y` (built in) and
+    `CONFIG_PHYLINK=m` (module, the general default), that's an
+    `undefined reference` at vmlinux link time regardless of base tree.
+    Fixed by forcing `CONFIG_PHYLINK=y` in `kernel/flavors/ask/
+    ask.config` instead of patching the pristine sdk-sources Kconfig or
+    reviving 110's un-static+export approach.
   - `120-emc2305-dt-fan-control.patch` — an in-kernel DT-driven
     cooling-device rewrite of the EMC2305 fan controller, unrelated to
     ASK/DPAA1 networking and built against Linux v6.12.103 (54 point
