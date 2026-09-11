@@ -1,38 +1,78 @@
-From: vyos-ls1046a-build M0 fix <noreply@vyos-ls1046a-build>
-Date: 2026-05-26
-Subject: [PATCH] dpaa: retro-attach flavor ops to all probed privs on register
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: flavor ops hooks + retro-attach (T-M3)
 
-The init-order bug: LS1046A has DPAA1 built-in. All five FMan MACs probe
-at boot calling dpaa_priv_attach_flavor_ops() while dpaa_*_ops_global are
-still NULL. When af_xdp_pool.ko loads later via udev (T+638s on the DUT)
-it populates the globals but the per-priv RCU slots are never refreshed.
-dpaa_setup_xsk_pool() then takes the first NULL-ops bail and returns
--EOPNOTSUPP -> userspace bind(XDP_ZEROCOPY) fails -95.
+Consolidates 0069 (dpaa-flavor-hooks) + 0069a (dpaa-flavor-ops-retro-attach)
+into one patch, verified byte-identical against CI checkpoints
+c8989ea0704b..819158996cef (patch-series-cleanup run 34556757795).
+Touches: dpaa_eth.c, dpaa_flavor.c.
 
-Confirmed via kprobes on DUT image 2026.05.26-1904-rolling (run 26469108527):
-  - xp_assign_dev rc=-95
-  - dpaa_xdp entered, returns -95 (xdp_features bit OK)
-  - af_xdp_pool_xsk_pool_attach NEVER fires during bind
-
-Fix: use a private heap-allocated tracker list inside dpaa_flavor.c, so
-no struct dpaa_priv field has to be added (which would shift follow-on
-patches 0071/0072/0075b). On attach we kzalloc a small tracker node and
-add it to a LIST_HEAD under a spinlock. On register, walk the trackers
-and rcu_assign new ops into every priv. Unregister does the inverse.
-
-With no flavor module loaded, behaviour is byte-identical to the
-post-0068+0069 baseline. One ~32-byte kzalloc per probed dpaa_priv
-(5 allocs on LS1046A) is the only added cost.
-
-Acceptance gate this unlocks:
-  sudo /tmp/xsk_bind_test eth4 0 --zerocopy   # must print "bind() SUCCESS"
-
-Depends-on: 0068-dpaa-flavor-ops.patch, 0069-dpaa-flavor-hooks.patch.
-
-Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
 ---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -30,6 +30,7 @@
+ #include <linux/sort.h>
+ #include <linux/bpf.h>
+ #include <linux/bpf_trace.h>
++#include "dpaa_flavor.h"
+ #include <soc/fsl/bman.h>
+ #include <soc/fsl/qman.h>
+ #include "fman.h"
+@@ -3508,6 +3509,24 @@
+ 	netif_set_real_num_tx_queues(net_dev,
+ 				     priv->num_tc * dpaa_num_txqs_per_tc());
+ 
++	/* M0: attach flavor ops, then run pcd_ops->install before
++	 * register_netdev() makes the netdev visible to userspace.
++	 */
++	dpaa_priv_attach_flavor_ops(priv);
++	{
++		const struct dpaa_pcd_ops *pops =
++			rcu_dereference_protected(priv->pcd_ops,
++				lockdep_is_held(&dev->mutex));
++		if (pops && pops->install) {
++			err = pops->install(priv);
++			if (err) {
++				dev_err(dev, "flavor pcd_ops->install() = %d\n",
++					err);
++				goto delete_dpaa_napi;
++			}
++		}
++	}
++
+ 	/* Initialize NAPI */
+ 	err = dpaa_napi_add(net_dev);
+ 	if (err < 0)
+@@ -3556,6 +3575,17 @@
+ 
+ 	dpaa_eth_sysfs_remove(dev);
+ 
++	/* M0: tear down flavor PCD configuration before the netdev becomes
++	 * invisible to userspace.
++	 */
++	{
++		const struct dpaa_pcd_ops *pops =
++			rcu_dereference_protected(priv->pcd_ops,
++				lockdep_is_held(&dev->mutex));
++		if (pops && pops->teardown)
++			pops->teardown(priv);
++	}
++
+ 	dev_set_drvdata(dev, NULL);
+ 	unregister_netdev(net_dev);
+ 	phylink_destroy(priv->mac_dev->phylink);
+@@ -3572,6 +3602,8 @@
+ 
+ 	dpaa_napi_del(net_dev);
+ 
++	dpaa_priv_detach_flavor_ops(priv);
++
+ 	dpaa_bps_free(priv);
+ 
+ 	free_netdev(net_dev);
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
-index 27931f0..27931f1 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
 @@ -11,60 +11,131 @@
@@ -195,5 +235,3 @@ index 27931f0..27931f1 100644
 +priv->flavor_priv = NULL;
 +}
 \ No newline at end of file
--- 
-2.39.5
