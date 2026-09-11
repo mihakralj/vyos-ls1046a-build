@@ -84,13 +84,13 @@ fi
 [ -n "$KVER" ] || { echo "FATAL: could not resolve KVER"; exit 1; }
 
 # ── Clone we-are-mono/ASK, pinned to a fixed commit ───────────────────────
-# Pinned (not a floating branch) so upstream drift on mt-6.12.y can never
-# silently break the sed/python source patches below without a deliberate
-# bump here. Update ASK_COMMIT + kernel/flavors/ask/{sources,userspace}
-# READMEs together when intentionally moving to a newer upstream commit.
-ASK_REPO="https://github.com/we-are-mono/ASK.git"
-ASK_BRANCH="mt-6.12.y"
-ASK_COMMIT="a211ea865379362058c6656b9c448e4a7050e93c"
+# Pinned (not a floating branch) so upstream drift can never silently break
+# the sed/python source patches below without a deliberate bump. The pin
+# lives in kernel/flavors/ask/ask-version.env -- shared with
+# ci-build-ask-userspace.sh so the two builds can never disagree.
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "$0")/.." && pwd)/kernel/flavors/ask/ask-version.env"
+ASK_COMMIT="$ASK_VERSION"
 ASK_CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/ask-clone-cache"
 ASK_DIR="$ASK_CACHE_DIR/ask-mt-6.12.y"
 

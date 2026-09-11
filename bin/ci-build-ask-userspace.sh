@@ -71,12 +71,12 @@ mkdir -p "$SRC_CACHE"
 SYSROOT="$SRC_CACHE/sysroot"
 mkdir -p "$SYSROOT" "$SYSROOT/lib" "$SYSROOT/include" "$SYSROOT/lib/pkgconfig"
 
-# Pinned (not a floating branch) — matches bin/ci-build-ask-modules.sh.
-# Update ASK_COMMIT in both scripts + the kernel/flavors/ask/{sources,
-# userspace} READMEs together when intentionally bumping upstream.
-ASK_REPO="https://github.com/we-are-mono/ASK.git"
-ASK_BRANCH="mt-6.12.y"
-ASK_COMMIT="a211ea865379362058c6656b9c448e4a7050e93c"
+# Pinned (not a floating branch) -- the pin lives in
+# kernel/flavors/ask/ask-version.env, shared with ci-build-ask-modules.sh
+# so the two builds can never disagree.
+# shellcheck disable=SC1091
+. "$REPO_ROOT/kernel/flavors/ask/ask-version.env"
+ASK_COMMIT="$ASK_VERSION"
 ASK_CACHE="${RUNNER_TOOL_CACHE:-/tmp}/ask-clone-cache"
 ASK_DIR="$ASK_CACHE/ask-mt-6.12.y"
 
