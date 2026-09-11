@@ -1,8 +1,8 @@
 diff --git a/src/udev/vyos_net_name b/src/udev/vyos_net_name
-index 568734c..cc789d6 100755
+index 388cc78..ac5e6db 100755
 --- a/src/udev/vyos_net_name
 +++ b/src/udev/vyos_net_name
-@@ -95,6 +95,37 @@ def get_biosdevname(ifname: str) -> str:
+@@ -114,6 +114,37 @@ def get_biosdevname(ifname: str) -> str:
      return intf if biosname == '' else biosname
  
  
@@ -40,13 +40,13 @@ index 568734c..cc789d6 100755
  def leave_rescan_hint(intf_name: str, hwid: str):
      """Write interface information reported by udev
  
-@@ -221,6 +252,9 @@ def on_boot_event(intf_name: str, hwid: str, predefined: str = '') -> str:
+@@ -162,6 +193,9 @@ def on_boot_event(intf_name: str, hwid: str, predefined: str = '') -> str:
      add_assigned_interfaces(interfaces)
-     logger.debug(f'adding assigned interfaces: {interfaces}')
+     logger.debug(f'{intf_name} ({hwid}): already assigned this boot: {interfaces}')
  
 +    if not predefined:
 +        predefined = get_fman_predefined(intf_name)
 +
      if predefined:
          newname = predefined
-         logger.info(f"predefined interface name for '{intf_name}' is '{newname}'")
+     else:

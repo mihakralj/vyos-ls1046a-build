@@ -43,7 +43,7 @@ index 40b38b3..5011f69 100644
          root_dir = disk.find_persistence()
  
 diff --git a/python/vyos/system/grub_util.py b/python/vyos/system/grub_util.py
-index edaea8a..a9163fd 100644
+index 98d3c1d..bea39b1 100644
 --- a/python/vyos/system/grub_util.py
 +++ b/python/vyos/system/grub_util.py
 @@ -18,6 +18,15 @@
@@ -59,10 +59,10 @@ index edaea8a..a9163fd 100644
 +    except OSError:
 +        return False
 +
+ @image.if_not_container
+ @image.if_persistence
  @compat.grub_cfg_update
- def set_serial_console(console_type: str, console_num: str,
-                        console_speed: str, root_dir: str = '') -> None:
-@@ -37,6 +46,8 @@ def set_serial_console(console_type: str, console_num: str,
+@@ -41,6 +50,8 @@ def set_serial_console(console_type: str, console_num: str,
  def update_serial_console(console_type: str, console_num: str,
                            console_speed: str, root_dir: str = '') -> None:
      """Update console_speed if different from current value"""
@@ -71,7 +71,7 @@ index edaea8a..a9163fd 100644
  
      if not root_dir:
          root_dir = disk.find_persistence()
-@@ -70,6 +81,8 @@ def update_kernel_cmdline_options(cmdline_options: str,
+@@ -78,6 +89,8 @@ def update_kernel_cmdline_options(cmdline_options: str,
                                    root_dir: str = '',
                                    version = image.get_running_image()) -> None:
      """Update Kernel custom cmdline options"""

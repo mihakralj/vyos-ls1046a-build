@@ -1,11 +1,11 @@
 diff --git a/src/conf_mode/system_option.py b/src/conf_mode/system_option.py
-index 003e8c9..634abb2 100755
+index 47ea9fa..c3711d2 100755
 --- a/src/conf_mode/system_option.py
 +++ b/src/conf_mode/system_option.py
-@@ -480,9 +480,23 @@ def generate_cmdline_for_kexec(options):
- 
+@@ -600,6 +600,20 @@ def generate_cmdline_for_kexec(options):
  
  def apply(options):
+     running_as_container = image.is_running_as_container()
 +    # LS1046A SDK DPAA1 cannot survive kexec: drivers/staging/fsl_qbman has
 +    # no bman_requires_cleanup() / qman_requires_cleanup() equivalent of
 +    # mainline drivers/soc/fsl/qbman, so the second kernel finds frame
@@ -21,9 +21,14 @@ index 003e8c9..634abb2 100755
 +        pass
 +
      kexec_required, cmdline_new = generate_cmdline_for_kexec(options)
+     # T9269: a container does not own the Kernel cmdline - it belongs to the
+     # host system, thus neither kexec nor a reboot would apply anything and the
+@@ -607,7 +621,7 @@ def apply(options):
+     if running_as_container:
+         kexec_required = False
      if kexec_required:
 -        if not boot_configuration_complete() and os.getenv('VYOS_CONFIGD'):
 +        if (not _ls1046a) and not boot_configuration_complete() and os.getenv('VYOS_CONFIGD'):
-             cmd(
-                 'kexec -l /boot/vmlinuz --initrd=/boot/initrd.img '
-                 f'--command-line="{cmdline_new}" --kexec-file-syscall'
+             cmdl([
+                 'kexec', '-l', '/boot/vmlinuz', '--initrd=/boot/initrd.img',
+                 f'--command-line={cmdline_new}', '--kexec-file-syscall',
