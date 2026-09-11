@@ -62,14 +62,9 @@
 0095-dpaa1-xsk-fill-ring-guard-audit.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0096-dpaa1-true-zc-rx-recover-readside.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0097-fman-pcd-keygen.patch
+# patch-series-cleanup (2026-09-11): squashed 0097+0098+0099+0100.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0098-fman-pcd-cc-static-install.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0099-fman-pcd-hm-install.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0100-fman-pcd-plcr-install.patch
+0097-fman-pcd-keygen-cc-hm-plcr-install.patch
 
 # ── DPAA / FMan port primitives ──
 # 0101–0106: VLAN strip, bpool, CC base, KeyGen graft
