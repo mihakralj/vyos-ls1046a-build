@@ -39,7 +39,6 @@
 #include <linux/percpu.h>
 #include <linux/highmem.h>
 #include <linux/sort.h>
-#include <linux/list_sort.h>
 #include <linux/fsl_qman.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -53,58 +52,6 @@
 #include "dpaa_debugfs.h"
 #endif /* CONFIG_FSL_DPAA_DBG_LOOP */
 #include "mac.h"
-
-/* Deferred registration for ifindex ordering by ethernet alias.
- * Devices are collected during probe and registered in sorted order
- * via late_initcall to ensure eth0 gets ifindex 2, eth1 gets 3, etc.
- */
-struct dpa_pending_netdev {
-	struct list_head list;
-	struct net_device *net_dev;
-	int eth_alias;
-};
-
-static LIST_HEAD(dpa_pending_list);
-static DEFINE_MUTEX(dpa_pending_mutex);
-static bool dpa_pending_registered;
-
-static int dpa_pending_cmp(void *priv, const struct list_head *a,
-			   const struct list_head *b)
-{
-	struct dpa_pending_netdev *pa = list_entry(a, struct dpa_pending_netdev, list);
-	struct dpa_pending_netdev *pb = list_entry(b, struct dpa_pending_netdev, list);
-	return pa->eth_alias - pb->eth_alias;
-}
-
-static int __init dpa_register_pending_netdevs(void)
-{
-	struct dpa_pending_netdev *pending, *tmp;
-	int err;
-
-	mutex_lock(&dpa_pending_mutex);
-	dpa_pending_registered = true;
-
-	/* Sort by ethernet alias */
-	list_sort(NULL, &dpa_pending_list, dpa_pending_cmp);
-
-	/* Register in sorted order and initialize sysfs */
-	list_for_each_entry_safe(pending, tmp, &dpa_pending_list, list) {
-		err = register_netdev(pending->net_dev);
-		if (err) {
-			pr_err("register_netdev(%s) = %d\n",
-			       pending->net_dev->name, err);
-		} else {
-			/* Init sysfs after successful registration */
-			dpaa_eth_sysfs_init(&pending->net_dev->dev);
-		}
-		list_del(&pending->list);
-		kfree(pending);
-	}
-
-	mutex_unlock(&dpa_pending_mutex);
-	return 0;
-}
-late_initcall(dpa_register_pending_netdevs);
 
 /* Size in bytes of the FQ taildrop threshold */
 #define DPA_FQ_TD		0x200000
@@ -156,7 +103,6 @@ int dpa_netdev_init(struct net_device *net_dev,
 	int err;
 	struct dpa_priv_s *priv = netdev_priv(net_dev);
 	struct device *dev = net_dev->dev.parent;
-	int eth_alias;
 
 	net_dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
 
@@ -171,30 +117,6 @@ int dpa_netdev_init(struct net_device *net_dev,
 	net_dev->needed_headroom = priv->tx_headroom;
 	net_dev->watchdog_timeo = msecs_to_jiffies(tx_timeout);
 
-	/* Get ethernet alias for interface naming and sorted registration */
-	eth_alias = of_alias_get_id(priv->mac_dev->dev->of_node, "ethernet");
-	if (eth_alias >= 0)
-		snprintf(net_dev->name, IFNAMSIZ, "eth%d", eth_alias);
-
-	/* Defer registration to late_initcall for sorted ifindex assignment */
-	mutex_lock(&dpa_pending_mutex);
-	if (!dpa_pending_registered) {
-		struct dpa_pending_netdev *pending;
-
-		pending = kzalloc(sizeof(*pending), GFP_KERNEL);
-		if (!pending) {
-			mutex_unlock(&dpa_pending_mutex);
-			return -ENOMEM;
-		}
-		pending->net_dev = net_dev;
-		pending->eth_alias = (eth_alias >= 0) ? eth_alias : INT_MAX;
-		list_add_tail(&pending->list, &dpa_pending_list);
-		mutex_unlock(&dpa_pending_mutex);
-		return 1;  /* Positive return = deferred, caller should not continue */
-	}
-	mutex_unlock(&dpa_pending_mutex);
-
-	/* If late_initcall already ran, register immediately */
 	err = register_netdev(net_dev);
 	if (err < 0) {
 		dev_err(dev, "register_netdev() = %d\n", err);
@@ -244,7 +166,6 @@ int __cold dpa_start(struct net_device *net_dev)
 	}
 
 	netif_tx_start_all_queues(net_dev);
-	dpa_update_eth_if(priv);
 
 	return 0;
 
@@ -264,8 +185,6 @@ int __cold dpa_stop(struct net_device *net_dev)
 
 	priv = netdev_priv(net_dev);
 	mac_dev = priv->mac_dev;
-
-	dpa_update_eth_if(priv);
 
 	netif_tx_stop_all_queues(net_dev);
 	/* Allow the Fman (Tx) port to process in-flight frames before we
@@ -377,20 +296,6 @@ int dpa_set_features(struct net_device *dev, netdev_features_t features)
 	return 0;
 }
 EXPORT_SYMBOL(dpa_set_features);
-
-netdev_features_t dpa_fix_features(struct net_device *dev,
-				   netdev_features_t features)
-{
-	netdev_features_t unsupported_features = 0;
-
-	/* We don't support enabling Rx csum through ethtool yet */
-	unsupported_features |= NETIF_F_RXCSUM;
-
-	features &= ~unsupported_features;
-
-	return features;
-}
-EXPORT_SYMBOL(dpa_fix_features);
 
 #ifdef CONFIG_FSL_DPAA_TS
 u64 dpa_get_timestamp_ns(const struct dpa_priv_s *priv, enum port_type rx_tx,
@@ -683,16 +588,6 @@ void dpa_set_rx_mode(struct net_device *net_dev)
 					   "mac_dev->set_promisc() = %d\n",
 					   _errno);
 	}
-	if (!!(net_dev->flags & IFF_ALLMULTI) != priv->mac_dev->allmulti) {
-		priv->mac_dev->allmulti = !priv->mac_dev->allmulti;
-		_errno = priv->mac_dev->set_allmulti(
-				priv->mac_dev->get_mac_handle(priv->mac_dev),
-				priv->mac_dev->allmulti);
-		if (unlikely(_errno < 0) && netif_msg_drv(priv))
-			netdev_err(net_dev,
-					   "mac_dev->set_allmulti() = %d\n",
-					   _errno);
-	}
 
 	_errno = priv->mac_dev->set_multi(net_dev, priv->mac_dev);
 	if (unlikely(_errno < 0) && netif_msg_drv(priv))
@@ -713,7 +608,6 @@ void dpa_set_buffers_layout(struct mac_device *mac_dev,
 	layout[RX].time_stamp = true;
 #endif
 	fm_port_get_buff_layout_ext_params(mac_dev->port_dev[RX], &params);
-	printk("*********%s(%d) internal buffer offset %d\n",__FUNCTION__,__LINE__, params.manip_extra_space);
 	layout[RX].manip_extra_space = params.manip_extra_space;
 	/* a value of zero for data alignment means "don't care", so align to
 	 * a non-zero value to prevent FMD from using its own default
@@ -824,7 +718,7 @@ void dpa_bp_drain(struct dpa_bp *bp)
 }
 EXPORT_SYMBOL(dpa_bp_drain);
 
-void __cold __attribute__((nonnull))
+static void __cold __attribute__((nonnull))
 _dpa_bp_free(struct dpa_bp *dpa_bp)
 {
 	struct dpa_bp *bp = dpa_bpid2pool(dpa_bp->bpid);
@@ -845,7 +739,6 @@ _dpa_bp_free(struct dpa_bp *dpa_bp)
 	dpa_bp_array[bp->bpid] = NULL;
 	bman_free_pool(bp->pool);
 }
-EXPORT_SYMBOL(_dpa_bp_free);
 
 void __cold __attribute__((nonnull))
 dpa_bp_free(struct dpa_priv_s *priv)
@@ -1650,9 +1543,8 @@ void dpa_release_sgt(struct qm_sg_entry *sgt)
 }
 EXPORT_SYMBOL(dpa_release_sgt);
 
-// net_dev is not used internally, so commenting non null check
-//void __attribute__((nonnull))
-void dpa_fd_release(const struct net_device *net_dev, const struct qm_fd *fd)
+void __attribute__((nonnull))
+dpa_fd_release(const struct net_device *net_dev, const struct qm_fd *fd)
 {
 	struct qm_sg_entry	*sgt;
 	struct dpa_bp		*dpa_bp;
@@ -1707,67 +1599,6 @@ void dpa_fd_release(const struct net_device *net_dev, const struct qm_fd *fd)
 		cpu_relax();
 }
 EXPORT_SYMBOL(dpa_fd_release);
-
-// SGT fraglist to be freed
-//void __attribute__((nonnull))
-void sgt_fraglist_fd_release(const struct net_device *net_dev, const struct qm_fd *fd)
-{
-   struct qm_sg_entry  *sgt;
-   struct dpa_bp       *dpa_bp;
-   struct bm_buffer    bmb;
-   struct sk_buff *skb;
-   dma_addr_t      addr;
-   void            *vaddr;
-   int ii = 0;
-
-   bmb.opaque = 0;
-
-   if (!qm_fd_addr(fd))
-   {
-       printk("%s(%d) NULL addr in fd\n",__FUNCTION__,__LINE__);
-       return;
-   }
-
-
-   char *tmp = (char *) fd;
-   printk("%s(%d) FD info : \t",__FUNCTION__,__LINE__);
-   printk("%0x %0x %0x %0x %0x %0x %0x %0x %0x %0x %0x %0x %0x %0x %0x %0x\n",
-   tmp[0],tmp[1],tmp[2],tmp[3],tmp[4],tmp[5],tmp[6],tmp[7],tmp[8],tmp[9],tmp[10],tmp[11],tmp[12],tmp[13],tmp[14],tmp[15]);
-   bm_buffer_set64(&bmb, qm_fd_addr(fd));
-   dpa_bp = dpa_bpid2pool(fd->bpid);
-   DPA_BUG_ON(!dpa_bp);
-
-   if (fd->format == qm_fd_sg) {
-       vaddr = phys_to_virt(qm_fd_addr(fd));
-       sgt = vaddr;
-
-       printk("%s(%d) addr %llx , size %zu, buff pool id %x, fd %p\t",
-           __FUNCTION__, __LINE__, (unsigned long long)qm_fd_addr(fd),
-           dpa_bp->size, bmb.bpid, fd);
-       printk("bpid: %d, netdev name %s, vaddr %p, fd offset %zd\n",
-           fd->bpid, net_dev->name, vaddr, dpa_fd_offset(fd));
-
-       while (!qm_sg_entry_get_final(&sgt[ii]))
-           ii++;
-       addr = qm_sg_addr(&sgt[ii+1]);
-       printk("%s(%d) ii %d, old-skb %p \n",__FUNCTION__, __LINE__,ii,(void *)addr);
-       if (addr) // free the old skb
-       {
-           skb =  (struct sk_buff *)(addr);
-           kfree_skb(skb);
-       }
-       addr = 0;
-       qm_sg_entry_set64(&sgt[ii+1], addr);
-
-       dma_unmap_single(dpa_bp->dev, qm_fd_addr(fd), (ii+1)*sizeof(struct qm_sg_entry),
-                DMA_BIDIRECTIONAL);
-
-   }
-
-   while (bman_release(dpa_bp->pool, &bmb, 1, 0))
-       cpu_relax();
-}
-EXPORT_SYMBOL(sgt_fraglist_fd_release);
 
 void count_ern(struct dpa_percpu_priv_s *percpu_priv,
 		      const struct qm_mr_entry *msg)
@@ -1904,8 +1735,7 @@ return_error:
 }
 EXPORT_SYMBOL(dpa_enable_tx_csum);
 
-#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH) || \
-	defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
+#ifdef CONFIG_FSL_DPAA_CEETM
 void dpa_enable_ceetm(struct net_device *dev)
 {
 	struct dpa_priv_s *priv = netdev_priv(dev);
@@ -1920,36 +1750,3 @@ void dpa_disable_ceetm(struct net_device *dev)
 }
 EXPORT_SYMBOL(dpa_disable_ceetm);
 #endif
-
-void dpa_set_eth_ifinfo(struct dpa_priv_s *priv, void* ifinfo)
-{
-	if(!priv)
-		return;
-	priv->ifinfo = ifinfo;
-	return;
-}
-EXPORT_SYMBOL(dpa_set_eth_ifinfo);
-
-
-void dpa_reset_eth_ifinfo(struct dpa_priv_s *priv)
-{
-	if(!priv)
-		return;
-	priv->ifinfo = NULL;
-	return;
-}
-EXPORT_SYMBOL(dpa_reset_eth_ifinfo);
-
-int dpa_update_eth_if(struct dpa_priv_s *priv)
-{
-	unsigned int port_status;
-	if(!priv->ifinfo || !priv->net_dev)
-		return 1;
-	port_status = test_bit(__LINK_STATE_START,
-							&priv->net_dev->state);
-		/* Synch tx port here */
-		((struct en_ehash_ifportinfo*)(priv->ifinfo))->txpinfo.port_info = ntohl(port_status);
-
-		return 0;
-}
-EXPORT_SYMBOL(dpa_update_eth_if);

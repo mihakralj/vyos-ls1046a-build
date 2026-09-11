@@ -1,0 +1,614 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Mon, 07 Sep 2026 20:49:05 +0200
+Subject: [PATCH] thermal: add linear active cooling governor with passive
+ step-wise control
+
+Local implementation against Linux 6.12.103; not an upstream backport.
+Interpolate each active cooling map within its limits up to the next
+higher active trip bound to that device in the same zone. Keep core
+hysteresis, maximum-demand aggregation, and hot/critical handling. Reuse
+step-wise trip updates for passive cooling so a zone can manage both
+fans and CPU throttling. Allow selecting linear as the built-in default,
+with no userspace selector or new thermal DT properties. Document the
+policy and exercise it through the real thermal core using simulated
+sensors and cooling devices.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ drivers/thermal/Kconfig                     |   26 ++
+ drivers/thermal/Makefile                    |    1 
+ drivers/thermal/thermal_core.h              |    4 
+ drivers/thermal/gov_step_wise.c             |   11 -
+ drivers/thermal/gov_linear.c                |  108 ++++++++++
+ drivers/thermal/gov_linear_test.c           |  292 +++++++++++++++++++++++++++
+ Documentation/driver-api/thermal/index.rst  |    1 
+ Documentation/driver-api/thermal/linear.rst |   39 ++++
+ 8 files changed, 476 insertions(+), 6 deletions(-)
+ create mode 100644 drivers/thermal/gov_linear.c
+ create mode 100644 drivers/thermal/gov_linear_test.c
+ create mode 100644 Documentation/driver-api/thermal/linear.rst
+
+diff --git a/drivers/thermal/Kconfig b/drivers/thermal/Kconfig
+--- a/drivers/thermal/Kconfig
++++ b/drivers/thermal/Kconfig
+@@ -106,6 +106,15 @@
+ 	  Use the step_wise governor as default. This throttles the
+ 	  devices one step at a time.
+ 
++config THERMAL_DEFAULT_GOV_LINEAR
++	bool "linear"
++	select THERMAL_GOV_LINEAR
++	help
++	  Interpolate active cooling states between trip temperatures and
++	  use step_wise for passive cooling.
++	  This selects the linear policy for zones at boot without needing
++	  a userspace policy selector.
++
+ config THERMAL_DEFAULT_GOV_FAIR_SHARE
+ 	bool "fair_share"
+ 	select THERMAL_GOV_FAIR_SHARE
+@@ -151,6 +160,23 @@
+ 	help
+ 	  Enable this to manage platform thermals using a simple linear
+ 	  governor.
++
++config THERMAL_GOV_LINEAR
++	bool "Linear thermal governor"
++	select THERMAL_GOV_STEP_WISE
++	help
++	  Interpolate each active cooling map's minimum and maximum states
++	  between its trip temperature and the next higher active trip bound
++	  to the same cooling device. Passive trips use step_wise throttling.
++	  See Documentation/driver-api/thermal/linear.rst.
++
++config THERMAL_GOV_LINEAR_KUNIT_TEST
++	bool "KUnit tests for the linear thermal governor" if !KUNIT_ALL_TESTS
++	depends on KUNIT=y && THERMAL_GOV_LINEAR
++	default KUNIT_ALL_TESTS
++	help
++	  Exercise the governor through thermal core with simulated sensors
++	  and cooling devices, including hysteresis and passive cooling.
+ 
+ config THERMAL_GOV_BANG_BANG
+ 	bool "Bang Bang thermal governor"
+diff --git a/drivers/thermal/Makefile b/drivers/thermal/Makefile
+--- a/drivers/thermal/Makefile
++++ b/drivers/thermal/Makefile
+@@ -21,6 +21,7 @@
+ thermal_sys-$(CONFIG_THERMAL_GOV_FAIR_SHARE)	+= gov_fair_share.o
+ thermal_sys-$(CONFIG_THERMAL_GOV_BANG_BANG)	+= gov_bang_bang.o
+ thermal_sys-$(CONFIG_THERMAL_GOV_STEP_WISE)	+= gov_step_wise.o
++thermal_sys-$(CONFIG_THERMAL_GOV_LINEAR)		+= gov_linear.o
+ thermal_sys-$(CONFIG_THERMAL_GOV_USER_SPACE)	+= gov_user_space.o
+ thermal_sys-$(CONFIG_THERMAL_GOV_POWER_ALLOCATOR)	+= gov_power_allocator.o
+ 
+diff --git a/drivers/thermal/thermal_core.h b/drivers/thermal/thermal_core.h
+--- a/drivers/thermal/thermal_core.h
++++ b/drivers/thermal/thermal_core.h
+@@ -167,6 +167,8 @@
+ #define DEFAULT_THERMAL_GOVERNOR       "power_allocator"
+ #elif defined(CONFIG_THERMAL_DEFAULT_GOV_BANG_BANG)
+ #define DEFAULT_THERMAL_GOVERNOR       "bang_bang"
++#elif defined(CONFIG_THERMAL_DEFAULT_GOV_LINEAR)
++#define DEFAULT_THERMAL_GOVERNOR       "linear"
+ #endif
+ 
+ /* Initial state of a cooling device during binding */
+@@ -209,6 +211,8 @@
+ 
+ void thermal_cdev_update(struct thermal_cooling_device *);
+ void __thermal_cdev_update(struct thermal_cooling_device *cdev);
++void thermal_step_wise_update(struct thermal_zone_device *tz,
++			      const struct thermal_trip_desc *td);
+ 
+ int get_tz_trend(struct thermal_zone_device *tz, const struct thermal_trip *trip);
+ 
+diff --git a/drivers/thermal/gov_step_wise.c b/drivers/thermal/gov_step_wise.c
+--- a/drivers/thermal/gov_step_wise.c
++++ b/drivers/thermal/gov_step_wise.c
+@@ -78,9 +78,8 @@
+ 	return instance->target;
+ }
+ 
+-static void thermal_zone_trip_update(struct thermal_zone_device *tz,
+-				     const struct thermal_trip_desc *td,
+-				     int trip_threshold)
++void thermal_step_wise_update(struct thermal_zone_device *tz,
++			      const struct thermal_trip_desc *td)
+ {
+ 	const struct thermal_trip *trip = &td->trip;
+ 	enum thermal_trend trend = get_tz_trend(tz, trip);
+@@ -88,13 +87,13 @@
+ 	struct thermal_instance *instance;
+ 	bool throttle = false;
+ 
+-	if (tz->temperature >= trip_threshold) {
++	if (tz->temperature >= td->threshold) {
+ 		throttle = true;
+ 		trace_thermal_zone_trip(tz, trip_id, trip->type);
+ 	}
+ 
+ 	dev_dbg(&tz->device, "Trip%d[type=%d,temp=%d]:trend=%d,throttle=%d\n",
+-		trip_id, trip->type, trip_threshold, trend, throttle);
++		trip_id, trip->type, td->threshold, trend, throttle);
+ 
+ 	list_for_each_entry(instance, &td->thermal_instances, trip_node) {
+ 		int old_target;
+@@ -138,7 +137,7 @@
+ 		    trip->type == THERMAL_TRIP_HOT)
+ 			continue;
+ 
+-		thermal_zone_trip_update(tz, td, td->threshold);
++		thermal_step_wise_update(tz, td);
+ 	}
+ 
+ 	for_each_trip_desc(tz, td) {
+diff --git a/drivers/thermal/gov_linear.c b/drivers/thermal/gov_linear.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/thermal/gov_linear.c
+@@ -0,0 +1,108 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Linear active cooling with step-wise passive cooling. */
++
++#include <linux/math64.h>
++#include <linux/thermal.h>
++
++#include "thermal_core.h"
++
++/*
++ * A map's lower state is its value at the trip temperature. Its upper state
++ * is reached at the next higher active trip bound to this cooling device.
++ * Find that trip in this zone only; neither DTS order nor other fans/zones
++ * determine the endpoint. A terminal map requests its upper state.
++ */
++static const struct thermal_trip *
++linear_next_trip(struct thermal_zone_device *tz, struct thermal_instance *instance)
++{
++	const struct thermal_trip *next = NULL;
++	const struct thermal_trip_desc *td;
++	struct thermal_instance *other;
++
++	for_each_trip_desc(tz, td) {
++		const struct thermal_trip *trip = &td->trip;
++
++		if (trip->type != THERMAL_TRIP_ACTIVE ||
++		    trip->temperature == THERMAL_TEMP_INVALID ||
++		    trip->temperature <= instance->trip->temperature ||
++		    (next && trip->temperature >= next->temperature))
++			continue;
++
++		list_for_each_entry(other, &td->thermal_instances, trip_node) {
++			if (other->cdev == instance->cdev) {
++				next = trip;
++				break;
++			}
++		}
++	}
++	return next;
++}
++
++static unsigned long linear_target(struct thermal_zone_device *tz,
++				   const struct thermal_trip_desc *td,
++				   struct thermal_instance *instance)
++{
++	const struct thermal_trip *next;
++	u32 offset, span;
++
++	/* The core maintains this threshold, including falling hysteresis. */
++	if (td->trip.temperature == THERMAL_TEMP_INVALID ||
++	    tz->temperature < td->threshold)
++		return THERMAL_NO_TARGET;
++
++	next = linear_next_trip(tz, instance);
++	if (!next || tz->temperature >= next->temperature)
++		return instance->upper;
++
++	if (tz->temperature <= td->trip.temperature)
++		return instance->lower;
++
++	offset = (s64)tz->temperature - td->trip.temperature;
++	span = (s64)next->temperature - td->trip.temperature;
++	/* Integer division rounds down; the result stays within the map bounds. */
++	return instance->lower + mul_u64_u32_div(instance->upper - instance->lower,
++					       offset, span);
++}
++
++static void linear_manage(struct thermal_zone_device *tz)
++{
++	const struct thermal_trip_desc *td;
++	struct thermal_instance *instance;
++
++	lockdep_assert_held(&tz->lock);
++
++	for_each_trip_desc(tz, td) {
++		if (td->trip.type == THERMAL_TRIP_PASSIVE &&
++		    td->trip.temperature != THERMAL_TEMP_INVALID) {
++			thermal_step_wise_update(tz, td);
++			continue;
++		}
++		if (td->trip.type != THERMAL_TRIP_ACTIVE)
++			continue;
++
++		list_for_each_entry(instance, &td->thermal_instances, trip_node) {
++			instance->target = linear_target(tz, td, instance);
++			instance->initialized = true;
++			/* Retry even unchanged demand after a failed hardware write. */
++			mutex_lock(&instance->cdev->lock);
++			instance->cdev->updated = false;
++			mutex_unlock(&instance->cdev->lock);
++		}
++	}
++
++	/* Aggregate all maps and zones before applying each device's demand. */
++	for_each_trip_desc(tz, td) {
++		list_for_each_entry(instance, &td->thermal_instances, trip_node)
++			thermal_cdev_update(instance->cdev);
++	}
++}
++
++static struct thermal_governor thermal_gov_linear = {
++	.name = "linear",
++	.manage = linear_manage,
++};
++THERMAL_GOVERNOR_DECLARE(thermal_gov_linear);
++
++#if IS_ENABLED(CONFIG_THERMAL_GOV_LINEAR_KUNIT_TEST)
++#include "gov_linear_test.c"
++#endif
+diff --git a/drivers/thermal/gov_linear_test.c b/drivers/thermal/gov_linear_test.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/thermal/gov_linear_test.c
+@@ -0,0 +1,292 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Exercise the actual thermal core, trip hysteresis and cooling aggregation. */
++#include <kunit/test.h>
++
++struct linear_test_cdev {
++	struct thermal_cooling_device *cdev;
++	unsigned long state;
++	unsigned long max_state;
++	unsigned int writes;
++	int error;
++};
++
++struct linear_test_ctx {
++	struct thermal_zone_device *tz;
++	struct linear_test_cdev cooling[3];
++	struct linear_test_cdev *bound[3];
++	int temperature;
++	int sensor_error;
++	unsigned int critical;
++};
++
++enum linear_test_trip {
++	LINEAR_TOP, LINEAR_CPU, LINEAR_SECOND_LOW, LINEAR_CRITICAL,
++	LINEAR_LOW, LINEAR_SECOND_TOP, LINEAR_UNBOUND,
++};
++
++static const struct thermal_trip linear_test_trips[] = {
++	[LINEAR_TOP] = { .temperature = 80000, .type = THERMAL_TRIP_ACTIVE },
++	[LINEAR_CPU] = { .temperature = 85000, .hysteresis = 2000,
++			.type = THERMAL_TRIP_PASSIVE },
++	[LINEAR_SECOND_LOW] = { .temperature = 45000, .hysteresis = 1000,
++			       .type = THERMAL_TRIP_ACTIVE },
++	[LINEAR_CRITICAL] = { .temperature = 95000, .type = THERMAL_TRIP_CRITICAL },
++	[LINEAR_LOW] = { .temperature = 40000, .hysteresis = 2000,
++			.type = THERMAL_TRIP_ACTIVE },
++	[LINEAR_SECOND_TOP] = { .temperature = 75000, .type = THERMAL_TRIP_ACTIVE },
++	[LINEAR_UNBOUND] = { .temperature = 60000, .type = THERMAL_TRIP_ACTIVE },
++};
++
++static int linear_test_get_max(struct thermal_cooling_device *cdev, unsigned long *state)
++{
++	struct linear_test_cdev *cooling = cdev->devdata;
++
++	*state = cooling->max_state;
++	return 0;
++}
++
++static int linear_test_get_state(struct thermal_cooling_device *cdev, unsigned long *state)
++{
++	struct linear_test_cdev *cooling = cdev->devdata;
++
++	*state = cooling->state;
++	return 0;
++}
++
++static int linear_test_set_state(struct thermal_cooling_device *cdev, unsigned long state)
++{
++	struct linear_test_cdev *cooling = cdev->devdata;
++
++	cooling->writes++;
++	if (cooling->error)
++		return cooling->error;
++	if (state > cooling->max_state)
++		return -EINVAL;
++	cooling->state = state;
++	return 0;
++}
++
++static const struct thermal_cooling_device_ops linear_test_cooling_ops = {
++	.get_max_state = linear_test_get_max,
++	.get_cur_state = linear_test_get_state,
++	.set_cur_state = linear_test_set_state,
++};
++
++static bool linear_test_bind(struct thermal_zone_device *tz, const struct thermal_trip *trip,
++			     struct thermal_cooling_device *cdev, struct cooling_spec *spec)
++{
++	struct linear_test_ctx *ctx = tz->devdata;
++	int id = thermal_zone_trip_id(tz, trip);
++
++	if (ctx->bound[0] && cdev->devdata == ctx->bound[0]) {
++		if (id != LINEAR_LOW && id != LINEAR_TOP)
++			return false;
++		spec->lower = id == LINEAR_LOW ? 34 : 255;
++		spec->upper = 255;
++	} else if (ctx->bound[1] && cdev->devdata == ctx->bound[1]) {
++		if (id != LINEAR_SECOND_LOW && id != LINEAR_SECOND_TOP)
++			return false;
++		spec->lower = id == LINEAR_SECOND_LOW ? 60 : 200;
++		spec->upper = 200;
++	} else if (ctx->bound[2] && cdev->devdata == ctx->bound[2] && id == LINEAR_CPU) {
++		spec->lower = 0;
++		spec->upper = 3;
++	} else {
++		return false;
++	}
++	return true;
++}
++
++static int linear_test_get_temp(struct thermal_zone_device *tz, int *temp)
++{
++	struct linear_test_ctx *ctx = tz->devdata;
++
++	*temp = ctx->temperature;
++	return ctx->sensor_error;
++}
++
++static void linear_test_critical(struct thermal_zone_device *tz)
++{
++	struct linear_test_ctx *ctx = tz->devdata;
++
++	ctx->critical++;
++}
++
++static const struct thermal_zone_device_ops linear_test_zone_ops = {
++	.should_bind = linear_test_bind,
++	.get_temp = linear_test_get_temp,
++	.critical = linear_test_critical,
++};
++
++static void linear_test_unregister_zone(void *arg)
++{
++	thermal_zone_device_unregister(arg);
++}
++
++static void linear_test_unregister_cdev(void *arg)
++{
++	thermal_cooling_device_unregister(arg);
++}
++
++static int linear_test_register_zone(struct kunit *test, struct linear_test_ctx *ctx)
++{
++	const struct thermal_zone_params params = {
++		.governor_name = "linear",
++		.no_hwmon = true,
++	};
++	int ret;
++
++	ctx->tz = thermal_zone_device_register_with_trips("linear-test", linear_test_trips,
++							ARRAY_SIZE(linear_test_trips), ctx,
++							&linear_test_zone_ops, &params, 0, 0);
++	if (IS_ERR(ctx->tz))
++		return PTR_ERR(ctx->tz);
++	ret = kunit_add_action_or_reset(test, linear_test_unregister_zone, ctx->tz);
++	if (ret)
++		return ret;
++	return thermal_zone_device_enable(ctx->tz);
++}
++
++static int linear_test_init(struct kunit *test)
++{
++	struct linear_test_ctx *ctx;
++	int i, ret;
++
++	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++	test->priv = ctx;
++	ctx->temperature = 35000;
++	for (i = 0; i < ARRAY_SIZE(ctx->cooling); i++) {
++		struct linear_test_cdev *cooling = &ctx->cooling[i];
++
++		ctx->bound[i] = cooling;
++		cooling->max_state = i == 2 ? 3 : 255;
++		cooling->cdev = thermal_cooling_device_register("linear-test", cooling,
++							      &linear_test_cooling_ops);
++		if (IS_ERR(cooling->cdev))
++			return PTR_ERR(cooling->cdev);
++		ret = kunit_add_action_or_reset(test, linear_test_unregister_cdev, cooling->cdev);
++		if (ret)
++			return ret;
++	}
++	return linear_test_register_zone(test, ctx);
++}
++
++static void linear_test_sample(struct linear_test_ctx *ctx, int temperature)
++{
++	ctx->temperature = temperature;
++	thermal_zone_device_update(ctx->tz, THERMAL_EVENT_TEMP_SAMPLE);
++}
++
++static void linear_test_curve(struct kunit *test)
++{
++	struct linear_test_ctx *ctx = test->priv;
++	static const int temps[] = { 35000, 39999, 40000, 41000, 50000, 60000,
++				     70000, 79999, 80000, 90000, 60000 };
++	static const unsigned long states[] = { 0, 0, 34, 39, 89, 144, 199, 254, 255, 255, 144 };
++	int i;
++
++	KUNIT_ASSERT_STREQ(test, ctx->tz->governor->name, "linear");
++	for (i = 0; i < ARRAY_SIZE(temps); i++) {
++		linear_test_sample(ctx, temps[i]);
++		KUNIT_EXPECT_EQ_MSG(test, ctx->cooling[0].state, states[i], "T=%d", temps[i]);
++	}
++	/* The unrelated 60 C trip and second fan's 75 C endpoint do not alter fan 1. */
++	KUNIT_EXPECT_EQ(test, ctx->cooling[1].state, 130UL);
++}
++
++static void linear_test_hysteresis(struct kunit *test)
++{
++	struct linear_test_ctx *ctx = test->priv;
++
++	linear_test_sample(ctx, 39000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 0UL);
++	linear_test_sample(ctx, 40000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 34UL);
++	linear_test_sample(ctx, 39000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 34UL);
++	linear_test_sample(ctx, 38000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 34UL);
++	linear_test_sample(ctx, 37999);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 0UL);
++	linear_test_sample(ctx, 39999);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 0UL);
++	linear_test_sample(ctx, 40000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 34UL);
++}
++
++static void linear_test_passive_and_critical(struct kunit *test)
++{
++	struct linear_test_ctx *ctx = test->priv;
++
++	linear_test_sample(ctx, 84000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[2].state, 0UL);
++	linear_test_sample(ctx, 85000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[2].state, 1UL);
++	linear_test_sample(ctx, 86000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[2].state, 2UL);
++	linear_test_sample(ctx, 87000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[2].state, 3UL);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 255UL);
++	KUNIT_EXPECT_EQ(test, ctx->critical, 0U);
++	linear_test_sample(ctx, 95000);
++	KUNIT_EXPECT_EQ(test, ctx->critical, 1U);
++	linear_test_sample(ctx, 82000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[2].state, 0UL);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 255UL);
++}
++
++static void linear_test_retry(struct kunit *test)
++{
++	struct linear_test_ctx *ctx = test->priv;
++
++	linear_test_sample(ctx, 50000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 89UL);
++	ctx->cooling[0].error = -EIO;
++	linear_test_sample(ctx, 60000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 89UL);
++	ctx->cooling[0].error = 0;
++	linear_test_sample(ctx, 60000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 144UL);
++	ctx->sensor_error = -EAGAIN;
++	linear_test_sample(ctx, 35000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 144UL);
++	ctx->sensor_error = 0;
++	linear_test_sample(ctx, 35000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 0UL);
++}
++
++static void linear_test_shared_fan(struct kunit *test)
++{
++	struct linear_test_ctx *ctx = test->priv;
++	struct linear_test_ctx *other;
++
++	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, other);
++	other->bound[0] = &ctx->cooling[0];
++	other->temperature = 70000;
++	KUNIT_ASSERT_EQ(test, linear_test_register_zone(test, other), 0);
++	linear_test_sample(ctx, 50000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 199UL);
++	linear_test_sample(ctx, 35000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 199UL);
++	linear_test_sample(other, 35000);
++	KUNIT_EXPECT_EQ(test, ctx->cooling[0].state, 0UL);
++}
++
++static struct kunit_case linear_test_cases[] = {
++	KUNIT_CASE(linear_test_curve),
++	KUNIT_CASE(linear_test_hysteresis),
++	KUNIT_CASE(linear_test_passive_and_critical),
++	KUNIT_CASE(linear_test_retry),
++	KUNIT_CASE(linear_test_shared_fan),
++	{}
++};
++
++static struct kunit_suite linear_test_suite = {
++	.name = "thermal-linear",
++	.init = linear_test_init,
++	.test_cases = linear_test_cases,
++};
++kunit_test_suite(linear_test_suite);
+diff --git a/Documentation/driver-api/thermal/index.rst b/Documentation/driver-api/thermal/index.rst
+--- a/Documentation/driver-api/thermal/index.rst
++++ b/Documentation/driver-api/thermal/index.rst
+@@ -11,6 +11,7 @@
+    cpu-idle-cooling
+    sysfs-api
+    power_allocator
++   linear
+ 
+    exynos_thermal
+    exynos_thermal_emulation
+diff --git a/Documentation/driver-api/thermal/linear.rst b/Documentation/driver-api/thermal/linear.rst
+new file mode 100644
+--- /dev/null
++++ b/Documentation/driver-api/thermal/linear.rst
+@@ -0,0 +1,39 @@
++.. SPDX-License-Identifier: GPL-2.0-only
++
++Linear thermal governor
++=======================
++
++The ``linear`` governor interpolates active cooling states using ordinary
++thermal trips and cooling maps. This is a local governor, not an upstream
++Linux feature. Passive trips retain the step_wise governor's behavior. Hot
++and critical trip handling remains in thermal core.
++
++For an active map, the lower state is requested at its trip temperature. The
++upper state is reached at the next higher active trip in the same zone that
++is also bound to this cooling device. Between those temperatures the state
++is interpolated, with integer division rounding down. Beyond the endpoint it
++is clamped to the upper state. A terminal map requests its upper state as
++soon as it becomes active. A fixed-state map has equal lower and upper limits.
++Trip order does not matter. Equal-temperature trips do not form a segment.
++
++For a continuous curve, set each map's upper state equal to the next map's
++lower state, and give the last map equal lower and upper states. For example,
++a fan exposing PWM bytes as cooling states can use a 40 C active trip with
++limits 34..255 and an 80 C active trip with limits 255..255. This requests 34,
++89, 144, 199 and 255 at 40, 50, 60, 70 and 80 C respectively. Cooling states
++are driver-defined; the governor does not interpret them as RPM or duty.
++
++The core's hysteresis threshold determines whether a map is active. A 2 C
++hysteresis on the 40 C trip starts cooling at 40 C and keeps at least state
++34 until the temperature falls below 38 C. Use zero hysteresis on subsequent
++points to retrace the same line when cooling. Inactive maps release their
++request; the core applies the maximum demand across all maps and zones.
++
++Select ``CONFIG_THERMAL_DEFAULT_GOV_LINEAR`` for automatic boot-time control,
++or select ``linear`` through a zone's policy attribute. The zone must poll or
++otherwise deliver temperature updates throughout the curve; trip interrupts
++alone cannot continuously adjust the state within a segment. Hardware startup
++boosts belong in the fan driver. The governor re-applies active-device requests
++on each update so transient write failures are retried. Temperature read
++failures retain the last demand and use the thermal core's existing retry
++behavior; this governor does not introduce a separate sensor watchdog.
+-- 
+2.47.3
+

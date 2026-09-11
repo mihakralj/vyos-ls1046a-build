@@ -236,7 +236,6 @@ typedef struct ioc_compat_fm_pcd_cc_key_params_t {
     compat_uptr_t                              p_key;
     compat_uptr_t                              p_mask;
     ioc_compat_fm_pcd_cc_next_engine_params_t  cc_next_engine_params; /**< compat structure*/
-	compat_uptr_t				monitor_addr;
 } ioc_compat_fm_pcd_cc_key_params_t;
 
 typedef struct ioc_compat_keys_params_t {
@@ -267,13 +266,6 @@ typedef struct ioc_compat_fm_pcd_hash_table_params_t {
     uint8_t                     hash_shift;
     uint8_t                     match_key_size;
     ioc_compat_fm_pcd_cc_next_engine_params_t   cc_next_engine_params_for_miss;
-	bool			aging_support;
-	bool			external_hash;
-	struct {
-		uint8_t		data_mem_id;
-		uint16_t	data_liodn_offs;
-		compat_uptr_t	miss_monitor_addr;
-	} external_hash_params;
     compat_uptr_t               id;
 } ioc_compat_fm_pcd_hash_table_params_t;
 

@@ -1,7 +1,10 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 9bd5602cb8d96ea655627bb7569d988650e24802 Mon Sep 17 00:00:00 2001
 From: Tomaz Zaman <tomaz@mono.si>
 Date: Mon, 4 May 2026 18:00:00 +0200
 Subject: [PATCH] sdk_dpaa: use slab_build_skb() for kmalloc'd pool buffers
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 dpaa_bp_alloc_n_add_buffs() seeds a BMan pool's buffers via kmalloc()
 and, when act_skb=true, wraps each buffer in an skb via
@@ -17,12 +20,17 @@ cdx module load. behaviorally the kernel auto-corrects via __slab_build_skb
 after warning — so this patch is just removing the WARN noise, not
 fixing a runtime regression. slab_build_skb() is a drop-in replacement
 for build_skb(ptr, 0) on slab buffers.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
 ---
+ drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
 diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c
-index ce91adf053a6..bb56ac6d22cb 100644
+index 4854edf74d5f..ce0400ca782a 100644
 --- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c
 +++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c
-@@ -179,7 +179,7 @@ int dpaa_bp_alloc_n_add_buffs(const struct dpa_bp *dpa_bp, uint32_t nbuffs, bool
+@@ -197,7 +197,7 @@ int dpaa_bp_alloc_n_add_buffs(const struct dpa_bp *dpa_bp, uint32_t nbuffs, bool
  				 * We only need enough space to store a pointer, but allocate
  				 * an entire cacheline for performance reasons.
  				 */
@@ -31,5 +39,6 @@ index ce91adf053a6..bb56ac6d22cb 100644
  				if (unlikely(!skb)) {
  					pr_err("%s(%d) ii %d , buffs2fill %d build_skb failed \n",
  							__func__,__LINE__, ii, buffs2fill);
---
-2.43.0
+-- 
+2.47.3
+

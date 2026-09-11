@@ -1,0 +1,84 @@
+From 04c24d4b516a8a14998225eb5bae4270c886b772 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Wed, 12 Aug 2026 14:14:02 +0200
+Subject: [PATCH] sdk_dpaa: quiet benign "phy device not initialized" ethtool
+ noise
+
+The DPAA ethtool ops guard against a NULL phy_dev and return early --
+correct for a port with no PHY (fixed-link and offline/OH ports, or a
+port mid-teardown). Six of these guards logged at netdev_err, so a
+routine ethtool query on such a port spams the console at error level
+even though nothing is wrong and the op still returns its normal
+result.
+
+Two guards in the same file already use netdev_dbg for the identical
+condition and message; make the other six match, so the line is emitted
+only under dynamic debug. No functional change -- same early return and
+return codes.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ .../net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c   | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c
+index a15d31c7bf7b..95f6db29416b 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c
+@@ -127,7 +127,7 @@ static int __cold dpa_set_ksettings(struct net_device *net_dev,
+ 		return -ENODEV;
+ 	}
+ 	if (unlikely(priv->mac_dev->phy_dev == NULL)) {
+-		netdev_err(net_dev, "phy device not initialized\n");
++		netdev_dbg(net_dev, "phy device not initialized\n");
+ 		return -ENODEV;
+ 	}
+ 
+@@ -182,7 +182,7 @@ static int __cold dpa_nway_reset(struct net_device *net_dev)
+ 		return -ENODEV;
+ 	}
+ 	if (unlikely(priv->mac_dev->phy_dev == NULL)) {
+-		netdev_err(net_dev, "phy device not initialized\n");
++		netdev_dbg(net_dev, "phy device not initialized\n");
+ 		return -ENODEV;
+ 	}
+ 
+@@ -214,7 +214,7 @@ static void __cold dpa_get_pauseparam(struct net_device *net_dev,
+ 
+ 	phy_dev = mac_dev->phy_dev;
+ 	if (unlikely(phy_dev == NULL)) {
+-		netdev_err(net_dev, "phy device not initialized\n");
++		netdev_dbg(net_dev, "phy device not initialized\n");
+ 		return;
+ 	}
+ 
+@@ -242,7 +242,7 @@ static int __cold dpa_set_pauseparam(struct net_device *net_dev,
+ 
+ 	phy_dev = mac_dev->phy_dev;
+ 	if (unlikely(phy_dev == NULL)) {
+-		netdev_err(net_dev, "phy device not initialized\n");
++		netdev_dbg(net_dev, "phy device not initialized\n");
+ 		return -ENODEV;
+ 	}
+ 
+@@ -329,7 +329,7 @@ static int dpa_get_eee(struct net_device *net_dev, struct ethtool_keee *et_eee)
+ 	}
+ 
+ 	if (unlikely(priv->mac_dev->phy_dev == NULL)) {
+-		netdev_err(net_dev, "phy device not initialized\n");
++		netdev_dbg(net_dev, "phy device not initialized\n");
+ 		return -ENODEV;
+ 	}
+ 
+@@ -347,7 +347,7 @@ static int dpa_set_eee(struct net_device *net_dev, struct ethtool_keee *et_eee)
+ 	}
+ 
+ 	if (unlikely(priv->mac_dev->phy_dev == NULL)) {
+-		netdev_err(net_dev, "phy device not initialized\n");
++		netdev_dbg(net_dev, "phy device not initialized\n");
+ 		return -ENODEV;
+ 	}
+ 
+-- 
+2.47.3
+

@@ -1243,7 +1243,6 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
                         p_SchemeRegs->kgse_ppc = ppcTmp;
                     }
                 }
-                printk("%s::kgse_ppc %08x\n", __FUNCTION__, ppcTmp);
             }
             break;
         case (e_FM_PCD_DONE):
@@ -1255,14 +1254,6 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
         default:
              RETURN_ERROR(MAJOR, E_NOT_SUPPORTED, ("Next engine not supported"));
     }
-#if 0 //BMR bypass classification
-    printk("%s::actual_kgse_mode %08x\n", __FUNCTION__, tmpReg);
-    if (p_SchemeParams->nextEngine == e_FM_PCD_CC) {
-		tmpReg =  (KG_SCH_MODE_EN | GET_NIA_BMI_AC_ENQ_FRAME(p_FmPcd));
-		tmpReg |= (uint32_t)(grpBase << KG_SCH_MODE_CCOBASE_SHIFT);
-    }
-    printk("%s::kgse_mode %08x\n", __FUNCTION__, tmpReg);
-#endif
     p_SchemeRegs->kgse_mode = tmpReg;
 
     p_SchemeRegs->kgse_mv = p_Scheme->matchVector;
@@ -1580,8 +1571,6 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
                 generic = FALSE;
             }
         }
-	//bmr
-	knownTmp |= KG_SCH_KN_PORT_ID;
         p_SchemeRegs->kgse_ekfc = knownTmp;
 
         selectTmp = 0;
@@ -2784,22 +2773,10 @@ uint8_t FmPcdKgGetSchemeId(t_Handle h_Scheme)
 
 }
 
-void disp_sch_info(t_Handle h_Scheme)
-{
-	t_FmPcdKgScheme *scheme;
-
-	scheme = (t_FmPcdKgScheme *)h_Scheme;
-	printk("scheme %p\n", h_Scheme);
-	printk("id %d, mv %x\n", scheme->schemeId,
-		scheme->matchVector);
-
-}
-#if (DPAA_VERSION >= 11)
 bool FmPcdKgGetVspe(t_Handle h_Scheme)
 {
     return ((t_FmPcdKgScheme*)h_Scheme)->vspe;
 }
-#endif /* (DPAA_VERSION >= 11) */
 
 uint8_t FmPcdKgGetRelativeSchemeId(t_Handle h_FmPcd, uint8_t schemeId)
 {

@@ -1,42 +1,5 @@
-From 8958217de0bd9d8706e4bdf87a93e009f7e9100f Mon Sep 17 00:00:00 2001
-From: Tomaz Zaman <tomaz@mono.si>
-Date: Thu, 23 Apr 2026 17:55:40 +0200
-Subject: [PATCH] ask: IPv4/IPv6 forwarding-path hook points
-
-Wires Comcerto fast-path hooks into the kernel's IP forwarding code path:
-net/ipv4/{ip_output,ip_tunnel}.c, net/ipv6/{ip6_output,ip6_tunnel,sit,udp,
-output_core}.c and net/ipv6/netfilter/ip6t_NPT.c. Also the tunnel-related
-UAPI (if_arp.h ARPHRD_IPV6_IPV6_TUNNEL, if_tunnel.h, ip6_tunnel.h).
-
-Depends on the dpa_add_dummy_eth_hdr export and skb fields from 010.
-
-Signed-off-by: Tomaz Zaman <tomaz@mono.si>
----
- include/uapi/linux/if_arp.h   |  1 +
- net/ipv4/ip_output.c          | 38 +++++++++++++++++++++++++++++++++++++-
- net/ipv4/ip_tunnel.c          |  3 +++
- net/ipv6/ip6_output.c         | 31 +++++++++++++++++++++++++++++--
- net/ipv6/ip6_tunnel.c         | 12 ++++++++----
- net/ipv6/netfilter/ip6t_NPT.c | 29 +++++++++++++++++++++++++++++
- net/ipv6/output_core.c        | 19 +++++++++++++++++++
- net/ipv6/sit.c                |  3 +++
- 8 files changed, 129 insertions(+), 7 deletions(-)
-
-
-diff --git a/include/uapi/linux/if_arp.h b/include/uapi/linux/if_arp.h
-index 4783af9fe520..822e21ba5ebb 100644
---- a/include/uapi/linux/if_arp.h
-+++ b/include/uapi/linux/if_arp.h
-@@ -29,6 +29,7 @@
- /* ARP protocol HARDWARE identifiers. */
- #define ARPHRD_NETROM	0		/* from KA9Q: NET/ROM pseudo	*/
- #define ARPHRD_ETHER 	1		/* Ethernet 10Mbps		*/
-+#define ARPHRD_IPV6_IPV6_TUNNEL		ARPHRD_ETHER
- #define	ARPHRD_EETHER	2		/* Experimental Ethernet	*/
- #define	ARPHRD_AX25	3		/* AX.25 Level 2		*/
- #define	ARPHRD_PRONET	4		/* PROnet token ring		*/
 diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
-index 49811c9281d4..87b2653bb951 100644
+index 49811c928..3c7c7e8b6 100644
 --- a/net/ipv4/ip_output.c
 +++ b/net/ipv4/ip_output.c
 @@ -102,6 +102,17 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
@@ -90,21 +53,24 @@ index 49811c9281d4..87b2653bb951 100644
  		return ip_fragment(net, sk, skb, mtu, ip_finish_output2);
  
  	return ip_finish_output2(net, sk, skb);
-@@ -431,6 +457,13 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
- 	skb->dev = dev;
- 	skb->protocol = htons(ETH_P_IP);
- 
+@@ -434,6 +460,16 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
+ 			    net, sk, skb, indev, dev,
+ 			    ip_finish_output,
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD)
 +	/* Bypass invoking post routing hooks since the tunnel header and ESP
 +	 * processing is not done in slow path for IPSec offloaded cases
 +	 */
-+	if (skb->ipsec_offload)
-+		return ip_finish_output(net, sk, skb);
++	if (skb->ipsec_offload) {
++		ret_val = ip_finish_output(net, sk, skb);
++		rcu_read_unlock();
++		return ret_val;
++	}
 +#endif
- 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
- 			    net, sk, skb, indev, dev,
- 			    ip_finish_output,
-@@ -561,6 +594,9 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
+ 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
+ }
+ EXPORT_SYMBOL(ip_output);
+@@ -561,6 +597,9 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
  	skb_dst_copy(to, from);
  	to->dev = from->dev;
  	to->mark = from->mark;
@@ -115,7 +81,7 @@ index 49811c9281d4..87b2653bb951 100644
  	skb_copy_hash(to, from);
  
 diff --git a/net/ipv4/ip_tunnel.c b/net/ipv4/ip_tunnel.c
-index 09b73acf037a..1083fe44416d 100644
+index 09b73acf0..1083fe444 100644
 --- a/net/ipv4/ip_tunnel.c
 +++ b/net/ipv4/ip_tunnel.c
 @@ -438,6 +438,9 @@ int ip_tunnel_rcv(struct ip_tunnel *tunnel, struct sk_buff *skb,
@@ -129,7 +95,7 @@ index 09b73acf037a..1083fe44416d 100644
  	}
  
 diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
-index f0e5431c2d46..87fe154cd7ea 100644
+index f0e5431c2..87fe154cd 100644
 --- a/net/ipv6/ip6_output.c
 +++ b/net/ipv6/ip6_output.c
 @@ -83,6 +83,13 @@ static int ip6_finish_output2(struct net *net, struct sock *sk, struct sk_buff *
@@ -199,38 +165,29 @@ index f0e5431c2d46..87fe154cd7ea 100644
  	skb_copy_hash(to, from);
  
 diff --git a/net/ipv6/ip6_tunnel.c b/net/ipv6/ip6_tunnel.c
-index 5350c9bb2319..8273f86c6372 100644
+index 5350c9bb2..81b7ab84e 100644
 --- a/net/ipv6/ip6_tunnel.c
 +++ b/net/ipv6/ip6_tunnel.c
-@@ -19,6 +19,7 @@
- #include <linux/capability.h>
- #include <linux/errno.h>
- #include <linux/types.h>
-+#include <linux/version.h>
- #include <linux/sockios.h>
- #include <linux/icmp.h>
- #include <linux/if.h>
-@@ -1196,11 +1197,14 @@ int ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
+@@ -832,6 +832,9 @@ static int __ip6_tnl_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
+ 		skb->protocol = eth_type_trans(skb, tunnel->dev);
+ 		skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
+ 	} else {
++#ifdef CONFIG_CPE_FAST_PATH
++		skb->underlying_iif = skb->dev->ifindex;
++#endif
+ 		skb->dev = tunnel->dev;
+ 		skb_reset_mac_header(skb);
+ 	}
+@@ -1196,6 +1199,7 @@ int ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
  		       IPV6_MIN_MTU : IPV4_MIN_MTU);
  
  	skb_dst_update_pmtu_no_confirm(skb, mtu);
 +
  	if (skb->len - t->tun_hlen - eth_hlen > mtu && !skb_is_gso(skb)) {
--		*pmtu = mtu;
--		err = -EMSGSIZE;
--		goto tx_err_dst_release;
--	}
-+			*pmtu = mtu;
-+			err = -EMSGSIZE;
-+			goto tx_err_dst_release;
-+		}
-+
-+	hop_limit = t->parms.hop_limit;
- 
- 	if (t->err_count > 0) {
- 		if (time_before(jiffies,
+ 		*pmtu = mtu;
+ 		err = -EMSGSIZE;
 diff --git a/net/ipv6/netfilter/ip6t_NPT.c b/net/ipv6/netfilter/ip6t_NPT.c
-index 787c74aa85e3..f523f471722a 100644
+index 787c74aa8..f523f4717 100644
 --- a/net/ipv6/netfilter/ip6t_NPT.c
 +++ b/net/ipv6/netfilter/ip6t_NPT.c
 @@ -11,6 +11,9 @@
@@ -284,7 +241,7 @@ index 787c74aa85e3..f523f471722a 100644
  }
  
 diff --git a/net/ipv6/output_core.c b/net/ipv6/output_core.c
-index 806d4b5dd1e6..f27467e8e51d 100644
+index 806d4b5dd..f27467e8e 100644
 --- a/net/ipv6/output_core.c
 +++ b/net/ipv6/output_core.c
 @@ -128,7 +128,18 @@ int __ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
@@ -322,7 +279,7 @@ index 806d4b5dd1e6..f27467e8e51d 100644
  		       net, sk, skb, NULL, skb_dst(skb)->dev,
  		       dst_output);
 diff --git a/net/ipv6/sit.c b/net/ipv6/sit.c
-index 3c15a0ae228e..338f3d6674c3 100644
+index 3c15a0ae2..338f3d667 100644
 --- a/net/ipv6/sit.c
 +++ b/net/ipv6/sit.c
 @@ -694,6 +694,9 @@ static int ipip6_rcv(struct sk_buff *skb)

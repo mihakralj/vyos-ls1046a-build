@@ -230,7 +230,7 @@ static struct attribute *fm_oh_port_dev_stats_attributes[] = {
 	/* &dev_attr_port_rx_bad_frame.attr, */
 	/* &dev_attr_port_rx_large_frame.attr, */
 	&dev_attr_port_rx_out_of_buffers_discard.attr,
-	&dev_attr_port_rx_filter_frame.attr, 
+	/*&dev_attr_port_rx_filter_frame.attr, */
 	NULL
 };
 
@@ -667,9 +667,6 @@ int fm_port_dump_regs_bmi(void *h_dev, char *buf, int nn)
 		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_offc);
 		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_ofwdc);
 		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_ofldec);
-		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_obdc);
-		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_oodc);
-		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_opec);
 		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_opc);
 		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_opcp);
 		FM_DMP_V32(buf, n, &p_bmi->ohPortBmiRegs, fmbm_occn);
@@ -701,9 +698,6 @@ int fm_port_dump_regs_bmi(void *h_dev, char *buf, int nn)
 		FM_DMP_V32(buf, n, &p_bmi->rxPortBmiRegs, fmbm_rfpne);
 		FM_DMP_V32(buf, n, &p_bmi->rxPortBmiRegs, fmbm_rpso);
 		FM_DMP_V32(buf, n, &p_bmi->rxPortBmiRegs, fmbm_rpp);
-#ifdef USE_ENHANCED_EHASH
-		FM_DMP_V32(buf, n, &p_bmi->rxPortBmiRegs, fmbm_rccb); 
-#endif
 		FM_DMP_TITLE(buf, n, &(p_bmi->rxPortBmiRegs.fmbm_rprai),
 			"fmbm_rprai");
 		for (i = 0; i < FM_PORT_PRS_RESULT_NUM_OF_WORDS; ++i) {

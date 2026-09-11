@@ -55,14 +55,6 @@
 #include "fm_prs.h"
 #include "fm_hc.h"
 #include "fm_muram_ext.h"
-#ifdef USE_ENHANCED_EHASH
-#include "fm_ehash.h"
-#endif /*USE_ENHANCED_EHASH */
-#if (DPAA_VERSION >= 11)
-//time stamp infrastructure for use in the case of ext hash tables
-struct ext_hash_ts_info extHashTsInfo;
-EXPORT_SYMBOL(extHashTsInfo);
-#endif
 
 /****************************************/
 /*       static functions               */
@@ -375,89 +367,7 @@ static void ReleaseFreeLocksLst(t_FmPcd *p_FmPcd)
     }
 }
 
-#if (DPAA_VERSION >= 11)
-static void ReleaseFEsList(t_FmPcd *p_FmPcd)
-{
-    t_FmPcdFEObj *p_FeObj;
-    uint32_t intFlags;
 
-    intFlags = XX_LockIntrSpinlock(p_FmPcd->h_Spinlock);
-    while (!LIST_IsEmpty(&p_FmPcd->feInfo.enqLst))
-    {
-        p_FeObj = FM_PCD_FE_OBJ(p_FmPcd->feInfo.enqLst.p_Next);
-        LIST_DelAndInit(&p_FeObj->node);
-        FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FeObj->h_FE);
-        XX_Free(p_FeObj);
-    }
-    while (!LIST_IsEmpty(&p_FmPcd->feInfo.availableFeLst))
-    {
-        p_FeObj = FM_PCD_FE_OBJ(p_FmPcd->feInfo.availableFeLst.p_Next);
-        LIST_DelAndInit(&p_FeObj->node);
-        FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FeObj->h_FE);
-        XX_Free(p_FeObj);
-    }
-    XX_UnlockIntrSpinlock(p_FmPcd->h_Spinlock, intFlags);
-}
-
-static __inline__ t_FmPcdFEObj* DequeueFEObj(t_FmPcd *p_FmPcd, t_List *p_List)
-{
-    t_FmPcdFEObj *p_FeObj = NULL;
-    uint32_t    intFlags;
-
-    intFlags = XX_LockIntrSpinlock(p_FmPcd->h_Spinlock);
-    if (!LIST_IsEmpty(p_List))
-    {
-        p_FeObj = FM_PCD_FE_OBJ(p_List->p_Next);
-        LIST_DelAndInit(&p_FeObj->node);
-    }
-    XX_UnlockIntrSpinlock(p_FmPcd->h_Spinlock, intFlags);
-
-    return p_FeObj;
-}
-
-static __inline__ void EnqueueFEObj(t_FmPcd *p_FmPcd, t_List *p_List, t_FmPcdFEObj *p_FeObj)
-{
-    uint32_t   intFlags;
-
-    intFlags = XX_LockIntrSpinlock(p_FmPcd->h_Spinlock);
-    LIST_AddToTail(&p_FeObj->node, p_List);
-    XX_UnlockIntrSpinlock(p_FmPcd->h_Spinlock, intFlags);
-}
-
-static t_Error AllocFEObjs(t_FmPcd *p_FmPcd)
-{
-    t_Handle h_FmMuram = NULL;
-    t_FmPcdFEObj *p_FeObj;
-    uint32_t i;
-
-    ASSERT_COND(p_FmPcd);
-
-    h_FmMuram = FmPcdGetMuramHandle(p_FmPcd);
-    if (!h_FmMuram)
-        RETURN_ERROR(MAJOR, E_INVALID_HANDLE, ("FM MURAM"));
-
-    INIT_LIST(&p_FmPcd->feInfo.availableFeLst);
-
-    for (i=0; i<100; i++) {
-        p_FeObj = (t_FmPcdFEObj *)XX_Malloc(sizeof(t_FmPcdFEObj));
-        if (!p_FeObj)
-            RETURN_ERROR(MAJOR, E_NO_MEMORY, ("FM-PCD FE obj!"));
-        memset(p_FeObj, 0, sizeof(t_FmPcdFEObj));
- 
-        p_FeObj->h_FE = (t_Handle)FM_MURAM_AllocMem(h_FmMuram,
-                                                    FM_PCD_FE_MAX_SIZE,
-                                                    FM_PCD_FE_ALIGN);
-        if (!p_FeObj->h_FE)
-            RETURN_ERROR(MAJOR, E_NO_MEMORY, ("MURAM allocation for FE"));
-        memset((uint8_t *)p_FeObj->h_FE, 0, FM_PCD_FE_MAX_SIZE);
- 
-        EnqueueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst, p_FeObj);
-    }
-
-    return E_OK;
-}
-
-#endif /* (DPAA_VERSION >= 11) */
 
 /*****************************************************************************/
 /*              Inter-module API routines                                    */
@@ -876,49 +786,6 @@ bool FmPcdIsAdvancedOffloadSupported(t_Handle h_FmPcd)
     ASSERT_COND(h_FmPcd);
     return ((t_FmPcd*)h_FmPcd)->advancedOffloadSupport;
 }
-
-#if (DPAA_VERSION >= 11)
-t_Handle FmPcdGetFE(t_Handle h_FmPcd, t_FmPcdFEParams *p_FeParams)
-{
-    t_FmPcd     *p_FmPcd = (t_FmPcd *)h_FmPcd;
-    uint32_t    intFlags;
-    t_List      *p_Pos, *p_List;
-    t_Handle    h_FE = NULL;
-    t_FmPcdFEObj *p_FeObj;
-
-    ASSERT_COND(h_FmPcd);
-    ASSERT_COND((p_FeParams->type == e_FM_PCD_FE_T_ENQ));
-
-    p_List = &p_FmPcd->feInfo.enqLst;
-
-    intFlags = FmPcdLock(h_FmPcd);
-    LIST_FOR_EACH(p_Pos, p_List)
-    {
-        p_FeObj = FM_PCD_FE_OBJ(p_Pos);
-        if (memcmp(&p_FeObj->feParams, p_FeParams, sizeof(t_FmPcdFEParams)) == 0)
-        {
-            h_FE = p_FeObj->h_FE;
-            break;
-        }
-    }
-    FmPcdUnlock(h_FmPcd, intFlags);
-
-    if (!h_FE) {
-        p_FeObj = DequeueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst);
-        if (!p_FeObj) {
-            REPORT_ERROR(MAJOR, E_EMPTY, ("FM-PCD FE obj!"));
-            return NULL;
-        }
-        h_FE = p_FeObj->h_FE;
-        FmPcdCcBuildFE(h_FmPcd, p_FeParams, h_FE);
-        memcpy(&p_FeObj->feParams, p_FeParams, sizeof(t_FmPcdFEParams));
-        EnqueueFEObj(p_FmPcd, p_List, p_FeObj);
-    }
-
-    return h_FE;
-}
-#endif /* DPAA_VERSION >= 11 */
-
 /*********************** End of inter-module routines ************************/
 
 
@@ -1052,14 +919,6 @@ t_Error FM_PCD_Init(t_Handle h_FmPcd)
     t_FmPcd         *p_FmPcd = (t_FmPcd*)h_FmPcd;
     t_Error         err = E_OK;
     t_FmPcdIpcMsg   msg;
-#if (DPAA_VERSION >= 11)
-    t_FmPcdFEObj *p_FeObj;
-    t_FmPcdFEParams feParams;
-    int i;
-#endif /* DPAA_VERSION >= 11 */
-#ifdef USE_ENHANCED_EHASH
-	uint32_t global_data_size;
-#endif /* USE_ENHANCED_EHASH */
 
     SANITY_CHECK_RETURN_ERROR(p_FmPcd, E_INVALID_HANDLE);
     SANITY_CHECK_RETURN_ERROR(p_FmPcd->p_FmPcdDriverParam, E_INVALID_HANDLE);
@@ -1159,135 +1018,10 @@ t_Error FM_PCD_Init(t_Handle h_FmPcd)
     }
     IOMemSet32(UINT_TO_PTR(p_FmPcd->capwapFrameIdAddr), 0,  2);
 
-#if (DPAA_VERSION >= 11)
-    {
-       extHashTsInfo.max_ext_ts_timers = MAX_EXT_TS_TIMERS;
-       /* allocate memory for external timestamp used in ext hash table */
-       extHashTsInfo.ptr =
-               FM_MURAM_AllocMem(p_FmPcd->h_FmMuram, (MAX_EXT_TS_TIMERS * EXT_TS_SIZE), EXT_TS_SIZE);
-       if (!extHashTsInfo.ptr) {
-               FM_PCD_Free(p_FmPcd);
-               RETURN_ERROR(MAJOR, E_NO_MEMORY, ("MURAM allocation for Ext TS"));
-       }
-       extHashTsInfo.offset = (uint32_t)(XX_VirtToPhys(extHashTsInfo.ptr) -
-                       p_FmPcd->physicalMuramBase);
-       printk("%s::ext timers %d, base ptr %p, muram base %p, offset %x\n", __FUNCTION__,
-                       extHashTsInfo.max_ext_ts_timers, extHashTsInfo.ptr,
-                       (void *)p_FmPcd->physicalMuramBase, extHashTsInfo.offset);
-   }
-#endif
-
-#if (DPAA_VERSION >= 11)
-    err = AllocFEObjs(p_FmPcd);
-    if (err) {
-        FM_PCD_Free(p_FmPcd);
-        RETURN_ERROR(MAJOR, err, NO_MSG);
-    }
- 
-    /* Singleton MUX-FE */
-    p_FeObj = DequeueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst);
-    if (!p_FeObj) {
-        FM_PCD_Free(p_FmPcd);
-        RETURN_ERROR(MAJOR, E_EMPTY, ("No Free FE-Obj"));
-    }
-    memset(&feParams, 0, sizeof(t_FmPcdFEParams));
-    feParams.type = e_FM_PCD_FE_T_MUX;
-    feParams.wsOffset = FE_MUX_CONTEXT_OFFSET;
-    p_FmPcd->feInfo.h_Mux = p_FeObj->h_FE;
-    FmPcdCcBuildFE(p_FmPcd, &feParams, p_FmPcd->feInfo.h_Mux);
-    XX_Free(p_FeObj);
- 
-    /* Singleton Transition-FE */
-    p_FeObj = DequeueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst);
-    if (!p_FeObj) {
-        FM_PCD_Free(p_FmPcd);
-        RETURN_ERROR(MAJOR, E_EMPTY, ("No Free FE-Obj"));
-    }
-    memset(&feParams, 0, sizeof(t_FmPcdFEParams));
-    feParams.type = e_FM_PCD_FE_T_TRANSITION;
-    feParams.wsOffset = FE_TRANSITION_CONTEXT_OFFSET;
-    feParams.u.transition.deallocateBuffer = TRUE;
-    feParams.u.transition.nextADFromWS = TRUE;
-    p_FmPcd->feInfo.h_Transition = p_FeObj->h_FE;
-    FmPcdCcBuildFE(p_FmPcd, &feParams, p_FmPcd->feInfo.h_Transition);
-    XX_Free(p_FeObj);
-
-    /* Singleton Exit-FE */
-    p_FeObj = DequeueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst);
-    if (!p_FeObj) {
-        FM_PCD_Free(p_FmPcd);
-        RETURN_ERROR(MAJOR, E_EMPTY, ("No Free FE-Obj"));
-    }
-    memset(&feParams, 0, sizeof(t_FmPcdFEParams));
-    feParams.type = e_FM_PCD_FE_T_EXIT;
-    feParams.u.exit.deallocateBuffer = TRUE;
-    p_FmPcd->feInfo.h_Exit = p_FeObj->h_FE;
-    FmPcdCcBuildFE(p_FmPcd, &feParams, p_FmPcd->feInfo.h_Exit);
-    XX_Free(p_FeObj);
-
-    memset(&feParams, 0, sizeof(t_FmPcdFEParams));
-    feParams.type = e_FM_PCD_FE_T_HM;
-    feParams.h_NextFE = p_FmPcd->feInfo.h_Exit;
-    for (i=0; i<FM_MAX_HM_CONTEXTS; i++) {
-        /* Singleton HM (with-parse)-FE */
-        p_FeObj = DequeueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst);
-        if (!p_FeObj) {
-            FM_PCD_Free(p_FmPcd);
-            RETURN_ERROR(MAJOR, E_EMPTY, ("No Free FE-Obj"));
-        }
-        feParams.wsOffset = FE_HM_CONTEXT_OFFSET(i);
-        feParams.u.hm.parseAfterHm = TRUE;
-        p_FmPcd->feInfo.hm[i].h_HmWParse = p_FeObj->h_FE;
-        FmPcdCcBuildFE(p_FmPcd, &feParams, p_FmPcd->feInfo.hm[i].h_HmWParse);
-        XX_Free(p_FeObj);
-
-        /* Singleton HM (without-parse)-FE */
-        p_FeObj = DequeueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst);
-        if (!p_FeObj) {
-            FM_PCD_Free(p_FmPcd);
-            RETURN_ERROR(MAJOR, E_EMPTY, ("No Free FE-Obj"));
-        }
-        feParams.wsOffset = FE_HM_CONTEXT_OFFSET(i);
-        feParams.u.hm.parseAfterHm = FALSE;
-        p_FmPcd->feInfo.hm[i].h_HmWOParse = p_FeObj->h_FE;
-        FmPcdCcBuildFE(p_FmPcd, &feParams, p_FmPcd->feInfo.hm[i].h_HmWOParse);
-        XX_Free(p_FeObj);
-    }
-
-    INIT_LIST(&p_FmPcd->feInfo.enqLst);
-#endif /* DPAA_VERSION >= 11 */
-
     XX_Free(p_FmPcd->p_FmPcdDriverParam);
     p_FmPcd->p_FmPcdDriverParam = NULL;
 
     FmRegisterPcd(p_FmPcd->h_Fm, p_FmPcd);
-
-#ifdef USE_ENHANCED_EHASH
-	global_data_size = (sizeof(en_exthash_global_mem) / 256) * 256 + 256;
-	
-
-	/* allocate MURAM memory for Internal buffers and global data */
-	p_FmPcd->pIntMuramPtr = FM_MURAM_AllocMem(p_FmPcd->h_FmMuram, 
-    						EN_INTERNAL_BUFF_POOL_SIZE+global_data_size, 256);
-    if (!p_FmPcd->pIntMuramPtr)
-    {
-        FM_PCD_Free(p_FmPcd);
-        RETURN_ERROR(MAJOR, E_EMPTY, ("MURAM alloc error"));	
-    }
-    p_FmPcd->InternalBufMgmtMuramArea = (uint32_t)(XX_VirtToPhys(p_FmPcd->pIntMuramPtr) -
-                       p_FmPcd->physicalMuramBase);
-    printk("%s(%d) pIntMuramPtr %p InternalBufMgmtMuramArea %x, size 0x%x \n",
-		__FUNCTION__,__LINE__, p_FmPcd->pIntMuramPtr,p_FmPcd->InternalBufMgmtMuramArea,
-		EN_INTERNAL_BUFF_POOL_SIZE+global_data_size);
-
-    if (p_FmPcd->InternalBufMgmtMuramArea & 0xff)
-    {
-        FM_PCD_Free(p_FmPcd);
-        RETURN_ERROR(MAJOR, E_EMPTY, ("InternalBufMgmtMuramArea should be aligned to 256"));	
-    }
-    p_FmPcd->InternalBufMgmtMuramArea >>= 8;
-    printk("%s(%d) pIntMuramPtr %p InternalBufMgmtMuramArea %x \n",__FUNCTION__,__LINE__, p_FmPcd->pIntMuramPtr,p_FmPcd->InternalBufMgmtMuramArea);
-#endif //USE_ENHANCED_EHASH
 
     return E_OK;
 }
@@ -1296,39 +1030,12 @@ t_Error FM_PCD_Free(t_Handle h_FmPcd)
 {
     t_FmPcd                             *p_FmPcd =(t_FmPcd *)h_FmPcd;
     t_Error                             err = E_OK;
-#if (DPAA_VERSION >= 11)
-    int         i;
-
-    ReleaseFEsList(p_FmPcd);
-
-    if (p_FmPcd->feInfo.h_Exit)
-        FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FmPcd->feInfo.h_Exit);
-
-    if (p_FmPcd->feInfo.h_Mux)
-        FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FmPcd->feInfo.h_Mux);
-
-    if (p_FmPcd->feInfo.h_Transition)
-        FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FmPcd->feInfo.h_Transition);
-
-    for (i=0; i<FM_MAX_HM_CONTEXTS; i++) {
-        if (p_FmPcd->feInfo.hm[i].h_HmWParse)
-            FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FmPcd->feInfo.hm[i].h_HmWParse);
-
-        if (p_FmPcd->feInfo.hm[i].h_HmWOParse)
-            FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FmPcd->feInfo.hm[i].h_HmWOParse);
-    }
-#endif /* (DPAA_VERSION >= 11) */
 
     if (p_FmPcd->ipv6FrameIdAddr)
         FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, UINT_TO_PTR(p_FmPcd->ipv6FrameIdAddr));
 
     if (p_FmPcd->capwapFrameIdAddr)
         FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, UINT_TO_PTR(p_FmPcd->capwapFrameIdAddr));
-
-#ifdef USE_ENHANCED_EHASH
-    if (p_FmPcd->pIntMuramPtr)
-        FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, p_FmPcd->pIntMuramPtr);
-#endif //USE_ENHANCED_EHASH
 
     if (p_FmPcd->enabled)
         FM_PCD_Disable(p_FmPcd);
@@ -1865,8 +1572,7 @@ t_Error FM_PCD_SetAdvancedOffloadSupport(t_Handle h_FmPcd)
         revInfo.packageRev = IP_OFFLOAD_PACKAGE_NUMBER;
     }
     if (!IS_OFFLOAD_PACKAGE(revInfo.packageRev))
-		RETURN_ERROR(MAJOR, E_NOT_SUPPORTED, ("Fman version (%d) is not matching with the kernel fman version(%d). Please update proper fman version", revInfo.packageRev, ASK_UCODE_PACKAGE_NUMBER));
-	
+        RETURN_ERROR(MAJOR, E_NOT_SUPPORTED, ("Fman ctrl code package"));
 
     if (!p_FmPcd->h_Hc)
         RETURN_ERROR(MAJOR, E_INVALID_HANDLE, ("HC must be initialized in this mode"));

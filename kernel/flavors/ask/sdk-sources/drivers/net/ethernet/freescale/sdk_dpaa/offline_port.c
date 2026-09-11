@@ -50,7 +50,6 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/fsl_qman.h>
-#include <linux/fsl_oh_port.h>
 
 #include "offline_port.h"
 #include "dpaa_eth.h"
@@ -66,7 +65,6 @@ MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Bogdan Hamciuc <bogdan.hamciuc@freescale.com>");
 MODULE_DESCRIPTION(OH_MOD_DESCRIPTION);
 
-static struct fman_offline_port_info offline_port_info[MAX_FMANS][MAX_OFFLINE_PORTS];
 
 static const struct of_device_id oh_port_match_table[] = {
 	{
@@ -233,33 +231,6 @@ static int __cold oh_free_pcd_fqids(struct device *dev, uint32_t base_fqid)
 
 	return 0;
 }
-
-
-int oh_port_driver_get_port_info(struct fman_offline_port_info *info)
-{
-	uint32_t ii;
-	uint32_t fman_idx;
-	uint32_t port_idx;
-	struct fman_offline_port_info *port_info;
-
-	if (sscanf(info->port_name, "dpa-fman%d-oh@%d", &fman_idx, &port_idx) != 2) {
-		printk("%s::invalid name %s\n", __FUNCTION__, info->port_name);
-		return (-EINVAL);
-	}
-
-	port_info = &offline_port_info[fman_idx][0];
-	for (ii = 0; ii < MAX_OFFLINE_PORTS; ii++) {
-		if (strcmp(&info->port_name[0], &port_info->port_name[0]) == 0) {
-			memcpy(info, port_info, sizeof(struct fman_offline_port_info));
-			return 0;
-		}
-		port_info++;
-	}
-	return (-ENOENT);
-}
-
-EXPORT_SYMBOL(oh_port_driver_get_port_info);
-
 
 static void oh_set_buffer_layout(struct fm_port *port,
 				 struct dpa_buffer_layout_s *layout)
@@ -766,30 +737,6 @@ init_port:
 		goto return_kfree;
 
 	dev_info(dpa_oh_dev, "OH port %s enabled.\n", oh_node->full_name);
-	{
-		uint32_t fman_idx;
-		uint32_t port_idx;
-		struct fman_offline_port_info *info;
-		char *devname;
-
-		printk("devname %s\n", dev_name(dpa_oh_dev));
-		devname = strstr(dev_name(dpa_oh_dev), "dpa-fman");
-		if (devname) {
-			if (sscanf(devname, "dpa-fman%d-oh@%d", &fman_idx, &port_idx) == 2) {
-				info = &offline_port_info[fman_idx][port_idx - 1];
-				strcpy(&info->port_name[0], devname);
-				info->channel_id = channel_id;
-				//info->err_fqid = oh_config->default_fqid;
-				//info->default_fqid = oh_config->error_fqid;
-				info->default_fqid = oh_config->default_fqid;
-				info->err_fqid = oh_config->error_fqid;
-				printk("%s::found OH port %s, fman %d, port %d\n", __FUNCTION__,
-						&info->port_name[0], fman_idx, port_idx);
-			}
-		} else {
-			printk("strstr failed on str %s\n", dev_name(dpa_oh_dev));
-		}
-	}
 
 	/* print of all referenced & created queues */
 	dump_oh_config(dpa_oh_dev, oh_config);

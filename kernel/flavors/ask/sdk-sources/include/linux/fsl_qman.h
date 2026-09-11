@@ -3963,12 +3963,6 @@ static inline int qman_portals_probed(void) {
 	return 1;
 }
 
-int qman_ceetm_configure_mapping_shaper_tcfc(
-	struct qm_mcc_ceetm_mapping_shaper_tcfc_config *opts);
-/* Macro used to configure queue for control traffic, 7 is the highest */
-#define QOS_DEFAULT_QUEUE      7
-#define QOS_LEAST_PRIORITY_QUEUE   0
-
 #ifdef __cplusplus
 }
 #endif

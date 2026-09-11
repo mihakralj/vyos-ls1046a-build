@@ -144,9 +144,6 @@ uint64_t SYS_PhysToVirt(uint64_t addr)
     }
     return PTR_TO_UINT(phys_to_virt((unsigned long)addr));
 }
-#ifdef CONFIG_DBG_UCODE_INFRA 
-EXPORT_SYMBOL(SYS_PhysToVirt);
-#endif // CONFIG_DBG_UCODE_INFRA
 
 uint64_t SYS_VirtToPhys(uint64_t addr)
 {
@@ -160,4 +157,3 @@ uint64_t SYS_VirtToPhys(uint64_t addr)
         return (uint64_t)(addr - p_IoMap->virtAddr + p_IoMap->physAddr);
     return (uint64_t)virt_to_phys(UINT_TO_PTR(addr));
 }
-EXPORT_SYMBOL(SYS_VirtToPhys);

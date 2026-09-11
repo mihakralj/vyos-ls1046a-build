@@ -67,14 +67,6 @@
 #define HC_HCOR_ACTION_REG_IP_FRAG_SCRATCH_POOL_CMD_SHIFT       24
 #define HC_HCOR_ACTION_REG_IP_FRAG_SCRATCH_POOL_BPID            16
 
-
-#ifdef CONFIG_DBG_UCODE_INFRA
-#define HC_HCOR_OPCODE_DBG_UCODE_CMD  0x1e
-#ifdef CONFIG_DMAR_TEST
-#define HC_HCOR_OPCDOE_DMA_READ_TEST 0x1f
-#endif //CONFIG_DMAR_TEST
-#endif // CONFIG_DBG_UCODE_INFRA
-
 #define HC_HCOR_GBL                         0x20000000
 
 #define HC_HCOR_KG_SCHEME_COUNTER           0x00000400
@@ -86,9 +78,6 @@
 #define SIZE_OF_HC_FRAME_PROFILES_REGS      (sizeof(t_HcFrame)-sizeof(struct fman_kg_scheme_regs)+sizeof(t_FmPcdPlcrProfileRegs))
 #define SIZE_OF_HC_FRAME_PROFILE_CNT        (sizeof(t_HcFrame)-sizeof(t_FmPcdPlcrProfileRegs)+sizeof(uint32_t))
 #define SIZE_OF_HC_FRAME_READ_OR_CC_DYNAMIC 16
-
-
-#define SIZE_OF_HC_FRAME_READ_DBG_UCODE_CMD 64 //jyos
 
 #define HC_CMD_POOL_SIZE                    (INTG_MAX_NUM_OF_CORES)
 
@@ -124,11 +113,6 @@ typedef struct t_HcFrame {
         volatile uint32_t                       clsPlanEntries[CLS_PLAN_NUM_PER_GRP];
         t_FmPcdCcCapwapReassmTimeoutParams      ccCapwapReassmTimeout;
         t_FmPcdCcReassmTimeoutParams            ccReassmTimeout;
-#ifdef CONFIG_DMAR_TEST
-	volatile uint8_t			data[64];
-#else
-	volatile uint8_t			data[48];
-#endif //CONFIG_DMAR_TEST
     } hcSpecificData;
 } t_HcFrame;
 
@@ -1211,97 +1195,6 @@ t_Error FmHcPcdCcDoDynamicChange(t_Handle h_FmHc, uint32_t oldAdAddrOffset, uint
     return E_OK;
 }
 
-t_Error FmHcPcdCcDoDynamicChangeWithAging(t_Handle h_FmHc,
-                                          uint32_t oldAdAddrOffset,
-                                          uint32_t newAdAddrOffset,
-                                          e_ModifyState modifyState,
-                                          uint16_t keyIndex)
-{
-    t_FmHc                  *p_FmHc = (t_FmHc*)h_FmHc;
-    t_HcFrame               *p_HcFrame;
-    t_DpaaFD                fmFd;
-    t_Error                 err = E_OK;
-    uint32_t                seqNum;
-
-    SANITY_CHECK_RETURN_ERROR(p_FmHc, E_INVALID_HANDLE);
-
-    p_HcFrame = GetBuf(p_FmHc, &seqNum);
-    if (!p_HcFrame)
-        RETURN_ERROR(MINOR, E_NO_MEMORY, ("HC Frame object"));
-    memset(p_HcFrame, 0, sizeof(t_HcFrame));
-
-    p_HcFrame->opcode     = (uint32_t)(HC_HCOR_GBL | HC_HCOR_OPCODE_CC_UPDATE_WITH_AGING);
-    p_HcFrame->actionReg  = newAdAddrOffset;
-    p_HcFrame->actionReg |= 0xc0000000;
-    p_HcFrame->extraReg   = oldAdAddrOffset;
-
-    switch (modifyState)
-    {
-        case e_MODIFY_STATE_ADD:
-            p_HcFrame->extraReg |= HC_HCOR_EXTRA_REG_CC_AGING_ADD;
-            break;
-
-        case e_MODIFY_STATE_REMOVE:
-            p_HcFrame->extraReg |= HC_HCOR_EXTRA_REG_CC_AGING_REMOVE;
-            p_HcFrame->extraReg |= ((keyIndex << HC_HCOR_EXTRA_REG_CC_REMOVE_INDX_SHIFT) & HC_HCOR_EXTRA_REG_CC_REMOVE_INDX_MASK);
-            break;
-
-        case e_MODIFY_STATE_CHANGE:
-            p_HcFrame->extraReg &= ~HC_HCOR_EXTRA_REG_CC_AGING_CHANGE_MASK;
-            break;
-    }
-
-    p_HcFrame->commandSequence = seqNum;
-
-    BUILD_FD(SIZE_OF_HC_FRAME_READ_OR_CC_DYNAMIC);
-
-    err = EnQFrm(p_FmHc, &fmFd, seqNum);
-
-    PutBuf(p_FmHc, p_HcFrame, seqNum);
-
-    if (err != E_OK)
-        RETURN_ERROR(MAJOR, err, NO_MSG);
-
-    return E_OK;
-}
-
-t_Error FmHcPcdCcResetAgingMask(t_Handle h_FmHc, uint32_t adAddrOffset, uint32_t newAgeMask, uint32_t *p_OldAgeMask)
-{
-    t_FmHc                  *p_FmHc = (t_FmHc*)h_FmHc;
-    t_HcFrame               *p_HcFrame;
-    t_DpaaFD                fmFd;
-    t_Error                 err = E_OK;
-    uint32_t                seqNum;
-
-    SANITY_CHECK_RETURN_ERROR(p_FmHc, E_INVALID_HANDLE);
-
-    p_HcFrame = GetBuf(p_FmHc, &seqNum);
-    if (!p_HcFrame)
-        RETURN_ERROR(MINOR, E_NO_MEMORY, ("HC Frame object"));
-    memset(p_HcFrame, 0, sizeof(t_HcFrame));
-
-    p_HcFrame->opcode     = (uint32_t)(HC_HCOR_GBL | HC_HCOR_OPCODE_CC_AGE_MASK);
-    p_HcFrame->actionReg  = adAddrOffset;
-    p_HcFrame->extraReg   = newAgeMask;
-    p_HcFrame->commandSequence = seqNum;
-
-    BUILD_FD(SIZE_OF_HC_FRAME_READ_OR_CC_DYNAMIC);
-
-    err = EnQFrm(p_FmHc, &fmFd, seqNum);
-
-    /* On command completion the FMC writes to HCER the 'aging-mask' field
-       before it was updated by this command. This way the user may identify
-       which bits were cleared by FMC before setting them. */
-    *p_OldAgeMask = p_HcFrame->extraReg;
-
-    PutBuf(p_FmHc, p_HcFrame, seqNum);
-
-    if (err != E_OK)
-        RETURN_ERROR(MAJOR, err, NO_MSG);
-
-    return E_OK;
-}
-
 t_Error FmHcPcdSync(t_Handle h_FmHc)
 {
     t_FmHc                  *p_FmHc = (t_FmHc*)h_FmHc;
@@ -1357,116 +1250,3 @@ bool FmIsHcUsageAllowed(t_Handle h_FmHc)
 
 	return p_FmHc->usageAllowed;
 }
-
-#ifdef CONFIG_DBG_UCODE_INFRA
-t_Error FmHcPcdDbgUcodeHCmd(t_Handle h_FmHc,
-			   uint32_t muram_offset,
-			   uint8_t  *data,
-			   uint8_t	size)
-{
-    t_FmHc                  *p_FmHc = (t_FmHc*)h_FmHc;
-    t_HcFrame               *p_HcFrame;
-    t_DpaaFD                fmFd;
-    t_Error                 err = E_OK;
-    uint32_t                seqNum, ii;
-    uint8_t		   *hc_data;
-
-
-    SANITY_CHECK_RETURN_ERROR(p_FmHc, E_INVALID_HANDLE);
-
-    p_HcFrame = GetBuf(p_FmHc, &seqNum);
-    if (!p_HcFrame)
-        RETURN_ERROR(MINOR, E_NO_MEMORY, ("HC Frame object"));
-    memset(p_HcFrame, 0, sizeof(t_HcFrame));
-
-    p_HcFrame->opcode     = (uint32_t)(HC_HCOR_GBL | HC_HCOR_OPCODE_DBG_UCODE_CMD);
-    p_HcFrame->actionReg = muram_offset;
-    p_HcFrame->extraReg =  size;
-    hc_data = (uint8_t *)p_HcFrame->hcSpecificData.data;
-    for (ii=0; ii<size; ii++)
-	hc_data[ii] =  data[ii];
-
-    BUILD_FD(SIZE_OF_HC_FRAME_READ_DBG_UCODE_CMD);
-
-    err = EnQFrm(p_FmHc, &fmFd, seqNum);
-
-    PutBuf(p_FmHc, p_HcFrame, seqNum);
-    if (err != E_OK)
-        RETURN_ERROR(MAJOR, err, NO_MSG);
-
-    return E_OK;
-}
-
-t_Error FmHcPcdDbgUcodeTest(t_Handle h_FmHc,
-			uint32_t opcode,
-			uint32_t *data,
-			uint16_t data_size)
-{
-    t_FmHc                  *p_FmHc = (t_FmHc*)h_FmHc;
-    t_HcFrame               *p_HcFrame;
-    t_DpaaFD                fmFd;
-    t_Error                 err = E_OK;
-    uint32_t                seqNum;
-
-    SANITY_CHECK_RETURN_ERROR(p_FmHc, E_INVALID_HANDLE);
-
-    p_HcFrame = GetBuf(p_FmHc, &seqNum);
-    if (!p_HcFrame)
-	RETURN_ERROR(MINOR, E_NO_MEMORY, ("HC Frame object"));
-    memset(p_HcFrame, 0, sizeof(t_HcFrame));
-
-    p_HcFrame->opcode	  = opcode;
-    p_HcFrame->actionReg  = *data;
-    p_HcFrame->extraReg = data_size;
-
-    BUILD_FD(SIZE_OF_HC_FRAME_READ_DBG_UCODE_CMD);
-
-    err = EnQFrm(p_FmHc, &fmFd, seqNum);
-
-    PutBuf(p_FmHc, p_HcFrame, seqNum);
-
-    if (err != E_OK)
-	RETURN_ERROR(MAJOR, err, NO_MSG);
-
-    return E_OK;
-}
-#ifdef CONFIG_DMAR_TEST
-
-t_Error FmHcPcdDMAreadTest(t_Handle h_FmHc, uint32_t muram_addr_offset,
-									 uint8_t *ptr, uint8_t size)
-{
-    t_FmHc                  *p_FmHc = (t_FmHc*)h_FmHc;
-    t_HcFrame               *p_HcFrame;
-    uint8_t					*data;
-    t_DpaaFD                fmFd;
-    t_Error                 err = E_OK;
-    uint32_t                seqNum, ii;
-
-    SANITY_CHECK_RETURN_ERROR(p_FmHc, E_INVALID_HANDLE);
-
-    p_HcFrame = GetBuf(p_FmHc, &seqNum);
-    if (!p_HcFrame)
-	RETURN_ERROR(MINOR, E_NO_MEMORY, ("HC Frame object"));
-    memset(p_HcFrame, 0, sizeof(t_HcFrame));
-
-    p_HcFrame->opcode	  = HC_HCOR_OPCDOE_DMA_READ_TEST;
-    p_HcFrame->actionReg  = muram_addr_offset;
-    p_HcFrame->extraReg = size;
-    data = p_HcFrame->hcSpecificData.data;
-    memcpy(data, ptr, size);
-
-    BUILD_FD(SIZE_OF_HC_FRAME_READ_DBG_UCODE_CMD+16);
-
-    err = EnQFrm(p_FmHc, &fmFd, seqNum);
-
-    PutBuf(p_FmHc, p_HcFrame, seqNum);
-
-    if (err != E_OK)
-	RETURN_ERROR(MAJOR, err, NO_MSG);
-
-    return E_OK;
-}
-
-#endif //CONFIG_DMAR_TEST
-
-#endif // CONFIG_DBG_UCODE_INFRA

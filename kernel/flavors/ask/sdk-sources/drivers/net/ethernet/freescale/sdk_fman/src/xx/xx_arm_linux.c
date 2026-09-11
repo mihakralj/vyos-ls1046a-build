@@ -298,18 +298,11 @@ void * XX_MallocSmart(uint32_t size, int memPartitionId, uint32_t alignment)
     return xx_MallocSmart(size,memPartitionId, alignment);
 }
 
-#ifdef CONFIG_DBG_UCODE_INFRA 
-EXPORT_SYMBOL(XX_MallocSmart);
-#endif // CONFIG_DBG_UCODE_INFRA
-
 void XX_FreeSmart(void *p)
 {
     xx_FreeSmart(p);
 }
 
-#ifdef CONFIG_DBG_UCODE_INFRA 
-EXPORT_SYMBOL(XX_FreeSmart);
-#endif // CONFIG_DBG_UCODE_INFRA
 
 void XX_Free(void *p)
 {

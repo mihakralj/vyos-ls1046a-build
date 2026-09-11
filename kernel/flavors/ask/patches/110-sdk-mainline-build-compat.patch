@@ -1,0 +1,303 @@
+From afde617fc5c9fd3c783ce870f994ba71be91bcf5 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Sun, 23 Aug 2026 18:48:54 +0200
+Subject: [PATCH] sdk: build the vendored SDK on stock mainline
+
+The vendored NXP DPAA SDK drivers (sdk_fman, sdk_dpaa, staging/fsl_qbman)
+target the NXP LSDK kernel, which carries wiring and APIs that stock
+mainline lacks. Bundle every change needed to build the SDK overlay on a
+stock kernel.org tree into one ASK-owned patch; each consumer that bases
+on mainline (rather than the NXP vendor tag) needs it. Folds five
+previously-separate OpenWrt build-compat patches (705/710/711/712/713).
+
+Driver wiring (ex-705):
+ - source the sdk_fman/sdk_dpaa Kconfigs and add their obj-$() entries
+   under drivers/net/ethernet/freescale/; source + wire staging/fsl_qbman
+   (the qbman/bman/usdpaa driver, CONFIG_FSL_SDK_DPA). This is the
+   keystone that activates the vendored drivers.
+
+Mainline API shims (ex-710):
+ - ioremap_cache_ns(): bman/qman portal CE cacheable maps. mainline has no
+   *_ns (PROT_NORMAL_NS) variant; NS is irrelevant on the non-secure
+   LS1046, so map it onto ioremap_cache (cacheable Normal memory).
+ - pgprot_cached()/pgprot_cached_ns(): usdpaa mmap uses them for cacheable,
+   non-shareable userspace portal/buffer maps. mainline arm64 has neither.
+ - phylink_interface_max_speed(): the sdk_dpaa MAC driver calls it;
+   mainline keeps it static. Un-static + export.
+ - skb_recycle(): dropped from mainline, kept by NXP and used by sdk_dpaa's
+   Tx recycle path. Restore it verbatim from the NXP tree.
+
+SDK source alignment (sdk_dpaa/mac.c):
+ - the MAC driver's sole reference to PHY_INTERFACE_MODE_2500SGMII -- an
+   enum name the NXP kernel carries but mainline lacks -- is renamed to
+   PHY_INTERFACE_MODE_2500BASEX, mainline's name for the 2.5G SerDes mode.
+   The board DT declares "2500base-x", so this matches what of_get_phy_mode()
+   delivers; the sole use is a full-duplex-only if_support mask, so it is
+   behaviourally identical. Renaming the reference (rather than #define-ing
+   the missing name in a header) is the collision-free form: OpenWrt's 702
+   adds PHY_INTERFACE_MODE_2500SGMII as a real enum member, so a same-named
+   macro in this patch would collapse 702's switch cases onto the 2500BASEX
+   cases (duplicate-case build error) once a 702-carrying tree consumes it.
+
+Warning hygiene (ex-711):
+ - mark dpa_get_bp_device() __maybe_unused; it is only called from the SEC
+   inbound path, compiled out when CPE_FAST_PATH is disabled, so an
+   SDK-only (fast-path-off) build would otherwise trip
+   -Werror=unused-function.
+
+Board support (ex-712):
+ - swphy: decode a 10000 Mbit/s fixed-link like 1000 (no distinct 10G MII
+   code). The Mono Gateway's 10G (xfi) MACs use fixed-link 10000; mainline
+   swphy returns -EINVAL and the MAC fails to probe.
+
+Export for the ppp hook (ex-713):
+ - export rtmsg_ifinfo(): ASK patch 070's PPP fast-path hook calls it from
+   ppp_generic; mainline dropped the export after its last in-tree caller
+   went away, so a modular ppp_generic fails modpost. CPE_FAST_PATH=n
+   builds compile the hook out, so this only matters for the ASK image.
+
+NOTE (phylink vs OpenWrt 702): the phylink hunk here only un-statics the
+phylink_interface_max_speed() signature and appends EXPORT_SYMBOL_GPL after
+the function's closing brace. OpenWrt's 702 (2.5G-SGMII, deliberately not
+imported here) edits the *interior* of the same function -- it adds a
+PHY_INTERFACE_MODE_2500SGMII switch case -- plus phylink_get_capabilities().
+The two edit disjoint regions and must stay that way: a consumer carrying
+both 702 and this patch must keep 702's edits inside the switch body and
+this patch's edits at the signature/export lines, so the hunks never
+overlap when both are applied.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ arch/arm64/include/asm/io.h                   |  4 +++
+ arch/arm64/include/asm/pgtable.h              |  7 +++++
+ drivers/net/ethernet/freescale/Kconfig        |  2 ++
+ drivers/net/ethernet/freescale/Makefile       |  2 ++
+ .../ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c |  2 +-
+ drivers/net/ethernet/freescale/sdk_dpaa/mac.c |  4 +--
+ drivers/net/phy/phylink.c                     |  3 ++-
+ drivers/net/phy/swphy.c                       |  1 +
+ drivers/staging/Kconfig                       |  2 ++
+ drivers/staging/Makefile                      |  1 +
+ include/linux/phylink.h                       |  1 +
+ include/linux/skbuff.h                        |  1 +
+ net/core/rtnetlink.c                          |  1 +
+ net/core/skbuff.c                             | 26 +++++++++++++++++++
+ 14 files changed, 53 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/include/asm/io.h b/arch/arm64/include/asm/io.h
+index 46bd37707e08..8ad3052680f6 100644
+--- a/arch/arm64/include/asm/io.h
++++ b/arch/arm64/include/asm/io.h
+@@ -312,6 +312,10 @@ static inline void __iomem *ioremap_prot(phys_addr_t phys, size_t size,
+ #include <asm-generic/io.h>
+ 
+ #define ioremap_cache ioremap_cache
++/* NXP DPAA SDK (bman/qman portal CE) maps cacheable memory via ioremap_cache_ns.
++ * mainline lacks it; the NS attribute is irrelevant on the non-secure LS1046, so
++ * map it onto ioremap_cache (cacheable Normal memory). */
++#define ioremap_cache_ns(addr, size)	ioremap_cache((addr), (size))
+ static inline void __iomem *ioremap_cache(phys_addr_t addr, size_t size)
+ {
+ 	if (pfn_is_map_memory(__phys_to_pfn(addr)))
+diff --git a/arch/arm64/include/asm/pgtable.h b/arch/arm64/include/asm/pgtable.h
+index 2de5a70a47ce..cfa07bf36308 100644
+--- a/arch/arm64/include/asm/pgtable.h
++++ b/arch/arm64/include/asm/pgtable.h
+@@ -678,6 +678,13 @@ static inline void set_pud_at(struct mm_struct *mm, unsigned long addr,
+ 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_DEVICE_nGnRnE) | PTE_PXN | PTE_UXN)
+ #define pgprot_writecombine(prot) \
+ 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_NORMAL_NC) | PTE_PXN | PTE_UXN)
++/* NXP DPAA SDK (usdpaa mmap) uses pgprot_cached_ns for cacheable, non-shareable
++ * userspace mappings of portal/buffer memory. mainline arm64 has neither macro. */
++#define pgprot_cached(prot) \
++	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_NORMAL) | \
++			PTE_PXN | PTE_UXN)
++#define pgprot_cached_ns(prot) \
++	__pgprot(pgprot_val(pgprot_cached(prot)) ^ PTE_SHARED)
+ #define pgprot_device(prot) \
+ 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_DEVICE_nGnRE) | PTE_PXN | PTE_UXN)
+ #define pgprot_tagged(prot) \
+diff --git a/drivers/net/ethernet/freescale/Kconfig b/drivers/net/ethernet/freescale/Kconfig
+index 75401d2a5fb4..de868a0f7552 100644
+--- a/drivers/net/ethernet/freescale/Kconfig
++++ b/drivers/net/ethernet/freescale/Kconfig
+@@ -106,5 +106,7 @@ config GIANFAR
+ source "drivers/net/ethernet/freescale/dpaa/Kconfig"
+ source "drivers/net/ethernet/freescale/dpaa2/Kconfig"
+ source "drivers/net/ethernet/freescale/enetc/Kconfig"
++source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"
++source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"
+ 
+ endif # NET_VENDOR_FREESCALE
+diff --git a/drivers/net/ethernet/freescale/Makefile b/drivers/net/ethernet/freescale/Makefile
+index d0a259e47960..966141be7f9a 100644
+--- a/drivers/net/ethernet/freescale/Makefile
++++ b/drivers/net/ethernet/freescale/Makefile
+@@ -21,6 +21,8 @@ ucc_geth_driver-objs := ucc_geth.o ucc_geth_ethtool.o
+ 
+ obj-$(CONFIG_FSL_FMAN) += fman/
+ obj-$(CONFIG_FSL_DPAA_ETH) += dpaa/
++obj-$(if $(CONFIG_FSL_SDK_FMAN),y) += sdk_fman/
++obj-$(if $(CONFIG_FSL_SDK_DPAA_ETH),y) += sdk_dpaa/
+ 
+ obj-y += dpaa2/
+ obj-y += enetc/
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c
+index d2a0bbc1e71f..d0d33d17e558 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_sg.c
+@@ -1055,7 +1055,7 @@ EXPORT_SYMBOL(sg_bpool_g);
+ struct dpa_bp *skb_2bfreed_bpool_g; //if no recyclable skbs exist in skb fraglist, those should be freed back, SEC engine will add to this bman pool
+ EXPORT_SYMBOL(skb_2bfreed_bpool_g);
+ 
+-static struct device* dpa_get_bp_device(void)
++static struct device __maybe_unused *dpa_get_bp_device(void)
+ {
+ 	if (skb_2bfreed_bpool_g)
+ 		return skb_2bfreed_bpool_g->dev;
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/mac.c b/drivers/net/ethernet/freescale/sdk_dpaa/mac.c
+index 3163fd8e6b0e..a2b87f33e5dd 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/mac.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/mac.c
+@@ -273,10 +273,10 @@ static int __cold mac_probe(struct platform_device *_of_dev)
+ 	mac_dev->speed		= phylink_interface_max_speed(mac_dev->phy_if);
+ 	mac_dev->max_speed	= mac_dev->speed;
+ 	mac_dev->if_support = MEMAC_SUPPORTED;
+-	/* We don't support half-duplex in SGMII mode */
++	/* We don't support half-duplex in SGMII / 2.5G modes */
+ 	if (mac_dev->phy_if == PHY_INTERFACE_MODE_SGMII ||
+ 	    mac_dev->phy_if == PHY_INTERFACE_MODE_QSGMII ||
+-	    mac_dev->phy_if == PHY_INTERFACE_MODE_2500SGMII)
++	    mac_dev->phy_if == PHY_INTERFACE_MODE_2500BASEX)
+ 		mac_dev->if_support &= ~(SUPPORTED_10baseT_Half |
+ 					SUPPORTED_100baseT_Half);
+ 
+diff --git a/drivers/net/phy/phylink.c b/drivers/net/phy/phylink.c
+index e6f3963739ad..332405f8a58f 100644
+--- a/drivers/net/phy/phylink.c
++++ b/drivers/net/phy/phylink.c
+@@ -202,7 +202,7 @@ static unsigned int phylink_interface_signal_rate(phy_interface_t interface)
+  *
+  * Return: The maximum speed of @interface
+  */
+-static int phylink_interface_max_speed(phy_interface_t interface)
++int phylink_interface_max_speed(phy_interface_t interface)
+ {
+ 	switch (interface) {
+ 	case PHY_INTERFACE_MODE_100BASEX:
+@@ -262,6 +262,7 @@ static int phylink_interface_max_speed(phy_interface_t interface)
+ 	WARN_ON_ONCE(1);
+ 	return SPEED_UNKNOWN;
+ }
++EXPORT_SYMBOL_GPL(phylink_interface_max_speed);
+ 
+ /**
+  * phylink_caps_to_linkmodes() - Convert capabilities to ethtool link modes
+diff --git a/drivers/net/phy/swphy.c b/drivers/net/phy/swphy.c
+index 59f1ba4d49bc..522ecda43d1b 100644
+--- a/drivers/net/phy/swphy.c
++++ b/drivers/net/phy/swphy.c
+@@ -71,6 +71,7 @@ static const struct swmii_regs duplex[] = {
+ static int swphy_decode_speed(int speed)
+ {
+ 	switch (speed) {
++	case 10000:
+ 	case 1000:
+ 		return SWMII_SPEED_1000;
+ 	case 100:
+diff --git a/drivers/staging/Kconfig b/drivers/staging/Kconfig
+index 7aa37f54af68..762db336986e 100644
+--- a/drivers/staging/Kconfig
++++ b/drivers/staging/Kconfig
+@@ -62,4 +62,6 @@ source "drivers/staging/fieldbus/Kconfig"
+ 
+ source "drivers/staging/vme_user/Kconfig"
+ 
++source "drivers/staging/fsl_qbman/Kconfig"
++
+ endif # STAGING
+diff --git a/drivers/staging/Makefile b/drivers/staging/Makefile
+index 2e18fe5b74ca..1dabd3d82577 100644
+--- a/drivers/staging/Makefile
++++ b/drivers/staging/Makefile
+@@ -20,3 +20,4 @@ obj-$(CONFIG_GREYBUS)		+= greybus/
+ obj-$(CONFIG_BCM2835_VCHIQ)	+= vc04_services/
+ obj-$(CONFIG_XIL_AXIS_FIFO)	+= axis-fifo/
+ obj-$(CONFIG_FIELDBUS_DEV)     += fieldbus/
++obj-$(CONFIG_FSL_SDK_DPA)	+= fsl_qbman/
+diff --git a/include/linux/phylink.h b/include/linux/phylink.h
+index 5c01048860c4..50fec86d1b22 100644
+--- a/include/linux/phylink.h
++++ b/include/linux/phylink.h
+@@ -163,6 +163,7 @@ struct phylink_config {
+ };
+ 
+ void phylink_limit_mac_speed(struct phylink_config *config, u32 max_speed);
++int phylink_interface_max_speed(phy_interface_t interface);
+ 
+ /**
+  * struct phylink_mac_ops - MAC operations structure.
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 46498bc4a9b2..42513e250c7f 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -1341,6 +1341,7 @@ static inline void consume_skb(struct sk_buff *skb)
+ #endif
+ 
+ void __consume_stateless_skb(struct sk_buff *skb);
++void skb_recycle(struct sk_buff *skb);
+ void  __kfree_skb(struct sk_buff *skb);
+ 
+ void kfree_skb_partial(struct sk_buff *skb, bool head_stolen);
+diff --git a/net/core/rtnetlink.c b/net/core/rtnetlink.c
+index a13e87558d0e..fa1f9d704c75 100644
+--- a/net/core/rtnetlink.c
++++ b/net/core/rtnetlink.c
+@@ -4265,6 +4265,7 @@ void rtmsg_ifinfo(int type, struct net_device *dev, unsigned int change,
+ 	rtmsg_ifinfo_event(type, dev, change, rtnl_get_event(0), flags,
+ 			   NULL, 0, portid, nlh);
+ }
++EXPORT_SYMBOL(rtmsg_ifinfo);
+ 
+ void rtmsg_ifinfo_newnet(int type, struct net_device *dev, unsigned int change,
+ 			 gfp_t flags, int *new_nsid, int new_ifindex)
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index b76f9c813689..baaddb8521fb 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -1515,6 +1515,32 @@ void napi_consume_skb(struct sk_buff *skb, int budget)
+ }
+ EXPORT_SYMBOL(napi_consume_skb);
+ 
++/**
++ * 	skb_recycle - clean up an skb for reuse
++ * 	@skb: buffer
++ *
++ * 	Recycles the skb to be reused as a receive buffer. This
++ * 	function does any necessary reference count dropping, and
++ * 	cleans up the skbuff as if it just came from __alloc_skb().
++ */
++void skb_recycle(struct sk_buff *skb)
++{
++	struct skb_shared_info *shinfo;
++	u8 head_frag = skb->head_frag;
++
++	skb_release_head_state(skb);
++
++	shinfo = skb_shinfo(skb);
++	memset(shinfo, 0, offsetof(struct skb_shared_info, dataref));
++	atomic_set(&shinfo->dataref, 1);
++
++	memset(skb, 0, offsetof(struct sk_buff, tail));
++	skb->data = skb->head + NET_SKB_PAD;
++	skb->head_frag = head_frag;
++	skb_reset_tail_pointer(skb);
++}
++EXPORT_SYMBOL(skb_recycle);
++
+ /* Make sure a field is contained by headers group */
+ #define CHECK_SKB_FIELD(field) \
+ 	BUILD_BUG_ON(offsetof(struct sk_buff, field) !=		\
+-- 
+2.47.3
+

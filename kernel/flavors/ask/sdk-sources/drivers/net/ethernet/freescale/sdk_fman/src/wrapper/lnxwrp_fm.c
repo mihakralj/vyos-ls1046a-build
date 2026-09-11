@@ -1319,35 +1319,6 @@ void *fm_port_get_handle(const struct fm_port *port)
 }
 EXPORT_SYMBOL(fm_port_get_handle);
 
-int fm_get_fw_rev(struct fm *fm, u16 *package, u8 *major, u8 *minor)
-{
-    t_LnxWrpFmDev               *p_LnxWrpFmDev = (t_LnxWrpFmDev*)fm;
-    t_FmCtrlCodeRevisionInfo    rv;
-    t_Error                     err;
-
-    if (!p_LnxWrpFmDev || !p_LnxWrpFmDev->active || !p_LnxWrpFmDev->h_Dev)
-        return -ENODEV;
-
-    err = FM_GetFmanCtrlCodeRevision((t_Handle)p_LnxWrpFmDev->h_Dev, &rv);
-    if (err != E_OK)
-        return -EIO;
-
-    if (package) *package = rv.packageRev;
-    if (major)   *major   = rv.majorRev;
-    if (minor)   *minor   = rv.minorRev;
-    return 0;
-}
-EXPORT_SYMBOL(fm_get_fw_rev);
-
-int fm_port_get_hwid(const struct fm_port *port)
-{
-	t_LnxWrpFmPortDev *p_LnxWrpFmPortDev = (t_LnxWrpFmPortDev*)port;
-	return(FmPortGetHardwarePortId(p_LnxWrpFmPortDev->h_Dev));
-
-}
-EXPORT_SYMBOL(fm_port_get_hwid);
-
-
 u64 *fm_port_get_buffer_time_stamp(const struct fm_port *port,
 		const void *data)
 {
@@ -1639,28 +1610,12 @@ int fm_mac_resume(struct fm_mac_dev *fm_mac_dev)
 }
 EXPORT_SYMBOL(fm_mac_resume);
 
-int fm_mac_set_allmulti(struct fm_mac_dev *fm_mac_dev,
-		bool enable)
-{
-	int	_errno;
-	t_Error	err;
-
-	err = FM_MAC_SetAllMulti(fm_mac_dev, enable);
-	_errno = -GET_ERROR_TYPE(err);
-	if (unlikely(_errno < 0))
-		pr_err("FM_MAC_SetPromiscuous() = 0x%08x\n", err);
-
-	return _errno;
-}
-EXPORT_SYMBOL(fm_mac_set_allmulti);
-
 int fm_mac_set_promiscuous(struct fm_mac_dev *fm_mac_dev,
 		bool enable)
 {
 	int	_errno;
 	t_Error	err;
 
-        printk("%s::%d \r\n", __FUNCTION__, __LINE__);
 	err = FM_MAC_SetPromiscuous(fm_mac_dev, enable);
 	_errno = -GET_ERROR_TYPE(err);
 	if (unlikely(_errno < 0))

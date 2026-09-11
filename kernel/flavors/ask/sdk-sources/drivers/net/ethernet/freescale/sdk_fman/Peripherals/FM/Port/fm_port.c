@@ -53,11 +53,6 @@
 /****************************************/
 /*       static functions               */
 /****************************************/
-
-#define MAX_FMANS  1
-#define MAX_OF_PORTS    8
-static t_FmPort *OfPortInfo[MAX_FMANS][MAX_OF_PORTS];
-
 static t_Error CheckInitParameters(t_FmPort *p_FmPort)
 {
     t_FmPortDriverParam *p_Params = p_FmPort->p_FmPortDriverParam;
@@ -667,9 +662,7 @@ static t_Error InitLowLevelDriver(t_FmPort *p_FmPort)
     {
         case (e_FM_PORT_TYPE_RX_10G):
         case (e_FM_PORT_TYPE_RX):
-            //portParams.err_mask = (RX_ERRS_TO_ENQ & ~portParams.discard_mask);
-	    //not required to enqueue error frames
-            portParams.err_mask = 0;
+            portParams.err_mask = (RX_ERRS_TO_ENQ & ~portParams.discard_mask);
             if (!p_FmPort->imEn)
             {
                 if (p_DriverParams->forwardReuseIntContext)
@@ -759,12 +752,6 @@ static t_Error InitLowLevelDriver(t_FmPort *p_FmPort)
         }
     }
 
-	if (p_FmPort->portType == e_FM_PORT_TYPE_OH_OFFLINE_PARSING) {
-		OfPortInfo[0][p_FmPort->portId] = p_FmPort;
-		printk("%s::of port %s id %d, handle %p\n", __FUNCTION__,
-				p_FmPort->name, p_FmPort->portId, p_FmPort);
-	}
-
     return E_OK;
 }
 
@@ -832,7 +819,6 @@ static bool CheckOhBmiCounter(t_FmPort *p_FmPort, e_FmPortCounters counter)
         case (e_FM_PORT_COUNTERS_LENGTH_ERR):
         case (e_FM_PORT_COUNTERS_UNSUPPRTED_FORMAT):
         case (e_FM_PORT_COUNTERS_DEALLOC_BUF):
-        case (e_FM_PORT_COUNTERS_RX_OUT_OF_BUFFERS_DISCARD):
             return TRUE;
         case (e_FM_PORT_COUNTERS_RX_FILTER_FRAME):
             if (p_FmPort->portType == e_FM_PORT_TYPE_OH_HOST_COMMAND)
@@ -2168,89 +2154,6 @@ t_Error FmPortGetSetCcParams(t_Handle h_FmPort,
 
     return E_OK;
 }
-
-#if (DPAA_VERSION >= 11)
-t_Error FmPortSetFESupport(t_Handle h_FmPort)
-{
-    t_FmPort *p_FmPort = (t_FmPort*)h_FmPort;
-    t_FmPcdCtrlParamsPage *p_ParamsPage;
-    uint8_t *p_Ptr, i, totalNumOfTnums;
-
-    if (p_FmPort->supportFE)
-    	return E_OK;
-
-    FmPortSetGprFunc(p_FmPort, e_FM_PORT_GPR_MURAM_PAGE,
-                     (void**)&p_ParamsPage);
-    ASSERT_COND(p_ParamsPage);
-
-
-    totalNumOfTnums =
-            (uint8_t)(p_FmPort->tasks.num + p_FmPort->tasks.extra);
-
-    p_FmPort->internalFEBufferPoolAddr =
-            PTR_TO_UINT(FM_MURAM_AllocMem(p_FmPort->h_FmMuram,
-                            (uint32_t)(totalNumOfTnums * BMI_FIFO_UNITS*2),
-                            BMI_FIFO_UNITS));
-    if (!p_FmPort->internalFEBufferPoolAddr)
-        RETURN_ERROR(
-                MAJOR, E_NO_MEMORY,
-                ("MURAM alloc for FE internal buffers pool"));
-    IOMemSet32(UINT_TO_PTR(p_FmPort->internalFEBufferPoolAddr),
-            0, (uint32_t)(totalNumOfTnums * BMI_FIFO_UNITS*2));
-
-    p_FmPort->internalFEBufferPoolManagementIndexAddr =
-            PTR_TO_UINT(FM_MURAM_AllocMem(p_FmPort->h_FmMuram,
-                            (uint32_t)(5 + totalNumOfTnums),
-                            4));
-    if (!p_FmPort->internalFEBufferPoolManagementIndexAddr)
-        RETURN_ERROR(
-                MAJOR,
-                E_NO_MEMORY,
-                ("MURAM alloc for FE internal buffers management"));
-
-    p_Ptr =
-            (uint8_t*)UINT_TO_PTR(p_FmPort->internalFEBufferPoolManagementIndexAddr);
-    WRITE_UINT32(
-            *(uint32_t*)p_Ptr,
-            (uint32_t)(XX_VirtToPhys(UINT_TO_PTR(p_FmPort->internalFEBufferPoolAddr)) - p_FmPort->fmMuramPhysBaseAddr));
-    /* Initialize the pool management index to 4: */
-    WRITE_UINT8(*p_Ptr, 4);
-    for (i = 0, p_Ptr += 4; i < totalNumOfTnums; i++, p_Ptr++)
-        WRITE_UINT8(*p_Ptr, i);
-    WRITE_UINT8(*p_Ptr, 0xFF);
-
-    WRITE_UINT32(p_ParamsPage->internalFEBufferDepletionCounter, 0);
-    WRITE_UINT32(p_ParamsPage->internalFEBufferManagementIndexAddr,
-            (uint32_t)(XX_VirtToPhys(UINT_TO_PTR(p_FmPort->internalFEBufferPoolManagementIndexAddr))
-                                            - p_FmPort->fmMuramPhysBaseAddr));
-
-    p_FmPort->supportFE = TRUE;
-
-    return E_OK;
-}
-
-t_Error FmPortDeleteFESupport(t_Handle h_FmPort)
-{
-    t_FmPort *p_FmPort = (t_FmPort*)h_FmPort;
-    t_FmPcdCtrlParamsPage *p_ParamsPage;
-
-    if (!p_FmPort->supportFE)
-        return E_OK;
-
-    FmPortSetGprFunc(p_FmPort, e_FM_PORT_GPR_MURAM_PAGE,
-                     (void**)&p_ParamsPage);
-    ASSERT_COND(p_ParamsPage);
-
-    p_FmPort->supportFE = FALSE;
-    WRITE_UINT32(p_ParamsPage->internalFEBufferManagementIndexAddr, 0);
- 
-    FM_MURAM_FreeMem(p_FmPort->h_FmMuram, UINT_TO_PTR(p_FmPort->internalFEBufferPoolAddr));
-    FM_MURAM_FreeMem(p_FmPort->h_FmMuram, UINT_TO_PTR(p_FmPort->internalFEBufferPoolManagementIndexAddr));
- 
-    return E_OK;
-}
-#endif /* (DPAA_VERSION >= 11) */
-
 /*********************** End of inter-module routines ************************/
 
 /****************************************/
@@ -4036,21 +3939,6 @@ t_Error FM_PORT_SetErrorsRoute(t_Handle h_FmPort, fmPortFrameErrSelect_t errs)
     return E_OK;
 }
 
-#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
-t_Error FM_PORT_SetDiscardMask(t_Handle h_FmPort, fmPortFrameErrSelect_t errs)
-{
-    t_FmPort *p_FmPort = (t_FmPort*)h_FmPort;
-    int err;
-
-    err = fman_port_set_discard_mask(&p_FmPort->port, (uint32_t)errs);
-    if (err != 0)
-        RETURN_ERROR(MAJOR, E_INVALID_VALUE, ("fman_port_set_discard_mask"));
-
-    return E_OK;
-}
-EXPORT_SYMBOL(FM_PORT_SetDiscardMask);
-#endif
-
 t_Error FM_PORT_SetAllocBufCounter(t_Handle h_FmPort, uint8_t poolId,
                                    bool enable)
 {
@@ -4602,8 +4490,6 @@ t_Error FM_PORT_PcdPlcrAllocProfiles(t_Handle h_FmPort, uint16_t numOfProfiles)
 
     return E_OK;
 }
-EXPORT_SYMBOL(FM_PORT_PcdPlcrAllocProfiles);
-
 
 t_Error FM_PORT_PcdPlcrFreeProfiles(t_Handle h_FmPort)
 {
@@ -5354,14 +5240,7 @@ t_Error FM_PORT_DeletePCD(t_Handle h_FmPort)
             RETURN_ERROR(MAJOR, err, NO_MSG);
         }
         p_FmPort->h_ReassemblyTree = NULL;
-    }
- 
-#if (DPAA_VERSION >= 11)
-	if (p_FmPort->supportFE)
-		FmPortDeleteFESupport(h_FmPort);
-#endif /* (DPAA_VERSION >= 11) */
-
-    RELEASE_LOCK(p_FmPort->lock);
+    }RELEASE_LOCK(p_FmPort->lock);
 
     return err;
 }
@@ -5603,33 +5482,3 @@ t_Error FM_PORT_GetIPv4OptionsCount(t_Handle h_FmPort,
 
     return E_OK;
 }
-
-extern void fman_set_ohport_ofne(void *handle, uint32_t ofne_val);
-int FM_PORT_SetOhPortOfne(uint32_t fmidx, uint32_t portidx, uint32_t nia_val)
-{
-	t_FmPort *p_FmPort;
-
-	if (fmidx)
-		return -1;
-	p_FmPort = OfPortInfo[fmidx][portidx];
-	if (!p_FmPort)
-		return -1;
-	fman_set_ohport_ofne(&p_FmPort->port, nia_val);
-	return 0;
-}
-EXPORT_SYMBOL(FM_PORT_SetOhPortOfne);
-
-extern void fman_set_ohport_rda(void *handle, uint32_t dma_opt);
-int FM_PORT_SetOhPortRda(uint32_t fmidx, uint32_t portidx, uint32_t dma_opt)
-{
-	t_FmPort *p_FmPort;
-
-	if (fmidx)
-		return -1;
-	p_FmPort = OfPortInfo[fmidx][portidx];
-	if (!p_FmPort)
-		return -1;
-	fman_set_ohport_rda(&p_FmPort->port, dma_opt);
-	return 0;
-}
-EXPORT_SYMBOL(FM_PORT_SetOhPortRda);

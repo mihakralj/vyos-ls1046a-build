@@ -157,7 +157,6 @@ void fm_unbind(struct fm *fm);
 void *fm_get_handle(struct fm *fm);
 void *fm_get_rtc_handle(struct fm *fm);
 struct resource *fm_get_mem_region(struct fm *fm);
-int fm_get_fw_rev(struct fm *fm, u16 *package, u8 *major, u8 *minor);
 
 /**************************************************************************//**
  @Function	fm_port_bind
@@ -580,8 +579,6 @@ int fm_mac_disable(struct fm_mac_dev *fm_mac_dev);
 int fm_mac_resume(struct fm_mac_dev *fm_mac_dev);
 
 int fm_mac_set_promiscuous(struct fm_mac_dev *fm_mac_dev,
-		bool enable);
-int fm_mac_set_allmulti(struct fm_mac_dev *fm_mac_dev,
 		bool enable);
 
 int fm_mac_remove_hash_mac_addr(struct fm_mac_dev *fm_mac_dev,

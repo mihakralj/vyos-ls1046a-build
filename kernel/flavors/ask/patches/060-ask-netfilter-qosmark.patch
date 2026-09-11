@@ -1,4 +1,4 @@
-From 2ad28cd7b121e327e8f86444090e5a7afd357d44 Mon Sep 17 00:00:00 2001
+From 6d17d73d2947ada824919fd7c765876e3e051f78 Mon Sep 17 00:00:00 2001
 From: Tomaz Zaman <tomaz@mono.si>
 Date: Thu, 23 Apr 2026 17:55:41 +0200
 Subject: [PATCH] ask: netfilter qosmark/qosconnmark + comcerto_fp module
@@ -15,15 +15,21 @@ Signed-off-by: Tomaz Zaman <tomaz@mono.si>
 ---
  include/uapi/linux/netfilter/xt_QOSCONNMARK.h |  10 +
  include/uapi/linux/netfilter/xt_QOSMARK.h     |   6 +
- include/uapi/linux/netfilter/xt_qosconnmark.h |  35 +++
- include/uapi/linux/netfilter/xt_qosmark.h     |  19 ++
+ include/uapi/linux/netfilter/xt_qosconnmark.h |  36 ++
+ include/uapi/linux/netfilter/xt_qosmark.h     |  20 +
  net/netfilter/Kconfig                         |  26 ++
  net/netfilter/Makefile                        |   3 +
- net/netfilter/comcerto_fp_netfilter.c         | 392 ++++++++++++++++++++++++++
- net/netfilter/xt_qosconnmark.c                | 171 +++++++++++
- net/netfilter/xt_qosmark.c                    |  85 ++++++
- 9 files changed, 747 insertions(+)
-
+ net/netfilter/comcerto_fp_netfilter.c         | 384 ++++++++++++++++++
+ net/netfilter/xt_qosconnmark.c                | 167 ++++++++
+ net/netfilter/xt_qosmark.c                    |  85 ++++
+ 9 files changed, 737 insertions(+)
+ create mode 100644 include/uapi/linux/netfilter/xt_QOSCONNMARK.h
+ create mode 100644 include/uapi/linux/netfilter/xt_QOSMARK.h
+ create mode 100644 include/uapi/linux/netfilter/xt_qosconnmark.h
+ create mode 100644 include/uapi/linux/netfilter/xt_qosmark.h
+ create mode 100644 net/netfilter/comcerto_fp_netfilter.c
+ create mode 100644 net/netfilter/xt_qosconnmark.c
+ create mode 100644 net/netfilter/xt_qosmark.c
 
 diff --git a/include/uapi/linux/netfilter/xt_QOSCONNMARK.h b/include/uapi/linux/netfilter/xt_QOSCONNMARK.h
 new file mode 100644
@@ -55,23 +61,24 @@ index 000000000000..45c4795aac12
 +#endif /*_XT_QOSMARK_H_target */
 diff --git a/include/uapi/linux/netfilter/xt_qosconnmark.h b/include/uapi/linux/netfilter/xt_qosconnmark.h
 new file mode 100644
-index 000000000000..d9901a9bd4fd
+index 000000000000..19331b58f0e4
 --- /dev/null
 +++ b/include/uapi/linux/netfilter/xt_qosconnmark.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
++/* Keep in sync with ASK iptables-extensions/include/linux/netfilter/xt_qosconnmark.h. */
 +#ifndef _XT_QOSCONNMARK_H
 +#define _XT_QOSCONNMARK_H
 +
 +#include <linux/types.h>
 +
 +/* Copyright (C) 2002,2004 MARA Systems AB <http://www.marasystems.com>
-+    + * by Henrik Nordstrom <hno@marasystems.com>
-+    + *
-+    + * This program is free software; you can redistribute it and/or modify
-+    + * it under the terms of the GNU General Public License as published by
-+    + * the Free Software Foundation; either version 2 of the License, or
-+    + * (at your option) any later version.
-+    + */
++ * by Henrik Nordstrom <hno@marasystems.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
 +
 +enum {
 +    XT_QOSCONNMARK_SET = 0,
@@ -96,10 +103,11 @@ index 000000000000..d9901a9bd4fd
 +
 diff --git a/include/uapi/linux/netfilter/xt_qosmark.h b/include/uapi/linux/netfilter/xt_qosmark.h
 new file mode 100644
-index 000000000000..6f80bd016c40
+index 000000000000..94fdeffb3965
 --- /dev/null
 +++ b/include/uapi/linux/netfilter/xt_qosmark.h
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,20 @@
++/* Keep in sync with ASK iptables-extensions/include/linux/netfilter/xt_qosmark.h. */
 +#ifndef _XT_QOSMARK_H
 +#define _XT_QOSMARK_H
 +
@@ -179,10 +187,10 @@ index f0aa4d7ef499..6af83a10050b 100644
  
 diff --git a/net/netfilter/comcerto_fp_netfilter.c b/net/netfilter/comcerto_fp_netfilter.c
 new file mode 100644
-index 000000000000..236fdf135b28
+index 000000000000..4da8ed73d1c8
 --- /dev/null
 +++ b/net/netfilter/comcerto_fp_netfilter.c
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,384 @@
 +/* Copyright (C) 2015 Freescale Semiconductor, Inc.
 + *
 + * Redistribution and use in source and binary forms, with or without
@@ -362,8 +370,6 @@ index 000000000000..236fdf135b28
 +
 +	dir = CTINFO2DIR(ctinfo);
 +
-+	//  if (printk_ratelimit())
-+	//      printk(KERN_INFO "ct: %lx, dir: %x, mark: %x, ifindex: %d iif: %d iif_index:%d\n", (unsigned long)ct, dir, skb->mark, skb->dev->ifindex, skb->skb_iif,skb->iif_index);
 +
 +	/* We could also check for changes and notify userspace (or print message) */
 +	if (dir == IP_CT_DIR_ORIGINAL) {
@@ -373,17 +379,14 @@ index 000000000000..236fdf135b28
 +	}
 +
 +	if (fp_info->mark && (fp_info->mark != skb->mark))
-+		if (printk_ratelimit())
-+			printk(KERN_INFO "ct: mark changed %x, %x\n", fp_info->mark, skb->mark);
++		pr_debug("ct: mark changed %x, %x\n", fp_info->mark, skb->mark);
 +
 +
 +	if (fp_info->ifindex && (fp_info->ifindex != skb->dev->ifindex))
-+		if (printk_ratelimit())
-+			printk(KERN_DEBUG "ct: ifindex changed %d, %d\n", fp_info->ifindex, skb->dev->ifindex);
++		pr_debug("ct: ifindex changed %d, %d\n", fp_info->ifindex, skb->dev->ifindex);
 +
 +	if (fp_info->iif && (fp_info->iif != skb->iif_index))
-+		if (printk_ratelimit())
-+			printk(KERN_DEBUG "ct: iif changed %d, %d\n", fp_info->iif, skb->iif_index);
++		pr_debug("ct: iif changed %d, %d\n", fp_info->iif, skb->iif_index);
 +	/*      // commenting it out as a duplicate print. In most cases iif and underlying iif are the same.
 +			if (fp_info->underlying_iif && (fp_info->underlying_iif != skb->underlying_iif))
 +			if (printk_ratelimit())
@@ -429,14 +432,12 @@ index 000000000000..236fdf135b28
 +	}
 +
 +	if (fp_info->mark && (fp_info->mark != skb->mark))
-+		if (printk_ratelimit())
-+			printk(KERN_INFO "ct: mark changed %x, %x\n", fp_info->mark, skb->mark);
++		pr_debug("ct: mark changed %x, %x\n", fp_info->mark, skb->mark);
 +
-+	if ((fp_info->ifindex) && (skb->dev) &&(fp_info->ifindex != skb->dev->ifindex))
-+		if (printk_ratelimit()) {
-+			printk(KERN_DEBUG "ct: ifindex changed %d, %d\n", fp_info->ifindex, skb->dev->ifindex);
-+			update_event=1;
-+		}
++	if ((fp_info->ifindex) && (skb->dev) && (fp_info->ifindex != skb->dev->ifindex)) {
++		pr_debug("ct: ifindex changed %d, %d\n", fp_info->ifindex, skb->dev->ifindex);
++		update_event=1;
++	}
 +
 +	fp_info->mark = skb->mark;
 +	if (skb->dev)
@@ -446,7 +447,6 @@ index 000000000000..236fdf135b28
 +		nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
 +	}
 +
-+	//printk(KERN_INFO "%s:(DIR-%d, CT-%x):%x:%s:%x\n",__func__,dir, (unsigned int)ct, fp_info->mark,  skb->dev->name, skb->skb_iif);
 +	fp_info->iif = 0; /* To identify the connection as local connection */
 +
 +#ifndef IPSEC_FLOW_CACHE
@@ -577,10 +577,10 @@ index 000000000000..236fdf135b28
 +module_exit(fp_netfilter_exit);
 diff --git a/net/netfilter/xt_qosconnmark.c b/net/netfilter/xt_qosconnmark.c
 new file mode 100644
-index 000000000000..a47f1ad05168
+index 000000000000..de13f29c4d5a
 --- /dev/null
 +++ b/net/netfilter/xt_qosconnmark.c
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,167 @@
 +/* xt_connmark - Netfilter module to operate on connection marks
 + *
 + * Copyright (C) 2002,2004 MARA Systems AB <http://www.marasystems.com>
@@ -748,10 +748,6 @@ index 000000000000..a47f1ad05168
 +
 +module_init(qosconnmark_mt_init);
 +module_exit(qosconnmark_mt_exit);
-+
-+             
-+
-+
 diff --git a/net/netfilter/xt_qosmark.c b/net/netfilter/xt_qosmark.c
 new file mode 100644
 index 000000000000..771edb1f812f
@@ -843,3 +839,6 @@ index 000000000000..771edb1f812f
 +module_exit(qosmark_mt_exit);
 +
 +
+-- 
+2.47.3
+

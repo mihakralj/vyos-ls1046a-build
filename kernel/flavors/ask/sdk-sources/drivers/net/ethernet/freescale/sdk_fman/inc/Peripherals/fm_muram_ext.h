@@ -151,18 +151,6 @@ void  * FM_MURAM_AllocMemForce(t_Handle h_FmMuram, uint64_t base, uint32_t size)
 t_Error FM_MURAM_FreeMem(t_Handle h_FmMuram, void *ptr);
 
 /**************************************************************************//**
- @Function      get_muram_data
-
- @Description   Snapshot the current FM MURAM contents into a newly allocated
-                kernel buffer.
-
- @Param[out]    size      - Size of the returned MURAM snapshot.
-
- @Return        A newly allocated copy of the MURAM contents; NULL otherwise.
-*//***************************************************************************/
-void *get_muram_data(uint32_t *size);
-
-/**************************************************************************//**
  @Function      FM_MURAM_GetFreeMemSize
 
  @Description   Returns the size (in bytes) of free MURAM memory.

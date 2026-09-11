@@ -402,20 +402,6 @@ uint64_t * FM_VSP_GetBufferTimeStamp(t_Handle h_FmVsp, char *p_Data);
 *//***************************************************************************/
 uint8_t * FM_VSP_GetBufferHashResult(t_Handle h_FmVsp, char *p_Data);
 
-/**************************************************************************//**
- @Function      FM_VSP_GetRelativeProfileId
-
- @Description   Given the VSP handle, the configured relative storage profile
-		id is returned.
-
- @Param[in]     h_FmVsp    - FM PORT module descriptor
-
- @Return        Relative storage Profile ID.
-
- @Cautions      Allowed only following FM_VSP_Init().
-*//***************************************************************************/
-
-uint8_t FM_VSP_GetRelativeProfileId(t_Handle h_FmVsp);
 
 /** @} */ /* end of FM_VSP_control_grp group */
 /** @} */ /* end of FM_VSP_grp group */

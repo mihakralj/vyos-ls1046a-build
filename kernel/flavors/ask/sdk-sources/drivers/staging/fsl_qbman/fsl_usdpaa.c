@@ -2461,7 +2461,7 @@ static int __init usdpaa_init(void)
 	u64 tmp_size = phys_size;
 	u64 tmp_start = phys_start;
 	u64 tmp_pfn_start = pfn_start;
-	printk(KERN_CRIT "Freescale USDPAA process driver\n");
+
 	pr_info("Freescale USDPAA process driver\n");
 	if (!phys_start) {
 		pr_warn("fsl-usdpaa: no region found\n");

@@ -1053,63 +1053,6 @@ static t_Error MemacFree(t_Handle h_Memac)
 
 /* ......................................................................... */
 
-static t_Error MemacSetAllMulti(t_Handle h_Memac, bool newVal)
-{
-    t_Memac             *p_Memac = (t_Memac *)h_Memac;
-    uint32_t            ii;
-    char                *pChar;
-    char                EthAddr[6];
-
-    SANITY_CHECK_RETURN_ERROR(p_Memac, E_NULL_POINTER);
-    SANITY_CHECK_RETURN_ERROR(!p_Memac->p_MemacDriverParam, E_INVALID_STATE);
-
-    /* For IPv4 Multicast packet first 3 bytes of dst mac remains the same.
-       so generating hash by varying remaining 3 bytes,which maps to 3 bits
-       in hash register.
-       Similarly for IPv6 multicast packet, first 2 bytes of multicast packet
-       remains the same, so generating hash by varying remaining 4 bytes,
-       which maps to 4 bits in hash register*/
-
-    pChar = EthAddr;
-    pChar[0] = 0x01;
-    pChar[1] = 0x00;
-    pChar[2] = 0x5e;
-    for(ii=0;ii<=7;ii++)
-    {
-        pChar[3] = ii>>2 & 1;
-        pChar[4] = ii>>1 & 1;
-        pChar[5] = ii>>0 & 1;
-        if(newVal)
-        {
-            MemacAddHashMacAddress(h_Memac, (t_EnetAddr *)EthAddr);
-        }
-        else
-        {
-            MemacDelHashMacAddress(h_Memac,(t_EnetAddr *)EthAddr);
-        }
-    }
-    pChar[0] = 0x33;
-    pChar[1] = 0x33;
-    for(ii=0;ii<=15;ii++)
-    {
-        pChar[2] = ii>>3 & 1;
-        pChar[3] = ii>>2 & 1;
-        pChar[4] = ii>>1 & 1;
-        pChar[5] = ii>>0 & 1;
-        if(newVal)
-        {
-            MemacAddHashMacAddress(h_Memac, (t_EnetAddr *)EthAddr);
-        }
-        else
-        {
-            MemacDelHashMacAddress(h_Memac, (t_EnetAddr *)EthAddr);
-        }
-    }
-    return E_OK;
-}
-
-/* ......................................................................... */
-
 static void InitFmMacControllerDriver(t_FmMacControllerDriver *p_FmMacControllerDriver)
 {
     p_FmMacControllerDriver->f_FM_MAC_Init                      = MemacInit;
@@ -1134,7 +1077,6 @@ static void InitFmMacControllerDriver(t_FmMacControllerDriver *p_FmMacController
     p_FmMacControllerDriver->f_FM_MAC_Disable1588TimeStamp      = NULL;
 
     p_FmMacControllerDriver->f_FM_MAC_SetPromiscuous            = MemacSetPromiscuous;
-    p_FmMacControllerDriver->f_FM_MAC_SetAllMulti               = MemacSetAllMulti;
     p_FmMacControllerDriver->f_FM_MAC_AdjustLink                = MemacAdjustLink;
     p_FmMacControllerDriver->f_FM_MAC_RestartAutoneg            = NULL;
 

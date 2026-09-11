@@ -1,0 +1,53 @@
+From e414696d49521b9ceb7734e037d5aa18ef92d8a3 Mon Sep 17 00:00:00 2001
+From: Madalin Bucur <madalin.bucur@nxp.com>
+Date: Thu, 31 Oct 2019 16:37:57 +0200
+Subject: [PATCH] sdk_dpaa: extend delays in ndo_stop
+
+Make sure all the frames that are in flight have time to be processed
+before the interface is completely brought down. Add a missing delay
+for the Rx path.
+
+Backport the upstream DPAA stop sequence to the NXP SDK driver's common
+stop helper. Its 5-10 ms pre-stop delay can expire with frames still in
+flight, after which the MAC is stopped before the FMan port is disabled.
+Use the upstream 200 ms drain interval and allow another 200 ms for receive
+and completion processing before returning to the caller. The private
+interface's NAPI remains enabled until dpa_stop() returns.
+
+This addresses incomplete draining as a possible cause of the FMan busy
+warning seen during OpenWrt reboot. Keep the busy checks and warning;
+the delay does not establish that a persistent hardware stall recovered.
+
+Upstream-Status: Backport [https://git.kernel.org/linus/e414696d4952]
+Signed-off-by: Madalin Bucur <madalin.bucur@nxp.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[tzaman: adapt drivers/net/ethernet/freescale/dpaa/dpaa_eth.c to the SDK
+ common helper in sdk_dpaa/dpaa_eth_common.c; use _errno return context.]
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
+@@ -193,7 +193,7 @@
+ 	/* Allow the Fman (Tx) port to process in-flight frames before we
+ 	 * try switching it off.
+ 	 */
+-	usleep_range(5000, 10000);
++	msleep(200);
+ 
+ 	_errno = mac_dev->stop(mac_dev);
+ 	if (unlikely(_errno < 0))
+@@ -209,6 +209,8 @@
+ 	if (mac_dev->phy_dev)
+ 		phy_disconnect(mac_dev->phy_dev);
+ 	mac_dev->phy_dev = NULL;
++
++	msleep(200);
+ 
+ 	return _errno;
+ }
+-- 
+2.47.3

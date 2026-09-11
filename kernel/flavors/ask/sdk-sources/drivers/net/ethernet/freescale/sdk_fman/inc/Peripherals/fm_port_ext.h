@@ -1733,25 +1733,6 @@ t_Error FM_PORT_SetRxL4ChecksumVerify(t_Handle h_FmPort, bool enable);
 t_Error FM_PORT_SetErrorsRoute(t_Handle h_FmPort, fmPortFrameErrSelect_t errs);
 
 /**************************************************************************//**
- @Function      FM_PORT_SetDiscardMask
-
- @Description   Sets user provided DiscardMask value  to Port BMI register 
-			rfsdm in case of rx
-			ofsdm in case of op port
-
-                used for Rx and OP ports only
-
- @Param[in]     h_FmPort    A handle to a FM Port module.
- @Param[in]     errs        A list of errors to discard the frame.
-
- @Return        E_OK on success; Error code otherwise.
-
- @Cautions      Allowed only following FM_PORT_Config() and before FM_PORT_Init().
-*//***************************************************************************/
-#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
-t_Error FM_PORT_SetDiscardMask(t_Handle h_FmPort, fmPortFrameErrSelect_t errs);
-#endif
-/**************************************************************************//**
  @Function      FM_PORT_SetIMExceptions
 
  @Description   Calling this routine enables/disables FM PORT interrupts.

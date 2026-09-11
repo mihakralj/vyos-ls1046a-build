@@ -41,10 +41,46 @@
  */
 int atoi(const char *s);
 
-/* String functions (strlen, strnlen, strcpy, strncpy, strtok) are provided
- * by the kernel - do not redeclare them here to avoid conflicts with
- * fortify-string.h macros.
+/**
+ * strnlen - Find the length of a length-limited string
+ * @s: The string to be sized
+ * @count: The maximum number of bytes to search
  */
+size_t strnlen(const char * s, size_t count);
+
+/**
+ * strlen - Find the length of a string
+ * @s: The string to be sized
+ */
+size_t strlen(const char * s);
+
+/**
+ * strtok - Split a string into tokens
+ * @s: The string to be searched
+ * @ct: The characters to search for
+ *
+ * WARNING: strtok is deprecated, use strsep instead.
+ */
+char * strtok(char * s,const char * ct);
+
+/**
+ * strncpy - Copy a length-limited, %NUL-terminated string
+ * @dest: Where to copy the string to
+ * @src: Where to copy the string from
+ * @count: The maximum number of bytes to copy
+ *
+ * Note that unlike userspace strncpy, this does not %NUL-pad the buffer.
+ * However, the result is not %NUL-terminated if the source exceeds
+ * @count bytes.
+ */
+char * strncpy(char * dest,const char *src,size_t count);
+
+/**
+ * strcpy - Copy a %NUL terminated string
+ * @dest: Where to copy the string to
+ * @src: Where to copy the string from
+ */
+char * strcpy(char * dest,const char *src);
 
 /**
  * vsscanf - Unformat a buffer into a list of arguments

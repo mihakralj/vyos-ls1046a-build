@@ -50,7 +50,7 @@
 /**************************************************************************//**
  @Description       defaults
 *//***************************************************************************/
-#define DEFAULT_FM_SP_bufferPrefixContent_privDataSize      128//0
+#define DEFAULT_FM_SP_bufferPrefixContent_privDataSize      0
 #define DEFAULT_FM_SP_bufferPrefixContent_passPrsResult     FALSE
 #define DEFAULT_FM_SP_bufferPrefixContent_passTimeStamp     FALSE
 #define DEFAULT_FM_SP_bufferPrefixContent_allOtherPCDInfo   FALSE

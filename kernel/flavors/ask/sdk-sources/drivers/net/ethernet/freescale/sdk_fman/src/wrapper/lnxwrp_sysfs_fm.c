@@ -46,14 +46,6 @@
 #include "../../sdk_fman/Peripherals/FM/fm.h"
 #include <linux/delay.h>
 
-static ssize_t show_fm_dma_cmd_queue(struct device *dev,
-                                struct device_attribute *attr,
-                                char *buf);
-static ssize_t show_fm_dma_cam_queue(struct device *dev,
-                                struct device_attribute *attr,
-                                char *buf);
-static int fm_get_counter(void *h_fm, enum fman_counters cnt_e, uint32_t *cnt_val);
-
 enum fm_dma_match_stats {
 	FM_DMA_COUNTERS_CMQ_NOT_EMPTY,
 	FM_DMA_COUNTERS_BUS_ERROR,
@@ -866,23 +858,6 @@ static DEVICE_ATTR(scheme_29, S_IRUGO, show_fm_schemes, NULL);
 static DEVICE_ATTR(scheme_30, S_IRUGO, show_fm_schemes, NULL);
 static DEVICE_ATTR(scheme_31, S_IRUGO, show_fm_schemes, NULL);
 
-static DEVICE_ATTR(fm_dma_cmdq_0, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-static DEVICE_ATTR(fm_dma_cmdq_8, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-static DEVICE_ATTR(fm_dma_cmdq_16, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-static DEVICE_ATTR(fm_dma_cmdq_24, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-static DEVICE_ATTR(fm_dma_cmdq_32, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-static DEVICE_ATTR(fm_dma_cmdq_40, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-static DEVICE_ATTR(fm_dma_cmdq_48, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-static DEVICE_ATTR(fm_dma_cmdq_56, S_IRUGO, show_fm_dma_cmd_queue, NULL);
-
-static DEVICE_ATTR(fm_dma_camq_0, S_IRUGO, show_fm_dma_cam_queue, NULL);
-static DEVICE_ATTR(fm_dma_camq_8, S_IRUGO, show_fm_dma_cam_queue, NULL);
-static DEVICE_ATTR(fm_dma_camq_16, S_IRUGO, show_fm_dma_cam_queue, NULL);
-static DEVICE_ATTR(fm_dma_camq_24, S_IRUGO, show_fm_dma_cam_queue, NULL);
-static DEVICE_ATTR(fm_dma_camq_32, S_IRUGO, show_fm_dma_cam_queue, NULL);
-static DEVICE_ATTR(fm_dma_camq_40, S_IRUGO, show_fm_dma_cam_queue, NULL);
-static DEVICE_ATTR(fm_dma_camq_48, S_IRUGO, show_fm_dma_cam_queue, NULL);
-static DEVICE_ATTR(fm_dma_camq_56, S_IRUGO, show_fm_dma_cam_queue, NULL);
 
 static struct attribute *fm_dev_stats_attributes[] = {
 	&dev_attr_enq_total_frame.attr,
@@ -1047,43 +1022,6 @@ static struct attribute *fm_dev_schemes_attributes[] = {
 	NULL
 };
 
-static struct attribute *fm_dma_cmdq_attributes[] = {
-	&dev_attr_fm_dma_cmdq_0.attr,
-	&dev_attr_fm_dma_cmdq_8.attr,
-	&dev_attr_fm_dma_cmdq_16.attr,
-	&dev_attr_fm_dma_cmdq_24.attr,
-	&dev_attr_fm_dma_cmdq_32.attr,
-	&dev_attr_fm_dma_cmdq_40.attr,
-	&dev_attr_fm_dma_cmdq_48.attr,
-	&dev_attr_fm_dma_cmdq_56.attr,
-	NULL
-};
-
-
-static struct attribute *fm_dma_camq_attributes[] = {
-        &dev_attr_fm_dma_camq_0.attr,
-        &dev_attr_fm_dma_camq_8.attr,
-        &dev_attr_fm_dma_camq_16.attr,
-        &dev_attr_fm_dma_camq_24.attr,
-        &dev_attr_fm_dma_camq_32.attr,
-        &dev_attr_fm_dma_camq_40.attr,
-        &dev_attr_fm_dma_camq_48.attr,
-        &dev_attr_fm_dma_camq_56.attr,
-        NULL
-};
-
-
-
-static const struct attribute_group fm_dev_fm_dma_cmdq_grp = {
-	.name = "fm_dma_cmdq",
-	.attrs = fm_dma_cmdq_attributes
-};
-
-static const struct attribute_group fm_dev_fm_dma_camq_grp = {
-	.name = "fm_dma_camq",
-	.attrs = fm_dma_camq_attributes
-};
-
 static const struct attribute_group fm_dev_stats_attr_grp = {
 	.name = "statistics",
 	.attrs = fm_dev_stats_attributes
@@ -1108,130 +1046,6 @@ static const struct attribute_group fm_dev_profiles_attr_grp = {
 	.name = "profiles",
 	.attrs = fm_dev_profiles_attributes
 };
-
-#define MAX_CMD_QUE_DMP_COUNT        8
-#define QT_CMD_QUEUE_ENTRY           (1 << 16)
-#define QT_CAM_QUEUE_ENTRY           (2 << 16)
-int fm_dump_ccqueue(void *h_fm, char *buf, int nn, uint32_t start, uint32_t type)
-{
-	t_Fm            *p_Fm = (t_Fm *)h_fm;
-        uint8_t         i = 0;
-        int             n = nn;
-
-	FM_DMP_SUBTITLE(buf, n, "\n");
-	if (type == QT_CMD_QUEUE_ENTRY) {
-		FM_DMP_TITLE(buf, n, NULL, "FMDM cmd queue %d - %d", start, (start + MAX_CMD_QUE_DMP_COUNT - 1));
-	} else {
-		FM_DMP_TITLE(buf, n, NULL, "FMDM cam queue %d - %d", start, (start + MAX_CMD_QUE_DMP_COUNT - 1));
-	}
-	for (i = start; i < (start + MAX_CMD_QUE_DMP_COUNT); i++) {
-                uint32_t tmp;
-                tmp = (type | i);
-                iowrite32be(tmp, &p_Fm->p_FmDmaRegs->fmdmccqdr);
-                FM_DMP_V32(buf, n, p_Fm->p_FmDmaRegs, fmdmccqdr);
-                FM_DMP_V32(buf, n, p_Fm->p_FmDmaRegs, fmdmccqvr1);
-                FM_DMP_V32(buf, n, p_Fm->p_FmDmaRegs, fmdmccqvr2);
-                FM_DMP_V32(buf, n, p_Fm->p_FmDmaRegs, fmdmcqvr3);
-                FM_DMP_V32(buf, n, p_Fm->p_FmDmaRegs, fmdmcqvr4);
-                FM_DMP_V32(buf, n, p_Fm->p_FmDmaRegs, fmdmcqvr5);
-                FM_DMP_LN(buf, n, "\n");
-        }
-        FM_DMP_LN(buf, n, "\n");
-	return n;
-}
-
-
-static ssize_t show_fm_dma_cam_queue(struct device *dev,
-                                struct device_attribute *attr,
-                                char *buf)
-{
-	unsigned long flags;
-	unsigned n = 0;	
-	int start;
-
-#if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
-	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
-#endif
-	if (attr == NULL || buf == NULL || dev == NULL)
-		return -EINVAL;
-
-#if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
-
-	p_wrp_fm_dev = (t_LnxWrpFmDev *) dev_get_drvdata(dev);
-	if (WARN_ON(p_wrp_fm_dev == NULL))
-		return -EINVAL;
-
-	local_irq_save(flags);
-
-	n = snprintf(buf, PAGE_SIZE, "FM DMA CAM queue dump.\n");
-
-	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_Dev)
-		return -EIO;
-
-	if (!sscanf(attr->attr.name, "fm_dma_camq_%d", &start))
-                        return -EINVAL;
-
-	n = fm_dump_ccqueue(p_wrp_fm_dev->h_Dev, buf, n,
-			start, QT_CAM_QUEUE_ENTRY);
-
-	local_irq_restore(flags);
-#else
-
-	local_irq_save(flags);
-	n = snprintf(buf, PAGE_SIZE,
-			"Debug level is too low to dump registers!!!\n");
-	local_irq_restore(flags);
-#endif /* (defined(DEBUG_ERRORS) && ... */
-
-	return n;
-}
-
-static ssize_t show_fm_dma_cmd_queue(struct device *dev,
-                                struct device_attribute *attr,
-                                char *buf)
-{
-	unsigned long flags;
-	unsigned n = 0;	
-	int start;
-
-#if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
-	t_LnxWrpFmDev *p_wrp_fm_dev = NULL;
-#endif
-	if (attr == NULL || buf == NULL || dev == NULL)
-		return -EINVAL;
-
-#if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
-
-	p_wrp_fm_dev = (t_LnxWrpFmDev *) dev_get_drvdata(dev);
-	if (WARN_ON(p_wrp_fm_dev == NULL))
-		return -EINVAL;
-
-	local_irq_save(flags);
-
-	n = snprintf(buf, PAGE_SIZE, "FM DMA CMD queue dump.\n");
-
-	if (!p_wrp_fm_dev->active || !p_wrp_fm_dev->h_Dev)
-		return -EIO;
-
-	if (!sscanf(attr->attr.name, "fm_dma_cmdq_%d", &start))
-                        return -EINVAL;
-
-	n = fm_dump_ccqueue(p_wrp_fm_dev->h_Dev, buf, n,
-			start, QT_CMD_QUEUE_ENTRY);
-
-	local_irq_restore(flags);
-#else
-
-	local_irq_save(flags);
-	n = snprintf(buf, PAGE_SIZE,
-			"Debug level is too low to dump registers!!!\n");
-	local_irq_restore(flags);
-#endif /* (defined(DEBUG_ERRORS) && ... */
-
-	return n;
-}
-
-
 
 static ssize_t show_fm_regs(struct device *dev,
 				struct device_attribute *attr,
@@ -1514,12 +1328,6 @@ int fm_sysfs_create(struct device *dev)
 		return -EIO;
 
 	if (sysfs_create_group(&dev->kobj, &fm_dev_cls_plans_attr_grp) != 0)
-		return -EIO;
-
-	if (sysfs_create_group(&dev->kobj, &fm_dev_fm_dma_cmdq_grp) != 0)
-		return -EIO;
-
-	if (sysfs_create_group(&dev->kobj, &fm_dev_fm_dma_camq_grp) != 0)
 		return -EIO;
 
 	/* Registers dump entry - in future will be moved to debugfs */

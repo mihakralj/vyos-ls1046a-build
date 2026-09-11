@@ -37,7 +37,6 @@
 #include <linux/fsl_qman.h>	/* struct qman_fq */
 
 #include "fm_ext.h"
-#include "fm_ehash.h"
 #include "dpaa_eth_trace.h"
 
 extern int dpa_rx_extra_headroom;
@@ -93,10 +92,7 @@ static inline void DPA_BUG_ON(bool cond)
 /* The raw buffer size must be cacheline aligned.
  * Normally we use 2K buffers.
  */
-/* As 1518 byte packets are received in scatter gather buffers from DPAA, 
-and these buffers are used by WIFI which requires contiguous buffers. So
-increased buffer size from 2048 to 2176, to accomodate them in contiguous fd */
-#define DPA_BP_RAW_SIZE		2176
+#define DPA_BP_RAW_SIZE		2048
 #else
 /* For jumbo frame optimizations, use buffers large enough to accommodate
  * 9.6K frames, FD maximum offset, skb sh_info overhead and some extra
@@ -197,20 +193,11 @@ increased buffer size from 2048 to 2176, to accomodate them in contiguous fd */
 /* number of Tx queues to FMan */
 #ifdef CONFIG_FMAN_PFC
 #define DPAA_ETH_TX_QUEUES	(NR_CPUS * CONFIG_FMAN_PFC_COS_COUNT)
-#elif defined(CONFIG_CPE_FAST_PATH)
-/* ASK CDX module's MAX_SCHEDULER_QUEUES=16 (8 PQs + 8 WBFQs) requires
- * DPAA_ETH_TX_QUEUES=16 to match the cdx struct layout it builds against.
- * FMAN_PFC is intentionally NOT enabled (it changes dpa_select_queue's
- * signature to 4 params, which the mainline net_device_ops.ndo_select_queue
- * typedef the 002-ask-kernel-hooks patch adds doesn't support), so this
- * branch is the only path that reaches 16 with NR_CPUS=4. */
-#define DPAA_ETH_TX_QUEUES	(NR_CPUS * 4)
 #else
 #define DPAA_ETH_TX_QUEUES	NR_CPUS
 #endif
 
 #define DPAA_ETH_RX_QUEUES	128
-#define DPAA_IP_VERSION_4  4
 
 /* Convenience macros for storing/retrieving the skb back-pointers. They must
  * accommodate both recycling and confirmation paths - i.e. cases when the buf
@@ -348,41 +335,11 @@ struct dpa_percpu_priv_s {
 	u64 tx_frag_skbuffs;
 	/* number of S/G frames received */
 	u64 rx_sg;
-#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
-	u64 tx_caam_enc;
-	u64 tx_caam_dec;
-	u64 ipsec_tx_entry;
-	u64 ipsec_tx_direct;
-	u64 ipsec_out_ok;
-	u64 ipsec_out_no_hook;
-	u64 ipsec_out_no_sa;
-	u64 ipsec_out_fq_miss;
-	u64 ipsec_out_fd_fail;
-	u64 ipsec_out_enqueue_fail;
-	u64 ipsec_out_l2_strip;
-	u64 ipsec_out_gso;
-	u64 ipsec_out_nonlinear;
-	u64 ipsec_out_fraglist;
-	u64 ipsec_out_sg_entries;
-	u64 ipsec_out_compound;
-	u64 ipsec_out_enqueue_busy;
-	u64 ipsec_out_enqueue_busy_high;
-	u64 ipsec_in_ok;
-	u64 ipsec_in_no_fq;
-	u64 ipsec_in_fd_fail;
-	u64 ipsec_in_enqueue_fail;
-	u64 ipsec_txconf_null;
-	u64 ipsec_txconf_bpid35;
-	u64 ipsec_txconf_marker_release;
-#endif
-#ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
-	u64 ask_ceetm_tx_drops;
-#endif
+
 	struct rtnl_link_stats64 stats;
 	struct dpa_rx_errors rx_errors;
 	struct dpa_ern_cnt ern_cnt;
 };
-
 
 struct dpa_priv_s {
 	struct dpa_percpu_priv_s	__percpu *percpu_priv;
@@ -455,14 +412,9 @@ struct dpa_priv_s {
 	int loop_id;
 	int loop_to;
 #endif
-#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH) || \
-	defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
+#ifdef CONFIG_FSL_DPAA_CEETM
 	bool ceetm_en; /* CEETM QoS enabled */
-#if defined(CONFIG_CPE_FAST_PATH) || defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
-	void *qm_ctx;  /* CEETM context */
 #endif
-#endif
-	void *ifinfo;
 };
 
 struct fm_port_fqs {
@@ -477,7 +429,7 @@ struct fm_port_fqs {
 extern struct net_device *dpa_loop_netdevs[20];
 #endif
 
-int dpaa_eth_refill_bpools(struct dpa_bp *dpa_bp, int *count_ptr, int threshold);
+int dpaa_eth_refill_bpools(struct dpa_bp *dpa_bp, int *count_ptr);
 void __hot _dpa_rx(struct net_device *net_dev,
 		struct qman_portal *portal,
 		const struct dpa_priv_s *priv,
@@ -591,7 +543,6 @@ void dpaa_eth_sysfs_init(struct device *dev);
 int dpaa_eth_poll(struct napi_struct *napi, int budget);
 
 void dpa_private_napi_del(struct net_device *net_dev);
-bool dpa_is_private_netdev(const struct net_device *net_dev);
 
 /* Equivalent to a memset(0), but works faster */
 static inline void clear_fd(struct qm_fd *fd)

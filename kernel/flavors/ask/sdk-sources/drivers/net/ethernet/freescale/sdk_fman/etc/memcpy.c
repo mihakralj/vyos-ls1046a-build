@@ -56,7 +56,6 @@ void * MemSet8(void* pDst, int c, uint32_t size)
     return pDst;
 }
 
-#define USE_ALTERNATE 1
 void * MemCpy32(void* pDst,void* pSrc, uint32_t size)
 {
     uint32_t leftAlign;
@@ -70,10 +69,6 @@ void * MemCpy32(void* pDst,void* pSrc, uint32_t size)
 
     p_Src8 = (uint8_t*)(pSrc);
     p_Dst8 = (uint8_t*)(pDst);
-#ifdef USE_ALTERNATE
-    memcpy(p_Dst8, p_Src8, size);
-    return pDst;
-#endif
     /* first copy byte by byte till the source first alignment
      * this step is necessary to ensure we do not even try to access
      * data which is before the source buffer, hence it is not ours.
@@ -148,11 +143,6 @@ void * IO2IOCpy32(void* pDst,void* pSrc, uint32_t size)
 
     p_Src8 = (uint8_t*)(pSrc);
     p_Dst8 = (uint8_t*)(pDst);
-#ifdef USE_ALTERNATE
-    memcpy(p_Dst8, p_Src8, size);
-    return pDst;
-#endif
-
     /* first copy byte by byte till the source first alignment
      * this step is necessary to ensure we do not even try to access
      * data which is before the source buffer, hence it is not ours.
@@ -232,11 +222,6 @@ void * Mem2IOCpy32(void* pDst,void* pSrc, uint32_t size)
 
     p_Src8 = (uint8_t*)(pSrc);
     p_Dst8 = (uint8_t*)(pDst);
-#ifdef USE_ALTERNATE
-    memcpy(p_Dst8, p_Src8, size);
-    return pDst;
-#endif
-
     /* first copy byte by byte till the source first alignment
      * this step is necessary to ensure we do not even try to access
      * data which is before the source buffer, hence it is not ours.
@@ -315,10 +300,6 @@ void * IO2MemCpy32(void* pDst,void* pSrc, uint32_t size)
 
     p_Src8 = (uint8_t*)(pSrc);
     p_Dst8 = (uint8_t*)(pDst);
-#ifdef USE_ALTERNATE
-    memcpy(p_Dst8, p_Src8, size);
-    return pDst;
-#endif
     /* first copy byte by byte till the source first alignment
      * this step is necessary to ensure we do not even try to access
      * data which is before the source buffer, hence it is not ours.

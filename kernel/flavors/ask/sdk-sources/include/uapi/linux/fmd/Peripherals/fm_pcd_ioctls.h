@@ -1359,14 +1359,6 @@ typedef struct ioc_fm_pcd_cc_key_params_t {
                                                  of the same size defined in the key_size */
     ioc_fm_pcd_cc_next_engine_params_t  cc_next_engine_params;
                                             /**< parameters for the next for the defined Key in p_key */
-#if 0 // following fields not defined in ioc_fm_pcd_cc_key_params_t 
-#if (DPAA_VERSION >= 11)
-	uint32_t					internal_tstamp:1; /* set to use internal FMAN time stamp */
-	uint32_t					reserved:29;
-	uint32_t					ext_timer_id:2; /* time stamp timer to use */
-	uintptr_t	monitor_addr;
-#endif /* (DPAA_VERSION >= 11) */
-#endif // 0
 
 } ioc_fm_pcd_cc_key_params_t;
 
@@ -1463,37 +1455,6 @@ typedef struct ioc_fm_pcd_hash_table_params_t {
 
     ioc_fm_pcd_cc_next_engine_params_t   cc_next_engine_params_for_miss;
                                                             /**< Parameters for defining the next engine when a key is not matched */
-
-	bool			aging_support;							/**< TRUE to enable aging support for all keys of this hash table;
-																Aging status of a key enables the application to monitor if the
-																key was accessed for a certain period of time, meaning if a
-																packet that matches this key was received since this bit was last
-																set by the application */
-
-#if (DPAA_VERSION >= 11)
-	bool			external_hash;
-#ifndef EXCLUDE_FMAN_IPR_OFFLOAD
-	uint32_t    table_type;    /* ip reassembly table */
-	//valid for reassembly tables only
-	struct {
-		uint32_t timeout_val;   //reassembly timeout
-		uint32_t timeout_fqid;  //fqid for reassmebly failures
-		uint32_t max_frags;     //max allowed fragments
-		uint32_t min_frag_size; //min allowed frag size except last frag
-		uint32_t max_sessions;  //max conn reassembly sessions
-	};
-#endif
-
-	struct {
-		uint8_t		data_mem_id;							/**< Memory partition ID for the external hash table buckets and contexts;
-    	 	 	 	 	 	 	 	 	 	 	 	 	 	 	 Must not cross the 4GB boundaries*/
-
-		uint16_t	data_liodn_offs;						/**< LIODN offset for access the external hash table buckets and contexts */
-
-		uintptr_t	miss_monitor_addr;						/**< user allocated miss monitor address */
-	} external_hash_params;
-#endif /* (DPAA_VERSION >= 11) */
-
     void                        *id;
 } ioc_fm_pcd_hash_table_params_t;
 

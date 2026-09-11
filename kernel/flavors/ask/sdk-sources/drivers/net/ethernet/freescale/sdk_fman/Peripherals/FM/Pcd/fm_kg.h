@@ -158,8 +158,6 @@ typedef uint8_t t_GenericCodes;
 #define MAX_HASH_SHIFT                      40
 #define MAX_KG_SCH_FQID_BIT_OFFSET          31
 #define MAX_KG_SCH_PP_BIT_OFFSET            15
-
-void disp_sch_info(t_Handle h_Scheme);
 #define MAX_DIST_FQID_SHIFT                 23
 
 #define GET_MASK_SEL_SHIFT(shift,i)                 \

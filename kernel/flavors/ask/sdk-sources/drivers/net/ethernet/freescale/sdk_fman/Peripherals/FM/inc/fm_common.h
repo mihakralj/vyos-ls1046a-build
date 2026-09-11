@@ -53,8 +53,7 @@
 
 #define IP_OFFLOAD_PACKAGE_NUMBER                   106
 #define CAPWAP_OFFLOAD_PACKAGE_NUMBER               108
-#define ASK_UCODE_PACKAGE_NUMBER                    209
-#define IS_OFFLOAD_PACKAGE(num) ((num == IP_OFFLOAD_PACKAGE_NUMBER) || (num == CAPWAP_OFFLOAD_PACKAGE_NUMBER) || (num >= ASK_UCODE_PACKAGE_NUMBER) )
+#define IS_OFFLOAD_PACKAGE(num) ((num == IP_OFFLOAD_PACKAGE_NUMBER) || (num == CAPWAP_OFFLOAD_PACKAGE_NUMBER))
 
 
 
@@ -186,19 +185,9 @@ typedef _Packed struct t_FmPcdCtrlParamsPage {
     volatile uint32_t discardMask;
     volatile uint8_t  reserved3[4];
     volatile uint32_t postBmiFetchNia;
-    volatile uint32_t internalFEBufferManagementIndexAddr;
-    volatile uint32_t internalFEBufferDepletionCounter;
-    volatile uint8_t  reserved4[164];
+    volatile uint8_t  reserved4[172];
 } _PackedType t_FmPcdCtrlParamsPage;
 
-#if (DPAA_VERSION >= 11)
-typedef _Packed struct t_ExtHashResult {
-    volatile uint32_t liodnContextAndContextPtrHi;
-    volatile uint32_t contextPtrLow;
-    volatile uint32_t liodnMonitorAndMonitorPtrHi;
-    volatile uint32_t monitorPtrLow;
-} _PackedType t_ExtHashResult;
-#endif /* (DPAA_VERSION >= 11) */
 
 
 #if defined(__MWERKS__) && !defined(__GNUC__)
@@ -451,17 +440,6 @@ static __inline__ bool TRY_LOCK(t_Handle h_Spinlock, volatile bool *p_Flag)
 
 #define NIA_BMI_AC_ENQ_FRAME_WITHOUT_DMA    0x00000202
 
-#if (DPAA_VERSION >= 11)
-#define FE_MAX_CONTEXT_SIZE             256
-#define FE_MUX_CONTEXT_OFFSET           0
-#define FE_TRANSITION_CONTEXT_OFFSET    4
-#define FE_ENQUEUE_CONTEXT_OFFSET       8
-#define FE_HM_CONTEXT_OFFSET_START      16
-#define FM_MAX_HM_CONTEXTS              3
-#define FM_HM_CONTEXT_SIZE              ((FE_MAX_CONTEXT_SIZE-FE_HM_CONTEXT_OFFSET_START)/FM_MAX_HM_CONTEXTS)
-#define FE_HM_CONTEXT_OFFSET(i)         (FE_HM_CONTEXT_OFFSET_START + i*FM_HM_CONTEXT_SIZE)
-#endif /* (DPAA_VERSION >= 11) */
-
 #if defined(FM_OP_NO_VSP_NO_RELEASE_ERRATA_FMAN_A006675) || defined(FM_ERROR_VSP_NO_MATCH_SW006)
 #define GET_NIA_BMI_AC_ENQ_FRAME(h_FmPcd)   \
     (uint32_t)((FmPcdIsAdvancedOffloadSupported(h_FmPcd)) ? \
@@ -683,76 +661,6 @@ typedef struct t_FmPcdLock {
 typedef t_Error (t_FmPortGetSetCcParamsCallback) (t_Handle                  h_FmPort,
                                                   t_FmPortGetSetCcParams    *p_FmPortGetSetCcParams);
 
-#if (DPAA_VERSION >= 11)
-#define FM_PCD_FE_ALIGN                     8
-#define FM_PCD_FE_T_EXT_HASH_SIZE           (4*7)
-#define FM_PCD_FE_T_HM_SIZE                 (4*4)
-#define FM_PCD_FE_T_ENQ_SIZE                (4*4)
-#define FM_PCD_FE_T_MUX_SIZE                (4*1)
-#define FM_PCD_FE_T_EXIT_SIZE               (4*1)
-#define FM_PCD_FE_T_TRANSITION_SIZE         (4*2)
-
-#define FM_PCD_FE_MAX_SIZE                   FM_PCD_FE_T_EXT_HASH_SIZE
-
-typedef enum e_FmPcdFEType
-{
-    e_FM_PCD_FE_T_INVALID = 0,
-    e_FM_PCD_FE_T_HM,
-    e_FM_PCD_FE_T_ENQ,
-    e_FM_PCD_FE_T_EXIT,
-    e_FM_PCD_FE_T_MUX,
-    e_FM_PCD_FE_T_TRANSITION,
-    e_FM_PCD_FE_T_EXT_HASH
-} e_FmPcdFEType;
-
-typedef struct
-{
-    uint16_t    wsOffset;
-    t_Handle    h_NextFE;
-    e_FmPcdFEType type;
-    union {
-        struct {
-            bool parseAfterHm;
-        } hm;
-        struct {
-            bool    fqidEn;
-            bool    spEn;
-            bool    ppEn;
-            bool    mergePolicerWithNia;
-            uint32_t    nia;
-        } enq;
-        struct {
-            bool deallocateBuffer;
-        } exit;
-        struct {
-            bool deallocateBuffer;
-            bool nextADFromWS;
-        } transition;
-    } u;
-} t_FmPcdFEParams;
-
-typedef struct
-{
-    e_FmPcdFEType type;
-    union {
-        struct {
-            uint8_t     *p_Hmct;
-            uint16_t    tableSize;
-        } hm;
-        struct {
-            uint32_t    fqid;
-            uint8_t     rspid;
-            uint8_t     ppid;
-        } enq;
-        struct {
-            t_Handle h_NextAD;
-        } transition;
-        struct {
-            t_Handle h_NextFE;
-        } mux;
-    } u;
-} t_FmPcdFEContextParams;
-#endif /* DPAA_VERSION >= 11) */
 
 /***********************************************************************/
 /*          Common API for FM-PCD module                               */
@@ -773,9 +681,6 @@ t_Error     FmPcdFragHcScratchPoolInit(t_Handle h_FmPcd, uint8_t scratchBpid);
 t_Error     FmPcdRegisterReassmPort(t_Handle h_FmPcd, t_Handle h_IpReasmCommonPramTbl);
 t_Error     FmPcdUnregisterReassmPort(t_Handle h_FmPcd, t_Handle h_IpReasmCommonPramTbl);
 bool        FmPcdIsAdvancedOffloadSupported(t_Handle h_FmPcd);
-#if (DPAA_VERSION >= 11)
-t_Handle    FmPcdGetFE(t_Handle h_FmPcd, t_FmPcdFEParams *p_FeParams);
-#endif /* DPAA_VERSION >= 11) */
 bool        FmPcdLockTryLockAll(t_Handle h_FmPcd);
 void        FmPcdLockUnlockAll(t_Handle h_FmPcd);
 t_Error     FmPcdHcSync(t_Handle h_FmPcd);
@@ -868,21 +773,6 @@ t_Error     FmPcdCcTreeAddIPR(t_Handle h_FmPcd, t_Handle h_FmTree, t_Handle h_Ne
 t_Error     FmPcdCcTreeAddCPR(t_Handle h_FmPcd, t_Handle h_FmTree, t_Handle h_NetEnv, t_Handle h_ReassemblyManip, bool schemes);
 t_Error     FmPcdCcBindTree(t_Handle h_FmPcd, t_Handle h_PcdParams, t_Handle h_CcTree,  uint32_t  *p_Offset,t_Handle h_FmPort);
 t_Error     FmPcdCcUnbindTree(t_Handle h_FmPcd, t_Handle h_CcTree);
-#if (DPAA_VERSION >= 11)
-void        FmPcdCcBuildFE(t_Handle h_FmPcd, t_FmPcdFEParams *p_FeParams, t_Handle h_FE);
-t_Error     FmPcdCcBuildContextByFE(t_Handle h_FmPcd,
-                                    uint8_t *p_Context,
-                                    uint16_t offset,
-                                    t_FmPcdFEContextParams *p_FeParams);
-t_Handle FmPcdExternalHashTableSet(t_Handle h_FmPcd,
-                                   t_FmPcdHashTableParams *p_Param,
-                                   bool allocateBuffer,
-                                   uint16_t contextSize,
-                                   uint16_t contextOffsetInWS,
-                                   t_Handle h_NextFE,
-                                   t_Handle h_MissFE,
-                                   t_ExtHashResult *p_MissResult);
-#endif /* DPAA_VERSION >= 11) */
 
 /***********************************************************************/
 /*          Common API for FM-PCD Manip module                            */
@@ -899,10 +789,6 @@ typedef enum e_FmPortGprFuncType
 } e_FmPortGprFuncType;
 
 t_Error     FmPortSetGprFunc(t_Handle h_FmPort, e_FmPortGprFuncType gprFunc, void **p_Value);
-#if (DPAA_VERSION >= 11)
-t_Error     FmPortSetFESupport(t_Handle h_FmPort);
-t_Error     FmPortDeleteFESupport(t_Handle h_FmPort);
-#endif /* DPAA_VERSION >= 11) */
 t_Error     FmGetSetParams(t_Handle h_Fm, t_FmGetSetParams *p_FmGetSetParams);
 t_Error     FmPortGetSetCcParams(t_Handle h_FmPort, t_FmPortGetSetCcParams *p_FmPortGetSetCcParams);
 uint8_t     FmPortGetNetEnvId(t_Handle h_FmPort);

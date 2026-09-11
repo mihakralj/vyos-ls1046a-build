@@ -1,0 +1,103 @@
+From 3607d5c2e2d6ecb6105f0ca27834241e5ad182be Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Fri, 3 Jul 2026 20:34:41 +0200
+Subject: [PATCH] sdk_fman: use C99 flexible arrays in ehash descriptor structs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The ehash descriptor structs in fm_ehash.h declared their variable-
+size tails as GNU zero-length arrays (member[0]). The kernel builds
+with -fstrict-flex-arrays=3, under which a [0] tail has a compile-
+time object size of zero, so any memcpy into it trips FORTIFY_SOURCE
+at runtime and UBSAN's array-bounds check — even when the caller
+correctly allocated sizeof(struct) + payload.
+
+Observed in practice from cdx create_tunnel_insert_hm, which memcpys
+the outer L3 header into en_ehash_insert_l3_hdr.l3hdr on the sit-
+tunnel encap path:
+
+  WARNING: ... in fortify_panic-adjacent memcpy check
+  memcpy: detected field-spanning write (size N) of single field
+  "&ptr->l3hdr[0]" ... (destination size 0)
+
+Convert all seven zero-length tails (key, stats_offsets x3, l2hdr,
+vlanhdr, l3hdr) to C99 flexible array members. sizeof(struct) is
+unchanged; FORTIFY/UBSAN treat [] tails as unbounded, which matches
+how every caller sizes these buffers.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ .../freescale/sdk_fman/inc/Peripherals/fm_ehash.h  | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_ehash.h b/drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_ehash.h
+index bd16459d5d81..8cfb906052be 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_ehash.h
++++ b/drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_ehash.h
+@@ -60,7 +60,7 @@ struct en_ehash_entry {
+ 				};
+ 				uint64_t next_entry;
+ 			};
+-			uint8_t key[0];			//variable size key
++			uint8_t key[];			//variable size key
+ 		}__attribute__ ((packed));
+ 		struct {
+ 			uint8_t	hash_entry[MAX_EN_EHASH_ENTRY_SIZE];
+@@ -305,7 +305,7 @@ struct en_ehash_strip_all_vlan_hdrs {
+ 	uint8_t         op_flags;       /* To check vlan validation should be enabled or disabled*/
+ 	uint8_t         pad;
+ 	uint16_t         pad1;
+-	uint8_t stats_offsets[0];		//array of offsets into stats base
++	uint8_t stats_offsets[];		//array of offsets into stats base
+ }__attribute__ ((packed));
+ 
+ //parameters for STRIP_PPPoE_HDR
+@@ -324,7 +324,7 @@ struct en_ehash_strip_l2_hdrs {
+ 		};
+ 		uint32_t word;
+ 	};
+-	uint8_t stats_offsets[0];		//array of offsets into stats base
++	uint8_t stats_offsets[];		//array of offsets into stats base
+ }__attribute__ ((packed));
+ 
+ //parameters for opcode VALIDATE_IPSEC_ID
+@@ -373,7 +373,7 @@ struct en_ehash_insert_l2_hdr {
+ 		};
+ 		uint32_t word;
+ 	};
+-        uint8_t l2hdr[0];               //l2 hdr padded to next 4 bytes boundary
++        uint8_t l2hdr[];               //l2 hdr padded to next 4 bytes boundary
+ }__attribute__ ((packed));
+ 
+ struct en_ehash_insert_l2_hdr_stats {
+@@ -385,7 +385,7 @@ struct en_ehash_insert_l2_hdr_stats {
+                 };
+                 uint32_t word;
+         };
+-        uint8_t stats_offsets[0];               //array of offsets into stats base
++        uint8_t stats_offsets[];               //array of offsets into stats base
+ }__attribute__ ((packed));
+ 
+ 
+@@ -400,7 +400,7 @@ struct en_ehash_insert_vlan_hdr {
+ 		}__attribute__ ((packed));
+ 		uint32_t word;
+ 	}__attribute__ ((packed));
+-	uint32_t vlanhdr[0];				/* array of vlan header includes TPID */
++	uint32_t vlanhdr[];				/* array of vlan header includes TPID */
+ }__attribute__ ((packed));
+ 
+ struct en_ehash_insert_vlan_hdr_stats {
+@@ -461,7 +461,7 @@ struct en_ehash_insert_l3_hdr {
+ 		};
+ 		uint32_t word_1;
+ 	};
+-        uint8_t l3hdr[0];               //l3 hdr padded to next 4 bytes boundary
++        uint8_t l3hdr[];               //l3 hdr padded to next 4 bytes boundary
+ }__attribute__ ((packed));
+ 
+ #define COPY_DSCP_OUTER_INNER (1<<24)
+-- 
+2.47.3
+

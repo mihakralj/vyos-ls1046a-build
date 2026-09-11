@@ -1,0 +1,24 @@
+# ASK kernel patches synced from https://github.com/we-are-mono/ASK.git @ 5d96de360d8ec7809d8b97cee0ad591e48c5e73e
+010-ask-fman-dpaa-ehash.patch
+020-ask-bridge-hooks.patch
+030-ask-ipv4-ipv6-forwarding.patch
+040-ask-xfrm-ipsec-offload.patch
+050-ask-conntrack-offload.patch
+060-ask-netfilter-qosmark.patch
+070-ask-ppp-hooks.patch
+080-wext-core-restore-ndo_do_ioctl.patch
+090-qbman-dpa_alloc-preallocate-nodes.patch
+091-sdk_dpaa-dpa_get_channel-use-mutex.patch
+092-sdk_fman-FmPcdLockTryLockAll-nest-annotation.patch
+093-netlink-name-L2FLOW-cb-mutex.patch
+094-sdk-fman-dpaa-qbman-kasan-sanitize-off.patch
+096-sdk_fman-mac-hash-alloc-null-check.patch
+097-xfrm-trans-queue-force-dst-refcount.patch
+098-sdk_dpaa-bp-alloc-slab-build-skb.patch
+099-sdk_fman-ehash-flex-arrays.patch
+100-sdk_dpaa-ethtool-quiet-phyless-ports.patch
+101-sdk_fman-sysfs-restore-irqs-on-early-return.patch
+102-sdk_dpaa-extend-stop-drain-delays.patch
+110-sdk-mainline-build-compat.patch
+120-emc2305-dt-fan-control.patch
+130-thermal-linear-governor.patch
