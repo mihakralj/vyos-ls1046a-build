@@ -430,10 +430,17 @@ DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Per
 
 $CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
 $CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
-$CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
+# testapp.c removed upstream at ASK_VERSION 5d96de36 (no dangling references
+# in main.c/dpa.c -- confirmed by grep before dropping it here).
+if [ -f "$DPA_SRC/testapp.c" ]; then
+    $CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
+    TESTAPP_OBJ="$DPA_SRC/testapp.o"
+else
+    TESTAPP_OBJ=""
+fi
 
 $CXX -o "$DPA_BUILT" \
-    "$DPA_SRC/main.o" "$DPA_SRC/dpa.o" "$DPA_SRC/testapp.o" \
+    "$DPA_SRC/main.o" "$DPA_SRC/dpa.o" $TESTAPP_OBJ \
     "$FMC_SRC/libfmc.a" \
     -L"$FMLIB_DIR" -lfm \
     -lxml2 -lpthread -lcli \
