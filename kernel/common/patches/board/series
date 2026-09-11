@@ -206,12 +206,10 @@
 4010-clk-qoriq-ls1046a-cmux-full-range.patch
 
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
+# patch-series-cleanup (2026-09-11): squashed 0155+0156+0157 (tight,
+# blob-chained fe_arm refinement, fman_pcd.c only). See its header.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0155-fman-pcd-fe-arm-allow-zero-offset.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0156-fman-pcd-fe-arm-disengage-port-del.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0157-fman-pcd-fe-arm-typed-impl.patch
+0155-fman-pcd-fe-arm-zero-offset-disengage-typed-impl.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0158-fman-pcd-fqid-resolution-compose.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A

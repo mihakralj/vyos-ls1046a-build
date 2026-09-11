@@ -1,8 +1,28 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman: FE-arm zero-offset, disengage-port-del, typed impl
+
+Consolidates 0155 (fe-arm-allow-zero-offset) + 0156
+(fe-arm-disengage-port-del) + 0157 (fe-arm-typed-impl) into one patch: a
+tight, blob-hash-chained 3-step refinement of fman_pcd_fe_arm_engage()/
+fman_pcd_fe_arm_disengage() (0155's ending blob 1b888fd is 0156's
+starting blob; 0156's ending blob 75e279b is 0157's starting blob), all
+touching only fman_pcd.c and nothing else, with no other patch touching
+this file interleaved between them.
+
+Verified against the real CI checkpoint commits in the persistent
+kernel-git-cache (run 34561804990, checkpoints fd0214291520 "applied:
+0154..." to 0f9d77aedc1b "applied: 0157..."), round-trip verified
+byte-identical via `patch -p1`.
+
+Touches: fman_pcd.c only.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 75e279b..f3290c4 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2249,56 +2249,55 @@ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
+@@ -2281,59 +2281,55 @@
   *
   * Verbs:  engage <port_hex> <fe_enter_off_hex> [miss_fqid_hex]  |  disengage <port_hex>
   */
@@ -24,18 +44,21 @@ index 75e279b..f3290c4 100644
  	int err;
  
 -	if (sscanf(args, "engage %x %lx %x", &port_id, &fe_enter_off, &miss_fqid) < 2)
--		return -EINVAL;
--	if (miss_fqid == 0)
--		miss_fqid = 0x200;  /* backward compat: eth3 default */
- 	if (port_id < 0x08 || port_id >= 0x28)
++	if (port_id < 0x08 || port_id >= 0x28)
  		return -EINVAL;
-+	if (miss_fqid == 0)
+ 	if (miss_fqid == 0)
+-		miss_fqid = 0x200;  /* backward compat: eth3 default */
+-	if (port_id < 0x08 || port_id >= 0x28 || fe_enter_off == 0)
+-		return -EINVAL;
+-
+-	mutex_lock(&pcd->fe_lock);
+-	if (fe_enter_off != 0 && (pcd->fe_refcount == 0 || pcd->fe_root_ad_off != fe_enter_off)) {
+-		mutex_unlock(&pcd->fe_lock);
+-		return -EINVAL;
+-	}
+-	mutex_unlock(&pcd->fe_lock);
 +		miss_fqid = 0x200;
  
--	/* F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP
--	 * pass-through (no FE-VM chain).  The fman_pcd_kg_port_arm_fe()
--	 * call below rejects double-engage; no need for a refcount gate. */
--
 -	/* F-079: CONT_LOOKUP pass-through scaffold (RM 8.7.4.1).
 -	 * AC_CC dispatch (next_engine=3) with RCCB→group_table.
 -	 * numKeys=0 → all frames miss → miss-AD → kernel FQ (dynamic per port).
@@ -85,7 +108,7 @@ index 75e279b..f3290c4 100644
  				pcd->fe_scaffold_gro = gro;
  				pcd->fe_scaffold_mto = mto;
  				pcd->fe_scaffold_ato = ato;
-@@ -2313,31 +2312,50 @@ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+@@ -2348,28 +2344,50 @@
  
  	pcd->fe_armed_port = (u8)port_id;
  	pcd->fe_miss_fqid = miss_fqid;
@@ -120,10 +143,8 @@ index 75e279b..f3290c4 100644
  	if (port_id < 0x08 || port_id >= 0x28)
  		return -EINVAL;
  
--	/* R10: FE port teardown (pool+index) BEFORE scaffold free (0156). */
- 	fman_pcd_fe_port_del(pcd, (u8)port_id);
--
 -	/* Free scaffold MURAM before scheme disarm (0152). */
++	fman_pcd_fe_port_del(pcd, (u8)port_id);
  	fman_pcd_fe_arm_free_scaffold(pcd);
 -
  	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
@@ -144,7 +165,7 @@ index 75e279b..f3290c4 100644
  static int fman_pcd_fe_arm_show(struct seq_file *s, void *unused)
  {
  	struct fman_pcd *pcd = s->private;
-@@ -2398,7 +2416,6 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+@@ -2430,7 +2448,6 @@
  {
  	struct fman_pcd *pcd;
  	struct fman_port *rxport;
@@ -152,7 +173,7 @@ index 75e279b..f3290c4 100644
  	unsigned int miss_fqid;
  	int err;
  
-@@ -2418,15 +2435,13 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+@@ -2450,15 +2467,13 @@
  	if (err)
  		return err;
  
@@ -170,7 +191,7 @@ index 75e279b..f3290c4 100644
  		return err;
  	}
  
-@@ -2439,7 +2454,6 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_engage);
+@@ -2471,7 +2486,6 @@
  void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id)
  {
  	struct fman_pcd *pcd;
@@ -178,7 +199,7 @@ index 75e279b..f3290c4 100644
  
  	if (!fm)
  		return;
-@@ -2447,9 +2461,7 @@ void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id)
+@@ -2479,9 +2493,7 @@
  	if (!pcd)
  		return;
  
