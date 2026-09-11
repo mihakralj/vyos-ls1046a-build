@@ -59,7 +59,21 @@ opam pin add -y -n vyos1x-config \
   'https://github.com/vyos/vyos1x-config.git#52132ad2c0992bf6f17a06173384030d93a29053'
 opam pin add -y -n vyconf \
   'https://github.com/vyos/vyconf.git#e25b13ae3040d02326f01bf9bedd097795fb3a62'
-opam install -y vyos1x-config vyconf
+# Install one at a time, NOT `opam install -y vyos1x-config vyconf` in a
+# single command. Root-caused via runner filesystem inspection after two
+# intermittent failures (CI runs 34572188019, 34571368967): opam's
+# default parallel job scheduler can start compiling vyconf against
+# vyos1x-config's OLD interface before vyos1x-config's own recompile has
+# finished installing its new .cmi files into /opt/opam's shared lib/
+# dir -- a build-ordering race, not a stale cache (vyos1x-config's
+# freshly rebuilt config_diff.ml was already on disk when vyconf's build
+# failed with "Unbound module Vyos1x.Config_diff"). A single `opam
+# install` invocation naming both packages lets opam schedule them
+# concurrently by its dependency graph; two separate invocations force
+# full serialization, since each command only returns once that
+# package's install (including copying its .cmi into lib/) is complete.
+opam install -y vyos1x-config
+opam install -y vyconf
 
 # vyos-1x's top-level Makefile gates the libvyosconfig build behind
 #   @if [ ! -f /usr/lib/libvyosconfig.so.0 ]; then make -C libvyosconfig all; ... fi
