@@ -1,0 +1,1050 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman: PCD KeyGen/CC/HM/policer subsystem install
+
+Consolidates 0097 (fman-pcd-keygen) + 0098 (fman-pcd-cc-static-install) +
+0099 (fman-pcd-hm-install) + 0100 (fman-pcd-plcr-install) into one patch:
+four sequential install-registration steps from this file's own
+"0092-0100: PCD subsystem, KeyGen, CC, HM, policer" section, all with the
+same small footprint (Makefile object-list entry, dpaa_fman_caps.c
+capability wiring, fman_pcd.h prototype), same-day authorship (0098/0099
+both dated 2026-05-29), applied in strict sequence with nothing else
+interleaved.
+
+Verified against the real CI checkpoint commits in the persistent
+kernel-git-cache (run 34562697395, checkpoints e08fb896625b "applied:
+0096..." to 86e3a1da75d3 "applied: 0100..."), round-trip verified
+byte-identical via `patch -p1`.
+
+Touches: dpaa_fman_caps.c, fman/Makefile, fman_keygen.c, fman_pcd.h.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -19,11 +19,15 @@
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+ #include <linux/printk.h>
++#include <linux/slab.h>
+ #include <linux/types.h>
+ 
+ #include <linux/of.h>
+ #include <linux/string.h>
++#include <linux/fsl/fman_pcd.h>
++
+ #include "dpaa_fman_caps.h"
++#include "fman.h"
+ 
+ /* dpaa_fman_caps.force=<u32>
+  *
+@@ -186,10 +190,108 @@
+  * today and gracefully degrade on ucode-106 silicon.
+  * ------------------------------------------------------------------ */
+ 
++/*
++ * Translate one host-endian struct fman_cc_key into the neutral, BE-ready
++ * struct fman_pcd_cc_hw_key the fman-side installer consumes.  A field
++ * participates iff it (or its mask) is non-zero; multi-byte fields are
++ * converted host->FMan-big-endian here so the silicon-programming layer can
++ * copy them verbatim into MURAM.
++ */
++static void dpaa_cc_key_to_hw(const struct fman_cc_key *k,
++      struct fman_pcd_cc_hw_key *hw)
++{
++memset(hw, 0, sizeof(*hw));
++
++if (k->is_ipv6)
++hw->present |= FMAN_PCD_CC_HW_F_IPV6;
++
++if (k->ethertype) {
++hw->ethertype_be = cpu_to_be16(k->ethertype);
++hw->present |= FMAN_PCD_CC_HW_F_ETHERTYPE;
++}
++if (k->proto) {
++hw->proto = k->proto;
++hw->present |= FMAN_PCD_CC_HW_F_PROTO;
++}
++
++if (k->is_ipv6) {
++/* IPv6 addresses are already network-order byte arrays. */
++memcpy(hw->src_ip6, k->src_ip6, sizeof(hw->src_ip6));
++memcpy(hw->dst_ip6, k->dst_ip6, sizeof(hw->dst_ip6));
++/* Presence keyed on a non-zero address. */
++if (memchr_inv(k->src_ip6, 0, sizeof(k->src_ip6)))
++hw->present |= FMAN_PCD_CC_HW_F_SRC_IP;
++if (memchr_inv(k->dst_ip6, 0, sizeof(k->dst_ip6)))
++hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
++} else {
++if (k->src_ip || k->src_ip_mask) {
++hw->src_ip_be = cpu_to_be32(k->src_ip);
++hw->present |= FMAN_PCD_CC_HW_F_SRC_IP;
++}
++if (k->dst_ip || k->dst_ip_mask) {
++hw->dst_ip_be = cpu_to_be32(k->dst_ip);
++hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
++}
++}
++
++if (k->src_port) {
++hw->src_port_be = cpu_to_be16(k->src_port);
++hw->present |= FMAN_PCD_CC_HW_F_SRC_PORT;
++}
++if (k->dst_port) {
++hw->dst_port_be = cpu_to_be16(k->dst_port);
++hw->present |= FMAN_PCD_CC_HW_F_DST_PORT;
++}
++
++hw->target_qband = k->target_qband;
++hw->hm_handle = k->hm_handle;
++}
++
++/*
++ * Productive static CC-tree install (spec sec 5.4).  Gates on
++ * FMAN_CAP_CC_EXACT_MATCH (BIT0) BEFORE touching MURAM per spec sec 3.5;
++ * on a board without it (mainline ucode 106) returns -ENOTSUPP so the
++ * flavor layer fails soft.  On the Mono Gateway DK the 210.10.1 QEF blob
++ * lights CC up (caps = 0x17), so this path is live there.
++ *
++ * Translates the host-endian static tree into the neutral fman-side
++ * descriptor and delegates the silicon programming to
++ * fman_pcd_cc_static_install() in fsl_dpaa_fman.ko (which owns the MURAM
++ * allocator).  add_key/remove_key stay -ENOTSUPP: they require the Host
++ * Command doorbell (FMAN_CAP_HC_DISPATCH), which the board's ucode does
++ * not implement.
++ */
+ int fman_cc_tree_install(struct fman *fm, u8 port_id,
+  const struct fman_cc_static_tree *spec)
+ {
++struct fman_pcd_cc_hw_spec *hw;
++struct fman_pcd *pcd;
++u16 i;
++int err;
++
++if (!fm || !spec)
++return -EINVAL;
++if (!(dpaa_fman_get_caps() & FMAN_CAP_CC_EXACT_MATCH))
+ return -ENOTSUPP;
++if (spec->num_keys > FMAN_CC_MAX_STATIC_KEYS)
++return -EINVAL;
++
++pcd = fman_get_pcd(fm);
++if (!pcd)
++return -ENXIO;
++
++hw = kzalloc(sizeof(*hw), GFP_KERNEL);
++if (!hw)
++return -ENOMEM;
++
++hw->num_keys = spec->num_keys;
++hw->miss_qband = spec->miss_qband;
++for (i = 0; i < spec->num_keys; i++)
++dpaa_cc_key_to_hw(&spec->keys[i], &hw->keys[i]);
++
++err = fman_pcd_cc_static_install(pcd, port_id, hw);
++kfree(hw);
++return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_install);
+ 
+@@ -208,7 +310,15 @@
+ 
+ void fman_cc_tree_destroy(struct fman *fm, u8 port_id)
+ {
+-/* no-op stub */
++struct fman_pcd *pcd;
++
++if (!fm)
++return;
++if (!(dpaa_fman_get_caps() & FMAN_CAP_CC_EXACT_MATCH))
++return;
++pcd = fman_get_pcd(fm);
++if (pcd)
++fman_pcd_cc_static_destroy(pcd, port_id);
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
+ 
+@@ -222,19 +332,110 @@
+  * downstream caller. Spec sec 5.5.
+  * ------------------------------------------------------------------ */
+ 
++/*
++ * Translate the host-endian ordered-op list (struct fman_hm_spec, private
++ * to fsl_dpa.ko) into the neutral struct fman_pcd_hm_hw_spec the fman-side
++ * installer consumes.  The neutral HM fields carry HOST values (the encoder
++ * in fman_pcd_manip.c assembles the inline payload word and writes it
++ * big-endian via iowrite32be), so this is a one-to-one field copy: VLAN
++ * tpid->tpid_be, vlan_id->vid, pcp->pcp; MPLS name-for-name.  VLAN_STRIP /
++ * MPLS_POP carry no params.
++ */
++static void dpaa_hm_spec_to_hw(const struct fman_hm_spec *spec,
++			      struct fman_pcd_hm_hw_spec *hw)
++{
++	u8 i;
++
++	memset(hw, 0, sizeof(*hw));
++	hw->num_ops = spec->num_ops;
++
++	for (i = 0; i < spec->num_ops; i++) {
++		const struct fman_hm_op *src = &spec->ops[i];
++		struct fman_pcd_hm_hw_op *dst = &hw->ops[i];
++
++		switch (src->type) {
++		case FMAN_HM_OP_VLAN_STRIP:
++			dst->type = FMAN_PCD_HM_HW_OP_VLAN_STRIP;
++			break;
++		case FMAN_HM_OP_VLAN_INSERT:
++			dst->type = FMAN_PCD_HM_HW_OP_VLAN_INSERT;
++			dst->vlan_insert.tpid_be = src->vlan_insert.tpid;
++			dst->vlan_insert.vid = src->vlan_insert.vlan_id;
++			dst->vlan_insert.pcp = src->vlan_insert.pcp;
++			break;
++		case FMAN_HM_OP_MPLS_PUSH:
++			dst->type = FMAN_PCD_HM_HW_OP_MPLS_PUSH;
++			dst->mpls_push.label = src->mpls_push.label;
++			dst->mpls_push.tc = src->mpls_push.tc;
++			dst->mpls_push.s = src->mpls_push.s;
++			dst->mpls_push.ttl = src->mpls_push.ttl;
++			break;
++		case FMAN_HM_OP_MPLS_POP:
++			dst->type = FMAN_PCD_HM_HW_OP_MPLS_POP;
++			break;
++		}
++	}
++}
++
++/*
++ * Productive HM node install (spec sec 5.5).  Gates on FMAN_CAP_HM_NODES
++ * BEFORE touching MURAM per spec sec 3.5; on a board without it (mainline
++ * ucode 106) returns -ENOTSUPP so the flavor layer fails soft.  On the Mono
++ * Gateway DK the 210.10.1 QEF blob lights HM up (caps = 0x17), so this path
++ * is live there.  Translates the host-endian op list into the neutral
++ * fman-side descriptor and delegates the silicon programming to
++ * fman_pcd_hm_install() in fsl_dpaa_fman.ko (which owns the MURAM
++ * allocator).  On success *handle receives the HMTD MURAM byte offset, the
++ * value a CC action carries as hm_handle.
++ */
+ int fman_hm_node_install(struct fman *fm, u8 port_id,
+ 			 const struct fman_hm_spec *spec, u32 *handle)
+ {
+-	if (!handle)
++	struct fman_pcd_hm_hw_spec *hw;
++	struct fman_pcd *pcd;
++	int err;
++
++	if (!fm || !spec || !handle)
+ 		return -EINVAL;
+ 	*handle = 0;
+-	return -ENOTSUPP;
++	if (!fman_hm_caps_supported())
++		return -ENOTSUPP;
++	if (spec->num_ops == 0 || spec->num_ops > FMAN_HM_MAX_OPS)
++		return -EINVAL;
++
++	pcd = fman_get_pcd(fm);
++	if (!pcd)
++		return -ENXIO;
++
++	hw = kzalloc(sizeof(*hw), GFP_KERNEL);
++	if (!hw)
++		return -ENOMEM;
++
++	dpaa_hm_spec_to_hw(spec, hw);
++
++	err = fman_pcd_hm_install(pcd, port_id, hw, handle);
++	kfree(hw);
++	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_hm_node_install);
+ 
++/*
++ * Productive HM node destroy (spec sec 5.5).  Gates on FMAN_CAP_HM_NODES,
++ * resolves the PCD and delegates to fman_pcd_hm_destroy(), which is
++ * idempotent (a handle matching no live node is a no-op).  Returns 0 on a
++ * board without HM caps (nothing was ever installed).
++ */
+ int fman_hm_node_destroy(struct fman *fm, u8 port_id, u32 handle)
+ {
+-	/* idempotent no-op on stub; productive impl will validate handle */
++	struct fman_pcd *pcd;
++
++	if (!fm)
++		return 0;
++	if (!fman_hm_caps_supported())
++		return 0;
++	pcd = fman_get_pcd(fm);
++	if (pcd)
++		return fman_pcd_hm_destroy(pcd, port_id, handle);
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_hm_node_destroy);
+@@ -256,20 +457,89 @@
+  * install failure. Spec sec 5.6.
+  * ------------------------------------------------------------------ */
+ 
++/*
++ * Translate the host-endian struct fman_policer_profile (private to
++ * fsl_dpa.ko) into the neutral struct fman_pcd_plcr_hw_profile the
++ * fman-side installer consumes.  The neutral fields carry HOST values
++ * (bits/sec, bytes); the fman-side encoder does the exp/mant rate-field
++ * and 256-byte burst quantisation.  mode TRTCM->trtcm, color AWARE->
++ * color_aware; rates/bursts copied verbatim.
++ */
++static void dpaa_plcr_prof_to_hw(const struct fman_policer_profile *prof,
++				 struct fman_pcd_plcr_hw_profile *hw)
++{
++memset(hw, 0, sizeof(*hw));
++hw->trtcm = (prof->mode == FMAN_POLICER_MODE_TRTCM);
++hw->color_aware = (prof->color_mode == FMAN_POLICER_COLOR_AWARE);
++hw->cir_bps = prof->cir_bps;
++hw->cbs_bytes = prof->cbs_bytes;
++hw->pir_bps = prof->pir_bps;
++hw->pbs_bytes = prof->pbs_bytes;
++}
++
++/*
++ * Productive policer install (spec sec 5.6).  Gates on
++ * FMAN_CAP_POLICER_TRTCM BEFORE touching MURAM per spec sec 3.5; on a
++ * board without it (mainline ucode 106) returns -ENOTSUPP so the flavor
++ * layer fails soft.  On the Mono Gateway DK the 210.10.1 QEF blob lights
++ * the policer up (caps = 0x17), so this path is live there.  Validates
++ * the rate/burst inputs (cir_bps == 0 -> -EINVAL; a trTCM profile whose
++ * pir_bps < cir_bps -> -ERANGE), translates the host-endian profile into
++ * the neutral descriptor, resolves the PCD via fman_get_pcd(fm), and
++ * delegates the silicon programming to fman_pcd_plcr_install() in
++ * fsl_dpaa_fman.ko (which owns the MURAM allocator + rate encoder).
++ */
+ int fman_policer_install(struct fman *fm, u8 port_id, u8 profile_id,
+  const struct fman_policer_profile *prof)
+ {
+-if (!prof)
++struct fman_pcd_plcr_hw_profile *hw;
++struct fman_pcd *pcd;
++int err;
++
++if (!fm || !prof)
+ return -EINVAL;
++if (!fman_policer_caps_supported())
+ return -ENOTSUPP;
++if (prof->cir_bps == 0)
++return -EINVAL;
++if (prof->mode == FMAN_POLICER_MODE_TRTCM &&
++    prof->pir_bps < prof->cir_bps)
++return -ERANGE;
++
++pcd = fman_get_pcd(fm);
++if (!pcd)
++return -ENXIO;
++
++hw = kzalloc(sizeof(*hw), GFP_KERNEL);
++if (!hw)
++return -ENOMEM;
++
++dpaa_plcr_prof_to_hw(prof, hw);
++
++err = fman_pcd_plcr_install(pcd, port_id, profile_id, hw);
++kfree(hw);
++return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_policer_install);
+ 
++/*
++ * Productive policer destroy (spec sec 5.6).  Gates on
++ * FMAN_CAP_POLICER_TRTCM, resolves the PCD and delegates to the
++ * idempotent fman_pcd_plcr_destroy() (a (port, slot) matching no live
++ * profile is a no-op).  No-op on a board without policer caps (nothing
++ * was ever installed).
++ */
+ void fman_policer_destroy(struct fman *fm, u8 port_id, u8 profile_id)
+ {
+-/* idempotent no-op on stub; productive impl will validate slot and
+- * detach the policer profile from any CC actions still referencing it.
+- */
++struct fman_pcd *pcd;
++
++if (!fm)
++return;
++if (!fman_policer_caps_supported())
++return;
++pcd = fman_get_pcd(fm);
++if (pcd)
++fman_pcd_plcr_destroy(pcd, port_id, profile_id);
+ }
+ EXPORT_SYMBOL_GPL(fman_policer_destroy);
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,6 @@
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -8,6 +8,7 @@
+ #include <linux/slab.h>
+ 
+ #include "fman_keygen.h"
++#include "fman_keygen_internal.h"
+ 
+ /* Maximum number of HW Ports */
+ #define FMAN_MAX_NUM_OF_HW_PORTS		64
+@@ -90,9 +91,36 @@
+ 
+ /* NIA values */
+ #define NIA_ENG_BMI			0x00500000
++#define NIA_ENG_PLCR			0x004C0000
++/* KGSE_MODE NIA action bit: select the policer profile id in the low bits of
++ * the mode NIA as an ABSOLUTE (global) profile slot rather than a per-port
++ * relative index resolved through the (unprogrammed) FMPL_PMR window. Matches
++ * the SDK CC/keygen->policer path (fm_plcr.c: nia |= NIA_ENG_PLCR |
++ * NIA_PLCR_ABSOLUTE | absoluteProfileId). RM 8.7.4. Fits KG_NIA_AC_MASK.
++ */
++#define NIA_PLCR_ABSOLUTE		0x00008000
+ #define NIA_BMI_AC_ENQ_FRAME		0x00000002
+ #define ENQUEUE_KG_DFLT_NIA		(NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME)
+ 
++/* KGSE_MODE next-action selector: when set, the scheme's next engine is the
++ * Policer (the mode NIA points at NIA_ENG_PLCR and KGSE_PPC carries the
++ * absolute profile id). When clear, the default BMI-enqueue path is used.
++ * RM 8.7.4 (KGSE_MODE). 0xC04C0000 = EN | NIA_PLCR_SELECT | NIA_ENG_PLCR.
++ */
++#define KG_SCH_MODE_NIA_PLCR		0x40000000
++
++/* KGSE_MODE next-action selector for Coarse Classification (CC): the mode NIA
++ * points at the FMan-controller CC action (NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC)
++ * and the CCOBASE field (bits 27:24) carries the CC group-table base index.
++ * KGSE_CCBS carries the hash-bit selection. RM 8.7.4 (KGSE_MODE).
++ * For the static single-group/single-entry CC tree (board patch 0098) both
++ * CCOBASE and CCBS are 0, so KGSE_MODE(CC) = EN | NIA_ENG_FM_CTL |
++ * NIA_FM_CTL_AC_CC = 0x80000006 and KGSE_CCBS = 0.
++ */
++#define NIA_ENG_FM_CTL			0x00000000
++#define NIA_FM_CTL_AC_CC		0x00000006
++#define KG_SCH_MODE_CCOBASE_SHIFT	24
++
+ /* Hard-coded configuration:
+  * These values are used as hard-coded values for KeyGen configuration
+  * and they replace user selections for this hard-coded version
+@@ -193,44 +221,6 @@
+ 	u32 fmkg_ar;	/* 0x1FC: KeyGen Action Register */
+ };
+ 
+-/* KeyGen Scheme data */
+-struct keygen_scheme {
+-	bool used;	/* Specifies if this scheme is used */
+-	u8 hw_port_id;
+-		/* Hardware port ID
+-		 * schemes sharing between multiple ports is not
+-		 * currently supported
+-		 * so we have only one port id bound to a scheme
+-		 */
+-	u32 base_fqid;
+-		/* Base FQID:
+-		 * Must be between 1 and 2^24-1
+-		 * If hash is used and an even distribution is
+-		 * expected according to hash_fqid_count,
+-		 * base_fqid must be aligned to hash_fqid_count
+-		 */
+-	u32 hash_fqid_count;
+-		/* FQ range for hash distribution:
+-		 * Must be a power of 2
+-		 * Represents the range of queues for spreading
+-		 */
+-	bool use_hashing;	/* Usage of Hashing and spreading over FQ */
+-	bool symmetric_hash;	/* Symmetric Hash option usage */
+-	u8 hashShift;
+-		/* Hash result right shift.
+-		 * Select the 24 bits out of the 64 hash result.
+-		 * 0 means using the 24 LSB's, otherwise
+-		 * use the 24 LSB's after shifting right
+-		 */
+-	u32 match_vector;	/* Match Vector */
+-};
+-
+-/* KeyGen driver data */
+-struct fman_keygen {
+-	struct keygen_scheme schemes[FM_KG_MAX_NUM_OF_SCHEMES];
+-				/* Array of schemes */
+-	struct fman_kg_regs __iomem *keygen_regs;	/* KeyGen registers */
+-};
+ 
+ /* keygen_write_ar_wait
+  *
+@@ -455,7 +445,7 @@
+  *
+  * Return: Zero for success or error code in case of failure
+  */
+-static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
++int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+ 				       u8 scheme_id,
+ 					bool bind)
+ {
+@@ -495,6 +485,7 @@
+ 
+ 	return 0;
+ }
++EXPORT_SYMBOL_GPL(keygen_bind_port_to_schemes);
+ 
+ /* keygen_scheme_setup
+  *
+@@ -506,7 +497,7 @@
+  *
+  * Return: Zero for success or error code in case of failure
+  */
+-static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
++int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 			       bool enable)
+ {
+ 	struct fman_kg_regs __iomem *keygen_regs = keygen->keygen_regs;
+@@ -534,12 +525,67 @@
+ 	if (enable) {
+ 		/* Enable Scheme */
+ 		tmp_reg |= KG_SCH_MODE_EN;
+-		/* Enqueue frame NIA */
+-		tmp_reg |= ENQUEUE_KG_DFLT_NIA;
++		if (scheme->next_engine == 1) {
++			/* Next engine = Policer: route the frame to the
++			 * policer profile in scheme->policer_profile_id. The
++			 * profile's own per-colour NIA (programmed by
++			 * fman_pcd_plcr) then decides enqueue vs drop. The
++			 * destination FQID still comes from kgse_fqb below.
++			 *
++			 * The profile id is RELATIVE (NIA_PLCR_ABSOLUTE clear,
++			 * mode 0xc04c0000): KGSE_PPC carries the id with
++			 * shift=0/mask=0, and the KeyGen resolves it through the
++			 * RX port's relative->absolute policer-profile window
++			 * FMPL_PMR[hwPortId-1], which plcr_set_port_window() in
++			 * fman_pcd_plcr programs at policer-attach (BASE=
++			 * profile_id, NUM=1, VALID).  The SDK uses relative
++			 * addressing for private per-port profiles and reserves
++			 * NIA_PLCR_ABSOLUTE for the PLCR->PLCR shared-profile
++			 * chaining case only.  Without the window programmed the
++			 * BMI has no valid profile for the port and drops every
++			 * frame *before* metering (BUG 3a: counters frozen at 0).
++			 * 2026-06-09
++			 */
++			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
++			scheme_regs.kgse_ppc = scheme->policer_profile_id;
++		} else if (scheme->next_engine == 2) {
++			/* Next engine = Coarse Classification: route the
++			 * frame into the installed CC group table. CCOBASE
++			 * (bits 27:24) selects the CC group; CCBS (kgse_ccbs
++			 * below) selects which hash bits index the entry. The
++			 * CC tree-root MURAM base is programmed separately at
++			 * the BMI RX port (FMBM_RCCB) via
++			 * fman_port_set_cc_base().
++			 */
++			tmp_reg |= NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC |
++				(scheme->cc_base_offset <<
++				 KG_SCH_MODE_CCOBASE_SHIFT);
++		} else {
++			/* Enqueue frame NIA */
++			tmp_reg |= ENQUEUE_KG_DFLT_NIA;
++		}
+ 	}
+ 
+ 	scheme_regs.kgse_mode = tmp_reg;
+ 
++	/* Policer Profile Command (KGSE_PPC): the profile-generation register
++	 * (base/shift/mask). For the policer path KGSE_PPC is set in the
++	 * next_engine==1 branch above to policer_profile_id with shift=0 and
++	 * mask=0, so the generated profile equals the id. The mode's
++	 * mode's NIA_PLCR_ABSOLUTE bit is left CLEAR, so the id is
++	 * RELATIVE; the KeyGen resolves it via the RX port's
++	 * FMPL_PMR window that plcr_set_port_window() programs at
++	 * policer-attach (see BUG 3a above). For the non-policer paths PPC stays 0
++	 * from the memset above.
++	 */
++	/* Coarse Classification Bits Select (KGSE_CCBS): which hash bits index
++	 * the CC group entry. Only meaningful when the mode NIA points at CC;
++	 * left at 0 (from the memset above) otherwise. For the static
++	 * single-entry tree this is 0.
++	 */
++	if (enable && scheme->next_engine == 2)
++		scheme_regs.kgse_ccbs = scheme->cc_bits_sel;
++
+ 	scheme_regs.kgse_mv = scheme->match_vector;
+ 
+ 	/* Scheme don't override StorageProfile:
+@@ -611,6 +657,7 @@
+ 
+ 	return 0;
+ }
++EXPORT_SYMBOL_GPL(keygen_scheme_setup);
+ 
+ /* keygen_init
+  *
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -74,4 +74,463 @@
+ void fman_pcd_release(struct fman_pcd *pcd);
+ struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
+ 
++/*
++ * KeyGen (KG) API.
++ *
++ * The KeyGen engine extracts a configurable byte-mask out of every
++ * incoming frame and feeds it to a hash that selects one of N
++ * Classifier-Continue (CC) targets, a direct frame queue, or a default
++ * policer profile.  The hardware programming lives in fman_pcd_kg.c.
++ *
++ * Reference: LS1046A RM 8.7.4 (KeyGen scheme registers), 8.7.5 (KG
++ * extract record format).  All extract offsets are in bytes from the
++ * start of the parse result described in RM 8.7.3.
++ */
++
++/**
++ * enum fman_pcd_kg_extract_from - source for one extract slot.
++ * @FMAN_PCD_KG_EXTRACT_FROM_FRAME:        raw byte at fixed frame offset
++ * @FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT: byte at offset inside parse result
++ * @FMAN_PCD_KG_EXTRACT_FROM_DEFAULT:      use the per-port default value
++ *
++ * Mirrors the KGSE_EKDV (KeyGen Scheme Extract Definition - Value) field
++ * documented in RM 8.7.5 Table 8-105.
++ */
++enum fman_pcd_kg_extract_from {
++	FMAN_PCD_KG_EXTRACT_FROM_FRAME = 0,
++	FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT,
++	FMAN_PCD_KG_EXTRACT_FROM_DEFAULT,
++};
++
++/**
++ * enum fman_pcd_kg_next_engine - post-KeyGen dispatch target for a scheme.
++ * @FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE: enqueue the frame directly via BMI to the
++ *                                   scheme's FQID (the historical default).
++ * @FMAN_PCD_KG_NEXT_ENGINE_PLCR:    hand the frame to the policer profile in
++ *                                   @policer_profile_id (KGSE_PPC) before the
++ *                                   profile's own green/yellow/red NIA decides
++ *                                   enqueue-vs-drop. The destination FQID is
++ *                                   still taken from the scheme (@default_fqid).
++ *
++ * Mirrors the KGSE_MODE next-action-NIA encoding (RM 8.7.4): ENQUEUE selects
++ * NIA_ENG_BMI|ENQ_FRAME; PLCR selects the policer-engine NIA with the
++ * scheme's KGSE_PPC carrying the absolute profile id.
++ */
++enum fman_pcd_kg_next_engine {
++	FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE = 0,
++	FMAN_PCD_KG_NEXT_ENGINE_PLCR,
++};
++
++/**
++ * struct fman_pcd_kg_extract_spec - one extract slot inside a scheme.
++ * @src:    where the byte run comes from (frame / parse result / default)
++ * @offset: starting byte offset (0..63 for parse result, 0..127 for frame)
++ * @size:   number of bytes to extract (1..16); total across all slots must
++ *          not exceed the FMan KG generic extract buffer of 36 bytes
++ * @mask:   per-byte AND-mask applied before hashing (0xff = no mask)
++ *
++ * Used to build the IPv4/IPv6 5-tuple key (typical flow: SIP, DIP, proto,
++ * SPORT, DPORT - all sourced from FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT
++ * with the standard FMan parser offsets).
++ */
++struct fman_pcd_kg_extract_spec {
++	enum fman_pcd_kg_extract_from src;
++	u8 offset;
++	u8 size;
++	u8 mask;
++};
++
++/**
++ * struct fman_pcd_kg_scheme_params - immutable scheme description.
++ * @id:         requested scheme id (0..31 on FMan v3); -1 = first free
++ * @num_extracts:  count of populated entries in @extracts (1..8)
++ * @extracts:   per-slot extract specs
++ * @default_fqid: fallback FQID when CC chaining is not used
++ * @use_hash:   true = hash extracts and select target via CC; false = direct
++ *              FQID via @default_fqid only
++ * @next_engine: post-KeyGen dispatch target (enqueue vs policer). Defaults to
++ *              FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE (value 0) for callers that
++ *              zero-initialise this struct, preserving the historical
++ *              enqueue-only behaviour.
++ * @policer_profile_id: absolute FMan policer profile id to route through when
++ *              @next_engine == FMAN_PCD_KG_NEXT_ENGINE_PLCR; ignored otherwise.
++ *
++ * Mainline LS1046A FMan v3 silicon has 32 KG schemes (8 per netcfg
++ * partition).  Each scheme is single-attach to a port.
++ */
++struct fman_pcd_kg_scheme_params {
++	int id;
++	u8 num_extracts;
++	struct fman_pcd_kg_extract_spec extracts[8];
++	u32 default_fqid;
++	bool use_hash;
++	enum fman_pcd_kg_next_engine next_engine;
++	u8 policer_profile_id;
++};
++
++/**
++ * fman_pcd_kg_scheme_create() - allocate and program a new KG scheme.
++ * @pcd:    PCD subsystem handle from fman_pcd_init()
++ * @params: scheme parameters; not retained after the call returns
++ *
++ * Programs the FMan KGSE_* registers for the chosen scheme id, attaches
++ * the scheme to @pcd->kg_schemes, and returns a handle that can be passed
++ * to fman_pcd_kg_bind_port() / fman_pcd_kg_attach_cc().
++ *
++ * Return: handle on success, ERR_PTR(-EBUSY) if @params->id is already in
++ * use, ERR_PTR(-EOPNOTSUPP) for an unsupported extract shape.
++ */
++struct fman_pcd_kg_scheme *
++fman_pcd_kg_scheme_create(struct fman_pcd *pcd,
++			  const struct fman_pcd_kg_scheme_params *params);
++
++/**
++ * fman_pcd_kg_bind_port() - bind a scheme to an FMan ingress port.
++ * @scheme:  handle from fman_pcd_kg_scheme_create()
++ * @port_id: FMan hardware BMI RX port id from fman_port_get_id() (0x08..0x27)
++ *
++ * Writes the scheme's match-vector bit for @port_id and updates the
++ * port's PCD configuration so that frames classified to this scheme
++ * enter the KG hash pipeline.
++ *
++ * Return: 0 on success, -EINVAL on bad args, -EBUSY if already bound.
++ */
++int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id);
++
++/**
++ * fman_pcd_kg_port_attach_policer() - route an RX port's existing RSS
++ *                                     scheme through a policer profile.
++ * @pcd:        PCD handle for the owning FMan (fman_get_pcd()).
++ * @hw_port_id: BMI hardware RX port id (0x08-0x0d 1G, 0x10-0x11 10G).
++ * @profile_id: relative policer profile id to dispatch frames to.
++ *
++ * Every FMan RX port is initialised with a single hard-coded RSS-hashing
++ * KeyGen scheme (keygen_port_hashing_init()) that all ingress frames are
++ * dispatched to.  This reprograms THAT scheme's next-engine in place to
++ * the policer profile, preserving its hash spreading and FQID base, so
++ * conforming frames still reach the per-flow RX FQs while the policer
++ * meters and drops excess.  It deliberately does NOT create a second
++ * scheme: the silicon's scheme-select picks the lowest-id scheme bound to
++ * the port, so a competing higher-id scheme would never be consulted.
++ *
++ * Return: 0 on success, -ENODEV if the port has no RSS scheme, or a
++ * negative errno from the underlying KGSE_* reprogram.
++ */
++int fman_pcd_kg_port_attach_policer(struct fman_pcd *pcd, u8 hw_port_id,
++				    u8 profile_id);
++
++/**
++ * fman_pcd_kg_port_detach_policer() - restore an RX port's RSS scheme to
++ *                                     plain BMI-enqueue next-engine.
++ * @pcd:        PCD handle for the owning FMan (fman_get_pcd()).
++ * @hw_port_id: BMI hardware RX port id used in the matching attach call.
++ *
++ * Reverse of fman_pcd_kg_port_attach_policer().  The RSS scheme itself is
++ * left intact (it is the port's permanent hashing scheme); only its
++ * next-engine is reset to direct enqueue.  NULL/-ENODEV-safe.
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int fman_pcd_kg_port_detach_policer(struct fman_pcd *pcd, u8 hw_port_id);
++
++/**
++ * fman_pcd_kg_attach_cc() - chain a scheme to a Classifier-Continue tree.
++ * @scheme: handle from fman_pcd_kg_scheme_create()
++ * @cc:     classifier tree from fman_pcd_cc_tree_create()
++ *
++ * Wires the KGSE_CCBS (CC Base Scheme) register so that the scheme's
++ * hash output indexes into the CC tree's key table.
++ *
++ * Return: 0 on success, -EOPNOTSUPP until the CC subsystem lands,
++ * -EINVAL on bad args.
++ */
++int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
++			  struct fman_pcd_cc_tree *cc);
++
++/**
++ * fman_pcd_kg_scheme_destroy() - tear down a previously created scheme.
++ * @scheme: handle from fman_pcd_kg_scheme_create().  NULL-safe.
++ *
++ * Detaches all port bindings, clears the KGSE_* registers, removes the
++ * scheme from @pcd->kg_schemes, and frees the handle.
++ */
++void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
++
++
++/*
++ * Static Coarse-Classifier (CC) install surface (spec sec 5.4).
++ *
++ * The dpaa1 CC steering API exported from the dpaa driver
++ * (fman_cc_tree_install() in dpaa_fman_caps.c) consumes a host-endian
++ * 5-tuple key/tree shape that is module-private to fsl_dpa.ko. To program
++ * the FMan CC silicon (which lives in fsl_dpaa_fman.ko alongside the MURAM
++ * allocator) without a circular include, dpaa_fman_caps.c normalises its
++ * host-endian struct fman_cc_static_tree into the neutral, already
++ * big-endian-ready descriptor below and hands it to the fman-side installer.
++ *
++ * A field participates in the match iff its mask word is non-zero. All
++ * multi-byte fields here are FMan big-endian (the dpaa-side translator does
++ * the host->BE conversion); the install body copies them verbatim into the
++ * MURAM match-key record.
++ */
++
++/* Bounds mirror FMAN_CC_MAX_STATIC_KEYS in dpaa_fman_caps.h (kept in sync
++ * by review; the install body re-checks num_keys against this).
++ */
++#define FMAN_PCD_CC_HW_MAX_KEYS	32
++
++/* Match-key field-presence bitmask for struct fman_pcd_cc_hw_key.present. */
++#define FMAN_PCD_CC_HW_F_ETHERTYPE	BIT(0)
++#define FMAN_PCD_CC_HW_F_PROTO		BIT(1)
++#define FMAN_PCD_CC_HW_F_SRC_IP		BIT(2)
++#define FMAN_PCD_CC_HW_F_DST_IP		BIT(3)
++#define FMAN_PCD_CC_HW_F_SRC_PORT	BIT(4)
++#define FMAN_PCD_CC_HW_F_DST_PORT	BIT(5)
++#define FMAN_PCD_CC_HW_F_IPV6		BIT(6)
++
++/**
++ * struct fman_pcd_cc_hw_key - one normalised CC match key (FMan BE layout).
++ * @present:      bitmask of FMAN_PCD_CC_HW_F_* fields that participate
++ * @ethertype_be: L2 EtherType, FMan big-endian
++ * @proto:        L4 protocol (IANA), single byte
++ * @src_ip_be:    IPv4 source (BE) when !FMAN_PCD_CC_HW_F_IPV6
++ * @dst_ip_be:    IPv4 dest   (BE)
++ * @src_ip6:      IPv6 source (16 bytes, network order)
++ * @dst_ip6:      IPv6 dest   (16 bytes, network order)
++ * @src_port_be:  L4 source port (BE)
++ * @dst_port_be:  L4 dest   port (BE)
++ * @target_qband: qband to steer matching frames to (validated by caller)
++ * @hm_handle:    HM node MURAM handle to chain after match (0 = none)
++ */
++struct fman_pcd_cc_hw_key {
++	u32 present;
++	u16 ethertype_be;
++	u8  proto;
++	u8  src_ip6[16];
++	u8  dst_ip6[16];
++	u32 src_ip_be;
++	u32 dst_ip_be;
++	u16 src_port_be;
++	u16 dst_port_be;
++	u16 target_qband;
++	u32 hm_handle;
++};
++
++/**
++ * struct fman_pcd_cc_hw_spec - a port's complete normalised static CC tree.
++ * @num_keys:    number of valid entries in @keys (0..FMAN_PCD_CC_HW_MAX_KEYS)
++ * @miss_qband:  qband for frames matching no key
++ * @keys:        evaluated in order; first match wins
++ */
++struct fman_pcd_cc_hw_spec {
++	u16 num_keys;
++	u16 miss_qband;
++	struct fman_pcd_cc_hw_key keys[FMAN_PCD_CC_HW_MAX_KEYS];
++};
++
++/**
++ * fman_pcd_cc_static_install() - program a static CC tree into MURAM.
++ * @pcd:     PCD subsystem handle (fman_get_pcd(fm))
++ * @port_id: FMan port id (1..10 on LS1046A) this tree serves
++ * @hw:      normalised, BE-ready static tree spec
++ *
++ * Allocates a MURAM match-key table + action-descriptor (AD) table, encodes
++ * each key's CONT_LOOKUP AD per LS1046A RM 8.7.4.1, writes the tree
++ * group-table[0] entry, records per-port state on pcd->cc_trees, and returns
++ * 0. Re-installing on a port that already has a tree first tears the old one
++ * down (idempotent rebuild — the static/commit lifecycle). On any MURAM or
++ * validation failure no partial state is left installed.
++ *
++ * Return: 0 on success; -EINVAL bad args; -ENOSPC MURAM exhausted; -EBUSY
++ * concurrent install race.
++ */
++int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
++			       const struct fman_pcd_cc_hw_spec *hw);
++
++/**
++ * fman_pcd_cc_static_get_base() - fetch a port's installed CC tree MURAM base.
++ * @pcd:          PCD subsystem handle
++ * @port_id:      FMan port id whose installed tree to query
++ * @cc_muram_off: out param - RAW MURAM byte offset of the tree root (no >>4)
++ *
++ * The offset is suitable for writing into the BMI RX port FMBM_RCCB register
++ * via fman_port_set_cc_base() (board patch 0105) - the productive port-bind
++ * that points the silicon datapath at the installed static CC tree.
++ *
++ * Returns 0 on success, -EINVAL on bad arguments, -ENODEV if no tree installed.
++ */
++int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
++				u32 *cc_muram_off);
++
++/**
++ * fman_pcd_cc_static_destroy() - tear down a port's static CC tree.
++ * @pcd:     PCD subsystem handle
++ * @port_id: FMan port id whose tree to remove. No-op if none installed.
++ *
++ * Frees the MURAM tables, unlinks per-port state, returns nothing.
++ */
++void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
++
++
++/*
++ * Header-Manipulation (HM) install surface (spec sec 5.5).
++ *
++ * The dpaa1 HM steering API exported from the dpaa driver
++ * (fman_hm_node_install() in dpaa_fman_caps.c) consumes a host-endian
++ * ordered-op-list (struct fman_hm_spec) that is module-private to
++ * fsl_dpa.ko. To program the FMan HMTD/HMCT silicon (which lives in
++ * fsl_dpaa_fman.ko alongside the MURAM allocator) without a circular
++ * include, dpaa_fman_caps.c normalises its host-endian struct fman_hm_spec
++ * into the neutral, big-endian-ready descriptor below and hands it to the
++ * fman-side installer.  Multi-byte fields here carry host values that the
++ * silicon-programming layer assembles and writes big-endian via
++ * iowrite32be (see fman_pcd_manip.c).
++ */
++
++#define FMAN_PCD_HM_HW_MAX_OPS	8
++
++/**
++ * enum fman_pcd_hm_hw_op_type - one ordered header-manip operation kind.
++ * @FMAN_PCD_HM_HW_OP_VLAN_STRIP:  remove one VLAN tag at L2 offset 12
++ * @FMAN_PCD_HM_HW_OP_VLAN_INSERT: insert one VLAN tag at L2 offset 12
++ * @FMAN_PCD_HM_HW_OP_MPLS_PUSH:   push one MPLS label entry at offset 14
++ * @FMAN_PCD_HM_HW_OP_MPLS_POP:    pop  one MPLS label entry at offset 14
++ *
++ * Values mirror enum fman_hm_op_type in dpaa_fman_caps.h (kept in sync by
++ * review; the dpaa-side translator maps one-to-one).
++ */
++enum fman_pcd_hm_hw_op_type {
++	FMAN_PCD_HM_HW_OP_VLAN_STRIP	= 0,
++	FMAN_PCD_HM_HW_OP_VLAN_INSERT	= 1,
++	FMAN_PCD_HM_HW_OP_MPLS_PUSH	= 2,
++	FMAN_PCD_HM_HW_OP_MPLS_POP	= 3,
++};
++
++/**
++ * struct fman_pcd_hm_hw_op - one normalised HM operation (host values).
++ * @type:        which operation (enum fman_pcd_hm_hw_op_type)
++ * @vlan_insert: VLAN-insert params (valid iff type == VLAN_INSERT)
++ * @mpls_push:   MPLS-push  params (valid iff type == MPLS_PUSH)
++ *
++ * VLAN_STRIP / MPLS_POP carry no params (fixed offset/size).  The encoder
++ * in fman_pcd_manip.c assembles the inline payload words from these host
++ * fields and writes them big-endian into the HMCT.
++ */
++struct fman_pcd_hm_hw_op {
++	enum fman_pcd_hm_hw_op_type type;
++	union {
++		struct {
++			u16 tpid_be;	/* host TPID, e.g. 0x8100 */
++			u16 vid;	/* 12-bit VLAN id */
++			u8  pcp;	/* 3-bit priority */
++		} vlan_insert;
++		struct {
++			u32 label;	/* 20-bit MPLS label */
++			u8  tc;	/* 3-bit traffic class */
++			u8  s;	/* bottom-of-stack bit */
++			u8  ttl;	/* time-to-live */
++		} mpls_push;
++	};
++};
++
++/**
++ * struct fman_pcd_hm_hw_spec - a complete ordered HM op list.
++ * @num_ops: number of valid entries in @ops (1..FMAN_PCD_HM_HW_MAX_OPS)
++ * @ops:     applied in array order at runtime
++ */
++struct fman_pcd_hm_hw_spec {
++	u8 num_ops;
++	struct fman_pcd_hm_hw_op ops[FMAN_PCD_HM_HW_MAX_OPS];
++};
++
++/**
++ * fman_pcd_hm_install() - program one ordered-op-list HM node into MURAM.
++ * @pcd:     PCD subsystem handle (fman_get_pcd(fm))
++ * @port_id: FMan port id this node is installed for
++ * @spec:    neutral, big-endian-ready op list
++ * @handle:  on success, receives the HMTD MURAM byte offset (the opaque
++ *           handle for fman_pcd_hm_destroy() and a CC action's hm_handle)
++ *
++ * Return: 0 on success (writes @handle); negative errno on failure.
++ */
++int fman_pcd_hm_install(struct fman_pcd *pcd, u8 port_id,
++			const struct fman_pcd_hm_hw_spec *spec, u32 *handle);
++
++/**
++ * fman_pcd_hm_destroy() - tear down one HM node by handle.
++ * @pcd:     PCD subsystem handle
++ * @port_id: FMan port id (matched against the node for safety)
++ * @handle:  the HMTD MURAM offset returned by fman_pcd_hm_install()
++ *
++ * Idempotent: a handle matching no live node is a no-op returning 0.
++ *
++ * Return: 0 always.
++ */
++int fman_pcd_hm_destroy(struct fman_pcd *pcd, u8 port_id, u32 handle);
++
++/*
++ * Policer (srTCM/trTCM) install surface (spec sec 5.6).
++ *
++ * The dpaa1 policer API exported from the dpaa driver
++ * (fman_policer_install() in dpaa_fman_caps.c) consumes a host-endian
++ * struct fman_policer_profile (bits/sec rates, byte bursts) that is
++ * module-private to fsl_dpa.ko. To program the FMan policer profile
++ * record (which lives in fsl_dpaa_fman.ko alongside the MURAM allocator)
++ * without a circular include, dpaa_fman_caps.c normalises its host-endian
++ * profile into the neutral descriptor below and hands it to the fman-side
++ * installer.  The neutral fields carry HOST values; the fman-side encoder
++ * does the exp/mant rate-field and 256-byte burst quantisation per
++ * LS1046A RM 8.7.6 and writes the 16-byte big-endian MURAM record (see
++ * fman_pcd_plcr.c).
++ */
++
++/**
++ * struct fman_pcd_plcr_hw_profile - one normalised policer profile (host).
++ * @trtcm:       true = two-rate trTCM (RFC 2698); false = srTCM (RFC 2697)
++ * @color_aware: true = honour the incoming frame colour (colour-aware)
++ * @cir_bps:     committed information rate, bits/sec (both modes)
++ * @cbs_bytes:   committed burst size, bytes (both modes)
++ * @pir_bps:     peak information rate, bits/sec (trTCM only; 0 for srTCM)
++ * @pbs_bytes:   peak/excess burst size, bytes (trTCM PBS / srTCM EBS)
++ *
++ * The fman-side installer encodes @cir_bps/@pir_bps into the FMan
++ * exp<<29|mant<<13 rate field and @cbs_bytes/@pbs_bytes into 256-byte
++ * burst mantissas, saturating at the silicon ceiling on overflow.
++ */
++struct fman_pcd_plcr_hw_profile {
++	bool trtcm;
++	bool color_aware;
++	u64 cir_bps;
++	u32 cbs_bytes;
++	u64 pir_bps;
++	u32 pbs_bytes;
++};
++
++/**
++ * fman_pcd_plcr_install() - program one srTCM/trTCM policer profile.
++ * @pcd:        PCD subsystem handle (fman_get_pcd(fm))
++ * @port_id:    FMan port id this profile is installed for
++ * @profile_id: caller-chosen silicon slot id (0..255)
++ * @hw:         neutral profile spec (host bps/bytes; encoded by this body)
++ *
++ * Allocates a 16-byte MURAM profile record, encodes the rate/burst/mode
++ * fields per RM 8.7.6, writes the record, and registers the profile on
++ * pcd->plcr_profiles. Re-installing on a populated (port, slot) tears the
++ * old profile down first (idempotent rebuild).
++ *
++ * Return: 0 on success; negative errno on failure.
++ */
++int fman_pcd_plcr_install(struct fman_pcd *pcd, u8 port_id, u8 profile_id,
++			  const struct fman_pcd_plcr_hw_profile *hw);
++
++/**
++ * fman_pcd_plcr_destroy() - tear down one policer profile by slot.
++ * @pcd:        PCD subsystem handle
++ * @port_id:    FMan port id (matched against the profile for safety)
++ * @profile_id: the silicon slot id to release
++ *
++ * Idempotent: a (port, slot) matching no live profile is a no-op.
++ */
++void fman_pcd_plcr_destroy(struct fman_pcd *pcd, u8 port_id, u8 profile_id);
++
+ #endif /* __LINUX_FSL_FMAN_PCD_H */
