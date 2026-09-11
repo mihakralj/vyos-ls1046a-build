@@ -178,9 +178,16 @@ unset _count _series _src _p
 # (a Makefile/Kconfig registration) applies against an already-populated
 # tree. See data/vyos-1x-files/ for the same mechanism on the vyos-1x side.
 echo "### Staging LS1046A new-file source tree (kernel/common/files)"
-rm -rf "$KERNEL_BUILD/files"
+# build-kernel.sh sets PATCH_DIR=${CWD}/patches/kernel and runs with
+# CWD=$KERNEL_BUILD, so the REPLACEMENT block's "${PATCH_DIR}/../files"
+# resolves to $KERNEL_BUILD/patches/files -- NOT $KERNEL_BUILD/files.
+# Staging one directory too shallow left that check silently false and
+# the new-file copy never ran (CI run 34551992852: af_xdp_pool_main.c
+# "does not exist in index" on patch 0095, which only modifies a file
+# that 0073's split expected this step to have created).
+rm -rf "$KERNEL_PATCHES/../files"
 if [ -d kernel/common/files ]; then
-    cp -a kernel/common/files "$KERNEL_BUILD/files"
+    cp -a kernel/common/files "$KERNEL_PATCHES/../files"
 fi
 
 # ── Staging-completeness guard
