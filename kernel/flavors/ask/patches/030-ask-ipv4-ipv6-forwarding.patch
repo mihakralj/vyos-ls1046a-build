@@ -1,5 +1,5 @@
 diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
-index 49811c928..3c7c7e8b6 100644
+index 49811c928..87b2653bb 100644
 --- a/net/ipv4/ip_output.c
 +++ b/net/ipv4/ip_output.c
 @@ -102,6 +102,17 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
@@ -53,24 +53,21 @@ index 49811c928..3c7c7e8b6 100644
  		return ip_fragment(net, sk, skb, mtu, ip_finish_output2);
  
  	return ip_finish_output2(net, sk, skb);
-@@ -434,6 +460,16 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
- 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
- 			    net, sk, skb, indev, dev,
- 			    ip_finish_output,
+@@ -431,6 +457,13 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 	skb->dev = dev;
+ 	skb->protocol = htons(ETH_P_IP);
+ 
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD)
 +	/* Bypass invoking post routing hooks since the tunnel header and ESP
 +	 * processing is not done in slow path for IPSec offloaded cases
 +	 */
-+	if (skb->ipsec_offload) {
-+		ret_val = ip_finish_output(net, sk, skb);
-+		rcu_read_unlock();
-+		return ret_val;
-+	}
++	if (skb->ipsec_offload)
++		return ip_finish_output(net, sk, skb);
 +#endif
- 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
- }
- EXPORT_SYMBOL(ip_output);
-@@ -561,6 +597,9 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
+ 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
+ 			    net, sk, skb, indev, dev,
+ 			    ip_finish_output,
+@@ -561,6 +594,9 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
  	skb_dst_copy(to, from);
  	to->dev = from->dev;
  	to->mark = from->mark;
