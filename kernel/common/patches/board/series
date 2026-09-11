@@ -9,10 +9,9 @@
 # 0068–0077: FMan DPAA flavor ops + XDP pool setup
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0068-dpaa-flavor-ops.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0069-dpaa-flavor-hooks.patch
+# patch-series-cleanup (2026-09-11): squashed 0069+0069a.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0069a-dpaa-flavor-ops-retro-attach.patch
+0069-dpaa-flavor-ops-hooks.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0070-dpaa1-xsk-wakeup.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -23,12 +22,9 @@
 0073-dpaa-af-xdp-pool-skeleton.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0074-dpaa-af-xdp-pool-wakeup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0075a-dpaa-af-xdp-pool-liodn-and-attach-validation.patch
+# patch-series-cleanup (2026-09-11): squashed 0075a+0075b+0075c.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0075b-dpaa-af-xdp-pool-attach-bman-seed-rcu.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0075c-dpaa-af-xdp-pool-remove-liodn-gate.patch
+0075-dpaa-af-xdp-pool-liodn-attach-bman-seed.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0076-dpaa-af-xdp-pool-detach.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -42,10 +38,9 @@
 0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0082-dpaa-af-xdp-pool-qmap-debugfs.patch
+# patch-series-cleanup (2026-09-11): squashed 0082+0082b.
 # Upstream-Status: Inappropriate | Risk-Tier: C
-0082b-dpaa-dedicated-qman-channels-per-qband.patch
+0082-dpaa-af-xdp-pool-qmap-debugfs-dedicated-channels.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0083-dpaa-rx-xsk-branch-eligibility-probe.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -55,22 +50,17 @@
 
 # ── FMan PCD subsystem bootstrap ──
 # 0086–0091a: FMan capabilities, CC stub, HM stub, policer
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0086-dpaa-fman-caps-detection-and-cc-stub.patch
+# patch-series-cleanup (2026-09-11): squashed 0086+0086a+0086b.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0086a-dpaa-fman-caps-probe-dt.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0086b-dpaa-fman-cc-productive-structs.patch
+0086-dpaa-fman-caps-detection-cc-stub.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch
+# patch-series-cleanup (2026-09-11): squashed 0090+0090a.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0090-dpaa-fman-hm-stub.patch
+0090-dpaa-fman-hm-stub-productive-structs.patch
+# patch-series-cleanup (2026-09-11): squashed 0091+0091a.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0090a-dpaa-fman-hm-productive-structs.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0091-dpaa-fman-policer-stub.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0091a-dpaa-fman-policer-productive-structs.patch
+0091-dpaa-fman-policer-stub-productive-structs.patch
 
 # ── FMan PCD core ──
 # 0092–0100: PCD subsystem, KeyGen, CC, HM, policer
@@ -97,28 +87,16 @@
 # 0101–0106: VLAN strip, bpool, CC base, KeyGen graft
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch
+# patch-series-cleanup (2026-09-11): squashed 0102+0102b.
 # Upstream-Status: Inappropriate | Risk-Tier: C
-0102-fman-port-set-rx-bpool-primitive.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0102b-fman-port-debug-readback.patch
+0102-fman-port-set-rx-bpool-primitive-debug-readback.patch
+# patch-series-cleanup (2026-09-11): squashed 0103a/b/c/e/f/g (no 0103d
+# ever existed -- pre-existing gap, not introduced by this squash).
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0103a-dpaa1-true-zc-rx-recover-swring.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0103b-dpaa1-true-zc-rx-reprogram-redirect.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0103f-dpaa1-true-zc-rx-rxhook-before-bpidpool.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0103g-dpaa1-true-zc-rx-register-zc-rxq.patch
+0103-dpaa1-true-zc-rx-recovery-and-registration.patch
+# patch-series-cleanup (2026-09-11): squashed 0104+0104a+0104b.
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0104-dpaa-ingress-policer-tc-matchall-bridge.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0104a-dpaa-netdev-advertise-hw-tc.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0104b-dpaa-ceetm-stub.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0105-fman-port-set-cc-base-primitive.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
