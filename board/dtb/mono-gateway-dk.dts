@@ -789,8 +789,6 @@ managed = "in-band-status";
 * VPP, vyos-1x vpp.py unbinds that port's dpaa-ethernet.N device from
 * fsl_dpa before starting VPP with DPDK DPAA PMD. On VPP stop, the
 * device is rebound to fsl_dpa, restoring kernel control.
-*
-* FQIDs start at 0x40c to avoid conflict with kernel dynamic allocation.
 */
 &soc {
 	fsl,dpaa {
@@ -846,34 +844,18 @@ managed = "in-band-status";
 
 		/* MAC9 — 10G left SFP+ (eth3) */
 		ethernet@8 {
-			compatible = "fsl,dpa-ethernet-init";
+			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet6>;
-			fsl,qman-frame-queues-rx = <0x40c 1 0x40d 1>;
-			fsl,qman-frame-queues-tx = <0x40e 1 0x40f 1>;
 			fsl,bman-buffer-pools = <&dpaa_pool>;
-
-			dpaa-ethernet@0 {
-				compatible = "fsl,dpa-ethernet";
-				fsl,fman-mac = <&enet6>;
-				fsl,bman-buffer-pools = <&dpaa_pool>;
-				dma-coherent;
-			};
+			dma-coherent;
 		};
 
 		/* MAC10 — 10G right SFP+ (eth4) */
 		ethernet@9 {
-			compatible = "fsl,dpa-ethernet-init";
+			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet7>;
-			fsl,qman-frame-queues-rx = <0x410 1 0x411 1>;
-			fsl,qman-frame-queues-tx = <0x412 1 0x413 1>;
 			fsl,bman-buffer-pools = <&dpaa_pool>;
-
-			dpaa-ethernet@0 {
-				compatible = "fsl,dpa-ethernet";
-				fsl,fman-mac = <&enet7>;
-				fsl,bman-buffer-pools = <&dpaa_pool>;
-				dma-coherent;
-			};
+			dma-coherent;
 		};
 	};
 };
