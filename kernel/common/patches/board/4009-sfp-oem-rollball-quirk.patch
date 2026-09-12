@@ -32,15 +32,34 @@ without it the -EINVAL is fatal and the module enters SFP_S_FAIL state.
 Verified on hardware 2026-06-21 (LS1046A Mono Gateway, kernel 6.18.34-vyos,
 nxp-ask branch, FMan memac 1af0000 / eth4).
 
+Also add an entry for OEM "SFP-10G-SR" (same RTL8261 rollball hardware,
+serial CSY101NC2727 -- confirmed same physical module across boards): OEM
+ships some of these copper modules with product name "SFP-10G-SR" instead
+of "SFP-10G-T" in their EEPROM. Without a matching quirk entry, sfp.c's
+generic SFP-cage subsystem never sets mdio_protocol = MDIO_I2C_ROLLBALL
+for it, so the rollball PHY is never even probed/configured over I2C --
+distinct from (and prerequisite to) whatever the MAC-side driver then
+does with the link. On the nxp-sdk flavor specifically, the ethernet
+node doesn't reference managed=/sfp=<> at all (sdk_fman forces
+fixed-link and deletes those properties -- see board/dtb/mono-gateway-
+dk-sdk.dts), so phylink's connector/interface-bitmap handling is moot
+here either way; what matters is only that some quirk fires and sets
+mdio_protocol so the RTL8261 gets configured and can complete copper
+auto-negotiation with the link partner. Use sfp_fixup_fs_10gt (chains
+the rollball wait/config path) rather than sfp_fixup_rollball_cc for
+this entry, matching the fix already hardware-verified for this exact
+module/serial on kernel 6.18.36-vyos (board .190, 2026-07-07: LOS
+deasserted but link stayed down until this quirk was added).
+
 Signed-off-by: VyOS LS1046A Build <build@vyos.io>
 ---
- drivers/net/phy/sfp.c | 12 ++++++++++--
- 1 file changed, 10 insertions(+), 2 deletions(-)
+ drivers/net/phy/sfp.c | 13 +++++++++++--
+ 1 file changed, 12 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -579,7 +579,15 @@ static const struct sfp_quirk sfp_quirks[] = {
+@@ -579,7 +579,18 @@ static const struct sfp_quirk sfp_quirks[] = {
  	// OEM SFP-GE-T is a 1000Base-T module with broken TX_FAULT indicator
  	SFP_QUIRK_F("OEM", "SFP-GE-T", sfp_fixup_ignore_tx_fault),
 
@@ -54,6 +73,9 @@ diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
 +	// through, the MAC's 10GBASE-R in-band sync detects carrier
 +	// once the RTL8261 PHY completes copper auto-negotiation.
 +	SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc),
++	// Same RTL8261 rollball hardware, but this batch reports "SFP-10G-SR"
++	// in EEPROM instead. fs_10gt chains the rollball config/wait path.
++	SFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt),
  	SFP_QUIRK_S("OEM", "SFP-2.5G-T", sfp_quirk_oem_2_5g),
  	SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-D", sfp_quirk_2500basex),
  	SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-U", sfp_quirk_2500basex),
