@@ -91,6 +91,138 @@
 			fifo-size = <0x900 0x00>;    /* 2,304 bytes for WiFi */
 			buffer-layout = <0x60 0x40>;
 		};
+
+		/*
+		 * Ethernet RX/TX extended-args — REQUIRED.
+		 *
+		 * The SDK FMan port wrapper resolves these by walking the children
+		 * of this node and matching (cell-index, compatible) — see
+		 * GetFmPortAdvArgsDevTreeNode() in lnxwrp_fm_port.c:447-495.
+		 * CheckNConfigFmPortVSP() then reads "vsp-window" from the RX node
+		 * (lnxwrp_fm_port.c:613) and configures the port's default Virtual
+		 * Storage Profile (h_DfltVsp, :672).
+		 *
+		 * Without an RX node carrying vsp-window, h_DfltVsp stays NULL and
+		 * cdx's dpa_add_virt_storage_profile() bails at vsp_cfg.c:89 with
+		 * -EINVAL, which aborts the entire cdx init:
+		 *   dpa_add_eth_if::dpa_add_virt_storage_porfile_config failed
+		 *   cdx_add_eth_onif::add_onif failed
+		 *   cdx_ioc_set_dpa_params::port e2 add failed
+		 *   cdx_init_frag_module  Error in getting MURAM handle
+		 *   ipsec_init_ohport: Error in allocating OH port Channel
+		 * Because the FMan PCD is only programmed by dpa_app, that leaves
+		 * every port with dead RX (no ARP, no DHCP, no SSH) even though
+		 * the netdevs exist and TX works.
+		 *
+		 * vsp-window = <numOfProfiles dfltRelativeId>; cdx requests
+		 * relativeProfileId 1 (vsp_cfg.c:100), so a window of 2 starting
+		 * at 0 covers it. Values and FIFO sizing mirror the known-good
+		 * OpenWRT-ASK mono-gateway DK DTB.
+		 */
+		fman0_rx0-extended-args {
+			cell-index = <0x00>;
+			compatible = "fsl,fman-port-1g-rx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_rx1-extended-args {
+			cell-index = <0x01>;
+			compatible = "fsl,fman-port-1g-rx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_rx2-extended-args {
+			cell-index = <0x02>;
+			compatible = "fsl,fman-port-1g-rx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_rx3-extended-args {
+			cell-index = <0x03>;
+			compatible = "fsl,fman-port-1g-rx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_rx4-extended-args {
+			cell-index = <0x04>;
+			compatible = "fsl,fman-port-1g-rx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_rx5-extended-args {
+			cell-index = <0x05>;
+			compatible = "fsl,fman-port-1g-rx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_rx6-extended-args {
+			cell-index = <0x00>;
+			compatible = "fsl,fman-port-10g-rx-extended-args";
+			fifo-size = <0x6000 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_rx7-extended-args {
+			cell-index = <0x01>;
+			compatible = "fsl,fman-port-10g-rx-extended-args";
+			fifo-size = <0x6000 0x00>;
+			buffer-layout = <0x60 0x40>;
+			vsp-window = <0x02 0x00>;
+		};
+		fman0_tx0-extended-args {
+			cell-index = <0x00>;
+			compatible = "fsl,fman-port-1g-tx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
+		fman0_tx1-extended-args {
+			cell-index = <0x01>;
+			compatible = "fsl,fman-port-1g-tx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
+		fman0_tx2-extended-args {
+			cell-index = <0x02>;
+			compatible = "fsl,fman-port-1g-tx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
+		fman0_tx3-extended-args {
+			cell-index = <0x03>;
+			compatible = "fsl,fman-port-1g-tx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
+		fman0_tx4-extended-args {
+			cell-index = <0x04>;
+			compatible = "fsl,fman-port-1g-tx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
+		fman0_tx5-extended-args {
+			cell-index = <0x05>;
+			compatible = "fsl,fman-port-1g-tx-extended-args";
+			fifo-size = <0x3200 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
+		fman0_tx6-extended-args {
+			cell-index = <0x00>;
+			compatible = "fsl,fman-port-10g-tx-extended-args";
+			fifo-size = <0x4000 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
+		fman0_tx7-extended-args {
+			cell-index = <0x01>;
+			compatible = "fsl,fman-port-10g-tx-extended-args";
+			fifo-size = <0x4000 0x00>;
+			buffer-layout = <0x60 0x40>;
+		};
 	};
 };
 }; /* / (root node re-entry close) */
