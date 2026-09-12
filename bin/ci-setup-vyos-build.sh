@@ -531,6 +531,13 @@ chmod +x "$HOOKS/99-mask-services.chroot"
 cp data/hooks/95-libcli-symlink.chroot "$HOOKS/95-libcli-symlink.chroot"
 chmod +x "$HOOKS/95-libcli-symlink.chroot"
 
+# 95: populate /home/vyos from /etc/skel -- vyos-1x diverts real .bashrc/
+#     .profile into skel but whatever creates the vyos account in this
+#     chroot doesn't copy them, leaving vbash with no CLI at all (configure/
+#     run/show all "not found"). Full diagnosis in the hook.
+cp data/hooks/95-vyos-user-skel.chroot "$HOOKS/95-vyos-user-skel.chroot"
+chmod +x "$HOOKS/95-vyos-user-skel.chroot"
+
 ### NOTE: ethernet port remapping was deleted on 2026-05-15. The previous
 ### eth0..eth4 rename layer (fman-port-name + 10-fman-port-order.rules +
 ### 00-fman.link) lived in the squashfs, but the predictable-naming race
