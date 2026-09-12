@@ -1,0 +1,28 @@
+#!/bin/bash
+# The vyos user's home directory ships with no dotfiles at all (no
+# .bashrc, no .profile) despite vyos-1x diverting real versions into
+# /etc/skel/.bashrc and /etc/skel/.profile (`dpkg-divert` moves the
+# original Debian files to *.distrib and installs its own). Whatever
+# creates the vyos account in this build's chroot does not copy skel,
+# so /home/vyos ships empty of them.
+#
+# This matters beyond cosmetics: vbash is just bash under another name,
+# so `configure`/`run`/`show ...` etc. are defined by
+# /etc/bash_completion.d/vyatta-cfg, which is normally sourced through
+# the standard bash-completion chain that vyos-1x's shipped .bashrc
+# pulls in. Without that .bashrc, nothing sources vyatta-cfg and the
+# CLI has no operational commands at all (confirmed on hardware:
+# `type configure` / `type run` both report "not found").
+#
+# Fix: copy the vyos-1x-provided skel files into /home/vyos if missing,
+# with correct ownership. Idempotent — skipped if the files already
+# exist (e.g. a future base-image fix makes this hook a no-op).
+if id vyos >/dev/null 2>&1; then
+    for f in .bashrc .profile .bash_logout; do
+        if [ -f "/etc/skel/$f" ] && [ ! -e "/home/vyos/$f" ]; then
+            cp -p "/etc/skel/$f" "/home/vyos/$f"
+            chown vyos:vyos "/home/vyos/$f"
+            echo "### Copied /etc/skel/$f to /home/vyos/$f"
+        fi
+    done
+fi
