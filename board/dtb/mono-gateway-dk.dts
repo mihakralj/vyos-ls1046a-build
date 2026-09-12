@@ -844,36 +844,57 @@ managed = "in-band-status";
 			dma-coherent;
 		};
 
+		/*
+		 * MAC9/MAC10 (10G SFP+, eth3/eth4): plain "fsl,dpa-ethernet"
+		 * nodes, matching the 1G ports above -- NOT the
+		 * "fsl,dpa-ethernet-init" DPDK-proxy pattern this used to be.
+		 *
+		 * "fsl,dpa-ethernet-init" matches drivers/net/ethernet/
+		 * freescale/sdk_dpaa's dpa_proxy driver: it initialises the
+		 * MAC/port hardware (including programming the port's
+		 * fmbm_ebmpi buffer-pool-ID register) but expects an
+		 * EXTERNAL consumer -- DPDK, via the dpaa_pool node below
+		 * (bpid 16, whose own comment says it's "for DPDK" and that
+		 * DPDK "overrides" its config with its own mbuf allocation)
+		 * -- to actually populate that pool with real buffers at
+		 * runtime. This board runs plain Linux kernel networking, no
+		 * DPDK ever runs, so bpid 16 stays permanently empty and the
+		 * proxy-initialised port hardware discards every single
+		 * received frame forever.
+		 *
+		 * Confirmed on hardware via the FMan port's own BMI register
+		 * dump: eth3/eth4's fmbm_ebmpi read back bpid 16 with
+		 * fmbm_rodc (Rx Out-of-buffer Discard Counter) exactly
+		 * matching fmbm_rfrc (Rx Frame Counter) -- literally every
+		 * frame that arrives gets discarded for want of a buffer.
+		 * eth0 (working) reads back bpid 32 with rodc=0 despite
+		 * referencing the exact same dpaa_pool node in its own DTS
+		 * property -- the plain "fsl,dpa-ethernet" driver ignores
+		 * the DTS pool hint in favour of dynamically allocating and
+		 * programming its own kernel-managed pool at probe time; the
+		 * "-init" proxy driver never gets that chance because it
+		 * already programmed the DTS-literal bpid before the real
+		 * netdev driver on the (now-removed) child node ever ran.
+		 */
+
 		/* MAC9 — 10G left SFP+ (eth3) */
 		ethernet@8 {
-			compatible = "fsl,dpa-ethernet-init";
+			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet6>;
 			fsl,qman-frame-queues-rx = <0x40c 1 0x40d 1>;
 			fsl,qman-frame-queues-tx = <0x40e 1 0x40f 1>;
 			fsl,bman-buffer-pools = <&dpaa_pool>;
-
-			dpaa-ethernet@0 {
-				compatible = "fsl,dpa-ethernet";
-				fsl,fman-mac = <&enet6>;
-				fsl,bman-buffer-pools = <&dpaa_pool>;
-				dma-coherent;
-			};
+			dma-coherent;
 		};
 
 		/* MAC10 — 10G right SFP+ (eth4) */
 		ethernet@9 {
-			compatible = "fsl,dpa-ethernet-init";
+			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet7>;
 			fsl,qman-frame-queues-rx = <0x410 1 0x411 1>;
 			fsl,qman-frame-queues-tx = <0x412 1 0x413 1>;
 			fsl,bman-buffer-pools = <&dpaa_pool>;
-
-			dpaa-ethernet@0 {
-				compatible = "fsl,dpa-ethernet";
-				fsl,fman-mac = <&enet7>;
-				fsl,bman-buffer-pools = <&dpaa_pool>;
-				dma-coherent;
-			};
+			dma-coherent;
 		};
 	};
 };
