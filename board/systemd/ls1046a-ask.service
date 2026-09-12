@@ -4,6 +4,15 @@ Documentation=https://mono.si
 After=ask-ct-setup.service
 Requires=ask-ct-setup.service
 Before=getty.target
+# Bound the restart loop (2026-09-12). Restart=on-failure with no rate limit
+# meant a failing cdx/cmm init re-ran dpa_app indefinitely, leaking FMan PCD
+# resources on every attempt (the netEnv table caps at 22; CEETM channels
+# likewise) until the PCD could never be programmed again at all. It also
+# flooded the serial console, which is what made the CLI unusable.
+# Give up after 5 attempts in 10 min: the failure stays one-shot and
+# diagnosable instead of poisoning the PCD and the console.
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=forking
