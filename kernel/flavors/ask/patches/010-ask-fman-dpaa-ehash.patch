@@ -60,10 +60,6 @@ Validate complete FM port resource requests before committing hardware
 and shared accounting. Serialize resource updates and leave rejected
 initialization or resize requests unchanged, with interrupts restored.
 
-Commit keygen scheme deletion only after successful hardware deletion.
-Keep required actions, netenv ownership and the scheme lock on refusal
-or command failure, and return the lock once after a successful retry.
-
 Signed-off-by: Tomaz Zaman <tomaz@mono.si>
 ---
  Makefile                                           |    5 
@@ -87,11 +83,11 @@ Signed-off-by: Tomaz Zaman <tomaz@mono.si>
  .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.h  |   26 
  .../sdk_fman/Peripherals/FM/Pcd/fm_cc_dbg.h        | 1374 ++++++++++++
  .../sdk_fman/Peripherals/FM/Pcd/fm_ehash.c         | 1211 ++++++++++
- .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c  |  135 +
+ .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c  |   68 -
  .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.h  |    1 
  .../sdk_fman/Peripherals/FM/Pcd/fm_manip.c         | 1439 +-----------
  .../sdk_fman/Peripherals/FM/Pcd/fm_manip.h         |  111 -
- .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c |   95 +
+ .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c |   90 -
  .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.h |   17 
  .../sdk_fman/Peripherals/FM/Pcd/fm_plcr.c          |   13 
  .../sdk_fman/Peripherals/FM/Pcd/fm_plcr.h          |    1 
@@ -147,7 +143,7 @@ Signed-off-by: Tomaz Zaman <tomaz@mono.si>
  net/core/gro.c                                     |    5 
  net/core/rtnetlink.c                               |   19 
  net/core/skbuff.c                                  |   38 
- 81 files changed, 8772 insertions(+), 4907 deletions(-)
+ 81 files changed, 8731 insertions(+), 4876 deletions(-)
  create mode 100644 drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc_dbg.h
  create mode 100644 drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_ehash.c
  create mode 100644 drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_eh_types.h
@@ -6018,7 +6014,7 @@ index 0000000..ab643e7
 +EXPORT_SYMBOL(ExternalHashGetDscpVlanpcpMapCfg);
 +
 diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c
-index 7c5cf46..86db5aa 100644
+index 7c5cf46..2ba1183 100644
 --- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c
 +++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c
 @@ -873,9 +873,9 @@ static t_Error BindPortToClsPlanGrp(t_FmPcd *p_FmPcd, uint8_t hardwarePortId, ui
@@ -6033,28 +6029,7 @@ index 7c5cf46..86db5aa 100644
  }
  
  #if (defined(DEBUG_ERRORS) && (DEBUG_ERRORS > 0))
-@@ -1000,16 +1000,15 @@ static void  ValidateSchemeSw(t_FmPcdKgScheme *p_Scheme)
-     p_Scheme->valid = TRUE;
- }
- 
--static t_Error InvalidateSchemeSw(t_FmPcdKgScheme *p_Scheme)
-+static void InvalidateSchemeSw(t_FmPcdKgScheme *p_Scheme)
- {
--    if (p_Scheme->owners)
--       RETURN_ERROR(MINOR, E_INVALID_STATE, ("Trying to delete a scheme that has ports bound to"));
-+    /* The caller holds the scheme flag and has deleted the hardware entry. */
-+    ASSERT_COND(p_Scheme->valid);
-+    ASSERT_COND(!p_Scheme->owners);
- 
-     if (p_Scheme->netEnvId != ILLEGAL_NETENV)
-         FmPcdDecNetEnvOwners(p_Scheme->h_FmPcd, p_Scheme->netEnvId);
-     p_Scheme->valid = FALSE;
--
--    return E_OK;
- }
- 
- static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
-@@ -1243,6 +1242,7 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
+@@ -1243,6 +1243,7 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
                          p_SchemeRegs->kgse_ppc = ppcTmp;
                      }
                  }
@@ -6062,7 +6037,7 @@ index 7c5cf46..86db5aa 100644
              }
              break;
          case (e_FM_PCD_DONE):
-@@ -1571,6 +1571,8 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
+@@ -1571,6 +1572,8 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
                  generic = FALSE;
              }
          }
@@ -6071,7 +6046,7 @@ index 7c5cf46..86db5aa 100644
          p_SchemeRegs->kgse_ekfc = knownTmp;
  
          selectTmp = 0;
-@@ -1843,7 +1845,7 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
+@@ -1843,7 +1846,7 @@ static t_Error BuildSchemeRegs(t_FmPcdKgScheme            *p_Scheme,
  t_Error FmPcdKgBuildClsPlanGrp(t_Handle h_FmPcd, t_FmPcdKgInterModuleClsPlanGrpParams *p_Grp, t_FmPcdKgInterModuleClsPlanSet *p_ClsPlanSet)
  {
      t_FmPcd                         *p_FmPcd = (t_FmPcd*)h_FmPcd;
@@ -6080,7 +6055,7 @@ index 7c5cf46..86db5aa 100644
      t_FmPcdIpcKgClsPlanParams       kgAlloc;
      t_Error                         err = E_OK;
      uint32_t                        oredVectors = 0;
-@@ -1860,19 +1862,8 @@ t_Error FmPcdKgBuildClsPlanGrp(t_Handle h_FmPcd, t_FmPcdKgInterModuleClsPlanGrpP
+@@ -1860,19 +1863,8 @@ t_Error FmPcdKgBuildClsPlanGrp(t_Handle h_FmPcd, t_FmPcdKgInterModuleClsPlanGrpP
      if (i == FM_MAX_NUM_OF_PORTS)
          RETURN_ERROR(MAJOR, E_FULL,("No classification plan groups available."));
  
@@ -6100,7 +6075,7 @@ index 7c5cf46..86db5aa 100644
  
      p_ClsPlanGrp->sizeOfGrp = (uint16_t)(1 << p_Grp->numOfOptions);
      /* a minimal group of 8 is required */
-@@ -1965,6 +1956,16 @@ t_Error FmPcdKgBuildClsPlanGrp(t_Handle h_FmPcd, t_FmPcdKgInterModuleClsPlanGrpP
+@@ -1965,6 +1957,16 @@ t_Error FmPcdKgBuildClsPlanGrp(t_Handle h_FmPcd, t_FmPcdKgInterModuleClsPlanGrpP
          }
      }
  
@@ -6117,7 +6092,7 @@ index 7c5cf46..86db5aa 100644
      return E_OK;
  }
  
-@@ -2481,6 +2482,7 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
+@@ -2481,6 +2483,7 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
      t_FmPcdKgClsPlanGrp                     *p_ClsPlanGrp;
      t_FmPcdKgInterModuleClsPlanSet          *p_ClsPlanSet;
      t_Error                                 err;
@@ -6125,7 +6100,7 @@ index 7c5cf46..86db5aa 100644
  
      /* This function is issued only from FM_PORT_SetPcd which locked all PCD modules,
         so no need for lock here */
-@@ -2516,6 +2518,7 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
+@@ -2516,6 +2519,7 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
              RETURN_ERROR(MINOR, err, NO_MSG);
          }
          *p_ClsPlanGrpId = p_GrpParams->clsPlanGrpId;
@@ -6133,7 +6108,7 @@ index 7c5cf46..86db5aa 100644
  
          if (FmIsHcUsageAllowed(p_FmPcd->h_Hc))
          {
-@@ -2524,6 +2527,7 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
+@@ -2524,6 +2528,7 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
              if (err)
              {
                  XX_Free(p_ClsPlanSet);
@@ -6141,7 +6116,7 @@ index 7c5cf46..86db5aa 100644
                  RETURN_ERROR(MAJOR, err, NO_MSG);
              }
          }
-@@ -2534,26 +2538,20 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
+@@ -2534,26 +2539,20 @@ t_Error FmPcdKgSetOrBindToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardwarePortId, u
          XX_Free(p_ClsPlanSet);
      }
  
@@ -6179,7 +6154,7 @@ index 7c5cf46..86db5aa 100644
  
      return E_OK;
  }
-@@ -2568,7 +2566,9 @@ t_Error FmPcdKgDeleteOrUnbindPortToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardware
+@@ -2568,7 +2567,9 @@ t_Error FmPcdKgDeleteOrUnbindPortToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardware
      /* This function is issued only from FM_PORT_DeletePcd which locked all PCD modules,
         so no need for lock here */
  
@@ -6190,7 +6165,7 @@ index 7c5cf46..86db5aa 100644
  
      /* decrement owners number */
      ASSERT_COND(p_ClsPlanGrp->owners);
-@@ -2579,6 +2579,8 @@ t_Error FmPcdKgDeleteOrUnbindPortToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardware
+@@ -2579,6 +2580,8 @@ t_Error FmPcdKgDeleteOrUnbindPortToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardware
          if (FmIsHcUsageAllowed(p_FmPcd->h_Hc))
          {
              err = FmHcPcdKgDeleteClsPlan(p_FmPcd->h_Hc, clsPlanGrpId);
@@ -6199,7 +6174,7 @@ index 7c5cf46..86db5aa 100644
              return err;
          }
          else
-@@ -2587,6 +2589,7 @@ t_Error FmPcdKgDeleteOrUnbindPortToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardware
+@@ -2587,6 +2590,7 @@ t_Error FmPcdKgDeleteOrUnbindPortToClsPlanGrp(t_Handle h_FmPcd, uint8_t hardware
              p_ClsPlanSet = (t_FmPcdKgInterModuleClsPlanSet *)XX_Malloc(sizeof(t_FmPcdKgInterModuleClsPlanSet));
              if (!p_ClsPlanSet)
              {
@@ -6207,84 +6182,6 @@ index 7c5cf46..86db5aa 100644
                  RETURN_ERROR(MAJOR, E_NO_MEMORY, ("Classification plan set"));
              }
              memset(p_ClsPlanSet, 0, sizeof(t_FmPcdKgInterModuleClsPlanSet));
-@@ -3085,44 +3088,52 @@ t_Handle FM_PCD_KgSchemeSet(t_Handle h_FmPcd,  t_FmPcdKgSchemeParams *p_SchemePa
- t_Error  FM_PCD_KgSchemeDelete(t_Handle h_Scheme)
- {
-     t_FmPcd             *p_FmPcd;
--    uint8_t             physicalSchemeId;
-+    t_FmPcdLock         *p_Lock;
-     uint32_t            tmpKgarReg, intFlags;
--    t_Error             err = E_OK;
-+    t_Error             err;
-     t_FmPcdKgScheme     *p_Scheme = (t_FmPcdKgScheme *)h_Scheme;
- 
-     SANITY_CHECK_RETURN_ERROR(h_Scheme, E_INVALID_HANDLE);
-+    if (!p_Scheme->valid || !p_Scheme->p_Lock)
-+        RETURN_ERROR(MINOR, E_INVALID_STATE, ("Scheme is invalid"));
- 
--    p_FmPcd = (t_FmPcd*)(p_Scheme->h_FmPcd);
-+    p_FmPcd = (t_FmPcd*)p_Scheme->h_FmPcd;
- 
--    UpdateRequiredActionFlag(h_Scheme, FALSE);
-+    /* Use the operation flag, not an IRQ spinlock: HC completion needs
-+     * interrupts. Port binding takes these flags through TryLockAll. */
-+    if (!KgSchemeFlagTryLock(p_Scheme))
-+        return ERROR_CODE(E_BUSY);
- 
--    /* check that no port is bound to this scheme */
--    err = InvalidateSchemeSw(h_Scheme);
--    if (err)
--        RETURN_ERROR(MINOR, err, NO_MSG);
-+    if (p_Scheme->owners)
-+    {
-+        KgSchemeFlagUnlock(p_Scheme);
-+        RETURN_ERROR(MINOR, E_INVALID_STATE, ("Trying to delete a scheme that has ports bound to"));
-+    }
- 
-     if (FmIsHcUsageAllowed(p_FmPcd->h_Hc))
--    {
-         err = FmHcPcdKgDeleteScheme(p_FmPcd->h_Hc, h_Scheme);
--        if (p_Scheme->p_Lock)
--            FmPcdReleaseLock(p_FmPcd, p_Scheme->p_Lock);
--        return err;
-+    else
-+    {
-+        intFlags = KgHwLock(p_FmPcd->p_FmPcdKg);
-+        /* Clear mode register, including enable bit. */
-+        WRITE_UINT32(p_FmPcd->p_FmPcdKg->p_IndirectAccessRegs->schemeRegs.kgse_mode, 0);
-+        tmpKgarReg = FmPcdKgBuildWriteSchemeActionReg(p_Scheme->schemeId, FALSE);
-+        err = WriteKgarWait(p_FmPcd, tmpKgarReg);
-+        KgHwUnlock(p_FmPcd->p_FmPcdKg, intFlags);
-     }
- 
--    physicalSchemeId = ((t_FmPcdKgScheme *)h_Scheme)->schemeId;
--
--    intFlags = KgHwLock(p_FmPcd->p_FmPcdKg);
--    /* clear mode register, including enable bit */
--    WRITE_UINT32(p_FmPcd->p_FmPcdKg->p_IndirectAccessRegs->schemeRegs.kgse_mode, 0);
--
--    /* call indirect command for scheme write */
--    tmpKgarReg = FmPcdKgBuildWriteSchemeActionReg(physicalSchemeId, FALSE);
--
--    WriteKgarWait(p_FmPcd, tmpKgarReg);
--    KgHwUnlock(p_FmPcd->p_FmPcdKg, intFlags);
-+    if (err)
-+    {
-+        KgSchemeFlagUnlock(p_Scheme);
-+        return err;
-+    }
- 
--    if (p_Scheme->p_Lock)
--        FmPcdReleaseLock(p_FmPcd, p_Scheme->p_Lock);
-+    /* Software ownership changes only after hardware deletion succeeds. */
-+    UpdateRequiredActionFlag(p_Scheme, FALSE);
-+    InvalidateSchemeSw(p_Scheme);
-+    p_Lock = p_Scheme->p_Lock;
-+    p_Scheme->p_Lock = NULL;
-+    FmPcdReleaseLock(p_FmPcd, p_Lock);
- 
-     return E_OK;
- }
 diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.h b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.h
 index f55fe8bb0bb4..29c01bd97627 100644
 --- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.h
@@ -8030,7 +7927,7 @@ index 241703a..f0f48e5 100644
      bool                    cnia;
 
 diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
-index 5d96727..6dfedc1 100644
+index 5d96727..7345cb8 100644
 --- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
 +++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
 @@ -55,6 +55,12 @@
@@ -8095,20 +7992,7 @@ index 5d96727..6dfedc1 100644
  e_NetHeaderType FmPcdGetAliasHdr(t_FmPcd *p_FmPcd, uint8_t netEnvId, e_NetHeaderType hdr)
  {
      int         i;
-@@ -703,8 +674,11 @@ void FmPcdReleaseLock(t_Handle h_FmPcd, t_FmPcdLock *p_Lock)
-     ASSERT_COND(h_FmPcd);
-     intFlags = FmPcdLock(h_FmPcd);
-     LIST_DelAndInit(&p_Lock->node);
-+    /* Retire a held operation flag and move the lock under one PCD lock.
-+     * TryLockAll must not acquire it between flag release and removal. */
-+    p_Lock->flag = FALSE;
-+    LIST_AddToTail(&p_Lock->node, &((t_FmPcd*)h_FmPcd)->freeLocksLst);
-     FmPcdUnlock(h_FmPcd, intFlags);
--    EnqueueLockToFreeLst((t_FmPcd*)h_FmPcd, p_Lock);
- }
- 
- bool FmPcdLockTryLockAll(t_Handle h_FmPcd)
-@@ -786,6 +760,7 @@ bool FmPcdIsAdvancedOffloadSupported(t_Handle h_FmPcd)
+@@ -786,6 +757,7 @@ bool FmPcdIsAdvancedOffloadSupported(t_Handle h_FmPcd)
      ASSERT_COND(h_FmPcd);
      return ((t_FmPcd*)h_FmPcd)->advancedOffloadSupport;
  }
@@ -8116,7 +8000,7 @@ index 5d96727..6dfedc1 100644
  /*********************** End of inter-module routines ************************/
  
  
-@@ -919,6 +894,7 @@ t_Error FM_PCD_Init(t_Handle h_FmPcd)
+@@ -919,6 +891,7 @@ t_Error FM_PCD_Init(t_Handle h_FmPcd)
      t_FmPcd         *p_FmPcd = (t_FmPcd*)h_FmPcd;
      t_Error         err = E_OK;
      t_FmPcdIpcMsg   msg;
@@ -8124,7 +8008,7 @@ index 5d96727..6dfedc1 100644
  
      SANITY_CHECK_RETURN_ERROR(p_FmPcd, E_INVALID_HANDLE);
      SANITY_CHECK_RETURN_ERROR(p_FmPcd->p_FmPcdDriverParam, E_INVALID_HANDLE);
-@@ -1018,11 +994,52 @@ t_Error FM_PCD_Init(t_Handle h_FmPcd)
+@@ -1018,11 +991,52 @@ t_Error FM_PCD_Init(t_Handle h_FmPcd)
      }
      IOMemSet32(UINT_TO_PTR(p_FmPcd->capwapFrameIdAddr), 0,  2);
  
@@ -8177,7 +8061,7 @@ index 5d96727..6dfedc1 100644
      return E_OK;
  }
  
-@@ -1037,6 +1054,9 @@ t_Error FM_PCD_Free(t_Handle h_FmPcd)
+@@ -1037,6 +1051,9 @@ t_Error FM_PCD_Free(t_Handle h_FmPcd)
      if (p_FmPcd->capwapFrameIdAddr)
          FM_MURAM_FreeMem(p_FmPcd->h_FmMuram, UINT_TO_PTR(p_FmPcd->capwapFrameIdAddr));
  
@@ -8187,7 +8071,7 @@ index 5d96727..6dfedc1 100644
      if (p_FmPcd->enabled)
          FM_PCD_Disable(p_FmPcd);
  
-@@ -1572,7 +1592,8 @@ t_Error FM_PCD_SetAdvancedOffloadSupport(t_Handle h_FmPcd)
+@@ -1572,7 +1589,8 @@ t_Error FM_PCD_SetAdvancedOffloadSupport(t_Handle h_FmPcd)
          revInfo.packageRev = IP_OFFLOAD_PACKAGE_NUMBER;
      }
      if (!IS_OFFLOAD_PACKAGE(revInfo.packageRev))

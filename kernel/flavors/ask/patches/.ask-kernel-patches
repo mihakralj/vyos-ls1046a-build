@@ -1,4 +1,4 @@
-# ASK kernel patches synced from https://github.com/we-are-mono/ASK.git @ 42c8b34cdc66f167c4f7b8aac45723410f421652
+# ASK kernel patches synced from https://github.com/we-are-mono/ASK.git @ ee9e210b7dcb02210137f12239b6ce7a3278ff39
 010-ask-fman-dpaa-ehash.patch
 020-ask-bridge-hooks.patch
 030-ask-ipv4-ipv6-forwarding.patch
