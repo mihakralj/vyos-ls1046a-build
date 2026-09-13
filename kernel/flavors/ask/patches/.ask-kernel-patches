@@ -1,4 +1,4 @@
-# ASK kernel patches synced from https://github.com/we-are-mono/ASK.git @ 41d068369859efd2dfcadb0cfc1a856e24e1240f
+# ASK kernel patches synced from https://github.com/we-are-mono/ASK.git @ 5d96de360d8ec7809d8b97cee0ad591e48c5e73e
 010-ask-fman-dpaa-ehash.patch
 020-ask-bridge-hooks.patch
 030-ask-ipv4-ipv6-forwarding.patch
@@ -19,7 +19,6 @@
 100-sdk_dpaa-ethtool-quiet-phyless-ports.patch
 101-sdk_fman-sysfs-restore-irqs-on-early-return.patch
 102-sdk_dpaa-extend-stop-drain-delays.patch
-103-qbman-ceetm-lfq-unwind.patch
 110-sdk-mainline-build-compat.patch
 120-emc2305-dt-fan-control.patch
 130-thermal-linear-governor.patch
