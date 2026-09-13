@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Miha Kralj <miha.kralj@outlook.com>
+Date: Sun, 13 Sep 2026 19:50:26 +0000
+Subject: [PATCH] net: phy: sfp: tolerate known-bad EEPROM checksum on generic
+ OEM 10G DAC
+
+Generic no-name "OEM" 10G passive DAC modules (vendor_pn
+"SFP-H10GB-CU1M") ship with a permanently incorrect base structure
+checksum (cc_base) baked into their EEPROM at manufacturing time.
+Confirmed on hardware: the identification bytes (vendor name, part
+number, revision) decode identically and consistently across
+repeated reads, unbind/rebind cycles, and full power cycles -- only
+the checksum byte itself is wrong. This is a defect in the module's
+EEPROM content, not a flaky I2C read.
+
+Since 8ae94629abaf ("net: sfp: consider fixed link modules using SFP")
+sfp_sm_mod_probe() hard-fails module identification with -EINVAL on
+checksum mismatch, refusing to bring the link up at all. The existing
+Cotsworks quirk already establishes the precedent for tolerating a
+known-bad-checksum vendor by downgrading dev_err()+EINVAL to a
+dev_warn() and continuing with the (otherwise valid) parsed data.
+Extend that same tolerance to this generic OEM DAC.
+
+On LS1046A this specific module is in daily use in eth3's SFP+ cage
+(sfp-xfi0). NXP's vendor ASK1 kernel (6.12.49) tolerates this same
+checksum failure and brings the link up fine; only the switch to a
+strict mainline drivers/net/phy/sfp.c on the ASK2/dpaa1 kernel
+(6.18.x) exposed the difference.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ drivers/net/phy/sfp.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
+index 16f64abf6..3c6f33b37 100644
+--- a/drivers/net/phy/sfp.c
++++ b/drivers/net/phy/sfp.c
+@@ -2324,6 +2324,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ 	bool cotsworks_sfbg;
+ 	unsigned int mask;
+ 	bool cotsworks;
++	bool bad_checksum_oem_dac;
+ 	u8 check;
+ 	int ret;
+ 
+@@ -2378,6 +2379,16 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ 	cotsworks = !memcmp(id.base.vendor_name, "COTSWORKS       ", 16);
+ 	cotsworks_sfbg = !memcmp(id.base.vendor_pn, "SFBG", 4);
+ 
++	/* Generic no-name "OEM" 10G passive DAC modules (vendor_pn
++	 * "SFP-H10GB-CU1M") ship with a permanently incorrect base
++	 * structure checksum baked into their EEPROM at manufacturing
++	 * time. The identification bytes themselves (vendor/PN/rev) are
++	 * consistently valid on every read; only cc_base is wrong. Treat
++	 * exactly like the existing Cotsworks tolerance below.
++	 */
++	bad_checksum_oem_dac = !memcmp(id.base.vendor_name, "OEM             ", 16) &&
++			       !memcmp(id.base.vendor_pn, "SFP-H10GB-CU1M  ", 16);
++
+ 	/* Cotsworks SFF module EEPROM do not always have valid phys_id,
+ 	 * phys_ext_id, and connector bytes.  Rewrite SFF EEPROM bytes if
+ 	 * Cotsworks PN matches and bytes are not correct.
+@@ -2391,7 +2402,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ 	/* Validate the checksum over the base structure */
+ 	check = sfp_check(&id.base, sizeof(id.base) - 1);
+ 	if (check != id.base.cc_base) {
+-		if (cotsworks) {
++		if (cotsworks || bad_checksum_oem_dac) {
+ 			dev_warn(sfp->dev,
+ 				 "EEPROM base structure checksum failure (0x%02x != 0x%02x)\n",
+ 				 check, id.base.cc_base);
