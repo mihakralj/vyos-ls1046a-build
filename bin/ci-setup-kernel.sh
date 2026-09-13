@@ -751,6 +751,25 @@ else
     echo "WARNING: $NF_FLOW_LOG_PATCH missing — PR14o REPLACE-delivery diagnostic disabled"
 fi
 
+# Stage SFP EEPROM checksum tolerance quirk:
+#   135-sfp-tolerate-generic-oem-dac-bad-checksum.patch — generic no-name
+#   "OEM" 10G passive DAC modules (vendor_pn "SFP-H10GB-CU1M") ship with a
+#   permanently incorrect base structure checksum in their EEPROM. Mainline
+#   sfp.c hard-fails module identification (-EINVAL) on checksum mismatch,
+#   refusing to bring the link up. Confirmed on hardware: eth3's SFP+ cage
+#   (sfp-xfi0) uses exactly this module, and the identification bytes
+#   decode identically across repeated reads/rebinds/power-cycles — only
+#   the checksum byte is wrong. NXP's vendor ASK1 kernel (6.12.49) already
+#   tolerates this and brings the link up fine; without this patch, eth3
+#   never links on the mainline-derived ASK2/dpaa1 kernel.
+SFP_CHECKSUM_PATCH="$COMMON_FIXES_DIR/135-sfp-tolerate-generic-oem-dac-bad-checksum.patch"
+if [ -f "$SFP_CHECKSUM_PATCH" ]; then
+    echo "### Staging $(basename "$SFP_CHECKSUM_PATCH") (eth3 SFP EEPROM checksum tolerance)"
+    cp "$SFP_CHECKSUM_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "WARNING: $SFP_CHECKSUM_PATCH missing — eth3 SFP link will fail to come up"
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
