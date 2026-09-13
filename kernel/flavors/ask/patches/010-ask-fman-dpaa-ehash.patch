@@ -64,10 +64,6 @@ Commit keygen scheme deletion only after successful hardware deletion.
 Keep required actions, netenv ownership and the scheme lock on refusal
 or command failure, and return the lock once after a successful retry.
 
-Translate the public keygen direct-scheme flag to the SDK layout and
-reject ordinary schemes without a network environment. Preserve the
-native and compat ioctl layouts and return compat next-engine data.
-
 Signed-off-by: Tomaz Zaman <tomaz@mono.si>
 ---
  Makefile                                           |    5 
@@ -85,17 +81,17 @@ Signed-off-by: Tomaz Zaman <tomaz@mono.si>
  .../freescale/sdk_fman/Peripherals/FM/HC/hc.c      |   77 -
  .../freescale/sdk_fman/Peripherals/FM/MAC/fm_mac.c |   14 
  .../freescale/sdk_fman/Peripherals/FM/MAC/fm_mac.h |    1 
- .../freescale/sdk_fman/Peripherals/FM/MAC/memac.c  |   58 
+ .../freescale/sdk_fman/Peripherals/FM/MAC/memac.c  |   58 +
  .../freescale/sdk_fman/Peripherals/FM/Pcd/Makefile |    7 
  .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c  |  929 +-------
  .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.h  |   26 
  .../sdk_fman/Peripherals/FM/Pcd/fm_cc_dbg.h        | 1374 ++++++++++++
  .../sdk_fman/Peripherals/FM/Pcd/fm_ehash.c         | 1211 ++++++++++
- .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c  |  142 +
+ .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c  |  135 +
  .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.h  |    1 
  .../sdk_fman/Peripherals/FM/Pcd/fm_manip.c         | 1439 +-----------
  .../sdk_fman/Peripherals/FM/Pcd/fm_manip.h         |  111 -
- .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c |   95 -
+ .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c |   95 +
  .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.h |   17 
  .../sdk_fman/Peripherals/FM/Pcd/fm_plcr.c          |   13 
  .../sdk_fman/Peripherals/FM/Pcd/fm_plcr.h          |    1 
@@ -104,7 +100,7 @@ Signed-off-by: Tomaz Zaman <tomaz@mono.si>
  .../sdk_fman/Peripherals/FM/Port/fm_port.h         |   21 
  .../sdk_fman/Peripherals/FM/Port/fman_port.c       |   34 
  .../freescale/sdk_fman/Peripherals/FM/SP/fm_sp.c   |   14 
- .../freescale/sdk_fman/Peripherals/FM/fm.c         |  539 ++---
+ .../freescale/sdk_fman/Peripherals/FM/fm.c         |  539 +++--
  .../freescale/sdk_fman/Peripherals/FM/fm_muram.c   |   32 
  .../sdk_fman/Peripherals/FM/inc/fm_common.h        |   24 
  .../freescale/sdk_fman/Peripherals/FM/inc/fm_hc.h  |    2 
@@ -127,8 +123,8 @@ Signed-off-by: Tomaz Zaman <tomaz@mono.si>
  .../freescale/sdk_fman/src/wrapper/lnxwrp_fm.c     |   45 
  .../freescale/sdk_fman/src/wrapper/lnxwrp_fm.h     |   36 
  .../sdk_fman/src/wrapper/lnxwrp_fm_port.c          |    9 
- .../sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c        | 2347 ++++++++++----------
- .../sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.c |   18 
+ .../sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c        | 2308 ++++++++++----------
+ .../sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.c |   16 
  .../sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.h |   13 
  .../sdk_fman/src/wrapper/lnxwrp_sysfs_fm.c         |  192 ++
  .../sdk_fman/src/wrapper/lnxwrp_sysfs_fm_port.c    |    6 
@@ -151,7 +147,7 @@ Signed-off-by: Tomaz Zaman <tomaz@mono.si>
  net/core/gro.c                                     |    5 
  net/core/rtnetlink.c                               |   19 
  net/core/skbuff.c                                  |   38 
- 81 files changed, 8809 insertions(+), 4918 deletions(-)
+ 81 files changed, 8772 insertions(+), 4907 deletions(-)
  create mode 100644 drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc_dbg.h
  create mode 100644 drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_ehash.c
  create mode 100644 drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_eh_types.h
@@ -6022,7 +6018,7 @@ index 0000000..ab643e7
 +EXPORT_SYMBOL(ExternalHashGetDscpVlanpcpMapCfg);
 +
 diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c
-index 7c5cf46..8da5559 100644
+index 7c5cf46..86db5aa 100644
 --- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c
 +++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_kg.c
 @@ -873,9 +873,9 @@ static t_Error BindPortToClsPlanGrp(t_FmPcd *p_FmPcd, uint8_t hardwarePortId, ui
@@ -6211,21 +6207,7 @@ index 7c5cf46..8da5559 100644
                  RETURN_ERROR(MAJOR, E_NO_MEMORY, ("Classification plan set"));
              }
              memset(p_ClsPlanSet, 0, sizeof(t_FmPcdKgInterModuleClsPlanSet));
-@@ -2957,6 +2960,13 @@ t_Handle FM_PCD_KgSchemeSet(t_Handle h_FmPcd,  t_FmPcdKgSchemeParams *p_SchemePa
-     uint8_t                             physicalSchemeId, relativeSchemeId = 0;
-     t_FmPcdKgScheme                     *p_Scheme;
- 
-+    SANITY_CHECK_RETURN_VALUE(p_SchemeParams, E_INVALID_HANDLE, NULL);
-+    if (!p_SchemeParams->alwaysDirect && !p_SchemeParams->netEnvParams.h_NetEnv)
-+    {
-+        REPORT_ERROR(MAJOR, E_INVALID_HANDLE, ("Ordinary scheme requires a network environment"));
-+        return NULL;
-+    }
-+
-     if (p_SchemeParams->modify)
-     {
-         p_Scheme = (t_FmPcdKgScheme *)p_SchemeParams->id.h_Scheme;
-@@ -3085,44 +3095,52 @@ t_Handle FM_PCD_KgSchemeSet(t_Handle h_FmPcd,  t_FmPcdKgSchemeParams *p_SchemePa
+@@ -3085,44 +3088,52 @@ t_Handle FM_PCD_KgSchemeSet(t_Handle h_FmPcd,  t_FmPcdKgSchemeParams *p_SchemePa
  t_Error  FM_PCD_KgSchemeDelete(t_Handle h_Scheme)
  {
      t_FmPcd             *p_FmPcd;
@@ -13290,7 +13272,7 @@ index ea4235847686..1aa05d79cfdf 100644
  
      if (CheckNConfigFmPortAdvArgs(p_LnxWrpFmPortDev) != E_OK)
 diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c
-index f97c37f..497f0a2 100644
+index f97c37f..7189210 100644
 --- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c
 +++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c
 @@ -52,6 +52,8 @@
@@ -13737,52 +13719,7 @@ index f97c37f..497f0a2 100644
  void LnxWrpPCDIOCTLTypeChecking(void)
  {
      /* fm_ext.h == fm_ioctls.h */
-@@ -470,6 +900,44 @@ void LnxWrpPCDIOCTLEnumChecking(void)
-     return;
- }
- 
-+/* The SDK has a software-only shared flag before alwaysDirect. The
-+ * published native/compat ioctl layouts do not. Translate that prefix
-+ * explicitly; the netenv-to-counter tail has the same layout. */
-+static t_Handle fm_pcd_kg_scheme_set(t_Handle h_Pcd,
-+                                    ioc_fm_pcd_kg_scheme_params_t *p_Params)
-+{
-+    t_FmPcdKgSchemeParams *p_Scheme;
-+    t_Handle h_Scheme;
-+
-+    BUILD_BUG_ON(sizeof(*p_Scheme) - offsetof(t_FmPcdKgSchemeParams, netEnvParams) !=
-+                 offsetof(ioc_fm_pcd_kg_scheme_params_t, id) -
-+                 offsetof(ioc_fm_pcd_kg_scheme_params_t, net_env_params));
-+    p_Scheme = XX_Malloc(sizeof(*p_Scheme));
-+    if (!p_Scheme)
-+        return NULL;
-+
-+    memset(p_Scheme, 0, sizeof(*p_Scheme));
-+    memcpy(p_Scheme, p_Params, offsetof(t_FmPcdKgSchemeParams, shared));
-+    p_Scheme->alwaysDirect = p_Params->always_direct;
-+    memcpy(&p_Scheme->netEnvParams, &p_Params->net_env_params,
-+           sizeof(*p_Scheme) - offsetof(t_FmPcdKgSchemeParams, netEnvParams));
-+    /* Resolve cookies only in the private SDK copy. Copy-out must retain
-+     * public IDs, never resolved kernel handles. */
-+    if ((p_Scheme->modify &&
-+         fm_pcd_cookie_to_handle(&p_Scheme->id.h_Scheme, FM_PCD_COOKIE_SCHEME)) ||
-+        fm_pcd_cookie_to_handle(&p_Scheme->netEnvParams.h_NetEnv, FM_PCD_COOKIE_NET_ENV) ||
-+        ((p_Scheme->nextEngine == e_FM_PCD_CC) &&
-+         fm_pcd_cookie_to_handle(&p_Scheme->kgNextEngineParams.cc.h_CcTree,
-+                                 FM_PCD_COOKIE_CC_TREE)))
-+    {
-+        XX_Free(p_Scheme);
-+        return NULL;
-+    }
-+    h_Scheme = FM_PCD_KgSchemeSet(h_Pcd, p_Scheme);
-+    XX_Free(p_Scheme);
-+    return h_Scheme;
-+}
-+
- static t_Error LnxwrpFmPcdIOCTL(t_LnxWrpFmDev *p_LnxWrpFmDev, unsigned int cmd, unsigned long arg, bool compat)
- {
-     t_Error err = E_OK;
-@@ -504,8 +972,6 @@ Status: PCD API to fmlib (file: drivers/net/dpa/NetCommSw/inc/Peripherals/fm_pcd
+@@ -504,8 +934,6 @@ Status: PCD API to fmlib (file: drivers/net/dpa/NetCommSw/inc/Peripherals/fm_pcd
      FM_PCD_MatchTableModifyKeyAndNextEngine
      FM_PCD_HashTableSet
      FM_PCD_HashTableDelete
@@ -13791,7 +13728,7 @@ index f97c37f..497f0a2 100644
      FM_PCD_MatchTableModifyKey
      FM_PCD_ManipNodeReplace
      FM_PCD_ManipNodeSet
-@@ -527,9 +993,7 @@ Status: not exported
+@@ -527,9 +955,7 @@ Status: not exported
      FM_PCD_MatchTableGetKeyCounter
  
  Status: not exported, would be nice to have
@@ -13801,7 +13738,7 @@ index f97c37f..497f0a2 100644
      FM_PCD_ManipGetStatistics
  
  Status: not exported
-@@ -839,6 +1303,19 @@ Status: not exported
+@@ -839,6 +1265,19 @@ Status: not exported
                  break;
              }
  
@@ -13821,7 +13758,7 @@ index f97c37f..497f0a2 100644
  #if defined(CONFIG_COMPAT)
              if (compat)
              {
-@@ -881,6 +1358,7 @@ Status: not exported
+@@ -881,6 +1320,7 @@ Status: not exported
          case FM_PCD_IOC_NET_ENV_CHARACTERISTICS_DELETE:
          {
              ioc_fm_obj_t id;
@@ -13829,7 +13766,7 @@ index f97c37f..497f0a2 100644
  
              memset(&id, 0 , sizeof(ioc_fm_obj_t));
  
-@@ -901,7 +1379,18 @@ Status: not exported
+@@ -901,7 +1341,18 @@ Status: not exported
                      RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
              }
  
@@ -13849,16 +13786,33 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -956,7 +1445,7 @@ Status: not exported
+@@ -956,6 +1407,25 @@ Status: not exported
                  }
              }
  
--            param->id = FM_PCD_KgSchemeSet(p_LnxWrpFmDev->h_PcdDev, (t_FmPcdKgSchemeParams*)param);
-+            param->id = fm_pcd_kg_scheme_set(p_LnxWrpFmDev->h_PcdDev, param);
++            {
++                t_Error xlate = E_OK;
++
++                if (param->modify)
++                    xlate = fm_pcd_cookie_to_handle(&param->scm_id.scheme_id,
++                                                    FM_PCD_COOKIE_SCHEME);
++                if (xlate == E_OK)
++                    xlate = fm_pcd_cookie_to_handle(&param->net_env_params.net_env_id,
++                                                    FM_PCD_COOKIE_NET_ENV);
++                if ((xlate == E_OK) && (param->next_engine == e_IOC_FM_PCD_CC))
++                    xlate = fm_pcd_cookie_to_handle(&param->kg_next_engine_params.cc.tree_id,
++                                                    FM_PCD_COOKIE_CC_TREE);
++                if (xlate != E_OK)
++                {
++                    XX_Free(param);
++                    RETURN_ERROR(MINOR, E_INVALID_SELECTION, ("KG scheme cookie"));
++                }
++            }
++
+             param->id = FM_PCD_KgSchemeSet(p_LnxWrpFmDev->h_PcdDev, (t_FmPcdKgSchemeParams*)param);
  
              if (!param->id)
-             {
-@@ -968,6 +1457,19 @@ Status: not exported
+@@ -968,6 +1438,19 @@ Status: not exported
                  break;
              }
  
@@ -13878,7 +13832,7 @@ index f97c37f..497f0a2 100644
  #if defined(CONFIG_COMPAT)
              if (compat)
              {
-@@ -1008,86 +1510,9 @@ Status: not exported
+@@ -1008,86 +1491,9 @@ Status: not exported
  #endif
          case FM_PCD_IOC_KG_SCHEME_GET_CNTR:
          {
@@ -13968,7 +13922,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -1097,6 +1522,7 @@ Status: not exported
+@@ -1097,6 +1503,7 @@ Status: not exported
          case FM_PCD_IOC_KG_SCHEME_DELETE:
          {
              ioc_fm_obj_t id;
@@ -13976,7 +13930,7 @@ index f97c37f..497f0a2 100644
  
              memset(&id, 0 , sizeof(ioc_fm_obj_t));
  
-@@ -1117,7 +1543,15 @@ Status: not exported
+@@ -1117,7 +1524,15 @@ Status: not exported
                      RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
              }
  
@@ -13993,7 +13947,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -1183,8 +1617,19 @@ Status: not exported
+@@ -1183,8 +1598,19 @@ Status: not exported
                  }
              }
  
@@ -14015,7 +13969,7 @@ index f97c37f..497f0a2 100644
  
              /* support for indexed lookup */
              if( !(param->extract_cc_params.type == e_IOC_FM_PCD_EXTRACT_NON_HDR &&
-@@ -1224,6 +1669,12 @@ Status: not exported
+@@ -1224,6 +1650,12 @@ Status: not exported
                  }
              }
  
@@ -14028,7 +13982,7 @@ index f97c37f..497f0a2 100644
              param->id = FM_PCD_MatchTableSet(p_LnxWrpFmDev->h_PcdDev, (t_FmPcdCcNodeParams*)param);
  
              if (!param->id) {
-@@ -1235,6 +1686,19 @@ Status: not exported
+@@ -1235,6 +1667,19 @@ Status: not exported
                  break;
              }
  
@@ -14048,7 +14002,7 @@ index f97c37f..497f0a2 100644
  #if defined(CONFIG_COMPAT)
              if (compat)
              {
-@@ -1278,6 +1742,7 @@ Status: not exported
+@@ -1278,6 +1723,7 @@ Status: not exported
          case FM_PCD_IOC_MATCH_TABLE_DELETE:
          {
              ioc_fm_obj_t id;
@@ -14056,7 +14010,7 @@ index f97c37f..497f0a2 100644
  
              memset(&id, 0 , sizeof(ioc_fm_obj_t));
  
-@@ -1298,7 +1763,15 @@ Status: not exported
+@@ -1298,7 +1744,15 @@ Status: not exported
                      RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
              }
  
@@ -14073,7 +14027,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -1353,6 +1826,12 @@ Status: not exported
+@@ -1353,6 +1807,12 @@ Status: not exported
                  }
              }
  
@@ -14086,12 +14040,10 @@ index f97c37f..497f0a2 100644
              param->id = FM_PCD_CcRootBuild(p_LnxWrpFmDev->h_PcdDev, (t_FmPcdCcTreeParams*)param);
  
              if (!param->id) {
-@@ -1364,8 +1843,21 @@ Status: not exported
+@@ -1364,6 +1824,19 @@ Status: not exported
                  break;
              }
  
--#if defined(CONFIG_COMPAT)
--            if (compat)
 +            {
 +                uint64_t cookie = fm_pcd_cookie_create(param->id, FM_PCD_COOKIE_CC_TREE);
 +
@@ -14105,12 +14057,10 @@ index f97c37f..497f0a2 100644
 +                param->id = (void *)(uintptr_t)cookie;
 +            }
 +
-+#if defined(CONFIG_COMPAT)
-+            if (compat)
+ #if defined(CONFIG_COMPAT)
+             if (compat)
              {
-                 ioc_compat_fm_pcd_cc_tree_params_t *compat_param;
- 
-@@ -1406,6 +1898,7 @@ Status: not exported
+@@ -1406,6 +1879,7 @@ Status: not exported
          case FM_PCD_IOC_CC_ROOT_DELETE:
          {
              ioc_fm_obj_t id;
@@ -14118,7 +14068,7 @@ index f97c37f..497f0a2 100644
  
              memset(&id, 0 , sizeof(ioc_fm_obj_t));
  
-@@ -1426,7 +1919,15 @@ Status: not exported
+@@ -1426,7 +1900,15 @@ Status: not exported
                      RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
              }
  
@@ -14135,7 +14085,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -1538,6 +2039,28 @@ invalid_port_id:
+@@ -1538,6 +2020,28 @@ invalid_port_id:
                  XX_Free(port_params);
              }
  
@@ -14164,7 +14114,7 @@ index f97c37f..497f0a2 100644
              param->id = FM_PCD_PlcrProfileSet(p_LnxWrpFmDev->h_PcdDev, (t_FmPcdPlcrProfileParams*)param);
  
              if (!param->id) {
-@@ -1549,6 +2072,20 @@ invalid_port_id:
+@@ -1549,6 +2053,20 @@ invalid_port_id:
                  break;
              }
  
@@ -14185,7 +14135,7 @@ index f97c37f..497f0a2 100644
  #if defined(CONFIG_COMPAT)
              if (compat)
              {
-@@ -1590,6 +2127,7 @@ invalid_port_id:
+@@ -1590,6 +2108,7 @@ invalid_port_id:
          case FM_PCD_IOC_PLCR_PROFILE_DELETE:
          {
              ioc_fm_obj_t id;
@@ -14193,7 +14143,7 @@ index f97c37f..497f0a2 100644
  
              memset(&id, 0 , sizeof(ioc_fm_obj_t));
  
-@@ -1610,7 +2148,15 @@ invalid_port_id:
+@@ -1610,7 +2129,15 @@ invalid_port_id:
                      RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
              }
  
@@ -14210,7 +14160,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -1619,58 +2165,9 @@ invalid_port_id:
+@@ -1619,58 +2146,9 @@ invalid_port_id:
  #endif
          case FM_PCD_IOC_CC_ROOT_MODIFY_NEXT_ENGINE:
          {
@@ -14272,7 +14222,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -1679,665 +2176,210 @@ invalid_port_id:
+@@ -1679,57 +2157,9 @@ invalid_port_id:
  #endif
          case FM_PCD_IOC_MATCH_TABLE_MODIFY_NEXT_ENGINE:
          {
@@ -14282,18 +14232,69 @@ index f97c37f..497f0a2 100644
 -                    sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t));
 -            if (!param)
 -                RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
+-
+-            memset(param, 0, sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t));
+-
+-#if defined(CONFIG_COMPAT)
+-            if (compat)
+-            {
+-                ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t *compat_param;
+-
+-                compat_param = (ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t *) XX_Malloc(
+-                        sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t));
+-                if (!compat_param)
+-                {
+-                    XX_Free(param);
+-                    RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
+-                }
+-
+-                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t));
+-                if (copy_from_user(compat_param, (ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t *) compat_ptr(arg),
+-                            sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t)))
+-                {
+-                    XX_Free(compat_param);
+-                    XX_Free(param);
+-                    RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
+-                }
+-
+-                compat_copy_fm_pcd_cc_node_modify_next_engine(compat_param, param, COMPAT_US_TO_K);
+-
+-                XX_Free(compat_param);
+-            }
+-            else
+-#endif
+-            {
+-                if (copy_from_user(param, (ioc_fm_pcd_cc_node_modify_next_engine_params_t *)arg,
+-                            sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t)))
+-                {
+-                    XX_Free(param);
+-                    RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
+-                }
+-            }
+-
+-            err = FM_PCD_MatchTableModifyNextEngine(param->id,
+-                    param->key_indx,
+-                    (t_FmPcdCcNextEngineParams*)(&param->cc_next_engine_params));
+-
+-            XX_Free(param);
 +            RETURN_ERROR(MINOR, E_INVALID_SELECTION,
 +                ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr: %d.\n",
 +                cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
-+            break;
-+        }
+             break;
+         }
  
+@@ -1738,606 +2168,199 @@ invalid_port_id:
+ #endif
+         case FM_PCD_IOC_MATCH_TABLE_MODIFY_MISS_NEXT_ENGINE:
+         {
+-            ioc_fm_pcd_cc_node_modify_next_engine_params_t *param;
+-
+-            param = (ioc_fm_pcd_cc_node_modify_next_engine_params_t *) XX_Malloc(
+-                    sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t));
+-            if (!param)
+-                RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
+-
 -            memset(param, 0, sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t));
-+#if defined(CONFIG_COMPAT)
-+        case FM_PCD_IOC_MATCH_TABLE_MODIFY_MISS_NEXT_ENGINE_COMPAT:
-+#endif
-+        case FM_PCD_IOC_MATCH_TABLE_MODIFY_MISS_NEXT_ENGINE:
-+        {
 +            RETURN_ERROR(MINOR, E_INVALID_SELECTION,
 +                ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr: %d.\n",
 +                cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
@@ -14344,7 +14345,7 @@ index f97c37f..497f0a2 100644
  
 -                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t));
 -                if (copy_from_user(compat_param, (ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t *) compat_ptr(arg),
--                            sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t)))
+-                                    sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t)))
 -                {
 -                    XX_Free(compat_param);
 -                    XX_Free(param);
@@ -14370,8 +14371,8 @@ index f97c37f..497f0a2 100644
 +        case FM_PCD_IOC_MATCH_TABLE_GET_MISS_STAT_COMPAT:
  #endif
 -            {
--                if (copy_from_user(param, (ioc_fm_pcd_cc_node_modify_next_engine_params_t *)arg,
--                            sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t)))
+-                if (copy_from_user(param, (ioc_fm_pcd_cc_node_modify_next_engine_params_t *) arg,
+-                                    sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t)))
 -                {
 -                    XX_Free(param);
 -                    RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
@@ -14385,8 +14386,7 @@ index f97c37f..497f0a2 100644
 +            break;
 +        }
  
--            err = FM_PCD_MatchTableModifyNextEngine(param->id,
--                    param->key_indx,
+-            err = FM_PCD_MatchTableModifyMissNextEngine(param->id,
 -                    (t_FmPcdCcNextEngineParams*)(&param->cc_next_engine_params));
  
 -            XX_Free(param);
@@ -14402,122 +14402,25 @@ index f97c37f..497f0a2 100644
          }
  
  #if defined(CONFIG_COMPAT)
--        case FM_PCD_IOC_MATCH_TABLE_MODIFY_MISS_NEXT_ENGINE_COMPAT:
+-        case FM_PCD_IOC_MATCH_TABLE_REMOVE_KEY_COMPAT:
 +        case FM_PCD_IOC_HASH_TABLE_SET_COMPAT:
  #endif
--        case FM_PCD_IOC_MATCH_TABLE_MODIFY_MISS_NEXT_ENGINE:
+-        case FM_PCD_IOC_MATCH_TABLE_REMOVE_KEY:
 +        case FM_PCD_IOC_HASH_TABLE_SET:
          {
--            ioc_fm_pcd_cc_node_modify_next_engine_params_t *param;
+-            ioc_fm_pcd_cc_node_remove_key_params_t *param;
 +            ioc_fm_pcd_hash_table_params_t *param;
 +            t_Handle                        h_HashTbl;
  
--            param = (ioc_fm_pcd_cc_node_modify_next_engine_params_t *) XX_Malloc(
--                    sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t));
+-            param = (ioc_fm_pcd_cc_node_remove_key_params_t *) XX_Malloc(
+-                    sizeof(ioc_fm_pcd_cc_node_remove_key_params_t));
 +            param = (ioc_fm_pcd_hash_table_params_t*) XX_Malloc(
 +                    sizeof(ioc_fm_pcd_hash_table_params_t));
              if (!param)
                  RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
  
--            memset(param, 0, sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t));
-+            memset(param, 0, sizeof(ioc_fm_pcd_hash_table_params_t));
- 
- #if defined(CONFIG_COMPAT)
-             if (compat)
-             {
--                ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t *compat_param;
-+                ioc_compat_fm_pcd_hash_table_params_t *compat_param;
- 
--                compat_param = (ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t *) XX_Malloc(
--                        sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t));
-+                compat_param = (ioc_compat_fm_pcd_hash_table_params_t*) XX_Malloc(
-+                        sizeof(ioc_compat_fm_pcd_hash_table_params_t));
-                 if (!compat_param)
-                 {
-                     XX_Free(param);
-                     RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
-                 }
- 
--                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t));
--                if (copy_from_user(compat_param, (ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t *) compat_ptr(arg),
--                                    sizeof(ioc_compat_fm_pcd_cc_node_modify_next_engine_params_t)))
-+                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_hash_table_params_t));
-+                if (copy_from_user(compat_param,
-+                            (ioc_compat_fm_pcd_hash_table_params_t*)compat_ptr(arg),
-+                            sizeof(ioc_compat_fm_pcd_hash_table_params_t)))
-                 {
-                     XX_Free(compat_param);
-                     XX_Free(param);
-                     RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
-                 }
- 
--                compat_copy_fm_pcd_cc_node_modify_next_engine(compat_param, param, COMPAT_US_TO_K);
-+                compat_copy_fm_pcd_hash_table(compat_param, param, COMPAT_US_TO_K);
- 
-                 XX_Free(compat_param);
-             }
-             else
- #endif
-             {
--                if (copy_from_user(param, (ioc_fm_pcd_cc_node_modify_next_engine_params_t *) arg,
--                                    sizeof(ioc_fm_pcd_cc_node_modify_next_engine_params_t)))
-+                if (copy_from_user(param, (ioc_fm_pcd_hash_table_params_t *)arg,
-+                                    sizeof(ioc_fm_pcd_hash_table_params_t)))
-                 {
-                     XX_Free(param);
-                     RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
-                 }
-             }
- 
--            err = FM_PCD_MatchTableModifyMissNextEngine(param->id,
--                    (t_FmPcdCcNextEngineParams*)(&param->cc_next_engine_params));
-+            if (fm_pcd_cookie_next_engine(&param->cc_next_engine_params_for_miss) != E_OK)
-+            {
-+                XX_Free(param);
-+                RETURN_ERROR(MINOR, E_INVALID_SELECTION, ("hash table cookie"));
-+            }
- 
--            XX_Free(param);
--            break;
--        }
-+            param->id = FM_PCD_HashTableSet(p_LnxWrpFmDev->h_PcdDev, (t_FmPcdHashTableParams *) param);
- 
--#if defined(CONFIG_COMPAT)
--        case FM_PCD_IOC_MATCH_TABLE_REMOVE_KEY_COMPAT:
--#endif
--        case FM_PCD_IOC_MATCH_TABLE_REMOVE_KEY:
--        {
--            ioc_fm_pcd_cc_node_remove_key_params_t *param;
-+            if (!param->id)
-+            {
-+                XX_Free(param);
-+                err = E_INVALID_VALUE;
-+                /* Since the LLD has no errno-style error reporting,
-+                   we're left here with no other option than to report
-+                   a generic E_INVALID_VALUE */
-+                break;
-+            }
- 
--            param = (ioc_fm_pcd_cc_node_remove_key_params_t *) XX_Malloc(
--                    sizeof(ioc_fm_pcd_cc_node_remove_key_params_t));
--            if (!param)
--                RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
-+            h_HashTbl = param->id;
-+
-+            {
-+                uint64_t cookie = fm_pcd_cookie_create(h_HashTbl,
-+                                                       FM_PCD_COOKIE_HASH_TABLE);
-+
-+                if (!cookie)
-+                {
-+                    FM_PCD_HashTableDelete(h_HashTbl);
-+                    XX_Free(param);
-+                    RETURN_ERROR(MINOR, E_NO_MEMORY, ("FM PCD handle cookies"));
-+                }
- 
 -            memset(param, 0, sizeof(ioc_fm_pcd_cc_node_remove_key_params_t));
-+                param->id = (void *)(uintptr_t)cookie;
-+            }
++            memset(param, 0, sizeof(ioc_fm_pcd_hash_table_params_t));
  
  #if defined(CONFIG_COMPAT)
              if (compat)
@@ -14536,17 +14439,113 @@ index f97c37f..497f0a2 100644
                  }
  
 -                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_cc_node_remove_key_params_t));
--                if (copy_from_user(compat_param,
++                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_hash_table_params_t));
+                 if (copy_from_user(compat_param,
 -                            (ioc_compat_fm_pcd_cc_node_remove_key_params_t *)compat_ptr(arg),
 -                            sizeof(ioc_compat_fm_pcd_cc_node_remove_key_params_t)))
--                {
--                    XX_Free(compat_param);
--                    XX_Free(param);
--                    RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
--                }
--
++                            (ioc_compat_fm_pcd_hash_table_params_t*)compat_ptr(arg),
++                            sizeof(ioc_compat_fm_pcd_hash_table_params_t)))
+                 {
+                     XX_Free(compat_param);
+                     XX_Free(param);
+                     RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
+                 }
+ 
 -                param->id = compat_ptr(compat_param->id);
 -                param->key_indx = compat_param->key_indx;
++                compat_copy_fm_pcd_hash_table(compat_param, param, COMPAT_US_TO_K);
+ 
+                 XX_Free(compat_param);
+             }
+             else
+ #endif
+             {
+-                if (copy_from_user(param, (ioc_fm_pcd_cc_node_remove_key_params_t *) arg,
+-                            sizeof(ioc_fm_pcd_cc_node_remove_key_params_t)))
++                if (copy_from_user(param, (ioc_fm_pcd_hash_table_params_t *)arg,
++                                    sizeof(ioc_fm_pcd_hash_table_params_t)))
+                 {
+                     XX_Free(param);
+                     RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
+                 }
+             }
+ 
+-            err = FM_PCD_MatchTableRemoveKey(param->id, param->key_indx);
++            if (fm_pcd_cookie_next_engine(&param->cc_next_engine_params_for_miss) != E_OK)
++            {
++                XX_Free(param);
++                RETURN_ERROR(MINOR, E_INVALID_SELECTION, ("hash table cookie"));
++            }
+ 
+-            XX_Free(param);
+-            break;
+-        }
+-#if defined(CONFIG_COMPAT)
+-        case FM_PCD_IOC_MATCH_TABLE_ADD_KEY_COMPAT:
+-#endif
+-        case FM_PCD_IOC_MATCH_TABLE_ADD_KEY:
+-        {
+-            ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t *param;
++            param->id = FM_PCD_HashTableSet(p_LnxWrpFmDev->h_PcdDev, (t_FmPcdHashTableParams *) param);
+ 
+-            param = (ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t *) XX_Malloc(
+-                    sizeof(ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
+-            if (!param)
+-                RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
++            if (!param->id)
++            {
++                XX_Free(param);
++                err = E_INVALID_VALUE;
++                /* Since the LLD has no errno-style error reporting,
++                   we're left here with no other option than to report
++                   a generic E_INVALID_VALUE */
++                break;
++            }
+ 
+-            memset(param, 0, sizeof(ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
++            h_HashTbl = param->id;
+ 
+-#if defined(CONFIG_COMPAT)
+-            if (compat)
+             {
+-                ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t *compat_param;
++                uint64_t cookie = fm_pcd_cookie_create(h_HashTbl,
++                                                       FM_PCD_COOKIE_HASH_TABLE);
+ 
+-                compat_param = (ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t *) XX_Malloc(
+-                        sizeof(ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
+-                if (!compat_param)
++                if (!cookie)
+                 {
++                    FM_PCD_HashTableDelete(h_HashTbl);
+                     XX_Free(param);
+-                    RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
++                    RETURN_ERROR(MINOR, E_NO_MEMORY, ("FM PCD handle cookies"));
+                 }
+ 
+-                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
+-                if (copy_from_user(compat_param,
+-                            (ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t *)compat_ptr(arg),
+-                            sizeof(ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t)))
++                param->id = (void *)(uintptr_t)cookie;
++            }
++
++#if defined(CONFIG_COMPAT)
++            if (compat)
++            {
++                ioc_compat_fm_pcd_hash_table_params_t *compat_param;
++
++                compat_param = (ioc_compat_fm_pcd_hash_table_params_t*) XX_Malloc(
++                        sizeof(ioc_compat_fm_pcd_hash_table_params_t));
++                if (!compat_param)
+                 {
+-                    XX_Free(compat_param);
+                     XX_Free(param);
+-                    RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
++                    RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
+                 }
+ 
+-                compat_copy_fm_pcd_cc_node_modify_key_and_next_engine(compat_param, param, COMPAT_US_TO_K);
 +                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_hash_table_params_t));
 +                compat_copy_fm_pcd_hash_table(compat_param, param, COMPAT_K_TO_US);
 +                if (copy_to_user((ioc_compat_fm_pcd_hash_table_params_t*) compat_ptr(arg),
@@ -14559,8 +14558,8 @@ index f97c37f..497f0a2 100644
              else
  #endif
              {
--                if (copy_from_user(param, (ioc_fm_pcd_cc_node_remove_key_params_t *) arg,
--                            sizeof(ioc_fm_pcd_cc_node_remove_key_params_t)))
+-                if (copy_from_user(param, (ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t *)arg,
+-                                    sizeof(ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t)))
 +                if (copy_to_user((ioc_fm_pcd_hash_table_params_t *)arg,
 +                                 param, sizeof(*param)))
                  {
@@ -14571,63 +14570,6 @@ index f97c37f..497f0a2 100644
                  }
              }
  
--            err = FM_PCD_MatchTableRemoveKey(param->id, param->key_indx);
--
--            XX_Free(param);
--            break;
--        }
--#if defined(CONFIG_COMPAT)
--        case FM_PCD_IOC_MATCH_TABLE_ADD_KEY_COMPAT:
--#endif
--        case FM_PCD_IOC_MATCH_TABLE_ADD_KEY:
--        {
--            ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t *param;
--
--            param = (ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t *) XX_Malloc(
--                    sizeof(ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
--            if (!param)
--                RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
--
--            memset(param, 0, sizeof(ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
--
--#if defined(CONFIG_COMPAT)
--            if (compat)
--            {
--                ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t *compat_param;
--
--                compat_param = (ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t *) XX_Malloc(
--                        sizeof(ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
--                if (!compat_param)
--                {
--                    XX_Free(param);
--                    RETURN_ERROR(MINOR, E_NO_MEMORY, ("IOCTL FM PCD"));
--                }
--
--                memset(compat_param, 0, sizeof(ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t));
--                if (copy_from_user(compat_param,
--                            (ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t *)compat_ptr(arg),
--                            sizeof(ioc_compat_fm_pcd_cc_node_modify_key_and_next_engine_params_t)))
--                {
--                    XX_Free(compat_param);
--                    XX_Free(param);
--                    RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
--                }
--
--                compat_copy_fm_pcd_cc_node_modify_key_and_next_engine(compat_param, param, COMPAT_US_TO_K);
--
--                XX_Free(compat_param);
--            }
--            else
--#endif
--            {
--                if (copy_from_user(param, (ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t *)arg,
--                                    sizeof(ioc_fm_pcd_cc_node_modify_key_and_next_engine_params_t)))
--                {
--                    XX_Free(param);
--                    RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
--                }
--            }
--
 -            if (param->key_size)
 -            {
 -                int size = 0;
@@ -15068,7 +15010,7 @@ index f97c37f..497f0a2 100644
              XX_Free(param);
              break;
          }
-@@ -2346,344 +2388,58 @@ invalid_port_id:
+@@ -2346,344 +2369,58 @@ invalid_port_id:
          case FM_PCD_IOC_HASH_TABLE_DELETE_COMPAT:
  #endif
          case FM_PCD_IOC_HASH_TABLE_DELETE:
@@ -15454,7 +15396,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -2764,24 +2520,31 @@ invalid_port_id:
+@@ -2764,24 +2501,31 @@ invalid_port_id:
                  param->u.hdr.insrt_params.u.generic.p_data = p_data;
              }
  
@@ -15499,7 +15441,7 @@ index f97c37f..497f0a2 100644
                  param->id = FM_PCD_ManipNodeSet(
                          p_LnxWrpFmDev->h_PcdDev,
                          (t_FmPcdManipParams*) param);
-@@ -2796,6 +2559,18 @@ invalid_port_id:
+@@ -2796,6 +2540,18 @@ invalid_port_id:
                         a generic E_INVALID_VALUE */
                      break;
                  }
@@ -15518,7 +15460,7 @@ index f97c37f..497f0a2 100644
              }
  
  #if defined(CONFIG_COMPAT)
-@@ -2844,6 +2619,7 @@ invalid_port_id:
+@@ -2844,6 +2600,7 @@ invalid_port_id:
          case FM_PCD_IOC_MANIP_NODE_DELETE:
          {
              ioc_fm_obj_t id;
@@ -15526,7 +15468,7 @@ index f97c37f..497f0a2 100644
  
              memset(&id, 0, sizeof(ioc_fm_obj_t));
  #if defined(CONFIG_COMPAT)
-@@ -2863,7 +2639,15 @@ invalid_port_id:
+@@ -2863,7 +2620,15 @@ invalid_port_id:
                      RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
              }
  
@@ -15543,7 +15485,7 @@ index f97c37f..497f0a2 100644
              break;
          }
  
-@@ -2872,69 +2656,9 @@ invalid_port_id:
+@@ -2872,69 +2637,9 @@ invalid_port_id:
  #endif
          case FM_PCD_IOC_MANIP_GET_STATS:
  	{
@@ -15616,7 +15558,7 @@ index f97c37f..497f0a2 100644
              break;
  	}
  
-@@ -2995,6 +2719,28 @@ invalid_port_id:
+@@ -2995,6 +2700,28 @@ invalid_port_id:
  			}
  		}
  
@@ -15645,7 +15587,7 @@ index f97c37f..497f0a2 100644
  		param->id = FM_PCD_FrmReplicSetGroup(p_LnxWrpFmDev->h_PcdDev,
  				(t_FmPcdFrmReplicGroupParams*)param);
  
-@@ -3009,6 +2755,20 @@ invalid_port_id:
+@@ -3009,6 +2736,20 @@ invalid_port_id:
  			break;
  		}
  
@@ -15666,7 +15608,7 @@ index f97c37f..497f0a2 100644
  #if defined(CONFIG_COMPAT)
  		if (compat)
  		{
-@@ -3058,6 +2818,7 @@ invalid_port_id:
+@@ -3058,6 +2799,7 @@ invalid_port_id:
  	case FM_PCD_IOC_FRM_REPLIC_GROUP_DELETE:
  	{
  		ioc_fm_obj_t id;
@@ -15674,7 +15616,7 @@ index f97c37f..497f0a2 100644
  
  		memset(&id, 0, sizeof(ioc_fm_obj_t));
  #if defined(CONFIG_COMPAT)
-@@ -3068,7 +2829,7 @@ invalid_port_id:
+@@ -3068,7 +2810,7 @@ invalid_port_id:
  			if (copy_from_user(&compat_id,
  					(ioc_compat_fm_obj_t *) compat_ptr(arg),
  					sizeof(ioc_compat_fm_obj_t)))
@@ -15683,7 +15625,7 @@ index f97c37f..497f0a2 100644
  			compat_obj_delete(&compat_id, &id);
  		}
  		else
-@@ -3076,10 +2837,20 @@ invalid_port_id:
+@@ -3076,10 +2818,20 @@ invalid_port_id:
  		{
  			if (copy_from_user(&id, (ioc_fm_obj_t *) arg,
  					sizeof(ioc_fm_obj_t)))
@@ -15706,7 +15648,7 @@ index f97c37f..497f0a2 100644
  	}
  	break;
  
-@@ -3089,6 +2860,7 @@ invalid_port_id:
+@@ -3089,6 +2841,7 @@ invalid_port_id:
  	case FM_PCD_IOC_FRM_REPLIC_MEMBER_ADD:
  	{
  		ioc_fm_pcd_frm_replic_member_params_t param;
@@ -15714,7 +15656,7 @@ index f97c37f..497f0a2 100644
  
  #if defined(CONFIG_COMPAT)
  		if (compat)
-@@ -3105,7 +2877,15 @@ invalid_port_id:
+@@ -3105,7 +2858,15 @@ invalid_port_id:
  			if (copy_from_user(&param, (void *)arg, sizeof(param)))
  				RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
@@ -15731,7 +15673,7 @@ index f97c37f..497f0a2 100644
  			param.member.member_index,
  			(t_FmPcdCcNextEngineParams*)&param.next_engine_params);
  	}
-@@ -3117,6 +2897,7 @@ invalid_port_id:
+@@ -3117,6 +2878,7 @@ invalid_port_id:
  	case FM_PCD_IOC_FRM_REPLIC_MEMBER_REMOVE:
  	{
  		ioc_fm_pcd_frm_replic_member_t param;
@@ -15739,7 +15681,7 @@ index f97c37f..497f0a2 100644
  
  #if defined(CONFIG_COMPAT)
  		if (compat)
-@@ -3133,7 +2914,14 @@ invalid_port_id:
+@@ -3133,7 +2895,14 @@ invalid_port_id:
  			if (copy_from_user(&param, (void *)arg, sizeof(param)))
  				RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
@@ -15755,7 +15697,7 @@ index f97c37f..497f0a2 100644
  	}
  	break;
  
-@@ -3166,6 +2954,26 @@ invalid_port_id:
+@@ -3166,6 +2935,26 @@ invalid_port_id:
          param.p_fm = p_LnxWrpFmDev->h_Dev;
          param.id = FM_VSP_Config((t_FmVspParams *)&param);
  
@@ -15782,7 +15724,7 @@ index f97c37f..497f0a2 100644
  #if defined(CONFIG_COMPAT)
          if (compat)
          {
-@@ -3190,6 +2998,7 @@ invalid_port_id:
+@@ -3190,6 +2979,7 @@ invalid_port_id:
      case FM_IOC_VSP_INIT:
      {
          ioc_fm_obj_t id;
@@ -15790,7 +15732,7 @@ index f97c37f..497f0a2 100644
  
          memset(&id, 0, sizeof(ioc_fm_obj_t));
  #if defined(CONFIG_COMPAT)
-@@ -3200,7 +3009,7 @@ invalid_port_id:
+@@ -3200,7 +2990,7 @@ invalid_port_id:
              if (copy_from_user(&compat_id,
                      (ioc_compat_fm_obj_t *) compat_ptr(arg),
                      sizeof(ioc_compat_fm_obj_t)))
@@ -15799,7 +15741,7 @@ index f97c37f..497f0a2 100644
              id.obj = compat_pcd_id2ptr(compat_id.obj);
          }
          else
-@@ -3208,10 +3017,15 @@ invalid_port_id:
+@@ -3208,10 +2998,15 @@ invalid_port_id:
          {
              if (copy_from_user(&id, (ioc_fm_obj_t *) arg,
                      sizeof(ioc_fm_obj_t)))
@@ -15817,7 +15759,7 @@ index f97c37f..497f0a2 100644
      }
  
  #if defined(CONFIG_COMPAT)
-@@ -3220,6 +3034,7 @@ invalid_port_id:
+@@ -3220,6 +3015,7 @@ invalid_port_id:
      case FM_IOC_VSP_FREE:
      {
          ioc_fm_obj_t id;
@@ -15825,7 +15767,7 @@ index f97c37f..497f0a2 100644
  
          memset(&id, 0, sizeof(ioc_fm_obj_t));
  #if defined(CONFIG_COMPAT)
-@@ -3230,7 +3045,7 @@ invalid_port_id:
+@@ -3230,7 +3026,7 @@ invalid_port_id:
              if (copy_from_user(&compat_id,
                      (ioc_compat_fm_obj_t *) compat_ptr(arg),
                      sizeof(ioc_compat_fm_obj_t)))
@@ -15834,7 +15776,7 @@ index f97c37f..497f0a2 100644
              compat_obj_delete(&compat_id, &id);
          }
          else
-@@ -3238,10 +3053,23 @@ invalid_port_id:
+@@ -3238,10 +3034,23 @@ invalid_port_id:
          {
              if (copy_from_user(&id, (ioc_fm_obj_t *) arg,
                      sizeof(ioc_fm_obj_t)))
@@ -15860,7 +15802,7 @@ index f97c37f..497f0a2 100644
      }
  
  #if defined(CONFIG_COMPAT)
-@@ -3250,6 +3078,7 @@ invalid_port_id:
+@@ -3250,6 +3059,7 @@ invalid_port_id:
      case FM_IOC_VSP_CONFIG_POOL_DEPLETION:
      {
          ioc_fm_buf_pool_depletion_params_t param;
@@ -15868,7 +15810,7 @@ index f97c37f..497f0a2 100644
  
  #if defined(CONFIG_COMPAT)
          if (compat)
-@@ -3266,7 +3095,15 @@ invalid_port_id:
+@@ -3266,7 +3076,15 @@ invalid_port_id:
              if (copy_from_user(&param, (void *)arg, sizeof(param)))
                  RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
@@ -15885,7 +15827,7 @@ index f97c37f..497f0a2 100644
                      (t_FmBufPoolDepletion *)&param.fm_buf_pool_depletion))
              RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
-@@ -3280,6 +3117,7 @@ invalid_port_id:
+@@ -3280,6 +3098,7 @@ invalid_port_id:
      case FM_IOC_VSP_CONFIG_BUFFER_PREFIX_CONTENT:
      {
          ioc_fm_buffer_prefix_content_params_t param;
@@ -15893,7 +15835,7 @@ index f97c37f..497f0a2 100644
  
  #if defined(CONFIG_COMPAT)
          if (compat)
-@@ -3296,7 +3134,15 @@ invalid_port_id:
+@@ -3296,7 +3115,15 @@ invalid_port_id:
              if (copy_from_user(&param, (void *)arg, sizeof(param)))
                  RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
@@ -15910,7 +15852,7 @@ index f97c37f..497f0a2 100644
                  (t_FmBufferPrefixContent *)&param.fm_buffer_prefix_content))
              RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
-@@ -3309,6 +3155,7 @@ invalid_port_id:
+@@ -3309,6 +3136,7 @@ invalid_port_id:
      case FM_IOC_VSP_CONFIG_NO_SG:
      {
          ioc_fm_vsp_config_no_sg_params_t param;
@@ -15918,7 +15860,7 @@ index f97c37f..497f0a2 100644
  
  #if defined(CONFIG_COMPAT)
          if (compat)
-@@ -3325,7 +3172,15 @@ invalid_port_id:
+@@ -3325,7 +3153,15 @@ invalid_port_id:
              if (copy_from_user(&param, (void *)arg, sizeof(param)))
                  RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
@@ -15935,7 +15877,7 @@ index f97c37f..497f0a2 100644
              RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
          break;
-@@ -3337,6 +3192,7 @@ invalid_port_id:
+@@ -3337,6 +3173,7 @@ invalid_port_id:
      case FM_IOC_VSP_GET_BUFFER_PRS_RESULT:
      {
          ioc_fm_vsp_prs_result_params_t param;
@@ -15943,7 +15885,7 @@ index f97c37f..497f0a2 100644
  
  #if defined(CONFIG_COMPAT)
          if (compat)
-@@ -3353,8 +3209,16 @@ invalid_port_id:
+@@ -3353,8 +3190,16 @@ invalid_port_id:
              if (copy_from_user(&param, (void *)arg, sizeof(param)))
                  RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
  
@@ -15961,7 +15903,7 @@ index f97c37f..497f0a2 100644
  
          if (!param.p_data)
              RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
-@@ -3379,6 +3243,9 @@ invalid_port_id:
+@@ -3379,6 +3224,9 @@ invalid_port_id:
      }
  
          default:
@@ -15971,7 +15913,7 @@ index f97c37f..497f0a2 100644
              RETURN_ERROR(MINOR, E_INVALID_SELECTION,
                  ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr: %d.\n",
                  cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
-@@ -4035,6 +3902,12 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4035,6 +3883,12 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
                  }
              }
  
@@ -15984,7 +15926,7 @@ index f97c37f..497f0a2 100644
              if (!err)
                  err = FM_PORT_SetPCD(p_LnxWrpFmPortDev->h_Dev, (t_FmPortPcdParams*) port_pcd_params);
  
-@@ -4098,6 +3971,14 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4098,6 +3952,14 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
                  }
              }
  
@@ -15999,7 +15941,7 @@ index f97c37f..497f0a2 100644
              err =  FM_PORT_PcdKgModifyInitialScheme(p_LnxWrpFmPortDev->h_Dev, (t_FmPcdKgSchemeSelect *)param);
  
              XX_Free(param);
-@@ -4130,6 +4011,10 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4130,6 +3992,10 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
                      RETURN_ERROR(MINOR, E_WRITE_FAILED, NO_MSG);
              }
  
@@ -16010,7 +15952,7 @@ index f97c37f..497f0a2 100644
              err = FM_PORT_PcdPlcrModifyInitialProfile(p_LnxWrpFmPortDev->h_Dev, id.obj);
              break;
          }
-@@ -4174,6 +4059,12 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4174,6 +4040,12 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
                  }
              }
  
@@ -16023,7 +15965,7 @@ index f97c37f..497f0a2 100644
              err = FM_PORT_PcdKgBindSchemes(p_LnxWrpFmPortDev->h_Dev, (t_FmPcdPortSchemesParams *)param);
  
              XX_Free(param);
-@@ -4220,6 +4111,12 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4220,6 +4092,12 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
                  }
              }
  
@@ -16036,7 +15978,7 @@ index f97c37f..497f0a2 100644
              err =  FM_PORT_PcdKgUnbindSchemes(p_LnxWrpFmPortDev->h_Dev, (t_FmPcdPortSchemesParams *)param);
  
              XX_Free(param);
-@@ -4248,36 +4145,6 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4248,36 +4126,6 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
              err = FM_PORT_AttachPCD(p_LnxWrpFmPortDev->h_Dev);
              break;
  
@@ -16073,7 +16015,7 @@ index f97c37f..497f0a2 100644
          case FM_PORT_IOC_ADD_CONGESTION_GRPS:
          case FM_PORT_IOC_REMOVE_CONGESTION_GRPS:
          {
-@@ -4511,6 +4378,22 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4511,6 +4359,22 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
                  p_LnxWrpFmTxPortDev = &p_LnxWrpFmDev->txPorts[p_LnxWrpFmPortDev->id];
                  param->p_fm_tx_port = p_LnxWrpFmTxPortDev->h_Dev;
              }
@@ -16096,7 +16038,7 @@ index f97c37f..497f0a2 100644
  
              if (FM_PORT_VSPAlloc(p_LnxWrpFmPortDev->h_Dev, (t_FmPortVSPAllocParams *)param))
              {
-@@ -4612,6 +4495,9 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
+@@ -4612,6 +4476,9 @@ t_Error LnxwrpFmPortIOCTL(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev, unsigned int cmd
          }
  
          default:
@@ -16106,7 +16048,7 @@ index f97c37f..497f0a2 100644
              RETURN_ERROR(MINOR, E_INVALID_SELECTION,
                  ("invalid ioctl: cmd:0x%08x(type:0x%02x, nr:0x%02x.\n",
                  cmd, _IOC_TYPE(cmd), _IOC_NR(cmd)));
-@@ -4725,6 +4611,79 @@ static int fm_close(struct inode *inode, struct file *file)
+@@ -4725,6 +4592,79 @@ static int fm_close(struct inode *inode, struct file *file)
      return err;
  }
  
@@ -16186,7 +16128,7 @@ index f97c37f..497f0a2 100644
  static int fm_ioctls(unsigned int minor, struct file *file, unsigned int cmd, unsigned long arg, bool compat)
  {
      DBG(TRACE, ("IOCTL minor - %u, cmd - 0x%08x, arg - 0x%08lx \n", minor, cmd, arg));
-@@ -4733,8 +4692,12 @@ static int fm_ioctls(unsigned int minor, struct file *file, unsigned int cmd, un
+@@ -4733,8 +4673,12 @@ static int fm_ioctls(unsigned int minor, struct file *file, unsigned int cmd, un
          (minor == DEV_FM_PCD_MINOR_BASE))
      {
          t_LnxWrpFmDev *p_LnxWrpFmDev = ((t_LnxWrpFmDev*)file->private_data);
@@ -16199,7 +16141,7 @@ index f97c37f..497f0a2 100644
          if (LnxwrpFmIOCTL(p_LnxWrpFmDev, cmd, arg, compat))
              return -EFAULT;
      }
-@@ -4743,8 +4706,17 @@ static int fm_ioctls(unsigned int minor, struct file *file, unsigned int cmd, un
+@@ -4743,8 +4687,17 @@ static int fm_ioctls(unsigned int minor, struct file *file, unsigned int cmd, un
               ((minor >= DEV_FM_TX_PORTS_MINOR_BASE) && (minor < DEV_FM_MAX_MINORS)))
      {
          t_LnxWrpFmPortDev *p_LnxWrpFmPortDev = ((t_LnxWrpFmPortDev*)file->private_data);
@@ -16217,7 +16159,7 @@ index f97c37f..497f0a2 100644
          if (LnxwrpFmPortIOCTL(p_LnxWrpFmPortDev, cmd, arg, compat))
              return -EFAULT;
      }
-@@ -4794,3 +4766,18 @@ struct file_operations fm_fops =
+@@ -4794,3 +4747,18 @@ struct file_operations fm_fops =
      .open =             fm_open,
      .release =          fm_close,
  };
@@ -16237,18 +16179,9 @@ index f97c37f..497f0a2 100644
 +}
 +EXPORT_SYMBOL(fm_file_is_pcd);
 diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.c b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.c
-index 6453395..8c64c86 100644
+index 6453395..f136630 100644
 --- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.c
 +++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.c
-@@ -668,7 +668,7 @@ void compat_copy_fm_pcd_kg_scheme(
-                    sizeof(ioc_fm_pcd_kg_plcr_profile_t));
-         }
-         else
--            memcpy(&param->kg_next_engine_params, &compat_param->kg_next_engine_params, sizeof(compat_param->kg_next_engine_params));
-+            memcpy(&compat_param->kg_next_engine_params, &param->kg_next_engine_params, sizeof(compat_param->kg_next_engine_params));
- 
-         memcpy(&compat_param->scheme_counter, &param->scheme_counter, sizeof(ioc_fm_pcd_kg_scheme_counter_t));
- 
 @@ -772,20 +772,11 @@ void compat_copy_fm_port_pcd(
              compat_copy_fm_port_pcd_kg(compat_port_pcd_kg_params, param->p_kg_params, COMPAT_US_TO_K);
          if (param->p_plcr_params)
