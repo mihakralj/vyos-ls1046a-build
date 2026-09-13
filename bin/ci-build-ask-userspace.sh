@@ -151,7 +151,16 @@ echo "### KVER: $KVER"
 #  fmlib — NXP Frame Manager userspace library
 # ===========================================================================
 echo "### ======== fmlib ========"
-if [ ! -f "$FMLIB_DIR/.built" ]; then
+# .built is keyed to ASK_COMMIT, not just presence: fmlib itself is pinned to
+# the fixed NXP_TAG, but 01-mono-ask-extensions.patch comes from ASK's repo
+# and can add/change exported symbols (e.g. FM_PORT_GetEnabled) between ASK
+# pins. $SRC_CACHE persists across CI runs on the same self-hosted runner, so
+# a version-blind marker silently links a stale libfm.a against a
+# freshly-fetched fmc/dpa_app expecting the new pin's symbols -- a real
+# failure mode hit bumping ASK_VERSION to mono-1.0.7 (undefined reference to
+# FM_PORT_GetEnabled). Keying on content, not just existence, mirrors the
+# fmc .built check just below.
+if [ "$(cat "$FMLIB_DIR/.built" 2>/dev/null)" != "$ASK_COMMIT" ]; then
     rm -rf "$FMLIB_DIR"
     git clone -q --depth 1 --branch "$NXP_TAG" "$NXP_FMLIB_REPO" "$FMLIB_DIR" 2>&1 | tail -3
     # Patch
@@ -165,7 +174,7 @@ if [ ! -f "$FMLIB_DIR/.built" ]; then
         KERNEL_SRC="$KSRC" \
         libfm-arm.a
     ln -sf libfm-arm.a "$FMLIB_DIR/libfm.a"
-    touch "$FMLIB_DIR/.built"
+    echo "$ASK_COMMIT" > "$FMLIB_DIR/.built"
 fi
 echo "### fmlib ready"
 
@@ -173,7 +182,10 @@ echo "### fmlib ready"
 #  fmc — NXP FMan Configuration tool
 # ===========================================================================
 echo "### ======== fmc ========"
-if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'return err.*name, err' "$FMC_DIR/source/fmc_exec.c" 2>/dev/null; then
+# .built keyed to ASK_COMMIT (same rationale as fmlib above) -- the ad-hoc
+# grep for one already-applied patch hunk only caught staleness for that one
+# line, not the general case of fmc's own ASK-provided patch changing.
+if [ "$(cat "$FMC_DIR/.built" 2>/dev/null)" != "$ASK_COMMIT" ]; then
     rm -rf "$FMC_DIR"
     git clone -q --depth 1 --branch "$NXP_TAG" "$NXP_FMC_REPO" "$FMC_DIR" 2>&1 | tail -3
     FMC_PATCH="$ASK_DIR/patches/fmc/01-mono-ask-extensions.patch"
@@ -220,7 +232,7 @@ PYEOF
         FMD_USPACE_LIB_PATH="$FMLIB_DIR" \
         LIBXML2_HEADER_PATH=/usr/include/libxml2 \
         TCLAP_HEADER_PATH=/usr/include
-    touch "$FMC_DIR/.built"
+    echo "$ASK_COMMIT" > "$FMC_DIR/.built"
 fi
 # Debian 12 libxml2 v2.9.14+ changed xmlStructuredErrorFunc signature
 # from void(*)(void*, const xmlError*) to void(*)(void*, xmlError*).
@@ -233,7 +245,10 @@ echo "### fmc ready: $(ls -lh "$FMC_DIR/source/fmc" | awk '{print $5}')"
 # ===========================================================================
 echo "### ======== libnfnetlink $LIBNFNETLINK_VER (patched) ========"
 LIBNFNETLINK_SRC="$SRC_CACHE/libnfnetlink-${LIBNFNETLINK_VER}"
-if [ ! -f "$LIBNFNETLINK_SRC/.built" ]; then
+# .built keyed to ASK_COMMIT (same rationale as fmlib above): the upstream
+# tarball version is fixed, but 01-nxp-ask-nonblocking-heap-buffer.patch
+# comes from ASK's repo and can change between pins.
+if [ "$(cat "$LIBNFNETLINK_SRC/.built" 2>/dev/null)" != "$ASK_COMMIT" ]; then
     TARBALL="$SRC_CACHE/libnfnetlink-${LIBNFNETLINK_VER}.tar.bz2"
     if [ ! -f "$TARBALL" ]; then
         wget -q -P "$SRC_CACHE" "$LIBNFNETLINK_URL"
@@ -248,7 +263,7 @@ if [ ! -f "$LIBNFNETLINK_SRC/.built" ]; then
         ./configure --host="${CHOST:-$CBUILD}" --prefix="$SYSROOT" --enable-static --disable-shared -q && \
         make -j"$(nproc)" -s && make install -s
     )
-    touch "$LIBNFNETLINK_SRC/.built"
+    echo "$ASK_COMMIT" > "$LIBNFNETLINK_SRC/.built"
 fi
 echo "### libnfnetlink ready"
 
@@ -257,7 +272,10 @@ echo "### libnfnetlink ready"
 # ===========================================================================
 echo "### ======== libnetfilter_conntrack $LIBNFCT_VER (patched) ========"
 LIBNFCT_SRC="$SRC_CACHE/libnetfilter_conntrack-${LIBNFCT_VER}"
-if [ ! -f "$LIBNFCT_SRC/.built" ]; then
+# .built keyed to ASK_COMMIT (same rationale as fmlib above): the upstream
+# tarball version is fixed, but 01-nxp-ask-comcerto-fp-extensions.patch
+# comes from ASK's repo and can change between pins.
+if [ "$(cat "$LIBNFCT_SRC/.built" 2>/dev/null)" != "$ASK_COMMIT" ]; then
     TARBALL="$SRC_CACHE/libnetfilter_conntrack-${LIBNFCT_VER}.tar.xz"
     if [ ! -f "$TARBALL" ]; then
         wget -q -P "$SRC_CACHE" "$LIBNFCT_URL"
@@ -274,7 +292,7 @@ if [ ! -f "$LIBNFCT_SRC/.built" ]; then
             CFLAGS="-I$SYSROOT/include" LDFLAGS="-L$SYSROOT/lib" && \
         make -j"$(nproc)" -s && make install -s
     )
-    touch "$LIBNFCT_SRC/.built"
+    echo "$ASK_COMMIT" > "$LIBNFCT_SRC/.built"
 fi
 echo "### libnetfilter_conntrack ready"
 
