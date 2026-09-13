@@ -1,42 +1,66 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Miha Kralj <miha.kralj@outlook.com>
-Date: Sun, 13 Sep 2026 19:50:26 +0000
-Subject: [PATCH] net: phy: sfp: tolerate known-bad EEPROM checksum on generic
- OEM 10G DAC
+Date: Sun, 13 Sep 2026 20:12:40 +0000
+Subject: [PATCH] net: phy: sfp: tolerate known-bad EEPROM on generic OEM 10G
+ DAC
 
 Generic no-name "OEM" 10G passive DAC modules (vendor_pn
-"SFP-H10GB-CU1M") ship with a permanently incorrect base structure
-checksum (cc_base) baked into their EEPROM at manufacturing time.
-Confirmed on hardware: the identification bytes (vendor name, part
-number, revision) decode identically and consistently across
-repeated reads, unbind/rebind cycles, and full power cycles -- only
-the checksum byte itself is wrong. This is a defect in the module's
-EEPROM content, not a flaky I2C read.
+"SFP-H10GB-CU1M") ship with EEPROM content that is permanently wrong
+in two independent ways, confirmed on hardware across repeated reads,
+unbind/rebind cycles, and full power cycles (so this is baked into
+the module's flash, not a flaky I2C read):
+
+ 1. The base structure checksum (cc_base) never matches, even though
+    every identification byte (vendor name, part number, revision)
+    decodes correctly and consistently.
+ 2. The phys_id byte reads as 0x28, which has no defined meaning in
+    SFF-8024, instead of the expected SFF8024_ID_SFP. phys_ext_id is
+    correct (SFP_PHYS_EXT_ID_SFP).
 
 Since 8ae94629abaf ("net: sfp: consider fixed link modules using SFP")
 sfp_sm_mod_probe() hard-fails module identification with -EINVAL on
-checksum mismatch, refusing to bring the link up at all. The existing
-Cotsworks quirk already establishes the precedent for tolerating a
-known-bad-checksum vendor by downgrading dev_err()+EINVAL to a
-dev_warn() and continuing with the (otherwise valid) parsed data.
-Extend that same tolerance to this generic OEM DAC.
+checksum mismatch, and sfp_module_supported() separately rejects any
+phys_id it doesn't recognize -- either alone is enough to keep the
+link down. Two precedents already exist for exactly this class of
+fix: the Cotsworks checksum quirk (dev_warn+continue instead of
+dev_err+EINVAL) and the Ubiquiti U-Fiber Instant phys_id override
+(match on vendor identity instead of the wrong ID byte). Apply both
+patterns to this module.
 
-On LS1046A this specific module is in daily use in eth3's SFP+ cage
-(sfp-xfi0). NXP's vendor ASK1 kernel (6.12.49) tolerates this same
-checksum failure and brings the link up fine; only the switch to a
-strict mainline drivers/net/phy/sfp.c on the ASK2/dpaa1 kernel
-(6.18.x) exposed the difference.
+On LS1046A this module is in daily use in eth3's SFP+ cage
+(sfp-xfi0). NXP's vendor ASK1 kernel (6.12.49) tolerates both defects
+and brings the link up fine; only the switch to a strict mainline
+drivers/net/phy/sfp.c on the ASK2/dpaa1 kernel (6.18.x) exposed the
+difference.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 ---
- drivers/net/phy/sfp.c | 13 ++++++++++++-
- 1 file changed, 12 insertions(+), 1 deletion(-)
+ drivers/net/phy/sfp.c | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
-index 16f64abf6..3c6f33b37 100644
+index 16f64abf6..b60f65329 100644
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -2324,6 +2324,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+@@ -332,6 +332,17 @@ static bool sfp_module_supported(const struct sfp_eeprom_id *id)
+ 	    !memcmp(id->base.vendor_pn, "UF-INSTANT      ", 16))
+ 		return true;
+ 
++	/* Generic no-name "OEM" 10G passive DAC (vendor_pn
++	 * "SFP-H10GB-CU1M") stores a garbage phys_id byte (observed 0x28,
++	 * no defined SFF-8024 meaning) alongside an otherwise-correct
++	 * phys_ext_id. Same class of bad-EEPROM-content issue as the
++	 * checksum quirk above; match on vendor identity instead.
++	 */
++	if (id->base.phys_ext_id == SFP_PHYS_EXT_ID_SFP &&
++	    !memcmp(id->base.vendor_name, "OEM             ", 16) &&
++	    !memcmp(id->base.vendor_pn, "SFP-H10GB-CU1M  ", 16))
++		return true;
++
+ 	return false;
+ }
+ 
+@@ -2324,6 +2335,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
  	bool cotsworks_sfbg;
  	unsigned int mask;
  	bool cotsworks;
@@ -44,7 +68,7 @@ index 16f64abf6..3c6f33b37 100644
  	u8 check;
  	int ret;
  
-@@ -2378,6 +2379,16 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+@@ -2378,6 +2390,16 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
  	cotsworks = !memcmp(id.base.vendor_name, "COTSWORKS       ", 16);
  	cotsworks_sfbg = !memcmp(id.base.vendor_pn, "SFBG", 4);
  
@@ -61,7 +85,7 @@ index 16f64abf6..3c6f33b37 100644
  	/* Cotsworks SFF module EEPROM do not always have valid phys_id,
  	 * phys_ext_id, and connector bytes.  Rewrite SFF EEPROM bytes if
  	 * Cotsworks PN matches and bytes are not correct.
-@@ -2391,7 +2402,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+@@ -2391,7 +2413,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
  	/* Validate the checksum over the base structure */
  	check = sfp_check(&id.base, sizeof(id.base) - 1);
  	if (check != id.base.cc_base) {
