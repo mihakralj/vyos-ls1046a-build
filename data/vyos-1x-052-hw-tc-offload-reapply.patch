@@ -1,0 +1,56 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2: reapply hw-tc-offload whenever set_ask_offload() arms a port
+
+Fixes a real regression found and board-confirmed 2026-09-14: cycling
+`offload ipv4`/`offload ipv6` on an interface via commit (disengage
+then re-engage) left ask.ko reporting the port "engaged" (fe_arm,
+ask-check) while ethtool hw-tc-offload had silently reverted to off --
+the nft hardware flowtable cannot actually reach a port in that state,
+so the port looks fine but isn't. Root cause: only firewall.py's
+flowtable apply() (vyos-1x-035) ever reapplies this ethtool feature;
+the interfaces-offload engage path (set_ask_offload()) never did, so
+the two subsystems drift apart across independent commits. Verified
+on .185: 3 production engage/disengage cycles on eth4 reproduced it
+every time (ask-check FAIL "eth4 hw-tc-offload is not enabled").
+
+Fix: set_ask_offload() now reapplies `ethtool -K <if> hw-tc-offload
+on` itself whenever it arms a nonzero family mask, mirroring
+firewall.py's own fix but at the actual point of arming so it can't
+drift regardless of which subsystem last committed. Best-effort (not
+gated on rc) -- an adapter that genuinely doesn't support the feature
+is firewall.py's verify_hardware_offload()'s job to catch, not this
+reapplication's.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GooC2zFmzRBYLikPbwekuH
+---
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+--- a/python/vyos/ifconfig/ethernet.py
++++ b/python/vyos/ifconfig/ethernet.py
+@@ -395,8 +395,26 @@
+ 
+         tool = '/usr/local/bin/vyos-offload-ask'
+         if not os.path.exists(tool):
+             raise ConfigError(f'ASK offload helper not found: {tool}')
+ 
++        # ask.ko's own engage (family/vlan/bridge) is inert without this:
++        # the production nft hardware flowtable cannot reach a port whose
++        # ethtool hw-tc-offload feature is off, even though ask.ko itself
++        # reports the port "engaged" -- ask_hw_offload_engage() and the
++        # ethtool feature toggle are two independent things the kernel
++        # never reconciles on its own. Previously only firewall.py's
++        # flowtable apply() (vyos-1x-035) reapplied this feature, so a
++        # disengage/re-engage cycle through THIS path alone (e.g. toggling
++        # `offload ipv4` off and back on) could silently leave hw-tc-offload
++        # off while ask-check still reported the port engaged. Board-
++        # confirmed 2026-09-14 on .185: 3 engage/disengage cycles left
++        # eth4's hw-tc-offload reverted to off. Best-effort (not gated on
++        # rc): if the adapter genuinely doesn't support the feature,
++        # firewall.py's verify_hardware_offload() is the real gate for
++        # that, not this reapplication.
++        if int(family_mask) != 0:
++            self._popen(f'ethtool -K {self.ifname} hw-tc-offload on')
++
+         # `family <mask> [vlan] [bridge]` sets the per-port family mask and,
+         # when the port stays engaged (mask != 0), the per-port VLAN and
+         # bridge bits in one engage. A disengaging call (mask 0) drops the
