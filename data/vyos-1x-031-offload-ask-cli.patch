@@ -32,7 +32,7 @@ index b7df88fab..28d115638 100644
                  <properties>
                    <help>Enable Large Receive Offload</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index ace16f11d..4f402f8e7 100644
+index 8ab218dd8..97f56eb4c 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
 @@ -17,6 +17,10 @@
@@ -45,10 +45,10 @@ index ace16f11d..4f402f8e7 100644
 +from vyos.base import ConfigError
  from vyos.base import Warning
  from vyos.ethtool import Ethtool
- from vyos.ifconfig import Section
-@@ -338,6 +342,35 @@ def set_hw_tc_offload(self, state):
-                 print('Adapter does not support changing hw-tc-offload settings!')
-         return False
+ from vyos.ifconfig.interface import Interface
+@@ -333,6 +337,35 @@ def set_hw_tc_offload(self, state, warn=True):
+             'hw-tc-offload', 'hw-tc-offload', state, enabled, fixed, warn
+         )
  
 +    def set_ask_offload(self, family_mask: int):
 +        """
@@ -79,12 +79,12 @@ index ace16f11d..4f402f8e7 100644
 +                f'ASK family-mask {family_mask} failed on {self.ifname}: {detail}'
 +            )
 +
-     def set_lro(self, state):
+     def set_lro(self, state, warn=True):
          """
          Enable Large Receive offload. State can be either True or False.
-@@ -687,8 +720,19 @@ def update(self, config):
-         # LRO (large receive offload)
-         self.set_lro(dict_search('offload.lro', config) is not None)
+@@ -688,8 +721,19 @@ def update(self, config):
+             warn='lro' in offload_changed,
+         )
  
 +        # ASK offload - NXP LS1046A FMan FE-VM hardware forwarding.
 +        # Independent per-family selection: offload ipv4 / offload ipv6.

@@ -1,34 +1,34 @@
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 0a81508..38a021b 100644
+index 8e104bd98..d3698cd16 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -353,7 +353,7 @@ class EthernetIf(Interface):
-                 print('Adapter does not support changing hw-tc-offload settings!')
-         return False
-
+@@ -337,7 +337,7 @@ def set_hw_tc_offload(self, state, warn=True):
+             'hw-tc-offload', 'hw-tc-offload', state, enabled, fixed, warn
+         )
+ 
 -    def set_ask_offload(self, family_mask: int, vlan: bool = False):
 +    def set_ask_offload(self, family_mask: int, vlan: bool = False, bridge: bool = False):
          """
          Apply per-interface ASK2 family selection. bit0=IPv4, bit1=IPv6;
          mask 0 disengages the port. The kernel scheme/table is family-neutral;
-@@ -362,6 +362,13 @@ class EthernetIf(Interface):
+@@ -346,6 +346,13 @@ def set_ask_offload(self, family_mask: int, vlan: bool = False):
          @vlan arms this port's single-tag 802.1Q VLAN pop/push offload
          (CLI `offload vlan`), carried to ask.ko as the genl ASK_ATTR_VLAN
          bit alongside the family mask so both are set atomically on engage.
 +
 +        @bridge arms this port's L2 bridge FDB offload (T-M6-2), carried as
 +        ASK_ATTR_BRIDGE alongside the family mask. There is no CLI leafNode
-+        for this — the caller (this method's own bridge-membership check
++        for this -- the caller (this method's own bridge-membership check
 +        below, or interfaces_bridge.py for a membership change) computes it
 +        automatically: bridge offload is on whenever the port is both a
 +        current bridge member AND already has family offload armed.
          """
          # Physical ingress FMan hwport IDs (DT-authoritative, all five ports).
          port_map = {
-@@ -376,14 +383,14 @@ class EthernetIf(Interface):
+@@ -360,14 +367,14 @@ def set_ask_offload(self, family_mask: int, vlan: bool = False):
          if not os.path.exists(tool):
              raise ConfigError(f'ASK offload helper not found: {tool}')
-
+ 
 -        # `family <mask> [vlan]` sets the per-port family mask and, when the
 -        # port stays engaged (mask != 0), the per-port VLAN bit in one engage.
 -        # A disengaging call (mask 0) drops the port entirely; the kernel
@@ -46,12 +46,12 @@ index 0a81508..38a021b 100644
          out, rc = self._popen(cmd)
          if rc:
              msg = (out or '').strip().splitlines()
-@@ -745,7 +752,16 @@ class EthernetIf(Interface):
+@@ -740,7 +747,16 @@ def update(self, config):
          # require ipv4 or ipv6). Passed with the family mask so ask.ko arms
          # both atomically; ignored by the helper on a disengaging (mask 0) call.
          ask_vlan = dict_search('offload.vlan', config) is not None
 -        self.set_ask_offload(ask_mask, ask_vlan)
-+        # T-M6-2: bridge offload has no CLI leafNode — it's automatic
++        # T-M6-2: bridge offload has no CLI leafNode -- it's automatic
 +        # whenever this port is both a current bridge member (populated
 +        # generically by get_interface_dict()'s is_member() check, same
 +        # field interfaces_bridge.py itself consults) and already has
@@ -61,7 +61,7 @@ index 0a81508..38a021b 100644
 +        # interfaces_bridge.py re-arming affected members directly.
 +        ask_bridge = ask_mask != 0 and dict_search('is_bridge_member', config) is not None
 +        self.set_ask_offload(ask_mask, ask_vlan, ask_bridge)
-
+ 
          # RPS - Receive Packet Steering
          # ASK's IPv6/NAT/VLAN misses take the kernel RX softirq path; on this
 diff --git a/src/conf_mode/interfaces_bridge.py b/src/conf_mode/interfaces_bridge.py
