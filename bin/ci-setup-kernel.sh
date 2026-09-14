@@ -966,12 +966,17 @@ make olddefconfig
 # "scripts/config --disable CONFIG_IO_STRICT_DEVMEM" + "make olddefconfig"
 # and a block between them breaks that anchor.
 if [ "${KUNIT:-false}" = "true" ]; then
-    echo "I: LS1046A — KUnit build: forcing CONFIG_KUNIT + PROVE_RCU/PROVE_LOCKING"
+    echo "I: LS1046A — KUnit build: forcing CONFIG_KUNIT + PROVE_RCU/PROVE_LOCKING + DEBUG_LIST"
     scripts/config --set-val CONFIG_KUNIT y
     scripts/config --set-val CONFIG_KUNIT_DEBUGFS y
     scripts/config --set-val CONFIG_FSL_FMAN_PCD_KUNIT_TEST y
     scripts/config --enable CONFIG_PROVE_RCU
     scripts/config --enable CONFIG_PROVE_LOCKING
+    # CR-004 gate: catches list add/del corruption (poisoned prev/next,
+    # double-remove, use-after-free) in the CR-004 stale-MAC
+    # remove/reinsert lifecycle (ownership generations/tombstones,
+    # T-M6-A3) under concurrent REPLACE/DESTROY/neighbour-churn stress.
+    scripts/config --enable CONFIG_DEBUG_LIST
     make olddefconfig
 fi
 
