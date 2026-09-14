@@ -167,23 +167,28 @@ EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
  * CC-leaf -> combined HMTD (VLAN strip/insert + L2 rewrite + TTL) -> egress
  * no-confirm TX FQ, with the CC miss row chaining to the FE_ENTER ehash so
  * routed/NAT coexist on the same engaged port (R4c-2/R4c-3, sustained both
- * directions, ehash graft restored on VLAN churn, clean disengage). It ships
- * default-OFF pending the R5 matrix + soak; ASK_CAP_VLAN is advertised only
- * while this gate is armed (ask_genl.c), so the capability honestly tracks
- * what a flow would actually get. Single 802.1Q tag only; eth0/802.1ad/QinQ
- * fall back to software.
+ * directions, ehash graft restored on VLAN churn, clean disengage). R5b
+ * PASSED 2026-08-26 (no-wrong-forward/zero-tag-leak, bidirectional,
+ * coexistence, PCP/DEI, MTU sweep, 100x churn) and gate-off regression
+ * PASSED (routed ~11.6G / NAT44 ~11.7G unaffected). Productized default-ON
+ * 2026-09-14, mirroring the nat44/nat66 default-on precedent above:
+ * ASK_CAP_VLAN is advertised whenever this gate is armed (ask_genl.c), so
+ * the capability honestly tracks what a flow would actually get. Single
+ * 802.1Q tag only; eth0/802.1ad/QinQ fall back to software (independent
+ * ASK_HW_PORT_ETH0_MGMT guard below, unaffected by this default).
  */
 /*
- * Global master override. Default off. When set it arms VLAN offload on EVERY
- * port (OR'd with the per-port bit) — kept for back-compat and one-shot debug
- * (`echo Y > /sys/module/ask/parameters/vlan_offload`). Production arming is
- * per-port via the CLI `offload ask vlan` -> genl ASK_ATTR_VLAN -> the
- * ask_hw_port_vlan[] array below, mirroring the per-port family mask.
+ * Global master override. Default ON: arms VLAN offload on every ASK-engaged
+ * port (OR'd with the per-port bit), matching how nat44/nat66 ship — no
+ * separate CLI step required. Runtime-disableable for diagnosis
+ * (`echo N > /sys/module/ask/parameters/vlan_offload`), and the per-port CLI
+ * `offload ask vlan` -> genl ASK_ATTR_VLAN -> ask_hw_port_vlan[] below still
+ * works as an explicit per-port bit if the global override is ever turned off.
  */
-static bool ask_vlan_offload;
+static bool ask_vlan_offload = true;
 module_param_named(vlan_offload, ask_vlan_offload, bool, 0644);
 MODULE_PARM_DESC(vlan_offload,
-		 "Global master override arming single-tag 802.1Q VLAN pop/push FMan offload on ALL ports (default 0; per-port control is CLI `offload ask vlan`; eth0/802.1ad/QinQ excluded)");
+		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload on all ASK-engaged ports (default 1, silicon-validated R5b; per-port override is CLI `offload ask vlan`; eth0/802.1ad/QinQ excluded)");
 
 /* Per-port VLAN offload arm bit, sized like ask_hw_port_family[]. Set by
  * ask_hw_offload_set_vlan() from the genl engage path (ASK_ATTR_VLAN). */
