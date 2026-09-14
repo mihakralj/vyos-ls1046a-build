@@ -54,3 +54,24 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
          # `family <mask> [vlan] [bridge]` sets the per-port family mask and,
          # when the port stays engaged (mask != 0), the per-port VLAN and
          # bridge bits in one engage. A disengaging call (mask 0) drops the
+@@ -468,8 +486,18 @@ def set_ingress_policer(self, config):
+         policer = config.get('ingress_policer')
+         if not policer:
+             # No policer configured: return hw-tc-offload to its default-off
+-            # state so a deleted policer leaves no toggled feature behind.
+-            self._popen(f'ethtool -K {ifname} hw-tc-offload off')
++            # state so a deleted policer leaves no toggled feature behind --
++            # but only when ASK2 hardware offload isn't also relying on the
++            # same feature. set_ask_offload() (called earlier in update())
++            # reapplies hw-tc-offload=on whenever this port has offload
++            # ipv4/ipv6 engaged; unconditionally forcing it off here ran on
++            # EVERY commit regardless of whether ingress-policer was ever
++            # touched, silently undoing that reapply every time. Board-
++            # confirmed 2026-09-14 on .185 eth1.
++            ask_active = (dict_search('offload.ipv4', config) is not None or
++                          dict_search('offload.ipv6', config) is not None)
++            if not ask_active:
++                self._popen(f'ethtool -K {ifname} hw-tc-offload off')
+             return None
+ 
+         rate = policer.get('bandwidth')
