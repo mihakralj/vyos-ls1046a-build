@@ -1589,7 +1589,7 @@ record it does not own.
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
 | IPv4/IPv6 multicast | `cdx_multicast4/6_cc`; MC4/MC6 FCI | switchdev MDB / kernel mroute | group key + bounded replication FQ/egress set | not implemented |
 | PPPoE | `cdx_pppoe_cc`; PPPoE FCI; `cdx_sp.xml` | PPPoE netdev + normal flowtable after parser recognition | soft-parser sequence exposes inner IP; normal route/NAT/VLAN intent follows | source found; loader/compiler gate open |
-| 3-tuple route | `cdx_tuple3*` tables | flowtable wildcard/coarse flow only when kernel semantics permit | separate key type/scheme/table; never fake by truncating a 5-tuple key | not implemented |
+| 3-tuple route | `cdx_tuple3*` tables | flowtable wildcard/coarse flow only when kernel semantics permit | separate key type/scheme/table; never fake by truncating a 5-tuple key | key-packer primitive landed 2026-09-14 (silicon-confirmed 10-byte layout, KUnit-pinned), not yet dispatch-wired or reachable from ask.ko — see T-M6-T3 |
 | IPv4/IPv6 fragments | `cdx_frag4/6_cc`; IP reassembly module | kernel fragment/reassembly framework | fragment key + bounded reassembly/slow-path policy | not implemented |
 | Tunnels / 6-in-4 | tunnel FCI; `cdx_sp.xml` IPv4-nextp 0x29 | tunnel netdev + flowtable | soft-parser re-dispatch; inner-flow intent; explicit encap/decap actions | not implemented |
 | Policer/QoS/CEETM | QM/CEETM FCI, policer NIA | tc police/qdisc | existing FMan PLCR; CEETM separately scoped | policer SILICON-VALIDATED 2026-08-23 (F-231): installs `in_hw`, meters, rate-cap tracks CIR (10/25/50/80 Mbit → 0.88× L4 egress = L2-overhead-correct), reversible. Applies to non-ASK ports; ASK-engaged ports route AC_CC/FE-VM and bypass PLCR by design. Flood/BUG-3b still open |
@@ -2076,11 +2076,33 @@ FMan→CAAM→FMan fast path) split, with a measurement gate between them.
   memory/timeouts. Gate: first/non-first/out-of-order/overlap/tiny fragments,
   IPv6 fragment header, timeout/resource exhaustion, no bypass of firewall or
   NAT policy.
-- [ ] **T-M6-T3 — 3-tuple tables.** Add only for explicit kernel wildcard flow
+- [~] **T-M6-T3 — 3-tuple tables.** Add only for explicit kernel wildcard flow
   semantics. Use a different KG extraction/key type/table. Never implement a
   coarse flow by truncating a full extracted key (`keysize` MUST equal the
   extraction length). Gate: wildcard collision and exact-flow precedence;
   protocol separation; teardown/fallback.
+  **2026-09-14: key-packer primitive landed (patch 0203).** The 2-byte gap
+  between the field list (`PORT_ID+SIP+DIP+PROTO`=10B) and the previously-cited
+  `keysize=8` is resolved: live silicon readback on `.106` (`bin/kg-scheme-read.py`
+  + `bin/fman-full-capture.py --follow-rccb`, scheme 6, `ekfc=0x801c0000`,
+  CCOBASE=5 → `FMBM_RCCB+0x50`) shows the group-table row's real keysize field
+  is **10**, matching the field list exactly with no truncation. (Scheme 7's
+  row did not independently corroborate this — same `ekfc` but a different
+  group-table byte pattern; flagged, not yet explained, worth a follow-up
+  read before treating scheme 7 the same way.) `cc_pack_key_3tuple()` +
+  `CC_KEY_SIZE_3TUPLE=10` added to `fman_pcd_cc.c`, KUnit-pinned
+  (`tests/fman_pcd_cc_3tuple_key_test.c`), marked `__maybe_unused` — **not
+  yet wired** into `fman_pcd_cc_static_install()`'s spec/hw dispatch (the
+  `dual_lane`/`dual_lane_pid` two-struct mechanism 0185 built), not armed via
+  any KeyGen scheme-attach path, not reachable from `ask.ko`. Remaining work:
+  (1) explain the scheme-7 discrepancy, (2) thread a `tuple3` bool through
+  `struct fman_pcd_cc_hw_spec`/`struct fman_pcd_cc_hw` mirroring
+  `dual_lane_pid`, (3) a KeyGen scheme-attach variant arming `ekfc=0x801c0000`,
+  (4) the actual trigger: wire kernel wildcard-flow intent into this through
+  `ask_flow_offload.c`'s tc-flower dispatch (`ask_flow_offload_setup_tc_block_cb`'s
+  `TC_SETUP_CLSFLOWER` case, the same entry point 0198's tc-flower ACL hook
+  already uses for non-flowtable hardware rules) — not the `nf_flowtable`
+  REPLACE path, which has no native "wildcard" concept.
 - [ ] **T-M6-TN — remaining tunnels.** One tunnel type at a time, only through a
   kernel tunnel netdev/offload hook, after soft-parser and intent gates. No
   generic vendor `CMD_TNL_*` compatibility layer.
