@@ -28,18 +28,27 @@ dispatch (the natural entry point, matching how the existing 0198
 tc-flower hook already handles non-flowtable-sourced hardware rules)
 is separate follow-on work, not attempted blind here.
 
+v2: fixed two malformed-diff bugs in the original hunk headers
+(wrong old/new line counts, and blank context lines missing their
+required leading space) that made the first CI run fall back to a
+partial/fuzzy `patch -p1` apply -- the #include hunk silently never
+applied, so fman_pcd_cc_3tuple_key never got compiled/registered as
+a KUnit suite (confirmed on .185: dmesg showed "1..2" suites, not
+the expected 3). Headers below are now programmatically verified
+against the actual hunk bodies, not hand-counted.
+
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01GooC2zFmzRBYLikPbwekuH
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -595,6 +595,55 @@
+@@ -595,8 +595,66 @@
  	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE_DUAL_PID;
  	memcpy_toio((void __iomem *)row, key, CC_KEY_SIZE_DUAL_PID);
  	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE_DUAL_PID), msk, CC_KEY_SIZE_DUAL_PID);
  }
-
+ 
 +#define CC_KEY_SIZE_3TUPLE	10U
 +
 +/*
@@ -101,9 +110,9 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/eth
  /*
   * Encode one leaf (result) action descriptor at AD row @idx - SDK-convergent
   * RESULT AD (0115; SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
-@@ -859,3 +908,7 @@
+@@ -859,5 +908,6 @@
  EXPORT_SYMBOL_GPL(fman_pcd_cc_static_get_base);
-
+ 
  #if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
  #include "tests/fman_pcd_cc_dual_key_test.c"
 +#include "tests/fman_pcd_cc_3tuple_key_test.c"
