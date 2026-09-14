@@ -29,7 +29,7 @@ static void cc_dual_key_v4(struct kunit *test)
 	u8 *buf;
 	u8 *key, *msk;
 	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
-		0x00,				  /* [0]  family V4 */
+		CC_KEY_DUAL_FAMILY_V4,		  /* [0]  family V4 */
 		0x0a, 0x00, 0x00, 0x01,		  /* [1..4]   src 10.0.0.1 */
 		0x0a, 0x00, 0x00, 0x02,		  /* [5..8]   dst 10.0.0.2 */
 		/* [9..40] v6 lanes: zero */
@@ -78,7 +78,7 @@ static void cc_dual_key_v6(struct kunit *test)
 		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
 	};
 	static const u8 expect_key[CC_KEY_SIZE_DUAL] = {
-		0x00,				 /* [0] family V6 */
+		CC_KEY_DUAL_FAMILY_V6,		 /* [0] family V6 */
 		/* [1..8] v4 lane: zero */
 		[9]  = 0x20, [10] = 0x01, [11] = 0x0d, [12] = 0xb8,
 		[24] = 0x01,			 /* src6 tail */
