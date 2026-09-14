@@ -260,10 +260,31 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
   fallback" note — no change needed there since bridge is legitimately
   dormant, not broken.
 
-- **B1 — CC DA-match builder + KUnit.** `fman_pcd_cc_bridge_key_add/remove` (host
-  shadow → `fman_pcd_cc_hw_spec` with DA leaves + `miss_fe_off`). Dormant readback
-  of a built spec (no live install). Gate: KUnit vectors for DA-only and
-  PORT_ID|DA|SA|ETYPE keys; spec byte-exact vs a golden vector.
+- **B1 — CC DA-match builder + KUnit — key-packer half landed 2026-09-14 (patches
+  0204/0205).** Narrows, but does NOT close, §8.1: patch 0202's own framing of
+  "which byte layout to target" (DA-only vs the vendor's 15-byte
+  `PORT_ID|DA|SA|ETYPE` composite) now has a real answer — live `.106` KeyGen
+  scheme 11 (EKFC `0xe4000000` = `PORT_ID|MACDST|MACSRC|ETYPE`, the vendor's real
+  L2/bridge classification scheme — 1,225,734 live packets, by far the
+  highest-traffic scheme observed) has a group-table row keysize field of 15,
+  matching the field list exactly (captured via `bin/fman-full-capture.py
+  --follow-rccb` during the same session's T-M6-T3 work, reused rather than
+  re-reading the board). **§8.1's deeper question — whether THIS project's own
+  CC comparator window matches what its KG extraction emits for a DA-bearing
+  key — is untouched by this and still needs the `hash_probe`/`fe_scaffold`
+  oracle at B2, exactly as originally scoped.** `struct fman_pcd_cc_hw_key`
+  gained `src_mac[6]`/`ethertype_be` (0204, completing B0's `dst_mac[6]`), and
+  `cc_pack_key_l2()` + `CC_KEY_SIZE_L2=15` (0205) is the field-presence-gated
+  packer, KUnit-pinned for both gate cases (DA-only, full `PORT_ID|DA|SA|ETYPE`)
+  — board-verified all-pass on `.185`. Field *order* (DA before SA before
+  ETYPE) follows this project's documentation convention, not independently
+  byte-order-verified beyond the aggregate keysize match — dormant/
+  readback-only per B1's own scope, so re-derive before B2 arms this on silicon
+  if it turns out to matter. **Still not done:** `fman_pcd_cc_bridge_key_add/
+  remove` itself (the host shadow → `fman_pcd_cc_hw_spec` assembly layer with
+  `miss_fe_off` wiring) — the packer this uses now exists, but the
+  tree-assembly function that calls it does not. That, plus §8.1's remaining
+  half and B2's silicon de-risk, are the next concrete steps.
 
 - **B2 — silicon de-risk (the decisive proof), `cc_test` harness, sacrificial
   port, cold boot.** Hand-arm a CC leaf matching a fixed destination MAC →
