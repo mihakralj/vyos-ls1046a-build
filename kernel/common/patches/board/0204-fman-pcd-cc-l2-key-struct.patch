@@ -1,0 +1,57 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2(T-M6-2 B1): add SRC_MAC/ETHERTYPE to the bridge FDB match key struct
+
+Completes struct fman_pcd_cc_hw_key's bridge FDB match-key surface:
+B0 (patch 0202) added FMAN_PCD_CC_HW_F_MAC_DST + dst_mac[6] and
+explicitly left the full byte layout as an "open silicon question."
+This adds FMAN_PCD_CC_HW_F_MAC_SRC + src_mac[6] and
+FMAN_PCD_CC_HW_F_ETHERTYPE + ethertype_be, completing the vendor
+15-byte PORT_ID|DA|SA|ETYPE composite B1's own plan section names.
+
+Resolves that open question with a board reading, not a guess: live
+.106 KeyGen scheme 11 (EKFC 0xe4000000 = PORT_ID|MACDST|MACSRC|ETYPE,
+the vendor's real L2/bridge classification scheme -- 1,225,734 live
+packets, by far the highest-traffic scheme observed) has a
+group-table row keysize field of 15, matching PORT_ID(1)+DA(6)+
+SA(6)+ETYPE(2) exactly. Captured via bin/fman-full-capture.py
+--follow-rccb during this session's T-M6-T3 work; reused here rather
+than re-reading the board.
+
+Purely additive, same as B0: no existing field moves, no existing
+packer touched, no caller sets the new presence bits, so every
+existing CC key stays byte-identical. Paired with a new
+cc_pack_key_l2() in fman_pcd_cc.c (separate commit/patch) that
+targets these fields.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GooC2zFmzRBYLikPbwekuH
+---
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -514,1 +514,10 @@
+ #define FMAN_PCD_CC_HW_F_MAC_DST	BIT(7)
++/* T-M6-2 B1: source MAC + EtherType, completing the vendor 15-byte
++ * PORT_ID|DA|SA|ETYPE bridge FDB match key. Board-confirmed 2026-09-14
++ * (live .106 KeyGen scheme 11 group-table row, keysize field = 15,
++ * matching PORT_ID(1)+DA(6)+SA(6)+ETYPE(2) exactly -- resolves the "open
++ * silicon question" B0's comment above flagged). Presence bits + byte
++ * slots only, same as B0's MAC_DST: no packer emits these yet.
++ */
++#define FMAN_PCD_CC_HW_F_MAC_SRC	BIT(8)
++#define FMAN_PCD_CC_HW_F_ETHERTYPE	BIT(9)
+@@ -543,3 +554,10 @@
+ * @dst_mac:      L2 destination MAC (6 bytes, network order).  Valid only
+ *                when FMAN_PCD_CC_HW_F_MAC_DST is set.  T-M6-2 bridge FDB
+ *                match key; dormant until a bridge key packer exists (B1).
++ * @src_mac:      L2 source MAC (6 bytes, network order).  Valid only when
++ *                FMAN_PCD_CC_HW_F_MAC_SRC is set.  T-M6-2 bridge FDB match
++ *                key, completes the PORT_ID|DA|SA|ETYPE composite with
++ *                @dst_mac and @ethertype_be.
++ * @ethertype_be: EtherType (2 bytes, BE).  Valid only when
++ *                FMAN_PCD_CC_HW_F_ETHERTYPE is set.  T-M6-2 bridge FDB
++ *                match key.
+@@ -571,1 +585,3 @@
+ 	u8  dst_mac[6];
++	u8  src_mac[6];
++	u16 ethertype_be;
