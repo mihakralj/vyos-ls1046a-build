@@ -2,10 +2,26 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS — B0 DONE (2026-09-10), B1 DONE (2026-09-15), B2 harness
-> plumbing DONE (2026-09-15, CI verification pending) — live-arming
-> experiment on a sacrificial port NOT YET RUN, see §6 B2 for exactly
-> what's left.** Patch `0204-fman-pcd-cc-bridge-key-src-mac.patch`
+> **STATUS — B0 DONE (2026-09-10), B1 DONE (2026-09-15), B2 §8.1 oracle
+> question RESOLVED 2026-09-15 on real silicon (`.185`/eth1, `probe3`
+> mode 2): the 15-byte `PORT_ID|DA|SA|ETYPE` layout and field order are
+> CONFIRMED correct against a live KeyGen-extracted frame — with one
+> real, now-fixed defect: byte 0 (PORT_ID) extracts as the REAL hardware
+> port id on this scheme (`0x0d` for eth1), not the `0x00` every other
+> CC key type on this ucode has consistently shown; `cc_pack_key_l2()`
+> was hardcoding `0x00` there (patch `0208`, fixed). DST_MAC and
+> ETHERTYPE landed at their exact expected byte positions with
+> unambiguous real-world values (`33:33:00:00:00:fb` = the real
+> `ff02::fb` multicast DST_MAC; `0x86dd` = the real IPv6 EtherType, in
+> this packer's own byte order) — ruling out a capture-alignment misread
+> as the explanation, so the PORT_ID finding is a genuine silicon fact,
+> not an artifact. B2's own full silicon de-risk proof (hardware
+> forwarding + CC-miss→FE coexistence under sustained traffic) is still
+> NOT run — this closes the *narrower* §8.1 comparator-window question
+> the plan asked to resolve before that full proof, using the
+> `probe3`/`ricp_widen` oracle tooling (F-240/F-241, extended this
+> session with mode 2 / F-247+F-248) exactly as the plan's own §8.1
+> prescribed. See §6 B2 and §8 for what's left. Patch `0204-fman-pcd-cc-bridge-key-src-mac.patch`
 > adds `FMAN_PCD_CC_HW_F_MAC_SRC`/`src_mac[6]`, completing the vendor
 > 15-byte `PORT_ID|DA|SA|ETYPE` composite (reusing the already-present
 > `FMAN_PCD_CC_HW_F_ETHERTYPE`/`ethertype_be` — a first attempt at this
@@ -383,13 +399,22 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
 
 ## 8. Unresolved silicon questions (resolve read-only before arming)
 
-1. **CC comparator window for a DA-bearing key.** The project has never directly
-   observed what the CC CONT_LOOKUP comparator reads for *any* key (open even for
-   the IP 5-tuple, `specs/cc-comparator-compare-window-hypothesis.md`). Whether a
-   DA-only (6 B) or PORT_ID|DA|SA|ETYPE (15 B) window matches the KG-emitted
-   composite is unverified. Resolve via the `hash_probe`/`fe_scaffold` oracle
-   before B2 arming. The vendor's live 15-byte `cdx_ethernet_cc` is strong prior
-   evidence the layout works.
+1. **CC comparator window for a DA-bearing key — RESOLVED 2026-09-15.** Live
+   `probe3` mode 2 capture on `.185`/eth1 (widened-RICP, `bin/kernel-fixups/
+   F_240.py`/`F_241.py` + this session's mode-2 extension, F-247/F-248) directly
+   observed the KeyGen-extracted composite for the armed L2 scheme
+   (EKFC `0xe4000000`) against a real live frame. DST_MAC and ETHERTYPE landed
+   at their exact expected byte positions with unambiguous real-world values
+   (`33:33:00:00:00:fb` = the real `ff02::fb` multicast DST_MAC seen later in
+   the same capture; `0x86dd` = the real IPv6 EtherType, matching this
+   packer's own byte order) — confirming the 15-byte `PORT_ID|DA|SA|ETYPE`
+   layout and field order are correct, not just byte-perfect against a guess.
+   One real defect found and fixed (patch `0208`): PORT_ID (byte 0) extracts
+   as the REAL hardware port id (`0x0d` on eth1) on this scheme, not the
+   `0x00` every other CC key type on this ucode has shown — `cc_pack_key_l2()`
+   was hardcoding `0x00`. The vendor's live 15-byte `cdx_ethernet_cc` was
+   strong prior evidence the layout works; this is now direct, first-party
+   confirmation, not just precedent.
 2. **DA-match CC + routed ehash coexistence on one live port via CC-miss→FE.**
    Proven for VLAN CC keys (R4c); a **DA-keyed** CC leaf coexisting is a new (small)
    variant — B2 is exactly this proof. Expected to pass since `miss_fe_off` is
