@@ -1,0 +1,121 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2(T-M6-2 B1): add bridge FDB CC key struct field (src_mac)
+
+Completes struct fman_pcd_cc_hw_key's bridge FDB match-key surface: B0
+(patch 0202) added FMAN_PCD_CC_HW_F_MAC_DST + dst_mac[6] and explicitly
+left the full byte layout as an "open silicon question". This adds
+FMAN_PCD_CC_HW_F_MAC_SRC + src_mac[6], completing the vendor 15-byte
+PORT_ID|DA|SA|ETYPE composite B1's own plan section names -- reusing
+the ALREADY-PRESENT FMAN_PCD_CC_HW_F_ETHERTYPE/ethertype_be fields
+(added earlier for other CC keys) rather than duplicating them, since
+this session's first attempt at this same patch (reverted b3e5a749,
+2026-09-14) mistakenly tried to add a second ethertype field/bit that
+already existed -- caught this time by reading the TRUE current header
+content out of the kernel git cache instead of working from fragments
+of a different patch's diff.
+
+Resolves the open question with a board reading, not a guess: live
+.106 KeyGen scheme 11 (EKFC 0xe4000000 = PORT_ID|MACDST|MACSRC|ETYPE,
+the vendor's real L2/bridge classification scheme -- 1,225,734 live
+packets, by far the highest-traffic scheme observed) has a group-table
+row keysize field of 15, matching PORT_ID(1)+DA(6)+SA(6)+ETYPE(2)
+exactly. Captured via bin/fman-full-capture.py --follow-rccb during an
+earlier session's T-M6-T3 work; reused here rather than re-reading the
+board.
+
+Also adds fman_pcd_cc_bridge_key_add()/_remove() declarations (defined
+in the paired 0205 patch) -- the B1 host-shadow-to-spec builder this
+struct extension exists to serve.
+
+Purely additive: no existing field moves, no existing packer touched,
+no caller sets the new presence bit, so every existing CC key stays
+byte-identical.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 1170b52..db279b2 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -519,6 +519,19 @@ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+  * to target instead of also needing a header patch.
+  */
+ #define FMAN_PCD_CC_HW_F_MAC_DST	BIT(7)
++/* T-M6-2 (2026-09-15, B1): source MAC, completing the vendor 15-byte
++ * PORT_ID|DA|SA|ETYPE bridge FDB match key alongside the existing
++ * FMAN_PCD_CC_HW_F_MAC_DST (B0) and FMAN_PCD_CC_HW_F_ETHERTYPE (already
++ * present above, reused as-is -- no new ethertype field needed). Board-
++ * confirmed 2026-09-14: live .106 KeyGen scheme 11 (EKFC 0xe4000000 =
++ * PORT_ID|MACDST|MACSRC|ETYPE, the vendor's own L2/bridge classification
++ * scheme, by far the highest live-traffic scheme observed) has a
++ * group-table row keysize field of 15, matching PORT_ID(1)+DA(6)+SA(6)+
++ * ETYPE(2) exactly -- resolves the "open silicon question" B0's comment
++ * above flagged. Presence bit + byte slot only, same as B0's MAC_DST: no
++ * packer emits this yet.
++ */
++#define FMAN_PCD_CC_HW_F_MAC_SRC	BIT(8)
+ 
+ /**
+  * struct fman_pcd_cc_hw_key - one normalised CC match key (FMan BE layout).
+@@ -540,6 +553,10 @@ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+  * @dst_mac:      L2 destination MAC (6 bytes, network order).  Valid only
+  *                when FMAN_PCD_CC_HW_F_MAC_DST is set.  T-M6-2 bridge FDB
+  *                match key; dormant until a bridge key packer exists (B1).
++ * @src_mac:      L2 source MAC (6 bytes, network order).  Valid only when
++ *                FMAN_PCD_CC_HW_F_MAC_SRC is set.  T-M6-2 bridge FDB match
++ *                key, completes the PORT_ID|DA|SA|ETYPE composite with
++ *                @dst_mac and @ethertype_be.
+  * @target_qband: qband to steer matching frames to (validated by caller);
+  *                informational when @target_fqid is 0 (fall-through)
+  * @target_fqid:  target frame-queue id for matching frames.  Non-zero =
+@@ -566,6 +583,7 @@ struct fman_pcd_cc_hw_key {
+ 	u16 src_port_be;
+ 	u16 dst_port_be;
+ 	u8  dst_mac[6];
++	u8  src_mac[6];
+ 	u16 target_qband;
+ 	u32 target_fqid;
+ 	u32 hm_handle;
+@@ -672,6 +690,42 @@ int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
+  */
+ void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
+ 
++/**
++ * fman_pcd_cc_bridge_key_add() - add/update a bridge FDB DA-match leaf.
++ * @spec:         caller-owned per-port shadow tree (host memory only)
++ * @dst_mac:      destination MAC of the FDB entry (6 bytes, network order)
++ * @target_fqid:  egress port's TX FQ to enqueue a DA match to
++ * @miss_fe_off:  FE_ENTER AD MURAM offset for @spec's miss row (see
++ *                struct fman_pcd_cc_hw_spec.miss_fe_off)
++ *
++ * T-M6-2 B1: host-side only. Builds/updates @spec in memory; does not
++ * touch MURAM or hardware. A subsequent fman_pcd_cc_static_install(pcd,
++ * port_id, spec) (caller's responsibility, not this function's) is what
++ * actually programs silicon. Idempotent: an existing entry for @dst_mac
++ * has its @target_fqid refreshed in place rather than duplicated.
++ *
++ * Returns 0 on success, -EINVAL on bad arguments, -ENOSPC if @spec is full
++ * (FMAN_PCD_CC_HW_MAX_KEYS).
++ */
++int fman_pcd_cc_bridge_key_add(struct fman_pcd_cc_hw_spec *spec,
++			       const u8 dst_mac[6], u32 target_fqid,
++			       u32 miss_fe_off);
++
++/**
++ * fman_pcd_cc_bridge_key_remove() - remove a bridge FDB DA-match leaf.
++ * @spec:    caller-owned per-port shadow tree (host memory only)
++ * @dst_mac: destination MAC of the FDB entry to remove
++ *
++ * T-M6-2 B1: host-side only, mirrors fman_pcd_cc_bridge_key_add(). Removes
++ * the matching entry and compacts @spec->keys[] so the valid range stays
++ * @spec->keys[0 .. num_keys). Does not touch MURAM or hardware.
++ *
++ * Returns 0 on success, -EINVAL on bad arguments, -ENOENT if @dst_mac was
++ * not present.
++ */
++int fman_pcd_cc_bridge_key_remove(struct fman_pcd_cc_hw_spec *spec,
++				  const u8 dst_mac[6]);
++
+ /* R4c: MURAM offset of the engaged FE_ENTER root AD (0 if not engaged). */
+ unsigned long fman_pcd_fe_root_get_offset(struct fman *fm);
+ 

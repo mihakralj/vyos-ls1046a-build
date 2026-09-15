@@ -2,7 +2,31 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS — B0 DONE (2026-09-10), B1 NEXT.** `ask_bridge.c` now registers
+> **STATUS — B0 DONE (2026-09-10), B1 DONE (2026-09-15, CI verification
+> pending), B2 NEXT.** Patch `0204-fman-pcd-cc-bridge-key-src-mac.patch`
+> adds `FMAN_PCD_CC_HW_F_MAC_SRC`/`src_mac[6]`, completing the vendor
+> 15-byte `PORT_ID|DA|SA|ETYPE` composite (reusing the already-present
+> `FMAN_PCD_CC_HW_F_ETHERTYPE`/`ethertype_be` — a first attempt at this
+> same patch, reverted `b3e5a749` on 2026-09-14, mistakenly tried to add a
+> duplicate ethertype field by working from diff fragments instead of the
+> true current header). Patch `0205-fman-pcd-cc-bridge-key-l2-builder.patch`
+> adds `cc_pack_key_l2()` (the 15-byte packer, `static __maybe_unused`,
+> silicon-confirmed byte layout) and the actual B1 deliverable,
+> `fman_pcd_cc_bridge_key_add()`/`fman_pcd_cc_bridge_key_remove()` — a
+> host-memory-only shadow builder (no MURAM/hardware I/O) that
+> adds/updates/removes DA-match leaves in a caller-owned
+> `struct fman_pcd_cc_hw_spec` and maintains `miss_fe_off`, non-static and
+> `EXPORT_SYMBOL_GPL`'d for B3's future cross-module (`ask.ko`) call. Two
+> new KUnit suites (`fman_pcd_cc_l2_key`, `fman_pcd_cc_bridge_shadow`) pin
+> both the packer's byte-exact layout (DA-only and full `PORT_ID|DA|SA|
+> ETYPE` vectors, matching B1's own stated gate) and the shadow builder's
+> add/idempotent-update/remove-with-compaction/bad-argument behaviour.
+> Verified both patches apply clean (`git apply --3way`, zero conflicts)
+> against the real current kernel tree (the CI kernel git cache, not
+> fragments) before landing — the exact discipline the reverted first
+> attempt skipped. Dormant: not wired into `ask_bridge.c`'s FDB workqueue
+> (still B0's log-only stub), no install path, no live traffic path.
+> **B0 status (superseded above, kept for provenance):**
 > the switchdev FDB/blocking/netdevice notifier chains and observes FDB
 > events (coalesced + bounded queue, §12 debounce lesson applied from the
 > start), gated by a new `bridge_offload` module param (default off) that
@@ -260,10 +284,15 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
   fallback" note — no change needed there since bridge is legitimately
   dormant, not broken.
 
-- **B1 — CC DA-match builder + KUnit.** `fman_pcd_cc_bridge_key_add/remove` (host
-  shadow → `fman_pcd_cc_hw_spec` with DA leaves + `miss_fe_off`). Dormant readback
-  of a built spec (no live install). Gate: KUnit vectors for DA-only and
-  PORT_ID|DA|SA|ETYPE keys; spec byte-exact vs a golden vector.
+- **B1 — DONE 2026-09-15 (CI verification pending) — CC DA-match builder + KUnit.**
+  `fman_pcd_cc_bridge_key_add/remove` (patches `0204`/`0205`, host shadow →
+  `fman_pcd_cc_hw_spec` with DA leaves + `miss_fe_off`) plus `cc_pack_key_l2()`
+  (the 15-byte packer). Dormant readback of a built spec (no live install, not
+  wired into `ask_bridge.c`). Gate met: KUnit vectors for DA-only and
+  PORT_ID|DA|SA|ETYPE keys (`fman_pcd_cc_l2_key`) plus the shadow builder's
+  add/update/remove/compaction behaviour (`fman_pcd_cc_bridge_shadow`); both
+  patches verified `git apply --3way` clean against the real current kernel
+  tree before landing.
 
 - **B2 — silicon de-risk (the decisive proof), `cc_test` harness, sacrificial
   port, cold boot.** Hand-arm a CC leaf matching a fixed destination MAC →

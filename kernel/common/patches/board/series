@@ -341,3 +341,6 @@
 0202-fman-pcd-cc-bridge-mac-dst-key-dormant.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0203-fman-pcd-cc-3tuple-key.patch
+0204-fman-pcd-cc-bridge-key-src-mac.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0205-fman-pcd-cc-bridge-key-l2-builder.patch
