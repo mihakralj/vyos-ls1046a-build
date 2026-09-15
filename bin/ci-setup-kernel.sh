@@ -2305,6 +2305,22 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     echo "### fman_pcd_cc_test.c: F-249 cc_test_install_l2 miss->FE_ENTER coexistence (T-M6-2 B2)"
 fi
 
+# F-250 (T-M6-2 B2, 2026-09-15/16): add cc_test_install_l2fwd() -- a §8.2b
+# hypothesis test. FMan's own QMI counters prove install_l2's bare (no
+# NADEN/HMTD) enqueue-only AD genuinely succeeds (fmqm_etfc tracks sent
+# frames almost exactly) but the frames are never dequeued (fmqm_dtfc
+# barely moves), no hardware error flagged. Re-reading this project's own
+# prior silicon proofs found every previously-proven CROSS-PORT hardware
+# forward went through NADEN+HMTD (the "24M+ frames" bare-enqueue
+# precedent was ethtool-ntuple RX-queue steering, same-port/CPU-consumed,
+# not a genuine cross-port EGRESS forward). install_l2fwd chains the same
+# bridge_l2 key through a minimal IPV4_FORWARD HMTD via NADEN to test
+# whether that's the missing piece. Must run after F-248/0207.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_250.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-250 cc_test_install_l2fwd NADEN+HMTD hypothesis test (T-M6-2 B2)"
+fi
+
 # F-247 (T-M6-2 B2, 2026-09-15): extend probe3 (F-241) with mode 2 for the
 # bridge FDB L2 composite (PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2()
 # (F-248, corrected from the original patch 0206/0207 attempt) the same way
