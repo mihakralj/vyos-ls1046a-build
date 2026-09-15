@@ -2276,6 +2276,18 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     echo "### fman_pcd_cc_test.c: F-246 global soft-parser execution-unit enable (T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-247 (T-M6-2 B2, 2026-09-15): extend probe3 (F-241) with mode 2 for the
+# bridge FDB L2 composite (PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2()
+# (patch 0206/0207) the same way modes 0/1 reuse cc_test_install_v6()/
+# cc_test_install_v6pid(). Answers plan §8.1's read-only comparator-window
+# question for the L2 case. Must run after F-241 (probe3 must already
+# exist) and after the plain-tracked fman_pcd_cc_test.c copy-in (which
+# carries cc_test_install_l2() as of patch 0206).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_247.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-247 probe3 mode 2 bridge L2 comparator capture (T-M6-2 B2)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
