@@ -2,8 +2,10 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS — B0 DONE (2026-09-10), B1 DONE (2026-09-15, CI verification
-> pending), B2 NEXT.** Patch `0204-fman-pcd-cc-bridge-key-src-mac.patch`
+> **STATUS — B0 DONE (2026-09-10), B1 DONE (2026-09-15), B2 harness
+> plumbing DONE (2026-09-15, CI verification pending) — live-arming
+> experiment on a sacrificial port NOT YET RUN, see §6 B2 for exactly
+> what's left.** Patch `0204-fman-pcd-cc-bridge-key-src-mac.patch`
 > adds `FMAN_PCD_CC_HW_F_MAC_SRC`/`src_mac[6]`, completing the vendor
 > 15-byte `PORT_ID|DA|SA|ETYPE` composite (reusing the already-present
 > `FMAN_PCD_CC_HW_F_ETHERTYPE`/`ethertype_be` — a first attempt at this
@@ -304,6 +306,24 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
   path (CC miss → FE). This is the single new silicon question (§8.2/§8.3);
   everything downstream is gated on it. Read-only comparator-window check first
   (`hash_probe`/`fe_scaffold` oracle) before arming.
+  **Harness plumbing DONE 2026-09-15 (CI verification pending), live-arming
+  experiment NOT YET RUN.** Patch `0206-fman-pcd-cc-bridge-l2-install-dispatch.patch`
+  wires `cc_pack_key_l2()` into `fman_pcd_cc_static_install()` via a new
+  `struct fman_pcd_cc_hw_spec.bridge_l2` flag (mirrors the existing
+  `dual_lane`/`dual_lane_pid` dispatch pattern; purely additive, every
+  existing tree stays byte-identical) and adds an `install_l2 <port>
+  <dst_mac> <target_fqid>` command to the `cc_test` debugfs harness
+  (`fman_pcd_cc_test.c`), auto-filling `miss_fe_off` from
+  `fman_pcd_fe_root_get_offset()` so a port with FE_ENTER already engaged
+  gets the real coexistence precondition for free. Still fully dormant: no
+  KeyGen scheme-attach exists for L2 extraction anywhere in-tree, so
+  nothing reaches an L2 leaf without an explicit debugfs write on a live
+  board. **Not yet done:** the §8.1 read-only comparator-window oracle
+  check, choosing/confirming the sacrificial port, arming the port's
+  KeyGen scheme for L2 extraction (no code path for this exists yet —
+  needs its own small patch, analogous to
+  `fman_pcd_kg_port_attach_cc_dual_ekfc()` for the dual-lane case), and
+  the actual cold-boot silicon experiment itself.
 
 - **B3 — `ask.ko` production switchdev wiring (gated on B2 PASS).** Replace the
   `ask_bridge.c` stub: FDB workqueue installs/removes DA leaves via the B1

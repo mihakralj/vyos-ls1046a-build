@@ -344,3 +344,5 @@
 0204-fman-pcd-cc-bridge-key-src-mac.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0205-fman-pcd-cc-bridge-key-l2-builder.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0206-fman-pcd-cc-bridge-l2-install-dispatch.patch
