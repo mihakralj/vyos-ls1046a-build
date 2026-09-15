@@ -1,0 +1,85 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2(T-M6-2 B2): cc_pack_key_l2() must write the real PORT_ID
+
+Board finding from the B2 read-only oracle capture (probe3 mode 2,
+plan §8.1), run 2026-09-15 on .185/eth1: a live frame's KeyGen-extracted
+L2 composite showed byte 0 = 0x0d -- eth1's REAL hardware port id, not
+the hardcoded 0x00 cc_pack_key_l2() currently writes there. Every other
+CC key type in this file (cc_pack_key()/_v6()/_dual()/_3tuple()) has
+consistently shown PORT_ID extracting as a deterministic 0x00 on this
+ucode; the L2/bridge scheme is different.
+
+Capture confidence: DST_MAC and ETHERTYPE landed at their exact
+expected byte positions in the SAME capture with unambiguous real-world
+values -- DST_MAC 33:33:00:00:00:fb is exactly the IPv6 multicast MAC
+for ff02::fb (the mDNS group visible later in the same capture as
+plaintext IPv6/mDNS payload), and ETHERTYPE 0x86dd is the real IPv6
+EtherType, in the exact byte order this packer's own convention uses.
+This rules out a capture-alignment misread as the explanation for the
+PORT_ID byte -- the surrounding bytes are independently, unambiguously
+correct, so byte 0 being 0x0d is a genuine silicon finding, not an
+artifact.
+
+Writing a hardcoded 0x00 (the original, untested B1 guess -- B1 was
+explicit that "not independently byte-order-verified... since B1 is
+dormant") would have produced a key that could never match live
+traffic on any port other than a hypothetical port-0: exactly the
+"byte-perfect against the wrong model" trap
+specs/cc-comparator-compare-window-hypothesis.md warns about, and
+which this project has been burned by before (the ask20-precedent
+cited in that same doc).
+
+Fix: cc_pack_key_l2() takes the arming port's hw_port_id as a new first
+parameter and writes it to key[0] instead of leaving it implicitly zero
+via memset. The one caller (fman_pcd_cc_static_install()'s per-key
+dispatch loop) already has port_id in scope and passes it through.
+
+Board-verified: re-armed the SAME oracle capture after this fix landed
+-- see session notes for the confirming probe3/install_l2 round-trip.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -606,14 +606,32 @@ static void cc_pack_key_l2(void __iomem *match, u16 idx,
+-static void cc_pack_key_l2(void __iomem *match, u16 idx,
+-					  const struct fman_pcd_cc_hw_key *k)
++static void cc_pack_key_l2(u8 hw_port_id, void __iomem *match, u16 idx,
++			  const struct fman_pcd_cc_hw_key *k)
+ {
+ 	u8 key[CC_KEY_SIZE_L2];
+ 	u8 msk[CC_KEY_SIZE_L2];
+ 	u8 *row;
+ 
+ 	memset(key, 0, sizeof(key));
+ 	memset(msk, 0, sizeof(msk));
+ 
+-	/* byte 0: PORT_ID, deterministically 0x00 on this ucode. */
++	/* byte 0: PORT_ID. Unlike every other CC key type in this file
++	 * (cc_pack_key()/_v6()/_dual()/_3tuple(), all deterministically
++	 * 0x00 on this ucode), the L2/bridge scheme extracts the REAL
++	 * hardware port id here -- board-confirmed 2026-09-15 via the B2
++	 * read-only oracle capture (probe3 mode 2, plan §8.1): a live
++	 * frame's KeyGen-extracted composite showed byte 0 = 0x0d, eth1's
++	 * real hw_port_id, not zero. DST_MAC/ETHERTYPE landed at their
++	 * exact expected positions in the same capture (33:33:00:00:00:fb
++	 * = the real ff02::fb multicast DST_MAC; 0x86dd = the real IPv6
++	 * ethertype, byte order matching this packer's own convention),
++	 * confirming the capture's byte alignment and, by construction,
++	 * this finding. Writing a hardcoded 0x00 here (the original,
++	 * untested B1 guess) would have produced a key that could never
++	 * match live traffic on any port other than a hypothetical
++	 * port-0 -- exactly the "byte-perfect against the wrong model"
++	 * trap specs/cc-comparator-compare-window-hypothesis.md warns
++	 * about.
++	 */
++	key[0] = hw_port_id;
+ 	msk[0] = 0xff;
+ 
+ 	if (k->present & FMAN_PCD_CC_HW_F_MAC_DST) {
+@@ -953,3 +971,3 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 		if (hw->bridge_l2)
+-			cc_pack_key_l2(t->match, i, &hw->keys[i]);
++			cc_pack_key_l2(port_id, t->match, i, &hw->keys[i]);
+ 		else if (hw->dual_lane && hw->dual_lane_pid)
