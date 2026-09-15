@@ -1416,8 +1416,30 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
 /*
  * Map an ASK flow egress netdev ifindex to its TX QMan FQID (queue 0).
  * Returns -ENODEV for a non-DPAA / unknown ifindex.
+ *
+ * CR-013 (2026-09-15): @allow_alloc gates the COLD-CACHE path
+ * (dpaa_alloc_offload_tx_fq(), which takes rtnl_lock()) separately from
+ * the cache-hit fast path (no locking beyond what the caller already
+ * holds). CR-012 fixed the *prewarm* call site's own rtnl_lock() but left
+ * this function's cache-miss fallback still reachable from the flow-insert
+ * hot path (ask_hw_flow_preflight()/ask_hw_flow_insert(), both called
+ * under &flowtable->flow_block_lock) for any egress interface the prewarm
+ * pass could never have warmed -- a non-DPAA netdev (e.g. a veth or
+ * tunnel) that dpaa_get_rx_fman_port() can't map to a hw_port_id, or any
+ * DPAA port whose own engage-time prewarm hasn't run yet. Found live via
+ * PROVE_LOCKING during T-M6-2 B2 testing: a synthetic flow's egress
+ * resolved to a veth ifindex, taking the exact same rtnl_lock()-under-
+ * flow_block_lock path CR-012 already closed for the prewarm helper.
+ *
+ * Callers from the hot path MUST pass allow_alloc=false: a cache miss
+ * fails closed (-ENODEV, keeping the flow in software) instead of ever
+ * calling dpaa_alloc_offload_tx_fq(). This is the same FAIL-CLOSED
+ * philosophy already used a few lines below for allocation failure --
+ * extended to cover "cannot safely attempt allocation from here" too.
+ * Only ask_hw_prewarm_egress_fq() (genuinely safe process context, no
+ * flow_block_lock held) passes allow_alloc=true.
  */
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_inst;
 	struct net_device *dev;
@@ -1452,6 +1474,15 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 		*fqid = h->noconf_tx[slot].fqid;
 		dev_put(dev);
 		return 0;
+	}
+
+	/* CR-013: cache miss from an unsafe (hot-path) caller -- do not risk
+	 * dpaa_alloc_offload_tx_fq()'s rtnl_lock() here. Fail closed; the flow
+	 * stays in software. A later engage's prewarm (or a retry once this
+	 * port's own prewarm has run) covers it going forward. */
+	if (!allow_alloc) {
+		dev_put(dev);
+		return -ENODEV;
 	}
 
 	rc = dpaa_alloc_offload_tx_fq(phys, fqid);
@@ -1516,9 +1547,13 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
  * genuinely-safe process context: the genl ASK_CMD_ENGAGE handler and the
  * debugfs engage write, both called directly, never from inside
  * ask_hw_offload_engage()/ask_hw_port_bind(). Best-effort either way: if
- * the port's netdev can't be found or the resolve fails,
- * ask_hw_resolve_oif_fqid()'s existing lazy path still covers it on the
- * first real flow install for that port.
+ * the port's netdev can't be found or the resolve fails here, the port's
+ * cache slot stays cold. Per CR-013, the hot path no longer has a lazy
+ * fallback for that case -- ask_hw_flow_preflight()/ask_hw_flow_insert()
+ * call ask_hw_resolve_oif_fqid() with allow_alloc=false and fail closed
+ * (stay in software) on a cache miss, rather than risking
+ * dpaa_alloc_offload_tx_fq()'s rtnl_lock() from under flow_block_lock.
+ * A cold slot self-heals on the port's next successful engage/prewarm.
  *
  * Iterates under rtnl_lock() (matching how dpaa_get_rx_fman_port() is
  * called everywhere else in this file -- via dev_get_by_index(), never
@@ -1544,7 +1579,7 @@ void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 	rtnl_unlock();
 
 	if (ifindex)
-		ask_hw_resolve_oif_fqid(ifindex, &fqid);
+		ask_hw_resolve_oif_fqid(ifindex, &fqid, true);
 }
 
 int ask_hw_flow_preflight(const struct ask_flow_key *key,
@@ -1639,8 +1674,10 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	    is_zero_ether_addr(key->egress_mac))
 		return -EAGAIN;
 
-	/* Egress forward FQ must exist before we publish. */
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	/* Egress forward FQ must exist before we publish. CR-013: this runs
+	 * in the flow-insert hot path under flow_block_lock -- never allow
+	 * the cold-cache allocation here. */
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false);
 	if (rc)
 		return rc;
 
@@ -1696,7 +1733,9 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 	    is_zero_ether_addr(key->egress_mac))
 		return -EAGAIN;
 
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	/* CR-013: same hot-path constraint as ask_hw_flow_preflight() above --
+	 * this runs under flow_block_lock, never allow the cold-cache alloc. */
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false);
 	if (rc)
 		return rc;
 
