@@ -2294,6 +2294,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     echo "### fman_pcd_cc_test.c: F-248 cc_test_install_l2 bridge L2 install variant (T-M6-2 B2)"
 fi
 
+# F-249 (T-M6-2 B2, 2026-09-15): wire cc_test_install_l2() (F-248) to point
+# its CC-miss row at the live FE_ENTER root (fman_pcd_fe_root_get_offset())
+# instead of always leaving miss_fe_off 0. Byte-identical when nothing has
+# ASK ehash engaged yet; answers plan §8.2 (does a DA-keyed CC leaf coexist
+# with ehash on the same port via CC-miss->FE_ENTER, as already proven for
+# VLAN CC keys, R4c). Must run after F-248.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_249.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-249 cc_test_install_l2 miss->FE_ENTER coexistence (T-M6-2 B2)"
+fi
+
 # F-247 (T-M6-2 B2, 2026-09-15): extend probe3 (F-241) with mode 2 for the
 # bridge FDB L2 composite (PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2()
 # (F-248, corrected from the original patch 0206/0207 attempt) the same way
