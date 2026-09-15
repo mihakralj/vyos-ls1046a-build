@@ -2,66 +2,76 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS UPDATE 2026-09-15 (later same day) — B2's full silicon de-risk
-> proof (§8.2) attempted on real hardware. Result: SPLIT.**
-> **§8.2a (CC-miss→FE_ENTER coexistence with ASK ehash): PASSED.** Built a
-> genuine two-port transit topology (`.185` eth1↔eth1 and eth2↔eth2 wired
-> directly to a second real board, `.106`; forced-transit via netns + an
-> ingress-keyed policy route, mirroring `bin/verify-106-offload.sh`'s
-> already-proven pattern, confirmed 3-hop via `traceroute`) and armed the
-> B1/B2 CC L2 DA-match tree on eth1 with the F-249 `miss_fe_off` auto-wire
-> live. A fresh routed TCP/ICMP flow through eth1 completed cleanly with
-> the CC tree grafted on (`ping`: 0% loss, correct TTL; `iperf3`: ~320
-> Mbit/s, comparable to the pre-CC baseline) — CC-miss traffic correctly
-> continues into the ehash path exactly as before the graft, the *same*
-> coexistence model VLAN R4c already proved for VLAN CC keys, now also
-> confirmed for a DA-keyed CC leaf.
-> **§8.2b (CC-hit → CPU-bypassed hardware forward to a fixed DA): NOT
-> CONFIRMED — open finding, not root-caused.** Sustained bursts of
-> real Ethernet frames addressed to a fixed test DA, sent from `.106`'s
-> eth1, never reached the target egress FQID on `.185`'s eth2 — every
-> frame fell through to `.185`'s own kernel RX path on eth1 instead of
-> being CPU-bypass-forwarded. One real test-setup bug was found and fixed
-> along the way (eth1 needed `promisc on` — a bridge port's MAC hardware
-> silently drops frames addressed to a MAC it doesn't own unless
-> promiscuous, which is normal/expected and mirrors why every Linux
-> bridge port goes promiscuous on join) — after that fix, `probe3` mode 2
-> confirmed the KeyGen extraction is still byte-perfect against the same
-> live frame (`PORT_ID`/`DST_MAC`/`SRC_MAC`/`ETHERTYPE` all exactly
-> correct, independently re-confirmed against `cc_test`'s own match-table
-> readback). So the gap is specifically between "the comparator sees the
-> right bytes" (confirmed, twice) and "the comparator actually fires a
-> HIT on the *persistent* tree and enqueues to `target_fqid`" (not
-> observed). `probe3`'s own atomic capture only proves KeyGen extraction,
-> not comparator-match-and-forward — this may be exactly the class of gap
-> that distinction was always going to eventually expose. **Root cause
-> unknown.** Candidate next steps for whoever picks this up: compare a
-> known-working `install_v6`/`install_vlan` persistent-forward test on
-> this same image to isolate whether the regression is generic (this
-> fresh image/cold-boot state) or specific to the new L2/bridge dispatch
-> path; check whether ASK's own production ehash engagement on the same
-> port re-clobbers the CC-tree's KG-scheme attach after `install_l2`
-> returns (both features currently fight over the same single per-port
-> `FMBM_RCCB`/`KGSE_MODE` slot — this plan's own §5.1 already flags them
-> as mutually exclusive per port); dump the live AD-table content (not
-> just the match table) via a new debugfs read node to confirm
-> `target_fqid`/`hw_id` actually landed as requested in the hardware
-> structure, not just in `cc_test`'s software-side echo of what it asked
-> for.
-> **Bonus finding, unrelated to bridge/CC work:** a second, separate
-> lockdep circular-locking hazard was found live during this session —
-> tracked as **CR-013** in `plans/ASK2-MASTER-PLAN.md`'s CR table. Not a
-> bridge-offload bug; noted here because it was found *while* testing
-> this feature. All test-only config (addressing, ASK offload,
-> firewall flowtable membership, promiscuous mode, netns/veth) was
-> cleanly reverted on both `.185` and `.106`, and `.185` is back on the
-> known-stable production image, `ask-check` 36/36.
-> **Net effect on this plan: B2 is still OPEN, now for a narrower and
-> better-characterized reason** (byte-level extraction proven correct
-> twice; the unresolved question is specifically about comparator-hit
-> and/or KG-scheme-attach persistence). B3 (`ask.ko` production
-> switchdev wiring) remains explicitly gated on B2 PASS and must not
-> start until this is root-caused and fixed.
+> **STATUS UPDATE 2026-09-15, third pass — decisive new evidence for §8.2b
+> via FMan's hardware counter/error-capture debugfs
+> (`/sys/kernel/debug/fman_pcd/0/dcsr/{qmi_err,kg_err,bmi_err}`), not
+> previously used by this project for this purpose.** Sent 500 raw
+> IPv4/UDP frames from `.106` matching the armed CC tree's DA, tracking
+> `fmqm_etfc` (QMI enqueue total frame count, FMan-wide) and `fmqm_dtfc`
+> (QMI dequeue total frame count) tightly before/after, with a
+> matched-duration idle-window baseline just before to subtract
+> background production-traffic noise (~35.5 etfc/s, ~8.2 dtfc/s at the
+> time). Over the 2.92 s send window: `fmqm_etfc` rose by 586 against an
+> expected background-only ~104 — **excess ~480–500, matching the 500
+> sent frames almost exactly.** `fmqm_dtfc` rose by only 28 against an
+> expected background-only ~24 — **excess ~4, essentially nothing.**
+> **Conclusion: the CC comparator is matching and the AD's enqueue action
+> is genuinely succeeding — `cc_pack_key_l2()`, `fman_pcd_kg_port_attach_cc_l2()`,
+> and the AD write are all vindicated — but the enqueued frames are never
+> dequeued/transmitted. They get silently stuck in the target FQID's
+> hardware queue.** No error-status register went non-zero anywhere
+> (`fmqm_eie`, `fmkg_eer`, `fmbm_ievr` all stayed `0x00000000`) — not a
+> hardware-flagged fault, a silent "enqueued but never serviced" state.
+> Checked for resource exhaustion (`bpool` counters, `muram_budget`): no
+> leak signs, board stayed healthy throughout (`ask-check` only showed
+> the expected cosmetic FAILs for a test port not being in `ask-check`'s
+> hardcoded port list / not being in the flowtable — nothing alarming). A
+> subsequent full reboot cleared the stuck frames, confirming they were
+> genuinely parked in volatile QMan hardware state, not a persistent leak.
+> **This is the most precise characterization of §8.2b to date, and the
+> concrete next lead: diff what `ask.ko`'s own production flow-insert
+> path does to a target FQID beyond just resolving its number (channel
+> binding, WQ scheduling, DCA/context setup) against what `install_l2`'s
+> raw AD write does — the gap is almost certainly a missing step in that
+> difference, not a comparator or key-packing bug.**
+> Two earlier hypotheses were tested and ruled out along the way: (1)
+> ASK's own ehash engagement contending with the CC-tree's KG-scheme
+> attach on the same port — disabling `offload ipv4` on the CC-armed port
+> changed behavior (kernel-RX fallthrough stopped, `rx dropped` on
+> ingress began exactly tracking sent-frame count instead) but did not
+> fix delivery, so contention was a real but insufficient explanation;
+> (2) the target FQID needing to be "warmed up" by prior real `ask.ko`
+> traffic — tested against a proven-live production FQID (eth4's, in
+> active use) with the identical result, ruling this out.
+>
+> **STATUS UPDATE 2026-09-15, second pass — §8.2a's "PASSED" verdict
+> RETRACTED, methodology flaw found.** The original coexistence test's
+> forward-direction traffic entered `.185` via a software `veth`
+> (`ns_src`, a netns-based fake source) — it never touched FMan's real
+> RX/KeyGen/CC-comparator hardware on eth1 at all, only ever *transmitted*
+> out eth1 (FMan's TX path, unrelated to the armed port's RX/KG dispatch
+> under test). So that test validated plain kernel software routing with
+> a CC tree grafted onto the port, not genuine silicon coexistence. A
+> corrected topology (real `.106` traffic as the actual source, so it
+> genuinely enters `.185` via eth1's physical wire; only the sink is
+> virtualized) was built and confirmed via `traceroute` to give a clean,
+> single real-hop ingress on eth1 — but the coexistence proof has not yet
+> been re-run on this corrected topology. **§8.2a is therefore back to
+> UNRESOLVED, not PASSED, pending a re-run.**
+>
+> All test-only config (addressing, ASK offload, firewall flowtable
+> membership, promiscuous mode, netns/veth) was cleanly reverted on both
+> `.185` and `.106` after every round this session; `.185` is back on the
+> known-stable production image, `ask-check` 36/36. Production traffic on
+> eth3/eth4 was undisturbed throughout (verified via `ask-check` staying
+> otherwise-clean every round, including the round that targeted eth4's
+> own live FQID as a read-only comparison point).
+> **Net effect on this plan: B2 is still OPEN**, now characterized far
+> more precisely than "mystery, not working" — enqueue is proven to work,
+> dequeue/servicing is proven not to, and §8.2a needs a clean re-run
+> before it can be counted again. B3 (`ask.ko` production switchdev
+> wiring) remains explicitly gated on B2 PASS and must not start until
+> both are resolved.
 >
 > **STATUS — B0 DONE (2026-09-10), B1 DONE (2026-09-15), B2 §8.1 oracle
 > question RESOLVED 2026-09-15 on real silicon (`.185`/eth1, `probe3`
@@ -395,19 +405,30 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
   command, with `miss_fe_off` auto-filled from `fman_pcd_fe_root_get_offset()`
   (fixup F-249) so a port with ASK ehash already engaged gets the real
   coexistence precondition for free.
-  **(a) Coexistence (CC-miss→FE_ENTER→ehash): PASSED** on real two-port
-  hardware (`.185`↔`.106`, forced-transit topology) — a fresh routed flow
-  through the CC-armed port completed cleanly (0% loss, comparable
-  throughput to the pre-CC baseline).
-  **(b) CPU-bypassed HW forward on a CC HIT: NOT CONFIRMED.** Sustained
-  frames to the fixed test DA never reached the target FQID; fell through
-  to kernel RX instead, despite `probe3`-reconfirmed byte-perfect KeyGen
-  extraction for the exact same frame. Root cause not identified — see the
-  STATUS banner at the top of this file for full detail and candidate next
-  steps (KG-scheme-attach contention between the CC tree and ASK's own
-  ehash engagement is the leading suspect, not yet confirmed).
-  **B3 remains gated on B2 PASS — do not start it until (b) is root-caused
-  and fixed.**
+  **(a) Coexistence (CC-miss→FE_ENTER→ehash): UNRESOLVED, PASSED verdict
+  RETRACTED.** The original test topology's forward-direction traffic
+  entered `.185` via a software veth, never touching real FMan RX/KG/CC
+  hardware on the armed port — it validated plain kernel routing, not
+  silicon coexistence. A corrected topology (real `.106` traffic as the
+  actual source) is built and `traceroute`-verified but the proof has not
+  been re-run on it yet.
+  **(b) CPU-bypassed HW forward on a CC HIT: precisely characterized,
+  still not achieved.** FMan's hardware QMI counters
+  (`fmqm_etfc`/`fmqm_dtfc` via `/sys/kernel/debug/fman_pcd/0/dcsr/qmi_err`)
+  prove the CC comparator matches and the AD's enqueue action genuinely
+  succeeds (500 sent frames → ~500 excess enqueues over background) —
+  `cc_pack_key_l2()`/`fman_pcd_kg_port_attach_cc_l2()`/the AD write are
+  vindicated — but the enqueued frames are essentially never dequeued
+  (~4 excess dequeues out of 500 enqueued), with no hardware error
+  flagged anywhere. Two earlier hypotheses (KG-scheme-attach contention
+  with ASK's own ehash; the target FQID needing prior real-traffic
+  warmup) were tested directly and ruled out. Current leading hypothesis:
+  a missing FQID channel/WQ-scheduling/DCA setup step that `ask.ko`'s own
+  production flow-insert path performs and `install_l2`'s raw AD write
+  does not. See the STATUS banner at the top of this file for full
+  detail.
+  **B3 remains gated on B2 PASS — do not start it until both (a) and (b)
+  are resolved.**
 
 - **B3 — `ask.ko` production switchdev wiring (gated on B2 PASS).** Replace the
   `ask_bridge.c` stub: FDB workqueue installs/removes DA leaves via the B1
@@ -484,15 +505,14 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
    strong prior evidence the layout works; this is now direct, first-party
    confirmation, not just precedent.
 2. **DA-match CC + routed ehash coexistence on one live port via CC-miss→FE —
-   RESOLVED 2026-09-15, PASSED.** Real two-port hardware test (`.185`↔`.106`):
-   a fresh routed flow through the CC-armed port completed cleanly (0% loss,
-   throughput comparable to the pre-CC baseline). Confirms the VLAN R4c model
-   generalizes to a DA-keyed CC leaf as expected, `miss_fe_off` is indeed
-   key-agnostic. **What B2 did NOT resolve:** whether a CC HIT itself actually
-   forwards a frame to `target_fqid` with CPU bypassed — that sub-question is
-   open (see STATUS banner and §6 B2 for detail); it is a different failure
-   mode than coexistence and was not expected to be hard given B1's builder
-   and the byte-perfect extraction §8.1 already confirmed.
+   UNRESOLVED, an earlier PASSED verdict was retracted (methodology flaw:
+   the tested traffic never touched real FMan RX/KG/CC hardware on the
+   armed port, only kernel software routing).** A corrected,
+   `traceroute`-verified topology exists but the proof has not been
+   re-run on it. Separately, a decisive silicon finding for the
+   *sibling* §8.2b sub-question (CC-hit forward) shows the CC comparator
+   genuinely matching and the AD enqueue genuinely succeeding — see the
+   STATUS banner and §6 B2 for full detail on both.
 3. **Non-IP frame through the CC/enqueue path.** The VLAN/routed proofs were IP
    frames. A pure L2 bridge forward of a non-IP known-unicast frame (e.g. a
    protocol the parser doesn't deep-parse) through a CC DA-match leaf + plain
