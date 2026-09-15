@@ -1,7 +1,7 @@
 """F-247 (T-M6-2 B2, 2026-09-15): extend probe3 (F-241) with mode 2 --
 atomic RICP-widen capture for the bridge FDB L2 composite
-(PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2() (patch 0206/0207)
-the same way probe3's existing modes 0/1 reuse cc_test_install_v6()/
+(PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2() (F-248) the same way
+probe3's existing modes 0/1 reuse cc_test_install_v6()/
 cc_test_install_v6pid(). Answers plan §8.1's read-only comparator-window
 question for the L2 case: does the CC comparator actually see the bytes
 cc_pack_key_l2() packs, for a real live frame, before any CC tree is
@@ -19,9 +19,8 @@ debugfs write bounded by one msleep(), not a human-driven multi-step
 round-trip, for the L2 case exactly as already proven for the V6 case.
 
 Must run after F-241 (cc_test_probe3/cc_test_probe3_buf/mode dispatch
-must already exist) and after 0206/0207 (cc_test_install_l2 must
-already exist -- it lives in the plain-tracked fman_pcd_cc_test.c, not
-a prior fixup). Idempotent.
+must already exist) and after F-248 (cc_test_install_l2 must already
+exist). Idempotent.
 """
 
 import os
@@ -44,7 +43,7 @@ if marker in src:
 
 for needed in ("cc_test_probe3", "cc_test_install_l2", "cc_test_saved_ricp"):
     if needed not in src:
-        print(f"### F-247: FATAL: {needed} not found -- F-241 and 0206/0207 must run first")
+        print(f"### F-247: FATAL: {needed} not found -- F-241 and F-248 must run first")
         sys.exit(1)
 
 # ---------------------------------------------------------------------
