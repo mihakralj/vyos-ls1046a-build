@@ -1001,9 +1001,6 @@ EXPORT_SYMBOL_GPL(ask_hw_get_enq_fe_off);
 /* Defined further down with the per-flow fast path; forward-declared here. */
 static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
 						u8 port_id);
-/* Defined after ask_hw_resolve_oif_fqid(), which it wraps; forward-declared
- * here so ask_hw_offload_engage() (CR-012 fix, below) can call it. */
-static void ask_hw_prewarm_egress_fq(u8 hw_port_id);
 
 /*
  * Engage/disengage the coarse S0<->S1 PCD mode-switch on one FMan RX port.
@@ -1025,15 +1022,6 @@ int ask_hw_offload_engage(u8 hw_port_id)
 
 	if (!h)
 		return -ENODEV;
-
-	/*
-	 * CR-012 (2026-09-15): warm this port's no-confirm egress TX FQ cache
-	 * here, in plain process context, before any flow can be installed on
-	 * it. Must run before h->lock (it internally takes rtnl_lock() on a
-	 * cache miss, via dpaa_alloc_offload_tx_fq()) and before the engage
-	 * below arms flow admission. See the function's own comment for why.
-	 */
-	ask_hw_prewarm_egress_fq(hw_port_id);
 
 	mutex_lock(&h->lock);
 
@@ -1515,13 +1503,22 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
  * deliberate stress (plans/ASK2-MASTER-PLAN.md CR-012).
  *
  * The noconf_tx[] cache already exists to allocate each egress port's FQ
- * only once (T-M7-2 S4); this just moves that first allocation to engage
- * time -- plain process context, no flow_block_lock held -- instead of
- * leaving it to whichever flow happens to be first through preflight.
- * Best-effort: if the port's netdev can't be found or the resolve fails,
+ * only once (T-M7-2 S4); this warms that cache from a genuinely safe
+ * calling context instead of leaving the first allocation to whichever
+ * flow happens to be first through preflight.
+ *
+ * NOT safe to call from ask_hw_offload_engage() itself: that function is
+ * also reached from ask_hw_port_bind(), called by ask_flow_offload_replace()
+ * from INSIDE the flow-install callback while flow_block_lock is held (the
+ * exact hazard above) -- confirmed by a 2026-09-15 board PROVE_LOCKING run
+ * that fired the identical circular-dependency splat through THIS
+ * function's own rtnl_lock() once it was wired in there. Callers MUST be
+ * genuinely-safe process context: the genl ASK_CMD_ENGAGE handler and the
+ * debugfs engage write, both called directly, never from inside
+ * ask_hw_offload_engage()/ask_hw_port_bind(). Best-effort either way: if
+ * the port's netdev can't be found or the resolve fails,
  * ask_hw_resolve_oif_fqid()'s existing lazy path still covers it on the
- * first real flow install for that port (same lock-order risk as before
- * this fix, just no longer the GUARANTEED first hit).
+ * first real flow install for that port.
  *
  * Iterates under rtnl_lock() (matching how dpaa_get_rx_fman_port() is
  * called everywhere else in this file -- via dev_get_by_index(), never
@@ -1529,7 +1526,7 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
  * ask_hw_resolve_oif_fqid(), which re-takes rtnl_lock() itself on a cache
  * miss -- rtnl_lock() is not recursive, so the two must not overlap.
  */
-static void ask_hw_prewarm_egress_fq(u8 hw_port_id)
+void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 {
 	struct net_device *dev;
 	int ifindex = 0;

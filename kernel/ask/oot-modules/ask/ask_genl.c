@@ -897,6 +897,11 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 		return rc;
 	}
 
+	/* CR-012: safe here -- plain genl doit process context, never called
+	 * with flow_block_lock held. Must NOT be called from inside
+	 * ask_hw_offload_engage() itself (see ask_hw_prewarm_egress_fq()). */
+	ask_hw_prewarm_egress_fq(port_id);
+
 	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x vlan=%d bridge=%d\n",
 		    port_id, fam_mask, vlan_attr ? vlan_on : -1,
 		    bridge_attr ? bridge_on : -1);
