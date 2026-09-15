@@ -2276,13 +2276,31 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     echo "### fman_pcd_cc_test.c: F-246 global soft-parser execution-unit enable (T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-248 (T-M6-2 B2, 2026-09-15): add cc_test_install_l2() -- the bridge FDB
+# L2 composite install_* variant, mirroring cc_test_install_v6pid() exactly
+# (heap-allocated spec, full silicon-arming sequence: static_install ->
+# get_base -> ensure_params_page -> set_cc_base -> kg_port_attach_cc_l2()
+# from patch 0207). Corrects an earlier same-session mistake: this logic
+# was first written directly into kernel/common/files/fman_pcd_cc_test.c,
+# which turned out to be a dead orphan file never copied into any real
+# kernel build (fman_pcd_cc_test.c is entirely fixup-assembled in this
+# codebase, not patch- or plain-tracked-file-delivered -- confirmed by
+# tracing every "install_*" sibling variant's own origin). Must run after
+# patch 0185 (cc_test_install_v6pid, the anchor) and after 0206/0207
+# (struct fman_pcd_cc_hw_spec.bridge_l2 / fman_pcd_kg_port_attach_cc_l2()
+# must already exist in fman_pcd.h) -- and before F-247, which reuses this.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_248.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-248 cc_test_install_l2 bridge L2 install variant (T-M6-2 B2)"
+fi
+
 # F-247 (T-M6-2 B2, 2026-09-15): extend probe3 (F-241) with mode 2 for the
 # bridge FDB L2 composite (PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2()
-# (patch 0206/0207) the same way modes 0/1 reuse cc_test_install_v6()/
-# cc_test_install_v6pid(). Answers plan §8.1's read-only comparator-window
-# question for the L2 case. Must run after F-241 (probe3 must already
-# exist) and after the plain-tracked fman_pcd_cc_test.c copy-in (which
-# carries cc_test_install_l2() as of patch 0206).
+# (F-248, corrected from the original patch 0206/0207 attempt) the same way
+# modes 0/1 reuse cc_test_install_v6()/cc_test_install_v6pid(). Answers plan
+# §8.1's read-only comparator-window question for the L2 case. Must run
+# after F-241 (probe3 must already exist) and after F-248 (cc_test_install_l2
+# must already exist).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_247.py" 2>&1
     echo "### fman_pcd_cc_test.c: F-247 probe3 mode 2 bridge L2 comparator capture (T-M6-2 B2)"
