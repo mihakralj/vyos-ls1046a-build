@@ -7,15 +7,31 @@
  * kernel consumer.
  *
  * Write: install <port> <qband> <proto> <src_ip> <dst_ip> <dport>
+ *        install_l2 <port> <dst_mac> <target_fqid>
  *        clear <port>
  * Read:  summary of installed CC trees
  *
  * Spec sec 5.4; B1 acceptance gate.
+ *
+ * install_l2 (T-M6-2 B2, plans/ASK2-BRIDGE-OFFLOAD-PLAN.md): arms a single
+ * DA-only bridge FDB CC leaf (cc_pack_key_l2(), the 15-byte PORT_ID|DA|SA|
+ * ETYPE layout with only DA present) on @port, enqueuing a DA match
+ * directly to @target_fqid (a real hardware TX FQ -- e.g. read from
+ * `ask-check`'s "DPAA FQ map" line for the intended egress port, or
+ * `bin/fman-full-capture.py`). miss_fe_off is auto-filled from
+ * fman_pcd_fe_root_get_offset() -- 0 (legacy RSS miss) if FE_ENTER isn't
+ * currently engaged on this FMan, non-zero (CC-miss routes through the
+ * production ehash path) if it is; this is exactly the B2 coexistence
+ * proof's precondition, not something the caller supplies. Debugfs-only:
+ * no KeyGen scheme-attach happens here, so nothing reaches this leaf
+ * until the port's KG scheme is separately armed for L2 extraction
+ * (operator's job on the sacrificial port, not this harness's).
  */
 
 #include <linux/debugfs.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/etherdevice.h>     /* ETH_ALEN, ether_addr_copy, T-M6-2 B2 */
 #include <linux/inet.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -130,6 +146,48 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
 	return fman_pcd_cc_static_install(pcd, port_id, &spec);
 }
 
+/* T-M6-2 B2: see the file-header comment above for the full contract. */
+static int cc_test_install_l2(struct fman_pcd *pcd, const char *args)
+{
+	struct fman_pcd_cc_hw_spec spec;
+	u8 port_id;
+	u32 target_fqid;
+	char mac_str[32];
+	u8 dst_mac[ETH_ALEN];
+	struct fman *fm;
+	int n;
+
+	n = sscanf(args, "install_l2 %hhu %31s %u",
+		  &port_id, mac_str, &target_fqid);
+	if (n != 3)
+		return -EINVAL;
+
+	if (!mac_pton(mac_str, dst_mac))
+		return -EINVAL;
+
+	fm = fman_pcd_get_fman(pcd);
+	if (!fm)
+		return -ENODEV;
+
+	memset(&spec, 0, sizeof(spec));
+	spec.bridge_l2 = true;
+	spec.num_keys = 1;
+	spec.miss_qband = 0;
+	/*
+	 * 0 if FE_ENTER isn't engaged on this FMan yet -- a valid state (a
+	 * pure-L2 leaf with legacy RSS miss), not an error. Non-zero is the
+	 * B2 coexistence proof's actual precondition: engage ASK ehash
+	 * routing on the port first, then install_l2, so CC-miss lands on
+	 * the live routed/NAT path instead of falling through to RSS.
+	 */
+	spec.miss_fe_off = fman_pcd_fe_root_get_offset(fm);
+	spec.keys[0].present = FMAN_PCD_CC_HW_F_MAC_DST;
+	ether_addr_copy(spec.keys[0].dst_mac, dst_mac);
+	spec.keys[0].target_fqid = target_fqid;
+
+	return fman_pcd_cc_static_install(pcd, port_id, &spec);
+}
+
 static ssize_t cc_test_write(struct file *file, const char __user *buf,
 			     size_t count, loff_t *ppos)
 {
@@ -152,6 +210,10 @@ static ssize_t cc_test_write(struct file *file, const char __user *buf,
 	if (sscanf(cmd, "clear %hhu", &port_id) == 1) {
 		fman_pcd_cc_static_destroy(pcd, port_id);
 		ret = count;
+	} else if (strncmp(cmd, "install_l2 ", 11) == 0) {
+		ret = cc_test_install_l2(pcd, cmd);
+		if (ret == 0)
+			ret = count;
 	} else if (strncmp(cmd, "install ", 8) == 0) {
 		ret = cc_test_install(pcd, cmd);
 		if (ret == 0)

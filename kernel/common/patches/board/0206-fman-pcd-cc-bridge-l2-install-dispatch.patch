@@ -1,0 +1,115 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2(T-M6-2 B2): wire cc_pack_key_l2() into the CC install dispatch
+
+Depends on 0204+0205 (adds src_mac/FMAN_PCD_CC_HW_F_MAC_SRC and
+cc_pack_key_l2() this wires in).
+
+B2 (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md) is the decisive silicon de-risk
+proof: hand-arm a CC leaf matching a fixed destination MAC, enqueue to
+another port's TX FQ, with the miss row = FE_ENTER, and confirm on
+silicon that (a) an L2 frame to that DA forwards with the CPU bypassed
+and (b) an untagged routed flow on the same port still hits the ehash
+path via CC-miss. Doing that needs a way to actually INSTALL such a
+tree -- this patch is that plumbing, still entirely debugfs-gated and
+off any live traffic path:
+
+1. struct fman_pcd_cc_hw_spec gains a `bridge_l2` bool (mirrors the
+   existing `dual_lane`/`dual_lane_pid` pattern exactly): when set,
+   fman_pcd_cc_static_install() sizes the tree's match rows as
+   CC_KEY_SIZE_L2 (15 bytes) and packs every key via cc_pack_key_l2()
+   instead of the IP-oriented packers. False for every existing caller,
+   so every existing CC tree (routed, VLAN single/dual-lane) stays
+   byte-identical -- purely additive dispatch, no existing branch
+   touched.
+
+2. cc_pack_key_l2() itself drops __maybe_unused now that it has a real
+   caller (fman_pcd_cc_static_install(), reached only when bridge_l2 is
+   set -- still unreachable from any live path since nothing sets that
+   flag outside the cc_test debugfs harness and its own KUnit tests).
+
+3. fman_pcd_cc_test.c (plain-tracked, edited directly) gains a new
+   `install_l2 <port> <dst_mac> <target_fqid>` debugfs command
+   alongside the existing IP-oriented `install`. Auto-fills
+   miss_fe_off from fman_pcd_fe_root_get_offset() -- 0 if FE_ENTER
+   isn't engaged yet (a valid pure-L2-leaf state), non-zero if it is
+   (the actual B2 coexistence-proof precondition: engage ASK ehash
+   routing on the port first, then install_l2).
+
+Still fully dormant: no KeyGen scheme-attach happens anywhere in this
+patch, so nothing reaches an L2 leaf on any live port until the
+operator both engages the port's KG scheme for L2 extraction AND
+issues an explicit debugfs write -- the live-arming step itself (which
+port, what scheme, what to observe) is B2's actual experiment, done by
+hand on a sacrificial port, not something this patch performs.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index ccf9ea6..d02a2c2 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -599,11 +599,14 @@ static void __maybe_unused cc_pack_key_3tuple(void __iomem *match, u16 idx,
+  * bytes zero (wildcard), per B1's stated gate: "KUnit vectors for
+  * DA-only and PORT_ID|DA|SA|ETYPE keys."
+  *
+- * __maybe_unused: not yet wired into fman_pcd_cc_bridge_key_add/remove()
+- * (below) or any live install path. Pinned by
+- * tests/fman_pcd_cc_l2_key_test.c.
++ * T-M6-2 B2: reachable from fman_pcd_cc_static_install() when the caller
++ * sets struct fman_pcd_cc_hw_spec.bridge_l2 -- but nothing in-tree does
++ * that yet outside the cc_test debugfs harness (fman_pcd_cc_test.c's
++ * install_l2 command) and the KUnit tests below, so this is still not on
++ * any live traffic path (no KeyGen scheme-attach caller exists). Pinned
++ * by tests/fman_pcd_cc_l2_key_test.c.
+  */
+-static void __maybe_unused cc_pack_key_l2(void __iomem *match, u16 idx,
++static void cc_pack_key_l2(void __iomem *match, u16 idx,
+ 					  const struct fman_pcd_cc_hw_key *k)
+ {
+ 	u8 key[CC_KEY_SIZE_L2];
+@@ -902,7 +905,8 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 		for (i = 0; i < hw->num_keys; i++)
+ 			if (hw->keys[i].present & FMAN_PCD_CC_HW_F_IPV6)
+ 				v6 = true;
+-		t->key_size = hw->dual_lane ?
++		t->key_size = hw->bridge_l2 ? CC_KEY_SIZE_L2 :
++			hw->dual_lane ?
+ 			(hw->dual_lane_pid ? CC_KEY_SIZE_DUAL_PID : CC_KEY_SIZE_DUAL) :
+ 			(v6 ? CC_KEY_SIZE_V6 : CC_KEY_SIZE);
+ 	}
+@@ -946,7 +950,9 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 
+ 	/* Encode each key's match record + leaf result AD. */
+ 	for (i = 0; i < hw->num_keys; i++) {
+-		if (hw->dual_lane && hw->dual_lane_pid)
++		if (hw->bridge_l2)
++			cc_pack_key_l2(t->match, i, &hw->keys[i]);
++		else if (hw->dual_lane && hw->dual_lane_pid)
+ 			cc_pack_key_dual_pid(t->match, i, &hw->keys[i]);
+ 		else if (hw->dual_lane)
+ 			cc_pack_key_dual(t->match, i, &hw->keys[i]);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index db279b2..dd4dec7 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -631,6 +631,20 @@ struct fman_pcd_cc_hw_spec {
+ 				 * (this false) keeps the plain 46-byte
+ 				 * cc_pack_key_dual() path byte-identical.
+ 				 */
++	bool bridge_l2;	/* T-M6-2 B2: use the 15-byte PORT_ID|DA|SA|ETYPE
++			 * bridge FDB key (cc_pack_key_l2(), CC_KEY_SIZE_L2)
++			 * for every key in this tree, instead of the plain
++			 * IP-oriented packers. Mutually exclusive with
++			 * @dual_lane in practice (a tree is either all-IP or
++			 * all-L2, mirroring how @dual_lane itself works) --
++			 * not enforced here, caller's responsibility, same as
++			 * every other @*_lane combination. False for every
++			 * existing caller, so every existing CC tree stays
++			 * byte-identical. The port's KeyGen scheme must
++			 * separately be armed for the L2 extraction (B2/B3),
++			 * or the extracted key width/content won't match what
++			 * this tree compares.
++			 */
+ };
+ 
+ /**
