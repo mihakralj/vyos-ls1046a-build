@@ -45,6 +45,7 @@
 #include "fman.h"
 #include "fman_muram.h"
 #include "fman_pcd_internal.h"
+#include "fman_port.h"          /* fman_port_lookup_rx/_set_cc_base, T-M6-2 B2 */
 
 /*
  * Forward references: fman_pcd_cc_static_install/destroy live in
@@ -185,7 +186,43 @@ static int cc_test_install_l2(struct fman_pcd *pcd, const char *args)
 	ether_addr_copy(spec.keys[0].dst_mac, dst_mac);
 	spec.keys[0].target_fqid = target_fqid;
 
-	return fman_pcd_cc_static_install(pcd, port_id, &spec);
+	{
+		struct fman_port *rxport;
+		u32 cc_base;
+		int err;
+
+		err = fman_pcd_cc_static_install(pcd, port_id, &spec);
+		if (err)
+			return err;
+
+		/*
+		 * Beyond this point the tree exists in MURAM but nothing
+		 * points at it yet -- publish the datapath wiring (SDK
+		 * FM_PORT_SetPCD order, matching every other install_*
+		 * variant in this file: params page, then FMBM_RCCB, then
+		 * the KG scheme's KGSE_MODE/CCBS/EKFC via attach_cc_l2()).
+		 * Any failure here tears the tree back down so a partial,
+		 * dangling-but-unreachable CC tree is never left behind.
+		 */
+		err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
+		if (!err) {
+			rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
+			if (!rxport)
+				err = -ENODEV;
+		}
+		if (!err)
+			err = fman_pcd_port_ensure_params_page(pcd, rxport);
+		if (!err)
+			err = fman_port_set_cc_base(rxport, cc_base);
+		if (!err) {
+			err = fman_pcd_kg_port_attach_cc_l2(pcd, port_id, cc_base);
+			if (err)
+				(void)fman_port_set_cc_base(rxport, 0);
+		}
+		if (err)
+			fman_pcd_cc_static_destroy(pcd, port_id);
+		return err;
+	}
 }
 
 static ssize_t cc_test_write(struct file *file, const char __user *buf,
