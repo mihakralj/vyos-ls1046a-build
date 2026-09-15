@@ -115,6 +115,16 @@ void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 
 /*
+ * CR-012: warms this port's no-confirm egress TX FQ cache. MUST be called
+ * only from genuinely safe process context (genl ASK_CMD_ENGAGE handler,
+ * debugfs engage write) -- never from ask_hw_offload_engage() or anything
+ * it calls, since that function is also reached from inside the
+ * flow-install callback (ask_hw_port_bind()) while flow_block_lock is
+ * held. See its definition in ask_hw.c for the full lock-order rationale.
+ */
+void ask_hw_prewarm_egress_fq(u8 hw_port_id);
+
+/*
  * PR14g-body-1 (M2.5g) - FMan PCD bring-up cache.
  *
  * struct ask_hw_pcd holds the per-FMan PCD handles that ask.ko owns
