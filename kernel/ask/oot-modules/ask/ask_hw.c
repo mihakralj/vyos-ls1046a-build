@@ -53,6 +53,7 @@
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
+#include <linux/rtnetlink.h>       /* rtnl_lock/rtnl_unlock, CR-012 */
 #include <linux/xarray.h>
 #include <net/net_namespace.h>
 #include <linux/etherdevice.h>          /* is_zero_ether_addr */
@@ -1000,6 +1001,9 @@ EXPORT_SYMBOL_GPL(ask_hw_get_enq_fe_off);
 /* Defined further down with the per-flow fast path; forward-declared here. */
 static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
 						u8 port_id);
+/* Defined after ask_hw_resolve_oif_fqid(), which it wraps; forward-declared
+ * here so ask_hw_offload_engage() (CR-012 fix, below) can call it. */
+static void ask_hw_prewarm_egress_fq(u8 hw_port_id);
 
 /*
  * Engage/disengage the coarse S0<->S1 PCD mode-switch on one FMan RX port.
@@ -1021,6 +1025,15 @@ int ask_hw_offload_engage(u8 hw_port_id)
 
 	if (!h)
 		return -ENODEV;
+
+	/*
+	 * CR-012 (2026-09-15): warm this port's no-confirm egress TX FQ cache
+	 * here, in plain process context, before any flow can be installed on
+	 * it. Must run before h->lock (it internally takes rtnl_lock() on a
+	 * cache miss, via dpaa_alloc_offload_tx_fq()) and before the engage
+	 * below arms flow admission. See the function's own comment for why.
+	 */
+	ask_hw_prewarm_egress_fq(hw_port_id);
 
 	mutex_lock(&h->lock);
 
@@ -1486,6 +1499,55 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 		    *fqid, ifindex, phys_ifindex);
 	dev_put(dev);
 	return 0;
+}
+
+/*
+ * CR-012 (2026-09-15): dpaa_alloc_offload_tx_fq() takes rtnl_lock(), which
+ * is unsafe to call from the flow-insert hot path (ask_hw_resolve_oif_fqid()
+ * via ask_hw_flow_preflight()) because that path runs under
+ * &flowtable->flow_block_lock (nf_flow_offload_tuple() called from
+ * flow_offload_work_handler()), while stock nftables independently takes
+ * rtnl_mutex -> commit_mutex -> flow_block_lock at module load (netdev
+ * notifier registration under commit_mutex, then flow_block_lock via
+ * nf_flow_table_offload_setup()). PROVE_LOCKING correctly flags the
+ * resulting circular lock-order chain -- found 2026-09-14 on the very first
+ * hardware flow install during normal board setup, not even under
+ * deliberate stress (plans/ASK2-MASTER-PLAN.md CR-012).
+ *
+ * The noconf_tx[] cache already exists to allocate each egress port's FQ
+ * only once (T-M7-2 S4); this just moves that first allocation to engage
+ * time -- plain process context, no flow_block_lock held -- instead of
+ * leaving it to whichever flow happens to be first through preflight.
+ * Best-effort: if the port's netdev can't be found or the resolve fails,
+ * ask_hw_resolve_oif_fqid()'s existing lazy path still covers it on the
+ * first real flow install for that port (same lock-order risk as before
+ * this fix, just no longer the GUARANTEED first hit).
+ *
+ * Iterates under rtnl_lock() (matching how dpaa_get_rx_fman_port() is
+ * called everywhere else in this file -- via dev_get_by_index(), never
+ * under RCU) to find hw_port_id's netdev, then drops it before calling
+ * ask_hw_resolve_oif_fqid(), which re-takes rtnl_lock() itself on a cache
+ * miss -- rtnl_lock() is not recursive, so the two must not overlap.
+ */
+static void ask_hw_prewarm_egress_fq(u8 hw_port_id)
+{
+	struct net_device *dev;
+	int ifindex = 0;
+	u32 fqid;
+
+	rtnl_lock();
+	for_each_netdev(&init_net, dev) {
+		struct fman_port *port = dpaa_get_rx_fman_port(dev);
+
+		if (port && fman_port_get_id(port) == hw_port_id) {
+			ifindex = dev->ifindex;
+			break;
+		}
+	}
+	rtnl_unlock();
+
+	if (ifindex)
+		ask_hw_resolve_oif_fqid(ifindex, &fqid);
 }
 
 int ask_hw_flow_preflight(const struct ask_flow_key *key,
