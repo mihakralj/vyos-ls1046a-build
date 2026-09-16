@@ -1,0 +1,675 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman: pcd: dual-lane 46-byte CC-tree key packer + install + isolating tests
+
+Consolidates 0185 (dual-lane-key-dormant) + 0186 (dual-lane-install) +
+0187 (cc_test-v4gec-isolating) + 0188 (hybrid-ekfc-gec-isolating) into
+one patch: the T-M6-8 VLAN-v6 dual-lane CC-tree key packer feature and
+its own isolating-experiment test-harness coverage, all dated
+2026-09-02, applied in strict sequence with nothing else interleaved.
+
+Verified against the real CI checkpoint commits in the persistent
+kernel-git-cache (run 34563593304, checkpoints 3564a9b357a7 "applied:
+0184..." to 1e7d85c97ed1 "applied: 0188..."), round-trip verified
+byte-identical via `patch -p1`.
+
+Touches: fman_pcd_cc.c, fman_pcd_cc_test.c, fman_pcd.h.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -171,6 +171,12 @@
+ 	void __iomem *group;
+ 	void __iomem *match;
+ 	void __iomem *ad;
++	u8 key_size;	/* T-M6-8 VLAN-v6 V6-2: CC_KEY_SIZE (16) for a plain v4
++			 * tree, CC_KEY_SIZE_DUAL (46) for a dual_lane tree --
++			 * cc_write_group0() needs the REAL per-row width for
++			 * the CONT_LOOKUP AD's KeyLength field, not just the
++			 * global v4 constant.
++			 */
+ };
+ 
+ /* Find an installed tree for @port_id.  Caller holds pcd->lock. */
+@@ -278,6 +284,180 @@
+ }
+ 
+ /*
++ * T-M6-8 VLAN-v6: dual-lane 46-byte CC key packer. Used by
++ * fman_pcd_cc_static_install() when struct fman_pcd_cc_hw_spec.dual_lane is
++ * set (V6-2); the port's KeyGen scheme must separately be armed via
++ * fman_pcd_kg_port_attach_cc_dual() (fman_pcd_kg.c) or the extracted bytes
++ * won't match what this packs.
++ *
++ * cc_pack_key() above is IPv4-only and CC_KEY_SIZE=16 has no room for a
++ * 16-byte v6 address, let alone a src/dst pair. Rather than invent a new
++ * layout, this mirrors ask.ko's ask_fe_build_key_dual() (ask_flow_offload.c)
++ * byte-for-byte -- the SAME family-discriminated dual-lane key already
++ * silicon-proven for the routed ehash path (F-224/F-225/F-226, zero
++ * throughput regression at 46 bytes):
++ *
++ *   byte  0      FAMILY: 0x80 (v4) / 0x40 (v6) -- see ASK_FE_FAMILY_V4/_V6.
++ *                Replaces cc_pack_key()'s byte-0 PORT_ID: port identity is
++ *                already implicit in which per-port CC tree got installed
++ *                (fman_cc_tree_install(fm, port_id, ...)), so PORT_ID was
++ *                redundant key content to begin with -- safe to repurpose.
++ *   bytes 1..4   IPv4 src (network order), v4 keys only; zero for v6.
++ *   bytes 5..8   IPv4 dst (network order), v4 keys only; zero for v6.
++ *   bytes 9..24  IPv6 src (16B), v6 keys only; zero for v4.
++ *   bytes 25..40 IPv6 dst (16B), v6 keys only; zero for v4.
++ *   byte  41     L4 proto.
++ *   bytes 42..43 L4 src port (network order).
++ *   bytes 44..45 L4 dst port (network order).
++ *
++ * Per-key family comes from dpaa_cc_key_to_hw()'s existing
++ * FMAN_PCD_CC_HW_F_IPV6 present bit (already correctly set from
++ * struct fman_cc_key.is_ipv6 -- that translation was already complete;
++ * only this packer and its EKFC/GEC producer were missing).
++ *
++ * Only reached when the caller explicitly sets dual_lane; cc_pack_key()/
++ * CC_KEY_SIZE above stay untouched and are what every existing (v4-only,
++ * shipped) CC-tree consumer still uses, so that path remains byte-identical.
++ */
++#define CC_KEY_SIZE_DUAL	48U
++#define CC_KEY_DUAL_FAMILY_V4	0x40U
++#define CC_KEY_DUAL_FAMILY_V6	0x60U
++
++static void cc_pack_key_dual(void __iomem *match, u16 idx,
++			     const struct fman_pcd_cc_hw_key *k)
++{
++	u8 key[CC_KEY_SIZE_DUAL];
++	u8 msk[CC_KEY_SIZE_DUAL];
++	u8 *row;
++	bool is_v6 = !!(k->present & FMAN_PCD_CC_HW_F_IPV6);
++
++	memset(key, 0, sizeof(key));
++	memset(msk, 0, sizeof(msk));
++
++	key[0] = is_v6 ? CC_KEY_DUAL_FAMILY_V6 : CC_KEY_DUAL_FAMILY_V4;
++	msk[0] = 0xff;
++
++	if (is_v6) {
++		/* Enforce zero in IPv4 lane [1..8] */
++		memset(&msk[1], 0xff, 8);
++
++		if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++			memcpy(&key[9], k->src_ip6, 16);
++			memset(&msk[9], 0xff, 16);
++		}
++		if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++			memcpy(&key[25], k->dst_ip6, 16);
++			memset(&msk[25], 0xff, 16);
++		}
++	} else {
++		if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++			memcpy(&key[1], &k->src_ip_be, 4);
++			msk[1] = msk[2] = msk[3] = msk[4] = 0xff;
++		}
++		if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++			memcpy(&key[5], &k->dst_ip_be, 4);
++			msk[5] = msk[6] = msk[7] = msk[8] = 0xff;
++		}
++		/* Enforce zero in IPv6 lane [9..40] */
++		memset(&msk[9], 0xff, 32);
++	}
++
++	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
++		key[41] = k->proto;
++		msk[41] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
++		key[42] = (u8)(k->src_port_be & 0xff);
++		key[43] = (u8)(k->src_port_be >> 8);
++		msk[42] = msk[43] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
++		key[44] = (u8)(k->dst_port_be & 0xff);
++		key[45] = (u8)(k->dst_port_be >> 8);
++		msk[44] = msk[45] = 0xff;
++	}
++
++	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE_DUAL;
++	memcpy_toio((void __iomem *)row, key, CC_KEY_SIZE_DUAL);
++	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE_DUAL), msk, CC_KEY_SIZE_DUAL);
++}
++
++/*
++ * T-M6-8 VLAN-v6 V6-2c: dual-lane key with a leading PORT_ID byte, for use
++ * with fman_pcd_kg_port_attach_cc_dual_ekfc() (F-238) -- the isolating
++ * experiment testing whether the CC-tree comparator needs a real nonzero
++ * EKFC known field to see a GEC-sourced composite. With EKFC=0x80000000
++ * (KG_SCH_KN_PORT_ID alone), "generic extracts APPEND after known EKFC
++ * fields" (vendor source) means the silicon composite is the SAME
++ * cc_pack_key_dual() content, just ONE BYTE WIDER: PORT_ID first (0x00,
++ * deterministic on this ucode -- F-183/F-190, F-179 zeroes kgse_dv0/dv1),
++ * then the identical 46-byte dual-lane layout shifted by +1.
++ *
++ * cc_pack_key_dual() itself is untouched by this -- this is a separate,
++ * additive function so the already board-proven (register-writes-correct)
++ * all-GEC path keeps working exactly as before regardless of this
++ * experiment's outcome.
++ */
++#define CC_KEY_SIZE_DUAL_PID	(CC_KEY_SIZE_DUAL + 1)
++
++static void cc_pack_key_dual_pid(void __iomem *match, u16 idx,
++				 const struct fman_pcd_cc_hw_key *k)
++{
++	u8 key[CC_KEY_SIZE_DUAL_PID];
++	u8 msk[CC_KEY_SIZE_DUAL_PID];
++	u8 *row;
++	bool is_v6 = !!(k->present & FMAN_PCD_CC_HW_F_IPV6);
++
++	memset(key, 0, sizeof(key));
++	memset(msk, 0, sizeof(msk));
++
++	/* byte 0: PORT_ID, deterministically 0x00 on this ucode. */
++	msk[0] = 0xff;
++
++	key[1] = is_v6 ? CC_KEY_DUAL_FAMILY_V6 : CC_KEY_DUAL_FAMILY_V4;
++	msk[1] = 0xff;
++
++	if (is_v6) {
++		if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++			memcpy(&key[10], k->src_ip6, 16);
++			memset(&msk[10], 0xff, 16);
++		}
++		if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++			memcpy(&key[26], k->dst_ip6, 16);
++			memset(&msk[26], 0xff, 16);
++		}
++	} else {
++		if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++			memcpy(&key[2], &k->src_ip_be, 4);
++			msk[2] = msk[3] = msk[4] = msk[5] = 0xff;
++		}
++		if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++			memcpy(&key[6], &k->dst_ip_be, 4);
++			msk[6] = msk[7] = msk[8] = msk[9] = 0xff;
++		}
++	}
++
++	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
++		key[42] = k->proto;
++		msk[42] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
++		key[43] = (u8)(k->src_port_be & 0xff);
++		key[44] = (u8)(k->src_port_be >> 8);
++		msk[43] = msk[44] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
++		key[45] = (u8)(k->dst_port_be & 0xff);
++		key[46] = (u8)(k->dst_port_be >> 8);
++		msk[45] = msk[46] = 0xff;
++	}
++
++	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE_DUAL_PID;
++	memcpy_toio((void __iomem *)row, key, CC_KEY_SIZE_DUAL_PID);
++	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE_DUAL_PID), msk, CC_KEY_SIZE_DUAL_PID);
++}
++
++/*
+  * Encode one leaf (result) action descriptor at AD row @idx - SDK-convergent
+  * RESULT AD (0115; SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
+  *
+@@ -343,7 +523,7 @@
+ {
+ 	u32 __iomem *w = (u32 __iomem *)t->group;
+ 
+-	iowrite32be(CC_AD_CONT_LOOKUP | ((CC_KEY_SIZE - 1) << 24) |
++	iowrite32be(CC_AD_CONT_LOOKUP | (((u32)t->key_size - 1) << 24) |
+ 		    (t->ad_off & 0xFFFFFF), &w[0]);
+ 	iowrite32be(((u32)t->num_keys << 24) | CC_AD_W1_LCL_MASK |
+ 		    (t->match_off & 0xFFFFFF), &w[1]);
+@@ -429,12 +609,15 @@
+ 		return -EINVAL;
+ 	/*
+ 	 * IPv6 keys cannot match the v4-shaped 16-byte KG-emitted composite
+-	 * this tree compares (see cc_pack_key()); reject loudly rather than
+-	 * install a key that can never hit.
++	 * a plain (non-dual_lane) tree compares (see cc_pack_key()); reject
++	 * loudly rather than install a key that can never hit. A dual_lane
++	 * tree (T-M6-8 VLAN-v6 V6-2) uses cc_pack_key_dual()'s 46-byte
++	 * family-discriminated layout instead, which has room for both.
+ 	 */
+-	for (i = 0; i < hw->num_keys; i++)
+-		if (hw->keys[i].present & FMAN_PCD_CC_HW_F_IPV6)
+-			return -ENOTSUPP;
++	if (!hw->dual_lane)
++		for (i = 0; i < hw->num_keys; i++)
++			if (hw->keys[i].present & FMAN_PCD_CC_HW_F_IPV6)
++				return -ENOTSUPP;
+ 
+ 	muram = fman_get_muram(fman_pcd_get_fman(pcd));
+ 	if (!muram)
+@@ -447,11 +630,14 @@
+ 	t->pcd = pcd;
+ 	t->port_id = port_id;
+ 	t->num_keys = hw->num_keys;
++	t->key_size = hw->dual_lane ?
++		(hw->dual_lane_pid ? CC_KEY_SIZE_DUAL_PID : CC_KEY_SIZE_DUAL) :
++		CC_KEY_SIZE;
+ 	INIT_LIST_HEAD(&t->node);
+ 
+ 	/* (num_keys + 1) rows: trailing row is the miss slot (RM 8.7.4.2/3). */
+ 	nrows = hw->num_keys + 1;
+-	match_sz = (size_t)nrows * 2 * CC_KEY_SIZE;
++	match_sz = (size_t)nrows * 2 * t->key_size;
+ 	ad_sz = (size_t)nrows * CC_AD_ENTRY_SIZE;
+ 	t->match_sz = match_sz;
+ 	t->ad_sz = ad_sz;
+@@ -487,7 +673,12 @@
+ 
+ 	/* Encode each key's match record + leaf result AD. */
+ 	for (i = 0; i < hw->num_keys; i++) {
+-		cc_pack_key(t->match, i, &hw->keys[i]);
++		if (hw->dual_lane && hw->dual_lane_pid)
++			cc_pack_key_dual_pid(t->match, i, &hw->keys[i]);
++		else if (hw->dual_lane)
++			cc_pack_key_dual(t->match, i, &hw->keys[i]);
++		else
++			cc_pack_key(t->match, i, &hw->keys[i]);
+ 		cc_write_leaf_ad(t->ad, i, hw->keys[i].target_fqid,
+ 				 hw->keys[i].target_qband,
+ 				 hw->keys[i].hm_handle);
+@@ -665,3 +856,7 @@
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_static_get_base);
++
++#if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
++#include "tests/fman_pcd_cc_dual_key_test.c"
++#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -240,6 +240,303 @@
+ }
+ 
+ /*
++ * install_v6 <port> <proto> <src-ip6> <dst-ip6> <sport> <dport> <fqid-hex>
++ *
++ * T-M6-8 VLAN-v6 V6-2 silicon de-risk (plans/ASK2-VLAN-REARCH.md, F-236):
++ * arm ONE dual-lane (46-byte, family-discriminated) CC key matching a real
++ * IPv6 5-tuple, with a PLAIN enqueue action to @fqid -- no HMTD, no VLAN
++ * edit. This is deliberately the smallest possible experiment: V6-1
++ * (cc_pack_key_dual(), board patch 0185) built the key packer and F-236
++ * built the KeyGen GEC opt-in, but NEITHER has ever driven a real frame
++ * through a CC-tree comparator before this. Point @fqid at a software
++ * capture sink (fman_port_oh_test's capture_init, T-M6-8 phase 1f) to get
++ * a definitive HIT/MISS signal: if a real matching v6 frame's classified
++ * and delivered there, the dual-lane extraction + comparator both work on
++ * this silicon. Uses fman_pcd_kg_port_attach_cc_dual(), NOT the plain
++ * fman_pcd_kg_port_attach_cc() install_vlan uses -- the whole point is
++ * exercising the new GEC-extraction opt-in.
++ */
++static int cc_test_install_v6(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec = NULL;
++	struct fman_port *rxport;
++	struct fman *fm;
++	char src_str[48], dst_str[48];
++	u8 src6[16], dst6[16];
++	u32 fqid, cc_base;
++	u8 port_id, proto;
++	u16 sport, dport;
++	int n, err;
++
++	n = sscanf(args, "install_v6 %hhi %hhu %47s %47s %hu %hu %x",
++		   &port_id, &proto, src_str, dst_str, &sport, &dport, &fqid);
++	if (n != 7 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++	    !(proto == 6 || proto == 17) || !fqid)
++		return -EINVAL;
++	if (in6_pton(src_str, -1, src6, -1, NULL) <= 0 ||
++	    in6_pton(dst_str, -1, dst6, -1, NULL) <= 0)
++		return -EINVAL;
++
++	fm = fman_pcd_get_fman(pcd);
++	if (!fm)
++		return -ENODEV;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec)
++		return -ENOMEM;
++	spec->num_keys = 1;
++	spec->miss_qband = 0;
++	spec->miss_fqid = 0;	/* miss stays on the existing RSS/SW path */
++	spec->dual_lane = true;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_IPV6 |
++			       FMAN_PCD_CC_HW_F_PROTO |
++			       FMAN_PCD_CC_HW_F_SRC_IP |
++			       FMAN_PCD_CC_HW_F_DST_IP |
++			       FMAN_PCD_CC_HW_F_SRC_PORT |
++			       FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].proto = proto;
++	memcpy(spec->keys[0].src_ip6, src6, 16);
++	memcpy(spec->keys[0].dst_ip6, dst6, 16);
++	spec->keys[0].src_port_be = cpu_to_be16(sport);
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_qband = 0;
++	spec->keys[0].target_fqid = fqid;
++	spec->keys[0].hm_handle = 0;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	if (err)
++		return err;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err)
++		goto out_destroy_cc;
++	rxport = fman_port_lookup_rx(fm, port_id);
++	if (!rxport) {
++		err = -ENODEV;
++		goto out_destroy_cc;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_port_set_cc_base(rxport, cc_base);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_pcd_kg_port_attach_cc_dual(pcd, port_id, cc_base);
++	if (err) {
++		(void)fman_port_set_cc_base(rxport, 0);
++		goto out_destroy_cc;
++	}
++
++	pr_info("fman_pcd cc_test: IPv6 dual-lane port 0x%02x CC base 0x%x -> fqid 0x%x %pI6c:%u -> %pI6c:%u proto %u\n",
++		port_id, cc_base, fqid, src6, sport, dst6, dport, proto);
++	return 0;
++
++out_destroy_cc:
++	(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++	return err;
++}
++
++/*
++ * install_v4gec <port> <proto> <src-ip> <dst-ip> <sport> <dport> <fqid-hex>
++ *
++ * T-M6-8 VLAN-v6 V6-2 isolating experiment (2026-09-02, after install_v6's
++ * null result): identical dual-lane machinery to install_v6 -- same
++ * fman_pcd_kg_port_attach_cc_dual() (F-236, EKFC forced to 0, GEC words
++ * written), same cc_pack_key_dual() 46-byte packer via spec->dual_lane --
++ * but a real IPv4 5-tuple instead of IPv6, exercising the DIFFERENT GEC
++ * codes (0x0b family/addr vs 0x1b) and the v4 lane of the family byte.
++ *
++ * Purpose: isolate whether EKFC=0 (GEC-only sourcing) itself is what the
++ * CC-tree comparator can't see, independent of anything IPv6-specific.
++ * If this ALSO misses a confirmed-arriving matching v4 frame, that's a
++ * clean, family-independent result: GEC-sourced composites (EKFC=0) don't
++ * reach wherever the CC comparator reads from, full stop -- not a v6
++ * quirk, not an offset-for-this-width quirk. If it HITS, the v6 miss is
++ * specific to something else (the v6 GEC codes, the wider key, etc).
++ */
++static int cc_test_install_v4gec(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec = NULL;
++	struct fman_port *rxport;
++	struct fman *fm;
++	char src_str[40], dst_str[40];
++	u32 src_ip, dst_ip, fqid, cc_base;
++	u8 port_id, proto;
++	u16 sport, dport;
++	int n, err;
++
++	n = sscanf(args, "install_v4gec %hhi %hhu %39s %39s %hu %hu %x",
++		   &port_id, &proto, src_str, dst_str, &sport, &dport, &fqid);
++	if (n != 7 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++	    !(proto == 6 || proto == 17) || !fqid)
++		return -EINVAL;
++	if (!in4_pton(src_str, -1, (u8 *)&src_ip, -1, NULL) ||
++	    !in4_pton(dst_str, -1, (u8 *)&dst_ip, -1, NULL))
++		return -EINVAL;
++
++	fm = fman_pcd_get_fman(pcd);
++	if (!fm)
++		return -ENODEV;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec)
++		return -ENOMEM;
++	spec->num_keys = 1;
++	spec->miss_qband = 0;
++	spec->miss_fqid = 0;	/* miss stays on the existing RSS/SW path */
++	spec->dual_lane = true;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_PROTO |
++			       FMAN_PCD_CC_HW_F_SRC_IP |
++			       FMAN_PCD_CC_HW_F_DST_IP |
++			       FMAN_PCD_CC_HW_F_SRC_PORT |
++			       FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].proto = proto;
++	spec->keys[0].src_ip_be = src_ip;
++	spec->keys[0].dst_ip_be = dst_ip;
++	spec->keys[0].src_port_be = cpu_to_be16(sport);
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_qband = 0;
++	spec->keys[0].target_fqid = fqid;
++	spec->keys[0].hm_handle = 0;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	if (err)
++		return err;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err)
++		goto out_destroy_cc;
++	rxport = fman_port_lookup_rx(fm, port_id);
++	if (!rxport) {
++		err = -ENODEV;
++		goto out_destroy_cc;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_port_set_cc_base(rxport, cc_base);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_pcd_kg_port_attach_cc_dual(pcd, port_id, cc_base);
++	if (err) {
++		(void)fman_port_set_cc_base(rxport, 0);
++		goto out_destroy_cc;
++	}
++
++	pr_info("fman_pcd cc_test: IPv4 dual-lane (GEC-only isolating test) port 0x%02x CC base 0x%x -> fqid 0x%x %pI4:%u -> %pI4:%u proto %u\n",
++		port_id, cc_base, fqid, &src_ip, sport, &dst_ip, dport, proto);
++	return 0;
++
++out_destroy_cc:
++	(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++	return err;
++}
++
++/*
++ * install_v6pid <port> <proto> <src-ip6> <dst-ip6> <sport> <dport> <fqid-hex>
++ *
++ * T-M6-8 VLAN-v6 V6-2c hybrid EKFC+GEC isolating experiment (F-238,
++ * 2026-09-02, after install_v6/install_v4gec's family-independent MISS):
++ * install_v6 and install_v4gec both proved an all-GEC (EKFC=0) composite
++ * is invisible to the CC-tree comparator, regardless of family. This verb
++ * tests the other half of that finding -- keep KGSE_EKFC nonzero
++ * (KG_SCH_KN_PORT_ID alone, 0x80000000) instead of zeroing it, via
++ * fman_pcd_kg_port_attach_cc_dual_ekfc() (F-238), and pack the matching
++ * 47-byte PORT_ID-prefixed key via cc_pack_key_dual_pid()
++ * (spec->dual_lane_pid). If a real matching v6 frame HITS here, the
++ * comparator needs a genuine nonzero EKFC known field, not GEC content, to
++ * see a GEC-sourced composite -- and the fix for VLAN-v6 is to always
++ * carry PORT_ID (or another known field) alongside the GEC lanes. If it
++ * STILL misses, the gap is elsewhere (not an EKFC-vs-GEC sourcing issue).
++ */
++static int cc_test_install_v6pid(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec = NULL;
++	struct fman_port *rxport;
++	struct fman *fm;
++	char src_str[48], dst_str[48];
++	u8 src6[16], dst6[16];
++	u32 fqid, cc_base;
++	u8 port_id, proto;
++	u16 sport, dport;
++	int n, err;
++
++	n = sscanf(args, "install_v6pid %hhi %hhu %47s %47s %hu %hu %x",
++		   &port_id, &proto, src_str, dst_str, &sport, &dport, &fqid);
++	if (n != 7 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++	    !(proto == 6 || proto == 17) || !fqid)
++		return -EINVAL;
++	if (in6_pton(src_str, -1, src6, -1, NULL) <= 0 ||
++	    in6_pton(dst_str, -1, dst6, -1, NULL) <= 0)
++		return -EINVAL;
++
++	fm = fman_pcd_get_fman(pcd);
++	if (!fm)
++		return -ENODEV;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec)
++		return -ENOMEM;
++	spec->num_keys = 1;
++	spec->miss_qband = 0;
++	spec->miss_fqid = 0;	/* miss stays on the existing RSS/SW path */
++	spec->dual_lane = true;
++	spec->dual_lane_pid = true;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_IPV6 |
++			       FMAN_PCD_CC_HW_F_PROTO |
++			       FMAN_PCD_CC_HW_F_SRC_IP |
++			       FMAN_PCD_CC_HW_F_DST_IP |
++			       FMAN_PCD_CC_HW_F_SRC_PORT |
++			       FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].proto = proto;
++	memcpy(spec->keys[0].src_ip6, src6, 16);
++	memcpy(spec->keys[0].dst_ip6, dst6, 16);
++	spec->keys[0].src_port_be = cpu_to_be16(sport);
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_qband = 0;
++	spec->keys[0].target_fqid = fqid;
++	spec->keys[0].hm_handle = 0;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	if (err)
++		return err;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err)
++		goto out_destroy_cc;
++	rxport = fman_port_lookup_rx(fm, port_id);
++	if (!rxport) {
++		err = -ENODEV;
++		goto out_destroy_cc;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_port_set_cc_base(rxport, cc_base);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_pcd_kg_port_attach_cc_dual_ekfc(pcd, port_id, cc_base);
++	if (err) {
++		(void)fman_port_set_cc_base(rxport, 0);
++		goto out_destroy_cc;
++	}
++
++	pr_info("fman_pcd cc_test: IPv6 dual-lane+PID (hybrid EKFC+GEC) port 0x%02x CC base 0x%x -> fqid 0x%x %pI6c:%u -> %pI6c:%u proto %u\n",
++		port_id, cc_base, fqid, src6, sport, dst6, dport, proto);
++	return 0;
++
++out_destroy_cc:
++	(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++	return err;
++}
++
++/*
+  * install_vlan <port> <proto> <src-ip> <dst-ip> <sport> <dport>
+  *              <target-fqid-hex> <pop|push> <vid> [tpid-hex] [pcp]
+  *
+@@ -600,6 +897,18 @@
+ 		ret = cc_test_install_vlanr(pcd, kbuf);
+ 		if (ret == 0)
+ 			ret = count;
++	} else if (strncmp(kbuf, "install_v6 ", 11) == 0) {
++		ret = cc_test_install_v6(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
++	} else if (strncmp(kbuf, "install_v4gec ", 14) == 0) {
++		ret = cc_test_install_v4gec(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
++	} else if (strncmp(kbuf, "install_v6pid ", 14) == 0) {
++		ret = cc_test_install_v6pid(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
+ 	} else if (strncmp(kbuf, "install_vlan ", 13) == 0) {
+ 		ret = cc_test_install_vlan(pcd, kbuf);
+ 		if (ret == 0)
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -277,6 +277,33 @@
+ 			       u32 cc_group_off);
+ 
+ /**
++ * fman_pcd_kg_port_attach_cc_dual() - like fman_pcd_kg_port_attach_cc(),
++ * but arms the port's scheme for the 46-byte dual-lane GEC extraction
++ * (T-M6-8 VLAN-v6 V6-2, F-236) instead of the plain 16-byte v4 EKFC
++ * composite -- required when the CC tree being attached was installed
++ * with struct fman_pcd_cc_hw_spec.dual_lane set.
++ *
++ * Return: same as fman_pcd_kg_port_attach_cc().
++ */
++int fman_pcd_kg_port_attach_cc_dual(struct fman_pcd *pcd, u8 hw_port_id,
++				    u32 cc_group_off);
++
++/**
++ * fman_pcd_kg_port_attach_cc_dual_ekfc() - like
++ * fman_pcd_kg_port_attach_cc_dual(), but leaves KGSE_EKFC set to
++ * KG_SCH_KN_PORT_ID (0x80000000) instead of zeroing it (T-M6-8 VLAN-v6
++ * V6-2c, F-238 isolating experiment: does the CC-tree comparator need a
++ * real nonzero EKFC known field, not just GEC content, to see a
++ * GEC-sourced composite?). Pairs with struct fman_pcd_cc_hw_spec.dual_lane
++ * + a tree installed via cc_pack_key_dual_pid()'s 47-byte PORT_ID-prefixed
++ * layout -- NOT plain cc_pack_key_dual().
++ *
++ * Return: same as fman_pcd_kg_port_attach_cc().
++ */
++int fman_pcd_kg_port_attach_cc_dual_ekfc(struct fman_pcd *pcd, u8 hw_port_id,
++					 u32 cc_group_off);
++
++/**
+  * fman_pcd_kg_port_detach_cc() - restore an RX port's RSS scheme to the
+  * plain BMI-enqueue path (reverse of fman_pcd_kg_port_attach_cc()).
+  * @pcd:        PCD subsystem handle
+@@ -489,6 +516,27 @@
+ 	u32 miss_fqid;
+ 	u32 miss_fe_off;
+ 	struct fman_pcd_cc_hw_key keys[FMAN_PCD_CC_HW_MAX_KEYS];
++	bool dual_lane;	/* T-M6-8 VLAN-v6 V6-2: use the 46-byte family-
++			 * discriminated dual-lane key (cc_pack_key_dual(),
++			 * CC_KEY_SIZE_DUAL) instead of the plain 16-byte v4
++			 * key (cc_pack_key(), CC_KEY_SIZE) -- and skip the
++			 * FMAN_PCD_CC_HW_F_IPV6 rejection loop. False for
++			 * every existing caller, so the shipped v4-only VLAN
++			 * CC-tree path is byte-identical. The port's KeyGen
++			 * scheme must separately be armed via
++			 * fman_pcd_kg_port_attach_cc_dual() (not the plain
++			 * fman_pcd_kg_port_attach_cc()) or the extracted key
++			 * width won't match what this tree compares.
++			 */
++	bool dual_lane_pid;	/* T-M6-8 VLAN-v6 V6-2c: like @dual_lane, but
++				 * packs the 47-byte PORT_ID-prefixed layout
++				 * (cc_pack_key_dual_pid(), CC_KEY_SIZE_DUAL_PID)
++				 * for use with a scheme armed via
++				 * fman_pcd_kg_port_attach_cc_dual_ekfc(). Ignored
++				 * unless @dual_lane is also set; @dual_lane alone
++				 * (this false) keeps the plain 46-byte
++				 * cc_pack_key_dual() path byte-identical.
++				 */
+ };
+ 
+ /**

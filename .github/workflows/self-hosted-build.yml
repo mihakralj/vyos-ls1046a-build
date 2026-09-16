@@ -22,7 +22,7 @@ on:
         type: boolean
         default: false
       kunit:
-        description: 'KUnit debug build: enable CONFIG_KUNIT + FMan PCD suites (run at boot) + ship ask_kunit.ko (default false)'
+        description: 'KUnit debug build: enable CONFIG_KUNIT + FMan PCD suites (run at boot) + ship ask_kunit.ko + CONFIG_DEBUG_LIST/PROVE_RCU/PROVE_LOCKING (default false)'
         type: boolean
         default: false
 

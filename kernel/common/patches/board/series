@@ -9,26 +9,16 @@
 # 0068–0077: FMan DPAA flavor ops + XDP pool setup
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0068-dpaa-flavor-ops.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0069-dpaa-flavor-hooks.patch
+# patch-series-cleanup (2026-09-11): squashed 0069(+0069a)+0070+0071+0072.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0069a-dpaa-flavor-ops-retro-attach.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0070-dpaa1-xsk-wakeup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0071-dpaa1-xsk-pool-setup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0072-dpaa1-xsk-zc-datapath-scaffold.patch
+0069-dpaa-flavor-ops-hooks-xsk-wakeup-pool-setup-scaffold.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0073-dpaa-af-xdp-pool-skeleton.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0074-dpaa-af-xdp-pool-wakeup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0075a-dpaa-af-xdp-pool-liodn-and-attach-validation.patch
+# patch-series-cleanup (2026-09-11): squashed 0075a+0075b+0075c.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0075b-dpaa-af-xdp-pool-attach-bman-seed-rcu.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0075c-dpaa-af-xdp-pool-remove-liodn-gate.patch
+0075-dpaa-af-xdp-pool-liodn-attach-bman-seed.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0076-dpaa-af-xdp-pool-detach.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -42,35 +32,23 @@
 0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0082-dpaa-af-xdp-pool-qmap-debugfs.patch
+# patch-series-cleanup (2026-09-11): squashed 0082(+0082b)+0083+0084+0085.
 # Upstream-Status: Inappropriate | Risk-Tier: C
-0082b-dpaa-dedicated-qman-channels-per-qband.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0083-dpaa-rx-xsk-branch-eligibility-probe.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0084-dpaa-napi-hooked-bman-refill.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0085-dpaa-tx-zc-and-inflight-backpressure.patch
+0082-dpaa-af-xdp-qmap-eligibility-refill-tx-zc.patch
 
 # ── FMan PCD subsystem bootstrap ──
 # 0086–0091a: FMan capabilities, CC stub, HM stub, policer
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0086-dpaa-fman-caps-detection-and-cc-stub.patch
+# patch-series-cleanup (2026-09-11): squashed 0086+0086a+0086b.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0086a-dpaa-fman-caps-probe-dt.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0086b-dpaa-fman-cc-productive-structs.patch
+0086-dpaa-fman-caps-detection-cc-stub.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch
+# patch-series-cleanup (2026-09-11): squashed 0090+0090a.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0090-dpaa-fman-hm-stub.patch
+0090-dpaa-fman-hm-stub-productive-structs.patch
+# patch-series-cleanup (2026-09-11): squashed 0091+0091a.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0090a-dpaa-fman-hm-productive-structs.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0091-dpaa-fman-policer-stub.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0091a-dpaa-fman-policer-productive-structs.patch
+0091-dpaa-fman-policer-stub-productive-structs.patch
 
 # ── FMan PCD core ──
 # 0092–0100: PCD subsystem, KeyGen, CC, HM, policer
@@ -84,41 +62,24 @@
 0095-dpaa1-xsk-fill-ring-guard-audit.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0096-dpaa1-true-zc-rx-recover-readside.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0097-fman-pcd-keygen.patch
+# patch-series-cleanup (2026-09-11): squashed 0097+0098+0099+0100.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0098-fman-pcd-cc-static-install.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0099-fman-pcd-hm-install.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0100-fman-pcd-plcr-install.patch
+0097-fman-pcd-keygen-cc-hm-plcr-install.patch
 
 # ── DPAA / FMan port primitives ──
 # 0101–0106: VLAN strip, bpool, CC base, KeyGen graft
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch
+# patch-series-cleanup (2026-09-11): squashed 0102+0102b.
 # Upstream-Status: Inappropriate | Risk-Tier: C
-0102-fman-port-set-rx-bpool-primitive.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0102b-fman-port-debug-readback.patch
+0102-fman-port-set-rx-bpool-primitive-debug-readback.patch
+# patch-series-cleanup (2026-09-11): squashed 0103a/b/c/e/f/g (no 0103d
+# ever existed -- pre-existing gap, not introduced by this squash).
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0103a-dpaa1-true-zc-rx-recover-swring.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0103b-dpaa1-true-zc-rx-reprogram-redirect.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0103f-dpaa1-true-zc-rx-rxhook-before-bpidpool.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0103g-dpaa1-true-zc-rx-register-zc-rxq.patch
+0103-dpaa1-true-zc-rx-recovery-and-registration.patch
+# patch-series-cleanup (2026-09-11): squashed 0104+0104a+0104b.
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0104-dpaa-ingress-policer-tc-matchall-bridge.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0104a-dpaa-netdev-advertise-hw-tc.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0104b-dpaa-ceetm-stub.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0105-fman-port-set-cc-base-primitive.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -158,56 +119,19 @@
 0119-fman-pcd-hm-l3-forward-ops.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0120-fman-pcd-hm-nexthop-dedup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0121-dpaa-export-cc-target-resolvers.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A (new file/API; T-M6-8 VLAN R2)
-0121a-fman-pcd-hm-vlan-dedup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R3a)
-0121c-fman-pcd-cc-test-vlan-hm.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A (new API; T-M6-8 VLAN R4a)
-0121d-fman-pcd-hm-vlan-route-dedup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4b)
-0121e-fman-pcd-cc-test-vlan-route.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c)
-0121f-fman-pcd-cc-test-teardown-quiesce.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C (debug harness; T-M6-8 VLAN R4c-pre)
-0121g-fman-pcd-cc-test-vlan-coex.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-1)
-0121h-fman-cc-miss-fe-production-api.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A (changed exported API; T-M6-8 VLAN R4d)
-0121j-fman-pcd-hm-vlan-route-translate.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B (widens an existing bound, no new API)
-0121k-fman-pcd-cc-max-keys-64.patch
+# patch-series-cleanup (2026-09-11): squashed 0121/0121a/0121c-0121l (11
+# incremental review slices) into one patch. See its header for the full
+# list of originals and the CI checkpoints used to verify byte-identical
+# content.
 # Upstream-Status: Inappropriate | Risk-Tier: A (changes live CC match-key format + scheme EKFC)
-0121l-fman-pcd-cc-ekfc-port-id.patch
+0121-fman-cc-hm-vlan-route-support.patch
 # ── FE-VM / ehash / FE chain ──
-# 0122–0133: FE ehash init, port support, singletons, ehash table,
-#            MURAM genpool, ENQ root, flow insert, offload engage,
-#            DMA coherent, hash object, arm debugfs, AC_CC
+# patch-series-cleanup (2026-09-11): squashed 0122-0133 (12 sequential
+# patches building one FE-VM/ehash arc, per this section's own original
+# comment) into one patch. See its header for the CI checkpoints used
+# to verify byte-identical content.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0122-fman-pcd-fe-ehash-init.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0123-fman-pcd-fe-port-support.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0124-fman-pcd-fe-vm-singletons.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0125-fman-pcd-fe-ehash-table.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0126-fman-pcd-muram-genpool.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0127-fman-pcd-fe-vm-enq-root.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0128-fman-pcd-fe-vm-flow-insert.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0129-fman-pcd-offload-engage.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0130-fman-pcd-fe-ehash-dma-coherent.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0131-fman-pcd-fe-hash-object.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0132-fman-pcd-fe-arm-debugfs.patch
-# Upstream-Status: Inappropriate | Risk-Tier: C
-0133-fman-pcd-fe-arm-real-accc.patch
+0122-fman-pcd-fe-vm-chain.patch
 
 # ── CAAM + FE context + TX bypass + manip ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -246,14 +170,6 @@
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0153-fman-pcd-fe-engage-api.patch
 
-# 2026-08-30 (fold): relocated from its old series slot right after 0121h.
-# 0121i's diff targets fman_pcd_fe_enq_get_offset as anchor context, but
-# that function is only introduced by 0153 (above) -- applying 0121i in
-# its original numeric position always failed with "does not apply"
-# because the anchor didn't exist yet. Content unchanged, order-only fix.
-# Upstream-Status: Inappropriate | Risk-Tier: B (API; T-M6-8 VLAN R4c-2)
-0121i-fman-export-fe-root-offset.patch
-
 # ── T1 typing fix (§16.2) ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0154-fman-port-lookup-rx-typing.patch
@@ -285,12 +201,10 @@
 4010-clk-qoriq-ls1046a-cmux-full-range.patch
 
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
+# patch-series-cleanup (2026-09-11): squashed 0155+0156+0157 (tight,
+# blob-chained fe_arm refinement, fman_pcd.c only). See its header.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0155-fman-pcd-fe-arm-allow-zero-offset.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0156-fman-pcd-fe-arm-disengage-port-del.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0157-fman-pcd-fe-arm-typed-impl.patch
+0155-fman-pcd-fe-arm-zero-offset-disengage-typed-impl.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0158-fman-pcd-fqid-resolution-compose.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -321,139 +235,18 @@
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0173-fman-pcd-fixup-fold.patch
 
-# ── ASK2 OH-port re-enqueue infra, phase 1a (2026-09-01) ──
-# T-M6-8 VLAN-via-OH-port re-architecture (plans/ASK2-VLAN-REARCH.md),
-# proving ground for the same OH-port primitive IPsec ESP offload needs.
-# Binds the 6 fsl,fman-v3-port-oh devicetree nodes (hw id 0x02-0x07,
-# live-confirmed unbound 2026-09-01) mainline never matched. Probe-only:
-# maps the register window, writes nothing. FMBM_OCFG bring-up is a
-# separate later increment.
+# ── ASK2 OH-port re-enqueue infra, phase 1a-1g (2026-09-01/02) ──
+# patch-series-cleanup (2026-09-11): squashed 0175+0176+0177+0178+0179+
+# 0180+0181+0182+0183+0184 into one patch. 0181's full board-incident
+# narrative (fman_port_active_list double-insertion, reboot required)
+# is preserved verbatim in its header -- see there.
 # Upstream-Status: Inappropriate | Risk-Tier: A
-0175-fman-port-oh-type.patch
+0175-fman-port-oh-reenqueue-infra.patch
 
-# Phase 1b: RM 5.5.7.6 FMBM_O* register bring-up + the fman_set_port_params()
-# mac_mfl aliasing fix found by review (hw_port_id_to_sw_port_id() silently
-# maps every O/H hw id to mac_id 0). Still fully dormant: FMBM_OCFG[EN] and
-# fman_port_set_oh_cc_base() are new exported functions, called from nowhere
-# yet. See plans/ASK2-VLAN-REARCH.md.
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0176-fman-port-oh-bringup.patch
-
-# Phase 1c: hand-arm debugfs (/sys/kernel/debug/fman_port_oh_test/bringup)
-# to exercise 0176's fman_port_config()/fman_port_init() for the first time
-# on real silicon. FMBM_OCFG[EN] stays 0 -- de-risk only, no live traffic
-# path yet. Self-contained in fman_port.c (see patch body for why, not
-# routed through fman_pcd.c's cc_test debugfs tree).
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0177-fman-port-oh-test-debugfs.patch
-
-# Fix, board-found 2026-09-01: 0177's bringup lookup only searched
-# fman_port_active_list, which fman_port_init() populates -- but nothing
-# had ever called it for an O/H port (that's what bringup exists to do),
-# so the list was empty. Registers O/H ports at probe time instead and
-# fixes the lookup to match dts_params.id/.type (valid pre-init) rather
-# than port_id/port_type (only set by fman_port_config() itself).
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0178-fman-port-oh-probe-time-registry.patch
-
-# Polish, board-found 2026-09-01: "bringup 4" succeeded after 0178 (both
-# fman_port_config()/fman_port_init() returned 0) but dmesg showed a
-# spurious WARN_ON from verify_size_of_fifo() -- unmodified upstream,
-# only ever handled TX/RX, left both size sums at 0 for O/H. Harmless
-# (no functional effect) but noisy; O/H now takes the TX branch.
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0179-fman-port-oh-fifo-size-warn.patch
-
-# Phase 1d step 1: "bringup" accepts an optional target-FQID hex arg
-# (FMBM_OFQID/OEFQID), and a new "enable <port> <0|1>" verb wraps
-# fman_port_oh_enable() (FMBM_OCFG[EN]) -- built in 0176, never exposed
-# until now. Still no CC tree, no QMan test FQ, nothing feeding the port
-# traffic -- FMBM_OCFG[EN]=1 gets tested in isolation first.
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0180-fman-port-oh-enable-target-fqid.patch
-
-# Regression fix, board-found 2026-09-01: calling "bringup" on an O/H
-# port (0177/0178's probe-time fman_port_active_list registration,
-# followed by fman_port_init()'s own unconditional list_add_tail() on
-# the same node) double-inserts that port into the shared list,
-# corrupting it for EVERY port on the fman. Silently broke
-# fman_port_lookup_rx() for unrelated physical ports (-ENODEV from
-# fman_cc_tree_install(), surfaced as "fe_flow_insert=-19" board-wide)
-# -- found while diagnosing an unrelated VLAN offload bug report.
-# Guards both list_add_tail() call sites with a new bool field so the
-# node links at most once regardless of call order. Boards that
-# already ran "bringup" need a reboot to clear the corrupted list.
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0181-fman-port-active-list-double-add.patch
-
-# Phase 1e of the O/H-port re-enqueue infra: schedule a QMan FQ onto the
-# O/H port's own dequeue channel (fman_port_get_qman_channel_id(), already
-# populated for O/H ports by 0175) via new "sched_fq"/"unsched_fq" debugfs
-# verbs, mirroring ask_hw.c's dedicated-TX-FQ pattern. Board port 0x04 is
-# armed+idle after 0175-0181 (2026-09-02) but nothing has ever fed it a
-# frame; this is the piece that lets a frame actually reach it.
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0182-fman-port-oh-input-fq.patch
-
-# Phase 1f: close the loop on phase 1e's input FQ with an actual frame.
-# New "capture_init"/"capture_fini" verbs create a software-owned sink FQ
-# (own dqrr callback, decoupled from dpaa_eth's own RX FQs -- injecting
-# into eth3/eth4's live kernel RX FQ would misinterpret this tool's
-# hand-rolled buffer as dpaa_eth's own per-buffer bookkeeping). New
-# "inject <port>" builds one minimal frame and qman_enqueue()s it into
-# the port's phase-1e input FQ. Not yet board-tested.
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0183-fman-port-oh-inject-capture.patch
-
-# Phase 1g: read-only diagnostic after phase 1f's clean NULL result
-# (inject succeeded, capture saw 0 frames, no wedge). New "dump <port>"
-# reads back FMBM_OCFG/OFDNE/OFNE/OFPNE/OFQID/OEFQID/OCCB plus
-# qman_query_fq_np() on the input+capture FQs, to tell whether the O/H
-# port ever dequeued the injected frame at all vs. lost it downstream.
-# Not yet board-tested.
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0184-fman-port-oh-dump-diagnostics.patch
-
-# T-M6-8 VLAN-v6 V6-1 (first increment of extending Option A's shipped
-# CC-tree+HMTD VLAN offload from IPv4-only to IPv4+IPv6): dormant
-# cc_pack_key_dual(), a 46-byte family-discriminated CC-tree match key
-# mirroring ask.ko's already-proven ehash dual-lane key byte-for-byte.
-# Purely additive -- cc_pack_key()/CC_KEY_SIZE untouched, no caller yet.
-# KUnit-covered (fman_pcd_cc_dual_key_test.c).
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0185-fman-pcd-cc-dual-lane-key-dormant.patch
-
-# T-M6-8 VLAN-v6 V6-2: wires 0185's cc_pack_key_dual() into
-# fman_pcd_cc_static_install() via a new dual_lane flag (default false,
-# byte-identical for every existing caller), fixes the CONT_LOOKUP
-# KeyLength field to use the tree's real key width instead of the global
-# v4 constant, and adds a cc_test "install_v6" debugfs verb for the
-# silicon de-risk. Depends on fixup F_236.py (bin/kernel-fixups/, KeyGen
-# GEC opt-in for CC-tree schemes) having run. Not yet board-tested.
+# ── T-M6-8 VLAN-v6 dual-lane CC-tree key (2026-09-02) ──
+# patch-series-cleanup (2026-09-11): squashed 0185+0186+0187+0188.
 # Upstream-Status: Inappropriate | Risk-Tier: B
-0186-fman-pcd-cc-dual-lane-install.patch
-
-# T-M6-8 VLAN-v6 V6-2 isolating experiment, added after install_v6's
-# board-confirmed null result (F-236's GEC scheme reconfig genuinely
-# works, but a real v6 frame still misses the CC-tree comparator). Adds
-# "install_v4gec" -- identical GEC/EKFC=0 dual-lane machinery but a real
-# IPv4 5-tuple, to determine whether EKFC=0 sourcing itself (not width,
-# not v6-specific GEC codes) is what the comparator can't see. Not yet
-# board-tested.
-# Upstream-Status: Inappropriate | Risk-Tier: B
-0187-fman-pcd-cc-test-v4gec-isolating.patch
-
-# T-M6-8 VLAN-v6 V6-2c hybrid EKFC+GEC isolating experiment, added after
-# install_v6/install_v4gec's board-confirmed family-independent null
-# result (all-GEC, EKFC=0 composites are invisible to the CC-tree
-# comparator). Keeps KGSE_EKFC nonzero (PORT_ID-only, 0x80000000) instead
-# of zeroing it, via fman_pcd_kg_port_attach_cc_dual_ekfc() (companion
-# fixup F_238.py) and a new 47-byte PORT_ID-prefixed key packer
-# (cc_pack_key_dual_pid(), does not touch the proven cc_pack_key_dual()).
-# Adds "install_v6pid" cc_test verb. Depends on fixup F_238.py having run
-# (which itself depends on F_236.py). Not yet board-tested.
-# Upstream-Status: Inappropriate | Risk-Tier: B
-0188-fman-pcd-cc-hybrid-ekfc-gec-isolating.patch
+0185-fman-pcd-cc-dual-lane-key-install-tests.patch
 
 # T-M6-8 Option D phase 1h: O/H CC-tree AD-target de-risk. 0188's V6-2c
 # result proved CC-tree is EKFC-only (GEC never visible), closing the
@@ -544,3 +337,16 @@
 0199-fman-pcd-fe-flow-add-drop-ctx-trace.patch
 0200-fman-pcd-fe-flow-add-drop-fqid-zero.patch
 0201-fman-vlan-route-ipv6-l3-forward.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0202-fman-pcd-cc-bridge-mac-dst-key-dormant.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0203-fman-pcd-cc-3tuple-key.patch
+0204-fman-pcd-cc-bridge-key-src-mac.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0205-fman-pcd-cc-bridge-key-l2-builder.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0206-fman-pcd-cc-bridge-l2-install-dispatch.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0207-fman-pcd-kg-port-attach-cc-l2.patch
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0208-fman-pcd-cc-l2-key-real-port-id.patch
