@@ -2,6 +2,65 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
+> **STATUS UPDATE 2026-09-16 — §8.2b's AD-content hypothesis space is now
+> EXHAUSTED. The bug is not in anything software writes.** Two more
+> hypotheses were tested and refuted overnight (2026-09-15/16):
+> **NADEN+HMTD chaining** (new debugfs command `install_l2fwd`, chains the
+> bridge_l2 leaf through a minimal, valid `IPV4_FORWARD` HMTD via NADEN,
+> exactly matching the structure of every previously-proven cross-port
+> silicon forward in this project) — result identical to the bare
+> enqueue-only AD: `rx dropped` on ingress matched sent frames exactly
+> (80/80), zero arrivals at the target. Refuted. **Own-real-MAC variant**
+> (matching the port's own hardware address instead of an arbitrary
+> bridge-FDB-style MAC) — a *different*, unexplained signature (frames
+> bypass the CC tree entirely, delivered via normal kernel RX instead of
+> the drop-without-skb pattern every other test showed); inconclusive,
+> flagged as a separate open question, not informative for the core
+> mystery.
+>
+> **Then a new debugfs oracle (`fman_pcd_cc_seq_dump()` AD-table dump,
+> previously nonexistent — only the match table was ever readable) let
+> the actual live hardware AD content be checked directly against what
+> `cc_write_leaf_ad()` intends, instead of trusted or inferred from
+> counters.** Result: **byte-perfect, in both variants.** Bare `install_l2`:
+> `w0=0x000002bc` (exactly the fqid passed), `w1=0`, `w2=0x02000028`
+> (exactly `CC_AD_RES_NO_OM_VSPE | CC_NIA_FMCTL_PRE_BMI_ENQ`), `w3=0`.
+> HMTD-chained `install_l2fwd`: `w1=0x5a40` (a real HMTD handle offset),
+> `w2=0xa2000028` (exactly the same base NIA with `CC_AD_RES_NADEN |
+> CC_AD_RES_EXTENDED` correctly OR'd in). Every field, in both forms,
+> exactly matches the software's own encoding — no corruption, no
+> misalignment, nothing unexpected anywhere.
+>
+> **This rules out every software-controllable layer of the pipeline**:
+> KeyGen extraction (probe3, twice, §8.1), the CC comparator match (QMI
+> enqueue counters tracking sent frames almost 1:1, §8.2b's first pass),
+> and now the AD content itself (this update). What remains is FMan's own
+> internal execution of this AD once handed off — the FM_CTL microcode
+> behavior at `AC 0x28` (`PRE_BMI_ENQ`) and/or QMan's subsequent
+> scheduling/dequeue of the resulting frame — territory with no register
+> or MURAM content this project's software stack can write, read, or
+> otherwise directly inspect. **Working theory, not yet tested:** `AC 0x28`
+> (`PRE_BMI_ENQ`) may be fundamentally a same-port primitive (its one
+> silicon-proven use in this project, the `ethtool -N` ntuple-steering
+> path traced in the prior update, is same-port RX-queue steering) that
+> happens to also work for VLAN's R3b/R4b cross-port proofs specifically
+> *because* those flows chain through the HMTD/manip engine in a way this
+> project has not yet distinguished from a bare `AC 0x28` targeting a
+> foreign port's FQID directly — i.e. the actual working mechanism for
+> genuine cross-port silicon delivery may be something other than
+> `cc_write_leaf_ad()`'s own enqueue path, and B3 may need to route
+> bridge FDB hits through the same FE-VM/ehash "action" mechanism
+> `ask.ko`'s own proven NAT/routing insert path already uses
+> (`ask_hw_flow_insert()`'s 144-byte action structure, F-195), rather
+> than a bare CC-leaf AD, for cross-port bridge forwarding to work at
+> all. This is an architecture question now, not a bug hunt — the next
+> productive step is very likely vendor RM research on `AC 0x28`'s exact
+> semantics, or adapting the FE-VM action mechanism for a bridge target,
+> not another debugfs-side hypothesis test.
+>
+> All test config was cleanly reverted on `.185` and `.106`; production
+> traffic on eth3/eth4 was undisturbed throughout.
+>
 > **STATUS UPDATE 2026-09-15, third pass — decisive new evidence for §8.2b
 > via FMan's hardware counter/error-capture debugfs
 > (`/sys/kernel/debug/fman_pcd/0/dcsr/{qmi_err,kg_err,bmi_err}`), not
@@ -412,21 +471,22 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
   silicon coexistence. A corrected topology (real `.106` traffic as the
   actual source) is built and `traceroute`-verified but the proof has not
   been re-run on it yet.
-  **(b) CPU-bypassed HW forward on a CC HIT: precisely characterized,
-  still not achieved.** FMan's hardware QMI counters
-  (`fmqm_etfc`/`fmqm_dtfc` via `/sys/kernel/debug/fman_pcd/0/dcsr/qmi_err`)
-  prove the CC comparator matches and the AD's enqueue action genuinely
-  succeeds (500 sent frames → ~500 excess enqueues over background) —
-  `cc_pack_key_l2()`/`fman_pcd_kg_port_attach_cc_l2()`/the AD write are
-  vindicated — but the enqueued frames are essentially never dequeued
-  (~4 excess dequeues out of 500 enqueued), with no hardware error
-  flagged anywhere. Two earlier hypotheses (KG-scheme-attach contention
-  with ASK's own ehash; the target FQID needing prior real-traffic
-  warmup) were tested directly and ruled out. Current leading hypothesis:
-  a missing FQID channel/WQ-scheduling/DCA setup step that `ask.ko`'s own
-  production flow-insert path performs and `install_l2`'s raw AD write
-  does not. See the STATUS banner at the top of this file for full
-  detail.
+  **(b) CPU-bypassed HW forward on a CC HIT: AD-content hypothesis space
+  EXHAUSTED, still not achieved.** FMan's hardware QMI counters prove the
+  CC comparator matches and the AD's enqueue action genuinely succeeds,
+  and a new debugfs AD-table dump (F-251) proves the live hardware AD
+  content is byte-perfect against `cc_write_leaf_ad()`'s own intent, in
+  BOTH the bare and NADEN+HMTD-chained forms (`install_l2fwd`, F-250,
+  tested and refuted as a fix). Every software-controllable layer —
+  KeyGen extraction, comparator match, AD content — is now proven
+  correct. The gap is inside FMan's own execution of the AD once handed
+  off (`AC 0x28`/`PRE_BMI_ENQ` microcode, and/or QMan's dequeue
+  scheduling), not observable or controllable via any register/MURAM
+  write this project's software stack has access to. This has shifted
+  from a bug hunt to an architecture question — see the STATUS banner at
+  the top of this file for the working theory (bridge forwarding may
+  need `ask.ko`'s own FE-VM/ehash action mechanism, not a bare CC-leaf
+  AD, for genuine cross-port delivery) and next steps.
   **B3 remains gated on B2 PASS — do not start it until both (a) and (b)
   are resolved.**
 
