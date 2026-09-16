@@ -48,6 +48,8 @@ attribute-sets:
         type: u8
       - name: vlan
         type: u8
+      - name: bridge
+        type: u8
   -
     name: info
     name-prefix: ask-info-attr-
@@ -286,6 +288,7 @@ operations:
             - port-id
             - family-mask
             - vlan
+            - bridge
     -
       name: disengage
       attribute-set: top

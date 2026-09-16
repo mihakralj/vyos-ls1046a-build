@@ -1,0 +1,190 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2(T-M6-2 B2): add fman_pcd_kg_port_attach_cc_l2()
+
+Step 1 of 3 for B2's silicon de-risk proof (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md):
+a way to actually arm a port's KeyGen scheme to extract the bridge FDB
+L2 composite (PORT_ID|DA|SA|ETYPE) toward the CC comparator. Without
+this, patch 0206's cc_test install_l2 debugfs command has a tree to
+install but no scheme extracting the right bytes for it to ever match
+against.
+
+fman_pcd_kg_port_attach_cc_l2(), modeled directly on the existing plain
+fman_pcd_kg_port_attach_cc() (same preamble/error-restore/direct-scheme
+tail, copied verbatim): reprograms the port's bound KeyGen scheme's
+KGSE_EKFC to 0xe4000000 (KG_SCH_KN_PORT_ID | KG_SCH_KN_MACDST |
+KG_SCH_KN_MACSRC | KG_SCH_KN_ETYPE) and grafts it onto the given CC
+tree via KGSE_CCBS, exactly like the base attach_cc's IP-tuple case --
+just a different EKFC bit combination. No GEC/dual-lane machinery
+needed: every L2 field is a hard-parser "known" field with its own
+EKFC bit (plan §2 point 1), unlike the VLAN-v6 dual-lane family which
+needs GEC for IPv6.
+
+The 0xe4000000 EKFC value is not a guess: it's identical to the live
+vendor L2/bridge classification scheme observed on `.106` (scheme 11,
+1,225,734 packets, by far the busiest scheme on that board) -- reused
+from this project's own oracle read, not re-derived. What is NOT yet
+verified is whether the CC comparator on THIS board's silicon actually
+reads the bytes this EKFC extracts in the order cc_pack_key_l2() packs
+them -- that is plan §8.1's still-open read-only oracle question, the
+next step, not resolved by this patch.
+
+fman_pcd_kg_port_detach_cc() needs no changes: it already generically
+resets next_engine/cc_base_offset/cc_bits_sel to 0 for any attach_cc
+variant (plain/dual/dual_ekfc/l2 alike), matching existing behavior.
+
+Still fully dormant: nothing in-tree calls this function outside its
+own declaration. Live arming (actually calling it against a real
+sacrificial port) is a separate, deliberate operator action -- not
+performed by this patch.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index ae9759f..c1507a7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -64,6 +64,21 @@
+ #define KG_SCH_KN_IPDST1	0x00080000
+ #define KG_SCH_KN_L4PSRC	0x00000004
+ #define KG_SCH_KN_L4PDST	0x00000002
++/*
++ * T-M6-2 B2: hard-parser known-field bits for the bridge FDB L2 composite
++ * (PORT_ID|DA|SA|ETYPE). Named here (unlike the existing inline
++ * 0x80000000 literal for PORT_ID elsewhere in this file) because
++ * fman_pcd_kg_port_attach_cc_l2() below composes all four together, where
++ * a bare hex constant would be unreadable. Board-confirmed bit positions:
++ * live .106 KeyGen scheme 11 EKFC 0xe4000000 = PORT_ID|MACDST|MACSRC|
++ * ETYPE decomposes to exactly PORT_ID(bit31)|MACDST(bit30)|MACSRC(bit29)|
++ * ETYPE(bit26), matching plans/ASK2-BRIDGE-OFFLOAD-PLAN.md §2 point 1's
++ * documented hard-parser bit positions.
++ */
++#define KG_SCH_KN_PORT_ID	0x80000000
++#define KG_SCH_KN_MACDST	0x40000000
++#define KG_SCH_KN_MACSRC	0x20000000
++#define KG_SCH_KN_ETYPE		0x04000000
+ 
+ /*
+  * KG extract-source enumeration that mirrors the silicon-side
+@@ -766,6 +781,97 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_cc);
+ 
++/*
++ * fman_pcd_kg_port_attach_cc_l2() - like fman_pcd_kg_port_attach_cc(), but
++ * arms the port's scheme for the T-M6-2 B2 bridge FDB L2 composite
++ * (PORT_ID|DA|SA|ETYPE, matches cc_pack_key_l2()/CC_KEY_SIZE_L2=15)
++ * instead of the plain 14-byte IP-tuple EKFC composite.
++ *
++ * Unlike the VLAN-v6 dual-lane family below, this needs no GEC: every
++ * field in the L2 composite (PORT_ID, MACDST, MACSRC, ETHERTYPE) is a
++ * hard-parser "known" field with its own KGSE_EKFC bit, so a plain
++ * nonzero EKFC composite is sufficient, exactly like the base
++ * fman_pcd_kg_port_attach_cc()'s IP-tuple case -- just a different bit
++ * combination. gec_dual_lane/gec_keep_ekfc stay false/untouched.
++ *
++ * Board-confirmed EKFC value: 0xe4000000 = KG_SCH_KN_PORT_ID |
++ * KG_SCH_KN_MACDST | KG_SCH_KN_MACSRC | KG_SCH_KN_ETYPE, identical to the
++ * live vendor L2/bridge scheme observed on .106 (scheme 11). Composed
++ * from the same F-190 rule fman_pcd_kg_port_attach_cc()'s own comment
++ * states: the CC walker compares the KeyGen-EXTRACTED composite and
++ * never re-extracts, so this scheme's EKFC must deterministically match
++ * what cc_pack_key_l2() packs -- unverified beyond the aggregate EKFC
++ * value matching the vendor's own working scheme; the actual CC
++ * comparator byte-order/content for THIS specific composite has not
++ * been directly observed on this board (plan §8.1's oracle check is the
++ * next step, not this patch).
++ *
++ * Return: same as fman_pcd_kg_port_attach_cc().
++ */
++int fman_pcd_kg_port_attach_cc_l2(struct fman_pcd *pcd, u8 hw_port_id,
++				  u32 cc_group_off)
++{
++	struct fman_keygen *keygen;
++	struct keygen_scheme *slot;
++	struct fman *fman;
++	struct mutex *lock;
++	u32 saved_ccbs, saved_ekfc;
++	u8 saved_engine, id;
++	int err;
++
++	if (!pcd || !cc_group_off)
++		return -EINVAL;
++	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++
++	slot = kg_find_port_scheme(keygen, hw_port_id, &id);
++	if (!slot) {
++		mutex_unlock(lock);
++		return -ENODEV;
++	}
++
++	saved_engine = slot->next_engine;
++	saved_ccbs   = slot->cc_bits_sel;
++	saved_ekfc   = slot->ekfc;
++
++	slot->next_engine    = 2;
++	slot->cc_base_offset = 0;
++	slot->cc_bits_sel    = cc_group_off;
++	slot->ekfc           = KG_SCH_KN_PORT_ID | KG_SCH_KN_MACDST |
++				KG_SCH_KN_MACSRC | KG_SCH_KN_ETYPE;
++
++	slot->used = false;
++	err = keygen_scheme_setup(keygen, id, true);
++	if (err) {
++		slot->next_engine = saved_engine;
++		slot->cc_bits_sel = saved_ccbs;
++		slot->ekfc        = saved_ekfc;
++		slot->used = false;
++		(void)keygen_scheme_setup(keygen, id, true);
++		mutex_unlock(lock);
++		return err;
++	}
++
++	{
++		struct fman_port *rxport = fman_port_lookup_rx(fman, hw_port_id);
++
++		if (rxport)
++			(void)fman_port_set_kg_direct_scheme(rxport, id);
++	}
++
++	mutex_unlock(lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_cc_l2);
++
+ /*
+  * fman_pcd_kg_port_attach_cc_dual() - like fman_pcd_kg_port_attach_cc(),
+  * but arms the port's scheme for F-224/F-236 dual-lane GEC extraction
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index dd4dec7..171b8e3 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -276,6 +276,20 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 			       u32 cc_group_off);
+ 
++/**
++ * fman_pcd_kg_port_attach_cc_l2() - like fman_pcd_kg_port_attach_cc(), but
++ * arms the port's scheme for the T-M6-2 B2 bridge FDB L2 composite
++ * (PORT_ID|DA|SA|ETYPE, matches cc_pack_key_l2()/CC_KEY_SIZE_L2) instead
++ * of the plain 14-byte IP-tuple EKFC composite. No GEC/dual-lane needed:
++ * every L2 field is a hard-parser known field with its own EKFC bit.
++ * Board-confirmed EKFC value: 0xe4000000 (PORT_ID|MACDST|MACSRC|ETYPE),
++ * identical to the live vendor L2/bridge scheme observed on `.106`.
++ *
++ * Return: same as fman_pcd_kg_port_attach_cc().
++ */
++int fman_pcd_kg_port_attach_cc_l2(struct fman_pcd *pcd, u8 hw_port_id,
++				  u32 cc_group_off);
++
+ /**
+  * fman_pcd_kg_port_attach_cc_dual() - like fman_pcd_kg_port_attach_cc(),
+  * but arms the port's scheme for the 46-byte dual-lane GEC extraction

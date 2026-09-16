@@ -115,6 +115,16 @@ void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 
 /*
+ * CR-012: warms this port's no-confirm egress TX FQ cache. MUST be called
+ * only from genuinely safe process context (genl ASK_CMD_ENGAGE handler,
+ * debugfs engage write) -- never from ask_hw_offload_engage() or anything
+ * it calls, since that function is also reached from inside the
+ * flow-install callback (ask_hw_port_bind()) while flow_block_lock is
+ * held. See its definition in ask_hw.c for the full lock-order rationale.
+ */
+void ask_hw_prewarm_egress_fq(u8 hw_port_id);
+
+/*
  * PR14g-body-1 (M2.5g) - FMan PCD bring-up cache.
  *
  * struct ask_hw_pcd holds the per-FMan PCD handles that ask.ko owns
@@ -426,6 +436,17 @@ bool ask_hw_nat66_offload_armed(void);
 void ask_hw_offload_set_vlan(u8 hw_port_id, bool on);
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
 bool ask_hw_vlan_offload_armed(void);
+/*
+ * T-M6-2 L2 bridge offload gate (default-OFF, B0: no install path yet).
+ * Per-port model mirroring VLAN's, but with no global master-override param
+ * and no dedicated CLI leafNode -- ask_hw_offload_set_bridge() is called
+ * automatically by VyOS's `interfaces bridge` conf_mode for a member port
+ * that already has `offload ipv4`/`offload ipv6` armed, never directly by
+ * the user.
+ */
+void ask_hw_offload_set_bridge(u8 hw_port_id, bool on);
+bool ask_hw_bridge_offload_armed_port(u8 hw_port_id);
+bool ask_hw_bridge_offload_armed(void);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);
 void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
