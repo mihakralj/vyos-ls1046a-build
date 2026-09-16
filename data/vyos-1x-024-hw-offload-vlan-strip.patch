@@ -3,17 +3,22 @@ From: "miha.kralj" <miha.kralj@outlook.com>
 Date: Mon, 20 Jul 2026 03:57:11 +0000
 Subject: [PATCH] temp: 024
 
+Refreshed 2026-09-14: upstream refactored set_lro() to delegate to a new
+_set_offload() helper (adds a warn= kwarg), which shifted the trailing
+context this patch's set_vlan_strip() insertion anchored on. No functional
+change to what this patch adds -- context only.
+
 ---
- .../interfaces_ethernet.xml.in                | 90 +++++++++++++++++++
- python/vyos/ethtool.py                        |  3 +
- python/vyos/ifconfig/ethernet.py              | 28 ++++++
+ interface-definitions/interfaces_ethernet.xml.in | 90 ++++++++++++++++++++++++
+ python/vyos/ethtool.py                           |  3 +
+ python/vyos/ifconfig/ethernet.py                 | 28 ++++++++
  3 files changed, 121 insertions(+)
 
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index e981481..6cf3373 100644
+index e110bd48f..b7df88fab 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -133,6 +133,96 @@
+@@ -139,6 +139,96 @@
                </leafNode>
              </children>
            </node>
@@ -111,10 +116,10 @@ index e981481..6cf3373 100644
              <properties>
                <help>Link speed</help>
 diff --git a/python/vyos/ethtool.py b/python/vyos/ethtool.py
-index 85e228e..00ca6f2 100644
+index 66dc6bb89..9cb15c2cd 100644
 --- a/python/vyos/ethtool.py
 +++ b/python/vyos/ethtool.py
-@@ -177,6 +177,9 @@ def get_scatter_gather(self):
+@@ -184,6 +184,9 @@ def get_scatter_gather(self):
      def get_tcp_segmentation_offload(self):
          return self._get_generic('tcp-segmentation-offload')
  
@@ -125,10 +130,10 @@ index 85e228e..00ca6f2 100644
          # Configuration of RX/TX ring-buffers is not supported on every device,
          # thus when it's impossible return None
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index b7b7b12..0d7fc25 100644
+index ab5c8a0b8..ddb792b5d 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -78,6 +78,10 @@ def feature(ifname, option, value):
+@@ -80,6 +80,10 @@ def feature(ifname, option, value):
                  'validate': lambda v: assert_list(v, ['on', 'off']),
                  'possible': lambda i, v: EthernetIf.feature(i, 'tso', v),
              },
@@ -139,9 +144,9 @@ index b7b7b12..0d7fc25 100644
          },
      }
  
-@@ -335,6 +339,30 @@ def set_lro(self, state):
-                 )
-         return False
+@@ -345,6 +349,30 @@ def set_lro(self, state, warn=True):
+             'lro', 'large-receive-offload', state, enabled, fixed, warn
+         )
  
 +    def set_vlan_strip(self, state):
 +        """
@@ -172,4 +177,3 @@ index b7b7b12..0d7fc25 100644
              raise ValueError('Value out of range')
 -- 
 2.39.5
-

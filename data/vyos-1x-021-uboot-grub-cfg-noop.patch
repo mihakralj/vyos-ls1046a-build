@@ -1,21 +1,39 @@
 From 4fd901ee9dcc29091094825a4e58304e7e05114e Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
 Date: Mon, 20 Jul 2026 03:56:43 +0000
-Subject: [PATCH] temp: vyos-1x-021-uboot-grub-cfg-noop.patch
+Subject: [PATCH] compat.py: no-op the legacy grub.cfg compat path on U-Boot
+ boards (v2, refreshed 2026-09-10)
+
+v2: dropped the grub_util.py hunk entirely -- upstream independently added
+@image.if_persistence (+ if_not_container/if_not_live_boot) decorators to
+set_serial_console()/update_serial_console()/update_kernel_cmdline_options()
+since this patch was first written. if_persistence's has_persistence() ==
+bool(disk.find_persistence()) is False on a U-Boot board (no GRUB
+persistence partition mounted), so those three functions now already
+short-circuit to a no-op there -- the original _is_uboot_board() guards on
+them are fully superseded, not merely redundant.
+
+compat.py's mode()/render_grub_cfg() are NOT behind any such decorator
+(grub_cfg_update's own wrapper calls mode() unconditionally, and mode()
+returning True on a U-Boot board -- get_cfg_ver() reads a VYOS_CFG_VER that
+will never exist there, comparing as "below" SYSTEM_CFG_VER -- would still
+call render_grub_cfg(), which renders a template to
+f'{root_dir}/{GRUB_CFG_MAIN}' with root_dir='' i.e. straight to '/', an
+unwanted write to the live filesystem root). That part of the original
+patch is still needed and is kept, re-applied against the current file.
 
 ---
- python/vyos/system/compat.py    | 19 +++++++++++++++++++
- python/vyos/system/grub_util.py | 13 +++++++++++++
- 2 files changed, 32 insertions(+)
+ python/vyos/system/compat.py | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
 
 diff --git a/python/vyos/system/compat.py b/python/vyos/system/compat.py
-index 40b38b3..5011f69 100644
+index 40b38b366..5011f6973 100644
 --- a/python/vyos/system/compat.py
 +++ b/python/vyos/system/compat.py
 @@ -30,6 +30,18 @@
- 
+
  TMPL_GRUB_COMPAT: str = 'grub/grub_compat.j2'
- 
+
 +# LS1046A / U-Boot boards have no GRUB: /boot/grub/grub.cfg never exists.
 +# Detect once at import time so every grub_cfg_update() call short-circuits
 +# without raising FileNotFoundError from parse_menuentries() / vars_read().
@@ -32,8 +50,8 @@ index 40b38b3..5011f69 100644
  REGEX_VERSION = r'^menuentry "[^\n]*{\n[^}]*\s+linux /boot/(?P<version>\S+)/[^}]*}'
  REGEX_MENUENTRY = r'^menuentry "[^\n]*{\n[^}]*\s+linux /boot/(?P<version>\S+)/vmlinuz (?P<options>[^\n]+)\n[^}]*}'
 @@ -48,6 +60,10 @@ class DowngradingImageTools(Exception):
- 
- 
+
+
  def mode():
 +    # On U-Boot boards (LS1046A) there is no GRUB at all; never enter the
 +    # legacy grub.cfg compat path.
@@ -41,9 +59,9 @@ index 40b38b3..5011f69 100644
 +        return False
      if grub.get_cfg_ver() >= SYSTEM_CFG_VER:
          return False
- 
+
 @@ -327,6 +343,9 @@ def grub_cfg_fields(root_dir: str = '') -> dict:
- 
+
  def render_grub_cfg(root_dir: str = '') -> None:
      """Render grub.cfg for legacy compatibility"""
 +    # U-Boot boards (LS1046A) have no /boot/grub/grub.cfg to render.
@@ -51,45 +69,4 @@ index 40b38b3..5011f69 100644
 +        return
      if not root_dir:
          root_dir = disk.find_persistence()
- 
-diff --git a/python/vyos/system/grub_util.py b/python/vyos/system/grub_util.py
-index edaea8a..a9163fd 100644
---- a/python/vyos/system/grub_util.py
-+++ b/python/vyos/system/grub_util.py
-@@ -18,6 +18,15 @@
- from vyos.system import image
- from vyos.system import compat
- 
-+def _is_uboot_board() -> bool:
-+    """LS1046A / U-Boot boards have no GRUB; skip cmdline / serial-console
-+    updates that would otherwise read or write /boot/grub/grub.cfg."""
-+    try:
-+        with open('/proc/device-tree/compatible', 'rb') as _f:
-+            return b'fsl,ls1046a' in _f.read()
-+    except OSError:
-+        return False
-+
- @compat.grub_cfg_update
- def set_serial_console(console_type: str, console_num: str,
-                        console_speed: str, root_dir: str = '') -> None:
-@@ -37,6 +46,8 @@ def set_serial_console(console_type: str, console_num: str,
- def update_serial_console(console_type: str, console_num: str,
-                           console_speed: str, root_dir: str = '') -> None:
-     """Update console_speed if different from current value"""
-+    if _is_uboot_board():
-+        return
- 
-     if not root_dir:
-         root_dir = disk.find_persistence()
-@@ -70,6 +81,8 @@ def update_kernel_cmdline_options(cmdline_options: str,
-                                   root_dir: str = '',
-                                   version = image.get_running_image()) -> None:
-     """Update Kernel custom cmdline options"""
-+    if _is_uboot_board():
-+        return
-     if not root_dir:
-         root_dir = disk.find_persistence()
- 
--- 
-2.39.5
 

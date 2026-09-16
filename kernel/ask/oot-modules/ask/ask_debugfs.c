@@ -61,6 +61,11 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 		rc = ask_hw_offload_engage((u8)port);
 		if (rc)
 			return rc;
+		/* CR-012: safe here -- plain debugfs write process context,
+		 * never called with flow_block_lock held. Must NOT be called
+		 * from inside ask_hw_offload_engage() itself (see
+		 * ask_hw_prewarm_egress_fq()). */
+		ask_hw_prewarm_egress_fq((u8)port);
 	} else if (!strcmp(verb, "disengage")) {
 		ask_hw_offload_disengage((u8)port);
 	} else {
