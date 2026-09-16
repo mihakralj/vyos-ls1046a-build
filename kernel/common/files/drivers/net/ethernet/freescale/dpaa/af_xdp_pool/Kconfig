@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DPAA_AF_XDP_POOL
+	tristate "DPAA1: AF_XDP zero-copy pool flavor module (af_xdp_pool.ko)"
+	depends on FSL_DPAA_ETH && DPAA_FLAVOR_OPS && XDP_SOCKETS
+	default m
+	help
+	  Flavor module that populates the DPAA1 dpaa_qmgmt_ops table with
+	  AF_XDP zero-copy callbacks: per-queue UMEM-backed BMan pool,
+	  PAMU window create/destroy, dedicated BMan channels, NAPI-hooked
+	  refill, and a strict TX backpressure path.
+
+	  At M3.1 (this scaffold), all callbacks return -EOPNOTSUPP so
+	  behaviour is byte-identical to a kernel built without this module.
+	  Subsequent patches (0074+) implement the wakeup kick, pool
+	  attach/detach, and the ZC RX/TX hot paths per spec sec 5.2-5.4.
+
+	  Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.4.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called af_xdp_pool.

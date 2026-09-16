@@ -16,12 +16,12 @@ index 1e9f870..750e036 100644
                  <properties>
                    <help>Enable Receive Packet Steering</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 950b669..0a81508 100644
+index 97f56eb4c..8e104bd98 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -353,11 +353,15 @@ def set_hw_tc_offload(self, state):
-                 print('Adapter does not support changing hw-tc-offload settings!')
-         return False
+@@ -337,11 +337,15 @@ def set_hw_tc_offload(self, state, warn=True):
+             'hw-tc-offload', 'hw-tc-offload', state, enabled, fixed, warn
+         )
  
 -    def set_ask_offload(self, family_mask: int):
 +    def set_ask_offload(self, family_mask: int, vlan: bool = False):
@@ -36,7 +36,7 @@ index 950b669..0a81508 100644
          """
          # Physical ingress FMan hwport IDs (DT-authoritative, all five ports).
          port_map = {
-@@ -372,9 +376,15 @@ def set_ask_offload(self, family_mask: int):
+@@ -356,9 +360,15 @@ def set_ask_offload(self, family_mask: int):
          if not os.path.exists(tool):
              raise ConfigError(f'ASK offload helper not found: {tool}')
  
@@ -55,7 +55,7 @@ index 950b669..0a81508 100644
          if rc:
              msg = (out or '').strip().splitlines()
              detail = msg[-1] if msg else f'helper exited with rc={rc}'
-@@ -731,7 +741,11 @@ def update(self, config):
+@@ -726,7 +736,11 @@ def update(self, config):
          # bit0=IPv4, bit1=IPv6; mask 0 disengages the port.
          ask_mask = ((1 if dict_search('offload.ipv4', config) is not None else 0) |
                      (2 if dict_search('offload.ipv6', config) is not None else 0))

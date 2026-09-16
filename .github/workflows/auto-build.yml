@@ -36,7 +36,7 @@ on:
         required: false
         default: false
       kunit:
-        description: 'KUnit debug build (opt-in): enable CONFIG_KUNIT + FMan PCD suites in the kernel (they run at boot and emit KTAP) and compile the ask_kunit.ko OOT test harness. Production images must leave this false — the KUnit fragment is never applied to production builds.'
+        description: 'KUnit debug build (opt-in): enable CONFIG_KUNIT + FMan PCD suites in the kernel (they run at boot and emit KTAP), compile the ask_kunit.ko OOT test harness, and enable CONFIG_DEBUG_LIST/PROVE_RCU/PROVE_LOCKING for ASK2 invariant stress (CR-004, CR-009, CR-010). Production images must leave this false — none of this is applied to production builds.'
         type: boolean
         required: false
         default: false

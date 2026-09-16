@@ -2,7 +2,196 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS — PLANNING.** No code written. This plan turns the high-level
+> **STATUS UPDATE 2026-09-16 — §8.2b's AD-content hypothesis space is now
+> EXHAUSTED. The bug is not in anything software writes.** Two more
+> hypotheses were tested and refuted overnight (2026-09-15/16):
+> **NADEN+HMTD chaining** (new debugfs command `install_l2fwd`, chains the
+> bridge_l2 leaf through a minimal, valid `IPV4_FORWARD` HMTD via NADEN,
+> exactly matching the structure of every previously-proven cross-port
+> silicon forward in this project) — result identical to the bare
+> enqueue-only AD: `rx dropped` on ingress matched sent frames exactly
+> (80/80), zero arrivals at the target. Refuted. **Own-real-MAC variant**
+> (matching the port's own hardware address instead of an arbitrary
+> bridge-FDB-style MAC) — a *different*, unexplained signature (frames
+> bypass the CC tree entirely, delivered via normal kernel RX instead of
+> the drop-without-skb pattern every other test showed); inconclusive,
+> flagged as a separate open question, not informative for the core
+> mystery.
+>
+> **Then a new debugfs oracle (`fman_pcd_cc_seq_dump()` AD-table dump,
+> previously nonexistent — only the match table was ever readable) let
+> the actual live hardware AD content be checked directly against what
+> `cc_write_leaf_ad()` intends, instead of trusted or inferred from
+> counters.** Result: **byte-perfect, in both variants.** Bare `install_l2`:
+> `w0=0x000002bc` (exactly the fqid passed), `w1=0`, `w2=0x02000028`
+> (exactly `CC_AD_RES_NO_OM_VSPE | CC_NIA_FMCTL_PRE_BMI_ENQ`), `w3=0`.
+> HMTD-chained `install_l2fwd`: `w1=0x5a40` (a real HMTD handle offset),
+> `w2=0xa2000028` (exactly the same base NIA with `CC_AD_RES_NADEN |
+> CC_AD_RES_EXTENDED` correctly OR'd in). Every field, in both forms,
+> exactly matches the software's own encoding — no corruption, no
+> misalignment, nothing unexpected anywhere.
+>
+> **This rules out every software-controllable layer of the pipeline**:
+> KeyGen extraction (probe3, twice, §8.1), the CC comparator match (QMI
+> enqueue counters tracking sent frames almost 1:1, §8.2b's first pass),
+> and now the AD content itself (this update). What remains is FMan's own
+> internal execution of this AD once handed off — the FM_CTL microcode
+> behavior at `AC 0x28` (`PRE_BMI_ENQ`) and/or QMan's subsequent
+> scheduling/dequeue of the resulting frame — territory with no register
+> or MURAM content this project's software stack can write, read, or
+> otherwise directly inspect. **Working theory, not yet tested:** `AC 0x28`
+> (`PRE_BMI_ENQ`) may be fundamentally a same-port primitive (its one
+> silicon-proven use in this project, the `ethtool -N` ntuple-steering
+> path traced in the prior update, is same-port RX-queue steering) that
+> happens to also work for VLAN's R3b/R4b cross-port proofs specifically
+> *because* those flows chain through the HMTD/manip engine in a way this
+> project has not yet distinguished from a bare `AC 0x28` targeting a
+> foreign port's FQID directly — i.e. the actual working mechanism for
+> genuine cross-port silicon delivery may be something other than
+> `cc_write_leaf_ad()`'s own enqueue path, and B3 may need to route
+> bridge FDB hits through the same FE-VM/ehash "action" mechanism
+> `ask.ko`'s own proven NAT/routing insert path already uses
+> (`ask_hw_flow_insert()`'s 144-byte action structure, F-195), rather
+> than a bare CC-leaf AD, for cross-port bridge forwarding to work at
+> all. This is an architecture question now, not a bug hunt — the next
+> productive step is very likely vendor RM research on `AC 0x28`'s exact
+> semantics, or adapting the FE-VM action mechanism for a bridge target,
+> not another debugfs-side hypothesis test.
+>
+> All test config was cleanly reverted on `.185` and `.106`; production
+> traffic on eth3/eth4 was undisturbed throughout.
+>
+> **STATUS UPDATE 2026-09-15, third pass — decisive new evidence for §8.2b
+> via FMan's hardware counter/error-capture debugfs
+> (`/sys/kernel/debug/fman_pcd/0/dcsr/{qmi_err,kg_err,bmi_err}`), not
+> previously used by this project for this purpose.** Sent 500 raw
+> IPv4/UDP frames from `.106` matching the armed CC tree's DA, tracking
+> `fmqm_etfc` (QMI enqueue total frame count, FMan-wide) and `fmqm_dtfc`
+> (QMI dequeue total frame count) tightly before/after, with a
+> matched-duration idle-window baseline just before to subtract
+> background production-traffic noise (~35.5 etfc/s, ~8.2 dtfc/s at the
+> time). Over the 2.92 s send window: `fmqm_etfc` rose by 586 against an
+> expected background-only ~104 — **excess ~480–500, matching the 500
+> sent frames almost exactly.** `fmqm_dtfc` rose by only 28 against an
+> expected background-only ~24 — **excess ~4, essentially nothing.**
+> **Conclusion: the CC comparator is matching and the AD's enqueue action
+> is genuinely succeeding — `cc_pack_key_l2()`, `fman_pcd_kg_port_attach_cc_l2()`,
+> and the AD write are all vindicated — but the enqueued frames are never
+> dequeued/transmitted. They get silently stuck in the target FQID's
+> hardware queue.** No error-status register went non-zero anywhere
+> (`fmqm_eie`, `fmkg_eer`, `fmbm_ievr` all stayed `0x00000000`) — not a
+> hardware-flagged fault, a silent "enqueued but never serviced" state.
+> Checked for resource exhaustion (`bpool` counters, `muram_budget`): no
+> leak signs, board stayed healthy throughout (`ask-check` only showed
+> the expected cosmetic FAILs for a test port not being in `ask-check`'s
+> hardcoded port list / not being in the flowtable — nothing alarming). A
+> subsequent full reboot cleared the stuck frames, confirming they were
+> genuinely parked in volatile QMan hardware state, not a persistent leak.
+> **This is the most precise characterization of §8.2b to date, and the
+> concrete next lead: diff what `ask.ko`'s own production flow-insert
+> path does to a target FQID beyond just resolving its number (channel
+> binding, WQ scheduling, DCA/context setup) against what `install_l2`'s
+> raw AD write does — the gap is almost certainly a missing step in that
+> difference, not a comparator or key-packing bug.**
+> Two earlier hypotheses were tested and ruled out along the way: (1)
+> ASK's own ehash engagement contending with the CC-tree's KG-scheme
+> attach on the same port — disabling `offload ipv4` on the CC-armed port
+> changed behavior (kernel-RX fallthrough stopped, `rx dropped` on
+> ingress began exactly tracking sent-frame count instead) but did not
+> fix delivery, so contention was a real but insufficient explanation;
+> (2) the target FQID needing to be "warmed up" by prior real `ask.ko`
+> traffic — tested against a proven-live production FQID (eth4's, in
+> active use) with the identical result, ruling this out.
+>
+> **STATUS UPDATE 2026-09-15, second pass — §8.2a's "PASSED" verdict
+> RETRACTED, methodology flaw found.** The original coexistence test's
+> forward-direction traffic entered `.185` via a software `veth`
+> (`ns_src`, a netns-based fake source) — it never touched FMan's real
+> RX/KeyGen/CC-comparator hardware on eth1 at all, only ever *transmitted*
+> out eth1 (FMan's TX path, unrelated to the armed port's RX/KG dispatch
+> under test). So that test validated plain kernel software routing with
+> a CC tree grafted onto the port, not genuine silicon coexistence. A
+> corrected topology (real `.106` traffic as the actual source, so it
+> genuinely enters `.185` via eth1's physical wire; only the sink is
+> virtualized) was built and confirmed via `traceroute` to give a clean,
+> single real-hop ingress on eth1 — but the coexistence proof has not yet
+> been re-run on this corrected topology. **§8.2a is therefore back to
+> UNRESOLVED, not PASSED, pending a re-run.**
+>
+> All test-only config (addressing, ASK offload, firewall flowtable
+> membership, promiscuous mode, netns/veth) was cleanly reverted on both
+> `.185` and `.106` after every round this session; `.185` is back on the
+> known-stable production image, `ask-check` 36/36. Production traffic on
+> eth3/eth4 was undisturbed throughout (verified via `ask-check` staying
+> otherwise-clean every round, including the round that targeted eth4's
+> own live FQID as a read-only comparison point).
+> **Net effect on this plan: B2 is still OPEN**, now characterized far
+> more precisely than "mystery, not working" — enqueue is proven to work,
+> dequeue/servicing is proven not to, and §8.2a needs a clean re-run
+> before it can be counted again. B3 (`ask.ko` production switchdev
+> wiring) remains explicitly gated on B2 PASS and must not start until
+> both are resolved.
+>
+> **STATUS — B0 DONE (2026-09-10), B1 DONE (2026-09-15), B2 §8.1 oracle
+> question RESOLVED 2026-09-15 on real silicon (`.185`/eth1, `probe3`
+> mode 2): the 15-byte `PORT_ID|DA|SA|ETYPE` layout and field order are
+> CONFIRMED correct against a live KeyGen-extracted frame — with one
+> real, now-fixed defect: byte 0 (PORT_ID) extracts as the REAL hardware
+> port id on this scheme (`0x0d` for eth1), not the `0x00` every other
+> CC key type on this ucode has consistently shown; `cc_pack_key_l2()`
+> was hardcoding `0x00` there (patch `0208`, fixed). DST_MAC and
+> ETHERTYPE landed at their exact expected byte positions with
+> unambiguous real-world values (`33:33:00:00:00:fb` = the real
+> `ff02::fb` multicast DST_MAC; `0x86dd` = the real IPv6 EtherType, in
+> this packer's own byte order) — ruling out a capture-alignment misread
+> as the explanation, so the PORT_ID finding is a genuine silicon fact,
+> not an artifact. B2's own full silicon de-risk proof (hardware
+> forwarding + CC-miss→FE coexistence under sustained traffic) is still
+> NOT run — this closes the *narrower* §8.1 comparator-window question
+> the plan asked to resolve before that full proof, using the
+> `probe3`/`ricp_widen` oracle tooling (F-240/F-241, extended this
+> session with mode 2 / F-247+F-248) exactly as the plan's own §8.1
+> prescribed. See §6 B2 and §8 for what's left. Patch `0204-fman-pcd-cc-bridge-key-src-mac.patch`
+> adds `FMAN_PCD_CC_HW_F_MAC_SRC`/`src_mac[6]`, completing the vendor
+> 15-byte `PORT_ID|DA|SA|ETYPE` composite (reusing the already-present
+> `FMAN_PCD_CC_HW_F_ETHERTYPE`/`ethertype_be` — a first attempt at this
+> same patch, reverted `b3e5a749` on 2026-09-14, mistakenly tried to add a
+> duplicate ethertype field by working from diff fragments instead of the
+> true current header). Patch `0205-fman-pcd-cc-bridge-key-l2-builder.patch`
+> adds `cc_pack_key_l2()` (the 15-byte packer, `static __maybe_unused`,
+> silicon-confirmed byte layout) and the actual B1 deliverable,
+> `fman_pcd_cc_bridge_key_add()`/`fman_pcd_cc_bridge_key_remove()` — a
+> host-memory-only shadow builder (no MURAM/hardware I/O) that
+> adds/updates/removes DA-match leaves in a caller-owned
+> `struct fman_pcd_cc_hw_spec` and maintains `miss_fe_off`, non-static and
+> `EXPORT_SYMBOL_GPL`'d for B3's future cross-module (`ask.ko`) call. Two
+> new KUnit suites (`fman_pcd_cc_l2_key`, `fman_pcd_cc_bridge_shadow`) pin
+> both the packer's byte-exact layout (DA-only and full `PORT_ID|DA|SA|
+> ETYPE` vectors, matching B1's own stated gate) and the shadow builder's
+> add/idempotent-update/remove-with-compaction/bad-argument behaviour.
+> Verified both patches apply clean (`git apply --3way`, zero conflicts)
+> against the real current kernel tree (the CI kernel git cache, not
+> fragments) before landing — the exact discipline the reverted first
+> attempt skipped. Dormant: not wired into `ask_bridge.c`'s FDB workqueue
+> (still B0's log-only stub), no install path, no live traffic path.
+> **B0 status (superseded above, kept for provenance):**
+> the switchdev FDB/blocking/netdevice notifier chains and observes FDB
+> events (coalesced + bounded queue, §12 debounce lesson applied from the
+> start), gated by a new `bridge_offload` module param (default off) that
+> nothing installs against yet; `ASK_CAP_BRIDGE` stays unadvertised. Kernel
+> patch `0202-fman-pcd-cc-bridge-mac-dst-key-dormant.patch` adds the dormant
+> `FMAN_PCD_CC_HW_F_MAC_DST` CC key field for B1's builder to target. Zero
+> live-path change — routed/NAT/VLAN untouched, nothing is installed into
+> hardware. **Full CI build verified 2026-09-10** (run
+> `34525313747`, branch `dpaa1`): kernel + `ask.ko` + ISO all build clean
+> end-to-end. Two unrelated pre-existing CI infra bugs were found and fixed
+> along the way (didn't exist on `dpaa1` before tonight's bridge work
+> needed a green build to land): the same `0166` kernel-patch corruption
+> already fixed on `vlan-offload-rework` earlier tonight, ported over; and
+> a `vyos-build/data/architectures/arm64.toml` corruption in our own
+> `bin/ci-setup-vyos-build.sh` (a sed assumed TOML disallows trailing
+> commas in arrays -- it doesn't -- and broke once upstream inserted a new
+> package entry). This plan turns the high-level
 > `plans/OFFLOAD-CAPABILITY-PLAN.md` §1.5 sketch into a concrete, silicon-gated
 > build. It reuses the CC-tree + HMTD + CC-miss→FE_ENTER substrate the VLAN
 > re-architecture (`plans/ASK2-VLAN-REARCH.md`, T-M6-8) proved on silicon (R4c
@@ -227,17 +416,31 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
 Mirrors the NAT/VLAN safe progression: dormant host plumbing first, silicon
 de-risk on the `cc_test` harness before any production wiring, then a matrix.
 
-- **B0 — S0 gate + host plumbing (dormant, zero datapath change).**
-  Add the CC DA match-key fields (§5.1), the `ASK_TABLE_L2` per-port shadow, the
-  `ask_bridge_offload` module param (default-off), and the switchdev notifier
-  skeleton that **logs** offloadable FDB events but installs nothing. Gate: builds
-  clean; static-asserts + KUnit key vectors pass; routed/NAT/VLAN byte-identical
-  (regression oracle untouched); `ask-check` shows bridge dormant.
+- **B0 — DONE 2026-09-10 — S0 gate + host plumbing (dormant, zero datapath
+  change).** Added the `FMAN_PCD_CC_HW_F_MAC_DST` CC match-key field (§5.1,
+  patch `0202`, purely additive — no packer emits it yet), the
+  `ask_bridge_offload` module param (default-off), and the switchdev
+  notifier skeleton (`ask_bridge.c`, replacing the 21-line stub) that
+  **logs** offloadable FDB events (coalesced+bounded queue) but installs
+  nothing. Local module build against the CI kernel cache is clean, no
+  warnings. **Deferred to B1, not done in B0:** the `ASK_TABLE_L2` per-port
+  shadow registry — it exists to serve the real DA-match builder, which is
+  B1's job, so building the shadow before the builder it shadows would be
+  premature structure. Gate: builds clean (verified locally; full-CI pass
+  still pending); routed/NAT/VLAN byte-identical (untouched by this change);
+  `ask-check` already reports bridge under its existing generic "software
+  fallback" note — no change needed there since bridge is legitimately
+  dormant, not broken.
 
-- **B1 — CC DA-match builder + KUnit.** `fman_pcd_cc_bridge_key_add/remove` (host
-  shadow → `fman_pcd_cc_hw_spec` with DA leaves + `miss_fe_off`). Dormant readback
-  of a built spec (no live install). Gate: KUnit vectors for DA-only and
-  PORT_ID|DA|SA|ETYPE keys; spec byte-exact vs a golden vector.
+- **B1 — DONE 2026-09-15 (CI verification pending) — CC DA-match builder + KUnit.**
+  `fman_pcd_cc_bridge_key_add/remove` (patches `0204`/`0205`, host shadow →
+  `fman_pcd_cc_hw_spec` with DA leaves + `miss_fe_off`) plus `cc_pack_key_l2()`
+  (the 15-byte packer). Dormant readback of a built spec (no live install, not
+  wired into `ask_bridge.c`). Gate met: KUnit vectors for DA-only and
+  PORT_ID|DA|SA|ETYPE keys (`fman_pcd_cc_l2_key`) plus the shadow builder's
+  add/update/remove/compaction behaviour (`fman_pcd_cc_bridge_shadow`); both
+  patches verified `git apply --3way` clean against the real current kernel
+  tree before landing.
 
 - **B2 — silicon de-risk (the decisive proof), `cc_test` harness, sacrificial
   port, cold boot.** Hand-arm a CC leaf matching a fixed destination MAC →
@@ -249,6 +452,43 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
   path (CC miss → FE). This is the single new silicon question (§8.2/§8.3);
   everything downstream is gated on it. Read-only comparator-window check first
   (`hash_probe`/`fe_scaffold` oracle) before arming.
+  **Harness plumbing DONE. §8.1 RESOLVED 2026-09-15. Live-arming experiment
+  RUN 2026-09-15 — SPLIT result, B2 still OPEN.** Patch
+  `0206-fman-pcd-cc-bridge-l2-install-dispatch.patch` wires `cc_pack_key_l2()`
+  into `fman_pcd_cc_static_install()` via a new
+  `struct fman_pcd_cc_hw_spec.bridge_l2` flag (mirrors the existing
+  `dual_lane`/`dual_lane_pid` dispatch pattern; purely additive, every
+  existing tree stays byte-identical); `fman_pcd_kg_port_attach_cc_l2()`
+  (patch 0207) arms the port's KeyGen scheme for L2 extraction; `install_l2
+  <port> <dst_mac> <target_fqid>` (fixup F-248) is the `cc_test` debugfs
+  command, with `miss_fe_off` auto-filled from `fman_pcd_fe_root_get_offset()`
+  (fixup F-249) so a port with ASK ehash already engaged gets the real
+  coexistence precondition for free.
+  **(a) Coexistence (CC-miss→FE_ENTER→ehash): UNRESOLVED, PASSED verdict
+  RETRACTED.** The original test topology's forward-direction traffic
+  entered `.185` via a software veth, never touching real FMan RX/KG/CC
+  hardware on the armed port — it validated plain kernel routing, not
+  silicon coexistence. A corrected topology (real `.106` traffic as the
+  actual source) is built and `traceroute`-verified but the proof has not
+  been re-run on it yet.
+  **(b) CPU-bypassed HW forward on a CC HIT: AD-content hypothesis space
+  EXHAUSTED, still not achieved.** FMan's hardware QMI counters prove the
+  CC comparator matches and the AD's enqueue action genuinely succeeds,
+  and a new debugfs AD-table dump (F-251) proves the live hardware AD
+  content is byte-perfect against `cc_write_leaf_ad()`'s own intent, in
+  BOTH the bare and NADEN+HMTD-chained forms (`install_l2fwd`, F-250,
+  tested and refuted as a fix). Every software-controllable layer —
+  KeyGen extraction, comparator match, AD content — is now proven
+  correct. The gap is inside FMan's own execution of the AD once handed
+  off (`AC 0x28`/`PRE_BMI_ENQ` microcode, and/or QMan's dequeue
+  scheduling), not observable or controllable via any register/MURAM
+  write this project's software stack has access to. This has shifted
+  from a bug hunt to an architecture question — see the STATUS banner at
+  the top of this file for the working theory (bridge forwarding may
+  need `ask.ko`'s own FE-VM/ehash action mechanism, not a bare CC-leaf
+  AD, for genuine cross-port delivery) and next steps.
+  **B3 remains gated on B2 PASS — do not start it until both (a) and (b)
+  are resolved.**
 
 - **B3 — `ask.ko` production switchdev wiring (gated on B2 PASS).** Replace the
   `ask_bridge.c` stub: FDB workqueue installs/removes DA leaves via the B1
@@ -308,17 +548,31 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
 
 ## 8. Unresolved silicon questions (resolve read-only before arming)
 
-1. **CC comparator window for a DA-bearing key.** The project has never directly
-   observed what the CC CONT_LOOKUP comparator reads for *any* key (open even for
-   the IP 5-tuple, `specs/cc-comparator-compare-window-hypothesis.md`). Whether a
-   DA-only (6 B) or PORT_ID|DA|SA|ETYPE (15 B) window matches the KG-emitted
-   composite is unverified. Resolve via the `hash_probe`/`fe_scaffold` oracle
-   before B2 arming. The vendor's live 15-byte `cdx_ethernet_cc` is strong prior
-   evidence the layout works.
-2. **DA-match CC + routed ehash coexistence on one live port via CC-miss→FE.**
-   Proven for VLAN CC keys (R4c); a **DA-keyed** CC leaf coexisting is a new (small)
-   variant — B2 is exactly this proof. Expected to pass since `miss_fe_off` is
-   key-agnostic.
+1. **CC comparator window for a DA-bearing key — RESOLVED 2026-09-15.** Live
+   `probe3` mode 2 capture on `.185`/eth1 (widened-RICP, `bin/kernel-fixups/
+   F_240.py`/`F_241.py` + this session's mode-2 extension, F-247/F-248) directly
+   observed the KeyGen-extracted composite for the armed L2 scheme
+   (EKFC `0xe4000000`) against a real live frame. DST_MAC and ETHERTYPE landed
+   at their exact expected byte positions with unambiguous real-world values
+   (`33:33:00:00:00:fb` = the real `ff02::fb` multicast DST_MAC seen later in
+   the same capture; `0x86dd` = the real IPv6 EtherType, matching this
+   packer's own byte order) — confirming the 15-byte `PORT_ID|DA|SA|ETYPE`
+   layout and field order are correct, not just byte-perfect against a guess.
+   One real defect found and fixed (patch `0208`): PORT_ID (byte 0) extracts
+   as the REAL hardware port id (`0x0d` on eth1) on this scheme, not the
+   `0x00` every other CC key type on this ucode has shown — `cc_pack_key_l2()`
+   was hardcoding `0x00`. The vendor's live 15-byte `cdx_ethernet_cc` was
+   strong prior evidence the layout works; this is now direct, first-party
+   confirmation, not just precedent.
+2. **DA-match CC + routed ehash coexistence on one live port via CC-miss→FE —
+   UNRESOLVED, an earlier PASSED verdict was retracted (methodology flaw:
+   the tested traffic never touched real FMan RX/KG/CC hardware on the
+   armed port, only kernel software routing).** A corrected,
+   `traceroute`-verified topology exists but the proof has not been
+   re-run on it. Separately, a decisive silicon finding for the
+   *sibling* §8.2b sub-question (CC-hit forward) shows the CC comparator
+   genuinely matching and the AD enqueue genuinely succeeding — see the
+   STATUS banner and §6 B2 for full detail on both.
 3. **Non-IP frame through the CC/enqueue path.** The VLAN/routed proofs were IP
    frames. A pure L2 bridge forward of a non-IP known-unicast frame (e.g. a
    protocol the parser doesn't deep-parse) through a CC DA-match leaf + plain
@@ -368,3 +622,144 @@ not build it into the base case.
   `am65-cpsw-switchdev.c`, `adin1110.c`.
 - Stub to replace: `kernel/ask/oot-modules/ask/ask_bridge.c`; capability bit
   `ASK_CAP_BRIDGE` `kernel/ask/oot-modules/ask/include/uapi/linux/ask/ask.h:204`.
+
+## 11. 2026-09-10 update — VLAN CC-tree work validates and sharpens §8.5
+
+The VLAN re-architecture's production code (`ask_vlan_cc.c`, `vlan-offload-rework`
+branch) hit and fixed exactly the failure class §8 point 5 warned about, now with
+live silicon evidence instead of a hypothesis:
+
+- **Confirmed on hardware:** `ask_vlan_cc_flow_del()` held its per-port-table
+  global mutex across a full CC-tree rebuild *and* the ~5-6 ms post-rebuild
+  drain sleep, serializing every VLAN flow add/delete on *every* port behind
+  one flow's teardown. Under concurrent multi-flow churn this measured 65% CPU
+  at *lower* throughput than the unaffected routed/NAT path — the exact
+  "whole-tree rebuild under churn" risk this plan already flagged, now with a
+  number attached. Fixed by unlocking before the drain (keeps the rebuild +
+  drain + HMTD-free ordering intact; only the lock's *span* shrinks). **Build
+  the bridge FDB workqueue (§5.5/B3) with this pattern from the start** — do
+  not hold one global lock across a CC rebuild + drain; bridge FDB churn is
+  expected to be *higher* frequency than routed-VLAN flow churn (§8.5's own
+  premise), so a naive port-wide-serializing lock here would be worse, not
+  equivalent.
+- **Confirmed on hardware:** the CC-tree/HMTD path genuinely forwards bulk
+  traffic with the CPU bypassed for the matched frames — verified live via
+  `ynl --family ask --dump dump-flows`, whose per-port aggregate
+  packet/byte counters climbed at real multi-Gbps rates matching achieved
+  throughput during a sustained run. This is independent, current-silicon
+  confirmation of the same substrate §2 already argued for from static
+  evidence — the CC-miss→FE_ENTER coexistence model this bridge plan depends
+  on is not just proven-in-principle, it's proven-in-current-production-code.
+- **New tool available for B5's performance gate:** a statically-linked `perf`
+  binary was built for this board's exact kernel (6.18.50-vyos, arm64;
+  build recipe in [[project_vlan_offload_rework_status]] — no cross-compiler
+  needed, this build sandbox is native aarch64). Use it for B5's throughput/
+  CPU acceptance runs instead of the `/proc/stat`-delta-only technique; it
+  gives real function-level attribution (e.g. it was what separated "CC-tree
+  not working" from "CC-tree working, cost is elsewhere" for the VLAN case)
+  and would answer §8 point 5's churn-rate question directly rather than by
+  inference.
+
+## 12. FDB churn prevention (design, not just survival) — 2026-09-10
+
+Churn has four distinct sources; each gets its own lever rather than one
+generic "handle churn better" fix:
+
+1. **Ageing-induced churn (self-inflicted, avoidable by construction).** The
+   CPU never sees the source MAC of a HW-forwarded flow, so kernel ageing can
+   expire an entry that's still actively forwarding in hardware — DEL, then a
+   fresh ADD the moment the next frame is punted and relearned.
+   **Decision: B3 offloads only static (`added_by_user`) FDB entries by
+   default.** Static entries never age — zero ageing-churn by construction.
+   §8 point 4 already floated this as *an* option; given the measured cost of
+   churn (§11), make it the shipped default, not a fallback. Dynamic-entry
+   ageing-refresh (HW hit-counter → kernel FDB `used` touch, or
+   `SWITCHDEV_FDB_ADD_TO_BRIDGE` sync) stays a B5+ increment, deliberately out
+   of the first cut.
+2. **STP topology-change mass-flush.** Deliberate bridge behavior on a TC
+   event (fast-age the whole FDB) — must not be prevented, only absorbed
+   cheaply. **Add a coalescing/debounce window** (a few ms, e.g. via
+   `mod_delayed_work`) between an FDB notifier event and the CC-tree rebuild
+   it triggers: batch every FDB add/del that arrives inside the window into
+   one whole-tree rebuild instead of one rebuild per entry. The CC-tree
+   rebuild is already a whole-tree atomic op (no per-flow dynamic add exists),
+   so batching costs nothing semantically and directly cuts rebuild-event
+   count during a flush storm.
+3. **MAC-move churn.** A DEL on the old port + ADD on the new port, close
+   together — the same debounce window coalesces this into one rebuild instead
+   of two rebuild+drain cycles.
+4. **Table-pressure thrashing.** Fail-install → SW fallback → retry-on-
+   relearn can loop at the `FMAN_CC_MAX_STATIC_KEYS` boundary under a churn
+   burst. Keep deliberate headroom below the cap (do not fill to 100%) so a
+   burst doesn't oscillate at the boundary.
+
+**Consequence for B3's design:** the FDB workqueue item must NOT react to
+every individual switchdev notification with an immediate CC-tree rebuild.
+Coalesce first (debounce timer keyed per port), then rebuild once. This is in
+addition to, not instead of, §11's unlock-before-drain lesson — the two
+compose: fewer rebuild events (this section), each one not serializing
+unrelated ports (§11).
+
+## 13. Per-port arming ABI + automatic CLI trigger — 2026-09-10
+
+Extended the same genl engage mechanism VLAN uses (`ASK_CMD_ENGAGE` +
+`ASK_ATTR_FAMILY_MASK`/`ASK_ATTR_VLAN`) with a parallel `ASK_ATTR_BRIDGE`
+(u8 bool) attribute, and the matching kernel-side per-port array
+(`ask_hw_port_bridge[]`, `ask_hw_offload_set_bridge()`,
+`ask_hw_bridge_offload_armed_port()`/`_armed()` in `ask_hw.c` — byte-for-byte
+mirroring the VLAN functions). `ask_bridge.c`'s FDB observer now reports the
+real per-port armed state instead of the placeholder global module param B0
+shipped with (removed — see below). `ASK_CAP_BRIDGE` deliberately stays
+unadvertised through B0-B2 even though the arm/gate functions now exist for
+real, since there is still no CC-tree/FDB install path consuming them (that's
+B3).
+
+**Design decision (explicit user direction): no CLI leafNode for bridge
+offload.** Unlike VLAN's `offload vlan` (an explicit per-port opt-in the user
+sets), bridge offload arms **automatically**: whenever a member port already
+has `offload ipv4`/`offload ipv6` armed, joining a bridge (or the bridge
+itself being created around it) arms that port's bridge bit with no separate
+command. There is intentionally no global master-override module param either
+(unlike `ask_vlan_offload`) — forcing bridge offload on for a port with no
+family offload armed at all would have nothing to ride on, so a bare
+"force everything on" debug knob doesn't mean anything here.
+
+Implementation spans three layers, all now silicon-independent (dormant, same
+B0 risk profile — this only changes when the genl bit gets set, not whether
+anything installs into hardware):
+
+1. **`board/scripts/vyos-offload-ask`** — `engage`/`family` gained an optional
+   3rd `bridge` arg (mirroring `vlan`'s 2nd arg), plus a standalone `bridge
+   <0|1>` verb (mirroring `vlan <0|1>`) for re-arming just that bit without
+   touching family.
+2. **vyos-1x `python/vyos/ifconfig/ethernet.py`** (`data/vyos-1x-051-bridge-
+   hw-offload-auto.patch`) — `set_ask_offload()` gained a `bridge: bool`
+   param threaded into the tool call. `update()` computes it automatically:
+   `ask_mask != 0 and is_bridge_member is not None` — `is_bridge_member` is
+   already populated generically for every interface by `configdict.py`'s
+   `get_interface_dict()` (the same field `interfaces_bridge.py` itself
+   reads), so this needed no new cross-tree lookup. Covers the "toggle
+   `offload ipv4` on a port that's already in a bridge" direction entirely
+   within ethernet.py's own existing commit path.
+3. **vyos-1x `src/conf_mode/interfaces_bridge.py`** (same patch) — new
+   `apply_ask_bridge_offload()`, called from `apply()`. Covers the reverse
+   direction: a bridge's own commit (member added/removed) doesn't re-trigger
+   `interfaces_ethernet.py`'s conf_mode script by itself, so this function
+   directly reads each changed member's current `offload ipv4`/`ipv6`/`vlan`
+   config (via `get_interface_dict(conf, ['interfaces', 'ethernet'],
+   ifname=interface)`, the identical pattern this file already uses for
+   vxlan/openvpn members) and calls `EthernetIf(interface).set_ask_offload(
+   mask, vlan, bridge=<joined>)` directly. Deliberately does **not** use
+   VyOS's declarative `set_dependents`/`call_dependents` dependency-graph
+   machinery (the pattern the file uses for vxlan/wlan/firewall deps) —
+   registering a new dependency type there needs an entry in a separate
+   build-generated dependency-graph file, more moving parts than this
+   self-contained direct call needs for what is still a B0-risk-profile,
+   log-only change.
+
+**Not yet done:** no full-CI build/deploy verification of this specific
+patch (T-M6-2 B0's baseline commit `d4e50ac4` + these ABI/CLI additions were
+built and syntax-checked locally — `ask.ko` against the CI kernel cache,
+both vyos-1x Python files with `py_compile` plus a full patch-series
+round-trip against a fresh vyos-1x clone — but not yet run through a real CI
+build+deploy+live-bridge-test cycle the way B0 itself was).

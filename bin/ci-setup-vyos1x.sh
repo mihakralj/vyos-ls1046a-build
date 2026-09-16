@@ -58,6 +58,16 @@ for p in data/vyos-1x-*.patch; do
 done
 cp data/reftree.cache "$PATCH_STAGING/"
 
+# Plain new-file source tree (patch-series-cleanup, 2026-09-11): files that
+# don't exist upstream at all -- op-mode show-commands, migration scripts,
+# etc. -- carry none of the "diff against a moving upstream target" fragility
+# that broke 5 patches in one night (see plans/, git log around 2026-09-10).
+# A "new file mode" patch hunk IS the file's content; tracking it as a plain
+# file here and copying it into place (pre_build_hook, below) is equivalent
+# and can never suffer context drift. Only files that ALSO modify an existing
+# upstream file (e.g. registering a new .py in a Makefile) stay patch-format.
+cp -a data/vyos-1x-files "$PATCH_STAGING/"
+
 # The MOTD patch (vyos-1x-012) hardcodes its banner text; there is no
 # @@FLAVOR@@ placeholder to substitute any more. The flavor split was retired
 # 2026-06-14 and the FLAVOR variable removed 2026-07-26 — the banner now
@@ -137,6 +147,13 @@ PYLINTRC
 *.toml  merge=mergiraf
 *.xml   merge=mergiraf
 GITATTR
+  # Plain new-file source tree: copy first so any remaining modify-only
+  # patch that references these files (e.g. a Makefile/menu entry) applies
+  # against an already-populated tree. cp -a preserves the executable bit
+  # op-mode Python scripts need.
+  if [ -d ../ls1046a-patches/vyos-1x-files ]; then
+    cp -a ../ls1046a-patches/vyos-1x-files/. .
+  fi
   for p in ../ls1046a-patches/vyos-1x-*.patch; do
     # Skip if already applied (idempotent across pre_build_hook re-invocations
     # and forward-compatible if upstream lands an equivalent change).

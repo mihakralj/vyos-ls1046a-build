@@ -168,6 +168,28 @@ done < "$_series"
 echo "### Staged $_count LS1046A board patches"
 unset _count _series _src _p
 
+# patch-series-cleanup (2026-09-11): stage the plain new-file source tree
+# alongside the patches. A "new file mode" patch hunk IS the file's content
+# with no upstream original to diff against, so tracking these files
+# directly (kernel/common/files/, mirroring the real kernel tree paths)
+# carries none of the diff-drift risk a patch does. Copied into the kernel
+# tree by the injected REPLACEMENT block below, before the (now smaller)
+# patch loop runs, so any remaining patch hunk that references these files
+# (a Makefile/Kconfig registration) applies against an already-populated
+# tree. See data/vyos-1x-files/ for the same mechanism on the vyos-1x side.
+echo "### Staging LS1046A new-file source tree (kernel/common/files)"
+# build-kernel.sh sets PATCH_DIR=${CWD}/patches/kernel and runs with
+# CWD=$KERNEL_BUILD, so the REPLACEMENT block's "${PATCH_DIR}/../files"
+# resolves to $KERNEL_BUILD/patches/files -- NOT $KERNEL_BUILD/files.
+# Staging one directory too shallow left that check silently false and
+# the new-file copy never ran (CI run 34551992852: af_xdp_pool_main.c
+# "does not exist in index" on patch 0095, which only modifies a file
+# that 0073's split expected this step to have created).
+rm -rf "$KERNEL_PATCHES/../files"
+if [ -d kernel/common/files ]; then
+    cp -a kernel/common/files "$KERNEL_PATCHES/../files"
+fi
+
 # ── Staging-completeness guard
 # 0078 (dpaa MODULE_SOFTDEP on af_xdp_pool) intentionally NOT staged:
 # under CONFIG_FSL_DPAA_ETH=y and CONFIG_DPAA_AF_XDP_POOL=y the softdep
@@ -729,6 +751,25 @@ else
     echo "WARNING: $NF_FLOW_LOG_PATCH missing — PR14o REPLACE-delivery diagnostic disabled"
 fi
 
+# Stage SFP EEPROM checksum tolerance quirk:
+#   135-sfp-tolerate-generic-oem-dac-bad-checksum.patch — generic no-name
+#   "OEM" 10G passive DAC modules (vendor_pn "SFP-H10GB-CU1M") ship with a
+#   permanently incorrect base structure checksum in their EEPROM. Mainline
+#   sfp.c hard-fails module identification (-EINVAL) on checksum mismatch,
+#   refusing to bring the link up. Confirmed on hardware: eth3's SFP+ cage
+#   (sfp-xfi0) uses exactly this module, and the identification bytes
+#   decode identically across repeated reads/rebinds/power-cycles — only
+#   the checksum byte is wrong. NXP's vendor ASK1 kernel (6.12.49) already
+#   tolerates this and brings the link up fine; without this patch, eth3
+#   never links on the mainline-derived ASK2/dpaa1 kernel.
+SFP_CHECKSUM_PATCH="$COMMON_FIXES_DIR/135-sfp-tolerate-generic-oem-dac-bad-checksum.patch"
+if [ -f "$SFP_CHECKSUM_PATCH" ]; then
+    echo "### Staging $(basename "$SFP_CHECKSUM_PATCH") (eth3 SFP EEPROM checksum tolerance)"
+    cp "$SFP_CHECKSUM_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "WARNING: $SFP_CHECKSUM_PATCH missing — eth3 SFP link will fail to come up"
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
@@ -925,12 +966,17 @@ make olddefconfig
 # "scripts/config --disable CONFIG_IO_STRICT_DEVMEM" + "make olddefconfig"
 # and a block between them breaks that anchor.
 if [ "${KUNIT:-false}" = "true" ]; then
-    echo "I: LS1046A — KUnit build: forcing CONFIG_KUNIT + PROVE_RCU/PROVE_LOCKING"
+    echo "I: LS1046A — KUnit build: forcing CONFIG_KUNIT + PROVE_RCU/PROVE_LOCKING + DEBUG_LIST"
     scripts/config --set-val CONFIG_KUNIT y
     scripts/config --set-val CONFIG_KUNIT_DEBUGFS y
     scripts/config --set-val CONFIG_FSL_FMAN_PCD_KUNIT_TEST y
     scripts/config --enable CONFIG_PROVE_RCU
     scripts/config --enable CONFIG_PROVE_LOCKING
+    # CR-004 gate: catches list add/del corruption (poisoned prev/next,
+    # double-remove, use-after-free) in the CR-004 stale-MAC
+    # remove/reinsert lifecycle (ownership generations/tombstones,
+    # T-M6-A3) under concurrent REPLACE/DESTROY/neighbour-churn stress.
+    scripts/config --enable CONFIG_DEBUG_LIST
     make olddefconfig
 fi
 
@@ -1090,6 +1136,19 @@ fi
 # downstream patches stop applying -- ARM64-runner2 failure 2026-08-14).
 git -c user.email=ci@local -c user.name=ci reset -q --hard || true
 git clean -fdxq || true
+
+# Plain new-file source tree: copy first so any remaining patch hunk that
+# references these files (a Makefile/Kconfig registration) applies against
+# an already-populated tree. cp -a preserves file modes. `git add` them into
+# the index right away -- git apply --3way's blob lookups (and its "does
+# not exist in index" / "does not match index" failure mode) need these
+# files tracked, not just present on disk, or every LATER patch that
+# touches one of them fails even though the file is right there.
+if [ -d "${PATCH_DIR}/../files" ]; then
+    cp -a "${PATCH_DIR}/../files/." .
+    git -c user.email=ci@local -c user.name=ci add -A -- $(cd "${PATCH_DIR}/../files" && find . -type f | sed 's#^\./##')
+    git -c user.email=ci@local -c user.name=ci commit -q -m "kernel pristine + LS1046A new-file source tree" --allow-empty
+fi
 
 PATCH_FAIL=0
 PATCH_FAIL_LIST=""
@@ -2215,6 +2274,78 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_246.py" 2>&1
     echo "### fman_pcd_cc_test.c: F-246 global soft-parser execution-unit enable (T-M6-8 VLAN-v6 dig)"
+fi
+
+# F-248 (T-M6-2 B2, 2026-09-15): add cc_test_install_l2() -- the bridge FDB
+# L2 composite install_* variant, mirroring cc_test_install_v6pid() exactly
+# (heap-allocated spec, full silicon-arming sequence: static_install ->
+# get_base -> ensure_params_page -> set_cc_base -> kg_port_attach_cc_l2()
+# from patch 0207). Corrects an earlier same-session mistake: this logic
+# was first written directly into kernel/common/files/fman_pcd_cc_test.c,
+# which turned out to be a dead orphan file never copied into any real
+# kernel build (fman_pcd_cc_test.c is entirely fixup-assembled in this
+# codebase, not patch- or plain-tracked-file-delivered -- confirmed by
+# tracing every "install_*" sibling variant's own origin). Must run after
+# patch 0185 (cc_test_install_v6pid, the anchor) and after 0206/0207
+# (struct fman_pcd_cc_hw_spec.bridge_l2 / fman_pcd_kg_port_attach_cc_l2()
+# must already exist in fman_pcd.h) -- and before F-247, which reuses this.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_248.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-248 cc_test_install_l2 bridge L2 install variant (T-M6-2 B2)"
+fi
+
+# F-249 (T-M6-2 B2, 2026-09-15): wire cc_test_install_l2() (F-248) to point
+# its CC-miss row at the live FE_ENTER root (fman_pcd_fe_root_get_offset())
+# instead of always leaving miss_fe_off 0. Byte-identical when nothing has
+# ASK ehash engaged yet; answers plan §8.2 (does a DA-keyed CC leaf coexist
+# with ehash on the same port via CC-miss->FE_ENTER, as already proven for
+# VLAN CC keys, R4c). Must run after F-248.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_249.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-249 cc_test_install_l2 miss->FE_ENTER coexistence (T-M6-2 B2)"
+fi
+
+# F-250 (T-M6-2 B2, 2026-09-15/16): add cc_test_install_l2fwd() -- a §8.2b
+# hypothesis test. FMan's own QMI counters prove install_l2's bare (no
+# NADEN/HMTD) enqueue-only AD genuinely succeeds (fmqm_etfc tracks sent
+# frames almost exactly) but the frames are never dequeued (fmqm_dtfc
+# barely moves), no hardware error flagged. Re-reading this project's own
+# prior silicon proofs found every previously-proven CROSS-PORT hardware
+# forward went through NADEN+HMTD (the "24M+ frames" bare-enqueue
+# precedent was ethtool-ntuple RX-queue steering, same-port/CPU-consumed,
+# not a genuine cross-port EGRESS forward). install_l2fwd chains the same
+# bridge_l2 key through a minimal IPV4_FORWARD HMTD via NADEN to test
+# whether that's the missing piece. Must run after F-248/0207.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_250.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-250 cc_test_install_l2fwd NADEN+HMTD hypothesis test (T-M6-2 B2)"
+fi
+
+# F-251 (T-M6-2 B2, 2026-09-16): fman_pcd_cc_seq_dump()'s match-table dump
+# hardcoded print length as num_keys*32 (assumes the default 16B key+mask
+# pair) -- wrong for a bridge_l2 tree (2*15=30B/row), read 2 bytes past
+# the real match record. Fixed to use the tree's own key_size. Also adds
+# the AD-table dump the cc_test debugfs read node never had -- the
+# missing oracle for directly verifying what a CC leaf's enqueue action
+# actually contains in hardware (fqid/NIA/NADEN bits) versus what the
+# software believes it wrote, needed to keep chasing §8.2b (F-250's
+# NADEN+HMTD hypothesis was directly tested and refuted; the
+# enqueue-succeeds-dequeue-fails mystery survives).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_251.py" 2>&1
+    echo "### fman_pcd_cc.c: F-251 AD-table dump + match-table print-length fix (T-M6-2 B2)"
+fi
+
+# F-247 (T-M6-2 B2, 2026-09-15): extend probe3 (F-241) with mode 2 for the
+# bridge FDB L2 composite (PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2()
+# (F-248, corrected from the original patch 0206/0207 attempt) the same way
+# modes 0/1 reuse cc_test_install_v6()/cc_test_install_v6pid(). Answers plan
+# §8.1's read-only comparator-window question for the L2 case. Must run
+# after F-241 (probe3 must already exist) and after F-248 (cc_test_install_l2
+# must already exist).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_247.py" 2>&1
+    echo "### fman_pcd_cc_test.c: F-247 probe3 mode 2 bridge L2 comparator capture (T-M6-2 B2)"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic

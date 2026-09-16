@@ -286,18 +286,28 @@ sed -i 's/ttyAMA0/ttyS0/g' \
 # Our config.boot.* defaults do NOT use `set system flow-accounting netflow`,
 # so the OOT iptables-NETFLOW kmod + the small VyOS glue package are dead
 # weight on this board. Strip the entry from arm64.toml before
-# build-vyos-image renders custom.list.chroot. The companion sed normalizes
-# the trailing comma on the preceding `"grub-efi-arm64"` entry so the TOML
-# array stays syntactically valid after deletion.
+# build-vyos-image renders custom.list.chroot.
+#
+# 2026-09-10 fix: the original version of this block also stripped the
+# trailing comma from the preceding `"grub-efi-arm64"` entry, on the
+# assumption that TOML arrays disallow a trailing comma before `]`. TOML
+# has always allowed a trailing comma in arrays (verified: `tomllib.loads`
+# parses `packages = ["a", "b",]` fine) -- that sed was solving a non-
+# problem from the start. It turned actively harmful once upstream
+# inserted a new `"vyos-linux-firmware"` entry between "grub-efi-arm64"
+# and "vyos-ipt-netflow": the comma-strip still fired on the (no longer
+# second-to-last) "grub-efi-arm64" line by name match alone, deleting a
+# comma that was still needed to separate it from "vyos-linux-firmware"
+# and producing "tomli.TOMLDecodeError: Unclosed array" during
+# build-vyos-image. Deleting just the named line is sufficient and
+# always valid TOML regardless of what upstream puts around it.
 #
 # If upstream republishes the package later, this sed becomes a no-op
-# (the line will simply not exist to delete and the grub entry will not
-# have the trailing comma to strip), and we can revert this block.
+# (the line will simply not exist to delete), and we can revert this block.
 if [ -f vyos-build/data/architectures/arm64.toml ]; then
   if grep -q '"vyos-ipt-netflow"' vyos-build/data/architectures/arm64.toml; then
     sed -i -E \
       -e '/^[[:space:]]*"vyos-ipt-netflow"[[:space:]]*,?[[:space:]]*$/d' \
-      -e 's/^([[:space:]]*"grub-efi-arm64")[[:space:]]*,[[:space:]]*$/\1/' \
       vyos-build/data/architectures/arm64.toml
     echo "### Stripped vyos-ipt-netflow from arm64.toml (upstream apt repo no longer ships it):"
     cat vyos-build/data/architectures/arm64.toml

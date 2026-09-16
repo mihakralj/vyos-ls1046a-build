@@ -1,0 +1,428 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: FMan capability detection + CC stub (DT probe, productive structs)
+
+Consolidates 0086 (fman-caps-detection-and-cc-stub) + 0086a
+(fman-caps-probe-dt) + 0086b (fman-cc-productive-structs) into one patch,
+verified byte-identical against CI checkpoints 577747604142..58c525b887e9
+(patch-series-cleanup run 34556757795).
+Touches: Kconfig, Makefile, dpaa_eth.{c,h}, dpaa_ethtool.c,
+dpaa_fman_caps.{c,h}.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
+--- a/drivers/net/ethernet/freescale/dpaa/Kconfig
++++ b/drivers/net/ethernet/freescale/dpaa/Kconfig
+@@ -20,4 +20,19 @@
+ 	  and XSK pool management to dpaa_eth without touching core code.
+ 	  Safe to leave on: with no flavor module loaded, behaviour is unchanged.
+ 
++config DPAA_HW_CC_STEERING
++bool "DPAA: FMan PCD capability detection + CC steering stubs (M3-3b)"
++depends on FSL_DPAA_ETH
++default y
++help
++  Compile in the FMan PCD capability layer (dpaa_fman_get_caps,
++  FMAN_CAP_* bits) and the CC-steering stub API
++  (fman_cc_tree_install/add_key/remove_key/destroy) per
++  specs/dpaa1-afxdp-modernization-spec.md sec 3.5 and sec 5.4.
++  All stubs return -ENOTSUPP on mainline ucode 106 and bump
++  the hw_offload_unavailable ethtool counter.  Productive
++  implementations land in follow-up patches; the API is fixed
++  now so downstream consumers can wire calls today.
++  Safe to leave on: zero runtime cost without ucode 210.
++
+ source "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig"
+diff --git a/drivers/net/ethernet/freescale/dpaa/Makefile b/drivers/net/ethernet/freescale/dpaa/Makefile
+--- a/drivers/net/ethernet/freescale/dpaa/Makefile
++++ b/drivers/net/ethernet/freescale/dpaa/Makefile
+@@ -11,6 +11,7 @@
+ 
+ fsl_dpa-objs += dpaa_eth.o dpaa_ethtool.o dpaa_eth_sysfs.o
+ fsl_dpa-$(CONFIG_DPAA_FLAVOR_OPS) += dpaa_flavor.o
++fsl_dpa-$(CONFIG_DPAA_HW_CC_STEERING) += dpaa_fman_caps.o
+ CFLAGS_dpaa_eth.o := -I$(src)
+ 
+ obj-$(CONFIG_DPAA_AF_XDP_POOL) += af_xdp_pool/
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -32,6 +32,7 @@
+ #include <linux/bpf_trace.h>
+ #include <net/xdp_sock_drv.h>
+ #include "dpaa_flavor.h"
++#include "dpaa_fman_caps.h"
+ #include <soc/fsl/bman.h>
+ #include <soc/fsl/qman.h>
+ #include "fman.h"
+@@ -3620,9 +3621,19 @@
+ 	 * queue_id validator before any pcd_ops->install runs. A flavor
+ 	 * module's pcd_ops->install may later refine this downward.
+ 	 */
+-	priv->xsk_max_qbands = DPAA1_XSK_MAX_QBANDS;
++priv->xsk_max_qbands = DPAA1_XSK_MAX_QBANDS;
+ 
+-	priv->egress_fqs = devm_kcalloc(dev, dpaa_max_num_txqs(),
++/* M3-3b (patch 0086): snapshot the FMan PCD capability bitmask
++ * once per netdev so subsequent fman_cc_/fman_hm_/fman_pol_
++ * helpers can short-circuit to -ENOTSUPP without re-probing.
++ * dpaa_fman_caps_log() emits one KERN_INFO line for the first
++ * netdev only (internal one-shot guard) so the boot log records
++ * the cap bitmask exactly once. Spec sec 3.5.
++ */
++priv->fman_caps = dpaa_fman_get_caps();
++dpaa_fman_caps_log(dev, priv->fman_caps);
++
++priv->egress_fqs = devm_kcalloc(dev, dpaa_max_num_txqs(),
+ 					sizeof(*priv->egress_fqs),
+ 					GFP_KERNEL);
+ 	if (!priv->egress_fqs) {
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -288,6 +288,24 @@
+  */
+ u64 xsk_tx_conf_zc;
+ 
++/* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
++ * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
++ * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
++ * to -ENOTSUPP and bump hw_offload_unavailable. Non-zero only
++ * when ucode 210+ is loaded (or simulated via
++ * dpaa_fman_caps.force=). Spec sec 3.5 capability layer.
++ */
++u32 fman_caps;
++
++/* M3-3b (patch 0086): bumped once per -ENOTSUPP returned by any
++ * HW-offload stub (fman_cc_*, fman_hm_*, fman_pol_*, fman_hc_*).
++ * Surfaces via the dpaa_stats_hwoffload[] ethtool array as
++ * "hw_offload_unavailable". Allows operators to detect "I asked
++ * for HW offload but silicon/ucode doesn't support it" without
++ * scraping dmesg. Spec sec 5.4 observability.
++ */
++u64 hw_offload_unavailable;
++
+ /* M3 (Phase 3a): qband -> { FQ base, SWP, CPU, NAPI } resource map.
+ 	 * Populated by the flavor module's pcd_ops->install. With no flavor
+ 	 * module loaded the array stays zeroed and the spec's "qmap[]
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -73,9 +73,22 @@
+ "xsk_tx_conf_zc",
+ };
+ 
+-#define DPAA_STATS_PERCPU_LEN ARRAY_SIZE(dpaa_stats_percpu)
+-#define DPAA_STATS_GLOBAL_LEN ARRAY_SIZE(dpaa_stats_global)
+-#define DPAA_STATS_XSK_LEN    ARRAY_SIZE(dpaa_stats_xsk)
++/* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match
++ * the u64 block at &priv->hw_offload_unavailable in struct dpaa_priv
++ * (dpaa_eth.h). One bumped-on-ENOTSUPP counter today; the productive
++ * implementations of fman_cc_/fman_hm_/fman_pol_/fman_hc_ in
++ * follow-up patches will add per-block success/fail counters keeping
++ * the same contiguous-block-of-u64 layout.
++ * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 3.5 + sec 5.4.
++ */
++static char dpaa_stats_hwoffload[][ETH_GSTRING_LEN] = {
++"hw_offload_unavailable",
++};
++
++#define DPAA_STATS_PERCPU_LEN    ARRAY_SIZE(dpaa_stats_percpu)
++#define DPAA_STATS_GLOBAL_LEN    ARRAY_SIZE(dpaa_stats_global)
++#define DPAA_STATS_XSK_LEN       ARRAY_SIZE(dpaa_stats_xsk)
++#define DPAA_STATS_HWOFFLOAD_LEN ARRAY_SIZE(dpaa_stats_hwoffload)
+ 
+ static int dpaa_get_link_ksettings(struct net_device *net_dev,
+ 				   struct ethtool_link_ksettings *cmd)
+@@ -146,8 +159,9 @@
+ 	unsigned int total_stats, num_stats;
+ 
+ 	num_stats   = num_online_cpus() + 1;
+-	total_stats = num_stats * (DPAA_STATS_PERCPU_LEN + 1) +
+-			DPAA_STATS_GLOBAL_LEN + DPAA_STATS_XSK_LEN;
++total_stats = num_stats * (DPAA_STATS_PERCPU_LEN + 1) +
++DPAA_STATS_GLOBAL_LEN + DPAA_STATS_XSK_LEN +
++DPAA_STATS_HWOFFLOAD_LEN;
+ 
+ 	switch (type) {
+ 	case ETH_SS_STATS:
+@@ -266,11 +280,22 @@
+ 	/* AF_XDP zero-copy counters - contiguous u64 block in dpaa_priv,
+ 	 * order matches dpaa_stats_xsk[] above.  Spec sec 5.3.
+ 	 */
+-	{
+-		const u64 *xsk_src = &priv->xsk_pool_attach_ok;
+-		for (i = 0; i < DPAA_STATS_XSK_LEN; i++)
+-			data[offset++] = xsk_src[i];
+-	}
++{
++const u64 *xsk_src = &priv->xsk_pool_attach_ok;
++for (i = 0; i < DPAA_STATS_XSK_LEN; i++)
++data[offset++] = xsk_src[i];
++}
++
++/* HW-offload counters (M3-3b / patch 0086) - contiguous u64
++ * block in dpaa_priv, order matches dpaa_stats_hwoffload[] above.
++ * Spec sec 3.5 + sec 5.4.
++ */
++{
++const u64 *hwoff_src = &priv->hw_offload_unavailable;
++
++for (i = 0; i < DPAA_STATS_HWOFFLOAD_LEN; i++)
++data[offset++] = hwoff_src[i];
++}
+ }
+ 
+ static void dpaa_get_strings(struct net_device *net_dev, u32 stringset,
+@@ -294,8 +319,10 @@
+ 
+ 	for (i = 0; i < DPAA_STATS_GLOBAL_LEN; i++)
+ 		ethtool_puts(&data, dpaa_stats_global[i]);
+-	for (i = 0; i < DPAA_STATS_XSK_LEN; i++)
+-		ethtool_puts(&data, dpaa_stats_xsk[i]);
++for (i = 0; i < DPAA_STATS_XSK_LEN; i++)
++ethtool_puts(&data, dpaa_stats_xsk[i]);
++for (i = 0; i < DPAA_STATS_HWOFFLOAD_LEN; i++)
++ethtool_puts(&data, dpaa_stats_hwoffload[i]);
+ }
+ 
+ static int dpaa_get_rxfh_fields(struct net_device *dev,
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -21,6 +21,8 @@
+ #include <linux/printk.h>
+ #include <linux/types.h>
+ 
++#include <linux/of.h>
++#include <linux/string.h>
+ #include "dpaa_fman_caps.h"
+ 
+ /* dpaa_fman_caps.force=<u32>
+@@ -37,9 +39,115 @@
+  "Force FMan PCD capability bitmask (FMAN_CAP_* bits) for dev/CI. "
+  "Default 0 = no PCD offload (mainline ucode 106 behaviour).");
+ 
++/* Cached after first successful DT probe so subsequent dpaa_eth_probe()
++ * calls (one per netdev, 5x on Mono Gateway DK) don't re-walk the DT
++ * for the same firmware blob. -1 = not yet probed; >=0 = cached bitmask.
++ */
++static int dpaa_fman_caps_cached = -1;
++
++/* Map an ASCII version string from the FMan ucode header id field to
++ * the FMAN_CAP_* bitmask documented in spec sec 3.5.  The NXP QEF
++ * header id is always of the form
++ *
++ *   "Microcode version <maj>.<min>.<rev> for <SoC> <rev>"
++ *
++ * with a NUL terminator. We only need <maj> here:
++ *   maj >= 210: PCD primitives are present (CC, HM, POL, PARSER)
++ *               but NOT host-command dispatch (per PR13 hardware probe
++ *               on Mono Gateway DK 2026-05-13 — the standard 210.10.1
++ *               QEF ucode does not implement the HC doorbell).
++ *   maj == 106 (or anything < 210): no PCD primitives.
++ *
++ * Returns the bitmask, or 0 if the id string is unparseable.
++ */
++static u32 dpaa_fman_caps_from_id(const char *id, size_t id_len)
++{
++	const char prefix[] = "Microcode version ";
++	unsigned int major = 0;
++	size_t i;
++
++	if (id_len < sizeof(prefix))
++		return 0;
++	if (memcmp(id, prefix, sizeof(prefix) - 1) != 0)
++		return 0;
++
++	i = sizeof(prefix) - 1;
++	while (i < id_len && id[i] >= '0' && id[i] <= '9') {
++		major = major * 10 + (id[i] - '0');
++		if (major > 9999)
++			return 0;
++		i++;
++}
++	if (i == sizeof(prefix) - 1 || (id[i] != '.' && id[i] != ' '))
++		return 0;
++
++	if (major >= 210)
++		return FMAN_CAP_CC_EXACT_MATCH | FMAN_CAP_HM_NODES |
++		       FMAN_CAP_POLICER_TRTCM | FMAN_CAP_PARSER_SOFTSEQ;
++	return 0;
++}
++
++/* Walk the device tree looking for the FMan firmware blob U-Boot loaded
++ * into MURAM. Layout (see include/soc/fsl/qe/qe.h struct qe_firmware):
++ *   bytes 0..3  __be32 length
++ *   bytes 4..6  magic "QEF"
++ *   byte  7     version (==1 today)
++ *   bytes 8..69 id[62]  NUL-terminated ASCII version string
++ *
++ * On Mono Gateway DK with U-Boot loading from SPI mtd4, this property
++ * is at /soc/fman@1a00000/fman-firmware/fsl,firmware and the id reads
++ * exactly "Microcode version 210.10.1 for LS1043 r1.0".
++ *
++ * Returns the cap bitmask on success, 0 on any DT error / missing blob /
++ * unparseable header. Safe to call before any FMan driver probe.
++ */
++static u32 dpaa_fman_caps_probe_dt(void)
++{
++	struct device_node *fman_np, *fw_np;
++	const u8 *fw;
++	int fw_len;
++	u32 caps;
++
++	fman_np = of_find_compatible_node(NULL, NULL, "fsl,fman");
++	if (!fman_np)
++		return 0;
++
++	fw_np = of_get_child_by_name(fman_np, "fman-firmware");
++	of_node_put(fman_np);
++	if (!fw_np)
++		return 0;
++
++	fw = of_get_property(fw_np, "fsl,firmware", &fw_len);
++	if (!fw || fw_len < 70 /* header(8) + id[62] */) {
++		of_node_put(fw_np);
++		return 0;
++}
++
++	if (fw[4] != 'Q' || fw[5] != 'E' || fw[6] != 'F') {
++		of_node_put(fw_np);
++		return 0;
++}
++
++	/* id field is bytes 8..69 (62 bytes), NUL-terminated. */
++	caps = dpaa_fman_caps_from_id((const char *)&fw[8], 62);
++	of_node_put(fw_np);
++	return caps;
++}
++
+ u32 dpaa_fman_get_caps(void)
+ {
+-return dpaa_fman_caps_force & FMAN_CAP_ALL;
++	u32 caps;
++
++	/* Operator override (dev/CI) always wins. */
++	if (dpaa_fman_caps_force)
++		return dpaa_fman_caps_force & FMAN_CAP_ALL;
++
++	if (dpaa_fman_caps_cached >= 0)
++		return (u32)dpaa_fman_caps_cached;
++
++	caps = dpaa_fman_caps_probe_dt();
++	dpaa_fman_caps_cached = (int)caps;
++	return caps;
+ }
+ EXPORT_SYMBOL_GPL(dpaa_fman_get_caps);
+ 
+@@ -53,7 +161,7 @@
+ 
+ if (!caps) {
+ dev_info(dev,
+- "FMan PCD caps = 0x00 (mainline ucode 106 / no PCD offload)\n");
++ "FMan PCD caps = 0x00 (ucode <210 or DT probe failed; no PCD offload)\n");
+ return;
+ }
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -101,16 +101,88 @@
+ int  fman_cc_tree_remove_key(struct fman *fm, u8 port_id, u32 handle);
+ void fman_cc_tree_destroy(struct fman *fm, u8 port_id);
+ 
+-/* Opaque types referenced by the stub signatures; concrete layout
+- * lands with the productive implementation.  Declaring them here keeps
+- * callers source-compatible across the stub -> productive transition.
++/* Productive CC (Coarse Classification) data structures (spec sec 5.4).
++ *
++ * The FMan PCD Custom Classifier matches a fixed 5-tuple extracted by
++ * the Parser (post-HXS) against a table of keys held in MURAM; each key
++ * that hits steers the frame to a target RX FQ (and thereby a qband /
++ * CPU per spec sec 5.2). These structs describe the key/tree at the API
++ * boundary; the silicon AD-table / group-table encoding (CONT_LOOKUP AD
++ * format per LS1046A RM 8.7.4.1) is built inside the productive
++ * fman_cc_tree_install()/add_key() bodies (follow-up patch).
++ *
++ * Match semantics: a field participates in the match iff the
++ * corresponding *_mask bit(s) are set; mask 0 = wildcard (don't-care).
++ * All multi-byte fields are host-endian at the API; the install body
++ * converts to the FMan big-endian MURAM layout.
+  */
+-struct fman_cc_static_tree {
+-	u32 reserved;          /* productive layout TBD per spec sec 5.4 */
+-};
+ 
++/* L4 protocol selector for fman_cc_key.proto (IANA numbers). 0 = any. */
++#define FMAN_CC_PROTO_ANY	0
++#define FMAN_CC_PROTO_TCP	6
++#define FMAN_CC_PROTO_UDP	17
++
++/* EtherType selector for fman_cc_key.ethertype (host-endian). 0 = any. */
++#define FMAN_CC_ETHERTYPE_ANY	0x0000
++#define FMAN_CC_ETHERTYPE_IPV4	0x0800
++#define FMAN_CC_ETHERTYPE_IPV6	0x86dd
++
++/**
++ * struct fman_cc_key - one exact/masked CC classification key
++ * @ethertype:    L2 EtherType to match (host-endian), 0 = wildcard
++ * @proto:        L4 protocol (FMAN_CC_PROTO_*), 0 = wildcard
++ * @src_ip:       source IPv4 (host-endian); IPv6 uses src_ip6 instead
++ * @dst_ip:       destination IPv4 (host-endian)
++ * @src_ip6:      source IPv6 (network byte order, 16 bytes)
++ * @dst_ip6:      destination IPv6 (network byte order, 16 bytes)
++ * @src_port:     L4 source port (host-endian), 0 = wildcard
++ * @dst_port:     L4 destination port (host-endian), 0 = wildcard
++ * @src_ip_mask:  prefix-style mask for src_ip (host-endian); 0 = any
++ * @dst_ip_mask:  prefix-style mask for dst_ip (host-endian); 0 = any
++ * @target_qband: qband [0 .. xsk_max_qbands-1] to steer matching frames
++ * @hm_handle:    HM node handle to chain after match (0 = no HM); the
++ *                value returned by fman_hm_node_install() per spec sec 5.5
++ * @is_ipv6:      when true, match src_ip6/dst_ip6 instead of src_ip/dst_ip
++ *
++ * A field is matched iff it (or its mask) is non-zero. The productive
++ * add_key() body rejects a key whose target_qband >= priv->xsk_max_qbands
++ * with -ERANGE and one whose hm_handle is non-zero on a build without
++ * FMAN_CAP_HM_NODES with -ENOTSUPP.
++ */
+ struct fman_cc_key {
+-	u32 reserved;          /* productive layout TBD per spec sec 5.4 */
++	u16 ethertype;
++	u8  proto;
++	u8  is_ipv6;
++	u32 src_ip;
++	u32 dst_ip;
++	u32 src_ip_mask;
++	u32 dst_ip_mask;
++	u8  src_ip6[16];
++	u8  dst_ip6[16];
++	u16 src_port;
++	u16 dst_port;
++	u16 target_qband;
++	u32 hm_handle;
++};
++
++/**
++ * struct fman_cc_static_tree - a port's complete static CC table
++ * @num_keys: number of valid entries in @keys
++ * @miss_qband: qband for frames matching no key (the tree's miss action);
++ *              default 0 maps to the existing RSS-hash default path
++ * @keys: the key array, evaluated in order; first match wins
++ *
++ * Passed to fman_cc_tree_install() for the static (default/vpp) lifecycle.
++ * The dynamic (ask) lifecycle builds the same key one-at-a-time via
++ * fman_cc_tree_add_key(). FMAN_CC_MAX_STATIC_KEYS bounds the static tree
++ * at the ~5 KiB MURAM budget from spec sec 3.5 (32 keys x ~150 B).
++ */
++#define FMAN_CC_MAX_STATIC_KEYS	32
++
++struct fman_cc_static_tree {
++	u16 num_keys;
++	u16 miss_qband;
++	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
+ };
+ 
+ #endif /* __DPAA_FMAN_CAPS_H */
+\ No newline at end of file

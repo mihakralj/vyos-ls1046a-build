@@ -1,0 +1,1302 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] fman: CC/HM VLAN-route support, dedup, and debugfs tests (T-M6-8)
+
+Consolidates the T-M6-8 VLAN CC/HM front-end series into a single patch.
+This squashes eleven originally-separate incremental patches (0121,
+0121a, 0121c-0121l) that were split into per-step review slices during
+ASK2 development; each slice touched the same handful of files as its
+predecessor and had to apply in the exact micro-order recorded below.
+Content is unchanged from the union of those patches as verified in CI
+(run 34552869475, checkpoints 4c03ccf5ad29..c9f00727a3d8); only the
+patch boundary is different.
+
+Squashed originals (in real, alphabetical apply order -- the series
+file's line order does NOT control apply order, find|sort does):
+  0121   - dpaa-export-cc-target-resolvers
+  0121a  - fman-pcd-hm-vlan-dedup
+  0121c  - fman-pcd-cc-test-vlan-hm
+  0121d  - fman-pcd-hm-vlan-route-dedup
+  0121e  - fman-pcd-cc-test-vlan-route
+  0121f  - fman-pcd-cc-test-teardown-quiesce
+  0121g  - fman-pcd-cc-test-vlan-coex
+  0121h  - fman-cc-miss-fe-production-api
+  0121i  - fman-export-fe-root-offset (previously given a separate,
+           purely cosmetic series-file slot after 0153 in the belief
+           that series-file order affects apply order; it does not --
+           0121i genuinely applies here, right after 0121h, in every
+           real build. That belief is now moot since there is only one
+           patch.)
+  0121j  - fman-pcd-hm-vlan-route-translate
+  0121k  - fman-pcd-cc-max-keys-64
+  0121l  - fman-pcd-cc-ekfc-port-id
+
+Touches: drivers/net/ethernet/freescale/dpaa/dpaa_eth.c,
+dpaa_fman_caps.{c,h}; drivers/net/ethernet/freescale/fman/fman_pcd.c,
+fman_pcd_cc.c, fman_pcd_cc_test.c, fman_pcd_kg.c;
+include/linux/fsl/fman_pcd.h.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -4407,6 +4407,56 @@
+ 	.remove = dpaa_remove
+ };
+ 
++/*
++ * dpaa_get_rx_fman_port() / dpaa_get_tx_fqid() (board patch 0121)
++ *
++ * OOT CC-target resolvers for the single-image ASK2 PCD consumer (ask.ko).
++ * They turn a kernel net_device into the DPAA1 hardware identifiers a
++ * static CC tree needs: the ingress RX struct fman_port (feed to
++ * fman_port_get_id() for the fman_cc_tree_* port key) and an egress TX
++ * frame-queue id (the target_fqid a CC FORWARD_FQ[_WITH_MANIP] action
++ * enqueues to).  Both validate the device is dpaa-owned before touching
++ * private state.  Bodies mirror the dead ask-flavor exports 0039/0031 but
++ * are reparented onto the common dpaa_fman_caps.h substrate.  Callers hold
++ * RTNL (or equivalent) so the dpaa_priv cannot be freed underneath them.
++ */
++struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev)
++{
++	struct dpaa_priv *priv;
++
++	if (!dev)
++		return NULL;
++	if (dev->netdev_ops != &dpaa_ops)
++		return NULL;
++	priv = netdev_priv(dev);
++	if (!priv->mac_dev)
++		return NULL;
++	return priv->mac_dev->port[RX];
++}
++EXPORT_SYMBOL_GPL(dpaa_get_rx_fman_port);
++
++int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
++{
++	struct dpaa_priv *priv;
++
++	if (!dev || !fqid)
++		return -EINVAL;
++
++	if (dev->netdev_ops != &dpaa_ops)
++		return -ENODEV;
++
++	if (queue >= dpaa_max_num_txqs())
++		return -ERANGE;
++
++	priv = netdev_priv(dev);
++	if (!priv->egress_fqs || !priv->egress_fqs[queue])
++		return -ENOENT;
++
++	*fqid = qman_fq_fqid(priv->egress_fqs[queue]);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_get_tx_fqid);
++
+ static int __init dpaa_load(void)
+ {
+ 	int err;
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -21,6 +21,7 @@
+ #include <linux/printk.h>
+ #include <linux/slab.h>
+ #include <linux/types.h>
++#include <linux/delay.h>
+ #include <linux/etherdevice.h>
+ #include <linux/list.h>
+ #include <linux/mutex.h>
+@@ -295,6 +296,7 @@
+ hw->num_keys = spec->num_keys;
+ hw->miss_qband = spec->miss_qband;
+ hw->miss_fqid = spec->miss_fqid;
++hw->miss_fe_off = spec->miss_fe_off;
+ for (i = 0; i < spec->num_keys; i++)
+ dpaa_cc_key_to_hw(&spec->keys[i], &hw->keys[i]);
+ 
+@@ -370,6 +372,9 @@
+ 		if (rxport)
+ 			(void)fman_port_set_cc_base(rxport, 0);
+ 	}
++	/* F-135/F-136 + R4b wedge: let in-flight FMan tasks drain after
++	 * detaching/clearing RCCB before freeing live-walked CC/HMTD MURAM. */
++	usleep_range(5000, 6000);
+ 	fman_pcd_cc_static_destroy(pcd, port_id);
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
+@@ -769,5 +774,367 @@
+ }
+ EXPORT_SYMBOL_GPL(fman_hm_nexthop_put);
+ 
++/* ------------------------------------------------------------------ *
++ * VLAN HM dedup (T-M6-8 R2): one shared HMTD per VLAN tag-edit adjacency.
++ *
++ * A VLAN flow's per-key CC action references a header-manip handle that
++ * either strips the outermost ingress VLAN tag (POP) or inserts one egress
++ * tag (PUSH).  As with the L3 next-hop dedup, installing one HMTD per *flow*
++ * would exhaust MURAM, so every flow that needs the same tag edit toward the
++ * same egress FQ shares one node keyed by
++ * (is_push, vid, tpid, pcp, egress_tx_fqid) and refcounted.
++ *
++ * The install path sleeps (fman_hm_node_install does GFP_KERNEL) and callers
++ * hold no spinlock, so a plain mutex guards the table.
++ * ------------------------------------------------------------------ */
++struct fman_hm_vlan_ent {
++	struct list_head	node;
++	struct fman		*fm;
++	u32			egress_tx_fqid;
++	u16			vid;
++	u16			tpid;
++	u8			pcp;
++	bool			is_push;
++	u8			port_id;
++	u32			handle;
++	refcount_t		refcount;
++};
++
++static LIST_HEAD(fman_hm_vlan_cache);
++static DEFINE_MUTEX(fman_hm_vlan_lock);
++
++static struct fman_hm_vlan_ent *
++fman_hm_vlan_lookup(struct fman *fm, bool is_push, u16 vid, u16 tpid, u8 pcp,
++		    u32 egress_tx_fqid)
++{
++	struct fman_hm_vlan_ent *v;
++
++	list_for_each_entry(v, &fman_hm_vlan_cache, node) {
++		if (v->fm == fm &&
++		    v->is_push == is_push &&
++		    v->egress_tx_fqid == egress_tx_fqid &&
++		    (!is_push ||
++		     (v->vid == vid && v->tpid == tpid && v->pcp == pcp)))
++			return v;
++	}
++	return NULL;
++}
++
++/*
++ * fman_hm_vlan_get - resolve (and refcount) the shared VLAN HM node for a
++ * tag-edit adjacency, installing it on first use.  @is_push selects INSERT
++ * (push @vid/@tpid/@pcp) vs STRIP (pop the outermost tag).  On success
++ * *handle receives the HMTD MURAM offset to embed as a CC leaf hm_handle.
++ */
++int fman_hm_vlan_get(struct fman *fm, u8 port_id, bool is_push,
++		     u16 vid, u16 tpid, u8 pcp, u32 egress_tx_fqid,
++		     u32 *handle)
++{
++	struct fman_hm_vlan_ent *v;
++	struct fman_hm_spec spec;
++	struct fman_hm_op *op;
++	int err;
++
++	if (!fm || !handle)
++		return -EINVAL;
++	*handle = 0;
++	if (!fman_hm_caps_supported())
++		return -ENOTSUPP;
++	if (is_push && (vid == 0 || vid > 4094))
++		return -EINVAL;
++
++	mutex_lock(&fman_hm_vlan_lock);
++
++	v = fman_hm_vlan_lookup(fm, is_push, vid, tpid, pcp, egress_tx_fqid);
++	if (v) {
++		refcount_inc(&v->refcount);
++		*handle = v->handle;
++		mutex_unlock(&fman_hm_vlan_lock);
++		return 0;
++	}
++
++	v = kzalloc(sizeof(*v), GFP_KERNEL);
++	if (!v) {
++		mutex_unlock(&fman_hm_vlan_lock);
++		return -ENOMEM;
++	}
++
++	memset(&spec, 0, sizeof(spec));
++	spec.num_ops = 1;
++	op = &spec.ops[0];
++	if (is_push) {
++		op->type = FMAN_HM_OP_VLAN_INSERT;
++		op->vlan_insert.vlan_id = vid;
++		op->vlan_insert.tpid = tpid ? tpid : 0x8100;
++		op->vlan_insert.pcp = pcp & 0x7;
++	} else {
++		op->type = FMAN_HM_OP_VLAN_STRIP;
++	}
++
++	err = fman_hm_node_install(fm, port_id, &spec, &v->handle);
++	if (err) {
++		kfree(v);
++		mutex_unlock(&fman_hm_vlan_lock);
++		return err;
++	}
++
++	v->fm = fm;
++	v->egress_tx_fqid = egress_tx_fqid;
++	v->vid = vid;
++	v->tpid = tpid ? tpid : 0x8100;
++	v->pcp = pcp & 0x7;
++	v->is_push = is_push;
++	v->port_id = port_id;
++	refcount_set(&v->refcount, 1);
++	list_add(&v->node, &fman_hm_vlan_cache);
++
++	*handle = v->handle;
++	mutex_unlock(&fman_hm_vlan_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_get);
++
++/*
++ * fman_hm_vlan_put - drop a reference taken by fman_hm_vlan_get().  Destroys
++ * the shared HM node and reclaims its MURAM when the last user goes away.
++ * Idempotent for an unknown handle (returns 0).
++ */
++int fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle)
++{
++	struct fman_hm_vlan_ent *v, *found = NULL;
++	int err = 0;
++
++	if (!fm)
++		return 0;
++
++	mutex_lock(&fman_hm_vlan_lock);
++	list_for_each_entry(v, &fman_hm_vlan_cache, node) {
++		if (v->fm == fm && v->handle == handle) {
++			found = v;
++			break;
++		}
++	}
++	if (found && refcount_dec_and_test(&found->refcount)) {
++		list_del(&found->node);
++		err = fman_hm_node_destroy(found->fm, found->port_id,
++					   found->handle);
++		kfree(found);
++	}
++	mutex_unlock(&fman_hm_vlan_lock);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_put);
++
++/* ------------------------------------------------------------------ *
++ * VLAN+route HM dedup (T-M6-8 R4a): one shared HMTD that does BOTH the
++ * VLAN tag edit AND the L3 next-hop rewrite for a routed-VLAN flow.
++ *
++ * R3b proved a VLAN-only strip HMTD sustains, but a real routed-VLAN flow
++ * must, in one HMTD chain, edit the tag AND rebuild L2 (dst=next-hop MAC,
++ * src=egress MAC) + decrement the IPv4 TTL - the CC enqueue itself rewrites
++ * nothing.  This composes R2's VLAN op with the next-hop op-set (0119/0120):
++ *   POP+route :  {VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD}
++ *   PUSH+route:  {RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD, VLAN_INSERT}
++ * (VLAN_INSERT last so the tag rides the rebuilt L2 header.)
++ *
++ * Refcounted like the other dedup caches, keyed by the full
++ * (is_push, vid, tpid, pcp, dst_mac, src_mac, egress_tx_fqid) adjacency, so
++ * MURAM stays O(routed-VLAN adjacencies) not O(flows).  Sleepable; process
++ * context only.  For a *bridged* (non-routed) VLAN flow keep using the
++ * VLAN-only fman_hm_vlan_get().
++ * ------------------------------------------------------------------ */
++struct fman_hm_vlan_route_ent {
++	struct list_head	node;
++	struct fman		*fm;
++	u32			egress_tx_fqid;
++	u16			vid;
++	u16			tpid;
++	u8			pcp;
++	bool			do_pop;
++	bool			do_push;
++	u8			src_mac[ETH_ALEN];
++	u8			dst_mac[ETH_ALEN];
++	u8			port_id;
++	u32			handle;
++	refcount_t		refcount;
++};
++
++static LIST_HEAD(fman_hm_vlan_route_cache);
++static DEFINE_MUTEX(fman_hm_vlan_route_lock);
++
++static struct fman_hm_vlan_route_ent *
++fman_hm_vlan_route_lookup(struct fman *fm, bool do_pop, bool do_push,
++			  u16 vid, u16 tpid, u8 pcp,
++			  const u8 *src_mac, const u8 *dst_mac,
++			  u32 egress_tx_fqid)
++{
++	struct fman_hm_vlan_route_ent *v;
++
++	list_for_each_entry(v, &fman_hm_vlan_route_cache, node) {
++		if (v->fm == fm &&
++		    v->do_pop == do_pop &&
++		    v->do_push == do_push &&
++		    v->egress_tx_fqid == egress_tx_fqid &&
++		    ether_addr_equal(v->src_mac, src_mac) &&
++		    ether_addr_equal(v->dst_mac, dst_mac) &&
++		    (!do_push ||
++		     (v->vid == vid && v->tpid == tpid && v->pcp == pcp)))
++			return v;
++	}
++	return NULL;
++}
++
++static void fman_hm_vlan_route_l3(struct fman_hm_spec *spec, unsigned int i,
++				  const u8 *dst_mac, const u8 *src_mac)
++{
++	struct fman_hm_op *op;
++
++	spec->ops[i].type = FMAN_HM_OP_RMV_ETHERNET;
++	op = &spec->ops[i + 1];
++	op->type = FMAN_HM_OP_INSRT_GENERIC;
++	op->insrt_generic.size = 2 * ETH_ALEN + 2;
++	memcpy(&op->insrt_generic.hdr[0], dst_mac, ETH_ALEN);
++	memcpy(&op->insrt_generic.hdr[ETH_ALEN], src_mac, ETH_ALEN);
++	op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08; /* ETH_P_IP >> 8 */
++	op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00; /* ETH_P_IP & 0xff */
++	op = &spec->ops[i + 2];
++	op->type = FMAN_HM_OP_IPV4_FORWARD;
++	op->ipv4_forward.dec_ttl = 1;
++	op->ipv4_forward.l4_csum = 1;
++}
++
++/*
++ * fman_hm_vlan_route_get - resolve (and refcount) the shared combined
++ * VLAN-edit + L3-forward HM node for a routed-VLAN adjacency, installing it on
++ * first use.  @do_pop and @do_push are independent: POP-only strips the
++ * ingress tag before the L2/L3 rebuild; PUSH-only inserts (@vid/@tpid/@pcp)
++ * after it; BOTH set builds a same-port VID-to-VID TRANSLATE chain (strip the
++ * old tag, rebuild L2/L3, insert the new tag last) -- e.g. two 802.1Q vifs on
++ * one physical port routing between each other. At least one of @do_pop/
++ * @do_push must be set. @dst_mac/@src_mac are the egress next-hop and
++ * egress-port MACs. On success *handle receives the HMTD MURAM offset for a
++ * CC leaf hm_handle. Sleepable; process context only.
++ */
++int fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
++			   bool do_pop, bool do_push,
++			   u16 vid, u16 tpid, u8 pcp,
++			   const u8 *src_mac, const u8 *dst_mac,
++			   u32 egress_tx_fqid, u32 *handle)
++{
++	struct fman_hm_vlan_route_ent *v;
++	struct fman_hm_spec spec;
++	struct fman_hm_op *op;
++	unsigned int n;
++	int err;
++
++	if (!fm || !src_mac || !dst_mac || !handle)
++		return -EINVAL;
++	*handle = 0;
++	if (!fman_hm_caps_supported())
++		return -ENOTSUPP;
++	if (!do_pop && !do_push)
++		return -EINVAL;
++	if (do_push && (vid == 0 || vid > 4094))
++		return -EINVAL;
++
++	mutex_lock(&fman_hm_vlan_route_lock);
++
++	v = fman_hm_vlan_route_lookup(fm, do_pop, do_push, vid, tpid, pcp,
++				      src_mac, dst_mac, egress_tx_fqid);
++	if (v) {
++		refcount_inc(&v->refcount);
++		*handle = v->handle;
++		mutex_unlock(&fman_hm_vlan_route_lock);
++		return 0;
++	}
++
++	v = kzalloc(sizeof(*v), GFP_KERNEL);
++	if (!v) {
++		mutex_unlock(&fman_hm_vlan_route_lock);
++		return -ENOMEM;
++	}
++
++	/*
++	 * Op order matches the vendor fill_actions convention (strip before,
++	 * insert after the L2/L3 rebuild): STRIP (if popping) -> RMV_ETHERNET
++	 * + INSRT_GENERIC(L2) + IPV4_FORWARD -> INSERT (if pushing). A
++	 * translate chain is simply both ends present; the L3 rebuild in the
++	 * middle is identical to the single-edit cases. Max 5 of
++	 * FMAN_HM_MAX_OPS(8).
++	 */
++	memset(&spec, 0, sizeof(spec));
++	n = 0;
++	if (do_pop)
++		spec.ops[n++].type = FMAN_HM_OP_VLAN_STRIP;
++
++	fman_hm_vlan_route_l3(&spec, n, dst_mac, src_mac);
++	n += 3;
++
++	if (do_push) {
++		op = &spec.ops[n++];
++		op->type = FMAN_HM_OP_VLAN_INSERT;
++		op->vlan_insert.vlan_id = vid;
++		op->vlan_insert.tpid = tpid ? tpid : 0x8100;
++		op->vlan_insert.pcp = pcp & 0x7;
++	}
++	spec.num_ops = n;
++
++	err = fman_hm_node_install(fm, port_id, &spec, &v->handle);
++	if (err) {
++		kfree(v);
++		mutex_unlock(&fman_hm_vlan_route_lock);
++		return err;
++	}
++
++	v->fm = fm;
++	v->egress_tx_fqid = egress_tx_fqid;
++	v->vid = vid;
++	v->tpid = tpid ? tpid : 0x8100;
++	v->pcp = pcp & 0x7;
++	v->do_pop = do_pop;
++	v->do_push = do_push;
++	v->port_id = port_id;
++	ether_addr_copy(v->src_mac, src_mac);
++	ether_addr_copy(v->dst_mac, dst_mac);
++	refcount_set(&v->refcount, 1);
++	list_add(&v->node, &fman_hm_vlan_route_cache);
++
++	*handle = v->handle;
++	mutex_unlock(&fman_hm_vlan_route_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_route_get);
++
++/*
++ * fman_hm_vlan_route_put - drop a reference taken by fman_hm_vlan_route_get().
++ * Destroys the shared HM node and reclaims its MURAM when the last user goes
++ * away.  Idempotent for an unknown handle (returns 0).
++ */
++int fman_hm_vlan_route_put(struct fman *fm, u8 port_id, u32 handle)
++{
++	struct fman_hm_vlan_route_ent *v, *found = NULL;
++	int err = 0;
++
++	if (!fm)
++		return 0;
++
++	mutex_lock(&fman_hm_vlan_route_lock);
++	list_for_each_entry(v, &fman_hm_vlan_route_cache, node) {
++		if (v->fm == fm && v->handle == handle) {
++			found = v;
++			break;
++		}
++	}
++	if (found && refcount_dec_and_test(&found->refcount)) {
++		list_del(&found->node);
++		err = fman_hm_node_destroy(found->fm, found->port_id,
++					   found->handle);
++		kfree(found);
++	}
++	mutex_unlock(&fman_hm_vlan_route_lock);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_hm_vlan_route_put);
++
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -190,14 +190,17 @@
+  * Passed to fman_cc_tree_install() for the static (default/vpp) lifecycle.
+  * The dynamic (ask) lifecycle builds the same key one-at-a-time via
+  * fman_cc_tree_add_key(). FMAN_CC_MAX_STATIC_KEYS bounds the static tree
+- * at the ~5 KiB MURAM budget from spec sec 3.5 (32 keys x ~150 B).
++ * at the ~10 KiB MURAM budget from spec sec 3.5 (64 keys x ~150 B; raised
++ * from 32 2026-08-31, T-M6-8 VLAN throughput investigation).
+  */
+-#define FMAN_CC_MAX_STATIC_KEYS	32
++#define FMAN_CC_MAX_STATIC_KEYS	64
+ 
+ struct fman_cc_static_tree {
+ 	u16 num_keys;
+ 	u16 miss_qband;
+ 	u32 miss_fqid;
++	/* R4c: non-zero FE_ENTER MURAM AD offset for CC-miss -> ehash. */
++	u32 miss_fe_off;
+ 	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
+ };
+ 
+@@ -385,6 +388,81 @@
+  */
+ int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
+ 
++/**
++ * fman_hm_vlan_get - shared VLAN header-manip node for a tag-edit adjacency
++ *                    (T-M6-8 R2; plans/ASK2-VLAN-REARCH.md)
++ * @is_push:        true = INSERT; false = STRIP
++ * @egress_tx_fqid: egress TX FQ (dedup key)
++ * @handle:         HMTD MURAM offset for a CC leaf hm_handle
++ */
++int  fman_hm_vlan_get(struct fman *fm, u8 port_id, bool is_push,
++		      u16 vid, u16 tpid, u8 pcp, u32 egress_tx_fqid,
++		      u32 *handle);
++
++/** fman_hm_vlan_put - release a VLAN reference from fman_hm_vlan_get() */
++int  fman_hm_vlan_put(struct fman *fm, u8 port_id, u32 handle);
++
++/**
++ * fman_hm_vlan_route_get - combined VLAN-edit + L3 next-hop HM node for a
++ *                          ROUTED-VLAN adjacency (T-M6-8 R4a; translate R4d)
++ * @do_pop:          strip the ingress tag before the L2/L3 rebuild
++ * @do_push:         insert (@vid/@tpid/@pcp) after the L2/L3 rebuild
++ * @vid/@tpid/@pcp:  pushed tag params (@do_push only)
++ * @src_mac:         egress-port source MAC for the rebuilt L2 header
++ * @dst_mac:         next-hop destination MAC for the rebuilt L2 header
++ * @egress_tx_fqid:  egress TX FQ (dedup key)
++ * @handle:          on success, HMTD MURAM offset for a CC leaf hm_handle
++ *
++ * @do_pop and @do_push are independent -- POP-only, PUSH-only, or BOTH (a
++ * same-port VID-to-VID TRANSLATE, e.g. two 802.1Q vifs on one physical port
++ * routing to each other) are all valid; at least one must be set. Builds one
++ * HMTD that does the tag edit(s) AND {RMV_ETHERNET, INSRT_GENERIC(L2),
++ * IPV4_FORWARD(dec_ttl,l4_csum)} - everything a routed-VLAN frame needs. Use
++ * fman_hm_vlan_get() (VLAN-only) for a bridged VLAN flow instead. Refcounted;
++ * sleepable; process context.
++ */
++int  fman_hm_vlan_route_get(struct fman *fm, u8 port_id,
++			    bool do_pop, bool do_push,
++			    u16 vid, u16 tpid, u8 pcp,
++			    const u8 *src_mac, const u8 *dst_mac,
++			    u32 egress_tx_fqid, u32 *handle);
++
++/** fman_hm_vlan_route_put - release a ref from fman_hm_vlan_route_get() */
++int  fman_hm_vlan_route_put(struct fman *fm, u8 port_id, u32 handle);
++
++/* ------------------------------------------------------------------ *
++ * OOT CC-target resolvers (board patch 0121)
++ *
++ * Helpers an out-of-tree PCD consumer (ask.ko) uses to turn a kernel
++ * net_device into the DPAA1 hardware identifiers a static CC tree needs:
++ * the ingress RX fman_port (-> fman_port_get_id() -> port_id key) and an
++ * egress TX frame-queue id (-> fman_cc_key.target_fqid).  Both validate
++ * that the device is DPAA-owned before dereferencing private state.
++ * ------------------------------------------------------------------ */
++struct net_device;
++struct fman_port;
++
++/**
++ * dpaa_get_rx_fman_port - ingress RX fman_port backing a DPAA netdev
++ * @dev: a DPAA-owned net_device
++ *
++ * Returns the RX-side struct fman_port, or NULL when @dev is not a DPAA
++ * interface or has no bound MAC.  Feed the result to fman_port_get_id()
++ * to obtain the BMI hard port id used as the fman_cc_tree_* port key.
++ */
++struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
++
++/**
++ * dpaa_get_tx_fqid - egress TX frame-queue id for a DPAA netdev
++ * @dev:   a DPAA-owned net_device (the flow's sink/egress interface)
++ * @queue: egress queue index (< dpaa_max_num_txqs())
++ * @fqid:  out; receives the QMan FQID on success
++ *
++ * Returns 0 and writes @fqid, or -EINVAL/-ENODEV/-ERANGE/-ENOENT.  The
++ * FQID is the target_fqid a CC FORWARD_FQ[_WITH_MANIP] action enqueues to.
++ */
++int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
++
+ /* ------------------------------------------------------------------ *
+  * M3-3d STUB API  (spec sec 5.6 Policer)
+  *
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -332,6 +332,25 @@
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_release);
+ 
++/*
++ * fman_pcd_fe_root_get_offset - MURAM offset of the engaged FE_ENTER root AD,
++ * or 0 if the FE path is not engaged. T-M6-8 R4c: ask.ko passes this as
++ * fman_cc_static_tree.miss_fe_off so a CC miss continues into the
++ * enhanced-external-hash routed/NAT path (unified CC front-end).
++ */
++unsigned long fman_pcd_fe_root_get_offset(struct fman *fm)
++{
++	struct fman_pcd *pcd;
++
++	if (!fm)
++		return 0;
++	pcd = fman_get_pcd(fm);
++	if (!pcd || pcd->fe_refcount == 0)
++		return 0;
++	return pcd->fe_root_ad_off;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_root_get_offset);
++
+ /**
+  * fman_pcd_get_muram_budget() - return MURAM accounting snapshot.
+  * @pcd: handle.  NULL-safe (returns zeroed struct).
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -191,34 +191,44 @@
+  * Pack one normalised key into the CC_KEY_SIZE-byte composite the silicon
+  * compares, plus its mask, written into the match record at row @idx.
+  *
+- * SILICON-TRUTH LAYOUT (ask20 PR14z14/PR14z22, DUT-proven 2026-05-23):
+- * under the KGSE_CCBS graft model (board patch 0106) the CC walker
+- * compares the KeyGen-EXTRACTED composite, i.e. the bytes the port's
+- * existing RSS scheme emits per its KGSE_EKFC.  The mainline default
+- * scheme's EKFC is 0x00180206 = IPSRC1 | IPDST1 | IPSEC_SPI | L4PSRC |
+- * L4PDST, which extracts exactly 16 bytes:
+- *
+- *   bytes 0..3   IPv4 src (network order)
+- *   bytes 4..7   IPv4 dst (network order)
+- *   bytes 8..11  IPsec SPI (0x00000000 for plain IP/TCP/UDP frames)
+- *   bytes 12..13 L4 src port (network order)
+- *   bytes 14..15 L4 dst port (network order)
+- *
+- * The DROP-miss diagnostic (ask20 patch 0053) proved silicon HITs with
+- * this exact layout: 24M frames matched and forwarded with miss=DROP and
+- * throughput unchanged.  The previous 0098 composite
+- * (ethertype/proto/flags/IP/ports) could NEVER match because the walker
+- * does not re-extract — it compares the KG-emitted bytes.
++ * SILICON-TRUTH LAYOUT (F-190, 2026-08-31, supersedes F-161): under the
++ * KGSE_CCBS graft model (board patch 0106) the CC walker compares the
++ * KeyGen-EXTRACTED composite, i.e. the bytes the port's scheme emits per
++ * its KGSE_EKFC — it does not re-extract from the frame itself.
++ *
++ * F-161's "board-confirmed EKFC=0x00180006" (SIP|DIP|SPORT|DPORT, no
++ * PORT_ID, 12 bytes) was a single dmesg observation of scheme4 mid-cycle,
++ * not the steady-state value. Three independent, later sources agree the
++ * real composite is 14 bytes, PORT_ID-prefixed:
++ *   1. The vendor's own kernel patch (ASK/patches/kernel/
++ *      010-ask-fman-dpaa-ehash.patch), BuildSchemeRegs() in fm_kg.c:
++ *      `knownTmp |= KG_SCH_KN_PORT_ID; p_SchemeRegs->kgse_ekfc = knownTmp;`
++ *      — unconditional, for every scheme, not just the FE-VM/ehash one.
++ *   2. F-183 (board patch 0167, fman_pcd_cc_test.c): the *cc_test* debug
++ *      harness independently derived and silicon-verified the same 14-byte
++ *      PORT_ID(1)|SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2) window
++ *      (EKFC 0x801C0006) — but the fix was applied only to the debug
++ *      harness's own key builder, never ported to this production one.
++ *   3. Live board captures (T-M6-8 VLAN throughput investigation,
++ *      2026-08-31): scheme3/scheme4 repeatedly converged on
++ *      ekfc=0x801c0006 after normal production engage cycles, matching
++ *      (1)/(2), not F-161's 0x00180006.
++ *
++ * PORT_ID extracts as a constant 0x00 on this ucode/scheme setup (F-183's
++ * "E25/E26-verified... PORT_ID=0x00 from the zeroed dv default"), so it is
++ * an exact-match wildcard-free byte, not a per-port value to compute.
++ *
++ *   byte  0      PORT_ID (always 0x00 on this ucode)
++ *   bytes 1..4   IPv4 src (network order)
++ *   bytes 5..8   IPv4 dst (network order)
++ *   byte  9      L4 protocol
++ *   bytes 10..11 L4 src port (network order)
++ *   bytes 12..13 L4 dst port (network order)
++ *   bytes 14..15 unused, wildcard
+  *
+  * Consequences (documented limitations, not silent):
+- *  - ETHERTYPE / PROTO cannot participate: the KG composite carries
+- *    neither.  A TCP and a UDP flow with identical addresses+ports are
+- *    indistinguishable to this tree.  The presence flags are accepted
+- *    (the dpaa-side translator sets them) but do not contribute bytes.
+  *  - IPv6 keys cannot match a v4-shaped 16-byte composite;
+  *    fman_pcd_cc_static_install() rejects them with -ENOTSUPP.
+- *  - The SPI field is exact-matched as zero (the HW-proven shape for
+- *    plain IP traffic); ESP flows are out of scope for this tree.
+  *
+  * The mask row mirrors the layout: 0xff for participating bytes, 0x00
+  * for wildcard.
+@@ -233,26 +243,33 @@
+ 	memset(key, 0, sizeof(key));
+ 	memset(msk, 0, sizeof(msk));
+ 
++	/* byte 0: PORT_ID, always extracted as 0x00 on this ucode (F-183). */
++	key[0] = 0x00;
++	msk[0] = 0xff;
++
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
+-		memcpy(&key[0], &k->src_ip_be, 4);
+-		msk[0] = msk[1] = msk[2] = msk[3] = 0xff;
++		memcpy(&key[1], &k->src_ip_be, 4);
++		msk[1] = msk[2] = msk[3] = msk[4] = 0xff;
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
+-		memcpy(&key[4], &k->dst_ip_be, 4);
+-		msk[4] = msk[5] = msk[6] = msk[7] = 0xff;
++		memcpy(&key[5], &k->dst_ip_be, 4);
++		msk[5] = msk[6] = msk[7] = msk[8] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
++		key[9] = k->proto;
++		msk[9] = 0xff;
+ 	}
+-	/* bytes 8..11: IPsec SPI — exact-match zero (HW-proven shape). */
+-	msk[8] = msk[9] = msk[10] = msk[11] = 0xff;
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
+-		key[12] = (u8)(k->src_port_be & 0xff);
+-		key[13] = (u8)(k->src_port_be >> 8);
+-		msk[12] = msk[13] = 0xff;
++		key[10] = (u8)(k->src_port_be & 0xff);
++		key[11] = (u8)(k->src_port_be >> 8);
++		msk[10] = msk[11] = 0xff;
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
+-		key[14] = (u8)(k->dst_port_be & 0xff);
+-		key[15] = (u8)(k->dst_port_be >> 8);
+-		msk[14] = msk[15] = 0xff;
++		key[12] = (u8)(k->dst_port_be & 0xff);
++		key[13] = (u8)(k->dst_port_be >> 8);
++		msk[12] = msk[13] = 0xff;
+ 	}
++	/* bytes 14..15: unused by this EKFC -- stay wildcard (mask 0). */
+ 
+ 	/* Each match row is key followed by mask, 2 * CC_KEY_SIZE bytes. */
+ 	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE;
+@@ -481,6 +498,28 @@
+ 	 */
+ 	cc_write_leaf_ad(t->ad, hw->num_keys, hw->miss_fqid, hw->miss_qband, 0);
+ 
++	/*
++	 * T-M6-8 R4c unified dispatch: a non-zero miss_fe_off makes the CC
++	 * tree a front-end for the production enhanced-external-hash path.
++	 * Copy the four-word FE_ENTER AD into the trailing miss row BEFORE the
++	 * tree is published/live. Post-attach AD writes require FMFP_EXTC sync
++	 * and have watchdog-reset the board (F-182 / RM 5.12.14.1).
++	 */
++	if (hw->miss_fe_off) {
++		void __iomem *fe;
++		void __iomem *miss_ad;
++		u16 w;
++
++		fe = (void __iomem *)fman_muram_offset_to_vbase(muram,
++							      hw->miss_fe_off);
++		miss_ad = (void __iomem *)((u8 __iomem *)t->ad +
++						 (size_t)hw->num_keys * CC_AD_ENTRY_SIZE);
++		for (w = 0; w < 4; w++)
++			iowrite32be(ioread32be((u32 __iomem *)
++					 ((u8 __iomem *)fe + 4 * w)),
++				    (u32 __iomem *)((u8 __iomem *)miss_ad + 4 * w));
++	}
++
+ 	/* Point the walker at the tables via the group-table[0] CONT_LOOKUP. */
+ 	cc_write_group0(t);
+ 
+@@ -557,14 +596,37 @@
+ 		return;
+ 
+ 	mutex_lock(fman_pcd_get_lock(pcd));
+-	if (list_empty(head))
++	if (list_empty(head)) {
+ 		seq_puts(m, "(no CC trees installed)\n");
+-	else
+-		list_for_each_entry(t, head, node)
++	} else {
++		struct muram_info *muram = fman_get_muram(fman_pcd_get_fman(pcd));
++
++		list_for_each_entry(t, head, node) {
+ 			seq_printf(m,
+ 				   "port 0x%02x: %u keys, group=0x%lx match=0x%lx ad=0x%lx\n",
+ 				   t->port_id, t->num_keys, t->group_off,
+ 				   t->match_off, t->ad_off);
++			/* F-159: raw match-table ground truth -- (num_keys) rows of
++			 * key(16B)+mask(16B)=32B, so the actual written bytes can be
++			 * checked against the cc_pack_key() composite directly,
++			 * instead of trusting the packer blindly (same philosophy as
++			 * F-158's fe_scaffold dump for the FE-VM/ehash path). */
++			if (muram && t->match_off) {
++				void __iomem *mt = (void __iomem *)
++					fman_muram_offset_to_vbase(muram, t->match_off);
++				unsigned int i, len = (unsigned int)t->num_keys * 32;
++
++				seq_puts(m, "  match table (row = 16B key + 16B mask):");
++				for (i = 0; i < len; i++) {
++					if (i % 16 == 0)
++						seq_printf(m, "\n    %04x:", i);
++					seq_printf(m, " %02x",
++						   ioread8((u8 __iomem *)mt + i));
++				}
++				seq_puts(m, "\n");
++			}
++		}
++	}
+ 	mutex_unlock(fman_pcd_get_lock(pcd));
+ }
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -35,10 +35,14 @@
+ #include <linux/debugfs.h>
+ #include <linux/err.h>
+ #include <linux/errno.h>
++#include <linux/etherdevice.h>
++#include <linux/hex.h>
+ #include <linux/inet.h>
++#include <linux/io.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/seq_file.h>
++#include <linux/delay.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
+ #include <linux/types.h>
+@@ -58,6 +62,9 @@
+ 	return 0;
+ }
+ 
++/* T-M6-8 R3 de-risk: one hand-armed VLAN HMTD handle per test port. */
++static u32 cc_test_vlan_hm[32];
++
+ static int cc_test_open(struct inode *inode, struct file *file)
+ {
+ 	return single_open(file, cc_test_show, inode->i_private);
+@@ -139,6 +146,322 @@
+ 	return 0;
+ }
+ 
++/*
++ * install_vlan <port> <proto> <src-ip> <dst-ip> <sport> <dport>
++ *              <target-fqid-hex> <pop|push> <vid> [tpid-hex] [pcp]
++ *
++ * T-M6-8 R3 de-risk (plans/ASK2-VLAN-REARCH.md): install ONE CC 5-tuple leaf
++ * whose RESULT action chains a real VLAN HMTD via NADEN before enqueueing to
++ * @target_fqid.  This is the replacement for the retired inline FE-VM VLAN
++ * opcode path (which froze at 5+tnums): the tag edit runs in the FMan
++ * Header-Manipulation engine (a separate engine), so the freeze cannot recur.
++ * A single hand-armed flow proves the CC+HMTD datapath sustains past 21 frames
++ * before the ask.ko rewire (R4).  One HMTD per test port; freed on "clear".
++ */
++static int cc_test_install_vlan(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec = NULL;
++	struct fman_pcd_hm_hw_spec hm;
++	struct fman_port *rxport;
++	struct fman *fm;
++	char src_str[40], dst_str[40], dir[8];
++	u32 src_ip, dst_ip, fqid, cc_base, hm_handle = 0;
++	unsigned int tpid = 0x8100, pcp = 0;
++	u8 port_id, proto;
++	u16 sport, dport, vid;
++	bool is_push;
++	int n, err;
++
++	n = sscanf(args,
++		   "install_vlan %hhi %hhu %39s %39s %hu %hu %x %7s %hu %x %u",
++		   &port_id, &proto, src_str, dst_str, &sport, &dport,
++		   &fqid, dir, &vid, &tpid, &pcp);
++	if (n < 9 || n > 11 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++	    !(proto == 6 || proto == 17) || !fqid)
++		return -EINVAL;
++	is_push = !strcmp(dir, "push");
++	if (!is_push && strcmp(dir, "pop"))
++		return -EINVAL;
++	if (is_push && (vid == 0 || vid > 4094 || tpid > 0xffff || pcp > 7))
++		return -EINVAL;
++	if (!in4_pton(src_str, -1, (u8 *)&src_ip, -1, NULL) ||
++	    !in4_pton(dst_str, -1, (u8 *)&dst_ip, -1, NULL))
++		return -EINVAL;
++
++	fm = fman_pcd_get_fman(pcd);
++	if (!fm)
++		return -ENODEV;
++	if (cc_test_vlan_hm[port_id])
++		return -EBUSY;
++
++	memset(&hm, 0, sizeof(hm));
++	hm.num_ops = 1;
++	if (is_push) {
++		hm.ops[0].type = FMAN_PCD_HM_HW_OP_VLAN_INSERT;
++		hm.ops[0].vlan_insert.tpid_be = (u16)tpid;
++		hm.ops[0].vlan_insert.vid = vid;
++		hm.ops[0].vlan_insert.pcp = (u8)pcp;
++	} else {
++		hm.ops[0].type = FMAN_PCD_HM_HW_OP_VLAN_STRIP;
++	}
++	err = fman_pcd_hm_install(pcd, port_id, &hm, &hm_handle);
++	if (err)
++		return err;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec) {
++		err = -ENOMEM;
++		goto out_put_hm;
++	}
++	spec->num_keys = 1;
++	spec->miss_qband = 0;
++	spec->miss_fqid = 0;	/* miss stays on the existing RSS/SW path */
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_ETHERTYPE |
++			       FMAN_PCD_CC_HW_F_PROTO |
++			       FMAN_PCD_CC_HW_F_SRC_IP |
++			       FMAN_PCD_CC_HW_F_DST_IP |
++			       FMAN_PCD_CC_HW_F_SRC_PORT |
++			       FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].ethertype_be = cpu_to_be16(ETH_P_IP);
++	spec->keys[0].proto = proto;
++	spec->keys[0].src_ip_be = src_ip;
++	spec->keys[0].dst_ip_be = dst_ip;
++	spec->keys[0].src_port_be = cpu_to_be16(sport);
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_qband = 0;
++	spec->keys[0].target_fqid = fqid;
++	spec->keys[0].hm_handle = hm_handle;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	spec = NULL;
++	if (err)
++		goto out_put_hm;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err)
++		goto out_destroy_cc;
++	rxport = fman_port_lookup_rx(fm, port_id);
++	if (!rxport) {
++		err = -ENODEV;
++		goto out_destroy_cc;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_port_set_cc_base(rxport, cc_base);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_pcd_kg_port_attach_cc(pcd, port_id, cc_base);
++	if (err) {
++		(void)fman_port_set_cc_base(rxport, 0);
++		goto out_destroy_cc;
++	}
++
++	cc_test_vlan_hm[port_id] = hm_handle;
++	pr_info("fman_pcd cc_test: VLAN-%s port 0x%02x CC base 0x%x HMTD 0x%x -> fqid 0x%x %pI4:%u -> %pI4:%u proto %u vid %u\n",
++		is_push ? "PUSH" : "POP", port_id, cc_base, hm_handle, fqid,
++		&src_ip, sport, &dst_ip, dport, proto, is_push ? vid : 0);
++	return 0;
++
++out_destroy_cc:
++	(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++out_put_hm:
++	(void)fman_pcd_hm_destroy(pcd, port_id, hm_handle);
++	return err;
++}
++
++/*
++ * install_vlanr <port> <proto> <sip> <dip> <sport> <dport> <fqid-hex>
++ *               <pop|push> <vid> <dst-mac> <src-mac> [tpid-hex] [pcp]
++ *
++ * T-M6-8 R4b de-risk: like install_vlan but the HMTD is the COMBINED
++ * routed-VLAN chain - the tag edit PLUS the L3 next-hop rewrite (rebuild L2
++ * to dst-mac/src-mac + decrement IPv4 TTL).  Proves a real routed-VLAN flow
++ * forwards through CC+HMTD with correct egress L2 and TTL, closing the R3b
++ * gap (VLAN_STRIP-only) before the ask.ko rewire (R4c).
++ *   POP+route : VLAN_STRIP, RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD
++ *   PUSH+route: RMV_ETHERNET, INSRT_GENERIC(L2), IPV4_FORWARD, VLAN_INSERT
++ */
++static int cc_test_install_vlanr(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec = NULL;
++	struct fman_pcd_hm_hw_spec hm;
++	struct fman_pcd_hm_hw_op *op;
++	struct fman_port *rxport;
++	struct fman *fm;
++	char src_str[40], dst_str[40], dir[8], dmac[24], smac[24];
++	u32 src_ip, dst_ip, fqid, cc_base, hm_handle = 0;
++	u32 fe_miss_off = 0, ad_off;
++	unsigned int tpid = 0x8100, pcp = 0, i;
++	struct muram_info *muram;
++	void __iomem *group, *ad, *fe;
++	u8 port_id, proto, dmb[ETH_ALEN], smb[ETH_ALEN];
++	u16 sport, dport, vid;
++	bool is_push;
++	int n, err;
++
++	n = sscanf(args,
++		   "install_vlanr %hhi %hhu %39s %39s %hu %hu %x %7s %hu %23s %23s %x %u %x",
++		   &port_id, &proto, src_str, dst_str, &sport, &dport, &fqid,
++		   dir, &vid, dmac, smac, &tpid, &pcp, &fe_miss_off);
++	if (n < 11 || n > 14 || port_id >= ARRAY_SIZE(cc_test_vlan_hm) ||
++	    !(proto == 6 || proto == 17) || !fqid)
++		return -EINVAL;
++	is_push = !strcmp(dir, "push");
++	if (!is_push && strcmp(dir, "pop"))
++		return -EINVAL;
++	if (is_push && (vid == 0 || vid > 4094 || tpid > 0xffff || pcp > 7))
++		return -EINVAL;
++	if (!in4_pton(src_str, -1, (u8 *)&src_ip, -1, NULL) ||
++	    !in4_pton(dst_str, -1, (u8 *)&dst_ip, -1, NULL))
++		return -EINVAL;
++	if (!mac_pton(dmac, dmb) || !mac_pton(smac, smb))
++		return -EINVAL;
++
++	fm = fman_pcd_get_fman(pcd);
++	if (!fm)
++		return -ENODEV;
++	if (cc_test_vlan_hm[port_id])
++		return -EBUSY;
++
++	memset(&hm, 0, sizeof(hm));
++	if (is_push) {
++		hm.ops[0].type = FMAN_PCD_HM_HW_OP_RMV_ETHERNET;
++		op = &hm.ops[1];
++		op->type = FMAN_PCD_HM_HW_OP_INSRT_GENERIC;
++		op->insrt_generic.size = 2 * ETH_ALEN + 2;
++		memcpy(&op->insrt_generic.hdr[0], dmb, ETH_ALEN);
++		memcpy(&op->insrt_generic.hdr[ETH_ALEN], smb, ETH_ALEN);
++		op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08;
++		op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00;
++		op = &hm.ops[2];
++		op->type = FMAN_PCD_HM_HW_OP_IPV4_FORWARD;
++		op->ipv4_forward.dec_ttl = 1;
++		op->ipv4_forward.l4_csum = 1;
++		op = &hm.ops[3];
++		op->type = FMAN_PCD_HM_HW_OP_VLAN_INSERT;
++		op->vlan_insert.tpid_be = (u16)tpid;
++		op->vlan_insert.vid = vid;
++		op->vlan_insert.pcp = (u8)pcp;
++		hm.num_ops = 4;
++	} else {
++		hm.ops[0].type = FMAN_PCD_HM_HW_OP_VLAN_STRIP;
++		hm.ops[1].type = FMAN_PCD_HM_HW_OP_RMV_ETHERNET;
++		op = &hm.ops[2];
++		op->type = FMAN_PCD_HM_HW_OP_INSRT_GENERIC;
++		op->insrt_generic.size = 2 * ETH_ALEN + 2;
++		memcpy(&op->insrt_generic.hdr[0], dmb, ETH_ALEN);
++		memcpy(&op->insrt_generic.hdr[ETH_ALEN], smb, ETH_ALEN);
++		op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08;
++		op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00;
++		op = &hm.ops[3];
++		op->type = FMAN_PCD_HM_HW_OP_IPV4_FORWARD;
++		op->ipv4_forward.dec_ttl = 1;
++		op->ipv4_forward.l4_csum = 1;
++		hm.num_ops = 4;
++	}
++
++	err = fman_pcd_hm_install(pcd, port_id, &hm, &hm_handle);
++	if (err)
++		return err;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec) {
++		err = -ENOMEM;
++		goto out_put_hm;
++	}
++	spec->num_keys = 1;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_ETHERTYPE |
++			       FMAN_PCD_CC_HW_F_PROTO |
++			       FMAN_PCD_CC_HW_F_SRC_IP |
++			       FMAN_PCD_CC_HW_F_DST_IP |
++			       FMAN_PCD_CC_HW_F_SRC_PORT |
++			       FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].ethertype_be = cpu_to_be16(ETH_P_IP);
++	spec->keys[0].proto = proto;
++	spec->keys[0].src_ip_be = src_ip;
++	spec->keys[0].dst_ip_be = dst_ip;
++	spec->keys[0].src_port_be = cpu_to_be16(sport);
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_fqid = fqid;
++	spec->keys[0].hm_handle = hm_handle;
++
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	spec = NULL;
++	if (err)
++		goto out_put_hm;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (err)
++		goto out_destroy_cc;
++
++	/*
++	 * R4c-pre coexistence gate: when @fe_miss_off is supplied, overwrite the
++	 * trailing CC MISS AD row (row num_keys == 1) with the FE_ENTER AD's four
++	 * words BEFORE the tree is attached. Topology:
++	 *   RCCB -> CC tree -- VLAN key HIT -> NADEN VLANR HMTD -> TX FQ
++	 *                   `- MISS -> FE_ENTER -> ehash routed/NAT
++	 * F-182 pre-live AD-copy applied to the miss row; a post-attach overwrite
++	 * faults the FMan controller (RM 5.12.14.1 FMFP_EXTC sync).
++	 */
++	if (fe_miss_off) {
++		muram = fman_get_muram(fm);
++		if (!muram) {
++			err = -ENXIO;
++			goto out_destroy_cc;
++		}
++		group = (void __iomem *)fman_muram_offset_to_vbase(muram,
++								   cc_base);
++		ad_off = ioread32be((u32 __iomem *)group) & 0xFFFFFF;
++		if (!ad_off) {
++			err = -EINVAL;
++			goto out_destroy_cc;
++		}
++		ad = (void __iomem *)fman_muram_offset_to_vbase(muram, ad_off);
++		fe = (void __iomem *)fman_muram_offset_to_vbase(muram,
++								fe_miss_off);
++		/* one key => miss row is row 1; each AD row is 16 bytes */
++		ad = (void __iomem *)((u8 __iomem *)ad + 16);
++		for (i = 0; i < 4; i++)
++			iowrite32be(ioread32be((u32 __iomem *)((u8 __iomem *)fe +
++								 4 * i)),
++				    (u32 __iomem *)((u8 __iomem *)ad + 4 * i));
++	}
++
++	rxport = fman_port_lookup_rx(fm, port_id);
++	if (!rxport) {
++		err = -ENODEV;
++		goto out_destroy_cc;
++	}
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_port_set_cc_base(rxport, cc_base);
++	if (err)
++		goto out_destroy_cc;
++	err = fman_pcd_kg_port_attach_cc(pcd, port_id, cc_base);
++	if (err) {
++		(void)fman_port_set_cc_base(rxport, 0);
++		goto out_destroy_cc;
++	}
++
++	cc_test_vlan_hm[port_id] = hm_handle;
++	pr_info("fman_pcd cc_test: VLANR-%s port 0x%02x CC base 0x%x HMTD 0x%x -> fqid 0x%x dst %pM src %pM%s\n",
++		is_push ? "PUSH" : "POP", port_id, cc_base, hm_handle, fqid,
++		dmb, smb, fe_miss_off ? " miss->FE coexist" : "");
++	return 0;
++
++out_destroy_cc:
++	(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++	fman_pcd_cc_static_destroy(pcd, port_id);
++out_put_hm:
++	(void)fman_pcd_hm_destroy(pcd, port_id, hm_handle);
++	return err;
++}
++
+ static ssize_t cc_test_write(struct file *file, const char __user *buf,
+ 			     size_t count, loff_t *ppos)
+ {
+@@ -166,10 +489,28 @@
+ 		rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
+ 		if (rxport)
+ 			(void)fman_port_set_cc_base(rxport, 0);
++		/* R4c teardown hardening: detach + clear RCCB first, then let
++		 * in-flight FMan tasks drain before freeing live-walked MURAM.
++		 * F-135/F-136 proved that freeing before drain can bus-lock FMan. */
++		usleep_range(5000, 6000);
+ 		fman_pcd_cc_static_destroy(pcd, port_id);
+-		pr_info("fman_pcd cc_test: port 0x%02x graft detached, tree destroyed\n",
++		if (port_id < ARRAY_SIZE(cc_test_vlan_hm) &&
++		    cc_test_vlan_hm[port_id]) {
++			(void)fman_pcd_hm_destroy(pcd, port_id,
++						 cc_test_vlan_hm[port_id]);
++			cc_test_vlan_hm[port_id] = 0;
++		}
++		pr_info("fman_pcd cc_test: port 0x%02x graft detached, tree/HMTD destroyed\n",
+ 			port_id);
+ 		ret = count;
++	} else if (strncmp(kbuf, "install_vlanr ", 14) == 0) {
++		ret = cc_test_install_vlanr(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
++	} else if (strncmp(kbuf, "install_vlan ", 13) == 0) {
++		ret = cc_test_install_vlan(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
+ 	} else if (strncmp(kbuf, "install ", 8) == 0) {
+ 		ret = cc_test_install(pcd, kbuf);
+ 		if (ret == 0)
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -604,7 +604,7 @@
+ 	struct keygen_scheme *slot;
+ 	struct fman *fman;
+ 	struct mutex *lock;
+-	u32 saved_ccbs;
++	u32 saved_ccbs, saved_ekfc;
+ 	u8 saved_engine, id;
+ 	int err;
+ 
+@@ -629,6 +629,7 @@
+ 
+ 	saved_engine = slot->next_engine;
+ 	saved_ccbs   = slot->cc_bits_sel;
++	saved_ekfc   = slot->ekfc;
+ 
+ 	/*
+ 	 * HW-proven CC graft (see fman_keygen.c CC chaining comment):
+@@ -636,17 +637,34 @@
+ 	 * stays BMI direct-enqueue and the CC walk fires implicitly.
+ 	 * use_hashing / base_fqid / match_vector are untouched, so on a
+ 	 * CC miss the frame still spreads over the same hashed RX FQs.
++	 *
++	 * F-190 (2026-08-31): the CC walker compares the KeyGen-EXTRACTED
++	 * composite (it never re-extracts), so this scheme's EKFC must
++	 * deterministically match what cc_pack_key() (this file) packs, not
++	 * whatever a scheme slot happened to inherit from a prior RSS or
++	 * FE-VM/ehash engage on the same port. Without this the CC-tree
++	 * installs cleanly (control plane) but every real packet
++	 * permanently misses (data plane), because the extracted bytes
++	 * never match the installed key. 0x801C0006 = KG_SCH_KN_PORT_ID |
++	 * IPSRC1 | IPDST1 | PROTO | L4PSRC | L4PDST, the 14-byte
++	 * PORT_ID(1)|SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2) window
++	 * cc_pack_key() now builds -- confirmed against the vendor's own
++	 * unconditional `knownTmp |= KG_SCH_KN_PORT_ID` in BuildSchemeRegs()
++	 * (ASK/patches/kernel/010-ask-fman-dpaa-ehash.patch) and this
++	 * project's own F-183/board patch 0167 debug-harness proof.
+ 	 */
+ 	slot->next_engine    = 2;
+ 	slot->cc_base_offset = 0;
+ 	slot->cc_bits_sel    = cc_group_off;
++	slot->ekfc           = 0x801C0006;
+ 
+ 	slot->used = false;
+ 	err = keygen_scheme_setup(keygen, id, true);
+ 	if (err) {
+-		/* Restore the previous next-engine on failure. */
++		/* Restore the previous state on failure. */
+ 		slot->next_engine = saved_engine;
+ 		slot->cc_bits_sel = saved_ccbs;
++		slot->ekfc        = saved_ekfc;
+ 		slot->used = false;
+ 		(void)keygen_scheme_setup(keygen, id, true);
+ 		mutex_unlock(lock);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -306,9 +306,10 @@
+  */
+ 
+ /* Bounds mirror FMAN_CC_MAX_STATIC_KEYS in dpaa_fman_caps.h (kept in sync
+- * by review; the install body re-checks num_keys against this).
++ * by review; the install body re-checks num_keys against this). Raised
++ * 32 -> 64 2026-08-31, T-M6-8 VLAN throughput investigation.
+  */
+-#define FMAN_PCD_CC_HW_MAX_KEYS	32
++#define FMAN_PCD_CC_HW_MAX_KEYS	64
+ 
+ /* Match-key field-presence bitmask for struct fman_pcd_cc_hw_key.present. */
+ #define FMAN_PCD_CC_HW_F_ETHERTYPE	BIT(0)
+@@ -366,12 +367,18 @@
+  *               enqueue-AD in the miss slot (steers ALL non-matching
+  *               traffic - use deliberately), 0 = miss traffic stays on
+  *               the port's existing RSS path (the default)
++ * @miss_fe_off: FE_ENTER AD MURAM offset for the unified CC-fronted model;
++ *               non-zero copies the four-word FE_ENTER AD into the trailing
++ *               miss row before the tree is published, so CC misses continue
++ *               through the enhanced-external-hash routed/NAT path. 0 keeps
++ *               the legacy miss_fqid/RSS behaviour.
+  * @keys:        evaluated in order; first match wins
+  */
+ struct fman_pcd_cc_hw_spec {
+ 	u16 num_keys;
+ 	u16 miss_qband;
+ 	u32 miss_fqid;
++	u32 miss_fe_off;
+ 	struct fman_pcd_cc_hw_key keys[FMAN_PCD_CC_HW_MAX_KEYS];
+ };
+ 
+@@ -432,6 +439,9 @@
+  */
+ void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
+ 
++/* R4c: MURAM offset of the engaged FE_ENTER root AD (0 if not engaged). */
++unsigned long fman_pcd_fe_root_get_offset(struct fman *fm);
++
+ 
+ /*
+  * Header-Manipulation (HM) install surface (spec sec 5.5).

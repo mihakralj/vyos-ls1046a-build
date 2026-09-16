@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="show">
+    <children>
+      <node name="hardware">
+        <children>
+          <leafNode name="fan">
+            <properties>
+              <help>Show thermal zones and fan controller status</help>
+            </properties>
+            <command>${vyos_op_scripts_dir}/show_hardware_fan.py</command>
+          </leafNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

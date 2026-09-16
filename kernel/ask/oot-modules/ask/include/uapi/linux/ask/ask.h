@@ -72,6 +72,8 @@ enum ask_genl_attr {
     ASK_ATTR_FAMILY_MASK,   /* u8, ASK_FAM_* bitmask on engage; absent => both */
     ASK_ATTR_VLAN,          /* u8 bool, per-port single-tag 802.1Q VLAN offload
                              * on engage; absent => leave unchanged (default off) */
+    ASK_ATTR_BRIDGE,        /* u8 bool, per-port L2 bridge FDB offload (T-M6-2)
+                             * on engage; absent => leave unchanged (default off) */
 
     __ASK_ATTR_MAX,
 };
@@ -98,6 +100,21 @@ enum ask_genl_attr {
  */
 #define ASK_VLAN_OFF 0u
 #define ASK_VLAN_ON  1u
+
+/*
+ * Per-port L2 bridge offload selection (ASK_ATTR_BRIDGE on ASK_CMD_ENGAGE).
+ * u8 bool: 1 arms this port's bridge FDB hardware offload (CC leaf matching
+ * destination MAC -> plain enqueue to the egress port's TX FQ, CC miss ->
+ * FE_ENTER ehash); 0 disarms it. Unlike ASK_ATTR_VLAN there is no dedicated
+ * CLI leafNode for this bit: VyOS's `interfaces bridge` conf_mode sets it
+ * automatically for a member port whenever that port already has `offload
+ * ipv4`/`offload ipv6` armed (T-M6-2 design: "bridge offload is automatic
+ * when at least one member port has ASK hardware offload enabled" -- no
+ * separate opt-in). BUM traffic, local termination, and control frames are
+ * never affected by this bit; they always stay in the kernel bridge.
+ */
+#define ASK_BRIDGE_OFF 0u
+#define ASK_BRIDGE_ON  1u
 
 /* ASK_ATTR_INFO nested attributes */
 enum ask_info_attr {

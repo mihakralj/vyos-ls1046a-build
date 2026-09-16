@@ -1,0 +1,857 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: AF_XDP qmap debugfs/channels, RX eligibility, NAPI refill, TX ZC backpressure
+
+Consolidates 0082 (qmap-debugfs-dedicated-channels) + 0083
+(rx-xsk-branch-eligibility-probe) + 0084 (napi-hooked-bman-refill) +
+0085 (tx-zc-and-inflight-backpressure) into one patch: the tail four
+patches of this file's own "0079-0085: ethtool counters, NAPI
+distribution, XSK datapath" section, authored 2026-05-27/28, applied in
+strict sequence with nothing else interleaved.
+
+Verified against the real CI checkpoint commits in the persistent
+kernel-git-cache (run 34560348600, checkpoints b8a864c4cbea "applied:
+0081..." to d4be276f6f9f "applied: 0085..."), round-trip verified
+byte-identical via `patch -p1`.
+
+Touches: af_xdp_pool_main.c, dpaa_eth.{c,h}, dpaa_ethtool.c,
+dpaa_flavor.h.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -31,8 +31,12 @@
+ #include <linux/printk.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/netdevice.h>
++#include <linux/rtnetlink.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ #include <net/xdp_sock_drv.h>
+ #include <soc/fsl/bman.h>
++#include <soc/fsl/qman.h>
+ 
+ #include "dpaa_flavor.h"
+ #include "dpaa_eth.h"
+@@ -245,9 +249,26 @@
+ 			break;
+ 		for (i = 0; i < n; i++) {
+ 			dma_addr_t dma = xsk_buff_xdp_get_dma(handles[i]);
++			/* Zero bmbs[i].data first: bman_release() memcpies entries
++			 * 1..num-1 including their bpid bits into the RCR. Stack
++			 * garbage in bpid produces BMan 'ErrInt: Invalid Command
++			 * Verb'. Mirrors mainline dpaa_eth.c::dpaa_bp_add_8_bufs().
++			 * Patch 0087.
++			 */
++			bmbs[i].data = 0;
+ 			bm_buffer_set64(&bmbs[i], dma);
+ 		}
+-		bman_release(bpool, bmbs, (u8)n);
++		/* BMan RCR verb byte BUFCOUNT_MASK = 0x0f, HW-valid range 1..8
++		 * only (bman.c:746 DPAA_ASSERT). Mirror the mainline dpaa_eth.c
++		 * refill contract (8 at a time). Spec M3-3 step 6, patch 0086.
++		 */
++		{
++			u32 chunk_off;
++			for (chunk_off = 0; chunk_off < n; chunk_off += 8) {
++				u8 chunk = (u8)min_t(u32, 8u, n - chunk_off);
++				bman_release(bpool, &bmbs[chunk_off], chunk);
++			}
++		}
+ 		seeded += n;
+ 	}
+ 	if (seeded < DPAA1_XSK_INITIAL_SEED / 2)
+@@ -592,6 +613,303 @@
+ }
+ }
+ 
++/*
++ * af_xdp_pool_napi_refill - top up BMan pool from XSK fill ring
++ *
++ * M3-3 step 4 (patch 0084, spec sec 6.1.3). Called from
++ * dpaa_eth_poll() tail inside the same rcu_read_lock() region as
++ * xsk_set_rx_need_wakeup, AFTER napi_complete_done() and BEFORE
++ * the QMan DQRR interrupt is re-armed.
++ *
++ * For every bound qband (priv->xsk_bpool[qband] non-NULL), measure
++ * BMan depth. If below DPAA1_XSK_REFILL_THRESHOLD (256), allocate
++ * a batch of free chunks from the XSK fill ring via
++ * xsk_buff_alloc_batch() and release them into the BMan pool. If
++ * the BMan pool is critically drained (below DPAA1_XSK_MIN_DEPTH =
++ * 64), bump priv->xsk_bman_starve and use a larger batch (256 vs
++ * 32) to recover faster.
++ *
++ * The 256-entry handles[] / bmbs[] stack arrays bound the per-call
++ * cost to a single cache-line-friendly burst. bman_release()
++ * internally serialises 8 at a time, so the burst size is a
++ * scheduling rather than a hardware constraint.
++ *
++ * Strictly NAPI-context. v2 single-CPU pinning: only the CPU that
++ * owns the qband (priv->qmap[q].cpu, wired by M3-3 step 2a) runs
++ * the xsk_buff_alloc_batch + bman_release body for that qband.
++ * Other CPUs short-circuit via the early-return below. This makes
++ * each qband's XSK fill ring single-writer (no cursor race) and
++ * eliminates the BMan "Invalid Command Verb" hang observed with v1.
++ *
++ * No additional locking required:
++ *   - priv->xsk_bpool[] is mutated only at attach/detach time,
++ *     which is rtnl-serialised; the dpaa_eth_poll() reader sees
++ *     a stable pointer.
++ *   - priv->xsk_pool[] is RCU-protected; rcu_dereference inside
++ *     the caller's read-section.
++ *   - bman_release() is NAPI-safe per soc/fsl/bman.h.
++ *   - priv->qmap[q].cpu is stable for the netdev's lifetime once
++ *     xsk_pool_attach() has run (M3-3 step 2a invariant).
++ *
++ * Note: the public BMan API does NOT expose a pool depth query,
++ * so depth-driven gating (DPAA1_XSK_REFILL_THRESHOLD / MIN_DEPTH)
++ * is not used here. Refill is unconditional, naturally rate-
++ * limited by the XSK fill ring -- xsk_buff_alloc_batch() returns
++ * 0 when userspace has not deposited any free chunks, in which
++ * case we skip bman_release() and the counter does not increment.
++ */
++static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
++{
++struct xdp_buff *handles[32];
++struct bm_buffer bmbs[32];
++struct xsk_buff_pool *pool;
++struct bman_pool *bpool;
++u32 n, i;
++u16 q;
++
++if (!priv)
++return;
++
++for (q = 0; q < priv->xsk_max_qbands && q < DPAA1_XSK_MAX_QBANDS; q++) {
++bpool = priv->xsk_bpool[q];
++if (!bpool)
++continue;
++pool = rcu_dereference(priv->xsk_pool[q]);
++if (!pool)
++continue;
++
++/* v2: single-CPU pin. Only the qband-owner CPU drives this
++ * qband's XSK fill-ring -> BMan refill. Other CPUs skip,
++ * making each qband's fill ring single-producer.
++ */
++if (raw_smp_processor_id() != priv->qmap[q].cpu)
++continue;
++
++n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
++for (i = 0; i < n; i++) {
++/* Zero bmbs[i].data first; see attach-time seed loop comment.
++ * Patch 0087.
++ */
++bmbs[i].data = 0;
++bm_buffer_set64(&bmbs[i], xsk_buff_xdp_get_dma(handles[i]));
++}
++if (n) {
++/* Chunk bman_release() in 8-buffer batches; HW BUFCOUNT field is
++ * 4 bits and rejects num > 8 as Invalid Command Verb. XSK-side
++ * counter still bumps once per non-empty alloc batch. Mirror of
++ * attach-time seed loop. Spec M3-3 step 6, patch 0086.
++ */
++{
++u32 chunk_off;
++for (chunk_off = 0; chunk_off < n; chunk_off += 8) {
++u8 chunk = (u8)min_t(u32, 8u, n - chunk_off);
++bman_release(bpool, &bmbs[chunk_off], chunk);
++}
++}
++priv->xsk_bman_refill_batches++;
++}
++}
++}
++
++/*
++ * af_xdp_pool_napi_tx_zc - drain XSK Tx ring into DPAA1 egress FQs
++ *
++ * M3-3 step 5 (patch 0085, spec sec 6.1.4). Called from
++ * dpaa_eth_poll() tail inside the same rcu_read_lock() region as
++ * napi_refill, AFTER napi_complete_done() and BEFORE the QMan
++ * DQRR interrupt is re-armed.
++ *
++ * Per bound qband (priv->xsk_bpool[qband] non-NULL):
++ *   1. atomic_read(xsk_tx_inflight[qband]). If >= DPAA1_XSK_TX_MAX_INFLIGHT
++ *      (1024) -> bump xsk_tx_backpressure and skip.
++ *   2. budget = min(MAX_INFLIGHT - inflight, 64).
++ *   3. n = xsk_tx_peek_release_desc_batch(pool, budget).
++ *   4. For each pool->tx_descs[i] in [0..n):
++ *        - dma = xsk_buff_raw_get_dma(pool, d.addr)
++ *        - Build qm_fd: contig 0/len, addr=dma, bpid=xsk_bpid[q]
++ *          (the bpid is our TxConf claim marker; FCO NOT set --
++ *          the XSK UMEM chunk is NOT BMan-owned).
++ *        - egress_fq = priv->egress_fqs[raw_smp_processor_id() %
++ *          dpaa_max_num_txqs()].
++ *        - qman_enqueue retry loop (DPAA_ENQUEUE_RETRIES on -EBUSY).
++ *          Hard fail: bump xsk_tx_backpressure, break inner loop.
++ *        - Success: atomic_inc(xsk_tx_inflight[q]), submitted++.
++ *   5. If submitted > 0: priv->xsk_tx_zc_submit++.
++ *
++ * Inflight decrement happens in af_xdp_pool_tx_conf_zc(). xsk_tx_completed(
++ * pool, 1) is called there per claimed FD.
++ *
++ * NAPI-context. xsk_tx_inflight[] is atomic_t to be lockless against the
++ * TxConf path which may run on a different CPU.
++ */
++static void af_xdp_pool_napi_tx_zc(struct dpaa_priv *priv)
++{
++struct xsk_buff_pool *pool;
++struct qman_fq *egress_fq;
++struct xdp_desc *descs;
++struct qm_fd fd;
++dma_addr_t dma;
++u32 budget, n, i, submitted;
++int inflight, j, err;
++u16 q;
++
++if (!priv)
++return;
++
++for (q = 0; q < priv->xsk_max_qbands && q < DPAA1_XSK_MAX_QBANDS; q++) {
++if (!priv->xsk_bpool[q])
++continue;
++pool = rcu_dereference(priv->xsk_pool[q]);
++if (!pool)
++continue;
++
++/* v2: single-CPU pin. Only the qband-owner CPU drains this
++ * qband's XSK Tx ring -> QMan enqueue. Other CPUs skip,
++ * making each qband's Tx ring single-consumer (matches the
++ * XSK SPSC cursor contract). Mirror of the 0084v2 fix on the
++ * fill-ring side; same race, same one-line fix. The TxConf
++ * side (af_xdp_pool_tx_conf_zc) is intentionally NOT pinned
++ * — its bpid-claim scheme is designed for cross-CPU demux.
++ */
++if (raw_smp_processor_id() != priv->qmap[q].cpu)
++continue;
++
++inflight = atomic_read(&priv->xsk_tx_inflight[q]);
++if (inflight >= DPAA1_XSK_TX_MAX_INFLIGHT) {
++priv->xsk_tx_backpressure++;
++continue;
++}
++
++budget = (u32)(DPAA1_XSK_TX_MAX_INFLIGHT - inflight);
++if (budget > 64)
++budget = 64;
++
++n = xsk_tx_peek_release_desc_batch(pool, budget);
++if (!n)
++continue;
++
++descs = pool->tx_descs;
++submitted = 0;
++for (i = 0; i < n; i++) {
++dma = xsk_buff_raw_get_dma(pool, descs[i].addr);
++
++memset(&fd, 0, sizeof(fd));
++qm_fd_addr_set64(&fd, dma);
++qm_fd_set_contig(&fd, 0, (int)descs[i].len);
++fd.bpid = priv->xsk_bpid[q];
++/* No FM_FD_CMD_FCO: XSK UMEM chunk MUST NOT be released
++ * to BMan. Release goes through xsk_tx_completed() in
++ * the TxConf hook.
++ */
++
++egress_fq = priv->egress_fqs[raw_smp_processor_id() %
++     dpaa_max_num_txqs()];
++
++err = -EBUSY;
++/* DPAA_ENQUEUE_RETRIES is a #define private to dpaa_eth.c
++ * (value 100000); inline the same constant here rather than
++ * exporting it through dpaa_eth.h. The value is a stable upper
++ * bound on QMan EQCR slot-refill latency under congestion --
++ * it has not changed since the driver was upstreamed.
++ */
++for (j = 0; j < 100000; j++) {
++err = qman_enqueue(egress_fq, &fd);
++if (err != -EBUSY)
++break;
++}
++if (err) {
++priv->xsk_tx_backpressure++;
++break;
++}
++atomic_inc(&priv->xsk_tx_inflight[q]);
++submitted++;
++}
++
++if (submitted)
++priv->xsk_tx_zc_submit++;
++}
++}
++
++/*
++ * af_xdp_pool_xsk_set_tx_need_wakeup - arm XSK tx-need-wakeup flag
++ *
++ * M3-3 step 5 (patch 0085, spec sec 6.1.4). Called from dpaa_eth_poll()
++ * tail right after napi_tx_zc, same RCU region.
++ *
++ * For each bound xsk_pool[qband] that requested XDP_USE_NEED_WAKEUP at
++ * bind time, assert tx need-wakeup. Userspace observes via
++ * xsk_ring_prod__needs_wakeup() and issues sendto(MSG_DONTWAIT) which
++ * lands in af_xdp_pool_xsk_wakeup() and schedules NAPI.
++ *
++ * Currently set unconditionally per bound qband. Future refinement
++ * (M3-3 step 6+) may clear when inflight falls below
++ * DPAA1_XSK_TX_LOW_WATER (512).
++ */
++static void af_xdp_pool_xsk_set_tx_need_wakeup(struct dpaa_priv *priv,
++       struct dpaa_napi_portal *np)
++{
++struct xsk_buff_pool *pool;
++u16 q;
++
++if (!priv)
++return;
++
++for (q = 0; q < priv->xsk_max_qbands && q < DPAA1_XSK_MAX_QBANDS; q++) {
++pool = rcu_dereference(priv->xsk_pool[q]);
++if (!pool)
++continue;
++if (!xsk_uses_need_wakeup(pool))
++continue;
++xsk_set_tx_need_wakeup(pool);
++}
++}
++
++/*
++ * af_xdp_pool_tx_conf_zc - claim XSK-bpid TxConf FDs
++ *
++ * M3-3 step 5 (patch 0085, spec sec 6.1.4 round-trip closure).
++ * Called from dpaa_tx_conf() BEFORE the skb-cleanup path. FD's bpid is
++ * our claim marker (napi_tx_zc set fd.bpid = priv->xsk_bpid[q]).
++ *
++ * Returns true if FD claimed (caller MUST NOT run skb cleanup); false
++ * otherwise.
++ *
++ * Per claimed FD:
++ *   - atomic_dec(xsk_tx_inflight[q]) to free a budget slot.
++ *   - xsk_tx_completed(pool, 1) to advance userspace CQ head one slot.
++ *   - priv->xsk_tx_conf_zc++ for observability.
++ *
++ * If pool detached between submit and confirm (XDP_UNBIND while in
++ * flight), skip xsk_tx_completed() but still atomic_dec -- inflight
++ * MUST drop or the next attach starts polluted.
++ */
++static bool af_xdp_pool_tx_conf_zc(struct dpaa_priv *priv,
++   const struct qm_fd *fd)
++{
++struct xsk_buff_pool *pool;
++u8 bpid;
++u16 q;
++
++if (!priv || !fd)
++return false;
++
++bpid = fd->bpid;
++for (q = 0; q < priv->xsk_max_qbands && q < DPAA1_XSK_MAX_QBANDS; q++) {
++if (!priv->xsk_bpool[q])
++continue;
++if (priv->xsk_bpid[q] != bpid)
++continue;
++
++atomic_dec(&priv->xsk_tx_inflight[q]);
++pool = rcu_dereference(priv->xsk_pool[q]);
++if (pool)
++xsk_tx_completed(pool, 1);
++priv->xsk_tx_conf_zc++;
++return true;
++}
++return false;
++}
++
+ /* ---------- Ops tables ---------- */
+ 
+ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+@@ -601,8 +919,121 @@
+ .xsk_pool_detach        = af_xdp_pool_xsk_pool_detach,
+ .xsk_wakeup             = af_xdp_pool_xsk_wakeup,
+ .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
++.napi_refill            = af_xdp_pool_napi_refill,
++.napi_tx_zc             = af_xdp_pool_napi_tx_zc,
++.xsk_set_tx_need_wakeup = af_xdp_pool_xsk_set_tx_need_wakeup,
++.tx_conf_zc             = af_xdp_pool_tx_conf_zc,
+ };
+ 
++/* ---------- debugfs: /sys/kernel/debug/af_xdp_pool/qmap ----------
++ *
++ * Patch 0082 (M3-3 step 2b, spec sec 5.2).  Renders priv->qmap[] for
++ * every DPAA1 netdev so step 2a's per-CPU NAPI distribution is
++ * user-visible without requiring kgdb or a crash dump.  Output format
++ * (one block per netdev, sorted by ifindex):
++ *
++ *     iface=eth3 ifindex=4 xsk_max_qbands=4
++ *       qband 0  fqid_base=0x00000000  swp_id=0  cpu=0  napi=ffff800082b35a80
++ *       qband 1  fqid_base=0x00000000  swp_id=0  cpu=1  napi=ffff800082b35d80
++ *       qband 2  fqid_base=0x00000000  swp_id=0  cpu=2  napi=ffff800082b36080
++ *       qband 3  fqid_base=0x00000000  swp_id=0  cpu=3  napi=ffff800082b36380
++ *
++ * The napi pointer stride between qbands matches the per-CPU offset
++ * stride of priv->percpu_priv on a 4-CPU LS1046A: that is the
++ * verification gate for step 2a.  fqid_base / swp_id remain 0 until
++ * the dedicated QMan dispatch channel work (step 3) populates them.
++ *
++ * RCU read-side: walk dev_base under rtnl_lock + RCU.  We only deref
++ * priv->qmap[] which is stable for the netdev's lifetime once the
++ * flavor module attaches.  The atomic_read of xsk_tx_inflight[] is
++ * read-only and self-consistent.
++ *
++ * Identification of DPAA1 netdevs without a public is_dpaa_priv()
++ * helper: a DPAA1 netdev's ->dev.parent points at the fsl_dpaa_mac
++ * platform device (per AGENTS.md "DPAA1 driver split": two drivers
++ * cooperate — fsl_dpaa_mac owns the MAC, fsl_dpa registers the netdev
++ * and owns netdev_priv as struct dpaa_priv).  So the predicate is
++ * "parent device driver name == fsl_dpaa_mac".  The original
++ * "fsl_dpa" guess was wrong — that driver name belongs to the child
++ * dpaa-ethernet.N platform device, which is NOT what ndev->dev.parent
++ * points to on LS1046A 6.18.x.  Verified on DUT 2026-05-27.
++ */
++static struct dentry *af_xdp_pool_debugfs_root;
++
++static bool af_xdp_pool_is_dpaa1_netdev(const struct net_device *ndev)
++{
++const struct device *dev;
++const struct device_driver *drv;
++
++if (!ndev)
++return false;
++dev = ndev->dev.parent;
++if (!dev)
++return false;
++drv = dev->driver;
++if (!drv || !drv->name)
++return false;
++return strcmp(drv->name, "fsl_dpaa_mac") == 0;
++}
++
++static int af_xdp_pool_qmap_show(struct seq_file *m, void *v)
++{
++struct net_device *ndev;
++struct net *net = &init_net;
++struct dpaa_priv *priv;
++unsigned int q;
++int qband_count;
++
++rtnl_lock();
++for_each_netdev(net, ndev) {
++if (!af_xdp_pool_is_dpaa1_netdev(ndev))
++continue;
++priv = netdev_priv(ndev);
++if (!priv)
++continue;
++
++qband_count = (int)priv->xsk_max_qbands;
++if (qband_count <= 0 || qband_count > DPAA1_XSK_MAX_QBANDS)
++qband_count = DPAA1_XSK_MAX_QBANDS;
++
++seq_printf(m, "iface=%s ifindex=%d xsk_max_qbands=%u\n",
++   ndev->name, ndev->ifindex, priv->xsk_max_qbands);
++for (q = 0; q < (unsigned int)qband_count; q++) {
++seq_printf(m,
++   "  qband %u  fqid_base=0x%08x  swp_id=%u  cpu=%d  napi=%p  xsk_tx_inflight=%d\n",
++   q,
++   priv->qmap[q].fqid_base,
++   (unsigned int)priv->qmap[q].swp_id,
++   priv->qmap[q].cpu,
++   priv->qmap[q].napi,
++   atomic_read(&priv->xsk_tx_inflight[q]));
++}
++seq_putc(m, '\n');
++}
++rtnl_unlock();
++return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(af_xdp_pool_qmap);
++
++static void af_xdp_pool_debugfs_init(void)
++{
++af_xdp_pool_debugfs_root = debugfs_create_dir("af_xdp_pool", NULL);
++if (IS_ERR(af_xdp_pool_debugfs_root)) {
++af_xdp_pool_debugfs_root = NULL;
++pr_warn("af_xdp_pool: debugfs root create failed; qmap node unavailable\n");
++return;
++}
++debugfs_create_file("qmap", 0444, af_xdp_pool_debugfs_root,
++    NULL, &af_xdp_pool_qmap_fops);
++}
++
++static void af_xdp_pool_debugfs_exit(void)
++{
++debugfs_remove_recursive(af_xdp_pool_debugfs_root);
++af_xdp_pool_debugfs_root = NULL;
++}
++
+ /* ---------- Module init / exit ---------- */
+ 
+ static int __init af_xdp_pool_init(void)
+@@ -615,12 +1046,15 @@
+ return err;
+ }
+ 
++af_xdp_pool_debugfs_init();
++
+ pr_info("af_xdp_pool: registered (skeleton, all callbacks stubbed -EOPNOTSUPP)\n");
+ return 0;
+ }
+ 
+ static void __exit af_xdp_pool_exit(void)
+ {
++af_xdp_pool_debugfs_exit();
+ dpaa_unregister_flavor_ops();
+ pr_info("af_xdp_pool: unregistered\n");
+ }
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -166,8 +166,6 @@
+ #define DPAA_RX_PRIV_DATA_SIZE DPAA_RX_PRIV_DATA_DEFAULT_SIZE
+ #endif
+ 
+-#define DPAA_ETH_PCD_RXQ_NUM	128
+-
+ #define DPAA_ENQUEUE_RETRIES	100000
+ 
+ enum port_type {RX, TX};
+@@ -981,12 +979,66 @@
+ 		case FQ_TYPE_RX_ERROR:
+ 			dpaa_setup_ingress(priv, fq, &fq_cbs->rx_errq);
+ 			break;
+-		case FQ_TYPE_RX_PCD:
++		case FQ_TYPE_RX_PCD: {
++			u16 band_idx;
++			u16 band_size;
++
+ 			if (!num_portals)
+ 				continue;
+ 			dpaa_setup_ingress(priv, fq, &fq_cbs->rx_defq);
+-			fq->channel = channels[portal_cnt++ % num_portals];
++
++			/* M3-3 step 2c: dedicated banding.
++			 *
++			 * Replace round-robin PCD-FQ -> portal mapping with
++			 * contiguous-banding mapping. Round-robin
++			 * (channels[portal_cnt % num_portals]) scatters
++			 * consecutive PCD FQs across every CPU portal; with
++			 * FMan KeyGen output landing on FQ index =
++			 * hash % DPAA_ETH_PCD_RXQ_NUM, back-to-back frames
++			 * of the same flow can hit different portals when
++			 * their KG hashes fall on adjacent indices.
++			 *
++			 * Banding instead pins each contiguous
++			 *   band_size = DPAA_ETH_PCD_RXQ_NUM / num_portals
++			 * block of FQs to one portal, so a flow stays on
++			 * one CPU as long as its hash stays in the same
++			 * band.
++			 *
++			 * Concretely on LS1046A (num_portals=4,
++			 * DPAA_ETH_PCD_RXQ_NUM=128):
++			 *   band 0: FQs   0..31  -> channels[0] -> CPU 0
++			 *   band 1: FQs  32..63  -> channels[1] -> CPU 1
++			 *   band 2: FQs  64..95  -> channels[2] -> CPU 2
++			 *   band 3: FQs  96..127 -> channels[3] -> CPU 3
++			 *
++			 * Eliminates HOLDACTIVE arbitration: each band's
++			 * 32 FQs now resolve on ONE portal/CPU rather than
++			 * arbitrating across all four. This also populates
++			 * priv->qmap[band].fqid_base / swp_id so the
++			 * af_xdp_pool flavor module (patch 0082) can find
++			 * the right channel for an XSK-bound qband without
++			 * re-deriving it, and so the qmap debugfs node
++			 * starts showing non-zero columns.
++			 *
++			 * Spec: specs/dpaa1-afxdp-modernization-spec.md
++			 * sec 5.2.
++			 */
++			band_size = max_t(u16, 1u,
++					  DPAA_ETH_PCD_RXQ_NUM /
++					  (u16)num_portals);
++			band_idx = portal_cnt / band_size;
++			if (band_idx >= num_portals)
++				band_idx = num_portals - 1;
++			fq->channel = channels[band_idx];
++
++			if (band_idx < priv->xsk_max_qbands &&
++			    priv->qmap[band_idx].fqid_base == 0) {
++				priv->qmap[band_idx].fqid_base = fq->fqid;
++				priv->qmap[band_idx].swp_id    = fq->channel;
++			}
++			portal_cnt++;
+ 			break;
++		}
+ 		case FQ_TYPE_TX:
+ 			dpaa_setup_egress(priv, fq, tx_port,
+ 					  &fq_cbs->egress_ern);
+@@ -2454,11 +2506,35 @@
+ 		 * a single NULL deref under RCU, no behaviour change.
+ 		 * Spec sec 5.4 RX path step 5.
+ 		 */
+-		rcu_read_lock();
+-		ops = rcu_dereference(priv->qmgmt_ops);
+-		if (ops && ops->xsk_set_rx_need_wakeup)
+-			ops->xsk_set_rx_need_wakeup(priv, np);
+-		rcu_read_unlock();
++rcu_read_lock();
++ops = rcu_dereference(priv->qmgmt_ops);
++if (ops && ops->xsk_set_rx_need_wakeup)
++ops->xsk_set_rx_need_wakeup(priv, np);
++
++/* M3-3 step 4 (patch 0084): NAPI-hooked BMan refill from the
++ * XSK fill ring. Reuses the local `ops` (no second
++ * rcu_dereference), folded into the same RCU read-section as
++ * xsk_set_rx_need_wakeup. With no XSK pool bound the callback
++ * walks zero bound qbands and returns immediately. Spec sec
++ * 6.1.3.
++ */
++if (ops && ops->napi_refill)
++ops->napi_refill(priv);
++
++/* M3-3 step 5 (patch 0085): NAPI-hooked TX ZC submission and
++ * tx-need-wakeup arming. Same RCU read-section, reuses the
++ * local `ops`. napi_tx_zc drains the XSK Tx ring into the
++ * DPAA1 egress FQs (xsk_tx_peek_release_desc_batch ->
++ * qman_enqueue) honouring the software xsk_tx_inflight budget.
++ * xsk_set_tx_need_wakeup arms tx-need-wakeup when the budget
++ * is exhausted OR the Tx ring drained. Spec sec 6.1.4.
++ */
++if (ops && ops->napi_tx_zc)
++ops->napi_tx_zc(priv);
++if (ops && ops->xsk_set_tx_need_wakeup)
++ops->xsk_set_tx_need_wakeup(priv, np);
++
++rcu_read_unlock();
+ 
+ 		qman_p_irqsource_add(np->p, QM_PIRQ_DQRI);
+ 	} else if (np->down) {
+@@ -2476,6 +2552,31 @@
+ {
+ 	struct sk_buff	*skb;
+ 
++	/* M3-3 step 5 (patch 0085): give the flavor module first crack
++	 * at the TxConf FD. If it returns true, the FD belonged to an
++	 * XSK qband (bpid matched priv->xsk_bpid[q]); the flavor has
++	 * called xsk_tx_completed() and atomic_dec'd xsk_tx_inflight;
++	 * we MUST NOT run dpaa_cleanup_tx_fd() on it (no skb backing
++	 * -- the FD's DMA address is an XSK UMEM chunk still owned by
++	 * the pool). Strictly NAPI-context. With no flavor module
++	 * loaded (default flavor) ops is NULL and the fast path falls
++	 * through to the existing skb cleanup verbatim. Spec sec 6.1.4
++	 * round-trip closure.
++	 */
++	{
++		const struct dpaa_qmgmt_ops *ops;
++
++		rcu_read_lock();
++		ops = rcu_dereference(priv->qmgmt_ops);
++		if (ops && ops->tx_conf_zc &&
++		    ops->tx_conf_zc((struct dpaa_priv *)priv, fd)) {
++			rcu_read_unlock();
++			percpu_priv->tx_confirm++;
++			return;
++		}
++		rcu_read_unlock();
++	}
++
+ 	if (unlikely(be32_to_cpu(fd->status) & FM_FD_STAT_TX_ERRORS)) {
+ 		if (net_ratelimit())
+ 			netif_warn(priv, hw, net_dev, "FD status = 0x%08x\n",
+@@ -2733,6 +2834,27 @@
+ 	if (!dpaa_bp)
+ 		return qman_cb_dqrr_consume;
+ 
++	/* M3-3 step 3 (patch 0083): observational xsk-RX branch-eligibility
++	 * probe. Map the FD's FQID to a qband via the qmap[] populated by
++	 * dpaa_fq_setup() (patch 0082b), then RCU-deref priv->xsk_pool[band].
++	 * If a pool is bound, bump priv->xsk_rx_branch. Strictly diagnostic --
++	 * no change to packet handling. The actual ZC redirect (xdp_buff
++	 * recovery + bpf_prog_run_xdp + xdp_do_redirect into the XSK RX ring)
++	 * lands in patch 0084+. With no XSK pool ever bound (default flavor)
++	 * the rcu_dereference returns NULL on every FD and this branch is
++	 * effectively dead code, preserving byte-identical mainline behaviour.
++	 */
++	{
++		u16 _band = dpaa_fq_to_qband(priv, fq->fqid);
++		struct xsk_buff_pool *_xp;
++
++		rcu_read_lock();
++		_xp = rcu_dereference(priv->xsk_pool[_band]);
++		if (_xp)
++			priv->xsk_rx_branch++;
++		rcu_read_unlock();
++	}
++
+ 	/* Trace the Rx fd */
+ 	trace_dpaa_rx_fd(net_dev, fq, &dq->fd);
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -133,6 +133,13 @@
+ 
+ /* AF_XDP zerocopy constants (Phase 2). See spec sec 5.3. */
+ #define DPAA1_XSK_MAX_QBANDS        4
++
++/* PCD RX FQ count per netdev (shared with dpaa_eth.c).
++ * FMan KeyGen distributes ingress across this many FQs via
++ * 5-tuple hash mod DPAA_ETH_PCD_RXQ_NUM. Used by dpaa_fq_to_qband()
++ * (below) and by dpaa_fq_setup() FQ allocation in dpaa_eth.c.
++ */
++#define DPAA_ETH_PCD_RXQ_NUM        128
+ #define DPAA1_XSK_INITIAL_SEED      8192
+ #define DPAA1_XSK_REFILL_THRESHOLD  256
+ #define DPAA1_XSK_MIN_DEPTH         64
+@@ -249,7 +256,39 @@
+ 	u64 xsk_mtu_reject;
+ 	u64 xsk_pamu_window_fail;
+ 
+-	/* M3 (Phase 3a): qband -> { FQ base, SWP, CPU, NAPI } resource map.
++	/* M3-3 step 3 (patch 0083): per-FD observation that an FD
++	 * arrived on a qband with a bound XSK pool. Bumped from the
++	 * rx_default_dqrr branch-eligibility probe. Currently strictly
++ * observational -- the actual ZC redirect lands in 0084+.
++ */
++u64 xsk_rx_branch;
++
++/* M3-3 step 4 (patch 0084): bumped once per non-empty
++ * xsk_buff_alloc_batch() -> bman_release() round-trip inside
++ * the NAPI-hooked BMan refill callback. Observability for
++ * spec sec 6.1.3 "refill discipline".
++ */
++u64 xsk_bman_refill_batches;
++
++/* M3-3 step 5 (patch 0085): bumped once per non-empty
++ * xsk_tx_peek_release_desc_batch() -> qman_enqueue() round-trip
++ * inside the NAPI-hooked TX ZC submission callback. Pairs with
++ * xsk_tx_backpressure (already exposed since 0079) for spec sec
++ * 6.1.4 "Strict Tx backpressure" observability. Counts FDs
++ * actually submitted to QMan, NOT FDs the XSK ring offered.
++ */
++u64 xsk_tx_zc_submit;
++
++/* M3-3 step 5 (patch 0085): bumped once per XSK-bpid FD claimed
++ * by the flavor module's tx_conf_zc hook in the dpaa_tx_conf()
++ * path. Pairs with xsk_tx_zc_submit; under steady state the two
++ * counters track within the in-flight budget (DPAA1_XSK_TX_MAX_INFLIGHT
++ * = 1024). xsk_tx_zc_submit - xsk_tx_conf_zc == current inflight
++ * across all qbands (summed). Spec sec 6.1.4 round-trip closure.
++ */
++u64 xsk_tx_conf_zc;
++
++/* M3 (Phase 3a): qband -> { FQ base, SWP, CPU, NAPI } resource map.
+ 	 * Populated by the flavor module's pcd_ops->install. With no flavor
+ 	 * module loaded the array stays zeroed and the spec's "qmap[]
+ 	 * empty" branch is taken (single-queue mainline behaviour).
+@@ -275,12 +314,36 @@
+  */
+ static inline u16 dpaa_fq_to_qband(struct dpaa_priv *priv, u32 fqid)
+ {
+-	/* Phase 3a: until the flavor module wires up the PCD FQID base
+-	 * and per-qband distribution stride, every FQID maps to qband 0
+-	 * (kernel-domain default). The flavor module replaces this
+-	 * inline at runtime via the qmgmt_ops dispatch (spec sec 5.4).
+-	 */
+-	(void)fqid;
++	/* M3-3 step 3 (patch 0083): real PCD-FQID -> qband mapping using
++	 * the contiguous-banding qmap[].fqid_base populated by dpaa_fq_setup()
++	 * at probe time (patch 0082b). Each band owns DPAA_ETH_PCD_RXQ_NUM /
++	 * priv->xsk_max_qbands contiguous FQIDs starting at qmap[band].fqid_base.
++	 * For LS1046A defaults (DPAA_ETH_PCD_RXQ_NUM=128, xsk_max_qbands=4):
++	 *   band 0 = [base0 .. base0+31]
++	 *   band 1 = [base1 .. base1+31]
++	 *   band 2 = [base2 .. base2+31]
++	 *   band 3 = [base3 .. base3+31]
++	 * FQIDs outside every band's range (kernel-domain default FQs etc.)
++	 * map to band 0 -- the kernel-domain default -- so callers can safely
++	 * use the result as an array index into priv->xsk_pool[].
++	 */
++	unsigned int n = priv->xsk_max_qbands;
++	u32 stride;
++	u16 b;
++
++	if (!n || n > DPAA1_XSK_MAX_QBANDS)
++		return 0;
++	stride = DPAA_ETH_PCD_RXQ_NUM / n;
++	if (!stride)
++		return 0;
++	for (b = 0; b < n; b++) {
++		u32 base = priv->qmap[b].fqid_base;
++
++		if (!base)
++			continue;
++		if (fqid >= base && fqid < base + stride)
++			return b;
++	}
+ 	return 0;
+ }
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -67,6 +67,10 @@
+ 	"xsk_headroom_reject",
+ 	"xsk_mtu_reject",
+ 	"xsk_pamu_window_fail",
++	"xsk_rx_branch",
++"xsk_bman_refill_batches",
++"xsk_tx_zc_submit",
++"xsk_tx_conf_zc",
+ };
+ 
+ #define DPAA_STATS_PERCPU_LEN ARRAY_SIZE(dpaa_stats_percpu)
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+@@ -45,6 +45,13 @@
+ 	int  (*dump_state)(struct dpaa_priv *priv, struct seq_file *m);
+ };
+ 
++/* Forward declaration -- struct qm_fd is defined in <soc/fsl/qman.h>
++ * but we deliberately do NOT include that header here to keep this
++ * inter-module ABI surface minimal. Callers and implementors of
++ * tx_conf_zc must pull in qman.h themselves.
++ */
++struct qm_fd;
++
+ /**
+  * struct dpaa_qmgmt_ops - per-queue management operations
+  * @alloc_rx_fqs:     Optional: append flavor-specific RX FQs at probe time.
+@@ -55,6 +62,19 @@
+  * @xsk_pool_attach:  XDP_SETUP_XSK_POOL attach. NULL = AF_XDP ZC unsupported.
+  * @xsk_pool_detach:  XDP_SETUP_XSK_POOL detach.
+  * @xsk_wakeup:       ndo_xsk_wakeup backend.
++ * @xsk_set_rx_need_wakeup: arm XSK rx-need-wakeup at NAPI completion.
++ * @napi_refill:      M3-3 step 4 - top up BMan pool from XSK fill ring
++ *                    at NAPI completion. Spec sec 6.1.3.
++ * @napi_tx_zc:       M3-3 step 5 - drain XSK Tx ring into the DPAA1
++ *                    egress FQs at NAPI completion, with software
++ *                    xsk_tx_inflight backpressure. Spec sec 6.1.4.
++ * @xsk_set_tx_need_wakeup: arm XSK tx-need-wakeup when in-flight budget
++ *                    is exhausted OR the Tx ring is drained.
++ *                    Spec sec 6.1.4.
++ * @tx_conf_zc:       M3-3 step 5 - claim XSK-bpid TxConf FDs in the
++ *                    dpaa_tx_conf() path. Returns true to short-circuit
++ *                    the skb cleanup path; calls xsk_tx_completed()
++ *                    and atomic_dec(xsk_tx_inflight). Spec sec 6.1.4.
+  */
+ struct dpaa_qmgmt_ops {
+ 	int  (*alloc_rx_fqs)(struct dpaa_priv *priv, struct list_head *list);
+@@ -64,8 +84,13 @@
+ 				struct xsk_buff_pool *pool, u16 queue_id);
+ 	int  (*xsk_pool_detach)(struct dpaa_priv *priv, u16 queue_id);
+ 	int  (*xsk_wakeup)(struct dpaa_priv *priv, u32 queue_id, u32 flags);
+-	void (*xsk_set_rx_need_wakeup)(struct dpaa_priv *priv,
+-				       struct dpaa_napi_portal *np);
++void (*xsk_set_rx_need_wakeup)(struct dpaa_priv *priv,
++       struct dpaa_napi_portal *np);
++void (*napi_refill)(struct dpaa_priv *priv);
++void (*napi_tx_zc)(struct dpaa_priv *priv);
++void (*xsk_set_tx_need_wakeup)(struct dpaa_priv *priv,
++       struct dpaa_napi_portal *np);
++bool (*tx_conf_zc)(struct dpaa_priv *priv, const struct qm_fd *fd);
+ };
+ 
+ #ifdef CONFIG_DPAA_FLAVOR_OPS

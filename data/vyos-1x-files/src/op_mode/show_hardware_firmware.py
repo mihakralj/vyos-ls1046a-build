@@ -1,0 +1,646 @@
+#!/usr/bin/env python3
+#
+# Copyright (C) VyOS Inc.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# op-mode: show hardware firmware
+#
+# Boot firmware, TF-A, U-Boot, FMan microcode, and recovery OS firmware
+# inventory for the NXP LS1046A Mono Gateway DK.
+#
+# Reports both QSPI NOR flash (active boot medium) and eMMC on-flash
+# firmware copies (inactive / backup medium).
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import textwrap
+import zlib
+
+from tabulate import tabulate
+
+# Test hook: prepend a fake root (used by the sanity harness only).
+SYS_ROOT = os.environ.get('VYOS_FW_SYS_ROOT', '')
+
+DT_COMPATIBLE = f'{SYS_ROOT}/proc/device-tree/compatible'
+DT_MODEL = f'{SYS_ROOT}/proc/device-tree/model'
+DT_UBOOT_VERSION = f'{SYS_ROOT}/proc/device-tree/chosen/u-boot,version'
+DT_FW = (f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000/'
+         'fman-firmware/fsl,firmware')
+SOC0 = f'{SYS_ROOT}/sys/devices/soc0'
+MTD_PROC = f'{SYS_ROOT}/proc/mtd'
+EMMC_DEV = f'{SYS_ROOT}/dev/mmcblk0'
+
+QEF_LEN = 76  # decoded header length in bytes
+
+
+def _read_bytes(path, n=None):
+    try:
+        with open(path, 'rb') as f:
+            return f.read(n)
+    except OSError:
+        return None
+
+
+def _read_text(path):
+    data = _read_bytes(path)
+    if data is None:
+        return None
+    try:
+        return data.decode().strip('\x00\n')
+    except UnicodeDecodeError:
+        return None
+
+
+def _is_ls1046a():
+    compat = _read_text(DT_COMPATIBLE)
+    return bool(compat and 'fsl,ls1046a' in compat)
+
+
+def _is_root():
+    return os.geteuid() == 0
+
+
+def render_table(rows, headers, widths=None):
+    if not widths:
+        print(tabulate(rows, headers=headers, tablefmt='simple'))
+        return
+    wrapped_rows = []
+    for r in rows:
+        wrapped_row = []
+        for i, val in enumerate(r):
+            w = widths[i] if i < len(widths) else None
+            val_str = '' if val is None else str(val)
+            if w and len(val_str) > w:
+                wrapped_val = textwrap.fill(val_str, w, break_long_words=True,
+                                            break_on_hyphens=False)
+            else:
+                wrapped_val = val_str
+            wrapped_row.append(wrapped_val)
+        wrapped_rows.append(wrapped_row)
+    print(tabulate(wrapped_rows, headers=headers, tablefmt='simple'))
+
+
+# ---------------------------------------------------------------------------
+# QEF header decode — mirrors struct qe_firmware (include/soc/fsl/qe/qe.h).
+# ---------------------------------------------------------------------------
+def qef_decode(data: bytes):
+    """Decode Quicc Engine Firmware header; None if short or bad magic."""
+    if not data or len(data) < QEF_LEN:
+        return None
+    if data[4:7] != b'QEF':
+        return None
+    qef_len = struct.unpack('>I', data[0:4])[0]
+    ident = data[8:70].split(b'\x00', 1)[0].decode(errors='replace')
+    return {
+        'length': qef_len,
+        'version': data[7],
+        'id': ident,
+        'split_iram': data[70],
+        'count': data[71],
+        'soc_model': struct.unpack('>H', data[72:74])[0],
+        'soc_major': data[74],
+        'soc_minor': data[75],
+    }
+
+
+def ucode_classify(ident: str):
+    m = re.match(r'^Microcode version (\d+)\.', ident)
+    if not m:
+        return 'unrecognized id format'
+    if int(m.group(1)) >= 210:
+        return ('proprietary NXP/Mono PCD-capable '
+                '(CC/HM/POL/PARSER)')
+    return ('open-source qoriq-fm-ucode '
+            '(NO PCD extensions)')
+
+
+def content_sniff(head: bytes):
+    hexhead = head.hex()
+    if hexhead.startswith('d00dfeed'):
+        return 'FDT (flattened device tree)'
+    if hexhead.startswith('1f8b'):
+        return 'gzip compressed data'
+    if hexhead.startswith('ffffffff'):
+        return 'erased flash (0xFF)'
+    if hexhead.startswith('00000000'):
+        return 'zeroed'
+    if hexhead.startswith('27051956'):
+        return 'U-Boot legacy uImage'
+    return f'unrecognized (first bytes: {hexhead[:16]})'
+
+
+# ---------------------------------------------------------------------------
+# Sysfs / proc / flash readers.
+# ---------------------------------------------------------------------------
+def mtd_map():
+    out = []
+    text = _read_text(MTD_PROC)
+    if not text:
+        return out
+    for line in text.splitlines():
+        m = re.match(r'^(mtd\d+):\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+"(.*)"',
+                     line.strip())
+        if m:
+            out.append((m.group(1), m.group(2), m.group(3)))
+    return out
+
+
+def flash_head(dev, n=16):
+    return _read_bytes(f'{SYS_ROOT}/dev/{dev}', n)
+
+
+def read_board_eeprom():
+    """Read board serial from AT24CS32 EEPROM at i2c-3:0x50."""
+    if not _is_root():
+        return None
+    for bus in (3, 0, 1, 2, 4, 5, 6, 7):
+        dev = f'{SYS_ROOT}/dev/i2c-{bus}'
+        if not os.path.exists(dev):
+            continue
+        try:
+            fd = os.open(dev, os.O_RDWR)
+            fcntl.ioctl(fd, 0x0706, 0x50)  # I2C_SLAVE_FORCE
+            os.write(fd, bytes([0x00, 0x00]))
+            data = os.read(fd, 128)
+            os.close(fd)
+            if data.startswith(b'MAGC'):
+                serial = data[40:104].split(b'\x00', 1)[0].decode(errors='replace').strip()
+                return serial if serial else None
+        except OSError:
+            pass
+    return None
+
+
+def read_rcw_serdes():
+    """Extract SerDes1 and SerDes2 protocols from RCW in mtd0."""
+    if not os.path.exists(f'{SYS_ROOT}/dev/mtd0'):
+        return None
+    try:
+        with open(f'{SYS_ROOT}/dev/mtd0', 'rb') as f:
+            blob = f.read(512)
+        off = blob.find(bytes.fromhex('55aa55aa'))
+        if off == -1:
+            return None
+        raw = blob[off + 4:off + 4 + 64]
+        words_le = struct.unpack('<16I', raw)
+        w4 = words_le[5] if '1133' in f'{words_le[5]:08x}' else words_le[4]
+        s1 = (w4 >> 16) & 0xffff
+        s2 = w4 & 0xffff
+        return f'S1 0x{s1:04x} ({s1}), S2 0x{s2:04x} ({s2})'
+    except OSError:
+        return None
+
+
+def uboot_version_search(data: bytes):
+    """First printable 'U-Boot 20xx.yy...' string in a partition dump."""
+    if not data:
+        return None
+    for m in re.finditer(rb'U-Boot [0-9]{4}\.', data):
+        start = m.start()
+        end = m.end()
+        while end < len(data) and 0x20 <= data[end] < 0x7f:
+            end += 1
+        s = data[start:end].decode(errors='replace').strip()
+        if s:
+            return s
+    return None
+
+
+def tfa_version_search(data: bytes):
+    """Scan for ARM Trusted Firmware (TF-A / BL31) version string."""
+    if not data:
+        return None
+    m = re.search(rb'v\d+\.\d+\.\d+\(release\):[ -~]+', data)
+    if not m:
+        return None
+    ver = m.group().decode(errors='replace').strip('\x00 ')
+    built_m = re.search(rb'Built\s*:\s*[0-9:APMapm,\sA-Za-z0-9]+',
+                        data[m.end():m.end() + 100])
+    if built_m:
+        built = built_m.group().decode(errors='replace').strip('\x00 ')
+        return f'{ver} ({built})'
+    return ver
+
+
+def recovery_firmware_version(path_or_dev, offset=0):
+    """Extract etc/firmware/version from recovery kernel/initramfs.
+
+    Streams and decompresses gzip blocks until etc/firmware/version is found.
+    Returns version string (e.g. '2026.06.3') or None.
+    """
+    if not os.path.exists(path_or_dev):
+        return None
+    try:
+        with open(path_or_dev, 'rb') as f:
+            if offset > 0:
+                f.seek(offset)
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            decompressed_chunks = []
+            while True:
+                chunk = f.read(512 * 1024)
+                if not chunk:
+                    break
+                try:
+                    out = d.decompress(chunk)
+                    if out:
+                        decompressed_chunks.append(out)
+                        combined = (b''.join(decompressed_chunks[-2:])
+                                    if len(decompressed_chunks) >= 2
+                                    else decompressed_chunks[0])
+                        idx = combined.find(b'etc/firmware/version\x00')
+                        if idx != -1:
+                            hdr_start = combined.rfind(b'070701', 0, idx)
+                            if hdr_start != -1 and len(combined) >= hdr_start + 110:
+                                hdr = combined[hdr_start:hdr_start + 110]
+                                fsize = int(hdr[54:62], 16)
+                                nsize = int(hdr[94:102], 16)
+                                body_at = (hdr_start + 110 + nsize + 3) & ~3
+                                if len(combined) >= body_at + fsize:
+                                    val = combined[body_at:body_at + fsize].decode('utf-8', 'replace').strip('\x00 \n\r')
+                                    return val
+                except zlib.error:
+                    break
+    except OSError:
+        return None
+    return None
+
+
+def fw_env_ok():
+    """CRC probe: does fw_printenv parse the environment at all?"""
+    if not _is_root():
+        return 'skip', 'not root'
+    if not shutil.which('fw_printenv'):
+        return 'skip', 'fw_printenv not installed'
+    rc = subprocess.run(['fw_printenv'], capture_output=True, text=True)
+    if rc.returncode != 0:
+        detail = rc.stderr.strip().splitlines()[-1] if rc.stderr else None
+        return 'fail', detail
+    return 'ok', None
+
+
+# ---------------------------------------------------------------------------
+# Renderers.
+# ---------------------------------------------------------------------------
+def render_identity():
+    model = _read_text(DT_MODEL) or 'Mono Gateway Development Kit'
+    fam = _read_text(f'{SOC0}/family') or 'QorIQ LS1046AE'
+    rev = _read_text(f'{SOC0}/revision') or '1.0'
+    svr_raw = _read_text(f'{SOC0}/soc_id') or ''
+    svr = svr_raw.replace('svr:', '') if svr_raw else ''
+    soc_str = f'{fam} rev {rev}' + (f' (SVR {svr})' if svr else '')
+
+    board_sn = read_board_eeprom()
+    emmc_sn = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/serial')
+    emmc_name = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/name')
+    base_mac = None
+    dt_mac = _read_bytes(f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000/ethernet@e2000/local-mac-address')
+    if dt_mac and len(dt_mac) == 6:
+        base_mac = ':'.join(f'{b:02X}' for b in dt_mac)
+
+    serdes_str = read_rcw_serdes()
+
+    emmc_str = None
+    if emmc_sn:
+        emmc_str = f'{emmc_name} (SN {emmc_sn})' if emmc_name else f'SN {emmc_sn}'
+
+    lines = [
+        ('Model', model),
+        ('SoC', soc_str),
+        ('Board Serial', board_sn),
+        ('Base MAC', base_mac),
+        ('eMMC Storage', emmc_str),
+        ('DRAM Memory', '8 GB DDR4 (ECC on)'),
+        ('SerDes Config', serdes_str),
+        ('System Clocks', 'CPU 1.6 GHz, FMan 700 MHz'),
+    ]
+
+    for label, val in lines:
+        if val:
+            lbl = label + ':'
+            print(f'{lbl:<16}{val}')
+
+
+def render_dual_store_firmware(root: bool):
+    """Combined side-by-side comparison of NOR (active) vs eMMC (inactive)."""
+    print('\nBoot & Recovery Firmware:')
+    rows = []
+    run_uboot = _read_text(DT_UBOOT_VERSION)
+
+    nor_tfa = None
+    nor_uboot = None
+    if root and os.path.exists(f'{SYS_ROOT}/dev/mtd1'):
+        mtd1_blob = _read_bytes(f'{SYS_ROOT}/dev/mtd1', 2 * 1024 * 1024)
+        nor_tfa = tfa_version_search(mtd1_blob)
+        nor_uboot = uboot_version_search(mtd1_blob)
+
+    emmc_tfa = None
+    emmc_uboot = None
+    emmc_qef = None
+    if root and os.path.exists(EMMC_DEV):
+        try:
+            with open(EMMC_DEV, 'rb') as f:
+                f.seek(0x100000)
+                emmc_fip = f.read(2 * 1024 * 1024)
+                emmc_tfa = tfa_version_search(emmc_fip)
+                emmc_uboot = uboot_version_search(emmc_fip)
+                f.seek(0x400000)
+                emmc_qef_head = f.read(QEF_LEN)
+                emmc_qef = qef_decode(emmc_qef_head)
+        except OSError:
+            pass
+
+    nor_rec_ver = None
+    emmc_rec_ver = None
+    if root:
+        mtds = mtd_map()
+        rec_dev = None
+        for dev, _, name in mtds:
+            if name == 'kernel-initramfs':
+                rec_dev = dev
+                break
+        if rec_dev and os.path.exists(f'{SYS_ROOT}/dev/{rec_dev}'):
+            nor_rec_ver = recovery_firmware_version(f'{SYS_ROOT}/dev/{rec_dev}')
+        if os.path.exists(EMMC_DEV):
+            emmc_rec_ver = recovery_firmware_version(EMMC_DEV, offset=0xa00000)
+
+    nor_qef_id = None
+    nor_qef_len = None
+    if root and os.path.exists(f'{SYS_ROOT}/dev/mtd3'):
+        qef_nor = qef_decode(flash_head('mtd3', QEF_LEN) or b'')
+        if qef_nor:
+            nor_qef_id = qef_nor['id']
+            nor_qef_len = qef_nor['length']
+
+    rows.append(['Running U-Boot', run_uboot or '-', '-'])
+    rows.append(['TF-A (BL31)', nor_tfa or ('SKIP - not root' if not root else '-'),
+                 emmc_tfa or ('SKIP - not root' if not root else '-')])
+    rows.append(['On-flash U-Boot', nor_uboot or ('SKIP - not root' if not root else '-'),
+                 emmc_uboot or ('SKIP - not root' if not root else '-')])
+
+    nor_ucode_disp = f'"{nor_qef_id}" ({nor_qef_len} B)' if nor_qef_id else ('SKIP - not root' if not root else '-')
+    emmc_ucode_disp = f'"{emmc_qef["id"]}" ({emmc_qef["length"]} B)' if emmc_qef else ('SKIP - not root' if not root else '-')
+    rows.append(['FMan microcode', nor_ucode_disp, emmc_ucode_disp])
+
+    nor_rec_disp = f'Mono Gateway Firmware v{nor_rec_ver}' if nor_rec_ver else ('SKIP - not root' if not root else '-')
+    emmc_rec_disp = f'Mono Gateway Firmware v{emmc_rec_ver}' if emmc_rec_ver else ('SKIP - not root' if not root else '-')
+    rows.append(['Recovery OS', nor_rec_disp, emmc_rec_disp])
+
+    render_table(rows, ['Component', 'NOR Flash (Active)', 'eMMC (Inactive / Backup)'], [15, 33, 33])
+    return nor_rec_ver
+
+
+def render_partitions(root: bool, nor_rec_ver: str):
+    """Returns (mtds_found, flash_uboot, flash_ucode, n_fails)."""
+    print('\nQSPI NOR flash partitions (/proc/mtd):')
+    mtds = mtd_map()
+    if not mtds:
+        print('FAIL - /proc/mtd empty (CONFIG_SPI_FSL_QUADSPI missing?)')
+        return False, None, None, 1
+    rows = []
+    flash_uboot = None
+    flash_ucode = None
+    n_fails = 0
+    for dev, size_hex, name in mtds:
+        size_kib = int(size_hex, 16) // 1024
+        detail = 'not root' if not root else '/dev/%s absent' % dev
+        if root and os.path.exists(f'{SYS_ROOT}/dev/{dev}'):
+            head = flash_head(dev) or b''
+            if name == 'rcw-bl2':
+                if '55aa55aa' in head.hex():
+                    detail = 'RCW/PBL preamble present'
+                else:
+                    detail = 'WARN: no 55aa55aa preamble in first 16 bytes'
+            elif name == 'uboot':
+                flash_uboot = uboot_version_search(
+                    _read_bytes(f'{SYS_ROOT}/dev/{dev}', 2 * 1024 * 1024))
+                detail = flash_uboot or 'no embedded version string found'
+            elif name == 'uboot-env':
+                state, err_detail = fw_env_ok()
+                if state == 'ok':
+                    detail = 'environment CRC valid'
+                elif state == 'fail':
+                    detail = f'FAIL: fw_printenv failed ({err_detail or "bad CRC"})'
+                    n_fails += 1
+                else:
+                    detail = err_detail or 'CRC probe skipped'
+            elif name == 'fman-ucode':
+                qef = qef_decode(flash_head(dev, QEF_LEN) or b'')
+                if qef:
+                    flash_ucode = qef['id']
+                    detail = f'QEF "{qef["id"]}" ({qef["length"]} B)'
+                else:
+                    detail = 'FAIL: no valid QEF microcode header'
+                    n_fails += 1
+            elif name == 'recovery-dtb':
+                if head.hex().startswith('d00dfeed'):
+                    compat = re.search(
+                        rb'(?:mono|fsl),[ -~]+',
+                        _read_bytes(f'{SYS_ROOT}/dev/{dev}', 128 * 1024) or b'')
+                    detail = 'FDT valid' + (
+                        f' (compatible: {compat.group().decode()})'
+                        if compat else '')
+                else:
+                    detail = 'WARN: FDT magic d00dfeed absent'
+            elif name == 'kernel-initramfs':
+                if nor_rec_ver:
+                    detail = f'Recovery OS (v{nor_rec_ver})'
+                else:
+                    detail = f'{content_sniff(head)} - recovery kernel'
+            else:
+                detail = content_sniff(head)
+        rows.append([dev, size_kib, f'{name} ({detail})'])
+    render_table(rows, ['MTD', 'Size (KiB)', 'Partition / Content'], [5, 11, 58])
+    return True, flash_uboot, flash_ucode, n_fails
+
+
+def render_microcode(flash_ucode):
+    """Returns number of FAIL conditions rendered."""
+    print('\nFMan microcode (running & on-flash):')
+    rows = []
+    n_fails = 0
+    data = _read_bytes(DT_FW)
+    running = None
+    if data:
+        qef = qef_decode(data)
+        if qef:
+            running = qef['id']
+            rows.append(['Running microcode', f'"{running}"'])
+            rows.append(['QEF header',
+                         f'length={qef["length"]} B, layout v{qef["version"]}, '
+                         f"split-IRAM={qef['split_iram']}, "
+                         f"microcode count={qef['count']}"])
+            rows.append(['SoC code',
+                         f'model=0x{qef["soc_model"]:04x} rev '
+                         f'{qef["soc_major"]}.{qef["soc_minor"]}'])
+            rows.append(['Class', ucode_classify(running)])
+            h = hashlib.md5()
+            maxlen = min(qef['length'], 16 * 1024 * 1024)
+            h.update(data[:maxlen])
+            rows.append(['MD5 (first %d B)' % maxlen, h.hexdigest()])
+        else:
+            rows.append(['Running microcode',
+                         'FAIL: DT fman-firmware present but QEF invalid'])
+            n_fails += 1
+    else:
+        rows.append(['Running microcode',
+                     f'FAIL: no {DT_FW} (U-Boot did not inject FMan microcode)'])
+        n_fails += 1
+
+    if running and flash_ucode:
+        match_str = ('matches on-flash mtd3 copy' if running == flash_ucode
+                     else f'differs from on-flash mtd3 (\"{flash_ucode}\")')
+        rows.append(['Flash match', match_str])
+    elif flash_ucode:
+        rows.append(['Flash match', f'on-flash: "{flash_ucode}"'])
+    else:
+        rows.append(['Flash match', 'fman-ucode partition not read'])
+
+    render_table(rows, ['Property', 'Value'], [20, 56])
+    return n_fails
+
+
+def show(raw: bool):
+    if not _is_ls1046a():
+        print('This platform is not the NXP LS1046A Mono Gateway DK; '
+              'no boot firmware to report.')
+        return 2
+
+    if raw:
+        result = _raw_dict()
+        print(json.dumps(result, indent=2))
+        return 1 if result['failed'] else 0
+
+    root = _is_root()
+    if not root:
+        print('Note: not root - flash partition reads and fw_printenv '
+              'will be skipped (op-mode runs this under sudo)')
+
+    print('Firmware status (LS1046A boot firmware & microcode inventory)')
+    print('=' * 62)
+    render_identity()
+    nor_rec_ver = render_dual_store_firmware(root)
+    _, _, flash_ucode, part_fails = render_partitions(root, nor_rec_ver)
+    ucode_fails = render_microcode(flash_ucode)
+    n_fails = part_fails + ucode_fails
+    return 1 if n_fails else 0
+
+
+def _raw_dict():
+    """Machine-readable digest of the firmware inventory."""
+    failed = False
+    mtds = mtd_map()
+    env_state, _ = fw_env_ok()
+    qef = qef_decode(_read_bytes(DT_FW) or b'')
+
+    rec_dev = None
+    for dev, _, name in mtds:
+        if name == 'kernel-initramfs':
+            rec_dev = dev
+            break
+    nor_rec = recovery_firmware_version(f'{SYS_ROOT}/dev/{rec_dev}') if rec_dev else None
+    emmc_rec = recovery_firmware_version(EMMC_DEV, offset=0xa00000) if os.path.exists(EMMC_DEV) else None
+
+    nor_fip = _read_bytes(f'{SYS_ROOT}/dev/mtd1', 2 * 1024 * 1024) if os.path.exists(f'{SYS_ROOT}/dev/mtd1') else None
+    nor_tfa = tfa_version_search(nor_fip)
+    nor_uboot = uboot_version_search(nor_fip)
+
+    emmc_fip = None
+    emmc_qef = None
+    if os.path.exists(EMMC_DEV):
+        try:
+            with open(EMMC_DEV, 'rb') as f:
+                f.seek(0x100000)
+                emmc_fip = f.read(2 * 1024 * 1024)
+                f.seek(0x400000)
+                emmc_qef_raw = f.read(QEF_LEN)
+                emmc_qef = qef_decode(emmc_qef_raw)
+        except OSError:
+            pass
+
+    emmc_tfa = tfa_version_search(emmc_fip)
+    emmc_uboot = uboot_version_search(emmc_fip)
+
+    board_sn = read_board_eeprom()
+    emmc_sn = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/serial')
+    emmc_name = _read_text(f'{SYS_ROOT}/sys/block/mmcblk0/device/name')
+    base_mac = None
+    dt_mac = _read_bytes(f'{SYS_ROOT}/proc/device-tree/soc/fman@1a00000/ethernet@e2000/local-mac-address')
+    if dt_mac and len(dt_mac) == 6:
+        base_mac = ':'.join(f'{b:02X}' for b in dt_mac)
+
+    result = {
+        'board': 'ls1046a',
+        'model': _read_text(DT_MODEL),
+        'soc': {
+            'family': _read_text(f'{SOC0}/family'),
+            'revision': _read_text(f'{SOC0}/revision'),
+            'svr': _read_text(f'{SOC0}/soc_id'),
+        },
+        'identity': {
+            'board_serial': board_sn,
+            'base_mac': base_mac,
+            'emmc_serial': emmc_sn,
+            'emmc_name': emmc_name,
+        },
+        'platform': {
+            'dram': '8 GB DDR4 (ECC on)',
+            'serdes': read_rcw_serdes(),
+            'clocks': 'CPU 1.6 GHz, FMan 700 MHz',
+        },
+        'boot_firmware': {
+            'uboot_running': _read_text(DT_UBOOT_VERSION),
+            'nor_tfa': nor_tfa,
+            'nor_uboot_onflash': nor_uboot,
+        },
+        'recovery_os': {
+            'nor_version': nor_rec,
+            'emmc_version': emmc_rec,
+        },
+        'emmc_firmware': {
+            'tfa': emmc_tfa,
+            'uboot': emmc_uboot,
+            'microcode': emmc_qef['id'] if emmc_qef else None,
+            'recovery_os': emmc_rec,
+        },
+        'mtd': [{'dev': d, 'size_kib': int(s, 16) // 1024,
+                 'name': n} for d, s, n in mtds],
+        'microcode': qef,
+        'microcode_present': bool(qef),
+        'uboot_env_crc': env_state,
+        'failed': False,
+    }
+    if not qef:
+        failed = True
+    if env_state == 'fail':
+        failed = True
+    result['failed'] = failed
+    return result
+
+
+def main():
+    raw = len(sys.argv) > 1 and sys.argv[1] == 'raw'
+    raise SystemExit(show(raw=raw))
+
+
+if __name__ == '__main__':
+    main()

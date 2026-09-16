@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LS1046A Canonical <canonical@ls1046a-build>
+Date: Thu, 10 Sep 2026 18:30:00 +0000
+Subject: [PATCH] fman_pcd: dormant CC match-key MAC_DST field (T-M6-2 B0)
+
+plans/ASK2-BRIDGE-OFFLOAD-PLAN.md (T-M6-2, L2 bridge HW offload) stages the
+build B0-B5, silicon-gated at each step. B0 is "dormant host plumbing,
+zero datapath change": add the struct/enum surface a future bridge CC-leaf
+key packer will target, without wiring it into any live path yet.
+
+Adds FMAN_PCD_CC_HW_F_MAC_DST (the next free presence bit, BIT(7)) and a
+dst_mac[6] field to struct fman_pcd_cc_hw_key. Purely additive: no existing
+field moves, no existing packer (cc_pack_key()/_v6()/_dual()/_dual_pid(),
+all untouched by this patch) emits it, and no caller sets the new presence
+bit -- every existing CC key (routed IPv4/IPv6, VLAN single/dual-lane)
+stays byte-identical. The dst_mac field exists now so B1's bridge key
+builder has a normalised struct slot to fill instead of also needing a
+header patch; the actual match-key byte layout (DA-only vs the vendor's
+15-byte PORT_ID|DA|SA|ETYPE composite) is an open silicon question
+(plan §8.1) deliberately left unresolved by this patch -- B1/B2 pick it
+via the hash_probe/fe_scaffold oracle before any packer is written.
+
+---
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 277e17b..1170b52 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -508,6 +508,17 @@ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+ #define FMAN_PCD_CC_HW_F_SRC_PORT	BIT(4)
+ #define FMAN_PCD_CC_HW_F_DST_PORT	BIT(5)
+ #define FMAN_PCD_CC_HW_F_IPV6		BIT(6)
++/* T-M6-2 (2026-09-10, B0, dormant): L2 bridge FDB match key.  Presence bit +
++ * byte slot only -- no packer emits this yet (cc_pack_key()/_v6()/_dual()
++ * are all untouched) and no caller sets it, so every existing key stays
++ * byte-identical.  The final match-key layout (DA-only vs the vendor's
++ * PORT_ID|DA|SA|ETYPE composite) is an open silicon question
++ * (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md §8.1) to be resolved via the
++ * hash_probe/fe_scaffold oracle before a bridge-specific packer is written
++ * in B1/B2; this field exists now so that work has a normalised struct slot
++ * to target instead of also needing a header patch.
++ */
++#define FMAN_PCD_CC_HW_F_MAC_DST	BIT(7)
+
+ /**
+  * struct fman_pcd_cc_hw_key - one normalised CC match key (FMan BE layout).
+@@ -526,6 +537,9 @@ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+  * @dst_ip6:      IPv6 dest   (16 bytes, network order)
+  * @src_port_be:  L4 source port (BE)
+  * @dst_port_be:  L4 dest   port (BE)
++ * @dst_mac:      L2 destination MAC (6 bytes, network order).  Valid only
++ *                when FMAN_PCD_CC_HW_F_MAC_DST is set.  T-M6-2 bridge FDB
++ *                match key; dormant until a bridge key packer exists (B1).
+  * @target_qband: qband to steer matching frames to (validated by caller);
+  *                informational when @target_fqid is 0 (fall-through)
+  * @target_fqid:  target frame-queue id for matching frames.  Non-zero =
+@@ -551,6 +565,7 @@ struct fman_pcd_cc_hw_key {
+ 	u32 dst_ip_mask_be;
+ 	u16 src_port_be;
+ 	u16 dst_port_be;
++	u8  dst_mac[6];
+ 	u16 target_qband;
+ 	u32 target_fqid;
+ 	u32 hm_handle;

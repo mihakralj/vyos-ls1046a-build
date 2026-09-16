@@ -53,6 +53,7 @@
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
+#include <linux/rtnetlink.h>       /* rtnl_lock/rtnl_unlock, CR-012 */
 #include <linux/xarray.h>
 #include <net/net_namespace.h>
 #include <linux/etherdevice.h>          /* is_zero_ether_addr */
@@ -167,23 +168,28 @@ EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
  * CC-leaf -> combined HMTD (VLAN strip/insert + L2 rewrite + TTL) -> egress
  * no-confirm TX FQ, with the CC miss row chaining to the FE_ENTER ehash so
  * routed/NAT coexist on the same engaged port (R4c-2/R4c-3, sustained both
- * directions, ehash graft restored on VLAN churn, clean disengage). It ships
- * default-OFF pending the R5 matrix + soak; ASK_CAP_VLAN is advertised only
- * while this gate is armed (ask_genl.c), so the capability honestly tracks
- * what a flow would actually get. Single 802.1Q tag only; eth0/802.1ad/QinQ
- * fall back to software.
+ * directions, ehash graft restored on VLAN churn, clean disengage). R5b
+ * PASSED 2026-08-26 (no-wrong-forward/zero-tag-leak, bidirectional,
+ * coexistence, PCP/DEI, MTU sweep, 100x churn) and gate-off regression
+ * PASSED (routed ~11.6G / NAT44 ~11.7G unaffected). Productized default-ON
+ * 2026-09-14, mirroring the nat44/nat66 default-on precedent above:
+ * ASK_CAP_VLAN is advertised whenever this gate is armed (ask_genl.c), so
+ * the capability honestly tracks what a flow would actually get. Single
+ * 802.1Q tag only; eth0/802.1ad/QinQ fall back to software (independent
+ * ASK_HW_PORT_ETH0_MGMT guard below, unaffected by this default).
  */
 /*
- * Global master override. Default off. When set it arms VLAN offload on EVERY
- * port (OR'd with the per-port bit) — kept for back-compat and one-shot debug
- * (`echo Y > /sys/module/ask/parameters/vlan_offload`). Production arming is
- * per-port via the CLI `offload ask vlan` -> genl ASK_ATTR_VLAN -> the
- * ask_hw_port_vlan[] array below, mirroring the per-port family mask.
+ * Global master override. Default ON: arms VLAN offload on every ASK-engaged
+ * port (OR'd with the per-port bit), matching how nat44/nat66 ship — no
+ * separate CLI step required. Runtime-disableable for diagnosis
+ * (`echo N > /sys/module/ask/parameters/vlan_offload`), and the per-port CLI
+ * `offload ask vlan` -> genl ASK_ATTR_VLAN -> ask_hw_port_vlan[] below still
+ * works as an explicit per-port bit if the global override is ever turned off.
  */
-static bool ask_vlan_offload;
+static bool ask_vlan_offload = true;
 module_param_named(vlan_offload, ask_vlan_offload, bool, 0644);
 MODULE_PARM_DESC(vlan_offload,
-		 "Global master override arming single-tag 802.1Q VLAN pop/push FMan offload on ALL ports (default 0; per-port control is CLI `offload ask vlan`; eth0/802.1ad/QinQ excluded)");
+		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload on all ASK-engaged ports (default 1, silicon-validated R5b; per-port override is CLI `offload ask vlan`; eth0/802.1ad/QinQ excluded)");
 
 /* Per-port VLAN offload arm bit, sized like ask_hw_port_family[]. Set by
  * ask_hw_offload_set_vlan() from the genl engage path (ASK_ATTR_VLAN). */
@@ -249,6 +255,73 @@ bool ask_hw_vlan_offload_armed(void)
 	return false;
 }
 EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
+
+/*
+ * T-M6-2 B0: per-port L2 bridge offload arm bit, mirroring ask_hw_port_vlan[]
+ * exactly. No CLI leafNode sets this directly -- VyOS's `interfaces bridge`
+ * conf_mode arms it automatically for a member port that already has
+ * `offload ipv4`/`offload ipv6` set (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md: "no
+ * separate opt-in, automatic when at least one member port has ASK hardware
+ * offload enabled"). No global master-override module param exists for this
+ * bit (unlike ask_vlan_offload) -- bridge admission with no member port
+ * engaged makes no sense to force on, so there is nothing sensible for a
+ * bare master override to mean here.
+ */
+static bool ask_hw_port_bridge[64];
+
+void ask_hw_offload_set_bridge(u8 hw_port_id, bool on)
+{
+	bool old;
+
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_bridge))
+		return;
+
+	old = READ_ONCE(ask_hw_port_bridge[hw_port_id]);
+	WRITE_ONCE(ask_hw_port_bridge[hw_port_id], on);
+
+	/*
+	 * B0: no CC-tree/FDB install path exists yet (ask_bridge.c is an
+	 * observer only), so there is nothing to tear down on a live
+	 * true->false transition. B3's real switchdev wiring adds the
+	 * equivalent of ask_vlan_cc_teardown_port()'s live-disarm handling
+	 * here once bridge FDB entries are actually installed into hardware.
+	 */
+	(void)old;
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_set_bridge);
+
+/*
+ * Authoritative per-port bridge gate, mirroring ask_hw_vlan_offload_armed_
+ * port(). A bridge FDB entry on this ingress port is admitted to hardware
+ * only when this returns true -- once B1-B3 give it something to gate.
+ */
+bool ask_hw_bridge_offload_armed_port(u8 hw_port_id)
+{
+	bool armed;
+
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_bridge))
+		return false;
+	armed = READ_ONCE(ask_hw_port_bridge[hw_port_id]);
+	if (armed)
+		pr_info_once("ask: L2 bridge FDB hardware offload enabled (CC+plain enqueue) on at least one port\n");
+	return armed;
+}
+EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed_port);
+
+/*
+ * Port-agnostic gate for the capability-advertise (ask_genl.c), mirroring
+ * ask_hw_vlan_offload_armed(). True iff ANY port is armed.
+ */
+bool ask_hw_bridge_offload_armed(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ask_hw_port_bridge); i++)
+		if (READ_ONCE(ask_hw_port_bridge[i]))
+			return true;
+	return false;
+}
+EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed);
 
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
@@ -1343,8 +1416,30 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
 /*
  * Map an ASK flow egress netdev ifindex to its TX QMan FQID (queue 0).
  * Returns -ENODEV for a non-DPAA / unknown ifindex.
+ *
+ * CR-013 (2026-09-15): @allow_alloc gates the COLD-CACHE path
+ * (dpaa_alloc_offload_tx_fq(), which takes rtnl_lock()) separately from
+ * the cache-hit fast path (no locking beyond what the caller already
+ * holds). CR-012 fixed the *prewarm* call site's own rtnl_lock() but left
+ * this function's cache-miss fallback still reachable from the flow-insert
+ * hot path (ask_hw_flow_preflight()/ask_hw_flow_insert(), both called
+ * under &flowtable->flow_block_lock) for any egress interface the prewarm
+ * pass could never have warmed -- a non-DPAA netdev (e.g. a veth or
+ * tunnel) that dpaa_get_rx_fman_port() can't map to a hw_port_id, or any
+ * DPAA port whose own engage-time prewarm hasn't run yet. Found live via
+ * PROVE_LOCKING during T-M6-2 B2 testing: a synthetic flow's egress
+ * resolved to a veth ifindex, taking the exact same rtnl_lock()-under-
+ * flow_block_lock path CR-012 already closed for the prewarm helper.
+ *
+ * Callers from the hot path MUST pass allow_alloc=false: a cache miss
+ * fails closed (-ENODEV, keeping the flow in software) instead of ever
+ * calling dpaa_alloc_offload_tx_fq(). This is the same FAIL-CLOSED
+ * philosophy already used a few lines below for allocation failure --
+ * extended to cover "cannot safely attempt allocation from here" too.
+ * Only ask_hw_prewarm_egress_fq() (genuinely safe process context, no
+ * flow_block_lock held) passes allow_alloc=true.
  */
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_inst;
 	struct net_device *dev;
@@ -1381,6 +1476,15 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 		return 0;
 	}
 
+	/* CR-013: cache miss from an unsafe (hot-path) caller -- do not risk
+	 * dpaa_alloc_offload_tx_fq()'s rtnl_lock() here. Fail closed; the flow
+	 * stays in software. A later engage's prewarm (or a retry once this
+	 * port's own prewarm has run) covers it going forward. */
+	if (!allow_alloc) {
+		dev_put(dev);
+		return -ENODEV;
+	}
+
 	rc = dpaa_alloc_offload_tx_fq(phys, fqid);
 	if (rc) {
 		/*
@@ -1414,6 +1518,68 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 		    *fqid, ifindex, phys_ifindex);
 	dev_put(dev);
 	return 0;
+}
+
+/*
+ * CR-012 (2026-09-15): dpaa_alloc_offload_tx_fq() takes rtnl_lock(), which
+ * is unsafe to call from the flow-insert hot path (ask_hw_resolve_oif_fqid()
+ * via ask_hw_flow_preflight()) because that path runs under
+ * &flowtable->flow_block_lock (nf_flow_offload_tuple() called from
+ * flow_offload_work_handler()), while stock nftables independently takes
+ * rtnl_mutex -> commit_mutex -> flow_block_lock at module load (netdev
+ * notifier registration under commit_mutex, then flow_block_lock via
+ * nf_flow_table_offload_setup()). PROVE_LOCKING correctly flags the
+ * resulting circular lock-order chain -- found 2026-09-14 on the very first
+ * hardware flow install during normal board setup, not even under
+ * deliberate stress (plans/ASK2-MASTER-PLAN.md CR-012).
+ *
+ * The noconf_tx[] cache already exists to allocate each egress port's FQ
+ * only once (T-M7-2 S4); this warms that cache from a genuinely safe
+ * calling context instead of leaving the first allocation to whichever
+ * flow happens to be first through preflight.
+ *
+ * NOT safe to call from ask_hw_offload_engage() itself: that function is
+ * also reached from ask_hw_port_bind(), called by ask_flow_offload_replace()
+ * from INSIDE the flow-install callback while flow_block_lock is held (the
+ * exact hazard above) -- confirmed by a 2026-09-15 board PROVE_LOCKING run
+ * that fired the identical circular-dependency splat through THIS
+ * function's own rtnl_lock() once it was wired in there. Callers MUST be
+ * genuinely-safe process context: the genl ASK_CMD_ENGAGE handler and the
+ * debugfs engage write, both called directly, never from inside
+ * ask_hw_offload_engage()/ask_hw_port_bind(). Best-effort either way: if
+ * the port's netdev can't be found or the resolve fails here, the port's
+ * cache slot stays cold. Per CR-013, the hot path no longer has a lazy
+ * fallback for that case -- ask_hw_flow_preflight()/ask_hw_flow_insert()
+ * call ask_hw_resolve_oif_fqid() with allow_alloc=false and fail closed
+ * (stay in software) on a cache miss, rather than risking
+ * dpaa_alloc_offload_tx_fq()'s rtnl_lock() from under flow_block_lock.
+ * A cold slot self-heals on the port's next successful engage/prewarm.
+ *
+ * Iterates under rtnl_lock() (matching how dpaa_get_rx_fman_port() is
+ * called everywhere else in this file -- via dev_get_by_index(), never
+ * under RCU) to find hw_port_id's netdev, then drops it before calling
+ * ask_hw_resolve_oif_fqid(), which re-takes rtnl_lock() itself on a cache
+ * miss -- rtnl_lock() is not recursive, so the two must not overlap.
+ */
+void ask_hw_prewarm_egress_fq(u8 hw_port_id)
+{
+	struct net_device *dev;
+	int ifindex = 0;
+	u32 fqid;
+
+	rtnl_lock();
+	for_each_netdev(&init_net, dev) {
+		struct fman_port *port = dpaa_get_rx_fman_port(dev);
+
+		if (port && fman_port_get_id(port) == hw_port_id) {
+			ifindex = dev->ifindex;
+			break;
+		}
+	}
+	rtnl_unlock();
+
+	if (ifindex)
+		ask_hw_resolve_oif_fqid(ifindex, &fqid, true);
 }
 
 int ask_hw_flow_preflight(const struct ask_flow_key *key,
@@ -1508,8 +1674,10 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	    is_zero_ether_addr(key->egress_mac))
 		return -EAGAIN;
 
-	/* Egress forward FQ must exist before we publish. */
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	/* Egress forward FQ must exist before we publish. CR-013: this runs
+	 * in the flow-insert hot path under flow_block_lock -- never allow
+	 * the cold-cache allocation here. */
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false);
 	if (rc)
 		return rc;
 
@@ -1565,7 +1733,9 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 	    is_zero_ether_addr(key->egress_mac))
 		return -EAGAIN;
 
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+	/* CR-013: same hot-path constraint as ask_hw_flow_preflight() above --
+	 * this runs under flow_block_lock, never allow the cold-cache alloc. */
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false);
 	if (rc)
 		return rc;
 

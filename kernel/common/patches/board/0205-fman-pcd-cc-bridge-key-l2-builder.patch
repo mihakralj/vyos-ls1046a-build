@@ -1,0 +1,219 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2(T-M6-2 B1): add bridge FDB CC key packer + host shadow builder
+
+Depends on 0204 (adds the src_mac/FMAN_PCD_CC_HW_F_MAC_SRC struct field
+this depends on).
+
+Two pieces, matching B1's own stated gate in
+plans/ASK2-BRIDGE-OFFLOAD-PLAN.md ("KUnit vectors for DA-only and
+PORT_ID|DA|SA|ETYPE keys; spec byte-exact vs a golden vector"):
+
+1. cc_pack_key_l2() + CC_KEY_SIZE_L2 (15 bytes: PORT_ID + DST_MAC +
+   SRC_MAC + ETHERTYPE) -- the leaf-level byte packer, same pattern as
+   cc_pack_key_3tuple()/cc_pack_key_dual(). static __maybe_unused: not
+   yet called by any install path. Field order (DA before SA before
+   ETYPE) follows this project's "PORT_ID|DA|SA|ETYPE" documentation
+   convention; not independently byte-order-verified beyond the
+   aggregate keysize match from 0204's changelog, since B1 is dormant
+   (readback-only) -- re-derive before B2 arms this on silicon if the
+   order turns out to matter differently.
+
+2. fman_pcd_cc_bridge_key_add()/fman_pcd_cc_bridge_key_remove() -- the
+   actual B1 deliverable the plan names: a host-side (no MURAM/hardware
+   I/O) shadow builder that adds/removes DA-match leaves in a caller-
+   owned struct fman_pcd_cc_hw_spec and maintains its miss_fe_off. Non-
+   static and EXPORT_SYMBOL_GPL'd (unlike the packers) because this is
+   the cross-module interface B3's ask.ko bridge installer will call in
+   a later increment -- B1 itself wires it to nothing. Idempotent add
+   (an existing MAC's target_fqid updates in place, matching this
+   project's established idempotent-key convention elsewhere) and
+   remove that compacts the key array so keys[0..num_keys) stays
+   contiguous for every other consumer of the spec.
+
+Scope, deliberately bounded, matching how cc_pack_key_3tuple() and B0
+were each delivered as their own single-purpose increment: this is the
+packer + shadow builder + KUnit pin only. NOT wired into
+ask_bridge.c's FDB workqueue (B0's stub still only logs, per B3's own
+staging), not called from fman_pcd_cc_static_install() or any install
+path, not reachable from any live traffic path. Two new KUnit suites
+(fman_pcd_cc_l2_key, fman_pcd_cc_bridge_shadow) as plain-tracked test
+files under tests/, following this project's established "new test
+files are plain-tracked, not patched" convention.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index ec9be77..ccf9ea6 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -48,6 +48,7 @@
+ 
+ #include <linux/err.h>
+ #include <linux/errno.h>
++#include <linux/etherdevice.h>     /* ether_addr_equal/_copy, T-M6-2 B1 */
+ #include <linux/export.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
+@@ -578,6 +579,155 @@ static void __maybe_unused cc_pack_key_3tuple(void __iomem *match, u16 idx,
+ 	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE_3TUPLE), msk, CC_KEY_SIZE_3TUPLE);
+ }
+ 
++#define CC_KEY_SIZE_L2	15U
++
++/*
++ * T-M6-2 B1 bridge FDB match key: PORT_ID + DST_MAC + SRC_MAC + ETHERTYPE.
++ * Board-confirmed byte-exact against the vendor's own L2/bridge KeyGen
++ * scheme on .106 (scheme 11, EKFC 0xe4000000 = PORT_ID|MACDST|MACSRC|
++ * ETYPE, by far the highest live-traffic scheme observed -- 1,225,734
++ * packets): live group-table row (CCOBASE=0) keysize field = 15, matching
++ * this layout exactly. PORT_ID is byte 0, deterministically 0x00 on this
++ * ucode (same finding as cc_pack_key_dual_pid()/cc_pack_key_3tuple()
++ * above). Field order (DA before SA before ETYPE) follows this project's
++ * consistent "PORT_ID|DA|SA|ETYPE" documentation convention -- not
++ * independently byte-order-verified beyond the aggregate keysize match,
++ * since B1 is dormant (readback-only, no live install); re-derive before
++ * B2 arms this on silicon if the order turns out to matter differently.
++ *
++ * Any DA/SA/ETYPE field left absent in @k->present leaves its key/mask
++ * bytes zero (wildcard), per B1's stated gate: "KUnit vectors for
++ * DA-only and PORT_ID|DA|SA|ETYPE keys."
++ *
++ * __maybe_unused: not yet wired into fman_pcd_cc_bridge_key_add/remove()
++ * (below) or any live install path. Pinned by
++ * tests/fman_pcd_cc_l2_key_test.c.
++ */
++static void __maybe_unused cc_pack_key_l2(void __iomem *match, u16 idx,
++					  const struct fman_pcd_cc_hw_key *k)
++{
++	u8 key[CC_KEY_SIZE_L2];
++	u8 msk[CC_KEY_SIZE_L2];
++	u8 *row;
++
++	memset(key, 0, sizeof(key));
++	memset(msk, 0, sizeof(msk));
++
++	/* byte 0: PORT_ID, deterministically 0x00 on this ucode. */
++	msk[0] = 0xff;
++
++	if (k->present & FMAN_PCD_CC_HW_F_MAC_DST) {
++		memcpy(&key[1], k->dst_mac, 6);
++		memset(&msk[1], 0xff, 6);
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_MAC_SRC) {
++		memcpy(&key[7], k->src_mac, 6);
++		memset(&msk[7], 0xff, 6);
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_ETHERTYPE) {
++		key[13] = (u8)(k->ethertype_be & 0xff);
++		key[14] = (u8)(k->ethertype_be >> 8);
++		msk[13] = msk[14] = 0xff;
++	}
++
++	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE_L2;
++	memcpy_toio((void __iomem *)row, key, CC_KEY_SIZE_L2);
++	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE_L2), msk, CC_KEY_SIZE_L2);
++}
++
++/*
++ * T-M6-2 B1: host-side bridge FDB shadow builder. Adds/removes DA-match
++ * leaves in a per-port `struct fman_pcd_cc_hw_spec` held entirely in host
++ * memory -- no MURAM or hardware I/O, no scheme/tree install. Dormant
++ * readback only, per B1's own gate ("host shadow -> fman_pcd_cc_hw_spec
++ * with DA leaves + miss_fe_off ... no live install"); B3 is what actually
++ * calls fman_pcd_cc_static_install() with a spec these functions built.
++ *
++ * @spec is the caller-owned per-port shadow (one per bridge-member port);
++ * callers are responsible for its lifetime and for serialising concurrent
++ * add/remove on the same spec (matches every other CC builder in this
++ * file -- none of the packers or spec helpers take their own lock).
++ *
++ * A DA-only key (the common case: this project has not yet decided SA/
++ * ETYPE filtering matters for bridge FDB matching -- see cc_pack_key_l2()
++ * above and plan §8.1) sets only FMAN_PCD_CC_HW_F_MAC_DST. Callers that
++ * additionally want SA/ETYPE discrimination pass them too; either shape
++ * round-trips byte-exact through cc_pack_key_l2() once B2/B3 wire this in.
++ */
++int fman_pcd_cc_bridge_key_add(struct fman_pcd_cc_hw_spec *spec,
++			       const u8 dst_mac[6], u32 target_fqid,
++			       u32 miss_fe_off)
++{
++	struct fman_pcd_cc_hw_key *k;
++	u16 i;
++
++	if (!spec || !dst_mac)
++		return -EINVAL;
++
++	/* Idempotent update: a MAC already present just gets its target
++	 * refreshed (FDB entry moved to a different egress port), matching
++	 * this project's established idempotent-key convention elsewhere
++	 * (e.g. ask_hw_offload_engage()'s per-port "already engaged" no-op). */
++	for (i = 0; i < spec->num_keys; i++) {
++		k = &spec->keys[i];
++		if ((k->present & FMAN_PCD_CC_HW_F_MAC_DST) &&
++		    ether_addr_equal(k->dst_mac, dst_mac)) {
++			k->target_fqid = target_fqid;
++			spec->miss_fe_off = miss_fe_off;
++			return 0;
++		}
++	}
++
++	if (spec->num_keys >= FMAN_PCD_CC_HW_MAX_KEYS)
++		return -ENOSPC;
++
++	k = &spec->keys[spec->num_keys];
++	memset(k, 0, sizeof(*k));
++	k->present = FMAN_PCD_CC_HW_F_MAC_DST;
++	ether_addr_copy(k->dst_mac, dst_mac);
++	k->target_fqid = target_fqid;
++	spec->num_keys++;
++	spec->miss_fe_off = miss_fe_off;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_bridge_key_add);
++
++/*
++ * Removes the DA-match leaf for @dst_mac from @spec, compacting the array
++ * so @spec->keys[0 .. num_keys) stays contiguous (fman_pcd_cc_static_install()
++ * and every other consumer of this spec iterate exactly that range). Leaves
++ * @spec->miss_fe_off untouched -- it is a per-port property of the tree, not
++ * of any one key, and stays valid as long as any key (bridge or otherwise)
++ * remains.
++ *
++ * Returns 0 on removal, -ENOENT if @dst_mac was not present.
++ */
++int fman_pcd_cc_bridge_key_remove(struct fman_pcd_cc_hw_spec *spec,
++				  const u8 dst_mac[6])
++{
++	u16 i;
++
++	if (!spec || !dst_mac)
++		return -EINVAL;
++
++	for (i = 0; i < spec->num_keys; i++) {
++		struct fman_pcd_cc_hw_key *k = &spec->keys[i];
++
++		if (!(k->present & FMAN_PCD_CC_HW_F_MAC_DST) ||
++		    !ether_addr_equal(k->dst_mac, dst_mac))
++			continue;
++
++		memmove(k, k + 1,
++			(spec->num_keys - i - 1) * sizeof(*k));
++		spec->num_keys--;
++		memset(&spec->keys[spec->num_keys], 0, sizeof(*k));
++		return 0;
++	}
++
++	return -ENOENT;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_bridge_key_remove);
++
+ /*
+  * Encode one leaf (result) action descriptor at AD row @idx - SDK-convergent
+  * RESULT AD (0115; SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
+@@ -985,4 +1135,6 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_static_get_base);
+ #if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
+ #include "tests/fman_pcd_cc_dual_key_test.c"
+ #include "tests/fman_pcd_cc_3tuple_key_test.c"
++#include "tests/fman_pcd_cc_l2_key_test.c"
++#include "tests/fman_pcd_cc_bridge_shadow_test.c"
+ #endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
