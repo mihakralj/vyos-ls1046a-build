@@ -2,8 +2,59 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS UPDATE 2026-09-16 — §8.2b's AD-content hypothesis space is now
-> EXHAUSTED. The bug is not in anything software writes.** Two more
+> **STATUS UPDATE 2026-09-16, second pass — the decisive control test: NOT
+> bridge_l2-specific. The already-proven `install_vlan` mechanism ALSO
+> fails on this exact eth1(0x0d)→eth2(0x09) port pairing.** Designed to
+> settle the working theory from the first 2026-09-16 update below (`AC
+> 0x28` as a same-port-only primitive): armed the historically-proven
+> `cc_test install_vlan` verb (same `cc_write_leaf_ad()` NADEN+HMTD
+> mechanism R3b/R4b silicon-validated at ~55k pps — see
+> `plans/ASK2-VLAN-REARCH.md` §7b/7c) on the identical port pairing used
+> for every bridge_l2 test overnight, with a real 5-tuple UDP key
+> (`10.99.8.106→10.99.9.253:9999`, VLAN push vid=100) instead of a MAC-DA
+> key. AD readback confirmed correct arming: `w0=0x000002bc` (target
+> fqid), `w1=0x00005a40` (real HMTD handle), `w2=0xa2000028` (`NADEN |
+> EXTENDED | RES_NO_OM_VSPE | AC 0x28`) — structurally byte-identical to
+> the `install_l2fwd` AD confirmed in the first 2026-09-16 update. Sent 25
+> matching UDP frames from `.106`'s eth1 (forced out that NIC via
+> `SO_BINDTODEVICE`, bypassing `.106`'s own routing table so the frames
+> actually transit `.185`). Result: **`.185` eth1's CPU rx-packet counter
+> rose by only 3 of 25** (consistent with most frames correctly diverting
+> to hardware, not leaking to the CPU default path — the CC hit is
+> happening), **but zero frames, tagged or otherwise, arrived at `.106`'s
+> eth2** (`tcpdump -i eth2 -n -e -c 40`, clean capture, only unrelated
+> background DHCP broadcasts seen). **Identical signature to every
+> bridge_l2 test overnight: enqueue succeeds, cross-port dequeue/delivery
+> never happens.**
+>
+> **This overturns the "bridge_l2-specific" framing.** The bug is not
+> specific to the bridge L2 KeyGen scheme, DA-match keys, or anything
+> `install_l2`/`install_l2fwd` did differently from the proven VLAN path.
+> It is specific to *this* — either this exact eth1→eth2 port pairing/rig,
+> or `AC 0x28`/`PRE_BMI_ENQ`-via-raw-`cc_test`-debugfs as a cross-port
+> primitive in general, independent of key type. Since R3b/R4b's own
+> "~55k pps, arrived at the sink" proofs were never confirmed in this
+> session to have used this same eth1(0x0d)/eth2(0x09) RJ45 pair specifically
+> (vs. e.g. the SFP+ eth3/eth4 pair, which carries `.106`'s own
+> already-configured VLAN subinterfaces `eth3.10`/`eth4.20`) — **the most
+> likely next step is re-running this exact control test on the SFP+
+> eth3↔eth4 pairing** (or whichever pairing R3b/R4b actually used) to
+> determine whether this is a rig/port-pairing artifact or a genuine,
+> broader regression in the cross-port mechanism itself. Not yet done —
+> flagging for a decision before continuing, since it needs its own careful
+> cabling/config setup on ports currently carrying real state.
+>
+> All test config was cleanly reverted on `.185` and `.106` (imperative
+> `ip addr del`, no persistent VyOS config was ever committed on `.106`
+> since its config-write subsystem was found broken on its stale
+> `2026.09.13-1806-rolling` image — `set`/`delete` fail even for trivial
+> leaves like `system host-name`, a `.106`-image-specific issue unrelated
+> to this project's own kernel, noted here for awareness but out of scope
+> to fix). `.185` reverted to production image `2026.09.14-1431-rolling`.
+>
+> **STATUS UPDATE 2026-09-16, first pass — §8.2b's AD-content hypothesis
+> space is now EXHAUSTED. The bug is not in anything software writes.**
+> Two more
 > hypotheses were tested and refuted overnight (2026-09-15/16):
 > **NADEN+HMTD chaining** (new debugfs command `install_l2fwd`, chains the
 > bridge_l2 leaf through a minimal, valid `IPV4_FORWARD` HMTD via NADEN,
