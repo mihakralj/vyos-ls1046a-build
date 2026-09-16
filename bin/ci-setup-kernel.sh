@@ -2321,6 +2321,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     echo "### fman_pcd_cc_test.c: F-250 cc_test_install_l2fwd NADEN+HMTD hypothesis test (T-M6-2 B2)"
 fi
 
+# F-251 (T-M6-2 B2, 2026-09-16): fman_pcd_cc_seq_dump()'s match-table dump
+# hardcoded print length as num_keys*32 (assumes the default 16B key+mask
+# pair) -- wrong for a bridge_l2 tree (2*15=30B/row), read 2 bytes past
+# the real match record. Fixed to use the tree's own key_size. Also adds
+# the AD-table dump the cc_test debugfs read node never had -- the
+# missing oracle for directly verifying what a CC leaf's enqueue action
+# actually contains in hardware (fqid/NIA/NADEN bits) versus what the
+# software believes it wrote, needed to keep chasing §8.2b (F-250's
+# NADEN+HMTD hypothesis was directly tested and refuted; the
+# enqueue-succeeds-dequeue-fails mystery survives).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_251.py" 2>&1
+    echo "### fman_pcd_cc.c: F-251 AD-table dump + match-table print-length fix (T-M6-2 B2)"
+fi
+
 # F-247 (T-M6-2 B2, 2026-09-15): extend probe3 (F-241) with mode 2 for the
 # bridge FDB L2 composite (PORT_ID|DA|SA|ETYPE), reusing cc_test_install_l2()
 # (F-248, corrected from the original patch 0206/0207 attempt) the same way
