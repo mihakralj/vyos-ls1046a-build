@@ -405,7 +405,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    if: github.ref_name == 'main'
+    if: github.ref_name == 'main' || startsWith(github.ref_name, 'nxp-sdk')
     outputs:
       # Base64 keeps multiline Markdown safe across the job -> reusable-workflow
       # input boundary. discord.yml decodes and truncates to Discord's 1024-char
@@ -511,9 +511,13 @@ jobs:
 
           # Build a single self-contained prompt file (instructions + all raw
           # material). Copilot CLI reads it via -p and writes Markdown to stdout.
+          FLAVOR_PROMPT=""
+          if [[ "${{ github.ref_name }}" == nxp-sdk* ]]; then
+            FLAVOR_PROMPT=" (NXP ASK / LSDK 5.4 flavor with native hardware acceleration)"
+          fi
           {
-            cat <<'PROMPT'
-          You are writing GitHub release notes for "VyOS for the NXP LS1046A (Mono Gateway)",
+            cat <<PROMPT
+          You are writing GitHub release notes for "VyOS for the NXP LS1046A (Mono Gateway)"${FLAVOR_PROMPT},
           a bare-metal ARM64 router build. Audience: network operators running this on real
           hardware. Tone: friendly and confident, but technically precise. No marketing fluff,
           no emojis. Output GitHub-Flavored Markdown ONLY: no preamble, no sign-off, and do not
@@ -640,14 +644,11 @@ jobs:
           echo "----- release notes -----"
           cat /tmp/release_notes.md
 
-      # ─── Single-image update-check feed ───────────────────────────────
-      # One ISO → one canonical feed. version.json is the source
-      # of truth; version-{default,ask,vpp}.json are written byte-identical as
-      # aliases so any fielded install that baked in a per-flavor URL before the
-      # 2026-06-14 flavor collapse keeps updating (deleting an alias would make a
-      # persisted …/version-ask.json abort `add system image` on an empty feed).
-      # See AGENTS.md update-check feed rule.
-      - name: "Release publishing: write canonical version.json + aliases"
+      # ─── Update-check feed ──────────────────────────────────────────
+      # Two build flavors:
+      #   • main: writes version.json + aliases (version-default.json, version-vpp.json).
+      #   • nxp-sdk: writes version-ask.json pointing to the nxp-ask release.
+      - name: "Release publishing: write update-check feed"
         env:
           BUILD_VERSION: ${{ needs.build_iso.outputs.build_version }}
           IMAGE_ISO: ${{ needs.build_iso.outputs.image_iso }}
@@ -655,47 +656,72 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -e
-          URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_ISO}"
-          cat > version.json <<EOF
-          [
-            {
-              "url": "${URL}",
-              "version": "${BUILD_VERSION}",
-              "timestamp": "${TIMESTAMP}"
-            }
-          ]
-          EOF
-          # Byte-identical aliases for fielded per-flavor URLs.
-          cp version.json version-default.json
-          cp version.json version-ask.json
-          cp version.json version-vpp.json
-          echo "### Wrote canonical version.json + 3 aliases"
-          cat version.json
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_ISO}"
+            cat > version.json <<EOF
+[
+  {
+    "url": "${URL}",
+    "version": "${BUILD_VERSION}",
+    "timestamp": "${TIMESTAMP}"
+  }
+]
+EOF
+            cp version.json version-default.json
+            cp version.json version-vpp.json
+            echo "### Wrote canonical version.json + aliases (version-default.json, version-vpp.json)"
+            cat version.json
+          elif [[ "${{ github.ref_name }}" == nxp-sdk* ]]; then
+            URL="https://github.com/${REPO}/releases/download/nxp-ask/${IMAGE_ISO}"
+            cat > version-ask.json <<EOF
+[
+  {
+    "url": "${URL}",
+    "version": "${BUILD_VERSION}",
+    "timestamp": "${TIMESTAMP}"
+  }
+]
+EOF
+            echo "### Wrote version-ask.json for nxp-ask release"
+            cat version-ask.json
+          fi
 
       - name: "Release publishing: check if the repository was modified during runtime to prevent autocommit failure"
         id: check_if_the_repository_was_modified_during_runtime
         run: |
           set -e
           sudo chown -R $(whoami):$(whoami) ./*
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            FEEDS="version.json version-default.json version-vpp.json"
+          else
+            FEEDS="version-ask.json"
+          fi
           # Stash the freshly-generated feed files before pulling.
-          for f in version.json version-default.json version-ask.json version-vpp.json; do
-            cp "$f" "/tmp/${f}.new"
+          for f in $FEEDS; do
+            [ -f "$f" ] && cp "$f" "/tmp/${f}.new"
           done
           # Reset to clean tree, pull, then restore.
-          for f in version.json version-default.json version-ask.json version-vpp.json; do
+          for f in $FEEDS; do
             git checkout -- "$f" 2>/dev/null || true
           done
           git pull --rebase || true
-          for f in version.json version-default.json version-ask.json version-vpp.json; do
-            cp "/tmp/${f}.new" "$f"
+          for f in $FEEDS; do
+            [ -f "/tmp/${f}.new" ] && cp "/tmp/${f}.new" "$f"
           done
 
       - name: "Release publishing: create autocommit and tag"
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
-          tagging_message: ${{ needs.build_iso.outputs.build_version }}
+          tagging_message: ${{ github.ref_name == 'main' && needs.build_iso.outputs.build_version || '' }}
           commit_message: ${{ needs.build_iso.outputs.build_version }}
           commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          file_pattern: ${{ github.ref_name == 'main' && 'version.json version-default.json version-vpp.json' || 'version-ask.json' }}
+
+      - name: "Release publishing: update git tag for nxp-ask"
+        if: startsWith(github.ref_name, 'nxp-sdk')
+        run: |
+          git tag -f nxp-ask
+          git push origin -f nxp-ask || true
 
       - uses: actions/download-artifact@v8
         with:
@@ -705,13 +731,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: /tmp/release_notes.md
-          tag_name: ${{ needs.build_iso.outputs.build_version }}
+          tag_name: ${{ startsWith(github.ref_name, 'nxp-sdk') && 'nxp-ask' || needs.build_iso.outputs.build_version }}
+          name: ${{ startsWith(github.ref_name, 'nxp-sdk') && format('{0}-LS1046A-nxpask', needs.build_iso.outputs.build_version) || needs.build_iso.outputs.build_version }}
+          prerelease: ${{ startsWith(github.ref_name, 'nxp-sdk') }}
           fail_on_unmatched_files: true
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
             ${{ needs.build_iso.outputs.image_iso }}.minisig
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
+        if: github.ref_name == 'main'
         with:
           keep_latest: 10
           delete_tags: true
@@ -723,19 +752,21 @@ jobs:
     needs:
       - build_iso
       - publish
-    # Notify for every branch and every outcome. For main, success requires
+    # Notify for every branch and every outcome. For main and nxp-sdk, success requires
     # BOTH build_iso and publish so the release asset exists before Discord
-    # posts its upgrade URL. For non-main branches publish is intentionally
-    # skipped, so status follows build_iso alone. discord.yml routes only
-    # main+success to the release channel; every other case goes to dev/failure.
+    # posts its upgrade URL. For other non-release branches publish is skipped,
+    # so status follows build_iso alone. discord.yml routes only
+    # published releases (main and nxp-sdk) to the public release channel;
+    # every other case goes to dev/failure.
     if: ${{ always() }}
     uses: ./.github/workflows/discord.yml
     with:
-      status: ${{ ((github.ref_name == 'main' && needs.build_iso.result == 'success' && needs.publish.result == 'success') || (github.ref_name != 'main' && needs.build_iso.result == 'success')) && 'success' || 'failure' }}
+      status: ${{ (((github.ref_name == 'main' || startsWith(github.ref_name, 'nxp-sdk')) && needs.build_iso.result == 'success' && needs.publish.result == 'success') || (!startsWith(github.ref_name, 'nxp-sdk') && github.ref_name != 'main' && needs.build_iso.result == 'success')) && 'success' || 'failure' }}
       build_version: ${{ needs.build_iso.outputs.build_version }}
       build_branch: ${{ github.ref_name }}
       release_type: 'Rolling'
       image_iso: ${{ needs.build_iso.outputs.image_iso }}
       release_highlights_b64: ${{ needs.publish.outputs.release_highlights_b64 }}
+      release_tag: ${{ startsWith(github.ref_name, 'nxp-sdk') && 'nxp-ask' || needs.build_iso.outputs.build_version }}
     secrets:
       DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
