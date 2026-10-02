@@ -1,7 +1,17 @@
 name: Discord notification (reusable)
 
 # Reusable-only workflow — no `workflow_dispatch:` trigger.
-# Invoked from another workflow via `uses: ./.github/workflows/discord.yml`
+# Invoked automatically from auto-build.yml's `notify` job via
+# `uses: ./.github/workflows/discord.yml`. To resend a corrected release
+# notification without rebuilding the ISO, use the dedicated
+# `discord-resend.yml` caller (a thin workflow_dispatch wrapper around this
+# reusable job); adding workflow_dispatch directly to a workflow GitHub had
+# only ever run via workflow_call leaves dispatched runs stuck un-queued.
+#
+# Posts a build-result embed to Discord. The channel is chosen by outcome:
+#   success  -> 1494357051378503862
+#   failure  -> 1519025519327318239
+# (cancelled/skipped are treated as failure).
 
 on:
   workflow_call:
@@ -11,30 +21,35 @@ on:
         type: string
         required: true
       build_version:
-        description: 'Release/build version string (e.g., 2026.06.19-0202-rolling)'
+        description: 'Release/build version string (e.g., 2026.08.16-0240-rolling)'
         type: string
         required: false
         default: 'unknown'
       build_branch:
-        description: 'Branch or board target (e.g., Stock, NXP, ASK2)'
+        description: 'Branch the build ran on'
         type: string
         required: false
-        default: 'Stock'
+        default: 'main'
       release_type:
-        description: 'Release type (e.g., LTS, Stream, Rolling)'
+        description: 'Release type (e.g., Rolling)'
         type: string
         required: false
         default: 'Rolling'
-      image_name:
-        description: 'ISO image name produced by the build'
+      image_iso:
+        description: 'GitHub release ISO asset filename from build_iso.outputs.image_iso'
         type: string
         required: false
         default: 'n/a'
-      channel_id:
-        description: 'Discord channel ID to post to'
+      release_highlights_b64:
+        description: 'Base64-encoded Markdown body of the AI-generated ## Highlights section'
         type: string
         required: false
-        default: '1519025519327318239'
+        default: ''
+      release_tag:
+        description: 'GitHub release tag (e.g. nxp-ask or 2026.08.16-0240-rolling)'
+        type: string
+        required: false
+        default: ''
     secrets:
       DISCORD_BOT_KEY:
         description: 'Discord bot token (Authorization: Bot <token>)'
@@ -45,35 +60,37 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Notify Discord
-        if: always()
         env:
           DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
-          CHANNEL_ID: ${{ inputs.channel_id }}
           JOB_STATUS: ${{ inputs.status }}
           WORKFLOW: ${{ github.workflow }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ID: ${{ github.run_id }}
-          EVENT_NAME: ${{ github.event_name }}
           ACTOR: ${{ github.actor }}
-          REF_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_ISO: ${{ inputs.image_iso }}
           BUILD_VERSION: ${{ inputs.build_version }}
-          RUNNER_NAME: ${{ runner.name }}
-          RUNNER_OS: ${{ runner.os }}
-          RUNNER_ARCH: ${{ runner.arch }}
           RELEASE_TYPE: ${{ inputs.release_type }}
           BUILD_BRANCH: ${{ inputs.build_branch }}
+          RELEASE_HIGHLIGHTS_B64: ${{ inputs.release_highlights_b64 }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
 
-          SHORT_SHA="${SHA:0:7}"
-          BUILD_EPOCH=$(date -u +%s)
-          BUILD_HUMAN=$(date -u -d "@${BUILD_EPOCH}" +"%B %-d, %Y %-I:%M %p UTC")
+          # Channel policy:
+          #   main or nxp-sdk + success -> release channel 1494357051378503862
+          #   everything else           -> dev/failure channel 1519025519327318239
+          #     (failures, and non-release builds)
+          if [ "${JOB_STATUS}" = "success" ] && { [ "${BUILD_BRANCH}" = "main" ] || [[ "${BUILD_BRANCH}" == nxp-sdk* ]]; }; then
+            IS_RELEASE=1
+            CHANNEL_ID="1494357051378503862"
+          else
+            IS_RELEASE=0
+            CHANNEL_ID="1519025519327318239"
+          fi
 
-          # Zero-width space — lets a field render with no visible label.
-          ZWSP=$'\u200b'
+          BUILD_HUMAN=$(date -u +"%B %-d, %Y %-I:%M %p UTC")
 
           # Display version drops the trailing channel suffix (e.g. "-rolling"),
           # which is surfaced separately as the release type.
@@ -82,73 +99,122 @@ jobs:
           DISPLAY_VERSION="${DISPLAY_VERSION%-lts}"
           DISPLAY_VERSION="${DISPLAY_VERSION%-stream}"
 
+          RELEASE_TAG="${RELEASE_TAG_INPUT}"
+          if [ -z "${RELEASE_TAG}" ]; then
+            if [[ "${BUILD_BRANCH}" == nxp-sdk* ]]; then
+              RELEASE_TAG="nxp-ask"
+            else
+              RELEASE_TAG="${BUILD_VERSION}"
+            fi
+          fi
+
           INSTALL_URL="https://github.com/${REPO}/blob/main/INSTALL.md"
-          NOTES_URL="https://github.com/${REPO}/releases/tag/${BUILD_VERSION}"
+          NOTES_URL="https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
           REPO_URL="https://github.com/${REPO}"
-          ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}"
+
+          # build_iso's image_iso output is the actual GitHub release asset
+          # filename (including `.iso`). Normalize defensively so an old/manual
+          # caller that passes the artifact stem still gets exactly one suffix.
+          # The old notification consumed image_name (the suffix-less Actions
+          # artifact name), so its direct-upgrade command always 404'd.
+          ISO_ASSET="${IMAGE_ISO%.iso}.iso"
+          ISO_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${ISO_ASSET}"
 
           NOTES_LINK="[Read changelog](${NOTES_URL})"
           INSTALL_LINK="[View instructions](${INSTALL_URL})"
-          REPO_LINK="[Open repository](${REPO_URL})"
+          REPO_LINK="[Repository](${REPO_URL})"
           UPGRADE_CMD="\`\`\`"$'\n'"add system image ${ISO_URL}"$'\n'"\`\`\`"
 
-          if [ "${JOB_STATUS}" = "success" ]; then
-            TITLE="📦 New VyOS LS1046A Build"
+          # The publish job passes the AI-generated `## Highlights` body as
+          # base64 so multiline Markdown survives the reusable-workflow input.
+          # Discord embed field values are limited to 1024 characters; keep a
+          # little room for a Unicode ellipsis and truncate only when needed.
+          RELEASE_HIGHLIGHTS=""
+          if [ -n "${RELEASE_HIGHLIGHTS_B64}" ]; then
+            RELEASE_HIGHLIGHTS=$(printf '%s' "${RELEASE_HIGHLIGHTS_B64}" | base64 -d 2>/dev/null || true)
+          fi
+          # Strip surrounding blank lines and truncate by Unicode characters
+          # (not bytes, which could split a UTF-8 Markdown glyph).
+          RELEASE_HIGHLIGHTS=$(printf '%s' "${RELEASE_HIGHLIGHTS}" | python3 -c '
+          import sys
+          text = sys.stdin.read().strip()
+          sys.stdout.write(text[:1023] + "…" if len(text) > 1024 else text)
+          ')
+          [ -n "${RELEASE_HIGHLIGHTS}" ] || RELEASE_HIGHLIGHTS="_See the full release notes for build highlights._"
+
+          if [ "${IS_RELEASE}" = "1" ]; then
+            if [[ "${BUILD_BRANCH}" == nxp-sdk* ]]; then
+              TITLE="📦 New VyOS LS1046A Build (NXP ASK)"
+            else
+              TITLE="📦 New VyOS LS1046A Build"
+            fi
             COLOR=5763719
+          elif [ "${JOB_STATUS}" = "success" ]; then
+            # Non-main success: report it, but it is not a published release.
+            TITLE="✅ VyOS LS1046A Build Succeeded (${BUILD_BRANCH})"
+            COLOR=5793266
           else
             TITLE="❌ VyOS LS1046A Build Failed"
             COLOR=15548997
           fi
 
-          if [ "${JOB_STATUS}" = "success" ]; then
+          if [ "${IS_RELEASE}" = "1" ]; then
             PAYLOAD=$(jq -n \
               --arg title      "${TITLE}" \
               --argjson color  "${COLOR}" \
               --arg version    "${DISPLAY_VERSION}" \
-              --arg flavor     "${BUILD_BRANCH}" \
+              --arg branch     "${BUILD_BRANCH}" \
               --arg release    "${RELEASE_TYPE}" \
               --arg notes      "${NOTES_LINK}" \
               --arg install    "${INSTALL_LINK}" \
               --arg repo       "${REPO_LINK}" \
+              --arg summary    "${RELEASE_HIGHLIGHTS}" \
               --arg upgrade    "${UPGRADE_CMD}" \
               --arg footer     "${BUILD_HUMAN}" \
-              --arg ts_epoch   "${BUILD_EPOCH}" \
               '{
                 embeds: [{
                   title: $title,
                   color: $color,
                   fields: [
                     { name: "Version:", value: $version, inline: true },
-                    { name: "Flavor:",  value: $flavor,  inline: true },
-                    { name: "Release:",     value: $release, inline: true },
+                    { name: "Branch:",  value: $branch,  inline: true },
+                    { name: "Release:", value: $release, inline: true },
+                    { name: "Highlights:", value: $summary, inline: false },
                     { name: "Direct upgrade command:", value: $upgrade, inline: false },
-                    { name: "📝 Release notes:",   value: $notes,   inline: true },
+                    { name: "📝 Release notes:", value: $notes,   inline: true },
                     { name: "🛠️ Install guide:", value: $install, inline: true },
-                    { name: "🐙 Code review:",    value: $repo,    inline: true }
+                    { name: "🐙 Source code:",  value: $repo,    inline: true }
                   ],
                   footer: { text: $footer }
                 }]
               }')
           else
+            # Compact embed for main failures and all non-main builds
+            # (success or failure). No release/upgrade URL exists for these.
+            if [ "${JOB_STATUS}" = "success" ]; then
+              STATUS_TEXT="Succeeded (no release published — non-main branch)"
+            else
+              STATUS_TEXT="Failed"
+            fi
             PAYLOAD=$(jq -n \
               --arg title      "${TITLE}" \
               --argjson color  "${COLOR}" \
               --arg version    "${DISPLAY_VERSION}" \
-              --arg flavor     "${BUILD_BRANCH}" \
+              --arg branch     "${BUILD_BRANCH}" \
               --arg release    "${RELEASE_TYPE}" \
+              --arg status     "${STATUS_TEXT}" \
               --arg run_url    "https://github.com/${REPO}/actions/runs/${RUN_ID}" \
               --arg run_number "${RUN_NUMBER}" \
-              --arg zwsp       "${ZWSP}" \
               --arg footer     "${BUILD_HUMAN}" \
-              --arg ts_epoch   "${BUILD_EPOCH}" \
               '{
                 embeds: [{
                   title: $title,
                   color: $color,
                   fields: [
                     { name: "Version", value: $version, inline: true },
-                    { name: "Flavor",  value: $flavor,  inline: true },
-                    { name: $zwsp,     value: $release, inline: true },
+                    { name: "Branch",  value: $branch,  inline: true },
+                    { name: "Release", value: $release, inline: true },
+                    { name: "Status",  value: $status,  inline: false },
                     { name: "Run",     value: "[#\($run_number)](\($run_url))", inline: false }
                   ],
                   footer: { text: $footer }
