@@ -109,6 +109,7 @@ jobs:
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
       DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
       VYOS_VANITY_KEY: ${{ secrets.VYOS_VANITY_KEY }}
+      OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
 
   # NOTE: VM deallocation is intentionally NOT a CI step. The VM runs a
   # systemd timer (idle-deallocate.service) that self-deallocates after 10
