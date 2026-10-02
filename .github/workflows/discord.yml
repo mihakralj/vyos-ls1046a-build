@@ -45,6 +45,11 @@ on:
         type: string
         required: false
         default: ''
+      release_tag:
+        description: 'GitHub release tag (e.g. nxp-ask or 2026.08.16-0240-rolling)'
+        type: string
+        required: false
+        default: ''
     secrets:
       DISCORD_BOT_KEY:
         description: 'Discord bot token (Authorization: Bot <token>)'
@@ -69,16 +74,15 @@ jobs:
           RELEASE_TYPE: ${{ inputs.release_type }}
           BUILD_BRANCH: ${{ inputs.build_branch }}
           RELEASE_HIGHLIGHTS_B64: ${{ inputs.release_highlights_b64 }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
 
           # Channel policy:
-          #   main + success           -> release channel 1494357051378503862
-          #   everything else          -> dev/failure channel 1519025519327318239
-          #     (main failures, and ALL non-main builds success or failure)
-          # Only a successful main build produces a published GitHub release, so
-          # only that case earns the release channel + the rich upgrade embed.
-          if [ "${JOB_STATUS}" = "success" ] && [ "${BUILD_BRANCH}" = "main" ]; then
+          #   main or nxp-sdk + success -> release channel 1494357051378503862
+          #   everything else           -> dev/failure channel 1519025519327318239
+          #     (failures, and non-release builds)
+          if [ "${JOB_STATUS}" = "success" ] && { [ "${BUILD_BRANCH}" = "main" ] || [[ "${BUILD_BRANCH}" == nxp-sdk* ]]; }; then
             IS_RELEASE=1
             CHANNEL_ID="1494357051378503862"
           else
@@ -95,8 +99,17 @@ jobs:
           DISPLAY_VERSION="${DISPLAY_VERSION%-lts}"
           DISPLAY_VERSION="${DISPLAY_VERSION%-stream}"
 
+          RELEASE_TAG="${RELEASE_TAG_INPUT}"
+          if [ -z "${RELEASE_TAG}" ]; then
+            if [[ "${BUILD_BRANCH}" == nxp-sdk* ]]; then
+              RELEASE_TAG="nxp-ask"
+            else
+              RELEASE_TAG="${BUILD_VERSION}"
+            fi
+          fi
+
           INSTALL_URL="https://github.com/${REPO}/blob/main/INSTALL.md"
-          NOTES_URL="https://github.com/${REPO}/releases/tag/${BUILD_VERSION}"
+          NOTES_URL="https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
           REPO_URL="https://github.com/${REPO}"
 
           # build_iso's image_iso output is the actual GitHub release asset
@@ -105,7 +118,7 @@ jobs:
           # The old notification consumed image_name (the suffix-less Actions
           # artifact name), so its direct-upgrade command always 404'd.
           ISO_ASSET="${IMAGE_ISO%.iso}.iso"
-          ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${ISO_ASSET}"
+          ISO_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${ISO_ASSET}"
 
           NOTES_LINK="[Read changelog](${NOTES_URL})"
           INSTALL_LINK="[View instructions](${INSTALL_URL})"
@@ -130,7 +143,11 @@ jobs:
           [ -n "${RELEASE_HIGHLIGHTS}" ] || RELEASE_HIGHLIGHTS="_See the full release notes for build highlights._"
 
           if [ "${IS_RELEASE}" = "1" ]; then
-            TITLE="📦 New VyOS LS1046A Build"
+            if [[ "${BUILD_BRANCH}" == nxp-sdk* ]]; then
+              TITLE="📦 New VyOS LS1046A Build (NXP ASK)"
+            else
+              TITLE="📦 New VyOS LS1046A Build"
+            fi
             COLOR=5763719
           elif [ "${JOB_STATUS}" = "success" ]; then
             # Non-main success: report it, but it is not a published release.

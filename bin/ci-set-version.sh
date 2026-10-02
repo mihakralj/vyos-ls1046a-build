@@ -22,14 +22,20 @@ fi
 echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
 # PREVIOUS_SUCCESS_BUILD_TIMESTAMP feeds the publish job's `git log --since`
-# call to compose the release notes. Single-image build: read the canonical
-# version.json (the version-{default,ask,vpp}.json aliases mirror it). Fall
-# back to the epoch on the very first build when no feed exists yet.
-if [ -s version.json ]; then
+# call to compose the release notes.
+# On nxp-sdk: read version-ask.json.
+# On main/other branches: read the canonical version.json.
+# Fall back to the epoch on the very first build when no feed exists yet.
+FEED_FILE="version.json"
+if [[ "${GITHUB_REF_NAME:-}" == nxp-sdk* ]] && [ -s version-ask.json ]; then
+    FEED_FILE="version-ask.json"
+fi
+
+if [ -s "$FEED_FILE" ]; then
     if command -v jq >/dev/null 2>&1; then
-        PREV_TS=$(jq -r '.[0].timestamp // empty' version.json)
+        PREV_TS=$(jq -r '.[0].timestamp // empty' "$FEED_FILE")
     else
-        PREV_TS=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d[0].get("timestamp","") if isinstance(d,list) and d else "")' version.json)
+        PREV_TS=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d[0].get("timestamp","") if isinstance(d,list) and d else "")' "$FEED_FILE")
     fi
 else
     PREV_TS=""
