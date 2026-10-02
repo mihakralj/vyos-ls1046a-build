@@ -1,308 +1,178 @@
 diff --git a/data/templates/vpp/startup.conf.j2 b/data/templates/vpp/startup.conf.j2
-index 82d3753..f00a6d6 100644
+index 82d3753ae..60282697d 100644
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
-@@ -72,6 +72,7 @@ physmem {
- 
- plugins {
+@@ -74,6 +74,7 @@ plugins {
      plugin default { disable }
-+    plugin af_xdp_plugin.so { enable }
      plugin avf_plugin.so { enable }
      plugin dpdk_plugin.so { enable }
++    plugin af_xdp_plugin.so { enable }
      plugin vmxnet3_plugin.so { enable }
-@@ -154,31 +155,54 @@ memory {
- }
- {% endif %}
- 
--dpdk {
--    # Whitelist the fake PCI address 0000:00:00.0
--    # This prevents all devices from being added to VPP-DPDK by default
--    dev 0000:00:00.0
-+{# Classify interfaces: PCI-based DPDK vs platform-bus DPDK (DPAA auto-discovers) #}
-+{% set ns = namespace(has_pci_dpdk=false, has_platform_dpdk=false) %}
+     plugin lacp_plugin.so { enable }
+     plugin linux_cp_plugin.so { enable }
+@@ -159,7 +160,7 @@ dpdk {
+     # This prevents all devices from being added to VPP-DPDK by default
+     dev 0000:00:00.0
  {% for iface, iface_config in interface.items() %}
- {%     if iface_config.driver == 'dpdk' %}
-+{%         if iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
-+{%             set ns.has_platform_dpdk = true %}
-+{%         else %}
-+{%             set ns.has_pci_dpdk = true %}
-+{%         endif %}
-+{%     endif %}
-+{% endfor %}
-+{% if ns.has_pci_dpdk or ns.has_platform_dpdk %}
-+dpdk {
-+{%     if not ns.has_pci_dpdk %}
-+    {# Platform-bus only (DPAA) - skip PCI scan entirely #}
-+    no-pci
-+{%     else %}
-+    {# PCI whitelist anchor - prevents auto-claiming all PCI devices #}
-+    dev 0000:00:00.0
-+{%     endif %}
-+{%     for iface, iface_config in interface.items() %}
-+{%         if iface_config.driver == 'dpdk' and (iface_config.original_driver is not defined or iface_config.original_driver not in ['fsl_dpa']) %}
+-{%     if iface_config.driver == 'dpdk' %}
++{%     if iface_config.driver | default('dpdk') != 'xdp' %}
      dev {{ iface_config.dpdk_options.dev_id }} {
          name {{ iface }}
--{%         if iface_config.num_rx_desc is vyos_defined %}
-+{%             if iface_config.num_rx_desc is vyos_defined %}
-         num-rx-desc {{ iface_config.num_rx_desc }}
--{%         endif %}
--{%         if iface_config.num_tx_desc is vyos_defined %}
-+{%             endif %}
-+{%             if iface_config.num_tx_desc is vyos_defined %}
-         num-tx-desc {{ iface_config.num_tx_desc }}
--{%         endif %}
--{%         if iface_config.num_rx_queues is vyos_defined %}
-+{%             endif %}
-+{%             if iface_config.num_rx_queues is vyos_defined %}
-         num-rx-queues {{ iface_config.num_rx_queues }}
--{%         endif %}
--{%         if iface_config.num_tx_queues is vyos_defined %}
-+{%             endif %}
-+{%             if iface_config.num_tx_queues is vyos_defined %}
-         num-tx-queues {{ iface_config.num_tx_queues }}
--{%         endif %}
-+{%             endif %}
-         }
--{%     endif %}
--{% endfor %}
-+{%         endif %}
-+{%         if iface_config.driver == 'dpdk' and iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
-+    {# Platform-bus NIC (DPAA) - auto-discovered by dpaa_bus, no explicit dev entry #}
-+    {# Interface {{ iface }} handed off via /dev/fsl-usdpaa DPAA PMD #}
-+{%         endif %}
-+{%     endfor %}
-+{%     if ns.has_pci_dpdk %}
-     uio-bind-force
-+{%     endif %}
- }
-+{% endif %}
- 
- {% if ipsec_acceleration is vyos_defined %}
- linux-xfrm-nl {
-diff --git a/python/vyos/vpp/config_resource_checks/resource_defaults.py b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-index aa1c9a8..8f3c4e9 100644
---- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
-+++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-@@ -21,9 +21,9 @@
-     # Default size of buffers transferred via netlink
-     'netlink_rx_buffer_size': 268435456,
-     # Minimal amount of memory required to start VPP
--    'min_memory': '8G',
-+    'min_memory': '7G',
-     # Minimal number of physical CPU cores required to start VPP
--    'min_cpus': 4,
-+    'min_cpus': 2,
-     # Reserve at least 2 physical cores
--    'reserved_cpu_cores': 2,
-+    'reserved_cpu_cores': 1,
- }
-diff --git a/python/vyos/vpp/config_verify.py b/python/vyos/vpp/config_verify.py
-index 228fcbc..376da42 100644
---- a/python/vyos/vpp/config_verify.py
-+++ b/python/vyos/vpp/config_verify.py
-@@ -284,8 +284,8 @@ def verify_vpp_main_heap_size(settings: dict):
-     main_heap_size = mem_checks.memory_main_heap(settings)
-     main_heap_page_size = mem_checks.main_heap_page_size(settings)
- 
--    if main_heap_size < 1 << 30:
--        raise ConfigError('The main heap size must be greater than or equal to 1G')
-+    if main_heap_size < 1 << 28:
-+        raise ConfigError('The main heap size must be greater than or equal to 256M')
- 
-     readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
- 
+ {%         if iface_config.num_rx_desc is vyos_defined %}
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
-index 342d58f..1d5381c 100755
+index a831ded02..e8238b6c4 100755
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -16,6 +16,9 @@
- # with this program; if not, write to the Free Software Foundation, Inc.,
- # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- 
-+import json
-+import os
-+
- from pathlib import Path
- 
- from pyroute2.iproute import IPRoute
-@@ -95,7 +98,7 @@
- }
- 
- # drivers that does not use PCIe addresses
--not_pci_drv: list[str] = ['hv_netvsc']
-+not_pci_drv: list[str] = ['hv_netvsc', 'fsl_dpa']
- 
- # drivers that support interrupt RX mode for DPDK and XDP
- drivers_support_interrupt: dict[str, list] = {
-@@ -129,8 +132,81 @@
+@@ -133,6 +133,7 @@
+     '1d0f:ec20',  # Amazon.com, Inc. Elastic Network Adapter (ENA)
  )
  SUPPORTED_DRIVERS = (
++    'fsl_dpa',    # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
      'hv_netvsc',  # Microsoft Hyper-V network interface card
-+    'fsl_dpa',    # NXP DPAA1 FMan Ethernet (platform bus, DPDK DPAA PMD)
  )
  
-+# ---------------------------------------------------------------------------
-+# DPAA1 kernel-to-DPDK handoff helpers (LS1046A platform-bus)
-+#
-+# At boot ALL FMan MACs are owned by the kernel:
-+#   fsl_dpaa_mac -> hardware MAC (PHY, link, PHYLINK)
-+#   fsl_dpa      -> Linux netdevs (dpaa-ethernet.N -> ethN)
-+#
-+# DPDK DPAA PMD accesses FMan frame queues directly via /dev/mem and
-+# /dev/fsl-usdpaa. If fsl_dpa is still bound to the same MAC when DPDK
-+# initialises, both drivers drain the same FQs -> kernel panic.
-+#
-+# Solution: unbind the dpaa-ethernet.N sysfs device from fsl_dpa before
-+# starting VPP. On VPP stop a systemd ExecStopPost (dpaa-rebind.conf)
-+# reads the persisted state and rebinds, restoring kernel ownership
-+# without requiring a reboot.
-+# ---------------------------------------------------------------------------
-+
-+_DPAA_DRIVER_PATH = '/sys/bus/platform/drivers/fsl_dpa'
-+_DPAA_UNBOUND_STATE = '/run/vpp-dpaa-unbound.json'
-+
-+
-+def _dpaa_find_platform_dev(iface: str):
-+    """Return the dpaa-ethernet.N sysfs device name backing a netdev.
-+
-+    Walks /sys/bus/platform/drivers/fsl_dpa/dpaa-ethernet.*/net/<iface>
-+    to identify which platform device belongs to the named interface.
-+    Returns None on non-DPAA1 hardware (fsl_dpa driver absent).
-+    """
-+    if not os.path.isdir(_DPAA_DRIVER_PATH):
-+        return None
-+    for dev in sorted(os.listdir(_DPAA_DRIVER_PATH)):
-+        if not dev.startswith('dpaa-ethernet.'):
-+            continue
-+        if os.path.exists(os.path.join(_DPAA_DRIVER_PATH, dev, 'net', iface)):
-+            return dev
-+    return None
-+
-+
-+def _dpaa_unbind_ifaces(ifaces):
-+    """Unbind interfaces from fsl_dpa so DPDK DPAA PMD can claim them.
-+
-+    Iterates the given interface names, finds each one's dpaa-ethernet.N
-+    platform device, and writes it to the fsl_dpa 'unbind' sysfs file.
-+    The resulting {iface: device} mapping is persisted to
-+    _DPAA_UNBOUND_STATE so the companion rebind script can restore
-+    kernel ownership when VPP stops.
-+
-+    Silently skips interfaces that are not DPAA (no fsl_dpa binding),
-+    making this safe to call on any VyOS platform.
-+    """
-+    unbound = {}
-+    unbind_path = os.path.join(_DPAA_DRIVER_PATH, 'unbind')
-+    for iface in ifaces:
-+        dev = _dpaa_find_platform_dev(iface)
-+        if not dev:
-+            continue
-+        try:
-+            with open(unbind_path, 'w') as fh:
-+                fh.write(dev)
-+            unbound[iface] = dev
-+        except OSError as exc:
-+            print(f'W: vpp: could not unbind {iface} ({dev}) from fsl_dpa: {exc}')
-+    # Persist so the systemd ExecStopPost can rebind without reboot.
-+    try:
-+        with open(_DPAA_UNBOUND_STATE, 'w') as fh:
-+            json.dump(unbound, fh)
-+    except OSError as exc:
-+        print(f'W: vpp: could not write DPAA unbound state: {exc}')
-+    return unbound
-+
-+
-+
- 
- def _load_module(module_name: str):
-     """
-@@ -348,8 +424,20 @@ def get_config(config=None):
+@@ -286,6 +287,11 @@ def get_config(config=None):
+                 'iface_name': removed_iface,
+                 'driver': 'dpdk',
+             }
++            # LS1046A: fsl_dpa is platform-bus AF_XDP, not DPDK
++            # Check persist_config for the original driver
++            orig_drv = eth_ifaces_persist.get(removed_iface, {}).get('original_driver', '')
++            if orig_drv == 'fsl_dpa':
++                to_append['driver'] = 'xdp'
+             removed_ifaces.append(to_append)
+             # add an interface to a list of interfaces that need
+             # to be reinitialized after the commit
+@@ -353,8 +359,12 @@ def get_config(config=None):
          effective_config = config_dict_merge(default_values_effective, effective_config)
          # Buffer normalization (auto → computed)
          _normalize_buffers(effective_config)
 -        for iface_config in effective_config['settings']['interface'].values():
--            iface_config['driver'] = 'dpdk'
-+        for _ename, iface_config in effective_config['settings']['interface'].items():
-+            # Inject original_driver and select AF_XDP vs DPDK
-+            _edrv = eth_ifaces_persist.get(_ename, {}).get('original_driver', '')
-+            iface_config['original_driver'] = _edrv
-+            if _edrv == 'fsl_dpa':
++        for iface_config in effective_config['settings']['interface'].items():
++            iface, iface_config = iface_config
+             iface_config['driver'] = 'dpdk'
++            # LS1046A: fsl_dpa is platform-bus AF_XDP, not DPDK
++            if eth_ifaces_persist.get(iface, {}).get('original_driver') == 'fsl_dpa':
 +                iface_config['driver'] = 'xdp'
-+                if 'xdp_options' not in iface_config or not iface_config['xdp_options']:
-+                    iface_config['xdp_options'] = {
-+                        'rx_queue_size': 4096,
-+                        'tx_queue_size': 4096,
-+                        'num_rx_queues': 1,
-+                    }
-+            else:
-+                iface_config['driver'] = 'dpdk'
          config['effective'] = effective_config
  
      # Save important info about all interfaces that cannot be retrieved later
-@@ -375,7 +463,25 @@ def get_config(config=None):
-             interface_rx_mode = config['settings'].get('interface_rx_mode')
+@@ -401,6 +411,16 @@ def get_config(config=None):
+                     ['interfaces', 'ethernet', iface, 'mac']
+                 )
  
-             for iface, iface_config in config['settings']['interface'].items():
--                iface_config['driver'] = 'dpdk'
-+                # Inject original_driver so we can select AF_XDP vs DPDK.
-+                _orig_drv = eth_ifaces_persist.get(iface, {}).get('original_driver', '')
-+                if not _orig_drv:
-+                    try:
-+                        _orig_drv = EthtoolGDrvinfo(iface).driver
-+                    except Exception:
-+                        _orig_drv = ''
-+                iface_config['original_driver'] = _orig_drv
-+                # DPAA1 platform-bus NICs use AF_XDP; PCI NICs use DPDK
-+                if _orig_drv == 'fsl_dpa':
++                # LS1046A: fsl_dpa is a platform-bus AF_XDP driver, not DPDK
++                if eth_ifaces_persist.get(iface, {}).get('original_driver') == 'fsl_dpa':
 +                    iface_config['driver'] = 'xdp'
-+                    if 'xdp_options' not in iface_config or not iface_config['xdp_options']:
++                    # DPAA1 AF_XDP defaults (XDP options removed from CLI by T8202)
++                    if 'xdp_options' not in iface_config:
 +                        iface_config['xdp_options'] = {
-+                            'rx_queue_size': 4096,
-+                            'tx_queue_size': 4096,
-+                            'num_rx_queues': 1,
++                            'rx_queue_size': '4096',
++                            'tx_queue_size': '4096',
++                            'num_rx_queues': '1',
 +                        }
-+                else:
-+                    iface_config['driver'] = 'dpdk'
+                 # filter unsupported config nodes
+                 iface_filter_eth(conf, iface)
+                 set_dependents('ethernet', conf, iface)
+@@ -500,12 +520,7 @@ def get_config(config=None):
+                         )
+                     if 'zero-copy' in iface_config['xdp_options']:
+                         xdp_api_params['mode'] = 'zero-copy'
+-                    if (
+-                        interface_rx_mode in ('interrupt', 'adaptive')
+-                        and int(config['settings']['resource_allocation']['cpu_cores'])
+-                        > 1
+-                    ):
+-                        xdp_api_params['flags'] = 'no_syscall_lock'
++                    xdp_api_params['flags'] = 'no_syscall_lock'  # Always for DPAA1 AF_XDP
+                     iface_config['xdp_api_params'] = xdp_api_params
  
-                 # old_driver = leaf_node_changed(
-                 #     conf, base_settings + ['interface', iface, 'driver']
-@@ -770,20 +876,33 @@ def apply(config):
+         # Enable 'no-multi-seg' only when the buffer data-size can hold the
+@@ -641,7 +656,7 @@ def verify(config):
+         if iface_config['driver'] == 'xdp' and 'xdp_options' in iface_config:
+             if iface_config['xdp_options']['num_rx_queues'] != 'all':
+                 rx_queues = iface_config['xdp_api_params']['rxq_num']
+-                max_rx_queues = _get_max_xdp_rx_queues(config['persist_config'][iface])
++                max_rx_queues = _get_max_xdp_rx_queues(config['persist_config'].get(iface, {}))
+                 if rx_queues > max_rx_queues:
+                     raise ConfigError(
+                         f'Maximum supported number of RX queues for interface {iface} is {max_rx_queues}. '
+@@ -699,6 +714,9 @@ def generate(config):
+ 
+ def initialize_interface(iface, driver, iface_config) -> None:
+     # DPDK - rescan PCI to use a proper driver
++    # AF_XDP devices (platform-bus or otherwise) need no PCI rescan
++    if driver == 'xdp':
++        pass  # AF_XDP — no PCI rescan, no rename
+     if driver == 'dpdk' and iface_config['original_driver'] not in not_pci_drv:
+         # 'gve' devices require a specific unbind/bind process instead of a standard PCI rescan.
+         if iface_config['original_driver'] == 'gve':
+@@ -764,7 +782,7 @@ def apply(config):
+                     if iface_config['kernel_module'] == 'ena':
+                         control_host.unsafe_noiommu_mode(True)
+ 
+-                    original_driver = config['persist_config'][iface]['original_driver']
++                    original_driver = config['persist_config'].get(iface, {}).get('original_driver', '')
+                     effective_ifaces = (
+                         config.get('effective', {})
+                         .get('settings', {})
+@@ -787,8 +805,8 @@ def apply(config):
+                         or override_xdp_to_dpdk
+                     ):
+                         control_host.override_driver(
+-                            config['persist_config'][iface]['bus_id'],
+-                            config['persist_config'][iface]['dev_id'],
++                            config['persist_config'].get(iface, {})['bus_id'],
++                            config['persist_config'].get(iface, {})['dev_id'],
                              override_drivers[k_module],
                          )
  
-+        # Unbind fsl_dpa from any DPAA interfaces assigned to VPP.
-+        # Must happen before systemctl start vpp so DPDK DPAA PMD can
-+        # claim the FMan frame queues without conflicting with fsl_dpa.
-+        _dpaa_ifaces = [
-+            iface
-+            for iface, icfg in config['settings']['interface'].items()
-+            if icfg.get('original_driver') == 'fsl_dpa'
-+        ]
-+        if _dpaa_ifaces:
-+            _dpaa_unbind_ifaces(_dpaa_ifaces)
-+
-         call('systemctl daemon-reload')
-         call(f'systemctl restart {service_name}.service')
+@@ -797,6 +815,8 @@ def apply(config):
  
      # Initialize interfaces removed from VPP
      for iface in config.get('removed_ifaces', []):
--        initialize_interface(
--            iface['iface_name'],
--            iface['driver'],
--            config['persist_config'][iface['iface_name']],
--        )
-+        _persist = config.get('persist_config', {}).get(iface['iface_name'], {})
-+        if _persist:
-+            initialize_interface(
-+                iface['iface_name'],
-+                iface['driver'],
-+                _persist,
-+            )
++        # Use .get() for persist_config — it may have been deleted
++        persist = config['persist_config'].get(iface['iface_name'], {})
+         initialize_interface(
+             iface['iface_name'],
+             iface['driver'],
+@@ -805,7 +825,7 @@ def apply(config):
  
          # Remove what is not in the config anymore
          if iface['iface_name'] not in config.get('settings', {}).get('interface', {}):
 -            del config['persist_config'][iface['iface_name']]
-+            config.get('persist_config', {}).pop(iface['iface_name'], None)
++            config['persist_config'].pop(iface['iface_name'], None)
  
      if 'settings' in config and 'interface' in config.get('settings'):
          interface_rx_mode = config['settings'].get('interface_rx_mode')
+@@ -835,13 +855,13 @@ def apply(config):
+                     # Some cloud NICs fail to load XDP if all RX queues are configured. To avoid this,
+                     # we limit the number of queues to half of the maximum supported by the driver.
+                     if (
+-                        config['persist_config'][iface]['original_driver']
++                        config['persist_config'].get(iface, {}).get('original_driver', '')
+                         in ethtool_channels_change_drv
+                     ):
+                         max_rx_queues = _get_max_xdp_rx_queues(
+-                            config['persist_config'][iface]
++                            config['persist_config'].get(iface, {})
+                         )
+-                        channels_orig = config['persist_config'][iface]['channels']
++                        channels_orig = config['persist_config'].get(iface, {})['channels']
+                         channels = {}
+                         if channels_orig.get('rx'):
+                             channels = {'rx': max_rx_queues, 'tx': max_rx_queues}
+@@ -902,8 +922,12 @@ def apply(config):
+             # we need to stop vpp service and initialize interfaces
+             call(f'systemctl stop {service_name}.service')
+             for iface, iface_config in config['settings']['interface'].items():
++                # Skip interfaces without persist_config (e.g., LCP tap interfaces)
++                persist = config['persist_config'].get(iface, {})
++                if not persist:
++                    continue
+                 initialize_interface(
+-                    iface, iface_config['driver'], config['persist_config'][iface]
++                    iface, iface_config['driver'], config['persist_config'].get(iface, {})
+                 )
+ 
+             raise ConfigError(
