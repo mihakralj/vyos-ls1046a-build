@@ -40,6 +40,9 @@ for p in data/vyos-1x-*.patch; do
   cp "$p" "$PATCH_STAGING/"
 done
 cp data/reftree.cache "$PATCH_STAGING/"
+if [ -d data/vyos-1x-files ]; then
+  cp -a data/vyos-1x-files "$PATCH_STAGING/"
+fi
 
 # Substitute @@FLAVOR@@ placeholder in the MOTD patch so the post-login banner
 # correctly identifies which build flavor is installed (default | ask | vpp).
@@ -138,6 +141,11 @@ PYLINTRC
 *.toml  merge=mergiraf
 *.xml   merge=mergiraf
 GITATTR
+  # Plain new-file source tree (e.g. op-mode definitions / scripts):
+  # copy into place before applying patches.
+  if [ -d ../ls1046a-patches/vyos-1x-files ]; then
+    cp -a ../ls1046a-patches/vyos-1x-files/. .
+  fi
   for p in ../ls1046a-patches/vyos-1x-*.patch; do
     # Skip if already applied (idempotent across pre_build_hook re-invocations
     # and forward-compatible if upstream lands an equivalent change).
