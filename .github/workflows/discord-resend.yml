@@ -49,6 +49,11 @@ on:
         description: 'Base64-encoded Markdown Highlights body'
         type: string
         required: true
+      release_tag:
+        description: 'Release tag (defaults to build_version, or nxp-ask for nxp-sdk)'
+        type: string
+        default: ''
+        required: false
 
 jobs:
   resend:
@@ -60,4 +65,5 @@ jobs:
       release_type: ${{ inputs.release_type }}
       image_iso: ${{ inputs.image_iso }}
       release_highlights_b64: ${{ inputs.release_highlights_b64 }}
+      release_tag: ${{ inputs.release_tag }}
     secrets: inherit
