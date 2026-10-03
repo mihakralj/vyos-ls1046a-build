@@ -611,14 +611,14 @@ jobs:
           if [ "${{ github.ref_name }}" = "main" ]; then
             URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_ISO}"
             cat > version.json <<EOF
-[
-  {
-    "url": "${URL}",
-    "version": "${BUILD_VERSION}",
-    "timestamp": "${TIMESTAMP}"
-  }
-]
-EOF
+          [
+            {
+              "url": "${URL}",
+              "version": "${BUILD_VERSION}",
+              "timestamp": "${TIMESTAMP}"
+            }
+          ]
+          EOF
             cp version.json version-default.json
             cp version.json version-vpp.json
             echo "### Wrote canonical version.json + aliases (version-default.json, version-vpp.json)"
@@ -626,14 +626,14 @@ EOF
           elif [[ "${{ github.ref_name }}" == nxp-sdk* ]]; then
             URL="https://github.com/${REPO}/releases/download/nxp-ask/${IMAGE_ISO}"
             cat > version-ask.json <<EOF
-[
-  {
-    "url": "${URL}",
-    "version": "${BUILD_VERSION}",
-    "timestamp": "${TIMESTAMP}"
-  }
-]
-EOF
+          [
+            {
+              "url": "${URL}",
+              "version": "${BUILD_VERSION}",
+              "timestamp": "${TIMESTAMP}"
+            }
+          ]
+          EOF
             echo "### Wrote version-ask.json for nxp-ask release"
             cat version-ask.json
           fi
