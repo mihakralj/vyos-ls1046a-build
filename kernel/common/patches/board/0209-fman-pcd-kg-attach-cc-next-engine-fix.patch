@@ -1,0 +1,126 @@
+From: Claude Sonnet 5 <noreply@anthropic.com>
+Subject: [PATCH] ask2(T-M6-8): fman_pcd_kg_port_attach_cc() must use next_engine=3
+
+VLAN cross-port hardware offload (Option A: CC-tree + HMTD, ask_vlan_cc.c)
+showed no measurable throughput benefit despite installing cleanly:
+KeyGen scheme packet counters climbed correctly (matching real traffic
+volume) while essentially 100% of the same traffic also transited the
+software RX path (rx_default_dqrr) -- "dual delivery", quantified
+2026-10-02 at ~968,000 rx_default_dqrr hits/GB transferred, versus ~22
+hits/GB for the working ehash/FE_ENTER unicast path on the same silicon.
+
+Root cause: fman_pcd_kg_port_attach_cc() -- the function
+fman_cc_tree_install() (dpaa_fman_caps.c) calls to graft a port's
+KeyGen scheme onto the CC tree for every VLAN flow install -- hardcoded
+slot->next_engine = 2. Per keygen_scheme_setup() (fman_keygen.c),
+next_engine==2 produces kgse_mode = ENQUEUE_KG_DFLT_NIA (0x80500002):
+BMI direct-enqueue straight to the port's default RX FQID, bypassing
+the CC tree entirely. next_engine==3 produces kgse_mode =
+NIA_ENG_FM_CTL|NIA_FM_CTL_AC_CC (0x80000006), which actually walks the
+CC root named by the port's FMBM_RCCB. Live register capture
+2026-10-02 confirmed schemes 3/4 (eth3/eth4) read mode=0x80500002
+during an active VLAN flow -- production VLAN CC has been dispatching
+in CC-bypass mode the whole time.
+
+History explaining how this regressed: patch 0115 first tried
+next_engine==3 here: reverted by patch 0118 (2026-06-12) after it
+stalled the FMan port (FMFP_PS[STL]) on the first CC-dispatched frame.
+That stall test predates fman_pcd_port_ensure_params_page() (patches
+0116/0165), which fman_cc_tree_install() now guarantees before every
+call to this function -- the missing prerequisite, not the AC_CC
+encoding itself, is the more likely explanation for 0118's stall.
+Patch 0169 (2026-08-10, F-183/F-184) then tried routing the CC MURAM
+offset through kgse_bmch instead, while leaving next_engine at 2: also
+wrong, since FMKG_SE_BMCH is the Bit-Mask-Command register (RM
+5.10.3.12.4), not a CC dispatch field, and writing a MURAM offset there
+corrupts extracted key byte masking (found independently 2026-09-03
+while debugging an unrelated VLAN-v6 GEC byte-corruption symptom, which
+already concluded "production AC_CC mode uses FMBM_RCCB directly with
+kgse_bmch=0" -- but no patch after 0169 had actually changed
+fman_pcd_kg_port_attach_cc()'s next_engine value to match).
+
+Board-validated 2026-10-03 via a live register poke of the running
+production path (ask_vlan_cc.c's automatic flow-install untouched):
+flipping scheme 3+4's kgse_mode from 0x80500002 to 0x80000006 and
+kgse_bmch to 0 (preserving kgse_ekfc=0x801c0006 and every other field)
+while a real dell1->dell2 iperf3 flow was active across eth3.10/eth4.20
+dropped rx_default_dqrr hits from ~100% of traffic to 128 hits over a
+clean 10-second mid-flow window -- the same noise floor as the working
+ehash path. FPM_PS_STALLED stayed clear throughout, including after
+sustained load, directly answering 0118's stall concern.
+
+This patch changes only the one line in fman_pcd_kg_port_attach_cc()
+needed to make the live-validated encoding permanent, and updates the
+function's own comment (which described the now-disproven CCBS/BMCH
+rationale) to record the full history so a future session does not
+re-regress this a fourth time. fman_pcd_kg_port_attach_cc_dual(),
+_dual_ekfc() and _l2() (VLAN-v6 GEC dual-lane and bridge L2 scenarios)
+are intentionally left unchanged -- out of scope for this fix, pending
+their own separate validation.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -725,28 +725,43 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 	saved_engine = slot->next_engine;
+ 	saved_ccbs   = slot->cc_bits_sel;
+ 	saved_ekfc   = slot->ekfc;
+ 
+-	/*
+-	 * HW-proven CC graft (see fman_keygen.c CC chaining comment):
+-	 * KGSE_CCBS <- MURAM offset of the CC root group table; the NIA
+-	 * stays BMI direct-enqueue and the CC walk fires implicitly.
+-	 * use_hashing / base_fqid / match_vector are untouched, so on a
+-	 * CC miss the frame still spreads over the same hashed RX FQs.
++	/*
++	 * next_engine MUST be 3 (NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC), not 2.
++	 * next_engine==2 produces kgse_mode = ENQUEUE_KG_DFLT_NIA, which
++	 * enqueues every classified frame straight to the port's default RX
++	 * FQID without ever walking the CC tree: the frame IS classified
++	 * (scheme packet counters climb normally) but the installed CC leaf
++	 * is never consulted, so every packet still takes the software RX
++	 * path too ("dual delivery" -- real HW classification plus 100%
++	 * software delivery, simultaneously). next_engine==3 walks the CC
++	 * root named by the port's FMBM_RCCB, as it must.
++	 *
++	 * History: 0115 first tried next_engine==3 here and was reverted by
++	 * 0118 after it stalled the FMan port (FMFP_PS[STL]) -- but that
++	 * test predates fman_pcd_port_ensure_params_page() (0116/0165),
++	 * which this function's only caller (fman_cc_tree_install()) now
++	 * guarantees before every call. 0169 then tried routing the CC
++	 * MURAM offset through kgse_bmch instead while keeping
++	 * next_engine==2 (also wrong: FMKG_SE_BMCH is the Bit-Mask-Command
++	 * register, not a CC dispatch field, and corrupts extracted key
++	 * bytes). Board-validated 2026-10-03: next_engine==3 with
++	 * kgse_bmch==0 sustains real cross-port VLAN traffic, FPM port-stall
++	 * bit stays clear under sustained load, and rx_default_dqrr falls to
++	 * the established HW-bypass noise floor (qdrant: "ASK2 VLAN
++	 * cross-port fix VALIDATED LIVE 2026-10-03").
+ 	 *
+ 	 * F-190 (2026-08-31): the CC walker compares the KeyGen-EXTRACTED
+ 	 * composite (it never re-extracts), so this scheme's EKFC must
+ 	 * deterministically match what cc_pack_key() (this file) packs, not
+ 	 * whatever a scheme slot happened to inherit from a prior RSS or
+-	 * FE-VM/ehash engage on the same port. Without this the CC-tree
+-	 * installs cleanly (control plane) but every real packet
+-	 * permanently misses (data plane), because the extracted bytes
+-	 * never match the installed key. 0x801C0006 = KG_SCH_KN_PORT_ID |
++	 * FE-VM/ehash engage on the same port. 0x801C0006 = KG_SCH_KN_PORT_ID |
+ 	 * IPSRC1 | IPDST1 | PROTO | L4PSRC | L4PDST, the 14-byte
+ 	 * PORT_ID(1)|SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2) window
+-	 * cc_pack_key() now builds -- confirmed against the vendor's own
++	 * cc_pack_key() builds -- confirmed against the vendor's own
+ 	 * unconditional `knownTmp |= KG_SCH_KN_PORT_ID` in BuildSchemeRegs()
+ 	 * (ASK/patches/kernel/010-ask-fman-dpaa-ehash.patch) and this
+ 	 * project's own F-183/board patch 0167 debug-harness proof.
+ 	 */
+-	slot->next_engine    = 2;
++	slot->next_engine    = 3;
+ 	slot->cc_base_offset = 0;
+ 	slot->cc_bits_sel    = cc_group_off;
+ 	slot->ekfc           = 0x801C0006;
+ 
+ 	slot->used = false;
+ 	err = keygen_scheme_setup(keygen, id, true);
