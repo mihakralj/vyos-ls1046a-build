@@ -1,7 +1,7 @@
 diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -485,6 +485,10 @@
+@@ -522,6 +522,10 @@
                      if 'zero-copy' in iface_config['xdp_options']:
                          xdp_api_params['mode'] = 'zero-copy'
                      xdp_api_params['flags'] = 'no_syscall_lock'  # Always for DPAA1 AF_XDP
@@ -11,7 +11,7 @@ diff --git a/src/conf_mode/vpp.py b/src/conf_mode/vpp.py
 +                        xdp_api_params['prog'] = '/usr/share/vpp/xdp_redirect.o'
                      iface_config['xdp_api_params'] = xdp_api_params
  
-         # Buffer normalization (auto → computed)
+         # Enable 'no-multi-seg' only when the buffer data-size can hold the
 diff --git a/python/vyos/vpp/control_vpp.py b/python/vyos/vpp/control_vpp.py
 --- a/python/vyos/vpp/control_vpp.py
 +++ b/python/vyos/vpp/control_vpp.py

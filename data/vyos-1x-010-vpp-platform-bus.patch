@@ -74,7 +74,7 @@ index a831ded02..e8238b6c4 100755
                  # filter unsupported config nodes
                  iface_filter_eth(conf, iface)
                  set_dependents('ethernet', conf, iface)
-@@ -470,12 +490,7 @@ def get_config(config=None):
+@@ -500,12 +520,7 @@ def get_config(config=None):
                          )
                      if 'zero-copy' in iface_config['xdp_options']:
                          xdp_api_params['mode'] = 'zero-copy'
@@ -87,7 +87,7 @@ index a831ded02..e8238b6c4 100755
 +                    xdp_api_params['flags'] = 'no_syscall_lock'  # Always for DPAA1 AF_XDP
                      iface_config['xdp_api_params'] = xdp_api_params
  
-         # Buffer normalization (auto → computed)
+         # Enable 'no-multi-seg' only when the buffer data-size can hold the
 @@ -641,7 +656,7 @@ def verify(config):
          if iface_config['driver'] == 'xdp' and 'xdp_options' in iface_config:
              if iface_config['xdp_options']['num_rx_queues'] != 'all':

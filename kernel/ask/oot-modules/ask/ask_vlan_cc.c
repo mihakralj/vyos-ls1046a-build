@@ -377,6 +377,9 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 		port->agg_bytes_snap = 0;
 		port->phys_ifindex = 0;
 		tree_destroyed = true;
+		mutex_unlock(&ask_vlan_cc_lock);
+		/* Old leaf AD is detached/replaced and drained: safe to free HMTD. */
+		fman_hm_vlan_route_put(fm, port_id, hm_handle);
 	} else {
 		int rc;
 
@@ -388,6 +391,32 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 			ask_pr_warn("vlan_cc: port 0x%02x rebuild failed: %d\n",
 				    port_id, rc);
 		/*
+		 * PERF FIX (2026-09-10): unlock before the drain instead of
+		 * holding ask_vlan_cc_lock across it. By the time
+		 * fman_cc_tree_install() (inside rebuild_locked) returns, the
+		 * new tree is already live and port->keys[]/nkeys are done
+		 * being mutated for this call -- nothing below touches shared
+		 * port state, only the local hm_handle. Holding the lock here
+		 * serialized EVERY VLAN flow add/delete on EVERY port behind
+		 * this one flow's ~5-6ms drain wait; under concurrent
+		 * multi-flow load (8-stream bidir iperf3 measured live,
+		 * 2026-09-10) that lock-and-sleep was the actual throughput
+		 * ceiling: 65% CPU at LOWER throughput than the unaffected
+		 * routed/NAT path, with the CC-tree table (FMAN_CC_MAX_STATIC_
+		 * KEYS) churning fast enough under contention to exhaust and
+		 * fall flows back to software (matches the 2026-08-31
+		 * ENOSPC/nkeys-churn finding above). fman_hm_vlan_route_put()
+		 * already has its own independent locking -- the idempotent-
+		 * refresh path above already calls it unlocked -- so this
+		 * matches an established pattern in this file, not a new one.
+		 * Safety invariant preserved exactly: the CC tree is still
+		 * fully rebuilt and the drain still fully elapses before this
+		 * hm_handle is freed; only the *lock* no longer spans that
+		 * wait, so a DIFFERENT flow's add/delete (same port or not)
+		 * can proceed concurrently instead of queuing behind it.
+		 */
+		mutex_unlock(&ask_vlan_cc_lock);
+		/*
 		 * Defensive quiesce: the rebuild re-grafts a NEW CC tree whose
 		 * leaves no longer reference the removed HMTD, but give any
 		 * frame that entered the OLD tree before the swap time to drain
@@ -396,11 +425,8 @@ void ask_vlan_cc_flow_del(const struct ask_flow_key *key)
 		 * fman_cc_tree_destroy applies on the last-key path.
 		 */
 		usleep_range(5000, 6000);
+		fman_hm_vlan_route_put(fm, port_id, hm_handle);
 	}
-
-	/* Old leaf AD is detached/replaced and drained: safe to free HMTD. */
-	fman_hm_vlan_route_put(fm, port_id, hm_handle);
-	mutex_unlock(&ask_vlan_cc_lock);
 
 	/*
 	 * R4c-3: the last VLAN flow left this port, so fman_cc_tree_destroy

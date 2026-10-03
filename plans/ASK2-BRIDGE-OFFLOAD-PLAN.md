@@ -2,8 +2,115 @@
 
 **2026-08-27 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
 
-> **STATUS UPDATE 2026-09-16 — §8.2b's AD-content hypothesis space is now
-> EXHAUSTED. The bug is not in anything software writes.** Two more
+> **STATUS UPDATE 2026-09-16, third pass — REGRESSION, not an untested
+> pairing: the EXACT port/FQID R3b silicon-proved in August now delivers
+> zero frames.** The second-pass finding below (eth1↔eth2 also fails)
+> raised the possibility that eth1/eth2 was simply never a validated
+> pairing for this mechanism, muddying the interpretation. Checked qdrant
+> silicon-proof history directly: **R3b/R4b's actual 2026-08-26 proof used
+> port `0x10` (eth3) → target FQID `0x2ba` (eth4)** — `install_vlan 0x10
+> 17 10.99.100.110 10.99.2.16 9999 44455 2ba pop 100`, sustained ~54,600
+> pps, `vif_rx` flat, ErrFD=0. Re-ran the *identical* port/FQID combo
+> today: `.185`'s eth4 no-confirm TX FQID is still `0x2ba` (unchanged
+> since August — confirmed via dmesg), so this is not even a fresh
+> allocation, it's the literal same target.
+>
+> Procedure: `sudo vyos-offload-ask --port 0x10 disengage` (confirmed via
+> `pcd-snapshot show`: `rccb` 0x56d00→0x0, matching the documented safe
+> teardown from the R3b/R4c-pre records — no live flows were present,
+> `flow-stats`/`conntrack -L` both empty before touching anything). Armed
+> `install_vlan 0x10 17 10.99.1.106 10.99.2.253 54321 9999 0x2ba push 100`
+> — AD readback byte-identical in structure to every other test this
+> session (`w0=0x000002ba`, `w1=0x000056d0` real HMTD handle, `w2=
+> 0xa2000028` NADEN|EXTENDED|RES_NO_OM_VSPE|AC0x28), match table correctly
+> encodes the 5-tuple. Sent 25 UDP frames from `.106`'s eth3 (forced via
+> `SO_BINDTODEVICE`, matching src `10.99.1.106`). **Result: zero frames,
+> tagged or otherwise, arrived at `.106`'s eth4** (40-packet capture,
+> clean, only unrelated background LAN broadcast/ARP/VRRP traffic — eth4
+> itself is confirmed receiving normal frames fine, ruling out a dead
+> port). FMan's own hardware error-capture registers
+> (`kg_err`/`bmi_err`/`parser_err`/`fpm_err`/`pol_err`) all read clean —
+> no fault flagged anywhere, the same silent "enqueued, never delivered"
+> signature as every hypothesis tested this session. (The QMI
+> `fmqm_etfc`/`fmqm_dtfc` FMan-wide aggregate counters were checked too but
+> proved too noisy to use as a signal on this port pair — eth3/eth4 sit on
+> a dual-homed `192.168.1.0/16` segment with constant real ARP/SSDP/VRRP
+> background traffic, unlike the quiet point-to-point eth1/eth2 pair; the
+> clean negative capture result is the decisive signal here, not the
+> counters.)
+>
+> **This changes the diagnosis materially.** It is not "this mechanism was
+> never proven on this pairing" — it is "this mechanism regressed since
+> 2026-08-26 on the *exact* pairing that once sustained 55k pps." Something
+> changed between commit `4e21e78f`-era (R4c-2, last confirmed-working
+> production silicon test) and today's `dpaa1` tip that broke cross-port
+> CC+HMTD delivery generally, independent of key type, port pairing, or
+> FQID freshness. Candidate next step: `git bisect` or targeted diff of
+> everything touching `fman_pcd_cc.c`, `fman_pcd_kg.c`, `fman_port.c`, or
+> QMan/FQ setup between `4e21e78f` and `dpaa1` tip — a code regression is
+> now a substantially more likely explanation than an FM_CTL microcode
+> semantics gap (`AC 0x28` same-port-only theory), since that theory
+> predicts this pairing should have failed in August too, and it didn't.
+>
+> Port `0x10` (eth3) was cleanly restored: `clear 0x10` succeeded, `sudo
+> vyos-offload-ask --port 0x10 engage 3` restored `rccb=0x00056d00` —
+> byte-identical to its pre-test value. `.106`'s temp capture files
+> removed. `.185` reverted to production image `2026.09.14-1431-rolling`,
+> `ask-check` 36/36 clean.
+>
+> **STATUS UPDATE 2026-09-16, second pass — the decisive control test: NOT
+> bridge_l2-specific. The already-proven `install_vlan` mechanism ALSO
+> fails on this exact eth1(0x0d)→eth2(0x09) port pairing.** Designed to
+> settle the working theory from the first 2026-09-16 update below (`AC
+> 0x28` as a same-port-only primitive): armed the historically-proven
+> `cc_test install_vlan` verb (same `cc_write_leaf_ad()` NADEN+HMTD
+> mechanism R3b/R4b silicon-validated at ~55k pps — see
+> `plans/ASK2-VLAN-REARCH.md` §7b/7c) on the identical port pairing used
+> for every bridge_l2 test overnight, with a real 5-tuple UDP key
+> (`10.99.8.106→10.99.9.253:9999`, VLAN push vid=100) instead of a MAC-DA
+> key. AD readback confirmed correct arming: `w0=0x000002bc` (target
+> fqid), `w1=0x00005a40` (real HMTD handle), `w2=0xa2000028` (`NADEN |
+> EXTENDED | RES_NO_OM_VSPE | AC 0x28`) — structurally byte-identical to
+> the `install_l2fwd` AD confirmed in the first 2026-09-16 update. Sent 25
+> matching UDP frames from `.106`'s eth1 (forced out that NIC via
+> `SO_BINDTODEVICE`, bypassing `.106`'s own routing table so the frames
+> actually transit `.185`). Result: **`.185` eth1's CPU rx-packet counter
+> rose by only 3 of 25** (consistent with most frames correctly diverting
+> to hardware, not leaking to the CPU default path — the CC hit is
+> happening), **but zero frames, tagged or otherwise, arrived at `.106`'s
+> eth2** (`tcpdump -i eth2 -n -e -c 40`, clean capture, only unrelated
+> background DHCP broadcasts seen). **Identical signature to every
+> bridge_l2 test overnight: enqueue succeeds, cross-port dequeue/delivery
+> never happens.**
+>
+> **This overturns the "bridge_l2-specific" framing.** The bug is not
+> specific to the bridge L2 KeyGen scheme, DA-match keys, or anything
+> `install_l2`/`install_l2fwd` did differently from the proven VLAN path.
+> It is specific to *this* — either this exact eth1→eth2 port pairing/rig,
+> or `AC 0x28`/`PRE_BMI_ENQ`-via-raw-`cc_test`-debugfs as a cross-port
+> primitive in general, independent of key type. Since R3b/R4b's own
+> "~55k pps, arrived at the sink" proofs were never confirmed in this
+> session to have used this same eth1(0x0d)/eth2(0x09) RJ45 pair specifically
+> (vs. e.g. the SFP+ eth3/eth4 pair, which carries `.106`'s own
+> already-configured VLAN subinterfaces `eth3.10`/`eth4.20`) — **the most
+> likely next step is re-running this exact control test on the SFP+
+> eth3↔eth4 pairing** (or whichever pairing R3b/R4b actually used) to
+> determine whether this is a rig/port-pairing artifact or a genuine,
+> broader regression in the cross-port mechanism itself. Not yet done —
+> flagging for a decision before continuing, since it needs its own careful
+> cabling/config setup on ports currently carrying real state.
+>
+> All test config was cleanly reverted on `.185` and `.106` (imperative
+> `ip addr del`, no persistent VyOS config was ever committed on `.106`
+> since its config-write subsystem was found broken on its stale
+> `2026.09.13-1806-rolling` image — `set`/`delete` fail even for trivial
+> leaves like `system host-name`, a `.106`-image-specific issue unrelated
+> to this project's own kernel, noted here for awareness but out of scope
+> to fix). `.185` reverted to production image `2026.09.14-1431-rolling`.
+>
+> **STATUS UPDATE 2026-09-16, first pass — §8.2b's AD-content hypothesis
+> space is now EXHAUSTED. The bug is not in anything software writes.**
+> Two more
 > hypotheses were tested and refuted overnight (2026-09-15/16):
 > **NADEN+HMTD chaining** (new debugfs command `install_l2fwd`, chains the
 > bridge_l2 leaf through a minimal, valid `IPV4_FORWARD` HMTD via NADEN,
@@ -472,21 +579,25 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
   actual source) is built and `traceroute`-verified but the proof has not
   been re-run on it yet.
   **(b) CPU-bypassed HW forward on a CC HIT: AD-content hypothesis space
-  EXHAUSTED, still not achieved.** FMan's hardware QMI counters prove the
-  CC comparator matches and the AD's enqueue action genuinely succeeds,
-  and a new debugfs AD-table dump (F-251) proves the live hardware AD
-  content is byte-perfect against `cc_write_leaf_ad()`'s own intent, in
-  BOTH the bare and NADEN+HMTD-chained forms (`install_l2fwd`, F-250,
-  tested and refuted as a fix). Every software-controllable layer —
-  KeyGen extraction, comparator match, AD content — is now proven
-  correct. The gap is inside FMan's own execution of the AD once handed
-  off (`AC 0x28`/`PRE_BMI_ENQ` microcode, and/or QMan's dequeue
-  scheduling), not observable or controllable via any register/MURAM
-  write this project's software stack has access to. This has shifted
-  from a bug hunt to an architecture question — see the STATUS banner at
-  the top of this file for the working theory (bridge forwarding may
-  need `ask.ko`'s own FE-VM/ehash action mechanism, not a bare CC-leaf
-  AD, for genuine cross-port delivery) and next steps.
+  EXHAUSTED, still not achieved — and now characterized as a likely
+  REGRESSION, not an architecture gap.** FMan's hardware QMI counters
+  prove the CC comparator matches and the AD's enqueue action genuinely
+  succeeds, and a new debugfs AD-table dump (F-251) proves the live
+  hardware AD content is byte-perfect against `cc_write_leaf_ad()`'s own
+  intent, in BOTH the bare and NADEN+HMTD-chained forms (`install_l2fwd`,
+  F-250, tested and refuted as a fix). Every software-controllable layer
+  — KeyGen extraction, comparator match, AD content — is proven correct.
+  **Decisive new evidence (2026-09-16, third pass):** re-running the
+  *exact* port (`0x10`/eth3) and target FQID (`0x2ba`/eth4)
+  `install_vlan` combination that R3b/R4b silicon-proved at ~55k pps in
+  August (commit `4e21e78f` era) now delivers zero frames, byte-perfect
+  AD and all. Since this specific pairing/mechanism definitely worked
+  before and definitely doesn't now, a code regression somewhere between
+  `4e21e78f` and `dpaa1` tip is now a more likely explanation than the
+  `AC 0x28`/`PRE_BMI_ENQ` same-port-only microcode theory (that theory
+  predicts August's R3b/R4b proofs should also have failed, and they
+  didn't). See the STATUS banner at the top of this file for the full
+  evidence and the suggested `git bisect`/targeted-diff next step.
   **B3 remains gated on B2 PASS — do not start it until both (a) and (b)
   are resolved.**
 
