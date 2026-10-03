@@ -350,3 +350,19 @@
 0207-fman-pcd-kg-port-attach-cc-l2.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0208-fman-pcd-cc-l2-key-real-port-id.patch
+
+# T-M6-8d (2026-10-03): vendor SDK deep-dive (/mnt/builds/ASK, the stack
+# proven to sustain VLAN on .116) found vendor never uses CC-tree/AC_CC
+# match-table classification for ANY traffic, including VLAN -- every
+# one of its 16 FMC-declared classification nodes is a plain external
+# hash table, and routed VLAN pop/push is just more inline FE-VM
+# opcodes in the same ehash record routing/NAT already use. Re-adds
+# STRIP_ALL_VLAN(0x12)/INSERT_VLAN_HDR(0x42) emission to
+# fman_pcd_ehash_add_key(), matching vendor's fill_actions() order;
+# byte-identical to the current record when the new optional vlan
+# param is NULL/flags==0. Does not yet fix the original ~21-packet
+# freeze (mechanism still uncharacterized) -- re-establishes the
+# vendor-aligned substrate first. ask.ko wiring is a companion,
+# board-tracked (non-patch) change in kernel/ask/oot-modules/ask/.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0209-fman-pcd-ehash-vlan-revival.patch
