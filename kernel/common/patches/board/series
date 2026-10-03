@@ -350,5 +350,3 @@
 0207-fman-pcd-kg-port-attach-cc-l2.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0208-fman-pcd-cc-l2-key-real-port-id.patch
-# Upstream-Status: Inappropriate | Risk-Tier: B
-0209-fman-pcd-kg-attach-cc-next-engine-fix.patch
