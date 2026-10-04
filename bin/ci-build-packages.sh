@@ -1,5 +1,5 @@
 #!/bin/bash
-# ci-build-packages.sh — Build vyos-1x + vpp (+ optionally linux-kernel) packages
+# ci-build-packages.sh — Build vyos-1x (+ optionally linux-kernel) packages
 # Called by: .github/workflows/auto-build.yml "Build Image Packages" step
 # Expects: GITHUB_WORKSPACE set
 #
@@ -9,16 +9,6 @@
 # would just consume 20+ minutes and replace the ASK kernel with a vanilla
 # one that lacks fast-path hooks.
 #
-# vpp is built from source (not the prebuilt VyOS repo .deb) so
-# data/vyos-build-008-vpp-libxdp.patch's [dependencies] addition
-# (libxdp-dev + libbpf-dev) actually gets installed before VPP's own
-# build — required for the af_xdp plugin's xsk_socket__create() path.
-# Without "vpp" in this list, scripts/package-build/vpp/package.toml
-# (what that patch modifies) is never invoked at all, and patch 008
-# becomes dead code — this was the actual cause of the M4 ZC libxdp
-# regression after commit 957b8f3 reverted the earlier attempt to wire
-# this in (that revert was chasing a different, since-fixed CI caching
-# bug — see 1cee5b2 — and inadvertently took this down with it).
 set -ex -o pipefail
 
 # Source common.sh before changing CWD so it can resolve REPO_ROOT.
@@ -29,9 +19,9 @@ cd "${GITHUB_WORKSPACE:-.}/vyos-build/scripts/package-build"
 
 if [ -n "${ASK_KERNEL_TAG:-}" ]; then
     echo "### ASK kernel in effect ($ASK_KERNEL_TAG) — skipping linux-kernel local build"
-    packages="vyos-1x vpp"
+    packages="vyos-1x"
 else
-    packages="linux-kernel vyos-1x vpp"
+    packages="linux-kernel vyos-1x"
 fi
 ignore_packages=(amazon-cloudwatch-agent amazon-ssm-agent xen-guest-agent)
 
@@ -96,7 +86,15 @@ for package in $packages; do
         # failure 2026-08-14: cache stuck at v6.18.38 while the build
         # tracked 6.18.44.)
         echo "::warning::kernel cache at ${ACTUAL:-<unknown>}, want v${KVER} — re-cloning"
-        rm -rf "$CACHE"
+        # $CACHE may itself be a tmpfs mountpoint (mounted earlier in this
+        # same run, above) — `rm -rf` cannot remove a mountpoint, only its
+        # contents, and fails EBUSY. Clear the contents in place when
+        # mounted; only rm -rf the directory itself when it is plain disk.
+        if mountpoint -q "$CACHE"; then
+          find "$CACHE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+        else
+          rm -rf "$CACHE"
+        fi
         git clone --depth=1 --branch "v${KVER}" \
           https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$CACHE"
         git -C "$CACHE" fetch --unshallow 2>/dev/null || git -C "$CACHE" fetch --depth=100000 2>/dev/null || true
@@ -407,7 +405,7 @@ for package in $packages; do
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
     echo "### Skipping ./build.py for vyos-1x (cache hit)"
   else
-    # Defensive: reset any pre-existing $package/$package checkout to clean
+    # Defensive: reset any pre-existing $package checkout to clean
     # tracked state right before build.py runs. For vyos-1x, ci-setup-
     # vyos1x.sh does an earlier reset in its own "Setup vyos-1x patches"
     # step, but on this persistent self-hosted/local runner that step and
@@ -423,11 +421,23 @@ for package in $packages; do
     # rebase directory still exists" until cleared — plus separate leftover
     # unstaged modifications from a prior successful build. `git am --abort`
     # needs a committer identity; use the same -c override the build_cmd
-    # patch loop itself already uses (data/vyos-build-008-vpp-libxdp.patch's
-    # `git -c user.email=... -c user.name=vyos am`) rather than touching
+    # patch loops use (`git -c user.email=... -c user.name=vyos am`)
+    # rather than touching
     # global git config. Neither exact intervening re-dirty cause was
     # pinned down; reset again here, closest to the point of actual use,
     # rather than leave it to chance.
+    # NOTE: this block runs AFTER `cd "$package"` (line 41), so cwd is
+    # already e.g. `.../package-build/vpp/`. build.py's own repo_dir is
+    # `Path(repo_name)` == `$package` *relative to that cwd* (e.g.
+    # `vpp/vpp/.git` from the repo root, but just `$package/.git`, i.e.
+    # `vpp/.git` relative to the already-cd'd-into-vpp/ cwd here). An
+    # earlier fix (2026-10-04, reverted same day) mistakenly used
+    # "$package/$package" throughout this block -- that double-nests one
+    # level too deep relative to the post-cd cwd and silently kept the
+    # whole block dead (paths never existed, same net effect as the
+    # original bug it was meant to fix). Confirmed via log trace showing
+    # a real nested checkout only at .../package-build/vpp/vpp/ (one level
+    # below the already-cd'd cwd), i.e. plain "$package" is correct here.
     if [ -d "$package/.git" ]; then
       if [ -d "$package/.git/rebase-apply" ]; then
         git -c user.email=maintainers@vyos.net -c user.name=vyos -C "$package" am --abort || true
@@ -456,10 +466,10 @@ for package in $packages; do
       ' package.toml 2>/dev/null)
       if [ -n "$PKG_COMMIT_ID" ] && git -C "$package" fetch origin "$PKG_COMMIT_ID" 2>/dev/null; then
         git -C "$package" reset --hard FETCH_HEAD
-        echo "### $package/: fetched + reset to origin's current $PKG_COMMIT_ID immediately before build.py"
+        echo "### $package: fetched + reset to origin's current $PKG_COMMIT_ID immediately before build.py"
       else
         git -C "$package" reset --hard HEAD
-        echo "### $package/: fetch unavailable/failed, reset to local HEAD immediately before build.py"
+        echo "### $package: fetch unavailable/failed, reset to local HEAD immediately before build.py"
       fi
       git -C "$package" clean -fdq
       # 2026-08-05: git clean -fdq (no -x) never touches gitignored paths.
@@ -477,7 +487,8 @@ for package in $packages; do
       # trees (glob, not -x) so /build-root/.ccache is preserved.
       rm -rf "$package"/build-root/build-*/ "$package"/build-root/install-*/ 2>/dev/null || true
     fi
-    ./build.py
+    # dev-build.sh exports CC="ccache gcc"; CI sets no CC. Match CI.
+    env -u CC ./build.py
   fi
 
   ### Populate vyos-1x cache after a successful build (cache miss path)
