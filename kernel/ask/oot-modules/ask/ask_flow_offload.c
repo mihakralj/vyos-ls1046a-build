@@ -2022,8 +2022,11 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 			return -EOPNOTSUPP;
 		action.vlan_flags = key->vlan_edit_flags;
 		action.vlan_ingress_vid = key->vlan_ingress_vid;
-		action.vlan_push_tci = key->vlan_push_tci;
-		action.vlan_push_tpid = key->vlan_push_tpid;
+		/* key holds __be16; the 0209 emitter takes host order and
+		 * does its own cpu_to_be*() (raw copy put TPID 0x0081 on the
+		 * wire -> every VLAN PUSH HIT frame dropped, 2026-10-04). */
+		action.vlan_push_tci = ntohs(key->vlan_push_tci);
+		action.vlan_push_tpid = ntohs(key->vlan_push_tpid);
 	}
 
 	/* F-195/F-204 contract: the second argument remains exclusively the

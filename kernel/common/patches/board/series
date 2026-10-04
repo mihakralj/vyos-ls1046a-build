@@ -366,3 +366,12 @@
 # board-tracked (non-patch) change in kernel/ask/oot-modules/ask/.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0209-fman-pcd-ehash-vlan-revival.patch
+
+# DMA CAM corruption fix (2026-10-04, ASK2-REWRITE-PLAN E3): every ehash
+# HIT record wrote ENQUEUE_PKT word2 (muram_frag_param_addr) as 0, so the
+# microcode updated its frag-info counters at MURAM 0x0-0xf = the FMan DMA
+# CAM on every routed and VLAN HIT. Points word2 at an owned, zeroed 32 B
+# block carved from the FE int-buf reservation (vendor create_enque_hm
+# never writes 0 there).
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0214-fman-pcd-ehash-enq-frag-info-block.patch
