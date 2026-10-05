@@ -1,0 +1,156 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 05 Oct 2026 00:00:00 +0000
+Subject: [PATCH] fman_pcd: owned stats block for VLAN opcodes; vendor 0x12 on push-only
+
+Push-only VLAN records (untagged ingress -> tagged egress) wedged the
+ingress port RX-deaf on .185 in every opcode form tried, vendor-exact
+05 04 11 12 21 42 41 01 included. The vendor record for this flow class,
+captured live on .106 (2026-10-05, 9.3 Gbit/s), differs from those tests
+only in its non-zero MURAM stats pointers: 04 -> 0x48640, the 0x12 word
+-> 0x48d00, the 0x42 statptr -> 0x48690. Tagged ingress (pop, pop+push)
+tolerates zero pointers.
+
+- Carve a zeroed 256-byte stats scratch block out of the existing FE
+  int-buf reservation (fman_pcd_ehash_int_buf_get/put, same refcounted
+  lifetime, so muram_budget still returns to baseline). Point the
+  UPDATE_ETH_RX_STATS pointer, the STRIP_ALL_VLAN word and the
+  INSERT_VLAN_HDR statptr at it.
+- Emit STRIP_ALL_VLAN for every VLAN edit, with vid 0 when the ingress
+  frame is untagged (push-only), as the vendor record does.
+- Fix the NAT opcode rebuild, which rewound to "vlan_pop ? 1 : 0" and so
+  would overwrite the 0215 04/11 prefix on VLAN+NAT records; rewind to
+  the real VLAN prefix length instead.
+
+Push-only offload stays off in ask.ko (vlan_push_only=0) until validated.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 14c5592..ef56c7f 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -200,6 +200,7 @@ struct fman_pcd {
+ 	unsigned long fe_int_buf_raw_off; /* unaligned off handed to free() */
+ 	size_t fe_int_buf_raw_size;
+ 	int fe_int_buf_refcount;
++	unsigned long fe_stats_off;	  /* VLAN opcode stats scratch (0216) */
+ 	unsigned long fe_root_ad_off;	/* sec.5 FE_ENTER root AD (16 B) */
+ 	unsigned long fe_group_off;	/* F-171: CONT_LOOKUP group AD (16 B) */
+ 	unsigned long fe_group_mto_off;/* F-171: group match table (64 B) */
+@@ -1815,6 +1816,17 @@ static const struct file_operations fman_pcd_fe_enter_fops = {
+ #define FMAN_EHASH_INT_BUF_TOTAL \
+ 	(FMAN_EHASH_INT_BUF_POOL_SIZE + FMAN_EHASH_GLOBAL_MEM_SIZE)
+ #define FMAN_EHASH_ALIGN		256		/* EN_EXTHASH_TBL_ALIGNMENT */
++/*
++ * Owned, zeroed MURAM block that the VLAN opcodes' stats pointers
++ * (UPDATE_ETH_RX_STATS, STRIP_ALL_VLAN word, INSERT_VLAN statptr) target.
++ * The vendor always points these at real per-interface stats in MURAM
++ * (cdx_ehash.c get_logical_ifstats_base()). With them at 0, an
++ * untagged-ingress push record (04 11 12(vid 0) 21 42 41 01) wedges the
++ * RX port; tagged ingress tolerates 0 [SILICON 2026-10-05]. One shared
++ * block, not per-interface counters: the microcode serialises its
++ * updates with ld.sm/st.sm.
++ */
++#define FMAN_EHASH_STATS_SCRATCH_SIZE	256
+ #define FMAN_EHASH_NODE_SIZE		16	/* en_exthash_node descriptor */
+ #define FMAN_EHASH_BUCKET_SIZE		16		/* lf-5.4 {u64 h; u64 pad} */
+ #define FMAN_EHASH_MASK_MAX		0x7fff		/* hash_mask_bits: 4-bit field */
+@@ -1889,7 +1901,8 @@ static int fman_pcd_ehash_int_buf_get(struct fman_pcd *pcd)
+ 	}
+ 
+ 	/* Bounds-check before reserving (section 8.6 item 2). */
+-	raw_size = FMAN_EHASH_INT_BUF_TOTAL + FMAN_EHASH_ALIGN;
++	raw_size = FMAN_EHASH_INT_BUF_TOTAL + FMAN_EHASH_STATS_SCRATCH_SIZE +
++		   FMAN_EHASH_ALIGN;
+ 	mutex_lock(&pcd->lock);
+ 	avail = pcd->muram_reserved - pcd->muram_used;
+ 	mutex_unlock(&pcd->lock);
+@@ -1902,9 +1915,10 @@ static int fman_pcd_ehash_int_buf_get(struct fman_pcd *pcd)
+ 	aligned_off = (raw_off + (FMAN_EHASH_ALIGN - 1)) &
+ 		      ~(unsigned long)(FMAN_EHASH_ALIGN - 1);
+ 	v = (void __iomem *)(void *)(void *)fman_muram_offset_to_vbase(muram, aligned_off);
+-	memset_io(v, 0, FMAN_EHASH_INT_BUF_TOTAL);
++	memset_io(v, 0, FMAN_EHASH_INT_BUF_TOTAL + FMAN_EHASH_STATS_SCRATCH_SIZE);
+ 
+ 	pcd->fe_int_buf_raw_off = raw_off;
++	pcd->fe_stats_off = aligned_off + FMAN_EHASH_INT_BUF_TOTAL;
+ 	pcd->fe_int_buf_raw_size = raw_size;
+ 	pcd->fe_int_buf_off = aligned_off;
+ 	pcd->fe_int_buf_refcount = 1;
+@@ -1922,6 +1936,7 @@ static void fman_pcd_ehash_int_buf_put(struct fman_pcd *pcd)
+ 	pcd->fe_int_buf_raw_off = 0;
+ 	pcd->fe_int_buf_raw_size = 0;
+ 	pcd->fe_int_buf_off = 0;
++	pcd->fe_stats_off = 0;
+ }
+ 
+ /*
+@@ -2344,6 +2359,7 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 			size_t ttl_param_off = param_off;
+ 			size_t l2poff;
+ 			size_t oi = 0;
++			size_t vlan_oi;
+ 			u16 l2_eth_type = eth_type;
+ 			bool vlan_pop = vlan && (vlan->flags & FMAN_PCD_VLANF_POP);
+ 
+@@ -2368,29 +2384,37 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 			 * (SILICON 2026-10-05, .185: 04/05/both prefixes each gave
+ 			 * VID 10 -> 20 at line rate). Without 0x11 at all the frame
+ 			 * leaves with the ingress tag unchanged. Lead with
+-			 * UPDATE_ETH_RX_STATS (0x04), stats_ptr 0 = no stats. */
++			 * UPDATE_ETH_RX_STATS (0x04) into the owned stats scratch
++			 * block (0216). */
+ 			#define FMAN_EHASH_OPC_UPDATE_ETH_RX_STATS	0x04
+ 			#define FMAN_EHASH_OPC_STRIP_ETH_HDR		0x11
+ 			if (vlan && (vlan->flags &
+ 				     (FMAN_PCD_VLANF_POP | FMAN_PCD_VLANF_PUSH))) {
+ 				r[opc_off + oi++] = FMAN_EHASH_OPC_UPDATE_ETH_RX_STATS;
+-				*(__be32 *)(r + param_off) = cpu_to_be32(0);
++				*(__be32 *)(r + param_off) =
++					cpu_to_be32(t->pcd->fe_stats_off & 0x00ffffff);
+ 				param_off += 4;
+ 				ttl_param_off = param_off;
+ 				r[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ETH_HDR;
+ 			}
+-			if (vlan_pop) {
++			/* 0216: vendor emits STRIP_ALL_VLAN for every VLAN edit,
++			 * with vid 0 when the ingress frame is untagged
++			 * (push-only), as captured from .106 2026-10-05. */
++			if (vlan && (vlan->flags &
++				     (FMAN_PCD_VLANF_POP | FMAN_PCD_VLANF_PUSH))) {
+ 				r[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ALL_VLAN;
+ 				*(__be16 *)(r + param_off + 0) =
+-					cpu_to_be16(vlan->ingress_vid);
++					cpu_to_be16(vlan_pop ? vlan->ingress_vid : 0);
+ 				*(__be16 *)(r + param_off + 2) = cpu_to_be16(0);
+-				*(__be32 *)(r + param_off + 4) = cpu_to_be32(0);
++				*(__be32 *)(r + param_off + 4) =
++					cpu_to_be32(t->pcd->fe_stats_off & 0x00ffffff);
+ 				*(r + param_off + 8) = 0;	/* op_flags = VALIDATE */
+ 				*(r + param_off + 9) = 0;
+ 				*(r + param_off + 10) = 0;
+ 				*(r + param_off + 11) = 0;
+ 				ttl_param_off = param_off + 12;
+ 			}
++			vlan_oi = oi;	/* VLAN prefix opcodes (04 11 12), 0 if none */
+ 			l2poff = ttl_param_off;
+ 
+ 			if (eth_type == 0x0800) {
+@@ -2435,7 +2459,7 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				 * reset, preserving F-200/F-226 byte identity; a VLAN
+ 				 * prefix (if any) is preserved since oi/l2poff reset
+ 				 * relative to ttl_param_off, not param_off. */
+-				oi = vlan_pop ? 1 : 0;
++				oi = vlan_oi;
+ 				l2poff = ttl_param_off;
+ 				if (nat->flags & FMAN_PCD_NATF_SPAT)
+ 					port_opc |= FMAN_EHASH_OPC_UPDATE_SPORT;
+@@ -2479,7 +2503,9 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 			 * the original (inner) eth_type. */
+ 			if (vlan && (vlan->flags & FMAN_PCD_VLANF_PUSH)) {
+ 				r[opc_off + oi++] = FMAN_EHASH_OPC_INSERT_VLAN_HDR;
+-				*(__be32 *)(r + l2poff + 0) = cpu_to_be32(1u << 24);
++				*(__be32 *)(r + l2poff + 0) =
++					cpu_to_be32((1u << 24) |
++						    (t->pcd->fe_stats_off & 0x00ffffff));
+ 				*(__be32 *)(r + l2poff + 4) =
+ 					cpu_to_be32(((u32)vlan->push_tci << 16) |
+ 						    eth_type);

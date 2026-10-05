@@ -1,0 +1,55 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 05 Oct 2026 00:00:00 +0000
+Subject: [PATCH] fman_port: reserve the vendor 96 B RX internal margin + parse start offset
+
+Push-only VLAN offload (untagged ingress -> tagged egress) is the one
+inline FE-VM case that grows the frame in front of its start. With
+mainline's FMBM_RIM = 0 / FMBM_RPSO = 0 the ingress port wedged RX-deaf
+within ~10 hits in every record form tried, vendor-exact opcodes and
+stats pointers included (.185, 2026-10-05). The vendor SDK programs
+RIM 0x60000000 / RPSO 0x60 on every RX port (read live on .106).
+
+Writing those two registers live on .185 made push-only offload deliver
+VID 10 at line rate with the port healthy. The full rig matrix (unidir
+and bidir, v4/v6, vlan->vlan, vlan->port, port->port) ran with no
+regression and both ports stayed healthy.
+
+Program the same values in init_bmi_rx(): internal margin
+max(int_buf_start_margin, 96) and parse start offset 96.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 17ea7b1..601767e 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -113,6 +113,7 @@
+ 
+ #define BMI_INT_BUF_MARG_SHIFT			28
+ #define BMI_INT_BUF_MARG_MASK			0x0000000f
++#define FMAN_PORT_RX_HM_MARGIN			96	/* vendor RIM/RPSO, bytes */
+ #define BMI_EXT_BUF_MARG_START_SHIFT		FMAN_SP_EXT_BUF_MARG_START_SHIFT
+ #define BMI_EXT_BUF_MARG_START_MASK		0x000001ff
+ #define BMI_EXT_BUF_MARG_END_MASK		0x000001ff
+@@ -572,10 +573,21 @@ static int init_bmi_rx(struct fman_port *port)
+ 		BMI_IC_SIZE_MASK;
+ 	iowrite32be(tmp, &regs->fmbm_ricp);
+ 
+-	/* Internal buffer offset */
+-	tmp = ((cfg->int_buf_start_margin / PORT_IC_OFFSET_UNITS) &
++	/* Internal buffer offset. The FE-VM inline opcodes (ASK2 ehash
++	 * records) grow the frame in front of its start when they push a
++	 * VLAN tag onto an untagged frame; with no internal margin that
++	 * wedges the RX port (RX-deaf until a cold power-cycle). The vendor
++	 * SDK reserves 96 B here and starts parsing after it (RIM
++	 * 0x60000000, RPSO 0x60, read live on .106). Same values here: with
++	 * them, untagged->VLAN push offloads at line rate and every other
++	 * path (kernel RX, routed, VLAN pop/translate) is unchanged
++	 * [SILICON 2026-10-05, .185].
++	 */
++	tmp = ((max_t(u32, cfg->int_buf_start_margin,
++		      FMAN_PORT_RX_HM_MARGIN) / PORT_IC_OFFSET_UNITS) &
+ 		BMI_INT_BUF_MARG_MASK) << BMI_INT_BUF_MARG_SHIFT;
+ 	iowrite32be(tmp, &regs->fmbm_rim);
++	iowrite32be(FMAN_PORT_RX_HM_MARGIN, &regs->fmbm_rpso);
+ 
+ 	/* External buffer margins */
+ 	tmp = (cfg->buf_margins.start_margins & BMI_EXT_BUF_MARG_START_MASK) <<

@@ -43,10 +43,12 @@ End-to-end recipe, three stages:
 
 **[SPEC]**
 ```bash
-# On this Cobalt 100 VM (cwd = /home/vyos/vyos-ls1046a-build):
-bin/dev-build.sh iso
+# PREFERRED (2026-10-05): CI on the self-hosted runner, then deploy (§5a)
+gh workflow run "VyOS LS1046A build (self-hosted)" --ref dpaa1
+#   ... wait for success, then run the §5a deploy steps to lxc200
 
-# Then on the running board (vyos@192.168.1.190):
+# Then on the running board (operator only — the agent never runs this;
+# lab DUT is vyos@192.168.1.185):
 add system image http://192.168.1.137:8080/iso/latest.iso
 # or pin to a specific build:
 add system image http://192.168.1.137:8080/iso/vyos-<version>-LS1046A-arm64.iso
@@ -131,7 +133,39 @@ ssh lxc200 'sudo install -d -m 0755 -o admin -g admin /srv/tftp/iso'
 
 ---
 
-## 5. THE BUILD COMMAND — `bin/dev-build.sh iso`
+## 5a. CI BUILD AND DEPLOY (preferred)
+
+**[SPEC]** Use the CI workflow for every image that goes onto a board.
+`bin/dev-build.sh iso` (§5) builds the **dirty working tree** and differs from
+CI in several ways (2026-10-04 findings):
+- it exports `CC="ccache gcc"`;
+- it has no minisign secret, so it writes a 10-byte `fake sign` `.minisig`
+  and `add system image` signature verification fails;
+- it rewrites `latest.iso` without its sidecar.
+
+```bash
+# 1. commit + push, then dispatch (workflow_dispatch only)
+gh workflow run "VyOS LS1046A build (self-hosted)" --ref dpaa1
+gh run list --workflow "VyOS LS1046A build (self-hosted)" --limit 1
+
+# 2. download the artifact (-R is needed outside a git checkout)
+A=$(gh api repos/mihakralj/vyos-ls1046a-build/actions/runs/<run-id>/artifacts --jq '.artifacts[0].name')
+gh run download <run-id> -R mihakralj/vyos-ls1046a-build -n "$A" -D /tmp/ci-iso
+
+# 3. publish to lxc200 and refresh BOTH aliases (ISO and .minisig)
+V=$A.iso
+rsync -a --rsync-path='sudo rsync' -e "ssh -i ~/.ssh/admin_key" \
+  /tmp/ci-iso/$V /tmp/ci-iso/$V.minisig admin@192.168.1.137:/srv/tftp/iso/
+ssh -i ~/.ssh/admin_key admin@192.168.1.137 "cd /srv/tftp/iso && \
+  sudo ln -sfn $V latest.iso && sudo ln -sfn $V.minisig latest.iso.minisig && \
+  sha256sum latest.iso.minisig $V.minisig"     # the two hashes must match
+curl -sI http://192.168.1.137:8080/iso/latest.iso | head -1   # HTTP/1.0 200 OK
+```
+
+The CI `.minisig` is a real 341-byte signature. Only `latest.iso` is an alias
+(no per-flavor aliases).
+
+## 5. THE LOCAL BUILD COMMAND — `bin/dev-build.sh iso` (not for board images)
 
 **[SPEC]**
 - The `iso` subcommand wraps the full CI chain (`bin/local-build.sh`) and the LXC-200 publish step.

@@ -617,7 +617,7 @@ KeyGen. To engage the KG for either RSS or AC_CC, rewrite RFPNE to
 
 **[NOTE]** `NIA_KG_DIRECT` alone does not explain the RX stall observed under
 `cc_test`-driven AC_CC dispatch (F-162 added it, board-confirmed live and
-correctly encoded, stall persisted — see `plans/CC-TREE-REBUILD-PLAN.md`). It
+correctly encoded, stall persisted — see `plans/archive/CC-TREE-REBUILD-PLAN.md`). It
 is documented here because it is a real vendor-required field this branch was
 missing, not because it is a proven fix for that stall.
 
@@ -649,7 +649,7 @@ matches exactly between vendor and our armed state and is not listed):
 | `FMBM_RFNE` (pre-parser next engine) | `0x20` | `0x10440000` | `0x00440000` | Bit 28 undecoded. Open, low priority — upstream of the parser. |
 | `FMBM_RPSO` (Parse Start Offset) | `0x2C` | `0x00000060` (96 B) | `0x00000000` | Open. Possibly paired with `FMBM_RIM` (both 0 together may be self-consistent for manip-free config). |
 | `FMBM_RPP` (Policer Profile) | `0x30` | `0x01000000` | `0x00000000` | Likely orthogonal — rate limiting is separate from classification dispatch. |
-| `FMBM_RFENE` / `FMBM_RCMNE` | `0x70` / `0x7C` | `0x00000022` / `0x0000000e` | `0x00d40000` / `0x00000000` | **Deprioritized.** Traced to `AttachPCD()`'s NIA-restore mechanism, which is **dormant** for standard CC-tree/AC_CC setups in the SDK source (only `fm_manip.c` ever sets the flags, and only for an OH-port manip case). Most likely general port-init tuning. |
+| `FMBM_RFENE` / `FMBM_RCMNE` | `0x70` / `0x7C` | `0x00000022` / `0x0000000e` | `0x00d40000` / `0x00000000` | **Deprioritized.** Traced to `AttachPCD()`'s NIA-restore mechanism, which is **dormant** for standard CC-tree/AC_CC setups in the SDK source (only `fm_manip.c` ever sets the flags, and only for an OH-port manip case). Most likely general port-init tuning. **⚠ CORRECTED 2026-10-04:** not dormant. In the ASK SDK, `FM_PORT_SetPCD` arms both whenever `FmPcdIsAdvancedOffloadSupported()` is true, which `dpa_app` always enables: RFENE via `UPDATE_NIA_FENE` (`fm_port.c:5115-5118`), RCMNE `0x0e` via `FM_PORT_ConfigureMuramPage` (`:4843-4852`, called at `:5151`), plus params `misc \|= OFFLOAD_SUPPORT_EN` (`:4863-4866`). `AttachPCD` then writes them (`:1737-1758`). The live vendor `.106` (2026-10-04) shows `0x22`/`0x0e` and params `misc = 0x40000100`; ASK2 has `misc = 0x00000100`. This is the E1 lead in `plans/ASK2-REWRITE-PLAN.md` §4.4. |
 
 **[?] Does `.106` actually exercise ehash? Most likely no.** Three
 independent signals: (1) `cmm` never populates a single flow (§3.2,
@@ -872,6 +872,12 @@ offset of the per-port FE buffer management free-list (written at arm time);
 `+0x58 = 0x00000000` (reset at arm, zeroed at disengage). The `+0x54`/`+0x58`
 fields are only written when `FmPortSetFESupport` is called; they stay zero
 for bare exact-match CC.
+
+**[NOTE 2026-10-04]** The vendor ASK SDK additionally ORs
+`OFFLOAD_SUPPORT_EN` into `+0x40` at `FM_PORT_SetPCD` time when advanced
+offload is on (`fm_port.c:4863-4866`). The live vendor `.106` reads
+`+0x40 = 0x40000100`. ASK2 writes `0x00000100` only (`fman_port.c:2542`).
+See `plans/ASK2-REWRITE-PLAN.md` §4.4 / E1.
 
 ---
 
@@ -1113,7 +1119,7 @@ already builds — the earlier hypothesis "vendor uses a fundamentally
 different AD species" is **not correct**. **What remains open:** `w1`–`w3`'s
 real semantics (most likely a hash/CRC-config + further-indirection scheme
 never replicated here) — the more likely home for the actual behavioral
-difference. Follow-on work: `plans/NXP-106-DEEP-DIVE-PLAN.md` Phase A/C.
+difference. Follow-on work: `plans/archive/NXP-106-DEEP-DIVE-PLAN.md` Phase A/C.
 
 ### 7.12 FE-VM microcode dispatch mechanics — decompile-verified (2026-08-08)
 
@@ -1304,7 +1310,7 @@ opposite conclusion by reading the wrong function family; that conclusion is
 retracted below, in place, per this project's own documentation convention
 of superseding rather than deleting.**
 
-Phase 0 of `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` first read
+Phase 0 of `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` first read
 `ext_hash_add_key()`/`ext_hash_lookup()`/`ext_hash_table_create()` — which
 operate on `t_FmPcdCcNodeExtHashInfo`/`t_FmExtHashBucket` (a 256-byte
 set-associative bucket) — and concluded this project's bucket format was
@@ -1357,7 +1363,7 @@ Entries that want this are allocated at `MAX_EN_EHASH_EXT_ENTRY_SIZE = 320`
 bytes (not 256) — "stats begins at the 256th byte, 64-byte aligned again."
 This is real, unimplemented, and becomes the dispatch-independent
 compare-happened discriminator Phase 1 should add — see the corrected scope
-in `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md`.
+in `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md`.
 
 **Net effect of this whole detour**: this project's ehash bucket/table
 format was never the bug. The persistent MISS remains most plausibly
@@ -1370,7 +1376,7 @@ confirmed defect.
 
 <details><summary>Original (incorrect) 2026-08-07 verdict, preserved for the record</summary>
 
-Phase 0 of `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` read
+Phase 0 of `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` read
 the full, live `ext_hash_add_key()`/`ext_hash_lookup()`/
 `ext_hash_table_create()` bodies from `we-are-mono/ASK`'s
 `patches/kernel/002-mono-gateway-ask-kernel_linux_6_12.patch` (branch
@@ -1430,7 +1436,7 @@ overflow-chaining, and per-key `contex_addr`/`monitoring_addr` stored
 tail-first within the same bucket rather than a separate flow-record
 pointer. This is a structural rewrite of `fman_pcd_ehash_add_key()` /
 `fman_pcd_ehash_bucket_index()` / the bucket allocator, not a small fixup.
-See `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` Phase 1 for the design this
+See `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` Phase 1 for the design this
 verdict feeds into.
 
 **This entire bullet list and "Practical consequence" paragraph is WRONG —
@@ -1810,6 +1816,6 @@ identically on bare exact-match CC.
 | Public microcode capability matrix | `github.com/nxp-qoriq/qoriq-fm-ucode` (readme) |
 | FMan firmware-check script | `board/scripts/firmware-check` |
 | `cmm`/conntrack root cause (why `cmm` counters aren't a usable oracle) | this document §3.2; `specs/conntrack-root-cause-analysis.md` (`nxp-sdk` branch) |
-| `.106` group-table structure, `.106` operational notes | this document §7.11a; `plans/NXP-106-DEEP-DIVE-PLAN.md` |
+| `.106` group-table structure, `.106` operational notes | this document §7.11a; `plans/archive/NXP-106-DEEP-DIVE-PLAN.md` |
 | Complete `Fm*`/`fm_*` function catalogue (162 functions, two vendor SDK snapshots) | `arch/fman-function-inventory.md` |
 | Per-field config-value cross-check (this project's value vs. vendor's real production value) — start here before writing any fixup that sets a hardware field | `arch/fman-config-value-ledger.md` |

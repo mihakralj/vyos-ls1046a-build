@@ -31,6 +31,18 @@ Historical change records, newest first. Subheadings (Fixed / Added / Improved /
 ### 2.1 Unreleased
 
 **Added**
+- **Hardware VLAN offload (802.1Q pop, push and translate), IPv4 and IPv6 (2026-10-05, `dpaa1`).** Routed flows between VLAN sub-interfaces, and between VLAN and untagged ports, are offloaded through the same FMan ehash path as routed traffic, using the vendor's opcode chain (`04 11 12 21 42 41 01`). The feature is on by default (`ask.vlan_offload`, `ask.vlan_push_only`). Bidir: VLAN↔VLAN 15.6–15.9 Gbit/s and VLAN↔untagged 11.7 Gbit/s, against the vendor reference's 16.9 / 12.8 Gbit/s on the same rig. Board patches 0215–0218.
+
+**Fixed**
+- **VLAN offload delivered nothing (2026-10-05).** ask.ko passed the push TCI/TPID in network order to code that byte-swaps again, so offloaded frames left with EtherType `0x0081` and were dropped. TCP backoff then made the hardware hit counter look like a "21-packet FE-VM freeze". Fixed with `ntohs`.
+- **VLAN tag never rewritten / RX port wedge (2026-10-05).** The VLAN records lacked `STRIP_ETH_HDR` (0x11). Adding it as the first opcode wedges the RX port until a cold power-cycle; any opcode before it works. Patch 0215 emits `04 11`.
+- **Untagged→VLAN offload wedged the ingress port (2026-10-05).** Pushing a tag grows the frame in front of its start, and mainline reserved no RX internal margin. Patch 0217 programs the vendor's 96 B margin and parse-start offset (`FMBM_RIM 0x60000000`, `FMBM_RPSO 0x60`) on every RX port.
+- **`Err FD status = 0x00080000` log floods under VLAN↔untagged bidir (2026-10-05).** These are MAC RX FIFO overflows, which the vendor stack sees too. Patch 0218 discards them in BMI as the vendor does; the mEMAC `rdrp`/`rerr` counters still record them.
+
+**Removed**
+- The separate VPP source build (vyos-build patch 008 and the xdp-tools fixer); the ISO uses the upstream VyOS `vpp` package (2026-10-04).
+
+**Added**
 - **DPAA1 FMan hardware routing offload for IPv4 and IPv6 (ASK2).** Routed TCP/UDP unicast flows are offloaded to the Frame Manager's coarse-classifier + FE opcode engine: the CPU is bypassed for established flows while conntrack/nftables remain authoritative. Enabled per interface and per family with `set interfaces ethernet eth<n> offload ipv4` and/or `offload ipv6` (the older single `offload ask` knob is removed; an automatic config migration rewrites it to both families). All five ports are offloadable; each ingress port gets its own hardware flow table. The FE engine decrements IPv4 TTL / IPv6 hop-limit and rebuilds the L2 header in hardware; any flow it cannot represent (ICMP, fragments, NAT/VLAN, unresolved neighbour) falls back cleanly to software forwarding. Measured ~7.3 Gbit/s unidirectional and ~12.9 Gbit/s bidirectional aggregate per 10G port at near-zero CPU. Offloaded MTU is clamped to the 1280–3600 range. Silicon-validated on the LS1046A: mixed v4+v6 bidirectional soak, flow churn/aging (no MURAM or memory leak), TTL/hop-limit decrement, software-fallback edge cases, and the five-port engage matrix.
 
 **Fixed**
