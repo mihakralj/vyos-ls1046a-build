@@ -374,3 +374,10 @@
 # (silicon-bisected on .185; vendor always has 05 04 in front).
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0215-fman-pcd-ehash-vlan-strip-eth-prefix.patch
+
+# Push-only VLAN prep (2026-10-05): owned MURAM stats scratch block for the
+# VLAN opcodes stats pointers (vendor never leaves them 0; untagged-ingress
+# push wedged with 0), 0x12 vid 0 on push-only like the vendor .106 record,
+# and NAT rebuild preserving the full 04/11/12 prefix.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0216-fman-pcd-ehash-vlan-stats-scratch.patch

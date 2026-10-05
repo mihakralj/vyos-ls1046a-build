@@ -117,6 +117,12 @@ static inline int ask_dpaa_get_fman_port_id(struct net_device *dev, u8 *pid)
  */
 static u8 ask_flow_first_pid = 0xff;
 
+static bool ask_vlan_push_only;
+module_param_named(vlan_push_only, ask_vlan_push_only, bool, 0644);
+MODULE_PARM_DESC(vlan_push_only,
+		 "Offload push-only VLAN flows (untagged ingress -> tagged egress); "
+		 "default off pending silicon validation");
+
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
 /*                                                                            */
@@ -2020,14 +2026,16 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		 * behaviour this feature has always shipped with. */
 		if (!ask_hw_vlan_offload_armed_port(key->port_id))
 			return -EOPNOTSUPP;
-		/* Push-only (untagged ingress -> tagged egress) wedges the
-		 * ingress port RX-deaf on 210.10.1 in every opcode form tried,
-		 * vendor-exact 05 04 11 12 21 42 41 01 included (.185,
-		 * 2026-10-05). Keep it in software until a vendor record for
-		 * this flow class is captured. Tagged ingress (pop, pop+push)
-		 * is silicon-validated. */
+		/* Push-only (untagged ingress -> tagged egress) wedged the
+		 * ingress port RX-deaf on 210.10.1 with zero stats pointers in
+		 * every opcode form tried (.185, 2026-10-05). The vendor record
+		 * for this class (.106) differs only in its non-zero stats
+		 * pointers, which 0216 now provides. Off until that is
+		 * silicon-validated; ask.vlan_push_only=1 enables it. Tagged
+		 * ingress (pop, pop+push) is silicon-validated. */
 		if ((key->vlan_edit_flags & ASK_VLANF_PUSH) &&
-		    !(key->vlan_edit_flags & ASK_VLANF_POP))
+		    !(key->vlan_edit_flags & ASK_VLANF_POP) &&
+		    !ask_vlan_push_only)
 			return -EOPNOTSUPP;
 		action.vlan_flags = key->vlan_edit_flags;
 		action.vlan_ingress_vid = key->vlan_ingress_vid;
