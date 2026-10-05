@@ -2020,6 +2020,15 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		 * behaviour this feature has always shipped with. */
 		if (!ask_hw_vlan_offload_armed_port(key->port_id))
 			return -EOPNOTSUPP;
+		/* Push-only (untagged ingress -> tagged egress) wedges the
+		 * ingress port RX-deaf on 210.10.1 in every opcode form tried,
+		 * vendor-exact 05 04 11 12 21 42 41 01 included (.185,
+		 * 2026-10-05). Keep it in software until a vendor record for
+		 * this flow class is captured. Tagged ingress (pop, pop+push)
+		 * is silicon-validated. */
+		if ((key->vlan_edit_flags & ASK_VLANF_PUSH) &&
+		    !(key->vlan_edit_flags & ASK_VLANF_POP))
+			return -EOPNOTSUPP;
 		action.vlan_flags = key->vlan_edit_flags;
 		action.vlan_ingress_vid = key->vlan_ingress_vid;
 		/* key holds __be16; the 0209 emitter takes host order and

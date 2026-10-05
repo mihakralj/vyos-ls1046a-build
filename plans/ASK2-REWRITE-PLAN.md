@@ -797,6 +797,49 @@ the E3 section above are in bold.
   same `{u64 pkts, u64 bytes}` from its own past offloaded traffic. ASK2 is at
   vendor parity here, so there is nothing to fix. Patch 0214 is reverted
   (removed from `series`) as inert.
+- **VLAN translate FIXED (patch 0215) [SILICON 2026-10-05].** The VID 10
+  egress came from the missing `0x11 STRIP_ETH_HDR`. Putting `0x11` at
+  **opcode 0** wedges the RX port. That reproduced three times, including with
+  every safe vendor RX-port setting applied (`rim`/`rpso` 96 B headroom,
+  RFENE/RCMNE, `misc` bit 30), so the headroom and advanced-offload
+  hypotheses are falsified. Live record bisection, rewriting one active
+  record with the sender paused:
+
+  | Opcodes | Result |
+  |---|---|
+  | `05 04 11 12 21 42 41 01` (vendor-exact) | VID 20 at line rate, no wedge |
+  | `04 11 12 21 42 41 01` | VID 20 at line rate, no wedge |
+  | `05 11 12 21 42 41 01` | VID 20 at line rate, no wedge |
+  | `11 12 21 42 41 01` | RX-deaf |
+
+  Rule on 210.10.1: `0x11` must not be opcode 0. Patch 0215 emits `04`
+  (stats 0) + `11` ahead of the VLAN ops; records without VLAN edits are
+  byte-identical. It is validated for VLAN→VLAN only; push-only, pop-only,
+  TCP throughput and the reverse direction are still to be tested on the CI
+  image (commit `b8c06b05`, run 37252626849).
+- **CI image `b8c06b05` (0215) on silicon [SILICON 2026-10-05].** The kernel
+  now emits `04 11 12 21 42 41 01` for VLAN→VLAN.
+
+  | Combo | TCP, 4 streams | eth3 kernel RX |
+  |---|---|---|
+  | vlan→vlan v4 / v6 | **9.33 / 9.23 Gbit/s** | ~0 (hardware) |
+  | port→port v4 / v6 | 9.38 / 9.25 Gbit/s | — |
+  | vlan→port v4 / v6 | 225 / 368 Kbit/s | — |
+
+  vlan→port v4/v6 is broken by the reverse (push-only) direction. One-way UDP
+  results:
+  - **Pop-only** (`04 11 12 21 41 01`, VLAN → untagged) delivers correctly
+    untagged at line rate.
+  - **Push-only** (untagged ingress → VLAN egress) wedges the ingress port
+    (eth4) RX-deaf within about 14 hits. It does so as `04 11 21 42 41 01`,
+    as `04 11 12(vid 0) 21 42 41 01`, and as the vendor-exact
+    `05 04 11 12 21 42 41 01` alike.
+
+  ask.ko now fails push-only closed to software (`-EOPNOTSUPP`) until a vendor
+  record for untagged→VLAN is captured on `.106`. Rig gotcha: a DUT
+  power-cycle drops dell1's table-110 policy routes, so re-run
+  `testrig-combo-matrix.sh setup` after every cold boot or vlan→port silently
+  goes untagged.
 - Tooling note: `/dev/mem` **mmap** reads of DDR records returned `0xcc` on
   this image. Use `pread`/`pwrite` (`dd if=/dev/mem`, helper `pw.py`)
   instead.
