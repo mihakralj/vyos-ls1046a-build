@@ -753,6 +753,54 @@ stats block from `fman_muram_alloc()` and write its offset into the ENQUEUE
 (`0x48650`/`0x48680`/`0x48670`). Alternatively, confirm a microcode flag that
 skips stats. Needs the S0 gate, a design, CI, and a regression run on routed.
 
+#### E3 follow-up: CI build `6bf043d2` on silicon [SILICON 2026-10-05]
+
+Image `2026.10.04-2356-rolling` (CI run 37245529958) on `.185`. Corrections to
+the E3 section above are in bold.
+
+- **Defect 1 fix validated.** The record now carries the vendor bytes
+  (INSERT_VLAN `00 14 08 00`, EtherType `81 00`). The one-way UDP VLAN stream
+  is delivered to dell2 at the full send rate (3,595 frames in 2 s) through
+  the hardware path (record hits climbing, eth3 kernel RX 0).
+- **Defect 2, corrected diagnosis.** The STRIP control word's `num_entries`
+  counts VLAN interface-stats entries, not tags. The vendor itself writes the
+  word as 0 when `INCLUDE_VLAN_IFSTATS` is off (`cdx_ehash.c` ~2000). It was
+  not the cause. Frames still leave with **VID 10** (the ingress tag), so
+  STRIP and INSERT still have no visible effect. The cause is open.
+- **Inserting `0x11 STRIP_ETH_HDR` into a live VLAN record
+  (`12 21 42 41 01` → `11 12 21 42 41 01`) wedges eth3 into the RX-deaf
+  state immediately.** Hits stop at once, then all eth3 RX stops (untagged
+  and VLAN, kernel RX 0). Only a cold power-cycle recovers it. Reproduced
+  twice on 2026-10-05, each time within one frame of the write. This is a
+  concrete, repeatable RX-deaf trigger. Do not emit `0x11` in this chain
+  until the vendor's full prefix (`05 04 11`) and its params are understood.
+- **Defect 3, corrected attribution: patch 0214 does not fix it.** `word2`
+  now points at the owned block (`0x054200`), and that block stays all zero
+  under load, so `word2` was never the writer. A guarded live test pointed one
+  record's ENQ `stats_ptr` (`word`) at the owned block. The block then took
+  vendor `en_ehash_stats` `{u64 bytes, u32 pkts}` for that flow, which proves
+  the ucode honours ENQ `stats_ptr` when non-zero and skips it when 0
+  (vendor-consistent). **MURAM 0x0–0xf kept counting at the same rate**, in a
+  different layout `{u64 pkts @0, u64 bytes @8}`. So the DMA CAM writer is
+  still unidentified. Facts: it runs on the hit path only (a non-offloaded
+  ICMP flood leaves it at +0), it uses the per-record stats layout, and it is
+  shared across flows. 0214 is harmless (+32 B MURAM, lifecycle tied to the
+  int-buf pool) but inert. The CAM counter was also seen reset to 0 once
+  mid-session. The first RX-deaf event came right after a `0x11` poke, so it
+  does not implicate the CAM writes.
+- **Defect 3 RETRACTED [SILICON 2026-10-05]: this is microcode behaviour,
+  not an ASK2 bug.** Setting the record's `STATS_EN` flag (`0x0392` →
+  `0x1392`) did not change it. MURAM 0 counts at exactly the record's own
+  rec+0x100 rate (886K/s versus 886K/s), so it is a microcode working copy
+  of the hit record's stats. The **vendor board `.106` shows the same thing**:
+  `FMDMEBCR = 0` and MURAM `+0x4` = 65.9M packets, `+0x8..f` = 26.4 GB, the
+  same `{u64 pkts, u64 bytes}` from its own past offloaded traffic. ASK2 is at
+  vendor parity here, so there is nothing to fix. Patch 0214 is reverted
+  (removed from `series`) as inert.
+- Tooling note: `/dev/mem` **mmap** reads of DDR records returned `0xcc` on
+  this image. Use `pread`/`pwrite` (`dd if=/dev/mem`, helper `pw.py`)
+  instead.
+
 ### Phase 2 — consolidation (target: smaller than today, no behavior change)
 
 - **Delete dead code physically** [AGENTS S6 §10.7]:
