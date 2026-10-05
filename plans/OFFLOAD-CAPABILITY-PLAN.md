@@ -29,8 +29,10 @@ structural choice explains ASK2's wins and its one loss:
 kernel-authoritative ingest + one intent + one FE record builder + inline opcodes +
 direct-to-TX-FQ — and only borrow the vendor's *heavier* mechanism (separate HM/CC
 node, OH port, two-stage FQ, replication group) where a capability provably cannot
-be expressed as inline opcodes on a single ehash record.** The VLAN result is the
-first evidence that L2 header-rebuild may be the boundary of "expressible inline."
+be expressed as inline opcodes on a single ehash record.** VLAN pop, push and
+translate turned out to be expressible inline after all (2026-10-05, §1.4). The
+earlier "L2 rebuild is the inline boundary" reading came from a host-side
+byte-order bug and missing port headroom, not a microcode limit.
 
 The lean model wins on: no daemon/start-order coupling, no duplicated state, no
 MURAM churn from per-flow HM/CC nodes, lower per-flow latency (direct enqueue), and
@@ -79,7 +81,24 @@ typed action/param; **heavier** = provably needs a vendor-like separate primitiv
   policers are richer; adopt only if a VyOS QoS requirement appears. ASK-engaged
   ports route AC_CC/FE-VM and bypass PLCR by design (per-interface mutex).
 
-### 1.4 VLAN pop/push — DONE via CC+HMTD; R5b + gate-off regression PASSED; merge-ready (2026-08-26)
+### 1.4 VLAN pop/push — DONE via inline FE-VM opcodes (2026-10-05); CC+HMTD path superseded
+
+> **UPDATE 2026-10-05: the conclusions below are reversed.** The inline
+> ehash-opcode path is what ships, and it is silicon-validated and default-on
+> (`dpaa1` `1e8865d5`). The "freeze after ~22 packets" was never an FE-VM
+> limit. Every offloaded frame was dropped, and TCP backoff made the
+> counter look frozen. The causes and fixes:
+> - ask.ko double-swapped the TCI/TPID, putting EtherType `0x0081` on the
+>   wire (fixed with `ntohs`).
+> - `0x11 STRIP_ETH_HDR` was missing, and it must not be opcode 0 (0215
+>   emits `04 11`).
+> - Push-only needs the vendor's 96 B RX internal margin (0217).
+>
+> Bidir: VLAN↔VLAN 15.6–15.9 Gbit/s vs vendor 16.9. The CC+HMTD ("Option A")
+> mechanism below gave no cross-port benefit over software (2026-10-02) and
+> is retired. Details: `plans/ASK2-REWRITE-PLAN.md` Phase 1 / E3. The text
+> below is kept as the 2026-08-26 record.
+
 - **Vendor:** VLAN via the SDK **parser + HMCD header-manip chain** (`set rx
   bridge` svlanprio/cvlanprio/vlan-queue, `tx` DSCP-VLAN-PCP map, parser
   `set_vlan_tpid1/2`), standard parser→KG→CC + OH reassembly. `query vlan` shows

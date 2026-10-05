@@ -1,0 +1,34 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 05 Oct 2026 00:00:00 +0000
+Subject: [PATCH] fman_port: discard RX physical errors in BMI (vendor parity)
+
+Under full-rate VLAN<->untagged bidir traffic the mEMAC RX FIFOs
+overflow. That is a hardware limit of this traffic mix, and the vendor
+stack does it too, at more than twice the rate on .106 (2026-10-05). ASK2
+enqueued every such frame (FM_FD_ERR_PHYSICAL) to the port error FQ, so
+the kernel processed and logged ~26K error frames/s per port ("Err FD
+status = 0x00080000", ratelimited) exactly when the box was saturated.
+The vendor discards them in BMI (FMBM_RFSDM 0x010ee3c0).
+
+Add FM_PORT_FRM_ERR_PHYSICAL to the default RX discard mask. The frame
+was lost anyway; the drop stays visible in the mEMAC rdrp/rerr counters.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 601767e..43469df 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -55,7 +55,13 @@
+ 
+ #define DFLT_PORT_CUT_BYTES_FROM_END		4
+ 
+-#define DFLT_PORT_ERRORS_TO_DISCARD		FM_PORT_FRM_ERR_CLS_DISCARD
++/* Physical errors (MAC RX FIFO overflow under load) are discarded in BMI,
++ * as the vendor SDK does (FMBM_RFSDM 0x010ee3c0 on .106), instead of being
++ * enqueued to the error FQ where dpaa_rx_error() logs and counts each one.
++ * The frame is lost either way; the mEMAC rdrp/rerr counters still record it.
++ */
++#define DFLT_PORT_ERRORS_TO_DISCARD		(FM_PORT_FRM_ERR_CLS_DISCARD | \
++						 FM_PORT_FRM_ERR_PHYSICAL)
+ #define DFLT_PORT_MAX_FRAME_LENGTH		9600
+ 
+ #define DFLT_PORT_RX_FIFO_PRI_ELEVATION_LEV(bmi_max_fifo_size)	\

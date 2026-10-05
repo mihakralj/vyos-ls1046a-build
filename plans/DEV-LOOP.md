@@ -1,6 +1,21 @@
 # Dev-Test Loop: Fast Iteration for VyOS LS1046A
 **Version 1.1.0** · 2026-07-22 · HADS 1.0.0
 
+> **Read first (2026-10-05).** Build kernels and board images through CI
+> (`gh workflow run "VyOS LS1046A build (self-hosted)" --ref dpaa1`; deploy
+> per `plans/ASK-ISO-BUILD-AND-INSTALL.md` §5a), **not** this loop. The local
+> path differs from CI in ways that cost a full day on 2026-10-04:
+> - it builds the dirty working tree, so uncommitted series edits collide with
+>   the fixups;
+> - `dev-build.sh` exports `CC="ccache gcc"`, which broke the VPP build until
+>   `env -u CC ./build.py`;
+> - `local-build.sh` is a hand-copied mirror of `auto-build.yml` and drifts;
+> - it has no minisign key, so the image is unsigned.
+>
+> The canonical kernel tree (`~/kernel-git-cache/linux`) lives on tmpfs and is
+> lost when the VM deallocates; CI re-clones it. Use this loop only for
+> throwaway TFTP experiments you will not install.
+
 ---
 
 ## AI READING INSTRUCTION

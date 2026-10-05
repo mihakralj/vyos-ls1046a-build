@@ -15,7 +15,7 @@ Read `[NOTE]` only if additional context is needed.
 
 **[SPEC]**
 - Authoritative specification for U-Boot configuration, hardware memory map, clock tree, interface mapping, and boot sequence for the NXP LS1046A (Mono Gateway Development Kit).
-- Supersedes `plans/UBOOT.md` (archived). For low-level kernel driver architecture, see `NETWORKING-DEEP-DIVE.md` and `PORTING.md`. For initial board setup, see `INSTALL.md`.
+- Supersedes `plans/archive/UBOOT.md` (archived). For low-level kernel driver architecture, see `NETWORKING-DEEP-DIVE.md` and `PORTING.md`. For initial board setup, see `INSTALL.md`.
 - Two primary boot paths share the same static U-Boot environment:
 
 | Path | Trigger | Primary Use Case |

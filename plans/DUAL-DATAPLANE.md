@@ -13,6 +13,19 @@ the validated hardware path is IPv4 unicast TCP/UDP routing; IPv6, NAT, VLAN,
 IPsec, and bridge remain kernel software fallback (see §1 verdict note). The
 v1.5 and earlier history is retained verbatim below for the decision trail.
 
+**Status update 2026-10-05:** the S1 hardware scope has widened since v1.6.
+IPv6 routed, NAT44/NAT66 and single-tag 802.1Q VLAN (pop, push and translate,
+v4/v6) are now hardware-offloaded on the same ehash path (`dpaa1` `1e8865d5`;
+see `plans/ASK2-MASTER-PLAN.md` and `plans/ASK2-REWRITE-PLAN.md` Phase 1).
+- Bidir: VLAN↔VLAN 15.6–15.9 Gbit/s, routed 15.3–15.8 Gbit/s.
+- IPsec and bridge remain software fallback.
+- The state machine and CLI contract are unchanged.
+
+One port-init change belongs to the reversibility contract (patch 0217): every
+RX port now boots with a 96 B internal margin and parse-start offset (`FMBM_RIM
+0x60000000`, `FMBM_RPSO 0x60`), as the vendor configures. It is static and
+identical in S0, S1 and S2, so it is not a mode-switch delta.
+
 **[NOTE — superseded history]** Adopted v1.5. 2026-08-05 (v1.4's "S1 = CC-tree, FE-VM ehash retired" framing re-litigated: F-163 un-retired ehash — the deployed vendor `cdx.ko` classifies via external-hash; no dispatch path on this branch has a confirmed hardware HIT; `cc_test` harness architecturally broken F-159–F-162; ehash HIT retest pending F-165. The state machine and CLI contract below are unaffected by which matching mechanism wins; S1's *mechanism* is again an open question — see `plans/ASK2-MASTER-PLAN.md` top banners). v1.4 2026-08-01 (S1 redefined: CC-tree + SW flowtable + manip chain, FE-VM ehash retired as dead-end experimental fork; shipping hw-offload proof integrated; M3/M5 false-positive HITs noted). v1.3 2026-07-19 (single-image flavor collapse made **immediate** 2026-06-14; v1.2 incorporated M2 gate PASS + M3 infrastructure landing; v1.3 adopts the **per-interface CLI contract** — `set interfaces ethernet eth<n> offload ask` replaces the `set system offload ask` global knob, mutual exclusion becomes per-interface, and `set system offload classify` is deprecated as a CLI while its mechanism stays a silent default). The `default | ask | vpp` build-flavor split is **retired** — CI ships one flavor-neutral ISO + one `version.json` feed (aliases kept for fielded installs). This is the current build/packaging model. Sequencing/milestones live in `plans/ASK2-MASTER-PLAN.md`; this document owns the state machine and the CLI contract.
 **Goal:** One installed VyOS image on the LS1046A Mono Gateway that supports the *full* NXP-ASK-equivalent FMan hardware offload (CC-tree classification, kernel SW flowtable, manip-chain forwarding, NAT, IPsec, frag/reassembly) **and** can disable that offload to run the VPP/AF_XDP dataplane instead — switched by VyOS config commit, no reflash.
 

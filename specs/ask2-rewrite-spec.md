@@ -6,8 +6,8 @@
 - CC-tree classification **never produced a confirmed HIT** (`cc_test` retired; M5's 10.259 Gbps is a SW-flowtable/CC-tree *throughput* result, mechanism unresolved — see `plans/ASK2-MASTER-PLAN.md` M5).
 
 **Consequences for this index (v1.12):**
-1. **The per-packet HIT path is the external ehash (FE-VM), not CC-tree.** The "DEAD END" banner below the line is retained only as historical framing; the authoritative course-corrected architecture is `plans/ASK2-PRODUCTION-ARCHITECTURE.md`.
-2. **M3 OPEN = the three silicon deltas** (RCCB AD species at `FMBM_RCCB`; record-side `t_ExtHashResult`; params `OFFLOAD_SUPPORT_EN` + FE buffer pool `+0x54/+0x58`) — see `plans/ASK2-PRODUCTION-ARCHITECTURE.md` §3.1/§4 Phase 2.
+1. **The per-packet HIT path is the external ehash (FE-VM), not CC-tree.** The "DEAD END" banner below the line is retained only as historical framing; the authoritative course-corrected architecture is `plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md`.
+2. **M3 OPEN = the three silicon deltas** (RCCB AD species at `FMBM_RCCB`; record-side `t_ExtHashResult`; params `OFFLOAD_SUPPORT_EN` + FE buffer pool `+0x54/+0x58`) — see `plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md` §3.1/§4 Phase 2.
 3. **Binding production requirement: the control surface is genl/YNL only. debugfs is `CONFIG_ASK_DEBUG_FS` / `CONFIG_FMAN_PCD_DEBUG_FS`-gated and compiled out of production images.** Consumers must never depend on `/sys/kernel/debug/ask` or `fman_pcd/fe_*`. The genl `ask` family (UAPI `kernel/ask/uapi/ask.yaml`) is the sole production engage/disengage/flow/stats path.
 
 **[CORRECTION, 2026-08-05]** This index's "FE-VM ehash is a DEAD END / not vendor architecture" framing (v1.11 line below) is partly refuted: the genuine deployed vendor `cdx.ko` driver's production classification path IS external-hash (`insert_entry_in_classif_table()` → `ExternalHashTableAddKey()`, `cdx_ehash.c`, nxp-sdk branch) — see `arch/fman-fe-ehash.md`'s un-retirement banner and `specs/fman-keygen-flow-key-spec.md` §1.2a for the full finding, and F-163 (`kernel/ask/oot-modules/ask/ask_flow_offload.c`) for the resulting key-format fix. What is NOT refuted: the ~1.5 Gbps DDR-per-frame throughput-ceiling claim (unmeasured against real vendor traffic) and the fact that this branch's own FE-VM has still never produced a confirmed hardware HIT (a 2026-08-05 live board test, byte-correct end-to-end including the corrected key, still MISSed — see `arch/fman-microcode-210-programming-reference.md` §10.5a). Whether CC-tree remains the right *shipping* mechanism for other reasons (MURAM footprint, avoiding per-frame DDR) is a separate, still-open question this correction does not settle either way.
@@ -35,7 +35,7 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 | §12 (Wire format) | CDX ↔ kernel serialization — deleted v1.3 | `plans/archive/ASK2-IMPLEMENTATION.md` |
 | §13 (fman_pcd subsystem) | KeyGen, CC, HM, Policer, replicator | `arch/fman-pcd.md` (pipeline narrative), `arch/fman-microcode-210-programming-reference.md` (register reference) |
 | §13.3 (MURAM exhaustion) | gen_pool reservation, chain_create -ENOMEM | `arch/muram.md` |
-| §15 (Implementation status) | Per-module STARTED/NOT_STARTED | `plans/OFFLOAD-CAPABILITY-PLAN.md`, `plans/MODULE-INVENTORY.md` |
+| §15 (Implementation status) | Per-module STARTED/NOT_STARTED | `plans/OFFLOAD-CAPABILITY-PLAN.md`, `plans/archive/MODULE-INVENTORY.md` |
 | §16 (Risk register) | MURAM sizing, HM chain caps | `arch/muram.md`, `plans/DUAL-DATAPLANE.md` |
 
 ## 2. Design intent documents (active)
@@ -47,7 +47,7 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 | `specs/vpp-dpaa1-ls1046a-spec.md` | VPP AF_XDP integration on DPAA1. |
 | `plans/DUAL-DATAPLANE.md` | S0↔S1↔S2 dataplane mode state machine, reversibility contract, CLI semantics (per-interface `set interfaces ethernet eth<n> offload ask`). S1 (ASK) = CC-tree + SW flowtable + manip chain. |
 | `plans/ASK2-MASTER-PLAN.md` | **Single authoritative execution plan** — milestones M2–M8, gates, live TODO list. |
-| `plans/ASK2-PRODUCTION-ARCHITECTURE.md` | **Course-correction plan (2026-08-11)** — production architecture (mainline control plane, NXP DPAA1 data plane, **no debugfs in production**) + 6-phase plan (Phases 1–6). The three silicon deltas for M3 OPEN: RCCB AD species, `t_ExtHashResult` record, `OFFLOAD_SUPPORT_EN`/FE-pool. Supersedes the v1.11 "FE-VM ehash dead end" framing for the HIT path. |
+| `plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md` | **Course-correction plan (2026-08-11)** — production architecture (mainline control plane, NXP DPAA1 data plane, **no debugfs in production**) + 6-phase plan (Phases 1–6). The three silicon deltas for M3 OPEN: RCCB AD species, `t_ExtHashResult` record, `OFFLOAD_SUPPORT_EN`/FE-pool. Supersedes the v1.11 "FE-VM ehash dead end" framing for the HIT path. |
 
 ## 3. Hardware silicon reference (arch/)
 
@@ -66,12 +66,12 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 | Document | Topic |
 |---|---|
 | `plans/ASK2-MASTER-PLAN.md` | **THE authoritative ASK2 execution plan (v1.0.0, 2026-07-19).** Ground state, gaps A–E, binding decisions, milestone chain M2–M8 with gates, live TODO list, open defects, harness/gate mechanics, superseded-doc register. Read this and nothing else for sequencing. |
-| `plans/ASK2-PRODUCTION-ARCHITECTURE.md` | **Course-correction (2026-08-11).** Production architecture + 6-phase plan. See the top correction banner for the M3 reframe and the genl-only/no-debugfs binding requirement. |
+| `plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md` | **Course-correction (2026-08-11).** Production architecture + 6-phase plan. See the top correction banner for the M3 reframe and the genl-only/no-debugfs binding requirement. |
 | `plans/DUAL-DATAPLANE.md` | Dataplane mode state machine (S0/S1/S2) + CLI contract. v1.3 (2026-07-19). S1 = CC-tree + SW flowtable + manip chain. |
-| `plans/TF-2026-07-18-001-function-inventory.md` | Stub/type-drift inventory (F-01–F-23) feeding the master plan §5 re-land series. |
+| `plans/archive/TF-2026-07-18-001-function-inventory.md` | Stub/type-drift inventory (F-01–F-23) feeding the master plan §5 re-land series. |
 | `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Current heidi→DUT `.185`→HELGA throughput harness (supersedes the retired LXC/third-board `plans/archive/TRAFFIC-HARNESS.md`). |
 | `plans/OFFLOAD-CAPABILITY-PLAN.md` | Per-capability vendor-vs-ASK2 mechanism reference (supersedes the dated `plans/archive/OFFLOAD-CAPABILITIES.md` v2.1 snapshot). |
-| `plans/MODULE-INVENTORY.md` | Delivered kernel patch inventory (107 board patches as of 2026-07-18). |
+| `plans/archive/MODULE-INVENTORY.md` | Delivered kernel patch inventory (107 board patches as of 2026-07-18). |
 
 ## 5. Architecture decision records (archive)
 
