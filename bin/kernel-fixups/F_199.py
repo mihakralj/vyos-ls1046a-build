@@ -41,6 +41,18 @@ also drops this FQ's CGE/cgid membership -- an acceptable trade since that
 membership was confirmed non-functional for this producer. Kernel's own
 confirm-enabled TX FQs (td_enable always False) are unaffected.
 
+A6-LOSS step 7 fix-up (2026-10-05, same day): the first cut of this change
+boot-faulted on board .185 (image 2026.10.05-2149) -- "qman_init_fq(698) =
+-22" for fqid 0x2ba/0x2bb (698/699 decimal) on every boot. Root cause:
+qman_init_fq() hard-rejects we_mask with BOTH QM_INITFQ_WE_OAC and
+QM_INITFQ_WE_TDTHRESH set ("can't be set at the same time as TDTHRESH" in
+qman.c). The CGE/OAC branch above unconditionally sets WE_OAC for
+FQ_TYPE_TX_NO_CONFIRM regardless of td_enable, so with td_enable=true both
+WE_OAC and WE_TDTHRESH ended up set together. Fix: that branch's condition
+now reads `(dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM && !td_enable)`, so
+this FQ enters either the CGE/OAC branch or the TDE branch, never both. No
+other caller passes td_enable=true, so no other FQ type is affected.
+
 Count-gated, idempotent (marker "F-199"); hard-fail on any source drift.
 """
 
@@ -93,6 +105,26 @@ replace(
     "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||\n"
     "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ ||\n"
     "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {\n"
+    "\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);",
+)
+
+# 2b. A6-LOSS step 7 (2026-10-05): qman_init_fq() hard-rejects we_mask with
+#     BOTH QM_INITFQ_WE_OAC and QM_INITFQ_WE_TDTHRESH set (qman.c: "can't be
+#     set at the same time as TDTHRESH" -> -EINVAL). Block 2 above
+#     unconditionally enters the CGE/OAC branch for FQ_TYPE_TX_NO_CONFIRM,
+#     which sets WE_OAC; the td_enable branch (block 4's dpaa_fq_init(...,
+#     true) call) sets WE_TDTHRESH -- together these hard-faulted
+#     qman_init_fq() for fqid 0x2ba/0x2bb at every boot ("qman_init_fq(698)
+#     = -22"), confirmed on board .185 image 2026.10.05-2149. Exclude this
+#     FQ from the CGE/OAC branch whenever td_enable is set, since td_enable
+#     is the signal this FQ wants FQD-local tail-drop instead of CGR
+#     membership for the same budget. No other caller in this tree ever
+#     passes td_enable=true, so this is a no-op for every other FQ type.
+replace(
+    ETH_C, "no-confirm FQ skips CGE/OAC when td_enable",
+    "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {\n"
+    "\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);",
+    "\t\t    (dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM && !td_enable)) {\n"
     "\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);",
 )
 
