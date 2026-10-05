@@ -117,11 +117,11 @@ static inline int ask_dpaa_get_fman_port_id(struct net_device *dev, u8 *pid)
  */
 static u8 ask_flow_first_pid = 0xff;
 
-static bool ask_vlan_push_only;
+static bool ask_vlan_push_only = true;
 module_param_named(vlan_push_only, ask_vlan_push_only, bool, 0644);
 MODULE_PARM_DESC(vlan_push_only,
 		 "Offload push-only VLAN flows (untagged ingress -> tagged egress); "
-		 "default off pending silicon validation");
+		 "needs the RX internal margin from patch 0217 (default on)");
 
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
@@ -2026,13 +2026,11 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		 * behaviour this feature has always shipped with. */
 		if (!ask_hw_vlan_offload_armed_port(key->port_id))
 			return -EOPNOTSUPP;
-		/* Push-only (untagged ingress -> tagged egress) wedged the
-		 * ingress port RX-deaf on 210.10.1 with zero stats pointers in
-		 * every opcode form tried (.185, 2026-10-05). The vendor record
-		 * for this class (.106) differs only in its non-zero stats
-		 * pointers, which 0216 now provides. Off until that is
-		 * silicon-validated; ask.vlan_push_only=1 enables it. Tagged
-		 * ingress (pop, pop+push) is silicon-validated. */
+		/* Push-only (untagged ingress -> tagged egress) grows the frame
+		 * in front of its start; without the vendor 96 B RX internal
+		 * margin (patch 0217) it wedged the ingress port RX-deaf. With
+		 * 0217 it offloads at line rate (.185, 2026-10-05). The
+		 * ask.vlan_push_only=0 off-switch keeps it in software. */
 		if ((key->vlan_edit_flags & ASK_VLANF_PUSH) &&
 		    !(key->vlan_edit_flags & ASK_VLANF_POP) &&
 		    !ask_vlan_push_only)
