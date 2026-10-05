@@ -65,7 +65,7 @@
 > 0x28` as a same-port-only primitive): armed the historically-proven
 > `cc_test install_vlan` verb (same `cc_write_leaf_ad()` NADEN+HMTD
 > mechanism R3b/R4b silicon-validated at ~55k pps — see
-> `plans/ASK2-VLAN-REARCH.md` §7b/7c) on the identical port pairing used
+> `plans/archive/ASK2-VLAN-REARCH.md` §7b/7c) on the identical port pairing used
 > for every bridge_l2 test overnight, with a real 5-tuple UDP key
 > (`10.99.8.106→10.99.9.253:9999`, VLAN push vid=100) instead of a MAC-DA
 > key. AD readback confirmed correct arming: `w0=0x000002bc` (target
@@ -301,7 +301,7 @@
 > package entry). This plan turns the high-level
 > `plans/OFFLOAD-CAPABILITY-PLAN.md` §1.5 sketch into a concrete, silicon-gated
 > build. It reuses the CC-tree + HMTD + CC-miss→FE_ENTER substrate the VLAN
-> re-architecture (`plans/ASK2-VLAN-REARCH.md`, T-M6-8) proved on silicon (R4c
+> re-architecture (`plans/archive/ASK2-VLAN-REARCH.md`, T-M6-8) proved on silicon (R4c
 > coexistence: routed 5.68 G via CC-miss→FE + a CC-key edit path simultaneous, no
 > wedge). The bridge lane is the **leanest new consumer** of that substrate: a CC
 > leaf that matches on **destination MAC** and enqueues to the egress port's TX
@@ -707,7 +707,7 @@ de-risk on the `cc_test` harness before any production wiring, then a matrix.
 Untagged bridging (§1) needs no HMTD. VLAN-aware bridging — a bridged frame that
 must have a tag pushed/popped between ingress and egress bridge ports — reuses the
 **exact** VLAN CC-leaf → NADEN → combined-HMTD path the VLAN re-architecture
-shipped (`ASK2-VLAN-REARCH.md`), except the HMTD does only the tag edit + enqueue
+shipped (`archive/ASK2-VLAN-REARCH.md`), except the HMTD does only the tag edit + enqueue
 (no L3 rewrite / no TTL decrement, since it's bridged not routed). This is a clean
 follow-on once §1 base bridging and T-M6-8 tagged-forward both land; sequence it
 after B5 and after multicast (T-M6-MC) if bridge+VLAN filtering is required. Do
@@ -717,7 +717,7 @@ not build it into the base case.
 - Capability scope + lean-model recommendation: `plans/OFFLOAD-CAPABILITY-PLAN.md`
   §1.5, §2, §3; master task **T-M6-2** (`plans/ASK2-MASTER-PLAN.md` §4.6.5 Phase
   M6-E, gates §4.6.5).
-- CC-tree + HMTD + CC-miss→FE substrate (silicon-proven): `plans/ASK2-VLAN-REARCH.md`
+- CC-tree + HMTD + CC-miss→FE substrate (silicon-proven): `plans/archive/ASK2-VLAN-REARCH.md`
   (R3b/R4b/R4c), board patches `0098`/`0108`/`0115`/`0116`/`0121h`.
 - L2 EKFC fields + vendor L2 evidence:
   `arch/fman-microcode-210-programming-reference.md:416-420`,
