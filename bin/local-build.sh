@@ -176,6 +176,18 @@ step "Setup vyos-1x patches" bash bin/ci-setup-vyos1x.sh
 step "Setup kernel config and patches" bash bin/ci-setup-kernel.sh
 step "Compile Mono DTB" bash bin/ci-compile-mono-dtb.sh
 step "Setup vyos-build" bash bin/ci-setup-vyos-build.sh
+
+# auto-build.yml's "Clone Linux Kernel (git repo, not tarball)" step —
+# without this, ci-build-packages.sh's package-build/linux-kernel/linux
+# symlink is never created, build.py silently falls back to the plain
+# kernel.org tarball (no git blob history), and every series patch that
+# needs `git apply --3way` fails with "repository lacks the necessary
+# blob to perform 3-way merge". local-build.sh had never called this
+# (CI-only step); missing here, not a regression from this session.
+KVER_FOR_CLONE="${KERNEL_VERSION:-$(awk -F'"' '/^[[:space:]]*kernel_version[[:space:]]*=/{print $2; exit}' vyos-build/data/defaults.toml 2>/dev/null)}"
+[ -n "$KVER_FOR_CLONE" ] || KVER_FOR_CLONE="6.18.38"
+step "Clone Linux Kernel (git repo, not tarball)" bash bin/clone-kernel.sh "$KVER_FOR_CLONE"
+
 step "Build image packages" bash bin/ci-build-packages.sh
 step "Pick packages" bash bin/ci-pick-packages.sh
 step "Install extra packages" bash bin/ci-install-extra-packages.sh

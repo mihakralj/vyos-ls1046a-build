@@ -977,6 +977,67 @@ module_param_cb(fq_probe, &ask_fq_probe_ops, NULL, 0200);
 MODULE_PARM_DESC(fq_probe,
 		 "T-M6-8 diagnostic: write 1 to log no-confirm TX FQ state + backlog (frm_cnt) via QMan QUERYFQ_NP");
 
+/*
+ * A6-LOSS step6 DIAGNOSTIC: live CGR congestion-state probe.
+ *
+ * dpaa_eth.c's dpaa_fq_init() already places every FQ_TYPE_TX_NO_CONFIRM FQ
+ * (the no-confirm TX FQs this module caches in h->noconf_tx[]) into the
+ * owning netdev's own egress CGR (QM_FQCTRL_CGE set, fqd.cgid =
+ * priv->cgr_data.cgr.cgrid, CS tail-drop + CSCN enabled at CGR init time
+ * with a 256 MiB threshold on 10G ports). That CGR's cgrid is private to
+ * dpaa_eth and not exported, so this probe cannot name which cgrid belongs
+ * to eth3/eth4 -- it instead calls the exported qman_query_cgr_congested()
+ * across the full 0..255 cgrid space and logs only the IDs currently
+ * reporting congested=1. QUERYCGR is a read-only QMan management command
+ * (same class as QUERYFQ_NP); this touches no datapath state.
+ *
+ * Decisive question this answers: when h->noconf_tx[]'s frm_cnt/byte_cnt
+ * (per fq_probe) show a deep, sustained backlog on a no-confirm TX FQ, does
+ * ANY CGR ever actually report congested=1? If none do despite a backlog
+ * far above the configured 256 MiB CS threshold, the CGR's congestion
+ * integrator is not being updated by the FE hardware's direct ENQUEUE_PKT
+ * dispatch into that FQ -- i.e. CGR/CSTD is cosmetically configured on the
+ * FQD but functionally inert for this producer path, and a per-FQ FQTD
+ * threshold (evaluated locally against the FQD's own counters, not routed
+ * through a separate CG integrator) becomes the next candidate instead.
+ */
+static int ask_cgr_probe_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int i, hits = 0;
+	bool trig;
+	int rc;
+
+	rc = kstrtobool(val, &trig);
+	if (rc)
+		return rc;
+	if (!trig)
+		return 0;
+
+	for (i = 0; i < 256; i++) {
+		struct qman_cgr cgr = { .cgrid = i };
+		bool congested = false;
+
+		rc = qman_query_cgr_congested(&cgr, &congested);
+		if (rc)
+			continue; /* unallocated/invalid cgrid: expected for most IDs */
+		if (congested) {
+			pr_info("ask: CGR-PROBE cgrid=%u congested=1\n", i);
+			hits++;
+		}
+	}
+
+	pr_info("ask: CGR-PROBE scan done: %u/%u cgrid(s) congested\n", hits, 256);
+	return 0;
+}
+
+static const struct kernel_param_ops ask_cgr_probe_ops = {
+	.set = ask_cgr_probe_set,
+	/* write-only trigger; no .get */
+};
+module_param_cb(cgr_probe, &ask_cgr_probe_ops, NULL, 0200);
+MODULE_PARM_DESC(cgr_probe,
+		 "A6-LOSS diagnostic: write 1 to scan cgrid 0-255 via qman_query_cgr_congested() and log congested IDs");
+
 /* ------------------------------------------------------------------------- */
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */

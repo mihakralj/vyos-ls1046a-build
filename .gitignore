@@ -51,6 +51,14 @@ work/
 !data/ask-userspace/libcli/
 fmc_config_data.c
 
+# ask-persistent-keys/ is the module-signing keypair bin/ci-setup-kernel.sh
+# generates at $GITHUB_WORKSPACE/ask-persistent-keys so vmlinux and OOT
+# ask.ko are signed with the same key for one CI run (see the "ASK2 v2
+# persistent signing key" block). Root-owned, regenerated per run/build,
+# and NOT reusable across runs (each job gets a fresh key) — must not be
+# committed, same rationale as accel-ppp-ng/ below.
+ask-persistent-keys/
+
 # accel-ppp-ng/ is a build-time clone created by bin/ci-build-accel-ppp.sh
 # (clones accel-ppp/accel-ppp-ng @ commit 3e30d9b to build daemon + ipoe
 # .kmods on ARM64, since the upstream VyOS arm64 mirror does not provide
