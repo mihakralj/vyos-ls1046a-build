@@ -1,0 +1,295 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Sat, 03 Oct 2026 00:00:00 +0000
+Subject: [PATCH] fman_pcd: revive ehash+inline-opcode VLAN (T-M6-8d), align with vendor fill_actions()
+
+Today's deep review of the vendor SDK that's actually proven to sustain
+VLAN on this silicon (/mnt/builds/ASK, cdx/cmm/dpa_app, the stack
+running on .116) found that "Option A" (CC-leaf AD -> NADEN -> VLAN
+HMTD, ASK2-VLAN-REARCH.md, shipped 2026-08-26) is architecturally
+foreign to what vendor actually does:
+
+- Vendor's own declarative FMC policy (dpa_app/files/etc/cdx_pcd.xml,
+  525 lines, read in full) declares EVERY ONE of its 16 classification
+  nodes -- TCP4/UDP4/TCP6/UDP6/ESP4/ESP6/multicast/the L2 bridge
+  table/PPPoE/3-tuple/fragmentation, on every port including both
+  OFFLINE ports -- as <hashtable external="yes" .../>. There is no
+  RM-style CC match-table classification node anywhere in vendor's
+  shipped configuration, for any traffic class, on any port.
+- Reading cdx_ehash.c directly: routed VLAN pop/push (fill_actions(),
+  the function that handles routed TCP/UDP, as opposed to the
+  MAC-keyed fill_bridge_actions() used only for pure L2 switching) is
+  just more inline FE-VM opcodes (STRIP_ALL_VLAN 0x12 / INSERT_VLAN_HDR
+  0x42) in the SAME per-flow ehash record that handles routing/NAT.
+  No OH-port, no NADEN, no HMTD anywhere in vendor's routed-VLAN path.
+- Separately, today's own board A/B testing (patch 0209 attempt #1,
+  commit b72338d2, reverted) and a six-weeks-earlier investigation
+  (plans/CC-TREE-REBUILD-PLAN.md, 2026-08-05 FINAL VERDICT) both
+  independently found that reaching AC_CC dispatch via next_engine=3
+  reliably wedges this silicon (RX-deaf, cold-boot-only recovery),
+  while next_engine=2 is safe but always "dual delivers" (a real HW
+  classification AND a simultaneous software-path copy, capping
+  throughput). Vendor's own kgse_ccbs=0 on a working scheme (recorded
+  in arch/fman-microcode-210-programming-reference.md) suggests vendor
+  never reaches this register at all for ordinary classification.
+
+So Option A swapped a narrowly-buggy-but-correct mechanism (the
+original F-233/0174 inline-opcode path, retired 2026-08-26 after
+freezing at ~21 packets, a per-task FE-VM management-index resource
+exhaustion that was never root-caused) for an architecturally-foreign
+one that vendor doesn't use for this purpose at all -- which is very
+plausibly why Option A has itself been fragile (dual delivery / wedge,
+confirmed today).
+
+This patch re-adds VLAN opcode emission to fman_pcd_ehash_add_key(),
+matching vendor's fill_actions() order exactly: STRIP_ALL_VLAN (0x12,
+mandatory-first on POP, real ingress VID + op_flags=0/VALIDATE, per
+vendor's "strip vlan hdrs is called mandatorily to validate the vlan
+id's" comment) -> TTL/HOPLIMIT or fused NAT (unchanged existing logic)
+-> INSERT_VLAN_HDR (0x42, single tag, control word (num_hdrs=1)<<24 +
+one (TCI<<16)|inner-EtherType word, PUSH only) -> INSERT_L2_HDR (now
+embedding the VLAN TPID as the new outer ethertype when PUSH is active,
+instead of the original inner ethertype) -> ENQUEUE_PKT.
+
+Byte-identical to the current (post-F-233-retirement) record whenever
+the new optional `vlan` parameter is NULL or vlan->flags==0 -- verified
+by inspection: every new code path is gated on vlan/vlan->flags and
+every existing oi/l2poff/param_off computation is threaded through an
+intermediate (ttl_param_off) that equals the old hardcoded param_off
+in the no-VLAN case.
+
+This does NOT yet fix the original ~21-packet freeze (that mechanism-
+level bug, most likely INSERT_VLAN_HDR's internal checksum/DMA
+submission asymmetry per the 2026-09-10 microcode disassembly, is
+still uncharacterized) -- it re-establishes the vendor-aligned
+mechanism and is the necessary first step before that bug can be
+chased on the right substrate. ask.ko (board-tracked, not behind this
+patch) is wired in a companion change to call this path for VLAN flows
+instead of the CC-tree path; ask_vlan_cc.c is left in place, unused,
+as an easy revert if this does not pan out.
+
+Upstream-Status: Inappropriate | Risk-Tier: B (re-adds previously-
+shipped-then-retired inline-opcode emission to an existing, heavily
+proven function; gated so the no-VLAN record path is byte-identical;
+known failure mode if the old freeze recurs is a clean stall after
+~21 packets, not a wedge/crash, per the extensive prior P0 campaign)
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 36ee7220f7ac..2fdf15651510 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2252,24 +2252,29 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				  u32 enq_off, u32 fqid, bool stats,
+ 				  const u8 *l2_dst, const u8 *l2_src,
+ 				  u16 eth_type,
+-				  const struct fman_pcd_nat_params *nat);
+-/* F-230: debugfs fe_flow add path never performs NAT. */
++				  const struct fman_pcd_nat_params *nat,
++				  const struct fman_pcd_vlan_params *vlan);
++/* F-230: debugfs fe_flow add path never performs NAT; T-M6-8d adds an
++ * optional vlan param so the debug harness can de-risk the revived
++ * inline-opcode VLAN path independently of ask.ko. */
+ static int fman_pcd_ehash_add_key_natwrap_dbgfs(
+ 				  struct fman_pcd_ehash_table *t,
+ 				  const u8 *key, u8 key_size,
+ 				  u32 enq_off, u32 fqid, bool stats,
+ 				  const u8 *l2_dst, const u8 *l2_src,
+-				  u16 eth_type)
++				  u16 eth_type,
++				  const struct fman_pcd_vlan_params *vlan)
+ {
+ 	return fman_pcd_ehash_add_key(t, key, key_size, enq_off, fqid, stats,
+-				      l2_dst, l2_src, eth_type, NULL);
++				      l2_dst, l2_src, eth_type, NULL, vlan);
+ }
+ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				  const u8 *key, u8 key_size,
+ 				  u32 enq_off, u32 fqid, bool stats,
+ 				  const u8 *l2_dst, const u8 *l2_src,
+ 				  u16 eth_type,
+-				  const struct fman_pcd_nat_params *nat)
++				  const struct fman_pcd_nat_params *nat,
++				  const struct fman_pcd_vlan_params *vlan)
+ {
+ 	struct fman_pcd_ehash_flow *flow;
+ 	u64 prev_head, old_native, rec_phys;
+@@ -2306,6 +2311,8 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 	/* F-198 (T-M7-2 S1): vendor ordered opcode/parameter record. */
+ 	#define FMAN_EHASH_OPC_ENQUEUE_PKT		0x01
+ 	#define FMAN_EHASH_OPC_INSERT_L2_HDR	0x41
++	#define FMAN_EHASH_OPC_STRIP_ALL_VLAN	0x12
++	#define FMAN_EHASH_OPC_INSERT_VLAN_HDR	0x42
+ 	{
+ 		size_t opc_off = FMAN_EHASH_FLOW_KEY_OFF + ALIGN(key_size, sizeof(u32));
+ 		size_t param_off = opc_off + 16;	/* MAX_OPCODES */
+@@ -2334,14 +2341,43 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 			 * payload needs two pad bytes, so word = 14 | (2 << 29) =
+ 			 * 0x4000000e. L2 param consumes 20B. */
+ 			#define FMAN_EHASH_OPC_UPDATE_TTL	0x21
+-			size_t l2poff = param_off;
++			size_t ttl_param_off = param_off;
++			size_t l2poff;
+ 			size_t oi = 0;
++			u16 l2_eth_type = eth_type;
++			bool vlan_pop = vlan && (vlan->flags & FMAN_PCD_VLANF_POP);
++
++			/* T-M6-8d (ehash-vlan-revival): STRIP_ALL_VLAN (0x12) is
++			 * vendor's mandatory-first opcode for a routed POP -- see
++			 * fill_actions()'s "strip vlan hdrs is called mandatorily
++			 * to validate the vlan id's" comment. Vendor writes the
++			 * real ingress VID (en_ehash_strip_all_vlan_hdrs: BE
++			 * vlan_id[2] outer-first, a 4B validating word, op_flags,
++			 * 12B total) and leaves op_flags=0 (VALIDATE) for a routed
++			 * tagged POP -- OP_SKIP_VLAN_VALIDATE is a bridge-only case
++			 * this ehash path never takes. Must run before the TTL/NAT
++			 * opcode so later params land after it; ttl_param_off (not
++			 * param_off) is threaded through so the no-VLAN case stays
++			 * byte-identical. */
++			if (vlan_pop) {
++				r[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ALL_VLAN;
++				*(__be16 *)(r + param_off + 0) =
++					cpu_to_be16(vlan->ingress_vid);
++				*(__be16 *)(r + param_off + 2) = cpu_to_be16(0);
++				*(__be32 *)(r + param_off + 4) = cpu_to_be32(0);
++				*(r + param_off + 8) = 0;	/* op_flags = VALIDATE */
++				*(r + param_off + 9) = 0;
++				*(r + param_off + 10) = 0;
++				*(r + param_off + 11) = 0;
++				ttl_param_off = param_off + 12;
++			}
++			l2poff = ttl_param_off;
+ 
+ 			if (eth_type == 0x0800) {
+ 				/* UPDATE_TTL opcode + 4B zero DSCP param first. */
+ 				r[opc_off + oi++] = FMAN_EHASH_OPC_UPDATE_TTL;
+-				*(__be32 *)(r + param_off + 0) = cpu_to_be32(0);
+-				l2poff = param_off + 4;
++				*(__be32 *)(r + ttl_param_off + 0) = cpu_to_be32(0);
++				l2poff = ttl_param_off + 4;
+ 			} else if (eth_type == 0x86dd) {
+ 				/* F-226(hoplimit): IPv6 hop-limit decrement, the v6
+ 				 * counterpart of UPDATE_TTL (vendor fm_ehash.h
+@@ -2350,8 +2386,8 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				 * decrement the hop limit on forward. */
+ 				#define FMAN_EHASH_OPC_UPDATE_HOPLIMIT	0x29
+ 				r[opc_off + oi++] = FMAN_EHASH_OPC_UPDATE_HOPLIMIT;
+-				*(__be32 *)(r + param_off + 0) = cpu_to_be32(0);
+-				l2poff = param_off + 4;
++				*(__be32 *)(r + ttl_param_off + 0) = cpu_to_be32(0);
++				l2poff = ttl_param_off + 4;
+ 			}
+ 			/* F-230 (T-M6-7.1): vendor create_nat_hm encoding.
+ 			 * NAT opcodes are BIT-FUSED (OR'd into one byte per operation
+@@ -2373,11 +2409,14 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				u8 l3_opc;
+ 				bool pv6 = nat->is_v6;
+ 
+-				/* Rebuild the opcode list + params from param_off in the
+-				 * vendor NAT order. The no-NAT branch below never executes
+-				 * this reset, preserving F-200/F-226 byte identity. */
+-				oi = 0;
+-				l2poff = param_off;
++				/* Rebuild the opcode list + params from ttl_param_off
++				 * (after any STRIP_ALL_VLAN prefix) in the vendor NAT
++				 * order. The no-NAT branch above never executes this
++				 * reset, preserving F-200/F-226 byte identity; a VLAN
++				 * prefix (if any) is preserved since oi/l2poff reset
++				 * relative to ttl_param_off, not param_off. */
++				oi = vlan_pop ? 1 : 0;
++				l2poff = ttl_param_off;
+ 				if (nat->flags & FMAN_PCD_NATF_SPAT)
+ 					port_opc |= FMAN_EHASH_OPC_UPDATE_SPORT;
+ 				if (nat->flags & FMAN_PCD_NATF_DPAT)
+@@ -2411,12 +2450,28 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 					l2poff += pv6 ? 16 : 4;
+ 				}
+ 			}
++			/* T-M6-8d: INSERT_VLAN_HDR (0x42) runs after TTL/NAT, just
++			 * before the L2 rebuild -- vendor create_vlan_ins_hm(), a
++			 * single-tag en_ehash_insert_vlan_hdr: control word
++			 * (num_hdrs=1)<<24, then one (TCI<<16)|inner-EtherType word.
++			 * The frame's new OUTER ethertype becomes the VLAN TPID, so
++			 * the INSERT_L2_HDR param below must embed push_tpid, not
++			 * the original (inner) eth_type. */
++			if (vlan && (vlan->flags & FMAN_PCD_VLANF_PUSH)) {
++				r[opc_off + oi++] = FMAN_EHASH_OPC_INSERT_VLAN_HDR;
++				*(__be32 *)(r + l2poff + 0) = cpu_to_be32(1u << 24);
++				*(__be32 *)(r + l2poff + 4) =
++					cpu_to_be32(((u32)vlan->push_tci << 16) |
++						    eth_type);
++				l2poff += 8;
++				l2_eth_type = vlan->push_tpid;
++			}
+ 			r[opc_off + oi++] = FMAN_EHASH_OPC_INSERT_L2_HDR;
+ 			r[opc_off + oi++] = FMAN_EHASH_OPC_ENQUEUE_PKT;
+ 			*(__be32 *)(r + l2poff + 0) = cpu_to_be32(0x4000000e);
+ 			memcpy(r + l2poff + 4, l2_dst, 6);
+ 			memcpy(r + l2poff + 10, l2_src, 6);
+-			*(__be16 *)(r + l2poff + 16) = cpu_to_be16(eth_type);
++			*(__be16 *)(r + l2poff + 16) = cpu_to_be16(l2_eth_type);
+ 			enqueue_off = l2poff + 20;	/* after L2 (ALIGN(4+14,4)) */
+ 		} else {
+ 			/* Byte-identical F-197 RX-reinjection terminal. */
+@@ -2937,7 +2992,7 @@ static ssize_t fman_pcd_fe_flow_write(struct file *file,
+ 	err = fman_pcd_ehash_add_key_natwrap_dbgfs(t, key, key_size,
+ 				     drop ? (u32)pcd->fe_exit_off :
+ 					    (u32)enq_obj->muram_off, (u32)fqid,
+-				     stats, NULL, NULL, 0);
++				     stats, NULL, NULL, 0, NULL);
+ 
+ 	if (!err) {
+ 		/* F-177 (T-M3-R Phase 2 item 2): assert FMFP_EXTC[INV0] SYNC
+@@ -5117,6 +5172,12 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 			.sport  = action->nat_sport,
+ 			.dport  = action->nat_dport,
+ 		};
++		struct fman_pcd_vlan_params _vlan = {
++			.flags     = action->vlan_flags,
++			.ingress_vid = action->vlan_ingress_vid,
++			.push_tci  = action->vlan_push_tci,
++			.push_tpid = action->vlan_push_tpid,
++		};
+ 		int err;
+ 
+ 		memcpy(_nat.sip, action->nat_sip, 16);
+@@ -5139,7 +5200,8 @@ int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+ 						 (u32)rec_ctx, hit_fqid,
+ 						 false /* F-189(genl-stats-false) */,
+ 						 l2_dst, l2_src, l2_eth,
+-						 &_nat);
++						 &_nat,
++						 action->vlan_flags ? &_vlan : NULL);
+ 
+ 	if (!err) {
+ 		/* F-177 (T-M3-R Phase 2 item 2): assert FMFP_EXTC[INV0] SYNC
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 171b8e3f7c2c..c0daa51ffe0d 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -441,6 +441,27 @@ struct fman_pcd_fe_flow_action {
+ 	u8   nat_dip[16];
+ 	__be16 nat_sport;
+ 	__be16 nat_dport;
++	/* T-M6-8d (ehash-vlan-revival): VLAN pop/push, vendor fill_actions()
++	 * mechanism (inline FE-VM opcodes in the same ehash record used for
++	 * routing/NAT) instead of the CC-tree+NADEN+HMTD path. vlan_flags==0
++	 * => no VLAN edit (record byte-identical to the plain routed path). */
++	u8   vlan_flags;
++	u16  vlan_ingress_vid;	/* host order; STRIP_ALL_VLAN validation */
++	u16  vlan_push_tci;	/* host order; PCP<<13|DEI<<12|VID */
++	u16  vlan_push_tpid;	/* host order; outer EtherType, e.g. 0x8100 */
++};
++
++/* T-M6-8d: vlan_flags bits, mirroring ask.ko's ASK_VLANF_*. */
++#define FMAN_PCD_VLANF_POP	(1u << 0)
++#define FMAN_PCD_VLANF_PUSH	(1u << 1)
++
++/* VLAN rewrite parameters threaded into the ehash record emitter, the
++ * vlan-equivalent of struct fman_pcd_nat_params below. */
++struct fman_pcd_vlan_params {
++	u8  flags;		/* FMAN_PCD_VLANF_* */
++	u16 ingress_vid;
++	u16 push_tci;
++	u16 push_tpid;
+ };
+ 
+ /* F-230: NAT rewrite parameters threaded into the ehash record emitter.

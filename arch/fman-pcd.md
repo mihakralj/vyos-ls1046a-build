@@ -49,7 +49,7 @@
 > across five vendor-verified register fixes (F-159–F-162) while `.106`'s vendor stack survived 400+
 > — `cc_test`'s architecture is the problem. **Neither path has a confirmed hardware HIT on this
 > branch; both are under active rework.** Byte-level oracle path forward:
-> `plans/NXP-106-DEEP-DIVE-PLAN.md` Phases A/C.
+> `plans/archive/NXP-106-DEEP-DIVE-PLAN.md` Phases A/C.
 
 This is the PCD pipeline ARCHITECTURE doc. Historically (through 2026-07-24/M5) the **CC-tree + kernel
 SW flowtable + manip-chain** forward path was the shipping HW-offload mechanism; per the correction

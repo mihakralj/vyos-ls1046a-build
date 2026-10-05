@@ -297,7 +297,7 @@ Abandoned 2026-04-03 (RC#31). Analysis: `plans/VPP-DPAA-PMD-VS-AFXDP.md`. Produc
 | `kernel/common/files/fman_pcd_fe_test.c` | §17 Tripwire 2: 8 KUnit test cases (`CONFIG_FSL_FMAN_PCD_KUNIT_TEST=y`) for descriptor encodings. Injected by F-089 |
 | `.github/workflows/patch-rot-check.yml` | Weekly canary (Mon 06:00 UTC): `git apply --3way --check` on series; `::warning` per drifted patch + end-of-run counter summary |
 | `plans/TA-2026-07-18-002-patch-architecture.md` | Patch architecture v1.3 — 3-layer analysis, tool evaluation, tree-canonical migration plan, risk-tier taxonomy, §17 tripwire architecture |
-| `plans/patching-improvement-plan.md` | IP-003 v1.3 — Phase 0/R/2a scorecard, NF-01–NF-11 findings, count-gating validation, REPLACEMENT block structural debt, binding P-rules |
+| `plans/archive/patching-improvement-plan.md` | IP-003 v1.3 — Phase 0/R/2a scorecard, NF-01–NF-11 findings, count-gating validation, REPLACEMENT block structural debt, binding P-rules |
 | `bin/ci-setup-vyos1x.sh` / `bin/ci-setup-vyos-build.sh` | vyos-1x patches + reftree / vyos-build patches + live-build ARM64 |
 | `bin/ci-build-packages.sh` / `bin/ci-build-accel-ppp.sh` / `bin/ci-build-iso.sh` | Kernel+vyos-1x builds / accel-ppp-ng fallback (S5) / ISO + isohybrid (FAT32+MBR append) |
 | `kernel/common/kernel-config/` | Board kernel config fragments (dpaa1, i2c-gpio, `03-leds.config` = `NEW_LEDS, LEDS_CLASS, LEDS_CLASS_MULTICOLOR, LEDS_GPIO, LEDS_LP5812, LEDS_TRIGGERS, LEDS_TRIGGER_NETDEV`, sfp, usb, watchdog) |

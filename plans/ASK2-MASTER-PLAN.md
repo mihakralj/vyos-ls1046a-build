@@ -13,9 +13,9 @@ Sources of truth that remain **live and binding** (this plan only sequences
 them): silicon contract `arch/fman-microcode-210-programming-reference.md` +
 `arch/fman-fe-ehash.md`; flow-key spec `specs/fman-keygen-flow-key-spec.md`;
 state machine + CLI contract `plans/DUAL-DATAPLANE.md`; API surface
-`arch/fman-pcd-api-reference.md`; CC-tree rebuild `plans/CC-TREE-REBUILD-PLAN.md`;
-vendor oracle `plans/NXP-106-DEEP-DIVE-PLAN.md`; stub/type inventory
-`plans/TF-2026-07-18-001-function-inventory.md`. Where this plan and those
+`arch/fman-pcd-api-reference.md`; CC-tree rebuild `plans/archive/CC-TREE-REBUILD-PLAN.md`;
+vendor oracle `plans/archive/NXP-106-DEEP-DIVE-PLAN.md`; stub/type inventory
+`plans/archive/TF-2026-07-18-001-function-inventory.md`. Where this plan and those
 documents disagree, they win — update this plan.
 
 ---
@@ -35,7 +35,15 @@ bidirectional HIT run moved 13.6 GB (~9.7M frames), while eth4/eth3
 `tx confirm [TOTAL]` advanced only +9/+5 control-plane frames, F-227 remained
 zero, and the board stayed idle. The earlier B0V-cleared guess
 `0x1c00000080000000` is superseded; F-232 proved the record already targeted
-FQs `0x2ba/0x2bb` and was retired after this validation. **The old S2 inline
+FQs `0x2ba/0x2bb` and was retired after this validation. **[SUPERSEDED
+2026-10-03 — see `plans/ASK2-REWRITE-PLAN.md`: the CC-leaf → HMTD path
+("Option A") showed no cross-port benefit over software (2026-10-02, vendor
+vlan↔vlan 16.50G vs ASK2 5.27G on 2026-09-10); commit `40ace3f0` revived the
+inline FE-VM path. **UPDATE 2026-10-05:** that inline path is now
+silicon-validated and ships default-on through patches 0215–0218 and the
+ask.ko fixes (`dpaa1` `1e8865d5`). VLAN↔VLAN bidir reaches 15.6–15.9 Gbit/s,
+and push-only and pop-only are offloaded; see `plans/ASK2-REWRITE-PLAN.md`
+E3. The text below is historical.]** **The old S2 inline
 FE-VM VLAN strip/insert path is retired, not pending:** it exhausted a 5+tnums
 FE-VM management resource after 21 frames. VLAN pop/push now uses the separate
 CC-leaf → combined-HMTD path and is DONE and silicon-validated end-to-end
@@ -136,7 +144,7 @@ soak — not a CC-tree-vs-ehash mechanism decision (§4.6).
 | 1. FMan PCD subsystem (KG / CC / HM / PLCR) | Shipping — patches 0092–0118, 0151–0155 |
 | 2. FE-VM ehash substrate (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | Code complete. Manual E25/E26 proved a discriminator-verified silicon HIT, but F-192 production-adjacent diagnostics remain incomplete; the warm shared diagnostic chain is singleton-global and must be reused rather than rebuilt. |
 | 3. Classifier→FE arm | Direct vendor-node arm is proven. The manual `.185` eth3 arm explicitly applies scheme-4 EKFC and tears down safely; the retained chain is byte-readable. The fixed-tuple SPC capture proves KeyGen scheme-4 traversal but not the succeeding FE workspace/writeback stage. |
-| 4. ask.ko datapath (genl + flow table) | **IPv4 and IPv6 routed TCP/UDP unicast are complete and silicon-passed; IPv4/IPv6 NAT/PAT (nat44 + nat66) ship default-on; single-tag IPv4 802.1Q VLAN pop/push is implemented and silicon-validated behind a default-off gate.** Routed/NAT uses per-port 46-byte dual-family ehash tables, `UPDATE_TTL`/`UPDATE_HOPLIMIT`, bit-fused NAT rewrites (`0x33`/`0x27`/`0x2f`, F-230), `INSERT_L2_HDR`, and hardware enqueue. VLAN uses a per-port CC shadow whose HIT leaf invokes a combined tag-edit + L2 rewrite + TTL/checksum HMTD and whose miss row falls through to FE_ENTER, preserving routed/NAT coexistence. The retired inline FE-VM VLAN path's 21-frame freeze cannot recur in the separate HM engine. R4c-2/R4c-3 passed silicon; R5 fixed vif-delete teardown ordering; R5b matrix (no-wrong-forward, PCP/DEI, MTU sweep, 100× churn) and full gate-off regression (routed ~11.6G / NAT44 ~11.7G) both PASSED — VLAN is done and merge-ready, shipping default-off; eth0, 802.1ad, QinQ, IPv6 VLAN and stacked tags fall back to software. Sustained mixed-family routed traffic reached ~8 Gbit/s aggregate in the bounded durability gate and ~12.9 Gbit/s in the peak harness; masquerade NAT ~7.1–7.3 Gbit/s. Unsupported actions fail to software before publication. |
+| 4. ask.ko datapath (genl + flow table) | **IPv4 and IPv6 routed TCP/UDP unicast are complete and silicon-passed; IPv4/IPv6 NAT/PAT (nat44 + nat66) ship default-on; single-tag 802.1Q VLAN pop/push/translate is silicon-validated and default-on again (2026-10-05, inline FE-VM path, `dpaa1` `1e8865d5`, patches 0215–0218; reopened 2026-10-03 per ASK2-REWRITE-PLAN.md Phase 1; CC+HMTD history below).** Routed/NAT uses per-port 46-byte dual-family ehash tables, `UPDATE_TTL`/`UPDATE_HOPLIMIT`, bit-fused NAT rewrites (`0x33`/`0x27`/`0x2f`, F-230), `INSERT_L2_HDR`, and hardware enqueue. VLAN uses a per-port CC shadow whose HIT leaf invokes a combined tag-edit + L2 rewrite + TTL/checksum HMTD and whose miss row falls through to FE_ENTER, preserving routed/NAT coexistence. The retired inline FE-VM VLAN path's 21-frame freeze cannot recur in the separate HM engine. R4c-2/R4c-3 passed silicon; R5 fixed vif-delete teardown ordering; R5b matrix (no-wrong-forward, PCP/DEI, MTU sweep, 100× churn) and full gate-off regression (routed ~11.6G / NAT44 ~11.7G) both PASSED — VLAN is done and merge-ready, shipping default-off; eth0, 802.1ad, QinQ, IPv6 VLAN and stacked tags fall back to software. Sustained mixed-family routed traffic reached ~8 Gbit/s aggregate in the bounded durability gate and ~12.9 Gbit/s in the peak harness; masquerade NAT ~7.1–7.3 Gbit/s. Unsupported actions fail to software before publication. |
 | 5. VyOS CLI + mutual exclusion | **Shipping on eth0–eth4.** IPv4 and IPv6 are selected independently per interface with `offload ipv4` / `offload ipv6`; ASK↔VPP remains a per-interface mutex. Migration `34-to-35` rewrites the retired `offload ask` node to both family knobs. The hardware-offload MTU range is 1280–3600. Cold-boot config persistence, the four-port simultaneous engage matrix, and eth0 management survival are board-validated. |
 
 ### 1.3 Binding silicon facts (settled on LS1046A hardware — do not re-litigate)
@@ -492,7 +500,7 @@ opcode terminal, not comparator correctness.
 ## 4. Work program
 
 **[SPEC]** Ordered by priority. Owner slots (`@___`) assigned at session
-start. Stub-fix IDs per `plans/TF-2026-07-18-001-function-inventory.md`. The
+start. Stub-fix IDs per `plans/archive/TF-2026-07-18-001-function-inventory.md`. The
 orphaned P1–P3 closure series (`4493ce8`→`9970745`) is recoverable via
 `git reflog` — re-land behind `bin/test-fixups.sh`, never before it passes.
 
@@ -1393,7 +1401,7 @@ remove it so it stops emitting false reversibility failures.
 
 ### 4.3 NXP-106 deep-dive — vendor oracle track (parallel; unblocks CC-tree)
 
-**[SPEC]** Owned by `plans/NXP-106-DEEP-DIVE-PLAN.md`. Phase A: `t_ExtHashFe`
+**[SPEC]** Owned by `plans/archive/NXP-106-DEEP-DIVE-PLAN.md`. Phase A: `t_ExtHashFe`
 decode of `.106`'s live `FMBM_RCCB` targets — the byte-level oracle for this
 branch's chain. Phase C: Fork-B gap punch-list. Feeds both T-M3-R failure
 analysis and the CC-tree replacement harness.
@@ -1406,7 +1414,7 @@ hit-pass-flow-encoding-decoded`), and the ASK2↔vendor difference inventory
 (`qdrant: ask2-vendor-diff-inventory`). The `t_ExtHashFe` decode + the DDR
 record-side `t_ExtHashResult` encoding are written into `arch/fman-fe-ehash.md`
 §5.1/§5.2. **Phase C (Fork-B gap punch-list) is the live work** — it is what
-`plans/ASK2-PRODUCTION-ARCHITECTURE.md` Phase 2 (M3 attempt 5) executes. The
+`plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md` Phase 2 (M3 attempt 5) executes. The
 CC-tree replacement harness is no longer gated on Phase A/C; it follows the
 same three-delta attempt-5.
 
@@ -1426,7 +1434,7 @@ those constants gate. Actual scope when unblocked:
    install, reboot-required, while `.106`'s vendor stack classified 400+
    frames at 0% loss in the same session).
 4. Then raise the capacity constants and implement multi-node allocation per
-   `plans/CC-TREE-REBUILD-PLAN.md` (Phase 0 oracle test → Phase 4 scale-out).
+   `plans/archive/CC-TREE-REBUILD-PLAN.md` (Phase 0 oracle test → Phase 4 scale-out).
 
 ### 4.5 M4 — AF_XDP true-ZC RX
 
@@ -1584,7 +1592,7 @@ record it does not own.
 | IPv4 TCP/UDP unicast route | `cdx_tcp4_cc`, `cdx_udp4_cc`; IPv4 FCI | `nf_flow_table` / tc `FLOW_CLS_REPLACE/DESTROY` | 14-byte ehash key; `UPDATE_TTL` → `INSERT_L2_HDR` → per-egress no-confirm `ENQUEUE` | **DONE on eth3/eth4, silicon-passed; eth0/eth1/eth2 breadth tracked by T-M6-P5/T-M7-P5** |
 | IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | **unified dual-lane 46-byte key on ONE match-all AC_CC scheme** (`F-224`/`F-225`/`F-226`), `UPDATE_HOPLIMIT(0x29)` + L2/TX chain, per-port table | **DONE — silicon-passed 2026-08-19/21, shipped in release `2026.08.22-0031-rolling`.** The earlier slot-based LCV two-scheme approach (T-M6-1 §4.6, F-205/210/211/212) was proven design-invalid for transit and abandoned; the dual-lane key superseded it. |
 | NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | bit-fused in-place rewrites between `UPDATE_TTL`/`UPDATE_HOPLIMIT` and `INSERT_L2_HDR` (ports `0x33`, v4 L3 `0x27`=`UPDATE_TTL\|SIP\|DIP`, v6 L3 `0x2f`=`UPDATE_HOPLIMIT\|SIP\|DIP`); silicon auto-recomputes IP+L4 checksums | **DONE — SHIPPING default-on (2026-08-22/23).** F-230 bit-fused FE-VM emitter landed (`8cfb0af5`), armed behind a gate (`55dd82b6`), then productized default-on after silicon pass: nat44 (`625d0d2c`, T-M6-7.7) and nat66 (`9598799f`). S0 record readback + S1 SNAT + S2 DNAT wire-verified; S3 masquerade TCP `-P4` ~7.1–7.3 Gbit/s 0-retr + UDP 0-loss. NAT is AUTOMATIC whenever `offload ipv4`/`offload ipv6` is engaged (no separate CLI knob); `nat44_offload`/`nat66_offload` are default-on diagnostic escape hatches; eth0 never NAT-offloaded. NAT46/NAT64 NOT offloadable — always SW fallback (same-family in-place rewrite only; no family-conversion opcode). `get-info` advertises `ASK_CAP_IPV4\|IPV6\|NAT\|PAT`. |
-| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | per-port CC key → combined VLAN-edit + L2 rewrite + IPv4-forward HMTD → per-egress no-confirm TX FQ; CC miss → FE_ENTER ehash for routed/NAT coexistence | **DONE — SILICON-VALIDATED end-to-end (2026-08-26, image 0713, commit `36bf83de`); ships default-OFF; merge-ready.** The retired inline FE-VM F-233/F-234 path froze after 21 frames; the replacement runs tag edits in the separate HM engine. R4c-2/R4c-3 validated the datapath/lifecycle; `36bf83de` fixed vif-delete teardown (detach/drain CC before HMTD free). R5b PASSED: no-wrong-forward/zero-tag-leak, bidirectional, coexistence, PCP/DEI (`p 0`, TPID 0x8100), MTU sweep 100–1472 B, 100× churn (ErrFD 0). Gate-off regression PASSED: routed ~11.6G / NAT44 ~11.7G, `vlan_cc_activity=0`. Scope: IPv4, one 802.1Q tag, non-eth0; 802.1ad/QinQ/stacked/IPv6 VLAN fall back to software. `ASK_CAP_VLAN` advertised only while armed. **Per-port CLI landed 2026-08-27 (`vyos-1x-044`):** `set interfaces ethernet ethN offload vlan` → `vyos-offload-ask family <mask> <vlan>` → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]` (mirrors the family-mask model; the `ask.vlan_offload` module param stays as an OR'd global override). Remaining is non-silicon: `dpaa1`→`main` merge + default-on decision. |
+| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | per-port CC key → combined VLAN-edit + L2 rewrite + IPv4-forward HMTD → per-egress no-confirm TX FQ; CC miss → FE_ENTER ehash for routed/NAT coexistence | **REOPENED 2026-10-03 (ASK2-REWRITE-PLAN.md Phase 1): HEAD uses inline FE-VM opcodes, unvalidated, default-off.** Was: **DONE — SILICON-VALIDATED end-to-end (2026-08-26, image 0713, commit `36bf83de`); ships default-OFF; merge-ready.** The retired inline FE-VM F-233/F-234 path froze after 21 frames; the replacement runs tag edits in the separate HM engine. R4c-2/R4c-3 validated the datapath/lifecycle; `36bf83de` fixed vif-delete teardown (detach/drain CC before HMTD free). R5b PASSED: no-wrong-forward/zero-tag-leak, bidirectional, coexistence, PCP/DEI (`p 0`, TPID 0x8100), MTU sweep 100–1472 B, 100× churn (ErrFD 0). Gate-off regression PASSED: routed ~11.6G / NAT44 ~11.7G, `vlan_cc_activity=0`. Scope: IPv4, one 802.1Q tag, non-eth0; 802.1ad/QinQ/stacked/IPv6 VLAN fall back to software. `ASK_CAP_VLAN` advertised only while armed. **Per-port CLI landed 2026-08-27 (`vyos-1x-044`):** `set interfaces ethernet ethN offload vlan` → `vyos-offload-ask family <mask> <vlan>` → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]` (mirrors the family-mask model; the `ask.vlan_offload` module param stays as an OR'd global override). Remaining is non-silicon: `dpaa1`→`main` merge + default-on decision. |
 | IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) — sequencing plan in `plans/ASK2-IPSEC-OFFLOAD-PLAN.md` (DRAFT, not started) |
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
 | IPv4/IPv6 multicast | `cdx_multicast4/6_cc`; MC4/MC6 FCI | switchdev MDB / kernel mroute | group key + bounded replication FQ/egress set | not implemented |
@@ -1932,7 +1940,20 @@ record it does not own.
   `ASK_CAP_IPV4|IPV6|NAT|PAT`. Remaining T-M6-7-adjacent: hairpin proof is not
   gated by the shipping claim (SNAT/DNAT/PAT both directions TCP+UDP were the
   gate and passed).
-- [x] **T-M6-8 — VLAN actions. DONE + SILICON-VALIDATED end-to-end; ships
+- [x] **T-M6-8 — VLAN actions. DONE again 2026-10-05** (owned by
+  `plans/ASK2-REWRITE-PLAN.md` Phase 1). The CC+HMTD path below gave no
+  cross-port benefit over software (2026-10-02) and was replaced at `40ace3f0`
+  by the inline FE-VM path. That path is silicon-validated on `dpaa1`
+  `1e8865d5`, with these fixes:
+  - ask.ko `ntohs` on the TCI and TPID;
+  - 0215: `04 11` prefix;
+  - 0216: owned stats block;
+  - 0217: vendor 96 B RX margin, needed for push-only;
+  - 0218: physical errors discarded in BMI.
+
+  `vlan_offload` and `vlan_push_only` are default-on. Historical record
+  follows.
+  **Was: DONE + SILICON-VALIDATED end-to-end; ships
   default-OFF; merge-ready (2026-08-26, image 0713, commit `36bf83de`).** The
   original inline FE-VM F-233/F-234 opcode path is retired: it froze after
   exactly 5+tnums = 21 frames. The production replacement routes VLAN
@@ -2462,13 +2483,21 @@ ASK2 plan documents — extend this plan or the owning reference.
 | `specs/fman-keygen-flow-key-spec.md` | Flow-key formats, EKFC encodings, CRC-64 contract |
 | `specs/cc-comparator-compare-window-hypothesis.md` | CC compare-window hypothesis + experiment protocol |
 | `plans/DUAL-DATAPLANE.md` | S0/S1/S2 state machine + CLI contract |
-| `plans/CC-TREE-REBUILD-PLAN.md` | CC-tree phased rebuild (Phase 0 → Phase 4) |
-| `plans/NXP-106-DEEP-DIVE-PLAN.md` | Vendor-stack oracle (Phase A `t_ExtHashFe` decode → Phase C gap list) |
+| `plans/ASK2-REWRITE-PLAN.md` | Vendor-parity review (2026-10-03), `.106` vendor oracles (Phase 0), VLAN root cause and fixes 0215–0218 (Phase 1 / E3) |
+| `plans/OFFLOAD-CAPABILITY-PLAN.md` | Per-capability vendor mechanism vs ASK2 mechanism |
+| `plans/CC-ACL-OFFLOAD-PLAN.md` | ACL / ntuple / tc-flower backend; CC match-walker verdict |
 | `specs/reference/nxp-ask-fmc/` | Literal vendor FMC/NetPDL oracle (`cdx_sp.xml`, `cdx_pcd.xml`, cfg variants) from `we-are-mono/ASK@fe36f30`; reference only, never runtime config |
-| `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Current heidi→DUT `.185`→HELGA throughput harness, SW/HW mode proof, MTU 1280–2500 operation |
-| `plans/TF-2026-07-18-001-function-inventory.md` | Stub/type inventory behind §4 task IDs |
-| `plans/ZC-RX-SCOPE.md` | M4 follow-up scope |
+| `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Throughput-harness method (SW/HW mode proof, MTU operation); current rig = `bin/testrig-combo-matrix.sh` (dell1–DUT–dell2) |
+| `arch/fman-function-inventory.md` | Stub/type inventory behind §4 task IDs |
+| `plans/VPP-AFXDP-ZC-FULLSPEED.md` | VPP AF_XDP zero-copy follow-up |
 | `plans/ASK-ISO-BUILD-AND-INSTALL.md` | Operator build/install how-to |
+
+**[NOTE]** Retired 2026-10-05 (see `plans/archive/README.md` and the
+`<name>.archive-note.md` files there): CC-TREE-REBUILD-PLAN,
+NXP-106-DEEP-DIVE-PLAN, TF-2026-07-18-001, ZC-RX-SCOPE, ASK2-VLAN-REARCH (+
+EXECUTION), ASK2-PRODUCTION-ARCHITECTURE, EHASH-DUAL-FIX-VERIFICATION-PLAN,
+MODULE-INVENTORY, PATCH-FOLD-CAMPAIGN-PLAN, ASK1-VS-ASK2-TESTS, skip-ledger,
+and needs-forward-port/.
 
 **[NOTE]** Maintenance rule: when a milestone gate passes, flip its §3
 status, check off §4 items, and log evidence to qdrant in the same change.

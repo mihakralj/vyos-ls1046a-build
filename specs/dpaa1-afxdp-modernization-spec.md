@@ -1031,7 +1031,7 @@ M4  : Phase 4 single-MAC dual-flavor (deferred).
 ### Companion specs
 - `specs/ask2-rewrite-spec.md` — ASK2 Track B; consumes §5.4/5.5/5.6 APIs from this spec.
 - `specs/vpp-dpaa1-ls1046a-spec.md` — VPP AF_XDP integration and HW offload consumption (v0.2). Supersedes the rejected v0.1 native plugin proposal.
-- `plans/PR14x-DESIGN.md` — PR14a-x foundational fman_pcd subsystem retained by ASK2.
+- `plans/archive/PR14x-DESIGN.md` — PR14a-x foundational fman_pcd subsystem retained by ASK2.
 
 ### Kernel documentation
 - `docs.kernel.org/networking/af_xdp.html`
