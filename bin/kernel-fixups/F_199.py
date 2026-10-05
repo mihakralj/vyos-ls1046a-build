@@ -22,6 +22,25 @@ The kernel's own TX path is untouched: priv->egress_fqs[] stay FQ_TYPE_TX
 with confirmation, so dpaa_xmit/ARP/conntrack-promote continue to free skbs
 normally. Only ask.ko's offloaded HIT path uses the no-confirm FQ.
 
+A6-LOSS step 7 (2026-10-05): dpaa_alloc_offload_tx_fq() now calls
+dpaa_fq_init(dpaa_fq, td_enable=True) instead of False. Live hardware
+testing (cgr_probe, this session) proved the FQ's CGR membership
+(QM_FQCTRL_CGE, cgid = priv->cgr_data.cgr.cgrid, 256 MiB CS threshold) never
+reports congested=1 for this FQ's enqueues even when fq_probe shows the FQD's
+own frm_cnt/byte_cnt backlogged to ~4.27 GB (17x over threshold) -- ASK2's FE
+hardware ENQUEUE_PKT path updates the FQD's own counters but does not feed
+the separate CG integrator the CGE path depends on. dpaa_fq_init()'s dormant
+td_enable branch (never exercised by any caller in this tree before this
+change) instead programs QM_FQCTRL_TDE + a FQD-local byte-count tail-drop
+threshold (DPAA_FQ_TD, 4 MiB) that QMan evaluates directly against the same
+per-FQD counters fq_probe already proved ARE updated correctly for this FQ --
+independent of the CG integrator. Per arch/qman-ceetm.md's FQD field table,
+CGE (bit 288) and TDE (bit 289) are independent bits, but this driver's
+existing td_enable branch overwrites (not ORs) fq_ctrl, so enabling TDE here
+also drops this FQ's CGE/cgid membership -- an acceptable trade since that
+membership was confirmed non-functional for this producer. Kernel's own
+confirm-enabled TX FQs (td_enable always False) are unaffected.
+
 Count-gated, idempotent (marker "F-199"); hard-fail on any source drift.
 """
 
@@ -165,7 +184,14 @@ replace(
     "\t\t\t  &dpaa_fq_cbs.egress_ern);\n"
     "\tlist_add_tail(&dpaa_fq->list, &priv->dpaa_fq_list);\n"
     "\n"
-    "\tret = dpaa_fq_init(dpaa_fq, false);\n"
+    "\t/* A6-LOSS step 7 (2026-10-05): td_enable=true, not false. CGE/cgid\n"
+    "\t * membership in priv->cgr_data.cgr.cgrid was live-proven (cgr_probe)\n"
+    "\t * to never report congested for this FQ's FE-hardware enqueues even\n"
+    "\t * with a multi-GB backlog; the FQD-local tail-drop threshold this\n"
+    "\t * enables instead is evaluated directly against the same per-FQD\n"
+    "\t * frm_cnt/byte_cnt counters fq_probe already proved DO update\n"
+    "\t * correctly for this FQ. */\n"
+    "\tret = dpaa_fq_init(dpaa_fq, true);\n"
     "\tif (ret < 0) {\n"
     "\t\tlist_del(&dpaa_fq->list);\n"
     "\t\tdevm_kfree(dev->dev.parent, dpaa_fq);\n"
