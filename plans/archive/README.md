@@ -62,6 +62,19 @@ For current state, see (in order of authority):
 | `PERFORMANCE-BENCHMARKS.md` | `.185 ↔ .106` benchmark record | Self-declared SUPERSEDED — predates current harness/F-198…F-203 work; `.106` no longer an active harness endpoint (2026-09-05) |
 | `OFFLOAD-CAPABILITIES.md` | 2026-08-05 silicon-verified capability inventory (v2.1) | Dated snapshot; superseded by the actively cross-referenced `OFFLOAD-CAPABILITY-PLAN.md` (2026-09-05) |
 | `TRAFFIC-HARNESS.md` | LXC CT201/CT202 board-as-gateway traffic harness | Self-declared SUPERSEDED — retired topology; current standard is `ASK2-PERFORMANCE-TEST-HARNESS.md` (2026-09-05) |
+| `ASK1-VS-ASK2-TESTS.md` (+ gitignored `ASK1-VS-ASK2-TESTS/`) | ASK 1.0 `.110` vs ASK2 `.185` comparative harness (heidi/HELGA) | `.110` gone; replaced by the dell rig (`bin/testrig-combo-matrix.sh`) and the `.106` vendor comparison in `ASK2-REWRITE-PLAN.md` E3 (2026-10-05) |
+| `ASK2-PRODUCTION-ARCHITECTURE.md` | 2026-08-11 course-correction to a production architecture | Landed/re-planned in the master plan; the 2026-10-03 rewrite review replaces its vendor-difference inventory (2026-10-05) |
+| `ASK2-VLAN-REARCH.md` | CC-leaf → NADEN → HMTD VLAN path ("Option A") | Superseded by the inline FE-VM VLAN path, silicon-validated with patches 0215–0218 (2026-10-05) |
+| `ASK2-VLAN-REARCH-EXECUTION.md` | IPv6 VLAN execution plan on the CC/HMTD path | Superseded together with `ASK2-VLAN-REARCH.md` (2026-10-05) |
+| `CC-TREE-REBUILD-PLAN.md` | `cc_test` CC-tree rebuild track (F-159–F-162) | Closed as architecturally broken 2026-08-05; CC match walker absent in 210.10.1 per `CC-ACL-OFFLOAD-PLAN.md` (2026-10-05) |
+| `EHASH-DUAL-FIX-VERIFICATION-PLAN.md` | 2026-08-07 plan to reach the first genuine ehash HIT | Both defects fixed; M3 HIT gate passed 2026-08-12 (2026-10-05) |
+| `MODULE-INVENTORY.md` | Delivered/planned module inventory (v2.1, 2026-08-05) | Stale; master plan status tables and `arch/fman-function-inventory.md` are maintained (2026-10-05) |
+| `NXP-106-DEEP-DIVE-PLAN.md` | `.106` vendor deep-dive phases A–C | Answered 2026-08-11 (`arch/fman-fe-ehash.md`); oracle method continues in `ASK2-REWRITE-PLAN.md` Phase 0 (2026-10-05) |
+| `PATCH-FOLD-CAMPAIGN-PLAN.md` | Patch provenance review + fold proposal (2026-08-29) | Executed 2026-08-29/30; authority stays `TA-2026-07-18-002-patch-architecture.md` (2026-10-05) |
+| `TF-2026-07-18-001-function-inventory.md` | Dated static-analysis finding on function inventory | Superseded statements; inventory maintained in `arch/fman-function-inventory.md` (2026-10-05) |
+| `ZC-RX-SCOPE.md` | True-ZC AF_XDP RX scope brief | Resolved 2026-06-10; follow-on work in `VPP-AFXDP-ZC-FULLSPEED.md` (2026-10-05) |
+| `skip-ledger.md` | Patch SKIP ledger (rule P3) | Not enforced by CI; skipped patches removed by the fold/cleanup (2026-10-05) |
+| `needs-forward-port/` | Parked 6.6-era INA234 hwmon patch | Forward-ported as board patch `4002` (2026-10-05) |
 
 Archived 2026-05-25 as part of the v1.3 doc consolidation following PR14z21 M2 gate run.
 

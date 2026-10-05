@@ -3,7 +3,7 @@
 **2026-08-26 · dpaa1 · T-M6-8 follow-up.** Defines the per-interface CLI grammar
 that replaces the interim global `ask_vlan_offload` module param, so VLAN
 pop/push offload is expressed and scoped in `config.boot` like every other ASK
-family. Datapath is done and silicon-validated (see `plans/ASK2-VLAN-REARCH.md`);
+family. Datapath is done and silicon-validated (see `plans/archive/ASK2-VLAN-REARCH.md`);
 this is the control-plane surface only.
 
 ## 1. Goal and constraints
@@ -193,7 +193,7 @@ explicit, scoped, per-interface knob regardless of the shipped default. The
 current recommendation is to ship the datapath default-off and let this CLI be
 the opt-in; revisit a default-on posture only after a VLAN duration soak and the
 churn RX-deaf / mgmt-martian caveats are resolved or root-caused to lab-only
-(see `plans/ASK2-VLAN-REARCH.md` status banner).
+(see `plans/archive/ASK2-VLAN-REARCH.md` status banner).
 
 ## 8. Implementation checklist
 

@@ -350,3 +350,47 @@
 0207-fman-pcd-kg-port-attach-cc-l2.patch
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0208-fman-pcd-cc-l2-key-real-port-id.patch
+
+# T-M6-8d (2026-10-03): vendor SDK deep-dive (/mnt/builds/ASK, the stack
+# proven to sustain VLAN on .116) found vendor never uses CC-tree/AC_CC
+# match-table classification for ANY traffic, including VLAN -- every
+# one of its 16 FMC-declared classification nodes is a plain external
+# hash table, and routed VLAN pop/push is just more inline FE-VM
+# opcodes in the same ehash record routing/NAT already use. Re-adds
+# STRIP_ALL_VLAN(0x12)/INSERT_VLAN_HDR(0x42) emission to
+# fman_pcd_ehash_add_key(), matching vendor's fill_actions() order;
+# byte-identical to the current record when the new optional vlan
+# param is NULL/flags==0. Does not yet fix the original ~21-packet
+# freeze (mechanism still uncharacterized) -- re-establishes the
+# vendor-aligned substrate first. ask.ko wiring is a companion,
+# board-tracked (non-patch) change in kernel/ask/oot-modules/ask/.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0209-fman-pcd-ehash-vlan-revival.patch
+
+# VLAN translate fix (2026-10-05, ASK2-REWRITE-PLAN E3): lead VLAN ehash
+# records with UPDATE_ETH_RX_STATS (0x04, stats 0) + STRIP_ETH_HDR (0x11).
+# Without 0x11 the tag is never rewritten (egress keeps ingress VID); with
+# 0x11 as opcode 0 the RX port wedges. Any opcode before 0x11 fixes both
+# (silicon-bisected on .185; vendor always has 05 04 in front).
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0215-fman-pcd-ehash-vlan-strip-eth-prefix.patch
+
+# Push-only VLAN prep (2026-10-05): owned MURAM stats scratch block for the
+# VLAN opcodes stats pointers (vendor never leaves them 0; untagged-ingress
+# push wedged with 0), 0x12 vid 0 on push-only like the vendor .106 record,
+# and NAT rebuild preserving the full 04/11/12 prefix.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0216-fman-pcd-ehash-vlan-stats-scratch.patch
+
+# Push-only VLAN fix (2026-10-05): vendor 96 B RX internal margin (RIM
+# 0x60000000) + parse start offset (RPSO 0x60) on every RX port. Push-only
+# grows the frame in front of its start; with RIM/RPSO 0 the ingress port
+# wedged RX-deaf. Matrix-validated live on .185 with these values.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0217-fman-port-rx-hm-margin.patch
+
+# Discard RX physical errors (MAC FIFO overflow) in BMI like the vendor
+# (RFSDM 0x010ee3c0) instead of enqueuing each to the error FQ + logging
+# "Err FD status = 0x00080000" under full-rate VLAN<->untagged bidir.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0218-fman-port-discard-physical-errors.patch
