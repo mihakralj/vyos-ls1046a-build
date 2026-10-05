@@ -388,3 +388,9 @@
 # wedged RX-deaf. Matrix-validated live on .185 with these values.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0217-fman-port-rx-hm-margin.patch
+
+# Discard RX physical errors (MAC FIFO overflow) in BMI like the vendor
+# (RFSDM 0x010ee3c0) instead of enqueuing each to the error FQ + logging
+# "Err FD status = 0x00080000" under full-rate VLAN<->untagged bidir.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0218-fman-port-discard-physical-errors.patch
