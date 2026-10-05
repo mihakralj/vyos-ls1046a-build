@@ -1,0 +1,64 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 05 Oct 2026 00:00:00 +0000
+Subject: [PATCH] fman_pcd: lead VLAN ehash records with 04 + STRIP_ETH_HDR (fixes VLAN translate)
+
+The 0209 inline VLAN records carried `12 21 42 41 01` without the
+vendor's STRIP_ETH_HDR (0x11). On silicon (.185, 2026-10-05) frames
+then left with the ingress tag unchanged: same length, VID 10 instead
+of 20. STRIP and INSERT run against a frame that still starts at the
+DA, and only INSERT_L2's in-place MAC/EtherType rewrite takes effect.
+
+Adding 0x11 as the FIRST opcode wedges the RX port at once (all hits
+stop, then the whole port goes RX-deaf; only a cold power-cycle
+recovers). Reproduced twice, and still with the vendor RX-port
+settings applied (rim/rpso 96 B headroom, RFENE 0x22, RCMNE 0x0e, params
+misc bit 30), so port config is not the factor.
+
+Live record bisection on the same board, rewriting one active record
+and keeping traffic paused across the write:
+  05 04 11 12 21 42 41 01 (vendor-exact) -> VID 20, line rate, no wedge
+  04 11 12 21 42 41 01                   -> VID 20, line rate, no wedge
+  05 11 12 21 42 41 01                   -> VID 20, line rate, no wedge
+  11 12 21 42 41 01                      -> RX-deaf
+So 0x11 must not be opcode 0. The vendor always has PREEMPTIVE_CHECKS and
+UPDATE_ETH_RX_STATS in front of it (cdx_ehash.c fill_actions()).
+
+Fix: for any record with a VLAN pop/push, emit UPDATE_ETH_RX_STATS
+(0x04, 4 B param, stats_ptr 0 = no stats, as the vendor writes it
+without INCLUDE_ETHER_IFSTATS) and then STRIP_ETH_HDR (0x11, no param)
+ahead of the VLAN ops. Records without VLAN edits stay byte-identical.
+
+Silicon-validated: VLAN->VLAN translate (pop+push). Push-only and pop-only
+records take the same prefix but are not yet validated on silicon.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 2fdf156..14c5592 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2359,6 +2359,26 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 			 * opcode so later params land after it; ttl_param_off (not
+ 			 * param_off) is threaded through so the no-VLAN case stays
+ 			 * byte-identical. */
++			/* Vendor fill_actions() rebuilds L2 for any VLAN edit with
++			 * STRIP_ETH_HDR (0x11) ahead of the VLAN ops, and always
++			 * has PREEMPTIVE_CHECKS/UPDATE_ETH_RX_STATS in front of it.
++			 * On 210.10.1 0x11 must NOT be the first opcode: as opcode 0
++			 * it wedges the RX port (RX-deaf, cold power-cycle only);
++			 * with any opcode before it the VLAN translate executes
++			 * (SILICON 2026-10-05, .185: 04/05/both prefixes each gave
++			 * VID 10 -> 20 at line rate). Without 0x11 at all the frame
++			 * leaves with the ingress tag unchanged. Lead with
++			 * UPDATE_ETH_RX_STATS (0x04), stats_ptr 0 = no stats. */
++			#define FMAN_EHASH_OPC_UPDATE_ETH_RX_STATS	0x04
++			#define FMAN_EHASH_OPC_STRIP_ETH_HDR		0x11
++			if (vlan && (vlan->flags &
++				     (FMAN_PCD_VLANF_POP | FMAN_PCD_VLANF_PUSH))) {
++				r[opc_off + oi++] = FMAN_EHASH_OPC_UPDATE_ETH_RX_STATS;
++				*(__be32 *)(r + param_off) = cpu_to_be32(0);
++				param_off += 4;
++				ttl_param_off = param_off;
++				r[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ETH_HDR;
++			}
+ 			if (vlan_pop) {
+ 				r[opc_off + oi++] = FMAN_EHASH_OPC_STRIP_ALL_VLAN;
+ 				*(__be16 *)(r + param_off + 0) =
