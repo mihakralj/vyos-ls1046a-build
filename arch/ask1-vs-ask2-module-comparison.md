@@ -79,7 +79,7 @@ by a mainline kernel mechanism or dropped from scope.
 | `auto_bridge.ko` (1831 LOC; ebtables hooks, NETLINK_L2FLOW=33) | L2 bridge flow detection | `ask_bridge.c` stub (switchdev notifier planned) | Not implemented; L2 offload deferred |
 | comcerto fastpath (`CONFIG_CPE_FAST_PATH`, `fp_netfilter`, NF_IP_PRI_LAST metadata snapshot into ct entries) | Per-packet conntrack metadata enrichment | **Deleted, no equivalent.** Mainline conntrack + flowtable deliver a complete `flow_rule` at REPLACE time; no per-packet snapshot hook exists or is needed | — |
 | `cmm` (~43 kLOC daemon: conntrack monitor, route/neighbor caches, keytrack, QoS modules, cmmctl CLI) | Software brain | **Deleted.** Split into mainline pieces: conntrack events → nf_flowtable promotion (in-kernel); route/neigh resolution performed by kernel flowtable infra before REPLACE; policy = VyOS firewall config; operator surface = `vyos-1x-031` CLI + `033` op-mode | CLI shipping (`offload ask` per-interface, ASK↔VPP mutex, `show flows` via ynl) |
-| `dpa_app` (boot-time PCD loader via `call_usermodehelper`, reads the XML set) | PCD baseline programmer | **Deleted.** Replaced by engage-at-config-commit: `fman_pcd_fe_engage()`/`_disengage()` (patch 0153) through dpaa flavor-ops (patches 0068/0069); boot always lands S0 (mainline RSS) | Engage works in dev builds (debugfs path); genl end-to-end engage is the open course-correction (`plans/ASK2-PRODUCTION-ARCHITECTURE.md`, 2026-08-11) |
+| `dpa_app` (boot-time PCD loader via `call_usermodehelper`, reads the XML set) | PCD baseline programmer | **Deleted.** Replaced by engage-at-config-commit: `fman_pcd_fe_engage()`/`_disengage()` (patch 0153) through dpaa flavor-ops (patches 0068/0069); boot always lands S0 (mainline RSS) | Engage works in dev builds (debugfs path); genl end-to-end engage is the open course-correction (`plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md`, 2026-08-11) |
 | `fmc` + `fmlib` (XML→PCD compiler, `FM_PCD_*` userspace API) | PCD graph compiler | **Deleted.** Replaced by in-tree `fman_pcd` kernel API: KeyGen (0097), CC (0098, 0105–0108, 0115–0118, 0166–0167), HM chains (0099, 0119–0120, 0137), PLCR (0100), FE-VM/ehash (0122–0135) | Layer 1 shipping |
 | iptables `QOSMARK`/`QOSCONNMARK` extensions (64-bit qosmark) | QoS marking consumed by offload | **Not carried forward.** nftables `meta mark`/`ct mark` + tc-flower / hw-tc-offload cover the role | **[?]** no 64-bit qosmark concept exists in ASK2 |
 | `libcli` + cmmctl | Operator CLI | ynl Python + VyOS op-mode commands | Surface shipping (M7); release claim gated by CR-001 |
@@ -186,7 +186,7 @@ selection and delivery both live in the kernel.
 | Proven HW offload today | Bridge path | FMan ingress policer (HW-verified) + mainline RSS; M2 = 7.37 Gbps MISS→kernel pass-through @ 0.16% CPU |
 | Reversibility | None — PCD state persists across `rmmod cdx`; reboot-only recovery | Hard gate: S1→S0 `pcd-snapshot` byte-exact register/MURAM diff |
 | Kernel horizon | Dead at 6.12 (SDK Kconfig rejected by 6.18 parser) | Mainline-aligned (6.18.x, survives 7.x rebase) |
-| Observability | `/proc/fqid_stats/pcd/*`, `/proc/fci` — **not** a HIT/MISS oracle (cmm deafness) | genl `dump-flows`/`get-info`; `fe_*` debugfs in dev builds only (production images compile debugfs out per `plans/ASK2-PRODUCTION-ARCHITECTURE.md`) |
+| Observability | `/proc/fqid_stats/pcd/*`, `/proc/fci` — **not** a HIT/MISS oracle (cmm deafness) | genl `dump-flows`/`get-info`; `fe_*` debugfs in dev builds only (production images compile debugfs out per `plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md`) |
 
 ---
 
@@ -218,7 +218,7 @@ selection and delivery both live in the kernel.
    `/home/vyos/kernel-ls1046a-build/reference/ASK-fix-security-hardening`
    (`165f402`, merged into master; missing patches 080–099).
 4. **Live oracle:** `root@192.168.1.106` — production ASK 1.x node;
-   byte-level oracle per `plans/NXP-106-DEEP-DIVE-PLAN.md`. Its `/proc`
+   byte-level oracle per `plans/archive/NXP-106-DEEP-DIVE-PLAN.md`. Its `/proc`
    counters are not a HIT/MISS oracle (§7).
 
 **[NOTE]** The comcerto fastpath (`CPE_FAST_PATH`, `enable_hooks`) is
