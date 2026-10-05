@@ -840,6 +840,47 @@ the E3 section above are in bold.
   power-cycle drops dell1's table-110 policy routes, so re-run
   `testrig-combo-matrix.sh setup` after every cold boot or vlan→port silently
   goes untagged.
+- **CI image `98a17eb5` (0215 + push-only fail-closed) on silicon
+  [SILICON 2026-10-05].** `.185`, rig re-`setup` after the boot, TCP with 4
+  streams for 10 s. Both ports stayed healthy after every cell.
+
+  | Combo | Unidir v4 / v6 | Bidir v4 / v6 |
+  |---|---|---|
+  | vlan→vlan | 9.36 / 9.23 Gbit/s | **16.0 / 15.8 Gbit/s** |
+  | vlan→port | 9.22 / 9.12 Gbit/s | 10.8 / 8.66 Gbit/s |
+  | port→port | 9.38 / 9.20 Gbit/s | 16.1 / 15.5 Gbit/s |
+
+  - vlan↔vlan bidir is within ~3% of the vendor's 16.50 Gbit/s (the Phase 1
+    exit target).
+  - vlan→port bidir is lower by design: its push-only half runs in software.
+  - dmesg showed 47 `Err FD status = 0x00080000` (`FM_FD_ERR_PHYSICAL`; 44 on
+    eth3, 3 on eth4), all during the bidir runs. That is negligible against
+    the frame count and probably MAC RX pressure at saturation, but the cause
+    is unconfirmed.
+  - Open: push-only (untagged→VLAN) hardware offload needs a vendor
+    reference record.
+- **Push-only fixed (0217) and `Err FD 0x00080000` explained
+  [SILICON 2026-10-05].**
+  - Push-only (untagged→VLAN) grows the frame in front of its start and
+    needs the vendor's 96 B RX internal margin. 0217 programs `RIM =
+    0x60000000` and `RPSO = 0x60` on every RX port. The clean-boot image
+    `c032e652` shows those values on all five RX ports and push-only on by
+    default; push data runs at 9.36 Gbit/s.
+  - `0x00080000` (`FM_FD_ERR_PHYSICAL`) is mEMAC RX FIFO overflow (`rdrp`
+    and `rerr`, with zero CRC, length or jabber errors). It happens mainly
+    under VLAN↔untagged bidir.
+  - The **vendor `.106` shows the same overflow** under the same load: about
+    58K drops/s per port, more than twice ASK2's rate. So it is a hardware
+    limit of this traffic mix.
+
+  | Bidir (Gbit/s) | Vendor `.106` | ASK2 `.185` |
+  |---|---|---|
+  | VLAN↔untagged | 12.8 | 11.7 |
+  | VLAN↔VLAN | 16.9 | 15.7 |
+  | routed | 16.8 | 15.5 |
+
+  - The vendor logs nothing because BMI discards these frames
+    (`RFSDM 0x010ee3c0`). Patch 0218 does the same.
 - Tooling note: `/dev/mem` **mmap** reads of DDR records returned `0xcc` on
   this image. Use `pread`/`pwrite` (`dd if=/dev/mem`, helper `pw.py`)
   instead.
