@@ -18,7 +18,7 @@
 > path; Fork-B un-retired and under active re-validation (F-165 retest is the immediate step);
 > CC-tree absent from `ask.ko` AND its `cc_test` harness architecturally broken (F-159–F-162:
 > five vendor-verified register fixes, still RX-silent within 17–30 frames vs `.106` vendor stack's
-> 400+).** Byte-level oracle path: `plans/NXP-106-DEEP-DIVE-PLAN.md` Phases A/C.
+> 400+).** Byte-level oracle path: `plans/archive/NXP-106-DEEP-DIVE-PLAN.md` Phases A/C.
 >
 > **Vendor-stack observability note (2026-08-05):** on `.106`, `cmm`'s connection tracker is
 > functionally deaf — its vendored, statically-linked libnetfilter_conntrack 1.1.0 (+ comcerto-fp
@@ -222,7 +222,7 @@ The PCD layer is the single biggest gap mainline doesn't fill — which is exact
 > composite, F-160 `next_engine=3` AC_CC graft, F-161 live-EKFC realignment, F-162 `NIA_KG_DIRECT`)
 > still left the port RX-silent within 17–30 frames (surviving `clear`, reboot-required), while
 > `.106`'s vendor stack classified 400+ frames at 0% loss in the same session. Per
-> `plans/NXP-106-DEEP-DIVE-PLAN.md`, `cc_test` is to be retired rather than further patched; the
+> `plans/archive/NXP-106-DEEP-DIVE-PLAN.md`, `cc_test` is to be retired rather than further patched; the
 > vendor `t_ExtHashFe` decode (Phase A) is the byte-level oracle for whatever replaces it.
 
 **[SPEC, intended architecture — not currently implemented, see correction above]** The ASK2 shipping HW-offload path uses **CC-tree classification (top-N flows) + kernel

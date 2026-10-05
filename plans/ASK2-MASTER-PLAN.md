@@ -13,9 +13,9 @@ Sources of truth that remain **live and binding** (this plan only sequences
 them): silicon contract `arch/fman-microcode-210-programming-reference.md` +
 `arch/fman-fe-ehash.md`; flow-key spec `specs/fman-keygen-flow-key-spec.md`;
 state machine + CLI contract `plans/DUAL-DATAPLANE.md`; API surface
-`arch/fman-pcd-api-reference.md`; CC-tree rebuild `plans/CC-TREE-REBUILD-PLAN.md`;
-vendor oracle `plans/NXP-106-DEEP-DIVE-PLAN.md`; stub/type inventory
-`plans/TF-2026-07-18-001-function-inventory.md`. Where this plan and those
+`arch/fman-pcd-api-reference.md`; CC-tree rebuild `plans/archive/CC-TREE-REBUILD-PLAN.md`;
+vendor oracle `plans/archive/NXP-106-DEEP-DIVE-PLAN.md`; stub/type inventory
+`plans/archive/TF-2026-07-18-001-function-inventory.md`. Where this plan and those
 documents disagree, they win — update this plan.
 
 ---
@@ -500,7 +500,7 @@ opcode terminal, not comparator correctness.
 ## 4. Work program
 
 **[SPEC]** Ordered by priority. Owner slots (`@___`) assigned at session
-start. Stub-fix IDs per `plans/TF-2026-07-18-001-function-inventory.md`. The
+start. Stub-fix IDs per `plans/archive/TF-2026-07-18-001-function-inventory.md`. The
 orphaned P1–P3 closure series (`4493ce8`→`9970745`) is recoverable via
 `git reflog` — re-land behind `bin/test-fixups.sh`, never before it passes.
 
@@ -1401,7 +1401,7 @@ remove it so it stops emitting false reversibility failures.
 
 ### 4.3 NXP-106 deep-dive — vendor oracle track (parallel; unblocks CC-tree)
 
-**[SPEC]** Owned by `plans/NXP-106-DEEP-DIVE-PLAN.md`. Phase A: `t_ExtHashFe`
+**[SPEC]** Owned by `plans/archive/NXP-106-DEEP-DIVE-PLAN.md`. Phase A: `t_ExtHashFe`
 decode of `.106`'s live `FMBM_RCCB` targets — the byte-level oracle for this
 branch's chain. Phase C: Fork-B gap punch-list. Feeds both T-M3-R failure
 analysis and the CC-tree replacement harness.
@@ -1414,7 +1414,7 @@ hit-pass-flow-encoding-decoded`), and the ASK2↔vendor difference inventory
 (`qdrant: ask2-vendor-diff-inventory`). The `t_ExtHashFe` decode + the DDR
 record-side `t_ExtHashResult` encoding are written into `arch/fman-fe-ehash.md`
 §5.1/§5.2. **Phase C (Fork-B gap punch-list) is the live work** — it is what
-`plans/ASK2-PRODUCTION-ARCHITECTURE.md` Phase 2 (M3 attempt 5) executes. The
+`plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md` Phase 2 (M3 attempt 5) executes. The
 CC-tree replacement harness is no longer gated on Phase A/C; it follows the
 same three-delta attempt-5.
 
@@ -1434,7 +1434,7 @@ those constants gate. Actual scope when unblocked:
    install, reboot-required, while `.106`'s vendor stack classified 400+
    frames at 0% loss in the same session).
 4. Then raise the capacity constants and implement multi-node allocation per
-   `plans/CC-TREE-REBUILD-PLAN.md` (Phase 0 oracle test → Phase 4 scale-out).
+   `plans/archive/CC-TREE-REBUILD-PLAN.md` (Phase 0 oracle test → Phase 4 scale-out).
 
 ### 4.5 M4 — AF_XDP true-ZC RX
 
@@ -2483,13 +2483,21 @@ ASK2 plan documents — extend this plan or the owning reference.
 | `specs/fman-keygen-flow-key-spec.md` | Flow-key formats, EKFC encodings, CRC-64 contract |
 | `specs/cc-comparator-compare-window-hypothesis.md` | CC compare-window hypothesis + experiment protocol |
 | `plans/DUAL-DATAPLANE.md` | S0/S1/S2 state machine + CLI contract |
-| `plans/CC-TREE-REBUILD-PLAN.md` | CC-tree phased rebuild (Phase 0 → Phase 4) |
-| `plans/NXP-106-DEEP-DIVE-PLAN.md` | Vendor-stack oracle (Phase A `t_ExtHashFe` decode → Phase C gap list) |
+| `plans/ASK2-REWRITE-PLAN.md` | Vendor-parity review (2026-10-03), `.106` vendor oracles (Phase 0), VLAN root cause and fixes 0215–0218 (Phase 1 / E3) |
+| `plans/OFFLOAD-CAPABILITY-PLAN.md` | Per-capability vendor mechanism vs ASK2 mechanism |
+| `plans/CC-ACL-OFFLOAD-PLAN.md` | ACL / ntuple / tc-flower backend; CC match-walker verdict |
 | `specs/reference/nxp-ask-fmc/` | Literal vendor FMC/NetPDL oracle (`cdx_sp.xml`, `cdx_pcd.xml`, cfg variants) from `we-are-mono/ASK@fe36f30`; reference only, never runtime config |
-| `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Current heidi→DUT `.185`→HELGA throughput harness, SW/HW mode proof, MTU 1280–2500 operation |
-| `plans/TF-2026-07-18-001-function-inventory.md` | Stub/type inventory behind §4 task IDs |
-| `plans/ZC-RX-SCOPE.md` | M4 follow-up scope |
+| `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` | Throughput-harness method (SW/HW mode proof, MTU operation); current rig = `bin/testrig-combo-matrix.sh` (dell1–DUT–dell2) |
+| `arch/fman-function-inventory.md` | Stub/type inventory behind §4 task IDs |
+| `plans/VPP-AFXDP-ZC-FULLSPEED.md` | VPP AF_XDP zero-copy follow-up |
 | `plans/ASK-ISO-BUILD-AND-INSTALL.md` | Operator build/install how-to |
+
+**[NOTE]** Retired 2026-10-05 (see `plans/archive/README.md` and the
+`<name>.archive-note.md` files there): CC-TREE-REBUILD-PLAN,
+NXP-106-DEEP-DIVE-PLAN, TF-2026-07-18-001, ZC-RX-SCOPE, ASK2-VLAN-REARCH (+
+EXECUTION), ASK2-PRODUCTION-ARCHITECTURE, EHASH-DUAL-FIX-VERIFICATION-PLAN,
+MODULE-INVENTORY, PATCH-FOLD-CAMPAIGN-PLAN, ASK1-VS-ASK2-TESTS, skip-ledger,
+and needs-forward-port/.
 
 **[NOTE]** Maintenance rule: when a milestone gate passes, flip its §3
 status, check off §4 items, and log evidence to qdrant in the same change.

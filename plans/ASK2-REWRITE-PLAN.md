@@ -4,6 +4,34 @@ Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the
 `nxp-sdk` branch (worktree `e20239b9`) and the original vendor source at
 `/mnt/builds/ASK`.
 
+## Progress tracker (updated 2026-10-05)
+
+| Phase | Status | Where it stands |
+|---|---|---|
+| **0 — safety and oracles** | ✅ (0.4 🟡 partial, deferred by operator) | 0.1 ⚠ superseded: VLAN offload is default-on again now that it works. 0.2 register oracle ✅. 0.3 record oracle ✅ (push-only record added 2026-10-05). 0.4 vendor thresholds ✅ TCP; 64 B/IMIX/64k-flow deferred. 0.5 ✅. |
+| **1 — VLAN root cause** | 🟡 **fixed; exit gate (A6) not yet run** | Root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **Open:** A6 with the binding §8 methodology (iperf3 `-Z`, 40 s, `-P 8`/2×`-P 16`, tuned Dells, median of 3) against the vendor thresholds, plus a churn test. Indicative numbers (iperf2, 10 s, `-P 4`) are listed below the table. |
+| **2 — consolidation** | ⬜ not started | Now unblocked: delete `ask_vlan_cc.c` and its genl/debugfs/stat proxies (CC VLAN path retired); fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD. |
+| **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE, multicast, IPsec, tunnels/fragments and QoS have not been started. |
+| **4 — exceed the vendor** | ⬜ not started | Vendor A13 measured; ASK2 A13 not measured. |
+
+Indicative Phase 1 bidir results against the vendor thresholds (§8):
+
+| Combo | ASK2 (indicative) | Vendor threshold |
+|---|---|---|
+| vlan↔vlan v4 | 15.9 | 16.74 |
+| vlan↔vlan v6 | 15.6 | 16.01 |
+| vlan↔port v4 | 11.7 | 12.35 |
+| vlan↔port v6 | 11.6 | 12.22 |
+| port↔port | 15.3–15.8 | 16.6–16.9 (vendor runs NAT44/66 on the forward leg; configure identically before comparing) |
+
+Unidir is at line rate (9.2–9.4).
+
+**Next action:** run A6 per §8 on `.185` with `oracle/baseline3.sh` (it
+needs a DUT parameter and the ASK2 offload proof via the `fe_ehash_stats`
+delta instead of the vendor kprobe). If ASK2 is still about 5 % short, that gap
+is Phase 1 exit work, not Phase 4.
+
+
 This plan is the output of a six-agent review followed by a direct
 cross-check of every claim that drives a decision:
 
@@ -1082,8 +1110,8 @@ regresses.
 
 ## 10. Relationship to other plans
 
-This plan supersedes the VLAN conclusions in `plans/ASK2-VLAN-REARCH.md`,
-`plans/ASK2-VLAN-REARCH-EXECUTION.md` and the VLAN status lines of
+This plan supersedes the VLAN conclusions in `plans/archive/ASK2-VLAN-REARCH.md`,
+`plans/archive/ASK2-VLAN-REARCH-EXECUTION.md` and the VLAN status lines of
 `plans/ASK2-MASTER-PLAN.md`. Feature sub-plans
 (`ASK2-BRIDGE-OFFLOAD-PLAN.md`, `ASK2-IPSEC-OFFLOAD-PLAN.md`) remain valid in
 scope but must adopt the Phase 1 port-init and the ehash-table model (not

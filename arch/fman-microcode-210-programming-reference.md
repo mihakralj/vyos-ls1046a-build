@@ -617,7 +617,7 @@ KeyGen. To engage the KG for either RSS or AC_CC, rewrite RFPNE to
 
 **[NOTE]** `NIA_KG_DIRECT` alone does not explain the RX stall observed under
 `cc_test`-driven AC_CC dispatch (F-162 added it, board-confirmed live and
-correctly encoded, stall persisted — see `plans/CC-TREE-REBUILD-PLAN.md`). It
+correctly encoded, stall persisted — see `plans/archive/CC-TREE-REBUILD-PLAN.md`). It
 is documented here because it is a real vendor-required field this branch was
 missing, not because it is a proven fix for that stall.
 
@@ -1119,7 +1119,7 @@ already builds — the earlier hypothesis "vendor uses a fundamentally
 different AD species" is **not correct**. **What remains open:** `w1`–`w3`'s
 real semantics (most likely a hash/CRC-config + further-indirection scheme
 never replicated here) — the more likely home for the actual behavioral
-difference. Follow-on work: `plans/NXP-106-DEEP-DIVE-PLAN.md` Phase A/C.
+difference. Follow-on work: `plans/archive/NXP-106-DEEP-DIVE-PLAN.md` Phase A/C.
 
 ### 7.12 FE-VM microcode dispatch mechanics — decompile-verified (2026-08-08)
 
@@ -1310,7 +1310,7 @@ opposite conclusion by reading the wrong function family; that conclusion is
 retracted below, in place, per this project's own documentation convention
 of superseding rather than deleting.**
 
-Phase 0 of `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` first read
+Phase 0 of `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` first read
 `ext_hash_add_key()`/`ext_hash_lookup()`/`ext_hash_table_create()` — which
 operate on `t_FmPcdCcNodeExtHashInfo`/`t_FmExtHashBucket` (a 256-byte
 set-associative bucket) — and concluded this project's bucket format was
@@ -1363,7 +1363,7 @@ Entries that want this are allocated at `MAX_EN_EHASH_EXT_ENTRY_SIZE = 320`
 bytes (not 256) — "stats begins at the 256th byte, 64-byte aligned again."
 This is real, unimplemented, and becomes the dispatch-independent
 compare-happened discriminator Phase 1 should add — see the corrected scope
-in `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md`.
+in `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md`.
 
 **Net effect of this whole detour**: this project's ehash bucket/table
 format was never the bug. The persistent MISS remains most plausibly
@@ -1376,7 +1376,7 @@ confirmed defect.
 
 <details><summary>Original (incorrect) 2026-08-07 verdict, preserved for the record</summary>
 
-Phase 0 of `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` read
+Phase 0 of `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` read
 the full, live `ext_hash_add_key()`/`ext_hash_lookup()`/
 `ext_hash_table_create()` bodies from `we-are-mono/ASK`'s
 `patches/kernel/002-mono-gateway-ask-kernel_linux_6_12.patch` (branch
@@ -1436,7 +1436,7 @@ overflow-chaining, and per-key `contex_addr`/`monitoring_addr` stored
 tail-first within the same bucket rather than a separate flow-record
 pointer. This is a structural rewrite of `fman_pcd_ehash_add_key()` /
 `fman_pcd_ehash_bucket_index()` / the bucket allocator, not a small fixup.
-See `plans/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` Phase 1 for the design this
+See `plans/archive/EHASH-DUAL-FIX-VERIFICATION-PLAN.md` Phase 1 for the design this
 verdict feeds into.
 
 **This entire bullet list and "Practical consequence" paragraph is WRONG —
@@ -1816,6 +1816,6 @@ identically on bare exact-match CC.
 | Public microcode capability matrix | `github.com/nxp-qoriq/qoriq-fm-ucode` (readme) |
 | FMan firmware-check script | `board/scripts/firmware-check` |
 | `cmm`/conntrack root cause (why `cmm` counters aren't a usable oracle) | this document §3.2; `specs/conntrack-root-cause-analysis.md` (`nxp-sdk` branch) |
-| `.106` group-table structure, `.106` operational notes | this document §7.11a; `plans/NXP-106-DEEP-DIVE-PLAN.md` |
+| `.106` group-table structure, `.106` operational notes | this document §7.11a; `plans/archive/NXP-106-DEEP-DIVE-PLAN.md` |
 | Complete `Fm*`/`fm_*` function catalogue (162 functions, two vendor SDK snapshots) | `arch/fman-function-inventory.md` |
 | Per-field config-value cross-check (this project's value vs. vendor's real production value) — start here before writing any fixup that sets a hardware field | `arch/fman-config-value-ledger.md` |

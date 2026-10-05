@@ -2,6 +2,26 @@
 
 **Version 1.2.0 · 2026-08-17**
 
+> **Current rig (2026-10-05).** heidi/HELGA are no longer the generators. The
+> standard rig is **dell1 (`admin@192.168.1.112`) → DUT eth3 / eth4 → dell2
+> (`admin@192.168.1.113`)** on 10G SFP+, driven by
+> `bin/testrig-combo-matrix.sh` (`setup`, `check`, `run <combo> <unidir|bidir>
+> <secs> <streams>`, `matrix`). It covers port↔port, vlan↔port and vlan↔vlan
+> for both IPv4 and IPv6.
+>
+> - Any DUT pinned to the `.185` data-plane addresses can be swapped in by
+>   moving the cables. That is how the vendor `.106` comparison was run.
+> - Re-run `setup` after every DUT power cycle (it restores dell1's table-110
+>   policy routes).
+> - For loss accounting, read the mEMAC counters directly (`rdrp` +0x158,
+>   `rerr` +0x138 at FMan+`0xF0000`/`0xF2000`). After patch 0218, physical
+>   errors are discarded in BMI and no longer reach the driver's
+>   `rx frame physical error` counter.
+> - Do not use `/sys/class/net/eth4/statistics/rx_packets` as a kernel-RX
+>   indicator under offload (2026-10-05 finding).
+>
+> The SW/HW-mode proof method below still applies.
+
 A reproducible procedure for measuring routed IPv4 throughput and DUT CPU cost through the Mono Gateway LS1046A, comparing the Linux software flowtable against ASK2/FMan hardware offload.
 
 This document is authoritative for the current heidi → DUT `.185` → HELGA harness. The older `plans/archive/TRAFFIC-HARNESS.md` (LXC/third-board) and the dual-board sections of `plans/archive/PERFORMANCE-BENCHMARKS.md` describe different topologies and must not be used to configure this harness.
