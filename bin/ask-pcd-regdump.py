@@ -111,8 +111,18 @@ RX_BMI_FIELDS = [
     ("fmbm_rpp",     0x030, "Rx Policer Profile"),
     ("fmbm_rccb",    0x034, "Rx Coarse Classification Base"),
     ("fmbm_reth",    0x038, "Rx Excessive Threshold"),
+    ("fmbm_rprai0",  0x040, "Rx Parse Results Array Init [0]"),
+    ("fmbm_rprai1",  0x044, "Rx Parse Results Array Init [1]"),
+    ("fmbm_rprai2",  0x048, "Rx Parse Results Array Init [2]"),
+    ("fmbm_rprai3",  0x04c, "Rx Parse Results Array Init [3]"),
+    ("fmbm_rprai4",  0x050, "Rx Parse Results Array Init [4]"),
+    ("fmbm_rprai5",  0x054, "Rx Parse Results Array Init [5]"),
+    ("fmbm_rprai6",  0x058, "Rx Parse Results Array Init [6]"),
+    ("fmbm_rprai7",  0x05c, "Rx Parse Results Array Init [7]"),
     ("fmbm_rfqid",   0x060, "Rx Frame Queue ID (default FQ)"),
     ("fmbm_refqid",  0x064, "Rx Error Frame Queue ID"),
+    ("fmbm_rfsdm",   0x068, "Rx Frame Status Discard Mask"),
+    ("fmbm_rfsem",   0x06c, "Rx Frame Status Error Mask"),
     ("fmbm_rfene",   0x070, "Rx Frame Enqueue Next Engine"),
     ("fmbm_rcmne",   0x07c, "Rx Frame Continuous Mode Next Engine"),
     ("fmbm_rstc",    0x200, "Rx Statistics Counters control"),
@@ -125,7 +135,19 @@ RX_BMI_FIELDS = [
     ("fmbm_rodc",    0x21c, "Rx Out of Buffers Discard counter"),
     ("fmbm_rbdc",    0x220, "Rx Buffers Deallocate Counter"),
     ("fmbm_rpec",    0x224, "Rx Prepare to enqueue Counter"),
+    ("fmbm_rgpr",    0x30c, "Rx General Purpose Register (FM_CTL params page MURAM offset)"),
 ]
+
+# MURAM sits at FMan CCSR offset 0; LS1046A FMan v3 MURAM is 384 KiB.
+MURAM_SIZE = 0x60000
+PARAMS_PAGE_WORDS = 64
+
+# Known FMBM_RFENE values (SDK fm_common.h:402-421, mainline fman_port.c:605).
+RFENE_DECODE = {
+    0x00000022: "FM_CTL|AC_POST_BMI_ENQ (SDK advanced offload)",
+    0x00000014: "FM_CTL|AC_POST_BMI_ENQ_ORR",
+    0x00d40000: "QMI_ENQ|ORDER_RESTOR (mainline default)",
+}
 
 # NIA engine field — bits 23..20 in NIA u32 (per fman_port.c NIA_ENG_BMI = 0x00500000)
 # We extract via (val & 0x00F00000) >> 20.
@@ -317,9 +339,21 @@ def dump_port_bmi(fr, port_off_in_fman, label):
             line += f"  -> {nia_decode(val)}"
         elif name == "fmbm_rcfg":
             line += f"  EN={(val>>31)&1}"
+        elif name == "fmbm_rfene":
+            line += f"  -> {RFENE_DECODE.get(val, 'unrecognised')}"
         elif name in ("fmbm_rfrc", "fmbm_rfdc", "fmbm_rfbc"):
             line += f"  ({val} dec)"
         print(line, "  //", doc)
+    dump_params_page(fr, fr.r32(port_off_in_fman + 0x30c))
+
+def dump_params_page(fr, rgpr):
+    if rgpr == 0 or rgpr + PARAMS_PAGE_WORDS * 4 > MURAM_SIZE:
+        print(f"  (params page: RGPR=0x{rgpr:08x}, not dumped)")
+        return
+    print(f"  params page @ MURAM 0x{rgpr:05x} ({PARAMS_PAGE_WORDS * 4} B):")
+    for row in range(0, PARAMS_PAGE_WORDS, 4):
+        words = " ".join(f"{fr.r32(rgpr + (row + i) * 4):08x}" for i in range(4))
+        print(f"    +0x{row * 4:03x}: {words}")
 
 def main():
     ap = argparse.ArgumentParser(description="PR14z12-B v2 silicon-state dump")
