@@ -381,3 +381,10 @@
 # and NAT rebuild preserving the full 04/11/12 prefix.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0216-fman-pcd-ehash-vlan-stats-scratch.patch
+
+# Push-only VLAN fix (2026-10-05): vendor 96 B RX internal margin (RIM
+# 0x60000000) + parse start offset (RPSO 0x60) on every RX port. Push-only
+# grows the frame in front of its start; with RIM/RPSO 0 the ingress port
+# wedged RX-deaf. Matrix-validated live on .185 with these values.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0217-fman-port-rx-hm-margin.patch
