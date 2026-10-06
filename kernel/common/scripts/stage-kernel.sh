@@ -135,6 +135,25 @@ if [[ ! -d "$KSRC/.git" ]]; then
         git add -A && git commit -qm "linux-$KVER pristine baseline" )
 fi
 
+# patch-series-cleanup (2026-09-11) parity fix: bin/ci-setup-kernel.sh
+# overlays the whole kernel/common/files/ tree onto the kernel source root
+# (it mirrors real kernel-tree paths, e.g.
+# drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c) and git-commits it
+# BEFORE the patch loop runs, because some "new file mode" content was
+# split out of its patch (0068) into plain tracked source here, on the
+# assumption a later patch (0069+) would only ever need to *modify* an
+# already-present file. stage-kernel.sh never replicated that overlay, so
+# a from-scratch dev-build.sh run fails at 0069 with "dpaa_flavor.c: does
+# not exist in index" even though the file is present on disk under
+# kernel/common/files/. Mirror the same overlay + commit here, before the
+# patch loop, so --3way sees these files as part of the baseline tree.
+if [[ -d "$FILES_DIR" ]]; then
+    info "staging LS1046A new-file source tree (kernel/common/files)…"
+    cp -a "$FILES_DIR/." "$KSRC/"
+    ( cd "$KSRC" && git add -A && \
+        git commit -qm "stage kernel/common/files new-file source tree" --allow-empty )
+fi
+
 # Drop .gitattributes so Mergiraf is wired as the merge driver for source
 # files when --3way needs to fall back to a real 3-way merge.
 cat > "$KSRC/.gitattributes" <<'GITATTR'
