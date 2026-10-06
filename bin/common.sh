@@ -26,15 +26,26 @@ export REPO_ROOT
 KERNEL_SCRIPTS_DIR="$REPO_ROOT/kernel/common/scripts"
 export KERNEL_SCRIPTS_DIR
 
-# Pull fallback defaults from versions.lock first.
-[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
-
-# Then let sync-kernel-version.sh override from vyos-build/data/defaults.toml
-# when that checkout is present. Respects an already-set KERNEL_VERSION env var.
+# Resolve KERNEL_VERSION/KERNEL_SERIES from vyos-build/data/defaults.toml
+# (auto-tracked) FIRST, falling back to versions.lock internally when that
+# checkout is missing. Must run BEFORE sourcing versions.lock below: that
+# file uses `: "${KERNEL_VERSION:=6.18.44}"` and `export`s it, and
+# sync-kernel-version.sh's own env-var precedence tier treats any
+# already-exported KERNEL_VERSION as an explicit caller override and
+# "respects" it — so sourcing versions.lock first silently poisoned the
+# env and made every local dev-loop script stick to its stale fallback
+# pin forever, even after defaults.toml moved on (found 2026-10-05:
+# defaults.toml pinned 6.18.48, but common.sh kept resolving 6.18.44).
 if [[ -f "$KERNEL_SCRIPTS_DIR/sync-kernel-version.sh" ]]; then
     # shellcheck source=../kernel/common/scripts/sync-kernel-version.sh
     . "$KERNEL_SCRIPTS_DIR/sync-kernel-version.sh"
 fi
+export KERNEL_VERSION KERNEL_SERIES
+
+# Now safe to source versions.lock for its other pins (e.g. ARCH): its
+# `: "${KERNEL_VERSION:=...}"` form is a no-op since KERNEL_VERSION is
+# already exported above.
+[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
 export KERNEL_VERSION KERNEL_SERIES
 
 # ── Status banner (only when sourced from an interactive script) ──────

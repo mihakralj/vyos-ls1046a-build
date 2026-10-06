@@ -22,6 +22,37 @@ The kernel's own TX path is untouched: priv->egress_fqs[] stay FQ_TYPE_TX
 with confirmation, so dpaa_xmit/ARP/conntrack-promote continue to free skbs
 normally. Only ask.ko's offloaded HIT path uses the no-confirm FQ.
 
+A6-LOSS step 7 (2026-10-05): dpaa_alloc_offload_tx_fq() now calls
+dpaa_fq_init(dpaa_fq, td_enable=True) instead of False. Live hardware
+testing (cgr_probe, this session) proved the FQ's CGR membership
+(QM_FQCTRL_CGE, cgid = priv->cgr_data.cgr.cgrid, 256 MiB CS threshold) never
+reports congested=1 for this FQ's enqueues even when fq_probe shows the FQD's
+own frm_cnt/byte_cnt backlogged to ~4.27 GB (17x over threshold) -- ASK2's FE
+hardware ENQUEUE_PKT path updates the FQD's own counters but does not feed
+the separate CG integrator the CGE path depends on. dpaa_fq_init()'s dormant
+td_enable branch (never exercised by any caller in this tree before this
+change) instead programs QM_FQCTRL_TDE + a FQD-local byte-count tail-drop
+threshold (DPAA_FQ_TD, 4 MiB) that QMan evaluates directly against the same
+per-FQD counters fq_probe already proved ARE updated correctly for this FQ --
+independent of the CG integrator. Per arch/qman-ceetm.md's FQD field table,
+CGE (bit 288) and TDE (bit 289) are independent bits, but this driver's
+existing td_enable branch overwrites (not ORs) fq_ctrl, so enabling TDE here
+also drops this FQ's CGE/cgid membership -- an acceptable trade since that
+membership was confirmed non-functional for this producer. Kernel's own
+confirm-enabled TX FQs (td_enable always False) are unaffected.
+
+A6-LOSS step 7 fix-up (2026-10-05, same day): the first cut of this change
+boot-faulted on board .185 (image 2026.10.05-2149) -- "qman_init_fq(698) =
+-22" for fqid 0x2ba/0x2bb (698/699 decimal) on every boot. Root cause:
+qman_init_fq() hard-rejects we_mask with BOTH QM_INITFQ_WE_OAC and
+QM_INITFQ_WE_TDTHRESH set ("can't be set at the same time as TDTHRESH" in
+qman.c). The CGE/OAC branch above unconditionally sets WE_OAC for
+FQ_TYPE_TX_NO_CONFIRM regardless of td_enable, so with td_enable=true both
+WE_OAC and WE_TDTHRESH ended up set together. Fix: that branch's condition
+now reads `(dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM && !td_enable)`, so
+this FQ enters either the CGE/OAC branch or the TDE branch, never both. No
+other caller passes td_enable=true, so no other FQ type is affected.
+
 Count-gated, idempotent (marker "F-199"); hard-fail on any source drift.
 """
 
@@ -74,6 +105,26 @@ replace(
     "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||\n"
     "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ ||\n"
     "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {\n"
+    "\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);",
+)
+
+# 2b. A6-LOSS step 7 (2026-10-05): qman_init_fq() hard-rejects we_mask with
+#     BOTH QM_INITFQ_WE_OAC and QM_INITFQ_WE_TDTHRESH set (qman.c: "can't be
+#     set at the same time as TDTHRESH" -> -EINVAL). Block 2 above
+#     unconditionally enters the CGE/OAC branch for FQ_TYPE_TX_NO_CONFIRM,
+#     which sets WE_OAC; the td_enable branch (block 4's dpaa_fq_init(...,
+#     true) call) sets WE_TDTHRESH -- together these hard-faulted
+#     qman_init_fq() for fqid 0x2ba/0x2bb at every boot ("qman_init_fq(698)
+#     = -22"), confirmed on board .185 image 2026.10.05-2149. Exclude this
+#     FQ from the CGE/OAC branch whenever td_enable is set, since td_enable
+#     is the signal this FQ wants FQD-local tail-drop instead of CGR
+#     membership for the same budget. No other caller in this tree ever
+#     passes td_enable=true, so this is a no-op for every other FQ type.
+replace(
+    ETH_C, "no-confirm FQ skips CGE/OAC when td_enable",
+    "\t\t    dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {\n"
+    "\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);",
+    "\t\t    (dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM && !td_enable)) {\n"
     "\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);",
 )
 
@@ -165,7 +216,14 @@ replace(
     "\t\t\t  &dpaa_fq_cbs.egress_ern);\n"
     "\tlist_add_tail(&dpaa_fq->list, &priv->dpaa_fq_list);\n"
     "\n"
-    "\tret = dpaa_fq_init(dpaa_fq, false);\n"
+    "\t/* A6-LOSS step 7 (2026-10-05): td_enable=true, not false. CGE/cgid\n"
+    "\t * membership in priv->cgr_data.cgr.cgrid was live-proven (cgr_probe)\n"
+    "\t * to never report congested for this FQ's FE-hardware enqueues even\n"
+    "\t * with a multi-GB backlog; the FQD-local tail-drop threshold this\n"
+    "\t * enables instead is evaluated directly against the same per-FQD\n"
+    "\t * frm_cnt/byte_cnt counters fq_probe already proved DO update\n"
+    "\t * correctly for this FQ. */\n"
+    "\tret = dpaa_fq_init(dpaa_fq, true);\n"
     "\tif (ret < 0) {\n"
     "\t\tlist_del(&dpaa_fq->list);\n"
     "\t\tdevm_kfree(dev->dev.parent, dpaa_fq);\n"

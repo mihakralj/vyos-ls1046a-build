@@ -41,9 +41,19 @@ FQs `0x2ba/0x2bb` and was retired after this validation. **[SUPERSEDED
 vlan↔vlan 16.50G vs ASK2 5.27G on 2026-09-10); commit `40ace3f0` revived the
 inline FE-VM path. **UPDATE 2026-10-05:** that inline path is now
 silicon-validated and ships default-on through patches 0215–0218 and the
-ask.ko fixes (`dpaa1` `1e8865d5`). VLAN↔VLAN bidir reaches 15.6–15.9 Gbit/s,
-and push-only and pop-only are offloaded; see `plans/ASK2-REWRITE-PLAN.md`
-E3. The text below is historical.]** **The old S2 inline
+ask.ko fixes (`dpaa1` `1e8865d5`). Push-only and pop-only are offloaded; see
+`plans/ASK2-REWRITE-PLAN.md` E3. **A6 against the vendor's own OpenWrt build
+(2026-10-05, binding method) FAILS on bidir:** unidir is at parity, but bidir is
+20–29 % short on every combo, with 10–15M retransmits per run, and untagged
+port→port loses ~710k frames even unidir. The earlier 15.6–15.9 Gbit/s
+vlan↔vlan figure came from a lighter iperf2 load and is superseded (binding
+figure 12.5–12.7 vs vendor 17.2–17.6). Scoreboard:
+`plans/ASK2-VS-VENDOR-THROUGHPUT.md`; defect **A6-LOSS** in §5. **UPDATE
+2026-10-06:** A6 throughput now passes. 0219, the RX buffer pool fix
+(`7ba747e1`, 128 → 640 buffers/CPU) and the RX data alignment fix (`dc8591ae`,
+data at 256) bring bidir to 17.3–17.8 Gbit/s on port↔port and vlan↔vlan and
+12.6–12.8 on vlan↔port — vendor parity or better. The text below
+is historical.]** **The old S2 inline
 FE-VM VLAN strip/insert path is retired, not pending:** it exhausted a 5+tnums
 FE-VM management resource after 21 frames. VLAN pop/push now uses the separate
 CC-leaf → combined-HMTD path and is DONE and silicon-validated end-to-end
@@ -1951,8 +1961,9 @@ record it does not own.
   - 0217: vendor 96 B RX margin, needed for push-only;
   - 0218: physical errors discarded in BMI.
 
-  `vlan_offload` and `vlan_push_only` are default-on. Historical record
-  follows.
+  `vlan_offload` and `vlan_push_only` are default-on. Functionally done. The
+  throughput gate is not: A6 fails on bidir for all combos, including
+  untagged (defect **A6-LOSS**, §5). Historical record follows.
   **Was: DONE + SILICON-VALIDATED end-to-end; ships
   default-OFF; merge-ready (2026-08-26, image 0713, commit `36bf83de`).** The
   original inline FE-VM F-233/F-234 opcode path is retired: it froze after
@@ -2395,6 +2406,7 @@ open defects.
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN, narrowed 2026-09-14 | M3 (if eth4 used) | 3× production YNL engage/disengage cycles on eth4 (`.185`, image `2026.09.14-1431-rolling`) via `ConfigSession` reproduced NO deafness: connectivity clean after every cycle, `pcd-snapshot diff` byte-exact match against pre-cycling baseline, and a follow-up throughput test confirmed genuine `[HW_OFFLOAD]` in conntrack (3.17GB/12s @ 2.27 Gbit/s, re-verified after fixing the hw-tc-offload regression below — the first pass's throughput number was NOT confirmed HW_OFFLOAD and should not have been cited as proof; this entry corrects that). Likely narrows to the debugfs `hit-engage`/`hit-disengage` path (F-076's "DIRECT path", explicitly flagged short-term-verification-only, not reachable through any supported VyOS config) rather than the production engage path real operators use. If it recurs, reproduce via `vyos-offload-ask hit-engage`/`hit-disengage` specifically, not the CLI/YNL path. |
 | **hw-tc-offload lost on offload cycling** | `delete`/`set interfaces ethernet ethN offload ipv4/ipv6` via commit does NOT reapply `ethtool hw-tc-offload`, so after a disengage/re-engage cycle the port shows `ask.ko`-engaged (`fe_arm`, `ask-check` "engaged through the production ASK path") but `ethtool -k <if> hw-tc-offload` reads back **off** — the nft hardware flowtable then cannot actually reach that port, silently degrading to a state where the interface *looks* engaged but isn't reachable via the hw-tc-offload-gated flowtable path. Found 2026-09-14 while testing the eth4-intermittent defect above: 3 cycles left `ask-check` at 35/36 with `[FAIL] eth4 hw-tc-offload is not enabled (off)`. | **CLOSED — board-verified 2026-09-14/15** | M6-A / M8 | Two independent bugs, both fixed (`vyos-1x-052-hw-tc-offload-reapply.patch`): (1) `set_ask_offload()` didn't reapply `hw-tc-offload` on engage — added a best-effort `ethtool -K <if> hw-tc-offload on` whenever it arms a nonzero family mask. (2) The real reproducer of the *every-commit* symptom: `set_ingress_policer()` (called unconditionally near the end of every `EthernetIf.update()`) force-set `hw-tc-offload off` whenever no ingress-policer was configured, silently undoing (1) moments later on literally every commit, not just after a disengage/re-engage cycle — found by instrumenting `.185` live (logger calls bracketing each ethtool state change) and tracing the exact point in `update()` where the flag flipped back. Fixed by making that reset conditional on ASK offload (`offload ipv4`/`offload ipv6`) not also being engaged on the port. Verified: 3/3 engage→disengage cycles on eth1 on a real CI-built image (`2026.09.14-2332-rolling`), `ethtool -k eth1 hw-tc-offload` tracked on/off correctly every time; `ask-check` 36/36 on production. |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | **CLOSED — STALE/UNREPRODUCED 2026-09-14.** The actual production flowtable (VyOS `firewall.py`-generated, no CLI knob exists to pick a different hook) has always used `hook ingress priority filter` — confirmed live in `config.boot` on `.185` — and has carried 10+ Gbit/s of sustained HW-offloaded traffic all session with zero forwarding breakage. Likely fixed indirectly by an earlier, unrelated change (e.g. the 2026-08-14 flowtable-chain-priority fix) and never marked closed, or was specific to a manual/ad-hoc test table that no longer exists. | M5 | Reopen only with a concrete reproduction; do not reproduce against the production flowtable given the "permanent" breakage claim — use a disposable manual nft table if revisited. |
+| **A6-LOSS** | ASK2 hardware-forwarded bidir traffic fell 20–29 % short of the vendor NXP ASK (OpenWrt, `.106`) with 10–15M TCP retransmits per 40 s run (2026-10-05). | **CLOSED on throughput 2026-10-06** (image `2026.10.06-0526-rolling`, `dc8591ae`): unidir line rate, bidir −0.5 % to +1.0 % vs vendor on all six combos. Three causes: (1) 0219 (`eb901a5f`) ehash duplicate-key eviction — removed the ~710k unidir port→port floor; (2) RX BMan pool exhaustion (BMI `fmbm_rodc` = retransmits 1:1; mainline seeds 128 buffers/CPU once, the CPU never refills on the hardware path) — `7ba747e1`, `FSL_DPAA_ETH_MAX_BUF_COUNT` 640 (vendor value); (3) RX data starting 16 B into a cache line (headroom 272, aligned 16) on a coherent FMan — a ~15.5 Gbit/s byte-rate ceiling — `dc8591ae`, data at 256 (vendor DT `buffer-layout <0x60 0x40>`). Earlier step-2/step-5 "BMI ruled out" readings were wrong (counters disabled at boot; `rfdc` ≠ `rodc`). **Residual:** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's at equal throughput. | ASK2-REWRITE-PLAN Phase 1 exit (A6) | Throughput gate met. Optional: chase the residual retransmit ratio; Phase 1 churn test. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`. |
 | **ZC refill under flood** | `refill_batches` freezes under sustained flood; pool drains at ~256 frames | OPEN | M4 throughput | Investigate after the ZC datapath flows (T-M4-4d) |
 
 ---
@@ -2484,6 +2496,7 @@ ASK2 plan documents — extend this plan or the owning reference.
 | `specs/cc-comparator-compare-window-hypothesis.md` | CC compare-window hypothesis + experiment protocol |
 | `plans/DUAL-DATAPLANE.md` | S0/S1/S2 state machine + CLI contract |
 | `plans/ASK2-REWRITE-PLAN.md` | Vendor-parity review (2026-10-03), `.106` vendor oracles (Phase 0), VLAN root cause and fixes 0215–0218 (Phase 1 / E3) |
+| `plans/ASK2-VS-VENDOR-THROUGHPUT.md` | A6 scoreboard: ASK2 vs vendor NXP ASK (OpenWrt) routed throughput and retransmits, unidir and bidir |
 | `plans/OFFLOAD-CAPABILITY-PLAN.md` | Per-capability vendor mechanism vs ASK2 mechanism |
 | `plans/CC-ACL-OFFLOAD-PLAN.md` | ACL / ntuple / tc-flower backend; CC match-walker verdict |
 | `specs/reference/nxp-ask-fmc/` | Literal vendor FMC/NetPDL oracle (`cdx_sp.xml`, `cdx_pcd.xml`, cfg variants) from `we-are-mono/ASK@fe36f30`; reference only, never runtime config |

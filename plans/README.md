@@ -13,6 +13,7 @@ Last consolidated: 2026-10-05.
 |---|---|
 | [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative ASK2 execution plan:** milestones M2–M8, task IDs, open defects, live reference register (§8). Start here. |
 | [`ASK2-REWRITE-PLAN.md`](ASK2-REWRITE-PLAN.md) | Vendor-parity review (2026-10-03), `.106` vendor oracles (Phase 0), VLAN root cause and fixes 0215–0218 (Phase 1 / E3), later phases. |
+| [`ASK2-VS-VENDOR-THROUGHPUT.md`](ASK2-VS-VENDOR-THROUGHPUT.md) | A6 scoreboard: ASK2 vs vendor NXP ASK routed throughput and retransmits (unidir and bidir tables). |
 | [`DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md) | S0/S1/S2 state machine, per-interface CLI contract, reversibility contract. |
 | [`OFFLOAD-CAPABILITY-PLAN.md`](OFFLOAD-CAPABILITY-PLAN.md) | Per capability: vendor mechanism vs ASK2 mechanism, with build steps. |
 | [`ASK2-BRIDGE-OFFLOAD-PLAN.md`](ASK2-BRIDGE-OFFLOAD-PLAN.md) | L2 bridge offload (T-M6-2); open regression as of 2026-09-16. |
