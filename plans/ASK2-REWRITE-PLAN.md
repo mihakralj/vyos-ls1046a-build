@@ -4,17 +4,17 @@ Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the
 `nxp-sdk` branch (worktree `e20239b9`) and the original vendor source at
 `/mnt/builds/ASK`.
 
-## Progress tracker (updated 2026-10-05)
+## Progress tracker (updated 2026-10-06)
 
 | Phase | Status | Where it stands |
 |---|---|---|
 | **0 — safety and oracles** | ✅ (0.4 🟡 partial, deferred by operator) | 0.1 ⚠ superseded: VLAN offload is default-on again now that it works. 0.2 register oracle ✅. 0.3 record oracle ✅ (push-only record added 2026-10-05). 0.4 vendor thresholds ✅ TCP; 64 B/IMIX/64k-flow deferred. 0.5 ✅. |
-| **1 — VLAN root cause** | 🟡 **fixed; exit gate (A6) not yet run** | Root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **Open:** A6 with the binding §8 methodology (iperf3 `-Z`, 40 s, `-P 8`/2×`-P 16`, tuned Dells, median of 3) against the vendor thresholds, plus a churn test. Indicative numbers (iperf2, 10 s, `-P 4`) are listed below the table. |
+| **1 — VLAN root cause** | ✅ **VLAN fixed; A6 throughput passes** (churn test pending) | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Open:** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's at equal throughput; churn test. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
 | **2 — consolidation** | ⬜ not started | Now unblocked: delete `ask_vlan_cc.c` and its genl/debugfs/stat proxies (CC VLAN path retired); fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD. |
 | **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE, multicast, IPsec, tunnels/fragments and QoS have not been started. |
 | **4 — exceed the vendor** | ⬜ not started | Vendor A13 measured; ASK2 A13 not measured. |
 
-Indicative Phase 1 bidir results against the vendor thresholds (§8):
+Indicative Phase 1 bidir results against the vendor thresholds (§8). These are **superseded** by the A6 tables below: the lighter iperf2 `-P 4` load hid the loss.
 
 | Combo | ASK2 (indicative) | Vendor threshold |
 |---|---|---|
@@ -26,10 +26,398 @@ Indicative Phase 1 bidir results against the vendor thresholds (§8):
 
 Unidir is at line rate (9.2–9.4).
 
-**Next action:** run A6 per §8 on `.185` with `oracle/baseline3.sh` (it
-needs a DUT parameter and the ASK2 offload proof via the `fe_ehash_stats`
-delta instead of the vendor kprobe). If ASK2 is still about 5 % short, that gap
-is Phase 1 exit work, not Phase 4.
+**A6 result [SILICON 2026-10-05]: FAIL on bidir.** Run on `.185`, image
+`2026.10.05-1355-rolling` (`1e8865d5`), warm boot. Method per §8:
+`oracle/baseline3.sh` with `DUT=vyos@192.168.1.185 PROOF=ehash`, iperf3 `-Z`,
+40 s, unidir `-P 8`, bidir 2×`-P 16`, tuned Dells, median of 3. Raw data:
+`oracle/a6-ask2-185.csv`.
+
+| Combo | Unidir ASK2 / vendor | Bidir ASK2 / vendor | Bidir retransmits ASK2 / vendor |
+|---|---|---|---|
+| vlan↔port v4 | 9.339 / 9.38 ✅ | **10.27 / 12.35 ❌** (−17 %) | ~15.0M / 1.02M |
+| vlan↔vlan v4 | 9.343 / 9.38 ✅ | **12.53 / 16.74 ❌** (−25 %) | ~13.7M / 31k |
+| vlan↔port v6 | 9.184 / 9.25 ⚠ (−0.7 %) | **9.73 / 12.22 ❌** (−20 %) | ~15.0M / 1.06M |
+| vlan↔vlan v6 | 9.194 / 9.25 ⚠ (−0.6 %) | **12.67 / 16.01 ❌** (−21 %) | ~14.1M / 16k |
+
+- Offload is proven on every run: 17M (unidir) to 27–33M (bidir) hardware
+  hits per 18 s window, with DUT CPU 0.4–10 %.
+- The shortfall is packet loss inside the hardware path under the heavier
+  bidir load: ~14M TCP retransmits per run, against the vendor's 16k–1M.
+  The lighter iperf2 `-P 4` runs (15.6–15.9) hid this.
+- Leading hypothesis: per-port FMan resources (BMI FIFO size, tasks, open
+  DMAs, the MAC RX FIFO), which the vendor SDK sizes differently from
+  mainline. This is unverified.
+
+**Vendor re-baseline on the true OpenWrt build [SILICON 2026-10-05].** `.106`
+was rebuilt as the vendor's own NXP ASK on OpenWrt (Mono 25.12.5, kernel
+6.12.103). The run used the same §8 method, routed with no NAT on every combo,
+and `baseline3.sh DUT=root@192.168.1.106 PROOF=kernelrx` (kernel RX in the
+window, 1–4 packets, so every run is offloaded). DUT CPU was ~0.1 %. Raw data:
+`oracle/a6-vendor-owrt-106.csv`. These numbers **supersede the VyOS-port
+thresholds as the A6 reference**; the VyOS port measured ~3–7 % lower on
+bidir.
+
+| Combo | Vendor OpenWrt uni / bidir | ASK2 bidir | Δ bidir | Bidir retransmits vendor / ASK2 |
+|---|---|---|---|---|
+| port↔port v4 | 9.34 / 17.67 | 13.59 | −23.1 % | 0.34M / 10.7M |
+| vlan↔port v4 | 9.32 / 12.84 | 10.27 | −20.0 % | 9.8M / 15.0M |
+| vlan↔vlan v4 | 9.34 / 17.61 | 12.53 | **−28.8 %** | 0.32M / 13.7M |
+| port↔port v6 | 9.22 / 17.32 | 13.35 | −22.9 % | 0.29M / 10.0M |
+| vlan↔port v6 | 9.19 / 12.53 | 9.72 | −22.4 % | 8.9M / 15.0M |
+| vlan↔vlan v6 | 9.20 / 17.20 | 12.66 | −26.4 % | 0.21M / 14.1M |
+
+- ASK2 unidir throughput is at parity with the real vendor on the VLAN combos
+  (−0.1 % to +0.2 %), so the v6 unidir "marginal" flag above is cleared.
+  Port→port unidir is 2 % lower (9.14 / 9.04 vs 9.34 / 9.22).
+- **Port→port unidir has steady loss [SILICON 2026-10-05].** Every ASK2 run
+  shows 706k–712k retransmits (v4 and v6), against 2–10 on the vendor, while
+  ASK2 vlan→vlan unidir shows 2–4. Untagged ingress loses frames with no
+  overload. That steadiness points to a fixed mechanism, and this is the
+  cheapest reproducer for the loss hunt. Port↔port bidir is also lopsided
+  (one direction 5.1–6.5 Gbit/s, the other 8.0–9.2).
+- **Bidir is the Phase 1 exit blocker.** ASK2 loses 20–29 % with ~40–60×
+  the retransmits on vlan↔vlan.
+- The vendor's vlan↔port loss (~9M retransmits) matches the MAC RX FIFO
+  overflow seen earlier, so that combo is partly a silicon limit. vlan↔vlan
+  and port↔port, however, run near 17.6 Gbit/s on the vendor with low
+  loss.
+- The OpenWrt build has no `/dev/mem` or kprobes, so the vendor port
+  resource registers must come from source (SDK `fm_port.c` defaults) or
+  from a vendor build with `CONFIG_DEVMEM=y`.
+
+**Port-resource hypothesis: FALSIFIED [CODE + SILICON 2026-10-05].**
+- The OpenWrt vendor DT (`.106` `/proc/device-tree`) sets no per-port
+  `fifo-size`, `num-tasks` or `num-dmas`; `lnxwrp_fm_port.c` only overrides
+  from those properties, and `cdx`/`dpa_app` never call the setters. So the
+  vendor runs the SDK defaults (`fm_port.h`).
+- `.185` live BMI common (`fmbm_pp[]`/`fmbm_pfs[]`):
+
+  | Port | Tasks ASK2 / vendor | DMAs | FIFO buffers |
+  |---|---|---|---|
+  | 10G RX | **16** / 14 | 8 / 8 | 96 / 96 |
+  | 10G TX | **16** / 14 | 12 / 12 | 64 / 64 |
+  | 1G | identical | identical | identical |
+
+- The RX FIFO thresholds `fmbm_rfp = 0x03ff03ff` and `fmbm_rda` are
+  identical on both stacks.
+- The remaining eth3 RX BMI diffs (2026-10-04 dumps) are the known
+  Phase 0.2 set plus `fmbm_rfed` (vendor `0x00040000`, likely a 4-byte
+  frame-end/FCS cut) and `fmbm_rpp` (vendor policer profile `0x01000000`).
+  Neither explains 40–60× the loss.
+- **Not compared yet:** the global DMA, FPM and QMI settings. There is no
+  vendor dump, and the OpenWrt build lacks `/dev/mem`.
+
+**Loss-localization result (2026-10-06) [SILICON].** This supersedes the
+conclusions of steps 2 and 5 below; their measurements stand, but two of their
+readings were wrong.
+
+- **Corrections.** BMI port statistics boot disabled (`fmbm_rstc = 0`), so
+  step 2's "all BMI RX counters 0" was read with the counters off. Step 5
+  watched `fmbm_rfdc` (frame discard, port+0x214); out-of-buffer discards are
+  counted separately in `fmbm_rodc` (port+0x21c). Enable the counters with
+  `0x80000000` → port+0x200 (RX ports 0x10/0x11, TX 0x30/0x31; FMan base
+  `0x1A00000` + `0x80000` + port×`0x1000`).
+- **Root cause of the bidir loss: RX buffer pool exhaustion.** One port↔port
+  v4 bidir run (image `2026.10.06-0039-rolling`, `eb901a5f`): `rodc` eth3
+  6,892,550 + eth4 7,053,602 = 13.95M frames against 12.53M TCP retransmits.
+  RX minus `rodc` equals the other port's TX within the ~580 bad frames
+  (`rfbc`); MAC drops ~870 per port, TX discards 0. Mainline `dpaa_eth.c`
+  seeds each port's pool once with `FSL_DPAA_ETH_MAX_BUF_COUNT` = 128 buffers
+  per CPU (~480 per port); hardware-forwarded frames hold their buffer until
+  the egress port releases it, and the CPU never refills the pool on that
+  path. The vendor builds with 640.
+- **Fix: `7ba747e1`** (count-gated `mutate.py` in `bin/ci-setup-kernel.sh`,
+  next to F-053): 128 → 640, 2,560 buffers per port, ~10 MiB per port. CI
+  run `37411828069`, image `2026.10.06-0403-rolling`. Result: bidir
+  retransmits 0.5–3M (from 10–15M), throughput 15.1–15.6 Gbit/s (from
+  12.5–13.6) on port↔port and vlan↔vlan. Scoreboard updated.
+- **0219 (ehash duplicate-key eviction, `eb901a5f`)** removed the steady
+  ~710k port→port unidir retransmits (now 0–138 per run). Before 0219 the
+  same code had also produced clean unidir runs (2/13/791), so the
+  attribution is likely but not proven.
+- **Remaining gap: a byte-rate forwarding ceiling.** Fixed-rate UDP bidir
+  (iperf3 `-u -P 4` per direction, 15 s, 1448 B payload): 6 Gbit/s per
+  direction is lossless; at 8 and 9 offered, delivery caps at ~7.6–7.95 per
+  direction, and the excess is `rodc` (0.3–1.07M per port). With 700 B payload
+  the DUT forwarded 1.78 Mpps in total with zero drops (RX = other port's TX
+  exactly), so packet rate is not the limit. TCP bidir (15.4–15.6) sits on this
+  ~15.5 Gbit/s ceiling; the remaining retransmits are TCP probing it,
+  tail-dropped at the empty RX pool, which also drops the reverse direction's
+  ACKs on that port. The vendor's ceiling is close to wire rate.
+- **Ruled out for the ceiling:** FMan global DMA/FPM defaults (mainline
+  `fman.c` and SDK `fm.h` identical: commQ `0x2A`/`0x3F`, CAM 64, no cache
+  override, dispatch thresholds 16) and per-port BMI resources (above).
+- **Step 1 result: FE record cost ruled out.** A live ASK2 port→port record
+  runs only `21 41 01` (TTL, INSERT_L2, ENQUEUE; flags `0x0392`); the vendor's
+  records run up to six opcodes with stats and timestamp write-back enabled
+  (`0x318a`) and still reach 17.6. Chain lengths are ≤ 2 (899 live records per
+  table = 899 `HW_OFFLOAD` conntrack flows).
+- **Ceiling root cause: RX frame data misaligned to cache lines.** Mainline
+  `dpaa_get_headroom()` RX headroom = 16 (TX priv) + 256 (XDP) − 48 (HWA) + 48
+  = 272, aligned only to 16 (`rebm` `0x01100000`), so every received frame
+  starts 16 B into a 64 B line on a `dma-coherent` FMan. The vendor DT sets
+  `buffer-layout = <0x60 0x40>` (manip space 96, data_align 64) on every FMan
+  port (`.106` `/proc/device-tree/cpus/fman0-extended-args/*`), which with
+  `CONFIG_FSL_FM_RX_EXTRA_HEADROOM=64` gives 80 + 48 + 96 = 224 → aligned 256.
+  A/B on `.185` (test DTB with `fsl,erratum-a050385`, which selects mainline's
+  256 RX layout; cold boot): UDP 9 Gbit/s/dir DUT loss 10.6 % → 0.6 %, TCP
+  port↔port bidir 15.4–15.6 → 17.8 Gbit/s.
+- **Fix: `dc8591ae`** (count-gated `mutate.py` in `bin/ci-setup-kernel.sh`):
+  drop the TX-priv term from `DPAA_RX_PRIV_DATA_DEFAULT_SIZE` → RX priv 208,
+  data at 256, XDP headroom still 256, without the erratum's TX realign copies.
+  CI run `37418518497`, image `2026.10.06-0526-rolling`; live `rebm`
+  `0x01000000`, `ricp` `0x000d0203`. Full A6 on it
+  (`oracle/a6-ask2-185-dc8591ae.csv`): bidir port↔port 17.82/17.48, vlan↔vlan
+  17.79/17.35, vlan↔port 12.77/12.55 Gbit/s (v4/v6) — vendor parity or better.
+- **Original next-step note (superseded by the above):** measure the per-frame
+  DDR cost of the FE record. ASK2 records are 320 B, read from DDR every frame, with counters
+  written back every frame; rerun the UDP ceiling with that write-back
+  removed. Then compare the RX buffer layout (`ricp` ASK2 `0x000e0203` vs
+  vendor `0x00050203`, `rebm`, `rfed`) and DMA coherency attributes, one
+  change per run. Separately, find what puts vlan↔port into its 18.75 Gbit/s
+  state.
+
+**Loss-localization next steps (proposed 2026-10-05).** Run them in order;
+each one narrows the next.
+
+1. **Software A/B on port→port unidir — DONE, loss confirmed NOT in the FE
+   offload path [SILICON 2026-10-05].** `offload ipv4`/`ipv6`/`vlan` deleted
+   from eth3 and eth4 (`sudo ask-check` confirmed 0 hardware-backed flows,
+   `num-flows=0`), then the same port→port unidir combo (v4+v6, 3 reps,
+   `oracle/baseline3.sh`) reran in software forwarding. Retransmits were
+   707k–711k, statistically identical to the HW-engaged control run taken
+   immediately before (704k–716k, 1638 live ASK flows). Raw data:
+   `oracle/ab-hw-port-port.csv`, `oracle/ab-sw-port-port.csv`. **The loss is
+   a port/driver/BMI-or-MAC-level cause common to both datapaths, not the
+   FE record** — proceed to step 2. Caveat found in passing: the
+   `fe_ehash_stats` pkt_count delta (the `PROOF=ehash` offload metric) stayed
+   at 15.8M–15.95M even with zero live ASK flows, so it counts KeyGen
+   hash-lookup attempts (hit or miss, used for RSS queue distribution), not
+   successful ASK hits — cross-check `dump-flows`/`num-flows` before citing
+   it as offload proof elsewhere. Board restored to its original
+   `offload ipv4 ipv6 vlan` config on eth3/eth4 after the test.
+2. **Counter snapshot around one port→port unidir run — DONE, this is not a
+   drop/discard at all. It is TCP-level packet reordering
+   [SILICON 2026-10-05].** Before/after snapshot on `.185` around a single
+   clean port→port-v4 unidir run (710,152 iperf3-reported retransmits):
+   mEMAC `rdrp`/`rerr`/overrun/FCS on both eth3 and eth4 were byte-identical
+   before and after; all BMI RX port counters (`fmbm_rfdc`, `rodc`, `rbdc`,
+   `rfrc`, `rfbc`, `rlfc`, `rffc`, `rfldec`, `rpec`) stayed at 0; all
+   `ethtool -S` error/dropped/qman (`cg_tdrop`, `wred`, `fq tdrop`,
+   `orp disabled`) and bpool counters stayed at 0 — on the DUT **and** on
+   both Dell endpoints' `/proc/net/dev` (`rx_drop`/`rx_errs`/`tx_drop`/
+   `tx_errs` all delta 0 despite ~32M packets forwarded). No drop or error
+   counter anywhere in the path moved. The `/proc/net/netstat` TCP extended
+   stats resolve it instead: sender (dell1) `TCPFastRetrans` delta
+   (710,529) matches the retransmit count almost exactly, but
+   `TCPDSACKRecv`=178 confirms some retransmits were spurious (receiver had
+   already seen the data); receiver (dell2) `TCPOFOQueue` delta is
+   **9,308,033** — ~29% of the ~31.8M forwarded segments arrived
+   out-of-order and were queued for reassembly. This is classic
+   reordering-induced spurious fast-retransmit, not real loss: a delayed
+   (not dropped) segment causes duplicate ACKs, the sender fast-retransmits
+   needlessly, and the DSACK confirms it when the original later arrives.
+   Root cause located in `dpaa_eth.c`: `dpaa_xmit()` selects the egress FQ
+   as `priv->egress_fqs[queue]` with `queue = smp_processor_id()` at
+   forward time (not a flow hash) — the TX FQ a forwarded frame uses
+   depends on which of the 4 CPUs happened to run the ingress NAPI poll for
+   that frame. Ingress has 48 RX FQs per port across only 4 CPUs
+   (`/sys/class/net/eth3/queues/` and `eth4/`) and no ORP (order-restoration
+   point) is configured anywhere in the mainline `dpaa` driver
+   (`qman orp disabled` counter stays 0 throughout, and no ORP code exists
+   in `kernel/common/files/drivers/net/ethernet/freescale/dpaa/`) — if the
+   same flow's ingress frames are serviced by more than one CPU over the
+   run (e.g. a shared/pool-channel portal rather than a per-FQ-pinned
+   dedicated channel), each is forwarded via a different per-CPU TX FQ and
+   the 4 independent FMan egress FQs give no cross-FQ ordering guarantee,
+   so frames of one flow can leave the wire out of send order. Raw data:
+   `oracle/ab-counter-snap-run.csv`, `-run2.csv`, `-run3.csv`; snapshots
+   under `/tmp/snap-{before,after}.txt`, `/tmp/d{1,2}_netstat_{before,after}.txt`.
+   **This reframes steps 3–5 below:** not a buffer-pool or FIFO-overflow
+   condition — confirm the RX-FQ→CPU affinity / RPS angle first (step 3).
+3. **RX FQ→CPU affinity / RPS check — DONE, RULED OUT
+   [SILICON 2026-10-05].** `fman_pcd_kg.c:315` still hardcodes
+   `slot->hash_fqid_count = 1` for the ASK-path KeyGen scheme on eth3/eth4
+   (unfixed since a 2026-08-16 finding), so all eth3/eth4 ingress traffic
+   funnels through exactly **one** hardware FQID per port — which, per
+   QMan's held-active/FIFO semantics, should itself preserve per-flow order
+   regardless of which CPU drains it, so this doesn't explain reordering by
+   itself. Separately, `rps_cpus=e` (CPUs 1,2,3) is force-enabled on every
+   RX queue of eth3/eth4 whenever ASK offload is configured (VyOS
+   `set_rps(ask_mask != 0 …)`, see `board/scripts/99-dpaa1-offloads.rules`
+   and `vyos-1x-031-offload-ask-cli.patch`), and `/proc/net/softnet_stat`
+   confirmed it actively redirects packets to CPU1–3 via IPI. **Decisive
+   test:** disengaged ASK (same procedure as step 1), confirmed
+   `rps_cpus` flipped to `0` on both interfaces, reran the identical
+   port→port-v4 unidir test (`oracle/ab-rps-off-run.csv`) — retransmits
+   706,790, `TCPOFOQueue` delta 9,325,401 on the receiver, both
+   statistically identical to the RPS-on numbers (710,529 / 9,308,033).
+   **RPS on/off makes no measurable difference.** Also checked both Dell
+   endpoints (dell1 `enp1s0` sender, dell2 `enp2s0` receiver, 8-queue
+   NICs): `rps_cpus=00` on both already — host-side RPS was never a factor
+   either. **Conclusion: this rules out software RPS and DPAA1 ingress
+   multi-core FQ distribution as the cause.** It also weakens the step-2
+   `dpaa_xmit()`/`smp_processor_id()` egress-FQ-selection hypothesis — if
+   RX genuinely stays on one CPU the whole run (per the FQ pinning), TX FQ
+   selection should stay constant too, which should preserve order. The
+   actual reordering mechanism is **not yet identified**. Board restored
+   (ASK re-engaged ipv4/ipv6/vlan on eth3+eth4, confirmed via `ask-check`).
+4. **Wire-level capture to localize real vs. endpoint-side reordering —
+   DONE, step 2's conclusion CORRECTED: this is real single-packet loss,
+   not reordering [SILICON 2026-10-05].** Captured simultaneously at dell1
+   `enp1s0` (TX, pre-DUT, sender) and dell2 `enp2s0` (RX, post-DUT,
+   receiver) during an identical port→port-v4 unidir run. DUT-side
+   `tcpdump -i eth3/eth4` captures were tried first and found **useless**
+   regardless of ASK engage state: VyOS's own firewall framework installs
+   a persistent nftables hardware flowtable (`VYOS_FLOWTABLE_ASK1`, table
+   `ip/ip6 vyos_filter`, `flags offload`, devices `{eth3,eth3.10,eth4,
+   eth4.20}`) that auto-accelerates established TCP/UDP forward-hook
+   traffic in hardware independent of the per-interface
+   `offload ipv4/ipv6/vlan` CLI — deleting that CLI config made
+   `ask-check` report 0 engaged flows, but `conntrack -L` still showed
+   `[HW_OFFLOAD]` entries and a 10 s run still only produced 46
+   kernel-visible packets (handshake only) on eth3/eth4 while dell2
+   captured 2.96M for the same run. **This means step 1's "software A/B"
+   never achieved a true no-hardware-offload baseline either** — both
+   states it compared likely still had this flowtable hardware-forwarding
+   the bulk of the traffic; step 1's "not in the FE offload path"
+   conclusion should be treated as weaker than originally recorded. Given
+   DUT captures can't see forwarded traffic at all, the capture pivoted to
+   dell1 TX + dell2 RX only (ASK restored to its normal engaged config).
+   First pass (default TSO/GSO/GRO on both Dells) reproduced tshark
+   flagging 23%+ "out-of-order"/12% "retransmission" on data — but manual
+   seq+len chain verification showed **perfectly monotonic order**; the
+   flags were an artifact of GSO super-segments (up to 65,160 B per
+   captured frame) confusing wireshark's TCP-reassembly heuristics, not
+   real wire behavior. Disabling all NIC offloads on both Dells
+   (`ethtool -K … tso off gso off gro off lro off`) to get true
+   per-MSS-segment (1448 B payload) captures and re-running the identical
+   test (retransmit rate unchanged, confirming the phenomenon is
+   host-offload-independent) gave a trustworthy picture: a custom seq/gap/
+   dup-overlap script over one flow's full 1.7M-segment chain found
+   **zero true out-of-order/overlapping segments on either side**
+   (`partial-overlap-reorder=0`). Instead: dell1 TX shows only 104
+   send-side gaps (near-perfect outbound order) plus 38,065 full-duplicate
+   retransmissions (the sender genuinely re-sending data it believes was
+   lost); dell2 RX shows 37,163 genuine gaps matched almost 1:1 by 37,357
+   retransmit-fills. **Gap-size distribution at dell2 RX: 37,139 of 37,163
+   (99.9%) are exactly 1448 bytes — one missing MSS-sized segment,
+   isolated, not bursts.** This is the classic signature of silent,
+   single-packet hardware tail-drop under sustained line-rate micro-
+   congestion (matching the "FMan easily overflows, needs kernel-driven
+   flow control" hypothesis raised earlier), not a TCP-stack or scheduling
+   artifact. **The step-2 "every counter stayed at zero" finding needs to
+   be revisited**: it checked coarse MAC/BMI error/discard counters, not
+   FMan/QMan-specific congestion tail-drop counters (CGR drop counts, BMI
+   discard-due-to-congestion, QMan portal/DQRR overflow), which are the
+   counters that would actually move on this kind of drop. Raw data:
+   `oracle/ab-capture-run{2,3,4,5-nooffload}.csv`; pcaps and analysis
+   scripts under `/tmp/a6loss-pcap/` (not in git). Board and both Dells
+   restored to their normal configs after the test.
+5. **Find the exact drop point via FMan/QMan congestion counters — DONE,
+   found: eth4's hardware no-confirm TX FQ runs a massive, sustained,
+   invisible backlog [SILICON 2026-10-05].** Per AGENTS.md S0,
+   `arch/qman-ceetm.md` §6 (congestion management — WRED/CGR, CS Tail
+   Drop, FQ Tail Drop, CSCN/ERN) and `arch/fman.md`/`bman.md` (BMI
+   storage-profile discard on BMan depletion, `FMBM_RMPD`, `FMBM_RFDC`)
+   were cross-checked first. Live-read `fmbm_rfdc` (Rx Frame Discard
+   Counter, BMI RX port 0x214) directly via `/dev/mem`
+   (`bin/ask-pcd-regdump.py`, reused as-is) in `--watch` mode on both eth3
+   and eth4 through an identical port→port-v4 unidir run: `fmbm_rfrc`
+   (frame counter) climbed by millions on both ports (eth3 +9.7M, eth4
+   +1.9M, confirming heavy real traffic), while `fmbm_rfdc` stayed at
+   **exactly 0** throughout on both — BMI RX discard / BMan pool
+   depletion is now cleanly ruled out, not just "not yet moved". Checked
+   the receiving endpoint next (dell2 `enp2s0`): `ethtool -S` RX
+   driver-level counters (`rx_dropped`, `rx_missed_errors`, `rx_fifo_errors`,
+   `rx_over_errors`, `rx_crc_errors`) and `/proc/net/softnet_stat`
+   (per-CPU backlog-drop column) were all exactly 0 before and after —
+   ruling out NIC ring overflow and kernel backlog drop on the receiver
+   too. With every MAC/BMI/BMan/QMan-ethtool/receiver-NIC counter clean,
+   re-examined *why*. First pass of this entry claimed `ask_hw.c`
+   configures the no-confirm TX FQ with no CGR/FQTD at all
+   (`fq_ctrl = QM_FQCTRL_PREFERINCACHE` only) — **this is WRONG and is
+   CORRECTED here, 2026-10-05, same day.** That description matches
+   `ask_hw.c`'s separate `h->dedicated_fq` (fqid 0x2b9, single-flow,
+   genuinely CGR-less by design), not the FQ the probe below actually
+   caught congested. The congested FQ is `h->noconf_tx[]`
+   (`dpaa_alloc_offload_tx_fq()`, added by kernel-fixup F-199 patching
+   in-tree `dpaa_eth.c`), and F-199 *does* attach it to the netdev's
+   existing per-port CGR: `QM_FQCTRL_CGE` set, `cgid =
+   priv->cgr_data.cgr.cgrid`, CS tail-drop + CSCN configured at 256 MiB
+   on these 10G ports (same CGR the normal Linux-driven TX FQs on the
+   same port already share). So the standard `ethtool -S` "qman
+   cg_tdrop/wred/fq_tdrop" counters are not structurally blind here —
+   the ERN callback path is wired for this FQ. The real puzzle: those
+   counters stayed at 0 even though `fq_probe` (below) shows
+   `byte_cnt` on this FQ reaching ~3.5 GB, near the ~3.75 GB field
+   ceiling the 256 MiB CS tail-drop threshold should trip at far
+   earlier. `ask_hw.c` ships two read-only diagnostics for this:
+   `fq_probe` (`T-M6-8`, `/sys/module/ask/parameters/fq_probe`, logs
+   each cached no-confirm TX FQ's live `qman_query_fq_np()` state +
+   `frm_cnt`/`byte_cnt`), and a new `cgr_probe`
+   (`/sys/module/ask/parameters/cgr_probe`, added 2026-10-05, scans
+   cgrid 0–255 via `qman_query_cgr_congested()` to check whether the
+   port's CGR itself ever reports congested state). Looped `fq_probe`
+   at ~3 Hz through an identical port→port-v4 unidir run
+   (`oracle/ab-fqprobe-run.csv`, `/tmp/fqprobe_dmesg.log`): eth4's
+   no-confirm TX FQ (`fqid=0x2ba`, slot 6) read `state=0x02`
+   (`QM_MCR_NP_STATE_TEN_SCHED`, idle, `frm_cnt=0`) before/after the
+   run, but for the **entire run duration** read `state=0x05`
+   (`QM_MCR_NP_STATE_ACTIVE`) with **`frm_cnt` pinned at exactly
+   65536** while `byte_cnt` climbed continuously (2.39 GB → 3.50 GB
+   across the sampled window) — i.e. a massive, sustained,
+   non-transient backlog sitting on the egress FQ the entire time, not
+   a brief micro-burst. The other no-confirm FQ (`0x2bb`, eth3
+   direction, unused in this unidir test) and the dedicated
+   single-flow FQ (`0x2b9`) both stayed idle (`frm_cnt=0`) throughout,
+   confirming the probe is correctly isolating eth4's egress path as
+   the congested one. `cgr_probe` itself has **not yet been run live**:
+   a standalone rebuild of `ask.ko` to carry it was deployed to `.185`
+   and failed to load (`insmod: Key was rejected by service`) — ASK2's
+   module-signing key is generated fresh per CI workspace, not truly
+   persistent across builds/runs, so a locally rebuilt module can't be
+   signed to match a board's already-running kernel unless built from
+   the exact matching workspace/key. The board was fully recovered
+   (original `ask.ko` restored) without running `cgr_probe`. **Root
+   mechanism: eth4's hardware-only egress FQ cannot drain at the
+   ingress (eth3) rate and backs up massively; whether this produces
+   any software-visible congestion signal or backpressure depends on
+   whether the port's existing CGR's congestion accounting actually
+   executes for ASK2's FE-driven hardware enqueues — this is now the
+   open question, not "no CGR exists".** Working hypothesis: the FE's
+   direct silicon/microcode enqueue path (`ENQUEUE_PKT`) may not run
+   the same CGR-accounting update a normal QMan EQCR software enqueue
+   does, leaving the CGR correctly configured (CGE/CGID bits set) but
+   functionally inert for this FQ's traffic — unconfirmed. This is
+   consistent with, but does not yet fully confirm, the "FMan easily
+   overflows, needs kernel-driven flow control" hypothesis. Raw data:
+   `oracle/ab-fqprobe-run.csv`, `/tmp/fqprobe_dmesg.log` (not in git —
+   recreate via the `fq_probe` loop if needed). Board left in its
+   normal config; no register writes made (read-only `QUERYFQ_NP`/
+   `QUERYCGR` only).
+6. **Run `cgr_probe` live and re-test**, per `arch/qman-ceetm.md` §6:
+   rebuild/redeploy `ask.ko` with `cgr_probe` from a workspace whose
+   signing key matches the board's running kernel (CI build, or a
+   `bin/dev-build.sh`-driven rebuild that keeps vmlinux and `ask.ko`
+   key-paired — do not reuse a stale local snapshot's key), then loop
+   `cgr_probe` through the same port→port-v4 unidir run used for
+   `fq_probe` above. If the port's CGR reports congested: the
+   accounting does run, and the fix is CGR/WRED threshold tuning (lower
+   the CS tail-drop point, or add true CSCN-driven backpressure to
+   throttle/pause ingress FE dispatch) so drops become counted/bounded
+   instead of silent. If the CGR never reports congested despite the
+   FQ's `byte_cnt` backlog: the FE-enqueue-bypasses-CGR-accounting
+   hypothesis is confirmed, and the fix direction shifts to per-FQ
+   FQTD (`QM_FQCTRL_TDE`) or a microcode-level backpressure mechanism
+   instead. Confirm either way with another `fq_probe` + packet-capture
+   pass that `frm_cnt` stays bounded and the A6 retransmit count drops.
+7. **Repeat on vlan↔vlan bidir** once the mechanism is identified, to
+   confirm it's the same cause (not a separate FIFO-overflow cause — the
+   vendor's worse mEMAC RX-overflow numbers under the same bidir load may
+   be an unrelated, co-occurring effect).
+8. **Fix, then re-run A6** (all 12 rows, binding method) and update
+   `plans/ASK2-VS-VENDOR-THROUGHPUT.md`.
 
 
 This plan is the output of a six-agent review followed by a direct
