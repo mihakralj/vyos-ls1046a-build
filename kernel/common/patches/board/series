@@ -394,3 +394,20 @@
 # "Err FD status = 0x00080000" under full-rate VLAN<->untagged bidir.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0218-fman-port-discard-physical-errors.patch
+
+# A6-LOSS ehash duplicate-key fix (2026-10-06): fman_pcd_ehash_add_key()
+# unconditionally LIFO head-inserted, even when a live record for the
+# same 5-tuple key already existed. ask.ko's REPLACE dedup is keyed on
+# the nf_conn cookie, not the 5-tuple, so a conntrack churn event
+# (SYN-retransmit races under bidir load) can hand the same 5-tuple a
+# new cookie, bypass the dedup, and insert a second hardware record for
+# the same key -- orphaning the first as an unreachable, unfreed
+# bucket-chain tail. Confirmed live via fe_ehash_stats on .185
+# (2026-10-06): several records frozen at single-digit pkt_count while
+# siblings in the same table climbed by hundreds of thousands of
+# packets in the same window; records from an already-finished prior
+# test were still present and frozen in a later dump. Fix: evict any
+# existing record for the key via fman_pcd_ehash_del_key() before the
+# insert, under the same pcd->fe_lock already held by every caller.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+0219-fman-pcd-ehash-dup-key-evict.patch
