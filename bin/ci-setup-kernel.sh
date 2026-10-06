@@ -1319,6 +1319,24 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     echo "### dpaa_eth.c: FSL_DPAA_ETH_MAX_BUF_COUNT=640 injected (mutate)"
 fi
 
+# A6-LOSS: start RX frame data on a cache line (vendor parity). Mainline RX
+# headroom = 16 (TX priv) + 256 (XDP) - 48 (HWA) + 48 = 272, aligned only to 16,
+# so every received frame starts 16 B into a 64 B line and FMan's coherent DMA
+# pays for a partial-line write on every frame. Vendor DT buffer-layout
+# <0x60 0x40> (data_align 64) puts data at 256. Dropping the TX-priv term gives
+# the RX layout mainline already uses under erratum A050385 (priv 208, data at
+# 256, XDP headroom still 256) without that erratum's TX realign copies.
+# Silicon A/B on .185 (2026-10-06): port<->port bidir 15.4 -> 17.8 Gbit/s.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
+        '#define DPAA_RX_PRIV_DATA_DEFAULT_SIZE (DPAA_TX_PRIV_DATA_SIZE + \\' \
+        '#define DPAA_RX_PRIV_DATA_DEFAULT_SIZE ( \\' \
+        1 \
+        "A6-LOSS: RX data 64B-aligned (headroom 256)"
+    echo "### dpaa_eth.c: RX priv 208 / data offset 256 injected (mutate)"
+fi
+
 # Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
 # The 2MB default fills quickly at 10G line rate; 4MB gives more headroom
 
