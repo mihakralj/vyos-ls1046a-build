@@ -4,12 +4,12 @@ Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the
 `nxp-sdk` branch (worktree `e20239b9`) and the original vendor source at
 `/mnt/builds/ASK`.
 
-## Progress tracker (updated 2026-10-05)
+## Progress tracker (updated 2026-10-06)
 
 | Phase | Status | Where it stands |
 |---|---|---|
 | **0 — safety and oracles** | ✅ (0.4 🟡 partial, deferred by operator) | 0.1 ⚠ superseded: VLAN offload is default-on again now that it works. 0.2 register oracle ✅. 0.3 record oracle ✅ (push-only record added 2026-10-05). 0.4 vendor thresholds ✅ TCP; 64 B/IMIX/64k-flow deferred. 0.5 ✅. |
-| **1 — VLAN root cause** | 🔴 **VLAN fixed; exit gate A6 FAILS on bidir** | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 run 2026-10-05 with the binding §8 method against the vendor's own OpenWrt build:** unidir at parity, bidir 20–29 % short on every combo (port↔port included), and untagged ingress loses ~710k frames per unidir run. The scoreboard is `plans/ASK2-VS-VENDOR-THROUGHPUT.md`. **Open:** localize and fix the loss (next steps below), then the churn test. The indicative iperf2 numbers below the table are superseded. |
+| **1 — VLAN root cause** | ✅ **VLAN fixed; A6 throughput passes** (churn test pending) | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Open:** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's at equal throughput; churn test. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
 | **2 — consolidation** | ⬜ not started | Now unblocked: delete `ask_vlan_cc.c` and its genl/debugfs/stat proxies (CC VLAN path retired); fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD. |
 | **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE, multicast, IPsec, tunnels/fragments and QoS have not been started. |
 | **4 — exceed the vendor** | ⬜ not started | Vendor A13 measured; ASK2 A13 not measured. |
@@ -106,6 +106,76 @@ bidir.
   Neither explains 40–60× the loss.
 - **Not compared yet:** the global DMA, FPM and QMI settings. There is no
   vendor dump, and the OpenWrt build lacks `/dev/mem`.
+
+**Loss-localization result (2026-10-06) [SILICON].** This supersedes the
+conclusions of steps 2 and 5 below; their measurements stand, but two of their
+readings were wrong.
+
+- **Corrections.** BMI port statistics boot disabled (`fmbm_rstc = 0`), so
+  step 2's "all BMI RX counters 0" was read with the counters off. Step 5
+  watched `fmbm_rfdc` (frame discard, port+0x214); out-of-buffer discards are
+  counted separately in `fmbm_rodc` (port+0x21c). Enable the counters with
+  `0x80000000` → port+0x200 (RX ports 0x10/0x11, TX 0x30/0x31; FMan base
+  `0x1A00000` + `0x80000` + port×`0x1000`).
+- **Root cause of the bidir loss: RX buffer pool exhaustion.** One port↔port
+  v4 bidir run (image `2026.10.06-0039-rolling`, `eb901a5f`): `rodc` eth3
+  6,892,550 + eth4 7,053,602 = 13.95M frames against 12.53M TCP retransmits.
+  RX minus `rodc` equals the other port's TX within the ~580 bad frames
+  (`rfbc`); MAC drops ~870 per port, TX discards 0. Mainline `dpaa_eth.c`
+  seeds each port's pool once with `FSL_DPAA_ETH_MAX_BUF_COUNT` = 128 buffers
+  per CPU (~480 per port); hardware-forwarded frames hold their buffer until
+  the egress port releases it, and the CPU never refills the pool on that
+  path. The vendor builds with 640.
+- **Fix: `7ba747e1`** (count-gated `mutate.py` in `bin/ci-setup-kernel.sh`,
+  next to F-053): 128 → 640, 2,560 buffers per port, ~10 MiB per port. CI
+  run `37411828069`, image `2026.10.06-0403-rolling`. Result: bidir
+  retransmits 0.5–3M (from 10–15M), throughput 15.1–15.6 Gbit/s (from
+  12.5–13.6) on port↔port and vlan↔vlan. Scoreboard updated.
+- **0219 (ehash duplicate-key eviction, `eb901a5f`)** removed the steady
+  ~710k port→port unidir retransmits (now 0–138 per run). Before 0219 the
+  same code had also produced clean unidir runs (2/13/791), so the
+  attribution is likely but not proven.
+- **Remaining gap: a byte-rate forwarding ceiling.** Fixed-rate UDP bidir
+  (iperf3 `-u -P 4` per direction, 15 s, 1448 B payload): 6 Gbit/s per
+  direction is lossless; at 8 and 9 offered, delivery caps at ~7.6–7.95 per
+  direction, and the excess is `rodc` (0.3–1.07M per port). With 700 B payload
+  the DUT forwarded 1.78 Mpps in total with zero drops (RX = other port's TX
+  exactly), so packet rate is not the limit. TCP bidir (15.4–15.6) sits on this
+  ~15.5 Gbit/s ceiling; the remaining retransmits are TCP probing it,
+  tail-dropped at the empty RX pool, which also drops the reverse direction's
+  ACKs on that port. The vendor's ceiling is close to wire rate.
+- **Ruled out for the ceiling:** FMan global DMA/FPM defaults (mainline
+  `fman.c` and SDK `fm.h` identical: commQ `0x2A`/`0x3F`, CAM 64, no cache
+  override, dispatch thresholds 16) and per-port BMI resources (above).
+- **Step 1 result: FE record cost ruled out.** A live ASK2 port→port record
+  runs only `21 41 01` (TTL, INSERT_L2, ENQUEUE; flags `0x0392`); the vendor's
+  records run up to six opcodes with stats and timestamp write-back enabled
+  (`0x318a`) and still reach 17.6. Chain lengths are ≤ 2 (899 live records per
+  table = 899 `HW_OFFLOAD` conntrack flows).
+- **Ceiling root cause: RX frame data misaligned to cache lines.** Mainline
+  `dpaa_get_headroom()` RX headroom = 16 (TX priv) + 256 (XDP) − 48 (HWA) + 48
+  = 272, aligned only to 16 (`rebm` `0x01100000`), so every received frame
+  starts 16 B into a 64 B line on a `dma-coherent` FMan. The vendor DT sets
+  `buffer-layout = <0x60 0x40>` (manip space 96, data_align 64) on every FMan
+  port (`.106` `/proc/device-tree/cpus/fman0-extended-args/*`), which with
+  `CONFIG_FSL_FM_RX_EXTRA_HEADROOM=64` gives 80 + 48 + 96 = 224 → aligned 256.
+  A/B on `.185` (test DTB with `fsl,erratum-a050385`, which selects mainline's
+  256 RX layout; cold boot): UDP 9 Gbit/s/dir DUT loss 10.6 % → 0.6 %, TCP
+  port↔port bidir 15.4–15.6 → 17.8 Gbit/s.
+- **Fix: `dc8591ae`** (count-gated `mutate.py` in `bin/ci-setup-kernel.sh`):
+  drop the TX-priv term from `DPAA_RX_PRIV_DATA_DEFAULT_SIZE` → RX priv 208,
+  data at 256, XDP headroom still 256, without the erratum's TX realign copies.
+  CI run `37418518497`, image `2026.10.06-0526-rolling`; live `rebm`
+  `0x01000000`, `ricp` `0x000d0203`. Full A6 on it
+  (`oracle/a6-ask2-185-dc8591ae.csv`): bidir port↔port 17.82/17.48, vlan↔vlan
+  17.79/17.35, vlan↔port 12.77/12.55 Gbit/s (v4/v6) — vendor parity or better.
+- **Original next-step note (superseded by the above):** measure the per-frame
+  DDR cost of the FE record. ASK2 records are 320 B, read from DDR every frame, with counters
+  written back every frame; rerun the UDP ceiling with that write-back
+  removed. Then compare the RX buffer layout (`ricp` ASK2 `0x000e0203` vs
+  vendor `0x00050203`, `rebm`, `rfed`) and DMA coherency attributes, one
+  change per run. Separately, find what puts vlan↔port into its 18.75 Gbit/s
+  state.
 
 **Loss-localization next steps (proposed 2026-10-05).** Run them in order;
 each one narrows the next.
