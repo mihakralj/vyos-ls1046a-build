@@ -1,0 +1,89 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Tue, 06 Oct 2026 00:00:00 +0000
+Subject: [PATCH] fman_pcd: evict stale duplicate-key ehash record before insert (A6-LOSS)
+
+fman_pcd_ehash_add_key() always LIFO head-inserted a new hardware flow
+record, with no check for a live record already keyed on the same
+5-tuple. ask.ko's PR14r REPLACE dedup is keyed on the nf_conn cookie,
+not the 5-tuple -- a conntrack churn event (e.g. SYN-retransmit races
+under bidirectional load) can hand the same 5-tuple a new cookie, which
+sails past that dedup and calls fman_pcd_fe_flow_add() again. The
+second call produced a second live hardware record for the same key:
+the new one became the reachable bucket head, the old one became an
+orphaned chain tail -- still DMA-resident, never hit again by
+hardware, and never freed (fman_pcd_ehash_del_key() stops at the first
+key match in list order, so only one of the duplicates is ever
+reclaimed on teardown).
+
+Confirmed live via fe_ehash_stats polling on .185 during a 60s
+bidirectional iperf3 run, 2026-10-06: several ehash records sat frozen
+at single-digit pkt_count while sibling records in the same table
+climbed by hundreds of thousands of packets over the same window.
+Records from an already-finished prior test were also still present
+and frozen in a later dump, confirming the leak persists across
+teardown, not just across inserts. This is the suspected mechanism
+behind the retransmit storm described in plans/ASK2-VS-VENDOR-THROUGHPUT.md
+(A6-LOSS): under heavy bidirectional load the second SYN of a
+retransmit race wins a new cookie, orphans the original record's slot,
+and any traffic still hashing to the orphan during the churn window is
+dropped until the flow's next REPLACE.
+
+Fix: before the unconditional insert, call fman_pcd_ehash_del_key() for
+the same key to evict any existing record first, so at most one live
+record ever exists per key. fman_pcd_ehash_del_key() requires the
+caller to already hold pcd->fe_lock -- true for every current caller of
+fman_pcd_ehash_add_key() (fman_pcd_fe_flow_add() and the debugfs
+"add"/"add drop"/"add stats" commands all take the lock before calling
+in), so no new locking is introduced here.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index ef56c7f9f98d..e68ecf4fa4ed 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2283,6 +2283,13 @@ static int fman_pcd_ehash_add_key_natwrap_dbgfs(
+ 	return fman_pcd_ehash_add_key(t, key, key_size, enq_off, fqid, stats,
+ 				      l2_dst, l2_src, eth_type, NULL, vlan);
+ }
++/* F-219 (A6-LOSS, 2026-10-06): forward decl so fman_pcd_ehash_add_key()
++ * below can evict a stale same-key record before inserting a new one.
++ * See the F-219 comment at its call site for the defect this closes.
++ */
++static int fman_pcd_ehash_del_key(struct fman_pcd_ehash_table *t,
++				  const u8 *key, u8 key_size);
++
+ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 				  const u8 *key, u8 key_size,
+ 				  u32 enq_off, u32 fqid, bool stats,
+@@ -2303,6 +2310,30 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 	if (key_size > FMAN_EHASH_FLOW_KEY_MAX)
+ 		return -EINVAL;
+ 
++	/*
++	 * F-219 (A6-LOSS): this function used to unconditionally LIFO
++	 * head-insert, even when a live record for this exact key already
++	 * existed (ask.ko's REPLACE-dedup is keyed on the nf_conn cookie,
++	 * not the 5-tuple key -- a conntrack churn event that hands the
++	 * same 5-tuple a new cookie bypasses it, e.g. SYN-retransmit races
++	 * under bidirectional load). The stale record then became an
++	 * orphaned bucket-chain tail: never hit again by hardware, never
++	 * freed by fman_pcd_ehash_del_key() (which stops at the first
++	 * key match in list order and only ever reaps one of the
++	 * duplicates). Confirmed live via fe_ehash_stats on .185,
++	 * 2026-10-06: several records frozen at single-digit pkt_count
++	 * while sibling records in the same table climbed by hundreds of
++	 * thousands over the same window. Evict any existing record for
++	 * this key first, so at most one live record per key ever exists.
++	 */
++	{
++		int drc = fman_pcd_ehash_del_key(t, key, key_size);
++
++		if (!drc)
++			pr_info_ratelimited("fman_pcd: F-219 ehash evicted stale duplicate record for key before re-insert (key_size=%u)\n",
++					    key_size);
++	}
++
+ 	index = fman_pcd_ehash_bucket_index(key, key_size, t->hash_shift,
+ 					    t->hash_mask);
+ 
