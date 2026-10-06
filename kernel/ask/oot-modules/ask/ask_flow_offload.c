@@ -3353,11 +3353,31 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
 	 * still want eventually for accurate Gbps reporting via
 	 * `nft list flowtable`, but is orthogonal to M2 gate pass).
 	 */
-	/* flow_stats_update() ACCUMULATES; cumulative silicon totals must
-	 * never be passed directly. d_* is current minus the previous poll's
-	 * per-flow baseline (or current after a silicon record reset). */
-	flow_stats_update(&f->stats, d_bytes, d_packets, 0, jiffies,
-			  FLOW_ACTION_HW_STATS_DELAYED);
+	/*
+	 * Idle aging (2026-10-06): the unconditional jiffies keep-alive above
+	 * predates per-flow silicon counters (T-M8-3) and kept every offloaded
+	 * flow alive forever -- conntrack and the ehash table grew by every
+	 * connection ever offloaded (churn gate: 2074 -> 4518 records in 41
+	 * cycles, none freed after idle). Now that the silicon delta is real,
+	 * refresh only on observed activity, like mlx5/mtk/sfc: a HW-backed
+	 * flow with a successful read and zero new packets reports lastused 0
+	 * (no timeout extension) and the flowtable tears it down after its
+	 * normal idle timeout. A missed read or a SW-fallback flow keeps the
+	 * old keep-alive.
+	 */
+	{
+		unsigned long lastused = jiffies;
+
+		if (is_hw_backed && refreshed && !d_packets)
+			lastused = 0;
+
+		/* flow_stats_update() ACCUMULATES; cumulative silicon totals
+		 * must never be passed directly. d_* is current minus the
+		 * previous poll's per-flow baseline (or current after a
+		 * silicon record reset). */
+		flow_stats_update(&f->stats, d_bytes, d_packets, 0, lastused,
+				  FLOW_ACTION_HW_STATS_DELAYED);
+	}
 	return 0;
 }
 
