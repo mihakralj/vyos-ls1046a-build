@@ -1302,6 +1302,23 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     echo "### dpaa_eth.c: DPAA_FQ_TD=4MB injected (mutate)"
 fi
 
+# A6-LOSS: RX buffer pool 128 -> 640 buffers per CPU (vendor parity:
+# NXP ASK defconfig CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT=640). Hardware-forwarded
+# frames hold their RX buffer until the egress port releases it, and the CPU
+# never refills the pool on that path, so the boot-time seed (128 x 4 CPUs,
+# ~480 buffers/port) is all the hardware gets. Under bidir load it ran dry:
+# BMI fmbm_rodc (RX out-of-buffers discard) = 13.95M frames vs 12.53M TCP
+# retransmits in one 40 s port<->port run (.185, 2026-10-06). Cost ~10 MiB/port.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
+        $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t128' \
+        $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t640' \
+        1 \
+        "A6-LOSS: RX bpool 128->640 bufs/CPU"
+    echo "### dpaa_eth.c: FSL_DPAA_ETH_MAX_BUF_COUNT=640 injected (mutate)"
+fi
+
 # Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
 # The 2MB default fills quickly at 10G line rate; 4MB gives more headroom
 
