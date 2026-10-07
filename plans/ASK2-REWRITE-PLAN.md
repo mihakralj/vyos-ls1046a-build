@@ -4,12 +4,12 @@ Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the
 `nxp-sdk` branch (worktree `e20239b9`) and the original vendor source at
 `/mnt/builds/ASK`.
 
-## Progress tracker (updated 2026-10-06)
+## Progress tracker (updated 2026-10-07)
 
 | Phase | Status | Where it stands |
 |---|---|---|
 | **0 — safety and oracles** | ✅ (0.4 🟡 partial, deferred by operator) | 0.1 ⚠ superseded: VLAN offload is default-on again now that it works. 0.2 register oracle ✅. 0.3 record oracle ✅ (push-only record added 2026-10-05). 0.4 vendor thresholds ✅ TCP; 64 B/IMIX/64k-flow deferred. 0.5 ✅. |
-| **1 — VLAN root cause** | ✅ **VLAN fixed; A6 throughput passes** (churn test pending) | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Open:** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's at equal throughput; churn test. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
+| **1 — VLAN root cause** | 🟡 **VLAN fixed, A6 throughput passes; churn gate REOPENED (rare FMan RX stall)** | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Churn gate REOPENED 2026-10-07:** one 100/100 clean run under verified load on `0cb5a105`, but the next run stalled at cycle 84 (see "Churn gate (2026-10-07)" below). Idle aging (`2d7c8268`) and the safe ehash delete F-254 are real fixes but not the stall trigger. **Follow-ups (not gating):** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's; 5/600 isolated vlan↔vlan burst failures under churn; torn-down offloaded flows linger in conntrack as ESTABLISHED for ~1 day. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
 | **2 — consolidation** | ⬜ not started | Now unblocked: delete `ask_vlan_cc.c` and its genl/debugfs/stat proxies (CC VLAN path retired); fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD. |
 | **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE, multicast, IPsec, tunnels/fragments and QoS have not been started. |
 | **4 — exceed the vendor** | ⬜ not started | Vendor A13 measured; ASK2 A13 not measured. |
@@ -106,6 +106,57 @@ bidir.
   Neither explains 40–60× the loss.
 - **Not compared yet:** the global DMA, FPM and QMI settings. There is no
   vendor dump, and the OpenWrt build lacks `/dev/mem`.
+
+**Churn gate (2026-10-07) [SILICON] — Phase 1 exit criterion "zero RX-deaf or
+churn errors": REOPENED.** A first 100-cycle run passed; a second run on the
+same build stalled (see the last bullet).
+
+- **Harness:** `/mnt/builds/ask2-review/oracle/churn.sh`. Background vlan↔vlan v4
+  bidir, 16 × 450 Mbit/s per direction (~75 % line rate) on a dedicated port
+  5203, rate verified ≥ 5 Gbit/s per direction at start and every cycle. Each
+  cycle: a 2 s, 4-stream iperf3 burst on all six combos (hardware flows
+  created and torn down), then a deaf check (8 rig addresses × 5 pings plus
+  BMI `rfrc` progress, re-checked after 5 s), kernel-log error grep, MURAM,
+  record and conntrack counts. Settle 120 s at the end.
+- **Defect 1, offloaded flows never aged (fixed `2d7c8268`).**
+  `ask_flow_offload_stats()` reported `lastused = jiffies` unconditionally, so
+  idle offloaded flows and their ehash records lived forever (records grew by
+  every flow; without aging the slowest burst fell 9.24 → 6.54 Gbit/s as they
+  piled up). Now refreshed only when the silicon per-flow counters advance.
+- **Defect 2, unsafe ehash delete (fixed F-254, `0cb5a105`).** With aging,
+  records are deleted under traffic. `fman_pcd_ehash_del_key()` rewrote the
+  predecessor's 48-bit next pointer as two stores and freed the record with no
+  `FMFP_EXTC[INV0]` SYNC. Result: silent FMan RX stalls (once FMan-wide incl.
+  `eth0`; once eth3 only: `FMFP_PS[0x10]` STL `0x00800000`, MAC receiving, BMI
+  `rfrc` frozen, `fe_recover` ineffective, cold boot only). F-254: one 64-bit
+  store, `dma_wmb`, SYNC, then free (RM §5.12.14.1; vendor
+  `ExternalHashTableDeleteKey` + `FmPcdHcSync`). Measured SYNC cost: 0 polls
+  idle, 2–11 µs under load.
+- **Result on `2026.10.06-2239-rolling` (cold boot):** 100/100 cycles, 0 stalls,
+  0 deaf, 0 kernel errors, 0 F-254 SYNC timeouts, MURAM 52,890 flat, records
+  flat at 124 and 0 after settle. 5/600 bursts failed (all vlan↔vlan),
+  isolated, each recovered next cycle — follow-up.
+- **Harness correction:** two earlier runs (`1727` cycle-90 stall, `1459` 100
+  clean) ran without background load: the server check `pgrep -f "[i]perf3 -s
+  -p N"` matched its own ssh command line, so a missing server was never
+  started (signature: slowest burst 9.24, the whole link). Their conclusions
+  are weaker than first recorded; the verified-load results are `1459` 41
+  cycles clean, `1727` (aging, no F-254) FMan-wide stall at cycle 1, `2239`
+  (aging + F-254) 60 + 100 cycles clean.
+- **Stall reproduced on `2239` (aging + F-254), second run, cycle 84
+  [SILICON 2026-10-07].** eth3 and eth4 RX dead, `eth0` alive,
+  `FMFP_PS[0x11]` STL `0x00800000`, `FMFP_EXTC.INV0` stuck at 1. Kernel
+  timeline: last successful sync 04:55:45.545 right after the eight
+  vlan↔vlan v4 burst records were installed; the next burst never installed
+  a flow; the first F-254 delete SYNC timed out at 04:55:50.43 (50 more to
+  04:56:25). The stall therefore began **before** any delete, so deletes are
+  not the trigger and the SYNC timeouts are a symptom of a stuck FM task.
+  Stall #1 (2026-10-06 17:59:52) had the same shape: right after vlan↔vlan v4
+  burst records were installed. Working hypothesis: a rare wedge on the VLAN
+  record path (`04 11 12 21 42 41 01`) under load and churn. Next: a
+  vlan↔vlan-v4-only churn against a no-VLAN control to confirm the trigger,
+  plus an FPM task-status capture at the stall. F-254 is kept (it fixes an
+  RM-violating delete) but frees the record even after a SYNC timeout.
 
 **Loss-localization result (2026-10-06) [SILICON].** This supersedes the
 conclusions of steps 2 and 5 below; their measurements stand, but two of their
@@ -1328,6 +1379,34 @@ the E3 section above are in bold.
 Each feature is an additional ehash table plus opcode emitters, reusing the
 Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
 
+0. **Soft-parser bring-up, first rule: TCP SYN/FIN/RST to the kernel**
+   (design 2026-10-07; prerequisite for item 2 and for the vendor TTL ≤ 1 and
+   NAT-T punts).
+   - *Why:* the hardware path swallows FIN/RST, so the kernel never sees an
+     offloaded connection close. Since idle aging (`2d7c8268`) the flow is
+     torn down 30 s after its last packet, but conntrack then keeps it as
+     ESTABLISHED for the global TCP established timeout
+     (`flow_offload_fixup_ct()` uses `tn->timeouts[state]`). Churn gate:
+     46 → 2,972 entries over 100 cycles. Interim mitigation (2026-10-07):
+     `system sysctl parameter net.netfilter.nf_conntrack_tcp_timeout_established
+     value 7440` (vendor OpenWrt value) in `config.boot.{default,dhcp,vpp}`;
+     `config.boot.full` already sets 1800. Headroom: 262,144 / 7,440 s ≈ 35
+     new offloaded connections/s sustained.
+   - *Vendor mechanism:* `cdx_sp.xml:138-146` `tcpschema` — `if ((tcp.flags
+     bitwand 7) != 0) { $hpnia = 0x500002; exit end_parse }`: SYN/FIN/RST
+     frames skip KeyGen and the FE lookup and go to the port's default FQ.
+   - *No cheaper hook in ASK2:* `PREEMPTIVE_CHECKS` (0x05) only carries
+     TX-validate/DF/police/DSCP options (`PREEMPT_*`, ASK 010 patch); a CC
+     match on TCP flags ahead of FE_ENTER hits the "CC match walker absent"
+     verdict (`CC-ACL-OFFLOAD-PLAN.md`) and the CC-hop hash-clobber risk.
+   - *Blocker:* ASK2 soft-parser code (F-243..F-246) loads but never visibly
+     executes; host-side load/enable sequencing is proven identical to the
+     vendor (`.116` cold-boot kprobe capture, 2026-09-05). Open question: the
+     `.185` hard parser's dispatch into the soft-parser window.
+   - *First milestone:* load only the 6-line `tcpschema` punt; pass = a FIN
+     on an offloaded flow appears in kernel conntrack (state leaves
+     ESTABLISHED) while data packets stay in hardware. Then PPPoE, TTL ≤ 1,
+     NAT-T on the same loader.
 1. **Bridge L2.** Ethernet table (vendor keysize 15) fed by switchdev FDB
    notifiers, replacing the observer-only `ask_bridge.c`. Gate: A7.
 2. **PPPoE.** Soft-parser pppoe schema plus pppoe table, with
