@@ -155,7 +155,14 @@ same build stalled (see the last bullet).
   burst records were installed. Working hypothesis: a rare wedge on the VLAN
   record path (`04 11 12 21 42 41 01`) under load and churn. Next: a
   vlan↔vlan-v4-only churn against a no-VLAN control to confirm the trigger,
-  plus an FPM task-status capture at the stall. F-254 is kept (it fixes an
+  plus an FPM task-status capture at the stall. **Capture in place
+  (2026-10-07):** `oracle/fmstall.py` dumps the FPM task table
+  (`fmfp_ts[0..127]` + DRD0-3 via `FMFP_DRA`, vendor `fm_dump_tnum_dbg()`
+  method), `FMFP_PS`, `FMFP_EXTC`, QMI/DMA/BMI state, and flags tasks that
+  stay busy and unchanged across samples. `churn.sh` runs it with debugfs
+  and the kernel log at start (`baseline.txt`), on a suspect deaf and on a
+  persistent stall. Healthy baseline: only task 4 (`0x810000xx`, parked
+  FM_CTL) is permanently busy. F-254 is kept (it fixes an
   RM-violating delete) but frees the record even after a SYNC timeout.
 
 **Loss-localization result (2026-10-06) [SILICON].** This supersedes the
