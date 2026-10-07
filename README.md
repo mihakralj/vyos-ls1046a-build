@@ -238,4 +238,4 @@ Full annotated boot sequences: [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md).
 
 ## License
 
-VyOS sources are GPLv2. ARM64 builder image from [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build). Hardware documentation from [mono-gateway-docs](https://github.com/ryneches/mono-gateway-docs).
+The build scripts, patches, and documentation in this repository are licensed under the [Apache License 2.0](LICENSE). Vendored and upstream sources keep their own licenses: VyOS and the Linux kernel are GPLv2, and `accel-ppp-ng/` ships its own `COPYING`. ARM64 builder image from [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build). Hardware documentation from [mono-gateway-docs](https://github.com/ryneches/mono-gateway-docs).
