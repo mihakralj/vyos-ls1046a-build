@@ -1154,14 +1154,18 @@ PATCH_FAIL=0
 PATCH_FAIL_LIST=""
 PATCH_FALLBACK_COUNT=0
 PATCH_FALLBACK_LIST=""
+# Private stderr capture: a fixed /tmp/_apply_stderr left by another user made
+# the redirect fail ("Permission denied"), so git apply never ran and every
+# patch fell to patch -p1 (run 37653594339: 0095/0119/4010 failed).
+APPLY_ERR=$(mktemp)
 for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); do
     pname=$(basename "$patch")
     echo "I: Apply Kernel patch: $patch"
     APPLIED=0
-    if git apply --3way --whitespace=nowarn "$patch" 2>/tmp/_apply_stderr; then
+    if git apply --3way --whitespace=nowarn "$patch" 2>"$APPLY_ERR"; then
         APPLIED=1
         # Detect silent 3-way fallback — patch landed but with drifted context
-        if grep -q "Falling back to three-way merge" /tmp/_apply_stderr; then
+        if grep -q "Falling back to three-way merge" "$APPLY_ERR"; then
             echo "::warning::3-way-fallback: $pname applied via 3-way merge (context drifted)" >&2
             PATCH_FALLBACK_COUNT=$((PATCH_FALLBACK_COUNT + 1))
             PATCH_FALLBACK_LIST="$PATCH_FALLBACK_LIST $pname"
