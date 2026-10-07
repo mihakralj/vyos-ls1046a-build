@@ -2394,6 +2394,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-254 ehash delete atomic unlink + SYNC before free"
 fi
 
+# F-255 (T-M6-2 B1, 2026-10-07): per-port FE key profiles. A port has one
+# KeyGen scheme, so one key format and one per-port ehash table; until now
+# both were hardwired to the 46-byte dual-lane routed key (F-224/F-225).
+# ROUTED (default, unchanged) and L2_DA (6-byte destination MAC, EKFC
+# MACDST, no GEC) for bridge offload; later offloads add profiles.
+# Dormant until ask.ko engages a port with L2_DA.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_255.py" 2>&1
+    echo "### fman_pcd/keygen: F-255 per-port FE key profiles (ROUTED, L2_DA)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:

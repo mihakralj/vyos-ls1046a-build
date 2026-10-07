@@ -1,6 +1,16 @@
 # ASK2 L2 bridge HW offload — switchdev FDB → L2 ehash (`PORT_ID|DA|SA|ETYPE`) → FE-VM `ENQUEUE_PKT`
 
-**2026-10-07 · dpaa1 · T-M6-2 · Implementation plan (design + staged build, no code yet).**
+**2026-10-07 · dpaa1 · T-M6-2 · Implementation plan (B0 done, B1 code written; DA-only key).**
+
+**Parity constraint (binding for every later offload).** ASK2 must reach
+near-parity with the vendor (IPsec ESP, PPPoE, multicast, tunnels). Today a
+port has exactly one KeyGen scheme, hence one key format and one ehash
+table; the vendor walks several tables per port (IP tuples, ESP, PPPoE, L2).
+F-255's per-port key profile is the extension point for new key formats, but
+a port that must offload two traffic classes with different keys at once
+(for example routed + ESP) needs multi-table dispatch per port, which ASK2
+does not have yet. Design new offloads so they can ride a profile now and
+move to multi-table dispatch later without changing their record format.
 
 Offload the steady-state fast path of a Linux software bridge in FMan
 silicon: a frame whose destination MAC is a known, non-local FDB entry
@@ -258,13 +268,40 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
   design — the switchdev notifier chains, workqueue, and admission filter
   are topology-independent (§4).
 
-- **B1 — not started — L2 ehash key builder + FE-VM action emitter.**
-  Pack the 15-byte `PORT_ID|DA|SA|ETYPE` key into the ehash record format,
-  emit `ENQUEUE_PKT` as the untagged action, and wire the KeyGen scheme
-  (§5 items 1-2). Gate: KUnit vectors for the ehash record layout + the
-  `ENQUEUE_PKT`-only action, byte-compared against the vendor's
-  `fill_bridge_actions()` untagged case; dormant, no live install,
-  routed/NAT/VLAN byte-identical.
+- **B1 — code written 2026-10-07, not yet built in CI — per-port key
+  profiles + DA-only key + `ENQUEUE_PKT` action.**
+  - *Key decision: DA-only first* (§8 point 4). The key is the frame's
+    6-byte destination MAC (EKFC `0x40000000`, `KG_SCH_KN_MACDST`), one
+    record per FDB entry, fed directly by switchdev FDB events. No
+    PORT_ID byte (per-port tables already separate ingress ports, and it
+    avoids the §8 point 1 `0x00`-vs-hwport question), no SA, no promotion
+    ladder. The vendor's 15-byte `PORT_ID|DA|SA|ETYPE` composite stays a
+    later option: it changes only the profile row and the key builder,
+    plus a traffic-learning entry source that DA-only never needs.
+  - *Kernel, F-255 (`bin/kernel-fixups/F_255.py`):* per-port FE key
+    profiles. A port has one KeyGen scheme, so one key format and one
+    per-port ehash table; until now both were hardwired to the 46-byte
+    dual-lane routed key (F-224/F-225). `fman_pcd_fe_engage_profile(fm,
+    port, fqid, profile)`; `fman_pcd_fe_engage()` = ROUTED (unchanged).
+    L2_DA arms EKFC MACDST alone (`keygen_scheme.ekfc_only` skips the
+    F-224 GEC override) and sizes the per-port table to 6 bytes.
+    Re-engaging an armed port with another profile is `-EBUSY`; disengage
+    resets it to ROUTED. Later offloads (ESP, PPPoE, L2 tunnels) add
+    profile rows rather than new arming paths.
+  - *ask.ko:* `ask_bridge_fe_action()` builds the record action for one
+    FDB entry: key = DA, table 0, HIT = plain `ENQUEUE_PKT` to the egress
+    port's no-confirm TX FQ via `rx_fqid` (`tx_fqid` stays 0, so no
+    `INSERT_L2_HDR`). Rejects broadcast/multicast/zero DAs. KUnit suite
+    `ask_bridge` (`tests/ask_test_bridge.c`).
+  - *Verified so far:* F-255 applied to a locally derived copy of the CI
+    kernel tree (same patch series + fixups), `fman/` compiles,
+    `test-fixups.sh` [1]-[4] OK; ask.ko and `ask_kunit.ko` compile.
+    Still to do: CI build, KUnit run (`kunit` input), and a routed
+    regression run on `.185` showing ROUTED ports are byte-identical
+    (`pcd-snapshot`, A6 spot check).
+  - *Known ceiling:* every ehash record's `ENQUEUE_PKT` param carries
+    MTU 1500 (routed records too); bridged jumbo frames need that
+    revisited before B5.
 
 - **B2 — not started — ehash silicon de-risk (the decisive proof).**
   Hand-arm a single L2 ehash entry (fixed destination MAC → `ENQUEUE_PKT`
@@ -360,7 +397,8 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
    512-entry `cdx_ethernet_cc` is a precedent, not a confirmed ASK2 number
    — measure the actual MURAM/table budget for a dedicated L2 ehash table
    on this build before picking its capacity cap.
-4. **DA-only vs full 15-byte key.** The vendor's `cdx_ethernet_cc` supports
+4. **DA-only vs full 15-byte key — DECIDED 2026-10-07: DA-only first** (B1
+   above); the composite remains a later profile. Original note: the vendor's `cdx_ethernet_cc` supports
    masking (`masks="yes"`), so a DA-only key (6 bytes, SA/ETYPE wildcarded)
    is a plausible simpler first cut closer to a textbook FDB. Untested;
    worth an early A/B against the full 15-byte composite before committing

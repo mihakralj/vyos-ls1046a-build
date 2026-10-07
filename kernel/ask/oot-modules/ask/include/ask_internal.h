@@ -1166,6 +1166,10 @@ void ask_caam_exit(void);
 /* ------------------------------------------------------------------------- */
 int  ask_bridge_init(void);
 void ask_bridge_exit(void);
+struct fman_pcd_fe_flow_action;
+int  ask_bridge_fe_action(const u8 *da, u32 egress_tx_fqid,
+			  unsigned long enq_off,
+			  struct fman_pcd_fe_flow_action *a);
 
 /* ------------------------------------------------------------------------- */
 /* ask_neigh.c — netevent notifier for L2 nexthop updates                     */
