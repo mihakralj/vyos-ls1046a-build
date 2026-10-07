@@ -2409,6 +2409,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd/keygen: F-255 per-port FE key profiles (ROUTED, L2_DA)"
 fi
 
+# F-256 (Phase 1 churn gate, 2026-10-07): stall #3 was an eth4 RX task's DMA
+# bus error (FMDM_TCID port 0x11 TNUM 87, addr 0x2e_000008f7) that the kernel
+# handled at dev_dbg only, and F-254 freed records even after a delete SYNC
+# timed out (use-after-free risk, evidence lost). Log bus errors; keep and
+# log records whose delete SYNC timed out. Logging/leak only. After F-254.
+if [ -f drivers/net/ethernet/freescale/fman/fman.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_256.py" 2>&1
+    echo "### fman.c/fman_pcd.c: F-256 DMA bus-error logging + keep records on SYNC timeout"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
