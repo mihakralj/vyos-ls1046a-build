@@ -23,12 +23,12 @@ echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
 # PREVIOUS_SUCCESS_BUILD_TIMESTAMP feeds the publish job's `git log --since`
 # call to compose the release notes.
-# On nxp-sdk: read version-ask.json.
+# On nxp-sdk: read version-nxp.json.
 # On main/other branches: read the canonical version.json.
 # Fall back to the epoch on the very first build when no feed exists yet.
 FEED_FILE="version.json"
-if [[ "${GITHUB_REF_NAME:-}" == nxp-sdk* ]] && [ -s version-ask.json ]; then
-    FEED_FILE="version-ask.json"
+if [[ "${GITHUB_REF_NAME:-}" == nxp-sdk* ]] && [ -s version-nxp.json ]; then
+    FEED_FILE="version-nxp.json"
 fi
 
 if [ -s "$FEED_FILE" ]; then
