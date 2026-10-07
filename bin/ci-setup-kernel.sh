@@ -2383,6 +2383,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c ]; then
     echo "### fman_pcd_cc_test.c: F-247 probe3 mode 2 bridge L2 comparator capture (T-M6-2 B2)"
 fi
 
+# F-254 (Phase 1 churn gate, 2026-10-06): fman_pcd_ehash_del_key() rewrote a
+# live chain's 48-bit next pointer as two stores and freed the record with no
+# FMFP_EXTC[INV0] SYNC. With idle aging deleting records under traffic, the
+# churn gate stalled FMan RX twice in 91 cycles (FMFP_PS STL, cold boot only);
+# without deletes it ran 141 cycles clean. One 64-bit store + SYNC before free
+# (RM S5.12.14.1, vendor ExternalHashTableDeleteKey + FmPcdHcSync).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_254.py" 2>&1
+    echo "### fman_pcd.c: F-254 ehash delete atomic unlink + SYNC before free"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:

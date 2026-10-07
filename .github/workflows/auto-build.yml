@@ -647,7 +647,7 @@ jobs:
       # ─── Update-check feed ──────────────────────────────────────────
       # Two build flavors:
       #   • main: writes version.json + aliases (version-default.json, version-vpp.json).
-      #   • nxp-sdk: writes version-ask.json pointing to the nxp-ask release.
+      #   • nxp-sdk: writes version-nxp.json pointing to the nxp-ask release.
       - name: "Release publishing: write update-check feed"
         env:
           BUILD_VERSION: ${{ needs.build_iso.outputs.build_version }}
@@ -673,7 +673,7 @@ jobs:
             cat version.json
           elif [[ "${{ github.ref_name }}" == nxp-sdk* ]]; then
             URL="https://github.com/${REPO}/releases/download/nxp-ask/${IMAGE_ISO}"
-            cat > version-ask.json <<EOF
+            cat > version-nxp.json <<EOF
           [
             {
               "url": "${URL}",
@@ -682,8 +682,8 @@ jobs:
             }
           ]
           EOF
-            echo "### Wrote version-ask.json for nxp-ask release"
-            cat version-ask.json
+            echo "### Wrote version-nxp.json for nxp-ask release"
+            cat version-nxp.json
           fi
 
       - name: "Release publishing: check if the repository was modified during runtime to prevent autocommit failure"
@@ -694,7 +694,7 @@ jobs:
           if [ "${{ github.ref_name }}" = "main" ]; then
             FEEDS="version.json version-default.json version-vpp.json"
           else
-            FEEDS="version-ask.json"
+            FEEDS="version-nxp.json"
           fi
           # Stash the freshly-generated feed files before pulling.
           for f in $FEEDS; do
@@ -715,7 +715,7 @@ jobs:
           tagging_message: ${{ github.ref_name == 'main' && needs.build_iso.outputs.build_version || '' }}
           commit_message: ${{ needs.build_iso.outputs.build_version }}
           commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          file_pattern: ${{ github.ref_name == 'main' && 'version.json version-default.json version-vpp.json' || 'version-ask.json' }}
+          file_pattern: ${{ github.ref_name == 'main' && 'version.json version-default.json version-vpp.json' || 'version-nxp.json' }}
 
       - name: "Release publishing: update git tag for nxp-ask"
         if: startsWith(github.ref_name, 'nxp-sdk')
