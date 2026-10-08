@@ -2224,6 +2224,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ] && \
     echo "### fman_pcd.c/dpaa_eth.c: F-239 CC-tree comparator input capture (probe2, T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-258 (T-M6-SP4 PPPoE parser probe, 2026-10-08): widen the F-239 probe2
+# predicate from eth1-only to eth1 OR any port's contiguous PPPoE session
+# frame (EtherType 0x8864), so the hard-parser question in
+# plans/ASK2-PPPOE-OFFLOAD-PLAN.md section 3 can be answered on the eth3
+# PPPoE rig. Same synchronous, bounded, read-only copy. Anchors on F-239's
+# predicate, so it must run right after it.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_258.py" 2>&1
+    echo "### dpaa_eth.c: F-258 probe2 also captures PPPoE session frames (T-M6-SP4)"
+fi
+
 # F-240 (T-M6-8 VLAN-v6 dig, 2026-09-03): widen/restore a sacrificial RX
 # port's BMI Internal-Context copy window (FMBM_RICP) so probe2/F-239 can
 # actually reach CC_IC_KG_KEY_OFFSET. No ordering dependency on F-239 itself
