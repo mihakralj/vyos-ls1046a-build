@@ -2246,6 +2246,47 @@ static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
 	return vid;
 }
 
+/*
+ * T-M6-SP4 step 0: PPPoE fail-closed boundary.
+ *
+ * nf_flow_rule_match() only adds a match for 802.1Q encaps, so a flow whose
+ * ingress tuple came in over PPPoE reaches us as a plain inner-IP match on the
+ * physical port with no session ID, PPP protocol or peer MAC, and its action
+ * list (REDIRECT + ETH mangle) passes parse_action. Only the opposite
+ * direction carries FLOW_ACTION_PPPOE_PUSH. Publishing that half would key a
+ * PPPoE frame on an unqualified 5-tuple and rebuild it with plain L2. Until
+ * the session-aware key and PPPoE strip/insert exist, refuse both directions
+ * of any flow that has a PPP_SES encap on either tuple.
+ *
+ * The cookie is &flow->tuplehash[dir].tuple (nf_flow_offload_init); same
+ * guard as ask_z11_other_src_v4(). A non-kernel cookie is not a flowtable
+ * flow and is left to the normal path.
+ */
+bool ask_flow_cookie_is_pppoe(unsigned long cookie)
+{
+	const struct flow_offload_tuple *t, *tt;
+	const struct flow_offload *flow;
+	int dir, d, i;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return false;
+
+	t = (const struct flow_offload_tuple *)cookie;
+	dir = t->dir;
+	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+		return false;
+	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
+
+	for (d = 0; d < FLOW_OFFLOAD_DIR_MAX; d++) {
+		tt = &flow->tuplehash[d].tuple;
+		for (i = 0; i < tt->encap_num && i < NF_FLOW_TABLE_ENCAP_MAX; i++)
+			if (tt->encap[i].proto == htons(ETH_P_PPP_SES))
+				return true;
+	}
+	return false;
+}
+EXPORT_SYMBOL_GPL(ask_flow_cookie_is_pppoe);
+
 static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				    struct flow_cls_offload *f)
 {
@@ -2266,6 +2307,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 	if (!t) {
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (no default table) cookie=0x%lx\n",
+				    f->cookie);
+		return -EOPNOTSUPP;
+	}
+
+	if (ask_flow_cookie_is_pppoe(f->cookie)) {
+		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE flow not offloaded (T-M6-SP4) - SW fallback cookie=0x%lx\n",
 				    f->cookie);
 		return -EOPNOTSUPP;
 	}
