@@ -2478,11 +2478,23 @@ fi
 # INSERT_L2 with EtherType 0x8864; session ID via the new pppoe_sid field in
 # fman_pcd_fe_flow_action/fman_pcd_vlan_params; ENQUEUE mtu 0xffff
 # (fragmentation disabled, no frag pool) on these records only. Dormant
-# until ask.ko sets the flag (ask.pppoe_encap_offload, default off).
+# until ask.ko sets the flag (`offload pppoe` per port, default off).
 # After F-260.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_261.py" 2>&1
     echo "### fman_pcd.c/fman_pcd.h: F-261 ehash INSERT_PPPoE_HDR (0x43) emitter"
+fi
+
+# F-262 (T-M6-SP4 hardware MTU check, 2026-10-08): vendor PREEMPTIVE_CHECKS
+# (0x05) first + sealed {mtu_offset, TX_VALIDATE|DFBIT_HONOR(v4)}, ENQUEUE
+# mtu = egress MTU, bpid = a dedicated 2048 x 2 KiB BMan fragmentation pool
+# (created on first use, never freed), word2 = a 32-byte frag-info block in
+# the owned FE MURAM reservation (BPID_ENABLE|OPT_COUNTER_EN, v6_id 1).
+# Only on records with the new egress_mtu set (ask.ko: route MTU < ingress
+# port MTU, IPv4); all other records byte-identical. After F-261.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_262.py" 2>&1
+    echo "### fman_pcd.c/fman_pcd.h: F-262 ehash PREEMPTIVE_CHECKS (05) + frag pool"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
