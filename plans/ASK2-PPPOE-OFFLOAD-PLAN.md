@@ -133,6 +133,23 @@ The kernel flowtable identifies a flow by ingress port + encapsulation (VLAN IDs
 - A BTF kprobe on `netif_receive_skb` logged the eth4 VLAN-20 probe frames' `skb->hash` (top 32 bits of the KG CRC-64) as `0x015C749F`. The only 4-byte key tail matching it is `00 04 00 00`.
 - So the GEC mask byte `0x0F` was applied to the **last** byte of the 2-byte extraction (`0x14` → `0x04`), not the first. VID 10 (`0x0a`) had survived the mask unchanged.
 - Fix: no mask (`0x81FF0500`).
+
+**Third build (`33c9c606`, image `2026.10.08-2003-rolling`): ALL F-259 ACCEPTANCE GATES PASS.**
+
+| Combo | Unidir Gbit/s | `rx_default_dqrr` / 10 s | Bidir Gbit/s | `rx_default_dqrr` / 10 s |
+|---|---|---|---|---|
+| port↔port v4 | 9.38 | 163 | 17.4 | 316 |
+| port↔port v6 | 9.25 / 9.24 (one 7.38 outlier, still HW) | 143–163 | — | — |
+| vlan→port v4 | 9.35 | 162 | — | — |
+| vlan→port v6 | 9.23 | 322 | — | — |
+| vlan↔vlan v4 | 9.35 | 194 | 16.3 | 166 |
+| vlan↔vlan v6 | 9.21 | 234 | 16.7 | 169 |
+
+Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔port 15.5, vlan↔vlan 15.7) and at vendor level (16.8 / 16.9).
+
+- **Isolation (gate 4).** Two stats records on eth3's table for the same UDP 5-tuple (`10.99.10.112:47011 → 10.99.2.113:47012`): A keyed VID 10, B keyed untagged. dell1 sent that tuple raw on `enp1s0`, 10 frames tagged VLAN 10 and 7 untagged; its NIC counted exactly 17 TX. Round 2: A +10 (110-byte frames only), B +7 (106-byte frames only). Round 1 was 8/7 (start-up loss, no cross-matching). Before F-259 both frames had the same key.
+- **Health.** No kernel errors, bus errors or SYNC timeouts; the only pattern hit is the boot-time ramoops reserved-memory line.
+- **Not yet covered.** The A6/churn soak with the 50-byte key, and a priority-marked (PCP ≠ 0) tagged flow, which is expected to stay in software.
 - Why not the parse-result `l2r` byte: GEC code `0x20` (parse result) emits 0 in AC_CC mode (qdrant 2026-09-03), which is why F-243 moved the family byte to a frame-header code.
 - **One size constant.** `FMAN_PCD_FE_ROUTED_KEY_SIZE` (50) in `include/linux/fsl/fman_pcd.h` sizes the ROUTED profile, the default ehash table and the 0194/0198 ACL key buffers. ask.ko's `ASK_FE_KEY_SIZE_DUAL` `static_assert`s against it, so the two can't drift.
 - **ask.ko.** `ask_fe_build_key_dual()` writes `vlan_ingress_vid & VLAN_VID_MASK` and the new `pppoe_sid` (0 while the step-0 guard stands) big-endian at `[46..49]`. KUnit case `ask_flow_offload_test_fe_key_l2_context`.
