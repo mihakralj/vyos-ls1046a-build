@@ -2419,6 +2419,23 @@ if [ -f drivers/net/ethernet/freescale/fman/fman.c ]; then
     echo "### fman.c/fman_pcd.c: F-256 DMA bus-error logging + keep records on SYNC timeout"
 fi
 
+# F-257 (Phase 1 churn gate hygiene, 2026-10-08): fman_pcd_ehash_add_key()
+# allocates a 16-byte DMA-coherent FE context per flow (F-175) and only
+# flow_drain() freed it, so every single del_key() leaked one: ask.ko
+# DESTROY, idle aging, and the evict-before-insert of patch 0219. The
+# context now goes with the record, after the delete SYNC; the F-256
+# SYNC-timeout path keeps both. Resource leak only, NOT a stall fix:
+# stalls #4 and #5 occurred on F-254+F-256 builds. After F-256, whose
+# delete tail it anchors on. bin/test-ehash-delete.py then runs the real
+# del_key()/flow_drain() with a simulated SYNC and fails the build, before
+# the kernel compile, if unlink/SYNC/free ordering or ctx release regress.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_257.py" 2>&1
+    echo "### fman_pcd.c: F-257 ehash delete frees the F-175 flow context after SYNC"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash delete harness passed"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
