@@ -1138,7 +1138,8 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
  *   [25..40] IPv6 dst(16)                 (zero on a v4 flow)
  *   [41]     proto / next-header
  *   [42..45] L4 sport(2) dport(2)
- *   [46..47] outer VID, 0 untagged         (F-259, gec[6])
+ *   [46..47] outer TCI with PCP=DEI=0, i.e. the VID; 0 untagged (F-259,
+ *            gec[6] unmasked: priority-marked frames MISS to software)
  *   [48..49] PPPoE session ID, 0 if none   (F-259, gec[7])
  * Must equal the kernel's FMAN_PCD_FE_ROUTED_KEY_SIZE (static_assert in
  * ask_flow_offload.c).
