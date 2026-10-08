@@ -326,6 +326,8 @@ That gives opcodes `05 04 11 12 21 43 41 01` and `mtu_off` = 132 − 76 = `0x38`
 3. **Fragment.** 1500-byte IPv4 with DF clear (`ping -M dont -s 1472`). Expect two fragments on dell1 (`tcpdump -e`, EtherType 0x8864, valid PPPoE lengths). The frag-info counters at FMan MURAM + `fe_frag_off` should rise: +8 v4 frames, +16 v4 fragments, +4 allocation failures stays 0. The frag pool must not drain, so repeat a few thousand times.
 4. **DF.** 1500-byte IPv4 with DF set (`ping -M do -s 1472`). This is unmeasured: with DF action "error" the frame may land in the port error FQ (`Err FD status`, a PMTUD black hole) or reach the host, which would send ICMP fragmentation-needed. Record which. If it is a black hole, the frag-info `frag_options` DF bits (0x10 ignore, 0x20 don't fragment) and the `05` OpMask are the calibration points. Try them live through `/dev/mem` before changing code.
 5. **Stability.** 60 s of mixed sizes at rate, with no RX-deaf port and no `Err FD` growth. Fragmentation produces S/G frames on the no-confirm TX FQ, which has never been exercised.
+6. **Throughput (30 s quick protocol).** After `set interfaces ethernet eth3 offload pppoe` (eth3 is the PPPoE source interface), run `bin/testrig-offload-quick.sh` (`ASK2-REWRITE-PLAN.md` §8). Pass: the four PPPoE cells report HW and beat the software control in §3a (decap v4/v6 3.98/3.74, encap v4/v6 3.60/3.58 Gbit/s). The other six cells must match the `2126` baseline (9.2-9.4 Gbit/s, HW). Expected exception: `pppoe-up-v6` at 1500 to 1492 stays software by design (F-262 keeps IPv6 that needs the MTU check in the kernel), so PARTIAL or SW there is correct, not a failure.
+7. **Complex combinations (once per image, not a matrix):** NAT44 over PPPoE (LAN to PPPoE WAN with masquerade on `pppoe10`); VLAN-VLAN NAT44; PPPoE over VLAN (must stay software, `-EOPNOTSUPP`, still forwarding correctly); and a session flap during an encap flow (the session-down notifier must flush the records).
 
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
 
@@ -365,6 +367,17 @@ Note the current VyOS schema is `interfaces pppoe <name>` as its own top-level i
 **Current state left in place:** the dell1 concentrator service and the DUT `pppoe10` client config are both left configured and running (not torn down) so this is ready for immediate reuse — install a fresh image, the DUT config persists via `save`, and dell1's systemd unit auto-starts. To temporarily disable without deleting config: `sudo systemctl stop ask2-pppoe-server.service` on dell1, or `set interfaces pppoe pppoe10 disable` on the DUT.
 
 This closes the open question from the prior session ("will our testing gear allow us to test PPPoE hw offload?") — **yes**, and it now does, with zero new hardware and a reusable, documented, persistent setup.
+
+**Rig update 2026-10-08 — IPv6 over PPPoE and session-flap-proof routes** (for `bin/testrig-offload-quick.sh`, the PPPoE v4 and v6 cells):
+
+- **dell1 concentrator:** `+ipv6` appended to `/etc/ppp/pppoe-server-options`, so IPv6CP negotiates next to IPCP.
+- **dell1 hooks (rebuilt on every session up, so a flap or reconnect needs no manual routing):**
+  - `/etc/ppp/ip-up.d/ask2-rig`: `ip route replace 10.99.2.0/24 dev $PPP_IFACE table 150`, plus rule `10900 from 10.99.50.1 to 10.99.2.0/24 lookup 150` if absent.
+  - `/etc/ppp/ipv6-up.d/ask2-rig`: `ip -6 addr replace fd99:50::1/64 dev $PPP_IFACE nodad`, route `fd99:2::/64 dev $PPP_IFACE table 150`, rule `10900 from fd99:50::1 to fd99:2::/64 lookup 150`.
+- **dell2:** `ip -6 route replace fd99:50::/64 via fd99:2::185 dev enp2s0` (runtime only; re-apply after a dell2 reboot, like the v4 route `10.99.50.1 via 10.99.2.185`).
+- **DUT (persistent, saved):** `set interfaces pppoe pppoe10 ipv6 address autoconf` (drives `+ipv6 ipv6cp-use-ipaddr` in the pppd peer file) and `set protocols static route6 fd99:50::/64 interface pppoe10`. The DUT needs no global address on `pppoe10`, only the route.
+- **Verified (2026-10-08, image `2026.10.08-2126-rolling`):** IPCP and IPV6CP both up, `ping -6` dell1 `fd99:50::1` ↔ dell2 `fd99:2::113` through the DUT in both directions, session ID 1.
+- **Software control** (30 s, 8 streams, `ask.pppoe_offload=N`; no record in `fe_ehash_stats`): decap v4 3.98, v6 3.74 Gbit/s; encap v4 3.60, v6 3.58 Gbit/s, at 55–75% DUT busy (about 50–70% softirq). This is the floor the hardware paths must beat.
 
 ## 4. Phased implementation plan (if §3 confirms soft-parser involvement is required)
 

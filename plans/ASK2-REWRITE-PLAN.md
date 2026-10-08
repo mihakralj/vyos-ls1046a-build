@@ -1658,6 +1658,35 @@ Complex combinations beyond the eight cells (NAT over PPPoE, VLAN-VLAN NAT,
 the F-262 1500 to 1492 DF/no-DF path, PPPoE over VLAN as an expected software
 fallback) are a small targeted set run once per image, not a matrix.
 
+- **Driver:** `bin/testrig-offload-quick.sh [cell ...]`. Cells: `unicast`,
+  `nat`, `vlan`, each `-v4`/`-v6`, plus `pppoe-down` (decap, WAN to LAN) and
+  `pppoe-up` (encap, LAN to WAN), each `-v4`/`-v6`: 10 cells, about 7 min.
+  NAT uses runtime nft tables on the DUT (`table ask2q`, masquerade out of
+  eth4) and temporarily removes the VyOS NAT66 rule, restoring it on exit.
+- **Offload proof:** per-record growth of `pkt_count` in `fe_ehash_stats`
+  over the steady window versus the data frames implied by the measured rate
+  (`ratio` >= 0.9 = HW, 0.1 to 0.9 = PARTIAL, < 0.1 = SW; about 1.2 when the
+  ACK direction is in hardware too). A summed delta is wrong because records
+  that age out inside the window make it negative.
+- **Baseline, image `2026.10.08-2126-rolling` (kernel 6.18.55-vyos), 30 s,
+  `-P 8`, steady from 10 s** (`/mnt/builds/ask2-review/oracle/quick-2126-*.csv`):
+
+| Cell | Gbit/s | DUT busy | Verdict |
+|---|---|---|---|
+| unicast v4 | 9.37 | 0.2% | HW |
+| unicast v6 | 9.23 | 3.0% | HW |
+| NAT44 | 9.37 | 3.1% | HW |
+| NAT66 | 9.27 | 0.2% | HW |
+| VLAN-VLAN v4 | 9.35 | 0.3% | HW |
+| VLAN-VLAN v6 | 9.25 | 3.0% | HW |
+| PPPoE decap v4 / v6 | 3.98 / 3.74 | 55% / 56% | SW (`ask.pppoe_offload=N`, expected) |
+| PPPoE encap v4 / v6 | 3.60 / 3.58 | 75% / 66% | SW (not in this image, expected) |
+
+  DUT busy at line rate is bimodal, about 0.2-0.3% or 3.0-3.2%, and it is not
+  tied to a cell: the same cell flipped between the two values across two
+  runs (unicast v4 3.2 then 0.2, NAT44 0.3 then 3.1). Cause not investigated;
+  every value is far below the 40-75% of the software forwarding path.
+
 **Methodology (binding, 2026-10-04):**
 
 - **Generator:** iperf3 3.20 with **`-Z` (zero-copy) on every sending Dell**,
