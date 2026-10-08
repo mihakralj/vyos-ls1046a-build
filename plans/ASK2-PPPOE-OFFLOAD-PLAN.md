@@ -166,7 +166,7 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 4. Isolation: a plain frame with a tagged flow's 5-tuple MISSes.
 5. The A6/churn regression gates are unchanged.
 
-### 3.3 Decap direction (PPPoE→LAN): implemented 2026-10-08, not yet board-tested
+### 3.3 Decap direction (PPPoE→LAN): implemented and SILICON-VALIDATED 2026-10-08
 
 - **Kernel, F-260** (`bin/kernel-fixups/F_260.py`): a new L2-edit flag `FMAN_PCD_VLANF_PPPOE_STRIP` (bit 2 of `vlan_flags`) makes the inline record emitter take the VLAN front half `04 11 12` (12 with VID 0) and then emit `14 STRIP_PPPoE_HDR`. Its 4-byte stats pointer points at the owned 0216 scratch block, never 0. The record is `04 11 12 14 21 41 01` for IPv4 and `… 14 29 41 01` for IPv6, with NAT opcodes in place of `21`/`29` when the flow is NATed.
 - **ask.ko:**
@@ -183,6 +183,27 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
   - **Pass:** the eth3 record's `pkt_count` climbs, kernel RX on the data direction stays flat, and dell2 receives intact frames, checked with `tcpdump` (no PPPoE header left, TTL decremented).
   - **Then:** throughput, then session flap.
   - **Wedge risk:** `0x14` has never executed on this board. If eth3 goes RX-deaf, recovery is a cold power cycle.
+
+**Board result** (`e8350d56`, image `2026.10.08-2126-rolling`, cold boot): **PASS.** `0x14 STRIP_PPPoE_HDR` executes cleanly on 210.10.1.
+- **Regression with `pppoe_offload=N`:** all six routed combos in hardware, 9.14–9.38 Gbit/s unidir, 153–331 `rx_default_dqrr` calls per 10 s.
+- **Decap, 20 Mbit/s TCP** (dell1 `10.99.50.1` → `pppoe10`/eth3 → eth4 → dell2):
+  - conntrack `[HW_OFFLOAD]`.
+  - New eth3 record `idx=29595`: 15,734 packets / 23.6 MB. It decodes exactly to the 50-byte key with session ID `0x000a`, the live session in `/proc/net/pppoe`.
+  - The encap direction (ACKs) logged `REPLACE PPPoE flow not offloaded (T-M6-SP4 unsupported)` and stayed in software, as designed.
+- **Decap, unlimited, 4 streams, 15 s:**
+  - 746 Mbit/s, 1.32 GB.
+  - `pppoe10` RX rose by only **8** packets, so the data direction bypassed the kernel PPPoE stack entirely.
+  - A dell2 capture 6 s in: frames from DUT eth4's MAC, plain IPv4, TTL 63, TCP checksums correct, no PPPoE header.
+  - The 613k `rx_default_dqrr` calls are the software ACK direction.
+  - **746 Mbit/s is the rig's limit, not the DUT's.** dell1's concentrator runs userspace PPPoE (`pppd pty /usr/sbin/pppoe`, `pppoe-server` without `-k`). Measuring DUT decap throughput needs kernel-mode PPPoE on dell1 (`pppoe-server -k`).
+- **Teardown:** when the flows ended, the decap records were deleted through the normal DESTROY path (the `tbl[3]` list was empty afterwards).
+- **Session flap:** `disconnect`/`connect interface pppoe10` moved session ID `0x000a` → `0x0001`. A new flow's record `idx=21272` (13,894 packets, HIT) decodes to session ID **1**, not 10 or 0.
+- **Health:** no kernel errors, bus errors, SYNC timeouts or Err FDs.
+- **Still to do:**
+  1. **Encap (LAN→PPPoE):** `43 INSERT_PPPoE_HDR` + INSERT_L2 with EtherType `0x8864` and the concentrator MAC, ENQ MTU = PPPoE MTU, and the ask.ko flush of PPPoE records on PPP netdev down/unregister.
+  2. Kernel-mode PPPoE on dell1 for a throughput number.
+  3. PPPoE over VLAN.
+  4. Turning `pppoe_offload` on by default once encap is in.
 
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
 
