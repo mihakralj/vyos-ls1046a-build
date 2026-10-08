@@ -124,6 +124,14 @@ MODULE_PARM_DESC(vlan_push_only,
 		 "Offload push-only VLAN flows (untagged ingress -> tagged egress); "
 		 "needs the RX internal margin from patch 0217 (default on)");
 
+/* T-M6-SP4: PPPoE->LAN (decap) flows, STRIP_PPPoE_HDR 0x14 (F-260). Off by
+ * default until silicon-validated; encap (LAN->PPPoE) is always software. */
+static bool ask_pppoe_offload;
+module_param_named(pppoe_offload, ask_pppoe_offload, bool, 0644);
+MODULE_PARM_DESC(pppoe_offload,
+		 "Offload PPPoE->LAN (session decap) flows; LAN->PPPoE stays in "
+		 "software (default off)");
+
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
 /*                                                                            */
@@ -1896,6 +1904,8 @@ EXPORT_SYMBOL_GPL(ask_fe_build_key_v6);
  */
 /* F-259: one routed key size across the kernel and ask.ko (spec 10.3). */
 static_assert(ASK_FE_KEY_SIZE_DUAL == FMAN_PCD_FE_ROUTED_KEY_SIZE);
+/* T-M6-SP4: ask.ko's L2-edit flag is handed to the emitter unchanged. */
+static_assert(ASK_VLANF_PPPOE_STRIP == FMAN_PCD_VLANF_PPPOE_STRIP);
 
 void ask_fe_build_key_dual(const struct ask_flow_key *key,
 			   u8 k[ASK_FE_KEY_SIZE_DUAL])
@@ -2030,8 +2040,10 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		/* Per-port gate: same contract ask_vlan_cc_flow_add() enforced
 		 * (armed on this flow's ingress port). Fail closed to SW when
 		 * off, matching the "default off, explicit per-port CLI arm"
-		 * behaviour this feature has always shipped with. */
-		if (!ask_hw_vlan_offload_armed_port(key->port_id))
+		 * behaviour this feature has always shipped with. A PPPoE strip
+		 * alone is gated by ask.pppoe_offload in the replace path. */
+		if ((key->vlan_edit_flags & (ASK_VLANF_POP | ASK_VLANF_PUSH)) &&
+		    !ask_hw_vlan_offload_armed_port(key->port_id))
 			return -EOPNOTSUPP;
 		/* Push-only (untagged ingress -> tagged egress) grows the frame
 		 * in front of its start; without the vendor 96 B RX internal
@@ -2254,45 +2266,55 @@ static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
 }
 
 /*
- * T-M6-SP4 step 0: PPPoE fail-closed boundary.
+ * T-M6-SP4: classify a flowtable flow's PPPoE encapsulation.
  *
  * nf_flow_rule_match() only adds a match for 802.1Q encaps, so a flow whose
- * ingress tuple came in over PPPoE reaches us as a plain inner-IP match on the
- * physical port with no session ID, PPP protocol or peer MAC, and its action
- * list (REDIRECT + ETH mangle) passes parse_action. Only the opposite
- * direction carries FLOW_ACTION_PPPOE_PUSH. Publishing that half would key a
- * PPPoE frame on an unqualified 5-tuple and rebuild it with plain L2. Until
- * the session-aware key and PPPoE strip/insert exist, refuse both directions
- * of any flow that has a PPP_SES encap on either tuple.
+ * ingress came over PPPoE reaches us as a plain inner-IP match on the
+ * physical port; the session lives only in the tuple's encap[] (this
+ * direction's ingress encaps). The opposite direction carries
+ * FLOW_ACTION_PPPOE_PUSH, built from the OTHER tuple's encap.
  *
- * The cookie is &flow->tuplehash[dir].tuple (nf_flow_offload_init); same
- * guard as ask_z11_other_src_v4(). A non-kernel cookie is not a flowtable
- * flow and is left to the normal path.
+ * Returns 0 when neither tuple has a PPP_SES encap, 1 for a decap direction
+ * (this tuple's only encap is PPPoE with a non-zero session ID, written to
+ * *sid, and the other tuple has no PPPoE), and -EOPNOTSUPP for anything else
+ * involving PPPoE: the encap direction, PPPoE over VLAN, session ID 0 (which
+ * would key like a plain frame, F-259). The cookie is
+ * &flow->tuplehash[dir].tuple (nf_flow_offload_init); same guard as
+ * ask_z11_other_src_v4(). A non-kernel cookie is not a flowtable flow.
  */
-bool ask_flow_cookie_is_pppoe(unsigned long cookie)
+int ask_flow_cookie_pppoe(unsigned long cookie, u16 *sid)
 {
-	const struct flow_offload_tuple *t, *tt;
+	const struct flow_offload_tuple *t, *o;
 	const struct flow_offload *flow;
-	int dir, d, i;
+	int dir, i;
 
+	*sid = 0;
 	if (!cookie || !virt_addr_valid((void *)cookie))
-		return false;
+		return 0;
 
 	t = (const struct flow_offload_tuple *)cookie;
 	dir = t->dir;
 	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
-		return false;
+		return 0;
 	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
+	o = &flow->tuplehash[!dir].tuple;
 
-	for (d = 0; d < FLOW_OFFLOAD_DIR_MAX; d++) {
-		tt = &flow->tuplehash[d].tuple;
-		for (i = 0; i < tt->encap_num && i < NF_FLOW_TABLE_ENCAP_MAX; i++)
-			if (tt->encap[i].proto == htons(ETH_P_PPP_SES))
-				return true;
-	}
-	return false;
+	for (i = 0; i < o->encap_num && i < NF_FLOW_TABLE_ENCAP_MAX; i++)
+		if (o->encap[i].proto == htons(ETH_P_PPP_SES))
+			return -EOPNOTSUPP;	/* LAN->PPPoE: encap */
+
+	for (i = 0; i < t->encap_num && i < NF_FLOW_TABLE_ENCAP_MAX; i++)
+		if (t->encap[i].proto == htons(ETH_P_PPP_SES))
+			break;
+	if (i >= t->encap_num || i >= NF_FLOW_TABLE_ENCAP_MAX)
+		return 0;
+	if (t->encap_num != 1 || !t->encap[0].id)
+		return -EOPNOTSUPP;	/* PPPoE over VLAN, or session 0 */
+
+	*sid = t->encap[0].id;
+	return 1;
 }
-EXPORT_SYMBOL_GPL(ask_flow_cookie_is_pppoe);
+EXPORT_SYMBOL_GPL(ask_flow_cookie_pppoe);
 
 static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				    struct flow_cls_offload *f)
@@ -2310,6 +2332,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	u32 generation;
 	u32 true_iif = 0;
 	bool have_meta_iif = false;
+	u16 pppoe_sid = 0;
+	int pppoe;
 	int rc;
 
 	if (!t) {
@@ -2318,8 +2342,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return -EOPNOTSUPP;
 	}
 
-	if (ask_flow_cookie_is_pppoe(f->cookie)) {
-		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE flow not offloaded (T-M6-SP4) - SW fallback cookie=0x%lx\n",
+	pppoe = ask_flow_cookie_pppoe(f->cookie, &pppoe_sid);
+	if (pppoe < 0 || (pppoe > 0 && !READ_ONCE(ask_pppoe_offload))) {
+		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE flow not offloaded (T-M6-SP4 %s) - SW fallback cookie=0x%lx\n",
+				    pppoe < 0 ? "unsupported" : "pppoe_offload=N",
 				    f->cookie);
 		return -EOPNOTSUPP;
 	}
@@ -2484,6 +2510,20 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
 				    rc, f->cookie);
 		return rc;
+	}
+
+	/*
+	 * T-M6-SP4: a PPPoE->LAN flow. The session ID is part of the FE key
+	 * (F-259, bytes 48..49), so the record only matches this session's
+	 * frames; the record strips the session header (STRIP_PPPoE_HDR,
+	 * F-260) before the TTL/NAT and L2 rebuild. The ingress is untagged
+	 * (ask_flow_cookie_pppoe() refuses PPPoE over VLAN), so no VID, even
+	 * if the ingress-owner heuristic above picked a VLAN vif.
+	 */
+	if (pppoe > 0) {
+		key.pppoe_sid = pppoe_sid;
+		key.vlan_ingress_vid = 0;
+		key.vlan_edit_flags |= ASK_VLANF_PPPOE_STRIP;
 	}
 
 	/*

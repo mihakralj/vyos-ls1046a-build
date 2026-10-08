@@ -975,41 +975,62 @@ KUNIT_EXPECT_TRUE(test, (flags & ASK_ACT_NAT_SRC) != 0);
 }
 
 /*
- * T-M6-SP4 step 0: a flow with a PPP_SES encap on EITHER tuple must be
- * refused, including when the cookie is the plain (PPPoE->LAN) direction and
- * only the other tuple carries the encap. VLAN-only and non-flowtable cookies
- * are not PPPoE.
+ * T-M6-SP4: ask_flow_cookie_pppoe() classifies a flow's PPPoE encapsulation:
+ * 0 = none, 1 = decap direction (this tuple's only encap is PPP_SES with a
+ * non-zero session, returned in *sid), -EOPNOTSUPP = everything else
+ * (encap direction, PPPoE over VLAN, session 0). Non-flowtable cookies are 0.
  */
 static void ask_flow_offload_test_pppoe_cookie(struct kunit *test)
 {
 struct flow_offload *flow;
+struct flow_offload_tuple *t0, *t1;
 unsigned long c0, c1;
+u16 sid;
 
 flow = kunit_kzalloc(test, sizeof(*flow), GFP_KERNEL);
 KUNIT_ASSERT_NOT_NULL(test, flow);
-flow->tuplehash[0].tuple.dir = FLOW_OFFLOAD_DIR_ORIGINAL;
-flow->tuplehash[1].tuple.dir = FLOW_OFFLOAD_DIR_REPLY;
-c0 = (unsigned long)&flow->tuplehash[0].tuple;
-c1 = (unsigned long)&flow->tuplehash[1].tuple;
+t0 = &flow->tuplehash[0].tuple;
+t1 = &flow->tuplehash[1].tuple;
+t0->dir = FLOW_OFFLOAD_DIR_ORIGINAL;
+t1->dir = FLOW_OFFLOAD_DIR_REPLY;
+c0 = (unsigned long)t0;
+c1 = (unsigned long)t1;
 
-KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(0));
-KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c0));
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(0, &sid), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), 0);
 
-flow->tuplehash[0].tuple.encap_num = 1;
-flow->tuplehash[0].tuple.encap[0].proto = htons(ETH_P_8021Q);
-KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c0));
-KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c1));
+/* VLAN only: not PPPoE. */
+t0->encap_num = 1;
+t0->encap[0].proto = htons(ETH_P_8021Q);
+t0->encap[0].id = 10;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), 0);
 
-/* VLAN outer, PPPoE inner on the reply tuple only. */
-flow->tuplehash[1].tuple.encap_num = 2;
-flow->tuplehash[1].tuple.encap[0].proto = htons(ETH_P_8021Q);
-flow->tuplehash[1].tuple.encap[1].proto = htons(ETH_P_PPP_SES);
-KUNIT_EXPECT_TRUE(test, ask_flow_cookie_is_pppoe(c0));
-KUNIT_EXPECT_TRUE(test, ask_flow_cookie_is_pppoe(c1));
+/* t1 ingresses PPPoE session 7: t1 is the decap direction, t0 the encap. */
+t0->encap_num = 0;
+t1->encap_num = 1;
+t1->encap[0].proto = htons(ETH_P_PPP_SES);
+t1->encap[0].id = 7;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), 1);
+KUNIT_EXPECT_EQ(test, sid, (u16)7);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, sid, (u16)0);
 
-/* encap_num bounds the scan: a stale proto past it is ignored. */
-flow->tuplehash[1].tuple.encap_num = 1;
-KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c0));
+/* Session 0 would key like a plain frame: refused. */
+t1->encap[0].id = 0;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), -EOPNOTSUPP);
+
+/* PPPoE over VLAN: not yet supported. */
+t1->encap[0].id = 7;
+t1->encap_num = 2;
+t1->encap[1].proto = htons(ETH_P_8021Q);
+t1->encap[1].id = 10;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), -EOPNOTSUPP);
+
+/* encap_num bounds the scan: a stale PPP_SES past it is ignored. */
+t1->encap_num = 0;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), 0);
 }
 
 /*

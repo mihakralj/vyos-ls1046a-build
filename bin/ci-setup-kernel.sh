@@ -2461,6 +2461,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c/fman_pcd.c/dpaa: F-259 routed FE key 50 bytes (VID + PPPoE SID)"
 fi
 
+# F-260 (T-M6-SP4 PPPoE decap record, 2026-10-08): the inline ehash record
+# emitter learns the vendor STRIP_PPPoE_HDR (0x14) opcode behind a new L2-edit
+# flag FMAN_PCD_VLANF_PPPOE_STRIP: front half 04 11 12 (VID 0), then 0x14 with
+# its stats pointer on the owned 0216 scratch block, before TTL/NAT and the L2
+# rebuild. Dormant until ask.ko sets the flag (ask.pppoe_offload, default off).
+# After F-259 and the 0209/0215/0216 emitter patches.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_260.py" 2>&1
+    echo "### fman_pcd.c/fman_pcd.h: F-260 ehash STRIP_PPPoE_HDR (0x14) emitter"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:

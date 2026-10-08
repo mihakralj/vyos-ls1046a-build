@@ -581,6 +581,7 @@ u8     nat_flags;
 	u8     vlan_edit_flags;
 #define ASK_VLANF_POP	BIT(0)	/* strip all ingress VLAN tags */
 #define ASK_VLANF_PUSH	BIT(1)	/* insert one egress 802.1Q tag */
+#define ASK_VLANF_PPPOE_STRIP	BIT(2)	/* T-M6-SP4: strip the ingress PPPoE session hdr */
 	__be16 vlan_push_tci;
 	__be16 vlan_push_tpid;
 	/*
@@ -1040,7 +1041,7 @@ enum ask_flow_direction {
 };
 
 int ask_flow_offload_classify_dir(const struct net_device *dev);
-bool ask_flow_cookie_is_pppoe(unsigned long cookie);
+int ask_flow_cookie_pppoe(unsigned long cookie, u16 *sid);
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow_offload.c — flow_block_cb registration on dpaa netdevs            */

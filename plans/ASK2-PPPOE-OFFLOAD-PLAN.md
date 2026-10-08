@@ -166,6 +166,24 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 4. Isolation: a plain frame with a tagged flow's 5-tuple MISSes.
 5. The A6/churn regression gates are unchanged.
 
+### 3.3 Decap direction (PPPoE→LAN): implemented 2026-10-08, not yet board-tested
+
+- **Kernel, F-260** (`bin/kernel-fixups/F_260.py`): a new L2-edit flag `FMAN_PCD_VLANF_PPPOE_STRIP` (bit 2 of `vlan_flags`) makes the inline record emitter take the VLAN front half `04 11 12` (12 with VID 0) and then emit `14 STRIP_PPPoE_HDR`. Its 4-byte stats pointer points at the owned 0216 scratch block, never 0. The record is `04 11 12 14 21 41 01` for IPv4 and `… 14 29 41 01` for IPv6, with NAT opcodes in place of `21`/`29` when the flow is NATed.
+- **ask.ko:**
+  - `ask_flow_cookie_pppoe()` replaces the step-0 guard. It returns 1 only for a decap direction: this tuple's only encap is `PPP_SES` with a non-zero session ID, and the other tuple has no PPPoE.
+  - The encap direction, PPPoE over VLAN and session 0 return `-EOPNOTSUPP` and stay in software.
+  - Decap flows are offloaded only with `ask.pppoe_offload=Y`; it is a runtime toggle, off by default. Turn it on with `echo Y | sudo tee /sys/module/ask/parameters/pppoe_offload`.
+  - For a decap flow the replace path sets `key.pppoe_sid`, forces `vlan_ingress_vid = 0` and sets `ASK_VLANF_PPPOE_STRIP`. The VLAN per-port gate now applies only to POP/PUSH.
+  - `static_assert`s tie the flag value and key size to the kernel's.
+  - KUnit: `ask_flow_offload_test_pppoe_cookie`, rewritten for the classifier.
+- **Teardown is deliberately deferred to the encap step.** A decap record carries nothing session-specific apart from its key, which includes the session ID. After a reconnect, new-session frames therefore MISS. If a session ID happens to be reused, the old record still strips the PPPoE header and forwards to the same LAN next hop, which is correct. Stale decap records only linger until the kernel flow times out and DESTROY removes them. The encap record (`43`, session ID and concentrator MAC inside) is the one that must be flushed on `pppoe10` down.
+- **Board test:**
+  - **Traffic:** a forwarded dell1 `10.99.50.1` (`ppp0`) → DUT `pppoe10`/eth3 → eth4 → dell2 `10.99.2.113` flow. It needs the temporary routes from §1a: on dell2, `10.99.50.1/32 via 10.99.2.185`; on dell1, rule `from 10.99.50.1 to 10.99.2.0/24 lookup 150` with `10.99.2.0/24 dev ppp0`.
+  - **Order:** cold boot, then first one flow at low rate with `pppoe_offload=Y`.
+  - **Pass:** the eth3 record's `pkt_count` climbs, kernel RX on the data direction stays flat, and dell2 receives intact frames, checked with `tcpdump` (no PPPoE header left, TTL decremented).
+  - **Then:** throughput, then session flap.
+  - **Wedge risk:** `0x14` has never executed on this board. If eth3 goes RX-deaf, recovery is a cold power cycle.
+
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
 
 The standard dell1/dell2 ↔ DUT throughput rig (`ASK2-PERFORMANCE-TEST-HARNESS.md`) had no PPPoE capability — it only drives raw routed/VLAN IPv4 combos. This gap is closed: **dell1 now runs a real software PPPoE access concentrator on its DUT-facing link, and the DUT runs a real PPPoE client session against it**, giving this feature a working, repeatable test rig before any offload code exists.
