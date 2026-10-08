@@ -64,6 +64,7 @@
 #include <linux/file.h>
 #include <linux/fsl/dpaa_flow_offload.h>
 #include <linux/fsl/fman_pcd.h>       /* F-109: fman_pcd_fe_flow_add/del, fman_pcd_fe_flow_action */
+#include <linux/unaligned.h>
 
 /*
  * Single-image OOT re-declares (board patches 0121 + 0104).
@@ -1893,6 +1894,9 @@ EXPORT_SYMBOL_GPL(ask_fe_build_key_v6);
  * lanes 16+16 zero; v6 flow -> v4 lane 8 zero). ask_flow_key.src_ip/dst_ip are
  * 16-byte; for a v4 flow the address is in the first 4 bytes.
  */
+/* F-259: one routed key size across the kernel and ask.ko (spec 10.3). */
+static_assert(ASK_FE_KEY_SIZE_DUAL == FMAN_PCD_FE_ROUTED_KEY_SIZE);
+
 void ask_fe_build_key_dual(const struct ask_flow_key *key,
 			   u8 k[ASK_FE_KEY_SIZE_DUAL])
 {
@@ -1911,6 +1915,9 @@ void ask_fe_build_key_dual(const struct ask_flow_key *key,
 	k[41] = key->l4_proto;
 	memcpy(&k[42], &key->sport, sizeof(key->sport));
 	memcpy(&k[44], &key->dport, sizeof(key->dport));
+	/* F-259: ingress L2 context, big-endian like the wire. */
+	put_unaligned_be16(key->vlan_ingress_vid & VLAN_VID_MASK, &k[46]);
+	put_unaligned_be16(key->pppoe_sid, &k[48]);
 }
 
 /* ------------------------------------------------------------------------- */
