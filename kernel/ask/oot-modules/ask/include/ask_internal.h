@@ -593,8 +593,17 @@ u8     nat_flags;
 	 * inconsistent and silently dropped bulk POP frames on silicon. Sourced
 	 * from the ingress VLAN vif (vlan_dev_vlan_id) since the flowtable POP
 	 * action carries no VID. Host order 1..4094; 0 = no ingress tag.
+	 * F-259: also bytes [46..47] of the FE comparison key (the outer VID
+	 * KeyGen extracts from the wire), so a tagged flow's record can only
+	 * match frames carrying that tag.
 	 */
 	u16    vlan_ingress_vid;
+	/*
+	 * F-259: ingress PPPoE session ID, host order; 0 = not PPPoE. Bytes
+	 * [48..49] of the FE comparison key. Always 0 while the T-M6-SP4
+	 * guard refuses PPPoE flows.
+	 */
+	u16    pppoe_sid;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
@@ -1129,8 +1138,12 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
  *   [25..40] IPv6 dst(16)                 (zero on a v4 flow)
  *   [41]     proto / next-header
  *   [42..45] L4 sport(2) dport(2)
+ *   [46..47] outer VID, 0 untagged         (F-259, gec[6])
+ *   [48..49] PPPoE session ID, 0 if none   (F-259, gec[7])
+ * Must equal the kernel's FMAN_PCD_FE_ROUTED_KEY_SIZE (static_assert in
+ * ask_flow_offload.c).
  */
-#define ASK_FE_KEY_SIZE_DUAL 46
+#define ASK_FE_KEY_SIZE_DUAL 50
 /* F-243 (2026-09-06): silicon family byte = L3 header byte 0 masked
  * 0xF0 = the IP-version nibble shifted: v4 0x45->0x40, v6 0x60->0x60.
  * Live-captured on .185 (46-byte dual composite byte 0 = 0x40 for a

@@ -93,6 +93,50 @@ Nothing in this project's existing planning documents (`ASK2-MASTER-PLAN.md` Pha
 
 This is a half-day-scale investigation (probe/decode only, no new kernel infrastructure), dramatically cheaper than either resolving §2 or building the full soft-parser loader/compiler pipeline (`T-M6-SP1`/`SP2`), and should be the literal next action on this feature — not the phased plan below, which assumes (conservatively, and per the master plan's existing task breakdown) that soft-parser involvement will be needed.
 
+### 3.1 Result (2026-10-08): POSITIVE, the hard parser exposes the inner IP
+
+Measured with F-258 on `.185` (image `2026.10.08-1735-rolling`, kernel `6.18.55-vyos`, commit `09b5127b`), on frames arriving on eth3 through the `pppoe10` session. Parse result offsets are bytes into the 32-byte `struct fman_prs_result`; the frame starts at probe offset +48.
+
+| Frame | `l2r` | `l3r` | `l4r` | `nxthdr` | `etype_off` | `pppoe_off` | `ip_off[0..1]` | `l4_off` | `nxthdr_off` |
+|---|---|---|---|---|---|---|---|---|---|
+| LCP echo (PPP `c021`) | `0x8880` | `0x0000` | `0x00` | `0xc021` | `0x0c` | `0x0e` | `ff ff` | `ff` | `0x16` |
+| ICMP in IPv4 (PPP `0021`) | `0x8800` | `0x8080` | `0x00` | `0x0001` | `0x0c` | `0x0e` | `16 16` | `ff` | `0x2a` |
+| TCP in IPv4 (PPP `0021`) | `0x8800` | `0x8000` | `0x2d` | — | `0x0c` | `0x0e` | `16 16` | `0x2a` | `0x4a` |
+
+- The parser recognises PPPoE (`pppoe_off = 0x0e`) and continues through PPP protocol `0x0021` into the inner IPv4 header at frame+22 (`ip_off = 0x16`; the frame bytes there are `45 b8`) and into TCP at frame+42 (`l4_off = 0x2a`; source port `00 16`). For LCP it stops with `nxthdr = 0xc021`, so LCP frames have no L3 and cannot match a flow record.
+- **The KeyGen key is the production key.** The KG hash captured for the TCP frame (`0xe4a5f1ea44b82104`) equals `crc64_raw` of the 46-byte dual-lane key from `ask_fe_build_key_dual()` for the inner 5-tuple (`0x40`, 10.99.50.1 → 10.99.50.15, TCP, 22 → 52898). So on this silicon a PPPoE session frame produces exactly the key a plain frame with the same 5-tuple produces.
+
+Consequences:
+1. **The soft parser is not needed for Tier 1.** §2 and Phases A–C are off the PPPoE critical path. They stay relevant only for TTL punt and tunnels.
+2. **The step-0 hazard was real, not conditional.** Before `a2890a36`, a PPPoE→LAN record keyed on the inner 5-tuple would have HIT and been forwarded without stripping PPPoE. The guard was necessary.
+3. **Isolation is now a concrete design decision (§1b).** The key cannot tell PPPoE frames from plain frames. The only difference visible to the parser is `l2r` (`0x88xx` for PPPoE, `0x80xx` for plain Ethernet, and different again for VLAN). The options are listed in §3.2.
+
+### 3.2 Isolation: chosen design (2026-10-08) — the hardware key carries the kernel's flow identity
+
+The kernel flowtable identifies a flow by ingress port + encapsulation (VLAN IDs, PPPoE session) + inner 5-tuple. The per-port table already gives the port and the 46-byte dual-lane key the 5-tuple, so the missing piece is the encapsulation. That gap caused the PPPoE collision measured in §3.1, and the same latent bug exists for VLAN: a VLAN-pop record could be hit by an untagged frame with the same 5-tuple. Fixing it once, generically, closes both.
+
+**F-259** (`bin/kernel-fixups/F_259.py`, with the ask.ko changes in the same commit):
+- The routed key grows from 46 to **50 bytes** by appending two GEC extractions on the ehash FE scheme only (`next_engine == 3`):
+  - `gec[6] = 0x810F0502`: `KG_SCH_GEN_VLAN1`, validated, header +2, 2 bytes, first-byte mask `0x0F`, giving the outer VID in key `[46..47]`.
+  - `gec[7] = 0x81FF0802`: `KG_SCH_GEN_PPP`, validated, header +2, 2 bytes, giving the PPPoE session ID in key `[48..49]`.
+
+  Validated codes substitute the zeroed default register when the header is absent, so plain frames carry 0/0. That is the same mechanism that zero-fills the absent IPv4/IPv6 lane (silicon-proven). Offsets are relative to the parse-result header offsets (`vlan_off` is the TPID, `pppoe_off` is the PPPoE header start).
+- Why not the parse-result `l2r` byte: GEC code `0x20` (parse result) emits 0 in AC_CC mode (qdrant 2026-09-03), which is why F-243 moved the family byte to a frame-header code.
+- **One size constant.** `FMAN_PCD_FE_ROUTED_KEY_SIZE` (50) in `include/linux/fsl/fman_pcd.h` sizes the ROUTED profile, the default ehash table and the 0194/0198 ACL key buffers. ask.ko's `ASK_FE_KEY_SIZE_DUAL` `static_assert`s against it, so the two can't drift.
+- **ask.ko.** `ask_fe_build_key_dual()` writes `vlan_ingress_vid & VLAN_VID_MASK` and the new `pppoe_sid` (0 while the step-0 guard stands) big-endian at `[46..49]`. KUnit case `ask_flow_offload_test_fe_key_l2_context`.
+- **Record layout.** Opcodes move from +56 to +60. The worst-case parameter end (NAT66 + VLAN translate) is +184, under the +256 stats block.
+- **Behaviour change.** ethtool/tc-flower ACL records keep 0/0 in the new bytes, so they match untagged, non-PPPoE frames only.
+- **Rejected alternatives.**
+  - (a) The vendor key: incomplete, and leaves a spoofed plain frame running a strip opcode.
+  - (c) A separate PPPoE KG scheme and table: this project already chose one unified key over per-family schemes (F-224 replaced the planned separate v6 scheme) because LCV scheme selection proved fragile (F-205/F-212).
+
+**Silicon acceptance (before any PPPoE record is built):**
+1. Plain v4/v6 routed flows still HIT at line rate. The probe2/F-258 KG hash of a plain frame equals `crc64_raw` of the 50-byte key with `00 00 00 00` tail.
+2. A tagged flow's KG hash matches the key with its VID at `[46..47]`, and VLAN-pop flows still HIT. If the hash comes out wrong, the VLAN1 offset base is the suspect (TCI at header +0 instead of +2).
+3. A PPPoE frame's KG hash matches the key with its session ID at `[48..49]`.
+4. Isolation: a plain frame with a tagged flow's 5-tuple MISSes.
+5. The A6/churn regression gates are unchanged.
+
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
 
 The standard dell1/dell2 ↔ DUT throughput rig (`ASK2-PERFORMANCE-TEST-HARNESS.md`) had no PPPoE capability — it only drives raw routed/VLAN IPv4 combos. This gap is closed: **dell1 now runs a real software PPPoE access concentrator on its DUT-facing link, and the DUT runs a real PPPoE client session against it**, giving this feature a working, repeatable test rig before any offload code exists.

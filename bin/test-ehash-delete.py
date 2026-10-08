@@ -42,7 +42,7 @@ typedef u64 dma_addr_t;
 #define FMAN_EHASH_FLOW_KEY_OFF 8
 #define FMAN_EHASH_FLOW_REC_SIZE 320
 #define FMAN_FE_CTX_SIZE 16
-#define KEY_SIZE 46
+#define KEY_SIZE 50	/* F-259 routed key */
 #define INV0 0x80000000U
 #define be16_to_cpu(x) be16toh(x)
 #define be32_to_cpu(x) be32toh(x)
