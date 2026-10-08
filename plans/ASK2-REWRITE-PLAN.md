@@ -9,7 +9,7 @@ Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the
 | Phase | Status | Where it stands |
 |---|---|---|
 | **0 — safety and oracles** | ✅ (0.4 🟡 partial, deferred by operator) | 0.1 ⚠ superseded: VLAN offload is default-on again now that it works. 0.2 register oracle ✅. 0.3 record oracle ✅ (push-only record added 2026-10-05). 0.4 vendor thresholds ✅ TCP; 64 B/IMIX/64k-flow deferred. 0.5 ✅. |
-| **1 — VLAN root cause** | 🟡 **VLAN fixed, A6 throughput passes; churn gate REOPENED (rare FMan RX stall)** | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Churn gate REOPENED 2026-10-07:** one 100/100 clean run under verified load on `0cb5a105`, but the next run stalled at cycle 84 (see "Churn gate (2026-10-07)" below). Idle aging (`2d7c8268`) and the safe ehash delete F-254 are real fixes but not the stall trigger. **Follow-ups (not gating):** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's; 5/600 isolated vlan↔vlan burst failures under churn; torn-down offloaded flows linger in conntrack as ESTABLISHED for ~1 day. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
+| **1 — VLAN root cause** | 🟡 **VLAN fixed, A6 throughput passes; churn gate REOPENED (rare FMan RX stall)** | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Churn gate REOPENED 2026-10-07:** one 100/100 clean run under verified load on `0cb5a105`, but the next run stalled at cycle 84 (see "Churn gate (2026-10-07)" below). Idle aging (`2d7c8268`) and the safe ehash delete F-254 are real fixes but not the stall trigger; stalls #3-#5 recurred on F-254+F-256 builds (see "Churn gate (2026-10-07)" below), and the 2026-10-08 stability pass added F-257, a per-delete DMA context leak fix that is hygiene only. **Follow-ups (not gating):** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's; 5/600 isolated vlan↔vlan burst failures under churn; torn-down offloaded flows linger in conntrack as ESTABLISHED for ~1 day. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
 | **2 — consolidation** | ⬜ not started | Now unblocked: delete `ask_vlan_cc.c` and its genl/debugfs/stat proxies (CC VLAN path retired); fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD. |
 | **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE, multicast, IPsec, tunnels/fragments and QoS have not been started. |
 | **4 — exceed the vendor** | ⬜ not started | Vendor A13 measured; ASK2 A13 not measured. |
@@ -162,8 +162,118 @@ same build stalled (see the last bullet).
   stay busy and unchanged across samples. `churn.sh` runs it with debugfs
   and the kernel log at start (`baseline.txt`), on a suspect deaf and on a
   persistent stall. Healthy baseline: only task 4 (`0x810000xx`, parked
-  FM_CTL) is permanently busy. F-254 is kept (it fixes an
-  RM-violating delete) but frees the record even after a SYNC timeout.
+  FM_CTL) is permanently busy.
+- **Stall #3 captured (2026-10-07, `2239` image, cold boot, cycle 97) [SILICON].**
+  eth4 RX dead (eth3 alive), `FMFP_PS[0x11]` STL, `FMFP_EXTC.INV0` stuck.
+  - *FMan DMA bus error on eth4 RX:* `FMDM_TAH/TAL` = `0x2e_000008f7` (not
+    DDR on LS1046A), `FMDM_TCID` = `0x11570000` (PortID `0x11`, TNUM 87);
+    all zero in the same-boot baseline. `FMDM_SEFRC` 0 → 111. The kernel
+    cleared it silently: mainline `fman_bus_error()` only does `dev_dbg`.
+  - *Task table:* 14 eth4 RX tasks (TNUM 87 among them) frozen with status
+    `0x00d8xxxx`/`0x00d9xxxx`/`0x00daxxxx` (healthy in-flight is
+    `0x0088xxxx`), plus FM_CTL task 4 at `0x81d00007`. eth4's FE workspace
+    pool is untouched, so the tasks never reached the hash lookup.
+  - *Timeline:* last good sync 17:20:50.373 (IPv6 port↔port burst records
+    installed), 0.74 s of no table activity, four aging deletes at
+    17:20:51.112, first delete SYNC timeout at .234. Onset vs. the first
+    delete is ambiguous this time.
+  - *Hypothesis (unproven):* the FMan followed a pointer into memory that
+    now holds other content (the address looks like a 64-bit counter, e.g.
+    a reused record's stats). F-254 freed records after sync timeouts, so
+    the evidence was lost.
+  - *F-256 (diagnostics, `2dcdb65c`):* bus errors logged with address,
+    port, TNUM and LIODN; a record whose delete SYNC times out is kept
+    (not freed) and its address, header/key and stats are logged. Next:
+    rerun churn on this image and match the bus-error address against the
+    logged records. Data: `oracle/churn-1007-stallcap400-fails/`. F-254 is
+    kept (it fixes an RM-violating delete); F-256 stops it freeing a record
+    after a SYNC timeout.
+- **Stall #4 captured (2026-10-07 19:27, image `2026.10.07-1743-rolling`,
+  `churn-1007-stallcap400-v2`, cycle 105) [SILICON].** eth3 and eth4 both
+  RX-stalled (`deaf_events=1`), 33 FMan tasks stuck (`stuck_count=33`,
+  healthy baseline is 1 — only task 4 parked). Kernel: `FMan[0] DMA bus
+  error: addr 0x2e000008f7 port_id 9 tnum 93 liodn 0 (F-256)`. **The fault
+  address `0x2e000008f7` is byte-for-byte identical to Stall #3's
+  `FMDM_TAH/TAL`**, despite a different reporting port (`port_id 9` here vs.
+  `0x11` in Stall #3) and a different TNUM (93 vs. 87) — the same stale
+  address faults from more than one port's DMA context, which argues against
+  a per-port-specific cause and strengthens the "stale pointer into reused
+  memory" hypothesis over a per-port resource/timing race. Raw capture:
+  `oracle/churn-1007-stallcap400-v2-fails/` (`baseline.txt`, `c105-stall.txt`,
+  `c105-suspect.txt`, per-combo `.dut.txt`/`.iperf.txt`). Recurrence
+  cadence so far: stalls at cycle 84 (2239, 2026-10-07 early), cycle 97
+  (2239, Stall #3), cycle 105 (1743, Stall #4) — roughly 1 per 85–105
+  verified-load cycles, still unresolved. **Churn gate remains REOPENED**;
+  this is a milestone blocker for Phase 1 exit, not yet closed.
+- **Stall #5 captured (2026-10-07 22:16:52, image `2026.10.07-1743-rolling`,
+  fresh cold boot this time, `churn-1007-2111-coldboot-long`, cycle 129)
+  [SILICON].** eth3 and eth4 both RX-stalled (`deaf_events=1`), 32 FMan
+  tasks stuck (`stuck_count=32`, healthy baseline 1). Kernel: `FMan[0] DMA
+  bus error: addr 0x2e000008f7 port_id 9 tnum 93 liodn 0 (F-256)`. **This
+  fault is not just the same address as Stall #3/#4 — `port_id 9 tnum 93`
+  is byte-for-byte identical to Stall #4's signature as well**, on a
+  completely independent cold-boot run (fresh FMan/MURAM state, no shared
+  process/session with the run that produced Stall #4). Conntrack total at
+  stop was 3830 (vs. 3391 at Stall #4's cycle 105) — so total conntrack
+  churn is NOT the triggering variable (different totals, same exact
+  fault identity). This all-fields-identical recurrence across a cold
+  boot is the strongest evidence yet for a **deterministic** stale-pointer
+  bug (not random memory reuse): the same address/port/tnum combination
+  faults again from a clean silicon/software state, implying a fixed
+  code path or fixed-size structure (e.g. a MURAM record/record-pool slot
+  indexed by something that wraps predictably) rather than a timing race.
+  Recurrence cadence remains irregular by cycle count (84, 97, 105, 129)
+  — cycle count alone is not the correlating variable either. DUT
+  recovered to a reachable control-plane state post-stall (SSH alive,
+  MURAM budget unchanged at 52890/86016, consistent with prior partial-FMan
+  hangs that spare eth0). **Churn gate remains REOPENED**; this
+  identical-signature recurrence across independent boots should be the
+  starting point for the next root-cause attempt (match address
+  `0x2e000008f7` / tnum 93 against a fixed MURAM offset or record-pool
+  slot formula, rather than continuing to treat it as a generic "stale
+  pointer somewhere" search).
+- **Stability pass (2026-10-08) [code-level, not board-validated].** The
+  ehash delete path was re-reviewed against the vendor
+  `ExternalHashTableDeleteKey` and RM §5.12.14.1. One real defect remained
+  after F-254/F-256; only that was fixed.
+  - *Leak:* `fman_pcd_ehash_add_key()` allocates a 16-byte DMA-coherent FE
+    context per FE flow (F-175, `flow->ctx`), but only
+    `fman_pcd_ehash_flow_drain()` freed it, so every single `del_key()`
+    (ask.ko DESTROY, idle aging, and 0219's evict-before-insert) leaked one.
+    **F-257** frees it right after the record, that is only after the SYNC
+    succeeded; the F-256 timeout path still keeps record and context. No
+    register, descriptor or record format changes. This is resource hygiene,
+    **not** a stall fix and not attributed to Stalls #3-#5: the onset
+    precedes any delete in at least one run, and nothing links a leaked
+    buffer to the FMan DMA bus error signature.
+  - *Dropped draft `0220` (never committed; do not recreate):* it
+    re-implemented F-254's atomic unlink and SYNC (F-254's anchors match only
+    the unpatched `del_key()`, so applying `0220` first makes F-254's anchor
+    count 0 and fails the CI fixup chain), its timeout path freed the record
+    that F-256 keeps, and it was built on a 6.18.48 mirror that lacks
+    patches 0207-0219. Its one valid part, the ctx leak, is F-257, as a
+    Layer-2 fixup after F-256 because a Layer-1 patch would break F-256's
+    delete-tail anchor.
+  - *Build gate:* `bin/test-ehash-delete.py` compiles the real `del_key()`
+    and `flow_drain()` from the patched tree with the host gcc (ASan/UBSan
+    when usable) against a simulated SYNC. It checks head/middle/tail
+    unlink, exactly-once record and ctx release after the SYNC, invalid and
+    missing keys, and record+ctx retention on SYNC timeout. It runs in
+    `ci-setup-kernel.sh` right after F-257 and aborts the build before the
+    kernel compile on a violation.
+  - *Verification:* the harness fails on a tree without F-257
+    (`records_freed == 1 && contexts_freed == 1 && metadata_freed == 1`) and
+    passes with it, with and without sanitizers; 6/6 deliberate mutants
+    (ctx freed before the SYNC, on the timeout path, without the NULL guard,
+    never; predecessor flags dropped on unlink; SYNC removed) are caught;
+    F-254, F-256 and F-257 apply in order on pristine text and are
+    idempotent; the patched `fman_pcd.c` compiles with the real 6.18.55
+    kbuild flags with an identical warning set; `bin/test-fixups.sh` passes.
+  - *Churn gate stays REOPENED.* No build or board run yet, and the stall
+    signature (`0x2e000008f7`; `port_id 9 tnum 93` in #4 and #5) is not
+    explained by this change. Next evidence: verified-load mixed churn on
+    independent cold boots well beyond 84-129 cycles, and matching the fault
+    address against fixed MURAM offsets and record-pool slot formulas.
 
 **Loss-localization result (2026-10-06) [SILICON].** This supersedes the
 conclusions of steps 2 and 5 below; their measurements stand, but two of their
