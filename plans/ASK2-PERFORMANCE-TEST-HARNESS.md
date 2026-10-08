@@ -21,6 +21,17 @@
 >   indicator under offload (2026-10-05 finding).
 >
 > The SW/HW-mode proof method below still applies.
+>
+> **PPPoE rig (2026-10-07, additive, does not touch any of the above).** dell1
+> also runs a persistent software PPPoE access concentrator on `enp1s0`
+> (`ask2-pppoe-server.service`, pool `10.99.50.0/24` — distinct from the
+> addresses used by the combo matrix above), and the DUT has a verified
+> `interfaces pppoe pppoe10 source-interface eth3` client session against it
+> (credentials `asktest`/`asktest123`). Both are left running/enabled for
+> reuse. Full setup, verified results (session, ~1.0 Gbit/s software-path
+> iperf2 baseline, confirmed auto-reconnect), and rationale are in
+> `plans/ASK2-PPPOE-OFFLOAD-PLAN.md` §3a — read that before touching PPPoE
+> testing, not this document.
 
 A reproducible procedure for measuring routed IPv4 throughput and DUT CPU cost through the Mono Gateway LS1046A, comparing the Linux software flowtable against ASK2/FMan hardware offload.
 
