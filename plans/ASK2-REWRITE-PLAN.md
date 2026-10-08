@@ -9,9 +9,9 @@ Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the
 | Phase | Status | Where it stands |
 |---|---|---|
 | **0 — safety and oracles** | ✅ (0.4 🟡 partial, deferred by operator) | 0.1 ⚠ superseded: VLAN offload is default-on again now that it works. 0.2 register oracle ✅. 0.3 record oracle ✅ (push-only record added 2026-10-05). 0.4 vendor thresholds ✅ TCP; 64 B/IMIX/64k-flow deferred. 0.5 ✅. |
-| **1 — VLAN root cause** | 🟡 **VLAN fixed, A6 throughput passes; churn gate REOPENED (rare FMan RX stall)** | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Churn gate REOPENED 2026-10-07:** one 100/100 clean run under verified load on `0cb5a105`, but the next run stalled at cycle 84 (see "Churn gate (2026-10-07)" below). Idle aging (`2d7c8268`) and the safe ehash delete F-254 are real fixes but not the stall trigger; stalls #3-#5 recurred on F-254+F-256 builds (see "Churn gate (2026-10-07)" below), and the 2026-10-08 stability pass added F-257, a per-delete DMA context leak fix that is hygiene only. **Follow-ups (not gating):** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's; 5/600 isolated vlan↔vlan burst failures under churn; torn-down offloaded flows linger in conntrack as ESTABLISHED for ~1 day. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
+| **1 — VLAN root cause** | 🟡 **VLAN fixed, A6 throughput passes; churn gate REOPENED (rare FMan RX stall)** | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Churn gate REOPENED 2026-10-07:** one 100/100 clean run under verified load on `0cb5a105`, but the next run stalled at cycle 84 (see "Churn gate (2026-10-07)" below). Idle aging (`2d7c8268`) and the safe ehash delete F-254 are real fixes but not the stall trigger; stalls #3-#5 recurred on F-254+F-256 builds (see "Churn gate (2026-10-07)" below), and the 2026-10-08 stability pass added F-257, a per-delete DMA context leak fix that is hygiene only. Its first cold-boot soak (`2026.10.08-0106-rolling`) ran 576 cumulative verified-load cycles on one boot with 0 deaf, 0 kernel errors and MURAM flat, 4.5× past the latest earlier onset (cycle 129); the gate stays REOPENED until a second independent cold boot repeats it. **Follow-ups (not gating):** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's; isolated iperf3 control-channel burst failures under churn (5/600 vlan↔vlan earlier; 13/3456 in the 2026-10-08 soak, 12 of them IPv6, on all three path types); torn-down offloaded flows linger in conntrack as ESTABLISHED for ~1 day (7440 s with the 2026-10-07 sysctl; soak plateau 6.2-7.0k of 262,144). Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
 | **2 — consolidation** | ⬜ not started | Now unblocked: delete `ask_vlan_cc.c` and its genl/debugfs/stat proxies (CC VLAN path retired); fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD. |
-| **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE, multicast, IPsec, tunnels/fragments and QoS have not been started. |
+| **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE: decap silicon-validated, encap and the HW MTU check (F-262) implemented and awaiting a board run; multicast, IPsec, tunnels/fragments and QoS have not been started. |
 | **4 — exceed the vendor** | ⬜ not started | Vendor A13 measured; ASK2 A13 not measured. |
 
 Indicative Phase 1 bidir results against the vendor thresholds (§8). These are **superseded** by the A6 tables below: the lighter iperf2 `-P 4` load hid the loss.
@@ -118,6 +118,23 @@ same build stalled (see the last bullet).
   created and torn down), then a deaf check (8 rig addresses × 5 pings plus
   BMI `rfrc` progress, re-checked after 5 s), kernel-log error grep, MURAM,
   record and conntrack counts. Settle 120 s at the end.
+  - *Running it from a LAN host (2026-10-08).* `churn-lan.sh` is the same
+    gate with a selectable controller (`CTL_ON=remote|dell1|dell2`, CSV
+    timestamps in UTC); `soakctl.sh {setup|deploy|preflight|start|status|pull|stop|clean}`
+    runs it detached on dell2 (default) and `soak_summary.py` prints cycles,
+    cadence, ETA in UTC and Pacific, burst failures per combo, MURAM and
+    record ranges. Reason: run 1 died at cycle 76 when the control VM (an
+    Azure Spot VM) was evicted, and that VM reaches the rig through
+    Tailscale, so a WAN blip would read as `dut-unreachable`, which the
+    gate treats as persistent deaf. `churn-lan.sh` refuses to start while
+    background iperf3 clients exist (a leftover set doubles the load; run
+    `soakctl.sh clean` after a stop or crash). Never run two harnesses at
+    once (they clobber `/tmp/churn-bg.log` and collide on the single-test
+    iperf3 servers) and never edit a script while it runs. The cycle loop is
+    byte-identical to `churn.sh`; validated by preflight 17/17 from dell2
+    and from the VM, and a dummy harness for start/refuse/status/stop/pull.
+    A full run from dell2 has not been done yet, and its cycle time on the
+    LAN may be shorter than the VM's ~30 s.
 - **Defect 1, offloaded flows never aged (fixed `2d7c8268`).**
   `ask_flow_offload_stats()` reported `lastused = jiffies` unconditionally, so
   idle offloaded flows and their ehash records lived forever (records grew by
@@ -232,7 +249,7 @@ same build stalled (see the last bullet).
   `0x2e000008f7` / tnum 93 against a fixed MURAM offset or record-pool
   slot formula, rather than continuing to treat it as a generic "stale
   pointer somewhere" search).
-- **Stability pass (2026-10-08) [code-level, not board-validated].** The
+- **Stability pass (2026-10-08) [built; warm-boot smoke only].** The
   ehash delete path was re-reviewed against the vendor
   `ExternalHashTableDeleteKey` and RM §5.12.14.1. One real defect remained
   after F-254/F-256; only that was fixed.
@@ -269,11 +286,72 @@ same build stalled (see the last bullet).
     F-254, F-256 and F-257 apply in order on pristine text and are
     idempotent; the patched `fman_pcd.c` compiles with the real 6.18.55
     kbuild flags with an identical warning set; `bin/test-fixups.sh` passes.
-  - *Churn gate stays REOPENED.* No build or board run yet, and the stall
-    signature (`0x2e000008f7`; `port_id 9 tnum 93` in #4 and #5) is not
-    explained by this change. Next evidence: verified-load mixed churn on
-    independent cold boots well beyond 84-129 cycles, and matching the fault
-    address against fixed MURAM offsets and record-pool slot formulas.
+  - *Board result so far (warm boot, smoke only).* CI run `37711222593`
+    built `2026.10.08-0106-rolling` (kernel 6.18.55-vyos), installed on
+    `.185` by a software reboot (the old image's `wtmp` has a clean shutdown
+    record), so this is not a cold boot. `churn.sh` with `CYCLES=10` under
+    verified 7.2/7.2 Gbit/s load: 0 burst failures, 0 deaf ports, 0 new
+    kernel errors, no F-256 bus-error lines, MURAM flat at 52890 B, records
+    back to 0 after the settle. That shows no regression in the delete path;
+    it says nothing about the stall (onset on earlier builds was cycle
+    84-129) and does not measure the leak.
+  - *Cold-boot soak result (2026-10-08) [SILICON]: every gate criterion met,
+    on one boot.* `.185` was cold-power-cycled into
+    `2026.10.08-0106-rolling` (kernel `6.18.55-vyos`; kernel start 03:07:44
+    UTC, no shutdown record before it) and `churn.sh` ran `CYCLES=500` under
+    verified 7.2/7.2 Gbit/s load. Run 1 (03:11 UTC) died at cycle 76 when the
+    control VM was evicted (0 deaf, 0 errors); run 2 (04:02-08:38 UTC)
+    resumed on the same boot and ran all 500. Total: **576 cumulative cycles
+    on one cold boot, never reset**, so this is a continuation, not a
+    pristine 500.
+    - *Criteria:* 0 deaf ports, 0 transient misses, 0 new kernel errors,
+      MURAM flat at 52890 B every cycle, records 106-124 under burst and 0
+      after the 120 s settle. A whole-boot journal scan (both runs and the
+      gap between them) finds 0 error-pattern hits, 0 F-256 bus-error lines,
+      0 SYNC timeouts and 0 F-219 evictions; `sudo ask-check` 36/36 READY.
+    - *Reading it:* stalls #2-#5 hit at cycles 84, 97, 105 and 129; this
+      build ran 4.5× past the latest. With a constant hazard (4 stalls in
+      ~575 earlier verified-load cycles) the chance of 576 clean cycles on an
+      unchanged build is about 2 %, so luck alone is unlikely. It is still
+      one boot: the `2239` build also passed 100/100 once and then stalled at
+      cycle 84 on its next run, and F-257 does not explain the fault
+      signature, so what changed the behaviour is unknown.
+    - *Non-gating burst failures, 13 of 3456 bursts (0.38 %).* All are
+      iperf3 "unable to receive control message ... Transport endpoint is not
+      connected" (control-channel loss; none is a zero-throughput data-path
+      failure) and each recovered the next cycle. DUT captures at those
+      moments show 0 F-219 evictions and normal REPLACE/DESTROY traffic. 12 of
+      13 are IPv6 (p ≈ 0.002 against an even v4/v6 split), and they hit all
+      three path types, not only vlan↔vlan as earlier notes said (runs 1+2:
+      pp6 4, vp6 2, vv6 6, vv4 1). Over every run with the current CSV
+      schema: 40 of 7044 (0.57 %), v6 33 (pp6 10, vp6 9, vv6 14), v4 7 (all
+      vv4); they predate F-257. Cause unknown. The 2026-09-06 qdrant finding
+      that cleared the DUT of a v6-VLAN failure was a peer-side DSA VLAN-6
+      problem on `.116` and does not cover port↔port. Next (non-gating):
+      v6-only churn with a dell-side capture at a failing burst, to see
+      whether the control connection dies by RST or by neighbour discovery.
+    - *Conntrack:* a plateau, not growth. 2,357 at baseline, ~6.5k by cycle
+      ~150, then 6.2-7.0k; 6,052 after the settle and 5,746 later, with no
+      `[OFFLOAD]` entries. The hardware path swallows FIN/RST, so entries
+      stay ESTABLISHED until `nf_conntrack_tcp_timeout_established` (7440 s
+      on `.185`, the 2026-10-07 sysctl mitigation) expires; the peak is ~3 %
+      of `nf_conntrack_max` 262,144.
+    - *Harness cadence drifts 29 → 36 s* between cycles 1-50 and 451-500.
+      The per-cycle error scan (`journalctl -k --since T0 | grep -c`)
+      re-reads the whole growing kernel log (7.3 s over 289k lines at the
+      end, ~580 lines per cycle). It is a harness artifact, not a DUT
+      slowdown. A `journalctl --cursor` incremental scan would hold the
+      cadence flat on longer runs; it is left unchanged so the loop stays
+      byte-identical to the earlier runs.
+  - *Churn gate stays REOPENED.* One clean boot did not close it before
+    (`2239`: 100/100 clean, then a stall at cycle 84), the stall signature
+    (`0x2e000008f7`; `port_id 9 tnum 93` in #4 and #5) is not explained by
+    F-257, and the plan asked for independent cold boots, plural.
+    **Proposed close bar:** a second independent, pristine cold-boot
+    `CYCLES=500` run on this image with the same criteria (operator cold
+    power-cycle, `bin/testrig-combo-matrix.sh setup`, then `soakctl.sh start`
+    from dell2). In parallel and off-board: match the fault address against
+    fixed MURAM offsets and record-pool slot formulas.
 
 **Loss-localization result (2026-10-06) [SILICON].** This supersedes the
 conclusions of steps 2 and 5 below; their measurements stand, but two of their
@@ -1526,8 +1604,15 @@ Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
      NAT-T on the same loader.
 1. **Bridge L2.** Ethernet table (vendor keysize 15) fed by switchdev FDB
    notifiers, replacing the observer-only `ask_bridge.c`. Gate: A7.
-2. **PPPoE.** Soft-parser pppoe schema plus pppoe table, with
-   strip/insert-PPPoE opcodes. Gate: A8.
+2. **PPPoE.** Hard-parser inner-IP exposure plus strip/insert-PPPoE opcodes
+   (no soft parser). Gate: A8.
+   - Decap (F-260, `0x14`): SILICON-VALIDATED 2026-10-08.
+   - Encap (F-261, `0x43`, key includes the session ID; per-port CLI
+     `offload pppoe`): implemented, not board-tested.
+   - Egress MTU check (F-262): `05 PREEMPTIVE_CHECKS` only on records whose
+     route MTU is below the ingress port MTU (LAN 1500 to PPPoE 1492); IPv6
+     that needs it stays in software so the kernel sends Packet Too Big.
+     Board plan: `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
 3. **Multicast.** mc4/mc6 tables plus a REPLICATE chain. Gate: A10.
 4. **IPsec ESP.** ESP table → OH port → CAAM SEC (vendor oh@2 model), via
    XFRM offload in `ask_xfrm.c`. Gate: A9.
@@ -1562,6 +1647,16 @@ three VLAN mechanisms. Phase 2 addresses that.
 Use the P1 suite A1–A15 (`/mnt/builds/ask2-review/review/P1.md` §5) on
 `bin/testrig-combo-matrix.sh`. Thresholds are vendor medians measured on the
 same rig.
+
+**Quick protocol (2026-10-08, for per-offload checks):** one 30 s run per
+cell, iperf3 `-Z`, unidir `-P 8`, first 10 s omitted (`-O 10`), steady value =
+mean of the receiver intervals from 10 s on. Cells: unicast, NAT, VLAN-VLAN and
+PPPoE, each for IPv4 and IPv6. Each cell also records the offload proof
+(`fe_ehash_stats` delta, conntrack `[HW_OFFLOAD]`) so a software-forwarded run
+cannot pass. Acceptance thresholds still use the 40 s binding method below.
+Complex combinations beyond the eight cells (NAT over PPPoE, VLAN-VLAN NAT,
+the F-262 1500 to 1492 DF/no-DF path, PPPoE over VLAN as an expected software
+fallback) are a small targeted set run once per image, not a matrix.
 
 **Methodology (binding, 2026-10-04):**
 
