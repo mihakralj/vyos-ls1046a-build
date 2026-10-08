@@ -12,9 +12,9 @@ the same holds for a tagged frame vs an untagged one. A VLAN-pop or PPPoE-decap
 record could therefore be hit by a frame that has no tag/session to strip.
 
 KEY (50 bytes, GEC concatenation order; [0..45] unchanged):
-  [46..47] VLAN1 TCI & 0x0FFF = outer VID   gec[6]=0x810F0500
-           (KG_SCH_GEN_VLAN1 0x05, VALIDATED, header +0, 2 B, first-byte
-           mask 0x0F drops PCP/DEI)
+  [46..47] VLAN1 TCI (PCP|DEI|VID)         gec[6]=0x81FF0500
+           (KG_SCH_GEN_VLAN1 0x05, VALIDATED, header +0, 2 B, no mask;
+           records carry PCP=DEI=0, so priority-marked frames MISS to SW)
   [48..49] PPPoE session ID                  gec[7]=0x81FF0802
            (KG_SCH_GEN_PPP 0x08, VALIDATED, header +2, 2 B)
 Validated codes substitute the zeroed default register when the header is
@@ -24,7 +24,12 @@ so plain frames carry 0/0. Silicon-measured 2026-10-08 (.185, image
 that announced it, so the VLAN1 header starts at the TCI (+0; +2 read the inner
 EtherType: a candidate record keyed 0x0800 took 20/20 tagged probes) and the
 PPP(oE) header starts at ver/type, putting the session ID at +2 (probe2 KG hash
-0x5a40bb5250ea9773 == crc64_raw of the 50-byte key with SID 0x0007). GEC encoding per vendor fm_kg.c: VALID|(size-1)<<24|mask<<16|
+0x5a40bb5250ea9773 == crc64_raw of the 50-byte key with SID 0x0007).
+The GEC mask byte does NOT apply to the first byte of a multi-byte extraction:
+with mask 0x0F, VID 20 (TCI 0x0014) on eth4 extracted as 0x0004 (skb->hash
+0x015C749F == top 32 bits of crc64_raw with tail 00040000, unique over all
+2^32 tails), so masking PCP/DEI needs the kgse_bmch/bmcl bit-mask commands;
+until then the full TCI is keyed. GEC encoding per vendor fm_kg.c: VALID|(size-1)<<24|mask<<16|
 code<<8|offset; the first-byte mask mechanism is the one F-243 already uses
 for the family byte.
 
@@ -59,7 +64,7 @@ EDITS = [
      "\t\t\t * [46..47] outer VID (VLAN1 TCI & 0x0FFF), [48..49] PPPoE\n"
      "\t\t\t * session ID. Validated codes: 0 when the header is absent. */\n"
      "\t\t\tif (scheme->next_engine == 3) {\n"
-     "\t\t\t\tscheme_regs.kgse_gec[6] = 0x810F0500;\n"
+     "\t\t\t\tscheme_regs.kgse_gec[6] = 0x81FF0500;\n"
      "\t\t\t\tscheme_regs.kgse_gec[7] = 0x81FF0802;\n"
      "\t\t\t}\n"
      "\t\t}\n"),
