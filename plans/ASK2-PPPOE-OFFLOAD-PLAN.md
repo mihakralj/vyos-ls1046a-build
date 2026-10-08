@@ -117,7 +117,7 @@ The kernel flowtable identifies a flow by ingress port + encapsulation (VLAN IDs
 
 **F-259** (`bin/kernel-fixups/F_259.py`, with the ask.ko changes in the same commit):
 - The routed key grows from 46 to **50 bytes** by appending two GEC extractions on the ehash FE scheme only (`next_engine == 3`):
-  - `gec[6] = 0x810F0500`: `KG_SCH_GEN_VLAN1`, validated, header +0 (the VLAN header starts at the TCI), 2 bytes, first-byte mask `0x0F`, giving the outer VID in key `[46..47]`.
+  - `gec[6] = 0x81FF0500`: `KG_SCH_GEN_VLAN1`, validated, header +0 (the VLAN header starts at the TCI), 2 bytes, **unmasked**, giving the full outer TCI in key `[46..47]`. ask.ko writes PCP = DEI = 0, so priority-marked tagged frames MISS and stay in software. To mask PCP/DEI in hardware instead, use the `kgse_bmch`/`kgse_bmcl` bit-mask commands (follow-up).
   - `gec[7] = 0x81FF0802`: `KG_SCH_GEN_PPP`, validated, header +2, 2 bytes, giving the PPPoE session ID in key `[48..49]`.
 
   Validated codes substitute the zeroed default register when the header is absent, so plain frames carry 0/0. That is the same mechanism that zero-fills the absent IPv4/IPv6 lane (silicon-proven). A header code's base is the first byte after the EtherType that announced it, which is **not** the parse-result offset for VLAN (`vlan_off` points at the TPID).
@@ -126,6 +126,13 @@ The kernel flowtable identifies a flow by ingress port + encapsulation (VLAN IDs
 - **Plain flows:** port↔port v4/v6 HIT at 9.39/9.24 Gbit/s, with 331 `rx_default_dqrr` calls per 10 s run. So the 50-byte key with a `00 00 00 00` tail matches, and both new GECs yield 0 for plain frames.
 - **PPPoE:** the probe2 KG hash of a PPPoE TCP frame (`0x5a40bb5250ea9773`) equals `crc64_raw` of the 50-byte key with session ID `0x0007` at `[48..49]`. The PPP code at +2 is correct.
 - **VLAN, first attempt wrong:** with `gec[6] = 0x810F0502` (+2), tagged flows all MISSed (about 3.15M `rx_default_dqrr` calls per 10 s; vlan↔port 3.6, vlan↔vlan 2.7 Gbit/s). The installed record's bucket decoded to VID `0x000a`, so the record side was right. Candidate stats records for one fixed UDP tuple (`10.99.10.112:47001 → 10.99.2.113:47002`, `tbl[3]`): `0x0800` took 20/20 packets; `0x000a`, `0x0100`, `0x0000` and `0x8100` took 0. +2 therefore reads the inner EtherType, and the fix is offset 0 (`0x810F0500`).
+
+**Second build (`85223395`, image `2026.10.08-1910-rolling`, cold boot):**
+- port↔port v4/v6 and vlan→port v4/v6 are all in hardware (145–162 `rx_default_dqrr` calls per 10 s; 9.36/9.25/9.35/8.39 Gbit/s).
+- vlan↔vlan still had 1.26M/1.49M software calls per 10 s. eth3's VLAN-10 records HIT (4.6M packets); eth4's VLAN-20 ACK record (bucket decoded to VID `0x0014`) took 0.
+- A BTF kprobe on `netif_receive_skb` logged the eth4 VLAN-20 probe frames' `skb->hash` (top 32 bits of the KG CRC-64) as `0x015C749F`. The only 4-byte key tail matching it is `00 04 00 00`.
+- So the GEC mask byte `0x0F` was applied to the **last** byte of the 2-byte extraction (`0x14` → `0x04`), not the first. VID 10 (`0x0a`) had survived the mask unchanged.
+- Fix: no mask (`0x81FF0500`).
 - Why not the parse-result `l2r` byte: GEC code `0x20` (parse result) emits 0 in AC_CC mode (qdrant 2026-09-03), which is why F-243 moved the family byte to a frame-header code.
 - **One size constant.** `FMAN_PCD_FE_ROUTED_KEY_SIZE` (50) in `include/linux/fsl/fman_pcd.h` sizes the ROUTED profile, the default ehash table and the 0194/0198 ACL key buffers. ask.ko's `ASK_FE_KEY_SIZE_DUAL` `static_assert`s against it, so the two can't drift.
 - **ask.ko.** `ask_fe_build_key_dual()` writes `vlan_ingress_vid & VLAN_VID_MASK` and the new `pppoe_sid` (0 while the step-0 guard stands) big-endian at `[46..49]`. KUnit case `ask_flow_offload_test_fe_key_l2_context`.
