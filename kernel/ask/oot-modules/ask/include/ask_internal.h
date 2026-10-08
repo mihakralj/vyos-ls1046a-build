@@ -616,6 +616,13 @@ u8     nat_flags;
 	 * as the INSERT_PPPoE_HDR param (F-261).
 	 */
 	u16    pppoe_push_sid;
+	/*
+	 * F-262: flowtable route MTU of this direction when it is below the
+	 * ingress port MTU (e.g. LAN 1500 -> PPPoE 1492), else 0. Non-zero
+	 * asks the record for the vendor PREEMPTIVE_CHECKS + fragmentation
+	 * context; NOT part of the FE key.
+	 */
+	u16    egress_mtu;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
