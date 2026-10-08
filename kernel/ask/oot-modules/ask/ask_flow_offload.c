@@ -1998,6 +1998,16 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
 				? ETH_P_IPV6 : ETH_P_IP;
 
+	/* F-262: hardware MTU check (05 + fragmentation). The microcode
+	 * would fragment IPv6 too, which a router must not do (RFC 8200
+	 * 5); keep such v6 flows in software, where the kernel sends
+	 * Packet Too Big. */
+	if (key->egress_mtu) {
+		if (key->l3_proto == ASK_FLOW_L3_IPV6)
+			return -EOPNOTSUPP;
+		action.egress_mtu = key->egress_mtu;
+	}
+
 	/*
 	 * T-M6-7.1 arming: copy the parsed/carry NAT tuple into the public
 	 * FMan action only when the family's NAT gate
@@ -2343,6 +2353,23 @@ int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
 	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL_GPL(ask_flow_cookie_pppoe);
+
+/*
+ * F-262: the route MTU nf_flow_table recorded for the cookie's direction
+ * (flow_offload_fill_route(): egress dst MTU, e.g. 1492 out of a PPPoE
+ * session); 0 for a cookie that is not a flowtable tuple.
+ */
+static u16 ask_flow_cookie_mtu(unsigned long cookie)
+{
+	const struct flow_offload_tuple *t;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return 0;
+	t = (const struct flow_offload_tuple *)cookie;
+	if (t->dir >= FLOW_OFFLOAD_DIR_MAX)
+		return 0;
+	return t->mtu;
+}
 
 /*
  * T-M6-SP4: on a PPPoE session going down, drop the HW records of every
@@ -3176,6 +3203,19 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				 * slot winner decided below.
 				 */
 				key.port_id = pid;
+
+				/*
+				 * F-262: only a direction whose route MTU is
+				 * below what this port can deliver needs the
+				 * hardware MTU check; every other record stays
+				 * byte-identical.
+				 */
+				{
+					u16 emtu = ask_flow_cookie_mtu(f->cookie);
+
+					if (emtu && emtu < bind_dev->mtu)
+						key.egress_mtu = emtu;
+				}
 
 				/*
 				 * Race-free first-arrival latch:
