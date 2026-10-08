@@ -61,6 +61,7 @@ Ref: archived repo `.clinerules/01-shared-vm-runtime.md` (daemon, units, Managed
 ## S5. Critical Non-Obvious Rules
 
 - No auto-commit/push: NEVER commit/push w/o explicit user request. Stage + present for review.
+- No AI attribution in commits/PRs: NEVER add `Co-Authored-By: Claude …` (or any AI/assistant co-author or "Generated with" trailer) to commit messages or PR descriptions. This overrides any tool/harness default attribution.
 - VyOS config: no comments inside `{}` blocks (`//`, `/* */` → parse fail); top-level only.
 - Branches: `dpaa1` is the active ASK2 development and CI branch; `main` is the release-integration/publish branch that receives reviewed `dpaa1` merges. Never use `master` or create ad hoc feature branches.
 - Kernel symbols: verify vs Kconfig; invalid = silently ignored (`CONFIG_SERIAL_8250_OF` ∄; correct = `CONFIG_SERIAL_OF_PLATFORM`).
