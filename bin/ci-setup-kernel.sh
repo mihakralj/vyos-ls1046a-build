@@ -2472,6 +2472,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c/fman_pcd.h: F-260 ehash STRIP_PPPoE_HDR (0x14) emitter"
 fi
 
+# F-261 (T-M6-SP4 PPPoE encap record, 2026-10-08): the emitter learns the
+# vendor INSERT_PPPoE_HDR (0x43) behind FMAN_PCD_VLANF_PPPOE_INSERT: front
+# half 04 11 12, TTL/NAT, 0x43 {stats_ptr, ver1|type1|code0|session}, then
+# INSERT_L2 with EtherType 0x8864; session ID via the new pppoe_sid field in
+# fman_pcd_fe_flow_action/fman_pcd_vlan_params; ENQUEUE mtu 0xffff
+# (fragmentation disabled, no frag pool) on these records only. Dormant
+# until ask.ko sets the flag (ask.pppoe_encap_offload, default off).
+# After F-260.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_261.py" 2>&1
+    echo "### fman_pcd.c/fman_pcd.h: F-261 ehash INSERT_PPPoE_HDR (0x43) emitter"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:

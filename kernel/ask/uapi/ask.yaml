@@ -50,6 +50,8 @@ attribute-sets:
         type: u8
       - name: bridge
         type: u8
+      - name: pppoe
+        type: u8
   -
     name: info
     name-prefix: ask-info-attr-
@@ -289,6 +291,7 @@ operations:
             - family-mask
             - vlan
             - bridge
+            - pppoe
     -
       name: disengage
       attribute-set: top
