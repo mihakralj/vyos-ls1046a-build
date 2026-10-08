@@ -2447,6 +2447,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
+# F-259 (T-M6-SP4 logical-ingress key, 2026-10-08): the routed FE ehash key
+# grows 46 -> 50 bytes with the ingress L2 context (outer VID via GEC VLAN1,
+# PPPoE session ID via GEC PPP, both validated so 0 when absent), so a VLAN-pop
+# or PPPoE-decap record can only match frames that carry that tag/session
+# (the F-258 probe proved PPPoE and plain frames produced identical 46-byte
+# keys). Introduces FMAN_PCD_FE_ROUTED_KEY_SIZE in include/linux/fsl/fman_pcd.h
+# for every routed table and key buffer; ask.ko static_asserts against it.
+# After F-224 (keygen anchor), F-255 (profile table) and the 0194/0198 ACL
+# bridges.
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_259.py" 2>&1
+    echo "### fman_keygen.c/fman_pcd.c/dpaa: F-259 routed FE key 50 bytes (VID + PPPoE SID)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
