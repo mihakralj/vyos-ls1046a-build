@@ -12,16 +12,19 @@ the same holds for a tagged frame vs an untagged one. A VLAN-pop or PPPoE-decap
 record could therefore be hit by a frame that has no tag/session to strip.
 
 KEY (50 bytes, GEC concatenation order; [0..45] unchanged):
-  [46..47] VLAN1 TCI & 0x0FFF = outer VID   gec[6]=0x810F0502
-           (KG_SCH_GEN_VLAN1 0x05, VALIDATED, header +2, 2 B, first-byte
+  [46..47] VLAN1 TCI & 0x0FFF = outer VID   gec[6]=0x810F0500
+           (KG_SCH_GEN_VLAN1 0x05, VALIDATED, header +0, 2 B, first-byte
            mask 0x0F drops PCP/DEI)
   [48..49] PPPoE session ID                  gec[7]=0x81FF0802
            (KG_SCH_GEN_PPP 0x08, VALIDATED, header +2, 2 B)
 Validated codes substitute the zeroed default register when the header is
 absent (the F-224 zero-fill mechanism, silicon-proven for the v4/v6 lanes),
-so plain frames carry 0/0. Header offsets come from the parse result
-(vlan_off = TPID position, pppoe_off = PPPoE header start), so TCI and SID are
-both at +2. GEC encoding per vendor fm_kg.c: VALID|(size-1)<<24|mask<<16|
+so plain frames carry 0/0. Silicon-measured 2026-10-08 (.185, image
+2026.10.08-1847): a header code's base is the first byte AFTER the EtherType
+that announced it, so the VLAN1 header starts at the TCI (+0; +2 read the inner
+EtherType: a candidate record keyed 0x0800 took 20/20 tagged probes) and the
+PPP(oE) header starts at ver/type, putting the session ID at +2 (probe2 KG hash
+0x5a40bb5250ea9773 == crc64_raw of the 50-byte key with SID 0x0007). GEC encoding per vendor fm_kg.c: VALID|(size-1)<<24|mask<<16|
 code<<8|offset; the first-byte mask mechanism is the one F-243 already uses
 for the family byte.
 
@@ -56,7 +59,7 @@ EDITS = [
      "\t\t\t * [46..47] outer VID (VLAN1 TCI & 0x0FFF), [48..49] PPPoE\n"
      "\t\t\t * session ID. Validated codes: 0 when the header is absent. */\n"
      "\t\t\tif (scheme->next_engine == 3) {\n"
-     "\t\t\t\tscheme_regs.kgse_gec[6] = 0x810F0502;\n"
+     "\t\t\t\tscheme_regs.kgse_gec[6] = 0x810F0500;\n"
      "\t\t\t\tscheme_regs.kgse_gec[7] = 0x81FF0802;\n"
      "\t\t\t}\n"
      "\t\t}\n"),
