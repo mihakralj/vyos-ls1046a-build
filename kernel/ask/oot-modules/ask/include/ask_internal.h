@@ -1031,6 +1031,7 @@ enum ask_flow_direction {
 };
 
 int ask_flow_offload_classify_dir(const struct net_device *dev);
+bool ask_flow_cookie_is_pppoe(unsigned long cookie);
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow_offload.c — flow_block_cb registration on dpaa netdevs            */

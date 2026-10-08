@@ -66,6 +66,7 @@
 #include <linux/string.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <net/netfilter/nf_flow_table.h>
 
 #include "../include/ask_internal.h"
 
@@ -973,7 +974,46 @@ KUNIT_EXPECT_EQ(test, oif, 42u);
 KUNIT_EXPECT_TRUE(test, (flags & ASK_ACT_NAT_SRC) != 0);
 }
 
+/*
+ * T-M6-SP4 step 0: a flow with a PPP_SES encap on EITHER tuple must be
+ * refused, including when the cookie is the plain (PPPoE->LAN) direction and
+ * only the other tuple carries the encap. VLAN-only and non-flowtable cookies
+ * are not PPPoE.
+ */
+static void ask_flow_offload_test_pppoe_cookie(struct kunit *test)
+{
+struct flow_offload *flow;
+unsigned long c0, c1;
+
+flow = kunit_kzalloc(test, sizeof(*flow), GFP_KERNEL);
+KUNIT_ASSERT_NOT_NULL(test, flow);
+flow->tuplehash[0].tuple.dir = FLOW_OFFLOAD_DIR_ORIGINAL;
+flow->tuplehash[1].tuple.dir = FLOW_OFFLOAD_DIR_REPLY;
+c0 = (unsigned long)&flow->tuplehash[0].tuple;
+c1 = (unsigned long)&flow->tuplehash[1].tuple;
+
+KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(0));
+KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c0));
+
+flow->tuplehash[0].tuple.encap_num = 1;
+flow->tuplehash[0].tuple.encap[0].proto = htons(ETH_P_8021Q);
+KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c0));
+KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c1));
+
+/* VLAN outer, PPPoE inner on the reply tuple only. */
+flow->tuplehash[1].tuple.encap_num = 2;
+flow->tuplehash[1].tuple.encap[0].proto = htons(ETH_P_8021Q);
+flow->tuplehash[1].tuple.encap[1].proto = htons(ETH_P_PPP_SES);
+KUNIT_EXPECT_TRUE(test, ask_flow_cookie_is_pppoe(c0));
+KUNIT_EXPECT_TRUE(test, ask_flow_cookie_is_pppoe(c1));
+
+/* encap_num bounds the scan: a stale proto past it is ignored. */
+flow->tuplehash[1].tuple.encap_num = 1;
+KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c0));
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
+KUNIT_CASE(ask_flow_offload_test_pppoe_cookie),
 KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
 KUNIT_CASE(ask_flow_offload_test_fe_key_v6_wire_order),
 KUNIT_CASE(ask_flow_offload_test_intent_lower_ipv4),
