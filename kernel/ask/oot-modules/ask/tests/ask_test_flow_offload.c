@@ -1012,7 +1012,43 @@ flow->tuplehash[1].tuple.encap_num = 1;
 KUNIT_EXPECT_FALSE(test, ask_flow_cookie_is_pppoe(c0));
 }
 
+/*
+ * F-259: the 50-byte routed key = 46-byte dual lane + outer VID [46..47] +
+ * PPPoE session ID [48..49], both big-endian, matching gec[6]/gec[7]. A plain
+ * frame carries 0/0; the VID keeps only the 12 VID bits (KeyGen masks PCP/DEI).
+ */
+static void ask_flow_offload_test_fe_key_l2_context(struct kunit *test)
+{
+struct ask_flow_key key = {
+	.l3_proto = ASK_FLOW_L3_IPV4,
+	.l4_proto = IPPROTO_TCP,
+	.sport = htons(22),
+	.dport = htons(0xcea2),
+	.src_ip = { 10, 99, 50, 1 },
+	.dst_ip = { 10, 99, 50, 15 },
+};
+u8 k[ASK_FE_KEY_SIZE_DUAL];
+int i;
+
+KUNIT_EXPECT_EQ(test, (int)ASK_FE_KEY_SIZE_DUAL, 50);
+
+ask_fe_build_key_dual(&key, k);
+KUNIT_EXPECT_EQ(test, k[0], (u8)ASK_FE_FAMILY_V4);
+KUNIT_EXPECT_EQ(test, k[41], (u8)IPPROTO_TCP);
+for (i = 46; i < 50; i++)
+	KUNIT_EXPECT_EQ(test, k[i], (u8)0);
+
+key.vlan_ingress_vid = 0xf00a;	/* PCP/DEI bits must not reach the key */
+key.pppoe_sid = 0x1234;
+ask_fe_build_key_dual(&key, k);
+KUNIT_EXPECT_EQ(test, k[46], (u8)0x00);
+KUNIT_EXPECT_EQ(test, k[47], (u8)0x0a);
+KUNIT_EXPECT_EQ(test, k[48], (u8)0x12);
+KUNIT_EXPECT_EQ(test, k[49], (u8)0x34);
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
+KUNIT_CASE(ask_flow_offload_test_fe_key_l2_context),
 KUNIT_CASE(ask_flow_offload_test_pppoe_cookie),
 KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
 KUNIT_CASE(ask_flow_offload_test_fe_key_v6_wire_order),
