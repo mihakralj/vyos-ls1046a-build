@@ -74,6 +74,9 @@ enum ask_genl_attr {
                              * on engage; absent => leave unchanged (default off) */
     ASK_ATTR_BRIDGE,        /* u8 bool, per-port L2 bridge FDB offload (T-M6-2)
                              * on engage; absent => leave unchanged (default off) */
+    ASK_ATTR_PPPOE,         /* u8 bool, per-port PPPoE session offload (CLI
+                             * `offload pppoe`, T-M6-SP4) on engage; absent =>
+                             * leave unchanged (default off) */
 
     __ASK_ATTR_MAX,
 };

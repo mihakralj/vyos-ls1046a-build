@@ -172,7 +172,7 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 - **ask.ko:**
   - `ask_flow_cookie_pppoe()` replaces the step-0 guard. It returns 1 only for a decap direction: this tuple's only encap is `PPP_SES` with a non-zero session ID, and the other tuple has no PPPoE.
   - The encap direction, PPPoE over VLAN and session 0 return `-EOPNOTSUPP` and stay in software.
-  - Decap flows are offloaded only with `ask.pppoe_offload=Y`; it is a runtime toggle, off by default. Turn it on with `echo Y | sudo tee /sys/module/ask/parameters/pppoe_offload`.
+  - Decap flows were first gated by a runtime `ask.pppoe_offload` module parameter; that is now replaced by the per-port `offload pppoe` CLI bit (§3.5).
   - For a decap flow the replace path sets `key.pppoe_sid`, forces `vlan_ingress_vid = 0` and sets `ASK_VLANF_PPPOE_STRIP`. The VLAN per-port gate now applies only to POP/PUSH.
   - `static_assert`s tie the flag value and key size to the kernel's.
   - KUnit: `ask_flow_offload_test_pppoe_cookie`, rewritten for the classifier.
@@ -201,9 +201,70 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 - **Health:** no kernel errors, bus errors, SYNC timeouts or Err FDs.
 - **Still to do:**
   1. **Encap (LAN→PPPoE):** `43 INSERT_PPPoE_HDR` + INSERT_L2 with EtherType `0x8864` and the concentrator MAC, ENQ MTU = PPPoE MTU, and the ask.ko flush of PPPoE records on PPP netdev down/unregister.
-  2. Kernel-mode PPPoE on dell1 for a throughput number.
+  2. ~~Kernel-mode PPPoE on dell1 for a throughput number.~~ Done, see below.
   3. PPPoE over VLAN.
   4. Turning `pppoe_offload` on by default once encap is in.
+
+**Throughput with a kernel-mode concentrator (2026-10-08).**
+- **dell1 change:** the `ask2-pppoe-server.service` `ExecStart` now uses `pppoe-server -k -g /usr/lib/pppd/2.5.2/rp-pppoe.so …`. Without `-g` it looks for `/etc/ppp/plugins/rp-pppoe.so` and every session dies with "Couldn't load plugin".
+- **Results,** 4 TCP streams for 15 s, dell1 → `pppoe10` → eth4 → dell2:
+
+| `ask.pppoe_offload` | Throughput | DUT CPU | Flows `[HW_OFFLOAD]` |
+|---|---|---|---|
+| N (kernel software flowtable) | 3.99 Gbit/s | 40.4% softirq, 57.8% idle | 0 |
+| Y (hardware decap) | **5.16 Gbit/s** | **2.0% softirq, 97.5% idle** | 4 |
+
+- **Bottleneck:** with hardware decap the DUT is nearly idle, so 5.16 Gbit/s is dell1's kernel-PPPoE send limit. The remaining DUT softirq is the ACK direction (LAN→PPPoE), which stays in software until encap.
+- **Counter note:** `pppoe10` RX rises by only ~8 packets in both modes, because the kernel software flowtable also bypasses the PPPoE netdev. The software/hardware discriminator is therefore CPU and conntrack `[HW_OFFLOAD]`, not netdev counters.
+
+### 3.4 Encap direction (LAN→PPPoE): implemented 2026-10-08, not yet board-tested
+
+- **Kernel, F-261** (`bin/kernel-fixups/F_261.py`):
+  - A new flag `FMAN_PCD_VLANF_PPPOE_INSERT` (bit 3), plus a `pppoe_sid` field in `fman_pcd_fe_flow_action` and `fman_pcd_vlan_params`.
+  - Record: `04 11 12` (VID 0), TTL or NAT, then `43 INSERT_PPPoE_HDR {stats_ptr → owned scratch, (1<<28)|(1<<24)|session}`, then `41 INSERT_L2_HDR` with EtherType **0x8864**, then `01`. This follows the vendor `create_pppoe_ins_hm()`, where the microcode fills in the PPPoE length and the PPP protocol.
+- **ask.ko:**
+  - `ask_flow_cookie_pppoe()` now also returns `ASK_PPPOE_ENCAP`: this tuple has no encap, the other tuple's only encap is `PPP_SES` with a non-zero session, and this tuple transmits `FLOW_OFFLOAD_XMIT_DIRECT`. The concentrator MAC comes from `out.h_dest` and our port's MAC from `out.h_source`, because no neighbour table knows the concentrator.
+  - `FLOW_ACTION_PPPOE_PUSH` is parsed into `key.pppoe_push_sid` and `ASK_VLANF_PPPOE_INSERT`. The replace path checks that the push session matches the tuple's session. It refuses PPPoE combined with VLAN pop/push, and refuses any push outside a classified encap flow.
+  - Gated by the per-port `offload pppoe` CLI bit (§3.5), like decap. KUnit coverage is extended.
+- **Session-down flush.** An ask.ko netdev notifier watches for `ARPHRD_PPP` `NETDEV_DOWN`/`UNREGISTER`. It schedules work that walks the flow table and `ask_flow_remove_owned()`s every flow carrying a PPPoE flag, which hands those flows back to the kernel path. The kernel never tears these flows down itself, because their `iifidx` is never the PPP netdev. If the notifier fails to register, PPPoE offload is refused.
+- **MTU.**
+  - The ENQUEUE parameter `mtu` is the microcode's fragmentation threshold (vendor: `EN_EHASH_DISABLE_FRAG = 0xffff`). ASK2 has no fragmentation pool (`bpid 0`), so encap records write `0xffff` to stay out of the fragmentation path.
+  - **There is no hardware MTU enforcement.** The vendor does it with `05 PREEMPTIVE_CHECKS` (OpMask FRAG) plus a fragmentation pool; ASK2 emits neither. An inner packet above the PPPoE MTU (1492) therefore leaves 8 bytes oversize and the concentrator drops it, where the software path would send ICMP fragmentation-needed. Until `05` is brought up, encap requires TCP MSS clamping on the PPPoE interface: `set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu`.
+- **Board test:**
+  - **Setup:** cold boot. Turn on both `pppoe_offload=Y` and `pppoe_encap_offload=Y`.
+  - **First flow:** dell2 (LAN) → DUT eth4 → `pppoe10` → dell1 `10.99.50.1`, with MSS ≤ 1452 (`iperf -M 1400` or the clamp).
+  - **Pass:**
+    - eth4's record HITs.
+    - dell1 captures (`tcpdump -e`) show EtherType 0x8864, the right session ID, a correct PPPoE length and PPP protocol `0x0021`, and TTL decremented.
+    - The data arrives intact.
+  - **Then:**
+    - bidirectional throughput, now with both directions in hardware;
+    - a session flap, where the journal must show "PPPoE session down, removed N PPPoE HW flow(s)" and a new flow must get the new session ID;
+    - an oversize DF probe, to document the MTU behaviour.
+  - **Wedge risk:** `0x43` has never executed on this board, and it grows the frame in front, so the 96-byte RX margin from patch 0217 applies.
+
+### 3.5 Turning PPPoE offload on and off: `set interfaces ethernet ethN offload pppoe` (2026-10-08)
+
+PPPoE offload is a per-port modifier, like `offload vlan`. It is set on the PPPoE `source-interface`, because the session's keys, tables and records all live on that physical port:
+
+```
+set interfaces ethernet eth3 offload ipv4
+set interfaces ethernet eth3 offload pppoe
+set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu   # until 05 PREEMPTIVE_CHECKS gives HW MTU enforcement
+```
+
+- **vyos-1x patch 053** (`data/vyos-1x-053-offload-pppoe-cli.patch`):
+  - adds the `pppoe` leaf under `interfaces ethernet <if> offload`;
+  - adds `set_ask_offload(…, pppoe)`, which passes a fourth helper argument;
+  - derives the bit in both `ethernet.py update()` and the `interfaces_bridge.py` member re-arm, so a bridge commit cannot drop it;
+  - verify: requires `offload ipv4` and/or `ipv6` on the same port, and refuses eth0.
+- **Helper:** `vyos-offload-ask family <mask> [vlan] [bridge] [pppoe]` sends `"pppoe"` in the engage JSON.
+- **ask.ko:**
+  - genl `ASK_ATTR_PPPOE` (u8, appended after `ASK_ATTR_BRIDGE`; YNL spec `pppoe`); absent means unchanged.
+  - The per-port arm is `ask_hw_port_pppoe[]`. A true→false edge, or a disengage, calls `ask_flow_pppoe_flush()`.
+  - The replace path admits a PPPoE flow only if the bit is set on the session's physical port: the decap tuple's `iifidx`, or the encap tuple's `out.ifidx`.
+  - The interim `ask.pppoe_offload` / `ask.pppoe_encap_offload` module parameters are removed.
+- **Same change: vyos-1x stack rebased onto `rolling` `4b022646b` (2026-10-08).** Upstream added `verify_vpp_mtu()` (T9161) in `interfaces_ethernet.py` next to where patch 025 inserts `verify_ingress_policer()`. Patch 025 is regenerated to keep both functions. With it, the full stack 001–053 applies on today's `rolling` both with `--3way` and with plain `git apply`. Without it, every patch from 025 on conflicted or cascaded, and the next vyos-1x cache miss would have failed CI.
 
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
 

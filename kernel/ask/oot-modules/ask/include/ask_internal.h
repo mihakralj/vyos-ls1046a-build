@@ -447,6 +447,10 @@ bool ask_hw_vlan_offload_armed(void);
 void ask_hw_offload_set_bridge(u8 hw_port_id, bool on);
 bool ask_hw_bridge_offload_armed_port(u8 hw_port_id);
 bool ask_hw_bridge_offload_armed(void);
+/* T-M6-SP4: per-port PPPoE session offload (CLI `offload pppoe`). */
+void ask_hw_offload_set_pppoe(u8 hw_port_id, bool on);
+bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
+void ask_flow_pppoe_flush(void);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);
 void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
@@ -582,6 +586,7 @@ u8     nat_flags;
 #define ASK_VLANF_POP	BIT(0)	/* strip all ingress VLAN tags */
 #define ASK_VLANF_PUSH	BIT(1)	/* insert one egress 802.1Q tag */
 #define ASK_VLANF_PPPOE_STRIP	BIT(2)	/* T-M6-SP4: strip the ingress PPPoE session hdr */
+#define ASK_VLANF_PPPOE_INSERT	BIT(3)	/* T-M6-SP4: insert the egress PPPoE session hdr */
 	__be16 vlan_push_tci;
 	__be16 vlan_push_tpid;
 	/*
@@ -605,6 +610,12 @@ u8     nat_flags;
 	 * guard refuses PPPoE flows.
 	 */
 	u16    pppoe_sid;
+	/*
+	 * T-M6-SP4: egress PPPoE session for a LAN->PPPoE flow
+	 * (FLOW_ACTION_PPPOE_PUSH), host order. NOT part of the FE key; consumed
+	 * as the INSERT_PPPoE_HDR param (F-261).
+	 */
+	u16    pppoe_push_sid;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
@@ -1041,7 +1052,15 @@ enum ask_flow_direction {
 };
 
 int ask_flow_offload_classify_dir(const struct net_device *dev);
-int ask_flow_cookie_pppoe(unsigned long cookie, u16 *sid);
+#define ASK_PPPOE_DECAP	1	/* PPPoE -> LAN: strip */
+#define ASK_PPPOE_ENCAP	2	/* LAN -> PPPoE: insert */
+struct ask_pppoe_info {
+	u16 sid;			/* host order */
+	int ifindex;			/* the session's physical port */
+	u8  peer_mac[ETH_ALEN];		/* ENCAP: concentrator */
+	u8  src_mac[ETH_ALEN];		/* ENCAP: our port */
+};
+int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi);
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow_offload.c — flow_block_cb registration on dpaa netdevs            */

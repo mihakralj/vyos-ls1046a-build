@@ -323,6 +323,36 @@ bool ask_hw_bridge_offload_armed(void)
 }
 EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed);
 
+/*
+ * T-M6-SP4: per-port PPPoE session offload arm bit (CLI `offload pppoe` on the
+ * PPPoE source-interface), mirroring ask_hw_port_vlan[]. Gates both the
+ * decap (PPPoE -> LAN) and encap (LAN -> PPPoE) direction of sessions whose
+ * physical port this is. A live true->false transition drops every PPPoE HW
+ * flow so nothing keeps forwarding in silicon after the operator turned it off.
+ */
+static bool ask_hw_port_pppoe[64];
+
+void ask_hw_offload_set_pppoe(u8 hw_port_id, bool on)
+{
+	bool old;
+
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_pppoe))
+		return;
+	old = READ_ONCE(ask_hw_port_pppoe[hw_port_id]);
+	WRITE_ONCE(ask_hw_port_pppoe[hw_port_id], on);
+	if (old && !on)
+		ask_flow_pppoe_flush();
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_set_pppoe);
+
+bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id)
+{
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_pppoe))
+		return false;
+	return READ_ONCE(ask_hw_port_pppoe[hw_port_id]);
+}
+EXPORT_SYMBOL_GPL(ask_hw_pppoe_offload_armed_port);
+
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
 	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))

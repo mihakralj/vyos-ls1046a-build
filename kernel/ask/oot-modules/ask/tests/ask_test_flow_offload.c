@@ -976,61 +976,84 @@ KUNIT_EXPECT_TRUE(test, (flags & ASK_ACT_NAT_SRC) != 0);
 
 /*
  * T-M6-SP4: ask_flow_cookie_pppoe() classifies a flow's PPPoE encapsulation:
- * 0 = none, 1 = decap direction (this tuple's only encap is PPP_SES with a
- * non-zero session, returned in *sid), -EOPNOTSUPP = everything else
- * (encap direction, PPPoE over VLAN, session 0). Non-flowtable cookies are 0.
+ * 0 = none; DECAP = this tuple's only encap is PPP_SES (non-zero session);
+ * ENCAP = this tuple has no encap, the other tuple's only encap is PPP_SES and
+ * this tuple transmits DIRECT (concentrator MAC from out.h_dest);
+ * -EOPNOTSUPP = everything else (PPPoE over VLAN, VLAN on the LAN side,
+ * session 0, encap without a DIRECT xmit). Non-flowtable cookies are 0.
  */
 static void ask_flow_offload_test_pppoe_cookie(struct kunit *test)
 {
+static const u8 ac[ETH_ALEN] = { 0xec, 0x0d, 0x9a, 0xbc, 0x34, 0x90 };
+static const u8 me[ETH_ALEN] = { 0xe8, 0xf6, 0xd7, 0x00, 0x16, 0x02 };
 struct flow_offload *flow;
 struct flow_offload_tuple *t0, *t1;
+struct ask_pppoe_info pi;
 unsigned long c0, c1;
-u16 sid;
 
 flow = kunit_kzalloc(test, sizeof(*flow), GFP_KERNEL);
 KUNIT_ASSERT_NOT_NULL(test, flow);
-t0 = &flow->tuplehash[0].tuple;
-t1 = &flow->tuplehash[1].tuple;
+t0 = &flow->tuplehash[0].tuple;	/* LAN -> PPPoE */
+t1 = &flow->tuplehash[1].tuple;	/* PPPoE -> LAN */
 t0->dir = FLOW_OFFLOAD_DIR_ORIGINAL;
 t1->dir = FLOW_OFFLOAD_DIR_REPLY;
 c0 = (unsigned long)t0;
 c1 = (unsigned long)t1;
 
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(0, &sid), 0);
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(0, &pi), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), 0);
 
 /* VLAN only: not PPPoE. */
 t0->encap_num = 1;
 t0->encap[0].proto = htons(ETH_P_8021Q);
 t0->encap[0].id = 10;
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), 0);
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), 0);
 
-/* t1 ingresses PPPoE session 7: t1 is the decap direction, t0 the encap. */
-t0->encap_num = 0;
+/* t1 ingresses PPPoE session 7 -> decap; t0 with a tagged LAN side is
+ * not supported. */
 t1->encap_num = 1;
 t1->encap[0].proto = htons(ETH_P_PPP_SES);
 t1->encap[0].id = 7;
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), 1);
-KUNIT_EXPECT_EQ(test, sid, (u16)7);
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), -EOPNOTSUPP);
-KUNIT_EXPECT_EQ(test, sid, (u16)0);
+t1->iifidx = 5;		/* the PPPoE physical port */
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
 
-/* Session 0 would key like a plain frame: refused. */
+/* Untagged LAN side, but t0 not yet DIRECT: encap refused, decap ok. */
+t0->encap_num = 0;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), ASK_PPPOE_DECAP);
+KUNIT_EXPECT_EQ(test, pi.sid, (u16)7);
+KUNIT_EXPECT_EQ(test, pi.ifindex, 5);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
+
+/* t0 transmits DIRECT toward the concentrator: encap with its MACs. */
+t0->xmit_type = FLOW_OFFLOAD_XMIT_DIRECT;
+t0->out.ifidx = 5;
+ether_addr_copy(t0->out.h_dest, ac);
+ether_addr_copy(t0->out.h_source, me);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), ASK_PPPOE_ENCAP);
+KUNIT_EXPECT_EQ(test, pi.sid, (u16)7);
+KUNIT_EXPECT_MEMEQ(test, pi.peer_mac, ac, ETH_ALEN);
+KUNIT_EXPECT_MEMEQ(test, pi.src_mac, me, ETH_ALEN);
+KUNIT_EXPECT_EQ(test, pi.ifindex, 5);
+
+/* Session 0 would key like a plain frame: refused both ways. */
 t1->encap[0].id = 0;
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
 
 /* PPPoE over VLAN: not yet supported. */
 t1->encap[0].id = 7;
 t1->encap_num = 2;
 t1->encap[1].proto = htons(ETH_P_8021Q);
 t1->encap[1].id = 10;
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
 
 /* encap_num bounds the scan: a stale PPP_SES past it is ignored. */
 t1->encap_num = 0;
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &sid), 0);
-KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &sid), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), 0);
 }
 
 /*
