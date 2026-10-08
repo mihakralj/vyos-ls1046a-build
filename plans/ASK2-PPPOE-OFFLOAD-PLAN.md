@@ -229,9 +229,9 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 - **Session-down flush.** An ask.ko netdev notifier watches for `ARPHRD_PPP` `NETDEV_DOWN`/`UNREGISTER`. It schedules work that walks the flow table and `ask_flow_remove_owned()`s every flow carrying a PPPoE flag, which hands those flows back to the kernel path. The kernel never tears these flows down itself, because their `iifidx` is never the PPP netdev. If the notifier fails to register, PPPoE offload is refused.
 - **MTU.**
   - The ENQUEUE parameter `mtu` is the microcode's fragmentation threshold (vendor: `EN_EHASH_DISABLE_FRAG = 0xffff`). ASK2 has no fragmentation pool (`bpid 0`), so encap records write `0xffff` to stay out of the fragmentation path.
-  - **There is no hardware MTU enforcement.** The vendor does it with `05 PREEMPTIVE_CHECKS` (OpMask FRAG) plus a fragmentation pool; ASK2 emits neither. An inner packet above the PPPoE MTU (1492) therefore leaves 8 bytes oversize and the concentrator drops it, where the software path would send ICMP fragmentation-needed. Until `05` is brought up, encap requires TCP MSS clamping on the PPPoE interface: `set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu`.
+  - **There is no hardware MTU enforcement.** The vendor does it with `05 PREEMPTIVE_CHECKS` (OpMask FRAG) plus a fragmentation pool; ASK2 emits neither. An inner packet above the PPPoE MTU (1492) therefore leaves 8 bytes oversize and the concentrator drops it, where the software path would send ICMP fragmentation-needed. Until `05` is brought up, encap requires TCP MSS clamping on the PPPoE interface: `set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu`. *(Superseded by §3.6, F-262: encap records now carry the vendor MTU check.)*
 - **Board test:**
-  - **Setup:** cold boot. Turn on both `pppoe_offload=Y` and `pppoe_encap_offload=Y`.
+  - **Setup:** cold boot. Arm `offload pppoe` on eth3 (§3.5).
   - **First flow:** dell2 (LAN) → DUT eth4 → `pppoe10` → dell1 `10.99.50.1`, with MSS ≤ 1452 (`iperf -M 1400` or the clamp).
   - **Pass:**
     - eth4's record HITs.
@@ -265,6 +265,67 @@ set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu   # until 05 PREEMP
   - The replace path admits a PPPoE flow only if the bit is set on the session's physical port: the decap tuple's `iifidx`, or the encap tuple's `out.ifidx`.
   - The interim `ask.pppoe_offload` / `ask.pppoe_encap_offload` module parameters are removed.
 - **Same change: vyos-1x stack rebased onto `rolling` `4b022646b` (2026-10-08).** Upstream added `verify_vpp_mtu()` (T9161) in `interfaces_ethernet.py` next to where patch 025 inserts `verify_ingress_policer()`. Patch 025 is regenerated to keep both functions. With it, the full stack 001–053 applies on today's `rolling` both with `--3way` and with plain `git apply`. Without it, every patch from 025 on conflicted or cascaded, and the next vyos-1x cache miss would have failed CI.
+
+### 3.6 Hardware MTU check: vendor `05 PREEMPTIVE_CHECKS` + fragmentation (F-262, 2026-10-08, not yet board-tested)
+
+**What the vendor does.** `cdx_ehash.c fill_actions()` puts `05 PREEMPTIVE_CHECKS_ON_PKT` first in every routed record (multicast too). Bridge and PPPoE-relay records use ENQUEUE mtu `0xffff`, and IPsec-to-SEC records set `FRAG_DISABLE`; none of those carry the check. The pieces:
+
+- `seal_preemptive_checks_hm()` fills the 8-byte `en_ehash_preempt_op`. Its `mtu_offset` byte is the distance from the `05` parameter to the ENQUEUE parameter, whose first field is the MTU. Its `OpMask` is `PREEMPT_TX_VALIDATE 0x01`, plus `PREEMPT_DFBIT_HONOR 0x02` for IPv4.
+- `create_enque_hm()` writes the ENQUEUE parameter:
+  - `mtu` = the route MTU;
+  - `bpid` = the fragmentation pool;
+  - `word2` = the MURAM offset of a `cdx_ucode_frag_info_t` block.
+- `cdx_init_frag_module()` initialises that block:
+  - `frag_options = BPID_ENABLE 0x08 | OPT_COUNTER_EN 0x04` (DF action `0x00`, "error");
+  - counters 0;
+  - `v6_identification` 1.
+- `cdx_create_fragment_bufpool()` seeds a dedicated BMan pool of 2048 buffers.
+
+The live vendor record on `.106` (2026-10-04) shows `05` param `38 03 00…`, ENQ mtu `0x05dc` and word2 `0x00049540`.
+
+**What ASK2 had.** No `05`, ENQ mtu 1500, bpid 0 and word2 0. Without `05` the mtu field is inert: the 2026-08-17 MTU battery forwarded 2500-byte frames through mtu-1500 records. A `05` with word2 0 would aim the microcode's frag-info reads at MURAM 0, which is the DMA CAM. So `05` is only ever emitted together with a real block. A vendor-exact `05` prefix already executed at line rate on `.185` during the 2026-10-05 VLAN bisection.
+
+**F-262 (kernel, `bin/kernel-fixups/F_262.py`):**
+
+- **The request.** `u16 egress_mtu` is added to `fman_pcd_fe_flow_action` and `fman_pcd_vlan_params`; 0 means no check, and the record stays byte-identical.
+- **The frag-info block.** 32 bytes appended to the owned, refcounted FE internal-buffer MURAM reservation, after the 0216 stats scratch (`pcd->fe_frag_off`). It is initialised like the vendor's. It lives and dies with the engage lifecycle, so the S1→S0 MURAM baseline still returns to zero.
+- **The fragmentation pool.** `fman_pcd_frag_pool_bpid()` creates a dedicated BMan pool of 2048 × 2 KiB buffers (order-0 pages, `DMA_BIDIRECTIONAL` on the FMan device). It is created on the first record that needs it and never freed, because hardware may hold its buffers at any time.
+- **The emitter**, for an L2/TX record with `egress_mtu` set:
+  - puts `05` first, ahead of the `04 11 12` front half (opcode 0 is not `11`);
+  - seals its parameter once the ENQUEUE offset is known;
+  - writes ENQ `mtu` = `egress_mtu`, `bpid` = the pool, and `word2` = `fe_frag_off`.
+- **Fail-closed.** If any piece is missing it returns an error, and ask.ko keeps the flow in software.
+
+**ask.ko.**
+
+- The replace path reads the flowtable tuple's `mtu`, which `flow_offload_fill_route()` takes from the egress dst. It sets `key.egress_mtu` only when that MTU is below the true ingress port's MTU.
+- So LAN 1500 → PPPoE 1492 gets the check. Port↔port 1500/1500, PPPoE decap, and VLAN flows of equal MTU do not, and their records are unchanged.
+- An IPv6 flow that would need the check stays in software. The microcode would fragment IPv6 (the vendor sets no DF-honor for v6), and a router must not; the kernel sends Packet Too Big instead.
+
+**Encap record layout with the check.** For a 50-byte key the opcode list is at +60 and parameters start at +76:
+
+| Offset | Opcode | Parameter |
+|---|---|---|
+| +76 | `05` | 8 bytes: `mtu_off`, `0x03` |
+| +84 | `04` | 4 bytes |
+| +88 | `12` | 12 bytes |
+| +100 | `21` | 4 bytes |
+| +104 | `43` | 8 bytes |
+| +112 | `41` | 20 bytes |
+| +132 | `01` | ENQ: mtu `0x05d4`, bpid, fqid, stats, word2 |
+
+That gives opcodes `05 04 11 12 21 43 41 01` and `mtu_off` = 132 − 76 = `0x38`. TCP MSS clamping on the PPPoE interface stays recommended, so TCP never needs fragmenting.
+
+**Board test (after CI, cold boot, eth3/eth4 only):**
+
+1. **Record.** Bring up an encap flow (dell2 → eth4 → pppoe10 → dell1). Check:
+   - dmesg has `F-262 frag pool bpid N … frag info @MURAM 0x…`;
+   - a `/dev/mem` dump of the eth4 record has the layout above, with bpid N and word2 = that offset.
+   - **Regression check:** a plain eth3↔eth4 record has no `05` and ENQ mtu 1500.
+2. **Fits.** 1400-byte UDP: HIT, delivered intact.
+3. **Fragment.** 1500-byte IPv4 with DF clear (`ping -M dont -s 1472`). Expect two fragments on dell1 (`tcpdump -e`, EtherType 0x8864, valid PPPoE lengths). The frag-info counters at FMan MURAM + `fe_frag_off` should rise: +8 v4 frames, +16 v4 fragments, +4 allocation failures stays 0. The frag pool must not drain, so repeat a few thousand times.
+4. **DF.** 1500-byte IPv4 with DF set (`ping -M do -s 1472`). This is unmeasured: with DF action "error" the frame may land in the port error FQ (`Err FD status`, a PMTUD black hole) or reach the host, which would send ICMP fragmentation-needed. Record which. If it is a black hole, the frag-info `frag_options` DF bits (0x10 ignore, 0x20 don't fragment) and the `05` OpMask are the calibration points. Try them live through `/dev/mem` before changing code.
+5. **Stability.** 60 s of mixed sizes at rate, with no RX-deaf port and no `Err FD` growth. Fragmentation produces S/G frames on the no-confirm TX FQ, which has never been exercised.
 
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
 
