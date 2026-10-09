@@ -1620,19 +1620,20 @@ Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
 2. **PPPoE.** Hard-parser inner-IP exposure plus strip/insert-PPPoE opcodes
    (no soft parser). Gate: A8.
    - Decap (F-260, `0x14`): SILICON-VALIDATED 2026-10-08.
-   - Encap (F-261, `0x43`, key includes the session ID; per-port CLI
-     `offload pppoe`): SILICON-VALIDATED 2026-10-09 (9.19 Gbit/s v4).
+   - Encap (F-261, `0x43`, key includes the session ID; automatic on an
+     engaged PPPoE source-interface port, `ask.pppoe_offload` kill switch): SILICON-VALIDATED 2026-10-09 (9.19 Gbit/s v4).
    - Egress MTU check (F-262): `05 PREEMPTIVE_CHECKS` only on records whose
      route MTU is below the ingress port MTU (LAN 1500 to PPPoE 1492).
      With the vendor RX-port triple (applied at engage, restored at
      disengage) and `frag_options = 0x000c` plus a fragment pool, IPv4
      DF-clear oversize packets are fragmented in hardware (100/100 delivered
      as 2 fragments) and DF-set ones go to the host, which sends ICMP
-     fragmentation-needed (PMTUD verified). IPv6 that needs it stays in
-     software by default so the kernel sends Packet Too Big (`pppoe-up-v6`
-     PARTIAL by design): the microcode fragments IPv6 and can never send
-     Packet Too Big (RFC 8200 5); `ask.ipv6_hw_frag=1` opts into the vendor
-     behaviour. Without the triple the fragmenter loses datagrams and kills
+     fragmentation-needed (PMTUD verified). IPv6 that needs it is fragmented
+     in hardware by default (vendor parity); the microcode can never send
+     Packet Too Big (RFC 8200 4.5), so the global module parameter
+     `ask.ipv6_hw_frag=0` (default 1) keeps such flows in the kernel for RFC
+     compliance (`pppoe-up-v6` PARTIAL when cleared); there is no per-port
+     CLI. Policy inverted 2026-10-09. Without the triple the fragmenter loses datagrams and kills
      port RX after 11 frames (the root cause of the earlier "unusable"
      verdict). Results: `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
 3. **Multicast.** mc4/mc6 tables plus a REPLICATE chain. Gate: A10.

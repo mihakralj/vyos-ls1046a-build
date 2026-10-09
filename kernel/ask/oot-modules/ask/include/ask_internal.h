@@ -425,30 +425,17 @@ int  ask_hw_flow_preflight(const struct ask_flow_key *key,
 bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
 /*
- * T-M6-8 VLAN offload gate (default-OFF). Per-port model mirroring the family
- * mask: ask_hw_offload_set_vlan() arms/disarms one port from the genl engage
- * path (ASK_ATTR_VLAN); ask_hw_vlan_offload_armed_port() is the authoritative
- * per-ingress-port gate at preflight + CC insert; ask_hw_vlan_offload_armed()
- * is the port-agnostic OR used only where no ingress port is in hand (capability
- * advertise, intent-lower fail-closed pre-check). The legacy global
- * ask.vlan_offload module param is an OR'd master override.
+ * Offload granularity: per-port state is only (engaged, family mask). VLAN,
+ * PPPoE and bridge offload are automatic capabilities of an engaged port, with
+ * global kill-switch module params (vlan_offload, pppoe_offload) -- no per-port
+ * arm bits. *_armed_port() is the authoritative per-ingress-port gate at
+ * preflight/insert (kill switch AND port engaged); the port-agnostic variants
+ * serve callers with no ingress port in hand (capability advertise, intent-lower
+ * pre-check, bridge observer log).
  */
-void ask_hw_offload_set_vlan(u8 hw_port_id, bool on);
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
 bool ask_hw_vlan_offload_armed(void);
-/*
- * T-M6-2 L2 bridge offload gate (default-OFF, B0: no install path yet).
- * Per-port model mirroring VLAN's, but with no global master-override param
- * and no dedicated CLI leafNode -- ask_hw_offload_set_bridge() is called
- * automatically by VyOS's `interfaces bridge` conf_mode for a member port
- * that already has `offload ipv4`/`offload ipv6` armed, never directly by
- * the user.
- */
-void ask_hw_offload_set_bridge(u8 hw_port_id, bool on);
-bool ask_hw_bridge_offload_armed_port(u8 hw_port_id);
 bool ask_hw_bridge_offload_armed(void);
-/* T-M6-SP4: per-port PPPoE session offload (CLI `offload pppoe`). */
-void ask_hw_offload_set_pppoe(u8 hw_port_id, bool on);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
 void ask_flow_pppoe_flush(void);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,

@@ -1601,11 +1601,11 @@ record it does not own.
 | IPv4 TCP/UDP unicast route | `cdx_tcp4_cc`, `cdx_udp4_cc`; IPv4 FCI | `nf_flow_table` / tc `FLOW_CLS_REPLACE/DESTROY` | 14-byte ehash key; `UPDATE_TTL` → `INSERT_L2_HDR` → per-egress no-confirm `ENQUEUE` | **DONE on eth3/eth4, silicon-passed; eth0/eth1/eth2 breadth tracked by T-M6-P5/T-M7-P5** |
 | IPv6 TCP/UDP unicast route | `cdx_tcp6_cc`, `cdx_udp6_cc`; IPv6 FCI | same flowtable hook, IPv6 tuple | **unified dual-lane 46-byte key on ONE match-all AC_CC scheme** (`F-224`/`F-225`/`F-226`), `UPDATE_HOPLIMIT(0x29)` + L2/TX chain, per-port table | **DONE — silicon-passed 2026-08-19/21, shipped in release `2026.08.22-0031-rolling`.** The earlier slot-based LCV two-scheme approach (T-M6-1 §4.6, F-205/210/211/212) was proven design-invalid for transit and abandoned; the dual-lane key superseded it. |
 | NAT / PAT | CMM conntrack forward-engine; MANGLE equivalent | flowtable `FLOW_ACTION_MANGLE`/`ADD` | bit-fused in-place rewrites between `UPDATE_TTL`/`UPDATE_HOPLIMIT` and `INSERT_L2_HDR` (ports `0x33`, v4 L3 `0x27`=`UPDATE_TTL\|SIP\|DIP`, v6 L3 `0x2f`=`UPDATE_HOPLIMIT\|SIP\|DIP`); silicon auto-recomputes IP+L4 checksums | **DONE — SHIPPING default-on (2026-08-22/23).** F-230 bit-fused FE-VM emitter landed (`8cfb0af5`), armed behind a gate (`55dd82b6`), then productized default-on after silicon pass: nat44 (`625d0d2c`, T-M6-7.7) and nat66 (`9598799f`). S0 record readback + S1 SNAT + S2 DNAT wire-verified; S3 masquerade TCP `-P4` ~7.1–7.3 Gbit/s 0-retr + UDP 0-loss. NAT is AUTOMATIC whenever `offload ipv4`/`offload ipv6` is engaged (no separate CLI knob); `nat44_offload`/`nat66_offload` are default-on diagnostic escape hatches; eth0 never NAT-offloaded. NAT46/NAT64 NOT offloadable — always SW fallback (same-family in-place rewrite only; no family-conversion opcode). `get-info` advertises `ASK_CAP_IPV4\|IPV6\|NAT\|PAT`. |
-| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | tagged flows reuse the routed/NAT ehash record: `STRIP_ETH_HDR`→`STRIP_ALL_VLAN_HDRS`→`INSERT_VLAN_HDR`→`INSERT_L2_HDR`→`ENQUEUE_PKT`, no separate CC-tree/HMTD stage, no miss-chain | **DONE — ships default-on (2026-10-06).** A CC-leaf→HMTD path ("Option A") was tried first (merge-ready by 2026-08-26) but abandoned 2026-10-02: no cross-port throughput benefit over software, and `rx_default_dqrr` kprobe instrumentation showed it never achieved genuine CPU bypass. The inline FE-VM/ehash path (`dpaa1` `1e8865d5`, patches 0215–0218) replaced it: push/pop both offload, and the A6 vendor-parity throughput gate passes (bidir 17.3–17.8 Gbit/s port↔port/vlan↔vlan, 12.6–12.8 vlan↔port). Scope: IPv4, one 802.1Q tag, non-eth0; 802.1ad/QinQ/stacked/IPv6 VLAN fall back to software. `ASK_CAP_VLAN` advertised only while armed. Per-port CLI (`vyos-1x-044`): `set interfaces ethernet ethN offload vlan` → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]`; `ask.vlan_offload` module param is an OR'd global override. Full detail: T-M6-8 (§4.6.4), `plans/ASK2-REWRITE-PLAN.md` Phase 1. |
+| VLAN pop/push | `CMD_VLAN_ENTRY`; VLAN HM | flowtable/tc `FLOW_ACTION_VLAN_POP/PUSH` | tagged flows reuse the routed/NAT ehash record: `STRIP_ETH_HDR`→`STRIP_ALL_VLAN_HDRS`→`INSERT_VLAN_HDR`→`INSERT_L2_HDR`→`ENQUEUE_PKT`, no separate CC-tree/HMTD stage, no miss-chain | **DONE — ships default-on (2026-10-06).** A CC-leaf→HMTD path ("Option A") was tried first (merge-ready by 2026-08-26) but abandoned 2026-10-02: no cross-port throughput benefit over software, and `rx_default_dqrr` kprobe instrumentation showed it never achieved genuine CPU bypass. The inline FE-VM/ehash path (`dpaa1` `1e8865d5`, patches 0215–0218) replaced it: push/pop both offload, and the A6 vendor-parity throughput gate passes (bidir 17.3–17.8 Gbit/s port↔port/vlan↔vlan, 12.6–12.8 vlan↔port). Scope: IPv4, one 802.1Q tag, non-eth0; 802.1ad/QinQ/stacked/IPv6 VLAN fall back to software. `ASK_CAP_VLAN` advertised only while armed. Automatic on an engaged port (granularity decision 2026-10-09: the per-port `offload vlan` leaf of `vyos-1x-044` was removed, migration `interfaces` 35-to-36 deletes it from stored configs); `ask.vlan_offload` (default on) is the global kill switch. Full detail: T-M6-8 (§4.6.4), `plans/ASK2-REWRITE-PLAN.md` Phase 1. |
 | IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) — sequencing plan in `plans/ASK2-IPSEC-OFFLOAD-PLAN.md` (DRAFT, not started) |
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
 | IPv4/IPv6 multicast | `cdx_multicast4/6_cc`; MC4/MC6 FCI | switchdev MDB / kernel mroute | group key + bounded replication FQ/egress set | not implemented |
-| PPPoE | `cdx_pppoe_cc`; PPPoE FCI; `cdx_sp.xml` | PPPoE netdev + normal flowtable after parser recognition | hard parser exposes inner IP (no soft parser needed); normal route/NAT intent follows; `offload pppoe` CLI | decap (F-260), encap (F-261) and MTU check (F-262) SILICON-VALIDATED (2026-10-09, image `2320`); fixes found on the board not yet in a CI image |
+| PPPoE | `cdx_pppoe_cc`; PPPoE FCI; `cdx_sp.xml` | PPPoE netdev + normal flowtable after parser recognition | hard parser exposes inner IP (no soft parser needed); normal route/NAT intent follows; automatic on an engaged PPPoE source-interface port (`ask.pppoe_offload` kill switch; the `offload pppoe` leaf was removed 2026-10-09) | decap (F-260), encap (F-261) and MTU check (F-262) SILICON-VALIDATED (2026-10-09, image `2320`); fixes found on the board not yet in a CI image |
 | 3-tuple route | `cdx_tuple3*` tables | flowtable wildcard/coarse flow only when kernel semantics permit | separate key type/scheme/table; never fake by truncating a 5-tuple key | key-packer primitive landed 2026-09-14 (silicon-confirmed 10-byte layout, KUnit-pinned), not yet dispatch-wired or reachable from ask.ko — see T-M6-T3 |
 | IPv4/IPv6 fragments | `cdx_frag4/6_cc`; IP reassembly module | kernel fragment/reassembly framework | fragment key + bounded reassembly/slow-path policy | not implemented |
 | Tunnels / 6-in-4 | tunnel FCI; `cdx_sp.xml` IPv4-nextp 0x29 | tunnel netdev + flowtable | soft-parser re-dispatch; inner-flow intent; explicit encap/decap actions | not implemented |
@@ -2049,12 +2049,16 @@ own PCD objects and prove readback.
       fragmented frames, MURAM flat. The final F-262 restores the pool and
       applies/restores the triple at FE engage/disengage
       (`fman_port_adv_offload()`, readback-verified).
-    - IPv6 that needs the check stays in software by default (RFC 8200 5:
-      the microcode fragments IPv6 and can never send Packet Too Big), so
-      `pppoe-up-v6` is PARTIAL by design (4.35 Gbit/s vs 3.58 software);
-      `ask.ipv6_hw_frag=1` opts into the vendor's hardware fragmentation.
-      The triple does not cure the VLAN FE-leak freeze (E1); it is
-      required for fragmentation only.
+    - IPv6 that needs the check is fragmented in hardware by default
+      (vendor parity). The microcode can never send Packet Too Big, which
+      RFC 8200 4.5 requires of a router, so the global module parameter
+      `ask.ipv6_hw_frag=0` (default 1) keeps those flows in software, where
+      the kernel sends Packet Too Big. There is no per-port CLI for it
+      (granularity decision 2026-10-09, below). With it cleared,
+      `pppoe-up-v6` is PARTIAL (4.35 Gbit/s vs 3.58 software). Policy
+      inverted 2026-10-09; not yet validated on a CI image. The triple does not affect the VLAN record
+      defects behind E1 (a hypothesis since disproved, see the REWRITE
+      plan); it is required for fragmentation only.
     - PPPoE over VLAN is code-verified to stay in software (two encap
       entries, `-EOPNOTSUPP`); not run on the board.
     - Found and fixed on the board (tree only, not in image `2320`):
@@ -2069,6 +2073,20 @@ own PCD objects and prove readback.
       5.7 Gbit/s because dell1 cannot RSS-hash PPPoE (one-core limit);
       with RPS on dell1 it is 9.35 / 9.22. Details and table: PPPoE plan §3.6. Method:
       `plans/ASK2-REWRITE-PLAN.md` §8.
+    - **Offload granularity (decision 2026-10-09, user direction).** Per-port
+      engage is the one mandatory granularity (real BMan/MURAM cost, VPP and
+      policer exclusivity). `offload ipv4|ipv6` stays as the per-port +
+      per-family operator policy knob (admission only, free). Every other
+      per-capability knob is removed: the `offload vlan` and `offload pppoe`
+      leaves, genl `ASK_ATTR_VLAN`/`BRIDGE`/`PPPOE` and the per-port bits
+      (`vyos-1x-054`, migration `interfaces` 35-to-36). VLAN, NAT, PPPoE,
+      bridge and IPv6 HW fragmentation are automatic parts of an engaged
+      port; the module parameters `vlan_offload`, `pppoe_offload`,
+      `nat44_offload`, `nat66_offload`, `ipv6_hw_frag` are global kill
+      switches (`vlan_offload`/`pppoe_offload`/`ipv6_hw_frag` flush live
+      records on 1 to 0). The PPPoE F-222 MTU ceiling again covers every
+      engaged port (patch 044 had split it off). Spec:
+      `specs/ask2-vlan-cli-grammar.md` §9. Not yet built or board-tested.
 - [ ] **T-M6-SP5 — tunnel re-dispatch.** Add only protocols represented by a
   kernel tunnel netdev and canonical flow intent. Gate: 6-in-4 inner key,
   hop-limit/TTL, decap/encap capture, route/neighbour changes, unsupported

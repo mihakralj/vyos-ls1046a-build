@@ -62,10 +62,12 @@ This fixup:
 
 ask.ko sets egress_mtu only when the flowtable route MTU is below the
 ingress port MTU (e.g. LAN 1500 -> PPPoE 1492). IPv6 flows that need the
-check stay in software unless ask.ko's ipv6_hw_frag parameter is set,
-because a router must not fragment IPv6 (RFC 8200 section 4.5) and the
-hardware cannot send Packet Too Big. VSP stays off (RM 5.12: required when
-fragmentation is enabled; mainline never enables it).
+check are fragmented in hardware by default (vendor behaviour); the
+hardware cannot send Packet Too Big, which RFC 8200 section 4.5 requires of
+a router, so an operator who needs RFC behaviour clears ask.ko's global
+ipv6_hw_frag parameter (the only knob; no per-port CLI) to keep those flows
+in software. VSP stays off (RM 5.12: required when fragmentation is
+enabled; mainline never enables it).
 
 Must run after F-261. Idempotent; exits non-zero unless every anchor matches
 the expected number of times.
