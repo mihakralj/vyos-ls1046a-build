@@ -1998,12 +1998,19 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
 				? ETH_P_IPV6 : ETH_P_IP;
 
-	/* F-262: hardware MTU check (05). Oversize frames are punted to the
-	 * host (the hardware never fragments: BPID_ENABLE stays clear), so
-	 * the kernel fragments (IPv4 DF clear) or sends ICMP / Packet Too
-	 * Big. */
-	if (key->egress_mtu)
+	/* F-262: hardware MTU check (05). IPv4: with BPID_ENABLE clear the
+	 * microcode punts oversize frames to the host, which fragments
+	 * (DF clear) or sends ICMP frag-needed. IPv6 (measured 2026-10-09):
+	 * the microcode enters its IPv6 fragmenter regardless of
+	 * frag_options, DFBIT_HONOR or the DF action bits, and silently
+	 * drops without a fragment pool, so no Packet Too Big is ever sent.
+	 * A router must not fragment v6 (RFC 8200 5): keep such flows in
+	 * software. */
+	if (key->egress_mtu) {
+		if (key->l3_proto == ASK_FLOW_L3_IPV6)
+			return -EOPNOTSUPP;
 		action.egress_mtu = key->egress_mtu;
+	}
 
 	/*
 	 * T-M6-7.1 arming: copy the parsed/carry NAT tuple into the public
