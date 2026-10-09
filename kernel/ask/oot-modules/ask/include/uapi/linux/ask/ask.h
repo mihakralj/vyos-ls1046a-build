@@ -70,13 +70,6 @@ enum ask_genl_attr {
     ASK_ATTR_POLICER,       /* nested ask_policer_attr */
     ASK_ATTR_PORT_ID,       /* u8, hardware port ID for engage/disengage */
     ASK_ATTR_FAMILY_MASK,   /* u8, ASK_FAM_* bitmask on engage; absent => both */
-    ASK_ATTR_VLAN,          /* u8 bool, per-port single-tag 802.1Q VLAN offload
-                             * on engage; absent => leave unchanged (default off) */
-    ASK_ATTR_BRIDGE,        /* u8 bool, per-port L2 bridge FDB offload (T-M6-2)
-                             * on engage; absent => leave unchanged (default off) */
-    ASK_ATTR_PPPOE,         /* u8 bool, per-port PPPoE session offload (CLI
-                             * `offload pppoe`, T-M6-SP4) on engage; absent =>
-                             * leave unchanged (default off) */
 
     __ASK_ATTR_MAX,
 };
@@ -88,36 +81,15 @@ enum ask_genl_attr {
  * engage means both (back-compat with callers that predate the split). This
  * is the CLI `offload ipv4` / `offload ipv6` selector; a port engaged with
  * only ASK_FAM_V4 keeps IPv6 flows in software, and vice versa.
+ *
+ * Engage granularity is deliberately just (port, family mask): VLAN pop/push,
+ * NAT, PPPoE and L2 bridge offload are automatic capabilities of an engaged
+ * port, switched globally by the ask.vlan_offload / nat44_offload /
+ * nat66_offload / pppoe_offload / ipv6_hw_frag module parameters. There are no
+ * per-port or per-L4 attributes.
  */
 #define ASK_FAM_V4  (1u << 0)
 #define ASK_FAM_V6  (1u << 1)
-
-/*
- * Per-port VLAN offload selection (ASK_ATTR_VLAN on ASK_CMD_ENGAGE).
- * u8 bool: 1 arms single-tag 802.1Q pop/push HW offload (CC-leaf -> combined
- * HMTD -> egress FQ, CC miss -> FE_ENTER ehash) on this port; 0 disarms it.
- * This is the CLI `offload ask vlan` per-interface selector, mirroring the
- * family-mask model. The legacy global `ask.vlan_offload` module param is an
- * OR'd master override that arms every port (default 0). eth0/802.1ad/QinQ/
- * IPv6-VLAN always fall back to software regardless of this bit.
- */
-#define ASK_VLAN_OFF 0u
-#define ASK_VLAN_ON  1u
-
-/*
- * Per-port L2 bridge offload selection (ASK_ATTR_BRIDGE on ASK_CMD_ENGAGE).
- * u8 bool: 1 arms this port's bridge FDB hardware offload (CC leaf matching
- * destination MAC -> plain enqueue to the egress port's TX FQ, CC miss ->
- * FE_ENTER ehash); 0 disarms it. Unlike ASK_ATTR_VLAN there is no dedicated
- * CLI leafNode for this bit: VyOS's `interfaces bridge` conf_mode sets it
- * automatically for a member port whenever that port already has `offload
- * ipv4`/`offload ipv6` armed (T-M6-2 design: "bridge offload is automatic
- * when at least one member port has ASK hardware offload enabled" -- no
- * separate opt-in). BUM traffic, local termination, and control frames are
- * never affected by this bit; they always stay in the kernel bridge.
- */
-#define ASK_BRIDGE_OFF 0u
-#define ASK_BRIDGE_ON  1u
 
 /* ASK_ATTR_INFO nested attributes */
 enum ask_info_attr {
