@@ -1614,7 +1614,9 @@ Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
      Oversize frames go to the host (`frag_options = 0x0004`, no frag pool):
      the kernel fragments DF-clear packets and sends ICMP fragmentation-needed
      for DF-set ones. IPv6 that needs it stays in software so the kernel
-     sends Packet Too Big (`pppoe-up-v6` PARTIAL by design). Results:
+     sends Packet Too Big (`pppoe-up-v6` PARTIAL by design): measured
+     2026-10-09, the microcode drops oversize IPv6 silently instead of
+     passing it to the host. Results:
      `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
 3. **Multicast.** mc4/mc6 tables plus a REPLICATE chain. Gate: A10.
 4. **IPsec ESP.** ESP table → OH port → CAAM SEC (vendor oh@2 model), via
