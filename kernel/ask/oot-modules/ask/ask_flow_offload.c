@@ -42,6 +42,7 @@
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>		/* ARPHRD_PPP: T-M6-SP4 session-down flush */
+#include <linux/if_pppox.h>		/* PPPOE_SES_HLEN: decap MTU bound */
 #include <linux/inetdevice.h>
 #include <linux/of.h>
 #include <linux/string.h>
@@ -3300,8 +3301,14 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				 */
 				{
 					u16 emtu = ask_flow_cookie_mtu(f->cookie);
+					unsigned int in_mtu = bind_dev->mtu;
 
-					if (emtu && emtu < bind_dev->mtu)
+					/* A PPPoE session carries at most port MTU - 8
+					 * of IP (RFC 4638: 1508 -> 1500), so a decap
+					 * flow into a 1500 LAN needs no check. */
+					if (key.vlan_edit_flags & ASK_VLANF_PPPOE_STRIP)
+						in_mtu -= PPPOE_SES_HLEN;
+					if (emtu && emtu < in_mtu)
 						key.egress_mtu = emtu;
 				}
 
