@@ -1019,7 +1019,8 @@ kept out of E1 so that only one thing changes at a time.
 The ref doc's 2026-08-05 verdict that RFENE/RCMNE are "dormant for standard
 CC-tree/AC_CC setups" [DOC `arch/fman-microcode-210-programming-reference.md:652`]
 is contradicted by the vendor code path above and by the live `.106` values.
-That doc now carries a dated correction.
+That doc now carries a dated correction. (2026-10-09: the triple also turns
+out to be required for IP fragmentation; see the E1 addendum in Phase 1.)
 
 ## 5. Target architecture
 
@@ -1298,6 +1299,18 @@ the smart plug. Rig: dell1 `10.99.10.112` (VID 10) → DUT `eth3.10` → routed 
   the baseline repeats below show it is within normal variance.
 - No wedge, no `Err FD`, no dmesg errors. Disabling restored
   `rfene=0x00d40000 rcmne=0 misc=0x00000100`, and routed ping kept working.
+- **Addendum 2026-10-09: the triple is not irrelevant, it is required for the
+  hardware IP fragmenter.** E1 correctly showed it does not unfreeze VLAN
+  forwarding, but with `frag_options = 0x000c` and a real pool the 210.10.1
+  fragmenter emitted one fragment per oversize frame and killed port RX after
+  11 fragmented frames unless the triple is on. With the triple (written
+  live: misc `0x00000100` → `0x40000100`, `RCMNE` `0` → `0x0e`, `RFENE`
+  `0x00d40000` → `0x22`) IPv4 and IPv6 oversize frames are fragmented in
+  hardware (100/100 delivered as 2 fragments each) and the port survived 315
+  fragmented frames. F-262 now applies the triple at FE engage and restores
+  the saved values at disengage (`fman_port_adv_offload()`), which keeps the
+  `pcd-snapshot` reversibility gate (it compares `RFENE` and `RCMNE`) clean.
+  Results: `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
 
 **E1a and E1b results [SILICON 2026-10-04].** Same board, image and rig. Each
 step started from a cold boot (E1a, E1b), or from a revert that was confirmed
@@ -1611,13 +1624,17 @@ Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
      `offload pppoe`): SILICON-VALIDATED 2026-10-09 (9.19 Gbit/s v4).
    - Egress MTU check (F-262): `05 PREEMPTIVE_CHECKS` only on records whose
      route MTU is below the ingress port MTU (LAN 1500 to PPPoE 1492).
-     Oversize frames go to the host (`frag_options = 0x0004`, no frag pool):
-     the kernel fragments DF-clear packets and sends ICMP fragmentation-needed
-     for DF-set ones. IPv6 that needs it stays in software so the kernel
-     sends Packet Too Big (`pppoe-up-v6` PARTIAL by design): measured
-     2026-10-09, the microcode drops oversize IPv6 silently instead of
-     passing it to the host. Results:
-     `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
+     With the vendor RX-port triple (applied at engage, restored at
+     disengage) and `frag_options = 0x000c` plus a fragment pool, IPv4
+     DF-clear oversize packets are fragmented in hardware (100/100 delivered
+     as 2 fragments) and DF-set ones go to the host, which sends ICMP
+     fragmentation-needed (PMTUD verified). IPv6 that needs it stays in
+     software by default so the kernel sends Packet Too Big (`pppoe-up-v6`
+     PARTIAL by design): the microcode fragments IPv6 and can never send
+     Packet Too Big (RFC 8200 5); `ask.ipv6_hw_frag=1` opts into the vendor
+     behaviour. Without the triple the fragmenter loses datagrams and kills
+     port RX after 11 frames (the root cause of the earlier "unusable"
+     verdict). Results: `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
 3. **Multicast.** mc4/mc6 tables plus a REPLICATE chain. Gate: A10.
 4. **IPsec ESP.** ESP table → OH port → CAAM SEC (vendor oh@2 model), via
    XFRM offload in `ask_xfrm.c`. Gate: A9.
