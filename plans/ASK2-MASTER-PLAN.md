@@ -469,10 +469,11 @@ opcode terminal, not comparator correctness.
   attempt was abandoned 2026-10-02 — see `plans/ASK2-REWRITE-PLAN.md` Phase 1).
   PPPoE rides the hard parser only (inner IP exposed, no soft parser): decap
   (F-260, opcode `0x14`), encap (F-261, opcode `0x43`) and the hardware MTU
-  check (F-262, `PREEMPTIVE_CHECKS`; oversize frames go to the host, which
-  fragments or sends ICMP) are silicon-validated on image `2320`
+  check (F-262, `PREEMPTIVE_CHECKS` + hardware IP fragmentation, which needs
+  the vendor RX-port triple) are silicon-validated on image `2320`
   (2026-10-09; `plans/ASK2-PPPOE-OFFLOAD-PLAN.md` §3.4/§3.6). Four fixes found
-  on the board are in the tree but not yet in a CI image. Remaining implementation breadth: soft-parser (TCP punts),
+  on the board and the final F-262 (pool + RX-port triple) are in the tree
+  but not yet in a validated CI image. Remaining implementation breadth: soft-parser (TCP punts),
   XFRM/IPsec, bridge/multicast, fragments/tunnels, stacked tags and wider VLAN
   scope. Full
   gates and MUST/DO-NOT rules: §4.6.
@@ -2035,18 +2036,25 @@ own PCD objects and prove readback.
     Encap (F-261) and the egress MTU check (F-262: `05 PREEMPTIVE_CHECKS`
     first, ENQUEUE mtu, 32-byte frag-info block in the owned MURAM
     reservation) are SILICON-VALIDATED 2026-10-09 on image `2320`.
-    - Hardware fragmentation (`frag_options` `BPID_ENABLE`, frag pool) emits
-      one fragment per oversize frame and loses the datagram, so the revised
-      F-262 has no pool: `frag_options = 0x0004`, ENQ bpid 0. Oversize IPv4
-      goes to the host, which fragments (DF clear) or sends ICMP
-      fragmentation-needed (DF set, PMTUD verified). This resolves the open
-      DF silicon unknown.
-    - IPv6 that needs the check stays in software, so `pppoe-up-v6` is
-      PARTIAL by design (4.35 Gbit/s vs 3.58 software). Measured
-      2026-10-09: the microcode does not host-pass oversize IPv6 (it enters
-      its fragmenter regardless of `frag_options`, DFBIT_HONOR or DF action
-      bits, finds no buffer, and drops silently with no Packet Too Big), so
-      this limit is permanent for this microcode.
+    - Hardware fragmentation (`frag_options` `0x000c`, frag pool) first
+      emitted one fragment per oversize frame, lost the datagram and killed
+      port RX after 11 frames; an interim revision shipped without the pool
+      (`frag_options = 0x0004`, bpid 0, image `0216`). ROOT CAUSE found
+      2026-10-09: the vendor advanced-offload RX-port triple (params-page
+      misc `|= 0x40000000`, `FMBM_RCMNE = 0x0e`, `FMBM_RFENE = 0x22`; ASK SDK
+      `FM_PORT_SetPCD`) was never applied. With it and the vendor config:
+      IPv4 DF-clear 100/100 delivered as 2 fragments, IPv4 DF-set host punt
+      with ICMP fragmentation-needed 100/100 (PMTUD verified, resolves the
+      open DF unknown), IPv6 100/100 delivered, port alive after 315
+      fragmented frames, MURAM flat. The final F-262 restores the pool and
+      applies/restores the triple at FE engage/disengage
+      (`fman_port_adv_offload()`, readback-verified).
+    - IPv6 that needs the check stays in software by default (RFC 8200 5:
+      the microcode fragments IPv6 and can never send Packet Too Big), so
+      `pppoe-up-v6` is PARTIAL by design (4.35 Gbit/s vs 3.58 software);
+      `ask.ipv6_hw_frag=1` opts into the vendor's hardware fragmentation.
+      The triple does not cure the VLAN FE-leak freeze (E1); it is
+      required for fragmentation only.
     - PPPoE over VLAN is code-verified to stay in software (two encap
       entries, `-EOPNOTSUPP`); not run on the board.
     - Found and fixed on the board (tree only, not in image `2320`):
