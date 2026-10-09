@@ -1,7 +1,8 @@
-"""F-262 (T-M6-SP4 hardware MTU check, 2026-10-08, revised 2026-10-09):
-vendor PREEMPTIVE_CHECKS (0x05) + ENQUEUE MTU context on records whose egress
-MTU is below what the ingress port can deliver. Oversize frames are punted
-to the host; the hardware never fragments.
+"""F-262 (T-M6-SP4 hardware MTU check + IP fragmentation, 2026-10-08,
+revised 2026-10-09): vendor PREEMPTIVE_CHECKS (0x05) + ENQUEUE fragmentation
+context on records whose egress MTU is below what the ingress port can
+deliver, plus the vendor advanced-offload RX-port settings the microcode
+fragmenter needs.
 
 Vendor cdx_ehash.c fill_actions() puts 05 PREEMPTIVE_CHECKS_ON_PKT first in
 every routed record; seal_preemptive_checks_hm() fills its 8-byte param
@@ -13,7 +14,9 @@ be32 fqid, be32 stats word, be32 word2 = MURAM offset of the
 cdx_ucode_frag_info_t block }. Live vendor record (.106, 2026-10-04):
 05 param '38 03 00..', ENQ mtu 0x05dc, word2 0x00049540.
 cdx_init_frag_module() initialises that block to frag_options =
-BPID_ENABLE 0x08 | OPT_COUNTER_EN 0x04, counters 0, v6_identification 1.
+BPID_ENABLE 0x08 | OPT_COUNTER_EN 0x04 (DF action 0x00 = error), counters 0,
+v6_identification 1; cdx_create_fragment_bufpool() seeds a dedicated BMan
+pool (2048 buffers).
 
 ASK2 so far emitted no 05, ENQ mtu 1500, bpid 0, word2 0. Without 05 the
 mtu field is inert (MTU battery 2026-08-17: 2500-byte frames forwarded
@@ -21,30 +24,48 @@ through mtu-1500 records). 05 with word2 0 would point the microcode's
 frag-info reads at MURAM 0 (the DMA CAM), so 05 is only ever emitted
 together with a real block.
 
-Silicon result (board .185, image 2320, 2026-10-09): with BPID_ENABLE set
-the microcode fragments in hardware but emits ONE fragment per oversize
-frame (first fragment only, 1514 B on the wire, no tail), so the datagram
-is silently lost. With BPID_ENABLE clear (frag_options 0x0004, bpid 0) the
-05 check still fires and oversize frames, DF set or clear, are handed to the
-host: the kernel fragments DF-clear datagrams (8/8 and a 3000-datagram soak
-reassembled, frag counters 0) and sends ICMP frag-needed for DF-set ones
-(PMTUD works), with no Err FD and the port RX staying alive. So the vendor
-fragmentation pool is NOT created: no pool, bpid 0, BPID_ENABLE clear.
+Silicon history (board .185, 2026-10-09). With frag_options BPID_ENABLE and
+a real pool but the stock RX-port registers, the microcode emitted ONE
+fragment per oversize frame (datagram lost) and port RX went permanently
+deaf after exactly 11 fragmented frames; with BPID_ENABLE clear it punted
+IPv4 to the host (kernel fragments / ICMP) and silently dropped IPv6.
+ROOT CAUSE: the vendor advanced-offload RX-port triple was missing: params
+page misc |= OFFLOAD_SUPPORT_EN (0x40000000), FMBM_RCMNE = 0x0e, FMBM_RFENE
+= 0x22 (SDK FM_PORT_SetPCD, fm_port.c:4843-4880,5115-5118; live vendor .106
+reads 0x40000100 / 0x0e / 0x22; ours read 0x100 / 0 / 0x00d40000). With the
+triple and the vendor config (frag_options 0x000c, real pool, ENQ bpid):
+IPv4 DF-clear 1493 B x100 -> 100/100 delivered as 2 fragments each; IPv4
+DF-set x100 -> host punt, ICMP frag-needed 100/100 (PMTUD works); IPv6
+1493 B x100 -> 100/100 delivered as 2 fragments each (the microcode
+fragments IPv6 and sends no Packet Too Big); port alive after 315
+fragmented frames, MURAM flat, no alloc failures. (E1, 2026-10-04, showed
+the triple does not cure the VLAN FE-leak freeze; it is required for IP
+fragmentation.)
 
 This fixup:
   * extends the owned FE internal-buffer MURAM reservation by a 32-byte
     frag-info block (pcd->fe_frag_off, after the 0216 stats scratch),
-    initialised frag_options = OPT_COUNTER_EN, v6_identification 1; same
-    refcounted lifetime, so the S1->S0 MURAM baseline still returns to zero;
+    initialised like the vendor's (0x000c); same refcounted lifetime, so
+    the S1->S0 MURAM baseline still returns to zero;
+  * adds fman_pcd_frag_pool_bpid(): a dedicated BMan pool of 2048 x 2 KiB
+    DMA-mapped buffers, created on the first flow that needs the check and
+    never freed (hardware may hold its buffers at any time);
+  * adds fman_port_adv_offload(): applies the vendor RX-port triple (misc,
+    RCMNE, RFENE, in the vendor order) and restores the saved values in
+    reverse; fman_pcd applies it when a port engages and restores it when
+    the port disengages, so the S1->S0 pcd-snapshot (BMI 0x70/0x7C, params
+    page) returns to baseline;
   * adds u16 egress_mtu to fman_pcd_fe_flow_action and fman_pcd_vlan_params
     (0 = no check). A non-zero value on an L2/TX record makes the emitter
-    put 05 first and seal it, and write ENQ mtu = egress_mtu and
-    word2 = fe_frag_off. Records with egress_mtu 0 stay byte-identical.
+    put 05 first and seal it, and write ENQ mtu = egress_mtu, bpid = frag
+    pool, word2 = fe_frag_off. Records with egress_mtu 0 stay byte-identical.
 
 ask.ko sets egress_mtu only when the flowtable route MTU is below the
-ingress port MTU (e.g. LAN 1500 -> PPPoE 1492). IPv6 flows that would need
-the check stay in software for now (not yet measured on silicon). VSP stays
-off (RM 5.12 requires it off when fragmentation is enabled).
+ingress port MTU (e.g. LAN 1500 -> PPPoE 1492). IPv6 flows that need the
+check stay in software unless ask.ko's ipv6_hw_frag parameter is set,
+because a router must not fragment IPv6 (RFC 8200 section 4.5) and the
+hardware cannot send Packet Too Big. VSP stays off (RM 5.12: required when
+fragmentation is enabled; mainline never enables it).
 
 Must run after F-261. Idempotent; exits non-zero unless every anchor matches
 the expected number of times.
@@ -55,24 +76,240 @@ import sys
 MARK = "F-262"
 PCD = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
 HDR = "include/linux/fsl/fman_pcd.h"
+PORT = "drivers/net/ethernet/freescale/fman/fman_port.c"
+PORTH = "drivers/net/ethernet/freescale/fman/fman_port.h"
+
+PORT_ADV = '''
+/*
+ * F-262: vendor advanced-offload RX-port settings (ASK SDK FM_PORT_SetPCD,
+ * fm_port.c:4843-4880 and 5115-5118): params-page misc |= OFFLOAD_SUPPORT_EN,
+ * FMBM_RCMNE = 0x0e, FMBM_RFENE = 0x22, written in that order; live vendor
+ * ports read 0x40000100 / 0x0e / 0x22 against our 0x100 / 0 / 0x00d40000.
+ * The 210.10.1 IP fragmenter needs them: without, it emits one fragment per
+ * frame and the port RX dies after 11 fragmented frames (silicon,
+ * 2026-10-09). The pre-engage values are saved and restored in reverse on
+ * disengage, so the mainline state returns exactly.
+ */
+#define FMAN_PP_OFFLOAD_SUPPORT_EN	0x40000000
+#define FMAN_ADV_RCMNE			0x0000000e
+#define FMAN_ADV_RFENE			0x00000022
+
+static void fman_port_adv_write(struct fman_port *port, u32 __iomem *misc,
+				u32 m, u32 c, u32 e, bool on)
+{
+	if (on) {
+		iowrite32be(m, misc);
+		iowrite32be(c, &port->bmi_regs->rx.fmbm_rcmne);
+		iowrite32be(e, &port->bmi_regs->rx.fmbm_rfene);
+	} else {
+		iowrite32be(e, &port->bmi_regs->rx.fmbm_rfene);
+		iowrite32be(c, &port->bmi_regs->rx.fmbm_rcmne);
+		iowrite32be(m, misc);
+	}
+}
+
+int fman_port_adv_offload(struct fman_port *port, void __iomem *page, bool on)
+{
+	u32 __iomem *misc;
+	u32 m, c, e;
+	bool ok;
+
+	if (!port || !page || port->port_type != FMAN_PORT_TYPE_RX)
+		return -EINVAL;
+	if (on == port->adv_offload)
+		return 0;
+
+	misc = (u32 __iomem *)((u8 __iomem *)page + FMAN_PP_MISC_OFF);
+	if (on) {
+		port->adv_saved[0] = ioread32be(misc);
+		port->adv_saved[1] = ioread32be(&port->bmi_regs->rx.fmbm_rcmne);
+		port->adv_saved[2] = ioread32be(&port->bmi_regs->rx.fmbm_rfene);
+		m = port->adv_saved[0] | FMAN_PP_OFFLOAD_SUPPORT_EN;
+		c = FMAN_ADV_RCMNE;
+		e = FMAN_ADV_RFENE;
+	} else {
+		m = port->adv_saved[0];
+		c = port->adv_saved[1];
+		e = port->adv_saved[2];
+	}
+	fman_port_adv_write(port, misc, m, c, e, on);
+
+	/* Silicon writes do not report errors: read back and compare. */
+	ok = ioread32be(misc) == m &&
+	     ioread32be(&port->bmi_regs->rx.fmbm_rcmne) == c &&
+	     ioread32be(&port->bmi_regs->rx.fmbm_rfene) == e;
+	if (!ok) {
+		dev_err(port->dev,
+			"fman_port: advanced offload %s readback mismatch (misc 0x%08x/0x%08x rcmne 0x%08x/0x%08x rfene 0x%08x/0x%08x)\\n",
+			on ? "on" : "off", ioread32be(misc), m,
+			ioread32be(&port->bmi_regs->rx.fmbm_rcmne), c,
+			ioread32be(&port->bmi_regs->rx.fmbm_rfene), e);
+		if (on)
+			fman_port_adv_write(port, misc, port->adv_saved[0],
+					    port->adv_saved[1],
+					    port->adv_saved[2], false);
+		return -EIO;
+	}
+	port->adv_offload = on;
+	dev_info(port->dev,
+		 "fman_port: advanced offload %s (misc 0x%08x rcmne 0x%08x rfene 0x%08x)\\n",
+		 on ? "on" : "off", m, c, e);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(fman_port_adv_offload);
+'''
+
+PCD_ADV = '''/* F-262: vendor advanced-offload RX-port triple for an engaged port (see
+ * fman_port_adv_offload()); the microcode IP fragmenter needs it. Applied
+ * on engage, restored on disengage. */
+static int fman_pcd_fe_adv_offload(struct fman_pcd *pcd, u8 hw_port_id,
+				   bool on)
+{
+	struct muram_info *muram = fman_get_muram(pcd->fman);
+	struct fman_port *port = fman_port_lookup_rx(pcd->fman, hw_port_id);
+	u32 off = port ? fman_port_get_params_page(port) : 0;
+
+	if (!muram || !off)
+		return -ENODEV;
+	return fman_port_adv_offload(port, (void __iomem *)(void *)
+				     fman_muram_offset_to_vbase(muram, off),
+				     on);
+}
+
+'''
+
+FRAG_POOL = '''
+/* F-262: the IP fragmentation buffer pool named by ENQUEUE_PKT's bpid
+ * (vendor cdx_create_fragment_bufpool(): a dedicated BMan pool the
+ * microcode takes fragment header buffers from; the TX port releases them
+ * back). Created on the first record that needs an MTU check and kept for
+ * the life of the system: hardware may hold its buffers at any time, so it
+ * is never drained or freed. Returns the BPID or a negative errno. */
+#define FMAN_FRAG_BUF_SIZE	2048
+#define FMAN_FRAG_BUF_COUNT	2048
+
+static int fman_pcd_frag_pool_bpid(struct fman_pcd *pcd)
+{
+	static DEFINE_MUTEX(frag_lock);
+	static struct bman_pool *frag_pool;
+	struct device *dev = fman_get_dev(pcd->fman);
+	struct bm_buffer bmb[8];
+	int i, j, n = 0, seeded = 0, err = 0;
+
+	mutex_lock(&frag_lock);
+	if (frag_pool)
+		goto out;
+	frag_pool = bman_new_pool();
+	if (!frag_pool) {
+		err = -ENODEV;
+		goto out;
+	}
+	for (i = 0; !err &&
+	     i < FMAN_FRAG_BUF_COUNT * FMAN_FRAG_BUF_SIZE / PAGE_SIZE; i++) {
+		struct page *p = alloc_page(GFP_KERNEL);
+		dma_addr_t a;
+
+		if (!p) {
+			err = -ENOMEM;
+			break;
+		}
+		a = dma_map_page(dev, p, 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
+		if (dma_mapping_error(dev, a)) {
+			__free_page(p);
+			err = -ENOMEM;
+			break;
+		}
+		for (j = 0; !err && j < PAGE_SIZE / FMAN_FRAG_BUF_SIZE; j++) {
+			bm_buffer_set64(&bmb[n++], a + j * FMAN_FRAG_BUF_SIZE);
+			if (n == ARRAY_SIZE(bmb)) {
+				err = bman_release(frag_pool, bmb, n);
+				seeded += err ? 0 : n;
+				n = 0;
+			}
+		}
+	}
+	if (!err && n) {
+		err = bman_release(frag_pool, bmb, n);
+		seeded += err ? 0 : n;
+	}
+	if (!seeded) {
+		/* Nothing reached hardware: safe to give the BPID back. */
+		bman_free_pool(frag_pool);
+		frag_pool = NULL;
+		err = err ? err : -ENOMEM;
+		goto out;
+	}
+	if (err)
+		pr_warn("fman_pcd: F-262 frag pool short: %d of %d buffers (%d)\\n",
+			seeded, FMAN_FRAG_BUF_COUNT, err);
+	err = 0;
+	pr_info("fman_pcd: F-262 frag pool bpid %d, %d x %d B, frag info @MURAM 0x%lx\\n",
+		bman_get_bpid(frag_pool), seeded, FMAN_FRAG_BUF_SIZE,
+		pcd->fe_frag_off);
+out:
+	if (!err)
+		err = bman_get_bpid(frag_pool);
+	mutex_unlock(&frag_lock);
+	return err;
+}
+
+'''
 
 EDITS = [
+    # -- RX-port advanced-offload triple (vendor FM_PORT_SetPCD) --
+    (PORT,
+     "\tu32 ctrl_params_page;\t/* FM_CTL params page MURAM off (0116) */\n",
+     "\tu32 ctrl_params_page;\t/* FM_CTL params page MURAM off (0116) */\n"
+     "\tbool adv_offload;\t\t/* F-262: vendor RX-port triple applied */\n"
+     "\tu32 adv_saved[3];\t\t/* F-262: misc, rcmne, rfene before it */\n", 1),
+    (PORT,
+     "EXPORT_SYMBOL_GPL(fman_port_set_params_page);\n",
+     "EXPORT_SYMBOL_GPL(fman_port_set_params_page);\n" + PORT_ADV, 1),
+    (PORTH,
+     "int fman_port_set_params_page(struct fman_port *port, u32 muram_off,\n"
+     "\t\t\t      void __iomem *page);\n",
+     "int fman_port_set_params_page(struct fman_port *port, u32 muram_off,\n"
+     "\t\t\t      void __iomem *page);\n"
+     "/* F-262: vendor advanced-offload RX-port triple (misc, RCMNE, RFENE) */\n"
+     "int fman_port_adv_offload(struct fman_port *port, void __iomem *page,\n"
+     "\t\t\t  bool on);\n", 1),
+    (PCD,
+     "static u8 fman_pcd_fe_port_profile(struct fman_pcd *pcd, u8 hw_port_id)\n{",
+     PCD_ADV +
+     "static u8 fman_pcd_fe_port_profile(struct fman_pcd *pcd, u8 hw_port_id)\n{", 1),
+    (PCD,
+     "\tpr_info(\"fman_pcd: FE engage port 0x%02x FQ=0x%x (AC_CC) profile %u key %uB\\n\",",
+     "\terr = fman_pcd_fe_adv_offload(pcd, hw_port_id, true);\t/* F-262 */\n"
+     "\tif (err) {\n"
+     "\t\t__fman_pcd_fe_arm_disengage(pcd, hw_port_id);\n"
+     "\t\tpcd->fe_port_profile[hw_port_id] = FMAN_PCD_FE_PROFILE_ROUTED;\n"
+     "\t\treturn err;\n"
+     "\t}\n"
+     "\tpr_info(\"fman_pcd: FE engage port 0x%02x FQ=0x%x (AC_CC) profile %u key %uB\\n\",", 1),
+    (PCD,
+     "\tfsleep(5000);\n\tfman_pcd_fe_port_del(pcd, (u8)port_id);\n",
+     "\tfsleep(5000);\n"
+     "\tfman_pcd_fe_adv_offload(pcd, (u8)port_id, false);\t/* F-262 */\n"
+     "\tfman_pcd_fe_port_del(pcd, (u8)port_id);\n", 1),
     # -- header: the per-record request --
     (HDR,
      "\tu16  pppoe_sid;\t\t/* F-261: egress PPPoE session, host order */\n};\n",
      "\tu16  pppoe_sid;\t\t/* F-261: egress PPPoE session, host order */\n"
      "\t/* F-262: egress IP MTU for the vendor PREEMPTIVE_CHECKS (05) +\n"
-     "\t * ENQUEUE MTU context; oversize frames are punted to the host.\n"
-     "\t * 0 = no check (byte-identical record). Only honoured on L2/TX\n"
-     "\t * records. */\n"
+     "\t * ENQUEUE fragmentation context; 0 = no check (byte-identical\n"
+     "\t * record). Only honoured on L2/TX records. */\n"
      "\tu16  egress_mtu;\n"
      "};\n", 1),
     (HDR,
      "\tu16 pppoe_sid;\t\t/* F-261: INSERT_PPPoE_HDR session, host order */\n};\n",
      "\tu16 pppoe_sid;\t\t/* F-261: INSERT_PPPoE_HDR session, host order */\n"
-     "\tu16 egress_mtu;\t\t/* F-262: 05 + ENQ mtu/word2; 0 = none */\n"
+     "\tu16 egress_mtu;\t\t/* F-262: 05 + ENQ mtu/bpid/word2; 0 = none */\n"
      "};\n", 1),
     # -- frag-info MURAM block, inside the owned FE reservation --
+    (PCD,
+     "#include <linux/fsl/fman_pcd.h>\n",
+     "#include <linux/fsl/fman_pcd.h>\n"
+     "#include <soc/fsl/bman.h>\t/* F-262: fragmentation buffer pool */\n", 1),
     (PCD,
      "\tunsigned long fe_stats_off;",
      "\tunsigned long fe_frag_off;\t  /* F-262: frag-info block, 0 if none */\n"
@@ -92,11 +329,9 @@ EDITS = [
      "\tmemset_io(v, 0, FMAN_EHASH_INT_BUF_TOTAL + FMAN_EHASH_STATS_SCRATCH_SIZE);\n",
      "\tmemset_io(v, 0, FMAN_EHASH_INT_BUF_TOTAL + FMAN_EHASH_STATS_SCRATCH_SIZE +\n"
      "\t\t  FMAN_EHASH_FRAG_INFO_SIZE);\n"
-     "\t/* F-262: vendor cdx_init_frag_module() minus BPID_ENABLE (0x08):\n"
-     "\t * with it the microcode fragments in hardware but emits one\n"
-     "\t * fragment per frame (silicon, 2026-10-09). OPT_COUNTER_EN only,\n"
-     "\t * so oversize frames reach the host. v6_identification 1. */\n"
-     "\tiowrite16be(0x0004, v + FMAN_EHASH_INT_BUF_TOTAL +\n"
+     "\t/* F-262: vendor cdx_init_frag_module(): BPID_ENABLE | OPT_COUNTER_EN,\n"
+     "\t * DF action 0 (error), counters 0, v6_identification 1. */\n"
+     "\tiowrite16be(0x0008 | 0x0004, v + FMAN_EHASH_INT_BUF_TOTAL +\n"
      "\t\t    FMAN_EHASH_STATS_SCRATCH_SIZE);\n"
      "\tiowrite32be(1, v + FMAN_EHASH_INT_BUF_TOTAL +\n"
      "\t\t    FMAN_EHASH_STATS_SCRATCH_SIZE + 24);\n", 1),
@@ -108,15 +343,37 @@ EDITS = [
      "\tpcd->fe_stats_off = 0;\n",
      "\tpcd->fe_stats_off = 0;\n"
      "\tpcd->fe_frag_off = 0;\t/* F-262 */\n", 1),
-    # -- refuse an MTU check the record cannot carry --
+    # -- frag pool, ahead of the emitter --
+    (PCD,
+     "static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,\n"
+     "\t\t\t\t  const u8 *key, u8 key_size,\n"
+     "\t\t\t\t  u32 enq_off, u32 fqid, bool stats,\n"
+     "\t\t\t\t  const u8 *l2_dst, const u8 *l2_src,\n"
+     "\t\t\t\t  u16 eth_type,\n"
+     "\t\t\t\t  const struct fman_pcd_nat_params *nat,\n"
+     "\t\t\t\t  const struct fman_pcd_vlan_params *vlan)\n{\n",
+     FRAG_POOL +
+     "static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,\n"
+     "\t\t\t\t  const u8 *key, u8 key_size,\n"
+     "\t\t\t\t  u32 enq_off, u32 fqid, bool stats,\n"
+     "\t\t\t\t  const u8 *l2_dst, const u8 *l2_src,\n"
+     "\t\t\t\t  u16 eth_type,\n"
+     "\t\t\t\t  const struct fman_pcd_nat_params *nat,\n"
+     "\t\t\t\t  const struct fman_pcd_vlan_params *vlan)\n{\n"
+     "\tint frag_bpid = 0;\t/* F-262 */\n", 1),
+    # -- resolve the pool before anything is allocated --
     (PCD,
      "\tif (key_size > FMAN_EHASH_FLOW_KEY_MAX)\n\t\treturn -EINVAL;\n",
      "\tif (key_size > FMAN_EHASH_FLOW_KEY_MAX)\n\t\treturn -EINVAL;\n"
-     "\t/* F-262: an MTU check needs the L2/TX terminal and the frag-info\n"
-     "\t * block; refuse rather than emit 05 without them. */\n"
-     "\tif (vlan && vlan->egress_mtu &&\n"
-     "\t    (!(l2_dst && l2_src && eth_type) || !t->pcd->fe_frag_off))\n"
-     "\t\treturn -EOPNOTSUPP;\n", 1),
+     "\t/* F-262: an MTU check needs the L2/TX terminal, the frag-info block\n"
+     "\t * and the frag pool; refuse rather than emit 05 without them. */\n"
+     "\tif (vlan && vlan->egress_mtu) {\n"
+     "\t\tif (!(l2_dst && l2_src && eth_type) || !t->pcd->fe_frag_off)\n"
+     "\t\t\treturn -EOPNOTSUPP;\n"
+     "\t\tfrag_bpid = fman_pcd_frag_pool_bpid(t->pcd);\n"
+     "\t\tif (frag_bpid < 0)\n"
+     "\t\t\treturn frag_bpid;\n"
+     "\t}\n", 1),
     # -- emitter: 05 first --
     (PCD,
      "\t\tsize_t enqueue_off;\n",
@@ -141,13 +398,13 @@ EDITS = [
      "\t\tparam_end = enqueue_off + 16;\n",
      "\t\t/* F-262: vendor seal_preemptive_checks_hm() + create_enque_hm():\n"
      "\t\t * mtu_offset, TX_VALIDATE (| DFBIT_HONOR for IPv4); ENQ mtu =\n"
-     "\t\t * egress MTU, bpid 0 (no fragmentation pool), word2 = frag-info\n"
-     "\t\t * block. */\n"
+     "\t\t * egress MTU, bpid = frag pool, word2 = frag-info block. */\n"
      "\t\tif (pre_off) {\n"
      "\t\t\tr[pre_off + 0] = (u8)(enqueue_off - pre_off);\n"
      "\t\t\tr[pre_off + 1] = 0x01 | (eth_type == 0x0800 ? 0x02 : 0);\n"
      "\t\t\t*(__be16 *)(r + enqueue_off + 0) =\n"
      "\t\t\t\tcpu_to_be16(vlan->egress_mtu);\n"
+     "\t\t\t*(r + enqueue_off + 3) = (u8)frag_bpid;\n"
      "\t\t\t*(__be32 *)(r + enqueue_off + 12) =\n"
      "\t\t\t\tcpu_to_be32(t->pcd->fe_frag_off & 0x00ffffff);\n"
      "\t\t}\n"
@@ -187,4 +444,4 @@ for path, old, new, want in EDITS:
 for path, s in srcs.items():
     with open(path, "w") as f:
         f.write(s)
-print("### F-262: ehash PREEMPTIVE_CHECKS (05) + frag-info MURAM behind egress_mtu")
+print("### F-262: ehash PREEMPTIVE_CHECKS (05) + frag pool/MURAM + RX-port adv-offload triple")

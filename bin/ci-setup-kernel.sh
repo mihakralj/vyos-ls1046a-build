@@ -2485,18 +2485,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c/fman_pcd.h: F-261 ehash INSERT_PPPoE_HDR (0x43) emitter"
 fi
 
-# F-262 (T-M6-SP4 hardware MTU check, 2026-10-08, revised 2026-10-09):
-# vendor PREEMPTIVE_CHECKS (0x05) first + sealed {mtu_offset,
-# TX_VALIDATE|DFBIT_HONOR(v4)}, ENQUEUE mtu = egress MTU, bpid 0, word2 = a
-# 32-byte frag-info block in the owned FE MURAM reservation (frag_options
-# OPT_COUNTER_EN only, v6_id 1). No fragmentation pool: with BPID_ENABLE the
-# microcode sent only the first fragment (silicon, 2026-10-09); without it
-# oversize frames go to the host, which fragments or sends ICMP. Only on
-# records with the new egress_mtu set (ask.ko: route MTU < ingress port MTU,
-# IPv4); all other records byte-identical. After F-261.
+# F-262 (T-M6-SP4 hardware MTU check + IP fragmentation, 2026-10-08, revised
+# 2026-10-09): vendor PREEMPTIVE_CHECKS (0x05) first + sealed {mtu_offset,
+# TX_VALIDATE|DFBIT_HONOR(v4)}, ENQUEUE mtu = egress MTU, bpid = dedicated
+# fragmentation pool, word2 = a 32-byte frag-info block (frag_options 0x000c)
+# in the owned FE MURAM reservation; plus fman_port_adv_offload(), the vendor
+# RX-port triple (params-page OFFLOAD_SUPPORT_EN, RCMNE 0x0e, RFENE 0x22)
+# applied at port engage and restored at disengage - without it the
+# microcode fragmenter emits one fragment per frame and kills port RX after
+# 11 frames (silicon, 2026-10-09). Only on records with the new egress_mtu
+# set (ask.ko: route MTU < ingress port MTU; IPv6 only with
+# ask.ipv6_hw_frag=1); all other records byte-identical. After F-261.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_262.py" 2>&1
-    echo "### fman_pcd.c/fman_pcd.h: F-262 ehash PREEMPTIVE_CHECKS (05) + frag-info MURAM"
+    echo "### fman_pcd.c/fman_port.c: F-262 ehash PREEMPTIVE_CHECKS (05) + frag pool/MURAM + RX-port adv-offload"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic

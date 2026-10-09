@@ -125,6 +125,14 @@ MODULE_PARM_DESC(vlan_push_only,
 		 "Offload push-only VLAN flows (untagged ingress -> tagged egress); "
 		 "needs the RX internal margin from patch 0217 (default on)");
 
+static bool ask_ipv6_hw_frag;
+module_param_named(ipv6_hw_frag, ask_ipv6_hw_frag, bool, 0644);
+MODULE_PARM_DESC(ipv6_hw_frag,
+		 "Offload IPv6 flows whose egress MTU is below the ingress port MTU "
+		 "with the microcode fragmenter (vendor behaviour: oversize packets are "
+		 "fragmented in hardware and no Packet Too Big is sent, RFC 8200 5). "
+		 "Default off: such flows stay in software");
+
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
 /*                                                                            */
@@ -1998,16 +2006,15 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
 				? ETH_P_IPV6 : ETH_P_IP;
 
-	/* F-262: hardware MTU check (05). IPv4: with BPID_ENABLE clear the
-	 * microcode punts oversize frames to the host, which fragments
-	 * (DF clear) or sends ICMP frag-needed. IPv6 (measured 2026-10-09):
-	 * the microcode enters its IPv6 fragmenter regardless of
-	 * frag_options, DFBIT_HONOR or the DF action bits, and silently
-	 * drops without a fragment pool, so no Packet Too Big is ever sent.
-	 * A router must not fragment v6 (RFC 8200 5): keep such flows in
-	 * software. */
+	/* F-262: hardware MTU check (05). IPv4: the microcode fragments
+	 * DF-clear oversize packets and punts DF-set ones to the host, which
+	 * sends ICMP frag-needed (PMTUD intact). IPv6 (measured 2026-10-09):
+	 * the microcode always fragments oversize packets and never sends
+	 * Packet Too Big, but a router must not fragment v6 (RFC 8200 5), so
+	 * such flows stay in software unless ipv6_hw_frag opts into the
+	 * vendor behaviour. */
 	if (key->egress_mtu) {
-		if (key->l3_proto == ASK_FLOW_L3_IPV6)
+		if (key->l3_proto == ASK_FLOW_L3_IPV6 && !ask_ipv6_hw_frag)
 			return -EOPNOTSUPP;
 		action.egress_mtu = key->egress_mtu;
 	}
