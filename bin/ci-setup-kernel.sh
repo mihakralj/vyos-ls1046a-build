@@ -2503,6 +2503,18 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c/fman_port.c: F-262 ehash PREEMPTIVE_CHECKS (05) + frag pool/MURAM + RX-port adv-offload"
 fi
 
+# F-263 (A6 churn stall root cause, 2026-10-09): delete F-143's memcpy of the
+# en_exthash_node template into the first 16 bytes of each DDR bucket array.
+# That is bucket 0: the walker read it as a bucket head (key_size<<32 |
+# bswap32(table_base_lo), e.g. 0x32000008f7) and DMA'd it -> FMan DMA bus
+# error, eth3/eth4 RX dead. One packet hashing to bucket 0 triggered it
+# (reproduced on .185). The node is read from MURAM (IC.CCBASE); the template
+# stays in t->ad. After F-262.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_263.py" 2>&1
+    echo "### fman_pcd.c: F-263 ehash bucket 0 no longer overwritten by the node template"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
