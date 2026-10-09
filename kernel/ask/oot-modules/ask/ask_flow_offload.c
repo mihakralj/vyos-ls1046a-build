@@ -1998,15 +1998,12 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	action.eth_type = (key->l3_proto == ASK_FLOW_L3_IPV6)
 				? ETH_P_IPV6 : ETH_P_IP;
 
-	/* F-262: hardware MTU check (05 + fragmentation). The microcode
-	 * would fragment IPv6 too, which a router must not do (RFC 8200
-	 * 5); keep such v6 flows in software, where the kernel sends
-	 * Packet Too Big. */
-	if (key->egress_mtu) {
-		if (key->l3_proto == ASK_FLOW_L3_IPV6)
-			return -EOPNOTSUPP;
+	/* F-262: hardware MTU check (05). Oversize frames are punted to the
+	 * host (the hardware never fragments: BPID_ENABLE stays clear), so
+	 * the kernel fragments (IPv4 DF clear) or sends ICMP / Packet Too
+	 * Big. */
+	if (key->egress_mtu)
 		action.egress_mtu = key->egress_mtu;
-	}
 
 	/*
 	 * T-M6-7.1 arming: copy the parsed/carry NAT tuple into the public
@@ -2345,7 +2342,9 @@ int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
 	    t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
 	    !is_zero_ether_addr(t->out.h_dest)) {
 		pi->sid = o->encap[0].id;
-		pi->ifindex = t->out.ifidx;
+		/* out.ifidx is the ppp netdev; out.hw_ifidx is the physical
+		 * port the session rides (nft_dev_path_info() hw_outdev). */
+		pi->ifindex = t->out.hw_ifidx ? t->out.hw_ifidx : t->out.ifidx;
 		ether_addr_copy(pi->peer_mac, t->out.h_dest);
 		ether_addr_copy(pi->src_mac, t->out.h_source);
 		return ASK_PPPOE_ENCAP;
@@ -2385,6 +2384,7 @@ struct ask_pppoe_victim {
 	struct list_head node;
 	u64 cookie;
 	u32 generation;
+	struct ask_flow_key key;
 };
 
 static int ask_pppoe_collect(struct ask_flow *f, void *arg)
@@ -2399,6 +2399,7 @@ static int ask_pppoe_collect(struct ask_flow *f, void *arg)
 		return 0;
 	v->cookie = f->cookie;
 	v->generation = f->generation;
+	v->key = f->key;
 	list_add_tail(&v->node, arg);
 	return 0;
 }
@@ -2414,8 +2415,14 @@ static void ask_pppoe_flush_fn(struct work_struct *w)
 		return;
 	ask_flow_walk(t, ask_pppoe_collect, &victims);
 	list_for_each_entry_safe(v, tmp, &victims, node) {
-		if (!ask_flow_remove_owned(t, v->cookie, v->generation))
+		/* The SW remove does not touch silicon, and the nft DESTROY
+		 * that follows finds no entry and returns early: without this
+		 * the ehash record (old SID, old concentrator MAC) outlives
+		 * the session and forwards a matching tuple into it. */
+		if (!ask_flow_remove_owned(t, v->cookie, v->generation)) {
+			ask_fe_flow_remove(&v->key);
 			n++;
+		}
 		list_del(&v->node);
 		kfree(v);
 	}
