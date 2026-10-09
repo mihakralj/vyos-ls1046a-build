@@ -2478,7 +2478,8 @@ fi
 # INSERT_L2 with EtherType 0x8864; session ID via the new pppoe_sid field in
 # fman_pcd_fe_flow_action/fman_pcd_vlan_params; ENQUEUE mtu 0xffff
 # (fragmentation disabled, no frag pool) on these records only. Dormant
-# until ask.ko sets the flag (`offload pppoe` per port, default off).
+# until ask.ko sets the flag (automatic on an engaged port; ask.pppoe_offload
+# kill switch).
 # After F-260.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_261.py" 2>&1
@@ -2494,8 +2495,9 @@ fi
 # applied at port engage and restored at disengage - without it the
 # microcode fragmenter emits one fragment per frame and kills port RX after
 # 11 frames (silicon, 2026-10-09). Only on records with the new egress_mtu
-# set (ask.ko: route MTU < ingress port MTU; IPv6 only with
-# ask.ipv6_hw_frag=1); all other records byte-identical. After F-261.
+# set (ask.ko: route MTU < ingress port MTU; IPv6 in hardware by default,
+# kept in software by the global ask.ipv6_hw_frag=0 kill switch); all other
+# records byte-identical. After F-261.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_262.py" 2>&1
     echo "### fman_pcd.c/fman_port.c: F-262 ehash PREEMPTIVE_CHECKS (05) + frag pool/MURAM + RX-port adv-offload"

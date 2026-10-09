@@ -34,15 +34,11 @@
 #include "include/ask_internal.h"
 
 /*
- * T-M6-2 gate: no standalone module param here (unlike ask_vlan_offload).
- * Arming is per-port only, via ask_hw_offload_set_bridge() / genl
- * ASK_ATTR_BRIDGE (kernel/ask_hw.c), driven automatically by VyOS's
- * `interfaces bridge` conf_mode for a member port that already has
- * `offload ipv4`/`offload ipv6` armed — no separate opt-in, and no CLI
- * leafNode a user sets directly. Forcing bridge offload on regardless of
- * a port's family engagement wouldn't mean anything (there is no dispatch
- * for it to ride on), so a master override doesn't make sense here the way
- * it does for VLAN.
+ * T-M6-2 gate: bridge offload is an automatic capability of an engaged port
+ * (ask_hw_bridge_offload_armed() == some port has `offload ipv4`/`ipv6`
+ * armed) -- no per-port arm bit, no CLI leafNode, no module param. Forcing it
+ * on regardless of a port's family engagement wouldn't mean anything (there
+ * is no dispatch for it to ride on).
  */
 
 /* One coalesced FDB event. @dev is dev_hold()'d at capture, dev_put() in

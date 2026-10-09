@@ -125,13 +125,31 @@ MODULE_PARM_DESC(vlan_push_only,
 		 "Offload push-only VLAN flows (untagged ingress -> tagged egress); "
 		 "needs the RX internal margin from patch 0217 (default on)");
 
-static bool ask_ipv6_hw_frag;
-module_param_named(ipv6_hw_frag, ask_ipv6_hw_frag, bool, 0644);
+static bool ask_ipv6_hw_frag = true;
+static void ask_flow_v6_frag_flush(void);
+
+static int ask_ipv6_hw_frag_set(const char *val, const struct kernel_param *kp)
+{
+	bool old = READ_ONCE(ask_ipv6_hw_frag);
+	int rc = param_set_bool(val, kp);
+
+	if (!rc && old && !READ_ONCE(ask_ipv6_hw_frag))
+		ask_flow_v6_frag_flush();
+	return rc;
+}
+
+static const struct kernel_param_ops ask_ipv6_hw_frag_ops = {
+	.set = ask_ipv6_hw_frag_set,
+	.get = param_get_bool,
+};
+module_param_cb(ipv6_hw_frag, &ask_ipv6_hw_frag_ops, &ask_ipv6_hw_frag, 0644);
 MODULE_PARM_DESC(ipv6_hw_frag,
 		 "Offload IPv6 flows whose egress MTU is below the ingress port MTU "
-		 "with the microcode fragmenter (vendor behaviour: oversize packets are "
-		 "fragmented in hardware and no Packet Too Big is sent, RFC 8200 5). "
-		 "Default off: such flows stay in software");
+		 "with the microcode fragmenter (vendor behaviour, default 1: oversize "
+		 "packets are fragmented in hardware and no Packet Too Big is sent, "
+		 "RFC 8200 4.5). Global RFC 8200 kill switch: 0 keeps such flows in "
+		 "software (the kernel sends Packet Too Big) and drops the live HW "
+		 "records that carry the MTU check");
 
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
@@ -1325,9 +1343,9 @@ int ask_intent_lower(const struct ask_flow_intent *in,
 			 * ask_fe_flow_insert() for any flow carrying a VLAN edit.
 			 *
 			 * Carry the VLAN action flag in the lowered flags so the
-			 * intent survives, but ONLY when the VLAN gate is armed;
-			 * when the gate is off VLAN still fails closed to software
-			 * (default-off preserved). key->vlan_* already holds the
+			 * intent survives, but ONLY when the vlan_offload kill
+			 * switch is on; when it is off VLAN fails closed to
+			 * software. key->vlan_* already holds the
 			 * parsed tag edit for the CC path. */
 			if (!ask_hw_vlan_offload_armed())
 				return -EOPNOTSUPP;
@@ -2010,11 +2028,13 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	 * DF-clear oversize packets and punts DF-set ones to the host, which
 	 * sends ICMP frag-needed (PMTUD intact). IPv6 (measured 2026-10-09):
 	 * the microcode always fragments oversize packets and never sends
-	 * Packet Too Big, but a router must not fragment v6 (RFC 8200 5), so
-	 * such flows stay in software unless ipv6_hw_frag opts into the
-	 * vendor behaviour. */
+	 * Packet Too Big, which a router must not do (RFC 8200 4.5). Vendor
+	 * parity is the default; an operator who needs RFC behaviour clears the
+	 * global ipv6_hw_frag module parameter and such flows stay in software,
+	 * where the kernel sends Packet Too Big. There is deliberately no
+	 * per-port knob. */
 	if (key->egress_mtu) {
-		if (key->l3_proto == ASK_FLOW_L3_IPV6 && !ask_ipv6_hw_frag)
+		if (key->l3_proto == ASK_FLOW_L3_IPV6 && !READ_ONCE(ask_ipv6_hw_frag))
 			return -EOPNOTSUPP;
 		action.egress_mtu = key->egress_mtu;
 	}
@@ -2060,11 +2080,10 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	 * fields below (byte-identical record when vlan_edit_flags==0).
 	 */
 	if (key->vlan_edit_flags) {
-		/* Per-port gate: same contract ask_vlan_cc_flow_add() enforced
-		 * (armed on this flow's ingress port). Fail closed to SW when
-		 * off, matching the "default off, explicit per-port CLI arm"
-		 * behaviour this feature has always shipped with. A PPPoE strip
-		 * alone is gated per port (`offload pppoe`) in the replace path. */
+		/* Gate: same contract ask_vlan_cc_flow_add() enforced (vlan_offload
+		 * kill switch on AND this flow's ingress port engaged). Fails closed
+		 * to SW otherwise. A PPPoE strip alone is gated by pppoe_offload in
+		 * the replace path. */
 		if ((key->vlan_edit_flags & (ASK_VLANF_POP | ASK_VLANF_PUSH)) &&
 		    !ask_hw_vlan_offload_armed_port(key->port_id))
 			return -EOPNOTSUPP;
@@ -2394,7 +2413,7 @@ static u16 ask_flow_cookie_mtu(unsigned long cookie)
  * the one session (ponytail: one PPPoE WAN session per box; key the walk by
  * session if a multi-session use appears).
  */
-struct ask_pppoe_victim {
+struct ask_flush_victim {
 	struct list_head node;
 	u64 cookie;
 	u32 generation;
@@ -2403,7 +2422,7 @@ struct ask_pppoe_victim {
 
 static int ask_pppoe_collect(struct ask_flow *f, void *arg)
 {
-	struct ask_pppoe_victim *v;
+	struct ask_flush_victim *v;
 
 	if (!(f->key.vlan_edit_flags &
 	      (ASK_VLANF_PPPOE_STRIP | ASK_VLANF_PPPOE_INSERT)))
@@ -2418,16 +2437,22 @@ static int ask_pppoe_collect(struct ask_flow *f, void *arg)
 	return 0;
 }
 
-static void ask_pppoe_flush_fn(struct work_struct *w)
+/*
+ * Shared body of the HW-flow flushers: collect every flow @collect selects,
+ * remove its silicon record and SW entry, and log @what. Process context
+ * only (runs from a work item).
+ */
+static void ask_flow_flush_matching(int (*collect)(struct ask_flow *, void *),
+				    const char *what)
 {
 	struct ask_flow_table *t = ask_flow_default_table();
-	struct ask_pppoe_victim *v, *tmp;
+	struct ask_flush_victim *v, *tmp;
 	LIST_HEAD(victims);
 	unsigned int n = 0;
 
 	if (!t)
 		return;
-	ask_flow_walk(t, ask_pppoe_collect, &victims);
+	ask_flow_walk(t, collect, &victims);
 	list_for_each_entry_safe(v, tmp, &victims, node) {
 		/* The SW remove does not touch silicon, and the nft DESTROY
 		 * that follows finds no entry and returns early: without this
@@ -2441,20 +2466,62 @@ static void ask_pppoe_flush_fn(struct work_struct *w)
 		kfree(v);
 	}
 	if (n)
-		pr_info("ask: flow_offload: PPPoE session down, removed %u PPPoE HW flow(s)\n",
-			n);
+		pr_info("ask: flow_offload: %s, removed %u HW flow(s)\n",
+			what, n);
+}
+
+static void ask_pppoe_flush_fn(struct work_struct *w)
+{
+	ask_flow_flush_matching(ask_pppoe_collect, "PPPoE session down");
 }
 static DECLARE_WORK(ask_pppoe_flush_work, ask_pppoe_flush_fn);
 
-/* Also run when an operator removes `offload pppoe` from a port. */
+/* Also run when the pppoe_offload kill switch is cleared or a port disengages.
+ * No-op before the flow table exists (the parameter can be set at insmod). */
 void ask_flow_pppoe_flush(void)
 {
-	schedule_work(&ask_pppoe_flush_work);
+	if (ask_flow_default_table())
+		schedule_work(&ask_pppoe_flush_work);
 }
 EXPORT_SYMBOL_GPL(ask_flow_pppoe_flush);
 
-/* T-M6-SP4: is PPPoE offload armed (CLI `offload pppoe`) on the session's
- * physical port? */
+/*
+ * F-262: when the ask.ipv6_hw_frag kill switch is cleared, drop the IPv6 HW
+ * records that already carry the microcode MTU check so those flows return to
+ * the kernel (which then sends Packet Too Big).
+ */
+static int ask_v6_frag_collect(struct ask_flow *f, void *arg)
+{
+	struct ask_flush_victim *v;
+
+	if (f->key.l3_proto != ASK_FLOW_L3_IPV6 || !f->key.egress_mtu)
+		return 0;
+	v = kzalloc(sizeof(*v), GFP_ATOMIC);
+	if (!v)
+		return 0;
+	v->cookie = f->cookie;
+	v->generation = f->generation;
+	v->key = f->key;
+	list_add_tail(&v->node, arg);
+	return 0;
+}
+
+static void ask_v6_frag_flush_fn(struct work_struct *w)
+{
+	ask_flow_flush_matching(ask_v6_frag_collect,
+				"IPv6 hardware fragmentation disabled");
+}
+static DECLARE_WORK(ask_v6_frag_flush_work, ask_v6_frag_flush_fn);
+
+/* No-op before the flow table exists (the parameter can be set at insmod). */
+static void ask_flow_v6_frag_flush(void)
+{
+	if (ask_flow_default_table())
+		schedule_work(&ask_v6_frag_flush_work);
+}
+
+/* T-M6-SP4: is PPPoE offload armed (pppoe_offload on, port engaged) on the
+ * session's physical port? */
 static bool ask_pppoe_port_armed(int ifindex)
 {
 	struct net_device *dev;
@@ -2517,7 +2584,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	    (pppoe > 0 && !ask_pppoe_port_armed(pppoe_info.ifindex))) {
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE flow not offloaded (T-M6-SP4 %s) - SW fallback cookie=0x%lx\n",
 				    pppoe < 0 ? "unsupported" :
-				    "offload pppoe not set on the session port",
+				    "pppoe_offload off or session port not engaged",
 				    f->cookie);
 		return -EOPNOTSUPP;
 	}
@@ -4091,6 +4158,7 @@ void ask_flow_offload_exit(void)
 	if (ask_pppoe_nb_ok)
 		unregister_netdevice_notifier(&ask_pppoe_netdev_nb);
 	cancel_work_sync(&ask_pppoe_flush_work);
+	cancel_work_sync(&ask_v6_frag_flush_work);
 
 	dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
 	/* T-M6-3: netevent notifier unregistration moved to ask_neigh_exit(). */
