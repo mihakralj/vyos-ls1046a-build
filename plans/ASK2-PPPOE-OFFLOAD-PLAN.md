@@ -214,10 +214,12 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 | N (kernel software flowtable) | 3.99 Gbit/s | 40.4% softirq, 57.8% idle | 0 |
 | Y (hardware decap) | **5.16 Gbit/s** | **2.0% softirq, 97.5% idle** | 4 |
 
-- **Bottleneck:** with hardware decap the DUT is nearly idle, so 5.16 Gbit/s is dell1's kernel-PPPoE send limit. The remaining DUT softirq is the ACK direction (LAN→PPPoE), which stays in software until encap.
+- **Bottleneck:** with hardware decap the DUT is nearly idle, so 5.16 Gbit/s is a limit of dell1, not of the DUT. The remaining DUT softirq is the ACK direction (LAN→PPPoE), which stays in software until encap.
+  - **Cause (measured 2026-10-09):** dell1's mlx4 NIC cannot RSS-hash PPPoE frames (EtherType 0x8864), so every returning ACK lands on RX queue 0 and CPU0. TCP is ACK-clocked, so dell1's whole send path (software GSO into 1452-byte segments, software checksums because `ppp0` has no checksum or TSO offload, PPPoE transmit) runs in that one softirq. CPU0 was at 91.7% softirq and the other seven CPUs idle; rx0 took 1.02 M packets in 8 s and rx1–7 none. That is about 510 kpps, or 5.9 Gbit/s.
+  - **Fix:** RPS on dell1's `enp1s0`, `echo fe > /sys/class/net/enp1s0/queues/rx-0/rps_cpus` (the flow dissector hashes on the inner flow). 5.94 → 9.36 Gbit/s (14 s `-P 8` probe), DUT at line rate. `bin/testrig-offload-quick.sh` now sets it for PPPoE cells and restores it on exit.
 - **Counter note:** `pppoe10` RX rises by only ~8 packets in both modes, because the kernel software flowtable also bypasses the PPPoE netdev. The software/hardware discriminator is therefore CPU and conntrack `[HW_OFFLOAD]`, not netdev counters.
 
-### 3.4 Encap direction (LAN→PPPoE): implemented 2026-10-08, not yet board-tested
+### 3.4 Encap direction (LAN→PPPoE): implemented 2026-10-08, silicon-validated 2026-10-09 (§3.6)
 
 - **Kernel, F-261** (`bin/kernel-fixups/F_261.py`):
   - A new flag `FMAN_PCD_VLANF_PPPOE_INSERT` (bit 3), plus a `pppoe_sid` field in `fman_pcd_fe_flow_action` and `fman_pcd_vlan_params`.
@@ -266,7 +268,52 @@ set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu   # until 05 PREEMP
   - The interim `ask.pppoe_offload` / `ask.pppoe_encap_offload` module parameters are removed.
 - **Same change: vyos-1x stack rebased onto `rolling` `4b022646b` (2026-10-08).** Upstream added `verify_vpp_mtu()` (T9161) in `interfaces_ethernet.py` next to where patch 025 inserts `verify_ingress_policer()`. Patch 025 is regenerated to keep both functions. With it, the full stack 001–053 applies on today's `rolling` both with `--3way` and with plain `git apply`. Without it, every patch from 025 on conflicted or cascaded, and the next vyos-1x cache miss would have failed CI.
 
-### 3.6 Hardware MTU check: vendor `05 PREEMPTIVE_CHECKS` + fragmentation (F-262, 2026-10-08, not yet board-tested)
+### 3.6 Hardware MTU check: vendor `05 PREEMPTIVE_CHECKS` + fragmentation (F-262, 2026-10-08; revised and board-validated 2026-10-09)
+
+**Board result and revision (2026-10-09, image `2026.10.08-2320-rolling`, kernel `6.18.55-vyos`, DUT `.185`).** The design below was built as written and tested. `05` and the MTU field work. The vendor's hardware fragmentation does not give a usable result here, so the shipped F-262 no longer builds a fragmentation pool:
+
+- **Records.** Encap records carry `05` first with parameter `38 03`, and ENQ `mtu=0x05d4` (1492), word2 = the frag-info block at MURAM `0x54300` (32 B). Decoded from DDR on the live board, record layout as in the table below.
+- **Hardware fragmentation is unusable (`frag_options` = `0x000c`, `BPID_ENABLE` set, pool bpid 5).** An oversize DF-clear frame produced exactly one fragment (the first, at the MTU) and no second one, so the datagram was lost. The datagram is lost, and no `Err FD` is raised. The cause inside the microcode was not investigated.
+- **Fix, validated live.** With `BPID_ENABLE` clear (`frag_options = 0x0004`, `OPT_COUNTER_EN` only) and ENQ `bpid = 0`, the microcode no longer touches the frame: it reaches the host path. The kernel then does what a router must do:
+  - DF clear: the host fragments (`IpFragOKs`/`IpFragCreates` rise) and the datagram is delivered whole.
+  - DF set: the host sends ICMP fragmentation-needed (`IcmpOutDestUnreachs` rises), and the sender's route cache shows `mtu 1492`, so PMTUD works. This answers the open silicon unknown in step 4: the frame is **not** swallowed into an error queue.
+- **Revised F-262 (`bin/kernel-fixups/F_262.py`, in the tree, ships with the next CI image).** No fragmentation pool and no `fman_pcd_frag_pool_bpid()`. The 32-byte frag-info block stays, initialised with `frag_options = 0x0004`. ENQ `bpid` = 0, `mtu` = `egress_mtu`, word2 = `fe_frag_off`. The emitter returns `-EOPNOTSUPP` only if the L2 fields or `fe_frag_off` are missing, and ask.ko then keeps the flow in software. The CI image `2320` still carries the pool version; for board runs on it, re-apply `frag_options = 0x0004` after each cold boot with a `/dev/mem` write to `0x1A00000 + 0x54300` (word at +0, big endian `0x00040000`). The block's MURAM offset is printed by the dmesg line at engage.
+- **Stability probes with `frag_options = 0x0004` (cold boot, eth3 and eth4 only).**
+  - Probe 1, 45 s, two concurrent flows from dell2 (400 fitting 1000-byte datagrams to warm the record, then 400 × 1472-byte datagrams that are 8 bytes oversize on the PPPoE leg): DF clear delivered 399/400, DF set delivered 0/400 and drew ICMP fragmentation-needed. The DUT sent 407 `IcmpOutDestUnreachs` and made 399 reassemblable datagrams (`IpFragOKs` +399, `IpFragCreates` +798).
+  - The one missing DF-clear datagram is the only frame the frag-info counters saw (`v4_frames=1`, `alloc_fail=1`).
+  - Probe 2, a fresh flow, DF clear only: 300/300 delivered and the counters did not move, so that loss was a one-off transient on the first oversize frame, not a rate.
+  - Throughout: no `Err FD`/timeout/bus-error messages, 0 RX errors on eth3/eth4, no RX-deaf port, MURAM `used` flat at 52922, and all flows aged out afterwards (`total flows: 0`).
+- **Not measured:** IPv6. ask.ko still returns `-EOPNOTSUPP` for an IPv6 flow that needs the check, so it stays in software (the kernel sends Packet Too Big). Allowing `egress_mtu` for IPv6 would make `pppoe-up-v6` fully hardware, but it needs the same `frag_options = 0x0004` behaviour proven for IPv6 first (the vendor sets no DF-honor bit for v6, so the microcode may fragment instead of passing the frame up). Follow-up.
+- **TCP MSS clamping** on the PPPoE interface stays recommended, so TCP never has to fragment.
+
+**Findings made on the board while running the quick protocol (all fixed in the tree; none is in image `2320`):**
+
+1. `board/scripts/vyos-offload-ask` dropped its 4th argument, so `offload pppoe` armed the helper without the PPPoE bit (the engage line showed `pppoe=0` on eth3).
+2. `ask_flow_cookie_pppoe()` used `out.ifidx` (the PPP netdev) where the physical port is `out.hw_ifidx`, so the encap port gate looked at the wrong device.
+3. **Session-down flush leaked silicon records.** `ask_pppoe_flush_fn()` removed the software flow entries only. The later nft DESTROY callback then finds no entry (`-ENOENT`) and returns before `ask_fe_flow_remove()`, so the ehash records stayed in silicon: after a session flap, 9 flows were still listed two minutes later, and a decoded record carried SID 5 while the live session was SID 6. A stale encap record would forward into the dead session with the old SID and MAC, and each one leaks a DDR record. The 2126 flap test missed it because its flows had already ended and DESTROY had run first. Fix: `struct ask_pppoe_victim` carries the flow key and the flush calls `ask_fe_flow_remove(&v->key)` after `ask_flow_remove_owned()`. Re-run with the fix (4-stream iperf3 while `pppd` was killed on dell1): 10 flows to 0 within 2 s, MURAM `used` flat at 52922, RX alive, 0 errors, and the redial (new SID) worked.
+
+**Throughput, 30 s quick protocol, final state (`ask.ko` srcversion `F5AADE10C3AD930F078393C` on image `2320`, `frag_options` unchanged; CSV `/mnt/builds/ask2-review/oracle/quick-20261009-0127.csv`):**
+
+| Cell | Gbit/s | Verdict |
+|---|---|---|
+| unicast v4 / v6 | 9.38 / 9.24 | HW / HW |
+| NAT44 / NAT66 | 9.34 / 9.27 | HW / HW |
+| VLAN-VLAN v4 / v6 | 9.32 / 9.18 | HW / HW |
+| PPPoE decap (down) v4 / v6 | 5.76 / 5.74 | HW / HW (dell1 RX-queue-0 limit, see §3.3; software control 3.98 / 3.74) |
+| PPPoE encap (up) v4 | 9.19 | HW (software control 3.60) |
+| PPPoE encap (up) v6 | 4.35 | PARTIAL (ratio 0.46), by design: the MTU check keeps IPv6 in software (software control 3.58) |
+
+**Re-run with RPS on dell1 (same image and `ask.ko`, CSV `quick-20261009-rps.csv`, `bin/testrig-offload-quick.sh` now enables RPS for PPPoE cells):**
+
+| Cell | Gbit/s | Verdict |
+|---|---|---|
+| PPPoE decap (down) v4 / v6 | 9.35 / 9.22 | HW / HW (ratio 1.18 / 1.02) |
+| PPPoE encap (up) v4 / v6 | 9.20 / 4.36 | HW / PARTIAL by design (ratio 1.14 / 0.46) |
+| NAT44 over PPPoE | 9.33 | HW (ratio 1.14) |
+
+So PPPoE decap and encap v4 and NAT over PPPoE all run at line rate; the 5.76 figures above were the dell1 limit. After the re-run: 0 `Err FD`, MURAM `used` flat at 52922, RPS restored to 0.
+
+Combinations (once, CSV `quick-20261009-0134.csv`): NAT44 over PPPoE (masquerade on `pppoe10`) 9.08 Gbit/s HW; VLAN-VLAN NAT44 (masquerade on `eth4.20`) 9.34 Gbit/s HW. PPPoE over VLAN is verified by code only: `ask_flow_cookie_pppoe()` sees two encap entries, `ask_tuple_only_pppoe` requires one, so the flow falls through to `-EOPNOTSUPP` and stays in software. It was not run on the board. After the runs: 124 M packets, 0 RX errors, 0 `Err FD`, MURAM `used` flat.
 
 **What the vendor does.** `cdx_ehash.c fill_actions()` puts `05 PREEMPTIVE_CHECKS_ON_PKT` first in every routed record (multicast too). Bridge and PPPoE-relay records use ENQUEUE mtu `0xffff`, and IPsec-to-SEC records set `FRAG_DISABLE`; none of those carry the check. The pieces:
 
@@ -289,18 +336,18 @@ The live vendor record on `.106` (2026-10-04) shows `05` param `38 03 00…`, EN
 
 - **The request.** `u16 egress_mtu` is added to `fman_pcd_fe_flow_action` and `fman_pcd_vlan_params`; 0 means no check, and the record stays byte-identical.
 - **The frag-info block.** 32 bytes appended to the owned, refcounted FE internal-buffer MURAM reservation, after the 0216 stats scratch (`pcd->fe_frag_off`). It is initialised like the vendor's. It lives and dies with the engage lifecycle, so the S1→S0 MURAM baseline still returns to zero.
-- **The fragmentation pool.** `fman_pcd_frag_pool_bpid()` creates a dedicated BMan pool of 2048 × 2 KiB buffers (order-0 pages, `DMA_BIDIRECTIONAL` on the FMan device). It is created on the first record that needs it and never freed, because hardware may hold its buffers at any time.
+- **The fragmentation pool (removed 2026-10-09, see the board result above).** `fman_pcd_frag_pool_bpid()` creates a dedicated BMan pool of 2048 × 2 KiB buffers (order-0 pages, `DMA_BIDIRECTIONAL` on the FMan device). It is created on the first record that needs it and never freed, because hardware may hold its buffers at any time.
 - **The emitter**, for an L2/TX record with `egress_mtu` set:
   - puts `05` first, ahead of the `04 11 12` front half (opcode 0 is not `11`);
   - seals its parameter once the ENQUEUE offset is known;
-  - writes ENQ `mtu` = `egress_mtu`, `bpid` = the pool, and `word2` = `fe_frag_off`.
+  - writes ENQ `mtu` = `egress_mtu`, `bpid` = the pool (revised: 0), and `word2` = `fe_frag_off`.
 - **Fail-closed.** If any piece is missing it returns an error, and ask.ko keeps the flow in software.
 
 **ask.ko.**
 
 - The replace path reads the flowtable tuple's `mtu`, which `flow_offload_fill_route()` takes from the egress dst. It sets `key.egress_mtu` only when that MTU is below the true ingress port's MTU.
 - So LAN 1500 → PPPoE 1492 gets the check. Port↔port 1500/1500, PPPoE decap, and VLAN flows of equal MTU do not, and their records are unchanged.
-- An IPv6 flow that would need the check stays in software. The microcode would fragment IPv6 (the vendor sets no DF-honor for v6), and a router must not; the kernel sends Packet Too Big instead.
+- An IPv6 flow that would need the check stays in software. This is a precaution, not a measured result: every F-262 probe was IPv4. The vendor frag-info block has a `v6_identification` counter, so the microcode probably has an IPv6 fragmentation path, but we have not measured what it does with oversize IPv6 when `BPID_ENABLE` is clear. A router must not fragment IPv6, so the kernel sends Packet Too Big until a board test shows oversize v6 frames reach the host (no `Err FD`, no loss).
 
 **Encap record layout with the check.** For a 50-byte key the opcode list is at +60 and parameters start at +76:
 
@@ -319,13 +366,13 @@ That gives opcodes `05 04 11 12 21 43 41 01` and `mtu_off` = 132 − 76 = `0x38`
 **Board test (after CI, cold boot, eth3/eth4 only):**
 
 1. **Record.** Bring up an encap flow (dell2 → eth4 → pppoe10 → dell1). Check:
-   - dmesg has `F-262 frag pool bpid N … frag info @MURAM 0x…`;
-   - a `/dev/mem` dump of the eth4 record has the layout above, with bpid N and word2 = that offset.
+   - dmesg has `F-262 frag pool bpid N … frag info @MURAM 0x…` (the pool version; the revised F-262 has no pool);
+   - a `/dev/mem` dump of the eth4 record has the layout above, with bpid N (revised: 0) and word2 = that offset.
    - **Regression check:** a plain eth3↔eth4 record has no `05` and ENQ mtu 1500.
 2. **Fits.** 1400-byte UDP: HIT, delivered intact.
-3. **Fragment.** 1500-byte IPv4 with DF clear (`ping -M dont -s 1472`). Expect two fragments on dell1 (`tcpdump -e`, EtherType 0x8864, valid PPPoE lengths). The frag-info counters at FMan MURAM + `fe_frag_off` should rise: +8 v4 frames, +16 v4 fragments, +4 allocation failures stays 0. The frag pool must not drain, so repeat a few thousand times.
-4. **DF.** 1500-byte IPv4 with DF set (`ping -M do -s 1472`). This is unmeasured: with DF action "error" the frame may land in the port error FQ (`Err FD status`, a PMTUD black hole) or reach the host, which would send ICMP fragmentation-needed. Record which. If it is a black hole, the frag-info `frag_options` DF bits (0x10 ignore, 0x20 don't fragment) and the `05` OpMask are the calibration points. Try them live through `/dev/mem` before changing code.
-5. **Stability.** 60 s of mixed sizes at rate, with no RX-deaf port and no `Err FD` growth. Fragmentation produces S/G frames on the no-confirm TX FQ, which has never been exercised.
+3. **Fragment.** 1500-byte IPv4 with DF clear (`ping -M dont -s 1472`). Expect two fragments on dell1 (`tcpdump -e`, EtherType 0x8864, valid PPPoE lengths). The frag-info counters at FMan MURAM + `fe_frag_off` should rise: +8 v4 frames, +16 v4 fragments, +4 allocation failures stays 0. The frag pool must not drain, so repeat a few thousand times. **Result 2026-10-09: hardware fragmentation emits one fragment per frame, so it was dropped; the host fragments instead (see the board result above).**
+4. **DF.** 1500-byte IPv4 with DF set (`ping -M do -s 1472`). This is unmeasured: with DF action "error" the frame may land in the port error FQ (`Err FD status`, a PMTUD black hole) or reach the host, which would send ICMP fragmentation-needed. Record which. If it is a black hole, the frag-info `frag_options` DF bits (0x10 ignore, 0x20 don't fragment) and the `05` OpMask are the calibration points. Try them live through `/dev/mem` before changing code. **Result 2026-10-09: not a black hole.** With `frag_options = 0x0004` the frame reaches the host, which sends ICMP fragmentation-needed (400/400 DF-set frames answered, sender route cache `mtu 1492`). No DF-bit calibration was needed.
+5. **Stability.** 60 s of mixed sizes at rate, with no RX-deaf port and no `Err FD` growth. Fragmentation produces S/G frames on the no-confirm TX FQ, which has never been exercised. **Result 2026-10-09: passed with host fragmentation (two probes, see the board result above); the hardware S/G fragmentation path was not pursued.**
 6. **Throughput (30 s quick protocol).** After `set interfaces ethernet eth3 offload pppoe` (eth3 is the PPPoE source interface), run `bin/testrig-offload-quick.sh` (`ASK2-REWRITE-PLAN.md` §8). Pass: the four PPPoE cells report HW and beat the software control in §3a (decap v4/v6 3.98/3.74, encap v4/v6 3.60/3.58 Gbit/s). The other six cells must match the `2126` baseline (9.2-9.4 Gbit/s, HW). Expected exception: `pppoe-up-v6` at 1500 to 1492 stays software by design (F-262 keeps IPv6 that needs the MTU check in the kernel), so PARTIAL or SW there is correct, not a failure.
 7. **Complex combinations (once per image, not a matrix):** NAT44 over PPPoE (LAN to PPPoE WAN with masquerade on `pppoe10`); VLAN-VLAN NAT44; PPPoE over VLAN (must stay software, `-EOPNOTSUPP`, still forwarding correctly); and a session flap during an encap flow (the session-down notifier must flush the records).
 
