@@ -2042,8 +2042,11 @@ own PCD objects and prove readback.
       fragmentation-needed (DF set, PMTUD verified). This resolves the open
       DF silicon unknown.
     - IPv6 that needs the check stays in software, so `pppoe-up-v6` is
-      PARTIAL by design (4.35 Gbit/s vs 3.58 software). Allowing it needs
-      the same host-pass behaviour proven for IPv6 first.
+      PARTIAL by design (4.35 Gbit/s vs 3.58 software). Measured
+      2026-10-09: the microcode does not host-pass oversize IPv6 (it enters
+      its fragmenter regardless of `frag_options`, DFBIT_HONOR or DF action
+      bits, finds no buffer, and drops silently with no Packet Too Big), so
+      this limit is permanent for this microcode.
     - PPPoE over VLAN is code-verified to stay in software (two encap
       entries, `-EOPNOTSUPP`); not run on the board.
     - Found and fixed on the board (tree only, not in image `2320`):

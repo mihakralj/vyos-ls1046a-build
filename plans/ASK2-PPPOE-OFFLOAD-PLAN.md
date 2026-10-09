@@ -283,7 +283,16 @@ set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu   # until 05 PREEMP
   - The one missing DF-clear datagram is the only frame the frag-info counters saw (`v4_frames=1`, `alloc_fail=1`).
   - Probe 2, a fresh flow, DF clear only: 300/300 delivered and the counters did not move, so that loss was a one-off transient on the first oversize frame, not a rate.
   - Throughout: no `Err FD`/timeout/bus-error messages, 0 RX errors on eth3/eth4, no RX-deaf port, MURAM `used` flat at 52922, and all flows aged out afterwards (`total flows: 0`).
-- **Not measured:** IPv6. ask.ko still returns `-EOPNOTSUPP` for an IPv6 flow that needs the check, so it stays in software (the kernel sends Packet Too Big). Allowing `egress_mtu` for IPv6 would make `pppoe-up-v6` fully hardware, but it needs the same `frag_options = 0x0004` behaviour proven for IPv6 first (the vendor sets no DF-honor bit for v6, so the microcode may fragment instead of passing the frame up). Follow-up.
+- **IPv6, measured 2026-10-09 (image `2320`, experimental ask.ko with the IPv6 gate removed, cold boot): the microcode does not punt oversize IPv6 to the host.** Flow dell2 `fd99:2::113` to dell1 `fd99:50::1` (UDP, `IPV6_MTU_DISCOVER` = PROBE so the sender cannot cache a PMTU), 100 datagrams of 1452 bytes (1500-byte packets) into a record with the `05` check (`mtu 0x05d4`). Four variants gave the same result:
+
+  | Variant | `v6_frames` | `alloc_fail` | PTB sent | Delivered |
+  |---|---|---|---|---|
+  | `frag_options` 0x0004, ENQ bpid 5 (pool) | +100 | +148 | 0 | 0 |
+  | `frag_options` 0x0004, bpid 0 | +100 | +135 | 0 | 0 |
+  | same, `05` OpMask 0x03 (DFBIT_HONOR) | +100 | +133 | 0 | not checked (server idled out; counters are the evidence) |
+  | `frag_options` 0x0024 (DF action 0x20), OpMask 0x01 | +100 | +122 | 0 | 0 |
+
+  The frame always enters the IPv6 fragmenter (`v6_frames` counts every oversize frame, regardless of `BPID_ENABLE`, DFBIT_HONOR or the DF action bits, unlike IPv4 where `v4_frames` stays 0), finds no fragment buffer (`alloc_fail` rises, `v6_frags` stays 0) and drops the frame silently. `Err FD` and RX errors stayed 0, `Icmp6OutPktTooBigs` stayed 0, MURAM `used` stayed flat at 52922. Allowing `egress_mtu` for IPv6 would therefore black-hole every oversize IPv6 packet and break IPv6 PMTUD. ask.ko keeps returning `-EOPNOTSUPP` for an IPv6 flow that needs the check, so it stays in software and the kernel sends Packet Too Big. A real fragment pool would only make the hardware fragment IPv6, which a router must not do (RFC 8200 5). Closed: IPv6 hardware offload across an MTU decrease is not possible with this microcode.
 - **TCP MSS clamping** on the PPPoE interface stays recommended, so TCP never has to fragment.
 
 **Findings made on the board while running the quick protocol (all fixed in the tree; none is in image `2320`):**
@@ -347,7 +356,7 @@ The live vendor record on `.106` (2026-10-04) shows `05` param `38 03 00…`, EN
 
 - The replace path reads the flowtable tuple's `mtu`, which `flow_offload_fill_route()` takes from the egress dst. It sets `key.egress_mtu` only when that MTU is below the true ingress port's MTU.
 - So LAN 1500 → PPPoE 1492 gets the check. Port↔port 1500/1500, PPPoE decap, and VLAN flows of equal MTU do not, and their records are unchanged.
-- An IPv6 flow that would need the check stays in software. This is a precaution, not a measured result: every F-262 probe was IPv4. The vendor frag-info block has a `v6_identification` counter, so the microcode probably has an IPv6 fragmentation path, but we have not measured what it does with oversize IPv6 when `BPID_ENABLE` is clear. A router must not fragment IPv6, so the kernel sends Packet Too Big until a board test shows oversize v6 frames reach the host (no `Err FD`, no loss).
+- An IPv6 flow that would need the check stays in software. Measured 2026-10-09 (see §3.6): the microcode enters its IPv6 fragmenter for every oversize frame whatever `frag_options`, DFBIT_HONOR or the DF action bits say, and drops it silently when no fragment buffer exists, so no Packet Too Big is sent. Hardware IPv6 across an MTU decrease would break PMTUD; the kernel sends Packet Too Big instead.
 
 **Encap record layout with the check.** For a 50-byte key the opcode list is at +60 and parameters start at +76:
 
