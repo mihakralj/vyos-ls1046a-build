@@ -10,7 +10,12 @@
 # NAT cells use runtime nft tables (table ask2q) masquerading out of eth4; the VyOS
 # NAT66 rule is removed for the run and restored on exit. Nothing persistent changes.
 #
-# Usage: bin/testrig-offload-quick.sh [cell ...]       (default: all cells)
+# Combo cells (opt-in, not in the default run; name them or pass `combo`):
+#   nat-pppoe-up-v4  NAT44 masquerade on pppoe10, LAN -> PPPoE (encap + NAT, decap replies)
+#   nat-vlan-v4      NAT44 masquerade on eth4.20, VLAN 10 -> VLAN 20
+#
+# PPPoE cells enable RPS on dell1's DUT-facing NIC for the run (see rps_set); other cells leave it off.
+# Usage: bin/testrig-offload-quick.sh [cell ...]       (default: the 10 base cells)
 # Env:   DUT DUR STEADY_FROM STREAMS OUT
 set -u
 DUT=${DUT:-vyos@192.168.1.185}
@@ -35,7 +40,15 @@ pppoe-up-v4|none|d2|10.99.2.113|10.99.50.1
 pppoe-down-v6|none|d1|fd99:50::1|fd99:2::113
 pppoe-up-v6|none|d2|fd99:2::113|fd99:50::1
 "
+# opt-in combo cells: only run when named (or via `combo`)
+CELLS_COMBO="
+nat-pppoe-up-v4|4p|d2|10.99.2.113|10.99.50.1
+nat-vlan-v4|4v|d1|10.99.10.112|10.99.20.113
+"
 WANT="$*"
+case " $WANT " in *" combo "*) WANT="$WANT nat-pppoe-up-v4 nat-vlan-v4" ;; esac
+CELLS_RUN="$CELLS_ALL"
+[ -n "$WANT" ] && CELLS_RUN="$CELLS_ALL $CELLS_COMBO"
 
 NAT66_RULE='oifname "eth4" ip6 saddr fd99:1::/64 counter masquerade comment "SRC-NAT66-100"'
 vyos_nat66_present=0
@@ -46,10 +59,24 @@ nat_set(){
   nat_clear
   case $1 in
     4) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2q post oifname eth4 ip saddr 10.99.1.0/24 masquerade' ;;
+    4p) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2q post oifname pppoe10 ip saddr 10.99.2.0/24 masquerade' ;;
+    4v) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2q post oifname eth4.20 ip saddr 10.99.10.0/24 masquerade' ;;
     6) $S 'sudo nft add table ip6 ask2q && sudo nft "add chain ip6 ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip6 ask2q post oifname eth4 ip6 saddr fd99:1::/64 masquerade' ;;
   esac
 }
+# dell1's mlx4 NIC cannot RSS-hash PPPoE frames, so every returning ACK lands on RX queue 0 / CPU0
+# and the whole TCP send path runs in that one softirq (about 5.9 Gbit/s ceiling, DUT idle).
+# RPS hashes on the inner flow instead. Runtime-only; applied for PPPoE cells, restored on exit.
+D1_IF=${D1_IF:-enp1s0}
+rps_set(){
+  if [ "$1" = on ]; then
+    $D1 "m=\$(printf '%x' \$(( (1<<\$(nproc)) - 1 ))); for q in /sys/class/net/$D1_IF/queues/rx-*/rps_cpus; do echo \$m | sudo -n tee \$q >/dev/null; done"
+  else
+    $D1 "for q in /sys/class/net/$D1_IF/queues/rx-*/rps_cpus; do echo 0 | sudo -n tee \$q >/dev/null; done"
+  fi
+}
 cleanup(){
+  rps_set off 2>/dev/null
   nat_clear
   if [ $vyos_nat66_present = 1 ]; then
     $S "sudo nft list chain ip6 vyos_nat POSTROUTING | grep -q SRC-NAT66-100 || sudo nft add rule ip6 vyos_nat POSTROUTING $NAT66_RULE"
@@ -79,7 +106,7 @@ PY
 echo "ts,cell,gbps,dut_busy,dut_softirq,gen_cpu,retrans,hw_pkts,data_pkts_est,hw_ratio,verdict" > "$OUT"
 printf '%-15s %7s %6s %6s %6s %8s %12s %6s  %s\n' cell Gbit/s busy% sirq% gen% retrans hw_pkts ratio verdict
 
-for line in $CELLS_ALL; do
+for line in $CELLS_RUN; do
   IFS='|' read -r name nat cli a b <<<"$line"
   if [ -n "$WANT" ] && ! [[ " $WANT " == *" $name "* ]]; then continue; fi
   [ $cli = d1 ] && G="$D1" || G="$D2"
@@ -87,6 +114,7 @@ for line in $CELLS_ALL; do
     printf '%-15s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,0,0,0,0,0,0,0,0,SKIP" >> "$OUT"; continue
   fi
   nat_set $nat >/dev/null 2>&1
+  case $name in *pppoe*) rps_set on ;; *) rps_set off ;; esac
   tag="$name"
   $SI bash -s -- $STEADY_FROM $((DUR-STEADY_FROM-2)) > /tmp/quick.stat <<'EOS' &
 sf=$1; w=$2
