@@ -1,5 +1,10 @@
 # ASK2 VLAN Offload — VyOS CLI Grammar (design to implement)
 
+> **Superseded 2026-10-09 by §9.** The per-port `offload vlan` leaf designed in
+> §§1-8 was removed: VLAN is an automatic capability of an engaged port.
+> Granularity is per port + per IP family only. Read §9 first; §§1-8 are
+> design history.
+
 **2026-08-26 · dpaa1 · T-M6-8 follow-up.** Defines the per-interface CLI grammar
 that replaces the interim global `ask_vlan_offload` module param, so VLAN
 pop/push offload is expressed and scoped in `config.boot` like every other ASK
@@ -218,3 +223,80 @@ churn RX-deaf / mgmt-martian caveats are resolved or root-caused to lab-only
 - [ ] Board gate: `set offload vlan` on eth3/eth4 arms the port bit, VLAN
       flows HW-offload, `delete` returns them to software, eth0 rejected,
       `offload vlan` without `offload ipv4` rejected, gate-off regression clean.
+
+## 9. Final model: per-port + per-family only (2026-10-09, supersedes §§1-8)
+
+Sections 1-8 record the original per-capability design. They are kept as the
+design history only: the `offload vlan` leaf (§2), its genl attribute and the
+per-port VLAN bit no longer exist. The `offload pppoe` leaf and the short-lived
+`offload disable-ipv6-fragmentation` leaf were never kept either.
+
+**Granularity.** Per-port engage is the one mandatory granularity: engaging a
+port is a real silicon change (KG scheme RSS to AC_CC, BMI RFPNE/RCCB, a
+512 KiB ehash table, FE objects, a TX FQ, the F-262 RX-port triple) and it is
+what makes the port exclusive against VPP and the ingress policer. Per-port +
+per-IP-family (`offload ipv4`, `offload ipv6`) is the operator policy knob; it
+only gates flow admission, so it is free and allows a staged rollout (for
+example IPv4 offloaded while IPv6 stays in software). Nothing finer exists.
+
+```
+interfaces ethernet <ethN> offload ipv4
+interfaces ethernet <ethN> offload ipv6
+```
+
+```mermaid
+flowchart TD
+    P["port: offload ipv4 and/or ipv6 set?"] -->|no| SW["port not engaged: mainline RSS, all flows in software"]
+    P -->|yes| E["port engaged (family mask != 0)"]
+    E --> F{"flow family allowed by mask?"}
+    F -->|no| SW2["flow stays in software"]
+    F -->|yes| C["automatic capabilities of an engaged port"]
+    C --> R["routed + NAT/PAT"]
+    C --> V["VLAN pop/push (vlan_offload)"]
+    C --> PP["PPPoE decap/encap (pppoe_offload)"]
+    C --> B["L2 bridge"]
+    C --> H["IPv6 MTU-check fragmentation (ipv6_hw_frag)"]
+```
+
+**Automatic capabilities.** VLAN, NAT, PPPoE and bridge need no leaf; an
+engaged port carries them. PPPoE is gated on the PPPoE `source-interface`
+physical port being engaged (decap ingress and encap egress both go through
+it). Bridge offload is on while any port is engaged.
+
+**Global kill switches (ask.ko module parameters, default on).** They stay
+for diagnostics and for operators who must opt out of a capability; clearing
+one on a live system tears the affected hardware records down so flows return
+to the kernel.
+
+| Parameter | Switches off | Live effect on 1 to 0 |
+|---|---|---|
+| `vlan_offload` | VLAN pop/push (and the `ASK_CAP_VLAN` bit) | per engaged port: VLAN CC teardown + FE re-engage |
+| `pppoe_offload` | PPPoE decap/encap | flush all PPPoE flows |
+| `ipv6_hw_frag` | IPv6 hardware fragmentation | flush IPv6 records carrying the MTU check |
+| `nat44_offload`, `nat66_offload` | NAT44 / NAT66 | existing behaviour, unchanged |
+| `vlan_push_only` | untagged-to-tagged push | existing behaviour, unchanged |
+
+**IPv6 fragmentation policy.** An IPv6 flow whose route MTU is below its
+ingress port MTU is offloaded with the microcode MTU check, so oversize
+packets are fragmented in hardware (vendor parity). The microcode has no
+host-punt path for IPv6 and never sends Packet Too Big, so PMTU discovery is
+hidden for such flows (RFC 8200 4.5: a router must not fragment IPv6 in
+transit). Where RFC conformance matters, set `ask.ipv6_hw_frag=0`: such flows
+stay in the kernel, which sends Packet Too Big. It is deliberately a global
+switch, not a per-port leaf. IPv4 is unaffected (DF-clear is fragmented in
+hardware, DF-set is punted to the host, which sends ICMP fragmentation-needed).
+
+**Migration.** `interfaces` config version 35 to 36 (`35-to-36`) deletes
+`offload vlan` and `offload pppoe` from stored configs. The family leaves are
+kept, so a port that had them stays engaged and now gets VLAN/PPPoE offload
+automatically.
+
+**Verify.** `interfaces_ethernet.py` `verify_offload` keeps the supported-port
+check, the VPP-exclusivity check and the F-222 MTU ceiling (1280-3600) for every
+engaged port. The MTU ceiling formerly ran only when `offload vlan` or
+`offload pppoe` was present (patch 044 split it off `_ask_on`); it now covers
+every engaged port again.
+
+**Control path.** `ethernet.py` `set_ask_offload(family_mask)` runs
+`vyos-offload-ask --port <hw-port> family <mask>`, which sends genl
+`engage` with `port-id` + `family-mask` (or `disengage` for mask 0).

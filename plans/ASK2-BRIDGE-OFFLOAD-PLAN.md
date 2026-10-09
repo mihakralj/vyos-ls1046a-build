@@ -505,6 +505,14 @@ without serializing unrelated ports behind one port's operation.
 
 ## 12. Per-port arming ABI + automatic CLI trigger
 
+> **Superseded 2026-10-09 (offload granularity decision).** The per-port
+> bridge bit, `ASK_ATTR_BRIDGE`, `ask_hw_offload_set_bridge()` and the
+> `apply_ask_bridge_offload` bridge-membership trigger described below were
+> removed. Bridge offload is now an automatic part of an engaged port:
+> `ask_hw_bridge_offload_armed()` is true while any port has `offload
+> ipv4`/`ipv6` armed. Granularity is per port + per IP family only (spec
+> `specs/ask2-vlan-cli-grammar.md` §9). The text below is design history.
+
 Extended the same genl engage mechanism VLAN uses (`ASK_CMD_ENGAGE` +
 `ASK_ATTR_FAMILY_MASK`/`ASK_ATTR_VLAN`) with a parallel `ASK_ATTR_BRIDGE`
 (u8 bool) attribute, and the matching kernel-side per-port array

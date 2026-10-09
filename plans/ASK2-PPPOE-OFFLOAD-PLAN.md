@@ -172,7 +172,7 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 - **ask.ko:**
   - `ask_flow_cookie_pppoe()` replaces the step-0 guard. It returns 1 only for a decap direction: this tuple's only encap is `PPP_SES` with a non-zero session ID, and the other tuple has no PPPoE.
   - The encap direction, PPPoE over VLAN and session 0 return `-EOPNOTSUPP` and stay in software.
-  - Decap flows were first gated by a runtime `ask.pppoe_offload` module parameter; that is now replaced by the per-port `offload pppoe` CLI bit (§3.5).
+  - Decap flows were first gated by a runtime `ask.pppoe_offload` module parameter, then by a per-port `offload pppoe` CLI bit (§3.5, since removed). The final gate is the engaged-port rule plus the `ask.pppoe_offload` kill switch (§3.5).
   - For a decap flow the replace path sets `key.pppoe_sid`, forces `vlan_ingress_vid = 0` and sets `ASK_VLANF_PPPOE_STRIP`. The VLAN per-port gate now applies only to POP/PUSH.
   - `static_assert`s tie the flag value and key size to the kernel's.
   - KUnit: `ask_flow_offload_test_pppoe_cookie`, rewritten for the classifier.
@@ -227,13 +227,13 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
 - **ask.ko:**
   - `ask_flow_cookie_pppoe()` now also returns `ASK_PPPOE_ENCAP`: this tuple has no encap, the other tuple's only encap is `PPP_SES` with a non-zero session, and this tuple transmits `FLOW_OFFLOAD_XMIT_DIRECT`. The concentrator MAC comes from `out.h_dest` and our port's MAC from `out.h_source`, because no neighbour table knows the concentrator.
   - `FLOW_ACTION_PPPOE_PUSH` is parsed into `key.pppoe_push_sid` and `ASK_VLANF_PPPOE_INSERT`. The replace path checks that the push session matches the tuple's session. It refuses PPPoE combined with VLAN pop/push, and refuses any push outside a classified encap flow.
-  - Gated by the per-port `offload pppoe` CLI bit (§3.5), like decap. KUnit coverage is extended.
+  - Gated like decap (§3.5): the session's physical port is engaged and `ask.pppoe_offload` is on. KUnit coverage is extended.
 - **Session-down flush.** An ask.ko netdev notifier watches for `ARPHRD_PPP` `NETDEV_DOWN`/`UNREGISTER`. It schedules work that walks the flow table and `ask_flow_remove_owned()`s every flow carrying a PPPoE flag, which hands those flows back to the kernel path. The kernel never tears these flows down itself, because their `iifidx` is never the PPP netdev. If the notifier fails to register, PPPoE offload is refused.
 - **MTU.**
   - The ENQUEUE parameter `mtu` is the microcode's fragmentation threshold (vendor: `EN_EHASH_DISABLE_FRAG = 0xffff`). ASK2 has no fragmentation pool (`bpid 0`), so encap records write `0xffff` to stay out of the fragmentation path.
   - **There is no hardware MTU enforcement.** The vendor does it with `05 PREEMPTIVE_CHECKS` (OpMask FRAG) plus a fragmentation pool; ASK2 emits neither. An inner packet above the PPPoE MTU (1492) therefore leaves 8 bytes oversize and the concentrator drops it, where the software path would send ICMP fragmentation-needed. Until `05` is brought up, encap requires TCP MSS clamping on the PPPoE interface: `set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu`. *(Superseded by §3.6, F-262: encap records now carry the vendor MTU check.)*
 - **Board test:**
-  - **Setup:** cold boot. Arm `offload pppoe` on eth3 (§3.5).
+  - **Setup:** cold boot. Engage eth3 with `offload ipv4`/`ipv6` (§3.5); PPPoE needs nothing more.
   - **First flow:** dell2 (LAN) → DUT eth4 → `pppoe10` → dell1 `10.99.50.1`, with MSS ≤ 1452 (`iperf -M 1400` or the clamp).
   - **Pass:**
     - eth4's record HITs.
@@ -245,28 +245,26 @@ Every combo is in hardware. Bidir is above the 2026-10-05 ASK2 baseline (port↔
     - an oversize DF probe, to document the MTU behaviour.
   - **Wedge risk:** `0x43` has never executed on this board, and it grows the frame in front, so the 96-byte RX margin from patch 0217 applies.
 
-### 3.5 Turning PPPoE offload on and off: `set interfaces ethernet ethN offload pppoe` (2026-10-08)
+### 3.5 Turning PPPoE offload on and off: automatic on an engaged port (granularity decision 2026-10-09)
 
-PPPoE offload is a per-port modifier, like `offload vlan`. It is set on the PPPoE `source-interface`, because the session's keys, tables and records all live on that physical port:
+PPPoE offload is no longer a per-port CLI leaf. It was `set interfaces ethernet ethN offload pppoe` (vyos-1x patch 053, 2026-10-08, genl `ASK_ATTR_PPPOE`, `ask_hw_port_pppoe[]`); the 2026-10-09 granularity decision removed it. Per-port engage (`offload ipv4|ipv6`) is the one mandatory granularity, per-family stays as the operator policy knob, and VLAN, NAT, PPPoE and bridge are automatic parts of an engaged port (spec `specs/ask2-vlan-cli-grammar.md` §9).
+
+PPPoE offload runs on the PPPoE `source-interface` physical port, because the session's keys, tables and records all live there. Engaging that port is all it takes:
 
 ```
 set interfaces ethernet eth3 offload ipv4
-set interfaces ethernet eth3 offload pppoe
-set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu   # until 05 PREEMPTIVE_CHECKS gives HW MTU enforcement
+set interfaces ethernet eth3 offload ipv6
+set interfaces pppoe pppoe10 ip adjust-mss clamp-mss-to-pmtu   # still advisable: not every flow gets the HW MTU check
 ```
 
-- **vyos-1x patch 053** (`data/vyos-1x-053-offload-pppoe-cli.patch`):
-  - adds the `pppoe` leaf under `interfaces ethernet <if> offload`;
-  - adds `set_ask_offload(…, pppoe)`, which passes a fourth helper argument;
-  - derives the bit in both `ethernet.py update()` and the `interfaces_bridge.py` member re-arm, so a bridge commit cannot drop it;
-  - verify: requires `offload ipv4` and/or `ipv6` on the same port, and refuses eth0.
-- **Helper:** `vyos-offload-ask family <mask> [vlan] [bridge] [pppoe]` sends `"pppoe"` in the engage JSON.
+- **vyos-1x patch 054** (`data/vyos-1x-054-offload-drop-vlan-pppoe-leaves.patch`) removes the `vlan` and `pppoe` leaves, the `set_ask_offload()` modifier arguments and the `interfaces_bridge.py` re-arm; migration `interfaces` 35-to-36 deletes both leaves from stored configs (the family leaves stay, so the port stays engaged). It also restores the F-222 MTU ceiling (1280-3600) check for every engaged port; patch 044 had split it off `_ask_on` so it only ran under a modifier leaf.
+- **Helper:** `vyos-offload-ask family <mask>` sends only `port-id` and `family-mask`.
 - **ask.ko:**
-  - genl `ASK_ATTR_PPPOE` (u8, appended after `ASK_ATTR_BRIDGE`; YNL spec `pppoe`); absent means unchanged.
-  - The per-port arm is `ask_hw_port_pppoe[]`. A true→false edge, or a disengage, calls `ask_flow_pppoe_flush()`.
-  - The replace path admits a PPPoE flow only if the bit is set on the session's physical port: the decap tuple's `iifidx`, or the encap tuple's `out.ifidx`.
-  - The interim `ask.pppoe_offload` / `ask.pppoe_encap_offload` module parameters are removed.
-- **Same change: vyos-1x stack rebased onto `rolling` `4b022646b` (2026-10-08).** Upstream added `verify_vpp_mtu()` (T9161) in `interfaces_ethernet.py` next to where patch 025 inserts `verify_ingress_policer()`. Patch 025 is regenerated to keep both functions. With it, the full stack 001–053 applies on today's `rolling` both with `--3way` and with plain `git apply`. Without it, every patch from 025 on conflicted or cascaded, and the next vyos-1x cache miss would have failed CI.
+  - genl `ASK_ATTR_PPPOE` and `ask_hw_port_pppoe[]` are removed.
+  - The gate is `ask_hw_pppoe_offload_armed_port(pid)`: the `pppoe_offload` module parameter (default 1) AND the session's physical port is engaged (family mask != 0). It is checked on the decap tuple's `iifidx` and the encap tuple's `out.ifidx`.
+  - `pppoe_offload` is the global kill switch: a live 1 to 0 and every port disengage call `ask_flow_pppoe_flush()`, so no PPPoE record outlives its port or the switch.
+  - `pppoe_encap_offload` stays removed.
+- **Same change: vyos-1x stack rebased onto `rolling` `4b022646b` (2026-10-08).** Upstream added `verify_vpp_mtu()` (T9161) in `interfaces_ethernet.py` next to where patch 025 inserts `verify_ingress_policer()`. Patch 025 is regenerated to keep both functions. With it, the full stack 001–053 applies on today's `rolling` both with `--3way` and with plain `git apply`. Without it, every patch from 025 on conflicted or cascaded, and the next vyos-1x cache miss would have failed CI. The stack through 054 was re-verified on the same `rolling` on 2026-10-09.
 
 ### 3.6 Hardware MTU check: vendor `05 PREEMPTIVE_CHECKS` + fragmentation (F-262, 2026-10-08; revised and board-validated 2026-10-09)
 
@@ -283,7 +281,7 @@ Verified with the triple written live over `/dev/mem` (cold boot, eth3/eth4 arme
 
 The port stayed alive through 315 fragmented frames, MURAM `used` stayed flat at 52922, `alloc_fail` stayed 0, and dmesg was clean. The earlier "FE index leak" hypothesis was wrong. The triple does **not** cure the VLAN FE-leak freeze (E1, 2026-10-04, `ASK2-REWRITE-PLAN.md`); it is required for IP fragmentation. With the triple applied and `frag_options = 0x0004` (no `BPID_ENABLE`) IPv4 DF-clear oversize reaches the host and the kernel fragments it (5/5 delivered), but IPv6 oversize is still silently dropped (`v6_frames` 5, `alloc_fail` 5, none delivered, no Packet Too Big). So the hardware can never send an IPv6 Packet Too Big: IPv6 across an MTU decrease is either hardware-fragmented (vendor behaviour, `cdx_ehash.c`: `frag_options 0x000c`, 2048 × 1500 pool; RFC 8200 5 non-compliant) or kept in software.
 
-**Final F-262 (`bin/kernel-fixups/F_262.py`).** Pool restored (`fman_pcd_frag_pool_bpid()`, 2048 × 2 KiB, created on first use, never freed), frag-info `frag_options = 0x000c`, ENQ bpid = the pool, and a new `fman_port_adv_offload()` that applies the triple when a port engages and restores the saved values (reverse order) when it disengages. It reads every register back and fails the engage on mismatch. The restore is what keeps the S1→S0 `pcd-snapshot` gate clean (it compares `RFENE` and `RCMNE`). The shipped result: IPv4 DF-clear is fragmented in hardware, IPv4 DF-set is punted to the host (ICMP frag-needed), and IPv6 that needs the check stays in software unless the ask.ko parameter `ipv6_hw_frag=1` opts into the vendor behaviour (hardware fragmentation, no Packet Too Big). Not yet validated on a CI image: throughput of all cells with the triple on every engaged port, pool exhaustion, and a long soak.
+**Final F-262 (`bin/kernel-fixups/F_262.py`).** Pool restored (`fman_pcd_frag_pool_bpid()`, 2048 × 2 KiB, created on first use, never freed), frag-info `frag_options = 0x000c`, ENQ bpid = the pool, and a new `fman_port_adv_offload()` that applies the triple when a port engages and restores the saved values (reverse order) when it disengages. It reads every register back and fails the engage on mismatch. The restore is what keeps the S1→S0 `pcd-snapshot` gate clean (it compares `RFENE` and `RCMNE`). The shipped result: IPv4 DF-clear is fragmented in hardware, IPv4 DF-set is punted to the host (ICMP frag-needed), and IPv6 that needs the check is fragmented in hardware (no Packet Too Big). That is the default since the 2026-10-09 policy inversion (vendor parity); the global ask.ko parameter `ipv6_hw_frag=0` keeps those flows in software for RFC 8200 (a per-port CLI leaf existed for a few hours on 2026-10-09 and was dropped by the granularity decision). Not yet validated on a CI image: throughput of all cells with the triple on every engaged port, pool exhaustion, and a long soak.
 
 **Interim board result and revision (2026-10-09, image `2026.10.08-2320-rolling`, kernel `6.18.55-vyos`, DUT `.185`; SUPERSEDED by the root cause above, kept as the record of what was measured without the triple).** The design below was built as written and tested. `05` and the MTU field work. Without the RX-port triple the vendor's hardware fragmentation gave an unusable result, so this interim revision of F-262 dropped the fragmentation pool:
 
@@ -307,7 +305,7 @@ The port stayed alive through 315 fragmented frames, MURAM `used` stayed flat at
   | same, `05` OpMask 0x03 (DFBIT_HONOR) | +100 | +133 | 0 | not checked (server idled out; counters are the evidence) |
   | `frag_options` 0x0024 (DF action 0x20), OpMask 0x01 | +100 | +122 | 0 | 0 |
 
-  The frame always enters the IPv6 fragmenter (`v6_frames` counts every oversize frame, regardless of `BPID_ENABLE`, DFBIT_HONOR or the DF action bits, unlike IPv4 where `v4_frames` stays 0), finds no fragment buffer (`alloc_fail` rises, `v6_frags` stays 0) and drops the frame silently. `Err FD` and RX errors stayed 0, `Icmp6OutPktTooBigs` stayed 0, MURAM `used` stayed flat at 52922. Allowing `egress_mtu` for IPv6 would therefore black-hole every oversize IPv6 packet and break IPv6 PMTUD. ask.ko returns `-EOPNOTSUPP` for an IPv6 flow that needs the check (default `ipv6_hw_frag=0`), so it stays in software and the kernel sends Packet Too Big. A real fragment pool plus the triple makes the hardware fragment IPv6, which a router must not do (RFC 8200 5). **Superseded:** these four variants were taken without the RX-port triple. With the triple and the vendor configuration (`0x000c`, real pool) the microcode fragments IPv6 in hardware (100/100 delivered); with the triple and `0x0004` it still drops, so it never sends Packet Too Big. IPv6 across an MTU decrease stays in software by default (RFC 8200 5, correct PMTUD); `ask.ipv6_hw_frag=1` opts into hardware fragmentation.
+  The frame always enters the IPv6 fragmenter (`v6_frames` counts every oversize frame, regardless of `BPID_ENABLE`, DFBIT_HONOR or the DF action bits, unlike IPv4 where `v4_frames` stays 0), finds no fragment buffer (`alloc_fail` rises, `v6_frags` stays 0) and drops the frame silently. `Err FD` and RX errors stayed 0, `Icmp6OutPktTooBigs` stayed 0, MURAM `used` stayed flat at 52922. Allowing `egress_mtu` for IPv6 would therefore black-hole every oversize IPv6 packet and break IPv6 PMTUD. ask.ko at that time returned `-EOPNOTSUPP` for an IPv6 flow that needs the check, so it stayed in software and the kernel sent Packet Too Big. A real fragment pool plus the triple makes the hardware fragment IPv6, which a router must not do (RFC 8200 5). **Superseded:** these four variants were taken without the RX-port triple. With the triple and the vendor configuration (`0x000c`, real pool) the microcode fragments IPv6 in hardware (100/100 delivered); with the triple and `0x0004` it still drops, so it never sends Packet Too Big. **Policy (inverted 2026-10-09):** IPv6 across an MTU decrease is hardware-fragmented by default (vendor parity, no Packet Too Big, RFC 8200 4.5 non-compliant); `ask.ipv6_hw_frag=0` keeps those flows in software with correct PMTUD (global kill switch, no per-port CLI; a live 1 to 0 flushes the IPv6 records that carry the MTU check).
 - **TCP MSS clamping** on the PPPoE interface stays recommended, so TCP never has to fragment.
 
 **Findings made on the board while running the quick protocol (all fixed in the tree; none is in image `2320`):**
@@ -325,7 +323,7 @@ The port stayed alive through 315 fragmented frames, MURAM `used` stayed flat at
 | VLAN-VLAN v4 / v6 | 9.32 / 9.18 | HW / HW |
 | PPPoE decap (down) v4 / v6 | 5.76 / 5.74 | HW / HW (dell1 RX-queue-0 limit, see §3.3; software control 3.98 / 3.74) |
 | PPPoE encap (up) v4 | 9.19 | HW (software control 3.60) |
-| PPPoE encap (up) v6 | 4.35 | PARTIAL (ratio 0.46), by design: the MTU check keeps IPv6 in software (software control 3.58); expected HW with `ask.ipv6_hw_frag=1` on the final F-262 (not yet measured) |
+| PPPoE encap (up) v6 | 4.35 | PARTIAL (ratio 0.46), measured with the old policy (IPv6 that needs the MTU check in software, control 3.58); expected HW by default with the final F-262 and the inverted policy (not yet measured); PARTIAL again with `ipv6_hw_frag=0` |
 
 **Re-run with RPS on dell1 (same image and `ask.ko`, CSV `quick-20261009-rps.csv`, `bin/testrig-offload-quick.sh` now enables RPS for PPPoE cells):**
 
@@ -372,7 +370,7 @@ The live vendor record on `.106` (2026-10-04) shows `05` param `38 03 00…`, EN
 
 - The replace path reads the flowtable tuple's `mtu`, which `flow_offload_fill_route()` takes from the egress dst. It sets `key.egress_mtu` only when that MTU is below the true ingress port's MTU.
 - So LAN 1500 → PPPoE 1492 gets the check. Port↔port 1500/1500, PPPoE decap, and VLAN flows of equal MTU do not, and their records are unchanged.
-- An IPv6 flow that would need the check stays in software unless the module parameter `ipv6_hw_frag` (default off) is set. Measured 2026-10-09 (see §3.6): the microcode enters its IPv6 fragmenter for every oversize frame whatever `frag_options`, DFBIT_HONOR or the DF action bits say; with the RX-port triple and a pool it fragments in hardware, otherwise it drops silently, and it never sends Packet Too Big. Hardware IPv6 across an MTU decrease therefore breaks PMTUD (and is non-compliant, RFC 8200 5); by default the kernel sends Packet Too Big instead.
+- An IPv6 flow that needs the check is hardware-fragmented by default (module parameter `ipv6_hw_frag`, default on; clearing it keeps such flows in software). Measured 2026-10-09 (see §3.6): the microcode enters its IPv6 fragmenter for every oversize frame whatever `frag_options`, DFBIT_HONOR or the DF action bits say; with the RX-port triple and a pool it fragments in hardware, otherwise it drops silently, and it never sends Packet Too Big. Hardware IPv6 across an MTU decrease therefore hides PMTU (no Packet Too Big; non-compliant, RFC 8200 4.5), which is why the `ipv6_hw_frag` kill switch exists; with it cleared the kernel sends Packet Too Big.
 
 **Encap record layout with the check.** For a 50-byte key the opcode list is at +60 and parameters start at +76:
 
@@ -399,7 +397,7 @@ That gives opcodes `05 04 11 12 21 43 41 01` and `mtu_off` = 132 − 76 = `0x38`
 3. **Fragment.** 1500-byte IPv4 with DF clear (`ping -M dont -s 1472`). Expect two fragments on dell1 (`tcpdump -e`, EtherType 0x8864, valid PPPoE lengths). The frag-info counters at FMan MURAM + `fe_frag_off` should rise: +8 v4 frames, +16 v4 fragments, +4 allocation failures stays 0. The frag pool must not drain, so repeat a few thousand times. **Result 2026-10-09: with the RX-port triple, 100/100 DF-clear datagrams delivered as 2 fragments each (see the root cause above); without it, one fragment per frame.**
 4. **DF.** 1500-byte IPv4 with DF set (`ping -M do -s 1472`). This is unmeasured: with DF action "error" the frame may land in the port error FQ (`Err FD status`, a PMTUD black hole) or reach the host, which would send ICMP fragmentation-needed. Record which. If it is a black hole, the frag-info `frag_options` DF bits (0x10 ignore, 0x20 don't fragment) and the `05` OpMask are the calibration points. Try them live through `/dev/mem` before changing code. **Result 2026-10-09: not a black hole.** The DF-set frame reaches the host, which sends ICMP fragmentation-needed (400/400 with `0x0004`; 100/100 with the triple and `0x000c`; sender route cache `mtu 1492`). No DF-bit calibration was needed.
 5. **Stability.** 60 s of mixed sizes at rate, with no RX-deaf port and no `Err FD` growth. Fragmentation produces S/G frames on the no-confirm TX FQ, which has never been exercised. **Result 2026-10-09: passed for 315 fragmented frames with the triple (no RX-deaf port, MURAM flat, `alloc_fail` 0) and with host fragmentation (two probes, interim result). Pool exhaustion and a long soak on the final F-262 are still to run.**
-6. **Throughput (30 s quick protocol).** After `set interfaces ethernet eth3 offload pppoe` (eth3 is the PPPoE source interface), run `bin/testrig-offload-quick.sh` (`ASK2-REWRITE-PLAN.md` §8). Pass: the four PPPoE cells report HW and beat the software control in §3a (decap v4/v6 3.98/3.74, encap v4/v6 3.60/3.58 Gbit/s). The other six cells must match the `2126` baseline (9.2-9.4 Gbit/s, HW). Expected exception: `pppoe-up-v6` at 1500 to 1492 stays software by default (F-262 keeps IPv6 that needs the MTU check in the kernel unless `ask.ipv6_hw_frag=1`), so PARTIAL or SW there is correct, not a failure. Re-run it once with `ipv6_hw_frag=1` to measure the hardware-fragmenting figure. Also check that all six non-PPPoE cells keep their baseline now that the triple is on every engaged port.
+6. **Throughput (30 s quick protocol).** With eth3 (the PPPoE source interface) engaged by `offload ipv4`/`ipv6` (no PPPoE-specific leaf exists any more), run `bin/testrig-offload-quick.sh` (`ASK2-REWRITE-PLAN.md` §8). Pass: the four PPPoE cells report HW and beat the software control in §3a (decap v4/v6 3.98/3.74, encap v4/v6 3.60/3.58 Gbit/s). The other six cells must match the `2126` baseline (9.2-9.4 Gbit/s, HW). `pppoe-up-v6` at 1500 to 1492 should now be HW by default (IPv6 that needs the MTU check is fragmented in hardware). Re-run it once with `ask.ipv6_hw_frag=0` (`echo 0 > /sys/module/ask/parameters/ipv6_hw_frag`): PARTIAL or SW there is then correct, not a failure. Also check that all six non-PPPoE cells keep their baseline now that the triple is on every engaged port.
 7. **Complex combinations (once per image, not a matrix):** NAT44 over PPPoE (LAN to PPPoE WAN with masquerade on `pppoe10`); VLAN-VLAN NAT44; PPPoE over VLAN (must stay software, `-EOPNOTSUPP`, still forwarding correctly); and a session flap during an encap flow (the session-down notifier must flush the records).
 
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
