@@ -468,10 +468,11 @@ opcode terminal, not comparator correctness.
   inline FE-VM/ehash path (T-M6-8 DONE, ships default-on; an earlier CC+HMTD
   attempt was abandoned 2026-10-02 — see `plans/ASK2-REWRITE-PLAN.md` Phase 1).
   PPPoE rides the hard parser only (inner IP exposed, no soft parser): decap
-  (F-260, opcode `0x14`) is silicon-validated; encap (F-261, opcode `0x43`)
-  and the hardware MTU check (F-262, `PREEMPTIVE_CHECKS` + frag pool) are
-  implemented and await a board run (`plans/ASK2-PPPOE-OFFLOAD-PLAN.md`
-  §3.4/§3.6). Remaining implementation breadth: soft-parser (TCP punts),
+  (F-260, opcode `0x14`), encap (F-261, opcode `0x43`) and the hardware MTU
+  check (F-262, `PREEMPTIVE_CHECKS`; oversize frames go to the host, which
+  fragments or sends ICMP) are silicon-validated on image `2320`
+  (2026-10-09; `plans/ASK2-PPPOE-OFFLOAD-PLAN.md` §3.4/§3.6). Four fixes found
+  on the board are in the tree but not yet in a CI image. Remaining implementation breadth: soft-parser (TCP punts),
   XFRM/IPsec, bridge/multicast, fragments/tunnels, stacked tags and wider VLAN
   scope. Full
   gates and MUST/DO-NOT rules: §4.6.
@@ -1603,7 +1604,7 @@ record it does not own.
 | IPsec ESP | `cdx_esp4/6_cc`; 15 FCI SA commands; CMM XFRM; CAAM | XFRM `xfrmdev_ops` | SA table + CAAM descriptor path + ESP FE action; per-SA lifecycle and anti-replay | stub (`-EOPNOTSUPP`) — sequencing plan in `plans/ASK2-IPSEC-OFFLOAD-PLAN.md` (DRAFT, not started) |
 | L2 bridge/FDB | `cdx_ethernet_cc`; RX L2BRIDGE commands | switchdev FDB | L2 ehash key + egress/replication action; bridge owns lifetime | not implemented |
 | IPv4/IPv6 multicast | `cdx_multicast4/6_cc`; MC4/MC6 FCI | switchdev MDB / kernel mroute | group key + bounded replication FQ/egress set | not implemented |
-| PPPoE | `cdx_pppoe_cc`; PPPoE FCI; `cdx_sp.xml` | PPPoE netdev + normal flowtable after parser recognition | hard parser exposes inner IP (no soft parser needed); normal route/NAT intent follows; `offload pppoe` CLI | decap SILICON-VALIDATED (F-260); encap (F-261) + MTU check (F-262) implemented, board run pending |
+| PPPoE | `cdx_pppoe_cc`; PPPoE FCI; `cdx_sp.xml` | PPPoE netdev + normal flowtable after parser recognition | hard parser exposes inner IP (no soft parser needed); normal route/NAT intent follows; `offload pppoe` CLI | decap (F-260), encap (F-261) and MTU check (F-262) SILICON-VALIDATED (2026-10-09, image `2320`); fixes found on the board not yet in a CI image |
 | 3-tuple route | `cdx_tuple3*` tables | flowtable wildcard/coarse flow only when kernel semantics permit | separate key type/scheme/table; never fake by truncating a 5-tuple key | key-packer primitive landed 2026-09-14 (silicon-confirmed 10-byte layout, KUnit-pinned), not yet dispatch-wired or reachable from ask.ko — see T-M6-T3 |
 | IPv4/IPv6 fragments | `cdx_frag4/6_cc`; IP reassembly module | kernel fragment/reassembly framework | fragment key + bounded reassembly/slow-path policy | not implemented |
 | Tunnels / 6-in-4 | tunnel FCI; `cdx_sp.xml` IPv4-nextp 0x29 | tunnel netdev + flowtable | soft-parser re-dispatch; inner-flow intent; explicit encap/decap actions | not implemented |
@@ -2032,12 +2033,31 @@ own PCD objects and prove readback.
     (insert, EtherType `0x8864`, session ID in the flow key). Decap is
     SILICON-VALIDATED (kernel-mode concentrator, 5.16 Gbit/s HW vs 3.99 SW).
     Encap (F-261) and the egress MTU check (F-262: `05 PREEMPTIVE_CHECKS`
-    first, ENQUEUE mtu, dedicated 2048 x 2 KiB frag pool, 32-byte frag-info
-    block in the owned MURAM reservation) are implemented, not yet on the
-    board. IPv6 that needs the check stays in software. Open silicon unknown:
-    oversized IPv4 with DF set. Method and test order: PPPoE plan §3.6.
-    Throughput of every offload class follows the 30 s protocol in
-    `plans/ASK2-REWRITE-PLAN.md` §8.
+    first, ENQUEUE mtu, 32-byte frag-info block in the owned MURAM
+    reservation) are SILICON-VALIDATED 2026-10-09 on image `2320`.
+    - Hardware fragmentation (`frag_options` `BPID_ENABLE`, frag pool) emits
+      one fragment per oversize frame and loses the datagram, so the revised
+      F-262 has no pool: `frag_options = 0x0004`, ENQ bpid 0. Oversize IPv4
+      goes to the host, which fragments (DF clear) or sends ICMP
+      fragmentation-needed (DF set, PMTUD verified). This resolves the open
+      DF silicon unknown.
+    - IPv6 that needs the check stays in software, so `pppoe-up-v6` is
+      PARTIAL by design (4.35 Gbit/s vs 3.58 software). Allowing it needs
+      the same host-pass behaviour proven for IPv6 first.
+    - PPPoE over VLAN is code-verified to stay in software (two encap
+      entries, `-EOPNOTSUPP`); not run on the board.
+    - Found and fixed on the board (tree only, not in image `2320`):
+      helper dropped the `pppoe` argument; `ask_flow_cookie_pppoe()` used
+      `out.ifidx` instead of `out.hw_ifidx`; the session-down flush removed
+      software entries but left the silicon ehash records (stale encap
+      records survived a session flap), now deleted with
+      `ask_fe_flow_remove()`.
+    - Quick protocol on `2320` plus the fixed `ask.ko` (all ten cells and
+      the NAT-over-PPPoE and VLAN-VLAN NAT combos): every cell HW at
+      9.2-9.4 Gbit/s except `pppoe-up-v6` PARTIAL. PPPoE decap first read
+      5.7 Gbit/s because dell1 cannot RSS-hash PPPoE (one-core limit);
+      with RPS on dell1 it is 9.35 / 9.22. Details and table: PPPoE plan §3.6. Method:
+      `plans/ASK2-REWRITE-PLAN.md` §8.
 - [ ] **T-M6-SP5 — tunnel re-dispatch.** Add only protocols represented by a
   kernel tunnel netdev and canonical flow intent. Gate: 6-in-4 inner key,
   hop-limit/TTL, decap/encap capture, route/neighbour changes, unsupported

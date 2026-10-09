@@ -11,7 +11,7 @@ Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the
 | **0 — safety and oracles** | ✅ (0.4 🟡 partial, deferred by operator) | 0.1 ⚠ superseded: VLAN offload is default-on again now that it works. 0.2 register oracle ✅. 0.3 record oracle ✅ (push-only record added 2026-10-05). 0.4 vendor thresholds ✅ TCP; 64 B/IMIX/64k-flow deferred. 0.5 ✅. |
 | **1 — VLAN root cause** | 🟡 **VLAN fixed, A6 throughput passes; churn gate REOPENED (rare FMan RX stall)** | VLAN root cause found and fixed, `dpaa1` `1e8865d5` (E3 result + follow-up): byte order, `04 11` prefix (0215), stats block (0216), 96 B RX margin for push-only (0217), BMI discard of physical errors (0218). E1/E1a/E1b falsified; E2/E4 not needed. **A6 (defect A6-LOSS) closed on throughput 2026-10-06:** 0219 (ehash duplicate-key eviction), the RX buffer pool fix (`7ba747e1`, 128→640 buffers/CPU) and the RX data alignment fix (`dc8591ae`, data at 256, vendor `buffer-layout <0x60 0x40>` parity). Image `2026.10.06-0526-rolling`: unidir line rate; bidir −0.5 % to +1.0 % vs vendor on all six combos. **Churn gate REOPENED 2026-10-07:** one 100/100 clean run under verified load on `0cb5a105`, but the next run stalled at cycle 84 (see "Churn gate (2026-10-07)" below). Idle aging (`2d7c8268`) and the safe ehash delete F-254 are real fixes but not the stall trigger; stalls #3-#5 recurred on F-254+F-256 builds (see "Churn gate (2026-10-07)" below), and the 2026-10-08 stability pass added F-257, a per-delete DMA context leak fix that is hygiene only. Its first cold-boot soak (`2026.10.08-0106-rolling`) ran 576 cumulative verified-load cycles on one boot with 0 deaf, 0 kernel errors and MURAM flat, 4.5× past the latest earlier onset (cycle 129); the gate stays REOPENED until a second independent cold boot repeats it. **Follow-ups (not gating):** port↔port/vlan↔vlan bidir retransmits 1.4–2.6× the vendor's; isolated iperf3 control-channel burst failures under churn (5/600 vlan↔vlan earlier; 13/3456 in the 2026-10-08 soak, 12 of them IPv6, on all three path types); torn-down offloaded flows linger in conntrack as ESTABLISHED for ~1 day (7440 s with the 2026-10-07 sysctl; soak plateau 6.2-7.0k of 262,144). Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`; analysis: "Loss-localization result (2026-10-06)" below. |
 | **2 — consolidation** | ⬜ not started | Now unblocked: delete `ask_vlan_cc.c` and its genl/debugfs/stat proxies (CC VLAN path retired); fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD. |
-| **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE: decap silicon-validated, encap and the HW MTU check (F-262) implemented and awaiting a board run; multicast, IPsec, tunnels/fragments and QoS have not been started. |
+| **3 — vendor-parity features** | ⬜ not started | Bridge L2 (gate A7) has its own track in `ASK2-BRIDGE-OFFLOAD-PLAN.md` (regression open since 2026-09-16); PPPoE: decap, encap and the HW MTU check (F-262) silicon-validated 2026-10-09 (image `2320`; board-found fixes are in the tree, not yet in a CI image); multicast, IPsec, tunnels/fragments and QoS have not been started. |
 | **4 — exceed the vendor** | ⬜ not started | Vendor A13 measured; ASK2 A13 not measured. |
 
 Indicative Phase 1 bidir results against the vendor thresholds (§8). These are **superseded** by the A6 tables below: the lighter iperf2 `-P 4` load hid the loss.
@@ -1608,11 +1608,14 @@ Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
    (no soft parser). Gate: A8.
    - Decap (F-260, `0x14`): SILICON-VALIDATED 2026-10-08.
    - Encap (F-261, `0x43`, key includes the session ID; per-port CLI
-     `offload pppoe`): implemented, not board-tested.
+     `offload pppoe`): SILICON-VALIDATED 2026-10-09 (9.19 Gbit/s v4).
    - Egress MTU check (F-262): `05 PREEMPTIVE_CHECKS` only on records whose
-     route MTU is below the ingress port MTU (LAN 1500 to PPPoE 1492); IPv6
-     that needs it stays in software so the kernel sends Packet Too Big.
-     Board plan: `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
+     route MTU is below the ingress port MTU (LAN 1500 to PPPoE 1492).
+     Oversize frames go to the host (`frag_options = 0x0004`, no frag pool):
+     the kernel fragments DF-clear packets and sends ICMP fragmentation-needed
+     for DF-set ones. IPv6 that needs it stays in software so the kernel
+     sends Packet Too Big (`pppoe-up-v6` PARTIAL by design). Results:
+     `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6.
 3. **Multicast.** mc4/mc6 tables plus a REPLICATE chain. Gate: A10.
 4. **IPsec ESP.** ESP table → OH port → CAAM SEC (vendor oh@2 model), via
    XFRM offload in `ask_xfrm.c`. Gate: A9.
@@ -1661,6 +1664,8 @@ fallback) are a small targeted set run once per image, not a matrix.
 - **Driver:** `bin/testrig-offload-quick.sh [cell ...]`. Cells: `unicast`,
   `nat`, `vlan`, each `-v4`/`-v6`, plus `pppoe-down` (decap, WAN to LAN) and
   `pppoe-up` (encap, LAN to WAN), each `-v4`/`-v6`: 10 cells, about 7 min.
+  Opt-in combo cells (named explicitly, or `combo` for both): `nat-pppoe-up-v4`
+  (masquerade on `pppoe10`) and `nat-vlan-v4` (masquerade on `eth4.20`).
   NAT uses runtime nft tables on the DUT (`table ask2q`, masquerade out of
   eth4) and temporarily removes the VyOS NAT66 rule, restoring it on exit.
 - **Offload proof:** per-record growth of `pkt_count` in `fe_ehash_stats`
@@ -1686,6 +1691,35 @@ fallback) are a small targeted set run once per image, not a matrix.
   tied to a cell: the same cell flipped between the two values across two
   runs (unicast v4 3.2 then 0.2, NAT44 0.3 then 3.1). Cause not investigated;
   every value is far below the 40-75% of the software forwarding path.
+
+- **Result, image `2026.10.08-2320-rolling` (kernel 6.18.55-vyos) with the
+  fixed `ask.ko`, 2026-10-09, same method**
+  (`/mnt/builds/ask2-review/oracle/quick-20261009-0127.csv`; combos in
+  `quick-20261009-0134.csv`):
+
+| Cell | Gbit/s | Verdict |
+|---|---|---|
+| unicast v4 / v6 | 9.38 / 9.24 | HW / HW |
+| NAT44 / NAT66 | 9.34 / 9.27 | HW / HW |
+| VLAN-VLAN v4 / v6 | 9.32 / 9.18 | HW / HW |
+| PPPoE decap v4 / v6 | 5.76 / 5.74 | HW / HW (dell1 RX-queue-0 limit; 9.35 / 9.22 with RPS, below) |
+| PPPoE encap v4 | 9.19 | HW (software 3.60) |
+| PPPoE encap v6 | 4.35 | PARTIAL, ratio 0.46, by design (MTU check keeps v6 in software; software 3.58) |
+| combo: NAT44 over PPPoE | 9.08 | HW |
+| combo: VLAN-VLAN NAT44 | 9.34 | HW |
+
+  **Rig note (2026-10-09):** dell1's mlx4 NIC cannot RSS-hash PPPoE frames, so
+  all returning ACKs hit RX queue 0 / CPU0 and the TCP send path saturates one
+  core at about 5.9 Gbit/s while the DUT is idle. `testrig-offload-quick.sh`
+  now enables RPS on dell1's `enp1s0` for PPPoE cells (restored on exit).
+  Re-run with RPS (`quick-20261009-rps.csv`): decap v4 / v6 9.35 / 9.22 HW,
+  encap v4 9.20 HW, encap v6 4.36 PARTIAL by design, NAT44 over PPPoE 9.33 HW.
+  The software controls above (3.98 / 3.74 decap, 3.60 / 3.58 encap) sit well
+  below the old 5.9 Gbit/s ceiling, so they are unaffected.
+
+  The six non-PPPoE cells match the `2126` baseline. PPPoE over VLAN stays in
+  software by code (two encap entries, `-EOPNOTSUPP`); it has not been run on
+  the board. After the runs: 0 RX errors, 0 `Err FD`, MURAM `used` flat.
 
 **Methodology (binding, 2026-10-04):**
 
