@@ -517,78 +517,62 @@ static void hw_pcd_test_remove_unknown_cookie(struct kunit *test)
 }
 
 /* ------------------------------------------------------------------------- */
-/* T-M6-8: per-port VLAN offload gate (offload ask vlan)                       */
+/* Offload granularity: VLAN / PPPoE are automatic on an ENGAGED port         */
 /*                                                                            */
-/* The gate is a pure static-array + module-param decision (no FMan needed).  */
-/* In the KUnit harness ask_hw_get_fman() returns NULL, so the disarm         */
-/* transition's ask_vlan_cc_teardown_port() early-returns — the setter/getter */
-/* logic is exercised in isolation. Default (unarmed) must fail closed.       */
+/* There is no per-port VLAN/PPPoE arm bit: a port is "engaged" when it has a */
+/* non-zero family mask, and the vlan_offload / pppoe_offload kill switches   */
+/* (default on) are global. The gates are pure static-array + module-param    */
+/* decisions (no FMan needed). The tests mark ports engaged through           */
+/* ask_hw_offload_set_family() and so only run on the non-DPAA harness: on a  */
+/* live board (ask_hw_get_fman() != NULL) that would mutate real admission.   */
 /* ------------------------------------------------------------------------- */
 
-static void hw_vlan_gate_default_off(struct kunit *test)
+static void hw_auto_gate_needs_engaged_port(struct kunit *test)
 {
-	/*
-	 * On a live DUT the boot config may have armed per-port VLAN offload
-	 * (CLI `offload ask vlan`), so the pristine-default contract is not
-	 * observable — and mutating the gate here would tear down the board's
-	 * live CC tree. Skip; the default-off pin runs on the non-DPAA host.
-	 */
-	if (ask_hw_vlan_offload_armed()) {
-		kunit_skip(test, "live board has VLAN offload armed by config (DUT run)");
+	if (ask_hw_get_fman()) {
+		kunit_skip(test, "live board: would mutate real port admission (DUT run)");
 		return;
 	}
 
-	/* Nothing armed and the global override defaults off: every port is
-	 * unarmed and the port-agnostic OR is false. */
+	/* Nothing engaged: every port fails closed for VLAN and PPPoE, while the
+	 * port-agnostic capability gate follows the (default-on) kill switch. */
 	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x10));
-	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x11));
-	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed());
-}
-
-static void hw_vlan_gate_is_per_port(struct kunit *test)
-{
-	/*
-	 * Same DUT guard as default_off: this test arms/disarms port 0x10,
-	 * and on an engaged board that transition triggers
-	 * ask_vlan_cc_teardown_port() + FE re-engage on the REAL pipeline.
-	 * Never mutate live armed state; run only on a pristine harness.
-	 */
-	if (ask_hw_vlan_offload_armed()) {
-		kunit_skip(test, "live board has VLAN offload armed by config (DUT run)");
-		return;
-	}
-
-	/* Arm only port 0x10. It must read armed; a different port must not,
-	 * and the port-agnostic OR must report "some port armed". */
-	ask_hw_offload_set_vlan(0x10, true);
-	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed_port(0x10));
-	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x11));
+	KUNIT_EXPECT_FALSE(test, ask_hw_pppoe_offload_armed_port(0x10));
+	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_offload_armed());
 	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed());
 
-	/* Disarm restores fail-closed on that port (and, since it was the only
-	 * armed port, on the port-agnostic OR). */
-	ask_hw_offload_set_vlan(0x10, false);
+	/* Engage only port 0x10: it reads armed, another port does not. */
+	ask_hw_offload_set_family(0x10, ASK_FAM_V4);
+	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed_port(0x10));
+	KUNIT_EXPECT_TRUE(test, ask_hw_pppoe_offload_armed_port(0x10));
+	KUNIT_EXPECT_TRUE(test, ask_hw_bridge_offload_armed());
+	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x11));
+	KUNIT_EXPECT_FALSE(test, ask_hw_pppoe_offload_armed_port(0x11));
+
+	/* The family mask value is irrelevant to the capability gates (an
+	 * IPv6-only port still carries VLAN/PPPoE frames); disengage restores
+	 * fail-closed. */
+	ask_hw_offload_set_family(0x10, ASK_FAM_V6);
+	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed_port(0x10));
+	ask_hw_offload_set_family(0x10, 0);
 	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x10));
-	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed());
+	KUNIT_EXPECT_FALSE(test, ask_hw_pppoe_offload_armed_port(0x10));
+	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_offload_armed());
 }
 
-static void hw_vlan_gate_out_of_range_safe(struct kunit *test)
+static void hw_auto_gate_out_of_range_safe(struct kunit *test)
 {
-	/*
-	 * DUT guard: when the live config already armed a real port, the
-	 * port-agnostic OR reads true regardless of the out-of-range write,
-	 * so the "must not have flipped the OR" pin is unobservable there.
-	 */
-	if (ask_hw_vlan_offload_armed()) {
-		kunit_skip(test, "live board has VLAN offload armed by config (DUT run)");
+	if (ask_hw_get_fman()) {
+		kunit_skip(test, "live board: would mutate real port admission (DUT run)");
 		return;
 	}
 
-	/* A port id beyond the array must never read armed and must not crash. */
-	ask_hw_offload_set_vlan(0xff, true);
+	/* A port id beyond the family array can never be engaged or armed and
+	 * must not crash or alias a real port. */
+	ask_hw_offload_set_family(0xff, ASK_FAM_V4);
 	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0xff));
-	/* And it must not have flipped the port-agnostic OR either. */
-	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed());
+	KUNIT_EXPECT_FALSE(test, ask_hw_pppoe_offload_armed_port(0xff));
+	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_offload_armed());
 }
 
 static struct kunit_case ask_hw_pcd_test_cases[] = {
@@ -615,9 +599,8 @@ KUNIT_CASE(hw_pcd_test_insert_zero_dst_mac_only_eagain),
 KUNIT_CASE(hw_pcd_test_remove_cookie_zero_is_noop),
 KUNIT_CASE(hw_pcd_test_remove_unknown_cookie),
 /* T-M6-8: per-port VLAN offload gate. */
-KUNIT_CASE(hw_vlan_gate_default_off),
-KUNIT_CASE(hw_vlan_gate_is_per_port),
-KUNIT_CASE(hw_vlan_gate_out_of_range_safe),
+KUNIT_CASE(hw_auto_gate_needs_engaged_port),
+KUNIT_CASE(hw_auto_gate_out_of_range_safe),
 {}
 };
 

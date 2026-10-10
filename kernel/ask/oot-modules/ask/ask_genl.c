@@ -254,9 +254,10 @@ goto nla_put_failure;
  *
  * T-M6-8 R5: VLAN pop/push offload (CC leaf -> combined HMTD -> egress FQ, with
  * CC miss -> FE_ENTER ehash for routed/NAT coexistence) is silicon-validated end
- * to end (R4c-2/R4c-3). It ships default-OFF behind the ask_vlan_offload gate,
- * so ASK_CAP_VLAN is advertised ONLY when the gate is armed -- the advertised
- * capability then honestly tracks what a flow would actually get offloaded.
+ * to end (R4c-2/R4c-3). It is an automatic capability of every engaged port
+ * behind the global ask.vlan_offload kill switch (default on), so ASK_CAP_VLAN
+ * is advertised ONLY while the switch is on -- the advertised capability then
+ * honestly tracks what a flow would actually get offloaded.
  */
 {
 	u64 caps = ASK_CAP_IPV4 | ASK_CAP_IPV6 | ASK_CAP_NAT | ASK_CAP_PAT;
@@ -264,8 +265,8 @@ goto nla_put_failure;
 	if (ask_hw_vlan_offload_armed())
 		caps |= ASK_CAP_VLAN;
 	/* T-M6-2: ASK_CAP_BRIDGE stays unadvertised through B0-B2 even though
-	 * ask_hw_offload_set_bridge()/ask_hw_bridge_offload_armed() already
-	 * exist -- there is no CC-tree/FDB install path yet (ask_bridge.c is
+	 * ask_hw_bridge_offload_armed() already exists -- there is no
+	 * CC-tree/FDB install path yet (ask_bridge.c is
 	 * an observer only), so advertising the capability now would claim a
 	 * flow could actually get bridge-offloaded when none can. Add
 	 * `caps |= ASK_CAP_BRIDGE` here once B3's real switchdev wiring lands. */
@@ -830,12 +831,8 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr *port_attr;
 	struct nlattr *fam_attr;
-	struct nlattr *vlan_attr;
-	struct nlattr *bridge_attr;
 	u8 port_id;
 	u8 fam_mask;
-	u8 vlan_on;
-	u8 bridge_on;
 	int rc;
 
 	port_attr = info->attrs[ASK_ATTR_PORT_ID];
@@ -846,9 +843,11 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 
 	/*
 	 * ASK_ATTR_FAMILY_MASK selects which L3 families this port offloads
-	 * (CLI `offload ipv4` / `offload ipv6`). Absent => both, so callers
-	 * that predate the split get the historical behaviour. Set the mask
-	 * BEFORE engage so admission is correct from the first frame.
+	 * (CLI `offload ipv4` / `offload ipv6`). Absent => both. Set the mask
+	 * BEFORE engage so admission is correct from the first frame. This is
+	 * the only per-port policy: VLAN, NAT, PPPoE and bridge offload are
+	 * automatic capabilities of an engaged port (global module-param kill
+	 * switches), so engage carries nothing else.
 	 */
 	fam_attr = info->attrs[ASK_ATTR_FAMILY_MASK];
 	fam_mask = fam_attr ? nla_get_u8(fam_attr) : (ASK_FAM_V4 | ASK_FAM_V6);
@@ -857,42 +856,8 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 
 	ask_hw_offload_set_family(port_id, fam_mask);
 
-	/*
-	 * ASK_ATTR_VLAN (u8 bool) arms/disarms single-tag 802.1Q VLAN offload
-	 * on this port (CLI `offload ask vlan`). Absent => leave the per-port
-	 * bit unchanged, so a family-only engage from an older helper does not
-	 * clobber VLAN state. Set BEFORE engage so the first frame is gated
-	 * correctly. eth0/802.1ad/QinQ/IPv6-VLAN still fall back to software.
-	 */
-	vlan_attr = info->attrs[ASK_ATTR_VLAN];
-	if (vlan_attr) {
-		vlan_on = nla_get_u8(vlan_attr);
-		if (vlan_on > 1)
-			return -EINVAL;
-		ask_hw_offload_set_vlan(port_id, vlan_on);
-	}
-
-	/*
-	 * ASK_ATTR_BRIDGE (u8 bool, T-M6-2) arms/disarms this port's L2 bridge
-	 * FDB offload bit. Absent => leave the per-port bit unchanged, same
-	 * contract as ASK_ATTR_VLAN. No CLI leafNode sets this directly --
-	 * VyOS's `interfaces bridge` conf_mode passes it automatically for a
-	 * member port that already has family offload armed.
-	 */
-	bridge_attr = info->attrs[ASK_ATTR_BRIDGE];
-	if (bridge_attr) {
-		bridge_on = nla_get_u8(bridge_attr);
-		if (bridge_on > 1)
-			return -EINVAL;
-		ask_hw_offload_set_bridge(port_id, bridge_on);
-	}
-
 	rc = ask_hw_offload_engage(port_id);
 	if (rc) {
-		if (vlan_attr && vlan_on)
-			ask_hw_offload_set_vlan(port_id, false);
-		if (bridge_attr && bridge_on)
-			ask_hw_offload_set_bridge(port_id, false);
 		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
 		return rc;
 	}
@@ -902,9 +867,8 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	 * ask_hw_offload_engage() itself (see ask_hw_prewarm_egress_fq()). */
 	ask_hw_prewarm_egress_fq(port_id);
 
-	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x vlan=%d bridge=%d\n",
-		    port_id, fam_mask, vlan_attr ? vlan_on : -1,
-		    bridge_attr ? bridge_on : -1);
+	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x\n",
+		    port_id, fam_mask);
 	return 0;
 }
 
@@ -919,16 +883,9 @@ return -EINVAL;
 
 port_id = nla_get_u8(port_attr);
 
-/* Clear the per-port VLAN admission bit BEFORE the full disengage so the
- * setter's live-transition teardown does not fire (disengage already tears the
- * VLAN CC tree down in F-134 order and restores RSS). Ordering avoids a
- * redundant teardown + fe_reengage on an about-to-be-disengaged port. */
-ask_hw_offload_set_vlan(port_id, false);
-/* Same reasoning for the bridge admission bit (T-M6-2). */
-ask_hw_offload_set_bridge(port_id, false);
 ask_hw_offload_disengage(port_id);
 
-ask_pr_info("genl: disengaged port 0x%02x (VLAN/bridge offload disarmed)\n", port_id);
+ask_pr_info("genl: disengaged port 0x%02x\n", port_id);
 return 0;
 }
 

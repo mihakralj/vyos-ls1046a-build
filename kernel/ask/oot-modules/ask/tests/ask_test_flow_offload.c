@@ -66,6 +66,7 @@
 #include <linux/string.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <net/netfilter/nf_flow_table.h>
 
 #include "../include/ask_internal.h"
 
@@ -973,7 +974,126 @@ KUNIT_EXPECT_EQ(test, oif, 42u);
 KUNIT_EXPECT_TRUE(test, (flags & ASK_ACT_NAT_SRC) != 0);
 }
 
+/*
+ * T-M6-SP4: ask_flow_cookie_pppoe() classifies a flow's PPPoE encapsulation:
+ * 0 = none; DECAP = this tuple's only encap is PPP_SES (non-zero session);
+ * ENCAP = this tuple has no encap, the other tuple's only encap is PPP_SES and
+ * this tuple transmits DIRECT (concentrator MAC from out.h_dest);
+ * -EOPNOTSUPP = everything else (PPPoE over VLAN, VLAN on the LAN side,
+ * session 0, encap without a DIRECT xmit). Non-flowtable cookies are 0.
+ */
+static void ask_flow_offload_test_pppoe_cookie(struct kunit *test)
+{
+static const u8 ac[ETH_ALEN] = { 0xec, 0x0d, 0x9a, 0xbc, 0x34, 0x90 };
+static const u8 me[ETH_ALEN] = { 0xe8, 0xf6, 0xd7, 0x00, 0x16, 0x02 };
+struct flow_offload *flow;
+struct flow_offload_tuple *t0, *t1;
+struct ask_pppoe_info pi;
+unsigned long c0, c1;
+
+flow = kunit_kzalloc(test, sizeof(*flow), GFP_KERNEL);
+KUNIT_ASSERT_NOT_NULL(test, flow);
+t0 = &flow->tuplehash[0].tuple;	/* LAN -> PPPoE */
+t1 = &flow->tuplehash[1].tuple;	/* PPPoE -> LAN */
+t0->dir = FLOW_OFFLOAD_DIR_ORIGINAL;
+t1->dir = FLOW_OFFLOAD_DIR_REPLY;
+c0 = (unsigned long)t0;
+c1 = (unsigned long)t1;
+
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(0, &pi), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), 0);
+
+/* VLAN only: not PPPoE. */
+t0->encap_num = 1;
+t0->encap[0].proto = htons(ETH_P_8021Q);
+t0->encap[0].id = 10;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), 0);
+
+/* t1 ingresses PPPoE session 7 -> decap; t0 with a tagged LAN side is
+ * not supported. */
+t1->encap_num = 1;
+t1->encap[0].proto = htons(ETH_P_PPP_SES);
+t1->encap[0].id = 7;
+t1->iifidx = 5;		/* the PPPoE physical port */
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
+
+/* Untagged LAN side, but t0 not yet DIRECT: encap refused, decap ok. */
+t0->encap_num = 0;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), ASK_PPPOE_DECAP);
+KUNIT_EXPECT_EQ(test, pi.sid, (u16)7);
+KUNIT_EXPECT_EQ(test, pi.ifindex, 5);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
+
+/* t0 transmits DIRECT toward the concentrator: encap with its MACs. */
+t0->xmit_type = FLOW_OFFLOAD_XMIT_DIRECT;
+t0->out.ifidx = 5;
+ether_addr_copy(t0->out.h_dest, ac);
+ether_addr_copy(t0->out.h_source, me);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), ASK_PPPOE_ENCAP);
+KUNIT_EXPECT_EQ(test, pi.sid, (u16)7);
+KUNIT_EXPECT_MEMEQ(test, pi.peer_mac, ac, ETH_ALEN);
+KUNIT_EXPECT_MEMEQ(test, pi.src_mac, me, ETH_ALEN);
+KUNIT_EXPECT_EQ(test, pi.ifindex, 5);
+
+/* Session 0 would key like a plain frame: refused both ways. */
+t1->encap[0].id = 0;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
+
+/* PPPoE over VLAN: not yet supported. */
+t1->encap[0].id = 7;
+t1->encap_num = 2;
+t1->encap[1].proto = htons(ETH_P_8021Q);
+t1->encap[1].id = 10;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
+
+/* encap_num bounds the scan: a stale PPP_SES past it is ignored. */
+t1->encap_num = 0;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), 0);
+}
+
+/*
+ * F-259: the 50-byte routed key = 46-byte dual lane + outer VID [46..47] +
+ * PPPoE session ID [48..49], both big-endian, matching gec[6]/gec[7]. A plain
+ * frame carries 0/0; the VID keeps only the 12 VID bits (KeyGen masks PCP/DEI).
+ */
+static void ask_flow_offload_test_fe_key_l2_context(struct kunit *test)
+{
+struct ask_flow_key key = {
+	.l3_proto = ASK_FLOW_L3_IPV4,
+	.l4_proto = IPPROTO_TCP,
+	.sport = htons(22),
+	.dport = htons(0xcea2),
+	.src_ip = { 10, 99, 50, 1 },
+	.dst_ip = { 10, 99, 50, 15 },
+};
+u8 k[ASK_FE_KEY_SIZE_DUAL];
+int i;
+
+KUNIT_EXPECT_EQ(test, (int)ASK_FE_KEY_SIZE_DUAL, 50);
+
+ask_fe_build_key_dual(&key, k);
+KUNIT_EXPECT_EQ(test, k[0], (u8)ASK_FE_FAMILY_V4);
+KUNIT_EXPECT_EQ(test, k[41], (u8)IPPROTO_TCP);
+for (i = 46; i < 50; i++)
+	KUNIT_EXPECT_EQ(test, k[i], (u8)0);
+
+key.vlan_ingress_vid = 0xf00a;	/* PCP/DEI bits must not reach the key */
+key.pppoe_sid = 0x1234;
+ask_fe_build_key_dual(&key, k);
+KUNIT_EXPECT_EQ(test, k[46], (u8)0x00);
+KUNIT_EXPECT_EQ(test, k[47], (u8)0x0a);
+KUNIT_EXPECT_EQ(test, k[48], (u8)0x12);
+KUNIT_EXPECT_EQ(test, k[49], (u8)0x34);
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
+KUNIT_CASE(ask_flow_offload_test_fe_key_l2_context),
+KUNIT_CASE(ask_flow_offload_test_pppoe_cookie),
 KUNIT_CASE(ask_flow_offload_test_fe_key_wire_order),
 KUNIT_CASE(ask_flow_offload_test_fe_key_v6_wire_order),
 KUNIT_CASE(ask_flow_offload_test_intent_lower_ipv4),

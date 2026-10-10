@@ -97,72 +97,30 @@ read_fe_offset() {
 # engage — PRODUCTION path via generic-netlink/YNL.
 # ---------------------------------------------------------------------------
 engage() {
-    local port_id mask="${1:-3}" vlan="${2:-}" bridge="${3:-}"
+    local port_id mask="${1:-3}"
     port_id="$(port_id_dec)"
     # family-mask: bit0=IPv4, bit1=IPv6 (CLI offload ipv4/ipv6). Default 3=both
     # for the back-compat bare `engage`. mask 0 is nonsensical for engage.
-    # vlan (optional): 0|1 = per-port single-tag 802.1Q VLAN offload
-    # (CLI `offload ask vlan`), carried as ASK_ATTR_VLAN. Absent => the kernel
-    # leaves the port's VLAN bit unchanged (default off).
-    # bridge (optional): 0|1 = per-port L2 bridge FDB offload (T-M6-2), carried
-    # as ASK_ATTR_BRIDGE. Absent => leave unchanged. No CLI leafNode sets this
-    # directly — VyOS's `interfaces bridge` conf_mode passes it automatically
-    # for a member port that already has offload ipv4/ipv6 armed.
-    local json="\"port-id\": $port_id, \"family-mask\": $mask"
-    local desc="family-mask=$mask"
-    if [ -n "$vlan" ]; then
-        json="$json, \"vlan\": $vlan"
-        desc="$desc vlan=$vlan"
-    fi
-    if [ -n "$bridge" ]; then
-        json="$json, \"bridge\": $bridge"
-        desc="$desc bridge=$bridge"
-    fi
-    info "engaging port $PORT via ask genl (port-id=$port_id $desc)"
-    ynl_do engage "{$json}"
-    info "ENGAGED ($desc)"
+    # Granularity is per port + per IP family only: VLAN, NAT, PPPoE, bridge and
+    # IPv6 fragmentation are automatic parts of an engaged port (global
+    # ask.* module parameters are the kill switches), so nothing else is passed.
+    info "engaging port $PORT via ask genl (port-id=$port_id family-mask=$mask)"
+    ynl_do engage "{\"port-id\": $port_id, \"family-mask\": $mask}"
+    info "ENGAGED (family-mask=$mask)"
 }
 
 # ---------------------------------------------------------------------------
-# family <mask> [vlan] [bridge] — set this port's offload family selection
-# (and, when given, its per-port VLAN and/or bridge bits) and engage, or
-# disengage when mask==0. Driven by the VyOS CLI `offload ask ipv4`/`ipv6`/
-# `vlan` knobs plus the automatic bridge-membership arming (userspace/conf_mode
-# computes the effective per-port mask + bits each commit).
+# family <mask> — set this port's offload family selection and engage, or
+# disengage when mask==0. Driven by the VyOS CLI `offload ipv4`/`ipv6` leaves
+# (conf_mode computes the effective per-port mask each commit).
 # ---------------------------------------------------------------------------
 family() {
-    local mask="${1:-0}" vlan="${2:-}" bridge="${3:-}"
+    local mask="${1:-0}"
     if [ "$mask" = "0" ]; then
         disengage
     else
-        engage "$mask" "$vlan" "$bridge"
+        engage "$mask"
     fi
-}
-
-# ---------------------------------------------------------------------------
-# vlan <0|1> — set ONLY this port's VLAN offload bit without changing the
-# family mask, by re-engaging with the port's current family. Convenience for
-# an explicit toggle; the VyOS apply path normally uses `family <mask> <vlan>`
-# so family + vlan are set atomically in one engage. mask defaults to 3 (both)
-# when the port's current family cannot be inferred here.
-# ---------------------------------------------------------------------------
-vlan() {
-    local on="${1:-0}"
-    case "$on" in 0|1) ;; *) die "vlan arg must be 0 or 1" ;; esac
-    engage 3 "$on"
-}
-
-# ---------------------------------------------------------------------------
-# bridge <0|1> — set ONLY this port's L2 bridge FDB offload bit (T-M6-2)
-# without changing the family mask, by re-engaging with the port's current
-# family. Called by VyOS's `interfaces bridge` conf_mode when a member
-# interface joins/leaves a bridge, never directly by the user. mask defaults
-# to 3 (both) when the port's current family cannot be inferred here.
-# ---------------------------------------------------------------------------
-bridge() {
-    local on="${1:-0}"
-    case "$on" in 0|1) ;; *) die "bridge arg must be 0 or 1" ;; esac
-    engage 3 "" "$on"
 }
 
 # ---------------------------------------------------------------------------
@@ -424,10 +382,8 @@ if ! grep -q "fsl,ls1046a" /proc/device-tree/compatible 2>/dev/null; then
 fi
 
 case "$VERB" in
-    engage)         engage "${1:-3}" "${2:-}" "${3:-}" ;;
-    family)         family "${1:-0}" "${2:-}" "${3:-}" ;;
-    vlan)           vlan "${1:-0}" ;;
-    bridge)         bridge "${1:-0}" ;;
+    engage)         engage "${1:-3}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+    family)         family "${1:-0}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     disengage)      disengage ;;
     hit-engage)     hit_engage "$@" ;;
     hit-disengage)  hit_disengage ;;
@@ -452,13 +408,10 @@ case "$VERB" in
 Usage: vyos-offload-ask [--port 0x10|0x11] <verb> [args]
 
 Production path (CONT_LOOKUP scaffold, FE-VM dormant):
-  engage [mask] [vlan] [bridge]
-                           arm offload; mask bit0=IPv4 bit1=IPv6; vlan/bridge 0|1
-  family <mask> [vlan] [bridge]
-                           set per-port family (+VLAN/+bridge) and engage; mask 0 = disengage
-  vlan <0|1>               set per-port single-tag 802.1Q VLAN offload bit
-  bridge <0|1>             set per-port L2 bridge FDB offload bit (T-M6-2; set
-                            automatically by `interfaces bridge` conf_mode, not by hand)
+  engage [mask]           arm offload; mask bit0=IPv4 bit1=IPv6 (default 3)
+  family <mask>           set per-port family selection and engage; mask 0 = disengage
+                          (VLAN/NAT/PPPoE/bridge/IPv6 frag are automatic on an
+                          engaged port; kill switches are ask.* module params)
   disengage                disarm, restore RSS
 
 HIT verification (FE-VM active, SHORT-TERM TEST):
