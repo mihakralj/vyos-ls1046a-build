@@ -33,6 +33,7 @@ extern struct kunit_suite ask_flow_suite;
 extern struct kunit_suite ask_flow_offload_suite;
 extern struct kunit_suite ask_genl_suite;
 extern struct kunit_suite ask_hw_pcd_suite;
+extern struct kunit_suite ask_bridge_suite;
 
 /*
  * kunit_test_suites() is variadic: append further suites here as the
@@ -45,7 +46,7 @@ extern struct kunit_suite ask_hw_pcd_suite;
  */
 kunit_test_suites(&ask_dummy_suite, &ask_flow_suite,
   &ask_flow_offload_suite, &ask_genl_suite,
-  &ask_hw_pcd_suite);
+  &ask_hw_pcd_suite, &ask_bridge_suite);
 
 MODULE_AUTHOR("ASK2 contributors");
 MODULE_DESCRIPTION("ASK2 kunit test harness");

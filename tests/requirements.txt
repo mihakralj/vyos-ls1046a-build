@@ -1,0 +1,30 @@
+# Snapshot of the bench environment, 2026-10-02, plus the timeout watchdog.
+# Update deliberately together; deploy does not float to newer dependencies.
+# Install: make test-env (runner) or make deploy-agent-wan (runner + WAN agent).
+# Reference interpreter: Python 3.13; verify with the venv's python -m pip check.
+# System packages, LAN dependencies and DUT recipes: docs/testing.md.
+# pytest-asyncio / pytest-timeout pins also appear in tools/pyproject.toml.
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.5
+aiosignal==1.4.0
+attrs==26.1.0
+cffi==2.0.0
+execnet==2.1.2
+frozenlist==1.8.0
+idna==3.11
+iniconfig==2.3.0
+multidict==6.7.1
+packaging==26.1
+pluggy==1.6.0
+propcache==0.4.1
+pycparser==3.0
+Pygments==2.20.0
+pyroute2==0.9.6
+pyserial==3.5
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0
+pytest-xdist==3.8.0
+PyYAML==6.0.3
+scapy==2.7.0
+yarl==1.23.0
