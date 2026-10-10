@@ -108,6 +108,24 @@ int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 bool fman_pcd_v6_enabled(void);	/* F-210 export; still consulted by kernel */
 static u8 ask_hw_port_family[64];
 
+static u8 ask_hw_port_family_get(u8 hw_port_id)
+{
+	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
+		return READ_ONCE(ask_hw_port_family[hw_port_id]);
+	return 0;
+}
+
+/*
+ * OFFLOAD GRANULARITY. The only per-port state is (engaged, family mask):
+ * `offload ipv4|ipv6` on an interface. Everything else -- VLAN pop/push, NAT,
+ * PPPoE encap/decap, L2 bridge, IPv6 hardware fragmentation -- is an automatic
+ * capability of an engaged port, switched only by the global kill-switch module
+ * parameters below (vlan_offload, nat44_offload, nat66_offload, pppoe_offload,
+ * and ask.ipv6_hw_frag in ask_flow_offload.c). "Engaged" == non-zero family
+ * mask: engage sets it, disengage clears it, and flow admission already keys
+ * off it.
+ */
+
 /*
  * T-M6-7.1 NAT offload arming gate. Default OFF: NAT/PAT flows fail closed to
  * software (the shipping contract). When set (modprobe ask nat44_offload=1) the
@@ -179,57 +197,57 @@ EXPORT_SYMBOL_GPL(ask_hw_nat66_offload_armed);
  * ASK_HW_PORT_ETH0_MGMT guard below, unaffected by this default).
  */
 /*
- * Global master override. Default ON: arms VLAN offload on every ASK-engaged
- * port (OR'd with the per-port bit), matching how nat44/nat66 ship — no
- * separate CLI step required. Runtime-disableable for diagnosis
- * (`echo N > /sys/module/ask/parameters/vlan_offload`), and the per-port CLI
- * `offload ask vlan` -> genl ASK_ATTR_VLAN -> ask_hw_port_vlan[] below still
- * works as an explicit per-port bit if the global override is ever turned off.
+ * VLAN pop/push is an automatic capability of every ASK-engaged port (no
+ * per-port arm bit, no CLI knob), default ON like nat44/nat66. This module
+ * parameter is its single global kill switch
+ * (`echo N > /sys/module/ask/parameters/vlan_offload`). Turning it off at
+ * runtime fails closed: admission is refused, every engaged port's VLAN CC
+ * tree is detached/drained and its HMTDs released (F-134 order inside
+ * teardown), then the FE-VM ehash graft is re-asserted so routed/NAT stays
+ * HW-offloaded on the still-engaged port (fe_reengage is a no-op for a port
+ * that is not engaged).
  */
 static bool ask_vlan_offload = true;
-module_param_named(vlan_offload, ask_vlan_offload, bool, 0644);
-MODULE_PARM_DESC(vlan_offload,
-		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload on all ASK-engaged ports (default 1, silicon-validated R5b; per-port override is CLI `offload ask vlan`; eth0/802.1ad/QinQ excluded)");
 
-/* Per-port VLAN offload arm bit, sized like ask_hw_port_family[]. Set by
- * ask_hw_offload_set_vlan() from the genl engage path (ASK_ATTR_VLAN). */
-static bool ask_hw_port_vlan[64];
-
-void ask_hw_offload_set_vlan(u8 hw_port_id, bool on)
+static void ask_hw_vlan_disarm_all(void)
 {
-	bool old;
+	unsigned int i;
 
-	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_vlan))
-		return;
-
-	old = READ_ONCE(ask_hw_port_vlan[hw_port_id]);
-	WRITE_ONCE(ask_hw_port_vlan[hw_port_id], on);
-
-	/* Fail closed on a live true -> false transition. Clear admission first so
-	 * a concurrent REPLACE cannot add another VLAN leaf, then detach/drain the
-	 * port's CC tree and release its HMTDs (F-134 order inside teardown), then
-	 * re-assert the FE-VM ehash graft so routed/NAT stays HW-offloaded on a
-	 * still-engaged port (mirrors ask_vlan_cc_flow_del's last-flow path;
-	 * fe_reengage is a no-op if the port is not ASK-engaged, e.g. the disengage
-	 * genl path which does its own teardown). */
-	if (old && !on) {
-		ask_vlan_cc_teardown_port(hw_port_id);
-		(void)ask_hw_fe_reengage(hw_port_id);
+	for (i = 0; i < ARRAY_SIZE(ask_hw_port_family); i++) {
+		if (!ask_hw_port_family_get(i))
+			continue;
+		ask_vlan_cc_teardown_port(i);
+		(void)ask_hw_fe_reengage(i);
 	}
 }
-EXPORT_SYMBOL_GPL(ask_hw_offload_set_vlan);
+
+static int ask_vlan_offload_set(const char *val, const struct kernel_param *kp)
+{
+	bool old = READ_ONCE(ask_vlan_offload);
+	int rc = param_set_bool(val, kp);
+
+	if (!rc && old && !READ_ONCE(ask_vlan_offload))
+		ask_hw_vlan_disarm_all();
+	return rc;
+}
+
+static const struct kernel_param_ops ask_vlan_offload_ops = {
+	.set = ask_vlan_offload_set,
+	.get = param_get_bool,
+};
+module_param_cb(vlan_offload, &ask_vlan_offload_ops, &ask_vlan_offload, 0644);
+MODULE_PARM_DESC(vlan_offload,
+		 "Single-tag 802.1Q VLAN pop/push FMan hardware offload on all ASK-engaged ports (default 1, silicon-validated R5b; 0 = kill switch, tears down live VLAN trees; eth0/802.1ad/QinQ excluded)");
 
 /*
- * Authoritative per-port VLAN gate. A VLAN flow is admitted to the CC+HMTD
- * path only when this returns true for its INGRESS port. True iff the global
- * master override is set OR this port's per-port bit is armed.
+ * Authoritative VLAN gate. A VLAN flow is admitted to the CC+HMTD path only
+ * when the kill switch is on AND its INGRESS port is engaged.
  */
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id)
 {
-	bool armed = READ_ONCE(ask_vlan_offload);
+	bool armed = READ_ONCE(ask_vlan_offload) &&
+		     ask_hw_port_family_get(hw_port_id);
 
-	if (!armed && hw_port_id < ARRAY_SIZE(ask_hw_port_vlan))
-		armed = READ_ONCE(ask_hw_port_vlan[hw_port_id]);
 	if (armed)
 		pr_info_once("ask: single-tag 802.1Q VLAN hardware offload enabled (CC+HMTD); eth0/802.1ad/QinQ excluded\n");
 	return armed;
@@ -239,89 +257,68 @@ EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed_port);
 /*
  * Port-agnostic gate for the capability-advertise (ask_genl.c) and the
  * ask_intent_lower() fail-closed pre-check, neither of which has an ingress
- * port in hand. True iff the global override OR ANY port is armed; the
- * authoritative per-port decision is still made downstream by
- * ask_hw_vlan_offload_armed_port() at preflight and CC insert.
+ * port in hand: just the kill switch. The authoritative per-port decision is
+ * still made downstream by ask_hw_vlan_offload_armed_port() at preflight and
+ * CC insert.
  */
 bool ask_hw_vlan_offload_armed(void)
 {
-	unsigned int i;
-
-	if (READ_ONCE(ask_vlan_offload))
-		return true;
-	for (i = 0; i < ARRAY_SIZE(ask_hw_port_vlan); i++)
-		if (READ_ONCE(ask_hw_port_vlan[i]))
-			return true;
-	return false;
+	return READ_ONCE(ask_vlan_offload);
 }
 EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
 
 /*
- * T-M6-2 B0: per-port L2 bridge offload arm bit, mirroring ask_hw_port_vlan[]
- * exactly. No CLI leafNode sets this directly -- VyOS's `interfaces bridge`
- * conf_mode arms it automatically for a member port that already has
- * `offload ipv4`/`offload ipv6` set (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md: "no
- * separate opt-in, automatic when at least one member port has ASK hardware
- * offload enabled"). No global master-override module param exists for this
- * bit (unlike ask_vlan_offload) -- bridge admission with no member port
- * engaged makes no sense to force on, so there is nothing sensible for a
- * bare master override to mean here.
- */
-static bool ask_hw_port_bridge[64];
-
-void ask_hw_offload_set_bridge(u8 hw_port_id, bool on)
-{
-	bool old;
-
-	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_bridge))
-		return;
-
-	old = READ_ONCE(ask_hw_port_bridge[hw_port_id]);
-	WRITE_ONCE(ask_hw_port_bridge[hw_port_id], on);
-
-	/*
-	 * B0: no CC-tree/FDB install path exists yet (ask_bridge.c is an
-	 * observer only), so there is nothing to tear down on a live
-	 * true->false transition. B3's real switchdev wiring adds the
-	 * equivalent of ask_vlan_cc_teardown_port()'s live-disarm handling
-	 * here once bridge FDB entries are actually installed into hardware.
-	 */
-	(void)old;
-}
-EXPORT_SYMBOL_GPL(ask_hw_offload_set_bridge);
-
-/*
- * Authoritative per-port bridge gate, mirroring ask_hw_vlan_offload_armed_
- * port(). A bridge FDB entry on this ingress port is admitted to hardware
- * only when this returns true -- once B1-B3 give it something to gate.
- */
-bool ask_hw_bridge_offload_armed_port(u8 hw_port_id)
-{
-	bool armed;
-
-	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_bridge))
-		return false;
-	armed = READ_ONCE(ask_hw_port_bridge[hw_port_id]);
-	if (armed)
-		pr_info_once("ask: L2 bridge FDB hardware offload enabled (CC+plain enqueue) on at least one port\n");
-	return armed;
-}
-EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed_port);
-
-/*
- * Port-agnostic gate for the capability-advertise (ask_genl.c), mirroring
- * ask_hw_vlan_offload_armed(). True iff ANY port is armed.
+ * L2 bridge FDB offload (T-M6-2) is an automatic capability of an engaged
+ * port: no arm bit, no CLI leaf, no module param. B0 is observer-only (no
+ * CC-tree/FDB installer yet), so this only reports whether any port could
+ * carry it; B3's switchdev wiring will gate per ingress port on the same
+ * engaged state.
  */
 bool ask_hw_bridge_offload_armed(void)
 {
 	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(ask_hw_port_bridge); i++)
-		if (READ_ONCE(ask_hw_port_bridge[i]))
+	for (i = 0; i < ARRAY_SIZE(ask_hw_port_family); i++)
+		if (ask_hw_port_family_get(i))
 			return true;
 	return false;
 }
 EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed);
+
+/*
+ * PPPoE session offload (decap PPPoE->LAN and encap LAN->PPPoE, T-M6-SP4) is
+ * an automatic capability of an engaged port, default ON. The session's
+ * source-interface physical port must be engaged (it carries the PPPoE
+ * frames); `offload pppoe` no longer exists. This parameter is the global
+ * kill switch: turning it off drops every PPPoE HW flow so nothing keeps
+ * forwarding in silicon (the flows return to the kernel).
+ */
+static bool ask_pppoe_offload = true;
+
+static int ask_pppoe_offload_set(const char *val, const struct kernel_param *kp)
+{
+	bool old = READ_ONCE(ask_pppoe_offload);
+	int rc = param_set_bool(val, kp);
+
+	if (!rc && old && !READ_ONCE(ask_pppoe_offload))
+		ask_flow_pppoe_flush();
+	return rc;
+}
+
+static const struct kernel_param_ops ask_pppoe_offload_ops = {
+	.set = ask_pppoe_offload_set,
+	.get = param_get_bool,
+};
+module_param_cb(pppoe_offload, &ask_pppoe_offload_ops, &ask_pppoe_offload, 0644);
+MODULE_PARM_DESC(pppoe_offload,
+		 "PPPoE session decap/encap FMan hardware offload on ASK-engaged ports (default 1; 0 = kill switch, drops live PPPoE HW flows)");
+
+bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id)
+{
+	return READ_ONCE(ask_pppoe_offload) &&
+	       ask_hw_port_family_get(hw_port_id);
+}
+EXPORT_SYMBOL_GPL(ask_hw_pppoe_offload_armed_port);
 
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
@@ -330,13 +327,6 @@ void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 			   family_mask & (ASK_FAM_V4 | ASK_FAM_V6));
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_set_family);
-
-static u8 ask_hw_port_family_get(u8 hw_port_id)
-{
-	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
-		return READ_ONCE(ask_hw_port_family[hw_port_id]);
-	return 0;
-}
 
 /* Flow admission for the preflight + insert gates, gated by the INGRESS
  * port's selected family mask. TCP/UDP only (both families). Returns 0 if the
@@ -1228,12 +1218,6 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 	 * ask_vlan_cc_flow_del holds ask_vlan_cc_lock alone and only calls back
 	 * into h->lock (ask_hw_fe_reengage) AFTER dropping ask_vlan_cc_lock, so
 	 * no path ever holds ask_vlan_cc_lock while taking h->lock. */
-	/* Clear the per-port VLAN admission bit as part of disengage so the port
-	 * returns to software fully. Raw write (not ask_hw_offload_set_vlan) to
-	 * avoid re-entering its live-transition teardown while we already tear
-	 * the CC tree down below. */
-	if (hw_port_id < ARRAY_SIZE(ask_hw_port_vlan))
-		WRITE_ONCE(ask_hw_port_vlan[hw_port_id], false);
 	ask_vlan_cc_teardown_port(hw_port_id);
 
 	/* F-092: Disarm + tear down FE-VM via kernel API (not debugfs).
@@ -1258,6 +1242,11 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 	 * cannot re-admit a family the operator disabled. Re-engage sets it
 	 * again from the CLI mask. */
 	ask_hw_offload_set_family(hw_port_id, 0);
+
+	/* PPPoE flows ride on this port's engaged state (encap flows ingress on
+	 * another port but egress through a session sourced here): drop them now
+	 * that the family is cleared so they cannot outlive the port. */
+	ask_flow_pppoe_flush();
 
 	ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
 }

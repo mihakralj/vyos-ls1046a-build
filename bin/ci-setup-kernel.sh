@@ -1154,14 +1154,18 @@ PATCH_FAIL=0
 PATCH_FAIL_LIST=""
 PATCH_FALLBACK_COUNT=0
 PATCH_FALLBACK_LIST=""
+# Private stderr capture: a fixed /tmp/_apply_stderr left by another user made
+# the redirect fail ("Permission denied"), so git apply never ran and every
+# patch fell to patch -p1 (run 37653594339: 0095/0119/4010 failed).
+APPLY_ERR=$(mktemp)
 for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); do
     pname=$(basename "$patch")
     echo "I: Apply Kernel patch: $patch"
     APPLIED=0
-    if git apply --3way --whitespace=nowarn "$patch" 2>/tmp/_apply_stderr; then
+    if git apply --3way --whitespace=nowarn "$patch" 2>"$APPLY_ERR"; then
         APPLIED=1
         # Detect silent 3-way fallback — patch landed but with drifted context
-        if grep -q "Falling back to three-way merge" /tmp/_apply_stderr; then
+        if grep -q "Falling back to three-way merge" "$APPLY_ERR"; then
             echo "::warning::3-way-fallback: $pname applied via 3-way merge (context drifted)" >&2
             PATCH_FALLBACK_COUNT=$((PATCH_FALLBACK_COUNT + 1))
             PATCH_FALLBACK_LIST="$PATCH_FALLBACK_LIST $pname"
@@ -2220,6 +2224,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ] && \
     echo "### fman_pcd.c/dpaa_eth.c: F-239 CC-tree comparator input capture (probe2, T-M6-8 VLAN-v6 dig)"
 fi
 
+# F-258 (T-M6-SP4 PPPoE parser probe, 2026-10-08): widen the F-239 probe2
+# predicate from eth1-only to eth1 OR any port's contiguous PPPoE session
+# frame (EtherType 0x8864), so the hard-parser question in
+# plans/ASK2-PPPOE-OFFLOAD-PLAN.md section 3 can be answered on the eth3
+# PPPoE rig. Same synchronous, bounded, read-only copy. Anchors on F-239's
+# predicate, so it must run right after it.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_258.py" 2>&1
+    echo "### dpaa_eth.c: F-258 probe2 also captures PPPoE session frames (T-M6-SP4)"
+fi
+
 # F-240 (T-M6-8 VLAN-v6 dig, 2026-09-03): widen/restore a sacrificial RX
 # port's BMI Internal-Context copy window (FMBM_RICP) so probe2/F-239 can
 # actually reach CC_IC_KG_KEY_OFFSET. No ordering dependency on F-239 itself
@@ -2392,6 +2407,112 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_254.py" 2>&1
     echo "### fman_pcd.c: F-254 ehash delete atomic unlink + SYNC before free"
+fi
+
+# F-255 (T-M6-2 B1, 2026-10-07): per-port FE key profiles. A port has one
+# KeyGen scheme, so one key format and one per-port ehash table; until now
+# both were hardwired to the 46-byte dual-lane routed key (F-224/F-225).
+# ROUTED (default, unchanged) and L2_DA (6-byte destination MAC, EKFC
+# MACDST, no GEC) for bridge offload; later offloads add profiles.
+# Dormant until ask.ko engages a port with L2_DA.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_255.py" 2>&1
+    echo "### fman_pcd/keygen: F-255 per-port FE key profiles (ROUTED, L2_DA)"
+fi
+
+# F-256 (Phase 1 churn gate, 2026-10-07): stall #3 was an eth4 RX task's DMA
+# bus error (FMDM_TCID port 0x11 TNUM 87, addr 0x2e_000008f7) that the kernel
+# handled at dev_dbg only, and F-254 freed records even after a delete SYNC
+# timed out (use-after-free risk, evidence lost). Log bus errors; keep and
+# log records whose delete SYNC timed out. Logging/leak only. After F-254.
+if [ -f drivers/net/ethernet/freescale/fman/fman.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_256.py" 2>&1
+    echo "### fman.c/fman_pcd.c: F-256 DMA bus-error logging + keep records on SYNC timeout"
+fi
+
+# F-257 (Phase 1 churn gate hygiene, 2026-10-08): fman_pcd_ehash_add_key()
+# allocates a 16-byte DMA-coherent FE context per flow (F-175) and only
+# flow_drain() freed it, so every single del_key() leaked one: ask.ko
+# DESTROY, idle aging, and the evict-before-insert of patch 0219. The
+# context now goes with the record, after the delete SYNC; the F-256
+# SYNC-timeout path keeps both. Resource leak only, NOT a stall fix:
+# stalls #4 and #5 occurred on F-254+F-256 builds. After F-256, whose
+# delete tail it anchors on. bin/test-ehash-delete.py then runs the real
+# del_key()/flow_drain() with a simulated SYNC and fails the build, before
+# the kernel compile, if unlink/SYNC/free ordering or ctx release regress.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_257.py" 2>&1
+    echo "### fman_pcd.c: F-257 ehash delete frees the F-175 flow context after SYNC"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash delete harness passed"
+fi
+
+# F-259 (T-M6-SP4 logical-ingress key, 2026-10-08): the routed FE ehash key
+# grows 46 -> 50 bytes with the ingress L2 context (outer VID via GEC VLAN1,
+# PPPoE session ID via GEC PPP, both validated so 0 when absent), so a VLAN-pop
+# or PPPoE-decap record can only match frames that carry that tag/session
+# (the F-258 probe proved PPPoE and plain frames produced identical 46-byte
+# keys). Introduces FMAN_PCD_FE_ROUTED_KEY_SIZE in include/linux/fsl/fman_pcd.h
+# for every routed table and key buffer; ask.ko static_asserts against it.
+# After F-224 (keygen anchor), F-255 (profile table) and the 0194/0198 ACL
+# bridges.
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_259.py" 2>&1
+    echo "### fman_keygen.c/fman_pcd.c/dpaa: F-259 routed FE key 50 bytes (VID + PPPoE SID)"
+fi
+
+# F-260 (T-M6-SP4 PPPoE decap record, 2026-10-08): the inline ehash record
+# emitter learns the vendor STRIP_PPPoE_HDR (0x14) opcode behind a new L2-edit
+# flag FMAN_PCD_VLANF_PPPOE_STRIP: front half 04 11 12 (VID 0), then 0x14 with
+# its stats pointer on the owned 0216 scratch block, before TTL/NAT and the L2
+# rebuild. Dormant until ask.ko sets the flag (ask.pppoe_offload, default off).
+# After F-259 and the 0209/0215/0216 emitter patches.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_260.py" 2>&1
+    echo "### fman_pcd.c/fman_pcd.h: F-260 ehash STRIP_PPPoE_HDR (0x14) emitter"
+fi
+
+# F-261 (T-M6-SP4 PPPoE encap record, 2026-10-08): the emitter learns the
+# vendor INSERT_PPPoE_HDR (0x43) behind FMAN_PCD_VLANF_PPPOE_INSERT: front
+# half 04 11 12, TTL/NAT, 0x43 {stats_ptr, ver1|type1|code0|session}, then
+# INSERT_L2 with EtherType 0x8864; session ID via the new pppoe_sid field in
+# fman_pcd_fe_flow_action/fman_pcd_vlan_params; ENQUEUE mtu 0xffff
+# (fragmentation disabled, no frag pool) on these records only. Dormant
+# until ask.ko sets the flag (automatic on an engaged port; ask.pppoe_offload
+# kill switch).
+# After F-260.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_261.py" 2>&1
+    echo "### fman_pcd.c/fman_pcd.h: F-261 ehash INSERT_PPPoE_HDR (0x43) emitter"
+fi
+
+# F-262 (T-M6-SP4 hardware MTU check + IP fragmentation, 2026-10-08, revised
+# 2026-10-09): vendor PREEMPTIVE_CHECKS (0x05) first + sealed {mtu_offset,
+# TX_VALIDATE|DFBIT_HONOR(v4)}, ENQUEUE mtu = egress MTU, bpid = dedicated
+# fragmentation pool, word2 = a 32-byte frag-info block (frag_options 0x000c)
+# in the owned FE MURAM reservation; plus fman_port_adv_offload(), the vendor
+# RX-port triple (params-page OFFLOAD_SUPPORT_EN, RCMNE 0x0e, RFENE 0x22)
+# applied at port engage and restored at disengage - without it the
+# microcode fragmenter emits one fragment per frame and kills port RX after
+# 11 frames (silicon, 2026-10-09). Only on records with the new egress_mtu
+# set (ask.ko: route MTU < ingress port MTU; IPv6 in hardware by default,
+# kept in software by the global ask.ipv6_hw_frag=0 kill switch); all other
+# records byte-identical. After F-261.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_262.py" 2>&1
+    echo "### fman_pcd.c/fman_port.c: F-262 ehash PREEMPTIVE_CHECKS (05) + frag pool/MURAM + RX-port adv-offload"
+fi
+
+# F-263 (A6 churn stall root cause, 2026-10-09): delete F-143's memcpy of the
+# en_exthash_node template into the first 16 bytes of each DDR bucket array.
+# That is bucket 0: the walker read it as a bucket head (key_size<<32 |
+# bswap32(table_base_lo), e.g. 0x32000008f7) and DMA'd it -> FMan DMA bus
+# error, eth3/eth4 RX dead. One packet hashing to bucket 0 triggered it
+# (reproduced on .185). The node is read from MURAM (IC.CCBASE); the template
+# stays in t->ad. After F-262.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_263.py" 2>&1
+    echo "### fman_pcd.c: F-263 ehash bucket 0 no longer overwritten by the node template"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic

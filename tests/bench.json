@@ -1,0 +1,42 @@
+{
+  "duts": {
+    "dut1": {
+      "kind": "ask2",
+      "host": "192.168.1.185",
+      "user": "vyos",
+      "identity": "~/.ssh/vyos_key",
+      "lan_if": "eth3",
+      "wan_if": "eth4",
+      "lan_address": "10.99.1.185",
+      "wan_address": "10.99.2.185",
+      "namespace": "",
+      "nic": "enp1s0f0np0"
+    },
+    "dut2": {
+      "kind": "vendor",
+      "host": "192.168.1.106",
+      "user": "root",
+      "identity": "~/.ssh/vyos_key",
+      "lan_if": "eth3",
+      "wan_if": "eth4",
+      "lan_address": "10.99.1.185",
+      "wan_address": "10.99.2.185",
+      "namespace": "n106",
+      "nic": "enp1s0f1np1"
+    }
+  },
+  "lan": {
+    "name": "dell1",
+    "host": "192.168.1.112",
+    "user": "admin",
+    "address": "10.99.1.112",
+    "address6": "fd99:1::112"
+  },
+  "wan": {
+    "name": "dell2",
+    "host": "192.168.1.113",
+    "user": "admin",
+    "address": "10.99.2.113",
+    "address6": "fd99:2::113"
+  }
+}

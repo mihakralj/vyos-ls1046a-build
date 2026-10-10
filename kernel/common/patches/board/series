@@ -367,7 +367,7 @@
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0209-fman-pcd-ehash-vlan-revival.patch
 
-# VLAN translate fix (2026-10-05, ASK2-REWRITE-PLAN E3): lead VLAN ehash
+# VLAN translate fix (2026-10-05, archived ASK2-REWRITE-PLAN E3): lead VLAN ehash
 # records with UPDATE_ETH_RX_STATS (0x04, stats 0) + STRIP_ETH_HDR (0x11).
 # Without 0x11 the tag is never rewritten (egress keeps ingress VID); with
 # 0x11 as opcode 0 the RX port wedges. Any opcode before 0x11 fixes both

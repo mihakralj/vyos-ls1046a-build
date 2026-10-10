@@ -26,7 +26,7 @@ problem (`.106` vendor stack survived 400+ classified frames where `.185`'s `cc_
 17–30). Still-standing caveats: the ~1.5 Gbps DDR-per-frame ceiling claim is unmeasured against
 real vendor traffic, and M5's 10.259 Gbps most likely measured kernel SW forwarding
 (`no-confirmed-hw-hit-ever`). Full status: `arch/fman-fe-ehash.md` (un-retirement banner),
-`arch/fman-microcode-210-programming-reference.md` §10.5a, `plans/ASK2-MASTER-PLAN.md` top banners.
+`arch/fman-microcode-210-programming-reference.md` §10.5a, `plans/ASK2-MASTER-PLAN.md` §1.1 dispatch-path caveats.
 
 **Architecture-status banner (2026-08-01, SUPERSEDED above — kept for history):** The SHIPPING
 HW-offload forward path is **CC-tree

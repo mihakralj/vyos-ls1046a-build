@@ -5,14 +5,14 @@ Live planning, operational and reference documents. Retired documents live in
 what replaced it. `plans/` holds live documents only. New ASK2 planning goes
 into the master plan, not into new plan files.
 
-Last consolidated: 2026-10-05.
+Last consolidated: 2026-10-09.
 
 ## ASK2 hardware offload
 
 | Document | Owns |
 |---|---|
-| [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative ASK2 execution plan:** milestones M2–M8, task IDs, open defects, live reference register (§8). Start here. |
-| [`ASK2-REWRITE-PLAN.md`](ASK2-REWRITE-PLAN.md) | Vendor-parity review (2026-10-03), `.106` vendor oracles (Phase 0), VLAN root cause and fixes 0215–0218 (Phase 1 / E3), later phases. |
+| [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative ASK2 execution plan:** baseline, open milestones M3–M8, open task IDs and gates, open defects, binding silicon facts, live reference register (§8). Open work only; achieved history is in [`archive/ASK2-MASTER-PLAN-2026-10-09.md`](archive/ASK2-MASTER-PLAN-2026-10-09.md). Start here. |
+| [`ASK2-REWRITE-PLAN.md`](ASK2-REWRITE-PLAN.md) | Vendor-parity plan, open work only: churn gate (reopened), open board checklist, Phase 2 consolidation, Phase 3/4 features, vendor reference records and test method. Achieved history: [`archive/ASK2-REWRITE-PLAN-2026-10-09.md`](archive/ASK2-REWRITE-PLAN-2026-10-09.md). |
 | [`ASK2-VS-VENDOR-THROUGHPUT.md`](ASK2-VS-VENDOR-THROUGHPUT.md) | A6 scoreboard: ASK2 vs vendor NXP ASK routed throughput and retransmits (unidir and bidir tables). |
 | [`DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md) | S0/S1/S2 state machine, per-interface CLI contract, reversibility contract. |
 | [`OFFLOAD-CAPABILITY-PLAN.md`](OFFLOAD-CAPABILITY-PLAN.md) | Per capability: vendor mechanism vs ASK2 mechanism, with build steps. |

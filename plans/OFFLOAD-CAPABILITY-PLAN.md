@@ -96,7 +96,7 @@ typed action/param; **heavier** = provably needs a vendor-like separate primitiv
 >
 > Bidir: VLAN↔VLAN 15.6–15.9 Gbit/s vs vendor 16.9. The CC+HMTD ("Option A")
 > mechanism below gave no cross-port benefit over software (2026-10-02) and
-> is retired. Details: `plans/ASK2-REWRITE-PLAN.md` Phase 1 / E3. The text
+> is retired. Details: `plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md` Phase 1 / E3. The text
 > below is kept as the 2026-08-26 record.
 
 - **Vendor:** VLAN via the SDK **parser + HMCD header-manip chain** (`set rx
@@ -118,7 +118,9 @@ typed action/param; **heavier** = provably needs a vendor-like separate primitiv
   churn) and full gate-off regression (routed ~11.6G / NAT44 ~11.7G) both PASSED.
   The freeze cannot recur (no inline FE-VM VLAN opcodes execute). Scope: IPv4,
   single 802.1Q tag, non-eth0. Per-port CLI landed 2026-08-27 (`vyos-1x-044`:
-  `set interfaces ethernet ethN offload vlan`). Remaining is non-silicon:
+  `set interfaces ethernet ethN offload vlan`; leaf removed 2026-10-09, VLAN is
+  now automatic on an engaged port, see `specs/ask2-vlan-cli-grammar.md` §9).
+  Remaining is non-silicon:
   `dpaa1`→`main` merge and the default-on decision.
 - **Recommendation — TAKEN. The inline ehash record was abandoned for VLAN; the
   HMCD header-manip node (option 1 below) is the shipping implementation.**
@@ -133,7 +135,7 @@ typed action/param; **heavier** = provably needs a vendor-like separate primitiv
      intermediate pool-channel FQ with context stashing (like the vendor's
      channel-9 classify FQ) before TX, if the L2 rebuild needs the CPU/portal
      recycle step the direct no-confirm TX FQ can't provide.
-  - Gate: master plan T-M6-8 (untagged↔tagged, tagged↔tagged, PCP/DEI, MTU
+  - Gate: archived master plan T-M6-8 (`plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §4.6.4; achieved 2026-10-06) (untagged↔tagged, tagged↔tagged, PCP/DEI, MTU
     1280–2500, checksum/L2, unsupported depth → SW, IPv4 regression).
 
 ### 1.5 L2 bridge / FDB — NOT IMPLEMENTED (target)

@@ -21,7 +21,9 @@
 > (sibling of `offload ipv4`/`ipv6`) → `vyos-offload-ask family <mask> <vlan>`
 > → genl `ASK_ATTR_VLAN` → per-port `ask_hw_port_vlan[]`; the legacy
 > `ask.vlan_offload` module param remains an OR'd global master override for
-> one-shot debug. **Remaining work is non-silicon:** merge `dpaa1`→`main`
+> one-shot debug. **Superseded 2026-10-09:** the leaf, attribute and per-port
+> bit were removed; VLAN is automatic on an engaged port and `ask.vlan_offload`
+> (default on) is the global kill switch (`specs/ask2-vlan-cli-grammar.md` §9). **Remaining work is non-silicon:** merge `dpaa1`→`main`
 > (Option A) and the default-on vs default-off decision for the fielded
 > release.
 >

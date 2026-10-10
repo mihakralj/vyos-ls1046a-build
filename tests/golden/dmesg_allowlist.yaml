@@ -1,0 +1,24 @@
+# Known-benign kernel-log patterns excluded from the splat_window oracle.
+#
+# Required fields per entry:
+#   pattern  - Python regex matched against each candidate splat line
+#   reason   - one-line justification; reference an ISSUES.md tag if applicable
+#   expires  - YYYY-MM-DD; entries past their expiry fail at session-start
+#              and force re-review (see _dmesg_allowlist.py)
+#
+# Optional:
+#   applies_to - list of test-name regexes (matched against pytest nodeid).
+#                Default: applies to all tests.
+#
+# Treat this file as a tripwire, not a graveyard. If you find yourself
+# bumping `expires` without a fresh look at the underlying kernel
+# behaviour, the entry has outlived its usefulness.
+
+allowlist:
+  - pattern: "rcu: RCU lockdep checking is enabled"
+    reason: "CONFIG_PROVE_RCU boot announcement; not a real splat. Belt-and-braces in case SPLAT_RE broadens."
+    expires: "2027-01-01"
+
+  - pattern: "ASK-DEBUG: "
+    reason: "ASK-DEBUG admission tracing (360a75c) is a per-flow pr_info the test image turns on; SPLAT_RE matches the BUG inside its name. Not a splat."
+    expires: "2027-03-01"

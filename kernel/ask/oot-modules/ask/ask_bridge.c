@@ -29,19 +29,16 @@
 #include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <net/switchdev.h>
+#include <linux/fsl/fman_pcd.h>
 
 #include "include/ask_internal.h"
 
 /*
- * T-M6-2 gate: no standalone module param here (unlike ask_vlan_offload).
- * Arming is per-port only, via ask_hw_offload_set_bridge() / genl
- * ASK_ATTR_BRIDGE (kernel/ask_hw.c), driven automatically by VyOS's
- * `interfaces bridge` conf_mode for a member port that already has
- * `offload ipv4`/`offload ipv6` armed — no separate opt-in, and no CLI
- * leafNode a user sets directly. Forcing bridge offload on regardless of
- * a port's family engagement wouldn't mean anything (there is no dispatch
- * for it to ride on), so a master override doesn't make sense here the way
- * it does for VLAN.
+ * T-M6-2 gate: bridge offload is an automatic capability of an engaged port
+ * (ask_hw_bridge_offload_armed() == some port has `offload ipv4`/`ipv6`
+ * armed) -- no per-port arm bit, no CLI leafNode, no module param. Forcing it
+ * on regardless of a port's family engagement wouldn't mean anything (there
+ * is no dispatch for it to ride on).
  */
 
 /* One coalesced FDB event. @dev is dev_hold()'d at capture, dev_put() in
@@ -70,6 +67,33 @@ static struct work_struct ask_bridge_fdb_work;
 static bool ask_bridge_notifiers_registered;
 static bool ask_bridge_blocking_registered;
 static bool ask_bridge_netdev_registered;
+
+/*
+ * T-M6-2 B1: one FDB entry -> one FE record on the ingress port's L2_DA
+ * table (F-255 profile: the key is the frame's 6-byte destination MAC).
+ * HIT = plain ENQUEUE_PKT to @egress_tx_fqid (the egress port's no-confirm
+ * TX FQ): rx_fqid carries it, tx_fqid stays 0 so no L2 rewrite is emitted.
+ * Only a unicast, non-zero DA is accepted: broadcast/multicast/unknown must
+ * keep missing to the kernel bridge.
+ */
+int ask_bridge_fe_action(const u8 *da, u32 egress_tx_fqid,
+			 unsigned long enq_off,
+			 struct fman_pcd_fe_flow_action *a)
+{
+	BUILD_BUG_ON(FMAN_PCD_FE_L2_DA_KEY_SIZE != ETH_ALEN);
+
+	if (!da || !a || !is_valid_ether_addr(da) || !egress_tx_fqid ||
+	    egress_tx_fqid > 0xffffff || !enq_off)
+		return -EINVAL;
+	memset(a, 0, sizeof(*a));
+	ether_addr_copy(a->key, da);
+	a->key_size  = FMAN_PCD_FE_L2_DA_KEY_SIZE;
+	a->enq_off   = enq_off;
+	a->table_idx = 0;		/* the ingress port's own table */
+	a->rx_fqid   = egress_tx_fqid;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ask_bridge_fe_action);
 
 /* Process context: safe to log (and, once B1-B3 land, to call the sleeping
  * CC-install path) here. */
