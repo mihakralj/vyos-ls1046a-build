@@ -82,7 +82,7 @@ search(){ # label size env...: REPS independent a2 searches -> summary.csv row (
     say "  $label $size search $i/$REPS: MAC rdrp eth3 +$(( (a1 - a0) % 4294967296 )) eth4 +$(( (b1 - b0) % 4294967296 ))"
   done
   [ -f "$D/summary.csv" ] || echo "label,size,n,mean_pps,maxdev_pct,gbit_l1,hw_share,rdrp_eth3,rdrp_eth4" > "$D/summary.csv"
-  awk -F, -v s="$size" -v l="$label" -v da=$da -v db=$db '$3 ~ /^a2-result/ && $5==s {v[++n]=$6; h+=$11; t+=$6}
+  awk -F, -v s="$size" -v l="$label" -v da=$da -v db=$db '$3 ~ /^a2-result/ && $5==s {v[++n]=$7; h+=$11; t+=$7}
     END{ if(!n){print l","s",0,0,0,0,0,"da","db; exit}
          m=t/n; for(i=1;i<=n;i++){d=v[i]-m; if(d<0)d=-d; if(d>x)x=d}
          z=(s=="imix")? (7*64+4*570+1518)/12 : s
@@ -138,7 +138,7 @@ lat_run(){ # label pdr_total bg_env...: probes at idle and at LAT_LOADS % of pdr
       pps=$((pdr * l / 100)); secs=$((LAT_COUNT / 1000 + 15))
       say "lat $label: background $pps pps ($l % of $pdr)"
       env "$@" OUT=$D/lat-bg.csv $PG trial port-v4 "$LAT_SIZE" "$pps" "$secs" > /dev/null & bg=$!
-      sleep 9   # BIDIR warm-up (~7 s) then load
+      sleep 12  # BIDIR warm-up (~7 s + the 2 s offload delay) then load
     fi
     out=$($D1 "sudo python3 /tmp/testrig-latprobe.py probe $IF 10.99.1.112 10.99.2.113 $LAT_COUNT 1000")
     [ -n "$bg" ] && wait $bg
