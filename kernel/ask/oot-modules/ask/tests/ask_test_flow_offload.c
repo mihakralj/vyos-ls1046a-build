@@ -674,11 +674,14 @@ KUNIT_EXPECT_NULL(test, ask_flow_lookup(t, 0xCAFE07));
 /* ------------------------------------------------------------------------- */
 
 static bool ask_flow_offload_owns_default_table;
+static unsigned int ask_flow_offload_saved_delay;
 
 static int ask_flow_offload_suite_init(struct kunit_suite *suite)
 {
 int rc;
 
+/* These cases expect REPLACE to install at once. */
+ask_flow_offload_saved_delay = ask_flow_offload_set_delay_ms(0);
 if (ask_flow_default_table())
 return 0;
 rc = ask_flow_init();
@@ -690,6 +693,7 @@ return 0;
 
 static void ask_flow_offload_suite_exit(struct kunit_suite *suite)
 {
+ask_flow_offload_set_delay_ms(ask_flow_offload_saved_delay);
 if (!ask_flow_offload_owns_default_table)
 return;
 ask_flow_exit();

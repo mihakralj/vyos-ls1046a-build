@@ -3,8 +3,9 @@
 
   reflect IFACE ADDR                 dell2: answer probes arriving on ADDR (UDP 319) until killed.
   probe IFACE SRC DST COUNT [RATE]   dell1: COUNT probes at RATE/s (default 1000) from SRC to the reflector
-                                     at DST. The first 200 are warm-up (the DUT offloads the flow after the
-                                     first reply) and are not counted. Prints one JSON line, in microseconds.
+                                     at DST. The first 5000 (5 s at 1000/s) are warm-up and are not counted
+                                     (ask.ko offloads a flow only once it is offload_delay_ms, 2 s, old).
+                                     Prints one JSON line, in microseconds.
   selftest                           loopback with software timestamps, no rig, no root.
 
 PTP-style, so no clock sync is needed. The probe sends a PTPv2 Delay_Req to UDP 319 (t1 = its TX hardware
@@ -22,7 +23,7 @@ SIOCSHWTSTAMP = 0x89b0
 HW = 1 | 4 | 64            # SOF_TIMESTAMPING_TX_HARDWARE | RX_HARDWARE | RAW_HARDWARE -> ts[2]
 SW = 2 | 8 | 16            # SOF_TIMESTAMPING_TX_SOFTWARE | RX_SOFTWARE | SOFTWARE     -> ts[0]
 OPT_TSONLY = 1 << 11
-EVENT, GENERAL, WARM = 319, 320, 200
+EVENT, GENERAL, WARM = 319, 320, 5000
 
 
 def hwtstamp(ifname, on):

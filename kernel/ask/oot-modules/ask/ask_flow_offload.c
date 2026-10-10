@@ -152,6 +152,50 @@ MODULE_PARM_DESC(ipv6_hw_frag,
 		 "software (the kernel sends Packet Too Big) and drops the live HW "
 		 "records that carry the MTU check");
 
+/*
+ * Offload only flows that have lived offload_delay_ms (the vendor cmm engages
+ * ~2.6 s after a flow starts). Short connections then finish in the software
+ * fast path, so conntrack sees their FIN/RST (the hardware path swallows them
+ * and the entry would linger ESTABLISHED for the whole established timeout),
+ * and they cost no hardware insert or delete. A refused REPLACE is retried by
+ * nf_flowtable's flow_offload_refresh() about once a second while the flow
+ * still passes through software. First-REPLACE times live in a value xarray
+ * keyed by cookie until DESTROY (sent for every flow of a hardware flowtable)
+ * erases them; they are not erased on install, because each REPLACE reaches
+ * every bound block and all of them (true ingress and egress-side echo) must
+ * judge the age against the same time. 0 = offload at the first REPLACE.
+ */
+static unsigned int ask_offload_delay_ms = 2000;
+module_param_named(offload_delay_ms, ask_offload_delay_ms, uint, 0644);
+MODULE_PARM_DESC(offload_delay_ms,
+		 "Minimum flow age before hardware offload, in ms (default 2000; "
+		 "0 offloads at the first REPLACE)");
+
+static DEFINE_XARRAY(ask_offload_first_seen);
+
+/* True while @cookie is younger than offload_delay_ms (records its first
+ * REPLACE). On memory pressure the flow is offloaded at once. */
+static bool ask_offload_too_young(unsigned long cookie)
+{
+	unsigned int ms = READ_ONCE(ask_offload_delay_ms);
+	void *e;
+
+	if (!ms)
+		return false;
+	e = xa_load(&ask_offload_first_seen, cookie);
+	if (!xa_is_value(e))
+		return !xa_err(xa_store(&ask_offload_first_seen, cookie,
+					xa_mk_value(jiffies), GFP_KERNEL));
+	return time_before(jiffies, xa_to_value(e) + msecs_to_jiffies(ms));
+}
+
+/* KUnit drives REPLACE directly and expects an immediate install. */
+unsigned int ask_flow_offload_set_delay_ms(unsigned int ms)
+{
+	return xchg(&ask_offload_delay_ms, ms);
+}
+EXPORT_SYMBOL_GPL(ask_flow_offload_set_delay_ms);
+
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
 /*                                                                            */
@@ -2580,6 +2624,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return -EOPNOTSUPP;
 	}
 
+	if (ask_offload_too_young(f->cookie))
+		return -EAGAIN;	/* software until offload_delay_ms; nf_flowtable retries */
+
 	pppoe = ask_flow_cookie_pppoe(f->cookie, &pppoe_info);
 	if (pppoe < 0 || (pppoe > 0 && !ask_pppoe_nb_ok) ||
 	    (pppoe > 0 && !ask_pppoe_port_armed(pppoe_info.ifindex))) {
@@ -3483,6 +3530,7 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 	u32 destroy_gen;
 	int rc;
 
+	xa_erase(&ask_offload_first_seen, f->cookie);
 	if (!t)
 		return -EOPNOTSUPP;
 
@@ -4168,6 +4216,7 @@ void ask_flow_offload_exit(void)
 	cancel_work_sync(&ask_v6_frag_flush_work);
 
 	dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
+	xa_destroy(&ask_offload_first_seen);
 	/* T-M6-3: netevent notifier unregistration moved to ask_neigh_exit(). */
 
 	/*
