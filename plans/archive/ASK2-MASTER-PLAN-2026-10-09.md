@@ -1,3 +1,8 @@
+> **ARCHIVED 2026-10-09** — full snapshot (v2.28.0) taken when achieved content was pruned from the live plan.
+> Live plan = [`plans/ASK2-MASTER-PLAN.md`](../ASK2-MASTER-PLAN.md).
+> Do not use this file for current state; it is the historical record of what was done and measured.
+> Original content below is unmodified.
+
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
 **Version 2.28.0 · 2026-10-08**

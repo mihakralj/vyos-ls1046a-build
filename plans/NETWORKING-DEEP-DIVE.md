@@ -206,7 +206,7 @@ graph LR
 
 ### 4.1 Shipping Architecture: CC-tree + SW Flowtable
 
-**[SPEC — 2026-08-01, SUPERSEDED 2026-08-05]** ~~The shipping HW-offload architecture is **CC-tree classification (top-N flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding**.~~ **(2026-08-05: never implemented in `ask.ko` (CR-007); `cc_test` harness architecturally broken (F-159–F-162); FE-VM ehash un-retired (F-163); no confirmed HIT on any path — see `plans/ASK2-MASTER-PLAN.md` top banners.)** This is the Linux flow-offload model: a TCAM-style classifier table for hot flows, software for the long tail.
+**[SPEC — 2026-08-01, SUPERSEDED 2026-08-05]** ~~The shipping HW-offload architecture is **CC-tree classification (top-N flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding**.~~ **(2026-08-05: never implemented in `ask.ko` (CR-007); `cc_test` harness architecturally broken (F-159–F-162); FE-VM ehash un-retired (F-163); no confirmed HIT on any path — see `plans/ASK2-MASTER-PLAN.md` §1.1 dispatch-path caveats.)** This is the Linux flow-offload model: a TCAM-style classifier table for hot flows, software for the long tail.
 
 **[SPEC]** Silicon-proven performance data:
 - **M2 CC pass-through** (CONT_LOOKUP numKeys=0 → miss-AD → kernel FQ): 7.37 Gbps @ 0.16% CPU (2026-07-07)

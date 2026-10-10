@@ -10,7 +10,7 @@
 > key, EKFC `0x801C0006`, F-163; test-methodology fix F-165). What remains true and load-bearing
 > here: the MURAM budget arithmetic, the vendor MURAM-exhaustion history, and the fact that no HIT
 > is confirmed on *this branch's* silicon yet via either path. See `arch/fman-fe-ehash.md`
-> (un-retirement banner) and `plans/ASK2-MASTER-PLAN.md` top banners.
+> (un-retirement banner) and `plans/ASK2-MASTER-PLAN.md` §1.1 dispatch-path caveats.
 
 **Source:** LS1046A DPAA RM §5.3.13 (p.481), §5.5 (BMI), §5.12 (CC); ASK2 spec §13.3 & §16 (Risk #13);
 patch `0126-fman-pcd-muram-genpool.patch`; `fman-pcd-api-reference.md` §16.4 (throughput).

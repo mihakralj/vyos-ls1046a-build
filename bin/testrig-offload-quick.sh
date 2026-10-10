@@ -6,7 +6,8 @@
 # the per-record pkt_count growth in fe_ehash_stats over the steady window, compared
 # with the data frames iperf3 reports for the same window.
 #
-# Rig: dell1 (enp1s0, enp1s0.10) <-> DUT eth3, dell2 (enp2s0, enp2s0.20) <-> DUT eth4.
+# Rig: dell1 (enp1s0f0np0, .10) <-> DUT .185 eth3, dell2 (enp1s0f0np0, .20) <-> DUT .185 eth4
+# (X710 port 1; persistent config: bin/testrig-dell-net.sh).
 # NAT cells use runtime nft tables (table ask2q) masquerading out of eth4; the VyOS
 # NAT66 rule is removed for the run and restored on exit. Nothing persistent changes.
 #
@@ -23,7 +24,14 @@ DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}; STREAMS=${STREAMS:-8}
 OUT=${OUT:-/mnt/builds/ask2-review/oracle/quick-$(date +%Y%m%d-%H%M).csv}
 J=${J:-/mnt/builds/ask2-review/oracle/json-quick}; mkdir -p "$J"
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
-S="ssh -n $SSHO -i $HOME/.ssh/vyos_key $DUT"
+# DUT_KIND=ask2 (.185 VyOS: sudo, HW proof = fe_ehash_stats record hits) or vendor (.106 OpenWrt
+# vendor ASK: root, no sudo/bash, HW proof = frames that never reach the kernel: ethtool -S
+# 'rx packets [TOTAL]', as baseline3.sh PROOF=kernelrx; the netdev rx_packets counts fast-path frames too).
+# RIG_NS=n106 runs the dell side inside the n106 netns (the X710 port facing .106).
+DUT_KIND=${DUT_KIND:-ask2}; RIG_NS=${RIG_NS:-}
+NSX=""; [ -n "$RIG_NS" ] && NSX="sudo ip netns exec $RIG_NS"
+dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO -i $HOME/.ssh/vyos_key $DUT "$c"; }
+S=dut
 SI="ssh $SSHO -i $HOME/.ssh/vyos_key $DUT"
 D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
 
@@ -67,7 +75,7 @@ nat_set(){
 # dell1's mlx4 NIC cannot RSS-hash PPPoE frames, so every returning ACK lands on RX queue 0 / CPU0
 # and the whole TCP send path runs in that one softirq (about 5.9 Gbit/s ceiling, DUT idle).
 # RPS hashes on the inner flow instead. Runtime-only; applied for PPPoE cells, restored on exit.
-D1_IF=${D1_IF:-enp1s0}
+D1_IF=${D1_IF:-enp1s0f0np0}
 rps_set(){
   if [ "$1" = on ]; then
     $D1 "m=\$(printf '%x' \$(( (1<<\$(nproc)) - 1 ))); for q in /sys/class/net/$D1_IF/queues/rx-*/rps_cpus; do echo \$m | sudo -n tee \$q >/dev/null; done"
@@ -110,19 +118,27 @@ for line in $CELLS_RUN; do
   IFS='|' read -r name nat cli a b <<<"$line"
   if [ -n "$WANT" ] && ! [[ " $WANT " == *" $name "* ]]; then continue; fi
   [ $cli = d1 ] && G="$D1" || G="$D2"
-  if ! $G "ping -c2 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
+  if ! $G "$NSX ping -c2 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
     printf '%-15s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,0,0,0,0,0,0,0,0,SKIP" >> "$OUT"; continue
   fi
   nat_set $nat >/dev/null 2>&1
   case $name in *pppoe*) rps_set on ;; *) rps_set off ;; esac
   tag="$name"
+  if [ "$DUT_KIND" = vendor ]; then
+  $SI sh -s -- $STEADY_FROM $((DUR-STEADY_FROM-2)) > /tmp/quick.stat <<'EOS' &
+sf=$1; w=$2
+rx(){ for i in eth3 eth4; do ethtool -S $i | awk -v i=$i '/rx packets \[TOTAL\]/{print "K", i, $NF}'; done; }   # SDK: frames handed to the kernel
+sleep $sf; head -1 /proc/stat; rx; sleep $w; head -1 /proc/stat; rx
+EOS
+  else
   $SI bash -s -- $STEADY_FROM $((DUR-STEADY_FROM-2)) > /tmp/quick.stat <<'EOS' &
 sf=$1; w=$2
 hits(){ sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats | sed -n 's/.*record_dma=\(0x[0-9a-f]*\).*pkt_count=\([0-9]*\).*/E \1 \2/p'; }
 sleep $sf; head -1 /proc/stat; hits; sleep $w; head -1 /proc/stat; hits
 EOS
+  fi
   sp=$!
-  $G "iperf3 -c $b -B $a -p 5201 -P $STREAMS -t $DUR -i 1 -Z -J" > "$J/$tag.json" &
+  $G "$NSX iperf3 -c $b -B $a -p 5201 -P $STREAMS -t $DUR -i 1 -Z -J" > "$J/$tag.json" &
   p1=$!; wait $p1 $sp; sleep 1
   read gbps gen rt bytes < <(parse "$J/$tag.json")
   win=$((DUR-STEADY_FROM-2))
@@ -130,6 +146,10 @@ EOS
   # per-record delta: records aged out inside the window must not cancel growth elsewhere
   hw=$(awk '/^cpu /{sec++; next} /^E /{if(sec==1) a[$2]=$3; else b[$2]=$3} END{for(k in b){d=((k in a) && b[k]>=a[k]) ? b[k]-a[k] : b[k]; s+=d}; print s+0}' /tmp/quick.stat)
   est=$(awk -v g="$gbps" -v w="$win" 'BEGIN{printf "%d", g*1e9/8/1448*w}')
+  if [ "$DUT_KIND" = vendor ]; then   # frames the kernel never saw were forwarded by the fast path
+    krx=$(awk '/^cpu /{sec++; next} /^K /{if(sec==1) a[$2]=$3; else b[$2]=$3} END{for(k in b) s+=b[k]-a[k]; print s+0}' /tmp/quick.stat)
+    hw=$(( est > krx ? est - krx : 0 ))
+  fi
   ratio=$(awk -v h="$hw" -v e="$est" 'BEGIN{if(e>0) printf "%.2f", h/e; else print "0"}')
   verdict=$(awk -v r="$ratio" -v g="$gbps" 'BEGIN{if(g<0.1) print "FAIL(no traffic)"; else if(r>=0.9) print "HW"; else if(r>=0.1) print "PARTIAL"; else print "SW"}')
   printf '%-15s %7s %6s %6s %6s %8s %12s %6s  %s\n' "$name" "$gbps" "$busy" "$sirq" "$gen" "$rt" "$hw" "$ratio" "$verdict"
