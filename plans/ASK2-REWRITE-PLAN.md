@@ -29,17 +29,17 @@ section went.
 - **Software today:** bridge L2 (B0 FDB observer and B1 DA-only record action
   committed, no silicon proof), PPPoE over VLAN, IPsec, multicast, tunnels, IPv4
   fragments as flows, egress QoS.
-- **Latest CI image:** `vyos-2026.10.09-0415-rolling` from `ab1660a7` (CI run
-  `37882977943`), on lxc200; installed-board validation pending the operator.
+- **Latest CI image:** `vyos-2026.10.09-1858-rolling` from `98d3deba` (CI run
+  `37976997166`: F-263 plus the PPPoE decap MTU bound), installed on `.185`.
 - Vendor oracle `.106`, ASK2 DUT `.185`, rig `dell1 (.112) → DUT eth3/eth4 →
   dell2 (.113)`.
 
-## Progress tracker (updated 2026-10-09)
+## Progress tracker (updated 2026-10-10)
 
 | Phase | Status | Open remainder |
 |---|---|---|
 | **0 — safety and oracles** | 🟢 CLOSED 2026-10-09 (Phase 0.4 complete) | None. Line-rate pktgen (14.7 Mpps), IMIX, UDP vlan↔vlan and 64k-flow scale measured on NXP reference and ASK2 (see Phase 0.4 below) |
-| **1 — VLAN root cause** | 🟡 exit criterion "zero RX-deaf or churn errors" **REOPENED** (rare FMan RX stall) | Churn gate: a second independent pristine cold-boot `CYCLES=500` run, plus the fault-address match. Non-gating follow-ups below |
+| **1 — VLAN root cause** | 🟡 exit criterion "zero RX-deaf or churn errors" **REOPENED**; stall root-caused and fixed (F-263, validated 2026-10-10) | Churn gate: the pristine cold-boot `CYCLES=500` run `1010-1708-coldboot-1858-500` (started 2026-10-10 17:08). Non-gating follow-ups below |
 | **2 — consolidation** | ⬜ not started | Delete `ask_vlan_cc.c` (509 LOC, still in `Kbuild`) and its proxies; fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD |
 | **3 — vendor-parity features** | 🟡 bridge, PPPoE remainder, soft-parser punts, multicast, IPsec, tunnels/fragments, QoS open | Bridge L2 has its own track (`ASK2-BRIDGE-OFFLOAD-PLAN.md` §13: B1 CI → B2 silicon matrix → B3a → B3b → B4 → B5; D1 and D8 operator-confirmed). Details in Phase 3 |
 | **4 — exceed the vendor** | ⬜ not started | A13 on ASK2 not measured |
@@ -81,9 +81,19 @@ bus-error address.
   the WAN, could wedge an engaged port with one packet. The 576-cycle pass on
   `0106` simply never produced a bucket-0 flow. F-263 deletes the copy (the
   template stays in `t->ad`; `dma_alloc_coherent` zeroes the array).
-  Validation on the F-263 image: bucket 0 reads zero; the four bucket-0
-  triggers (eth3/eth4 × IPv4/IPv6) pass and an offloaded bucket-0 flow HITs;
-  then the 500-cycle churn soak closes A6.
+  **Validated 2026-10-10** on image `1858` (CI `37976997166`, `98d3deba`),
+  smart-plug cold boot: bucket 0 of all four tables reads zero; single-packet
+  triggers (5 UDP packets each) eth3-v4 `10.99.1.112:16735 → 10.99.2.113:9000`,
+  eth4-v4 `10.99.2.113:38483 → 10.99.1.112:9000`, eth3-v6
+  `fd99:1::112:36976 → fd99:2::113:9002` and eth4-v6
+  `fd99:2::113:34246 → fd99:1::112:9002` all deliver 5/5 with no bus error
+  (neighbouring-port controls likewise); TCP flows pinned to bucket 0 by
+  `--cport` (eth3/eth4 × IPv4/IPv6, the eth4 IPv6 one through NAT66) put
+  their records at `idx=0` and take 6.35–6.39M hardware hits each in 7 s at
+  9.28–9.41 Gbit/s. Bucket model (verified against two silicon hashes): key =
+  `ask_fe_build_key_dual()`'s 50 bytes, bucket = `(crc64_raw >> 48) & 0x7fff`.
+  Finder `oracle/b0.py SRC DST PROTO FIXED {sport|dport} N`; evidence
+  `oracle/f263-validation-20261010.txt`.
 - **Reading:** all-fields-identical recurrence across a cold boot argues for a
   deterministic stale-pointer bug (a fixed code path or fixed-size structure,
   e.g. a MURAM record or record-pool slot indexed by something that wraps),
@@ -106,15 +116,21 @@ bus-error address.
   0 F-219 evictions; `sudo ask-check` 36/36 READY. That is
   4.5× past the latest earlier onset but **one boot**, and the `2239` build
   also passed 100/100 once before stalling at cycle 84, so the gate stays open.
-- **Proposed close bar:** a second independent, pristine cold-boot
-  `CYCLES=500` run on the same criteria, on `2026.10.08-0106-rolling` or a
-  newer image (F-259–F-262 and `ab1660a7` postdate it, so a newer image is
-  the more useful test; operator cold power-cycle,
-  `bin/testrig-combo-matrix.sh setup`, then `soakctl.sh start`
-  from dell2). In parallel and off-board: match the fault address
-  `0x2e000008f7` / tnum 93 against fixed MURAM offsets and record-pool slot
-  formulas, rather than a generic stale-pointer search. The soak has not been
-  re-run on any board since F-259 (50-byte key) and F-260–F-262.
+  (Root cause since found: no bucket-0 flow occurred in that run.)
+- **Soaks on the F-263 image `1858`:** `churn-1010-0326-lan` (2026-10-10
+  03:26–07:20 UTC) PASS 500/500: 0 deaf, 0 transient misses, 0 new kernel
+  errors, MURAM 52922 → 52922, records 0 → 0, background 7.2/7.2 Gbit/s,
+  107 burst fails (non-gating, see below). It started 8 min after the
+  image's first boot and the boot type is not known (most likely the warm
+  reboot after the install), so it does not count as the pristine run. The
+  close-bar run `1010-1708-coldboot-1858-500` started 2026-10-10 17:08 UTC on
+  a smart-plug cold boot (background verified 7.2/7.2 Gbit/s).
+- **Close bar:** a pristine cold-boot `CYCLES=500` run on an F-263 image
+  with 0 deaf, 0 transient misses, 0 new kernel errors and MURAM/records back
+  to baseline after the settle (cold power-cycle,
+  `bin/testrig-combo-matrix.sh setup`, `soakctl.sh preflight`, then
+  `soakctl.sh start` from dell2). The fault-address match is done (F-263
+  root cause).
 - **Harness** (`/mnt/builds/ask2-review/oracle/`): `churn.sh` = background
   vlan↔vlan v4 bidir load, 16 × 450 Mbit/s per direction on port 5203 (rate
   verified ≥ 5 Gbit/s per direction); per cycle a 2 s 4-stream burst on all six
@@ -158,14 +174,25 @@ bus-error address.
 
 - **Bidir retransmits:** port↔port and vlan↔vlan bidir retransmits are
   1.4–2.6× the vendor's. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`.
-- **iperf3 control-channel burst failures under churn:** 13 of 3456 bursts in
-  the 2026-10-08 soak (0.38 %, "unable to receive control message ...
-  Transport endpoint is not connected", each recovered next cycle, 12 of 13
-  IPv6, all three path types); 40 of 7044 (0.57 %) over every run with the
-  current CSV schema (v6 33, v4 7 all vv4), predating F-257. Cause unknown; the
-  2026-09-06 v6-VLAN finding was a peer-side DSA VLAN-6 problem on `.116` and
-  does not cover port↔port. Next: a v6-only churn with a dell-side capture at a
-  failing burst (RST vs neighbour discovery).
+- **iperf3 control-channel burst failures under churn: ROOT-CAUSED
+  2026-10-10, a harness race, not a DUT fault.** Symptom: "unable to receive
+  control message ... Transport endpoint is not connected" with
+  `"connected": []`, about 3.6 % of bursts since the `0415` run (0.33–0.95 %
+  before). Passive SYN/FIN/RST captures on both dells during the
+  `1010-1708` soak show: the client's FIN on the previous burst's iperf3
+  control connection is lost at the end of the burst (10 of 122 control
+  connections, 8.2 %, ordinary congestion loss while TCP fills the link
+  next to the 7.2 Gbit/s background); TCP resends it after the ~210 ms RTO;
+  `churn-lan.sh` starts the next combo ~180 ms after the previous one, always
+  against the same dell2 `:5202` server; when the late FIN arrives, iperf3
+  ends the old test, closes and reopens its listener and resets the new
+  control connection. 4 of 4 captured failures match exactly, and
+  8.2 % × ~45 % (next SYN inside the RTO window) ≈ the observed 3.7 %. Why the
+  FIN loss rose about 10× on 2026-10-09 (the `0415` image and the X710 rig
+  rewire landed together) is not A/B-tested. Harness fix (local source,
+  used from the next `soakctl.sh deploy`): wait ≤ 3 s before each burst until
+  dell2 has no live `:5202` socket. Tools: `oracle/burstclass.py`,
+  captures `oracle/burstcap-20261010/`.
 - **Conntrack lingering:** the hardware path swallows FIN/RST, so a torn-down
   offloaded flow stays ESTABLISHED in conntrack until
   `nf_conntrack_tcp_timeout_established` expires. Interim mitigation
@@ -177,27 +204,18 @@ bus-error address.
 - **DUT CPU at line rate is bimodal** (about 0.2–0.3 % or 3.0–3.2 %), not tied
   to a cell; cause not investigated.
 
-### Open board checklist (image `2026.10.09-0415-rolling`, installed by the operator)
+### Open board checklist (open items only)
 
-- Cold boot; dmesg shows `fman_port: advanced offload on (misc 0x40000100 rcmne
-  0x0000000e rfene 0x00000022)` per engaged port and the `F-262 frag pool bpid
-  N … frag info @MURAM 0x…` line.
-- VLAN and PPPoE auto-arm with only `offload ipv4|ipv6` on the port.
-- Config migration `interfaces` 35-to-36 (old `vlan`/`pppoe` leaves removed,
-  family leaves kept) on an installed config.
-- Kill switches: `vlan_offload`, `pppoe_offload` (live 1 → 0 flushes PPPoE
-  records), `ipv6_hw_frag` (`echo 0 > /sys/module/ask/parameters/ipv6_hw_frag`;
-  `pppoe-up-v6` must then read PARTIAL or SW, which is correct, not a failure).
-- Fragmentation probes (PPPoE encap leg, 1492 MTU; IPv4 DF clear, IPv4 DF set,
-  IPv6): `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.6 board test steps 3–5. Not yet run on
-  a CI image: pool exhaustion and a long soak of the final F-262.
-- `bin/testrig-offload-quick.sh` (10 cells + `combo`): pass criteria in §8.
-- `pcd-snapshot` diff clean after disengage (`RFENE` back to `0x00d40000`,
-  `RCMNE` `0`, params `misc` `0x100`); MURAM `used` back to baseline.
+The image-`0415` board gates (advanced offload on, VLAN/PPPoE auto-arm,
+migration 35-to-36, kill switches, fragmentation probes, quick cells,
+`pcd-snapshot` diff) passed on 2026-10-09; results are in master plan §1.1.
+F-263 is validated on image `1858` (2026-10-10, churn gate above). Still open:
+
+- F-262 on a CI image: fragment pool exhaustion and a long soak of the final
+  F-262.
 - PPPoE over VLAN: must stay in software by code (`-EOPNOTSUPP`) and keep
   forwarding correctly. Not run on the board yet.
-- Not covered since F-259: the churn soak with the 50-byte key, and a
-  priority-marked (PCP ≠ 0) tagged flow (expected to stay in software).
+- A priority-marked (PCP ≠ 0) tagged flow (expected to stay in software).
 
 ### Review sources
 
