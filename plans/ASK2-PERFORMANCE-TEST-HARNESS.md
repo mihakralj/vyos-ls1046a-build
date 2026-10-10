@@ -674,7 +674,48 @@ Post-test:
 
 ---
 
+## 12a. Comparison suite against the external tuned-ASK benchmark (dell rig, 2026-10)
+
+The external Mono DK benchmark (`VytautasJnk/mono-gw`, branch `armbian-ask-master-20261010-results`,
+`RESULTS.md`) measures NXP ASK master on TRex: PDR (highest rate with ≤ 0.5 % loss) over both directions
+with 8k sessions, mean of 3 ± max deviation; NIC-timestamped latency at idle and 10/50/90 % of PDR;
+20k new connections/s with 20k held, with and without NAT; and the kernel path. `bin/testrig-compare.sh`
+runs the same four measurements on the current dell rig (dell1 `.112` → DUT `.185` eth3/eth4 → dell2
+`.113`, topology and rules in qdrant "ASK2 TESTING SETUP on the dell rig"):
+
+| Section | What it runs | Their table |
+|---|---|---|
+| `pdr` | `BIDIR=1 FLOWS=8192 LOSS=0.5 bin/testrig-pktgen.sh a2 port-v4 <size>` for 64/570/1518/imix: both dells transmit the exact reverse tuples at once, every flow is warmed so it is offloaded, counting at the X710 MAC counters | Stateful firewall, offloaded |
+| `cps` | `bin/testrig-cps.py` (server on dell2 :8080/:8081, paced client on dell1) at 5k/10k/20k new connections/s for 30 s plus 20k held connections, NAT off and on (runtime nft table `ask2c`, masquerade out of eth4); records conntrack states and drops, DUT CPU, client retransmits | New connections/s ± NAT |
+| `lat` | `bin/testrig-latprobe.py` on dell1/dell2: PTPv2-framed UDP 319 probes, X710 hardware timestamps at both ends, rtt = (t4 − t1) − (t3 − t2); 5000 probes at idle and at 10/50/90 % of the imix PDR as background | Latency, firewall offloaded |
+| `kpath` | Unidirectional 64 B flows that never get a reply (so never offloaded), 1 and 1024 flows, `MAXPPS=1000000` search cap, first with ASK engaged (the miss path) and then with eth3/eth4 disengaged through the CLI; then kernel-path latency with the ports disengaged; re-engages at the end | Kernel path, routing latency |
+
+Run it on a cold-booted DUT after `DUT_HOST=192.168.1.185 bin/testrig-combo-matrix.sh setup`; it refuses
+to start while a churn soak runs. Output goes to `/mnt/builds/ask2-review/oracle/compare-<date>-<time>/`.
+On exit it always removes the NAT table, re-engages offload and stops the server/reflector.
+
+Differences from their method that remain: kernel pktgen instead of TRex (UDP flows, not TCP sessions),
+our "kernel path" keeps conntrack (theirs is stateless routing), the latency figure is half of a
+two-traversal round trip (they time each direction on one dual-port NIC), the CPS client is a Python
+asyncio generator, and there is no TCP application mix. `port-v6` is refused in BIDIR mode because NAT66
+masquerades the reverse tuple on eth4. Self-tests that need no rig: `bin/testrig-cps.py selftest`,
+`bin/testrig-latprobe.py selftest`, `DRY=1 BIDIR=1 bin/testrig-pktgen.sh trial ...` (prints the pktgen
+configuration of both dells).
+
+### 12a.1 Variance and port-FIFO findings from the external benchmark (2026-10-10)
+
+The external author reported 570 B PDR ±96 % on stock settings: three runs of the same cell found 2.14, 0.70 and 0.44 Mpps. The cause is not the method. Bursty alignment of 8k sessions overflows the 10G port RX FIFO (24 KB per port by default); IMIX is affected through its 570 B component. Overflow drops appear as mEMAC `rdrp`. Reallocating FMan FIFO memory to the 10G ports (RX 80 KB each, TX 24 KB; 1G and O/H ports 4 KB) brought the spread to about 1 %. Above 80 KB RX, and raising TX from 16 to 24 KB, changed nothing. Their kernel-path tuning also leaves CPU0 for housekeeping and runs packet work on CPU1-3 with RPS, because the packet path and flow install compete for cycles.
+
+Correlates with `arch/fman-fe-ehash.md`, where the 24 KB port RX FIFO filling (~45 frames) is the deaf-port mechanism. Rules for `pdr` cells:
+
+- Run each PDR cell 3 times and record mean, ± max deviation and per-run `rdrp` delta. A spread above ~10 % means FIFO or burst sensitivity: report it, do not average it away.
+- Before quoting a 570 B or IMIX figure, sweep RX FIFO size (24 to 88 KB). No mechanism in this tree sets port FIFO size yet (only the BMI unit and O/H sizing in patches 0122, 0175, 0218), so this is an open experiment. It is a BMI change: apply the Qdrant gate (AGENTS S0) and cold-boot per run.
+- For `kpath` and `cps`, compare against a CPU0-housekeeping split (packet work on CPU1-3) before judging connections/s stability.
+
 ## 13. Changelog
+
+- **1.3.1 — 2026-10-10** — Add §12a.1: external-benchmark variance cause (10G RX FIFO), per-run `rdrp`/spread rule, FIFO sweep and CPU-split experiments.
+- **1.3.0 — 2026-10-10** — Add §12a comparison suite (`testrig-compare.sh`, `testrig-cps.py`, `testrig-latprobe.py`, BIDIR/FLOWS/NOPRIME/MAXPPS/DRY in `testrig-pktgen.sh`).
 
 - **1.2.0 — 2026-08-17** — Add §7.6 saturation mode: empirical port→CPU mapping, balanced fixed-source-port flow method, and the measured true software ceiling (~12.74 Gbit/s bidirectional, ~2.4× the imbalanced -P8 figure); documents that RSS imbalance, not the generator/links, caps the default number.
 - **1.1.0 — 2026-08-17** — Add mandatory per-second continuous FE mode gate, SW/HW throughput+CPU validity discriminator, reject/discard rules for hidden FE re-arm, F-203 order-1 hardware jumbo results through MTU 7000, and explicit pending status for software jumbo cells.

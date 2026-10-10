@@ -39,12 +39,12 @@ section went.
 | Phase | Status | Open remainder |
 |---|---|---|
 | **0 — safety and oracles** | 🟢 CLOSED 2026-10-09 (Phase 0.4 complete) | None. Line-rate pktgen (14.7 Mpps), IMIX, UDP vlan↔vlan and 64k-flow scale measured on NXP reference and ASK2 (see Phase 0.4 below) |
-| **1 — VLAN root cause** | 🟡 exit criterion "zero RX-deaf or churn errors" **REOPENED**; stall root-caused and fixed (F-263, validated 2026-10-10) | Churn gate: the pristine cold-boot `CYCLES=500` run `1010-1708-coldboot-1858-500` (started 2026-10-10 17:08). Non-gating follow-ups below |
+| **1 — VLAN root cause** | 🟢 CLOSED 2026-10-10 (churn gate closed by operator decision: FMan RX stall root-caused and fixed by F-263, 0 stalls in 1,123 cycles on three boots) | None gating. Non-gating follow-ups below, including the single ARP-type transient of the close run |
 | **2 — consolidation** | ⬜ not started | Delete `ask_vlan_cc.c` (509 LOC, still in `Kbuild`) and its proxies; fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD |
 | **3 — vendor-parity features** | 🟡 bridge, PPPoE remainder, soft-parser punts, multicast, IPsec, tunnels/fragments, QoS open | Bridge L2 has its own track (`ASK2-BRIDGE-OFFLOAD-PLAN.md` §13: B1 CI → B2 silicon matrix → B3a → B3b → B4 → B5; D1 and D8 operator-confirmed). Details in Phase 3 |
 | **4 — exceed the vendor** | ⬜ not started | A13 on ASK2 not measured |
 
-### Churn gate (Phase 1 exit criterion) — REOPENED
+### Churn gate (Phase 1 exit criterion) — CLOSED 2026-10-10
 
 The gate is "zero RX-deaf or churn errors" under verified load. Stalls #1–#5
 (2026-10-06/07) are one rare FMan RX stall. Stalls #3–#5 carry the same DMA
@@ -123,14 +123,35 @@ bus-error address.
   107 burst fails (non-gating, see below). It started 8 min after the
   image's first boot and the boot type is not known (most likely the warm
   reboot after the install), so it does not count as the pristine run. The
-  close-bar run `1010-1708-coldboot-1858-500` started 2026-10-10 17:08 UTC on
-  a smart-plug cold boot (background verified 7.2/7.2 Gbit/s).
-- **Close bar:** a pristine cold-boot `CYCLES=500` run on an F-263 image
-  with 0 deaf, 0 transient misses, 0 new kernel errors and MURAM/records back
-  to baseline after the settle (cold power-cycle,
-  `bin/testrig-combo-matrix.sh setup`, `soakctl.sh preflight`, then
-  `soakctl.sh start` from dell2). The fault-address match is done (F-263
-  root cause).
+  first close-bar run `1010-1708-coldboot-1858-500` (smart-plug cold boot,
+  17:08 UTC) was stopped clean at cycle 123 (0 deaf, 0 errors, 22 burst
+  fails) to switch to the fixed harness. The run of record is
+  `1010-1805-coldboot-1858-500-h2`, started 18:05 UTC on a power-on-reset
+  boot (WDOG `WRSR` = `0x0010` POR; the smart plug cut power a second time
+  ~2 min after the commanded cycle, so the boot is cold), background
+  7.2/7.2 Gbit/s, harness with the listener-inode wait and the incremental
+  journal-cursor error scan.
+- **Close run result (2026-10-10 18:05–21:29 UTC):** `1010-1805-coldboot-1858-500-h2`
+  ran 500/500 cycles: 0 deaf, 0 new kernel errors, 0 burst fails (the
+  harness fix works), MURAM 52922 → 52922 and records 0 → 0 after the
+  settle, background 7.2/7.2 Gbit/s. Harness verdict FAIL on **one transient
+  miss** at cycle 359 (~20:29:45): the DUT's 5 pings to `10.99.1.112`
+  (dell1, untagged IPv4 on eth3) went unanswered and the re-check 5 s later
+  passed. Not the stall signature: FPM port status clear, only the parked
+  FM_CTL task, eth3 BMI `rfrc` advancing, the other seven rig addresses
+  (including dell1's VLAN 10 and IPv6 on the same port) answered, no
+  bus-error or kernel-error line, and ASK re-resolved the 10.99.1.112
+  neighbour at 20:29:50 inside the check window (it re-resolves every
+  11–38 s under this load, 847 times in the run). Read as a lost ARP
+  exchange under load; tracked below as a non-gating follow-up.
+- **Gate CLOSED 2026-10-10 by operator decision.** The close bar asked for a
+  pristine cold-boot 500-cycle run with 0 transient misses; the run above
+  had one, of a different class than the gate guards against. Since F-263
+  three runs on image `1858` (`0326` 500, `1708` 123, `1805-h2` 500 =
+  1,123 verified-load cycles on three boots) had 0 FMan RX stalls, 0 deaf
+  ports and 0 kernel errors, against onsets at cycles 84–129 before the
+  fix. Data: `oracle/churn-1010-1805-coldboot-1858-500-h2.{csv,log}` and
+  `-fails/c359-suspect.txt` on dell2 `~/soak/`.
 - **Harness** (`/mnt/builds/ask2-review/oracle/`): `churn.sh` = background
   vlan↔vlan v4 bidir load, 16 × 450 Mbit/s per direction on port 5203 (rate
   verified ≥ 5 Gbit/s per direction); per cycle a 2 s 4-stream burst on all six
@@ -152,9 +173,9 @@ bus-error address.
   settle; burst fails are reported but do not gate. A finished run's copy stays
   as `churn-<tag>.status`. Check from anywhere: `ssh admin@192.168.1.113 cat
   soak/STATUS` (or `soakctl.sh status`, which prints it first).
-  Cadence drift 29 → 36 s over 500 cycles is a harness artifact (the
-  per-cycle `journalctl -k --since T0` re-reads the growing log; a
-  `--cursor` scan would fix it).
+  The per-cycle kernel-error scan reads the journal incrementally from a
+  saved cursor (fixed 2026-10-10; rescanning since `T0` every cycle made
+  the cadence drift 29 → 36 s over 500 cycles).
 - **Binding guards on the ehash delete path:**
   - **Dropped draft `0220` — never recreate.** It re-implemented F-254's atomic
     unlink and SYNC (F-254's anchors match only the unpatched `del_key()`, so
@@ -189,10 +210,18 @@ bus-error address.
   control connection. 4 of 4 captured failures match exactly, and
   8.2 % × ~45 % (next SYN inside the RTO window) ≈ the observed 3.7 %. Why the
   FIN loss rose about 10× on 2026-10-09 (the `0415` image and the X710 rig
-  rewire landed together) is not A/B-tested. Harness fix (local source,
-  used from the next `soakctl.sh deploy`): wait ≤ 3 s before each burst until
-  dell2 has no live `:5202` socket. Tools: `oracle/burstclass.py`,
+  rewire landed together) is not A/B-tested. Harness fix (deployed for the
+  `1805-h2` run): iperf3 opens a new listening socket after every test, so
+  before each burst the harness waits ≤ 3 s until dell2's `:5202` listener
+  inode differs from the one the previous burst used (a plain "no live
+  socket" wait is not enough: the listener reset comes up to ~50 ms after the
+  old socket closes). Tools: `oracle/burstclass.py`,
   captures `oracle/burstcap-20261010/`.
+- **ARP-type transient under load (close run, cycle 359):** one 5-ping check
+  from the DUT to `10.99.1.112` failed and recovered within 5 s while the
+  neighbour was being re-resolved. Next if it recurs: capture ARP on dell1
+  and the DUT during the check, and count BMI out-of-buffer discards
+  (`rodc`) on eth3 at that moment.
 - **Conntrack lingering:** the hardware path swallows FIN/RST, so a torn-down
   offloaded flow stays ESTABLISHED in conntrack until
   `nf_conntrack_tcp_timeout_established` expires. Interim mitigation
