@@ -1,8 +1,8 @@
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 0d7fc2521..7eaf81f84 100644
+index ddb792b5d..8ab218dd8 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -362,6 +362,69 @@ def set_vlan_strip(self, state):
+@@ -372,6 +372,69 @@ def set_vlan_strip(self, state):
                      'Adapter does not support changing rx-vlan-offload settings!'
                  )
          return False
@@ -72,7 +72,7 @@ index 0d7fc2521..7eaf81f84 100644
  
      def set_rps(self, state):
          if not isinstance(state, bool):
-@@ -632,5 +695,10 @@ def update(self, config):
+@@ -670,5 +733,10 @@ def update(self, config):
          # call base class last
          super().update(config)
  
@@ -84,13 +84,14 @@ index 0d7fc2521..7eaf81f84 100644
          # enable/disable EAPoL (Extensible Authentication Protocol over Local Area Network)
          self.set_eapol()
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 16ff90300..7d42e3f77 100755
+index 54af3954e..26589728b 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -385,6 +385,24 @@ def verify_vpp_remove_vif(ethernet: dict):
-     for vlan in vlan_names:
-         verify_vpp_remove_interface(vlan, vpp_config)
+@@ -499,6 +499,25 @@ def verify_vpp_mtu(ethernet: dict):
+             'supported by the VPP dataplane'
+         )
  
++
 +def verify_ingress_policer(ethernet):
 +    """
 +    Verify the hardware ingress-policer configuration. 'bandwidth' (the
@@ -112,7 +113,7 @@ index 16ff90300..7d42e3f77 100755
  def verify(ethernet):
      verify_flowtable(ethernet)
      verify_vpp_remove_vif(ethernet)
-@@ -396,6 +414,7 @@ def verify(ethernet):
+@@ -510,6 +529,7 @@ def verify(ethernet):
      verify_interface_exists(ethernet, ifname, state_required=True)
      verify_eapol(ethernet)
      verify_mirror_redirect(ethernet)

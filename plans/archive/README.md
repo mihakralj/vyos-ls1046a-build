@@ -75,6 +75,8 @@ For current state, see (in order of authority):
 | `ZC-RX-SCOPE.md` | True-ZC AF_XDP RX scope brief | Resolved 2026-06-10; follow-on work in `VPP-AFXDP-ZC-FULLSPEED.md` (2026-10-05) |
 | `skip-ledger.md` | Patch SKIP ledger (rule P3) | Not enforced by CI; skipped patches removed by the fold/cleanup (2026-10-05) |
 | `needs-forward-port/` | Parked 6.6-era INA234 hwmon patch | Forward-ported as board patch `4002` (2026-10-05) |
+| `ASK2-MASTER-PLAN-2026-10-09.md` | Full v2.28.0 snapshot of the ASK2 master plan (T-M3-R/T-M7 attempt history, VLAN/NAT/PPPoE/MTU-check delivery narrative, closed defects, dated board-result logs) | Achieved content pruned from the live plan 2026-10-09; live `plans/ASK2-MASTER-PLAN.md` v2.29.0 keeps open work and binding facts with original section numbers and an "Archived sections map"; redirect note at `ASK2-MASTER-PLAN-2026-10-09.md.archive-note.md` |
+| `ASK2-REWRITE-PLAN-2026-10-09.md` | Full snapshot of the ASK2 rewrite plan (Phase 0.1–0.3/0.5 oracles, Phase 1 VLAN root cause and fixes 0215–0219, A6 result tables, F-260/F-261/F-262 and IPv6 frag policy history) | Achieved content pruned from the live plan 2026-10-09; live `plans/ASK2-REWRITE-PLAN.md` keeps the churn gate, open board checklist, Phase 2–4 and vendor reference records with original section numbers; redirect note at `ASK2-REWRITE-PLAN-2026-10-09.md.archive-note.md` |
 
 Archived 2026-05-25 as part of the v1.3 doc consolidation following PR14z21 M2 gate run.
 

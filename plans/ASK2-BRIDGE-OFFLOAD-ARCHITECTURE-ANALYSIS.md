@@ -1,8 +1,19 @@
 # ASK2 L2 Bridge HW Offload — Architecture Analysis & Recommendation
 
-**Date:** 2026-10-07
+**Date:** 2026-10-07 (revised 2026-10-09)
 **Branches reviewed:** `dpaa1` (ASK2), `nxp-sdk` (vendor ASK)
 **Task:** T-M6-2 — analyze how to do HW-offloaded bridging "like smart switches do it"
+
+> **Revision 2026-10-09.** `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md` is the
+> execution contract; this document is the vendor-vs-ASK2 comparison behind
+> it. Since the first pass: the ehash re-architecture was adopted (B1 is now
+> the F-255 `L2_DA` profile plus `ask_bridge_fe_action()`, not the CC-tree
+> builder), per-port offload granularity was simplified (per-port engage plus
+> per-family mask only), and the vendor sources were re-read. New material is
+> §2.5 (vendor details), §6.7 (mapping to ASK2 and gap list), and corrections
+> inside §2.1, §2.3, §2.4, §3.2, §6.3 and §9. Sections that describe the
+> superseded CC-tree plan (§3.1, §3.3, §3.4, §4, §7.2) are kept as history and
+> marked so.
 
 ---
 
@@ -18,73 +29,43 @@
 
 ### 2.1 Architecture Overview
 
-The vendor ASK implements L2 bridging through a **userspace-driven ehash table** with kernel bridge hooks:
+The vendor ASK implements L2 bridging through a per-flow ehash record built by
+CDX, fed by a patched bridge and the `auto_bridge.ko` module (§2.4). The
+verified chain (2026-10-09 re-read of `/mnt/builds/ASK`):
 
+```mermaid
+flowchart TD
+    BR["Linux bridge (patched)<br/>learning, ageing, STP, flooding<br/>br_handle_frame_finish sets skb->abm_ff"]
+    ABM["auto_bridge.ko (ABM)<br/>hooks NF_BR_FORWARD, NF_BR_POST_ROUTING<br/>SEEN, CONFIRMED, FF state ladder"]
+    CMM["CMM (userspace)<br/>forward_engine.c:257-266<br/>FPP_CMD_RX_L2FLOW_ENTRY over FCI"]
+    CDX["CDX (kernel)<br/>cdx_ehash.c add_l2flow_to_hw()<br/>fill_bridge_actions()"]
+    TBL["FMan PCD cdx_ethernet_cc ehash<br/>keysize 15 = PORT_ID+DA+SA+ETYPE<br/>max 512, aging yes, mask 0xff"]
+    KG["KeyGen scheme cdx_ethernet_dist<br/>ethernet.dst, src, type + PORT_ID<br/>last entry of every port dist_order"]
+    FE["FE-VM per-flow record<br/>optional strip/insert VLAN, L2 header<br/>then ENQUEUE_PKT to egress TX FQ"]
+    BR -- "brevent_notifier<br/>FDB update, port down" --> ABM
+    ABM -- "NETLINK_L2FLOW<br/>L2FLOW_ENTRY_NEW" --> CMM
+    CMM --> CDX
+    CDX -- "ExternalHashTableAddKey" --> TBL
+    KG --> TBL
+    TBL --> FE
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Linux Bridge (kernel)                                       │
-│  - Learning, ageing, STP, VLAN filtering, flooding           │
-│  - FDB management (br_fdb.c)                                 │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              │ Kernel hooks (020-ask-bridge-hooks.patch)
-                              │ - brevent_notifier chain (FDB updates)
-                              │ - br_fdb_can_expire callback (ageing)
-                              │ - skb->abm_ff flag (fast-forward marker)
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  CMM (userspace daemon)                                      │
-│  - ffbridge.c: reads bridge FDB via ioctl                    │
-│  - cmmBrToFF(): maps bridge routes to fast-forward           │
-│  - Sends L2 flow entries to CDX via NETLINK_L2FLOW           │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              │ NETLINK_L2FLOW messages
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  CDX (kernel module)                                         │
-│  - control_bridge.c: manages L2 flow hash table              │
-│  - add_l2flow_to_hw(): installs into ehash                   │
-│  - delete_l2br_entry_classif_table(): removes from ehash     │
-│  - Timer-based ageing (L2Bridge_timeout, default 30s)        │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              │ ExternalHashTableAddKey/RemoveKey
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  FMan PCD — cdx_ethernet_cc (ehash table)                    │
-│  - keysize=15: PORT_ID(1) + DA(6) + SA(6) + ETYPE(2)         │
-│  - max=512 entries, shared across ports                      │
-│  - aging=yes (hardware ageing support)                       │
-│  - mask=0xff, hashshift=0                                    │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              │ KeyGen scheme: cdx_ethernet_dist
-                              │ - Extracts: ethernet.dst, ethernet.src, ethernet.type
-                              │ - AC_CC dispatch to ehash
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  FMan FE-VM (per-flow action record)                         │
-│  - fill_bridge_actions() builds opcode chain:                │
-│    [STRIP_ETH 0x11] → [STRIP_VLAN 0x12] → [INSERT_VLAN 0x42]│
-│    → [INSERT_L2_HDR 0x41] → [ENQUEUE_PKT 0x01]              │
-│  - For untagged bridging: just ENQUEUE_PKT (no HMTD)         │
-│  - Target: egress port's TX FQ (no-confirm)                  │
-└─────────────────────────────────────────────────────────────┘
-```
+
+Earlier revisions of this diagram showed CMM `cmmBrToFF()` reading the bridge
+FDB and `control_bridge.c` owning an L2 hash table. That was the pre-correction
+reading; §2.4 explains why `cmmBrToFF()` belongs to the routed-flow path.
 
 ### 2.2 Key Vendor Files
 
-| File | Purpose |
+| File (under `/mnt/builds/ASK/`; the old `kernel/flavors/ask/...` tree no longer exists) | Purpose |
 |------|---------|
-| `kernel/flavors/ask/patches/020-ask-bridge-hooks.patch` | Kernel bridge hooks: notifier chains, FDB callbacks, skb flags |
-| `kernel/flavors/ask/sources/cdx/cdx-5.03.1/control_bridge.c` | CDX L2 flow management (572 lines) |
-| `kernel/flavors/ask/sources/cdx/cdx-5.03.1/control_bridge.h` | L2Flow structures, command definitions |
-| `kernel/flavors/ask/userspace/cmm/src/ffbridge.c` | CMM bridge-to-fast-forward mapping (336 lines) |
-| `kernel/flavors/ask/userspace/cmm/src/ffbridge.h` | Bridge FDB entry structures |
-| `release/ask-6.12.49/cdx_pcd.xml` | FMC policy: `cdx_ethernet_cc` (keysize=15), `cdx_ethernet_dist` |
-| `kernel/flavors/ask/config/gateway-dk/cdx_cfg.xml` | Port policies (all ports use `cdx_ethernet_dist` as last distribution) |
-| `/mnt/builds/ASK/auto_bridge/auto_bridge.c` + `auto_bridge_private.h` | A **second, separate** vendor mechanism — see §2.4 |
+| `patches/kernel/020-ask-bridge-hooks.patch` | Kernel bridge hooks: `brevent_notifier`, can-expire callback, `skb->abm_ff`, `br_input_skb_cb` vid/untagged |
+| `cdx/control_bridge.c` / `control_bridge.h` | CDX L2 flow management; routed-flow-via-bridge resolution (ageing timer commented out, §2.5) |
+| `cdx/cdx_ehash.c` | `add_l2flow_to_hw()` (~1496), `fill_bridge_actions()` (~1196-1300) |
+| `cmm/src/ffbridge.c` / `ffbridge.h` | CMM `cmmBrToFF()`: routed flow whose egress is a bridge (§2.4) |
+| `cmm/src/forward_engine.c` (257-266) | `L2FLOW_ENTRY_NEW` → `FPP_CMD_RX_L2FLOW_ENTRY` over FCI |
+| `dpa_app/files/etc/cdx_pcd.xml` | FMC policy: `cdx_ethernet_cc` (line 53, keysize=15), `cdx_ethernet_dist` (line 207, shared), per-port `dist_order` (~336-504) |
+| `config/gateway-dk/cdx_cfg.xml`, `dpa_app/files/etc/cdx_cfg.xml` | Port policies (all ports use `cdx_ethernet_dist` as last distribution) |
+| `auto_bridge/auto_bridge.c` + `auto_bridge_private.h` | A **second, separate** vendor mechanism — see §2.4 |
 
 ### 2.3 Vendor Key Design Decisions
 
@@ -98,6 +79,15 @@ The vendor ASK implements L2 bridging through a **userspace-driven ehash table**
 
 5. **Silicon-proven**: Live .106 board scheme 11 (`0xe4000000` = `PORT_ID|MACDST|MACSRC|ETYPE`) carried **1,225,734 packets** — the busiest scheme on the board.
 
+**Corrections 2026-10-09 to items 3 and 4.** Item 3 is right that the vendor
+has no switchdev, but the hooks are narrower than "custom chains": the patch
+adds `brevent_notifier` (`BREVENT_FDB_UPDATE`, `BREVENT_PORT_DOWN`), the
+can-expire callback and `skb->abm_ff`, and the consumer is `auto_bridge.ko`
+(§2.4), not CMM reading the FDB over ioctl. Item 4 is only half true: the
+FDB is not read by CMM. ABM learns flows in kernel and hands each new flow to
+CMM over `NETLINK_L2FLOW`; CMM forwards it to CDX over FCI (§2.5). Userspace
+is a relay, not the source of truth.
+
 ### 2.4 A second vendor mechanism: `auto_bridge.ko` (ABM) — pure L2 flow discovery
 
 **Correction to the first pass of this analysis:** §2.1-2.3 above describe `cdx/control_bridge.c` + `cmm/ffbridge.c`'s `cmmBrToFF()`. Reading those functions directly shows `cmmBrToFF(struct RtEntry *route)` is called from `cmm/src/conntrack.c:921` and takes a **route** (an L3/NAT flow whose *egress* interface happens to be a bridge) — it resolves the bridge's internal FDB *once* at flow-install time so the egress L2 header (dst MAC, optional VLAN tag) can be baked into that routed flow's hardware record (`dpa_get_tx_info_by_itf()` in `devman.c` does the analogous VLAN-tag part). This is the vendor's equivalent of what ASK2's `ask_neigh.c` already does for routed next-hops — **not** the general "two hosts purely switched, no L3 involved" case the bridge plan actually targets.
@@ -108,60 +98,96 @@ That general case is `auto_bridge.ko`'s job, a **separate, 1771-line kernel modu
 - Tracks each (src MAC, dst MAC, in-dev, out-dev) pair as an `l2flowTable` entry through an explicit **promotion ladder**: `L2FLOW_STATE_SEEN → CONFIRMED → {LINUX | FF} → DYING` (`auto_bridge_private.h`). A flow is **not** installed into hardware the instant a MAC is learned — it has to be re-observed/confirmed first.
 - Sized deliberately larger in software than in hardware: `L2FLOW_HASH_TABLE_SIZE=1024` buckets, `ABM_DEFAULT_MAX_ENTRIES=5000` software-tracked flows, against only **512** hardware ehash slots (`cdx_ethernet_cc` max=512) — i.e. the vendor tracks ~10x more candidate flows than it can ever offload, and only promotes the ones worth it.
 - Ages hardware-forwarded flows via a **callback**, not polling: `br_fdb_register_can_expire_cb(&abm_fdb_can_expire)` — the (patched) bridge asks ABM "is this MAC still fast-forwarded?" before expiring it, and ABM says no (`return 0`) if it's in `L2FLOW_STATE_FF`. A new `skb->abm_ff` field (added by `patches/kernel/020-ask-bridge-hooks.patch`) is set by the bridge's own forward path once a flow is confirmed, which is how the data path and ABM agree a flow is live.
-- Talks to a userspace daemon over its own reliable netlink protocol (ack/retry, `l2flow_list_wait_for_ack`), which is presumably what eventually calls into `fill_bridge_actions()`/`add_l2flow_to_hw()` — **not independently confirmed from source in this pass**; flagged as `[INFERRED]`.
+- Talks to a userspace daemon over its own reliable netlink protocol (ack/retry, `l2flow_list_wait_for_ack`). **Confirmed 2026-10-09** (previously `[INFERRED]`): on first sight at `NF_BR_POST_ROUTING` ABM sends `L2FLOW_ENTRY_NEW` over `NETLINK_L2FLOW`; CMM `forward_engine.c:257-266` turns it into `FPP_CMD_RX_L2FLOW_ENTRY` over FCI; CDX consumes that and calls `add_l2flow_to_hw()` / `fill_bridge_actions()`.
 - Has a real security history worth not repeating (`ISSUES.md`): **C1** — a netlink attribute (`L2FLOWA_IP_SRC/DST`) trusted attacker-supplied `nla_len` into a fixed-size union (buffer overflow), fixed via `nla_policy` caps. **H11/H7-r** — `spin_lock` vs `spin_lock_bh` mismatches between a process-context callback (`abm_fdb_can_expire`, called from `br_fdb_cleanup`) and softirq-context callers of the same lock. **M6** — an unbounded `schedule()` spin on module-exit waiting for flow drain, fixed to a bounded 5 s wait. ASK2's current `ask_bridge.c` already uses `spin_lock_bh` consistently and has no unbounded waits, so it doesn't repeat H11/M6, but this is worth keeping in mind for B3's teardown path and any future netlink/genl attribute added for bridge observability (C1's class of bug).
+
+### 2.5 Vendor details verified 2026-10-09
+
+These points were re-read from source and drive decisions D1-D8 in the plan
+(§13).
+
+1. **The record is per flow, in the ingress port's table.** `add_l2flow_to_hw()`
+   (`cdx/cdx_ehash.c` ~1496) keys `portid(1)+DA(6)+SA(6)+ethertype(2)` = 15 B.
+   `l2_info.mtu = 0xffff`, so bridge flows get no MTU check. The
+   `cdx_ethernet_dist` distribution is `shared="true"` and carries PORT_ID, so
+   the vendor holds one shared table with ingress port in the key (512 entries,
+   mask `0xff`). ASK2 uses per-port tables (F-225), where PORT_ID in the key
+   is redundant.
+2. **Routed and bridge coexist on one port by distribution chaining.**
+   `cdx_ethernet_dist` is the last entry of every port's `dist_order`
+   (`cdx_pcd.xml` ~336-504), after the esp4/esp6/udp4/tcp4/udp6/tcp6/
+   ipv4mcast/ipv6mcast/tup3/pppoe distributions. L3 lookups run first, L2 only
+   on a miss. ASK2 has one scheme and one table per port and no multi-table
+   dispatch, so it cannot do this yet.
+3. **`abm_ff` semantics.** The patched `br_handle_frame_finish` clears
+   `skb->abm_ff`, then sets it only on a known-unicast dst-FDB hit before
+   `br_forward`. `br_input_skb_cb` gains `vid` and `untagged`; `skb->
+   underlying_iif` is set in `br_pass_frame_up`. ABM only considers skbs with
+   `abm_ff` and ethertype IP, IPv6, PPP_SES or 8021Q.
+4. **ABM state timers.** SEEN 10 s, CONFIRMED 2 min (commented "should not
+   timeout here"), LINUX 10 s, DYING 2 min; FF has no timer. Defaults: 1024
+   hash buckets, 5000 software entries. Hooks: `NF_BR_FORWARD` at
+   `NF_BR_PRI_LAST`, `NF_BR_POST_ROUTING` at `NF_BR_PRI_LAST - 1`.
+5. **Dynamic entries are offloaded.** `abm_fdb_can_expire` returns 0 for FF
+   flows, so a hardware-forwarded dynamic FDB entry is kept alive. That is why
+   the vendor needs its bridge patch; ASK2 without one cannot reproduce it and
+   starts with static entries (plan §13 D4).
+6. **Invalidation is event-driven.** `BREVENT_PORT_DOWN` marks matching flows
+   DYING; `BREVENT_FDB_UPDATE` rewrites `odev_ifi` for flows with that dst MAC.
+   The vendor's `control_bridge.c` per-entry ageing timer is commented out
+   (lines 205 and 262), so ABM drives lifetime.
+7. **`fill_bridge_actions()` (~1196-1300).** Sets `EHASH_BRIDGE_FLOW`;
+   `rebuild_l2_hdr` only when a VLAN strip or add applies. In `VLAN_FILTER`
+   mode a tagged egress inserts a tag (TPID 0x8100, `tci = vid`; QinQ uses
+   `svlan_tag`/`cvlan_tag`) and an untagged egress strips. The chain is
+   optional `create_strip_eth_hm`, then `insert_remove_outer_vlan_hm` (filtered)
+   or `insert_remove_vlan_hm`, then optional `create_vlan_ins_hm`, then
+   `create_ethernet_hm`, then `create_enque_hm`. **`insert_remove_vlan_hm` runs
+   unconditionally for non-filtered flows and always emits
+   `STRIP_ALL_VLAN_HDRS` (0x12), even for untagged frames.** ASK2's plain
+   `ENQUEUE_PKT` baseline for untagged traffic is therefore not byte-identical
+   to the vendor; B2 must prove it (plan §13.3 row 5).
+8. **First-pass claim retracted.** The old diagram's "Timer-based ageing
+   (`L2Bridge_timeout`, default 30 s)" describes `control_bridge.c` code whose
+   timer calls are commented out; do not rely on it.
 
 ---
 
 ## 3. ASK2 Current Approach (dpaa1 branch)
 
-### 3.1 Architecture Overview (Planned)
+### 3.1 Architecture Overview (superseded CC-tree plan — historical)
 
-The ASK2 bridge plan (`plans/ASK2-BRIDGE-OFFLOAD-PLAN.md`) assumes a **CC-tree approach**:
+> **Superseded 2026-10-07.** The CC-tree design below was replaced by the
+> ehash design (§6). Current ASK2 state is §3.2; the current design is §6 and
+> plan §13.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Linux Bridge (kernel)                                       │
-│  - Learning, ageing, STP, VLAN filtering, flooding           │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              │ switchdev notifiers (atomic + blocking)
-                              │ - SWITCHDEV_FDB_ADD/DEL_TO_DEVICE
-                              │ - SWITCHDEV_PORT_ATTR_SET (STP state)
-                              │ - NETDEV_CHANGEUPPER (bridge join/leave)
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  ask_bridge.c (ask.ko)                                       │
-│  - B0: switchdev notifier skeleton (logs only)               │
-│  - B1: CC DA-match key builder (host shadow)                 │
-│  - B3 (planned): FDB workqueue → CC tree rebuild             │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              │ fman_pcd_cc_static_install()
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  FMan PCD — per-port CC tree                                  │
-│  - DA-match leaves: key = destination MAC                    │
-│  - Action: plain BMI enqueue to egress port TX FQ            │
-│  - CC miss row: FE_ENTER (miss_fe_off) → ehash routed path   │
-│  - No HMTD for untagged bridging                             │
-└─────────────────────────────────────────────────────────────┘
+The original ASK2 bridge plan assumed a CC-tree approach:
+
+```mermaid
+flowchart TD
+    BR["Linux bridge<br/>learning, ageing, STP, VLAN filtering, flooding"]
+    OBS["ask_bridge.c (ask.ko)<br/>B0: switchdev notifier skeleton, logs only<br/>B1: CC DA-match key builder<br/>B3 planned: FDB workqueue, CC tree rebuild"]
+    PCD["FMan PCD per-port CC tree<br/>DA-match leaves, key = destination MAC<br/>action: plain BMI enqueue to egress TX FQ<br/>CC miss row: FE_ENTER to ehash routed path<br/>no HMTD for untagged bridging"]
+    BR -- "switchdev notifiers<br/>FDB_ADD/DEL_TO_DEVICE, STP state,<br/>NETDEV_CHANGEUPPER" --> OBS
+    OBS -- "fman_pcd_cc_static_install()" --> PCD
 ```
 
-### 3.2 Current State (2026-10-07)
+### 3.2 Current State (2026-10-09)
 
 | Stage | Status | Notes |
 |-------|--------|-------|
-| B0 | **DONE** (2026-09-10) | switchdev notifier skeleton, logs only, no HW install |
-| B1 | **DONE** (2026-09-15) | CC DA-match key builder + KUnit tests |
-| B2 | **BLOCKED** | Silicon de-risk: cross-port CC+HMTD delivery regression |
-| B3 | **GATED** | Production switchdev wiring (gated on B2 PASS) |
+| B0 | **DONE** (2026-09-10) | switchdev notifier skeleton, logs only, no HW install; queue holds 1024 events, drops on full |
+| B1 (CC builder, 2026-09-15) | **SUPERSEDED** | CC DA-match key builder + KUnit; dormant |
+| B1' (ehash) | **Code written 2026-10-07, dormant, not built in CI** | F-255 `L2_DA` profile (6 B, EKFC MACDST `0x40000000`, `ekfc_only`) + `ask_bridge_fe_action()`; no runtime caller of `fman_pcd_fe_engage_profile(..., L2_DA)`; `ask_hw_offload_engage()` always arms ROUTED |
+| B2' (ehash silicon proof) | **NOT STARTED** | Test matrix in plan §13.3 |
+| B3 | **GATED** | Needs role selection, FDB fan-out, urgent invalidation, fail-closed table allocation (plan §13 G1, G3, G5, G6) |
 | B4 | **PLANNED** | Lifecycle + teardown |
-| B5 | **PLANNED** | Matrix + productization |
+| B5 | **PLANNED** | Matrix + productization; `ASK_CAP_BRIDGE` stays unadvertised until then |
 
-### 3.3 The B2 Blocker
+### 3.3 The CC-tree B2 Blocker (historical)
 
-The B2 silicon de-risk experiment has hit a **regression**:
+The CC-tree B2 silicon de-risk experiment hit a **regression**. It is the main
+reason the plan moved to ehash and is not the current blocker:
 
 - The exact port/FQID combination (`eth3`/`0x10` → `eth4`/`0x2ba`) that was silicon-proven in August 2026 (R3b/R4b, ~55k pps sustained) now delivers **zero frames**
 - FMan hardware counters prove the CC comparator matches and the AD enqueue succeeds (`fmqm_etfc` rises, `fmqm_dtfc` stays flat)
@@ -170,7 +196,7 @@ The B2 silicon de-risk experiment has hit a **regression**:
 - A reboot clears the stuck frames (volatile QMan state)
 - **Root cause unknown**: either a code regression between `4e21e78f` and `dpaa1` tip, or a fundamental `AC 0x28` (`PRE_BMI_ENQ`) same-port-only limitation
 
-### 3.4 ASK2 CC-Tree Silicon History
+### 3.4 ASK2 CC-Tree Silicon History (historical)
 
 The CC-tree approach has a troubled silicon history on this project:
 
@@ -184,8 +210,12 @@ The CC-tree approach has a troubled silicon history on this project:
 
 ---
 
-## 4. Key Architectural Differences
+## 4. Key Architectural Differences (vendor vs the superseded CC-tree plan — historical)
 
+> The right-hand column describes the CC-tree plan, not current ASK2. Current
+> ASK2 uses ehash like the vendor; the remaining differences are control plane
+> (switchdev, no bridge patch, no CMM), per-port tables (vendor: one shared
+> table keyed with PORT_ID), and no L3-then-L2 distribution chaining (§2.5).
 | Aspect | Vendor ASK (nxp-sdk) | ASK2 Plan (dpaa1) |
 |--------|----------------------|-------------------|
 | **Classification mechanism** | **Ehash** (external hash table) | **CC-tree** (match-table walker) |
@@ -348,6 +378,22 @@ This matches:
 
 **For the first cut, DA-only matching (6 bytes) is also viable** — the ehash table can use a shorter key with a mask. But the 15-byte composite is the vendor-proven format.
 
+**Update 2026-10-09 — DA-only is the shipped B1 default, decided at B2.** B1
+(F-255 `L2_DA`) implements the DA-only 6-byte key (EKFC MACDST `0x40000000`).
+The 15-byte composite is the alternative. The choice is not cosmetic, because
+it sets capacity and fan-out:
+
+| | DA-only 6 B | Vendor 15 B composite |
+|---|---|---|
+| Record per | (DA, other-ingress-port), from FDB events | observed flow (ingress, DA, SA, ethertype) |
+| Entry source | switchdev FDB, no traffic learning | needs traffic-driven learning (ABM-style) |
+| Carries VID | no (fail closed on `vlan_filtering`) | no VID either; vendor adds it via `vid`/`untagged` bridge hooks |
+| Family gating | none: any ethertype matches | ethertype in key enables it |
+| Records under N members, M MACs | M × (N-1) | only flows actually seen |
+
+PORT_ID in the key is redundant with per-port tables (ASK2) but required with
+the vendor's shared table. Decide at B2 (plan §13.3 row 3).
+
 #### 6.3.2 KeyGen Scheme
 
 The L2 scheme needs:
@@ -373,6 +419,16 @@ struct fman_pcd_ehash_table_params l2_table = {
 };
 ```
 
+**Correction 2026-10-09.** This block is the vendor's configuration, not
+ASK2's. The vendor's `cdx_ethernet_cc` is `max=512`, `mask=0xff`, keysize 15,
+`aging=yes`. ASK2 per-port tables use mask `0x7fff` (32768 buckets × 16 B), and
+production `fman_pcd_fe_flow_add` passes `stats=false`, so per-record counters
+are off. Per-table capacity and MURAM/record footprint under fan-out are
+**unmeasured** (spec `ask2-shared-table-multi-protocol-design.md` §146: the
+bucket array dominates and every class must pass the live MURAM-budget gate).
+Both go on the B2 matrix (plan §13.3 row 7), and `stats=true` is needed for
+observability and a hit-based ageing refresh (plan §13 G8, D4).
+
 #### 6.3.4 FE-VM Action Record
 
 For **untagged bridging** (simplest case):
@@ -391,6 +447,15 @@ Opcode chain: [STRIP_ALL_VLAN 0x12] → [INSERT_VLAN_HDR 0x42]
 
 This is **identical** to the vendor's `fill_bridge_actions()` and reuses ASK2's proven VLAN opcode emitters (F-233, silicon-validated).
 
+**Correction 2026-10-09.** Not identical for the untagged case. The vendor
+calls `insert_remove_vlan_hm` for every non-VLAN-filtered flow, so its chain
+always begins with `STRIP_ALL_VLAN_HDRS` (0x12), even for untagged frames. The
+plain `[ENQUEUE_PKT]` record above is a deliberate ASK2 simplification that
+leaves frame bytes (including any 802.1Q tag) untouched. That is correct for a
+non-VLAN-aware bridge, but it needs silicon proof (plan §13.3 row 5). The
+vendor also keeps `mtu = 0xffff` for bridge records; ASK2 must keep bridge
+records off the F-262 `05 PREEMPTIVE_CHECKS` path (plan §13 D7).
+
 #### 6.3.5 Coexistence with Routed/NAT
 
 The ehash approach makes coexistence **trivial**:
@@ -402,17 +467,29 @@ The ehash approach makes coexistence **trivial**:
 
 No CC-miss→FE_ENTER chain needed. No `miss_fe_off` wiring. No CC-tree rebuild under FDB churn.
 
+**Correction 2026-10-09: "trivial" overstated it.** In the vendor, coexistence
+is distribution chaining (§2.5 point 2). In ASK2 a port runs one profile, so
+coexistence is across ports only; the port's role is chosen at engage time
+(plan §13 D1: bridge member → `L2_DA`, otherwise ROUTED, with explicit
+disengage and re-engage on a role change). Routed flows whose egress or
+ingress is a bridge device (IRB/SVI) have no member-port resolution and stay in
+software (plan §13 G11).
+
 ### 6.4 Implementation Roadmap (Revised B0-B5)
+
+> Updated 2026-10-09 to the actual state. The ordering and gates here are
+> mirrored by plan §6 and §13.7.
 
 | Stage | Description | Gate |
 |-------|-------------|------|
-| **B0** | ✅ DONE — switchdev notifier skeleton (logs only) | Build clean |
-| **B1** | ✅ DONE — CC DA-match builder (superseded by ehash approach) | KUnit pass |
-| **B1'** | **NEW** — L2 ehash key builder + FE-VM action emitter | KUnit vectors for 15-byte key + ENQUEUE_PKT record |
-| **B2'** | **NEW** — Silicon de-risk: hand-arm L2 ehash entry on sacrificial port, prove HW forward + routed coexistence | Single flow HW forward + routed still HITs |
-| **B3** | ask.ko production switchdev wiring (FDB workqueue → ehash insert/remove) | Two-port bridge, known-unicast HW forward, BUM stays SW |
-| **B4** | Lifecycle + teardown (FDB del/flush, STP state change, port down, module unload) | Forward+inverse, pcd-snapshot clean |
-| **B5** | Matrix + productization (learn/move/delete/age, multi-port, churn, performance) | Full acceptance contract |
+| **B0** | ✅ DONE (2026-09-10) — switchdev notifier skeleton (logs only) | Build clean |
+| **B1 (CC)** | ❌ SUPERSEDED — CC DA-match builder | — |
+| **B1'** | ⚠️ CODE WRITTEN 2026-10-07, dormant, not built in CI — F-255 `L2_DA` profile (6 B DA key) + `ask_bridge_fe_action()` | CI build; KUnit; routed regression via `pcd-snapshot` |
+| **B2'** | NOT STARTED — silicon de-risk on a sacrificial port (never eth0): matrix in plan §13.3 | Single flow HW forward, CPU bypass by kprobe A/B, detach restores `next_engine`, capacity measured |
+| **B3a** | Role selection at engage, static FDB fan-out, fail-closed table allocation | Two-port bridge, known-unicast static entry HW forward, BUM/BPDU stay SW, no routed regression |
+| **B3b** | Urgent invalidation and shadow resync (DEL, STP-block, move, port-down; overflow resync from FDB dump) | No stale record under churn; lockdep clean |
+| **B4** | Lifecycle + teardown (FDB del/flush, STP state change, port down, module unload) | Forward+inverse, `pcd-snapshot` clean, `muram_budget` back to baseline |
+| **B5** | Matrix + productization (learn/move/delete/age, multi-port, churn, performance); advertise `ASK_CAP_BRIDGE`; default decision for `bridge_offload` | Full acceptance contract |
 
 ### 6.5 What to Keep from Current Work
 
@@ -422,6 +499,11 @@ No CC-miss→FE_ENTER chain needed. No `miss_fe_off` wiring. No CC-tree rebuild 
 - **KUnit test infrastructure**: ✅ Keep — the test patterns apply to ehash key builder too
 
 ### 6.6 What to Add
+
+> Updated 2026-10-09: item 1 is implemented as the DA-only `L2_DA` profile
+> (F-255) rather than the 15-byte key; the 15-byte builder is the B2 A/B
+> alternative. Items 3 and 4 are not done: the per-port table exists only as
+> the F-255 profile size, and nothing calls it at runtime (§6.7).
 
 1. **L2 ehash key builder** (`cc_pack_key_l2` equivalent for ehash):
    - Pack 15-byte `PORT_ID|DA|SA|ETYPE` key
@@ -442,6 +524,26 @@ No CC-miss→FE_ENTER chain needed. No `miss_fe_off` wiring. No CC-tree rebuild 
    - Add L2 extraction fields to the per-port scheme's EKFC
    - Or create a dedicated L2 scheme (if EKFC space allows)
 
+### 6.7 Review 2026-10-09: vendor mechanism mapped to ASK2
+
+| Vendor mechanism | ASK2 equivalent | Status |
+|---|---|---|
+| ABM flow discovery (`NF_BR_*` hooks, SEEN/CONFIRMED/FF) | switchdev FDB events (`ask_bridge.c`), static entries first | B0 log-only; no install path |
+| cmm → FCI → cdx relay | in-kernel `ask.ko` direct to `fman_pcd_fe_flow_add` | Needs the install path (B3a) |
+| Per-flow record, shared table, PORT_ID in key | Per-port table, DA-only key, record per (DA, other ingress port) | `ask_bridge_fe_action()` written; fan-out not written |
+| `dist_order` chaining (L3 first, L2 last) | One scheme per port; role chosen at engage | Role selection not written (plan §13 D1) |
+| `br_fdb_register_can_expire_cb` keeps dynamic entries alive | Hit-counter refresh or static-only | Static-only for v1 (plan §13 D4) |
+| `abm_ff` marks only known-unicast dst-FDB hits | Admission filter: static, unicast, FORWARDING, VID 0, not local/locked | Specified, not enforced |
+| `BREVENT_PORT_DOWN` / `BREVENT_FDB_UPDATE` | `SWITCHDEV_FDB_DEL_TO_DEVICE`, STP state, `NETDEV_CHANGEUPPER` | Observed in B0; invalidation not written |
+| `cmmBrToFF()` bakes bridge egress into routed records | none: routed flows with a bridge egress stay in software | Gap G11, out of scope for v1 |
+| `mtu = 0xffff` on bridge records | no `05 PREEMPTIVE_CHECKS` on bridge records (F-262 interplay) | Rule D7 |
+| Unconditional `STRIP_ALL_VLAN_HDRS` | Plain `ENQUEUE_PKT` for untagged | Deviation; B2 row 5 |
+
+The vendor ABM bugs to avoid when writing B3 are C1 (netlink attribute length
+trusted without a policy cap), H11/H7-r (`spin_lock` vs `spin_lock_bh`
+mismatch) and M6 (unbounded wait at module exit); see §2.4. The gap list G1-G13
+and the decisions D1-D8 are in plan §13; they are not repeated here.
+
 ---
 
 ## 7. Risk Analysis
@@ -455,8 +557,16 @@ No CC-miss→FE_ENTER chain needed. No `miss_fe_off` wiring. No CC-tree rebuild 
 | Ehash table exhaustion | 512 entries per table; fail-closed to SW bridge past cap |
 | Ageing of HW-forwarded flows | Offload static entries only in v1; add HW hit-counter → kernel FDB refresh in v2 |
 | Non-IP frames through ehash | Base case is safest (no HMTD, no PAHM); test with ARP, IPv6, unknown ethertypes |
+| FDB fan-out multiplies records (M MACs × (N-1) ports) | Measure per-table capacity and MURAM at B2; admission cap; fail closed to software (plan §13 G3, G7) |
+| Stale record after DEL, STP-block, move or port-down | Process these immediately, never debounce; kernel FDB is truth with a shadow and resync from a bridge FDB dump on overflow (plan §13 D3) |
+| L2 engage falls back to the global 46-byte table if per-port table creation fails | L2 engage must fail closed (F-255 `fman_pcd_ehash_table_set` guard; plan §13 G6); the same structural mismatch stalled T-M3-R attempt 1 |
+| DA-only key matches any ethertype and has no VID | Fail closed on `vlan_filtering` or non-zero VID until §9; document that the family mask does not gate L2 (plan §13 G4, G12) |
+| Bridge record reaches the F-262 `05` path | Bridge records stay on the no-`05` path, as the vendor's mtu `0xffff` (plan §13 D7) |
 
-### 7.2 Risks of Staying with CC-Tree
+### 7.2 Risks of Staying with CC-Tree (historical)
+
+Superseded; the plan no longer stays with CC-tree. Kept as the rationale for
+the ehash move.
 
 | Risk | Status |
 |------|--------|
@@ -502,17 +612,21 @@ The vendor ASK proves that **L2 bridge hardware offload works on LS1046A silicon
 1. **Keep B0** (switchdev skeleton) — it's correct and reusable
 2. **Replace B1-B2** (CC-tree builder + silicon de-risk) with **ehash-based L2 offload**
 3. **Reuse ASK2's proven ehash infrastructure** (`ask_fe_flow_insert()`, CRC-64, per-port tables)
-4. **Match the vendor's 15-byte key format** (`PORT_ID|DA|SA|ETYPE`) — silicon-proven
+4. **Choose the L2 key by B2 evidence** (DA-only 6 B vs the vendor's 15-byte `PORT_ID|DA|SA|ETYPE`, §6.3.1). The 15-byte layout is vendor-proven; DA-only is the shipped B1 default.
 5. **Start with untagged bridging** (ENQUEUE_PKT only, no HMTD) — simplest possible path
 6. **Add VLAN-aware bridging later** (reuse F-233 VLAN opcodes)
 7. **Offload static FDB entries only in v1** (no ageing concern); add dynamic entry ageing-refresh in v2
+8. **Select the port role at engage time** (bridge member → `L2_DA`, else ROUTED) and treat a bridge member as bridge-only in v1 (plan §13 D1; confirmed by the operator 2026-10-09)
+9. **Invalidate urgently** on DEL, STP-block, move and port-down; debounce only ADD (plan §13 D3)
+
+Open before any of this ships: the B2 silicon matrix (plan §13.3) has not been run, F-255 has not been built in CI, and nothing calls the `L2_DA` engage at runtime.
 
 This approach:
 - ✅ Reuses silicon-proven mechanisms (ehash, CRC-64, FE-VM ENQUEUE_PKT)
 - ✅ Matches vendor's production-proven configuration
 - ✅ Avoids the CC-tree's unresolved silicon issues
-- ✅ Provides per-flow HW counters (record +256/+264)
-- ✅ Supports hardware ageing (`aging=yes`)
+- ✅ Provides per-flow HW counters (record +256/+264) — vendor tables; ASK2 production passes `stats=false`, so this needs enabling (§6.3.3)
+- ✅ Supports hardware ageing (`aging=yes`) — vendor tables; ASK2's ageing story is static-only first (plan §13 D4)
 - ✅ Scales to VLAN-aware bridging via existing VLAN opcode emitters
 - ✅ Maintains kernel bridge authority (switchdev, fail-closed)
 
@@ -520,20 +634,25 @@ This approach:
 
 ## 10. References
 
-- `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md` — Current ASK2 bridge plan (CC-tree approach)
-- `plans/ASK2-MASTER-PLAN.md` §4.6.5 — T-M6-2 master task
+- `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md` — ASK2 bridge plan and execution contract (ehash; review 2026-10-09 in §13)
+- `plans/ASK2-MASTER-PLAN.md` §4.6.4 Phase M6-E — T-M6-2 master task
 - `arch/fman-vendor-source-extraction-2026-08-07.md` — Vendor L2 scheme evidence (1.2M packets)
 - `specs/reference/nxp-ask-fmc/cdx_pcd.xml` — Vendor FMC policy (cdx_ethernet_cc)
-- `kernel/flavors/ask/sources/cdx/cdx-5.03.1/control_bridge.c` — Vendor L2 flow management
-- `kernel/flavors/ask/sources/cdx/cdx-5.03.1/cdx_ehash.c` — Vendor `add_l2flow_to_hw()`, `fill_bridge_actions()`
-- `kernel/flavors/ask/patches/020-ask-bridge-hooks.patch` — Vendor kernel bridge hooks
+- `/mnt/builds/ASK/cdx/control_bridge.c` — Vendor L2 flow management / routed-via-bridge (ageing timer commented out, §2.5)
+- `/mnt/builds/ASK/cdx/cdx_ehash.c` — Vendor `add_l2flow_to_hw()`, `fill_bridge_actions()`
+- `/mnt/builds/ASK/patches/kernel/020-ask-bridge-hooks.patch` — Vendor kernel bridge hooks
+- `/mnt/builds/ASK/cmm/src/forward_engine.c` (257-266) — `FPP_CMD_RX_L2FLOW_ENTRY` relay (§2.4)
+- `/mnt/builds/ASK/dpa_app/files/etc/cdx_pcd.xml` — `cdx_ethernet_cc` (line 53), `cdx_ethernet_dist` (line 207), per-port `dist_order` (§2.5)
+- `bin/kernel-fixups/F_255.py` — ASK2 per-port key profiles (ROUTED, L2_DA) and the `-EBUSY` rule
+- `specs/ask2-shared-table-multi-protocol-design.md` §146 — per-table cost and the MURAM-budget gate
+- Qdrant: "ASK2 bridge offload — vendor-parity gap review" (tags `ask2-bridge-offload`, `vendor-parity`, `gap-review`, 2026-10-09)
 - `kernel/ask/oot-modules/ask/ask_bridge.c` — ASK2 B0 switchdev skeleton
 - `kernel/ask/oot-modules/ask/ask_vlan_cc.c` — ASK2 VLAN CC-tree implementation (proven)
 - `kernel/ask/oot-modules/ask/ask_flow_offload.c` — ASK2 ehash flow insert (proven 9+ Gbit/s)
 - `/mnt/builds/ASK/auto_bridge/auto_bridge.c` + `auto_bridge_private.h` — vendor ABM pure-L2 flow discovery/promotion ladder (§2.4)
 - `/mnt/builds/ASK/cmm/src/ffbridge.c` (`cmmBrToFF()`), `/mnt/builds/ASK/cdx/control_bridge.c` — vendor routed-flow-via-bridge L2 resolution (distinct from ABM, §2.4)
 - `/mnt/builds/ASK/ISSUES.md` — vendor ABM security history (C1, H11/H7-r, M6)
-- `plans/ASK2-REWRITE-PLAN.md` §1, §6 Phase 1 — the ehash/FE-VM VLAN fix this recommendation mirrors (2026-10-04/06)
+- `plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md` §1, §6 Phase 1 — the ehash/FE-VM VLAN fix this recommendation mirrors (2026-10-04/06)
 - Qdrant: "vendor NEVER uses CC-tree for ANYTHING" (2026-10-03)
 - Qdrant: "ASK2 CC-tree/AC_CC dispatch reconciliation" (2026-10-03)
 - Qdrant: "ASK2 bridge offload regression" (2026-09-16)

@@ -62,7 +62,7 @@ Cite one of these for every vendor-side value quoted below:
 
 | Field | This project | Set by | Vendor value | Source | Status |
 |---|---|---|---|---|---|
-| `NIA_KG_DIRECT` (bit 8) \| `physicalSchemeId` (bits 4:0) | **now set** (`F-178`, 2026-08-07) — `fmbm_rfpne = 0x00480304` (scheme 4) on arm | `fman_pcd_kg_port_arm_fe()` (patch 0132 + `F-178`), the function backing `fe_arm engage` | **always OR'd in for a single-bound-scheme port** (`fm_port.c` `SetPcd()`, `PRS_AND_KG_AND_CC`/`PRS_AND_KG` cases, `directScheme` branch) | `[999-5.4]` `fm_port.c`; `[.185-live]` dmesg confirmed `"KG direct-scheme addressing set, scheme 4 (rfpne 0x00480304)"` on arm | **cross-checked-match, fix confirmed applied on-board, board-tested NEGATIVE.** `F-162`'s helper now correctly fires from the live arm path (confirmed via dmesg, exact vendor-matching encoding). Genuinely cold-booted board, same 13-byte key/EKFC=`0x001c0006` combination used for the very first Phase 1 test (isolating this one variable), matching frame confirmed transmitted. `pkt_count` stayed `0`. This was the strongest structural hypothesis this investigation produced and it did not resolve the symptom either — see `plans/ASK2-MASTER-PLAN.md` §4.1 for the full writeup. |
+| `NIA_KG_DIRECT` (bit 8) \| `physicalSchemeId` (bits 4:0) | **now set** (`F-178`, 2026-08-07) — `fmbm_rfpne = 0x00480304` (scheme 4) on arm | `fman_pcd_kg_port_arm_fe()` (patch 0132 + `F-178`), the function backing `fe_arm engage` | **always OR'd in for a single-bound-scheme port** (`fm_port.c` `SetPcd()`, `PRS_AND_KG_AND_CC`/`PRS_AND_KG` cases, `directScheme` branch) | `[999-5.4]` `fm_port.c`; `[.185-live]` dmesg confirmed `"KG direct-scheme addressing set, scheme 4 (rfpne 0x00480304)"` on arm | **cross-checked-match, fix confirmed applied on-board, board-tested NEGATIVE.** `F-162`'s helper now correctly fires from the live arm path (confirmed via dmesg, exact vendor-matching encoding). Genuinely cold-booted board, same 13-byte key/EKFC=`0x001c0006` combination used for the very first Phase 1 test (isolating this one variable), matching frame confirmed transmitted. `pkt_count` stayed `0`. This was the strongest structural hypothesis this investigation produced and it did not resolve the symptom either — see `plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §4.1 for the full writeup. |
 
 ## KeyGen scheme register (`kgse_ekfc`)
 
@@ -87,7 +87,7 @@ When a board test or a vendor-source read resolves a row, update its
 `Status` and `Source` columns in the same commit as the fixup, and link the
 qdrant entry that has the full narrative (this ledger stays terse by
 design — see `arch/fman-microcode-210-programming-reference.md` and
-`plans/ASK2-MASTER-PLAN.md` for the story behind each row).
+`plans/ASK2-MASTER-PLAN.md` (live state) and `plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` (§4.1 T-M3-R history) for the story behind each row).
 
 ## Cross-references
 
@@ -96,7 +96,7 @@ design — see `arch/fman-microcode-210-programming-reference.md` and
   that doc's structural claims are correct and focuses only on values.
 - `arch/fman-vendor-source-extraction-2026-08-07.md` — the full narrative
   behind the open `PORT_ID`/`<combine>` question.
-- `plans/ASK2-MASTER-PLAN.md` §4.1 — T-M3-R phase history, including the
+- `plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §4.1 — T-M3-R phase history, including the
   `F-053` retraction and its board-test status.
 - qdrant tags: `F-053-hash-bytes-offset-wrong-finding`,
   `T-M3-R-phase-2-final-result`, `combine-portid-open-question`.

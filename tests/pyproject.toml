@@ -1,0 +1,43 @@
+[tool.pytest.ini_options]
+# All async tests run under asyncio with no @pytest.mark.asyncio decorator needed.
+asyncio_mode = "auto"
+# Function-scoped so each test gets its own event loop — aiohttp.ClientSession
+# is loop-bound, so sharing across tests would hit "Timeout context manager
+# should be used inside a task" on the second test. Session-scoped async
+# fixtures that need to outlive individual tests must declare their loop
+# scope explicitly via @pytest_asyncio.fixture(loop_scope="session").
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope    = "function"
+
+# Native pytest status lines, captured successful-test output and final totals.
+# Every run collects all failures; pass ARGS=-x to stop at the first.
+addopts = "-v -ra --tb=short --strict-markers --strict-config"
+# Each verbose line ends in the test's time and its place in the run, e.g.
+# `PASSED  41.2s [ 27/514]` (the time is added by ask_orch.pytest_plugin).
+console_output_style = "count"
+testpaths = ["."]
+norecursedirs = ["ask_orch", "askd_agent", "dut", ".venv"]
+# Test directories contain plain test filenames and underscore-prefixed helpers.
+python_files = ["[!_]*.py"]
+pythonpath = ["."]
+required_plugins = ["pytest-asyncio==1.3.0", "pytest-timeout==2.4.0"]
+markers = [
+    "host: runs without the physical bench",
+    "hardware: requires exclusive ownership of the physical bench",
+    "portable: bounded forwarding checks for either existing DUT image",
+    "upstream: imported scenarios retaining their CDX/native-flowtable contracts",
+    "backend(*capabilities): real DUT interfaces or instrumentation required by a test",
+    "smoke: agent health and boot checks",
+    "slow: profiles, throughput or sustained traffic",
+    "destructive: changes boot state or requires a fresh boot afterwards",
+    "requires(*binaries): DUT tools required before release-test setup",
+    "rfc(number, section=None): the RFC behaviour this test proves",
+]
+# Last-resort watchdog around the test body. Cleanup has its own operation
+# budgets and is allowed to finish after this timer fires.
+timeout = 900
+timeout_method = "signal"
+timeout_func_only = true
+junit_family = "xunit2"
+junit_logging = "all"
+junit_log_passing_tests = false

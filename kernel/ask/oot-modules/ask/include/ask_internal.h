@@ -425,28 +425,19 @@ int  ask_hw_flow_preflight(const struct ask_flow_key *key,
 bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
 /*
- * T-M6-8 VLAN offload gate (default-OFF). Per-port model mirroring the family
- * mask: ask_hw_offload_set_vlan() arms/disarms one port from the genl engage
- * path (ASK_ATTR_VLAN); ask_hw_vlan_offload_armed_port() is the authoritative
- * per-ingress-port gate at preflight + CC insert; ask_hw_vlan_offload_armed()
- * is the port-agnostic OR used only where no ingress port is in hand (capability
- * advertise, intent-lower fail-closed pre-check). The legacy global
- * ask.vlan_offload module param is an OR'd master override.
+ * Offload granularity: per-port state is only (engaged, family mask). VLAN,
+ * PPPoE and bridge offload are automatic capabilities of an engaged port, with
+ * global kill-switch module params (vlan_offload, pppoe_offload) -- no per-port
+ * arm bits. *_armed_port() is the authoritative per-ingress-port gate at
+ * preflight/insert (kill switch AND port engaged); the port-agnostic variants
+ * serve callers with no ingress port in hand (capability advertise, intent-lower
+ * pre-check, bridge observer log).
  */
-void ask_hw_offload_set_vlan(u8 hw_port_id, bool on);
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
 bool ask_hw_vlan_offload_armed(void);
-/*
- * T-M6-2 L2 bridge offload gate (default-OFF, B0: no install path yet).
- * Per-port model mirroring VLAN's, but with no global master-override param
- * and no dedicated CLI leafNode -- ask_hw_offload_set_bridge() is called
- * automatically by VyOS's `interfaces bridge` conf_mode for a member port
- * that already has `offload ipv4`/`offload ipv6` armed, never directly by
- * the user.
- */
-void ask_hw_offload_set_bridge(u8 hw_port_id, bool on);
-bool ask_hw_bridge_offload_armed_port(u8 hw_port_id);
 bool ask_hw_bridge_offload_armed(void);
+bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
+void ask_flow_pppoe_flush(void);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);
 void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
@@ -581,6 +572,8 @@ u8     nat_flags;
 	u8     vlan_edit_flags;
 #define ASK_VLANF_POP	BIT(0)	/* strip all ingress VLAN tags */
 #define ASK_VLANF_PUSH	BIT(1)	/* insert one egress 802.1Q tag */
+#define ASK_VLANF_PPPOE_STRIP	BIT(2)	/* T-M6-SP4: strip the ingress PPPoE session hdr */
+#define ASK_VLANF_PPPOE_INSERT	BIT(3)	/* T-M6-SP4: insert the egress PPPoE session hdr */
 	__be16 vlan_push_tci;
 	__be16 vlan_push_tpid;
 	/*
@@ -593,8 +586,30 @@ u8     nat_flags;
 	 * inconsistent and silently dropped bulk POP frames on silicon. Sourced
 	 * from the ingress VLAN vif (vlan_dev_vlan_id) since the flowtable POP
 	 * action carries no VID. Host order 1..4094; 0 = no ingress tag.
+	 * F-259: also bytes [46..47] of the FE comparison key (the outer VID
+	 * KeyGen extracts from the wire), so a tagged flow's record can only
+	 * match frames carrying that tag.
 	 */
 	u16    vlan_ingress_vid;
+	/*
+	 * F-259: ingress PPPoE session ID, host order; 0 = not PPPoE. Bytes
+	 * [48..49] of the FE comparison key. Always 0 while the T-M6-SP4
+	 * guard refuses PPPoE flows.
+	 */
+	u16    pppoe_sid;
+	/*
+	 * T-M6-SP4: egress PPPoE session for a LAN->PPPoE flow
+	 * (FLOW_ACTION_PPPOE_PUSH), host order. NOT part of the FE key; consumed
+	 * as the INSERT_PPPoE_HDR param (F-261).
+	 */
+	u16    pppoe_push_sid;
+	/*
+	 * F-262: flowtable route MTU of this direction when it is below the
+	 * ingress port MTU (e.g. LAN 1500 -> PPPoE 1492), else 0. Non-zero
+	 * asks the record for the vendor PREEMPTIVE_CHECKS + fragmentation
+	 * context; NOT part of the FE key.
+	 */
+	u16    egress_mtu;
 } __packed;
 
 /* ------------------------------------------------------------------------- */
@@ -1031,6 +1046,15 @@ enum ask_flow_direction {
 };
 
 int ask_flow_offload_classify_dir(const struct net_device *dev);
+#define ASK_PPPOE_DECAP	1	/* PPPoE -> LAN: strip */
+#define ASK_PPPOE_ENCAP	2	/* LAN -> PPPoE: insert */
+struct ask_pppoe_info {
+	u16 sid;			/* host order */
+	int ifindex;			/* the session's physical port */
+	u8  peer_mac[ETH_ALEN];		/* ENCAP: concentrator */
+	u8  src_mac[ETH_ALEN];		/* ENCAP: our port */
+};
+int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi);
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow_offload.c — flow_block_cb registration on dpaa netdevs            */
@@ -1128,8 +1152,13 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
  *   [25..40] IPv6 dst(16)                 (zero on a v4 flow)
  *   [41]     proto / next-header
  *   [42..45] L4 sport(2) dport(2)
+ *   [46..47] outer TCI with PCP=DEI=0, i.e. the VID; 0 untagged (F-259,
+ *            gec[6] unmasked: priority-marked frames MISS to software)
+ *   [48..49] PPPoE session ID, 0 if none   (F-259, gec[7])
+ * Must equal the kernel's FMAN_PCD_FE_ROUTED_KEY_SIZE (static_assert in
+ * ask_flow_offload.c).
  */
-#define ASK_FE_KEY_SIZE_DUAL 46
+#define ASK_FE_KEY_SIZE_DUAL 50
 /* F-243 (2026-09-06): silicon family byte = L3 header byte 0 masked
  * 0xF0 = the IP-version nibble shifted: v4 0x45->0x40, v6 0x60->0x60.
  * Live-captured on .185 (46-byte dual composite byte 0 = 0x40 for a
@@ -1166,6 +1195,10 @@ void ask_caam_exit(void);
 /* ------------------------------------------------------------------------- */
 int  ask_bridge_init(void);
 void ask_bridge_exit(void);
+struct fman_pcd_fe_flow_action;
+int  ask_bridge_fe_action(const u8 *da, u32 egress_tx_fqid,
+			  unsigned long enq_off,
+			  struct fman_pcd_fe_flow_action *a);
 
 /* ------------------------------------------------------------------------- */
 /* ask_neigh.c — netevent notifier for L2 nexthop updates                     */
