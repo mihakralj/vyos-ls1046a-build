@@ -279,7 +279,7 @@ Verified with the triple written live over `/dev/mem` (cold boot, eth3/eth4 arme
 | IPv4 DF set × 100 | 0 delivered by hardware: host punt, `IcmpOutDestUnreachs` +100, dell2 `IcmpInDestUnreachs` +100 (PMTUD intact) |
 | IPv6 × 100 | 100/100 delivered, `Ip6ReasmOKs` +100, 2 fragments per frame (1510 B + 83 B), no Packet Too Big |
 
-The port stayed alive through 315 fragmented frames, MURAM `used` stayed flat at 52922, `alloc_fail` stayed 0, and dmesg was clean. The earlier "FE index leak" hypothesis was wrong. The triple does **not** cure the VLAN FE-leak freeze (E1, 2026-10-04, `ASK2-REWRITE-PLAN.md`); it is required for IP fragmentation. With the triple applied and `frag_options = 0x0004` (no `BPID_ENABLE`) IPv4 DF-clear oversize reaches the host and the kernel fragments it (5/5 delivered), but IPv6 oversize is still silently dropped (`v6_frames` 5, `alloc_fail` 5, none delivered, no Packet Too Big). So the hardware can never send an IPv6 Packet Too Big: IPv6 across an MTU decrease is either hardware-fragmented (vendor behaviour, `cdx_ehash.c`: `frag_options 0x000c`, 2048 × 1500 pool; RFC 8200 5 non-compliant) or kept in software.
+The port stayed alive through 315 fragmented frames, MURAM `used` stayed flat at 52922, `alloc_fail` stayed 0, and dmesg was clean. The earlier "FE index leak" hypothesis was wrong. The triple does **not** cure the VLAN FE-leak freeze (E1, 2026-10-04, `plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md` Phase 1 E1); it is required for IP fragmentation. With the triple applied and `frag_options = 0x0004` (no `BPID_ENABLE`) IPv4 DF-clear oversize reaches the host and the kernel fragments it (5/5 delivered), but IPv6 oversize is still silently dropped (`v6_frames` 5, `alloc_fail` 5, none delivered, no Packet Too Big). So the hardware can never send an IPv6 Packet Too Big: IPv6 across an MTU decrease is either hardware-fragmented (vendor behaviour, `cdx_ehash.c`: `frag_options 0x000c`, 2048 × 1500 pool; RFC 8200 5 non-compliant) or kept in software.
 
 **Final F-262 (`bin/kernel-fixups/F_262.py`).** Pool restored (`fman_pcd_frag_pool_bpid()`, 2048 × 2 KiB, created on first use, never freed), frag-info `frag_options = 0x000c`, ENQ bpid = the pool, and a new `fman_port_adv_offload()` that applies the triple when a port engages and restores the saved values (reverse order) when it disengages. It reads every register back and fails the engage on mismatch. The restore is what keeps the S1→S0 `pcd-snapshot` gate clean (it compares `RFENE` and `RCMNE`). The shipped result: IPv4 DF-clear is fragmented in hardware, IPv4 DF-set is punted to the host (ICMP frag-needed), and IPv6 that needs the check is fragmented in hardware (no Packet Too Big). That is the default since the 2026-10-09 policy inversion (vendor parity); the global ask.ko parameter `ipv6_hw_frag=0` keeps those flows in software for RFC 8200 (a per-port CLI leaf existed for a few hours on 2026-10-09 and was dropped by the granularity decision). Not yet validated on a CI image: throughput of all cells with the triple on every engaged port, pool exhaustion, and a long soak.
 
@@ -323,7 +323,7 @@ The port stayed alive through 315 fragmented frames, MURAM `used` stayed flat at
 | VLAN-VLAN v4 / v6 | 9.32 / 9.18 | HW / HW |
 | PPPoE decap (down) v4 / v6 | 5.76 / 5.74 | HW / HW (dell1 RX-queue-0 limit, see §3.3; software control 3.98 / 3.74) |
 | PPPoE encap (up) v4 | 9.19 | HW (software control 3.60) |
-| PPPoE encap (up) v6 | 4.35 | PARTIAL (ratio 0.46), measured with the old policy (IPv6 that needs the MTU check in software, control 3.58); expected HW by default with the final F-262 and the inverted policy (not yet measured); PARTIAL again with `ipv6_hw_frag=0` |
+| PPPoE encap (up) v6 | 4.35 | PARTIAL (ratio 0.46), measured with the old policy (IPv6 that needs the MTU check in software, control 3.58). On image `0415` with the default policy: 9.20 / 9.08 Gbit/s HW; with `ipv6_hw_frag=0`: 4.87 PARTIAL (§3.7) |
 
 **Re-run with RPS on dell1 (same image and `ask.ko`, CSV `quick-20261009-rps.csv`, `bin/testrig-offload-quick.sh` now enables RPS for PPPoE cells):**
 
@@ -370,7 +370,7 @@ The live vendor record on `.106` (2026-10-04) shows `05` param `38 03 00…`, EN
 
 - The replace path reads the flowtable tuple's `mtu`, which `flow_offload_fill_route()` takes from the egress dst. It sets `key.egress_mtu` only when that MTU is below the true ingress port's MTU.
 - So LAN 1500 → PPPoE 1492 gets the check. Port↔port 1500/1500, PPPoE decap, and VLAN flows of equal MTU do not, and their records are unchanged.
-- An IPv6 flow that needs the check is hardware-fragmented by default (module parameter `ipv6_hw_frag`, default on; clearing it keeps such flows in software). Measured 2026-10-09 (see §3.6): the microcode enters its IPv6 fragmenter for every oversize frame whatever `frag_options`, DFBIT_HONOR or the DF action bits say; with the RX-port triple and a pool it fragments in hardware, otherwise it drops silently, and it never sends Packet Too Big. Hardware IPv6 across an MTU decrease therefore hides PMTU (no Packet Too Big; non-compliant, RFC 8200 4.5), which is why the `ipv6_hw_frag` kill switch exists; with it cleared the kernel sends Packet Too Big.
+- An IPv6 flow that needs the check is hardware-fragmented by default (module parameter `ipv6_hw_frag`, default on; clearing it keeps such flows in software). Measured 2026-10-09 (see §3.6): the microcode enters its IPv6 fragmenter for every oversize frame whatever `frag_options`, DFBIT_HONOR or the DF action bits say; with the RX-port triple and a pool it fragments in hardware, otherwise it drops silently, and it never sends Packet Too Big. Hardware IPv6 across an MTU decrease therefore hides PMTU (no Packet Too Big; non-compliant, RFC 8200 4.5), which is why the `ipv6_hw_frag` kill switch exists; with it cleared the kernel sends Packet Too Big. Under load the hardware also reuses IPv6 fragment IDs, which loses datagrams when two oversize flows share a host pair (§3.7).
 
 **Encap record layout with the check.** For a 50-byte key the opcode list is at +60 and parameters start at +76:
 
@@ -399,6 +399,51 @@ That gives opcodes `05 04 11 12 21 43 41 01` and `mtu_off` = 132 − 76 = `0x38`
 5. **Stability.** 60 s of mixed sizes at rate, with no RX-deaf port and no `Err FD` growth. Fragmentation produces S/G frames on the no-confirm TX FQ, which has never been exercised. **Result 2026-10-09: passed for 315 fragmented frames with the triple (no RX-deaf port, MURAM flat, `alloc_fail` 0) and with host fragmentation (two probes, interim result). Pool exhaustion and a long soak on the final F-262 are still to run.**
 6. **Throughput (30 s quick protocol).** With eth3 (the PPPoE source interface) engaged by `offload ipv4`/`ipv6` (no PPPoE-specific leaf exists any more), run `bin/testrig-offload-quick.sh` (`ASK2-REWRITE-PLAN.md` §8). Pass: the four PPPoE cells report HW and beat the software control in §3a (decap v4/v6 3.98/3.74, encap v4/v6 3.60/3.58 Gbit/s). The other six cells must match the `2126` baseline (9.2-9.4 Gbit/s, HW). `pppoe-up-v6` at 1500 to 1492 should now be HW by default (IPv6 that needs the MTU check is fragmented in hardware). Re-run it once with `ask.ipv6_hw_frag=0` (`echo 0 > /sys/module/ask/parameters/ipv6_hw_frag`): PARTIAL or SW there is then correct, not a failure. Also check that all six non-PPPoE cells keep their baseline now that the triple is on every engaged port.
 7. **Complex combinations (once per image, not a matrix):** NAT44 over PPPoE (LAN to PPPoE WAN with masquerade on `pppoe10`); VLAN-VLAN NAT44; PPPoE over VLAN (must stay software, `-EOPNOTSUPP`, still forwarding correctly); and a session flap during an encap flow (the session-down notifier must flush the records).
+
+### 3.7 IPv6 hardware fragmentation on image `0415`: throughput, kill switch and a fragment-ID race (2026-10-09)
+
+Image `vyos-2026.10.09-0415-rolling` (`ab1660a7`, kernel `6.18.55-vyos`, DUT `.185`), RX-port triple on both 10G ports (`advanced offload on (misc 0x40000100 rcmne 0x0000000e rfene 0x00000022)`). PPPoE leg MTU 1492, LAN MTU 1500, so every IPv6 LAN to PPPoE flow carries the `05` check.
+
+**Quick protocol, `pppoe-up-v6` (TCP, 8 streams, 30 s).**
+
+| Run | Boot | Gbit/s | Verdict | DUT busy |
+|---|---|---|---|---|
+| `ipv6_hw_frag=1` (default) | warm, 10 h up | 9.20 | HW, ratio 1.16 | 0.3 % |
+| `ipv6_hw_frag=1` (default) | cold | 9.08 | HW, ratio 1.15 | 0.3 % |
+| `ipv6_hw_frag=0` | cold | 4.87 | PARTIAL, ratio 0.14 (encap in software, ACKs in hardware) | 81 % |
+
+CSVs: `/mnt/builds/ask2-review/oracle/quick-20261009-v6hwfrag-default.csv`, `quick-20261009-A-default.csv`, `quick-20261009-C-off.csv`.
+
+The TCP cell never reaches the fragmenter. dell1's `ppp0` (MTU 1492) advertises MSS 1432, so every segment fits. The frag-info counters at MURAM `0x54300` stayed 0 and dell1's `Ip6ReasmOKs` did not move. The cell therefore measures hardware encap with the `05` check armed but never firing.
+
+**Kill switch.** On a cold boot, with no `/dev/mem` access, the following were all clean (no F-256 SYNC timeout, no `Err FD`, MURAM `used` flat at 52922, eth0 receiving):
+
+- a default run whose 18 records then aged out;
+- `ipv6_hw_frag` 1 to 0 with no flows present;
+- an `=0` run whose 8 records then aged out;
+- 0 to 1 again.
+
+An earlier warm-boot attempt wedged the FMan: nine `F-256 delete SYNC timed out (fmfp_extc=0x80000000)`, eth0 RX frozen, recovered only by a power cycle. In that attempt, two malformed userspace `/dev/mem` reads of MURAM (Python `struct.unpack` on an `mmap` slice, SIGBUS) came about a minute before the switch, and they are the only difference from the clean sequence. The suspect is those reads, not the switch; it was not reproduced deliberately. Read MURAM through `/dev/mem` only with aligned 32-bit loads (`memoryview(mmap).cast("I")`, as `pcd-snapshot` does).
+
+**Fragmenter probe (UDP).** Sender on dell2 with `IPV6_MTU_DISCOVER = IPV6_PMTUDISC_PROBE`, so every 1452-byte payload leaves as a full 1500-byte packet and only the DUT can fragment it. A handshake reply gets the flow offloaded first. A software-forwarded oversize packet would be dropped with Packet Too Big, so delivery measures the hardware path directly. Before each run dell1's IPv6 fragment memory was drained (`/proc/net/sockstat6` `FRAG6: inuse 0`).
+
+| Case | Sent | Delivered | Distinct first-fragment IDs in a 10k capture |
+|---|---|---|---|
+| 1 flow, 500 pps | 1,000 | 1,000 (dell1 `Ip6ReasmOKs` +1000; DUT `Ip6FragCreates` 0, `Icmp6OutPktTooBigs` 0) | not captured |
+| 1 flow, unthrottled (~246k pps, ~3 Gbit/s) | 1,230,295 | 100 % | 7,531 of 9,994 |
+| 2 flows × 10k pps | 63,328 | 100 % | 10,000 of 10,000 |
+| 2 flows, unthrottled (~434k pps) | 2,171,475 | 37,263 (1.7 %) | 8,211 of 9,994 |
+| 4 flows, unthrottled (~823k pps offered, not drained first) | 16,465,000 | 5,860 | not captured |
+
+**Finding: the microcode reuses IPv6 fragment IDs under load.** The IDs come from the shared `v6_identification` counter in the frag-info block (sequential, `0x0107xxxx` after about 17M datagrams). At high packet rates the same ID goes to several datagrams; a capture shows IDs used three times. This fits a non-atomic read-increment by concurrent FMan tasks.
+
+- **Single flow:** the duplicates are harmless. Each datagram's two fragments complete reassembly before the next datagram with the same ID arrives.
+- **Two or more concurrent oversize flows between the same source and destination address:** duplicate-ID datagrams interleave. The receiver keys reassembly on (src, dst, ID), mixes them, and drops both.
+- **Cascade:** the leftover incomplete queues fill the receiver's IPv6 fragment memory (`ip6frag_high_thresh`, 4 MiB here) and starve later fragments until they expire (60 s). A run started too soon after a flood lost 100 % even at 2 × 2,000 pps.
+- **Unaffected:** IPv4 (fragments reuse the packet's own IPv4 ID; not tested multi-flow), and TCP across the PPPoE MTU, which never fragments because of MSS.
+- **Affected:** oversize IPv6 UDP or tunnels at high packet rates between one host pair. The DUT itself stayed healthy throughout.
+
+**Policy (operator decision 2026-10-09): keep `ipv6_hw_frag=1` as the default** (vendor parity), with the fragment-ID race documented as a known limitation. `ask.ipv6_hw_frag=0` remains the opt-out for RFC 8200 behaviour and for sites that run oversize IPv6 UDP or tunnels between one host pair at high packet rates.
 
 ## 3a. Test rig: live PPPoE session now stood up and verified (2026-10-07)
 
@@ -445,7 +490,7 @@ This closes the open question from the prior session ("will our testing gear all
 - **dell1 hooks (rebuilt on every session up, so a flap or reconnect needs no manual routing):**
   - `/etc/ppp/ip-up.d/ask2-rig`: `ip route replace 10.99.2.0/24 dev $PPP_IFACE table 150`, plus rule `10900 from 10.99.50.1 to 10.99.2.0/24 lookup 150` if absent.
   - `/etc/ppp/ipv6-up.d/ask2-rig`: `ip -6 addr replace fd99:50::1/64 dev $PPP_IFACE nodad`, route `fd99:2::/64 dev $PPP_IFACE table 150`, rule `10900 from fd99:50::1 to fd99:2::/64 lookup 150`.
-- **dell2:** `ip -6 route replace fd99:50::/64 via fd99:2::185 dev enp2s0` (runtime only; re-apply after a dell2 reboot, like the v4 route `10.99.50.1 via 10.99.2.185`).
+- **dell2:** `ip -6 route replace fd99:50::/64 via fd99:2::185 dev enp2s0` (runtime only; re-apply after a dell2 reboot or any `enp2s0` link flap such as a DUT power cycle, which makes NetworkManager drop it, like the v4 route `10.99.50.1 via 10.99.2.185`).
 - **DUT (persistent, saved):** `set interfaces pppoe pppoe10 ipv6 address autoconf` (drives `+ipv6 ipv6cp-use-ipaddr` in the pppd peer file) and `set protocols static route6 fd99:50::/64 interface pppoe10`. The DUT needs no global address on `pppoe10`, only the route.
 - **Verified (2026-10-08, image `2026.10.08-2126-rolling`):** IPCP and IPV6CP both up, `ping -6` dell1 `fd99:50::1` ↔ dell2 `fd99:2::113` through the DUT in both directions, session ID 1.
 - **Software control** (30 s, 8 streams, `ask.pppoe_offload=N`; no record in `fe_ehash_stats`): decap v4 3.98, v6 3.74 Gbit/s; encap v4 3.60, v6 3.58 Gbit/s, at 55–75% DUT busy (about 50–70% softirq). This is the floor the hardware paths must beat.
@@ -486,7 +531,7 @@ This section inherits and elaborates `ASK2-MASTER-PLAN.md` Phase M6-C's existing
 ## 6. Relationship to existing planning documents
 
 - `plans/ASK2-MASTER-PLAN.md` Phase M6-C / `T-M6-SP1`..`SP4` — this document is the detailed execution plan for that phase's PPPoE-specific task (`SP4`), and should be read as elaborating, not superseding, the master plan's task list and "MUST"/"NEVER" rules.
-- `plans/ASK2-REWRITE-PLAN.md` "Gate: A8" (line ~1443) and its PPPoE feature-parity table row (line 653) — same feature, different plan document's tracking scheme; both should be updated to cross-reference this document once it's reviewed, rather than maintaining three independent descriptions of the same unimplemented feature.
+- `plans/ASK2-REWRITE-PLAN.md` Phase 3 item 2 ("Gate: A8") and its §3 "PPPoE remainder" feature-parity row — same feature, different plan document's tracking scheme; the live rewrite plan now carries only the open remainder and points here for detail, rather than maintaining three independent descriptions of the same feature.
 - `plans/OFFLOAD-CAPABILITY-PLAN.md` §1.8 — this document's recommendation ("lean — the only new heavy piece is the owned soft-parser arena") is adopted verbatim as this plan's Tier 1 scope; §0 above explains why Tier 2 (vendor relay-table depth) is explicitly rejected.
 - `plans/archive/SOFT-PARSER-PPPOE.md` — superseded by this document for the PPPoE-specific content; its general soft-parser motivation (hard parser recognizes "only 16 L2-L4 protocol headers" and PPPoE needs an extension) is corrected by this document's §1 finding that PPPoE/PPP *is* one of those 16 hard-parser header types (slot 3) — the archived document's framing of PPPoE as inherently soft-parser-only was an unverified assumption, not a confirmed fact, and §3's cheap test should be run before accepting it.
 - `specs/ask2-soft-parser-lcv-scheme-select.md` — the authoritative, detailed record of the soft-parser investigation summarized in §2 above; consult it directly for exact register addresses, bytecode encodings, and the full chronological investigation (§6a-6q) if Phase A (resolving the blocker) is picked up.
