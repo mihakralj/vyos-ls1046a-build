@@ -1,3 +1,8 @@
+> **ARCHIVED 2026-10-09** — full snapshot taken when achieved content was pruned from the live plan.
+> Live plan = [`plans/ASK2-REWRITE-PLAN.md`](../ASK2-REWRITE-PLAN.md).
+> Do not use this file for current state; it is the historical record of what was done and measured.
+> Original content below is unmodified.
+
 # ASK2 Rewrite Plan — reaching and exceeding vendor NXP ASK on LS1046A
 
 Date: 2026-10-03. Branch reviewed: `dpaa1` at `40ace3f0`. Vendor reference: the

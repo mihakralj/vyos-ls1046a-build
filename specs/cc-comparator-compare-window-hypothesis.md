@@ -87,7 +87,7 @@ That's `SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2)` = 13 bytes — **the identical
 
 ## 6. What this does *not* change, regardless of outcome
 
-The production scale-out decision (`plans/ASK2-MASTER-PLAN.md` §3 decision 14: CC-tree, multi-node, not FE-VM ehash, is the binding >32-flow scale mechanism) is **independent of this experiment's result**:
+The production scale-out decision (`plans/ASK2-MASTER-PLAN.md` §2 decision 12: ehash is SETTLED as the >32-flow scale mechanism; CC-tree scale-out is deferred, §4.4. The earlier "§3 decision 14: CC-tree, multi-node" wording is superseded — see `plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §2) is **independent of this experiment's result**:
 
 - FE-VM ehash is DDR-per-frame-latency-bound to ~1.5 Gbps even with a working HIT (measured 2026-07-19) — an architectural ceiling, not a bug.
 - It is not the Linux flow-offload model (`TC Flower`/`nf_flowtable` offload is a TCAM-classifier-table abstraction — the CC-tree — not a per-frame hash lookup).
@@ -155,7 +155,7 @@ design-doc framing: `specs/ask2-ipv6-dual-lane-key-design.md` §9.2.
 
 ## References
 
-- `plans/ASK2-MASTER-PLAN.md` §1.3a — full M3/M5 false-positive timeline, F-156/F-157/F-158 board evidence, architectural assessment
+- `plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §4.1 — full M3/M5 false-positive timeline, F-156/F-157/F-158 board evidence, architectural assessment (the live plan's §1.3a now holds only the slot-LCV closure)
 - `specs/fman-keygen-flow-key-spec.md` §6.1.3, §3.4 — CC match-table row format, EHASH extraction-order settlement and its scope caveat
 - `arch/fman-microcode-210-programming-reference.md` §7.2 (EXT_HASH FE), §10 (DDR ehash flow store) — byte-level reference for the EHASH path
 - ask20 branch, patch `kernel/common/patches/board/0108-fman-pcd-cc-per-key-fq-enqueue-ad.patch` (2026-06-10) — the precedent this document generalizes from

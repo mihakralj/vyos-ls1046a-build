@@ -1,6 +1,13 @@
 # ASK2 L2 bridge HW offload — switchdev FDB → L2 ehash (`PORT_ID|DA|SA|ETYPE`) → FE-VM `ENQUEUE_PKT`
 
-**2026-10-07 · dpaa1 · T-M6-2 · Implementation plan (B0 done, B1 code written; DA-only key).**
+**2026-10-09 · dpaa1 · T-M6-2 · Implementation plan (B0 done, B1 code written but dormant; DA-only key; production gap review and decisions in §13).**
+
+> **2026-10-09 review.** The vendor bridge mechanism was re-read against
+> ASK2 at `ab1660a7` (per-port + per-family offload granularity). The
+> result is §13: a gap list (G1-G13), eight design decisions (D1-D8), the
+> concrete B2 test matrix, and a re-ordered B2-B5 sequence. Where an older
+> section below contradicts §13, §13 wins; the affected paragraphs carry an
+> inline "2026-10-09" correction.
 
 **Parity constraint (binding for every later offload).** ASK2 must reach
 near-parity with the vendor (IPsec ESP, PPPoE, multicast, tunnels). Today a
@@ -16,7 +23,7 @@ Offload the steady-state fast path of a Linux software bridge in FMan
 silicon: a frame whose destination MAC is a known, non-local FDB entry
 reachable on another bridge port forwards via a dedicated L2 ehash table,
 with the CPU bypassed — the same ehash/FE-VM mechanism ASK2 already uses
-for routed/NAT/VLAN offload (`plans/ASK2-REWRITE-PLAN.md`), keyed on L2
+for routed/NAT/VLAN offload (`plans/ASK2-REWRITE-PLAN.md` Baseline), keyed on L2
 fields instead of an IP 5-tuple. Full architecture comparison against the
 vendor and the rationale for this mechanism:
 `plans/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md`.
@@ -63,7 +70,7 @@ unicast is today. Everything else stays in the kernel bridge.
   untagged bridging (and 802.1Q-transparent forwarding where no tag edit is
   needed). Tag push/pop on a bridged frame reuses the ehash VLAN opcode chain
   (`STRIP_ALL_VLAN_HDRS`/`INSERT_VLAN_HDR`, proven on the routed VLAN path —
-  `plans/ASK2-REWRITE-PLAN.md` Phase 1, 2026-10-04/06), and is a later
+  `plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md` Phase 1, 2026-10-04/06), and is a later
   increment.
 
 ## 2. Why this is the leanest new capability (established facts)
@@ -139,6 +146,14 @@ simultaneously hardware-route some traffic and hardware-bridge other
 traffic is explicitly out of scope for v1** and stays software-forwarded
 until a later increment.
 
+*2026-10-09 correction.* The vendor does support both on one port: every
+port's `dist_order` walks the IP, ESP, multicast and PPPoE distributions
+first and `cdx_ethernet_dist` last, so L2 is reached only when the L3
+lookups miss (`dpa_app/files/etc/cdx_pcd.xml` `cdx_ethport_N_policy`).
+ASK2 cannot do that yet (one scheme, one table per port), which is why v1
+is bridge-only. How a port becomes bridge-only is decision D1 in §13; the
+path to routed+bridge coexistence is multi-table dispatch (§13 G2).
+
 **Key format (vendor-matched):** `PORT_ID(1)+DA(6)+SA(6)+ETYPE(2)` = 15
 bytes, mirroring the vendor's `cdx_ethernet_cc` exactly
 (`specs/reference/nxp-ask-fmc/cdx_pcd.xml:53-57,207-219`). The byte layout
@@ -181,16 +196,19 @@ table, not required).
 is_local:1; locked:1; offloaded:1; }`. Admission filter in the work item:
 - **skip `is_local`** (terminate on bridge — kernel keeps it),
 - **skip `locked`** (802.1X MAB — bridge does not offload these),
-- program **both** `added_by_user` (static) and dynamically-learned unicast
-  entries whose egress port is a DPAA member in `BR_STATE_FORWARDING`;
+- program only `added_by_user` (static) unicast entries whose egress port is
+  a DPAA member in `BR_STATE_FORWARDING` (2026-10-09: this bullet used to say
+  "both static and dynamic", which contradicted §8 point 6 and §11 point 1;
+  dynamic entries wait for an ageing mechanism, §13 D4);
 - after a successful ehash install, fire `SWITCHDEV_FDB_OFFLOADED` (set
   `.offloaded = true`, `call_switchdev_notifiers()`) so `bridge fdb` shows
   `offload` and the bridge tracks HW ownership.
 
 **Port attributes:**
 - `SWITCHDEV_ATTR_ID_PORT_STP_STATE` — a port leaving `FORWARDING` must
-  immediately drop all its HW entries (remove the matching ehash keys); a
-  port entering `FORWARDING` may re-mirror the kernel FDB.
+immediately drop all its HW entries (remove the matching ehash keys, in
+its own table and in every other member's table that points at it, §13
+D3); a port entering `FORWARDING` may re-mirror the kernel FDB.
 - `SWITCHDEV_ATTR_ID_BRIDGE_AGEING_TIME` — informational; ageing is the kernel's
   job. ASK2 removes an entry only when the kernel sends `FDB_DEL_TO_DEVICE`. To
   keep the kernel's ageing correct for *hardware-forwarded* flows (whose source
@@ -229,8 +247,8 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
    `0x2ba`/`0x2bb`) — the same FQ routed/NAT/VLAN flows already enqueue to.
    Tagged bridging adds the VLAN opcode chain (§9) on top of the same
    record, reusing the Phase 1 VLAN fixes (opcode ordering, byte order,
-   RX buffer/alignment — `plans/ASK2-REWRITE-PLAN.md` patches
-   `0215`/`0217`/`0218`) rather than rediscovering them.
+   RX buffer/alignment — `plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md`
+   patches `0215`/`0217`/`0218`) rather than rediscovering them.
 
 4. **Per-port L2 ehash table + software shadow, with a flow-promotion
    ladder (not immediate install).** `ask.ko` keeps a per-port software
@@ -252,9 +270,14 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
    the FDB workqueue + admission filter (already done, B0) now additionally
    implementing the promotion ladder (item 4) and calling the ehash
    add/remove path (items 1-3) instead of `fman_pcd_cc_static_install`,
-   STP-state handling, and teardown. Add `ask_bridge_offload` module param
-   (default-off), `ASK_CAP_BRIDGE` advertise gate in `ask_genl.c`, and
-   `ask-check` / `show flows` / `support-bundle` bridge observability.
+   STP-state handling, and teardown. Add a global `bridge_offload` kill-switch
+   module param (the same role `vlan_offload`/`pppoe_offload`/`ipv6_hw_frag`
+   play; default 0 until B5, then 1), the `ASK_CAP_BRIDGE` advertise gate in
+   `ask_genl.c`, and `ask-check` / `show flows` / `support-bundle` bridge
+   observability. 2026-10-09: the earlier `ask_bridge_offload` per-feature
+   param and the per-port bridge bit no longer exist (§12 banner); there is
+   no per-port bridge knob, only the engaged-port rule plus this one global
+   switch (§13 D8).
 
 ## 6. Staged implementation increments (each build + silicon-gated)
 
@@ -262,7 +285,9 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
   change).** The switchdev notifier skeleton (`ask_bridge.c`, replacing a
   21-line lifecycle-only stub) that **logs** offloadable FDB events
   (coalesced+bounded queue) but installs nothing. `ASK_CAP_BRIDGE` stays
-  unadvertised; `ask_bridge_offload` module param default-off. Gate: builds
+  unadvertised; the `ask_bridge_offload` module param shipped default-off
+  (historical: removed 2026-10-09, replaced by the `bridge_offload` global
+  kill switch planned in §13 D8). Gate: builds
   clean; routed/NAT/VLAN byte-identical (untouched); `ask-check` reports
   bridge as legitimately dormant, not broken. Reused as-is for the ehash
   design — the switchdev notifier chains, workqueue, and admission filter
@@ -301,7 +326,16 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
     (`pcd-snapshot`, A6 spot check).
   - *Known ceiling:* every ehash record's `ENQUEUE_PKT` param carries
     MTU 1500 (routed records too); bridged jumbo frames need that
-    revisited before B5.
+    revisited before B5. 2026-10-09: F-262 gave records that ask for it a
+    real egress MTU plus the `05 PREEMPTIVE_CHECKS` opcode and a frag-info
+    block. Bridge records must NOT ask for it: the vendor sets
+    `l2_info.mtu = 0xffff` for bridge flows, and a bridge never fragments.
+    Keep bridge records on the no-`05` path (§13 D7).
+  - *Known dormancy (2026-10-09):* nothing calls
+    `fman_pcd_fe_engage_profile(..., L2_DA)` at runtime.
+    `ask_hw_offload_engage()` always calls `fman_pcd_fe_engage()` (ROUTED),
+    so B1 compiles but no port can reach the L2 profile. Closing that is
+    the first item of B3 (§13 D1, G1).
 
 - **B2 — not started — ehash silicon de-risk (the decisive proof).**
   Hand-arm a single L2 ehash entry (fixed destination MAC → `ENQUEUE_PKT`
@@ -312,10 +346,17 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
   traffic, not just "frames arrive"; see
   `plans/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` §4.1 for why that's
   the right acceptance bar). **This is the single new silicon question
-  gating B3.**
+  gating B3.** The full test matrix (key A/B, PORT_ID byte, non-IP frame,
+  arm/detach, capacity, tagged pass-through) is §13.3; run it as one
+  cold-boot session per variable (AGENTS §10.9/§10.10).
 
 - **B3 — `ask.ko` production switchdev wiring (gated on B2 PASS).** Replace the
-  `ask_bridge.c` stub: FDB workqueue (promotion ladder, §5 item 4) installs/removes
+  `ask_bridge.c` stub. 2026-10-09: B3 is larger than this paragraph first
+  assumed; it has four prerequisites that B1 does not provide (§13 G1, G3,
+  G5, G6): port-role selection at engage, FDB fan-out across the other
+  members' ingress tables, an authoritative shadow with urgent invalidation,
+  and a fail-closed table-allocation path. FDB workqueue (promotion ladder,
+  §5 item 4, only if the 15-byte key wins at B2) installs/removes
   ehash records via the B1 builder; STP-state and port-flag handling;
   `SWITCHDEV_FDB_OFFLOADED` ack; bridge join/leave via
   `switchdev_bridge_port_offload`. BUM/unknown-DA/local/control all miss → kernel.
@@ -325,7 +366,8 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
 
 - **B4 — lifecycle + teardown.** FDB del / flush → remove the ehash key (per-key,
   no whole-tree rebuild to reason about); STP leave-FORWARDING → drop that port's
-  entries; port down / bridge leave / `ask_bridge_offload=N` / module unload /
+  entries (in every member's table, §13 D3); port down / bridge leave /
+  `bridge_offload=0` / module unload /
   reboot → detach the L2 KeyGen scheme, restoring the port to its prior
   `next_engine` (RSS or routed, whichever it was before bridging armed), quiesce,
   never churn VyOS config mid-teardown; `pcd-snapshot` byte-clean after. Gate:
@@ -398,7 +440,11 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
    — measure the actual MURAM/table budget for a dedicated L2 ehash table
    on this build before picking its capacity cap.
 4. **DA-only vs full 15-byte key — DECIDED 2026-10-07: DA-only first** (B1
-   above); the composite remains a later profile. Original note: the vendor's `cdx_ethernet_cc` supports
+   above); the composite remains a later profile. 2026-10-09: B2 runs both
+   keys as an A/B (§13.3), because the choice drives capacity and fan-out,
+   not just simplicity: DA-only needs one record per (DA, other-ingress-port)
+   and cannot carry a VID; the vendor's per-flow 15-byte key needs one record
+   per observed flow and a traffic-driven entry source (§13 D2). Original note: the vendor's `cdx_ethernet_cc` supports
    masking (`masks="yes"`), so a DA-only key (6 bytes, SA/ETYPE wildcarded)
    is a plausible simpler first cut closer to a textbook FDB. Untested;
    worth an early A/B against the full 15-byte composite before committing
@@ -418,6 +464,10 @@ Reference drivers to mirror (API-identical, HW backend differs): DPAA2 switch
    ship. The vendor's `auto_bridge.ko` answers this with a `br_fdb_register_can_expire_cb()`
    callback instead of polling (architecture analysis §2.4) — a cleaner B5+ option
    than hit-counter polling, if dynamic-entry offload is ever wanted.
+   2026-10-09: the vendor's callback needs a bridge kernel patch
+   (`020-ask-bridge-hooks.patch` touches `br_fdb.c`, `br_input.c`,
+   `br_private.h`, `br_stp_if.c`); ASK2 deliberately has none. The
+   no-patch options are the hit-counter refresh or static-only (§13 D4).
 
 ## 9. VLAN-aware bridging (later increment, reuses the Phase 1 ehash VLAN opcodes)
 
@@ -425,7 +475,7 @@ Untagged bridging (§1) needs no VLAN opcodes at all — just `ENQUEUE_PKT`.
 VLAN-aware bridging — a bridged frame that
 must have a tag pushed/popped between ingress and egress bridge ports — reuses the
 **exact** ehash VLAN opcode chain the routed-VLAN Phase 1 fix proved on silicon
-(`plans/ASK2-REWRITE-PLAN.md` §1 item 1, patches `0215`/`0217`/`0218`:
+(`plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md` §1 item 1, patches `0215`/`0217`/`0218`:
 `STRIP_ETH_HDR`/`STRIP_ALL_VLAN_HDRS`/`INSERT_VLAN_HDR`/`INSERT_L2_HDR` ahead of
 `ENQUEUE_PKT`), minus the L3 rewrite/TTL-decrement opcodes a routed record also
 carries (bridging doesn't touch TTL). This also matches the vendor's own
@@ -437,7 +487,7 @@ not build it into the base case.
 
 ## 10. Provenance
 - Capability scope + lean-model recommendation: `plans/OFFLOAD-CAPABILITY-PLAN.md`
-  §1.5, §2, §3; master task **T-M6-2** (`plans/ASK2-MASTER-PLAN.md` §4.6.5 Phase
+  §1.5, §2, §3; master task **T-M6-2** (`plans/ASK2-MASTER-PLAN.md` §4.6.4 Phase
   M6-E, gates §4.6.5).
 - L2 EKFC fields + vendor L2 evidence:
   `arch/fman-microcode-210-programming-reference.md:416-420`,
@@ -455,8 +505,8 @@ not build it into the base case.
   `ASK_CAP_BRIDGE` `kernel/ask/oot-modules/ask/include/uapi/linux/ask/ask.h:204`.
 - **Architecture rationale:** `plans/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md`
   (full vendor-vs-ASK2 comparison, the `rx_default_dqrr` kprobe evidence, the
-  per-port-scheme resolution); `plans/ASK2-REWRITE-PLAN.md` §1, §6
-  Phase 1 (the ehash/FE-VM VLAN fix this plan's mechanism mirrors);
+  per-port-scheme resolution); `plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md`
+  §1, §6 Phase 1 (the ehash/FE-VM VLAN fix this plan's mechanism mirrors);
   `/mnt/builds/ASK/auto_bridge/auto_bridge.c` + `auto_bridge_private.h` (vendor
   ABM flow-promotion ladder, the smart-switch admission pattern §5 item 4
   adopts); qdrant tags `ask2-bridge-offload`/`cc-tree-vs-ehash` (2026-10-07).
@@ -479,29 +529,34 @@ generic "handle churn better" fix:
 2. **STP topology-change mass-flush.** Deliberate bridge behavior on a TC
    event (fast-age the whole FDB) — must not be prevented, only absorbed
    cheaply. **Add a coalescing/debounce window** (a few ms, e.g. via
-   `mod_delayed_work`) between an FDB notifier event and the ehash
-   add/remove calls it triggers: batch every FDB add/del that arrives inside
-   the window into one pass over the per-key ehash API instead of one
-   install/remove call per individual event, and don't promote a flapping
-   entry through the SEEN→CONFIRMED ladder (§3) prematurely. A lock held
+   `mod_delayed_work`) between an FDB ADD event and the ehash add call it
+   triggers: batch every ADD that arrives inside the window into one pass over
+   the per-key ehash API instead of one install call per individual event, and
+   don't promote a flapping entry through the SEEN→CONFIRMED ladder (§3)
+   prematurely. **2026-10-09: debounce applies to ADD only.** A DEL,
+   STP-block, MAC move or port-down is a correctness event: a stale record
+   keeps forwarding frames the kernel bridge would no longer forward, so those
+   are processed immediately, never delayed or coalesced away (§13 D3). A lock held
    across an install-and-drain-sleep sequence (the same mistake the VLAN
    CC-tree work hit and fixed — `ask_vlan_cc_flow_del()` serialized every
    port behind one flow's teardown until the lock was narrowed to not span
    the drain) must not be repeated here: unlock before any sleep, don't hold
    one global lock across a multi-port operation.
 3. **MAC-move churn.** A DEL on the old port + ADD on the new port, close
-   together — the same debounce window coalesces this into one pass instead
-   of two separate install/remove cycles.
+   together. Process the DEL immediately and debounce only the ADD: the
+   window between them is a short software-bridge fallback, which is safe;
+   a delayed DEL is not (stale record forwards to the old port).
 4. **Table-pressure thrashing.** Fail-install → SW fallback → retry-on-
    relearn can loop at the ehash table-capacity boundary (§8 point 3) under a
    churn burst. Keep deliberate headroom below the cap (do not fill to 100%) so a
    burst doesn't oscillate at the boundary.
 
 **Consequence for B3's design:** the FDB workqueue item must NOT react to
-every individual switchdev notification with an immediate ehash install/remove
+every individual switchdev ADD notification with an immediate ehash install
 call, and must not promote a flow through the SEEN→CONFIRMED ladder on a single
-flapping event. Coalesce first (debounce timer keyed per port), then act once,
-without serializing unrelated ports behind one port's operation.
+flapping event. Coalesce ADDs first (debounce timer keyed per port), then act
+once, without serializing unrelated ports behind one port's operation. DEL,
+STP-block, move and port-down bypass the debounce (§13 D3).
 
 ## 12. Per-port arming ABI + automatic CLI trigger
 
@@ -574,3 +629,167 @@ built and syntax-checked locally — `ask.ko` against the CI kernel cache,
 both vyos-1x Python files with `py_compile` plus a full patch-series
 round-trip against a fresh vyos-1x clone — but not yet run through a real CI
 build+deploy+live-bridge-test cycle the way B0 itself was).
+
+## 13. Review 2026-10-09: vendor parity gaps, decisions, B2 matrix
+
+This section records a read of the vendor bridge mechanism (`/mnt/builds/ASK`:
+`cdx/cdx_ehash.c`, `auto_bridge/auto_bridge.c`,
+`dpa_app/files/etc/cdx_pcd.xml`, `patches/kernel/020-ask-bridge-hooks.patch`)
+against ASK2 at commit `ab1660a7`. Vendor-side detail is in
+`plans/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` §2.5 and §6.7. Nothing
+here changes the datapath; it fixes the order of work and the contract B3 must
+meet. **D1 and D8 were confirmed by the operator on 2026-10-09**; D2-D7 follow
+from vendor evidence and the existing plan decisions.
+
+### 13.1 Where ASK2 stands
+
+| Piece | State |
+|---|---|
+| B0: switchdev FDB observer, log-only (`ask_bridge.c`) | Done; queue holds 1024 events and drops on full |
+| B1: F-255 `L2_DA` profile + `ask_bridge_fe_action()` | Code written, KUnit-covered, **not built in CI**, no runtime caller |
+| `ask_hw_offload_engage()` | Always ROUTED; `-EBUSY` treated as idempotent success (F-122/F-124) |
+| `ASK_CAP_BRIDGE` | Unadvertised (`ask_genl.c`); `ask_hw_bridge_offload_armed()` is true when any port is engaged |
+| B2 silicon proof | Not started |
+
+The vendor path for comparison: `auto_bridge.ko` hooks `NF_BR_FORWARD` /
+`NF_BR_POST_ROUTING`, marks a frame `abm_ff` only on a known-unicast dst-FDB hit
+in `br_handle_frame_finish`, tracks the flow SEEN → CONFIRMED → FF, and sends
+`L2FLOW_ENTRY_NEW` over `NETLINK_L2FLOW` to cmm, which forwards
+`FPP_CMD_RX_L2FLOW_ENTRY` over FCI to cdx. cdx builds one **per-flow** ehash
+record in the ingress port's ETHERNET table with key
+`portid(1)+DA(6)+SA(6)+ethertype(2)` = 15 B and `l2_info.mtu = 0xffff`
+(no MTU check). ASK2 replaces that whole chain with switchdev FDB events and
+needs no bridge kernel patch.
+
+### 13.2 Gaps
+
+| # | Gap | Why it matters | Closed by |
+|---|---|---|---|
+| G1 | Port role is not selectable. `ask_hw_offload_engage()` always arms ROUTED and swallows `-EBUSY`. | The `L2_DA` profile is unreachable; once roles exist, a profile mismatch must be a hard error, not idempotent success. | B3a, D1 |
+| G2 | One KeyGen scheme and one ehash table per port. | A second match-all scheme is dead and the LCV split wedged silicon, so one port cannot route and bridge in hardware at once. The vendor does it by chaining distributions (`cdx_ethernet_dist` last in every `dist_order`). | v1 bridge-only members (D1); multi-table dispatch is a later epic |
+| G3 | switchdev reports the **egress** port of an FDB entry, but tables belong to **ingress** ports. | A MAC learned on port X needs a record in every other member's table (M MACs × (N-1) ports). None in X's own table unless hairpin is on. | B3a, §13.4 |
+| G4 | DA-only key has no VID. | Records are wrong on a `vlan_filtering` bridge or any entry with a non-zero VID. | Fail closed in B3a; real support §9 / D6 |
+| G5 | B0 queue drops on overflow and §11 originally debounced DELs. | A dropped or delayed DEL / STP-block / move leaves a stale record forwarding frames the bridge would not. | D3 |
+| G6 | `F_255.py` falls back to the global 46-byte table if the per-port `fman_pcd_ehash_table_set()` fails. | EKFC would extract 6 bytes against a 46-byte table key: the structural mismatch that stalled T-M3-R attempt 1 (`plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §4.1, KeyGen scheme 4 note). L2 engage must fail closed. | B3a |
+| G7 | Per-table capacity and per-record footprint are unmeasured. | Bucket mask `0x7fff` means 32768 × 16 B per table, against the vendor's 512-entry cap; spec `ask2-shared-table-multi-protocol-design.md` says the bucket array dominates and every class must pass the live MURAM-budget gate. Fan-out multiplies records. | B2 matrix |
+| G8 | Production `fman_pcd_fe_flow_add` passes `stats=false`. | No per-record hit counters, so no observability and no hit-based ageing refresh (D4). | B3/B5 |
+| G9 | F-262 gives records that request it `05 PREEMPTIVE_CHECKS`, an MTU and a frag-info block. | Bridge records must not request it; vendor bridge MTU is `0xffff`. | D7 |
+| G10 | Churn and lifecycle risks. | The CR-001 MURAM "leak" was F-133's diagnostic tracker, a false signal (`plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §5); keep `muram_budget` + `pcd-snapshot` as the only truth. Per-table delete cost under mass flush is unmeasured. | B4 gate |
+| G11 | Routed flows whose egress (or ingress) is a bridge device (IRB/SVI) are not resolved to a member port. `ask.ko` has no `netif_is_bridge_master` handling outside `ask_bridge.c`'s `NETDEV_CHANGEUPPER`. | They stay in software. The vendor handles this with `cmmBrToFF`. Not board-verified. | Out of scope for v1; D1 documents it |
+| G12 | The family mask cannot gate L2 flows. | A DA-only key matches any ethertype, so `offload ipv4` on a bridge member also forwards IPv6 and non-IP unicast in hardware. | D8 (document) |
+| G13 | Exclusivity and in-place scheme reprogramming. | The L2 scheme must respect the ASK↔VPP per-interface mutex and must remain compatible with the ingress-policer's `kg_find_port_scheme()` in-place next-engine rewrite. | B3a gate |
+
+### 13.3 B2 test matrix (silicon, cold boot, one variable per session)
+
+B2 hand-arms one L2 record on a sacrificial bridge-only port (never eth0, the
+SSH lifeline; eth3/eth4 pair per the board map). Each row is one cold-boot
+experiment (AGENTS §10.9, §10.10); record the boot type.
+
+| # | Question | Method | Pass criterion |
+|---|---|---|---|
+| 1 | Does a `L2_DA` hit plus plain `ENQUEUE_PKT` forward a frame? | Hand-armed DA record to the peer's no-confirm TX FQ | Frame egresses the other port |
+| 2 | Is the CPU bypassed? | `rx_default_dqrr` kprobe A/B, bulk traffic | Near-zero hits for the bulk flow |
+| 3 | DA-only 6 B vs vendor 15 B composite | A/B on the same flow | Pick by capacity, fan-out cost, VID need (D2) |
+| 4 | PORT_ID byte on the L2 scheme | Passive `hash_probe` / CRC-64 check, not assumed | Real hw port id is what the scheme emits (e.g. `0x0d` on eth1 per the 2026-09-15 `probe3` mode-2 capture, patch 0208); never assume the routed `0x00` result transfers |
+| 5 | Non-IP and tagged frames | ARP / LLDP-like / 802.1Q frame through a hit | Passes unmodified; documents the deviation from the vendor's unconditional `STRIP_ALL_VLAN_HDRS` (0x12) |
+| 6 | Arm and detach restore the prior `next_engine` | `pcd-snapshot diff` after disengage | Byte-clean; `muram_budget used` back to baseline |
+| 7 | Real per-table capacity | Insert until failure | Number recorded; sets the admission cap in B3 |
+| 8 | Unknown DA, broadcast, BPDU | Send each through an armed port | Miss → default FQ → kernel bridge floods or terminates |
+
+### 13.4 Decisions
+
+**D1 — port role follows the engage trigger; no new CLI leaf (confirmed 2026-10-09).**
+Engaging a port (`offload ipv4|ipv6`) selects `L2_DA` if the port is a bridge
+member and ROUTED otherwise. A join or leave (`NETDEV_CHANGEUPPER`) is an
+explicit disengage then re-engage; routed flows with that port as ingress are
+flushed at join. A bridge member is bridge-only in v1, so VLAN, PPPoE and
+routed hardware flows on it stay in software (the miss path keeps that
+correct), and the routed insert path in `ask.ko` must refuse a port whose
+profile is not ROUTED. This matches the 2026-10-09 granularity decision:
+per-port engage plus per-family mask, everything else automatic.
+
+**D2 — key format decided by B2 evidence.** DA-only is the B3 default because
+FDB events feed it directly and it needs no traffic-learning source. Its cost
+is one record per (DA, other-ingress-port). The vendor's per-flow 15-byte key
+needs only records for flows actually seen and carries the ethertype, but needs
+a traffic-driven entry source. Decide at B2 row 3.
+
+**D3 — urgent, authoritative invalidation.** ADD may be debounced (§11). DEL,
+STP-block, MAC move and port-down are processed immediately. The kernel FDB is
+the source of truth, with an ask.ko shadow of installed records; on queue
+overflow or allocation failure, resync from a bridge FDB dump rather than
+trusting the dropped event stream. Never hold one global lock across a
+multi-port fan-out.
+
+**D4 — static entries first.** Only `added_by_user` entries. Dynamic entries
+need ageing that does not strand a hardware-forwarded flow. The vendor patches
+the bridge (`br_fdb_register_can_expire_cb`); ASK2 has no bridge patch, so the
+options are a hit-counter refresh (needs `stats=true`, G8) or staying static.
+
+**D5 — BUM, multicast, local, ARP, BPDU and unknown DA stay in the kernel.**
+They miss the table and take the default FQ. Local entries (`is_local`) and
+`locked` entries are never offloaded.
+
+**D6 — VLAN-aware bridging later, fail closed now.** Skip any entry with a
+non-zero VID or on a `vlan_filtering` bridge until §9 lands. The vendor's
+`fill_bridge_actions()` calls `insert_remove_vlan_hm` unconditionally for
+non-filtered flows, which always emits `STRIP_ALL_VLAN_HDRS` (0x12), even for
+untagged frames. ASK2's plain `ENQUEUE_PKT` baseline is a deliberate deviation
+and needs proof at B2 row 5; it is not byte-identical to the vendor.
+
+**D7 — no MTU check on bridge records.** Bridge records carry the
+no-`05` path (vendor mtu `0xffff`), never the F-262 frag-info block.
+
+**D8 — one global kill switch (confirmed 2026-10-09).** `bridge_offload` module param,
+default 0 until B5, same role as `vlan_offload`, `pppoe_offload` and
+`ipv6_hw_frag`. `ASK_CAP_BRIDGE` is advertised only after B5. The family mask
+is the engage trigger and is documented as not filtering L2 flows (G12); an
+operator who wants a bridge's IPv6 in software does not engage that port.
+
+### 13.5 FDB fan-out
+
+```mermaid
+flowchart LR
+    FDB["Kernel FDB<br/>MAC A on port 1<br/>static entry"] --> OBS["ask_bridge observer<br/>switchdev FDB event"]
+    OBS --> ADM{"Admission<br/>static, unicast, FORWARDING<br/>VID 0, not local/locked"}
+    ADM -- "no" --> SW["stays in software"]
+    ADM -- "yes" --> FAN["fan out to every<br/>other member"]
+    FAN --> T2["port 2 table<br/>key A -> port 1 TX FQ"]
+    FAN --> T3["port 3 table<br/>key A -> port 1 TX FQ"]
+    FAN -. "none unless hairpin" .-> T1["port 1 table"]
+```
+
+### 13.6 Port role state
+
+```mermaid
+stateDiagram-v2
+    [*] --> Disengaged
+    Disengaged --> Routed: engage, not a bridge member
+    Disengaged --> L2DA: engage, bridge member
+    Routed --> Disengaged: disengage or bridge join
+    L2DA --> Disengaged: disengage or bridge leave
+    Routed --> Routed: re-engage (idempotent)
+    L2DA --> L2DA: re-engage (idempotent)
+    note right of L2DA
+        A different profile on an armed port is -EBUSY.
+        Under roles that is a hard error, not success.
+    end note
+```
+
+### 13.7 Re-ordered stages
+
+```mermaid
+flowchart LR
+    B1["B1 built in CI<br/>F-255 + fe_action"] --> B2["B2 silicon matrix<br/>13.3"]
+    B2 --> B3a["B3a role engage,<br/>static fan-out,<br/>fail-closed alloc"]
+    B3a --> B3b["B3b urgent invalidation<br/>shadow + resync"]
+    B3b --> B4["B4 lifecycle<br/>muram_budget clean"]
+    B4 --> B5["B5 matrix,<br/>default decision,<br/>advertise CAP_BRIDGE"]
+    B5 -.-> LATER["dynamic entries<br/>VLAN-aware<br/>routed + bridge"]
+```
+
+B1 must first build in CI and pass the routed regression (`pcd-snapshot`,
+A6 spot check) before any port is switched to `L2_DA`. B3a's gate is a
+two-port bridge forwarding a known-unicast static entry in hardware with the
+kprobe A/B, broadcast, unknown unicast and BPDU still in software, and no
+routed regression on ports outside the bridge.

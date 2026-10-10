@@ -3,15 +3,19 @@
 # throughput matrix for the dell1-DUT-dell2 10G test rig.
 #
 # Topology (DUT is swappable — see below):
-#   dell1 (admin@192.168.1.112) enp1s0/enp1s0.10 --SFP+--> DUT eth3
+#   dell1 (admin@192.168.1.112) enp1s0f0np0/.10 (X710 p1) --SFP+--> DUT .185 eth3
 #   DUT routes eth3 <-> eth4 (HW ASK2 flowtable if present, else plain SW routing)
-#   dell2 (admin@192.168.1.113) enp2s0/enp2s0.20 --SFP+--> DUT eth4
+#   dell2 (admin@192.168.1.113) enp1s0f0np0/.20 (X710 p1) --SFP+--> DUT .185 eth4
+# Since 2026-10-09 the dells carry a second X710 port each (enp1s0f1np1) to DUT .106,
+# inside netns n106 with the same addresses, and a direct ConnectX-3 link (enp2s0,
+# 10.99.99.0/24). All addresses, routes and policy rules are persistent: see
+# bin/testrig-dell-net.sh (NetworkManager profiles lab-185-*, systemd lab-n106).
 #
 # Addressing (see /memories/repo/testrig-dell-boxes.md):
 #   port (untagged): dell1 10.99.1.112/fd99:1::112  <-> DUT eth3 10.99.1.<tail>/fd99:1::<tail>
 #                     dell2 10.99.2.113/fd99:2::113  <-> DUT eth4 10.99.2.<tail>/fd99:2::<tail>
-#   vlan (tagged):    dell1 enp1s0.10 (vlan 10) 10.99.10.112/fd99:10::112 <-> DUT eth3.10
-#                     dell2 enp2s0.20 (vlan 20) 10.99.20.113/fd99:20::113 <-> DUT eth4.20
+#   vlan (tagged):    dell1 enp1s0f0np0.10 (vlan 10) 10.99.10.112/fd99:10::112 <-> DUT eth3.10
+#                     dell2 enp1s0f0np0.20 (vlan 20) 10.99.20.113/fd99:20::113 <-> DUT eth4.20
 # <tail> is fixed at 185 (NOT derived from DUT_HOST): every known DUT's
 # eth3/eth4/vif10/vif20 are pinned with a SECOND set of addresses matching
 # .185's data-plane scheme (10.99.X.185 / fd99:X::185), alongside the DUT's
@@ -127,41 +131,24 @@ cmd_setup() {
   log "DUT=$DUT_HOST tail=$DUT_TAIL"
   local t="$DUT_TAIL"
 
-  log "dell1: vlan iface + policy routing (table 110)"
-  SSH1 "
-    set -e
-    sudo ip rule add from 10.99.10.112 lookup 110 priority 11000 2>/dev/null || true
-    sudo ip -6 rule add from fd99:10::112 lookup 110 priority 11000 2>/dev/null || true
-    sudo ip route replace 10.99.20.0/24 via 10.99.10.$t dev enp1s0.10
-    sudo ip -6 route replace fd99:20::/64 via fd99:10::$t dev enp1s0.10
-    sudo ip -6 route replace fd99:2::/64 via fd99:1::$t dev enp1s0
-    sudo ip route replace 10.99.2.0/24 via 10.99.1.$t dev enp1s0
-    sudo ip route replace 10.99.2.0/24 via 10.99.10.$t dev enp1s0.10 table 110
-    sudo ip -6 route replace fd99:2::/64 via fd99:10::$t dev enp1s0.10 table 110
-  " || { log "dell1 setup FAILED"; return 1; }
-
-  log "dell2: vlan iface + policy routing (table 120)"
-  SSH2 "
-    set -e
-    sudo ip rule add from 10.99.20.113 lookup 120 priority 12000 2>/dev/null || true
-    sudo ip -6 rule add from fd99:20::113 lookup 120 priority 12000 2>/dev/null || true
-    sudo ip route replace 10.99.1.0/24 via 10.99.2.$t dev enp2s0
-    sudo ip -6 route replace fd99:1::/64 via fd99:2::$t dev enp2s0
-    sudo ip route replace 10.99.10.0/24 via 10.99.2.$t dev enp2s0
-    sudo ip -6 route replace fd99:10::/64 via fd99:2::$t dev enp2s0
-    sudo ip route replace 10.99.10.0/24 via 10.99.20.$t dev enp2s0.20 table 120
-    sudo ip -6 route replace fd99:10::/64 via fd99:20::$t dev enp2s0.20 table 120
-  " || { log "dell2 setup FAILED"; return 1; }
+  # Addresses, routes and policy rules are persistent on the dells (bin/testrig-dell-net.sh);
+  # setup only checks that they are active instead of re-adding runtime routes.
+  log "dell1+dell2: persistent rig profiles (bin/testrig-dell-net.sh)"
+  for h in SSH1 SSH2; do
+    $h "nmcli -t -f NAME con show --active | grep -qx lab-185-p1 && nmcli -t -f NAME con show --active | grep -qx lab-185-vlan" \
+      || { log "  $h: lab-185-p1/lab-185-vlan not active; run: sudo bash testrig-dell-net.sh dell1|dell2"; return 1; }
+  done
+  [ "$t" = 185 ] || log "  note: the persistent routes use the .185 data-plane gateways (tail 185)"
 
   log "dell1+dell2: flush stale neighbor cache for DUT gateway addresses (post cable-swap safety)"
-  SSH1 "sudo ip neigh flush dev enp1s0 2>/dev/null; sudo ip neigh flush dev enp1s0.10 2>/dev/null; sudo ip -6 neigh flush dev enp1s0 2>/dev/null; sudo ip -6 neigh flush dev enp1s0.10 2>/dev/null; true"
-  SSH2 "sudo ip neigh flush dev enp2s0 2>/dev/null; sudo ip neigh flush dev enp2s0.20 2>/dev/null; sudo ip -6 neigh flush dev enp2s0 2>/dev/null; sudo ip -6 neigh flush dev enp2s0.20 2>/dev/null; true"
+  SSH1 "for d in enp1s0f0np0 enp1s0f0np0.10; do sudo ip neigh flush dev \$d; sudo ip -6 neigh flush dev \$d; done 2>/dev/null; true"
+  SSH2 "for d in enp1s0f0np0 enp1s0f0np0.20; do sudo ip neigh flush dev \$d; sudo ip -6 neigh flush dev \$d; done 2>/dev/null; true"
 
   log "dell2: ensure iperf2 server running (-V, dual-stack)"
-  if ! SSH2 'pgrep -fx "iperf -s -V" >/dev/null'; then
+  if ! SSH2 "ss -ltn | grep -q ':$IPERF_PORT '"; then
     SSH2 "nohup iperf -s -V -p $IPERF_PORT > /tmp/iperf2_srv.log 2>&1 & sleep 1; echo LAUNCHED" || true
   fi
-  SSH2 'pgrep -fx "iperf -s -V" >/dev/null' && log "  server OK" || { log "  server FAILED to start"; return 1; }
+  SSH2 "ss -ltn | grep -q ':$IPERF_PORT '" && log "  server OK" || { log "  server FAILED to start"; return 1; }
   log "setup: OK"
 }
 
