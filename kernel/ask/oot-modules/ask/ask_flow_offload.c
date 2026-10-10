@@ -2113,11 +2113,11 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	 * bug cross-port dropped eth4 flows. The separate action.table_idx
 	 * field now selects ehash table 0/1 inside fman_pcd_fe_flow_add().
 	 */
-	ask_pr_info("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
-		    fm, &action, key->port_id, table_idx, action.key_size,
-		    sizeof(action),
-		    offsetof(struct fman_pcd_fe_flow_action, key_size),
-		    action.key_size, action.key);
+	ask_pr_dbg("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
+		   fm, &action, key->port_id, table_idx, action.key_size,
+		   sizeof(action),
+		   offsetof(struct fman_pcd_fe_flow_action, key_size),
+		   action.key_size, action.key);
 
 	/* Drive the real FMan (fman_get_pcd -> ehash) and surface failures so
 	 * callers can roll back provisional HW-backed ownership. */

@@ -2437,14 +2437,11 @@ fi
 # context now goes with the record, after the delete SYNC; the F-256
 # SYNC-timeout path keeps both. Resource leak only, NOT a stall fix:
 # stalls #4 and #5 occurred on F-254+F-256 builds. After F-256, whose
-# delete tail it anchors on. bin/test-ehash-delete.py then runs the real
-# del_key()/flow_drain() with a simulated SYNC and fails the build, before
-# the kernel compile, if unlink/SYNC/free ordering or ctx release regress.
+# delete tail it anchors on. bin/test-ehash-delete.py checks the final
+# del_key()/flow_drain() after F-264 below.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_257.py" 2>&1
     echo "### fman_pcd.c: F-257 ehash delete frees the F-175 flow context after SYNC"
-    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
 # F-259 (T-M6-SP4 logical-ingress key, 2026-10-08): the routed FE ehash key
@@ -2513,6 +2510,26 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_263.py" 2>&1
     echo "### fman_pcd.c: F-263 ehash bucket 0 no longer overwritten by the node template"
+fi
+
+# F-264 (control-plane scaling, 2026-10-10): ehash flows indexed by bucket
+# (t->bidx[mask + 1]), so del_key() (also F-219's evict-before-insert on every
+# add) and fman_pcd_fe_flow_get_stats() walk one collision chain instead of
+# every flow. nf_flowtable polls the stats of every hardware flow each gc
+# pass: the whole-list scan under fe_lock was O(N^2) per pass, and at 2048
+# flows kworkers piled up on fe_lock; at 8192 inserts stopped (.185, image
+# 1723). F-265 demotes the two per-insert log lines (F-177 SYNC success,
+# F-148 cosmetic warning) that 40k inserts/s would turn into a log storm.
+# Then bin/test-ehash-delete.py runs the real del_key()/flow_drain() with a
+# simulated SYNC and fails the build, before the kernel compile, if
+# unlink/index/SYNC/free ordering or ctx release regress. After F-263.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_264.py" 2>&1
+    echo "### fman_pcd.c: F-264 ehash bucket index (O(chain) key lookups)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_265.py" 2>&1
+    echo "### fman_pcd.c: F-265 per-insert log lines demoted"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
