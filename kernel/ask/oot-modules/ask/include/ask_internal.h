@@ -1073,6 +1073,9 @@ enum tc_setup_type;
 
 int  ask_flow_offload_init(void);
 void ask_flow_offload_exit(void);
+/* Minimum flow age before HW offload (module param offload_delay_ms); returns
+ * the previous value. KUnit sets 0 to keep REPLACE immediate. */
+unsigned int ask_flow_offload_set_delay_ms(unsigned int ms);
 
 /*
  * Public block-bind helper. The in-tree dpaa patch (PR11) calls this from
