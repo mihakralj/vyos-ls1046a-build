@@ -37,6 +37,22 @@ the equivalent of pulling and re-inserting the plug.
   session. See the companion **dut-console** skill for full serial protocol
   details.
 
+## Reaching the Hubitat hub (verified 2026-10-11)
+
+`curl` from the agent host (source IP on `tailscale0`) gets `Empty reply from
+server` (HTTP 000) even though the hub answers ping. Run the same curl from
+lxc200 instead (same LAN as the hub):
+
+```bash
+ssh -i ~/.ssh/admin_key admin@192.168.1.137 'U=http://192.168.1.187/apps/api/15/devices/10; T=<access token above>; curl -fsS -m 15 "$U/off?access_token=$T"; echo; sleep 3; curl -fsS -m 15 "$U/on?access_token=$T"'
+```
+
+The reply to the OFF call may still show `"switch":"on"` (state is reported
+before the command lands); the ON reply shows `"off"` for the same reason.
+Judge success by the DUT instead: poll `ssh vyos@192.168.1.185 'cat /proc/uptime'`
+until it answers with a small uptime (~2 min after power-on; `uptime -s`
+reflects the board clock, which steps after NTP). DUT `.106` is device ID 7.
+
 ## Procedure
 
 ### Step 1 — Power OFF
