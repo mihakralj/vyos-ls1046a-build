@@ -51,6 +51,7 @@
 #include <linux/string.h>
 
 #include "../include/ask_internal.h"
+#include <uapi/linux/ask/ask.h>
 
 /* ------------------------------------------------------------------------- */
 /* helpers                                                                    */
