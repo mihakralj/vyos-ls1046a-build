@@ -407,6 +407,7 @@ struct ask_hw_port {
 	bool            in_use;
 	u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
 	bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
+	enum fman_pcd_fe_profile engaged_profile; /* valid while offload_engaged */
 };
 
 struct ask_hw_pcd {
@@ -1090,7 +1091,11 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		ask_hw_offload_set_family(hw_port_id, ASK_FAM_V4 | ASK_FAM_V6);
 
 	if (p->offload_engaged) {
-		rc = 0;                 /* idempotent */
+		/* Same profile is idempotent; another one needs a disengage. */
+		rc = p->engaged_profile == profile ? 0 : -EBUSY;
+		if (rc)
+			ask_pr_err("hw: port 0x%02x already engaged with profile %d\n",
+				   hw_port_id, p->engaged_profile);
 		goto out_unlock;
 	}
 
@@ -1184,6 +1189,7 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 	 */
 
 	p->offload_engaged = true;
+	p->engaged_profile = profile;
 	ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
 
 out_unlock:
