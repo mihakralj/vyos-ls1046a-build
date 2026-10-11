@@ -849,3 +849,21 @@ Enabled eth3's RX BMI statistics (`FMBM_RSTC` at port page `0x1A00000+0x80000+0x
 - Cumulative RFRC after successive bursts of 4, 4, 4, 4, 8 non-IP hit-DA frames: 4, 9, 15, 19, 28; `pkt_count` only 4, 8, 8, 9, 9; dell2 wire +0 and eth3 CPU rx +0 at every step.
 - The follow-up 200 IPv4 frames (100 hit DA, 100 unknown DA) raised RFRC only 28→51 (+23 of 200): after the non-IP hit frames the port accepts almost nothing, so the RX FIFO/pipeline is no longer draining and later frames die at the MAC (this is the same mEMAC overflow class the nxp-ask user sees as `rdrp`, but here it does not recover).
 - Therefore non-IP frames that HIT the `L2_DA` record are not lost at the egress FQ: they are swallowed inside FMan (never reaching the CPU or the wire, no discard counted) and a few of them are enough to stall the port. Non-IP frames that MISS pass fine (500/500 to the CPU). Next experiments, one per cold boot: (a) a 1-frame non-IP hit then read RFRC/RTPC task counters and the mEMAC `RDRP`; (b) an IPv4 non-TCP/UDP (e.g. ICMP) hit frame; (c) tx3.py non-IP hit with the DA record's action changed to a plain to-CPU (miss-like) to isolate ENQUEUE_PKT from the lookup.
+
+### 13.14 Correction: non-IP hit frames are forwarded 4 times, then the hit path stops (2026-10-11, cold boot, 0348)
+
+Re-test with one `L2_DA` record on eth3 (hw port 0x10), `FMBM_RSTC` enabled, counters read after each step. This corrects §13.12/§13.13, which read the effect as a port wedge: the port keeps receiving and passing misses.
+
+| Step | `pkt_count` | RFRC (+0x204) | Result |
+|---|---|---|---|
+| 1 non-IP hit frame | 0→1 | +1 | forwarded |
+| 100 IPv4 miss frames | 1 | +102 | all reached the CPU (eth3 rx 84→186) |
+| +3 non-IP hits | 1→4 | +3 | forwarded |
+| +4 non-IP hits | 4 | +4 | counted by BMI, no `pkt_count` increment |
+| 20 IPv4 misses after each burst | 4 | +20 each | all reached the CPU |
+| +8 non-IP hits | 4 | +3 | `pkt_count` stuck at 4 |
+
+- Discard, filter, large-frame and DMA-error counters stay 0 and mEMAC `RDRP` stays 0.
+- Only the hit path stops, after exactly 4 non-IP hit frames. Every earlier run ended at `pkt_count` 4 as well. Something with a capacity of 4 is consumed per non-IP hit and never returned (suspect egress FQ/enqueue state or descriptor format). IPv4 hits are not affected (500/500).
+- Consequence for B3a: the "IPv4-only port" mitigation is insufficient. Any non-IP or VLAN hit-DA frame permanently disables the hit path until cold reset, so DA records must not be armed until this is root-caused.
+- Next (fresh cold boot): read eth4 tx FQ state and frame count after 4 non-IP hits to separate an egress-FQ limit from an FMan-internal one.
