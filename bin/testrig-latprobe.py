@@ -4,7 +4,7 @@
   reflect IFACE ADDR                 dell2: answer probes arriving on ADDR (UDP 319) until killed.
   probe IFACE SRC DST COUNT [RATE]   dell1: COUNT probes at RATE/s (default 1000) from SRC to the reflector
                                      at DST. The first 5000 (5 s at 1000/s) are warm-up and are not counted
-                                     (ask.ko offloads a flow only once it is offload_delay_ms, 2 s, old).
+                                     (ask.ko offloads a flow only once it is offload_delay_ms old, ~1-3 s).
                                      Prints one JSON line, in microseconds.
   selftest                           loopback with software timestamps, no rig, no root.
 
