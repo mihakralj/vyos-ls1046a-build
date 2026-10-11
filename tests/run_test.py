@@ -90,7 +90,7 @@ def remote_command(bench, root, suite, extra, digest=""):
 def remove_stage(bench, suite):
     result = bench.endpoint("wan").execute(
         ["python3", "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", str(suite)],
-        management=True, privileged=False)
+        management=True, privileged=True)
     if result.rc:
         raise RuntimeError("dell2 staged-suite cleanup failed: " + result.stdout)
 
@@ -108,7 +108,8 @@ def command(suite, environ, executable=sys.executable):
     if suite not in {"dut", "all"}:
         raise ValueError("this import contains the DUT suite, not upstream host/startup suites")
     env["PYTHONPATH"] = str(root)
-    argv = [executable, "-m", "pytest", "-c", str(root / "pyproject.toml"), str(root)]
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    argv = [executable, "-B", "-m", "pytest", "-c", str(root / "pyproject.toml"), str(root)]
     if env.get("ASK_LAB_EXECUTE") != "1":
         argv.append("--collect-only")
     else:
