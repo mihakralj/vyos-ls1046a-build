@@ -58,6 +58,8 @@
 #include <net/neighbour.h>
 #include <net/netevent.h>
 #include <net/ipv6.h>
+#include <net/route.h>		/* rt_nexthop(): routed-endpoint next hop */
+#include <net/ip6_route.h>	/* rt6_nexthop() */
 #include <net/addrconf.h>
 #include <net/net_namespace.h>
 #include <net/netfilter/nf_flow_table.h>
@@ -1842,6 +1844,33 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 		 * borrowed and re-resolves under its own rcu/ref. */
 		rcu_read_unlock();
 	}
+
+	/*
+	 * Routed endpoint: other->src_v4 is the far-end host, which is only
+	 * the neighbour when it is on-link. The kernel's own
+	 * flow_offload_eth_dst() resolves it through dst_neigh_lookup(), i.e.
+	 * the route's gateway when the dst uses one. Do the same.
+	 */
+	if (t->xmit_type == FLOW_OFFLOAD_XMIT_NEIGH && t->dst_cache &&
+	    t->l3proto == NFPROTO_IPV4)
+		return rt_nexthop((const struct rtable *)t->dst_cache,
+				  other->src_v4.s_addr);
+
+	/*
+	 * VLAN/bridge egress flows use FLOW_OFFLOAD_XMIT_DIRECT and carry no
+	 * dst_cache: ask the routing table for the gateway instead.
+	 */
+	if (t->l3proto == NFPROTO_IPV4) {
+		struct flowi4 fl4 = { .daddr = other->src_v4.s_addr };
+		struct rtable *rt = ip_route_output_key(&init_net, &fl4);
+
+		if (!IS_ERR(rt)) {
+			__be32 nh = rt_nexthop(rt, other->src_v4.s_addr);
+
+			ip_rt_put(rt);
+			return nh;
+		}
+	}
 	return other->src_v4.s_addr;
 }
 
@@ -1899,6 +1928,19 @@ static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
 		rcu_read_unlock();
 	}
 	*out_nh = other->src_v6;
+	if (t->xmit_type == FLOW_OFFLOAD_XMIT_NEIGH && t->dst_cache &&
+	    t->l3proto == NFPROTO_IPV6)
+		*out_nh = *rt6_nexthop((const struct rt6_info *)t->dst_cache,
+				       &other->src_v6);
+	else if (t->l3proto == NFPROTO_IPV6) {
+		struct flowi6 fl6 = { .daddr = other->src_v6 };
+		struct dst_entry *dst = ip6_route_output(&init_net, NULL, &fl6);
+
+		if (dst && !dst->error)
+			*out_nh = *rt6_nexthop(dst_rt6_info(dst),
+					       &other->src_v6);
+		dst_release(dst);
+	}
 	return true;
 }
 
@@ -2334,6 +2376,26 @@ out:
  * address, i.e. key.src_ip for the POP direction). Returns the VID
  * (1..4094) or 0 if no matching vif is found (caller fails closed to SW).
  */
+/*
+ * Ingress 802.1Q VID straight from the flowtable tuple: encap[] holds this
+ * direction's ingress tags, so it is correct even when the flow endpoints
+ * are routed (no vif subnet contains the source). 0 = untagged/unknown.
+ */
+static u16 ask_cookie_ingress_vid(unsigned long cookie)
+{
+	const struct flow_offload_tuple *t;
+	int i;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return 0;
+
+	t = (const struct flow_offload_tuple *)cookie;
+	for (i = 0; i < t->encap_num && i < NF_FLOW_TABLE_ENCAP_MAX; i++)
+		if (t->encap[i].proto == htons(ETH_P_8021Q))
+			return t->encap[i].id & VLAN_VID_MASK;
+	return 0;
+}
+
 static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
 {
 	struct net_device *phys, *owner;
@@ -2869,6 +2931,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		 */
 		if (!key.vlan_ingress_vid)
 			key.vlan_ingress_vid = key.vlan_id & VLAN_VID_MASK;
+		if (!key.vlan_ingress_vid)
+			key.vlan_ingress_vid = ask_cookie_ingress_vid(f->cookie);
 		if (!key.vlan_ingress_vid && !is_v6 && key.iif) {
 			memcpy(&peer_v4, &key.src_ip[0], 4);
 			key.vlan_ingress_vid =
