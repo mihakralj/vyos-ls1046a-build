@@ -824,3 +824,16 @@ Findings:
 - Row 1 re-run with the corrected counters: 500 IPv4/UDP frames to the hit DA → `pkt_count` +500, CPU rx counters unchanged.
 - Non-IP hit-DA frames (EtherType 0x88b5): only 4 of 500 counted as hits. The L2_DA scheme does not reliably classify non-IP frames; VLAN-tagged hit-DA frames: 0 hits. Row 5 is therefore NOT a pass: non-IP/tagged frames are not forwarded by the record.
 - Misses (unknown DA, broadcast, BPDU) did NOT reach the CPU on this boot even with promisc on (`ethtool -S` rx and `statistics/rx_packets` both flat, no drops counted). This contradicts the 0257 observation (unknown-DA frames reached the CPU). Open: confirm on a confirmed cold boot whether the L2_DA miss FQID (`MISS FQID: 0x200`) delivers to the kernel; B3a is blocked until misses are proven to reach the bridge. Also still unexplained: `F-148 CC match table full (1 key max)` printed after `l2add`.
+
+### 13.11 Cold-boot repeat (2026-10-11 ~04:50, image 0348, cold reset)
+
+Order on a fresh cold boot (promisc on, one `L2_DA` record for `02:00:00:aa:bb:01` → eth4), 500 frames per row from dell1:
+
+| Frame | Result |
+|---|---|
+| hit DA, IPv4 | `pkt_count` +500, CPU rx unchanged (PASS) |
+| unknown DA IPv4, unknown DA non-IP, broadcast, BPDU `01:80:c2:00:00:00` | 500/500 each reached the CPU (`rx packets [TOTAL]` +500 per row) (PASS: misses reach the kernel on a clean boot) |
+| hit DA, non-IP (0x88b5) | only 8/500 counted as hits; remaining frames neither hit nor reached the CPU; dell2 wire +0 |
+| hit DA, VLAN-tagged | 0 hits, 0 CPU |
+
+After the non-IP hit-DA row the eth3 RX path was wedged: a following IPv4 hit-DA burst, an unknown-DA burst, and even a burst after restoring the ROUTED profile (`disengage` / `engage`, `muram_budget` back at 52922 B) produced no hits and no CPU rx. This explains the earlier "misses vanish" observation on the warm boot (a preceding non-IP hit row wedged the port). Conclusion: a hit-DA non-IP or tagged frame in the `L2_DA` record's ENQUEUE_PKT path stalls the port (suspected buffer or FQ stall; no drop counter moves). B3a must not arm DA records on a port that can see non-IPv4 traffic until this is root-caused. Next experiment: cold boot, send ONLY a short non-IP hit burst (e.g. 20 frames) and read BMI/FMPL/FQ state plus `bpool` counters before and after; compare with the ENQUEUE_PKT frame-format requirements in `arch/fman-microcode-210-programming-reference.md`. The DUT needs another cold reset to clear the wedge.
