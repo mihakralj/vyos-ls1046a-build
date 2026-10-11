@@ -167,8 +167,10 @@ rm -f ./*.ko ./*.o ./*.mod ./*.mod.c ./Module.symvers ./modules.order
 # Build. Force CONFIG_NET_ASK=m on the command line — there is no in-tree
 # Kconfig hook for the OOT module (the in-tree Kconfig only exists inside
 # the OOT tree itself; the kernel's main config does not know about it).
+DEBUGFS_ARG=""
+[ "${KUNIT:-false}" = "true" ] && DEBUGFS_ARG="CONFIG_NET_ASK_DEBUG_FS=y"
 make -C "$KSRC" M="$OOT_DIR" \
-    CONFIG_NET_ASK=m \
+    CONFIG_NET_ASK=m $DEBUGFS_ARG \
     modules
 
 # Verify the produced .ko exists and is sane.
@@ -186,7 +188,7 @@ modinfo "$OOT_DIR/ask.ko" || true
 if [ "${KUNIT:-false}" = "true" ]; then
     echo "### KUnit build: compiling ask_kunit.ko test harness"
     make -C "$KSRC" M="$OOT_DIR" \
-        CONFIG_NET_ASK=m CONFIG_NET_ASK_KUNIT_TEST=m \
+        CONFIG_NET_ASK=m CONFIG_NET_ASK_KUNIT_TEST=m $DEBUGFS_ARG \
         modules
     # The harness is a SEPARATE module built in the tests/ subdir
     # (tests/Kbuild -> obj-m ask_kunit.o), so it lands at

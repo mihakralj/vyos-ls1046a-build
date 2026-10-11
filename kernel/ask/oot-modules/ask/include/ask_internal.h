@@ -110,6 +110,9 @@ void ask_hw_exit(void);
  * board engage on failure.  disengage is void and idempotent.
  */
 int  ask_hw_offload_engage(u8 hw_port_id);
+int  ask_hw_b2_l2_engage(const char *ifname);
+int  ask_hw_b2_l2_record(const char *iifname, const u8 *da,
+			 const char *oifname, bool add);
 void ask_hw_offload_disengage(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);

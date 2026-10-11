@@ -40,7 +40,7 @@ static struct dentry *ask_debugfs_root;
 static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 				 size_t len, loff_t *ppos)
 {
-	char buf[64];
+	char buf[96];
 	char verb[16];
 	unsigned int port;
 	int rc;
@@ -50,6 +50,25 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 	if (copy_from_user(buf, ubuf, len))
 		return -EFAULT;
 	buf[len] = '\0';
+
+	/* T-M6-2 B2: "l2engage <iif>" | "l2add <iif> <mac> <oif>" |
+	 * "l2del <iif> <mac>" -- hand-armed bridge records, bring-up only. */
+	if (!strncmp(buf, "l2", 2)) {
+		char iif[IFNAMSIZ], oif[IFNAMSIZ], mac[18];
+		u8 da[ETH_ALEN];
+
+		if (sscanf(buf, "l2engage %15s", iif) == 1)
+			rc = ask_hw_b2_l2_engage(iif);
+		else if (sscanf(buf, "l2add %15s %17s %15s", iif, mac, oif) == 3 &&
+			 mac_pton(mac, da))
+			rc = ask_hw_b2_l2_record(iif, da, oif, true);
+		else if (sscanf(buf, "l2del %15s %17s", iif, mac) == 2 &&
+			 mac_pton(mac, da))
+			rc = ask_hw_b2_l2_record(iif, da, NULL, false);
+		else
+			return -EINVAL;
+		return rc ? rc : len;
+	}
 
 	/* "engage <port>" | "disengage <port>"; %i accepts 0x-hex or decimal. */
 	if (sscanf(buf, "%15s %i", verb, &port) != 2)
