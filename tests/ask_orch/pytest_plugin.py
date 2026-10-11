@@ -78,7 +78,8 @@ def pytest_configure(config):
     versions = {
         d.metadata["Name"]: d.version for d in importlib.metadata.distributions()
     }
-    source = checkout(Path(__file__).resolve().parents[2])
+    suite_root = Path(__file__).resolve().parents[1]
+    source = checkout(suite_root.parent if (suite_root.parent / ".git").exists() else suite_root)
     # Only bench settings: credentials and unrelated environment variables
     # never belong in a distributable test report.
     settings = {
@@ -181,6 +182,14 @@ def pytest_collection_modifyitems(config, items):
                     func_only=True,
                 )
             )
+    # Only tests that exercise ASK2 are kept. The imported upstream scenarios
+    # need the DUT UART agent and CDX/KASAN interfaces; the generic checks do
+    # not touch the offload. ASK_INCLUDE_NON_ASK=1 restores them for collection.
+    if os.environ.get("ASK_INCLUDE_NON_ASK") != "1":
+        dropped = [item for item in items if not item.get_closest_marker("ask2")]
+        if dropped:
+            items[:] = [item for item in items if item.get_closest_marker("ask2")]
+            config.hook.pytest_deselected(items=dropped)
     # pytest applies -k/-m inside this hook. Mark first; validate only the
     # remaining selection so `-m host -n auto` never reserves the bench.
     result = yield
@@ -278,8 +287,9 @@ def pytest_runtest_setup(item):
         if not report["ok"]:
             pytest.fail("lab preflight failed: " + str(report["nodes"]))
         capabilities = report["nodes"]["dut"]["capabilities"]
+        waived = set(filter(None, os.environ.get("ASK_WAIVE_CAPS", "").split(",")))
         missing = sorted({name for marker in item.iter_markers("backend") for name in marker.args
-                          if not capabilities.get(name)})
+                          if not capabilities.get(name) and name not in waived})
         if missing:
             pytest.skip(f"{report['dut']} lacks upstream test capabilities: {', '.join(missing)}")
 

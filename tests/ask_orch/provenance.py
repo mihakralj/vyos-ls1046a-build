@@ -10,7 +10,14 @@ def checkout(root):
     def git(*args):
         return subprocess.check_output(["git", *args], cwd=root, timeout=10)
 
-    names = sorted(set(git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")) - {b""})
+    try:
+        names = sorted(set(git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")) - {b""})
+        revision = git("rev-parse", "HEAD").decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Staged worker copies are not git checkouts; identify them by content.
+        names = sorted(os.fsencode(str(p.relative_to(root))) for p in Path(root).rglob("*")
+                       if p.is_file() and "__pycache__" not in p.parts)
+        revision = "staged:" + os.environ.get("ASK_SUITE_SHA256", "unknown")
     digest = hashlib.sha256()
     for name in names:
         path = Path(root) / os.fsdecode(name)
@@ -23,7 +30,7 @@ def checkout(root):
         else:
             kind, content = b"missing", b""
         digest.update(name + b"\0" + kind + b"\0" + content)
-    return {"revision": git("rev-parse", "HEAD").decode().strip(),
+    return {"revision": revision,
             "sha256": digest.hexdigest(), "files": len(names)}
 
 
