@@ -793,3 +793,21 @@ A6 spot check) before any port is switched to `L2_DA`. B3a's gate is a
 two-port bridge forwarding a known-unicast static entry in hardware with the
 kprobe A/B, broadcast, unknown unicast and BPDU still in software, and no
 routed regression on ports outside the bridge.
+
+### 13.8 B2 results (2026-10-11, board .185, image 2026.10.11-0257, partial)
+
+Boot type was not confirmed cold (operator install and reboot), so rows 1–3 are provisional until repeated on a cold boot.
+
+Method: debugfs verbs `l2engage <iif>`, `l2add <iif> <mac> <oif>` and `l2del <iif> <mac>` on `/sys/kernel/debug/ask/offload`. They are compiled only with `CONFIG_NET_ASK_DEBUG_FS`, which `ci-build.sh` enables when `KUNIT=true`. eth3 (port 0x10) is already ROUTED-armed at boot by the firewall flowtable, so `disengage 0x10` comes first. 1000 raw frames with DA `02:00:00:aa:bb:01` were sent from dell1 into eth3, and an unknown-DA control stream was sent the same way.
+
+| Row | Result |
+|---|---|
+| 1. Hit + `ENQUEUE_PKT` forwards | PASS: `pkt_count` 1000; dell2 X710 `port.rx_unicast` +1000 (the netdev `rx_packets` stat stays 0 because the NIC unicast filter drops the foreign DA). |
+| 2. CPU bypass | PASS: eth3 `rx packets [TOTAL]` unchanged for hit frames; the unknown-DA control stream added 1000. |
+| 3. 6-byte DA key | PASS: the per-port table reports `keysz=6`; no PORT_ID byte needed for the `L2_DA` profile. |
+| 6. Restore | `l2del` + `disengage` + ROUTED `engage` returns `muram_budget` used to the 52922 B baseline (44101 B while disengaged). `pcd-snapshot diff` not yet run. |
+| 4, 5, 7, 8 | Not yet run. |
+
+Findings:
+- A bridge port must be promiscuous (`ip link set eth3 promisc on`). Otherwise the mEMAC drops unknown-DA frames before KeyGen, so a miss never reaches the kernel bridge. B3a must set this when it takes a port into the `L2_DA` role.
+- G1 gap confirmed: `fman_pcd_fe_engage_profile()` returns 0 on an already-armed port whatever the profile, so `l2engage` on a ROUTED-armed port is a silent no-op. The `-EBUSY` hard error in `ask_hw_offload_engage_profile()` never fires; the engage path itself must report the mismatch.
