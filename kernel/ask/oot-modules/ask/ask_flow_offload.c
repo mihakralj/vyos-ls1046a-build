@@ -153,22 +153,24 @@ MODULE_PARM_DESC(ipv6_hw_frag,
 		 "records that carry the MTU check");
 
 /*
- * Offload only flows that have lived offload_delay_ms (the vendor cmm engages
- * ~2.6 s after a flow starts). Short connections then finish in the software
- * fast path, so conntrack sees their FIN/RST (the hardware path swallows them
- * and the entry would linger ESTABLISHED for the whole established timeout),
- * and they cost no hardware insert or delete. A refused REPLACE is retried by
- * nf_flowtable's flow_offload_refresh() about once a second while the flow
- * still passes through software. First-REPLACE times live in a value xarray
- * keyed by cookie until DESTROY (sent for every flow of a hardware flowtable)
- * erases them; they are not erased on install, because each REPLACE reaches
- * every bound block and all of them (true ingress and egress-side echo) must
- * judge the age against the same time. 0 = offload at the first REPLACE.
+ * Offload only flows that have lived offload_delay_ms. Short connections then
+ * finish in the software fast path, so conntrack sees their FIN/RST (the
+ * hardware path swallows them and the entry would linger ESTABLISHED for the
+ * whole established timeout), and they cost no hardware insert or delete. A
+ * refused REPLACE is retried by nf_flowtable's flow_offload_refresh() at most
+ * once a second, and only while packets still pass through software, so any
+ * value below ~1000 means "offload at the first retry" (~1 s). VyOS sets it
+ * from `firewall global-options hardware-offload-delay` (vyos-1x-055).
+ * First-REPLACE times live in a value xarray keyed by cookie until DESTROY
+ * (sent for every flow of a hardware flowtable) erases them; they are not
+ * erased on install, because each REPLACE reaches every bound block and all
+ * of them (true ingress and egress-side echo) must judge the age against the
+ * same time. 0 = offload at the first REPLACE.
  */
-static unsigned int ask_offload_delay_ms = 2000;
+static unsigned int ask_offload_delay_ms = 500;
 module_param_named(offload_delay_ms, ask_offload_delay_ms, uint, 0644);
 MODULE_PARM_DESC(offload_delay_ms,
-		 "Minimum flow age before hardware offload, in ms (default 2000; "
+		 "Minimum flow age before hardware offload, in ms (default 500; "
 		 "0 offloads at the first REPLACE)");
 
 static DEFINE_XARRAY(ask_offload_first_seen);

@@ -50,8 +50,15 @@ ASK2 state and preserving independent delivery/offload evidence.
 
 ## Verification Status
 
-On 2026-10-10, all 558 cases collect for both profiles; 34 host adapter checks
-and the original ABI tripwire pass. Read-only management/port preflight passes
-for both DUT/Dell paths. Live portable checks remain unverified because
-`dell2` needs the matching `python3.14-venv` package before runner preparation.
-No DUT image, persistent configuration or boot selection was changed.
+Only tests marked `ask2` run by default; the imported upstream scenarios,
+`smoke.py` and `abi_snapshot.py` do not exercise ASK2 (they need CDX, KASAN and
+the DUT UART agent), so they and the host adapter checks are filtered out unless
+`ASK_INCLUDE_NON_ASK=1`. [ask2_offload.py](ask2_offload.py) holds 36 cases: ask.ko
+loaded with both ports armed, plus IPv4/IPv6 UDP and TCP unicast forwarding
+proven by FMan ehash per-record packet counts. On 2026-10-10 34 pass live (the 2 planned-feature gates, bridge and IPsec, fail by design) on
+`dut1` (`.185`) through `dell2`, and the traffic tests fail with the ports disengaged
+(`vyos-offload-ask --port 0x10|0x11 family 0`; re-engage with `family 3`).
+`dell2` needed `python3.14-venv`, `git`, `ethtool`, `conntrack`, `nftables`,
+`dnsmasq-base`, `ppp` and `python3-scapy`; `dell1` got the same tools except the
+venv package.
+The launcher needs an SSH agent holding `vyos_key` and `admin_key`.
