@@ -877,3 +877,23 @@ Follow-up on the same boot: `fe_ehash_stats` later read `pkt_count=8 pkt_bytes=4
 - After that point **IPv4 hit frames also stop hitting** (20 sent, `pkt_count` stays 7), so the hit path is dead for every frame class, while misses still reach the CPU. This refines §13.14: the earlier "IPv4 hits are fine" holds only before the first ~8 non-IP hits.
 - eth4 tx BMI (ports 0x30/0x31, `TSTC` enabled; `TFRC` at +0x204) moved by only 1–2 frames, so the stalled frames are not being transmitted either.
 - Open: what state outside the workspace pool the non-IP hit consumes. Candidates: the egress FQ/channel taking the frames without transmitting, or a counter-based limit in the ENQUEUE_PKT FE. Next: cold boot, enable eth4 tx `TSTC` first, then correlate tx `TFRC`/`TFDC` with each of the first 8 hits.
+
+### 13.16 The trigger is short non-IPv4/IPv6 frames, not "non-IP" (2026-10-11, DUT .185, ISO 0348, one cold boot per case)
+
+Each case: fresh cold boot, `L2_DA` record on eth3, 20 frames, then 20 IPv4/UDP hit frames. `pkt_count` from `fe_ehash_stats`, dell2 from `port.rx_unicast`.
+
+| Frame (total length) | `pkt_count` | dell2 | Then 20 IPv4 hits |
+|---|---|---|---|
+| IPv6/UDP, 60 B | 20 | +20 | 40, +20 |
+| IPv4/ICMP | 20 | +20 | 40, +20 |
+| 0x88b5, 1000 B | 20 | +20 | 40, +20 |
+| IPv4/UDP, 1000 B | 20 | +20 | 40, +20 |
+| ARP, 60 B | 4 | 0 | 4, 0 (dead) |
+| 0x88b5, 60 B | about 7-8 | 0 | dead |
+
+Size sweep of 0x88b5 on one boot, 20 frames per size: 512, 256 and 192 give +20 each; 128 gives +9 then dead; 100, 80, 64 and 60 give +0.
+
+- Short (up to 128 B) frames that are neither IPv4 nor IPv6 are counted by the lookup for a handful of frames, never reach the wire, and then disable the whole hit path (all frame classes) until a cold reset. Frames of 192 B or more of the same type, and short IPv4/IPv6 frames, are unaffected.
+- The workspace pool stays intact (§13.15), so this is not a pool leak. The signature matches the earlier VLAN freeze (counting stops after about 16 task numbers plus a few), so the ENQUEUE_PKT completion/retry loop that allocates task numbers (Qdrant, 2026-09-03 disassembly) remains the leading candidate.
+- Consequence for B3a: DA records must not be reachable by short non-IP frames such as ARP. Working plan: gate the L2_DA KeyGen scheme with a classification plan on the parser's IPv4/IPv6 indication, so ARP and other L2 frames take the default FQ to the CPU and the software bridge keeps handling them. F-214 already has the CP passall plumbing. Check the CP-entry parse-result bits against the reference manual and Qdrant before any code.
+- Not resolved: why short non-IP frames stall the FE-VM at microcode level; needs the workspace dump (spec §11 step 3) or microcode disassembly.
