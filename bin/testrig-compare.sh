@@ -138,7 +138,7 @@ lat_run(){ # label pdr_total bg_env...: probes at idle and at LAT_LOADS % of pdr
       pps=$((pdr * l / 100)); secs=$((LAT_COUNT / 1000 + 15))
       say "lat $label: background $pps pps ($l % of $pdr)"
       env "$@" OUT=$D/lat-bg.csv $PG trial port-v4 "$LAT_SIZE" "$pps" "$secs" > /dev/null & bg=$!
-      sleep 12  # BIDIR warm-up (~7 s + the 2 s offload delay) then load
+      sleep 12  # BIDIR warm-up (~7 s + ask.ko's offload delay) then load
     fi
     out=$($D1 "sudo python3 /tmp/testrig-latprobe.py probe $IF 10.99.1.112 10.99.2.113 $LAT_COUNT 1000")
     [ -n "$bg" ] && wait $bg

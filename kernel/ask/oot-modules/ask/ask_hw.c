@@ -1065,7 +1065,8 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
  * routes `set system offload ask` here.
  */
-int ask_hw_offload_engage(u8 hw_port_id)
+static int ask_hw_offload_engage_profile(u8 hw_port_id,
+					 enum fman_pcd_fe_profile profile)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct ask_hw_port *p;
@@ -1123,8 +1124,14 @@ int ask_hw_offload_engage(u8 hw_port_id)
 	 * and is unaffected; the CC MISS disposition is already per-ingress-port
 	 * via fman_pcd_resolve_miss_fqid() inside fman_pcd_fe_engage().
 	 */
-	rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
-	if (rc == -EBUSY) {
+	rc = fman_pcd_fe_engage_profile(h->fman, hw_port_id, 0, profile);
+	if (rc == -EBUSY && profile != FMAN_PCD_FE_PROFILE_ROUTED) {
+		/* A profile mismatch on an armed port is a hard error (plan
+		 * 13.2 G1), never idempotent success. */
+		ask_pr_err("hw: port 0x%02x already armed with another profile\n",
+			   hw_port_id);
+		goto out_unlock;
+	} else if (rc == -EBUSY) {
 		/*
 		 * F-122/F-124: treat "already armed" as idempotent success.
 		 * The FE state may have been left engaged while our software
@@ -1183,7 +1190,73 @@ out_unlock:
 	mutex_unlock(&h->lock);
 	return rc;
 }
+
+int ask_hw_offload_engage(u8 hw_port_id)
+{
+	return ask_hw_offload_engage_profile(hw_port_id,
+					     FMAN_PCD_FE_PROFILE_ROUTED);
+}
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
+
+static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id);
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc);
+
+static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
+{
+	struct net_device *dev = dev_get_by_name(&init_net, ifname);
+	int rc;
+
+	if (!dev)
+		return -ENODEV;
+	rc = ask_hw_resolve_iif_port(dev->ifindex, port_id);
+	dev_put(dev);
+	return rc;
+}
+
+/* T-M6-2 B2 (debugfs only): engage @ifname's port with the L2_DA profile. */
+int ask_hw_b2_l2_engage(const char *ifname)
+{
+	u8 port;
+	int rc = ask_hw_b2_port_of(ifname, &port);
+
+	return rc ? rc : ask_hw_offload_engage_profile(port,
+						       FMAN_PCD_FE_PROFILE_L2_DA);
+}
+
+/* B2: hand-arm (or remove) one DA record in @iifname's L2_DA table that
+ * forwards to @oifname's no-confirm TX FQ. Process context, never with
+ * flow_block_lock held. */
+int ask_hw_b2_l2_record(const char *iifname, const u8 *da,
+			const char *oifname, bool add)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	struct fman_pcd_fe_flow_action a;
+	struct net_device *dev;
+	u32 fqid = 0;
+	u8 port;
+	int rc;
+
+	if (!h)
+		return -ENODEV;
+	rc = ask_hw_b2_port_of(iifname, &port);
+	if (rc)
+		return rc;
+	if (!add)
+		return fman_pcd_fe_flow_del(h->fman, port, da,
+					    FMAN_PCD_FE_L2_DA_KEY_SIZE);
+
+	dev = dev_get_by_name(&init_net, oifname);
+	if (!dev)
+		return -ENODEV;
+	rc = ask_hw_resolve_oif_fqid(dev->ifindex, &fqid, true);
+	dev_put(dev);
+	if (rc)
+		return rc;
+	rc = ask_bridge_fe_action(da, fqid, ask_hw_get_enq_fe_off(), &a);
+	if (rc)
+		return rc;
+	return fman_pcd_fe_flow_add(h->fman, port, &a);
+}
 
 void ask_hw_offload_disengage(u8 hw_port_id)
 {
