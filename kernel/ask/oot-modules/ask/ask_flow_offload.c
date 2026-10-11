@@ -2004,6 +2004,9 @@ void ask_fe_build_key_dual(const struct ask_flow_key *key,
 	put_unaligned_be16(key->vlan_ingress_vid & VLAN_VID_MASK, &k[46]);
 	put_unaligned_be16(key->pppoe_sid, &k[48]);
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_fe_build_key_dual);
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
