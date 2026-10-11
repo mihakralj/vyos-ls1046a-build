@@ -869,3 +869,11 @@ Re-test with one `L2_DA` record on eth3 (hw port 0x10), `FMBM_RSTC` enabled, cou
 - Next (fresh cold boot): read eth4 tx FQ state and frame count after 4 non-IP hits to separate an egress-FQ limit from an FMan-internal one.
 
 Follow-up on the same boot: `fe_ehash_stats` later read `pkt_count=8 pkt_bytes=480` (8 × 60 B), so the counter does advance, in steps of 4 (1, 4, 4, 4, 8). After 20 further non-IP hits it stayed at 8, dell2 `port.rx_unicast` did not move, and eth4 tx/confirm counters stayed equal (48/48, no stuck tx frames). The hit path therefore completes some frames in groups of 4 and silently drops the rest; eth4's TX FQ shows no backlog, which weakens the egress-FQ hypothesis. Next: one cold boot with a single non-IP hit, reading the FE-VM workspace/stats (spec §11 step 3) rather than counters.
+
+### 13.15 Workspace pool is not leaking; hit path dies for ALL frames after ~8 non-IP hits (2026-10-11, cold boot, 0348)
+
+- Port 0x10 FE workspace pool (`fe_pool`/`fe_buffer`) is identical before and after the non-IP hits: free list `00..0f ff` intact, `cursor=4`, available 11. The workspace-leak hypothesis is **disproved**.
+- Counting: `pkt_count` 1 → 2 after 1 non-IP hit, 7 after 7 more (8 sent), then **7 after 50 more**. Nothing from the non-IP hits ever reached dell2 (`port.rx_unicast` flat).
+- After that point **IPv4 hit frames also stop hitting** (20 sent, `pkt_count` stays 7), so the hit path is dead for every frame class, while misses still reach the CPU. This refines §13.14: the earlier "IPv4 hits are fine" holds only before the first ~8 non-IP hits.
+- eth4 tx BMI (ports 0x30/0x31, `TSTC` enabled; `TFRC` at +0x204) moved by only 1–2 frames, so the stalled frames are not being transmitted either.
+- Open: what state outside the workspace pool the non-IP hit consumes. Candidates: the egress FQ/channel taking the frames without transmitting, or a counter-based limit in the ENQUEUE_PKT FE. Next: cold boot, enable eth4 tx `TSTC` first, then correlate tx `TFRC`/`TFDC` with each of the first 8 hits.
