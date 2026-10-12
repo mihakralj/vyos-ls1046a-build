@@ -13,12 +13,12 @@
 # Usage: bin/testrig-wgfp-p1.sh [run]
 # Env:   SINKS=4 (queues, one per CPU)  FLOWS=16  TOUCH=2 (0 none, 1 first+last 64 B, 2 read all, 3 read+write)
 #        PPS_LIST="100000 300000 500000 700000 0"  (0 = unpaced)  SECS=8  SIZE=1434 (wire bytes incl FCS)
-#        TBLS="3 2" (ehash tables the records are inserted into: the per-port IPv4 tables)
-#        OUT=csv
+#        TBLS="0 2 3" (the 50-byte-key ehash tables; a record only matches in the table of the port the frame enters)
+#        RECREATE=1 (destroy existing sinks first, to change SINKS; stop traffic before)  OUT=csv
 # Gate G1 (plan): >= 600000 frames/s delivered over 4 CPUs at <= 0.1 % loss.  Kill: < 350000 frames/s.
 set -u
 SINKS=${SINKS:-4}; FLOWS=${FLOWS:-16}; TOUCH=${TOUCH:-2}; SECS=${SECS:-8}; SIZE=${SIZE:-1434}
-PPS_LIST=${PPS_LIST:-"100000 300000 500000 700000 0"}; TBLS=${TBLS:-"3 2"}
+PPS_LIST=${PPS_LIST:-"100000 300000 500000 700000 0"}; TBLS=${TBLS:-"0 2 3"}
 OUT=${OUT:-/mnt/builds/ask2-review/oracle/wgfp-p1-$(date +%Y%m%d-%H%M).csv}
 cd "$(dirname "$0")/.."
 DUT=vyos@192.168.1.185
@@ -34,17 +34,22 @@ dut 'zcat /proc/config.gz | grep -qE "^CONFIG_(PROVE_LOCKING|DEBUG_SPINLOCK)=y"'
 echo "kernel: $(dut 'uname -v | cut -c1-60')"
 dut 'sudo sysctl -qw kernel.softlockup_panic=1 kernel.panic_on_rcu_stall=1'   # a lockup reboots (panic=60) instead of hanging
 
-dut "echo 'create $SINKS' | sudo tee $DBG/ctl >/dev/null" || fail "sink create failed (see dmesg)"
+if [ "${RECREATE:-0}" = 1 ]; then   # destroy old sinks first; the records inserted below replace the old ones (dup-key evict)
+  dut "echo destroy | sudo tee $DBG/ctl >/dev/null"
+fi
+if dut "sudo cat $DBG/stats" | grep -q "sinks=$SINKS"; then echo "reusing $SINKS existing sinks"
+else dut "echo 'create $SINKS' | sudo tee $DBG/ctl >/dev/null" || fail "sink create failed (see dmesg)"; fi
 dut "echo 'touch $TOUCH' | sudo tee $DBG/ctl >/dev/null"
 FQIDS=($(dut "sudo cat $DBG/stats" | sed -n 's/.*fqid=0x\([0-9a-f]*\).*/\1/p'))
 [ ${#FQIDS[@]} -eq "$SINKS" ] || fail "expected $SINKS sink fqids, got ${#FQIDS[@]}"
 echo "sink fqids: ${FQIDS[*]}"
 
-# 46-byte dual-lane key: family 0x40 | src | dst | 32 zero (v6 lane) | proto | sport | dport
+# 50-byte dual-lane key (ask_internal.h ASK_FE_KEY_SIZE_DUAL): family 0x40 | src | dst | 32 zero (v6 lane) |
+# proto | sport | dport | VID (0) | PPPoE session (0)
 SIP=0a630170; DIP=0a630271; ZERO32=$(printf '00%.0s' $(seq 1 32))
 for k in $(seq 0 $((FLOWS-1))); do
   sport=$(printf '%04x' $((10000+k)))
-  key="40${SIP}${DIP}${ZERO32}11${sport}2328"
+  key="40${SIP}${DIP}${ZERO32}11${sport}232800000000"
   fq=${FQIDS[$((k % SINKS))]}
   for t in $TBLS; do
     dut "echo 'add $t $key $fq' | sudo tee $FE >/dev/null" || fail "record insert failed (table $t flow $k)"
