@@ -1,0 +1,115 @@
+diff --git a/data/config-mode-dependencies/vyos-1x.json b/data/config-mode-dependencies/vyos-1x.json
+index dd3d28d..e45bf60 100644
+--- a/data/config-mode-dependencies/vyos-1x.json
++++ b/data/config-mode-dependencies/vyos-1x.json
+@@ -73,6 +73,7 @@
+         "static_arp": ["protocols_static_arp"]
+     },
+     "interfaces_wireguard": {
++        "conntrack": ["system_conntrack"],
+         "firewall": ["firewall"],
+         "vxlan": ["interfaces_vxlan"]
+     },
+diff --git a/data/templates/conntrack/nftables-ct.j2 b/data/templates/conntrack/nftables-ct.j2
+index a834c7f..17ccaab 100644
+--- a/data/templates/conntrack/nftables-ct.j2
++++ b/data/templates/conntrack/nftables-ct.j2
+@@ -50,6 +50,9 @@ table ip vyos_conntrack {
+ 
+     chain PREROUTING {
+         type filter hook prerouting priority -300; policy accept;
++{% if wireguard_ports %}
++        udp dport { {{ wireguard_ports | join(', ') }} } fib daddr type local counter notrack
++{% endif %}
+         counter jump VYOS_CT_IGNORE
+         ct state untracked accept
+         counter jump FW_CONNTRACK
+@@ -68,6 +71,9 @@ table ip vyos_conntrack {
+ 
+     chain OUTPUT {
+         type filter hook output priority -300; policy accept;
++{% if wireguard_ports %}
++        udp sport { {{ wireguard_ports | join(', ') }} } counter notrack
++{% endif %}
+         counter jump VYOS_CT_IGNORE
+         ct state untracked accept
+         counter jump FW_CONNTRACK
+@@ -152,6 +158,9 @@ table ip6 vyos_conntrack {
+ 
+     chain PREROUTING {
+         type filter hook prerouting priority -300; policy accept;
++{% if wireguard_ports %}
++        udp dport { {{ wireguard_ports | join(', ') }} } fib daddr type local counter notrack
++{% endif %}
+         counter jump VYOS_CT_IGNORE
+         ct state untracked accept
+         counter jump FW_CONNTRACK
+@@ -169,6 +178,9 @@ table ip6 vyos_conntrack {
+ 
+     chain OUTPUT {
+         type filter hook output priority -300; policy accept;
++{% if wireguard_ports %}
++        udp sport { {{ wireguard_ports | join(', ') }} } counter notrack
++{% endif %}
+         counter jump VYOS_CT_IGNORE
+         ct state untracked accept
+         counter jump FW_CONNTRACK
+diff --git a/interface-definitions/system_conntrack.xml.in b/interface-definitions/system_conntrack.xml.in
+index 733a4a4..be96d66 100644
+--- a/interface-definitions/system_conntrack.xml.in
++++ b/interface-definitions/system_conntrack.xml.in
+@@ -320,6 +320,12 @@
+               </leafNode>
+             </children>
+           </node>
++          <leafNode name="disable-wireguard-bypass">
++            <properties>
++              <help>Track the UDP flows of WireGuard listen ports (default: not tracked)</help>
++              <valueless/>
++            </properties>
++          </leafNode>
+           <leafNode name="table-size">
+             <properties>
+               <help>Size of connection tracking table</help>
+diff --git a/src/conf_mode/interfaces_wireguard.py b/src/conf_mode/interfaces_wireguard.py
+index 850c66a..8d7e7c4 100755
+--- a/src/conf_mode/interfaces_wireguard.py
++++ b/src/conf_mode/interfaces_wireguard.py
+@@ -89,6 +89,10 @@ def get_config(config=None):
+         wireguard['prev_fwmark'] = prev.get('fwmark')
+         wireguard['prev_vrf'] = prev.get('vrf')
+ 
++    # The conntrack bypass for WireGuard listen ports is rendered by system_conntrack
++    if 'port_changed' in wireguard or 'deleted' in wireguard or is_node_changed(conf, base + [ifname, 'disable']):
++        set_dependents('conntrack', conf)
++
+     # Check vrf membership, to ensure firewall is updated
+     if is_vrf_changed(conf, ifname):
+         set_dependents('firewall', conf)
+diff --git a/src/conf_mode/system_conntrack.py b/src/conf_mode/system_conntrack.py
+index 559aebc..89b9f57 100755
+--- a/src/conf_mode/system_conntrack.py
++++ b/src/conf_mode/system_conntrack.py
+@@ -105,6 +105,22 @@ def get_config(config=None):
+ 
+     conntrack['module_map'] = module_map
+ 
++    # WireGuard data packets are encrypted and never offloaded, so tracking
++    # the outer UDP flow only costs cycles (conntrack, helper and firewall
++    # chains on every packet of the serial tx/rx stage). Skip tracking for the
++    # configured listen ports unless disabled. Only packets addressed to this
++    # router (prerouting) and sent from the listen port (output) are matched,
++    # forwarded traffic using the same port numbers stays tracked.
++    conntrack['wireguard_ports'] = []
++    if 'disable_wireguard_bypass' not in conntrack:
++        wg = conf.get_config_dict(['interfaces', 'wireguard'], key_mangling=('-', '_'),
++                                  get_first_key=True, no_tag_node_value_mangle=True)
++        ports = set()
++        for ifname, ifconfig in wg.items():
++            if isinstance(ifconfig, dict) and 'disable' not in ifconfig and 'port' in ifconfig:
++                ports.add(int(ifconfig['port']))
++        conntrack['wireguard_ports'] = sorted(ports)
++
+     if conf.exists(['service', 'conntrack-sync']):
+         set_dependents('conntrack_sync', conf)
+ 
