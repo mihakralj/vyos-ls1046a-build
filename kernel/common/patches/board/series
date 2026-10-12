@@ -225,6 +225,20 @@
 # Upstream-Status: Inappropriate | Risk-Tier: B
 4013-dpaa-wgfp-lab-sink-fqs.patch
 
+# ── 4014/4015: WireGuard fast path P2a, lab seal (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md) ──
+# 4014: dpaa_wgfp gets a consumer hook (include/linux/fsl/dpaa_wgfp.h):
+# dpaa_wgfp_register/unregister, dpaa_wgfp_set_egress (resolves the egress
+# port's no-confirm TX FQ), dpaa_wgfp_xmit (sync + enqueue the same buffer),
+# dpaa_wgfp_drop. 4015: wireguard/fastpath.c (built only with FSL_DPAA_ETH)
+# registers the hook when root writes a config to the wgfp_lab module
+# parameter and seals steered IPv4 frames IN PLACE with a fixed lab key into
+# WireGuard transport packets (Eth+IP+UDP+WG header written into the buffer
+# headroom), then transmits the same buffer: measures the real transmit
+# fast-path cost. Inert by default; not a usable VPN (no peer, fixed key).
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4014-dpaa-wgfp-consumer-hook.patch
+4015-wireguard-dpaa-fastpath-lab.patch
+
 # ── 4012 RETIRED 2026-10-12: dpaa_eth RX default path through napi_gro_receive ──
 # Moved to kernel/common/patches/archive/ (not applied). rx_default_dqrr() uses
 # netif_receive_skb(), so GRO never runs on DPAA1 RX. v1 (unconditional
