@@ -245,6 +245,25 @@ Mask 10 gives the best single tunnel (1.03 against an unmasked mean of 0.94) but
 
 Next image content: patch 4011, vyos-1x 056, the modprobe option; no 4012. The conntrack ignore rules stay a documented per-deployment step (2.5); making them automatic needs a product decision because untracked packets break firewall rules that match only `state new`.
 
+### 2.11 Final validation of image 1740 (4011 + 056 + serial_cpus=14, no 4012), 2026-10-12
+
+Installed by the operator; production kernel, no lock debugging, `softlockup_panic` and `panic_on_rcu_stall` armed, no BUG/stall/OOM messages for the whole run. `/etc/modprobe.d/ls1046a-wireguard.conf` loads `wireguard serial_cpus=14` (read back as 14 after `modprobe`).
+
+- **Placement:** 8 recreated tunnels put the serial worker only on CPUs 1, 2, 3 (never 0): CPU1 0.98 to 1.01, CPU3 0.95 to 1.00, CPU2 0.86 to 0.88 Gbit/s (`wg-v4 up`, no ignore rules). Unmasked it ranged 0.82 to 1.03.
+- **Validated matrix, conntrack ignore recipe on, GRO default (on), 3 x 30 s, 4 streams, Gbit/s:**
+
+| Cell | up | down | bidir |
+|---|---|---|---|
+| wg-v4 | 1.13 | 1.60 | 1.46 |
+| wg-v6 | 1.09 | 1.50 | 1.40 |
+
+- **Recipe effect, same image:** `wg-v4 up` 0.99 without the ignore rules, 1.13 with them (+15%).
+- **Software forwarding** (hardware offload removed, `Armed ports: (none)`, 8 flows, GRO on as shipped): up 5.65 (sd 0.69; reps 4.71, 5.90, 6.34), bidir 6.13. Image 0350 gave 6.43 (sd 0.09) and 6.33. The two images have the same forwarding code, so the difference is run-to-run noise (first rep 4.71 with 194k retransmits), but 3 reps cannot prove it; a 6-rep rerun is the cheap way to close it.
+
+Reading against 2.7 (image 0350, mask 10): `up` is lower (1.13 against 1.21) because mask 14 admits CPU 2, the weakest single-tunnel placement; `down` is higher (1.60 against 1.46). Net: mask 14 trades about 7% of single-tunnel `up` for no multi-tunnel loss, and no CPU 0. If the target workload is exactly one tunnel, mask 10 is the better setting; for several peers, 14.
+
+Best shipped-image numbers (1740, single tunnel, recipe on): wg-v4 1.13 up, 1.60 down, 1.46 bidir. Best measured anywhere: 4 tunnels 1.82 up (GRO off, 4012 v2, now retired) and 1.79 with the shipped build (mask 0).
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
