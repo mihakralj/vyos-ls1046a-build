@@ -264,6 +264,17 @@ Reading against 2.7 (image 0350, mask 10): `up` is lower (1.13 against 1.21) bec
 
 Best shipped-image numbers (1740, single tunnel, recipe on): wg-v4 1.13 up, 1.60 down, 1.46 bidir. Best measured anywhere: 4 tunnels 1.82 up (GRO off, 4012 v2, now retired) and 1.79 with the shipped build (mask 0).
 
+### 2.12 Patch 057: automatic conntrack bypass for WireGuard listen ports
+
+`data/vyos-1x-057-conntrack-wireguard-bypass.patch` (applies after 056) makes the VyOS conntrack script collect the listen port of every enabled `interfaces wireguard` interface and render, in the IPv4 and IPv6 `vyos_conntrack` tables:
+
+- PREROUTING: `udp dport { ports } fib daddr type local counter notrack`
+- OUTPUT: `udp sport { ports } counter notrack`
+
+Scope is deliberately narrow: only packets addressed to this router, and only packets it sends from the listen port. Forwarded traffic that happens to use the same port numbers (for example a WireGuard client behind the router) stays tracked. `interfaces_wireguard` now triggers `system_conntrack` when a port is added, changed, disabled or deleted (`config-mode-dependencies`: `interfaces_wireguard -> conntrack`). New leaf `system conntrack disable-wireguard-bypass` turns the behaviour off. Default is on, which is a behaviour change: a firewall rule that accepts the WireGuard port only with `state new` or `established` no longer sees these packets (state `untracked`) and must allow the port statelessly; a plain `destination port 51820` accept rule is unaffected.
+
+Live test on `.185` (image 1740 with the changed scripts and template installed temporarily; the new XML leaf needs a full image, so `disable-wireguard-bypass` was not exercised): adding `wg100` port 51899 produced the rules in both families; adding `wg101` merged to `{ 51898, 51899 }`; changing `wg100` to 51897, disabling `wg101` and deleting both each updated the set, ending with no rule. Traffic: 3 UDP packets to 10.99.1.185:51899 hit the rule (counter 3, no conntrack entry) while 3 packets to the same port forwarded to 10.99.2.113 were still tracked (3 entries). Originals restored afterwards. The throughput effect is the one measured in 2.5 and 2.11 (+15 to 26% on `up`); it still has to be confirmed on the next image with a VyOS-managed tunnel.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
