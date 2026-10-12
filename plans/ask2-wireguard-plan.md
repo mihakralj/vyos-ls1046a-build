@@ -275,6 +275,40 @@ Scope is deliberately narrow: only packets addressed to this router, and only pa
 
 Live test on `.185` (image 1740 with the changed scripts and template installed temporarily; the new XML leaf needs a full image, so `disable-wireguard-bypass` was not exercised): adding `wg100` port 51899 produced the rules in both families; adding `wg101` merged to `{ 51898, 51899 }`; changing `wg100` to 51897, disabling `wg101` and deleting both each updated the set, ending with no rule. Traffic: 3 UDP packets to 10.99.1.185:51899 hit the rule (counter 3, no conntrack entry) while 3 packets to the same port forwarded to 10.99.2.113 were still tracked (3 entries). Originals restored afterwards. The throughput effect is the one measured in 2.5 and 2.11 (+15 to 26% on `up`); it still has to be confirmed on the next image with a VyOS-managed tunnel.
 
+### 2.13 Reassessment against the original model (2026-10-12)
+
+The original staged model (1.4 to 4.0-5.5 Gbit/s aggregate, "every figure modelled, not measured") was checked against the measurements in 2.1 to 2.12.
+
+| Item | Model | Measured on `.185` |
+|---|---|---|
+| Clock | 1.8 GHz | 1.6 GHz |
+| ChaCha20-Poly1305 | 5.3 cycles/byte, 10.9 Gbit/s on 4 cores | 6.45 cycles/byte, about 7.9 Gbit/s |
+| Stage 0, single tunnel | 1.2 to 1.6 | up 0.88 to 1.02, down 1.36 to 1.41 (`.106`: 1.4 to 1.5) |
+| Stage 1, config | 1.1 to 1.2x | about 0; the real risk was a lockdep image costing 6x |
+| Stage 2, spread, 4 tunnels | 1.5 to 1.6x | 1.84x up, 1.32x down; single peer unchanged |
+| Stage 3, datapath | about 1.3x | conntrack/netfilter bypass +15 to 26%; nothing else validated |
+| Stage 4, assembly | 1.05x | consistent, at most about 5% |
+| Software-only end state | 2.7 to 4.0 | 1.8 up / 1.9 down with 4 tunnels; 1.1 to 1.6 single |
+| Non-crypto cycles per packet | 7k to 10k at stage 4 | about 27k (total about 36k, crypto about 9k) |
+
+Conclusions:
+
+- The ordering of stages holds (config, spread, datapath, assembly last), and the exclusions (SEC/CAAM, FMan header edits, AES/PMULL, hardware flow offload of tunnel traffic, 10G) are confirmed. `/proc/crypto` shows no CAAM ChaCha/Poly1305.
+- The model's non-crypto cost is off by about 3x, so 2.7 to 4.0 Gbit/s is not reachable with stages 3 and 4 as written. Revised software-only estimate: 2.2 to 2.8 Gbit/s aggregate (unverified until the null-cipher run in stage 3a).
+- Missed by the model: serial-stage placement (about 25% on one tunnel), debug kernels, and netfilter/conntrack on the outer packets (our largest software gain, now patches 4011, 056, 057).
+- Stage 3 items that no longer hold: `skb_cow_data` (absent from the profile); inner GRO aggregation (no gain, -7% at 4 tunnels because the tunnel re-splits); GRO-layer decryption needs GRO on the DPAA RX path, which patch 4012 tried: v1 hard-locked the board, v2 cost software forwarding 6 to 17% (retired). A selective variant (GRO only for outer UDP to WireGuard ports) is unproven.
+- Stage 5 (FMan fast path): forwarding-equivalent work is about 12k of 36k cycles, so the ceiling is about 30%, realistically 15 to 20%; it needs an offline port for reinjection that ASK2 does not have and sits on the flow engine with the thousands-of-flows collapse. Stage 6 (QMan order restoration) is the only item that lifts a single tunnel; mainline `qbman` has not been checked for the ORP enqueue.
+- Verified open items: CAAM Era 8 has no ChaCha/Poly1305 (done); cycles per byte measured in userspace (done). Still open: `qbman` ORP enqueue, KeyGen byte extraction at the WireGuard counter offset, kernel-side cycles/byte.
+
+Revised stage 3 plan:
+
+1. **3a: null-cipher ceiling.** A test-only build that replaces ChaCha20-Poly1305 with a copy (insecure, never shipped) to measure everything except crypto in one run. Decision rule: null-cipher at or above 3 Gbit/s on 4 tunnels means the non-crypto overhead is the target (do 3b, then stage 5/6 on the numbers); below 2.4 means crypto assembly (stage 4) is worth its 5% and stages 5/6 are not justified.
+2. **3b: cross-core handoffs.** Batch `queue_work_on` and the per-packet queue operations in WireGuard (the 15k cycles of WireGuard-specific overhead). Upstreamable.
+3. **3c: lean firewall path.** Per-rule counters and chains on the tunnel path.
+4. Stage 4 and stages 5/6 stay gated on 3a.
+
+Product question outside the plan: if the goal is VPN throughput, IPsec offload through CAAM (about 2 to 3 Gbit/s, `plans/ASK2-IPSEC-OFFLOAD-PLAN.md`) is a stronger case than months of out-of-tree WireGuard work.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
