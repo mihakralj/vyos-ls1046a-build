@@ -178,6 +178,29 @@ Image `2026.10.12-0350-rolling` (production, no lock debugging). `wireguard.seri
 
 Against the earlier `.185` sessions (2.2): `up` went from 0.88 / 1.02 to 1.21 to 1.22 and is now repeatable (sd below 0.04); `down` from 1.36 / 1.41 to 1.40 to 1.46; `bidir` is unchanged within noise (1.45 to 1.48 against 1.14 to 1.49). `.106` session 2 stays ahead on `up` (1.46 v4, 1.36 v6) and `down` (1.55 v4, 1.53 v6), and equal on `bidir`; `.185` is within 6% of `.106` on `down` and 17% behind on `up`. The ignore rules and the mask are runtime/config only here (not saved in the board config; the mask resets at reboot).
 
+### 2.8 Stage 3 profile on image 0350 (4 tunnels, `up`, 2026-10-12)
+
+Four tunnels keep all four cores busy, so the profile shows where the per-packet cost really goes. Aggregate throughput first: four tunnels reach 1.50 Gbit/s on image 0350; with the conntrack ignore rules for the four outer ports (recipe in 2.5, port range 51830-51833) they reach 1.74 Gbit/s (+16%); two more runs with the recipe gave 1.70 and 1.73 to 1.77. Profile with the recipe applied (`perf record -a -g`, 8 s, percentages of all samples):
+
+| Cost | Share | Notes |
+|---|---|---|
+| Crypto leaf (`chacha_4block_xor_neon` 18.8, `poly1305_blocks_neon` 4.3, `chacha_permute` 1.8, `kernel_neon_begin/end` about 1.4) | about 28% | Encrypt workers are 42% inclusive; the rest is interrupt and scheduler noise attributed into them |
+| RX: `dpaa_eth_poll` 16.4 (`rx_default_dqrr` 9.2) plus `net_rx_action` | about 29% inclusive | QMan portal dequeue and the forwarding stack on RX |
+| TX serial worker `wg_packet_tx_worker` | about 30% inclusive | `udp_tunnel_xmit_skb` 19.9, `__dev_queue_xmit` 14.5 |
+| Netfilter `nf_hook_slow` | about 16% inclusive | `nft_do_chain` 6.7 (3.8 self), `nft_counter_eval` 1.4, conntrack about 3 |
+| Workqueue and scheduling (`queue_work_on` 1.5, `finish_task_switch` 1.7, spin unlock paths about 3) | about 6% | |
+| AF_PACKET (`packet_rcv`) | about 0.7% self, 3% inclusive without the recipe | `dhclient` holds ETH_P_ALL raw sockets on every interface it runs on, here eth3 and eth4 |
+
+Findings that change stage 3:
+
+- `skb_cow_data` and similar copy paths do not appear. The "no `skb_cow_data`" item is dropped.
+- Crypto leaf per-call overhead outside the bulk cipher is small: the generic C `chacha_permute` for the Poly1305 key block (`chacha_crypt_arch` falls back to generic C for 64 bytes or less) is 1.8%, `kernel_neon_begin/end` about 1.4%. Together at most 3%, so a first-block NEON patch is not worth a CI cycle on its own.
+- GRO is enabled on eth3 and eth4 and makes no difference: 4-tunnel `up` is 1.73 Gbit/s with GRO on and 1.72 with it off (3 reps each). Inner TCP is not being aggregated before it reaches the tunnel, so the forwarding stack runs once per 1448-byte segment. Making GRO effective on the DPAA RX path (batching same-flow packets per NAPI poll, tying RSS and `gro_flush_timeout`/`napi_defer_hard_irqs` together) is the one large structural lever left, because every RX-side cost (about 29%) and the netfilter forward path would then run once per aggregate.
+- The remaining netfilter share (about 16% inclusive) is the VyOS firewall base chains and per-rule counters on forwarded inner traffic and the tunnel's input and output; a lean firewall configuration, or removing the `counter` statements from default-action rules, is the cheap lever before any datapath code.
+- dhclient on a data interface costs an AF_PACKET delivery on every packet; relevant for WAN-DHCP deployments, not for static addressing.
+
+Revised stage 3 order: (1) make GRO effective on `fsl_dpa` RX and measure forwarding cost per aggregate; (2) lean firewall and no per-packet counters for the tunnel path; (3) fewer cross-core handoffs (`queue_work_on`, lock traffic) only if (1) and (2) leave the same profile; (4) batched NEON sections and the first-block NEON path are bundled into stage 4 with the assembly work.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
