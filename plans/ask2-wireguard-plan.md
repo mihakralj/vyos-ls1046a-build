@@ -309,6 +309,29 @@ Revised stage 3 plan:
 
 Product question outside the plan: if the goal is VPN throughput, IPsec offload through CAAM (about 2 to 3 Gbit/s, `plans/ASK2-IPSEC-OFFLOAD-PLAN.md`) is a stronger case than months of out-of-tree WireGuard work.
 
+### 2.14 Stage 3a result: where the non-crypto cycles go (image 1740, 4 tunnels up, 2026-10-12)
+
+The null-cipher build was dropped before it was built: crypto is about 28% of cycles, so removing it entirely predicts about 2.5 Gbit/s from 1.8, between the 2.4 and 3.0 decision thresholds, so the run could not have decided anything, and it needs a CI image with an insecure Kconfig option (the running kernel only loads modules signed with its own build key). A function-level attribution of one more profile replaced it.
+
+Profile: `perf record -a -g -F 1999`, 10 s, 4 tunnels, conntrack ignore ports applied, GRO off, aggregate 1.61 Gbit/s while profiling. Shares of all samples (self unless marked inclusive):
+
+| Bucket | Share | Detail |
+|---|---|---|
+| Crypto leaf | about 26.5% | `chacha_4block_xor_neon` 18.5, `poly1305_blocks_neon` 4.2, `chacha_permute` 1.7 (Poly1305 key block in generic C), `kernel_neon_begin/end` + `fpsimd_flush_cpu_state` 1.8 |
+| Rest of the encrypt call | about 10% | `chacha20poly1305_encrypt_sg_inplace` is 36.8% inclusive against 26.5% of leaves; scatterlist setup and copies, and interrupt time landing inside it |
+| Outer TX, serial `wg_packet_tx_worker` (inclusive) | 37.1% | `udp_tunnel_xmit_skb` 18.8, `__dev_queue_xmit` 14.5, `dpaa_start_xmit` 2.3 |
+| RX softirq (inclusive) | 29.6% | `dpaa_eth_poll` 16.3 (`rx_default_dqrr` 9.2 incl, 3.6 self), `wg_packet_rx_poll` 6.3, `ip_forward` 2.7 |
+| Netfilter (inclusive) | 16.4% | `nf_hook_slow`; `nft_do_chain` 4.1 self (6.9 incl), `nft_counter_eval` 1.4, conntrack about 3, `nf_flow_offload_ip_hook` 0.4 (flowtable ingress hook runs on the outer packets too) |
+| Handoff, wakeup, scheduling | about 10 to 12% | `queue_work_on` 2.0, `finish_task_switch` 2.4, `schedule` 2.4, `__local_bh_enable_ip` 1.75, spin unlocks about 2.6, `wg_prev_queue_dequeue` 0.7 |
+
+Findings:
+
+- There is no single dominant remaining bucket. Handoff and scheduling (stage 3b) is capped at about 10%. The remaining netfilter share is capped at roughly 8 to 11% (the earlier all-tables-removed run reached 1.36 against 1.22 with the recipe). Crypto assembly is capped near 5%. Together they are worth about +25%, which is consistent with the revised 2.2 to 2.8 Gbit/s software-only estimate.
+- The earlier "15k cycles of WireGuard-specific overhead" was mostly the second pass of the outer packet through the IP, netfilter and `dev_queue_xmit` path (about 30% of cycles) and not queueing.
+- The GRO-off, notrack recipe aggregate (1.61 under profiling, 1.8 unprofiled) leaves RX plus outer TX plus netfilter as roughly 60% of all cycles, i.e. the work an FMan fast path would remove; its ceiling stays about 30% (2.13).
+
+Revised order: 3c (trim the remaining netfilter hooks on the tunnel path: per-rule counters, flowtable ingress hook for WireGuard ports) as cheap config/patch experiments; 3b (batching) and stage 4 as bounded 5 to 10% items; stages 5 and 6 only if the product wants more than about 2.5 Gbit/s from software WireGuard.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
