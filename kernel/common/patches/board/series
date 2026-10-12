@@ -200,6 +200,19 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4010-clk-qoriq-ls1046a-cmux-full-range.patch
 
+# ── 4011: wireguard serial-work CPU mask (stage 2c of plans/ask2-wireguard-plan.md) ──
+# WireGuard homes each peer's serial tx/rx worker on CPU
+# peer->internal_id % online_cpus, and internal_id is a global counter, so
+# the serial stage (the single-core bottleneck, about 75% of that core) lands
+# on a different CPU for every new wg0. Measured on .185 (wg-v4 up, 6.18.55):
+# CPU0 0.82, CPU2 0.90, CPU1 1.03, CPU3 1.03 Gbit/s -- CPU0 shares the core with
+# QMan portal 0 RX NAPI. New module parameter wireguard.serial_cpus (ulong
+# bitmask, 0644, default 0 = stock behaviour) restricts the candidate CPUs;
+# e.g. 0xa keeps the serial stage on CPUs 1 and 3. Read only when a peer picks
+# its CPU, so it applies to peers created after the write.
+# Upstream-Status: Pending | Risk-Tier: B
+4011-wireguard-serial-cpu-mask.patch
+
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
 # patch-series-cleanup (2026-09-11): squashed 0155+0156+0157 (tight,
 # blob-chained fe_arm refinement, fman_pcd.c only). See its header.
