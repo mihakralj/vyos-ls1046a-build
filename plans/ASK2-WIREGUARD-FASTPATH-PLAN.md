@@ -1,6 +1,6 @@
 # ASK2 WireGuard fast path (stages 5 and 6): FMan classification, QMan queues, a zero-skb datapath
 
-**2026-10-12 · dpaa1 · Status: P0 and P1 done, gate G1 PASSED on the board (section 4, P1 result). P2 and later not started.** This plan replaces the "stage 5 / stage 6" sketch in `plans/ask2-wireguard-plan.md` with a design grounded in this tree's code and the qdrant FMan/QMan manual extracts. Every number marked *estimate* is derived from the profiles in `ask2-wireguard-plan.md` 2.8 to 2.16 and must be replaced by measurements at the gate that is named next to it.
+**2026-10-12 · dpaa1 · Status: P0, P1 and P2a done: gate G1 passed, and the lab transmit path seals and sends about 465k packets/s (5.3 Gbit/s inner) with valid ChaCha20-Poly1305 output. P2b (real peer) and later not started.** This plan replaces the "stage 5 / stage 6" sketch in `plans/ask2-wireguard-plan.md` with a design grounded in this tree's code and the qdrant FMan/QMan manual extracts. Every number marked *estimate* is derived from the profiles in `ask2-wireguard-plan.md` 2.8 to 2.16 and must be replaced by measurements at the gate that is named next to it.
 
 ## 0. Why this, and what changed from the earlier sketch
 
@@ -125,6 +125,23 @@ Built before P2 proper because it answers the question P2 depends on, using only
 - **Lab behaviour.** Each steered Ethernet+IPv4 frame is sealed in place with a fixed lab key (inner IP packet padded to 16 bytes, 16-byte tag appended), the Ethernet, IPv4, UDP and WireGuard transport headers (58 bytes) are written into the buffer headroom, and the same buffer is enqueued to eth4's no-confirm queue. No peer, no handshake, a global counter, IPv4 outer with a zero UDP checksum: it measures the cost and proves the bytes, it is not a VPN.
 - **Harness `bin/testrig-wgfp-p2a.sh`.** Same flows and records as P1; reports sealed packets per second, what dell2 receives (X710 MAC counter), transmit failures and per-core load, and decrypts one captured packet on dell2 with `cryptography` to prove the sealed bytes are valid. Frame size 1438 on the wire gives a 1420-byte inner IP packet (sealed IP length 1484, inside the 1500 MTU).
 - **Expectation to test:** about 13k cycles per packet, about 440k packets/s on four cores. A result under 250k packets/s means the model is wrong and P2 needs re-planning before any WireGuard integration.
+
+**P2a result (image 2243, `.185`, 2026-10-12): the lab transmit path works and runs at about 465k packets/s.** 16 flows, four sinks, 1438-byte wire frames (1420-byte inner IP), real ChaCha20-Poly1305 in place, headers written into the buffer headroom, same buffer enqueued to eth4's no-confirm queue. dell2 counts what arrives at its NIC. (`/mnt/builds/ask2-review/oracle/wgfp-p2a-20261012-2301.csv`)
+
+| Offered (frames/s) | Sealed | dell2 received | Transmit failures | Core load |
+|---|---|---|---|---|
+| 98k | 100.00% | 100.00% of sealed | 0 | 3 to 8% |
+| 196k | 100.00% | 100.00% | 0 | 8 to 9% |
+| 295k | 100.00% | 100.00% | 0 | 12 to 18% |
+| 391k | 99.99% (399,972/s) | 100.00% | 0 | 16 to 25% |
+| 491k | 93.6% (468,132/s) | 100.00% | 0 | 19 to 40% |
+| 853k (unpaced) | 54.2% (464,825/s) | 100.00% | 0 | 43% on every core |
+
+- **Correctness:** two captured packets were decrypted on dell2 with a userspace ChaCha20-Poly1305 and the lab key: WireGuard type 4, receiver index 7, counters 0 and 1, outer frame 1498 bytes, inner IPv4 `10.99.1.112:1000x -> 10.99.2.113:9000`, total length 1420, 4 pad bytes. The sealed bytes are valid.
+- **Ceiling:** the sealer plateaus at about 465k packets/s, which is 5.3 Gbit/s of inner payload (5.57 Gbit/s on the wire) and 2.9 times today's software WireGuard (about 158k packets/s at 1.8 Gbit/s). The estimate was 420k with an 80% range of 330k to 520k; the model's CPU-bound figure was 460k.
+- **Everything the sealer emitted arrived:** dell2 received 100% of sealed frames at every rate and there were no enqueue failures, so the loss at the top rates is before the sealer (the same burst-absorption effect seen in P1), not in transmit.
+- **Unexplained, and worth explaining before P2b:** at the plateau every core reports only 43% busy, which does not look CPU-bound, yet the plateau is flat from 500k to 853k offered and almost exactly at the model's CPU-bound figure. Either `/proc/stat` under-reports the time spent in NAPI with NEON, or a hardware or queue limit sits near 465k packets/s. `perf stat -a -e cycles` on the DUT during an unpaced run would separate the two (cycles stop counting when a core idles).
+- **Still not shown:** a real peer and keypair, rekey and timers, TCP with its ACK stream (the receive path is still the software path), IPv6 and the receive direction.
 
 ### P2. TX fast path (stage 5, transmit half) (gate G2)
 
