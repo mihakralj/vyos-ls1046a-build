@@ -151,6 +151,18 @@ set system conntrack ignore ipv4 rule 20 source port 51820
 
 Caveat: untracked packets have `ct state untracked`, so a firewall that only accepts `state new` or `established` for the WireGuard port will drop them; allow the port explicitly (no state match), which is the usual VyOS WireGuard firewall rule. A fully automatic rule per WireGuard listen port was left out for that reason. The remaining distance to the all-tables-removed result (1.36) is the rest of the `vyos_conntrack` prerouting and output chains, not the helpers.
 
+### 2.6 Multi-tunnel scaling (stage 2b)
+
+`bin/testrig-wireguard-multi.sh` runs N tunnels with distinct listen ports (`wgm0..`, outer UDP 51830+K, inner `10.99.(210+K).0/24`), one iperf3 pair per tunnel, all started together. Four tunnels are configured and 1, 2 or 4 of them carry traffic; 2 reps of 20 s, 2 streams per tunnel, `.185` image 0117, aggregate Gbit/s:
+
+| Active tunnels | up | down | Busy CPUs (up) |
+|---|---|---|---|
+| 1 | 0.85 | 1.33 | one (the serial stage) |
+| 2 | 1.27 | 1.67 | two |
+| 4 | 1.56 | 1.76 | all four, DUT 92% busy |
+
+Per-tunnel up at 4 tunnels is 0.27 to 0.50 Gbit/s (placement again: tunnels on CPU 0 get the least). So spreading helps (+84% from 1 to 4 tunnels on `up`, +32% on `down`) and then the box is CPU-bound at about 1.6 Gbit/s up and 1.75 Gbit/s down. At 1420-byte packets 1.56 Gbit/s is about 137k packets per second, about 46k cycles per packet across four cores at 1.6 GHz, of which crypto is about 9.3k, so about 80% is per-packet overhead outside the crypto. That makes the stage 3 datapath work (GRO decryption, no `skb_cow_data`, batched NEON sections, less cross-core traffic) the next lever, ahead of crypto assembly, matching the gate in section 6. The 4-tunnel number is the practical aggregate ceiling to beat.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
@@ -207,7 +219,7 @@ Phase 2 work items, in order (status 2026-10-12):
 
 1. **2c, placement (measured 2.3, patch 4011 written, harness control done, board validation waiting on a CI image):** the serial tx worker CPU should be chosen away from the QMan portal RX CPU. First measure the effect of keeping RX NAPI off the serial CPU; then a small WireGuard patch giving the device a configurable serial CPU mask (net-next candidate), instead of `internal_id % online_cpus`. Expected up to +25% on `up` for a bad placement; the best placement already reaches about 1.03.
 2. **2a, netfilter on outer packets (measured 2.4, patch 056 and config recipe in 2.5):** `nf_hook_slow` is 19% of the serial core; the `vyos_conntrack` helper chains and conntrack on the outer flow are the cost (+35% together). Trim or bypass the VyOS output/prerouting chains for the tunnel endpoint (measured so far: conntrack bypass alone +4%/+14%). Compare on the same peer instance so placement does not mask the result.
-3. **2b, multi-peer and multi-port:** harness support for N tunnels (one peer each, distinct ports) with dell-side spread; this is the only change that moves several serial stages onto different cores.
+3. **2b, multi-peer and multi-port (done, 2.6):** `bin/testrig-wireguard-multi.sh`; 4 tunnels reach 1.56 up / 1.76 down aggregate and saturate all four cores.
 
 One peer is one outer UDP 5-tuple, so KeyGen hashes it to one frame queue and one core.
 
