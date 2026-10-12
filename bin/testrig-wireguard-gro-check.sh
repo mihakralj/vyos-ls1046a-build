@@ -2,6 +2,8 @@
 # testrig-wireguard-gro-check.sh — validate dpaa RX GRO (patch 4012) on .185 with 4 WireGuard tunnels.
 #   A: recipe applied (conntrack ignore for the outer ports), GRO on  eth3/eth4
 #   B: same, GRO off on eth3/eth4
+# Sets kernel.softlockup_panic=1 and panic_on_rcu_stall=1 first, so a lockup panics and the board reboots after
+# panic=60 with the trace preserved in pstore (ls /sys/fs/pstore) instead of staying hung.
 # Also prints the kernel, lockdep state and recent kernel warnings, and restores everything on exit.
 # Usage: bin/testrig-wireguard-gro-check.sh      Env: SERIAL_CPUS=10 (wireguard.serial_cpus bitmask), REPS=3
 set -u
@@ -17,7 +19,7 @@ set system conntrack ignore ipv4 rule 20 protocol udp
 set system conntrack ignore ipv4 rule 20 source port 51830-51833'
 restore(){ $SSHV 'sudo ethtool -K eth3 gro on; sudo ethtool -K eth4 gro on'; cfg 'delete system conntrack ignore'; TUNNELS=4 bin/testrig-wireguard-multi.sh teardown; }
 trap restore EXIT
-$SSHV 'echo "kernel: $(uname -r) $(uname -v | cut -c1-40)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; sudo dmesg | grep -iE "warn|bug|oops|dpaa.*err|rx.*drop" | tail -3; echo "gro: $(sudo ethtool -k eth3 | grep generic-receive)"; echo "$SERIAL_CPUS" | sudo tee /sys/module/wireguard/parameters/serial_cpus >/dev/null; cat /sys/module/wireguard/parameters/serial_cpus'
+$SSHV 'sudo sysctl -qw kernel.softlockup_panic=1 kernel.panic_on_rcu_stall=1; echo "kernel: $(uname -r) $(uname -v | cut -c1-40)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; sudo dmesg | grep -iE "warn|bug|oops|dpaa.*err|rx.*drop" | tail -3; echo "gro: $(sudo ethtool -k eth3 | grep generic-receive)"; echo "$SERIAL_CPUS" | sudo tee /sys/module/wireguard/parameters/serial_cpus >/dev/null; cat /sys/module/wireguard/parameters/serial_cpus'
 KEEP=1 TUNNELS=4 bin/testrig-wireguard-multi.sh setup >/dev/null
 cfg "$IGN"
 m(){ for r in $(seq 1 $REPS); do
