@@ -1,6 +1,6 @@
 # ASK2 WireGuard fast path (stages 5 and 6): FMan classification, QMan queues, a zero-skb datapath
 
-**2026-10-12 · dpaa1 · Status: PLAN, phase P0 (feasibility) done, nothing below P0 implemented or board-tested.** This plan replaces the "stage 5 / stage 6" sketch in `plans/ask2-wireguard-plan.md` with a design grounded in this tree's code and the qdrant FMan/QMan manual extracts. Every number marked *estimate* is derived from the profiles in `ask2-wireguard-plan.md` 2.8 to 2.16 and must be replaced by measurements at the gate that is named next to it.
+**2026-10-12 · dpaa1 · Status: P0 and P1 done, gate G1 PASSED on the board (section 4, P1 result). P2 and later not started.** This plan replaces the "stage 5 / stage 6" sketch in `plans/ask2-wireguard-plan.md` with a design grounded in this tree's code and the qdrant FMan/QMan manual extracts. Every number marked *estimate* is derived from the profiles in `ask2-wireguard-plan.md` 2.8 to 2.16 and must be replaced by measurements at the gate that is named next to it.
 
 ## 0. Why this, and what changed from the earlier sketch
 
@@ -96,6 +96,26 @@ Deliverables: this plan, the correction of the offline-port claim, the facts in 
 Not measured by P1 and still open: behaviour when a sink queue is full (no tail-drop is configured; the earlier A6-LOSS finding shows a queue without congestion control can hold a very large invisible backlog), and the buffer-pool accounting when buffers leave and re-enter a pool outside `dpaa_eth`.
 
 Effort: 3 to 5 days including CI cycles. Risk: low (default-off lab code, existing record format).
+
+**P1 result (image 1943, `.185`, 2026-10-12): gate G1 PASSED with a large margin.** 16 UDP flows (dell1 pktgen, 1434-byte wire frames) matched by one flow record each, in the three 50-byte-key tables, enqueued to four sink queues (one per CPU); the sinks read the whole frame (touch 2) or read and write it (touch 3), then return the buffer to BMan. Board state: production kernel, flow engine engaged, lockup-to-panic armed, no kernel errors.
+
+| Run | Offered | Delivered | Per-core load |
+|---|---|---|---|
+| 4 sinks, touch 2, 100k to 700k paced | 98k to 687k/s | 100.00% at every step | 3 to 15% |
+| 4 sinks, touch 2, unpaced (line rate) | 856k/s | 100.00% (6.88M frames) | 15 to 24% |
+| 4 sinks, touch 3 (read+write), 500k to 800k paced | 489k to 784k/s | 99.93 to 100.00% | 7 to 25% |
+| 4 sinks, touch 3, unpaced | 850k/s | 94.1 to 94.7% (809k to 814k/s) | 16 to 28% |
+| 2 sinks, touch 3, unpaced | 850k/s | 95.1% (818k/s) | 34% on the two busy cores |
+| 1 sink, touch 3, unpaced | 858k/s | 74.9% (644k/s) | 52% on its core |
+| 4 sinks, touch 3, 10-minute soak, unpaced | 859k/s | 94.5% (487M of 516M frames, 812k/s) | 26 to 42% |
+
+- Delivery of a hit to a software queue works exactly as 0194 predicted; no errors, no scatter/gather frames, no backlog left at the end of any run, no wedge in the 10-minute soak, nothing in `dmesg`.
+- The consumer framework is cheap: one core sustains at least 644k frames/s at 52% load, which is about 0.8 microseconds (about 1,300 cycles) per frame for dequeue, DMA sync, touching the whole 1.4 KB and returning the buffer. The plan assumed 1,500 cycles for this slice, so the 13k-cycle transmit estimate stands.
+- Capacity is not the limit: with read and write, the sinks are lossless up to 800k frames/s on four CPUs. The 5% loss at full line rate (850k+) happens with the cores far from saturated and with fewer sinks it grows (75% delivery with one sink), so it is a burst-absorption limit upstream of the CPU (the RX buffer pool is only about 2,270 buffers, about 2.7 ms at line rate), not a drain-rate limit. It was not localised further: the BMI discard counters read zero on this image (they are not enabled), so the cause is inferred, not measured.
+- Flow spread over the sinks was uneven in the soak (one sink received about 25% fewer frames than the others with 16 flows over 4 sinks); the real fast path assigns flows round-robin when it installs records.
+- The sink records stay in the flow tables until reboot (debugfs `del` only covers table 0).
+
+Open from P1, carried into P2: behaviour with a full sink queue (no tail-drop was configured, and the run never overloaded a queue), the 5% line-rate loss mechanism, and the F-232 transmit-confirm prerequisite below.
 
 ### P2. TX fast path (stage 5, transmit half) (gate G2)
 
