@@ -201,6 +201,26 @@ Findings that change stage 3:
 
 Revised stage 3 order: (1) make GRO effective on `fsl_dpa` RX and measure forwarding cost per aggregate; (2) lean firewall and no per-packet counters for the tunnel path; (3) fewer cross-core handoffs (`queue_work_on`, lock traffic) only if (1) and (2) leave the same profile; (4) batched NEON sections and the first-block NEON path are bundled into stage 4 with the assembly work.
 
+### 2.9 Patch 4012 (GRO on DPAA RX): v1 lockup, v2 results (image 1538, 2026-10-12)
+
+Patch 4012 changes `rx_default_dqrr()` from `netif_receive_skb()` (which never went through GRO) to `napi_gro_receive()`.
+
+- **v1 (image 0530) hard-locked the board** under 4-tunnel and IPv6 load (RCU stall, CPU0 soft lockup in `swapper/0`, hung tasks on `mmcblk0p3`; power cycle needed). Likely cause: the per-CPU QMan portal is shared by all DPAA netdevs, so one netdev's NAPI also delivers other netdevs' frames, and v1 handed those to an unscheduled NAPI. The call trace was not captured, so this is the working hypothesis, not proven.
+- **v2 (image 1538)** uses `napi_gro_receive()` only when `np->napi` is scheduled and keeps `netif_receive_skb()` for the rest. The board ran all matrices (about 45 minutes under 4-tunnel and single-tunnel load, plain-v4 hardware offload, IPv4 and IPv6) with `kernel.softlockup_panic=1` and `panic_on_rcu_stall=1` armed and no stall. (The 169 hits of a naive `dmesg | grep stall` are the word "installs" in ASK flow-offload lines.)
+- **Hardware offload unaffected:** plain-v4 9.30 Gbit/s with about 10.2M offload hits per 20 s run.
+
+Single tunnel, serial worker on CPUs 1/3, conntrack ignore rules applied, 3 x 30 s, Gbit/s:
+
+| Variant | wg-v4 up | down | bidir | 4 tunnels up |
+|---|---|---|---|---|
+| Image 0350 (no 4012, same as GRO never running) | 1.21 | 1.46 | 1.48 | 1.74 |
+| Image 1538, GRO on | 1.26 | 1.47 | 1.50 | 1.70 |
+| Image 1538, GRO off on eth3/eth4 | 1.25 | 1.49 | 1.56 | 1.82 |
+
+Reading: GRO aggregation does not help WireGuard (4 tunnels: 1.70 with GRO on, 1.82 off); the tunnel's transmit step has to split the aggregated segments again. The measurable gain of the patch comes from the receive-list batching that `napi_gro_receive()` does even with GRO off: +3 to +5% on single-tunnel `up`/`bidir` and +5% on 4 tunnels against image 0350. With GRO on the patch is neutral to slightly negative at 4 tunnels. So the recommended WireGuard setting on the tunnel-facing ports is GRO off (VyOS `offload gro` unset), with patch 4012 v2 in the image. The structural lever predicted in 2.8 (aggregation) turned out not to be one for tunnel forwarding; it may still help terminated or non-tunnel traffic, which was not measured. A software-forwarding regression run (plain routed TCP with the hardware offload disabled) is still open.
+
+Best recorded numbers now (image 1538, GRO off, mask 10, conntrack ignore): wg-v4 1.25 up, 1.49 down, 1.56 bidir; 4 tunnels 1.82 up. Files: `wg-validated-185-1538.csv` (GRO on), `wg-1538-groff.csv`.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.

@@ -19,7 +19,7 @@ set system conntrack ignore ipv4 rule 20 protocol udp
 set system conntrack ignore ipv4 rule 20 source port 51830-51833'
 restore(){ $SSHV 'sudo ethtool -K eth3 gro on; sudo ethtool -K eth4 gro on'; cfg 'delete system conntrack ignore'; TUNNELS=4 bin/testrig-wireguard-multi.sh teardown; }
 trap restore EXIT
-$SSHV 'sudo sysctl -qw kernel.softlockup_panic=1 kernel.panic_on_rcu_stall=1; echo "kernel: $(uname -r) $(uname -v | cut -c1-40)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; sudo dmesg | grep -iE "warn|bug|oops|dpaa.*err|rx.*drop" | tail -3; echo "gro: $(sudo ethtool -k eth3 | grep generic-receive)"; echo "$SERIAL_CPUS" | sudo tee /sys/module/wireguard/parameters/serial_cpus >/dev/null; cat /sys/module/wireguard/parameters/serial_cpus'
+$SSHV 'sudo sysctl -qw kernel.softlockup_panic=1 kernel.panic_on_rcu_stall=1; echo "kernel: $(uname -r) $(uname -v | cut -c1-40)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; sudo dmesg | grep -iE "warn|bug|oops|dpaa.*err|rx.*drop" | tail -3; echo "gro: $(sudo ethtool -k eth3 | grep generic-receive)"; echo '"$SERIAL_CPUS"' | sudo tee /sys/module/wireguard/parameters/serial_cpus >/dev/null; cat /sys/module/wireguard/parameters/serial_cpus'
 KEEP=1 TUNNELS=4 bin/testrig-wireguard-multi.sh setup >/dev/null
 cfg "$IGN"
 m(){ for r in $(seq 1 $REPS); do
