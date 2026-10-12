@@ -1,0 +1,19 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index f086c29..055f760 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3731,7 +3731,13 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 
+ 	skb_len = skb->len;
+ 
+-	if (unlikely(netif_receive_skb(skb) == NET_RX_DROP)) {
++	/* np->napi is the NAPI instance of this CPU's portal and is the one
++	 * being polled when this callback delivers frames, so frames can go
++	 * through GRO. netif_receive_skb() here left every TCP segment
++	 * unaggregated, so the stack (forwarding, netfilter, tunnels) ran once
++	 * per 1448 byte segment.
++	 */
++	if (unlikely(napi_gro_receive(&np->napi, skb) == GRO_DROP)) {
+ 		percpu_stats->rx_dropped++;
+ 		return qman_cb_dqrr_consume;
+ 	}

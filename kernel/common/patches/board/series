@@ -213,6 +213,18 @@
 # Upstream-Status: Pending | Risk-Tier: B
 4011-wireguard-serial-cpu-mask.patch
 
+# ── 4012: dpaa_eth RX default path through GRO (stage 3 of plans/ask2-wireguard-plan.md) ──
+# rx_default_dqrr() hands every frame to netif_receive_skb(), so GRO never
+# runs on DPAA1 RX: with the 4-tunnel WireGuard profile (image 0350) enabling
+# or disabling GRO on eth3/eth4 made no difference (1.73 vs 1.72 Gbit/s) and the
+# whole RX stack (forwarding, netfilter, tunnel encapsulation) ran once per
+# 1448 byte segment (about 29% of CPU). Use napi_gro_receive() on the per-CPU
+# portal NAPI that is being polled. L4-checksum-verified frames are
+# CHECKSUM_UNNECESSARY so they are GRO eligible; GRO flushes at napi_complete.
+# Needs a software-forwarding regression run (plain routed TCP, offload off).
+# Upstream-Status: Pending | Risk-Tier: B
+4012-dpaa-rx-napi-gro-receive.patch
+
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
 # patch-series-cleanup (2026-09-11): squashed 0155+0156+0157 (tight,
 # blob-chained fe_arm refinement, fman_pcd.c only). See its header.
