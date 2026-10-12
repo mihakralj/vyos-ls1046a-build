@@ -307,7 +307,7 @@ Revised stage 3 plan:
 3. **3c: lean firewall path.** Per-rule counters and chains on the tunnel path.
 4. Stage 4 and stages 5/6 stay gated on 3a.
 
-Product question outside the plan: if the goal is VPN throughput, IPsec offload through CAAM (about 2 to 3 Gbit/s, `plans/ASK2-IPSEC-OFFLOAD-PLAN.md`) is a stronger case than months of out-of-tree WireGuard work.
+Product note (2026-10-12): IPsec/CAAM is not an alternative; the target users (home gateways) run WireGuard, so the FMan/QMan fast path (`ASK2-WIREGUARD-FASTPATH-PLAN.md`) is the only route to higher throughput.
 
 ### 2.14 Stage 3a result: where the non-crypto cycles go (image 1740, 4 tunnels up, 2026-10-12)
 
