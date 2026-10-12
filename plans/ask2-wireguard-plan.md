@@ -275,6 +275,8 @@ Rig rules from `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` apply: do not run two ha
 
 ## 7. Open items
 
+- [ ] Validate CI image `2026.10.12-0350-rolling` (contains 4011 and vyos-1x 056; also carries the bridge F-255 commit) on `.185` after the operator installs it: (1) `cat /sys/module/wireguard/parameters/serial_cpus` exists and is 0; (2) `echo 10 > /sys/module/wireguard/parameters/serial_cpus` then recreate the tunnel, run `REPS=8 RECREATE=1 DIRS=up` and expect the busy CPU only on CPU 1 and 3 and about 1.03 Gbit/s, never 0.82; (3) apply the config recipe in 2.5 and expect the 056 chains (`nft list chain ip vyos_conntrack PREROUTING` shows `ct state untracked accept`) and about +22% on `wg-v4 up`; (4) re-run section 2.2 and 2.6 matrices.
+
 - [x] Profile `.185` with `perf` and identify the cause of about 390k cycles per packet (stage -1): lockdep debug kernel, 2.1.
 - [ ] Make `bin/testrig-wireguard.sh` (and the other `testrig-*` scripts) refuse to run, or loudly flag the CSV, when the DUT kernel has `PROVE_LOCKING`.
 - [ ] Repoint `latest.iso` on lxc200 at a production image; decide how KUnit builds are named so they cannot be taken for releases.
