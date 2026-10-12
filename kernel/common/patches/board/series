@@ -213,20 +213,18 @@
 # Upstream-Status: Pending | Risk-Tier: B
 4011-wireguard-serial-cpu-mask.patch
 
-# ── 4012: dpaa_eth RX default path through GRO (stage 3 of plans/ask2-wireguard-plan.md) ──
-# rx_default_dqrr() hands every frame to netif_receive_skb(), so GRO never
-# runs on DPAA1 RX: with the 4-tunnel WireGuard profile (image 0350) enabling
-# or disabling GRO on eth3/eth4 made no difference (1.73 vs 1.72 Gbit/s) and the
-# whole RX stack (forwarding, netfilter, tunnel encapsulation) ran once per
-# 1448 byte segment (about 29% of CPU). Use napi_gro_receive() on the per-CPU
-# portal NAPI that is being polled. L4-checksum-verified frames are
-# CHECKSUM_UNNECESSARY so they are GRO eligible; GRO flushes at napi_complete.
-# v2: GRO only when np->napi is scheduled (the per-CPU portal is shared by all
-# DPAA netdevs; v1 handed other netdevs' frames to unscheduled NAPIs and the DUT
-# hard-locked under load, image 0530). Other frames keep netif_receive_skb().
-# Needs a software-forwarding regression run (plain routed TCP, offload off).
-# Upstream-Status: Pending | Risk-Tier: B
-4012-dpaa-rx-napi-gro-receive.patch
+# ── 4012 RETIRED 2026-10-12: dpaa_eth RX default path through napi_gro_receive ──
+# Moved to kernel/common/patches/archive/ (not applied). rx_default_dqrr() uses
+# netif_receive_skb(), so GRO never runs on DPAA1 RX. v1 (unconditional
+# napi_gro_receive on np->napi) hard-locked the DUT under load (image 0530: RCU
+# stall, CPU0 soft lockup) because the per-CPU QMan portal is shared by all DPAA
+# netdevs. v2 (GRO only when napi_is_scheduled) was stable (image 1538) but a
+# net loss: WireGuard gained only +3-5% (and only with GRO off; GRO on is -7% at
+# 4 tunnels because the tunnel tx re-splits the aggregates), while software
+# forwarding of plain routed TCP (offload off, 8 flows) dropped from 6.43 Gbit/s
+# (image 0350) to 5.33 (GRO on) / 6.02 (GRO off, 6 reps). See
+# plans/ask2-wireguard-plan.md 2.9.
+# SKIP 4012-dpaa-rx-napi-gro-receive.patch
 
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
 # patch-series-cleanup (2026-09-11): squashed 0155+0156+0157 (tight,
