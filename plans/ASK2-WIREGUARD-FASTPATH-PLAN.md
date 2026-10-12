@@ -83,17 +83,23 @@ Each phase is one variable, ends in a measurement, and has a kill criterion. S0 
 
 Deliverables: this plan, the correction of the offline-port claim, the facts in section 3. No code.
 
-### P1. Record to CPU: can the flow engine deliver a HIT to a software consumer, and how fast can four CPUs drain it? (gate G1)
+### P1. How fast can the CPUs drain a flow-engine-fed queue? (gate G1)
 
-Nothing WireGuard-specific. In `ask.ko` add a lab-only debugfs/genl hook (default off, not advertised) that: creates K sink FQs on a pool channel with a `qman_fq` DQRR callback that touches the frame (reads the first cache line, optionally writes one byte, as the fast path will) and releases the buffer to BMan; resolves their FQIDs; and lets the existing flow-insert path install a record whose target FQID is a sink FQ. Drive it from dell1 with a fixed set of UDP flows.
+**Narrowed by what the project already proved.** Delivering a flow-engine HIT to a chosen CPU queue is silicon-verified: patch 0194 gives records an explicit `rx_fqid`, and the 2026-09-06 board pass recorded a 514/512 FQID differential (matched flows reached the rule's queue, mismatches went to the default queue). The debugfs `fe_flow add <tbl> <keyhex> <fqid>` path can already target any FQID. So P1 no longer has to prove delivery, only the drain rate of a light consumer: a consumer that does not build an `sk_buff`.
 
-Measure: (a) the HIT really reaches the sink FQ with the payload intact (compare bytes with a known pattern); (b) frames/s and cycles per frame with 1, 2, 4 CPUs draining, 1420-byte frames, in-place touch of 1.5 KB of data; (c) buffer accounting (no BMan pool depletion, no leaks over a 10-minute soak); (d) behaviour of the record chain when the FQ is full (tail drop versus FE wedge).
+**Built (patch 4013, `dpaa_wgfp.c`, compiled against the 6.18.55 CI tree, not yet run):** per-CPU sink queues on each CPU's affine channel; the dequeue callback follows the `dpaa_eth` NAPI/portal hand-off exactly (the 4012 lockup came from mishandling portals shared between netdevs, so the sink never assumes its own NAPI is the one polling); each frame is DMA-synced for the CPU, optionally touched (none / first and last 64 bytes / read all / read and write all), synced back and returned to its BMan pool through three narrow helpers in `dpaa_eth.c`. Inert until `echo "create N" > /sys/kernel/debug/dpaa_wgfp/ctl`.
 
-**Gate G1:** at least 600k frames/s total with four CPUs and 100% delivery, no wedge in the soak. That is the number that decides the whole project, because the fast path can never exceed the drain rate. **Kill:** under 350k frames/s (then the FQ path is no cheaper than the skb path and the plan stops; fall back to IPsec/CAAM).
+**Harness:** `bin/testrig-wgfp-p1.sh` creates the sinks, inserts one 46-byte-key record per test flow into the per-port IPv4 tables, drives dell1's kernel packet generator (`testrig-pktgen.sh`, 16 flows by default) at increasing rates, and reports delivered frames per second, delivery percentage, per-core load and queue backlog. Records inserted by debugfs cannot be removed one by one, so the board is rebooted after the run.
 
-Effort: 3 to 5 days including two CI cycles. Risk: low (default-off lab code; same record format as existing flows).
+**Gate G1:** at least 600k frames/s delivered over four CPUs at under 0.1% loss, 1434-byte frames, "read all" touch, no wedge, no buffer-pool depletion over a 10-minute soak. **Kill:** under 350k frames/s. Also measure the "read and write all" mode (it mimics in-place encryption) and one, two and four sinks.
+
+Not measured by P1 and still open: behaviour when a sink queue is full (no tail-drop is configured; the earlier A6-LOSS finding shows a queue without congestion control can hold a very large invisible backlog), and the buffer-pool accounting when buffers leave and re-enter a pool outside `dpaa_eth`.
+
+Effort: 3 to 5 days including CI cycles. Risk: low (default-off lab code, existing record format).
 
 ### P2. TX fast path (stage 5, transmit half) (gate G2)
+
+**Prerequisite found while preparing P1: the "no-confirm" TX queue still emits TX-confirm frames.** The 2026-08-24 F-232 board run showed records correctly target the no-confirm queues (0x2ba/0x2bb) yet F-227 keeps dropping bogus confirmations, i.e. the intended `context_a` (B0V=0) does not suppress them on 210.10.1 silicon; the vendor uses a different `context_a` (low word 0xC0000000, qdrant 2026-08-15). The transmit fast path enqueues frames it did not allocate as `sk_buff`s, so a TX-confirm for them lands in `dpaa_eth`'s confirm handler. Resolve this first (correct the `context_a` encoding or keep F-227's drop path as the supported mechanism and measure its cost) before building P2 on it.
 
 Inside the `wireguard` module (new `fastpath.c`, hooks in `device.c` and `send.c`, carried as a board patch): on the first `wg_xmit` for a flow whose peer, endpoint and valid keypair are known and whose ingress interface is an ASK-engaged port, ask `ask.ko` to install the record; the worker (the sink callback from P1, now doing real work) does: keypair validity and counter (`atomic64_inc_return`) check, in-place `chacha20poly1305_encrypt` on the contiguous buffer, header build from a cached route and neighbour entry (invalidated on route/neighbour events), UDP checksum policy (zero checksum is legal for IPv4; IPv6 needs the FMan checksum command or a software sum, deferred), enqueue to the no-confirm TX FQ. Anything unexpected (keypair near `REKEY_AFTER_*`, no neighbour, oversize, keepalive timer due, peer removed) punts the frame to the normal stack by building an skb and calling `wg_xmit`'s slow path, and the record is withdrawn.
 
@@ -133,7 +139,7 @@ Effort: 2 to 3 weeks. The fallback the original sketch mentions (KeyGen hashing 
 | Option | Verdict |
 |---|---|
 | Keep software WireGuard as is | Valid. 1.8 to 1.9 Gbit/s with four tunnels. This plan is the only route to roughly double it. |
-| IPsec through CAAM (Tier 1, `ASK2-IPSEC-OFFLOAD-PLAN.md`) | Stronger on effort for the same user goal (VPN throughput); if the requirement is "a VPN", do this first. WireGuard cannot use CAAM (no ChaCha20-Poly1305 on Era 8). |
+| IPsec through CAAM (`ASK2-IPSEC-OFFLOAD-PLAN.md`) | Ruled out by the product: home users run WireGuard. (WireGuard cannot use CAAM anyway: no ChaCha20-Poly1305 on Era 8.) The offline-port substrate is still shared work if IPsec is ever funded for other reasons. |
 | Offload the crypto to CAAM-style hardware | Not possible for WireGuard on this SoC. |
 | KeyGen hash on the WireGuard counter to spread one peer | Rejected: reorders inner TCP at burst edges, and the spread is available for free from flow pinning. |
 | FMan message-type classification (UDP payload byte 0) | Not needed: software separates handshakes after the FQ; avoids an unverified KeyGen extraction past the UDP header. |
@@ -159,7 +165,7 @@ Effort: 2 to 3 weeks. The fallback the original sketch mentions (KeyGen hashing 
 2. **After P2/G2:** if TX reaches 2.6 Gbit/s on four flows, the project has paid for itself; P3 then follows mechanically.
 3. **Before P4:** decide jointly with the IPsec plan whether the offline-port reinjection substrate is worth building (it serves both).
 4. **Before P5:** only if single-flow throughput matters to a named workload.
-5. At any kill criterion: stop and fall back to IPsec/CAAM (`ASK2-IPSEC-OFFLOAD-PLAN.md`) as the VPN-throughput answer.
+5. At any kill criterion: stop that phase, keep everything shipped so far, and re-plan the remaining phases (IPsec is not an option: the target users run WireGuard).
 
 ## 8. Open items to close before or during P1
 
