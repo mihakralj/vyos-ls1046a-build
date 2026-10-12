@@ -111,7 +111,7 @@ void ask_hw_exit(void);
  */
 int  ask_hw_offload_engage(u8 hw_port_id);
 int  ask_hw_b2_l2_engage(const char *ifname);
-int  ask_hw_b2_l2_record(const char *iifname, const u8 *da,
+int  ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
 			 const char *oifname, bool add);
 void ask_hw_offload_disengage(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
@@ -1202,7 +1202,7 @@ void ask_caam_exit(void);
 int  ask_bridge_init(void);
 void ask_bridge_exit(void);
 struct fman_pcd_fe_flow_action;
-int  ask_bridge_fe_action(const u8 *da, u32 egress_tx_fqid,
+int  ask_bridge_fe_action(const u8 *da, __be16 eth_type, u32 egress_tx_fqid,
 			  unsigned long enq_off,
 			  struct fman_pcd_fe_flow_action *a);
 
