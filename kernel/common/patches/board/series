@@ -221,6 +221,9 @@
 # 1448 byte segment (about 29% of CPU). Use napi_gro_receive() on the per-CPU
 # portal NAPI that is being polled. L4-checksum-verified frames are
 # CHECKSUM_UNNECESSARY so they are GRO eligible; GRO flushes at napi_complete.
+# v2: GRO only when np->napi is scheduled (the per-CPU portal is shared by all
+# DPAA netdevs; v1 handed other netdevs' frames to unscheduled NAPIs and the DUT
+# hard-locked under load, image 0530). Other frames keep netif_receive_skb().
 # Needs a software-forwarding regression run (plain routed TCP, offload off).
 # Upstream-Status: Pending | Risk-Tier: B
 4012-dpaa-rx-napi-gro-receive.patch
