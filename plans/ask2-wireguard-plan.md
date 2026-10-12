@@ -221,6 +221,30 @@ Reading: GRO aggregation does not help WireGuard (4 tunnels: 1.70 with GRO on, 1
 
 Best recorded numbers now (image 1538, GRO off, mask 10, conntrack ignore): wg-v4 1.25 up, 1.49 down, 1.56 bidir; 4 tunnels 1.82 up. Files: `wg-validated-185-1538.csv` (GRO on), `wg-1538-groff.csv`.
 
+### 2.10 Decisions after the 4012 and mask experiments (2026-10-12)
+
+**4012 is retired** (patch moved to `kernel/common/patches/archive/`, series entry replaced by a `# SKIP` note). Software-forwarding regression, plain routed TCP, hardware offload removed from the flowtable and verified `Armed ports: (none)` and `hw_hits 0` for every run, 8 flows, `up`, Gbit/s:
+
+| Image | up | bidir |
+|---|---|---|
+| 0350 (no 4012) | 6.43 (sd 0.09, 3 reps) | 6.33 |
+| 1538 4012 v2, GRO on | 5.33 (sd 0.60) | 6.19 |
+| 1538 4012 v2, GRO off | 6.02 (sd 0.18, 6 reps) | 5.93 |
+
+The patch costs 6% (GRO off) to 17% (GRO on, with a large retransmit count) on software-forwarded TCP and buys only +3 to 5% on WireGuard, so it is a net loss, apart from the earlier lockup risk. The board's `config.boot.default` also enables `offload gro` on every port, so a default install would have been on the worse GRO-on side.
+
+**Serial CPU mask: use 14 (CPUs 1, 2, 3), not 10.** 4 tunnels, recipe on, GRO off, image 1538, 3 reps of 20 s, aggregate Gbit/s:
+
+| `serial_cpus` | up | down |
+|---|---|---|
+| 0 (stock) | 1.79 | 1.91 |
+| 10 (CPUs 1, 3) | 1.66 | 1.92 |
+| 14 (CPUs 1, 2, 3) | 1.76 | 1.94 |
+
+Mask 10 gives the best single tunnel (1.03 against an unmasked mean of 0.94) but costs 7% when several tunnels or peers run, because only two CPUs host serial stages. Mask 14 keeps CPU 0 (the worst placement) out, costs nothing measurable with 4 tunnels, and takes the single-tunnel placements to 0.90 to 1.03. The image now sets `options wireguard serial_cpus=14` in `/etc/modprobe.d/ls1046a-wireguard.conf` (hook `96-enable-services.chroot`); the module parameter is also writable at runtime.
+
+Next image content: patch 4011, vyos-1x 056, the modprobe option; no 4012. The conntrack ignore rules stay a documented per-deployment step (2.5); making them automatic needs a product decision because untracked packets break firewall rules that match only `state new`.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
