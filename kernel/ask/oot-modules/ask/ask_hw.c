@@ -1229,15 +1229,18 @@ int ask_hw_b2_l2_engage(const char *ifname)
 						       FMAN_PCD_FE_PROFILE_L2_DA);
 }
 
-/* B2: hand-arm (or remove) one DA record in @iifname's L2_DA table that
- * forwards to @oifname's no-confirm TX FQ. Process context, never with
+/* B2: hand-arm (or remove) one DA+EtherType record in @iifname's L2_DA
+ * table that forwards to @oifname's no-confirm TX FQ. F-255's L2_DA key is
+ * DA(6)+EtherType(2) (plan §13.18), so @eth_type (network byte order) must
+ * be supplied for both add and del. Process context, never with
  * flow_block_lock held. */
-int ask_hw_b2_l2_record(const char *iifname, const u8 *da,
+int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
 			const char *oifname, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
 	struct net_device *dev;
+	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
 	u32 fqid = 0;
 	u8 port;
 	int rc;
@@ -1247,9 +1250,13 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da,
 	rc = ask_hw_b2_port_of(iifname, &port);
 	if (rc)
 		return rc;
-	if (!add)
-		return fman_pcd_fe_flow_del(h->fman, port, da,
+	if (!add) {
+		BUILD_BUG_ON(FMAN_PCD_FE_L2_DA_KEY_SIZE != ETH_ALEN + sizeof(__be16));
+		ether_addr_copy(key, da);
+		memcpy(key + ETH_ALEN, &eth_type, sizeof(eth_type));
+		return fman_pcd_fe_flow_del(h->fman, port, key,
 					    FMAN_PCD_FE_L2_DA_KEY_SIZE);
+	}
 
 	dev = dev_get_by_name(&init_net, oifname);
 	if (!dev)
@@ -1258,7 +1265,7 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da,
 	dev_put(dev);
 	if (rc)
 		return rc;
-	rc = ask_bridge_fe_action(da, fqid, ask_hw_get_enq_fe_off(), &a);
+	rc = ask_bridge_fe_action(da, eth_type, fqid, ask_hw_get_enq_fe_off(), &a);
 	if (rc)
 		return rc;
 	return fman_pcd_fe_flow_add(h->fman, port, &a);
