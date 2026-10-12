@@ -332,6 +332,20 @@ Findings:
 
 Revised order: 3c (trim the remaining netfilter hooks on the tunnel path: per-rule counters, flowtable ingress hook for WireGuard ports) as cheap config/patch experiments; 3b (batching) and stage 4 as bounded 5 to 10% items; stages 5 and 6 only if the product wants more than about 2.5 Gbit/s from software WireGuard.
 
+### 2.15 Stage 3c result: netfilter hooks on the tunnel path are not worth a patch (2026-10-12)
+
+Per-chain counters were diffed over 12 s of 4-tunnel `up` load (recipe on, 1.65 Gbit/s). Base chains traversed (packets seen in 12 s):
+
+| Hook | Chains evaluated | Packets |
+|---|---|---|
+| output (outer packets leaving) | `vyos_filter` `VYOS_OUTPUT_raw`, `vyos_conntrack` `OUTPUT` (raw), `vyos_filter` `VYOS_OUTPUT_filter`, `vyos_conntrack` `OUTPUT_HELPER` | 2.26 M |
+| prerouting (inner and returning packets) | `ip raw` `vyos_rpfilter`, `VYOS_PREROUTING_raw`, `vyos_conntrack` `PREROUTING`, `PREROUTING_HELPER` | 0.78 M |
+| forward / input | `VYOS_FORWARD_filter`, `VYOS_INPUT_filter` | 0.39 M each |
+
+Every one is a default-action chain (`counter accept` or a jump pair) that VyOS creates whenever the firewall exists. About 15 base-chain evaluations happen per inner packet. The profile puts all of `nft_do_chain` at 6.9% inclusive (4.1% self) and the per-rule counters at 1.4%, which is about 165 cycles per evaluation. Removing the counters saves about 1.4%; removing every VyOS base chain would save at most about 7%, and those chains are the firewall framework (default actions, state policy, rpfilter), so no patch is planned. The 056 and 057 changes already removed the part that mattered (conntrack and its helper/NAT/WLB chains: +15 to 26%). Stage 3c is closed; its remaining ceiling (about 3 to 5%) is below the noise of a single placement.
+
+Remaining software levers, in order: 3b handoff and scheduling batching (about 10% ceiling, upstreamable), stage 4 crypto assembly (about 5%). The rest of the encrypt call (about 10%, scatterlist setup, copies) and the DPAA RX path (`rx_default_dqrr` 9.2% inclusive: `build_skb`, buffer refill, DMA unmap, and the shared BMan refill) are not WireGuard-specific and would also help plain forwarding.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
