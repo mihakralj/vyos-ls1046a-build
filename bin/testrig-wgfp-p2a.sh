@@ -56,7 +56,7 @@ echo "inserted $FLOWS records into tables $TBLS -> sinks ${FQIDS[*]}"
 dut "echo 'eth4 $DMAC $SMAC 10.99.2.185 10.99.2.113 51820 51820 $RCV_IDX $KEYHEX' | sudo tee /sys/module/wireguard/parameters/wgfp_lab >/dev/null" || fail "lab seal config rejected (dmesg)"
 trap 'dut "echo off | sudo tee /sys/module/wireguard/parameters/wgfp_lab >/dev/null" 2>/dev/null' EXIT
 
-d2rx(){ $D2 "ethtool -S $D2IF | awk '/port.rx_unicast:/ {print \$2}'"; }
+d2rx(){ $D2 "sudo /usr/sbin/ethtool -S $D2IF | awk '/port.rx_unicast:/ {print \$2}'"; }
 cpustat(){ dut 'grep "^cpu[0-9]" /proc/stat'; }
 sealed(){ dut 'sudo cat /sys/module/wireguard/parameters/wgfp_lab' | sed -n 's/.*sealed=\([0-9]*\).*/\1/p'; }
 xmitfail(){ dut "sudo cat $DBG/stats" | sed -n 's/.*xmit_fail=\([0-9]*\).*/\1/p' | head -1; }
