@@ -2,7 +2,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
 index f086c29..13b93b9 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -3731,10 +3731,14 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+@@ -3731,10 +3731,21 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
  
  	skb_len = skb->len;
  
@@ -10,14 +10,21 @@ index f086c29..13b93b9 100644
 -		percpu_stats->rx_dropped++;
 -		return qman_cb_dqrr_consume;
 -	}
-+	/* np->napi is the NAPI instance of this CPU's portal and is the one
-+	 * being polled when this callback delivers frames, so frames can go
-+	 * through GRO. netif_receive_skb() here left every TCP segment
-+	 * unaggregated, so the stack (forwarding, netfilter, tunnels) ran once
-+	 * per 1448 byte segment. napi_gro_receive() has no drop result in
-+	 * this kernel, so rx_dropped is no longer counted here.
++	/* GRO only into a NAPI instance that is scheduled. The per-CPU portal is
++	 * shared by every DPAA netdev, so while one netdev's NAPI polls it, this
++	 * callback also runs for frames of the other netdevs; handing those to an
++	 * unscheduled NAPI would hold them in its GRO/rx list until that NAPI next
++	 * runs (soft lockups seen with the unconditional version). Those frames
++	 * keep the plain path. netif_receive_skb() here left every TCP segment
++	 * unaggregated, so the stack (forwarding, netfilter, tunnels) ran once per
++	 * 1448 byte segment; napi_gro_receive() also batches the rx list.
 +	 */
-+	napi_gro_receive(&np->napi, skb);
++	if (napi_is_scheduled(&np->napi)) {
++		napi_gro_receive(&np->napi, skb);
++	} else if (unlikely(netif_receive_skb(skb) == NET_RX_DROP)) {
++		percpu_stats->rx_dropped++;
++		return qman_cb_dqrr_consume;
++	}
  
  	percpu_stats->rx_packets++;
  	percpu_stats->rx_bytes += skb_len;
