@@ -21,6 +21,7 @@ Last consolidated: 2026-10-09.
 | [`CC-ACL-OFFLOAD-PLAN.md`](CC-ACL-OFFLOAD-PLAN.md) | ACL / ntuple / tc-flower backend; verdict that the CC match walker is absent in 210.10.1. |
 | [`ASK2-PERFORMANCE-TEST-HARNESS.md`](ASK2-PERFORMANCE-TEST-HARNESS.md) | Throughput and CPU measurement method; current rig is `bin/testrig-combo-matrix.sh` (dell1–DUT–dell2). |
 | [`ask2-wireguard-plan.md`](ask2-wireguard-plan.md) | WireGuard software throughput on `.185`/`.106`: measured baseline, stage -1 investigation, revised optimisation stages. Harness: `bin/testrig-wireguard.sh`. |
+| [`ASK2-WIREGUARD-FASTPATH-PLAN.md`](ASK2-WIREGUARD-FASTPATH-PLAN.md) | WireGuard stages 5 and 6: zero-skb datapath over FMan ehash records, QMan frame queues and (optionally) offline-port reinjection and order restoration; phases P0-P5 with gates and kill criteria. |
 
 ## VPP dataplane
 
