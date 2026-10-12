@@ -346,6 +346,16 @@ Every one is a default-action chain (`counter accept` or a jump pair) that VyOS 
 
 Remaining software levers, in order: 3b handoff and scheduling batching (about 10% ceiling, upstreamable), stage 4 crypto assembly (about 5%). The rest of the encrypt call (about 10%, scatterlist setup, copies) and the DPAA RX path (`rx_default_dqrr` 9.2% inclusive: `build_skb`, buffer refill, DMA unmap, and the shared BMan refill) are not WireGuard-specific and would also help plain forwarding.
 
+### 2.16 Stage 3b result: handoff batching is already happening and is not worth a patch (2026-10-12)
+
+Code review (`queueing.h`, `send.c`, 6.18.55): every inner packet does `ptr_ring_produce_bh` and one `queue_work_on()` into the encrypt worker, and the encrypt worker does one `queue_work_on()` per packet into the peer's serial tx worker. Without inner GRO each forwarded TCP segment is its own queue element, so there is no per-burst `skb` list to amortise over.
+
+Measured over 10 s of 4-tunnel `up` load (recipe on, 1.6 Gbit/s): about 162k inner packets/s in and 162k outer packets/s out, 29k context switches/s, 3.2k scheduler wakeups/s counted by `perf stat` over 5 s (32k `sched_wakeup` events, 47.8k context switches in 5 s system-wide), 25 CPU migrations/s. That is 0.18 context switches per packet: the workers already drain about 5 to 6 packets per wakeup, because the ptr_ring fills while a worker runs. The scheduler share in the profile (`finish_task_switch` 2.4% plus `schedule` 2.4%) is therefore the price of those 29k switches/s, not of per-packet handoffs.
+
+What is left to win: a plain-read `work_pending()` check before `queue_work_on()` (needs an `smp_mb()` to avoid a lost wakeup) would remove most of the 2.0% `queue_work_on` self time, i.e. at most 1 to 2%; raising the batch per wakeup would trade latency for at most another 2%. The run-to-run spread of one placement is 3 to 4%, so a 2 to 3% change cannot be measured with this rig, and WireGuard upstream would be unlikely to take a hot-path change it cannot show a gain for. Stage 3b is closed without a patch.
+
+Stage 4 (crypto assembly, about 5%) is in the same position. Software WireGuard on this board is at its practical limit: about 1.1 to 1.6 Gbit/s single tunnel and 1.8 to 1.9 Gbit/s with four tunnels. The only remaining items above measurement noise are stage 5/6 (FMan/QMan, months, out of tree) or the IPsec/CAAM offload plan for VPN throughput.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
