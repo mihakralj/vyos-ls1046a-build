@@ -9,7 +9,7 @@ route and neighbour entry. Enabled via the wgfp_peer module parameter:
 
 ---
 diff --git a/drivers/net/wireguard/fastpath.c b/drivers/net/wireguard/fastpath.c
-index 989c537..0d76cc5 100644
+index 989c537..23b1c3c 100644
 --- a/drivers/net/wireguard/fastpath.c
 +++ b/drivers/net/wireguard/fastpath.c
 @@ -35,8 +35,20 @@
@@ -209,13 +209,6 @@ index 989c537..0d76cc5 100644
 +	ctr = (u64)atomic64_inc_return(&kp->sending_counter) - 1;
 +	if (unlikely(ctr >= REJECT_AFTER_MESSAGES))
 +		goto decline;
-+	if (unlikely(ctr == REKEY_AFTER_MESSAGES ||
-+		     (kp->i_am_the_initiator && ctr == 0 &&
-+		      wg_birthdate_has_expired(kp->sending.birthdate, REKEY_AFTER_TIME)))) {
-+		atomic64_inc(&ps->rekeys);
-+		wg_packet_send_queued_handshake_initiation(peer, false);
-+	}
-+
 +	memset(inner + ip_len, 0, plain - ip_len);
 +	chacha20poly1305_encrypt(inner, inner, plain, NULL, 0, ctr,
 +				 kp->sending.key);
@@ -240,6 +233,13 @@ index 989c537..0d76cc5 100644
 +		wg_timers_any_authenticated_packet_traversal(peer);
 +		wg_timers_any_authenticated_packet_sent(peer);
 +		wg_timers_data_sent(peer);
++		/* Same test as keep_key_fresh(); the send is itself rate limited. */
++		if (ctr > REKEY_AFTER_MESSAGES ||
++		    (kp->i_am_the_initiator &&
++		     wg_birthdate_has_expired(kp->sending.birthdate, REKEY_AFTER_TIME))) {
++			atomic64_inc(&ps->rekeys);
++			wg_packet_send_queued_handshake_initiation(peer, false);
++		}
 +	}
 +	atomic64_inc(&ps->sealed);
 +	dpaa_wgfp_xmit(f, f->off - WGFP_ADDED,
