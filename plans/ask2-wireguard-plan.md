@@ -391,6 +391,26 @@ Same method for both boards: IPv4 inner, MTU 1420, iperf3 TCP, 30 s runs with th
 
 **E2 status (2026-10-13):** `kernel/common/patches/board/4016-wireguard-tx-lanes.patch` written and in `series` (Risk-Tier C). Module parameter `wireguard.tx_lanes` (1 to 4, default 1 = stock, read at peer creation); per-peer `tx_lane[]` each with its own `prev_queue`, work item and CPU (`peer->internal_id + lane` over `serial_cpus`); `wg_packet_send_staged_packets` assigns nonces in order, then splits the batch by `skb_get_hash` so a flow keeps its lane, and each sub-list takes its own peer and keypair reference. `git apply --check` passes on the pristine 4011/4014/4015 files and the module builds against the 6.18.55 tree without warnings. **Not yet run on a board** (needs a CI image because of module signing). Validation recipe: `echo 3 > /sys/module/wireguard/parameters/tx_lanes` before creating the tunnel, then `REPS=5 RECREATE=1 DIRS=up bin/testrig-wireguard.sh run wg-v4` and a 1-stream cell (must be unchanged), the 4-stream cell must reach at least 1.5 Gbit/s; arm `softlockup_panic` and `panic_on_rcu_stall`; check dell2 `wg show` for no invalid MACs and run the netns selftest. Ship with `tx_lanes=3` in `/etc/modprobe.d/ls1046a-wireguard.conf` only after the gate passes.
 
+**E2 board result (2026-10-13, image 2026.10.13-0051, `.185`, wg-v4 `up`, 4 streams, 5 x 30 s, `RECREATE=1`, mask 14, `softlockup_panic`/`panic_on_rcu_stall` armed; files `oracle/wg-e2-lanes{1,3}.csv`):** `tx_lanes=1` 0.959 Gbit/s (0.874 to 0.999, sd 0.05, box 67% busy); `tx_lanes=3` **1.332** (0.991 to 1.571, sd 0.19, box 86% busy), **+39% like for like**, but below the 1.5 pass bar and above the 1.3 kill line, so inconclusive. Busiest core stays at 99% in both, so the cap moved rather than vanished: lane CPUs (1 to 3) share cores with RPS receive work, and the hot core is probably CPU 0 (NIC interrupt) or a lane colliding with RX. Next: per-core `mpstat` during a lanes=3 run, try `serial_cpus` placements, a 1-stream cell, dell2 invalid-MAC check, netns selftest and rekey before any decision on shipping `tx_lanes=3`.
+
+**E2 follow-up (2026-10-13, same image and method):** per-core `top` with `tx_lanes=3` shows all four cores at about 99% busy, so the cap is now total CPU (about 150k to 165k pkt/s, the balanced ceiling in 2.18), not one serial stage. 1 stream is unchanged (1.03 vs 0.96 stock, noise). No lockup/RCU messages on the DUT and no `Invalid MAC` on dell2. **`tx_lanes=3` plus `tc qdisc replace dev eth4 root noqueue` (E1): 1.491 Gbit/s mean (1.370 to 1.610, sd 0.10), `oracle/wg-e2-lanes3-noq.csv`**, which is above the `.106` single-tunnel `up` median (1.38) and within noise of the 1.5 gate; runs landing the serial CPU on CPU0 reach 1.6 but show retransmits (1278 and 1771). Every other matrix cell was already ahead of `.106`, so single-tunnel `up` was the only gap. Done afterwards: a two-namespace veth smoke test with `tx_lanes=3` (ping 0% loss, 4-stream iperf3 1.41 Gbit/s, forced re-handshake recovers, a 135 s run crosses the 120 s rekey with a fresh handshake and steady 1.31 Gbit/s, no kernel warnings or lockups), and `tx_lanes=3` added to `/etc/modprobe.d/ls1046a-wireguard.conf` in `data/hooks/96-enable-services.chroot` (uncommitted; ships with the next CI image). Still open: the upstream `netns.sh` selftest (not run here), a persistent form of `noqueue`, and a full 9-cell matrix re-run on the shipping image.
+
+**Full matrix with `tx_lanes=3` (2026-10-13, image 0051, default `mq` qdisc, no `noqueue`, same method as 2.17; `oracle/wgfull-lanes3-185-t{1,2,4}.csv`), Gbit/s median:**
+
+| Tunnels | Dir | `.106` | `.185` before | `.185` lanes=3 |
+|---|---|---|---|---|
+| 1 | up | 1.38 | 1.17 | **1.65** |
+| 1 | down | 1.30 | 1.56 | 1.58 |
+| 1 | bidir | 1.51 | 1.54 | **1.44** (1.39 - 1.60) |
+| 2 | up | 1.44 | 1.60 | 1.72 |
+| 2 | down | 1.58 | 1.64 | 1.67 |
+| 2 | bidir | 1.68 | 1.79 | 1.81 |
+| 4 | up | 1.57 | 1.77 | 1.91 |
+| 4 | down | 1.66 | 1.87 | 1.82 |
+| 4 | bidir | 1.69 | 1.86 | 1.89 |
+
+`.185` leads `.106` in eight of nine cells; the exception is 1-tunnel `bidir` (1.44 vs 1.51), which also regressed from 1.54 and is the next target (hypothesis: three TX lanes compete with RX/decrypt work when both directions run; not yet measured). 4-tunnel `down` is 0.05 lower than before (within the 1.72 to 1.85 spread).
+
 Not planned: more netfilter trimming, GRO, handoff batching, crypto assembly (2.9, 2.15, 2.16 closed them at under 5% each). Measurement rules stay as in 2.3: `RECREATE=1`, at least 5 reps, quote median and range, record serial CPU and kernel config.
 
 ## 3. What does not help
