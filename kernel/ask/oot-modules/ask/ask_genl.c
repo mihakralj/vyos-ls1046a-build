@@ -265,12 +265,10 @@ goto nla_put_failure;
 
 	if (ask_hw_vlan_offload_armed())
 		caps |= ASK_CAP_VLAN;
-	/* T-M6-2: ASK_CAP_BRIDGE stays unadvertised through B0-B2 even though
-	 * ask_hw_bridge_offload_armed() already exists -- there is no
-	 * CC-tree/FDB install path yet (ask_bridge.c is
-	 * an observer only), so advertising the capability now would claim a
-	 * flow could actually get bridge-offloaded when none can. Add
-	 * `caps |= ASK_CAP_BRIDGE` here once B3's real switchdev wiring lands. */
+	/* T-M6-2: bridge FDB offload, same model as VLAN: advertised while its
+	 * kill switch (ask.bridge_offload, default on) is on. */
+	if (ask_hw_bridge_offload_armed())
+		caps |= ASK_CAP_BRIDGE;
 	if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, caps,
 			      ASK_INFO_ATTR_UNSPEC))
 		goto nla_put_failure;

@@ -15,8 +15,8 @@
  *
  * switchdev reports the EGRESS port of an entry; records live in the
  * INGRESS port's table. An entry for MAC A on port E therefore fans out to
- * every other member P as (A, 0x0800) and (A, 0x86dd) -> E's no-confirm TX
- * FQ. Only IPv4/IPv6 EtherTypes: a short non-IP frame hitting a record
+ * every other member P as (A, 0x0800) and/or (A, 0x86dd) -> E's no-confirm
+ * TX FQ, as P's `offload ipv4|ipv6` mask allows. Only IPv4/IPv6 EtherTypes: a short non-IP frame hitting a record
  * wedges the FE hit path (§13.16), and ARP etc. belong to the kernel (D5).
  * A pair (P, E) qualifies when both are DPAA ports of the same bridge,
  * engaged as L2_DA, FORWARDING, neither isolated nor locked; P has no VLAN
@@ -45,6 +45,7 @@
 #include <linux/module.h>
 #include <net/switchdev.h>
 #include <linux/fsl/fman_pcd.h>
+#include <uapi/linux/ask/ask.h>	/* ASK_FAM_V4/V6 */
 
 #include "include/ask_internal.h"
 
@@ -235,8 +236,14 @@ static void ask_bridge_walk(bool add)
 			if (in == egr || vlan_uses_dev(in) ||
 			    !ask_bridge_member_ok(in, br, &iport))
 				continue;
-			ask_bridge_one(iport, e->addr, htons(ETH_P_IP), fqid, add);
-			ask_bridge_one(iport, e->addr, htons(ETH_P_IPV6), fqid, add);
+			/* Like routed and VLAN flows, the INGRESS port's
+			 * `offload ipv4|ipv6` mask selects the families. */
+			if (ask_hw_port_family_mask(iport) & ASK_FAM_V4)
+				ask_bridge_one(iport, e->addr, htons(ETH_P_IP),
+					       fqid, add);
+			if (ask_hw_port_family_mask(iport) & ASK_FAM_V6)
+				ask_bridge_one(iport, e->addr, htons(ETH_P_IPV6),
+					       fqid, add);
 		}
 	}
 }
