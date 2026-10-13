@@ -1312,3 +1312,140 @@ Code (ask.ko only, no kernel change):
 Debug and production ask.ko variants compile W=1 clean against the replayed
 6.18.55 tree. Not yet CI-built or board-tested. Harness record counts are
 unchanged on the rig (eth3/eth4 engage with `family_mask=0x3`).
+
+### 13.28 B5 on the production image (2026-10-13, DUT .185, image 2026.10.13-2002-rolling, commit aee5bbbf)
+
+Production kernel 6.18.55-vyos (no KUnit/PROVE_LOCKING). The operator
+installed it and rebooted; cold or warm was not confirmed.
+
+| Check | Result |
+|---|---|
+| Defaults after boot | `bridge_offload=Y`; `get-info` capabilities 95 (0x5F) includes `ASK_CAP_BRIDGE` (0x10) |
+| Routed regression, `bin/testrig-offload-quick.sh` (10 base cells) | All `HW`, 9.23–9.41 Gbit/s, DUT busy ≤ 6.4 % (`quick-20261013-2222.csv`) |
+| Bridge gate + B3b rows, `bin/testrig-bridge-b3a.sh` | All PASS except "dell2 link down", the known 10G carrier gap (§13.24) |
+| eth3 `offload ipv4` only (`vyos-offload-ask --port 0x10 family 1`) | 4 → 3 records; v4 dell1→dell2 hits 20; v6 dell1→dell2 hits 0, software bridge +20; v6 dell2→dell1 (ingress eth4, mask 0x3) hits 20; `family 3` → 4 records: **PASS** |
+| Throughput dell1→dell2, iperf3 -P 4, 15 s | **9.41 Gbit/s at 1.4 % busy** (15.4 M hits) vs 2.44 Gbit/s at 31.2 % with `bridge_offload=0` |
+| Teardown | 0 records, MURAM 52922, `pcd-snapshot diff` matches baseline |
+| `journalctl -k -b` | 4 role changes; 0 lockdep/WARNING/BUG/DMA-bus-error/SYNC-timeout |
+
+The harness now carries the family-mask rows.
+
+The software bridge on the production kernel does 2.44 Gbit/s; the 0.36 Gbit/s
+in §13.24 was the PROVE_LOCKING debug kernel.
+
+Open, not bridge-specific: TCP retransmits in the routed quick cells are in
+the thousands per 30 s cell (6–11 k; pppoe-up-v6 40 k). The 2026-10-09 runs
+had tens to hundreds. The 16:52 debug-image run today was already at ~3 k,
+so the rise predates the §13.27 change. Throughput is unaffected.
+
+### 13.29 Vendor parity gaps and order (2026-10-13)
+
+Read of `/mnt/builds/ASK` (`auto_bridge/auto_bridge.c`, `cdx/cdx_ehash.c`
+`fill_bridge_actions()`, `cmm/src/ffbridge.c`,
+`patches/kernel/020-ask-bridge-hooks.patch`) against ASK2 after B5:
+
+| # | Capability | Vendor | ASK2 after B5 |
+|---|---|---|---|
+| 1 | Learned MACs | Traffic-driven per-flow records (`NF_BR_FORWARD` hook at `NF_BR_PRI_LAST`), 15 B key `PORT_ID\|DA\|SA\|ETYPE`; bridge patch `br_fdb_register_can_expire_cb` keeps HW-forwarded MACs alive | Static entries only |
+| 2 | Routing through a bridge (IRB) | `cmmBrToFF` resolves the member port | Software (G11) |
+| 3 | Routed and bridged on one port | `cdx_ethernet_dist` last in every `dist_order` | Bridge-only members (G2) |
+| 4 | VLAN-aware bridge, QinQ | `STRIP_ALL_VLAN_HDRS` / `INSERT_VLAN_HDR` per `VLAN_FILTERED`/`VLAN_UNTAGGED` | Fails closed |
+| 5 | PPPoE session frames | Offloaded (`ETH_P_PPP_SES`) | IPv4/IPv6 only; blocked by the short non-IP frame freeze (§13.16) |
+| 6 | Bridge firewall | Honoured at MAC-pair granularity (hook after the filter) | Bypassed |
+| 7 | Visibility | Per-flow counters, `/proc` listing | debugfs only |
+
+Not gaps: the vendor's mark/QoS path is a TODO (`control_bridge.c:401`);
+multicast and broadcast stay in software on both; the vendor table caps at
+512 entries per port, ASK2 holds 32,768.
+
+Order: 7, 1, 4, then 2/3 (multi-table epic). 5 waits for the short-frame
+root cause.
+
+### 13.30 B6: visibility and learned MACs (design, 2026-10-13)
+
+**Visibility (#7).** `ask.ko` sends `SWITCHDEV_FDB_OFFLOADED` for FDB entries
+with hardware records, so `bridge fdb show` and VyOS `show bridge <br> fdb`
+print `offload`. The bridge only flips the bit on request and never clears
+it, so the resync states it explicitly every pass. No vyos-1x change: the
+VyOS FDB table already prints iproute2's flags.
+
+**Key.** The L2 profile becomes EKFC `0x64000000` = `KG_SCH_KN_MACDST |
+KG_SCH_KN_MACSRC | KG_SCH_KN_ETYPE`, 14 bytes `DA(6)|SA(6)|ETYPE(2)`.
+Qdrant gate: MACSRC is bit 29 / 6 B in `fman_keygen.c`, spec §2 table line
+293 and the 210 reference §438; the vendor's live scheme 11 on .106 runs
+`0xe4000000` (the same plus PORT_ID, unneeded with per-port tables) and
+carried 1.2 M frames (`arch/fman-vendor-source-extraction-2026-08-07.md`
+§4). Extraction is MSB-first, so DA precedes SA. The SA is what makes learned
+MACs correct: with a DA-only key a moved host's frames hit in hardware and
+the bridge never sees the move or the source.
+
+**Records.** One per (ingress port, DA, SA, EtherType), created from
+traffic. A bridge `NF_BR_FORWARD` hook at `NF_BR_PRI_LAST` (after the bridge
+filter, like the vendor) picks untagged IPv4/IPv6 unicast frames between two
+L2 ports, deduplicates them in a small hash, and queues a candidate. The
+worker (rtnl) admits it only if `br_fdb_find_port()` puts DA behind the
+egress port and SA behind the ingress port, both ports pass the existing
+member checks, and the ingress port's family mask allows the EtherType.
+Flooded frames fail the DA check. Static entries need no special path.
+
+**Liveness.** The CPU no longer sees a hardware-forwarded source, so its
+dynamic FDB entry would age out. When a record is installed for a learned SA,
+`ask.ko` takes the entry over as externally learned
+(`SWITCHDEV_FDB_ADD_TO_BRIDGE`, offloaded): the bridge does not age those
+(`has_expired()`), and takes them back by itself on a move
+(`br_fdb_update()` "Take over HW learned entry", which also sends us the
+DEL/ADD events). `ask.ko` ages its entries: every few seconds it reads each
+record's hardware packet count (written unconditionally on 320 B records,
+qdrant 2026-08-22) and, when all records of a source have been idle for the
+bridge's ageing time, deletes them and the entry
+(`SWITCHDEV_FDB_DEL_TO_BRIDGE`). Static entries are never taken over:
+`br_fdb_external_learn_del()` would delete them. A lost static-entry event
+therefore disables takeover until reload (fail closed).
+
+**Invalidation.** Any FDB event, port state change, engage or kill-switch
+change revalidates every record against the live FDB and port state and
+deletes the stale ones. Records are not re-created by the resync; traffic
+re-creates them. This replaces the static-entry shadow and the D3 desync
+problem: the live FDB is the authority, there is nothing to replay.
+
+**Counter reads** use `fman_pcd_fe_flow_get_stats()` under `h->lock`. It is
+O(records on that port) per call, so one ageing pass is O(R²) on the port's
+table; the record cap (2048) bounds it. It never runs on the nf_flowtable
+stats path that caused the 2026-10-10 convoy.
+
+Gate: B2 row on silicon first (does a DA+SA+EtherType record hit), then the
+B3a/B3b harness reworked for traffic-driven records, ageing (records and
+the taken-over entry go after `ageing_time` idle, come back with traffic),
+a MAC move between ports, and the B4 soak.
+
+**Implemented (2026-10-13, not yet CI-built or board-tested).**
+
+- `F_255.py`: L2 profile EKFC `0x64000000`, `FMAN_PCD_FE_L2_DA_KEY_SIZE`
+  14. A replay of the CI patch and fixup block on a fresh 6.18.55 tarball
+  applies it with 0 FATAL.
+- `ask_bridge.c` rewritten as above. The static-entry shadow, the FDB event
+  queue and the desync path are gone; the FDB notifier only sets a sticky
+  hashed bit for user-added and local MACs (never taken over: a local entry
+  taken over would be deleted by `br_fdb_external_learn_del()`) and kicks
+  the worker. `SWITCHDEV_FDB_OFFLOADED` now marks the SA entry while it has
+  records (taken-over entries get it through `ADD_TO_BRIDGE`); a moved entry
+  has the stale bit cleared on its new port.
+- `ask_hw.c`: `ask_hw_l2_record()` takes the SA; new
+  `ask_hw_l2_record_hits()`; debugfs `l2add <iif> <da> <sa> <ethertype>
+  <oif>` / `l2del <iif> <da> <sa> <ethertype>`.
+- KUnit `ask_test_bridge.c` pins the 14-byte key and rejects a non-unicast SA.
+- Harnesses: `bin/testrig-bridge-b6.sh` replaces `testrig-bridge-b3a.sh`
+  (static-entry semantics no longer apply); `testrig-bridge-soak.sh` now
+  churns 64 learned MACs per cycle under iperf3 (peak 66, base 2);
+  `testrig-bridge-b2.sh` and `testrig-bridge-capacity.sh` use the new debugfs
+  syntax and count `keysz=14` records.
+- Production and debug `ask.ko` plus `ask_kunit.ko` compile W=1 clean.
+
+Kernel facts this relies on (6.18.55 source):
+`has_expired()` and `br_fdb_cleanup()` skip `BR_FDB_ADDED_BY_EXT_LEARN`;
+`br_fdb_update()` clears it on a move and sends DEL (old port) then ADD
+(new port); `fdb_add_entry()` (`bridge fdb replace ... static`) does not
+clear it; `br_fdb_external_learn_del()` deletes by (MAC, VID) regardless of
+port and of static/local; `br_fdb_offloaded_set()` is the only writer of
+`BR_FDB_OFFLOADED` besides `br_fdb_clear_offload()`; `br_fdb_find_port()`
+needs rtnl; `CONFIG_NETFILTER_FAMILY_BRIDGE=y`.
