@@ -50,7 +50,7 @@ sudo ip addr flush dev eth3; sudo ip addr flush dev eth4
 sudo ip link add $BR type bridge vlan_filtering 0
 sudo ip link set eth3 master $BR; sudo ip link set eth4 master $BR; sudo ip link set $BR up
 sleep 3
-sudo bridge fdb add $M2 dev eth4 master static; sudo bridge fdb add $M1 dev eth3 master static
+sudo bridge fdb replace $M2 dev eth4 master static; sudo bridge fdb replace $M1 dev eth3 master static
 sleep 2; sudo dmesg | tail -40 | grep -E 'role change|bridge|L2_DA|profile 1|error|failed'"
 echo "records: $(recs) (want 4: 2 MACs x IPv4/IPv6 x 1 other port)"
 

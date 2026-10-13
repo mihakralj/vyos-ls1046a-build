@@ -126,6 +126,7 @@ int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
 int  ask_hw_l2_record(u8 hw_port_id, const u8 *da, __be16 eth_type, u32 fqid,
 		      bool add);
 bool ask_hw_port_is_l2(u8 hw_port_id);
+u8   ask_hw_port_family_mask(u8 hw_port_id);
 
 /*
  * CR-012: warms this port's no-confirm egress TX FQ cache. MUST be called

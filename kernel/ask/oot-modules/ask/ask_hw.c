@@ -275,12 +275,13 @@ EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
 
 /*
  * L2 bridge FDB offload (T-M6-2) is an automatic capability of an engaged
- * bridge-member port (bridge plan D1), behind this global kill switch (D8,
- * default 0 until B5). Clearing it removes every bridge record at once; the
- * ports keep their L2_DA role (nothing is offloaded on them) until they are
- * re-engaged. Setting it takes effect at the next engage or bridge join.
+ * bridge-member port (bridge plan D1), behind this global kill switch
+ * (default on, like vlan_offload). Clearing it removes every bridge record
+ * at once; the ports keep their L2_DA role (nothing is offloaded on them)
+ * until they are re-engaged. Setting it takes effect at the next engage or
+ * bridge join.
  */
-static bool ask_bridge_offload;
+static bool ask_bridge_offload = true;
 
 static int ask_bridge_offload_set(const char *val,
 				  const struct kernel_param *kp)
@@ -298,7 +299,7 @@ static const struct kernel_param_ops ask_bridge_offload_ops = {
 };
 module_param_cb(bridge_offload, &ask_bridge_offload_ops, &ask_bridge_offload, 0644);
 MODULE_PARM_DESC(bridge_offload,
-		 "L2 bridge FDB hardware offload on engaged bridge-member ports (default 0 until T-M6-2 B5; static FDB entries, no VLAN filtering)");
+		 "L2 bridge FDB hardware offload on engaged bridge-member ports (default 1; static FDB entries, no VLAN filtering; 0 = kill switch, removes all bridge records)");
 
 bool ask_hw_bridge_offload_armed(void)
 {
@@ -1798,6 +1799,12 @@ int ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id)
 		return -ENODEV;
 	*hw_port_id = fman_port_get_id(port);
 	return 0;
+}
+
+/* The port's `offload ipv4|ipv6` mask (ASK_FAM_V4/V6), 0 when disengaged. */
+u8 ask_hw_port_family_mask(u8 hw_port_id)
+{
+	return ask_hw_port_family_get(hw_port_id);
 }
 
 bool ask_hw_port_is_l2(u8 hw_port_id)
