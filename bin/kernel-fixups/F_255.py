@@ -268,6 +268,29 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_engage);
 }
 EXPORT_SYMBOL_GPL(fman_pcd_fe_engage_profile);
 """),
+    # Bridge plan §13.2 G6: F-221 falls back to the global template table when
+    # the per-port alloc fails. That table is sized for ROUTED, so a non-routed
+    # profile would arm its 8B EKFC against a 50B comparator and report
+    # success. Fail closed instead. The scaffold is not yet recorded in
+    # pcd->fe_scaffold_* here (F-139), so freeing the three blocks is the whole
+    # unwind (F-125 pattern).
+    (FM + "fman_pcd.c",
+     """					if (pcd->fe_arming_v4_table)
+						et = pcd->fe_arming_v4_table;
+""",
+     """					if (pcd->fe_arming_v4_table)
+						et = pcd->fe_arming_v4_table;
+					else if (fman_pcd_fe_port_profile(pcd, (u8)port_id) !=
+						 FMAN_PCD_FE_PROFILE_ROUTED) {	/* F-255 G6 */
+						fman_pcd_muram_free(pcd, gro, 256);
+						fman_pcd_muram_free(pcd, mto, 64);
+						fman_pcd_muram_free(pcd, ato, 32);
+						pr_warn("fman_pcd fe_arm: port 0x%02x per-port table alloc failed; profile %u has no fallback\\n",
+							port_id,
+							fman_pcd_fe_port_profile(pcd, (u8)port_id));
+						return -ENOMEM;
+					}
+"""),
     (FM + "fman_pcd.c",
      """	__fman_pcd_fe_arm_disengage(pcd, hw_port_id);
 	/* F-129: Tear down shared FE-VM chain on last port disengage.""",

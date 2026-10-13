@@ -938,3 +938,186 @@ The §13.18 "wrap with `STRIP_ETH_HDR`/`INSERT_L2_HDR`" hypothesis was re-examin
 - `kernel/ask/oot-modules/ask/tests/ask_test_bridge.c`: KUnit cases updated for the 8-byte key, asserting the DA occupies bytes 0-5 and the EtherType occupies bytes 6-7 (network byte order), with the remaining `FMAN_FE_FLOW_KEY_MAX - 8` bytes still zero.
 
 **Not yet done:** build the modified kernel (F-255's EKFC/key-size live in the in-kernel `fman_pcd.c`, not the OOT module, so this requires a full `Image` rebuild + TFTP dev-boot or ISO, not just an `ask.ko` hot-swap) and OOT `ask.ko` rebuild/sign, deploy to the DUT, cold-boot, and re-run the §13.16 B2 matrix (ARP 60B and 0x88b5 60-128B stall cases, plus a regression check that IPv4/IPv6 ≥128B hits with a matching-ethertype key still work). No hardware verification has occurred for this fix yet.
+
+### 13.20 B1-closing verification runbook (prepared 2026-10-12, not yet executed)
+
+Both the prod (`vyos-2026.10.12-0117-rolling`, already on `.185`) and debug/KUnit
+(`vyos-2026.10.12-0139-rolling`, staged on lxc200, not yet installed) ISOs
+built clean in CI from commit `9acaab6c`. This is the exact sequence to close
+B1 (and, with it, re-run the §13.16 stall repro) once the debug ISO is
+installed and the board cold-booted — one boot covers all three checks below.
+Steps 1-4 are automated by `bin/testrig-bridge-b2.sh`. It runs from the
+Cobalt 100 runner, which does reach dell1/dell2 as `admin@` (corrected
+2026-10-13). It also fixes three errors in the hand sequence below. Stats live
+in `/sys/kernel/debug/fman_pcd/0/fe_ehash_stats` (the `keysz=8` lines), not
+under `ask/`. The debugfs `disengage` verb takes a port number (`0x10`), so
+`disengage eth3` returns `-EINVAL`. eth3 must be promiscuous (§13.8), or the
+mEMAC drops foreign-DA frames before KeyGen. The restore step re-engages
+ROUTED before `pcd-snapshot diff`, because the baseline was captured with eth3
+ROUTED-armed. The production image has no `ask` debugfs
+(`CONFIG_NET_ASK_DEBUG_FS`), so a kunit/debug ISO is required.
+
+1. **Built-in FMan PCD KUnit suites (boot-time):** `dmesg | grep -A2 KTAP`
+   immediately after boot; expect all `ok` lines, no `not ok`.
+2. **`ask_bridge` KUnit suite (OOT harness):**
+   `sudo modprobe ask && sudo modprobe ask_kunit`, then
+   `dmesg | grep -i ask_bridge` and `cat /sys/kernel/debug/kunit/ask_bridge/results`.
+   Expect every case (DA-byte, EtherType-byte, zero-padding assertions) `ok`.
+3. **§13.16 stall re-repro (needs dell1/dell2):**
+   - `sudo /usr/local/bin/pcd-snapshot capture -o /tmp/baseline.json` (clean
+     boot, before any bridge engage — this is the ROUTED-untouched reference).
+   - `echo "disengage 0x10" | sudo tee /sys/kernel/debug/ask/offload` (eth3 is
+     ROUTED-armed at boot by the firewall flowtable; must disengage first).
+   - `echo "l2engage eth3" | sudo tee /sys/kernel/debug/ask/offload`
+   - `echo "l2add eth3 02:00:00:aa:bb:01 0x0800 eth4" | sudo tee /sys/kernel/debug/ask/offload`
+   - From dell1, send to DA `02:00:00:aa:bb:01` on eth3: 20× ARP 60B, 20×
+     0x88b5 60B, 20× 0x88b5 128B (the three cases that wedged the port
+     pre-fix), then 20× IPv4/UDP matching ethertype `0x0800` (regression —
+     must still hit).
+   - After each burst, read `cat /sys/kernel/debug/ask/fe_ehash_stats` on
+     `.185` and `port.rx_unicast` on dell2.
+   - **Pass:** ARP/0x88b5 bursts produce **zero** `pkt_count` increment (they
+     structurally miss the 8-byte key, fall to the kernel software bridge —
+     no port wedge, no stall on the subsequent IPv4 burst). IPv4 burst still
+     shows `pkt_count +20` and dell2 `rx_unicast +20`.
+   - **Fail signature to watch for (old bug):** `pkt_count` advances by a
+     handful then freezes, and the following IPv4 burst also produces zero
+     movement anywhere (the port-wedge signature from §13.14-13.16).
+   - `echo "l2del eth3 02:00:00:aa:bb:01 0x0800" | sudo tee /sys/kernel/debug/ask/offload`,
+     `echo "disengage eth3" | sudo tee /sys/kernel/debug/ask/offload`.
+4. **Teardown/restore regression:**
+   `sudo /usr/local/bin/pcd-snapshot diff /tmp/baseline.json` — must report
+   byte-clean (ROUTED scheme restored on eth3, `muram_budget used` back to
+   baseline), confirming disengage correctly unwinds the L2_DA profile.
+
+Record results as a new subsection here and store the verdict in Qdrant
+(pass/fail per step, boot type, image version) following this session's
+pattern. If step 3 passes, B1 is closed and B2's open stall question is
+resolved; B3 (real FDB-driven switchdev wiring) becomes the next increment.
+If it fails, capture the FE-VM workspace dump (spec §11 step 3) before
+rebooting — this would be the first hardware falsification of the
+DA+EtherType key hypothesis and needs root-causing before any further B1/B2
+attempt.
+
+### 13.21 B1 closed: DA+EtherType key verified on silicon (2026-10-13, DUT .185, image 2026.10.12-0139-rolling debug/KUnit, kernel 6.18.55-vyos)
+
+Boot type: the operator rebooted after `add system image`. A cold power-cycle
+was not confirmed, so the boot type is unknown. The result is a pass, and
+leftover state from a warm boot could only have caused a false failure, so
+the verdict stands. `bin/testrig-bridge-b2.sh` ran twice in the same boot,
+with a full arm → test → restore cycle each time. Log of run 2:
+
+| Step | Result |
+|---|---|
+| 1. Built-in FMan PCD KUnit | All suites pass, 0 `not ok` |
+| 2. `ask_bridge` KUnit | 3/3 ok (`action_unicast`, `action_rejects_bum`, `action_rejects_bad_target`) |
+| 3. Engage eth3 (0x10) as L2_DA | `profile 1 key 8B` |
+| 3. 20× ARP 60 B → record DA | `pkt_count` +0, kernel rx +22, dell2 +0: **miss to kernel, PASS** |
+| 3. 20× 0x88b5 60 B | +0 / +21 / +0: **PASS** |
+| 3. 20× 0x88b5 128 B | +0 / +22 / +0: **PASS** |
+| 3. 20× IPv4/UDP 1000 B, sent after the three non-IP bursts | `pkt_count` +20, kernel rx +1, dell2 `port.rx_unicast` +20: **hit, forwarded, CPU bypassed, no freeze. PASS** |
+| 4. `l2del` + disengage + re-engage ROUTED | `muram_budget used` 52922 B, back at baseline; `pcd-snapshot diff`: matches baseline, **PASS** |
+
+Before the fix, the first short non-IP burst froze the hit path after 4–8
+hits, and every later hit (IPv4 included) stopped until a cold reset
+(§13.14–13.16). With the 8-byte key those frames cannot match a `0x0800`
+record, so the freeze does not occur. The fix avoids the freeze rather than
+explaining it: a record that short non-IP frames can match would presumably
+still freeze the port. B3a must therefore only install `0x0800` and `0x86dd`
+records, never a non-IP EtherType.
+
+B2 row 5 (tagged frames) closed on the same boot with
+`CASES="tag_v4_1000 tag_v4_64 tag_arp64 v4udp1000"`. KeyGen's EtherType field
+is the inner EtherType, after the 802.1Q tag. Tagged IPv4 1000 B and 64 B both
+hit the `0x0800` record (`pkt_count` +20, dell2 +20, kernel +1-2) with no
+freeze. Tagged ARP misses to the kernel (+22). The untagged IPv4 burst that
+followed still hit +20/+20. A `tcpdump -e` on dell2 shows the forwarded frame
+unchanged: same MACs, `802.1Q vlan 10, p 0`, 64 B. A hit therefore forwards
+the frame transparently with its tag intact, which matches the kernel bridge
+when VLAN filtering is off. On a `vlan_filtering` bridge it would ignore the
+VID, so D6 (fail closed on `vlan_filtering`) stands.
+
+Still open:
+- Row 7 per-table capacity.
+- `F-148 CC match table full` is printed on the first `l2add` of a boot and
+  is still unexplained.
+- The `0x7`/`0x6` channel-table gap. Mainline `fman_get_qman_channel_id()`
+  lists port `0x7` twice and never `0x6`, so offline port `1a86000` fails its
+  probe with `incorrect qman-channel-id` on every boot since 0175. This is
+  harmless: it fails before registering in the active-port list.
+
+Next increment: B3a (§13.7).
+
+### 13.22 B3a implemented (2026-10-13, not yet built in CI or board-tested)
+
+Kernel (`bin/kernel-fixups/F_255.py`, gap G6): when a port's per-port table
+allocation fails, `__fman_pcd_fe_arm_engage()` now returns `-ENOMEM` for any
+non-ROUTED profile. It frees the three scaffold blocks first; F-139 has not
+recorded them yet, which is the F-125 unwind pattern. Previously the F-221
+fallback to the ROUTED-sized template table applied to every profile. The
+qdrant gate (S0) found nothing against the change. A clean 6.18.55 CI replay
+gave 0 FATALs, `fman_pcd.o` compiles W=1 clean, and `test-fixups.sh` passes
+4/4.
+
+ask.ko:
+
+- **Kill switch (D8).** `ask.bridge_offload` (bool, 0644, default 0). Setting
+  it to 0 removes every bridge record. `ask_hw_bridge_offload_armed()` is now
+  the kill switch, not "any port engaged".
+- **Port role (D1).** `ask_hw_offload_engage_role()`. A genl engage under rtnl
+  picks L2_DA for a bridge member (while the switch is on) and ROUTED
+  otherwise. A port armed with the other profile is disengaged and
+  re-engaged, and its family mask survives. `NETDEV_CHANGEUPPER` to or from a
+  bridge does the same for an engaged port. VyOS's
+  `apply_ask_bridge_offload()` re-sends engage after a join, which is then
+  idempotent.
+- **Routed refusal.** A lockless `ask_hw_port_l2` bitmap makes
+  `ask_hw_flow_family_ok()`, `ask_hw_port_bind()` (quiet `-ENODEV`), and the
+  VLAN and PPPoE port gates refuse L2_DA ports.
+- **Installer** (`ask_bridge.c`, rewritten from the B0 observer):
+  - Only events for user-added, VID-0, non-local, unlocked FDB entries are
+    queued (D4, D6).
+  - The worker keeps a shadow of those entries (cap 512) and, under rtnl,
+    diffs installed against wanted records (cap 2048).
+  - An entry for MAC A behind port E gives (A, `0x0800`) and (A, `0x86dd`)
+    in every other member P's table, pointing at E's no-confirm TX FQ.
+  - A pair qualifies when P and E are both L2_DA-engaged DPAA ports of the
+    same bridge, both FORWARDING, neither `BR_ISOLATED` nor `BR_PORT_LOCKED`.
+    P must have no VLAN uppers, the bridge must not filter VLANs, and E's FQ
+    must already be cached (no allocation under rtnl, CR-012).
+- **Resync triggers.** FDB events, engage, `CHANGEUPPER`, STP state,
+  `PRE_BRIDGE_FLAGS` (the bridge never sends `BRIDGE_FLAGS` when no driver
+  claims it), VLAN filtering, and the kill switch.
+- **Disengage race.** Disengage calls `ask_bridge_forget_port()`.
+  `ask_hw_l2_record()` re-checks the L2_DA profile under `h->lock`, because
+  `fman_pcd_ehash_table_for_port()` falls back to the global ROUTED table for
+  a port with no per-port table.
+- **Lost events (D3).** A lost FDB event (queue full or OOM) drops the whole
+  shadow, so it fails closed. There is no FDB dump to resync from.
+- **Lock order:** rtnl → `ask_bridge_lock` → `h->lock` → `fe_lock`.
+- **Builds.** ask.ko and `ask_kunit.ko` compile W=1 against the replayed tree.
+  The `hw_auto_gate_needs_engaged_port` KUnit case is updated, since the
+  bridge gate no longer follows engagement.
+- **Bridge module dependency.** ask.ko now uses `br_port_get_stp_state`,
+  `br_port_flag_is_set` and `br_vlan_enabled`. `CONFIG_BRIDGE=m`, so loading
+  ask.ko pulls in `bridge.ko`.
+
+Known gaps, by design for v1:
+
+- Bridge-family nftables rules are bypassed for offloaded destination MACs.
+- Static entries must be added with `bridge fdb add <mac> dev <port> master
+  static`; VyOS has no CLI for this.
+- Dynamic entries and MAC moves the CPU cannot see stay in software.
+- Records are not counted (`stats=false`, G8).
+
+Board gate: `bin/testrig-bridge-b3a.sh`. It needs the B3a image, a cold boot,
+and a DUT reboot afterwards, because it builds `br-b3a` with ip(8) and
+deletes eth3.10/eth4.20 and the eth3/eth4 addresses.
+
+- Hit rows: v4 and v6 dell1→dell2, and v4 dell2→dell1. Each must show
+  `pkt_count` +20 with peer +20 and the kernel below 5.
+- Miss rows: ARP to a known MAC, unknown DA, and broadcast. Each must show
+  hits 0 and the kernel +20.
+- Deleting one entry takes the record count from 4 to 2.
+- Leaving the bridge takes it to 0, triggers the role change back, and must
+  leave `pcd-snapshot diff` clean.

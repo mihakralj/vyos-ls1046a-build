@@ -16,6 +16,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
+#include <linux/rtnetlink.h>
 #include <net/genetlink.h>
 #include <net/sock.h>
 
@@ -829,6 +830,7 @@ return 0;
 /* ------------------------------------------------------------------------- */
 static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 {
+	struct net_device *dev;
 	struct nlattr *port_attr;
 	struct nlattr *fam_attr;
 	u8 port_id;
@@ -856,7 +858,15 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 
 	ask_hw_offload_set_family(port_id, fam_mask);
 
-	rc = ask_hw_offload_engage(port_id);
+	/* T-M6-2 B3a (bridge plan D1): a bridge member engages as L2_DA, any
+	 * other port ROUTED. rtnl keeps membership stable across the decision
+	 * and the engage; a port armed with the other profile is switched. */
+	rtnl_lock();
+	dev = ask_hw_port_netdev(port_id);
+	rc = ask_hw_offload_engage_role(port_id,
+			dev ? ask_bridge_port_profile(dev) :
+			      FMAN_PCD_FE_PROFILE_ROUTED, false);
+	rtnl_unlock();
 	if (rc) {
 		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
 		return rc;
@@ -866,6 +876,7 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	 * with flow_block_lock held. Must NOT be called from inside
 	 * ask_hw_offload_engage() itself (see ask_hw_prewarm_egress_fq()). */
 	ask_hw_prewarm_egress_fq(port_id);
+	ask_bridge_kick();
 
 	ask_pr_info("genl: engaged port 0x%02x family_mask=0x%x\n",
 		    port_id, fam_mask);
