@@ -37,8 +37,9 @@ set interfaces ethernet eth<n> offload ipv6
 | Side effects | Forces RPS on the port and enables `hw-tc-offload`. |
 | Validation | Commit fails if the helper `/usr/local/bin/vyos-offload-ask` is missing/errors, or if the MTU is outside **1280–3600**. |
 
-Engaging a port only arms it; flows are learned **only** from a hardware
-flowtable (next section). An engaged port without a flowtable offloads nothing.
+Engaging a port only arms it. Routed flows are learned **only** from a hardware
+flowtable (next section); bridged traffic uses static FDB entries instead (see
+"Bridge offload" below). An engaged port with neither offloads nothing.
 
 #### Flow learning: hardware flowtable
 
@@ -58,6 +59,47 @@ set firewall global-options hardware-offload-delay 500   # verify path with: set
 * `hardware-offload-delay` (patch `055`): minimum flow age in ms, `0–60000`, default `500`.
 * Flowtable MTU guard (`037`) mirrors the 1280–3600 range; VLAN sub-interfaces are handled when the parent is listed (`043`).
 * Add the same flowtable rule for `ipv6` for IPv6 flows.
+
+#### Bridge offload
+
+When ports that are members of the same bridge are engaged, the FMan forwards
+known-unicast traffic between them. No flowtable and no static entries are
+needed: the first frames of each conversation go through the software bridge,
+then the pair (source MAC, destination MAC) is forwarded in hardware.
+
+```
+set interfaces bridge br0 member interface eth3
+set interfaces bridge br0 member interface eth4
+set interfaces ethernet eth3 offload ipv4
+set interfaces ethernet eth4 offload ipv4
+```
+
+* `show bridge br0 fdb` marks hosts whose traffic is in hardware with
+  `offload`; learned ones also show `extern_learn`, because ask.ko takes them
+  over from the bridge's ageing and ages them itself from hardware hit counts
+  (same ageing time). A host that moves to another port is picked up from its
+  first frame there.
+* Static entries (`bridge fdb replace <mac> dev eth4 master static`) work too
+  and are never aged or taken over.
+* Only IPv4 and IPv6 frames are offloaded, for the families engaged on the
+  ingress port (`offload ipv4` alone → IPv4 only). ARP, broadcast, multicast and
+  unknown destinations take the software bridge.
+* Not offloaded: VLAN-aware bridges (`enable-vlan`), member ports with VLAN
+  sub-interfaces, ports not in STP forwarding, isolated or locked ports.
+* A bridge member port does bridge offload only: its routed, VLAN and PPPoE
+  offload stops until it leaves the bridge.
+* Bridge-family firewall rules see the first frames of each MAC pair; a pair
+  they accept is then forwarded in hardware without them, as on NXP's ASK.
+
+#### Kill switches (diagnosis)
+
+Global `ask.ko` parameters, all default on and not persistent across reboots:
+`bridge_offload`, `vlan_offload`, `pppoe_offload`, `nat44_offload`,
+`nat66_offload`, `ipv6_hw_frag`.
+
+```
+echo 0 | sudo tee /sys/module/ask/parameters/bridge_offload   # removes all bridge records
+```
 
 #### Disable
 

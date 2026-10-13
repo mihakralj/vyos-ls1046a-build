@@ -1296,13 +1296,11 @@ int ask_hw_b2_l2_engage(const char *ifname)
 						       FMAN_PCD_FE_PROFILE_L2_DA);
 }
 
-/* B2: hand-arm (or remove) one DA+EtherType record in @iifname's L2_DA
- * table that forwards to @oifname's no-confirm TX FQ. F-255's L2_DA key is
- * DA(6)+EtherType(2) (plan §13.18), so @eth_type (network byte order) must
- * be supplied for both add and del. Process context, never with
- * flow_block_lock held. */
-int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
-			const char *oifname, bool add)
+/* B2: hand-arm (or remove) one DA+SA+EtherType record in @iifname's L2_DA
+ * table that forwards to @oifname's no-confirm TX FQ (F-255 key, plan
+ * §13.30). Process context, never with flow_block_lock held. */
+int ask_hw_b2_l2_record(const char *iifname, const u8 *da, const u8 *sa,
+			__be16 eth_type, const char *oifname, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
@@ -1318,11 +1316,8 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
 	if (rc)
 		return rc;
 	if (!add) {
-		BUILD_BUG_ON(FMAN_PCD_FE_L2_DA_KEY_SIZE != ETH_ALEN + sizeof(__be16));
-		ether_addr_copy(key, da);
-		memcpy(key + ETH_ALEN, &eth_type, sizeof(eth_type));
-		return fman_pcd_fe_flow_del(h->fman, port, key,
-					    FMAN_PCD_FE_L2_DA_KEY_SIZE);
+		ask_bridge_key(key, da, sa, eth_type);
+		return fman_pcd_fe_flow_del(h->fman, port, key, sizeof(key));
 	}
 
 	dev = dev_get_by_name(&init_net, oifname);
@@ -1332,7 +1327,8 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
 	dev_put(dev);
 	if (rc)
 		return rc;
-	rc = ask_bridge_fe_action(da, eth_type, fqid, ask_hw_get_enq_fe_off(), &a);
+	rc = ask_bridge_fe_action(da, sa, eth_type, fqid,
+				  ask_hw_get_enq_fe_off(), &a);
 	if (rc)
 		return rc;
 	return fman_pcd_fe_flow_add(h->fman, port, &a);
@@ -1818,47 +1814,76 @@ int ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid)
 	return ask_hw_resolve_oif_fqid(ifindex, fqid, false);
 }
 
+/* @hw_port_id's slot if it is engaged as L2_DA. h->lock held. */
+static struct ask_hw_port *ask_hw_l2_port(struct ask_hw_pcd *h, u8 hw_port_id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
+		if (h->port[i].in_use && h->port[i].port_id == hw_port_id &&
+		    h->port[i].offload_engaged &&
+		    h->port[i].engaged_profile == FMAN_PCD_FE_PROFILE_L2_DA)
+			return &h->port[i];
+	return NULL;
+}
+
 /*
- * Add or remove one bridge record (DA + EtherType -> @fqid) in
+ * Add or remove one bridge record (DA + SA + EtherType -> @fqid) in
  * @hw_port_id's L2_DA table. h->lock makes the profile check and the table
  * operation atomic against disengage: with no per-port table,
  * fman_pcd_fe_flow_add() would fall back to the global ROUTED table. A
  * delete on a port that is no longer L2_DA is a no-op (its table and
  * records were freed with it).
  */
-int ask_hw_l2_record(u8 hw_port_id, const u8 *da, __be16 eth_type, u32 fqid,
-		     bool add)
+int ask_hw_l2_record(u8 hw_port_id, const u8 *da, const u8 *sa,
+		     __be16 eth_type, u32 fqid, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
-	struct ask_hw_port *p = NULL;
-	unsigned int i;
 	int rc;
 
 	if (!h)
 		return add ? -ENODEV : 0;
 	if (add) {
-		rc = ask_bridge_fe_action(da, eth_type, fqid,
+		rc = ask_bridge_fe_action(da, sa, eth_type, fqid,
 					  ask_hw_get_enq_fe_off(), &a);
 		if (rc)
 			return rc;
 	} else {
-		ether_addr_copy(a.key, da);
-		memcpy(a.key + ETH_ALEN, &eth_type, sizeof(eth_type));
+		ask_bridge_key(a.key, da, sa, eth_type);
 	}
 
 	mutex_lock(&h->lock);
-	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
-		if (h->port[i].in_use && h->port[i].port_id == hw_port_id)
-			p = &h->port[i];
-	if (!p || !p->offload_engaged ||
-	    p->engaged_profile != FMAN_PCD_FE_PROFILE_L2_DA)
+	if (!ask_hw_l2_port(h, hw_port_id))
 		rc = add ? -ENODEV : 0;
 	else if (add)
 		rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
 	else
 		rc = fman_pcd_fe_flow_del(h->fman, hw_port_id, a.key,
 					  FMAN_PCD_FE_L2_DA_KEY_SIZE);
+	mutex_unlock(&h->lock);
+	return rc;
+}
+
+/* One record's hardware packet count (the FE writes it on every hit,
+ * qdrant 2026-08-22). O(records in the port's table) under fe_lock: for the
+ * bridge ageing pass only, never a per-flow stats path (2026-10-10 convoy). */
+int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *da, const u8 *sa,
+			  __be16 eth_type, u64 *pkts)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
+	u64 bytes;
+	u32 ts;
+	int rc;
+
+	if (!h)
+		return -ENODEV;
+	ask_bridge_key(key, da, sa, eth_type);
+	mutex_lock(&h->lock);
+	rc = ask_hw_l2_port(h, hw_port_id) ?
+		fman_pcd_fe_flow_get_stats(h->fman, hw_port_id, key, sizeof(key),
+					   pkts, &bytes, &ts) : -ENODEV;
 	mutex_unlock(&h->lock);
 	return rc;
 }
