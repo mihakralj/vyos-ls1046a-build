@@ -463,3 +463,18 @@
 # insert, under the same pcd->fe_lock already held by every caller.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0219-fman-pcd-ehash-dup-key-evict.patch
+
+# ── 4016: wireguard per-flow transmit lanes (E2 of plans/ask2-wireguard-plan.md 2.18) ──
+# A peer has ONE in-order transmit stage (wg_packet_tx_worker): one CPU at 99%
+# while the box is 67-76% busy, which caps a single tunnel at about 1.2 Gbit/s
+# (2 tunnels 1.6, 4 tunnels 1.77). New module parameter wireguard.tx_lanes
+# (uint 1..4, default 1 = stock) gives each peer N lanes, each with its own
+# prev_queue and work item on its own CPU (from serial_cpus). Nonces are still
+# assigned in order at submit; the staged batch is split by skb_get_hash so an
+# inner flow never changes lane (TCP order kept), the receiver's replay window
+# absorbs the cross-lane skew. Each sub-list owns its own peer and keypair
+# reference. Applies to peers created after the write. Single inner flow is
+# unchanged. Compiles against 6.18.55; board validation needs a CI image
+# (module signing): echo 3 > /sys/module/wireguard/parameters/tx_lanes first.
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4016-wireguard-tx-lanes.patch
