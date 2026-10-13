@@ -69,7 +69,7 @@ f=float(sys.argv[1]); tot=0; per=[]; retr=0
 for p in sys.argv[2:]:
     try: j=json.load(open(p))
     except Exception: per.append(0.0); continue
-    a=[i['sum']['bits_per_second'] for i in j.get('intervals',[]) if i['sum']['start']>=f-0.01 and not i['sum'].get('omitted')]
+    a=[i['sum']['bits_per_second']+i.get('sum_bidir_reverse',{}).get('bits_per_second',0) for i in j.get('intervals',[]) if i['sum']['start']>=f-0.01 and not i['sum'].get('omitted')]
     g=sum(a)/len(a)/1e9 if a else 0; per.append(g); tot+=g
     retr+=j.get('end',{}).get('sum_sent',{}).get('retransmits',0) or 0
 print("%.3f %d %s"%(tot,retr,",".join("%.2f"%x for x in per)))
@@ -94,7 +94,7 @@ echo "ts,tunnels,active,dir,rep,gbps,retrans,dut_busy,hot_cpus,per_tunnel_gbps" 
 echo "DUT=$DUT kind=$DUT_KIND tunnels=$TUNNELS active=$ACTIVE streams/tunnel=$STREAMS dur=$DUR"
 win=$((DUR-STEADY_FROM-2))
 for dir in $DIRS; do
-  case $dir in up) flag="";; down) flag="-R";; esac
+  case $dir in up) flag="";; down) flag="-R";; bidir) flag="--bidir";; esac
   for rep in $(seq 1 $REPS); do
     ssh $SSHO -i $HOME/.ssh/vyos_key $DUT sh -s -- $STEADY_FROM $win > /tmp/wgm-dut.stat <<'EOS' &
 sf=$1; w=$2

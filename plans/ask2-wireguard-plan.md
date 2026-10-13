@@ -356,6 +356,24 @@ What is left to win: a plain-read `work_pending()` check before `queue_work_on()
 
 Stage 4 (crypto assembly, about 5%) is in the same position. Software WireGuard on this board is at its practical limit: about 1.1 to 1.6 Gbit/s single tunnel and 1.8 to 1.9 Gbit/s with four tunnels. The only remaining items above measurement noise are stage 5/6 (FMan/QMan, months, out of tree) or the IPsec/CAAM offload plan for VPN throughput.
 
+### 2.17 Full matrix, .106 reference against .185 (2026-10-13)
+
+Same method for both boards: IPv4 inner, MTU 1420, iperf3 TCP, 30 s runs with the first 10 s discarded, medians. One tunnel: 4 streams and a new tunnel for every run (5 runs), which samples serial-worker placement. Two and four tunnels: 2 streams per tunnel, one tunnel set per row (3 runs). `.106` is OpenWrt with the vendor ASK stack on its default config (`schedutil` governor); `.185` is image 2243 (`serial_cpus=14` from modprobe.d, `performance` governor as shipped) with the conntrack ignore rules for the tunnel ports applied through VyOS config. Harness: `bin/wg-matrix.sh` and `bin/wg-matrix-table.py`; data `oracle/wgfull-{106,185}-t{1,2,4}.csv`. Gbit/s, median (min - max):
+
+| Tunnels | Dir | .106 | .185 | Gain |
+|---|---|---|---|---|
+| 1 | up | 1.38 (0.91 - 1.44) | 1.17 (1.10 - 1.21) | -15% |
+| 1 | down | 1.30 (1.29 - 1.55) | 1.56 (1.49 - 1.60) | +20% |
+| 1 | bidir | 1.51 (1.36 - 1.68) | 1.54 (1.41 - 1.61) | +2% |
+| 2 | up | 1.44 | 1.60 (1.58 - 1.61) | +11% |
+| 2 | down | 1.58 (1.57 - 1.61) | 1.64 (1.60 - 1.70) | +4% |
+| 2 | bidir | 1.68 | 1.79 (1.78 - 1.80) | +7% |
+| 4 | up | 1.57 (1.56 - 1.57) | 1.77 (1.73 - 1.85) | +13% |
+| 4 | down | 1.66 | 1.87 (1.86 - 1.88) | +13% |
+| 4 | bidir | 1.69 | 1.86 (1.84 - 1.91) | +10% |
+
+`.185` leads in eight of nine cells; the exception is single-tunnel `up` (-15%), the cell bounded by the serial transmit stage. `.106` scales from about 1.4 to 1.7 Gbit/s with four tunnels; `.185` from 1.2 to 1.9. `.106` single-tunnel `up` shows a large placement spread (one run at 0.91 among four at 1.36 to 1.44), `.185`'s is narrow (1.10 to 1.21). Multi-tunnel ranges are tight because each row uses one tunnel set.
+
 ## 3. What does not help
 
 Evaluated and dropped; no time should go into these.
