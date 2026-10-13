@@ -1199,3 +1199,116 @@ Still open:
 - B4 churn/soak.
 - B2 row 7 capacity.
 - B5.
+
+### 13.25 B4 churn soak passed on silicon (2026-10-13, DUT .185, image 1557, warm boot)
+
+The boot was warm, after about 8 bridge setup/teardown cycles that each ended
+with `pcd-snapshot` clean.
+
+`bin/testrig-bridge-soak.sh CYCLES=200 JOIN_EVERY=10`:
+
+- **Bridge.** eth3+eth4 with static entries for dell1 and dell2, and iperf3
+  `-P 4` dell1→dell2 across the bridge for the whole run.
+- **Per cycle.** Add 64 static MACs (32 per port, 128 records), then delete
+  them. Every 10th cycle eth3 also leaves and rejoins the bridge: a role
+  change to ROUTED and back, freeing and rebuilding its table.
+- **Totals.** About 25,600 record adds and 25,600 SYNC deletes under line-rate
+  traffic, plus 40 role changes.
+
+| Criterion | Result |
+|---|---|
+| Cycles | 200/200, no STOP |
+| Records at peak / after delete | 132 / 4 on every cycle |
+| MURAM | 52922 B on every cycle and after teardown |
+| New kernel errors (per-cycle journal-cursor scan: F-256, SYNC timeout, DMA bus error, WARNING, BUG, lockdep) | 0 on every cycle |
+| Background flow hardware hits per cycle | > 0 on every cycle (min 3.67 M, in join/leave cycles) |
+| Background throughput | 9.26 Gbit/s steady for 47 min. Each leave/rejoin shows as one 10 s interval at ~7.8 Gbit/s, i.e. ~1.5 s of outage while eth3 is out of the bridge |
+| Teardown | 0 records, MURAM 52922, `pcd-snapshot diff` matches baseline |
+| Whole-boot `journalctl -k -b -1` | 60 role changes, 0 lockdep/WARNING/BUG/DMA-bus-error/SYNC-timeout lines. The only pattern hit was the boot-time `ramoops@b0000000` reserved-mem line, a known false positive for `Oops` |
+
+Harness findings:
+
+- **Use `bridge fdb replace` for static entries.** Within ~3 s of a port
+  joining, the bridge learns the peer MAC dynamically from live traffic, and
+  `bridge fdb add ... master static` over a learned entry fails with EEXIST.
+  The entry then stays dynamic and is not offloaded (D4). Both bridge
+  harnesses now use `replace`. Operators adding static entries on a live
+  bridge need the same.
+- **Poll on the DUT, not over SSH.** Waiting for a record count needs one
+  remote loop, not repeated SSH round trips (1-2 s each).
+
+CPU: the 11.7 % "busy" in §13.24 was not datapath cost. Sampled during the
+soak at ~9.3 Gbit/s bridged: eth3/eth4 kernel RX +3 packets each over 5 s,
+NET_RX softirqs +~100 in total, and the softirq CPU column unchanged. The
+busy time is user and system time from sshd, sudo, journald and logind, all
+driven by the harness polling. Hardware-bridged frames cost no measurable
+CPU.
+
+B4 is closed on this image. Remaining before B5:
+
+- B2 row 7 (per-table capacity; the software caps are 512 entries and 2048
+  records).
+- Throughput on a production build.
+- The B5 matrix and `ASK_CAP_BRIDGE`.
+
+### 13.26 B2 row 7: L2_DA table capacity (2026-10-13, DUT .185, image 1557)
+
+`bin/testrig-bridge-capacity.sh` engages eth3 as L2_DA through debugfs and
+inserts N `(02:00:dd:xx:xx:xx, 0x0800) → eth4` records into the one table. It
+then sends 20 IPv4 frames from dell1 to the first, middle and last DA,
+deletes everything, and restores ROUTED.
+
+| N | Insert | Lookup (first / middle / last) | Delete | RAM while installed | MURAM | Teardown |
+|---|---|---|---|---|---|---|
+| 8,192 | 0 failures, 33.6 s | 20/20 hit + delivered each | 0 failures, 33.2 s | | 52922 flat | `pcd-snapshot` clean, 0 kernel errors |
+| 32,768 (= bucket count, so collision chains exist) | 0 failures, 139 s (~4.2 ms/record via debugfs) | 20/20 hit + delivered each | 0 failures, 139 s | −288 MiB (~9 KiB/record) | 52922 flat | clean |
+
+Findings:
+
+- **No capacity limit was reached.** A port table takes at least 32,768
+  records with correct lookups through the collision chains, 16× the software
+  record cap and 64× the vendor's 512-entry ETHERNET table. The ceiling is
+  host RAM, not the table: records live in DDR and the bucket array is fixed
+  at 32,768 × 16 B.
+- **RAM cost is ~9 KiB per record, not 336 B.** Every record makes two
+  `dma_alloc_coherent()` calls: the 320 B record (0122/0130) and the 16 B
+  F-175 FE context (0169). Each is rounded up to a 4 KiB page. 0122 already
+  says "a dma_pool would avoid per-record page rounding (future
+  optimization)". This applies to routed flows too: 8,192 bidirectional
+  routed flows (16,384 records) is ~144 MiB. Not a blocker on a 7.5 GB board,
+  but worth fixing before raising any caps.
+- **No leak.** One full 8,192 add+delete cycle, checked per cache: every
+  kmalloc cache within ±76 objects. Repeated cycles: unreclaimable slab
+  within ±0.3 MB. MemFree after `drop_caches` moved −11 / +10 / −24 MB across
+  cycles, which is allocator noise (per-CPU free lists), not a leak.
+- **Caps.** The software caps (`ASK_BRIDGE_ENTRY_MAX` 512,
+  `ASK_BRIDGE_REC_MAX` 2048) stay as they are for v1: memory-bounded at
+  ~18 MiB, and vendor-parity on entries. Raising them is a B5 decision and
+  should come after the dma_pool change.
+
+### 13.27 Decision (operator, 2026-10-13): bridge gating is identical to VLAN
+
+Supersedes D8's "default 0 until B5", D8's "`ASK_CAP_BRIDGE` only after B5",
+and G12 ("the family mask does not filter L2 flows").
+
+| | VLAN | Bridge (now) |
+|---|---|---|
+| Per-port trigger | `offload ipv4\|ipv6` on the physical port | same |
+| Feature condition | a VLAN vif exists | the port is a bridge member (D1 role switch) |
+| Kill switch | `ask.vlan_offload`, default 1 | `ask.bridge_offload`, **default 1** |
+| Family mask | per flow, ingress port's mask | per record, ingress port's mask: (MAC, `0x0800`) only with `offload ipv4`, (MAC, `0x86dd`) only with `offload ipv6` |
+| Capability | `ASK_CAP_VLAN` while the switch is on | `ASK_CAP_BRIDGE` while the switch is on |
+
+Code (ask.ko only, no kernel change):
+
+- `ask_bridge_offload = true`.
+- New `ask_hw_port_family_mask()` accessor.
+- `ask_bridge_walk()` installs the IPv4 and IPv6 records per the ingress
+  port's family mask. The mask is set by every genl engage, which then kicks
+  a resync, so changing `offload ipv4` → `ipv4 ipv6` adds the IPv6 records.
+- `ask_genl.c` advertises `ASK_CAP_BRIDGE` while the switch is on.
+- The KUnit `hw_auto_gate_*` expectations follow the default-on switch.
+
+Debug and production ask.ko variants compile W=1 clean against the replayed
+6.18.55 tree. Not yet CI-built or board-tested. Harness record counts are
+unchanged on the rig (eth3/eth4 engage with `family_mask=0x3`).
