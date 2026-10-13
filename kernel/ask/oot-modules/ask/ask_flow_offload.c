@@ -58,6 +58,8 @@
 #include <net/neighbour.h>
 #include <net/netevent.h>
 #include <net/ipv6.h>
+#include <net/route.h>		/* rt_nexthop(): routed-endpoint next hop */
+#include <net/ip6_route.h>	/* rt6_nexthop() */
 #include <net/addrconf.h>
 #include <net/net_namespace.h>
 #include <net/netfilter/nf_flow_table.h>
@@ -151,6 +153,52 @@ MODULE_PARM_DESC(ipv6_hw_frag,
 		 "RFC 8200 4.5). Global RFC 8200 kill switch: 0 keeps such flows in "
 		 "software (the kernel sends Packet Too Big) and drops the live HW "
 		 "records that carry the MTU check");
+
+/*
+ * Offload only flows that have lived offload_delay_ms. Short connections then
+ * finish in the software fast path, so conntrack sees their FIN/RST (the
+ * hardware path swallows them and the entry would linger ESTABLISHED for the
+ * whole established timeout), and they cost no hardware insert or delete. A
+ * refused REPLACE is retried by nf_flowtable's flow_offload_refresh() at most
+ * once a second, and only while packets still pass through software, so any
+ * value below ~1000 means "offload at the first retry" (~1 s). VyOS sets it
+ * from `firewall global-options hardware-offload-delay` (vyos-1x-055).
+ * First-REPLACE times live in a value xarray keyed by cookie until DESTROY
+ * (sent for every flow of a hardware flowtable) erases them; they are not
+ * erased on install, because each REPLACE reaches every bound block and all
+ * of them (true ingress and egress-side echo) must judge the age against the
+ * same time. 0 = offload at the first REPLACE.
+ */
+static unsigned int ask_offload_delay_ms = 500;
+module_param_named(offload_delay_ms, ask_offload_delay_ms, uint, 0644);
+MODULE_PARM_DESC(offload_delay_ms,
+		 "Minimum flow age before hardware offload, in ms (default 500; "
+		 "0 offloads at the first REPLACE)");
+
+static DEFINE_XARRAY(ask_offload_first_seen);
+
+/* True while @cookie is younger than offload_delay_ms (records its first
+ * REPLACE). On memory pressure the flow is offloaded at once. */
+static bool ask_offload_too_young(unsigned long cookie)
+{
+	unsigned int ms = READ_ONCE(ask_offload_delay_ms);
+	void *e;
+
+	if (!ms)
+		return false;
+	e = xa_load(&ask_offload_first_seen, cookie);
+	if (!xa_is_value(e))
+		return !xa_err(xa_store(&ask_offload_first_seen, cookie,
+					xa_mk_value(jiffies), GFP_KERNEL));
+	return time_before(jiffies, xa_to_value(e) + msecs_to_jiffies(ms));
+}
+
+/* KUnit drives REPLACE directly and expects an immediate install. */
+unsigned int ask_flow_offload_set_delay_ms(unsigned int ms)
+{
+	return xchg(&ask_offload_delay_ms, ms);
+}
+EXPORT_SYMBOL_GPL(ask_flow_offload_set_delay_ms);
 
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
@@ -1796,6 +1844,33 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 		 * borrowed and re-resolves under its own rcu/ref. */
 		rcu_read_unlock();
 	}
+
+	/*
+	 * Routed endpoint: other->src_v4 is the far-end host, which is only
+	 * the neighbour when it is on-link. The kernel's own
+	 * flow_offload_eth_dst() resolves it through dst_neigh_lookup(), i.e.
+	 * the route's gateway when the dst uses one. Do the same.
+	 */
+	if (t->xmit_type == FLOW_OFFLOAD_XMIT_NEIGH && t->dst_cache &&
+	    t->l3proto == NFPROTO_IPV4)
+		return rt_nexthop((const struct rtable *)t->dst_cache,
+				  other->src_v4.s_addr);
+
+	/*
+	 * VLAN/bridge egress flows use FLOW_OFFLOAD_XMIT_DIRECT and carry no
+	 * dst_cache: ask the routing table for the gateway instead.
+	 */
+	if (t->l3proto == NFPROTO_IPV4) {
+		struct flowi4 fl4 = { .daddr = other->src_v4.s_addr };
+		struct rtable *rt = ip_route_output_key(&init_net, &fl4);
+
+		if (!IS_ERR(rt)) {
+			__be32 nh = rt_nexthop(rt, other->src_v4.s_addr);
+
+			ip_rt_put(rt);
+			return nh;
+		}
+	}
 	return other->src_v4.s_addr;
 }
 
@@ -1853,6 +1928,19 @@ static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
 		rcu_read_unlock();
 	}
 	*out_nh = other->src_v6;
+	if (t->xmit_type == FLOW_OFFLOAD_XMIT_NEIGH && t->dst_cache &&
+	    t->l3proto == NFPROTO_IPV6)
+		*out_nh = *rt6_nexthop((const struct rt6_info *)t->dst_cache,
+				       &other->src_v6);
+	else if (t->l3proto == NFPROTO_IPV6) {
+		struct flowi6 fl6 = { .daddr = other->src_v6 };
+		struct dst_entry *dst = ip6_route_output(&init_net, NULL, &fl6);
+
+		if (dst && !dst->error)
+			*out_nh = *rt6_nexthop(dst_rt6_info(dst),
+					       &other->src_v6);
+		dst_release(dst);
+	}
 	return true;
 }
 
@@ -1958,6 +2046,9 @@ void ask_fe_build_key_dual(const struct ask_flow_key *key,
 	put_unaligned_be16(key->vlan_ingress_vid & VLAN_VID_MASK, &k[46]);
 	put_unaligned_be16(key->pppoe_sid, &k[48]);
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_fe_build_key_dual);
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
@@ -2113,11 +2204,11 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	 * bug cross-port dropped eth4 flows. The separate action.table_idx
 	 * field now selects ehash table 0/1 inside fman_pcd_fe_flow_add().
 	 */
-	ask_pr_info("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
-		    fm, &action, key->port_id, table_idx, action.key_size,
-		    sizeof(action),
-		    offsetof(struct fman_pcd_fe_flow_action, key_size),
-		    action.key_size, action.key);
+	ask_pr_dbg("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
+		   fm, &action, key->port_id, table_idx, action.key_size,
+		   sizeof(action),
+		   offsetof(struct fman_pcd_fe_flow_action, key_size),
+		   action.key_size, action.key);
 
 	/* Drive the real FMan (fman_get_pcd -> ehash) and surface failures so
 	 * callers can roll back provisional HW-backed ownership. */
@@ -2285,6 +2376,26 @@ out:
  * address, i.e. key.src_ip for the POP direction). Returns the VID
  * (1..4094) or 0 if no matching vif is found (caller fails closed to SW).
  */
+/*
+ * Ingress 802.1Q VID straight from the flowtable tuple: encap[] holds this
+ * direction's ingress tags, so it is correct even when the flow endpoints
+ * are routed (no vif subnet contains the source). 0 = untagged/unknown.
+ */
+static u16 ask_cookie_ingress_vid(unsigned long cookie)
+{
+	const struct flow_offload_tuple *t;
+	int i;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return 0;
+
+	t = (const struct flow_offload_tuple *)cookie;
+	for (i = 0; i < t->encap_num && i < NF_FLOW_TABLE_ENCAP_MAX; i++)
+		if (t->encap[i].proto == htons(ETH_P_8021Q))
+			return t->encap[i].id & VLAN_VID_MASK;
+	return 0;
+}
+
 static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
 {
 	struct net_device *phys, *owner;
@@ -2580,6 +2691,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return -EOPNOTSUPP;
 	}
 
+	if (ask_offload_too_young(f->cookie))
+		return -EAGAIN;	/* software until offload_delay_ms; nf_flowtable retries */
+
 	pppoe = ask_flow_cookie_pppoe(f->cookie, &pppoe_info);
 	if (pppoe < 0 || (pppoe > 0 && !ask_pppoe_nb_ok) ||
 	    (pppoe > 0 && !ask_pppoe_port_armed(pppoe_info.ifindex))) {
@@ -2817,6 +2931,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		 */
 		if (!key.vlan_ingress_vid)
 			key.vlan_ingress_vid = key.vlan_id & VLAN_VID_MASK;
+		if (!key.vlan_ingress_vid)
+			key.vlan_ingress_vid = ask_cookie_ingress_vid(f->cookie);
 		if (!key.vlan_ingress_vid && !is_v6 && key.iif) {
 			memcpy(&peer_v4, &key.src_ip[0], 4);
 			key.vlan_ingress_vid =
@@ -3483,6 +3599,7 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 	u32 destroy_gen;
 	int rc;
 
+	xa_erase(&ask_offload_first_seen, f->cookie);
 	if (!t)
 		return -EOPNOTSUPP;
 
@@ -4168,6 +4285,7 @@ void ask_flow_offload_exit(void)
 	cancel_work_sync(&ask_v6_frag_flush_work);
 
 	dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
+	xa_destroy(&ask_offload_first_seen);
 	/* T-M6-3: netevent notifier unregistration moved to ask_neigh_exit(). */
 
 	/*

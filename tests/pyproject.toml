@@ -24,6 +24,7 @@ required_plugins = ["pytest-asyncio==1.3.0", "pytest-timeout==2.4.0"]
 markers = [
     "host: runs without the physical bench",
     "hardware: requires exclusive ownership of the physical bench",
+    "ask2: exercises the ASK2 offload dataplane on the ask2 DUT image",
     "portable: bounded forwarding checks for either existing DUT image",
     "upstream: imported scenarios retaining their CDX/native-flowtable contracts",
     "backend(*capabilities): real DUT interfaces or instrumentation required by a test",

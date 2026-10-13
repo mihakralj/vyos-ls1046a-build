@@ -14,14 +14,29 @@ size); a port is engaged with one profile.
 Profiles:
   ROUTED (0): EKFC 0x801C0006 (non-zero trigger only) + F-224 dual-lane GECs,
               46-byte key. Today's behaviour, unchanged.
-  L2_DA  (1): EKFC 0x40000000 = KG_SCH_KN_MACDST, no GEC, 6-byte key: the
-              frame's destination MAC. One record per FDB entry; the HIT
-              action is a plain ENQUEUE_PKT to the egress port's TX FQ
-              (ask.ko passes rx_fqid=TX FQ, tx_fqid=0: no L2 rewrite).
-              Per-port tables already isolate the ingress port, so no
-              PORT_ID byte (sidesteps its 0x00-vs-hwport ambiguity, bridge
-              plan S8 point 1). An EKFC-only key on the ehash path is the
-              silicon-proven pre-F-224 form (E25/E26 HITs, 0x801C0006).
+  L2_DA  (1): EKFC 0x44000000 = KG_SCH_KN_MACDST | KG_SCH_KN_ETYPE, no GEC,
+              8-byte key: the frame's destination MAC (6B, MSB-first bit30)
+              followed by its EtherType (2B, bit26). One record per (FDB
+              entry, EtherType) pair; the HIT action is a plain ENQUEUE_PKT
+              to the egress port's TX FQ (ask.ko passes rx_fqid=TX FQ,
+              tx_fqid=0: no L2 rewrite). Per-port tables already isolate the
+              ingress port, so no PORT_ID byte (sidesteps its 0x00-vs-hwport
+              ambiguity, bridge plan S8 point 1). An EKFC-only key on the
+              ehash path is the silicon-proven pre-F-224 form (E25/E26
+              HITs, 0x801C0006).
+              EtherType was added to the key 2026-10 (plan §13.18) to fix a
+              silicon stall: short non-IPv4/IPv6 frames (ARP, 0x88b5, ...)
+              hitting a DA-only record permanently wedge the FE-VM hit path
+              (plan §13.16). Folding EtherType into the key means a record
+              installed for one EtherType (e.g. IPv4 0x0800) structurally
+              cannot be hit by a frame of a different EtherType sharing the
+              same DA -- ARP/other non-IP frames simply MISS the table and
+              fall to the default/kernel FQ, which is the already-intended
+              behaviour (plan D5: BUM/ARP/control traffic stays in the
+              kernel). This avoids both the LCV/kgse_mv scheme-selection
+              mechanism (shown non-viable for IPv4/IPv6 discrimination on
+              FE-engaged ports, 2026-08-19 IPv6 family-selection finding)
+              and any change to the proven-working HIT action/opcode chain.
 
 Edits:
   include/linux/fsl/fman_pcd.h  enum fman_pcd_fe_profile + engage_profile().
@@ -59,10 +74,10 @@ EDITS = [
  * different profile returns -EBUSY (disengage first). */
 enum fman_pcd_fe_profile {
 	FMAN_PCD_FE_PROFILE_ROUTED = 0,	/* 46B dual-lane IPv4/IPv6 5-tuple */
-	FMAN_PCD_FE_PROFILE_L2_DA  = 1,	/* 6B destination MAC (bridge FDB) */
+	FMAN_PCD_FE_PROFILE_L2_DA  = 1,	/* 8B dest MAC + EtherType (bridge FDB) */
 	FMAN_PCD_FE_PROFILE_NR
 };
-#define FMAN_PCD_FE_L2_DA_KEY_SIZE	6
+#define FMAN_PCD_FE_L2_DA_KEY_SIZE	8	/* 2026-10: DA(6)+EtherType(2), plan §13.18 */
 int fman_pcd_fe_engage_profile(struct fman *fm, u8 hw_port_id,
 			       u32 enq_fqid, enum fman_pcd_fe_profile profile);
 """),
@@ -125,7 +140,7 @@ static const struct {
 	u8   key_size;
 } fman_pcd_fe_profiles[FMAN_PCD_FE_PROFILE_NR] = {
 	[FMAN_PCD_FE_PROFILE_ROUTED] = { 0x801C0006, false, 46 },
-	[FMAN_PCD_FE_PROFILE_L2_DA]  = { 0x40000000 /* KG_SCH_KN_MACDST */,
+	[FMAN_PCD_FE_PROFILE_L2_DA]  = { 0x44000000 /* KG_SCH_KN_MACDST|KG_SCH_KN_ETYPE */,
 					 true, FMAN_PCD_FE_L2_DA_KEY_SIZE },
 };
 
@@ -253,6 +268,29 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_engage);
 }
 EXPORT_SYMBOL_GPL(fman_pcd_fe_engage_profile);
 """),
+    # Bridge plan §13.2 G6: F-221 falls back to the global template table when
+    # the per-port alloc fails. That table is sized for ROUTED, so a non-routed
+    # profile would arm its 8B EKFC against a 50B comparator and report
+    # success. Fail closed instead. The scaffold is not yet recorded in
+    # pcd->fe_scaffold_* here (F-139), so freeing the three blocks is the whole
+    # unwind (F-125 pattern).
+    (FM + "fman_pcd.c",
+     """					if (pcd->fe_arming_v4_table)
+						et = pcd->fe_arming_v4_table;
+""",
+     """					if (pcd->fe_arming_v4_table)
+						et = pcd->fe_arming_v4_table;
+					else if (fman_pcd_fe_port_profile(pcd, (u8)port_id) !=
+						 FMAN_PCD_FE_PROFILE_ROUTED) {	/* F-255 G6 */
+						fman_pcd_muram_free(pcd, gro, 256);
+						fman_pcd_muram_free(pcd, mto, 64);
+						fman_pcd_muram_free(pcd, ato, 32);
+						pr_warn("fman_pcd fe_arm: port 0x%02x per-port table alloc failed; profile %u has no fallback\\n",
+							port_id,
+							fman_pcd_fe_port_profile(pcd, (u8)port_id));
+						return -ENOMEM;
+					}
+"""),
     (FM + "fman_pcd.c",
      """	__fman_pcd_fe_arm_disengage(pcd, hw_port_id);
 	/* F-129: Tear down shared FE-VM chain on last port disengage.""",
@@ -282,4 +320,4 @@ for path, old, new in EDITS:
 for path, s in src.items():
     with open(path, "w") as f:
         f.write(s)
-print("### F-255: per-port FE key profiles (ROUTED 46B dual-lane, L2_DA 6B MACDST; dormant)")
+print("### F-255: per-port FE key profiles (ROUTED 46B dual-lane, L2_DA 8B MACDST+EtherType; dormant)")

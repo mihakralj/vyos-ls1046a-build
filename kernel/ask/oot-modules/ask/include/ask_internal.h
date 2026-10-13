@@ -21,6 +21,7 @@
 #include <linux/u64_stats_sync.h>
 #include <linux/if_ether.h>      /* ETH_ALEN — PR14j L2 header plumbing */
 #include <linux/xarray.h>        /* PR14j cookie indirection table */
+#include <linux/fsl/fman_pcd.h>    /* enum fman_pcd_fe_profile (T-M6-2 B3a) */
 #include <net/netlink.h>
 
 #define ASK_DRV_NAME            "ask"
@@ -110,9 +111,21 @@ void ask_hw_exit(void);
  * board engage on failure.  disengage is void and idempotent.
  */
 int  ask_hw_offload_engage(u8 hw_port_id);
+int  ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
+				bool if_engaged);
+int  ask_hw_b2_l2_engage(const char *ifname);
+int  ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
+			 const char *oifname, bool add);
 void ask_hw_offload_disengage(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
+/* T-M6-2 B3a bridge helpers (ask_hw.c). */
+struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
+int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
+int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
+int  ask_hw_l2_record(u8 hw_port_id, const u8 *da, __be16 eth_type, u32 fqid,
+		      bool add);
+bool ask_hw_port_is_l2(u8 hw_port_id);
 
 /*
  * CR-012: warms this port's no-confirm egress TX FQ cache. MUST be called
@@ -1073,6 +1086,9 @@ enum tc_setup_type;
 
 int  ask_flow_offload_init(void);
 void ask_flow_offload_exit(void);
+/* Minimum flow age before HW offload (module param offload_delay_ms); returns
+ * the previous value. KUnit sets 0 to keep REPLACE immediate. */
+unsigned int ask_flow_offload_set_delay_ms(unsigned int ms);
 
 /*
  * Public block-bind helper. The in-tree dpaa patch (PR11) calls this from
@@ -1195,8 +1211,11 @@ void ask_caam_exit(void);
 /* ------------------------------------------------------------------------- */
 int  ask_bridge_init(void);
 void ask_bridge_exit(void);
+void ask_bridge_kick(void);
+void ask_bridge_forget_port(u8 hw_port_id);
+enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev);
 struct fman_pcd_fe_flow_action;
-int  ask_bridge_fe_action(const u8 *da, u32 egress_tx_fqid,
+int  ask_bridge_fe_action(const u8 *da, __be16 eth_type, u32 egress_tx_fqid,
 			  unsigned long enq_off,
 			  struct fman_pcd_fe_flow_action *a);
 

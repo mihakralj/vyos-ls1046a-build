@@ -51,6 +51,7 @@
 #include <linux/string.h>
 
 #include "../include/ask_internal.h"
+#include <uapi/linux/ask/ask.h>
 
 /* ------------------------------------------------------------------------- */
 /* helpers                                                                    */
@@ -535,7 +536,9 @@ static void hw_auto_gate_needs_engaged_port(struct kunit *test)
 	}
 
 	/* Nothing engaged: every port fails closed for VLAN and PPPoE, while the
-	 * port-agnostic capability gate follows the (default-on) kill switch. */
+	 * port-agnostic capability gate follows the (default-on) kill switch.
+	 * The bridge gate is its own kill switch (bridge_offload, default 0,
+	 * T-M6-2 B3a) and never follows engagement. */
 	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x10));
 	KUNIT_EXPECT_FALSE(test, ask_hw_pppoe_offload_armed_port(0x10));
 	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_offload_armed());
@@ -545,7 +548,7 @@ static void hw_auto_gate_needs_engaged_port(struct kunit *test)
 	ask_hw_offload_set_family(0x10, ASK_FAM_V4);
 	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed_port(0x10));
 	KUNIT_EXPECT_TRUE(test, ask_hw_pppoe_offload_armed_port(0x10));
-	KUNIT_EXPECT_TRUE(test, ask_hw_bridge_offload_armed());
+	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_offload_armed());
 	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x11));
 	KUNIT_EXPECT_FALSE(test, ask_hw_pppoe_offload_armed_port(0x11));
 

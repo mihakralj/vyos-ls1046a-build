@@ -108,6 +108,11 @@ int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
 bool fman_pcd_v6_enabled(void);	/* F-210 export; still consulted by kernel */
 static u8 ask_hw_port_family[64];
 
+/* Ports engaged with the L2_DA profile (T-M6-2 B3a). Lockless for the routed,
+ * VLAN and PPPoE gates, which must refuse them (bridge plan D1); bridge
+ * records re-check under h->lock. */
+static DECLARE_BITMAP(ask_hw_port_l2, 256);
+
 static u8 ask_hw_port_family_get(u8 hw_port_id)
 {
 	if (hw_port_id < ARRAY_SIZE(ask_hw_port_family))
@@ -246,7 +251,8 @@ MODULE_PARM_DESC(vlan_offload,
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id)
 {
 	bool armed = READ_ONCE(ask_vlan_offload) &&
-		     ask_hw_port_family_get(hw_port_id);
+		     ask_hw_port_family_get(hw_port_id) &&
+		     !test_bit(hw_port_id, ask_hw_port_l2);
 
 	if (armed)
 		pr_info_once("ask: single-tag 802.1Q VLAN hardware offload enabled (CC+HMTD); eth0/802.1ad/QinQ excluded\n");
@@ -269,21 +275,37 @@ EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
 
 /*
  * L2 bridge FDB offload (T-M6-2) is an automatic capability of an engaged
- * port: no arm bit, no CLI leaf, no module param. B0 is observer-only (no
- * CC-tree/FDB installer yet), so this only reports whether any port could
- * carry it; B3's switchdev wiring will gate per ingress port on the same
- * engaged state.
+ * bridge-member port (bridge plan D1), behind this global kill switch (D8,
+ * default 0 until B5). Clearing it removes every bridge record at once; the
+ * ports keep their L2_DA role (nothing is offloaded on them) until they are
+ * re-engaged. Setting it takes effect at the next engage or bridge join.
  */
+static bool ask_bridge_offload;
+
+static int ask_bridge_offload_set(const char *val,
+				  const struct kernel_param *kp)
+{
+	int rc = param_set_bool(val, kp);
+
+	if (!rc)
+		ask_bridge_kick();
+	return rc;
+}
+
+static const struct kernel_param_ops ask_bridge_offload_ops = {
+	.set = ask_bridge_offload_set,
+	.get = param_get_bool,
+};
+module_param_cb(bridge_offload, &ask_bridge_offload_ops, &ask_bridge_offload, 0644);
+MODULE_PARM_DESC(bridge_offload,
+		 "L2 bridge FDB hardware offload on engaged bridge-member ports (default 0 until T-M6-2 B5; static FDB entries, no VLAN filtering)");
+
 bool ask_hw_bridge_offload_armed(void)
 {
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(ask_hw_port_family); i++)
-		if (ask_hw_port_family_get(i))
-			return true;
-	return false;
+	return READ_ONCE(ask_bridge_offload);
 }
 EXPORT_SYMBOL_GPL(ask_hw_bridge_offload_armed);
+
 
 /*
  * PPPoE session offload (decap PPPoE->LAN and encap LAN->PPPoE, T-M6-SP4) is
@@ -316,7 +338,8 @@ MODULE_PARM_DESC(pppoe_offload,
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id)
 {
 	return READ_ONCE(ask_pppoe_offload) &&
-	       ask_hw_port_family_get(hw_port_id);
+	       ask_hw_port_family_get(hw_port_id) &&
+	       !test_bit(hw_port_id, ask_hw_port_l2);
 }
 EXPORT_SYMBOL_GPL(ask_hw_pppoe_offload_armed_port);
 
@@ -336,6 +359,8 @@ static int ask_hw_flow_family_ok(u8 hw_port_id, const struct ask_flow_key *key)
 {
 	u8 fmask = ask_hw_port_family_get(hw_port_id);
 
+	if (test_bit(hw_port_id, ask_hw_port_l2))	/* bridge plan D1 */
+		return -EOPNOTSUPP;
 	if (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP)
 		return -EOPNOTSUPP;
 	if (key->l3_proto == ASK_FLOW_L3_IPV4)
@@ -407,6 +432,7 @@ struct ask_hw_port {
 	bool            in_use;
 	u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
 	bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
+	enum fman_pcd_fe_profile engaged_profile; /* valid while offload_engaged */
 };
 
 struct ask_hw_pcd {
@@ -1065,7 +1091,8 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
  * routes `set system offload ask` here.
  */
-int ask_hw_offload_engage(u8 hw_port_id)
+static int ask_hw_offload_engage_profile(u8 hw_port_id,
+					 enum fman_pcd_fe_profile profile)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct ask_hw_port *p;
@@ -1089,7 +1116,11 @@ int ask_hw_offload_engage(u8 hw_port_id)
 		ask_hw_offload_set_family(hw_port_id, ASK_FAM_V4 | ASK_FAM_V6);
 
 	if (p->offload_engaged) {
-		rc = 0;                 /* idempotent */
+		/* Same profile is idempotent; another one needs a disengage. */
+		rc = p->engaged_profile == profile ? 0 : -EBUSY;
+		if (rc)
+			ask_pr_err("hw: port 0x%02x already engaged with profile %d\n",
+				   hw_port_id, p->engaged_profile);
 		goto out_unlock;
 	}
 
@@ -1123,8 +1154,14 @@ int ask_hw_offload_engage(u8 hw_port_id)
 	 * and is unaffected; the CC MISS disposition is already per-ingress-port
 	 * via fman_pcd_resolve_miss_fqid() inside fman_pcd_fe_engage().
 	 */
-	rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
-	if (rc == -EBUSY) {
+	rc = fman_pcd_fe_engage_profile(h->fman, hw_port_id, 0, profile);
+	if (rc == -EBUSY && profile != FMAN_PCD_FE_PROFILE_ROUTED) {
+		/* A profile mismatch on an armed port is a hard error (plan
+		 * 13.2 G1), never idempotent success. */
+		ask_pr_err("hw: port 0x%02x already armed with another profile\n",
+			   hw_port_id);
+		goto out_unlock;
+	} else if (rc == -EBUSY) {
 		/*
 		 * F-122/F-124: treat "already armed" as idempotent success.
 		 * The FE state may have been left engaged while our software
@@ -1177,13 +1214,128 @@ int ask_hw_offload_engage(u8 hw_port_id)
 	 */
 
 	p->offload_engaged = true;
+	p->engaged_profile = profile;
+	if (profile == FMAN_PCD_FE_PROFILE_ROUTED)
+		clear_bit(hw_port_id, ask_hw_port_l2);
+	else
+		set_bit(hw_port_id, ask_hw_port_l2);
 	ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
 
 out_unlock:
 	mutex_unlock(&h->lock);
 	return rc;
 }
+
+int ask_hw_offload_engage(u8 hw_port_id)
+{
+	return ask_hw_offload_engage_profile(hw_port_id,
+					     FMAN_PCD_FE_PROFILE_ROUTED);
+}
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
+
+static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id);
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc);
+
+static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
+{
+	struct net_device *dev = dev_get_by_name(&init_net, ifname);
+	int rc;
+
+	if (!dev)
+		return -ENODEV;
+	rc = ask_hw_resolve_iif_port(dev->ifindex, port_id);
+	dev_put(dev);
+	return rc;
+}
+
+/*
+ * Bridge plan D1 port role: engage @hw_port_id with @profile, disengaging it
+ * first if it is armed with another one; the family mask survives. With
+ * @if_engaged, a port that is not engaged is left alone (bridge join/leave).
+ * Callers serialize on rtnl. Never call with ask_bridge_lock held: disengage
+ * takes it.
+ */
+int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
+			       bool if_engaged)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	u8 fam = ask_hw_port_family_get(hw_port_id);
+	bool engaged = false, other = false;
+	unsigned int i;
+
+	if (!h)
+		return -ENODEV;
+	mutex_lock(&h->lock);
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
+		if (h->port[i].in_use && h->port[i].port_id == hw_port_id &&
+		    h->port[i].offload_engaged) {
+			engaged = true;
+			other = h->port[i].engaged_profile != profile;
+		}
+	mutex_unlock(&h->lock);
+
+	if (if_engaged && !engaged)
+		return 0;
+	if (other) {
+		ask_pr_info("hw: port 0x%02x role change to profile %d\n",
+			    hw_port_id, profile);
+		ask_hw_offload_disengage(hw_port_id);
+		ask_hw_offload_set_family(hw_port_id, fam);
+	}
+	return ask_hw_offload_engage_profile(hw_port_id, profile);
+}
+
+/* T-M6-2 B2 (debugfs only): engage @ifname's port with the L2_DA profile. */
+int ask_hw_b2_l2_engage(const char *ifname)
+{
+	u8 port;
+	int rc = ask_hw_b2_port_of(ifname, &port);
+
+	return rc ? rc : ask_hw_offload_engage_profile(port,
+						       FMAN_PCD_FE_PROFILE_L2_DA);
+}
+
+/* B2: hand-arm (or remove) one DA+EtherType record in @iifname's L2_DA
+ * table that forwards to @oifname's no-confirm TX FQ. F-255's L2_DA key is
+ * DA(6)+EtherType(2) (plan §13.18), so @eth_type (network byte order) must
+ * be supplied for both add and del. Process context, never with
+ * flow_block_lock held. */
+int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
+			const char *oifname, bool add)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	struct fman_pcd_fe_flow_action a;
+	struct net_device *dev;
+	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
+	u32 fqid = 0;
+	u8 port;
+	int rc;
+
+	if (!h)
+		return -ENODEV;
+	rc = ask_hw_b2_port_of(iifname, &port);
+	if (rc)
+		return rc;
+	if (!add) {
+		BUILD_BUG_ON(FMAN_PCD_FE_L2_DA_KEY_SIZE != ETH_ALEN + sizeof(__be16));
+		ether_addr_copy(key, da);
+		memcpy(key + ETH_ALEN, &eth_type, sizeof(eth_type));
+		return fman_pcd_fe_flow_del(h->fman, port, key,
+					    FMAN_PCD_FE_L2_DA_KEY_SIZE);
+	}
+
+	dev = dev_get_by_name(&init_net, oifname);
+	if (!dev)
+		return -ENODEV;
+	rc = ask_hw_resolve_oif_fqid(dev->ifindex, &fqid, true);
+	dev_put(dev);
+	if (rc)
+		return rc;
+	rc = ask_bridge_fe_action(da, eth_type, fqid, ask_hw_get_enq_fe_off(), &a);
+	if (rc)
+		return rc;
+	return fman_pcd_fe_flow_add(h->fman, port, &a);
+}
 
 void ask_hw_offload_disengage(u8 hw_port_id)
 {
@@ -1236,7 +1388,11 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 	 */
 
 	p->offload_engaged = false;
+	clear_bit(hw_port_id, ask_hw_port_l2);
 	mutex_unlock(&h->lock);
+
+	/* The port's table (and its bridge records) is gone. */
+	ask_bridge_forget_port(hw_port_id);
 
 	/* Clear this port's family selection so a later flowtable callback
 	 * cannot re-admit a family the operator disabled. Re-engage sets it
@@ -1282,6 +1438,11 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
 		     struct net_device *ingress_dev)
 {
 	int rc;
+
+	/* Bridge plan D1: an L2_DA port carries no routed flows. Quiet -ENODEV
+	 * keeps the flow in software without a per-flow log line. */
+	if (test_bit(port_id, ask_hw_port_l2))
+		return -ENODEV;
 
 	/*
 	 * A successful FLOW_CLS_REPLACE must arm the ingress FE pipeline
@@ -1611,6 +1772,90 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc)
  * ask_hw_resolve_oif_fqid(), which re-takes rtnl_lock() itself on a cache
  * miss -- rtnl_lock() is not recursive, so the two must not overlap.
  */
+/* The physical DPAA netdev of @hw_port_id, or NULL. Caller holds rtnl; no
+ * reference is taken. */
+struct net_device *ask_hw_port_netdev(u8 hw_port_id)
+{
+	struct net_device *dev;
+
+	ASSERT_RTNL();
+	for_each_netdev(&init_net, dev) {
+		struct fman_port *port = dpaa_get_rx_fman_port(dev);
+
+		if (port && fman_port_get_id(port) == hw_port_id)
+			return dev;
+	}
+	return NULL;
+}
+
+/* @dev's own RX port id; VLAN vifs and non-DPAA netdevs are -ENODEV (a
+ * bridge record keyed on the physical port would ignore the VID). */
+int ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id)
+{
+	struct fman_port *port = dpaa_get_rx_fman_port(dev);
+
+	if (!port)
+		return -ENODEV;
+	*hw_port_id = fman_port_get_id(port);
+	return 0;
+}
+
+bool ask_hw_port_is_l2(u8 hw_port_id)
+{
+	return test_bit(hw_port_id, ask_hw_port_l2);
+}
+
+/* Cache-only egress FQ lookup: safe under rtnl (never allocates). */
+int ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid)
+{
+	return ask_hw_resolve_oif_fqid(ifindex, fqid, false);
+}
+
+/*
+ * Add or remove one bridge record (DA + EtherType -> @fqid) in
+ * @hw_port_id's L2_DA table. h->lock makes the profile check and the table
+ * operation atomic against disengage: with no per-port table,
+ * fman_pcd_fe_flow_add() would fall back to the global ROUTED table. A
+ * delete on a port that is no longer L2_DA is a no-op (its table and
+ * records were freed with it).
+ */
+int ask_hw_l2_record(u8 hw_port_id, const u8 *da, __be16 eth_type, u32 fqid,
+		     bool add)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	struct fman_pcd_fe_flow_action a;
+	struct ask_hw_port *p = NULL;
+	unsigned int i;
+	int rc;
+
+	if (!h)
+		return add ? -ENODEV : 0;
+	if (add) {
+		rc = ask_bridge_fe_action(da, eth_type, fqid,
+					  ask_hw_get_enq_fe_off(), &a);
+		if (rc)
+			return rc;
+	} else {
+		ether_addr_copy(a.key, da);
+		memcpy(a.key + ETH_ALEN, &eth_type, sizeof(eth_type));
+	}
+
+	mutex_lock(&h->lock);
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
+		if (h->port[i].in_use && h->port[i].port_id == hw_port_id)
+			p = &h->port[i];
+	if (!p || !p->offload_engaged ||
+	    p->engaged_profile != FMAN_PCD_FE_PROFILE_L2_DA)
+		rc = add ? -ENODEV : 0;
+	else if (add)
+		rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
+	else
+		rc = fman_pcd_fe_flow_del(h->fman, hw_port_id, a.key,
+					  FMAN_PCD_FE_L2_DA_KEY_SIZE);
+	mutex_unlock(&h->lock);
+	return rc;
+}
+
 void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 {
 	struct net_device *dev;
@@ -1618,14 +1863,9 @@ void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 	u32 fqid;
 
 	rtnl_lock();
-	for_each_netdev(&init_net, dev) {
-		struct fman_port *port = dpaa_get_rx_fman_port(dev);
-
-		if (port && fman_port_get_id(port) == hw_port_id) {
-			ifindex = dev->ifindex;
-			break;
-		}
-	}
+	dev = ask_hw_port_netdev(hw_port_id);
+	if (dev)
+		ifindex = dev->ifindex;
 	rtnl_unlock();
 
 	if (ifindex)

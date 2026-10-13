@@ -20,6 +20,9 @@ Last consolidated: 2026-10-09.
 | [`ASK2-IPSEC-OFFLOAD-PLAN.md`](ASK2-IPSEC-OFFLOAD-PLAN.md) | IPsec ESP offload via CAAM (T-M6-4); draft, not started. |
 | [`CC-ACL-OFFLOAD-PLAN.md`](CC-ACL-OFFLOAD-PLAN.md) | ACL / ntuple / tc-flower backend; verdict that the CC match walker is absent in 210.10.1. |
 | [`ASK2-PERFORMANCE-TEST-HARNESS.md`](ASK2-PERFORMANCE-TEST-HARNESS.md) | Throughput and CPU measurement method; current rig is `bin/testrig-combo-matrix.sh` (dell1–DUT–dell2). |
+| [`ask2-wireguard-plan.md`](ask2-wireguard-plan.md) | WireGuard software throughput on `.185`/`.106`: measured baseline, stage -1 investigation, revised optimisation stages. Harness: `bin/testrig-wireguard.sh`. |
+| [`ASK2-WIREGUARD-FASTPATH-PLAN.md`](ASK2-WIREGUARD-FASTPATH-PLAN.md) | WireGuard stages 5 and 6: zero-skb datapath over FMan ehash records, QMan frame queues and (optionally) offline-port reinjection and order restoration; phases P0-P5 with gates and kill criteria. |
+| [`ask2-wireguard-matrix-106-vs-185.md`](ask2-wireguard-matrix-106-vs-185.md) | WireGuard throughput matrix, `.106` reference against `.185` VyOS: 1/2/4 tunnels x up/down/bidir, medians, raw values, per-run load, configuration, method, caveats, how to repeat. |
 
 ## VPP dataplane
 

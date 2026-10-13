@@ -2,8 +2,10 @@
 """Run the patched ehash deletion code with a simulated FMan SYNC.
 
 Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>
-The tree must already carry the F-254/F-256/F-257 fixups; ci-setup-kernel.sh
-runs this right after them.
+The tree must already carry the F-254/F-256/F-257 and F-264 fixups;
+ci-setup-kernel.sh runs this right after F-265. The bucket hash is stubbed to
+one bucket: the synthetic chain holds three keys, as a real chain holds keys
+that share a bucket.
 
 The kernel source is used verbatim; only allocation, list and hardware
 interfaces are stubbed. This checks lifetime/chain invariants, not silicon.
@@ -73,10 +75,36 @@ static void list_del(struct list_head *node)
 	node->next->prev = node->prev;
 }
 
+struct hlist_node { struct hlist_node *next, **pprev; };
+struct hlist_head { struct hlist_node *first; };
+#define hlist_entry_safe(ptr, type, member) \
+	((ptr) ? list_entry(ptr, type, member) : NULL)
+#define hlist_for_each_entry(pos, head, member) \
+	for ((pos) = hlist_entry_safe((head)->first, __typeof__(*(pos)), member); \
+	     (pos); \
+	     (pos) = hlist_entry_safe((pos)->member.next, __typeof__(*(pos)), member))
+static void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
+{
+	n->next = h->first;
+	if (h->first)
+		h->first->pprev = &n->next;
+	h->first = n;
+	n->pprev = &h->first;
+}
+static void hlist_del(struct hlist_node *n)
+{
+	*n->pprev = n->next;
+	if (n->next)
+		n->next->pprev = n->pprev;
+	n->next = NULL;
+	n->pprev = NULL;
+}
+
 struct fman { bool timeout; unsigned int polls; };
 struct fman_pcd { struct fman *fman; };
 struct fman_pcd_ehash_flow {
 	struct list_head node;
+	struct hlist_node bnode;
 	u8 key_size;
 	u32 index;
 	void *record;
@@ -88,6 +116,9 @@ struct fman_pcd_ehash_flow {
 };
 struct fman_pcd_ehash_table {
 	u8 key_size;
+	u8 hash_shift;
+	u32 hash_mask;
+	struct hlist_head *bidx;
 	struct list_head flows;
 	struct fman_pcd *pcd;
 	void *dev;
@@ -141,14 +172,30 @@ static void dma_free_coherent(void *dev, size_t size, void *ptr, dma_addr_t dma)
 	free(ptr);
 }
 static void kfree(void *ptr) { metadata_freed++; free(ptr); }
+static u16 fman_pcd_ehash_bucket_index(const u8 *key, u8 key_size,
+				       u8 hash_shift, u32 mask)
+{
+	(void)key; (void)key_size; (void)hash_shift; (void)mask;
+	return 0;	/* one bucket: the synthetic chain */
+}
+static struct hlist_head bucket0;
+static unsigned int indexed(void)
+{
+	unsigned int n = 0;
+
+	for (struct hlist_node *p = bucket0.first; p; p = p->next)
+		n++;
+	return n;
+}
 
 @KERNEL_FUNCTIONS@
 
 static void setup(struct fman_pcd_ehash_table *table, struct fman_pcd *pcd)
 {
 	*table = (struct fman_pcd_ehash_table){ .key_size = KEY_SIZE,
-		.pcd = pcd, .dev = table };
+		.pcd = pcd, .dev = table, .bidx = &bucket0 };
 	table->flows.next = table->flows.prev = &table->flows;
+	bucket0.first = NULL;
 	records_freed = contexts_freed = metadata_freed = 0;
 	syncs = reads = warnings = 0;
 	barrier = quiesced = false;
@@ -180,6 +227,8 @@ static struct fman_pcd_ehash_flow *add(struct fman_pcd_ehash_table *table,
 	flow->node.prev = &table->flows;
 	table->flows.next->prev = &flow->node;
 	table->flows.next = &flow->node;
+	flow->index = 0;
+	hlist_add_head(&flow->bnode, &table->bidx[0]);
 	return flow;
 }
 
@@ -198,6 +247,7 @@ static void test_chain(unsigned int target)
 	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
 	assert(records_freed == 1 && contexts_freed == 1 && metadata_freed == 1);
 	assert(syncs == 1 && reads == 3 && warnings == 0);
+	assert(indexed() == 2);
 	assert(swab64(head) == flows[target == 2 ? 1 : 2]->record_dma);
 	if (target < 2) {
 		u64 word = be64_to_cpu(*(__be64 *)flows[target + 1]->record);
@@ -206,7 +256,7 @@ static void test_chain(unsigned int target)
 		       (target ? flows[0]->record_dma : 0));
 	}
 	fman_pcd_ehash_flow_drain(&table);
-	assert(head == 0 && table.flows.next == &table.flows);
+	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
 	assert(records_freed == 3 && contexts_freed == 3 && metadata_freed == 3);
 }
 
@@ -238,7 +288,7 @@ static void test_no_context(void)
 	add(&table, &head, 1, false);
 	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
 	assert(records_freed == 1 && contexts_freed == 0 && metadata_freed == 1);
-	assert(head == 0 && table.flows.next == &table.flows);
+	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
 }
 
 static void test_timeout(void)
@@ -258,7 +308,7 @@ static void test_timeout(void)
 	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
 	assert(records_freed == 0 && contexts_freed == 0 && metadata_freed == 1);
 	assert(syncs == 1 && reads == 100000 && warnings == 3 && !quiesced);
-	assert(head == 0 && table.flows.next == &table.flows);
+	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
 	assert(((u8 *)record)[FMAN_EHASH_FLOW_KEY_OFF] == 1);
 	assert(((u8 *)ctx)[0] == 0xab);
 	/* Test cleanup only: the production timeout must keep both allocations. */
@@ -273,7 +323,7 @@ int main(void)
 	test_missing_and_invalid();
 	test_no_context();
 	test_timeout();
-	puts("OK: ehash head/middle/tail deletion, ctx release, invalid/missing keys and SYNC-timeout retention");
+	puts("OK: ehash head/middle/tail deletion, bucket index, ctx release, invalid/missing keys and SYNC-timeout retention");
 	return 0;
 }
 """
