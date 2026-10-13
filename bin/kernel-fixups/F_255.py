@@ -14,9 +14,10 @@ size); a port is engaged with one profile.
 Profiles:
   ROUTED (0): EKFC 0x801C0006 (non-zero trigger only) + F-224 dual-lane GECs,
               46-byte key. Today's behaviour, unchanged.
-  L2_DA  (1): EKFC 0x44000000 = KG_SCH_KN_MACDST | KG_SCH_KN_ETYPE, no GEC,
-              8-byte key: the frame's destination MAC (6B, MSB-first bit30)
-              followed by its EtherType (2B, bit26). One record per (FDB
+  L2_DA  (1): EKFC 0x64000000 = KG_SCH_KN_MACDST | KG_SCH_KN_MACSRC |
+              KG_SCH_KN_ETYPE, no GEC, 14-byte key: the frame's destination
+              MAC (6B, MSB-first bit30), source MAC (6B, bit29), then its
+              EtherType (2B, bit26). Until 2026-10-13 DA+EtherType only (8B). One record per (FDB
               entry, EtherType) pair; the HIT action is a plain ENQUEUE_PKT
               to the egress port's TX FQ (ask.ko passes rx_fqid=TX FQ,
               tx_fqid=0: no L2 rewrite). Per-port tables already isolate the
@@ -37,6 +38,12 @@ Profiles:
               mechanism (shown non-viable for IPv4/IPv6 discrimination on
               FE-engaged ports, 2026-08-19 IPv6 family-selection finding)
               and any change to the proven-working HIT action/opcode chain.
+              Source MAC added 2026-10-13 (plan §13.30, B6 learned MACs):
+              EKFC 0x64000000 = MACDST|MACSRC|ETYPE, 14-byte key
+              DA(6)|SA(6)|EtherType(2) (MACSRC = bit 29, 6B; the vendor's
+              live L2 scheme 11 is 0xe4000000 = the same plus PORT_ID). One
+              record per (ingress port, DA, SA, EtherType) flow, so a host
+              that moves to another port misses and the bridge sees it.
 
 Edits:
   include/linux/fsl/fman_pcd.h  enum fman_pcd_fe_profile + engage_profile().
@@ -74,10 +81,10 @@ EDITS = [
  * different profile returns -EBUSY (disengage first). */
 enum fman_pcd_fe_profile {
 	FMAN_PCD_FE_PROFILE_ROUTED = 0,	/* 46B dual-lane IPv4/IPv6 5-tuple */
-	FMAN_PCD_FE_PROFILE_L2_DA  = 1,	/* 8B dest MAC + EtherType (bridge FDB) */
+	FMAN_PCD_FE_PROFILE_L2_DA  = 1,	/* 14B DA + SA + EtherType (bridge flows) */
 	FMAN_PCD_FE_PROFILE_NR
 };
-#define FMAN_PCD_FE_L2_DA_KEY_SIZE	8	/* 2026-10: DA(6)+EtherType(2), plan §13.18 */
+#define FMAN_PCD_FE_L2_DA_KEY_SIZE	14	/* DA(6)+SA(6)+EtherType(2), plan §13.30 */
 int fman_pcd_fe_engage_profile(struct fman *fm, u8 hw_port_id,
 			       u32 enq_fqid, enum fman_pcd_fe_profile profile);
 """),
@@ -140,7 +147,7 @@ static const struct {
 	u8   key_size;
 } fman_pcd_fe_profiles[FMAN_PCD_FE_PROFILE_NR] = {
 	[FMAN_PCD_FE_PROFILE_ROUTED] = { 0x801C0006, false, 46 },
-	[FMAN_PCD_FE_PROFILE_L2_DA]  = { 0x44000000 /* KG_SCH_KN_MACDST|KG_SCH_KN_ETYPE */,
+	[FMAN_PCD_FE_PROFILE_L2_DA]  = { 0x64000000 /* KG_SCH_KN_MACDST|MACSRC|ETYPE */,
 					 true, FMAN_PCD_FE_L2_DA_KEY_SIZE },
 };
 
@@ -320,4 +327,4 @@ for path, old, new in EDITS:
 for path, s in src.items():
     with open(path, "w") as f:
         f.write(s)
-print("### F-255: per-port FE key profiles (ROUTED 46B dual-lane, L2_DA 8B MACDST+EtherType; dormant)")
+print("### F-255: per-port FE key profiles (ROUTED 46B dual-lane, L2_DA 14B MACDST+MACSRC+EtherType)")
