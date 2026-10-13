@@ -282,6 +282,7 @@ ssh-keygen -y -f ~/.ssh/id_vyos_vanity > ~/.ssh/id_vyos_vanity.pub
 
 ## See Also
 
+- **[CLI-AND-TOOLS.md](CLI-AND-TOOLS.md)** — After installing: every added VyOS CLI command (offload, policer, MCP, `show hardware …`) and the tools bundled in the image
 - **[plans/FIRMWARE.md](plans/FIRMWARE.md)** — Board firmware update (NOR + eMMC flash procedure, partition offset details, recovery)
 - **[plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md)** — Complete technical specification: U-Boot environment, memory map, clock tree, USB and eMMC boot sequences, `vyos.env` write paths, DTB delivery, kexec prevention, SPI NOR layout, and failure modes
 - **[plans/archive/UBOOT.md](plans/archive/UBOOT.md)** — (Archived) former U-Boot reference, consolidated into `BOOT-PROCESS.md`
