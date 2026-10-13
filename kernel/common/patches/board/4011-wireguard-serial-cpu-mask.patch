@@ -1,0 +1,50 @@
+diff --git a/drivers/net/wireguard/device.c b/drivers/net/wireguard/device.c
+index 67b07ee..986ab9e 100644
+--- a/drivers/net/wireguard/device.c
++++ b/drivers/net/wireguard/device.c
+@@ -233,6 +233,10 @@ err:
+ 	return ret;
+ }
+ 
++unsigned long wg_serial_cpus;
++module_param_named(serial_cpus, wg_serial_cpus, ulong, 0644);
++MODULE_PARM_DESC(serial_cpus, "Bitmask of CPUs that may run a peer's serial tx/rx work (0 = any online CPU)");
++
+ static const struct net_device_ops netdev_ops = {
+ 	.ndo_open		= wg_open,
+ 	.ndo_stop		= wg_stop,
+diff --git a/drivers/net/wireguard/queueing.h b/drivers/net/wireguard/queueing.h
+index 79b6d70..01849a0 100644
+--- a/drivers/net/wireguard/queueing.h
++++ b/drivers/net/wireguard/queueing.h
+@@ -102,12 +102,28 @@ static inline void wg_reset_packet(struct sk_buff *skb, bool encapsulating)
+ 	skb_reset_inner_headers(skb);
+ }
+ 
++/* Bitmask of CPUs allowed to host a peer's serial (in-order) work. 0 keeps the
++ * stock behaviour (every online CPU). Read only when a peer picks its CPU, so a
++ * change applies to peers created or re-homed afterwards.
++ */
++extern unsigned long wg_serial_cpus;
++
+ static inline int wg_cpumask_choose_online(int *stored_cpu, unsigned int id)
+ {
+ 	unsigned int cpu = *stored_cpu;
+ 
+-	while (unlikely(cpu >= nr_cpu_ids || !cpu_online(cpu)))
+-		cpu = *stored_cpu = cpumask_nth(id % num_online_cpus(), cpu_online_mask);
++	while (unlikely(cpu >= nr_cpu_ids || !cpu_online(cpu))) {
++		struct cpumask allowed;
++		const struct cpumask *mask = cpu_online_mask;
++		unsigned long bits = READ_ONCE(wg_serial_cpus);
++
++		if (bits) {
++			cpumask_and(&allowed, cpu_online_mask, to_cpumask(&bits));
++			if (!cpumask_empty(&allowed))
++				mask = &allowed;
++		}
++		cpu = *stored_cpu = cpumask_nth(id % cpumask_weight(mask), mask);
++	}
+ 
+ 	return cpu;
+ }

@@ -1,0 +1,68 @@
+diff --git a/data/templates/conntrack/nftables-ct.j2 b/data/templates/conntrack/nftables-ct.j2
+index 0f0c49c..a834c7f 100644
+--- a/data/templates/conntrack/nftables-ct.j2
++++ b/data/templates/conntrack/nftables-ct.j2
+@@ -51,6 +51,7 @@ table ip vyos_conntrack {
+     chain PREROUTING {
+         type filter hook prerouting priority -300; policy accept;
+         counter jump VYOS_CT_IGNORE
++        ct state untracked accept
+         counter jump FW_CONNTRACK
+         counter jump NAT_CONNTRACK
+         counter jump WLB_CONNTRACK
+@@ -60,6 +61,7 @@ table ip vyos_conntrack {
+ {% if ipv4_firewall_action == 'accept' or ipv4_nat_action == 'accept' %}
+     chain PREROUTING_HELPER {
+         type filter hook prerouting priority -5; policy accept;
++        ct state untracked accept
+         counter jump VYOS_CT_HELPER
+     }
+ {% endif %}
+@@ -67,6 +69,7 @@ table ip vyos_conntrack {
+     chain OUTPUT {
+         type filter hook output priority -300; policy accept;
+         counter jump VYOS_CT_IGNORE
++        ct state untracked accept
+         counter jump FW_CONNTRACK
+         counter jump NAT_CONNTRACK
+ {% if wlb_local_action %}
+@@ -78,6 +81,7 @@ table ip vyos_conntrack {
+ {% if ipv4_firewall_action == 'accept' or ipv4_nat_action == 'accept' %}
+     chain OUTPUT_HELPER {
+         type filter hook output priority -5; policy accept;
++        ct state untracked accept
+         counter jump VYOS_CT_HELPER
+     }
+ {% endif %}
+@@ -149,6 +153,7 @@ table ip6 vyos_conntrack {
+     chain PREROUTING {
+         type filter hook prerouting priority -300; policy accept;
+         counter jump VYOS_CT_IGNORE
++        ct state untracked accept
+         counter jump FW_CONNTRACK
+         counter jump NAT_CONNTRACK
+         notrack
+@@ -157,6 +162,7 @@ table ip6 vyos_conntrack {
+ {% if ipv6_firewall_action == 'accept' or ipv6_nat_action == 'accept' %}
+     chain PREROUTING_HELPER {
+         type filter hook prerouting priority -5; policy accept;
++        ct state untracked accept
+         counter jump VYOS_CT_HELPER
+     }
+ {% endif %}
+@@ -164,6 +170,7 @@ table ip6 vyos_conntrack {
+     chain OUTPUT {
+         type filter hook output priority -300; policy accept;
+         counter jump VYOS_CT_IGNORE
++        ct state untracked accept
+         counter jump FW_CONNTRACK
+         counter jump NAT_CONNTRACK
+         notrack
+@@ -172,6 +179,7 @@ table ip6 vyos_conntrack {
+ {% if ipv6_firewall_action == 'accept' or ipv6_nat_action == 'accept' %}
+     chain OUTPUT_HELPER {
+         type filter hook output priority -5; policy accept;
++        ct state untracked accept
+         counter jump VYOS_CT_HELPER
+     }
+ {% endif %}

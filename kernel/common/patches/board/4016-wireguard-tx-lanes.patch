@@ -1,0 +1,208 @@
+diff --git a/drivers/net/wireguard/device.c b/drivers/net/wireguard/device.c
+--- a/drivers/net/wireguard/device.c
++++ b/drivers/net/wireguard/device.c
+@@ -233,6 +233,10 @@
+ 	return ret;
+ }
+ 
++unsigned int wg_tx_lanes = 1;
++module_param_named(tx_lanes, wg_tx_lanes, uint, 0644);
++MODULE_PARM_DESC(tx_lanes, "In-order transmit lanes per peer, 1 to 4 (1 = stock). Inner flows are pinned to a lane by hash; applies to peers created afterwards");
++
+ unsigned long wg_serial_cpus;
+ module_param_named(serial_cpus, wg_serial_cpus, ulong, 0644);
+ MODULE_PARM_DESC(serial_cpus, "Bitmask of CPUs that may run a peer's serial tx/rx work (0 = any online CPU)");
+diff --git a/drivers/net/wireguard/peer.c b/drivers/net/wireguard/peer.c
+--- a/drivers/net/wireguard/peer.c
++++ b/drivers/net/wireguard/peer.c
+@@ -24,6 +24,7 @@
+ {
+ 	struct wg_peer *peer;
+ 	int ret = -ENOMEM;
++	int i;
+ 
+ 	lockdep_assert_held(&wg->device_update_lock);
+ 
+@@ -46,8 +47,13 @@
+ 	wg_cookie_checker_precompute_peer_keys(peer);
+ 	spin_lock_init(&peer->keypairs.keypair_update_lock);
+ 	INIT_WORK(&peer->transmit_handshake_work, wg_packet_handshake_send_worker);
+-	INIT_WORK(&peer->transmit_packet_work, wg_packet_tx_worker);
+-	wg_prev_queue_init(&peer->tx_queue);
++	peer->nr_tx_lanes = clamp(READ_ONCE(wg_tx_lanes), 1U, (unsigned int)WG_MAX_TX_LANES);
++	for (i = 0; i < WG_MAX_TX_LANES; ++i) {
++		peer->tx_lane[i].peer = peer;
++		peer->tx_lane[i].cpu = nr_cpumask_bits;
++		INIT_WORK(&peer->tx_lane[i].work, wg_packet_tx_worker);
++		wg_prev_queue_init(&peer->tx_lane[i].queue);
++	}
+ 	wg_prev_queue_init(&peer->rx_queue);
+ 	rwlock_init(&peer->endpoint_lock);
+ 	kref_init(&peer->refcount);
+@@ -186,9 +192,12 @@
+ static void rcu_release(struct rcu_head *rcu)
+ {
+ 	struct wg_peer *peer = container_of(rcu, struct wg_peer, rcu);
++	int i;
+ 
+ 	dst_cache_destroy(&peer->endpoint_cache);
+-	WARN_ON(wg_prev_queue_peek(&peer->tx_queue) || wg_prev_queue_peek(&peer->rx_queue));
++	for (i = 0; i < WG_MAX_TX_LANES; ++i)
++		WARN_ON(wg_prev_queue_peek(&peer->tx_lane[i].queue));
++	WARN_ON(wg_prev_queue_peek(&peer->rx_queue));
+ 
+ 	/* The final zeroing takes care of clearing any remaining handshake key
+ 	 * material and other potentially sensitive information.
+diff --git a/drivers/net/wireguard/peer.h b/drivers/net/wireguard/peer.h
+--- a/drivers/net/wireguard/peer.h
++++ b/drivers/net/wireguard/peer.h
+@@ -34,9 +34,23 @@
+ 	};
+ };
+ 
++#define WG_MAX_TX_LANES 4
++
++/* One in-order transmit stage. Inner flows are pinned to a lane by hash, so
++ * per-flow order is kept while lanes run on different CPUs in parallel.
++ */
++struct wg_tx_lane {
++	struct prev_queue queue;
++	struct work_struct work;
++	struct wg_peer *peer;
++	int cpu;
++};
++
+ struct wg_peer {
+ 	struct wg_device *device;
+-	struct prev_queue tx_queue, rx_queue;
++	struct prev_queue rx_queue;
++	struct wg_tx_lane tx_lane[WG_MAX_TX_LANES];
++	unsigned int nr_tx_lanes;
+ 	struct sk_buff_head staged_packet_queue;
+ 	int serial_work_cpu;
+ 	bool is_dead;
+@@ -46,7 +60,7 @@
+ 	rwlock_t endpoint_lock;
+ 	struct noise_handshake handshake;
+ 	atomic64_t last_sent_handshake;
+-	struct work_struct transmit_handshake_work, clear_peer_work, transmit_packet_work;
++	struct work_struct transmit_handshake_work, clear_peer_work;
+ 	struct cookie latest_cookie;
+ 	struct hlist_node pubkey_hash;
+ 	u64 rx_bytes, tx_bytes;
+diff --git a/drivers/net/wireguard/queueing.h b/drivers/net/wireguard/queueing.h
+--- a/drivers/net/wireguard/queueing.h
++++ b/drivers/net/wireguard/queueing.h
+@@ -58,6 +58,7 @@
+ 
+ struct packet_cb {
+ 	u64 nonce;
++	u8 lane;
+ 	struct noise_keypair *keypair;
+ 	atomic_t state;
+ 	u32 mtu;
+@@ -108,6 +109,9 @@
+  */
+ extern unsigned long wg_serial_cpus;
+ 
++/* Number of in-order transmit lanes per peer (1 = stock). Read at peer creation. */
++extern unsigned int wg_tx_lanes;
++
+ static inline int wg_cpumask_choose_online(int *stored_cpu, unsigned int id)
+ {
+ 	unsigned int cpu = *stored_cpu;
+@@ -194,10 +198,12 @@
+ 	 * peer can be freed from below us.
+ 	 */
+ 	struct wg_peer *peer = wg_peer_get(PACKET_PEER(skb));
++	u8 id = PACKET_CB(skb)->lane;
++	struct wg_tx_lane *lane = &peer->tx_lane[id];
+ 
+ 	atomic_set_release(&PACKET_CB(skb)->state, state);
+-	queue_work_on(wg_cpumask_choose_online(&peer->serial_work_cpu, peer->internal_id),
+-		      peer->device->packet_crypt_wq, &peer->transmit_packet_work);
++	queue_work_on(wg_cpumask_choose_online(&lane->cpu, peer->internal_id + id),
++		      peer->device->packet_crypt_wq, &lane->work);
+ 	wg_peer_put(peer);
+ }
+ 
+diff --git a/drivers/net/wireguard/send.c b/drivers/net/wireguard/send.c
+--- a/drivers/net/wireguard/send.c
++++ b/drivers/net/wireguard/send.c
+@@ -261,15 +261,16 @@
+ 
+ void wg_packet_tx_worker(struct work_struct *work)
+ {
+-	struct wg_peer *peer = container_of(work, struct wg_peer, transmit_packet_work);
++	struct wg_tx_lane *lane = container_of(work, struct wg_tx_lane, work);
++	struct wg_peer *peer = lane->peer;
+ 	struct noise_keypair *keypair;
+ 	enum packet_state state;
+ 	struct sk_buff *first;
+ 
+-	while ((first = wg_prev_queue_peek(&peer->tx_queue)) != NULL &&
++	while ((first = wg_prev_queue_peek(&lane->queue)) != NULL &&
+ 	       (state = atomic_read_acquire(&PACKET_CB(first)->state)) !=
+ 		       PACKET_STATE_UNCRYPTED) {
+-		wg_prev_queue_drop_peeked(&peer->tx_queue);
++		wg_prev_queue_drop_peeked(&lane->queue);
+ 		keypair = PACKET_CB(first)->keypair;
+ 
+ 		if (likely(state == PACKET_STATE_CRYPTED))
+@@ -317,7 +318,7 @@
+ 	if (unlikely(READ_ONCE(peer->is_dead)))
+ 		goto err;
+ 
+-	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue, &peer->tx_queue, first,
++	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue, &peer->tx_lane[PACKET_CB(first)->lane].queue, first,
+ 						   wg->packet_crypt_wq);
+ 	if (unlikely(ret == -EPIPE))
+ 		wg_queue_enqueue_per_peer_tx(first, PACKET_STATE_DEAD);
+@@ -383,9 +384,44 @@
+ 	}
+ 
+ 	packets.prev->next = NULL;
+-	wg_peer_get(keypair->entry.peer);
+-	PACKET_CB(packets.next)->keypair = keypair;
+-	wg_packet_create_data(peer, packets.next);
++	if (likely(peer->nr_tx_lanes == 1)) {
++		wg_peer_get(keypair->entry.peer);
++		PACKET_CB(packets.next)->keypair = keypair;
++		PACKET_CB(packets.next)->lane = 0;
++		wg_packet_create_data(peer, packets.next);
++		return;
++	}
++
++	/* Nonces are already assigned in order. Split the batch by inner flow so a
++	 * flow never changes lane (TCP order) and each sub-list owns its own peer
++	 * and keypair reference, as a stock batch does.
++	 */
++	{
++		struct sk_buff *head[WG_MAX_TX_LANES] = {}, *tail[WG_MAX_TX_LANES] = {};
++		struct sk_buff *next;
++		unsigned int l;
++
++		for (skb = packets.next; skb; skb = next) {
++			next = skb->next;
++			skb->next = NULL;
++			l = reciprocal_scale(skb_get_hash(skb), peer->nr_tx_lanes);
++			if (tail[l])
++				tail[l]->next = skb;
++			else
++				head[l] = skb;
++			tail[l] = skb;
++		}
++		for (l = 0; l < peer->nr_tx_lanes; ++l) {
++			if (!head[l])
++				continue;
++			kref_get(&keypair->refcount);
++			wg_peer_get(keypair->entry.peer);
++			PACKET_CB(head[l])->keypair = keypair;
++			PACKET_CB(head[l])->lane = l;
++			wg_packet_create_data(peer, head[l]);
++		}
++		wg_noise_keypair_put(keypair, false);
++	}
+ 	return;
+ 
+ out_invalid:

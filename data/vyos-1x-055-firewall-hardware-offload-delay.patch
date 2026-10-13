@@ -1,0 +1,51 @@
+diff --git a/interface-definitions/include/firewall/global-options.xml.i b/interface-definitions/include/firewall/global-options.xml.i
+index 4827f6e82..724a79bea 100644
+--- a/interface-definitions/include/firewall/global-options.xml.i
++++ b/interface-definitions/include/firewall/global-options.xml.i
+@@ -175,6 +175,19 @@
+         #include <include/interface/vrf.xml.i>
+       </children>
+     </node>
++    <leafNode name="hardware-offload-delay">
++      <properties>
++        <help>Minimum flow age before a hardware flowtable offloads the flow</help>
++        <valueHelp>
++          <format>u32:0-60000</format>
++          <description>Delay (milliseconds); 0 offloads at once, flows are re-offered about once a second</description>
++        </valueHelp>
++        <constraint>
++          <validator name="numeric" argument="--range 0-60000"/>
++        </constraint>
++      </properties>
++      <defaultValue>500</defaultValue>
++    </leafNode>
+     <leafNode name="ip-src-route">
+       <properties>
+         <help>Policy for handling IPv4 packets with source route option</help>
+diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+index 29f4c61e0..3d6ec2ad8 100755
+--- a/src/conf_mode/firewall.py
++++ b/src/conf_mode/firewall.py
+@@ -51,6 +51,7 @@
+ firewall_config_dir = "/config/firewall"
+ 
+ sysctl_file = r'/run/sysctl/10-vyos-firewall.conf'
++ask_offload_delay = '/sys/module/ask/parameters/offload_delay_ms'
+ 
+ valid_groups = [
+     'address_group',
+@@ -857,6 +858,14 @@ def parse_firewall_error(output):
+     raise ConfigError('\n'.join(error_output))
+ 
+ def apply(firewall):
++    # LS1046A ASK2 (2026-10-11): ask.ko moves a flow into the hardware
++    # flowtable only once it is this old, so short connections finish in
++    # software and conntrack sees their FIN/RST. ask.ko is loaded at boot
++    # (modules-load.d); set it before nft installs the flowtable.
++    offload_delay = dict_search('global_options.hardware_offload_delay', firewall)
++    if offload_delay is not None and os.path.exists(ask_offload_delay):
++        write_file(ask_offload_delay, offload_delay)
++
+     # F-192 (LS1046A, 2026-08-14): the DPAA1 netdev advertises NETIF_F_HW_TC
+     # toggleable but defaults it OFF, and the standard `offload hw-tc-offload`
+     # interface config does not apply it at runtime.  Switch the feature on

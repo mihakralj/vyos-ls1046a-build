@@ -200,6 +200,58 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4010-clk-qoriq-ls1046a-cmux-full-range.patch
 
+# ── 4011: wireguard serial-work CPU mask (stage 2c of plans/ask2-wireguard-plan.md) ──
+# WireGuard homes each peer's serial tx/rx worker on CPU
+# peer->internal_id % online_cpus, and internal_id is a global counter, so
+# the serial stage (the single-core bottleneck, about 75% of that core) lands
+# on a different CPU for every new wg0. Measured on .185 (wg-v4 up, 6.18.55):
+# CPU0 0.82, CPU2 0.90, CPU1 1.03, CPU3 1.03 Gbit/s -- CPU0 shares the core with
+# QMan portal 0 RX NAPI. New module parameter wireguard.serial_cpus (ulong
+# bitmask, 0644, default 0 = stock behaviour) restricts the candidate CPUs;
+# e.g. 0xa keeps the serial stage on CPUs 1 and 3. Read only when a peer picks
+# its CPU, so it applies to peers created after the write.
+# Upstream-Status: Pending | Risk-Tier: B
+4011-wireguard-serial-cpu-mask.patch
+
+# ── 4013: WireGuard fast path lab, phase P1 (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md) ──
+# New dpaa_wgfp.c in the DPAA driver (built into fsl_dpa, inert until used):
+# per-CPU frame queues on each CPU's affine channel, drained without an
+# sk_buff by the dpaa_eth NAPI/portal pattern, buffers returned to BMan.
+# debugfs: /sys/kernel/debug/dpaa_wgfp/{ctl,stats}. An ehash record
+# (fman_pcd fe_flow add <tbl> <key> <fqid>) steers a flow to a sink FQ.
+# Measures the CPU drain ceiling that gates the whole fast-path project
+# (gate G1: >= 600k frames/s over 4 CPUs). Three narrow helpers added in
+# dpaa_eth.c (pool DMA device, RX error test, buffer release).
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4013-dpaa-wgfp-lab-sink-fqs.patch
+
+# ── 4014/4015: WireGuard fast path P2a, lab seal (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md) ──
+# 4014: dpaa_wgfp gets a consumer hook (include/linux/fsl/dpaa_wgfp.h):
+# dpaa_wgfp_register/unregister, dpaa_wgfp_set_egress (resolves the egress
+# port's no-confirm TX FQ), dpaa_wgfp_xmit (sync + enqueue the same buffer),
+# dpaa_wgfp_drop. 4015: wireguard/fastpath.c (built only with FSL_DPAA_ETH)
+# registers the hook when root writes a config to the wgfp_lab module
+# parameter and seals steered IPv4 frames IN PLACE with a fixed lab key into
+# WireGuard transport packets (Eth+IP+UDP+WG header written into the buffer
+# headroom), then transmits the same buffer: measures the real transmit
+# fast-path cost. Inert by default; not a usable VPN (no peer, fixed key).
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4014-dpaa-wgfp-consumer-hook.patch
+4015-wireguard-dpaa-fastpath-lab.patch
+
+# ── 4012 RETIRED 2026-10-12: dpaa_eth RX default path through napi_gro_receive ──
+# Moved to kernel/common/patches/archive/ (not applied). rx_default_dqrr() uses
+# netif_receive_skb(), so GRO never runs on DPAA1 RX. v1 (unconditional
+# napi_gro_receive on np->napi) hard-locked the DUT under load (image 0530: RCU
+# stall, CPU0 soft lockup) because the per-CPU QMan portal is shared by all DPAA
+# netdevs. v2 (GRO only when napi_is_scheduled) was stable (image 1538) but a
+# net loss: WireGuard gained only +3-5% (and only with GRO off; GRO on is -7% at
+# 4 tunnels because the tunnel tx re-splits the aggregates), while software
+# forwarding of plain routed TCP (offload off, 8 flows) dropped from 6.43 Gbit/s
+# (image 0350) to 5.33 (GRO on) / 6.02 (GRO off, 6 reps). See
+# plans/ask2-wireguard-plan.md 2.9.
+# SKIP 4012-dpaa-rx-napi-gro-receive.patch
+
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
 # patch-series-cleanup (2026-09-11): squashed 0155+0156+0157 (tight,
 # blob-chained fe_arm refinement, fman_pcd.c only). See its header.
@@ -411,3 +463,30 @@
 # insert, under the same pcd->fe_lock already held by every caller.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0219-fman-pcd-ehash-dup-key-evict.patch
+
+# ── 4016: wireguard per-flow transmit lanes (E2 of plans/ask2-wireguard-plan.md 2.18) ──
+# A peer has ONE in-order transmit stage (wg_packet_tx_worker): one CPU at 99%
+# while the box is 67-76% busy, which caps a single tunnel at about 1.2 Gbit/s
+# (2 tunnels 1.6, 4 tunnels 1.77). New module parameter wireguard.tx_lanes
+# (uint 1..4, default 1 = stock) gives each peer N lanes, each with its own
+# prev_queue and work item on its own CPU (from serial_cpus). Nonces are still
+# assigned in order at submit; the staged batch is split by skb_get_hash so an
+# inner flow never changes lane (TCP order kept), the receiver's replay window
+# absorbs the cross-lane skew. Each sub-list owns its own peer and keypair
+# reference. Applies to peers created after the write. Single inner flow is
+# unchanged. Compiles against 6.18.55; board validation needs a CI image
+# (module signing): echo 3 > /sys/module/wireguard/parameters/tx_lanes first.
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4016-wireguard-tx-lanes.patch
+
+# 4017: P2b-1 fast path peer mode. Seals frames from the dpaa_wgfp sink queues
+# with a real peer's current keypair (receiver index, key, atomic counter),
+# honours REJECT_AFTER_*/REKEY_AFTER_MESSAGES, pads within the device MTU,
+# feeds the peer timers, builds the outer Ethernet/IPv4/UDP header from the
+# endpoint route + neighbour entry (refreshed 1/s). Off by default; enable with
+# echo "wg0 eth4" > /sys/module/wireguard/parameters/wgfp_peer. AllowedIPs are
+# not checked (only operator-steered flows arrive); undeliverable frames are
+# declined, slow-path punt is P2b-3. Compiles clean (W=1) on 6.18.55; needs a
+# CI image for board validation. Requires 4013-4015.
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4017-wireguard-fastpath-peer-mode.patch

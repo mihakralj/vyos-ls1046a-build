@@ -20,6 +20,12 @@ ifeq ($(origin CONFIG_NET_ASK_KUNIT_TEST),command line)
 ccflags-y += -DASK_KUNIT_EXPORTS
 endif
 
+# Bring-up debugfs (B2 l2 verbs etc.): ci-build.sh passes
+# CONFIG_NET_ASK_DEBUG_FS=y on the command line only for KUNIT debug builds.
+ifeq ($(origin CONFIG_NET_ASK_DEBUG_FS),command line)
+ccflags-y += -DCONFIG_NET_ASK_DEBUG_FS
+endif
+
 obj-$(CONFIG_NET_ASK) += ask.o
 
 ask-y := \
