@@ -98,6 +98,9 @@ wg_dut_up(){
   if [ "${WG_NOTRACK:-0}" = 1 ]; then
     dut "sudo nft add table inet wgnt; sudo nft 'add chain inet wgnt pre { type filter hook prerouting priority -300 ; }'; sudo nft 'add chain inet wgnt out { type filter hook output priority -300 ; }'; sudo nft add rule inet wgnt pre udp dport $WGP notrack; sudo nft add rule inet wgnt out udp sport $WGP notrack"
   fi
+  if [ "${WG_NOTRACK:-0}" = 2 ]; then
+    dut "sudo nft add table inet wgnt; sudo nft 'add chain inet wgnt pre { type filter hook prerouting priority -300 ; }'; sudo nft 'add chain inet wgnt out { type filter hook output priority -300 ; }'; sudo nft add rule inet wgnt pre notrack; sudo nft add rule inet wgnt out notrack"
+  fi
   echo dut >> $STATE
 }
 
