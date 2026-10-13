@@ -1121,3 +1121,81 @@ deletes eth3.10/eth4.20 and the eth3/eth4 addresses.
 - Deleting one entry takes the record count from 4 to 2.
 - Leaving the bridge takes it to 0, triggers the role change back, and must
   leave `pcd-snapshot diff` clean.
+
+### 13.23 B3a gate passed on silicon (2026-10-13, DUT .185, image 2026.10.13-1557-rolling KUnit/PROVE_LOCKING, commit 23b62683)
+
+Boot type: post-install boot by the operator; cold or warm was not confirmed.
+CI run 38426326707: F-255 with the G6 edit, 0 FATALs, `ask_kunit.ko` built.
+
+| Check | Result |
+|---|---|
+| Boot KUnit (FMan PCD suites) | 0 `not ok` |
+| `ask_kunit` (11 suites, incl. `ask_bridge`, `ask_hw_pcd`) | all `ok` |
+| Lockdep / PROVE_RCU over boot + gate | 0 reports; taint 0x41000 = out-of-tree + KUnit only |
+| Default state | `bridge_offload=N`; eth3/eth4 engage ROUTED through the rtnl-wrapped genl path; MURAM 52922 B |
+| Join `br-b3a` (eth3+eth4, `bridge_offload=1`) | 0x10 and 0x11 `role change to profile 1` (disengage → engage, `key 8B`) |
+| 2 static entries (dell1 MAC on eth3, dell2 MAC on eth4) | 4 records |
+| v4 dell1→dell2, 20× 1000 B | hits +20, kernel +0, dell2 +20: **PASS** |
+| v6 dell1→dell2, 20× 100 B | +20 / +1 / +20: **PASS** |
+| v4 dell2→dell1 | +20 / +0 / +20: **PASS** |
+| ARP to dell2's MAC | hits 0, kernel +22, dell2 +20 (software bridge forwards): **PASS** |
+| Unknown DA | hits 0, kernel +20, dell2 +20 (flooded): **PASS** |
+| Broadcast | hits 0, kernel +20, dell2 broadcast +20: **PASS** |
+| `bridge fdb del` dell2's MAC | 4 → 2 records; that MAC then forwards in software (hits 0, kernel +20, dell2 +20): **PASS** |
+| Leave bridge + `bridge_offload=0` | `role change to profile 0` on both ports, 0 records, MURAM 52922 B, `pcd-snapshot diff` matches baseline: **PASS** |
+| Routed regression after reboot (`testrig-offload-quick.sh`, 15 s) | unicast-v4 9.41 Gbit/s HW, unicast-v6 9.15 Gbit/s HW, busy ~0.6 %: **PASS** (2026-10-09 baseline 9.38/9.24) |
+
+B3a is closed. Still open:
+
+- B3b on silicon: STP state change, port isolation, and VLAN-filter toggle
+  removing records. The code is in, but not board-tested.
+- B4: churn/soak of FDB add/del and join/leave cycles against
+  `muram_budget`.
+- B2 row 7: table capacity.
+- B5: matrix, then `ASK_CAP_BRIDGE`.
+- Bridge throughput: these rows only counted frames, so line rate through
+  the bridge has not been measured.
+
+### 13.24 B3b invalidation and bridge throughput on silicon (2026-10-13, DUT .185, image 1557, warm boot)
+
+`bin/testrig-bridge-b3a.sh`, extended with B3b rows and a throughput pair.
+Two full runs; the table below is run 2, which uses the corrected test method.
+
+| Check | Result |
+|---|---|
+| Bridge egress port `state 0` (disabled) | 4 → 0 records; v4 to that MAC: hits 0, peer 0 (dropped, not hardware-forwarded): **PASS** |
+| Back to forwarding | 0 → 4 records: **PASS** |
+| `isolated on` / `off` on eth3 | 0 / 4 records: **PASS** |
+| `vlan_filtering 1` / `0` | 0 / 4 records (D6): **PASS** |
+| `bridge fdb replace` M2 → eth3 | still 4 records, now all in eth4's table; v4 dell1→M2 on eth3: hits 0, the software bridge drops the hairpin (peer 0): **PASS** |
+| Move M2 back to eth4 | hits +20, peer +20: **PASS** |
+| Throughput dell1→dell2 across the bridge, iperf3 -P 4, 15 s | **9.31 Gbit/s with `bridge_offload=1`** (15.2 M hardware hits, DUT busy 11.7 %) vs 0.36 Gbit/s software bridge at 41 % busy, both on the PROVE_LOCKING debug kernel |
+| Setting `bridge_offload=0` with the bridge up | all records removed (software forwarding); setting 1 again brings back 4 |
+| Lockdep after both runs and a manual teardown | 0 reports |
+
+Test-method corrections:
+
+- **STP blocking test.** `bridge link set ... state 4` (blocking) cannot be
+  tested with STP off: `br_set_port_state()` calls
+  `br_port_state_selection()`, which makes every non-disabled port
+  designated and forwarding again at once (run 1 showed 4 records and the
+  kernel forwarding too). Use `state 0`.
+- **Carrier loss.** It could not be produced. With `link-down-on-close` set
+  on dell2's X710, `ip link set down` really drops dell2's PHY ("Link
+  detected: no"), yet the DUT's eth4 stays `carrier=1`, `operstate=up`.
+  The LS1046A 10G port does not see a DAC peer go away. This is a platform
+  carrier-detection gap (see AGENTS S5 on FMan 10G in-band PCS / LOS), not
+  a bridge-offload issue: the kernel bridge is equally blind. The record
+  invalidation for a real carrier loss runs through the same
+  `br_stp_disable_port()` → `br_set_state(DISABLED)` notification the
+  passing `state 0` row exercises.
+
+Still open:
+
+- **DUT busy 11.7 % at 9.31 Gbit/s.** Routed offload is ~0.6 %. Unexplained.
+  Candidates: the debug kernel, frames that miss (the ARP/NDP refresh is too
+  small to explain it), or the TX path of HW-forwarded frames. Measure on a
+  production build before reading anything into it.
+- B4 churn/soak.
+- B2 row 7 capacity.
+- B5.
