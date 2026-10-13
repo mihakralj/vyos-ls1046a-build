@@ -478,3 +478,15 @@
 # (module signing): echo 3 > /sys/module/wireguard/parameters/tx_lanes first.
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4016-wireguard-tx-lanes.patch
+
+# 4017: P2b-1 fast path peer mode. Seals frames from the dpaa_wgfp sink queues
+# with a real peer's current keypair (receiver index, key, atomic counter),
+# honours REJECT_AFTER_*/REKEY_AFTER_MESSAGES, pads within the device MTU,
+# feeds the peer timers, builds the outer Ethernet/IPv4/UDP header from the
+# endpoint route + neighbour entry (refreshed 1/s). Off by default; enable with
+# echo "wg0 eth4" > /sys/module/wireguard/parameters/wgfp_peer. AllowedIPs are
+# not checked (only operator-steered flows arrive); undeliverable frames are
+# declined, slow-path punt is P2b-3. Compiles clean (W=1) on 6.18.55; needs a
+# CI image for board validation. Requires 4013-4015.
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4017-wireguard-fastpath-peer-mode.patch

@@ -411,6 +411,8 @@ Same method for both boards: IPv4 inner, MTU 1420, iperf3 TCP, 30 s runs with th
 
 `.185` leads `.106` in eight of nine cells; the exception is 1-tunnel `bidir` (1.44 vs 1.51), which also regressed from 1.54 and is the next target (hypothesis: three TX lanes compete with RX/decrypt work when both directions run; not yet measured). 4-tunnel `down` is 0.05 lower than before (within the 1.72 to 1.85 spread).
 
+**1T `bidir` investigation (2026-10-13, `oracle/wg-bidir-*.csv`):** (a) three repeat sessions of 5 fresh tunnels on `.185` with `tx_lanes=3`: 1.402, 1.445, 1.400, so the matrix cell is real and not a dip. (b) `tx_lanes=1` on the same image: 1.410 (1.17 to 1.50), so the lanes are not the cause. (c) `noqueue` on eth3 and eth4 with lanes=3: 1.479 (+4%). (d) `.106` with 12 fresh tunnels: mean **1.551** (1.356 to 1.675) and the result is set by where the serial worker lands: CPU2 or CPU3 gives 1.66 to 1.67 at 176k pkt/s (92% busy, sirq 43%, 530k retransmits), CPU0 1.49 to 1.51, CPU1 1.36 to 1.39. `.185` never reaches the 176k pkt/s state in bidir (best 1.62, typical 150k pkt/s at 89% busy, sirq 27 to 35%), so it spends about 15% more CPU per packet in bidir: roughly 38k cycles per packet against `.106` at about 33k. The 5-rep `.106` median in the 9-cell table (1.515) understated its best mode. Mitigations do not explain it (`.185` reports spectre_v2 "Vulnerable", `.106` has BHB hardening). Cause of the extra per-packet cost is NOT identified: needs a CPU profile during `bidir` (no `perf` on the board image), then compare `.185` against the `.106` sirq/softirq split. Candidates to profile: netfilter/nft hooks (442 nft lines), conntrack on the inner path, `fsl_dpa` RX/TX cost with both directions active, 6.18 vs 6.12 differences in the UDP/GRO path.
+
 Not planned: more netfilter trimming, GRO, handoff batching, crypto assembly (2.9, 2.15, 2.16 closed them at under 5% each). Measurement rules stay as in 2.3: `RECREATE=1`, at least 5 reps, quote median and range, record serial CPU and kernel config.
 
 ## 3. What does not help
@@ -551,3 +553,9 @@ Rig rules from `plans/ASK2-PERFORMANCE-TEST-HARNESS.md` apply: do not run two ha
 - CRYPTOGAMS `chacha-armv8.pl` and `poly1305-armv8.pl` cycle counts; s2n-bignum (formally verified arm64 X25519).
 - WireGuard and GRO: Borkmann, Protopopov, Pumputis, LPC 2024. Tailscale, "Surpassing 10 Gbit/s with wireguard-go".
 - DPDK `bus/dpaa` ORP queue creation and burst enqueue, August 2026.
+
+### 2.19 P2b-1: real-peer fast path (patch 4017, 2026-10-13)
+
+perf of 1T bidir on .185 (tx_lanes=3): crypto about 22% of samples (chacha 15.2, poly1305 4.9, permute 1.4), netfilter about 7% (nft_do_chain 4.0, nft_counter_eval 1.1, conntrack about 1.5), worker handoff about 6% (finish_task_switch 4.2, queue_work_on 2.2), DPAA RX/TX under 4%. No FMan/BMan hotspot, so any further gain comes from skipping the software path (P2b) or trimming the nft ruleset.
+
+Patch 4017 adds `wgfp_peer` ("<wg dev> <egress dev>") to `drivers/net/wireguard/fastpath.c`: frames from the dpaa_wgfp sink FQs are sealed in place with the first peer's current keypair (atomic counter, remote_index, REJECT/REKEY limits), padded within the device MTU, with peer timers fed at most every 10 ms, and the outer header taken from a route+neighbour template refreshed every 1 s. Not yet done: AllowedIPs check, slow-path punt for declined frames (P2b-3), automatic flow install (P2b-2). Compiles clean at W=1 on 6.18.55. Not board-tested: needs a CI image (module signing). Test plan: cold boot, arm softlockup_panic/panic_on_rcu_stall, create 1 tunnel with stock dell2, `echo "wg0 eth4" > wgfp_peer`, steer 4 flows via debugfs fe_flow, require 4-stream up >= 2.6 Gbit/s, no Invalid MAC, rekey at 120 s survives.
