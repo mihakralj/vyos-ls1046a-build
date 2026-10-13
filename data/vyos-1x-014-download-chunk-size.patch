@@ -11,15 +11,15 @@ diff --git a/python/vyos/remote.py b/python/vyos/remote.py
 index a3cbc1a..c93ced2 100644
 --- a/python/vyos/remote.py
 +++ b/python/vyos/remote.py
-@@ -59,7 +59,7 @@
+@@ -60,7 +60,7 @@
  from vyos.base import Warning
  from vyos.defaults import directories
  
 -CHUNK_SIZE = 8192
 +CHUNK_SIZE = 1048576
  
- class InteractivePolicy(MissingHostKeyPolicy):
-     """
+ 
+ def _decode(value):
 -- 
 2.39.5
 

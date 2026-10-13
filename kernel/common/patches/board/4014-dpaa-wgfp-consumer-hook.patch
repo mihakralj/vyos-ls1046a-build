@@ -1,0 +1,234 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_wgfp.c b/drivers/net/ethernet/freescale/dpaa/dpaa_wgfp.c
+index 7d2ef9761d3b..d304e98d49b2 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_wgfp.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_wgfp.c
+@@ -35,6 +35,9 @@
+ #include <linux/netdevice.h>
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/fsl/dpaa_flow_offload.h>
++#include <linux/fsl/dpaa_wgfp.h>
++#include <linux/rcupdate.h>
+ #include <soc/fsl/qman.h>
+ 
+ /* Helpers living in dpaa_eth.c (file-local state there). */
+@@ -43,6 +46,8 @@ bool dpaa_wgfp_fd_has_error(const struct qm_fd *fd);
+ void dpaa_wgfp_fd_release(const struct qm_fd *fd);
+ 
+ #define WGFP_MAX_SINKS	4
++/* Usable bytes of a DPAA RX buffer (dpaa_bp_size of the 4096-byte raw size). */
++#define DPAA_WGFP_BUF_SIZE	3584
+ #define WGFP_WQ		3
+ 
+ struct wgfp_sink {
+@@ -68,6 +73,14 @@ static unsigned int wgfp_touch = 2;
+ static unsigned int wgfp_nsinks;
+ static DEFINE_MUTEX(wgfp_lock);
+ 
++/* Consumer hook (the wireguard module) and the egress frame queue. */
++static const struct dpaa_wgfp_ops __rcu *wgfp_ops;
++static void *wgfp_ops_priv;
++static struct qman_fq wgfp_txfq;
++static bool wgfp_tx_ready;
++static atomic64_t wgfp_xmit_ok = ATOMIC64_INIT(0);
++static atomic64_t wgfp_xmit_fail = ATOMIC64_INIT(0);
++
+ static void wgfp_touch_frame(struct wgfp_sink *s, u8 *p, u32 len)
+ {
+ 	u64 sum = 0;
+@@ -106,6 +119,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
+ {
+ 	struct wgfp_sink *s = container_of(fq, struct wgfp_sink, fq);
+ 	const struct qm_fd *fd = &dq->fd;
++	const struct dpaa_wgfp_ops *ops;
+ 	struct device *dev;
+ 	dma_addr_t addr;
+ 	u32 off, len;
+@@ -143,6 +157,29 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
+ 
+ 	p = (u8 *)phys_to_virt(addr) + off;
+ 	dma_sync_single_for_cpu(dev, addr + off, len, DMA_FROM_DEVICE);
++
++	rcu_read_lock();
++	ops = rcu_dereference(wgfp_ops);
++	if (ops) {
++		struct dpaa_wgfp_frame f = {
++			.buf = (u8 *)phys_to_virt(addr),
++			.addr = addr,
++			.dev = dev,
++			.off = off,
++			.len = len,
++			.buf_size = DPAA_WGFP_BUF_SIZE,
++			.fd = (void *)fd,
++		};
++
++		if (ops->frame(wgfp_ops_priv, &f)) {
++			rcu_read_unlock();
++			s->frames++;
++			s->bytes += len;
++			return qman_cb_dqrr_consume;
++		}
++	}
++	rcu_read_unlock();
++
+ 	wgfp_touch_frame(s, p, len);
+ 	dma_sync_single_for_device(dev, addr + off, len, DMA_FROM_DEVICE);
+ 
+@@ -309,7 +346,10 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
+ 	unsigned int i;
+ 
+ 	mutex_lock(&wgfp_lock);
+-	seq_printf(m, "touch=%u sinks=%u\n", wgfp_touch, wgfp_nsinks);
++	seq_printf(m, "touch=%u sinks=%u ops=%d tx=%d xmit_ok=%llu xmit_fail=%llu\n",
++		   wgfp_touch, wgfp_nsinks, !!rcu_access_pointer(wgfp_ops),
++		   wgfp_tx_ready, (u64)atomic64_read(&wgfp_xmit_ok),
++		   (u64)atomic64_read(&wgfp_xmit_fail));
+ 	for (i = 0; i < wgfp_nsinks; i++) {
+ 		struct wgfp_sink *s = &wgfp_sinks[i];
+ 		struct qm_mcr_queryfq_np np;
+@@ -332,6 +372,83 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
+ }
+ DEFINE_SHOW_ATTRIBUTE(wgfp_stats);
+ 
++int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv)
++{
++	int ret = 0;
++
++	mutex_lock(&wgfp_lock);
++	if (rcu_access_pointer(wgfp_ops)) {
++		ret = -EBUSY;
++	} else {
++		wgfp_ops_priv = priv;
++		rcu_assign_pointer(wgfp_ops, ops);
++	}
++	mutex_unlock(&wgfp_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dpaa_wgfp_register);
++
++void dpaa_wgfp_unregister(void)
++{
++	mutex_lock(&wgfp_lock);
++	rcu_assign_pointer(wgfp_ops, NULL);
++	mutex_unlock(&wgfp_lock);
++	synchronize_rcu();
++}
++EXPORT_SYMBOL_GPL(dpaa_wgfp_unregister);
++
++int dpaa_wgfp_set_egress(struct net_device *dev)
++{
++	u32 fqid;
++	int err;
++
++	err = dpaa_alloc_offload_tx_fq(dev, &fqid);
++	if (err)
++		return err;
++	mutex_lock(&wgfp_lock);
++	memset(&wgfp_txfq, 0, sizeof(wgfp_txfq));
++	wgfp_txfq.fqid = fqid;
++	wgfp_tx_ready = true;
++	mutex_unlock(&wgfp_lock);
++	pr_info("dpaa_wgfp: egress %s no-confirm tx fqid=0x%x\n", dev->name, fqid);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_wgfp_set_egress);
++
++void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
++{
++	dpaa_wgfp_fd_release(f->fd);
++}
++EXPORT_SYMBOL_GPL(dpaa_wgfp_drop);
++
++void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, u32 new_off, u32 new_len)
++{
++	struct qm_fd fd = *(const struct qm_fd *)f->fd;
++	int tries = 8;
++
++	if (unlikely(!wgfp_tx_ready)) {
++		atomic64_inc(&wgfp_xmit_fail);
++		dpaa_wgfp_fd_release(f->fd);
++		return;
++	}
++	qm_fd_clear_fd(&fd);
++	fd.bpid = ((const struct qm_fd *)f->fd)->bpid;
++	qm_fd_addr_set64(&fd, f->addr);
++	qm_fd_set_contig(&fd, new_off, new_len);
++	dma_sync_single_for_device(f->dev, f->addr + new_off, new_len,
++				   DMA_TO_DEVICE);
++	while (tries--) {
++		if (!qman_enqueue(&wgfp_txfq, &fd)) {
++			atomic64_inc(&wgfp_xmit_ok);
++			return;
++		}
++		cpu_relax();
++	}
++	atomic64_inc(&wgfp_xmit_fail);
++	dpaa_wgfp_fd_release(f->fd);
++}
++EXPORT_SYMBOL_GPL(dpaa_wgfp_xmit);
++
+ static int __init dpaa_wgfp_init(void)
+ {
+ 	wgfp_ndev = alloc_netdev_dummy(0);
+diff --git a/include/linux/fsl/dpaa_wgfp.h b/include/linux/fsl/dpaa_wgfp.h
+new file mode 100644
+index 000000000000..4ac3d8e19a28
+--- /dev/null
++++ b/include/linux/fsl/dpaa_wgfp.h
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * WireGuard fast path hook between the DPAA driver and the wireguard module
++ * (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md).
++ *
++ * dpaa_wgfp.c (built into fsl_dpa) owns QMan frame queues that FMan flow
++ * records steer frames to, and drains them without building an sk_buff.  A
++ * registered consumer (the wireguard module, which holds the keys and counters)
++ * gets each frame as a raw buffer, transforms it in place and hands the same
++ * buffer back for transmission, or declines it.
++ */
++#ifndef _LINUX_FSL_DPAA_WGFP_H
++#define _LINUX_FSL_DPAA_WGFP_H
++
++#include <linux/types.h>
++#include <linux/dma-mapping.h>
++
++struct net_device;
++
++struct dpaa_wgfp_frame {
++	u8 *buf;		/* virtual address of the buffer start */
++	dma_addr_t addr;	/* bus address of the buffer start */
++	struct device *dev;	/* DMA device of the buffer pool */
++	u32 off;		/* offset of the frame data in the buffer */
++	u32 len;		/* frame length */
++	u32 buf_size;		/* usable buffer size from the buffer start */
++	void *fd;		/* the dequeued struct qm_fd (opaque to users) */
++};
++
++struct dpaa_wgfp_ops {
++	/* Called in NAPI context, buffer already synced for the CPU.
++	 * Return 1 when the consumer took the buffer (it must have called
++	 * dpaa_wgfp_xmit() or dpaa_wgfp_drop()), 0 to decline.
++	 */
++	int (*frame)(void *priv, struct dpaa_wgfp_frame *f);
++};
++
++#if IS_ENABLED(CONFIG_FSL_DPAA_ETH)
++int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv);
++void dpaa_wgfp_unregister(void);
++/* Select the egress port; resolves its no-confirm TX frame queue. */
++int dpaa_wgfp_set_egress(struct net_device *dev);
++/* Transmit the (modified) buffer: new data offset and length in the buffer. */
++void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, u32 new_off, u32 new_len);
++/* Return the buffer to its pool. */
++void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f);
++#else
++static inline int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv)
++{ return -ENODEV; }
++static inline void dpaa_wgfp_unregister(void) { }
++static inline int dpaa_wgfp_set_egress(struct net_device *dev) { return -ENODEV; }
++static inline void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, u32 o, u32 l) { }
++static inline void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f) { }
++#endif
++
++#endif /* _LINUX_FSL_DPAA_WGFP_H */

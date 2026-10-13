@@ -1,0 +1,278 @@
+diff --git a/drivers/net/wireguard/Makefile b/drivers/net/wireguard/Makefile
+index dbe1f8514efc..46a21aefb963 100644
+--- a/drivers/net/wireguard/Makefile
++++ b/drivers/net/wireguard/Makefile
+@@ -14,4 +14,5 @@ wireguard-y += allowedips.o
+ wireguard-y += ratelimiter.o
+ wireguard-y += cookie.o
+ wireguard-y += netlink.o
++wireguard-$(CONFIG_FSL_DPAA_ETH) += fastpath.o
+ obj-$(CONFIG_WIREGUARD) := wireguard.o
+diff --git a/drivers/net/wireguard/fastpath.c b/drivers/net/wireguard/fastpath.c
+new file mode 100644
+index 000000000000..989c53769954
+--- /dev/null
++++ b/drivers/net/wireguard/fastpath.c
+@@ -0,0 +1,223 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * WireGuard fast path for DPAA1 (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md).
++ *
++ * Phase P2a, "lab seal": no peer, no handshake.  Frames that FMan flow
++ * records steer to the dpaa_wgfp queues (drivers/net/ethernet/freescale/dpaa)
++ * are sealed in place with a fixed key into WireGuard transport-data packets
++ * and transmitted on a chosen port, never building an sk_buff.  It measures
++ * the real cost of the transmit fast path (crypto, header build, enqueue).
++ * The key is a lab value, the counter is a plain global, and nothing here
++ * runs unless root writes a configuration to the "wgfp_lab" parameter, so it
++ * is NOT a usable VPN; P2b replaces the fixed state with a real peer keypair.
++ *
++ *   echo "<egress> <dst mac> <src mac> <src ip> <dst ip> <sport> <dport> \
++ *         <receiver index> <32-byte key as 64 hex digits>" \
++ *        > /sys/module/wireguard/parameters/wgfp_lab
++ *   echo off > /sys/module/wireguard/parameters/wgfp_lab
++ *
++ * Input frames must be Ethernet + IPv4; others are declined (the DPAA sink
++ * just releases them).
++ */
++
++#include <crypto/chacha20poly1305.h>
++#include <crypto/poly1305.h>
++#include <linux/atomic.h>
++#include <linux/etherdevice.h>
++#include <linux/fsl/dpaa_wgfp.h>
++#include <linux/hex.h>
++#include <linux/if_ether.h>
++#include <linux/inet.h>
++#include <linux/ip.h>
++#include <linux/moduleparam.h>
++#include <linux/netdevice.h>
++#include <linux/udp.h>
++#include <net/checksum.h>
++#include <net/ip.h>
++
++#include "fastpath.h"
++#include "messages.h"
++
++/* Ethernet + IPv4 + UDP + WireGuard transport header, in front of the data. */
++#define WGFP_HDR_LEN	(ETH_HLEN + sizeof(struct iphdr) + sizeof(struct udphdr) + \
++			 sizeof(struct message_data))
++#define WGFP_ADDED	(WGFP_HDR_LEN - ETH_HLEN)
++
++struct wgfp_lab {
++	u8 key[CHACHA20POLY1305_KEY_SIZE];
++	u8 tmpl[ETH_HLEN + sizeof(struct iphdr) + sizeof(struct udphdr)];
++	__le32 rcv_idx;
++	atomic64_t counter;
++};
++
++static struct wgfp_lab wgfp_lab_state;
++static bool wgfp_lab_on;
++static DEFINE_MUTEX(wgfp_lab_lock);
++static char wgfp_lab_cfg[16] = "off";
++
++static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
++{
++	struct wgfp_lab *l = priv;
++	u8 *data = f->buf + f->off;
++	u8 *inner = data + ETH_HLEN;
++	const struct iphdr *iph;
++	struct message_data *wg;
++	struct udphdr *udp;
++	struct iphdr *oip;
++	u32 ip_len, plain, tot;
++	u64 ctr;
++	u8 *hdr;
++
++	if (f->len < ETH_HLEN + sizeof(*iph) ||
++	    ((struct ethhdr *)data)->h_proto != htons(ETH_P_IP))
++		return 0;
++	iph = (const struct iphdr *)inner;
++	if (iph->version != 4)
++		return 0;
++	ip_len = ntohs(iph->tot_len);
++	if (ip_len < sizeof(*iph) || ETH_HLEN + ip_len > f->len)
++		return 0;
++
++	plain = ALIGN(ip_len, 16);
++	if (f->off < WGFP_ADDED ||
++	    f->off + ETH_HLEN + plain + POLY1305_DIGEST_SIZE > f->buf_size)
++		return 0;
++
++	memset(inner + ip_len, 0, plain - ip_len);
++	ctr = (u64)atomic64_inc_return(&l->counter) - 1;
++	chacha20poly1305_encrypt(inner, inner, plain, NULL, 0, ctr, l->key);
++
++	hdr = inner - WGFP_HDR_LEN;
++	memcpy(hdr, l->tmpl, sizeof(l->tmpl));
++
++	tot = sizeof(struct iphdr) + sizeof(struct udphdr) +
++	      sizeof(struct message_data) + plain + POLY1305_DIGEST_SIZE;
++	oip = (struct iphdr *)(hdr + ETH_HLEN);
++	oip->tot_len = htons(tot);
++	oip->check = 0;
++	oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
++	udp = (struct udphdr *)(oip + 1);
++	udp->len = htons(tot - sizeof(struct iphdr));
++
++	wg = (struct message_data *)(udp + 1);
++	wg->header.type = cpu_to_le32(MESSAGE_DATA);
++	wg->key_idx = l->rcv_idx;
++	wg->counter = cpu_to_le64(ctr);
++
++	dpaa_wgfp_xmit(f, f->off - WGFP_ADDED,
++		       WGFP_HDR_LEN + plain + POLY1305_DIGEST_SIZE);
++	return 1;
++}
++
++static const struct dpaa_wgfp_ops wgfp_lab_ops = {
++	.frame = wgfp_lab_frame,
++};
++
++static void wgfp_lab_stop(void)
++{
++	if (wgfp_lab_on) {
++		dpaa_wgfp_unregister();
++		wgfp_lab_on = false;
++	}
++}
++
++static int wgfp_lab_start(const char *cfg)
++{
++	struct wgfp_lab *l = &wgfp_lab_state;
++	char egress[IFNAMSIZ], dmac[24], smac[24], sip[20], dip[20], hex[80];
++	struct net_device *dev;
++	struct ethhdr *eth;
++	struct iphdr *ip;
++	struct udphdr *udp;
++	u8 mac_d[ETH_ALEN], mac_s[ETH_ALEN];
++	__be32 a_s, a_d;
++	u16 sport, dport;
++	u32 idx;
++	int err;
++
++	if (sscanf(cfg, "%15s %23s %23s %19s %19s %hu %hu %u %79s",
++		   egress, dmac, smac, sip, dip, &sport, &dport, &idx, hex) != 9)
++		return -EINVAL;
++	if (!mac_pton(dmac, mac_d) || !mac_pton(smac, mac_s) ||
++	    !in4_pton(sip, -1, (u8 *)&a_s, -1, NULL) ||
++	    !in4_pton(dip, -1, (u8 *)&a_d, -1, NULL) ||
++	    strlen(hex) != 2 * CHACHA20POLY1305_KEY_SIZE ||
++	    hex2bin(l->key, hex, CHACHA20POLY1305_KEY_SIZE))
++		return -EINVAL;
++
++	dev = dev_get_by_name(&init_net, egress);
++	if (!dev)
++		return -ENODEV;
++	err = dpaa_wgfp_set_egress(dev);
++	dev_put(dev);
++	if (err)
++		return err;
++
++	eth = (struct ethhdr *)l->tmpl;
++	ether_addr_copy(eth->h_dest, mac_d);
++	ether_addr_copy(eth->h_source, mac_s);
++	eth->h_proto = htons(ETH_P_IP);
++	ip = (struct iphdr *)(eth + 1);
++	memset(ip, 0, sizeof(*ip));
++	ip->version = 4;
++	ip->ihl = 5;
++	ip->frag_off = htons(IP_DF);
++	ip->ttl = 64;
++	ip->protocol = IPPROTO_UDP;
++	ip->saddr = a_s;
++	ip->daddr = a_d;
++	udp = (struct udphdr *)(ip + 1);
++	memset(udp, 0, sizeof(*udp));
++	udp->source = htons(sport);
++	udp->dest = htons(dport);	/* check stays 0: legal for IPv4 */
++	l->rcv_idx = cpu_to_le32(idx);
++	atomic64_set(&l->counter, 0);
++
++	err = dpaa_wgfp_register(&wgfp_lab_ops, l);
++	if (err)
++		return err;
++	wgfp_lab_on = true;
++	pr_info("fastpath lab seal on: %s -> %pI4:%u, receiver index %u\n",
++		egress, &a_d, dport, idx);
++	return 0;
++}
++
++static int wgfp_lab_cfg_set(const char *val, const struct kernel_param *kp)
++{
++	char buf[256];
++	int err = 0;
++
++	strscpy(buf, val, sizeof(buf));
++	strim(buf);
++	mutex_lock(&wgfp_lab_lock);
++	if (!strcmp(buf, "off")) {
++		wgfp_lab_stop();
++		strscpy(wgfp_lab_cfg, "off", sizeof(wgfp_lab_cfg));
++	} else {
++		wgfp_lab_stop();
++		err = wgfp_lab_start(buf);
++		strscpy(wgfp_lab_cfg, err ? "off" : "on", sizeof(wgfp_lab_cfg));
++	}
++	mutex_unlock(&wgfp_lab_lock);
++	return err;
++}
++
++static int wgfp_lab_cfg_get(char *buf, const struct kernel_param *kp)
++{
++	return scnprintf(buf, PAGE_SIZE, "%s sealed=%lld\n", wgfp_lab_cfg,
++			 (long long)atomic64_read(&wgfp_lab_state.counter));
++}
++
++static const struct kernel_param_ops wgfp_lab_ops_param = {
++	.set = wgfp_lab_cfg_set,
++	.get = wgfp_lab_cfg_get,
++};
++module_param_cb(wgfp_lab, &wgfp_lab_ops_param, NULL, 0600);
++MODULE_PARM_DESC(wgfp_lab, "DPAA fast path lab seal (P2a): see fastpath.c; \"off\" disables");
++
++void wg_fastpath_uninit(void)
++{
++	mutex_lock(&wgfp_lab_lock);
++	wgfp_lab_stop();
++	mutex_unlock(&wgfp_lab_lock);
++}
+diff --git a/drivers/net/wireguard/fastpath.h b/drivers/net/wireguard/fastpath.h
+new file mode 100644
+index 000000000000..dfc943ce90d6
+--- /dev/null
++++ b/drivers/net/wireguard/fastpath.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _WG_FASTPATH_H
++#define _WG_FASTPATH_H
++
++#include <linux/kconfig.h>
++
++#if IS_ENABLED(CONFIG_FSL_DPAA_ETH)
++void wg_fastpath_uninit(void);
++#else
++static inline void wg_fastpath_uninit(void) { }
++#endif
++
++#endif /* _WG_FASTPATH_H */
+diff --git a/drivers/net/wireguard/main.c b/drivers/net/wireguard/main.c
+index a00671b58701..3d4bb2889c4d 100644
+--- a/drivers/net/wireguard/main.c
++++ b/drivers/net/wireguard/main.c
+@@ -9,6 +9,7 @@
+ #include "queueing.h"
+ #include "ratelimiter.h"
+ #include "netlink.h"
++#include "fastpath.h"
+ 
+ #include <uapi/linux/wireguard.h>
+ 
+@@ -62,6 +63,7 @@ static int __init wg_mod_init(void)
+ 
+ static void __exit wg_mod_exit(void)
+ {
++	wg_fastpath_uninit();
+ 	wg_genetlink_uninit();
+ 	wg_device_uninit();
+ 	wg_peer_uninit();
