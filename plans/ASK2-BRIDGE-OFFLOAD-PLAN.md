@@ -1449,3 +1449,108 @@ clear it; `br_fdb_external_learn_del()` deletes by (MAC, VID) regardless of
 port and of static/local; `br_fdb_offloaded_set()` is the only writer of
 `BR_FDB_OFFLOADED` besides `br_fdb_clear_offload()`; `br_fdb_find_port()`
 needs rtnl; `CONFIG_NETFILTER_FAMILY_BRIDGE=y`.
+
+### 13.31 B6 passed on silicon (2026-10-14, DUT .185, image 2026.10.13-2319-rolling production, commit d2311554)
+
+Boot: operator install then power cycle (cold) for the gate; the routed
+check and the soak ran after a warm `reboot`.
+
+`bin/testrig-bridge-b6.sh` (gate, cold boot):
+
+| Check | Result |
+|---|---|
+| Bridge up, no traffic | 0 records |
+| Warm v4+v6 both ways | 4 records: the 14-byte DA+SA+EtherType key hits on silicon |
+| v4/v6 dell1→dell2, v4 reverse | hits 20, kernel ≤ 1, peer 20: **PASS** |
+| ARP to a known MAC, unknown DA, broadcast | hits 0, kernel 20: **PASS** |
+| FDB flags | learned M1 `extern_learn offload`; VyOS `show bridge br-b6 fdb` prints `extern_learn,offload` |
+| STP disabled / isolated / vlan_filtering 1 | 0 records; restored + warm → 4: **PASS** |
+| Dynamic move (spoofed frame from M2 on eth3) | 0 records, v4 to M2 in software; M2 back on eth4 + warm → 4, hits 20: **PASS** |
+| eth3 `offload ipv4` only | 3 records; v4 hits, v6 on eth3 software, v6 on eth4 hits; back to ipv4+ipv6 + warm → 4: **PASS** |
+| Ageing, `ageing_time` 10 s, no traffic | 0 records after 25 s; traffic again → 4: **PASS** |
+| Throughput, iperf3 -P 4, 15 s | **9.41 Gbit/s at 4.3 % busy** vs 2.29 Gbit/s at 29.7 % with `bridge_offload=0` |
+| Static entry over a learned one | records stay 4, hits 20; deleting it → 0, v4 to M2 floods in software: **PASS** |
+| Teardown | 0 records, MURAM 52922, `pcd-snapshot diff` clean, 0 kernel errors |
+
+The first run's FDB-flag row failed only because the harness ran `bridge`
+without `sudo` (vbash takes it as a VyOS command); fixed, then checked by
+hand. M2 showed `offload` without `extern_learn` there because the static
+row had marked it user-added for the rest of that boot, as designed.
+
+Routed regression on the same image (`quick-20261014-0132.csv`): all 10
+cells `HW`, 9.11-9.41 Gbit/s. pppoe-up-v6 had 2,461 retransmits, so the 40 k
+in §13.28 was noise.
+
+`bin/testrig-bridge-soak.sh`, 100 cycles (warm boot): every cycle peak 66,
+after 2, MURAM 52922, 0 new kernel errors; 6,400 learned MACs churned and 10
+leave/rejoin role changes. Background iperf3 9.41 Gbit/s, dips to ~7.3 only
+in the leave/rejoin intervals. Whole-boot kernel log: 24 role changes, 0
+lockdep/WARNING/BUG/DMA-bus-error/SYNC-timeout. Teardown clean.
+
+Vendor-parity items #1 (learned MACs) and #7 (visibility) are done. Next: #4
+VLAN-aware bridging.
+
+### 13.32 B7: VLAN-aware bridging (vendor parity #4, design 2026-10-14)
+
+**B7a: the tag in the key, same-tagging pairs (no frame edit).**
+
+- Key: L2 EKFC `0x74000000` = `MACDST | MACSRC | TCI1 | ETYPE`, 16 bytes
+  `DA(6)|SA(6)|TCI(2)|ETYPE(2)`. TCI1 is EKFC bit 28, 2 B (`fman_keygen.c`,
+  spec §2 line 294, 210 reference line 439). An untagged frame should
+  extract TCI `0x0000`: F-179 zeroes `kgse_ekdv`, which selects the global
+  default register, and mainline zeroes `fmkg_gdv0r` at init. That is an
+  inference, not a measurement (the vendor's TCI1 scheme 10 carried 0
+  frames on .106), so **the B7a gate must re-prove untagged hits first**:
+  if untagged frames extract anything else, B6 untagged bridging breaks.
+  TCI includes PCP/DEI, so each PCP value of a flow is its own record.
+- With the tag in the key a record only matches frames of the VLAN it was
+  learned in, so the B3a "ingress port has no VLAN uppers" exclusion goes;
+  instead a tagged record is invalid while its ingress port has a VLAN
+  device for that VID (tagged frames for a vif never reach the bridge).
+- At `NF_BR_FORWARD` the skb carries the **egress** VLAN state:
+  `__br_forward()` runs `br_handle_vlan()` before the hook. Ingress
+  taggedness is inferred.
+  - VLAN-filtering bridge, egress untagged: assume untagged ingress, VID =
+    PVID(in); require `out` has that VID with `BRIDGE_VLAN_INFO_UNTAGGED`;
+    key TCI 0.
+  - VLAN-filtering bridge, egress tagged with VID V: require V ≠ PVID(in)
+    (V = PVID is almost always untagged → tagged, which is B7b), `out` has V
+    without `UNTAGGED`; key TCI = the tag.
+  - Non-filtering bridge: key TCI = the tag or 0; FDB VID 0.
+  - FDB lookups use the VID (`br_fdb_find_port(br, mac, vid)`).
+  - A wrong inference cannot misforward: the record is validated against
+    what the bridge does with frames carrying exactly that key, so at
+    worst it never hits and the flow stays in software.
+- 802.1ad bridges (`br_vlan_get_proto()` ≠ 0x8100) and 802.1ad tags fail
+  closed. VLAN membership/PVID changes arrive as `SWITCHDEV_PORT_OBJ_ADD/DEL`
+  on the blocking chain and kick the revalidation.
+
+**B7b: tagged ↔ untagged (pop/push).** Needs an L2-only record chain
+(vendor `fill_bridge_actions()`: `04 11 12 [42] 41 01`, no TTL opcode) with
+INSERT_L2 carrying the record's own DA/SA (fixed per record now that SA is
+in the key). The routed chain's pop, push and translate work on silicon
+since patch 0217 (RX headroom), but the emitter always adds the TTL
+opcode; B7b needs an emitter flag. Later.
+
+Gate (B7a): untagged rows of `testrig-bridge-b6.sh` unchanged; new rows on
+a non-filtering bridge with tagged frames (VID 10 both sides, hits, frames
+arrive tagged), on a VLAN-filtering bridge (access PVID 10 untagged both
+ports; trunk VID 20 tagged both ports; mixed access→trunk stays software),
+PCP 5 frames make their own record, and a vif on the ingress port for a
+learned VID removes its records.
+
+**B7a implemented (2026-10-14, not yet CI-built or board-tested).**
+`F_255.py` L2 EKFC `0x74000000`, key 16 (fresh-tarball replay 0 FATAL).
+`ask.ko`: records carry the 16-byte key, the bridge VID and the filtering
+mode they were learned under; owned entries and FDB calls carry the VID;
+the hook takes the egress 802.1Q hwaccel tag (802.1ad and in-band tags are
+skipped); `ask_bridge_vid()` applies the PVID rule above;
+`ask_bridge_vlan_ok()` requires the ingress port to stay a member of a
+tagged record's VLAN and the egress tagging to match; a tagged record is
+invalid while its ingress port has a vif for the VID; `PORT_OBJ_ADD/DEL`
+(VLAN) and `BRIDGE_VLAN_PROTOCOL` kick revalidation. The record API now
+takes the prebuilt key (`ask_hw_l2_record(port, key, fqid, add)`); debugfs
+`l2add <iif> <da> <sa> <tci> <ethertype> <oif>`. KUnit pins the 16-byte
+layout with TCI `0xa00a`. Production, debug and KUnit modules compile W=1
+clean. Harness: `testrig-bridge-b6.sh` gained the B7a rows (VLAN=0 skips),
+all harnesses count `keysz=16`.

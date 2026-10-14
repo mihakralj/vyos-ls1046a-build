@@ -114,8 +114,8 @@ int  ask_hw_offload_engage(u8 hw_port_id);
 int  ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 				bool if_engaged);
 int  ask_hw_b2_l2_engage(const char *ifname);
-int  ask_hw_b2_l2_record(const char *iifname, const u8 *da, const u8 *sa,
-			 __be16 eth_type, const char *oifname, bool add);
+int  ask_hw_b2_l2_record(const char *iifname, const u8 *key,
+			 const char *oifname, bool add);
 void ask_hw_offload_disengage(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
@@ -123,10 +123,8 @@ unsigned long ask_hw_get_enq_fe_off(void);
 struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
-int  ask_hw_l2_record(u8 hw_port_id, const u8 *da, const u8 *sa,
-		      __be16 eth_type, u32 fqid, bool add);
-int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *da, const u8 *sa,
-			   __be16 eth_type, u64 *pkts);
+int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add);
+int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
 
@@ -1218,9 +1216,10 @@ void ask_bridge_kick(void);
 void ask_bridge_forget_port(u8 hw_port_id);
 enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev);
 struct fman_pcd_fe_flow_action;
-void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, __be16 eth_type);
-int  ask_bridge_fe_action(const u8 *da, const u8 *sa, __be16 eth_type,
-			  u32 egress_tx_fqid, unsigned long enq_off,
+void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
+		    __be16 eth_type);
+int  ask_bridge_fe_action(const u8 *key, u32 egress_tx_fqid,
+			  unsigned long enq_off,
 			  struct fman_pcd_fe_flow_action *a);
 
 /* ------------------------------------------------------------------------- */

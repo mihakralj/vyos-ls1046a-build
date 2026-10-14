@@ -1,9 +1,13 @@
 #!/bin/bash
-# Bridge B6 gate (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md §13.30): learned-MAC bridge offload on .185.
-# Records are per flow (ingress port, DA, SA, EtherType) and come from forwarded traffic, so every
+# Bridge B6/B7a gate (plans/ASK2-BRIDGE-OFFLOAD-PLAN.md §13.30, §13.32): learned-MAC and
+# VLAN-aware bridge offload on .185. Records are per flow (ingress port, DA, SA, TCI, EtherType)
+# and come from forwarded traffic, so every
 # check warms the flows first. Rows: hits and misses, the FDB "offload"/"extern_learn" flags,
 # invalidation (STP, isolation, VLAN filtering, a dynamic MAC move, family mask), ageing, a static
 # entry over a learned one, then iperf3 with bridge_offload 1 vs 0 (THROUGHPUT=0 skips it).
+# B7a rows (VLAN=0 skips them): tagged frames on a non-filtering bridge (and a PCP 5 record, a vif
+# that takes the VLAN away from the bridge), then a VLAN-filtering bridge with access, trunk,
+# filtered and access->trunk (stays software) pairs.
 # Needs an ask.ko with B6, eth3/eth4 engaged at boot, a cold boot. Builds the bridge with ip(8)
 # outside the VyOS config: it deletes eth3.10/eth4.20 and the eth3/eth4 addresses, so REBOOT the
 # DUT afterwards. Static FDB entries mark their MAC as user-added until reboot (never taken over),
@@ -17,20 +21,23 @@ P=/sys/module/ask/parameters/bridge_offload; PCD=/sys/kernel/debug/fman_pcd/0; B
 FAM="sudo /usr/local/bin/vyos-offload-ask --port 0x10 family"
 
 dut(){ $DUT "$1"; }
-recs(){ dut "sudo grep -c 'keysz=14 ' $PCD/fe_ehash_stats"; }
+recs(){ dut "sudo grep -c 'keysz=16 ' $PCD/fe_ehash_stats"; }
 # chk <name> <want records>: settle, then compare the record count
 chk(){ sleep 2; r=$(recs); [ "$r" = "$2" ] && v=PASS || v=FAIL; printf '%-28s records %2s (want %s)  %s\n' "$1" "$r" "$2" "$v"; }
-hits(){ dut "sudo awk '/keysz=14 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
+hits(){ dut "sudo awk '/keysz=16 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
 k_rx(){ dut "cat /sys/class/net/$1/statistics/rx_packets"; }
 peer_rx(){ $2 "sudo ethtool -S $IF | awk '/port.rx_$1:/{print \$2}'"; }
 cpu(){ dut "head -1 /proc/stat"; }
-fdbflags(){ dut "bridge fdb show br $BR | grep -i '^$1 ' | grep -v permanent | head -1"; }
-# send <host> <src mac> <dst mac> <kind> [count]
+fdbflags(){ dut "sudo bridge fdb show br $BR | grep -i '^$1 ' | grep -v permanent | head -1"; }
+# send <host> <src mac> <dst mac> <kind> [count]; kind t<vid>[p<pcp>] = tagged IPv4
 send(){ $1 "sudo python3 -c \"from scapy.all import *
+import re
 e=Ether(dst='$3',src='$2')
+t=re.fullmatch(r't(\\d+)(?:p(\\d))?','$4')
+if t: e=e/Dot1Q(vlan=int(t[1]),prio=int(t[2] or 0))
 f={'v4':e/IP(src='10.99.77.1',dst='10.99.77.2')/UDP(sport=47001,dport=47002)/Raw(bytes(958)),
  'v6':e/IPv6(src='fd77::1',dst='fd77::2')/UDP(sport=47001,dport=47002)/Raw(bytes(38)),
- 'arp':e/ARP(hwsrc='$2',psrc='10.99.77.1',pdst='10.99.77.2')/Raw(bytes(18))}['$4']
+ 'arp':e/ARP(hwsrc='$2',psrc='10.99.77.1',pdst='10.99.77.2')/Raw(bytes(18))}['v4' if t else '$4']
 sendp(f,iface='$IF',count=${5:-$N},inter=0.01,verbose=0)\""; }
 # warm [kinds]: learn both MACs, then let the hook see each direction (dedup retries after 1 s)
 warm(){ for k in ${1:-v4 v6}; do
@@ -94,6 +101,34 @@ dut "$FAM 3 >/dev/null"; warm v6; chk "eth3 offload ipv4 ipv6 + warm" 4
 echo "== ageing (ageing_time 10 s, no traffic)"
 dut "sudo ip link set $BR type bridge ageing_time 1000"; sleep 25; chk "idle 25 s" 0
 dut "sudo ip link set $BR type bridge ageing_time 30000"; warm; chk "traffic again" 4
+
+if [ "${VLAN:-1}" = 1 ]; then
+  echo "== B7a: VLAN tags on a non-filtering bridge"
+  warm t10; chk "tagged VID 10 + warm" 6
+  row t10-hit      "$D1" $M1 $M2 t10   eth3 "$D2" unicast $N
+  row t10-reverse  "$D2" $M2 $M1 t10   eth4 "$D1" unicast $N
+  send "$D1" $M1 $M2 t10p5 2; sleep 1.2; send "$D1" $M1 $M2 t10p5 2; chk "PCP 5 is its own record" 7
+  row t10p5-hit    "$D1" $M1 $M2 t10p5 eth3 "$D2" unicast $N
+  # tagged VID 10 frames on eth3 now go to the vif, never to the bridge
+  dut "sudo ip link add link eth3 name eth3.10 type vlan id 10"; chk "vif eth3.10 added" 5
+  row t10-to-vif   "$D1" $M1 $M2 t10   eth3 "$D2" unicast 0
+  dut "sudo ip link del eth3.10"; warm t10; chk "vif removed + warm" 6
+
+  echo "== B7a: VLAN-filtering bridge (default PVID 1 untagged on both ports)"
+  dut "sudo ip link set $BR type bridge vlan_filtering 1"; chk "vlan_filtering 1" 0
+  warm; chk "access VID 1 + warm" 4
+  row v4-access    "$D1" $M1 $M2 v4    eth3 "$D2" unicast $N
+  dut "sudo bridge vlan add dev eth3 vid 20; sudo bridge vlan add dev eth4 vid 20"
+  warm t20; chk "trunk VID 20 + warm" 6
+  row t20-trunk    "$D1" $M1 $M2 t20   eth3 "$D2" unicast $N
+  row t10-filtered "$D1" $M1 $M2 t10   eth3 "$D2" unicast 0
+  # eth3 access VID 30, eth4 trunk VID 30: untagged in, tagged out needs a push (B7b)
+  dut "sudo bridge vlan add dev eth3 vid 30 pvid untagged; sudo bridge vlan add dev eth4 vid 30"
+  chk "eth3 PVID 30" 4
+  row v4-access-to-trunk "$D1" $M1 $M2 v4 eth3 "$D2" unicast 0
+  chk "access->trunk stays software" 4
+  dut "sudo ip link set $BR type bridge vlan_filtering 0"; warm; chk "vlan_filtering 0 + warm" 4
+fi
 
 if [ "${THROUGHPUT:-1}" = 1 ]; then
   echo "== throughput dell1 -> dell2 across $BR (iperf3 -P 4, 15 s)"
