@@ -1296,16 +1296,16 @@ int ask_hw_b2_l2_engage(const char *ifname)
 						       FMAN_PCD_FE_PROFILE_L2_DA);
 }
 
-/* B2: hand-arm (or remove) one DA+SA+EtherType record in @iifname's L2_DA
- * table that forwards to @oifname's no-confirm TX FQ (F-255 key, plan
- * §13.30). Process context, never with flow_block_lock held. */
-int ask_hw_b2_l2_record(const char *iifname, const u8 *da, const u8 *sa,
-			__be16 eth_type, const char *oifname, bool add)
+/* B2: hand-arm (or remove) one L2 record (@key = DA+SA+TCI+EtherType, see
+ * ask_bridge_key()) in @iifname's L2_DA table that forwards to @oifname's
+ * no-confirm TX FQ (F-255, plan §13.32). Process context, never with
+ * flow_block_lock held. */
+int ask_hw_b2_l2_record(const char *iifname, const u8 *key,
+			const char *oifname, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
 	struct net_device *dev;
-	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
 	u32 fqid = 0;
 	u8 port;
 	int rc;
@@ -1315,10 +1315,9 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da, const u8 *sa,
 	rc = ask_hw_b2_port_of(iifname, &port);
 	if (rc)
 		return rc;
-	if (!add) {
-		ask_bridge_key(key, da, sa, eth_type);
-		return fman_pcd_fe_flow_del(h->fman, port, key, sizeof(key));
-	}
+	if (!add)
+		return fman_pcd_fe_flow_del(h->fman, port, key,
+					    FMAN_PCD_FE_L2_DA_KEY_SIZE);
 
 	dev = dev_get_by_name(&init_net, oifname);
 	if (!dev)
@@ -1327,8 +1326,7 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da, const u8 *sa,
 	dev_put(dev);
 	if (rc)
 		return rc;
-	rc = ask_bridge_fe_action(da, sa, eth_type, fqid,
-				  ask_hw_get_enq_fe_off(), &a);
+	rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(), &a);
 	if (rc)
 		return rc;
 	return fman_pcd_fe_flow_add(h->fman, port, &a);
@@ -1828,15 +1826,14 @@ static struct ask_hw_port *ask_hw_l2_port(struct ask_hw_pcd *h, u8 hw_port_id)
 }
 
 /*
- * Add or remove one bridge record (DA + SA + EtherType -> @fqid) in
- * @hw_port_id's L2_DA table. h->lock makes the profile check and the table
+ * Add or remove one bridge record (@key -> @fqid) in @hw_port_id's L2_DA
+ * table. h->lock makes the profile check and the table
  * operation atomic against disengage: with no per-port table,
  * fman_pcd_fe_flow_add() would fall back to the global ROUTED table. A
  * delete on a port that is no longer L2_DA is a no-op (its table and
  * records were freed with it).
  */
-int ask_hw_l2_record(u8 hw_port_id, const u8 *da, const u8 *sa,
-		     __be16 eth_type, u32 fqid, bool add)
+int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
@@ -1845,12 +1842,11 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *da, const u8 *sa,
 	if (!h)
 		return add ? -ENODEV : 0;
 	if (add) {
-		rc = ask_bridge_fe_action(da, sa, eth_type, fqid,
-					  ask_hw_get_enq_fe_off(), &a);
+		rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(), &a);
 		if (rc)
 			return rc;
 	} else {
-		ask_bridge_key(a.key, da, sa, eth_type);
+		memcpy(a.key, key, FMAN_PCD_FE_L2_DA_KEY_SIZE);
 	}
 
 	mutex_lock(&h->lock);
@@ -1868,21 +1864,19 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *da, const u8 *sa,
 /* One record's hardware packet count (the FE writes it on every hit,
  * qdrant 2026-08-22). O(records in the port's table) under fe_lock: for the
  * bridge ageing pass only, never a per-flow stats path (2026-10-10 convoy). */
-int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *da, const u8 *sa,
-			  __be16 eth_type, u64 *pkts)
+int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
-	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
 	u64 bytes;
 	u32 ts;
 	int rc;
 
 	if (!h)
 		return -ENODEV;
-	ask_bridge_key(key, da, sa, eth_type);
 	mutex_lock(&h->lock);
 	rc = ask_hw_l2_port(h, hw_port_id) ?
-		fman_pcd_fe_flow_get_stats(h->fman, hw_port_id, key, sizeof(key),
+		fman_pcd_fe_flow_get_stats(h->fman, hw_port_id, key,
+					   FMAN_PCD_FE_L2_DA_KEY_SIZE,
 					   pkts, &bytes, &ts) : -ENODEV;
 	mutex_unlock(&h->lock);
 	return rc;

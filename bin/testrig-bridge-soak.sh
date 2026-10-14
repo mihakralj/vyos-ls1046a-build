@@ -18,10 +18,10 @@ P=/sys/module/ask/parameters/bridge_offload; PCD=/sys/kernel/debug/fman_pcd/0; B
 ERR='F-256|SYNC timed out|DMA bus error|WARNING:|BUG:|Oops|circular locking|inconsistent lock|suspicious RCU|re-engage failed'
 
 dut(){ $DUT "$1"; }
-recs(){ dut "sudo grep -c 'keysz=14 ' $PCD/fe_ehash_stats"; }
-hits(){ dut "sudo awk '/keysz=14 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
+recs(){ dut "sudo grep -c 'keysz=16 ' $PCD/fe_ehash_stats"; }
+hits(){ dut "sudo awk '/keysz=16 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
 # wait_recs <n>: poll up to 15 s for the record count; prints it
-wait_recs(){ dut "for i in \$(seq 1 60); do r=\$(sudo grep -c 'keysz=14 ' $PCD/fe_ehash_stats); [ \"\$r\" = $1 ] && break; sleep 0.25; done; echo \$r"; }
+wait_recs(){ dut "for i in \$(seq 1 60); do r=\$(sudo grep -c 'keysz=16 ' $PCD/fe_ehash_stats); [ \"\$r\" = $1 ] && break; sleep 0.25; done; echo \$r"; }
 # churn_send: one IPv4 frame from each of 32 new source MACs per dell (eth3 side 02:00:00:cc:03:xx)
 churn_send(){ for d in 3 4; do [ $d = 3 ] && h="$D1" dst=$M2 || h="$D2" dst=$M1
   $h "sudo python3 -c \"from scapy.all import *
