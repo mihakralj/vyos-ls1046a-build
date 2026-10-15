@@ -942,7 +942,18 @@ to close. A valid test needs the shortconn transit harness (hosts on 10.99.1.x v
 establish+offload a TCP flow, close it, confirm the FIN reaches conntrack); not available this session. Disposition:
 ship F-266 **dormant** (default 0, provably zero PCD writes when off — `ask_hw_tcp_punt_apply()` early-returns on
 every path when the param is off), documented as validation-pending. Still open: the transit-harness end-to-end
-test, and committing the changes.
+test.
+
+**Committed + CI-built + deployed 2026-10-15.** The depmod/disengage outage fixes, the F-266 implementation
+(dormant), the F-199 refinement, patch 0207 regeneration, test tooling and docs committed to `dpaa1` as
+`6445c74a` (fixup gate 4/4, F-266 test 12/12). CI build `38688982292` on `dpaa1` is green and produced the signed
+ISO `vyos-2026.10.15-0551-rolling` (minisig verifies against the repo pubkey). Note: the `publish` job runs only on
+`main`/`nxp-sdk*`, so a `dpaa1` build never creates a GitHub release or updates the `version.json` feed — a public
+release needs a reviewed `dpaa1 -> main` merge. The CI ISO was staged on lxc200 for operator install-testing:
+`latest.iso` and `latest.iso.minisig` both repoint to 0551, served sidecar sha matches the versioned sidecar,
+HTTP 200 at `http://192.168.1.137:8080/iso/latest.iso`. DEFERRED pending operator go-ahead: the `dpaa1 -> main`
+merge + public release, because F-266 is still end-to-end-unvalidated (ships dormant) and a release writes the
+fielded-board update feed.
 
 ## Suggested order
 
