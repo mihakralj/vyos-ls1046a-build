@@ -200,7 +200,7 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4010-clk-qoriq-ls1046a-cmux-full-range.patch
 
-# ── 4011: wireguard serial-work CPU mask (stage 2c of plans/ask2-wireguard-plan.md) ──
+# ── 4011: wireguard serial-work CPU mask (stage 2c of plans/archive/ask2-wireguard-plan.md) ──
 # WireGuard homes each peer's serial tx/rx worker on CPU
 # peer->internal_id % online_cpus, and internal_id is a global counter, so
 # the serial stage (the single-core bottleneck, about 75% of that core) lands
@@ -249,7 +249,7 @@
 # 4 tunnels because the tunnel tx re-splits the aggregates), while software
 # forwarding of plain routed TCP (offload off, 8 flows) dropped from 6.43 Gbit/s
 # (image 0350) to 5.33 (GRO on) / 6.02 (GRO off, 6 reps). See
-# plans/ask2-wireguard-plan.md 2.9.
+# plans/archive/ask2-wireguard-plan.md 2.9.
 # SKIP 4012-dpaa-rx-napi-gro-receive.patch
 
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
@@ -464,7 +464,7 @@
 # Upstream-Status: Inappropriate | Risk-Tier: B
 0219-fman-pcd-ehash-dup-key-evict.patch
 
-# ── 4016: wireguard per-flow transmit lanes (E2 of plans/ask2-wireguard-plan.md 2.18) ──
+# ── 4016: wireguard per-flow transmit lanes (E2 of plans/archive/ask2-wireguard-plan.md 2.18) ──
 # A peer has ONE in-order transmit stage (wg_packet_tx_worker): one CPU at 99%
 # while the box is 67-76% busy, which caps a single tunnel at about 1.2 Gbit/s
 # (2 tunnels 1.6, 4 tunnels 1.77). New module parameter wireguard.tx_lanes

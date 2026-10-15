@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# testrig-wireguard-multi.sh — N parallel WireGuard tunnels through the DUT (stage 2b of plans/ask2-wireguard-plan.md).
+# testrig-wireguard-multi.sh — N parallel WireGuard tunnels through the DUT (stage 2b of plans/archive/ask2-wireguard-plan.md).
 #
 # One tunnel is one outer UDP 5-tuple and one serial tx/rx stage, i.e. one core. N tunnels with distinct listen ports
 # give N serial stages that the kernel homes on different CPUs (peer id % online CPUs, consecutive ids), and N outer
