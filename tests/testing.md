@@ -215,7 +215,7 @@ node IDs, profile, namespace, package versions, staged source digest,
 preflight and per-test diagnostics. SSH keys are not included in reports.
 
 Packet delivery and throughput alone are not proof of offload. ASK2 uses
-[the performance report's methodology](../plans/ASK2-PHASE0.4-PERFORMANCE-REPORT.md),
+[the performance report's methodology](../plans/archive/ASK2-PHASE0.4-PERFORMANCE-REPORT.md),
 including real ehash hits and independent Dell NIC counters. Imported CDX
 tests retain their own native status and software-counter contracts. Do not
 apply a vendor counter's meaning to ASK2 without checking its driver.

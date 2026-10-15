@@ -30,7 +30,7 @@
 > (credentials `asktest`/`asktest123`). Both are left running/enabled for
 > reuse. Full setup, verified results (session, ~1.0 Gbit/s software-path
 > iperf2 baseline, confirmed auto-reconnect), and rationale are in
-> `plans/ASK2-PPPOE-OFFLOAD-PLAN.md` §3a — read that before touching PPPoE
+> `plans/archive/ASK2-PPPOE-OFFLOAD-PLAN-2026-10-15.md` §3a — read that before touching PPPoE
 > testing, not this document.
 
 A reproducible procedure for measuring routed IPv4 throughput and DUT CPU cost through the Mono Gateway LS1046A, comparing the Linux software flowtable against ASK2/FMan hardware offload.
