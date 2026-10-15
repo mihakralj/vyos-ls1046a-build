@@ -31,6 +31,7 @@
 struct module;
 struct net_device;
 struct flow_block_offload;
+struct rtnl_link_stats64;
 
 /**
  * struct dpaa_flow_offload_ops - external flow-offload backend hooks
@@ -40,11 +41,21 @@ struct flow_block_offload;
  * 			FLOW_BLOCK_UNBIND dance against fbo. Returns 0 on
  * 			success or a negative errno; -EOPNOTSUPP is treated
  * 			by the upper layer as 'try software fallback'.
+ * @offload_stats: invoked from dpaa_get_stats64() after the software
+ * 			per-CPU counters have been summed, so the backend
+ * 			can fold in hardware-offloaded packets/bytes that
+ * 			bypassed the kernel datapath (ASK2). The counters
+ * 			must be DISJOINT from the software path to avoid
+ * 			double counting; the backend adds into *hw, it does
+ * 			not overwrite. Runs under rcu_read_lock() from a
+ * 			non-sleeping context, so it must not sleep.
  */
 struct dpaa_flow_offload_ops {
 	struct module *owner;
 	int (*setup_tc_block)(struct net_device *dev,
 			      struct flow_block_offload *fbo);
+	void (*offload_stats)(struct net_device *dev,
+			      struct rtnl_link_stats64 *hw);
 };
 
 #if IS_ENABLED(CONFIG_FSL_DPAA)

@@ -55,23 +55,6 @@ index a56dda6fdbcd..893f80d9acc9 100644
  		}
  		if (m->psrc)
  			k->src_port = be16_to_cpu(h->psrc);
-diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-index 0d011e851aef..fa53237fa207 100644
---- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-+++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-@@ -232,10 +232,12 @@ hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
- } else {
- if (k->src_ip || k->src_ip_mask) {
- hw->src_ip_be = cpu_to_be32(k->src_ip);
-+hw->src_ip_mask_be = k->src_ip_mask ? cpu_to_be32(k->src_ip_mask) : cpu_to_be32(0xffffffffu);
- hw->present |= FMAN_PCD_CC_HW_F_SRC_IP;
- }
- if (k->dst_ip || k->dst_ip_mask) {
- hw->dst_ip_be = cpu_to_be32(k->dst_ip);
-+hw->dst_ip_mask_be = k->dst_ip_mask ? cpu_to_be32(k->dst_ip_mask) : cpu_to_be32(0xffffffffu);
- hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
- }
- }
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 index 5817343bfb51..2c270167e787 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
