@@ -1539,7 +1539,7 @@ ports; trunk VID 20 tagged both ports; mixed access→trunk stays software),
 PCP 5 frames make their own record, and a vif on the ingress port for a
 learned VID removes its records.
 
-**B7a implemented (2026-10-14, not yet CI-built or board-tested).**
+**B7a implemented and board-tested (2026-10-14, image `2026.10.14-0217-rolling`, kernel 6.18.55-vyos).**
 `F_255.py` L2 EKFC `0x74000000`, key 16 (fresh-tarball replay 0 FATAL).
 `ask.ko`: records carry the 16-byte key, the bridge VID and the filtering
 mode they were learned under; owned entries and FDB calls carry the VID;
@@ -1554,3 +1554,29 @@ takes the prebuilt key (`ask_hw_l2_record(port, key, fqid, add)`); debugfs
 layout with TCI `0xa00a`. Production, debug and KUnit modules compile W=1
 clean. Harness: `testrig-bridge-b6.sh` gained the B7a rows (VLAN=0 skips),
 all harnesses count `keysz=16`.
+
+Board result on `.185` (fresh boot, `THROUGHPUT=0` for the rows): every B6
+and B7a row passes: tagged VID 10 on a non-filtering bridge (hits both ways),
+PCP 5 is its own record, a vif for the VID on the ingress port removes its
+records and the frames go to the vif, access VID 1 and trunk VID 20 on a
+filtering bridge hit, a VID the bridge filters stays in software, static
+entries, and no PCD drift (`pcd-snapshot` clean, MURAM `used` 52922
+unchanged, 0 kernel-log errors, 0 records after teardown). Across the bridge
+(dell1→dell2, `-P 4`, 15 s): 9.41 Gbit/s with `bridge_offload=1` at 1.5 % DUT
+CPU (15.4 M hardware hits), 2.22 Gbit/s in software at 32.9 %.
+
+Two rows first failed with 2 records where the harness wanted 4 (`eth3 PVID
+30`, `access->trunk stays software`). The harness was wrong, not the module.
+Moving eth3's PVID to 30 invalidates the two eth3→eth4 untagged records (the
+VLAN becomes 30 and eth4 sends 30 tagged, a push, B7b). They were the last
+records for SA M1 on (eth3, VID 1), so `ask_bridge_sa_release()` hands that
+entry back by deleting it, as the file header says it does. The eth4→eth3
+untagged records have M1/VID 1 as their DA, so they fail revalidation and
+release M2's VID 1 entry too. Only the VID 20 tagged pair is left. M1's
+untagged frames are VLAN 30 now, so a VID 1 binding for it is stale (a stock
+bridge would age it out). Consequence to know: until the bridge relearns the
+hosts, untagged unicast to them in VID 1 is flooded (and goes through
+software), not forwarded by a record. Proven with an FDB dump taken at the
+failure (only `vlan 20` entries remained) and with probe rows
+(`v4-rev-after-pvid` 0 hits, `t20-after-pvid` 20 hits); the harness now wants
+2 records and those two probe rows.

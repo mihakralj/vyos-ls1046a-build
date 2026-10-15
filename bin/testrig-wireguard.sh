@@ -13,6 +13,15 @@
 #   "down" = dell2 sends  -> DUT decrypts (eth4 -> wg0 -> eth3)   (iperf3 -R)
 #   "bidir"= both at once
 #
+# WG_PORT=eth3 mirrors the topology: the encrypted leg runs over eth3 and the plain leg over eth4:
+#
+#   dell2 --plain--> DUT eth4 --route--> wg0 (encrypt) --UDP/51820--> DUT eth3 --> dell1 wg0 (decrypt)
+#
+#   inner:  dell2 10.99.2.113 -> 10.99.200.112 (dell1 wg0)       v6: fd99:2::113 -> fd99:200::112
+#   outer:  DUT 10.99.1.185 <-> dell1 10.99.1.112 (OUTER=6: fd99:1::185 <-> fd99:1::112)
+#   up/down keep their meaning from the DUT's side: "up" = the DUT encrypts, "down" = the DUT decrypts.
+#   Cell names get a "-eth3" suffix (wg-v4-eth3); the ceiling cell is not available in this mode.
+#
 # Cells:
 #   plain-v4     no tunnel, dell1 -> dell2 through the DUT (software/HW path reference)
 #   wg-v4        IPv4 inner through the DUT tunnel
@@ -30,6 +39,7 @@
 #   MODE=udp LEN=1280 RATE=800M bin/testrig-wireguard.sh run wg-v4
 # Env: WG_NOTRACK=1 (outer UDP untracked by conntrack, experiment)
 #      DUT_KIND=ask2|vendor   (vendor = .106 OpenWrt; RIG_NS=n106 is implied)
+#      WG_PORT=eth4|eth3 (the DUT port that carries the encrypted leg; default eth4)
 #      REPS (repeat each cell/direction, summary mean/min/max/sd), DUT, DIRS, DUR, STEADY_FROM, STREAMS, WGMTU, OUTER=4|6, MODE=tcp|udp, LEN, RATE, OUT, KEEP
 # .106 needs a WireGuard kernel module built for its exact kernel; the OpenWrt feed kmod does not match
 # the vendor kernel hash, so `check` reports that and `run` refuses until one is installed.
@@ -39,27 +49,53 @@ if [ "$DUT_KIND" = vendor ]; then DUT=${DUT:-root@192.168.1.106}; RIG_NS=${RIG_N
 else DUT=${DUT:-vyos@192.168.1.185}; RIG_NS=${RIG_NS:-}; fi
 DIRS=${DIRS:-"up down"}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}; STREAMS=${STREAMS:-4}
 REPS=${REPS:-1}; WGMTU=${WGMTU:-1420}; OUTER=${OUTER:-4}; MODE=${MODE:-tcp}; LEN=${LEN:-1280}; RATE=${RATE:-1G}
-OUT=${OUT:-/mnt/builds/ask2-review/oracle/wg-$(date +%Y%m%d-%H%M)-${DUT_KIND}.csv}
-J=${J:-/mnt/builds/ask2-review/oracle/json-wg}; mkdir -p "$J"
+# RUN_ON=dell2: stored and run on dell2 (see testrig-offload-quick.sh): dell2 commands run locally, dell1 and
+# the DUT go over ssh with dell2's ~/.ssh/vyos_key, results default to ~/testrig/out.
+RUN_ON=${RUN_ON:-agent}
+if [ "$RUN_ON" = dell2 ]; then OUTDIR=${OUTDIR:-$HOME/testrig/out}; else OUTDIR=${OUTDIR:-/mnt/builds/ask2-review/oracle}; fi
+OUT=${OUT:-$OUTDIR/wg-$(date +%Y%m%d-%H%M)-${DUT_KIND}.csv}
+J=${J:-$OUTDIR/json-wg}; mkdir -p "$J"
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 NSX="sudo"; [ -n "$RIG_NS" ] && NSX="sudo ip netns exec $RIG_NS"   # always root; netns when RIG_NS is set
 
 dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO -i $HOME/.ssh/vyos_key $DUT "$c"; }
 duti(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh $SSHO -i $HOME/.ssh/vyos_key $DUT "$c"; }   # stdin passes through
-D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
-D1I="ssh $SSHO admin@192.168.1.112";   D2I="ssh $SSHO admin@192.168.1.113"
+WG_PORT=${WG_PORT:-eth4}
+# D1 = the dell on the PLAIN leg (iperf3 client), D2 = the dell that holds the far wg0 end (iperf3 server).
+# eth4 (default): D1 = dell1, D2 = dell2. eth3: the roles swap. The ceiling cell is bound to the literal dell1/dell2 pair.
+case $WG_PORT in
+  eth4) DA=192.168.1.112; DB=192.168.1.113; PORTSUF=""
+        P4=10.99.1.112; P6=fd99:1::112; PGW4=10.99.1.185; PGW6=fd99:1::185; PSUB4=10.99.1.0/24; PSUB6=fd99:1::/64
+        TI4=10.99.200.113; TI6=fd99:200::113; O_DUT4=10.99.2.185; O_DUT6=fd99:2::185; O_T4=10.99.2.113; O_T6=fd99:2::113
+        PLAIN_SRV4=10.99.2.113 ;;
+  eth3) DA=192.168.1.113; DB=192.168.1.112; PORTSUF="-eth3"
+        P4=10.99.2.113; P6=fd99:2::113; PGW4=10.99.2.185; PGW6=fd99:2::185; PSUB4=10.99.2.0/24; PSUB6=fd99:2::/64
+        TI4=10.99.200.112; TI6=fd99:200::112; O_DUT4=10.99.1.185; O_DUT6=fd99:1::185; O_T4=10.99.1.112; O_T6=fd99:1::112
+        PLAIN_SRV4=10.99.1.112 ;;
+  *) echo "WG_PORT must be eth3 or eth4" >&2; exit 2 ;;
+esac
+rig(){   # rig <host> <ssh -n or empty>: the command prefix that runs a command on that dell
+  if [ "$RUN_ON" = dell2 ]; then
+    [ "$1" = 192.168.1.113 ] && { echo "bash -c"; return; }
+    echo "ssh $2 $SSHO -i $HOME/.ssh/vyos_key admin@$1"
+  else echo "ssh $2 $SSHO admin@$1"; fi
+}
+D1=$(rig $DA -n); D2=$(rig $DB -n)
+D1I=$(rig $DA);   D2I=$(rig $DB)
+DD1=$(rig 192.168.1.112 -n); DD2=$(rig 192.168.1.113 -n)   # literal dell1/dell2 (ceiling cell)
+DD1I=$(rig 192.168.1.112);   DD2I=$(rig 192.168.1.113)
 
 WGP=51820; WGPD=51821; IPERF_P=5231
-if [ "$OUTER" = 6 ]; then DUT_OUT=fd99:2::185; D2_OUT=fd99:2::113; EP="[$D2_OUT]:$WGP"; else DUT_OUT=10.99.2.185; D2_OUT=10.99.2.113; EP="$D2_OUT:$WGP"; fi
-# dell2 reaches the DUT's outer address on the same /24 (or /64), so no extra routes are needed for the outer leg.
+if [ "$OUTER" = 6 ]; then DUT_OUT=$O_DUT6; D2_OUT=$O_T6; EP="[$D2_OUT]:$WGP"; else DUT_OUT=$O_DUT4; D2_OUT=$O_T4; EP="$D2_OUT:$WGP"; fi
+# the far dell reaches the DUT's outer address on the same /24 (or /64), so no extra routes are needed for the outer leg.
 
 STATE=/tmp/wg-rig.state; touch $STATE 2>/dev/null
 
-# name|inner client addr (dell1)|inner server addr (dell2)|family|wg
+# name|inner client addr (plain-leg dell)|inner server addr (far wg0 end)|family|wg
 CELLS_ALL="
-plain-v4|10.99.1.112|10.99.2.113|4|none
-wg-v4|10.99.1.112|10.99.200.113|4|dut
-wg-v6|fd99:1::112|fd99:200::113|6|dut
+plain-v4|$P4|$PLAIN_SRV4|4|none
+wg-v4|$P4|$TI4|4|dut
+wg-v6|$P6|$TI6|6|dut
 ceiling-v4|10.99.201.112|10.99.201.113|4|direct
 "
 
@@ -71,23 +107,31 @@ wg_dut_up(){
   k2=$($D2 'wg genkey');  p2=$(printf '%s\n' "$k2" | $D2I 'wg pubkey')
   # dut side
   printf '%s\n' "$k1" | duti 'umask 077; cat > /tmp/wgk'
-  dut "sudo wg set wg0 private-key /tmp/wgk listen-port $WGP peer $p2 allowed-ips 10.99.200.113/32,fd99:200::113/128 endpoint $EP; rm -f /tmp/wgk"
+  dut "sudo wg set wg0 private-key /tmp/wgk listen-port $WGP peer $p2 allowed-ips $TI4/32,$TI6/128 endpoint $EP; rm -f /tmp/wgk"
   dut "sudo ip addr add 10.99.200.1/24 dev wg0; sudo ip -6 addr add fd99:200::1/64 dev wg0; sudo ip link set wg0 mtu $WGMTU up"
-  # dell2 side (in RIG_NS when set: the namespace holding the port facing the DUT)
+  # WG_THREADED=0|1 overrides wg0's threaded NAPI (6.18 defaults to 1, the vendor 6.12 kernel to 0); the value read back is printed
+  if [ -n "${WG_THREADED:-}" ]; then
+    dut "echo $WG_THREADED | sudo tee /sys/class/net/wg0/threaded >/dev/null; echo wg0 threaded=\$(cat /sys/class/net/wg0/threaded)" >&2
+  fi
+  # WG_NAPI_CPU=N pins the threaded-NAPI kthread (napi/wg0-*) of wg0 to CPU N (ASK2 only; the thread otherwise floats)
+  if [ -n "${WG_NAPI_CPU:-}" ]; then
+    dut "for p in \$(pgrep -f 'napi/wg0'); do sudo taskset -cp $WG_NAPI_CPU \$p >/dev/null; done; echo napi/wg0 pinned to cpu$WG_NAPI_CPU: \$(pgrep -f 'napi/wg0' | wc -l) thread(s)" >&2
+  fi
+  # far-dell side (in RIG_NS when set: the namespace holding the port facing the DUT)
   printf '%s\n' "$k2" | $D2I 'umask 077; cat > /tmp/wgk'
   $D2 "$NSX ip link del wg0 2>/dev/null; $NSX ip link add wg0 type wireguard &&
-       $NSX wg set wg0 private-key /tmp/wgk listen-port $WGP peer $p1 allowed-ips 10.99.200.1/32,10.99.1.0/24,fd99:200::1/128,fd99:1::/64 endpoint [$DUT_OUT]:$WGP &&
+       $NSX wg set wg0 private-key /tmp/wgk listen-port $WGP peer $p1 allowed-ips 10.99.200.1/32,$PSUB4,fd99:200::1/128,$PSUB6 endpoint [$DUT_OUT]:$WGP &&
        rm -f /tmp/wgk &&
-       $NSX ip addr add 10.99.200.113/24 dev wg0 && $NSX ip -6 addr add fd99:200::113/64 dev wg0 && $NSX ip link set wg0 mtu $WGMTU up &&
+       $NSX ip addr add $TI4/24 dev wg0 && $NSX ip -6 addr add $TI6/64 dev wg0 && $NSX ip link set wg0 mtu $WGMTU up &&
        true"
   # endpoint with brackets only valid for v6; fix for v4 outer
   if [ "$OUTER" != 6 ]; then $D2 "$NSX wg set wg0 peer $p1 endpoint $DUT_OUT:$WGP"; fi
-  # dell2 replies from its tunnel address must go back through wg0, not the plain route via the DUT
+  # the far dell's replies from its tunnel address must go back through wg0, not the plain route via the DUT
   $D2 "$NSX ip rule del priority 12100 2>/dev/null; $NSX ip -6 rule del priority 12100 2>/dev/null;
-       $NSX ip rule add priority 12100 from 10.99.200.113 lookup 200; $NSX ip route replace 10.99.1.0/24 dev wg0 table 200;
-       $NSX ip -6 rule add priority 12100 from fd99:200::113 lookup 200; $NSX ip -6 route replace fd99:1::/64 dev wg0 table 200"
-  # dell1: tunnel subnet via the DUT, route MTU pinned so no PMTUD dependency
-  $D1 "$NSX ip route replace 10.99.200.0/24 via 10.99.1.185 mtu $WGMTU; $NSX ip -6 route replace fd99:200::/64 via fd99:1::185 mtu $WGMTU"
+       $NSX ip rule add priority 12100 from $TI4 lookup 200; $NSX ip route replace $PSUB4 dev wg0 table 200;
+       $NSX ip -6 rule add priority 12100 from $TI6 lookup 200; $NSX ip -6 route replace $PSUB6 dev wg0 table 200"
+  # plain-leg dell: tunnel subnet via the DUT, route MTU pinned so no PMTUD dependency
+  $D1 "$NSX ip route replace 10.99.200.0/24 via $PGW4 mtu $WGMTU; $NSX ip -6 route replace fd99:200::/64 via $PGW6 mtu $WGMTU"
   # OpenWrt fw4: wg0 belongs to no zone, so forwarded traffic to/from it falls through to handle_reject.
   # Runtime-only accept rules (comment wgrig), removed again in teardown.
   if [ "$DUT_KIND" = vendor ]; then
@@ -106,12 +150,12 @@ wg_dut_up(){
 
 wg_direct_up(){   # dell1 <-> dell2 over enp2s0 (no DUT); root namespaces
   local k1 k2 p1 p2
-  k1=$($D1 'wg genkey'); p1=$(printf '%s\n' "$k1" | $D1I 'wg pubkey')
-  k2=$($D2 'wg genkey'); p2=$(printf '%s\n' "$k2" | $D2I 'wg pubkey')
-  printf '%s\n' "$k1" | $D1I 'umask 077; cat > /tmp/wgk'
-  printf '%s\n' "$k2" | $D2I 'umask 077; cat > /tmp/wgk'
-  $D1 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p2 allowed-ips 10.99.201.113/32 endpoint 10.99.99.113:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.112/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
-  $D2 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p1 allowed-ips 10.99.201.112/32 endpoint 10.99.99.112:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.113/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
+  k1=$($DD1 'wg genkey'); p1=$(printf '%s\n' "$k1" | $DD1I 'wg pubkey')
+  k2=$($DD2 'wg genkey'); p2=$(printf '%s\n' "$k2" | $DD2I 'wg pubkey')
+  printf '%s\n' "$k1" | $DD1I 'umask 077; cat > /tmp/wgk'
+  printf '%s\n' "$k2" | $DD2I 'umask 077; cat > /tmp/wgk'
+  $DD1 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p2 allowed-ips 10.99.201.113/32 endpoint 10.99.99.113:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.112/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
+  $DD2 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p1 allowed-ips 10.99.201.112/32 endpoint 10.99.99.112:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.113/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
   echo direct >> $STATE
 }
 
@@ -119,7 +163,7 @@ wg_direct_up(){   # dell1 <-> dell2 over enp2s0 (no DUT); root namespaces
 # counter, so the CPU rotates with every new wg0. For a controlled experiment recreate wg0 until the pegged CPU
 # observed under a short probe load equals WG_SERIAL_CPU (at most 12 attempts).
 probe_cpu(){
-  $D1 "$NSX iperf3 -c 10.99.200.113 -B 10.99.1.112 -p $IPERF_P -P 4 -t 7 -Z >/dev/null 2>&1" &
+  $D1 "$NSX iperf3 -c $TI4 -B $P4 -p $IPERF_P -P 4 -t 7 -Z >/dev/null 2>&1" &
   local p=$!; sleep 2
   dut 'grep "^cpu[0-9]" /proc/stat; sleep 3; echo --; grep "^cpu[0-9]" /proc/stat' | awk '
     /^--$/{sec=1; next}
@@ -133,7 +177,7 @@ place_serial_cpu(){
     got=$(probe_cpu)
     if [ "$got" = "$want" ]; then echo "serial tx worker placed on $want (attempt $n)"; return 0; fi
     echo "  attempt $n: serial stage on $got, want $want; recreating wg0" >&2
-    sleep 8; teardown; wg_dut_up; servers_up; $D1 "$NSX ping -c3 -W2 -I 10.99.1.112 10.99.200.113 >/dev/null 2>&1"
+    sleep 8; teardown; wg_dut_up; servers_up; $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
   done
   echo "could not place the serial stage on $want" >&2; return 1
 }
@@ -191,10 +235,21 @@ cpu_stats(){ awk '
       for(k in T1){ if(k=="cpu")continue; dd=T1[k]-T0[k]; if(dd>0){ b=100*(dd-(I1[k]-I0[k]))/dd; if(b>mx){mx=b; mc=k} } }
       printf "%.1f %.1f %.1f %d %d %s\n", busy, sirq, mx, r1["eth3"]-r0["eth3"], r1["eth4"]-r0["eth4"], mc }' "$1"; }
 
+# PROF=1: per-CPU time, per-CPU softirq counts and per-thread CPU ticks (with the CPU each thread last ran on) at the
+# start and end of the steady window, written to $J/<cell>.prof; summarise with bin/wg-prof-summary.py.
+dut_prof(){ ssh $SSHO -i $HOME/.ssh/vyos_key $DUT sh -s -- "$1" "$2" <<'EOS'
+sf=$1; w=$2
+snap(){ echo "== $(date +%s)"; grep '^cpu' /proc/stat; echo "-- softirqs"; cat /proc/softirqs; echo "-- interrupts"; cat /proc/interrupts
+        echo "-- threads"; for f in /proc/[0-9]*/task/[0-9]*/stat; do cat $f 2>/dev/null; echo; done; echo "-- end"; }
+sleep $sf; snap; sleep $w; snap
+EOS
+}
+
 hits_sum(){ awk '/^--$/{sec++; next} /^E /{ if(sec==0) a[$2]=$3; else b[$2]=$3 } END{ for(k in b){ d=((k in a)&&b[k]>=a[k])?b[k]-a[k]:b[k]; s+=d } print s+0 }' "$1"; }
 
 run_cell(){
   local name=$1 a=$2 b=$3 fam=$4 kind=$5 dir flag tag win
+  name=$name$PORTSUF   # the encrypted-leg port is part of the cell identity (CSV, JSON file names)
   local NSC="$NSX"; [ "$kind" = direct ] && NSC="sudo"   # direct pair uses root namespaces
   if ! $D1 "$NSC ping -c3 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
     printf '%-12s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,-,0,0,0,0,0,0,0,0,SKIP,-" >> "$OUT"; return
@@ -202,7 +257,7 @@ run_cell(){
   for dir in $DIRS; do
    for rep in $(seq 1 $REPS); do
     if [ "${RECREATE:-0}" = 1 ] && [ "$kind" = dut ]; then   # new wg0 = new peer id = new serial tx worker CPU (id % ncpu)
-      teardown; wg_dut_up; servers_up; $D1 "$NSX ping -c3 -W2 -I 10.99.1.112 10.99.200.113 >/dev/null 2>&1"
+      teardown; wg_dut_up; servers_up; $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
     fi
     case $dir in up) flag="";; down) flag="-R";; bidir) flag="--bidir";; esac
     win=$((DUR-STEADY_FROM-2)); tag="$name-$dir-r$rep"
@@ -226,8 +281,9 @@ sleep $sf; snap; sleep $w; snap
 EOS
     fi
     sp=$!
+    pp=""; if [ "${PROF:-0}" = 1 ]; then dut_prof $STEADY_FROM $win > "$J/$tag.prof" & pp=$!; fi
     $D1 "$NSC iperf3 -c $b -B $a -p $IPERF_P -P $STREAMS -t $DUR -i 1 -Z -J $flag $udp" > "$J/$tag.json" &
-    wait $!; wait $sp; sleep 1
+    wait $!; wait $sp; [ -n "$pp" ] && wait $pp; sleep 1
     read gbps gen xr < <(parse "$J/$tag.json")
     read busy sirq mx rx3 rx4 mc < <(cpu_stats $dut_stat)
     hw=$(hits_sum $dut_stat)
@@ -269,13 +325,14 @@ fi
 teardown
 needdut=0; needdirect=0
 for c in $WANT; do case $c in wg-*) needdut=1;; ceiling-*) needdirect=1;; esac; done
+if [ $needdirect = 1 ] && [ "$WG_PORT" != eth4 ]; then echo "the ceiling cell is bound to the dell1/dell2 pair; run it without WG_PORT" >&2; exit 2; fi
 [ $needdut = 1 ] && { wg_dut_up || { echo "DUT tunnel setup failed" >&2; exit 4; }; }
 [ $needdirect = 1 ] && wg_direct_up
 servers_up
 [ -n "${WG_SERIAL_CPU:-}" ] && [ $needdut = 1 ] && { place_serial_cpu "$WG_SERIAL_CPU" || exit 6; }
 [ "$cmd" = setup ] && { echo "tunnel up; run cells with: $0 run <cell...>"; trap - EXIT; exit 0; }
 if [ $needdut = 1 ]; then   # prime the handshake and prove the path before measuring
-  $D1 "$NSX ping -c3 -W2 -I 10.99.1.112 10.99.200.113 >/dev/null 2>&1"
+  $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
   dut 'sudo wg show wg0 latest-handshakes' | awk '{print "handshake epoch: "$2}'
 fi
 echo "ts,cell,dir,rep,gbps,retr_or_loss,dut_busy,dut_sirq,dut_maxcore,gen_cpu,dut_rx_pps,hw_hits,maxcpu" > "$OUT"

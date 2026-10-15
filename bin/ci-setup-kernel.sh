@@ -2532,6 +2532,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
+# F-266 (TCP control punt, 2026-10-15, default off): with offload_delay_ms=0
+# the FE swallows FIN/RST of offloaded TCP flows and conntrack keeps them
+# ESTABLISHED for ~7300 s. Adds fman_port_sp_attach() and exported
+# fman_pcd_tcp_ctl_punt_arm()/_disarm(): load the vendor TCP soft-parser
+# routine (tcp.flags & 7 -> HPNIA 0x500002, BMI enqueue to the default FQ) at
+# parser byte 0x40 with FMPR_RPIMAC[PEN] cleared and readback, then attach
+# the port's TCP HXS (slot 10) to label 0x20. Nothing runs until ask.ko
+# tcp_ctl_punt=1 arms an engaged port. After F-265.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_266.py" 2>&1
+    echo "### fman_pcd.c: F-266 TCP control punt (default off)"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
@@ -2653,9 +2666,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 
 # F-199 (2026-08-16, T-M7-2 S4): per-egress no-confirm TX FQ. Adds a
-# FQ_TYPE_TX_NO_CONFIRM dpaa_fq with context_a=0x1c00000080000000 (B0V=0,
-# EBD=1), exports dpaa_alloc_offload_tx_fq(), and leaves the kernel's normal
-# confirm-enabled TX FQs untouched. ask.ko caches one FQ per output netdev.
+# FQ_TYPE_TX_NO_CONFIRM dpaa_fq with SDK-validated context_a=0x9a000000c0000000
+# (supersedes 0x1c00000080000000), exports dpaa_alloc_offload_tx_fq(), and
+# leaves the kernel's normal confirm-enabled TX FQs untouched. Offload uses
+# WQ6 to share best-effort service with kernel TX, not absolute-priority WQ0.
+# ask.ko caches one FQ per output netdev.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_199.py" 2>&1
     echo "### dpaa_eth: F-199 per-egress no-confirm offload TX FQ"

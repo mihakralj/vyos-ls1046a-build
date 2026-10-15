@@ -397,3 +397,63 @@ This exact 7-entry sequence repeated 7 times (~20ms apart, ~120ms total, then st
 **Cleanup**: all original files restored and checksum-verified identical to the pre-experiment backups (`cdx.ko`/`fci.ko`/ `auto_bridge.ko`/`cmm`/`dpa_app`), the temporary `/etc/modules.d/00- fmtrace` and `/etc/init.d/05fmtrace` removed, board rebooted normally (no netboot override) back onto the stock kernel from eMMC. Verified healthy afterward: stock `cdx.ko` size restored, `cmm` running as a normal persistent daemon, 0 `rx_errors` on all five interfaces, no panic/Oops/BUG in dmesg.
 
 **If this thread continues**: get physical access to `.116` for one genuine power cycle (unplug/replug, or add a remote-controllable smart plug matching `.185`'s Hubitat setup) with `fmtrace.ko` pre-staged via the same `00-fmtrace` mechanism (already proven to work and correctly ordered), then capture cold-boot dmesg + `/proc/fmtrace` immediately. That single capture would settle 6n's "necessary but not sufficient" question directly, on real vendor hardware and code, at the exact mechanism this project's own soft-parser work has been trying to exercise. Absent that, this is a reasonable point to step back and weigh continued soft-parser investment against the fact that VLAN offload already ships via the separate CC-tree/HMTD path.
+
+## 6r. 2026-10-15: the RM's parser-memory rule, and what it means for 6n/6o; F-266 loads the TCP control punt by that rule
+
+The LS1046A DPAA reference manual (FMPR_RPIMAC description and "Parser Internal Memory" section) states two rules
+that none of the earlier loads followed:
+
+- FMPR_RPIMAC (parser block `+0x844`, CCSR `0x01AC7844`) bit 31 in RM numbering (value `0x1`) is PEN. "When
+  de-asserted, the parser stops acquiring new work from FPM dispatch." Bit 23 (value `0x100`) is PSTAT, 0 = idle.
+- "To update any portion of the parse internal memory, the parser should be stopped" by clearing PEN, and memory
+  writes "should be performed only while FMPR_RPIMAC[PSTAT] is idle". The first 2 KB of the 4 KB parser window is the
+  internal memory. Per-port HXS configuration still goes through the Port Parse Memory Direct Access registers inside
+  the per-port PCAC PSTOP/PSTAT bracket (`stop_port_hwp()`/`start_port_hwp()`), which the existing code already does.
+- At hard reset the parser is disabled and its memory zeroed; software loads configuration and soft-parser code and
+  then sets PEN.
+
+Mainline already sets PEN at boot: `hwp_init()` (`drivers/net/ethernet/freescale/fman/fman.c`, called from
+`fman_init()`) writes `HWP_RPIMAC_PEN` to `fmprrpimac` at `HWP_OFFSET 0xC7000 + 0x844`. So on `.185`:
+
+- 6o's corrected `sp_global_enable` was a 1 -> 1 write. It could not have been the missing step, and "FMPR_RPIMAC was
+  0 under mainline" (6n) only ever described the wrong address.
+- Every `sp_load` in 6i-6o wrote code RAM while PEN was 1, against the RM rule. The order was load (PEN 1) -> arm ->
+  enable (no-op) -> disable. A PEN 1 -> 0 -> 1 cycle around a load was never tried.
+- `sp_global_disable` left PEN at 0 after the 6o test. Whether `.185` RX kept flowing in that state was not recorded.
+
+This is a concrete, untested difference from the vendor, where `FM_PCD_PrsLoadSw()` refuses to run unless the parser
+is disabled (`fm_prs.c` `PrsLoadSw`: `!p_FmPcd->p_FmPcdPrs->enabled`) and `fman_prs_enable()` sets PEN afterwards. The
+vendor's load target is `p_SwPrsCode + base * 2 / 4` (u32 pointer), so label `0x20` is parser byte `0x40`; `.116`'s
+live offset table (6q) has `hdr 13 -> 0x20`, the TCP header.
+
+**F-266 (`bin/kernel-fixups/F_266.py`, default off) applies the rule to the TCP control punt** from
+`specs/reference/ask2-sp/tcp_ctl_punt.xml` (the vendor `cdx_sp.xml` TCP block, compiled by vendor `fmc --sp_only` on
+`.106`):
+
+- `fman_pcd_prs_write()`: with IRQs off, clear PEN, poll PSTAT idle (up to 1000 x 1 us), save the previous words, write
+  the 8 code words at byte `0x40`, read them back (restore the previous words on mismatch), write the saved
+  FMPR_RPIMAC back and check PEN. Timeout and mismatch fail the arm. Clearing PEN pauses parse dispatch on every port
+  for the few microseconds of the write.
+- `fman_port_sp_attach()`: read-modify-write of the port's TCP HXS `pmda[10].ssa`, setting SW_PRS_EN (`0x400`) and
+  label `0x20` and keeping init_hwp()'s short-pad-removal bit: `0x80000000` -> `0x80000420`. Readback, restore on
+  mismatch.
+- `fman_pcd_tcp_ctl_punt_arm()`/`_disarm()`: the first armed port loads the code, later ports check that it is still
+  resident, the last disarm restores the attachment and the previous code words. Exported for ask.ko. If only the
+  code-word restore fails, the port still counts as disarmed (no HXS jumps to the code any more); the saved words are
+  kept, other FMans get -EBUSY, and the next arm/last-disarm cycle retries the restore.
+- ask.ko `tcp_ctl_punt` (default 0, writable at runtime) arms every ROUTED-engaged port and disarms on write 0,
+  disengage and module unload.
+
+The routine, for `tcp.flags & 7` (FIN, SYN, RST), writes HPNIA `0x500002` (BMI enqueue to the port's default FQ) and
+ends the parse, so KeyGen and the FE never see the frame; other TCP frames return to the hard parser. The 32 bytes are
+position-dependent (absolute jump to halfword `0x2E`), have no loop, and need no parameter data.
+
+The board test therefore settles two things at once:
+
+1. Whether a load done by the RM rule makes a soft-parser routine execute under mainline. If the punt stays silent,
+   the PEN cycle is ruled out as the missing gate and suspicion moves to the HXS attach or to HPNIA semantics on this
+   driver.
+2. If it executes, whether conntrack then sees offloaded TCP flows close (`plans/ASK2-VENDOR-PARITY.md`, "Short TCP
+   flows linger in conntrack").
+
+Cold boot `.185` before the test (6q: FMan state survives a warm reboot). The test plan is in the parity plan.

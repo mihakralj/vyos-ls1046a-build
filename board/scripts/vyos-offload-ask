@@ -141,6 +141,40 @@ family() {
 disengage() {
     local port_id armed
     port_id="$(port_id_dec)"
+
+    # 0. Nothing to tear down when ask.ko is not loaded: no port can be
+    #    engaged. Failing here would fail the VyOS ethernet commit and leave
+    #    every port (eth0 management included) admin-down.
+    if [ ! -d /sys/module/ask ]; then
+        info "ask.ko not loaded; port $PORT not engaged, nothing to disengage"
+        return 0
+    fi
+
+    # The fe_port_armed bit is the per-port engagement guard (F-107). A port
+    # not listed is not engaged: skip the global flushes below, which would
+    # otherwise drop every conntrack entry on each commit touching a
+    # non-offloaded port such as eth0.
+    if [ -r "$PCD_BASE/fe_arm" ]; then
+        armed=$(grep '^Armed ports:' "$PCD_BASE/fe_arm" 2>/dev/null || true)
+        case " $armed " in
+            *" $PORT "*) ;;
+            *)
+                ( ynl_do disengage "{\"port-id\": $port_id}" ) >/dev/null 2>&1 || true
+                info "port $PORT not engaged; nothing to disengage"
+                return 0
+                ;;
+        esac
+    else
+        # Engagement state unknown (debugfs absent/unreadable). Never run the
+        # global flushes on a guess: do only the port-scoped disengage, and
+        # fail the commit if the kernel refuses it.
+        warn "$PCD_BASE/fe_arm unreadable; port-scoped disengage only, no conntrack flush"
+        ynl_do disengage "{\"port-id\": $port_id}" \
+            || die "disengage of $PORT failed and engagement state is unreadable"
+        info "DISENGAGED (state unverified)"
+        return 0
+    fi
+
     info "disengaging port $PORT..."
 
     # 1. Drop the flow records that keep the FE armed. flush-flows is the
