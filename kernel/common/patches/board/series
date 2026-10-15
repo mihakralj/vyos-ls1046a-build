@@ -14,13 +14,9 @@
 0069-dpaa-flavor-ops-hooks-xsk-wakeup-pool-setup-scaffold.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0073-dpaa-af-xdp-pool-skeleton.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0074-dpaa-af-xdp-pool-wakeup.patch
 # patch-series-cleanup (2026-09-11): squashed 0075a+0075b+0075c.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0075-dpaa-af-xdp-pool-liodn-attach-bman-seed.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0076-dpaa-af-xdp-pool-detach.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0077-dpaa-xsk-max-qbands-default.patch
 
@@ -28,10 +24,6 @@
 # 0079–0085: ethtool counters, NAPI distribution, XSK datapath
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0079-dpaa-ethtool-expose-xsk-counters.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch
 # patch-series-cleanup (2026-09-11): squashed 0082(+0082b)+0083+0084+0085.
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0082-dpaa-af-xdp-qmap-eligibility-refill-tx-zc.patch
@@ -41,8 +33,6 @@
 # patch-series-cleanup (2026-09-11): squashed 0086+0086a+0086b.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0086-dpaa-fman-caps-detection-cc-stub.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch
 # patch-series-cleanup (2026-09-11): squashed 0090+0090a.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0090-dpaa-fman-hm-stub-productive-structs.patch
@@ -117,8 +107,6 @@
 0118-fman-pcd-cc-revert-ccbs-dispatch.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0119-fman-pcd-hm-l3-forward-ops.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0120-fman-pcd-hm-nexthop-dedup.patch
 # patch-series-cleanup (2026-09-11): squashed 0121/0121a/0121c-0121l (11
 # incremental review slices) into one patch. See its header for the full
 # list of originals and the CI checkpoints used to verify byte-identical
@@ -144,8 +132,6 @@
 0137-fman-pcd-manip-create-chain.patch
 
 # ── DPAA fixups ──
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0139-dpaa-af-xdp-bman-refill-bpid-fix.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0145-dpaa-flow-offload-backend-slot.patch
 
@@ -225,18 +211,7 @@
 # Upstream-Status: Inappropriate | Risk-Tier: B
 4013-dpaa-wgfp-lab-sink-fqs.patch
 
-# ── 4014/4015: WireGuard fast path P2a, lab seal (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md) ──
-# 4014: dpaa_wgfp gets a consumer hook (include/linux/fsl/dpaa_wgfp.h):
-# dpaa_wgfp_register/unregister, dpaa_wgfp_set_egress (resolves the egress
-# port's no-confirm TX FQ), dpaa_wgfp_xmit (sync + enqueue the same buffer),
-# dpaa_wgfp_drop. 4015: wireguard/fastpath.c (built only with FSL_DPAA_ETH)
-# registers the hook when root writes a config to the wgfp_lab module
-# parameter and seals steered IPv4 frames IN PLACE with a fixed lab key into
-# WireGuard transport packets (Eth+IP+UDP+WG header written into the buffer
-# headroom), then transmits the same buffer: measures the real transmit
-# fast-path cost. Inert by default; not a usable VPN (no peer, fixed key).
 # Upstream-Status: Inappropriate | Risk-Tier: B
-4014-dpaa-wgfp-consumer-hook.patch
 4015-wireguard-dpaa-fastpath-lab.patch
 
 # ── 4012 RETIRED 2026-10-12: dpaa_eth RX default path through napi_gro_receive ──
@@ -261,8 +236,6 @@
 0158-fman-pcd-fqid-resolution-compose.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0163-fman-pcd-port-recover.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A
-0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0165-fman-pcd-fe-arm-ensure-params-page.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -478,15 +451,3 @@
 # (module signing): echo 3 > /sys/module/wireguard/parameters/tx_lanes first.
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4016-wireguard-tx-lanes.patch
-
-# 4017: P2b-1 fast path peer mode. Seals frames from the dpaa_wgfp sink queues
-# with a real peer's current keypair (receiver index, key, atomic counter),
-# honours REJECT_AFTER_*/REKEY_AFTER_MESSAGES, pads within the device MTU,
-# feeds the peer timers, builds the outer Ethernet/IPv4/UDP header from the
-# endpoint route + neighbour entry (refreshed 1/s). Off by default; enable with
-# echo "wg0 eth4" > /sys/module/wireguard/parameters/wgfp_peer. AllowedIPs are
-# not checked (only operator-steered flows arrive); undeliverable frames are
-# declined, slow-path punt is P2b-3. Compiles clean (W=1) on 6.18.55; needs a
-# CI image for board validation. Requires 4013-4015.
-# Upstream-Status: Inappropriate | Risk-Tier: C
-4017-wireguard-fastpath-peer-mode.patch
