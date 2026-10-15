@@ -33,3 +33,22 @@ EOF
 
 echo "I: 97-ask-modules.chroot: wrote $CONF"
 cat "$CONF"
+
+# Rebuild the module index for every kernel that ships ask.ko, then assert
+# it is listed. With VYOS_PERSIST_CHROOT the chroot's modules.dep can predate
+# the ask-modules install (2026-10-15, 2026.10.15-0439: modprobe ask failed on
+# first boot, no port engaged). Hooks re-run on every build, so this holds
+# whatever order the packages were installed in.
+found=0
+for dir in /lib/modules/*; do
+    [ -f "$dir/extra/ask.ko" ] || continue
+    kver=$(basename "$dir")
+    depmod -a "$kver"
+    if ! grep -q '^extra/ask\.ko:' "$dir/modules.dep"; then
+        echo "E: 97-ask-modules.chroot: ask.ko missing from $dir/modules.dep after depmod" >&2
+        exit 1
+    fi
+    echo "I: 97-ask-modules.chroot: depmod $kver, ask.ko indexed"
+    found=1
+done
+[ "$found" = 1 ] || echo "W: 97-ask-modules.chroot: no ask.ko under /lib/modules/*/extra"

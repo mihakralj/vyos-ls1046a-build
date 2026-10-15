@@ -23,7 +23,8 @@ FAM="sudo /usr/local/bin/vyos-offload-ask --port 0x10 family"
 dut(){ $DUT "$1"; }
 recs(){ dut "sudo grep -c 'keysz=16 ' $PCD/fe_ehash_stats"; }
 # chk <name> <want records>: settle, then compare the record count
-chk(){ sleep 2; r=$(recs); [ "$r" = "$2" ] && v=PASS || v=FAIL; printf '%-28s records %2s (want %s)  %s\n' "$1" "$r" "$2" "$v"; }
+chk(){ sleep 2; r=$(recs); [ "$r" = "$2" ] && v=PASS || v=FAIL; printf '%-28s records %2s (want %s)  %s\n' "$1" "$r" "$2" "$v"
+  [ $v = FAIL ] && { dut "sudo grep 'keysz=16 ' $PCD/fe_ehash_stats | cut -c1-240; sudo bridge vlan show; sudo bridge fdb show br $BR | grep -v permanent" | sed 's/^/    /'; }; return 0; }
 hits(){ dut "sudo awk '/keysz=16 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
 k_rx(){ dut "cat /sys/class/net/$1/statistics/rx_packets"; }
 peer_rx(){ $2 "sudo ethtool -S $IF | awk '/port.rx_$1:/{print \$2}'"; }
@@ -122,11 +123,17 @@ if [ "${VLAN:-1}" = 1 ]; then
   warm t20; chk "trunk VID 20 + warm" 6
   row t20-trunk    "$D1" $M1 $M2 t20   eth3 "$D2" unicast $N
   row t10-filtered "$D1" $M1 $M2 t10   eth3 "$D2" unicast 0
-  # eth3 access VID 30, eth4 trunk VID 30: untagged in, tagged out needs a push (B7b)
+  # eth3 access VID 30, eth4 trunk VID 30: untagged in, tagged out needs a push (B7b).
+  # The two eth3->eth4 untagged records die; that was the last record of SA M1 (eth3, VID 1), so
+  # its taken-over FDB entry is handed back by deleting it (ask_bridge_sa_release), which takes
+  # the eth4->eth3 untagged records (DA M1, VID 1) and then M2's entry with it. M1's untagged
+  # frames are VLAN 30 now, so a VID 1 binding for it is stale anyway. Only the VID 20 pair stays.
   dut "sudo bridge vlan add dev eth3 vid 30 pvid untagged; sudo bridge vlan add dev eth4 vid 30"
-  chk "eth3 PVID 30" 4
+  chk "eth3 PVID 30" 2
   row v4-access-to-trunk "$D1" $M1 $M2 v4 eth3 "$D2" unicast 0
-  chk "access->trunk stays software" 4
+  chk "access->trunk stays software" 2
+  row v4-rev-after-pvid "$D2" $M2 $M1 v4  eth4 "$D1" unicast 0
+  row t20-after-pvid    "$D1" $M1 $M2 t20 eth3 "$D2" unicast $N
   dut "sudo ip link set $BR type bridge vlan_filtering 0"; warm; chk "vlan_filtering 0 + warm" 4
 fi
 

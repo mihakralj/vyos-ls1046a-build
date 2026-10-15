@@ -27,11 +27,29 @@ the end says where each removed section went.
 
 ---
 
-## 1. Current state (branch `dpaa1` · diagnostic DUT `.185`: kernel `6.18.44-vyos`)
+## 1. Current state (branch `dpaa1` · diagnostic DUT `.185`: kernel `6.18.55-vyos`)
 
 ### 1.1 Position
 
-**Baseline (2026-10-09, `dpaa1` HEAD `ab1660a7`).** What ships:
+**Continuation checkpoint (2026-10-15).** Git HEAD is `797e666c`; `.185`
+runs the operator-installed local image `2026.10.14-2058-rolling`, which
+includes uncommitted changes. F-199's WQ6 starvation fix is hardware-validated
+on both egress ports (~9.41 Gbit/s, ~0.54 ms loaded ping, 10/10 TCP connects).
+The immediate correctness gate is TCP FIN/RST bypassing conntrack, not
+another starvation retest. F-266's reversible TCP control punt is implemented
+and default off; signed local candidate `2026.10.15-0439-rolling` was
+installed on `.185` and FAILS publication: its `modules.dep` predates
+`ask.ko` (no engage until a manual `depmod -a`), the offload helper's
+disengage took every port down when `ask.ko` was absent (fixed in the
+working tree), and with `tcp_ctl_punt=1` no FIN/RST of an offloaded flow
+reaches the kernel, so conntrack still lingers `ESTABLISHED`. Do not publish
+0439. Current evidence and the exact candidate provenance
+are in `plans/ASK2-VENDOR-PARITY.md`; parser evidence is in
+`specs/ask2-soft-parser-lcv-scheme-select.md` §6r. That dated checkpoint
+supersedes the older baseline below for the deployed image and immediate
+execution order.
+
+**Historical baseline (2026-10-09, `dpaa1` HEAD `ab1660a7`).** Shipping state at that date:
 
 | Capability | Shipping state |
 |---|---|
@@ -1130,4 +1148,3 @@ snapshot; section numbers in the archive equal the numbers below).
 | §6 Experiment and gate rules | kept here, verbatim |
 | §7 Environment | kept here (MTU contract and rig updated) |
 | §8 Live reference documents | kept here (live plan list updated) |
-

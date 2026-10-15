@@ -53,6 +53,21 @@ now reads `(dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM && !td_enable)`, so
 this FQ enters either the CGE/OAC branch or the TDE branch, never both. No
 other caller passes td_enable=true, so no other FQ type is affected.
 
+The A6-LOSS backlog interpretation above is historical: a later starvation
+capture had a high byte count but zero pending frames. A stale byte counter
+alone does not prove backlog or CGR failure; the WQ priority diagnosis below
+does not depend on it. Keep the established tail-drop/context settings intact.
+
+Starvation fix (2026-10-14): the allocator now sets dpaa_fq->wq = 6. The FQ is
+devm_kzalloc'd and dpaa_setup_egress() does not assign a work queue, so it sat
+on WQ0 (QMan's absolute-priority WQ) above the kernel's best-effort TX FQs
+(WQ6 via dpaa_assign_wq()). A line-rate offloaded flow therefore held
+kernel-forwarded frames to the same port for seconds (ping avg 5.4 s, TCP
+connects timing out; NXP ASK on the same rig: 0.85 ms). The original PR14z23
+design specified WQ 6; the F-199 v2 rewrite on dpaa_setup_egress dropped it.
+Already-applied trees are upgraded through a count-gated allocator anchor;
+the F-199 marker alone must not hide the older WQ0 implementation.
+
 Count-gated, idempotent (marker "F-199"); hard-fail on any source drift.
 """
 
@@ -62,6 +77,15 @@ ETH_H = "drivers/net/ethernet/freescale/dpaa/dpaa_eth.h"
 ETH_C = "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c"
 OFF_H = "include/linux/fsl/dpaa_flow_offload.h"
 changes = 0
+EGRESS_SETUP = (
+    "\tdpaa_setup_egress(priv, dpaa_fq, priv->mac_dev->port[TX],\n"
+    "\t\t\t  &dpaa_fq_cbs.egress_ern);\n"
+)
+WQ_SETUP = (
+    EGRESS_SETUP
+    + "\t/* Share best-effort WQ6 with kernel TX; WQ0 starves it. */\n"
+    "\tdpaa_fq->wq = 6;\n"
+)
 
 
 def replace(path, name, old, new):
@@ -79,9 +103,16 @@ def replace(path, name, old, new):
 
 
 with open(ETH_C) as f:
-    if "F-199" in f.read():
-        print("### F-199 already applied")
-        sys.exit(0)
+    src = f.read()
+if "F-199" in src:
+    if src.count(WQ_SETUP + "\tlist_add_tail") != 1:
+        replace(
+            ETH_C, "offload TX WQ6 on already-applied tree",
+            EGRESS_SETUP + "\tlist_add_tail",
+            WQ_SETUP + "\tlist_add_tail",
+        )
+    print("### F-199 already applied; offload TX WQ6 verified")
+    sys.exit(0)
 
 # 1. New FQ type in the enum (appended last, preserving existing values).
 replace(
@@ -212,9 +243,8 @@ replace(
     "\t * DC-portal channel with the ERN callback and TO_DCPORTAL flag,\n"
     "\t * exactly like FQ_TYPE_TX; dpaa_fq_init() then applies the\n"
     "\t * no-confirm context_a for FQ_TYPE_TX_NO_CONFIRM. */\n"
-    "\tdpaa_setup_egress(priv, dpaa_fq, priv->mac_dev->port[TX],\n"
-    "\t\t\t  &dpaa_fq_cbs.egress_ern);\n"
-    "\tlist_add_tail(&dpaa_fq->list, &priv->dpaa_fq_list);\n"
+    + WQ_SETUP
+    + "\tlist_add_tail(&dpaa_fq->list, &priv->dpaa_fq_list);\n"
     "\n"
     "\t/* A6-LOSS step 7 (2026-10-05): td_enable=true, not false. CGE/cgid\n"
     "\t * membership in priv->cgr_data.cgr.cgrid was live-proven (cgr_probe)\n"
