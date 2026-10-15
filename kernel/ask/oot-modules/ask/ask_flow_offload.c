@@ -167,13 +167,16 @@ MODULE_PARM_DESC(ipv6_hw_frag,
  * (sent for every flow of a hardware flowtable) erases them; they are not
  * erased on install, because each REPLACE reaches every bound block and all
  * of them (true ingress and egress-side echo) must judge the age against the
- * same time. 0 = offload at the first REPLACE.
+ * same time. 0 = offload at the first REPLACE. Default 0 since 2026-10-15
+ * (vendor parity: cmm offloads within the handshake, 7-14 frames reach the
+ * kernel; a delay made ASK2 forward the first ~1 s in software).
  */
-static unsigned int ask_offload_delay_ms = 500;
+static unsigned int ask_offload_delay_ms;
 module_param_named(offload_delay_ms, ask_offload_delay_ms, uint, 0644);
 MODULE_PARM_DESC(offload_delay_ms,
-		 "Minimum flow age before hardware offload, in ms (default 500; "
-		 "0 offloads at the first REPLACE)");
+		 "Minimum flow age before hardware offload, in ms (default 0: "
+		 "offload at the first REPLACE, like the vendor; a nonzero value "
+		 "delays by about a second, see the comment above)");
 
 static DEFINE_XARRAY(ask_offload_first_seen);
 
