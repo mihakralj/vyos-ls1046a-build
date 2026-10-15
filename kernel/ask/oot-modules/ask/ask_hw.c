@@ -434,6 +434,7 @@ struct ask_hw_port {
 	u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
 	bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
 	enum fman_pcd_fe_profile engaged_profile; /* valid while offload_engaged */
+	bool            tcp_punt_armed; /* F-266 TCP SYN/FIN/RST punt attached */
 };
 
 struct ask_hw_pcd {
@@ -476,6 +477,80 @@ struct ask_hw_pcd {
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
+
+/*
+ * TCP control punt (F-266, default off). With offload_delay_ms=0 the FE
+ * forwards the FIN/RST of an offloaded TCP flow in hardware, so the kernel
+ * never sees the close and conntrack keeps the entry ESTABLISHED for ~7300 s.
+ * When set, every port engaged with the ROUTED profile runs a TCP soft-parser
+ * routine that sends SYN/FIN/RST to the port's default RX FQ (the kernel),
+ * skipping KeyGen and the FE; the flowtable sees the close and tears the
+ * flow down. Writing the parameter arms or disarms ports that are already
+ * engaged. If arming fails, the port engages without the punt and logs a
+ * warning.
+ */
+static bool ask_tcp_ctl_punt;
+
+/* Caller holds h->lock, or has exclusive access to h (teardown). */
+static void ask_hw_tcp_punt_apply(struct ask_hw_pcd *h, struct ask_hw_port *p,
+				  bool want)
+{
+	int rc;
+
+	if (want == p->tcp_punt_armed)
+		return;
+	if (want)
+		rc = fman_pcd_tcp_ctl_punt_arm(h->fman, p->port_id);
+	else
+		rc = fman_pcd_tcp_ctl_punt_disarm(h->fman, p->port_id);
+	if (rc == -ENOENT && !want)
+		rc = 0;
+	if (rc) {
+		/* A failed disarm keeps the flag so the next disarm retries. */
+		ask_pr_warn("hw: TCP control punt %s on port 0x%02x failed: %d\n",
+			    want ? "arm" : "disarm", p->port_id, rc);
+		return;
+	}
+	p->tcp_punt_armed = want;
+	ask_pr_info("hw: TCP control punt %s on port 0x%02x\n",
+		    want ? "armed" : "disarmed", p->port_id);
+}
+
+static bool ask_hw_tcp_punt_wanted(const struct ask_hw_port *p)
+{
+	return READ_ONCE(ask_tcp_ctl_punt) && p->in_use && p->offload_engaged &&
+	       p->engaged_profile == FMAN_PCD_FE_PROFILE_ROUTED;
+}
+
+/*
+ * Runs under kernel_param_lock(THIS_MODULE); ask_hw_pcd_teardown() clears
+ * ask_hw_pcd_inst under the same lock, so h cannot be freed here.
+ */
+static int ask_tcp_ctl_punt_set(const char *val, const struct kernel_param *kp)
+{
+	struct ask_hw_pcd *h;
+	unsigned int i;
+	int rc = param_set_bool(val, kp);
+
+	h = ask_hw_pcd_inst;
+	if (rc || !h)
+		return rc;
+	mutex_lock(&h->lock);
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
+		if (h->port[i].in_use)
+			ask_hw_tcp_punt_apply(h, &h->port[i],
+					      ask_hw_tcp_punt_wanted(&h->port[i]));
+	mutex_unlock(&h->lock);
+	return 0;
+}
+
+static const struct kernel_param_ops ask_tcp_ctl_punt_ops = {
+	.set = ask_tcp_ctl_punt_set,
+	.get = param_get_bool,
+};
+module_param_cb(tcp_ctl_punt, &ask_tcp_ctl_punt_ops, &ask_tcp_ctl_punt, 0644);
+MODULE_PARM_DESC(tcp_ctl_punt,
+		 "Send TCP SYN/FIN/RST on ROUTED-engaged ports to the kernel so conntrack sees offloaded flows close (default 0; applies to engaged ports on write)");
 
 /* F-113: kmem_cache for struct ask_hw_flow_cookie — O(1) alloc/free
  * under heavy flow churn (50k+ active flows).  Replaces per-entry
@@ -793,7 +868,10 @@ void ask_hw_pcd_teardown(void)
 	if (!h)
 		return;
 
+	/* F-266: fence ask_tcp_ctl_punt_set(), which dereferences the instance. */
+	kernel_param_lock(THIS_MODULE);
 	ask_hw_pcd_inst = NULL;
+	kernel_param_unlock(THIS_MODULE);
 	/* P4.1: release dedicated TX FQ before draining flow cookies. */
 	if (h->dedicated_fq_ready) {
 		u32 fqid = h->dedicated_fq.fqid;
@@ -827,6 +905,8 @@ void ask_hw_pcd_teardown(void)
 	 * F-109: Use kernel API fman_pcd_fe_disengage() instead of
 	 * debugfs loopback (filp_open + kernel_write). */
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		if (h->port[i].in_use)
+			ask_hw_tcp_punt_apply(h, &h->port[i], false);	/* F-266 */
 		if (h->port[i].in_use && h->port[i].offload_engaged) {
 			fman_pcd_fe_disengage(h->fman, h->port[i].port_id);
 			h->port[i].offload_engaged = false;
@@ -1220,6 +1300,8 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		clear_bit(hw_port_id, ask_hw_port_l2);
 	else
 		set_bit(hw_port_id, ask_hw_port_l2);
+	/* F-266: optional; a failure leaves the port engaged without it. */
+	ask_hw_tcp_punt_apply(h, p, ask_hw_tcp_punt_wanted(p));
 	ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
 
 out_unlock:
@@ -1354,6 +1436,9 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 		mutex_unlock(&h->lock);
 		return;                 /* idempotent no-op */
 	}
+
+	/* F-266: undo the TCP control punt first (armed last at engage). */
+	ask_hw_tcp_punt_apply(h, p, false);
 
 	/* T-M6-8 R4c-3: tear down any VLAN CC tree fronting this port BEFORE
 	 * disengaging the FE-VM, so the CC graft never outlives the FE_ENTER
