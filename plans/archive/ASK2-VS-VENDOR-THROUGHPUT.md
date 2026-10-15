@@ -1,5 +1,10 @@
 # ASK2 vs vendor NXP ASK — routed throughput (A6)
 
+> Archived 2026-10-15. The following tables are historical 2026-10-06 results,
+> not the current baseline. Live comparison: `plans/ASK2-VENDOR-PARITY.md`.
+> The residual retransmit and VLAN-to-port performance investigations are
+> retained in `plans/ASK2-MASTER-PLAN.md`.
+
 This is the A6 gate scoreboard for `plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md` Phase 1. Re-run and
 replace the "current" tables whenever either side changes; keep the history
 table.

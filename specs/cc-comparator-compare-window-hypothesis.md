@@ -87,7 +87,7 @@ That's `SIP(4)|DIP(4)|PROTO(1)|SPORT(2)|DPORT(2)` = 13 bytes — **the identical
 
 ## 6. What this does *not* change, regardless of outcome
 
-The production scale-out decision (`plans/ASK2-MASTER-PLAN.md` §2 decision 12: ehash is SETTLED as the >32-flow scale mechanism; CC-tree scale-out is deferred, §4.4. The earlier "§3 decision 14: CC-tree, multi-node" wording is superseded — see `plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §2) is **independent of this experiment's result**:
+The production scale-out decision (`plans/archive/ASK2-MASTER-PLAN-2026-10-15.md` §2 decision 12: ehash is SETTLED as the >32-flow scale mechanism; CC-tree scale-out is deferred, §4.4. The earlier "§3 decision 14: CC-tree, multi-node" wording is superseded — see `plans/archive/ASK2-MASTER-PLAN-2026-10-09.md` §2) is **independent of this experiment's result**:
 
 - FE-VM ehash is DDR-per-frame-latency-bound to ~1.5 Gbps even with a working HIT (measured 2026-07-19) — an architectural ceiling, not a bug.
 - It is not the Linux flow-offload model (`TC Flower`/`nf_flowtable` offload is a TCAM-classifier-table abstraction — the CC-tree — not a per-frame hash lookup).

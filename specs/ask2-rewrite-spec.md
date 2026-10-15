@@ -3,7 +3,7 @@
 **[CORRECTION, 2026-08-11]** The "FE-VM ehash is a DEAD END / not the shipping datapath; CC-tree + SW flowtable is shipping" framing (v1.11) is now **superseded for the per-packet HIT path** by the 2026-08-11 qdrant discoveries, which together show the vendor's genuine production classification path IS external-hash:
 - Vendor `.106` stack (live): `cdx.ko` production path = `insert_entry_in_classif_table()` → `ExternalHashTableAddKey()` (external ehash), full arming/offload process mapped (see `arch/fman-fe-ehash.md`, `qdrant: ask-arm-offload-every-step`).
 - 999-patch HIT/PASS encoding decoded: `en_exthash_node` CC-leaf AD + `en_ehash_entry` DDR record with **16 B `t_ExtHashResult`** (per-flow MUX context + monitor stats) after the key, stats at +256 (see `arch/fman-fe-ehash.md`, `qdrant: hit-pass-flow-encoding-decoded`).
-- CC-tree classification **never produced a confirmed HIT** (`cc_test` retired; M5's 10.259 Gbps is a SW-flowtable/CC-tree *throughput* result, mechanism unresolved — see `plans/ASK2-MASTER-PLAN.md` M5).
+- CC-tree classification **never produced a confirmed HIT** (`cc_test` retired; M5's 10.259 Gbps is a SW-flowtable/CC-tree *throughput* result, mechanism unresolved — see `plans/archive/ASK2-MASTER-PLAN-2026-10-15.md` M5).
 
 **Consequences for this index (v1.12):**
 1. **The per-packet HIT path is the external ehash (FE-VM), not CC-tree.** The "DEAD END" banner below the line is retained only as historical framing; the authoritative course-corrected architecture is `plans/archive/ASK2-PRODUCTION-ARCHITECTURE.md`.

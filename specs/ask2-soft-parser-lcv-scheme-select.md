@@ -9,7 +9,7 @@
 Replicating that requires two things this driver doesn't currently have:
 
 1. **Scheme selection via the QLCV walk instead of direct-scheme addressing.** Every CC-tree consumer in this driver (`fman_pcd_kg_port_attach_cc()`, `_dual()`, `_dual_ekfc()`, and the O/H variant) calls `fman_port_set_kg_direct_scheme()`, which hardwires the port to one specific scheme index — bypassing match-vector selection entirely. There is currently no code path that lets two schemes coexist and be chosen between per-frame.
-2. **A per-frame signal that reliably differs between IPv4 and IPv6 transit traffic**, for the walk's `(QLCV & kgse_mv) == kgse_mv` test to key off. The raw per-slot hard-parser LCV mechanism (`pmda[].lcv`) is closed, proven invalid for this (`plans/ASK2-MASTER-PLAN.md` §1.3a, 2026-08-19: a full single-slot sweep on live 10G transit frames found only HXS slot 0 ever activates; slots 5/6, the documented IPv4/IPv6 slots, never do, regardless of configuration). Any design that re-derives family discrimination from `pmda[].lcv` bits is re-litigating a closed question.
+2. **A per-frame signal that reliably differs between IPv4 and IPv6 transit traffic**, for the walk's `(QLCV & kgse_mv) == kgse_mv` test to key off. The raw per-slot hard-parser LCV mechanism (`pmda[].lcv`) is closed, proven invalid for this (`plans/archive/ASK2-MASTER-PLAN-2026-10-15.md` §1.3a, 2026-08-19: a full single-slot sweep on live 10G transit frames found only HXS slot 0 ever activates; slots 5/6, the documented IPv4/IPv6 slots, never do, regardless of configuration). Any design that re-derives family discrimination from `pmda[].lcv` bits is re-litigating a closed question.
 
 ## 2. The mechanism: soft-parser `OR_IV_LCV`, not CPID
 

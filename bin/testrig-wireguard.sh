@@ -319,7 +319,7 @@ envrec(){
 }
 ENVTXT=$(envrec); echo "$ENVTXT"
 if echo "$ENVTXT" | grep -q -E "lockdep: PRESENT|PROVE_LOCKING=y|DEBUG_SPINLOCK=y"; then
-  echo "REFUSING: DUT kernel has lock debugging enabled; numbers would be invalid (plans/ask2-wireguard-plan.md 2.1)." >&2; exit 5
+  echo "REFUSING: DUT kernel has lock debugging enabled; numbers would be invalid (plans/archive/ask2-wireguard-plan.md 2.1)." >&2; exit 5
 fi
 [ "${KEEP:-0}" = 1 ] || trap teardown EXIT
 teardown
