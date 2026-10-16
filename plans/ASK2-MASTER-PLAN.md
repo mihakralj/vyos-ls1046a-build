@@ -32,6 +32,31 @@ of this planning checkpoint. Its directory, not a copied progress counter,
 is authoritative: `~/testrig/campaigns/parity-10x10-20261015T2130Z/` on dell2.
 Do not overlap it with other traffic or change rig settings while it runs.
 
+**Release smoke checkpoint, 2026-10-16:** the operator cold-booted `.185`
+on `2026.10.16-0357-rolling`, kernel `6.18.55-vyos`. Boot evidence: boot ID
+`2568c1f3`, up since 17:19:56 UTC; the previous boot's journal ends at
+17:19:42 without any shutdown sequence, which is consistent with a power cut,
+not a warm reboot or kexec. Routed, NAT and VLAN
+IPv4/IPv6 cells all forwarded in hardware at 9.152–9.282 Gbit/s.
+Policy-routing tests for both families also forwarded in hardware with a
+deliberately wrong main-table gateway. F-267 used 512-byte coherent DMA-pool
+blocks, eight per page; 64 UDP streams had zero loss. These are smoke results,
+not full scale, soak or vendor-parity acceptance.
+
+**Publication is blocked by the per-port disable gate.** Deleting both
+`interfaces ethernet eth3 offload ipv4` and `ipv6` and committing initially
+disarmed port `0x10`, but the nft hardware flowtable retained eth3/eth3.10.
+New traffic rearmed `0x10` and hardware-forwarded despite the absent CLI
+leaves: IPv4 9.326 Gbit/s and IPv6 9.198 Gbit/s. A separate IPv4 reproduction
+confirmed the absent leaves and both armed ports after traffic. The journal
+shows the pattern three times (17:37:59, 17:42:41 and 17:46:32; the latter
+two follow eth3 CLI commits): `0x10` is disengaged, then a flowtable REPLACE
+on eth3 re-engages it 2–8 s later without any commit. Restore the
+S1→S0 contract and repeat this gate before publication. The original CLI
+configuration was restored, both ports were armed, `ask-check` passed 36/36,
+and there were no kernel error-level messages at the end.
+Qdrant anchor: `2026-10-16 cold-boot 0357 release smoke: per-port disable rearm`.
+
 ### 1.2 Feature-parity blockers
 
 These rows describe missing hardware outcomes, not features the kernel
@@ -122,6 +147,17 @@ programming recipes. Resolve contradictions before touching code.
 
 ### 4.1 Measurement and correctness
 
+- **Release gate / per-port disable:** prevent new flowtable callbacks from
+  rearming a port after its last offload family is deleted. Root cause:
+  `ask_hw_port_bind()` (flowtable REPLACE) called `ask_hw_offload_engage()`,
+  whose compatibility default turned a zero family mask back into V4+V6;
+  disengage also cleared the mask only after dropping `h->lock`. Fix committed
+  2026-10-16 in `ask_hw.c`: the flow path engages only when the mask is
+  non-zero (checked under `h->lock`, `-ENODEV` = quiet SW fallback), and
+  disengage clears the mask under `h->lock` before teardown. Compile-checked
+  only; needs CI build plus the board gate. Verify both IP
+  families stay in software under new traffic, eth4 remains independently
+  usable, and explicit re-enable restores hardware forwarding.
 - **T-PARITY-10:** collect all 480 attempts; account for missing/non-HW pairs;
   publish paired mean/median/SD, CI, CPU/retransmits and per-cell verdicts in
   the scoreboard. Preserve raw data, no jitter/outlier trimming.
