@@ -7,8 +7,8 @@
 # the per-record pkt_count growth in fe_ehash_stats over the steady window, compared
 # with the data frames iperf3 reports for the same window.
 #
-# Rig: dell1 (enp1s0f0np0, .10) <-> DUT .185 eth3, dell2 (enp1s0f0np0, .20) <-> DUT .185 eth4
-# (X710 port 1; persistent config: bin/testrig-dell-net.sh).
+# Rig: gen1 "dell1" (GEN_IF, .112) <-> DUT eth3, gen2 "dell2" (GEN_IF, .113) <-> DUT eth4
+# (persistent config: bin/testrig-dell-net.sh). Hosts, key and paths: bin/testrig-env.sh.
 # NAT cells use runtime nft tables (table ask2q) masquerading out of eth4; the VyOS
 # NAT66 rule is removed for the run and restored on exit. Nothing persistent changes.
 #
@@ -19,32 +19,40 @@
 #
 # PPPoE cells enable RPS on dell1's DUT-facing NIC for the run (see rps_set); other cells leave it off.
 # Usage: bin/testrig-offload-quick.sh [cell ...]       (default: the 10 base cells)
-# Env:   DUT DUR STEADY_FROM STREAMS OUT BIDIR J SAMPLE RUN_ON OUTDIR (SAMPLE=1: ASK2 per-second conntrack+CPU sampler)
+# Env:   DUT_KIND DUT DUR STEADY_FROM STREAMS OUT BIDIR J SAMPLE RUN_ON OUTDIR (SAMPLE=1: ASK2 per-second conntrack+CPU sampler)
 set -u
-DUT=${DUT:-vyos@192.168.1.185}
+. "$(dirname "$0")/testrig-env.sh"
 DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}; STREAMS=${STREAMS:-8}
 # BIDIR=1: one client with iperf3 --bidir (both directions' streams connect before data flows);
 # Gbit/s and retransmits are the sum of both directions.
 BIDIR=${BIDIR:-0}; BIDIR_ARG=""; [ "$BIDIR" = 1 ] && BIDIR_ARG="--bidir"
-# RUN_ON=dell2: the script is stored and run on dell2 (ssh to dell1 and the DUT starts from the rig,
-# not from the agent host): dell2 commands run locally, dell1 and the DUT go over ssh with dell2's
-# own ~/.ssh/vyos_key, and results default to ~/testrig/out. Default (agent) is the old behaviour.
+# RUN_ON=gen2 (alias dell2): the script runs on gen2: gen2 commands run locally, gen1 and the DUT go
+# over ssh. Default: a separate controller reaches all three over ssh.
 RUN_ON=${RUN_ON:-agent}
-if [ "$RUN_ON" = dell2 ]; then OUTDIR=${OUTDIR:-$HOME/testrig/out}; else OUTDIR=${OUTDIR:-/mnt/builds/ask2-review/oracle}; fi
+OUTDIR=${OUTDIR:-$RIG_OUT}
 OUT=${OUT:-$OUTDIR/quick-$(date +%Y%m%d-%H%M).csv}
 J=${J:-$OUTDIR/json-quick}; mkdir -p "$J"
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
-# DUT_KIND=ask2 (.185 VyOS: sudo, HW proof = fe_ehash_stats record hits) or vendor (.106 OpenWrt
+# DUT_KIND=ask2 (VyOS: sudo, HW proof = fe_ehash_stats record hits) or vendor (OpenWrt
 # vendor ASK: root, no sudo/bash, HW proof = frames that never reach the kernel: ethtool -S
 # 'rx packets [TOTAL]', as baseline3.sh PROOF=kernelrx; the netdev rx_packets counts fast-path frames too).
-# RIG_NS=n106 runs the dell side inside the n106 netns (the X710 port facing .106).
+# DUT_KIND=opnsense (OPNsense/FreeBSD vendor ASK port: root, pf+CMM): CMM offloads pf states,
+# so the OPNsense filter must be enabled with pass rules on the test interfaces and the local
+# plugin /usr/local/etc/inc/plugins.inc.d/testrig.inc providing nat-anchor "testrig"; NAT cells
+# load that anchor at runtime and flush it on exit.
+# HW proof = packets that never reached the FreeBSD IP stack (netstat -s ip/ip6 "total packets
+# received"; the dtsec ifnet counters include fast-path frames). CPU from kern.cp_time, where
+# interrupt time is reported in the softirq column.
+# RIG_NS=$VENDOR_NS runs the generator side inside that netns (the ports facing the second DUT).
 DUT_KIND=${DUT_KIND:-ask2}; RIG_NS=${RIG_NS:-}
+DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
+rig_require GEN1; [ "$RUN_ON" = dell2 ] || rig_require GEN2
 NSX=""; [ -n "$RIG_NS" ] && NSX="sudo ip netns exec $RIG_NS"
-dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO -i $HOME/.ssh/vyos_key $DUT "$c"; }
+dut(){ local c=$1; [ "$DUT_KIND" != ask2 ] && c=${c//sudo /}; ssh -n $SSHO $RIG_SSHK $DUT "$c"; }
 S=dut
-SI="ssh $SSHO -i $HOME/.ssh/vyos_key $DUT"
-D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
-[ "$RUN_ON" = dell2 ] && { D1="ssh -n $SSHO -i $HOME/.ssh/vyos_key admin@192.168.1.112"; D2="bash -c"; }
+SI="ssh $SSHO $RIG_SSHK $DUT"
+D1="ssh -n $SSHO $RIG_SSHK $GEN1"; D2="ssh -n $SSHO $RIG_SSHK ${GEN2:-}"
+[ "$RUN_ON" = dell2 ] && D2="bash -c"
 
 # name|nat|client|bind(source) address|server address
 CELLS_ALL="
@@ -84,9 +92,25 @@ NAT66_RULE='oifname "eth4" ip6 saddr fd99:1::/64 counter masquerade comment "SRC
 vyos_nat66_present=0
 $S 'sudo nft list chain ip6 vyos_nat POSTROUTING 2>/dev/null' | grep -q SRC-NAT66-100 && vyos_nat66_present=1
 
-nat_clear(){ $S 'sudo nft delete table ip ask2q 2>/dev/null; sudo nft delete table ip6 ask2q 2>/dev/null; true'; }
+pf_nat(){ $S "printf '%s\\n' '$1' | pfctl -q -a testrig -f -"; }
+nat_clear(){
+  if [ "$DUT_KIND" = opnsense ]; then $S 'pfctl -q -a testrig -F nat 2>/dev/null; true'; return; fi
+  $S 'sudo nft delete table ip ask2q 2>/dev/null; sudo nft delete table ip6 ask2q 2>/dev/null; true'; }
 nat_set(){
   nat_clear
+  if [ "$DUT_KIND" = opnsense ]; then
+    case $1 in
+      none) ;;
+      4) pf_nat 'nat on dtsec4 inet from 10.99.1.0/24 to any -> 10.99.2.185' ;;
+      4r) pf_nat 'nat on dtsec3 inet from 10.99.2.0/24 to any -> 10.99.1.185' ;;
+      4v) pf_nat 'nat on vlan02 inet from 10.99.10.0/24 to any -> 10.99.20.185' ;;
+      6) pf_nat 'nat on dtsec4 inet6 from fd99:1::/64 to any -> fd99:2::185' ;;
+      6r) pf_nat 'nat on dtsec3 inet6 from fd99:2::/64 to any -> fd99:1::185' ;;
+      6v) pf_nat 'nat on vlan02 inet6 from fd99:10::/64 to any -> fd99:20::185' ;;
+      *) echo "NAT mode $1 not supported on opnsense" >&2; return 1 ;;
+    esac
+    return
+  fi
   case $1 in
     4) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2q post oifname eth4 ip saddr 10.99.1.0/24 masquerade' ;;
     4p) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2q post oifname pppoe10 ip saddr 10.99.2.0/24 masquerade' ;;
@@ -100,8 +124,8 @@ nat_set(){
 # dell1's mlx4 NIC cannot RSS-hash PPPoE frames, so every returning ACK lands on RX queue 0 / CPU0
 # and the whole TCP send path runs in that one softirq (about 5.9 Gbit/s ceiling, DUT idle).
 # RPS hashes on the inner flow instead. Runtime-only; applied for PPPoE cells, restored on exit.
-D1_IF=${D1_IF:-enp1s0f0np0}
-[ -n "$RIG_NS" ] && D1_IF=${D1_IF_NS:-enp1s0f1np1}   # the dell1 port facing .106 lives in the netns; sysfs shows it only from inside
+D1_IF=${D1_IF:-$GEN_IF}
+[ -n "$RIG_NS" ] && D1_IF=${D1_IF_NS:-$GEN_IF_NS}   # the gen1 port facing the second DUT lives in the netns; sysfs shows it only from inside
 rps_set(){
   local m=0
   [ "$1" = on ] && m='$(printf %x $(( (1<<$(nproc)) - 1 )))'
@@ -159,7 +183,18 @@ for line in $CELLS_RUN; do
   fi
   case $name in *pppoe*) rps_set on ;; *) rps_set off ;; esac
   tag="$name"; [ "$BIDIR" = 1 ] && tag="$name-bidir"
-  if [ "$DUT_KIND" = vendor ]; then
+  if [ "$DUT_KIND" = opnsense ]; then
+  if ! $S 'pfctl -si | grep -q "Status: Enabled" && pfctl -sn | grep -q "nat-anchor \"testrig\"" && pfctl -sr | grep -q "pass in quick on dtsec3 inet6"'; then
+    echo "ERROR: OPNsense pf with testrig rules/anchor is not active on the DUT" >&2
+    exit 1
+  fi
+  $SI sh -s -- $STEADY_FROM $((DUR-STEADY_FROM-2)) > /tmp/quick.stat <<'EOS' &
+sf=$1; w=$2
+cpu(){ set -- $(sysctl -n kern.cp_time); echo "cpu $1 $2 $3 $5 0 0 $4 0 0 0"; }   # user nice sys idle iowait irq softirq(=intr)
+rx(){ netstat -s -p ip | awk '/total packets received/{print "K ip", $1}'; netstat -s -p ip6 | awk '/total packets received/{print "K ip6", $1}'; }
+sleep $sf; cpu; rx; sleep $w; cpu; rx
+EOS
+  elif [ "$DUT_KIND" = vendor ]; then
   $SI sh -s -- $STEADY_FROM $((DUR-STEADY_FROM-2)) > /tmp/quick.stat <<'EOS' &
 sf=$1; w=$2
 rx(){ for i in eth3 eth4; do ethtool -S $i | awk -v i=$i '/rx packets \[TOTAL\]/{print "K", i, $NF}'; done; }   # SDK: frames handed to the kernel
@@ -198,7 +233,7 @@ EOS
   # per-record delta: records aged out inside the window must not cancel growth elsewhere
   hw=$(awk '/^cpu /{sec++; next} /^E /{if(sec==1) a[$2]=$3; else b[$2]=$3} END{for(k in b){d=((k in a) && b[k]>=a[k]) ? b[k]-a[k] : b[k]; s+=d}; print s+0}' /tmp/quick.stat)
   est=$(awk -v g="$gbps" -v w="$win" 'BEGIN{printf "%d", g*1e9/8/1448*w}')
-  if [ "$DUT_KIND" = vendor ]; then   # frames the kernel never saw were forwarded by the fast path
+  if [ "$DUT_KIND" != ask2 ]; then   # frames the kernel never saw were forwarded by the fast path
     krx=$(awk '/^cpu /{sec++; next} /^K /{if(sec==1) a[$2]=$3; else b[$2]=$3} END{for(k in b) s+=b[k]-a[k]; print s+0}' /tmp/quick.stat)
     hw=$(( est > krx ? est - krx : 0 ))
   fi
