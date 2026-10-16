@@ -107,32 +107,59 @@ promise that every packet is always visible to Suricata.
 
 ## 6. Deployment model
 
-### Inline routed mode (primary target)
+### Hybrid inspection-driven local action model (primary target)
 
-This is the first deployment target.
+The most important distinction is that the practical ASK2/Suricata design is not
+best described as pure inline or pure passive. It is a hybrid model:
 
-- Suricata is configured under the normal VyOS service tree.
-- The router keeps doing regular routed forwarding.
-- ASK2 handles the established bulk traffic after the machine learns the flow.
-- Suricata remains the inspection and logging policy authority.
+- inspection can happen on the normal routed path, or through a mirrored/monitored
+  path such as SPAN, TAP or a local bridge-assisted observation path
+- the inspection result is fed back into the router's local control plane
+- the router then changes local forwarding/offload state for the relevant flow or
+  flow class via ASK2
+- the result is a local action on the Mono GW rather than passive logging alone
+
+This is the key to making it IPS-shaped rather than merely IDS-like.
+
+The router still does normal local policy decisions, but traffic that is observed
+as suspicious, interesting, or approved for bulk handling can cause a local
+flow-state change on the gateway. In other words, inspection is not merely a
+monitor; it becomes the trigger for local enforcement or fast-path installation.
+
+### Inline routed mode
+
+Inline routed mode is one end of the spectrum. It is the cleanest case when the
+router is directly in the forwarding path and can make a local decision on the
+traffic it sees.
 
 ### Passive / SPAN / tap mode
 
-This is not the first target. Passive visibility is useful, but it does not align
-with the hardware offload path in the same way as inline routed traffic does.
-The real first pass is routed inline mode, because that exercises the same path
-that the router actually forwards on.
+Passive monitoring is the other extreme. This is still useful for visibility,
+forensics, and rule tuning, but by itself it does not change local forwarding
+state. It becomes part of the hybrid model only when the observed inspection
+result is translated into a local policy action on the router.
+
+The real first target is therefore the hybrid model: inspection data from either
+local inline traffic or mirrored traffic influences a local ASK2 flow decision on
+this gateway, without requiring a fully custom or fully passive-only deployment.
 
 ## 7. Interaction points and boundaries
 
-The ASK2/Suricata boundary should be intentionally small:
+The ASK2/Suricata boundary should be intentionally small, but the important
+point is that the boundary is not just a passive log feed. It is a control-plane
+interaction:
 
 - Suricata config remains native VyOS config under `service suricata`
+- monitored or mirrored traffic feeds the inspection decision
+- the inspection result is translated into a local gateway action
 - flow handoff is controlled by the ASK2 flow install path
 - flow teardown happens on timeout, close, or policy invalidation
 - EVE logging remains the same Suricata logging model
 - ASK2 only acts on the flow subset the policy and inspection path explicitly
   approves for hardware handling
+
+This is the hybrid IPS-shaped behavior: local observation turns into local action,
+not passive-only monitoring.
 
 ## 8. Engineering constraints that matter
 
@@ -162,10 +189,16 @@ not a blanket replacement of the Suricata service model.
 
 ## 10. Bottom line
 
-This is a practical IDS/IPS design for the LS1046A: keep Suricata as the
-inspection and logging authority and use ASK2 only for the established traffic
-that has already passed the policy gate.
+This is a practical IDS/IPS-shaped design for the LS1046A, but the important
+nuance is that it is a hybrid model rather than a pure inline or pure passive
+deployment.
+
+Keep Suricata as the inspection and logging authority, and let it influence the
+local gateway's forwarding/offload state through the router's control plane. ASK2
+then handles the established traffic that has already passed the relevant policy
+and inspection gate.
 
 That keeps the implementation compatible with the documented VyOS service model,
-uses the existing ASK2 flow-offload architecture, and avoids creating an
-unsupported second control plane.
+uses the existing ASK2 flow-offload architecture, and preserves the real
+performance advantage: local inspection results can drive local fast-path action
+without inventing a bespoke second control plane.
