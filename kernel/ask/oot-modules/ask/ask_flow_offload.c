@@ -58,6 +58,7 @@
 #include <net/neighbour.h>
 #include <net/netevent.h>
 #include <net/ipv6.h>
+#include <net/netfilter/nf_conntrack.h>
 #include <net/route.h>		/* rt_nexthop(): routed-endpoint next hop */
 #include <net/ip6_route.h>	/* rt6_nexthop() */
 #include <net/addrconf.h>
@@ -1793,7 +1794,10 @@ static int ask_parse_action(struct flow_cls_offload *f,
 /* ------------------------------------------------------------------------- */
 
 static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
-				   struct net_device **out_iif)
+				   struct net_device **out_iif,
+				   u8 *out_direct_dst_mac,
+				   u8 *out_direct_src_mac,
+				   bool *out_direct)
 {
 	struct flow_offload_tuple *t;
 	struct flow_offload_tuple_rhash *rh;
@@ -1803,6 +1807,12 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 
 	if (out_iif)
 		*out_iif = NULL;
+	if (out_direct_dst_mac)
+		eth_zero_addr(out_direct_dst_mac);
+	if (out_direct_src_mac)
+		eth_zero_addr(out_direct_src_mac);
+	if (out_direct)
+		*out_direct = false;
 
 	if (!cookie)
 		return 0;
@@ -1860,11 +1870,31 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 				  other->src_v4.s_addr);
 
 	/*
-	 * VLAN/bridge egress flows use FLOW_OFFLOAD_XMIT_DIRECT and carry no
-	 * dst_cache: ask the routing table for the gateway instead.
+	 * Hardware flowtables use FLOW_OFFLOAD_XMIT_DIRECT and discard the
+	 * dst_cache. The kernel has already resolved the policy-aware next-hop
+	 * MAC into out.h_dest; use that MAC rather than resolving the gateway
+	 * again through an unrelated main-table route. The retained tuple gives
+	 * us the source, input/output interfaces and conntrack mark for the
+	 * auxiliary route lookup below; the packet mark itself is not retained.
 	 */
+	if (t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT) {
+		if (out_direct)
+			*out_direct = true;
+		if (out_direct_dst_mac)
+			ether_addr_copy(out_direct_dst_mac, t->out.h_dest);
+		if (out_direct_src_mac)
+			ether_addr_copy(out_direct_src_mac, t->out.h_source);
+	}
+
 	if (t->l3proto == NFPROTO_IPV4) {
-		struct flowi4 fl4 = { .daddr = other->src_v4.s_addr };
+		struct flowi4 fl4 = {
+			.saddr = t->src_v4.s_addr,
+			.daddr = other->src_v4.s_addr,
+			.flowi4_oif = t->ifidx,
+			.flowi4_iif = t->iifidx,
+			.flowi4_mark = READ_ONCE(flow->ct->mark),
+			.flowi4_flags = FLOWI_FLAG_ANYSRC,
+		};
 		struct rtable *rt = ip_route_output_key(&init_net, &fl4);
 
 		if (!IS_ERR(rt)) {
@@ -1888,7 +1918,10 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
  */
 static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
 				 struct net_device **out_iif,
-				 struct in6_addr *out_nh)
+				 struct in6_addr *out_nh,
+				 u8 *out_direct_dst_mac,
+				 u8 *out_direct_src_mac,
+				 bool *out_direct)
 {
 	struct flow_offload_tuple *t;
 	struct flow_offload_tuple_rhash *rh;
@@ -1898,6 +1931,12 @@ static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
 
 	if (out_iif)
 		*out_iif = NULL;
+	if (out_direct_dst_mac)
+		eth_zero_addr(out_direct_dst_mac);
+	if (out_direct_src_mac)
+		eth_zero_addr(out_direct_src_mac);
+	if (out_direct)
+		*out_direct = false;
 	if (!cookie || !out_nh)
 		return false;
 
@@ -1936,13 +1975,29 @@ static bool ask_z11_other_src_v6(unsigned long cookie, int *out_dir,
 		*out_nh = *rt6_nexthop((const struct rt6_info *)t->dst_cache,
 				       &other->src_v6);
 	else if (t->l3proto == NFPROTO_IPV6) {
-		struct flowi6 fl6 = { .daddr = other->src_v6 };
+		struct flowi6 fl6 = {
+			.daddr = other->src_v6,
+			.saddr = t->src_v6,
+			.flowi6_oif = t->ifidx,
+			.flowi6_iif = t->iifidx,
+			.flowi6_mark = READ_ONCE(flow->ct->mark),
+			.flowi6_flags = FLOWI_FLAG_ANYSRC,
+		};
 		struct dst_entry *dst = ip6_route_output(&init_net, NULL, &fl6);
 
 		if (dst && !dst->error)
 			*out_nh = *rt6_nexthop(dst_rt6_info(dst),
 					       &other->src_v6);
 		dst_release(dst);
+	}
+
+	if (t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT) {
+		if (out_direct)
+			*out_direct = true;
+		if (out_direct_dst_mac)
+			ether_addr_copy(out_direct_dst_mac, t->out.h_dest);
+		if (out_direct_src_mac)
+			ether_addr_copy(out_direct_src_mac, t->out.h_source);
 	}
 	return true;
 }
@@ -2677,6 +2732,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	struct ask_flow_key key;
 	__be32 dst_ip = 0;
 	struct in6_addr dst_ip6 = {};   /* T-M6-1: v6 next-hop for neigh resolve */
+	u8 direct_dst_mac[ETH_ALEN] = {};
+	u8 direct_src_mac[ETH_ALEN] = {};
+	bool direct_mac = false;
 	bool is_v6;
 	u32 hw_id = 0;
 	u32 action_flags = 0;
@@ -2985,7 +3043,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			struct in6_addr z11_nh6;
 
 			if (ask_z11_other_src_v6((unsigned long)f->cookie,
-						 NULL, &z11_iif, &z11_nh6) &&
+						 NULL, &z11_iif, &z11_nh6,
+						 direct_dst_mac,
+						 direct_src_mac,
+						 &direct_mac) &&
 			    !ipv6_addr_any(&z11_nh6)) {
 				dst_ip6 = z11_nh6;
 				if (z11_iif) {
@@ -3000,7 +3061,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			__be32 z11_dst;
 
 			z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
-						       NULL, &z11_iif);
+						       NULL, &z11_iif,
+						       direct_dst_mac,
+						       direct_src_mac,
+						       &direct_mac);
 			if (z11_dst != 0) {
 				dst_ip = z11_dst;
 				if (z11_iif) {
@@ -3011,6 +3075,11 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						    f->cookie, &z11_dst,
 						    egress_dev ? netdev_name(egress_dev) : "?");
 			}
+		}
+		if (direct_mac && is_zero_ether_addr(direct_dst_mac)) {
+			pr_info_ratelimited("ask: flow_offload: DIRECT tuple has no resolved destination MAC cookie=0x%lx — SW fallback\n",
+					    f->cookie);
+			return -EAGAIN;
 		}
 	}
 
@@ -3228,6 +3297,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	if (pppoe == ASK_PPPOE_ENCAP) {
 		ether_addr_copy(key.next_hop_mac, pppoe_info.peer_mac);
 		ether_addr_copy(key.egress_mac, pppoe_info.src_mac);
+	} else if (direct_mac) {
+		ether_addr_copy(key.next_hop_mac, direct_dst_mac);
+		if (!is_zero_ether_addr(direct_src_mac))
+			ether_addr_copy(key.egress_mac, direct_src_mac);
 	}
 
 	/*
