@@ -37,6 +37,12 @@ set interfaces ethernet eth<n> offload ipv6
 | Side effects | Forces RPS on the port and enables `hw-tc-offload`. |
 | Validation | Commit fails if the helper `/usr/local/bin/vyos-offload-ask` is missing/errors, or if the MTU is outside **1280–3600**. |
 
+The ISO's factory default config (`board/vyos-config/config.boot.dhcp`, installed as
+`/opt/vyatta/etc/config.boot.default`) ships with `offload ipv4` and `offload ipv6`
+on eth1–eth4 (not eth0, the management port), plus the hardware flowtable `FT`
+over eth1–eth4, IPv4 and IPv6 forward rule 10 `action offload`, and
+`hardware-offload-delay 500` shown below. Delete them to boot without hardware offload.
+
 Engaging a port only arms it. Routed flows are learned **only** from a hardware
 flowtable (next section); bridged traffic uses static FDB entries instead (see
 "Bridge offload" below). An engaged port with neither offloads nothing.
@@ -51,12 +57,12 @@ set firewall ipv4 forward filter rule 10 action offload
 set firewall ipv4 forward filter rule 10 offload-target FT
 set firewall ipv4 forward filter rule 10 state established
 set firewall ipv4 forward filter rule 10 state related
-set firewall global-options hardware-offload-delay 500   # verify path with: set firewall global-options ?
+set firewall global-options hardware-offload-delay 500
 ```
 
 * `action offload` is non-terminal: an earlier `accept` rule matching established
   traffic in the same chain shadows it (commit warns for global state-policy accepts, patch `038`).
-* `hardware-offload-delay` (patch `055`): minimum flow age in ms, `0–60000`, default `500`.
+* `hardware-offload-delay` (patch `055`): minimum flow age in ms, `0–60000`, default `0` (offload at once). It writes `/sys/module/ask/parameters/offload_delay_ms`.
 * Flowtable MTU guard (`037`) mirrors the 1280–3600 range; VLAN sub-interfaces are handled when the parent is listed (`043`).
 * Add the same flowtable rule for `ipv6` for IPv6 flows.
 

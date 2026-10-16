@@ -1,3 +1,40 @@
+firewall {
+    flowtable FT {
+        interface eth1
+        interface eth2
+        interface eth3
+        interface eth4
+        offload hardware
+    }
+    global-options {
+        hardware-offload-delay 500
+    }
+    ipv4 {
+        forward {
+            filter {
+                rule 10 {
+                    action offload
+                    offload-target FT
+                    state established
+                    state related
+                }
+            }
+        }
+    }
+    ipv6 {
+        forward {
+            filter {
+                rule 10 {
+                    action offload
+                    offload-target FT
+                    state established
+                    state related
+                }
+            }
+        }
+    }
+}
+
 system {
     host-name vyos
     login {
@@ -69,6 +106,10 @@ interfaces {
     ethernet eth2 {
         address dhcp
         description "RJ45 right"
+        offload {
+            ipv4
+            ipv6
+        }
     }
     ethernet eth0 {
         address dhcp
@@ -77,14 +118,26 @@ interfaces {
     ethernet eth1 {
         address dhcp
         description "RJ45 center"
+        offload {
+            ipv4
+            ipv6
+        }
     }
     ethernet eth3 {
         address dhcp
         description "SFP+ left"
+        offload {
+            ipv4
+            ipv6
+        }
     }
     ethernet eth4 {
         address dhcp
         description "SFP+ right"
+        offload {
+            ipv4
+            ipv6
+        }
     }
 }
 
