@@ -920,12 +920,15 @@ scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
 # backend is present at FMan bring-up and patch 0134's
 # caam_qi_ext_consumer_register/_release are compiled-in + EXPORT_SYMBOL_GPL'd
 # (a =m caam_jr would force fragile module load-order coupling with ask.ko).
-# CONFIG_CRYPTO_DEV_FSL_CAAM_QI is the symbol that actually compiles qi.c — the
-# patch's edits and exports live there; the original 5-symbol plan omitted it.
+# CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI is the symbol that compiles qi.c
+# (caam_jr-$(..._CRYPTO_API_QI) += qi.o); the patch's edits and exports live
+# there. It defaults to y with CRYPTO_API + FSL_DPAA; pin it so a defconfig
+# change cannot drop it. (CONFIG_CRYPTO_DEV_FSL_CAAM_QI does not exist.)
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_COMMON y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_JR y
-scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_QI y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_DESC y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_AHASH_API_DESC y
 scripts/config --disable CONFIG_DEBUG_PREEMPT

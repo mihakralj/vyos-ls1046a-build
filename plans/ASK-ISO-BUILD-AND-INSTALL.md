@@ -6,10 +6,13 @@
 > **Single-image model (2026-06-14):** the historical per-flavor `FLAVOR=ask`
 > build path has been **retired**. There is now **one** ISO
 > (`vyos-<version>-LS1046A-arm64.iso`) that ships every dataplane — mainline
-> DPAA, VPP AF_XDP, and (once it lands) a dormant `ask.ko`. Install that one
-> image and **enable ASK at runtime** per interface with
-> `set interfaces ethernet eth<n> offload ask` (per-interface CLI contract,
-> 2026-07-19 — supersedes the retired `set system offload ask` global knob). Where the
+> DPAA, VPP AF_XDP and `ask.ko`. Install that one image and **enable ASK at
+> runtime** per interface and IP family with
+> `set interfaces ethernet eth<n> offload ipv4|ipv6` (there is no `ask` keyword;
+> supersedes the retired `set system offload ask` global knob). Since
+> 2026-10-16 the factory default config enables `offload ipv4 ipv6` on eth1–eth4
+> plus a hardware flowtable; this applies only to fresh installs and live boots,
+> and `add system image` keeps the existing config (see `CLI-AND-TOOLS.md`). Where the
 > text below historically said "build a `FLAVOR=ask` ISO", read "build the
 > single image"; where it said `latest-ask.iso`, read `latest.iso`.
 
@@ -31,7 +34,8 @@ End-to-end recipe, three stages:
 - Publish it to the LXC 200 HTTP relay.
 - Install it on the running LS1046A board via `add system image <url>`, then
   enable the offload at runtime per interface with
-  `set interfaces ethernet eth<n> offload ask`.
+  `set interfaces ethernet eth<n> offload ipv4|ipv6` (already on for eth1–eth4
+  in the factory default config of fresh installs).
 
 **[SPEC]**
 - The HTTP relay on LXC 200 is a systemd service (`tftp-http.service`, rooted at `/srv/tftp/`, listening on `:8080`).
@@ -57,8 +61,10 @@ add system image http://192.168.1.137:8080/iso/vyos-<version>-LS1046A-arm64.iso
 set system image default-image vyos-<version>-LS1046A-arm64
 reboot
 
-# Enable the ASK offload at runtime (once the ask.ko component lands):
-set interfaces ethernet eth3 offload ask
+# Enable the ASK offload at runtime on an upgraded config (fresh installs
+# already carry it on eth1-eth4; the flowtable is in CLI-AND-TOOLS.md):
+set interfaces ethernet eth3 offload ipv4
+set interfaces ethernet eth3 offload ipv6
 commit ; save
 ```
 
@@ -185,7 +191,7 @@ What it does, in order:
    - `ci-setup-vyos1x.sh` (patches vyos-1x)
    - `ci-setup-kernel.sh` (kernel config + patches + Mono DTB)
    - `ci-compile-mono-dtb.sh`
-   - `ci-setup-vyos-build.sh` (stages the single image's chroot; the ASK2 offload ships dormant until the spec components land — `set interfaces ethernet eth<n> offload ask` is a no-op until then)
+   - `ci-setup-vyos-build.sh` (stages the single image's chroot; installs `board/vyos-config/config.boot.dhcp` as the factory `config.boot.default`, which enables `offload ipv4 ipv6` on eth1–eth4)
    - `ci-build-packages.sh` (kernel + vyos-1x)
    - `ci-pick-packages.sh`
    - `ci-install-extra-packages.sh`
@@ -254,7 +260,7 @@ ssh vyos sudo /tmp/ask-check
 **[SPEC]**
 What should change once ASK is engaged:
 
-| Probe | offload disabled (default) | offload engaged (`set interfaces ethernet eth<n> offload ask`) |
+| Probe | offload disabled | offload engaged (`set interfaces ethernet eth<n> offload ipv4\|ipv6`) |
 |---|---|---|
 | `caam_qi_ext_consumer_register` in kallsyms | absent | **present** (patch 0001) |
 | `ethtool -k eth0 \| grep hw-tc-offload` | `off [fixed]` | **`on [fixed]`** (patch 0002) |
@@ -265,7 +271,7 @@ What should change once ASK is engaged:
 | `askd.service`, `ask-cli`, `set system ask` CLI | absent | **TBD** — userspace M5 still pending |
 
 **[NOTE]**
-The four in-tree kernel patches + PCD subsystem ship built-in in every image, so `ask-check` shows them OK today. The OOT `ask.ko` module and the `set interfaces ethernet eth<n> offload ask` engagement remain TODO until those components land.
+Historical note. Today `ask.ko` ships in every image and the `offload ipv4|ipv6` leaves engage it; `ask-check` is installed at `/usr/local/bin/ask-check`.
 
 ---
 
