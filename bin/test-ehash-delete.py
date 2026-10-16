@@ -2,8 +2,8 @@
 """Run the patched ehash deletion code with a simulated FMan SYNC.
 
 Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>
-The tree must already carry the F-254/F-256/F-257 and F-264 fixups;
-ci-setup-kernel.sh runs this right after F-265. The bucket hash is stubbed to
+The tree must already carry the F-254/F-256/F-257, F-264 and F-267 fixups;
+ci-setup-kernel.sh runs this right after F-267. The bucket hash is stubbed to
 one bucket: the synthetic chain holds three keys, as a real chain holds keys
 that share a bucket.
 
@@ -44,6 +44,7 @@ typedef u64 dma_addr_t;
 #define FMAN_EHASH_FLOW_KEY_OFF 8
 #define FMAN_EHASH_FLOW_REC_SIZE 320
 #define FMAN_FE_CTX_SIZE 16
+#define FMAN_EHASH_FLOW_BLK_SIZE 512
 #define KEY_SIZE 50	/* F-259 routed key */
 #define INV0 0x80000000U
 #define be16_to_cpu(x) be16toh(x)
@@ -122,9 +123,10 @@ struct fman_pcd_ehash_table {
 	struct list_head flows;
 	struct fman_pcd *pcd;
 	void *dev;
+	void *rec_pool;
 };
 
-static unsigned int records_freed, contexts_freed, metadata_freed;
+static unsigned int records_freed, metadata_freed;
 static unsigned int syncs, reads, warnings;
 static bool barrier, quiesced;
 
@@ -160,15 +162,11 @@ static void record_warning(const char *format, ...)
 }
 #define pr_warn(...) record_warning(__VA_ARGS__)
 #define pr_warn_ratelimited(...) record_warning(__VA_ARGS__)
-static void dma_free_coherent(void *dev, size_t size, void *ptr, dma_addr_t dma)
+/* F-267: one pool block holds the record and its FE context. */
+static void dma_pool_free(void *pool, void *ptr, dma_addr_t dma)
 {
-	assert(dev && quiesced && ptr && dma == (uintptr_t)ptr);
-	if (size == FMAN_EHASH_FLOW_REC_SIZE)
-		records_freed++;
-	else {
-		assert(size == FMAN_FE_CTX_SIZE);
-		contexts_freed++;
-	}
+	assert(pool && quiesced && ptr && dma == (uintptr_t)ptr);
+	records_freed++;
 	free(ptr);
 }
 static void kfree(void *ptr) { metadata_freed++; free(ptr); }
@@ -193,10 +191,10 @@ static unsigned int indexed(void)
 static void setup(struct fman_pcd_ehash_table *table, struct fman_pcd *pcd)
 {
 	*table = (struct fman_pcd_ehash_table){ .key_size = KEY_SIZE,
-		.pcd = pcd, .dev = table, .bidx = &bucket0 };
+		.pcd = pcd, .dev = table, .rec_pool = table, .bidx = &bucket0 };
 	table->flows.next = table->flows.prev = &table->flows;
 	bucket0.first = NULL;
-	records_freed = contexts_freed = metadata_freed = 0;
+	records_freed = metadata_freed = 0;
 	syncs = reads = warnings = 0;
 	barrier = quiesced = false;
 }
@@ -206,15 +204,14 @@ static struct fman_pcd_ehash_flow *add(struct fman_pcd_ehash_table *table,
 {
 	struct fman_pcd_ehash_flow *flow = calloc(1, sizeof(*flow));
 	assert(flow);
-	flow->record = calloc(1, FMAN_EHASH_FLOW_REC_SIZE);
+	flow->record = calloc(1, FMAN_EHASH_FLOW_BLK_SIZE);
 	assert(flow->record);
 	flow->record_dma = (uintptr_t)flow->record;
 	assert(!(flow->record_dma >> 48));
 	if (context) {
-		flow->ctx = malloc(FMAN_FE_CTX_SIZE);
-		assert(flow->ctx);
+		flow->ctx = (u8 *)flow->record + FMAN_EHASH_FLOW_REC_SIZE;
 		memset(flow->ctx, 0xab, FMAN_FE_CTX_SIZE);
-		flow->ctx_dma = (uintptr_t)flow->ctx;
+		flow->ctx_dma = flow->record_dma + FMAN_EHASH_FLOW_REC_SIZE;
 	}
 	flow->key_size = KEY_SIZE;
 	((u8 *)flow->record)[FMAN_EHASH_FLOW_KEY_OFF] = id;
@@ -245,7 +242,7 @@ static void test_chain(unsigned int target)
 	for (unsigned int i = 0; i < 3; i++)
 		flows[i] = add(&table, &head, i + 1, true);
 	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
-	assert(records_freed == 1 && contexts_freed == 1 && metadata_freed == 1);
+	assert(records_freed == 1 && metadata_freed == 1);
 	assert(syncs == 1 && reads == 3 && warnings == 0);
 	assert(indexed() == 2);
 	assert(swab64(head) == flows[target == 2 ? 1 : 2]->record_dma);
@@ -257,7 +254,7 @@ static void test_chain(unsigned int target)
 	}
 	fman_pcd_ehash_flow_drain(&table);
 	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
-	assert(records_freed == 3 && contexts_freed == 3 && metadata_freed == 3);
+	assert(records_freed == 3 && metadata_freed == 3);
 }
 
 static void test_missing_and_invalid(void)
@@ -273,7 +270,7 @@ static void test_missing_and_invalid(void)
 	assert(fman_pcd_ehash_del_key(&table, NULL, sizeof(key)) == -EINVAL);
 	assert(fman_pcd_ehash_del_key(&table, key, 0) == -EINVAL);
 	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key) - 1) == -EINVAL);
-	assert(syncs == 0 && records_freed == 0 && contexts_freed == 0);
+	assert(syncs == 0 && records_freed == 0);
 }
 
 static void test_no_context(void)
@@ -287,7 +284,7 @@ static void test_no_context(void)
 	setup(&table, &pcd);
 	add(&table, &head, 1, false);
 	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
-	assert(records_freed == 1 && contexts_freed == 0 && metadata_freed == 1);
+	assert(records_freed == 1 && metadata_freed == 1);
 	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
 }
 
@@ -306,14 +303,13 @@ static void test_timeout(void)
 	record = flow->record;
 	ctx = flow->ctx;
 	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
-	assert(records_freed == 0 && contexts_freed == 0 && metadata_freed == 1);
+	assert(records_freed == 0 && metadata_freed == 1);
 	assert(syncs == 1 && reads == 100000 && warnings == 3 && !quiesced);
 	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
 	assert(((u8 *)record)[FMAN_EHASH_FLOW_KEY_OFF] == 1);
 	assert(((u8 *)ctx)[0] == 0xab);
-	/* Test cleanup only: the production timeout must keep both allocations. */
+	/* Test cleanup only: the production timeout must keep the block. */
 	free(record);
-	free(ctx);
 }
 
 int main(void)
@@ -323,7 +319,7 @@ int main(void)
 	test_missing_and_invalid();
 	test_no_context();
 	test_timeout();
-	puts("OK: ehash head/middle/tail deletion, bucket index, ctx release, invalid/missing keys and SYNC-timeout retention");
+	puts("OK: ehash head/middle/tail deletion, bucket index, pool block release, invalid/missing keys and SYNC-timeout retention");
 	return 0;
 }
 """
