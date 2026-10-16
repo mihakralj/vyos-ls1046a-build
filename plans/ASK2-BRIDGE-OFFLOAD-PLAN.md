@@ -77,7 +77,7 @@ roles remain in software. This is the safe contract for the current silicon path
 
 | Stage | Required outcome | Dependency / gate |
 |---|---|---|
-| Current-image repeat | Learned/static/move/age/visibility plus B7a rows and software controls | No reimplementation of archived acceptance notes; verify on current image |
+| Current-image repeat | Learned/static/move/age/visibility plus B7a rows and software controls | No reimplementation of archived acceptance notes; verify on current image with the hardened harnesses (§5.1) |
 | B7b | Access↔trunk tag pop/push and translation if required | L2-only emitter, no TTL, preserve B7a and routed/NAT regressions |
 | Multi-table dispatch | Multiple class-specific tables on one ingress port | Correct precedence, owner, miss, flush and resource design |
 | IRB | Route through bridge using kernel-selected member and nexthop | Multi-table coexistence gate |
@@ -85,6 +85,32 @@ roles remain in software. This is the safe contract for the current silicon path
 | QinQ / 802.1ad | Stacked-tag membership and rewrite semantics | Shared VLAN work; unsupported depths remain software |
 | PPPoE bridging | Session frames forwarded without short-frame freeze | Cold-boot non-IP de-risk and session separation first |
 | Multicast | MDB-owned replication | Separate multicast gate; not implied by unicast acceptance |
+
+### 5.1 Harness verdicts (fixed 2026-10-16)
+
+Before 2026-10-16 the bridge harnesses printed PASS/FAIL per row but always
+exited 0. `chk()` ended in `return 0`, and the final MURAM, `pcd-snapshot`,
+kernel-error and record-count checks only printed values. A run could
+therefore "complete" with failing rows, and archived results taken from these
+scripts are only as good as whoever read the output.
+
+All four scripts now count failures, print `== result: N failure(s)` with an
+overall PASS/FAIL, and exit nonzero on any failure:
+`bin/testrig-bridge-b6.sh`, `testrig-bridge-b2.sh`,
+`testrig-bridge-capacity.sh` and `testrig-bridge-soak.sh`.
+
+The following count as failures:
+- every FAIL row;
+- the M1 extern_learn/offload takeover check (b6);
+- a nonzero `pcd-snapshot diff` exit;
+- leftover 16-byte records after teardown;
+- kernel lock, WARNING, BUG, DMA or SYNC errors. For b6 this means any such
+  error in the current boot, so start from a cold boot. For capacity it means
+  the last 15 minutes.
+
+The soak harness also counts its STOP condition. Informational `tag_*` rows in
+b2 are still not scored. The current-image repeat must quote each script's exit
+status, not just its row table.
 
 ## 6. B7b and mixed-role gate requirements
 

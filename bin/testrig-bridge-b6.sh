@@ -13,6 +13,7 @@
 # DUT afterwards. Static FDB entries mark their MAC as user-added until reboot (never taken over),
 # so run this on a fresh boot.
 set -u
+FAILS=0
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 DUT="ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185"
 D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
@@ -24,7 +25,7 @@ dut(){ $DUT "$1"; }
 recs(){ dut "sudo grep -c 'keysz=16 ' $PCD/fe_ehash_stats"; }
 # chk <name> <want records>: settle, then compare the record count
 chk(){ sleep 2; r=$(recs); [ "$r" = "$2" ] && v=PASS || v=FAIL; printf '%-28s records %2s (want %s)  %s\n' "$1" "$r" "$2" "$v"
-  [ $v = FAIL ] && { dut "sudo grep 'keysz=16 ' $PCD/fe_ehash_stats | cut -c1-240; sudo bridge vlan show; sudo bridge fdb show br $BR | grep -v permanent" | sed 's/^/    /'; }; return 0; }
+  [ $v = FAIL ] && { FAILS=$((FAILS+1)); dut "sudo grep 'keysz=16 ' $PCD/fe_ehash_stats | cut -c1-240; sudo bridge vlan show; sudo bridge fdb show br $BR | grep -v permanent" | sed 's/^/    /'; }; return 0; }
 hits(){ dut "sudo awk '/keysz=16 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
 k_rx(){ dut "cat /sys/class/net/$1/statistics/rx_packets"; }
 peer_rx(){ $2 "sudo ethtool -S $IF | awk '/port.rx_$1:/{print \$2}'"; }
@@ -49,6 +50,7 @@ row(){
   dh=$(( $(hits)-h0 )); dk=$(( $(k_rx $6)-k0 )); dr=$(( $(peer_rx $8 "$7")-r0 ))
   if [ $9 -gt 0 ]; then [ $dh -eq $9 ] && [ $dr -ge $N ] && [ $dk -lt 5 ] && v=PASS || v=FAIL
   else [ $dh -eq 0 ] && [ $dk -ge $N ] && v=PASS || v=FAIL; fi
+  [ $v = FAIL ] && FAILS=$((FAILS+1))
   printf '%-14s %6d %6d %6d  %s\n' "$1" $dh $dk $dr $v
 }
 
@@ -66,7 +68,7 @@ sleep 3; sudo dmesg | tail -20 | grep -E 'role change|error|failed'"
 echo "records before traffic: $(recs) (want 0)"
 warm; chk "warm v4+v6 both ways" 4
 echo "M1: $(fdbflags $M1)"; echo "M2: $(fdbflags $M2)"
-f=$(fdbflags $M1); case "$f" in *extern_learn*offload*|*offload*extern_learn*) v=PASS;; *) v=FAIL;; esac
+f=$(fdbflags $M1); case "$f" in *extern_learn*offload*|*offload*extern_learn*) v=PASS;; *) v=FAIL; FAILS=$((FAILS+1));; esac
 echo "M1 taken over (extern_learn + offload): $v"
 
 printf '%-14s %6s %6s %6s  %s\n' case hits k_rx peer verdict
@@ -160,8 +162,11 @@ row v4-after-del "$D1" $M1 $M2 v4 eth3 "$D2" unicast 0
 
 echo "== leave bridge"
 dut "sudo ip link set eth3 nomaster; sudo ip link set eth4 nomaster; sudo ip link del $BR
-sleep 2; sudo dmesg | tail -20 | grep -E 'role change|error|failed'; sudo grep used $PCD/muram_budget
-sudo /usr/local/bin/pcd-snapshot diff /tmp/b6-baseline.json | tail -5
-sudo journalctl -k -b | grep -ciE 'possible circular|inconsistent lock|WARNING:|BUG:|DMA bus error|SYNC timed out'"
-echo "records: $(recs) (want 0)"
+sleep 2; sudo dmesg | tail -20 | grep -E 'role change|error|failed'; sudo grep used $PCD/muram_budget"
+dut "sudo /usr/local/bin/pcd-snapshot diff /tmp/b6-baseline.json | tail -5; exit \${PIPESTATUS[0]}" || { echo "pcd-snapshot diff: FAIL"; FAILS=$((FAILS+1)); }
+kerr=$(dut "sudo journalctl -k -b | grep -ciE 'possible circular|inconsistent lock|WARNING:|BUG:|DMA bus error|SYNC timed out'")
+echo "kernel errors this boot: $kerr (want 0)"; [ "${kerr:-1}" = 0 ] || FAILS=$((FAILS+1))
+left=$(recs); echo "records: $left (want 0)"; [ "$left" = 0 ] || FAILS=$((FAILS+1))
 echo "Reboot the DUT now: eth3.10/eth4.20 and the eth3/eth4 addresses are gone until then."
+echo "== result: $FAILS failure(s)"; [ "$FAILS" -eq 0 ] && echo PASS || echo FAIL
+exit $(( FAILS > 0 ))
