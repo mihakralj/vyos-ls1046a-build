@@ -1171,9 +1171,17 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  * plumbing only (the traffic-carrying engage is blocked on M2 AC_CC
  * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
  * routes `set system offload ask` here.
+ *
+ * @from_flow: the caller is the lazy flowtable REPLACE path
+ * (ask_hw_port_bind()). It may only (re)arm a port the operator has enabled,
+ * i.e. one with a non-zero family mask, and never applies the both-families
+ * compatibility default below. Checked under h->lock, which
+ * ask_hw_offload_disengage() also holds while clearing the mask, so a
+ * flowtable callback can never re-engage a port after `delete ... offload`.
  */
 static int ask_hw_offload_engage_profile(u8 hw_port_id,
-					 enum fman_pcd_fe_profile profile)
+					 enum fman_pcd_fe_profile profile,
+					 bool from_flow)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct ask_hw_port *p;
@@ -1183,6 +1191,11 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		return -ENODEV;
 
 	mutex_lock(&h->lock);
+
+	if (from_flow && !ask_hw_port_family_get(hw_port_id)) {
+		rc = -ENODEV;	/* administratively disabled: stay in software */
+		goto out_unlock;
+	}
 
 	p = ask_hw_port_slot_get(h, hw_port_id);
 	if (!p) {
@@ -1312,7 +1325,7 @@ out_unlock:
 int ask_hw_offload_engage(u8 hw_port_id)
 {
 	return ask_hw_offload_engage_profile(hw_port_id,
-					     FMAN_PCD_FE_PROFILE_ROUTED);
+					     FMAN_PCD_FE_PROFILE_ROUTED, false);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
 
@@ -1365,7 +1378,7 @@ int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 		ask_hw_offload_disengage(hw_port_id);
 		ask_hw_offload_set_family(hw_port_id, fam);
 	}
-	return ask_hw_offload_engage_profile(hw_port_id, profile);
+	return ask_hw_offload_engage_profile(hw_port_id, profile, false);
 }
 
 /* T-M6-2 B2 (debugfs only): engage @ifname's port with the L2_DA profile. */
@@ -1375,7 +1388,8 @@ int ask_hw_b2_l2_engage(const char *ifname)
 	int rc = ask_hw_b2_port_of(ifname, &port);
 
 	return rc ? rc : ask_hw_offload_engage_profile(port,
-						       FMAN_PCD_FE_PROFILE_L2_DA);
+						       FMAN_PCD_FE_PROFILE_L2_DA,
+						       false);
 }
 
 /* B2: hand-arm (or remove) one L2 record (@key = DA+SA+TCI+EtherType, see
@@ -1425,6 +1439,13 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 
 	mutex_lock(&h->lock);
 
+	/* Clear this port's family selection first, under h->lock: the lazy
+	 * flowtable engage (ask_hw_port_bind()) checks it under the same lock,
+	 * so no callback can re-arm the port during or after teardown, and
+	 * admission closes before the FE-VM goes away. Re-engage sets it again
+	 * from the CLI mask. */
+	ask_hw_offload_set_family(hw_port_id, 0);
+
 	p = NULL;
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
 		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
@@ -1473,11 +1494,6 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 
 	/* The port's table (and its bridge records) is gone. */
 	ask_bridge_forget_port(hw_port_id);
-
-	/* Clear this port's family selection so a later flowtable callback
-	 * cannot re-admit a family the operator disabled. Re-engage sets it
-	 * again from the CLI mask. */
-	ask_hw_offload_set_family(hw_port_id, 0);
 
 	/* PPPoE flows ride on this port's engaged state (encap flows ingress on
 	 * another port but egress through a session sourced here): drop them now
@@ -1529,10 +1545,13 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
 	 * before it can add an ehash record.  fman_pcd_fe_engage() publishes
 	 * the per-port FE workspace and the shared ENQ FE offset consumed by
 	 * ask_fe_flow_insert().  The wrapper is idempotent for subsequent
-	 * flows on this port.
+	 * flows on this port.  It refuses (-ENODEV, quiet SW fallback) a port
+	 * whose family mask is 0: only the operator's `offload ipv4|ipv6`
+	 * (genl ASK_CMD_ENGAGE) may enable a port, never traffic.
 	 */
-	rc = ask_hw_offload_engage(port_id);
-	if (rc)
+	rc = ask_hw_offload_engage_profile(port_id,
+					   FMAN_PCD_FE_PROFILE_ROUTED, true);
+	if (rc && rc != -ENODEV)
 		ask_pr_warn("hw: port-bind engage port 0x%02x dir=%u dev=%s failed: %d\n",
 			    port_id, dir,
 			    ingress_dev ? netdev_name(ingress_dev) : "?", rc);
