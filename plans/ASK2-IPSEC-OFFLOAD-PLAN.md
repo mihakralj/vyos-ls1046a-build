@@ -1,6 +1,6 @@
 # ASK2 IPsec ESP hardware offload — CAAM crypto acceleration through the T-M6-4 fast path
 
-**Updated 2026-10-15 · dpaa1 · T-M6-4 / T-M6-IP1 / T-M6-IP2 · DRAFT, fast path NOT STARTED.** `ask_xfrm.c`, `ask_caam.c`, and `ask_op.c` are lifecycle stubs, not ESP offload. This document owns the IPsec runbook; task priority and acceptance belong to `ASK2-MASTER-PLAN.md` §4.6.4. Audit the current built kernel config and substrate before implementation: the configuration/patch inventory below was recorded on 2026-09-06 and is not current-image verification.
+**Updated 2026-10-16 · dpaa1 · T-M6-4 / T-M6-IP1 / T-M6-IP2 · Tier 1 substrate VERIFIED on the running image; tunnel gate and Tier 2 fast path NOT STARTED.** `ask_xfrm.c`, `ask_caam.c`, and `ask_op.c` are lifecycle stubs, not ESP offload. This document owns the IPsec runbook; task priority and acceptance belong to `ASK2-MASTER-PLAN.md` §4.6.4. The 2026-09-06 inventory claimed CAAM was not built; that was wrong (see §1). The rest of the patch inventory is still dated and must be re-verified before Tier 2 work.
 
 The original draft is preserved in `archive/ASK2-IPSEC-OFFLOAD-PLAN-2026-10-15.md`. Its CC-leaf classification, transport-mode parity requirement and per-feature CLI proposal are superseded. Full vendor parity requires the Tier 2 fast path, not just CAAM crypto use.
 
@@ -15,11 +15,13 @@ Tier 1 verifies crypto acceleration independently and establishes a measured bas
 
 ## 1. Substrate audit before implementation
 
-The following is the dated 2026-09-06 inventory. Re-verify it against the
-current config, applied stack and running image before selecting work.
+The CAAM build and boot-time items were re-verified on 2026-10-16 against
+the running image on `.185` (`6.18.55-vyos`). The O/H-port, QI-share and
+`ask.ko` items are still the dated 2026-09-06 inventory; re-verify them
+against the applied stack before selecting Tier 2 work.
 
 - **Silicon capability** — LS1046A SEC/CAAM implements a full IPsec ESP PROTOCOL OPERATION with per-SA PDB (SPI, seq/ESN, IV/salt, anti-replay scorecard), DES/3DES-CBC/AES-CBC/AES-CTR/AES-CCM/AES-GCM, HMAC via MDHA split-key, NAT-T (RFC 3948), and DPOVRD per-frame override — see `arch/sec-caam.md` §3 and the LS1046A SEC Reference Manual (qdrant).
-- **Kernel config gap** — `CONFIG_CRYPTO_DEV_FSL_CAAM` is **absent** from every fragment under `kernel/common/vyos-base/*.config` and `kernel/ask/kernel-config/*.config`. The CAAM driver is not built today. This is the actual current blocker for Tier 1, not a design question.
+- **Kernel config (corrected 2026-10-16)** — the earlier "CAAM is absent" finding only looked at the config fragments. `bin/ci-setup-kernel.sh` (~lines 918–930) forces `CRYPTO_DEV_FSL_CAAM`, `_COMMON`, `_JR`, `_CRYPTO_API_DESC` and `_AHASH_API_DESC` to `=y` after the fragments are merged. Until 2026-10-16 it also set `CRYPTO_DEV_FSL_CAAM_QI`, which does not exist in 6.18 and was silently ignored; QI is built through `CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI`, which defaulted to `y` because `CRYPTO_API` and `FSL_DPAA` are set. Tier 2 depends on QI (patch 0134 lives in `qi.c`), so the bogus line was replaced by explicit `CRYPTO_API=y` and `CRYPTO_API_QI=y` pins (no change to the resolved config); `kernel/common/vyos-base/40-crypto.config` itself still has no CAAM lines. The running image's resolved config has the whole stack built in: `CAAM`, `JR`, `CRYPTO_API`, `CRYPTO_API_QI`, `AHASH_API`, `PKC_API`, `RNG_API`, `PRNG_API` all `=y`, `RINGSIZE=9`, `DEBUG`/`INTC`/`RNG_TEST` off. `INET_ESP`, `INET6_ESP` and their `_OFFLOAD` variants are `=m`; `XFRM_OFFLOAD=y`. CAAM is not a Tier 1 blocker.
 - **QI descriptor sharing** — `kernel/common/patches/board/0134-caam-qi-share.patch` adds `caam_qi_ext_consumer_register()`/`_release()` so an external FMan consumer can redirect a `caam_drv_ctx`'s response FQ to a caller-supplied sink FQID instead of the per-CPU crypto-API callback. Written for Tier 2; **never exercised against real traffic** in this tree.
 - **O/H-port substrate** — patches `0175`–`0184` bring an FMan offline port from unbound to "armed and idle": device-tree bind (0175), register bring-up (0176), debugfs test harness (0177–0181, including the active-list double-add fix), input-FQ scheduling (0182, board-validated through phase 1d per `kernel/common/patches/board/series`), and an inject/capture/dump toolset (0183/0184) explicitly marked **"not yet board-tested."** No CC-tree rule or live frame has ever reached an O/H port. `plans/archive/ASK2-VLAN-REARCH.md`'s 2026-09-02 addendum names this substrate as the thing "IPsec reinject" will eventually need.
 - **`ask.ko` scaffolding** — `ASK_CAP_ESP_OFFLOAD` (`include/uapi/linux/ask/ask.h:226`) and `ASK_ACT_TO_CAAM`/`ASK_ACT_TO_OP` (`include/ask_internal.h`) are reserved bits. `ask_hw.c` (~line 1461) hard-rejects both action flags unconditionally today — the reservation is real, the wiring is not. `ask_xfrm_init/exit`, `ask_caam_init/exit`, `ask_op_init/exit` are lifecycle-only stubs (`ask_xfrm.c`, `ask_caam.c`, `ask_op.c`); the one functional entry point, `ask_xfrm_state_add()`, unconditionally returns `-EOPNOTSUPP`.
@@ -28,13 +30,33 @@ current config, applied stack and running image before selecting work.
 
 ## 2. Tier 1 — CAAM crypto acceleration (software XFRM, hardware math)
 
-No FMan/ASK2 changes. Sequence:
+No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change was needed); steps 4–5 are the remaining Tier 1 work.
 
-1. **Kernel config.** Add to `kernel/common/vyos-base/40-crypto.config`: `CRYPTO_DEV_FSL_CAAM=y`, `CRYPTO_DEV_FSL_CAAM_JR=y`, `CRYPTO_DEV_FSL_CAAM_CRYPTO_API=y` (pulls `CRYPTO_AEAD`/`CRYPTO_AUTHENC`/`CRYPTO_SKCIPHER`/`CRYPTO_LIB_DES`/`CRYPTO_XTS`), `CRYPTO_DEV_FSL_CAAM_RNG_API=y`. Leave `CRYPTO_DEV_FSL_CAAM_QI` and `CRYPTO_DEV_FSL_CAAM_AHASH_API` out for now — QI is Tier 2 scope, ahash isn't needed for ESP's AEAD/authenc path.
-2. **Boot-time correctness gate** (`arch/sec-caam.md` §4, non-negotiable, these are silent-corruption footguns not soft warnings): RNG4 self-instantiates at boot (dmesg) and `/proc/crypto` self-tests pass for every registered `*-caam` transform; `SCFG_SNPCNFGCR[SECRDSNP/SECWRSNP]` and `MCFGR[ARCACHE/AWCACHE]` snoop bits are set (without them, CAAM DMA is cache-incoherent with the A72 cores and silently produces wrong plaintext/ciphertext rather than an error); `SCFG_QOS1/QOS2` weights for the SEC port raised off their lowest-priority POR default (perf, not correctness, but cheap to fix alongside the snoop bits).
-3. **Verify registration and priority.** `authenc(hmac(sha256),cbc(aes))` (and friends) appear in `/proc/crypto` with `driver: *-caam`; confirm via the `priority` field that CAAM's registration outranks the software fallback rather than assuming it — XFRM/charon picks whichever transform the crypto API hands it highest-priority, this is not configurable per-SA.
-4. **Confirm strongSwan picks it up.** VyOS's existing `charon` + `kernel-netlink` + in-kernel `esp4`/`esp6` stack needs no VyOS-side change — it already goes through the kernel Crypto API. Bring up a tunnel and confirm.
-5. **Gate.** Tunnel up; `ip -s xfrm state` byte counters climbing; `/sys/kernel/debug/caam/ctl` `ib_bytes_decrypted`/`ob_bytes_encrypted` climbing in lockstep; CPU load / throughput measured against a software-only baseline (same tunnel, same traffic, CAAM config reverted); rekey and reboot clean.
+1. **Kernel config — DONE (already present).** See §1. If the config is ever moved from `ci-setup-kernel.sh` into a fragment, keep `CRYPTO_API_QI`: it is built today and Tier 2 needs it.
+2. **Boot-time correctness gate — verified 2026-10-16 on `.185`, except QoS** (`arch/sec-caam.md` §4; these are silent-corruption footguns, not soft warnings):
+   - Every CAAM entry in `/proc/crypto` that `caam-check` inspects reports `selftest : passed`. `rng_current = rng-caam`, and `/dev/hwrng` returns data.
+   - `SCFG_SNPCNFGCR` (`0x015701A4`) = `0xc0f3e0c0`: `SECRDSNP` and `SECWRSNP` (bits 31/30) are set by firmware.
+   - CAAM `MCFGR` (`0x01700004`) = `0x40012305`: ARCACHE = 2, AWCACHE = 3 (cacheable). Re-read both registers after any U-Boot/RCW change.
+   - Open: `SCFG_QOS1` = `0x02800000`, `SCFG_QOS2` = `0x03800000`. The SEC master's field has not been decoded against the reference manual. This affects performance, not correctness; decode it before the throughput comparison in step 5.
+   - The RNG4 instantiation dmesg line was no longer in the ring buffer on a long-running boot. Capture it on the next cold boot.
+3. **Registration and priority — verified 2026-10-16.** The kernel uses the highest-priority implementation, and charon cannot choose per SA. On the running image the Job Ring driver wins every common ESP transform. Each is shown below as JR, then QI, then software:
+
+   | Transform | Job Ring (wins) | QI | Software |
+   |---|---|---|---|
+   | `authenc(hmac(sha256),cbc(aes))` | `-caam` 3000 | `-caam-qi` 2000 | — |
+   | `authenc(hmac(sha1),cbc(aes))` | `-caam` 3000 | `-caam-qi` 2000 | — |
+   | `rfc4106(gcm(aes))` | `-caam` 3000 | `-caam-qi` 2000 | `-ce` 300 |
+   | `gcm(aes)` | `-caam` 3000 | `-caam-qi` 2000 | `-ce` 300 |
+   | `cbc(aes)` | `-caam` 3000 | `-caam-qi` 2000 | `-ce` 300 |
+   | `hmac(sha256)` | `-caam` 3000 | — | `-lib` 300 |
+
+   `caam-check` section 5b now prints this table and fails if any CAAM entry's self-test result is anything other than `passed` (or `unknown`). Note that GCM is CAAM-accelerated in Tier 1. The A24a GCM refusal in step 8 applies only to the Tier 2 FMan-driven protocol descriptor path.
+4. **Confirm strongSwan uses it.** VyOS's existing `charon` + `kernel-netlink` + in-kernel `esp4`/`esp6` stack needs no VyOS-side change, because it already goes through the kernel Crypto API. Bring up a tunnel against a lab peer (dell1/dell2) with `aes256-sha256` and separately `aes256gcm16`.
+5. **Gate.**
+   - Tunnel up, and the `ip -s xfrm state` byte counters climb.
+   - The CAAM controller debugfs counters (`caam-check` prints them as root) move with traffic. On 2026-10-16 the idle board showed `rq_dequeued 250` and zero for the encrypt/decrypt byte counters. Record which counters move for JR-driven ESP; the `ob_*`/`ib_*` protocol counters may stay 0 outside protocol-descriptor mode, so do not gate on them until this is known.
+   - Measure CPU load and throughput against a software-only baseline: the same tunnel and traffic with CAAM excluded. Exclude it by blacklisting the `-caam` drivers through `crypto_user`/`cryptomgr`, or by booting a kernel with CAAM disabled. Do not use a build that drops QI.
+   - Rekey and reboot clean.
 
 **Measurement point after Tier 1:** publish crypto-use proof, throughput and CPU against software on the same rig. This can be an independent delivery, but the full-parity objective remains open until Tier 2 passes.
 
@@ -75,4 +97,5 @@ No FMan/ASK2 changes. Sequence:
 - Reusable HM/NADEN infra: `plans/archive/ASK2-VLAN-REARCH.md` §2, §4, §7.
 - Capability comparison and mechanism recommendation: `decomp/vendor-vs-ask2-offloads.md` ("Capabilities the VENDOR has that ASK2 does NOT"), `plans/OFFLOAD-CAPABILITY-PLAN.md` §1.7.
 - Binding control-plane rules, task IDs and GCM refusal: `plans/ASK2-MASTER-PLAN.md` §2/§4.6.1/§4.6.4 (T-M6-4/IP1/IP2).
+- Tier 1 live evidence (2026-10-16): `board/scripts/caam-check` sections 5 and 5b on `.185`, `/proc/config.gz`, and `/dev/mem` reads of `SCFG_SNPCNFGCR`/`MCFGR`.
 - Stub state: `kernel/ask/oot-modules/ask/ask_xfrm.c`, `ask_caam.c`, `ask_op.c`, `ask_hw.c` (~line 1461), `include/uapi/linux/ask/ask.h:226`.

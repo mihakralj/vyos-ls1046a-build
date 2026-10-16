@@ -1,6 +1,6 @@
 # ASK2 Master Plan
 
-**Version 2.32.0 · 2026-10-15**
+**Version 2.33.0 · 2026-10-16**
 
 This is the single ASK2 task list and execution order. Feature plans own
 detailed designs and runbooks; `ASK2-VENDOR-PARITY.md` owns current measurement
@@ -27,10 +27,14 @@ F-266 TCP control punt is implemented but default-off and has no end-to-end
 offloaded-transit acceptance. Closed TCP flows can linger in conntrack.
 Do not claim scale acceptance or enable the punt based on register readback.
 
-The Dell-controlled paired 10×10 routed/NAT/VLAN campaign is in progress as
-of this planning checkpoint. Its directory, not a copied progress counter,
-is authoritative: `~/testrig/campaigns/parity-10x10-20261015T2130Z/` on dell2.
-Do not overlap it with other traffic or change rig settings while it runs.
+The Dell-controlled paired 10×10 routed/NAT/VLAN campaign is complete:
+480/480 attempts at 2026-10-16 02:54:36 UTC on `0551`, `COMPLETE_WITH_ISSUES`
+because one NAT44 run was only partially offloaded. Under the strict mean rule
+17 of 24 cells PASS and 7 FAIL. Six of the failing cells are one-way, with
+deficits of 0.002–0.140%; the largest is VLAN↔port strip/add IPv6 at −0.366%,
+with an interval that includes zero. Verdicts and raw data:
+`ASK2-VENDOR-PARITY.md`; campaign directory
+`~/testrig/campaigns/parity-10x10-20261015T2130Z/` on dell2.
 
 **Release smoke checkpoint, 2026-10-16:** the operator cold-booted `.185`
 on `2026.10.16-0357-rolling`, kernel `6.18.55-vyos`. Boot evidence: boot ID
@@ -43,7 +47,7 @@ deliberately wrong main-table gateway. F-267 used 512-byte coherent DMA-pool
 blocks, eight per page; 64 UDP streams had zero loss. These are smoke results,
 not full scale, soak or vendor-parity acceptance.
 
-**Publication is blocked by the per-port disable gate.** Deleting both
+**Publication is blocked by the per-port disable gate until the fixed image passes it (see §4.1).** Deleting both
 `interfaces ethernet eth3 offload ipv4` and `ipv6` and committing initially
 disarmed port `0x10`, but the nft hardware flowtable retained eth3/eth3.10.
 New traffic rearmed `0x10` and hardware-forwarded despite the absent CLI
@@ -133,10 +137,11 @@ programming recipes. Resolve contradictions before touching code.
 
 | Priority | Work | Dependency / exit |
 |---|---|---|
-| 1 | Finish existing paired campaign and publish evidence | No rig changes until campaign ends; does not close feature parity |
+| 1 | Release gate on `2026.10.16-1941-rolling` (per-port disable/re-enable, `ask-check`, factory default), then publish | Cold boot first; mutate eth3 only |
+| 1a | Analyse the seven strict-mean FAIL cells and the partial NAT44 run | Repeat under the same alternating protocol; does not close feature parity |
 | 2 | F-266 FIN/RST transit and NAT correctness; TTL safety | Must pass before connection-scale claims or new default-on safety paths |
 | 3 | Close existing-feature acceptance: PPPoE, bridge current-image repeat, resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
-| 4 | IPsec Tier 1 verification and Tier 2 design/bring-up | Highest missing feature; audit stale draft assumptions first; full path remains required for full parity |
+| 4 | IPsec Tier 1 tunnel gate and SW baseline, then Tier 2 design/bring-up | Tier 1 substrate verified 2026-10-16 (CAAM built in, wins priority, self-tests pass, snoop set); full path remains required for full parity |
 | 5 | B7b and multi-table dispatch; PPPoE-over-VLAN; multicast | B7b can proceed independently; shared dispatch must prove coexistence before IRB/mixed classes/ESP coexistence |
 | 6 | QinQ, relay, tunnels, QoS | Feature-specific kernel ownership and forward/inverse/fallback gates |
 | Parallel, not on the active rig | Phase 2 code/patch consolidation | No behavior change; preserve regression evidence |
@@ -154,13 +159,32 @@ programming recipes. Resolve contradictions before touching code.
   disengage also cleared the mask only after dropping `h->lock`. Fix committed
   2026-10-16 in `ask_hw.c`: the flow path engages only when the mask is
   non-zero (checked under `h->lock`, `-ENODEV` = quiet SW fallback), and
-  disengage clears the mask under `h->lock` before teardown. Compile-checked
-  only; needs CI build plus the board gate. Verify both IP
-  families stay in software under new traffic, eth4 remains independently
-  usable, and explicit re-enable restores hardware forwarding.
-- **T-PARITY-10:** collect all 480 attempts; account for missing/non-HW pairs;
-  publish paired mean/median/SD, CI, CPU/retransmits and per-cell verdicts in
-  the scoreboard. Preserve raw data, no jitter/outlier trimming.
+  disengage clears the mask under `h->lock` before teardown. Built by CI run
+  `38956672515` (head `087a40e5`) as `2026.10.16-1941-rolling`, deployed to
+  `http://192.168.1.137:8080/iso/latest.iso`; not yet board-tested. Gate,
+  after a cold boot:
+  - delete both eth3 offload leaves and push IPv4/IPv6 traffic: port `0x10`
+    must stay disengaged with both families in software;
+  - eth4 (`0x11`) must stay independently in hardware;
+  - explicit re-enable must restore hardware forwarding;
+  - `ask-check` must pass 36/36, with no kernel error-level messages.
+- **Factory default (commit `c84499e5`, not in `1941`):** the ISO's
+  `config.boot.default` now enables `offload ipv4 ipv6` on eth1–eth4 (not
+  eth0, the management port), a hardware flowtable `FT` over eth1–eth4 with
+  `hardware-offload-delay 500`, and IPv4/IPv6 forward rule 10 → `offload`.
+  This applies only to fresh installs and live boots; `add system image` keeps
+  the existing config. Verify on a live boot from the next ISO that
+  `ask-check` shows the ports armed without any operator commits.
+- **T-PARITY-10:** DONE 2026-10-16. 480/480 attempts, 17/24 PASS, 7 strict-mean
+  FAIL; the scoreboard is in `ASK2-VENDOR-PARITY.md`. Follow-up: repeat the
+  seven FAIL cells and the partial NAT44 run under the same protocol. Note
+  that `.106` now runs OPNsense, so the vendor side must be re-imaged before
+  any repeat. Preserve raw data; no jitter/outlier trimming.
+- **Harness verdicts:** the bridge harnesses (`bin/testrig-bridge-*.sh`) now
+  exit nonzero on any FAIL row, `pcd-snapshot` diff, leftover record or kernel
+  error (`ASK2-BRIDGE-OFFLOAD-PLAN.md` §5.1). Earlier bridge results came from
+  scripts that always exited 0; the current-image repeat must quote exit
+  status.
 - **T-M6-SP3 / F-266:** establish and offload transit TCP; FIN and RST must
   reach conntrack while established data stays HW; test NAT44/NAT66 mapping
   survival and clean disarm snapshot. Keep `tcp_ctl_punt=0` until all pass.
@@ -285,6 +309,14 @@ runbooks below are subordinate to this plan, not independent task priorities.
 - **T-M6-4 / IP1 / IP2 / A9:** audit the IPsec draft, verify Tier 1 Crypto
   API/CAAM, measure SW baseline, then build XFRM-owned ESP ehash→OH/SEC→TX
   with AES-CBC-SHA256 first. Tier 1 alone is not full vendor parity.
+  2026-10-16 audit: the draft's "CAAM not built" claim was wrong.
+  `ci-setup-kernel.sh` forces it to `=y`; the bogus `CAAM_QI` symbol was
+  replaced by explicit `CRYPTO_API` and `CRYPTO_API_QI` pins. On the running
+  image, `-caam` (priority 3000) wins over `-caam-qi` (2000) and the software
+  drivers for all common ESP transforms, with self-tests passed and the SEC
+  snoop bits set. `caam-check` §5b now reports and gates this. Remaining
+  Tier 1 work: the strongSwan tunnel gate with debugfs counter proof and the
+  software-only baseline.
   Add/delete/update/lifetime/rekey, tunnel v4/v6, inbound/outbound, ESN,
   anti-replay, NAT-T, PMTU/fragments, peer interoperability, bad-auth/replay,
   reboot and disable fallback all gate `NETIF_F_HW_ESP`, advertised LAST.
@@ -367,6 +399,12 @@ be silently consumed.
   Owner `ASK2-WIREGUARD-FASTPATH-PLAN.md` (history in `archive/`).
 - **Beyond parity:** sub-100 ms per-flow engage, port-scoped conntrack
   teardown, non-proxy HW observability, ≥16 Gbit/s VLAN↔port bidirectional.
+- **Suricata:** design only (`ASK2-SURICATA-BYPASS-PLAN.md`). The native
+  VyOS service is AF_PACKET IDS, not inline, so it cannot approve flows.
+  With the factory-default offload it sees only each flow's slow-path prefix.
+  Before any code, the approval contract (§9 of that plan) must be written:
+  explicit verdict → conntrack mark → flowtable match, tuple/NAT identity,
+  revocation on reload or alert, and fail-closed behaviour.
 - **Memory:** consider DMA pools before increasing bridge caps: historical
   coherent record/context allocations cost ~9 KiB per record due to page
   rounding. Preserve memory/resource accounting and collision-chain gates.
@@ -427,7 +465,8 @@ archived 40-second dual-client baseline with the current 30-second
 | `ASK2-VENDOR-PARITY.md` | Current comparison scope, evidence and acceptance method |
 | `ASK2-BRIDGE-OFFLOAD-PLAN.md` | Remaining bridge design and runbook |
 | `ASK2-PPPOE-OFFLOAD-PLAN.md` | Remaining PPPoE acceptance and feature gaps |
-| `ASK2-IPSEC-OFFLOAD-PLAN.md` | Tier 1/2 draft; must satisfy this plan's current scope/architecture |
+| `ASK2-IPSEC-OFFLOAD-PLAN.md` | Tier 1/2 runbook (Tier 1 substrate verified 2026-10-16); must satisfy this plan's current scope/architecture |
+| `ASK2-SURICATA-BYPASS-PLAN.md` | Suricata IDS/IPS integration design and approval contract (no code) |
 | `archive/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` | Completed vendor topology/reference analysis |
 | `OFFLOAD-CAPABILITY-PLAN.md` | Vendor vs ASK2 mechanism for each remaining capability |
 | `CC-ACL-OFFLOAD-PLAN.md` | Static ACL backend (open Phase 2 drop ACL; not a parity blocker) |
