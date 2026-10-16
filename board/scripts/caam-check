@@ -6,9 +6,10 @@
 #
 # CAAM is the NXP SEC 5.4 hardware crypto engine on every Layerscape
 # LS1046A SoC. It accelerates AES/SHA/3DES/HMAC/RSA/RNG via Job Ring (JR)
-# descriptors submitted from the kernel crypto API, and on FLAVOR=ask it
-# additionally services IPsec ESP packets via the SDK fast-path SEC FQ
-# (`dpaa_submit_inb_pkt_to_SEC` in sdk_dpaa).
+# descriptors submitted from the kernel crypto API. Kernel IPsec (xfrm)
+# uses it through that API when a CAAM driver wins algorithm selection;
+# ASK2 ESP offload (xfrmdev_ops) is not wired yet
+# (plans/ASK2-IPSEC-OFFLOAD-PLAN.md).
 #
 # Reports:
 #   - SoC presence (DT compatible, CAAM controller MMIO node)
@@ -19,10 +20,13 @@
 #   - dmesg banner lines ("caam %s: device ID = ...", "caam_jr %s: Instantiated RNG4 SH...")
 #   - kernel crypto API registrations sourced from CAAM (looks for "caam"
 #     in /proc/crypto driver fields)
+#   - IPsec algorithm selection: which driver wins (highest priority) for
+#     the common ESP transforms, and the self-test result of CAAM entries
+#   - CAAM controller debugfs job/byte counters (root only, if present)
 #   - Hardware RNG: presence of /dev/hwrng, current_source (should be
 #     "rng-caam" once caamrng has loaded), and a 16-byte sample read
-#   - FLAVOR=ask only: dpa_ipsec sysfs / dmesg signs of CDX successfully
-#     locating the SEC FQ
+#   - ASK2 module posture (if ask.ko is loaded): init banners, flow
+#     offload errors, xfrmdev offload status
 #
 # Designed to mirror the style of `sfp-check`, `fan-check`, and
 # `ask-check.sh`: human-readable table with [OK]/[WARN]/[FAIL]/[SKIP]
@@ -31,8 +35,9 @@
 # Exit codes:
 #   0 — CAAM controller present, at least 1 Job Ring active, RNG sourced
 #       from rng-caam (or no /dev/hwrng but JR active is acceptable)
-#   1 — CAAM hardware not detected, no Job Rings up, or kernel crypto
-#       API has no CAAM-backed algorithms
+#   1 — CAAM hardware not detected, no Job Rings up, kernel crypto
+#       API has no CAAM-backed algorithms, or a CAAM algorithm failed
+#       its self-test
 #   2 — board is not LS1046A (sysfs paths absent)
 
 set -u
@@ -239,12 +244,77 @@ if [ -r /proc/crypto ]; then
             note "  ... ($((count - 12)) more — full list: grep -A6 caam /proc/crypto)"
         fi
     else
-        warn "/proc/crypto has no CAAM-backed entries"
+        fail "/proc/crypto has no CAAM-backed entries"
+        mark_fail
         note "  (caam_jr probed but registered zero algorithms — check dmesg for"
         note "   'caam_jr: register algs' errors, or RNG4 instantiation failure)"
     fi
 else
     skip "/proc/crypto not readable"
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. IPsec transform selection and CAAM self-tests
+# ---------------------------------------------------------------------------
+hdr "5b) IPsec transform selection (highest priority wins)"
+
+# The kernel picks the highest-priority registered implementation of each
+# algorithm name. CAAM only accelerates kernel IPsec when one of its drivers
+# (caam_jr: *-caam, QI: *-caam-qi) outranks the arm64 CE/NEON software
+# drivers. A CAAM entry whose self-test is not "passed" is a hard failure;
+# "unknown" means the kernel was built without crypto self-tests.
+if [ -r /proc/crypto ]; then
+    for alg in 'authenc(hmac(sha256),cbc(aes))' 'authenc(hmac(sha1),cbc(aes))' \
+               'rfc4106(gcm(aes))' 'gcm(aes)' 'cbc(aes)' 'hmac(sha256)'; do
+        rows=$(awk -v want="$alg" '
+            BEGIN { RS=""; FS="\n" }
+            {
+                name=""; drv=""; pri=""; st="";
+                for (i=1; i<=NF; i++) {
+                    if (match($i, /^name +: */))     { name = substr($i, RSTART+RLENGTH) }
+                    if (match($i, /^driver +: */))   { drv  = substr($i, RSTART+RLENGTH) }
+                    if (match($i, /^priority +: */)) { pri  = substr($i, RSTART+RLENGTH) }
+                    if (match($i, /^selftest +: */)) { st   = substr($i, RSTART+RLENGTH) }
+                }
+                if (name == want) printf "%s %s %s\n", pri, drv, st
+            }
+        ' /proc/crypto 2>/dev/null | sort -rn)
+        if [ -z "$rows" ]; then
+            skip "$alg: not registered (instantiated on first use)"
+            continue
+        fi
+        set -- $(printf "%s\n" "$rows" | head -1)
+        case "$2" in
+            *caam*) ok "$alg -> $2 (priority $1, selftest $3)" ;;
+            *)      warn "$alg -> $2 (priority $1) — software wins, CAAM not used" ;;
+        esac
+        printf "%s\n" "$rows" | sed 1d | while read -r pri drv st; do
+            note "  also: $drv (priority $pri, selftest $st)"
+        done
+        bad=$(printf "%s\n" "$rows" | awk '$2 ~ /caam/ && $3 != "passed" && $3 != "unknown" {print $2"="$3}')
+        if [ -n "$bad" ]; then
+            fail "$alg: CAAM self-test not passed: $bad"
+            mark_fail
+        fi
+    done
+else
+    skip "/proc/crypto not readable"
+fi
+
+# Controller job/byte counters (drivers/crypto/caam/debugfs.c). The debugfs
+# directory name varies by kernel ("caam" or the controller device name).
+CTL_DIR=""
+for d in /sys/kernel/debug/caam/ctl /sys/kernel/debug/*crypto*/ctl; do
+    [ -r "$d/rq_dequeued" ] && { CTL_DIR=$d; break; }
+done
+if [ -n "$CTL_DIR" ]; then
+    for c in rq_dequeued ob_rq_encrypted ib_rq_decrypted ob_bytes_encrypted ib_bytes_decrypted; do
+        [ -r "$CTL_DIR/$c" ] && note "$(printf '%-20s %s' "$c" "$(cat "$CTL_DIR/$c" 2>/dev/null)")"
+    done
+elif [ "$(id -u)" = "0" ]; then
+    skip "CAAM debugfs counters not present (CONFIG_DEBUG_FS or caam debugfs off)"
+else
+    skip "CAAM debugfs counters skipped (not root)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -288,19 +358,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. FLAVOR=ask: ASK 2.0 flow offload / fast-path posture
+# 7. ASK2 flow offload posture
 # ---------------------------------------------------------------------------
-hdr "7) ASK 2.0 flow offload (FLAVOR=ask only)"
+hdr "7) ASK2 flow offload (ask.ko)"
 
-# Two generations of the ASK stack may appear:
-#   ASK 2.0  — single ask.ko module (current; specs/ask2-rewrite-spec.md)
-#              dmesg: "ask: loading ASK 2.0.0", "ask: hw: FMan microcode …",
-#                     "ask: ready (genl family registered …)",
-#                     "ask: flow_offload: BIND <ifname>", "ask: flow: hw_insert OK"
-#   ASK 1.x  — legacy cdx.ko + dpa_ipsec.ko (deleted on ask20 branch May 2026)
-# If neither generation's module is loaded we are on default/vpp/generic
-# and simply SKIP. IPsec ESP offload via xfrmdev_ops is on the ASK 2.0
-# roadmap (M5 per spec) and not expected to be wired yet.
+# ask.ko ships in every image (specs/ask2-rewrite-spec.md). Its init banners:
+#   "ask: hw: FMan microcode …", "ask: ready (genl family registered …)",
+#   "ask: flow_offload: BIND <ifname>", "ask: flow: hw_insert OK".
+# The legacy ASK 1.x stack (cdx.ko + dpa_ipsec.ko) was deleted in May 2026.
+# IPsec ESP offload via xfrmdev_ops is not wired yet
+# (plans/ASK2-IPSEC-OFFLOAD-PLAN.md).
 
 if [ -d /sys/module/ask ]; then
     ver=$(cat /sys/module/ask/version 2>/dev/null || echo "?")
@@ -319,16 +386,12 @@ if [ -d /sys/module/ask ]; then
         # Each of these banners is logged exactly once at module init by
         # the corresponding subsystem (see ask_main.c / ask_hw_*.c).
         ucode=$(printf "%s\n" "$ASK_LOG" | grep -m1 'hw: FMan microcode'        || true)
-        pcd=$(printf   "%s\n" "$ASK_LOG" | grep -m1 'hw: FMan PCD chain up'      || true)
-        ohpool=$(printf "%s\n" "$ASK_LOG" | grep -m1 'hw: PR14s OH-port pool'    || true)
         flow=$(printf  "%s\n" "$ASK_LOG" | grep -m1 'flow: subsystem ready'      || true)
         fo=$(printf    "%s\n" "$ASK_LOG" | grep -m1 'flow_offload: ready'        || true)
         genl=$(printf  "%s\n" "$ASK_LOG" | grep -m1 "genl family 'ask' registered" || true)
         ready=$(printf "%s\n" "$ASK_LOG" | grep -m1 '^ask: ready'                || true)
 
         [ -n "$ucode"  ] && ok "FMan microcode loaded"    && note "$ucode"   || warn "no 'FMan microcode' banner — ucode load may have failed"
-        [ -n "$pcd"    ] && ok "FMan PCD chain ready"     && note "$pcd"     || warn "no 'FMan PCD chain up' banner"
-        [ -n "$ohpool" ] && ok "PR14s OH-port pool ready" && note "$ohpool"  || warn "no 'OH-port pool ready' banner"
         [ -n "$flow"   ] && ok "ask flow subsystem ready" && note "$flow"
         [ -n "$fo"     ] && ok "flow_offload subsystem ready" && note "$fo"
         [ -n "$genl"   ] && ok "ask genl family registered" && note "$genl"
@@ -359,28 +422,11 @@ if [ -d /sys/module/ask ]; then
     if [ -e /sys/class/net/eth3/xfrm ] || [ -e /sys/class/net/eth4/xfrm ]; then
         ok "xfrmdev offload sysfs present on dpaa_eth ports"
     else
-        skip "IPsec ESP offload via xfrmdev_ops not wired (deferred to ASK 2.0 M5)"
+        skip "IPsec ESP offload via xfrmdev_ops not wired (plans/ASK2-IPSEC-OFFLOAD-PLAN.md)"
     fi
 
-elif [ -d /sys/module/cdx ] || [ -d /sys/module/dpa_ipsec ]; then
-    # ----- Legacy ASK 1.x path (cdx.ko + dpa_ipsec.ko) -----
-    warn "legacy ASK 1.x stack detected (cdx/dpa_ipsec) — deprecated"
-    if [ -d /sys/module/cdx ];        then ok "cdx module loaded";        else warn "cdx module NOT loaded — ASK IPsec offload disabled"; fi
-    if [ -d /sys/module/dpa_ipsec ];  then ok "dpa_ipsec module loaded";  else warn "dpa_ipsec module NOT loaded"; fi
-    if command -v dmesg >/dev/null 2>&1; then
-        sec_fq=$(dmesg 2>/dev/null | grep -E 'cdx.*ipsec_fq|dpa_ipsec.*sec_fq|cdx.*SEC' | tail -3)
-        if [ -n "$sec_fq" ]; then
-            note "$sec_fq"
-        fi
-        bad=$(dmesg 2>/dev/null | grep -E 'cdx_module_init.*failed|locate eth bman pool|dpa_ipsec start failed' | tail -3)
-        if [ -n "$bad" ]; then
-            fail "ASK CDX init errors detected:"
-            printf "%s\n" "$bad" | while IFS= read -r line; do note "$line"; done
-            mark_fail
-        fi
-    fi
 else
-    skip "FLAVOR != ask (no ask/cdx/dpa_ipsec module loaded)"
+    skip "ask module not loaded"
 fi
 
 # ---------------------------------------------------------------------------

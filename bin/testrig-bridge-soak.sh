@@ -9,6 +9,7 @@
 # background flow. STOPs on a stuck record count, a new kernel error, or a background flow that
 # stops hitting. Builds the bridge with ip(8): REBOOT the DUT afterwards.
 set -u
+FAILS=0
 CYCLES=${CYCLES:-100}; JOIN_EVERY=${JOIN_EVERY:-10}
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 DUT="ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185"
@@ -66,7 +67,7 @@ for c in $(seq 1 "$CYCLES"); do
   [ "$after" != 2 ] && stop="records stuck at $after"
   [ "$err" -gt 0 ] && { stop="kernel errors"; printf '%s\n' "$out" | grep -E "$ERR" | head -5; }
   [ "$dh" -le 0 ] && stop="background flow stopped hitting"
-  [ -n "$stop" ] && { echo "STOP at cycle $c: $stop"; break; }
+  [ -n "$stop" ] && { echo "STOP at cycle $c: $stop"; FAILS=$((FAILS+1)); break; }
 done
 
 $D1 "pkill -f '[i]perf3 -c 10.99.77.113'"; sleep 2
@@ -76,7 +77,10 @@ $D1 "sudo ip addr del 10.99.77.112/24 dev $IF"; $D2 "sudo ip addr del 10.99.77.1
 
 echo "== teardown"
 dut "sudo ip link set eth3 nomaster; sudo ip link set eth4 nomaster; sudo ip link del $BR
-echo 0 | sudo tee $P >/dev/null; sleep 2
-sudo grep used $PCD/muram_budget; sudo /usr/local/bin/pcd-snapshot diff /tmp/soak-baseline.json | tail -3"
-echo "records $(recs) (want 0); baseline MURAM $base_muram"
+echo 0 | sudo tee $P >/dev/null; sleep 2; sudo grep used $PCD/muram_budget"
+dut "sudo /usr/local/bin/pcd-snapshot diff /tmp/soak-baseline.json | tail -3; exit \${PIPESTATUS[0]}" || { echo "pcd-snapshot diff: FAIL"; FAILS=$((FAILS+1)); }
+left=$(recs); echo "records $left (want 0); baseline MURAM $base_muram"
+[ "$left" = 0 ] || FAILS=$((FAILS+1))
 echo "Reboot the DUT now to restore eth3.10/eth4.20 and the eth3/eth4 addresses."
+echo "== result: $FAILS failure(s)"; [ "$FAILS" -eq 0 ] && echo PASS || echo FAIL
+exit $(( FAILS > 0 ))

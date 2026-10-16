@@ -45,7 +45,7 @@ Properties:
 
 - **S2 is a userspace overlay on S0.** There is no silicon delta, so VPP needs no inverse beyond closing its sockets.
 - **S1↔S0 is the only hard transition**, and it is entirely our code. There is no direct S1↔S2 edge.
-- **Boot always lands in S0.** ASK engages only on a config commit, never unconditionally at probe, so a wedged S1 is always recoverable by reboot.
+- **Boot always lands in S0.** ASK engages only on a config commit, never unconditionally at probe. The boot-time commit of a config that carries `offload` leaves (including the factory default since 2026-10-16) is such a commit. A wedged S1 is recoverable by rebooting, but only into a config without those leaves, for example by deleting them or booting the previous image.
 
 ## 3. Teardown checklist (S1→S0)
 
@@ -92,7 +92,7 @@ These are gates in the master plan; they are listed here because they are proper
 1. **Trafficked reversibility.** The 2026-06-15 100× soak proved control-plane reversibility without traffic. Every current feature's teardown must also be snapshot-clean after a trafficked S1, with port recovery and VPP AF_XDP bind plus traffic on the same port afterwards (master §4.1 existing-feature acceptance, A15 soak).
 2. **VPP regression in every gate.** After an ASK enable/disable cycle, `set vpp settings` on eth3/eth4 must still bind and pass traffic.
 3. **New features inherit item 6.** IPsec (SA, CAAM descriptors, SEC FQs), multicast replication groups, the soft-parser arena (PPPoE remainder, tunnels) and fragment reassembly each define their inverse before merge.
-4. **Default posture.** The shipped config stays default-off (S0 boot, operator opts in per interface).
+4. **Default posture (changed 2026-10-16, commit `c84499e5`).** The kernel and module defaults are unchanged: probe lands in S0, and a config without `offload` leaves never engages ASK. The ISO's factory `config.boot.default` (`board/vyos-config/config.boot.dhcp`) now opts in: `offload ipv4 ipv6` on eth1–eth4 (never eth0, the management port) and a hardware flowtable. Fresh installs and live boots therefore reach S1 at the boot commit. Upgrades keep their existing config. The release gate must include a live boot of this default.
 
 ## 6. Risks
 
