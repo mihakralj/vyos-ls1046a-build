@@ -1,6 +1,6 @@
 # ASK2 Master Plan
 
-**Version 2.33.0 · 2026-10-16**
+**Version 2.33.1 · 2026-10-16**
 
 This is the single ASK2 task list and execution order. Feature plans own
 detailed designs and runbooks; `ASK2-VENDOR-PARITY.md` owns current measurement
@@ -16,8 +16,9 @@ remaining bridge/encapsulation gaps.
 
 ### 1.1 Working baseline
 
-ASK2 `.185` runs `2026.10.15-0551-rolling`, kernel `6.18.55-vyos`;
-NXP ASK `.106` runs `6.12.103`. Dell1 `.112` and dell2 `.113` drive eth3/eth4.
+ASK2 `.185` runs `2026.10.16-2012-rolling`, kernel `6.18.55-vyos`;
+the NXP ASK comparison campaign used `.106` on `6.12.103`.
+Dell1 `.112` and dell2 `.113` drive eth3/eth4.
 Routed IPv4/IPv6, NAT44/NAT66/PAT, single-tag IPv4/IPv6 VLAN, PPPoE
 encap/decap and MTU-shrink fragmentation exist. Bridge learned/static unicast
 and B7a same-tagging have dated silicon acceptance; they are not dormant
@@ -47,7 +48,7 @@ deliberately wrong main-table gateway. F-267 used 512-byte coherent DMA-pool
 blocks, eight per page; 64 UDP streams had zero loss. These are smoke results,
 not full scale, soak or vendor-parity acceptance.
 
-**Publication is blocked by the per-port disable gate until the fixed image passes it (see §4.1).** Deleting both
+**The per-port disable/re-enable gate passed on `1941` and `2012`; factory-default live-boot validation remains open before publication (see §4.1).** On `0357`, deleting both
 `interfaces ethernet eth3 offload ipv4` and `ipv6` and committing initially
 disarmed port `0x10`, but the nft hardware flowtable retained eth3/eth3.10.
 New traffic rearmed `0x10` and hardware-forwarded despite the absent CLI
@@ -55,11 +56,99 @@ leaves: IPv4 9.326 Gbit/s and IPv6 9.198 Gbit/s. A separate IPv4 reproduction
 confirmed the absent leaves and both armed ports after traffic. The journal
 shows the pattern three times (17:37:59, 17:42:41 and 17:46:32; the latter
 two follow eth3 CLI commits): `0x10` is disengaged, then a flowtable REPLACE
-on eth3 re-engages it 2–8 s later without any commit. Restore the
-S1→S0 contract and repeat this gate before publication. The original CLI
+on eth3 re-engages it 2–8 s later without any commit. This violated the
+S1→S0 contract; the fix and successful re-tests are recorded below. The original CLI
 configuration was restored, both ports were armed, `ask-check` passed 36/36,
 and there were no kernel error-level messages at the end.
 Qdrant anchor: `2026-10-16 cold-boot 0357 release smoke: per-port disable rearm`.
+
+**Fixed-image gate re-test, 2026-10-16:** `.185` was running
+`2026.10.16-1941-rolling` (kernel `6.18.55-vyos`). With both eth3 offload
+families deleted, `ask-check` reported only eth4 configured and engaged
+(32/32 OK). The eth3→eth4 IPv4 and IPv6 test cells forwarded at 8.891 and
+9.133 Gbit/s with 87.1% and 65.6% DUT CPU; aggregate FE-hit ratios were 0.13
+and 0.09 (the v4 cell was PARTIAL by the harness threshold, consistent with
+some reverse-direction hits on still-engaged eth4). Reverse eth4→eth3 cells
+remained hardware-forwarded at 9.268 and 9.138 Gbit/s (ratios 1.01 and 1.02).
+No eth3 re-engage appeared during the disabled interval; the single `ENGAGED`
+event at 20:47:35 UTC followed the restore commit. After restoring eth3,
+forward v4/v6 reached 9.281/9.152 Gbit/s in hardware; the reverse-v6 repeat
+reached 9.170 Gbit/s, ratio 1.10. `ask-check` passed 36/36 and the kernel
+error-level log was empty after the first enabled battery. The board became
+unreachable from the runner after the final repeat, so no final health
+snapshot was captured.
+
+CI run `38960509088` succeeded on `38c40eaa` and produced
+`2026.10.16-2012-rolling`. The publish job was skipped; the ISO and its
+`.minisig` were deployed manually to lxc200 on 2026-10-16 21:01 and both
+`latest.iso` symlinks now point to `2012` (sidecar hash verified, HTTP 200).
+After a transient lab outage `.185` was still healthy on `1941` (`ask-check`
+36/36, no error-level dmesg). The operator subsequently deployed `2012`.
+
+**Installed-image gate, 2026-10-16 21:13–21:27 UTC:** `/proc/cmdline`
+confirmed `vyos-union=/boot/2026.10.16-2012-rolling`; boot ID
+`e74804be-e9e0-4c13-a66e-7b5e7659974d` remained unchanged through the tests.
+The journal starts at 21:07:33 UTC, but the boot method was not established:
+this is installed-image acceptance, not a new cold-boot result.
+`bin/testrig-offload-quick.sh` ran four routed cells per phase with
+`DUR=20 STEADY_FROM=5 STREAMS=8`; these are smoke tests, not parity or soak.
+
+| State | eth3→eth4 IPv4 / IPv6 (Gbit/s) | eth4→eth3 IPv4 / IPv6 (Gbit/s) | Evidence |
+|---|---|---|---|
+| Both ports enabled | 9.322 / 9.198 | 9.324 / 9.196 | All HW; aggregate FE-hit ratios 1.06–1.11; DUT CPU 0.2–0.3% |
+| eth3 offload families deleted | 9.292 / 8.638 | 9.313 / 9.186 | eth3 ingress software, CPU 54.4% / 83.9%, aggregate ratios 0.07 / 0.12; eth4 ingress HW, ratios 1.00 / 1.02 |
+| eth3 families restored | 9.323 / 9.278 | 9.321 / 9.193 | All HW; aggregate ratios 1.08–1.10; DUT CPU 0.2–0.3% |
+
+The live `fe_arm` readback showed exactly `Armed ports: 0x11` both before
+and after disabled traffic. No eth3 `ENGAGED` event occurred during
+21:20:56–21:23:23 UTC; its only new engagement was the restoration commit at
+21:23:24 UTC. The disabled IPv6 cell's aggregate `PARTIAL` verdict does not
+indicate eth3 rearm: eth4 remained engaged and aggregate counters also include
+reverse traffic. `ask-check` passed 32/32 with eth3 disabled and 36/36 after
+restoration. Final live ports were `0x10 0x11`, kernel error-level output
+was empty, and saved and running configuration hashes matched their
+pre-test values. Management eth0 was untouched.
+
+The shipped `caam-check` matched the source and passed: 129 CAAM-backed
+algorithms were registered, the checked IPsec transforms selected CAAM,
+and their reported self-tests passed. This does not establish full ESP
+dataplane offload. The shipped `/opt/vyatta/etc/config.boot.default` matched
+`board/vyos-config/config.boot.dhcp` byte-for-byte (SHA-256
+`625b97561979eb9594518f026f45e585b459fa11cf367a5b240acd514b168ba9`).
+The active config still used the preserved lab flowtable `ASK1`, not factory
+`FT`; factory-default live-boot validation therefore remains untested.
+
+**Offload regression battery, same boot, 2026-10-16:**
+`bin/testrig-offload-quick.sh` covered all 20 base cells plus the 3 combo
+cells (`DUR=20 STEADY_FROM=5 STREAMS=8`, unidirectional). The base cells
+were unicast, NAT, VLAN↔VLAN, VLAN↔port and PPPoE down/up, in IPv4 and
+IPv6 and in both directions. The combo cells were `nat-pppoe-up-v4`,
+`nat-vlan-v4` and `nat-vlan-v6`. **All 23 cells were HW**, at 9.14–9.40
+Gbit/s with FE-hit ratios 1.05–1.13 and DUT busy 0.2–0.5%. Afterwards
+`ask-check` passed 36/36, ports `0x10 0x11` were armed, and kernel
+error-level output was empty. This covers the forwarding paths that the
+`ae98749c` rearm fix could affect. It is a functional and throughput smoke
+test, not the strict-mean parity campaign or a soak.
+
+**Factory-default static validation, same boot:** the shipped
+`/opt/vyatta/etc/config.boot.default` has no version footer, so a live boot
+runs every migration. A copy migrated cleanly as root with
+`/usr/libexec/vyos/run-config-migration.py` (rc 0). The migrated file kept
+the eth1–eth4 `offload ipv4 ipv6` leaves, flowtable `FT` with `offload
+hardware` and `hardware-offload-delay 500`, and the IPv4/IPv6 rule 10
+targeting `FT`; eth0 had no offload families. The migrated file then loaded
+without error into a `vyattacfg` configure session. `compare` showed the
+expected `ASK1`→`FT` and eth1/eth2 differences, and the session was
+discarded. The saved config hash and live armed ports (`0x10 0x11`) were
+unchanged.
+
+One trap: loading the unmigrated file from a non-root vbash session fails in
+`interfaces/20-to-21` with a JSON decode error, because `ethtool` lives in
+`/usr/sbin` and is not on that user's PATH. This is a test-harness artifact;
+boot migration runs as root. It does not replace the live-boot gate, which
+still has to prove the boot commit, engagement, and the first offload engage
+on the 1G RJ45 ports eth1/eth2. No eth1/eth2 engage evidence exists in this
+plan or in qdrant.
 
 ### 1.2 Feature-parity blockers
 
@@ -137,7 +226,7 @@ programming recipes. Resolve contradictions before touching code.
 
 | Priority | Work | Dependency / exit |
 |---|---|---|
-| 1 | Release gate on `2026.10.16-1941-rolling` (per-port disable/re-enable, `ask-check`, factory default), then publish | Cold boot first; mutate eth3 only |
+| 1 | Verify the `2012` factory default on a fresh/live boot; then publication decision | Installed-image checks and per-port disable/re-enable passed on `2012`; do not overwrite the installed lab config |
 | 1a | Analyse the seven strict-mean FAIL cells and the partial NAT44 run | Repeat under the same alternating protocol; does not close feature parity |
 | 2 | F-266 FIN/RST transit and NAT correctness; TTL safety | Must pass before connection-scale claims or new default-on safety paths |
 | 3 | Close existing-feature acceptance: PPPoE, bridge current-image repeat, resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
@@ -160,21 +249,30 @@ programming recipes. Resolve contradictions before touching code.
   2026-10-16 in `ask_hw.c`: the flow path engages only when the mask is
   non-zero (checked under `h->lock`, `-ENODEV` = quiet SW fallback), and
   disengage clears the mask under `h->lock` before teardown. Built by CI run
-  `38956672515` (head `087a40e5`) as `2026.10.16-1941-rolling`, deployed to
-  `http://192.168.1.137:8080/iso/latest.iso`; not yet board-tested. Gate,
-  after a cold boot:
-  - delete both eth3 offload leaves and push IPv4/IPv6 traffic: port `0x10`
-    must stay disengaged with both families in software;
-  - eth4 (`0x11`) must stay independently in hardware;
-  - explicit re-enable must restore hardware forwarding;
-  - `ask-check` must pass 36/36, with no kernel error-level messages.
-- **Factory default (commit `c84499e5`, not in `1941`):** the ISO's
+  `38956672515` (head `087a40e5`) as `2026.10.16-1941-rolling`. The gate
+  passed on `.185` on `1941` and `2012` on 2026-10-16: deleting both eth3 leaves left eth3
+  unconfigured/disengaged while eth4 stayed engaged; generated eth3-ingress
+  traffic was software-forwarded, reverse eth4-ingress traffic stayed in
+  hardware, and no flowtable REPLACE re-engaged eth3 before the restore
+  commit. Re-enable restored hardware forwarding in both families.
+  `ask-check` was 32/32 while eth3 was disabled and 36/36 after restoration;
+  no kernel error-level messages were present after the first `1941` enabled
+  battery or at the final `2012` check. The `2012` gate also verified the live
+  `fe_arm` port set and unchanged saved/running config hashes. Detailed rates,
+  boot scope and the earlier `1941` reachability caveat are in §1.1.
+- **Factory default (commit `c84499e5`, included in `2012` but not `1941`):** the ISO's
   `config.boot.default` now enables `offload ipv4 ipv6` on eth1–eth4 (not
   eth0, the management port), a hardware flowtable `FT` over eth1–eth4 with
   `hardware-offload-delay 500`, and IPv4/IPv6 forward rule 10 → `offload`.
   This applies only to fresh installs and live boots; `add system image` keeps
-  the existing config. Verify on a live boot from the next ISO that
-  `ask-check` shows the ports armed without any operator commits.
+  the existing config. The `2012` factory default still needs live-boot
+  validation; the run's publish job was skipped. On 2026-10-16 21:01 UTC,
+  the ISO and sidecar were deployed to lxc200, both `latest.iso` symlinks
+  were verified against `2012` (matching sidecar hash, HTTP 200). The operator
+  then upgraded `.185` to `2012`; `ask-check` passed 36/36 and the shipped
+  default file matched the source, but the running config was preserved.
+  A separate fresh/live boot must apply the factory config without operator
+  commits; the installed-image checks do not close that gate.
 - **T-PARITY-10:** DONE 2026-10-16. 480/480 attempts, 17/24 PASS, 7 strict-mean
   FAIL; the scoreboard is in `ASK2-VENDOR-PARITY.md`. Follow-up: repeat the
   seven FAIL cells and the partial NAT44 run under the same protocol. Note
