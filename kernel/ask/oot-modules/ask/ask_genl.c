@@ -114,61 +114,61 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 {
 .cmd      = ASK_CMD_GET_INFO,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_get_info_doit,
 },
 {
 .cmd      = ASK_CMD_GET_MURAM,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_get_muram_doit,
 },
 {
 .cmd      = ASK_CMD_DUMP_FLOWS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .dumpit   = ask_genl_dump_flows_dumpit,
 },
 {
 .cmd      = ASK_CMD_GET_FLOW,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_get_flow_doit,
 },
 {
 .cmd      = ASK_CMD_DUMP_SAS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .dumpit   = ask_genl_eopnotsupp_dumpit,
 },
 {
 .cmd      = ASK_CMD_FLUSH_FLOWS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_flush_flows_doit,
 },
 {
 .cmd      = ASK_CMD_FLUSH_SAS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_eopnotsupp_doit,
 },
 {
 .cmd      = ASK_CMD_SET_POLICER,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_set_policer_doit,
 },
 {
 .cmd      = ASK_CMD_ENGAGE,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_engage_doit,
 },
 {
 .cmd      = ASK_CMD_DISENGAGE,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_disengage_doit,
 },
 };
@@ -182,7 +182,7 @@ static struct genl_family ask_genl_family __ro_after_init = {
 .version       = ASK_GENL_VERSION,
 .maxattr       = ASK_ATTR_MAX,
 .policy        = ask_top_policy,
-.netnsok       = true,
+.netnsok       = false,
 .parallel_ops  = false,
 .module        = THIS_MODULE,
 .small_ops     = ask_genl_small_ops,
@@ -897,4 +897,3 @@ ask_hw_offload_disengage(port_id);
 ask_pr_info("genl: disengaged port 0x%02x\n", port_id);
 return 0;
 }
-
