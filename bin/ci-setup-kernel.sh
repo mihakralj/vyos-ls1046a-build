@@ -2520,16 +2520,12 @@ fi
 # flows kworkers piled up on fe_lock; at 8192 inserts stopped (.185, image
 # 1723). F-265 demotes the two per-insert log lines (F-177 SYNC success,
 # F-148 cosmetic warning) that 40k inserts/s would turn into a log storm.
-# Then bin/test-ehash-delete.py runs the real del_key()/flow_drain() with a
-# simulated SYNC and fails the build, before the kernel compile, if
-# unlink/index/SYNC/free ordering or ctx release regress. After F-263.
+# The delete harness runs after F-267. After F-263.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_264.py" 2>&1
     echo "### fman_pcd.c: F-264 ehash bucket index (O(chain) key lookups)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_265.py" 2>&1
     echo "### fman_pcd.c: F-265 per-insert log lines demoted"
-    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
 # F-266 (TCP control punt, 2026-10-15, default off): with offload_delay_ms=0
@@ -2543,6 +2539,21 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_266.py" 2>&1
     echo "### fman_pcd.c: F-266 TCP control punt (default off)"
+fi
+
+# F-267 (control-plane memory, 2026-10-16): ehash flow records and their F-175
+# FE contexts come from one per-table dma_pool (512-byte self-aligned blocks,
+# context at +320) instead of two page-rounded dma_alloc_coherent() calls
+# (~9 KiB MemAvailable per flow on .185, 2026-10-13). Remaining per-insert
+# log lines (F-219 eviction, F-197 FQID fallback, F-251 drop trace) go to
+# debug. Then bin/test-ehash-delete.py runs the real del_key()/flow_drain()
+# with a simulated SYNC and fails the build, before the kernel compile, if
+# unlink/index/SYNC/free ordering or block release regress. After F-266.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_267.py" 2>&1
+    echo "### fman_pcd.c: F-267 ehash record pool + per-insert logs demoted"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
