@@ -1,13 +1,12 @@
 # ASK2 vs NXP ASK: current parity evidence
 
-**2026-10-15. Full feature parity is not reached.** The authoritative gap
+**Updated 2026-10-16. Full feature parity is not reached.** The authoritative gap
 inventory and task order are in [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md)
 §1.2/§3/§4. This file owns comparison evidence, not another implementation
 backlog. Completed and provisional single-run tables were moved verbatim to
 [`archive/ASK2-VENDOR-PARITY-2026-10-15.md`](archive/ASK2-VENDOR-PARITY-2026-10-15.md).
-No final campaign values have been published here yet.
 
-## Current campaign
+## Completed 10×10 campaign
 
 | Property | Contract |
 |---|---|
@@ -19,21 +18,24 @@ No final campaign values have been published here yet.
 | Repetitions | 10 per board per cell, adjacent paired runs; first board alternates each round; 480 attempts |
 | Per run | 30 s, iperf3 `-Z -P8`, steady receiver intervals from 10 s; bidirectional uses `--bidir` |
 | Output | dell2 `~/testrig/campaigns/parity-10x10-20261015T2130Z/` |
-| State | In progress at this planning checkpoint; read `status.json`, not a copied counter |
+| Final state | 480/480 attempts; completed 2026-10-16 02:54:36 UTC; `COMPLETE_WITH_ISSUES` (one partial-offload run) |
+| Summary artifacts | `summary.csv`, `summary.json`, `measurements.csv`, and per-run CSV/JSON on dell2 |
 
-Do not overlap other rig traffic, alter steering/MTU, or stop this campaign.
-It excludes PPPoE, bridging, WireGuard, packet rate, connection scale and
-latency. Passing all its cells would establish only measured-path throughput
-parity, not full feature parity.
+The campaign tested only the listed routed/NAT/VLAN paths. It excludes PPPoE,
+bridging, WireGuard, packet rate, connection scale and latency. Passing all
+its cells would establish only measured-path throughput parity, not full
+feature parity.
 
 ## Analysis and verdict contract
 
 Preserve `measurements.csv` and every per-run CSV/JSON, including errors and
-non-hardware runs. Summary must report paired means and medians, sample SD,
-CPU, retransmits, missing/non-HW pairs, and 95% paired bootstrap intervals
-for ASK2-minus-vendor throughput. No slow or high-CPU result is trimmed as
-"jitter". Only complete HW-proven pairs contribute to paired throughput
-intervals; exclusions and their reasons must remain visible.
+non-hardware runs. `summary.csv`/`summary.json` report paired means and
+medians, sample SD, missing/non-HW pairs, and 95% paired bootstrap intervals
+for ASK2-minus-vendor throughput. The raw `measurements.csv` and per-run
+artifacts retain CPU, retransmits, and other run-level diagnostics. The
+summary uses complete HW-proven pairs, 20,000 percentile-bootstrap resamples
+per cell, and seed 10551. No slow or high-CPU result is trimmed as "jitter";
+the partial run remains in the raw data and is identified below.
 
 Intervals are exploratory per cell, not campaign-wide multiplicity-adjusted
 claims or proof of equivalence. **A lower ASK2 paired mean in any cell is a
@@ -42,16 +44,79 @@ invalid pairs are incomplete evidence, never a PASS. Throughput is iperf3
 payload Gbit/s; bidirectional values sum both directions.
 
 The earlier one-run re-test showed both stacks shifting by about an
-MSS-sized step (~1.3%). It does not demonstrate an ASK2 slowdown and is not
-a final parity verdict. Its exact numbers, directions and raw-data paths
-are in the archive. Do not mix older 40 s/two-client medians or other images
-into this campaign's baseline.
+MSS-sized step (~1.3%). It does not demonstrate an ASK2 slowdown and is
+superseded by the final campaign below. Its exact numbers, directions and
+raw-data paths are in the archive. Do not mix older 40 s/two-client medians
+or other images into this campaign's baseline.
+
+## Final 10×10 results
+
+The tables give each cell's mean payload throughput, not a best run.
+`Δ` is ASK2 minus NXP ASK; its 95% paired bootstrap interval is in Gbit/s.
+`PASS`/`FAIL` applies the strict mean rule above, not the interval: any lower
+ASK2 mean is a `FAIL`, even when the interval includes zero. All values use
+complete pairs with hardware forwarding on both DUTs. `uni` cells are one
+way; `-rev` means the reverse client direction. `unicast` is routed traffic,
+`nat` is NAT44/NAT66, `vlan` is VID translation, `vlanport` is VLAN-to-plain
+port (strip), and `portvlan` is plain-port-to-VLAN (add).
+
+### One-way cells
+
+| Cell | NXP ASK mean | ASK2 mean | Δ | 95% paired CI for Δ | Verdict | HW pairs |
+|---|---:|---:|---:|---:|---|---:|
+| Routed IPv4, eth3→eth4 | 9.2822 | 9.2822 | +0.0000 (+0.000%) | [−0.0014, +0.0011] | PASS | 10/10 |
+| Routed IPv6, eth3→eth4 | 9.1545 | 9.1539 | −0.0006 (−0.007%) | [−0.0025, +0.0012] | FAIL | 10/10 |
+| NAT44, eth3→eth4 | 9.2816 | 9.2811 | −0.0005 (−0.005%) | [−0.0021, +0.0011] | FAIL | 10/10 |
+| NAT66, eth3→eth4 | 9.1540 | 9.1538 | −0.0002 (−0.002%) | [−0.0015, +0.0011] | FAIL | 10/10 |
+| VLAN translate IPv4, eth3→eth4 | 9.2707 | 9.2577 | −0.0130 (−0.140%) | [−0.0368, −0.0003] | FAIL | 10/10 |
+| VLAN translate IPv6, eth3→eth4 | 9.1300 | 9.1307 | +0.0007 (+0.008%) | [−0.0003, +0.0017] | PASS | 10/10 |
+| Routed IPv4, eth4→eth3 | 9.2832 | 9.3202 | +0.0370 (+0.399%) | [+0.0012, +0.0748] | PASS | 10/10 |
+| Routed IPv6, eth4→eth3 | 9.1539 | 9.1657 | +0.0118 (+0.129%) | [−0.0022, +0.0372] | PASS | 10/10 |
+| NAT44, eth4→eth3 | 9.2808 | 9.3187 | +0.0379 (+0.408%) | [+0.0023, +0.0744] | PASS | 10/10 |
+| NAT66, eth4→eth3 | 9.1552 | 9.1659 | +0.0107 (+0.117%) | [−0.0034, +0.0363] | PASS | 10/10 |
+| VLAN translate IPv4, eth4→eth3 | 9.2584 | 9.2836 | +0.0252 (+0.272%) | [−0.0004, +0.0623] | PASS | 10/10 |
+| VLAN translate IPv6, eth4→eth3 | 9.1314 | 9.1544 | +0.0230 (+0.252%) | [−0.0026, +0.0592] | PASS | 10/10 |
+| VLAN→port IPv4 (strip), eth3→eth4 | 9.2592 | 9.2590 | −0.0002 (−0.002%) | [−0.0013, +0.0009] | FAIL | 10/10 |
+| Port→VLAN IPv4 (add), eth4→eth3 | 9.2625 | 9.2864 | +0.0239 (+0.258%) | [−0.0013, +0.0608] | PASS | 10/10 |
+| VLAN→port IPv6 (strip), eth3→eth4 | 9.1428 | 9.1303 | −0.0125 (−0.137%) | [−0.0361, 0.0000] | FAIL | 10/10 |
+| Port→VLAN IPv6 (add), eth4→eth3 | 9.1339 | 9.1947 | +0.0608 (+0.666%) | [+0.0250, +0.0964] | PASS | 10/10 |
+
+### Bidirectional cells
+
+| Cell | NXP ASK mean | ASK2 mean | Δ | 95% paired CI for Δ | Verdict | HW pairs |
+|---|---:|---:|---:|---:|---|---:|
+| Routed IPv4 | 17.9932 | 18.1304 | +0.1372 (+0.763%) | [+0.0702, +0.1996] | PASS | 10/10 |
+| Routed IPv6 | 17.6136 | 17.8974 | +0.2838 (+1.611%) | [+0.1196, +0.5051] | PASS | 10/10 |
+| NAT44 | 17.8798 | 18.1681 | +0.2883 (+1.613%) | [+0.1141, +0.5334] | PASS | 9/10 |
+| NAT66 | 17.2940 | 17.9061 | +0.6121 (+3.539%) | [+0.3184, +0.9102] | PASS | 10/10 |
+| VLAN translate IPv4 | 17.9906 | 18.1525 | +0.1619 (+0.900%) | [+0.0690, +0.2581] | PASS | 10/10 |
+| VLAN translate IPv6 | 17.7910 | 17.9007 | +0.1097 (+0.617%) | [+0.0461, +0.1651] | PASS | 10/10 |
+| VLAN↔port strip/add IPv4 | 12.9309 | 12.9983 | +0.0674 (+0.521%) | [+0.0115, +0.1215] | PASS | 10/10 |
+| VLAN↔port strip/add IPv6 | 12.7994 | 12.7526 | −0.0468 (−0.366%) | [−0.1653, +0.0402] | FAIL | 10/10 |
+
+Under the strict mean rule, **7 of 24 cells are FAIL**: six one-way cells
+(routed IPv6 forward, NAT44/NAT66 forward, VLAN-translate IPv4 forward,
+VLAN→port IPv4/IPv6) and bidirectional VLAN↔port IPv6. Four of those
+one-way deficits are extremely small (0.002–0.007%); they remain FAIL by
+contract and need follow-up rather than being reclassified as ties.
+
+One excluded non-HW pair accounts for the campaign's `COMPLETE_WITH_ISSUES`
+status. In round 5, ASK2 `.185` bidirectional NAT44 was `PARTIAL` at
+13.898 Gbit/s, with `hw_ratio=0.79`, DUT busy 29.7%, softirq 28.9%, and
+118,142 retransmits. The run returned successfully but was not a complete
+hardware-forwarded pair, so NAT44 bidirectional has 9 valid pairs. No cause
+has been established; the observation must not be dismissed as jitter.
+Its raw data is `bidir-nat-v4-185-r05.csv` beside the summary artifacts.
+
+These results are for the `0551` ASK2 image listed above, not the later
+F-267/routing-optimization image or the uncommitted PBR next-hop fix. The
+campaign did not exercise policy routing.
 
 ## Evidence still required
 
 | Surface | Current acceptance state | Required comparison |
 |---|---|---|
-| Routed v4/v6, NAT44/NAT66, VLAN translate/strip/add | Implemented; current 10×10 result pending | Publish all 24 paired-cell summaries |
+| Routed v4/v6, NAT44/NAT66, VLAN translate/strip/add | Implemented; 10×10 complete, 7 strict-mean FAIL cells | Investigate the seven lower-mean cells; repeat small deficits under the same alternating protocol |
 | NAT over VLAN | Implemented; prior quick results historical | Same-conditions current-image combo |
 | PPPoE v4/v6 encap/decap, NAT over PPPoE | Implemented; prior runs not same-session | Both DUTs with vendor `pppoe10` up and dell1 RPS |
 | PPPoE fragmentation | Prior ASK2 intact delivery; vendor UDP-header corruption observed | Both DUTs, controls/warm/new/DF/PTB matrix |
