@@ -107,6 +107,12 @@ echo 0 | sudo tee /sys/module/ask/parameters/bridge_offload   # removes all brid
 delete interfaces ethernet eth3 offload
 ```
 
+This removes both family leaves. Flowtable traffic does not re-enable a
+disabled port; only restoring `offload ipv4` and/or `offload ipv6` does.
+Images up to and including `2026.10.16-0357-rolling` had a bug where new flows
+re-armed the port within seconds of the disable; later images fix it (pending
+board validation).
+
 ### 1.2 Hardware ingress policer (FMan Policer)
 
 Patches `024`, `025`.
