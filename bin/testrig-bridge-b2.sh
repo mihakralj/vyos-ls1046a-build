@@ -6,6 +6,7 @@
 # the IPv4 case must HIT (pkt_count +20, dell2 port.rx_unicast +20). Restores ROUTED at the end.
 # CASES="..." overrides the case list; tag_* cases (802.1Q VID 10) are reported as info only.
 set -u
+FAILS=0
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 DUT="ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185"
 D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
@@ -14,7 +15,7 @@ OFF=/sys/kernel/debug/ask/offload; PCD=/sys/kernel/debug/fman_pcd/0
 
 dut(){ $DUT "$1"; }
 ctl(){ dut "echo '$1' | sudo tee $OFF >/dev/null" || echo "!! '$1' failed"; }
-hits(){ dut "sudo awk '/keysz=8 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
+hits(){ dut "sudo awk '/keysz=16 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
 k_rx(){ dut "cat /sys/class/net/eth3/statistics/rx_packets"; }
 d2_rx(){ $D2 "sudo ethtool -S $IF | awk '/port.rx_unicast:/{print \$2}'"; }
 send(){ $D1 "sudo python3 -c \"from scapy.all import *
@@ -36,7 +37,7 @@ echo "== 2. ask_bridge KUnit"; dut 'sudo modprobe ask_kunit; sudo cat /sys/kerne
 
 echo "== 3. arm"; dut 'sudo /usr/local/bin/pcd-snapshot capture -o /tmp/b2-baseline.json >/dev/null && echo baseline captured'
 ctl "disengage 0x10"; dut 'sudo ip link set eth3 promisc on'
-ctl "l2engage eth3"; ctl "l2add eth3 $DA 0x0800 eth4"
+ctl "l2engage eth3"; ctl "l2add eth3 $DA $SA 0 0x0800 eth4"
 dut 'sudo dmesg | tail -15 | grep -iE "F-148|F-255|l2|engage|error|warn"'
 printf '%-10s %6s %6s %6s  %s\n' case hits k_rx dell2 verdict
 for c in ${CASES:-arp60 e60 e128 v4udp1000}; do
@@ -45,9 +46,13 @@ for c in ${CASES:-arp60 e60 e128 v4udp1000}; do
   if [ ${c#tag} != $c ]; then v=info
   elif [ $c = v4udp1000 ]; then [ $dh -eq $N ] && [ $dr -ge $N ] && v=PASS || v=FAIL
   else [ $dh -eq 0 ] && [ $dk -ge $N ] && v=PASS || v=FAIL; fi
+  [ $v = FAIL ] && FAILS=$((FAILS+1))
   printf '%-10s %6d %6d %6d  %s\n' $c $dh $dk $dr $v
 done
 
-echo "== 4. restore"; ctl "l2del eth3 $DA 0x0800"; ctl "disengage 0x10"
+echo "== 4. restore"; ctl "l2del eth3 $DA $SA 0 0x0800"; ctl "disengage 0x10"
 dut 'sudo ip link set eth3 promisc off'; ctl "engage 0x10"
-dut "sudo grep used $PCD/muram_budget; sudo /usr/local/bin/pcd-snapshot diff /tmp/b2-baseline.json | tail -5"
+dut "sudo grep used $PCD/muram_budget"
+dut "sudo /usr/local/bin/pcd-snapshot diff /tmp/b2-baseline.json | tail -5; exit \${PIPESTATUS[0]}" || { echo "pcd-snapshot diff: FAIL"; FAILS=$((FAILS+1)); }
+echo "== result: $FAILS failure(s)"; [ "$FAILS" -eq 0 ] && echo PASS || echo FAIL
+exit $(( FAILS > 0 ))

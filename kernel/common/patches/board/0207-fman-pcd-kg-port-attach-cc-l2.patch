@@ -40,7 +40,7 @@ performed by this patch.
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-index ae9759f..c1507a7 100644
+index de6644fc9..a84e3bbcc 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 @@ -64,6 +64,21 @@
@@ -65,7 +65,7 @@ index ae9759f..c1507a7 100644
  
  /*
   * KG extract-source enumeration that mirrors the silicon-side
-@@ -766,6 +781,97 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+@@ -757,6 +772,97 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_cc);
  
@@ -161,10 +161,10 @@ index ae9759f..c1507a7 100644
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_cc_l2);
 +
  /*
-  * fman_pcd_kg_port_attach_cc_dual() - like fman_pcd_kg_port_attach_cc(),
-  * but arms the port's scheme for F-224/F-236 dual-lane GEC extraction
+  * fman_pcd_kg_port_attach_oh_cc() - create and bind a catch-all KeyGen
+  * scheme routing an O/H port's frames into a CC tree (T-M6-8 Option D
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index dd4dec7..171b8e3 100644
+index dd4dec7b5..171b8e3f7 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
 @@ -276,6 +276,20 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,

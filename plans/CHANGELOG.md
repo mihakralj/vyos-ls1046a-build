@@ -31,6 +31,15 @@ Historical change records, newest first. Subheadings (Fixed / Added / Improved /
 ### 2.1 Unreleased
 
 **Added**
+- **Factory default enables ASK2 offload (2026-10-16, `c84499e5`).** Fresh installs and live boots get `offload ipv4 ipv6` on eth1–eth4 (not eth0, the management port), a hardware flowtable `FT` over eth1–eth4 with `hardware-offload-delay 500`, and IPv4/IPv6 forward rule 10 → `offload`. `add system image` keeps the existing config.
+- **`caam-check` reports IPsec transform selection (2026-10-16).** A new section 5b shows which driver wins `authenc(hmac(sha256),cbc(aes))`, `rfc4106(gcm(aes))` and related transforms, with priorities and self-test results, plus CAAM debugfs job counters. The check now fails when no CAAM algorithm is registered or a CAAM self-test has not passed. Stale FLAVOR and ASK 1.x sections were removed.
+
+**Fixed**
+- **Disabled port re-armed hardware offload (2026-10-16, `ae98749c`).** After both `offload` leaves were deleted from a port, the next flowtable REPLACE re-engaged it in hardware, because a zero family mask defaulted back to IPv4+IPv6. The flow path now engages only with a non-zero mask, and disengage clears the mask under the port lock.
+- **Bridge test harnesses always exited 0 (2026-10-16).** `testrig-bridge-{b6,b2,capacity,soak}.sh` now count FAIL rows, `pcd-snapshot` diffs, leftover records and kernel errors, and exit nonzero.
+- **CAAM QI kernel pin used a non-existent symbol (2026-10-16).** `CONFIG_CRYPTO_DEV_FSL_CAAM_QI` is replaced with `CRYPTO_API` and `CRYPTO_API_QI` pins. The resolved config is unchanged.
+
+**Added**
 - **Hardware VLAN offload (802.1Q pop, push and translate), IPv4 and IPv6 (2026-10-05, `dpaa1`).** Routed flows between VLAN sub-interfaces, and between VLAN and untagged ports, are offloaded through the same FMan ehash path as routed traffic, using the vendor's opcode chain (`04 11 12 21 42 41 01`). The feature is on by default (`ask.vlan_offload`, `ask.vlan_push_only`). Bidir: VLAN↔VLAN 15.6–15.9 Gbit/s and VLAN↔untagged 11.7 Gbit/s, against the vendor reference's 16.9 / 12.8 Gbit/s on the same rig. Board patches 0215–0218.
 
 **Fixed**

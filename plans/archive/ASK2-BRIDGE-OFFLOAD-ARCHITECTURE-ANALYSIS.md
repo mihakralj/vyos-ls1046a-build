@@ -1,5 +1,10 @@
 # ASK2 L2 Bridge HW Offload — Architecture Analysis & Recommendation
 
+> Archived 2026-10-15. Completed vendor/topology analysis with historical
+> recommendations and status. Current bridge remainder is in
+> `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md`; execution authority is
+> `plans/ASK2-MASTER-PLAN.md`. Do not reopen completed B0–B6/B7a from this text.
+
 **Date:** 2026-10-07 (revised 2026-10-09)
 **Branches reviewed:** `dpaa1` (ASK2), `nxp-sdk` (vendor ASK)
 **Task:** T-M6-2 — analyze how to do HW-offloaded bridging "like smart switches do it"
@@ -635,7 +640,7 @@ This approach:
 ## 10. References
 
 - `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md` — ASK2 bridge plan and execution contract (ehash; review 2026-10-09 in §13)
-- `plans/ASK2-MASTER-PLAN.md` §4.6.4 Phase M6-E — T-M6-2 master task
+- `plans/ASK2-MASTER-PLAN.md` §4.6.4 — T-M6-2 master task
 - `arch/fman-vendor-source-extraction-2026-08-07.md` — Vendor L2 scheme evidence (1.2M packets)
 - `specs/reference/nxp-ask-fmc/cdx_pcd.xml` — Vendor FMC policy (cdx_ethernet_cc)
 - `/mnt/builds/ASK/cdx/control_bridge.c` — Vendor L2 flow management / routed-via-bridge (ageing timer commented out, §2.5)

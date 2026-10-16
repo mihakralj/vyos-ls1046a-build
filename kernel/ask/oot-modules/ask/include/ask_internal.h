@@ -114,7 +114,7 @@ int  ask_hw_offload_engage(u8 hw_port_id);
 int  ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 				bool if_engaged);
 int  ask_hw_b2_l2_engage(const char *ifname);
-int  ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
+int  ask_hw_b2_l2_record(const char *iifname, const u8 *key,
 			 const char *oifname, bool add);
 void ask_hw_offload_disengage(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
@@ -123,9 +123,10 @@ unsigned long ask_hw_get_enq_fe_off(void);
 struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
-int  ask_hw_l2_record(u8 hw_port_id, const u8 *da, __be16 eth_type, u32 fqid,
-		      bool add);
+int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add);
+int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
+u8   ask_hw_port_family_mask(u8 hw_port_id);
 
 /*
  * CR-012: warms this port's no-confirm egress TX FQ cache. MUST be called
@@ -1158,11 +1159,11 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
 #define ASK_FE_KEY_SIZE 14
 #define ASK_FE_KEY_SIZE_V6 38
 /*
- * Dual-lane 46-byte key (specs/ask2-ipv6-dual-lane-key-design.md, silicon-proven
+ * Dual-lane 50-byte key (specs/ask2-ipv6-dual-lane-key-design.md, silicon-proven
  * 2026-08-21). One fixed-width key carries BOTH families so a single match-all
  * AC_CC scheme + one per-port table serve v4 and v6 with no parser LCV split.
  * Layout (matches the F-224 GEC extraction order exactly):
- *   [0]      FAMILY   0x80 v4 / 0x40 v6   (parse-result L3R byte 4)
+ *   [0]      FAMILY   0x40 v4 / 0x60 v6   (parse-result L3R byte 4)
  *   [1..8]   IPv4 src(4) dst(4)           (zero on a v6 flow)
  *   [9..24]  IPv6 src(16)                 (zero on a v4 flow)
  *   [25..40] IPv6 dst(16)                 (zero on a v4 flow)
@@ -1177,9 +1178,8 @@ return l3_proto == ASK_FLOW_L3_IPV6 ? 16 : 4;
 #define ASK_FE_KEY_SIZE_DUAL 50
 /* F-243 (2026-09-06): silicon family byte = L3 header byte 0 masked
  * 0xF0 = the IP-version nibble shifted: v4 0x45->0x40, v6 0x60->0x60.
- * Live-captured on .185 (46-byte dual composite byte 0 = 0x40 for a
- * v4 flow); the earlier 0x00 values made every record miss on the
- * first byte (zero ehash HITs on the dual-lane config). */
+ * Live-captured on .185; the earlier 0x00 values made every record miss on
+ * the first byte (zero ehash HITs on the dual-lane config). */
 #define ASK_FE_FAMILY_V4 0x40
 #define ASK_FE_FAMILY_V6 0x60
 void ask_fe_build_key(const struct ask_flow_key *key, u8 k[ASK_FE_KEY_SIZE]);
@@ -1215,7 +1215,9 @@ void ask_bridge_kick(void);
 void ask_bridge_forget_port(u8 hw_port_id);
 enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev);
 struct fman_pcd_fe_flow_action;
-int  ask_bridge_fe_action(const u8 *da, __be16 eth_type, u32 egress_tx_fqid,
+void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
+		    __be16 eth_type);
+int  ask_bridge_fe_action(const u8 *key, u32 egress_tx_fqid,
 			  unsigned long enq_off,
 			  struct fman_pcd_fe_flow_action *a);
 

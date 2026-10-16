@@ -920,12 +920,15 @@ scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
 # backend is present at FMan bring-up and patch 0134's
 # caam_qi_ext_consumer_register/_release are compiled-in + EXPORT_SYMBOL_GPL'd
 # (a =m caam_jr would force fragile module load-order coupling with ask.ko).
-# CONFIG_CRYPTO_DEV_FSL_CAAM_QI is the symbol that actually compiles qi.c — the
-# patch's edits and exports live there; the original 5-symbol plan omitted it.
+# CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI is the symbol that compiles qi.c
+# (caam_jr-$(..._CRYPTO_API_QI) += qi.o); the patch's edits and exports live
+# there. It defaults to y with CRYPTO_API + FSL_DPAA; pin it so a defconfig
+# change cannot drop it. (CONFIG_CRYPTO_DEV_FSL_CAAM_QI does not exist.)
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_COMMON y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_JR y
-scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_QI y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_QI y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_DESC y
 scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_AHASH_API_DESC y
 scripts/config --disable CONFIG_DEBUG_PREEMPT
@@ -2520,14 +2523,38 @@ fi
 # flows kworkers piled up on fe_lock; at 8192 inserts stopped (.185, image
 # 1723). F-265 demotes the two per-insert log lines (F-177 SYNC success,
 # F-148 cosmetic warning) that 40k inserts/s would turn into a log storm.
-# Then bin/test-ehash-delete.py runs the real del_key()/flow_drain() with a
-# simulated SYNC and fails the build, before the kernel compile, if
-# unlink/index/SYNC/free ordering or ctx release regress. After F-263.
+# The delete harness runs after F-267. After F-263.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_264.py" 2>&1
     echo "### fman_pcd.c: F-264 ehash bucket index (O(chain) key lookups)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_265.py" 2>&1
     echo "### fman_pcd.c: F-265 per-insert log lines demoted"
+fi
+
+# F-266 (TCP control punt, 2026-10-15, default off): with offload_delay_ms=0
+# the FE swallows FIN/RST of offloaded TCP flows and conntrack keeps them
+# ESTABLISHED for ~7300 s. Adds fman_port_sp_attach() and exported
+# fman_pcd_tcp_ctl_punt_arm()/_disarm(): load the vendor TCP soft-parser
+# routine (tcp.flags & 7 -> HPNIA 0x500002, BMI enqueue to the default FQ) at
+# parser byte 0x40 with FMPR_RPIMAC[PEN] cleared and readback, then attach
+# the port's TCP HXS (slot 10) to label 0x20. Nothing runs until ask.ko
+# tcp_ctl_punt=1 arms an engaged port. After F-265.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_266.py" 2>&1
+    echo "### fman_pcd.c: F-266 TCP control punt (default off)"
+fi
+
+# F-267 (control-plane memory, 2026-10-16): ehash flow records and their F-175
+# FE contexts come from one per-table dma_pool (512-byte self-aligned blocks,
+# context at +320) instead of two page-rounded dma_alloc_coherent() calls
+# (~9 KiB MemAvailable per flow on .185, 2026-10-13). Remaining per-insert
+# log lines (F-219 eviction, F-197 FQID fallback, F-251 drop trace) go to
+# debug. Then bin/test-ehash-delete.py runs the real del_key()/flow_drain()
+# with a simulated SYNC and fails the build, before the kernel compile, if
+# unlink/index/SYNC/free ordering or block release regress. After F-266.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_267.py" 2>&1
+    echo "### fman_pcd.c: F-267 ehash record pool + per-insert logs demoted"
     python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
     echo "### fman_pcd.c: ehash delete harness passed"
 fi
@@ -2653,9 +2680,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 
 # F-199 (2026-08-16, T-M7-2 S4): per-egress no-confirm TX FQ. Adds a
-# FQ_TYPE_TX_NO_CONFIRM dpaa_fq with context_a=0x1c00000080000000 (B0V=0,
-# EBD=1), exports dpaa_alloc_offload_tx_fq(), and leaves the kernel's normal
-# confirm-enabled TX FQs untouched. ask.ko caches one FQ per output netdev.
+# FQ_TYPE_TX_NO_CONFIRM dpaa_fq with SDK-validated context_a=0x9a000000c0000000
+# (supersedes 0x1c00000080000000), exports dpaa_alloc_offload_tx_fq(), and
+# leaves the kernel's normal confirm-enabled TX FQs untouched. Offload uses
+# WQ6 to share best-effort service with kernel TX, not absolute-priority WQ0.
+# ask.ko caches one FQ per output netdev.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_199.py" 2>&1
     echo "### dpaa_eth: F-199 per-egress no-confirm offload TX FQ"

@@ -275,12 +275,13 @@ EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed);
 
 /*
  * L2 bridge FDB offload (T-M6-2) is an automatic capability of an engaged
- * bridge-member port (bridge plan D1), behind this global kill switch (D8,
- * default 0 until B5). Clearing it removes every bridge record at once; the
- * ports keep their L2_DA role (nothing is offloaded on them) until they are
- * re-engaged. Setting it takes effect at the next engage or bridge join.
+ * bridge-member port (bridge plan D1), behind this global kill switch
+ * (default on, like vlan_offload). Clearing it removes every bridge record
+ * at once; the ports keep their L2_DA role (nothing is offloaded on them)
+ * until they are re-engaged. Setting it takes effect at the next engage or
+ * bridge join.
  */
-static bool ask_bridge_offload;
+static bool ask_bridge_offload = true;
 
 static int ask_bridge_offload_set(const char *val,
 				  const struct kernel_param *kp)
@@ -298,7 +299,7 @@ static const struct kernel_param_ops ask_bridge_offload_ops = {
 };
 module_param_cb(bridge_offload, &ask_bridge_offload_ops, &ask_bridge_offload, 0644);
 MODULE_PARM_DESC(bridge_offload,
-		 "L2 bridge FDB hardware offload on engaged bridge-member ports (default 0 until T-M6-2 B5; static FDB entries, no VLAN filtering)");
+		 "L2 bridge FDB hardware offload on engaged bridge-member ports (default 1; static FDB entries, no VLAN filtering; 0 = kill switch, removes all bridge records)");
 
 bool ask_hw_bridge_offload_armed(void)
 {
@@ -433,6 +434,7 @@ struct ask_hw_port {
 	u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
 	bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
 	enum fman_pcd_fe_profile engaged_profile; /* valid while offload_engaged */
+	bool            tcp_punt_armed; /* F-266 TCP SYN/FIN/RST punt attached */
 };
 
 struct ask_hw_pcd {
@@ -475,6 +477,80 @@ struct ask_hw_pcd {
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
+
+/*
+ * TCP control punt (F-266, default off). With offload_delay_ms=0 the FE
+ * forwards the FIN/RST of an offloaded TCP flow in hardware, so the kernel
+ * never sees the close and conntrack keeps the entry ESTABLISHED for ~7300 s.
+ * When set, every port engaged with the ROUTED profile runs a TCP soft-parser
+ * routine that sends SYN/FIN/RST to the port's default RX FQ (the kernel),
+ * skipping KeyGen and the FE; the flowtable sees the close and tears the
+ * flow down. Writing the parameter arms or disarms ports that are already
+ * engaged. If arming fails, the port engages without the punt and logs a
+ * warning.
+ */
+static bool ask_tcp_ctl_punt;
+
+/* Caller holds h->lock, or has exclusive access to h (teardown). */
+static void ask_hw_tcp_punt_apply(struct ask_hw_pcd *h, struct ask_hw_port *p,
+				  bool want)
+{
+	int rc;
+
+	if (want == p->tcp_punt_armed)
+		return;
+	if (want)
+		rc = fman_pcd_tcp_ctl_punt_arm(h->fman, p->port_id);
+	else
+		rc = fman_pcd_tcp_ctl_punt_disarm(h->fman, p->port_id);
+	if (rc == -ENOENT && !want)
+		rc = 0;
+	if (rc) {
+		/* A failed disarm keeps the flag so the next disarm retries. */
+		ask_pr_warn("hw: TCP control punt %s on port 0x%02x failed: %d\n",
+			    want ? "arm" : "disarm", p->port_id, rc);
+		return;
+	}
+	p->tcp_punt_armed = want;
+	ask_pr_info("hw: TCP control punt %s on port 0x%02x\n",
+		    want ? "armed" : "disarmed", p->port_id);
+}
+
+static bool ask_hw_tcp_punt_wanted(const struct ask_hw_port *p)
+{
+	return READ_ONCE(ask_tcp_ctl_punt) && p->in_use && p->offload_engaged &&
+	       p->engaged_profile == FMAN_PCD_FE_PROFILE_ROUTED;
+}
+
+/*
+ * Runs under kernel_param_lock(THIS_MODULE); ask_hw_pcd_teardown() clears
+ * ask_hw_pcd_inst under the same lock, so h cannot be freed here.
+ */
+static int ask_tcp_ctl_punt_set(const char *val, const struct kernel_param *kp)
+{
+	struct ask_hw_pcd *h;
+	unsigned int i;
+	int rc = param_set_bool(val, kp);
+
+	h = ask_hw_pcd_inst;
+	if (rc || !h)
+		return rc;
+	mutex_lock(&h->lock);
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
+		if (h->port[i].in_use)
+			ask_hw_tcp_punt_apply(h, &h->port[i],
+					      ask_hw_tcp_punt_wanted(&h->port[i]));
+	mutex_unlock(&h->lock);
+	return 0;
+}
+
+static const struct kernel_param_ops ask_tcp_ctl_punt_ops = {
+	.set = ask_tcp_ctl_punt_set,
+	.get = param_get_bool,
+};
+module_param_cb(tcp_ctl_punt, &ask_tcp_ctl_punt_ops, &ask_tcp_ctl_punt, 0644);
+MODULE_PARM_DESC(tcp_ctl_punt,
+		 "Send TCP SYN/FIN/RST on ROUTED-engaged ports to the kernel so conntrack sees offloaded flows close (default 0; applies to engaged ports on write)");
 
 /* F-113: kmem_cache for struct ask_hw_flow_cookie — O(1) alloc/free
  * under heavy flow churn (50k+ active flows).  Replaces per-entry
@@ -792,7 +868,10 @@ void ask_hw_pcd_teardown(void)
 	if (!h)
 		return;
 
+	/* F-266: fence ask_tcp_ctl_punt_set(), which dereferences the instance. */
+	kernel_param_lock(THIS_MODULE);
 	ask_hw_pcd_inst = NULL;
+	kernel_param_unlock(THIS_MODULE);
 	/* P4.1: release dedicated TX FQ before draining flow cookies. */
 	if (h->dedicated_fq_ready) {
 		u32 fqid = h->dedicated_fq.fqid;
@@ -826,6 +905,8 @@ void ask_hw_pcd_teardown(void)
 	 * F-109: Use kernel API fman_pcd_fe_disengage() instead of
 	 * debugfs loopback (filp_open + kernel_write). */
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		if (h->port[i].in_use)
+			ask_hw_tcp_punt_apply(h, &h->port[i], false);	/* F-266 */
 		if (h->port[i].in_use && h->port[i].offload_engaged) {
 			fman_pcd_fe_disengage(h->fman, h->port[i].port_id);
 			h->port[i].offload_engaged = false;
@@ -1090,9 +1171,17 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  * plumbing only (the traffic-carrying engage is blocked on M2 AC_CC
  * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
  * routes `set system offload ask` here.
+ *
+ * @from_flow: the caller is the lazy flowtable REPLACE path
+ * (ask_hw_port_bind()). It may only (re)arm a port the operator has enabled,
+ * i.e. one with a non-zero family mask, and never applies the both-families
+ * compatibility default below. Checked under h->lock, which
+ * ask_hw_offload_disengage() also holds while clearing the mask, so a
+ * flowtable callback can never re-engage a port after `delete ... offload`.
  */
 static int ask_hw_offload_engage_profile(u8 hw_port_id,
-					 enum fman_pcd_fe_profile profile)
+					 enum fman_pcd_fe_profile profile,
+					 bool from_flow)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct ask_hw_port *p;
@@ -1102,6 +1191,11 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		return -ENODEV;
 
 	mutex_lock(&h->lock);
+
+	if (from_flow && !ask_hw_port_family_get(hw_port_id)) {
+		rc = -ENODEV;	/* administratively disabled: stay in software */
+		goto out_unlock;
+	}
 
 	p = ask_hw_port_slot_get(h, hw_port_id);
 	if (!p) {
@@ -1219,6 +1313,8 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		clear_bit(hw_port_id, ask_hw_port_l2);
 	else
 		set_bit(hw_port_id, ask_hw_port_l2);
+	/* F-266: optional; a failure leaves the port engaged without it. */
+	ask_hw_tcp_punt_apply(h, p, ask_hw_tcp_punt_wanted(p));
 	ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
 
 out_unlock:
@@ -1229,7 +1325,7 @@ out_unlock:
 int ask_hw_offload_engage(u8 hw_port_id)
 {
 	return ask_hw_offload_engage_profile(hw_port_id,
-					     FMAN_PCD_FE_PROFILE_ROUTED);
+					     FMAN_PCD_FE_PROFILE_ROUTED, false);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
 
@@ -1282,7 +1378,7 @@ int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 		ask_hw_offload_disengage(hw_port_id);
 		ask_hw_offload_set_family(hw_port_id, fam);
 	}
-	return ask_hw_offload_engage_profile(hw_port_id, profile);
+	return ask_hw_offload_engage_profile(hw_port_id, profile, false);
 }
 
 /* T-M6-2 B2 (debugfs only): engage @ifname's port with the L2_DA profile. */
@@ -1292,21 +1388,20 @@ int ask_hw_b2_l2_engage(const char *ifname)
 	int rc = ask_hw_b2_port_of(ifname, &port);
 
 	return rc ? rc : ask_hw_offload_engage_profile(port,
-						       FMAN_PCD_FE_PROFILE_L2_DA);
+						       FMAN_PCD_FE_PROFILE_L2_DA,
+						       false);
 }
 
-/* B2: hand-arm (or remove) one DA+EtherType record in @iifname's L2_DA
- * table that forwards to @oifname's no-confirm TX FQ. F-255's L2_DA key is
- * DA(6)+EtherType(2) (plan §13.18), so @eth_type (network byte order) must
- * be supplied for both add and del. Process context, never with
+/* B2: hand-arm (or remove) one L2 record (@key = DA+SA+TCI+EtherType, see
+ * ask_bridge_key()) in @iifname's L2_DA table that forwards to @oifname's
+ * no-confirm TX FQ (F-255, plan §13.32). Process context, never with
  * flow_block_lock held. */
-int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
+int ask_hw_b2_l2_record(const char *iifname, const u8 *key,
 			const char *oifname, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
 	struct net_device *dev;
-	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
 	u32 fqid = 0;
 	u8 port;
 	int rc;
@@ -1316,13 +1411,9 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
 	rc = ask_hw_b2_port_of(iifname, &port);
 	if (rc)
 		return rc;
-	if (!add) {
-		BUILD_BUG_ON(FMAN_PCD_FE_L2_DA_KEY_SIZE != ETH_ALEN + sizeof(__be16));
-		ether_addr_copy(key, da);
-		memcpy(key + ETH_ALEN, &eth_type, sizeof(eth_type));
+	if (!add)
 		return fman_pcd_fe_flow_del(h->fman, port, key,
 					    FMAN_PCD_FE_L2_DA_KEY_SIZE);
-	}
 
 	dev = dev_get_by_name(&init_net, oifname);
 	if (!dev)
@@ -1331,7 +1422,7 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *da, __be16 eth_type,
 	dev_put(dev);
 	if (rc)
 		return rc;
-	rc = ask_bridge_fe_action(da, eth_type, fqid, ask_hw_get_enq_fe_off(), &a);
+	rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(), &a);
 	if (rc)
 		return rc;
 	return fman_pcd_fe_flow_add(h->fman, port, &a);
@@ -1348,6 +1439,13 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 
 	mutex_lock(&h->lock);
 
+	/* Clear this port's family selection first, under h->lock: the lazy
+	 * flowtable engage (ask_hw_port_bind()) checks it under the same lock,
+	 * so no callback can re-arm the port during or after teardown, and
+	 * admission closes before the FE-VM goes away. Re-engage sets it again
+	 * from the CLI mask. */
+	ask_hw_offload_set_family(hw_port_id, 0);
+
 	p = NULL;
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
 		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
@@ -1359,6 +1457,9 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 		mutex_unlock(&h->lock);
 		return;                 /* idempotent no-op */
 	}
+
+	/* F-266: undo the TCP control punt first (armed last at engage). */
+	ask_hw_tcp_punt_apply(h, p, false);
 
 	/* T-M6-8 R4c-3: tear down any VLAN CC tree fronting this port BEFORE
 	 * disengaging the FE-VM, so the CC graft never outlives the FE_ENTER
@@ -1393,11 +1494,6 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 
 	/* The port's table (and its bridge records) is gone. */
 	ask_bridge_forget_port(hw_port_id);
-
-	/* Clear this port's family selection so a later flowtable callback
-	 * cannot re-admit a family the operator disabled. Re-engage sets it
-	 * again from the CLI mask. */
-	ask_hw_offload_set_family(hw_port_id, 0);
 
 	/* PPPoE flows ride on this port's engaged state (encap flows ingress on
 	 * another port but egress through a session sourced here): drop them now
@@ -1449,10 +1545,13 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
 	 * before it can add an ehash record.  fman_pcd_fe_engage() publishes
 	 * the per-port FE workspace and the shared ENQ FE offset consumed by
 	 * ask_fe_flow_insert().  The wrapper is idempotent for subsequent
-	 * flows on this port.
+	 * flows on this port.  It refuses (-ENODEV, quiet SW fallback) a port
+	 * whose family mask is 0: only the operator's `offload ipv4|ipv6`
+	 * (genl ASK_CMD_ENGAGE) may enable a port, never traffic.
 	 */
-	rc = ask_hw_offload_engage(port_id);
-	if (rc)
+	rc = ask_hw_offload_engage_profile(port_id,
+					   FMAN_PCD_FE_PROFILE_ROUTED, true);
+	if (rc && rc != -ENODEV)
 		ask_pr_warn("hw: port-bind engage port 0x%02x dir=%u dev=%s failed: %d\n",
 			    port_id, dir,
 			    ingress_dev ? netdev_name(ingress_dev) : "?", rc);
@@ -1800,6 +1899,12 @@ int ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id)
 	return 0;
 }
 
+/* The port's `offload ipv4|ipv6` mask (ASK_FAM_V4/V6), 0 when disengaged. */
+u8 ask_hw_port_family_mask(u8 hw_port_id)
+{
+	return ask_hw_port_family_get(hw_port_id);
+}
+
 bool ask_hw_port_is_l2(u8 hw_port_id)
 {
 	return test_bit(hw_port_id, ask_hw_port_l2);
@@ -1811,47 +1916,72 @@ int ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid)
 	return ask_hw_resolve_oif_fqid(ifindex, fqid, false);
 }
 
+/* @hw_port_id's slot if it is engaged as L2_DA. h->lock held. */
+static struct ask_hw_port *ask_hw_l2_port(struct ask_hw_pcd *h, u8 hw_port_id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
+		if (h->port[i].in_use && h->port[i].port_id == hw_port_id &&
+		    h->port[i].offload_engaged &&
+		    h->port[i].engaged_profile == FMAN_PCD_FE_PROFILE_L2_DA)
+			return &h->port[i];
+	return NULL;
+}
+
 /*
- * Add or remove one bridge record (DA + EtherType -> @fqid) in
- * @hw_port_id's L2_DA table. h->lock makes the profile check and the table
+ * Add or remove one bridge record (@key -> @fqid) in @hw_port_id's L2_DA
+ * table. h->lock makes the profile check and the table
  * operation atomic against disengage: with no per-port table,
  * fman_pcd_fe_flow_add() would fall back to the global ROUTED table. A
  * delete on a port that is no longer L2_DA is a no-op (its table and
  * records were freed with it).
  */
-int ask_hw_l2_record(u8 hw_port_id, const u8 *da, __be16 eth_type, u32 fqid,
-		     bool add)
+int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
-	struct ask_hw_port *p = NULL;
-	unsigned int i;
 	int rc;
 
 	if (!h)
 		return add ? -ENODEV : 0;
 	if (add) {
-		rc = ask_bridge_fe_action(da, eth_type, fqid,
-					  ask_hw_get_enq_fe_off(), &a);
+		rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(), &a);
 		if (rc)
 			return rc;
 	} else {
-		ether_addr_copy(a.key, da);
-		memcpy(a.key + ETH_ALEN, &eth_type, sizeof(eth_type));
+		memcpy(a.key, key, FMAN_PCD_FE_L2_DA_KEY_SIZE);
 	}
 
 	mutex_lock(&h->lock);
-	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
-		if (h->port[i].in_use && h->port[i].port_id == hw_port_id)
-			p = &h->port[i];
-	if (!p || !p->offload_engaged ||
-	    p->engaged_profile != FMAN_PCD_FE_PROFILE_L2_DA)
+	if (!ask_hw_l2_port(h, hw_port_id))
 		rc = add ? -ENODEV : 0;
 	else if (add)
 		rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
 	else
 		rc = fman_pcd_fe_flow_del(h->fman, hw_port_id, a.key,
 					  FMAN_PCD_FE_L2_DA_KEY_SIZE);
+	mutex_unlock(&h->lock);
+	return rc;
+}
+
+/* One record's hardware packet count (the FE writes it on every hit,
+ * qdrant 2026-08-22). O(records in the port's table) under fe_lock: for the
+ * bridge ageing pass only, never a per-flow stats path (2026-10-10 convoy). */
+int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	u64 bytes;
+	u32 ts;
+	int rc;
+
+	if (!h)
+		return -ENODEV;
+	mutex_lock(&h->lock);
+	rc = ask_hw_l2_port(h, hw_port_id) ?
+		fman_pcd_fe_flow_get_stats(h->fman, hw_port_id, key,
+					   FMAN_PCD_FE_L2_DA_KEY_SIZE,
+					   pkts, &bytes, &ts) : -ENODEV;
 	mutex_unlock(&h->lock);
 	return rc;
 }

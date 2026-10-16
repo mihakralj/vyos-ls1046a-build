@@ -51,30 +51,29 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 		return -EFAULT;
 	buf[len] = '\0';
 
-	/* T-M6-2 B2: "l2engage <iif>" | "l2add <iif> <mac> <ethertype> <oif>" |
-	 * "l2del <iif> <mac> <ethertype>" -- hand-armed bridge records,
-	 * bring-up only. <ethertype> is hex (e.g. 0x0800); F-255's L2_DA key
-	 * is DA+EtherType (plan §13.18), so it must be supplied for both
-	 * add and del. */
+	/* T-M6-2 B2: "l2engage <iif>" |
+	 * "l2add <iif> <da> <sa> <tci> <ethertype> <oif>" |
+	 * "l2del <iif> <da> <sa> <tci> <ethertype>" -- hand-armed bridge
+	 * records, bring-up only. <tci> and <ethertype> are hex (0 = untagged,
+	 * 0x0800); F-255's L2_DA key is DA+SA+TCI+EtherType (plan §13.32). */
 	if (!strncmp(buf, "l2", 2)) {
-		char iif[IFNAMSIZ], oif[IFNAMSIZ], mac[18];
-		u8 da[ETH_ALEN];
-		unsigned int ethertype;
+		char iif[IFNAMSIZ], oif[IFNAMSIZ], dmac[18], smac[18];
+		u8 da[ETH_ALEN], sa[ETH_ALEN], key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
+		unsigned int tci, ethertype;
+		int n;
 
 		if (sscanf(buf, "l2engage %15s", iif) == 1)
-			rc = ask_hw_b2_l2_engage(iif);
-		else if (sscanf(buf, "l2add %15s %17s %x %15s",
-				iif, mac, &ethertype, oif) == 4 &&
-			 mac_pton(mac, da) && ethertype <= 0xffff)
-			rc = ask_hw_b2_l2_record(iif, da, htons((u16)ethertype),
-						 oif, true);
-		else if (sscanf(buf, "l2del %15s %17s %x",
-				iif, mac, &ethertype) == 3 &&
-			 mac_pton(mac, da) && ethertype <= 0xffff)
-			rc = ask_hw_b2_l2_record(iif, da, htons((u16)ethertype),
-						 NULL, false);
-		else
+			return ask_hw_b2_l2_engage(iif) ?: len;
+		n = sscanf(buf, "l2add %15s %17s %17s %x %x %15s",
+			   iif, dmac, smac, &tci, &ethertype, oif);
+		if (n != 6)
+			n = sscanf(buf, "l2del %15s %17s %17s %x %x",
+				   iif, dmac, smac, &tci, &ethertype) == 5 ? 5 : 0;
+		if (!n || !mac_pton(dmac, da) || !mac_pton(smac, sa) ||
+		    tci > 0xffff || ethertype > 0xffff)
 			return -EINVAL;
+		ask_bridge_key(key, da, sa, tci, htons((u16)ethertype));
+		rc = ask_hw_b2_l2_record(iif, key, n == 6 ? oif : NULL, n == 6);
 		return rc ? rc : len;
 	}
 
