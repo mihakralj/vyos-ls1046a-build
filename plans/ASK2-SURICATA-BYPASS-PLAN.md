@@ -1,194 +1,191 @@
-# ASK2 Suricata bypass plan: hardware offload of IDS-bypassed flows
+# ASK2 Suricata integration plan
 
-**2026-10-15 · dpaa1 · Status: open (design only, no code).** Suricata is not a
-vendor-parity item; relative priority is set in `plans/ASK2-MASTER-PLAN.md`.
-Task IDs are assigned there if this plan is adopted.
+**2026-10-16 · dpaa1 · Status: design only.** This plan is based on the current
+VyOS Suricata service model described in the upstream documentation at
+https://docs.vyos.io/en/rolling/configuration/service/suricata.html. The key
+point is that the router does not invent a custom Suricata control plane; it
+configures the built-in service under `service suricata`, then runs
+`update suricata` and `restart suricata` to load the ruleset.
 
-## 1. Summary
+The ASK2 question is not "how do we replace Suricata". It is: "how do we keep
+Suricata's inspection path working while the ASK2 hardware flow path handles the
+large bulk of traffic the IDS does not need to see again after the initial
+inspection prefix?"
 
-Suricata's flow-bypass model — inspect the first N KB of a flow, decide, then
-stop inspecting — is exactly the slow-path-learns / hardware-record contract
-ASK2 is built on. A bypassed flow is semantically "route this flow without
-touching the CPU", which is what the production FE-VM ehash path already does
-(9.38 / 9.27 Gbit/s IPv4/IPv6 at ~3% DUT CPU, 2026-10-09 gates). No new
-silicon mechanisms are required; the ehash record, opcode chain
-(`PREEMPTIVE_CHECKS_ON_PKT → STRIP_ALL_VLAN_HDRS → UPDATE_TTL → INSERT_L2_HDR →
-ENQUEUE_PKT`) and per-egress no-confirm TX FQ are reused unchanged.
+## 1. Baseline: the actual VyOS Suricata service
 
-This makes 10G inline IDS viable on 4× A72 for elephant-heavy traffic mixes:
-Suricata burns CPU only on the inspection prefix of each flow plus the mice,
-while bypassed bulk traffic stays in silicon. The scaling axis becomes flow
-rate, not byte rate — the right direction for backup/CDN/streaming mixes.
+The current VyOS Suricata config model is intentionally simple:
 
-Precedent: the WireGuard fast path uses the same split ("the per-peer
-fast-path state lives inside the `wireguard` module, and `ask.ko` supplies
-only record insert/delete and FQ ids; records are installed by the slow path,
-so a MISS stays safe") — see `plans/ASK2-WIREGUARD-FASTPATH-PLAN.md` §2.
+- monitored interfaces: `set service suricata interface <interface>`
+- address groups: `set service suricata address-group <name> address <address>`
+- port groups: `set service suricata port-group <name> port <port>`
+- EVE log: `set service suricata log eve filename ...`, `filetype`, and `type`
+- rules update: `update suricata`
+- restart: `restart suricata`
 
-## 2. Suricata bypass semantics (what we must honor)
+The underlying docs also require at least one interface, one address group, and
+one port group before a commit succeeds. That matters because the hardware-
+offload design should attach to an already valid Suricata service, not replace it
+with a separate ad hoc definition.
 
-- Triggers: the `bypass` rule keyword, and `stream.bypass: yes` (automatic
-  bypass once stream reassembly depth is reached and no rule needs more).
-- Decision point: userspace, mid-stream, after an arbitrary number of bytes.
-- Scope: the whole flow, **both directions** (Suricata's eBPF bypass inserts
-  both tuples into `flow_table_v4`/`flow_table_v6`).
-- Stock backends: eBPF/XDP bypass for AF_PACKET (pinned maps, per-flow
-  packet/byte counters read back for stats); `nfq.bypass-mark`/`bypass-mask`
-  for inline NFQ (marked packets skip the queue via nftables).
-- Bypass is final per flow; teardown happens on flow timeout/close, which
-  also feeds Suricata's flow records with final counters.
-- Suricata keeps working set state (flow table, app-layer context) for
-  bypassed flows until timeout — hardware offload must not break its
-  accounting expectations, only its packet visibility.
+Example config from the upstream service model:
 
-## 3. Architecture
-
-```mermaid
-sequenceDiagram
-    participant W as Wire
-    participant F as FMan (FE-VM ehash)
-    participant K as Kernel stack (conntrack/nft)
-    participant S as Suricata (userspace)
-    participant A as ask.ko
-
-    W->>F: flow starts (SYN … first N KB)
-    F->>K: ehash MISS → slow path
-    K->>S: NFQ delivery, inspection
-    Note over S: stream depth reached / bypass rule fires
-    S->>K: mark bypassed flow packets (nfq bypass-mark)
-    K->>K: nft rule on mark → flow add @ft
-    K->>A: nf_flowtable offload → REPLACE
-    A->>F: install ehash records (both directions), atomic publish
-    W->>F: all subsequent packets
-    F->>W: HIT → per-flow opcode chain → per-egress TX FQ, 0 CPU
-    Note over K,A: conntrack destroy → flowtable delete → ehash records removed
+```bash
+set service suricata interface eth1
+set service suricata address-group home-net address 192.0.2.0/24
+set service suricata address-group home-net address 2001:db8::/32
+set service suricata port-group http-ports port 80
+set service suricata port-group http-ports port 443
+set service suricata log eve filename eve.json
+set service suricata log eve filetype regular
+set service suricata log eve type alert
+set service suricata log eve type flow
+set service suricata log eve type http
+commit
+save
+update suricata
+restart suricata
 ```
 
-Integration path (chosen): **conntrack/nft flow-offload bridge.** The only
-new code is Suricata-side marking plus an nft template; everything from
-`flow add @ft` onward is the production insert path
-(`ask_flow_offload.c` REPLACE → ehash insert). This keeps `ask.ko` a pure
-hardware cache/translation layer — no new YNL insert verb, no second control
-plane (binding rule, `plans/ASK2-MASTER-PLAN.md` §2). The existing `ask` YNL
-family (`dump-flows`, `get-flow`, `flush-flows`) already covers observability
-and fail-closed flush.
+## 2. What Suricata is doing in practice
 
-Rejected alternative: a direct userspace insert API into `ask.ko`. It adds
-control-plane surface for no capability gain and bypasses conntrack-owned
-lifecycle (teardown, NAT state) that the flowtable path gets for free.
+Suricata is a packet-inspection engine. It accepts a live network interface, runs
+rules against traffic, emits JSON EVE logs, and loads fresh rules with
+`update suricata`. In a routed inline deployment, the packet stream is still
+visible to the kernel stack and the service, but the first useful state is the
+inspection decision.
 
-AF_PACKET variant (if NFQ inline is not used): a small daemon watches the
-pinned `flow_table_v4/v6` eBPF maps and programs the same ct marks for
-bypassed tuples; from there the path is identical. NFQ inline is preferred
-because `bypass-mark` is native Suricata config, not an eBPF-map scraper.
+This is a very good fit for the ASK2 flow model. ASK2 already operates from a
+slow-path learning pattern: a new flow enters the slow path, the system decides
+whether it remains software-visible or becomes a hardware-offloaded fast path.
+The design goal is to let Suricata decide that decision without inventing a
+separate packet-processing stack.
 
-## 4. Deployment modes
+## 3. ASK2-compatible design: Suricata as the decision point, ASK2 as the fast path
 
-| Mode | Fit | Notes |
-|---|---|---|
-| Inline routed (Suricata NFQ on this router's forwarding path) | Works on the shipped path | The target case: "10G inline IDS". NAT/VLAN/PPPoE compositions already HW. |
-| Inline bridge (bump-on-the-wire AF_PACKET bridge) | Blocked on T-M6-2 | Needs bridge offload completeness; B7a same-tagging has dated silicon acceptance, B7b access↔trunk open. |
-| Passive tap/SPAN | Marginal extra value | Software-copied taps stop seeing the flow once it is HW-forwarded (copy starves automatically — desired). If mirroring later moves to hardware (replicator), per-flow "do-not-mirror" exclusion is not in the current FE-VM opcode vocabulary; open question, not a blocker for inline. |
+The right integration point is not a custom Suricata YAML/daemon API. It is the
+existing ASK2 flowtable/offload contract:
 
-## 5. Dependencies and gaps
+- Suricata monitors traffic on the configured interface(s)
+- the flow reaches the inspection gate
+- once the flow has passed the initial inspection prefix, the router installs a
+  hardware flow record
+- the bulk of subsequent packets travel through the FE-VM ehash path instead of
+  the normal CPU inspection path
+- the Suricata service keeps its rule-based visibility for the flow until the
+  policy says it can be handed off
 
-- **F-266 TCP FIN/RST control punt** (implemented, default-off): without it,
-  closed bypassed TCP flows linger in ehash until timeout. For IDS mixes with
-  many short flows this is a capacity/churn issue. Soft dependency; already
-  priority 2 in the master plan. Enable `tcp_ctl_punt` only after the F-266
-  transit gates pass.
-- **Per-flow stats:** Suricata expects packet/byte counters for bypassed
-  flows (today read from the eBPF maps). YNL flow attributes expose
-  HW-forwarded packet/byte deltas per port for VLAN CC flows; per-record
-  counters on the routed ehash path must be verified or extended. Fallback:
-  bypassed flows lose per-flow stats (usually acceptable; note in docs).
-- **Insert-rate budget:** master plan targets ≥2,370 inserts/s, first insert
-  <2.6 s, per-flow engage <100 ms. Only flows that reach a bypass decision
-  need records; mice finish inside the inspection window and never insert.
-  Bypass-decision rate ≪ new-flow rate, so this is comfortable.
-- **Fail-open vs fail-close:** if Suricata dies, already-bypassed flows keep
-  forwarding in silicon. Policy choice per deployment; a watchdog that calls
-  YNL `flush-flows` on Suricata exit gives fail-close.
-- **Packaging:** VyOS ships no Suricata; run as a container or custom
-  package. Kernel-side plumbing is unaffected either way. Pin Suricata
-  workers away from the cores serving QMan portals.
-- **MTU:** HW path clamp 1280–3600 applies to bypassed flows; inline
-  deployments must keep MTU inside it or those flows stay in software.
-- **Ordering:** one TX FQ per flow, same in-order guarantee as the shipping
-  routed records.
+This is the same pattern the current ASK2 design already uses for fast flow
+insertion: a flow starts as a slow-path event; once the system decides it is
+safe for the silicon fast path, the record is published and the subsequent
+packets stop taking the inspection path.
 
-## 6. Performance model
+This makes the integration compatible with the shipped VyOS service model.
+Suricata remains the thing that decides what is interesting; ASK2 handles the
+repeat traffic once the decision is made.
 
-| Bypass backend | Cost per bypassed packet | 10G inline verdict |
-|---|---|---|
-| None (full inspection) | full Suricata pipeline | No — ~1–3 Gbps box ceiling on 4× A72, ruleset-dependent |
-| Stock eBPF/XDP bypass | ~250–400 ns XDP/softirq | Marginal — ~0.3–0.5 core per 10 Gbit/s spent on the bypass itself, plus the inspected share |
-| ASK2 ehash | 0 ns (silicon) | Yes for elephant-heavy mixes; CPU scales with flow rate, not byte rate |
+## 4. Why this is a good match for the LS1046A
 
-Residual CPU consumers after offload: the per-flow inspection prefix
-(N KB × new-flow rate through NFQ/AF_PACKET) and Suricata flow-table
-management. Both are flow-rate driven.
+The advantage is not that Suricata "becomes hardware offloaded by itself". The
+advantage is that the high-rate bulk of the traffic can leave the inspection path
+once the flow has already been classified, while Suricata continues to run in the
+normal way for the ruleset and logging.
 
-## 7. Complementary silicon uses (cheap extras, same box)
+That is exactly the class of problem ASK2 is good at:
 
-- **Static inspection policy via CC-tree's reserved role:** "never inspect
-  CIDR X" / "only inspect port Y" as coarse LPM-capable entries (255 per
-  table). This is the bounded coarse dispatch/policy role the master plan
-  reserves CC-tree for (T-M6-5); it does not compete with ehash.
-- **Symmetric RSS for capture workers:** KeyGen symmetric-hash mode pins both
-  directions of a flow to one queue → AF_PACKET `cluster_flow` across
-  Suricata threads without software RPS. ASK2 runs `symmetric=false` for
-  conntrack-friendliness; a dedicated capture-port profile would flip it.
-  Trade-off to evaluate at design time.
-- **Flood shield in front of inspection:** FMan ingress policer profiles
-  (shipping mechanism, `set interfaces ethernet ethN ingress-policer`) cap
-  pps toward the inspection path — silicon drop before any CPU.
+- new-flow cost: software logic and inspection
+- established-flow cost: hardware path / direct FQ dispatch
+- CPU bound by flow churn, not by ongoing byte-forwarding bandwidth
 
-## 8. Phases and gates (proposal; IDs assigned by the master plan)
+This fits elephant-heavy traffic mixes better than trying to force all packets
+through Suricata's userspace pipeline. The result is a real inline IDS/IPS
+pattern, not a fake "all traffic is Suricata traffic" model.
 
-AGENTS.md S0 applies to every phase that touches FMan: ≥3 qdrant queries,
-cross-check against `arch/fman-microcode-210-programming-reference.md` and
-`specs/fman-keygen-flow-key-spec.md`, read back every silicon write, cold boot
-before each experiment. Never experiment on eth0.
+## 5. Deployment model
 
-### P1. Mark-to-offload bridge (no Suricata changes)
+### Inline routed mode
 
-nft template: match `nfq bypass-mark` → `flow add @ft` on ASK-engaged routed
-interfaces. Drive bypass decisions with stock Suricata (`stream.bypass`,
-`bypass` keyword, `nfq.bypass-mark`).
+This is the target model for the first design pass.
 
-Gate: a bypassed TCP flow transitions mid-stream to `in_hw` with zero packet
-loss at 9+ Gbit/s; `dump-flows` shows both directions; conntrack destroy
-removes both records; `pcd-snapshot diff` clean after Suricata stop +
-disengage.
+- Suricata is configured as the router's IDS/IPS service on the relevant
+  interfaces using the normal VyOS syntax above.
+- The router continues to do normal routed forwarding.
+- The ASK2 flow path handles the bulk of traffic after the decision point.
+- The service remains the authoritative inspection and logging layer for the
+  flows that are still in software.
 
-### P2. Lifecycle and stats hardening
+This is the cleanest way to match the actual VyOS Suricata model.
 
-Enable and validate F-266 `tcp_ctl_punt` for bypassed flows (after its master
-plan gates); verify or extend per-record packet/byte counters; wire the
-fail-close watchdog (`flush-flows` on Suricata exit) behind a config flag.
+### Passive or SPAN mode
 
-Gate: 10k mixed short/long flows with 30% bypassed: no ehash leak
-(pre/post flow counts equal), closed flows removed within F-266 bounds,
-bypassed-flow stats match wire counts within measurement error.
+Passive tap/SPAN deployments are not the first target. They are useful for
+network visibility, but they do not align as well with a hardware fast path that
+must own forwarding for the actual throughput path. The inline routed mode is the
+real target because it exercises the same packet path the router already forwards
+on.
 
-### P3. Soak and mix acceptance
+## 6. Suricata and ASK2 interaction points
 
-30-minute elephant+mouse mixed soak at line rate through Suricata inline;
-zero kernel errors; Suricata CPU bounded and flat; HW forwarding share
-matches the bypass mark rate.
+The integration points should be intentionally small:
 
-Gate: ≥9 Gbit/s bypassed share at ≤20% total DUT CPU on a recorded elephant-
-heavy mix; new-flow rate varied up to the Suricata CPU ceiling without
-insert-queue backlog growth.
+1. Suricata configuration
+   - `service suricata interface ...`
+   - `address-group` and `port-group`
+   - `log eve ...`
+   - `update suricata`
+   - `restart suricata`
 
-## 9. Open questions
+2. Flow decision and handoff
+   - Suricata identifies the flow it wants to treat as bulk/known-safe
+   - the router records the flow in the ASK2 flow table for the normal fast path
+   - the flow switches from software inspection to hardware forwarding
 
-- Per-record counters on routed ehash records: present and readable, or an
-  `ask.yaml`/driver extension? (P2 blocker for stats parity with eBPF bypass.)
-- AF_PACKET passive/bridge deployments: is the eBPF-map scraper bridge
-  acceptable, or do we declare NFQ-inline the only supported Suricata mode?
-- Symmetric-hash capture profile vs conntrack-friendly `symmetric=false`:
-  one scheme per role, or runtime switch per port?
-- If hardware SPAN (replicator) is ever built, what is the per-flow
-  do-not-mirror mechanism? Not in the current FE-VM opcode set.
+3. Safe teardown
+   - flow timeout / close / NAT teardown removes the record and returns the flow
+     to the normal software path when required
+
+4. Observability
+   - Suricata still emits EVE logs for whatever it chooses to inspect
+   - ASK2 provides the hardware-fastpath state and flow counters for the
+     offloaded subset
+
+This keeps one source of truth for the service config and avoids inventing a
+second special-purpose control plane.
+
+## 7. What must be handled carefully
+
+The following are the real engineering gates, not purely design concerns:
+
+- Flow lifecycle: established flows must be removed cleanly on timeout or close
+- NAT/VLAN/PPPoE handling: the flow record is only useful if the hardware path
+  can safely carry the same tuple transformations the router already supports
+- MTU and fragmentation: the hardware offload path must stay inside the valid
+  packet envelope
+- Rule policy: the router must not promise that all traffic is bypassed; only the
+  flows that are verified safe may leave the inspection path
+- Logging and packet loss: Suricata must continue to emit useful EVE output for
+  the traffic that remains in software or for the early prefix before handoff
+
+## 8. Recommended first implementation sequence
+
+1. Establish a valid Suricata service on the router using the upstream VyOS
+   syntax and command model.
+2. Validate normal `update suricata` and `restart suricata` behavior.
+3. Build a minimal flow-offload handoff based on known safe flows only.
+4. Keep the interface and rule configuration under the native `service suricata`
+   tree; avoid custom CLI or a separate rule parser.
+5. Measure a mixed elephant/mouse workload with Suricata running and the ASK2
+   path enabled.
+6. Expand only after the software/hardware handoff is stable under real ruleset
+   traffic.
+
+## 9. Bottom line
+
+The native VyOS Suricata configuration is already the right service abstraction:
+monitored interfaces, groups, EVE logs, and rule updates. The ASK2 contribution
+is not to replace this service, but to let the system use the hardware fast path
+for flows that have already been approved by the inspection process.
+
+That keeps the design compatible with the documented VyOS model, aligns with the
+shipping ASK2 flow-offload architecture, and gives a realistic path toward a
+usable IDS/IPS deployment on DPAA1 hardware without rewriting the service layer.
