@@ -3,14 +3,14 @@
 # Generator: kernel pktgen on dell1's X710 (THREADS TX threads/queues, pps rate control, IMIX).
 # Counting: X710 MAC counters, port.tx_unicast on dell1 and port.rx_unicast on dell2, so neither
 # host's socket path limits the result (the 2026-10-04 Python receiver and ConnectX-3 5.9 Mpps TX
-# ceiling did). No DPDK: both X710 functions share IOMMU group 2, so vfio would take the .185 path down too.
+# ceiling did). No DPDK: both X710 functions share IOMMU group 2, so vfio would take the DUT path down too.
 #
 # Each trial first primes the flow (dell1 sends, dell2 answers the address it saw, dell1 sends
 # again) so conntrack is ESTABLISHED and the DUT offloads it, also through NAT. The DUT-side HW
 # share is reported: ask2 = fe_ehash_stats pkt_count growth / sent; vendor = 1 - frames handed to
 # the kernel (ethtool -S eth3 'rx packets [TOTAL]') / sent.
 #
-# Usage (control host; rig per bin/testrig-dell-net.sh):
+# Usage (control host; rig per bin/testrig-dell-net.sh, hosts and key per bin/testrig-env.sh):
 #   DUT_KIND=ask2|vendor bin/testrig-pktgen.sh trial PATH SIZE PPS SECS  one run, PPS 0 = as fast as possible
 #   DUT_KIND=ask2|vendor bin/testrig-pktgen.sh a2 PATH SIZE              max rate at <= LOSS % loss, then median of 3
 #   DUT_KIND=ask2|vendor bin/testrig-pktgen.sh flows PATH N PPS          N single-packet flows (distinct UDP sports)
@@ -33,18 +33,19 @@
 # Generator ceilings (dell1, iommu=pt, 64 B): unpaced 14.0-14.1 Mpps; paced (burst 1, 4 threads)
 # accurate to ~2.5 % up to 12 Mpps. Calibrate with DST_MAC=02:00:00:00:00:99 (the DUT discards it).
 set -u
+. "$(dirname "$0")/testrig-env.sh"
+rig_require GEN1 GEN2
 DUT_KIND=${DUT_KIND:-ask2}; LOSS=${LOSS:-0.001}; TRIAL=${TRIAL:-10}; STEPS=${STEPS:-7}
 THREADS=${THREADS:-4}; BURST=${BURST:-32}; BIDIR=${BIDIR:-0}; FLOWS=${FLOWS:-1}; NOPRIME=${NOPRIME:-0}; DRY=${DRY:-0}
-OUT=${OUT:-/mnt/builds/ask2-review/oracle/pktgen-$DUT_KIND-$(date +%Y%m%d).csv}
-SSHO="-o BatchMode=yes -o ConnectTimeout=8"
-D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"; D1S="ssh $SSHO admin@192.168.1.112"
-D2S="ssh $SSHO admin@192.168.1.113"
+OUT=${OUT:-$RIG_OUT/pktgen-$DUT_KIND-$(date +%Y%m%d).csv}; mkdir -p "$(dirname "$OUT")"
+SSHO="-o BatchMode=yes -o ConnectTimeout=8 $RIG_SSHK"
+D1="ssh -n $SSHO $GEN1"; D2="ssh -n $SSHO $GEN2"; D1S="ssh $SSHO $GEN1"; D2S="ssh $SSHO $GEN2"
 if [ "$DUT_KIND" = vendor ]; then
-  DUT=root@192.168.1.106; IF=enp1s0f1np1; NS="sudo ip netns exec n106"
+  DUT=${DUT:-$(rig_dut vendor)} || exit 2; IF=$GEN_IF_NS; NS="sudo ip netns exec $VENDOR_NS"
 else
-  DUT=vyos@192.168.1.185; IF=enp1s0f0np0; NS="sudo"
+  DUT=${DUT:-$(rig_dut ask2)} || exit 2; IF=$GEN_IF; NS="sudo"
 fi
-dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO -i $HOME/.ssh/vyos_key $DUT "$c"; }
+dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO $DUT "$c"; }
 
 path_set(){ # -> FAM SRC DST VLAN
   case $1 in
