@@ -29,48 +29,6 @@ Default flavor (ops NULL): both hunks are dead code, byte-identical
 mainline behaviour.  Supersedes the unreleased 0103h.
 
 
-diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-index 5b426ca..496e14c 100644
---- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-+++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-@@ -354,6 +354,17 @@ u16 band;
- int act;
- bool consumed = false;
- 
-+	/* 0110: the 0103f dispatch in rx_default_dqrr defers hard-IRQ
-+	 * deliveries to NAPI before calling us, so we only ever run in
-+	 * NAPI (softirq) context where xdp_do_redirect()/xdp_do_flush()
-+	 * are legal.  If a future refactor breaks that invariant, bail
-+	 * (frame falls through to the mainline path) rather than corrupt
-+	 * the xsk flush list from hard IRQ (observed dual-CPU Oops in
-+	 * __xsk_map_flush on LS1046A).
-+	 */
-+	if (WARN_ON_ONCE(in_hardirq()))
-+		return false;
-+
- if (!priv)
- return false;
- 
-@@ -408,6 +419,19 @@ goto out_unlock;
- 			if (xdp_do_redirect(priv->net_dev, xdp, prog) == 0) {
- 				priv->xsk_zc_rx_redirect++;
- 				consumed = true;
-+				/* xdp_do_redirect() into an XSKMAP only queues
-+				 * the descriptor (xskq_prod_reserve_desc); the
-+				 * producer pointer is published by xsk_flush()
-+				 * which only runs from xdp_do_flush() walking
-+				 * this bpf_net_context's flush list.  We tear
-+				 * the context down on hook exit, so flush here
-+				 * or the frame never becomes visible to user
-+				 * space (RX ring producer never advances).
-+				 * Per-frame flush is the correctness baseline;
-+				 * NAPI-level batching needs qmgmt_ops plumbing
-+				 * for the portal's napi struct (np->xdp_act).
-+				 */
-+				xdp_do_flush();
- 			}
- 			break;
- 		case XDP_DROP:
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 index d4eedfc..38b6cbf 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c

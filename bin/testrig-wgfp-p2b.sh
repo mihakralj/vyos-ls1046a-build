@@ -4,7 +4,7 @@
 # 4 TCP flows dell1 (cport 41001+k) -> dell2 wg0:5241+k are steered by ehash records to the 4 sink FQs; the
 # wireguard hook seals them with the real peer keypair. Env: DUR=20 FLOWS=4 TBLS="0 2 3" OUT=csv
 set -u
-DUR=${DUR:-20}; FLOWS=${FLOWS:-4}; TBLS=${TBLS:-"0 2 3"}
+DUR=${DUR:-20}; REV=${REV:-0}; FLOWS=${FLOWS:-4}; TBLS=${TBLS:-"0 2 3"}
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 dut(){ ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185 "$1"; }
 D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
@@ -26,6 +26,7 @@ c0=$(dut 'grep "^cpu[0-9]" /proc/stat')
 for k in $(seq 0 $((FLOWS-1))); do
   $D1 "iperf3 -c 10.99.200.113 -B 10.99.1.112 --cport $((41001+k)) -p $((5241+k)) -t $DUR -J > /tmp/p2b$k.json 2>&1 &"
 done
+[ "$REV" -gt 0 ] && $D1 "iperf3 -c 10.99.200.113 -B 10.99.1.112 -p 5231 -P $REV -R -t $DUR -J > /tmp/p2brev.json 2>&1 &"
 sleep $((DUR/2)); echo "mid: $(dut "sudo cat $WP")"; dut 'top -bn1 -1 | grep "^%Cpu"' 
 sleep $((DUR/2+4))
 echo "end: $(dut "sudo cat $WP")"; dut "sudo cat $DBG/stats" | head -5
@@ -33,6 +34,7 @@ tot=0; for k in $(seq 0 $((FLOWS-1))); do
   b=$($D1 "python3 -c \"import json;d=json.load(open('/tmp/p2b$k.json'));print(d['end']['sum_sent']['bits_per_second'] if 'end' in d and d['end'] else 0)\"" 2>/dev/null); echo "flow $k: ${b:-0} bit/s"
   tot=$(awk -v a=$tot -v b=${b:-0} 'BEGIN{print a+b}')
 done
+[ "$REV" -gt 0 ] && echo "REVERSE (down, software RX): $($D1 "python3 -c \"import json;d=json.load(open('/tmp/p2brev.json'));print(round(d['end']['sum_received']['bits_per_second']/1e9,3))\"") Gbit/s"
 echo "TOTAL up: $(awk -v t=$tot 'BEGIN{printf "%.3f Gbit/s", t/1e9}')"
 dut 'sudo dmesg | tail -5'
 echo "NOTE: reboot .185 afterwards (sink records persist in ehash tables)."
