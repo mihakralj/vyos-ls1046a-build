@@ -17,7 +17,7 @@ index 4827f6e82..724a79bea 100644
 +          <validator name="numeric" argument="--range 0-60000"/>
 +        </constraint>
 +      </properties>
-+      <defaultValue>500</defaultValue>
++      <defaultValue>0</defaultValue>
 +    </leafNode>
      <leafNode name="ip-src-route">
        <properties>

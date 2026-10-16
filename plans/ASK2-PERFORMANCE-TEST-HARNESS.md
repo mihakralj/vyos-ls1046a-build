@@ -1,722 +1,715 @@
-# ASK2 Performance Test Harness — Software vs Hardware Forwarding
+# ASK2 Performance Test Harness
 
-**Version 1.2.0 · 2026-08-17**
+**Version 2.0.0 · 2026-10-16**
 
-> **Current rig (2026-10-05).** heidi/HELGA are no longer the generators. The
-> standard rig is **dell1 (`admin@192.168.1.112`) → DUT eth3 / eth4 → dell2
-> (`admin@192.168.1.113`)** on 10G SFP+, driven by
-> `bin/testrig-combo-matrix.sh` (`setup`, `check`, `run <combo> <unidir|bidir>
-> <secs> <streams>`, `matrix`). It covers port↔port, vlan↔port and vlan↔vlan
-> for both IPv4 and IPv6.
->
-> - Any DUT pinned to the `.185` data-plane addresses can be swapped in by
->   moving the cables. That is how the vendor `.106` comparison was run.
-> - Re-run `setup` after every DUT power cycle (it restores dell1's table-110
->   policy routes).
-> - For loss accounting, read the mEMAC counters directly (`rdrp` +0x158,
->   `rerr` +0x138 at FMan+`0xF0000`/`0xF2000`). After patch 0218, physical
->   errors are discarded in BMI and no longer reach the driver's
->   `rx frame physical error` counter.
-> - Do not use `/sys/class/net/eth4/statistics/rx_packets` as a kernel-RX
->   indicator under offload (2026-10-05 finding).
->
-> The SW/HW-mode proof method below still applies.
->
-> **PPPoE rig (2026-10-07, additive, does not touch any of the above).** dell1
-> also runs a persistent software PPPoE access concentrator on `enp1s0`
-> (`ask2-pppoe-server.service`, pool `10.99.50.0/24` — distinct from the
-> addresses used by the combo matrix above), and the DUT has a verified
-> `interfaces pppoe pppoe10 source-interface eth3` client session against it
-> (credentials `asktest`/`asktest123`). Both are left running/enabled for
-> reuse. Full setup, verified results (session, ~1.0 Gbit/s software-path
-> iperf2 baseline, confirmed auto-reconnect), and rationale are in
-> `plans/ASK2-PPPOE-OFFLOAD-PLAN.md` §3a — read that before touching PPPoE
-> testing, not this document.
+This document describes how to repeat the throughput, packet-rate, PPPoE and
+WireGuard measurements published in `plans/ASK2-VENDOR-PARITY.md` for a Mono
+Gateway (NXP LS1046A) router. It covers three device-under-test (DUT) stacks:
 
-A reproducible procedure for measuring routed IPv4 throughput and DUT CPU cost through the Mono Gateway LS1046A, comparing the Linux software flowtable against ASK2/FMan hardware offload.
+| Label | Stack | Fast path |
+|---|---|---|
+| **VyOS** | VyOS with ASK2 (this repository) | nftables hardware flowtable → FMan external-hash forwarding |
+| **OWRT** | OpenWrt with NXP ASK (vendor SDK) | CMM + CDX, conntrack-driven |
+| **OPNS** | OPNsense / FreeBSD with the NXP ASK port | CMM + CDX, pf-state-driven |
 
-This document is authoritative for the current heidi → DUT `.185` → HELGA harness. The older `plans/archive/TRAFFIC-HARNESS.md` (LXC/third-board) and the dual-board sections of `plans/archive/PERFORMANCE-BENCHMARKS.md` describe different topologies and must not be used to configure this harness.
+Everything here can be rebuilt with commodity hardware and the scripts in
+`bin/`. No step needs access to a particular lab: every host name, login,
+key and path comes from one settings file (§2.4), and the scripts have no
+lab-specific defaults.
 
 ---
 
-## 1. Purpose and scope
+## 1. What is measured
 
-The harness measures routed IPv4 throughput through the DUT in two modes:
+- **TCP throughput** of routed, NAT, VLAN, NAT-over-VLAN and PPPoE paths,
+  IPv4 and IPv6, one-way in each direction and bidirectional.
+- **WireGuard throughput** with the tunnel terminated on the DUT. WireGuard
+  is software crypto on every stack and is never offloaded.
+- **64-byte packet rate** on one primed UDP flow: highest rate at ≤0.001%
+  loss, loss at a fixed offered rate, and delivered rate under an unpaced
+  flood.
+- Optional: latency, new-connections/s and multi-flow packet rate (§5.7).
 
-- **SW** — Linux nftables software flowtable, with ASK/FMan FE hardware forwarding disabled.
-- **HW** — nftables hardware flowtable driving ASK2/FMan external-hash + FE opcode forwarding.
-
-Every result cell records:
-
-- bidirectional aggregate TCP throughput from the iperf2 `[SUM]` line;
-- average DUT CPU utilization across the four A72 cores, plus each core;
-- live FE armed-port state, proving the cell actually ran in SW or HW;
-- FMan RX error counters before and after;
-- image, kernel, duration, stream count, and MTU.
-
-The validated MTU battery is:
-
-```
-1280, 1500, 2000, 2500
-```
-
-This is the **validated order-0 baseline battery**. F-203 changes the DPAA RX pool to one contiguous order-1/8 KiB buffer and raises the candidate ASK clamp to 7000; that expanded range is pending a separate cold-boot validation battery and must not be treated as validated by the results below. MTU 576 is rejected by VyOS while IPv6 link-local is enabled, because the minimum interface MTU is 1280.
+Every throughput result carries an **offload proof**: a measurement of how
+much of the traffic bypassed the DUT's kernel. A run that silently falls
+back to software forwarding must never be reported as a hardware result.
 
 ---
 
-## 2. Topology
+## 2. Rig
+
+### 2.1 Hardware
+
+| Role | Reference rig | Requirements |
+|---|---|---|
+| Generator 1 (`gen1`; older script comments say `dell1`) | x86 PC, Intel X710 dual 10G SFP+ | Linux, iperf3 ≥ 3.16 (zero-copy `-Z`), kernel `pktgen`, ethtool |
+| Generator 2 (`gen2`; older script comments say `dell2`) | Same as gen1 | Same; also runs the test controller |
+| DUT | Mono Gateway DK (LS1046A, 4× A72) | eth3 and eth4 are the two 10G SFP+ cages |
+| Cabling | 10G DAC | gen1 ↔ DUT eth3, gen2 ↔ DUT eth4; optional direct gen1 ↔ gen2 link for WireGuard ceiling checks |
+| Management | Separate 1G network | DUT eth0 and both generators; never in the measured path |
+
+Each generator is a single 10G sender. The bidirectional ceiling is therefore
+about 2 × 9.4 Gbit/s of TCP payload at MTU 1500. Use generators with
+headroom: 64-byte line rate is 14.88 Mpps per direction.
+
+### 2.2 Topology
 
 ```mermaid
 flowchart LR
-    subgraph HEIDI["heidi / Proxmox host"]
-        HMGMT["Management: 192.168.1.15"]
-        HTRANSIT["Transit: 10.99.1.15/24"]
-        HNIC["One physical 10G NIC<br/>enp35s0f1 via vmbr0<br/>both IP networks"]
-        HMGMT --- HNIC
-        HTRANSIT --- HNIC
+    subgraph G1["gen1"]
+        G1P["X710 port<br/>10.99.1.112/24  fd99:1::112/64<br/>VLAN 10: 10.99.10.112/24"]
     end
-
-    HNIC ===|"10G switch fabric"| E3["DUT eth3<br/>10.99.1.185/24"]
-
-    subgraph DUT["Mono Gateway LS1046A DUT .185"]
-        MGMT["eth0<br/>192.168.1.185<br/>management only"]
-        E3 --> ROUTER["IPv4 routing<br/>SW nft flowtable or HW ASK2"] --> E4["eth4<br/>10.99.2.185/24"]
+    subgraph DUT["DUT"]
+        E3["eth3<br/>10.99.1.185/24<br/>vif 10: 10.99.10.185/24"]
+        FWD["route / NAT / VLAN / PPPoE<br/>fast path or kernel"]
+        E4["eth4<br/>10.99.2.185/24<br/>vif 20: 10.99.20.185/24"]
+        E3 --> FWD --> E4
     end
-
-    E4 ===|"direct 10G DAC"| HELGAT["HELGA Ethernet 4<br/>10.99.2.16/24"]
-
-    subgraph HELGA["HELGA Windows host"]
-        HELGAM["Management 10G NIC<br/>Ethernet 3<br/>192.168.1.16"]
-        HELGAT
+    subgraph G2["gen2 (controller)"]
+        G2P["X710 port<br/>10.99.2.113/24  fd99:2::113/64<br/>VLAN 20: 10.99.20.113/24"]
     end
+    G1P ===|"10G DAC"| E3
+    E4 ===|"10G DAC"| G2P
 ```
 
-| Node | Management | Transit | Physical role |
-|---|---|---|---|
-| heidi / Proxmox | `192.168.1.15` | `10.99.1.15/24` on `vmbr0` | iperf2 client/generator; one 10G NIC carries both networks |
-| DUT | `eth0` = `192.168.1.185` | `eth3` = `10.99.1.185/24`; `eth4` = `10.99.2.185/24` | router and system under test |
-| HELGA | `Ethernet 3` = `192.168.1.16` | `Ethernet 4` = `10.99.2.16/24` | iperf2 server/sink; transit link is direct DAC to DUT eth4 |
-| lxc200 relay | `192.168.1.137` | none | ISO HTTP relay only; not in the measured path |
+The data-plane addresses are fixed by the scripts:
 
-Traffic must follow this routed path:
-
-```
-10.99.1.15 → 10.99.1.185 / DUT eth3 → DUT routing/offload → DUT eth4 / 10.99.2.185 → 10.99.2.16
-```
-
-### 2.1 heidi transit route (common failure)
-
-If iperf2 reports `No route to host` and heidi cannot ARP the next hop, an obsolete runtime route is pointing `10.99.2.0/24` at the dead gateway `10.99.1.106`. No `.106` endpoint exists in this harness. Fix it before every session:
-
-```bash
-ssh -i ~/.ssh/admin_key admin@192.168.1.15 \
-  'sudo ip route replace 10.99.2.0/24 via 10.99.1.185 dev vmbr0'
-```
-
-### 2.2 HELGA return route
-
-HELGA must route return traffic through DUT eth4:
-
-```powershell
-Get-NetRoute -DestinationPrefix 10.99.1.0/24
-# Required next hop: 10.99.2.185 on Ethernet 4
-```
-
-If absent:
-
-```powershell
-New-NetRoute -DestinationPrefix 10.99.1.0/24 `
-  -InterfaceAlias 'Ethernet 4' -NextHop 10.99.2.185 `
-  -RouteMetric 25 -PolicyStore ActiveStore
-```
-
----
-
-## 3. Access and required software
-
-| Node | Access | Required software |
+| Segment | gen side | DUT side |
 |---|---|---|
-| heidi | `ssh -i ~/.ssh/admin_key admin@192.168.1.15` | iperf2 `/usr/bin/iperf`, 2.1.x |
-| DUT | `ssh -i ~/.ssh/vyos_key vyos@192.168.1.185` | VyOS, `iperf`, `ethtool`, nftables, conntrack, ASK2 module |
-| HELGA | `ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes miha@192.168.1.16` | iperf2 `C:\Users\miha\iperf2\iperf.exe`, 2.2.x |
-| lxc200 | `ssh -i ~/.ssh/admin_key admin@192.168.1.137` | HTTP relay only |
+| eth3, untagged | `10.99.1.112/24`, `fd99:1::112/64` | `10.99.1.185/24`, `fd99:1::185/64` |
+| eth3, VLAN 10 | `10.99.10.112/24`, `fd99:10::112/64` | `10.99.10.185/24`, `fd99:10::185/64` |
+| eth4, untagged | `10.99.2.113/24`, `fd99:2::113/64` | `10.99.2.185/24`, `fd99:2::185/64` |
+| eth4, VLAN 20 | `10.99.20.113/24`, `fd99:20::113/64` | `10.99.20.185/24`, `fd99:20::185/64` |
+| PPPoE session (on eth3) | server `10.99.50.1`, `fd99:50::1` | client `10.99.50.10`, `fd99:50::10` |
+| WireGuard inner | `10.99.200.0/24`, `fd99:200::/64` | — |
 
-Use **iperf2** (executable `iperf`), not iperf3, for these measurements. iperf2 `--full-duplex -P 8` gives distinct flows, multicore host load, and a single bidirectional aggregate `[SUM]` line.
+Every DUT presents the same `.185` data-plane addresses. Switching DUTs is
+then a cable move, not a generator reconfiguration. A second DUT can be wired
+to a second X710 port on each generator. That port lives in a network
+namespace (`VENDOR_NS`, default `n106`; the name is only a label) with identical addresses, so the two DUT
+paths never share a routing table.
 
-### 3.1 HELGA iperf2 server
+### 2.3 Generator setup
 
-`Start-Process`, `cmd /c start`, and iperf daemon flags do not survive Windows SSH session teardown; the server dies and clients then fail to connect. Launch the persistent scheduled task instead:
+`sudo bin/testrig-dell-net.sh gen1` on generator 1 and `... gen2` on generator 2
+creates the persistent configuration:
 
-```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes miha@192.168.1.16 \
-  'powershell -NoProfile -Command "schtasks /Run /TN ask_iperf2|Out-Null; Start-Sleep 2"'
-```
+- NetworkManager profiles for the untagged port and its VLAN, with routes to
+  the far subnets via the DUT.
+- Source-based policy routes (tables 110/120) so VLAN-sourced traffic returns
+  via the VLAN.
+- The optional second-DUT namespace and `iperf3`/`iperf2` servers as systemd
+  units.
+- X710 tuning: 4096-entry rings, firmware LLDP agent disabled (it consumes
+  LLDP and can reset links), and `iommu=pt` on the kernel command line. With
+  DMA translation enabled, kernel pktgen on the X710 is capped at about
+  3–4 Mpps.
 
-HELGA's Windows Firewall must allow inbound iperf2 TCP on `Ethernet 4`. The lab host keeps persistent rules `ASK2-IPERF2-PROGRAM` and `ASK2-IPERF2-TCP`.
-
----
-
-## 4. DUT prerequisites
-
-Verify image, forwarding, addresses, link, and MTU before each session:
-
-```bash
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
-  echo "cmdline: $(cat /proc/cmdline)"
-  echo "ip_forward: $(cat /proc/sys/net/ipv4/ip_forward)"
-  ip -o -4 addr show eth3
-  ip -o -4 addr show eth4
-  for i in eth3 eth4; do
-    echo -n "$i mtu="; cat /sys/class/net/$i/mtu
-    sudo ethtool "$i" 2>/dev/null | grep -E "Speed|Link detected"
-  done
-'
-```
-
-Expected:
-
-```
-ip_forward = 1
-eth3 = 10.99.1.185/24, 10,000 Mb/s, link detected yes
-eth4 = 10.99.2.185/24, 10,000 Mb/s, link detected yes
-```
-
-Reference build for the validated run:
-
-```
-Image:  2026.08.17-0217-rolling
-Kernel: 6.18.44-vyos
-Branch: dpaa1
-Fixes:  F-201 RSS distribution; F-202 serialized FE flow lifecycle
-```
-
----
-
-## 5. End-to-end MTU control
-
-All transit endpoints must use the same MTU before any test traffic starts:
-
-```
-heidi enp35s0f1 = heidi vmbr0 = DUT eth3 = DUT eth4 = HELGA Ethernet 4
-```
-
-Change MTU only while ASK is disengaged and no traffic is running. Apply the DUT MTU first, then heidi, then HELGA; wait for links to settle; then start the iperf2 server and client.
-
-### 5.1 DUT MTU
-
-Use a standalone VyOS script. Do not use `vbash -c`, and do not wrap it in `sg vyattacfg -c` (that path hangs on repeated config churn).
+Also set, before a campaign and never during one:
 
 ```bash
-cat >/tmp/set-dut-mtu.vbash <<'EOF'
-#!/bin/vbash
-source /opt/vyatta/etc/functions/script-template
-configure
-set interfaces ethernet eth3 mtu 1500
-set interfaces ethernet eth4 mtu 1500
-commit
-exit
-EOF
-
-scp -i ~/.ssh/vyos_key /tmp/set-dut-mtu.vbash vyos@192.168.1.185:/tmp/
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 \
-  'chmod +x /tmp/set-dut-mtu.vbash; timeout 40 /tmp/set-dut-mtu.vbash'
+cpupower frequency-set -g performance
+sysctl -w net.core.rmem_max=67108864 net.core.wmem_max=67108864 \
+          net.ipv4.tcp_rmem='4096 131072 67108864' \
+          net.ipv4.tcp_wmem='4096 65536 67108864' \
+          net.core.netdev_max_backlog=250000
 ```
 
-Replace `1500` with the cell MTU and verify both sysfs readbacks afterward.
+For other NICs, set `GEN_IF` (port to the first DUT), `GEN_IF_NS` (port to
+the second DUT, moved into the namespace) and `GEN_DIRECT_IF` (optional
+direct generator link) in the environment of that command. The addresses and
+VLAN IDs are fixed (§2.2). The script always names the namespace `n106`, so
+keep `VENDOR_NS=n106` when you use it.
 
-### 5.2 heidi MTU
+### 2.4 Rig settings file
 
-Set the physical NIC before the bridge:
+The drivers read all rig-specific values from one file, so no script needs
+editing. Copy the template to the controller (gen2) and fill it in:
 
 ```bash
-ssh -i ~/.ssh/admin_key admin@192.168.1.15 '
-  sudo ip link set enp35s0f1 mtu 1500
-  sudo ip link set vmbr0 mtu 1500
-'
+mkdir -p ~/.config
+cp bin/testrig.env.example ~/.config/testrig.env
+$EDITOR ~/.config/testrig.env
 ```
 
-### 5.3 HELGA MTU
+The file is plain `KEY=value` lines. A leading `~/` or `$HOME` is expanded,
+and a variable set in the environment overrides the file. `TESTRIG_ENV=<path>`
+selects another file, for example one per rig. The bash drivers load it via
+`bin/testrig-env.sh` and the Python drivers via `bin/testrig_env.py`, with the
+same rules.
 
-```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes miha@192.168.1.16 \
-  'netsh interface ipv4 set subinterface "Ethernet 4" mtu=1500 store=active'
-```
+| Setting | Default | Meaning |
+|---|---|---|
+| `GEN1`, `GEN2` | none (required) | SSH targets (`user@host`) of gen1 (DUT eth3 side) and gen2 (DUT eth4 side) |
+| `ASK2_DUT` | none | SSH target of the VyOS/ASK2 DUT, used when `DUT_KIND=ask2` |
+| `VENDOR_DUT` | none | SSH target of the OpenWrt or OPNsense DUT, used when `DUT_KIND=vendor` or `opnsense` |
+| `RIG_KEY` | empty | SSH private key for all four hosts; empty uses your ssh config or agent |
+| `RIG_OUT` | `~/testrig/out` | Result directory (CSV files, iperf3 JSON, logs) |
+| `GEN_IF`, `GEN_IF_NS` | `enp1s0f0np0`, `enp1s0f1np1` | Generator ports facing the first DUT (root namespace) and the second DUT (namespace) |
+| `VENDOR_NS` | `n106` | Namespace holding `GEN_IF_NS`; must match §2.3 |
+| `PPPOE_USER` | `pppoe-test` | PPPoE test account; its password is read from gen1's `/etc/ppp/chap-secrets` and never stored in the settings file |
+| `PPPOE_PLUGIN` | `/usr/lib/pppd/2.5.2/rp-pppoe.so` | rp-pppoe plugin used by `pppoe-server` on gen1 |
 
-### 5.4 MTU cleanup after an abort
+Per-run variables stay in the environment:
 
-An aborted MTU test that leaves endpoints at mismatched MTUs breaks bulk TCP everywhere on the segment — including `add system image`, which reads the ISO size and then times out. Ping and HTTP headers still work, masking the fault. In one observed case heidi was left at 1280, lxc200 at 9000, and DUT at 1500.
-
-Always restore every endpoint to 1500 after a run or abort. Any automation must install an EXIT trap that does this:
-
-```bash
-ssh -i ~/.ssh/admin_key admin@192.168.1.15 \
-  'sudo ip link set enp35s0f1 mtu 1500; sudo ip link set vmbr0 mtu 1500'
-ssh -i ~/.ssh/admin_key admin@192.168.1.137 \
-  'sudo ip link set eth0 mtu 1500'
-ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes miha@192.168.1.16 \
-  'netsh interface ipv4 set subinterface "Ethernet 4" mtu=1500 store=active'
-```
-
-Restore DUT eth3/eth4 with the VyOS script in §5.1.
-
----
-
-## 6. Firewall flowtable configuration
-
-The DUT requires this base configuration:
-
-```
-firewall flowtable ft01 interface eth3
-firewall flowtable ft01 interface eth4
-firewall ipv4 forward filter rule 10 action offload
-firewall ipv4 forward filter rule 10 offload-target ft01
-interfaces ethernet eth3 offload hw-tc-offload
-```
-
-Hardware mode additionally requires:
-
-```
-firewall flowtable ft01 offload hardware
-```
-
-### 6.1 True software mode
-
-Removing the hardware flag is mandatory. Calling `vyos-offload-ask disengage` alone is not a software baseline: configured hardware-flowtable traffic re-arms the FE the moment offloadable traffic starts.
-
-```bash
-cat >/tmp/to-sw.vbash <<'EOF'
-#!/bin/vbash
-source /opt/vyatta/etc/functions/script-template
-configure
-delete firewall flowtable ft01 offload hardware
-commit
-exit
-EOF
-
-scp -i ~/.ssh/vyos_key /tmp/to-sw.vbash vyos@192.168.1.185:/tmp/
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
-  chmod +x /tmp/to-sw.vbash
-  timeout 40 /tmp/to-sw.vbash
-  sudo conntrack -F
-  sudo /usr/local/bin/vyos-offload-ask --port 0x10 disengage
-  sudo /usr/local/bin/vyos-offload-ask --port 0x11 disengage
-'
-```
-
-Verify both conditions before and during traffic:
-
-```bash
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
-  sudo nft list ruleset | grep -A5 "flowtable VYOS_FLOWTABLE_ft01"
-  sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm | grep "Armed ports"
-'
-```
-
-Expected: no `flags offload` line, and `Armed ports: (none)`.
-
-**A single pre-traffic check is NOT sufficient.** The FE can re-arm the instant offloadable traffic starts (CR-003 fail-open behaviour), so a software cell that only verified `Armed ports: (none)` *before* iperf will silently run in hardware and report bogus ~9–10 Gbit/s at ~2–3% CPU. A software cell MUST hold the FE disarmed for the **entire** run — see §7.4 (continuous mode gate) and the §7.5 validity discriminator. If the FE arms at any sample during a software cell, the cell is INVALID and its number MUST be discarded, not recorded.
-
-### 6.2 Hardware mode
-
-Enable the hardware flag and verify the live nftables render. Force a delete/commit then set/commit so the live ruleset is guaranteed to re-render (a plain `set` on an already-present node can be a silent no-op):
-
-```bash
-cat >/tmp/to-hw.vbash <<'EOF'
-#!/bin/vbash
-source /opt/vyatta/etc/functions/script-template
-configure
-delete firewall flowtable ft01 offload hardware
-commit
-set firewall flowtable ft01 offload hardware
-commit
-exit
-EOF
-
-scp -i ~/.ssh/vyos_key /tmp/to-hw.vbash vyos@192.168.1.185:/tmp/
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 \
-  'chmod +x /tmp/to-hw.vbash; timeout 60 /tmp/to-hw.vbash; sudo conntrack -F'
-```
-
-Before traffic, live nftables must contain `flags offload`. During traffic, FE state must show both ports: `Armed ports: 0x10 0x11`.
-
-### 6.3 Two verification pitfalls
-
-- **Config/live desync.** `config.boot` may say `offload hardware` while `nft list ruleset` has no `flags offload` (a `set` on an already-present node did not re-render live state after a prior runtime transition). Always force delete/commit + set/commit and verify the live ruleset. Reject any cell whose FE state does not match its intended mode.
-- **Conntrack `[OFFLOAD]` is not a hardware indicator.** The nftables *software* flowtable also marks conntrack entries `[OFFLOAD]`. Use live nft `flags offload`, FE `Armed ports`, CPU load, and kernel RX deltas to tell SW from HW — never conntrack alone.
-
----
-
-## 7. iperf2 test procedure
-
-### 7.1 Start the server
-
-```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes miha@192.168.1.16 \
-  'powershell -NoProfile -Command "schtasks /Run /TN ask_iperf2|Out-Null; Start-Sleep 2"'
-```
-
-### 7.2 Run one bidirectional cell
-
-From heidi:
-
-```bash
-ssh -i ~/.ssh/admin_key admin@192.168.1.15 '
-  sudo ip neigh flush dev vmbr0 2>/dev/null
-  iperf -c 10.99.2.16 -B 10.99.1.15 --full-duplex -P 8 -t 15
-'
-```
-
-Record the final bidirectional aggregate line:
-
-```
-[SUM] ... Gbits/sec
-```
-
-Do not average per-stream lines, and do not add both endpoint reports by hand.
-
-### 7.3 Capture average DUT CPU utilization
-
-Snapshot `/proc/stat` before traffic and near the end of the same 15-second window:
-
-```bash
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 \
-  'grep -E "^cpu[0-9]" /proc/stat > /tmp/cpu.before'
-
-# start iperf2, then at ~14 seconds:
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
-  grep -E "^cpu[0-9]" /proc/stat > /tmp/cpu.after
-  awk '\''
-    NR==FNR { old[$1]=$0; next }
-    {
-      split(old[$1], a, " "); total=0
-      for (i=2; i<=NF; i++) total += $i-a[i]
-      idle=($5-a[5])+($6-a[6])
-      printf "%s %.1f%% busy\n", $1, 100*(total-idle)/total
-    }
-  '\'' /tmp/cpu.before /tmp/cpu.after
-'
-```
-
-Report cpu0–cpu3 and the arithmetic mean of the four busy percentages.
-
-### 7.4 Continuous mode gate (mandatory — a single sample is not enough)
-
-Sample `fe_arm` **every second for the entire run**, not once. Run this on the
-DUT in parallel with the iperf cell:
-
-```bash
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
-  for i in $(seq 1 12); do
-    a=$(sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm 2>/dev/null \
-          | grep -oE "0x1[01]" | tr "\n" " ")
-    printf "t%02d fe=[%s]\n" "$i" "$a"
-    sleep 1
-  done
-'
-```
-
-Cell validity:
-
-- **Software cell:** every sample MUST be `fe=[]`. If any sample shows an armed
-  port (`0x10`/`0x11`), the FE re-armed mid-run — the cell ran in hardware.
-  Mark it **INVALID** and discard the number; do not record it.
-- **Hardware cell:** every sample MUST show both `0x10 0x11`. If a HW cell is
-  ever unarmed, it fell back to software — INVALID.
-
-### 7.5 Validity discriminator (sanity-check every number)
-
-The mode gate is authoritative, but the throughput/CPU shape is an independent
-cross-check. On this board (order-1 F-203 image):
-
-| Signature | Meaning |
+| Variable | Meaning |
 |---|---|
-| ~5–7 Gbit/s, all four cores ~45–90% busy | genuine **software** forwarding |
-| ~9–11 Gbit/s, all cores ~2–4% busy | **hardware** offload |
+| `DUT_KIND` | `ask2` (VyOS), `vendor` (OpenWrt NXP ASK) or `opnsense`; selects the DUT target and the offload proof |
+| `DUT` | Overrides the DUT target for one run |
+| `RIG_NS` | Run the generator side inside this namespace (set it to `$VENDOR_NS` for the second DUT) |
+| `RUN_ON=gen2` | The driver runs on gen2: gen2 commands run locally, gen1 and the DUT over SSH (`dell2` is accepted as an alias) |
+| `OUT`, `J`, `OUTDIR` | Result CSV, JSON directory and output directory for one run; default under `RIG_OUT` |
 
-A "software" cell reporting ~9–11 Gbit/s at ~2–3% CPU is **hardware-contaminated
-and invalid**, regardless of what the flowtable config said — the FE re-armed.
-Any result that disagrees with its intended mode's signature MUST be re-run
-under a verified continuous gate (§7.4), never published.
+A driver that needs a setting you have not set stops before sending traffic,
+for example `ERROR: set ASK2_DUT in the environment or in
+~/.config/testrig.env`. Use key-based SSH only: the controller must reach
+both generators and the DUT without prompts (`BatchMode=yes`), and the
+generator login needs password-less `sudo`.
 
-### 7.6 Saturation mode — the true software forwarding ceiling
+---
 
-The default `iperf2 --full-duplex -P 8` measures a **realistic but imbalanced**
-number: the FMan RSS hash frequently clusters the 8 flows onto one RX FQ band /
-one CPU, so a single core saturates (~96–98% softirq) while the others idle. The
-per-core *average* then looks like ~70% even though the bottleneck core is
-maxed, and aggregate throughput is capped by that one core — not by the
-generator, the links, or the board's real capacity.
+## 3. DUT configuration
 
-**Evidence (MTU 1500, software):** with default `-P 8`, RX packets landed
-CPU0 ≈ 80%, CPU1/2/3 ≈ 20% combined; CPU0 96–98% while CPU3 sat at 77%. heidi
-stayed ~90% idle and the same links carry 9–11 Gbit/s under hardware offload, so
-neither generator nor path is the limit — the limit is RSS imbalance.
+Each DUT needs only the data-plane addresses in §2.2, forwarding enabled and
+its fast path switched on. Keep management on eth0. Disable DHCP clients on
+eth3/eth4: a DHCP lease adds a second default route and changes the measured
+path.
 
-To measure the **true ceiling**, force an even flow→CPU spread. The RSS 4-tuple
-key is `SIP+DIP+SPORT+DPORT` (EKFC `0x00180006`), so for a fixed src/dst IP pair
-the source port alone selects the RX FQ band / CPU. The FQID-bit selection is
-not HW-confirmed for pure computation, so map ports **empirically**:
+### 3.1 VyOS / ASK2
 
-1. In software mode, disarmed, send a short UDP burst from a fixed source port
-   (`iperf -B <ip>:<port>` binds a fixed source port, or a tiny `socket` script)
-   and read the per-CPU `rx packets [CPU n]` delta on eth3. The CPU with the
-   largest delta owns that port.
-2. Sweep ~120 ports and bucket them by CPU. On this board the hash is uneven
-   (one CPU may be starved), so sweep wide and keep the highest-delta ports.
-3. Pick N ports per CPU and run N×4 fixed-source-port iperf2 clients:
+```text
+set interfaces ethernet eth3 address '10.99.1.185/24'
+set interfaces ethernet eth3 address 'fd99:1::185/64'
+set interfaces ethernet eth3 vif 10 address '10.99.10.185/24'
+set interfaces ethernet eth3 vif 10 address 'fd99:10::185/64'
+set interfaces ethernet eth4 address '10.99.2.185/24'
+set interfaces ethernet eth4 address 'fd99:2::185/64'
+set interfaces ethernet eth4 vif 20 address '10.99.20.185/24'
+set interfaces ethernet eth4 vif 20 address 'fd99:20::185/64'
+set interfaces ethernet eth3 offload ipv4
+set interfaces ethernet eth3 offload ipv6
+set interfaces ethernet eth4 offload ipv4
+set interfaces ethernet eth4 offload ipv6
+set firewall flowtable FT interface 'eth3'
+set firewall flowtable FT interface 'eth4'
+set firewall flowtable FT interface 'eth3.10'
+set firewall flowtable FT interface 'eth4.20'
+set firewall flowtable FT offload 'hardware'
+set firewall ipv4 forward filter rule 900 action 'offload'
+set firewall ipv4 forward filter rule 900 offload-target 'FT'
+set firewall ipv4 forward filter rule 900 protocol 'tcp_udp'
+set firewall ipv6 forward filter rule 900 action 'offload'
+set firewall ipv6 forward filter rule 900 offload-target 'FT'
+set firewall ipv6 forward filter rule 900 protocol 'tcp_udp'
+```
+
+`offload ipv4|ipv6` engages ASK2 per port and per IP family. VLAN, NAT and
+PPPoE on an engaged port are offloaded automatically. Apply configuration
+non-interactively with a `#!/bin/vbash` script that sources
+`/opt/vyatta/etc/functions/script-template`. Do not use `vbash -c`, which can
+hang over SSH.
+
+NAT cells need no permanent NAT rules. The harness creates a temporary
+nftables table `ask2q` with one masquerade rule per cell and removes it on
+exit. It also temporarily removes an existing VyOS NAT66 rule (comment
+`SRC-NAT66-100`) and restores it afterwards.
+
+PPPoE cells use a VyOS client on eth3 (§5.4):
+
+```text
+set interfaces pppoe pppoe10 source-interface 'eth3'
+set interfaces pppoe pppoe10 authentication username '<test-user>'
+set interfaces pppoe pppoe10 authentication password '<test-password>'
+set interfaces pppoe pppoe10 mtu '1492'
+set interfaces pppoe pppoe10 no-default-route
+set interfaces pppoe pppoe10 no-peer-dns
+set interfaces pppoe pppoe10 ipv6 address autoconf
+set protocols static route6 fd99:50::/64 interface pppoe10
+```
+
+### 3.2 OpenWrt with NXP ASK
+
+Configure the same addresses and VLANs, enable forwarding and keep CMM
+running. The harness logs in as `root`, does not use `sudo`, and needs only
+POSIX `sh`. NAT is supplied by the harness at runtime. The PPPoE session is
+created at runtime by `bin/testrig-pppoe-vendor.sh up|down|status`. It runs a
+`pppd` client named `pppoe10` on the DUT's eth3 and changes no persistent
+configuration.
+
+### 3.3 OPNsense with the NXP ASK port
+
+In the reference DUT, FreeBSD names the cages `dtsec3` (eth3) and `dtsec4`
+(eth4). Configure through the web UI:
+
+| OPNsense interface | Device | IPv4 / IPv6 |
+|---|---|---|
+| opt1 | `dtsec3` | `10.99.1.106/24` (native) + alias `10.99.1.185/24`; `fd99:1::106/64` + alias `fd99:1::185/64` |
+| opt2 | `dtsec4` | `10.99.2.106/24` + alias `10.99.2.185/24`; matching IPv6 |
+| opt3 | `vlan01` = VLAN 10 on `dtsec3` | `10.99.10.106/24` + alias `.185`; matching IPv6 |
+| opt4 | `vlan02` = VLAN 20 on `dtsec4` | `10.99.20.106/24` + alias `.185`; matching IPv6 |
+
+- Leave **pf enabled**. CMM offloads pf states, so with pf disabled nothing is
+  offloaded.
+- Add an inbound pass rule (IPv4 and IPv6) on each of the four test
+  interfaces. The harness refuses to run unless
+  `pass in quick on dtsec3 inet6` is present.
+- Leave Outbound NAT in Automatic mode. Test NAT rules are loaded at runtime
+  into a pf anchor called `testrig`, registered by this plugin file:
+
+```php
+<?php
+// /usr/local/etc/inc/plugins.inc.d/testrig.inc
+function testrig_firewall(\OPNsense\Firewall\Plugin $fw)
+{
+    $fw->registerAnchor("testrig", "nat", 0, "head");
+}
+```
+
+Reload the filter after adding the file. For example, the NAT-across-VLANs
+IPv4 cell loads `nat on vlan02 inet from 10.99.10.0/24 to any ->
+10.99.20.185` and flushes the anchor afterwards.
+
+- Enable CMM (`cmm_enable="YES"` in `/etc/rc.conf.local`). If you restart it
+  from an SSH session, detach its descriptors, or the SSH session will not
+  close:
+  `service cmm restart </dev/null >/tmp/cmm-restart.log 2>&1`.
+
+To add temporary filter rules for tunnel or PPPoE tests without disturbing
+NAT or state, edit the filter ruleset only:
+
+```sh
+pfctl -sr > /tmp/filter.orig                      # save the exact original
+# insert the new pass rules after the leading "scrub" lines, then:
+pfctl -n -o none -R -f /tmp/filter.new            # validate
+pfctl    -o none -R -f /tmp/filter.new            # load filter rules only
+# ... test ...
+pfctl    -o none -R -f /tmp/filter.orig           # restore; verify with pfctl -sr | diff
+```
+
+`-R` without `-o none` fails with “Must enable table loading for
+optimizations”.
+
+---
+
+## 4. Offload proof
+
+The quick harness (§5.1) measures the DUT's kernel packet counters over the
+steady window. It compares them with the number of data frames that iperf3
+reports for the same window:
+
+| `DUT_KIND` | Counter | Hardware share |
+|---|---|---|
+| `ask2` | Per-record `pkt_count` growth in `/sys/kernel/debug/fman_pcd/0/fe_ehash_stats` | Hardware-forwarded packets ÷ estimated data frames |
+| `vendor` | `ethtool -S ethN` `rx packets [TOTAL]` (frames handed to the kernel) | 1 − kernel RX ÷ estimated data frames |
+| `opnsense` | `netstat -s -p ip` and `-p ip6`, “total packets received” | 1 − IP-stack RX ÷ estimated data frames |
+
+Classification: ratio ≥ 0.9 **HW**, 0.1–0.9 **PARTIAL**, < 0.1 **SW**.
+Offloaded ACKs can push the ASK2 ratio to about 1.2. Use per-record growth for
+ASK2: summing deltas across records lets records that age out cancel growth
+elsewhere.
+
+Do not use interface `rx_packets` or the FreeBSD ifnet counters as a
+kernel-path indicator. On these drivers they also count fast-path frames.
+
+A non-HW run is **not** a slower hardware result. Report it separately as a
+fallback and investigate (§6). Never average it into a hardware mean.
+
+### 4.1 Forcing software mode on ASK2 (for SW vs HW comparisons)
+
+Remove `firewall flowtable FT offload hardware`, commit, flush conntrack, and
+disengage both ports. Then sample the armed-port state **every second for the
+whole run**:
 
 ```bash
-# balanced set example (MTU 1500, src 10.99.1.15, dst 10.99.2.16:5201):
-#   CPU0: 40065 40020   CPU1: 40028 40027
-#   CPU2: 40044 40030   CPU3: 40066 40043
-for p in 40065 40020 40028 40027 40044 40030 40066 40043; do
-  iperf -c 10.99.2.16 -B 10.99.1.15:$p --full-duplex -t 14 &
+for i in $(seq 1 30); do
+  sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm | grep -oE "0x1[01]" | tr "\n" " "
+  echo; sleep 1
 done
-wait
 ```
 
-Port→CPU mapping is specific to the hash **and** the src/dst IP pair — re-probe
-if either changes. The helper `saturate.sh` (probe + balanced run) automates
-both phases (`FLOWS_PER_CPU`, `DUR`, `MODE`, `REMAP`).
-
-**Validated software ceiling (MTU 1500, order-1 F-203 image):**
-
-| Flow selection | Per-core CPU | Throughput |
-|---|---|---|
-| default `-P 8` (imbalanced) | 98/96/88/77 | ~5.3 Gbit/s bidir |
-| balanced 2/CPU (8 flows) | 79/82/81/85 | 7.02 Gbit/s unidir |
-| balanced 4/CPU (16 flows) | 84/90/72/92 | **12.74 Gbit/s bidir** |
-
-So the board's real single-node software forwarding ceiling is **~12.7 Gbit/s
-bidirectional (~6.4 Gbit/s per direction)** — about 2.4× the naive `-P 8` bidir
-figure. Cores plateau at ~85–92%, not a clean 100%, because the DPAA softirq/
-NAPI path has a small non-CPU component (QMan portal dequeue, memory bandwidth,
-cache misses on scattered flows); adding flows past ~4/CPU raises per-core CPU
-without raising aggregate — the signature of genuine saturation.
-
-**When to use which:** report the default `-P 8` number as the representative
-mixed-traffic figure, and the saturation number as the board's capacity ceiling.
-Real traffic (diverse 5-tuples) spreads naturally and lands between the two; the
-`-P 8` clustering is a synthetic-benchmark artifact, not a production defect.
+A software run is valid only if every sample is empty. A hardware run is
+valid only if every sample shows both ports. Offloadable traffic can re-arm
+the fast path mid-run. A “software” cell at about 9 Gbit/s with near-idle CPU
+was really hardware-forwarded and must be discarded.
 
 ---
 
-## 8. Error and health monitoring
+## 5. Test suites
 
-Capture these counters before and after each cell:
+Run every suite from gen2 (`RUN_ON=gen2`) as a systemd user unit, so a
+dropped SSH session from your workstation cannot kill a campaign:
 
 ```bash
-ssh -i ~/.ssh/vyos_key vyos@192.168.1.185 '
-  sudo ethtool -S eth3 | grep -iE "rx frame physical error|rx frame size error|rx dma error"
-  sudo ethtool -S eth4 | grep -iE "rx frame physical error|rx frame size error|rx dma error"
-  sudo dmesg | grep -iE "Err FD status|list_del|list_add|BUG|panic|POISON|corruption|Oops"
-'
+systemd-run --user --unit=parity-run bash -c 'cd ~/repo && <command>'
+journalctl --user -fu parity-run
 ```
 
-These counters are cumulative — report deltas, not repeated absolute totals. A flat non-zero value across later cells is historical and must not be re-counted per cell.
+Never overlap two suites. `bin/testrig-parity-bidir.sh` takes an `flock` on
+`$RIG_OUT/parity-bidir.lock` and refuses to start while
+`testrig-offload-quick.sh` is running. The other drivers do not check, so
+run them one at a time.
 
-`rx frame physical error` increments when FMan flags an RX frame descriptor with `FM_FD_ERR_PHYSICAL`: a MAC/SerDes/physical receive fault such as an aborted, CRC-bad, or alignment-faulted frame. It is distinct from `rx frame size error` (a frame/buffer sizing fault). A small burst during 10G link bring-up that then stays flat under load is benign; a steadily climbing count indicates a real physical-path problem.
+### 5.1 Throughput cells
 
-Abort the session if any of these occur:
+`bin/testrig-offload-quick.sh [cell ...]` runs one 30-second iperf3 test per
+cell: `iperf3 -Z -P 8`, TCP, MSS 1448 (1514-byte frames at MTU 1500).
+Throughput is the mean of receiver intervals from 10 s onward. For
+bidirectional cells (`BIDIR=1`, iperf3 `--bidir`) both directions are summed.
+DUT CPU is sampled over the same window.
 
-- `Err FD status = 0x00080000` begins increasing continuously;
-- eth3 or eth4 link stays up but ARP fails and RX stops increasing;
-- kernel `list_del`, `BUG`, `Oops`, `panic`, or poison diagnostics appear;
-- management becomes unreachable;
-- MTUs differ among transit endpoints.
-
-### 8.1 eth3 RX-deaf state
-
-Symptom: eth3 shows 10G link and carrier, but the DUT cannot ARP/ping heidi, eth3 RX drops climb, and eth4 stays healthy. Cause: a DUT-side FMan/SerDes RX condition after an MTU mismatch under load, a physical rewire, or accumulated RX faults; link bouncing and a warm reboot do not clear it. Recovery: restore all MTUs to 1500, correct the routes, then cold power-cycle the DUT and confirm DUT→heidi ping and ARP `REACHABLE` before testing.
-
-### 8.2 FE flow lifecycle panic (images before F-202)
-
-Symptom: kernel panic in `fman_pcd_ehash_del_key()` with `list_del corruption` and `LIST_POISON2`, typically from `nf_ft_offload_del` during SW/HW mode churn. Cause: production flow add/delete did not hold `pcd->fe_lock`, letting the asynchronous nft delete race a duplicate delete, clear, or drain. Fix: use image `2026.08.17-0217-rolling` or newer (contains F-202). Do not run lifecycle stress on older images.
-
----
-
-## 9. Safe cell order
-
-For each MTU, run this exact sequence:
-
-1. Stop traffic.
-2. Flush conntrack and disengage both ASK ports.
-3. Confirm `Armed ports: (none)`.
-4. Set DUT eth3/eth4 MTU.
-5. Set heidi physical NIC and bridge MTU.
-6. Set HELGA `Ethernet 4` MTU.
-7. Wait at least three seconds for link and neighbor state.
-8. Run a short iperf2 connectivity probe.
-9. Enter true SW mode: delete the hardware flowtable flag, commit, flush
-   conntrack/flows, disengage both ports. Poll until `Armed ports: (none)` is
-   stable for at least two seconds before starting traffic.
-10. Run the 15-second SW cell **with the §7.4 1-second continuous FE sampler in
-    parallel**. Every sample must be empty. Any arm event = INVALID; discard the
-    throughput/CPU number and repeat the cell after a clean disengage.
-11. Flush flows/conntrack and verify FE unarmed before changing to HW.
-12. Enter HW mode; force delete/commit + set/commit so live nft has
-    `flags offload`. Verify both ports arm under a short probe.
-13. Run the 15-second HW cell with the same continuous sampler. Every sample
-    must contain `0x10 0x11`; otherwise INVALID.
-14. Flush conntrack, clear flows, disengage; poll until FE is stably unarmed.
-15. Record health-counter **deltas** and compare throughput/CPU with the §7.5
-    validity signature. Reject any contradictory cell.
-16. Continue to the next MTU.
-
-After the final cell or any abort, restore:
-
-```
-heidi enp35s0f1 = 1500
-heidi vmbr0      = 1500
-lxc200 eth0      = 1500
-DUT eth3/eth4    = 1500
-hardware flowtable configured
-FE ports unarmed until traffic starts
-```
-
----
-
-## 10. Validated results
-
-### 10.1 Order-0 baseline (image `2026.08.17-0217-rolling`, kernel `6.18.44-vyos`)
-
-Mode-verified per cell, iperf2 `--full-duplex -P 8 -t 15`:
-
-| MTU | SW throughput | SW CPU mean | HW throughput | HW CPU mean | HW / SW |
-|---:|---:|---:|---:|---:|---:|
-| 1280 | 5.71 Gbit/s | 65% | 9.92 Gbit/s | 4% | 1.74× |
-| 1500 | 6.64 Gbit/s | 69% | 10.4 Gbit/s | 3% | 1.57× |
-| 2000 | 6.19 Gbit/s | 71% | 10.4 Gbit/s | 3% | 1.68× |
-| 2500 | 6.22 Gbit/s | 70% | 10.1 Gbit/s | 3% | 1.62× |
-
-Signatures: SW = all four cores ~55–83% busy (F-201 RSS working); HW = all cores
-~2–6% busy (FMan forwards). This SW column is the trusted software reference —
-if a later run disagrees, the later run is suspect (§7.5).
-
-### 10.2 Order-1 jumbo (image `2026.08.17-2012-rolling`, F-203)
-
-F-203 raises the RX buffer to order-1/8 KiB so `dpaa_change_mtu` accepts up to
-7000 and large frames stay contiguous/HW-offloadable. **Hardware jumbo battery
-passed with no FMan RX wedge** (board uptime stable, `dev_alloc_pages` failures
-= 0, physical-error deltas 0 except transient link-settle bumps that did not
-grow):
-
-| MTU | HW throughput | HW CPU mean | phys-err delta | wedge |
-|---:|---:|---:|---:|:--:|
-| 1500 | 9.40 Gbit/s | 3% | 0 | no |
-| 3000 | 9.16 Gbit/s | ~2% | 0 | no |
-| 4000 | 9.00 Gbit/s | ~2% | +2 settle | no |
-| 6000 | 9.35 Gbit/s | ~3% | 0 (HW cell) | no |
-| 7000 | 9.25 Gbit/s | ~2% | 0 | no |
-
-Software MTU-1500 on the order-1 image re-measured at **6.53 Gbit/s, cores
-71–89%** — matches the order-0 SW reference (F-203 does not regress the
-software path).
-
-**Pending:** The order-1 **software** jumbo cells (3000/4000/6000/7000) are not
-yet captured with the §7.4 continuous gate. The first jumbo battery's "SW" rows
-read ~9 Gbit/s at ~2% CPU — those are hardware-contaminated (the FE re-armed
-between the HW and SW cells) and were correctly rejected; they are NOT software
-results. Re-run those four SW cells under the continuous gate before publishing
-an order-1 SW column.
-
-### 10.3 Interpretation
-
-Hardware forwarding runs at the ~9–10 Gbit/s harness ceiling while the DUT stays
-near idle; software forwarding is CPU-bound near 6 Gbit/s. Hardware delivers
-~1.6× the throughput at roughly one-twentieth of the DUT CPU cost, and (with
-F-203) does so contiguously up to MTU 7000. The hardware ceiling is above what
-this single 4-core generator can drive.
-
-Stability: order-0 run — five engage/flush/disengage cycles + 40 conntrack
-flushes clean; order-1 jumbo battery — no reboot, no wedge, no
-`list_del`/`BUG`/panic/poison/Oops.
-
----
-
-## 11. Result record template
-
-```
-Date/UTC:
-Image:
-Kernel:
-Commit/run:
-Cold boot before test: yes/no
-heidi route to 10.99.2.0/24:
-HELGA route to 10.99.1.0/24:
-MTUs verified end-to-end:
-Tool: iperf2
-Command: iperf -c 10.99.2.16 -B 10.99.1.15 --full-duplex -P 8 -t 15
-
-MTU | Mode | nft flags offload | FE armed during | Gbit/s | cpu0 | cpu1 | cpu2 | cpu3 | mean | RX-error delta | verdict
-
-Post-test:
-- all MTUs restored to 1500:
-- hardware flowtable configured:
-- FE armed ports:
-- MURAM baseline:
-- dmesg error scan:
-- management reachable:
-```
-
----
-
-## 12. Known limitations
-
-- TCP routed-IPv4 benchmark only — not a packet-loss or minimum-frame packet-rate test.
-- Aggregate is bounded by the 10G endpoints and physical path; it does not establish the absolute FMan ceiling.
-- VLAN, IPv6, bridge, PPPoE, tunnel, and IPsec offload are out of scope.
-- Order-0 SW+HW is validated 1280–2500 (§10.1). Order-1/F-203 hardware jumbo is validated 1500–7000 (§10.2); order-1 **software** jumbo (3000–7000) is still pending a continuous-gate run.
-- A "software" cell reading ~9–11 Gbit/s at ~2–3% CPU is hardware-contaminated, not a result — the FE re-armed. Use the §7.4 continuous gate and §7.5 signature to reject it.
-- MTU below 1280 is outside the VyOS interface contract with IPv6 link-local enabled.
-- The physical-error counter is cumulative; interpret it as a delta.
-- ICMP may be blocked by HELGA's Windows firewall; use a short TCP iperf2 probe for path readiness.
-
----
-
-## 12a. Comparison suite against the external tuned-ASK benchmark (dell rig, 2026-10)
-
-The external Mono DK benchmark (`VytautasJnk/mono-gw`, branch `armbian-ask-master-20261010-results`,
-`RESULTS.md`) measures NXP ASK master on TRex: PDR (highest rate with ≤ 0.5 % loss) over both directions
-with 8k sessions, mean of 3 ± max deviation; NIC-timestamped latency at idle and 10/50/90 % of PDR;
-20k new connections/s with 20k held, with and without NAT; and the kernel path. `bin/testrig-compare.sh`
-runs the same four measurements on the current dell rig (dell1 `.112` → DUT `.185` eth3/eth4 → dell2
-`.113`, topology and rules in qdrant "ASK2 TESTING SETUP on the dell rig"):
-
-| Section | What it runs | Their table |
+| Cell | Client → server | Path through the DUT |
 |---|---|---|
-| `pdr` | `BIDIR=1 FLOWS=8192 LOSS=0.5 bin/testrig-pktgen.sh a2 port-v4 <size>` for 64/570/1518/imix: both dells transmit the exact reverse tuples at once, every flow is warmed so it is offloaded, counting at the X710 MAC counters | Stateful firewall, offloaded |
-| `cps` | `bin/testrig-cps.py` (server on dell2 :8080/:8081, paced client on dell1) at 5k/10k/20k new connections/s for 30 s plus 20k held connections, NAT off and on (runtime nft table `ask2c`, masquerade out of eth4); records conntrack states and drops, DUT CPU, client retransmits | New connections/s ± NAT |
-| `lat` | `bin/testrig-latprobe.py` on dell1/dell2: PTPv2-framed UDP 319 probes, X710 hardware timestamps at both ends, rtt = (t4 − t1) − (t3 − t2); 5000 probes at idle and at 10/50/90 % of the imix PDR as background | Latency, firewall offloaded |
-| `kpath` | Unidirectional 64 B flows that never get a reply (so never offloaded), 1 and 1024 flows, `MAXPPS=1000000` search cap, first with ASK engaged (the miss path) and then with eth3/eth4 disengaged through the CLI; then kernel-path latency with the ports disengaged; re-engages at the end | Kernel path, routing latency |
+| `unicast-v4`, `unicast-v6` | gen1 → gen2 | routed eth3 → eth4 |
+| `unicast-v4-rev`, `-v6-rev` | gen2 → gen1 | routed eth4 → eth3 |
+| `nat-v4`, `nat-v6` (`-rev`) | gen1 → gen2 (reverse) | NAT44 / NAT66 masquerade on the egress port |
+| `vlan-v4`, `vlan-v6` (`-rev`) | VLAN 10 → VLAN 20 | VLAN ID translation |
+| `vlanport-v4`, `-v6` | VLAN 10 → untagged eth4 | tag strip |
+| `portvlan-v4`, `-v6` | untagged eth4 → VLAN 10 | tag add |
+| `pppoe-down-v4`, `-v6` | PPPoE server → gen2 | PPPoE decapsulation, eth3 → eth4 |
+| `pppoe-up-v4`, `-v6` | gen2 → PPPoE server | PPPoE encapsulation, eth4 → eth3 |
+| `nat-vlan-v4`, `nat-vlan-v6` | VLAN 10 → VLAN 20 | NAT across VLANs (opt-in combo cell) |
+| `nat-pppoe-up-v4` | gen2 → PPPoE server | NAT44 on the PPPoE interface (opt-in combo cell) |
 
-Run it on a cold-booted DUT after `DUT_HOST=192.168.1.185 bin/testrig-combo-matrix.sh setup`; it refuses
-to start while a churn soak runs. Output goes to `/mnt/builds/ask2-review/oracle/compare-<date>-<time>/`.
-On exit it always removes the NAT table, re-engages offload and stops the server/reflector.
+Example:
 
-Differences from their method that remain: kernel pktgen instead of TRex (UDP flows, not TCP sessions),
-our "kernel path" keeps conntrack (theirs is stateless routing), the latency figure is half of a
-two-traversal round trip (they time each direction on one dual-port NIC), the CPS client is a Python
-asyncio generator, and there is no TCP application mix. `port-v6` is refused in BIDIR mode because NAT66
-masquerades the reverse tuple on eth4. Self-tests that need no rig: `bin/testrig-cps.py selftest`,
-`bin/testrig-latprobe.py selftest`, `DRY=1 BIDIR=1 bin/testrig-pktgen.sh trial ...` (prints the pktgen
-configuration of both dells).
+```bash
+RUN_ON=gen2 DUT_KIND=ask2 DUR=30 STEADY_FROM=10 STREAMS=8 \
+  OUT=~/testrig/out/run.csv bin/testrig-offload-quick.sh unicast-v4 nat-v4
+# second DUT, wired to the namespace ports:
+BIDIR=1 RUN_ON=gen2 DUT_KIND=opnsense RIG_NS=n106 \
+  bin/testrig-offload-quick.sh unicast-v4
+```
 
-### 12a.1 Variance and port-FIFO findings from the external benchmark (2026-10-10)
+Each result row is:
+`ts,cell,gbps,dut_busy,dut_softirq,gen_cpu,retrans,hw_pkts,data_pkts_est,hw_ratio,verdict`.
+Per-run iperf3 JSON is stored under `J=`.
 
-The external author reported 570 B PDR ±96 % on stock settings: three runs of the same cell found 2.14, 0.70 and 0.44 Mpps. The cause is not the method. Bursty alignment of 8k sessions overflows the 10G port RX FIFO (24 KB per port by default); IMIX is affected through its 570 B component. Overflow drops appear as mEMAC `rdrp`. Reallocating FMan FIFO memory to the 10G ports (RX 80 KB each, TX 24 KB; 1G and O/H ports 4 KB) brought the spread to about 1 %. Above 80 KB RX, and raising TX from 16 to 24 KB, changed nothing. Their kernel-path tuning also leaves CPU0 for housekeeping and runs packet work on CPU1-3 with RPS, because the packet path and flow install compete for cycles.
+### 5.2 Paired campaign protocol
 
-Correlates with `arch/fman-fe-ehash.md`, where the 24 KB port RX FIFO filling (~45 frames) is the deaf-port mechanism. Rules for `pdr` cells:
+Single runs vary by about one MSS step (~1.3%). Compare stacks only with a
+paired, repeated campaign:
 
-- Run each PDR cell 3 times and record mean, ± max deviation and per-run `rdrp` delta. A spread above ~10 % means FIFO or burst sensitivity: report it, do not average it away.
-- Before quoting a 570 B or IMIX figure, sweep RX FIFO size (24 to 88 KB). No mechanism in this tree sets port FIFO size yet (only the BMI unit and O/H sizing in patches 0122, 0175, 0218), so this is an open experiment. It is a BMI change: apply the Qdrant gate (AGENTS S0) and cold-boot per run.
-- For `kpath` and `cps`, compare against a CPU0-housekeeping split (packet work on CPU1-3) before judging connections/s stability.
+- 10 rounds per cell. In each round, run both DUTs back-to-back on the same
+  cell, and alternate which DUT goes first in successive rounds.
+  `bin/testrig-parity-bidir.sh <cell> ...` implements this on gen2 for
+  `ASK2_DUT` (root-namespace ports) and `VENDOR_DUT` (namespace ports);
+  `VENDOR_KIND=opnsense` selects the OPNsense proof. Results are labelled
+  `ask2-*` and `vendor-*`.
+- Identical settings on both DUTs: duration, streams, MTU/MSS, direction,
+  warm-up, topology and offload proof.
+- Keep every raw CSV and JSON, including failed and non-HW runs. Summarise
+  only complete HW-proven pairs: mean, median, sample SD, the count of
+  missing or non-HW pairs, and a paired bootstrap interval.
+- Verdict rule used in the published tables: a lower mean is a FAIL, however
+  small the gap. Report uncertainty separately and do not trim slow runs.
+- Rerun a cell that fell back to software only after recording the
+  fallback. Report the rerun and the fallback together.
 
-## 13. Changelog
+### 5.3 NAT and VLAN combinations
 
-- **1.3.1 — 2026-10-10** — Add §12a.1: external-benchmark variance cause (10G RX FIFO), per-run `rdrp`/spread rule, FIFO sweep and CPU-split experiments.
-- **1.3.0 — 2026-10-10** — Add §12a comparison suite (`testrig-compare.sh`, `testrig-cps.py`, `testrig-latprobe.py`, BIDIR/FLOWS/NOPRIME/MAXPPS/DRY in `testrig-pktgen.sh`).
+NAT, VLAN and NAT-across-VLAN cells need no extra configuration. The harness
+installs the NAT rule for each cell (nftables on Linux DUTs, the pf `testrig`
+anchor on OPNsense) and removes it on exit.
 
-- **1.2.0 — 2026-08-17** — Add §7.6 saturation mode: empirical port→CPU mapping, balanced fixed-source-port flow method, and the measured true software ceiling (~12.74 Gbit/s bidirectional, ~2.4× the imbalanced -P8 figure); documents that RSS imbalance, not the generator/links, caps the default number.
-- **1.1.0 — 2026-08-17** — Add mandatory per-second continuous FE mode gate, SW/HW throughput+CPU validity discriminator, reject/discard rules for hidden FE re-arm, F-203 order-1 hardware jumbo results through MTU 7000, and explicit pending status for software jumbo cells.
-- **1.0.0 — 2026-08-17** — Initial current-harness specification: corrected topology, F-201/F-202 mode validation, deterministic SW/HW switching, MTU safety and recovery, CPU sampling, and validated 1280–2500 results.
+### 5.4 PPPoE
+
+- The PPPoE access concentrator runs on gen1: `rp-pppoe` `pppoe-server` in
+  kernel mode on the eth3-facing port, local `10.99.50.1`, pool
+  `10.99.50.10`. Create a test account in `/etc/ppp/chap-secrets`.
+- gen1's `ip-up`/`ipv6-up` hooks must add a policy route that sends the
+  session addresses back over `ppp0`. gen2 already routes `10.99.50.0/24`
+  and `fd99:50::/64` via the DUT's eth4.
+- **gen1 receive RPS is required.** NICs that cannot RSS-hash PPPoE frames
+  deliver every returning ACK to one RX queue. That caps the generator at
+  about 6 Gbit/s and makes the generator, not the DUT, the bottleneck. The
+  harness enables RPS on gen1 for `pppoe-*` cells and restores it on exit.
+- DUT client:
+  - VyOS: the `pppoe10` interface in §3.1.
+  - OpenWrt: `bin/testrig-pppoe-vendor.sh up` (server in gen1's
+    `VENDOR_NS`, account `PPPOE_USER`).
+  - OPNsense: create a PPPoE device under **Interfaces → Point-to-Point →
+    Devices**, parent `dtsec3`, test account `PPPOE_USER`, MTU/MRU 1492.
+    Assign the resulting device (for example `pppoe0`) to an enabled test
+    interface under **Interfaces → Assignments**, select PPPoE IPv4 and
+    enable IPv6 over the PPP link. Do not select it as the management/default
+    route. Apply through OPNsense so it generates the mpd configuration,
+    runs its link hooks and names the Netgraph nodes. **Do not hand-start
+    mpd5:** that forwarded in software in the original test, whereas the
+    assigned native interface offloaded all four v4/v6 encap/decap cells.
+
+For OPNsense, add `fd99:50::10/64` to the established PPP device for this
+fixed test subnet, plus filter pass rules on that device for the session
+sources (§3.3). The harness addresses the session by IP, not device name.
+
+PPPoE fragmentation correctness (oversize datagrams into a 1492-byte
+session) is tested separately with `bin/testrig-pppoe-frag.py ask2|vendor`.
+That script counts intact delivered datagrams, not TCP throughput.
+
+### 5.5 WireGuard
+
+`bin/wg-parity.sh ask2|vendor` (table: `bin/wg-parity-table.py`) drives
+`bin/testrig-wireguard.sh`. The tunnel is terminated on the DUT; the peer is
+the generator on the encrypted-leg port:
+
+- One tunnel, IPv4 outer transport, UDP 51820, MTU 1420, four TCP streams,
+  30 s runs with steady state from 10 s.
+- **A fresh tunnel for every repetition.** The CPU that services the single
+  WireGuard transmit worker changes with each new interface, so results from
+  one tunnel are bimodal.
+- Matrix: encrypted leg on eth3 and on eth4 × inner IPv4/IPv6 × `up` (DUT
+  encrypts), `down` (DUT decrypts), `bidir` (both directions summed). Report
+  the median of at least 3 repetitions.
+- `ceiling-v4` runs WireGuard between the two generators over a direct link.
+  It proves the generators are not the limit.
+- On VyOS, conntrack is bypassed for the outer UDP ports during the run, as
+  for VyOS-configured WireGuard. On OPNsense, the native `if_wg` tunnel
+  stays under pf/CMM. Treat those results as as-configured throughput,
+  including control-plane overhead, not as a pure crypto benchmark.
+
+### 5.6 64-byte packet rate
+
+`bin/testrig-pktgen.sh` uses kernel `pktgen` on gen1 (4 TX threads) and counts
+at the X710 MAC counters: `port.tx_unicast` on gen1 and `port.rx_unicast` on
+gen2. Neither host's socket path limits the result. Frame size includes FCS.
+Each trial first primes the flow in both directions, so the DUT sees an
+established connection and offloads it.
+
+```bash
+DUT_KIND=ask2 LOSS=0.001 TRIAL=10 STEPS=10 CONFIRM=3 \
+  bin/testrig-pktgen.sh a2 port-v4 64                 # search + 3 confirmations
+DUT_KIND=ask2 bin/testrig-pktgen.sh trial port-v4 64 3140000 10   # fixed rate
+DUT_KIND=ask2 bin/testrig-pktgen.sh trial port-v4 64 0 10         # unpaced flood
+```
+
+Reporting rules:
+
+- **Highest rate at ≤0.001% loss** is the highest search candidate confirmed
+  by three consecutive trials. If any confirmation fails, lower the rate.
+  It is not an exact physical ceiling.
+- **Fixed-rate loss** is reported at the rate actually offered (TX counter),
+  not the requested rate. pktgen pacing undershoots by a few percent, so
+  calibrate the request until the offered rate is within tolerance.
+- MAC counters are read separately on two hosts and include stray unicast.
+  An RX count one frame above TX is counter skew; treat it as zero loss and
+  keep the raw signed value. Reject anything larger.
+- Before a packet-rate batch, run a plain TCP routed cell and confirm it is
+  HW. A kernel-bypass share of 1.0 shows the DUT kernel did not see the
+  frames. It does not show where lost frames were dropped.
+- Calibrate the generator first. Sending to a MAC address the DUT discards
+  (`DST_MAC=02:00:00:00:00:99`) measures the generator alone. Reference
+  generators managed about 14.0 Mpps unpaced and paced to about ±2.5% up to
+  12 Mpps.
+- The DUT comes from `ASK2_DUT` or `VENDOR_DUT` by `DUT_KIND`; `vendor` runs
+  the generator side in `VENDOR_NS` on `GEN_IF_NS`. `pktgen` proof is built
+  in for `ask2` and `vendor`. For a FreeBSD DUT, replace the proof function
+  with the `netstat -s -p ip` counters from §4.
+
+### 5.7 Optional: latency, connection rate and multi-flow PDR
+
+`bin/testrig-compare.sh` runs four sections (`pdr`, `cps`, `lat`, `kpath`)
+with `bin/testrig-cps.py` and `bin/testrig-latprobe.py`:
+
+- 8k-flow bidirectional PDR at ≤0.5% loss.
+- 5k/10k/20k new connections/s with and without NAT.
+- Hardware-timestamped PTP-framed latency at idle and at 10/50/90% of PDR.
+- Kernel-path (miss-path) packet rate.
+
+Run each PDR cell three times and record the spread and the per-run MAC
+receive-drop delta. The drop delta needs an FMan register reader on the
+DUT: set `FMREG=<path>` to a Python script that takes `r <offset>` (run with
+`sudo python3` on the DUT) and prints the register value as its third
+space-separated field; without it the
+`rdrp_*` columns read 0. A spread above about 10% points to port-FIFO or burst
+sensitivity, not measurement noise. Self-tests that need no rig:
+`bin/testrig-cps.py selftest`, `bin/testrig-latprobe.py selftest`, and
+`DRY=1 BIDIR=1 bin/testrig-pktgen.sh trial ...`.
+
+---
+
+## 6. Health and error monitoring
+
+Capture these before and after every cell, and report **deltas**. All the
+counters are cumulative.
+
+| Stack | Command | Watch |
+|---|---|---|
+| VyOS | `ethtool -S eth3`, `ethtool -S eth4` | `rx frame physical error`, `rx frame size error`, `rx dma error`; per-CPU RX |
+| VyOS | mEMAC registers at FMan + `0xF0000` / `0xF2000`: `rdrp` (+0x158), `rerr` (+0x138) | MAC receive drops and errors |
+| OpenWrt | `ethtool -S eth3`, `ethtool -S eth4` | SDK RX error and drop counters |
+| OPNsense | `netstat -I dtsec3 -nd -b`, `netstat -I dtsec4 -nd -b` | `Ierrs`, `Idrop`, `Oerrs`, `Drop` |
+| OPNsense | `sysctl net.pfnotify dev.cdx.stats` | `events_dropped`, `ring_used` vs `ring_size`, `active_connections` |
+| OPNsense | `grep cmm /var/log/system/latest.log` | CMM messages; frame errors are logged by the kernel as `dtsecN: RX error … fd_status=…` |
+| all | `dmesg` / system log | `BUG`, `Oops`, `panic`, `list_del`, poison, repeated frame-descriptor errors |
+
+On OPNsense, `sysctl dev.dtsec.N` exposes only SFP data, BMan buffer counts
+and a `diag` trigger, not traffic counters. Use `netstat -I`.
+
+`fd_status=0x00080000` / `rx frame physical error` is a MAC/SerDes-class
+receive error: an aborted, CRC-bad or misaligned frame. A small burst at
+link-up that then stays flat is benign. A count that climbs with load is a
+real loss source. Report it with the throughput number, because TCP
+retransmits around it and the only visible symptom is lower throughput.
+
+Stop the session if any of these occur:
+
+- frame errors climb continuously;
+- a port keeps link but stops receiving (ARP fails, RX counters flat). Cold
+  power-cycle the DUT; a warm reboot does not clear the condition;
+- a kernel `BUG`, `Oops`, `panic` or list corruption appears;
+- management becomes unreachable;
+- endpoint MTUs differ (§7).
+
+---
+
+## 7. MTU safety
+
+All transit endpoints must use the same MTU: gen1 port, DUT eth3, DUT eth4
+and gen2 port. A mismatch breaks bulk TCP on the whole segment, while ping
+and small requests keep working, which hides the fault. Change MTU only with
+no traffic running. On VyOS, change it only with the fast path disengaged.
+Any MTU automation must use an exit trap that restores every endpoint to
+1500. VyOS rejects MTUs below 1280 while IPv6 link-local is enabled.
+
+---
+
+## 8. Validity checklist
+
+- Cold-boot the DUT before a campaign and record the image and kernel.
+- Confirm link at 10G on both ports and a clean routed HW reference cell.
+- Disable DHCP on the test ports. Confirm no other traffic on the rig.
+- Verify generator tuning before the campaign. Never change it mid-campaign.
+- Every reported value must have HW proof on every included run (§4).
+- Compare CPU and throughput against the expected signature. On ASK2,
+  hardware forwarding runs at line rate with the DUT near idle, while
+  software forwarding is CPU-bound at about 6 Gbit/s with all cores busy.
+  A result that disagrees with its mode's signature is suspect until
+  explained.
+- Use iperf3 `-Z` for zero-copy. In iperf2, `-Z` selects the TCP congestion
+  algorithm instead.
+- After the run, remove every temporary interface, NAT rule, filter rule,
+  route and tunnel, and verify the DUT's original configuration.
+
+---
+
+## 9. Result record template
+
+```text
+Date/UTC:
+DUT stack / image / kernel:
+Cold boot before campaign: yes/no
+Generators: NIC, driver, iperf3 version, tuning verified: yes/no
+Controller command and environment:
+Protocol: duration, steady-from, streams, MTU/MSS, repetitions, pairing order
+
+cell | family | direction | runs | HW runs | mean Gbit/s | median | SD | DUT busy % | retrans | error deltas
+
+Fallbacks / excluded runs (with reason):
+Post-test cleanup verified:
+Raw artifact location:
+```
+
+---
+
+## 10. Reference results
+
+The full tables, raw-data inventory and verdicts are in
+`plans/ASK2-VENDOR-PARITY.md`. These are the headline numbers measured with
+this harness at MTU 1500. Values are means of 10 runs (routed, NAT, VLAN),
+means of 3 runs (OPNS NAT across VLANs), one native-interface retest per
+cell (OPNS PPPoE), or medians of 3 fresh-tunnel runs (WireGuard):
+
+```text
+Gbit/s unless noted               OPNS           OWRT           VyOS
+                                  v4     v6      v4     v6      v4     v6
+ROUTED
+ 3->4                            9.28   9.23    9.28   9.15    9.28   9.15
+ 4->3                            9.31   9.18    9.28   9.15    9.32   9.17
+ bidir                          15.94  15.67   17.99  17.61   18.13  17.90
+NAT44 / NAT66 (PAT included)
+ 3->4                            9.30   9.24    9.28   9.15    9.28   9.15
+ 4->3                            9.10   9.25    9.28   9.16    9.32   9.17
+ bidir                          16.17  16.00   17.88  17.29   18.17  17.91
+VLAN
+ strip tag 3->4                  9.27   9.14    9.26   9.14    9.26   9.13
+ add tag 4->3                    9.27   9.15    9.26   9.13    9.29   9.19
+ strip+add bidir                11.43  11.39   12.93  12.80   13.00  12.75
+ xlate VID 3->4                  9.28   9.14    9.27   9.13    9.26   9.13
+ xlate VID 4->3                  9.27   9.20    9.26   9.13    9.28   9.15
+ xlate VID bidir                13.32  14.11   17.99  17.79   18.15  17.90
+ NAT across VLANs 3->4           9.26   9.10    9.26   9.13    9.38   9.25
+PPPoE (session on eth3; OPNS native interface, one run)
+ decap 3->4                      9.34   9.11    9.28   9.11    9.32   9.23
+ encap 4->3                      9.23   9.10    9.23   9.14    9.37   9.15
+WIREGUARD (software crypto)
+ eth3 up                         0.83   0.43    1.39   1.27    1.69   1.63
+ eth3 down                       0.96   0.93    1.21   1.22    1.54   1.42
+ eth3 bidir                      0.95   0.76    1.42   1.42    1.42   1.47
+ eth4 up                         0.84   0.77    1.34   1.30    1.57   1.62
+ eth4 down                       0.95   0.75    1.31   1.29    1.48   1.50
+ eth4 bidir                      0.93   0.74    1.57   1.44    1.41   1.37
+
+64 B ONE WAY (Mpps)               OPNS             OWRT                   VyOS
+ highest rate at <= 0.001 % loss  0.85             1.84 (2.79 unstable)   2.64
+ 3.14 Mpps offered, loss          62.867-62.930 %  0.011-0.053 %          0.00001-0.046 %
+ unpaced flood delivered          1.16             3.40                   4.12
+```
+
+Notes for interpreting the table:
+
+- OWRT and VyOS routed/NAT/VLAN values come from one paired campaign. The
+  other OWRT/VyOS rows and all OPNS values come from separate sessions:
+  they are context, not paired comparisons.
+- OPNS PPPoE uses its native device/assignment and ran in hardware
+  (`hw_ratio=1.00` in all four retest cells). The superseded hand-started-mpd
+  results were software-only; keep configuration provenance with results.
+- OPNS bidirectional cells were hardware-forwarded. In a diagnostic routed
+  IPv4 bidirectional rerun, each OPNS port logged about 1.9 M receive errors
+  (`fd_status=0x00080000`, about 8% of received frames). The run had about
+  5 M TCP retransmits, and `Idrop`/`Oerrs` stayed at 0. One-way cells showed
+  almost no errors. This likely explains the lower OPNS bidirectional
+  throughput, but the root cause is not established.
+- ASK2 software vs hardware forwarding on an earlier single-generator rig
+  (iperf2, MTU 1500): about 6.6 Gbit/s at about 69% DUT CPU in software,
+  against about 10.4 Gbit/s at about 3% CPU with hardware offload.
+
+---
+
+## 11. Known limitations
+
+- TCP throughput is bounded by the 10G generators. It shows the fast path
+  reaches line rate, not the FMan's absolute ceiling.
+- kernel `pktgen` sends UDP flows, not stateful TCP sessions with an
+  application mix.
+- Single-generator TCP with `-P 8` can hash several flows onto one DUT core
+  in software mode. That number is representative but below the software
+  ceiling. Balanced per-core flows measured about 12.7 Gbit/s bidirectional
+  in software on ASK2.
+- WireGuard, IPsec, bridging, multicast and QoS are either software on every
+  stack or outside this harness.
+- Results from different images, MTUs, stream counts or durations must not
+  be mixed into one baseline.
+
+---
+
+## 12. Changelog
+
+- **2.0.0 — 2026-10-16** — Rewritten for public reproduction:
+  - Covers the two-generator 10G rig, all three DUT stacks (VyOS/ASK2,
+    OpenWrt NXP ASK, OPNsense NXP ASK) and per-stack offload proof.
+  - Adds the paired campaign protocol and PPPoE, WireGuard and 64-byte
+    procedures.
+  - Adds OPNsense configuration, including the pf anchor, filter-only rule
+    loading and native OPNsense PPPoE device/assignment setup; the native
+    retest replaces the hand-started-mpd software values in the reference table.
+  - Adds health counters per stack and the reference results table.
+  - Removes the retired single-generator rig, host-specific credentials and
+    internal hostnames.
+  - Moves all rig-specific values into one settings file
+    (`bin/testrig.env.example`, loaded by `bin/testrig-env.sh` and
+    `bin/testrig_env.py`); the drivers no longer carry lab addresses, keys
+    or paths.
+- **1.3.1 — 2026-10-10** — External-benchmark variance cause (10G RX FIFO), per-run drop/spread rule.
+- **1.3.0 — 2026-10-10** — Comparison suite (`testrig-compare.sh`, `testrig-cps.py`, `testrig-latprobe.py`).
+- **1.2.0 — 2026-08-17** — Saturation mode and the measured software ceiling.
+- **1.1.0 — 2026-08-17** — Continuous fast-path mode gate and SW/HW validity discriminator.
+- **1.0.0 — 2026-08-17** — Initial harness specification.

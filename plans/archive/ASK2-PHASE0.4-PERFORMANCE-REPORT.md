@@ -1,4 +1,8 @@
 # ASK2 Datapath Performance & Hardware Offload Benchmark
+
+> Archived 2026-10-15. Completed Phase 0.4 report; measurements apply to the
+> recorded images and rig, not current-image parity. Remaining repeat and scale
+> gates: `plans/ASK2-MASTER-PLAN.md`; live evidence: `plans/ASK2-VENDOR-PARITY.md`.
 ## Evaluating Modern In-Tree ASK2 against NXP Legacy ASK on NXP Layerscape LS1046A
 
 **Date:** October 9, 2026  

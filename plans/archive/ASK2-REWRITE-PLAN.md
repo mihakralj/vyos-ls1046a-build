@@ -1,18 +1,28 @@
 # ASK2 Rewrite Plan — reaching and exceeding vendor NXP ASK on LS1046A
 
-Date: 2026-10-03. Live plan updated 2026-10-09 at `dpaa1` `ab1660a7`. Vendor
-reference: the `nxp-sdk` branch (worktree `e20239b9`) and the original vendor
-source at `/mnt/builds/ASK`.
+> Archived 2026-10-15. Historical review and evidence, not a live work queue.
+> Remaining tasks are consolidated in `plans/ASK2-MASTER-PLAN.md`; current
+> measurements and acceptance method are in `plans/ASK2-VENDOR-PARITY.md`.
+> All following text is the pre-consolidation snapshot, including dated status.
+
+Live status updated 2026-10-15. Vendor reference: the `nxp-sdk` branch and
+original vendor source; current performance comparison uses the live NXP ASK
+DUT `.106` and ASK2 DUT `.185`.
 
 This file holds only what is still open or still binding. The full text as of
-2026-10-09 (all measured history, falsified hypotheses, dated result logs) is
-preserved unmodified in
+2026-10-09 (measured history, falsified hypotheses and dated result logs
+through that checkpoint) is preserved unmodified in
 [`plans/archive/ASK2-REWRITE-PLAN-2026-10-09.md`](archive/ASK2-REWRITE-PLAN-2026-10-09.md).
 Section numbers below are the original ones so existing citations keep
 working; the "Archived sections map" at the end says where every removed
 section went.
 
-## Baseline (shipping at `ab1660a7`, 2026-10-09)
+## Historical implementation baseline (shipping at `ab1660a7`, 2026-10-09)
+
+The table below is the 2026-10-09 implementation baseline, retained to show
+what was already shipping at that checkpoint. It is not a current performance
+baseline. Current image and measurements are in the live-status block below
+and `plans/ASK2-VENDOR-PARITY.md`.
 
 - **In hardware on an engaged port:** routed IPv4/IPv6, NAT44/NAT66, 802.1Q
   VLAN pop/push/translate, PPPoE decap (F-260, `0x14`) and encap (F-261,
@@ -29,222 +39,85 @@ section went.
 - **Software today:** bridge L2 (B0 FDB observer and B1 DA-only record action
   committed, no silicon proof), PPPoE over VLAN, IPsec, multicast, tunnels, IPv4
   fragments as flows, egress QoS.
-- **Latest CI image:** `vyos-2026.10.09-1858-rolling` from `98d3deba` (CI run
-  `37976997166`: F-263 plus the PPPoE decap MTU bound), installed on `.185`.
-- Vendor oracle `.106`, ASK2 DUT `.185`, rig `dell1 (.112) → DUT eth3/eth4 →
-  dell2 (.113)`.
+- **Historical CI checkpoint:** `vyos-2026.10.09-1858-rolling` from
+  `98d3deba` (CI run `37976997166`: F-263 plus the PPPoE decap MTU bound).
+  It is superseded by the live 0551 image below.
+- Current comparison endpoints are `.106` (vendor) and `.185` (ASK2);
+  traffic path is `dell1 (.112) → DUT eth3/eth4 → dell2 (.113)`.
 
-## Progress tracker (updated 2026-10-10)
+## Live status (2026-10-15)
+
+- ASK2 `.185`: image `2026.10.15-0551-rolling`, kernel `6.18.55-vyos`.
+- Vendor `.106`: kernel `6.12.103`; it is active and is being re-tested rather
+  than treated as a frozen baseline.
+- An independent dell2 systemd campaign is in progress: 10 runs per board for
+  16 unidirectional and 8 bidirectional routed/NAT/VLAN cells (480 attempts).
+  At the 21:43 UTC status check it was still running, with 27/480 attempts
+  complete and zero reported measurement issues. Status, raw results and final
+  paired analysis:
+  `~/testrig/campaigns/parity-10x10-20261015T2130Z/` on dell2.
+- The initial same-session single-run results indicate a common rig throughput
+  shift, not an ASK2 regression. Keep all one-run parity verdicts provisional
+  until the paired campaign completes. The paired campaign does not include
+  PPPoE, WireGuard, packet-rate, connection-scale, or latency tests; those
+  remain separately pending.
+- F-199 WQ6 fix is present in 0551. F-266 is implemented, default-off, and
+  **not validated end-to-end**: the offloaded-flow FIN/RST still needs a
+  transit test proving conntrack close and NAT mapping behavior. Do not enable
+  or call that issue fixed based on parser register setup/readback alone.
+
+## Progress tracker (updated 2026-10-15)
 
 | Phase | Status | Open remainder |
 |---|---|---|
-| **0 — safety and oracles** | 🟢 CLOSED 2026-10-09 (Phase 0.4 complete) | None. Line-rate pktgen (14.7 Mpps), IMIX, UDP vlan↔vlan and 64k-flow scale measured on NXP reference and ASK2 (see Phase 0.4 below) |
-| **1 — VLAN root cause** | 🟢 CLOSED 2026-10-10 (churn gate closed by operator decision: FMan RX stall root-caused and fixed by F-263, 0 stalls in 1,123 cycles on three boots) | None gating. Non-gating follow-ups below, including the single ARP-type transient of the close run |
+| **0 — safety and oracles** | 🟢 CLOSED 2026-10-09 (Phase 0.4 complete) | None. Historical packet-rate/IMIX/UDP/64k-flow evidence remains in the archive; it is not a current 0551 parity measurement. |
+| **1 — VLAN root cause and RX churn safety** | 🟢 CLOSED 2026-10-10 (F-263 fixed; 0 FMan RX stalls in 1,123 verified-load cycles on three boots) | No gating work. The one ARP-type transient in the close run is a separate non-gating harness/network follow-up. |
 | **2 — consolidation** | ⬜ not started | Delete `ask_vlan_cc.c` (509 LOC, still in `Kbuild`) and its proxies; fold F_199/F_201/F_222/F_224/F_227/F_242; remove diagnostic fixups F_236–F_251; LOC budget ≤ 15k kernel PCD |
-| **3 — vendor-parity features** | 🟡 bridge, PPPoE remainder, soft-parser punts, multicast, IPsec, tunnels/fragments, QoS open | Bridge L2 has its own track (`ASK2-BRIDGE-OFFLOAD-PLAN.md` §13: B1 CI → B2 silicon matrix → B3a → B3b → B4 → B5; D1 and D8 operator-confirmed). Details in Phase 3 |
+| **3 — vendor-parity features and correctness** | 🟡 F-266 transit correctness, bridge, PPPoE remainder, soft-parser safety, multicast, IPsec, tunnels/fragments and QoS open | Do not repeat completed routed/NAT/VLAN code implementation. First finish 0551 paired throughput evidence; then address the explicit open tests/tasks in Phase 3 and the owning feature plans. Bridge execution is owned by `ASK2-BRIDGE-OFFLOAD-PLAN.md` §13. |
 | **4 — exceed the vendor** | ⬜ not started | A13 on ASK2 not measured |
 
-### Churn gate (Phase 1 exit criterion) — CLOSED 2026-10-10
+### Churn gate — CLOSED 2026-10-10
 
-The gate is "zero RX-deaf or churn errors" under verified load. Stalls #1–#5
-(2026-10-06/07) are one rare FMan RX stall. Stalls #3–#5 carry the same DMA
-bus-error address.
+The Phase 1 gate is closed by operator decision: after F-263 removed the
+`en_exthash_node` template copy that corrupted ehash bucket 0, three 1858-era
+runs completed 1,123 verified-load cycles across three boots with zero FMan RX
+stalls, deaf ports or kernel errors. A single ARP-type transient recovered
+within five seconds and was judged non-gating. No Phase 1 churn work remains.
+The full stall signatures and harness procedure are no longer repeated here.
+The 2026-10-10 close-run artifacts remain on dell2 under
+`~/soak/churn-1010-1805-coldboot-1858-500-h2.{csv,log}`.
+The separate 10,000-cycle PPPoE session-churn test remains open under Phase 3.
 
-| Stall | When / image | Cycle | Signature [SILICON] |
-|---|---|---|---|
-| #1 | 2026-10-06 17:59:52, aging without F-254 (`1727`) | 1 | FMan-wide RX stall incl. `eth0`; began right after vlan↔vlan v4 burst records were installed. Pre-F-254 variant: eth3 only, `FMFP_PS[0x10]` STL `0x00800000`, BMI `rfrc` frozen, `fe_recover` ineffective, cold boot only |
-| #2 | 2026-10-07, `2026.10.06-2239-rolling` (aging + F-254), second run | 84 | eth3 and eth4 RX dead, `eth0` alive, `FMFP_PS[0x11]` STL `0x00800000`, `FMFP_EXTC.INV0` stuck at 1. Onset **before** any delete (last good sync 04:55:45.545 right after the eight vlan↔vlan v4 burst records; first delete SYNC timeout 04:55:50.43), so deletes are not the trigger |
-| #3 | 2026-10-07, `2239`, cold boot | 97 | eth4 RX dead, eth3 alive; `FMFP_PS[0x11]` STL, `INV0` stuck. FMan DMA bus error `FMDM_TAH/TAL` = `0x2e_000008f7` (not DDR on LS1046A), `FMDM_TCID` = `0x11570000` (PortID `0x11`, TNUM 87), `FMDM_SEFRC` 0 → 111; 14 eth4 RX tasks frozen at status `0x00d8xxxx`/`0x00d9xxxx`/`0x00daxxxx` (healthy in-flight `0x0088xxxx`) plus FM_CTL task 4 at `0x81d00007`; eth4's FE workspace pool untouched (tasks never reached the hash lookup) |
-| #4 | 2026-10-07 19:27, `2026.10.07-1743-rolling`, `churn-1007-stallcap400-v2` | 105 | eth3 and eth4 stalled, `stuck_count=33` (healthy baseline 1: only task 4 parked). `FMan[0] DMA bus error: addr 0x2e000008f7 port_id 9 tnum 93 liodn 0 (F-256)`. Conntrack 3391 |
-| #5 | 2026-10-07 22:16:52, same image, fresh cold boot, `churn-1007-2111-coldboot-long` | 129 | eth3 and eth4 stalled, `stuck_count=32`, **identical** `port_id 9 tnum 93` and address as #4 on an independent cold boot. Conntrack 3830, so conntrack total is not the trigger. DUT control plane survived (SSH alive, MURAM `used` unchanged at 52890/86016) |
-| #6 | 2026-10-09 17:45:25, `2026.10.09-0415-rolling` (50-byte key), cold boot, `churn-1009-1701-coldboot-0415-500` | 97 | eth3 and eth4 RX dead, eth0 alive. `FMan[0] DMA bus error: addr 0x32000008f7 port_id 9 tnum 55`: high byte now `0x32` = the new key size 50 (was `0x2e` = 46), low half unchanged |
+Older non-gating findings (bidir retransmits, the iperf3 control-channel race,
+and the ARP transient) are historical, not open Phase 1 gates. Current
+throughput and retransmit comparisons belong in
+`plans/ASK2-VENDOR-PARITY.md`. TCP close visibility and its conntrack impact
+remain open and are described below under F-266.
 
-- **ROOT CAUSE FOUND 2026-10-09 (fix F-263, commit `5838202a`).** F-143
-  (2026-07-30, folded into patch 0169) `memcpy`'d the 16-byte `en_exthash_node`
-  template into the first 16 bytes of every DDR bucket array, i.e. onto
-  **bucket 0**, believing the FE-VM reads the node from the table base. The
-  walker reads the node from MURAM (`IC.CCBASE`); the DDR allocation is only
-  buckets. Read big-endian as a bucket head the template is
-  `(key_size << 32) | bswap32(table_base_lo)` = `0x32_000008f7` on the eth4
-  table `0xf7080000` (`0x2e_000008f7` with the 46-byte key), which the walker
-  DMA'd as a record pointer. Every frame whose key hashes to bucket 0
-  (`(crc64_raw >> 48) & 0x7fff == 0`, one flow in 32768) wedged the FMan, which
-  is why onset was random (cycles 84-129) but the signature never changed.
-  Evidence: the wedged task's IC (MURAM `0x3100`) had KS `0x32`, a port-port-v4
-  ACK key with crc64 `0x8000a6f507c29f55` (bucket 0) and `IC+0x90` (the DMA'd
-  bucket head) = `00000032 000008f7`, byte-equal to bucket 0 in DDR; bucket 0
-  of all four tables held the byte-reversed templates. **Deterministic
-  reproduction** after a cold boot: one UDP packet 10.99.1.112:16735 →
-  10.99.2.113:9000 (key in bucket 0) gave `DMA bus error: addr 0x32000010f7
-  port_id 8` on eth3 at once, exactly the predicted bucket-0 value of eth3's
-  table `0xf7100000`; the neighbouring port 16736 passed. Any host, including
-  the WAN, could wedge an engaged port with one packet. The 576-cycle pass on
-  `0106` simply never produced a bucket-0 flow. F-263 deletes the copy (the
-  template stays in `t->ad`; `dma_alloc_coherent` zeroes the array).
-  **Validated 2026-10-10** on image `1858` (CI `37976997166`, `98d3deba`),
-  smart-plug cold boot: bucket 0 of all four tables reads zero; single-packet
-  triggers (5 UDP packets each) eth3-v4 `10.99.1.112:16735 → 10.99.2.113:9000`,
-  eth4-v4 `10.99.2.113:38483 → 10.99.1.112:9000`, eth3-v6
-  `fd99:1::112:36976 → fd99:2::113:9002` and eth4-v6
-  `fd99:2::113:34246 → fd99:1::112:9002` all deliver 5/5 with no bus error
-  (neighbouring-port controls likewise); TCP flows pinned to bucket 0 by
-  `--cport` (eth3/eth4 × IPv4/IPv6, the eth4 IPv6 one through NAT66) put
-  their records at `idx=0` and take 6.35–6.39M hardware hits each in 7 s at
-  9.28–9.41 Gbit/s. Bucket model (verified against two silicon hashes): key =
-  `ask_fe_build_key_dual()`'s 50 bytes, bucket = `(crc64_raw >> 48) & 0x7fff`.
-  Finder `oracle/b0.py SRC DST PROTO FIXED {sport|dport} N`; evidence
-  `oracle/f263-validation-20261010.txt`.
-- **Reading:** all-fields-identical recurrence across a cold boot argues for a
-  deterministic stale-pointer bug (a fixed code path or fixed-size structure,
-  e.g. a MURAM record or record-pool slot indexed by something that wraps),
-  not random memory reuse or a per-port race. Cycle count (84, 97, 105, 129)
-  and conntrack total do not correlate. Mainline `fman_bus_error()` only does
-  `dev_dbg`, which is why F-256 logs it.
-- **Fixes already in** (none of them explains the signature): idle aging
-  `2d7c8268`; F-254 (`0cb5a105`, safe ehash delete: one 64-bit store,
-  `dma_wmb`, `FMFP_EXTC[INV0]` SYNC, then free, RM §5.12.14.1); F-256
-  (`2dcdb65c`, bus-error logging and records kept when the delete SYNC times
-  out); F-257 (`23c9d448`, frees the per-flow 16-byte FE ctx DMA buffer after
-  the SYNC; hygiene only).
-- **Cold-boot soak 2026-10-08** (CI run `37711222593`, image
-  `2026.10.08-0106-rolling`, kernel `6.18.55-vyos`): 576 cumulative cycles on
-  one cold boot (run 1 died at cycle 76 when the control VM was evicted, run 2
-  resumed on the same boot and ran all 500): criteria met on every cycle: 0
-  deaf ports, 0 transient misses, 0 new kernel errors, MURAM flat at 52890 B,
-  records 106–124 under burst and 0 after the 120 s settle; a whole-boot journal
-  scan found 0 error-pattern hits, 0 F-256 bus-error lines, 0 SYNC timeouts and
-  0 F-219 evictions; `sudo ask-check` 36/36 READY. That is
-  4.5× past the latest earlier onset but **one boot**, and the `2239` build
-  also passed 100/100 once before stalling at cycle 84, so the gate stays open.
-  (Root cause since found: no bucket-0 flow occurred in that run.)
-- **Soaks on the F-263 image `1858`:** `churn-1010-0326-lan` (2026-10-10
-  03:26–07:20 UTC) PASS 500/500: 0 deaf, 0 transient misses, 0 new kernel
-  errors, MURAM 52922 → 52922, records 0 → 0, background 7.2/7.2 Gbit/s,
-  107 burst fails (non-gating, see below). It started 8 min after the
-  image's first boot and the boot type is not known (most likely the warm
-  reboot after the install), so it does not count as the pristine run. The
-  first close-bar run `1010-1708-coldboot-1858-500` (smart-plug cold boot,
-  17:08 UTC) was stopped clean at cycle 123 (0 deaf, 0 errors, 22 burst
-  fails) to switch to the fixed harness. The run of record is
-  `1010-1805-coldboot-1858-500-h2`, started 18:05 UTC on a power-on-reset
-  boot (WDOG `WRSR` = `0x0010` POR; the smart plug cut power a second time
-  ~2 min after the commanded cycle, so the boot is cold), background
-  7.2/7.2 Gbit/s, harness with the listener-inode wait and the incremental
-  journal-cursor error scan.
-- **Close run result (2026-10-10 18:05–21:29 UTC):** `1010-1805-coldboot-1858-500-h2`
-  ran 500/500 cycles: 0 deaf, 0 new kernel errors, 0 burst fails (the
-  harness fix works), MURAM 52922 → 52922 and records 0 → 0 after the
-  settle, background 7.2/7.2 Gbit/s. Harness verdict FAIL on **one transient
-  miss** at cycle 359 (~20:29:45): the DUT's 5 pings to `10.99.1.112`
-  (dell1, untagged IPv4 on eth3) went unanswered and the re-check 5 s later
-  passed. Not the stall signature: FPM port status clear, only the parked
-  FM_CTL task, eth3 BMI `rfrc` advancing, the other seven rig addresses
-  (including dell1's VLAN 10 and IPv6 on the same port) answered, no
-  bus-error or kernel-error line, and ASK re-resolved the 10.99.1.112
-  neighbour at 20:29:50 inside the check window (it re-resolves every
-  11–38 s under this load, 847 times in the run). Read as a lost ARP
-  exchange under load; tracked below as a non-gating follow-up.
-- **Gate CLOSED 2026-10-10 by operator decision.** The close bar asked for a
-  pristine cold-boot 500-cycle run with 0 transient misses; the run above
-  had one, of a different class than the gate guards against. Since F-263
-  three runs on image `1858` (`0326` 500, `1708` 123, `1805-h2` 500 =
-  1,123 verified-load cycles on three boots) had 0 FMan RX stalls, 0 deaf
-  ports and 0 kernel errors, against onsets at cycles 84–129 before the
-  fix. Data: `oracle/churn-1010-1805-coldboot-1858-500-h2.{csv,log}` and
-  `-fails/c359-suspect.txt` on dell2 `~/soak/`.
-- **Harness** (`/mnt/builds/ask2-review/oracle/`): `churn.sh` = background
-  vlan↔vlan v4 bidir load, 16 × 450 Mbit/s per direction on port 5203 (rate
-  verified ≥ 5 Gbit/s per direction); per cycle a 2 s 4-stream burst on all six
-  combos, deaf check (8 rig addresses × 5 pings plus BMI `rfrc` progress,
-  re-checked after 5 s), kernel-log error grep, MURAM/record/conntrack counts;
-  120 s settle at the end. `churn-lan.sh` = same loop with `CTL_ON=remote|dell1|
-  dell2`; `soakctl.sh {setup|deploy|preflight|start|status|pull|stop|clean}`
-  runs it detached on dell2; `soak_summary.py` summarises; `oracle/fmstall.py`
-  captures the FPM task table, `FMFP_PS`/`FMFP_EXTC` and QMI/DMA/BMI state and
-  flags busy-and-unchanged tasks. Never run two harnesses at once and never
-  edit a script while it runs; run `soakctl.sh clean` after a stop or crash.
-  Since 2026-10-09 the harness also writes `~/soak/STATUS` on the controller: a
-  key=value snapshot rewritten atomically at arming, after every cycle, during
-  the settle and at the end (`state` ARMING/RUNNING/SETTLING/PASS/FAIL/STOPPED/
-  ABORTED/DIED, `cycle`, counters, MURAM/records, ETA, and `stale_after_utc`: a
-  run killed hard stops refreshing it, so `now_utc > stale_after_utc` means dead).
-  The final verdict is PASS only if every cycle ran with 0 deaf, 0 transient
-  misses, 0 new kernel errors and MURAM/records back to baseline after the
-  settle; burst fails are reported but do not gate. A finished run's copy stays
-  as `churn-<tag>.status`. Check from anywhere: `ssh admin@192.168.1.113 cat
-  soak/STATUS` (or `soakctl.sh status`, which prints it first).
-  The per-cycle kernel-error scan reads the journal incrementally from a
-  saved cursor (fixed 2026-10-10; rescanning since `T0` every cycle made
-  the cadence drift 29 → 36 s over 500 cycles).
-- **Binding guards on the ehash delete path:**
-  - **Dropped draft `0220` — never recreate.** It re-implemented F-254's atomic
-    unlink and SYNC (F-254's anchors match only the unpatched `del_key()`, so
-    applying `0220` first makes F-254's anchor count 0 and fails the CI fixup
-    chain), freed the record F-256 keeps, and was built on a 6.18.48 mirror
-    without patches 0207-0219. F-257 is its one valid part, as a Layer-2
-    fixup after F-256 (a Layer-1 patch would break F-256's delete-tail anchor).
-  - **Build gate `bin/test-ehash-delete.py`** compiles the real `del_key()` and
-    `flow_drain()` from the patched tree with the host gcc (ASan/UBSan when
-    usable) against a simulated SYNC and checks head/middle/tail unlink,
-    exactly-once record and ctx release after the SYNC, invalid and missing
-    keys, and record+ctx retention on SYNC timeout. It runs in
-    `ci-setup-kernel.sh` right after F-257 and aborts the build before the
-    kernel compile on a violation.
+### Open board checklist (current image 0551)
 
-### Non-gating follow-ups
+Baseline CLI/kill-switch/fragmentation and reversibility checks passed on the
+0415 CI image; F-263 bucket-0 and churn validation passed on 1858. Image 0551
+is installed and the quick routed/NAT/VLAN/PPPoE throughput cells have
+single-run hardware-proven results. Do not repeat those completed checks as a
+substitute for the pending work below:
 
-- **Bidir retransmits:** port↔port and vlan↔vlan bidir retransmits are
-  1.4–2.6× the vendor's. Scoreboard: `plans/ASK2-VS-VENDOR-THROUGHPUT.md`.
-- **iperf3 control-channel burst failures under churn: ROOT-CAUSED
-  2026-10-10, a harness race, not a DUT fault.** Symptom: "unable to receive
-  control message ... Transport endpoint is not connected" with
-  `"connected": []`, about 3.6 % of bursts since the `0415` run (0.33–0.95 %
-  before). Passive SYN/FIN/RST captures on both dells during the
-  `1010-1708` soak show: the client's FIN on the previous burst's iperf3
-  control connection is lost at the end of the burst (10 of 122 control
-  connections, 8.2 %, ordinary congestion loss while TCP fills the link
-  next to the 7.2 Gbit/s background); TCP resends it after the ~210 ms RTO;
-  `churn-lan.sh` starts the next combo ~180 ms after the previous one, always
-  against the same dell2 `:5202` server; when the late FIN arrives, iperf3
-  ends the old test, closes and reopens its listener and resets the new
-  control connection. 4 of 4 captured failures match exactly, and
-  8.2 % × ~45 % (next SYN inside the RTO window) ≈ the observed 3.7 %. Why the
-  FIN loss rose about 10× on 2026-10-09 (the `0415` image and the X710 rig
-  rewire landed together) is not A/B-tested. Harness fix (deployed for the
-  `1805-h2` run): iperf3 opens a new listening socket after every test, so
-  before each burst the harness waits ≤ 3 s until dell2's `:5202` listener
-  inode differs from the one the previous burst used (a plain "no live
-  socket" wait is not enough: the listener reset comes up to ~50 ms after the
-  old socket closes). Tools: `oracle/burstclass.py`,
-  captures `oracle/burstcap-20261010/`.
-- **ARP-type transient under load (close run, cycle 359):** one 5-ping check
-  from the DUT to `10.99.1.112` failed and recovered within 5 s while the
-  neighbour was being re-resolved. Next if it recurs: capture ARP on dell1
-  and the DUT during the check, and count BMI out-of-buffer discards
-  (`rodc`) on eth3 at that moment.
-- **Conntrack lingering:** the hardware path swallows FIN/RST, so a torn-down
-  offloaded flow stays ESTABLISHED in conntrack until
-  `nf_conntrack_tcp_timeout_established` expires. Interim mitigation
-  (2026-10-07): `system sysctl parameter
-  net.netfilter.nf_conntrack_tcp_timeout_established value 7440` in
-  `config.boot.{default,dhcp,vpp}` (`config.boot.full` sets 1800); headroom
-  262,144 / 7,440 s ≈ 35 new offloaded connections/s sustained (soak plateau
-  6.2–7.0k). Real fix: Phase 3 item 0.
-- **DUT CPU at line rate is bimodal** (about 0.2–0.3 % or 3.0–3.2 %), not tied
-  to a cell; cause not investigated.
-
-### Open board checklist (open items only)
-
-The image-`0415` board gates (advanced offload on, VLAN/PPPoE auto-arm,
-migration 35-to-36, kill switches, fragmentation probes, quick cells,
-`pcd-snapshot` diff) passed on 2026-10-09; results are in master plan §1.1.
-F-263 is validated on image `1858` (2026-10-10, churn gate above). Still open:
-
-- F-262 on a CI image: fragment pool exhaustion and a long soak of the final
-  F-262.
-- PPPoE over VLAN: must stay in software by code (`-EOPNOTSUPP`) and keep
-  forwarding correctly. Not run on the board yet.
-- A priority-marked (PCP ≠ 0) tagged flow (expected to stay in software).
+- Finish the paired 10×10 `.185`/`.106` routed/NAT/VLAN campaign; use its
+  summary to replace provisional parity verdicts in
+  `plans/ASK2-VENDOR-PARITY.md`.
+- Repeat PPPoE throughput against `.106` in the same session; repeat the
+  PPPoE fragmentation correctness matrix on both DUTs. The old vendor
+  observations are not a current same-conditions comparison.
+- Validate F-266 end-to-end through the transit harness: FIN and RST are
+  visible to conntrack, data remains hardware-offloaded, NAT44/NAT66 mappings
+  remain valid, and disarm restores the PCD snapshot. Keep the module
+  parameter off unless this gate passes.
+- Verify the expected software fallback and forwarding for PPPoE over VLAN
+  (`-EOPNOTSUPP`) and for a PCP ≠ 0 tagged flow.
+- Keep separate: WireGuard RPS A/B and product decision; 64-byte packet-rate
+  repeat; new-connection/session/flow-install scale; latency beside
+  offloaded traffic; remaining 10,000-session PPPoE churn and fragment-pool
+  exhaustion/soak gates.
 
 ### Review sources
 
@@ -277,26 +150,27 @@ in this plan, never by assertion.
 
 Standing conclusions only. Items 2–4 (VLAN) were resolved and are archived.
 
-1. **Routed and NAT forwarding matches the vendor and is the baseline every
-   phase is gated on.** ASK2 CPU is 0.10–0.40 % per core [SILICON 2026-08-24];
-   NAT44, NAT66 and IPv6 routed run at about 7.2 Gbit/s per direction
-   [SILICON 2026-08-21, 2026-09-04]. Bidir parity per combo is tracked in
-   `plans/ASK2-VS-VENDOR-THROUGHPUT.md`. The rewrite must not regress it.
+1. **Routed and NAT implementation is established; current parity is being
+   re-measured.** Earlier images showed about 7.2 Gbit/s per direction and
+   low ASK2 CPU use [SILICON 2026-08-21 through 2026-09-04]. Those measurements
+   are historical, not the 0551 baseline. The paired same-session comparison
+   is tracked in `plans/ASK2-VENDOR-PARITY.md`; do not treat the older
+   `ASK2-VS-VENDOR-THROUGHPUT.md` figures as current parity evidence.
 5. **ASK2 is already smaller than the vendor stack** (section 7), but about
    6.4k of roughly 21.3k reviewed kernel PCD lines are debug, dormant or dead
    [A1 LOC inventory]. The remaining work is consolidation (Phase 2), not a
    ground-up redesign.
-6. **There is a correctness gap the vendor closes and ASK2 does not.**
+6. **Open correctness gap: offloaded TCP close visibility.**
    - The vendor soft parser punts TCP SYN/FIN/RST to the host
      [CODE `/mnt/builds/ASK/dpa_app/files/etc/cdx_sp.xml:141-147`].
    - It also punts TTL/hop-limit ≤ 1 to the host [CODE `cdx_sp.xml:52-59,
      79-85`].
-   - ASK2 never consumes the TCP-flags match that nf_flowtable supplies (no
-     `flow_rule_match_tcp` in
-     `kernel/ask/oot-modules/ask/ask_flow_offload.c`).
-   - ASK2 has no parser-side punt either, so FIN/RST on an offloaded flow are
-     forwarded in hardware and Linux conntrack never sees the close
-     [INFERRED from code; verify with test A14].
+   - F-266 implements and reversibly arms the TCP SYN/FIN/RST soft-parser rule
+     on 0551, but is default-off. Setup/readback is proven; end-to-end transit
+     is not. A shortconn test must prove FIN/RST reaches conntrack while data
+     stays offloaded and NAT mappings survive. Until then, assume close
+     visibility is unresolved and keep F-266 disabled. TTL/hop-limit punts
+     are not implemented.
 
 ## 2. Data path, vendor vs ASK2
 
@@ -340,19 +214,21 @@ Sources:
 
 ## 3. Feature parity (rows still open)
 
-Routed v4/v6, NAT44/NAT66, routed VLAN, the ingress policer and the PPPoE
-decap/encap data path are at or above vendor parity and are archived.
+Routed v4/v6, NAT44/NAT66, VLAN, ingress policer and PPPoE decap/encap are
+implemented. Their implementation history is archived; current performance
+and remaining acceptance work are tracked in the live scoreboard and feature
+plans. Do not interpret historical measurements as current parity.
 
-| Feature | Vendor | ASK2 at `ab1660a7` | Evidence |
+| Feature | Vendor | ASK2 current status | Evidence |
 |---|---|---|---|
-| Bridge L2 | auto_bridge + ethernet ehash table (keysize 15) | B0 FDB observer and B1 DA-only record action (`ad20dfa9`, F-255 per-port FE key profiles) committed; no FDB-driven installer (B3), no silicon proof (B2) | [CODE `kernel/ask/oot-modules/ask/ask_bridge.c:1-15`]; `ASK2-BRIDGE-OFFLOAD-PLAN.md` §13 |
-| PPPoE remainder | Soft parser + pppoe tables + relay | Data path in hardware; PPPoE over VLAN stays software (`-EOPNOTSUPP`), never run on the board | `ASK2-PPPOE-OFFLOAD-PLAN.md` |
+| Bridge L2 | auto_bridge + ethernet ehash table (keysize 15) | B0/B1 groundwork exists; FDB-driven installation and silicon acceptance remain open. Follow the bridge plan's current stage/status, not this dated summary. | `ASK2-BRIDGE-OFFLOAD-PLAN.md` §13 |
+| PPPoE remainder | Soft parser + pppoe tables + relay | Data path in hardware; PPPoE over VLAN has a code-level `-EOPNOTSUPP` software fallback, still needs board forwarding validation | `ASK2-PPPOE-OFFLOAD-PLAN.md` |
 | Multicast | mc4/mc6 tables + REPLICATE | Absent (cap bit only) | [CODE `cdx_pcd.xml:41-51`; `ask.h:240-242`] |
 | IPsec ESP | ESP tables, SEC via OH port | Stub (`-EOPNOTSUPP`) | [CODE `ask_xfrm.c:13-17`] |
 | Tunnels | module_tunnel + HM | Absent | [CODE `/mnt/builds/ASK/cmm/src/module_tunnel.c`] |
 | Egress QoS/CEETM | Present (`-DENABLE_EGRESS_QOS`) | Absent | [CODE `/mnt/builds/ASK/cdx/Kbuild:7-8`] |
 | IPv4 frag | fmlib support; dist refs commented out in XML | HW fragmentation only on records that carry the F-262 MTU check; no coarse or fragment flows | [CODE `cdx_pcd.xml:88-96`] |
-| SYN/FIN/RST, TTL≤1 punt | Soft parser | **Absent** | section 1 item 6 |
+| SYN/FIN/RST, TTL≤1 punt | Soft parser | F-266 TCP rule implemented and reversible, but default-off and not transit-validated; TTL≤1 and other soft-parser rules remain open | section 1 item 6 and Phase 3 item 0 |
 
 ## 4. Cross-checked decision drivers
 
@@ -577,52 +453,21 @@ Each phase starts from a cold boot, changes one variable per experiment,
 records boot type, image, commit and kernel, and stores the result in qdrant
 [AGENTS S6 §10.9-10.10].
 
-### Phase 0 — safety and oracles (no datapath changes)
+### Phase 0 — safety and oracles — CLOSED 2026-10-09
 
-0.1, 0.2, 0.3, 0.5 are archived. **0.4 is complete and closed 2026-10-09.**
-All open items (64 B line-rate generator, IMIX, UDP for vlan↔vlan, clean 64k-flow
-scale) were measured across the NXP reference platform and ASK2 using `bin/testrig-pktgen.sh`.
+All Phase 0 probes and the 2026-10-09 packet-rate/IMIX/UDP/64k-flow campaign
+are historical evidence preserved in the archived plan. No Phase 0 gate is
+open. The 64-byte packet-rate repeat on 0551 is a separate current task in
+`plans/ASK2-VENDOR-PARITY.md` and must not reuse those historical numbers as a
+current parity result.
 
-- **Generator infrastructure (2026-10-09):** The generator host kernel booted with `iommu=pt`,
-  eliminating DMA translation overhead and allowing kernel pktgen on Intel X710
-  to generate up to 14.70 Mpps at 64 B (wire limit 14.88 Mpps). Received frames
-  are counted at Intel X710 MAC hardware counters (`port.tx_unicast` on TX,
-  `port.rx_unicast` on RX), bypassing socket stack limitations.
-- **RFC 8200 IPv6 UDP checksum discovery [SILICON 2026-10-09]:** Pktgen defaults
-  to zero UDP checksum (`udph->check = 0`). Under RFC 8200, zero checksum is
-  illegal for UDP over IPv6. Mainline LS1046A DPAA1 / FMan parser strictly enforces
-  this and flagged `FM_FD_ERR_PRS_HDR_ERR` (`rx header error: 157802839`),
-  dropping initial IPv6 test traffic at ingress, while the NXP SDK (kernel 4.1.35)
-  masked parser header errors. Setting `flag UDPCSUM` engages Intel X710 hardware
-  TX checksumming, resolving the drops completely (0 header errors, 100 % HW offload).
-- **Campaign results (oracle CSVs `pktgen-{vendor,ask2}-20261009.csv`):**
+### Phase 1 — CLOSED 2026-10-10
 
-| Test Path | Frame Size | Line Rate (pps) | NXP Ref Max Rate | NXP Delivered | NXP Loss | NXP HW | ASK2 Max Rate | ASK2 Delivered | ASK2 Loss | ASK2 HW | Comparison |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| **port-v4** | 64 B | 14,880,952 | 3,138,950 (21.1%) | 3,098,710 pps | 0.051% | 1.000 | **3,138,950 (21.1%)**<br/>*(3.82 Mpps peak)* | **3,100,266 pps** | **0.0000%** | **1.000** | **16,000× lower loss, +12.8% peak** (Note *1) |
-| **port-v4** | IMIX | 3,343,736 | 1,645,745 (49.2%) | 1,626,636 pps | 0.0066% | 1.000 | **2,455,556 (73.4%)** | **2,426,235 pps** | **0.0000%** | **1.000** | **+49.2% ASK2 WIN** |
-| **vlan-v4** | 64 B | 14,880,952 | 2,441,405 (16.4%) | 2,411,372 pps | 0.0000% | 1.000 | **2,790,178 (18.7%)** | **2,755,481 pps** | **0.0520%** | **0.999** | **+14.3% ASK2 WIN** |
-| **vlan-v4** | 512 B | 2,349,624 | 2,349,624 (100.0%) | 2,341,031 pps | 0.0000% | 1.000 | 2,331,267 (99.2%) | 2,303,856 pps | 0.0227% | 1.000 | Parity (~Line Rate) |
-| **vlan-v4** | 1470 B | 838,926 | 838,926 (100.0%) | 828,605 pps | 0.0000% | 1.000 | **838,926 (100.0%)** | **837,526 pps** | **0.0004%** | **1.000** | **Parity (100% Line Rate)** |
-| **port-v6 (route)** | 82 B | 12,254,901 | 3,255,207 (26.6%) | 3,213,330 pps | 0.0524% | 1.000 | **3,255,207 (26.6%)**<br/>*(3.43 Mpps peak)* | **3,173,403 pps** | **0.0011%** | **1.000** | **46× lower loss, +6.8% peak** (Note *2) |
-| **port-v6 (nat66)** | 82 B | 12,254,901 | N/A (unsupported) | N/A | N/A | N/A | **2,680,759 (21.9%)**<br/>*(3.11 Mpps peak)* | **2,641,187 pps** | **0.0488%** | **1.000** | **Hardware Stateful NAT66** (Note *2) |
-| **vlan-v6** | 82 B | 12,254,901 | 1,531,862 (12.5%) | 1,512,389 pps | 0.0000% | 1.000 | **2,297,793 (18.8%)** | **2,255,057 pps** | **0.0464%** | **1.000** | **+49.1% ASK2 WIN** |
-| **vlan-v6** | 512 B | 2,349,624 | 2,349,624 (100.0%) | 2,320,620 pps | 0.0000% | 1.000 | 2,239,485 (95.3%) | 2,211,974 pps | 0.0759% | 0.999 | Parity (95.3% Line Rate) |
-| **vlan-v6** | 1470 B | 838,926 | 838,926 (100.0%) | 835,500 pps | 0.0000% | 1.000 | **838,926 (100.0%)** | **834,858 pps** | **0.0000%** | **1.000** | **Parity (100% Line Rate)** |
-
-\*Note 1 on `port-v4 64`: Peak unpaced capacity is **3.82 Mpps** on ASK2 (38.2M frames / 10 s) vs. **3.39 Mpps** on NXP Reference (+12.8% peak capacity). Offered identical 3,138,950 pps load, ASK2 delivered **3,100,266 pps** with **0.00000% loss** (only 1 dropped frame out of 31,389,503 tested) vs NXP Reference's **3,098,710 pps with 0.0510% loss** (15,995 dropped frames)—achieving **16,000× lower packet loss** under sustained multi-megapacket load. At 3.30 Mpps offered load (comparable loss regime: 0.0478%), ASK2 delivered **3,257,000 pps** (+5.1% over NXP). An earlier automated binary search run dropped to 465k pps due to a single transient 5 ms micro-burst at 930 kpps failing the strict 0.001% threshold without backtracking. Both engines have comparable sustained multi-megapacket capacity (~3.3–3.8 Mpps peak).
-
-\*Note 2 on `port-v6 82` (Pure Route vs Stateful NAT66): The initial Phase 0.4 measurement tested ASK2 with `nat66 source rule 100` (`fd99:1::/64 -> masquerade`), requiring FMan microcode to rewrite 128-bit source IP, recalculate L4 UDP pseudo-header checksum, decrement Hop Limit, and rebuild L2 MAC on every frame. NXP Reference had no IPv6 NAT (`srcnat` empty) and ran pure routing. When measured on pure routing (NAT66 disabled), ASK2 matches and exceeds NXP: at 3.255 Mpps offered, ASK2 delivers **3,173,403 pps with 0.00114% loss** (185 drops / 16.27M frames) vs NXP's **3,213,330 pps with 0.0524% loss** (8,500 drops)—a **46× reduction in packet drops**. Peak unpaced burst is **3.428 Mpps** (+6.8% over NXP's 3.21 Mpps). Sustained lossless line capacity is **2.713 Mpps with 0.00000% loss** (14M / 14M frames). Stateful NAT66 delivers **2.64 Mpps** (3.11 Mpps peak).
-
-- **64k-flow scale:** Tested with 64,000 single-packet flows (distinct UDP source ports):
-  - NXP Reference: 64,000 / 64,000 delivered (100.0 % delivery, 1.000 HW share).
-  - ASK2: 64,000 / 64,000 delivered (100.0 % delivery, 1.000 HW share).
-
-### Phase 1 — exit criterion still open
-
-The VLAN root cause and the A6 throughput gate are archived. The remaining Phase 1
-exit criterion is "zero RX-deaf or churn errors": the churn gate in the
-Progress tracker above.
+The F-263 bucket-0 root cause is fixed, and the operator closed the churn gate
+after 1,123 verified-load cycles on three boots with zero FMan RX stalls.
+Retain the ARP-type transient as a non-gating follow-up; do not describe Phase
+1 as open or reopened. The new 0551 parity campaign is a separate measurement
+gate, not a reopening of the RX-stall gate.
 
 ### Phase 2 — consolidation (target: smaller than today, no behavior change)
 
@@ -652,36 +497,21 @@ Not started; unblocked.
 
 ### Phase 3 — vendor-parity features (vendor order of value)
 
-Each feature is an additional ehash table plus opcode emitters, reusing the
-Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
+Each feature needs a feature-specific implementation and vendor-first
+acceptance using the Phase 1 port-init baseline (P1 suite).
 
-0. **Soft-parser bring-up, first rule: TCP SYN/FIN/RST to the kernel**
-   (design 2026-10-07; prerequisite for item 2's soft-parser phases and for the
-   vendor TTL ≤ 1 and NAT-T punts).
-   - *Why:* the hardware path swallows FIN/RST, so the kernel never sees an
-     offloaded connection close. Since idle aging (`2d7c8268`) the flow is
-     torn down 30 s after its last packet, but conntrack then keeps it as
-     ESTABLISHED for the global TCP established timeout
-     (`flow_offload_fixup_ct()` uses `tn->timeouts[state]`). Churn gate:
-     46 → 2,972 entries over 100 cycles. Interim mitigation (2026-10-07):
-     the `7440` sysctl listed under the non-gating follow-ups.
-   - *Vendor mechanism:* `cdx_sp.xml:138-146` `tcpschema` — `if ((tcp.flags
-     bitwand 7) != 0) { $hpnia = 0x500002; exit end_parse }`: SYN/FIN/RST
-     frames skip KeyGen and the FE lookup and go to the port's default FQ.
-   - *No cheaper hook in ASK2:* `PREEMPTIVE_CHECKS` (0x05) only carries
-     TX-validate/DF/police/DSCP options (`PREEMPT_*`, ASK 010 patch); a CC
-     match on TCP flags ahead of FE_ENTER hits the "CC match walker absent"
-     verdict (`CC-ACL-OFFLOAD-PLAN.md`) and the CC-hop hash-clobber risk.
-   - *Blocker:* ASK2 soft-parser code (F-243..F-246) loads but never visibly
-     executes; host-side load/enable sequencing is proven identical to the
-     vendor (`.116` cold-boot kprobe capture, 2026-09-05). Open question: the
-     `.185` hard parser's dispatch into the soft-parser window.
-   - *First milestone:* load only the 6-line `tcpschema` punt; pass = a FIN
-     on an offloaded flow appears in kernel conntrack (state leaves
-     ESTABLISHED) while data packets stay in hardware. Then PPPoE, TTL ≤ 1,
-     NAT-T on the same loader. Detailed phases A–D (resolve the loader blocker,
-     compiler artifact and typed API `T-M6-SP1`/`SP2`, minimal safety sequence
-     `T-M6-SP3`, PPPoE recognition `T-M6-SP4`): `ASK2-PPPOE-OFFLOAD-PLAN.md` §4.
+0. **TCP close visibility (F-266).** The hardware path swallows FIN/RST, so
+   conntrack can retain closed offloaded flows as ESTABLISHED; a software
+   reaper cannot safely distinguish them from idle flows or preserve NAT
+   mappings. F-266 now implements a reversible, default-off TCP SYN/FIN/RST
+   punt on 0551. Register setup/readback/restoration pass, but offloaded-flow
+   transit does not yet. Gate: with the punt enabled, verify FIN and RST reach
+   conntrack, established data remains hardware-forwarded, NAT44/NAT66 mappings
+   survive, and disarm restores a clean PCD snapshot. Keep the module parameter
+   off until every gate passes. Then separately implement and test TTL/
+   hop-limit expiry punts and other safety schemas; broad soft-parser support
+   remains conditional on a feature needing it. PPPoE's normal path uses hard
+   parser exposure plus FE opcodes and does not depend on the soft parser.
 1. **Bridge L2.** Ethernet table (vendor keysize 15) fed by switchdev FDB
    notifiers, replacing the observer-only `ask_bridge.c`. Gate: A7. Plan and
    status: `plans/ASK2-BRIDGE-OFFLOAD-PLAN.md` §13 (gaps G1–G13, the B2 silicon
@@ -690,15 +520,14 @@ Phase 1 port init. Each needs a vendor-first benchmark (P1 suite).
    `plans/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` §2.5 and §6.7.
 2. **PPPoE remainder.** Gate: A8 (data path, MTU check and fragmentation
    shipped; detail in `ASK2-PPPOE-OFFLOAD-PLAN.md` §3.5/§3.6). Open:
-   - PPPoE over VLAN stays in software by code (`-EOPNOTSUPP`, two encap
-     entries); never run on the board.
-   - F-262 on a CI image: throughput of all cells with the triple on every
-     engaged port, fragment pool exhaustion, and a long soak (board checklist
-     above).
+   - Verify the expected PPPoE-over-VLAN `-EOPNOTSUPP` software fallback and
+     forwarding on the board.
+   - Re-run same-session PPPoE throughput and the fragmentation matrix; the
+     existing 0551 readings are not a vendor comparison. Gate fragment-pool
+     exhaustion and a long soak separately.
    - Session churn: repeated PPPoE connect/reconnect/disconnect (the PPPoE
-     plan's Phase D gate names a 10,000-session-cycle churn test with zero
-     stalls, zero misforwards and a stable MURAM budget) and the 50-byte-key
-     churn soak are not run.
+     plan's Phase D gate names a 10,000-session-cycle test with zero stalls,
+     zero misforwards and a stable MURAM budget) is not run.
    - Soft-parser phases A–D of the PPPoE plan only if the hard-parser path
      proves insufficient.
 3. **Multicast.** mc4/mc6 tables plus a REPLICATE chain. Gate: A10.
@@ -748,7 +577,10 @@ same rig. Harness notes: `plans/ASK2-PERFORMANCE-TEST-HARNESS.md`.
 **Quick protocol (2026-10-08, for per-offload checks):** one 30 s run per cell,
 iperf3 `-Z`, unidir `-P 8`, `-O 10`, steady value = mean of the receiver
 intervals from 10 s on, plus the offload proof below so a software-forwarded
-run cannot pass. Acceptance thresholds still use the 40 s binding method below.
+run cannot pass. The quick protocol is a functional/per-offload check, not a statistical parity
+acceptance. The active same-session routed/NAT/VLAN campaign uses its own paired
+10×10 protocol (see the live-status block and scoreboard). Other acceptance
+thresholds still use the 40 s binding method below.
 Complex combinations beyond the cells (NAT over PPPoE, VLAN-VLAN NAT, the F-262
 1500 to 1492 DF/no-DF path, PPPoE over VLAN as an expected software fallback)
 are a small targeted set run once per image, not a matrix.
@@ -940,17 +772,17 @@ the form noted.
 
 | Old section / block | Disposition |
 |---|---|
-| Header and intro (1–10) | Kept here, rewritten; Baseline box added |
+| Header and intro (1–10) | Kept here, rewritten; historical implementation baseline added |
 | Progress tracker: phase table (14–25) | Kept here, open remainder only |
 | Tracker: "Indicative Phase 1 bidir" table (27–33) | Archived, superseded by the A6 tables, 2026-10-05 |
 | Tracker: A6 FAIL result 2026-10-05 (34–55) | Archived, superseded; A6 passed 2026-10-06 |
 | Tracker: vendor OpenWrt re-baseline 2026-10-05 (56–92) | Archived; numbers live in `ASK2-VS-VENDOR-THROUGHPUT.md` |
 | Tracker: port-resource hypothesis FALSIFIED (93–114) | Archived, falsified 2026-10-05 |
-| Tracker: churn-gate header and harness (115–142) | Kept here, condensed |
-| Tracker: churn defects 1 and 2, `2239` result, harness correction (143–167) | Archived, fixed `2d7c8268` and F-254 (`0cb5a105`), 2026-10-07; fix IDs kept in the churn gate |
-| Tracker: Stalls #2–#5 (168–256) | Kept here as the signature table |
-| Tracker: stability pass, F-257 (257–302) | Kept here: guards (dropped `0220`, `bin/test-ehash-delete.py`); rest archived, F-257 built 2026-10-08 |
-| Tracker: cold-boot soak 2026-10-08 (303–360) | Kept here, condensed; close bar kept |
+| Tracker: churn-gate header and harness (115–142) | Archived; closed-gate summary kept here |
+| Tracker: churn defects 1 and 2, `2239` result, harness correction (143–167) | Archived; fixed by `2d7c8268` and F-254 (`0cb5a105`), 2026-10-07 |
+| Tracker: Stalls #2–#6 (168–256) | Archived; F-263 root-cause and closure summary kept here |
+| Tracker: stability pass, F-257 (257–302) | Archived; relevant build guard details remain in the master plan |
+| Tracker: cold-boot soak 2026-10-08 (303–360) | Archived; final close-bar summary kept here |
 | Tracker: loss-localization result 2026-10-06 (361–430) | Archived, achieved 2026-10-06: `7ba747e1` (CI run `37411828069`) and `dc8591ae` (CI run `37418518497`), patch 0219; A6 throughput PASS |
 | Tracker: loss-localization next steps 1–8 (431–673) | Archived, superseded by the 2026-10-06 result |
 | Tracker: six-agent review table and `REF/` note (674–694) | Kept here as "Review sources" |
@@ -967,7 +799,7 @@ the form noted.
 | §4.4 | Kept here, tables verbatim plus status |
 | §5 | Kept here; decisions 1 (partly), 4 (partly) shortened; 2, 3, 5, 6 open |
 | §6 Phase 0.1, 0.2, 0.3 (1097–1146) and 0.5 (1258–1267) | Archived, achieved 2026-10-04 |
-| §6 Phase 0.4 (1147–1257) | Kept here, open remainder only; TCP matrix, A13 on the vendor, UDP baseline, 1k/20k flow scale and the DPDK 512 B/1470 B points archived, done 2026-10-04 |
+| §6 Phase 0.4 (1147–1257) | Archived as completed historical evidence; current 64 B packet-rate repeat is in the parity scoreboard |
 | §6 Phase 1 preamble, E1, E1a, E1b (1268–1355) | Archived, falsified 2026-10-04 (triple later found required for fragmentation, applied by F-262) |
 | §6 Phase 1 experiment table E1–E4 (1356–1366) | Archived; E2 never run, superseded (soft-parser work is Phase 3 item 0); E4 never run, not needed |
 | §6 E3 result (1368–1435) | Archived, achieved 2026-10-04 (patches 0215, 0216, 0217, 0218) |

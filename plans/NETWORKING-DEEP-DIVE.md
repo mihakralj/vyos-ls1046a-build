@@ -1,5 +1,5 @@
 # LS1046A Networking Architecture Deep Dive
-**Version 2.0.0** · 2026-08-01 · HADS 1.0.0
+**Version 3.0.0** · 2026-10-15
 
 ---
 
@@ -204,50 +204,66 @@ graph LR
 
 ## 4. ASK2 HARDWARE OFFLOAD ENGINE
 
-### 4.1 Shipping Architecture: CC-tree + SW Flowtable
+### 4.1 Shipping Architecture: FE-VM ehash + Per-Flow Opcode/Manip Chains
 
-**[SPEC — 2026-08-01, SUPERSEDED 2026-08-05]** ~~The shipping HW-offload architecture is **CC-tree classification (top-N flows) + kernel SW flowtable (tail) + hardware manip-chain forwarding**.~~ **(2026-08-05: never implemented in `ask.ko` (CR-007); `cc_test` harness architecturally broken (F-159–F-162); FE-VM ehash un-retired (F-163); no confirmed HIT on any path — see `plans/ASK2-MASTER-PLAN.md` §1.1 dispatch-path caveats.)** This is the Linux flow-offload model: a TCAM-style classifier table for hot flows, software for the long tail.
+The shipping HW-offload architecture is **FE-VM external-hash (ehash) classification with per-flow opcode/manip chains stored in DDR records**. Hardware HIT is confirmed and this is the production path: the first packet of a flow takes the CPU slow path, `ask.ko` installs a DDR ehash record, and every subsequent packet executes in silicon and egresses at line rate with ~0 incremental CPU. This is the Linux flow-offload model built on the vendor's real classifier — NXP `cdx.ko` classifies every accelerated flow via `ExternalHashTableAddKey()` (F-163). See `plans/ASK2-MASTER-PLAN.md` for the live work program.
 
-**[SPEC]** Silicon-proven performance data:
-- **M2 CC pass-through** (CONT_LOOKUP numKeys=0 → miss-AD → kernel FQ): 7.37 Gbps @ 0.16% CPU (2026-07-07)
-- **M5 CC-tree + SW flowtable** (CC match → FE-VM opcode/manip → ENQ): 10.259 Gbps @ 0.16% CPU (2026-07-24)
-- **NXP cdx.ko** (vendor production stack, opcode/manip chain): 8.58 Gbps
+- Dispatch: `RCCB → FE_ENTER` direct (vendor mechanism, `copy_td_to_ccbase()`). The CC group-table dispatch topology is dead (F-157/158, F-175).
+- Per-flow opcode chain (vendor-verified): `PREEMPTIVE_CHECKS_ON_PKT(0x05) → STRIP_ALL_VLAN_HDRS(0x12) → UPDATE_TTL(0x21) → INSERT_L2_HDR(0x41) → ENQUEUE_PKT(0x01)` → per-egress-interface direct-to-wire TX FQ (F-198/F-199, no QMan confirm hop).
+- Flow keys: 50-byte dual-lane GEC key (routed); distinct 16-byte L2 key for bridge (B7a). The historical 14-byte EKFC-only model (`EKFC 0x801C0006`, §4.3) is settled silicon fact but is not the routed recipe.
+- Scale: DDR bucket/record store under an explicit resource budget; per-flow MURAM allocation is zero in the production path, so the MURAM ~2000-flow CC-tree ceiling does not apply. The long tail is handled by kernel `nf_flowtable`.
 
-**[SPEC]** CC-tree scaling:
-- Hardware supports **255 keys per node** (RM §8.7.4)
-- Software caps `FMAN_CC_MAX_STATIC_KEYS=32` and `FMAN_PCD_CC_HW_MAX_KEYS=32` are **software struct limits**, not silicon limits
-- MURAM arena 64 KiB → ~8 nodes → **~2000+ HW-offloaded flows**, zero per-frame DDR access
-- Long tail flows handled by kernel SW flowtable (`nf_flowtable`)
+Working capabilities (board gates for image `2026.10.09-0415-rolling` on `.185`; current production image `2026.10.15-0551-rolling`, kernel `6.18.55-vyos`):
+
+| Capability | HW state | 2026-10-09 gate result |
+|---|---|---|
+| Routed IPv4/IPv6 unicast | Shipping on eth0–eth4 (eth0 opt-in/high-risk) | 9.38 / 9.27 Gbit/s (v4/v6) |
+| NAT44 / NAT66 / PAT | Automatic on an engaged family (F-230 bit-fused rewrite) | 9.36 / 9.24 Gbit/s |
+| VLAN 802.1Q single tag | Inline ehash path (patches 0215–0218) | 9.31 / 9.22 Gbit/s |
+| PPPoE encap/decap | F-260 decap (opcode `0x14`), F-261 encap (opcode `0x43`) | 9.09–9.35 Gbit/s |
+| NAT44 over PPPoE, VLAN-VLAN NAT44 | Composed chains | 9.20 / 9.33 Gbit/s |
+| MTU-shrink fragmentation | HW frag for IPv4 DF-clear; IPv6 HW frag default-on (`ask.ipv6_hw_frag=0` opts out to RFC 8200 behavior) | 1000/1000 probe packets delivered |
+| Bridge | Learned/static unicast + B7a same-tagging hold dated silicon acceptance | current-image repeat pending |
+
+CPU cost at these rates is ~3% DUT CPU; A6 bidirectional measured within −0.5%/+1.0% of the vendor NXP ASK stack. Engage granularity is per port plus per IP family (`offload ipv4` / `offload ipv6`); VLAN, NAT, PPPoE and bridge are automatic parts of an engaged port, with global kill switches `ask.vlan_offload`, `ask.pppoe_offload`, `ask.nat44_offload`, `ask.nat66_offload`, `ask.ipv6_hw_frag`, `ask.bridge_offload`. Hardware-offload MTU range: 1280–3600. Still open (not parity yet): IPsec ESP, multicast, QinQ/802.1ad, tunnels, QoS on ASK-forwarded traffic, and the F-266 TCP FIN/RST control punt (implemented, default-off) — tracked in `plans/ASK2-MASTER-PLAN.md` §1.2.
+
+Historical numbers — do not cite as HW-offload proof:
+- **M2 CC pass-through** (CONT_LOOKUP numKeys=0 → miss-AD → kernel FQ): 7.37 Gbps @ 0.16% CPU (2026-07-07) — MISS→kernel delivery, not offload.
+- **M5 "CC-tree + SW flowtable"**: 10.259 Gbps @ 0.16% CPU (2026-07-24) — real throughput, mechanism unresolved (most likely kernel `nf_flowtable`).
+- **NXP cdx.ko** (vendor production stack): 8.58 Gbps — the reference ASK2 now matches.
+
+CC-tree status: never produced a confirmed HIT; the `ask.ko` insert path was deleted by CR-007 and the `cc_test` harness is retired (F-159–F-162). CC-tree scale-out is deferred (T-M6-5); it remains useful only for bounded coarse dispatch/policy roles and must not displace the proven ehash flow store. (Hardware allows 255 keys/node and ~8 nodes in the 64 KiB MURAM arena — design input only, not the flow-scale architecture.)
 
 ### 4.2 Offload Flow Architecture
 
-**[SPEC]**
 ```mermaid
 sequenceDiagram
     participant Wire as "Wire"
     participant FMan as "FMan HW"
-    participant CC as "Coarse Classifier"
+    participant CC as "FE-VM ehash"
     participant QMan as "QMan"
     participant Kernel as "Linux Kernel"
     participant ASK as "ask.ko Engine"
 
     Note over Wire,ASK: Phase 1: Connection Setup (Slow Path)
     Wire->>FMan: Initial SYN packet
-    FMan->>CC: Classify → MISS
+    FMan->>CC: EXT_HASH lookup → MISS
     CC->>QMan: Enqueue to default RX FQ
     QMan->>Kernel: Kernel processes & establishes conntrack
 
     Note over Wire,ASK: Phase 2: Offload Arming
-    ASK->>FMan: Install CC-tree match entry & FE-VM opcode/manip chain
+    ASK->>FMan: Install DDR ehash record (per-flow opcode/manip chain)
 
     Note over Wire,ASK: Phase 3: Hardware Offloaded (Fast Path)
     Wire->>FMan: Subsequent data packet
-    FMan->>CC: Classify → HIT!
-    CC->>FMan: FE-VM opcode/manip chain (STRIP→TTL_DEC→REBUILD→ENQ)
-    FMan->>Wire: Line-rate egress (0 CPU cycles)
+    FMan->>CC: EXT_HASH lookup → HIT!
+    CC->>FMan: Opcode chain (CHECKS→STRIP_VLAN→TTL_DEC→INSERT_L2→ENQ)
+    FMan->>Wire: Line-rate egress via per-egress TX FQ (0 CPU cycles)
 ```
 
 ### 4.3 CC Comparator: KG-Emitted Composite
+
+This section documents the **deferred CC-tree comparator** (no confirmed HIT; §4.1) — silicon reference for any future bounded coarse-policy use, not the production classifier. Production ehash keys are the 50-byte dual-lane GEC key (routed) and the 16-byte L2 key (bridge B7a).
 
 **[SPEC]** The CC comparator reads **KG-emitted bytes**, not a re-extracted canonical composite. Patch 0108 (`kernel/common/patches/board/0108-fman-pcd-cc-pack-key-kg-emitted-composite.patch`) rewrote `cc_pack_key()` to the silicon-truth KG-emitted composite:
 
@@ -259,18 +275,15 @@ The old 0098 layout (`[ETYPE|PROTO|FLAGS|SRCIP|DSTIP|SPORT|DPORT]`) "could NEVER
 
 **[SPEC]** EKFC extraction order is MSB-first/descending-bit: PORT_ID, SIP, DIP, PROTO, SPORT, DPORT (14 bytes, EKFC=0x801C0006). Settled 2026-08-06/07/08 by hardware CRC-64 match (184,320-candidate brute force, 16-candidate batch test, independent re-confirmation). PORT_ID = `0x00` for eth4/port 0x11. The old 13-byte `0x001C0006` (2026-07-13) is superseded. The CC comparator's 16-byte compare window uses the KG-emitted composite (patch 0108), which includes a zero-filled SPI slot — a structurally different layout from the 14-byte EKFC extraction.
 
-### 4.4 FE-VM ehash (EXT_HASH DDR Lookup) — retired 08-01, UN-RETIRED 08-05
+### 4.4 FE-VM ehash (EXT_HASH DDR Lookup) — Production Classifier (settled)
 
-**[NOTE — updated 2026-08-05]** The FE-VM ehash HIT path (Fork-B: EXT_HASH → DDR bucket table → MUX → ENQ) was declared a **dead end** on 2026-08-01 on the four grounds below; ground 3 is **refuted** and ground 5 is **weakened** as of 2026-08-05:
+FE-VM ehash is the production classification mechanism, not an experiment:
 
-1. **Per-frame DDR hash lookup** (~50–100 ns) imposes a ~1.5 Gbps ceiling — fundamentally unscalable for line-rate forwarding *(theoretical bound, never measured against real vendor traffic)*
-2. **Per-frame ALLOCATE/DEALLOCATE churn** in the FE-VM workspace pool adds overhead on every frame
-3. ~~**Not the vendor architecture**: NXP's production `cdx.ko` uses a hardware opcode/manip chain, not a per-frame DDR hash~~ **REFUTED (F-163, 2026-08-05):** the deployed vendor `cdx.ko` classifies every accelerated flow via `insert_entry_in_classif_table()` → `fill_key_info()` → `ExternalHashTableAddKey()` — external-hash IS the vendor's production classification; the opcode/manip chain executes from inside each DDR ehash entry
-4. **Not the Linux flow-offload model**: `TC Flower`/`nf_flowtable` offload is a TCAM-classifier-table abstraction (i.e. CC-tree), not a per-frame hash lookup
-5. **F-156/F-157/F-158 proved the scaffold byte-perfect** (H1 mask CLOSED, H2 padding CLOSED) but the CC engine still does not dispatch to the FE-VM — **weakened (F-165, 2026-08-05):** every prior arm test ran through the F-091 scaffold-overwrite bug, so the port was pointed at an empty scaffold match table, never at the built chain; the corrected chain (14-byte PORT_ID key, `EKFC 0x801C0006`, F-163) has never been genuinely exercised. Retest = T-M3-R
-6. **M3/M5 "HIT gate PASSED" claims were false positives** (FQID 0x200 ambiguity): the FE-VM ENQ and the CC miss-AD both targeted kernel FQID `0x200`, so HIT and MISS were indistinguishable by every instrument in use. Only real HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP).
-
-**[NOTE — updated 2026-08-05]** The FE-VM **opcode execution** claim ("shipping, 10.259 Gbps, M5") is itself under mechanism-retraction review — M5 most likely measured kernel `nf_flowtable` (qdrant tag `no-confirmed-hw-hit-ever`), and the opcode chain only executes after a HIT, which no path has produced. The ehash *matching* sub-mechanism is un-retired and under re-validation; the CC-tree scale-out path (multi-node allocation) is arithmetic-only until its own harness is rebuilt (`cc_test` condemned, F-159–F-162).
+- **F-163 (2026-08-05):** the deployed vendor `cdx.ko` classifies every accelerated flow via `insert_entry_in_classif_table()` → `fill_key_info()` → `ExternalHashTableAddKey()` — external hash IS the vendor production architecture; the opcode/manip chain executes from inside each DDR ehash entry.
+- **Dispatch:** `RCCB → FE_ENTER` direct (`copy_td_to_ccbase()`); the CC group-AD topology is dead (F-157/158, F-175). `FMFP_EXTC[INV0]` SYNC is required before dispatch into a re-pointed live FMan-controller structure (F-168, RM §5.12.14.1). The F-165 scaffold-overwrite (caller's `fe_enter_off` clobbered when 0) is fixed — explicit-target arms reach the built chain.
+- **Production terminal:** per-egress direct-to-wire TX FQ (F-198/F-199). The early "HIT reinjects to a kernel RX FQ" design (~1.5 Gbps single-portal ceiling) is gone.
+- **Scale:** DDR bucket/record store under an explicit resource budget; zero per-flow MURAM.
+- The 2026-08-01 "retirement" grounds are all resolved or refuted. The first real HIT was RCCB→FE_ENTER direct (2026-07-04, keysize=8 ICMP); HITs are now the routine shipping behavior evidenced by the §4.1 gate table.
 
 ---
 
@@ -280,13 +293,13 @@ The old 0098 layout (`[ETYPE|PROTO|FLAGS|SRCIP|DSTIP|SPORT|DPORT]`) "could NEVER
 
 | Dimension | Linux Kernel | VPP (AF_XDP) | ASK2 (`ask.ko`) |
 |-----------|--------------|--------------|-----------------|
-| **Forwarding Engine** | CPU (kernel IP stack) | CPU (VPP graph) | FMan Silicon (CC-tree + FE-VM opcode/manip) |
+| **Forwarding Engine** | CPU (kernel IP stack) | CPU (VPP graph) | FMan Silicon (FE-VM ehash + per-flow opcode/manip) |
 | **Per-Packet CPU Cost** | ~700–1100 ns | ~250–400 ns | **0 ns** (offloaded) |
-| **10G Throughput (1500B)** | ~3.6 Gbps | ~3.5 Gbps | **~10.3 Gbps** (line rate) |
-| **10G Throughput (64B)** | ~650 Mbps | ~1.5 Gbps | **~10.3 Gbps** (line rate) |
+| **10G Throughput (1500B)** | ~3.6 Gbps | ~3.5 Gbps | **9.2–9.4 Gbit/s per direction @ ~3% CPU** (2026-10-09 gates) |
+| **10G Throughput (64B)** | ~650 Mbps | ~1.5 Gbps | pending A2/A13 re-measurement |
 | **Dedicated CPU Cores** | 0 (interrupts) | 1 (poll-mode) | **0** |
 | **Thermal Overhead** | Low | High (requires sleep tuning) | **Low** (same as idle) |
-| **Memory Footprint** | ~0 extra | ~512 MB hugepages | ~20 MB |
-| **VyOS CLI Status** | Native | `set vpp` | `set interfaces ethX offload ask` |
-| **HW Flow Capacity** | N/A | N/A | ~2000+ (CC-tree), tail via SW flowtable |
-| **Offload Model** | N/A | N/A | Linux flow-offload (TCAM classifier + SW tail) |
+| **Memory Footprint** | ~0 extra | ~512 MB hugepages | ~20 MB + DDR flow records (zero per-flow MURAM) |
+| **VyOS CLI Status** | Native | `set vpp` | `set interfaces ethernet ethN offload ipv4\|ipv6` (VLAN/NAT/PPPoE/bridge automatic) |
+| **HW Flow Capacity** | N/A | N/A | DDR ehash record store (resource-budgeted), tail via SW flowtable |
+| **Offload Model** | N/A | N/A | Linux flow-offload (FE-VM ehash classifier + SW tail) |

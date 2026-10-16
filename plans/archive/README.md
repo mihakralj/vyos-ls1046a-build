@@ -12,7 +12,11 @@ Historical design and forensic documents preserved for bisect/audit purposes. Th
 
 For current state, see (in order of authority):
 
-- `plans/ASK2-MASTER-PLAN.md` — **THE authoritative ASK2 execution plan — start here.** Ground state, gaps, binding architecture decisions, milestone chain M2–M8 with gates, live TODO list, open defects, harness/gate mechanics, and the superseded-document register (§8) that maps every archived ASK2 plan's content forward.
+- `plans/ASK2-MASTER-PLAN.md` — **The authoritative ASK2 execution plan.**
+  Missing-feature inventory, ordered remaining tasks, contracts, acceptance,
+  defects and document ownership. Archived milestones are evidence, not
+  current task queues. `plans/ASK2-VENDOR-PARITY.md` owns current comparison
+  method and evidence.
 - `specs/dpaa1-afxdp-modernization-spec.md` — **the authoritative cross-flavor source-of-truth** (one DPAA1 driver core + `pcd_ops`/`qmgmt_ops`; the FMan PCD subsystem now lives in the common board stack, built-in for default/vpp/ask).
 - `specs/ask2-rewrite-spec.md` — ASK2 architecture index (v1.12).
 - `specs/vpp-dpaa1-ls1046a-spec.md` — VPP-flavor (AF_XDP) design spec.
@@ -23,6 +27,21 @@ For current state, see (in order of authority):
 
 | File | Topic | Why archived |
 |---|---|---|---|
+| `ASK2-MASTER-PLAN-2026-10-15.md` | Exact pre-consolidation master snapshot | Completed baselines, silicon investigations, closed milestones/defects and archive map removed from the live task list; open rewrite tasks folded into master v2.32.0 |
+| `ASK2-REWRITE-PLAN.md` | Full final rewrite review, including vendor records and old measurement protocol | Duplicate live task queue retired 2026-10-15; pending tasks now in master, current method/evidence in `plans/ASK2-VENDOR-PARITY.md` |
+| `ASK2-VENDOR-PARITY-2026-10-15.md` | Exact provisional single-run scoreboard and F-266 setup evidence | Current paired campaign supersedes old tables; no final campaign result asserted by the cleanup |
+| `ASK2-BRIDGE-OFFLOAD-PLAN-2026-10-15.md` | Exact B0–B6/B7a design/result history and superseded alternatives | Active bridge plan reduced to B7b, mixed-role/multi-table/IRB gaps and current-image acceptance |
+| `ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` | Completed vendor bridge mechanism/topology investigation | Historical recommendations and gap status superseded by the remaining-work bridge plan; reference evidence retained |
+| `ASK2-PPPOE-OFFLOAD-PLAN-2026-10-15.md` | Exact parser probe, F-260/F-261/F-262, rig and fragmentation history | Active PPPoE plan holds remaining acceptance and missing vendor features; normal PPPoE no longer gated on soft parser |
+| `ASK2-IPSEC-OFFLOAD-PLAN-2026-10-15.md` | Original Tier 1/2 draft | Preserves the superseded CC-leaf, per-feature CLI and transport-mode scope proposals; current IPsec draft follows ehash and master-plan scope |
+| `ask2-wireguard-plan.md` | Completed WireGuard software-throughput work: baseline, stage -1 lockdep finding, patches 4011/056/057/4016, E1/E2, P2b-1 results, conntrack-hook analysis | Work done and shipped (`tx_lanes=3`); remaining items folded into `plans/ASK2-WIREGUARD-FASTPATH-PLAN.md` |
+| `ask2-wireguard-matrix-106-vs-185.md` | 2026-10-12/13 nine-cell WireGuard matrix, `.106` vs `.185` (image 2243) | Completed measurement record; re-run on the shipping image is an open task in the active WireGuard plan |
+| `OFFLOAD-CAPABILITY-PLAN-2026-10-15.md` | Exact pre-consolidation capability plan: vendor `.110` verification, shipped routed/NAT/policer/VLAN records (retired CC-leaf+HMTD path, freeze root cause), original build order | Active `OFFLOAD-CAPABILITY-PLAN.md` keeps remaining capabilities only |
+| `CC-ACL-OFFLOAD-PLAN-2026-10-15.md` | Exact pre-consolidation ACL plan: Phase 0, the CC match-walker root-cause hunt, `0193`, Phase 1 (`0194`, verified 2026-09-06) | Active `CC-ACL-OFFLOAD-PLAN.md` keeps the open Phase 2 drop ACL |
+| `DUAL-DATAPLANE-2026-10-15.md` | Exact v1.6 dual-dataplane plan: evidence base, M0–M2 results, CC-tree vs ehash re-litigation, original M0–M8 graph, superseded `offload ask` CLI | Active `DUAL-DATAPLANE.md` keeps the binding runtime/CLI contract |
+| `ASK2-WIREGUARD-FASTPATH-PLAN-2026-10-15.md` | Exact pre-consolidation fast-path plan: P0 feasibility, P1 (G1 PASS), P2a lab seal, alternatives, closed open items | Active plan reduced to remaining phases P2b-2 onward and open items |
+| `ASK2-VS-VENDOR-THROUGHPUT.md` | 2026-10-06 A6 throughput/retransmit scoreboard | Historical image/method, replaced for current comparison by `plans/ASK2-VENDOR-PARITY.md` |
+| `ASK2-PHASE0.4-PERFORMANCE-REPORT.md` | Completed packet-rate/IMIX/flow-scale report | Historical results are not 0551 current-image parity acceptance |
 | `ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md` | **Combined Path A decision record** in three parts: (1) ASK-vs-ASK2 comparative analysis — forensic SDK evidence, sequence diagrams, residual-state model, Path A/B/C options; (2) Architecture review — five simplifications, LOC reduction table, component dispositions; (3) Course-correction execution — five phases, 28-patch KEEP/ARCHIVE/PARTIAL audit, M2 gate findings | Superseded by Fork B — FE-VM ehash (July 2026). Three original docs merged 2026-07-14; redirect notes at `ASK-VS-ASK2-COMPARATIVE-REVIEW.md.archive-note.md`, `ASK2-MODERN-ARCHITECTURE-REVIEW.md.archive-note.md`, `ASK2-COURSE-CORRECTION.md.archive-note.md`. |
 | `MULTI-FLAVOR-RELEASE.md` | RETIRED multi-flavor build plan (`default` / `ask` / `vpp`) | Retired 2026-06-14; single-image model supersedes per `plans/DUAL-DATAPLANE.md` |
 | `ASK-UPSTREAM-SYNC.md` | Legacy ASK 1.x SDK upstream sync workflow | ASK 1.x branch deleted; ASK2 is a clean re-architecture |
@@ -60,7 +79,7 @@ For current state, see (in order of authority):
 | `NXP-106-ORACLE-VALIDATION-PLAN.md` | `.106` vendor-stack oracle validation (Phase 0-3) | All phases executed 2026-08-01; successor is the still-live `NXP-106-DEEP-DIVE-PLAN.md` (2026-09-05) |
 | `SOFT-PARSER-PPPOE.md` | 2026-07-14 soft-parser PPPoE roadmap stub | Superseded by full design specs (`specs/ask2-soft-parser-lcv-scheme-select.md` et al.); host-sequencing question closed (2026-09-05) |
 | `PERFORMANCE-BENCHMARKS.md` | `.185 ↔ .106` benchmark record | Self-declared SUPERSEDED — predates current harness/F-198…F-203 work; `.106` no longer an active harness endpoint (2026-09-05) |
-| `OFFLOAD-CAPABILITIES.md` | 2026-08-05 silicon-verified capability inventory (v2.1) | Dated snapshot; superseded by the actively cross-referenced `OFFLOAD-CAPABILITY-PLAN.md` (2026-09-05) |
+| `OFFLOAD-CAPABILITIES.md` | 2026-08-05 silicon-verified capability inventory (v2.1) | Dated snapshot; superseded by the actively cross-referenced `OFFLOAD-CAPABILITY-PLAN.md` (2026-10-15) |
 | `TRAFFIC-HARNESS.md` | LXC CT201/CT202 board-as-gateway traffic harness | Self-declared SUPERSEDED — retired topology; current standard is `ASK2-PERFORMANCE-TEST-HARNESS.md` (2026-09-05) |
 | `ASK1-VS-ASK2-TESTS.md` (+ gitignored `ASK1-VS-ASK2-TESTS/`) | ASK 1.0 `.110` vs ASK2 `.185` comparative harness (heidi/HELGA) | `.110` gone; replaced by the dell rig (`bin/testrig-combo-matrix.sh`) and the `.106` vendor comparison in `ASK2-REWRITE-PLAN.md` E3 (2026-10-05) |
 | `ASK2-PRODUCTION-ARCHITECTURE.md` | 2026-08-11 course-correction to a production architecture | Landed/re-planned in the master plan; the 2026-10-03 rewrite review replaces its vendor-difference inventory (2026-10-05) |

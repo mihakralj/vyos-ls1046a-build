@@ -1,31 +1,47 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK2 - bridge subsystem: static FDB entries -> FMan L2_DA records
- * (T-M6-2 B3a, plans/ASK2-BRIDGE-OFFLOAD-PLAN.md §13).
+ * ASK2 - bridge subsystem: forwarded bridge flows -> FMan L2 records
+ * (T-M6-2 B6/B7a, plans/ASK2-BRIDGE-OFFLOAD-PLAN.md §13.30, §13.32).
  *
- * The kernel bridge stays the authority for learning, ageing, STP and
- * flooding. ask.ko mirrors only USER-ADDED, VID-0, non-local, unlocked FDB
- * entries (D4, D6): the CPU never sees the source MACs of hardware-forwarded
- * frames, so learned entries would go stale. Every switchdev event that can
- * touch such an entry carries added_by_user, so those are the only events
- * queued. The worker keeps a shadow of the entries and, under rtnl,
- * recomputes the wanted record set on every change (FDB, engage, bridge
- * join/leave, STP state, port flags, VLAN filtering), adding and deleting
- * records by diff (ask_bridge_resync()).
+ * A record is one flow: (ingress port, DA, SA, TCI, EtherType) -> the egress
+ * port's no-confirm TX FQ, in the ingress port's L2_DA table (F-255 16-byte
+ * key; TCI 0 = untagged). A bridge NF_BR_FORWARD hook, after the bridge
+ * filter like the vendor's auto_bridge, notes IPv4/IPv6 unicast frames
+ * between two L2 ports. The worker (rtnl) installs a record when the live
+ * FDB puts DA behind the egress port and SA behind the ingress port in the
+ * frame's VLAN, so flooded frames never qualify. Only IPv4/IPv6: a short
+ * non-IP frame hitting a record wedges the FE hit path (§13.16), and ARP etc.
+ * belong to the kernel (D5). A hit forwards the frame unchanged, so only
+ * pairs whose ingress and egress tagging agree are offloaded (B7a).
  *
- * switchdev reports the EGRESS port of an entry; records live in the
- * INGRESS port's table. An entry for MAC A on port E therefore fans out to
- * every other member P as (A, 0x0800) and (A, 0x86dd) -> E's no-confirm TX
- * FQ. Only IPv4/IPv6 EtherTypes: a short non-IP frame hitting a record
- * wedges the FE hit path (§13.16), and ARP etc. belong to the kernel (D5).
- * A pair (P, E) qualifies when both are DPAA ports of the same bridge,
- * engaged as L2_DA, FORWARDING, neither isolated nor locked; P has no VLAN
- * uppers (the key ignores the VID, §13.21: a hit forwards a tagged frame
- * unchanged); the bridge does not filter VLANs (D6); and E's TX FQ is
- * already cached (never allocated under rtnl, CR-012).
+ * VLANs: the hook sees the egress VLAN state (__br_forward() runs
+ * br_handle_vlan() first). On a VLAN-filtering bridge an untagged egress
+ * frame is taken as untagged ingress in the ingress port's PVID, a tagged
+ * one as tagged ingress in a non-PVID VLAN (VID = PVID tagged on egress is
+ * almost always untagged -> tagged, which needs a push). A wrong guess
+ * cannot misforward: the record is validated against what the bridge does
+ * with frames carrying exactly its key, so at worst it never hits.
  *
- * Not covered (documented in the plan): bridge-family nftables rules (a hit
- * bypasses them), dynamic entries, MAC moves the CPU cannot see.
+ * The CPU no longer sees a hardware-forwarded source, so a learned SA is
+ * taken over as externally learned: the bridge does not age those and takes
+ * them back by itself when the MAC moves (br_fdb_update()). ask.ko deletes
+ * records idle for the bridge's ageing time (hardware hit counts), and an SA
+ * whose last record goes is handed back by deleting its entry. User-added
+ * and local entries are never taken over: br_fdb_external_learn_del() would
+ * delete them.
+ *
+ * The live FDB, VLAN and port state are the authority. Every FDB event,
+ * port or VLAN change, engage or kill-switch change revalidates all records
+ * and deletes the stale ones; traffic re-creates records.
+ *
+ * A pair (in, out) qualifies when both are DPAA ports of the same bridge,
+ * engaged as L2_DA, FORWARDING, neither isolated nor locked; out's TX FQ is
+ * already cached (never allocated under rtnl, CR-012); in's `offload
+ * ipv4|ipv6` mask allows the EtherType; and a tagged record's VID has no
+ * VLAN device on in (frames for a vif never reach the bridge).
+ *
+ * Not covered: frames the bridge filter would drop later in the same flow
+ * (the record bypasses it, as on the vendor), 802.1ad, tagged <-> untagged.
  *
  * Lock order: rtnl -> ask_bridge_lock -> ask_hw h->lock -> FMan fe_lock.
  */
@@ -41,89 +57,126 @@
 #include <linux/etherdevice.h>
 #include <linux/if_bridge.h>
 #include <linux/if_vlan.h>
+#include <linux/jhash.h>
+#include <linux/netfilter.h>
+#include <linux/netfilter_bridge.h>
 #include <linux/rtnetlink.h>
 #include <linux/module.h>
+#include <linux/unaligned.h>
 #include <net/switchdev.h>
 #include <linux/fsl/fman_pcd.h>
+#include <uapi/linux/ask/ask.h>	/* ASK_FAM_V4/V6 */
 
 #include "include/ask_internal.h"
 
-/* One coalesced FDB event. @dev is dev_hold()'d at capture, dev_put() in
- * the worker. Coalesced by (dev, addr): VID is always 0 here. */
-struct ask_bridge_fdb_event {
-	struct list_head   node;
-	struct net_device *dev;
-	u8                 addr[ETH_ALEN];
-	bool               add;		/* true = ADD_TO_DEVICE, false = DEL */
-};
-
-/* One mirrored static FDB entry: MAC @addr behind port @port_ifindex. */
-struct ask_bridge_entry {
-	struct list_head node;
-	int              br_ifindex;
-	int              port_ifindex;
-	u8               addr[ETH_ALEN];
-};
+/* F-255 L2 key layout (MSB-first EKFC extraction). */
+#define ASK_BRIDGE_K_DA		0
+#define ASK_BRIDGE_K_SA		ETH_ALEN
+#define ASK_BRIDGE_K_TCI	(2 * ETH_ALEN)
+#define ASK_BRIDGE_K_ET		(2 * ETH_ALEN + 2)
 
 /* One installed record in ingress port @port's L2_DA table. */
 struct ask_bridge_rec {
 	struct list_head node;
-	u8               port;
-	u8               addr[ETH_ALEN];
-	__be16           eth_type;
-	u32              fqid;
-	bool             want;		/* resync mark */
+	int              br_ifindex;
+	int              in_ifindex;
+	int              out_ifindex;
+	u8               port;		/* ingress hw port: the record's table */
+	u8               key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
+	u16              vid;		/* bridge VLAN (0: not filtering) */
+	bool             filtering;	/* learned on a VLAN-filtering bridge */
+	u32              fqid;		/* out's no-confirm TX FQ */
+	u64              pkts;		/* last hardware hit count read */
+	unsigned long    last_hit;	/* jiffies of the last count change */
+	bool             dead;		/* table freed by a disengage */
 };
 
-#define ASK_BRIDGE_FDB_EV_MAX	1024
-#define ASK_BRIDGE_ENTRY_MAX	512	/* vendor ETHERNET table cap */
+/* A learned SA taken over as externally learned; ask.ko hands it back. */
+struct ask_bridge_own {
+	struct list_head node;
+	int              br_ifindex;
+	int              port_ifindex;
+	u8               addr[ETH_ALEN];
+	u16              vid;
+};
+
+/* A bridged frame the hook saw; admitted by the worker. */
+struct ask_bridge_cand {
+	int              in_ifindex;
+	int              out_ifindex;
+	u8               key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
+};
+
 #define ASK_BRIDGE_REC_MAX	2048
+#define ASK_BRIDGE_CAND_MAX	256
+#define ASK_BRIDGE_SEEN		1024	/* hook dedup slots, power of 2 */
+#define ASK_BRIDGE_AGE_PERIOD	(5 * HZ)
 
-static LIST_HEAD(ask_bridge_fdb_ev_list);
-static DEFINE_SPINLOCK(ask_bridge_fdb_ev_lock);
-static unsigned int ask_bridge_fdb_ev_count;
-static struct work_struct ask_bridge_fdb_work;
+static struct work_struct ask_bridge_work;
+static struct delayed_work ask_bridge_age_work;
 static bool ask_bridge_ready;
-/* An event was lost (queue full / OOM): the shadow can no longer be trusted
- * and there is no FDB dump to resync from, so the worker drops it (D3, fail
- * closed: those entries stay in software until re-added). */
-static bool ask_bridge_desync;
 
-static DEFINE_MUTEX(ask_bridge_lock);	/* entries + recs */
-static LIST_HEAD(ask_bridge_entries);
+static DEFINE_MUTEX(ask_bridge_lock);	/* recs, owns, cand_work */
 static LIST_HEAD(ask_bridge_recs);
-static unsigned int ask_bridge_n_entries;
+static LIST_HEAD(ask_bridge_owns);
 static unsigned int ask_bridge_n_recs;
+
+static DEFINE_SPINLOCK(ask_bridge_cand_lock);
+static struct ask_bridge_cand ask_bridge_cand[ASK_BRIDGE_CAND_MAX];
+static unsigned int ask_bridge_n_cand;
+static struct ask_bridge_cand ask_bridge_cand_work[ASK_BRIDGE_CAND_MAX];
+
+/* Best-effort hook dedup: one slot per hash, retried after a second. */
+static struct {
+	u32           hash;
+	unsigned long at;
+} ask_bridge_seen[ASK_BRIDGE_SEEN];
+
+/*
+ * MACs ever seen as user-added or local FDB entries, hashed, never cleared:
+ * a set bit only means "not taken over", so a collision is safe and nothing
+ * can be lost (no allocation in the atomic notifier).
+ * ponytail: sticky 4096-bit filter; a churn of many static MACs slowly
+ * stops takeovers for colliding learned MACs (those then age in the bridge).
+ */
+static DECLARE_BITMAP(ask_bridge_user_macs, 4096);
 
 static bool ask_bridge_notifiers_registered;
 static bool ask_bridge_blocking_registered;
 static bool ask_bridge_netdev_registered;
+static bool ask_bridge_hook_registered;
+
+/* F-255 L2 key: DA(6) | SA(6) | TCI(2) | EtherType(2), MSB-first (plan
+ * §13.32). @tci is the frame's first VLAN TCI, 0 when untagged. */
+void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
+		    __be16 eth_type)
+{
+	BUILD_BUG_ON(FMAN_PCD_FE_L2_DA_KEY_SIZE != ASK_BRIDGE_K_ET + 2);
+	ether_addr_copy(key + ASK_BRIDGE_K_DA, da);
+	ether_addr_copy(key + ASK_BRIDGE_K_SA, sa);
+	put_unaligned_be16(tci, key + ASK_BRIDGE_K_TCI);
+	memcpy(key + ASK_BRIDGE_K_ET, &eth_type, sizeof(eth_type));
+}
 
 /*
- * T-M6-2 B1: one FDB entry -> one FE record on the ingress port's L2_DA
- * table (F-255 profile: the key is the frame's 6-byte destination MAC
- * followed by its 2-byte EtherType, 8 bytes total, plan §13.18). Folding
- * EtherType into the key means a record installed for @eth_type structurally
- * cannot be hit by a frame of a different EtherType sharing the same DA:
- * ARP/other non-IP frames miss the table and fall to the kernel FQ by
- * construction, instead of wedging the FE-VM hit path (plan §13.16).
- * HIT = plain ENQUEUE_PKT to @egress_tx_fqid (the egress port's no-confirm
- * TX FQ): rx_fqid carries it, tx_fqid stays 0 so no L2 rewrite is emitted.
- * Only a unicast, non-zero DA is accepted: broadcast/multicast/unknown must
- * keep missing to the kernel bridge.
+ * One bridge flow -> one FE record on the ingress port's L2_DA table.
+ * Folding EtherType into the key means a record installed for one EtherType
+ * cannot be hit by a frame of another EtherType between the same MACs:
+ * ARP/other non-IP frames miss to the kernel FQ by construction instead of
+ * wedging the FE-VM hit path (plan §13.16). HIT = plain ENQUEUE_PKT to
+ * @egress_tx_fqid: rx_fqid carries it, tx_fqid stays 0 so no L2 rewrite is
+ * emitted. Only unicast, non-zero MACs: BUM keeps missing to the bridge.
  */
-int ask_bridge_fe_action(const u8 *da, __be16 eth_type, u32 egress_tx_fqid,
+int ask_bridge_fe_action(const u8 *key, u32 egress_tx_fqid,
 			 unsigned long enq_off,
 			 struct fman_pcd_fe_flow_action *a)
 {
-	BUILD_BUG_ON(FMAN_PCD_FE_L2_DA_KEY_SIZE != ETH_ALEN + sizeof(__be16));
-
-	if (!da || !a || !is_valid_ether_addr(da) || !egress_tx_fqid ||
+	if (!key || !a || !is_valid_ether_addr(key + ASK_BRIDGE_K_DA) ||
+	    !is_valid_ether_addr(key + ASK_BRIDGE_K_SA) || !egress_tx_fqid ||
 	    egress_tx_fqid > 0xffffff || !enq_off)
 		return -EINVAL;
 	memset(a, 0, sizeof(*a));
-	ether_addr_copy(a->key, da);
-	memcpy(a->key + ETH_ALEN, &eth_type, sizeof(eth_type));
+	memcpy(a->key, key, FMAN_PCD_FE_L2_DA_KEY_SIZE);
 	a->key_size  = FMAN_PCD_FE_L2_DA_KEY_SIZE;
 	a->enq_off   = enq_off;
 	a->table_idx = 0;		/* the ingress port's own table */
@@ -135,7 +188,7 @@ EXPORT_SYMBOL_GPL(ask_bridge_fe_action);
 void ask_bridge_kick(void)
 {
 	if (READ_ONCE(ask_bridge_ready))
-		schedule_work(&ask_bridge_fdb_work);
+		schedule_work(&ask_bridge_work);
 }
 
 /* D1: an engaged bridge member is L2_DA while the kill switch is on. */
@@ -164,288 +217,448 @@ static bool ask_bridge_member_ok(struct net_device *dev,
 	       !br_port_flag_is_set(dev, BR_ISOLATED | BR_PORT_LOCKED);
 }
 
-static struct ask_bridge_rec *ask_bridge_rec_find(u8 port, const u8 *addr,
-						  __be16 eth_type)
+static bool ask_bridge_user_mac(const u8 *addr)
+{
+	return test_bit(jhash(addr, ETH_ALEN, 0) & 4095, ask_bridge_user_macs);
+}
+
+/*
+ * The bridge VLAN a frame with @tci arriving on @in belongs to, under the
+ * B7a same-tagging rule (see the header comment); false if unsupported.
+ * rtnl held.
+ */
+static bool ask_bridge_vid(struct net_device *br, struct net_device *in,
+			   u16 tci, u16 *vid)
+{
+	u16 pvid = 0, proto;
+
+	if (!br_vlan_enabled(br)) {
+		*vid = 0;
+		return true;
+	}
+	if (br_vlan_get_proto(br, &proto) || proto != ETH_P_8021Q)
+		return false;
+	br_vlan_get_pvid(in, &pvid);
+	*vid = tci ? tci & VLAN_VID_MASK : pvid;
+	return *vid && (!tci || *vid != pvid);
+}
+
+/* On a VLAN-filtering bridge: is @in still a member of VLAN @vid (the PVID
+ * already is for an untagged record), and does @out send @vid tagged
+ * exactly when the record's frames are tagged (the hit forwards them
+ * unchanged)? */
+static bool ask_bridge_vlan_ok(struct net_device *in, struct net_device *out,
+			       u16 vid, u16 tci)
+{
+	struct bridge_vlan_info info;
+
+	return (!tci || !br_vlan_get_info(in, vid, &info)) &&
+	       !br_vlan_get_info(out, vid, &info) &&
+	       !!(info.flags & BRIDGE_VLAN_INFO_UNTAGGED) == !tci;
+}
+
+/*
+ * Would a record with @key (in -> out, bridge VLAN @vid) be correct now?
+ * Fills the ingress port and the egress FQ. rtnl held.
+ */
+static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
+			       const u8 *key, u16 vid, bool filtering,
+			       u8 *iport, u32 *fqid)
+{
+	struct net_device *br = __dev_get_by_index(&init_net, br_ifindex);
+	struct net_device *in = __dev_get_by_index(&init_net, in_ifindex);
+	struct net_device *out = __dev_get_by_index(&init_net, out_ifindex);
+	u16 tci = get_unaligned_be16(key + ASK_BRIDGE_K_TCI), v;
+	u8 fam = !memcmp(key + ASK_BRIDGE_K_ET, "\x08\x00", 2) ?
+		 ASK_FAM_V4 : ASK_FAM_V6;
+	bool vif = false;
+	u8 eport;
+
+	if (!ask_hw_bridge_offload_armed() ||
+	    !br || !in || !out || in == out || !netif_is_bridge_master(br) ||
+	    br_vlan_enabled(br) != filtering ||
+	    !ask_bridge_member_ok(in, br, iport) ||
+	    !ask_bridge_member_ok(out, br, &eport) ||
+	    !(ask_hw_port_family_mask(*iport) & fam) ||
+	    ask_hw_oif_fqid_cached(out_ifindex, fqid) ||
+	    !ask_bridge_vid(br, in, tci, &v) || v != vid ||
+	    (filtering && !ask_bridge_vlan_ok(in, out, vid, tci)))
+		return false;
+	if (tci) {
+		rcu_read_lock();
+		vif = __vlan_find_dev_deep_rcu(in, htons(ETH_P_8021Q),
+					       tci & VLAN_VID_MASK);
+		rcu_read_unlock();
+	}
+	return !vif &&
+	       br_fdb_find_port(br, key + ASK_BRIDGE_K_DA, vid) == out &&
+	       br_fdb_find_port(br, key + ASK_BRIDGE_K_SA, vid) == in;
+}
+
+static struct ask_bridge_own *ask_bridge_own_find(int br_ifindex,
+						  int port_ifindex,
+						  const u8 *addr, u16 vid)
+{
+	struct ask_bridge_own *o;
+
+	list_for_each_entry(o, &ask_bridge_owns, node)
+		if (o->br_ifindex == br_ifindex &&
+		    o->port_ifindex == port_ifindex && o->vid == vid &&
+		    ether_addr_equal(o->addr, addr))
+			return o;
+	return NULL;
+}
+
+static bool ask_bridge_sa_in_use(int br_ifindex, int in_ifindex, const u8 *sa,
+				 u16 vid)
 {
 	struct ask_bridge_rec *r;
 
 	list_for_each_entry(r, &ask_bridge_recs, node)
-		if (r->port == port && r->eth_type == eth_type &&
-		    ether_addr_equal(r->addr, addr))
+		if (!r->dead && r->br_ifindex == br_ifindex &&
+		    r->in_ifindex == in_ifindex && r->vid == vid &&
+		    ether_addr_equal(r->key + ASK_BRIDGE_K_SA, sa))
+			return true;
+	return false;
+}
+
+/* Send one FDB notification for (@addr, @vid) on @port_ifindex to the
+ * bridge (rtnl held). */
+static int ask_bridge_fdb_call(unsigned long event, int port_ifindex,
+			       const u8 *addr, u16 vid, bool offloaded)
+{
+	struct net_device *dev = __dev_get_by_index(&init_net, port_ifindex);
+	struct switchdev_notifier_fdb_info info = {
+		.addr = addr,
+		.vid = vid,
+		.offloaded = offloaded,
+	};
+
+	if (!dev)
+		return -ENODEV;
+	return notifier_to_errno(call_switchdev_notifiers(event, dev,
+							  &info.info, NULL));
+}
+
+/* The port (@addr, @vid) is behind in @br_ifindex's FDB, or 0. rtnl held. */
+static int ask_bridge_fdb_port(int br_ifindex, const u8 *addr, u16 vid)
+{
+	struct net_device *br = __dev_get_by_index(&init_net, br_ifindex);
+	struct net_device *port;
+
+	if (!br || !netif_is_bridge_master(br))
+		return 0;
+	port = br_fdb_find_port(br, addr, vid);
+	return port ? port->ifindex : 0;
+}
+
+/*
+ * @sa on @in_ifindex lost its last record: a taken-over entry is handed
+ * back by deleting it (the bridge relearns the host from its next frame);
+ * any other entry just loses its "offload" mark.
+ */
+static void ask_bridge_sa_release(int br_ifindex, int in_ifindex, const u8 *sa,
+				  u16 vid)
+{
+	struct ask_bridge_own *o = ask_bridge_own_find(br_ifindex, in_ifindex,
+						       sa, vid);
+	int now_on = ask_bridge_fdb_port(br_ifindex, sa, vid);
+
+	/* br_fdb_external_learn_del() finds the entry by (MAC, VID) alone:
+	 * only touch it while it is still ours, on this port, and never
+	 * user-added. A moved entry keeps our "offload" bit (the bridge never
+	 * clears it): clear it unless records use the MAC on its new port. */
+	if (now_on == in_ifindex && o && !ask_bridge_user_mac(sa))
+		ask_bridge_fdb_call(SWITCHDEV_FDB_DEL_TO_BRIDGE, in_ifindex, sa,
+				    vid, false);
+	else if (now_on && !ask_bridge_sa_in_use(br_ifindex, now_on, sa, vid))
+		ask_bridge_fdb_call(SWITCHDEV_FDB_OFFLOADED, now_on, sa, vid,
+				    false);
+	if (o) {
+		list_del(&o->node);
+		kfree(o);
+	}
+}
+
+/* Remove @r from the hardware (unless its table is already gone) and the
+ * list, then release its SA if nothing else uses it. */
+static void ask_bridge_rec_del(struct ask_bridge_rec *r)
+{
+	const u8 *sa = r->key + ASK_BRIDGE_K_SA;
+	int rc;
+
+	if (!r->dead) {
+		/* A failed delete has already unlinked the record (F-254/F-256
+		 * keep only the memory), so tracking goes either way. */
+		rc = ask_hw_l2_record(r->port, r->key, 0, false);
+		if (rc)
+			pr_warn_ratelimited("ask: bridge: delete %pM>%pM tci 0x%04x on port 0x%02x: %d\n",
+					    sa, r->key + ASK_BRIDGE_K_DA,
+					    get_unaligned_be16(r->key + ASK_BRIDGE_K_TCI),
+					    r->port, rc);
+	}
+	list_del(&r->node);
+	ask_bridge_n_recs--;
+	if (!ask_bridge_sa_in_use(r->br_ifindex, r->in_ifindex, sa, r->vid))
+		ask_bridge_sa_release(r->br_ifindex, r->in_ifindex, sa, r->vid);
+	kfree(r);
+}
+
+/* Revalidate every record against the live FDB, VLAN and port state. */
+static void ask_bridge_resync(void)
+{
+	struct ask_bridge_rec *r, *tmp;
+	u32 fqid;
+	u8 iport;
+
+	ASSERT_RTNL();
+	lockdep_assert_held(&ask_bridge_lock);
+
+	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node)
+		if (r->dead ||
+		    !ask_bridge_flow_ok(r->br_ifindex, r->in_ifindex,
+					r->out_ifindex, r->key, r->vid,
+					r->filtering, &iport, &fqid) ||
+		    iport != r->port || fqid != r->fqid)
+			ask_bridge_rec_del(r);
+}
+
+static struct ask_bridge_rec *ask_bridge_rec_find(u8 port, const u8 *key)
+{
+	struct ask_bridge_rec *r;
+
+	list_for_each_entry(r, &ask_bridge_recs, node)
+		if (!r->dead && r->port == port &&
+		    !memcmp(r->key, key, FMAN_PCD_FE_L2_DA_KEY_SIZE))
 			return r;
 	return NULL;
 }
 
-/* Mark pass (@add false) or add pass (@add true) for one wanted record. */
-static void ask_bridge_one(u8 port, const u8 *addr, __be16 eth_type, u32 fqid,
-			   bool add)
+/* Install a record for a candidate the hook saw, if it qualifies now. */
+static void ask_bridge_admit(const struct ask_bridge_cand *c)
 {
-	struct ask_bridge_rec *r = ask_bridge_rec_find(port, addr, eth_type);
+	struct net_device *in = __dev_get_by_index(&init_net, c->in_ifindex);
+	struct net_device *br = in && netif_is_bridge_port(in) ?
+				netdev_master_upper_dev_get(in) : NULL;
+	const u8 *sa = c->key + ASK_BRIDGE_K_SA;
+	struct ask_bridge_rec *r;
+	struct ask_bridge_own *o;
+	bool filtering;
+	u32 fqid;
+	u16 vid;
+	u8 iport;
 	int rc;
 
-	if (!add) {
-		if (r && r->fqid == fqid)
-			r->want = true;
+	if (!br || !netif_is_bridge_master(br) ||
+	    !ask_bridge_vid(br, in, get_unaligned_be16(c->key + ASK_BRIDGE_K_TCI),
+			    &vid))
 		return;
-	}
-	if (r)
+	filtering = br_vlan_enabled(br);
+	if (!ask_bridge_flow_ok(br->ifindex, c->in_ifindex, c->out_ifindex,
+				c->key, vid, filtering, &iport, &fqid) ||
+	    ask_bridge_rec_find(iport, c->key))
 		return;
 	if (ask_bridge_n_recs >= ASK_BRIDGE_REC_MAX) {
-		pr_warn_ratelimited("ask: bridge: %u records, %pM stays in software\n",
-				    ask_bridge_n_recs, addr);
+		pr_warn_ratelimited("ask: bridge: %u records, %pM>%pM stays in software\n",
+				    ask_bridge_n_recs, sa, c->key + ASK_BRIDGE_K_DA);
 		return;
 	}
 	r = kzalloc(sizeof(*r), GFP_KERNEL);
 	if (!r)
 		return;
-	rc = ask_hw_l2_record(port, addr, eth_type, fqid, true);
+	rc = ask_hw_l2_record(iport, c->key, fqid, true);
 	if (rc) {
 		kfree(r);
-		pr_warn_ratelimited("ask: bridge: add %pM/0x%04x on port 0x%02x failed: %d\n",
-				    addr, ntohs(eth_type), port, rc);
+		pr_warn_ratelimited("ask: bridge: add %pM>%pM tci 0x%04x on port 0x%02x failed: %d\n",
+				    sa, c->key + ASK_BRIDGE_K_DA,
+				    get_unaligned_be16(c->key + ASK_BRIDGE_K_TCI),
+				    iport, rc);
 		return;
 	}
-	r->port = port;
-	ether_addr_copy(r->addr, addr);
-	r->eth_type = eth_type;
+	r->br_ifindex = br->ifindex;
+	r->in_ifindex = c->in_ifindex;
+	r->out_ifindex = c->out_ifindex;
+	r->port = iport;
+	memcpy(r->key, c->key, sizeof(r->key));
+	r->vid = vid;
+	r->filtering = filtering;
 	r->fqid = fqid;
-	r->want = true;
+	r->last_hit = jiffies;
 	list_add_tail(&r->node, &ask_bridge_recs);
 	ask_bridge_n_recs++;
-}
 
-static void ask_bridge_walk(bool add)
-{
-	struct ask_bridge_entry *e;
-
-	list_for_each_entry(e, &ask_bridge_entries, node) {
-		struct net_device *br = __dev_get_by_index(&init_net, e->br_ifindex);
-		struct net_device *egr = __dev_get_by_index(&init_net, e->port_ifindex);
-		struct net_device *in;
-		struct list_head *iter;
-		u8 eport, iport;
-		u32 fqid;
-
-		if (!br || !egr || !netif_is_bridge_master(br) ||
-		    br_vlan_enabled(br) ||
-		    !ask_bridge_member_ok(egr, br, &eport) ||
-		    ask_hw_oif_fqid_cached(egr->ifindex, &fqid))
-			continue;
-		netdev_for_each_lower_dev(br, in, iter) {
-			if (in == egr || vlan_uses_dev(in) ||
-			    !ask_bridge_member_ok(in, br, &iport))
-				continue;
-			ask_bridge_one(iport, e->addr, htons(ETH_P_IP), fqid, add);
-			ask_bridge_one(iport, e->addr, htons(ETH_P_IPV6), fqid, add);
-		}
-	}
-}
-
-/* Diff the installed records against the wanted set. rtnl + ask_bridge_lock. */
-static void ask_bridge_resync(void)
-{
-	bool armed = ask_hw_bridge_offload_armed();
-	struct ask_bridge_rec *r, *tmp;
-	int rc;
-
-	ASSERT_RTNL();
-	lockdep_assert_held(&ask_bridge_lock);
-
-	list_for_each_entry(r, &ask_bridge_recs, node)
-		r->want = false;
-	if (armed)
-		ask_bridge_walk(false);
-	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node) {
-		if (r->want)
-			continue;
-		/* A failed delete has already unlinked the record (F-254/F-256
-		 * keep only the memory), so tracking goes either way. */
-		rc = ask_hw_l2_record(r->port, r->addr, r->eth_type, 0, false);
-		if (rc)
-			pr_warn_ratelimited("ask: bridge: delete %pM/0x%04x on port 0x%02x: %d\n",
-					    r->addr, ntohs(r->eth_type), r->port, rc);
-		list_del(&r->node);
-		kfree(r);
-		ask_bridge_n_recs--;
-	}
-	if (armed)
-		ask_bridge_walk(true);
-}
-
-static void ask_bridge_entries_drop(bool (*match)(struct ask_bridge_entry *,
-						  const void *),
-				    const void *arg)
-{
-	struct ask_bridge_entry *e, *tmp;
-
-	list_for_each_entry_safe(e, tmp, &ask_bridge_entries, node) {
-		if (match && !match(e, arg))
-			continue;
-		list_del(&e->node);
-		kfree(e);
-		ask_bridge_n_entries--;
-	}
-}
-
-struct ask_bridge_key {
-	int        ifindex;	/* bridge (ADD) or port (DEL) */
-	const u8  *addr;
-};
-
-static bool ask_bridge_match_br(struct ask_bridge_entry *e, const void *arg)
-{
-	const struct ask_bridge_key *k = arg;
-
-	return e->br_ifindex == k->ifindex && ether_addr_equal(e->addr, k->addr);
-}
-
-static bool ask_bridge_match_port(struct ask_bridge_entry *e, const void *arg)
-{
-	const struct ask_bridge_key *k = arg;
-
-	return e->port_ifindex == k->ifindex && ether_addr_equal(e->addr, k->addr);
-}
-
-static void ask_bridge_apply_event(const struct ask_bridge_fdb_event *ev)
-{
-	struct ask_bridge_key k = { .addr = ev->addr };
-	struct ask_bridge_entry *e;
-	struct net_device *br;
-
-	if (!ev->add) {
-		k.ifindex = ev->dev->ifindex;
-		ask_bridge_entries_drop(ask_bridge_match_port, &k);
+	/* The SA's frames no longer reach the bridge: take a learned entry
+	 * over so it does not age out, or just mark a user-added one. */
+	if (ask_bridge_own_find(br->ifindex, c->in_ifindex, sa, vid))
+		return;
+	if (ask_bridge_user_mac(sa)) {
+		ask_bridge_fdb_call(SWITCHDEV_FDB_OFFLOADED, c->in_ifindex, sa,
+				    vid, true);
 		return;
 	}
-	br = netif_is_bridge_port(ev->dev) ?
-		netdev_master_upper_dev_get(ev->dev) : NULL;
-	if (!br)
-		return;		/* the port left; its DEL is queued too */
-	k.ifindex = br->ifindex;	/* (bridge, MAC) is unique: a move */
-	ask_bridge_entries_drop(ask_bridge_match_br, &k);
-	if (ask_bridge_n_entries >= ASK_BRIDGE_ENTRY_MAX) {
-		pr_warn_ratelimited("ask: bridge: %u static entries, %pM stays in software\n",
-				    ask_bridge_n_entries, ev->addr);
+	o = kzalloc(sizeof(*o), GFP_KERNEL);
+	if (!o)
+		return;		/* the bridge ages it; the record goes with it */
+	rc = ask_bridge_fdb_call(SWITCHDEV_FDB_ADD_TO_BRIDGE, c->in_ifindex, sa,
+				 vid, true);
+	if (rc) {
+		kfree(o);
 		return;
 	}
-	e = kzalloc(sizeof(*e), GFP_KERNEL);
-	if (!e)
-		return;
-	e->br_ifindex = br->ifindex;
-	e->port_ifindex = ev->dev->ifindex;
-	ether_addr_copy(e->addr, ev->addr);
-	list_add_tail(&e->node, &ask_bridge_entries);
-	ask_bridge_n_entries++;
+	o->br_ifindex = br->ifindex;
+	o->port_ifindex = c->in_ifindex;
+	ether_addr_copy(o->addr, sa);
+	o->vid = vid;
+	list_add_tail(&o->node, &ask_bridge_owns);
 }
 
-static void ask_bridge_fdb_work_fn(struct work_struct *w)
+static void ask_bridge_work_fn(struct work_struct *w)
 {
-	struct ask_bridge_fdb_event *ev;
+	unsigned int i, n;
 
 	rtnl_lock();
 	mutex_lock(&ask_bridge_lock);
-	for (;;) {
-		spin_lock_bh(&ask_bridge_fdb_ev_lock);
-		ev = list_first_entry_or_null(&ask_bridge_fdb_ev_list,
-					      struct ask_bridge_fdb_event, node);
-		if (ev) {
-			list_del(&ev->node);
-			ask_bridge_fdb_ev_count--;
-		}
-		spin_unlock_bh(&ask_bridge_fdb_ev_lock);
-		if (!ev)
-			break;
-		ask_bridge_apply_event(ev);
-		dev_put(ev->dev);
-		kfree(ev);
-	}
-	if (READ_ONCE(ask_bridge_desync)) {
-		WRITE_ONCE(ask_bridge_desync, false);
-		ask_bridge_entries_drop(NULL, NULL);
-		pr_warn("ask: bridge: FDB event lost, static entries dropped to software until re-added\n");
-	}
+	spin_lock_bh(&ask_bridge_cand_lock);
+	n = ask_bridge_n_cand;
+	memcpy(ask_bridge_cand_work, ask_bridge_cand, n * sizeof(*ask_bridge_cand));
+	ask_bridge_n_cand = 0;
+	spin_unlock_bh(&ask_bridge_cand_lock);
+
 	ask_bridge_resync();
+	for (i = 0; i < n; i++)
+		ask_bridge_admit(&ask_bridge_cand_work[i]);
+	if (ask_bridge_n_recs)	/* no-op while a pass is pending */
+		queue_delayed_work(system_wq, &ask_bridge_age_work,
+				   ASK_BRIDGE_AGE_PERIOD);
 	mutex_unlock(&ask_bridge_lock);
 	rtnl_unlock();
 }
 
-/* @hw_port_id was disengaged: its table and records are gone. */
-void ask_bridge_forget_port(u8 hw_port_id)
+/* Delete records idle for their bridge's ageing time (0 = never).
+ * ponytail: reads every record's count under rtnl, O(R x records per port)
+ * memcmp (~tens of ms at the 2048 cap) every 5 s; read counts outside rtnl
+ * or cache the record pointer if rtnl latency matters. */
+static void ask_bridge_age_fn(struct work_struct *w)
 {
 	struct ask_bridge_rec *r, *tmp;
+	unsigned long now = jiffies;
+	u64 pkts;
 
+	rtnl_lock();
 	mutex_lock(&ask_bridge_lock);
 	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node) {
-		if (r->port != hw_port_id)
-			continue;
-		list_del(&r->node);
-		kfree(r);
-		ask_bridge_n_recs--;
+		struct net_device *br = __dev_get_by_index(&init_net,
+							   r->br_ifindex);
+		unsigned long age = br ?
+			clock_t_to_jiffies(br_get_ageing_time(br)) : 0;
+
+		if (!r->dead && !ask_hw_l2_record_hits(r->port, r->key, &pkts) &&
+		    pkts != r->pkts) {
+			r->pkts = pkts;
+			r->last_hit = now;
+		} else if (age && time_after_eq(now, r->last_hit + age)) {
+			ask_bridge_rec_del(r);
+		}
 	}
+	ask_bridge_resync();
+	if (ask_bridge_n_recs)	/* no-op while a pass is pending */
+		queue_delayed_work(system_wq, &ask_bridge_age_work,
+				   ASK_BRIDGE_AGE_PERIOD);
 	mutex_unlock(&ask_bridge_lock);
-	ask_bridge_kick();	/* records elsewhere may target this port */
+	rtnl_unlock();
 }
 
+/* @hw_port_id was disengaged: its table and records are gone. The worker
+ * releases the SAs (needs rtnl); dead records never match a lookup, so a
+ * quick re-engage installs afresh. */
+void ask_bridge_forget_port(u8 hw_port_id)
+{
+	struct ask_bridge_rec *r;
+
+	mutex_lock(&ask_bridge_lock);
+	list_for_each_entry(r, &ask_bridge_recs, node)
+		if (r->port == hw_port_id)
+			r->dead = true;
+	mutex_unlock(&ask_bridge_lock);
+	ask_bridge_kick();
+}
+
+/*
+ * NF_BR_FORWARD, after the bridge filter: note IPv4/IPv6 unicast between
+ * two L2 ports, with its egress 802.1Q tag (hwaccel; in-band tagged frames
+ * carry 0x8100 as EtherType and are skipped). Softirq; never blocks, drops
+ * candidates when full.
+ */
+static unsigned int ask_bridge_hook(void *priv, struct sk_buff *skb,
+				    const struct nf_hook_state *state)
+{
+	const struct ethhdr *eth = eth_hdr(skb);
+	struct ask_bridge_cand *c;
+	unsigned long now = jiffies;
+	unsigned int slot;
+	u16 tci = 0;
+	u32 h;
+	u8 port;
+
+	if (skb_vlan_tag_present(skb)) {
+		if (skb->vlan_proto != htons(ETH_P_8021Q))
+			return NF_ACCEPT;
+		tci = skb_vlan_tag_get(skb);
+	}
+	if (!ask_hw_bridge_offload_armed() ||
+	    (eth->h_proto != htons(ETH_P_IP) &&
+	     eth->h_proto != htons(ETH_P_IPV6)) ||
+	    !is_valid_ether_addr(eth->h_dest) ||
+	    !is_valid_ether_addr(eth->h_source) ||
+	    ask_hw_dev_port(state->in, &port) || !ask_hw_port_is_l2(port) ||
+	    ask_hw_dev_port(state->out, &port) || !ask_hw_port_is_l2(port))
+		return NF_ACCEPT;
+
+	/* h_dest and h_source are adjacent: hash both MACs at once. */
+	h = jhash(eth->h_dest, 2 * ETH_ALEN,
+		  (u32)state->in->ifindex << 16 ^ state->out->ifindex ^
+		  (u32)tci << 8 ^ (__force u32)eth->h_proto);
+	slot = h & (ASK_BRIDGE_SEEN - 1);
+	if (READ_ONCE(ask_bridge_seen[slot].hash) == h &&
+	    time_before(now, READ_ONCE(ask_bridge_seen[slot].at) + HZ))
+		return NF_ACCEPT;
+	WRITE_ONCE(ask_bridge_seen[slot].hash, h);
+	WRITE_ONCE(ask_bridge_seen[slot].at, now);
+
+	spin_lock(&ask_bridge_cand_lock);
+	if (ask_bridge_n_cand < ASK_BRIDGE_CAND_MAX) {
+		c = &ask_bridge_cand[ask_bridge_n_cand++];
+		c->in_ifindex = state->in->ifindex;
+		c->out_ifindex = state->out->ifindex;
+		ask_bridge_key(c->key, eth->h_dest, eth->h_source, tci,
+			       eth->h_proto);
+	}
+	spin_unlock(&ask_bridge_cand_lock);
+	ask_bridge_kick();
+	return NF_ACCEPT;
+}
+
+static const struct nf_hook_ops ask_bridge_nf_ops = {
+	.hook     = ask_bridge_hook,
+	.pf       = NFPROTO_BRIDGE,
+	.hooknum  = NF_BR_FORWARD,
+	.priority = NF_BR_PRI_LAST,
+};
+
+/* FDB changes: remember user-added and local MACs (never taken over), then
+ * let the worker revalidate. Atomic context. */
 static int ask_bridge_fdb_notifier(struct notifier_block *nb,
 				   unsigned long event, void *ptr)
 {
 	struct switchdev_notifier_fdb_info *fdb_info;
-	struct net_device *dev = switchdev_notifier_info_to_dev(ptr);
-	struct ask_bridge_fdb_event *ev;
-	bool add;
 
-	switch (event) {
-	case SWITCHDEV_FDB_ADD_TO_DEVICE:
-		add = true;
-		break;
-	case SWITCHDEV_FDB_DEL_TO_DEVICE:
-		add = false;
-		break;
-	default:
+	if (event != SWITCHDEV_FDB_ADD_TO_DEVICE &&
+	    event != SWITCHDEV_FDB_DEL_TO_DEVICE)
 		return NOTIFY_DONE;
-	}
-
 	fdb_info = container_of(ptr, struct switchdev_notifier_fdb_info, info);
-	if (!fdb_info->added_by_user || fdb_info->is_local ||
-	    fdb_info->locked || fdb_info->vid)
-		return NOTIFY_DONE;
-
-	/* Coalesce first, under the lock, without allocating. */
-	spin_lock_bh(&ask_bridge_fdb_ev_lock);
-	list_for_each_entry(ev, &ask_bridge_fdb_ev_list, node) {
-		if (ev->dev == dev && ether_addr_equal(ev->addr, fdb_info->addr)) {
-			ev->add = add;
-			spin_unlock_bh(&ask_bridge_fdb_ev_lock);
-			ask_bridge_kick();
-			return NOTIFY_DONE;
-		}
-	}
-	spin_unlock_bh(&ask_bridge_fdb_ev_lock);
-
-	/* Atomic context (switchdev's atomic notifier chain): capture only. */
-	ev = kzalloc(sizeof(*ev), GFP_ATOMIC);
-	if (!ev)
-		goto lost;
-	dev_hold(dev);
-	ev->dev = dev;
-	ether_addr_copy(ev->addr, fdb_info->addr);
-	ev->add = add;
-
-	spin_lock_bh(&ask_bridge_fdb_ev_lock);
-	if (ask_bridge_fdb_ev_count >= ASK_BRIDGE_FDB_EV_MAX) {
-		spin_unlock_bh(&ask_bridge_fdb_ev_lock);
-		dev_put(dev);
-		kfree(ev);
-		goto lost;
-	}
-	list_add_tail(&ev->node, &ask_bridge_fdb_ev_list);
-	ask_bridge_fdb_ev_count++;
-	spin_unlock_bh(&ask_bridge_fdb_ev_lock);
-	ask_bridge_kick();
-	return NOTIFY_DONE;
-
-lost:
-	WRITE_ONCE(ask_bridge_desync, true);
+	if (fdb_info->added_by_user || fdb_info->is_local)
+		set_bit(jhash(fdb_info->addr, ETH_ALEN, 0) & 4095,
+			ask_bridge_user_macs);
 	ask_bridge_kick();
 	return NOTIFY_DONE;
 }
@@ -455,24 +668,36 @@ static struct notifier_block ask_bridge_fdb_nb = {
 };
 
 /*
- * Blocking chain: STP state, port flags and VLAN filtering change which
- * records are wanted. Port flags only reach us as PRE_BRIDGE_FLAGS (no
- * driver claims the attribute, so the bridge never sends BRIDGE_FLAGS); the
- * flags are applied before the worker gets rtnl.
+ * Blocking chain: STP state, port flags, VLAN filtering/protocol and port
+ * VLAN membership/PVID change which records are valid. Port flags only
+ * reach us as PRE_BRIDGE_FLAGS (no driver claims the attribute, so the
+ * bridge never sends BRIDGE_FLAGS); the flags are applied before the worker
+ * gets rtnl.
  */
 static int ask_bridge_blocking_notifier(struct notifier_block *nb,
 					unsigned long event, void *ptr)
 {
-	struct switchdev_notifier_port_attr_info *info = ptr;
+	struct switchdev_notifier_port_attr_info *attr = ptr;
+	struct switchdev_notifier_port_obj_info *obj = ptr;
 
-	if (event != SWITCHDEV_PORT_ATTR_SET)
-		return NOTIFY_DONE;
-	switch (info->attr->id) {
-	case SWITCHDEV_ATTR_ID_PORT_STP_STATE:
-	case SWITCHDEV_ATTR_ID_PORT_PRE_BRIDGE_FLAGS:
-	case SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS:
-	case SWITCHDEV_ATTR_ID_BRIDGE_VLAN_FILTERING:
-		ask_bridge_kick();
+	switch (event) {
+	case SWITCHDEV_PORT_ATTR_SET:
+		switch (attr->attr->id) {
+		case SWITCHDEV_ATTR_ID_PORT_STP_STATE:
+		case SWITCHDEV_ATTR_ID_PORT_PRE_BRIDGE_FLAGS:
+		case SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS:
+		case SWITCHDEV_ATTR_ID_BRIDGE_VLAN_FILTERING:
+		case SWITCHDEV_ATTR_ID_BRIDGE_VLAN_PROTOCOL:
+			ask_bridge_kick();
+			break;
+		default:
+			break;
+		}
+		break;
+	case SWITCHDEV_PORT_OBJ_ADD:
+	case SWITCHDEV_PORT_OBJ_DEL:
+		if (obj->obj->id == SWITCHDEV_OBJ_ID_PORT_VLAN)
+			ask_bridge_kick();
 		break;
 	default:
 		break;
@@ -487,7 +712,7 @@ static struct notifier_block ask_bridge_blocking_nb = {
 /*
  * netdevice chain (rtnl held): a bridge join or leave switches an engaged
  * port's role (D1); any upper change (VLAN vifs included) can change which
- * records are wanted.
+ * records are valid.
  */
 static int ask_bridge_netdev_notifier(struct notifier_block *nb,
 				      unsigned long event, void *ptr)
@@ -523,7 +748,8 @@ int ask_bridge_init(void)
 {
 	int rc;
 
-	INIT_WORK(&ask_bridge_fdb_work, ask_bridge_fdb_work_fn);
+	INIT_WORK(&ask_bridge_work, ask_bridge_work_fn);
+	INIT_DELAYED_WORK(&ask_bridge_age_work, ask_bridge_age_fn);
 	WRITE_ONCE(ask_bridge_ready, true);
 
 	rc = register_switchdev_notifier(&ask_bridge_fdb_nb);
@@ -547,10 +773,20 @@ int ask_bridge_init(void)
 	}
 	ask_bridge_netdev_registered = true;
 
-	ask_pr_info("bridge: static FDB offload ready (T-M6-2 B3a, bridge_offload=%d)\n",
+	rc = nf_register_net_hook(&init_net, &ask_bridge_nf_ops);
+	if (rc) {
+		ask_pr_err("bridge: nf_register_net_hook failed: %d\n", rc);
+		goto err_hook;
+	}
+	ask_bridge_hook_registered = true;
+
+	ask_pr_info("bridge: flow offload ready (T-M6-2 B7a, bridge_offload=%d)\n",
 		    ask_hw_bridge_offload_armed());
 	return 0;
 
+err_hook:
+	unregister_netdevice_notifier(&ask_bridge_netdev_nb);
+	ask_bridge_netdev_registered = false;
 err_netdev:
 	unregister_switchdev_blocking_notifier(&ask_bridge_blocking_nb);
 	ask_bridge_blocking_registered = false;
@@ -564,9 +800,12 @@ err:
 
 void ask_bridge_exit(void)
 {
-	struct ask_bridge_fdb_event *ev, *tmp;
-	struct ask_bridge_rec *r, *rtmp;
+	struct ask_bridge_rec *r, *tmp;
 
+	if (ask_bridge_hook_registered) {
+		nf_unregister_net_hook(&init_net, &ask_bridge_nf_ops);
+		ask_bridge_hook_registered = false;
+	}
 	if (ask_bridge_netdev_registered) {
 		unregister_netdevice_notifier(&ask_bridge_netdev_nb);
 		ask_bridge_netdev_registered = false;
@@ -580,27 +819,22 @@ void ask_bridge_exit(void)
 		ask_bridge_notifiers_registered = false;
 	}
 
-	/* No notifier can queue new work now; flush what's in flight. */
+	/* Nothing can queue new work now; flush what's in flight. */
 	WRITE_ONCE(ask_bridge_ready, false);
-	cancel_work_sync(&ask_bridge_fdb_work);
-	spin_lock_bh(&ask_bridge_fdb_ev_lock);
-	list_for_each_entry_safe(ev, tmp, &ask_bridge_fdb_ev_list, node) {
-		list_del(&ev->node);
-		ask_bridge_fdb_ev_count--;
-		dev_put(ev->dev);
-		kfree(ev);
-	}
-	spin_unlock_bh(&ask_bridge_fdb_ev_lock);
+	cancel_work_sync(&ask_bridge_work);
+	cancel_delayed_work_sync(&ask_bridge_age_work);
 
-	/* Records go with the port tables when ask_hw tears the ports down. */
+	/* Hand every taken-over entry back; records go with the port tables
+	 * when ask_hw tears the ports down. */
+	rtnl_lock();
 	mutex_lock(&ask_bridge_lock);
-	ask_bridge_entries_drop(NULL, NULL);
-	list_for_each_entry_safe(r, rtmp, &ask_bridge_recs, node) {
-		list_del(&r->node);
-		kfree(r);
+	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node) {
+		r->dead = true;
+		ask_bridge_rec_del(r);
 	}
-	ask_bridge_n_recs = 0;
+	ask_bridge_n_cand = 0;
 	mutex_unlock(&ask_bridge_lock);
+	rtnl_unlock();
 
 	ask_pr_dbg("bridge: exit\n");
 }

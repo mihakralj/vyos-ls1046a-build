@@ -114,61 +114,61 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 {
 .cmd      = ASK_CMD_GET_INFO,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_get_info_doit,
 },
 {
 .cmd      = ASK_CMD_GET_MURAM,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_get_muram_doit,
 },
 {
 .cmd      = ASK_CMD_DUMP_FLOWS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .dumpit   = ask_genl_dump_flows_dumpit,
 },
 {
 .cmd      = ASK_CMD_GET_FLOW,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_get_flow_doit,
 },
 {
 .cmd      = ASK_CMD_DUMP_SAS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .dumpit   = ask_genl_eopnotsupp_dumpit,
 },
 {
 .cmd      = ASK_CMD_FLUSH_FLOWS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_flush_flows_doit,
 },
 {
 .cmd      = ASK_CMD_FLUSH_SAS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_eopnotsupp_doit,
 },
 {
 .cmd      = ASK_CMD_SET_POLICER,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_set_policer_doit,
 },
 {
 .cmd      = ASK_CMD_ENGAGE,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_engage_doit,
 },
 {
 .cmd      = ASK_CMD_DISENGAGE,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_UNS_ADMIN_PERM,
+.flags    = GENL_ADMIN_PERM,
 .doit     = ask_genl_disengage_doit,
 },
 };
@@ -182,7 +182,7 @@ static struct genl_family ask_genl_family __ro_after_init = {
 .version       = ASK_GENL_VERSION,
 .maxattr       = ASK_ATTR_MAX,
 .policy        = ask_top_policy,
-.netnsok       = true,
+.netnsok       = false,
 .parallel_ops  = false,
 .module        = THIS_MODULE,
 .small_ops     = ask_genl_small_ops,
@@ -265,12 +265,10 @@ goto nla_put_failure;
 
 	if (ask_hw_vlan_offload_armed())
 		caps |= ASK_CAP_VLAN;
-	/* T-M6-2: ASK_CAP_BRIDGE stays unadvertised through B0-B2 even though
-	 * ask_hw_bridge_offload_armed() already exists -- there is no
-	 * CC-tree/FDB install path yet (ask_bridge.c is
-	 * an observer only), so advertising the capability now would claim a
-	 * flow could actually get bridge-offloaded when none can. Add
-	 * `caps |= ASK_CAP_BRIDGE` here once B3's real switchdev wiring lands. */
+	/* T-M6-2: bridge FDB offload, same model as VLAN: advertised while its
+	 * kill switch (ask.bridge_offload, default on) is on. */
+	if (ask_hw_bridge_offload_armed())
+		caps |= ASK_CAP_BRIDGE;
 	if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, caps,
 			      ASK_INFO_ATTR_UNSPEC))
 		goto nla_put_failure;
@@ -899,4 +897,3 @@ ask_hw_offload_disengage(port_id);
 ask_pr_info("genl: disengaged port 0x%02x\n", port_id);
 return 0;
 }
-

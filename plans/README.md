@@ -5,31 +5,32 @@ Live planning, operational and reference documents. Retired documents live in
 what replaced it. `plans/` holds live documents only. New ASK2 planning goes
 into the master plan, not into new plan files.
 
-Last consolidated: 2026-10-09.
+Last consolidated: 2026-10-15. Completed ASK2 work and old result tables are
+archived; the master plan is the only task queue. Full feature parity is
+still open, independently of routed/NAT/VLAN throughput parity.
 
 ## ASK2 hardware offload
 
 | Document | Owns |
 |---|---|
-| [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative ASK2 execution plan:** baseline, open milestones M3–M8, open task IDs and gates, open defects, binding silicon facts, live reference register (§8). Open work only; achieved history is in [`archive/ASK2-MASTER-PLAN-2026-10-09.md`](archive/ASK2-MASTER-PLAN-2026-10-09.md). Start here. |
-| [`ASK2-REWRITE-PLAN.md`](ASK2-REWRITE-PLAN.md) | Vendor-parity plan, open work only: churn gate (reopened), open board checklist, Phase 2 consolidation, Phase 3/4 features, vendor reference records and test method. Achieved history: [`archive/ASK2-REWRITE-PLAN-2026-10-09.md`](archive/ASK2-REWRITE-PLAN-2026-10-09.md). |
-| [`ASK2-VS-VENDOR-THROUGHPUT.md`](ASK2-VS-VENDOR-THROUGHPUT.md) | A6 scoreboard: ASK2 vs vendor NXP ASK routed throughput and retransmits (unidir and bidir tables). |
-| [`DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md) | S0/S1/S2 state machine, per-interface CLI contract, reversibility contract. |
-| [`OFFLOAD-CAPABILITY-PLAN.md`](OFFLOAD-CAPABILITY-PLAN.md) | Per capability: vendor mechanism vs ASK2 mechanism, with build steps. |
-| [`ASK2-BRIDGE-OFFLOAD-PLAN.md`](ASK2-BRIDGE-OFFLOAD-PLAN.md) | L2 bridge offload (T-M6-2); open regression as of 2026-09-16. |
-| [`ASK2-IPSEC-OFFLOAD-PLAN.md`](ASK2-IPSEC-OFFLOAD-PLAN.md) | IPsec ESP offload via CAAM (T-M6-4); draft, not started. |
-| [`CC-ACL-OFFLOAD-PLAN.md`](CC-ACL-OFFLOAD-PLAN.md) | ACL / ntuple / tc-flower backend; verdict that the CC match walker is absent in 210.10.1. |
+| [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative task list:** missing vendor features, dependencies, acceptance, consolidation and defects. Absorbs the rewrite plan's pending work. Start here. |
+| [`ASK2-VENDOR-PARITY.md`](ASK2-VENDOR-PARITY.md) | Current comparison scope, paired 10×10 method, evidence still required and verdict contract. Old single-run and A6 tables are archived, not current acceptance. |
+| [`DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md) | Binding runtime contract: S0/S1/S2 state machine, `offload ipv4\|ipv6` CLI, ASK↔VPP mutex, teardown checklist, open contract obligations. History in `archive/`. |
+| [`OFFLOAD-CAPABILITY-PLAN.md`](OFFLOAD-CAPABILITY-PLAN.md) | Remaining capabilities only: vendor mechanism vs recommended ASK2 mechanism; shipped capabilities summarised, details in `archive/`. |
+| [`ASK2-BRIDGE-OFFLOAD-PLAN.md`](ASK2-BRIDGE-OFFLOAD-PLAN.md) | Remaining bridge work: B7b, mixed-role/multi-table dispatch, IRB, current-image repeats and safety/resource gates. B0–B6/B7a history is archived. |
+| [`ASK2-PPPOE-OFFLOAD-PLAN.md`](ASK2-PPPOE-OFFLOAD-PLAN.md) | Remaining PPPoE acceptance, 10,000-cycle churn, fragmentation/exhaustion, over-VLAN/relay gaps and IPv6 fragment-ID limitation. |
+| [`ASK2-IPSEC-OFFLOAD-PLAN.md`](ASK2-IPSEC-OFFLOAD-PLAN.md) | IPsec ESP offload via CAAM (T-M6-4). Tier 1 substrate verified 2026-10-16 (CAAM built in, selected, self-tests pass); tunnel gate and the Tier 2 fast path not started. |
+| [`ASK2-SURICATA-BYPASS-PLAN.md`](ASK2-SURICATA-BYPASS-PLAN.md) | Suricata + ASK2 design only: the native VyOS service is IDS-only (AF_PACKET); approval/revocation/fail-closed contract required before any code. |
+| [`CC-ACL-OFFLOAD-PLAN.md`](CC-ACL-OFFLOAD-PLAN.md) | Static ACL backend: settled facts (no CC walker; `0194` ntuple on ehash verified) and the open Phase 2 drop-ACL work. |
 | [`ASK2-PERFORMANCE-TEST-HARNESS.md`](ASK2-PERFORMANCE-TEST-HARNESS.md) | Throughput and CPU measurement method; current rig is `bin/testrig-combo-matrix.sh` (dell1–DUT–dell2). |
-| [`ask2-wireguard-plan.md`](ask2-wireguard-plan.md) | WireGuard software throughput on `.185`/`.106`: measured baseline, stage -1 investigation, revised optimisation stages. Harness: `bin/testrig-wireguard.sh`. |
-| [`ASK2-WIREGUARD-FASTPATH-PLAN.md`](ASK2-WIREGUARD-FASTPATH-PLAN.md) | WireGuard stages 5 and 6: zero-skb datapath over FMan ehash records, QMan frame queues and (optionally) offline-port reinjection and order restoration; phases P0-P5 with gates and kill criteria. |
-| [`ask2-wireguard-matrix-106-vs-185.md`](ask2-wireguard-matrix-106-vs-185.md) | WireGuard throughput matrix, `.106` reference against `.185` VyOS: 1/2/4 tunnels x up/down/bidir, medians, raw values, per-run load, configuration, method, caveats, how to repeat. |
+| [`ASK2-WIREGUARD-FASTPATH-PLAN.md`](ASK2-WIREGUARD-FASTPATH-PLAN.md) | The single active WireGuard plan (remaining work only): software-path open items (matrix re-run on the shipping image, persistent `noqueue`, netns selftest), fast-path P2b-2/P2b-3/P2c, P3 RX, P4 offline-port reinjection, P5 order restoration, with gates and kill criteria. Completed software stages, matrix and P0-P2b-1 results are in `archive/`. |
 
 ## VPP dataplane
 
 | Document | Owns |
 |---|---|
 | [`VPP.md`](VPP.md) | Single-image VPP / AF_XDP dataplane: current state and configuration. |
-| [`VPP-AFXDP-ZC-FULLSPEED.md`](VPP-AFXDP-ZC-FULLSPEED.md) | AF_XDP zero-copy full-speed plan (open). |
+| [`VPP-AFXDP-ZC-FULLSPEED.md`](VPP-AFXDP-ZC-FULLSPEED.md) | AF_XDP zero-copy full-speed plan (open; current task IDs in master §4.5). |
 
 ## Build, patches, operations
 

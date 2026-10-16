@@ -1,0 +1,14 @@
+<netpdl name="NetPDL custom protocol" description="ASK2 TCP control punt">
+<protocol name="tcpschema" longname="tcpschema" prevproto="tcp">
+    <execute-code>
+      <before>
+        <if expr="((tcp.flags bitwand 7) != 0)">
+          <if-true>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <action type="exit" confirm="yes" nextproto="end_parse"/>
+          </if-true>
+        </if>
+      </before>
+    </execute-code>
+  </protocol>
+</netpdl>

@@ -563,3 +563,11 @@ Patch 4017 adds `wgfp_peer` ("<wg dev> <egress dev>") to `drivers/net/wireguard/
 First P2b-1 board result (image 2026.10.13-0303, cold boot, 4 TCP flows steered to 4 sinks, `bin/testrig-wgfp-p2b.sh`): 2.58 Gbit/s received (2.60 sent) vs 1.65 software lanes=3 and 1.38 .106; sealed 4.73M frames, declined 0, xmit_fail 0, dell2 `Invalid MAC` 0, 7.4 GB decrypted by stock dell2. Gate G2 (>= 2.6) is just short. Bug found by review: the rekey trigger `ctr == 0` could never fire after 120 s; moved into the 10 ms timer block (same test as keep_key_fresh). Rekey-at-120 s run pending the fixed image.
 
 P2b-1 G2 PASS (image 2026.10.13-0347, cold boot, 140 s, 4 flows): 2.621 Gbit/s sent; 33.5M frames sealed, declined 0, xmit_fail 0, rekeys=1 (120 s rekey fired and tunnel kept running), no Invalid MAC on dell2, no kernel splats. Gate: >= 2.6 met (vs 1.65 software, 1.38 .106).
+
+#### 2.19.1 1T bidir on .185 vs .106: netfilter/conntrack root cause (2026-10-13)
+
+Fast path 1T (wgfp_peer, REV=4): up 2.62, bidir 1.96 (0.89 up + 1.08 down), down 1.41 (software; fast path is TX-only). Multi-peer (2T/4T) fast-path cells are untestable until multi-peer binding exists.
+
+Software 1T bidir, 4 reps each, tx_lanes=3 (Gbit/s mean): normal ruleset 1.49; `nft flush ruleset` 1.61; ruleset restored 1.47; `.106` 12-run mean 1.551. The VyOS nft ruleset costs about 0.12-0.14 Gbit/s (8-9%).
+
+Bisect by deleting table groups does not recover it (raw/mangle/vrf 1.39, conntrack tables 1.48, nat 1.42, filter 1.42): the cost is not one table. Clean-ruleset probes: empty base chains on prerouting/forward/postrouting 1.60; one `counter` rule 1.60 (counters are free); one `ct state new` rule 1.43 (loading nf_conntrack hooks costs about 0.17); notrack-all at raw priority on top of the full ruleset 1.43 (no gain, hooks still present). Conclusion: the cost is the presence of the conntrack hooks (nf_conntrack_in/defrag) on every packet, which any stateful firewall/NAT config needs. No safe VyOS-semantics-preserving elimination found; it is a config trade (no conntrack users = 1.6). Test aid: `WG_NOTRACK=1|2` in `bin/testrig-wireguard.sh`.

@@ -2,6 +2,8 @@
 
 **Version 1.0.0 · 2026-07-21 · HADS 1.0.0**
 
+**Status pointer (2026-10-15):** no phase of this plan is complete; the ZC RX regression is still open. The current task IDs and order (T-M4-5a libxdp image, T-M4-4d DRV/`xsks_map[0]`/`xsk_zc_rx_redirect>0`, 4e ≥3.0 Gbit/s, 4f reversibility, 4g steered ZC RX) are in `plans/ASK2-MASTER-PLAN.md` §4.5. Where the board and image details in §2 and §11 below differ, master §4.5 wins.
+
 ## AI READING INSTRUCTION
 
 This is the execution plan to drive the **VPP AF_XDP zero-copy (ZC) dataplane**
