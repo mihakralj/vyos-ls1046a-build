@@ -1,34 +1,45 @@
 # ASK2 Suricata integration plan
 
-**2026-10-16 · dpaa1 · Status: design only.** This plan is based on the current
-VyOS Suricata service model described in the upstream documentation at
-https://docs.vyos.io/en/rolling/configuration/service/suricata.html. The key
-point is that the router does not invent a custom Suricata control plane; it
-configures the built-in service under `service suricata`, then runs
-`update suricata` and `restart suricata` to load the ruleset.
+**2026-10-16 · dpaa1 · Status: design only.**
 
-The ASK2 question is not "how do we replace Suricata". It is: "how do we keep
-Suricata's inspection path working while the ASK2 hardware flow path handles the
-large bulk of traffic the IDS does not need to see again after the initial
-inspection prefix?"
+This document is intended to stand on its own. It explains the current scope,
+what is already known, and what remains to be implemented without assuming any
+prior discussion or archived working note.
 
-## 1. Baseline: the actual VyOS Suricata service
+## 1. Executive summary
 
-The current VyOS Suricata config model is intentionally simple:
+The ASK2 question is not: "how do we replace Suricata?"
+
+The real question is: "how do we keep Suricata as the inspection authority while
+ASK2 handles the repeated bulk traffic that has already been accepted by the
+inspection path?"
+
+This is the correct architecture for the LS1046A flow-offload model. Suricata is
+still the rule engine, logging layer and policy authority. ASK2 is the
+hardware fast-path used after the first inspection decision has been made.
+
+This leaves the router aligned with the normal VyOS service model instead of
+inventing a second custom Suricata control plane.
+
+## 2. Current fact base: the real VyOS Suricata service model
+
+VyOS exposes Suricata as a normal service under the `service suricata` tree.
+The command model is intentionally simple and documented in the upstream VyOS
+service docs.
+
+Required building blocks:
 
 - monitored interfaces: `set service suricata interface <interface>`
 - address groups: `set service suricata address-group <name> address <address>`
 - port groups: `set service suricata port-group <name> port <port>`
-- EVE log: `set service suricata log eve filename ...`, `filetype`, and `type`
+- EVE log settings: `set service suricata log eve ...`
 - rules update: `update suricata`
-- restart: `restart suricata`
+- service reload/restart: `restart suricata`
 
-The underlying docs also require at least one interface, one address group, and
-one port group before a commit succeeds. That matters because the hardware-
-offload design should attach to an already valid Suricata service, not replace it
-with a separate ad hoc definition.
+At least one interface, one address group, and one port group are required for a
+valid service configuration.
 
-Example config from the upstream service model:
+Example:
 
 ```bash
 set service suricata interface eth1
@@ -47,145 +58,114 @@ update suricata
 restart suricata
 ```
 
-## 2. What Suricata is doing in practice
+## 3. What Suricata does in practice
 
-Suricata is a packet-inspection engine. It accepts a live network interface, runs
-rules against traffic, emits JSON EVE logs, and loads fresh rules with
-`update suricata`. In a routed inline deployment, the packet stream is still
-visible to the kernel stack and the service, but the first useful state is the
-inspection decision.
+Suricata is a packet-inspection engine. It accepts live traffic on a router
+interface, evaluates a rule set, emits EVE logs, and reloads rules with
+`update suricata`.
 
-This is a very good fit for the ASK2 flow model. ASK2 already operates from a
-slow-path learning pattern: a new flow enters the slow path, the system decides
-whether it remains software-visible or becomes a hardware-offloaded fast path.
-The design goal is to let Suricata decide that decision without inventing a
-separate packet-processing stack.
+In a routed inline deployment, the packet stream is still visible to the kernel
+stack and the service. The first useful state is the inspection decision.
 
-## 3. ASK2-compatible design: Suricata as the decision point, ASK2 as the fast path
+That decision point is exactly where ASK2 can fit. ASK2 already behaves as a
+slow-path learning engine: a new flow enters the slow path, a decision is made,
+and the flow may be installed into the fast hardware path.
 
-The right integration point is not a custom Suricata YAML/daemon API. It is the
-existing ASK2 flowtable/offload contract:
+## 4. ASK2-compatible design
 
-- Suricata monitors traffic on the configured interface(s)
-- the flow reaches the inspection gate
-- once the flow has passed the initial inspection prefix, the router installs a
-  hardware flow record
-- the bulk of subsequent packets travel through the FE-VM ehash path instead of
-  the normal CPU inspection path
-- the Suricata service keeps its rule-based visibility for the flow until the
-  policy says it can be handed off
+The right design is not a custom Suricata API or a separate packet-processing
+stack. The correct design is:
 
-This is the same pattern the current ASK2 design already uses for fast flow
-insertion: a flow starts as a slow-path event; once the system decides it is
-safe for the silicon fast path, the record is published and the subsequent
-packets stop taking the inspection path.
+1. Suricata runs on the configured interface using the native VyOS service model.
+2. The first packet(s) of a flow go through the Suricata inspection gate.
+3. If the flow is accepted as bulk or safe for the hardware path, ASK2 installs a
+   fast-path flow record.
+4. Subsequent packets use the FE-VM ehash path instead of staying on the CPU
+   inspection path.
+5. Suricata keeps rule-based visibility and logging for the flows that remain in
+   the software path or for the early prefix before handoff.
 
-This makes the integration compatible with the shipped VyOS service model.
-Suricata remains the thing that decides what is interesting; ASK2 handles the
-repeat traffic once the decision is made.
+This keeps one source of truth for the service configuration and avoids duplicate
+state machines.
 
-## 4. Why this is a good match for the LS1046A
+## 5. Why this is a good fit for the LS1046A hardware model
 
-The advantage is not that Suricata "becomes hardware offloaded by itself". The
-advantage is that the high-rate bulk of the traffic can leave the inspection path
-once the flow has already been classified, while Suricata continues to run in the
-normal way for the ruleset and logging.
+The design is not: "make Suricata itself hardware offloaded".
 
-That is exactly the class of problem ASK2 is good at:
+The design is: "separate the expensive repeated traffic from the inspection path
+after a decision has been made".
 
-- new-flow cost: software logic and inspection
-- established-flow cost: hardware path / direct FQ dispatch
-- CPU bound by flow churn, not by ongoing byte-forwarding bandwidth
+This matches the LS1046A asymmetry well:
 
-This fits elephant-heavy traffic mixes better than trying to force all packets
-through Suricata's userspace pipeline. The result is a real inline IDS/IPS
-pattern, not a fake "all traffic is Suricata traffic" model.
+- first-flow cost: software inspection and classification
+- established-flow cost: hardware fast path
+- workload shape: elephant-heavy traffic with repeat flows and a manageable number
+  of decision events
 
-## 5. Deployment model
+This is the correct use of a hardware flow engine for IDS/IPS work. It is not a
+promise that every packet is always visible to Suricata.
 
-### Inline routed mode
+## 6. Deployment model
 
-This is the target model for the first design pass.
+### Inline routed mode (primary target)
 
-- Suricata is configured as the router's IDS/IPS service on the relevant
-  interfaces using the normal VyOS syntax above.
-- The router continues to do normal routed forwarding.
-- The ASK2 flow path handles the bulk of traffic after the decision point.
-- The service remains the authoritative inspection and logging layer for the
-  flows that are still in software.
+This is the first deployment target.
 
-This is the cleanest way to match the actual VyOS Suricata model.
+- Suricata is configured under the normal VyOS service tree.
+- The router keeps doing regular routed forwarding.
+- ASK2 handles the established bulk traffic after the machine learns the flow.
+- Suricata remains the inspection and logging policy authority.
 
-### Passive or SPAN mode
+### Passive / SPAN / tap mode
 
-Passive tap/SPAN deployments are not the first target. They are useful for
-network visibility, but they do not align as well with a hardware fast path that
-must own forwarding for the actual throughput path. The inline routed mode is the
-real target because it exercises the same packet path the router already forwards
-on.
+This is not the first target. Passive visibility is useful, but it does not align
+with the hardware offload path in the same way as inline routed traffic does.
+The real first pass is routed inline mode, because that exercises the same path
+that the router actually forwards on.
 
-## 6. Suricata and ASK2 interaction points
+## 7. Interaction points and boundaries
 
-The integration points should be intentionally small:
+The ASK2/Suricata boundary should be intentionally small:
 
-1. Suricata configuration
-   - `service suricata interface ...`
-   - `address-group` and `port-group`
-   - `log eve ...`
-   - `update suricata`
-   - `restart suricata`
+- Suricata config remains native VyOS config under `service suricata`
+- flow handoff is controlled by the ASK2 flow install path
+- flow teardown happens on timeout, close, or policy invalidation
+- EVE logging remains the same Suricata logging model
+- ASK2 only acts on the flow subset the policy and inspection path explicitly
+  approves for hardware handling
 
-2. Flow decision and handoff
-   - Suricata identifies the flow it wants to treat as bulk/known-safe
-   - the router records the flow in the ASK2 flow table for the normal fast path
-   - the flow switches from software inspection to hardware forwarding
+## 8. Engineering constraints that matter
 
-3. Safe teardown
-   - flow timeout / close / NAT teardown removes the record and returns the flow
-     to the normal software path when required
+The following are real constraints for a safe implementation:
 
-4. Observability
-   - Suricata still emits EVE logs for whatever it chooses to inspect
-   - ASK2 provides the hardware-fastpath state and flow counters for the
-     offloaded subset
+- flow lifecycle must be clean and reversible
+- NAT/VLAN/PPPoE must be preserved correctly in the fast path
+- MTU and fragmentation limits must be respected
+- the fast path must never unconditionally bypass all traffic
+- logging and packet loss must remain observable and understandable
+- the design must remain fail-safe when the offload path is not available
 
-This keeps one source of truth for the service config and avoids inventing a
-second special-purpose control plane.
+The design is deliberately narrow: it is a controlled handoff after inspection,
+not a blanket replacement of the Suricata service model.
 
-## 7. What must be handled carefully
+## 9. Recommended implementation sequence
 
-The following are the real engineering gates, not purely design concerns:
+1. Configure a valid Suricata service using the native VyOS syntax.
+2. Validate `update suricata` and `restart suricata` on a normal routed path.
+3. Add a minimal safe-flow handoff from Suricata-approved flows into the ASK2
+   fast path.
+4. Keep all interface and rule configuration in the native `service suricata`
+   tree.
+5. Measure mixed elephant/mouse traffic with both the inspection and hardware
+   paths enabled.
+6. Expand only after the handoff is stable under real ruleset traffic.
 
-- Flow lifecycle: established flows must be removed cleanly on timeout or close
-- NAT/VLAN/PPPoE handling: the flow record is only useful if the hardware path
-  can safely carry the same tuple transformations the router already supports
-- MTU and fragmentation: the hardware offload path must stay inside the valid
-  packet envelope
-- Rule policy: the router must not promise that all traffic is bypassed; only the
-  flows that are verified safe may leave the inspection path
-- Logging and packet loss: Suricata must continue to emit useful EVE output for
-  the traffic that remains in software or for the early prefix before handoff
+## 10. Bottom line
 
-## 8. Recommended first implementation sequence
+This is a practical IDS/IPS design for the LS1046A: keep Suricata as the
+inspection and logging authority and use ASK2 only for the established traffic
+that has already passed the policy gate.
 
-1. Establish a valid Suricata service on the router using the upstream VyOS
-   syntax and command model.
-2. Validate normal `update suricata` and `restart suricata` behavior.
-3. Build a minimal flow-offload handoff based on known safe flows only.
-4. Keep the interface and rule configuration under the native `service suricata`
-   tree; avoid custom CLI or a separate rule parser.
-5. Measure a mixed elephant/mouse workload with Suricata running and the ASK2
-   path enabled.
-6. Expand only after the software/hardware handoff is stable under real ruleset
-   traffic.
-
-## 9. Bottom line
-
-The native VyOS Suricata configuration is already the right service abstraction:
-monitored interfaces, groups, EVE logs, and rule updates. The ASK2 contribution
-is not to replace this service, but to let the system use the hardware fast path
-for flows that have already been approved by the inspection process.
-
-That keeps the design compatible with the documented VyOS model, aligns with the
-shipping ASK2 flow-offload architecture, and gives a realistic path toward a
-usable IDS/IPS deployment on DPAA1 hardware without rewriting the service layer.
+That keeps the implementation compatible with the documented VyOS service model,
+uses the existing ASK2 flow-offload architecture, and avoids creating an
+unsupported second control plane.
