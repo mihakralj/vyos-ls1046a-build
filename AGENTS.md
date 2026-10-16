@@ -252,6 +252,7 @@ Abandoned 2026-04-03 (RC#31). Analysis: `plans/VPP-DPAA-PMD-VS-AFXDP.md`. Produc
 | `Error -ENOENT ... 'net.core.default_qdisc=fq'` | `CONFIG_NET_SCH_FQ` ended `=m`. Verify `10-networking.config` has `=y` post `stage-kernel.sh` AND `ci-setup-kernel.sh` seds `13-net-sched.config` to `=y` (vyos-build merge runs after ours, else overrides back) |
 | `sfp-xfi0: deferred probe pending` | SFP waits for PHY driver; resolves post-boot |
 | `can't get pinctrl, bus recovery not supported` | I2C pinctrl absent in DTB. Harmless |
+| `fsl-fman-port 1a86000.port: fman_port_probe: incorrect qman-channel-id` → `failed with error -22` @~0.9s | `1a86000`/`port@86000` = `fman0_oh_0x6`, an Offline-Host (OH) accelerator port. Upstream `qoriq-fman3-0.dtsi` OH nodes (0x2–0x7) carry NO `fsl,qman-channel-id` (only MAC TX ports get 0x800–0x807), so mainline fman-port driver rejects OH-without-channel with EINVAL. DTS/upstream-inherent, NOT from ASK/F-266/image. All 5 MAC ports (eth0–4) probe fine; no interface affected. Cosmetic |
 
 ## S11. Files
 

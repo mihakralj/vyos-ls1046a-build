@@ -1,40 +1,43 @@
 #!/usr/bin/env bash
 # testrig-compare.sh — ASK2 against the external "tuned ASK master" Mono DK benchmark (RESULTS.md,
-# armbian-ask-master-20261010): PDR, connection rate, latency and the kernel path, on the dell rig with
-# the ASK2 DUT .185. Their method: TRex PDR = highest rate with <= 0.5 % loss over both directions,
+# armbian-ask-master-20261010): PDR, connection rate, latency and the kernel path, on the generator rig with
+# the ASK2 DUT (ASK2_DUT, bin/testrig-env.sh). Their method: TRex PDR = highest rate with <= 0.5 % loss over both directions,
 # 8k sessions, the mean of 3 independent searches (+- max deviation); tsprobe NIC-timestamped latency at
 # idle and 10/50/90 % of PDR; 20k new connections/s plus 20k held, with and without NAT.
 #
-# Before: cold-boot the DUT, `DUT_HOST=192.168.1.185 bin/testrig-combo-matrix.sh setup`. Never while the
-# churn soak runs (same dells and DUT; this script refuses). The kpath section floods the kernel path and
+# Before: cold-boot the DUT, `DUT_HOST=<ASK2 DUT host> bin/testrig-combo-matrix.sh setup`. Never while the
+# churn soak runs (same generators and DUT; this script refuses). The kpath section floods the kernel path and
 # disengages/re-engages ASK on eth3/eth4 through the VyOS CLI; it runs last.
 #
 #   bin/testrig-compare.sh [pdr] [lat] [kpath] [cps]      (default: all four, in this order; cps last because
 #                                                         a connection storm is the hardest on the control plane)
 #   bin/testrig-compare-report.py <run dir>               (the results table)
 #
-# Output: /mnt/builds/ask2-review/oracle/compare-<date>-<time>/: summary.csv (one row per search set:
+# Output: $RIG_OUT/compare-<date>-<time>/: summary.csv (one row per search set:
 # label,size,n,mean_pps,maxdev_pct,gbit_l1,hw_share,rdrp_eth3,rdrp_eth4), the per-trial CSVs,
 # cps.jsonl, lat.jsonl, run.log. Env: SIZES ("64 570 1518 imix"), SESSIONS (8192), REPS (3), STEPS (10),
 # CPS_RATES ("5000 10000 20000"), CPS_SECS (30), CPS_HOLD (20000), LAT_COUNT (5000), LAT_LOADS
-# ("10 50 90"), LAT_SIZE (64), KPATH_MAXPPS (1000000), OUT_DIR.
+# ("10 50 90"), LAT_SIZE (64), KPATH_MAXPPS (1000000), OUT_DIR, FMREG (path of an FMan register reader;
+# without it the rdrp_eth3/rdrp_eth4 columns read 0).
 set -u
 cd "$(dirname "$0")/.."
+. bin/testrig-env.sh
+rig_require GEN1 GEN2 ASK2_DUT
 SIZES=${SIZES:-64 570 1518 imix}; SESSIONS=${SESSIONS:-8192}; REPS=${REPS:-3}; export STEPS=${STEPS:-10}
 CPS_RATES=${CPS_RATES:-5000 10000 20000}; CPS_SECS=${CPS_SECS:-30}; CPS_HOLD=${CPS_HOLD:-20000}
 LAT_COUNT=${LAT_COUNT:-5000}; LAT_LOADS=${LAT_LOADS:-10 50 90}; LAT_SIZE=${LAT_SIZE:-64}
 KPATH_MAXPPS=${KPATH_MAXPPS:-1000000}
-D=${OUT_DIR:-/mnt/builds/ask2-review/oracle/compare-$(date +%Y%m%d-%H%M)}; mkdir -p "$D"
-SSHO="-o BatchMode=yes -o ConnectTimeout=8"; KEY=$HOME/.ssh/vyos_key; IF=enp1s0f0np0
-D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
-DUT="ssh -n $SSHO -i $KEY vyos@192.168.1.185"
+D=${OUT_DIR:-$RIG_OUT/compare-$(date +%Y%m%d-%H%M)}; mkdir -p "$D"
+SSHO="-o BatchMode=yes -o ConnectTimeout=8 $RIG_SSHK"; IF=$GEN_IF
+D1="ssh -n $SSHO $GEN1"; D2="ssh -n $SSHO $GEN2"
+DUT="ssh -n $SSHO $ASK2_DUT"; FMREG=${FMREG:-}
 PG=bin/testrig-pktgen.sh
 exec > >(tee -a "$D/run.log") 2>&1
 say(){ echo "[$(date -u +%T)] $*"; }
 
 $D2 'cat ~/soak/STATUS 2>/dev/null' | grep -qE '^state=(ARMING|RUNNING|SETTLING)' &&
-  { echo "a churn soak is running on dell2 (~/soak/STATUS); not starting"; exit 1; }
-scp -q $SSHO -i $KEY /mnt/builds/ask2-review/oracle/fmreg.py vyos@192.168.1.185:/tmp/ || exit 1
+  { echo "a churn soak is running on gen2 (~/soak/STATUS); not starting"; exit 1; }
+if [ -n "$FMREG" ]; then scp -q $SSHO "$FMREG" "$ASK2_DUT:/tmp/fmreg.py" || exit 1; fi
 
 nat_on=0; off=0; srv=0; refl=0
 cleanup(){
@@ -49,7 +52,7 @@ trap cleanup EXIT
 cli(){ # VyOS config commands -> one commit; a script-template commit returns 0 even when it fails
   local out
   { echo '#!/bin/vbash'; echo 'source /opt/vyatta/etc/functions/script-template'; echo configure
-    printf '%s\n' "$@"; echo commit; echo exit; } | ssh $SSHO -i $KEY vyos@192.168.1.185 'cat > /tmp/compare-cli.sh'
+    printf '%s\n' "$@"; echo commit; echo exit; } | ssh $SSHO $ASK2_DUT 'cat > /tmp/compare-cli.sh'
   out=$($DUT 'vbash /tmp/compare-cli.sh 2>&1')
   if grep -qi 'commit failed' <<<"$out"; then echo "$out"; return 1; fi
 }
@@ -67,7 +70,8 @@ dut_snap(){ # -> "conntrack_count drops table_full cpu_busy_jiffies cpu_total_ji
   $DUT "c=\$(cat /proc/sys/net/netfilter/nf_conntrack_count); d=\$(sudo conntrack -S 2>/dev/null | tr ' ' '\n' | awk -F= '\$1==\"drop\"||\$1==\"insert_failed\"||\$1==\"early_drop\"{s+=\$2} END{print s+0}'); t=\$(sudo dmesg | grep -c 'nf_conntrack: table full'); read -r _ a b c2 i w x y z _ < /proc/stat; echo \$c \$d \$t \$((a+b+c2+x+y+z)) \$((a+b+c2+i+w+x+y+z))"
 }
 retrans(){ $1 'nstat -az TcpRetransSegs TcpOutSegs' | awk '/TcpRetransSegs/{r=$2} /TcpOutSegs/{o=$2} END{print r, o}'; }
-rdrp(){ # MAC RX FIFO overflow drops on eth3 (MAC9) and eth4 (MAC10), low 32 bits
+rdrp(){ # MAC RX FIFO overflow drops on eth3 (MAC9) and eth4 (MAC10), low 32 bits; 0 0 without FMREG
+  [ -n "$FMREG" ] || { echo "0 0"; return; }
   $DUT 'for o in 0xf0158 0xf2158; do sudo python3 /tmp/fmreg.py r $o | cut -d" " -f3; done' | paste -sd' '
 }
 
@@ -103,7 +107,7 @@ sec_pdr(){
 
 sec_cps(){
   local nat r b a rb ab out st
-  scp -q $SSHO bin/testrig-cps.py admin@192.168.1.112:/tmp/ && scp -q $SSHO bin/testrig-cps.py admin@192.168.1.113:/tmp/ || exit 1
+  scp -q $SSHO bin/testrig-cps.py "$GEN1:/tmp/" && scp -q $SSHO bin/testrig-cps.py "$GEN2:/tmp/" || exit 1
   $D2 'setsid nohup python3 /tmp/testrig-cps.py serve 8080 8 > /tmp/cps-serve.log 2>&1 < /dev/null &'; srv=1
   sleep 2
   for nat in 0 1; do
@@ -150,7 +154,7 @@ lat_run(){ # label pdr_total bg_env...: probes at idle and at LAT_LOADS % of pdr
   done
 }
 lat_setup(){
-  scp -q $SSHO bin/testrig-latprobe.py admin@192.168.1.112:/tmp/ && scp -q $SSHO bin/testrig-latprobe.py admin@192.168.1.113:/tmp/ || exit 1
+  scp -q $SSHO bin/testrig-latprobe.py "$GEN1:/tmp/" && scp -q $SSHO bin/testrig-latprobe.py "$GEN2:/tmp/" || exit 1
   $D2 "sudo setsid nohup python3 /tmp/testrig-latprobe.py reflect $IF 10.99.2.113 > /tmp/lat-refl.log 2>&1 < /dev/null &"; refl=1
   sleep 2
 }

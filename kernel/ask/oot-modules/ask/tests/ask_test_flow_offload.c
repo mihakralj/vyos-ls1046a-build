@@ -1061,38 +1061,102 @@ KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), 0);
 }
 
 /*
- * F-259: the 50-byte routed key = 46-byte dual lane + outer VID [46..47] +
- * PPPoE session ID [48..49], both big-endian, matching gec[6]/gec[7]. A plain
- * frame carries 0/0; the VID keeps only the 12 VID bits (KeyGen masks PCP/DEI).
+ * Full golden vectors for the production 50-byte dual-lane key. These pin
+ * both address lanes, the zero-filled unused family, transport ports, and
+ * the optional VLAN/PPPoE context.
  */
+static void ask_flow_offload_expect_l2_variants(
+	struct kunit *test, struct ask_flow_key *key,
+	const u8 expect[ASK_FE_KEY_SIZE_DUAL])
+{
+	u8 k[ASK_FE_KEY_SIZE_DUAL];
+	u8 expected[ASK_FE_KEY_SIZE_DUAL];
+
+	ask_fe_build_key_dual(key, k);
+	KUNIT_EXPECT_MEMEQ(test, k, expect, ASK_FE_KEY_SIZE_DUAL);
+
+	memcpy(expected, expect, sizeof(expected));
+	expected[48] = 0;
+	expected[49] = 0;
+	key->pppoe_sid = 0;
+	ask_fe_build_key_dual(key, k);
+	KUNIT_EXPECT_MEMEQ(test, k, expected, sizeof(expected));
+
+	memcpy(expected, expect, sizeof(expected));
+	expected[46] = 0;
+	expected[47] = 0;
+	key->vlan_ingress_vid = 0;
+	key->pppoe_sid = 0x1234;
+	ask_fe_build_key_dual(key, k);
+	KUNIT_EXPECT_MEMEQ(test, k, expected, sizeof(expected));
+
+	expected[48] = 0;
+	expected[49] = 0;
+	key->pppoe_sid = 0;
+	ask_fe_build_key_dual(key, k);
+	KUNIT_EXPECT_MEMEQ(test, k, expected, sizeof(expected));
+}
+
 static void ask_flow_offload_test_fe_key_l2_context(struct kunit *test)
 {
+	static const u8 expect_v4[ASK_FE_KEY_SIZE_DUAL] = {
+		0x40,                         /* family */
+		0x0a, 0x63, 0x32, 0x01,      /* IPv4 src */
+		0x0a, 0x63, 0x32, 0x0f,      /* IPv4 dst */
+		/* zero-filled IPv6 lanes */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		IPPROTO_TCP,                  /* protocol */
+		0x00, 0x16,                   /* source port 22 */
+		0xce, 0xa2,                   /* destination port */
+		0x00, 0x0a,                   /* VLAN ID, PCP/DEI masked */
+		0x12, 0x34,                   /* PPPoE session ID */
+	};
+	static const u8 expect_v6[ASK_FE_KEY_SIZE_DUAL] = {
+		0x60,                         /* family */
+		/* zero-filled IPv4 lanes */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, /* IPv6 src */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, /* IPv6 dst */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+		IPPROTO_TCP,                  /* protocol */
+		0x00, 0x16,                   /* source port 22 */
+		0xce, 0xa2,                   /* destination port */
+		0x00, 0x0a,                   /* VLAN ID, PCP/DEI masked */
+		0x12, 0x34,                   /* PPPoE session ID */
+	};
 struct ask_flow_key key = {
 	.l3_proto = ASK_FLOW_L3_IPV4,
 	.l4_proto = IPPROTO_TCP,
 	.sport = htons(22),
 	.dport = htons(0xcea2),
+	.vlan_ingress_vid = 0xf00a,
+	.pppoe_sid = 0x1234,
 	.src_ip = { 10, 99, 50, 1 },
 	.dst_ip = { 10, 99, 50, 15 },
 };
-u8 k[ASK_FE_KEY_SIZE_DUAL];
-int i;
 
 KUNIT_EXPECT_EQ(test, (int)ASK_FE_KEY_SIZE_DUAL, 50);
 
-ask_fe_build_key_dual(&key, k);
-KUNIT_EXPECT_EQ(test, k[0], (u8)ASK_FE_FAMILY_V4);
-KUNIT_EXPECT_EQ(test, k[41], (u8)IPPROTO_TCP);
-for (i = 46; i < 50; i++)
-	KUNIT_EXPECT_EQ(test, k[i], (u8)0);
+ask_flow_offload_expect_l2_variants(test, &key, expect_v4);
 
-key.vlan_ingress_vid = 0xf00a;	/* PCP/DEI bits must not reach the key */
+key.l3_proto = ASK_FLOW_L3_IPV6;
+key.src_ip[0] = 0x20;
+key.src_ip[1] = 0x01;
+key.src_ip[2] = 0x0d;
+key.src_ip[3] = 0xb8;
+key.src_ip[15] = 0x01;
+key.dst_ip[0] = 0x20;
+key.dst_ip[1] = 0x01;
+key.dst_ip[2] = 0x0d;
+key.dst_ip[3] = 0xb8;
+key.dst_ip[15] = 0x02;
+key.vlan_ingress_vid = 0xf00a;
 key.pppoe_sid = 0x1234;
-ask_fe_build_key_dual(&key, k);
-KUNIT_EXPECT_EQ(test, k[46], (u8)0x00);
-KUNIT_EXPECT_EQ(test, k[47], (u8)0x0a);
-KUNIT_EXPECT_EQ(test, k[48], (u8)0x12);
-KUNIT_EXPECT_EQ(test, k[49], (u8)0x34);
+ask_flow_offload_expect_l2_variants(test, &key, expect_v6);
 }
 
 static struct kunit_case ask_flow_offload_test_cases[] = {
