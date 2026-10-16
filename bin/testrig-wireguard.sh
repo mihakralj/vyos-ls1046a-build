@@ -38,52 +38,52 @@
 #   DIRS="up down bidir" STREAMS=4 DUR=30 bin/testrig-wireguard.sh run wg-v4
 #   MODE=udp LEN=1280 RATE=800M bin/testrig-wireguard.sh run wg-v4
 # Env: WG_NOTRACK=1 (outer UDP untracked by conntrack, experiment)
-#      DUT_KIND=ask2|vendor   (vendor = .106 OpenWrt; RIG_NS=n106 is implied)
+#      DUT_KIND=ask2|vendor   (vendor = OpenWrt NXP ASK; RIG_NS=$VENDOR_NS is implied). Hosts and key: bin/testrig-env.sh
 #      WG_PORT=eth4|eth3 (the DUT port that carries the encrypted leg; default eth4)
 #      REPS (repeat each cell/direction, summary mean/min/max/sd), DUT, DIRS, DUR, STEADY_FROM, STREAMS, WGMTU, OUTER=4|6, MODE=tcp|udp, LEN, RATE, OUT, KEEP
-# .106 needs a WireGuard kernel module built for its exact kernel; the OpenWrt feed kmod does not match
+# The vendor DUT needs a WireGuard kernel module built for its exact kernel; the OpenWrt feed kmod does not match
 # the vendor kernel hash, so `check` reports that and `run` refuses until one is installed.
 set -u
+. "$(dirname "$0")/testrig-env.sh"
 DUT_KIND=${DUT_KIND:-ask2}
-if [ "$DUT_KIND" = vendor ]; then DUT=${DUT:-root@192.168.1.106}; RIG_NS=${RIG_NS:-n106}
-else DUT=${DUT:-vyos@192.168.1.185}; RIG_NS=${RIG_NS:-}; fi
+DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
+if [ "$DUT_KIND" = vendor ]; then RIG_NS=${RIG_NS:-$VENDOR_NS}; else RIG_NS=${RIG_NS:-}; fi
 DIRS=${DIRS:-"up down"}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}; STREAMS=${STREAMS:-4}
 REPS=${REPS:-1}; WGMTU=${WGMTU:-1420}; OUTER=${OUTER:-4}; MODE=${MODE:-tcp}; LEN=${LEN:-1280}; RATE=${RATE:-1G}
-# RUN_ON=dell2: stored and run on dell2 (see testrig-offload-quick.sh): dell2 commands run locally, dell1 and
-# the DUT go over ssh with dell2's ~/.ssh/vyos_key, results default to ~/testrig/out.
+# RUN_ON=gen2 (alias dell2): run on gen2 (see testrig-offload-quick.sh): gen2 commands run locally, gen1 and
+# the DUT go over ssh.
 RUN_ON=${RUN_ON:-agent}
-if [ "$RUN_ON" = dell2 ]; then OUTDIR=${OUTDIR:-$HOME/testrig/out}; else OUTDIR=${OUTDIR:-/mnt/builds/ask2-review/oracle}; fi
+rig_require GEN1; [ "$RUN_ON" = dell2 ] || rig_require GEN2
+OUTDIR=${OUTDIR:-$RIG_OUT}
 OUT=${OUT:-$OUTDIR/wg-$(date +%Y%m%d-%H%M)-${DUT_KIND}.csv}
 J=${J:-$OUTDIR/json-wg}; mkdir -p "$J"
-SSHO="-o BatchMode=yes -o ConnectTimeout=8"
+SSHO="-o BatchMode=yes -o ConnectTimeout=8 $RIG_SSHK"
 NSX="sudo"; [ -n "$RIG_NS" ] && NSX="sudo ip netns exec $RIG_NS"   # always root; netns when RIG_NS is set
 
-dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO -i $HOME/.ssh/vyos_key $DUT "$c"; }
-duti(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh $SSHO -i $HOME/.ssh/vyos_key $DUT "$c"; }   # stdin passes through
+dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO $DUT "$c"; }
+duti(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh $SSHO $DUT "$c"; }   # stdin passes through
 WG_PORT=${WG_PORT:-eth4}
 # D1 = the dell on the PLAIN leg (iperf3 client), D2 = the dell that holds the far wg0 end (iperf3 server).
 # eth4 (default): D1 = dell1, D2 = dell2. eth3: the roles swap. The ceiling cell is bound to the literal dell1/dell2 pair.
 case $WG_PORT in
-  eth4) DA=192.168.1.112; DB=192.168.1.113; PORTSUF=""
+  eth4) DA=gen1; DB=gen2; PORTSUF=""
         P4=10.99.1.112; P6=fd99:1::112; PGW4=10.99.1.185; PGW6=fd99:1::185; PSUB4=10.99.1.0/24; PSUB6=fd99:1::/64
         TI4=10.99.200.113; TI6=fd99:200::113; O_DUT4=10.99.2.185; O_DUT6=fd99:2::185; O_T4=10.99.2.113; O_T6=fd99:2::113
         PLAIN_SRV4=10.99.2.113 ;;
-  eth3) DA=192.168.1.113; DB=192.168.1.112; PORTSUF="-eth3"
+  eth3) DA=gen2; DB=gen1; PORTSUF="-eth3"
         P4=10.99.2.113; P6=fd99:2::113; PGW4=10.99.2.185; PGW6=fd99:2::185; PSUB4=10.99.2.0/24; PSUB6=fd99:2::/64
         TI4=10.99.200.112; TI6=fd99:200::112; O_DUT4=10.99.1.185; O_DUT6=fd99:1::185; O_T4=10.99.1.112; O_T6=fd99:1::112
         PLAIN_SRV4=10.99.1.112 ;;
   *) echo "WG_PORT must be eth3 or eth4" >&2; exit 2 ;;
 esac
-rig(){   # rig <host> <ssh -n or empty>: the command prefix that runs a command on that dell
-  if [ "$RUN_ON" = dell2 ]; then
-    [ "$1" = 192.168.1.113 ] && { echo "bash -c"; return; }
-    echo "ssh $2 $SSHO -i $HOME/.ssh/vyos_key admin@$1"
-  else echo "ssh $2 $SSHO admin@$1"; fi
+rig(){   # rig gen1|gen2 <-n or empty>: the command prefix that runs a command on that generator
+  [ "$RUN_ON" = dell2 ] && [ "$1" = gen2 ] && { echo "bash -c"; return; }
+  if [ "$1" = gen1 ]; then echo "ssh ${2:-} $SSHO $GEN1"; else echo "ssh ${2:-} $SSHO $GEN2"; fi
 }
 D1=$(rig $DA -n); D2=$(rig $DB -n)
 D1I=$(rig $DA);   D2I=$(rig $DB)
-DD1=$(rig 192.168.1.112 -n); DD2=$(rig 192.168.1.113 -n)   # literal dell1/dell2 (ceiling cell)
-DD1I=$(rig 192.168.1.112);   DD2I=$(rig 192.168.1.113)
+DD1=$(rig gen1 -n); DD2=$(rig gen2 -n)   # literal gen1/gen2 (ceiling cell)
+DD1I=$(rig gen1);   DD2I=$(rig gen2)
 
 WGP=51820; WGPD=51821; IPERF_P=5231
 if [ "$OUTER" = 6 ]; then DUT_OUT=$O_DUT6; D2_OUT=$O_T6; EP="[$D2_OUT]:$WGP"; else DUT_OUT=$O_DUT4; D2_OUT=$O_T4; EP="$D2_OUT:$WGP"; fi
@@ -201,7 +201,7 @@ preflight(){
   out=$(dut 'sudo modprobe wireguard 2>/dev/null; sudo ip link add wgchk type wireguard 2>&1; sudo ip link del wgchk 2>/dev/null; which wg >/dev/null 2>&1 || echo NOWG')
   if [ -n "$out" ]; then
     echo "DUT $DUT ($DUT_KIND): no WireGuard: $out" >&2
-    [ "$DUT_KIND" = vendor ] && echo "  .106: feed kmod-wireguard targets kernel hash b33bbf..., the vendor kernel is a2a056...; apk refuses it. Build wireguard.ko against the vendor tree." >&2
+    [ "$DUT_KIND" = vendor ] && echo "  vendor DUT: the OpenWrt feed kmod-wireguard targets kernel hash b33bbf..., the vendor kernel is a2a056...; apk refuses it. Build wireguard.ko against the vendor tree." >&2
     return 1
   fi
   $D1 'which wg iperf3 >/dev/null' && $D2 'which wg iperf3 >/dev/null' || { echo "dells need wireguard-tools + iperf3" >&2; return 1; }
@@ -237,7 +237,7 @@ cpu_stats(){ awk '
 
 # PROF=1: per-CPU time, per-CPU softirq counts and per-thread CPU ticks (with the CPU each thread last ran on) at the
 # start and end of the steady window, written to $J/<cell>.prof; summarise with bin/wg-prof-summary.py.
-dut_prof(){ ssh $SSHO -i $HOME/.ssh/vyos_key $DUT sh -s -- "$1" "$2" <<'EOS'
+dut_prof(){ ssh $SSHO $DUT sh -s -- "$1" "$2" <<'EOS'
 sf=$1; w=$2
 snap(){ echo "== $(date +%s)"; grep '^cpu' /proc/stat; echo "-- softirqs"; cat /proc/softirqs; echo "-- interrupts"; cat /proc/interrupts
         echo "-- threads"; for f in /proc/[0-9]*/task/[0-9]*/stat; do cat $f 2>/dev/null; echo; done; echo "-- end"; }
@@ -267,13 +267,13 @@ run_cell(){
     for attempt in 1 2 3; do
     dut_stat=/tmp/wg-dut.stat
     if [ "$DUT_KIND" = vendor ]; then
-      ssh $SSHO -i $HOME/.ssh/vyos_key $DUT sh -s -- $STEADY_FROM $win > $dut_stat <<'EOS' &
+      ssh $SSHO $DUT sh -s -- $STEADY_FROM $win > $dut_stat <<'EOS' &
 sf=$1; w=$2
 snap(){ grep '^cpu' /proc/stat; for i in eth3 eth4; do echo "N $i $(cat /sys/class/net/$i/statistics/rx_packets)"; done; echo --; }
 sleep $sf; snap; sleep $w; snap
 EOS
     else
-      ssh $SSHO -i $HOME/.ssh/vyos_key $DUT bash -s -- $STEADY_FROM $win > $dut_stat <<'EOS' &
+      ssh $SSHO $DUT bash -s -- $STEADY_FROM $win > $dut_stat <<'EOS' &
 sf=$1; w=$2
 snap(){ grep '^cpu' /proc/stat; for i in eth3 eth4; do echo "N $i $(cat /sys/class/net/$i/statistics/rx_packets)"; done
         sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats 2>/dev/null | sed -n 's/.*record_dma=\(0x[0-9a-f]*\).*pkt_count=\([0-9]*\).*/E \1 \2/p'; echo --; }
