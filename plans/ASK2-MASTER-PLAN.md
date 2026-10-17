@@ -1,6 +1,6 @@
 # ASK2 Master Plan
 
-**Version 2.33.1 · 2026-10-16**
+**Version 2.33.2 · 2026-10-17**
 
 This is the single ASK2 task list and execution order. Feature plans own
 detailed designs and runbooks; `ASK2-VENDOR-PARITY.md` owns current measurement
@@ -48,7 +48,7 @@ deliberately wrong main-table gateway. F-267 used 512-byte coherent DMA-pool
 blocks, eight per page; 64 UDP streams had zero loss. These are smoke results,
 not full scale, soak or vendor-parity acceptance.
 
-**The per-port disable/re-enable gate passed on `1941` and `2012`; factory-default live-boot validation remains open before publication (see §4.1).** On `0357`, deleting both
+**The per-port disable/re-enable gate passed on `1941` and `2012`; factory-default live-boot validation remains an outstanding post-publication follow-up (see §4.1).** On `0357`, deleting both
 `interfaces ethernet eth3 offload ipv4` and `ipv6` and committing initially
 disarmed port `0x10`, but the nft hardware flowtable retained eth3/eth3.10.
 New traffic rearmed `0x10` and hardware-forwarded despite the absent CLI
@@ -226,8 +226,8 @@ programming recipes. Resolve contradictions before touching code.
 
 | Priority | Work | Dependency / exit |
 |---|---|---|
-| 1 | Verify the `2012` factory default on a fresh/live boot; then publication decision | Installed-image checks and per-port disable/re-enable passed on `2012`; do not overwrite the installed lab config |
-| 1a | Analyse the seven strict-mean FAIL cells and the partial NAT44 run | Repeat under the same alternating protocol; does not close feature parity |
+| 1 | Fresh/live-boot validation of the published `2012` factory default | Publication is complete; installed-image checks do not exercise first-boot config application; preserve the lab install |
+| 1a | Investigate the two persistent strict-mean FAIL cells and the bidirectional rerun delta | Same-session `0551`/`2149` A/B for the bidirectional delta; repeat vendor comparisons only after `.106` is restored to NXP ASK |
 | 2 | F-266 FIN/RST transit and NAT correctness; TTL safety | Must pass before connection-scale claims or new default-on safety paths |
 | 3 | Close existing-feature acceptance: PPPoE, bridge current-image repeat, resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
 | 4 | IPsec Tier 1 tunnel gate and SW baseline, then Tier 2 design/bring-up | Tier 1 substrate verified 2026-10-16 (CAAM built in, wins priority, self-tests pass, snoop set); full path remains required for full parity |
@@ -266,18 +266,25 @@ programming recipes. Resolve contradictions before touching code.
   `hardware-offload-delay 500`, and IPv4/IPv6 forward rule 10 → `offload`.
   This applies only to fresh installs and live boots; `add system image` keeps
   the existing config. The `2012` factory default still needs live-boot
-  validation; the run's publish job was skipped. On 2026-10-16 21:01 UTC,
+  validation. The initial `2012` CI run's publish job was skipped; the image
+  was later published as `2026.10.16-2149-rolling` after the `dpaa1`→`main`
+  merge. On 2026-10-16 21:01 UTC,
   the ISO and sidecar were deployed to lxc200, both `latest.iso` symlinks
   were verified against `2012` (matching sidecar hash, HTTP 200). The operator
   then upgraded `.185` to `2012`; `ask-check` passed 36/36 and the shipped
   default file matched the source, but the running config was preserved.
   A separate fresh/live boot must apply the factory config without operator
   commits; the installed-image checks do not close that gate.
-- **T-PARITY-10:** DONE 2026-10-16. 480/480 attempts, 17/24 PASS, 7 strict-mean
-  FAIL; the scoreboard is in `ASK2-VENDOR-PARITY.md`. Follow-up: repeat the
-  seven FAIL cells and the partial NAT44 run under the same protocol. Note
-  that `.106` now runs OPNsense, so the vendor side must be re-imaged before
-  any repeat. Preserve raw data; no jitter/outlier trimming.
+- **T-PARITY-10:** DONE on `0551` (480/480 attempts, 17/24 PASS) and rerun
+  ASK2-only on the `2149` code (240/240 hardware attempts). The `0551`
+  partial NAT44 run did not recur. Six strict-mean FAIL cells remain against
+  historical OpenWrt; VLAN-translate IPv4 3→4 and bidirectional VLAN↔port
+  IPv6 are the two material deficits in both campaigns. All eight
+  bidirectional means were lower on the unpaired `2149` rerun (0.03–0.34%);
+  cause is unresolved. Same-session `0551`/`2149` A/B is needed to distinguish
+  image effects from rig/day drift. `.106` now runs OPNsense; restore NXP ASK
+  before any refreshed vendor comparison. Preserve raw data; no jitter or
+  outlier trimming.
 - **Harness verdicts:** the bridge harnesses (`bin/testrig-bridge-*.sh`) now
   exit nonzero on any FAIL row, `pcd-snapshot` diff, leftover record or kernel
   error (`ASK2-BRIDGE-OFFLOAD-PLAN.md` §5.1). Earlier bridge results came from
@@ -286,9 +293,24 @@ programming recipes. Resolve contradictions before touching code.
 - **T-M6-SP3 / F-266:** establish and offload transit TCP; FIN and RST must
   reach conntrack while established data stays HW; test NAT44/NAT66 mapping
   survival and clean disarm snapshot. Keep `tcp_ctl_punt=0` until all pass.
-  No software idle reaper: it cannot distinguish closed and quiet flows.
+  The dormant feature is verified to make no PCD writes while off; the live
+  arm path and TCP parser attachment were readback-verified, but no
+  end-to-end transit result exists. Next test on the installed `2012` image:
+  cold boot, verify routed test hosts on eth3/eth4, capture an offloaded
+  short-TCP baseline with the parameter off, then enable the parameter and
+  repeat the 300-connection/20-KB close test. Confirm FIN/RST-driven conntrack
+  closure while bulk data remains hardware-forwarded; repeat through NAT44
+  and NAT66, then disable the parameter and require a clean PCD snapshot.
+  Use real transit endpoints on `10.99.1.0/24` and `10.99.2.0/24`; an earlier
+  attempted test had no transit traffic, empty ARP and zero flowtable counters,
+  so it did not exercise the feature. Do not use a flood for this gate. Keep
+  the parameter off unless all checks pass. No software idle reaper: it cannot
+  distinguish closed and quiet flows.
 - **A14:** TTL/hop-limit 0/1 must produce kernel ICMP time-exceeded;
-  neighbour/route changes must not forward stale; no MURAM/DDR leak.
+  neighbour/route changes must not forward stale; no MURAM/DDR leak. Run the
+  TTL/hop-limit boundary cases separately from F-266: test 0 and 1 for routed
+  IPv4 and IPv6, verify ICMP time-exceeded reaches the source, and check that
+  no stale hardware record remains after route/neighbour replacement.
 - **A2 / A13 / scale:** repeat 64-byte loss/rate and IMIX; connection rate
   with held sessions, 8,000-session bidirectional PDR, install rate and first
   insert latency; measure latency beside HW traffic. External 20k CPS and
@@ -511,7 +533,7 @@ be silently consumed.
 
 | Item | Remaining issue / next gate |
 |---|---|
-| F-266 / conntrack close | Default-off, unproven transit; §4.1 blocks scale acceptance |
+| F-266 / conntrack close | Default-off; parser arm/readback proven, transit and NAT closure untested; §4.1 blocks scale acceptance |
 | IPv6 fragment-ID reuse | Concurrent oversize flows can corrupt reassembly; keep limitation and `ipv6_hw_frag=0` opt-out visible; PPPoE plan |
 | Short non-IP bridge frames | Historical FE hit-path freeze; restrict bridge to v4/v6 until a new cold-boot de-risk gate passes |
 | 10G link-down invalidation | Bridge remote-carrier test is limited by the known carrier gap; do not claim it passed |
