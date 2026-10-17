@@ -1,6 +1,6 @@
 # ASK2 vs NXP ASK: current parity evidence
 
-**Updated 2026-10-16. Full feature parity is not reached.** The authoritative gap
+**Updated 2026-10-17. Full feature parity is not reached.** The authoritative gap
 inventory and task order are in [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md)
 §1.2/§3/§4. This file owns comparison evidence, not another implementation
 backlog. Completed and provisional single-run tables were moved verbatim to
@@ -152,6 +152,116 @@ Its raw data is `bidir-nat-v4-185-r05.csv` beside the summary artifacts.
 These results are for the `0551` ASK2 image listed above, not the later
 F-267/routing-optimization image or the uncommitted PBR next-hop fix. The
 campaign did not exercise policy routing.
+
+## ASK2 rerun on the `2149` release code (2026-10-17)
+
+The `2026.10.16-2149-rolling` release changed the ASK2 forwarding path after
+`0551` (`dfe66471`, `2946a038`, `e9bed698`, `ae98749c`), so the ASK2 side of
+the 10×10 campaign was repeated. The OpenWrt side cannot be repeated because
+`.106` now runs OPNsense.
+
+| Property | Contract |
+|---|---|
+| ASK2 | `.185`, `2026.10.16-2012-rolling` (same code as the `2149` release), `6.18.55-vyos`, up 2 h 51 m at start; no cold boot before the run |
+| Protocol | Same 24 cells, 30 s, iperf3 `-Z -P8`, steady from 10 s, `SAMPLE=0`, 10 rounds, same cell order; single board (no pairing) |
+| Harness | `testrig-offload-quick.sh` sha256 `c863d424…e1795d588`, byte-identical to the `0551` campaign copy |
+| Controller | dell2-local systemd unit `testrig-ask2-10x10-2149`, `ask2-campaign.py` (the `0551` controller with `.106` removed) |
+| Output | dell2 `~/testrig/campaigns/ask2-10x10-2149-20261017T0000Z/`; `compare.py` → `compare.csv`/`compare.json` |
+| Final state | 240/240 attempts, all HW, 0 issues; 2026-10-16 23:58:46 → 2026-10-17 02:51:20 UTC; `COMPLETE` |
+| Post-run | `ask-check` 36/36, no kernel errors; `.185` controls (addresses, MTU, link state) identical before and after |
+
+`Δ0551` is the new mean minus the `0551` `.185` mean. Its 95% interval is an
+unpaired bootstrap, because the runs are on different days. `ΔOWRT` uses the
+historical OpenWrt `.106` mean (all 10 HW runs). That makes the strict-mean
+verdict a cross-day, unpaired comparison: valid for spotting regressions, but
+weaker than the paired `0551` verdicts above.
+
+| Cell | ASK2 2149 mean (SD) | `0551` mean | Δ0551 [95% CI] | OWRT mean | ΔOWRT | Strict vs OWRT (`0551`) | OPNS mean |
+|---|---:|---:|---:|---:|---:|---|---:|
+| Routed IPv4, 3→4 | 9.2821 (0.0012) | 9.2822 | −0.0001 [−0.0011, +0.0009] | 9.2822 | −0.0001 | FAIL (PASS) | 9.283 |
+| Routed IPv6, 3→4 | 9.1543 (0.0018) | 9.1539 | +0.0004 [−0.0011, +0.0019] | 9.1545 | −0.0002 | FAIL (FAIL) | 9.229 |
+| NAT44, 3→4 | 9.2808 (0.0022) | 9.2811 | −0.0003 [−0.0021, +0.0015] | 9.2816 | −0.0008 | FAIL (FAIL) | 9.295 |
+| NAT66, 3→4 | 9.1540 (0.0013) | 9.1538 | +0.0002 [−0.0013, +0.0019] | 9.1540 | +0.0000 | PASS (FAIL) | 9.241 |
+| VLAN translate IPv4, 3→4 | 9.2585 (0.0026) | 9.2577 | +0.0008 [−0.0010, +0.0025] | 9.2707 | −0.0122 | FAIL (FAIL) | 9.284 |
+| VLAN translate IPv6, 3→4 | 9.1309 (0.0019) | 9.1307 | +0.0002 [−0.0012, +0.0016] | 9.1300 | +0.0009 | PASS (PASS) | 9.145 |
+| Routed IPv4, 4→3 | 9.2815 (0.0028) | 9.3202 | −0.0387 [−0.0758, −0.0033] | 9.2832 | −0.0017 | FAIL (PASS) | 9.308 |
+| Routed IPv6, 4→3 | 9.1668 (0.0381) | 9.1657 | +0.0011 [−0.0349, +0.0363] | 9.1539 | +0.0129 | PASS (PASS) | 9.179 |
+| NAT44, 4→3 | 9.2816 (0.0025) | 9.3187 | −0.0371 [−0.0746, −0.0008] | 9.2808 | +0.0008 | PASS (PASS) | 9.099 |
+| NAT66, 4→3 | 9.1798 (0.0518) | 9.1659 | +0.0139 [−0.0236, +0.0515] | 9.1552 | +0.0246 | PASS (PASS) | 9.254 |
+| VLAN translate IPv4, 4→3 | 9.2586 (0.0028) | 9.2836 | −0.0250 [−0.0613, +0.0004] | 9.2584 | +0.0002 | PASS (PASS) | 9.270 |
+| VLAN translate IPv6, 4→3 | 9.1421 (0.0379) | 9.1544 | −0.0123 [−0.0496, +0.0243] | 9.1314 | +0.0107 | PASS (PASS) | 9.201 |
+| VLAN→port IPv4 (strip), 3→4 | 9.2707 (0.0378) | 9.2590 | +0.0117 [−0.0017, +0.0361] | 9.2592 | +0.0115 | PASS (FAIL) | 9.270 |
+| Port→VLAN IPv4 (add), 4→3 | 9.2872 (0.0521) | 9.2864 | +0.0008 [−0.0373, +0.0393] | 9.2625 | +0.0247 | PASS (PASS) | 9.265 |
+| VLAN→port IPv6 (strip), 3→4 | 9.1430 (0.0384) | 9.1303 | +0.0127 [−0.0007, +0.0376] | 9.1428 | +0.0002 | PASS (FAIL) | 9.143 |
+| Port→VLAN IPv6 (add), 4→3 | 9.1468 (0.0381) | 9.1947 | −0.0479 [−0.0857, −0.0009] | 9.1339 | +0.0129 | PASS (PASS) | 9.151 |
+| Bidir routed IPv4 | 18.1172 (0.0439) | 18.1304 | −0.0132 [−0.0564, +0.0348] | 17.9932 | +0.1240 | PASS (PASS) | 15.935 |
+| Bidir routed IPv6 | 17.8366 (0.0473) | 17.8974 | −0.0608 [−0.0920, −0.0302] | 17.6136 | +0.2230 | PASS (PASS) | 15.667 |
+| Bidir NAT44 | 18.1252 (0.0224) | 18.1681 | −0.0429 [−0.0599, −0.0264] | 17.9047 | +0.2205 | PASS (PASS) | 16.166 |
+| Bidir NAT66 | 17.8530 (0.0389) | 17.9061 | −0.0531 [−0.0812, −0.0236] | 17.2940 | +0.5590 | PASS (PASS) | 15.998 |
+| Bidir VLAN translate IPv4 | 18.1476 (0.0269) | 18.1525 | −0.0049 [−0.0269, +0.0154] | 17.9906 | +0.1570 | PASS (PASS) | 13.309 |
+| Bidir VLAN translate IPv6 | 17.8518 (0.0386) | 17.9007 | −0.0489 [−0.0749, −0.0215] | 17.7910 | +0.0608 | PASS (PASS) | 14.110 |
+| Bidir VLAN↔port IPv4 | 12.9579 (0.1142) | 12.9983 | −0.0404 [−0.1311, +0.0513] | 12.9309 | +0.0270 | PASS (PASS) | 11.437 |
+| Bidir VLAN↔port IPv6 | 12.7095 (0.1485) | 12.7526 | −0.0431 [−0.1762, +0.0959] | 12.7994 | −0.0899 | FAIL (FAIL) | 11.389 |
+
+The OPNS column is the OPNsense campaign's `summary.csv` mean over HW runs.
+For the two round-10 SW cells it averages rounds 1–9 only, so it differs
+slightly from the redo-substituted three-way table below.
+
+**Reading.** No regression in offload: every run was HW, and the `0551`
+partial-offload anomaly (bidir NAT44 round 5) did not recur (10/10 HW).
+Busy stayed at 0.2–0.5%. The one-way steady levels are unchanged. Three
+one-way cells have an interval that excludes zero (routed IPv4 4→3, NAT44
+4→3 and port→VLAN IPv6); VLAN translate IPv4 4→3 just includes it. All four
+come from the known two-level throughput step. In those cells `0551` had
+2–4 runs on the upper step (≈9.40 v4 / 9.25 v6); this run had 0–1. For
+example, routed IPv4 4→3 was 9.279–9.288 in both campaigns, plus three
+`0551` runs at 9.401–9.410. That is a per-run TCP/MSS-step lottery, not a
+forwarding change.
+
+Every bidirectional cell is lower than `0551`, by 0.03–0.34%. The interval
+excludes zero for routed IPv6 (−0.34%), NAT44 (−0.24%), NAT66 (−0.30%) and
+VLAN translate IPv6 (−0.27%). The cause is not established. This campaign
+cannot separate an image change from rig drift (different day, unpaired, no
+cold boot). It needs a same-session A/B against the `0551` image before it
+is called either. All bidirectional cells except VLAN↔port IPv6 remain
+0.2–3.2% above the historical OpenWrt means, and 11.6–36.4% above OPNsense.
+
+Under the strict mean rule against the historical OpenWrt means, 6 of 24
+cells are FAIL (`0551`: 7). Routed IPv6 3→4, NAT44 3→4, VLAN translate
+IPv4 3→4 and bidir VLAN↔port IPv6 remain FAIL. NAT66 3→4 and VLAN→port
+IPv4/IPv6 strip now pass. Routed IPv4 3→4 (−0.0001) and routed IPv4 4→3
+(−0.0017, the step-lottery case) are new FAILs. Only VLAN translate IPv4
+3→4 (−0.13%) and bidir VLAN↔port IPv6 (−0.70%) are larger than ±0.01%.
+Both were already FAIL at `0551`, and both remain the cells to investigate.
+
+### Investigation: `0551` → `2149` bidirectional delta
+
+The post-`0551` code-delta review found no single steady-state forwarding
+change that explains all eight lower bidirectional means:
+
+- F-267 changes ehash record/context allocation from separate coherent
+  allocations to packed 512-byte DMA-pool blocks, and demotes per-insert logs.
+  It preserves record contents and synchronization, but changes DMA address
+  placement and page locality; a memory-locality effect remains possible.
+- `2946a038` changes next-hop recovery for direct-xmit flowtable tuples during
+  flow insertion/replacement, which changes the egress-MAC inputs used to
+  build FE actions. Correlate it across every direct-xmit cell; current
+  evidence does not show whether any resolved MAC or action bytes changed.
+- `e9bed698` changes generic-netlink authorization, and `ae98749c` closes the
+  flowtable admission race for administratively disabled ports. These are
+  control/admission-path changes rather than established per-packet work.
+- The factory-default change in `c84499e5` is not active in the installed
+  campaign configuration; the 2012 upgrade preserved the lab configuration.
+
+This triage does not establish causality. Run the eight bidirectional cells
+on `0551` and `2149` in the same session, alternating image order across at
+least three paired rounds, with matching cold-boot state and unchanged rig
+configuration. Record per-cell hardware ratio, delivered rate, DUT busy and
+softirq, retransmits, TCP/MSS mode, port counters, image/boot IDs and
+`fe_ehash_stats`. First confirm the observed two-level TCP/MSS rate step and
+separate any software-fallback run; do not compare a partial-HW result as a
+forwarding-rate sample. Keep VLAN-translate IPv4 3→4 and bidirectional
+VLAN↔port IPv6 as independent vendor-gap investigations.
 
 ## OPNsense `.106` 10-run campaign (2026-10-16)
 
@@ -390,7 +500,7 @@ routed and NAT reach ~16 Gbit/s, VLAN translate 13.3/14.1, and VLAN↔port
 
 | Surface | Current acceptance state | Required comparison |
 |---|---|---|
-| Routed v4/v6, NAT44/NAT66, VLAN translate/strip/add | Implemented; 10×10 complete, 7 strict-mean FAIL cells | Investigate the seven lower-mean cells; repeat small deficits under the same alternating protocol |
+| Routed v4/v6, NAT44/NAT66, VLAN translate/strip/add | Implemented; 10×10 complete (7 strict-mean FAIL at `0551`; 6 on the 2026-10-17 `2149`-code ASK2-only rerun vs historical OWRT) | Investigate VLAN translate IPv4 3→4 (−0.13%) and bidir VLAN↔port IPv6 (−0.70%), FAIL in both campaigns; same-session A/B of `0551` vs `2149` for the ~0.3% bidir decrease; repeat small deficits under the alternating protocol when a vendor board is available |
 | NAT over VLAN | Implemented; prior quick results historical | Same-conditions current-image combo |
 | PPPoE v4/v6 encap/decap, NAT over PPPoE | Implemented; prior runs not same-session | Both DUTs with vendor `pppoe10` up and dell1 RPS |
 | PPPoE fragmentation | Prior ASK2 intact delivery; vendor UDP-header corruption observed | Both DUTs, controls/warm/new/DF/PTB matrix |
