@@ -112,6 +112,20 @@ The soak harness also counts its STOP condition. Informational `tag_*` rows in
 b2 are still not scored. The current-image repeat must quote each script's exit
 status, not just its row table.
 
+**2026-10-17:** `testrig-bridge-b6.sh` on a cold boot of
+`2026.10.16-2012-rolling` (6.18.55-vyos) exited 0 with `== result: 0
+failure(s)`. All B6 and B7a rows passed, and the M1 takeover check passed.
+Offload ran 9.31 Gbit/s at 1.5% DUT busy against 2.92 Gbit/s at 30.2% in
+software. MURAM was at baseline, `pcd-snapshot diff` was clean, and there were
+0 kernel errors and 0 records left. `testrig-bridge-soak.sh` (defaults: 100
+cycles, `JOIN_EVERY=10`) also exited 0 with 0 failures. Records held steady
+at 66 learned and 2 base, MURAM stayed at 52922, there were 0 kernel errors
+and `pcd-snapshot diff` was clean. Background iperf3 ran at about 9.41 Gbit/s,
+dipping to about 7.4 Gbit/s during each eth3 leave/rejoin.
+`testrig-bridge-b2.sh` and `testrig-bridge-capacity.sh` still need repeating,
+but they require a `CONFIG_NET_ASK_DEBUG_FS` (kunit) image; the production
+image has no ASK debugfs.
+
 ## 6. B7b and mixed-role gate requirements
 
 The next implementation block is not a free-form extension of the basic bridge
