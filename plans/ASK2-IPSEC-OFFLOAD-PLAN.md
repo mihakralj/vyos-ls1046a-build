@@ -30,7 +30,7 @@ against the applied stack before selecting Tier 2 work.
 
 ## 2. Tier 1 — CAAM crypto acceleration (software XFRM, hardware math)
 
-No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change was needed); steps 4–5 are the remaining Tier 1 work.
+No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change was needed). Steps 4–5 were run on 2026-10-17; only reboot-clean remains open.
 
 1. **Kernel config — DONE (already present).** See §1. If the config is ever moved from `ci-setup-kernel.sh` into a fragment, keep `CRYPTO_API_QI`: it is built today and Tier 2 needs it.
 2. **Boot-time correctness gate — verified 2026-10-16 on `.185`, except QoS** (`arch/sec-caam.md` §4; these are silent-corruption footguns, not soft warnings):
@@ -54,9 +54,26 @@ No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change 
 4. **Confirm strongSwan uses it.** VyOS's existing `charon` + `kernel-netlink` + in-kernel `esp4`/`esp6` stack needs no VyOS-side change, because it already goes through the kernel Crypto API. Bring up a tunnel against a lab peer (dell1/dell2) with `aes256-sha256` and separately `aes256gcm16`.
 5. **Gate.**
    - Tunnel up, and the `ip -s xfrm state` byte counters climb.
-   - The CAAM controller debugfs counters (`caam-check` prints them as root) move with traffic. On 2026-10-16 the idle board showed `rq_dequeued 250` and zero for the encrypt/decrypt byte counters. Record which counters move for JR-driven ESP; the `ob_*`/`ib_*` protocol counters may stay 0 outside protocol-descriptor mode, so do not gate on them until this is known.
+   - The CAAM controller debugfs counters (`caam-check` prints them as root) move with traffic. On 2026-10-16 the idle board showed `rq_dequeued 250` and zero for the encrypt/decrypt byte counters. JR-driven ESP moves all of them, including `ob_*`/`ib_*` (verified 2026-10-17, see the result below).
    - Measure CPU load and throughput against a software-only baseline: the same tunnel and traffic with CAAM excluded. Exclude it by blacklisting the `-caam` drivers through `crypto_user`/`cryptomgr`, or by booting a kernel with CAAM disabled. Do not use a build that drops QI.
    - Rekey and reboot clean.
+
+   **Result, 2026-10-17 (`.185`, kernel 6.18-vyos, ASK2 dataplane idle on eth4):** steps 4–5 passed except reboot-clean.
+   - Setup: VyOS ships strongSwan 6.0.7 (`/usr/sbin/swanctl`; it is not on the `vyos` user's PATH). dell2 `.113` received strongSwan 6.1.0 (`strongswan-swanctl charon-systemd libstrongswan-standard-plugins`). The service is now disabled there, but the package is still installed. The runtime-only IKEv2 PSK tunnel ran `10.99.2.185/32[tcp/5299]` ↔ `10.99.2.113/32[tcp]` with IKE `aes256-sha256-modp2048`, `rekey_time=0`, initiated from dell2. No VyOS config was changed. Traffic was iperf3 from dell2, 4 streams × 20 s: fwd means dell2→DUT (the DUT decrypts) and rev (`-R`) means the DUT encrypts.
+   - Counter proof: the CAAM debugfs `rq_dequeued`, `ob_rq_encrypted`/`ib_rq_decrypted` and `ob_bytes_encrypted`/`ib_bytes_decrypted` counters all move in lockstep with `ip -s xfrm state`. For example, CBC rev showed XFRM out 1.77 GB against an `ob_bytes_encrypted` delta of 1.75 GB. JR interrupts `1720000.jr`/`1730000.jr` rose by about 1M per run. The concern that the `ob_*`/`ib_*` counters stay at 0 outside protocol-descriptor mode is therefore wrong; JR ESP increments them, so they can be used as gates.
+   - Software baseline method: load `crypto_user`. Use `CRYPTO_MSG_UPDATEALG` to drop `echainiv-authenc-hmac-sha256-cbc-aes-caam` and `rfc4106-gcm-aes-caam` to 100 and their `-caam-qi` variants to 90. Then instantiate `echainiv(authenc(hmac-sha256-lib,cbc-aes-ce))` (priority 3300) and `seqiv(rfc4106-gcm-aes-ce)` through an AF_ALG bind. The explicit instantiation is required because the demoted CAAM entry still matches by name, so the template is never built. Every CAAM counter stayed flat (±1) across both software runs. To restore: delete the three software instances (`CRYPTO_MSG_DELALG`, refcnt 1) and set the priorities back to 3000/2000. UPDATEALG had removed the dependent `seqiv(rfc4106-gcm-aes-caam)` instance, so re-instantiate it. Finally, diff the `/proc/crypto` driver/priority list against a pre-test snapshot; the result was identical. Any leftover software instance would silently beat CAAM until reboot.
+
+   | Suite | Engine | fwd Gbit/s (retx, DUT busy) | rev Gbit/s (retx, DUT busy) |
+   |---|---|---|---|
+   | AES-CBC-256 / HMAC-SHA2-256 | CAAM JR | 0.436 (32, 49.8%) | 0.614 (3, 51.9%) |
+   | AES-CBC-256 / HMAC-SHA2-256 | software (CE) | 0.515 (2374, 33.2%) | 0.330 (107, 32.8%) |
+   | AES-GCM-16-256 | CAAM JR | 0.380 (19, 55.4%) | 0.599 (2, 51.3%) |
+   | AES-GCM-16-256 | software (CE) | 0.575 (5873, 34.5%) | 0.429 (255, 35.7%) |
+   | AES-GCM-16-256 (after restore, with rekey) | CAAM JR | 0.372 (0, 57.3%) | 0.606 (2, 50.3%) |
+
+   - Interpretation: these runs are host-terminated, so they include the DUT TCP stack and iperf3 and are not a gateway-forwarding measurement. "DUT busy" is aggregate across four cores. JR CAAM gives 1.4–1.9× on encrypt but is slower than ARMv8-CE software on decrypt, and costs more CPU in both directions (about 1M JR completion IRQs per run). The per-request Job Ring round trip dominates at MTU-sized packets. Tier 1 is therefore a correctness and offload-plumbing proof, not a performance win, and the Tier 2 (FMan→SEC, no per-packet CPU) case stands.
+   - Rekey: `swanctl --rekey --child t1gcm` 8 s into a CAAM GCM run completed with 0 retransmits for that run. The new CHILD_SA was installed and stayed on CAAM.
+   - Not done: reboot-clean, a gateway-forwarding (routed, not host-terminated) measurement, IPv6, and the SEC QoS decode from step 2.
 
 **Measurement point after Tier 1:** publish crypto-use proof, throughput and CPU against software on the same rig. This can be an independent delivery, but the full-parity objective remains open until Tier 2 passes.
 

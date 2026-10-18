@@ -414,6 +414,10 @@ runbooks below are subordinate to this plan, not independent task priorities.
   not current acceptance.
 - **T-M6-A4:** force resource failures before allocation/publication; no
   partial cookie/record, no `in_hw`, flat MURAM and correct SW forwarding.
+  **2026-10-17 preflight:** the current production DUT reports `failslab=false`;
+  imported `flowtable_failslab.py` is CDX-only and is not ASK2 evidence. Run
+  this gate only with ASK2-specific fault injection or a suitable instrumented
+  image.
 - **T-M6-SP1/SP2:** reusable parser compiler/artifact and typed owned
   load/readback/attach/detach/free API. Capture instructions, entry points,
   lengths and relocations against live vendor readback. Reuse F-266's
@@ -426,6 +430,18 @@ runbooks below are subordinate to this plan, not independent task priorities.
 - **T-M6-SP4 / A8:** PPPoE current-image comparison, fragmentation, fallback,
   10,000 session cycles, pool exhaustion and soak; then implement missing
   over-VLAN and relay outcomes. Owner `ASK2-PPPOE-OFFLOAD-PLAN.md`.
+  **2026-10-17 preflight:** `pppoe10` is up and the same-image 23-cell smoke
+  battery has already passed; that does not close the 10,000-cycle,
+  fragmentation, exhaustion or soak gates. `.106` is currently OPNsense, so
+  the vendor comparison is unavailable.
+  **2026-10-17 ASK2-side fragmentation run** (`bin/testrig-pppoe-frag.py ask2`,
+  same image, fresh boot): both fitting controls and IPv4 DF-clear (cold and
+  warm) were delivered intact with DUT kernel rx at 0%, i.e. hardware
+  fragmentation. IPv4 DF-set and cold IPv6 punted with 6000 ICMP/PTB and
+  nothing delivered, which is correct. Warm IPv6 was hardware-fragmented and
+  delivered intact. After the run MURAM was at baseline, there were 0 kernel
+  errors and `ask-check` passed 36/36. The vendor half, 10,000-cycle,
+  exhaustion and soak gates remain open; no 10,000-cycle runner exists yet.
 - **T-M6-4 / IP1 / IP2 / A9:** audit the IPsec draft, verify Tier 1 Crypto
   API/CAAM, measure SW baseline, then build XFRM-owned ESP ehash→OH/SEC→TX
   with AES-CBC-SHA256 first. Tier 1 alone is not full vendor parity.
@@ -437,6 +453,18 @@ runbooks below are subordinate to this plan, not independent task priorities.
   snoop bits set. `caam-check` §5b now reports and gates this. Remaining
   Tier 1 work: the strongSwan tunnel gate with debugfs counter proof and the
   software-only baseline.
+  **2026-10-17 Tier 1 run:** strongSwan 6.0.7 is present on `.185`
+  (`/usr/sbin/swanctl`; not on the `vyos` user's PATH). strongSwan 6.1.0 was
+  installed on dell2 `.113` as the peer. Runtime-only IKEv2 PSK tunnels
+  `.185` eth4 ↔ `.113` (selectors narrowed to tcp/5299) carried CAAM-proven
+  ESP for both `aes256-sha256` and `aes256gcm16`. The CAAM `ob_*`/`ib_*`
+  counters move in lockstep with XFRM bytes. The software baseline used a
+  `crypto_user` priority demotion, a CHILD_SA rekey under load lost nothing,
+  the crypto registry was restored byte-exact, and the rig was cleaned up
+  (`ask-check` 36/36). Host-terminated numbers and method are in
+  `ASK2-IPSEC-OFFLOAD-PLAN.md` §2 step 5. JR CAAM wins encrypt (1.4–1.9×) but
+  loses decrypt to ARMv8-CE software at higher CPU, which strengthens the
+  Tier 2 case. Remaining Tier 1 gap: reboot-clean.
   Add/delete/update/lifetime/rekey, tunnel v4/v6, inbound/outbound, ESN,
   anti-replay, NAT-T, PMTU/fragments, peer interoperability, bad-auth/replay,
   reboot and disable fallback all gate `NETIF_F_HW_ESP`, advertised LAST.
@@ -445,6 +473,20 @@ runbooks below are subordinate to this plan, not independent task priorities.
 - **T-M6-2 / A7:** bridge B7b and current-image repeats; retain learned-MAC,
   filtering, ageing, move/STP/isolation and clean teardown. Do not reopen
   B0–B6 implementation. Owner `ASK2-BRIDGE-OFFLOAD-PLAN.md`.
+  **2026-10-17 current-image repeat:** `bin/testrig-bridge-b6.sh` passed with
+  exit 0 and `== result: 0 failure(s)` on a cold boot of
+  `2026.10.16-2012-rolling` (6.18.55-vyos). All B6 learned/static/move/ageing/
+  invalidation/family-mask rows and all B7a tagged/PCP/vif/VLAN-filtering rows
+  passed. Throughput dell1→dell2 (iperf3 -P 4) was 9.31 Gbit/s at 1.5% DUT busy
+  with `bridge_offload=1`, against 2.92 Gbit/s at 30.2% with it off. MURAM
+  returned to baseline, `pcd-snapshot diff` was clean, there were 0 kernel
+  errors and 0 leftover records. The DUT was rebooted afterwards.
+  `bin/testrig-bridge-soak.sh` (100 cycles, 64 learned MACs per cycle, eth3
+  rejoining every 10th) also passed with exit 0 and 0 failures. Records held
+  steady at 66/2, MURAM was flat at 52922, there were 0 kernel errors, and
+  background traffic ran at about 9.41 Gbit/s, dipping to about 7.4 on each
+  rejoin. B2 and capacity need a debugfs/kunit image, which the operator must
+  install; B7b is next.
 - **T-M6-DISPATCH:** design/test multi-table per-port classification before
   IRB, routed+bridge coexistence or routed+ESP; protocol precedence, miss
   delivery, owner/generation isolation and reversibility are mandatory.
