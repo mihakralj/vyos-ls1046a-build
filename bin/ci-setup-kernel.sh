@@ -2559,6 +2559,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
+# F-268 (T-M6-2 B7b, 2026-10-19): FMAN_PCD_VLANF_BRIDGE makes a VLAN pop/push
+# record a bridge record: no TTL/hop-limit decrement and ENQUEUE mtu 0xffff
+# (vendor fill_bridge_actions), on the routed 04 11 12 [42] 41 01 chain.
+# Bridge records without POP/PUSH or with L3 edits are refused. Records
+# without the flag are byte-identical. Dormant until ask.ko sets it. After F-267.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_268.py" 2>&1
+    echo "### fman_pcd.c: F-268 bridge VLAN pop/push records"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:

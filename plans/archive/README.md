@@ -28,6 +28,7 @@ For current state, see (in order of authority):
 | File | Topic | Why archived |
 |---|---|---|---|
 | `ASK2-MASTER-PLAN-2026-10-15.md` | Exact pre-consolidation master snapshot | Completed baselines, silicon investigations, closed milestones/defects and archive map removed from the live task list; open rewrite tasks folded into master v2.32.0 |
+| `ASK2-MASTER-PLAN-2026-10-19.md` | Exact pre-cleanup master snapshot (v2.33.2 plus the T-M8-3 closure) | Closed-gate evidence: per-port disable, factory default on `.145`/`2149`, 23-cell regression battery, T-PARITY-10 same-session A/B, harness verdicts, bridge B6/B7a repeat and soak, PPPoE ASK2-side fragmentation, IPsec Tier 1 run, T-M8-3 counters/`get-flow`/KUnit; live master v2.34.0 keeps one-line pointers |
 | `ASK2-REWRITE-PLAN.md` | Full final rewrite review, including vendor records and old measurement protocol | Duplicate live task queue retired 2026-10-15; pending tasks now in master, current method/evidence in `plans/ASK2-VENDOR-PARITY.md` |
 | `ASK2-VENDOR-PARITY-2026-10-15.md` | Exact provisional single-run scoreboard and F-266 setup evidence | Current paired campaign supersedes old tables; no final campaign result asserted by the cleanup |
 | `ASK2-BRIDGE-OFFLOAD-PLAN-2026-10-15.md` | Exact B0–B6/B7a design/result history and superseded alternatives | Active bridge plan reduced to B7b, mixed-role/multi-table/IRB gaps and current-image acceptance |

@@ -1,6 +1,6 @@
 # ASK2 bridge offload: current status and remaining work
 
-**2026-10-16 · dpaa1 · Status: working path exists; remaining work is scoped and explicit.**
+**2026-10-19 · dpaa1 · Status: working path exists; remaining work is scoped and explicit.**
 
 This document is written to be read by an independent reviewer without any
 previous context. It separates the bridge functionality that is already present
@@ -141,6 +141,66 @@ path. It must be done under explicit structural requirements:
 Before implementation, verify the current Qdrant facts, silicon state and live
 flow-key spec. Resolve record size, owned stats parameters, tag order and RX
 headroom before new feature work is considered accepted.
+
+### 6.1 B7b implementation (2026-10-19, code complete, silicon untested)
+
+The implementation is in place but has not yet been accepted on silicon.
+
+**Kernel emitter (fixup `F-268`, `bin/kernel-fixups/F_268.py`).** A new
+`FMAN_PCD_VLANF_BRIDGE` (bit 4) flag marks an L2/TX record as a bridge record.
+Such a record:
+
+- emits no TTL or hop-limit opcode (`0x21`/`0x29` are skipped);
+- writes ENQ mtu `0xffff`, as the vendor `fill_bridge_actions()` does;
+- is rejected with `-EINVAL` unless it carries the L2 terminal (DA, SA and
+  EtherType), exactly one of POP or PUSH, no NAT flags, no PPPoE flags and no
+  `egress_mtu`.
+
+The resulting chains reuse the routed primitives that were silicon-proven on
+2026-10-05:
+
+- pop: `04 11 12 41 01`, where STRIP_ALL_VLAN validates the ingress VID;
+- push: `04 11 12 42 41 01`, where INSERT_VLAN uses TCI = VID with PCP 0 and
+  TPID `0x8100`. Push relies on the RX headroom from patch 0217.
+
+In both chains INSERT_L2_HDR re-inserts the frame's own DA and SA.
+
+**ask.ko.** `ask_bridge_fe_action()` takes an action argument (`SAME`, `POP` or
+`PUSH`) and the bridge VID:
+
+- `SAME` produces the B7a record, unchanged byte for byte (KUnit pins this).
+- `POP` and `PUSH` move the record to the L2/TX terminal (`tx_fqid`,
+  `rx_fqid` 0).
+- A pop requires a key tagged with that VID. A push requires an untagged key.
+- Only IPv4 and IPv6 EtherTypes are accepted.
+
+`ask_bridge_flow_ok()` derives the action from the record's ingress tag and the
+egress port's untagged flag for the VLAN. A pop or push is refused unless the
+port's `ask.vlan_offload` is armed. Resync deletes a record whose action has
+changed.
+
+The forward hook sees only the egress tag, so admission enumerates the possible
+ingress forms:
+
+- A tagged egress frame whose TCI equals the ingress PVID (PCP 0) is installed
+  as an untagged ingress record (a push).
+- Any other egress frame is installed as-is. If it is untagged on a filtering
+  bridge whose egress PVID differs from the ingress PVID, a second, tagged
+  ingress form in the egress PVID is also tried (a pop).
+
+The live FDB check in each VLAN rejects wrong guesses. A guess that passes but
+is still wrong never hits and ages out.
+
+**Limitation.** Pop keys carry PCP 0, so prioritized tagged frames stay in
+software.
+
+**Remaining gates.**
+
+1. Silicon pop/push on `.149`: hit counters, wire captures for the tag and an
+   unchanged TTL, and correct ARP/non-IP fallback.
+2. Repeat the B7a, routed/NAT and PPPoE regressions.
+3. Toggle `vlan_offload` as a kill switch.
+4. Exercise PVID and untagged-flag churn, which must resync the records.
 
 ## 7. Safety, resource and fallback rules
 

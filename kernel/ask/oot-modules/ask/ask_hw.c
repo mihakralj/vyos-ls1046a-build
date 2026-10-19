@@ -1422,7 +1422,8 @@ int ask_hw_b2_l2_record(const char *iifname, const u8 *key,
 	dev_put(dev);
 	if (rc)
 		return rc;
-	rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(), &a);
+	rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(),
+				  ASK_BRIDGE_ACT_SAME, 0, &a);
 	if (rc)
 		return rc;
 	return fman_pcd_fe_flow_add(h->fman, port, &a);
@@ -1937,7 +1938,8 @@ static struct ask_hw_port *ask_hw_l2_port(struct ask_hw_pcd *h, u8 hw_port_id)
  * delete on a port that is no longer L2_DA is a no-op (its table and
  * records were freed with it).
  */
-int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add)
+int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
+		     u16 vid, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
@@ -1946,7 +1948,8 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add)
 	if (!h)
 		return add ? -ENODEV : 0;
 	if (add) {
-		rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(), &a);
+		rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(),
+					  act, vid, &a);
 		if (rc)
 			return rc;
 	} else {
