@@ -50,6 +50,29 @@ produces IPv6 PTB in the tested configuration. Keep MSS clamping recommended.
 The old single-session flap and fragmentation probes are archived successes,
 not substitutes for the unrun 10,000-cycle/exhaustion gates.
 
+The session-lifecycle driver is `bin/testrig-pppoe-churn.sh` (ASK2 only; run
+on gen2 with `RUN_ON=gen2`). Each cycle runs 100 Mbit/s TCP per flow for v4/v6
+encap and decap, requires hardware hits (per-record `pkt_count` growth in
+`fe_ehash_stats`) before the flap and again after the reconnect on the same
+flows, and requires every flow to deliver data. `MODE=client` flaps with
+`systemctl stop/start ppp@pppoe10`; `MODE=server` kills the dell1 pppd and
+lets the DUT redial (holdoff 30 s); `MODE=mix` (default) makes every
+`SERVER_EVERY`-th cycle server-side. Every `DRAIN_EVERY` cycles and at the
+end it deletes the test conntrack entries and requires records and MURAM
+`used` back at baseline, then a clean `pcd-snapshot diff`. The gate run is
+`CYCLES=10000` (about 30–130 s per cycle, several days) after a cold boot.
+The concentrator assigns a new DUT address per session (10.99.50.10, .11,
+.12, …); only `10.99.50.1` is stable.
+
+2026-10-18 warm smoke runs on `.185` (`2026.10.16-2012-rolling`, 6.18.55-vyos;
+validation of the driver, not gate evidence): one client cycle and one
+mixed client+server pair passed. Every flap produced a new SID (0x0003 → 0x0004
+→ 0x0005), `pppoe10` teardown dropped all records to 0 (decap included), the
+same TCP flows re-offloaded after reconnect, and MURAM `used` (52922), record
+count (0) and the PCD snapshot returned to baseline. Records from completed
+flows remain until their conntrack entries expire (28 before the cycle-2 flap),
+which is why the drain step deletes the test entries.
+
 ## Missing vendor features
 
 PPPoE-over-VLAN **hardware** forwarding, relay/pass-through and
