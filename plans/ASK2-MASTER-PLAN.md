@@ -48,7 +48,7 @@ deliberately wrong main-table gateway. F-267 used 512-byte coherent DMA-pool
 blocks, eight per page; 64 UDP streams had zero loss. These are smoke results,
 not full scale, soak or vendor-parity acceptance.
 
-**The per-port disable/re-enable gate passed on `1941` and `2012`; factory-default live-boot validation remains an outstanding post-publication follow-up (see §4.1).** On `0357`, deleting both
+**The per-port disable/re-enable gate passed on `1941` and `2012`; the factory-default fresh-install gate passed on 2026-10-19 on the published `2149` build of the `2012` sources (`.145`; scope note in §4.1).** On `0357`, deleting both
 `interfaces ethernet eth3 offload ipv4` and `ipv6` and committing initially
 disarmed port `0x10`, but the nft hardware flowtable retained eth3/eth3.10.
 New traffic rearmed `0x10` and hardware-forwarded despite the absent CLI
@@ -116,7 +116,8 @@ dataplane offload. The shipped `/opt/vyatta/etc/config.boot.default` matched
 `board/vyos-config/config.boot.dhcp` byte-for-byte (SHA-256
 `625b97561979eb9594518f026f45e585b459fa11cf367a5b240acd514b168ba9`).
 The active config still used the preserved lab flowtable `ASK1`, not factory
-`FT`; factory-default live-boot validation therefore remains untested.
+`FT`; factory-default validation was closed separately by the 2026-10-19
+fresh USB install on `.145` (§4.1).
 
 **Offload regression battery, same boot, 2026-10-16:**
 `bin/testrig-offload-quick.sh` covered all 20 base cells plus the 3 combo
@@ -226,8 +227,8 @@ programming recipes. Resolve contradictions before touching code.
 
 | Priority | Work | Dependency / exit |
 |---|---|---|
-| 1 | Fresh/live-boot validation of the published `2012` factory default | Publication is complete; installed-image checks do not exercise first-boot config application; preserve the lab install |
-| 1a | Investigate the two persistent strict-mean FAIL cells and the bidirectional rerun delta | Same-session `0551`/`2149` A/B for the bidirectional delta; repeat vendor comparisons only after `.106` is restored to NXP ASK |
+| ~~1~~ | ~~Fresh/live-boot validation of the published `2012` factory default~~ | DONE 2026-10-19, scope revised: fresh USB install of `2149` (the published build of the `2012` sources; build inputs identical) on `.145` (§4.1). Live (non-installed) boot not exercised; 1G forwarding on eth1 still uncabled |
+| 1a | Investigate the two persistent strict-mean FAIL cells and the bidirectional rerun delta | Same-session `0551`/`2149` A/B for the bidirectional delta; repeat vendor comparisons only after a vendor board is restored to NXP ASK (former `.106` now runs VyOS as `.145`) |
 | 2 | F-266 FIN/RST transit and NAT correctness; TTL safety | Must pass before connection-scale claims or new default-on safety paths |
 | 3 | Close existing-feature acceptance: PPPoE, bridge current-image repeat, resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
 | 4 | IPsec Tier 1 tunnel gate and SW baseline, then Tier 2 design/bring-up | Tier 1 substrate verified 2026-10-16 (CAAM built in, wins priority, self-tests pass, snoop set); full path remains required for full parity |
@@ -265,24 +266,59 @@ programming recipes. Resolve contradictions before touching code.
   eth0, the management port), a hardware flowtable `FT` over eth1–eth4 with
   `hardware-offload-delay 500`, and IPv4/IPv6 forward rule 10 → `offload`.
   This applies only to fresh installs and live boots; `add system image` keeps
-  the existing config. The `2012` factory default still needs live-boot
-  validation. The initial `2012` CI run's publish job was skipped; the image
+  the existing config. The factory-default gate was closed on 2026-10-19 by a
+  fresh install of the published `2149` build (below). The initial `2012` CI run's publish job was skipped; the image
   was later published as `2026.10.16-2149-rolling` after the `dpaa1`→`main`
   merge. On 2026-10-16 21:01 UTC,
   the ISO and sidecar were deployed to lxc200, both `latest.iso` symlinks
   were verified against `2012` (matching sidecar hash, HTTP 200). The operator
   then upgraded `.185` to `2012`; `ask-check` passed 36/36 and the shipped
   default file matched the source, but the running config was preserved.
-  A separate fresh/live boot must apply the factory config without operator
-  commits; the installed-image checks do not close that gate.
+  **Fresh-install gate PASSED 2026-10-19 (scope revised from `2012` to its
+  published build `2149`).** The gate named the `2012` image, but `2012`
+  (`38c40eaa`, CI run `38960509088`) was never the published artifact: its
+  publish job was skipped and the same sources were published as `2149`
+  (`bb37970e`, CI run `38971875832`; `latest.iso` and its sidecar point to
+  `2149`). `git diff --stat 38c40eaa bb37970e` touches only docs
+  (`*.md`, `.gitignore`) and the `version*.json` feeds: no kernel, board,
+  `data/`, `bin/` or workflow file changed, and `config.boot.dhcp` hashes to
+  `625b9756…8ba9` at both commits. `2012` itself was not installed fresh;
+  a live (non-installed) USB boot was not exercised. Test board: the former `.106` board
+  (now VyOS, DHCP `192.168.1.145` on eth2, SN MT-R01A-0326-00342), fresh USB
+  install of `2026.10.16-2149-rolling`, kernel `6.18.55-vyos`. The running
+  config was the unmodified factory default (shipped file SHA-256
+  `625b9756…8ba9` = `config.boot.dhcp`). The boot commit engaged all four
+  ports with no operator commits: `fe_arm` = `0x09 0x0d 0x10 0x11`, with
+  journal `genl: engaged port 0x09/0x0d family_mask=0x3` (the first eth1/eth2
+  1G-port engage evidence) and eth0 `0x0c` left disengaged. With temporary
+  eth3/eth4 addresses (DAC to GEN1/GEN2 netns `n106`), iperf3 -P 8 for 20 s
+  gave IPv4 9.20/9.20 Gbit/s (forward/reverse) and IPv6 9.08/9.07 Gbit/s.
+  The DUT CPU stayed about 99.5% idle, 26 flows showed `offloaded:1`, and no
+  new kernel error-level messages appeared. The test addresses were reverted
+  without saving. A reboot persistence test passed: a `/config` marker
+  survived, the board was reachable again in about 98 s, all four ports
+  re-armed, saved config was unchanged and `ask-check` was READY (43/46, 3 WARN
+  for uncabled eth0/eth1 and the DHCP-only ports). Caveats: eth1 has no cable,
+  so 1G forwarding through eth1 is untested; eth2 is engaged but carries only
+  management traffic. `.145` uses the legacy recovery NOR layout (FIT at
+  `kernel_addr=0x800000` in mtd5/mtd6, mtd4 zeroed). `firmware-check` now
+  recognizes it instead of failing. `ask-check` now covers all five ports and
+  treats uncabled or unaddressed ASK ports as WARN.
 - **T-PARITY-10:** DONE on `0551` (480/480 attempts, 17/24 PASS) and rerun
   ASK2-only on the `2149` code (240/240 hardware attempts). The `0551`
   partial NAT44 run did not recur. Six strict-mean FAIL cells remain against
   historical OpenWrt; VLAN-translate IPv4 3→4 and bidirectional VLAN↔port
   IPv6 are the two material deficits in both campaigns. All eight
   bidirectional means were lower on the unpaired `2149` rerun (0.03–0.34%);
-  cause is unresolved. Same-session `0551`/`2149` A/B is needed to distinguish
-  image effects from rig/day drift. `.106` now runs OPNsense; restore NXP ASK
+  **Resolved 2026-10-19 by a same-session A/B on `.185`**. The arms ran
+  `2012` (the same sources as `2149`), then `0551`, then `2012` again, with a
+  cold boot between arms. Each arm ran 5 rounds of 8 bidirectional cells
+  (120 attempts total), and every attempt was hardware-offloaded with no
+  issues. In every cell the 95% bootstrap CI of `0551` minus `2149` includes
+  zero; the deltas range from −0.56% to +0.47%. The two `2149` arms differed
+  from each other by up to 1.57% (unicast-v6) and 0.6% (VLAN↔port). There is
+  no image effect, and the earlier delta was rig or day drift.
+  Raw data is in `GEN2:~/testrig/campaigns/ab-bidir-0551-2149-20261019/`. The former `.106` vendor board now runs VyOS as `.145`; restore NXP ASK
   before any refreshed vendor comparison. Preserve raw data; no jitter or
   outlier trimming.
 - **Harness verdicts:** the bridge harnesses (`bin/testrig-bridge-*.sh`) now
@@ -375,7 +411,7 @@ from generic netlink (`ask_genl.c`), and tears down its CC state from
 `ask_hw.c`. It is therefore an active path in this checkout, not dead code.
 This conflicts with the later inline-FE VLAN silicon notes and the Phase 2
 deletion item. Do not remove or fold it until the code path, deployed image,
-and silicon evidence are reconciled; `.106` is currently OPNsense, so the
+and silicon evidence are reconciled; the former `.106` vendor board now runs VyOS (`.145`), so the
 vendor-ASK live cross-check is unavailable.
 
 - Physically remove dead `ask_vlan_cc.c` and Kbuild/genl/debugfs/stat proxies,
@@ -463,7 +499,7 @@ runbooks below are subordinate to this plan, not independent task priorities.
   over-VLAN and relay outcomes. Owner `ASK2-PPPOE-OFFLOAD-PLAN.md`.
   **2026-10-17 preflight:** `pppoe10` is up and the same-image 23-cell smoke
   battery has already passed; that does not close the 10,000-cycle,
-  fragmentation, exhaustion or soak gates. `.106` is currently OPNsense, so
+  fragmentation, exhaustion or soak gates. The former `.106` vendor board now runs VyOS (`.145`), so
   the vendor comparison is unavailable.
   **2026-10-17 ASK2-side fragmentation run** (`bin/testrig-pppoe-frag.py ask2`,
   same image, fresh boot): both fitting controls and IPv4 DF-clear (cold and
@@ -579,6 +615,63 @@ be silently consumed.
   per-record HW proof; validate production YNL `packets`, `bytes`,
   `last-seen-ns` against silicon, not debugfs alone. `max-flows=0` denotes
   no fixed limit, not unlimited resources.
+  **Counter half DONE 2026-10-19** (`.145`, `2149`, `6.18.55-vyos`, eth3→eth4
+  routed IPv4 UDP, iperf3 from GEN1 to GEN2 in netns `n106`, no flood).
+  Run 1: 200,013 packets sent and received (0 lost). After the stats sync,
+  YNL `dump-flows` reported 187,509 packets / 195,384,378 bytes,
+  bit-identical to the silicon FE ehash record (`pkt_count`/`pkt_bytes`).
+  That is 1042 B per 1000 B payload (L2 frame without FCS). The other 12,504
+  packets were forwarded in software before the 500 ms
+  `hardware-offload-delay` install. The iperf3 TCP control flows (5/645 and
+  7/752) and the zero-packet reverse UDP record also matched silicon exactly.
+  Run 2: 150,013 sent, 137,513 / 74,532,046 B in hardware (542 B per 500 B
+  payload), again identical after sync.
+  `get-info` reported `num-flows 4` and `max-flows 0`.
+  Semantics observed:
+  - YNL serves a polled snapshot, not a live read. Mid-run it lagged silicon
+    by up to ~2.3 s, and the first dump after a run can still show 0 for flows
+    whose only packets arrived in the last poll window.
+  - `last-seen-ns` is the `ktime_get_ns()` (monotonic) time of the poll that
+    observed growth, not a per-packet timestamp (`ask_flow.c`
+    `ask_flow_set_hw_stats()`). It advances during traffic and freezes after.
+    The silicon record `timestamp` field stays 0.
+  - Counters are per silicon record and reset when a record is re-created.
+  **Defect found by this test: production YNL `get-flow` always fails with
+  `-EINVAL`** (`2149` and earlier), even for a live flow ID copied from
+  `dump-flows`. The spec (`kernel/ask/uapi/ask.yaml`, `get-flow`,
+  `attribute-set: flow`, request `[id]`) makes `ynl` send a flat `id`.
+  The genl core parses every command with the one family policy
+  (`ask_top_policy`), and `ASK_FLOW_ATTR_ID` and `ASK_ATTR_INFO` are both
+  type 1. The flat ID therefore landed in `attrs[ASK_ATTR_INFO]`.
+  `ask_genl_get_flow_doit()` required the ID nested in `ASK_ATTR_FLOW` and
+  returned `-EINVAL`. Nothing in the repo called `get-flow`.
+  **Fix (2026-10-19, kernel side, not yet committed):** the spec is the
+  contract and the reply was already flat, so only the request parser
+  changed.
+  - New helper `ask_genl_get_flow_cookie()` (`ask_genl.c`, declared in
+    `include/ask_internal.h`). When slot 1 is present it re-parses the
+    message flat with `ask_flow_policy`, which enforces the u64 length.
+    Otherwise it still accepts the legacy `ASK_ATTR_FLOW` nest. With
+    neither, it returns `-EINVAL` with an extack message.
+  - `ask.yaml` is unchanged.
+  - Four new KUnit cases in `tests/ask_test_genl.c` (flat, nested, missing,
+    4-byte flat → `-ERANGE`). The suite now has 16 cases.
+  - Built at W=1 against the `2149` `6.18.55-vyos` headers: `ask_genl.c`
+    and `tests/ask_test_genl.c` compile with no new warnings, and `ask.ko`
+    links. `ask_kunit.ko` modpost needs a `CONFIG_KUNIT` kernel.
+  - The structural long-term fix is per-op policies: full `genl_ops` with
+    `.policy`/`.maxattr`, ideally generated from `ask.yaml` by ynl-gen-c.
+    This removes the shared top-level number space that caused the
+    collision.
+
+  **Remaining to close T-M8-3:**
+  - A `kunit: true` CI image, then on the board
+    `modprobe ask_kunit; cat /sys/kernel/debug/kunit/ask_genl/results`
+    (expect 16/16).
+  - A production image board check:
+    `ynl --family ask --do get-flow --json '{"id": N}'` with `N` from
+    `dump-flows`. Expect the same counters as the dump; an unknown ID gives
+    `-ENOENT`.
 - **Preview:** release notes/package plus an external operator validation
   cycle using `ASK-ISO-BUILD-AND-INSTALL.md`. Do not describe the historical
   M8 release as full feature-parity completion.

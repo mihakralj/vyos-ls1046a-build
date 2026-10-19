@@ -244,7 +244,79 @@ CLI; direct calls to `apply()` bypass it). Effort: small.
 
 ## 8. What was explicitly NOT changed
 
-No source, patch, config, or documentation file was modified. All findings reference
-`file:line` or patch names for follow-up. Suggested next step: pick items from §7,
-one variable per experiment per the silicon rules (AGENTS.md §S6-10.10), cold-boot before
-silicon measurements (§S6-10.9), and keep qdrant as the gate for any FMan register change (§S0).
+At the original review time, no source, patch, config, or documentation file
+was modified. All findings reference `file:line` or patch names for follow-up.
+Suggested next step: pick items from §7, one variable per experiment per the
+silicon rules (AGENTS.md §S6-10.10), cold-boot before silicon measurements
+(§S6-10.9), and keep qdrant as the gate for any FMan register change (§S0).
+
+## 9. Triage disposition (2026-10-18)
+
+This is a source-level triage, not a remediation pass. No finding below justifies
+a broad refactor or production behavior change without its own scoped task.
+
+### Stale, already covered, or not a current defect
+
+- **S-1 — stale finding.** Every current `ask_genl_small_ops` entry uses
+  `GENL_ADMIN_PERM` (`ask_genl.c:113-171`), not `GENL_UNS_ADMIN_PERM`.
+- **S-3 — false positive as phrased.** `pcd-snapshot` writes the KeyGen Action
+  Register to trigger indirect reads (`pcd-snapshot:158-170`, `ar_wait()`); the
+  writable mapping is required by the snapshot algorithm. A separate
+  passive-read-only tool would be a different task.
+- **A-4 — no unchecked access found.** `ask_vlan_cc.c` checks `port_id` against
+  `ARRAY_SIZE(ports)` before indexing in add, delete, teardown and stats paths;
+  `ask_hw_port_family` has bounds-checked get/set helpers.
+- **A-5 — no change warranted.** The parser belongs to the debugfs-only
+  developer surface; do not add more verbs there.
+- **A-6 — substantially covered.** `ask_test_flow_offload.c` already pins
+  golden IPv4/IPv6 dual-key vectors, VLAN/PPPoE context, and zero-filled lanes.
+  Any additional tests should target lifecycle/rebuild behavior, not duplicate
+  these byte-layout vectors.
+- **P-2/P-5 — retain the existing invariant.** Stats remain allocation-free
+  under the RCU read section; order-0 RX buffers remain mandatory.
+- **S-8 — low priority, validator present.** The CLI leaf restricts the delay
+  to `0-60000`; direct Python invocation can bypass that validator, but no
+  unsafe value is currently reachable through the supported CLI.
+
+### Valid follow-up, not a ship-stopper
+
+- **A-1/A-3:** maintainability work only. Do not split modules or move resolver
+  APIs during Phase 2 consolidation.
+- **A-2/P-3:** defer log demotion/scrubbing to a small, measured change; preserve
+  failure and warning visibility.
+- **P-1:** measure REPLACE latency percentiles before changing batching or the
+  pending poll interval. The lab rig was already running unrelated traffic, so
+  no measurement was started.
+- **P-4:** the WireGuard RPS A/B was not run because the shared rig was busy.
+- **P-6:** no VPP tuning before the current libxdp image and zero-copy RX gate
+  are operator-validated.
+- **S-2:** production config invokes only `family <mask>` via the fixed board
+  port map (`vyos-1x-031`); debugfs HIT/flow verbs are not reachable from that
+  commit path. Keep the helper boundary explicit and harden its developer-only
+  `--port`/flow arguments in a separate task.
+- **S-4:** source inspection confirms authentication wraps the `/mcp/` mount,
+  read-only mode restricts tool exposure/calls, and configuration resources
+  and `show configuration` use the shared redactor. This is not a deployed
+  end-to-end auth/prefix test.
+- **S-5:** do not apply `set -euo pipefail` mechanically to every script; first
+  audit traps, intentional best-effort commands and word-splitting contracts.
+- **S-6:** malformed YNL JSON/attributes can raise an uncaught `ValueError` in
+  `show_ask_offload.py`; low-severity operator-output hardening.
+- **S-7:** the WireGuard notrack rules are generated only from configured,
+  enabled listen ports, with an explicit opt-out and a conntrack dependency.
+  Preserve the documented firewall-state implication and add a focused
+  render/order test if this path changes.
+- **VyOS integration notes:** the hardcoded port map is board-specific and
+  currently matches the LS1046A mapping; partition-installer and MCP changes
+  remain separate high-blast-radius rebase audits.
+- **Patch metadata manifest:** useful process improvement, but not required
+  for current correctness; schedule after the active feature gates.
+
+### Phase 2 prerequisite discovered
+
+The proposed deletion of `ask_vlan_cc.c` is not safe against the current
+checkout: it remains in Kbuild and is called by the VLAN-edit flow replace
+path, generic-netlink stats path and port teardown path. This contradicts the
+Phase 2 plan's “dead code” premise and the later inline-FE VLAN notes. The
+master plan now records this stop condition. Resolve the active implementation
+and silicon/image discrepancy before deleting or folding this code.
