@@ -214,7 +214,8 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 	 * NAT/PAT are implemented and always advertised. VLAN is also
 	 * silicon-validated (CC+HMTD) but its runtime gate defaults OFF, so the
 	 * capability bit is absent until the operator explicitly arms it.
-	 * Bridge/multicast/IPsec remain unadvertised.
+	 * Bridge follows the same gate model (T-M6-2); multicast/IPsec remain
+	 * unadvertised.
 	 *
 	 * On a live engaged DUT the gate may already be armed by the boot
 	 * config, so compute the expected mask from the same predicate the
@@ -227,6 +228,9 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 
 		if (ask_hw_vlan_offload_armed())
 			exp_caps |= ASK_CAP_VLAN;
+		/* T-M6-2: bridge is advertised under the same gate model. */
+		if (ask_hw_bridge_offload_armed())
+			exp_caps |= ASK_CAP_BRIDGE;
 		KUNIT_EXPECT_EQ(test,
 				nla_get_u64(attrs[ASK_INFO_ATTR_CAPABILITIES]),
 				exp_caps);
