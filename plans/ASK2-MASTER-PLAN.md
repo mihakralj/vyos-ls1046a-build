@@ -668,6 +668,10 @@ be silently consumed.
   - A `kunit: true` CI image, then on the board
     `modprobe ask_kunit; cat /sys/kernel/debug/kunit/ask_genl/results`
     (expect 16/16).
+    - Run `39278201984` failed at modpost because the bridge suite calls
+      `ask_bridge_key`, which lacked an export from `ask.ko`. Added an
+      `ASK_KUNIT_EXPORTS`-guarded export, preserving production exports.
+      Both modules link against that run's `6.18.57-vyos` KUnit headers.
   - ~~Production image board check~~ **PASSED 2026-10-19** on
     `2026.10.19-1504-rolling` (6.18.57-vyos, run 39274661356).
     - On `.185`, during a `testrig-offload-quick.sh unicast-v4` run
