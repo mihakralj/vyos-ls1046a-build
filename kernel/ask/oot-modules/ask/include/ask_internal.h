@@ -63,6 +63,11 @@ struct ask_genl_dump_ctx;
 int ask_genl_get_info_fill(struct sk_buff *skb);
 int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f);
 int ask_genl_dump_one_cb(struct ask_flow *f, void *arg);
+struct nlmsghdr;
+struct nlattr;
+struct netlink_ext_ack;
+int ask_genl_get_flow_cookie(const struct nlmsghdr *nlh, struct nlattr **attrs,
+			     u64 *cookie, struct netlink_ext_ack *extack);
 int ask_genl_eopnotsupp_doit(struct sk_buff *skb, struct genl_info *info);
 int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
        struct netlink_callback *cb);
