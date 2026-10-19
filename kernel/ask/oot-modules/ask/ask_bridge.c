@@ -157,6 +157,9 @@ void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
 	put_unaligned_be16(tci, key + ASK_BRIDGE_K_TCI);
 	memcpy(key + ASK_BRIDGE_K_ET, &eth_type, sizeof(eth_type));
 }
+#ifdef ASK_KUNIT_EXPORTS
+EXPORT_SYMBOL_GPL(ask_bridge_key);
+#endif
 
 /*
  * One bridge flow -> one FE record on the ingress port's L2_DA table.
