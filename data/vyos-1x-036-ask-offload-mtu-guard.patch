@@ -1,10 +1,10 @@
-
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 74fa59c..6335a91 100755
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -56,6 +56,14 @@
- from vyos import airbag
- airbag.enable()
+@@ -65,6 +65,14 @@ def cli_path(option_path: str) -> str:
+     """ Undo key mangling of a dotted option path for user-facing messages """
+     return option_path.replace('.', ' ').replace('_', '-')
  
 +# ASK2 FMan FE offload MTU bounds on LS1046A. F-222 reverts F-203's
 +# fragmentation-prone order-1 RX buffers to the mainline-proven order-0 4 KiB
@@ -17,7 +17,7 @@ diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_eth
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """
      Return list of blocked options if interface is a bond member
-@@ -315,6 +319,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -410,6 +418,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
              raise ConfigError(
                  f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
              )
