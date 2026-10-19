@@ -72,6 +72,8 @@ int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
        struct netlink_callback *cb);
 int ask_genl_get_info_fill(struct sk_buff *skb);
 int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f);
+int ask_genl_get_flow_cookie(const struct nlmsghdr *nlh, struct nlattr **attrs,
+			     u64 *cookie, struct netlink_ext_ack *extack);
 
 /*
  * Dump context: cb->args[0] is the index of the next flow to emit (we
@@ -742,13 +744,61 @@ cb->args[0] = ctx.seen;
 return skb->len;
 }
 
+/*
+ * Extract the GET_FLOW cookie from a request.
+ *
+ * ask.yaml declares get-flow on the `flow` attribute set with a flat
+ * request [id], so `ynl --do get-flow --json '{"id": N}'` sends
+ * ASK_FLOW_ATTR_ID directly after the genl header (same flat layout as the
+ * reply and as every dump-flows message). The family registers one
+ * top-level policy for every command (ask_top_policy), so the genl core
+ * parsed that attribute with ASK_ATTR_* numbering: ASK_FLOW_ATTR_ID and
+ * ASK_ATTR_INFO share value 1, and attrs[1] is the flat id validated as an
+ * opaque nest. Re-parse the message with the flow policy to validate it as
+ * a u64. The legacy request with the id nested in ASK_ATTR_FLOW is still
+ * accepted; attrs[ASK_ATTR_FLOW] is checked only when no flat id is present,
+ * so the two encodings never read the same attribute.
+ *
+ * Non-static for the kunit suite (tests/ask_test_genl.c).
+ */
+int ask_genl_get_flow_cookie(const struct nlmsghdr *nlh, struct nlattr **attrs,
+			     u64 *cookie, struct netlink_ext_ack *extack)
+{
+	struct nlattr *flow_tb[ASK_FLOW_ATTR_MAX + 1];
+	int rc;
+
+	if (!nlh || !attrs || !cookie)
+		return -EINVAL;
+
+	if (attrs[ASK_FLOW_ATTR_ID]) {
+		rc = nlmsg_parse_deprecated(nlh, GENL_HDRLEN, flow_tb,
+					    ASK_FLOW_ATTR_MAX,
+					    ask_flow_policy, extack);
+	} else if (attrs[ASK_ATTR_FLOW]) {
+		rc = nla_parse_nested(flow_tb, ASK_FLOW_ATTR_MAX,
+				      attrs[ASK_ATTR_FLOW], ask_flow_policy,
+				      extack);
+	} else {
+		NL_SET_ERR_MSG(extack, "get-flow requires a flow id");
+		return -EINVAL;
+	}
+	if (rc)
+		return rc;
+
+	if (!flow_tb[ASK_FLOW_ATTR_ID]) {
+		NL_SET_ERR_MSG(extack, "get-flow requires a flow id");
+		return -EINVAL;
+	}
+	*cookie = nla_get_u64(flow_tb[ASK_FLOW_ATTR_ID]);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ask_genl_get_flow_cookie);
+
 static int ask_genl_get_flow_doit(struct sk_buff *skb, struct genl_info *info)
 {
 struct ask_flow_table *t = ask_flow_default_table();
 struct ask_flow *f;
 struct sk_buff *rep;
-struct nlattr *flow_attr, *cookie_attr;
-struct nlattr *flow_tb[ASK_FLOW_ATTR_MAX + 1];
 u64 cookie;
 void *hdr;
 int rc;
@@ -756,19 +806,10 @@ int rc;
 if (!t)
 return -ENOENT;
 
-flow_attr = info->attrs[ASK_ATTR_FLOW];
-if (!flow_attr)
-return -EINVAL;
-
-rc = nla_parse_nested(flow_tb, ASK_FLOW_ATTR_MAX, flow_attr,
-      ask_flow_policy, info->extack);
+rc = ask_genl_get_flow_cookie(info->nlhdr, info->attrs, &cookie,
+      info->extack);
 if (rc)
 return rc;
-
-cookie_attr = flow_tb[ASK_FLOW_ATTR_ID];
-if (!cookie_attr)
-return -EINVAL;
-cookie = nla_get_u64(cookie_attr);
 
 rep = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 if (!rep)
