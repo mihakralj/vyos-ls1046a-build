@@ -11,7 +11,8 @@
 #   - Boot firmware: TF-A (BL31), running U-Boot version injected into /chosen,
 #     and on-flash U-Boot in mtd1
 #   - Recovery OS firmware version: extracted from /etc/firmware/version in
-#     the recovery kernel/initramfs for both NOR (active) and eMMC (inactive)
+#     the recovery kernel/initramfs for both NOR (active) and eMMC (inactive);
+#     older boards carry an unversioned FIT at U-Boot ${kernel_addr} instead
 #   - eMMC on-flash firmware: TF-A, U-Boot, FMan microcode, and Recovery OS
 #     in the reserved 32 MiB bootloader region
 #   - QSPI NOR partition map (/proc/mtd) with partition content fingerprints
@@ -130,6 +131,36 @@ content_sniff() {
         27051956*)  echo "U-Boot legacy uImage" ;;
         *)          echo "unrecognized (first bytes: ${hex:0:16})" ;;
     esac
+}
+
+# Older Mono NOR layout: `run recovery` reads a FIT ("Kernel fitImage for Mono
+# Recovery Linux/...") from U-Boot ${kernel_addr} (0x800000, inside the DT
+# "backup" partition); the FIT embeds its own DTB, recovery-dtb stays blank and
+# kernel-initramfs holds the FIT tail. Sets LEGACY_FIT_DESC / LEGACY_FIT_LOC.
+LEGACY_FIT_DESC=''
+LEGACY_FIT_LOC=''
+legacy_fit_probe() {
+    local addr dec d off size rel hex
+    command -v fw_printenv >/dev/null 2>&1 || return 1
+    addr=$(fw_printenv -n kernel_addr 2>/dev/null) || return 1
+    [ -n "$addr" ] || return 1
+    dec=$(( addr )) 2>/dev/null || return 1
+    for d in /sys/class/mtd/mtd[0-9]*; do
+        [ -r "$d/offset" ] || continue
+        off=$(cat "$d/offset"); size=$(cat "$d/size")
+        if [ "$dec" -ge "$off" ] && [ "$dec" -lt $(( off + size )) ]; then
+            rel=$(( dec - off ))
+            hex=$(dd if="/dev/${d##*/}" bs=4096 count=1 skip="$rel" iflag=skip_bytes 2>/dev/null \
+                  | od -An -tx1 -N4 | tr -d ' \n')
+            [ "$hex" = "d00dfeed" ] || return 1
+            LEGACY_FIT_DESC=$(dd if="/dev/${d##*/}" bs=4096 count=1 skip="$rel" iflag=skip_bytes 2>/dev/null \
+                  | tr -c '[:print:]' '\n' | grep -m1 -E 'fitImage|Recovery' || true)
+            [ -n "$LEGACY_FIT_DESC" ] || return 1
+            LEGACY_FIT_LOC=$(printf '0x%x (%s+0x%x)' "$dec" "$(cat "$d/name")" "$rel")
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Extract etc/firmware/version from recovery image
@@ -290,6 +321,9 @@ if [ "$IS_ROOT" = "1" ]; then
 
     if [ -n "$NOR_REC_VER" ]; then
         ok "NOR (active): Mono Gateway Firmware v$NOR_REC_VER"
+    elif legacy_fit_probe; then
+        ok "NOR (active): legacy FIT recovery \"$LEGACY_FIT_DESC\" at kernel_addr $LEGACY_FIT_LOC"
+        note "older Mono firmware layout: no version string; DTB is inside the FIT"
     else
         fail "NOR (active): recovery OS firmware version not found"
         mark_fail
@@ -418,13 +452,19 @@ if [ "$IS_ROOT" = "1" ] && [ -e /dev/mtd0 ]; then
                         ok "$dev ($name): valid FDT${rc_compat:+ (compatible: $rc_compat)}"
                         ;;
                     *)
-                        warn "$dev ($name): FDT magic d00dfeed absent — recovery DTB missing/corrupt"
+                        if [ -n "$LEGACY_FIT_DESC" ]; then
+                            note "$dev ($name): $(content_sniff "$hex") — unused by the legacy FIT layout"
+                        else
+                            warn "$dev ($name): FDT magic d00dfeed absent — recovery DTB missing/corrupt"
+                        fi
                         ;;
                 esac
                 ;;
             kernel-initramfs)
                 if [ -n "$NOR_REC_VER" ]; then
                     ok "$dev ($name): Recovery OS (v$NOR_REC_VER)"
+                elif [ -n "$LEGACY_FIT_DESC" ]; then
+                    note "$dev ($name): tail of the legacy FIT recovery image at $LEGACY_FIT_LOC"
                 else
                     ok "$dev ($name): $(content_sniff "$hex") — recovery kernel (\`run recovery\` in U-Boot)"
                 fi
