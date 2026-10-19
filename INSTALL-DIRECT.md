@@ -1,11 +1,13 @@
 # Install VyOS on Mono Gateway without USB (console-only)
 
-> **STATUS: EXPERIMENTAL, NOT YET VALIDATED ON HARDWARE.**
+> **STATUS: EXPERIMENTAL; RECOVERY DOWNLOAD AND EMMC WRITE VERIFIED.**
 > This guide is published so testers can try it and report back. Every step ends with a **checkpoint**: if the output does not match, stop and file a report (template at the bottom) instead of improvising.
+>
+> Hardware progress, 2026-10-19: Recovery DHCP, ISO digest verification, and the Step 2 eMMC write/read-back passed with `2026.10.16-2149-rolling`. Live boot and installation (Steps 3-6) remain unvalidated.
 
 ## Overview
 
-This installs the published VyOS LS1046A ISO onto a Mono Gateway that currently runs OPNsense, using **only the serial console and the ability to power-cycle the board**. No USB stick, no DIP switch changes, no PC-side imaging.
+This installs the published VyOS LS1046A ISO onto a Mono Gateway that currently runs OPNsense/OpenWrt, using **only the serial console and the ability to power-cycle the board**. No USB stick, no DIP switch changes, no PC-side imaging.
 
 | You need | Why |
 |----------|-----|
@@ -14,13 +16,15 @@ This installs the published VyOS LS1046A ISO onto a Mono Gateway that currently 
 | Ethernet cable with internet on one copper port (eth0 to eth2) | Recovery Linux downloads the ISO |
 | DIP switch already on **NOR** (RIGHT) | Gate 0 verifies this; you cannot continue without it |
 
-**What gets destroyed:** everything on the eMMC (OPNsense and its config). U-Boot, its environment and recovery Linux live in NOR flash and are not touched until VyOS writes its own `bootcmd` at the end.
+**Keep the DIP switch on NOR throughout this procedure.** Use only the tools already present in Recovery Linux and the board's U-Boot console; no extra recovery binaries or packages are required.
+
+**What gets destroyed:** everything on the eMMC (the existing OPNsense/OpenWrt installation, its config, and the eMMC boot firmware region). NOR U-Boot, its environment and recovery Linux are not touched until the VyOS installer writes its boot environment at the end. Step 3 uses temporary U-Boot settings, not `saveenv`.
 
 ---
 
 ## How it works
 
-1. **The board boots from NOR.** OPNsense's official install procedure ends with the DIP switch on NOR, with `bootcmd` set to `run opnsense || run recovery`. Because U-Boot and recovery Linux live in NOR, wiping the eMMC cannot brick the board.
+1. **The board must boot from NOR.** The saved boot command depends on the existing OPNsense/OpenWrt installation and firmware; it does not identify the boot source. Confirm NOR in Gate 0. Wiping the eMMC then leaves NOR U-Boot and recovery Linux available.
 2. **Recovery Linux can download.** It is reached with `run recovery` and has `udhcpc`, a full `curl`, `dd`, `sha256sum` and a RAM root of about 3.8 GB, enough for the roughly 571 MiB ISO.
 3. **The ISO carries its own partition table.** The release ISO is hybrid: an MBR with two partitions.
 
@@ -32,39 +36,53 @@ This installs the published VyOS LS1046A ISO onto a Mono Gateway that currently 
    (Measured on `2026.10.16-2149-rolling`. Later builds may differ in size; the layout is the same.)
 
    Writing the ISO raw to `/dev/mmcblk0` turns the eMMC into the equivalent of the USB stick in [INSTALL.md](INSTALL.md). U-Boot can then `fatload mmc 0:2`.
-4. **`toram` lets VyOS install onto the disk it booted from.** It copies the squashfs into RAM before userspace starts, so `install image` can repartition the eMMC under the running live system. (`boot.cmd` warns against `toram`, but that warning is about LS1046A USB xHCI stalls. It does not apply to eMMC.)
+4. **U-Boot starts the VyOS live system.** Writing the ISO does not replace the running Recovery Linux kernel or install VyOS. The tested recovery image lacks `fw_printenv`, `fw_setenv`, and `/etc/fw_env.config`, so this guide reboots into the existing U-Boot console instead of editing NOR from Recovery.
+5. **`toram` is intended to let VyOS install onto the disk it booted from.** It copies the squashfs into RAM before userspace starts, so `install image` can repartition the eMMC under the running live system. This eMMC path still needs hardware validation; Checkpoint 4a must pass before installing. (`boot.cmd` warns against `toram` because of LS1046A USB xHCI stalls; this procedure uses eMMC, not USB.)
 
+```mermaid
+flowchart LR
+  recovery["NOR Recovery Linux"] -->|"Step 2: write and verify"| media["eMMC: raw ISO, p1 ISO9660 and p2 FAT32"]
+  recovery -->|"Step 3: reboot and interrupt countdown"| uboot["NOR U-Boot"]
+  media -->|"Load kernel, DTB and initrd"| uboot
+  uboot -->|"booti with toram"| live["VyOS live in RAM"]
+  live -->|"Step 4: install image"| installed["eMMC: VyOS, 64 MiB reserved, p1, p2, p3 ext4"]
 ```
-NOR:  [U-Boot + env] [recovery Linux]          untouched until VyOS install writes bootcmd
-eMMC: OPNsense  ->  raw ISO (p1 ISO9660, p2 FAT32)  ->  VyOS (64 MiB reserved, p1, p2, p3 ext4)
-              Step 2                           Step 4
-```
+
+### Why this differs from OpenWrt installation
+
+The [Mono OpenWrt guide](https://docs.mono.si/gateway-development-kit/installing-openwrt/) writes a ready-to-boot system image using two `dd` commands: the first 4 KiB, then everything from 32 MiB onward. That preserves the eMMC firmware region between 4 KiB and 32 MiB. It still requires a one-time interactive U-Boot setup; its later `mono-fw-setenv` commands run inside installed OpenWrt, not Recovery Linux.
+
+The VyOS ISO is live installer media, not an installed-system disk image. **Do not use OpenWrt's split-write commands on this ISO:** skipping 4 KiB through 32 MiB would omit required ISO data. The whole-disk write in Step 2 deliberately overwrites the eMMC firmware region. **Do not follow OpenWrt's instruction to switch to eMMC boot afterwards; remain on NOR.**
 
 ---
 
 ## Gate 0: Confirm the board boots from NOR
 
-Power-cycle the board and **press any key** during the U-Boot countdown.
+Confirm that the DIP switch is already on **NOR** (RIGHT), or use an explicit boot-source indication in the board's startup log. If you cannot establish the boot source, stop before writing anything. Power-cycle the board and **press any key** during the U-Boot countdown, then record its boot command:
 
 ```
 => printenv bootcmd
 ```
 
 **Checkpoint 0**
-- The output contains `opnsense` (normally `bootcmd=run opnsense || run recovery`): you are on NOR. Continue.
-- **Anything else: STOP.** If the board boots U-Boot from eMMC, Step 2 makes it unbootable until someone physically flips the DIP switch.
+- NOR boot is confirmed independently of `bootcmd`, and the boot command includes the recovery fallback. The existing OPNsense/OpenWrt boot command alone is not proof of NOR boot.
+- **If the boot source is uncertain or the recovery fallback is missing: STOP.** If the board boots U-Boot from eMMC, Step 2 makes it unbootable until someone physically flips the DIP switch.
 
 ---
 
-## Step 0: Back up OPNsense
+## Step 0: Back up the existing configuration
 
-Turn on session logging in your terminal program. Boot OPNsense, choose **8) Shell**, and run:
+Turn on session logging in your terminal program. Boot the existing OPNsense/OpenWrt installation and save its configuration before proceeding.
+
+For OPNsense, choose **8) Shell** and capture the configuration:
 
 ```sh
 cat /conf/config.xml
 ```
 
-Save the logged output. The network served by this box is **down from Step 2 until VyOS is configured**. Plan the downtime.
+For OpenWrt, use its supported configuration backup/export procedure. Keep the backup off the eMMC; a backup left on this disk will be erased in Step 2.
+
+Save the logged output or exported backup. The network served by this box is **down from Step 2 until VyOS is configured**. Plan the downtime.
 
 ---
 
@@ -76,15 +94,18 @@ Power-cycle and interrupt U-Boot, then:
 => run recovery
 ```
 
-Log in as `root` (no password). Find the port with a live cable and get an address:
+Log in as `root` (no password). Find the port with a live cable and get an address (replace `eth0` in both commands if using another port). Interfaces may initially show `DOWN`; check for `UP,LOWER_UP` after bringing your port up:
 
 ```sh
-ip -br link                                    # look for LOWER_UP on eth0, eth1 or eth2
-ip link set eth0 up && udhcpc -i eth0 -n -q    # replace eth0 with your port
+ip -br link
+ip link set eth0 up
+udhcpc -i eth0
 ip -4 addr; ip route                           # expect an address and a default route
-ntpd -q -n -p pool.ntp.org                     # recovery can boot with a stale clock; TLS needs a correct one
+date -u                                       # check the clock; TLS needs a correct one
 df -h /tmp                                     # need at least ~600 MB free
 ```
+
+The tested Recovery Linux image does not include `ntpd`. If the clock is wrong, set the current UTC time manually as described under "Recovery Linux: `curl` fails with a TLS or certificate error" before downloading.
 
 Download the latest release named in the project's update feed:
 
@@ -120,36 +141,63 @@ wc -c vyos.iso
 
 ## Step 2: Write the ISO to the eMMC (point of no return)
 
+Run this block in the recovery Bash shell. The trailing `&&` operators stop the sequence if any command fails. The ISO must have a positive size that is an exact multiple of 512 bytes. **This overwrites the eMMC; confirm NOR boot and your backup before proceeding.**
+
 ```sh
-dd if=/tmp/vyos.iso of=/dev/mmcblk0 bs=4M conv=fsync && sync
-head -c $(wc -c < /tmp/vyos.iso) /dev/mmcblk0 | sha256sum
+set -o pipefail &&
+ISO_BYTES=$(wc -c < /tmp/vyos.iso) &&
+[[ "$ISO_BYTES" -gt 0 && "$((ISO_BYTES % 512))" -eq 0 ]] &&
+dd if=/tmp/vyos.iso of=/dev/mmcblk0 bs=4M &&
+sync &&
+READBACK_SHA=$(dd if=/dev/mmcblk0 bs=512 count="$((ISO_BYTES / 512))" | sha256sum) &&
+printf '%s\n' "$READBACK_SHA" &&
 fdisk -l /dev/mmcblk0
 ```
 
+This uses the basic operands supported by the tested BusyBox `dd`; `conv=fsync` and `head -c` are unavailable in that recovery build. `sync` flushes the write before verification. `pipefail` and the captured read-back output prevent a failed read from printing a misleading hash of empty input. **If any command prints usage or an error: STOP; do not reboot into Step 3.**
+
 **Checkpoint 2**
 - The read-back `sha256sum` equals the ISO hash from Checkpoint 1.
-- `fdisk -l` shows two partitions: `mmcblk0p1` (about 495M) and `mmcblk0p2` (about 76M, FAT32).
+- `fdisk -l` shows a DOS/MBR table with `mmcblk0p1` starting at sector 0 (type `0x17`, about 495M) and `mmcblk0p2` (type `0x0c`, about 76M, FAT32).
+- **If either check fails: STOP.** Do not continue to Step 3 until the read-back hash and partition table match the verified ISO.
 
-OPNsense is now gone. This also overwrote the eMMC firmware region (first 32 MiB). A NOR-booted board does not read it, and a VyOS install breaks eMMC boot anyway ([issue #24](https://github.com/mihakralj/vyos-ls1046a-build/issues/24)). See "Optional: restore the eMMC firmware region" below.
+Hardware result for `2026.10.16-2149-rolling` (2026-10-19): `598736896` bytes written and read back with SHA-256 `504ad58f5e562cb8011ecb616a5a4cbe439eb67738e66571c9c712bd629dbedb`. The resulting DOS disk identifier was `0x56594f53`; p1 started at sector `0` with `1013760` sectors, and p2 at sector `1013760` with `155648` sectors. The read-back covered `1169408` sectors of 512 bytes.
+
+The previous OPNsense/OpenWrt installation is now gone. This also overwrote the eMMC firmware region (first 32 MiB). A NOR-booted board does not read it, and a VyOS install breaks eMMC boot anyway ([issue #24](https://github.com/mihakralj/vyos-ls1046a-build/issues/24)). See "Optional: restore the eMMC firmware region" below.
 
 ---
 
 ## Step 3: Live-boot VyOS from the eMMC
 
-Power-cycle and **press any key** during the U-Boot countdown. Paste these **one line at a time**. Keep the initrd load **last**, so `${filesize}` holds the initrd size for `booti`.
+Keep the DIP switch on **NOR**. After Checkpoint 2 passes, run `reboot` in Recovery Linux (or power-cycle), then **press any key** during the U-Boot countdown. Simply letting autoboot continue would still run the previous OPNsense/OpenWrt boot command, not the VyOS ISO.
+
+Paste these **one line at a time** at the U-Boot prompt. These `setenv` commands only change the current session: **do not run `saveenv` or replace `bootcmd` here.** Keep the initrd load **last**, so `${filesize}` holds the initrd size for `booti`.
 
 ```
+setenv kernel_addr_r 0x82000000
+setenv fdt_addr_r 0x88000000
 setenv ramdisk_addr_r 0xa4000000
-mmc dev 0
+setenv kernel_comp_addr_r 0x90000000
+setenv kernel_comp_size 0x1600000
+mmc dev 0 0
+mmc rescan
+mmc part
 fatls mmc 0:2 live
+```
+
+Before loading anything, confirm a DOS table with p1 type `17`, p2 type `0c`, and a listing containing `vmlinuz` and `initrd.img`. **If any check fails: STOP** and use the U-Boot troubleshooting section below.
+
+Then load and boot:
+
+```
 fatload mmc 0:2 ${kernel_addr_r} live/vmlinuz
 fatload mmc 0:2 ${fdt_addr_r} mono-gw.dtb
 fatload mmc 0:2 ${ramdisk_addr_r} live/initrd.img
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/mmcblk0p1 toram rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/mmcblk0p1 toram rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60
 booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
-These bootargs are the ones from [board/scripts/boot.cmd](board/scripts/boot.cmd), plus `live-media=/dev/mmcblk0p1` (where the squashfs lives) and `toram`. Expect a pause during early boot while the squashfs is copied into RAM.
+These bootargs follow [board/scripts/boot.cmd](board/scripts/boot.cmd), with `live-media=/dev/mmcblk0p1` (where the squashfs lives), `toram`, and `panic=60` to match the VyOS default and avoid a parameter-mismatch kexec. USB-specific options are omitted. Expect a pause during early boot while the squashfs is copied into RAM. The DTB address `0x88000000` is separate from the decompression scratch area at `0x90000000`.
 
 **Checkpoint 3**
 - `fatls` lists `vmlinuz` and `initrd.img`.
@@ -192,7 +240,7 @@ install image
 reboot
 ```
 
-The installer's `vyos-postinstall` has written this to the NOR U-Boot environment, replacing OPNsense's `bootcmd`:
+The installer's `vyos-postinstall` has written this to the NOR U-Boot environment, replacing the previous OPNsense/OpenWrt `bootcmd`:
 
 ```
 bootcmd=run usb_vyos || run vyos || run recovery
@@ -226,7 +274,15 @@ exit
 ## Troubleshooting
 
 ### Recovery Linux: `curl` fails with a TLS or certificate error
-The clock is wrong. Rerun `ntpd -q -n -p pool.ntp.org` and check `date -u`. If NTP is blocked on your network, set the time by hand: `date -u -s "2026-10-19 05:00:00"`.
+Check `date -u` first. The tested recovery image does not include `ntpd`. If the clock is wrong, set the current UTC time by hand, for example `date -u -s "2026-10-19 05:00:00"` (replace this example with the actual current UTC time), then check `date -u` and retry the download. Do not disable TLS certificate verification.
+
+### Recovery Linux: `dd` prints usage or the read-back hashes empty input
+The tested BusyBox 1.37.0 build rejects `dd ... conv=fsync`, so that command exits before writing the ISO. Its `head` also rejects `-c`. The digest `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` is SHA-256 of empty input; after a failed `head`, it does not describe the eMMC contents. Use the corrected Step 2 block, which calls `sync` separately and reads the exact number of 512-byte blocks instead of using `head -c`.
+
+### Recovery Linux: why not edit U-Boot settings and just reboot?
+The tested recovery image has neither `fw_printenv` nor `fw_setenv`, and no `/etc/fw_env.config`. This procedure does not add tools to Recovery. Use the existing U-Boot console in Step 3 for a temporary live boot; the VyOS installer configures persistent booting later.
+
+`dd` copies bytes; it does not construct an environment with a valid CRC or perform the NOR erase/program handling needed to update it. **Do not use raw writes to `/dev/mtd*` to change boot variables.** Device numbering also differs between the two Linux environments: the tested Recovery labels `/dev/mtd3` as `uboot-env` and `/dev/mtd2` as `uboot`, whereas VyOS uses `/dev/mtd2` for the environment. Copying VyOS's device path into Recovery would target U-Boot itself.
 
 ### Recovery Linux: no DHCP lease
 Try the other copper ports (`eth0`, `eth1`, `eth2`). The Mono's physical-to-logical port mapping is not intuitive; see [HARDWARE.md](HARDWARE.md) section 3. Static fallback:
@@ -244,8 +300,17 @@ setenv kernel_comp_size 0x1600000
 ```
 Never load the DTB at `0x90000000`: decompression overwrites it.
 
-### U-Boot: `fatls mmc 0:2` shows nothing or errors
-Run `mmc rescan` and `mmc part`. You should see two DOS partitions. If not, go back to recovery (`run recovery`) and repeat Step 2.
+### U-Boot: `Can't set block device` or `fatls mmc 0:2` shows nothing
+Run these one line at a time:
+```
+mmc dev 0 0
+mmc rescan
+mmc part
+fatinfo mmc 0:2
+```
+Expect a DOS/MBR table with partition 1 type `17` and partition 2 type `0c` (FAT32). Two DOS partitions alone are not sufficient: a FAT32 boot partition at sector `65536` followed by a type `a5` (FreeBSD) partition at sector `229376` is a leftover FreeBSD layout, not the raw VyOS ISO. `fatload` cannot read that FreeBSD partition as FAT32; changing the filename or bootargs will not fix it.
+
+Return to NOR recovery with `run recovery`, inspect `fdisk -l /dev/mmcblk0`, and check the Step 2 read-back hash before deciding whether to retry the write. Files in `/tmp` do not survive a reboot; if `vyos.iso` is missing, repeat the download and verification in Step 1 before comparing it with the eMMC. Do not continue to Step 3 while the table still shows the old layout.
 
 ### Live boot drops to an initramfs shell, unable to find the live medium
 Check the `live-media=/dev/mmcblk0p1` spelling in `bootargs`. As a fallback, remove `live-media=...` and let live-boot scan all block devices.
@@ -259,8 +324,8 @@ If it persists after a second power-cycle, `fw_setenv` probably failed. Interrup
 
 | Where you stopped | State | How to recover |
 |-------------------|-------|----------------|
-| Before Step 2 | OPNsense intact | Power-cycle; autoboot runs `run opnsense` |
-| After Step 2 | eMMC holds the raw ISO, OPNsense gone | Repeat Step 3, or reinstall OPNsense from recovery Linux (for example with [mono-imager](https://github.com/HAHermsen/mono-imager)'s OPNsense LAN journey) |
+| Before Step 2 | Existing OPNsense/OpenWrt installation intact | Power-cycle; the saved boot command starts the existing OS |
+| After Step 2 | eMMC holds the raw ISO, previous OPNsense/OpenWrt installation gone | Repeat Step 3, or reinstall the previous OS from Recovery Linux using its installation procedure and restore the saved configuration |
 | After Step 4 | VyOS installed | Normal VyOS operation; `run recovery` is still the fallback in `bootcmd` |
 
 Recovery Linux remains reachable from the U-Boot prompt with `run recovery` at every stage, because both live in NOR.
@@ -279,8 +344,9 @@ Please open an issue (or post in the Discord thread) with this filled in. A fail
 ### Console-only install test report
 
 - VyOS version (from Step 1):
-- Previous OS on eMMC: OPNsense <version> / other:
+- Previous OS on eMMC: OPNsense/OpenWrt <name and version> / other:
 - Board: Mono Gateway DK / other:
+- NOR boot evidence (known DIP position or startup boot-source indication):
 - `printenv bootcmd` output (Gate 0):
 - Network port used in recovery (eth0/1/2), DHCP or static:
 
