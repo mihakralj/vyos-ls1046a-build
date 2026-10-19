@@ -109,17 +109,17 @@ model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo '?')
 record_ok "board: $model"
 
 DPAA_PORTS=()
-for dev in eth3 eth4; do
+for dev in eth0 eth1 eth2 eth3 eth4; do
     if [ -d "/sys/class/net/$dev" ] \
        && find -L "/sys/class/net/$dev/device" -maxdepth 0 -type d 2>/dev/null \
           | grep -q .; then
         DPAA_PORTS+=("$dev")
     fi
 done
-if [ "${#DPAA_PORTS[@]}" -eq 2 ]; then
-    record_ok 'DPAA1 transit netdevs present: eth3 eth4'
+if [ "${#DPAA_PORTS[@]}" -eq 5 ]; then
+    record_ok 'DPAA1 netdevs present: eth0 eth1 eth2 eth3 eth4'
 else
-    record_fail "missing DPAA1 transit netdev(s); found: ${DPAA_PORTS[*]:-(none)}"
+    record_fail "missing DPAA1 netdev(s); found: ${DPAA_PORTS[*]:-(none)}"
 fi
 
 ip_forward=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)
@@ -129,18 +129,20 @@ else
     record_fail 'net.ipv4.ip_forward is not enabled'
 fi
 
-for dev in eth3 eth4; do
+# Cabling and addressing are deployment state, not dataplane health: the
+# factory default puts every port on DHCP, so an unplugged or unaddressed
+# ASK port is reported but does not fail the verdict.
+for dev in "${ASK_PORTS[@]}"; do
     [ -d "/sys/class/net/$dev" ] || continue
     carrier=$(cat "/sys/class/net/$dev/carrier" 2>/dev/null || echo 0)
     addr=$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | paste -sd, -)
     if [ "$carrier" = 1 ] && [ -n "$addr" ]; then
         record_ok "$dev link/carrier/address healthy ($addr)"
     elif [ "$carrier" != 1 ]; then
-        record_fail "$dev has no carrier"
+        record_warn "$dev has no carrier"
     else
-        record_fail "$dev has carrier but no IPv4 address"
+        record_warn "$dev has carrier but no IPv4 address"
     fi
-
 done
 
 if echo "$KLOG" | grep -q 'FMan PCD caps = 0x17'; then
@@ -319,7 +321,11 @@ else
 fi
 
 for dev in "${ASK_PORTS[@]}"; do
+    # Physical ingress FMan hwport IDs; must match vyos-1x-031 set_ask_offload().
     case "$dev" in
+        eth0) port_hex=0x0c ;;
+        eth1) port_hex=0x0d ;;
+        eth2) port_hex=0x09 ;;
         eth3) port_hex=0x10 ;;
         eth4) port_hex=0x11 ;;
         *)    port_hex='' ;;
@@ -348,7 +354,7 @@ for dev in "${ASK_PORTS[@]}"; do
     # the kernel RX softirq path. On this 4-core DPAA1 board, RPS=0 let one
     # sustained v6 flow pin ksoftirqd at 100% and starve eth0 management in both
     # directions while transit kept forwarding (2026-08-19). Production images
-    # must spread eth3/eth4 RX across CPUs 1-3 (mask 0xe), sparing CPU0.
+    # must spread every ASK port's RX across CPUs 1-3 (mask 0xe), sparing CPU0.
     rps_bad=0
     rps_mask=''
     for q in /sys/class/net/$dev/queues/rx-*/rps_cpus; do
