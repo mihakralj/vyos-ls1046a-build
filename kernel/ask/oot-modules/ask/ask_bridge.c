@@ -11,16 +11,24 @@
  * FDB puts DA behind the egress port and SA behind the ingress port in the
  * frame's VLAN, so flooded frames never qualify. Only IPv4/IPv6: a short
  * non-IP frame hitting a record wedges the FE hit path (§13.16), and ARP etc.
- * belong to the kernel (D5). A hit forwards the frame unchanged, so only
- * pairs whose ingress and egress tagging agree are offloaded (B7a).
+ * belong to the kernel (D5). A hit forwards the frame unchanged when its
+ * ingress and egress tagging agree (B7a); on a VLAN-filtering bridge an
+ * access <-> trunk pair pops or pushes the 802.1Q tag in hardware (B7b,
+ * F-268: 04 11 12 [42] 41 01 with the frame's own DA/SA, no TTL change,
+ * under the ask.vlan_offload kill switch).
  *
  * VLANs: the hook sees the egress VLAN state (__br_forward() runs
- * br_handle_vlan() first). On a VLAN-filtering bridge an untagged egress
- * frame is taken as untagged ingress in the ingress port's PVID, a tagged
- * one as tagged ingress in a non-PVID VLAN (VID = PVID tagged on egress is
- * almost always untagged -> tagged, which needs a push). A wrong guess
- * cannot misforward: the record is validated against what the bridge does
- * with frames carrying exactly its key, so at worst it never hits.
+ * br_handle_vlan() first), so the ingress form is inferred. A tagged egress
+ * frame whose VID is the ingress port's PVID (PCP 0) is taken as untagged
+ * ingress (a push), any other as the same tag on ingress. An untagged
+ * egress frame is tried as untagged ingress in the ingress PVID and as
+ * tagged ingress in the egress port's PVID (a pop); the live FDB in each
+ * VLAN keeps only the true one. The action follows from the record's
+ * ingress tag and the egress port's untagged flag for the VLAN. A wrong
+ * guess cannot misforward: the record is validated against what the bridge
+ * does with frames carrying exactly its key, so at worst it never hits and
+ * ages out. A pop record's key has PCP 0: prioritized frames stay in
+ * software.
  *
  * The CPU no longer sees a hardware-forwarded source, so a learned SA is
  * taken over as externally learned: the bridge does not age those and takes
@@ -41,7 +49,7 @@
  * VLAN device on in (frames for a vif never reach the bridge).
  *
  * Not covered: frames the bridge filter would drop later in the same flow
- * (the record bypasses it, as on the vendor), 802.1ad, tagged <-> untagged.
+ * (the record bypasses it, as on the vendor), 802.1ad, stacked tags.
  *
  * Lock order: rtnl -> ask_bridge_lock -> ask_hw h->lock -> FMan fe_lock.
  */
@@ -85,6 +93,7 @@ struct ask_bridge_rec {
 	u8               key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
 	u16              vid;		/* bridge VLAN (0: not filtering) */
 	bool             filtering;	/* learned on a VLAN-filtering bridge */
+	u8               act;		/* enum ask_bridge_act */
 	u32              fqid;		/* out's no-confirm TX FQ */
 	u64              pkts;		/* last hardware hit count read */
 	unsigned long    last_hit;	/* jiffies of the last count change */
@@ -166,24 +175,66 @@ EXPORT_SYMBOL_GPL(ask_bridge_key);
  * Folding EtherType into the key means a record installed for one EtherType
  * cannot be hit by a frame of another EtherType between the same MACs:
  * ARP/other non-IP frames miss to the kernel FQ by construction instead of
- * wedging the FE-VM hit path (plan §13.16). HIT = plain ENQUEUE_PKT to
- * @egress_tx_fqid: rx_fqid carries it, tx_fqid stays 0 so no L2 rewrite is
- * emitted. Only unicast, non-zero MACs: BUM keeps missing to the bridge.
+ * wedging the FE-VM hit path (plan §13.16). Only unicast, non-zero MACs:
+ * BUM keeps missing to the bridge.
+ *
+ * ASK_BRIDGE_ACT_SAME (B7a): HIT = plain ENQUEUE_PKT to @egress_tx_fqid;
+ * rx_fqid carries it, tx_fqid stays 0 so no L2 rewrite is emitted.
+ * ASK_BRIDGE_ACT_POP/PUSH (B7b): the L2/TX terminal with the frame's own
+ * DA/SA and FMAN_PCD_VLANF_BRIDGE (F-268: no TTL change, mtu 0xffff). A pop
+ * needs a tagged key in bridge VLAN @vid; a push an untagged key, and tags
+ * the frame with @vid, PCP 0 (as br_allowed_ingress() does). IPv4/IPv6 only.
  */
 int ask_bridge_fe_action(const u8 *key, u32 egress_tx_fqid,
-			 unsigned long enq_off,
+			 unsigned long enq_off, u8 act, u16 vid,
 			 struct fman_pcd_fe_flow_action *a)
 {
+	u16 tci, et;
+
 	if (!key || !a || !is_valid_ether_addr(key + ASK_BRIDGE_K_DA) ||
 	    !is_valid_ether_addr(key + ASK_BRIDGE_K_SA) || !egress_tx_fqid ||
 	    egress_tx_fqid > 0xffffff || !enq_off)
 		return -EINVAL;
+	tci = get_unaligned_be16(key + ASK_BRIDGE_K_TCI);
+	et = get_unaligned_be16(key + ASK_BRIDGE_K_ET);
+	switch (act) {
+	case ASK_BRIDGE_ACT_SAME:
+		break;
+	case ASK_BRIDGE_ACT_POP:
+		if (!tci || (tci & VLAN_VID_MASK) != vid)
+			return -EINVAL;
+		fallthrough;
+	case ASK_BRIDGE_ACT_PUSH:
+		if ((act == ASK_BRIDGE_ACT_PUSH && tci) || !vid ||
+		    vid >= VLAN_VID_MASK ||
+		    (et != ETH_P_IP && et != ETH_P_IPV6))
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
 	memset(a, 0, sizeof(*a));
 	memcpy(a->key, key, FMAN_PCD_FE_L2_DA_KEY_SIZE);
 	a->key_size  = FMAN_PCD_FE_L2_DA_KEY_SIZE;
 	a->enq_off   = enq_off;
 	a->table_idx = 0;		/* the ingress port's own table */
-	a->rx_fqid   = egress_tx_fqid;
+	if (act == ASK_BRIDGE_ACT_SAME) {
+		a->rx_fqid = egress_tx_fqid;
+		return 0;
+	}
+	a->tx_fqid = egress_tx_fqid;
+	ether_addr_copy(a->next_hop_mac, key + ASK_BRIDGE_K_DA);
+	ether_addr_copy(a->egress_mac, key + ASK_BRIDGE_K_SA);
+	a->eth_type = et;
+	a->vlan_flags = FMAN_PCD_VLANF_BRIDGE;
+	if (act == ASK_BRIDGE_ACT_POP) {
+		a->vlan_flags |= FMAN_PCD_VLANF_POP;
+		a->vlan_ingress_vid = vid;
+	} else {
+		a->vlan_flags |= FMAN_PCD_VLANF_PUSH;
+		a->vlan_push_tci = vid;
+		a->vlan_push_tpid = ETH_P_8021Q;
+	}
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ask_bridge_fe_action);
@@ -226,9 +277,9 @@ static bool ask_bridge_user_mac(const u8 *addr)
 }
 
 /*
- * The bridge VLAN a frame with @tci arriving on @in belongs to, under the
- * B7a same-tagging rule (see the header comment); false if unsupported.
- * rtnl held.
+ * The bridge VLAN a frame with @tci arriving on @in belongs to: its VID,
+ * or @in's PVID when untagged; false if unsupported (802.1ad, priority
+ * tag, no PVID). rtnl held.
  */
 static bool ask_bridge_vid(struct net_device *br, struct net_device *in,
 			   u16 tci, u16 *vid)
@@ -243,30 +294,32 @@ static bool ask_bridge_vid(struct net_device *br, struct net_device *in,
 		return false;
 	br_vlan_get_pvid(in, &pvid);
 	*vid = tci ? tci & VLAN_VID_MASK : pvid;
-	return *vid && (!tci || *vid != pvid);
+	return *vid;
 }
 
 /* On a VLAN-filtering bridge: is @in still a member of VLAN @vid (the PVID
- * already is for an untagged record), and does @out send @vid tagged
- * exactly when the record's frames are tagged (the hit forwards them
- * unchanged)? */
+ * already is for an untagged record) and @out too? @out_tagged: @out sends
+ * @vid tagged. */
 static bool ask_bridge_vlan_ok(struct net_device *in, struct net_device *out,
-			       u16 vid, u16 tci)
+			       u16 vid, u16 tci, bool *out_tagged)
 {
 	struct bridge_vlan_info info;
 
-	return (!tci || !br_vlan_get_info(in, vid, &info)) &&
-	       !br_vlan_get_info(out, vid, &info) &&
-	       !!(info.flags & BRIDGE_VLAN_INFO_UNTAGGED) == !tci;
+	if ((tci && br_vlan_get_info(in, vid, &info)) ||
+	    br_vlan_get_info(out, vid, &info))
+		return false;
+	*out_tagged = !(info.flags & BRIDGE_VLAN_INFO_UNTAGGED);
+	return true;
 }
 
 /*
  * Would a record with @key (in -> out, bridge VLAN @vid) be correct now?
- * Fills the ingress port and the egress FQ. rtnl held.
+ * Fills the ingress port, the egress FQ and the action (what the bridge
+ * does to the tag). rtnl held.
  */
 static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
 			       const u8 *key, u16 vid, bool filtering,
-			       u8 *iport, u32 *fqid)
+			       u8 *iport, u32 *fqid, u8 *act)
 {
 	struct net_device *br = __dev_get_by_index(&init_net, br_ifindex);
 	struct net_device *in = __dev_get_by_index(&init_net, in_ifindex);
@@ -274,6 +327,7 @@ static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
 	u16 tci = get_unaligned_be16(key + ASK_BRIDGE_K_TCI), v;
 	u8 fam = !memcmp(key + ASK_BRIDGE_K_ET, "\x08\x00", 2) ?
 		 ASK_FAM_V4 : ASK_FAM_V6;
+	bool out_tagged = tci;
 	bool vif = false;
 	u8 eport;
 
@@ -285,7 +339,12 @@ static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
 	    !(ask_hw_port_family_mask(*iport) & fam) ||
 	    ask_hw_oif_fqid_cached(out_ifindex, fqid) ||
 	    !ask_bridge_vid(br, in, tci, &v) || v != vid ||
-	    (filtering && !ask_bridge_vlan_ok(in, out, vid, tci)))
+	    (filtering && !ask_bridge_vlan_ok(in, out, vid, tci, &out_tagged)))
+		return false;
+	*act = out_tagged == !!tci ? ASK_BRIDGE_ACT_SAME :
+	       tci ? ASK_BRIDGE_ACT_POP : ASK_BRIDGE_ACT_PUSH;
+	if (*act != ASK_BRIDGE_ACT_SAME &&
+	    !ask_hw_vlan_offload_armed_port(*iport))
 		return false;
 	if (tci) {
 		rcu_read_lock();
@@ -393,7 +452,8 @@ static void ask_bridge_rec_del(struct ask_bridge_rec *r)
 	if (!r->dead) {
 		/* A failed delete has already unlinked the record (F-254/F-256
 		 * keep only the memory), so tracking goes either way. */
-		rc = ask_hw_l2_record(r->port, r->key, 0, false);
+		rc = ask_hw_l2_record(r->port, r->key, 0, r->act, r->vid,
+				      false);
 		if (rc)
 			pr_warn_ratelimited("ask: bridge: delete %pM>%pM tci 0x%04x on port 0x%02x: %d\n",
 					    sa, r->key + ASK_BRIDGE_K_DA,
@@ -412,7 +472,7 @@ static void ask_bridge_resync(void)
 {
 	struct ask_bridge_rec *r, *tmp;
 	u32 fqid;
-	u8 iport;
+	u8 iport, act;
 
 	ASSERT_RTNL();
 	lockdep_assert_held(&ask_bridge_lock);
@@ -421,8 +481,8 @@ static void ask_bridge_resync(void)
 		if (r->dead ||
 		    !ask_bridge_flow_ok(r->br_ifindex, r->in_ifindex,
 					r->out_ifindex, r->key, r->vid,
-					r->filtering, &iport, &fqid) ||
-		    iport != r->port || fqid != r->fqid)
+					r->filtering, &iport, &fqid, &act) ||
+		    iport != r->port || fqid != r->fqid || act != r->act)
 			ask_bridge_rec_del(r);
 }
 
@@ -437,54 +497,53 @@ static struct ask_bridge_rec *ask_bridge_rec_find(u8 port, const u8 *key)
 	return NULL;
 }
 
-/* Install a record for a candidate the hook saw, if it qualifies now. */
-static void ask_bridge_admit(const struct ask_bridge_cand *c)
+/* Install a record with ingress-form @key (in -> out via @br), if it
+ * qualifies now. */
+static void ask_bridge_admit_key(struct net_device *br, struct net_device *in,
+				 int out_ifindex, const u8 *key)
 {
-	struct net_device *in = __dev_get_by_index(&init_net, c->in_ifindex);
-	struct net_device *br = in && netif_is_bridge_port(in) ?
-				netdev_master_upper_dev_get(in) : NULL;
-	const u8 *sa = c->key + ASK_BRIDGE_K_SA;
+	const u8 *sa = key + ASK_BRIDGE_K_SA;
 	struct ask_bridge_rec *r;
 	struct ask_bridge_own *o;
 	bool filtering;
 	u32 fqid;
 	u16 vid;
-	u8 iport;
+	u8 iport, act;
 	int rc;
 
-	if (!br || !netif_is_bridge_master(br) ||
-	    !ask_bridge_vid(br, in, get_unaligned_be16(c->key + ASK_BRIDGE_K_TCI),
+	if (!ask_bridge_vid(br, in, get_unaligned_be16(key + ASK_BRIDGE_K_TCI),
 			    &vid))
 		return;
 	filtering = br_vlan_enabled(br);
-	if (!ask_bridge_flow_ok(br->ifindex, c->in_ifindex, c->out_ifindex,
-				c->key, vid, filtering, &iport, &fqid) ||
-	    ask_bridge_rec_find(iport, c->key))
+	if (!ask_bridge_flow_ok(br->ifindex, in->ifindex, out_ifindex, key,
+				vid, filtering, &iport, &fqid, &act) ||
+	    ask_bridge_rec_find(iport, key))
 		return;
 	if (ask_bridge_n_recs >= ASK_BRIDGE_REC_MAX) {
 		pr_warn_ratelimited("ask: bridge: %u records, %pM>%pM stays in software\n",
-				    ask_bridge_n_recs, sa, c->key + ASK_BRIDGE_K_DA);
+				    ask_bridge_n_recs, sa, key + ASK_BRIDGE_K_DA);
 		return;
 	}
 	r = kzalloc(sizeof(*r), GFP_KERNEL);
 	if (!r)
 		return;
-	rc = ask_hw_l2_record(iport, c->key, fqid, true);
+	rc = ask_hw_l2_record(iport, key, fqid, act, vid, true);
 	if (rc) {
 		kfree(r);
-		pr_warn_ratelimited("ask: bridge: add %pM>%pM tci 0x%04x on port 0x%02x failed: %d\n",
-				    sa, c->key + ASK_BRIDGE_K_DA,
-				    get_unaligned_be16(c->key + ASK_BRIDGE_K_TCI),
-				    iport, rc);
+		pr_warn_ratelimited("ask: bridge: add %pM>%pM tci 0x%04x act %u on port 0x%02x failed: %d\n",
+				    sa, key + ASK_BRIDGE_K_DA,
+				    get_unaligned_be16(key + ASK_BRIDGE_K_TCI),
+				    act, iport, rc);
 		return;
 	}
 	r->br_ifindex = br->ifindex;
-	r->in_ifindex = c->in_ifindex;
-	r->out_ifindex = c->out_ifindex;
+	r->in_ifindex = in->ifindex;
+	r->out_ifindex = out_ifindex;
 	r->port = iport;
-	memcpy(r->key, c->key, sizeof(r->key));
+	memcpy(r->key, key, sizeof(r->key));
 	r->vid = vid;
 	r->filtering = filtering;
+	r->act = act;
 	r->fqid = fqid;
 	r->last_hit = jiffies;
 	list_add_tail(&r->node, &ask_bridge_recs);
@@ -492,27 +551,65 @@ static void ask_bridge_admit(const struct ask_bridge_cand *c)
 
 	/* The SA's frames no longer reach the bridge: take a learned entry
 	 * over so it does not age out, or just mark a user-added one. */
-	if (ask_bridge_own_find(br->ifindex, c->in_ifindex, sa, vid))
+	if (ask_bridge_own_find(br->ifindex, in->ifindex, sa, vid))
 		return;
 	if (ask_bridge_user_mac(sa)) {
-		ask_bridge_fdb_call(SWITCHDEV_FDB_OFFLOADED, c->in_ifindex, sa,
+		ask_bridge_fdb_call(SWITCHDEV_FDB_OFFLOADED, in->ifindex, sa,
 				    vid, true);
 		return;
 	}
 	o = kzalloc(sizeof(*o), GFP_KERNEL);
 	if (!o)
 		return;		/* the bridge ages it; the record goes with it */
-	rc = ask_bridge_fdb_call(SWITCHDEV_FDB_ADD_TO_BRIDGE, c->in_ifindex, sa,
+	rc = ask_bridge_fdb_call(SWITCHDEV_FDB_ADD_TO_BRIDGE, in->ifindex, sa,
 				 vid, true);
 	if (rc) {
 		kfree(o);
 		return;
 	}
 	o->br_ifindex = br->ifindex;
-	o->port_ifindex = c->in_ifindex;
+	o->port_ifindex = in->ifindex;
 	ether_addr_copy(o->addr, sa);
 	o->vid = vid;
 	list_add_tail(&o->node, &ask_bridge_owns);
+}
+
+/*
+ * A candidate carries the egress tag; install the ingress form(s) it can
+ * come from (header comment). The FDB check in each VLAN rejects a wrong
+ * guess, and a record that is still wrong just never hits.
+ */
+static void ask_bridge_admit(const struct ask_bridge_cand *c)
+{
+	struct net_device *in = __dev_get_by_index(&init_net, c->in_ifindex);
+	struct net_device *br = in && netif_is_bridge_port(in) ?
+				netdev_master_upper_dev_get(in) : NULL;
+	struct net_device *out;
+	u16 etci = get_unaligned_be16(c->key + ASK_BRIDGE_K_TCI);
+	u16 pin = 0, pout = 0;
+	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
+
+	if (!br || !netif_is_bridge_master(br))
+		return;
+	if (br_vlan_enabled(br)) {
+		out = __dev_get_by_index(&init_net, c->out_ifindex);
+		br_vlan_get_pvid(in, &pin);
+		if (out)
+			br_vlan_get_pvid(out, &pout);
+	}
+	memcpy(key, c->key, sizeof(key));
+	if (etci && etci == pin) {
+		/* untagged on in, tagged by the bridge with PVID, PCP 0 */
+		put_unaligned_be16(0, key + ASK_BRIDGE_K_TCI);
+		ask_bridge_admit_key(br, in, c->out_ifindex, key);
+		return;
+	}
+	ask_bridge_admit_key(br, in, c->out_ifindex, key);
+	if (!etci && pout && pout != pin) {
+		/* tagged with out's PVID on in, untagged by the bridge */
+		put_unaligned_be16(pout, key + ASK_BRIDGE_K_TCI);
+		ask_bridge_admit_key(br, in, c->out_ifindex, key);
+	}
 }
 
 static void ask_bridge_work_fn(struct work_struct *w)

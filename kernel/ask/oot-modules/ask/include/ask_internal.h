@@ -128,7 +128,8 @@ unsigned long ask_hw_get_enq_fe_off(void);
 struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
-int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add);
+int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
+		      u16 vid, bool add);
 int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
@@ -1222,8 +1223,15 @@ enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev);
 struct fman_pcd_fe_flow_action;
 void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
 		    __be16 eth_type);
+/* Bridge record action: forward unchanged (B7a) or pop/push the 802.1Q
+ * tag (B7b, F-268). */
+enum ask_bridge_act {
+	ASK_BRIDGE_ACT_SAME = 0,
+	ASK_BRIDGE_ACT_POP,
+	ASK_BRIDGE_ACT_PUSH,
+};
 int  ask_bridge_fe_action(const u8 *key, u32 egress_tx_fqid,
-			  unsigned long enq_off,
+			  unsigned long enq_off, u8 act, u16 vid,
 			  struct fman_pcd_fe_flow_action *a);
 
 /* ------------------------------------------------------------------------- */
