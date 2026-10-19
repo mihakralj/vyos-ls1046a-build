@@ -294,23 +294,43 @@ programming recipes. Resolve contradictions before touching code.
   reach conntrack while established data stays HW; test NAT44/NAT66 mapping
   survival and clean disarm snapshot. Keep `tcp_ctl_punt=0` until all pass.
   The dormant feature is verified to make no PCD writes while off; the live
-  arm path and TCP parser attachment were readback-verified, but no
-  end-to-end transit result exists. Next test on the installed `2012` image:
-  cold boot, verify routed test hosts on eth3/eth4, capture an offloaded
-  short-TCP baseline with the parameter off, then enable the parameter and
-  repeat the 300-connection/20-KB close test. Confirm FIN/RST-driven conntrack
-  closure while bulk data remains hardware-forwarded; repeat through NAT44
-  and NAT66, then disable the parameter and require a clean PCD snapshot.
-  Use real transit endpoints on `10.99.1.0/24` and `10.99.2.0/24`; an earlier
-  attempted test had no transit traffic, empty ARP and zero flowtable counters,
-  so it did not exercise the feature. Do not use a flood for this gate. Keep
-  the parameter off unless all checks pass. No software idle reaper: it cannot
-  distinguish closed and quiet flows.
+  arm path and TCP parser attachment were readback-verified. Use real transit
+  endpoints on `10.99.1.0/24` and `10.99.2.0/24`; an earlier attempted test
+  had no transit traffic, empty ARP and zero flowtable counters, so it did not
+  exercise the feature. Do not use a flood for this gate. Keep the parameter
+  off unless all checks pass. No software idle reaper: it cannot distinguish
+  closed and quiet flows.
+  **2026-10-18 cold-boot transit test (FAIL, `.185`, `2012`, `6.18.55-vyos`):**
+  after the approved hard power-cycle, root `ask-check` passed 36/36 and both
+  routed directions passed. With `tcp_ctl_punt=N`, 300/300 sequential 20-KB
+  TCP flows completed; at 125 s all 300 conntrack entries remained
+  `ESTABLISHED`, confirming the baseline linger. With `tcp_ctl_punt=Y`, both
+  RX ports logged the expected HXS slot-10 soft-parser attach/readback
+  (`0x80000000 -> 0x80000420`), and 300/300 flows still delivered data, but
+  all 300 entries remained `[HW_OFFLOAD]` with 600 ehash records after close.
+  Thus the FIN-close gate did not pass; NAT44/NAT66 mapping tests were not run.
+  The parameter was returned to `N`, test conntrack entries were deleted, and
+  the final `pcd-snapshot diff` was clean with MURAM `used=52922` at baseline.
+  Keep F-266 default-off and the acceptance gate open.
 - **A14:** TTL/hop-limit 0/1 must produce kernel ICMP time-exceeded;
   neighbour/route changes must not forward stale; no MURAM/DDR leak. Run the
   TTL/hop-limit boundary cases separately from F-266: test 0 and 1 for routed
   IPv4 and IPv6, verify ICMP time-exceeded reaches the source, and check that
   no stale hardware record remains after route/neighbour replacement.
+  **2026-10-18 cold-boot A14 test (FAIL, `.185`, `2012`, `6.18.55-vyos`):**
+  from dell1 `.112` to dell2 `.113`, IPv4 TTL 0/1 probes matching a live
+  `[HW_OFFLOAD]` TCP tuple returned ICMP type 11/code 0 from `10.99.1.185`.
+  Ordinary IPv6 ping hop-limit 1 and an unmatched IPv6 TCP probe returned
+  ICMPv6 time-exceeded, but matching TTL 0/1 TCP probes on a live offloaded
+  IPv6 tuple returned no ICMPv6 response. During a paced IPv4 flow, replacing
+  the `eth4` neighbour for `10.99.2.113` with a test MAC left 2 conntrack
+  entries `[HW_OFFLOAD]` and 4 ehash records in place; dell2 RX advanced by
+  5754 packets over 3 s, showing the old hardware forwarding continued.
+  The real neighbour MAC was restored and ping passed. Test flows were removed;
+  `tcp_ctl_punt=N`, MURAM `used=52922`, the ehash table empty, root
+  `ask-check` 36/36 and `pcd-snapshot diff` clean at final verification. The
+  kernel-path baseline passes, but IPv6 TTL and stale-neighbour safety remain
+  open A14 failures.
 - **A2 / A13 / scale:** repeat 64-byte loss/rate and IMIX; connection rate
   with held sessions, 8,000-session bidirectional PDR, install rate and first
   insert latency; measure latency beside HW traffic. External 20k CPS and
@@ -346,6 +366,17 @@ programming recipes. Resolve contradictions before touching code.
 
 Verify each candidate against today's tree before deleting/folding; old
 fixup ranges are not blanket removal instructions.
+
+**2026-10-18 source audit — STOP on `ask_vlan_cc.c` deletion.** The current
+tree still builds this file (`kernel/ask/oot-modules/ask/Kbuild`), routes
+VLAN-edit REPLACE events to `ask_vlan_cc_flow_add()` before
+`ask_fe_flow_insert()` (`ask_flow_offload.c`), reports its aggregate stats
+from generic netlink (`ask_genl.c`), and tears down its CC state from
+`ask_hw.c`. It is therefore an active path in this checkout, not dead code.
+This conflicts with the later inline-FE VLAN silicon notes and the Phase 2
+deletion item. Do not remove or fold it until the code path, deployed image,
+and silicon evidence are reconciled; `.106` is currently OPNsense, so the
+vendor-ASK live cross-check is unavailable.
 
 - Physically remove dead `ask_vlan_cc.c` and Kbuild/genl/debugfs/stat proxies,
   commented frees, duplicate `fe_buffer_setup`, legacy `offload_engage` and
