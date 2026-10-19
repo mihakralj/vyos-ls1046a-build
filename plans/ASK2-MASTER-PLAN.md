@@ -668,10 +668,15 @@ be silently consumed.
   - A `kunit: true` CI image, then on the board
     `modprobe ask_kunit; cat /sys/kernel/debug/kunit/ask_genl/results`
     (expect 16/16).
-  - A production image board check:
-    `ynl --family ask --do get-flow --json '{"id": N}'` with `N` from
-    `dump-flows`. Expect the same counters as the dump; an unknown ID gives
-    `-ENOENT`.
+  - ~~Production image board check~~ **PASSED 2026-10-19** on
+    `2026.10.19-1504-rolling` (6.18.57-vyos, run 39274661356).
+    - On `.185`, during a `testrig-offload-quick.sh unicast-v4` run
+      (9.24 Gbit/s, verdict HW), `get-flow` returned the same record as
+      `dump-flows` for 3 live offloaded flows. Every field matched, counters
+      included.
+    - On `.185` and `.147`, an unknown ID (`999999`) returns `-ENOENT`.
+    - On `.185` and `.147`, an empty request returns `-EINVAL` with the
+      extack "get-flow requires a flow id".
 - **Preview:** release notes/package plus an external operator validation
   cycle using `ASK-ISO-BUILD-AND-INSTALL.md`. Do not describe the historical
   M8 release as full feature-parity completion.
