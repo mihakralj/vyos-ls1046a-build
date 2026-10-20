@@ -382,9 +382,57 @@ That gives 3 keys per node for the 50-byte routed key, and 10 for a 14-byte key.
   the record. If node allocation fails during delete, the bucket head is
   cleared, so the bucket falls back to software until its next rebuild.
 
-The fix is pending CI. The retest is the routed chain A/B (`/tmp/chainab.sh`,
-N=3000): heads and records behind them must both hit. After that, rerun bridge
-capacity at N=8192.
+**F-269 retest: PASS on `.158` (2026-10-20, cold boot, image
+`2026.10.20-1310-rolling`, commit `73b8189d`, CI run 39428088010).**
+
+- Routed chain A/B, N=3000: 6000 records with keysz=50. All 5056 records alone
+  in their bucket hit, and all 944 records sharing a bucket hit, with 0 misses.
+  This confirms the stride-56 node layout on silicon. Teardown left 0 records,
+  MURAM used was back to 52922, and dmesg showed no SYNC timeout.
+- Bridge capacity, N=8192 (`DUT=vyos@192.168.1.158 NS=n106 IF=enp1s0f1np1`):
+  0 insert failures (33.7 s), 8192 records with keysz=16. DA `00:00:00`,
+  `00:10:00` and `00:1f:ff` each got 20/20 hits and 20/20 frames at dell2.
+  Delete was clean, MURAM unchanged, pcd-snapshot OK, 0 kernel errors. On
+  0326 only `00:1f:ff` passed.
+- On this rig the generator port facing the DUT is `enp1s0f1np1` in netns
+  `n106`. The root-namespace default `enp1s0f0np0` reaches nothing. A first
+  run with that default gave 0/3 probes. The rig now exits when the generator
+  port is not found.
+- Post-image regressions on the same boot all passed:
+  - B2: 4/4.
+  - F-266: 100/100 flows, all in CLOSE within 30 s, 0 `[HW_OFFLOAD]` lingering.
+  - A14 IPv4 and IPv6: hop limit 2 forwarded as 1; 1 and 0 punted with
+    ICMP time-exceeded, 10/10.
+  - PPPoE churn, 10 cycles mixed client/server: SID changed on every cycle,
+    drain left 0 records, MURAM 52922, pcd-snapshot OK.
+- Chains spanning several nodes, same boot: PASS. Colliding keys came from
+  `bucket = (crc64_raw(key) >> 48) & 0x7fff`, and the predicted bucket matched
+  silicon every time.
+  - Results:
+
+    | Test | Key size | Keys per node | Bucket depth | Hits before delete | After 3–4 deletes at node edges |
+    |---|---|---|---|---|---|
+    | L2_DA | 16 | 10 | 25 (3 nodes) and 11 | 36/36, each +20 | 32/32 hit, deleted DAs 0 frames |
+    | Routed IPv4 | 50 | 3 | 13 (5 nodes) | 13/13 | 10/10 |
+    | Routed IPv6, bucket 20634 | 50 | 3 | 13 (5 nodes) | 13/13 | 10/10 |
+
+    For the routed tests, the sport and dport were chosen so the flows
+    collide. The first IPv6 run passed a flow tuple instead of the bucket
+    index and its log was a copy of the IPv4 output, so it is void. The IPv6
+    result above is from a rerun at 15:00 UTC: `FAMN=6 rtdeep.sh 20634
+    <13 flows>`, started from 0 records. All 13 records sat at the predicted
+    bucket 20634 (the IPv4 bucket is a different one) and showed 13
+    `[HW_OFFLOAD]` IPv6 conntracks.
+  - Full sweeps: every one of 8192 and 65536 L2_DA records hit. Sequential
+    MACs fill each used bucket evenly, at depth 2 and depth 4.
+  - IPv6 chain A/B: 1904/1904 shared-bucket records hit.
+  - Every run tore down to 0 records, MURAM 52922, 0 kernel errors.
+  - Rig scripts are in the session files: `l2deep.sh`, `l2crc.py`,
+    `rtdeep.sh`, `rtcrc6.py`, `l2sweep.sh`, `chainab6.sh`.
+- Key sizes 14 (legacy ACL) and 38 (global IPv6 table 1) are dormant on this
+  image. Every producer passes `table_idx 0`, which selects the per-port
+  50-byte table or the 16-byte L2_DA table. If either size is reactivated, it
+  needs its own multi-node silicon test.
 
 **Bridge soak: PASS on `.156` (2026-10-20, warm boot after capacity, image
 `2026.10.20-0326-rolling`).** `testrig-bridge-soak.sh` ran 100 cycles, 10 of
