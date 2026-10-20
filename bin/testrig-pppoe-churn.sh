@@ -13,7 +13,9 @@
 #   3. flap the session while the TCP flows are in flight. MODE=client: systemctl stop/start
 #      ppp@pppoe10 on the DUT (what `disconnect`/`connect interface` do); MODE=server: kill the
 #      concentrator's pppd for this session, the DUT pppd redials by itself; MODE=mix: every
-#      SERVER_EVERY-th cycle is a server-side kill, the rest client-side;
+#      SERVER_EVERY-th cycle is a server-side kill, the rest client-side; MODE=kill: no flap, the
+#      ask.pppoe_offload kill switch goes 1 -> 0 (records must drop to the baseline, no hardware
+#      hits and kernel forwarding on pppoe10 while off) -> 1 on the same session (same SID);
 #   4. hardware proof after the reconnect (new session ID, same TCP flows): records must be
 #      rebuilt and hit again, otherwise the flows are stuck on stale state or fell to software;
 #   5. every flow must finish with data delivered (iperf3 received bytes > 0, no iperf3 error).
@@ -28,6 +30,8 @@
 # Usage: bin/testrig-pppoe-churn.sh
 # Env:   CYCLES MODE SERVER_EVERY FAMILIES RATE TRAFFIC_S SERVER_TRAFFIC_S HW_WIN UP_S DOWN_HOLD DRAIN_EVERY DRAIN_S
 #        RUN_ON=dell2 (run on gen2; gen2 commands run locally). Hosts and key: bin/testrig-env.sh.
+#        RIG_NS=$VENDOR_NS runs both generators' commands as root inside that netns (the ports facing
+#        the second DUT; start its concentrator with the pppoe-server line of testrig-pppoe-vendor.sh).
 # Exit: 0 PASS, 1 FAIL, 2 setup error.
 set -u
 . "$(dirname "$0")/testrig-env.sh"
@@ -37,8 +41,8 @@ FAMILIES=${FAMILIES:-"4 6"}; RATE=${RATE:-100M}; TRAFFIC_S=${TRAFFIC_S:-30}; HW_
 UP_S=${UP_S:-60}; DOWN_HOLD=${DOWN_HOLD:-1}; DRAIN_EVERY=${DRAIN_EVERY:-10}; DRAIN_S=${DRAIN_S:-30}
 # a server-side kill waits for the DUT pppd redial (holdoff up to 30 s): its flows must outlast it
 SERVER_TRAFFIC_S=${SERVER_TRAFFIC_S:-$((TRAFFIC_S+UP_S))}
-RUN_ON=${RUN_ON:-agent}
-case $MODE in client|server|mix) ;; *) echo "MODE must be client, server or mix" >&2; exit 2 ;; esac
+RUN_ON=${RUN_ON:-agent}; RIG_NS=${RIG_NS:-}
+case $MODE in client|server|mix|kill) ;; *) echo "MODE must be client, server, mix or kill" >&2; exit 2 ;; esac
 [ "$TRAFFIC_S" -ge $((4+2*HW_WIN+DOWN_HOLD+15)) ] || { echo "TRAFFIC_S too short for proof + flap + reconnect" >&2; exit 2; }
 [ "$RUN_ON" = dell2 ] || rig_require GEN2
 
@@ -46,7 +50,15 @@ SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 DUT="ssh -n $SSHO $RIG_SSHK $ASK2_DUT"
 D1="ssh -n $SSHO $RIG_SSHK $GEN1"; D2="ssh -n $SSHO $RIG_SSHK ${GEN2:-}"
 [ "$RUN_ON" = dell2 ] && D2="bash -c"
+if [ -n "$RIG_NS" ]; then
+  # the command goes in on stdin, so its quoting is the same as without a netns
+  nsd1(){ ssh $SSHO $RIG_SSHK $GEN1 "sudo ip netns exec $RIG_NS bash -s" <<< "$1"; }
+  nsd2(){ if [ "$RUN_ON" = dell2 ]; then sudo ip netns exec "$RIG_NS" bash -s <<< "$1"
+          else ssh $SSHO $RIG_SSHK "$GEN2" "sudo ip netns exec $RIG_NS bash -s" <<< "$1"; fi; }
+  D1=nsd1; D2=nsd2
+fi
 PCD=/sys/kernel/debug/fman_pcd/0; IFN=pppoe10; UNIT=ppp@pppoe10.service
+KSW=/sys/module/ask/parameters/pppoe_offload
 ERR='F-256|SYNC timed out|DMA bus error|WARNING:|BUG:|Oops|circular locking|inconsistent lock|suspicious RCU|re-engage failed|RX-deaf|Err FD'
 TAG=pppoe-churn-$$; FAILS=0
 
@@ -88,8 +100,17 @@ except Exception:
 hw_delta(){ dut "s(){ sudo sed -n 's/.*record_dma=\\(0x[0-9a-f]*\\).*pkt_count=\\([0-9]*\\).*/\\1 \\2/p' $PCD/fe_ehash_stats; }
 { s; echo --; sleep $HW_WIN; s; } | awk '/^--/{k=1; next} !k{a[\$1]=\$2; next} {d=((\$1 in a) && \$2>=a[\$1]) ? \$2-a[\$1] : \$2; t+=d} END{print t+0}'"; }
 
-flap(){ # $1 = client|server
-  if [ "$1" = client ]; then
+# swpkts: packets the kernel forwarded through the session (pppoe10 rx + tx)
+swpkts(){ dut "echo \$(( \$(cat /sys/class/net/$IFN/statistics/rx_packets) + \$(cat /sys/class/net/$IFN/statistics/tx_packets) ))"; }
+
+flap(){ # $1 = client|server|kill
+  if [ "$1" = kill ]; then
+    # KOFF = "records hw_hits sw_packets" while the switch is off
+    dut "echo 0 | sudo tee $KSW >/dev/null" || { echo "cannot clear $KSW"; return 1; }
+    local r h w0 w1; r=$(wait_recs "$base_recs"); w0=$(swpkts); h=$(hw_delta); w1=$(swpkts)
+    KOFF="$r $h $((w1-w0))"
+    dut "echo 1 | sudo tee $KSW >/dev/null" || { echo "cannot set $KSW"; return 1; }
+  elif [ "$1" = client ]; then
     dut "sudo systemctl stop $UNIT"; sleep "$DOWN_HOLD"
     session_up && { echo "session still up after stop"; return 1; }
     dut "sudo systemctl start $UNIT"
@@ -97,14 +118,21 @@ flap(){ # $1 = client|server
     # the concentrator hands out a new peer address per session: find its ppp unit by the DUT's
     local la; la=$(dut "ip -o -4 addr show $IFN | awk '{print \$4; exit}'")
     [ -n "$la" ] || { echo "no local address on $IFN"; return 1; }
-    $D1 "i=\$(ip -o -4 addr show | awk -v a='peer $la/' 'index(\$0, a){print \$2; exit}'); [ -n \"\$i\" ] && sudo kill \$(cat /run/\$i.pid 2>/dev/null || cat /var/run/\$i.pid)" \
-      || { echo "no concentrator pppd for peer $la"; return 1; }
+    if [ -n "$RIG_NS" ]; then
+      # /run/pppN.pid is shared with the root netns concentrator: pick the netns pppd by address
+      $D1 "k=''; for p in \$(ip netns pids $RIG_NS); do [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = pppd ] || continue
+tr '\\0' ' ' < /proc/\$p/cmdline | grep -q ':$la ' && k=\"\$k \$p\"; done; [ -n \"\$k\" ] && kill \$k" \
+        || { echo "no concentrator pppd in $RIG_NS for peer $la"; return 1; }
+    else
+      $D1 "i=\$(ip -o -4 addr show | awk -v a='peer $la/' 'index(\$0, a){print \$2; exit}'); [ -n \"\$i\" ] && sudo kill \$(cat /run/\$i.pid 2>/dev/null || cat /var/run/\$i.pid)" \
+        || { echo "no concentrator pppd for peer $la"; return 1; }
+    fi
     sleep "$DOWN_HOLD"
   fi
   return 0
 }
 
-cleanup(){ servers_stop >/dev/null 2>&1; session_up || dut "sudo systemctl start $UNIT"; }
+cleanup(){ servers_stop >/dev/null 2>&1; dut "echo 1 | sudo tee $KSW >/dev/null"; session_up || dut "sudo systemctl start $UNIT"; }
 trap cleanup EXIT
 
 # preflight
@@ -129,9 +157,12 @@ t0=$(date +%s); stop=""; reused=0; changed=0
 for c in $(seq 1 "$CYCLES"); do
   note=""
   how=client; { [ "$MODE" = server ] || { [ "$MODE" = mix ] && [ $((c % SERVER_EVERY)) = 0 ]; }; } && how=server
+  [ "$MODE" = kill ] && how=kill; KOFF=""
   wait_up || { stop="session not up before cycle"; break; }
   s0=$(sid)
   dur=$TRAFFIC_S; [ "$how" = server ] && dur=$SERVER_TRAFFIC_S
+  # the off phase waits up to DRAIN_S for the flush: the flows must outlast it
+  [ "$how" = kill ] && dur=$((TRAFFIC_S+DRAIN_S))
   clients_start "$dur"; sleep 4
   hp=$(hw_delta); r_up=$(recs)
   flap "$how" || { stop="flap failed ($how)"; }
@@ -156,6 +187,14 @@ for c in $(seq 1 "$CYCLES"); do
   [ "$hq" -gt 0 ] || stop=${stop:-"no hardware hits after the reconnect (stale state or software path)"}
   [ -z "$short" ] || stop=${stop:-"flows without delivered data: $short"}
   [ "$err" -eq 0 ] || { stop=${stop:-"kernel errors"}; printf '%s\n' "$out" | grep -E "$ERR" | head -5; }
+  if [ "$how" = kill ]; then
+    read -r ko_r ko_h ko_w <<< "${KOFF:-x x x}"
+    echo "      off: records $ko_r (baseline $base_recs), hw hits $ko_h, kernel pkts $ko_w"
+    [ "$ko_r" = "$base_recs" ] || stop=${stop:-"records not flushed by pppoe_offload=0 ($ko_r)"}
+    [ "$ko_h" = 0 ] || stop=${stop:-"hardware hits while pppoe_offload=0 ($ko_h)"}
+    [ "${ko_w:-0}" -gt 0 ] 2>/dev/null || stop=${stop:-"no kernel forwarding while pppoe_offload=0"}
+    [ "$s0" = "$s1" ] || stop=${stop:-"session ID changed across the kill switch"}
+  fi
   [ -n "$stop" ] && { echo "STOP at cycle $c: $stop"; FAILS=$((FAILS+1)); break; }
 done
 echo "session IDs: changed on $changed cycle(s), same ID on $reused cycle(s)"
