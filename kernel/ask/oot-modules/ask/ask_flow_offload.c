@@ -831,6 +831,58 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
 	return 0;
 }
 
+static int ask_fe_flow_insert(const struct ask_flow_key *key,
+			      unsigned long enq_off, u32 tx_fqid,
+			      const struct net_device *egress_dev);
+static void ask_fe_flow_remove(const struct ask_flow_key *key);
+
+/*
+ * A14: publish one cookie with a (possibly new) next-hop MAC. The ehash FE
+ * record carries the L2 rewrite, so the SW table entry alone is not enough:
+ * the silicon record must be re-created with the new key->next_hop_mac. On
+ * any failure the cookie is left out of the HW-backed table (kernel path).
+ */
+static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
+			       const struct ask_flow_key *key, u32 oif,
+			       u32 action_flags, enum ask_hw_dir dir,
+			       u32 generation)
+{
+	struct ask_flow *cur;
+	bool hw_backed = false;
+	u32 hw_id = 0, tx_fqid = 0;
+	int rc;
+
+	rc = ask_flow_insert_owned(t, cookie, key, oif, action_flags, dir,
+				   generation, &hw_id);
+	if (rc)
+		return rc;
+
+	rcu_read_lock();
+	cur = ask_flow_lookup(t, cookie);
+	if (cur)
+		hw_backed = cur->hw_backed;
+	rcu_read_unlock();
+	if (!hw_backed)
+		return 0;
+
+	rc = ask_hw_flow_get_sink_fqid(hw_id, &tx_fqid);
+	if (!rc && !tx_fqid)
+		rc = -EAGAIN;
+	if (!rc)
+		rc = ask_fe_flow_insert(key, ask_hw_get_enq_fe_off(), tx_fqid,
+					NULL);
+	if (rc) {
+		(void)ask_flow_remove_owned(t, cookie, generation);
+		return rc;
+	}
+	if (!ask_flow_gen_is_current(t, cookie, generation)) {
+		ask_fe_flow_remove(key);
+		(void)ask_flow_remove_owned(t, cookie, generation);
+		return -ESTALE;
+	}
+	return 0;
+}
+
 /*
  * ask_flow_neigh_mac_changed - re-point offloaded flows at a next-hop whose
  * MAC changed, killing stale-MAC blackholing (T-M6-3).
@@ -848,7 +900,6 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 	struct ask_flow_table *t = ask_flow_default_table();
 	struct ask_neigh_mac_fixup *fx, *tmp;
 	struct ask_neigh_mac_ctx ctx;
-	u32 hw_id = 0;
 	int rc;
 
 	if (!t || !dev || !dst_ip || !new_mac)
@@ -920,12 +971,15 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 			kfree(fx);
 			continue;
 		}
+		/* The silicon record is keyed on the 5-tuple (not the MAC), so
+		 * it must be deleted before it can be re-created. */
+		ask_fe_flow_remove(&old_key);
 		/* Re-check ownership after the remove: a DESTROY racing the
 		 * remove tombstones the cookie, and insert_owned will then
 		 * refuse to republish (returns -ESTALE) — no resurrection. */
-		rc = ask_flow_insert_owned(t, fx->cookie, &fx->key, fx->oif,
-					   fx->action_flags, fx->dir,
-					   fx->generation, &hw_id);
+		rc = ask_neigh_republish(t, fx->cookie, &fx->key, fx->oif,
+					 fx->action_flags, fx->dir,
+					 fx->generation);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == -ESTALE) {
@@ -935,10 +989,9 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 		} else if (rc) {
 			int restore_rc;
 
-			restore_rc = ask_flow_insert_owned(t, fx->cookie, &old_key,
-							   old_oif, old_action_flags,
-							   old_dir, fx->generation,
-							   &hw_id);
+			restore_rc = ask_neigh_republish(t, fx->cookie, &old_key,
+							 old_oif, old_action_flags,
+							 old_dir, fx->generation);
 			if (restore_rc == -EEXIST || restore_rc == -ESTALE)
 				restore_rc = 0;
 			if (restore_rc)

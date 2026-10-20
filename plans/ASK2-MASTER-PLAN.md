@@ -219,6 +219,19 @@ programming recipes. Resolve contradictions before touching code.
     `ipv4.ttl`/`ipv6.hop` == 0 or 1 and sends those frames to the host
     (`nia=0x500002`) before the FE lookup. The TTL fix therefore depends on
     the same soft-parser load path that blocks F-266.
+  **2026-10-20 `.185` acceptance (image `1310`, `6.18.57-vyos`).** F-266
+  transit PASS (300 flows, peak 25 `HW_OFFLOAD`/50 ehash, 0 after close,
+  MURAM 52922, `pcd-snapshot diff` clean). A14 TTL/hop-limit PASS (v4 TTL 1/0
+  and v6 hlim 1/0 return ICMP; TTL 2 forwarded). A14 stale-neighbour FAIL:
+  after `ip neigh replace … lladdr 02:00:00:aa:bb:cc`, ~465 pkt/s kept going to
+  the old MAC although the journal logged `stale-MAC rebuild … rc=0`. Root
+  cause: `ask_flow_neigh_mac_changed()` rebuilt only the SW table and HW
+  cookie; the ehash FE record carrying the L2 rewrite was never rewritten.
+  Fix (uncommitted, not yet silicon-tested): the rebuild deletes the old FE
+  record and `ask_neigh_republish()` re-inserts it with the new MAC, with
+  rollback to the kernel path on failure. Re-run the stale-neighbour recipe
+  on a build containing it. Deferred-insert paths (`PR14y`/`PR14z10`) call
+  `ask_flow_insert_owned` without an FE insert; not yet audited.
 
   Stale neighbour: reproduced with `neigh replace` to a test MAC. 0 frames
   carried the new MAC; the journal logged `skip stale-MAC rebuild ...
