@@ -50,6 +50,18 @@ produces IPv6 PTB in the tested configuration. Keep MSS clamping recommended.
 The old single-session flap and fragmentation probes are archived successes,
 not substitutes for the unrun 10,000-cycle/exhaustion gates.
 
+**10,000-cycle lifecycle gate: IN PROGRESS (launched 2026-10-20 15:15 UTC).** DUT2 `.158`,
+image `2026.10.20-1310-rolling`, 6.18.57-vyos. Boot type: the 14:04 UTC cold boot, which
+had already carried the F-269 shared-bucket and regression runs. Records and MURAM were
+back at baseline (0 / 52922) before launch, but the boot was not pristine. Driver:
+`MODE=mix CYCLES=10000` (`SERVER_EVERY=5`, `DRAIN_EVERY=10`), run on dell2 via
+`~/testrig/launch-churn-158.sh` (PID 475816). Log:
+`dell2:~/testrig/out/pppoe-churn-158-10k-1020-1515.log`. Concentrator:
+`ask2-pppoe-server-n106.service`. Cycles 1–10 passed, including server-side cycles 5 and 10
+and the first drain (recs 0, MURAM 52922, err 0). A cycle takes about 48 s, so the run should
+finish around 2026-10-26. Check progress with `tail ~/testrig/out/pppoe-churn-158-10k-1020-1515.log`
+on dell2.
+
 The session-lifecycle driver is `bin/testrig-pppoe-churn.sh` (ASK2 only; run
 on gen2 with `RUN_ON=gen2`). Each cycle runs 100 Mbit/s TCP per flow for v4/v6
 encap and decap, requires hardware hits (per-record `pkt_count` growth in
