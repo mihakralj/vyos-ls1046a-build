@@ -746,7 +746,7 @@ two builds and two boots, with 10 runs per cell except WireGuard (3).
 | Bridge learned/static and same-tagging | B6/B7a silicon acceptance is dated, not absent | Current-image functional repeat and vendor throughput per VLAN mode |
 | Ingress policer | Historical cap measurements on non-ASK ports | Current wire rate accuracy ±15%; ASK-path coexistence is missing functionality |
 | 64-byte pps / IMIX | Historical results, not 0551 acceptance | Same-rig offered/delivered/loss sweep and overload recovery |
-| Connection/session/install scale | Not accepted; F-266 conntrack close blocks claims | Correct close first, then held-session CPS, 8k PDR and insert latency/rate |
+| Connection/session/install scale | Not accepted; F-266 close fix proven live on silicon 2026-10-20, CI image retest pending | Retest close on the CI image, then held-session CPS (SYN now punted to one CPU, as on the vendor), 8k PDR and insert latency/rate |
 | Latency and mixed-feature soak | Pending | Latency beside offloaded traffic; 30-minute error/resource gate |
 | WireGuard | Software on both stacks; steering decision pending | Fresh tunnel per rep, eth4 bidir RPS A/B and eth3 10 reps |
 | IPsec, multicast, tunnels, QoS, remaining bridge/VLAN/PPPoE gaps | Not implemented in full | Implementation plus all per-feature gates before performance verdicts |

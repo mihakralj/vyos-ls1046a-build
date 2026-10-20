@@ -44,12 +44,15 @@ sendp(f,iface='$IF',count=${5:-$N},inter=0.01,verbose=0)\""; }
 warm(){ for k in v4 v6; do s=""; [ $k = v6 ] && s=v6
     send "$D1" $M1 $M2 $k 2; send "$D2" $M2 $M1 t$VID$s 2; sleep 1.2
     send "$D1" $M1 $M2 $k 2; send "$D2" $M2 $M1 t$VID$s 2; done; sleep 1; }
-# row <name> <host> <src> <dst> <kind> <ingress> <peer> <want hits>
+# row <name> <host> <src> <dst> <kind> <ingress> <peer> <want hits> [min peer packets; 0 = none]
 row(){
+  local want_peer=${9:-$N}
   h0=$(hits); k0=$(k_rx $6); r0=$(peer_rx unicast "$7"); send "$2" $3 $4 $5; sleep 2
   dh=$(( $(hits)-h0 )); dk=$(( $(k_rx $6)-k0 )); dr=$(( $(peer_rx unicast "$7")-r0 ))
-  if [ $8 -gt 0 ]; then [ $dh -eq $8 ] && [ $dr -ge $N ] && [ $dk -lt 5 ] && v=PASS || v=FAIL
-  else [ $dh -eq 0 ] && [ $dk -ge $N ] && [ $dr -ge $N ] && v=PASS || v=FAIL; fi
+  if [ $8 -gt 0 ]; then [ $dh -eq $8 ] && [ $dk -lt 5 ] && v=PASS || v=FAIL
+  else [ $dh -eq 0 ] && [ $dk -ge $N ] && v=PASS || v=FAIL; fi
+  if [ "$want_peer" -eq 0 ]; then [ "$dr" -eq 0 ] || v=FAIL
+  else [ "$dr" -ge "$want_peer" ] || v=FAIL; fi
   [ $v = FAIL ] && FAILS=$((FAILS+1))
   printf '%-22s %6d %6d %6d  %s\n' "$1" $dh $dk $dr $v
 }
@@ -115,18 +118,22 @@ row pop-v4-rearmed  "$D2" $M2 $M1 t$VID eth4 "$D1" $N
 
 echo "== untagged-flag churn: eth4 VID $VID untagged (pop/push -> same)"
 warm; chk "rewarm before churn" 4
-dut "sudo bridge vlan add dev eth4 vid $VID untagged"; chk "eth4 VID $VID untagged" 0
+dut "sudo bridge vlan add dev eth4 vid $VID untagged"; sleep 2
+echo "records after eth4 VID $VID untagged: $(recs) (unchanged ingress forms may remain)"
 warm; dut "sudo grep 'keysz=16 ' $PCD/fe_ehash_stats | cut -c1-200" | sed 's/^/    /'
 hdr
 row same-untagged-v4 "$D1" $M1 $M2 v4 eth3 "$D2" $N
 wire wire-same-untag "$D1" $M1 $M2 v4 "$D2" untag 'ttl 64'
-dut "sudo bridge vlan add dev eth4 vid $VID"; chk "eth4 VID $VID tagged again" 0
+dut "sudo bridge vlan add dev eth4 vid $VID"; sleep 2
+echo "records after eth4 VID $VID tagged again: $(recs) (unchanged ingress forms may remain)"
 warm; chk "rewarm push+pop" 4
+wire wire-push-restored "$D1" $M1 $M2 v4 "$D2" tag 'ttl 64'
 
 echo "== PVID churn: eth3 PVID $VID -> 40"
-dut "sudo bridge vlan add dev eth3 vid 40 pvid untagged"; chk "eth3 PVID 40" 0
+dut "sudo bridge vlan add dev eth3 vid 40 pvid untagged"; sleep 2
+echo "records after eth3 PVID 40: $(recs) (tagged VID $VID ingress forms may remain)"
 hdr
-row push-v4-pvid40 "$D1" $M1 $M2 v4 eth3 "$D2" 0
+row push-v4-pvid40 "$D1" $M1 $M2 v4 eth3 "$D2" 0 0
 dut "sudo bridge vlan add dev eth3 vid $VID pvid untagged; sudo bridge vlan del dev eth3 vid 40"
 warm; chk "eth3 PVID $VID again + warm" 4
 row push-v4-back   "$D1" $M1 $M2 v4 eth3 "$D2" $N

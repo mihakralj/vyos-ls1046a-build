@@ -7,32 +7,37 @@
 # entry over a learned one, then iperf3 with bridge_offload 1 vs 0 (THROUGHPUT=0 skips it).
 # B7a rows (VLAN=0 skips them): tagged frames on a non-filtering bridge (and a PCP 5 record, a vif
 # that takes the VLAN away from the bridge), then a VLAN-filtering bridge with access, trunk,
-# filtered and access->trunk (stays software) pairs.
+# filtered and access->trunk (before the destination is learned in that VLAN) pairs.
 # Needs an ask.ko with B6, eth3/eth4 engaged at boot, a cold boot. Builds the bridge with ip(8)
 # outside the VyOS config: it deletes eth3.10/eth4.20 and the eth3/eth4 addresses, so REBOOT the
 # DUT afterwards. Static FDB entries mark their MAC as user-added until reboot (never taken over),
 # so run this on a fresh boot.
+# Settings: DUT (SSH target), GEN1/GEN2, NS (empty = root namespace), IF (generator port).
 set -u
 FAILS=0
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
-DUT="ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185"
-D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
-IF=enp1s0f0np0; M1=3c:fd:fe:2a:f0:20; M2=3c:fd:fe:2a:ec:80; UNK=02:00:00:aa:bb:02; N=20
+DUTH=${DUT:-vyos@192.168.1.185}
+DUT="ssh -n $SSHO -i $HOME/.ssh/vyos_key $DUTH"
+D1="ssh -n $SSHO ${GEN1:-admin@192.168.1.112}"; D2="ssh -n $SSHO ${GEN2:-admin@192.168.1.113}"
+NS=${NS:-}; IF=${IF:-enp1s0f0np0}; UNK=02:00:00:aa:bb:02; N=20
+NX=""; [ -n "$NS" ] && NX="ip netns exec $NS"
 P=/sys/module/ask/parameters/bridge_offload; PCD=/sys/kernel/debug/fman_pcd/0; BR=br-b6
 FAM="sudo /usr/local/bin/vyos-offload-ask --port 0x10 family"
 
 dut(){ $DUT "$1"; }
+M1=$($D1 "sudo $NX cat /sys/class/net/$IF/address")
+M2=$($D2 "sudo $NX cat /sys/class/net/$IF/address")
 recs(){ dut "sudo grep -c 'keysz=16 ' $PCD/fe_ehash_stats"; }
 # chk <name> <want records>: settle, then compare the record count
 chk(){ sleep 2; r=$(recs); [ "$r" = "$2" ] && v=PASS || v=FAIL; printf '%-28s records %2s (want %s)  %s\n' "$1" "$r" "$2" "$v"
   [ $v = FAIL ] && { FAILS=$((FAILS+1)); dut "sudo grep 'keysz=16 ' $PCD/fe_ehash_stats | cut -c1-240; sudo bridge vlan show; sudo bridge fdb show br $BR | grep -v permanent" | sed 's/^/    /'; }; return 0; }
 hits(){ dut "sudo awk '/keysz=16 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
 k_rx(){ dut "cat /sys/class/net/$1/statistics/rx_packets"; }
-peer_rx(){ $2 "sudo ethtool -S $IF | awk '/port.rx_$1:/{print \$2}'"; }
+peer_rx(){ $2 "sudo $NX ethtool -S $IF | awk '/port.rx_$1:/{print \$2}'"; }
 cpu(){ dut "head -1 /proc/stat"; }
 fdbflags(){ dut "sudo bridge fdb show br $BR | grep -i '^$1 ' | grep -v permanent | head -1"; }
 # send <host> <src mac> <dst mac> <kind> [count]; kind t<vid>[p<pcp>] = tagged IPv4
-send(){ $1 "sudo python3 -c \"from scapy.all import *
+send(){ $1 "sudo $NX python3 -c \"from scapy.all import *
 import re
 e=Ether(dst='$3',src='$2')
 t=re.fullmatch(r't(\\d+)(?:p(\\d))?','$4')
@@ -125,7 +130,7 @@ if [ "${VLAN:-1}" = 1 ]; then
   warm t20; chk "trunk VID 20 + warm" 6
   row t20-trunk    "$D1" $M1 $M2 t20   eth3 "$D2" unicast $N
   row t10-filtered "$D1" $M1 $M2 t10   eth3 "$D2" unicast 0
-  # eth3 access VID 30, eth4 trunk VID 30: untagged in, tagged out needs a push (B7b).
+  # VID 30 has no learned destination yet; pop/push admission is tested by the B7b harness.
   # The two eth3->eth4 untagged records die; that was the last record of SA M1 (eth3, VID 1), so
   # its taken-over FDB entry is handed back by deleting it (ask_bridge_sa_release), which takes
   # the eth4->eth3 untagged records (DA M1, VID 1) and then M2's entry with it. M1's untagged
@@ -133,7 +138,7 @@ if [ "${VLAN:-1}" = 1 ]; then
   dut "sudo bridge vlan add dev eth3 vid 30 pvid untagged; sudo bridge vlan add dev eth4 vid 30"
   chk "eth3 PVID 30" 2
   row v4-access-to-trunk "$D1" $M1 $M2 v4 eth3 "$D2" unicast 0
-  chk "access->trunk stays software" 2
+  chk "unlearned VID 30 stays software" 2
   row v4-rev-after-pvid "$D2" $M2 $M1 v4  eth4 "$D1" unicast 0
   row t20-after-pvid    "$D1" $M1 $M2 t20 eth3 "$D2" unicast $N
   dut "sudo ip link set $BR type bridge vlan_filtering 0"; warm; chk "vlan_filtering 0 + warm" 4
@@ -141,16 +146,16 @@ fi
 
 if [ "${THROUGHPUT:-1}" = 1 ]; then
   echo "== throughput dell1 -> dell2 across $BR (iperf3 -P 4, 15 s)"
-  $D1 "sudo ip addr add 10.99.77.112/24 dev $IF"; $D2 "sudo ip addr add 10.99.77.113/24 dev $IF"
+  $D1 "sudo $NX ip addr add 10.99.77.112/24 dev $IF"; $D2 "sudo $NX ip addr add 10.99.77.113/24 dev $IF"
   for off in 1 0; do
     dut "echo $off | sudo tee $P >/dev/null"; sleep 3
     h0=$(hits); c0=$(cpu)
-    bps=$($D1 "iperf3 -c 10.99.77.113 -B 10.99.77.112 -P 4 -t 15 -O 3 -Z -J" | python3 -c 'import json,sys;print(round(json.load(sys.stdin)["end"]["sum_received"]["bits_per_second"]/1e9,2))')
+    bps=$($D1 "sudo $NX iperf3 -c 10.99.77.113 -B 10.99.77.112 -P 4 -t 15 -O 3 -Z -J" | python3 -c 'import json,sys;print(round(json.load(sys.stdin)["end"]["sum_received"]["bits_per_second"]/1e9,2))')
     c1=$(cpu); dh=$(( $(hits)-h0 ))
     busy=$(printf '%s\n%s\n' "$c0" "$c1" | awk '{for(i=2;i<=11;i++)a[NR,i]=$i} END{for(i=2;i<=11;i++){d=a[2,i]-a[1,i];T+=d;if(i==5||i==6)id+=d}; printf "%.1f",100*(T-id)/T}')
     printf 'bridge_offload=%s  %6s Gbit/s  DUT busy %5s%%  hw hits %d\n' $off "$bps" "$busy" $dh
   done
-  $D1 "sudo ip addr del 10.99.77.112/24 dev $IF"; $D2 "sudo ip addr del 10.99.77.113/24 dev $IF"
+  $D1 "sudo $NX ip addr del 10.99.77.112/24 dev $IF"; $D2 "sudo $NX ip addr del 10.99.77.113/24 dev $IF"
   dut "echo 1 | sudo tee $P >/dev/null"; warm; chk "bridge_offload back on + warm" 4
 fi
 
