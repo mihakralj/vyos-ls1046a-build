@@ -14,6 +14,7 @@ D1="ssh -n $SSHO ${GEN1:-admin@192.168.1.112}"; D2="ssh -n $SSHO ${GEN2:-admin@1
 NS=${NS:-}; NX=""; [ -n "$NS" ] && NX="ip netns exec $NS"
 IF=${IF:-enp1s0f0np0}
 SA=$($D1 "sudo $NX cat /sys/class/net/$IF/address")
+[ -n "$SA" ] || { echo "generator port $IF not found${NS:+ in netns $NS} on ${GEN1:-admin@192.168.1.112}"; exit 1; }
 OFF=/sys/kernel/debug/ask/offload; PCD=/sys/kernel/debug/fman_pcd/0
 
 dut(){ $DUT "$1"; }

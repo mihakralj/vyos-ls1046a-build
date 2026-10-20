@@ -67,6 +67,14 @@ it toggles `ask.pppoe_offload` 1→0→1 under traffic and requires zero records
 and zero hardware hits (software forwarding) while off, then a re-offload on
 the same flows. `RIG_NS=<netns>` runs both generators' commands as root inside
 that netns (the dual-DUT rig keeps the second DUT's ports in `n106`).
+The second DUT's concentrator is the dell1 unit `ask2-pppoe-server-n106.service`
+(`NetworkNamespacePath=/run/netns/n106`, `-I enp1s0f1np1`, `BindsTo=lab-n106.service`,
+installed by `bin/testrig-dell-net.sh gen1`). It survives pppoe-server crashes and dell1
+reboots. The root-namespace `ask2-pppoe-server.service` (`enp1s0f0np0`) serves the first DUT;
+leave it running. For multi-day runs use `RUN_ON=dell2` from `~/testrig` there, so the run
+survives control-VM restarts. Do not stop such a run with `pkill -f testrig-pppoe-churn` over
+SSH, because the pattern also matches the SSH command line and kills the session. Use `pgrep`
+plus `kill <pid>`.
 
 2026-10-18 warm smoke runs on `.185` (`2026.10.16-2012-rolling`, 6.18.55-vyos;
 validation of the driver, not gate evidence): one client cycle and one
