@@ -2531,17 +2531,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-265 per-insert log lines demoted"
 fi
 
-# F-266 (TCP control punt, 2026-10-15, default off): with offload_delay_ms=0
-# the FE swallows FIN/RST of offloaded TCP flows and conntrack keeps them
-# ESTABLISHED for ~7300 s. Adds fman_port_sp_attach() and exported
-# fman_pcd_tcp_ctl_punt_arm()/_disarm(): load the vendor TCP soft-parser
-# routine (tcp.flags & 7 -> HPNIA 0x500002, BMI enqueue to the default FQ) at
-# parser byte 0x40 with FMPR_RPIMAC[PEN] cleared and readback, then attach
-# the port's TCP HXS (slot 10) to label 0x20. Nothing runs until ask.ko
-# tcp_ctl_punt=1 arms an engaged port. After F-265.
+# F-266 (control punt, 2026-10-15; TTL 2026-10-20): with offload_delay_ms=0
+# the FE swallows FIN/RST of offloaded TCP flows (conntrack keeps them
+# ESTABLISHED for ~7300 s), drops IPv4 TTL 1 with no ICMP and rewrites IPv6
+# hop limit 1 -> 0 and 0 -> 255. Adds fman_port_sp_attach() and exported
+# fman_pcd_ctl_punt_set(): load the vendor soft-parser program
+# (specs/reference/ask2-sp/ctl_punt.xml; tcp.flags & 7, TTL/hop <= 1 ->
+# NIA/HPNIA 0x500002, BMI enqueue to the default FQ) at parser byte 0x40 with
+# FMPR_RPIMAC[PEN] cleared and readback, then attach the port's TCP (slot 10)
+# and IPv4/IPv6 (slots 5/6) HXS. ask.ko tcp_ctl_punt/ttl_punt (default 1) arm
+# ROUTED-engaged ports. After F-265.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_266.py" 2>&1
-    echo "### fman_pcd.c: F-266 TCP control punt (default off)"
+    echo "### fman_pcd.c: F-266 control punt (TCP SYN/FIN/RST, TTL/hop limit)"
 fi
 
 # F-267 (control-plane memory, 2026-10-16): ehash flow records and their F-175

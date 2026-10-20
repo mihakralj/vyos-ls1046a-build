@@ -631,7 +631,35 @@ u8     nat_flags;
 	 * context; NOT part of the FE key.
 	 */
 	u16    egress_mtu;
+	/*
+	 * A14 (2026-10-20): the resolved next hop this flow's next_hop_mac
+	 * came from — the gateway (or NAT-reply peer), not the 5-tuple dst —
+	 * and the netdev whose neighbour table holds it (the VLAN vif for a
+	 * PUSH flow). The neighbour-change rebuild matches on these. nh_ifindex
+	 * 0 = not neighbour-derived (PPPoE encap peer MAC); NOT part of the
+	 * FE key.
+	 */
+	u8     nh_ip[16];
+	u32    nh_ifindex;
 } __packed;
+
+/*
+ * A14: does a stored flow follow the neighbour (@l3_proto, @ifindex, @ip)?
+ * Pure predicate so KUnit can pin it without hardware.
+ */
+static inline bool ask_flow_key_follows_neigh(const struct ask_flow_key *k,
+					      u32 oif, u8 l3_proto, int ifindex,
+					      const u8 *ip, unsigned int addr_len)
+{
+	if (k->l3_proto != l3_proto)
+		return false;
+	if (k->vlan_edit_flags & ASK_VLANF_PPPOE_INSERT)
+		return false;
+	if (k->nh_ifindex)
+		return k->nh_ifindex == (u32)ifindex &&
+		       !memcmp(k->nh_ip, ip, addr_len);
+	return oif == (u32)ifindex && !memcmp(k->dst_ip, ip, addr_len);
+}
 
 /* ------------------------------------------------------------------------- */
 /* Canonical flow intent (T-M6-A1, 2026-08-18).                               */
