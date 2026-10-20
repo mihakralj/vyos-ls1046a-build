@@ -136,7 +136,7 @@ programming recipes. Resolve contradictions before touching code.
 
 | Priority | Work | Dependency / exit |
 |---|---|---|
-| 1 | **B7b access↔trunk pop/push** (active; silicon run 1 on `.155` image 2223 FAILED 2026-10-19 — bridge pop/push used the routed VLAN gate and `vlan_offload` toggle re-engaged L2 ports as ROUTED; fixes staged, need a new image) | F-268 bridge emitter flag (no TTL, mtu 0xffff) + ask.ko action/ingress-form enumeration; KUnit-pinned. Next: re-run `bin/testrig-bridge-b7b.sh` on `.155`, B7a/routed/NAT/PPPoE regressions. Runbook: `ASK2-BRIDGE-OFFLOAD-PLAN.md` §6.1 |
+| 1 | **B7b access↔trunk pop/push** (silicon gate and regression smoke checks PASS 2026-10-20 on cold-booted `.155`, image 0326, commit `1e845e2d`) | IPv4/IPv6 pop/push wire/hit/fallback/churn gates passed. On a second cold boot: B6/B7a zero failures; routed/NAT/VLAN/PPPoE quick matrix 23/23 HW. Teardown PCD state exact, MURAM unchanged. Separate F-266/A14 correctness, capacity/soak and vendor-parity gates remain open. Runbook: `ASK2-BRIDGE-OFFLOAD-PLAN.md` §6.1 |
 | 2 | F-266 FIN/RST transit and NAT correctness; A14 IPv6 TTL and stale-neighbour safety | Both FAILED 2026-10-18; must pass before connection-scale claims or new default-on safety paths |
 | 3 | Existing-feature acceptance: PPPoE cycles/exhaustion/soak, bridge B2/capacity (debugfs on `.149`), resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
 | 4 | IPsec Tier 1 reboot-clean, then Tier 2 design/bring-up | Full path required for parity |
@@ -156,7 +156,7 @@ programming recipes. Resolve contradictions before touching code.
   refreshed comparison. Preserve raw data; no jitter or outlier trimming.
 - **T-M6-SP3 / F-266:** establish and offload transit TCP; FIN and RST must
   reach conntrack while established data stays HW; test NAT44/NAT66 mapping
-  survival and clean disarm snapshot. Keep `tcp_ctl_punt=0` until all pass.
+  survival and clean disarm snapshot.
   The dormant feature is verified to make no PCD writes while off; the live
   arm path and TCP parser attachment were readback-verified. Use real transit
   endpoints on `10.99.1.0/24` and `10.99.2.0/24`; an earlier attempted test
@@ -175,7 +175,16 @@ programming recipes. Resolve contradictions before touching code.
   Thus the FIN-close gate did not pass; NAT44/NAT66 mapping tests were not run.
   The parameter was returned to `N`, test conntrack entries were deleted, and
   the final `pcd-snapshot diff` was clean with MURAM `used=52922` at baseline.
-  Keep F-266 default-off and the acceptance gate open.
+  **2026-10-20 root cause and silicon proof (`.156`, `0326`, cold boot).** The
+  routine ran but set only HPNIA; the parser hands the frame on by NIA (parse
+  result bytes 93-95), so it still went to KeyGen. With `$nia` added and the
+  words loaded live, 50/50 transit flows closed, with no conntrack or ehash
+  residue, and data stayed in the FE (spec
+  `ask2-soft-parser-lcv-scheme-select.md` §6s). F-266 is rewritten as
+  `fman_pcd_ctl_punt_set()` with the combined TCP + TTL program, and ask.ko
+  `tcp_ctl_punt` now **defaults to 1**. The gate closes after the CI image
+  repeats `f266.sh` N=300 on a cold boot. NAT44 FIN (the rig has no IPv4 NAT)
+  and the CPS cost of SYN going to one CPU are still to measure.
 - **A14:** TTL/hop-limit 0/1 must produce kernel ICMP time-exceeded;
   neighbour/route changes must not forward stale; no MURAM/DDR leak. Run the
   TTL/hop-limit boundary cases separately from F-266: test 0 and 1 for routed
@@ -195,6 +204,49 @@ programming recipes. Resolve contradictions before touching code.
   `ask-check` 36/36 and `pcd-snapshot diff` clean at final verification. The
   kernel-path baseline passes, but IPv6 TTL and stale-neighbour safety remain
   open A14 failures.
+  **2026-10-20 A14 re-measurement (`.156`, image `0326`, `6.18.57-vyos`,
+  warm boot).** Each probe was 5 scapy TCP ACKs on the same 5-tuple as a live
+  `[HW_OFFLOAD]` 5 Mbit/s iperf3 flow, dell1 to dell2.
+  - IPv4 TTL 2 is forwarded with TTL 1. TTL 1 and TTL 0 are dropped silently:
+    the DUT's `IcmpOutTimeExcds` stays 0. The 10-18 run on `.185` saw ICMP
+    instead; that discrepancy is unexplained.
+  - IPv6 hlim 2 is forwarded as 1, hlim 1 is **forwarded as hlim 0**, and
+    hlim 0 is **forwarded as hlim 255**. Microcode `UPDATE_HOPLIMIT` (0x29)
+    decrements without checking and wraps, so an IPv6 routing loop between
+    offloading routers never expires.
+  - The vendor never relies on microcode for this check. In
+    `dpa_app/files/etc/cdx_sp.xml`, the soft parser tests
+    `ipv4.ttl`/`ipv6.hop` == 0 or 1 and sends those frames to the host
+    (`nia=0x500002`) before the FE lookup. The TTL fix therefore depends on
+    the same soft-parser load path that blocks F-266.
+
+  Stale neighbour: reproduced with `neigh replace` to a test MAC. 0 frames
+  carried the new MAC; the journal logged `skip stale-MAC rebuild ...
+  (destroyed/superseded)`. There were two root causes, both fixed in ask.ko
+  and awaiting a CI build:
+  1. `ask_flow_offload_replace()` claimed the generation before the
+     egress-echo and dedup no-op returns. Each REPLACE reaches every bound
+     block, so those callbacks pushed the generation past the installed
+     flow's stamp, and the rebuild and pending replay skipped live flows.
+     The claim now happens after dedup.
+  2. The rebuild matched the 5-tuple dst on the physical oif instead of the
+     resolved next hop on its neighbour netdev, so gateway-routed, NAT-reply
+     and VLAN-push flows never matched. `ask_flow_key` now carries
+     `nh_ip`/`nh_ifindex`; PPPoE-encap flows are excluded. The predicate
+     `ask_flow_key_follows_neigh()` is pinned by KUnit
+     `ask_flow_test_neigh_follow_nexthop`.
+
+  **2026-10-20 TTL/hop-limit fix proven on silicon (`.156`, `0326`, cold
+  boot).** The vendor's IPv4/IPv6 soft-parser checks, loaded live together
+  with the F-266 TCP routine, punt TTL/hop limit 0 and 1 before KeyGen. IPv4
+  TTL 1/0 and IPv6 hop limit 1/0 on a live `[HW_OFFLOAD]` tuple each produced
+  10 ICMP/ICMPv6 time exceeded, TTL/hop 2 was forwarded as 1, nothing left
+  with hop limit 0 or 255, and 715 MB of bulk traffic stayed in the FE. The fix
+  ships in F-266 (IPv4/IPv6 HXS slots 5/6) behind ask.ko `ttl_punt`, default 1.
+  It still needs the CI image and a cold-boot retest (`ttl0.sh` FAM=4/6).
+
+  Harness: `ttl.sh`, `ttl0.sh`, `f266.sh`, `probe.py`, `neigh.sh`, `prsw.py` and
+  `pmda.py`, kept in the session evidence folder.
 - **A2 / A13 / scale:** repeat 64-byte loss/rate and IMIX; connection rate
   with held sessions, 8,000-session bidirectional PDR, install rate and first
   insert latency; measure latency beside HW traffic. External 20k CPS and
@@ -434,6 +486,7 @@ be silently consumed.
 
 | Item | Remaining issue / next gate |
 |---|---|
+| Ehash collision chain (2026-10-20) | Hardware never hits a non-head chained record: routed `.156`/0326 shows heads 472/472 hit and entries behind them 472/472 miss; bridge capacity fails the same way. These flows silently stay in software. Root cause: the 210.10.1 walker follows links only through vendor cumulative nodes (byte0 0x80), never from a regular record. Fix F-269 rebuilds each bucket of two or more flows as cumulative nodes (copy-on-write: switch the head, SYNC, then free). Pending CI, then the chain A/B and capacity retest (bridge plan §6.2). Bridge soak PASS 100/100 (2026-10-20) |
 | F-266 / conntrack close | Default-off; parser arm/readback proven, transit and NAT closure untested; §4.1 blocks scale acceptance |
 | IPv6 fragment-ID reuse | Concurrent oversize flows can corrupt reassembly; keep limitation and `ipv6_hw_frag=0` opt-out visible; PPPoE plan |
 | Short non-IP bridge frames | Historical FE hit-path freeze; restrict bridge to v4/v6 until a new cold-boot de-risk gate passes |
