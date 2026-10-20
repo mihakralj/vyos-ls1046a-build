@@ -807,11 +807,11 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
 	 */
 	if (!f->hw_backed)                          /* no HW backing to fix */
 		return 0;
-	if (f->key.l3_proto != ctx->l3_proto)
-		return 0;
-	if (f->oif != (u32)ctx->ifindex)
-		return 0;
-	if (memcmp(f->key.dst_ip, ctx->dst_ip, ctx->addr_len) != 0)
+	/* A14: match the resolved next hop on its neighbour netdev, not the
+	 * 5-tuple dst on the physical oif (gateway, NAT and VLAN flows). */
+	if (!ask_flow_key_follows_neigh(&f->key, f->oif, ctx->l3_proto,
+					ctx->ifindex, ctx->dst_ip,
+					ctx->addr_len))
 		return 0;
 	if (ether_addr_equal(f->key.next_hop_mac, ctx->new_mac))
 		return 0;                           /* MAC unchanged */
@@ -2765,21 +2765,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return -EOPNOTSUPP;
 	}
 
-	/*
-	 * T-M6-A3: claim ownership for this REPLACE up front. This bumps the
-	 * cookie's generation and clears any prior tombstone, so a DESTROY
-	 * that arrives while we resolve neighbours / install the FE record is
-	 * observed by the pre-publish gen check (insert_owned) and by the
-	 * pending/neigh workers. On registry OOM, fail to software rather
-	 * than publish an unguarded flow.
-	 */
-	generation = ask_flow_gen_next(t, (u64)f->cookie);
-	if (generation == 0) {
-		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx gen-alloc failed — SW fallback\n",
-				    f->cookie);
-		return -EOPNOTSUPP;
-	}
-
 	rc = ask_parse_match(f, &key);
 	if (rc) {
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_match=%d) cookie=0x%lx\n",
@@ -3248,6 +3233,27 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	}
 
 	/*
+	 * T-M6-A3: claim ownership for this REPLACE. This bumps the cookie's
+	 * generation and clears any prior tombstone, so a DESTROY that
+	 * arrives while we resolve neighbours / install the FE record is
+	 * observed by the pre-publish gen check (insert_owned) and by the
+	 * pending/neigh workers. On registry OOM, fail to software rather
+	 * than publish an unguarded flow.
+	 *
+	 * A14 (2026-10-20): claimed only AFTER the egress-echo and dedup
+	 * no-op returns. Every REPLACE reaches every bound block; claiming
+	 * earlier let those no-op callbacks advance the generation past the
+	 * installed flow's stamp, so the neighbour rebuild and pending replay
+	 * treated live flows as superseded and never repaired a stale MAC.
+	 */
+	generation = ask_flow_gen_next(t, (u64)f->cookie);
+	if (generation == 0) {
+		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx gen-alloc failed — SW fallback\n",
+				    f->cookie);
+		return -EOPNOTSUPP;
+	}
+
+	/*
 	 * PR14j: resolve the OH-chain L2 header.  We need
 	 *   egress_mac   = egress netdev's own MAC
 	 *   next_hop_mac = neigh ARP entry for dst_ip on egress_dev
@@ -3287,6 +3293,14 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	else
 		ask_resolve_neigh_v4(neigh_dev, dst_ip,
 				     key.next_hop_mac, key.egress_mac);
+
+	if (neigh_dev) {
+		key.nh_ifindex = neigh_dev->ifindex;
+		if (is_v6)
+			memcpy(key.nh_ip, &dst_ip6, sizeof(dst_ip6));
+		else
+			memcpy(key.nh_ip, &dst_ip, sizeof(dst_ip));
+	}
 
 	if (neigh_dev != egress_dev)
 		dev_put(neigh_dev);

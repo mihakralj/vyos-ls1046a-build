@@ -454,7 +454,7 @@ struct ask_hw_port {
 	u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
 	bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
 	enum fman_pcd_fe_profile engaged_profile; /* valid while offload_engaged */
-	bool            tcp_punt_armed; /* F-266 TCP SYN/FIN/RST punt attached */
+	u32             punt_mask;      /* F-266 FMAN_PCD_PUNT_* armed */
 };
 
 struct ask_hw_pcd {
@@ -499,54 +499,72 @@ struct ask_hw_pcd {
 static struct ask_hw_pcd *ask_hw_pcd_inst;
 
 /*
- * TCP control punt (F-266, default off). With offload_delay_ms=0 the FE
- * forwards the FIN/RST of an offloaded TCP flow in hardware, so the kernel
- * never sees the close and conntrack keeps the entry ESTABLISHED for ~7300 s.
- * When set, every port engaged with the ROUTED profile runs a TCP soft-parser
- * routine that sends SYN/FIN/RST to the port's default RX FQ (the kernel),
- * skipping KeyGen and the FE; the flowtable sees the close and tears the
- * flow down. Writing the parameter arms or disarms ports that are already
- * engaged. If arming fails, the port engages without the punt and logs a
- * warning.
+ * Control punt (F-266). On every port engaged with the ROUTED profile a
+ * soft-parser routine sends selected frames to the port's default RX FQ (the
+ * kernel), skipping KeyGen and the FE, as the vendor's cdx_sp.xml does:
+ *
+ * tcp_ctl_punt  TCP SYN/FIN/RST. With offload_delay_ms=0 the FE forwards the
+ *               FIN/RST of an offloaded flow, the kernel never sees the
+ *               close and conntrack keeps the entry ESTABLISHED for ~7300 s.
+ * ttl_punt      IPv4 TTL <= 1 and IPv6 hop limit <= 1 (A14). The FE drops
+ *               TTL 1 with no ICMP and rewrites hop limit 1 -> 0 and
+ *               0 -> 255; the kernel sends ICMP time exceeded instead.
+ *
+ * Both default on. Punted frames skip KeyGen RSS, so they land on one CPU.
+ * Writing a parameter re-applies it to ports that are already engaged. If
+ * arming fails, the port stays engaged without that punt and logs a warning.
  */
-static bool ask_tcp_ctl_punt;
+static bool ask_tcp_ctl_punt = true;
+static bool ask_ttl_punt = true;
+
+/* p->punt_mask after a failed change: matches no wanted mask */
+#define ASK_HW_PUNT_UNKNOWN	U32_MAX
 
 /* Caller holds h->lock, or has exclusive access to h (teardown). */
-static void ask_hw_tcp_punt_apply(struct ask_hw_pcd *h, struct ask_hw_port *p,
-				  bool want)
+static void ask_hw_punt_apply(struct ask_hw_pcd *h, struct ask_hw_port *p,
+			      u32 want)
 {
 	int rc;
 
-	if (want == p->tcp_punt_armed)
+	if (want == p->punt_mask)
 		return;
-	if (want)
-		rc = fman_pcd_tcp_ctl_punt_arm(h->fman, p->port_id);
-	else
-		rc = fman_pcd_tcp_ctl_punt_disarm(h->fman, p->port_id);
-	if (rc == -ENOENT && !want)
-		rc = 0;
+	rc = fman_pcd_ctl_punt_set(h->fman, p->port_id, want);
 	if (rc) {
-		/* A failed disarm keeps the flag so the next disarm retries. */
-		ask_pr_warn("hw: TCP control punt %s on port 0x%02x failed: %d\n",
-			    want ? "arm" : "disarm", p->port_id, rc);
+		/*
+		 * A failed call may still have changed some HXS (fman_pcd tracks
+		 * each one), so the hardware state is now unknown: mark it so
+		 * the next apply, including 0 from disengage/teardown, always
+		 * calls fman_pcd_ctl_punt_set() again and converges.
+		 */
+		ask_pr_warn("hw: control punt 0x%x -> 0x%x on port 0x%02x failed: %d\n",
+			    p->punt_mask, want, p->port_id, rc);
+		p->punt_mask = ASK_HW_PUNT_UNKNOWN;
 		return;
 	}
-	p->tcp_punt_armed = want;
-	ask_pr_info("hw: TCP control punt %s on port 0x%02x\n",
-		    want ? "armed" : "disarmed", p->port_id);
+	ask_pr_info("hw: control punt 0x%x -> 0x%x on port 0x%02x\n",
+		    p->punt_mask, want, p->port_id);
+	p->punt_mask = want;
 }
 
-static bool ask_hw_tcp_punt_wanted(const struct ask_hw_port *p)
+static u32 ask_hw_punt_wanted(const struct ask_hw_port *p)
 {
-	return READ_ONCE(ask_tcp_ctl_punt) && p->in_use && p->offload_engaged &&
-	       p->engaged_profile == FMAN_PCD_FE_PROFILE_ROUTED;
+	u32 mask = 0;
+
+	if (!p->in_use || !p->offload_engaged ||
+	    p->engaged_profile != FMAN_PCD_FE_PROFILE_ROUTED)
+		return 0;
+	if (READ_ONCE(ask_tcp_ctl_punt))
+		mask |= FMAN_PCD_PUNT_TCP_CTL;
+	if (READ_ONCE(ask_ttl_punt))
+		mask |= FMAN_PCD_PUNT_TTL;
+	return mask;
 }
 
 /*
  * Runs under kernel_param_lock(THIS_MODULE); ask_hw_pcd_teardown() clears
  * ask_hw_pcd_inst under the same lock, so h cannot be freed here.
  */
-static int ask_tcp_ctl_punt_set(const char *val, const struct kernel_param *kp)
+static int ask_punt_param_set(const char *val, const struct kernel_param *kp)
 {
 	struct ask_hw_pcd *h;
 	unsigned int i;
@@ -558,19 +576,22 @@ static int ask_tcp_ctl_punt_set(const char *val, const struct kernel_param *kp)
 	mutex_lock(&h->lock);
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
 		if (h->port[i].in_use)
-			ask_hw_tcp_punt_apply(h, &h->port[i],
-					      ask_hw_tcp_punt_wanted(&h->port[i]));
+			ask_hw_punt_apply(h, &h->port[i],
+					  ask_hw_punt_wanted(&h->port[i]));
 	mutex_unlock(&h->lock);
 	return 0;
 }
 
-static const struct kernel_param_ops ask_tcp_ctl_punt_ops = {
-	.set = ask_tcp_ctl_punt_set,
+static const struct kernel_param_ops ask_punt_param_ops = {
+	.set = ask_punt_param_set,
 	.get = param_get_bool,
 };
-module_param_cb(tcp_ctl_punt, &ask_tcp_ctl_punt_ops, &ask_tcp_ctl_punt, 0644);
+module_param_cb(tcp_ctl_punt, &ask_punt_param_ops, &ask_tcp_ctl_punt, 0644);
 MODULE_PARM_DESC(tcp_ctl_punt,
-		 "Send TCP SYN/FIN/RST on ROUTED-engaged ports to the kernel so conntrack sees offloaded flows close (default 0; applies to engaged ports on write)");
+		 "Send TCP SYN/FIN/RST on ROUTED-engaged ports to the kernel so conntrack sees offloaded flows close (default 1; applies to engaged ports on write)");
+module_param_cb(ttl_punt, &ask_punt_param_ops, &ask_ttl_punt, 0644);
+MODULE_PARM_DESC(ttl_punt,
+		 "Send IPv4 TTL <= 1 and IPv6 hop limit <= 1 on ROUTED-engaged ports to the kernel for ICMP time exceeded (default 1; applies to engaged ports on write)");
 
 /* F-113: kmem_cache for struct ask_hw_flow_cookie — O(1) alloc/free
  * under heavy flow churn (50k+ active flows).  Replaces per-entry
@@ -888,7 +909,7 @@ void ask_hw_pcd_teardown(void)
 	if (!h)
 		return;
 
-	/* F-266: fence ask_tcp_ctl_punt_set(), which dereferences the instance. */
+	/* F-266: fence ask_punt_param_set(), which dereferences the instance. */
 	kernel_param_lock(THIS_MODULE);
 	ask_hw_pcd_inst = NULL;
 	kernel_param_unlock(THIS_MODULE);
@@ -926,7 +947,7 @@ void ask_hw_pcd_teardown(void)
 	 * debugfs loopback (filp_open + kernel_write). */
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
 		if (h->port[i].in_use)
-			ask_hw_tcp_punt_apply(h, &h->port[i], false);	/* F-266 */
+			ask_hw_punt_apply(h, &h->port[i], 0);	/* F-266 */
 		if (h->port[i].in_use && h->port[i].offload_engaged) {
 			fman_pcd_fe_disengage(h->fman, h->port[i].port_id);
 			h->port[i].offload_engaged = false;
@@ -1334,7 +1355,7 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 	else
 		set_bit(hw_port_id, ask_hw_port_l2);
 	/* F-266: optional; a failure leaves the port engaged without it. */
-	ask_hw_tcp_punt_apply(h, p, ask_hw_tcp_punt_wanted(p));
+	ask_hw_punt_apply(h, p, ask_hw_punt_wanted(p));
 	ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
 
 out_unlock:
@@ -1479,8 +1500,8 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 		return;                 /* idempotent no-op */
 	}
 
-	/* F-266: undo the TCP control punt first (armed last at engage). */
-	ask_hw_tcp_punt_apply(h, p, false);
+	/* F-266: undo the control punt first (armed last at engage). */
+	ask_hw_punt_apply(h, p, 0);
 
 	/* T-M6-8 R4c-3: tear down any VLAN CC tree fronting this port BEFORE
 	 * disengaging the FE-VM, so the CC graft never outlives the FE_ENTER
