@@ -2551,14 +2551,10 @@ fi
 # context at +320) instead of two page-rounded dma_alloc_coherent() calls
 # (~9 KiB MemAvailable per flow on .185, 2026-10-13). Remaining per-insert
 # log lines (F-219 eviction, F-197 FQID fallback, F-251 drop trace) go to
-# debug. Then bin/test-ehash-delete.py runs the real del_key()/flow_drain()
-# with a simulated SYNC and fails the build, before the kernel compile, if
-# unlink/index/SYNC/free ordering or block release regress. After F-266.
+# debug. bin/test-ehash-delete.py runs after F-269. After F-266.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_267.py" 2>&1
     echo "### fman_pcd.c: F-267 ehash record pool + per-insert logs demoted"
-    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: ehash delete harness passed"
 fi
 
 # F-268 (T-M6-2 B7b, 2026-10-19): FMAN_PCD_VLANF_BRIDGE makes a VLAN pop/push
@@ -2569,6 +2565,25 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_268.py" 2>&1
     echo "### fman_pcd.c: F-268 bridge VLAN pop/push records"
+fi
+
+# F-269 (ehash collision chain, 2026-10-20): microcode 210.10.1 follows a
+# bucket's chain only through vendor cumulative nodes (byte0 0x80, NEXT 0x20,
+# count, key stride, pointer offset, next node BE at +4, keys at +12), never
+# from a record's next pointer: on .156 every bucket head hit and every record
+# behind one missed (472/472). A bucket with one flow points at its record; a
+# bucket with more is rebuilt copy-on-write from t->bidx into nodes from a
+# per-table 'fman_ehash_cu' dma_pool, published by one head store after
+# wmb(), and the replaced nodes are freed after the F-254 SYNC (kept on the
+# F-256 timeout). Then bin/test-ehash-delete.py runs the real publish, SYNC,
+# drain, del_key and add_key publish tail against a model of the microcode
+# walker and fails the build, before the kernel compile, if reachability,
+# node layout or SYNC-before-free ordering regress. After F-268.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_269.py" 2>&1
+    echo "### fman_pcd.c: F-269 ehash cumulative-node buckets"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash bucket harness passed"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic

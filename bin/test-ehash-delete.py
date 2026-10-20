@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Run the patched ehash deletion code with a simulated FMan SYNC.
+"""Run the patched ehash insert/delete code against a model of the FMan walker.
 
 Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>
-The tree must already carry the F-254/F-256/F-257, F-264 and F-267 fixups;
-ci-setup-kernel.sh runs this right after F-267. The bucket hash is stubbed to
-one bucket: the synthetic chain holds three keys, as a real chain holds keys
-that share a bucket.
+The tree must already carry the F-254/F-256, F-264, F-267 and F-269 fixups;
+ci-setup-kernel.sh runs this right after F-269. Keys select one of two
+buckets by their second byte, so one bucket fills while the other must stay
+reachable.
 
-The kernel source is used verbatim; only allocation, list and hardware
-interfaces are stubbed. This checks lifetime/chain invariants, not silicon.
+The kernel source is used verbatim: bucket publish, SYNC, drain, del_key and
+add_key()'s publish tail. Only allocation, list and hardware interfaces are
+stubbed. After every bucket-head store a model of the microcode 210.10.1
+lookup (cumulative nodes, decomp/en-exthash-lookup.asm) walks every bucket.
+Present keys must hit, deleted keys must miss, and a pool block may be freed
+only after a SYNC that completed after the head store that unlinked it. This
+checks layout, lifetime and reachability invariants, not silicon.
 """
 
 import os
@@ -36,40 +41,41 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
-typedef uint16_t __be16;
-typedef uint32_t __be32;
-typedef uint64_t __be64;
 typedef u64 dma_addr_t;
 
 #define FMAN_EHASH_FLOW_KEY_OFF 8
 #define FMAN_EHASH_FLOW_REC_SIZE 320
 #define FMAN_FE_CTX_SIZE 16
 #define FMAN_EHASH_FLOW_BLK_SIZE 512
-#define KEY_SIZE 50	/* F-259 routed key */
+#define FMAN_EHASH_BUCKET_SIZE 16
+#define FMAN_EHASH_CU_SIZE 256
+#define FMAN_EHASH_CU_NODE 0x80
+#define FMAN_EHASH_CU_NEXT 0x20
+#define FMAN_EHASH_CU_KEYS_OFF 12
+#define FMAN_EHASH_CU_PTR_SIZE 8
+#define KEY_MAX 56
+#define BUCKETS 2
 #define INV0 0x80000000U
-#define be16_to_cpu(x) be16toh(x)
-#define be32_to_cpu(x) be32toh(x)
-#define be64_to_cpu(x) be64toh(x)
-#define cpu_to_be64(x) htobe64(x)
+#define GFP_KERNEL 0
 #define swab64(x) __builtin_bswap64(x)
-#define READ_ONCE(x) (x)
-#define WRITE_ONCE(x, value) ((x) = (value))
-#define virt_to_phys(x) ((uintptr_t)(x))
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define struct_size(p, member, n) \
+	(sizeof(*(p)) + (size_t)(n) * sizeof((p)->member[0]))
+#define WRITE_ONCE(x, value) head_store(&(x), (value))
+
+static u64 get_be64(const u8 *p) { u64 v; memcpy(&v, p, 8); return be64toh(v); }
+static void put_unaligned_be64(u64 v, u8 *p) { v = htobe64(v); memcpy(p, &v, 8); }
 
 struct list_head { struct list_head *next, *prev; };
 #define list_entry(ptr, type, member) \
 	((type *)((char *)(ptr) - offsetof(type, member)))
-#define list_for_each_entry(pos, head, member) \
-	for (struct list_head *it = (head)->next; \
-	     it != (head) && ((pos) = list_entry(it, __typeof__(*(pos)), member), 1); \
-	     it = it->next)
 #define list_for_each_entry_safe(pos, tmp, head, member) \
 	for ((pos) = (head)->next == (head) ? NULL : \
 	     list_entry((head)->next, __typeof__(*(pos)), member); \
 	     (pos) && ((tmp) = (pos)->member.next == (head) ? NULL : \
 	     list_entry((pos)->member.next, __typeof__(*(pos)), member), 1); \
 	     (pos) = (tmp))
-
 static void list_del(struct list_head *node)
 {
 	node->prev->next = node->next;
@@ -106,30 +112,114 @@ struct fman_pcd { struct fman *fman; };
 struct fman_pcd_ehash_flow {
 	struct list_head node;
 	struct hlist_node bnode;
-	u8 key_size;
-	u32 index;
 	void *record;
 	dma_addr_t record_dma;
 	void *ctx;
 	dma_addr_t ctx_dma;
 	u64 *bucket_h;
-	u64 prev_head;
+	u16 index;
+	u8 key_size;
+};
+struct fman_pcd_ehash_cu {
+	unsigned int n;
+	struct {
+		void *va;
+		dma_addr_t dma;
+	} node[];
 };
 struct fman_pcd_ehash_table {
+	void *table_base;
+	struct fman_pcd *pcd;
+	u32 hash_mask;
 	u8 key_size;
 	u8 hash_shift;
-	u32 hash_mask;
-	struct hlist_head *bidx;
 	struct list_head flows;
-	struct fman_pcd *pcd;
-	void *dev;
+	struct hlist_head *bidx;
 	void *rec_pool;
+	void *cu_pool;
+	struct fman_pcd_ehash_cu **cu;
 };
 
-static unsigned int records_freed, metadata_freed;
-static unsigned int syncs, reads, warnings;
-static bool barrier, quiesced;
+/* Every pool block the code under test owns, with the last head store
+ * after which the FMan walker could reach it. */
+struct block { void *va; bool node; bool live; unsigned int seen; };
+static struct block blocks[256];
+static unsigned int nblocks;
+static unsigned int head_writes, sync_mark, syncs, reads, warnings;
+static unsigned int metadata_freed, fail_in;
+static bool wmb_pending, barrier, draining;
+static struct fman_pcd_ehash_table *cur;
 
+static struct block *block_of(const void *va)
+{
+	for (unsigned int i = 0; i < nblocks; i++)
+		if (blocks[i].va == va && blocks[i].live)
+			return &blocks[i];
+	return NULL;
+}
+
+/* Microcode 210.10.1 lookup (decomp/en-exthash-lookup.asm): returns the
+ * record that @key hits from bucket @b, or NULL. When @stamp is set, marks
+ * every block the walk can touch. */
+static const u8 *walk(struct fman_pcd_ehash_table *t, unsigned int b,
+		      const u8 *key, bool stamp)
+{
+	u64 h = ((u64 *)t->table_base)[b * 2];
+	const u8 *p, *hit = NULL;
+
+	if (!h)
+		return NULL;
+	p = (const u8 *)(uintptr_t)swab64(h);
+	for (;;) {
+		struct block *blk = block_of(p);
+
+		assert(blk && !((uintptr_t)p & 0xff));
+		if (stamp)
+			blk->seen = head_writes;
+		if (!(p[0] & FMAN_EHASH_CU_NODE)) {
+			assert(!blk->node);
+			if (key && !hit &&
+			    !memcmp(p + FMAN_EHASH_FLOW_KEY_OFF, key, t->key_size))
+				hit = p;
+			return hit;
+		}
+		assert(blk->node && !(p[0] & 0x40));
+		assert(p[1] >= 1 && p[2] >= t->key_size);
+		assert(p[3] == FMAN_EHASH_CU_KEYS_OFF + 1 + p[1] * p[2]);
+		assert(p[3] + p[1] * FMAN_EHASH_CU_PTR_SIZE <= FMAN_EHASH_CU_SIZE);
+		assert(p[FMAN_EHASH_CU_KEYS_OFF + p[1] * p[2]] == 0);
+		for (unsigned int i = 0; i < p[1]; i++) {
+			const u8 *r = (const u8 *)(uintptr_t)
+				get_be64(p + p[3] + i * FMAN_EHASH_CU_PTR_SIZE);
+			struct block *rb = block_of(r);
+
+			assert(rb && !rb->node && !((uintptr_t)r & 0xff));
+			assert(!memcmp(p + FMAN_EHASH_CU_KEYS_OFF + i * p[2],
+				       r + FMAN_EHASH_FLOW_KEY_OFF, t->key_size));
+			if (stamp)
+				rb->seen = head_writes;
+			if (key && !hit &&
+			    !memcmp(p + FMAN_EHASH_CU_KEYS_OFF + i * p[2], key,
+				    t->key_size))
+				hit = r;
+		}
+		if (!(p[0] & FMAN_EHASH_CU_NEXT))
+			return hit;
+		p = (const u8 *)(uintptr_t)get_be64(p + 4);
+	}
+}
+
+static void head_store(u64 *head, u64 value)
+{
+	assert(!value || wmb_pending);
+	wmb_pending = false;
+	*head = value;
+	head_writes++;
+	for (unsigned int b = 0; b < BUCKETS; b++)
+		walk(cur, b, NULL, true);
+}
+
+static void wmb(void) { wmb_pending = true; }
 static void dma_wmb(void) { barrier = true; }
 static void udelay(unsigned int us) { assert(us == 1); }
 static struct fman *fman_pcd_get_fman(struct fman_pcd *pcd)
@@ -140,7 +230,7 @@ static void fman_set_fpm_extc(struct fman *fm, u32 value)
 {
 	(void)fm;
 	assert(barrier && value == INV0);
-	quiesced = false;
+	barrier = false;
 	syncs++;
 }
 static u32 fman_get_fpm_extc(struct fman *fm)
@@ -152,7 +242,7 @@ static u32 fman_get_fpm_extc(struct fman *fm)
 		fm->polls--;
 		return INV0;
 	}
-	quiesced = true;
+	sync_mark = head_writes;
 	return 0;
 }
 static void record_warning(const char *format, ...)
@@ -162,175 +252,371 @@ static void record_warning(const char *format, ...)
 }
 #define pr_warn(...) record_warning(__VA_ARGS__)
 #define pr_warn_ratelimited(...) record_warning(__VA_ARGS__)
-/* F-267: one pool block holds the record and its FE context. */
-static void dma_pool_free(void *pool, void *ptr, dma_addr_t dma)
+
+static bool inject(void)
 {
-	assert(pool && quiesced && ptr && dma == (uintptr_t)ptr);
-	records_freed++;
-	free(ptr);
+	return fail_in && --fail_in == 0;
 }
-static void kfree(void *ptr) { metadata_freed++; free(ptr); }
+static void *kzalloc(size_t size, int gfp)
+{
+	(void)gfp;
+	return inject() ? NULL : calloc(1, size);
+}
+static void kfree(void *ptr) { if (ptr) metadata_freed++; free(ptr); }
+static void *dma_pool_zalloc(void *pool, int gfp, dma_addr_t *dma)
+{
+	bool node = pool == cur->cu_pool;
+	size_t size = node ? FMAN_EHASH_CU_SIZE : FMAN_EHASH_FLOW_BLK_SIZE;
+	void *va;
+
+	(void)gfp;
+	assert(pool == cur->cu_pool || pool == cur->rec_pool);
+	if (node && inject())
+		return NULL;
+	va = aligned_alloc(size, size);
+	assert(va && nblocks < 256);
+	memset(va, 0, size);
+	blocks[nblocks++] = (struct block){ .va = va, .node = node, .live = true };
+	*dma = (uintptr_t)va;
+	return va;
+}
+/* A block may be freed only once no head reaches it and a SYNC completed
+ * after the head store that unlinked it (drain runs with ports detached). */
+static void dma_pool_free(void *pool, void *va, dma_addr_t dma)
+{
+	struct block *blk = block_of(va);
+
+	assert(blk && dma == (uintptr_t)va);
+	assert(blk->node == (pool == cur->cu_pool));
+	assert(blk->node || pool == cur->rec_pool);
+	assert(draining || blk->seen == 0 || sync_mark > blk->seen);
+	blk->live = false;
+	free(va);
+}
 static u16 fman_pcd_ehash_bucket_index(const u8 *key, u8 key_size,
 				       u8 hash_shift, u32 mask)
 {
-	(void)key; (void)key_size; (void)hash_shift; (void)mask;
-	return 0;	/* one bucket: the synthetic chain */
-}
-static struct hlist_head bucket0;
-static unsigned int indexed(void)
-{
-	unsigned int n = 0;
-
-	for (struct hlist_node *p = bucket0.first; p; p = p->next)
-		n++;
-	return n;
+	(void)key_size; (void)hash_shift;
+	return key[1] & mask;
 }
 
 @KERNEL_FUNCTIONS@
 
-static void setup(struct fman_pcd_ehash_table *table, struct fman_pcd *pcd)
+/* add_key()'s F-269 publish tail runs verbatim; the record and opcode
+ * writes before it are reduced to the key. */
+static int add_tail(struct fman_pcd_ehash_table *t,
+		    struct fman_pcd_ehash_flow *flow, u8 *r, dma_addr_t rdma,
+		    u16 index, u8 key_size)
 {
-	*table = (struct fman_pcd_ehash_table){ .key_size = KEY_SIZE,
-		.pcd = pcd, .dev = table, .rec_pool = table, .bidx = &bucket0 };
-	table->flows.next = table->flows.prev = &table->flows;
-	bucket0.first = NULL;
-	records_freed = metadata_freed = 0;
-	syncs = reads = warnings = 0;
-	barrier = quiesced = false;
+	struct fman_pcd_ehash_cu *old_cu = NULL;
+	int f269_err;
+
+@ADD_TAIL@
+	return 0;
 }
 
-static struct fman_pcd_ehash_flow *add(struct fman_pcd_ehash_table *table,
-				      u64 *head, u8 id, bool context)
+static u64 heads[BUCKETS * 2] __attribute__((aligned(16)));
+static struct fman_pcd_ehash_cu *cus[BUCKETS];
+static struct hlist_head bidx[BUCKETS];
+static unsigned int pool_tags[2];
+
+static void setup(struct fman_pcd_ehash_table *t, struct fman_pcd *pcd,
+		  u8 key_size)
+{
+	for (unsigned int i = 0; i < nblocks; i++)
+		assert(!blocks[i].live);
+	memset(heads, 0, sizeof(heads));
+	memset(cus, 0, sizeof(cus));
+	memset(bidx, 0, sizeof(bidx));
+	*t = (struct fman_pcd_ehash_table){ .table_base = heads, .pcd = pcd,
+		.hash_mask = BUCKETS - 1, .key_size = key_size, .bidx = bidx,
+		.rec_pool = &pool_tags[0], .cu_pool = &pool_tags[1], .cu = cus };
+	t->flows.next = t->flows.prev = &t->flows;
+	cur = t;
+	nblocks = head_writes = sync_mark = syncs = reads = warnings = 0;
+	metadata_freed = fail_in = 0;
+	wmb_pending = barrier = draining = false;
+}
+
+static void make_key(u8 *key, unsigned int id, unsigned int bucket)
+{
+	memset(key, 0, KEY_MAX);
+	key[0] = id;
+	key[1] = bucket;
+	key[2] = 0xa5;
+}
+
+static int add(struct fman_pcd_ehash_table *t, unsigned int id,
+	       unsigned int bucket)
 {
 	struct fman_pcd_ehash_flow *flow = calloc(1, sizeof(*flow));
-	assert(flow);
-	flow->record = calloc(1, FMAN_EHASH_FLOW_BLK_SIZE);
-	assert(flow->record);
-	flow->record_dma = (uintptr_t)flow->record;
-	assert(!(flow->record_dma >> 48));
-	if (context) {
-		flow->ctx = (u8 *)flow->record + FMAN_EHASH_FLOW_REC_SIZE;
-		memset(flow->ctx, 0xab, FMAN_FE_CTX_SIZE);
-		flow->ctx_dma = flow->record_dma + FMAN_EHASH_FLOW_REC_SIZE;
-	}
-	flow->key_size = KEY_SIZE;
-	((u8 *)flow->record)[FMAN_EHASH_FLOW_KEY_OFF] = id;
-	flow->bucket_h = head;
-	flow->prev_head = *head;
-	*(__be64 *)flow->record = cpu_to_be64(
-		((u64)(0x1234 + id) << 48) | swab64(*head));
-	*head = swab64(flow->record_dma);
-	flow->node.next = table->flows.next;
-	flow->node.prev = &table->flows;
-	table->flows.next->prev = &flow->node;
-	table->flows.next = &flow->node;
-	flow->index = 0;
-	hlist_add_head(&flow->bnode, &table->bidx[0]);
-	return flow;
+	dma_addr_t rdma;
+	u8 *r = dma_pool_zalloc(t->rec_pool, GFP_KERNEL, &rdma);
+	u8 key[KEY_MAX];
+	int err;
+
+	assert(flow && r);
+	make_key(key, id, bucket);
+	memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, t->key_size);
+	flow->bucket_h = (u64 *)((u8 *)t->table_base +
+				 (size_t)bucket * FMAN_EHASH_BUCKET_SIZE);
+	err = add_tail(t, flow, r, rdma, bucket, t->key_size);
+	if (err)
+		return err;
+	flow->node.next = t->flows.next;
+	flow->node.prev = &t->flows;
+	t->flows.next->prev = &flow->node;
+	t->flows.next = &flow->node;
+	return 0;
 }
 
-static void test_chain(unsigned int target)
+static int del(struct fman_pcd_ehash_table *t, unsigned int id,
+	       unsigned int bucket)
 {
-	struct fman fm = { .polls = 2 };
-	struct fman_pcd pcd = { .fman = &fm };
-	struct fman_pcd_ehash_table table;
-	struct fman_pcd_ehash_flow *flows[3];
-	u64 head = 0;
-	u8 key[KEY_SIZE] = { target + 1 };
+	u8 key[KEY_MAX];
 
-	setup(&table, &pcd);
-	for (unsigned int i = 0; i < 3; i++)
-		flows[i] = add(&table, &head, i + 1, true);
-	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
-	assert(records_freed == 1 && metadata_freed == 1);
-	assert(syncs == 1 && reads == 3 && warnings == 0);
-	assert(indexed() == 2);
-	assert(swab64(head) == flows[target == 2 ? 1 : 2]->record_dma);
-	if (target < 2) {
-		u64 word = be64_to_cpu(*(__be64 *)flows[target + 1]->record);
-		assert((word >> 48) == 0x1234 + target + 2);
-		assert((word & 0x0000ffffffffffffULL) ==
-		       (target ? flows[0]->record_dma : 0));
+	make_key(key, id, bucket);
+	return fman_pcd_ehash_del_key(t, key, t->key_size);
+}
+
+static bool hits(struct fman_pcd_ehash_table *t, unsigned int id,
+		 unsigned int bucket)
+{
+	u8 key[KEY_MAX];
+	const u8 *r;
+
+	make_key(key, id, bucket);
+	r = walk(t, bucket, key, false);
+	assert(!r || !memcmp(r + FMAN_EHASH_FLOW_KEY_OFF, key, t->key_size));
+	return r != NULL;
+}
+
+static unsigned int indexed(unsigned int bucket)
+{
+	unsigned int n = 0;
+
+	for (struct hlist_node *p = bidx[bucket].first; p; p = p->next)
+		n++;
+	return n;
+}
+
+static unsigned int live(bool node)
+{
+	unsigned int n = 0;
+
+	for (unsigned int i = 0; i < nblocks; i++)
+		n += blocks[i].live && blocks[i].node == node;
+	return n;
+}
+
+static void drain(struct fman_pcd_ehash_table *t)
+{
+	draining = true;
+	fman_pcd_ehash_flow_drain(t);
+	draining = false;
+	assert(!heads[0] && !heads[2] && !cus[0] && !cus[1]);
+	assert(t->flows.next == &t->flows && !bidx[0].first && !bidx[1].first);
+	assert(live(false) == 0 && live(true) == 0);
+}
+
+/* Fill one bucket, delete in @order, and check every step against the
+ * walker: present keys hit, deleted keys miss, nodes match the count. */
+static void test_bucket(u8 key_size, unsigned int n, const unsigned int *order)
+{
+	struct fman fm = { .polls = 1 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+	unsigned int per, present = n;
+	bool gone[32] = { false };
+
+	setup(&t, &pcd, key_size);
+	per = 243 / (fman_pcd_ehash_cu_stride(key_size) + 8);
+	add(&t, 99, 1);		/* other bucket stays untouched */
+	for (unsigned int i = 0; i < n; i++) {
+		assert(add(&t, i, 0) == 0);
+		for (unsigned int j = 0; j <= i; j++)
+			assert(hits(&t, j, 0));
+		assert(live(true) == (i ? DIV_ROUND_UP(i + 1, per) : 0));
+		assert(hits(&t, 99, 1));
 	}
-	fman_pcd_ehash_flow_drain(&table);
-	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
-	assert(records_freed == 3 && metadata_freed == 3);
+	for (unsigned int s = 0; s < n; s++) {
+		unsigned int id = order[s];
+		unsigned int before = syncs;
+
+		assert(del(&t, id, 0) == 0);
+		assert(syncs == before + 1 && warnings == 0);
+		gone[id] = true;
+		present--;
+		assert(indexed(0) == present);
+		for (unsigned int j = 0; j < n; j++)
+			assert(hits(&t, j, 0) == !gone[j]);
+		assert(live(true) == (present > 1 ? DIV_ROUND_UP(present, per) : 0));
+		assert(live(false) == present + 1);
+		assert(hits(&t, 99, 1));
+		assert(del(&t, id, 0) == -ENOENT);
+	}
+	assert(!heads[0] && !cus[0]);
+	drain(&t);
+}
+
+static void test_insert_enomem(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+	u64 head;
+
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(add(&t, i, 0) == 0);
+	head = heads[0];
+	for (unsigned int f = 1; f <= 3; f++) {	/* cu, node 0, node 1 */
+		fail_in = f;
+		assert(add(&t, 7, 0) == -ENOMEM);
+		assert(heads[0] == head && indexed(0) == 3 && !hits(&t, 7, 0));
+		for (unsigned int i = 0; i < 3; i++)
+			assert(hits(&t, i, 0));
+		assert(live(false) == 3 && live(true) == 1);
+	}
+	drain(&t);
+}
+
+static void test_delete_enomem(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 4; i++)
+		assert(add(&t, i, 0) == 0);
+	fail_in = 1;
+	assert(del(&t, 0, 0) == 0);
+	assert(warnings == 1 && !heads[0] && !cus[0] && indexed(0) == 3);
+	assert(live(true) == 0 && live(false) == 3);
+	for (unsigned int i = 1; i < 4; i++)
+		assert(!hits(&t, i, 0));	/* software until the next rebuild */
+	assert(add(&t, 4, 0) == 0);
+	for (unsigned int i = 1; i < 5; i++)
+		assert(hits(&t, i, 0));
+	drain(&t);
+}
+
+static void test_delete_timeout(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+	struct block *rec, *node;
+	unsigned int freed, synced;
+
+	/* rec0 0, rec1 1, node A 2, rec2 3, node B 4 (A synced and freed) */
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(add(&t, i, 0) == 0);
+	assert(syncs == 1 && warnings == 0);
+	fm.timeout = true;
+	freed = metadata_freed;
+	synced = syncs;
+	reads = 0;
+	assert(del(&t, 1, 0) == 0);	/* publishes node C 5, keeps B */
+	assert(syncs == synced + 1 && reads == 100000 && warnings == 3);
+	assert(metadata_freed == freed + 2);	/* flow + old node list */
+	assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
+	assert(live(false) == 3 && live(true) == 2);	/* record + old node kept */
+	rec = &blocks[1];
+	node = &blocks[4];
+	assert(rec->live && !rec->node && node->live && node->node);
+	assert(rec->va && ((u8 *)rec->va)[FMAN_EHASH_FLOW_KEY_OFF] == 1);
+	rec->live = node->live = false;	/* test cleanup only */
+	free(rec->va);
+	free(node->va);
+	fm.timeout = false;
+	drain(&t);
+}
+
+static void test_insert_timeout(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 2; i++)
+		assert(add(&t, i, 0) == 0);
+	assert(syncs == 0);	/* 1 -> 2 replaces a record head, no nodes */
+	fm.timeout = true;
+	assert(add(&t, 2, 0) == 0);
+	assert(syncs == 1 && warnings == 1);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(hits(&t, i, 0));
+	assert(live(true) == 2);	/* new node + kept old node */
+	blocks[2].live = false;	/* test cleanup only: the old node */
+	assert(blocks[2].node);
+	free(blocks[2].va);
+	fm.timeout = false;
+	drain(&t);
 }
 
 static void test_missing_and_invalid(void)
 {
 	struct fman fm = { 0 };
 	struct fman_pcd pcd = { .fman = &fm };
-	struct fman_pcd_ehash_table table;
-	u8 key[KEY_SIZE] = { 1 };
+	struct fman_pcd_ehash_table t;
+	u8 key[KEY_MAX] = { 1 };
 
-	setup(&table, &pcd);
-	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == -ENOENT);
-	assert(fman_pcd_ehash_del_key(NULL, key, sizeof(key)) == -EINVAL);
-	assert(fman_pcd_ehash_del_key(&table, NULL, sizeof(key)) == -EINVAL);
-	assert(fman_pcd_ehash_del_key(&table, key, 0) == -EINVAL);
-	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key) - 1) == -EINVAL);
-	assert(syncs == 0 && records_freed == 0);
-}
-
-static void test_no_context(void)
-{
-	struct fman fm = { 0 };
-	struct fman_pcd pcd = { .fman = &fm };
-	struct fman_pcd_ehash_table table;
-	u64 head = 0;
-	u8 key[KEY_SIZE] = { 1 };
-
-	setup(&table, &pcd);
-	add(&table, &head, 1, false);
-	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
-	assert(records_freed == 1 && metadata_freed == 1);
-	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
-}
-
-static void test_timeout(void)
-{
-	struct fman fm = { .timeout = true };
-	struct fman_pcd pcd = { .fman = &fm };
-	struct fman_pcd_ehash_table table;
-	struct fman_pcd_ehash_flow *flow;
-	u64 head = 0;
-	u8 key[KEY_SIZE] = { 1 };
-	void *record, *ctx;
-
-	setup(&table, &pcd);
-	flow = add(&table, &head, 1, true);
-	record = flow->record;
-	ctx = flow->ctx;
-	assert(fman_pcd_ehash_del_key(&table, key, sizeof(key)) == 0);
-	assert(records_freed == 0 && metadata_freed == 1);
-	assert(syncs == 1 && reads == 100000 && warnings == 3 && !quiesced);
-	assert(head == 0 && table.flows.next == &table.flows && !bucket0.first);
-	assert(((u8 *)record)[FMAN_EHASH_FLOW_KEY_OFF] == 1);
-	assert(((u8 *)ctx)[0] == 0xab);
-	/* Test cleanup only: the production timeout must keep the block. */
-	free(record);
+	setup(&t, &pcd, 50);
+	assert(fman_pcd_ehash_del_key(&t, key, 50) == -ENOENT);
+	assert(fman_pcd_ehash_del_key(NULL, key, 50) == -EINVAL);
+	assert(fman_pcd_ehash_del_key(&t, NULL, 50) == -EINVAL);
+	assert(fman_pcd_ehash_del_key(&t, key, 0) == -EINVAL);
+	assert(fman_pcd_ehash_del_key(&t, key, 49) == -EINVAL);
+	assert(syncs == 0 && nblocks == 0);
 }
 
 int main(void)
 {
-	for (unsigned int target = 0; target < 3; target++)
-		test_chain(target);
+	static const unsigned int fwd[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+	static const unsigned int rev[] = { 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+	static const unsigned int mid[] = { 4, 1, 7, 0, 6, 2, 5, 3 };
+
+	assert(fman_pcd_ehash_cu_stride(1) == 1 && fman_pcd_ehash_cu_stride(3) == 4 &&
+	       fman_pcd_ehash_cu_stride(14) == 16 && fman_pcd_ehash_cu_stride(50) == 56 &&
+	       fman_pcd_ehash_cu_stride(56) == 56);
+	test_bucket(50, 8, fwd);
+	test_bucket(50, 8, rev + 4);
+	test_bucket(50, 8, mid);
+	test_bucket(50, 2, fwd);
+	test_bucket(14, 12, fwd);
+	test_bucket(14, 12, rev);
+	test_bucket(38, 7, rev + 5);
+	test_insert_enomem();
+	test_delete_enomem();
+	test_delete_timeout();
+	test_insert_timeout();
 	test_missing_and_invalid();
-	test_no_context();
-	test_timeout();
-	puts("OK: ehash head/middle/tail deletion, bucket index, pool block release, invalid/missing keys and SYNC-timeout retention");
+	puts("OK: ehash cumulative-node buckets (walker model), copy-on-write SYNC-before-free, ENOMEM, SYNC-timeout retention, drain");
 	return 0;
 }
 """
 
-
 def extract_function(source: str, name: str) -> str:
-    match = re.search(rf"static (?:int|void) {name}\([^;]*?\n\{{\n", source)
+    match = re.search(rf"static (?:int|void|u8) {name}\([^;]*?\n\{{\n", source)
     if match is None:
         raise ValueError(f"Kernel function {name} was not found")
     end = source.index("\n}\n", match.end()) + len("\n}\n")
     return source[match.start():end]
+
+
+def extract_add_tail(source: str) -> str:
+    """add_key()'s F-269 publish block: flow fields through the old-node
+    free. Everything between runs unchanged in the harness."""
+    first = "\tflow->record = r;\n\tflow->record_dma = rdma;\n"
+    last = "\t\t\tfman_pcd_ehash_cu_free(t, old_cu);\n\t}\n"
+    if source.count(first) != 1 or source.count(last) != 1:
+        raise ValueError("add_key() F-269 publish block was not found")
+    start = source.index(first)
+    return source[start:source.index(last, start) + len(last)]
 
 
 SANITIZERS = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
@@ -370,12 +656,16 @@ def main() -> None:
     source = (Path(sys.argv[1]) /
               "drivers/net/ethernet/freescale/fman/fman_pcd.c").read_text()
     functions = "\n".join(extract_function(source, name) for name in (
+        "fman_pcd_ehash_cu_stride", "fman_pcd_ehash_cu_free",
+        "fman_pcd_ehash_bucket_publish", "fman_pcd_ehash_sync",
         "fman_pcd_ehash_flow_drain", "fman_pcd_ehash_del_key"))
+    tail = extract_add_tail(source)
     with tempfile.TemporaryDirectory(prefix="ask2-ehash-delete-") as directory:
         path = Path(directory)
         code = path / "delete.c"
         binary = path / "delete"
-        code.write_text(HARNESS.replace("@KERNEL_FUNCTIONS@", functions))
+        code.write_text(HARNESS.replace("@KERNEL_FUNCTIONS@", functions)
+                        .replace("@ADD_TAIL@", tail))
         # Leak accounting is explicit in the harness (freed-allocation
         # counters), so LSan, which needs ptrace, is not required.
         env = {**os.environ,
