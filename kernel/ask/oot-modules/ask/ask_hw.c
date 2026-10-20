@@ -233,6 +233,11 @@ static int ask_vlan_offload_set(const char *val, const struct kernel_param *kp)
 
 	if (!rc && old && !READ_ONCE(ask_vlan_offload))
 		ask_hw_vlan_disarm_all();
+	/* Bridge pop/push records live in the L2_DA FE chain, not the routed
+	 * CC tree: revalidate them on any change (off removes them, on lets
+	 * the next forwarded frame re-admit them). */
+	if (!rc && old != READ_ONCE(ask_vlan_offload))
+		ask_bridge_kick();
 	return rc;
 }
 
@@ -259,6 +264,21 @@ bool ask_hw_vlan_offload_armed_port(u8 hw_port_id)
 	return armed;
 }
 EXPORT_SYMBOL_GPL(ask_hw_vlan_offload_armed_port);
+
+/*
+ * Bridge (L2_DA) counterpart of ask_hw_vlan_offload_armed_port(): a bridge
+ * pop/push record is admitted when the same vlan_offload kill switch is on
+ * AND its ingress port is an engaged L2_DA port. The routed gate above
+ * deliberately refuses L2 ports (their CC+HMTD path is not used), so the
+ * bridge path must not reuse it (B7b run 2026-10-19: zero pop/push records).
+ */
+bool ask_hw_bridge_vlan_armed_port(u8 hw_port_id)
+{
+	return READ_ONCE(ask_vlan_offload) &&
+	       ask_hw_port_family_get(hw_port_id) &&
+	       test_bit(hw_port_id, ask_hw_port_l2);
+}
+EXPORT_SYMBOL_GPL(ask_hw_bridge_vlan_armed_port);
 
 /*
  * Port-agnostic gate for the capability-advertise (ask_genl.c) and the
@@ -1602,8 +1622,12 @@ int ask_hw_fe_reengage(u8 hw_port_id)
 			break;
 		}
 	}
-	/* Only re-assert on a port ASK actually has engaged. */
-	if (!p || !p->offload_engaged) {
+	/* Only re-assert on a port ASK actually has engaged. An L2_DA (bridge)
+	 * port has no VLAN CC tree to restore from, and a routed re-engage
+	 * would swap its L2 table for a routed one under live bridge records
+	 * (B7b run 2026-10-19: every later 16-byte L2 add failed -EINVAL). */
+	if (!p || !p->offload_engaged ||
+	    p->engaged_profile != FMAN_PCD_FE_PROFILE_ROUTED) {
 		mutex_unlock(&h->lock);
 		return 0;
 	}

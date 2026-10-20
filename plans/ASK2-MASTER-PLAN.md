@@ -136,7 +136,7 @@ programming recipes. Resolve contradictions before touching code.
 
 | Priority | Work | Dependency / exit |
 |---|---|---|
-| 1 | **B7b access↔trunk pop/push** (active; code complete 2026-10-19, silicon gate pending) | F-268 bridge emitter flag (no TTL, mtu 0xffff) + ask.ko action/ingress-form enumeration; KUnit-pinned. Next: `.149` pop/push silicon gate, B7a/routed/NAT/PPPoE regressions. Runbook: `ASK2-BRIDGE-OFFLOAD-PLAN.md` §6.1 |
+| 1 | **B7b access↔trunk pop/push** (active; silicon run 1 on `.155` image 2223 FAILED 2026-10-19 — bridge pop/push used the routed VLAN gate and `vlan_offload` toggle re-engaged L2 ports as ROUTED; fixes staged, need a new image) | F-268 bridge emitter flag (no TTL, mtu 0xffff) + ask.ko action/ingress-form enumeration; KUnit-pinned. Next: re-run `bin/testrig-bridge-b7b.sh` on `.155`, B7a/routed/NAT/PPPoE regressions. Runbook: `ASK2-BRIDGE-OFFLOAD-PLAN.md` §6.1 |
 | 2 | F-266 FIN/RST transit and NAT correctness; A14 IPv6 TTL and stale-neighbour safety | Both FAILED 2026-10-18; must pass before connection-scale claims or new default-on safety paths |
 | 3 | Existing-feature acceptance: PPPoE cycles/exhaustion/soak, bridge B2/capacity (debugfs on `.149`), resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
 | 4 | IPsec Tier 1 reboot-clean, then Tier 2 design/bring-up | Full path required for parity |

@@ -142,7 +142,7 @@ Before implementation, verify the current Qdrant facts, silicon state and live
 flow-key spec. Resolve record size, owned stats parameters, tag order and RX
 headroom before new feature work is considered accepted.
 
-### 6.1 B7b implementation (2026-10-19, code complete, silicon untested)
+### 6.1 B7b implementation (2026-10-19, silicon run 1 failed, fixes staged)
 
 The implementation is in place but has not yet been accepted on silicon.
 
@@ -177,7 +177,9 @@ In both chains INSERT_L2_HDR re-inserts the frame's own DA and SA.
 `ask_bridge_flow_ok()` derives the action from the record's ingress tag and the
 egress port's untagged flag for the VLAN. A pop or push is refused unless the
 port's `ask.vlan_offload` is armed. Resync deletes a record whose action has
-changed.
+changed. (Corrected after run 1, below: the gate is
+`ask_hw_bridge_vlan_armed_port()`, not the routed
+`ask_hw_vlan_offload_armed_port()`.)
 
 The forward hook sees only the egress tag, so admission enumerates the possible
 ingress forms:
@@ -194,9 +196,34 @@ is still wrong never hits and ages out.
 **Limitation.** Pop keys carry PCP 0, so prioritized tagged frames stay in
 software.
 
+**Silicon run 1 (2026-10-19, image `vyos-2026.10.19-2223-rolling`, DUT
+`.155` (the former `.106` board), warm boot, `bin/testrig-bridge-b7b.sh`):
+FAIL, no pop/push record ever installed.** Software forwarding was correct
+(push frames left tagged VLAN 30, pop frames left untagged, TTL and hop limit
+64), ARP, PCP 5 and kill-switch fallback rows passed, `pcd-snapshot diff` was
+clean and no kernel errors were logged. Three defects were found:
+
+1. `ask_bridge_flow_ok()` gated pop/push on `ask_hw_vlan_offload_armed_port()`,
+   which by design refuses L2 ports (`ask_hw_port_l2`). On a bridge member it
+   is always false, so every pop/push candidate was dropped silently. Fix: a new
+   `ask_hw_bridge_vlan_armed_port()` (same `vlan_offload` switch and family
+   mask, but requires the L2_DA role). KUnit pins that a routed-engaged port
+   does not pass it.
+2. Turning `vlan_offload` 1→0 ran `ask_hw_vlan_disarm_all()`, whose
+   `ask_hw_fe_reengage()` disengaged every engaged port and re-engaged it with
+   the ROUTED profile, including L2_DA bridge ports. The port kept its L2 role
+   bit, so every later 16-byte SAME add failed with
+   `bridge: add ... act 0 on port 0x10 failed: -22`. Fix: `ask_hw_fe_reengage()`
+   is a no-op for a non-ROUTED port (an L2 port has no VLAN CC tree to
+   restore). A `vlan_offload` change now also kicks a bridge resync, so pop/push
+   records are removed or re-admitted promptly.
+3. Test-harness bug: the frame kind `t306` (tagged, IPv6) was parsed as VID 306
+   IPv4, so the pop-v6 rows sent frames the bridge correctly dropped. The kind
+   is now `t<vid>v6`.
+
 **Remaining gates.**
 
-1. Silicon pop/push on `.149`: hit counters, wire captures for the tag and an
+1. Silicon pop/push (re-run `bin/testrig-bridge-b7b.sh` on a fixed image): hit counters, wire captures for the tag and an
    unchanged TTL, and correct ARP/non-IP fallback.
 2. Repeat the B7a, routed/NAT and PPPoE regressions.
 3. Toggle `vlan_offload` as a kill switch.

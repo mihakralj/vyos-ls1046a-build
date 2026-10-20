@@ -454,6 +454,7 @@ bool ask_hw_nat66_offload_armed(void);
  * pre-check, bridge observer log).
  */
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
+bool ask_hw_bridge_vlan_armed_port(u8 hw_port_id);
 bool ask_hw_vlan_offload_armed(void);
 bool ask_hw_bridge_offload_armed(void);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
