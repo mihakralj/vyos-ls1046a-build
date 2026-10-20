@@ -344,7 +344,7 @@ static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
 	*act = out_tagged == !!tci ? ASK_BRIDGE_ACT_SAME :
 	       tci ? ASK_BRIDGE_ACT_POP : ASK_BRIDGE_ACT_PUSH;
 	if (*act != ASK_BRIDGE_ACT_SAME &&
-	    !ask_hw_vlan_offload_armed_port(*iport))
+	    !ask_hw_bridge_vlan_armed_port(*iport))
 		return false;
 	if (tci) {
 		rcu_read_lock();
@@ -880,7 +880,7 @@ int ask_bridge_init(void)
 	}
 	ask_bridge_hook_registered = true;
 
-	ask_pr_info("bridge: flow offload ready (T-M6-2 B7a, bridge_offload=%d)\n",
+	ask_pr_info("bridge: flow offload ready (T-M6-2 B7b, bridge_offload=%d)\n",
 		    ask_hw_bridge_offload_armed());
 	return 0;
 
