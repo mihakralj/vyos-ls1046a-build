@@ -30,7 +30,7 @@ against the applied stack before selecting Tier 2 work.
 
 ## 2. Tier 1 — CAAM crypto acceleration (software XFRM, hardware math)
 
-No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change was needed). Steps 4–5 were run on 2026-10-17; only reboot-clean remains open.
+No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change was needed). Steps 4–5 were run on 2026-10-17; reboot-clean passed 2026-10-21 (`.185`, image 0729: CAAM priorities and 167 self-tests identical after a cold boot, no xfrm leftovers, a re-established tunnel moved the CAAM counters again).
 
 1. **Kernel config — DONE (already present).** See §1. If the config is ever moved from `ci-setup-kernel.sh` into a fragment, keep `CRYPTO_API_QI`: it is built today and Tier 2 needs it.
 2. **Boot-time correctness gate — verified 2026-10-16 on `.185`, except QoS** (`arch/sec-caam.md` §4; these are silent-corruption footguns, not soft warnings):
@@ -73,7 +73,7 @@ No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change 
 
    - Interpretation: these runs are host-terminated, so they include the DUT TCP stack and iperf3 and are not a gateway-forwarding measurement. "DUT busy" is aggregate across four cores. JR CAAM gives 1.4–1.9× on encrypt but is slower than ARMv8-CE software on decrypt, and costs more CPU in both directions (about 1M JR completion IRQs per run). The per-request Job Ring round trip dominates at MTU-sized packets. Tier 1 is therefore a correctness and offload-plumbing proof, not a performance win, and the Tier 2 (FMan→SEC, no per-packet CPU) case stands.
    - Rekey: `swanctl --rekey --child t1gcm` 8 s into a CAAM GCM run completed with 0 retransmits for that run. The new CHILD_SA was installed and stayed on CAAM.
-   - Not done: reboot-clean, a gateway-forwarding (routed, not host-terminated) measurement, IPv6, and the SEC QoS decode from step 2.
+   - Not done: a gateway-forwarding (routed, not host-terminated) measurement, IPv6, and the SEC QoS decode from step 2.
 
 **Measurement point after Tier 1:** publish crypto-use proof, throughput and CPU against software on the same rig. This can be an independent delivery, but the full-parity objective remains open until Tier 2 passes.
 
