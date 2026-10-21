@@ -14,6 +14,7 @@ still open, independently of routed/NAT/VLAN throughput parity.
 | Document | Owns |
 |---|---|
 | [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative task list:** missing vendor features, dependencies, acceptance, consolidation and defects. Absorbs the rewrite plan's pending work. Start here. |
+| [`ASK2-PRIORITIZED-TASKS.md`](ASK2-PRIORITIZED-TASKS.md) | Ordered P0–P10 view of the master plan with status, gates and rig constraints (snapshot 2026-10-21; subordinate to the master plan). |
 | [`ASK2-VENDOR-PARITY.md`](ASK2-VENDOR-PARITY.md) | Current comparison scope, paired 10×10 method, evidence still required and verdict contract. Old single-run and A6 tables are archived, not current acceptance. |
 | [`DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md) | Binding runtime contract: S0/S1/S2 state machine, `offload ipv4\|ipv6` CLI, ASK↔VPP mutex, teardown checklist, open contract obligations. History in `archive/`. |
 | [`OFFLOAD-CAPABILITY-PLAN.md`](OFFLOAD-CAPABILITY-PLAN.md) | Remaining capabilities only: vendor mechanism vs recommended ASK2 mechanism; shipped capabilities summarised, details in `archive/`. |
