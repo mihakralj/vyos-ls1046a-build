@@ -505,6 +505,11 @@ struct ask_flow_pending {
 	u32                     generation; /* A3: owner stamp for replay guard */
 };
 
+static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
+			       const struct ask_flow_key *key, u32 oif,
+			       u32 action_flags, enum ask_hw_dir dir,
+			       u32 generation);
+
 static LIST_HEAD(ask_flow_pending_list);
 static DEFINE_SPINLOCK(ask_flow_pending_lock);
 static unsigned int ask_flow_pending_count;
@@ -642,7 +647,6 @@ static int ask_flow_pending_enqueue(u64 cookie,
 {
 	struct ask_flow_pending *p;
 	struct ask_flow_table *t;
-	u32 hw_id = 0;
 	int rc;
 	unsigned int drained = 0;
 	int drain_ifindex;
@@ -737,16 +741,17 @@ static int ask_flow_pending_enqueue(u64 cookie,
 		 * silicon.  PR14z6 (future) can capture the dir at
 		 * defer time and replay it here.
 		 */
-		rc = ask_flow_insert_owned(t, p->cookie, &p->key, p->oif,
-					   p->action_flags, ASK_HW_DIR_FWD,
-					   p->generation, &hw_id);
+		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
+		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
+					 p->action_flags, ASK_HW_DIR_FWD,
+					 p->generation);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == 0) {
 			atomic_inc(&ask_flow_pending_resolved);
-			pr_info_ratelimited("ask: flow_offload: PR14y deferred-insert OK cookie=0x%llx dev=%s hw_id=0x%08x nh=%pM em=%pM\n",
+			pr_info_ratelimited("ask: flow_offload: PR14y deferred-insert OK cookie=0x%llx dev=%s nh=%pM em=%pM\n",
 					    p->cookie, netdev_name(dev),
-					    hw_id, p->key.next_hop_mac,
+					    p->key.next_hop_mac,
 					    p->key.egress_mac);
 		} else {
 			pr_info_ratelimited("ask: flow_offload: PR14y deferred-insert FAIL rc=%d cookie=0x%llx dev=%s\n",
@@ -1143,7 +1148,6 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 
 	/* Now replay HW insert for each ready cookie, lock-free. */
 	list_for_each_entry_safe(p, tmp, &ready, node) {
-		u32 hw_id = 0;
 		int rc;
 
 		list_del(&p->node);
@@ -1155,19 +1159,20 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 			kfree(p);
 			continue;
 		}
-		rc = ask_flow_insert_owned(t, p->cookie, &p->key, p->oif,
-					   p->action_flags, ASK_HW_DIR_FWD,
-					   p->generation, &hw_id);
+		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
+		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
+					 p->action_flags, ASK_HW_DIR_FWD,
+					 p->generation);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == 0) {
 			atomic_inc(&ask_flow_pending_resolved);
 			atomic_inc(&ask_flow_pending_poll_resolved);
 			resolved_this_tick++;
-			pr_info_ratelimited("ask: flow_offload: PR14z10 poll-resolved cookie=0x%llx eg_if=%d in_if=%d hw_id=0x%08x nh=%pM em=%pM\n",
+			pr_info_ratelimited("ask: flow_offload: PR14z10 poll-resolved cookie=0x%llx eg_if=%d in_if=%d nh=%pM em=%pM\n",
 					    p->cookie, p->egress_ifindex,
 					    p->ingress_ifindex,
-					    hw_id, p->key.next_hop_mac,
+					    p->key.next_hop_mac,
 					    p->key.egress_mac);
 		} else if (rc == -ESTALE) {
 			/* superseded between the gen check and publish; benign */
