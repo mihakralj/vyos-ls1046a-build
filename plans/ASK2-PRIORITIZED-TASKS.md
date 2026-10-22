@@ -64,9 +64,56 @@ flowchart TD
   (`delete`/`set interfaces ethernet eth4 offload ipv4|ipv6`, commit each)
   with a ping through the DUT: MURAM 52922 after every cycle, `pcd-snapshot
   diff` clean, `ask-check` 36/36, 0 kernel errors. eth3 not yet run.
-  Still open per port: neighbour change, module unload, cold boot with offload
-  engaged, concurrent-traffic regression, and MTU with matching generator MTU
-  (the generators stayed at 1500).
+- **Done 2026-10-22 (`.185`, image 1955, eth3→eth4 routed iperf3 4 streams,
+  `bin/testrig-neigh-change.sh`):** neighbour flush under load costs one
+  ~7.9 Gbit/s second and recovers; a 1.5 s wrong-MAC blackhole then restore
+  returns the same flow to 9.4 Gbit/s with hardware hits (+3.3 M pkts/3 s) in
+  about 6 s, MURAM 52922, 0 kernel errors, `ask-check` 36/36. A 10 s
+  blackhole leaves the TCP flow stalled by RTO backoff, but a fresh flow runs
+  at 9.41 Gbit/s, so this is not a hardware fault. IPv6 and the eth3 side not run.
+- **Done 2026-10-22 (`.185`, image 1955, `bin/testrig-concurrent.sh`):** concurrent
+  eth3↔eth4 `--bidir` 4 streams: 8.95 / 9.02 Gbit/s per direction against 9.26
+  single-direction (>= 0.97x), hardware hits +7.1 M pkts/3 s, MURAM 52922,
+  0 kernel errors, `ask-check` 36/36.
+- **Module unload: refused by design 2026-10-22 (`.185`).** `rmmod ask` returns
+  "in use" (refcnt 1) with ports engaged, after disengaging both ports, and
+  after `nft flush ruleset`: board patch `0145` `dpaa_register_flow_offload_handler()`
+  takes `try_module_get(ops->owner)` on registration, so a loaded `ask.ko` pins
+  itself and `ask_exit()` is unreachable. No unload-state hazard; disengage left
+  MURAM at 35280 and ping worked; ruleset restored and ports re-engaged, 36/36.
+  A real unload test would need an explicit handler-unregister path (not planned).
+- **Cold boot with offload engaged: PASS 2026-10-22 (`.185`, image 1955).**
+  Auto-engage, `ask-check` 36/36, MURAM 52922, both ports ping.
+- **OPEN DEFECT 2026-10-22: MTU > 1500 with offload engaged wedges eth3 RX.**
+  With DUT eth3/eth4 and both generators at the same MTU (1800 and 2500
+  tested, three cold-boot repeats), pings pass but the first TCP burst freezes
+  eth3 `rx_packets` after ~15-20 frames (link up, eth4 fine, down/up and
+  disengage do not recover; cold boot only). With eth3 disengaged at MTU 2500
+  the same iperf3 runs 8.6 Gbit/s, so the fault is in the engaged FE path.
+  Not the 4 KB RX buffer limit (~3712 B). The 2026-10-21 MTU loop passed only
+  because the generators stayed at 1500. Next: bisect the threshold between
+  1500 and 1800, inspect FE-VM/BMI state on a wedged port, then qdrant-gate any
+  fix. `bin/testrig-mtu-steps.sh` reproduces it. Cold boot afterwards.
+  Update 2026-10-22: the F-262 RX-port triple (RFENE 0x22, RCMNE 0x0e, params
+  misc bit 30) is RULED OUT: reverting it live on port 0x10 changed nothing at
+  MTU 2500. It is a regression, because the 2026-08-17 battery passed 1280-2500
+  engaged. On a wedged port (MTU 1800, BMI stats on) the mEMAC kept counting
+  received frames (~+40k) while BMI RX `rfrc` was 0x20 and the stack saw 80
+  packets: the stall is inside FMan after ~32 frames, not at the MAC or in
+  BMan. DMA/FPM/QMI/BMI-common blocks show no error flag versus a healthy
+  idle dump (only activity counters differ). (The "+40k MAC frames" figure
+  was a mislabelled mEMAC register; MAC `rfrm` rose only ~43 frames.)
+  RIM/RPSO (patch 0217) also ruled out by live revert.
+  ROOT CAUSE 2026-10-22: a UDP size sweep at MTU 2500 passes payload 1472 and
+  wedges on payload 1473, so the threshold is exactly IP length > 1500. The
+  ehash emitter wrote ENQUEUE mtu 1500 with bpid 0 and no frag-info block on
+  plain routed records; with the F-262 RX-port triple the microcode takes its
+  fragmentation path with no pool and the port goes deaf. The 08-17 battery
+  predates the triple. FIX (unverified on board): `F_270.py` writes ENQUEUE
+  mtu 0xffff (EN_EHASH_DISABLE_FRAG, as F-261/F-268); F-262 still overwrites
+  it where it seals a real MTU check. Verify on a new image with
+  `bin/testrig-mtu-steps.sh` at 1280/1500/1800/2500, the payload sweep and
+  the F-262 PPPoE MTU-shrink case.
 
 - **T-M7-P5:** eth1 routed TCP/UDP HIT and load, then all-five simultaneous
   trafficked churn, identical-tuple cross-ingress isolation, and eth0 LAST with
