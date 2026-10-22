@@ -475,35 +475,37 @@ int ask_vlan_cc_agg_stats(u8 port_id, u64 *packets, u64 *bytes)
 	struct ask_vlan_cc_port *port;
 	struct rtnl_link_stats64 st;
 	struct net_device *dev;
-	u64 p, b;
-	int ret = -ENODATA;
+	u64 p, b, pkts_snap, bytes_snap;
+	int ifindex;
 
 	if (port_id >= ARRAY_SIZE(ports) || !packets || !bytes)
 		return -EINVAL;
 
-	mutex_lock(&ask_vlan_cc_lock);
+	/*
+	 * Lockless: the flow dump calls this inside an RCU read section
+	 * (rhashtable walk), where taking ask_vlan_cc_lock (a mutex) is an
+	 * invalid wait context (lockdep, 2026-10-22, .158 PPPoE gate). The
+	 * fields are single words written under the lock; a stale read only
+	 * skews an aggregate counter.
+	 */
 	port = &ports[port_id];
-	if (!port->nkeys || !port->phys_ifindex)
-		goto out;
+	ifindex = READ_ONCE(port->phys_ifindex);
+	if (!READ_ONCE(port->nkeys) || !ifindex)
+		return -ENODATA;
+	pkts_snap = READ_ONCE(port->agg_pkts_snap);
+	bytes_snap = READ_ONCE(port->agg_bytes_snap);
 
-	dev = dev_get_by_index(&init_net, port->phys_ifindex);
-	if (!dev) {
-		ret = -ENODEV;
-		goto out;
-	}
+	dev = dev_get_by_index(&init_net, ifindex);
+	if (!dev)
+		return -ENODEV;
 	memset(&st, 0, sizeof(st));
 	dev_get_stats(dev, &st);
 	dev_put(dev);
 
-	p = (st.tx_packets > port->agg_pkts_snap) ?
-	    st.tx_packets - port->agg_pkts_snap : 0;
-	b = (st.tx_bytes > port->agg_bytes_snap) ?
-	    st.tx_bytes - port->agg_bytes_snap : 0;
+	p = (st.tx_packets > pkts_snap) ? st.tx_packets - pkts_snap : 0;
+	b = (st.tx_bytes > bytes_snap) ? st.tx_bytes - bytes_snap : 0;
 	*packets = p;
 	*bytes = b;
-	ret = 0;
-out:
-	mutex_unlock(&ask_vlan_cc_lock);
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(ask_vlan_cc_agg_stats);
