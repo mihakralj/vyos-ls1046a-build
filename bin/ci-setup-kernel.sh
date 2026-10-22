@@ -2586,6 +2586,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: ehash bucket harness passed"
 fi
 
+# F-270 (engaged-port oversize wedge, 2026-10-22): plain routed ehash records
+# wrote ENQUEUE mtu 1500 with no frag pool; with the F-262 RX-port triple the
+# first IP packet above 1500 bytes wedged the ingress port RX-deaf (.185, UDP
+# payload 1473 at MTU 2500). Write EN_EHASH_DISABLE_FRAG 0xffff instead;
+# F-262 still overwrites it with the egress MTU on records that need a
+# hardware MTU check. After F-269.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_270.py" 2>&1
+    echo "### fman_pcd.c: F-270 ehash ENQUEUE mtu 0xffff without MTU check"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
