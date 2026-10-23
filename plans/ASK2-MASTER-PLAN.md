@@ -265,6 +265,21 @@ programming recipes. Resolve contradictions before touching code.
 
   Harness: `ttl.sh`, `ttl0.sh`, `f266.sh`, `probe.py`, `neigh.sh`, `prsw.py` and
   `pmda.py`, kept in the session evidence folder.
+  **2026-10-23 `.185` re-run on image `2044` (`6.18.57-vyos`, `bin/testrig-a14.sh`
+  ttl|neigh|f266, FAM=4|6).** A14 TTL/hop-limit PASS v4+v6 (10/10 ICMP; v4 showed
+  9 once = kernel `icmp_ratelimit`; TTL/hlim 2 forwarded as 1; nothing with
+  ttl 0 or hlim 0/255 reaches gen2). A14 stale-neighbour PASS v4+v6 (0 frames to
+  the real MAC from +1 s to +3 s after `neigh replace` to a bogus MAC). F-266
+  transit PASS with distinct tuples (100 flows, 0 `HW_OFFLOAD`, 0 ehash, MURAM
+  52922). **NEW OPEN BUG, ASK-specific (disengaged 6/6 pass): 5-tuple reuse race.**
+  When the client reuses the same source port within milliseconds
+  (`REUSE=2`: v6 3/3 runs fail, v4 1/3; unforced v6 ~6/8, v4 0/8), the new SYN is
+  punted and conntrack replaces the old entry, but the old ehash FE record is
+  still installed, so the handshake ACK and data are hardware-forwarded; the new
+  ct entry stays SYN_RECV, the server FIN is not de-NATed and the DUT answers
+  with RST. Root cause: ct DESTROY to ehash removal is asynchronous. Fix
+  direction: delete the live FE record synchronously on SYN/FIN/RST punt. Needs
+  a kernel change, qdrant gate and CI; gates connection-scale claims alongside §4.1.
 - **A2 / A13 / scale:** repeat 64-byte loss/rate and IMIX; connection rate
   with held sessions, 8,000-session bidirectional PDR, install rate and first
   insert latency; measure latency beside HW traffic. External 20k CPS and
