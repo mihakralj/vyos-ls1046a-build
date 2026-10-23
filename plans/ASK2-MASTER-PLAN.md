@@ -16,11 +16,12 @@ remaining bridge/encapsulation gaps.
 
 ### 1.1 Working baseline
 
-Boards and images (2026-10-19):
+Boards and images (2026-10-23):
 
 | Board | Image | Role |
 |---|---|---|
-| `.185` | `2026.10.19-1504-rolling`, `6.18.57-vyos` (production; `latest.iso`) | Primary rig DUT on the generators' root-namespace ports |
+| `.185` | `2026.10.22-2044-rolling`, `6.18.57-vyos` (production; `latest.iso`; F-270 + lockless `ask_vlan_cc_agg_stats`) | Primary rig DUT on the generators' root-namespace ports; eth1/eth2 have no peer cabling |
+| `.164` (was `.158`, DHCP) | `2026.10.22-2044-rolling` | Runs the 10k PPPoE session-churn gate (dell2 `~/testrig/launch-churn-158.sh`, log `out/pppoe-churn-164-10k-*.log`, ~34 s/cycle); prior run failed at cycle 3482 on lockdep, fixed |
 | `.149` | `2026.10.19-1845-rolling`, `6.18.57-vyos` (`kunit=true`, ASK debugfs) | KUnit/debugfs DUT on the generators' `n106` ports; same rig addresses as `.185` (`10.99.1.185`, `10.99.2.185`, …), management on eth2 DHCP |
 | `.145` | `2026.10.16-2149-rolling` | Former NXP vendor board (`.106`), now VyOS; no vendor ASK board exists until one is restored |
 
@@ -58,6 +59,10 @@ Gates closed since the 2026-10-15 snapshot. The evidence is in
 | Bridge B6/B7a current-image repeat and 100-cycle soak | `2012` cold boot, 2026-10-17 | B2 and capacity need the debugfs image (`.149`) |
 | PPPoE ASK2-side fragmentation | `2012`, 2026-10-17 | Vendor half, 10,000-cycle, exhaustion, soak open |
 | IPsec Tier 1 (CAAM-backed host-terminated ESP, SW baseline, rekey) | 2026-10-17 | Reboot-clean open |
+| P4 per-port loop, eth3 and eth4 (idempotent engage, MTU 1280/2500/3600/1500, link flap ×3, 100-cycle disengage/engage churn, CLI remove/reapply ×10) | `.185`/`2044`, 2026-10-21..23 | MURAM 52922, `pcd-snapshot diff` clean, 0 kernel errors; module unload refused by design (patch 0145 pins `ask.ko`) |
+| P4 MTU > 1500 with offload engaged (F-270) | `.185`/`2044`, 2026-10-23: MTU 1280-3600 steps, UDP sweep 1472-2400 incl. 1473, routed MTU-shrink | 9.2-9.7 Gbit/s; PPPoE-specific shrink case not rerun |
+| P4 neighbour change under load, eth3 and eth4 sides, IPv4 and IPv6 | `.185`/`2044`, 2026-10-22/23 | IPv6 only with reverse neighbour pinned (see §5 ND finding) |
+| P4 concurrent eth3↔eth4 `--bidir`, cold boot with offload engaged | `.185`/`1955`, 2026-10-22 | >= 0.97x single direction |
 | T-M8-3 per-flow counters, YNL `get-flow` fix, KUnit all-green | Counters on `.145`/`2149`; `get-flow` fix on `1504`/`.185`; KUnit (`ask_genl` 16/16) on `1845`/`.149`; 2026-10-19 | Per-op genl policies (§4.7) |
 
 ### 1.2 Feature-parity blockers
@@ -277,16 +282,17 @@ programming recipes. Resolve contradictions before touching code.
 - **T-M7-2 S2:** emit `PREEMPTIVE_CHECKS_ON_PKT(0x05)` on every plain routed
   record, not only MTU-shrink records, only with owned frag-info and a measured
   regression gate.
-- **T-M7-P5:** eth1 routed TCP/UDP HIT/load, then eth0 with serial recovery;
+- **T-M7-P5 (remaining):** eth1 routed TCP/UDP HIT/load (needs a peer on
+  eth1; eth1/eth2 are unwired on `.185`), then eth0 with serial recovery;
   all-five simultaneous trafficked churn; identical-tuple cross-ingress
-  isolation. eth0 is LAST and remains opt-in/high-risk.
-- For each port: idempotent CLI and per-port mutex, own RX PCD range and
-  distinct TX FQ/channel, correct TTL/L2/checksums/flow owner and HW counters;
-  test both directions against supported ports, MTU 1280/1500/2500/3600,
-  neighbour change, down/up, remove/reapply, unload and cold boot.
-  Per-port/all-five 100-cycle churn must restore S0 PCD/MURAM/FQ baseline.
-  1G ports need wire rate without one-core saturation; concurrent 1G traffic
-  must not regress eth3↔eth4.
+  isolation (new harness). eth0 is LAST and remains opt-in/high-risk.
+- Per-port acceptance for eth3 and eth4 is DONE (§1.1 closed gates). Left
+  for eth0/eth1/eth2: own RX PCD range and distinct TX FQ/channel, correct
+  TTL/L2/checksums/flow owner and HW counters, both directions, MTU
+  1280/1500/2500/3600, neighbour change, down/up, remove/reapply, cold boot,
+  100-cycle churn restoring S0 PCD/MURAM/FQ baseline. 1G ports need wire rate
+  without one-core saturation; concurrent 1G traffic must not regress
+  eth3↔eth4.
 - Port map (RX/TX/channel): eth2 `0x09/0x29/0x803`, eth0
   `0x0c/0x2c/0x806`, eth1 `0x0d/0x2d/0x807`, eth3 `0x10/0x30/0x800`,
   eth4 `0x11/0x31/0x801`. Never engage eth0 with SSH as the only recovery.
@@ -499,6 +505,9 @@ be silently consumed.
 
 | Item | Remaining issue / next gate |
 |---|---|
+| IPv6 ND under forwarded traffic (2026-10-23, `.185`/`2044`) | With IPv6 offload engaged and a NAT66 masquerade rule, the DUT's neighbour entry for gen1 on eth3 stays INCOMPLETE/FAILED when triggered by forwarded traffic (no NS seen on the wire), yet `ping -6 -I eth3` resolves it. Unexplained; first compare against offload disengaged. Gate: fix or explain before IPv6 default-on claims |
+| P4 MTU>1500 wedge (2026-10-22) | **FIXED** F-270 (ehash ENQUEUE mtu 0xffff on plain routed records), HW-verified 2026-10-23; widen vyos-1x MTU guard (patches 036/037, now [1280, 2500]) to 3600 is optional follow-up |
+| PPPoE 10k churn gate (2026-10-20) | Stopped at cycle 3482 on `BUG: Invalid wait context` (`ask_vlan_cc_agg_stats` took a mutex under `rcu_read_lock`); fixed lockless in `be246329`; relaunched 2026-10-23 on `.164`, must pass cycle 3482 and reach 10,000 with no kernel BUG |
 | Ehash collision chain (2026-10-20) | Hardware never hits a non-head chained record: routed `.156`/0326 shows heads 472/472 hit and entries behind them 472/472 miss; bridge capacity fails the same way. These flows silently stay in software. Root cause: the 210.10.1 walker follows links only through vendor cumulative nodes (byte0 0x80), never from a regular record. Fix F-269 rebuilds each bucket of two or more flows as cumulative nodes (copy-on-write: switch the head, SYNC, then free). **FIXED** in image `2026.10.20-1310` (commit `73b8189d`): on cold-booted `.158`, chain A/B gave 944/944 shared-bucket records hit with 0 misses, and bridge capacity N=8192 hit on 3/3 probes. B2, F-266, A14 v4/v6 and a 10-cycle PPPoE churn all pass on the same boot (bridge plan §6.2). Chains spanning several nodes are also proven: L2_DA 16-byte keys at depth 25 (3 nodes), and routed IPv4/IPv6 50-byte keys at depth 13 (5 nodes). All hit, including after deletes at node edges. Key sizes 14 and 38 are dormant (no producer). Bridge soak PASS 100/100 (2026-10-20) |
 | F-266 / conntrack close | Default-off; parser arm/readback proven, transit and NAT closure untested; §4.1 blocks scale acceptance |
 | IPv6 fragment-ID reuse | Concurrent oversize flows can corrupt reassembly; keep limitation and `ipv6_hw_frag=0` opt-out visible; PPPoE plan |

@@ -63,14 +63,15 @@ flowchart TD
 - **Done 2026-10-21 (eth4 only):** CLI remove/reapply ×10
   (`delete`/`set interfaces ethernet eth4 offload ipv4|ipv6`, commit each)
   with a ping through the DUT: MURAM 52922 after every cycle, `pcd-snapshot
-  diff` clean, `ask-check` 36/36, 0 kernel errors. eth3 not yet run.
+  diff` clean, `ask-check` 36/36, 0 kernel errors. eth3 run 2026-10-23 (`.185`, image 2044, `bin/testrig-cli-cycle.sh` ×10, ping running): MURAM 52922 after every cycle, 0 kernel errors, `ask-check` 36/36.
 - **Done 2026-10-22 (`.185`, image 1955, eth3→eth4 routed iperf3 4 streams,
   `bin/testrig-neigh-change.sh`):** neighbour flush under load costs one
   ~7.9 Gbit/s second and recovers; a 1.5 s wrong-MAC blackhole then restore
   returns the same flow to 9.4 Gbit/s with hardware hits (+3.3 M pkts/3 s) in
   about 6 s, MURAM 52922, 0 kernel errors, `ask-check` 36/36. A 10 s
   blackhole leaves the TCP flow stalled by RTO backoff, but a fresh flow runs
-  at 9.41 Gbit/s, so this is not a hardware fault. IPv6 and the eth3 side not run.
+  at 9.41 Gbit/s, so this is not a hardware fault. eth3 side run 2026-10-23 (image 2044, gen2→gen1, OUTIF=eth3): same result, 2 s dip then 9.41 Gbit/s, hardware hits +3.4 M pkts/3 s, MURAM 52922, 0 kernel errors, 36/36. IPv6 run 2026-10-23 (eth3→eth4, NAT66 masquerade rule present, reverse neighbour pinned): same recovery, 9.28 Gbit/s, hits +3.4 M, MURAM 52922, 0 kernel errors. Finding: with the reverse neighbour unpinned the DUT's ND for gen1 on eth3 stays INCOMPLETE/FAILED when triggered by forwarded IPv6 traffic (no NS seen on the wire), though `ping -6 -I eth3` resolves it; unexplained, needs follow-up.
+- **Done 2026-10-23 (`.185`, image 2044, `bin/testrig-port-loop.sh`):** eth3 and eth4 each: idempotent engage, MTU 1280/2500/3600/1500, link down/up ×3, 100-cycle disengage/engage churn with ping: MURAM 52922 throughout, `pcd-snapshot diff` clean (S0↔S1 reversible), 0 kernel errors, 36/36.
 - **Done 2026-10-22 (`.185`, image 1955, `bin/testrig-concurrent.sh`):** concurrent
   eth3↔eth4 `--bidir` 4 streams: 8.95 / 9.02 Gbit/s per direction against 9.26
   single-direction (>= 0.97x), hardware hits +7.1 M pkts/3 s, MURAM 52922,
@@ -84,7 +85,8 @@ flowchart TD
   A real unload test would need an explicit handler-unregister path (not planned).
 - **Cold boot with offload engaged: PASS 2026-10-22 (`.185`, image 1955).**
   Auto-engage, `ask-check` 36/36, MURAM 52922, both ports ping.
-- **OPEN DEFECT 2026-10-22: MTU > 1500 with offload engaged wedges eth3 RX.**
+- **FIXED + HW-VERIFIED 2026-10-22 (F-270, ISO 2026.10.22-2044-rolling, .185): `bin/testrig-mtu-steps.sh` 1280/1500/1800/2500 = 36/36 PASS, ~9.2-9.5 Gbit/s, MURAM 52922, no wedge. UDP payload sweep at MTU 2500 (`bin/testrig-udp-sweep.sh`, 1472/1473/1480/1500/1800/2000/2400) 0 loss; 1473 no longer wedges. Churn gate relaunched on the old .158 (now .164). MTU 3000/3600 also pass (9.6 Gbit/s, MURAM 52922). Routed MTU-shrink (eth4 1400, 1472 payload) 0 loss, 0 kernel errors. Not run: PPPoE-specific shrink case.**
+- **(was) DEFECT 2026-10-22: MTU > 1500 with offload engaged wedges eth3 RX.**
   With DUT eth3/eth4 and both generators at the same MTU (1800 and 2500
   tested, three cold-boot repeats), pings pass but the first TCP burst freezes
   eth3 `rx_packets` after ~15-20 frames (link up, eth4 fine, down/up and
@@ -109,7 +111,7 @@ flowchart TD
   ehash emitter wrote ENQUEUE mtu 1500 with bpid 0 and no frag-info block on
   plain routed records; with the F-262 RX-port triple the microcode takes its
   fragmentation path with no pool and the port goes deaf. The 08-17 battery
-  predates the triple. FIX (unverified on board): `F_270.py` writes ENQUEUE
+  predates the triple. FIX (verified on board, see above): `F_270.py` writes ENQUEUE
   mtu 0xffff (EN_EHASH_DISABLE_FRAG, as F-261/F-268); F-262 still overwrites
   it where it seals a real MTU check. Verify on a new image with
   `bin/testrig-mtu-steps.sh` at 1280/1500/1800/2500, the payload sweep and
