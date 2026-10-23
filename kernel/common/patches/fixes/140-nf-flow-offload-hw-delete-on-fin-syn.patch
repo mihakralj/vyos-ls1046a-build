@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Fri, 23 Oct 2026 12:00:00 +0000
+Subject: [PATCH] netfilter: nf_flow_table: delete HW flow at FIN/RST and on
+ SYN reuse of a closing flow
+
+With a hardware flowtable (ask.ko) the FE record outlives the connection
+by up to the 1 s gc period. A new SYN reusing the same 5-tuple is punted
+and conntrack creates a fresh entry, but the stale record still matches
+the handshake ACK and data, so they are forwarded without NAT/conntrack
+state and the new connection never reaches ESTABLISHED (F-266 tuple-reuse
+bug, seen on IPv6 5-tuple reuse ~11 ms apart).
+
+Call nf_flow_offload_del() (GFP_ATOMIC, queues work) from
+nf_flow_state_check() when FIN/RST marks the flow CLOSING and when a SYN
+tears down a CLOSING flow, if the flow is NF_FLOW_HW and not already dying.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
+--- a/net/netfilter/nf_flow_table_ip.c
++++ b/net/netfilter/nf_flow_table_ip.c
+@@ -19,7 +19,8 @@
+ #include <linux/tcp.h>
+ #include <linux/udp.h>
+ 
+-static int nf_flow_state_check(struct flow_offload *flow, int proto,
++static int nf_flow_state_check(struct nf_flowtable *flow_table,
++			       struct flow_offload *flow, int proto,
+ 			       struct sk_buff *skb, unsigned int thoff)
+ {
+ 	struct tcphdr *tcph;
+@@ -30,12 +31,26 @@
+ 	tcph = (void *)(skb_network_header(skb) + thoff);
+ 	if (tcph->syn && test_bit(NF_FLOW_CLOSING, &flow->flags)) {
+ 		flow_offload_teardown(flow);
++		/* A new connection reuses a tuple whose hardware record is
++		 * still installed; do not wait for the 1 s gc pass or the
++		 * handshake and data keep hitting the stale record.
++		 */
++		if (test_bit(NF_FLOW_HW, &flow->flags) &&
++		    !test_bit(NF_FLOW_HW_DYING, &flow->flags))
++			nf_flow_offload_del(flow_table, flow);
+ 		return -1;
+ 	}
+ 
+ 	if ((tcph->fin || tcph->rst) &&
+-	    !test_bit(NF_FLOW_CLOSING, &flow->flags))
++	    !test_bit(NF_FLOW_CLOSING, &flow->flags)) {
+ 		set_bit(NF_FLOW_CLOSING, &flow->flags);
++		/* Remove the hardware record at the first FIN/RST rather
++		 * than at the next gc pass (up to 1 s later).
++		 */
++		if (test_bit(NF_FLOW_HW, &flow->flags) &&
++		    !test_bit(NF_FLOW_HW_DYING, &flow->flags))
++			nf_flow_offload_del(flow_table, flow);
++	}
+ 
+ 	return 0;
+ }
+@@ -395,7 +410,7 @@
+ 
+ 	iph = (struct iphdr *)(skb_network_header(skb) + ctx->offset);
+ 	thoff = (iph->ihl * 4) + ctx->offset;
+-	if (nf_flow_state_check(flow, iph->protocol, skb, thoff))
++	if (nf_flow_state_check(flow_table, flow, iph->protocol, skb, thoff))
+ 		return 0;
+ 
+ 	if (!nf_flow_dst_check(&tuplehash->tuple)) {
+@@ -684,7 +699,7 @@
+ 
+ 	ip6h = (struct ipv6hdr *)(skb_network_header(skb) + ctx->offset);
+ 	thoff = sizeof(*ip6h) + ctx->offset;
+-	if (nf_flow_state_check(flow, ip6h->nexthdr, skb, thoff))
++	if (nf_flow_state_check(flow_table, flow, ip6h->nexthdr, skb, thoff))
+ 		return 0;
+ 
+ 	if (!nf_flow_dst_check(&tuplehash->tuple)) {
+-- 
+2.39.5

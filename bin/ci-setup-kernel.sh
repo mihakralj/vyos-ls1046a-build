@@ -770,6 +770,16 @@ else
     echo "WARNING: $SFP_CHECKSUM_PATCH missing — eth3 SFP link will fail to come up"
 fi
 
+# Stage F-266 tuple-reuse fix: delete the HW flow at FIN/RST and when a SYN
+# reuses a CLOSING flow's tuple (stale FE record otherwise outlives gc by 1 s).
+NF_FLOW_HWDEL_PATCH="$COMMON_FIXES_DIR/140-nf-flow-offload-hw-delete-on-fin-syn.patch"
+if [ -f "$NF_FLOW_HWDEL_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_HWDEL_PATCH") (F-266 5-tuple reuse stale HW record)"
+    cp "$NF_FLOW_HWDEL_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "ERROR: $NF_FLOW_HWDEL_PATCH missing"; exit 1
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
