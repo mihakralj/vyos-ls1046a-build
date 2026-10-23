@@ -14,34 +14,46 @@ bug, seen on IPv6 5-tuple reuse ~11 ms apart).
 Call nf_flow_offload_del() (GFP_ATOMIC, queues work) from
 nf_flow_state_check() when FIN/RST marks the flow CLOSING and when a SYN
 tears down a CLOSING flow, if the flow is NF_FLOW_HW and not already dying.
+The delete runs from a workqueue and a reused-tuple SYN can follow within
+~0.3 ms, so such a SYN is dropped until NF_FLOW_HW_DEAD is set; the client
+retransmits and conntrack then sees a clean tuple.
 
 Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 ---
 diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
 --- a/net/netfilter/nf_flow_table_ip.c
 +++ b/net/netfilter/nf_flow_table_ip.c
-@@ -19,7 +19,8 @@
+@@ -19,7 +19,11 @@
  #include <linux/tcp.h>
  #include <linux/udp.h>
  
 -static int nf_flow_state_check(struct flow_offload *flow, int proto,
++/* Returns 0 to continue the fast path, 1 to hand the packet to the slow
++ * path, -1 to drop it.
++ */
 +static int nf_flow_state_check(struct nf_flowtable *flow_table,
 +			       struct flow_offload *flow, int proto,
  			       struct sk_buff *skb, unsigned int thoff)
  {
  	struct tcphdr *tcph;
-@@ -30,12 +31,26 @@
+@@ -30,12 +34,31 @@
  	tcph = (void *)(skb_network_header(skb) + thoff);
  	if (tcph->syn && test_bit(NF_FLOW_CLOSING, &flow->flags)) {
  		flow_offload_teardown(flow);
-+		/* A new connection reuses a tuple whose hardware record is
-+		 * still installed; do not wait for the 1 s gc pass or the
-+		 * handshake and data keep hitting the stale record.
-+		 */
-+		if (test_bit(NF_FLOW_HW, &flow->flags) &&
-+		    !test_bit(NF_FLOW_HW_DYING, &flow->flags))
+-		return -1;
++		if (!test_bit(NF_FLOW_HW, &flow->flags))
++			return 1;
++		if (!test_bit(NF_FLOW_HW_DYING, &flow->flags))
 +			nf_flow_offload_del(flow_table, flow);
- 		return -1;
++		/* A SYN reusing the tuple of a closing hardware flow must not
++		 * reach conntrack while the hardware record is still installed:
++		 * the handshake ACK and data would be forwarded by the stale
++		 * record and the new connection never reaches ESTABLISHED. Drop
++		 * the SYN until the delete has completed; the client retransmits.
++		 */
++		if (!test_bit(NF_FLOW_HW_DEAD, &flow->flags))
++			return -1;
++		return 1;
  	}
  
  	if ((tcph->fin || tcph->rst) &&
@@ -58,23 +70,45 @@ diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
  
  	return 0;
  }
-@@ -395,7 +410,7 @@
+@@ -383,6 +406,7 @@
+ {
+ 	enum flow_offload_tuple_dir dir;
+ 	struct flow_offload *flow;
++	int sc;
+ 	unsigned int thoff, mtu;
+ 	struct iphdr *iph;
+ 
+@@ -395,8 +419,9 @@
  
  	iph = (struct iphdr *)(skb_network_header(skb) + ctx->offset);
  	thoff = (iph->ihl * 4) + ctx->offset;
 -	if (nf_flow_state_check(flow, iph->protocol, skb, thoff))
-+	if (nf_flow_state_check(flow_table, flow, iph->protocol, skb, thoff))
- 		return 0;
+-		return 0;
++	sc = nf_flow_state_check(flow_table, flow, iph->protocol, skb, thoff);
++	if (sc)
++		return sc < 0 ? -1 : 0;
  
  	if (!nf_flow_dst_check(&tuplehash->tuple)) {
-@@ -684,7 +699,7 @@
+ 		flow_offload_teardown(flow);
+@@ -672,6 +697,7 @@
+ {
+ 	enum flow_offload_tuple_dir dir;
+ 	struct flow_offload *flow;
++	int sc;
+ 	unsigned int thoff, mtu;
+ 	struct ipv6hdr *ip6h;
+ 
+@@ -684,8 +710,9 @@
  
  	ip6h = (struct ipv6hdr *)(skb_network_header(skb) + ctx->offset);
  	thoff = sizeof(*ip6h) + ctx->offset;
 -	if (nf_flow_state_check(flow, ip6h->nexthdr, skb, thoff))
-+	if (nf_flow_state_check(flow_table, flow, ip6h->nexthdr, skb, thoff))
- 		return 0;
+-		return 0;
++	sc = nf_flow_state_check(flow_table, flow, ip6h->nexthdr, skb, thoff);
++	if (sc)
++		return sc < 0 ? -1 : 0;
  
  	if (!nf_flow_dst_check(&tuplehash->tuple)) {
+ 		flow_offload_teardown(flow);
 -- 
 2.39.5
