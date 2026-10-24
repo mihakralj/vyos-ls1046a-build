@@ -506,12 +506,13 @@ be silently consumed.
   Owner `ASK2-WIREGUARD-FASTPATH-PLAN.md` (history in `archive/`).
 - **Beyond parity:** sub-100 ms per-flow engage, port-scoped conntrack
   teardown, non-proxy HW observability, ≥16 Gbit/s VLAN↔port bidirectional.
-- **Suricata:** design only (`ASK2-SURICATA-BYPASS-PLAN.md`). The native
+- **Suricata:** design only (`ASK2-SURICATA-OFFLOAD-PLAN.md`). The native
   VyOS service is AF_PACKET IDS, not inline, so it cannot approve flows.
   With the factory-default offload it sees only each flow's slow-path prefix.
-  Before any code, the approval contract (§9 of that plan) must be written:
-  explicit verdict → conntrack mark → flowtable match, tuple/NAT identity,
-  revocation on reload or alert, and fail-closed behaviour.
+  Before any code, complete the plan's
+  [decisions and safety contract](ASK2-SURICATA-OFFLOAD-PLAN.md#decisions-and-safety-contract):
+  define explicit per-flow approval, tuple/NAT identity, revocation, failure
+  behavior, configuration interaction, and observability.
 - **Memory:** consider DMA pools before increasing bridge caps: historical
   coherent record/context allocations cost ~9 KiB per record due to page
   rounding. Preserve memory/resource accounting and collision-chain gates.
@@ -577,7 +578,7 @@ archived 40-second dual-client baseline with the current 30-second
 | `ASK2-BRIDGE-OFFLOAD-PLAN.md` | Remaining bridge design and runbook |
 | `ASK2-PPPOE-OFFLOAD-PLAN.md` | Remaining PPPoE acceptance and feature gaps |
 | `ASK2-IPSEC-OFFLOAD-PLAN.md` | Tier 1/2 runbook (Tier 1 substrate verified 2026-10-16); must satisfy this plan's current scope/architecture |
-| `ASK2-SURICATA-BYPASS-PLAN.md` | Suricata IDS/IPS integration design and approval contract (no code) |
+| `ASK2-SURICATA-OFFLOAD-PLAN.md` | Suricata inspection-driven offload design and safety contract (no code) |
 | `archive/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` | Completed vendor topology/reference analysis |
 | `OFFLOAD-CAPABILITY-PLAN.md` | Vendor vs ASK2 mechanism for each remaining capability |
 | `CC-ACL-OFFLOAD-PLAN.md` | Static ACL backend (open Phase 2 drop ACL; not a parity blocker) |
