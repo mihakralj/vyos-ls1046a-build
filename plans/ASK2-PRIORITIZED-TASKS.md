@@ -1,6 +1,6 @@
 # ASK2 prioritized task order
 
-Snapshot: 2026-10-21. This is a derived, ordered view of
+Snapshot: 2026-10-23. This is a derived, ordered view of
 [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) (§3 execution order, §4 work
 program, §5 defects). The master plan stays authoritative; if the two
 disagree, the master plan wins and this file is stale. Counts, run IDs and
@@ -13,9 +13,9 @@ is kept, so P1 and P3 are intentionally absent.
 
 | Item | State |
 |---|---|
-| Image under test | `2026.10.21-0729-rolling`, `6.18.57-vyos`, commit `465e8ae8` (CI run 39562267413), deployed to lxc200 `latest.iso` and installed on `.185` |
-| P5 hardening | Open: forced-failure A4, deferred-insert replay test (IPsec Tier 1 closed 2026-10-21); see P5 |
-| PPPoE 10,000-cycle gate (A8) | RUNNING on `.158`, image `1310`, launched 2026-10-20 15:15 UTC, cycle 2125/10000 with 0 fails at 2026-10-21 19:38 UTC (about 485 cycles/h, so ETA about 2026-10-22 12:00 UTC at the current rate, earlier than the original 2026-10-26 estimate); log `dell2:~/testrig/out/pppoe-churn-158-10k-1020-1515.log` |
+| Image under test | `.185` and `.164` run `2026.10.23-1724-rolling` (`6.18.57-vyos`, commit `62dd22fa`, F-266 fix v1: async HW delete at FIN/RST/SYN). It did NOT fix tuple reuse. Fix v2 (drop reused-tuple SYN until `NF_FLOW_HW_DEAD`) is pushed, CI run `40003181649` building |
+| P5 hardening | Open: forced-failure A4, deferred-insert replay test, F-266 5-tuple reuse (see recap); IPsec Tier 1 closed 2026-10-21 |
+| PPPoE 10,000-cycle gate (A8) | FAILED on `.164`, image `2044`: stopped at cycle 1116/10000 (2026-10-23 ~16:38 UTC), all four flows (decap/encap v4/v6) delivered no data after a session-ID change; 1115 prior cycles clean, drain 0 records, MURAM 52922, `pcd-snapshot diff` clean, no kernel BUG. Cause not yet diagnosed (DUT offload vs `dell2` client). The earlier lockdep stop at 3482 was fixed in `be246329` but not yet passed |
 | Vendor comparison | BLOCKED: no board is running NXP ASK |
 
 Rig constraint: `.158` is occupied by the A8 run until it finishes. Do not
@@ -23,11 +23,70 @@ touch `.158`, the dells' `n106` namespace or the dell1 concentrator meanwhile.
 `.185` uses the root-namespace generator ports; `.149` is the debugfs/KUnit
 DUT. Both DUTs share rig addresses, so test one DUT at a time.
 
+## Status recap (2026-10-23)
+
+**Parity achieved (board-verified):**
+
+- Routed, NAT, VLAN and PPPoE offload.
+- Bridge B6, B7a and B7b access↔trunk pop/push.
+- IPsec Tier 1 (host-terminated ESP on CAAM, reboot-clean).
+- P4 per-port hardening on `.185`: engage/disengage churn, MTU 1280-3600
+  (F-270), link flap, neighbour change under load (v4/v6, VLAN) and
+  concurrent bidirectional traffic. `fe80::185/64` persistent on eth3/eth4.
+- Per-flow counters and the KUnit suite.
+
+**Parity gaps (master plan §1.2):**
+
+- IPsec full FMan→CAAM→FMan path (T-M6-4 / IP1 / IP2)
+- Multicast (T-M6-MC)
+- Multi-table dispatch (T-M6-DISPATCH)
+- PPPoE-over-VLAN and relay (T-M6-SP4)
+- QinQ (T-M6-VLAN2)
+- Tunnels, 6in4 and 4in6 (T-M6-SP5)
+- QoS: rate limit and CEETM (T-M6-QOS)
+- Generic fragment acceleration (T-M6-FR)
+
+**Gates and tests (2026-10-23, `.185`, harness `bin/testrig-a14.sh`):**
+
+| Gate | Result |
+|---|---|
+| A14 TTL/hop-limit expiry punt, v4+v6 | PASS (10/10 ICMP; kernel `icmp_ratelimit` can mask 1) |
+| A14 stale-neighbour safety, v4+v6, plain and VLAN | PASS (0 frames to the old MAC after +1 s) |
+| F-266 transit, 100 distinct tuples | PASS (0 `HW_OFFLOAD`, 0 ehash, MURAM 52922) |
+| F-266 transit, 5-tuple reuse (`REUSE=2 FAM=6`) | FAIL: v6 ~6/8 unforced, v4 rare. Mechanism: old FE record outlives the closing flow, so a same-tuple SYN ~0.3 ms later gets its ACK/data HW-forwarded, conntrack stays `SYN_RECV`. Fix v1 (async delete) failed 7/7 on image 1724; fix v2 (patch `fixes/140`) untested |
+| PPPoE 10k churn gate | FAILED at cycle 1116 (see above) |
+
+The F-266 gate cannot be called passed until `REUSE=2 FAM=6 ... f266` passes
+repeatedly on the fix-v2 image. Production exposure: needs the same 5-tuple
+reused within milliseconds, which randomized client ports make rare.
+
+**Next tasks, in order:**
+
+1. Fix v2: when CI `40003181649` finishes, deploy to lxc200, operator
+   installs on `.185`; run `REUSE=2 FAM=6 bin/testrig-a14.sh f266` x N,
+   unforced v4/v6, then the `ttl`, `neigh` and `testrig-neigh-change.sh`
+   regressions. Expect ~1 s retry delay on a reused tuple.
+2. Diagnose the `.164` churn stop at cycle 1116 (kernel log and `ask`
+   debugfs at ~16:38 UTC, client side on `dell2`), then rerun the 10,000-cycle
+   gate on the fix image. Interim reduced run (~46 s/cycle): `CYCLES=1800`
+   (~23 h) via `dell2:~/testrig/launch-churn-158.sh` (default 1800, override
+   with `CYCLES=`). It must clear cycle 1116 (the failure point); 1800 does
+   not reach the lockdep point at 3482, so the full 10,000 criterion in the
+   master plan stays open until agreed otherwise.
+3. PPPoE MTU-shrink on `.164` after the gate.
+4. T-M7-P5 cabling and T-M6-A4 fault injection (need the operator).
+5. Existing-feature acceptance: PPPoE exhaustion/soak, bridge B2/capacity on
+   `.149`, five-port breadth.
+6. IPsec Tier 2 (P6), then P7-P9 dispatch-dependent features.
+7. Vendor comparisons stay blocked until a board is restored to NXP ASK.
+8. Session end: `bin/qdrant-reconcile.sh`, update the master plan with the
+   F-266 result.
+
 ## Ordered list
 
 ```mermaid
 flowchart TD
-    P0[P0 Running: A8 PPPoE 10k on .158] --> P2[P2 Bridge B2 and capacity on .149]
+    P0[P0 Running: A8 PPPoE 10k on .164 (failed at 1116, rerun)] --> P2[P2 Bridge B2 and capacity on .149]
     P0 --> P4[P4 Five-port breadth]
     P5[P5 Resource-failure A4 and IPsec reboot-clean]
     P5 --> P6[P6 IPsec Tier 2]
@@ -38,9 +97,9 @@ flowchart TD
     P9 --> P10[P10 Scale, latency, final vendor comparison]
 ```
 
-### P0. Running now (no action, monitor)
+### P0. A8 PPPoE churn gate (stopped, rerun needed)
 
-- **A8 PPPoE 10,000-cycle lifecycle** on `.158` (`MODE=mix CYCLES=10000`).
+- **A8 PPPoE 10,000-cycle lifecycle** on `.164` (`MODE=mix CYCLES=10000`); last run stopped at cycle 1116 (see recap).
   Pass criteria: zero fails and zero deaf ports, hits on every flow before and
   after each flap, every drain returns records to 0 and MURAM `used` to 52922,
   final `pcd-snapshot diff` clean. Stop only with `pgrep` plus `kill <pid>`,
@@ -210,7 +269,8 @@ flowchart TD
   integration (`git merge --no-ff --log=200` with a descriptive subject).
 - **WireGuard fast path** (`ASK2-WIREGUARD-FASTPATH-PLAN.md`), **VPP zero-copy**
   (`VPP-AFXDP-ZC-FULLSPEED.md`, T-M4-5a through 4g, operator installs images),
-  **Suricata bypass** (design only, approval contract first).
+  **Suricata flow offload** (`ASK2-SURICATA-OFFLOAD-PLAN.md`; design only,
+  approval contract first).
 
 ## Known open defects (do not claim as passing)
 
@@ -222,6 +282,8 @@ flowchart TD
 | F-076 eth4 debugfs direct arm | Diagnostic only; can leave RX deaf |
 | VPP ZC refill | Flood can freeze refill and drain the pool; separate VPP track |
 | Deferred-insert replay (PR14y/PR14z10) | Fixed in source (`465e8ae8`), not exercised on silicon or in KUnit |
+| F-266 5-tuple reuse (same tuple within ms) | Stale HW record; fix v1 failed, fix v2 (`fixes/140`) pending board test |
+| PPPoE churn gate stop at cycle 1116 (2026-10-23) | Undiagnosed; gate not passed |
 | Closed flows lingering in conntrack | Entries stay until the flowtable timeout; the F-266 punt fix reduces but the 30 s timeout still applies |
 
 ## Standing gate rules for every item
