@@ -174,6 +174,12 @@ MODULE_PARM_DESC(ipv6_hw_frag,
  */
 static unsigned int ask_offload_delay_ms;
 module_param_named(offload_delay_ms, ask_offload_delay_ms, uint, 0644);
+
+/* F-266 diagnostics: unratelimited REPLACE/DESTROY trace with 5-tuple ports */
+static bool ask_f266_trace;
+module_param_named(f266_trace, ask_f266_trace, bool, 0644);
+MODULE_PARM_DESC(f266_trace,
+		 "Trace every flow REPLACE/DESTROY with cookie, ports and ordering (default off)");
 MODULE_PARM_DESC(offload_delay_ms,
 		 "Minimum flow age before hardware offload, in ms (default 0: "
 		 "offload at the first REPLACE, like the vendor; a nonzero value "
@@ -3660,6 +3666,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * Drop the misleading "tier" string here; keep cookie + hw_id
 	 * for cross-referencing.
 	 */
+	if (READ_ONCE(ask_f266_trace))
+		pr_info("ask: f266: REPLACE done cookie=0x%lx l3=%u sport=%u dport=%u hw_id=0x%08x\n",
+			f->cookie, key.l3_proto, ntohs(key.sport),
+			ntohs(key.dport), hw_id);
 	pr_info_ratelimited("ask: flow_offload: REPLACE installed cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
 			    f->cookie, hw_id,
 			    ingress_dev ? netdev_name(ingress_dev) : "?", oif,
@@ -3801,10 +3811,16 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 		 */
 		rc = ask_flow_remove_owned(t, (u64)f->cookie, destroy_gen);
 		if (rc == -ENOENT) {
+			if (READ_ONCE(ask_f266_trace))
+				pr_info("ask: f266: DESTROY no-flow (ENOENT) cookie=0x%lx\n",
+					f->cookie);
 			ask_flow_gen_release(t, (u64)f->cookie);
 			return 0;
 		}
 		if (rc == -ESTALE) {
+			if (READ_ONCE(ask_f266_trace))
+				pr_info("ask: f266: DESTROY stale (ESTALE) cookie=0x%lx\n",
+					f->cookie);
 			/* A newer REPLACE re-claimed this recycled cookie
 			 * after our tombstone. It owns the flow and its FE
 			 * record now — do NOT delete it, do NOT release the
@@ -3817,6 +3833,10 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 			return rc;
 
 		ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
+		if (READ_ONCE(ask_f266_trace) && have_key)
+			pr_info("ask: f266: DESTROY fe-remove cookie=0x%lx l3=%u sport=%u dport=%u\n",
+				f->cookie, dkey.l3_proto, ntohs(dkey.sport),
+				ntohs(dkey.dport));
 		/* Fix B: per-key FE-VM delete (F-117) — removes just this
 		 * flow's silicon record instead of clearing every flow.
 		 * T-M6-8d (ehash-vlan-revival): a VLAN flow now lives in the
