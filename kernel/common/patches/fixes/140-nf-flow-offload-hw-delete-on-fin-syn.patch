@@ -1,0 +1,203 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Fri, 23 Oct 2026 12:00:00 +0000
+Subject: [PATCH] netfilter: nf_flow_table: delete HW flow at FIN/RST and on
+ SYN reuse of a closing flow
+
+With a hardware flowtable (ask.ko) the FE record outlives the connection
+by up to the 1 s gc period. A new SYN reusing the same 5-tuple is punted
+and conntrack creates a fresh entry, but the stale record still matches
+the handshake ACK and data, so they are forwarded without NAT/conntrack
+state and the new connection never reaches ESTABLISHED (F-266 tuple-reuse
+bug, seen on IPv6 5-tuple reuse ~11 ms apart).
+
+Call nf_flow_offload_del() (GFP_ATOMIC, queues work) from
+nf_flow_state_check() when FIN/RST marks the flow CLOSING and when a SYN
+tears down a CLOSING flow, if the flow is NF_FLOW_HW and not already dying.
+The delete runs from a workqueue and a reused-tuple SYN can follow within
+~0.3 ms, so such a SYN is dropped while a hardware record may still be live
+(NF_FLOW_HW, IPS_HW_OFFLOAD or a pending job, not yet HW_DEAD). The flow
+stays in the flowtable so every retransmit is re-checked; flows without a
+hardware record go straight to the slow path.
+
+nf_flow_offload_del() is a silent no-op while NF_FLOW_PENDING is set (an add
+or stats job is queued), which loses the FIN-time delete for a flow whose
+hardware add has not run yet (board trace 2026-10-24, f266_trace). Run
+the delete inline from the work handler, before NF_FLOW_PENDING is cleared
+(gc cannot free the flow while it is set), if the flow is already CLOSING.
+
+Both FINs are punted, but the final ACK is still forwarded by the hardware
+record in the window before the delete job runs, so conntrack stays in
+LAST_ACK, where a SYN reusing the tuple is ignored (F-266 root cause, board
+capture 2026-10-25: no final ACK on either DUT port, ct never leaves
+LAST_ACK). When the hardware record is deleted for a CLOSING TCP flow in
+LAST_ACK, move conntrack to TIME_WAIT as the swallowed ACK would have done.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
+index 1be506a..4235141 100644
+--- a/net/netfilter/nf_flow_table_ip.c
++++ b/net/netfilter/nf_flow_table_ip.c
+@@ -19,7 +19,23 @@
+ #include <linux/tcp.h>
+ #include <linux/udp.h>
+ 
+-static int nf_flow_state_check(struct flow_offload *flow, int proto,
++/* Is a hardware record possibly still installed for @flow? An add that the
++ * driver declined never sets IPS_HW_OFFLOAD; an add or delete job in flight
++ * holds NF_FLOW_PENDING.
++ */
++static bool nf_flow_hw_record_live(const struct flow_offload *flow)
++{
++	return test_bit(NF_FLOW_HW, &flow->flags) &&
++	       !test_bit(NF_FLOW_HW_DEAD, &flow->flags) &&
++	       (test_bit(IPS_HW_OFFLOAD_BIT, &flow->ct->status) ||
++		test_bit(NF_FLOW_PENDING, &flow->flags));
++}
++
++/* Returns 0 to continue the fast path, 1 to hand the packet to the slow
++ * path, -1 to drop it.
++ */
++static int nf_flow_state_check(struct nf_flowtable *flow_table,
++			       struct flow_offload *flow, int proto,
+ 			       struct sk_buff *skb, unsigned int thoff)
+ {
+ 	struct tcphdr *tcph;
+@@ -29,13 +45,34 @@ static int nf_flow_state_check(struct flow_offload *flow, int proto,
+ 
+ 	tcph = (void *)(skb_network_header(skb) + thoff);
+ 	if (tcph->syn && test_bit(NF_FLOW_CLOSING, &flow->flags)) {
++		/* A SYN reusing the tuple of a closing flow must not reach
++		 * conntrack while a hardware record is still installed: the
++		 * handshake ACK and data would be forwarded by the stale
++		 * record and the new connection never reaches ESTABLISHED.
++		 * Keep the flow in the flowtable and drop the SYN until the
++		 * delete has completed, so every retransmit is checked again;
++		 * a flow without a hardware record goes straight to the slow
++		 * path.
++		 */
++		if (nf_flow_hw_record_live(flow)) {
++			if (!test_bit(NF_FLOW_HW_DYING, &flow->flags))
++				nf_flow_offload_del(flow_table, flow);
++			return -1;
++		}
+ 		flow_offload_teardown(flow);
+-		return -1;
++		return 1;
+ 	}
+ 
+ 	if ((tcph->fin || tcph->rst) &&
+-	    !test_bit(NF_FLOW_CLOSING, &flow->flags))
++	    !test_bit(NF_FLOW_CLOSING, &flow->flags)) {
+ 		set_bit(NF_FLOW_CLOSING, &flow->flags);
++		/* Remove the hardware record at the first FIN/RST rather
++		 * than at the next gc pass (up to 1 s later).
++		 */
++		if (test_bit(NF_FLOW_HW, &flow->flags) &&
++		    !test_bit(NF_FLOW_HW_DYING, &flow->flags))
++			nf_flow_offload_del(flow_table, flow);
++	}
+ 
+ 	return 0;
+ }
+@@ -383,6 +420,7 @@ static int nf_flow_offload_forward(struct nf_flowtable_ctx *ctx,
+ {
+ 	enum flow_offload_tuple_dir dir;
+ 	struct flow_offload *flow;
++	int sc;
+ 	unsigned int thoff, mtu;
+ 	struct iphdr *iph;
+ 
+@@ -395,8 +433,9 @@ static int nf_flow_offload_forward(struct nf_flowtable_ctx *ctx,
+ 
+ 	iph = (struct iphdr *)(skb_network_header(skb) + ctx->offset);
+ 	thoff = (iph->ihl * 4) + ctx->offset;
+-	if (nf_flow_state_check(flow, iph->protocol, skb, thoff))
+-		return 0;
++	sc = nf_flow_state_check(flow_table, flow, iph->protocol, skb, thoff);
++	if (sc)
++		return sc < 0 ? -1 : 0;
+ 
+ 	if (!nf_flow_dst_check(&tuplehash->tuple)) {
+ 		flow_offload_teardown(flow);
+@@ -672,6 +711,7 @@ static int nf_flow_offload_ipv6_forward(struct nf_flowtable_ctx *ctx,
+ {
+ 	enum flow_offload_tuple_dir dir;
+ 	struct flow_offload *flow;
++	int sc;
+ 	unsigned int thoff, mtu;
+ 	struct ipv6hdr *ip6h;
+ 
+@@ -684,8 +724,9 @@ static int nf_flow_offload_ipv6_forward(struct nf_flowtable_ctx *ctx,
+ 
+ 	ip6h = (struct ipv6hdr *)(skb_network_header(skb) + ctx->offset);
+ 	thoff = sizeof(*ip6h) + ctx->offset;
+-	if (nf_flow_state_check(flow, ip6h->nexthdr, skb, thoff))
+-		return 0;
++	sc = nf_flow_state_check(flow_table, flow, ip6h->nexthdr, skb, thoff);
++	if (sc)
++		return sc < 0 ? -1 : 0;
+ 
+ 	if (!nf_flow_dst_check(&tuplehash->tuple)) {
+ 		flow_offload_teardown(flow);
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+index 2af7d64..1bd76c2 100644
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -987,12 +987,33 @@ out:
+ 	nf_flow_offload_destroy(flow_rule);
+ }
+ 
++/* Both FINs of a closing TCP flow are punted to the CPU, but the final ACK
++ * can still be forwarded by the hardware record in the window before the
++ * delete job runs. Conntrack then never leaves LAST_ACK, where a SYN reusing
++ * the tuple is ignored instead of opening a new connection. Complete the
++ * close the swallowed ACK would have done.
++ */
++static void flow_offload_hw_close_fixup(struct flow_offload *flow)
++{
++	struct nf_conn *ct = flow->ct;
++
++	if (nf_ct_protonum(ct) != IPPROTO_TCP ||
++	    !test_bit(NF_FLOW_CLOSING, &flow->flags))
++		return;
++
++	spin_lock_bh(&ct->lock);
++	if (ct->proto.tcp.state == TCP_CONNTRACK_LAST_ACK)
++		ct->proto.tcp.state = TCP_CONNTRACK_TIME_WAIT;
++	spin_unlock_bh(&ct->lock);
++}
++
+ static void flow_offload_work_del(struct flow_offload_work *offload)
+ {
+ 	clear_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
+ 	flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_ORIGINAL);
+ 	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
+ 		flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_REPLY);
++	flow_offload_hw_close_fixup(offload->flow);
+ 	set_bit(NF_FLOW_HW_DEAD, &offload->flow->flags);
+ }
+ 
+@@ -1055,6 +1076,21 @@ static void flow_offload_work_handler(struct work_struct *work)
+ 		default:
+ 			WARN_ON_ONCE(1);
+ 	}
++	/* A FIN/RST or reused-tuple SYN that arrived while this add or stats
++	 * job was queued could not queue its delete (NF_FLOW_PENDING was set)
++	 * and the hardware record would then outlive the connection until the
++	 * next gc pass. Delete it here, in this work item, while
++	 * NF_FLOW_PENDING still keeps gc from freeing the flow.
++	 */
++	if (offload->cmd != FLOW_CLS_DESTROY &&
++	    test_bit(NF_FLOW_HW, &offload->flow->flags) &&
++	    test_bit(NF_FLOW_CLOSING, &offload->flow->flags) &&
++	    test_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status) &&
++	    !test_bit(NF_FLOW_HW_DYING, &offload->flow->flags)) {
++		set_bit(NF_FLOW_HW_DYING, &offload->flow->flags);
++		flow_offload_work_del(offload);
++	}
++
+ 	smp_mb__before_atomic();
+ 	clear_bit(NF_FLOW_PENDING, &offload->flow->flags);
+ 
