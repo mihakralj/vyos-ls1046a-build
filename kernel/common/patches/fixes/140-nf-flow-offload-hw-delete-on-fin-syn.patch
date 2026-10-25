@@ -26,6 +26,13 @@ hardware add has not run yet (board trace 2026-10-24, f266_trace). Run
 the delete inline from the work handler, before NF_FLOW_PENDING is cleared
 (gc cannot free the flow while it is set), if the flow is already CLOSING.
 
+Both FINs are punted, but the final ACK is still forwarded by the hardware
+record in the window before the delete job runs, so conntrack stays in
+LAST_ACK, where a SYN reusing the tuple is ignored (F-266 root cause, board
+capture 2026-10-25: no final ACK on either DUT port, ct never leaves
+LAST_ACK). When the hardware record is deleted for a CLOSING TCP flow in
+LAST_ACK, move conntrack to TIME_WAIT as the swallowed ACK would have done.
+
 Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 ---
 diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
@@ -135,10 +142,44 @@ index 1be506a..4235141 100644
  	if (!nf_flow_dst_check(&tuplehash->tuple)) {
  		flow_offload_teardown(flow);
 diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
-index 2af7d64..9eed205 100644
+index 2af7d64..1bd76c2 100644
 --- a/net/netfilter/nf_flow_table_offload.c
 +++ b/net/netfilter/nf_flow_table_offload.c
-@@ -1055,6 +1055,21 @@ static void flow_offload_work_handler(struct work_struct *work)
+@@ -987,12 +987,33 @@ out:
+ 	nf_flow_offload_destroy(flow_rule);
+ }
+ 
++/* Both FINs of a closing TCP flow are punted to the CPU, but the final ACK
++ * can still be forwarded by the hardware record in the window before the
++ * delete job runs. Conntrack then never leaves LAST_ACK, where a SYN reusing
++ * the tuple is ignored instead of opening a new connection. Complete the
++ * close the swallowed ACK would have done.
++ */
++static void flow_offload_hw_close_fixup(struct flow_offload *flow)
++{
++	struct nf_conn *ct = flow->ct;
++
++	if (nf_ct_protonum(ct) != IPPROTO_TCP ||
++	    !test_bit(NF_FLOW_CLOSING, &flow->flags))
++		return;
++
++	spin_lock_bh(&ct->lock);
++	if (ct->proto.tcp.state == TCP_CONNTRACK_LAST_ACK)
++		ct->proto.tcp.state = TCP_CONNTRACK_TIME_WAIT;
++	spin_unlock_bh(&ct->lock);
++}
++
+ static void flow_offload_work_del(struct flow_offload_work *offload)
+ {
+ 	clear_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
+ 	flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_ORIGINAL);
+ 	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
+ 		flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_REPLY);
++	flow_offload_hw_close_fixup(offload->flow);
+ 	set_bit(NF_FLOW_HW_DEAD, &offload->flow->flags);
+ }
+ 
+@@ -1055,6 +1076,21 @@ static void flow_offload_work_handler(struct work_struct *work)
  		default:
  			WARN_ON_ONCE(1);
  	}
