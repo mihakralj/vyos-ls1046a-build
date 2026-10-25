@@ -18,6 +18,12 @@ The delete runs from a workqueue and a reused-tuple SYN can follow within
 ~0.3 ms, so such a SYN is dropped until NF_FLOW_HW_DEAD is set; the client
 retransmits and conntrack then sees a clean tuple.
 
+nf_flow_offload_del() is a silent no-op while NF_FLOW_PENDING is set (an add
+or stats job is queued), which loses the FIN-time delete for a flow whose
+hardware add has not run yet (board trace 2026-10-24, f266_trace). Re-issue
+the delete from the work handler once the pending job completes if the flow
+is already CLOSING.
+
 Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 ---
 diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
@@ -110,5 +116,26 @@ diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
  
  	if (!nf_flow_dst_check(&tuplehash->tuple)) {
  		flow_offload_teardown(flow);
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -1061,6 +1061,17 @@
+ 	smp_mb__before_atomic();
+ 	clear_bit(NF_FLOW_PENDING, &offload->flow->flags);
+ 
++	/* A FIN/RST or reused-tuple SYN that arrived while this add or stats
++	 * job was queued could not queue its delete (NF_FLOW_PENDING was set)
++	 * and the hardware record would then outlive the connection until the
++	 * next gc pass. Queue the delete now.
++	 */
++	if (offload->cmd != FLOW_CLS_DESTROY &&
++	    test_bit(NF_FLOW_HW, &offload->flow->flags) &&
++	    test_bit(NF_FLOW_CLOSING, &offload->flow->flags) &&
++	    !test_bit(NF_FLOW_HW_DYING, &offload->flow->flags))
++		nf_flow_offload_del(offload->flowtable, offload->flow);
++
+ 	kfree(offload);
+ }
+ 
 -- 
 2.39.5
