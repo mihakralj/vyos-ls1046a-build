@@ -859,6 +859,34 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 static void ask_fe_flow_remove(const struct ask_flow_key *key);
 
 /*
+ * Install the FE-VM record for an already-published cookie. Single copy of
+ * the sink-FQID lookup + insert shared by REPLACE and the neigh/pending
+ * republish path.
+ */
+static int ask_flow_fe_install(const struct ask_flow_key *key, u32 hw_id,
+			       const struct net_device *egress_dev, u64 cookie)
+{
+	u32 tx_fqid = 0;
+	int rc = ask_hw_flow_get_sink_fqid(hw_id, &tx_fqid);
+
+	/* T-M7-2 S1 / 2026-08-21 PANIC FIX: the sink FQID MUST be the
+	 * per-egress NO-CONFIRM TX FQ (F-199, B0V=0). Targeting the confirmed
+	 * KG-default RX FQID makes FMan emit a TX-confirm FD whose BMan buffer
+	 * has no dpaa_eth_swbp -> dpaa_cleanup_tx_fd NULL-derefs xdp_frame.
+	 * Fail closed: keep the flow in software.
+	 */
+	if (rc || !tx_fqid) {
+		ask_pr_warn("flow_offload: cookie=0x%llx no no-confirm TX FQ (rc=%d fqid=0x%x) - keeping flow in SW\n",
+			    cookie, rc, tx_fqid);
+		return -EAGAIN;
+	}
+	/* VLAN flows use the same ehash record path; ask_fe_flow_insert()
+	 * populates the VLAN opcode fields when key->vlan_edit_flags is set. */
+	return ask_fe_flow_insert(key, ask_hw_get_enq_fe_off(), tx_fqid,
+				  egress_dev);
+}
+
+/*
  * A14: publish one cookie with a (possibly new) next-hop MAC. The ehash FE
  * record carries the L2 rewrite, so the SW table entry alone is not enough:
  * the silicon record must be re-created with the new key->next_hop_mac. On
@@ -871,7 +899,7 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 {
 	struct ask_flow *cur;
 	bool hw_backed = false;
-	u32 hw_id = 0, tx_fqid = 0;
+	u32 hw_id = 0;
 	int rc;
 
 	rc = ask_flow_insert_owned(t, cookie, key, oif, action_flags, dir,
@@ -887,12 +915,7 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 	if (!hw_backed)
 		return 0;
 
-	rc = ask_hw_flow_get_sink_fqid(hw_id, &tx_fqid);
-	if (!rc && !tx_fqid)
-		rc = -EAGAIN;
-	if (!rc)
-		rc = ask_fe_flow_insert(key, ask_hw_get_enq_fe_off(), tx_fqid,
-					NULL);
+	rc = ask_flow_fe_install(key, hw_id, NULL, cookie);
 	if (rc) {
 		(void)ask_flow_remove_owned(t, cookie, generation);
 		return rc;
@@ -3667,40 +3690,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	}
 	/* Keep offload ownership transactional: only keep the flow in the
 	 * HW-backed table if the FE-VM record was actually installed. */
-	{
-		/* T-M7-2 S1: recover the per-egress-interface TX FQID that
-		 * ask_hw_flow_insert() resolved and saved in this hw_id's
-		 * cookie, so the FE record forwards a HIT direct-to-wire.
-		 *
-		 * 2026-08-21 PANIC FIX (kernel NULL-deref in
-		 * xdp_return_frame <- dpaa_cleanup_tx_fd): the sink FQID MUST
-		 * be the per-egress NO-CONFIRM TX FQ (F-199, B0V=0). If the
-		 * cookie lookup misses (fe_tx_fqid stays 0), the F-197/F-198
-		 * fallback would enqueue the HIT to the port's CONFIRMED
-		 * KG-default RX FQID (target_fqid, B0V=1). An FMan-forwarded
-		 * HIT frame on a confirmed FQ generates a TX-confirm FD whose
-		 * BMan buffer has no dpaa_eth_swbp -> dpaa_cleanup_tx_fd
-		 * dereferences a garbage xdp_frame and panics the kernel.
-		 * FAIL CLOSED instead: refuse the FE record and keep the flow
-		 * in software (matches the resolver's fail-closed contract in
-		 * ask_hw_resolve_oif_fqid). A HIT must never target a
-		 * confirmed FQ. */
-		u32 fe_tx_fqid = 0;
-		int fqrc = ask_hw_flow_get_sink_fqid(hw_id, &fe_tx_fqid);
-
-		if (fqrc || fe_tx_fqid == 0) {
-			ask_pr_warn("flow_offload: REPLACE cookie=0x%lx no no-confirm TX FQ (rc=%d fqid=0x%x) - keeping flow in SW\n",
-				    f->cookie, fqrc, fe_tx_fqid);
-			rc = -EAGAIN;
-		} else {
-			/* T-M6-8d (ehash-vlan-revival): VLAN flows now route
-			 * through the same ehash record path as routed/NAT --
-			 * ask_fe_flow_insert() gates/populates the VLAN opcode
-			 * fields internally when key.vlan_edit_flags is set. */
-			rc = ask_fe_flow_insert(&key, ask_hw_get_enq_fe_off(),
-						fe_tx_fqid, egress_dev);
-		}
-	}
+	rc = ask_flow_fe_install(&key, hw_id, egress_dev, f->cookie);
 	if (rc) {
 		int rrc;
 
