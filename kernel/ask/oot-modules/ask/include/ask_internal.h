@@ -63,6 +63,11 @@ struct ask_genl_dump_ctx;
 int ask_genl_get_info_fill(struct sk_buff *skb);
 int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f);
 int ask_genl_dump_one_cb(struct ask_flow *f, void *arg);
+struct nlmsghdr;
+struct nlattr;
+struct netlink_ext_ack;
+int ask_genl_get_flow_cookie(const struct nlmsghdr *nlh, struct nlattr **attrs,
+			     u64 *cookie, struct netlink_ext_ack *extack);
 int ask_genl_eopnotsupp_doit(struct sk_buff *skb, struct genl_info *info);
 int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
        struct netlink_callback *cb);
@@ -123,7 +128,8 @@ unsigned long ask_hw_get_enq_fe_off(void);
 struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
-int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, bool add);
+int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
+		      u16 vid, bool add);
 int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
@@ -448,6 +454,8 @@ bool ask_hw_nat66_offload_armed(void);
  * pre-check, bridge observer log).
  */
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
+bool ask_hw_bridge_vlan_armed_port(u8 hw_port_id);
+bool ask_vlan_push_only_enabled(void);
 bool ask_hw_vlan_offload_armed(void);
 bool ask_hw_bridge_offload_armed(void);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
@@ -624,7 +632,35 @@ u8     nat_flags;
 	 * context; NOT part of the FE key.
 	 */
 	u16    egress_mtu;
+	/*
+	 * A14 (2026-10-20): the resolved next hop this flow's next_hop_mac
+	 * came from — the gateway (or NAT-reply peer), not the 5-tuple dst —
+	 * and the netdev whose neighbour table holds it (the VLAN vif for a
+	 * PUSH flow). The neighbour-change rebuild matches on these. nh_ifindex
+	 * 0 = not neighbour-derived (PPPoE encap peer MAC); NOT part of the
+	 * FE key.
+	 */
+	u8     nh_ip[16];
+	u32    nh_ifindex;
 } __packed;
+
+/*
+ * A14: does a stored flow follow the neighbour (@l3_proto, @ifindex, @ip)?
+ * Pure predicate so KUnit can pin it without hardware.
+ */
+static inline bool ask_flow_key_follows_neigh(const struct ask_flow_key *k,
+					      u32 oif, u8 l3_proto, int ifindex,
+					      const u8 *ip, unsigned int addr_len)
+{
+	if (k->l3_proto != l3_proto)
+		return false;
+	if (k->vlan_edit_flags & ASK_VLANF_PPPOE_INSERT)
+		return false;
+	if (k->nh_ifindex)
+		return k->nh_ifindex == (u32)ifindex &&
+		       !memcmp(k->nh_ip, ip, addr_len);
+	return oif == (u32)ifindex && !memcmp(k->dst_ip, ip, addr_len);
+}
 
 /* ------------------------------------------------------------------------- */
 /* Canonical flow intent (T-M6-A1, 2026-08-18).                               */
@@ -1217,8 +1253,15 @@ enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev);
 struct fman_pcd_fe_flow_action;
 void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
 		    __be16 eth_type);
+/* Bridge record action: forward unchanged (B7a) or pop/push the 802.1Q
+ * tag (B7b, F-268). */
+enum ask_bridge_act {
+	ASK_BRIDGE_ACT_SAME = 0,
+	ASK_BRIDGE_ACT_POP,
+	ASK_BRIDGE_ACT_PUSH,
+};
 int  ask_bridge_fe_action(const u8 *key, u32 egress_tx_fqid,
-			  unsigned long enq_off,
+			  unsigned long enq_off, u8 act, u16 vid,
 			  struct fman_pcd_fe_flow_action *a);
 
 /* ------------------------------------------------------------------------- */

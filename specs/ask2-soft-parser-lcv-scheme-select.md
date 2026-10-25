@@ -428,7 +428,7 @@ live offset table (6q) has `hdr 13 -> 0x20`, the TCP header.
 
 **F-266 (`bin/kernel-fixups/F_266.py`, default off) applies the rule to the TCP control punt** from
 `specs/reference/ask2-sp/tcp_ctl_punt.xml` (the vendor `cdx_sp.xml` TCP block, compiled by vendor `fmc --sp_only` on
-`.106`):
+`.106`; replaced on 2026-10-20 by `ctl_punt.xml`, see §6s):
 
 - `fman_pcd_prs_write()`: with IRQs off, clear PEN, poll PSTAT idle (up to 1000 x 1 us), save the previous words, write
   the 8 code words at byte `0x40`, read them back (restore the previous words on mismatch), write the saved
@@ -457,3 +457,54 @@ The board test therefore settles two things at once:
    flows linger in conntrack").
 
 Cold boot `.185` before the test (6q: FMan state survives a warm reboot). The test plan is in the parity plan.
+
+## 6s. 2026-10-20: the parser hands off by NIA, not HPNIA; F-266 and the A14 TTL punt proven on silicon
+
+The 2026-10-18 board test of 6r failed: the slot-10 attach read back `0x80000420` on both RX ports, yet FIN/RST of
+offloaded flows still went to the FE and all 300 test flows stayed `[HW_OFFLOAD]`. The load was correct. The routine
+ran, but it wrote only `$hpnia`. When the soft parser ends a parse, the frame goes to the action in NIA (RM 5.9.4.4.4,
+parse result array bytes 93-95), which still held the KeyGen hand-off; HPNIA is used only on the hard parser's own
+exit path. The vendor `cdx_sp.xml` routines set `$nia`.
+
+The program is now `specs/reference/ask2-sp/ctl_punt.xml`, three `<before>` blocks that each set `$nia` and `$hpnia` to
+`0x500002` on a match:
+
+| Schema | Match | Exit on match | Otherwise |
+|---|---|---|---|
+| `tcpschema` (TCP HXS, slot 10) | `(tcp.flags bitwand 7) != 0` | `confirm=yes`, `end_parse` | falls through to the hard parser |
+| `ipv4schema` (IPv4 HXS, slot 5) | `ipv4.ttl == 1 or ipv4.ttl == 0` | `confirm=no`, `end_parse` | `exit nextproto=return` |
+| `ipv6schema` (IPv6 HXS, slot 6) | `ipv6.hop == 1 or ipv6.hop == 0` | `confirm=no`, `end_parse` | `exit nextproto=return` |
+
+The IPv4 and IPv6 conditions are the vendor's. Vendor `fmc` built for the host compiles it to 30 words for parser
+byte `0x40` with labels TCP `0x20`, IPv4 `0x33`, IPv6 `0x47` (halfwords):
+
+```
+git clone nxp-qoriq/fmc and nxp-qoriq/fmlib into /tmp/fmcb
+make FMCHOSTMODE=1 MACHINE=ls1046 FMD_USPACE_HEADER_PATH=/tmp/fmcb/fmlib/include/fmd \
+     CXX="g++ -fpermissive" CC="gcc -fpermissive"
+fmc -d etc/fmc/config/hxs_pdl_v3.xml -s ctl_punt.xml --sp_only -t 0x20   # writes softparse.h
+```
+
+The attach value is `ssa = (old & ~0x7FF) | 0x400 | label`. On a cold-booted board TCP slot 10 goes
+`0x80000000 -> 0x80000420`, IPv4 slot 5 `0 -> 0x433` and IPv6 slot 6 `0 -> 0x447`. PCAC PSTAT never asserts on this
+silicon, so the PCAC stop/start bracket returns at once. That is harmless.
+
+**Silicon proof (DUT2 `.156`, image `0326`, `6.18.57-vyos`, cold boot, words loaded live through `/dev/mem` under the
+6r PEN rule, attached on eth3 and eth4):**
+
+- F-266 with the `$nia` program: 50/50 sequential transit TCP flows closed. No conntrack entries and no ehash records
+  remained afterwards. Data packets of the same flows stayed in the FE.
+- IPv4: TTL 2 is forwarded with TTL 1. TTL 1 and TTL 0 on a live `[HW_OFFLOAD]` tuple each produced ICMP time
+  exceeded from `10.99.1.185` (10 in total).
+- IPv6: hop limit 2 is forwarded as 1. Hop limit 1 and 0 each raised `Icmp6OutTimeExcds` by 5, and dell1 received
+  10 ICMPv6 time exceeded. No frame with hop limit 0 or 255 appeared on the wire.
+- With all three HXS attached, 500 Mbit/s per family for 12 s moved 715 MB and only 11 frames reached the kernel on
+  eth3. Flows stayed `[HW_OFFLOAD]`, so the `nextproto=return` exit does not disturb KeyGen or the FE.
+- Restore (`ssa` back, code words zeroed) left `pcd-snapshot diff` clean.
+
+**F-266 (rewritten 2026-10-20)** replaces the 8-word program with the 30-word one and the arm/disarm pair with
+`fman_pcd_ctl_punt_set(fm, hw_port_id, mask)` (`FMAN_PCD_PUNT_TCP_CTL`, `FMAN_PCD_PUNT_TTL`). The load and
+restore rules of 6r are unchanged. Each of the three HXS attachments is tracked per port, so after a partial failure a
+later call converges. ask.ko has two parameters, `tcp_ctl_punt` and `ttl_punt`. Both default to 1, like the vendor,
+and both act only on ROUTED-engaged ports. Punted frames skip KeyGen RSS and land on one CPU; the vendor has the same
+cost. PPPoE frames pass through the IPv4/IPv6 HXS too, so the TTL punt should cover them; that is still untested.

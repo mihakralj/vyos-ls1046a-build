@@ -314,9 +314,15 @@ if [ -f vyos-build/data/architectures/arm64.toml ]; then
   fi
 fi
 
-### MOK certificate for kernel module signing
-if [ -f board/mok/MOK.key ]; then
-  cp board/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
+### MOK certificate (public only)
+# vyos-build/data/certificates is copied verbatim into the image chroot
+# (/var/lib/shim-signed/mok, build-vyos-image), so a private key staged here
+# ships in the ISO. Only 93-sb-sign-kernel's sbsign used the .key, and 007
+# skips that; the kernel build reads only *.pem from this dir and signs
+# modules with the ASK persistent key. Upstream's hook now fails the build on
+# any private key in the chroot ("Found private key - bailing out").
+rm -f vyos-build/data/certificates/*.key
+if [ -f board/mok/MOK.pem ]; then
   cp board/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
 fi
 

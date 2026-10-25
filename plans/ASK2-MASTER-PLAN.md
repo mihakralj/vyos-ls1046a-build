@@ -1,6 +1,6 @@
 # ASK2 Master Plan
 
-**Version 2.33.1 · 2026-10-16**
+**Version 2.34.0 · 2026-10-19**
 
 This is the single ASK2 task list and execution order. Feature plans own
 detailed designs and runbooks; `ASK2-VENDOR-PARITY.md` owns current measurement
@@ -16,139 +16,54 @@ remaining bridge/encapsulation gaps.
 
 ### 1.1 Working baseline
 
-ASK2 `.185` runs `2026.10.16-2012-rolling`, kernel `6.18.55-vyos`;
-the NXP ASK comparison campaign used `.106` on `6.12.103`.
-Dell1 `.112` and dell2 `.113` drive eth3/eth4.
+Boards and images (2026-10-23):
+
+| Board | Image | Role |
+|---|---|---|
+| `.185` | `2026.10.22-2044-rolling`, `6.18.57-vyos` (production; `latest.iso`; F-270 + lockless `ask_vlan_cc_agg_stats`) | Primary rig DUT on the generators' root-namespace ports; eth1/eth2 have no peer cabling |
+| `.164` (was `.158`, DHCP) | `2026.10.22-2044-rolling` | Runs the 10k PPPoE session-churn gate (dell2 `~/testrig/launch-churn-158.sh`, log `out/pppoe-churn-164-10k-*.log`, ~34 s/cycle); prior run failed at cycle 3482 on lockdep, fixed |
+| `.149` | `2026.10.19-1845-rolling`, `6.18.57-vyos` (`kunit=true`, ASK debugfs) | KUnit/debugfs DUT on the generators' `n106` ports; same rig addresses as `.185` (`10.99.1.185`, `10.99.2.185`, …), management on eth2 DHCP |
+| `.145` | `2026.10.16-2149-rolling` | Former NXP vendor board (`.106`), now VyOS; no vendor ASK board exists until one is restored |
+
+Dell1 `.112` and dell2 `.113` drive eth3/eth4. Both DUTs carry the same rig
+addresses, so run a test against one DUT at a time; `pppoe10` works only on
+`.185` (the PPPoE server listens on the root-namespace port).
+
 Routed IPv4/IPv6, NAT44/NAT66/PAT, single-tag IPv4/IPv6 VLAN, PPPoE
 encap/decap and MTU-shrink fragmentation exist. Bridge learned/static unicast
-and B7a same-tagging have dated silicon acceptance; they are not dormant
-groundwork. Current-image repeat evidence is separate from implementation.
+and B7a same-tagging have silicon acceptance and a current-image repeat. The
+production YNL family serves per-record silicon counters and `get-flow`.
 
-F-266 TCP control punt is implemented but default-off and has no end-to-end
-offloaded-transit acceptance. Closed TCP flows can linger in conntrack.
-Do not claim scale acceptance or enable the punt based on register readback.
+F-266 TCP control punt is implemented but default-off; its transit gate and
+the A14 TTL/neighbour gate both FAILED on 2026-10-18 (§4.1). Closed TCP
+flows can linger in conntrack. Do not claim scale acceptance.
 
-The Dell-controlled paired 10×10 routed/NAT/VLAN campaign is complete:
-480/480 attempts at 2026-10-16 02:54:36 UTC on `0551`, `COMPLETE_WITH_ISSUES`
-because one NAT44 run was only partially offloaded. Under the strict mean rule
-17 of 24 cells PASS and 7 FAIL. Six of the failing cells are one-way, with
-deficits of 0.002–0.140%; the largest is VLAN↔port strip/add IPv6 at −0.366%,
-with an interval that includes zero. Verdicts and raw data:
-`ASK2-VENDOR-PARITY.md`; campaign directory
-`~/testrig/campaigns/parity-10x10-20261015T2130Z/` on dell2.
+The Dell-controlled paired 10×10 routed/NAT/VLAN campaign on `0551` is
+`COMPLETE_WITH_ISSUES`: 17 of 24 cells PASS under the strict-mean rule. Six
+failing cells are one-way deficits of 0.002–0.140%; the largest is VLAN↔port
+IPv6 at −0.366% with an interval including zero. VLAN-translate IPv4 3→4 and
+bidirectional VLAN↔port IPv6 are the two material deficits. Verdicts and raw
+data: `ASK2-VENDOR-PARITY.md`. A same-session A/B (2026-10-19) showed no
+image effect between `0551` and `2149`.
 
-**Release smoke checkpoint, 2026-10-16:** the operator cold-booted `.185`
-on `2026.10.16-0357-rolling`, kernel `6.18.55-vyos`. Boot evidence: boot ID
-`2568c1f3`, up since 17:19:56 UTC; the previous boot's journal ends at
-17:19:42 without any shutdown sequence, which is consistent with a power cut,
-not a warm reboot or kexec. Routed, NAT and VLAN
-IPv4/IPv6 cells all forwarded in hardware at 9.152–9.282 Gbit/s.
-Policy-routing tests for both families also forwarded in hardware with a
-deliberately wrong main-table gateway. F-267 used 512-byte coherent DMA-pool
-blocks, eight per page; 64 UDP streams had zero loss. These are smoke results,
-not full scale, soak or vendor-parity acceptance.
+Gates closed since the 2026-10-15 snapshot. The evidence is in
+`archive/ASK2-MASTER-PLAN-2026-10-19.md`:
 
-**The per-port disable/re-enable gate passed on `1941` and `2012`; factory-default live-boot validation remains open before publication (see §4.1).** On `0357`, deleting both
-`interfaces ethernet eth3 offload ipv4` and `ipv6` and committing initially
-disarmed port `0x10`, but the nft hardware flowtable retained eth3/eth3.10.
-New traffic rearmed `0x10` and hardware-forwarded despite the absent CLI
-leaves: IPv4 9.326 Gbit/s and IPv6 9.198 Gbit/s. A separate IPv4 reproduction
-confirmed the absent leaves and both armed ports after traffic. The journal
-shows the pattern three times (17:37:59, 17:42:41 and 17:46:32; the latter
-two follow eth3 CLI commits): `0x10` is disengaged, then a flowtable REPLACE
-on eth3 re-engages it 2–8 s later without any commit. This violated the
-S1→S0 contract; the fix and successful re-tests are recorded below. The original CLI
-configuration was restored, both ports were armed, `ask-check` passed 36/36,
-and there were no kernel error-level messages at the end.
-Qdrant anchor: `2026-10-16 cold-boot 0357 release smoke: per-port disable rearm`.
-
-**Fixed-image gate re-test, 2026-10-16:** `.185` was running
-`2026.10.16-1941-rolling` (kernel `6.18.55-vyos`). With both eth3 offload
-families deleted, `ask-check` reported only eth4 configured and engaged
-(32/32 OK). The eth3→eth4 IPv4 and IPv6 test cells forwarded at 8.891 and
-9.133 Gbit/s with 87.1% and 65.6% DUT CPU; aggregate FE-hit ratios were 0.13
-and 0.09 (the v4 cell was PARTIAL by the harness threshold, consistent with
-some reverse-direction hits on still-engaged eth4). Reverse eth4→eth3 cells
-remained hardware-forwarded at 9.268 and 9.138 Gbit/s (ratios 1.01 and 1.02).
-No eth3 re-engage appeared during the disabled interval; the single `ENGAGED`
-event at 20:47:35 UTC followed the restore commit. After restoring eth3,
-forward v4/v6 reached 9.281/9.152 Gbit/s in hardware; the reverse-v6 repeat
-reached 9.170 Gbit/s, ratio 1.10. `ask-check` passed 36/36 and the kernel
-error-level log was empty after the first enabled battery. The board became
-unreachable from the runner after the final repeat, so no final health
-snapshot was captured.
-
-CI run `38960509088` succeeded on `38c40eaa` and produced
-`2026.10.16-2012-rolling`. The publish job was skipped; the ISO and its
-`.minisig` were deployed manually to lxc200 on 2026-10-16 21:01 and both
-`latest.iso` symlinks now point to `2012` (sidecar hash verified, HTTP 200).
-After a transient lab outage `.185` was still healthy on `1941` (`ask-check`
-36/36, no error-level dmesg). The operator subsequently deployed `2012`.
-
-**Installed-image gate, 2026-10-16 21:13–21:27 UTC:** `/proc/cmdline`
-confirmed `vyos-union=/boot/2026.10.16-2012-rolling`; boot ID
-`e74804be-e9e0-4c13-a66e-7b5e7659974d` remained unchanged through the tests.
-The journal starts at 21:07:33 UTC, but the boot method was not established:
-this is installed-image acceptance, not a new cold-boot result.
-`bin/testrig-offload-quick.sh` ran four routed cells per phase with
-`DUR=20 STEADY_FROM=5 STREAMS=8`; these are smoke tests, not parity or soak.
-
-| State | eth3→eth4 IPv4 / IPv6 (Gbit/s) | eth4→eth3 IPv4 / IPv6 (Gbit/s) | Evidence |
-|---|---|---|---|
-| Both ports enabled | 9.322 / 9.198 | 9.324 / 9.196 | All HW; aggregate FE-hit ratios 1.06–1.11; DUT CPU 0.2–0.3% |
-| eth3 offload families deleted | 9.292 / 8.638 | 9.313 / 9.186 | eth3 ingress software, CPU 54.4% / 83.9%, aggregate ratios 0.07 / 0.12; eth4 ingress HW, ratios 1.00 / 1.02 |
-| eth3 families restored | 9.323 / 9.278 | 9.321 / 9.193 | All HW; aggregate ratios 1.08–1.10; DUT CPU 0.2–0.3% |
-
-The live `fe_arm` readback showed exactly `Armed ports: 0x11` both before
-and after disabled traffic. No eth3 `ENGAGED` event occurred during
-21:20:56–21:23:23 UTC; its only new engagement was the restoration commit at
-21:23:24 UTC. The disabled IPv6 cell's aggregate `PARTIAL` verdict does not
-indicate eth3 rearm: eth4 remained engaged and aggregate counters also include
-reverse traffic. `ask-check` passed 32/32 with eth3 disabled and 36/36 after
-restoration. Final live ports were `0x10 0x11`, kernel error-level output
-was empty, and saved and running configuration hashes matched their
-pre-test values. Management eth0 was untouched.
-
-The shipped `caam-check` matched the source and passed: 129 CAAM-backed
-algorithms were registered, the checked IPsec transforms selected CAAM,
-and their reported self-tests passed. This does not establish full ESP
-dataplane offload. The shipped `/opt/vyatta/etc/config.boot.default` matched
-`board/vyos-config/config.boot.dhcp` byte-for-byte (SHA-256
-`625b97561979eb9594518f026f45e585b459fa11cf367a5b240acd514b168ba9`).
-The active config still used the preserved lab flowtable `ASK1`, not factory
-`FT`; factory-default live-boot validation therefore remains untested.
-
-**Offload regression battery, same boot, 2026-10-16:**
-`bin/testrig-offload-quick.sh` covered all 20 base cells plus the 3 combo
-cells (`DUR=20 STEADY_FROM=5 STREAMS=8`, unidirectional). The base cells
-were unicast, NAT, VLAN↔VLAN, VLAN↔port and PPPoE down/up, in IPv4 and
-IPv6 and in both directions. The combo cells were `nat-pppoe-up-v4`,
-`nat-vlan-v4` and `nat-vlan-v6`. **All 23 cells were HW**, at 9.14–9.40
-Gbit/s with FE-hit ratios 1.05–1.13 and DUT busy 0.2–0.5%. Afterwards
-`ask-check` passed 36/36, ports `0x10 0x11` were armed, and kernel
-error-level output was empty. This covers the forwarding paths that the
-`ae98749c` rearm fix could affect. It is a functional and throughput smoke
-test, not the strict-mean parity campaign or a soak.
-
-**Factory-default static validation, same boot:** the shipped
-`/opt/vyatta/etc/config.boot.default` has no version footer, so a live boot
-runs every migration. A copy migrated cleanly as root with
-`/usr/libexec/vyos/run-config-migration.py` (rc 0). The migrated file kept
-the eth1–eth4 `offload ipv4 ipv6` leaves, flowtable `FT` with `offload
-hardware` and `hardware-offload-delay 500`, and the IPv4/IPv6 rule 10
-targeting `FT`; eth0 had no offload families. The migrated file then loaded
-without error into a `vyattacfg` configure session. `compare` showed the
-expected `ASK1`→`FT` and eth1/eth2 differences, and the session was
-discarded. The saved config hash and live armed ports (`0x10 0x11`) were
-unchanged.
-
-One trap: loading the unmigrated file from a non-root vbash session fails in
-`interfaces/20-to-21` with a JSON decode error, because `ethtool` lives in
-`/usr/sbin` and is not on that user's PATH. This is a test-harness artifact;
-boot migration runs as root. It does not replace the live-boot gate, which
-still has to prove the boot commit, engagement, and the first offload engage
-on the 1G RJ45 ports eth1/eth2. No eth1/eth2 engage evidence exists in this
-plan or in qdrant.
+| Gate | Closed | Residual caveat |
+|---|---|---|
+| Per-port disable/re-enable (no flowtable rearm after the last family is deleted) | `1941`/`2012`, 2026-10-16 | — |
+| Factory default (`offload ipv4 ipv6` on eth1–eth4, flowtable `FT`) | fresh USB install of `2149` on `.145`, 2026-10-19 | Live (non-installed) boot and 1G forwarding through eth1 untested |
+| Offload regression battery, 23 cells (20 base + 3 combo) | `2012`, 2026-10-16 | Smoke, not parity or soak |
+| T-PARITY-10 bidirectional delta | Same-session A/B, 2026-10-19: rig/day drift, not image | Vendor comparison needs a restored NXP board |
+| Bridge harness verdicts (nonzero exit on any failure) | 2026-10-16 | — |
+| Bridge B6/B7a current-image repeat and 100-cycle soak | `2012` cold boot, 2026-10-17 | B2 and capacity need the debugfs image (`.149`) |
+| PPPoE ASK2-side fragmentation | `2012`, 2026-10-17 | Vendor half, 10,000-cycle, exhaustion, soak open |
+| IPsec Tier 1 (CAAM-backed host-terminated ESP, SW baseline, rekey) | 2026-10-17 | Reboot-clean open |
+| P4 per-port loop, eth3 and eth4 (idempotent engage, MTU 1280/2500/3600/1500, link flap ×3, 100-cycle disengage/engage churn, CLI remove/reapply ×10) | `.185`/`2044`, 2026-10-21..23 | MURAM 52922, `pcd-snapshot diff` clean, 0 kernel errors; module unload refused by design (patch 0145 pins `ask.ko`) |
+| P4 MTU > 1500 with offload engaged (F-270) | `.185`/`2044`, 2026-10-23: MTU 1280-3600 steps, UDP sweep 1472-2400 incl. 1473, routed MTU-shrink | 9.2-9.7 Gbit/s; PPPoE-specific shrink case not rerun |
+| P4 neighbour change under load, eth3 and eth4 sides, IPv4 and IPv6 | `.185`/`2044`, 2026-10-22/23 | IPv6 needs a link-local on the port (see §5 ND finding, resolved); `fe80::185/64` now persistent in config on eth3/eth4. Re-run 2026-10-23 after fix: IPv6 plain and VLAN (eth3.10→eth4.20) IPv4+IPv6 all PASS: hw-hit before/after, MURAM 52922, 0 kernel errors, ask-check 36/36 |
+| P4 concurrent eth3↔eth4 `--bidir`, cold boot with offload engaged | `.185`/`1955`, 2026-10-22 | >= 0.97x single direction |
+| T-M8-3 per-flow counters, YNL `get-flow` fix, KUnit all-green | Counters on `.145`/`2149`; `get-flow` fix on `1504`/`.185`; KUnit (`ask_genl` 16/16) on `1845`/`.149`; 2026-10-19 | Per-op genl policies (§4.7) |
 
 ### 1.2 Feature-parity blockers
 
@@ -226,69 +141,145 @@ programming recipes. Resolve contradictions before touching code.
 
 | Priority | Work | Dependency / exit |
 |---|---|---|
-| 1 | Verify the `2012` factory default on a fresh/live boot; then publication decision | Installed-image checks and per-port disable/re-enable passed on `2012`; do not overwrite the installed lab config |
-| 1a | Analyse the seven strict-mean FAIL cells and the partial NAT44 run | Repeat under the same alternating protocol; does not close feature parity |
-| 2 | F-266 FIN/RST transit and NAT correctness; TTL safety | Must pass before connection-scale claims or new default-on safety paths |
-| 3 | Close existing-feature acceptance: PPPoE, bridge current-image repeat, resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
-| 4 | IPsec Tier 1 tunnel gate and SW baseline, then Tier 2 design/bring-up | Tier 1 substrate verified 2026-10-16 (CAAM built in, wins priority, self-tests pass, snoop set); full path remains required for full parity |
-| 5 | B7b and multi-table dispatch; PPPoE-over-VLAN; multicast | B7b can proceed independently; shared dispatch must prove coexistence before IRB/mixed classes/ESP coexistence |
+| 1 | **B7b access↔trunk pop/push** (silicon gate and regression smoke checks PASS 2026-10-20 on cold-booted `.155`, image 0326, commit `1e845e2d`) | IPv4/IPv6 pop/push wire/hit/fallback/churn gates passed. On a second cold boot: B6/B7a zero failures; routed/NAT/VLAN/PPPoE quick matrix 23/23 HW. Teardown PCD state exact, MURAM unchanged. Separate F-266/A14 correctness, capacity/soak and vendor-parity gates remain open. Runbook: `ASK2-BRIDGE-OFFLOAD-PLAN.md` §6.1 |
+| 2 | F-266 FIN/RST transit and NAT correctness; A14 IPv6 TTL and stale-neighbour safety | Both FAILED 2026-10-18; must pass before connection-scale claims or new default-on safety paths |
+| 3 | Existing-feature acceptance: PPPoE cycles/exhaustion/soak, bridge B2/capacity (debugfs on `.149`), resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
+| 4 | IPsec Tier 1 reboot-clean, then Tier 2 design/bring-up | Full path required for parity |
+| 5 | Multi-table dispatch; PPPoE-over-VLAN; multicast | Dispatch must prove coexistence before IRB/mixed classes/ESP coexistence |
 | 6 | QinQ, relay, tunnels, QoS | Feature-specific kernel ownership and forward/inverse/fallback gates |
+| Blocked | Refreshed vendor comparisons | Restore a board to NXP ASK first (the former `.106` now runs VyOS as `.145`) |
 | Parallel, not on the active rig | Phase 2 code/patch consolidation | No behavior change; preserve regression evidence |
 | After correctness gates | Current pps, scale, latency and soak; final per-feature vendor comparisons | No historical figures substituted for current acceptance |
-| Separate track | WireGuard improvement, VPP ZC, upstream preparation | Not missing vendor hardware features |
+| Separate track | WireGuard, VPP ZC, upstream preparation, genl per-op policies | Not missing vendor hardware features |
 
 ## 4. Open work program
 
 ### 4.1 Measurement and correctness
 
-- **Release gate / per-port disable:** prevent new flowtable callbacks from
-  rearming a port after its last offload family is deleted. Root cause:
-  `ask_hw_port_bind()` (flowtable REPLACE) called `ask_hw_offload_engage()`,
-  whose compatibility default turned a zero family mask back into V4+V6;
-  disengage also cleared the mask only after dropping `h->lock`. Fix committed
-  2026-10-16 in `ask_hw.c`: the flow path engages only when the mask is
-  non-zero (checked under `h->lock`, `-ENODEV` = quiet SW fallback), and
-  disengage clears the mask under `h->lock` before teardown. Built by CI run
-  `38956672515` (head `087a40e5`) as `2026.10.16-1941-rolling`. The gate
-  passed on `.185` on `1941` and `2012` on 2026-10-16: deleting both eth3 leaves left eth3
-  unconfigured/disengaged while eth4 stayed engaged; generated eth3-ingress
-  traffic was software-forwarded, reverse eth4-ingress traffic stayed in
-  hardware, and no flowtable REPLACE re-engaged eth3 before the restore
-  commit. Re-enable restored hardware forwarding in both families.
-  `ask-check` was 32/32 while eth3 was disabled and 36/36 after restoration;
-  no kernel error-level messages were present after the first `1941` enabled
-  battery or at the final `2012` check. The `2012` gate also verified the live
-  `fe_arm` port set and unchanged saved/running config hashes. Detailed rates,
-  boot scope and the earlier `1941` reachability caveat are in §1.1.
-- **Factory default (commit `c84499e5`, included in `2012` but not `1941`):** the ISO's
-  `config.boot.default` now enables `offload ipv4 ipv6` on eth1–eth4 (not
-  eth0, the management port), a hardware flowtable `FT` over eth1–eth4 with
-  `hardware-offload-delay 500`, and IPv4/IPv6 forward rule 10 → `offload`.
-  This applies only to fresh installs and live boots; `add system image` keeps
-  the existing config. The `2012` factory default still needs live-boot
-  validation; the run's publish job was skipped. On 2026-10-16 21:01 UTC,
-  the ISO and sidecar were deployed to lxc200, both `latest.iso` symlinks
-  were verified against `2012` (matching sidecar hash, HTTP 200). The operator
-  then upgraded `.185` to `2012`; `ask-check` passed 36/36 and the shipped
-  default file matched the source, but the running config was preserved.
-  A separate fresh/live boot must apply the factory config without operator
-  commits; the installed-image checks do not close that gate.
-- **T-PARITY-10:** DONE 2026-10-16. 480/480 attempts, 17/24 PASS, 7 strict-mean
-  FAIL; the scoreboard is in `ASK2-VENDOR-PARITY.md`. Follow-up: repeat the
-  seven FAIL cells and the partial NAT44 run under the same protocol. Note
-  that `.106` now runs OPNsense, so the vendor side must be re-imaged before
-  any repeat. Preserve raw data; no jitter/outlier trimming.
-- **Harness verdicts:** the bridge harnesses (`bin/testrig-bridge-*.sh`) now
-  exit nonzero on any FAIL row, `pcd-snapshot` diff, leftover record or kernel
-  error (`ASK2-BRIDGE-OFFLOAD-PLAN.md` §5.1). Earlier bridge results came from
-  scripts that always exited 0; the current-image repeat must quote exit
-  status.
+- **Vendor comparison:** the strict-mean FAIL cells (§1.1) stay open against
+  historical OpenWrt/vendor data. Restore NXP ASK on a board before a
+  refreshed comparison. Preserve raw data; no jitter or outlier trimming.
 - **T-M6-SP3 / F-266:** establish and offload transit TCP; FIN and RST must
   reach conntrack while established data stays HW; test NAT44/NAT66 mapping
-  survival and clean disarm snapshot. Keep `tcp_ctl_punt=0` until all pass.
-  No software idle reaper: it cannot distinguish closed and quiet flows.
+  survival and clean disarm snapshot.
+  The dormant feature is verified to make no PCD writes while off; the live
+  arm path and TCP parser attachment were readback-verified. Use real transit
+  endpoints on `10.99.1.0/24` and `10.99.2.0/24`; an earlier attempted test
+  had no transit traffic, empty ARP and zero flowtable counters, so it did not
+  exercise the feature. Do not use a flood for this gate. Keep the parameter
+  off unless all checks pass. No software idle reaper: it cannot distinguish
+  closed and quiet flows.
+  **2026-10-18 cold-boot transit test (FAIL, `.185`, `2012`, `6.18.55-vyos`):**
+  after the approved hard power-cycle, root `ask-check` passed 36/36 and both
+  routed directions passed. With `tcp_ctl_punt=N`, 300/300 sequential 20-KB
+  TCP flows completed; at 125 s all 300 conntrack entries remained
+  `ESTABLISHED`, confirming the baseline linger. With `tcp_ctl_punt=Y`, both
+  RX ports logged the expected HXS slot-10 soft-parser attach/readback
+  (`0x80000000 -> 0x80000420`), and 300/300 flows still delivered data, but
+  all 300 entries remained `[HW_OFFLOAD]` with 600 ehash records after close.
+  Thus the FIN-close gate did not pass; NAT44/NAT66 mapping tests were not run.
+  The parameter was returned to `N`, test conntrack entries were deleted, and
+  the final `pcd-snapshot diff` was clean with MURAM `used=52922` at baseline.
+  **2026-10-20 root cause and silicon proof (`.156`, `0326`, cold boot).** The
+  routine ran but set only HPNIA; the parser hands the frame on by NIA (parse
+  result bytes 93-95), so it still went to KeyGen. With `$nia` added and the
+  words loaded live, 50/50 transit flows closed, with no conntrack or ehash
+  residue, and data stayed in the FE (spec
+  `ask2-soft-parser-lcv-scheme-select.md` §6s). F-266 is rewritten as
+  `fman_pcd_ctl_punt_set()` with the combined TCP + TTL program, and ask.ko
+  `tcp_ctl_punt` now **defaults to 1**. The gate closes after the CI image
+  repeats `f266.sh` N=300 on a cold boot. NAT44 FIN (the rig has no IPv4 NAT)
+  and the CPS cost of SYN going to one CPU are still to measure.
 - **A14:** TTL/hop-limit 0/1 must produce kernel ICMP time-exceeded;
-  neighbour/route changes must not forward stale; no MURAM/DDR leak.
+  neighbour/route changes must not forward stale; no MURAM/DDR leak. Run the
+  TTL/hop-limit boundary cases separately from F-266: test 0 and 1 for routed
+  IPv4 and IPv6, verify ICMP time-exceeded reaches the source, and check that
+  no stale hardware record remains after route/neighbour replacement.
+  **2026-10-18 cold-boot A14 test (FAIL, `.185`, `2012`, `6.18.55-vyos`):**
+  from dell1 `.112` to dell2 `.113`, IPv4 TTL 0/1 probes matching a live
+  `[HW_OFFLOAD]` TCP tuple returned ICMP type 11/code 0 from `10.99.1.185`.
+  Ordinary IPv6 ping hop-limit 1 and an unmatched IPv6 TCP probe returned
+  ICMPv6 time-exceeded, but matching TTL 0/1 TCP probes on a live offloaded
+  IPv6 tuple returned no ICMPv6 response. During a paced IPv4 flow, replacing
+  the `eth4` neighbour for `10.99.2.113` with a test MAC left 2 conntrack
+  entries `[HW_OFFLOAD]` and 4 ehash records in place; dell2 RX advanced by
+  5754 packets over 3 s, showing the old hardware forwarding continued.
+  The real neighbour MAC was restored and ping passed. Test flows were removed;
+  `tcp_ctl_punt=N`, MURAM `used=52922`, the ehash table empty, root
+  `ask-check` 36/36 and `pcd-snapshot diff` clean at final verification. The
+  kernel-path baseline passes, but IPv6 TTL and stale-neighbour safety remain
+  open A14 failures.
+  **2026-10-20 A14 re-measurement (`.156`, image `0326`, `6.18.57-vyos`,
+  warm boot).** Each probe was 5 scapy TCP ACKs on the same 5-tuple as a live
+  `[HW_OFFLOAD]` 5 Mbit/s iperf3 flow, dell1 to dell2.
+  - IPv4 TTL 2 is forwarded with TTL 1. TTL 1 and TTL 0 are dropped silently:
+    the DUT's `IcmpOutTimeExcds` stays 0. The 10-18 run on `.185` saw ICMP
+    instead; that discrepancy is unexplained.
+  - IPv6 hlim 2 is forwarded as 1, hlim 1 is **forwarded as hlim 0**, and
+    hlim 0 is **forwarded as hlim 255**. Microcode `UPDATE_HOPLIMIT` (0x29)
+    decrements without checking and wraps, so an IPv6 routing loop between
+    offloading routers never expires.
+  - The vendor never relies on microcode for this check. In
+    `dpa_app/files/etc/cdx_sp.xml`, the soft parser tests
+    `ipv4.ttl`/`ipv6.hop` == 0 or 1 and sends those frames to the host
+    (`nia=0x500002`) before the FE lookup. The TTL fix therefore depends on
+    the same soft-parser load path that blocks F-266.
+  **2026-10-20 `.185` acceptance (image `1310`, `6.18.57-vyos`).** F-266
+  transit PASS (300 flows, peak 25 `HW_OFFLOAD`/50 ehash, 0 after close,
+  MURAM 52922, `pcd-snapshot diff` clean). A14 TTL/hop-limit PASS (v4 TTL 1/0
+  and v6 hlim 1/0 return ICMP; TTL 2 forwarded). A14 stale-neighbour FAIL:
+  after `ip neigh replace … lladdr 02:00:00:aa:bb:cc`, ~465 pkt/s kept going to
+  the old MAC although the journal logged `stale-MAC rebuild … rc=0`. Root
+  cause: `ask_flow_neigh_mac_changed()` rebuilt only the SW table and HW
+  cookie; the ehash FE record carrying the L2 rewrite was never rewritten.
+  Fix (uncommitted, not yet silicon-tested): the rebuild deletes the old FE
+  record and `ask_neigh_republish()` re-inserts it with the new MAC, with
+  rollback to the kernel path on failure. Re-run the stale-neighbour recipe
+  on a build containing it. Deferred-insert paths (`PR14y`/`PR14z10`) call
+  `ask_flow_insert_owned` without an FE insert; not yet audited.
+
+  Stale neighbour: reproduced with `neigh replace` to a test MAC. 0 frames
+  carried the new MAC; the journal logged `skip stale-MAC rebuild ...
+  (destroyed/superseded)`. There were two root causes, both fixed in ask.ko
+  and awaiting a CI build:
+  1. `ask_flow_offload_replace()` claimed the generation before the
+     egress-echo and dedup no-op returns. Each REPLACE reaches every bound
+     block, so those callbacks pushed the generation past the installed
+     flow's stamp, and the rebuild and pending replay skipped live flows.
+     The claim now happens after dedup.
+  2. The rebuild matched the 5-tuple dst on the physical oif instead of the
+     resolved next hop on its neighbour netdev, so gateway-routed, NAT-reply
+     and VLAN-push flows never matched. `ask_flow_key` now carries
+     `nh_ip`/`nh_ifindex`; PPPoE-encap flows are excluded. The predicate
+     `ask_flow_key_follows_neigh()` is pinned by KUnit
+     `ask_flow_test_neigh_follow_nexthop`.
+
+  **2026-10-20 TTL/hop-limit fix proven on silicon (`.156`, `0326`, cold
+  boot).** The vendor's IPv4/IPv6 soft-parser checks, loaded live together
+  with the F-266 TCP routine, punt TTL/hop limit 0 and 1 before KeyGen. IPv4
+  TTL 1/0 and IPv6 hop limit 1/0 on a live `[HW_OFFLOAD]` tuple each produced
+  10 ICMP/ICMPv6 time exceeded, TTL/hop 2 was forwarded as 1, nothing left
+  with hop limit 0 or 255, and 715 MB of bulk traffic stayed in the FE. The fix
+  ships in F-266 (IPv4/IPv6 HXS slots 5/6) behind ask.ko `ttl_punt`, default 1.
+  It still needs the CI image and a cold-boot retest (`ttl0.sh` FAM=4/6).
+
+  Harness: `ttl.sh`, `ttl0.sh`, `f266.sh`, `probe.py`, `neigh.sh`, `prsw.py` and
+  `pmda.py`, kept in the session evidence folder.
+  **2026-10-23 `.185` re-run on image `2044` (`6.18.57-vyos`, `bin/testrig-a14.sh`
+  ttl|neigh|f266, FAM=4|6).** A14 TTL/hop-limit PASS v4+v6 (10/10 ICMP; v4 showed
+  9 once = kernel `icmp_ratelimit`; TTL/hlim 2 forwarded as 1; nothing with
+  ttl 0 or hlim 0/255 reaches gen2). A14 stale-neighbour PASS v4+v6 (0 frames to
+  the real MAC from +1 s to +3 s after `neigh replace` to a bogus MAC). F-266
+  transit PASS with distinct tuples (100 flows, 0 `HW_OFFLOAD`, 0 ehash, MURAM
+  52922). **NEW OPEN BUG, ASK-specific (disengaged 6/6 pass): 5-tuple reuse race.**
+  When the client reuses the same source port within milliseconds
+  (`REUSE=2`: v6 3/3 runs fail, v4 1/3; unforced v6 ~6/8, v4 0/8), the new SYN is
+  punted and conntrack replaces the old entry, but the old ehash FE record is
+  still installed, so the handshake ACK and data are hardware-forwarded; the new
+  ct entry stays SYN_RECV, the server FIN is not de-NATed and the DUT answers
+  with RST. Root cause: ct DESTROY to ehash removal is asynchronous. Fix
+  direction: delete the live FE record synchronously on SYN/FIN/RST punt. Needs
+  a kernel change, qdrant gate and CI; gates connection-scale claims alongside §4.1.
 - **A2 / A13 / scale:** repeat 64-byte loss/rate and IMIX; connection rate
   with held sessions, 8,000-session bidirectional PDR, install rate and first
   insert latency; measure latency beside HW traffic. External 20k CPS and
@@ -306,16 +297,17 @@ programming recipes. Resolve contradictions before touching code.
 - **T-M7-2 S2:** emit `PREEMPTIVE_CHECKS_ON_PKT(0x05)` on every plain routed
   record, not only MTU-shrink records, only with owned frag-info and a measured
   regression gate.
-- **T-M7-P5:** eth1 routed TCP/UDP HIT/load, then eth0 with serial recovery;
+- **T-M7-P5 (remaining):** eth1 routed TCP/UDP HIT/load (needs a peer on
+  eth1; eth1/eth2 are unwired on `.185`), then eth0 with serial recovery;
   all-five simultaneous trafficked churn; identical-tuple cross-ingress
-  isolation. eth0 is LAST and remains opt-in/high-risk.
-- For each port: idempotent CLI and per-port mutex, own RX PCD range and
-  distinct TX FQ/channel, correct TTL/L2/checksums/flow owner and HW counters;
-  test both directions against supported ports, MTU 1280/1500/2500/3600,
-  neighbour change, down/up, remove/reapply, unload and cold boot.
-  Per-port/all-five 100-cycle churn must restore S0 PCD/MURAM/FQ baseline.
-  1G ports need wire rate without one-core saturation; concurrent 1G traffic
-  must not regress eth3↔eth4.
+  isolation (new harness). eth0 is LAST and remains opt-in/high-risk.
+- Per-port acceptance for eth3 and eth4 is DONE (§1.1 closed gates). Left
+  for eth0/eth1/eth2: own RX PCD range and distinct TX FQ/channel, correct
+  TTL/L2/checksums/flow owner and HW counters, both directions, MTU
+  1280/1500/2500/3600, neighbour change, down/up, remove/reapply, cold boot,
+  100-cycle churn restoring S0 PCD/MURAM/FQ baseline. 1G ports need wire rate
+  without one-core saturation; concurrent 1G traffic must not regress
+  eth3↔eth4.
 - Port map (RX/TX/channel): eth2 `0x09/0x29/0x803`, eth0
   `0x0c/0x2c/0x806`, eth1 `0x0d/0x2d/0x807`, eth3 `0x10/0x30/0x800`,
   eth4 `0x11/0x31/0x801`. Never engage eth0 with SSH as the only recovery.
@@ -324,6 +316,17 @@ programming recipes. Resolve contradictions before touching code.
 
 Verify each candidate against today's tree before deleting/folding; old
 fixup ranges are not blanket removal instructions.
+
+**2026-10-18 source audit — STOP on `ask_vlan_cc.c` deletion.** The current
+tree still builds this file (`kernel/ask/oot-modules/ask/Kbuild`), routes
+VLAN-edit REPLACE events to `ask_vlan_cc_flow_add()` before
+`ask_fe_flow_insert()` (`ask_flow_offload.c`), reports its aggregate stats
+from generic netlink (`ask_genl.c`), and tears down its CC state from
+`ask_hw.c`. It is therefore an active path in this checkout, not dead code.
+This conflicts with the later inline-FE VLAN silicon notes and the Phase 2
+deletion item. Do not remove or fold it until the code path, deployed image,
+and silicon evidence are reconciled; the former `.106` vendor board now runs VyOS (`.145`), so the
+vendor-ASK live cross-check is unavailable.
 
 - Physically remove dead `ask_vlan_cc.c` and Kbuild/genl/debugfs/stat proxies,
   commented frees, duplicate `fe_buffer_setup`, legacy `offload_engage` and
@@ -392,6 +395,10 @@ runbooks below are subordinate to this plan, not independent task priorities.
   not current acceptance.
 - **T-M6-A4:** force resource failures before allocation/publication; no
   partial cookie/record, no `in_hw`, flat MURAM and correct SW forwarding.
+  **2026-10-17 preflight:** the current production DUT reports `failslab=false`;
+  imported `flowtable_failslab.py` is CDX-only and is not ASK2 evidence. Run
+  this gate only with ASK2-specific fault injection or a suitable instrumented
+  image.
 - **T-M6-SP1/SP2:** reusable parser compiler/artifact and typed owned
   load/readback/attach/detach/free API. Capture instructions, entry points,
   lengths and relocations against live vendor readback. Reuse F-266's
@@ -401,28 +408,26 @@ runbooks below are subordinate to this plan, not independent task priorities.
   must resolve ASK-owned objects, never be copied as runtime literals.
 - **T-M6-SP3:** F-266 and TTL gates in §4.1; IKE/NAT-T control packets remain
   visible to the kernel before ESP offload.
-- **T-M6-SP4 / A8:** PPPoE current-image comparison, fragmentation, fallback,
-  10,000 session cycles, pool exhaustion and soak; then implement missing
-  over-VLAN and relay outcomes. Owner `ASK2-PPPOE-OFFLOAD-PLAN.md`.
-- **T-M6-4 / IP1 / IP2 / A9:** audit the IPsec draft, verify Tier 1 Crypto
-  API/CAAM, measure SW baseline, then build XFRM-owned ESP ehash→OH/SEC→TX
-  with AES-CBC-SHA256 first. Tier 1 alone is not full vendor parity.
-  2026-10-16 audit: the draft's "CAAM not built" claim was wrong.
-  `ci-setup-kernel.sh` forces it to `=y`; the bogus `CAAM_QI` symbol was
-  replaced by explicit `CRYPTO_API` and `CRYPTO_API_QI` pins. On the running
-  image, `-caam` (priority 3000) wins over `-caam-qi` (2000) and the software
-  drivers for all common ESP transforms, with self-tests passed and the SEC
-  snoop bits set. `caam-check` §5b now reports and gates this. Remaining
-  Tier 1 work: the strongSwan tunnel gate with debugfs counter proof and the
-  software-only baseline.
+- **T-M6-SP4 / A8:** PPPoE vendor comparison, 10,000 session cycles, pool
+  exhaustion and soak; then implement the missing over-VLAN and relay
+  outcomes. Owner `ASK2-PPPOE-OFFLOAD-PLAN.md`. The 23-cell smoke and the
+  ASK2-side fragmentation run passed (§1.1). No 10,000-cycle runner exists
+  yet, and no vendor board is available.
+- **T-M6-4 / IP1 / IP2 / A9:** build XFRM-owned ESP ehash→OH/SEC→TX with
+  AES-CBC-SHA256 first. Tier 1 alone is not full vendor parity. The Tier 1
+  substrate and host-terminated tunnel run passed (§1.1): CAAM wins
+  encrypt 1.4–1.9× but loses decrypt to ARMv8-CE software, which strengthens
+  the Tier 2 case. Remaining Tier 1 gap: reboot-clean.
   Add/delete/update/lifetime/rekey, tunnel v4/v6, inbound/outbound, ESN,
   anti-replay, NAT-T, PMTU/fragments, peer interoperability, bad-auth/replay,
   reboot and disable fallback all gate `NETIF_F_HW_ESP`, advertised LAST.
   Transport mode is optional breadth, not a vendor requirement.
   Owner `ASK2-IPSEC-OFFLOAD-PLAN.md`.
-- **T-M6-2 / A7:** bridge B7b and current-image repeats; retain learned-MAC,
-  filtering, ageing, move/STP/isolation and clean teardown. Do not reopen
-  B0–B6 implementation. Owner `ASK2-BRIDGE-OFFLOAD-PLAN.md`.
+- **T-M6-2 / A7:** B7b access↔trunk pop/push is the active bridge task
+  (F-268 + ask.ko code complete 2026-10-19; silicon gate pending);
+  retain learned-MAC, filtering, ageing, move/STP/isolation and clean
+  teardown. Do not reopen B0–B6 implementation. B2 and capacity repeats need
+  the debugfs image, now on `.149`. Owner `ASK2-BRIDGE-OFFLOAD-PLAN.md`.
 - **T-M6-DISPATCH:** design/test multi-table per-port classification before
   IRB, routed+bridge coexistence or routed+ESP; protocol precedence, miss
   delivery, owner/generation isolation and reversibility are mandatory.
@@ -480,10 +485,14 @@ be silently consumed.
 
 ### 4.7 Productization and beyond-vendor work
 
-- **T-M8-3:** reconcile old "no per-flow counter board evidence" with current
-  per-record HW proof; validate production YNL `packets`, `bytes`,
-  `last-seen-ns` against silicon, not debugfs alone. `max-flows=0` denotes
-  no fixed limit, not unlimited resources.
+- **genl per-op policies:** the `get-flow` `-EINVAL` defect (fixed 2026-10-19)
+  came from one family policy shared by every command, where
+  `ASK_FLOW_ATTR_ID` and `ASK_ATTR_INFO` both use type 1. The structural fix
+  is full `genl_ops` with `.policy`/`.maxattr`, ideally generated from
+  `ask.yaml` by ynl-gen-c. Counter semantics to preserve: YNL serves a polled
+  snapshot (up to ~2.3 s behind silicon), `last-seen-ns` is the poll time
+  that saw growth, counters reset when a record is re-created, and
+  `max-flows=0` means no fixed limit.
 - **Preview:** release notes/package plus an external operator validation
   cycle using `ASK-ISO-BUILD-AND-INSTALL.md`. Do not describe the historical
   M8 release as full feature-parity completion.
@@ -497,12 +506,13 @@ be silently consumed.
   Owner `ASK2-WIREGUARD-FASTPATH-PLAN.md` (history in `archive/`).
 - **Beyond parity:** sub-100 ms per-flow engage, port-scoped conntrack
   teardown, non-proxy HW observability, ≥16 Gbit/s VLAN↔port bidirectional.
-- **Suricata:** design only (`ASK2-SURICATA-BYPASS-PLAN.md`). The native
+- **Suricata:** design only (`ASK2-SURICATA-OFFLOAD-PLAN.md`). The native
   VyOS service is AF_PACKET IDS, not inline, so it cannot approve flows.
   With the factory-default offload it sees only each flow's slow-path prefix.
-  Before any code, the approval contract (§9 of that plan) must be written:
-  explicit verdict → conntrack mark → flowtable match, tuple/NAT identity,
-  revocation on reload or alert, and fail-closed behaviour.
+  Before any code, complete the plan's
+  [decisions and safety contract](ASK2-SURICATA-OFFLOAD-PLAN.md#decisions-and-safety-contract):
+  define explicit per-flow approval, tuple/NAT identity, revocation, failure
+  behavior, configuration interaction, and observability.
 - **Memory:** consider DMA pools before increasing bridge caps: historical
   coherent record/context allocations cost ~9 KiB per record due to page
   rounding. Preserve memory/resource accounting and collision-chain gates.
@@ -511,7 +521,11 @@ be silently consumed.
 
 | Item | Remaining issue / next gate |
 |---|---|
-| F-266 / conntrack close | Default-off, unproven transit; §4.1 blocks scale acceptance |
+| IPv6 ND under forwarded traffic (2026-10-23, `.185`/`2044`) | RESOLVED, not an ASK2 bug. eth3/eth4 have no fe80 link-local address (`addrgenmode none`), so for forwarded packets `ndisc_send_ns` cannot pick a source for the multicast NS (`ipv6_dev_get_saddr` fails) and no NS is sent; identical with offload disengaged; `ping -I eth3` works because its source is explicit. Adding `fe80::185/64` to eth3 made forwarded ping and the neighbour resolve. Fix applied: `set interfaces ethernet eth3|eth4 address fe80::185/64` committed+saved on `.185`. | Rig config only: give test ports a link-local when testing forwarded IPv6. No kernel change. |
+| P4 MTU>1500 wedge (2026-10-22) | **FIXED** F-270 (ehash ENQUEUE mtu 0xffff on plain routed records), HW-verified 2026-10-23; widen vyos-1x MTU guard (patches 036/037, now [1280, 2500]) to 3600 is optional follow-up |
+| PPPoE 10k churn gate (2026-10-20) | Stopped at cycle 3482 on `BUG: Invalid wait context` (`ask_vlan_cc_agg_stats` took a mutex under `rcu_read_lock`); fixed lockless in `be246329`; relaunched 2026-10-23 on `.164`, must pass cycle 3482 and reach 10,000 with no kernel BUG |
+| Ehash collision chain (2026-10-20) | Hardware never hits a non-head chained record: routed `.156`/0326 shows heads 472/472 hit and entries behind them 472/472 miss; bridge capacity fails the same way. These flows silently stay in software. Root cause: the 210.10.1 walker follows links only through vendor cumulative nodes (byte0 0x80), never from a regular record. Fix F-269 rebuilds each bucket of two or more flows as cumulative nodes (copy-on-write: switch the head, SYNC, then free). **FIXED** in image `2026.10.20-1310` (commit `73b8189d`): on cold-booted `.158`, chain A/B gave 944/944 shared-bucket records hit with 0 misses, and bridge capacity N=8192 hit on 3/3 probes. B2, F-266, A14 v4/v6 and a 10-cycle PPPoE churn all pass on the same boot (bridge plan §6.2). Chains spanning several nodes are also proven: L2_DA 16-byte keys at depth 25 (3 nodes), and routed IPv4/IPv6 50-byte keys at depth 13 (5 nodes). All hit, including after deletes at node edges. Key sizes 14 and 38 are dormant (no producer). Bridge soak PASS 100/100 (2026-10-20) |
+| F-266 / conntrack close | Default-off; parser arm/readback proven, transit and NAT closure untested; §4.1 blocks scale acceptance |
 | IPv6 fragment-ID reuse | Concurrent oversize flows can corrupt reassembly; keep limitation and `ipv6_hw_frag=0` opt-out visible; PPPoE plan |
 | Short non-IP bridge frames | Historical FE hit-path freeze; restrict bridge to v4/v6 until a new cold-boot de-risk gate passes |
 | 10G link-down invalidation | Bridge remote-carrier test is limited by the known carrier gap; do not claim it passed |
@@ -564,7 +578,7 @@ archived 40-second dual-client baseline with the current 30-second
 | `ASK2-BRIDGE-OFFLOAD-PLAN.md` | Remaining bridge design and runbook |
 | `ASK2-PPPOE-OFFLOAD-PLAN.md` | Remaining PPPoE acceptance and feature gaps |
 | `ASK2-IPSEC-OFFLOAD-PLAN.md` | Tier 1/2 runbook (Tier 1 substrate verified 2026-10-16); must satisfy this plan's current scope/architecture |
-| `ASK2-SURICATA-BYPASS-PLAN.md` | Suricata IDS/IPS integration design and approval contract (no code) |
+| `ASK2-SURICATA-OFFLOAD-PLAN.md` | Suricata inspection-driven offload design and safety contract (no code) |
 | `archive/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` | Completed vendor topology/reference analysis |
 | `OFFLOAD-CAPABILITY-PLAN.md` | Vendor vs ASK2 mechanism for each remaining capability |
 | `CC-ACL-OFFLOAD-PLAN.md` | Static ACL backend (open Phase 2 drop ACL; not a parity blocker) |
@@ -574,14 +588,17 @@ archived 40-second dual-client baseline with the current 30-second
 | `TA-2026-07-18-002-patch-architecture.md` | Canonical patch process |
 | `archive/README.md` | Historical documents and relocation map |
 
-The exact pre-cleanup master, bridge, PPPoE, IPsec, parity, WireGuard
-fast-path, offload-capability, CC-ACL and dual-dataplane texts are preserved as
+The full pre-cleanup master text of 2026-10-19 is preserved as
+`archive/ASK2-MASTER-PLAN-2026-10-19.md`: closed-gate narratives (per-port
+disable, factory default, regression battery, T-PARITY-10 A/B, T-M8-3
+counters and `get-flow`, bridge/PPPoE/IPsec runs). The exact pre-cleanup
+master, bridge, PPPoE, IPsec, parity, WireGuard fast-path,
+offload-capability, CC-ACL and dual-dataplane texts of 2026-10-15 are
 `archive/<original-stem>-2026-10-15.md`; the completed WireGuard software plan
-and matrix moved to `archive/` under their original names; the full rewrite plan is now
-`archive/ASK2-REWRITE-PLAN.md`. Earlier 2026-10-09 snapshots remain intact.
-Old A6/Phase 0.4 reports are archived under their original filenames.
-Register layouts, offsets, commands, dates and rejected hypotheses remain
-there verbatim; they have not been silently discarded.
+and matrix moved to `archive/` under their original names; the full rewrite
+plan is `archive/ASK2-REWRITE-PLAN.md`. Earlier 2026-10-09 snapshots remain
+intact. Register layouts, offsets, commands, dates and rejected hypotheses
+remain there verbatim; they have not been silently discarded.
 
 When a gate closes, move its detailed evidence to the archive, remove the
 completed task from this plan, update the owner/index and reconcile Qdrant.

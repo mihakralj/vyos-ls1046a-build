@@ -14,13 +14,14 @@ still open, independently of routed/NAT/VLAN throughput parity.
 | Document | Owns |
 |---|---|
 | [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative task list:** missing vendor features, dependencies, acceptance, consolidation and defects. Absorbs the rewrite plan's pending work. Start here. |
+| [`ASK2-PRIORITIZED-TASKS.md`](ASK2-PRIORITIZED-TASKS.md) | Ordered P0–P10 view of the master plan with status, gates and rig constraints (snapshot 2026-10-21; subordinate to the master plan). |
 | [`ASK2-VENDOR-PARITY.md`](ASK2-VENDOR-PARITY.md) | Current comparison scope, paired 10×10 method, evidence still required and verdict contract. Old single-run and A6 tables are archived, not current acceptance. |
 | [`DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md) | Binding runtime contract: S0/S1/S2 state machine, `offload ipv4\|ipv6` CLI, ASK↔VPP mutex, teardown checklist, open contract obligations. History in `archive/`. |
 | [`OFFLOAD-CAPABILITY-PLAN.md`](OFFLOAD-CAPABILITY-PLAN.md) | Remaining capabilities only: vendor mechanism vs recommended ASK2 mechanism; shipped capabilities summarised, details in `archive/`. |
 | [`ASK2-BRIDGE-OFFLOAD-PLAN.md`](ASK2-BRIDGE-OFFLOAD-PLAN.md) | Remaining bridge work: B7b, mixed-role/multi-table dispatch, IRB, current-image repeats and safety/resource gates. B0–B6/B7a history is archived. |
 | [`ASK2-PPPOE-OFFLOAD-PLAN.md`](ASK2-PPPOE-OFFLOAD-PLAN.md) | Remaining PPPoE acceptance, 10,000-cycle churn, fragmentation/exhaustion, over-VLAN/relay gaps and IPv6 fragment-ID limitation. |
 | [`ASK2-IPSEC-OFFLOAD-PLAN.md`](ASK2-IPSEC-OFFLOAD-PLAN.md) | IPsec ESP offload via CAAM (T-M6-4). Tier 1 substrate verified 2026-10-16 (CAAM built in, selected, self-tests pass); tunnel gate and the Tier 2 fast path not started. |
-| [`ASK2-SURICATA-BYPASS-PLAN.md`](ASK2-SURICATA-BYPASS-PLAN.md) | Suricata + ASK2 design only: the native VyOS service is IDS-only (AF_PACKET); approval/revocation/fail-closed contract required before any code. |
+| [`ASK2-SURICATA-OFFLOAD-PLAN.md`](ASK2-SURICATA-OFFLOAD-PLAN.md) | Suricata + ASK2 flow-offload design only: native VyOS Suricata is passive IDS; positive per-flow approval, revocation, and failure behavior must be validated before implementation. |
 | [`CC-ACL-OFFLOAD-PLAN.md`](CC-ACL-OFFLOAD-PLAN.md) | Static ACL backend: settled facts (no CC walker; `0194` ntuple on ehash verified) and the open Phase 2 drop-ACL work. |
 | [`ASK2-PERFORMANCE-TEST-HARNESS.md`](ASK2-PERFORMANCE-TEST-HARNESS.md) | Throughput and CPU measurement method; current rig is `bin/testrig-combo-matrix.sh` (dell1–DUT–dell2). |
 | [`ASK2-WIREGUARD-FASTPATH-PLAN.md`](ASK2-WIREGUARD-FASTPATH-PLAN.md) | The single active WireGuard plan (remaining work only): software-path open items (matrix re-run on the shipping image, persistent `noqueue`, netns selftest), fast-path P2b-2/P2b-3/P2c, P3 RX, P4 offline-port reinjection, P5 order restoration, with gates and kill criteria. Completed software stages, matrix and P0-P2b-1 results are in `archive/`. |

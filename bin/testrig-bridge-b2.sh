@@ -5,20 +5,23 @@
 # 20 frames per case from dell1. Non-IPv4 cases must MISS (pkt_count +0, kernel rx +20);
 # the IPv4 case must HIT (pkt_count +20, dell2 port.rx_unicast +20). Restores ROUTED at the end.
 # CASES="..." overrides the case list; tag_* cases (802.1Q VID 10) are reported as info only.
+# Settings: DUT (SSH target), GEN1/GEN2, NS (generator netns, empty = root namespace), IF (generator port).
 set -u
 FAILS=0
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
-DUT="ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185"
-D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
-IF=enp1s0f0np0; DA=02:00:00:aa:bb:01; SA=3c:fd:fe:2a:f0:20; N=20
+DUT="ssh -n $SSHO -i $HOME/.ssh/vyos_key ${DUT:-vyos@192.168.1.185}"
+D1="ssh -n $SSHO ${GEN1:-admin@192.168.1.112}"; D2="ssh -n $SSHO ${GEN2:-admin@192.168.1.113}"
+NS=${NS:-}; NX=""; [ -n "$NS" ] && NX="ip netns exec $NS"
+IF=${IF:-enp1s0f0np0}; DA=02:00:00:aa:bb:01; N=20
+SA=$($D1 "sudo $NX cat /sys/class/net/$IF/address")
 OFF=/sys/kernel/debug/ask/offload; PCD=/sys/kernel/debug/fman_pcd/0
 
 dut(){ $DUT "$1"; }
 ctl(){ dut "echo '$1' | sudo tee $OFF >/dev/null" || echo "!! '$1' failed"; }
 hits(){ dut "sudo awk '/keysz=16 /{for(i=1;i<=NF;i++)if(\$i~/^pkt_count=/){split(\$i,a,\"=\");s+=a[2]}}END{print s+0}' $PCD/fe_ehash_stats"; }
 k_rx(){ dut "cat /sys/class/net/eth3/statistics/rx_packets"; }
-d2_rx(){ $D2 "sudo ethtool -S $IF | awk '/port.rx_unicast:/{print \$2}'"; }
-send(){ $D1 "sudo python3 -c \"from scapy.all import *
+d2_rx(){ $D2 "sudo $NX ethtool -S $IF | awk '/port.rx_unicast:/{print \$2}'"; }
+send(){ $D1 "sudo $NX python3 -c \"from scapy.all import *
 e=Ether(dst='$DA',src='$SA')
 f={'arp60':e/ARP(hwsrc='$SA',psrc='10.99.1.112',pdst='10.99.1.185')/Raw(bytes(18)),
  'e60':Ether(dst='$DA',src='$SA',type=0x88b5)/Raw(bytes(46)),

@@ -169,4 +169,28 @@ if [ $ROLE = dell1 ] && [ -f /etc/systemd/system/ask2-pppoe-server.service ]; th
   systemctl daemon-reload
   systemctl restart ask2-pppoe-server.service
 fi
+# A second ASK2 DUT cabled to the n106 port (DUT2 eth3) gets its own concentrator in that netns:
+# same pool/options, separate pidfile, bound to lab-n106 so it follows the namespace lifecycle.
+if [ $ROLE = dell1 ] && [ -f /etc/systemd/system/ask2-pppoe-server.service ]; then
+  cat > /etc/systemd/system/ask2-pppoe-server-n106.service <<EOF3
+[Unit]
+Description=ASK2 test-rig PPPoE access concentrator (dell1 netns n106, facing DUT2 eth3)
+After=lab-n106.service
+BindsTo=lab-n106.service
+
+[Service]
+Type=forking
+NetworkNamespacePath=/run/netns/n106
+PIDFile=/var/run/pppoe-server-n106.pid
+ExecStart=/usr/sbin/pppoe-server -k -g /usr/lib/pppd/2.5.2/rp-pppoe.so -I $P2 -L 10.99.50.1 -R 10.99.50.10 -N 10 -C ASK2-TESTRIG -X /var/run/pppoe-server-n106.pid -O /etc/ppp/pppoe-server-options
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF3
+  systemctl daemon-reload
+  systemctl enable ask2-pppoe-server-n106.service >/dev/null 2>&1
+  systemctl restart ask2-pppoe-server-n106.service
+fi
 echo "$ROLE: done"

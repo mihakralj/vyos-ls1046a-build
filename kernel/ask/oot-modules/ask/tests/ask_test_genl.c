@@ -8,6 +8,8 @@
  *   - ask_genl_fill_one_flow()      appends one flow's attrs FLAT (T-M7-5)
  *   - ask_genl_dump_one_cb()        the per-flow walker callback
  *   - ask_genl_eopnotsupp_doit()    + dumpit() for the seven not-yet-wired cmds
+ *   - ask_genl_get_flow_cookie()    GET_FLOW id decode (flat per ask.yaml,
+ *                                   plus the legacy ASK_ATTR_FLOW nest)
  *
  * The doit/dumpit handlers that need a real `struct genl_info` (get_info_doit,
  * get_flow_doit, dump_flows_dumpit, flush_flows_doit) are intentionally NOT
@@ -16,7 +18,7 @@
  * userspace `askd` exists. The pure-helper surface covers the lion's share
  * of the LOC in ask_genl.c (~70%) without needing that scaffolding.
  *
- * Coverage shapes (12 cases):
+ * Coverage shapes (16 cases):
  *
  *   info_fill_happy_path           — fill into a fresh skb, parse back via
  *                                    ask_top_policy + ask_info_policy and
@@ -61,6 +63,12 @@
  *                                    nlattr stream and validate it through
  *                                    nla_validate() against
  *                                    ask_info_policy; expect 0.
+ *   get_flow_cookie_flat           — flat 8-byte ASK_FLOW_ATTR_ID (the ynl /
+ *                                    ask.yaml encoding) decodes to the cookie.
+ *   get_flow_cookie_nested         — legacy ASK_ATTR_FLOW nest still decodes.
+ *   get_flow_cookie_missing        — no id at all, expect -EINVAL.
+ *   get_flow_cookie_flat_short     — 4-byte flat id, expect -ERANGE from the
+ *                                    flow policy's NLA_U64 length check.
  *
  * Like ask_test_flow_offload, this suite uses suite_init/suite_exit with an
  * ownership flag so it can run standalone or stacked behind another suite
@@ -206,7 +214,8 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 	 * NAT/PAT are implemented and always advertised. VLAN is also
 	 * silicon-validated (CC+HMTD) but its runtime gate defaults OFF, so the
 	 * capability bit is absent until the operator explicitly arms it.
-	 * Bridge/multicast/IPsec remain unadvertised.
+	 * Bridge follows the same gate model (T-M6-2); multicast/IPsec remain
+	 * unadvertised.
 	 *
 	 * On a live engaged DUT the gate may already be armed by the boot
 	 * config, so compute the expected mask from the same predicate the
@@ -219,6 +228,9 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 
 		if (ask_hw_vlan_offload_armed())
 			exp_caps |= ASK_CAP_VLAN;
+		/* T-M6-2: bridge is advertised under the same gate model. */
+		if (ask_hw_bridge_offload_armed())
+			exp_caps |= ASK_CAP_BRIDGE;
 		KUNIT_EXPECT_EQ(test,
 				nla_get_u64(attrs[ASK_INFO_ATTR_CAPABILITIES]),
 				exp_caps);
@@ -494,6 +506,98 @@ static void ask_genl_test_policy_validate_info_round_trip(struct kunit *test)
 }
 
 /* ------------------------------------------------------------------------- */
+/* GET_FLOW request decoding                                                  */
+/*                                                                            */
+/* These build a request the way the genl core sees it: nlmsghdr + genlmsghdr */
+/* + attributes, top-level parsed with ask_top_policy (the family policy).    */
+/* ynl sends get-flow per ask.yaml as a flat ASK_FLOW_ATTR_ID with an 8-byte, */
+/* unpadded u64; older callers nest it inside ASK_ATTR_FLOW.                  */
+/* ------------------------------------------------------------------------- */
+
+#define TEST_GET_FLOW_COOKIE 0x0123456789abcdefULL
+
+static struct nlmsghdr *test_get_flow_req(struct kunit *test,
+					  struct sk_buff *skb)
+{
+	struct nlmsghdr *nlh;
+	struct genlmsghdr *gh;
+
+	nlh = nlmsg_put(skb, 0, 1, GENL_MIN_ID, GENL_HDRLEN, 0);
+	KUNIT_ASSERT_NOT_NULL(test, nlh);
+	gh = nlmsg_data(nlh);
+	memset(gh, 0, GENL_HDRLEN);
+	gh->cmd = ASK_CMD_GET_FLOW;
+	gh->version = ASK_GENL_VERSION;
+	return nlh;
+}
+
+static int test_get_flow_decode(struct kunit *test, struct sk_buff *skb,
+				struct nlmsghdr *nlh, u64 *cookie)
+{
+	struct nlattr *attrs[ASK_ATTR_MAX + 1];
+	int rc;
+
+	nlmsg_end(skb, nlh);
+	rc = nlmsg_parse_deprecated(nlh, GENL_HDRLEN, attrs, ASK_ATTR_MAX,
+				    ask_top_policy, NULL);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	return ask_genl_get_flow_cookie(nlh, attrs, cookie, NULL);
+}
+
+static void ask_genl_test_get_flow_cookie_flat(struct kunit *test)
+{
+	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
+	struct nlmsghdr *nlh = test_get_flow_req(test, skb);
+	u64 in = TEST_GET_FLOW_COOKIE, out = 0;
+
+	KUNIT_ASSERT_EQ(test, nla_put(skb, ASK_FLOW_ATTR_ID, sizeof(in), &in), 0);
+	KUNIT_EXPECT_EQ(test, test_get_flow_decode(test, skb, nlh, &out), 0);
+	KUNIT_EXPECT_EQ(test, out, TEST_GET_FLOW_COOKIE);
+	test_free_skb(skb);
+}
+
+static void ask_genl_test_get_flow_cookie_nested(struct kunit *test)
+{
+	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
+	struct nlmsghdr *nlh = test_get_flow_req(test, skb);
+	struct nlattr *nest;
+	u64 out = 0;
+
+	nest = nla_nest_start(skb, ASK_ATTR_FLOW);
+	KUNIT_ASSERT_NOT_NULL(test, nest);
+	KUNIT_ASSERT_EQ(test, nla_put_u64_64bit(skb, ASK_FLOW_ATTR_ID,
+						TEST_GET_FLOW_COOKIE,
+						ASK_FLOW_ATTR_UNSPEC), 0);
+	nla_nest_end(skb, nest);
+	KUNIT_EXPECT_EQ(test, test_get_flow_decode(test, skb, nlh, &out), 0);
+	KUNIT_EXPECT_EQ(test, out, TEST_GET_FLOW_COOKIE);
+	test_free_skb(skb);
+}
+
+static void ask_genl_test_get_flow_cookie_missing(struct kunit *test)
+{
+	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
+	struct nlmsghdr *nlh = test_get_flow_req(test, skb);
+	u64 out = 0;
+
+	KUNIT_EXPECT_EQ(test, test_get_flow_decode(test, skb, nlh, &out),
+			-EINVAL);
+	test_free_skb(skb);
+}
+
+static void ask_genl_test_get_flow_cookie_flat_short(struct kunit *test)
+{
+	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
+	struct nlmsghdr *nlh = test_get_flow_req(test, skb);
+	u64 out = 0;
+
+	KUNIT_ASSERT_EQ(test, nla_put_u32(skb, ASK_FLOW_ATTR_ID, 42), 0);
+	KUNIT_EXPECT_EQ(test, test_get_flow_decode(test, skb, nlh, &out),
+			-ERANGE);
+	test_free_skb(skb);
+}
+
+/* ------------------------------------------------------------------------- */
 /* suite lifecycle                                                            */
 /*                                                                            */
 /* The genl pure-helper tests do not touch the flow table, but                */
@@ -544,6 +648,10 @@ static struct kunit_case ask_genl_test_cases[] = {
 	KUNIT_CASE(ask_genl_test_eopnotsupp_doit_returns_eopnotsupp),
 	KUNIT_CASE(ask_genl_test_eopnotsupp_dumpit_returns_eopnotsupp),
 	KUNIT_CASE(ask_genl_test_policy_validate_info_round_trip),
+	KUNIT_CASE(ask_genl_test_get_flow_cookie_flat),
+	KUNIT_CASE(ask_genl_test_get_flow_cookie_nested),
+	KUNIT_CASE(ask_genl_test_get_flow_cookie_missing),
+	KUNIT_CASE(ask_genl_test_get_flow_cookie_flat_short),
 	{}
 };
 

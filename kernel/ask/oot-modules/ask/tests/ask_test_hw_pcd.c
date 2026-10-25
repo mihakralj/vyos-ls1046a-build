@@ -547,6 +547,11 @@ static void hw_auto_gate_needs_engaged_port(struct kunit *test)
 	/* Engage only port 0x10: it reads armed, another port does not. */
 	ask_hw_offload_set_family(0x10, ASK_FAM_V4);
 	KUNIT_EXPECT_TRUE(test, ask_hw_vlan_offload_armed_port(0x10));
+	/* B7b: bridge pop/push has its own gate, armed only on an L2_DA port;
+	 * a routed-engaged port must not pass it (nor an L2 port the routed
+	 * one, which is what refused every bridge pop/push on image 2223). */
+	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_vlan_armed_port(0x10));
+	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_vlan_armed_port(0x11));
 	KUNIT_EXPECT_TRUE(test, ask_hw_pppoe_offload_armed_port(0x10));
 	KUNIT_EXPECT_TRUE(test, ask_hw_bridge_offload_armed());
 	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0x11));
@@ -574,6 +579,7 @@ static void hw_auto_gate_out_of_range_safe(struct kunit *test)
 	 * must not crash or alias a real port. */
 	ask_hw_offload_set_family(0xff, ASK_FAM_V4);
 	KUNIT_EXPECT_FALSE(test, ask_hw_vlan_offload_armed_port(0xff));
+	KUNIT_EXPECT_FALSE(test, ask_hw_bridge_vlan_armed_port(0xff));
 	KUNIT_EXPECT_FALSE(test, ask_hw_pppoe_offload_armed_port(0xff));
 }
 
