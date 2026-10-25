@@ -15,7 +15,8 @@ fragmentation there too, so it does not separate software from hardware.
 Usage: bin/testrig-pppoe-frag.py ask2|vendor [count] [pps] [case,case,...]
 Cases: ctl-v4-1000 ctl-v6-1000 (controls that need no fragmentation), v4-dfclear v4-dfset v6, and the
 -warm variants, which first offload the flow with small datagrams so the oversize ones hit a live record.
-Needs the PPPoE session up (ASK2: dell1 root ns; vendor: bin/testrig-pppoe-vendor.sh up).
+Needs the PPPoE session up (ASK2: dell1 root ns, or RIG_NS=<netns> for the second DUT; vendor:
+bin/testrig-pppoe-vendor.sh up).
 Hosts and key: bin/testrig-env.sh (GEN1, GEN2, ASK2_DUT, VENDOR_DUT, RIG_KEY, VENDOR_NS); RUN_ON=gen2 runs
 the gen2 side locally.
 """
@@ -43,7 +44,8 @@ if KIND == "vendor":
     NS = f"sudo ip netns exec {CFG['VENDOR_NS']} "
     DUT = testrig_env.require(CFG, "VENDOR_DUT")
 else:
-    NS = ""
+    # RIG_NS: the generator ports facing this DUT live in that netns (second ASK2 DUT)
+    NS = f"sudo ip netns exec {os.environ['RIG_NS']} " if os.environ.get("RIG_NS") else ""
     DUT = testrig_env.require(CFG, "ASK2_DUT")
 PORT = 5999
 

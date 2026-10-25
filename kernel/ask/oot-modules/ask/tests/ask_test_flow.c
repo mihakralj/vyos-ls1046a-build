@@ -822,6 +822,55 @@ KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xDEAD, 1u));
 ask_flow_table_destroy(&t);
 }
 
+/*
+ * A14 (2026-10-20): the neighbour-change rebuild must follow the resolved
+ * next hop on its neighbour netdev, not the 5-tuple dst on the physical oif.
+ * Before the fix a gateway-routed / NAT-reply flow (nh != dst) and a VLAN
+ * PUSH flow (neigh on the vif, oif physical) never matched, and the stale
+ * MAC stayed in silicon.
+ */
+static void ask_flow_test_neigh_follow_nexthop(struct kunit *test)
+{
+struct ask_flow_key k = {};
+static const u8 dst[4] = { 10, 99, 2, 113 };
+static const u8 gw[4]  = { 10, 99, 2, 1 };
+static const u8 dst6[16] = { 0xfd, 0x99, 0, 2, [15] = 0x13 };
+
+/* legacy key (nh_ifindex 0): old oif + 5-tuple dst behaviour */
+k.l3_proto = ASK_FLOW_L3_IPV4;
+memcpy(k.dst_ip, dst, 4);
+KUNIT_EXPECT_TRUE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV4, 6, dst, 4));
+KUNIT_EXPECT_FALSE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV4, 5, dst, 4));
+
+/* gateway-routed: follows the gateway, not the 5-tuple dst */
+k.nh_ifindex = 6;
+memcpy(k.nh_ip, gw, 4);
+KUNIT_EXPECT_TRUE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV4, 6, gw, 4));
+KUNIT_EXPECT_FALSE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV4, 6, dst, 4));
+
+/* VLAN push: neighbour on the vif (ifindex 8), oif is physical (6) */
+k.nh_ifindex = 8;
+memcpy(k.nh_ip, dst, 4);
+KUNIT_EXPECT_TRUE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV4, 8, dst, 4));
+KUNIT_EXPECT_FALSE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV4, 6, dst, 4));
+
+/* family mismatch never matches */
+KUNIT_EXPECT_FALSE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV6, 8, dst, 4));
+
+/* PPPoE encap: MAC is the session peer's, never neighbour-derived */
+k.vlan_edit_flags = ASK_VLANF_PPPOE_INSERT;
+KUNIT_EXPECT_FALSE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV4, 8, dst, 4));
+
+/* IPv6: full 16-byte compare */
+memset(&k, 0, sizeof(k));
+k.l3_proto = ASK_FLOW_L3_IPV6;
+k.nh_ifindex = 6;
+memcpy(k.nh_ip, dst6, 16);
+KUNIT_EXPECT_TRUE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV6, 6, dst6, 16));
+k.nh_ip[15] ^= 1;
+KUNIT_EXPECT_FALSE(test, ask_flow_key_follows_neigh(&k, 6, ASK_FLOW_L3_IPV6, 6, dst6, 16));
+}
+
 /* ------------------------------------------------------------------------- */
 /* suite                                                                      */
 /* ------------------------------------------------------------------------- */
@@ -847,6 +896,7 @@ KUNIT_CASE(ask_flow_test_gen_legacy_paths_unaffected),
 KUNIT_CASE(ask_flow_test_gen_current_contract),
 KUNIT_CASE(ask_flow_test_gen_release_contract),
 KUNIT_CASE(ask_flow_test_gen_wrap_never_zero),
+KUNIT_CASE(ask_flow_test_neigh_follow_nexthop),
 {}
 };
 

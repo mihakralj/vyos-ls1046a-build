@@ -770,6 +770,16 @@ else
     echo "WARNING: $SFP_CHECKSUM_PATCH missing — eth3 SFP link will fail to come up"
 fi
 
+# Stage F-266 tuple-reuse fix: delete the HW flow at FIN/RST and when a SYN
+# reuses a CLOSING flow's tuple (stale FE record otherwise outlives gc by 1 s).
+NF_FLOW_HWDEL_PATCH="$COMMON_FIXES_DIR/140-nf-flow-offload-hw-delete-on-fin-syn.patch"
+if [ -f "$NF_FLOW_HWDEL_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_HWDEL_PATCH") (F-266 5-tuple reuse stale HW record)"
+    cp "$NF_FLOW_HWDEL_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "ERROR: $NF_FLOW_HWDEL_PATCH missing"; exit 1
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
@@ -2531,17 +2541,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-265 per-insert log lines demoted"
 fi
 
-# F-266 (TCP control punt, 2026-10-15, default off): with offload_delay_ms=0
-# the FE swallows FIN/RST of offloaded TCP flows and conntrack keeps them
-# ESTABLISHED for ~7300 s. Adds fman_port_sp_attach() and exported
-# fman_pcd_tcp_ctl_punt_arm()/_disarm(): load the vendor TCP soft-parser
-# routine (tcp.flags & 7 -> HPNIA 0x500002, BMI enqueue to the default FQ) at
-# parser byte 0x40 with FMPR_RPIMAC[PEN] cleared and readback, then attach
-# the port's TCP HXS (slot 10) to label 0x20. Nothing runs until ask.ko
-# tcp_ctl_punt=1 arms an engaged port. After F-265.
+# F-266 (control punt, 2026-10-15; TTL 2026-10-20): with offload_delay_ms=0
+# the FE swallows FIN/RST of offloaded TCP flows (conntrack keeps them
+# ESTABLISHED for ~7300 s), drops IPv4 TTL 1 with no ICMP and rewrites IPv6
+# hop limit 1 -> 0 and 0 -> 255. Adds fman_port_sp_attach() and exported
+# fman_pcd_ctl_punt_set(): load the vendor soft-parser program
+# (specs/reference/ask2-sp/ctl_punt.xml; tcp.flags & 7, TTL/hop <= 1 ->
+# NIA/HPNIA 0x500002, BMI enqueue to the default FQ) at parser byte 0x40 with
+# FMPR_RPIMAC[PEN] cleared and readback, then attach the port's TCP (slot 10)
+# and IPv4/IPv6 (slots 5/6) HXS. ask.ko tcp_ctl_punt/ttl_punt (default 1) arm
+# ROUTED-engaged ports. After F-265.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_266.py" 2>&1
-    echo "### fman_pcd.c: F-266 TCP control punt (default off)"
+    echo "### fman_pcd.c: F-266 control punt (TCP SYN/FIN/RST, TTL/hop limit)"
 fi
 
 # F-267 (control-plane memory, 2026-10-16): ehash flow records and their F-175
@@ -2549,14 +2561,50 @@ fi
 # context at +320) instead of two page-rounded dma_alloc_coherent() calls
 # (~9 KiB MemAvailable per flow on .185, 2026-10-13). Remaining per-insert
 # log lines (F-219 eviction, F-197 FQID fallback, F-251 drop trace) go to
-# debug. Then bin/test-ehash-delete.py runs the real del_key()/flow_drain()
-# with a simulated SYNC and fails the build, before the kernel compile, if
-# unlink/index/SYNC/free ordering or block release regress. After F-266.
+# debug. bin/test-ehash-delete.py runs after F-269. After F-266.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_267.py" 2>&1
     echo "### fman_pcd.c: F-267 ehash record pool + per-insert logs demoted"
+fi
+
+# F-268 (T-M6-2 B7b, 2026-10-19): FMAN_PCD_VLANF_BRIDGE makes a VLAN pop/push
+# record a bridge record: no TTL/hop-limit decrement and ENQUEUE mtu 0xffff
+# (vendor fill_bridge_actions), on the routed 04 11 12 [42] 41 01 chain.
+# Bridge records without POP/PUSH or with L3 edits are refused. Records
+# without the flag are byte-identical. Dormant until ask.ko sets it. After F-267.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_268.py" 2>&1
+    echo "### fman_pcd.c: F-268 bridge VLAN pop/push records"
+fi
+
+# F-269 (ehash collision chain, 2026-10-20): microcode 210.10.1 follows a
+# bucket's chain only through vendor cumulative nodes (byte0 0x80, NEXT 0x20,
+# count, key stride, pointer offset, next node BE at +4, keys at +12), never
+# from a record's next pointer: on .156 every bucket head hit and every record
+# behind one missed (472/472). A bucket with one flow points at its record; a
+# bucket with more is rebuilt copy-on-write from t->bidx into nodes from a
+# per-table 'fman_ehash_cu' dma_pool, published by one head store after
+# wmb(), and the replaced nodes are freed after the F-254 SYNC (kept on the
+# F-256 timeout). Then bin/test-ehash-delete.py runs the real publish, SYNC,
+# drain, del_key and add_key publish tail against a model of the microcode
+# walker and fails the build, before the kernel compile, if reachability,
+# node layout or SYNC-before-free ordering regress. After F-268.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_269.py" 2>&1
+    echo "### fman_pcd.c: F-269 ehash cumulative-node buckets"
     python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: ehash delete harness passed"
+    echo "### fman_pcd.c: ehash bucket harness passed"
+fi
+
+# F-270 (engaged-port oversize wedge, 2026-10-22): plain routed ehash records
+# wrote ENQUEUE mtu 1500 with no frag pool; with the F-262 RX-port triple the
+# first IP packet above 1500 bytes wedged the ingress port RX-deaf (.185, UDP
+# payload 1473 at MTU 2500). Write EN_EHASH_DISABLE_FRAG 0xffff instead;
+# F-262 still overwrites it with the egress MTU on records that need a
+# hardware MTU check. After F-269.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_270.py" 2>&1
+    echo "### fman_pcd.c: F-270 ehash ENQUEUE mtu 0xffff without MTU check"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic

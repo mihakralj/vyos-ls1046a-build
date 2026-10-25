@@ -1,0 +1,43 @@
+<netpdl name="NetPDL custom protocol" description="ASK2 control and TTL punt">
+<protocol name="tcpschema" longname="tcpschema" prevproto="tcp">
+    <execute-code>
+      <before>
+        <if expr="((tcp.flags bitwand 7) != 0)">
+          <if-true>
+            <assign-variable name="$nia" value="0x500002"/>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <action type="exit" confirm="yes" nextproto="end_parse"/>
+          </if-true>
+        </if>
+      </before>
+    </execute-code>
+  </protocol>
+<protocol name="ipv4schema" longname="ipv4schema" prevproto="ipv4">
+    <execute-code>
+      <before>
+        <if expr="ipv4.ttl == 1 or ipv4.ttl == 0">
+          <if-true>
+            <assign-variable name="$nia" value="0x500002"/>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <action type="exit" confirm="no" nextproto="end_parse"/>
+          </if-true>
+        </if>
+        <action type="exit" nextproto="return"/>
+      </before>
+    </execute-code>
+  </protocol>
+<protocol name="ipv6schema" longname="ipv6schema" prevproto="ipv6">
+    <execute-code>
+      <before>
+        <if expr="ipv6.hop == 1 or ipv6.hop == 0">
+          <if-true>
+            <assign-variable name="$nia" value="0x500002"/>
+            <assign-variable name="$hpnia" value="0x500002"/>
+            <action type="exit" confirm="no" nextproto="end_parse"/>
+          </if-true>
+        </if>
+        <action type="exit" nextproto="return"/>
+      </before>
+    </execute-code>
+  </protocol>
+</netpdl>
