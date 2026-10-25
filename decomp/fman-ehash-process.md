@@ -57,7 +57,7 @@ Armed-state readbacks [VERIFIED]: node @RCCB bytes, scheme4 mode/ekfc/fqb/ccbs, 
    - parse node: key_size (AND-0x3f), table_hi (AND-0xff), mask_bits (AND-0xf), pool (>>16), table_base_lo → dmem[0xe000];
    - bucket_index from `ctx[0xd048]` (KG hash), >>48 & mask_bits;
    - DMA read bucket head from DDR (works [VERIFIED] — empty-bucket MISS proved the read);
-   - walk the chain (`next` pointers) comparing record key@8 vs extracted key [single-record chain VERIFIED; multi-entry chain walk = OPEN].
+   - compare the bucket head's record key@8 vs the extracted key [single-record bucket VERIFIED]. A collision is walked only through vendor cumulative nodes (byte0 0x80 | NEXT 0x20, +1 key count, +2 key stride, +3 pointer offset 13 + n*stride, +4 next node BE64, +12 keys, then BE64 record pointers; `decomp/en-exthash-lookup.asm`). A regular record's `next` pointer is never followed: chained records behind a head missed 472/472 on .156 (2026-10-20). F-269 publishes multi-flow buckets as cumulative nodes [silicon retest pending].
 
 ## Phase 4 — discrimination: HIT vs MISS (the machine's two exits)
 
@@ -98,7 +98,7 @@ Armed-state readbacks [VERIFIED]: node @RCCB bytes, scheme4 mode/ekfc/fqb/ccbs, 
 
 ## Open items (E26 matrix)
 
-1. Multi-record **collision chain** walk in one bucket (never exercised).
+1. Multi-record **collision chain** walk in one bucket. E26-2 was non-discriminating; on 2026-10-20 the record chain was proven never walked (472/472 misses behind a head). F-269 switches to cumulative nodes; retest pending.
 2. **Writeback**: re-dump record after a HIT — does the machine write anything (aging/ts/stats) into the entry?
 3. `param.bpid`: does the machine use it on the ENQUEUE_PKT path (bpid=0 to own-port untested in E25)?
 4. Second port (eth3/0x10): PORT_ID source + own-fqb end-to-end.
