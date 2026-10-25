@@ -346,6 +346,8 @@ static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
 	if (*act != ASK_BRIDGE_ACT_SAME &&
 	    !ask_hw_bridge_vlan_armed_port(*iport))
 		return false;
+	if (*act == ASK_BRIDGE_ACT_PUSH && !ask_vlan_push_only_enabled())
+		return false;
 	if (tci) {
 		rcu_read_lock();
 		vif = __vlan_find_dev_deep_rcu(in, htons(ETH_P_8021Q),
