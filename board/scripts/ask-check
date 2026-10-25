@@ -72,7 +72,7 @@ if [ "$IS_ROOT" -eq 0 ]; then
 fi
 
 KLOG=''
-if [ "$IS_ROOT" -eq 1 ] && command -v journalctl >/dev/null 2>&1; then
+if command -v journalctl >/dev/null 2>&1; then
     KLOG=$(journalctl -b -k -o cat --no-pager 2>/dev/null || true)
 fi
 
@@ -336,6 +336,8 @@ for dev in "${ASK_PORTS[@]}"; do
     fi
     if echo "$KLOG" | grep -q "offload ENGAGED on port $port_hex"; then
         record_ok "$dev ($port_hex) engaged through the production ASK path"
+    elif [ -z "$KLOG" ]; then
+        record_skip "$dev engagement not verifiable: kernel journal unreadable (run with sudo)"
     else
         record_fail "$dev configured for ASK but current-boot engagement is not confirmed"
     fi
