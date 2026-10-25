@@ -129,6 +129,13 @@ MODULE_PARM_DESC(vlan_push_only,
 		 "Offload push-only VLAN flows (untagged ingress -> tagged egress); "
 		 "needs the RX internal margin from patch 0217 (default on)");
 
+/* Shared with the bridge offload: a bridge access->trunk push is the same
+ * frame-growing push-only case. */
+bool ask_vlan_push_only_enabled(void)
+{
+	return READ_ONCE(ask_vlan_push_only);
+}
+
 static bool ask_ipv6_hw_frag = true;
 static void ask_flow_v6_frag_flush(void);
 
@@ -507,6 +514,7 @@ struct ask_flow_pending {
 	 */
 	int                     ingress_ifindex;
 	__be32                  dst_ip;
+	enum ask_hw_dir         dir;	/* pipeline bound at REPLACE time */
 	unsigned long           jiffies_inserted;
 	u32                     generation; /* A3: owner stamp for replay guard */
 };
@@ -581,6 +589,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 				    int egress_ifindex,
 				    int ingress_ifindex,
 				    __be32 dst_ip,
+				    enum ask_hw_dir dir,
 				    u32 generation)
 {
 	struct ask_flow_pending *p, *iter;
@@ -596,6 +605,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 	p->egress_ifindex   = egress_ifindex;
 	p->ingress_ifindex  = ingress_ifindex;
 	p->dst_ip           = dst_ip;
+	p->dir              = dir;
 	p->jiffies_inserted = jiffies;
 	p->generation       = generation;
 
@@ -616,6 +626,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 			iter->egress_ifindex   = egress_ifindex;
 			iter->ingress_ifindex  = ingress_ifindex;
 			iter->dst_ip           = dst_ip;
+			iter->dir              = dir;
 			iter->jiffies_inserted = jiffies;
 			iter->generation       = generation;
 			spin_unlock_bh(&ask_flow_pending_lock);
@@ -705,7 +716,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 						     p->oif, p->action_flags,
 						     p->egress_ifindex,
 						     p->ingress_ifindex,
-						     p->dst_ip,
+						     p->dst_ip, p->dir,
 						     p->generation) == 0)
 				pr_info_ratelimited("ask: flow_offload: PR14y re-park cookie=0x%llx dev=%s\n",
 						    p->cookie, netdev_name(dev));
@@ -749,7 +760,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 		 */
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
-					 p->action_flags, ASK_HW_DIR_FWD,
+					 p->action_flags, p->dir,
 					 p->generation);
 		if (rc == -EEXIST)
 			rc = 0;
@@ -1167,7 +1178,7 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 		}
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
-					 p->action_flags, ASK_HW_DIR_FWD,
+					 p->action_flags, p->dir,
 					 p->generation);
 		if (rc == -EEXIST)
 			rc = 0;
@@ -2800,6 +2811,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	u8 direct_src_mac[ETH_ALEN] = {};
 	bool direct_mac = false;
 	bool is_v6;
+	bool defer_nh;
 	u32 hw_id = 0;
 	u32 action_flags = 0;
 	u32 oif = 0;
@@ -3433,11 +3445,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		 * of indefinite pinning if ARP churns.  M3 eviction policy
 		 * will age out entries stuck > 30 s and force SW path.
 		 */
-	if (!is_v6 && egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
-		/* PR14y BUG #2: ARP TOCTOU — neighbour resolved but evicted
-		 * before insert.  Deferred pending; M3 eviction TBD.
-		 */
-		int qrc;
+	defer_nh = !is_v6 && egress_dev && is_zero_ether_addr(key.next_hop_mac);
+	if (defer_nh) {
 		struct neighbour *n;
 		u32 dst_key = (__force u32)dst_ip;
 
@@ -3448,52 +3457,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			neigh_event_send(n, NULL);
 			neigh_release(n);
 		}
-
-		qrc = ask_flow_pending_enqueue((u64)f->cookie, &key, oif,
-					       action_flags,
-					       egress_dev->ifindex,
-						/* true ingress (META-corrected), not block dev */
-						key.iif,
-						dst_ip, generation);
-		if (qrc == 0) {
-			pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
-					    f->cookie, oif,
-					    egress_dev->ifindex,
-					    ingress_dev ? ingress_dev->ifindex : 0,
-					    &dst_ip);
-			return 0;
-		}
-		/*
-		 * PR14z2 (2026-05-18): on queue overflow do NOT fall
-		 * through to ask_flow_insert(). The old PR14y fall-
-		 * through path called ask_flow_insert() with a zero
-		 * next-hop MAC; ask_hw_flow_insert returned -EAGAIN;
-		 * the pre-PR14z2 ask_flow_insert then fabricated a
-		 * fake hw_id and shoved the cookie into the rht,
-		 * pinning the flow to the SW fast path for its
-		 * entire lifetime (because the PR14r "REPLACE dedup"
-		 * check at line 687 prevented any future retry once
-		 * the cookie was in the rht).
-		 *
-		 * Correct behaviour: return -EOPNOTSUPP. The kernel
-		 * nf_flow_table core treats -EOPNOTSUPP as "this
-		 * driver declined offload"; the flow stays on the
-		 * kernel SW flowtable's own fast path (which is
-		 * still considerably cheaper than the per-packet
-		 * routing slow path). If/when the operator clears
-		 * the ARP storm and a new FLOW_CLS_REPLACE arrives,
-		 * the cookie has changed (nf_flow_table generates a
-		 * fresh cookie per `flow add`), so dedupe does not
-		 * apply and the second-attempt offload can succeed.
-		 *
-		 * Whether the workload that overflowed a 4096-deep
-		 * queue should reach M2 thresholds at all is an
-		 * orthogonal question — this branch is a safety
-		 * valve, not a fast path.
-		 */
-		pr_info_ratelimited("ask: flow_offload: PR14z2 queue full (%d) — declining HW offload, kernel SW flowtable retains cookie=0x%lx\n",
-				    qrc, f->cookie);
-		return -EOPNOTSUPP;
 	}
 
 	/*
@@ -3631,6 +3594,33 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		}
 		if (true_iif_dev)
 			dev_put(true_iif_dev);
+
+		/*
+		 * Next hop unresolved: park the cookie, but only now that the
+		 * key carries port_id/egress_mtu and the pipeline dir is bound,
+		 * so the replay installs the same record a resolved REPLACE
+		 * would. On queue overflow decline offload (-EOPNOTSUPP): the
+		 * flow stays on the software flowtable.
+		 */
+		if (defer_nh) {
+			int qrc = ask_flow_pending_enqueue((u64)f->cookie, &key,
+							   oif, action_flags,
+							   egress_dev->ifindex,
+							   key.iif, dst_ip,
+							   __dir, generation);
+
+			if (qrc == 0) {
+				pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
+						    f->cookie, oif,
+						    egress_dev->ifindex,
+						    ingress_dev ? ingress_dev->ifindex : 0,
+						    &dst_ip);
+				return 0;
+			}
+			pr_info_ratelimited("ask: flow_offload: PR14z2 queue full (%d) — declining HW offload, kernel SW flowtable retains cookie=0x%lx\n",
+					    qrc, f->cookie);
+			return -EOPNOTSUPP;
+		}
 
 		rc = ask_flow_insert_owned(t, (u64)f->cookie, &key, oif,
 					   action_flags, __dir, generation,
