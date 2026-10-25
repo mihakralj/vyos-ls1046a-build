@@ -945,18 +945,12 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 	list_for_each_entry_safe(fx, tmp, &ctx.fixups, node) {
 		struct ask_flow *cur;
 		struct ask_flow_key old_key;
-		u32 old_oif;
-		u32 old_action_flags;
-		u8 old_dir;
 		bool snapshot_ok = false;
 
 		rcu_read_lock();
 		cur = ask_flow_lookup(t, fx->cookie);
 		if (cur) {
 			old_key = cur->key;
-			old_oif = cur->oif;
-			old_action_flags = cur->action_flags;
-			old_dir = cur->dir;
 			snapshot_ok = true;
 		}
 		rcu_read_unlock();
@@ -1009,16 +1003,12 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 			pr_info_ratelimited("ask: neigh: rebuild aborted (destroyed) cookie=0x%llx\n",
 					    fx->cookie);
 		} else if (rc) {
-			int restore_rc;
-
-			restore_rc = ask_neigh_republish(t, fx->cookie, &old_key,
-							 old_oif, old_action_flags,
-							 old_dir, fx->generation);
-			if (restore_rc == -EEXIST || restore_rc == -ESTALE)
-				restore_rc = 0;
-			if (restore_rc)
-				pr_warn_ratelimited("ask: neigh: rebuild rollback failed cookie=0x%llx rc=%d\n",
-						    fx->cookie, restore_rc);
+			/* Do not republish the old key: it carries the stale
+			 * MAC and would re-blackhole the flow. Leave it
+			 * removed; the kernel slow path carries it and the
+			 * next REPLACE re-offloads with the fresh MAC. */
+			pr_warn_ratelimited("ask: neigh: rebuild failed, flow left in software cookie=0x%llx rc=%d\n",
+					    fx->cookie, rc);
 		}
 		if (l3_proto == ASK_FLOW_L3_IPV6)
 			pr_info_ratelimited("ask: neigh: stale-MAC rebuild cookie=0x%llx dev=%s dst_ip=%pI6 nh=%pM rc=%d\n",
