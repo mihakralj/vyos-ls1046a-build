@@ -1231,6 +1231,9 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 /* ask_xfrm.c — xfrmdev_ops packet-mode IPsec offload                         */
 /* PR16a fills these in.                                                     */
 /* ------------------------------------------------------------------------- */
+struct xfrm_state;
+int  ask_xfrm_state_eligible(const struct xfrm_state *x);
+int  ask_xfrm_state_add(struct xfrm_state *x);
 int  ask_xfrm_init(void);
 void ask_xfrm_exit(void);
 
