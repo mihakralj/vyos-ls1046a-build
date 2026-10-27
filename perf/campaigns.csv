@@ -1,0 +1,1 @@
+campaign_id,tier,started_utc,finished_utc,dut_os,dut_host,image,kernel,git_commit,boot,harness_sha256,ref_os,ref_host,ref_image,status,raw_dir,notes
