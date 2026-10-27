@@ -431,6 +431,23 @@ runbooks below are subordinate to this plan, not independent task priorities.
 - **T-M6-DISPATCH:** design/test multi-table per-port classification before
   IRB, routed+bridge coexistence or routed+ESP; protocol precedence, miss
   delivery, owner/generation isolation and reversibility are mandatory.
+  **Design direction (2026-10-27, from the vendor `.106` readback in
+  `arch/fman-microcode-210-programming-reference.md` §7.11a and the proven
+  soft parser in `specs/ask2-soft-parser-lcv-scheme-select.md` §6s):** the
+  vendor does not use one table per port. `FMBM_RCCB` points at a shared
+  table of one 16-byte CONT_LOOKUP row per KeyGen scheme, selected by the
+  scheme's CCOBASE, and a soft-parser routine picks the scheme per protocol
+  (LCV). ASK2 already has the loader (F-266: PEN cycle, `$nia`, per-HXS
+  `pmda[].ssa` attach; TCP slot 10, IPv4 slot 5, IPv6 slot 6 proven on
+  silicon). Dispatch is therefore: (1) an ESP HXS routine that sets the LCV
+  for ESP; (2) one KG scheme per class (routed, L2_DA, ESP) with its own
+  EKFC and CCOBASE; (3) one RCCB row per scheme pointing at that class's
+  FE_ENTER/ehash; (4) miss-AD to the port's PCD FQ per §7.11. First gate on
+  a sacrificial port: two classes (routed plus ESP) on `.185` eth3 with
+  unchanged routed hit rates, then `pcd-snapshot diff` clean after disarm.
+  Open risk: AC_CC dispatch with `next_engine=3` wedged RX in August and
+  October (§5.1) and `next_engine=2` dual-delivers; test the multi-scheme
+  design against that first. Qdrant-gate every change.
 - **T-M6-MC / A10:** MDB/mroute-owned v4/v6 group objects with bounded
   REPLICATE/egress resources; join/leave, source-specific groups where
   supported, TTL/hop-limit, port down, churn, exhaustion and no duplicates.

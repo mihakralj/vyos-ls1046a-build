@@ -91,10 +91,16 @@ s=socket.socket(socket.AF_INET$([ $FAM = 6 ] && echo 6),socket.SOCK_STREAM); s.s
 s.bind(('$DST',$PORT)); s.listen(64); d=b'x'*20000
 for i in range($N):
     c,_=s.accept(); c.recv(16); c.sendall(d); c.close()"
-  CLI="import socket
+  CLI="import socket,time
 ok=0
 for i in range($N):
-    s=socket.socket(socket.AF_INET$([ $FAM = 6 ] && echo 6),socket.SOCK_STREAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.settimeout(5); s.bind(('$SRC',$([ -n "${REUSE:-}" ] && echo "50000+i%$REUSE" || echo 0))); s.connect(('$DST',$PORT)); s.sendall(b'g'); n=0
+    s=socket.socket(socket.AF_INET$([ $FAM = 6 ] && echo 6),socket.SOCK_STREAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.settimeout(5); s.bind(('$SRC',$([ -n "${REUSE:-}" ] && echo "50000+i%$REUSE" || echo 0)))
+    for _ in range(400):
+        try: s.connect(('$DST',$PORT)); break
+        except OSError as e:
+            if e.errno != 99: raise
+            time.sleep(0.0005)
+    s.sendall(b'g'); n=0
     while True:
         b=s.recv(65536)
         if not b: break
@@ -109,7 +115,7 @@ print(ok)"
   chk flows-completed "$(tail -1 /tmp/f266-ok.txt)" "$N"
   sleep 8
   d "sudo conntrack -L -p tcp --dport $PORT 2>/dev/null" >/tmp/f266-ct.txt
-  echo "ct_total=$(wc -l </tmp/f266-ct.txt) hw_offload=$(grep -c HW_OFFLOAD /tmp/f266-ct.txt)"
+  echo "ct_total=$(wc -l </tmp/f266-ct.txt) hw_offload=$(grep -c HW_OFFLOAD /tmp/f266-ct.txt) sw_offload=$(grep -c "\[OFFLOAD\]" /tmp/f266-ct.txt)"
   awk '{print $4}' /tmp/f266-ct.txt | sort | uniq -c
   chk ehash-after "$(d "sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats" | grep -c keysz)" 0
   chk hw-offload-after "$(grep -c HW_OFFLOAD /tmp/f266-ct.txt)" 0
