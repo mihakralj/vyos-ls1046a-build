@@ -724,6 +724,16 @@ EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
 /* Cookie indirection table (Phase 4.10 will populate from flow_offload)      */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * T-M6-A4 fault injection: fail every Nth cookie allocation (0 = off, the
+ * default) so the board can prove a failed insert leaves no partial record.
+ */
+static unsigned int ask_fault_cookie_nth;
+module_param_named(fault_cookie_nth, ask_fault_cookie_nth, uint, 0644);
+MODULE_PARM_DESC(fault_cookie_nth,
+		 "Fault injection: fail every Nth flow cookie allocation (0=off)");
+static atomic_t ask_fault_cookie_cnt = ATOMIC_INIT(0);
+
 u32 ask_hw_cookie_alloc(struct ask_hw_pcd *h,
 			const struct ask_hw_flow_cookie *src)
 {
@@ -732,6 +742,10 @@ u32 ask_hw_cookie_alloc(struct ask_hw_pcd *h,
 	int rc;
 
 	if (!h || !src)
+		return 0;
+
+	if (ask_fault_cookie_nth &&
+	    !(atomic_inc_return(&ask_fault_cookie_cnt) % ask_fault_cookie_nth))
 		return 0;
 
 	/* F-113: Use kmem_cache for O(1) alloc under flow churn.
