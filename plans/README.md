@@ -16,6 +16,7 @@ still open, independently of routed/NAT/VLAN throughput parity.
 | [`ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) | **The authoritative task list:** missing vendor features, dependencies, acceptance, consolidation and defects. Absorbs the rewrite plan's pending work. Start here. |
 | [`ASK2-PRIORITIZED-TASKS.md`](ASK2-PRIORITIZED-TASKS.md) | Ordered P0–P10 view of the master plan with status, gates and rig constraints (snapshot 2026-10-21; subordinate to the master plan). |
 | [`ASK2-VENDOR-PARITY.md`](ASK2-VENDOR-PARITY.md) | Current comparison scope, paired 10×10 method, evidence still required and verdict contract. Old single-run and A6 tables are archived, not current acceptance. |
+| [`ASK2-VENDOR-ASK-REVIEW.md`](ASK2-VENDOR-ASK-REVIEW.md) | Review of vendor ASK mono-1.2.2 (CMM retired, flowtable adapter) and the recommendations R1–R14 it implies for ASK2. Accepted items move into the master plan. |
 | [`DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md) | Binding runtime contract: S0/S1/S2 state machine, `offload ipv4\|ipv6` CLI, ASK↔VPP mutex, teardown checklist, open contract obligations. History in `archive/`. |
 | [`OFFLOAD-CAPABILITY-PLAN.md`](OFFLOAD-CAPABILITY-PLAN.md) | Remaining capabilities only: vendor mechanism vs recommended ASK2 mechanism; shipped capabilities summarised, details in `archive/`. |
 | [`ASK2-BRIDGE-OFFLOAD-PLAN.md`](ASK2-BRIDGE-OFFLOAD-PLAN.md) | Remaining bridge work: B7b, mixed-role/multi-table dispatch, IRB, current-image repeats and safety/resource gates. B0–B6/B7a history is archived. |
