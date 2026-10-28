@@ -244,6 +244,8 @@ Recommendation. Add `rx_missed` on eth3/eth4 to the harness's per-cell counters.
 
 **Result (2026-10-28, image 2026.10.28-0209, bidirectional 10G, 4 streams each way, 40 s):** 8.18 and 7.63 Gbit/s with about 500k and 408k retransmits; unidirectional 4 streams reach 9.13 Gbit/s with about 900 retransmits. Offload confirmed (HW_OFFLOAD conntrack and ehash pkt_count rise, kernel rx flat). No software counter moves, and ethtool exposes no MAC RX FIFO overrun counter, so FIFO loss cannot be measured on this image; retransmits are the only proxy.
 
+**Measurable after all (2026-10-28, image 1555):** the mEMAC `RDRP` counter (CCSR `0x1AF0158` eth3, `0x1AF2158` eth4, read via `/dev/mem`) does count the loss. `iperf3 -P 4 --bidir -t 30` (8.90 and 8.88 Gbit/s, 4463 and 4873 retransmits) moved RDRP by +3734 (eth3) and +3756 (eth4), about the retransmit count. Fix: board patch `0179` makes the 10G RX BMI FIFO a module parameter `fsl_dpaa_fman.fsl_fm_rx10g_fifo_kb` (default 64 KB, was 24 KB; total BMI FIFO 295 KB). Retest = same run, expect RDRP delta and retransmits well below baseline.
+
 ### R13 (P2): Know the parser's reach
 
 Vendor finding. The parser reads only the first 256-byte internal buffer, and the frame starts at the `FMBM_RIM[FOF]` offset, 96 bytes on every vendor port, so the parser reaches byte 160. A header that ends past it is marked block-limit-exceeded and the microcode's hash entry discards most such frames (`CLS_DISCARD`): long IPv6 extension chains, SRv6, deep encapsulation stacks. The vendor folds the BMI filter counter into `rx_dropped` so the drops are visible (`docs/in-kernel-pcd.md`, "The parser's reach").
