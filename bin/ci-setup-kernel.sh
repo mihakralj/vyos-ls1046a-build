@@ -925,6 +925,10 @@ scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
 scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
 scripts/config --set-val CONFIG_IMX2_WDT y
 scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+# U-Boot booti rejects the EFI zboot PE image ("Bad Linux ARM64 Image magic");
+# upstream vyos_defconfig enabled EFI_ZBOOT, which makes vmlinuz = vmlinuz.efi.
+# Disabled -> arm64 builds Image.gz, which booti decompresses.
+scripts/config --disable CONFIG_EFI_ZBOOT
 # CAAM (NXP SEC 5.4) hardware crypto built-in for ASK2 IPsec offload (spec §8.1).
 # vyos_defconfig ships these tristate symbols as =m; force =y so the CAAM/QI
 # backend is present at FMan bring-up and patch 0134's
