@@ -54,12 +54,12 @@ sleep 2
 echo "== cfg: fam=$FAM n=$N cycles=$CYCLES hold=${HOLD}s | udp_offload params: $(d "grep -H . /sys/module/ask/parameters/* 2>/dev/null | tr '\n' ' ' | head -c 300")"
 g1 "echo \"$CLI\" >/tmp/udpchurn-cli.py"
 for c in $(seq 1 "$CYCLES"); do
-  g1 "python3 /tmp/udpchurn-cli.py burst"
+  g1 "ulimit -n 65536; python3 /tmp/udpchurn-cli.py burst"
   sleep 1
   [ "$c" = 1 ] && echo "== cycle 1: ehash records $(ehash)"
   d "sudo conntrack -D -p udp --dport $PORT >/dev/null 2>&1"
 done
-g1 "python3 /tmp/udpchurn-cli.py hold" | tee /tmp/udpchurn-cli.txt
+g1 "ulimit -n 65536; python3 /tmp/udpchurn-cli.py hold" | tee /tmp/udpchurn-cli.txt
 HS=$(awk '$1=="hold_start"{print $2}' /tmp/udpchurn-cli.txt); HE=$(awk '$1=="hold_end"{print $2}' /tmp/udpchurn-cli.txt)
 echo "== offloaded ehash records at end of hold: $(ehash)"
 sleep 2
