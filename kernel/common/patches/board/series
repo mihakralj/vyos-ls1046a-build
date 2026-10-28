@@ -463,3 +463,7 @@
 # R5 of plans/ASK2-VENDOR-ASK-REVIEW.md: ingress CGR bounded by frames so a CPU flood cannot drain the RX pool.
 # Upstream-Status: Pending | Risk-Tier: C
 0178-dpaa-ingress-cgr-frames.patch
+
+# R12 of plans/ASK2-VENDOR-ASK-REVIEW.md: 10G RX BMI FIFO 24 KB -> 64 KB (module param).
+# Upstream-Status: Pending | Risk-Tier: C
+0179-fman-port-rx10g-fifo-size.patch
