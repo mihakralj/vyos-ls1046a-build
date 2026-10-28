@@ -280,6 +280,9 @@ programming recipes. Resolve contradictions before touching code.
   with RST. Root cause: ct DESTROY to ehash removal is asynchronous. Fix
   direction: delete the live FE record synchronously on SYN/FIN/RST punt. Needs
   a kernel change, qdrant gate and CI; gates connection-scale claims alongside §4.1.
+  **2026-10-28 RESOLVED:** patch fixes/140 (commit 562c0f59, ct LAST_ACK to TIME_WAIT on
+  HW delete) on image `0209`: `REUSE=2 bin/testrig-a14.sh f266` FAM=4 and FAM=6, N=100
+  both PASS (0 HW_OFFLOAD, 0 ehash, MURAM baseline, 0 kernel errors).
 - **A2 / A13 / scale:** repeat 64-byte loss/rate and IMIX; connection rate
   with held sessions, 8,000-session bidirectional PDR, install rate and first
   insert latency; measure latency beside HW traffic. External 20k CPS and
