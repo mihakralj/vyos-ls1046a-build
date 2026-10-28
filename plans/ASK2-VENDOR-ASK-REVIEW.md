@@ -339,3 +339,5 @@ qdrant: 2026-10-09 F-262 entries (fragmentation root cause, IPv6 fragment-ID rac
 | 1.5 Mpps | 0.00000 % | 0.00001 % |
 
 Both sustain 1.5 Mpps 64 B fully offloaded with effectively no loss (ASK2 lost 2 of 15 M). A full PDR search (`bin/testrig-compare.sh`) is still needed for the ceiling.
+
+R1 concurrent two-flow IPv4 oversize: not run. `bin/testrig-pppoe-frag.py` binds a fixed receiver port and a fixed warm source port (5990), so two parallel instances collide (`EADDRINUSE`). The harness needs per-instance ports before this case can be tested.
