@@ -147,7 +147,7 @@ programming recipes. Resolve contradictions before touching code.
 | 4 | IPsec Tier 1 reboot-clean, then Tier 2 design/bring-up | Full path required for parity |
 | 5 | Multi-table dispatch; PPPoE-over-VLAN; multicast | Dispatch must prove coexistence before IRB/mixed classes/ESP coexistence |
 | 6 | QinQ, relay, tunnels, QoS | Feature-specific kernel ownership and forward/inverse/fallback gates |
-| Blocked | Refreshed vendor comparisons | Restore a board to NXP ASK first (the former `.106` now runs VyOS as `.145`) |
+| Unblocked 2026-10-28 | Refreshed vendor comparisons | Vendor board `.70` (Mono OpenWrt 25.12.6, kernel 6.12.112, `cdx` + `ask_flowtable` loaded). Run after the correctness gates; same-rig A/B only (`bin/testrig-pppoe-vendor.sh`, `RIG_NS`) |
 | Parallel, not on the active rig | Phase 2 code/patch consolidation | No behavior change; preserve regression evidence |
 | After correctness gates | Current pps, scale, latency and soak; final per-feature vendor comparisons | No historical figures substituted for current acceptance |
 | Separate track | WireGuard, VPP ZC, upstream preparation, genl per-op policies | Not missing vendor hardware features |
