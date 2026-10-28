@@ -451,3 +451,7 @@
 # (module signing): echo 3 > /sys/module/wireguard/parameters/tx_lanes first.
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4016-wireguard-tx-lanes.patch
+
+# R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
+# Upstream-Status: Pending | Risk-Tier: C
+0176-dpaa-rx-stats-before-stack-verdict.patch

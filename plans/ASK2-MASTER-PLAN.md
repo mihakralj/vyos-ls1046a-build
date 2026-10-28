@@ -448,6 +448,14 @@ runbooks below are subordinate to this plan, not independent task priorities.
   Open risk: AC_CC dispatch with `next_engine=3` wedged RX in August and
   October (§5.1) and `next_engine=2` dual-delivers; test the multi-scheme
   design against that first. Qdrant-gate every change.
+- **Vendor review fixes (`ASK2-VENDOR-ASK-REVIEW.md`, 2026-10-28):** R3 done in
+  source (board patch `0176`, count `rx_packets` before `netif_receive_skb()`;
+  board gate: 100,000 software-flowtable frames raise `rx_packets` by 100,000
+  with `rx_dropped` flat). R2 open: reprogram mEMAC `maxfrm` from the MTU in
+  `dpaa_change_mtu()`; F_203/F_222 already rewrite that function, so the change
+  must land as a fixup or after them, with Qdrant gate (the 4K/8K RX buffer
+  wedge is the reason a 9600 `maxfrm` is unsafe). R4 open: UDP same-tuple
+  reopen churn test for the teardown `IPS_OFFLOAD` clear. R5-R7 follow.
 - **T-M6-MC / A10:** MDB/mroute-owned v4/v6 group objects with bounded
   REPLICATE/egress resources; join/leave, source-specific groups where
   supported, TTL/hop-limit, port down, churn, exhaustion and no duplicates.
