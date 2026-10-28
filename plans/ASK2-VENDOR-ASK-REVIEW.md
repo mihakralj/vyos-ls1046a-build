@@ -184,7 +184,7 @@ Recommendation. Test first: run an offloaded flow through eth3 while flooding et
 
 **Fix result (2026-10-28, image 1555, board patch `0178`, frame-mode ingress group at 1280 frames):** the same flood (2 threads, 64 B UDP, 2 Mpps total, 12 s) with a concurrent offloaded iperf flow no longer stalls it. Throughput stayed 8.1 Gbit/s typical (minimum 6.55) against 9.4 Gbit/s unloaded, and returned to 9.4 Gbit/s after the flood; before the patch it fell to 0 after about 6 s. No kernel errors beyond the existing F-148 and tc-callback messages. The remaining 14% dip is the flood sharing the port's wire and queue with the flow.
 
-**R4 IPv6 follow-up (2026-10-28, image 1555):** `FAM=6 N=200 CYCLES=3 HOLD=30 bin/testrig-udp-churn.sh` PASS: 0 live-window DESTROYs of 501, 400 ehash records at hold, 0 after delete, MURAM 58764 baseline, 0 kernel errors. The 16,384-tuple run is still open.
+**R4 IPv6 follow-up (2026-10-28, image 1555):** `FAM=6 N=200 CYCLES=3 HOLD=30 bin/testrig-udp-churn.sh` PASS: 0 live-window DESTROYs of 501, 400 ehash records at hold, 0 after delete, MURAM 58764 baseline, 0 kernel errors. **16,384 tuples (IPv4, `N=16384 CYCLES=2 HOLD=60`) PASS:** 32768 ehash records live during the hold (2 per tuple), 0 DESTROYs inside the live window, ehash empty after delete, MURAM 58764 baseline, 0 kernel errors. The first attempt was void (generator hit the 1024 open-file limit); the harness now raises `ulimit -n 65536`. R4 is closed.
 
 ### R6 (P1): Key PPPoE flows on the concentrator MAC
 
