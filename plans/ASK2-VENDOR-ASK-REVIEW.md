@@ -328,3 +328,14 @@ Vendor documents, all under `/mnt/builds/ASK`: `README.md`; `ISSUES.md` (A202, A
 ASK2: `kernel/ask/oot-modules/ask/ask_flow_offload.c`, `ask_hw.c`, `ask_stats.c`, `include/ask_internal.h`; `bin/kernel-fixups/F_254.py`, `F_256.py`, `F_262.py`, `F_264.py`, `F_269.py`; `board/scripts/vyos-postinstall`; mainline `work/linux-6.18.57` (`drivers/net/ethernet/freescale/dpaa/dpaa_eth.c`, `drivers/net/ethernet/freescale/fman/fman_port.c`, `net/netfilter/nf_flow_table_core.c`).
 
 qdrant: 2026-10-09 F-262 entries (fragmentation root cause, IPv6 fragment-ID race, vendor IPv6 handling), 2026-10-10 ASK2 CLI contract analysis, 2026-10-15 PPPoE fragmentation parity (ASK2 vs vendor), 2026-10-22 F-270 MTU wedge, 2026-10-27 vendor review.
+
+### Same-rig vendor comparison, quick pktgen trial (2026-10-28)
+
+`bin/testrig-pktgen.sh trial port-v4 64`, 10 s, both DUTs on the same generators, HW share 1.000 on both:
+
+| Offered | Vendor `.70` loss | ASK2 `.185` loss |
+|---|---|---|
+| 1.0 Mpps | 0.00000 % | 0.00003 % |
+| 1.5 Mpps | 0.00000 % | 0.00001 % |
+
+Both sustain 1.5 Mpps 64 B fully offloaded with effectively no loss (ASK2 lost 2 of 15 M). A full PDR search (`bin/testrig-compare.sh`) is still needed for the ceiling.
