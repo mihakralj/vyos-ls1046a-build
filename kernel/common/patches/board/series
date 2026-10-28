@@ -455,3 +455,7 @@
 # R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
 # Upstream-Status: Pending | Risk-Tier: C
 0176-dpaa-rx-stats-before-stack-verdict.patch
+
+# R2 of plans/ASK2-VENDOR-ASK-REVIEW.md: MAC admits frames larger than the RX buffer.
+# Upstream-Status: Pending | Risk-Tier: C
+0177-dpaa-memac-max-frame-from-mtu.patch
