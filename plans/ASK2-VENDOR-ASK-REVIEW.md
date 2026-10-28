@@ -138,6 +138,8 @@ Two limits remain on the ASK2 side. The evidence covers only 1500-byte packets i
 
 Recommendation. Extend the same probe to 2,000, 4,000 and 8,000-byte packets from a jumbo ingress (after R2) and to two concurrent IPv4 flows. Keep the receive-port fragmenter; do not copy the vendor's offline-port detour. Revisit the `ipv6_hw_frag=1` default on the fragment-ID race and RFC 8200 grounds, as that plan already notes.
 
+**Result (2026-10-28, 0209, MTU 3600 on DUT eth4 and gen2):** IPv4 jumbo 2000/3000/3500-byte datagrams into the 1492 PPPoE session: 2000/2000 delivered intact for each size (reassembled by the receiver, hardware plus kernel fragmentation). IPv6 returns ICMPv6 Packet Too Big from the host path and delivers nothing, which is correct router behaviour. No kernel errors; MTU restored to 1500.
+
 ### R2 (P0): Bound arrivals by the MAC's max frame length
 
 Vendor finding. Patch `109-sdk_dpaa-rx-max-frame-follows-mtu` programs each port's mEMAC max frame from its MTU: `max(mtu, 1500)` plus Ethernet header and FCS, plus one VLAN tag while the port has any upper device and two when a VLAN on it is 802.1ad or stacked. Without it, a port at MTU 1500 accepted about 9.6K frames. The vendor's admission bound for a direction is `max(port MTU, 1500)` less what the direction strips, never the logical device's MTU (A346).
@@ -168,6 +170,8 @@ Recommendation. Reproduce before patching. Add a churn case to the dell harness:
 
 Verification. Zero conntracks reaped while their flow is live over the run, compared against an unpatched control.
 
+Result 2026-10-28 (`.185`, image `2026.10.28-0209`, `bin/testrig-udp-churn.sh`, IPv4, 500 tuples x 5 delete/reopen cycles with 1,000 ehash records offloaded, 150 s live hold): 0 conntracks destroyed while live, ehash 0 and MURAM 58764 (baseline) after teardown, 0 kernel errors. Not reproduced under forced `conntrack -D` reopen. The vendor's expiry-driven race (old flow awaiting hardware retirement) is not exercised by this variant; IPv6 and a long-timeout/16,384-tuple run remain open. Smoke rerun 2026-10-28 (N=200, CYCLES=3, HOLD=30): 0 live DESTROYs of 501, 0 kernel errors, same result.
+
 ### R5 (P1): Bound the ingress congestion group by buffers
 
 Vendor finding. Patch `111-sdk_dpaa-cpu-queues-bounded-by-pool-share`. Frames waiting on a port's queues to the CPU hold receive buffers, and the congestion group counted bytes up to 256 MB, so a flood the CPU could not keep up with held the whole pool and every port missed frames, hardware forwarding included. The fix counts frames, at half of what the port seeds the pool with.
@@ -175,6 +179,8 @@ Vendor finding. Patch `111-sdk_dpaa-cpu-queues-bounded-by-pool-share`. Frames wa
 ASK2 state. Mainline uses `DPAA_INGRESS_CS_THRESHOLD 0x10000000` (`dpaa_eth.c:69`, applied in `dpaa_ingress_cgr_init()` at line 3231). Mainline gives each interface its own buffer pool, so the blast radius is one port rather than all of them, but an offloaded flow entering that port shares its pool with the CPU-bound traffic.
 
 Recommendation. Test first: run an offloaded flow through eth3 while flooding eth3 with traffic that cannot be offloaded (for example a UDP flood to an unrouted address, or ICMP), at a rate the CPU cannot sustain. If the offloaded flow loses frames or the port's buffer pool empties, add a board patch that sets the ingress threshold in frames relative to the pool size.
+
+**Result (2026-10-28, 0209):** reproduced. Kernel pktgen from gen1 (2 threads, 64 B UDP, about 2 Mpps to the DUT eth3 IP) drove one core to 96% softirq. A concurrent offloaded iperf flow fell from 9.4 Gbit/s to 0 after about 6 s and stayed at 0 for the flood (ehash pkt_count frozen). `qman cg_tdrop`, `entered congestion` and `rx dropped` did not move; `softnet_dropped` did. Throughput recovered afterwards (8.86 Gbit/s), no kernel errors. `DPAA_INGRESS_CS_THRESHOLD` is byte-based at 256 MB so it never trips; likely cause is port buffer-pool exhaustion (unproven). Needs a kernel patch and a CI run (Qdrant gate first).
 
 ### R6 (P1): Key PPPoE flows on the concentrator MAC
 
@@ -231,6 +237,8 @@ Vendor finding. NXP's 24 KB 10G receive FIFO let the MAC's own FIFO overflow und
 ASK2 state. Mainline `get_dflt_num_of_fifo_bufs()` (`fman_port.c:1164`) gives a 10G receive port 96 units of 256 bytes, 24 KB. ASK2's MURAM use was 52,922 bytes in the 2026-10-09 measurements.
 
 Recommendation. Add `rx_missed` on eth3/eth4 to the harness's per-cell counters. If it moves under load, raise the 10G receive FIFO after checking the MURAM budget with `pcd-snapshot`. This is a MURAM change, so it falls under the S0 qdrant gate.
+
+**Result (2026-10-28, image 2026.10.28-0209, bidirectional 10G, 4 streams each way, 40 s):** 8.18 and 7.63 Gbit/s with about 500k and 408k retransmits; unidirectional 4 streams reach 9.13 Gbit/s with about 900 retransmits. Offload confirmed (HW_OFFLOAD conntrack and ehash pkt_count rise, kernel rx flat). No software counter moves, and ethtool exposes no MAC RX FIFO overrun counter, so FIFO loss cannot be measured on this image; retransmits are the only proxy.
 
 ### R13 (P2): Know the parser's reach
 
