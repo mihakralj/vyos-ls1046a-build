@@ -182,6 +182,8 @@ Recommendation. Test first: run an offloaded flow through eth3 while flooding et
 
 **Result (2026-10-28, 0209):** reproduced. Kernel pktgen from gen1 (2 threads, 64 B UDP, about 2 Mpps to the DUT eth3 IP) drove one core to 96% softirq. A concurrent offloaded iperf flow fell from 9.4 Gbit/s to 0 after about 6 s and stayed at 0 for the flood (ehash pkt_count frozen). `qman cg_tdrop`, `entered congestion` and `rx dropped` did not move; `softnet_dropped` did. Throughput recovered afterwards (8.86 Gbit/s), no kernel errors. `DPAA_INGRESS_CS_THRESHOLD` is byte-based at 256 MB so it never trips; likely cause is port buffer-pool exhaustion (unproven). Needs a kernel patch and a CI run (Qdrant gate first).
 
+**Fix result (2026-10-28, image 1555, board patch `0178`, frame-mode ingress group at 1280 frames):** the same flood (2 threads, 64 B UDP, 2 Mpps total, 12 s) with a concurrent offloaded iperf flow no longer stalls it. Throughput stayed 8.1 Gbit/s typical (minimum 6.55) against 9.4 Gbit/s unloaded, and returned to 9.4 Gbit/s after the flood; before the patch it fell to 0 after about 6 s. No kernel errors beyond the existing F-148 and tc-callback messages. The remaining 14% dip is the flood sharing the port's wire and queue with the flow.
+
 ### R6 (P1): Key PPPoE flows on the concentrator MAC
 
 Vendor finding. The vendor's PPPoE schemes extract the concentrator MAC (Ethernet source, 6 bytes) and the session ID into the key. Patch `151-netfilter-flowtable-pppoe-peer` adds the same check to the software flowtable: "a matching session ID and inner tuple do not authenticate the Ethernet sender".
