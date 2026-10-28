@@ -13,7 +13,7 @@ DUT FragCreates is printed for information only: the vendor's patched kernel cou
 fragmentation there too, so it does not separate software from hardware.
 
 Usage: bin/testrig-pppoe-frag.py ask2|vendor [count] [pps] [case,case,...]
-Cases: ctl-v4-1000 ctl-v6-1000 (controls that need no fragmentation), v4-dfclear v4-dfset v6, and the
+Cases: v4-j2000/3000/3500 and v6-j2000/3000/3500 (jumbo ingress; set MTU 3600 on the LAN port and gen2 first), ctl-v4-1000 ctl-v6-1000 (controls that need no fragmentation), v4-dfclear v4-dfset v6, and the
 -warm variants, which first offload the flow with small datagrams so the oversize ones hit a live record.
 Needs the PPPoE session up (ASK2: dell1 root ns, or RIG_NS=<netns> for the second DUT; vendor:
 bin/testrig-pppoe-vendor.sh up).
@@ -61,7 +61,7 @@ s.settimeout(0.5)
 end, n, other = time.time() + dur, 0, {}
 while time.time() < end:
     try:
-        data, peer = s.recvfrom(4096)
+        data, peer = s.recvfrom(65535)
     except socket.timeout:
         continue
     if len(data) == plen:
@@ -203,7 +203,11 @@ CASES = [("ctl-v4-1000", "4", "dfclear", "10.99.50.1", 972),  # control: fits th
          ("v4-dfset", "4", "dfset", "10.99.50.1", 1472),
          ("v6", "6", "default", "fd99:50::1", 1452),
          ("v4-dfclear-warm", "4", "dfclear", "10.99.50.1", 1472, 5990),  # flow already offloaded
-         ("v6-warm", "6", "default", "fd99:50::1", 1452, 5991)]
+         ("v6-warm", "6", "default", "fd99:50::1", 1452, 5991),
+         # R1 jumbo ingress: the LAN port and gen2 need MTU >= the IP size first (ASK range is 1280-3600)
+         ("v4-j2000", "4", "dfclear", "10.99.50.1", 1972), ("v6-j2000", "6", "default", "fd99:50::1", 1952),
+         ("v4-j3000", "4", "dfclear", "10.99.50.1", 2972), ("v6-j3000", "6", "default", "fd99:50::1", 2952),
+         ("v4-j3500", "4", "dfclear", "10.99.50.1", 3472), ("v6-j3500", "6", "default", "fd99:50::1", 3452)]
 for c in CASES:
     if ONLY is None or c[0] in ONLY:
         run_case(*c)
