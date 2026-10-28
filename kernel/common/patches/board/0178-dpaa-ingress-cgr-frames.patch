@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Wed, 28 Oct 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: bound the ingress CGR by frames, not bytes (0178)
+
+The ingress congestion group counted bytes up to 256 MB, so a flood the CPU
+cannot keep up with held the port's whole RX buffer pool before the group
+tripped, and FMan then discarded everything the port received, offloaded
+flows included (HW-reproduced 2026-10-28: 9.4 Gbit/s offloaded flow fell to 0
+under a ~2 Mpps pktgen flood). Count frames at ingress_quarters/4 (default 2)
+of the port's pool seed (config_count x possible CPUs), vendor patch 111.
+plans/ASK2-VENDOR-ASK-REVIEW.md R5.
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 3edc8d1..08e96ef 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -66,12 +66,10 @@ MODULE_PARM_DESC(tx_timeout, "The Tx timeout in ms");
+ 			  NETIF_MSG_LINK | NETIF_MSG_IFUP | \
+ 			  NETIF_MSG_IFDOWN | NETIF_MSG_HW)
+ 
+-#define DPAA_INGRESS_CS_THRESHOLD 0x10000000
+-/* Ingress congestion threshold on FMan ports
+- * The size in bytes of the ingress tail-drop threshold on FMan ports.
+- * Traffic piling up above this value will be rejected by QMan and discarded
+- * by FMan.
+- */
++static uint dpaa_ingress_quarters = 2;
++module_param_named(ingress_quarters, dpaa_ingress_quarters, uint, 0444);
++MODULE_PARM_DESC(ingress_quarters,
++		 "Quarters of a port's pool seed its queues to the CPU may hold (1-4)");
+ 
+ /* Size in bytes of the FQ taildrop threshold */
+ #define DPAA_FQ_TD 0x200000
+@@ -3227,6 +3225,13 @@ static struct dpaa_bp *dpaa_bp_alloc(struct device *dev)
+  * We won't be sending congestion notifications to FMan; for now, we just use
+  * this CGR to generate enqueue rejections to FMan in order to drop the frames
+  * before they reach our ingress queues and eat up memory.
++ *
++ * A frame waiting on these queues for the CPU holds a buffer of the port's
++ * pool, and only the CPU taking it puts one back. The group used to count
++ * bytes up to 256 MB, which a flood the CPU cannot keep up with never reaches
++ * before the pool is empty, so FMan then discards everything the port
++ * receives, hardware-forwarded frames included. Count frames instead, at
++ * ingress_quarters/4 of what the port seeds its pool with.
+  */
+ static int dpaa_ingress_cgr_init(struct dpaa_priv *priv)
+ {
+@@ -3243,9 +3248,12 @@ static int dpaa_ingress_cgr_init(struct dpaa_priv *priv)
+ 
+ 	/* Enable CS TD, but disable Congestion State Change Notifications. */
+ 	memset(&initcgr, 0, sizeof(initcgr));
+-	initcgr.we_mask = cpu_to_be16(QM_CGR_WE_CS_THRES);
+-	initcgr.cgr.cscn_en = QM_CGR_EN;
+-	cs_th = DPAA_INGRESS_CS_THRESHOLD;
++	initcgr.we_mask = cpu_to_be16(QM_CGR_WE_MODE | QM_CGR_WE_CS_THRES |
++				     QM_CGR_WE_CSCN_EN);
++	initcgr.cgr.mode = QMAN_CGR_MODE_FRAME;
++	initcgr.cgr.cscn_en = 0;
++	cs_th = max_t(u32, priv->dpaa_bp->config_count * num_possible_cpus() *
++			   clamp_t(uint, dpaa_ingress_quarters, 1, 4) / 4, 1);
+ 	qm_cgr_cs_thres_set64(&initcgr.cgr.cs_thres, cs_th, 1);
+ 
+ 	initcgr.we_mask |= cpu_to_be16(QM_CGR_WE_CSTD_EN);

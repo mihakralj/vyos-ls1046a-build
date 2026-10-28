@@ -459,3 +459,7 @@
 # R2 of plans/ASK2-VENDOR-ASK-REVIEW.md: MAC admits frames larger than the RX buffer.
 # Upstream-Status: Pending | Risk-Tier: C
 0177-dpaa-memac-max-frame-from-mtu.patch
+
+# R5 of plans/ASK2-VENDOR-ASK-REVIEW.md: ingress CGR bounded by frames so a CPU flood cannot drain the RX pool.
+# Upstream-Status: Pending | Risk-Tier: C
+0178-dpaa-ingress-cgr-frames.patch
