@@ -355,3 +355,28 @@ Qdrant gate (3 queries: PPPoE 50-byte key layout, F-256/INV0 sync timeout, ehash
 **R6, decision: do not change the key now; keep as a documented residual risk, implement only if the WAN-segment threat is accepted into scope.** Reasons: the fix needs six more key bytes (50 + 6 = 56, exactly KeyGen's maximum, no headroom for a later field), every GEC slot is taken so the source MAC has to come from `EKFC` (known-field Ethernet source) or by re-packing GEC, and that changes the key order and CRC of every routed flow (all families, VLAN and non-PPPoE too) unless the wider key is confined to the PPPoE-engaged port's table. Plan if accepted: (1) per-port key size (56 B only on a port with a PPPoE source interface; `FMAN_PCD_FE_ROUTED_KEY_SIZE` stays the default, new per-port constant read from one place, §10.3); (2) source MAC taken from the flowtable's ingress neighbour for the decap lane; (3) acceptance by `crc64_raw` of the 56-byte key via probe, plain/tagged/PPPoE isolation MISS, a foreign-source-MAC frame with the right SID and tuple must MISS, A8 churn regression. Needs the S0 gate again and a silicon session; no code until then.
 
 **R7, decision: instrument first, no recovery yet.** One wedge in the project's lifetime, and it was a task frozen on a bus error, which a classifier bypass cannot fix. Step 1 (small, count-gated fixup on top of F-256): retry the `FMFP_EXTC[INV0]` sync a bounded number of times before declaring it timed out; on final timeout also log `FMDM_SR`, the per-port BMI status and the stuck task count; export counters `sync_timeouts`, `sync_recovered_by_retry`, `sync_wedged` in debugfs and `ask-check`. Step 2, only once a second sample exists and the counters show a recoverable class (timeout without a bus error): the degraded mode in the review, disengage armed ports to RSS (reversible S1 to S0, checked by `pcd-snapshot`), retry the sync, free parked records only after a sync succeeds, re-engage rate-limited (three per ten minutes as the vendor). Silicon injection of a sync timeout is not available (the existing injection is a C-model test), so step 1 is verified by the model test plus a no-regression churn pass.
+
+## 11. PDR comparison on `.185`, 2026-10-29 (image 2026.10.29-0010-rolling, cold boot)
+
+Run dir `/mnt/builds/ask2-review/oracle/compare-20261029-0541`. Firewall offloaded, 8k sessions, bidirectional, PDR ≤ 0.5 %, mean of 3. **Correction:** the MAC RDRP columns of this run (all 0) are invalid, because `bin/testrig-fmreg.py` bus-faulted on some offsets; the reader is fixed (native 32-bit load) and the PDR/latency figures are unaffected.
+
+| Size | ASK2 | ASK master tuned |
+|---|---|---|
+| 64 B | 3.74 Mpps / 2.51 Gbit/s | 3.18 Mpps |
+| 570 B | 3.19 Mpps / 15.04 Gbit/s | 2.70 Mpps |
+| 1518 B | 1.54 Mpps / 18.93 Gbit/s | 1.37 Mpps |
+| IMIX | 3.99 Mpps / 11.92 Gbit/s | 3.04 Mpps |
+
+- Offloaded latency: p50 about 7.2 µs round trip at every load level, with 0 probes lost. Kernel-path routing: 0.72 Mpps at 64 B with ASK disengaged, 0.99 Mpps on the engaged miss path.
+- CPS (no NAT / NAT, 20000 held): 5k/s and 10k/s clean (about 9.7k / 9.4k achieved). 20k/s collapses (1365 / 530 cps, mostly late or failed), so the sustained limit is between 10k and 20k cps.
+- Harness bug fixed: the `bin/testrig-compare.sh` re-engage check required exactly `Armed ports: 0x10 0x11`, but `.185` also arms 0x09 and 0x0d. It now matches both ports in any set. The cps stage was re-run after the fix.
+- Vendor `.70` comparison still pending (ssh access denied).
+
+## 12. 2026-10-29 follow-ups on `.185` (cold boot, image 2026.10.29-0010)
+
+- **A14 TTL/hop-limit, IPv4 and IPv6:** pass (ICMP time-exceeded 10/10, no wrapped TTL at gen2, MURAM at baseline, no kernel errors). The earlier IPv4 9/10 was the per-host ICMP error rate limit (burst 6, 1/s); `bin/testrig-a14.sh` now spaces the hop-limit batches by 7 s.
+- **F-266 `f266.sh` N=300, IPv4 and IPv6, with and without `REUSE=7`:** all pass (300/300 complete, 0 ehash, 0 HW_OFFLOAD, MURAM baseline, no kernel errors); `tcp_ctl_punt`=Y. Gate closed for IPv4/IPv6 routed flows. NAT44 FIN still unmeasured (the rig has no IPv4 NAT for `f266.sh`; CPS with NAT was clean to 10k/s).
+- **R12 FIFO size (kexec with `fsl_dpaa_fman.fsl_fm_rx10g_fifo_kb=N`, 8 x `iperf3 -P 4 --bidir -t 20`, RDRP summed over eth3/eth4):** 128 KB does not probe (eth4 fails, "set_size_of_fifo: Requested fifo size and extra size exceed total FIFO size"); 96 and 112 KB probe. 112 KB: about 7.5k / 7.8k RDRP over 8 runs; 80 KB (same session, after warm-up): about 1.7k / 2.4k. A larger FIFO does not help, so 80 KB stays. Patch 0179 clamp lowered to 24-112 (needs a CI build to ship).
+- **Reader fix:** `bin/testrig-fmreg.py` used a sliced mmap copy that bus-faults at some MMIO offsets (0x158 among them); it now uses a native 32-bit load. kexec wipes `/tmp/fmreg.py` on the DUT, so copy it again after each kexec.
+
+**PDR re-run with the fixed RDRP reader (2026-10-29 15:29, cold boot, `compare-20261029-1529`):** PDR reproduces (64 B 3.74, 570 B 3.19, 1518 B 1.54, IMIX 3.98 Mpps; HW share 0.994-1.000). MAC RDRP summed over all trials of a search (including the above-PDR overload trials, which is why they are large): 64 B 362.6M / 400.7M, 570 B 24.7k / 1.88M, 1518 B 49.0k / 49.3k, IMIX 18.8M / 19.8M (eth3 / eth4). So the PDR is bounded by MAC FIFO overflow (loss happens at the MAC, before the FE), and the "+0" values in §11 above were a reader failure, not a measurement. Per-trial RDRP at the PDR rate itself is not separated in `summary.csv`.
