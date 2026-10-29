@@ -5,7 +5,7 @@ Subject: [PATCH] fman-port: size the 10G RX BMI FIFO from a module parameter (01
 
 The 24 KB FIFO of a 10G receive port overflowed the MAC under bidirectional
 line rate (mEMAC RDRP +3.7k per port in 30 s, about the retransmit count).
-fsl_dpaa_fman.fsl_fm_rx10g_fifo_kb (24-128, default 64) sets it; vendor
+fsl_dpaa_fman.fsl_fm_rx10g_fifo_kb (24-128, default 80) sets it; vendor
 review R12, plans/ASK2-VENDOR-ASK-REVIEW.md. Total BMI FIFO is 295 KB.
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
@@ -19,9 +19,9 @@ index 43469df..bf86486 100644
 +/* KB of BMI FIFO per 10G receive port. 24 KB overflowed the MAC under
 + * bidirectional line rate (RDRP counter, plans/ASK2-VENDOR-ASK-REVIEW.md R12).
 + */
-+static uint fsl_fm_rx10g_fifo_kb = 64;
++static uint fsl_fm_rx10g_fifo_kb = 80;
 +module_param(fsl_fm_rx10g_fifo_kb, uint, 0444);
-+MODULE_PARM_DESC(fsl_fm_rx10g_fifo_kb, "BMI FIFO per 10G RX port in KB (24-128, default 64)");
++MODULE_PARM_DESC(fsl_fm_rx10g_fifo_kb, "BMI FIFO per 10G RX port in KB (24-128, default 80)");
 +
  static int get_dflt_num_of_fifo_bufs(u8 major, enum fman_port_type type,
  				     u16 speed)
