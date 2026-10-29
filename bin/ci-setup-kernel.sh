@@ -2596,6 +2596,10 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_269.py" 2>&1
     echo "### fman_pcd.c: F-269 ehash cumulative-node buckets"
+    # F-271 (R7 step 1): SYNC retry + timeout counters; the harness below
+    # models it. After F-269.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_271.py" 2>&1
+    echo "### fman_pcd.c: F-271 ehash SYNC retry and counters"
     python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
     echo "### fman_pcd.c: ehash bucket harness passed"
 fi

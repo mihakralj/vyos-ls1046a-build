@@ -294,6 +294,19 @@ else
     fi
 fi
 
+# F-271 ehash SYNC counters (absent on kernels without F-271)
+SYNCP=/sys/module/fsl_dpaa_fman/parameters
+if [ -r "$SYNCP/ehash_sync_wedged" ]; then
+    s_to=$(cat "$SYNCP/ehash_sync_timeouts" 2>/dev/null || echo 0)
+    s_rec=$(cat "$SYNCP/ehash_sync_recovered" 2>/dev/null || echo 0)
+    s_wd=$(cat "$SYNCP/ehash_sync_wedged" 2>/dev/null || echo 0)
+    if [ "$s_wd" = 0 ]; then
+        record_ok "ehash SYNC never wedged (timeouts=${s_to} recovered_by_retry=${s_rec})"
+    else
+        record_fail "ehash SYNC wedged ${s_wd}x (timeouts=${s_to} recovered=${s_rec}): FMan needs a cold boot"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 hdr '4) VyOS ASK configuration and per-port live state'
 # ---------------------------------------------------------------------------
