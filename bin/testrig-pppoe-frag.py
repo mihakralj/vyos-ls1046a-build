@@ -12,6 +12,7 @@ The receiver answers every datagram with 1 byte so conntrack sees an established
 DUT FragCreates is printed for information only: the vendor's patched kernel counts hardware
 fragmentation there too, so it does not separate software from hardware.
 
+Concurrent flows: run two copies with INSTANCE=0 and INSTANCE=1 (distinct ports and 5-tuples).
 Usage: bin/testrig-pppoe-frag.py ask2|vendor [count] [pps] [case,case,...]
 Cases: v4-j2000/3000/3500 and v6-j2000/3000/3500 (jumbo ingress; set MTU 3600 on the LAN port and gen2 first), ctl-v4-1000 ctl-v6-1000 (controls that need no fragmentation), v4-dfclear v4-dfset v6, and the
 -warm variants, which first offload the flow with small datagrams so the oversize ones hit a live record.
@@ -47,7 +48,10 @@ else:
     # RIG_NS: the generator ports facing this DUT live in that netns (second ASK2 DUT)
     NS = f"sudo ip netns exec {os.environ['RIG_NS']} " if os.environ.get("RIG_NS") else ""
     DUT = testrig_env.require(CFG, "ASK2_DUT")
-PORT = 5999
+# INSTANCE=n shifts the receiver port and the warm source ports so several instances can run at once
+# (concurrent-flow case); the per-instance share/reasm figures then include the other instances' frames.
+INST = int(os.environ.get("INSTANCE", "0"))
+PORT = 5999 - 10 * INST
 
 RECV = r'''
 import socket, sys, time, json
@@ -155,7 +159,7 @@ def run_case(name, fam, mode, dst, plen, warm_port=0):
     rx.stdin.write(RECV)
     rx.stdin.close()
     time.sleep(2)
-    sp = f" {warm_port}" if warm_port else ""
+    sp = f" {warm_port - 10 * INST}" if warm_port else ""
     if warm:
         ssh(D2, f"{NS}python3 - {fam} {mode} {dst} {warm} {PPS} 100{sp}", stdin=SEND, timeout=int(dur) + 60)
         time.sleep(1)
