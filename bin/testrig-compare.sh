@@ -62,7 +62,7 @@ offload(){ # on|off: ASK engage on eth3/eth4, both families (the rig config)
   for i in eth3 eth4; do for f in ipv4 ipv6; do c+=("$v interfaces ethernet $i offload $f"); done; done
   cli "${c[@]}" || { say "offload $1: commit failed"; exit 1; }
   sleep 3
-  if [ $1 = on ]; then $DUT 'sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm' | grep -q 'Armed ports: 0x10 0x11' || { say "re-engage did not arm 0x10 0x11"; exit 1; }; off=0
+  if [ $1 = on ]; then $DUT 'sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm' | grep -E '^Armed ports:' | grep -q '0x10.*0x11' || { say "re-engage did not arm 0x10 0x11"; exit 1; }; off=0
   else $DUT 'sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm' | grep -qE 'Armed ports:.*0x1[01]' && { say "disengage left a port armed"; exit 1; }; off=1; fi
   say "offload $1"
 }

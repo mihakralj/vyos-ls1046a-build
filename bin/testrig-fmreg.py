@@ -17,5 +17,7 @@ off = int(sys.argv[2], 0)
 page = (FMAN_BASE + off) & ~0xFFF
 fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
 m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ, offset=page)
-val = struct.unpack(">I", m[(FMAN_BASE + off) & 0xFFF:][:4])[0]
+# a native 32-bit load: a sliced copy can use wider accesses that bus-fault on some MMIO offsets
+raw = memoryview(m).cast("I")[((FMAN_BASE + off) & 0xFFF) // 4]
+val = struct.unpack(">I", struct.pack("=I", raw))[0]
 print(f"{off:#x} = {val}")
