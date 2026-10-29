@@ -107,7 +107,7 @@ static void hlist_del(struct hlist_node *n)
 	n->pprev = NULL;
 }
 
-struct fman { bool timeout; unsigned int polls; };
+struct fman { bool timeout; unsigned int polls; unsigned int fail_n; bool pending_fail; };
 struct fman_pcd { struct fman *fman; };
 struct fman_pcd_ehash_flow {
 	struct list_head node;
@@ -146,6 +146,8 @@ struct block { void *va; bool node; bool live; unsigned int seen; };
 static struct block blocks[256];
 static unsigned int nblocks;
 static unsigned int head_writes, sync_mark, syncs, reads, warnings;
+static unsigned int ehash_sync_timeouts, ehash_sync_recovered, ehash_sync_wedged;
+#define FMAN_EHASH_SYNC_TRIES 3
 static unsigned int metadata_freed, fail_in;
 static bool wmb_pending, barrier, draining;
 static struct fman_pcd_ehash_table *cur;
@@ -228,15 +230,15 @@ static struct fman *fman_pcd_get_fman(struct fman_pcd *pcd)
 }
 static void fman_set_fpm_extc(struct fman *fm, u32 value)
 {
-	(void)fm;
 	assert(barrier && value == INV0);
 	barrier = false;
 	syncs++;
+	fm->pending_fail = fm->fail_n && fm->fail_n--;
 }
 static u32 fman_get_fpm_extc(struct fman *fm)
 {
 	reads++;
-	if (fm->timeout)
+	if (fm->timeout || fm->pending_fail)
 		return INV0;
 	if (fm->polls) {
 		fm->polls--;
@@ -520,7 +522,8 @@ static void test_delete_timeout(void)
 	synced = syncs;
 	reads = 0;
 	assert(del(&t, 1, 0) == 0);	/* publishes node C 5, keeps B */
-	assert(syncs == synced + 1 && reads == 100000 && warnings == 3);
+	assert(syncs == synced + 3 && reads == 300000 && warnings == 3);
+	assert(ehash_sync_wedged == 1 && ehash_sync_timeouts == 3 && ehash_sync_recovered == 0);
 	assert(metadata_freed == freed + 2);	/* flow + old node list */
 	assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
 	assert(live(false) == 3 && live(true) == 2);	/* record + old node kept */
@@ -547,7 +550,7 @@ static void test_insert_timeout(void)
 	assert(syncs == 0);	/* 1 -> 2 replaces a record head, no nodes */
 	fm.timeout = true;
 	assert(add(&t, 2, 0) == 0);
-	assert(syncs == 1 && warnings == 1);
+	assert(syncs == 3 && warnings == 1);
 	for (unsigned int i = 0; i < 3; i++)
 		assert(hits(&t, i, 0));
 	assert(live(true) == 2);	/* new node + kept old node */
@@ -555,6 +558,29 @@ static void test_insert_timeout(void)
 	assert(blocks[2].node);
 	free(blocks[2].va);
 	fm.timeout = false;
+	drain(&t);
+}
+
+static void test_sync_retry(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+	unsigned int synced, timeouts = ehash_sync_timeouts;
+	unsigned int wedged = ehash_sync_wedged, recovered = ehash_sync_recovered;
+
+	/* first attempt times out, second succeeds: the old node is freed */
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(add(&t, i, 0) == 0);
+	fm.fail_n = 1;
+	synced = syncs;
+	assert(del(&t, 1, 0) == 0);
+	assert(syncs == synced + 2 && warnings == 0);
+	assert(ehash_sync_timeouts == timeouts + 1 && ehash_sync_recovered == recovered + 1);
+	assert(ehash_sync_wedged == wedged);
+	assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
+	assert(live(true) == 1 && live(false) == 2);
 	drain(&t);
 }
 
@@ -594,6 +620,7 @@ int main(void)
 	test_delete_enomem();
 	test_delete_timeout();
 	test_insert_timeout();
+	test_sync_retry();
 	test_missing_and_invalid();
 	puts("OK: ehash cumulative-node buckets (walker model), copy-on-write SYNC-before-free, ENOMEM, SYNC-timeout retention, drain");
 	return 0;

@@ -380,3 +380,30 @@ Run dir `/mnt/builds/ask2-review/oracle/compare-20261029-0541`. Firewall offload
 - **Reader fix:** `bin/testrig-fmreg.py` used a sliced mmap copy that bus-faults at some MMIO offsets (0x158 among them); it now uses a native 32-bit load. kexec wipes `/tmp/fmreg.py` on the DUT, so copy it again after each kexec.
 
 **PDR re-run with the fixed RDRP reader (2026-10-29 15:29, cold boot, `compare-20261029-1529`):** PDR reproduces (64 B 3.74, 570 B 3.19, 1518 B 1.54, IMIX 3.98 Mpps; HW share 0.994-1.000). MAC RDRP summed over all trials of a search (including the above-PDR overload trials, which is why they are large): 64 B 362.6M / 400.7M, 570 B 24.7k / 1.88M, 1518 B 49.0k / 49.3k, IMIX 18.8M / 19.8M (eth3 / eth4). So the PDR is bounded by MAC FIFO overflow (loss happens at the MAC, before the FE), and the "+0" values in §11 above were a reader failure, not a measurement. Per-trial RDRP at the PDR rate itself is not separated in `summary.csv`.
+
+## 13. Paired bidirectional parity, ASK2 `.185` vs vendor ASK `.70` (2026-10-29)
+
+`testrig-parity-bidir.sh unicast-v4 nat-v4`, `REPS=3`, run on dell2 (`RUN_ON=gen2`); vendor cells run inside generator netns `n106`. Both boards cabled identically (eth0 mgmt, DAC eth3/eth4 to dell1/dell2).
+
+| Cell | ASK2 Gbit/s (r1/r2/r3) | Vendor Gbit/s (r1/r2/r3) |
+|---|---|---|
+| unicast-v4 bidir | 17.48 / 18.01 / 18.01 | 17.96 / 17.98 / 17.88 |
+| nat-v4 bidir | 18.05 / 18.18 / 18.10 | 17.87 / 18.00 / 18.05 |
+
+Result: parity at the generator ceiling; all cells verdict HW on both boards. Retransmits are in the same range (tens to hundreds of thousands) with no systematic difference.
+
+Rig notes: dell1 `n106` had lost its port (rerun `sudo bash ~/testrig-dell-net.sh dell1`); vendor cells need an `iperf3 -s -D` inside `n106` on both dells; dell2 needs the repo `bin/` copied to `~/testrig/repo/bin` (chmod +x) and fresh known_hosts for `.185` and `.70`.
+
+### 13.1 Routed VLAN (vlan-v4) ran in software on image 2026.10.29-1640: root cause and fix
+
+Paired parity: unicast-v6 ASK2 17.90 vs vendor 17.46 Gbit/s; nat-v6 17.91 vs 17.76 (both HW). The ASK2 vlan-v4 cell
+(eth3.10 -> eth4.20) ran SW at 4.8-4.95 Gbit/s with 0 hw_pkts on three runs; earlier images measured 18.1 Gbit/s HW.
+
+Root cause (`ask.f266_trace=Y` trace): the T-M6-8b subnet-ownership step rewrites `true_iif` to the VLAN vif
+(eth3.10 = ifindex 9), but flowtable blocks are bound to the physical ports only. The egress-echo filter compared
+`ingress_dev->ifindex != true_iif`, so the eth3 block saw 5 != 9 and skipped the flow as an "echo"; no block ever
+matched, so no ehash record was installed (later DESTROY: ENOENT "no-flow"; no "REPLACE installed" line).
+
+Fix: the filter now compares the physical port that owns `true_iif` (vlan_dev_real_dev) with the block dev. Also
+logs the two previously silent PPPoE SW-fallback returns. Verify on the next image: `testrig-offload-quick.sh
+vlan-v4 vlan-v6` must report HW at ~18 Gbit/s with hw_pkts > 0.

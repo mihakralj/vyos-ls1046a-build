@@ -3030,11 +3030,16 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		}
 		key.vlan_ingress_vid = 0;
 	} else if (key.vlan_edit_flags & ASK_VLANF_PPPOE_INSERT) {
+		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE insert without encap tuple - SW fallback flags=0x%x cookie=0x%lx\n",
+				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
 	}
 	if (pppoe == ASK_PPPOE_DECAP &&
-	    (key.vlan_edit_flags & (ASK_VLANF_POP | ASK_VLANF_PUSH)))
+	    (key.vlan_edit_flags & (ASK_VLANF_POP | ASK_VLANF_PUSH))) {
+		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE decap with VLAN edit - SW fallback flags=0x%x cookie=0x%lx\n",
+				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
+	}
 
 	/*
 	 * T-M6-8 (2026-08-25): for a POP flow, capture the real ingress VID so
@@ -3204,10 +3209,27 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 */
 	if (have_meta_iif) {
 		if (ingress_dev && ingress_dev->ifindex != true_iif) {
-			pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
-					    f->cookie, netdev_name(ingress_dev),
-					    true_iif);
-			return 0;
+			/*
+			 * Flowtable blocks are bound to physical ports only, so a
+			 * VLAN vif true ingress (T-M6-8b owner) can never match a
+			 * block dev by ifindex; compare the owning physical port
+			 * or the VLAN flow is skipped by every block (vlan-v4 ran
+			 * SW with zero installs on 2026.10.29-1640).
+			 */
+			struct net_device *ti = dev_get_by_index(&init_net, true_iif);
+			struct net_device *ti_phys = ti && is_vlan_dev(ti) ?
+						     vlan_dev_real_dev(ti) : ti;
+			bool same_port = ti_phys &&
+					 ti_phys->ifindex == ingress_dev->ifindex;
+
+			if (ti)
+				dev_put(ti);
+			if (!same_port) {
+				pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
+						    f->cookie, netdev_name(ingress_dev),
+						    true_iif);
+				return 0;
+			}
 		}
 	} else if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
 		pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
