@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A <ask20@vyos-ls1046a-build>
+Date: Wed, 28 Oct 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: count rx_packets before netif_receive_skb (0176)
+
+netif_receive_skb() returns NET_RX_DROP for a frame consumed by the
+NF_NETDEV_INGRESS hook, which is how the software flowtable forwards. The
+driver counted that as rx_dropped and never as rx_packets/rx_bytes, so every
+software-forwarded frame (flows not yet offloaded, software fallback, ports
+without offload) was reported as a drop. Account the frame first and ignore
+the return value. Vendor ASK patch 104 fixes the SDK driver the same way
+(plans/ASK2-VENDOR-ASK-REVIEW.md R3).
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 3edc8d1..dedb3be 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -2825,14 +2825,15 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 
+ 	skb_len = skb->len;
+ 
+-	if (unlikely(netif_receive_skb(skb) == NET_RX_DROP)) {
+-		percpu_stats->rx_dropped++;
+-		return qman_cb_dqrr_consume;
+-	}
+-
++	/* NET_RX_DROP is also returned for a frame consumed by an ingress
++	 * hook (the software flowtable forwards this way), so it is not a
++	 * drop report: account the frame before handing it to the stack.
++	 */
+ 	percpu_stats->rx_packets++;
+ 	percpu_stats->rx_bytes += skb_len;
+ 
++	netif_receive_skb(skb);
++
+ 	return qman_cb_dqrr_consume;
+ }
+ 

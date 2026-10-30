@@ -925,6 +925,10 @@ scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
 scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
 scripts/config --set-val CONFIG_IMX2_WDT y
 scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+# U-Boot booti rejects the EFI zboot PE image ("Bad Linux ARM64 Image magic");
+# upstream vyos_defconfig enabled EFI_ZBOOT, which makes vmlinuz = vmlinuz.efi.
+# Disabled -> arm64 builds Image.gz, which booti decompresses.
+scripts/config --disable CONFIG_EFI_ZBOOT
 # CAAM (NXP SEC 5.4) hardware crypto built-in for ASK2 IPsec offload (spec §8.1).
 # vyos_defconfig ships these tristate symbols as =m; force =y so the CAAM/QI
 # backend is present at FMan bring-up and patch 0134's
@@ -2592,6 +2596,10 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_269.py" 2>&1
     echo "### fman_pcd.c: F-269 ehash cumulative-node buckets"
+    # F-271 (R7 step 1): SYNC retry + timeout counters; the harness below
+    # models it. After F-269.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_271.py" 2>&1
+    echo "### fman_pcd.c: F-271 ehash SYNC retry and counters"
     python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
     echo "### fman_pcd.c: ehash bucket harness passed"
 fi
@@ -2605,6 +2613,14 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_270.py" 2>&1
     echo "### fman_pcd.c: F-270 ehash ENQUEUE mtu 0xffff without MTU check"
+fi
+
+# F-272 (G2 PPPoE over VLAN, 2026-10-29): INSERT_VLAN_HDR carries the running
+# L2 EtherType (0x8864 after INSERT_PPPoE_HDR, vendor create_vlan_ins_hm()),
+# not the flow's IP EtherType. Byte-identical without 0x43. After F-261.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_272.py" 2>&1
+    echo "### fman_pcd.c: F-272 VLAN insert inner EtherType after PPPoE insert"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic

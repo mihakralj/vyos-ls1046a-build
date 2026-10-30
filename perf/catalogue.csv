@@ -1,0 +1,117 @@
+test_id,group,name,driver,metric,unit,pass_rule,vyos_ask2,owrt_vendor,opns,t0,t1,t2,owner,evidence
+R01,routed,Routed IPv4 eth3->eth4,bin/testrig-offload-quick.sh unicast-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,10x10 2149 2026-10-17
+R02,routed,Routed IPv4 eth4->eth3,bin/testrig-offload-quick.sh unicast-v4-rev,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+R03,routed,Routed IPv6 eth3->eth4,bin/testrig-offload-quick.sh unicast-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,10x10 2149 2026-10-17
+R04,routed,Routed IPv6 eth4->eth3,bin/testrig-offload-quick.sh unicast-v6-rev,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+R05,routed,Routed IPv4 bidirectional (one client --bidir),bin/testrig-parity-bidir.sh unicast-v4,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW-open,HW,HW,1,5,10,A6,-1.4% vs vendor 0217; drift per 2026-10-19 A/B
+R06,routed,Routed IPv6 bidirectional,bin/testrig-parity-bidir.sh unicast-v6,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW-open,HW,HW,1,5,10,A6,-0.6% vs vendor 0217
+R07,routed,"Routed IPv4 single stream (-P1, per-flow ceiling)",STREAMS=1 bin/testrig-offload-quick.sh unicast-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,-,-,0,5,10,,not on ledger yet
+R08,routed,Routed IPv6 single stream (-P1),STREAMS=1 bin/testrig-offload-quick.sh unicast-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,-,-,0,5,10,,not on ledger yet
+R09,routed,Concurrent eth3<->eth4 load after cold boot,bin/testrig-concurrent.sh,ratio,x,each direction >= 0.97x single-direction rate; HW hits grow,PASS,-,-,0,1,3,P4,.185 1955 2026-10-22
+N01,nat,NAT44 source NAT / masquerade (PAT) out,bin/testrig-offload-quick.sh nat-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,10x10 2149 2026-10-17
+N02,nat,NAT44 return / destination path in,bin/testrig-offload-quick.sh nat-v4-rev,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+N03,nat,NAT66 masquerade out,bin/testrig-offload-quick.sh nat-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,10x10 2149 2026-10-17
+N04,nat,NAT66 return path in,bin/testrig-offload-quick.sh nat-v6-rev,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+N05,nat,NAT44 bidirectional,bin/testrig-parity-bidir.sh nat-v4,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW-open,HW,HW,1,5,10,A6,-1.0% vs vendor 0217
+N06,nat,NAT66 bidirectional,bin/testrig-parity-bidir.sh nat-v6,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW-open,HW,HW,1,5,10,A6,-1.8% vs vendor 0217
+V01,vlan,VLAN translate IPv4 10->20,bin/testrig-offload-quick.sh vlan-v4,gbps,Gbit/s,HW verdict; ASK2 >= vendor,HW-open,HW,HW,0,5,10,A6,-0.13% FAIL in both 10x10 campaigns
+V02,vlan,VLAN translate IPv4 20->10,bin/testrig-offload-quick.sh vlan-v4-rev,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+V03,vlan,VLAN translate IPv6 10->20,bin/testrig-offload-quick.sh vlan-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+V04,vlan,VLAN translate IPv6 20->10,bin/testrig-offload-quick.sh vlan-v6-rev,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+V05,vlan,"VLAN strip IPv4 (tagged in, untagged out)",bin/testrig-offload-quick.sh vlanport-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+V06,vlan,"VLAN push IPv4 (untagged in, tagged out)",bin/testrig-offload-quick.sh portvlan-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+V07,vlan,VLAN strip IPv6,bin/testrig-offload-quick.sh vlanport-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+V08,vlan,VLAN push IPv6,bin/testrig-offload-quick.sh portvlan-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,0,5,10,,10x10 2149 2026-10-17
+V09,vlan,VLAN translate IPv4 bidirectional,bin/testrig-parity-bidir.sh vlan-v4,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW,HW,HW,1,5,10,,10x10 2149 2026-10-17
+V10,vlan,VLAN translate IPv6 bidirectional,bin/testrig-parity-bidir.sh vlan-v6,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW,HW,HW,1,5,10,,10x10 2149 2026-10-17
+V11,vlan,VLAN<->port IPv4 bidirectional,bin/testrig-parity-bidir.sh vlanport-v4,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW,HW,HW,1,5,10,,10x10 2149 2026-10-17
+V12,vlan,VLAN<->port IPv6 bidirectional,bin/testrig-parity-bidir.sh vlanport-v6,gbps,Gbit/s,HW both directions; ASK2 >= vendor,HW-open,HW,HW,1,5,10,A6,-0.70% FAIL in both 10x10 campaigns
+V13,vlan,Routed tagged frames with PCP != 0 (PCP preserved or clean SW fallback),TBD (scapy PCP 5 over vlan-v4),pass,-,frames delivered intact; PCP as configured; no stale record,open,-,-,0,1,1,T-M6-VLAN2,needs board proof (master plan 1.2)
+C01,combo,NAT44 across VLANs,bin/testrig-offload-quick.sh nat-vlan-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,OPNS 26.7.7_8 n=10 HW; ASK2 quick historical
+C02,combo,NAT66 across VLANs,bin/testrig-offload-quick.sh nat-vlan-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,OPNS 26.7.7_8 n=10 HW; ASK2 quick historical
+C03,combo,NAT44 over PPPoE upstream,bin/testrig-offload-quick.sh nat-pppoe-up-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,-,1,5,10,,not same-session
+P01,pppoe,PPPoE decap IPv4 (WAN session -> LAN),bin/testrig-offload-quick.sh pppoe-down-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,needs dell1 RPS fe; vendor pppoe10 up
+P02,pppoe,PPPoE encap IPv4 (LAN -> WAN session),bin/testrig-offload-quick.sh pppoe-up-v4,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,
+P03,pppoe,PPPoE decap IPv6,bin/testrig-offload-quick.sh pppoe-down-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,
+P04,pppoe,PPPoE encap IPv6,bin/testrig-offload-quick.sh pppoe-up-v6,gbps,Gbit/s,HW verdict; >= baseline -1%,HW,HW,HW,1,5,10,,
+P05,pppoe,PPPoE 1500->1492 fragmentation correctness (controls/warm/new/DF/PTB),bin/testrig-pppoe-frag.py,pass,-,all datagrams delivered intact (UDP header and payload checksum ok); DF gets PTB,PASS,FAIL,-,0,1,3,T-M6-SP4,ASK2 2012 2026-10-17; vendor zeroed UDP headers historically
+P06,pppoe,"PPPoE session churn 10,000 cycles under traffic",bin/testrig-pppoe-churn.sh,pass,-,no stale record or mapping; MURAM back to baseline; 0 kernel errors,open,n/a,n/a,0,0,1,PPPoE A8,not run on current image
+P07,pppoe,PPPoE fragment-pool exhaustion and long mixed-size soak,bin/testrig-pppoe-resources.sh,pass,-,pool recovers; no leak; no wedge,open,n/a,n/a,0,0,1,PPPoE resources,not run on current image
+F01,frag,MTU steps 1280/2500/3600/1500 with offload engaged,bin/testrig-mtu-steps.sh,gbps,Gbit/s,DF ping passes at each MTU; HW verdict; no wedge,PASS,-,-,0,1,1,F-270,.185 2044 2026-10-23 (9.2-9.7)
+F02,frag,UDP payload sweep 1472-2400 incl. 1473 at MTU 2500,bin/testrig-udp-sweep.sh,loss_pct,%,0 receiver loss at every size; no wedge,PASS,-,-,0,1,1,F-270,.185 2044 2026-10-23
+F03,frag,Routed IPv4 MTU shrink: HW fragmentation (DF clear) and ICMP frag-needed (DF set),TBD (iperf3 -u -l 1472 into MTU 1400 egress),pass,-,fragments reassemble at receiver; DF set yields ICMP 3/4; no SW fallback,PASS,HW,-,0,1,1,F-262,F-262 silicon verified (dated)
+F04,frag,Routed IPv6 MTU shrink: HW fragmentation (ipv6_hw_frag) and PTB,TBD (iperf3 -u -6 into MTU 1400 egress),pass,-,fragments reassemble at receiver; PTB when ipv6_hw_frag=0,PASS,HW,-,0,1,1,F-262,F-262 silicon verified (dated)
+F05,frag,Incoming fragmented flows forwarded correctly (software by policy),TBD (iperf3 -u -l 4000 at MTU 1500),pass,-,delivered intact; no HW record for fragments,SW,SW,SW,0,1,1,T-M6-FR,policy: default punt
+B01,bridge,Learned-MAC bridge forwarding (B6),bin/testrig-bridge-b6.sh,pass,-,per-flow L2 records hit; frames delivered; teardown exact,PASS,src,-,0,1,3,T-M6-2,2012 cold 2026-10-17; vendor throughput per VLAN mode not measured
+B02,bridge,"VLAN-aware bridge, same tag in and out (B7a)",VLAN=10 bin/testrig-bridge-b6.sh,pass,-,tagged L2 records hit; PCP record correct,PASS,src,-,0,1,3,T-M6-2,2012 cold 2026-10-17
+B03,bridge,Bridge access<->trunk VLAN pop/push (B7b),bin/testrig-bridge-b7b.sh,pass,-,"IPv4/IPv6 pop and push wire, hit, fallback and churn gates",HW-open,src,-,0,1,3,T-M6-2,.155 0326 cold 2026-10-20; parity and soak open
+B04,bridge,L2 learned-MAC churn under line-rate bridged traffic,bin/testrig-bridge-soak.sh,pass,-,base records keep hitting; no leak after N cycles,PASS,n/a,n/a,0,0,1,T-M6-2,100-cycle 2012 2026-10-17
+B05,bridge,L2 table capacity 8192 entries and lookup at occupancy,bin/testrig-bridge-capacity.sh,count,entries,all N insert and hit; misses still punt,open,n/a,n/a,0,0,1,B2 row 7,needs debugfs (kunit=true) image
+B06,bridge,Short non-IP frames on the L2 path (no FE stall),bin/testrig-bridge-b2.sh,pass,-,ARP/short frames punt; hits keep counting afterwards,open,n/a,n/a,0,0,1,B2,stall seen 2026-10-11; needs debugfs image
+S01,scale,"64-byte IPv4 routed pps, offered sweep",bin/testrig-pktgen.sh,mpps,Mpps,capacity at <=0.001% loss plus loss curve; ASK2 >= vendor,HW,HW,HW,0,3,3,A2,ASK2 3.10 Mpps 0 loss vs vendor 0.05% (2026-10-10); OPNS ~1.1
+S02,scale,"82-byte IPv6 routed pps, offered sweep",bin/testrig-pktgen.sh (port-v6),mpps,Mpps,capacity at <=0.001% loss plus loss curve; ASK2 >= vendor,HW,HW,-,0,3,3,A2,ASK2 3.17 Mpps vs vendor 3.21 (2026-10-10)
+S03,scale,IMIX pps and overload recovery,bin/testrig-pktgen.sh IMIX=1,mpps,Mpps,delivered >= vendor; recovers after overload,open,-,-,0,1,3,A2,"historical, not current-image"
+S04,scale,Flow scale: 8k-session bidirectional PDR (<=0.5% loss),bin/testrig-compare.sh pdr,mpps,Mpps,no FE wedge; PDR >= vendor,open,-,-,0,0,3,A13,FE wedge pre-F-264; vendor figure is other-rig target
+S05,scale,"New connections per second, held sessions, with and without NAT",bin/testrig-compare.sh cps,cps,conn/s,0 failures; CPS >= vendor same rig,FAIL,-,-,0,1,3,A13,ASK2 ceiling ~10-11k at 30-40k offered (P5 2026-10-21); vendor 20k is other-rig target
+S06,scale,Flow install rate and first-insert latency,TBD (conntrack HW_OFFLOAD count vs time under testrig-cps.py),rate,flows/s,">= 2,370/s; first insert < 2.6 s",FAIL,HW,-,0,1,3,A13,"ASK2 ~550/s; vendor >= 2,370/s lower bound"
+S07,scale,Latency through DUT at idle/10/50/90% load (HW timestamps),bin/testrig-compare.sh lat,us,us,p50/p99 <= vendor at each load,open,-,-,0,1,3,A13,pending
+S08,scale,Offload engage delay (time from flow start to HW forwarding),bin/testrig-offload-delay.py,delay,s,<= vendor (per-flow target < 100 ms),FAIL,HW,-,0,20,20,A13,ASK2 1.0-1.06 s vs vendor ~0 s (2026-10-14)
+S09,scale,Kernel/miss path capacity (offload off and engaged-miss),bin/testrig-compare.sh kpath,mpps,Mpps,>= baseline -3% (SW regression sentinel),SW,SW,SW,0,1,3,,ref ~0.29 Mpps external
+X01,safety,"Slow-path starvation: ping + 10 TCP connects beside line-rate offloaded bulk, both egress ports",dell2 ~/testrig/starvation-check.py (not in repo),rtt,ms,bulk stays HW; ping max < 10 ms; 10/10 connects < 50 ms,FAIL,PASS,-,0,3,3,F-199,"ASK2 ping avg 4.1-4.5 s, 3-6/10 connects (0217); vendor 0.57 ms 10/10; post-F-199 retest pending"
+X02,safety,"DUT-side jobs (commit, show, ask-check) during 60 s bidir",bin/testrig-trigger-probe.py,gbps,Gbit/s,no throughput collapse; no HW verdict loss,open,-,-,0,1,1,,informational
+X03,safety,"Neighbour change under load (flush, bogus MAC, restore), v4/v6, plain and VLAN",bin/testrig-neigh-change.sh,pass,-,traffic follows neighbour within 1 s; HW hits before/after; 0 kernel errors,PASS,-,-,0,1,1,P4,.185 2044 2026-10-23 (needs fe80 on eth3/eth4)
+X04,safety,TTL / hop-limit expiry on a live offloaded tuple,"bin/testrig-a14.sh ttl (FAM=4,6)",pass,-,TTL/hlim 0-1 punted with ICMP time-exceeded; never forwarded with hlim 0/255,FAIL,PASS,-,0,1,1,A14 / T-M6-SP1,"v6 hlim wraps 0->255, v4 silent drop (2026-10-20); vendor soft parser punts"
+X05,safety,Stale hardware rewrite after neighbour replace,"bin/testrig-a14.sh neigh (FAM=4,6)",pass,-,frames stop reaching old MAC within ~1 s,FAIL,-,-,0,1,1,A14,FAILED 2026-10-18; reconcile with X03 PASS
+X06,safety,5-tuple reuse and TCP close handling (F-266),bin/testrig-a14.sh f266 (REUSE=k),pass,-,100/100 complete; 0 HW_OFFLOAD ct and 0 ehash records after close,FAIL,PASS,-,0,1,1,F-266 / T-M6-SP1,"transit gate FAILED 2026-10-18; close fix live 2026-10-20, CI retest pending"
+X07,safety,Closed-flow conntrack linger (FIN/RST swallowed by HW),TBD (conntrack -L count after testrig-cps.py run),count,entries,no ESTABLISHED entries left for closed flows,FAIL,PASS,-,0,1,1,F-266,open FAIL 2026-10-15
+X08,safety,IKE / NAT-T control traffic not offloaded (UDP 500/4500),TBD,pass,-,IKE and NAT-T control/keepalives reach the CPU; distinguish ESP-in-UDP data tested by G06,open,-,-,0,1,1,T-M6-SP3,untested
+X09,safety,30-minute mixed-feature soak (routed+NAT+VLAN+PPPoE concurrent),TBD (testrig-combo-matrix.sh setup + parallel cells),pass,-,0 kernel errors; MURAM flat; throughput stable,open,-,-,0,0,1,A6,pending
+K01,control,CLI offload delete/set x10 with ping running,bin/testrig-cli-cycle.sh,pass,-,ping uninterrupted beyond commit; MURAM back to baseline,PASS,n/a,n/a,0,1,1,P4,.185 2044
+K02,control,"Per-port loop: idempotent engage, MTU, link flap x3, 100 disengage/engage cycles",bin/testrig-port-loop.sh,pass,-,ask-check clean; MURAM baseline; pcd-snapshot diff clean,PASS,n/a,n/a,0,1,1,P4,.185 2044 2026-10-21..23
+K03,control,Reversibility: disengage returns PCD and MURAM to boot baseline,board/scripts/pcd-snapshot capture/diff,pass,-,diff clean; muram_budget used == baseline,PASS,n/a,n/a,1,1,1,M1,MURAM 52922 (2044)
+K04,control,"Kill switches (vlan_offload, pppoe_offload, nat44_offload, nat66_offload, ipv6_hw_frag = 0)",TBD (module param + affected quick cells),pass,-,affected cell forwards in SW correctly; other cells stay HW,PASS,n/a,n/a,0,1,1,,dated
+K05,control,Per-flow counters match traffic (YNL get-flow / fe_ehash_stats),bin/ask-check + YNL get-flow,pass,-,record bytes within 1% of receiver bytes,PASS,src,-,0,1,1,T-M8-3,.145 2149 2026-10-19
+K06,control,Factory default engages after cold boot (offload ipv4 ipv6 on eth1-eth4),reboot + bin/testrig-offload-quick.sh unicast-v4,pass,-,HW verdict without manual commit,PASS,n/a,n/a,0,1,1,,fresh install 2149 .145 2026-10-19
+Q01,qos,Ingress policer accuracy on a non-ASK port (FMPL),set interfaces ethernet ethN ingress-policer + iperf3,gbps,Gbit/s,delivered within +-15% of configured rate; G/Y/R counters move,HW-open,src,-,0,1,3,T-M6-QOS,cap measured historically; accuracy pending
+W01,sw-ref,"WireGuard 1 tunnel, eth3/eth4 x IPv4/IPv6 x up/down/bidir",bin/wg-parity.sh,gbps,Gbit/s,SW on all stacks; ASK2 >= vendor,SW,SW,SW,0,0,10,,ASK2 ~1.5-1.7 at 92-95% busy; OPNS 0.4-0.9
+SW01,sw-ref,Routed IPv4 bidirectional with offload disabled (software baseline),TBD (R05 cell with offload off on every stack),gbps,Gbit/s,PASS; hw_ratio < 0.1; >= baseline -3% (SW regression sentinel),open,open,open,0,3,10,,planned; offload off = delete interfaces ethernet eth3/eth4 offload
+SW02,sw-ref,Routed IPv6 bidirectional with offload disabled,TBD (R06 cell with offload off),gbps,Gbit/s,as SW01,open,open,open,0,3,10,,planned
+SW03,sw-ref,NAT44 bidirectional with offload disabled,TBD (N05 cell with offload off),gbps,Gbit/s,as SW01,open,open,open,0,3,10,,planned
+SW04,sw-ref,NAT66 bidirectional with offload disabled,TBD (N06 cell with offload off),gbps,Gbit/s,as SW01,open,open,open,0,3,10,,planned
+U01,udp,UDP routed IPv4 eth3->eth4,TBD (iperf3 -u -4; R01 topology; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates in section 8; HW proof required,open,-,-,0,3,10,,planned cross-OS baseline; not measured
+U02,udp,UDP routed IPv4 eth4->eth3,TBD (iperf3 -u -4 -R; R01 topology; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates in section 8; HW proof required,open,-,-,0,3,10,,planned cross-OS baseline; not measured
+U03,udp,UDP routed IPv6 eth3->eth4,TBD (iperf3 -u -6; R03 topology; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates in section 8; HW proof required,open,-,-,0,3,10,,planned cross-OS baseline; not measured
+U04,udp,UDP routed IPv6 eth4->eth3,TBD (iperf3 -u -6 -R; R03 topology; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates in section 8; HW proof required,open,-,-,0,3,10,,planned cross-OS baseline; not measured
+U05,udp,UDP routed IPv4 simultaneous bidirectional,TBD (iperf3 -u -4 --bidir; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates in section 8 independently per direction; HW both ways,open,-,-,1,3,10,,planned cross-OS baseline; not measured
+U06,udp,UDP routed IPv6 simultaneous bidirectional,TBD (iperf3 -u -6 --bidir; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates in section 8 independently per direction; HW both ways,open,-,-,1,3,10,,planned cross-OS baseline; not measured
+U07,udp,UDP NAT44 outbound and return traffic,TBD (iperf3 -u; N01 topology with -R for return; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; translated tuple and checksum correct; HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+U08,udp,UDP NAT66 outbound and return traffic,TBD (iperf3 -u -6; N03 topology with -R for return; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; translated tuple and checksum correct; HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+U09,udp,UDP IPv4 VLAN translate both ways and strip/push,TBD (iperf3 -u; V01/V02/V05/V06 topologies; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; correct on-wire tags; HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+U10,udp,UDP IPv6 VLAN translate both ways and strip/push,TBD (iperf3 -u -6; V03/V04/V07/V08 topologies; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; correct on-wire tags; HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+U11,udp,UDP IPv4 PPPoE encap and decap,TBD (iperf3 -u; P01/P02 topologies; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; correct session and checksum; HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+U12,udp,UDP IPv6 PPPoE encap and decap,TBD (iperf3 -u -6; P03/P04 topologies; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; correct session and checksum; HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+U13,udp,UDP bridge untagged/same-tag/access-trunk IPv4 and IPv6 both ways,TBD (iperf3 -u; B01/B02/B03 topologies; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; correct L2 forwarding; L2-specific HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+U14,udp,UDP NAT-over-VLAN v4/v6 and NAT-over-PPPoE v4 outbound/return,TBD (iperf3 -u; C01/C02/C03 topologies; section 3.13),rx_gbps;loss_pct;jitter_ms,Gbit/s;%;ms,UDP profile gates; combined rewrites and checksums correct; HW proof,open,-,-,0,0,3,,planned cross-OS feature coverage; not measured
+G01,gap,IPv4 routed multicast replication (mc4 routed),"TBD (iperf2 UDP multicast to 239.x, 2 listeners)",pass,-,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-MC,vendor: set mc4 ... mode routed ... listener
+G02,gap,IPv6 routed multicast replication (mc6 routed),TBD (iperf2 UDP multicast to ff3e::x),pass,-,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-MC,vendor: set mc6 ... mode routed
+G03,gap,"Bridged multicast replication (mc4/mc6 bridged, MDB)",TBD,pass,-,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-MC,vendor: mode bridged
+G04,gap,"IPsec ESP tunnel IPv4, AES-CBC-SHA256, FMan->CAAM->FMan",TBD (strongSwan peer on dell2),gbps,Gbit/s,"ASK2 today: host-terminated ESP with CAAM crypto (Tier 1), SW forwarding",gap,src,-,0,0,3,T-M6-4,"vendor: cdx_esp4_cc, 15 FCI SA cmds, cmm XFRM listener"
+G05,gap,IPsec ESP tunnel IPv6,TBD,gbps,Gbit/s,as G04,gap,src,-,0,0,3,T-M6-4,vendor: cdx_esp6_cc
+G06,gap,IPsec ESP with NAT-T (UDP 4500 encapsulation),TBD,gbps,Gbit/s,as G04,gap,src,-,0,0,3,T-M6-4,
+G07,gap,IPsec SA rekey and expiry under load,TBD,pass,-,no stale SA; loss bounded during rekey,gap,src,-,0,0,3,T-M6-4,
+G08,gap,SEC/CAAM rate limit (qm sec_rate) and SA failure stats,TBD,pass,-,rate enforced; query secfailstats moves,gap,src,-,0,0,3,T-M6-4,
+G09,gap,6in4 (SIT) tunnel encap/decap with inner flow offload,TBD,gbps,Gbit/s,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-SP5,vendor: tunnel FCI + cdx_sp.xml nextproto re-dispatch
+G10,gap,4in6 (IPIP6) tunnel encap/decap with inner flow offload,TBD,gbps,Gbit/s,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-SP5,
+G11,gap,Egress shaping on a port carrying offloaded flows (CEETM shaper),TBD (tc on egress + iperf3),gbps,Gbit/s,shaped rate within +-5%; offloaded flows obey it,gap,src,-,0,0,3,T-M6-QOS,vendor: qm shaper
+G12,gap,Egress scheduling: strict priority and WBFQ across class queues,TBD (two marked flows),ratio,x,class shares within +-10% of weights,gap,src,-,0,0,3,T-M6-QOS,"vendor: WBFQ, 16 class queues per channel"
+G13,gap,DSCP -> frame-queue classification on egress,TBD,pass,-,DSCP-marked flow lands in its class queue,gap,src,-,0,0,3,T-M6-QOS,vendor: DSCP->FQ map
+G14,gap,Exception-path rate limit (protects CPU from miss floods),TBD (64B miss flood + mgmt ping),pass,-,CPU-bound traffic capped; management stays responsive,gap,src,-,0,0,3,T-M6-QOS,vendor: qm expt_rate
+G15,gap,Rate limit on fast-forwarded (offloaded) traffic,TBD,gbps,Gbit/s,offloaded flow capped within +-15%,gap,src,-,0,0,3,T-M6-QOS,vendor: qm ff_rate
+G16,gap,Ingress policer on an ASK-engaged port,set ... ingress-policer on eth3 with offload engaged,gbps,Gbit/s,policed rate enforced on offloaded flows,gap,src,-,0,0,3,T-M6-QOS,ASK2 bypasses PLCR on engaged ports by design
+G17,gap,QinQ / 802.1ad stacked tags routed,TBD,gbps,Gbit/s,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-VLAN2,
+G18,gap,DSCP -> VLAN PCP mapping on push,TBD,pass,-,pushed tag carries mapped PCP,gap,src,-,0,0,3,T-M6-VLAN2,
+G19,gap,PPPoE over a VLAN subinterface encap/decap,TBD (pppoe on eth4.vif),gbps,Gbit/s,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-SP4,
+G20,gap,PPPoE relay / pass-through,TBD,pass,-,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-SP4,vendor: bridge sessionid
+G21,gap,PPPoE-session bridging (L2 flow with PPPoE session id),TBD,pass,-,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-2,vendor: set rx bridge ... sessionid
+G22,gap,IRB: routed traffic to/from a bridge member port,TBD,gbps,Gbit/s,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-DISPATCH,needs multi-table dispatch
+G23,gap,Routed and bridged classes on the same port at once,TBD,gbps,Gbit/s,"ASK2 gap: correct SW forwarding, no HW record",gap,src,-,0,0,3,T-M6-DISPATCH,needs multi-table dispatch

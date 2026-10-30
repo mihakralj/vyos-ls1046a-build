@@ -92,9 +92,15 @@ pkill -f '^iperf3 -c $a -B $b -p $p '
 python3 -c 'import json,sys
 try:
     j=json.load(open(sys.argv[1]))
-    print(sys.argv[2], 0 if j.get(\"error\") else int(j[\"end\"][\"sum_received\"][\"bytes\"]))
+    r=int(j.get(\"end\",{}).get(\"sum_received\",{}).get(\"bytes\",0))
+    if not j.get(\"error\") and r: print(sys.argv[2], r); sys.exit()
+    # the end-of-test control exchange can stall after the data phase completed: trust the
+    # per-second sender intervals when they ran to the end of the test with non-zero bytes in the last 4 s
+    iv=j.get(\"intervals\",[])
+    ok=iv and iv[-1][\"sum\"][\"end\"]>=float(sys.argv[3])-2 and sum(i[\"sum\"][\"bytes\"] for i in iv[-4:])>0
+    print(sys.argv[2], int(sum(i[\"sum\"][\"bytes\"] for i in iv)) if ok else 0)
 except Exception:
-    print(sys.argv[2], 0)' /tmp/$TAG-$n.json $n"; done < <(flows); }
+    print(sys.argv[2], 0)' /tmp/$TAG-$n.json $n $1"; done < <(flows); }
 # hw_delta: pkt_count growth over HW_WIN s, per record (records deleted or re-created inside the
 # window must not cancel growth elsewhere)
 hw_delta(){ dut "s(){ sudo sed -n 's/.*record_dma=\\(0x[0-9a-f]*\\).*pkt_count=\\([0-9]*\\).*/\\1 \\2/p' $PCD/fe_ehash_stats; }

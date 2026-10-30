@@ -181,6 +181,15 @@ for f in "$ISO_CONTENT/live/vmlinuz" "$ISO_CONTENT/live/initrd.img"; do
   [ -s "$f" ] || { echo "FATAL: xorriso failed to extract $f from ISO"; exit 1; }
 done
 
+# U-Boot booti accepts only a raw Image or gzip Image.gz. An EFI zboot PE
+# ("MZ"..."zimg") is rejected with "Bad Linux ARM64 Image magic" (2026-10-28).
+_magic=$(head -c2 "$ISO_CONTENT/live/vmlinuz" | od -An -tx1 | tr -d ' ')
+_arm=$(dd if="$ISO_CONTENT/live/vmlinuz" bs=1 skip=56 count=4 2>/dev/null)
+if [ "$_magic" != "1f8b" ] && [ "$_arm" != "ARMd" ]; then
+  echo "FATAL: /live/vmlinuz is not booti-compatible (magic=$_magic); is CONFIG_EFI_ZBOOT enabled?"
+  exit 1
+fi
+
 # ── F-217/kernel-skew assertion ───────────────────────────────────────────
 # The ISO's /live/vmlinuz MUST be byte-identical to the freshly-built
 # linux-image .deb's packaged vmlinuz. If the persistent chroot's apt install
