@@ -4,8 +4,8 @@ Date: Mon, 20 Jul 2026 03:56:43 +0000
 Subject: [PATCH] temp: vyos-1x-012-ls1046a-motd.patch
 
 ---
- data/templates/login/default_motd.j2 | 5 ++++-
- 1 file changed, 4 insertions(+), 1 deletion(-)
+ data/templates/login/default_motd.j2 | 6 ++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/data/templates/login/default_motd.j2 b/data/templates/login/default_motd.j2
 index 0d52092..e396e48 100644
@@ -17,12 +17,13 @@ index 0d52092..e396e48 100644
  
     ┌── ┐
     . VyOS {{ version_data.version }}
-@@ -7,6 +7,9 @@ Welcome to VyOS!
+@@ -7,6 +7,10 @@ Welcome to VyOS!
  {% if version_data.lts_build %}
   * Support portal: {{ version_data.support_url }}
  {% endif %}
 +   Dataplane:     mainline/RSS at boot; ASK2 or VPP engaged at runtime
 +   Modules:       ask.ko, FMan PCD (KG/CC/MANIP/FE-VM/Policer), TX bypass, FE context builder, MANIP chain API, CAAM QI share, AF_XDP ZC
++   Offloads:      IPv4/IPv6 routing, NAT44/NAT66, VLAN, PPPoE, bridge, HW fragmentation, HW ingress police
 +
   * Documentation:  {{ version_data.documentation_url }}
   * Project news:   {{ version_data.project_news_url }}

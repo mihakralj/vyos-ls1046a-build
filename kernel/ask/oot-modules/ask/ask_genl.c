@@ -286,10 +286,8 @@ goto nla_put_failure;
 if (nla_put_u32(skb, ASK_INFO_ATTR_NUM_FLOWS, num_flows))
 goto nla_put_failure;
 }
-/* No fixed per-flow ceiling is exported yet: the external-hash table uses
- * collision chains and coherent DDR records. Zero means "not a fixed limit",
- * not "zero capacity". Resource failures are reported by the A4 preflight. */
-if (nla_put_u32(skb, ASK_INFO_ATTR_MAX_FLOWS, 0))
+/* Admission budget (ask.max_flows module param); 0 = unlimited. */
+if (nla_put_u32(skb, ASK_INFO_ATTR_MAX_FLOWS, ask_flow_max_flows()))
 goto nla_put_failure;
 
 nla_nest_end(skb, nest);
