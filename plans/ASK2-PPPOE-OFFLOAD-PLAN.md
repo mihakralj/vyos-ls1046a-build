@@ -45,7 +45,8 @@ produces IPv6 PTB in the tested configuration. Keep MSS clamping recommended.
 | Control/unsupported protocols | Discovery/LCP/IPCP/IPv6CP visible to kernel; unsupported PPP protocols stay software |
 | Kill switch | Live 1→0 removes PPPoE HW records, SW forwards, 0→1 reoffloads; no stale SID |
 | Resources | Fragment-pool exhaustion and long mixed-size soak; no RX-deaf port, error/SYNC growth or persistent resource delta |
-| Current unsupported combinations | PPPoE-over-VLAN returns `-EOPNOTSUPP` before publication and forwards in software |
+| PPPoE over VLAN (G2, implemented 2026-10-29, HW gate pending) | `pppoeN` over `ethX.V`: decap and encap records published, wire capture shows `8100 V / 8864 sid / 0021`, HW hit both directions, `.156` rerun of the 2026-10-20 cell now in HW |
+| Current unsupported combinations | VLAN on the LAN side of a PPPoE flow, QinQ under PPPoE, PCP≠0 session tags, and a HW-stripped session tag return `-EOPNOTSUPP` before publication and forward in software |
 
 The old single-session flap and fragmentation probes are archived successes,
 not substitutes for the unrun 10,000-cycle/exhaustion gates.
@@ -127,13 +128,42 @@ Methods:
 
 ## Missing vendor features
 
-PPPoE-over-VLAN **hardware** forwarding, relay/pass-through and
-PPPoE-through-bridge remain feature gaps even when the software fallback
-passes. The earlier Tier-1-only scope must not be mistaken for full parity.
+Relay/pass-through and PPPoE-through-bridge remain feature gaps even when
+the software fallback passes. The earlier Tier-1-only scope must not be
+mistaken for full parity.
 
-After existing-path acceptance, implement session+VLAN identity and tag
-ordering in the shared action compiler, with independent fallback and
-reconnect isolation. Relay uses a distinct match/action type
+### PPPoE over VLAN (G2, implemented 2026-10-29)
+
+The session VLAN is part of the existing 50-byte key (VID `[46..47]`, SID
+`[48..49]`), so no classifier change is needed. The kernel records the
+session path outer-last: `dev_fill_forward_path()` walks ppp → vlan → eth,
+so a tuple's `encap[]` is `{ PPP_SES sid, 8021Q vid }`. The flowtable then
+emits `VLAN_POP` for the ingress tag and `PPPOE_PUSH` followed by
+`VLAN_PUSH` for the egress encaps.
+
+- **Classifier** (`ask_flow_cookie_pppoe()`): accepts one non-zero PPP_SES
+  plus at most one 802.1Q tag in either order, and returns the tag in
+  `ask_pppoe_info.vid`. It refuses a tag the HW already stripped
+  (`in_vlan_ingress`), VID 0 and QinQ.
+- **Decap**: the record keys on the session VID and SID. It emits
+  `04 11 12 14 …` where `12 STRIP_ALL_VLAN` validates the session VID (vendor
+  chain `04 11 12 14 21 41 01`). The flow must carry exactly the
+  `VLAN_POP` of that tag.
+- **Encap**: `43 INSERT_PPPoE` (EtherType becomes 0x8864), then `42
+  INSERT_VLAN` whose inner EtherType is 0x8864, then `41 INSERT_L2` with
+  TPID 0x8100. This matches vendor `create_pppoe_ins_hm()` followed by
+  `create_vlan_ins_hm()`, which takes `info->eth_type`. Kernel fixup F-272
+  makes the 0x42 word carry the running `l2_eth_type`; records without 0x43
+  are byte-identical. The flow must carry exactly the `VLAN_PUSH` of the
+  session tag. A tagged LAN side (`VLAN_POP` on an encap flow) stays in
+  software.
+- **MTU**: F-262 is unchanged. The route MTU is the ppp MTU (1492). The tag
+  sits outside the Ethernet MTU, and the 0217 96-byte RX margin covers the
+  12-byte growth.
+- **Gates**: the PPPoE-over-VLAN row in Open acceptance, plus the session
+  lifecycle and kill-switch rows repeated over a tagged session.
+
+Relay uses a distinct match/action type
 (vendor `REPLACE_PPPOE_HDR 0x45`), not a truncation of the routed key.
 Bridge-session forwarding depends on the bridge non-IP safety/multi-class
 gates. Discovery and link control never move to hardware.

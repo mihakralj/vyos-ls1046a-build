@@ -1100,6 +1100,7 @@ int ask_flow_offload_classify_dir(const struct net_device *dev);
 #define ASK_PPPOE_ENCAP	2	/* LAN -> PPPoE: insert */
 struct ask_pppoe_info {
 	u16 sid;			/* host order */
+	u16 vid;			/* G2: session VLAN, 0 = untagged */
 	int ifindex;			/* the session's physical port */
 	u8  peer_mac[ETH_ALEN];		/* ENCAP: concentrator */
 	u8  src_mac[ETH_ALEN];		/* ENCAP: our port */

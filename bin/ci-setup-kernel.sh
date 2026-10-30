@@ -2615,6 +2615,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-270 ehash ENQUEUE mtu 0xffff without MTU check"
 fi
 
+# F-272 (G2 PPPoE over VLAN, 2026-10-29): INSERT_VLAN_HDR carries the running
+# L2 EtherType (0x8864 after INSERT_PPPoE_HDR, vendor create_vlan_ins_hm()),
+# not the flow's IP EtherType. Byte-identical without 0x43. After F-261.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_272.py" 2>&1
+    echo "### fman_pcd.c: F-272 VLAN insert inner EtherType after PPPoE insert"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:

@@ -407,3 +407,8 @@ matched, so no ehash record was installed (later DESTROY: ENOENT "no-flow"; no "
 Fix: the filter now compares the physical port that owns `true_iif` (vlan_dev_real_dev) with the block dev. Also
 logs the two previously silent PPPoE SW-fallback returns. Verify on the next image: `testrig-offload-quick.sh
 vlan-v4 vlan-v6` must report HW at ~18 Gbit/s with hw_pkts > 0.
+
+Verified on image 2026.10.29-2253-rolling (commit 8653ff37, `.185`): vlan-v4 9.38 / vlan-v6 9.25 Gbit/s
+one-way, and with `BIDIR=1` vlan-v4 18.15 / vlan-v6 18.05 Gbit/s. All four runs were HW (hw_ratio 1.06-1.09,
+DUT busy <= 0.4%). `ask-check`: 45 OK / 2 WARN (eth1/eth2 no carrier) / 0 FAIL. F-271 SYNC counters
+(`ehash_sync_timeouts/recovered/wedged`) all 0 after the runs.
