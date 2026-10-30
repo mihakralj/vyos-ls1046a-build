@@ -460,6 +460,7 @@ bool ask_hw_vlan_offload_armed(void);
 bool ask_hw_bridge_offload_armed(void);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
 void ask_flow_pppoe_flush(void);
+void ask_flow_fdb_change(const u8 *addr, int ifindex);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);
 void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
@@ -1100,6 +1101,7 @@ int ask_flow_offload_classify_dir(const struct net_device *dev);
 #define ASK_PPPOE_ENCAP	2	/* LAN -> PPPoE: insert */
 struct ask_pppoe_info {
 	u16 sid;			/* host order */
+	u16 vid;			/* G2: session VLAN, 0 = untagged */
 	int ifindex;			/* the session's physical port */
 	u8  peer_mac[ETH_ALEN];		/* ENCAP: concentrator */
 	u8  src_mac[ETH_ALEN];		/* ENCAP: our port */
@@ -1231,6 +1233,9 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 /* ask_xfrm.c — xfrmdev_ops packet-mode IPsec offload                         */
 /* PR16a fills these in.                                                     */
 /* ------------------------------------------------------------------------- */
+struct xfrm_state;
+int  ask_xfrm_state_eligible(const struct xfrm_state *x);
+int  ask_xfrm_state_add(struct xfrm_state *x);
 int  ask_xfrm_init(void);
 void ask_xfrm_exit(void);
 

@@ -1,0 +1,174 @@
+diff --git a/data/templates/firewall/nftables-offload.j2 b/data/templates/firewall/nftables-offload.j2
+index a893e05..24460f2 100644
+--- a/data/templates/firewall/nftables-offload.j2
++++ b/data/templates/firewall/nftables-offload.j2
+@@ -7,3 +7,23 @@
+         counter
+     }
+ {% endmacro %}
++
++{# LS1046A ASK2 (G1): auto flowtable for `interfaces ethernet ethN offload
++   ipv4|ipv6` ports that no user flowtable covers. The chain hooks forward
++   AFTER the filter chains (priority 10), so it only sees packets the
++   firewall accepted; ALG control sessions stay in software. #}
++{% macro ask_auto(devices) %}
++    flowtable VYOS_FLOWTABLE_ASK_AUTO {
++        hook ingress priority 0; devices = { {{ devices | join(', ') }} };
++        flags offload;
++        counter
++    }
++
++    chain VYOS_ASK_AUTO_FORWARD {
++        type filter hook forward priority 10; policy accept;
++        ct state != established return
++        meta l4proto tcp ct original proto-dst { 21, 1723 } return
++        meta l4proto udp ct original proto-dst 5060 return
++        meta l4proto { tcp, udp } counter flow add @VYOS_FLOWTABLE_ASK_AUTO
++    }
++{% endmacro %}
+diff --git a/data/templates/firewall/nftables.j2 b/data/templates/firewall/nftables.j2
+index 6b93584..17cd37e 100755
+--- a/data/templates/firewall/nftables.j2
++++ b/data/templates/firewall/nftables.j2
+@@ -229,6 +229,9 @@ table ip vyos_filter {
+         return
+     }
+ {% endif %}
++{% if ask_auto_flowtable.ipv4 is vyos_defined %}
++{{ offload_tmpl.ask_auto(ask_auto_flowtable.ipv4) }}
++{% endif %}
+ }
+ 
+ table ip6 vyos_filter
+@@ -425,6 +428,9 @@ table ip6 vyos_filter {
+         return
+     }
+ {% endif %}
++{% if ask_auto_flowtable.ipv6 is vyos_defined %}
++{{ offload_tmpl.ask_auto(ask_auto_flowtable.ipv6) }}
++{% endif %}
+ }
+ 
+ ## Bridge Firewall
+diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+index 0f5459f..dc524f6 100755
+--- a/src/conf_mode/firewall.py
++++ b/src/conf_mode/firewall.py
+@@ -126,6 +126,33 @@ def generate_inet_proto_keymap(firewall):
+ 
+     firewall['inet_proto_map'] = keymap
+ 
++def get_ask_auto_flowtable(conf, firewall):
++    """
++    LS1046A ASK2 (G1): `set interfaces ethernet ethN offload ipv4|ipv6` alone
++    makes forwarded flows on that port eligible for hardware offload. Return
++    the per-family list of armed ports that no user flowtable already covers;
++    the template renders VYOS_FLOWTABLE_ASK_AUTO over them. A device may sit
++    in only one flowtable per table, and unbinding a hardware flowtable
++    disengages the whole ASK port, so user flowtables always win.
++    """
++    ethernet = conf.get_config_dict(['interfaces', 'ethernet'],
++                                    key_mangling=('-', '_'),
++                                    get_first_key=True,
++                                    no_tag_node_value_mangle=True)
++    user_ifaces = set()
++    for flowtable_conf in (firewall.get('flowtable') or {}).values():
++        user_ifaces.update(flowtable_conf.get('interface', []))
++
++    auto = {}
++    for ifname, if_conf in sorted(ethernet.items()):
++        if ifname in user_ifaces or 'disable' in if_conf:
++            continue
++        offload = if_conf.get('offload') or {}
++        for family in ('ipv4', 'ipv6'):
++            if family in offload:
++                auto.setdefault(family, []).append(ifname)
++    return auto
++
+ def get_config(config=None):
+     if config:
+         conf = config
+@@ -178,6 +205,8 @@ def get_config(config=None):
+ 
+     set_dependents('conntrack', conf)
+ 
++    firewall['ask_auto_flowtable'] = get_ask_auto_flowtable(conf, firewall)
++
+     return firewall
+ 
+ def verify_jump_target(firewall, hook, jump_target, family, recursive=False):
+@@ -582,6 +611,10 @@ def verify_hardware_offload(ifname):
+     # a toggleable-but-off state here is not an error.
+ 
+ def verify(firewall):
++    # G1: the auto flowtable inherits the hardware-flowtable MTU gate.
++    for ifname in sorted(set(sum(firewall.get('ask_auto_flowtable', {}).values(), []))):
++        verify_hardware_offload(ifname)
++
+     if 'flowtable' in firewall:
+         for flowtable, flowtable_conf in firewall['flowtable'].items():
+             if 'interface' not in flowtable_conf:
+@@ -877,6 +910,9 @@ def apply(firewall):
+                     hardware_ifname = get_hardware_offload_interface(ifname)
+                     cmdl(['ethtool', '-K', hardware_ifname, 'hw-tc-offload', 'on'])
+ 
++    for ifname in sorted(set(sum(firewall.get('ask_auto_flowtable', {}).values(), []))):
++        cmdl(['ethtool', '-K', ifname, 'hw-tc-offload', 'on'])
++
+     # Use nft -c option to check current configuration file
+     completed_process = subp_run(['nft', '-c', '--file', nftables_conf], capture_output=True)
+     install_result = completed_process.returncode
+diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index 5bcfb90..ac1ac15 100755
+--- a/src/conf_mode/interfaces_ethernet.py
++++ b/src/conf_mode/interfaces_ethernet.py
+@@ -260,6 +260,10 @@ def get_config(config=None):
+     )
+     if tmp:
+         ethernet.update({'offload_changed': tmp})
++        # LS1046A ASK2 (G1): firewall.py derives the auto hardware flowtable
++        # from the offload ipv4/ipv6 leaves.
++        if {'ipv4', 'ipv6'} & set(tmp):
++            set_dependents('firewall', conf)
+ 
+     for node, key in {
+         'disable-flow-control': 'flow_control_changed',
+diff --git a/src/conf_mode/system_conntrack.py b/src/conf_mode/system_conntrack.py
+index 76c56d8..a39923d 100755
+--- a/src/conf_mode/system_conntrack.py
++++ b/src/conf_mode/system_conntrack.py
+@@ -105,6 +105,24 @@ def get_config(config=None):
+ 
+     conntrack['module_map'] = module_map
+ 
++    # LS1046A ASK2 (G1): ports armed with `offload ipv4|ipv6` and not in a
++    # user flowtable get the auto hardware flowtable (firewall.py). Its
++    # `flow add` needs established conntrack entries, so tracking must be on
++    # for that family even when no firewall rule matches state.
++    conntrack['ask_auto_families'] = set()
++    ethernet = conf.get_config_dict(['interfaces', 'ethernet'],
++                                    key_mangling=('-', '_'),
++                                    get_first_key=True,
++                                    no_tag_node_value_mangle=True)
++    user_ifaces = set()
++    for flowtable_conf in (conntrack['firewall'].get('flowtable') or {}).values():
++        user_ifaces.update(flowtable_conf.get('interface', []))
++    for ifname, if_conf in ethernet.items():
++        if ifname in user_ifaces or 'disable' in if_conf:
++            continue
++        conntrack['ask_auto_families'].update(
++            family for family in ('ipv4', 'ipv6') if family in (if_conf.get('offload') or {}))
++
+     # WireGuard data packets are encrypted and never offloaded, so tracking
+     # the outer UDP flow only costs cycles (conntrack, helper and firewall
+     # chains on every packet of the serial tx/rx stage). Skip tracking for the
+@@ -216,6 +234,9 @@ def generate(conntrack):
+                 elif path[0] == 'ipv6':
+                     conntrack['ipv6_firewall_action'] = 'accept'
+ 
++    for family in conntrack['ask_auto_families']:
++        conntrack[f'{family}_firewall_action'] = 'accept'
++
+     render(sysctl_file, 'conntrack/sysctl.conf.j2', conntrack)
+     render(nftables_ct_file, 'conntrack/nftables-ct.j2', conntrack)
+ 
