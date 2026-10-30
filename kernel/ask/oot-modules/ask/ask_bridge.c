@@ -761,6 +761,10 @@ static int ask_bridge_fdb_notifier(struct notifier_block *nb,
 	if (fdb_info->added_by_user || fdb_info->is_local)
 		set_bit(jhash(fdb_info->addr, ETH_ALEN, 0) & 4095,
 			ask_bridge_user_macs);
+	/* G5a: retire routed flows that egress to this MAC on another port. */
+	ask_flow_fdb_change(fdb_info->addr,
+			    event == SWITCHDEV_FDB_ADD_TO_DEVICE ?
+			    switchdev_notifier_info_to_dev(ptr)->ifindex : 0);
 	ask_bridge_kick();
 	return NOTIFY_DONE;
 }

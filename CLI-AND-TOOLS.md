@@ -43,11 +43,24 @@ on eth1–eth4 (not eth0, the management port), plus the hardware flowtable `FT`
 over eth1–eth4, IPv4 and IPv6 forward rule 10 `action offload`, and
 `hardware-offload-delay 500` shown below. Delete them to boot without hardware offload.
 
-Engaging a port only arms it. Routed flows are learned **only** from a hardware
-flowtable (next section); bridged traffic uses static FDB entries instead (see
-"Bridge offload" below). An engaged port with neither offloads nothing.
+Engaging a port is enough for routed flows (patch `058`, G1). Every engaged
+port that no user `firewall flowtable` lists joins the generated hardware
+flowtable `VYOS_FLOWTABLE_ASK_AUTO` (per family: `offload ipv4` ports in the IPv4
+table, `offload ipv6` ports in the IPv6 table). A generated forward chain
+`VYOS_ASK_AUTO_FORWARD` at priority `filter + 10` runs after the filter chains, so
+it sees only packets the firewall accepted, and offloads established TCP/UDP
+flows. ALG control sessions stay in software: TCP 21 (FTP), TCP 1723 (PPTP) and
+UDP 5060 (SIP), matched on the original destination port. Deleting the `offload`
+leaves removes the port from the generated flowtable. A user flowtable always
+wins: a port it lists is never in the generated one (a device can be in only one
+flowtable per table, and unbinding a hardware flowtable disengages the ASK port).
+The `hardware-offload-delay` global option applies to both. Bridged traffic uses
+static FDB entries instead (see "Bridge offload" below).
 
-#### Flow learning: hardware flowtable
+#### Flow learning: explicit hardware flowtable (optional)
+
+Use an explicit flowtable to control which traffic offloads (custom match rules,
+other exclusions); its ports leave the generated one.
 
 ```
 set firewall flowtable FT interface eth3

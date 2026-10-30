@@ -451,3 +451,19 @@
 # (module signing): echo 3 > /sys/module/wireguard/parameters/tx_lanes first.
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4016-wireguard-tx-lanes.patch
+
+# R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
+# Upstream-Status: Pending | Risk-Tier: C
+0176-dpaa-rx-stats-before-stack-verdict.patch
+
+# R2 of plans/ASK2-VENDOR-ASK-REVIEW.md: MAC admits frames larger than the RX buffer.
+# Upstream-Status: Pending | Risk-Tier: C
+0177-dpaa-memac-max-frame-from-mtu.patch
+
+# R5 of plans/ASK2-VENDOR-ASK-REVIEW.md: ingress CGR bounded by frames so a CPU flood cannot drain the RX pool.
+# Upstream-Status: Pending | Risk-Tier: C
+0178-dpaa-ingress-cgr-frames.patch
+
+# R12 of plans/ASK2-VENDOR-ASK-REVIEW.md: 10G RX BMI FIFO 24 KB -> 64 KB (module param).
+# Upstream-Status: Pending | Risk-Tier: C
+0179-fman-port-rx10g-fifo-size.patch

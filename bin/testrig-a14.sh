@@ -6,6 +6,7 @@
 #                    frames to stop reaching gen2 within ~1 s (no stale hardware rewrite).
 #   f266  FAM=4|6  : 100 sequential 20 KB TCP flows (REUSE=k cycles k fixed source ports to force 5-tuple reuse);
 #                    expect all complete, 0 HW_OFFLOAD conntrack entries and 0 ehash records after close.
+#                    NAT=1 (IPv4) masquerades gen1 behind eth4 first, to cover NAT44 FIN teardown.
 #   bin/testrig-a14.sh ttl|neigh|f266   (FAM=4 default; hosts and key from bin/testrig-env.sh)
 set -u
 . "$(dirname "$0")/testrig-env.sh"
@@ -49,7 +50,7 @@ if [ "$MODE" = ttl ]; then
   start_flow 5M 22
   echo "== offloaded entries: $(d "sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats" | grep -c keysz)"
   for H in 0 1 2; do
-    g1 "echo '$PROBE' >/tmp/a14probe.py; sudo python3 /tmp/a14probe.py $FAM $NIC1 $DMAC $SRC $DST $CP $PORT $H"; sleep 1
+    g1 "echo '$PROBE' >/tmp/a14probe.py; sudo python3 /tmp/a14probe.py $FAM $NIC1 $DMAC $SRC $DST $CP $PORT $H"; sleep 7  # refills the per-host ICMP error token bucket (burst 6, 1/s)
   done
   sleep 18
   ICMP=$(g1 "grep -c -E 'time exceeded|time-exceeded' /tmp/a14-icmp.txt")
@@ -91,16 +92,26 @@ s=socket.socket(socket.AF_INET$([ $FAM = 6 ] && echo 6),socket.SOCK_STREAM); s.s
 s.bind(('$DST',$PORT)); s.listen(64); d=b'x'*20000
 for i in range($N):
     c,_=s.accept(); c.recv(16); c.sendall(d); c.close()"
-  CLI="import socket
+  CLI="import socket,time
 ok=0
 for i in range($N):
-    s=socket.socket(socket.AF_INET$([ $FAM = 6 ] && echo 6),socket.SOCK_STREAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.settimeout(5); s.bind(('$SRC',$([ -n "${REUSE:-}" ] && echo "50000+i%$REUSE" || echo 0))); s.connect(('$DST',$PORT)); s.sendall(b'g'); n=0
+    s=socket.socket(socket.AF_INET$([ $FAM = 6 ] && echo 6),socket.SOCK_STREAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.settimeout(5); s.bind(('$SRC',$([ -n "${REUSE:-}" ] && echo "50000+i%$REUSE" || echo 0)))
+    for _ in range(400):
+        try: s.connect(('$DST',$PORT)); break
+        except OSError as e:
+            if e.errno != 99: raise
+            time.sleep(0.0005)
+    s.sendall(b'g'); n=0
     while True:
         b=s.recv(65536)
         if not b: break
         n+=len(b)
     s.close(); ok+=(n==20000)
 print(ok)"
+  if [ "${NAT:-0}" = 1 ] && [ "$FAM" = 4 ]; then   # NAT44: masquerade gen1 behind eth4, FINs then close translated flows
+    d 'sudo nft add table ip ask2c && sudo nft "add chain ip ask2c post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2c post oifname eth4 ip saddr 10.99.1.0/24 masquerade' || { echo "FAIL nat-setup"; exit 1; }
+    trap 'd "sudo nft delete table ip ask2c" >/dev/null 2>&1' EXIT
+  fi
   d "sudo conntrack -D -p tcp --dport $PORT >/dev/null 2>&1; true"
   g2 "[ -f /tmp/f266srv.pid ] && sudo kill \$(cat /tmp/f266srv.pid) 2>/dev/null; echo \"$SRV\" >/tmp/f266srv.py; (timeout 120 python3 /tmp/f266srv.py >/tmp/f266-srv.log 2>&1 & echo \$! >/tmp/f266srv.pid)"
   sleep 1
@@ -109,7 +120,7 @@ print(ok)"
   chk flows-completed "$(tail -1 /tmp/f266-ok.txt)" "$N"
   sleep 8
   d "sudo conntrack -L -p tcp --dport $PORT 2>/dev/null" >/tmp/f266-ct.txt
-  echo "ct_total=$(wc -l </tmp/f266-ct.txt) hw_offload=$(grep -c HW_OFFLOAD /tmp/f266-ct.txt)"
+  echo "ct_total=$(wc -l </tmp/f266-ct.txt) hw_offload=$(grep -c HW_OFFLOAD /tmp/f266-ct.txt) sw_offload=$(grep -c "\[OFFLOAD\]" /tmp/f266-ct.txt)"
   awk '{print $4}' /tmp/f266-ct.txt | sort | uniq -c
   chk ehash-after "$(d "sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats" | grep -c keysz)" 0
   chk hw-offload-after "$(grep -c HW_OFFLOAD /tmp/f266-ct.txt)" 0

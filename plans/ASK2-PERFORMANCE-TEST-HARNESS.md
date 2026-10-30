@@ -12,6 +12,16 @@ Gateway (NXP LS1046A) router. It covers three device-under-test (DUT) stacks:
 | **OWRT** | OpenWrt with NXP ASK (vendor SDK) | CMM + CDX, conntrack-driven |
 | **OPNS** | OPNsense / FreeBSD with the NXP ASK port | CMM + CDX, pf-state-driven |
 
+The full list of offload tests and the result ledger are described in
+`plans/OFFLOAD-TEST-CATALOGUE.md` and `perf/catalogue.csv`. That catalogue
+also lists vendor-only capabilities, which tests run on each build, how many
+repetitions each gets, and the result ledger under `perf/`. This document
+covers how to set up the rig and run the drivers.
+
+The catalogue's §3.13 adds a cross-OS UDP throughput/loss/jitter protocol.
+Its U rows are planned/manual: the current quick driver is TCP-only, and
+`testrig-udp-sweep.sh` is a low-rate ASK2 MTU check, not a UDP benchmark.
+
 Everything here can be rebuilt with commodity hardware and the scripts in
 `bin/`. No step needs access to a particular lab: every host name, login,
 key and path comes from one settings file (§2.4), and the scripts have no

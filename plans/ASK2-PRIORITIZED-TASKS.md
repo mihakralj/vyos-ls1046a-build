@@ -192,6 +192,10 @@ flowchart TD
 - **T-M6-A4:** forced DDR/MURAM/FQ allocation failures, no partial cookie or
   record, no `in_hw`, flat MURAM. Needs ASK2-specific fault injection; the
   production image reports `failslab=false`.
+  First injector (2026-10-27, uncommitted): `ask.fault_cookie_nth=N` fails every Nth
+  flow-cookie allocation in `ask_hw_cookie_alloc()` (default 0 = off). Board gate:
+  set N, run `testrig-a14.sh f266`, expect failed inserts fall back to software
+  with flat MURAM and `pcd-snapshot diff` clean. DDR/MURAM/FQ injectors still open.
 - **IPsec Tier 1 reboot-clean: PASS 2026-10-21** (`.185`, image 0729, runtime
   IKEv2 PSK tunnel with dell2, AES-CBC-256/SHA2-256). 20 s × 4 streams with a
   rekey at 8 s: CAAM `rq_dequeued` 809 → 1,030,444, `ib_bytes_decrypted`

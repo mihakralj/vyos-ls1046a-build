@@ -1,0 +1,1 @@
+run_id,campaign_id,test_id,rep,dut_os,dut_host,slot,image,started_utc,finished_utc,metric,value,unit,hw_ratio,verdict,dut_busy,dut_softirq,gen_cpu,retrans,rx_errs,raw_ref,note,variant_id,pair_id,protocol,family,direction,payload_bytes,streams,offered_bps,duration_s,warmup_s,proof_ref

@@ -12,8 +12,9 @@ The receiver answers every datagram with 1 byte so conntrack sees an established
 DUT FragCreates is printed for information only: the vendor's patched kernel counts hardware
 fragmentation there too, so it does not separate software from hardware.
 
+Concurrent flows: run two copies with INSTANCE=0 and INSTANCE=1 (distinct ports and 5-tuples).
 Usage: bin/testrig-pppoe-frag.py ask2|vendor [count] [pps] [case,case,...]
-Cases: ctl-v4-1000 ctl-v6-1000 (controls that need no fragmentation), v4-dfclear v4-dfset v6, and the
+Cases: v4-j2000/3000/3500 and v6-j2000/3000/3500 (jumbo ingress; set MTU 3600 on the LAN port and gen2 first), ctl-v4-1000 ctl-v6-1000 (controls that need no fragmentation), v4-dfclear v4-dfset v6, and the
 -warm variants, which first offload the flow with small datagrams so the oversize ones hit a live record.
 Needs the PPPoE session up (ASK2: dell1 root ns, or RIG_NS=<netns> for the second DUT; vendor:
 bin/testrig-pppoe-vendor.sh up).
@@ -47,7 +48,10 @@ else:
     # RIG_NS: the generator ports facing this DUT live in that netns (second ASK2 DUT)
     NS = f"sudo ip netns exec {os.environ['RIG_NS']} " if os.environ.get("RIG_NS") else ""
     DUT = testrig_env.require(CFG, "ASK2_DUT")
-PORT = 5999
+# INSTANCE=n shifts the receiver port and the warm source ports so several instances can run at once
+# (concurrent-flow case); the per-instance share/reasm figures then include the other instances' frames.
+INST = int(os.environ.get("INSTANCE", "0"))
+PORT = 5999 - 10 * INST
 
 RECV = r'''
 import socket, sys, time, json
@@ -61,7 +65,7 @@ s.settimeout(0.5)
 end, n, other = time.time() + dur, 0, {}
 while time.time() < end:
     try:
-        data, peer = s.recvfrom(4096)
+        data, peer = s.recvfrom(65535)
     except socket.timeout:
         continue
     if len(data) == plen:
@@ -155,7 +159,7 @@ def run_case(name, fam, mode, dst, plen, warm_port=0):
     rx.stdin.write(RECV)
     rx.stdin.close()
     time.sleep(2)
-    sp = f" {warm_port}" if warm_port else ""
+    sp = f" {warm_port - 10 * INST}" if warm_port else ""
     if warm:
         ssh(D2, f"{NS}python3 - {fam} {mode} {dst} {warm} {PPS} 100{sp}", stdin=SEND, timeout=int(dur) + 60)
         time.sleep(1)
@@ -203,7 +207,11 @@ CASES = [("ctl-v4-1000", "4", "dfclear", "10.99.50.1", 972),  # control: fits th
          ("v4-dfset", "4", "dfset", "10.99.50.1", 1472),
          ("v6", "6", "default", "fd99:50::1", 1452),
          ("v4-dfclear-warm", "4", "dfclear", "10.99.50.1", 1472, 5990),  # flow already offloaded
-         ("v6-warm", "6", "default", "fd99:50::1", 1452, 5991)]
+         ("v6-warm", "6", "default", "fd99:50::1", 1452, 5991),
+         # R1 jumbo ingress: the LAN port and gen2 need MTU >= the IP size first (ASK range is 1280-3600)
+         ("v4-j2000", "4", "dfclear", "10.99.50.1", 1972), ("v6-j2000", "6", "default", "fd99:50::1", 1952),
+         ("v4-j3000", "4", "dfclear", "10.99.50.1", 2972), ("v6-j3000", "6", "default", "fd99:50::1", 2952),
+         ("v4-j3500", "4", "dfclear", "10.99.50.1", 3472), ("v6-j3500", "6", "default", "fd99:50::1", 3452)]
 for c in CASES:
     if ONLY is None or c[0] in ONLY:
         run_case(*c)
