@@ -40,6 +40,11 @@ on:
         type: boolean
         required: false
         default: false
+      kasan:
+        description: 'KASAN debug build (opt-in): generic inline KASAN + vmalloc for board test runs (large slowdown; not for throughput measurements). Production images must leave this false.'
+        type: boolean
+        required: false
+        default: false
     secrets:
       MOK_KEY:
         required: false
@@ -269,6 +274,7 @@ jobs:
       - name: Setup kernel config and patches
         env:
           KUNIT: ${{ inputs.kunit }}
+          KASAN: ${{ inputs.kasan }}
         run: |
           # P3: validate fixup files before running them (2-second gate)
           python3 bin/test-fixups.sh
