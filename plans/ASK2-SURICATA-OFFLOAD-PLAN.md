@@ -1,6 +1,7 @@
 # ASK2 Suricata flow-offload plan
 
-**Status:** Design only. No Suricata approval or offload integration is
+**Status:** Design only, scheduled as step G7 (flow shunting) in
+`ASK2-MASTER-PLAN.md` §3.1. No Suricata approval or offload integration is
 implemented. Do not treat the target behavior below as available in the current
 image.
 
@@ -63,6 +64,61 @@ design. They must not be treated as approval by themselves: the implementation
 must demonstrate that they produce a positive, correctly scoped authorization
 for the same flow ASK2 will install. An EVE-driven agent is a less desirable
 fallback because it adds another control plane and can race packet forwarding.
+
+## Flow shunting
+
+Scheduled as step G7 in `ASK2-MASTER-PLAN.md` §3.1. It depends on G1 (R10
+generated flowtable rule) and G3 (R11 dependency retirement). Shunting is the
+concrete form of the approval gate above. Suricata inspects the first part of
+each flow inline, then hands the rest to the ASK2 hardware path.
+
+```mermaid
+flowchart LR
+    P["new flow packets"] --> Q["nft forward: queue to Suricata (NFQUEUE, fail-open)"]
+    Q --> S{"Suricata verdict"}
+    S -- "alert / drop" --> D["drop or SW, never marked"]
+    S -- "stream depth reached or bypass keyword" --> M["packet mark = bypass-mark"]
+    M --> C["nft: ct mark set meta mark"]
+    C --> F["ct mark bypass: flow add @ft (offload)"]
+    F --> H["ASK2 REPLACE: HW ehash"]
+    S -- "still inspecting" --> W["SW forward, unmarked"]
+```
+
+Mechanism:
+1. **Inline inspection.** nftables queues unmarked forward traffic on the
+   offloaded ports to Suricata with `queue num N bypass`. This needs inline
+   NFQ mode, which the native VyOS service does not render today, so it needs
+   a vyos-1x template change under `service suricata`.
+2. **Shunt signal.** Suricata's NFQ `bypass-mark`/`bypass-mask` marks packets
+   of flows that it bypasses locally. The triggers are stream reassembly depth
+   (`stream.bypass: yes` with `stream.reassembly.depth`) and the rule keyword
+   `bypass` (for example, for known-good bulk TLS/video). Alerted or dropped
+   flows are never marked.
+3. **Persist to conntrack.** `ct mark set meta mark and <mask>` on the first
+   marked packet. Queue rules skip flows whose `ct mark` already carries the
+   bit, so they no longer reach Suricata.
+4. **Gate the flowtable.** The G1-generated `flow add @ft` rule carries
+   `ct mark and <mask> == <mask>` when Suricata shunting is enabled. `ask.ko`
+   needs no change, because flowtable learning is the only path into REPLACE.
+5. **Revocation.** On a Suricata reload, restart or stop, or an operator
+   flush, clear the mark bit on all conntrack entries (`conntrack -U --mark
+   0/<mask>`) and flush the flowtable. The flows then take DESTROY back to SW,
+   and later packets are queued again. A later alert on an already-shunted
+   flow is impossible by design, because Suricata no longer sees it. Document
+   that as the trade-off.
+6. **Failure.** NFQUEUE `bypass` (fail-open) forwards in SW when Suricata is
+   down, but those packets carry no mark, so nothing new reaches HW. Already
+   shunted flows stay in HW until they are revoked; the initial policy revokes
+   all of them on Suricata stop.
+
+Shunting acceptance, in addition to the validation stages below:
+- A flow shorter than the stream depth never appears in `fe_ehash_stats`.
+- A long flow reaches HW only after the depth, measured in bytes seen by Suricata.
+- A flow matching an alert rule is never offloaded.
+- With Suricata stopped, new flows are 0 % HW and old flows are revoked.
+- `ask-check` reports the shunted, revoked and HW counts.
+- Throughput of a long shunted flow matches the unicast HW cell.
+- Short-flow CPS with inspection is recorded as the new SW-bound limit.
 
 ## Decisions and safety contract
 

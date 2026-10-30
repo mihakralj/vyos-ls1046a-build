@@ -983,8 +983,9 @@ KUNIT_EXPECT_TRUE(test, (flags & ASK_ACT_NAT_SRC) != 0);
  * 0 = none; DECAP = this tuple's only encap is PPP_SES (non-zero session);
  * ENCAP = this tuple has no encap, the other tuple's only encap is PPP_SES and
  * this tuple transmits DIRECT (concentrator MAC from out.h_dest);
- * -EOPNOTSUPP = everything else (PPPoE over VLAN, VLAN on the LAN side,
- * session 0, encap without a DIRECT xmit). Non-flowtable cookies are 0.
+ * -EOPNOTSUPP = everything else (VLAN on the LAN side, QinQ, HW-stripped
+ * tag, session or VID 0, encap without a DIRECT xmit). G2: one session tag
+ * is accepted in either encap order. Non-flowtable cookies are 0.
  */
 static void ask_flow_offload_test_pppoe_cookie(struct kunit *test)
 {
@@ -1046,13 +1047,39 @@ t1->encap[0].id = 0;
 KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
 KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
 
-/* PPPoE over VLAN: not yet supported. */
+/* G2 PPPoE over VLAN, kernel order { PPP_SES, 8021Q }: both ways, VID 10. */
 t1->encap[0].id = 7;
 t1->encap_num = 2;
 t1->encap[1].proto = htons(ETH_P_8021Q);
 t1->encap[1].id = 10;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), ASK_PPPOE_DECAP);
+KUNIT_EXPECT_EQ(test, pi.sid, (u16)7);
+KUNIT_EXPECT_EQ(test, pi.vid, (u16)10);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), ASK_PPPOE_ENCAP);
+KUNIT_EXPECT_EQ(test, pi.sid, (u16)7);
+KUNIT_EXPECT_EQ(test, pi.vid, (u16)10);
+
+/* Reverse order is the same session. */
+t1->encap[0].proto = htons(ETH_P_8021Q);
+t1->encap[0].id = 10;
+t1->encap[1].proto = htons(ETH_P_PPP_SES);
+t1->encap[1].id = 7;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), ASK_PPPOE_DECAP);
+KUNIT_EXPECT_EQ(test, pi.vid, (u16)10);
+
+/* A tag the HW already stripped, VID 0, and QinQ are refused. */
+t1->in_vlan_ingress = BIT(0);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
+t1->in_vlan_ingress = 0;
+t1->encap[0].id = 0;
 KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), -EOPNOTSUPP);
 KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
+t1->encap[0].id = 10;
+t1->encap[1].proto = htons(ETH_P_8021Q);
+t1->encap[1].id = 20;
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), 0);
+t1->encap[1].proto = htons(ETH_P_PPP_SES);
+t1->encap[1].id = 7;
 
 /* encap_num bounds the scan: a stale PPP_SES past it is ignored. */
 t1->encap_num = 0;

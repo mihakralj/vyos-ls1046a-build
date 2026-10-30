@@ -1,6 +1,6 @@
 # ASK2 Master Plan
 
-**Version 2.34.0 · 2026-10-19**
+**Version 2.35.0 · 2026-10-29**
 
 This is the single ASK2 task list and execution order. Feature plans own
 detailed designs and runbooks; `ASK2-VENDOR-PARITY.md` owns current measurement
@@ -77,7 +77,7 @@ cannot forward in software. Vendor source support is not a live benchmark.
 | Bridge | B7b access↔trunk pop/push, IRB, routed+bridged on one port, PPPoE-session bridging; QinQ remains unsupported | T-M6-2; bridge plan |
 | Multi-table dispatch | One key profile/table per port prevents simultaneous L2/routed/ESP classes | T-M6-DISPATCH; bridge plan |
 | VLAN | QinQ/802.1ad/stacked tags and DSCP→PCP absent; routed PCP≠0 fallback needs board proof | T-M6-VLAN2 |
-| PPPoE | PPPoE-over-VLAN hardware path and relay absent; current-image validation, churn and exhaustion still open | T-M6-SP4; PPPoE plan |
+| PPPoE | PPPoE-over-VLAN hardware path implemented 2026-10-29 (G2, HW gate pending); relay absent; current-image validation, churn and exhaustion still open | T-M6-SP4; PPPoE plan |
 | Tunnels | 6in4 and 4in6 absent; other modes require vendor datapath proof before scope expansion | T-M6-SP5 / TN |
 | QoS | Rate limit on ASK-forwarded traffic, CEETM shaping/scheduling, DSCP→queue and exception-path rate limit absent; ingress policer bypassed on ASK-engaged ports | T-M6-QOS |
 | Parser safety | F-266 transit gate, TTL/hop-limit expiry punts, IKE/NAT-T control separation | T-M6-SP1 / SP2 / SP3 |
@@ -142,7 +142,7 @@ programming recipes. Resolve contradictions before touching code.
 | Priority | Work | Dependency / exit |
 |---|---|---|
 | 1 | **B7b access↔trunk pop/push** (silicon gate and regression smoke checks PASS 2026-10-20 on cold-booted `.155`, image 0326, commit `1e845e2d`) | IPv4/IPv6 pop/push wire/hit/fallback/churn gates passed. On a second cold boot: B6/B7a zero failures; routed/NAT/VLAN/PPPoE quick matrix 23/23 HW. Teardown PCD state exact, MURAM unchanged. Separate F-266/A14 correctness, capacity/soak and vendor-parity gates remain open. Runbook: `ASK2-BRIDGE-OFFLOAD-PLAN.md` §6.1 |
-| 2 | F-266 FIN/RST transit and NAT correctness; A14 IPv6 TTL and stale-neighbour safety | Both FAILED 2026-10-18; must pass before connection-scale claims or new default-on safety paths |
+| 2 | F-266 FIN/RST transit and NAT correctness; A14 IPv6 TTL and stale-neighbour safety | FAILED 2026-10-18; **PASS 2026-10-29** on `.185` (A14 IPv4/IPv6 10/10; F-266 N=300 IPv4/IPv6 with and without reuse). NAT44 FIN still unmeasured on the rig |
 | 3 | Existing-feature acceptance: PPPoE cycles/exhaustion/soak, bridge B2/capacity (debugfs on `.149`), resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
 | 4 | IPsec Tier 1 reboot-clean, then Tier 2 design/bring-up | Full path required for parity |
 | 5 | Multi-table dispatch; PPPoE-over-VLAN; multicast | Dispatch must prove coexistence before IRB/mixed classes/ESP coexistence |
@@ -151,6 +151,102 @@ programming recipes. Resolve contradictions before touching code.
 | Parallel, not on the active rig | Phase 2 code/patch consolidation | No behavior change; preserve regression evidence |
 | After correctness gates | Current pps, scale, latency and soak; final per-feature vendor comparisons | No historical figures substituted for current acceptance |
 | Separate track | WireGuard, VPP ZC, upstream preparation, genl per-op policies | Not missing vendor hardware features |
+
+### 3.1 Vendor-gap implementation order (2026-10-29)
+
+This sequence implements the remaining vendor-ASK gaps from §1.2 and
+`ASK2-VENDOR-ASK-REVIEW.md` (R6–R13). It runs after the acceptance work in
+priorities 1–3 above and replaces the coarse ordering of priorities 4–6. Status on
+2026-10-29: unicast, NAT, routed VLAN, PPPoE and HW fragmentation are at
+parity (paired `.185`/`.70` runs, review §13). Everything below is open.
+
+The ordering rules:
+- Operator-visible feature gaps that block common deployments come first:
+  PPPoE over VLAN (ISP access), IRB and multicast (LAN/IPTV).
+- Work that fits the current single-table key comes before the classifier
+  change that needs it. PPPoE over VLAN fits the existing 50-byte key: VID
+  at bytes 46–47 and SID at 48–49 are both already extracted.
+- Multi-table dispatch comes before any feature that needs two traffic classes
+  on one port (IRB, ESP alongside routed traffic).
+- Retirement correctness (R11) comes before IRB and multicast, because a stale
+  L2 or replication entry forwards silently.
+- Each step ships in its own CI image and passes its gate on a cold-booted DUT
+  before the next silicon step starts.
+
+```mermaid
+flowchart TD
+    G1["G1 R10 one-line enable"]
+    G2["G2 PPPoE over VLAN"]
+    G3["G3 R11 dependency retirement audit"] --> G4["G4 multi-table dispatch"]
+    G4 --> G5["G5 bridge IRB and mixed L2/routed"]
+    G3 --> G6["G6 multicast"]
+    G5 --> G6
+    G1 --> G7["G7 Suricata flow shunting"]
+    G3 --> G7
+    G8["G8 R9 admission budget"]
+    G4 --> G9["G9 IPsec ESP Tier 2"]
+    G4 --> G10["G10 QoS on offloaded traffic"]
+    G4 --> G11["G11 tunnels 6in4/4in6"]
+    G2 --> G12["G12 QinQ and DSCP to PCP"]
+    G13["G13 R7 step 2 degraded mode"]
+    G14["G14 R6 PPPoE concentrator MAC"]
+```
+
+| Step | Work | Why here | Gate / exit | Owner |
+|---|---|---|---|---|
+| G1 | **R10 one-line enable.** `offload ipv4\|ipv6` generates a hidden flowtable and an early offload rule for the armed ports. Excludes the FTP, SIP and PPTP control ports by default. | vyos-1x only, small, no silicon. Today an armed port offloads nothing without a hand-written rule. G7 needs the generated rule as its hook. | Fresh config with only `offload ipv4 ipv6` passes the quick matrix as HW. `delete … offload` removes the rule and flowtable. The exclusions are verified with an FTP control session (SW). | **Implemented 2026-10-29** in `data/vyos-1x-058-offload-auto-flowtable.patch` (generated `VYOS_FLOWTABLE_ASK_AUTO` + `VYOS_ASK_AUTO_FORWARD` at `filter + 10`; patch-rot probe 44/44 ok; nft syntax validated in a netns on `.185`). HW gate pending the next image. `ASK2-VENDOR-ASK-REVIEW.md` R10 |
+| G2 | **PPPoE over VLAN** (T-M6-SP4). Decap and encap of PPPoE inside an 802.1Q tag on the WAN port. **Implemented 2026-10-29** (`ask_flow_cookie_pppoe()` VID, POP/PUSH cross-check, kernel fixup F-272 for the 0x42 inner EtherType); HW gate pending. | Common ISP access topology. The existing key already holds VID and SID, so the work is in the AD/encap path, not the classifier layout. | Wire capture of tag+PPPoE headers. HW hit both directions. Paired parity cell against `.70`. A churn and exhaustion pass. | PPPoE plan |
+| G3 | **R11 dependency retirement audit.** **Audit done 2026-10-29 (§3.2); route/rule and MTU/MAC retirement added to ask.ko, HW gate pending.** Builds an event table against the vendor's (neighbour, route prefix, MTU/carrier/MAC, upper-device, FDB move/age, bridge VLAN, rule add/delete) and fixes each missing notifier. | A stale HW entry forwards silently. IRB (FDB moves), multicast (MDB changes) and Suricata revocation all depend on it. | Each event is tested with a live HW flow: the flow leaves HW within 1 s and traffic follows the new path. | `ask_neigh.c`, `ask_flow_offload.c`, R11 |
+| G4 | **Multi-table dispatch (T-M6-DISPATCH).** More than one key profile and table per port, so L2, routed and ESP classes can coexist. **Status 2026-10-29: not started in silicon.** The design is in §4 T-M6-DISPATCH (soft-parser LCV → one KG scheme per class → one RCCB row per scheme). The first step is a rig experiment, not shippable code: two schemes (routed plus L2_DA) on a cold-booted sacrificial `.185` eth3, tested against the `next_engine=3` RX wedge first. | Prerequisite for IRB (G5) and ESP alongside routed traffic (G9). The largest classifier change, so the S0 qdrant gate applies. | The routed, VLAN, PPPoE and bridge quick matrix stays 100 % HW on one port with two classes engaged. `pcd-snapshot` S1→S0 is byte-exact. MURAM is at baseline after disengage. | Bridge plan, §4.6 |
+| G5 | **Bridge IRB, routed plus bridged on one port, PPPoE-session bridging** (T-M6-2). **Split 2026-10-29.** G5a (no dispatch needed): routed port → `br0` → member port. The ingress is a ROUTED port, so only the egress side changes. Resolve the neighbour on the L3 device (`br0`) and the egress port from the forward path (`out.hw_ifidx`), then enqueue to the member's TX FQ. The reverse direction stays SW until G4. G5b: the full IRB after G4. | The main LAN topology on a VyOS gateway (bridge with a routed `br` address). Needs G4. | Bridge plan gates. Routed↔bridged HW hit through `br0`. B7b paired parity. | Bridge plan |
+| G6 | **Multicast** (T-M6-MC): IPv4/IPv6 routed multicast and MDB-owned replication. **Design note 2026-10-29:** the nft flowtable never carries multicast; ipmr forwards it. The control source is therefore the FIB notifier's `RTNL_FAMILY_IPMR`/`IP6MR` MFC and VIF events, which the G3 notifier already receives and ignores. G6a: a single-OIF (S,G) record using the routed key and no replication. G6b: N-OIF replication, which needs an FMan replicator or a fan-out FQ primitive, proven on the rig first. | IPTV use case. Routed (S,G) uses the existing routed key; replication into a bridge needs G5's IRB path. | Join/leave/retire tests with a live stream. Replication count matches the MDB/MFC. | T-M6-MC |
+| G7 | **Suricata flow shunting.** Suricata inspects the start of each flow inline (NFQUEUE). At stream depth, or on a `bypass` verdict, it sets a bypass mark. nftables copies the mark to the conntrack mark, and only flows with that mark reach the flowtable. ASK2 then offloads them. Unmarked, alerted or revoked flows stay in SW. | No silicon or key change; it uses G1's generated rule and G3's revocation. Can run in parallel with G4–G6 because it needs no rig silicon time until its stage 6. | `ASK2-SURICATA-OFFLOAD-PLAN.md` stages 1–6, plus the shunting acceptance there. No unmarked flow appears in `fe_ehash_stats`. A Suricata reload or stop revokes all flows to SW. `ask-check` shows the approved, revoked and HW counts. | `ASK2-SURICATA-OFFLOAD-PLAN.md` |
+| G8 | **R9 admission budget.** A tested ceiling (start at 32,768 directions, as the vendor does), enforced in `ask.ko` and reported in `max-flows`. Overflow stays in SW, is counted as a reject, and never evicts. | Small `ask.ko` change. Should land before G9 adds per-SA tables and before capacity claims. | The harness fills the table, overflows by 10 % and checks that overflow flows are SW with 0 HW. No DESTROY of the other direction. MURAM and DDR return to baseline. | `ask.ko`, R9 |
+| G9 | **IPsec ESP Tier 2.** The FMan→CAAM→FMan path, starting with AES-CBC-SHA256, IPv4/IPv6 tunnel mode, SA lifecycle, ESN/anti-replay, rekey and NAT-T. GCM stays refused (CAAM A24a). | Largest remaining parity item. ESP coexisting with routed traffic needs G4. | IPsec plan Tier 2 gates. Paired throughput against `.70`. Reboot-clean. | IPsec plan, T-M6-4 |
+| G10 | **QoS on offloaded traffic** (T-M6-QOS): rate limits on ASK-forwarded traffic, the ingress policer honoured on engaged ports, DSCP→queue, and an exception-path rate limit. CEETM shaping comes last. | Needs dispatch to coexist with the policer and RSS schemes. | Wire-level rate cap within 5 %. The policer is not bypassed. Disengage is reversible. | T-M6-QOS |
+| G11 | **Tunnels 6in4 and 4in6** (T-M6-SP5). Other modes only with vendor datapath proof. | Separate key class, so it needs G4. | Forward, inverse and fallback gates. Paired parity if the vendor offloads them on `.70`. | T-M6-SP5 |
+| G12 | **QinQ / 802.1ad and DSCP→PCP** (T-M6-VLAN2). | Extends the VLAN key after G2 settles the VLAN plus encapsulation path. | Stacked-tag wire capture plus a HW hit. Routed PCP≠0 fallback proven. | T-M6-VLAN2 |
+| G13 | **R7 step 2: degraded mode** (disengage to RSS, settle, re-engage with a rate limit). | Only after F-271 counters show a recoverable sync-timeout class in the field. Step 1 shipped in image 2026.10.29-2253. | Model test, then a live sync timeout recovered without a cold boot. | R7 |
+| G14 | **R6: PPPoE concentrator MAC in the key.** | Deferred: residual risk accepted unless the WAN-segment threat is taken into scope. Uses the last 6 key bytes (56 = KeyGen maximum). | R6 plan in the review §10. S0 qdrant gate. | R6 |
+
+
+### 3.2 G3 retirement audit (2026-10-29)
+
+Each row is an event that can make a published HW record wrong, and what
+retires the record. The vendor CMM listens for all of these. "Kernel" means
+the flowtable itself sends `FLOW_CLS_DESTROY`. "ask.ko" means a notifier in
+the module removes the silicon record. After an ask.ko removal the kernel
+flow stays `[HW_OFFLOAD]`, forwards in software, and `flow_offload_refresh()`
+reoffloads it with current state.
+
+| Event | Stale state in the record | Retired by | Status |
+|---|---|---|---|
+| Route add, replace or delete | Egress port, next hop | ask.ko FIB notifier (`ask_fib_event`): removes routed records whose destination or DNAT destination is inside the changed prefix, coalesced over 50 ms. The kernel checks `dst_check()` only on the software fast path (`nf_flow_dst_check()`), which an offloaded flow never reaches, and 6.18 GC has no stale-dst check. | **Added 2026-10-29** |
+| Policy-rule add or delete | Any routing decision | ask.ko FIB notifier `FIB_EVENT_RULE_*`: removes every routed record | **Added 2026-10-29** |
+| Neighbour MAC change or failure | `next_hop_mac` | ask.ko netevent `NETEVENT_NEIGH_UPDATE` (A14 rebuild) | Covered |
+| Device down or unregister (port, VLAN vif) | Everything | Kernel `nf_flow_table_cleanup()` → DESTROY | Covered |
+| PPPoE session down | SID, concentrator MAC | ask.ko `ask_pppoe_netdev_event` (ppp DOWN/UNREGISTER) | Covered |
+| ppp MTU change | F-262 egress MTU | ask.ko, same notifier, `NETDEV_CHANGEMTU` on ppp | **Added 2026-10-29** |
+| Port or VLAN vif MTU change | F-262 egress MTU | ask.ko `NETDEV_CHANGEMTU`: removes routed records whose ingress, egress or next-hop device is the device or its real device | **Added 2026-10-29** |
+| Port or VLAN vif MAC change | `egress_mac` in `INSERT_L2_HDR` | ask.ko `NETDEV_CHANGEADDR`, same flush | **Added 2026-10-29** |
+| Carrier loss without admin down | Nothing wrong; frames to a dead port drop, same as software | None needed | Parity |
+| Bridge join or leave, upper change | Port role, VLAN records | ask.ko `ask_bridge_netdev_notifier` (CHANGEUPPER) | Covered |
+| FDB add, move, age-out | Bridge egress port | ask.ko switchdev FDB notifier | Covered |
+| Bridge VLAN, STP, flags | Bridge records | ask.ko switchdev blocking notifier | Covered |
+| Firewall rule add or delete | Already-accepted flow keeps forwarding | Nothing, same as the kernel software flowtable; flows retire on timeout or FIN/RST | Parity (documented) |
+| `pppoe_offload`, `ipv6_hw_frag` kill switches, port disengage | Records of that class | ask.ko flushers | Covered |
+
+The new rows still need a HW gate. On `.185`, change the eth3 MTU and then the
+eth4 MAC under a running routed flow. Each change must log `device MTU/MAC
+change, removed N HW flow(s)`. The flow must reoffload with the new MTU or
+source MAC on the wire, with no stale-MAC frames in a capture. For routes,
+add a more-specific static route to the flow's destination via a different
+next hop under a running flow. It must log `route change, removed N HW
+flow(s)`, and traffic must move to the new next hop within 1 s.
+
+R8 (statistics cost at 8k/16k flows) and R13 (parser reach, `FMBM_RIM`) are
+measurements, not features. Run them on the rig between steps whenever the
+DUT is otherwise idle.
 
 ## 4. Open work program
 
@@ -536,7 +632,8 @@ be silently consumed.
   Owner `ASK2-WIREGUARD-FASTPATH-PLAN.md` (history in `archive/`).
 - **Beyond parity:** sub-100 ms per-flow engage, port-scoped conntrack
   teardown, non-proxy HW observability, ≥16 Gbit/s VLAN↔port bidirectional.
-- **Suricata:** design only (`ASK2-SURICATA-OFFLOAD-PLAN.md`). The native
+- **Suricata:** scheduled as flow shunting, step G7 in §3.1
+  (`ASK2-SURICATA-OFFLOAD-PLAN.md`, "Flow shunting"). The native
   VyOS service is AF_PACKET IDS, not inline, so it cannot approve flows.
   With the factory-default offload it sees only each flow's slow-path prefix.
   Before any code, complete the plan's
