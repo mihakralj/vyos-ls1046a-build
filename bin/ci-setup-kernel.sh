@@ -72,6 +72,16 @@ if [ "${KUNIT:-false}" = "true" ]; then
   done
 fi
 
+# KASAN debug build (opt-in via the workflow `kasan` input -> KASAN env):
+# merge the KASAN fragment; the post-defconfig block below force-sets the
+# same symbols after merge_config.sh. Production builds skip both.
+if [ "${KASAN:-false}" = "true" ]; then
+  for frag in kernel/ask/kasan-config/*.config; do
+    echo "### KASAN build: appending kernel config fragment: $(basename "$frag")"
+    cat "$frag" >> "$DEFCONFIG"
+  done
+fi
+
 # Override the VyOS-merged net-sched fragment for NET_SCH_FQ.
 # vyos-build/scripts/package-build/linux-kernel/config/13-net-sched.config
 # is processed by merge_config.sh AFTER our defconfig, and it explicitly
@@ -994,6 +1004,16 @@ if [ "${KUNIT:-false}" = "true" ]; then
     # remove/reinsert lifecycle (ownership generations/tombstones,
     # T-M6-A3) under concurrent REPLACE/DESTROY/neighbour-churn stress.
     scripts/config --enable CONFIG_DEBUG_LIST
+    make olddefconfig
+fi
+
+# KASAN is inherited from the workflow step env (auto-build.yml).
+if [ "${KASAN:-false}" = "true" ]; then
+    echo "I: LS1046A — KASAN build: forcing generic inline KASAN + vmalloc"
+    scripts/config --enable CONFIG_KASAN
+    scripts/config --enable CONFIG_KASAN_GENERIC
+    scripts/config --enable CONFIG_KASAN_INLINE
+    scripts/config --enable CONFIG_KASAN_VMALLOC
     make olddefconfig
 fi
 

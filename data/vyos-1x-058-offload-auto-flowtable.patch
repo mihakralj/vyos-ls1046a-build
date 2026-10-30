@@ -21,8 +21,8 @@ index a893e05..24460f2 100644
 +    chain VYOS_ASK_AUTO_FORWARD {
 +        type filter hook forward priority 10; policy accept;
 +        ct state != established return
-+        meta l4proto tcp ct original proto-dst { 21, 1723 } return
-+        meta l4proto udp ct original proto-dst 5060 return
++        meta l4proto tcp ct original proto-dst { 21, 1723, 5060, 5061 } return
++        meta l4proto udp ct original proto-dst { 5060, 5061 } return
 +        meta l4proto { tcp, udp } counter flow add @VYOS_FLOWTABLE_ASK_AUTO
 +    }
 +{% endmacro %}

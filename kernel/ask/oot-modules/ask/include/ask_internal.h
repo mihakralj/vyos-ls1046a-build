@@ -960,6 +960,8 @@ void ask_flow_exit(void);
 
 /* The (sole) global flow table for PR7. Multi-fman support lands later. */
 struct ask_flow_table *ask_flow_default_table(void);
+u32 ask_flow_max_flows(void);
+u32 ask_flow_overflow_count(void);
 
 int  ask_flow_table_create(struct ask_flow_table *t, const char *tag);
 void ask_flow_table_destroy(struct ask_flow_table *t);
