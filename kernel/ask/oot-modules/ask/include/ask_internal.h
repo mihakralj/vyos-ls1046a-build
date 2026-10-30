@@ -460,6 +460,7 @@ bool ask_hw_vlan_offload_armed(void);
 bool ask_hw_bridge_offload_armed(void);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
 void ask_flow_pppoe_flush(void);
+void ask_flow_fdb_change(const u8 *addr, int ifindex);
 int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
 			  struct net_device *egress_dev);
 void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
