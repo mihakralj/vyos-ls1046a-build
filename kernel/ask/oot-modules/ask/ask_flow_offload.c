@@ -2856,7 +2856,7 @@ static int ask_devchg_collect(struct ask_flow *f, void *arg)
 {
 	struct ask_flush_victim *v;
 
-	if (!f->key.l3_proto || !f->key.l4_proto)
+	if (!f->key.l4_proto)
 		return 0;
 	if (!ask_devchg_snap_all && !ask_devchg_hit(f->oif) &&
 	    !ask_devchg_hit(f->key.iif) && !ask_devchg_hit(f->key.nh_ifindex))
