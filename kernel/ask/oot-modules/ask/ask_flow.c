@@ -324,6 +324,28 @@ return rhashtable_lookup_fast(&t->rht, &cookie, ask_flow_rht_params);
 }
 EXPORT_SYMBOL_GPL(ask_flow_lookup);
 
+/*
+ * R9 admission budget: the vendor ASK caps the table at 32768 directions
+ * and overflows to software. Same ceiling here; 0 disables the cap. It
+ * counts flow directions (one per ask_flow), so a bidirectional TCP
+ * connection uses two. An over-budget insert returns -ENOSPC and the flow
+ * stays on the kernel software path; ask_flow_overflow counts the refusals.
+ */
+static unsigned int ask_max_flows = 32768;
+module_param_named(max_flows, ask_max_flows, uint, 0644);
+MODULE_PARM_DESC(max_flows, "Admission ceiling on offloaded flow directions (0 = unlimited, default 32768)");
+static atomic_t ask_flow_overflow = ATOMIC_INIT(0);
+
+u32 ask_flow_max_flows(void)
+{
+	return ask_max_flows;
+}
+
+u32 ask_flow_overflow_count(void)
+{
+	return (u32)atomic_read(&ask_flow_overflow);
+}
+
 static int ask_flow_insert_core(struct ask_flow_table *t,
     u64 cookie,
     const struct ask_flow_key *key,
@@ -342,6 +364,13 @@ return -EINVAL;
 
 if (dir >= ASK_HW_DIR_NR)
 return -EINVAL;
+
+if (ask_max_flows && (u32)atomic_read(&t->num_flows) >= ask_max_flows) {
+atomic_inc(&ask_flow_overflow);
+pr_info_ratelimited("ask: flow: admission budget %u reached, cookie=0x%llx stays in software\n",
+    ask_max_flows, cookie);
+return -ENOSPC;
+}
 
 /*
  * F-112: Fast-path duplicate check BEFORE kzalloc().
