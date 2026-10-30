@@ -2904,6 +2904,101 @@ static void ask_devchg_queue(int ifindex)
 }
 
 /*
+ * G5a bridge egress (2026-10-30): a routed flow into a bridge (routed port ->
+ * br0 -> member) carries the member port and the destination MAC that the
+ * kernel took from the bridge FDB when it built the flow. The bridge moves or
+ * ages that MAC without telling the flow, so the silicon would keep sending to
+ * the old member. Retire every routed record whose next-hop MAC is the changed
+ * FDB entry, except when the entry was (re)learned on the port the record
+ * already uses.
+ */
+#define ASK_FDBCHG_MAX		16
+struct ask_fdbchg {
+	u8 addr[ETH_ALEN];
+	int ifindex;		/* port now holding the MAC, 0 = deleted */
+};
+static DEFINE_SPINLOCK(ask_fdbchg_lock);
+static struct ask_fdbchg ask_fdbchg_q[ASK_FDBCHG_MAX];
+static unsigned int ask_fdbchg_n;
+static bool ask_fdbchg_all;
+static struct ask_fdbchg ask_fdbchg_snap[ASK_FDBCHG_MAX];
+static unsigned int ask_fdbchg_snap_n;
+static bool ask_fdbchg_snap_all;
+static bool ask_fdb_live;
+
+static int ask_fdbchg_collect(struct ask_flow *f, void *arg)
+{
+	struct ask_flush_victim *v;
+	unsigned int i;
+	bool hit = false;
+
+	if (!f->key.l4_proto)
+		return 0;
+	for (i = 0; !hit && i < ask_fdbchg_snap_n; i++) {
+		const struct ask_fdbchg *c = &ask_fdbchg_snap[i];
+
+		hit = ether_addr_equal(c->addr, f->key.next_hop_mac) &&
+		      (!c->ifindex || (u32)c->ifindex != f->oif);
+	}
+	if (!hit && ask_fdbchg_snap_all)
+		hit = !is_zero_ether_addr(f->key.next_hop_mac);
+	if (!hit)
+		return 0;
+	v = kzalloc(sizeof(*v), GFP_ATOMIC);
+	if (!v)
+		return 0;
+	v->cookie = f->cookie;
+	v->generation = f->generation;
+	v->key = f->key;
+	list_add_tail(&v->node, arg);
+	return 0;
+}
+
+static void ask_fdbchg_flush_fn(struct work_struct *w)
+{
+	spin_lock_bh(&ask_fdbchg_lock);
+	memcpy(ask_fdbchg_snap, ask_fdbchg_q, sizeof(ask_fdbchg_snap));
+	ask_fdbchg_snap_n = ask_fdbchg_n;
+	ask_fdbchg_snap_all = ask_fdbchg_all;
+	ask_fdbchg_n = 0;
+	ask_fdbchg_all = false;
+	spin_unlock_bh(&ask_fdbchg_lock);
+	if (ask_fdbchg_snap_n || ask_fdbchg_snap_all)
+		ask_flow_flush_matching(ask_fdbchg_collect, "bridge FDB change");
+}
+static DECLARE_WORK(ask_fdbchg_flush_work, ask_fdbchg_flush_fn);
+
+/* Bridge FDB add/move/delete of @addr; @ifindex is the port now holding it,
+ * 0 when deleted. Called from the switchdev atomic notifier: never sleeps. */
+void ask_flow_fdb_change(const u8 *addr, int ifindex)
+{
+	unsigned int i;
+
+	if (!ask_flow_default_table())
+		return;
+	spin_lock_bh(&ask_fdbchg_lock);
+	/* Checked under the lock so exit's clear-then-cancel cannot race a
+	 * schedule_work() that already passed the check. */
+	if (!ask_fdb_live) {
+		spin_unlock_bh(&ask_fdbchg_lock);
+		return;
+	}
+	for (i = 0; i < ask_fdbchg_n; i++)
+		if (ether_addr_equal(ask_fdbchg_q[i].addr, addr))
+			break;
+	if (i < ask_fdbchg_n) {
+		ask_fdbchg_q[i].ifindex = ifindex;
+	} else if (ask_fdbchg_n < ASK_FDBCHG_MAX) {
+		ether_addr_copy(ask_fdbchg_q[ask_fdbchg_n].addr, addr);
+		ask_fdbchg_q[ask_fdbchg_n++].ifindex = ifindex;
+	} else {
+		ask_fdbchg_all = true;
+	}
+	schedule_work(&ask_fdbchg_flush_work);
+	spin_unlock_bh(&ask_fdbchg_lock);
+}
+
+/*
  * G3 route retirement (2026-10-29): the kernel checks a flow's cached dst
  * only on the software fast path (nf_flow_dst_check() in nf_flow_table_ip.c);
  * a hardware flow sends no packet there, so a route change never retires it
@@ -4717,6 +4812,11 @@ int ask_flow_offload_init(void)
 	ask_fib_nb_ok = !rc;
 	WRITE_ONCE(ask_fib_live, ask_fib_nb_ok);
 
+	/* G5a: ask_bridge's FDB notifier feeds ask_flow_fdb_change(). */
+	spin_lock_bh(&ask_fdbchg_lock);
+	ask_fdb_live = true;
+	spin_unlock_bh(&ask_fdbchg_lock);
+
 	ask_pr_info("flow_offload: ready (PR14y deferred-insert + PR14z9 active poll %d ms + PR14z10 dual-ifindex match + PR14z11 cookie-recovered next-hop)\n",
 		    ASK_FLOW_PENDING_POLL_INTERVAL_MS);
 	return 0;
@@ -4744,6 +4844,10 @@ void ask_flow_offload_exit(void)
 		unregister_netdevice_notifier(&ask_pppoe_netdev_nb);
 	cancel_work_sync(&ask_pppoe_flush_work);
 	cancel_work_sync(&ask_devchg_flush_work);
+	spin_lock_bh(&ask_fdbchg_lock);
+	ask_fdb_live = false;
+	spin_unlock_bh(&ask_fdbchg_lock);
+	cancel_work_sync(&ask_fdbchg_flush_work);
 	WRITE_ONCE(ask_fib_live, false);
 	if (ask_fib_nb_ok)
 		unregister_fib_notifier(&init_net, &ask_fib_nb);
