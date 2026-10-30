@@ -62,6 +62,9 @@
 #include <net/route.h>		/* rt_nexthop(): routed-endpoint next hop */
 #include <net/ip6_route.h>	/* rt6_nexthop() */
 #include <net/addrconf.h>
+#include <net/fib_notifier.h>	/* G3: route-change retirement */
+#include <net/ip_fib.h>
+#include <net/ip6_fib.h>
 #include <net/net_namespace.h>
 #include <net/netfilter/nf_flow_table.h>
 #include "include/ask_internal.h"
@@ -2577,14 +2580,18 @@ static u16 ask_resolve_ingress_vlan_vid(int iif, __be32 peer_v4)
  * FLOW_OFFLOAD_XMIT_DIRECT with the concentrator MAC in this tuple's out.h_dest.
  *
  * Returns 0 when neither tuple has a PPP_SES encap;
- *   ASK_PPPOE_DECAP: this tuple's only encap is PPP_SES (non-zero session),
- *                    the other tuple has none;
- *   ASK_PPPOE_ENCAP: this tuple has no encap, the other tuple's only encap is
- *                    PPP_SES (non-zero session) and this tuple transmits
+ *   ASK_PPPOE_DECAP: this tuple's encap is one PPP_SES (non-zero session)
+ *                    plus at most one 802.1Q tag (G2, PPPoE over VLAN), the
+ *                    other tuple has none;
+ *   ASK_PPPOE_ENCAP: this tuple has no encap, the other tuple's encap is one
+ *                    PPP_SES (+ at most one 802.1Q) and this tuple transmits
  *                    DIRECT (concentrator and source MACs filled in);
- *   -EOPNOTSUPP for anything else involving PPPoE (PPPoE over VLAN, VLAN on
- *                    the LAN side, session ID 0, which would key like a
- *                    plain frame, F-259).
+ *   -EOPNOTSUPP for anything else involving PPPoE (VLAN on the LAN side,
+ *                    QinQ, a tag the HW already stripped, session ID 0, which
+ *                    would key like a plain frame, F-259).
+ * The kernel records the session path outer-last (dev_fill_forward_path()
+ * walks ppp -> vlan -> eth, so encap[] = { PPP_SES, 8021Q }); accept either
+ * order. pi->vid is the session VLAN (0 = untagged).
  * The cookie is &flow->tuplehash[dir].tuple (nf_flow_offload_init); same
  * guard as ask_z11_other_src_v4(). A non-kernel cookie is not a flowtable flow.
  */
@@ -2598,10 +2605,29 @@ static bool ask_tuple_has_pppoe(const struct flow_offload_tuple *t)
 	return false;
 }
 
-static bool ask_tuple_only_pppoe(const struct flow_offload_tuple *t)
+static bool ask_tuple_pppoe_encap(const struct flow_offload_tuple *t,
+				  u16 *sid, u16 *vid)
 {
-	return t->encap_num == 1 &&
-	       t->encap[0].proto == htons(ETH_P_PPP_SES) && t->encap[0].id;
+	int i, n_ses = 0, n_vlan = 0;
+
+	*sid = 0;
+	*vid = 0;
+	if (t->encap_num < 1 || t->encap_num > NF_FLOW_TABLE_ENCAP_MAX)
+		return false;
+	for (i = 0; i < t->encap_num; i++) {
+		if (t->encap[i].proto == htons(ETH_P_PPP_SES)) {
+			n_ses++;
+			*sid = t->encap[i].id;
+		} else if (t->encap[i].proto == htons(ETH_P_8021Q) &&
+			   !(t->in_vlan_ingress & BIT(i))) {
+			n_vlan++;
+			*vid = t->encap[i].id;
+		} else {
+			return false;
+		}
+	}
+	return n_ses == 1 && n_vlan <= 1 && *sid &&
+	       (!n_vlan || (*vid && *vid < VLAN_VID_MASK));
 }
 
 int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
@@ -2624,15 +2650,13 @@ int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
 	if (!ask_tuple_has_pppoe(t) && !ask_tuple_has_pppoe(o))
 		return 0;
 
-	if (ask_tuple_only_pppoe(t) && !o->encap_num) {
-		pi->sid = t->encap[0].id;
+	if (!o->encap_num && ask_tuple_pppoe_encap(t, &pi->sid, &pi->vid)) {
 		pi->ifindex = t->iifidx;
 		return ASK_PPPOE_DECAP;
 	}
-	if (!t->encap_num && ask_tuple_only_pppoe(o) &&
+	if (!t->encap_num && ask_tuple_pppoe_encap(o, &pi->sid, &pi->vid) &&
 	    t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
 	    !is_zero_ether_addr(t->out.h_dest)) {
-		pi->sid = o->encap[0].id;
 		/* out.ifidx is the ppp netdev; out.hw_ifidx is the physical
 		 * port the session rides (nft_dev_path_info() hw_outdev). */
 		pi->ifindex = t->out.hw_ifidx ? t->out.hw_ifidx : t->out.ifidx;
@@ -2795,14 +2819,271 @@ static bool ask_pppoe_port_armed(int ifindex)
 	return armed;
 }
 
+/*
+ * G3 (R11 retirement audit, 2026-10-29): the kernel flowtable tears a flow
+ * down on NETDEV_DOWN (ask.ko handles neighbour and route events), but never on
+ * an MTU or MAC change of a device the flow uses. The silicon record keeps
+ * the egress MTU it was built with (F-262) and the source MAC baked into
+ * INSERT_L2_HDR, so it would keep forwarding oversized frames or frames from
+ * the old MAC. Remove every routed record whose ingress, egress or next-hop
+ * device is the changed device or its real (lower) device; the kernel flow
+ * then forwards in software and flow_offload_refresh() reoffloads it with
+ * the new values. Bridge records carry neither and are left alone.
+ */
+#define ASK_DEVCHG_MAX	16
+static DEFINE_SPINLOCK(ask_devchg_lock);
+static int ask_devchg_ifx[ASK_DEVCHG_MAX];
+static unsigned int ask_devchg_n;
+static bool ask_devchg_all;
+/* Snapshot the collector reads; only the (non-reentrant) work item writes it. */
+static int ask_devchg_snap[ASK_DEVCHG_MAX];
+static unsigned int ask_devchg_snap_n;
+static bool ask_devchg_snap_all;
+
+static bool ask_devchg_hit(u32 ifindex)
+{
+	unsigned int i;
+
+	if (!ifindex)
+		return false;
+	for (i = 0; i < ask_devchg_snap_n; i++)
+		if ((u32)ask_devchg_snap[i] == ifindex)
+			return true;
+	return false;
+}
+
+static int ask_devchg_collect(struct ask_flow *f, void *arg)
+{
+	struct ask_flush_victim *v;
+
+	if (!f->key.l3_proto || !f->key.l4_proto)
+		return 0;
+	if (!ask_devchg_snap_all && !ask_devchg_hit(f->oif) &&
+	    !ask_devchg_hit(f->key.iif) && !ask_devchg_hit(f->key.nh_ifindex))
+		return 0;
+	v = kzalloc(sizeof(*v), GFP_ATOMIC);
+	if (!v)
+		return 0;
+	v->cookie = f->cookie;
+	v->generation = f->generation;
+	v->key = f->key;
+	list_add_tail(&v->node, arg);
+	return 0;
+}
+
+static void ask_devchg_flush_fn(struct work_struct *w)
+{
+	spin_lock_bh(&ask_devchg_lock);
+	memcpy(ask_devchg_snap, ask_devchg_ifx, sizeof(ask_devchg_snap));
+	ask_devchg_snap_n = ask_devchg_n;
+	ask_devchg_snap_all = ask_devchg_all;
+	ask_devchg_n = 0;
+	ask_devchg_all = false;
+	spin_unlock_bh(&ask_devchg_lock);
+	if (ask_devchg_snap_n || ask_devchg_snap_all)
+		ask_flow_flush_matching(ask_devchg_collect,
+					"device MTU/MAC change");
+}
+static DECLARE_WORK(ask_devchg_flush_work, ask_devchg_flush_fn);
+
+static void ask_devchg_queue(int ifindex)
+{
+	unsigned int i;
+
+	spin_lock_bh(&ask_devchg_lock);
+	for (i = 0; i < ask_devchg_n; i++)
+		if (ask_devchg_ifx[i] == ifindex)
+			break;
+	if (i == ask_devchg_n) {
+		if (ask_devchg_n < ASK_DEVCHG_MAX)
+			ask_devchg_ifx[ask_devchg_n++] = ifindex;
+		else
+			ask_devchg_all = true;
+	}
+	spin_unlock_bh(&ask_devchg_lock);
+}
+
+/*
+ * G3 route retirement (2026-10-29): the kernel checks a flow's cached dst
+ * only on the software fast path (nf_flow_dst_check() in nf_flow_table_ip.c);
+ * a hardware flow sends no packet there, so a route change never retires it
+ * and the silicon keeps forwarding to the old next hop until the flow ages
+ * out. Like the vendor's route watch, retire every routed record whose
+ * destination (or DNAT destination) falls inside a changed prefix. A rule
+ * change can redirect anything, so it retires every routed record. Events
+ * are coalesced for ASK_FIBCHG_DELAY_MS so a routing-protocol burst costs one
+ * flush pass, and the registration-time route dump is ignored.
+ */
+#define ASK_FIBCHG_MAX		16
+#define ASK_FIBCHG_DELAY_MS	50
+struct ask_fibchg_pfx {
+	u8 l3_proto;
+	u8 plen;
+	u8 addr[16];
+};
+static DEFINE_SPINLOCK(ask_fibchg_lock);
+static struct ask_fibchg_pfx ask_fibchg_q[ASK_FIBCHG_MAX];
+static unsigned int ask_fibchg_n;
+static bool ask_fibchg_all;
+static struct ask_fibchg_pfx ask_fibchg_snap[ASK_FIBCHG_MAX];
+static unsigned int ask_fibchg_snap_n;
+static bool ask_fibchg_snap_all;
+static bool ask_fib_nb_ok;
+static bool ask_fib_live;
+
+static bool ask_fibchg_pfx_match(const struct ask_fibchg_pfx *p, u8 l3,
+				 const u8 *addr)
+{
+	unsigned int bytes = p->plen / 8, bits = p->plen % 8;
+
+	if (p->l3_proto != l3)
+		return false;
+	if (memcmp(p->addr, addr, bytes))
+		return false;
+	if (bits) {
+		u8 mask = (u8)(0xff << (8 - bits));
+
+		if ((p->addr[bytes] ^ addr[bytes]) & mask)
+			return false;
+	}
+	return true;
+}
+
+static int ask_fibchg_collect(struct ask_flow *f, void *arg)
+{
+	struct ask_flush_victim *v;
+	unsigned int i;
+	bool hit = ask_fibchg_snap_all;
+
+	if (!f->key.l4_proto)
+		return 0;
+	for (i = 0; !hit && i < ask_fibchg_snap_n; i++) {
+		const struct ask_fibchg_pfx *p = &ask_fibchg_snap[i];
+
+		hit = ask_fibchg_pfx_match(p, f->key.l3_proto, f->key.dst_ip) ||
+		      ((f->key.nat_flags & ASK_NATF_DNAT) &&
+		       ask_fibchg_pfx_match(p, f->key.l3_proto,
+					    f->key.nat_dst_ip));
+	}
+	if (!hit)
+		return 0;
+	v = kzalloc(sizeof(*v), GFP_ATOMIC);
+	if (!v)
+		return 0;
+	v->cookie = f->cookie;
+	v->generation = f->generation;
+	v->key = f->key;
+	list_add_tail(&v->node, arg);
+	return 0;
+}
+
+static void ask_fibchg_flush_fn(struct work_struct *w)
+{
+	spin_lock_bh(&ask_fibchg_lock);
+	memcpy(ask_fibchg_snap, ask_fibchg_q, sizeof(ask_fibchg_snap));
+	ask_fibchg_snap_n = ask_fibchg_n;
+	ask_fibchg_snap_all = ask_fibchg_all;
+	ask_fibchg_n = 0;
+	ask_fibchg_all = false;
+	spin_unlock_bh(&ask_fibchg_lock);
+	if (ask_fibchg_snap_n || ask_fibchg_snap_all)
+		ask_flow_flush_matching(ask_fibchg_collect, "route change");
+}
+static DECLARE_DELAYED_WORK(ask_fibchg_flush_work, ask_fibchg_flush_fn);
+
+static void ask_fibchg_queue(u8 l3, const void *addr, unsigned int alen,
+			     unsigned int plen, bool all)
+{
+	struct ask_fibchg_pfx p = { .l3_proto = l3 };
+	unsigned int i;
+
+	if (!all) {
+		p.plen = min_t(unsigned int, plen, alen * 8);
+		memcpy(p.addr, addr, alen);
+	}
+	spin_lock_bh(&ask_fibchg_lock);
+	if (all) {
+		ask_fibchg_all = true;
+	} else {
+		for (i = 0; i < ask_fibchg_n; i++)
+			if (!memcmp(&ask_fibchg_q[i], &p, sizeof(p)))
+				break;
+		if (i == ask_fibchg_n) {
+			if (ask_fibchg_n < ASK_FIBCHG_MAX)
+				ask_fibchg_q[ask_fibchg_n++] = p;
+			else
+				ask_fibchg_all = true;
+		}
+	}
+	spin_unlock_bh(&ask_fibchg_lock);
+	schedule_delayed_work(&ask_fibchg_flush_work,
+			      msecs_to_jiffies(ASK_FIBCHG_DELAY_MS));
+}
+
+/* IPv4 calls this under RTNL, IPv6 under the table spinlock: never sleep. */
+static int ask_fib_event(struct notifier_block *nb, unsigned long event,
+			 void *ptr)
+{
+	struct fib_notifier_info *info = ptr;
+
+	if (!READ_ONCE(ask_fib_live) || !ask_flow_default_table())
+		return NOTIFY_DONE;
+
+	switch (event) {
+	case FIB_EVENT_ENTRY_REPLACE:
+	case FIB_EVENT_ENTRY_APPEND:
+	case FIB_EVENT_ENTRY_ADD:
+	case FIB_EVENT_ENTRY_DEL:
+		if (info->family == AF_INET) {
+			struct fib_entry_notifier_info *fen =
+				container_of(info, struct fib_entry_notifier_info,
+					     info);
+			__be32 dst = htonl(fen->dst);
+
+			ask_fibchg_queue(ASK_FLOW_L3_IPV4, &dst, sizeof(dst),
+					 fen->dst_len, false);
+		} else if (info->family == AF_INET6) {
+			struct fib6_entry_notifier_info *fen6 =
+				container_of(info, struct fib6_entry_notifier_info,
+					     info);
+
+			if (fen6->rt)
+				ask_fibchg_queue(ASK_FLOW_L3_IPV6,
+						 &fen6->rt->fib6_dst.addr,
+						 sizeof(struct in6_addr),
+						 fen6->rt->fib6_dst.plen, false);
+		}
+		break;
+	case FIB_EVENT_RULE_ADD:
+	case FIB_EVENT_RULE_DEL:
+		ask_fibchg_queue(0, NULL, 0, 0, true);
+		break;
+	default:
+		break;
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block ask_fib_nb = {
+	.notifier_call = ask_fib_event,
+};
+
 static int ask_pppoe_netdev_event(struct notifier_block *nb,
 				  unsigned long event, void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 
 	if (dev->type == ARPHRD_PPP &&
-	    (event == NETDEV_DOWN || event == NETDEV_UNREGISTER))
+	    (event == NETDEV_DOWN || event == NETDEV_UNREGISTER ||
+	     event == NETDEV_CHANGEMTU))
 		schedule_work(&ask_pppoe_flush_work);
+	if ((event == NETDEV_CHANGEMTU || event == NETDEV_CHANGEADDR) &&
+	    ask_flow_default_table()) {
+		ask_devchg_queue(dev->ifindex);
+		if (is_vlan_dev(dev))
+			ask_devchg_queue(vlan_dev_real_dev(dev)->ifindex);
+		schedule_work(&ask_devchg_flush_work);
+	}
 	return NOTIFY_DONE;
 }
 
@@ -3005,24 +3286,33 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * T-M6-SP4: a PPPoE->LAN flow. The session ID is part of the FE key
 	 * (F-259, bytes 48..49), so the record only matches this session's
 	 * frames; the record strips the session header (STRIP_PPPoE_HDR,
-	 * F-260) before the TTL/NAT and L2 rebuild. The ingress is untagged
-	 * (ask_flow_cookie_pppoe() refuses PPPoE over VLAN), so no VID, even
-	 * if the ingress-owner heuristic above picked a VLAN vif.
+	 * F-260) before the TTL/NAT and L2 rebuild. The ingress VID is the
+	 * session's own tag (G2 PPPoE over VLAN, pi.vid) or 0, never what the
+	 * ingress-owner heuristic above picked. A tagged session arrives with
+	 * FLOW_ACTION_VLAN_POP; STRIP_ALL_VLAN validates that VID.
 	 */
 	if (pppoe == ASK_PPPOE_DECAP) {
 		key.pppoe_sid = pppoe_info.sid;
-		key.vlan_ingress_vid = 0;
+		key.vlan_ingress_vid = pppoe_info.vid;
 		key.vlan_edit_flags |= ASK_VLANF_PPPOE_STRIP;
 	}
 	/*
 	 * T-M6-SP4: a LAN->PPPoE flow. The PPPOE_PUSH action must name the same
-	 * session the tuple does; VLAN edits combined with PPPoE are not built
-	 * yet. Any PUSH outside a classified encap flow is refused.
+	 * session the tuple does. G2: a tagged session also needs exactly the
+	 * VLAN_PUSH of that tag (INSERT_PPPoE_HDR, then INSERT_VLAN_HDR with
+	 * inner EtherType 0x8864, F-272); an untagged one no VLAN edit. A
+	 * tagged LAN side (POP) stays in software. Any PUSH outside a
+	 * classified encap flow is refused.
 	 */
 	if (pppoe == ASK_PPPOE_ENCAP) {
+		bool push = key.vlan_edit_flags & ASK_VLANF_PUSH;
+
 		if (!(key.vlan_edit_flags & ASK_VLANF_PPPOE_INSERT) ||
 		    key.pppoe_push_sid != pppoe_info.sid ||
-		    (key.vlan_edit_flags & (ASK_VLANF_POP | ASK_VLANF_PUSH))) {
+		    (key.vlan_edit_flags & ASK_VLANF_POP) ||
+		    push != !!pppoe_info.vid ||
+		    (push && (ntohs(key.vlan_push_tci) & VLAN_VID_MASK) !=
+			     pppoe_info.vid)) {
 			pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE encap mismatch (push sid %u, tuple sid %u, flags 0x%x) - SW fallback cookie=0x%lx\n",
 					    key.pppoe_push_sid, pppoe_info.sid,
 					    key.vlan_edit_flags, f->cookie);
@@ -3034,8 +3324,11 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
 	}
+	/* G2: a tagged session decap carries exactly the VLAN_POP of its tag,
+	 * an untagged one none; never a PUSH (tagged LAN side). */
 	if (pppoe == ASK_PPPOE_DECAP &&
-	    (key.vlan_edit_flags & (ASK_VLANF_POP | ASK_VLANF_PUSH))) {
+	    ((key.vlan_edit_flags & ASK_VLANF_PUSH) ||
+	     !!(key.vlan_edit_flags & ASK_VLANF_POP) != !!pppoe_info.vid)) {
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE decap with VLAN edit - SW fallback flags=0x%x cookie=0x%lx\n",
 				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
@@ -4416,6 +4709,14 @@ int ask_flow_offload_init(void)
 			    rc);
 	ask_pppoe_nb_ok = !rc;
 
+	/* G3: retire HW flows on route changes (the dump replay is ignored). */
+	rc = register_fib_notifier(&init_net, &ask_fib_nb, NULL, NULL);
+	if (rc)
+		ask_pr_warn("flow_offload: FIB notifier failed: %d (route changes will not retire HW flows)\n",
+			    rc);
+	ask_fib_nb_ok = !rc;
+	WRITE_ONCE(ask_fib_live, ask_fib_nb_ok);
+
 	ask_pr_info("flow_offload: ready (PR14y deferred-insert + PR14z9 active poll %d ms + PR14z10 dual-ifindex match + PR14z11 cookie-recovered next-hop)\n",
 		    ASK_FLOW_PENDING_POLL_INTERVAL_MS);
 	return 0;
@@ -4442,6 +4743,11 @@ void ask_flow_offload_exit(void)
 	if (ask_pppoe_nb_ok)
 		unregister_netdevice_notifier(&ask_pppoe_netdev_nb);
 	cancel_work_sync(&ask_pppoe_flush_work);
+	cancel_work_sync(&ask_devchg_flush_work);
+	WRITE_ONCE(ask_fib_live, false);
+	if (ask_fib_nb_ok)
+		unregister_fib_notifier(&init_net, &ask_fib_nb);
+	cancel_delayed_work_sync(&ask_fibchg_flush_work);
 	cancel_work_sync(&ask_v6_frag_flush_work);
 
 	dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
