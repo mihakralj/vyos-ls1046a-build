@@ -126,11 +126,19 @@ def probe(ifname, src, dst, count, rate=1000, sw=False):
     finally:
         if not sw:
             hwtstamp(ifname, False)
+    series = list(rtt)                  # arrival order, for the jitter figures
     rtt.sort()
-    p = lambda q: round(rtt[min(len(rtt) - 1, int(q * len(rtt)))], 2) if rtt else None
+    p = lambda q: round(rtt[min(len(rtt) - 1, int(q * len(rtt)))], 3) if rtt else None
+    mean = round(sum(rtt) / len(rtt), 3) if rtt else None
+    # jitter: |difference of successive round trips|, the packet delay variation the RTT series shows
+    dv = sorted(abs(b - a) for a, b in zip(series, series[1:]))
+    j = lambda q: round(dv[min(len(dv) - 1, int(q * len(dv)))], 3) if dv else None
+    half = lambda v: None if v is None else round(v / 2, 3)
     out = dict(count=count, ok=len(rtt), lost=lost,
-               rtt_us=dict(min=p(0), p50=p(.5), p90=p(.9), p99=p(.99), max=p(1)),
-               half_rtt_us=dict(p50=p(.5) and round(p(.5) / 2, 2), p99=p(.99) and round(p(.99) / 2, 2)))
+               rtt_us=dict(min=p(0), mean=mean, p50=p(.5), p90=p(.9), p95=p(.95), p99=p(.99), p999=p(.999), max=p(1)),
+               half_rtt_us=dict(min=half(p(0)), mean=half(mean), p50=half(p(.5)), p95=half(p(.95)),
+                                p99=half(p(.99)), p999=half(p(.999)), max=half(p(1))),
+               jitter_us=dict(mean=(round(sum(dv) / len(dv), 3) if dv else None), p99=j(.99), p999=j(.999), max=j(1)))
     print(json.dumps(out))
     return out
 
