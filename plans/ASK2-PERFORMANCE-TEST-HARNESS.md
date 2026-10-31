@@ -534,6 +534,10 @@ sensitivity, not measurement noise. Self-tests that need no rig:
 `bin/testrig-cps.py selftest`, `bin/testrig-latprobe.py selftest`, and
 `DRY=1 BIDIR=1 bin/testrig-pktgen.sh trial ...`.
 
+The frame-geometry, flow-scale, latency and feature-stacking battery (suites A–D) that
+compares the ASK2 and vendor DUTs is in `ASK2-VENDOR-PERF-BATTERY.md`
+(`bin/testrig-suite-abcd.sh`, `bin/testrig-suite-compare.py`).
+
 ---
 
 ## 6. Health and error monitoring

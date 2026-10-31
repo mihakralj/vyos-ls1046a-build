@@ -325,15 +325,20 @@ return rhashtable_lookup_fast(&t->rht, &cookie, ask_flow_rht_params);
 EXPORT_SYMBOL_GPL(ask_flow_lookup);
 
 /*
- * R9 admission budget: the vendor ASK caps the table at 32768 directions
- * and overflows to software. Same ceiling here; 0 disables the cap. It
+ * R9 admission budget; 0 disables the cap. The vendor documents 32768
+ * directions but holds 131,072 bidirectional flows in hardware (measured
+ * 2026-10-31, OpenWrt .70: hw share 0.92 to 262k flows). With 32768 here, hw
+ * share was exactly 32768 / (2 x flows) (0.19 at 64k flows, 66 % loss). With
+ * the cap off, 65,536 and 131,072 flows ran at 0 % loss, 100 % hardware, MURAM
+ * unchanged (chained buckets, F-269). 262,144 flows collapse on both DUTs, so
+ * the default is the proven 262144 directions (131,072 flows). It
  * counts flow directions (one per ask_flow), so a bidirectional TCP
  * connection uses two. An over-budget insert returns -ENOSPC and the flow
  * stays on the kernel software path; ask_flow_overflow counts the refusals.
  */
-static unsigned int ask_max_flows = 32768;
+static unsigned int ask_max_flows = 262144;
 module_param_named(max_flows, ask_max_flows, uint, 0644);
-MODULE_PARM_DESC(max_flows, "Admission ceiling on offloaded flow directions (0 = unlimited, default 32768)");
+MODULE_PARM_DESC(max_flows, "Admission ceiling on offloaded flow directions (0 = unlimited, default 262144)");
 static atomic_t ask_flow_overflow = ATOMIC_INIT(0);
 
 u32 ask_flow_max_flows(void)
