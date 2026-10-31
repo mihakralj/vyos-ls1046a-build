@@ -1,6 +1,14 @@
 # ASK2 jumbo MTU plan: reach vendor parity (9000+)
 
-Status: proposed, revised 2026-10-31 after analysing the vendor driver. No code changed. Owner: unassigned.
+Status: **Step 0 passed 2026-10-31; Option B adopted (staged, not committed).** Option A/C are no longer needed.
+
+### Step 0 result (HW, `.185`, image 2026.10.31-0245, offload engaged, cold-ish boot)
+
+With the 0177 buffer clamp neutralised (mEMAC MAXFRM written live to 9026 after `ip link set mtu 9000`), DF pings at 3000, 3600, 4500, 6000 and 8972 passed through the DUT, and `iperf3 -P4` at MTU 9000 with hardware offload engaged ran 9.86 Gbit/s (127 retransmits), `fe_ehash_stats` hits growing (about 650k per 3 s), `rx dma error` and `rx frame physical error` 0, no kernel warnings, no wedge. Mainline RX scatter-gather (`sg_fd_to_skb()`) and the FE hit path both handle multi-buffer frames, so the vendor-style contiguous 10 KB buffers are unnecessary.
+
+Change staged: `0177` no longer caps the MAC max frame by `dpaa_bp->size`; `data/vyos-1x-036/037/043` guard ceilings raised 3600 to 9000. Still to do: A3 at 9000 on the new image, 30 min soak at MTU 9000 (log `MemFree`, buddyinfo), MTU 1500 regression (A1, B1, C1), and VLAN/PPPoE at jumbo.
+
+
 
 ## 1. Goal and gap
 

@@ -6,13 +6,13 @@ index 74fa59c..6335a91 100755
      """ Undo key mangling of a dotted option path for user-facing messages """
      return option_path.replace('.', ' ').replace('_', '-')
  
-+# ASK2 FMan FE offload MTU bounds on LS1046A. F-222 reverts F-203's
-+# fragmentation-prone order-1 RX buffers to the mainline-proven order-0 4 KiB
-+# page. SKB_WITH_OVERHEAD(4096) leaves ~3712 bytes; clamp MTU to 3600 so every
-+# accepted frame fits one contiguous RX buffer with safe L2/FCS/headroom margin.
++# ASK2 FMan FE offload MTU bounds on LS1046A. Frames above one 3584 B RX
++# buffer arrive as scatter-gather FDs; MTU up to 9000 is HW-validated
++# (2026-10-31, routed + offloaded, no wedge). Do not raise further untested;
++# the mEMAC/fsl_fm_max_frm ceiling is 9578.
 +# 1280 is the VyOS IPv6-link-local floor.
 +ASK_OFFLOAD_MTU_MIN = 1280
-+ASK_OFFLOAD_MTU_MAX = 3600
++ASK_OFFLOAD_MTU_MAX = 9000
 +
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """

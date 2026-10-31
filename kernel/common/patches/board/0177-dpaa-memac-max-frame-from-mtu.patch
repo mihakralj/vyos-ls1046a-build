@@ -7,19 +7,22 @@ The mEMAC MAXFRM register stays at the fsl_fm_max_frm default (9600) so the
 MAC admits wire frames no 4 KiB RX buffer can hold, which wedges the port
 (Qdrant 2026-08-16). Add a mac set_max_frame op and program it on open and
 on MTU change: max(mtu,1500)+ETH_HLEN+FCS+2 VLAN tags, capped by
-fsl_fm_max_frm and the RX buffer size. plans/ASK2-VENDOR-ASK-REVIEW.md R2.
+fsl_fm_max_frm. The RX buffer size is not a bound: frames above one 3584 B
+buffer are received as scatter-gather FDs (HW-verified 2026-10-31: MTU 9000
+routed and offloaded at 9.86 Gbit/s, no wedge). plans/ASK2-VENDOR-ASK-REVIEW.md R2.
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 index 3edc8d1..f1febcf 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -2939,6 +2939,24 @@ static void dpaa_eth_napi_disable(struct dpaa_priv *priv)
+@@ -2939,6 +2939,25 @@ static void dpaa_eth_napi_disable(struct dpaa_priv *priv)
  	}
  }
  
 +/* Bound what the MAC admits by the MTU (two VLAN tags of slack, 1500 floor for
-+ * PPPoE/VLAN ingress) and by the single RX buffer, so no accepted frame can
-+ * exceed the buffer. The boot-time 9600 default otherwise wedges the port.
++ * PPPoE/VLAN ingress). Frames longer than one RX buffer arrive as multi-buffer
++ * scatter-gather FDs (sg_fd_to_skb()), so the buffer size is not a bound; the
++ * boot-time 9600 default would admit frames above the configured MTU.
 + */
 +static int dpaa_apply_max_frame(struct dpaa_priv *priv, int mtu)
 +{
@@ -31,14 +34,13 @@ index 3edc8d1..f1febcf 100644
 +
 +	mfl = max(mtu, ETH_DATA_LEN) + ETH_HLEN + ETH_FCS_LEN + 2 * VLAN_HLEN;
 +	mfl = min_t(u32, mfl, fman_get_max_frm());
-+	mfl = min_t(u32, mfl, priv->dpaa_bp->size);
 +	return mac_dev->set_max_frame(mac_dev->fman_mac, mfl);
 +}
 +
  static int dpaa_open(struct net_device *net_dev)
  {
  	struct mac_device *mac_dev;
-@@ -2949,6 +2967,10 @@ static int dpaa_open(struct net_device *net_dev)
+@@ -2949,6 +2968,10 @@ static int dpaa_open(struct net_device *net_dev)
  	mac_dev = priv->mac_dev;
  	dpaa_eth_napi_enable(priv);
  
@@ -49,7 +51,7 @@ index 3edc8d1..f1febcf 100644
  	err = phylink_of_phy_connect(mac_dev->phylink,
  				     mac_dev->dev->of_node, 0);
  	if (err)
-@@ -3016,9 +3038,15 @@ static int dpaa_change_mtu(struct net_device *net_dev, int new_mtu)
+@@ -3016,9 +3039,15 @@ static int dpaa_change_mtu(struct net_device *net_dev, int new_mtu)
  {
  	struct dpaa_priv *priv = netdev_priv(net_dev);
  

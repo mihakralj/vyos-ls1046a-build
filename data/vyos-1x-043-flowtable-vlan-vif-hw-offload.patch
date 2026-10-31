@@ -83,7 +83,7 @@ diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
 @@ -500,7 +521,7 @@ def verify_hardware_offload(ifname):
      # larger range is validated on the FMan RX pool.
      ASK_FT_MTU_MIN = 1280
-     ASK_FT_MTU_MAX = 3600
+     ASK_FT_MTU_MAX = 9000
 -    mtu_path = f'/sys/class/net/{ifname}/mtu'
 +    mtu_path = f'/sys/class/net/{hardware_ifname}/mtu'
      try:
