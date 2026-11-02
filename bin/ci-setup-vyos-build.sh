@@ -14,6 +14,27 @@ cd "${GITHUB_WORKSPACE:-.}"
 CHROOT=vyos-build/data/live-build-config/includes.chroot
 HOOKS=vyos-build/data/live-build-config/hooks/live
 
+# Upstream T9553 (vyos-build 4cfde2ba, 2026-11-02) added 99-restore-file-caps.chroot,
+# which fails the build when an initrd holds no squashfs.ko ("contains no squashfs
+# module!"). Our kernel builds SQUASHFS=y, so there is no module to find and a good
+# image was rejected (run 41513850116). Accept a kernel whose /boot/config has it
+# built in; the upstream check stays for modular kernels. Count-gated: if upstream
+# rewrites the check, this fails loudly instead of silently doing nothing.
+H="$HOOKS/99-restore-file-caps.chroot"
+if [ -f "$H" ] && grep -q 'contains no squashfs module' "$H" && ! grep -q 'CONFIG_SQUASHFS=y' "$H"; then
+  python3 - "$H" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+a = "    if ! lsinitramfs $initrd | grep -q '/squashfs\\.ko'; then"
+b = ("    kver=${initrd#/boot/initrd.img-}\n"
+     "    grep -qx 'CONFIG_SQUASHFS=y' /boot/config-$kver 2>/dev/null && continue\n" + a)
+assert s.count(a) == 1, "99-restore-file-caps.chroot squashfs check changed upstream"
+open(p, "w").write(s.replace(a, b))
+print("### 99-restore-file-caps.chroot: built-in squashfs accepted")
+PYEOF
+fi
+
 ### vyos-build patches
 # Default config selection:
 #   The active default config that vyos-router applies on first boot when
