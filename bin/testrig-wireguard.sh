@@ -146,6 +146,8 @@ wg_dut_up(){
     dut "sudo nft add table inet wgnt; sudo nft 'add chain inet wgnt pre { type filter hook prerouting priority -300 ; }'; sudo nft 'add chain inet wgnt out { type filter hook output priority -300 ; }'; sudo nft add rule inet wgnt pre notrack; sudo nft add rule inet wgnt out notrack"
   fi
   echo dut >> $STATE
+  # WGFP=1: bind the DPAA WireGuard fast path to the new wg0 (fast-path matrix column)
+  if [ "${WGFP:-0}" = 1 ]; then dut "echo wg0 | sudo tee /sys/module/wireguard/parameters/wgfp_peer >/dev/null" || return 1; fi
 }
 
 wg_direct_up(){   # dell1 <-> dell2 over enp2s0 (no DUT); root namespaces

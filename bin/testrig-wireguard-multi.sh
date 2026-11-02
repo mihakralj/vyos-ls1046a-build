@@ -11,6 +11,7 @@
 # Usage: bin/testrig-wireguard-multi.sh [run|setup|teardown]
 # Env:   TUNNELS=4 ACTIVE=<n>  (n of the tunnels carry traffic; default all)   DIRS="up down"  DUR=30 STEADY_FROM=10
 #        STREAMS=2 (per tunnel)  REPS=3  DUT_KIND=ask2|vendor  OUT=<csv>
+#        WGFP=1 binds the DPAA WireGuard fast path to all wgm<K> after setup (multi-peer gate)
 # Everything is runtime-only and removed by an EXIT trap (KEEP=1 leaves it up).
 set -u
 DUT_KIND=${DUT_KIND:-ask2}
@@ -90,6 +91,12 @@ ENVTXT=$(dut 'echo "kernel: $(uname -r)"; echo "lockdep: $([ -e /proc/lockdep ] 
 if echo "$ENVTXT" | grep -q "lockdep: PRESENT"; then echo "REFUSING: lock debugging kernel" >&2; exit 5; fi
 [ "${KEEP:-0}" = 1 ] || trap teardown EXIT
 setup || { echo "setup failed" >&2; exit 4; }
+# WGFP=1: bind the DPAA fast path to every wgm<K> (multi-peer P2c gate); read-out printed at the end
+WP=/sys/module/wireguard/parameters/wgfp_peer
+if [ "${WGFP:-0}" = 1 ]; then
+  dut "echo '$(for k in $(seq 0 $((TUNNELS-1))); do printf 'wgm%s ' $k; done)' | sudo tee $WP >/dev/null" || { echo "wgfp bind failed" >&2; exit 4; }
+  echo "wgfp: $(dut "sudo cat $WP")"
+fi
 echo "ts,tunnels,active,dir,rep,gbps,retrans,dut_busy,hot_cpus,per_tunnel_gbps" > "$OUT"
 echo "DUT=$DUT kind=$DUT_KIND tunnels=$TUNNELS active=$ACTIVE streams/tunnel=$STREAMS dur=$DUR"
 win=$((DUR-STEADY_FROM-2))
@@ -123,4 +130,5 @@ for r in csv.DictReader(open(sys.argv[1])):
 print("\nSUMMARY (aggregate Gbit/s over reps)")
 for (a,d),v in g.items(): print("active=%s %-5s n=%d mean %.3f min %.3f max %.3f sd %.3f"%(a,d,len(v),st.mean(v),min(v),max(v),st.pstdev(v) if len(v)>1 else 0))
 PY
+[ "${WGFP:-0}" = 1 ] && echo "wgfp: $(dut "sudo cat $WP")" && dut "echo off | sudo tee $WP >/dev/null"
 echo "csv: $OUT"
