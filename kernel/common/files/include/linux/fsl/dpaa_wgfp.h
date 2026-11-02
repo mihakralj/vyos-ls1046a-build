@@ -35,7 +35,26 @@ struct dpaa_wgfp_ops {
 	int (*frame)(void *priv, struct dpaa_wgfp_frame *f);
 };
 
+/* An inner IPv4 flow arriving on a DPAA port (network byte order). */
+struct dpaa_wgfp_tuple {
+	__be32 saddr;
+	__be32 daddr;
+	__be16 sport;
+	__be16 dport;
+	u8 proto;
+};
+
 #if IS_ENABLED(CONFIG_FSL_DPAA_ETH)
+/* True when @dev is a DPAA port whose ehash table is armed (ASK engaged). */
+bool dpaa_wgfp_port_ok(struct net_device *dev);
+/* Steer @t arriving on @in to sink (@hash % sinks). Process context only.
+ * Returns the sink index or a negative errno. */
+int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,
+		       u32 hash);
+int dpaa_wgfp_flow_del(struct net_device *in, const struct dpaa_wgfp_tuple *t);
+/* Silicon packet counter of the record for @t. Process context only. */
+int dpaa_wgfp_flow_packets(struct net_device *in,
+			   const struct dpaa_wgfp_tuple *t, u64 *packets);
 int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv);
 void dpaa_wgfp_unregister(void);
 /* Select the egress port; resolves its no-confirm TX frame queue. */
@@ -45,6 +64,17 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, u32 new_off, u32 new_len);
 /* Return the buffer to its pool. */
 void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f);
 #else
+static inline bool dpaa_wgfp_port_ok(struct net_device *dev) { return false; }
+static inline int dpaa_wgfp_flow_add(struct net_device *in,
+				     const struct dpaa_wgfp_tuple *t, u32 hash)
+{ return -ENODEV; }
+static inline int dpaa_wgfp_flow_del(struct net_device *in,
+				     const struct dpaa_wgfp_tuple *t)
+{ return -ENODEV; }
+static inline int dpaa_wgfp_flow_packets(struct net_device *in,
+					 const struct dpaa_wgfp_tuple *t,
+					 u64 *packets)
+{ return -ENODEV; }
 static inline int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv)
 { return -ENODEV; }
 static inline void dpaa_wgfp_unregister(void) { }
