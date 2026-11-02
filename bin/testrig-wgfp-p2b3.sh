@@ -7,7 +7,7 @@
 #   dell2 is given persistent-keepalive 1 for rekey/roam, as a roaming client would have: a pure TCP receiver
 #   that roams or loses its session sends nothing, and stock WireGuard then never recovers either (2026-11-02).
 #   del deletes the DUT wg0 (re-run the tunnel setup afterwards); netns runs the upstream wireguard netns.sh
-#   selftest on the DUT (needs the script at $NETNS_SH, default: from the scratch CI tree; peer mode off).
+#   selftest on the DUT (NETNS_SH=<path to netns.sh>, e.g. from the v6.18 tag; peer mode off; ~15 min).
 # Each flow test runs one TCP flow dell1 -> dell2 wg0 for DUR s, fires the event at EV s and prints per-second
 # throughput plus the wgfp_peer counters before/after. Env: DUR=20 EV=6
 set -u
@@ -21,7 +21,7 @@ fails=0; ok(){ echo "  PASS: $*"; }; bad(){ echo "  FAIL: $*"; fails=$((fails+1)
 
 STOCK=${STOCK:-0}
 on(){ dut "echo off | sudo tee $WP >/dev/null"; [ "$STOCK" = 1 ] && return
-      dut "echo 'wg0 eth4' | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer"; exit 1; }; }
+      dut "echo wg0 | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer"; exit 1; }; }
 ka(){ $D2 "sudo wg set wg0 peer \$(sudo wg show wg0 peers) persistent-keepalive $1"; }
 srv(){ $D2 'sudo pkill -f "^iperf3 -s -p 5241"; iperf3 -s -p 5241 -D'; }
 # flow <name> <event command run with eval at EV>: prints intervals, leaves the iperf json in /tmp/p2b3.json on dell1
@@ -79,33 +79,50 @@ t_rekey120(){
   [ "$z" = 0 ] && ok "no stall across the rekey" || bad "$z stalled seconds"
 }
 
+# UDP echo on dell2 10.99.200.113:9100 (64-byte replies give conntrack its SEEN_REPLY); iperf3 -u does not get through
+# this tunnel on the rig even with the fast path off (2026-11-02), so UDP tests use these python endpoints
+echo_srv(){ $D2 "sudo pkill -f ^python3.*udpecho9100; nohup python3 -c \"
+import socket # udpecho9100
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('10.99.200.113',9100)); s.settimeout(30)
+try:
+  while True:
+    d,a=s.recvfrom(4096); s.sendto(d[:64],a)
+except Exception: pass\" >/dev/null 2>&1 &"; sleep 1; }
+
 t_aip(){
-  echo "== aip: a one-way UDP flow; the DUT peer loses 10.99.200.113 from AllowedIPs at ${EV}s, restored 6 s later"
+  echo "== aip: a UDP flow (800 B, ~1k pkt/s); the DUT peer loses 10.99.200.113 from AllowedIPs at ${EV}s, restored 6 s later"
   echo "   (TCP is useless here: the DUT drops dell2's ACKs by source AllowedIPs, so the flow stalls either way)"
-  local pk w0 w1 i2
+  local pk w0 w1 i0 i1 i2 s0 s1 s2 s3
   pk=$(dut 'sudo wg show wg0 peers')
-  on; srv; w0=$(cnt aip_withdraws)
-  # iperf3 itself errors out (its control connection is cut with the peer), hence NOIV
-  NOIV=1 FLOWOPT="-u -b 400M -l 1300" flow aip "dut 'sudo wg set wg0 peer $pk allowed-ips 10.99.200.250/32'; sleep 3; S1=\$(cnt sealed); sleep 2; S2=\$(cnt sealed); I1=\$(cnt installs); echo \"  mid:    \$(st)\"; dut 'sudo wg set wg0 peer $pk allowed-ips 10.99.200.113/32,fd99:200::113/128'"
-  w1=$(cnt aip_withdraws); i2=$(cnt installs)
-  echo "  aip_withdraws $w0 -> $w1; sealed in the 2 s window $((S2 - S1)); installs after restore $I1 -> $i2"
+  on; echo_srv; w0=$(cnt aip_withdraws); i0=$(cnt installs)
+  $D1 "nohup python3 -c \"
+import socket,time
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('10.99.1.112',9104)); s.connect(('10.99.200.113',9100)); s.setblocking(False)
+t=time.time()+$DUR
+while time.time()<t:
+  try: s.send(b'x'*800)
+  except OSError: pass
+  try: s.recv(100)
+  except OSError: pass
+  time.sleep(0.001)\" >/dev/null 2>&1 &"
+  sleep "$EV"; s0=$(cnt sealed); i1=$(cnt installs); echo "  before: $(st)"
+  dut "sudo wg set wg0 peer $pk allowed-ips 10.99.200.250/32"; sleep 3
+  s1=$(cnt sealed); sleep 2; s2=$(cnt sealed); echo "  mid:    $(st)"
+  dut "sudo wg set wg0 peer $pk allowed-ips 10.99.200.113/32,fd99:200::113/128"; sleep 5
+  s3=$(cnt sealed); i2=$(cnt installs); w1=$(cnt aip_withdraws); echo "  after:  $(st)"
+  echo "  installs $i0 -> $i1 (learned) -> $i2 (after restore); sealed $s0 / $s1 / $s2 / $s3; aip_withdraws $w0 -> $w1"
+  [ "${i1:-0}" -gt "${i0:-0}" ] && ok "UDP flow learned and installed" || bad "UDP flow never installed"
   [ "${w1:-0}" -gt "${w0:-0}" ] && ok "record withdrawn on the AllowedIPs change" || bad "no AllowedIPs withdraw"
-  [ $((S2 - S1)) = 0 ] && ok "nothing sealed for the peer while not allowed" || bad "$((S2 - S1)) frames sealed while not allowed"
-  [ "${i2:-0}" -gt "${I1:-0}" ] && ok "flow re-learned after the restore" || bad "flow not re-learned"
+  [ $((s2 - s1)) = 0 ] && ok "nothing sealed for the peer while not allowed" || bad "$((s2 - s1)) frames sealed while not allowed"
+  [ "${i2:-0}" -gt "${i1:-0}" ] && [ "${s3:-0}" -gt "${s2:-0}" ] && ok "flow re-learned and sealed after the restore" || bad "flow not re-learned"
+  sleep $((DUR - EV - 10 > 0 ? DUR - EV - 10 : 0))
 }
 
 t_pmtu(){
   echo "== pmtu: a learned UDP flow sends DF packets larger than the wg0 MTU (1420): expect ICMP frag-needed"
   local d0 p0 i0 out
   on; d0=$(cnt decline_withdraws); p0=$(cnt punted); i0=$(cnt installs)
-  $D2 "sudo pkill -f ^python3.*udpecho9100; nohup python3 -c \"
-import socket,time # udpecho9100
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('10.99.200.113',9100)); s.settimeout(30)
-try:
-  while True:
-    d,a=s.recvfrom(4096); s.sendto(d[:64],a)
-except Exception: pass\" >/dev/null 2>&1 &"
-  sleep 1
+  echo_srv
   # dell1 pins the tunnel route MTU at 1420; lift it so the DF packet leaves at 1488
   $D1 'sudo ip route replace 10.99.200.0/24 via 10.99.1.185 mtu 1500; sudo ip route flush cache'
   out=$($D1 "python3 -c \"
@@ -145,10 +162,29 @@ t_del(){
 
 t_netns(){
   echo "== netns: upstream tools/testing/selftests/wireguard/netns.sh on the DUT (peer mode off)"
-  local s=${NETNS_SH:-/tmp/claude-1000/-mnt-builds-vyos-ls1046a-build/eacdbd34-26f9-4ee1-b5c2-f36d77998f9b/scratchpad/ci/tree/linux-6.18.60/tools/testing/selftests/wireguard/netns.sh}
+  local s=${NETNS_SH:?set NETNS_SH to tools/testing/selftests/wireguard/netns.sh of the running kernel}
   dut "echo off | sudo tee $WP >/dev/null"
-  scp -q $SSHO -i $HOME/.ssh/vyos_key "$s" vyos@192.168.1.185:/tmp/netns.sh || { bad "copy netns.sh"; return; }
-  dut 'sudo timeout 600 bash /tmp/netns.sh > /tmp/netns.log 2>&1; echo rc=$?; tail -5 /tmp/netns.log' | tee /dev/stderr | grep -q 'rc=0' \
+  # VyOS wireguard-tools v1.0.20210914 predates "allowed-ips -prefix" removal (a userspace parser feature, not the
+  # kernel): drop that one block (the removal and its 388-entry check)
+  sed '/allowed-ips -192.168.0.1\/32/,/} < <(n0 wg show wg0 allowed-ips)/d' "$s" > /tmp/netns-vyos.sh
+  scp -q $SSHO -i $HOME/.ssh/vyos_key /tmp/netns-vyos.sh vyos@192.168.1.185:/tmp/netns.sh || { bad "copy netns.sh"; return; }
+  # VyOS ships no ncat. netns.sh uses only "ncat -l -u -p PORT" and "ncat -u HOST PORT", and waits until ss shows a
+  # process named ncat with the right pid, so the stand-in is a python script called ncat (comm = script name).
+  dut "mkdir -p /tmp/ncatshim && cat > /tmp/ncatshim/ncat <<'PYEOF'
+#!/usr/bin/python3
+import socket, sys
+a = sys.argv[1:]
+if '-l' in a:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(('0.0.0.0', int(a[a.index('-p') + 1])))
+    while True:
+        sys.stdout.buffer.write(s.recv(65535)); sys.stdout.buffer.flush()
+host, port = [x for x in a if not x.startswith('-')][:2]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(sys.stdin.buffer.read(), (host, int(port)))
+PYEOF
+chmod +x /tmp/ncatshim/ncat"
+  dut 'sudo env PATH=/tmp/ncatshim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin timeout 900 bash /tmp/netns.sh > /tmp/netns.log 2>&1; echo rc=$?; tail -5 /tmp/netns.log' | tee /dev/stderr | grep -q 'rc=0' \
     && ok "netns.sh passed" || bad "netns.sh failed (log /tmp/netns.log on the DUT)"
 }
 
