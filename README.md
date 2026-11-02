@@ -16,16 +16,17 @@ The LS1046A SoC uses the Data Path Acceleration Architecture (DPAA1), which defi
 
 ## Overview & Getting Started
 
-| **I want to...**                 | **Go to...**                                                                                                        |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **Use VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: Start here                                                                            |
-| **Understand the HW**            | [HARDWARE.md](HARDWARE.md): Physical HW, boot-chain and known quirks                                                |
-| **Update the Firmware**          | [FIRMWARE.md](FIRMWARE.md): A *'how-to'* guide                                                                      |
-| **Control HW & diagnose issues** | [HWCTL.md](HWCTL.md):  Control the main LEDs with `led` & diagnose issues with the seven built-in `*-check` scripts |
-| **Understand HW-Offloading**     | [HW-OFFLOADING.md](HW-OFFLOADING.md): Overview of the DPAA1/ASK network architecture                                |
-| **Manage VyOS via a web UI**     | [VYMANAGER.md](VYMANAGER.md): Manage VyOS using the Vymanager SDN controller & web GUI                              |
-| **See how this started**         | [STARTING-GATE.md](STARTING-GATE.md): Getting mainline VyOS to work (at all)                                        |
-| **See what's changed**           | [plans/CHANGELOG.md](plans/CHANGELOG.md): Per-build changelog                                                       |
+| **I want to...**                                   | **Go to...**                                                                                                                                                      |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Use VyOS** on the Mono Gateway                   | **[INSTALL.md](INSTALL.md)**: Start here                                                                                                                          |
+| **Understand the HW**                              | [HARDWARE.md](HARDWARE.md): Physical HW, boot-chain and known quirks                                                                                              |
+| **Update the Firmware**                            | [FIRMWARE.md](FIRMWARE.md): A *'how-to'* guide                                                                                                                    |
+| **Control HW & diagnose issues**                   | [HWCTL.md](HWCTL.md):  Control the main LEDs with `led` & diagnose issues with the seven built-in `*-check` scripts                                               |
+| **Look up every added CLI command & bundled tool** | **[CLI-AND-TOOLS.md](CLI-AND-TOOLS.md)**: `offload`, ingress-policer, MCP, `show offload/hardware` commands, `*-check` scripts, third-party packages in the image |
+| **Understand HW-Offloading**                       | [HW-OFFLOADING.md](HW-OFFLOADING.md): Overview of the DPAA1/ASK network architecture                                                                              |
+| **Manage VyOS via a web UI**                       | [VYMANAGER.md](VYMANAGER.md): Manage VyOS using the Vymanager SDN controller & web GUI                                                                            |
+| **See how this started**                           | [STARTING-GATE.md](STARTING-GATE.md): Getting mainline VyOS to work (at all)                                                                                      |
+| **See what's changed**                             | [plans/CHANGELOG.md](plans/CHANGELOG.md): Per-build changelog                                                                                                     |
 
 > Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues) before installing. Some limitations are permanent hardware constraints. Better to know before you're three hours into a rack installation.
 ## Architecture & Design
@@ -63,7 +64,7 @@ This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM
 - **U-Boot direct boot.** `vyos.env` on the ext4 partition selects the active image. No GRUB, no OOM, no overhead. Image upgrades write the file automatically.
 - **~80s cold boot to login prompt.** Single boot, no kexec double-reboot. `CONFIG_DEBUG_PREEMPT` suppressed saves ~20s of cosmetic scheduler spam.
 - **HW-accelerated AF_XDP datapath.** The DPAA1 driver is modernized into a single shared kernel binary with `ndo_xsk_wakeup`, XSK-backed BMan pools, per-CPU NAPI on dedicated QMan channels, and FMan HW offloads (CC / HM / Policer / CEETM). The earlier DPDK DPAA PMD path was abandoned (RC#31: `dpaa_bus` probe globally disrupts kernel FMan interfaces); AF_XDP is the production kernel+VPP coexistence path. Design and milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md).
-- **FMan hardware routing offload (ASK2).** Routed IPv4 **and** IPv6 TCP/UDP unicast flows are steered through the Frame Manager's coarse classifier and FE opcode engine — TTL/hop-limit decrement and L2 rebuild happen in hardware, the CPU is bypassed for established flows, and nftables conntrack stays authoritative. Enable per interface and per family: `set interfaces ethernet eth<n> offload ipv4` / `offload ipv6`. ~7.3 Gbit/s unidirectional and ~12.9 Gbit/s bidirectional per 10G port at near-zero CPU; anything the engine can't represent (ICMP, fragments, NAT/VLAN, unresolved neighbours) falls back to software forwarding automatically. Design: [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md).
+- **FMan hardware routing offload (ASK2).** Routed IPv4 **and** IPv6 TCP/UDP unicast flows are steered through the Frame Manager's coarse classifier and FE opcode engine — TTL/hop-limit decrement, L2 rebuild, and **NAT44/NAT66/PAT rewrites** happen in hardware, the CPU is bypassed for established flows, and nftables conntrack stays authoritative. Enable per interface and per family: `set interfaces ethernet eth<n> offload ipv4` / `offload ipv6` (NAT offload is automatic with it). ~7.3 Gbit/s unidirectional and ~12.9 Gbit/s bidirectional per 10G port at near-zero CPU, with ~7.1–7.3 Gbit/s masquerade NAT; anything the engine can't represent (ICMP, fragments, VLAN, NAT46/NAT64, unresolved neighbours) falls back to software forwarding automatically. Design: [specs/ask2-rewrite-spec.md](specs/ask2-rewrite-spec.md).
 
 ## Why VyOS?
 
@@ -81,4 +82,4 @@ This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM
 
 ## License
 
-VyOS sources are GPL-2.0. ARM64 builder image from [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build). Hardware documentation from [mono-gateway-docs](https://github.com/we-are-mono/docs/tree/master).
+The build scripts, patches, and documentation in this repository are licensed under the [Apache License 2.0](LICENSE). Vendored and upstream sources keep their own licenses: VyOS and the Linux kernel are GPLv2, and `accel-ppp-ng/` ships its own `COPYING`. ARM64 builder image from [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build). Hardware documentation from [mono-gateway-docs](https://github.com/we-are-mono/docs/tree/master).
