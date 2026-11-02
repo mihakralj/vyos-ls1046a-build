@@ -9,6 +9,10 @@
 # their frames by design; use AUTO=1.
 set -u
 DUR=${DUR:-20}; REV=${REV:-0}; FLOWS=${FLOWS:-4}; TBLS=${TBLS:-"0 2 3"}; AUTO=${AUTO:-0}
+# FAM=6: inner IPv6 flows (fd99:1::112 -> fd99:200::113; the tunnel setup configures both families).
+# The cport is fresh per run (CPORT0) so TIME_WAIT from a previous run never blocks the bind.
+FAM=${FAM:-4}; CPORT0=${CPORT0:-$((41001 + RANDOM % 8000))}
+if [ "$FAM" = 6 ]; then DST=fd99:200::113; SRC=fd99:1::112; else DST=10.99.200.113; SRC=10.99.1.112; fi
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 dut(){ ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185 "$1"; }
 D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
@@ -31,9 +35,9 @@ done
 [ "$AUTO" = 0 ] && echo "steered $FLOWS flows" || echo "AUTO: no steering, records come from wg_xmit learning"
 c0=$(dut 'grep "^cpu[0-9]" /proc/stat')
 for k in $(seq 0 $((FLOWS-1))); do
-  $D1 "iperf3 -c 10.99.200.113 -B 10.99.1.112 --cport $((41001+k)) -p $((5241+k)) -t $DUR -J > /tmp/p2b$k.json 2>&1 &"
+  $D1 "iperf3 -c $DST -B $SRC --cport $((CPORT0+k)) -p $((5241+k)) -t $DUR -J > /tmp/p2b$k.json 2>&1 &"
 done
-[ "$REV" -gt 0 ] && $D1 "iperf3 -c 10.99.200.113 -B 10.99.1.112 -p 5231 -P $REV -R -t $DUR -J > /tmp/p2brev.json 2>&1 &"
+[ "$REV" -gt 0 ] && $D1 "iperf3 -c $DST -B $SRC -p 5231 -P $REV -R -t $DUR -J > /tmp/p2brev.json 2>&1 &"
 sleep $((DUR/2)); echo "mid: $(dut "sudo cat $WP")"; dut 'top -bn1 -1 | grep "^%Cpu"' 
 sleep $((DUR/2+4))
 echo "end: $(dut "sudo cat $WP")"; dut "sudo cat $DBG/stats" | head -5

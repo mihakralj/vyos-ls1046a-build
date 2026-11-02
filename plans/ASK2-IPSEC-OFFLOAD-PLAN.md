@@ -77,6 +77,12 @@ No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change 
 
 **Measurement point after Tier 1:** publish crypto-use proof, throughput and CPU against software on the same rig. This can be an independent delivery, but the full-parity objective remains open until Tier 2 passes.
 
+## 2b. Tier 1.5 — sink → CAAM QI → egress (proposed 2026-11-02, master plan §4.8 item 2)
+
+A middle path between software XFRM with CAAM math (tier 1) and the full FMan → CAAM → FMan path through an O/H port (tier 2). It reuses what the WireGuard fast path proved on silicon: an ehash record steers an ESP-bound flow (or, on receive, the ESP flow of an SA) to a software sink FQ; the sink drains frames without an sk_buff; frames leave through a per-port no-confirm TX FQ. Instead of sealing on the A72s, the sink builds the ESP header and trailer in the frame's own DPAA buffer and enqueues it to CAAM through QI with a per-SA shared descriptor (`caam_qi_ext_consumer_register()`, patch `0134`, redirecting the response FQ to a second sink); the response sink transmits. The CPU does header work and two enqueues per packet; CAAM does the crypto.
+
+Why before tier 2: no O/H port, no FMan header manipulation, no multi-table dispatch; the risky substrate pieces of tier 2 (`0183`/`0184` untested, O/H FE path never carried a frame) are not needed. Why after tier 1: tier 1's measured CAAM throughput through the crypto API is the ceiling this path can approach, and it validates the SA/descriptor handling. Binding rules stay: XFRM is the only SA authority (records are created from XFRM state, never inferred), keys never leave the kernel, AES-CBC-SHA256 first, the A24a GCM refusal stands. Prerequisite: the shared substrate (master §4.8 item 1), so IPsec does not fork the WireGuard code. Open questions: whether QI can take a simple (non-compound) FD from a sink buffer with the needed head/tailroom, how replay state and ESN sequence numbers stay owned by XFRM, and the per-flow core cap (ORP, master §4.8 item 4).
+
 ## 3. Tier 2 — the T-M6-4 fast path (FMan → CAAM → FMan, zero CPU touch)
 
 ### 3a. Phase 1 — land the XFRM/CAAM stubs for real (still no O/H port)
