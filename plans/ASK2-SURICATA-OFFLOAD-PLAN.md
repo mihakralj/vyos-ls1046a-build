@@ -133,6 +133,10 @@ Findings:
 - **Revocation by `conntrack -D -m 0x100000/0x100000`** worked for a routed flow: the connection survived, got a fresh unmarked entry and fell back to software. This cannot be used for NAT flows (the mapping is lost), so production revocation needs another mechanism (clear the mark and tear down the flowtable entry without deleting the conntrack entry).
 - Teardown left MURAM `used` at 58764, no records, `ask-check` READY, and no kernel errors.
 
+### Relation to the shared steer substrate (2026-11-02)
+
+The steer-to-consumer substrate proposed in `ASK2-MASTER-PLAN.md` §4.8 item 1 (an ehash record delivering one flow's frames to a software sink without the IP stack) only helps an inline (IPS) Suricata: the consumer would feed Suricata's packet ring and forward or drop per verdict. It does not help the native passive (AF_PACKET IDS) service: FMan has no frame replicator, so a flow cannot be both forwarded in silicon and copied to an inspector. For the passive service the flow-shunting model above (inspect the slow-path prefix, then let the flowtable offload) stays the design.
+
 ## Decisions and safety contract
 
 The design is not ready for implementation until the following questions are
