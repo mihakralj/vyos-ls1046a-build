@@ -2,7 +2,7 @@
 
 # VyOS for Mono Gateway Development Kit (NXP LS1046A)
 
-This repo builds VyOS for the aarch64 [Mono Gateway Development Kit](https://docs.mono.si/gateway-development-kit/hardware-description) based on latest [VyOS 1.5.x. 'rolling' release](https://vyos.net/get/nightly-builds/). New [builds](https://github.com/mihakralj/vyos-ls1046a-build/releases) are released each Friday 01:00 UTC.
+This repo builds VyOS for the aarch64 [Mono Gateway Development Kit](https://docs.mono.si/gateway-development-kit/hardware-description) based on latest [VyOS 1.5.x. 'rolling' release](https://vyos.net/get/nightly-builds/).
 
 **This is the first and only VyOS build for bare-metal aarch64 networking hardware targeting support for both ASIC HW-offload *and* VPP.**
 
