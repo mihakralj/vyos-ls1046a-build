@@ -37,8 +37,15 @@
 #include <linux/slab.h>
 #include <linux/fsl/dpaa_flow_offload.h>
 #include <linux/fsl/dpaa_wgfp.h>
+#include <linux/fsl/fman_pcd.h>
 #include <linux/rcupdate.h>
 #include <soc/fsl/qman.h>
+
+#include "dpaa_eth.h"
+#include "dpaa_fman_caps.h"
+#include "fman.h"
+#include "fman_port.h"
+#include "mac.h"
 
 /* Helpers living in dpaa_eth.c (file-local state there). */
 struct device *dpaa_wgfp_dma_dev(u8 bpid);
@@ -48,7 +55,12 @@ void dpaa_wgfp_fd_release(const struct qm_fd *fd);
 #define WGFP_MAX_SINKS	4
 /* Usable bytes of a DPAA RX buffer (dpaa_bp_size of the 4096-byte raw size). */
 #define DPAA_WGFP_BUF_SIZE	3584
-#define WGFP_WQ		3
+/* Same work queue as the kernel RX FQs (dpaa_assign_wq: RX_DEFAULT/RX_PCD = 6).
+ * WQ3 sat in the medium tier above them: with all four sinks saturated
+ * (P2a unpaced, 2026-11-02) QMan starved eth0 RX and SSH timed out (the
+ * F-199 starvation class).
+ */
+#define WGFP_WQ		6
 
 struct wgfp_sink {
 	struct qman_fq fq;
@@ -380,8 +392,14 @@ int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv)
 	if (rcu_access_pointer(wgfp_ops)) {
 		ret = -EBUSY;
 	} else {
-		wgfp_ops_priv = priv;
-		rcu_assign_pointer(wgfp_ops, ops);
+		/* P2b-2: the consumer's flow records need sinks to target. */
+		if (!wgfp_nsinks)
+			ret = wgfp_create_all(min_t(unsigned int, WGFP_MAX_SINKS,
+						    num_online_cpus()));
+		if (!ret) {
+			wgfp_ops_priv = priv;
+			rcu_assign_pointer(wgfp_ops, ops);
+		}
 	}
 	mutex_unlock(&wgfp_lock);
 	return ret;
@@ -414,6 +432,121 @@ int dpaa_wgfp_set_egress(struct net_device *dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_set_egress);
+
+/*
+ * P2b-2: flow records that steer an inner flow to a sink, on the ingress
+ * port's own per-port ehash table (the table ASK2 arms on engage).  Same
+ * record shape as the ethtool-ntuple steering (dpaa_ethtool.c, F-241):
+ * routed key, plain ENQUEUE_PKT to rx_fqid.  The caller owns the record's
+ * lifetime; every add needs a matching del.
+ */
+static int wgfp_fm_port(struct net_device *dev, struct fman **fm, u8 *port_id,
+			int *key_size)
+{
+	struct fman_port *port = dpaa_get_rx_fman_port(dev);
+	struct dpaa_priv *priv;
+	int ks;
+
+	if (!port)
+		return -ENODEV;
+	priv = netdev_priv(dev);
+	*fm = fman_bind(priv->mac_dev->fman_dev);
+	if (!*fm)
+		return -ENODEV;
+	*port_id = fman_port_get_id(port);
+	ks = fman_pcd_fe_ehash_keysize(*fm, *port_id);
+	if (ks < 0)
+		return ks;
+	if (ks != FMAN_PCD_FE_ROUTED_KEY_SIZE)
+		return -EOPNOTSUPP;
+	*key_size = ks;
+	return 0;
+}
+
+/* F-269 routed key: family 0x40 | SIP @1 | DIP @5 | proto @41 | sport @42 |
+ * dport @44 | VID @46 (0, untagged) | PPPoE SID @48 (0). */
+static void wgfp_key(const struct dpaa_wgfp_tuple *t, u8 *key)
+{
+	memset(key, 0, FMAN_PCD_FE_ROUTED_KEY_SIZE);
+	key[0] = 0x40;
+	memcpy(key + 1, &t->saddr, 4);
+	memcpy(key + 5, &t->daddr, 4);
+	key[41] = t->proto;
+	memcpy(key + 42, &t->sport, 2);
+	memcpy(key + 44, &t->dport, 2);
+}
+
+bool dpaa_wgfp_port_ok(struct net_device *dev)
+{
+	struct fman *fm;
+	u8 port_id;
+	int ks;
+
+	return !wgfp_fm_port(dev, &fm, &port_id, &ks);
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_port_ok);
+
+int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,
+		       u32 hash)
+{
+	struct fman_pcd_fe_flow_action action;
+	unsigned int sink;
+	struct fman *fm;
+	u8 port_id;
+	int ks, err;
+
+	err = wgfp_fm_port(in, &fm, &port_id, &ks);
+	if (err)
+		return err;
+	mutex_lock(&wgfp_lock);
+	if (!wgfp_nsinks) {
+		mutex_unlock(&wgfp_lock);
+		return -ENODEV;
+	}
+	sink = hash % wgfp_nsinks;
+	memset(&action, 0, sizeof(action));
+	wgfp_key(t, action.key);
+	action.key_size = ks;
+	action.table_idx = 0;
+	action.rx_fqid = qman_fq_fqid(&wgfp_sinks[sink].fq);
+	mutex_unlock(&wgfp_lock);
+	err = fman_pcd_fe_flow_add(fm, port_id, &action);
+	return err ? err : sink;
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_flow_add);
+
+int dpaa_wgfp_flow_del(struct net_device *in, const struct dpaa_wgfp_tuple *t)
+{
+	u8 key[FMAN_PCD_FE_ROUTED_KEY_SIZE];
+	struct fman *fm;
+	u8 port_id;
+	int ks, err;
+
+	err = wgfp_fm_port(in, &fm, &port_id, &ks);
+	if (err)
+		return err;
+	wgfp_key(t, key);
+	return fman_pcd_fe_flow_del(fm, port_id, key, ks);
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_flow_del);
+
+int dpaa_wgfp_flow_packets(struct net_device *in,
+			   const struct dpaa_wgfp_tuple *t, u64 *packets)
+{
+	u8 key[FMAN_PCD_FE_ROUTED_KEY_SIZE];
+	struct fman *fm;
+	u64 bytes;
+	u8 port_id;
+	int ks, err;
+
+	err = wgfp_fm_port(in, &fm, &port_id, &ks);
+	if (err)
+		return err;
+	wgfp_key(t, key);
+	return fman_pcd_fe_flow_get_stats(fm, port_id, key, ks, packets, &bytes,
+					  NULL);
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_flow_packets);
 
 void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
 {
