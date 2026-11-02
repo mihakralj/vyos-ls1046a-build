@@ -160,6 +160,22 @@ Harness: `bin/testrig-wgfp-p2b3.sh [rekey rekey120 roam aip pmtu del netns]`, `S
 
 Image `vyos-2026.11.02-1818-rolling` (CI run 41499179221, commits `526d1ef7` A and `c93c9c7b` P3) carries closing step A and P3; C (IPv6) is written and compiled but not yet committed; D waits on the P3 measurement. Board gates still to run on 1818: P2b-2 throughput and the P2b-3 suite (regression after the multi-peer rewrite), `bin/testrig-wgfp-soak.sh overload` (sink tail drop; baseline 34% side-flow loss) and `soak` (10 min, `pcd-snapshot` clean), the CLI (`set interfaces wireguard wg0 offload ipv4` binds without the module parameter, survives reboot and `wg0` re-creation), two tunnels bound at once (P2c gate: 2T and 4T `up` at least 1.72 and 1.91 Gbit/s), and G3 (`AUTO=1 FLOWS=0 REV=4`: `down` at least 2.6 Gbit/s, A/B with `wgfp_rx=0`).
 
+**Fast-path matrix, image 1818 (2026-11-02, `WGFP=1 TAG=wgfp bin/wg-matrix.sh 185`, same method as the software matrix: 1 tunnel 4 streams 5 fresh-tunnel reps, 2/4 tunnels 2 streams each 3 reps, 30 s with the first 10 s discarded, VyOS `system conntrack ignore` on the tunnel ports; csv `oracle/wgfp-185-t{1,2,4}.csv`). Medians in Gbit/s:**
+
+| Tunnels | Dir | `.106` vendor | `.185` software (lanes=3) | `.185` fast path (1818) |
+|---|---|---|---|---|
+| 1 | up | 1.38 | 1.65 | **2.63** |
+| 1 | down | 1.30 | 1.58 | **1.83** |
+| 1 | bidir | 1.51 | 1.44 | **2.10** |
+| 2 | up | 1.44 | 1.72 | **3.53** |
+| 2 | down | 1.58 | 1.67 | **1.91** |
+| 2 | bidir | 1.68 | 1.81 | **2.50** |
+| 4 | up | 1.57 | 1.91 | **3.80** |
+| 4 | down | 1.66 | 1.82 | **2.06** |
+| 4 | bidir | 1.69 | 1.89 | **2.60** |
+
+The fast path leads `.106` in all nine cells, including 1-tunnel `bidir`, the one cell the software path lost. P2c gate passed (2T `up` 3.53 >= 1.72, 4T `up` 3.80 >= 1.91; both peers bound, no install failures). `down` and `bidir` on this image are TX fast path plus software RX: with the ports untracked, the 1818 P3 cut never installs its RX record (fixed in `758b6014`), so G3 (`down` >= 2.6) is still open and is the next measurement. The 1-tunnel `up` figure (2.63) is lower than the P2b harness's 3.16 because the matrix uses 4 iperf3 streams with kernel-chosen ports rather than 4 pinned flows.
+
 Leftovers after those gates, in order of value:
 
 - **Receive-only peers get no RX record.** Peer state (and with it the P3 outer record) is created by TX learning, so a peer that only sends to us (a one-way UDP download, a peer whose inner flows enter on a non-DPAA port) stays on the software receive path. Create peer state for every peer of a bound device at bind time and on peer add.
