@@ -175,6 +175,36 @@ After installation, every boot follows this order (configured automatically by `
 
 ## Troubleshooting
 
+### USB boot fails
+
+When attempting to boot from USB via:
+```
+usb start; fatload usb 0:2 ${load_addr} boot.scr; source ${load_addr}
+```
+In some circumstances the command may fail, and return an error. Usually, this occurs because the environment variable `load_addr` is not defined. This can occur if, for some reason, you reset your U-boot environment variables. Fix by redefining it:
+```
+setenv load_addr 0xa0000000
+```
+And then re-run the previous command to boot via USB. Done.
+
+### VyOS installer finds unexpected partitions on eMMC
+
+When installing VyOS via the `install image` command, after having booted into the liveUSB, if you have existing partitions on the eMMC, you may see the following error:
+```
+Creating partition table...
+Unable to install VyOS: Cannot detect partitions on /dev/mmcblk0: found ['/dev/mmcblk0p1'] (expected EFI=*2, root=*3)
+```
+
+The Mono Development kit requires a minified GPT table, and the install-script validates or creates this when required. If however the partition table looks significantly different to that expected, it will not proceed - this is deliberate and conservative choice.
+
+To fix, reboot, interrupt boot when prompted and at the `==>` U-boot prompt, enter the following to select and erase the contents of the eMMC.
+```
+mmc dev 0 
+mmc erase 0 3b48000
+```
+
+Once complete, boot into the LiveUSB environment, and re-attempt installation.
+
 ### Emergency eMMC boot (one-shot, no saveenv)
 
 If VyOS is installed but `vyos.env` is missing or corrupt, boot manually from the U-Boot console. First find the image name:
@@ -212,6 +242,7 @@ reset
 ```
 
 This is the same configuration that `vyos-postinstall` writes automatically — you only need this if the automated setup failed.
+
 
 ---
 
