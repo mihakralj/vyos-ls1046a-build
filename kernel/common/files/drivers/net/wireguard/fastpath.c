@@ -32,11 +32,13 @@
 #include <linux/jhash.h>
 #include <linux/tcp.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
 #include <linux/udp.h>
 #include <net/checksum.h>
 #include <net/ip.h>
+#include <net/ipv6.h>
 
 #include <linux/inetdevice.h>
 #include <linux/jiffies.h>
@@ -284,7 +286,9 @@ struct wgfp_tmpl {
 	struct rcu_head rcu;
 	int egress;		/* dpaa_wgfp_egress() handle */
 	int ifindex;		/* that port */
-	u8 hdr[ETH_HLEN + sizeof(struct iphdr) + sizeof(struct udphdr)];
+	u8 family;		/* outer: AF_INET or AF_INET6 */
+	u8 hlen;		/* Ethernet + IP + UDP */
+	u8 hdr[ETH_HLEN + sizeof(struct ipv6hdr) + sizeof(struct udphdr)];
 };
 
 struct wgfp_binds {
@@ -312,11 +316,144 @@ module_param(wgfp_rx, bool, 0600);
 MODULE_PARM_DESC(wgfp_rx, "WireGuard DPAA fast path: also steer each peer's inbound outer flow (P3)");
 static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t);
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
-			     const struct dpaa_wgfp_tuple *t);
+			     const struct dpaa_wgfp_tuple *t, bool *absent);
 
 static char wgfp_peer_cfg[WGFP_MAX_BIND * (IFNAMSIZ + 1) + 8] = "off";
 static atomic64_t wgfp_sealed, wgfp_declined, wgfp_rekeys, wgfp_punted;
 static atomic64_t wgfp_rx_frames, wgfp_rx_stack;
+
+/* Resolve @dst's neighbour on @dev into @t's Ethernet header; false (and an
+ * ARP/ND probe) while it is not valid. */
+static bool wgfp_tmpl_l2(struct wgfp_tmpl *t, struct net_device *dev,
+			 struct neigh_table *tbl, const void *nh, __be16 proto)
+{
+	struct ethhdr *eth = (struct ethhdr *)t->hdr;
+	struct neighbour *n;
+
+	n = tbl == &arp_tbl ? __ipv4_neigh_lookup(dev, *(const u32 *)nh) :
+	    __ipv6_neigh_lookup(dev, nh);
+	if (!n || !(n->nud_state & NUD_VALID)) {
+		if (n)
+			neigh_release(n);
+		else
+			neigh_event_send(__neigh_create(tbl, nh, dev, true), NULL);
+		return false;
+	}
+	read_lock_bh(&n->lock);
+	ether_addr_copy(eth->h_dest, n->ha);
+	read_unlock_bh(&n->lock);
+	neigh_release(n);
+	ether_addr_copy(eth->h_source, dev->dev_addr);
+	eth->h_proto = proto;
+	t->ifindex = dev->ifindex;
+	return true;
+}
+
+static struct wgfp_tmpl *wgfp_tmpl4(struct wgfp_pst *pst, const struct endpoint *ep)
+{
+	struct wg_device *wg = pst->peer->device;
+	struct flowi4 fl = {
+		.daddr = ep->addr4.sin_addr.s_addr,
+		.saddr = ep->src4.s_addr,
+		.fl4_dport = ep->addr4.sin_port,
+		.flowi4_mark = wg->fwmark,
+		.flowi4_proto = IPPROTO_UDP,
+	};
+	struct wgfp_tmpl *t;
+	struct rtable *rt;
+	struct iphdr *ip;
+	struct udphdr *udp;
+	__be32 nh;
+
+	rt = ip_route_output_key(dev_net(pst->wgdev), &fl);
+	if (IS_ERR(rt))
+		return NULL;
+	t = kzalloc(sizeof(*t), GFP_KERNEL);
+	if (!t)
+		goto out;
+	t->egress = dpaa_wgfp_egress(rt->dst.dev);	/* < 0: not a DPAA port */
+	nh = rt_nexthop(rt, fl.daddr);
+	if (t->egress < 0 ||
+	    !wgfp_tmpl_l2(t, rt->dst.dev, &arp_tbl, &nh, htons(ETH_P_IP))) {
+		kfree(t);
+		t = NULL;
+		goto out;
+	}
+	t->family = AF_INET;
+	t->hlen = ETH_HLEN + sizeof(*ip) + sizeof(*udp);
+	ip = (struct iphdr *)(t->hdr + ETH_HLEN);
+	ip->version = 4;
+	ip->ihl = 5;
+	ip->frag_off = htons(IP_DF);
+	ip->ttl = ip4_dst_hoplimit(&rt->dst);
+	ip->protocol = IPPROTO_UDP;
+	ip->saddr = fl.saddr ?: inet_select_addr(rt->dst.dev, nh, RT_SCOPE_UNIVERSE);
+	ip->daddr = fl.daddr;
+	udp = (struct udphdr *)(ip + 1);
+	udp->source = htons(wg->incoming_port);
+	udp->dest = fl.fl4_dport;
+out:
+	ip_rt_put(rt);
+	return t;
+}
+
+/* IPv6 outer (C2): the UDP checksum is mandatory, so the seal path sums the
+ * datagram in software after encrypting it. */
+static struct wgfp_tmpl *wgfp_tmpl6(struct wgfp_pst *pst, const struct endpoint *ep)
+{
+#if IS_ENABLED(CONFIG_IPV6)
+	struct wg_device *wg = pst->peer->device;
+	struct net *net = dev_net(pst->wgdev);
+	struct flowi6 fl = {
+		.daddr = ep->addr6.sin6_addr,
+		.saddr = ep->src6,
+		.fl6_dport = ep->addr6.sin6_port,
+		.fl6_sport = htons(wg->incoming_port),
+		.flowi6_mark = wg->fwmark,
+		.flowi6_oif = ep->addr6.sin6_scope_id,
+		.flowi6_proto = IPPROTO_UDP,
+	};
+	const struct in6_addr *nh;
+	struct wgfp_tmpl *t = NULL;
+	struct dst_entry *dst;
+	struct ipv6hdr *ip6;
+	struct udphdr *udp;
+
+	dst = ip6_route_output(net, NULL, &fl);
+	if (dst->error)
+		goto out;
+	if (ipv6_addr_any(&fl.saddr) &&
+	    ipv6_dev_get_saddr(net, dst->dev, &fl.daddr, 0, &fl.saddr))
+		goto out;
+	t = kzalloc(sizeof(*t), GFP_KERNEL);
+	if (!t)
+		goto out;
+	t->egress = dpaa_wgfp_egress(dst->dev);
+	nh = rt6_nexthop(dst_rt6_info(dst), &fl.daddr);
+	if (t->egress < 0 ||
+	    !wgfp_tmpl_l2(t, dst->dev, &nd_tbl, nh, htons(ETH_P_IPV6))) {
+		kfree(t);
+		t = NULL;
+		goto out;
+	}
+	t->family = AF_INET6;
+	t->hlen = ETH_HLEN + sizeof(*ip6) + sizeof(*udp);
+	ip6 = (struct ipv6hdr *)(t->hdr + ETH_HLEN);
+	ip6->version = 6;
+	ip6->nexthdr = IPPROTO_UDP;
+	ip6->hop_limit = ip6_dst_hoplimit(dst);
+	ip6->saddr = fl.saddr;
+	ip6->daddr = fl.daddr;
+	udp = (struct udphdr *)(ip6 + 1);
+	udp->source = fl.fl6_sport;
+	udp->dest = fl.fl6_dport;
+out:
+	dst_release(dst);
+	return t;
+#else
+	return NULL;
+#endif
+}
 
 static void wgfp_pst_refresh(struct work_struct *w)
 {
@@ -324,76 +461,19 @@ static void wgfp_pst_refresh(struct work_struct *w)
 					    refresh);
 	struct wg_peer *peer = pst->peer;
 	struct wgfp_tmpl *t = NULL, *old;
-	struct neighbour *n = NULL;
-	struct flowi4 fl = {};
-	struct rtable *rt;
-	struct ethhdr *eth;
-	struct iphdr *ip;
-	struct udphdr *udp;
-	__be32 nh;
-	int egress;
+	struct endpoint ep;
 
 	if (READ_ONCE(pst->stopping))
 		return;
-
 	read_lock_bh(&peer->endpoint_lock);
-	if (peer->endpoint.addr.sa_family != AF_INET) {
-		read_unlock_bh(&peer->endpoint_lock);
-		goto again;
-	}
-	fl.daddr = peer->endpoint.addr4.sin_addr.s_addr;
-	fl.saddr = peer->endpoint.src4.s_addr;
-	fl.fl4_dport = peer->endpoint.addr4.sin_port;
+	ep = peer->endpoint;
 	read_unlock_bh(&peer->endpoint_lock);
-	fl.flowi4_proto = IPPROTO_UDP;
-
-	rt = ip_route_output_key(dev_net(pst->wgdev), &fl);
-	if (IS_ERR(rt))
-		goto again;
-	egress = dpaa_wgfp_egress(rt->dst.dev);	/* < 0: not a DPAA port */
-	if (egress < 0) {
-		ip_rt_put(rt);
-		goto again;
-	}
-	nh = rt_nexthop(rt, fl.daddr);
-	n = __ipv4_neigh_lookup(rt->dst.dev, (__force u32)nh);
-	if (!n || !(n->nud_state & NUD_VALID)) {
-		if (n)
-			neigh_release(n);
-		else
-			neigh_event_send(__neigh_create(&arp_tbl, &nh, rt->dst.dev, true), NULL);
-		ip_rt_put(rt);
-		goto again;
-	}
-
-	t = kzalloc(sizeof(*t), GFP_KERNEL);
-	if (t) {
-		t->egress = egress;
-		t->ifindex = rt->dst.dev->ifindex;
-		eth = (struct ethhdr *)t->hdr;
-		read_lock_bh(&n->lock);
-		ether_addr_copy(eth->h_dest, n->ha);
-		read_unlock_bh(&n->lock);
-		ether_addr_copy(eth->h_source, rt->dst.dev->dev_addr);
-		eth->h_proto = htons(ETH_P_IP);
-		ip = (struct iphdr *)(eth + 1);
-		ip->version = 4;
-		ip->ihl = 5;
-		ip->frag_off = htons(IP_DF);
-		ip->ttl = ip4_dst_hoplimit(&rt->dst);
-		ip->protocol = IPPROTO_UDP;
-		ip->saddr = fl.saddr ?: inet_select_addr(rt->dst.dev, nh, RT_SCOPE_UNIVERSE);
-		ip->daddr = fl.daddr;
-		udp = (struct udphdr *)(ip + 1);
-		udp->source = htons(peer->device->incoming_port);
-		udp->dest = fl.fl4_dport;
-	}
-	neigh_release(n);
-	ip_rt_put(rt);
-again:
-	/* No usable route, DPAA egress, neighbour or IPv4 endpoint: no
-	 * template, so frames punt to the stack instead of leaving with stale
-	 * headers. */
+	/* No usable route, DPAA egress, neighbour or endpoint: no template,
+	 * so frames punt to the stack instead of leaving with stale headers. */
+	if (ep.addr.sa_family == AF_INET)
+		t = wgfp_tmpl4(pst, &ep);
+	else if (ep.addr.sa_family == AF_INET6)
+		t = wgfp_tmpl6(pst, &ep);
 	old = rcu_replace_pointer(pst->tmpl, t, true);
 	if (old)
 		kfree_rcu(old, rcu);
@@ -444,19 +524,64 @@ static void wgfp_age_fn(struct work_struct *w);
 static DECLARE_WORK(wgfp_flow_work, wgfp_flow_work_fn);
 static DECLARE_DELAYED_WORK(wgfp_age_work, wgfp_age_fn);
 
+/* Tuples are built zero-initialised, so the whole struct is the identity. */
 static bool wgfp_tuple_eq(const struct dpaa_wgfp_tuple *a,
 			  const struct dpaa_wgfp_tuple *b)
 {
-	return a->saddr == b->saddr && a->daddr == b->daddr &&
-	       a->sport == b->sport && a->dport == b->dport &&
-	       a->proto == b->proto;
+	return !memcmp(a, b, sizeof(*a));
 }
 
 static u32 wgfp_tuple_hash(const struct dpaa_wgfp_tuple *t)
 {
-	return jhash_3words((__force u32)t->saddr, (__force u32)t->daddr,
-			    ((__force u32)t->sport << 16 | (__force u32)t->dport) ^
-			    t->proto, 0);
+	return jhash2((const u32 *)t, sizeof(*t) / sizeof(u32), 0);
+}
+
+/*
+ * The flow of an inner packet at @l3 (@eth_proto from L2): plain IPv4 (no
+ * options, not a fragment) or IPv6 without extension headers, carrying TCP or
+ * UDP.  @avail bytes are readable at @l3; the packet has @total bytes from
+ * @l3 on.  Fills @t and the packet length; false otherwise.
+ */
+static bool wgfp_parse(const u8 *l3, __be16 eth_proto, u32 avail, u32 total,
+		       struct dpaa_wgfp_tuple *t, u32 *len)
+{
+	const __be16 *ports;
+
+	if (eth_proto == htons(ETH_P_IP)) {
+		const struct iphdr *iph = (const struct iphdr *)l3;
+
+		if (avail < sizeof(*iph) + 4 || iph->version != 4 || iph->ihl != 5 ||
+		    ip_is_fragment(iph) ||
+		    (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP))
+			return false;
+		*len = ntohs(iph->tot_len);
+		if (*len < sizeof(*iph) + 4 || *len > total)
+			return false;
+		t->family = AF_INET;
+		t->saddr = iph->saddr;
+		t->daddr = iph->daddr;
+		t->proto = iph->protocol;
+		ports = (const __be16 *)(l3 + sizeof(*iph));
+	} else if (eth_proto == htons(ETH_P_IPV6)) {
+		const struct ipv6hdr *ip6 = (const struct ipv6hdr *)l3;
+
+		if (avail < sizeof(*ip6) + 4 || ip6->version != 6 ||
+		    (ip6->nexthdr != IPPROTO_TCP && ip6->nexthdr != IPPROTO_UDP))
+			return false;
+		*len = sizeof(*ip6) + ntohs(ip6->payload_len);
+		if (*len < sizeof(*ip6) + 4 || *len > total)
+			return false;
+		t->family = AF_INET6;
+		t->saddr6 = ip6->saddr;
+		t->daddr6 = ip6->daddr;
+		t->proto = ip6->nexthdr;
+		ports = (const __be16 *)(l3 + sizeof(*ip6));
+	} else {
+		return false;
+	}
+	t->sport = ports[0];
+	t->dport = ports[1];
+	return true;
 }
 
 /* Writer side, under wgfp_flows_lock. */
@@ -539,6 +664,24 @@ static int wgfp_punt(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	return 1;
 }
 
+/* Does the template still point at the peer's endpoint?  Lockless. */
+static bool wgfp_endpoint_matches(const struct wg_peer *peer,
+				  const struct wgfp_tmpl *t)
+{
+	const struct udphdr *udp = (const struct udphdr *)(t->hdr + t->hlen -
+							   sizeof(*udp));
+
+	if (READ_ONCE(peer->endpoint.addr.sa_family) != t->family)
+		return false;
+	if (t->family == AF_INET)
+		return READ_ONCE(peer->endpoint.addr4.sin_addr.s_addr) ==
+		       ((const struct iphdr *)(t->hdr + ETH_HLEN))->daddr &&
+		       READ_ONCE(peer->endpoint.addr4.sin_port) == udp->dest;
+	return READ_ONCE(peer->endpoint.addr6.sin6_port) == udp->dest &&
+	       !memcmp(&peer->endpoint.addr6.sin6_addr,
+		       &((const struct ipv6hdr *)(t->hdr + ETH_HLEN))->daddr, 16);
+}
+
 /*
  * P3: an inbound outer frame of a peer endpoint (the record admits only
  * that exact UDP 5-tuple).  Copy it into an sk_buff and give it to upstream
@@ -548,9 +691,12 @@ static int wgfp_punt(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
  */
 static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 {
-	const struct iphdr *iph = (const struct iphdr *)(f->buf + f->off + ETH_HLEN);
+	const u8 *l3 = f->buf + f->off + ETH_HLEN;
+	const struct iphdr *iph = (const struct iphdr *)l3;
+	const struct ipv6hdr *ip6 = (const struct ipv6hdr *)l3;
 	struct net_device *dev = dev_get_by_index_rcu(&init_net, fl->ifindex);
 	struct sk_buff *skb;
+	u32 len, hl;
 	bool plain;
 
 	if (!dev || !(dev->flags & IFF_UP))
@@ -561,17 +707,27 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 	skb_put_data(skb, f->buf + f->off, f->len);
 	dpaa_wgfp_drop(f);
 	skb->protocol = eth_type_trans(skb, dev);
-	plain = skb->pkt_type == PACKET_HOST && iph->ihl == 5 &&
-		ntohs(iph->tot_len) <= f->len - ETH_HLEN &&
-		!ip_is_fragment(iph) && !ip_fast_csum((const u8 *)iph, 5);
+	/* the tuple matched, so the IP header and the UDP ports are there */
+	if (fl->t.family == AF_INET) {
+		hl = sizeof(*iph);
+		len = ntohs(iph->tot_len);
+		plain = iph->ihl == 5 && !ip_is_fragment(iph) &&
+			!ip_fast_csum((const u8 *)iph, 5);
+	} else {
+		hl = sizeof(*ip6);
+		len = hl + ntohs(ip6->payload_len);
+		plain = ip6->nexthdr == IPPROTO_UDP;
+	}
+	plain = plain && skb->pkt_type == PACKET_HOST &&
+		len <= f->len - ETH_HLEN;
 	if (unlikely(!plain)) {
 		atomic64_inc(&wgfp_rx_stack);
 		netif_receive_skb(skb);
 		return 1;
 	}
-	pskb_trim(skb, ntohs(iph->tot_len));
+	pskb_trim(skb, len);
 	skb_reset_network_header(skb);
-	skb_set_transport_header(skb, sizeof(struct iphdr));
+	skb_set_transport_header(skb, hl);
 	skb->skb_iif = dev->ifindex;
 	atomic64_inc(&wgfp_rx_frames);
 	wg_packet_receive(fl->pst->peer->device, skb);
@@ -586,36 +742,24 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	struct noise_keypair *kp;
 	const struct wgfp_tmpl *t;
 	const struct iphdr *iph;
-	const __be16 *ports;
 	struct message_data *wg;
 	struct wgfp_flow *fl;
 	struct wgfp_pst *pst;
 	struct wg_peer *peer;
 	struct udphdr *udp;
 	struct iphdr *oip;
-	u32 ip_len, plain, tot, mtu;
+	u32 ip_len, plain, tot, mtu, added;
 	bool withdraw = false;
 	u64 ctr;
 	u8 *hdr;
 
-	/* Only IPv4 TCP/UDP of a learned flow reaches a sink; anything else
-	 * (a stale or hand-made record) is dropped. */
-	if (f->len < ETH_HLEN + sizeof(*iph) + 4 ||
-	    ((struct ethhdr *)data)->h_proto != htons(ETH_P_IP))
+	/* Only TCP/UDP of a learned flow reaches a sink; anything else (a
+	 * stale or hand-made record) is dropped. */
+	if (f->len < ETH_HLEN ||
+	    !wgfp_parse(inner, ((struct ethhdr *)data)->h_proto,
+			f->len - ETH_HLEN, f->len - ETH_HLEN, &tup, &ip_len))
 		return 0;
 	iph = (const struct iphdr *)inner;
-	if (iph->version != 4 || iph->ihl != 5 ||
-	    (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP))
-		return 0;
-	ip_len = ntohs(iph->tot_len);
-	if (ip_len < sizeof(*iph) + 4 || ETH_HLEN + ip_len > f->len)
-		return 0;
-	ports = (const __be16 *)(inner + sizeof(*iph));
-	tup.saddr = iph->saddr;
-	tup.daddr = iph->daddr;
-	tup.proto = iph->protocol;
-	tup.sport = ports[0];
-	tup.dport = ports[1];
 	fl = wgfp_flow_lookup(&tup);
 	if (!fl)
 		return 0;
@@ -632,25 +776,23 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	/* We forward the inner packet: TTL must drop by one, as on the slow
 	 * path.  TTL <= 1 is left to the stack (ICMP time exceeded); ASK's
 	 * ttl_punt normally sends those to the kernel before the record. */
-	if (iph->ttl <= 1)
-		goto decline;
-
-	plain = min_t(u32, mtu, ALIGN(ip_len, MESSAGE_PADDING_MULTIPLE));
-	if (f->off < WGFP_ADDED ||
-	    f->off + ETH_HLEN + plain + POLY1305_DIGEST_SIZE > f->buf_size)
+	if ((tup.family == AF_INET ? iph->ttl :
+	     ((const struct ipv6hdr *)inner)->hop_limit) <= 1)
 		goto decline;
 
 	t = rcu_dereference(pst->tmpl);
 	if (unlikely(!t))
 		goto decline;
+	/* outer IP + UDP + WireGuard header in front of the inner packet */
+	added = t->hlen - ETH_HLEN + sizeof(struct message_data);
+	plain = min_t(u32, mtu, ALIGN(ip_len, MESSAGE_PADDING_MULTIPLE));
+	if (f->off < added ||
+	    f->off + ETH_HLEN + plain + POLY1305_DIGEST_SIZE > f->buf_size)
+		goto decline;
 	/* Roaming: unlocked compare, as wg_socket_set_peer_endpoint() does; a
-	 * torn read costs one punt.  An IPv6 endpoint never matches.  The
-	 * stopping test pairs with the synchronize_rcu() before the refresh
-	 * work is cancelled for good. */
-	oip = (struct iphdr *)(t->hdr + ETH_HLEN);
-	udp = (struct udphdr *)(oip + 1);
-	if (unlikely(READ_ONCE(peer->endpoint.addr4.sin_addr.s_addr) != oip->daddr ||
-		     READ_ONCE(peer->endpoint.addr4.sin_port) != udp->dest)) {
+	 * torn read costs one punt.  The stopping test pairs with the
+	 * synchronize_rcu() before the refresh work is cancelled for good. */
+	if (unlikely(!wgfp_endpoint_matches(peer, t))) {
 		if (!READ_ONCE(pst->stopping))
 			mod_delayed_work(system_wq, &pst->refresh, 0);
 		goto decline;
@@ -662,25 +804,41 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	ctr = (u64)atomic64_inc_return(&kp->sending_counter) - 1;
 	if (unlikely(ctr >= REJECT_AFTER_MESSAGES))
 		goto decline;
-	ip_decrease_ttl((struct iphdr *)iph);
+	if (tup.family == AF_INET)
+		ip_decrease_ttl((struct iphdr *)iph);
+	else
+		((struct ipv6hdr *)inner)->hop_limit--;
 	memset(inner + ip_len, 0, plain - ip_len);
 	chacha20poly1305_encrypt(inner, inner, plain, NULL, 0, ctr,
 				 kp->sending.key);
 
-	hdr = inner - WGFP_HDR_LEN;
-	memcpy(hdr, t->hdr, sizeof(t->hdr));
-	tot = sizeof(struct iphdr) + sizeof(struct udphdr) +
-	      sizeof(struct message_data) + plain + POLY1305_DIGEST_SIZE;
-	oip = (struct iphdr *)(hdr + ETH_HLEN);
-	oip->tot_len = htons(tot);
-	oip->check = 0;
-	oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
-	udp = (struct udphdr *)(oip + 1);
-	udp->len = htons(tot - sizeof(struct iphdr));
+	hdr = inner - added - ETH_HLEN;
+	memcpy(hdr, t->hdr, t->hlen);
+	tot = sizeof(struct udphdr) + sizeof(struct message_data) + plain +
+	      POLY1305_DIGEST_SIZE;		/* the UDP datagram */
+	if (t->family == AF_INET) {
+		oip = (struct iphdr *)(hdr + ETH_HLEN);
+		oip->tot_len = htons(sizeof(*oip) + tot);
+		oip->check = 0;
+		oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
+		udp = (struct udphdr *)(oip + 1);
+	} else {
+		((struct ipv6hdr *)(hdr + ETH_HLEN))->payload_len = htons(tot);
+		udp = (struct udphdr *)(hdr + ETH_HLEN + sizeof(struct ipv6hdr));
+	}
+	udp->len = htons(tot);
 	wg = (struct message_data *)(udp + 1);
 	wg->header.type = cpu_to_le32(MESSAGE_DATA);
 	wg->key_idx = kp->remote_index;
 	wg->counter = cpu_to_le64(ctr);
+	if (t->family == AF_INET6) {
+		const struct ipv6hdr *ip6 = (const struct ipv6hdr *)(hdr + ETH_HLEN);
+
+		udp->check = csum_ipv6_magic(&ip6->saddr, &ip6->daddr, tot,
+					     IPPROTO_UDP, csum_partial(udp, tot, 0));
+		if (!udp->check)
+			udp->check = CSUM_MANGLED_0;
+	}
 
 	if (time_after(jiffies, READ_ONCE(pst->last_timer))) {
 		WRITE_ONCE(pst->last_timer, jiffies + HZ / 100);
@@ -696,8 +854,9 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 		}
 	}
 	atomic64_inc(&wgfp_sealed);
-	dpaa_wgfp_xmit(f, t->egress, f->off - WGFP_ADDED,
-		       WGFP_HDR_LEN + plain + POLY1305_DIGEST_SIZE);
+	dpaa_wgfp_xmit(f, t->egress, hdr - f->buf,
+		       t->hlen + sizeof(struct message_data) + plain +
+		       POLY1305_DIGEST_SIZE);
 	return 1;
 decline_flow:
 	withdraw = true;
@@ -710,13 +869,29 @@ static const struct dpaa_wgfp_ops wgfp_peer_ops = {
 	.frame = wgfp_peer_frame,
 };
 
+/* A current keypair that can receive: a handshake with the peer completed. */
+static bool wgfp_peer_can_receive(struct wg_peer *peer)
+{
+	struct noise_keypair *kp;
+	bool ok;
+
+	rcu_read_lock_bh();
+	kp = rcu_dereference_bh(peer->keypairs.current_keypair);
+	ok = kp && READ_ONCE(kp->receiving.is_valid) &&
+	     !wg_birthdate_has_expired(kp->sending.birthdate, REJECT_AFTER_TIME);
+	rcu_read_unlock_bh();
+	return ok;
+}
+
 /*
  * P3: keep the peer's outer record in line with its template (called by the
  * refresh work, process context).  The outer flow is endpoint -> local source
  * address, UDP, endpoint port -> listen port, arriving on the template's port.
  * Installed once the outer conntrack entry is established, not NAT'ed and
- * without a helper (the firewall admitted it); withdrawn when the template or
- * the endpoint changes, the peer dies or wgfp_rx is off.
+ * without a helper (the firewall admitted it), or, when the outer flow is
+ * untracked and has no entry, once a handshake with the peer has completed;
+ * withdrawn when the template or the endpoint changes, the peer dies or
+ * wgfp_rx is off.
  */
 static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 {
@@ -726,11 +901,18 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 
 	if (t && READ_ONCE(wgfp_rx) && !READ_ONCE(pst->peer->is_dead) &&
 	    !READ_ONCE(pst->stopping)) {
-		const struct iphdr *ip = (const struct iphdr *)(t->hdr + ETH_HLEN);
-		const struct udphdr *udp = (const struct udphdr *)(ip + 1);
+		const u8 *l3 = t->hdr + ETH_HLEN;
+		const struct udphdr *udp = (const struct udphdr *)(t->hdr + t->hlen -
+								   sizeof(*udp));
 
-		rt.saddr = ip->daddr;
-		rt.daddr = ip->saddr;
+		if (t->family == AF_INET) {
+			rt.saddr = ((const struct iphdr *)l3)->daddr;
+			rt.daddr = ((const struct iphdr *)l3)->saddr;
+		} else {
+			rt.saddr6 = ((const struct ipv6hdr *)l3)->daddr;
+			rt.daddr6 = ((const struct ipv6hdr *)l3)->saddr;
+		}
+		rt.family = t->family;
 		rt.sport = udp->dest;
 		rt.dport = udp->source;
 		rt.proto = IPPROTO_UDP;
@@ -742,8 +924,19 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 		want = pst->rxfl && pst->rxfl->ifindex == t->ifindex &&
 		       wgfp_tuple_eq(&pst->rxfl->t, &rt);
 		spin_unlock_bh(&wgfp_flows_lock);
-		if (!want)
-			want = wgfp_ct_admitted(dev_net(pst->wgdev), NULL, &rt);
+		if (!want) {
+			bool absent = false;
+
+			want = wgfp_ct_admitted(dev_net(pst->wgdev), NULL, &rt,
+						&absent);
+			/* VyOS untracks the WireGuard ports (`system conntrack
+			 * ignore`, applied automatically for configured
+			 * tunnels), so there is often no entry at all.  Then a
+			 * completed handshake is the proof: the peer's
+			 * handshake came in through the input firewall. */
+			if (!want && absent)
+				want = wgfp_peer_can_receive(pst->peer);
+		}
 	}
 	spin_lock_bh(&wgfp_flows_lock);
 	fl = pst->rxfl;
@@ -786,7 +979,7 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
  * was withdrawn after the flowtable took it), so look the entry up by tuple.
  */
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
-			     const struct dpaa_wgfp_tuple *t)
+			     const struct dpaa_wgfp_tuple *t, bool *absent)
 {
 #if IS_REACHABLE(CONFIG_NF_CONNTRACK)
 	enum ip_conntrack_info ctinfo;
@@ -799,16 +992,24 @@ static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 		return (ctinfo == IP_CT_ESTABLISHED ||
 			ctinfo == IP_CT_ESTABLISHED_REPLY) &&
 		       !(ct->status & IPS_NAT_MASK) && !ct->master && !nfct_help(ct);
-	tuple.src.l3num = AF_INET;
-	tuple.src.u3.ip = t->saddr;
+	tuple.src.l3num = t->family;
+	if (t->family == AF_INET6) {
+		tuple.src.u3.in6 = t->saddr6;
+		tuple.dst.u3.in6 = t->daddr6;
+	} else {
+		tuple.src.u3.ip = t->saddr;
+		tuple.dst.u3.ip = t->daddr;
+	}
 	tuple.src.u.all = t->sport;
-	tuple.dst.u3.ip = t->daddr;
 	tuple.dst.u.all = t->dport;
 	tuple.dst.protonum = t->proto;
 	tuple.dst.dir = IP_CT_DIR_ORIGINAL;
 	h = nf_conntrack_find_get(net, &nf_ct_zone_dflt, &tuple);
-	if (!h)
+	if (!h) {
+		if (absent)
+			*absent = true;
 		return false;
+	}
 	ct = nf_ct_tuplehash_to_ctrack(h);
 	ok = test_bit(IPS_SEEN_REPLY_BIT, &ct->status) &&
 	     !(ct->status & IPS_NAT_MASK) && !ct->master && !nfct_help(ct);
@@ -864,24 +1065,31 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	struct dpaa_wgfp_tuple t = {};
 	struct wgfp_pst *pst;
 	struct wgfp_flow *fl;
-	const struct iphdr *iph;
-	unsigned int thoff, i;
+	u8 hb[sizeof(struct ipv6hdr) + 4];
+	unsigned int thoff, nhoff, i;
+	const u8 *l3;
 	bool fin = false;
-	u32 hash;
+	u32 hash, len, total;
 
-	if (!bs || skb->protocol != htons(ETH_P_IP) || !skb->skb_iif)
+	if (!bs || !skb->skb_iif ||
+	    (skb->protocol != htons(ETH_P_IP) && skb->protocol != htons(ETH_P_IPV6)))
 		return;
 	for (i = 0; i < bs->n; i++)
 		if (netdev_priv(bs->wgdev[i]) == peer->device)
 			wgdev = bs->wgdev[i];
 	if (!wgdev)
 		return;
-	iph = ip_hdr(skb);
-	if (iph->ihl != 5 || ip_is_fragment(iph) ||
-	    (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP))
+	nhoff = skb_network_offset(skb);
+	if (skb->len <= nhoff)
 		return;
-	thoff = skb_network_offset(skb) + sizeof(*iph);
-	if (iph->protocol == IPPROTO_TCP) {
+	total = skb->len - nhoff;
+	l3 = skb_header_pointer(skb, nhoff, min_t(u32, sizeof(hb), total), hb);
+	if (!l3 || !wgfp_parse(l3, skb->protocol, min_t(u32, sizeof(hb), total),
+			       total, &t, &len))
+		return;
+	thoff = nhoff + (t.family == AF_INET ?
+		sizeof(struct iphdr) : sizeof(struct ipv6hdr));
+	if (t.proto == IPPROTO_TCP) {
 		struct tcphdr _th;
 		const struct tcphdr *th = skb_header_pointer(skb, thoff,
 							     sizeof(_th), &_th);
@@ -889,21 +1097,7 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		if (!th || th->syn)
 			return;
 		fin = th->fin || th->rst;
-		t.sport = th->source;
-		t.dport = th->dest;
-	} else {
-		struct udphdr _uh;
-		const struct udphdr *uh = skb_header_pointer(skb, thoff,
-							     sizeof(_uh), &_uh);
-
-		if (!uh)
-			return;
-		t.sport = uh->source;
-		t.dport = uh->dest;
 	}
-	t.saddr = iph->saddr;
-	t.daddr = iph->daddr;
-	t.proto = iph->protocol;
 	hash = wgfp_tuple_hash(&t);
 
 	/* ponytail: one global lock per slow-path packet of a bound device;
@@ -923,7 +1117,7 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	}
 	if (fin || wgfp_nflows >= WGFP_FLOW_MAX)
 		goto out;
-	if (!wgfp_ct_admitted(dev_net(skb->dev), skb, &t))
+	if (!wgfp_ct_admitted(dev_net(skb->dev), skb, &t, NULL))
 		goto out;
 	pst = wgfp_pst_get_locked(peer, wgdev);
 	if (!pst)
@@ -1074,12 +1268,11 @@ static void wgfp_age_fn(struct work_struct *w)
 	struct sk_buff *probe;
 	bool kick = false;
 
-	/* wg_allowedips_lookup_dst() takes an skb; one IPv4 header suffices. */
-	probe = alloc_skb(sizeof(struct iphdr), GFP_KERNEL);
+	/* wg_allowedips_lookup_dst() takes an skb; one IP header suffices. */
+	probe = alloc_skb(sizeof(struct ipv6hdr), GFP_KERNEL);
 	if (probe) {
 		skb_reset_network_header(probe);
-		skb_put_zero(probe, sizeof(struct iphdr));
-		probe->protocol = htons(ETH_P_IP);
+		skb_put_zero(probe, sizeof(struct ipv6hdr));
 	}
 
 	spin_lock_bh(&wgfp_flows_lock);
@@ -1121,7 +1314,13 @@ static void wgfp_age_fn(struct work_struct *w)
 		if (probe) {
 			struct wg_peer *p;
 
-			ip_hdr(probe)->daddr = job[i].t.daddr;
+			if (job[i].t.family == AF_INET6) {
+				probe->protocol = htons(ETH_P_IPV6);
+				ipv6_hdr(probe)->daddr = job[i].t.daddr6;
+			} else {
+				probe->protocol = htons(ETH_P_IP);
+				ip_hdr(probe)->daddr = job[i].t.daddr;
+			}
 			p = wg_allowedips_lookup_dst(&pst->peer->device->peer_allowedips,
 						     probe);
 			foreign = p != pst->peer;
