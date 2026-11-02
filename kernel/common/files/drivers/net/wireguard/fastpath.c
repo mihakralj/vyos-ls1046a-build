@@ -262,6 +262,15 @@ MODULE_PARM_DESC(wgfp_lab, "DPAA fast path lab seal (P2a): see fastpath.c; \"off
  * (handshake queueing, ICMP, PMTU, TTL, AllowedIPs).  AllowedIPs are re-checked
  * for every record each aging period.
  *
+ * RX (P3): each peer with state also gets one record for its inbound outer
+ * flow (endpoint -> local listen port, on the port its route uses), installed
+ * once the outer conntrack entry is established and not NAT'ed.  Those frames
+ * reach a sink too; wgfp_rx_frame() hands them, as an sk_buff, straight to
+ * upstream wg_packet_receive().  That skips IP input, netfilter, conntrack and
+ * the UDP socket lookup for the one admitted endpoint (the serial cost of the
+ * RX CPU: ~60% of it, 2026-11-02 profile), while decryption, the replay
+ * window, the inner AllowedIPs source check and ordering stay upstream code.
+ *
  *   echo "wg0 [wg1 ...]" > /sys/module/wireguard/parameters/wgfp_peer
  *   echo off > /sys/module/wireguard/parameters/wgfp_peer
  *
@@ -274,6 +283,7 @@ MODULE_PARM_DESC(wgfp_lab, "DPAA fast path lab seal (P2a): see fastpath.c; \"off
 struct wgfp_tmpl {
 	struct rcu_head rcu;
 	int egress;		/* dpaa_wgfp_egress() handle */
+	int ifindex;		/* that port */
 	u8 hdr[ETH_HLEN + sizeof(struct iphdr) + sizeof(struct udphdr)];
 };
 
@@ -293,11 +303,20 @@ struct wgfp_pst {
 	struct delayed_work refresh;
 	unsigned long last_timer;
 	unsigned int nflows;		/* under wgfp_flows_lock */
+	struct wgfp_flow *rxfl;		/* P3 outer record, under the lock */
 	bool stopping;
 };
 
+static bool wgfp_rx = true;
+module_param(wgfp_rx, bool, 0600);
+MODULE_PARM_DESC(wgfp_rx, "WireGuard DPAA fast path: also steer each peer's inbound outer flow (P3)");
+static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t);
+static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
+			     const struct dpaa_wgfp_tuple *t);
+
 static char wgfp_peer_cfg[WGFP_MAX_BIND * (IFNAMSIZ + 1) + 8] = "off";
 static atomic64_t wgfp_sealed, wgfp_declined, wgfp_rekeys, wgfp_punted;
+static atomic64_t wgfp_rx_frames, wgfp_rx_stack;
 
 static void wgfp_pst_refresh(struct work_struct *w)
 {
@@ -350,6 +369,7 @@ static void wgfp_pst_refresh(struct work_struct *w)
 	t = kzalloc(sizeof(*t), GFP_KERNEL);
 	if (t) {
 		t->egress = egress;
+		t->ifindex = rt->dst.dev->ifindex;
 		eth = (struct ethhdr *)t->hdr;
 		read_lock_bh(&n->lock);
 		ether_addr_copy(eth->h_dest, n->ha);
@@ -377,6 +397,7 @@ again:
 	old = rcu_replace_pointer(pst->tmpl, t, true);
 	if (old)
 		kfree_rcu(old, rcu);
+	wgfp_pst_rx_sync(pst, t);
 	if (!READ_ONCE(pst->stopping))
 		schedule_delayed_work(&pst->refresh, HZ);
 }
@@ -406,6 +427,7 @@ struct wgfp_flow {
 	u8 state;
 	bool del;
 	bool gone;		/* unhashed, waiting for its grace period */
+	bool rx;		/* P3: the peer's inbound outer flow */
 	u8 idle;
 	u64 pkts;
 	unsigned long since;
@@ -462,6 +484,8 @@ static struct wgfp_flow *wgfp_flow_lookup(const struct dpaa_wgfp_tuple *t)
 
 static void wgfp_flow_free_locked(struct wgfp_flow *fl)
 {
+	if (fl->rx && fl->pst->rxfl == fl)
+		fl->pst->rxfl = NULL;
 	hash_del_rcu(&fl->node);
 	fl->gone = true;
 	fl->pst->nflows--;
@@ -515,6 +539,45 @@ static int wgfp_punt(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	return 1;
 }
 
+/*
+ * P3: an inbound outer frame of a peer endpoint (the record admits only
+ * that exact UDP 5-tuple).  Copy it into an sk_buff and give it to upstream
+ * wg_packet_receive() as wg_receive() would, minus the IP/netfilter/UDP layers
+ * in front.  A header that is not plain IPv4 with a valid checksum goes
+ * through the full stack instead.  NAPI context, RCU held by the sink.
+ */
+static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
+{
+	const struct iphdr *iph = (const struct iphdr *)(f->buf + f->off + ETH_HLEN);
+	struct net_device *dev = dev_get_by_index_rcu(&init_net, fl->ifindex);
+	struct sk_buff *skb;
+	bool plain;
+
+	if (!dev || !(dev->flags & IFF_UP))
+		return 0;
+	skb = netdev_alloc_skb_ip_align(dev, f->len);
+	if (!skb)
+		return 0;
+	skb_put_data(skb, f->buf + f->off, f->len);
+	dpaa_wgfp_drop(f);
+	skb->protocol = eth_type_trans(skb, dev);
+	plain = skb->pkt_type == PACKET_HOST && iph->ihl == 5 &&
+		ntohs(iph->tot_len) <= f->len - ETH_HLEN &&
+		!ip_is_fragment(iph) && !ip_fast_csum((const u8 *)iph, 5);
+	if (unlikely(!plain)) {
+		atomic64_inc(&wgfp_rx_stack);
+		netif_receive_skb(skb);
+		return 1;
+	}
+	pskb_trim(skb, ntohs(iph->tot_len));
+	skb_reset_network_header(skb);
+	skb_set_transport_header(skb, sizeof(struct iphdr));
+	skb->skb_iif = dev->ifindex;
+	atomic64_inc(&wgfp_rx_frames);
+	wg_packet_receive(fl->pst->peer->device, skb);
+	return 1;
+}
+
 static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 {
 	u8 *data = f->buf + f->off;
@@ -556,6 +619,8 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	fl = wgfp_flow_lookup(&tup);
 	if (!fl)
 		return 0;
+	if (fl->rx)
+		return wgfp_rx_frame(f, fl);
 	pst = fl->pst;
 	peer = pst->peer;
 	mtu = READ_ONCE(pst->wgdev->mtu);
@@ -645,6 +710,73 @@ static const struct dpaa_wgfp_ops wgfp_peer_ops = {
 	.frame = wgfp_peer_frame,
 };
 
+/*
+ * P3: keep the peer's outer record in line with its template (called by the
+ * refresh work, process context).  The outer flow is endpoint -> local source
+ * address, UDP, endpoint port -> listen port, arriving on the template's port.
+ * Installed once the outer conntrack entry is established, not NAT'ed and
+ * without a helper (the firewall admitted it); withdrawn when the template or
+ * the endpoint changes, the peer dies or wgfp_rx is off.
+ */
+static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
+{
+	struct dpaa_wgfp_tuple rt = {};
+	struct wgfp_flow *fl;
+	bool want = false;
+
+	if (t && READ_ONCE(wgfp_rx) && !READ_ONCE(pst->peer->is_dead) &&
+	    !READ_ONCE(pst->stopping)) {
+		const struct iphdr *ip = (const struct iphdr *)(t->hdr + ETH_HLEN);
+		const struct udphdr *udp = (const struct udphdr *)(ip + 1);
+
+		rt.saddr = ip->daddr;
+		rt.daddr = ip->saddr;
+		rt.sport = udp->dest;
+		rt.dport = udp->source;
+		rt.proto = IPPROTO_UDP;
+		/* Admission is checked once.  With both directions on the fast
+		 * path the outer conntrack entry sees no packets and expires;
+		 * like an offloaded flowtable flow, the admitted record stays
+		 * until the endpoint, the template or the binding changes. */
+		spin_lock_bh(&wgfp_flows_lock);
+		want = pst->rxfl && pst->rxfl->ifindex == t->ifindex &&
+		       wgfp_tuple_eq(&pst->rxfl->t, &rt);
+		spin_unlock_bh(&wgfp_flows_lock);
+		if (!want)
+			want = wgfp_ct_admitted(dev_net(pst->wgdev), NULL, &rt);
+	}
+	spin_lock_bh(&wgfp_flows_lock);
+	fl = pst->rxfl;
+	if (fl && (!want || fl->ifindex != t->ifindex ||
+		   !wgfp_tuple_eq(&fl->t, &rt))) {
+		if (!fl->del) {
+			fl->del = true;
+			queue_work(system_wq, &wgfp_flow_work);
+		}
+		pst->rxfl = NULL;
+		fl = NULL;
+	}
+	if (want && !fl && wgfp_nflows < WGFP_FLOW_MAX &&
+	    !wgfp_flow_find(&rt, t->ifindex, wgfp_tuple_hash(&rt))) {
+		fl = kzalloc(sizeof(*fl), GFP_ATOMIC);
+		if (fl) {
+			fl->t = rt;
+			fl->pst = pst;
+			fl->rx = true;
+			fl->ifindex = t->ifindex;
+			fl->hash = wgfp_tuple_hash(&rt);
+			fl->state = WGFP_PENDING;
+			fl->since = jiffies;
+			pst->nflows++;
+			pst->rxfl = fl;
+			hash_add_rcu(wgfp_flows, &fl->node, fl->hash);
+			wgfp_nflows++;
+			queue_work(system_wq, &wgfp_flow_work);
+		}
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+}
+
 /* ---- learning ---- */
 
 /*
@@ -653,11 +785,12 @@ static const struct dpaa_wgfp_ops wgfp_peer_ops = {
  * forwarded carries no ct (and neither does any packet of a flow whose record
  * was withdrawn after the flowtable took it), so look the entry up by tuple.
  */
-static bool wgfp_ct_admitted(struct sk_buff *skb, const struct dpaa_wgfp_tuple *t)
+static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
+			     const struct dpaa_wgfp_tuple *t)
 {
 #if IS_REACHABLE(CONFIG_NF_CONNTRACK)
 	enum ip_conntrack_info ctinfo;
-	struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
+	struct nf_conn *ct = skb ? nf_ct_get(skb, &ctinfo) : NULL;
 	struct nf_conntrack_tuple tuple = {};
 	struct nf_conntrack_tuple_hash *h;
 	bool ok;
@@ -673,7 +806,7 @@ static bool wgfp_ct_admitted(struct sk_buff *skb, const struct dpaa_wgfp_tuple *
 	tuple.dst.u.all = t->dport;
 	tuple.dst.protonum = t->proto;
 	tuple.dst.dir = IP_CT_DIR_ORIGINAL;
-	h = nf_conntrack_find_get(dev_net(skb->dev), &nf_ct_zone_dflt, &tuple);
+	h = nf_conntrack_find_get(net, &nf_ct_zone_dflt, &tuple);
 	if (!h)
 		return false;
 	ct = nf_ct_tuplehash_to_ctrack(h);
@@ -790,7 +923,7 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	}
 	if (fin || wgfp_nflows >= WGFP_FLOW_MAX)
 		goto out;
-	if (!wgfp_ct_admitted(skb, &t))
+	if (!wgfp_ct_admitted(dev_net(skb->dev), skb, &t))
 		goto out;
 	pst = wgfp_pst_get_locked(peer, wgdev);
 	if (!pst)
@@ -958,7 +1091,8 @@ static void wgfp_age_fn(struct work_struct *w)
 			wgfp_flow_free_locked(fl);
 			continue;
 		}
-		if (fl->state != WGFP_INSTALLED || fl->del)
+		/* the outer record lives as long as its peer state */
+		if (fl->state != WGFP_INSTALLED || fl->del || fl->rx)
 			continue;
 		/* round-robin over passes when there are more than a batch */
 		if (seen++ < cursor || n == WGFP_BATCH)
@@ -1224,11 +1358,13 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 	hash_for_each(wgfp_psts, bkt, pst, node)
 		tmpl += rcu_access_pointer(pst->tmpl) != NULL;
 	spin_unlock_bh(&wgfp_flows_lock);
-	return scnprintf(buf, PAGE_SIZE, "on sealed=%lld declined=%lld punted=%lld rekeys=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld decline_withdraws=%lld aip_withdraws=%lld dev=%s\n",
+	return scnprintf(buf, PAGE_SIZE, "on sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld decline_withdraws=%lld aip_withdraws=%lld dev=%s\n",
 			 (long long)atomic64_read(&wgfp_sealed),
 			 (long long)atomic64_read(&wgfp_declined),
 			 (long long)atomic64_read(&wgfp_punted),
 			 (long long)atomic64_read(&wgfp_rekeys),
+			 (long long)atomic64_read(&wgfp_rx_frames),
+			 (long long)atomic64_read(&wgfp_rx_stack),
 			 READ_ONCE(wgfp_npsts), tmpl, READ_ONCE(wgfp_nflows),
 			 (long long)atomic64_read(&wgfp_installs),
 			 (long long)atomic64_read(&wgfp_install_fail),
