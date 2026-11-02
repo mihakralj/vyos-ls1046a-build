@@ -790,6 +790,17 @@ else
     echo "ERROR: $NF_FLOW_HWDEL_PATCH missing"; exit 1
 fi
 
+# Final FLOW_CLS_STATS before the HW delete, so conntrack accounting (and any
+# conntrack-based IPFIX export) keeps the tail of each offloaded flow.
+# Applies after 140 (same file; staged patches apply in sort order).
+NF_FLOW_FINALSTATS_PATCH="$COMMON_FIXES_DIR/145-nf-flow-offload-final-stats-on-delete.patch"
+if [ -f "$NF_FLOW_FINALSTATS_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_FINALSTATS_PATCH") (final HW stats before delete)"
+    cp "$NF_FLOW_FINALSTATS_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "ERROR: $NF_FLOW_FINALSTATS_PATCH missing"; exit 1
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
