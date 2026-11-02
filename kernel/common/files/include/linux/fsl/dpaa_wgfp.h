@@ -13,6 +13,7 @@
 #define _LINUX_FSL_DPAA_WGFP_H
 
 #include <linux/types.h>
+#include <linux/in6.h>
 #include <linux/dma-mapping.h>
 
 struct net_device;
@@ -35,13 +36,17 @@ struct dpaa_wgfp_ops {
 	int (*frame)(void *priv, struct dpaa_wgfp_frame *f);
 };
 
-/* An inner IPv4 flow arriving on a DPAA port (network byte order). */
+/* An inner flow arriving on a DPAA port (network byte order).  IPv4 uses
+ * saddr/daddr (the first word of the 16-byte slots); every byte is part of the
+ * identity (compared and hashed whole), so build tuples zero-initialised. */
 struct dpaa_wgfp_tuple {
-	__be32 saddr;
-	__be32 daddr;
+	union { __be32 saddr; struct in6_addr saddr6; };
+	union { __be32 daddr; struct in6_addr daddr6; };
 	__be16 sport;
 	__be16 dport;
 	u8 proto;
+	u8 family;		/* AF_INET or AF_INET6 */
+	u8 _pad[2];
 };
 
 #if IS_ENABLED(CONFIG_FSL_DPAA_ETH)

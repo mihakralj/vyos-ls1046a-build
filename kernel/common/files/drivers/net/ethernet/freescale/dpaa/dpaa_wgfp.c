@@ -498,14 +498,22 @@ static int wgfp_fm_port(struct net_device *dev, struct fman **fm, u8 *port_id,
 	return 0;
 }
 
-/* F-269 routed key: family 0x40 | SIP @1 | DIP @5 | proto @41 | sport @42 |
- * dport @44 | VID @46 (0, untagged) | PPPoE SID @48 (0). */
+/* F-269 routed key (50 bytes): family 0x40 | SIP @1 | DIP @5 (v4 lane) for
+ * IPv4, family 0x60 | zero v4 lane | SIP6 @9 | DIP6 @25 for IPv6; then
+ * proto @41 | sport @42 | dport @44 | VID @46 (0, untagged) | PPPoE SID @48 (0). */
 static void wgfp_key(const struct dpaa_wgfp_tuple *t, u8 *key)
 {
 	memset(key, 0, FMAN_PCD_FE_ROUTED_KEY_SIZE);
-	key[0] = 0x40;
-	memcpy(key + 1, &t->saddr, 4);
-	memcpy(key + 5, &t->daddr, 4);
+	if (t->family == AF_INET6) {
+		/* dual-lane: zero v4 lane, src6 @9, dst6 @25 (qdrant 2026-09-06) */
+		key[0] = 0x60;
+		memcpy(key + 9, &t->saddr6, 16);
+		memcpy(key + 25, &t->daddr6, 16);
+	} else {
+		key[0] = 0x40;
+		memcpy(key + 1, &t->saddr, 4);
+		memcpy(key + 5, &t->daddr, 4);
+	}
 	key[41] = t->proto;
 	memcpy(key + 42, &t->sport, 2);
 	memcpy(key + 44, &t->dport, 2);
