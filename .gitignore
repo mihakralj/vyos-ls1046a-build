@@ -133,3 +133,4 @@ decomp/build2/
 
 # semcode tool index cache (regenerable)
 .semcode.db/
+/.obsidian
