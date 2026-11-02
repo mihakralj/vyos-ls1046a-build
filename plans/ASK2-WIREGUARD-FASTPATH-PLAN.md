@@ -144,6 +144,10 @@ Harness: `bin/testrig-wgfp-p2b3.sh [rekey rekey120 roam aip pmtu del netns]`, `S
 
 **Gate G3** unchanged: `down` >= 2.6 Gbit/s on four flows, kill below 2.2; plus the P2b-3 suite with `wgfp_rx=1`.
 
+**Untracked outer flows (fixed 2026-11-02, after image 1818).** VyOS untracks the WireGuard UDP ports (`system conntrack ignore`, applied automatically for VyOS-configured tunnels by vyos-1x patch 057, and by `bin/wg-matrix.sh` for the rig). The outer flow then has no conntrack entry, and the first P3 cut, which required an established entry, would never install the RX record in a production configuration. `wgfp_pst_rx_sync()` now admits the record when the lookup finds no entry and the peer has a current keypair that can receive (`wgfp_peer_can_receive()`): a completed handshake means the peer's packets came in through the input firewall. An entry that exists but is NAT'ed or has a helper still refuses. Image 1818 does not carry this fix, so its matrix `down`/`bidir` cells are TX fast path plus software RX.
+
+**CLI note.** With C, a device opted in through `set interfaces wireguard wgN offload ipv4` also accelerates its inner IPv6 flows. The leaf name understates that; a family gate (or a renamed leaf) is a follow-up, not a correctness issue.
+
 ### Closing step C implementation: IPv6 (2026-11-02, compiled, not yet built in CI or board-tested)
 
 **C1, IPv6 inner flows.** The flow tuple carries a family and 16-byte addresses (`struct dpaa_wgfp_tuple`, compared and hashed whole, always built zero-initialised). `wgfp_key()` emits the silicon-verified dual-lane layout for IPv6 (family 0x60, zero 8-byte v4 lane, src6 @9, dst6 @25, then proto/ports/VID/SID as for IPv4; qdrant 2026-08-21 and 2026-09-06), in the same 50-byte per-port table, so no FMan change is needed. One parser (`wgfp_parse()`) serves the sink path and learning: plain IPv4 (no options, no fragments) or IPv6 without extension headers, TCP or UDP; learning reads the headers through `skb_header_pointer()`. The seal path decrements the hop limit for IPv6 (no checksum). The conntrack lookup and the AllowedIPs probe handle both families.
