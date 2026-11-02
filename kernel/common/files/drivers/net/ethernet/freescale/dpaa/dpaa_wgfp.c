@@ -61,6 +61,15 @@ void dpaa_wgfp_fd_release(const struct qm_fd *fd);
  * F-199 starvation class).
  */
 #define WGFP_WQ		6
+/* Sink tail drop: without it a sink the CPU cannot keep up with (P2a unpaced:
+ * 853k pkt/s offered, 503k sealed) queues frames until the ingress port's
+ * buffer pool (~2,270 buffers) runs dry, and every other flow on that port
+ * loses with it.  FQ-local tail drop (QM_FQCTRL_TDE) is evaluated against the
+ * FQD's own byte count, which the FE ENQUEUE path does update (F-199 A6-LOSS);
+ * 512 KiB is about 350 MTU frames per sink, so four sinks stay well inside
+ * the pool.  QMan rejects the enqueue and FMan returns the buffer. */
+#define WGFP_SINK_TD	(512 * 1024)
+#define WGFP_MAX_EGRESS	8
 
 struct wgfp_sink {
 	struct qman_fq fq;
@@ -88,8 +97,13 @@ static DEFINE_MUTEX(wgfp_lock);
 /* Consumer hook (the wireguard module) and the egress frame queue. */
 static const struct dpaa_wgfp_ops __rcu *wgfp_ops;
 static void *wgfp_ops_priv;
-static struct qman_fq wgfp_txfq;
-static bool wgfp_tx_ready;
+/* Egress ports: one no-confirm TX FQ per DPAA port, allocated once (each
+ * dpaa_alloc_offload_tx_fq() call creates a new FQ) and never freed before
+ * the port (the driver's teardown owns it).  Readers index it locklessly;
+ * wgfp_neg is published after the entry is complete. */
+static struct qman_fq wgfp_eg_fq[WGFP_MAX_EGRESS];
+static int wgfp_eg_ifindex[WGFP_MAX_EGRESS];
+static int wgfp_neg;
 static atomic64_t wgfp_xmit_ok = ATOMIC64_INIT(0);
 static atomic64_t wgfp_xmit_fail = ATOMIC64_INIT(0);
 
@@ -258,9 +272,15 @@ static int wgfp_sink_create(struct wgfp_sink *s, int cpu)
 	s->napi_added = true;
 
 	memset(&opts, 0, sizeof(opts));
-	opts.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ);
-	opts.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
+	opts.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ |
+				   QM_INITFQ_WE_TDTHRESH);
+	opts.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_TDE);
 	qm_fqd_set_destwq(&opts.fqd, qman_affine_channel(cpu), WGFP_WQ);
+	err = qm_fqd_set_taildrop(&opts.fqd, WGFP_SINK_TD, 1);
+	if (err < 0) {
+		wgfp_sink_free(s);
+		return err;
+	}
 	err = qman_init_fq(&s->fq, QMAN_INITFQ_FLAG_SCHED, &opts);
 	if (err) {
 		pr_err("dpaa_wgfp: qman_init_fq(%u) = %d\n",
@@ -358,9 +378,9 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	unsigned int i;
 
 	mutex_lock(&wgfp_lock);
-	seq_printf(m, "touch=%u sinks=%u ops=%d tx=%d xmit_ok=%llu xmit_fail=%llu\n",
+	seq_printf(m, "touch=%u sinks=%u ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu\n",
 		   wgfp_touch, wgfp_nsinks, !!rcu_access_pointer(wgfp_ops),
-		   wgfp_tx_ready, (u64)atomic64_read(&wgfp_xmit_ok),
+		   READ_ONCE(wgfp_neg), (u64)atomic64_read(&wgfp_xmit_ok),
 		   (u64)atomic64_read(&wgfp_xmit_fail));
 	for (i = 0; i < wgfp_nsinks; i++) {
 		struct wgfp_sink *s = &wgfp_sinks[i];
@@ -415,23 +435,38 @@ void dpaa_wgfp_unregister(void)
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_unregister);
 
-int dpaa_wgfp_set_egress(struct net_device *dev)
+int dpaa_wgfp_egress(struct net_device *dev)
 {
+	int i, n, ret;
 	u32 fqid;
-	int err;
 
-	err = dpaa_alloc_offload_tx_fq(dev, &fqid);
-	if (err)
-		return err;
+	if (!dpaa_get_rx_fman_port(dev))	/* also the "is a DPAA port" test */
+		return -ENODEV;
 	mutex_lock(&wgfp_lock);
-	memset(&wgfp_txfq, 0, sizeof(wgfp_txfq));
-	wgfp_txfq.fqid = fqid;
-	wgfp_tx_ready = true;
+	n = wgfp_neg;
+	for (i = 0; i < n; i++)
+		if (wgfp_eg_ifindex[i] == dev->ifindex) {
+			ret = i;
+			goto out;
+		}
+	ret = -ENOSPC;
+	if (n == WGFP_MAX_EGRESS)
+		goto out;
+	ret = dpaa_alloc_offload_tx_fq(dev, &fqid);
+	if (ret)
+		goto out;
+	memset(&wgfp_eg_fq[n], 0, sizeof(wgfp_eg_fq[n]));
+	wgfp_eg_fq[n].fqid = fqid;
+	wgfp_eg_ifindex[n] = dev->ifindex;
+	smp_store_release(&wgfp_neg, n + 1);
+	pr_info("dpaa_wgfp: egress %u = %s, no-confirm tx fqid=0x%x\n", n,
+		dev->name, fqid);
+	ret = n;
+out:
 	mutex_unlock(&wgfp_lock);
-	pr_info("dpaa_wgfp: egress %s no-confirm tx fqid=0x%x\n", dev->name, fqid);
-	return 0;
+	return ret;
 }
-EXPORT_SYMBOL_GPL(dpaa_wgfp_set_egress);
+EXPORT_SYMBOL_GPL(dpaa_wgfp_egress);
 
 /*
  * P2b-2: flow records that steer an inner flow to a sink, on the ingress
@@ -554,12 +589,13 @@ void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_drop);
 
-void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, u32 new_off, u32 new_len)
+void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
+		    u32 new_len)
 {
 	struct qm_fd fd = *(const struct qm_fd *)f->fd;
 	int tries = 8;
 
-	if (unlikely(!wgfp_tx_ready)) {
+	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
 		atomic64_inc(&wgfp_xmit_fail);
 		dpaa_wgfp_fd_release(f->fd);
 		return;
@@ -571,7 +607,7 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, u32 new_off, u32 new_len)
 	dma_sync_single_for_device(f->dev, f->addr + new_off, new_len,
 				   DMA_TO_DEVICE);
 	while (tries--) {
-		if (!qman_enqueue(&wgfp_txfq, &fd)) {
+		if (!qman_enqueue(&wgfp_eg_fq[egress], &fd)) {
 			atomic64_inc(&wgfp_xmit_ok);
 			return;
 		}

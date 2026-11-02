@@ -84,10 +84,19 @@ cp -a data/vyos-1x-files "$PATCH_STAGING/"
 # install in lb chroot. Verified failure mode in run 25706953044 (2026-05-12).
 # Literal '''...''' passes the body through verbatim, so bash receives \"
 # unmolested and converts it to " correctly.
+# vyos-1x is PINNED (2026-11-02) to the upstream commit every shipping image
+# so far was built from (cached deb 999.0-15252-g91bf0ef51). Upstream T3871
+# (c73faac7f, 2026-10-31) replaced the udev vyos_net_name helper with a
+# slot-anchored mapping store; patches 027 (FMan DT port order) and 047 no
+# longer apply after it, and the CI cache key held the literal word "rolling",
+# so the drift stayed hidden until a patch change forced a fresh build. Move
+# the pin only together with a port of 027/047 to the T3871 store, verified on
+# the board (eth0 must stay the management port).
+VYOS1X_COMMIT=91bf0ef51026b82f5714c809d6d651a8b9c7aacb
 cat > "$VYOS1X_BUILD/package.toml" <<'EOF'
 [[packages]]
 name = "vyos-1x"
-commit_id = "rolling"
+commit_id = "@VYOS1X_COMMIT@"
 scm_url = "https://github.com/vyos/vyos-1x.git"
 pre_build_hook = '''
   set -ex
@@ -209,5 +218,6 @@ GITATTR
   exit 0
 '''
 EOF
+sed -i "s/@VYOS1X_COMMIT@/$VYOS1X_COMMIT/" "$VYOS1X_BUILD/package.toml"
 
 echo "### vyos-1x patch staging complete: $(ls "$PATCH_STAGING" | wc -l) files staged"
