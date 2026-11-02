@@ -449,9 +449,14 @@ static const struct dpaa_wgfp_ops wgfp_peer_ops = {
  * Phase P2b-2, automatic flow install.  wg_xmit() offers every packet for
  * the bound peer to wg_fastpath_learn().  An inner IPv4 TCP/UDP flow that
  * arrived on a DPAA port, whose conntrack entry is established, not NAT'ed,
- * not related to a master and has no helper, gets an FMan record (installed
- * by a worker; the record API sleeps) that steers its later frames on that
- * port straight to the sinks, where wgfp_peer_frame() seals them.  TCP SYN
+ * not related to a master and has no helper, is tracked from that packet on;
+ * after WGFP_ADMIT slow-path packets it gets an FMan record (installed by a
+ * worker; the record API sleeps) that steers its later frames on that port
+ * straight to a sink (round-robin), where wgfp_peer_frame() seals them.  Mice
+ * (an iperf3 control connection, DNS) never take a record or a sink.  The
+ * packets after the first need no conntrack proof: once the flowtable has the
+ * flow, they reach wg_xmit() without a ct.  A tracked flow that does not reach
+ * WGFP_ADMIT within 10 s is forgotten.  TCP SYN
  * is never learned; FIN/RST (punted to the kernel by ASK's tcp_ctl_punt)
  * withdraws the record, as does 10 s without silicon hits or peer stop.
  *
@@ -464,8 +469,9 @@ static const struct dpaa_wgfp_ops wgfp_peer_ops = {
 #define WGFP_AGE_IDLE		5	/* periods without hits */
 #define WGFP_FAIL_HOLD		(30 * HZ)
 #define WGFP_BATCH		16	/* job arrays live on the stack */
+#define WGFP_ADMIT		32	/* slow-path packets before a record */
 
-enum { WGFP_PENDING, WGFP_INSTALLING, WGFP_INSTALLED, WGFP_FAILED };
+enum { WGFP_LEARNING, WGFP_PENDING, WGFP_INSTALLING, WGFP_INSTALLED, WGFP_FAILED };
 
 struct wgfp_flow {
 	struct hlist_node node;
@@ -600,6 +606,10 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		if (fin && !fl->del) {
 			fl->del = true;
 			queue_work(system_wq, &wgfp_flow_work);
+		} else if (fl->state == WGFP_LEARNING && ++fl->pkts >= WGFP_ADMIT) {
+			fl->pkts = 0;
+			fl->state = WGFP_PENDING;
+			queue_work(system_wq, &wgfp_flow_work);
 		}
 		goto out;
 	}
@@ -624,11 +634,11 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	fl->t = t;
 	fl->ifindex = skb->skb_iif;
 	fl->hash = hash;
-	fl->state = WGFP_PENDING;
+	fl->state = WGFP_LEARNING;
+	fl->pkts = 1;
 	fl->since = jiffies;
 	hash_add(wgfp_flows, &fl->node, hash);
 	wgfp_nflows++;
-	queue_work(system_wq, &wgfp_flow_work);
 out:
 	spin_unlock_bh(&wgfp_flows_lock);
 }
@@ -645,7 +655,10 @@ static void wgfp_flow_free_locked(struct wgfp_flow *fl)
 static void wgfp_flow_work_fn(struct work_struct *w)
 {
 	struct { struct wgfp_flow *fl; struct dpaa_wgfp_tuple t; int ifindex;
-		 u32 hash; bool add; } job[WGFP_BATCH];
+		 bool add; } job[WGFP_BATCH];
+	/* ponytail: round-robin sink choice; per-sink load (silicon counters)
+	 * if long-lived flows pile up on one sink after churn. */
+	static unsigned int rr;
 	struct wgfp_flow *fl;
 	struct hlist_node *tmp;
 	unsigned int n = 0, i, bkt;
@@ -676,7 +689,6 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 		job[n].fl = fl;
 		job[n].t = fl->t;
 		job[n].ifindex = fl->ifindex;
-		job[n].hash = fl->hash;
 		job[n].add = add;
 		n++;
 	}
@@ -688,7 +700,7 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 
 		if (dev) {
 			err = job[i].add ?
-			      dpaa_wgfp_flow_add(dev, &job[i].t, job[i].hash) :
+			      dpaa_wgfp_flow_add(dev, &job[i].t, rr++) :
 			      dpaa_wgfp_flow_del(dev, &job[i].t);
 			dev_put(dev);
 		}
@@ -728,8 +740,10 @@ static void wgfp_age_fn(struct work_struct *w)
 
 	spin_lock_bh(&wgfp_flows_lock);
 	hash_for_each_safe(wgfp_flows, bkt, tmp, fl, node) {
-		if (fl->state == WGFP_FAILED && !fl->del &&
-		    time_after(jiffies, fl->since + WGFP_FAIL_HOLD)) {
+		if ((fl->state == WGFP_FAILED && !fl->del &&
+		     time_after(jiffies, fl->since + WGFP_FAIL_HOLD)) ||
+		    (fl->state == WGFP_LEARNING &&
+		     time_after(jiffies, fl->since + WGFP_AGE_IDLE * WGFP_AGE_PERIOD))) {
 			wgfp_flow_free_locked(fl);
 			continue;
 		}
