@@ -5,6 +5,8 @@
 # wireguard hook seals them with the real peer keypair. Env: DUR=20 FLOWS=4 TBLS="0 2 3" OUT=csv
 # AUTO=1 (P2b-2, patch 4018 + fastpath.c learning): no debugfs steering; the module learns the flows from
 # wg_xmit() and installs the records itself; after the run "off" must withdraw every record (gate: fe_flow empty).
+# OBSOLETE since the P2c rewrite (2026-11-02): AUTO=0 hand-steered records carry no learned flow, so the sink drops
+# their frames by design; use AUTO=1.
 set -u
 DUR=${DUR:-20}; REV=${REV:-0}; FLOWS=${FLOWS:-4}; TBLS=${TBLS:-"0 2 3"}; AUTO=${AUTO:-0}
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
@@ -19,7 +21,7 @@ if [ "$AUTO" = 0 ]; then
   [ ${#FQIDS[@]} -eq 4 ] || { echo "ABORT: sinks ${#FQIDS[@]}"; exit 1; }
 fi
 $D2 'for p in 5241 5242 5243 5244; do sudo pkill -f "iperf3 -s -p $p"; iperf3 -s -p $p -D; done'
-dut "echo 'wg0 eth4' | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer rejected"; dut 'sudo dmesg | tail -5'; exit 1; }
+dut "echo wg0 | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer rejected"; dut 'sudo dmesg | tail -5'; exit 1; }
 sleep 2; echo "peer: $(dut "sudo cat $WP")"
 SIP=0a630170; DIP=0ac7c871; DIP=$(printf '0a63c8%02x' 113); ZERO32=$(printf '00%.0s' $(seq 1 32))
 [ "$AUTO" = 0 ] && for k in $(seq 0 $((FLOWS-1))); do
