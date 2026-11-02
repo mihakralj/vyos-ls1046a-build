@@ -25,9 +25,12 @@
 #include <linux/atomic.h>
 #include <linux/etherdevice.h>
 #include <linux/fsl/dpaa_wgfp.h>
+#include <linux/hashtable.h>
 #include <linux/hex.h>
 #include <linux/if_ether.h>
 #include <linux/inet.h>
+#include <linux/jhash.h>
+#include <linux/tcp.h>
 #include <linux/ip.h>
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
@@ -41,6 +44,10 @@
 #include <net/arp.h>
 #include <net/neighbour.h>
 #include <net/route.h>
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+#include <net/netfilter/nf_conntrack.h>
+#include <net/netfilter/nf_conntrack_helper.h>
+#endif
 
 #include "device.h"
 #include "fastpath.h"
@@ -342,6 +349,8 @@ again:
 		schedule_delayed_work(&ps->refresh, HZ);
 }
 
+static void wgfp_withdraw_frame(const struct iphdr *iph, u32 len);
+
 static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 {
 	struct wgfp_peer_state *ps = priv;
@@ -366,7 +375,12 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 		goto decline;
 	ip_len = ntohs(iph->tot_len);
 	if (ip_len < sizeof(*iph) || ip_len > ps->mtu || ETH_HLEN + ip_len > f->len)
-		goto decline;
+		goto decline_flow;
+	/* We forward the inner packet: TTL must drop by one, as on the slow
+	 * path.  TTL <= 1 is left to the stack (ICMP time exceeded); ASK's
+	 * ttl_punt normally sends those to the kernel before the record. */
+	if (iph->ttl <= 1 || READ_ONCE(peer->is_dead))
+		goto decline_flow;
 
 	plain = min_t(u32, ps->mtu, ALIGN(ip_len, MESSAGE_PADDING_MULTIPLE));
 	if (f->off < WGFP_ADDED ||
@@ -383,6 +397,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	ctr = (u64)atomic64_inc_return(&kp->sending_counter) - 1;
 	if (unlikely(ctr >= REJECT_AFTER_MESSAGES))
 		goto decline;
+	ip_decrease_ttl((struct iphdr *)iph);
 	memset(inner + ip_len, 0, plain - ip_len);
 	chacha20poly1305_encrypt(inner, inner, plain, NULL, 0, ctr,
 				 kp->sending.key);
@@ -419,6 +434,8 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	dpaa_wgfp_xmit(f, f->off - WGFP_ADDED,
 		       WGFP_HDR_LEN + plain + POLY1305_DIGEST_SIZE);
 	return 1;
+decline_flow:
+	wgfp_withdraw_frame(iph, f->len - ETH_HLEN);
 decline:
 	atomic64_inc(&ps->declined);
 	return 0;
@@ -428,12 +445,380 @@ static const struct dpaa_wgfp_ops wgfp_peer_ops = {
 	.frame = wgfp_peer_frame,
 };
 
+/*
+ * Phase P2b-2, automatic flow install.  wg_xmit() offers every packet for
+ * the bound peer to wg_fastpath_learn().  An inner IPv4 TCP/UDP flow that
+ * arrived on a DPAA port, whose conntrack entry is established, not NAT'ed,
+ * not related to a master and has no helper, gets an FMan record (installed
+ * by a worker; the record API sleeps) that steers its later frames on that
+ * port straight to the sinks, where wgfp_peer_frame() seals them.  TCP SYN
+ * is never learned; FIN/RST (punted to the kernel by ASK's tcp_ctl_punt)
+ * withdraws the record, as does 10 s without silicon hits or peer stop.
+ *
+ * Like an offloaded flowtable flow, a fast-pathed flow skips the firewall
+ * after it was admitted: rule changes apply when the record is withdrawn.
+ */
+#define WGFP_FLOW_BITS		10
+#define WGFP_FLOW_MAX		4096
+#define WGFP_AGE_PERIOD		(2 * HZ)
+#define WGFP_AGE_IDLE		5	/* periods without hits */
+#define WGFP_FAIL_HOLD		(30 * HZ)
+#define WGFP_BATCH		16	/* job arrays live on the stack */
+
+enum { WGFP_PENDING, WGFP_INSTALLING, WGFP_INSTALLED, WGFP_FAILED };
+
+struct wgfp_flow {
+	struct hlist_node node;
+	struct dpaa_wgfp_tuple t;
+	int ifindex;
+	u32 hash;
+	u8 state;
+	bool del;
+	u8 idle;
+	u64 pkts;
+	unsigned long since;
+};
+
+static DEFINE_HASHTABLE(wgfp_flows, WGFP_FLOW_BITS);
+static DEFINE_SPINLOCK(wgfp_flows_lock);
+static unsigned int wgfp_nflows;
+static atomic64_t wgfp_installs, wgfp_withdraws, wgfp_install_fail;
+static void wgfp_flow_work_fn(struct work_struct *w);
+static void wgfp_age_fn(struct work_struct *w);
+static DECLARE_WORK(wgfp_flow_work, wgfp_flow_work_fn);
+static DECLARE_DELAYED_WORK(wgfp_age_work, wgfp_age_fn);
+
+static bool wgfp_tuple_eq(const struct dpaa_wgfp_tuple *a,
+			  const struct dpaa_wgfp_tuple *b)
+{
+	return a->saddr == b->saddr && a->daddr == b->daddr &&
+	       a->sport == b->sport && a->dport == b->dport &&
+	       a->proto == b->proto;
+}
+
+static u32 wgfp_tuple_hash(const struct dpaa_wgfp_tuple *t)
+{
+	return jhash_3words((__force u32)t->saddr, (__force u32)t->daddr,
+			    ((__force u32)t->sport << 16 | (__force u32)t->dport) ^
+			    t->proto, 0);
+}
+
+/* ifindex < 0 matches any ingress (the sink does not know the port). */
+static struct wgfp_flow *wgfp_flow_find(const struct dpaa_wgfp_tuple *t,
+					int ifindex, u32 hash)
+{
+	struct wgfp_flow *fl;
+
+	hash_for_each_possible(wgfp_flows, fl, node, hash)
+		if ((ifindex < 0 || fl->ifindex == ifindex) &&
+		    wgfp_tuple_eq(&fl->t, t))
+			return fl;
+	return NULL;
+}
+
+/*
+ * A frame of a learned flow that the seal path declined (too big for the
+ * tunnel MTU, TTL, no keypair, no template) is dropped by the sink.  Until a
+ * slow-path punt exists (P2b-3), withdraw that flow's record so its later
+ * packets take the stack again, which fragments or sends ICMP as needed
+ * (else an oversized DF flow would black-hole).  NAPI context.
+ */
+static atomic64_t wgfp_decline_withdraws;
+
+static void wgfp_withdraw_frame(const struct iphdr *iph, u32 len)
+{
+	struct dpaa_wgfp_tuple t = {};
+	const __be16 *ports = (const __be16 *)((const u8 *)iph + sizeof(*iph));
+	struct wgfp_flow *fl;
+
+	if (len < sizeof(*iph) + 4 || iph->ihl != 5 ||
+	    (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP))
+		return;
+	t.saddr = iph->saddr;
+	t.daddr = iph->daddr;
+	t.proto = iph->protocol;
+	t.sport = ports[0];
+	t.dport = ports[1];
+	spin_lock_bh(&wgfp_flows_lock);
+	fl = wgfp_flow_find(&t, -1, wgfp_tuple_hash(&t));
+	if (fl && !fl->del) {
+		fl->del = true;
+		atomic64_inc(&wgfp_decline_withdraws);
+		queue_work(system_wq, &wgfp_flow_work);
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+}
+
+void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
+{
+	struct wgfp_peer_state *ps = READ_ONCE(wgfp_ps);
+	struct dpaa_wgfp_tuple t = {};
+	struct wgfp_flow *fl;
+	bool fin = false;
+	const struct iphdr *iph;
+	unsigned int thoff;
+	u32 hash;
+
+	if (!ps || ps->peer != peer || skb->protocol != htons(ETH_P_IP) ||
+	    !skb->skb_iif)
+		return;
+	iph = ip_hdr(skb);
+	if (iph->ihl != 5 || ip_is_fragment(iph) ||
+	    (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP))
+		return;
+	thoff = skb_network_offset(skb) + sizeof(*iph);
+	if (iph->protocol == IPPROTO_TCP) {
+		struct tcphdr _th;
+		const struct tcphdr *th = skb_header_pointer(skb, thoff,
+							     sizeof(_th), &_th);
+
+		if (!th || th->syn)
+			return;
+		fin = th->fin || th->rst;
+		t.sport = th->source;
+		t.dport = th->dest;
+	} else {
+		struct udphdr _uh;
+		const struct udphdr *uh = skb_header_pointer(skb, thoff,
+							     sizeof(_uh), &_uh);
+
+		if (!uh)
+			return;
+		t.sport = uh->source;
+		t.dport = uh->dest;
+	}
+	t.saddr = iph->saddr;
+	t.daddr = iph->daddr;
+	t.proto = iph->protocol;
+	hash = wgfp_tuple_hash(&t);
+
+	/* ponytail: one global lock per slow-path packet of the bound peer;
+	 * an RCU lookup if it ever shows in a profile. */
+	spin_lock_bh(&wgfp_flows_lock);
+	fl = wgfp_flow_find(&t, skb->skb_iif, hash);
+	if (fl) {
+		if (fin && !fl->del) {
+			fl->del = true;
+			queue_work(system_wq, &wgfp_flow_work);
+		}
+		goto out;
+	}
+	if (fin || wgfp_nflows >= WGFP_FLOW_MAX)
+		goto out;
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+	{
+		enum ip_conntrack_info ctinfo;
+		struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
+
+		if (!ct || (ctinfo != IP_CT_ESTABLISHED &&
+			    ctinfo != IP_CT_ESTABLISHED_REPLY) ||
+		    (ct->status & IPS_NAT_MASK) || ct->master || nfct_help(ct))
+			goto out;
+	}
+#else
+	goto out;	/* no conntrack: no proof the flow was admitted */
+#endif
+	fl = kzalloc(sizeof(*fl), GFP_ATOMIC);
+	if (!fl)
+		goto out;
+	fl->t = t;
+	fl->ifindex = skb->skb_iif;
+	fl->hash = hash;
+	fl->state = WGFP_PENDING;
+	fl->since = jiffies;
+	hash_add(wgfp_flows, &fl->node, hash);
+	wgfp_nflows++;
+	queue_work(system_wq, &wgfp_flow_work);
+out:
+	spin_unlock_bh(&wgfp_flows_lock);
+}
+
+static void wgfp_flow_free_locked(struct wgfp_flow *fl)
+{
+	hash_del(&fl->node);
+	wgfp_nflows--;
+	kfree(fl);
+}
+
+/* Install PENDING records, withdraw del-marked ones.  Only this worker and
+ * the teardown (after cancelling it) free entries. */
+static void wgfp_flow_work_fn(struct work_struct *w)
+{
+	struct { struct wgfp_flow *fl; struct dpaa_wgfp_tuple t; int ifindex;
+		 u32 hash; bool add; } job[WGFP_BATCH];
+	struct wgfp_flow *fl;
+	struct hlist_node *tmp;
+	unsigned int n = 0, i, bkt;
+	bool more = false;
+
+	spin_lock_bh(&wgfp_flows_lock);
+	hash_for_each_safe(wgfp_flows, bkt, tmp, fl, node) {
+		bool add;
+
+		if (fl->state == WGFP_INSTALLING)
+			continue;
+		if (fl->del) {
+			if (fl->state != WGFP_INSTALLED) {
+				wgfp_flow_free_locked(fl);
+				continue;
+			}
+			add = false;
+		} else if (fl->state == WGFP_PENDING) {
+			add = true;
+		} else {
+			continue;
+		}
+		if (n == WGFP_BATCH) {
+			more = true;
+			break;
+		}
+		fl->state = WGFP_INSTALLING;
+		job[n].fl = fl;
+		job[n].t = fl->t;
+		job[n].ifindex = fl->ifindex;
+		job[n].hash = fl->hash;
+		job[n].add = add;
+		n++;
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+
+	for (i = 0; i < n; i++) {
+		struct net_device *dev = dev_get_by_index(&init_net, job[i].ifindex);
+		int err = -ENODEV;
+
+		if (dev) {
+			err = job[i].add ?
+			      dpaa_wgfp_flow_add(dev, &job[i].t, job[i].hash) :
+			      dpaa_wgfp_flow_del(dev, &job[i].t);
+			dev_put(dev);
+		}
+		spin_lock_bh(&wgfp_flows_lock);
+		fl = job[i].fl;
+		if (job[i].add) {
+			if (err < 0) {
+				atomic64_inc(&wgfp_install_fail);
+				fl->state = WGFP_FAILED;
+			} else {
+				atomic64_inc(&wgfp_installs);
+				fl->state = WGFP_INSTALLED;
+			}
+			fl->since = jiffies;
+			if (fl->del)
+				more = true;	/* FIN while installing */
+		} else {
+			atomic64_inc(&wgfp_withdraws);
+			wgfp_flow_free_locked(fl);
+		}
+		spin_unlock_bh(&wgfp_flows_lock);
+	}
+	if (more)
+		queue_work(system_wq, &wgfp_flow_work);
+}
+
+/* Withdraw records whose silicon counter stopped moving; forget failures. */
+static void wgfp_age_fn(struct work_struct *w)
+{
+	struct { struct wgfp_flow *fl; struct dpaa_wgfp_tuple t; int ifindex; }
+		job[WGFP_BATCH];
+	static unsigned int cursor;
+	unsigned int n = 0, i, bkt, seen = 0;
+	struct wgfp_flow *fl;
+	struct hlist_node *tmp;
+	bool kick = false;
+
+	spin_lock_bh(&wgfp_flows_lock);
+	hash_for_each_safe(wgfp_flows, bkt, tmp, fl, node) {
+		if (fl->state == WGFP_FAILED && !fl->del &&
+		    time_after(jiffies, fl->since + WGFP_FAIL_HOLD)) {
+			wgfp_flow_free_locked(fl);
+			continue;
+		}
+		if (fl->state != WGFP_INSTALLED || fl->del)
+			continue;
+		/* round-robin over passes when there are more than a batch */
+		if (seen++ < cursor || n == WGFP_BATCH)
+			continue;
+		job[n].fl = fl;
+		job[n].t = fl->t;
+		job[n].ifindex = fl->ifindex;
+		n++;
+	}
+	cursor = (n == WGFP_BATCH) ? cursor + n : 0;
+	spin_unlock_bh(&wgfp_flows_lock);
+
+	for (i = 0; i < n; i++) {
+		struct net_device *dev = dev_get_by_index(&init_net, job[i].ifindex);
+		u64 pkts = 0;
+		int err = -ENODEV;
+
+		if (dev) {
+			err = dpaa_wgfp_flow_packets(dev, &job[i].t, &pkts);
+			dev_put(dev);
+		}
+		spin_lock_bh(&wgfp_flows_lock);
+		fl = job[i].fl;
+		/* only this worker and the flow worker touch INSTALLED entries;
+		 * the flow worker frees only del-marked ones */
+		if (fl->state == WGFP_INSTALLED && !fl->del) {
+			if (err || pkts == fl->pkts) {
+				if (++fl->idle >= WGFP_AGE_IDLE) {
+					fl->del = true;
+					kick = true;
+				}
+			} else {
+				fl->idle = 0;
+				fl->pkts = pkts;
+			}
+		}
+		spin_unlock_bh(&wgfp_flows_lock);
+	}
+	if (kick)
+		queue_work(system_wq, &wgfp_flow_work);
+	if (READ_ONCE(wgfp_ps))
+		schedule_delayed_work(&wgfp_age_work, WGFP_AGE_PERIOD);
+}
+
+/* Teardown: learning already stopped (wgfp_ps NULL, RCU synced). */
+static void wgfp_flows_flush(void)
+{
+	struct wgfp_flow *fl;
+	struct hlist_node *tmp;
+	unsigned int bkt;
+
+	cancel_delayed_work_sync(&wgfp_age_work);
+	cancel_work_sync(&wgfp_flow_work);
+	/* no worker runs now; nothing else frees entries, so drop the lock
+	 * around the sleeping record delete */
+	spin_lock_bh(&wgfp_flows_lock);
+	hash_for_each_safe(wgfp_flows, bkt, tmp, fl, node) {
+		if (fl->state == WGFP_INSTALLED) {
+			struct dpaa_wgfp_tuple t = fl->t;
+			int ifindex = fl->ifindex;
+			struct net_device *dev;
+
+			spin_unlock_bh(&wgfp_flows_lock);
+			dev = dev_get_by_index(&init_net, ifindex);
+			if (dev) {
+				dpaa_wgfp_flow_del(dev, &t);
+				dev_put(dev);
+			}
+			atomic64_inc(&wgfp_withdraws);
+			spin_lock_bh(&wgfp_flows_lock);
+		}
+		wgfp_flow_free_locked(fl);
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+}
+
 static void wgfp_peer_stop(void)
 {
 	struct wgfp_peer_state *ps = wgfp_ps;
 
 	if (!ps)
 		return;
+	WRITE_ONCE(wgfp_ps, NULL);	/* wg_fastpath_learn() runs under RCU-bh */
+	synchronize_rcu();
+	wgfp_flows_flush();
 	dpaa_wgfp_unregister();
 	ps->stopping = true;
 	cancel_delayed_work_sync(&ps->refresh);
@@ -443,7 +828,6 @@ static void wgfp_peer_stop(void)
 	dev_put(ps->wgdev);
 	dev_put(ps->egress);
 	kfree(ps);
-	wgfp_ps = NULL;
 }
 
 static int wgfp_peer_start(const char *name, const char *egress)
@@ -489,13 +873,12 @@ static int wgfp_peer_start(const char *name, const char *egress)
 	err = dpaa_wgfp_set_egress(eg);
 	if (err)
 		goto err_ps;
-	wgfp_ps = ps;
 	err = dpaa_wgfp_register(&wgfp_peer_ops, ps);
-	if (err) {
-		wgfp_ps = NULL;
+	if (err)
 		goto err_ps;
-	}
+	WRITE_ONCE(wgfp_ps, ps);
 	schedule_delayed_work(&ps->refresh, 0);
+	schedule_delayed_work(&wgfp_age_work, WGFP_AGE_PERIOD);
 	pr_info("fastpath peer mode on: %s via %s\n", name, egress);
 	return 0;
 err_ps:
@@ -537,11 +920,15 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 
 	if (!ps)
 		return scnprintf(buf, PAGE_SIZE, "off\n");
-	return scnprintf(buf, PAGE_SIZE, "on sealed=%lld declined=%lld rekeys=%lld tmpl=%d\n",
+	return scnprintf(buf, PAGE_SIZE, "on sealed=%lld declined=%lld rekeys=%lld tmpl=%d flows=%u installs=%lld install_fail=%lld withdraws=%lld decline_withdraws=%lld\n",
 			 (long long)atomic64_read(&ps->sealed),
 			 (long long)atomic64_read(&ps->declined),
 			 (long long)atomic64_read(&ps->rekeys),
-			 rcu_access_pointer(ps->tmpl) != NULL);
+			 rcu_access_pointer(ps->tmpl) != NULL, READ_ONCE(wgfp_nflows),
+			 (long long)atomic64_read(&wgfp_installs),
+			 (long long)atomic64_read(&wgfp_install_fail),
+			 (long long)atomic64_read(&wgfp_withdraws),
+			 (long long)atomic64_read(&wgfp_decline_withdraws));
 }
 
 static const struct kernel_param_ops wgfp_peer_param_ops = {
