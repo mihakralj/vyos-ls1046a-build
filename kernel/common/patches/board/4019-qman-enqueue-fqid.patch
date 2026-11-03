@@ -1,0 +1,302 @@
+diff --git a/drivers/soc/fsl/qbman/qman.c b/drivers/soc/fsl/qbman/qman.c
+index 82aa9fb18bfc13cec8a169991be4e279285dab79..906f44112e297d64e8475dcb1355cb9265c03a67 100644
+--- a/drivers/soc/fsl/qbman/qman.c
++++ b/drivers/soc/fsl/qbman/qman.c
+@@ -2417,120 +2417,160 @@ int qman_volatile_dequeue(struct qman_fq *fq, u32 flags, u32 vdqcr)
+ 			wait_event_interruptible(affine_queue,
+ 				!fq_isset(fq, QMAN_FQ_STATE_VDQCR));
+ 		else
+ 			wait_event(affine_queue,
+ 				!fq_isset(fq, QMAN_FQ_STATE_VDQCR));
+ 	}
+ 	return 0;
+ }
+ EXPORT_SYMBOL(qman_volatile_dequeue);
+ 
+ static void update_eqcr_ci(struct qman_portal *p, u8 avail)
+ {
+ 	if (avail)
+ 		qm_eqcr_cce_prefetch(&p->p);
+ 	else
+ 		qm_eqcr_cce_update(&p->p);
+ }
+ 
+ int qman_enqueue(struct qman_fq *fq, const struct qm_fd *fd)
+ {
+ 	struct qman_portal *p;
+ 	struct qm_eqcr_entry *eq;
+ 	unsigned long irqflags;
+ 	u8 avail;
+ 
+ 	p = get_affine_portal();
+ 	local_irq_save(irqflags);
+ 
+ 	if (p->use_eqcr_ci_stashing) {
+ 		/*
+ 		 * The stashing case is easy, only update if we need to in
+ 		 * order to try and liberate ring entries.
+ 		 */
+ 		eq = qm_eqcr_start_stash(&p->p);
+ 	} else {
+ 		/*
+ 		 * The non-stashing case is harder, need to prefetch ahead of
+ 		 * time.
+ 		 */
+ 		avail = qm_eqcr_get_avail(&p->p);
+ 		if (avail < 2)
+ 			update_eqcr_ci(p, avail);
+ 		eq = qm_eqcr_start_no_stash(&p->p);
+ 	}
+ 
+ 	if (unlikely(!eq))
+ 		goto out;
+ 
+ 	qm_fqid_set(eq, fq->fqid);
+ 	eq->tag = cpu_to_be32(fq_to_tag(fq));
+ 	eq->fd = *fd;
+ 
+ 	qm_eqcr_pvb_commit(&p->p, QM_EQCR_VERB_CMD_ENQUEUE);
+ out:
+ 	local_irq_restore(irqflags);
+ 	put_affine_portal();
+ 	return 0;
+ }
+ EXPORT_SYMBOL(qman_enqueue);
+ 
++/*
++ * Keep the legacy enqueue path unchanged until its callers' full-ring
++ * ownership is audited. This variant reports backpressure and permits a
++ * separately registered software-ERN callback.
++ */
++int qman_enqueue_fqid(struct qman_fq *tag_fq, u32 fqid,
++		      const struct qm_fd *fd)
++{
++	struct qman_portal *p;
++	struct qm_eqcr_entry *eq;
++	unsigned long irqflags;
++	u8 avail;
++
++	p = get_affine_portal();
++	local_irq_save(irqflags);
++
++	if (p->use_eqcr_ci_stashing) {
++		eq = qm_eqcr_start_stash(&p->p);
++	} else {
++		avail = qm_eqcr_get_avail(&p->p);
++		if (avail < 2)
++			update_eqcr_ci(p, avail);
++		eq = qm_eqcr_start_no_stash(&p->p);
++	}
++
++	if (unlikely(!eq))
++		goto out;
++
++	qm_fqid_set(eq, fqid);
++	eq->tag = cpu_to_be32(fq_to_tag(tag_fq));
++	eq->fd = *fd;
++
++	qm_eqcr_pvb_commit(&p->p, QM_EQCR_VERB_CMD_ENQUEUE);
++out:
++	local_irq_restore(irqflags);
++	put_affine_portal();
++	return eq ? 0 : -EBUSY;
++}
++EXPORT_SYMBOL_GPL(qman_enqueue_fqid);
++
+ static int qm_modify_cgr(struct qman_cgr *cgr, u32 flags,
+ 			 struct qm_mcc_initcgr *opts)
+ {
+ 	union qm_mc_command *mcc;
+ 	union qm_mc_result *mcr;
+ 	struct qman_portal *p = get_affine_portal();
+ 	u8 verb = QM_MCC_VERB_MODIFYCGR;
+ 	int ret = 0;
+ 
+ 	mcc = qm_mc_start(&p->p);
+ 	if (opts)
+ 		mcc->initcgr = *opts;
+ 	mcc->initcgr.cgid = cgr->cgrid;
+ 	if (flags & QMAN_CGR_FLAG_USE_INIT)
+ 		verb = QM_MCC_VERB_INITCGR;
+ 	qm_mc_commit(&p->p, verb);
+ 	if (!qm_mc_result_timeout(&p->p, &mcr)) {
+ 		ret = -ETIMEDOUT;
+ 		goto out;
+ 	}
+ 
+ 	DPAA_ASSERT((mcr->verb & QM_MCR_VERB_MASK) == verb);
+ 	if (mcr->result != QM_MCR_RESULT_OK)
+ 		ret = -EIO;
+ 
+ out:
+ 	put_affine_portal();
+ 	return ret;
+ }
+ 
+ #define PORTAL_IDX(n)	(n->config->channel - QM_CHANNEL_SWPORTAL0)
+ 
+ /* congestion state change notification target update control */
+ static void qm_cgr_cscn_targ_set(struct __qm_mc_cgr *cgr, int pi, u32 val)
+ {
+ 	if (qman_ip_rev >= QMAN_REV30)
+ 		cgr->cscn_targ_upd_ctrl = cpu_to_be16(pi |
+ 					QM_CGR_TARG_UDP_CTRL_WRITE_BIT);
+ 	else
+ 		cgr->cscn_targ = cpu_to_be32(val | QM_CGR_TARG_PORTAL(pi));
+ }
+ 
+ static void qm_cgr_cscn_targ_clear(struct __qm_mc_cgr *cgr, int pi, u32 val)
+ {
+ 	if (qman_ip_rev >= QMAN_REV30)
+ 		cgr->cscn_targ_upd_ctrl = cpu_to_be16(pi);
+ 	else
+ 		cgr->cscn_targ = cpu_to_be32(val & ~QM_CGR_TARG_PORTAL(pi));
+ }
+ 
+ static u8 qman_cgr_cpus[CGR_NUM];
+ 
+ void qman_init_cgr_all(void)
+ {
+ 	struct qman_cgr cgr;
+ 	int err_cnt = 0;
+ 
+ 	for (cgr.cgrid = 0; cgr.cgrid < CGR_NUM; cgr.cgrid++) {
+ 		if (qm_modify_cgr(&cgr, QMAN_CGR_FLAG_USE_INIT, NULL))
+ 			err_cnt++;
+diff --git a/include/soc/fsl/qman.h b/include/soc/fsl/qman.h
+index 83436bbd83736e1d4bc7bdff7b14d2e39cbe4d0f..7fd5d606646e7028cb05673d84248a855106cb15 100644
+--- a/include/soc/fsl/qman.h
++++ b/include/soc/fsl/qman.h
+@@ -1032,120 +1032,132 @@ int qman_schedule_fq(struct qman_fq *fq);
+ 
+ /**
+  * qman_retire_fq - Retires a FQ
+  * @fq: the frame queue object to retire
+  * @flags: FQ flags (QMAN_FQ_STATE*) if retirement completes immediately
+  *
+  * Retires the frame queue. This returns zero if it succeeds immediately, +1 if
+  * the retirement was started asynchronously, otherwise it returns negative for
+  * failure. When this function returns zero, @flags is set to indicate whether
+  * the retired FQ is empty and/or whether it has any ORL fragments (to show up
+  * as ERNs). Otherwise the corresponding flags will be known when a subsequent
+  * FQRN message shows up on the portal's message ring.
+  *
+  * NB, if the retirement is asynchronous (the FQ was in the Truly Scheduled or
+  * Active state), the completion will be via the message ring as a FQRN - but
+  * the corresponding callback may occur before this function returns!! Ie. the
+  * caller should be prepared to accept the callback as the function is called,
+  * not only once it has returned.
+  */
+ int qman_retire_fq(struct qman_fq *fq, u32 *flags);
+ 
+ /**
+  * qman_oos_fq - Puts a FQ "out of service"
+  * @fq: the frame queue object to be put out-of-service, must be 'retired'
+  *
+  * The frame queue must be retired and empty, and if any order restoration list
+  * was released as ERNs at the time of retirement, they must all be consumed.
+  */
+ int qman_oos_fq(struct qman_fq *fq);
+ 
+ /*
+  * qman_volatile_dequeue - Issue a volatile dequeue command
+  * @fq: the frame queue object to dequeue from
+  * @flags: a bit-mask of QMAN_VOLATILE_FLAG_*** options
+  * @vdqcr: bit mask of QM_VDQCR_*** options, as per qm_dqrr_vdqcr_set()
+  *
+  * Attempts to lock access to the portal's VDQCR volatile dequeue functionality.
+  * The function will block and sleep if QMAN_VOLATILE_FLAG_WAIT is specified and
+  * the VDQCR is already in use, otherwise returns non-zero for failure. If
+  * QMAN_VOLATILE_FLAG_FINISH is specified, the function will only return once
+  * the VDQCR command has finished executing (ie. once the callback for the last
+  * DQRR entry resulting from the VDQCR command has been called). If not using
+  * the FINISH flag, completion can be determined either by detecting the
+  * presence of the QM_DQRR_STAT_UNSCHEDULED and QM_DQRR_STAT_DQCR_EXPIRED bits
+  * in the "stat" parameter passed to the FQ's dequeue callback, or by waiting
+  * for the QMAN_FQ_STATE_VDQCR bit to disappear.
+  */
+ int qman_volatile_dequeue(struct qman_fq *fq, u32 flags, u32 vdqcr);
+ 
+ /**
+  * qman_enqueue - Enqueue a frame to a frame queue
+  * @fq: the frame queue object to enqueue to
+  * @fd: a descriptor of the frame to be enqueued
+  *
+  * Fills an entry in the EQCR of portal @qm to enqueue the frame described by
+  * @fd. The descriptor details are copied from @fd to the EQCR entry, the 'pid'
+  * field is ignored. The return value is non-zero on error, such as ring full.
+  */
+ int qman_enqueue(struct qman_fq *fq, const struct qm_fd *fd);
+ 
++/**
++ * qman_enqueue_fqid - Enqueue using a separate rejection callback
++ * @tag_fq: registered frame queue object used to route software ERNs
++ * @fqid: destination frame queue ID
++ * @fd: descriptor of the frame to be enqueued
++ *
++ * The caller must keep @tag_fq registered until all possible ERNs have been
++ * processed. Returns zero on submission or a negative error if the ring is full.
++ */
++int qman_enqueue_fqid(struct qman_fq *tag_fq, u32 fqid,
++		      const struct qm_fd *fd);
++
+ /**
+  * qman_alloc_fqid_range - Allocate a contiguous range of FQIDs
+  * @result: is set by the API to the base FQID of the allocated range
+  * @count: the number of FQIDs required
+  *
+  * Returns 0 on success, or a negative error code.
+  */
+ int qman_alloc_fqid_range(u32 *result, u32 count);
+ #define qman_alloc_fqid(result) qman_alloc_fqid_range(result, 1)
+ 
+ /**
+  * qman_release_fqid - Release the specified frame queue ID
+  * @fqid: the FQID to be released back to the resource pool
+  *
+  * This function can also be used to seed the allocator with
+  * FQID ranges that it can subsequently allocate from.
+  * Returns 0 on success, or a negative error code.
+  */
+ int qman_release_fqid(u32 fqid);
+ 
+ /**
+  * qman_query_fq_np - Queries non-programmable FQD fields
+  * @fq: the frame queue object to be queried
+  * @np: storage for the queried FQD fields
+  */
+ int qman_query_fq_np(struct qman_fq *fq, struct qm_mcr_queryfq_np *np);
+ 
+ 	/* Pool-channel management */
+ /**
+  * qman_alloc_pool_range - Allocate a contiguous range of pool-channel IDs
+  * @result: is set by the API to the base pool-channel ID of the allocated range
+  * @count: the number of pool-channel IDs required
+  *
+  * Returns 0 on success, or a negative error code.
+  */
+ int qman_alloc_pool_range(u32 *result, u32 count);
+ #define qman_alloc_pool(result) qman_alloc_pool_range(result, 1)
+ 
+ /**
+  * qman_release_pool - Release the specified pool-channel ID
+  * @id: the pool-chan ID to be released back to the resource pool
+  *
+  * This function can also be used to seed the allocator with
+  * pool-channel ID ranges that it can subsequently allocate from.
+  * Returns 0 on success, or a negative error code.
+  */
+ int qman_release_pool(u32 id);
+ 
+ 	/* CGR management */
+ /**
+  * qman_create_cgr - Register a congestion group object
+  * @cgr: the 'cgr' object, with fields filled in
+  * @flags: QMAN_CGR_FLAG_* values
+  * @opts: optional state of CGR settings
+  *
+  * Registers this object to receiving congestion entry/exit callbacks on the
+  * portal affine to the cpu portal on which this API is executed. If opts is
+  * NULL then only the callback (cgr->cb) function is registered. If @flags
+  * contains QMAN_CGR_FLAG_USE_INIT, then an init hw command (which will reset
+  * any unspecified parameters) will be used rather than a modify hw hardware

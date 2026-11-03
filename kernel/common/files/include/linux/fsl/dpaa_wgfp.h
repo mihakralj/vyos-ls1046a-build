@@ -12,11 +12,32 @@
 #ifndef _LINUX_FSL_DPAA_WGFP_H
 #define _LINUX_FSL_DPAA_WGFP_H
 
+#include <linux/atomic.h>
+#include <linux/cpumask.h>
+#include <linux/percpu.h>
 #include <linux/types.h>
 #include <linux/in6.h>
 #include <linux/dma-mapping.h>
 
 struct net_device;
+
+static inline void dpaa_wgfp_stat_inc(atomic64_t __percpu *stat)
+{
+	atomic64_t *local = get_cpu_ptr(stat);
+
+	atomic64_inc(local);
+	put_cpu_ptr(stat);
+}
+
+static inline u64 dpaa_wgfp_stat_sum(const atomic64_t __percpu *stat)
+{
+	u64 total = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		total += atomic64_read(per_cpu_ptr(stat, cpu));
+	return total;
+}
 
 struct dpaa_wgfp_frame {
 	u8 *buf;		/* virtual address of the buffer start */
