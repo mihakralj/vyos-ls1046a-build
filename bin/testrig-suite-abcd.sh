@@ -88,6 +88,18 @@ conntrack_room(){ # N: nf_conntrack_max must hold both directions of N flows
   local need=$(( $1 * 2 + 65536 ))
   [ "${CT_ORIG:-0}" -ge "$need" ] || dut "$DSUDO sysctl -qw net.netfilter.nf_conntrack_max=$need" >/dev/null
 }
+ct_flush(){ # empty conntrack and wait until no HW_OFFLOAD entries remain, so each step starts cold
+  dut "$DSUDO conntrack -F >/dev/null 2>&1; true"
+  local i n=1
+  for i in $(seq 1 60); do
+    n=$(dut "sudo conntrack -L 2>/dev/null | grep -c HW_OFFLOAD || true"); [ "${n:-1}" = 0 ] && return 0; sleep 1
+  done
+  echo "  ct_flush: $n HW_OFFLOAD entries remain after 60 s" >&2
+}
+pause_snap(){ # LABEL: generator-side PAUSE/XOFF counters, to tell whether a generator was throttled
+  local h
+  for h in g1 g2; do $h "$NS ethtool -S $IF 2>/dev/null | grep -iE 'xoff|xon|pause' | tr -s ' ' | tr '\\n' ' '" | sed "s/^/  $1 $h: /"; done
+}
 restore_ctl(){
   [ -n "$CT_ORIG" ] && dut "$DSUDO sysctl -qw net.netfilter.nf_conntrack_max=$CT_ORIG" >/dev/null 2>&1
   [ -n "$PORTS_ORIG" ] && g1 "sudo sysctl -qw net.ipv4.ip_local_port_range='$PORTS_ORIG'" >/dev/null 2>&1
@@ -147,7 +159,7 @@ suite_B1(){ # flow scale
   echo "== B1 flow-table scaling at 2.5 Mpps total"
   local n o dk
   for n in ${STEPS_B1:-1024 16384 65536 131072 262144}; do
-    o=$OUTD/B1-$n.csv; rm -f "$o"; conntrack_room "$n"
+    o=$OUTD/B1-$n.csv; rm -f "$o"; ct_flush; conntrack_room "$n"
     # the vendor learns flows from conntrack events at its own pace; give it time in proportion
     BIDIR=1 FLOWS=$n WARM_PARTIAL=1 WARM_MAX=${WARM_MAX_B1:-420} WARM_SECS=$(( n / 1000 > 20 ? (n / 1000 > 300 ? 300 : n / 1000) : 20 )) OUT=$o \
       PK trial port-v4 64 2500000 "$TRIAL" > "$OUTD/B1-$n.log" 2>&1 || echo "  trial $n exit $?"
@@ -165,7 +177,7 @@ suite_B2(){ # new connections per second over a 1.5 Mpps background
   echo "== B2 CPS ramp over 1.5 Mpps background"
   cps_serve_start; local rate o secs=15 best=0 bestfail=NA j
   for rate in ${RATES_B2:-5000 10000 25000 40000 60000}; do
-    o=$OUTD/B2-$rate.csv; rm -f "$o"; j=$OUTD/B2-$rate.json
+    o=$OUTD/B2-$rate.csv; rm -f "$o"; j=$OUTD/B2-$rate.json; ct_flush; conntrack_room 300000
     BIDIR=1 FLOWS=1024 OUT=$o DURING_OUT=$j \
       DURING="ssh -n $SSHO $GEN1 \"$NS python3 /tmp/testrig-cps.py run $G1A $G2A $CPSPORT $rate $secs 0 8\"" \
       PK trial port-v4 64 1500000 $((secs + 8)) > "$OUTD/B2-$rate.log" 2>&1
@@ -268,9 +280,11 @@ suite_D1(){
 suite_D2(){
   echo "== D2 line-rate flood with 100 pps control-plane traffic to the router"
   local o=$OUTD/D2.csv n=2800 j=$OUTD/D2.out; rm -f "$o"
+  pause_snap before | tee "$OUTD/D2-pause.txt"
   BIDIR=1 FLOWS=1000 OUT=$o DURING_OUT=$j \
     DURING="( ssh -n $SSHO $GEN1 \"$NS ping -i 0.01 -c $n -W 1 -q $R1V | sed 's/^/P1 /'\" & ssh -n $SSHO $GEN2 \"$NS ping -i 0.01 -c $n -W 1 -q $R2V | sed 's/^/P2 /'\" & ssh -n $SSHO $GEN1 \"bash /tmp/testrig-sshprobe.sh $R1V 28\" & wait )" \
     PK trial vlan-v4 64 0 30 > "$OUTD/D2.log" 2>&1
+  pause_snap after | tee -a "$OUTD/D2-pause.txt"
   tail -n 3 "$OUTD/D2.log"; cat "$j"
   local p1 p2 s_bad lossr hw
   p1=$(sed -n 's/^P1 .* \([0-9.]*\)% packet loss.*/\1/p' "$j"); p2=$(sed -n 's/^P2 .* \([0-9.]*\)% packet loss.*/\1/p' "$j")
