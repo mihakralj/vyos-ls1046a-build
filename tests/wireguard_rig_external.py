@@ -34,8 +34,12 @@ if os.environ.get("FAKE_SSH_HOST_LOG"):
     with open(os.environ["FAKE_SSH_HOST_LOG"], "a") as log:
         log.write(args[index] + "\n")
 
-if os.environ.get("FAKE_PROBE_EXEC") and "ip link add wgc" in command:
-    sys.exit(subprocess.run(["sh", "-c", command]).returncode)
+if os.environ.get("FAKE_PROBE_EXEC") and re.search(r"sh -s -- (?:create|delete) wgc", command):
+    status = subprocess.run(["sh", "-c", command]).returncode
+    if status == 0 and os.environ.get("FAKE_PROBE_FAILURE") == "lost" and "sh -s -- create wgc" in command:
+        print("probe response lost", file=sys.stderr)
+        sys.exit(255)
+    sys.exit(status)
 elif "iperf3 -c " in command:
     if os.environ.get("FAKE_IPERF_FAIL_PORT") and (
         "-p " + os.environ["FAKE_IPERF_FAIL_PORT"]
@@ -65,15 +69,69 @@ elif "iperf3 -c " in command:
         "end": end,
     }))
 elif os.environ.get("FAKE_FW4_ERROR") and "nft insert rule inet fw4 forward" in command:
-    sys.exit(1)
+    sys.exit(int(os.environ["FAKE_FW4_ERROR"]))
+elif os.environ.get("FAKE_LINK_FAIL_ROLE") and re.search(
+    r"sh -s -- create (?:wg0|wgd|wgm[0-9]+) wgo-[0-9a-f]{32}-"
+    + re.escape(os.environ["FAKE_LINK_FAIL_ROLE"]) + r"(?:\s|$)", command
+):
+    sys.exit(int(os.environ.get("FAKE_LINK_FAIL_CODE", "255")))
+elif os.environ.get("FAKE_NOTRACK_FAIL") and re.search(
+    r"sh -s -- add [0-9a-f]{32} [12] 51820", command
+):
+    sys.exit(int(os.environ["FAKE_NOTRACK_FAIL"]))
 elif "python3 - start /tmp/wgrig-srv-" in command and os.environ.get("FAKE_SERVER_START_FAIL"):
     sys.exit(int(os.environ["FAKE_SERVER_START_FAIL"]))
 elif "python3 - identity /tmp/wgrig-srv-" in command:
     print("123:456:" + command.split()[-1])
 elif "sh -s -- add plain " in command and os.environ.get("FAKE_ROUTE_FAIL"):
     sys.exit(int(os.environ["FAKE_ROUTE_FAIL"]))
+elif "tee /sys/module/wireguard/parameters/wgfp_peer_lease" in command:
+    if os.environ.get("FAKE_LEASE_MISSING"):
+        sys.exit(1)
+    state_file = Path(os.environ["FAKE_BIND_STATE"])
+    owner_file = Path(os.environ["FAKE_BIND_OWNER"])
+    match = re.search(r"'(reserve|bind|stop|release) ([0-9a-f]{32})(?: ([^']+))?'\s*\|", command)
+    if not match:
+        sys.exit(1)
+    action, token, aliases = match.groups()
+    owner = owner_file.read_text() if owner_file.exists() else ""
+    names = state_file.read_text() if state_file.exists() else "off"
+    if action == "reserve":
+        if os.environ.get("FAKE_RESERVE_RACE"):
+            state_file.write_text("existing")
+            sys.exit(1)
+        if owner and owner != token or names != "off":
+            sys.exit(1)
+        owner_file.write_text(token)
+    elif owner != token:
+        sys.exit(1)
+    elif action == "bind":
+        if os.environ.get("FAKE_BIND_ERROR") or names != "off":
+            sys.exit(1)
+        result = []
+        for alias in aliases.split():
+            if alias == f"wgo-{token}-dut":
+                result.append("wg0")
+            elif re.fullmatch(rf"wgo-{token}-d[0-9]+", alias):
+                result.append("wgm" + alias.rsplit("d", 1)[1])
+            else:
+                sys.exit(1)
+        state_file.write_text(" ".join(result))
+    elif action == "stop":
+        state_file.write_text("off")
+    elif action == "release":
+        if names != "off":
+            sys.exit(1)
+        owner_file.unlink()
+    if os.environ.get("FAKE_LOST_RESPONSE") == action:
+        skip = int(os.environ.get("FAKE_LOST_RESPONSE_SKIP", "0"))
+        count_file = Path(os.environ["FAKE_LOST_RESPONSE_COUNT"])
+        count = int(count_file.read_text()) + 1 if count_file.exists() else 1
+        count_file.write_text(str(count))
+        if count > skip:
+            sys.exit(255)
 elif "tee /sys/module/wireguard/parameters/wgfp_peer" in command:
-    if os.environ.get("FAKE_BIND_ERROR"):
+    if os.environ.get("FAKE_BIND_ERROR") or Path(os.environ["FAKE_BIND_OWNER"]).exists():
         sys.exit(1)
     state_file = Path(os.environ["FAKE_BIND_STATE"])
     match = re.search(r"echo\s+(?:'([^']*)'|(\S+))\s+\|", command)
@@ -96,8 +154,18 @@ elif "cat /sys/kernel/debug/dpaa_wgfp/stats" in command:
             key = os.environ["FAKE_QMAN_CHANGE"]
             state = state.replace(f"{key}=0", f"{key}=1")
     print(state)
+elif "cat /sys/module/wireguard/parameters/wgfp_peer_lease" in command:
+    if os.environ.get("FAKE_LEASE_MISSING"):
+        sys.exit(1)
+    state_file = Path(os.environ["FAKE_BIND_STATE"])
+    owner_file = Path(os.environ["FAKE_BIND_OWNER"])
+    if os.environ.get("FAKE_LEASE_STATUS_FAIL_WHEN_OWNED") and owner_file.exists():
+        sys.exit(1)
+    owner = owner_file.read_text() if owner_file.exists() else ""
+    names = state_file.read_text() if state_file.exists() else "off"
+    print(f"owned={owner} dev={names}" if owner else "unowned")
 elif "cat /sys/module/wireguard/parameters/wgfp_peer" in command:
-    if os.environ.get("FAKE_WGFP_ERROR"):
+    if os.environ.get("FAKE_WGFP_ERROR") or os.environ.get("FAKE_WGFP_MISSING"):
         sys.exit(1)
     state_file = Path(os.environ["FAKE_BIND_STATE"])
     names = state_file.read_text() if state_file.exists() else "off"
@@ -109,6 +177,8 @@ elif "cat /sys/module/wireguard/parameters/wgfp_peer" in command:
         if count >= int(os.environ["FAKE_WGFP_CONFLICT_AT"]):
             default = "on sealed=2 rx=3 dev=existing"
     print(os.environ.get("FAKE_WGFP_STATE", default))
+elif command == "test ! -e /sys/module/wireguard/parameters/wgfp_peer":
+    sys.exit(0 if os.environ.get("FAKE_WGFP_MISSING") else 1)
 elif remote[:2] in (["sh", "-s"], ["bash", "-s"]):
     sys.stdin.read()
     if os.environ.get("FAKE_STAT_ERROR"):
@@ -122,7 +192,7 @@ elif command in ("wg genkey", "wg pubkey"):
 """
 
 
-def run_rig(tmp_path, script, extra, operation="run"):
+def run_rig(tmp_path, script, extra, operation="run", cells=None):
     ssh = tmp_path / "ssh"
     ssh.write_text(FAKE_SSH)
     ssh.chmod(0o755)
@@ -148,6 +218,8 @@ def run_rig(tmp_path, script, extra, operation="run"):
         "FAKE_SSH_HOST_LOG": str(tmp_path / "hosts.log"),
         "FAKE_QMAN_READ_COUNT": str(tmp_path / "qman-count"),
         "FAKE_BIND_STATE": str(tmp_path / "wgfp-bound"),
+        "FAKE_BIND_OWNER": str(tmp_path / "wgfp-owner"),
+        "FAKE_LOST_RESPONSE_COUNT": str(tmp_path / "lost-response-count"),
         "FAKE_WGFP_READ_COUNT": str(tmp_path / "wgfp-reads"),
         "J": str(tmp_path / "json"),
         "OUT": str(tmp_path / "result.csv"),
@@ -160,7 +232,9 @@ def run_rig(tmp_path, script, extra, operation="run"):
     env.update(extra)
     args = ["bash", str(script), operation]
     if script == SINGLE and operation == "run":
-        args.append("wg-v4")
+        args.extend(cells or ["wg-v4"])
+    elif script == SINGLE and cells:
+        args.extend(cells)
     result = subprocess.run(args, env=env, text=True, capture_output=True, timeout=30)
     commands = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, commands
@@ -178,7 +252,212 @@ def test_single_run_recreates_tunnel_without_touching_external_server(tmp_path):
     assert (tmp_path / "result.csv").read_text().count("2.000") == 2
 
 
-@pytest.mark.parametrize("failure", ["add", "del"])
+def test_single_manual_teardown_restores_persisted_options_and_unbinds_first(tmp_path):
+    setup, before = run_rig(tmp_path, SINGLE, {
+        "WGFP": "1", "WG_SKIP_SERVERS": "0", "WGMTU": "1300", "WG_NOTRACK": "1",
+    }, operation="setup")
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "WGFP": "0", "WG_SKIP_SERVERS": "1", "WGMTU": "1420", "WG_NOTRACK": "0",
+    }, operation="teardown")
+    assert result.returncode == 0, result.stdout + result.stderr
+    cleanup = commands[len(before):]
+    assert sum("python3 - identity /tmp/wgrig-srv-" in c for c in cleanup) == 1
+    assert sum("sh -s -- delete plain " in c and " 1300 " in c for c in cleanup) == 2
+    assert any(re.search(r"sh -s -- delete [0-9a-f]{32}$", c) for c in cleanup)
+    unbind = next(i for i, c in enumerate(cleanup) if re.search(r"'stop [0-9a-f]{32}'", c))
+    link_delete = next(i for i, c in enumerate(cleanup) if "sh -s -- delete wg0 " in c)
+    release = next(i for i, c in enumerate(cleanup) if re.search(r"'release [0-9a-f]{32}'", c))
+    assert unbind < link_delete < release
+    assert not (tmp_path / "state.single-lease").exists()
+
+
+def test_single_teardown_without_matching_lease_does_not_touch_the_rig(tmp_path):
+    result, commands = run_rig(tmp_path, SINGLE, {}, operation="teardown")
+    assert result.returncode != 0
+    assert "no valid owned lease" in result.stderr
+    assert not commands
+
+
+def test_single_teardown_refuses_an_external_binding_using_its_link(tmp_path):
+    setup, before = run_rig(tmp_path, SINGLE, {}, operation="setup")
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    (tmp_path / "wgfp-bound").write_text("wg0 existing")
+    result, commands = run_rig(tmp_path, SINGLE, {}, operation="teardown")
+    assert result.returncode != 0
+    assert "software rig's WGFP reservation became active" in result.stderr
+    cleanup = commands[len(before):]
+    assert not any("sh -s -- delete wg0 " in c or "'stop " in c for c in cleanup)
+    assert (tmp_path / "state.single-lease").exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_software_ask2_rig_requires_the_atomic_reservation(tmp_path, script):
+    result, commands = run_rig(tmp_path, script, {
+        "FAKE_WGFP_MISSING": "1", "FAKE_LEASE_MISSING": "1", "TUNNELS": "2",
+    })
+    assert result.returncode != 0
+    assert "cannot inspect the atomic WGFP reservation" in result.stderr
+    assert not any("sh -s -- create wg" in c for c in commands)
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    assert not lease.exists()
+    assert not (tmp_path / "state.single-lease.probe").exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_software_vendor_rig_does_not_require_ask2_reservation(tmp_path, script):
+    result, commands = run_rig(tmp_path, script, {
+        "DUT_KIND": "vendor", "FAKE_WGFP_MISSING": "1",
+        "FAKE_LEASE_MISSING": "1", "TUNNELS": "2",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not any("wgfp_peer_lease" in c for c in commands)
+    assert any("modprobe wireguard" in c for c in commands)
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_software_reservation_blocks_competing_binding_until_links_are_deleted(tmp_path, script):
+    setup, before = run_rig(tmp_path, script, {"TUNNELS": "2"}, operation="setup")
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    token = (lease / "token").read_text().strip()
+    assert (lease / "binding").read_text() == "created\n"
+    assert (tmp_path / "wgfp-owner").read_text() == token
+    reserve = next(i for i, c in enumerate(before) if f"'reserve {token}'" in c)
+    link = next(i for i, c in enumerate(before)
+                if f"sh -s -- create {'wg0' if script == SINGLE else 'wgm0'} " in c)
+    assert reserve < link
+    assert not any(f"'bind {token} " in c or f"'stop {token}'" in c for c in before)
+
+    env = os.environ | {
+        "FAKE_SSH_LOG": str(tmp_path / "ssh.log"),
+        "FAKE_BIND_OWNER": str(tmp_path / "wgfp-owner"),
+        "FAKE_BIND_STATE": str(tmp_path / "wgfp-bound"),
+    }
+    competing = subprocess.run(
+        [str(tmp_path / "ssh"), "-n", "vyos@dut",
+         "echo existing | sudo tee /sys/module/wireguard/parameters/wgfp_peer"],
+        env=env, text=True, capture_output=True,
+    )
+    assert competing.returncode != 0
+    before.append(json.loads((tmp_path / "ssh.log").read_text().splitlines()[-1]))
+
+    result, commands = run_rig(tmp_path, script, {"TUNNELS": "2"}, operation="teardown")
+    assert result.returncode == 0, result.stdout + result.stderr
+    cleanup = commands[len(before):]
+    link_delete = max(i for i, c in enumerate(cleanup) if "sh -s -- delete wg" in c)
+    release = next(i for i, c in enumerate(cleanup) if f"'release {token}'" in c)
+    assert link_delete < release
+    assert not any(f"'stop {token}'" in c for c in cleanup)
+    assert not lease.exists()
+    assert not (tmp_path / "wgfp-owner").exists()
+    competing = subprocess.run(
+        [str(tmp_path / "ssh"), "-n", "vyos@dut",
+         "echo existing | sudo tee /sys/module/wireguard/parameters/wgfp_peer"],
+        env=env, text=True, capture_output=True,
+    )
+    assert competing.returncode == 0
+
+
+@pytest.mark.parametrize(("owner", "contender"), [(SINGLE, MULTI), (MULTI, SINGLE)])
+def test_software_single_and_multi_rigs_cannot_share_a_reservation(tmp_path, owner, contender):
+    setup, before = run_rig(tmp_path, owner, {"TUNNELS": "2"}, operation="setup")
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    token = (tmp_path / "wgfp-owner").read_text()
+    refused, commands = run_rig(tmp_path, contender, {"TUNNELS": "2"}, operation="setup")
+    assert refused.returncode != 0
+    assert "already reserved" in refused.stderr
+    assert not any("sh -s -- create wg" in c for c in commands[len(before):])
+    assert (tmp_path / "wgfp-owner").read_text() == token
+    cleanup, _ = run_rig(tmp_path, owner, {"TUNNELS": "2"}, operation="teardown")
+    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
+
+
+def test_single_recreation_keeps_owned_server_and_rebinds_fast_path(tmp_path):
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "WGFP": "1", "WG_SKIP_SERVERS": "0", "RECREATE": "1",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum("python3 - start /tmp/wgrig-srv-" in c for c in commands) == 1
+    assert sum("python3 - identity /tmp/wgrig-srv-" in c for c in commands) == 1
+    assert sum(re.search(r"'bind [0-9a-f]{32} ", c) is not None for c in commands) == 3
+    assert sum(re.search(r"'release [0-9a-f]{32}'", c) is not None for c in commands) == 2
+    assert not (tmp_path / "state.single-lease").exists()
+
+
+@pytest.mark.parametrize("script,role", [(SINGLE, "far"), (MULTI, "f0")])
+def test_uncertain_link_creation_retains_lease_and_never_adopts_link(tmp_path, script, role):
+    result, commands = run_rig(tmp_path, script, {
+        "FAKE_LINK_FAIL_ROLE": role, "FAKE_LINK_FAIL_CODE": "255", "TUNNELS": "2",
+    }, operation="setup")
+    assert result.returncode != 0
+    assert "uncertain ownership" in result.stderr
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    marker = "link-far" if script == SINGLE else "link-far-0"
+    assert (lease / marker).read_text() == "pending\n"
+    assert not any("sh -s -- delete wg0 " in c and c.endswith("-far") or
+                   "sh -s -- delete wgm0 " in c and c.endswith("-f0") for c in commands)
+
+
+@pytest.mark.parametrize("status", ["10", "11", "12", "255"])
+def test_single_uncertain_notrack_creation_retains_lease(tmp_path, status):
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "WG_NOTRACK": "1", "FAKE_NOTRACK_FAIL": status,
+    }, operation="setup")
+    assert result.returncode != 0
+    assert "uncertain ownership" in result.stderr
+    assert (tmp_path / "state.single-lease" / "notrack").read_text() == "pending\n"
+    assert not any(re.search(r"sh -s -- delete [0-9a-f]{32}$", c) for c in commands)
+    assert not any("nft delete table inet wgnt" in c for c in commands)
+
+
+@pytest.mark.parametrize("status", ["10", "11", "12"])
+def test_single_uncertain_fw4_creation_retains_lease(tmp_path, status):
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "DUT_KIND": "vendor", "FAKE_FW4_ERROR": status,
+    }, operation="setup")
+    assert result.returncode != 0
+    assert "uncertain ownership" in result.stderr
+    assert (tmp_path / "state.single-lease" / "fw4").read_text() == "pending\n"
+    assert not any("nft delete rule inet fw4 forward" in c for c in commands)
+
+
+@pytest.mark.parametrize(("outer", "endpoint"), [
+    ("4", "endpoint 10.99.2.185:51820"),
+    ("6", "endpoint [fd99:2::185]:51820"),
+])
+def test_single_pipes_keys_and_uses_valid_outer_endpoint(tmp_path, outer, endpoint):
+    result, commands = run_rig(tmp_path, SINGLE, {"OUTER": outer}, operation="setup")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum("private-key /dev/stdin" in c for c in commands) == 2
+    assert any(endpoint in c for c in commands)
+    assert not any("/tmp/wgk" in c for c in commands)
+
+
+def test_single_direct_cell_switches_owned_server_and_cleans_direct_links(tmp_path):
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "WG_SKIP_SERVERS": "0", "DIRS": "up",
+    }, cells=["ceiling-v4"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum("python3 - start /tmp/wgrig-srv-" in c for c in commands) == 2
+    assert sum("python3 - identity /tmp/wgrig-srv-" in c for c in commands) == 2
+    assert sum("sh -s -- create wgd " in c for c in commands) == 2
+    assert sum("sh -s -- delete wgd " in c for c in commands) == 2
+    assert not any("/tmp/wgk" in c or "/tmp/wg-iperf" in c for c in commands)
+    assert not (tmp_path / "state.single-lease").exists()
+
+
+def test_single_keep_retains_lease_for_later_manual_teardown(tmp_path):
+    result, before = run_rig(tmp_path, SINGLE, {"KEEP": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "state.single-lease").exists()
+    result, commands = run_rig(tmp_path, SINGLE, {}, operation="teardown")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any("sh -s -- delete wg0 " in c for c in commands[len(before):])
+    assert not (tmp_path / "state.single-lease").exists()
+
+
+@pytest.mark.parametrize("failure", ["add", "del", "lost"])
 def test_preflight_probe_failure_does_not_remove_an_existing_interface(tmp_path, failure):
     ssh = tmp_path / "ssh"
     ssh.write_text(FAKE_SSH)
@@ -188,10 +467,37 @@ def test_preflight_probe_failure_does_not_remove_an_existing_interface(tmp_path,
         ("sudo", '#!/bin/sh\nexec "$@"\n'),
         ("modprobe", "#!/bin/sh\nexit 0\n"),
         ("wg", "#!/bin/sh\nexit 0\n"),
-        ("ip", """#!/bin/sh
-echo "$*" >> "$FAKE_IP_LOG"
-if [ "$2" = "$FAKE_PROBE_FAILURE" ]; then echo "probe $2 failed" >&2; exit 1; fi
-exit 0
+        ("ip", r"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with open(os.environ["FAKE_IP_LOG"], "a") as log:
+    log.write(" ".join(args) + "\n")
+state = Path(os.environ["FAKE_PROBE_STATE"])
+if args == ["-o", "link", "show"]:
+    if state.exists():
+        link = json.loads(state.read_text())
+        print(f'9: {link["name"]}: <POINTOPOINT> altname {link["owner"]}')
+    sys.exit(0)
+if args[:2] == ["link", "add"]:
+    if os.environ.get("FAKE_PROBE_FAILURE") == "add":
+        print("probe add failed", file=sys.stderr)
+        sys.exit(1)
+    state.write_text(json.dumps({"name": args[2], "owner": ""}))
+elif args[:3] == ["link", "property", "add"]:
+    link = json.loads(state.read_text())
+    link["owner"] = args[-1]
+    state.write_text(json.dumps(link))
+elif args[:3] == ["link", "set", "dev"]:
+    link = json.loads(state.read_text())
+    link["name"] = args[-1]
+    state.write_text(json.dumps(link))
+elif args[:2] == ["link", "del"]:
+    if os.environ.get("FAKE_PROBE_FAILURE") == "del":
+        print("probe del failed", file=sys.stderr)
+        sys.exit(1)
+    state.unlink()
 """),
     ):
         fake = tmp_path / name
@@ -209,6 +515,10 @@ exit 0
         "RIG_NS": "",
         "FAKE_SSH_LOG": str(tmp_path / "ssh.log"),
         "FAKE_IP_LOG": str(commands),
+        "FAKE_PROBE_STATE": str(tmp_path / "probe.json"),
+        "FAKE_BIND_STATE": str(tmp_path / "wgfp-bound"),
+        "FAKE_BIND_OWNER": str(tmp_path / "wgfp-owner"),
+        "FAKE_LOST_RESPONSE_COUNT": str(tmp_path / "lost-response-count"),
         "FAKE_PROBE_EXEC": "1",
         "FAKE_PROBE_FAILURE": failure,
         "J": str(tmp_path / "json"),
@@ -219,13 +529,50 @@ exit 0
         capture_output=True, timeout=30
     )
     assert result.returncode != 0
-    assert f"probe {failure} failed" in result.stderr
+    assert ("probe response lost" if failure == "lost" else f"probe {failure} failed") in result.stderr
     calls = commands.read_text().splitlines()
-    assert calls[0].startswith("link add wgc")
-    if failure == "add":
-        assert len(calls) == 1
+    assert calls[0] == "-o link show"
+    lease = tmp_path / "state.single-lease.probe"
+    assert lease.exists()
+    assert (tmp_path / "wgfp-owner").exists()
+    if failure in ("add", "lost"):
+        assert not any(call.startswith("link del ") for call in calls)
+        assert (lease / "link-probe").read_text() == "pending\n"
+        if failure == "lost":
+            cleanup = subprocess.run(
+                ["bash", str(SINGLE), "probe-teardown"], env=env, text=True,
+                capture_output=True, timeout=30
+            )
+            assert cleanup.returncode != 0 and "uncertain ownership" in cleanup.stderr
+            assert (tmp_path / "probe.json").exists()
     else:
-        assert len(calls) == 2 and calls[1].startswith("link del wgc")
+        assert calls[-1].startswith("link del wgo-")
+        assert (lease / "link-probe").read_text() == "created\n"
+        env["FAKE_PROBE_FAILURE"] = ""
+        (lease / "binding").unlink()
+        env["WG_BINDING_UNATTEMPTED"] = "1"
+        missing = subprocess.run(
+            ["bash", str(SINGLE), "probe-teardown"], env=env, text=True,
+            capture_output=True, timeout=30
+        )
+        assert missing.returncode != 0 and "reservation journal is missing" in missing.stderr
+        assert (tmp_path / "probe.json").exists()
+        (lease / "binding").write_text("created\n")
+        (tmp_path / "wgfp-bound").write_text("other")
+        active = subprocess.run(
+            ["bash", str(SINGLE), "probe-teardown"], env=env, text=True,
+            capture_output=True, timeout=30
+        )
+        assert active.returncode != 0 and "reservation became active" in active.stderr
+        assert (tmp_path / "probe.json").exists()
+        (tmp_path / "wgfp-bound").write_text("off")
+        cleanup = subprocess.run(
+            ["bash", str(SINGLE), "probe-teardown"], env=env, text=True,
+            capture_output=True, timeout=30
+        )
+        assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
+        assert not lease.exists()
+        assert not (tmp_path / "wgfp-owner").exists()
 
 
 def test_multi_run_uses_external_port_per_tunnel_without_server_cleanup(tmp_path):
@@ -246,10 +593,9 @@ def test_multi_manual_setup_binds_all_fast_path_peers(tmp_path):
         tmp_path, MULTI, {"WGFP": "1", "TUNNELS": "2", "ACTIVE": "2"}, operation="setup"
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert any("echo 'wgm0 wgm1 ' | sudo tee /sys/module/wireguard/parameters/wgfp_peer" in c
+    assert any(re.search(r"'bind ([0-9a-f]{32}) wgo-\1-d0 wgo-\1-d1'", c)
                for c in commands)
-    assert not any("echo off | sudo tee /sys/module/wireguard/parameters/wgfp_peer" in c
-                   for c in commands)
+    assert not any(re.search(r"'stop [0-9a-f]{32}'", c) for c in commands)
 
 
 def test_multi_manual_setup_reports_fast_path_bind_failure(tmp_path):
@@ -258,7 +604,7 @@ def test_multi_manual_setup_reports_fast_path_bind_failure(tmp_path):
                           "FAKE_BIND_ERROR": "1"}, operation="setup"
     )
     assert result.returncode != 0
-    assert "wgfp bind failed" in result.stderr
+    assert "WGFP bind failed" in result.stderr
 
 
 def test_multi_manual_teardown_uses_persisted_server_and_route_settings(tmp_path):
@@ -286,9 +632,10 @@ def test_multi_manual_teardown_unbinds_its_peers_before_removing_links(tmp_path)
     }, operation="teardown")
     assert result.returncode == 0, result.stdout + result.stderr
     cleanup = commands[len(before):]
-    unbind = next(i for i, c in enumerate(cleanup) if "echo off | sudo tee" in c)
+    unbind = next(i for i, c in enumerate(cleanup) if re.search(r"'stop [0-9a-f]{32}'", c))
     link_delete = next(i for i, c in enumerate(cleanup) if "sh -s -- delete wgm" in c)
-    assert unbind < link_delete
+    release = next(i for i, c in enumerate(cleanup) if re.search(r"'release [0-9a-f]{32}'", c))
+    assert unbind < link_delete < release
 
 
 def test_multi_teardown_refuses_an_external_binding_that_uses_its_link(tmp_path):
@@ -297,9 +644,9 @@ def test_multi_teardown_refuses_an_external_binding_that_uses_its_link(tmp_path)
     (tmp_path / "wgfp-bound").write_text("wgm0 existing")
     result, commands = run_rig(tmp_path, MULTI, {"TUNNELS": "2"}, operation="teardown")
     assert result.returncode != 0
-    assert "WGFP binding is not owned" in result.stderr
+    assert "software rig's WGFP reservation became active" in result.stderr
     cleanup = commands[len(before):]
-    assert not any("sh -s -- delete wgm" in c or "echo off | sudo tee" in c for c in cleanup)
+    assert not any("sh -s -- delete wgm" in c or "'stop " in c for c in cleanup)
     assert (tmp_path / "state.multi-lease").exists()
 
 
@@ -354,14 +701,200 @@ def test_rig_refuses_to_replace_existing_fast_path_before_cleanup(tmp_path, scri
                    or "nft delete" in command or " kill " in command for command in commands)
 
 
-def test_multi_rechecks_fast_path_before_binding(tmp_path):
+def test_multi_atomic_reservation_rejects_a_binding_race(tmp_path):
     result, commands = run_rig(
-        tmp_path, MULTI, {"WGFP": "1", "TUNNELS": "2", "FAKE_WGFP_CONFLICT_AT": "2"},
+        tmp_path, MULTI, {"WGFP": "1", "TUNNELS": "2", "FAKE_RESERVE_RACE": "1"},
         operation="setup",
     )
     assert result.returncode != 0
-    assert "WGFP is already bound" in result.stderr
-    assert not any("tee /sys/module/wireguard/parameters/wgfp_peer" in c for c in commands)
+    assert "WGFP reservation failed" in result.stderr
+    assert not any("'bind " in c or "'stop " in c or "'release " in c for c in commands)
+    assert (tmp_path / "wgfp-bound").read_text() == "existing"
+
+
+@pytest.mark.parametrize("operation", ["setup", "run"])
+def test_multi_rejects_too_many_fast_path_devices_before_setup(tmp_path, operation):
+    result, commands = run_rig(
+        tmp_path, MULTI, {"WGFP": "1", "TUNNELS": "9"}, operation=operation,
+    )
+    assert result.returncode != 0
+    assert "WGFP supports at most 8" in result.stderr
+    assert not any("'reserve " in c or "sh -s -- create wgm" in c for c in commands)
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_fast_path_requires_the_atomic_reservation_interface(tmp_path, script):
+    result, commands = run_rig(
+        tmp_path, script, {"WGFP": "1", "TUNNELS": "2", "FAKE_LEASE_MISSING": "1"},
+        operation="setup",
+    )
+    assert result.returncode != 0
+    assert "atomic WGFP reservation is unavailable" in result.stderr
+    assert not any("'reserve " in c or "'bind " in c for c in commands)
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    assert not lease.exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("action", ["reserve", "bind"])
+def test_lost_reserve_or_bind_response_is_reconciled_without_touching_foreign_state(
+    tmp_path, script, action
+):
+    result, commands = run_rig(
+        tmp_path, script,
+        {"WGFP": "1", "TUNNELS": "2", "FAKE_LOST_RESPONSE": action,
+         "FAKE_LOST_RESPONSE_SKIP": "1" if script == SINGLE and action == "reserve" else "0"},
+        operation="setup",
+    )
+    assert result.returncode != 0
+    assert any(re.search(r"'stop [0-9a-f]{32}'", c) for c in commands)
+    assert any(re.search(r"'release [0-9a-f]{32}'", c) for c in commands)
+    assert not (tmp_path / "wgfp-owner").exists()
+    assert (tmp_path / "wgfp-bound").read_text() == "off"
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    assert not lease.exists()
+
+
+@pytest.mark.parametrize(("script", "skip"), [(SINGLE, "0"), (SINGLE, "1"), (MULTI, "0")])
+def test_software_lost_reserve_response_releases_without_binding(tmp_path, script, skip):
+    result, commands = run_rig(
+        tmp_path, script,
+        {"TUNNELS": "2", "FAKE_LOST_RESPONSE": "reserve", "FAKE_LOST_RESPONSE_SKIP": skip},
+        operation="setup",
+    )
+    assert result.returncode != 0
+    assert "WGFP reservation failed" in result.stderr
+    assert any("'release " in c for c in commands)
+    assert not any("'bind " in c or "'stop " in c for c in commands)
+    assert not (tmp_path / "wgfp-owner").exists()
+    assert not (tmp_path / "state.single-lease.probe").exists()
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    assert not lease.exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("wgfp", ["0", "1"])
+def test_unreachable_reservation_after_lost_response_retains_journal_until_retry(
+    tmp_path, script, wgfp
+):
+    failed, commands = run_rig(
+        tmp_path, script, {"WGFP": wgfp, "TUNNELS": "2",
+                           "FAKE_LOST_RESPONSE": "reserve",
+                           "FAKE_LEASE_STATUS_FAIL_WHEN_OWNED": "1"},
+        operation="setup",
+    )
+    assert failed.returncode != 0
+    assert "cannot inspect the atomic WGFP reservation" in failed.stderr
+    lease = tmp_path / ("state.single-lease.probe" if script == SINGLE else "state.multi-lease")
+    assert (lease / "binding").read_text() == "pending\n"
+    assert (tmp_path / "wgfp-owner").read_text() == (lease / "token").read_text().strip()
+    assert not any("'stop " in c or "'release " in c or "sh -s -- create wg" in c
+                   for c in commands)
+    operation = "probe-teardown" if script == SINGLE else "teardown"
+    retried, _ = run_rig(tmp_path, script, {"TUNNELS": "2"}, operation=operation)
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    assert not lease.exists()
+    assert not (tmp_path / "wgfp-owner").exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_lost_stop_response_retains_reservation_and_links_until_retry(tmp_path, script):
+    setup, before = run_rig(
+        tmp_path, script, {"WGFP": "1", "TUNNELS": "2"}, operation="setup"
+    )
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    failed, commands = run_rig(
+        tmp_path, script, {"TUNNELS": "2", "FAKE_LOST_RESPONSE": "stop"},
+        operation="teardown",
+    )
+    assert failed.returncode != 0
+    cleanup = commands[len(before):]
+    assert not any("sh -s -- delete wg0 " in c or "sh -s -- delete wgm" in c
+                   or "'release " in c for c in cleanup)
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    assert (lease / "binding").read_text() == "created\n"
+    assert (tmp_path / "wgfp-owner").exists()
+    retried, _ = run_rig(tmp_path, script, {"TUNNELS": "2"}, operation="teardown")
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    assert not lease.exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("owner", ["ours", "absent", "foreign"])
+@pytest.mark.parametrize("wgfp", ["0", "1"])
+def test_missing_reservation_journal_keeps_owned_links_for_inspection(tmp_path, script, owner, wgfp):
+    setup, before = run_rig(
+        tmp_path, script, {"WGFP": wgfp, "TUNNELS": "2"}, operation="setup"
+    )
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    (lease / "binding").unlink()
+    if owner == "absent":
+        (tmp_path / "wgfp-owner").unlink()
+        (tmp_path / "wgfp-bound").write_text("off")
+    elif owner == "foreign":
+        (tmp_path / "wgfp-owner").write_text("f" * 32)
+        (tmp_path / "wgfp-bound").write_text("other")
+    result, commands = run_rig(tmp_path, script, {"TUNNELS": "2"}, operation="teardown")
+    assert result.returncode != 0
+    assert "reservation journal is missing" in result.stderr
+    cleanup = commands[len(before):]
+    assert not any("'stop " in c or "'release " in c or "sh -s -- delete wg" in c
+                   for c in cleanup)
+    if owner == "foreign":
+        assert (tmp_path / "wgfp-owner").read_text() == "f" * 32
+        assert (tmp_path / "wgfp-bound").read_text() == "other"
+    assert lease.exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("wgfp", ["0", "1"])
+def test_lost_release_response_preserves_a_new_owners_binding(tmp_path, script, wgfp):
+    setup, _ = run_rig(
+        tmp_path, script, {"WGFP": wgfp, "TUNNELS": "2"}, operation="setup"
+    )
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    failed, before = run_rig(
+        tmp_path, script, {"TUNNELS": "2", "FAKE_LOST_RESPONSE": "release"},
+        operation="teardown",
+    )
+    assert failed.returncode != 0
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    assert (lease / "binding").read_text() == "releasing\n"
+    foreign = "f" * 32
+    (tmp_path / "wgfp-owner").write_text(foreign)
+    (tmp_path / "wgfp-bound").write_text("other")
+    retried, commands = run_rig(tmp_path, script, {"TUNNELS": "2"}, operation="teardown")
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    cleanup = commands[len(before):]
+    assert not any("'stop " in c or "'release " in c or "sh -s -- delete wg" in c
+                   for c in cleanup)
+    assert (tmp_path / "wgfp-owner").read_text() == foreign
+    assert (tmp_path / "wgfp-bound").read_text() == "other"
+    assert not lease.exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("wgfp", ["0", "1"])
+def test_releasing_journal_with_remaining_links_cannot_delete_a_foreign_binding(
+    tmp_path, script, wgfp
+):
+    setup, before = run_rig(
+        tmp_path, script, {"WGFP": wgfp, "TUNNELS": "2"}, operation="setup"
+    )
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    (lease / "binding").write_text("releasing\n")
+    (tmp_path / "wgfp-owner").write_text("f" * 32)
+    (tmp_path / "wgfp-bound").write_text("wg0" if script == SINGLE else "wgm0")
+    result, commands = run_rig(tmp_path, script, {"TUNNELS": "2"}, operation="teardown")
+    assert result.returncode != 0
+    assert "reservation is not owned" in result.stderr
+    cleanup = commands[len(before):]
+    assert not any("'stop " in c or "'release " in c or "sh -s -- delete wg" in c
+                   for c in cleanup)
+    assert (tmp_path / "wgfp-owner").read_text() == "f" * 32
+    assert lease.exists()
 
 
 def test_multi_run_uses_configured_vendor_and_generators(tmp_path):
@@ -488,6 +1021,54 @@ def test_vendor_fw4_insertion_failure_aborts_setup(tmp_path, script):
     assert result.returncode != 0
     assert any("nft insert rule inet fw4 forward" in command for command in commands)
     assert not any("iperf3 -c " in command for command in commands)
+
+
+def test_multi_vendor_fw4_rules_match_only_leased_interfaces(tmp_path):
+    result, commands = run_rig(tmp_path, MULTI, {"DUT_KIND": "vendor", "TUNNELS": "2"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    inserts = [command for command in commands if "nft insert rule inet fw4 forward" in command]
+    assert len(inserts) == 2
+    for index, command in enumerate(inserts):
+        assert f"oifname 'wgm{index}'" in command
+        assert f"iifname 'wgm{index}'" in command
+        assert "wgm*" not in command
+
+
+def test_multi_vendor_fw4_cleanup_preserves_foreign_rule_in_netns(tmp_path):
+    nft = shutil.which("nft") or "/usr/sbin/nft"
+    if not Path(nft).is_file() or not shutil.which("unshare"):
+        pytest.skip("nft and unshare are required")
+    probe = subprocess.run(["unshare", "-Urn", "true"], capture_output=True, text=True)
+    if probe.returncode:
+        pytest.skip(f"disposable network namespace unavailable: {probe.stderr.strip()}")
+    result, commands = run_rig(tmp_path, MULTI, {"DUT_KIND": "vendor", "TUNNELS": "2"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    inserts = [command for command in commands if "nft insert rule inet fw4 forward" in command]
+    cleanup = next(command for command in commands if
+                   "nft -a list chain inet fw4 forward" in command and "wgmrig-" in command)
+    script = "\n".join([
+        "set -eu",
+        "nft add table inet fw4",
+        "nft add chain inet fw4 forward",
+        "nft add rule inet fw4 forward iifname wgm99 counter accept comment wgmrig-foreign",
+        *inserts,
+        "echo BEFORE",
+        "nft -a list chain inet fw4 forward",
+        cleanup,
+        "echo AFTER",
+        "nft -a list chain inet fw4 forward",
+    ])
+    env = os.environ | {"PATH": f"{Path(nft).parent}:{os.environ['PATH']}"}
+    actual = subprocess.run(
+        ["unshare", "-Urn", "sh", "-s"], input=script, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert actual.returncode == 0, actual.stdout + actual.stderr
+    before, after = actual.stdout.split("AFTER", 1)
+    assert '"wgm0"' in before and '"wgm1"' in before
+    assert '"wgm99"' in before and '"wgm99"' in after
+    assert '"wgm0"' not in after and '"wgm1"' not in after
+    assert 'comment "wgmrig-foreign"' in after
 
 
 @pytest.mark.parametrize(
@@ -719,8 +1300,10 @@ if "nft 'create table" in command:
     if not match:
         sys.exit(1)
     state.write_text(json.dumps({"name": match.group(1), "token": match.group(2)}))
+    if os.environ.get("FAKE_MATRIX_FAIL") == "table-uncertain":
+        sys.exit(255)
 if "nft -a list table" in command:
-    if os.environ.get("FAKE_MATRIX_FAIL") == "list":
+    if os.environ.get("FAKE_MATRIX_FAIL") == "list" or not state.exists():
         sys.exit(1)
     table = json.loads(state.read_text())
     token = "someone-else" if os.environ.get("FAKE_MATRIX_FAIL") == "owner" else table["token"]
@@ -861,6 +1444,7 @@ def test_matrix_uses_owned_scoped_nft_table_without_changing_vyos_config(tmp_pat
     assert sum("nft delete table inet handle 42" in command for command in commands) == 1
     assert not any("conntrack ignore" in command or "sysctl" in command for command in commands)
     assert len(rigs) == 3 and all("vyos@192.168.1.185 ask2" in rig for rig in rigs)
+    assert not list((tmp_path / "out").glob("*/nft-pending"))
 
 
 @pytest.mark.parametrize("failure", ["chain", "single"])
@@ -878,6 +1462,17 @@ def test_matrix_does_not_remove_resources_it_did_not_create(tmp_path, failure):
     assert result.returncode != 0
     assert not any("nft delete table" in command for command in commands)
     assert not rigs
+    pending = list((tmp_path / "out").glob("*/nft-pending"))
+    assert len(pending) == (1 if failure == "table" else 0)
+
+
+def test_matrix_cleans_its_table_if_create_response_is_lost(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"FAKE_MATRIX_FAIL": "table-uncertain"})
+    assert result.returncode != 0
+    assert any("nft -a list table" in command for command in commands)
+    assert sum("nft delete table inet handle 42" in command for command in commands) == 1
+    assert not rigs
+    assert not list((tmp_path / "out").glob("*/nft-pending"))
 
 
 def test_matrix_targets_current_vendor_board_without_nft_changes(tmp_path):
@@ -894,6 +1489,7 @@ def test_matrix_refuses_to_delete_an_unverified_nft_table(tmp_path, failure):
     assert result.returncode != 0
     assert "nft table" in result.stderr
     assert not any("nft delete table" in command for command in commands)
+    assert len(list((tmp_path / "out").glob("*/nft-pending"))) == 1
 
 
 def test_matrix_rejects_missing_fast_path_receive_and_removes_its_table(tmp_path):
@@ -966,6 +1562,8 @@ if "route" in args and "table" in args:
     sys.exit(2)
 if "route" in args and "exact" in args and conflict == "route" and "10.99.215.0/24" in args:
     print("10.99.215.0/24 dev existing")
+if "route" in args and "exact" in args and conflict == "route6" and "fd99:200::/64" in args:
+    print("fd99:200::/64 dev existing")
 sys.exit(0)
 """
 
@@ -1009,26 +1607,44 @@ def run_preflight(tmp_path, which, conflict=""):
     )
 
 
-@pytest.mark.parametrize(
-    ("conflict", "message"),
-    [("link", "wgm3 already exists"), ("rule", "rule 12100 already exists"),
-     ("table", "route table 224 is in use"), ("route", "10.99.215.0/24 already exists")],
-)
-def test_generator_preflight_refuses_existing_resources(tmp_path, conflict, message):
-    result = run_preflight(tmp_path, 1, conflict)
+def test_generator_preflight_refuses_existing_tunnel(tmp_path):
+    result = run_preflight(tmp_path, 1, "link")
+    assert result.returncode != 0
+    assert "wgm3 already exists" in result.stderr
+
+
+def test_dut_preflight_refuses_existing_udp_port(tmp_path):
+    result = run_preflight(tmp_path, 0, "udp")
+    assert result.returncode != 0
+    assert "UDP port 51820 already in use" in result.stderr
+
+
+@pytest.mark.parametrize(("which", "conflict"), [
+    (1, "rule"), (1, "table"), (0, "nft"), (0, "fw4"),
+])
+def test_matrix_preflight_accepts_unrelated_legacy_resources(tmp_path, which, conflict):
+    result = run_preflight(tmp_path, which, conflict)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("which", [0, 1])
+@pytest.mark.parametrize(("conflict", "message"), [
+    ("route", "10.99.215.0/24 already exists"), ("route6", "IPv6 test route already exists"),
+])
+def test_matrix_preflight_refuses_connected_route_conflicts(tmp_path, which, conflict, message):
+    result = run_preflight(tmp_path, which, conflict)
     assert result.returncode != 0
     assert message in result.stderr
 
 
-@pytest.mark.parametrize(
-    ("conflict", "message"),
-    [("udp", "UDP port 51820 already in use"), ("nft", "table inet wgnt already exists"),
-     ("fw4", "forward rules already use a WireGuard rig comment")],
-)
-def test_dut_preflight_refuses_existing_resources(tmp_path, conflict, message):
-    result = run_preflight(tmp_path, 0, conflict)
-    assert result.returncode != 0
-    assert message in result.stderr
+@pytest.mark.parametrize("which", [0, 1])
+def test_matrix_preflight_ignores_legacy_key_files(tmp_path, which):
+    for name in ("wgk", "wgmk"):
+        (tmp_path / name).write_text("foreign")
+    result = run_preflight(tmp_path, which)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("wgk", "wgmk"):
+        assert (tmp_path / name).read_text() == "foreign"
 
 
 @pytest.mark.parametrize("which", [0, 1])

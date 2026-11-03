@@ -29,9 +29,9 @@
 #   ceiling-v4   dell1 <-> dell2 wg directly over the ConnectX-3 link (enp2s0, no DUT): the
 #                generator pair's own crypto ceiling, so a DUT number is never generator-limited
 #
-# Everything is runtime-only: wg0 on the DUT (`ip link add`, not VyOS config), wg interfaces
-# and policy routes on the dells, iperf3 servers under pidfiles. An EXIT trap removes all of it
-# (KEEP=1 leaves the tunnel up for manual poking; `teardown` removes it).
+# Everything is runtime-only. Links, routes, rules and iperf3 servers are
+# identified by a per-run lease; cleanup refuses resources it cannot verify.
+# KEEP=1 or `setup` retains the lease for a later `teardown`.
 #
 # Usage: bin/testrig-wireguard.sh [setup|teardown|check|run] [cell ...]    (default: run, cells wg-v4 wg-v6)
 #   bin/testrig-wireguard.sh run ceiling-v4 plain-v4 wg-v4 wg-v6
@@ -43,6 +43,7 @@
 #      REPS (repeat each cell/direction, summary mean/min/max/sd), DUT, DIRS, DUR, STEADY_FROM, STREAMS, WGMTU, OUTER=4|6, MODE=tcp|udp, LEN, RATE, OUT, KEEP
 #      WG_SKIP_SERVERS=1 leaves iperf servers untouched. For run, also set
 #      WG_EXTERNAL_IPERF=1 and provide the server on WG_IPERF_PORT (default 5231).
+#      ASK2 software and WGFP runs both require the exclusive wgfp_peer_lease reservation.
 #      WGFP_COUNTER_LOG=<path> records per-attempt WGFP counters before and after each cell.
 #      WG_SKIP_FW4=1 leaves the vendor's existing forwarding policy unchanged;
 #      use it only when that policy already permits the test traffic.
@@ -51,6 +52,8 @@
 set -u
 . "$(dirname "$0")/testrig-env.sh"
 . "$(dirname "$0")/testrig-wgfp-counters.sh"
+. "$(dirname "$0")/testrig-wg-lease.sh"
+. "$(dirname "$0")/testrig-wg-resource.sh"
 DUT_KIND=${DUT_KIND:-ask2}
 DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
 if [ "$DUT_KIND" = vendor ]; then RIG_NS=${RIG_NS:-$VENDOR_NS}; else RIG_NS=${RIG_NS:-}; fi
@@ -92,7 +95,7 @@ rig(){   # rig gen1|gen2 <-n or empty>: the command prefix that runs a command o
   if [ "$1" = gen1 ]; then echo "ssh ${2:-} $SSHO $GEN1"; else echo "ssh ${2:-} $SSHO $GEN2"; fi
 }
 D1=$(rig $DA -n); D2=$(rig $DB -n)
-D2I=$(rig $DB)
+D1I=$(rig $DA); D2I=$(rig $DB)
 DD1=$(rig gen1 -n); DD2=$(rig gen2 -n)   # literal gen1/gen2 (ceiling cell)
 DD1I=$(rig gen1);   DD2I=$(rig gen2)
 
@@ -103,10 +106,28 @@ fi
 if [ "$IPERF_P" != 5231 ] && [ "${WG_SKIP_SERVERS:-0}" != 1 ]; then
   echo "WG_IPERF_PORT requires WG_SKIP_SERVERS=1 and an externally managed server" >&2; exit 2
 fi
-if [ "$OUTER" = 6 ]; then DUT_OUT=$O_DUT6; D2_OUT=$O_T6; EP="[$D2_OUT]:$WGP"; else DUT_OUT=$O_DUT4; D2_OUT=$O_T4; EP="$D2_OUT:$WGP"; fi
+if [ "$OUTER" = 6 ]; then
+  DUT_OUT=$O_DUT6; D2_OUT=$O_T6; EP="[$D2_OUT]:$WGP"; FAR_EP="[$DUT_OUT]:$WGP"
+else
+  DUT_OUT=$O_DUT4; D2_OUT=$O_T4; EP="$D2_OUT:$WGP"; FAR_EP="$DUT_OUT:$WGP"
+fi
 # the far dell reaches the DUT's outer address on the same /24 (or /64), so no extra routes are needed for the outer leg.
 
-STATE=${WG_STATE_PATH:-/tmp/wg-rig.state}; touch "$STATE" 2>/dev/null
+# shellcheck disable=SC2034 # consumed by the sourced lease helper
+WG_LEASE_KIND="single-$RUN_ON"
+# shellcheck disable=SC2034 # consumed by the sourced lease helper
+WG_LEASE_DIR="${WG_STATE_PATH:-/tmp/wg-rig}.single-lease"
+# shellcheck disable=SC2034 # consumed by the sourced lease helper
+WG_LEASE_COUNT=1
+# shellcheck disable=SC2034 # consumed by the sourced lease helper
+IPERF_BASE=$IPERF_P
+WG_LINK_HELPER="$(dirname "$0")/testrig-wg-link.sh"
+WG_ROUTE_HELPER="$(dirname "$0")/testrig-wg-route.sh"
+WG_NFT_HELPER="$(dirname "$0")/testrig-wg-nft.sh"
+# shellcheck disable=SC2034 # consumed by the sourced resource helper
+WG_SERVER_HELPER="$(dirname "$0")/testrig-wg-server.py"
+# shellcheck disable=SC2034 # consumed by the sourced resource helper
+WG_STOP_HELPER="$(dirname "$0")/testrig-wgfp-stop.py"
 
 # name|inner client addr (plain-leg dell)|inner server addr (far wg0 end)|family|wg
 CELLS_ALL="
@@ -117,70 +138,138 @@ ceiling-v4|10.99.201.112|10.99.201.113|4|direct
 "
 
 # ---------- tunnel plumbing ----------
+wg_link(){
+  local side=$1 action=$2
+  case $side in
+    dut)     duti "sudo sh -s -- $action wg0 wgo-$WG_OWNER_TOKEN-dut" < "$WG_LINK_HELPER";;
+    far)     $D2I "$NSX sh -s -- $action wg0 wgo-$WG_OWNER_TOKEN-far" < "$WG_LINK_HELPER";;
+    direct1) $DD1I "sudo sh -s -- $action wgd wgo-$WG_OWNER_TOKEN-direct1" < "$WG_LINK_HELPER";;
+    direct2) $DD2I "sudo sh -s -- $action wgd wgo-$WG_OWNER_TOKEN-direct2" < "$WG_LINK_HELPER";;
+    *) return 1;;
+  esac
+}
+
+wg_probe_link(){
+  duti "sudo sh -s -- $1 wgc${WG_OWNER_TOKEN:0:10} wgo-$WG_OWNER_TOKEN-probe" < "$WG_LINK_HELPER"
+}
+
+wg_route(){
+  local route=$1 action=$2 index priority table realm side source destination target
+  case $route in
+    far4)   index=0; side=far;   source=$TI4; destination=$PSUB4; target=wg0;;
+    plain4) index=1; side=plain; source=$P4;  destination=10.99.200.0/24; target=$PGW4;;
+    far6)   index=2; side=far;   source=$TI6; destination=$PSUB6; target=wg0;;
+    plain6) index=3; side=plain; source=$P6;  destination=fd99:200::/64; target=$PGW6;;
+    *) return 1;;
+  esac
+  priority=$((1000 + 16#${WG_OWNER_TOKEN:0:6} % 30000 + index))
+  table=$((1000000 + 16#${WG_OWNER_TOKEN:6:6} * 16 + index))
+  realm=$(( (16#${WG_OWNER_TOKEN:12:8} & 0x7fffffff) + 1 ))
+  if [ "$side" = far ]; then
+    $D2I "$NSX sh -s -- $action $side $priority $table $source $destination $target $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+  else
+    $D1I "$NSX sh -s -- $action $side $priority $table $source $destination $target $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+  fi
+}
+
+wg_server_run(){
+  case $1 in
+    tunnel) $D2I "$NSX $2";;
+    direct) $DD2I "sudo $2";;
+    *) return 1;;
+  esac
+}
+
+wg_bound_links_owned(){
+  dut "name=\$(sudo ip -o link show wgo-$WG_OWNER_TOKEN-dut | sed -n 's/^[0-9]*: \\([^:@ ]*\\).*/\\1/p'); [ \"\$name\" = wg0 ]" ||
+    { echo "ERROR: WGFP peer wg0 no longer belongs to this lease" >&2; return 1; }
+}
+
 wg_dut_up(){
-  local k1 k2 p1 p2
-  dut 'sudo modprobe wireguard 2>/dev/null; sudo ip link del wg0 2>/dev/null; sudo ip link add wg0 type wireguard' || return 1
-  k1=$(dut 'wg genkey'); p1=$(printf '%s\n' "$k1" | duti 'wg pubkey')
-  k2=$($D2 'wg genkey');  p2=$(printf '%s\n' "$k2" | $D2I 'wg pubkey')
-  # dut side
-  printf '%s\n' "$k1" | duti 'umask 077; cat > /tmp/wgk'
-  dut "sudo wg set wg0 private-key /tmp/wgk listen-port $WGP peer $p2 allowed-ips $TI4/32,$TI6/128 endpoint $EP; rm -f /tmp/wgk"
-  dut "sudo ip addr add 10.99.200.1/24 dev wg0; sudo ip -6 addr add fd99:200::1/64 dev wg0; sudo ip link set wg0 mtu $WGMTU up"
+  local k1 k2 p1 p2 route
+  k1=$(dut 'wg genkey') || return 1
+  p1=$(printf '%s\n' "$k1" | duti 'wg pubkey') || return 1
+  k2=$($D2 'wg genkey') || return 1
+  p2=$(printf '%s\n' "$k2" | $D2I 'wg pubkey') || return 1
+  wg_resource_add link-dut wg_link dut create || return 1
+  printf '%s\n' "$k1" | duti "sudo wg set wg0 private-key /dev/stdin listen-port $WGP peer $p2 allowed-ips $TI4/32,$TI6/128 endpoint $EP" || return 1
+  dut "sudo ip addr add 10.99.200.1/24 dev wg0 && sudo ip -6 addr add fd99:200::1/64 dev wg0 && sudo ip link set wg0 mtu $WGMTU up" || return 1
   # WG_THREADED=0|1 overrides wg0's threaded NAPI (6.18 defaults to 1, the vendor 6.12 kernel to 0); the value read back is printed
   if [ -n "${WG_THREADED:-}" ]; then
-    dut "echo $WG_THREADED | sudo tee /sys/class/net/wg0/threaded >/dev/null; echo wg0 threaded=\$(cat /sys/class/net/wg0/threaded)" >&2
+    case $WG_THREADED in 0|1) ;; *) echo "WG_THREADED must be 0 or 1" >&2; return 1;; esac
+    dut "echo $WG_THREADED | sudo tee /sys/class/net/wg0/threaded >/dev/null && echo wg0 threaded=\$(cat /sys/class/net/wg0/threaded)" >&2 || return 1
   fi
   # WG_NAPI_CPU=N pins the threaded-NAPI kthread (napi/wg0-*) of wg0 to CPU N (ASK2 only; the thread otherwise floats)
   if [ -n "${WG_NAPI_CPU:-}" ]; then
-    dut "for p in \$(pgrep -f 'napi/wg0'); do sudo taskset -cp $WG_NAPI_CPU \$p >/dev/null; done; echo napi/wg0 pinned to cpu$WG_NAPI_CPU: \$(pgrep -f 'napi/wg0' | wc -l) thread(s)" >&2
+    [[ $WG_NAPI_CPU =~ ^[0-9]+$ ]] || { echo "WG_NAPI_CPU must be a CPU number" >&2; return 1; }
+    dut "for p in \$(pgrep -f 'napi/wg0'); do sudo taskset -cp $WG_NAPI_CPU \$p >/dev/null || exit 1; done; echo napi/wg0 pinned to cpu$WG_NAPI_CPU: \$(pgrep -f 'napi/wg0' | wc -l) 'thread(s)'" >&2 || return 1
   fi
-  # far-dell side (in RIG_NS when set: the namespace holding the port facing the DUT)
-  printf '%s\n' "$k2" | $D2I 'umask 077; cat > /tmp/wgk'
-  $D2 "$NSX ip link del wg0 2>/dev/null; $NSX ip link add wg0 type wireguard &&
-       $NSX wg set wg0 private-key /tmp/wgk listen-port $WGP peer $p1 allowed-ips 10.99.200.1/32,$PSUB4,fd99:200::1/128,$PSUB6 endpoint [$DUT_OUT]:$WGP &&
-       rm -f /tmp/wgk &&
-       $NSX ip addr add $TI4/24 dev wg0 && $NSX ip -6 addr add $TI6/64 dev wg0 && $NSX ip link set wg0 mtu $WGMTU up &&
-       true"
-  # endpoint with brackets only valid for v6; fix for v4 outer
-  if [ "$OUTER" != 6 ]; then $D2 "$NSX wg set wg0 peer $p1 endpoint $DUT_OUT:$WGP"; fi
-  # the far dell's replies from its tunnel address must go back through wg0, not the plain route via the DUT
-  $D2 "$NSX ip rule del priority 12100 2>/dev/null; $NSX ip -6 rule del priority 12100 2>/dev/null;
-       $NSX ip rule add priority 12100 from $TI4 lookup 200; $NSX ip route replace $PSUB4 dev wg0 table 200;
-       $NSX ip -6 rule add priority 12100 from $TI6 lookup 200; $NSX ip -6 route replace $PSUB6 dev wg0 table 200"
-  # plain-leg dell: tunnel subnet via the DUT, route MTU pinned so no PMTUD dependency
-  $D1 "$NSX ip route replace 10.99.200.0/24 via $PGW4 mtu $WGMTU; $NSX ip -6 route replace fd99:200::/64 via $PGW6 mtu $WGMTU"
-  # OpenWrt fw4: wg0 belongs to no zone, so forwarded traffic to/from it falls through to handle_reject.
-  # Runtime-only accept rules (comment wgrig), removed again in teardown.
+  wg_resource_add link-far wg_link far create || return 1
+  printf '%s\n' "$k2" | $D2I "$NSX wg set wg0 private-key /dev/stdin listen-port $WGP peer $p1 allowed-ips 10.99.200.1/32,$PSUB4,fd99:200::1/128,$PSUB6 endpoint $FAR_EP" || return 1
+  $D2 "$NSX ip addr add $TI4/24 dev wg0 && $NSX ip -6 addr add $TI6/64 dev wg0 && $NSX ip link set wg0 mtu $WGMTU up" || return 1
+  for route in far4 plain4 far6 plain6; do
+    wg_resource_add "route-$route" wg_route "$route" add || return 1
+  done
+}
+
+wg_tunnel_start(){
+  local marker="$WG_LEASE_DIR/tunnel"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    echo "ERROR: tunnel already recorded in $WG_LEASE_DIR" >&2
+    return 1
+  fi
+  printf 'created\n' > "$marker" || return 1
+  wg_dut_up
+}
+
+wg_bind(){
+  wg_activate_binding wg0 "wgo-$WG_OWNER_TOKEN-dut"
+}
+
+wg_fw_add(){
+  dut "nft insert rule inet fw4 forward oifname 'wg0' counter accept comment 'wgrig-$WG_OWNER_TOKEN' && nft insert rule inet fw4 forward iifname 'wg0' counter accept comment 'wgrig-$WG_OWNER_TOKEN'"
+}
+
+wg_fw_remove(){
+  dut "rules=\$(nft -a list chain inet fw4 forward) || exit 1
+    handles=\$(printf '%s\\n' \"\$rules\" | awk -v tag='wgrig-$WG_OWNER_TOKEN' '
+      index(\$0, \"comment \\\"\" tag \"\\\"\") { for (i=1; i<NF; i++) if (\$i == \"handle\" && \$(i+1) ~ /^[0-9]+$/) print \$(i+1) }
+    ') || exit 1
+    for h in \$handles; do nft delete rule inet fw4 forward handle \"\$h\" || exit 1; done"
+}
+
+wg_notrack_add(){
+  duti "sudo sh -s -- add $WG_OWNER_TOKEN $WG_NOTRACK $WGP" < "$WG_NFT_HELPER"
+}
+
+wg_notrack_remove(){
+  duti "sudo sh -s -- delete $WG_OWNER_TOKEN" < "$WG_NFT_HELPER"
+}
+
+wg_network_up(){
   if [ "$DUT_KIND" = vendor ]; then
     if [ "${WG_SKIP_FW4:-0}" = 1 ]; then
       echo "Using the vendor's existing forwarding policy; no fw4 rules inserted" >&2
     else
-      dut 'nft insert rule inet fw4 forward oifname "wg0" counter accept comment "wgrig" && nft insert rule inet fw4 forward iifname "wg0" counter accept comment "wgrig"' ||
+      wg_resource_add fw4 wg_fw_add ||
         { echo "Failed to insert vendor fw4 rules" >&2; return 1; }
     fi
   fi
-  # Optional experiment: keep the OUTER tunnel UDP out of conntrack (WG_NOTRACK=1). The serial wg tx worker
-  # pays for netfilter hooks on every outer packet; this measures how much of the ceiling that is.
-  if [ "${WG_NOTRACK:-0}" = 1 ]; then
-    dut "sudo nft add table inet wgnt; sudo nft 'add chain inet wgnt pre { type filter hook prerouting priority -300 ; }'; sudo nft 'add chain inet wgnt out { type filter hook output priority -300 ; }'; sudo nft add rule inet wgnt pre udp dport $WGP notrack; sudo nft add rule inet wgnt out udp sport $WGP notrack"
-  fi
-  if [ "${WG_NOTRACK:-0}" = 2 ]; then
-    dut "sudo nft add table inet wgnt; sudo nft 'add chain inet wgnt pre { type filter hook prerouting priority -300 ; }'; sudo nft 'add chain inet wgnt out { type filter hook output priority -300 ; }'; sudo nft add rule inet wgnt pre notrack; sudo nft add rule inet wgnt out notrack"
-  fi
-  echo dut >> "$STATE"
-  # WGFP=1: bind the DPAA WireGuard fast path to the new wg0 (fast-path matrix column)
-  if [ "${WGFP:-0}" = 1 ]; then dut "echo wg0 | sudo tee /sys/module/wireguard/parameters/wgfp_peer >/dev/null" || return 1; fi
+  [ "${WG_NOTRACK:-0}" = 0 ] || wg_resource_add notrack wg_notrack_add
 }
 
 wg_direct_up(){   # dell1 <-> dell2 over enp2s0 (no DUT); root namespaces
   local k1 k2 p1 p2
-  k1=$($DD1 'wg genkey'); p1=$(printf '%s\n' "$k1" | $DD1I 'wg pubkey')
-  k2=$($DD2 'wg genkey'); p2=$(printf '%s\n' "$k2" | $DD2I 'wg pubkey')
-  printf '%s\n' "$k1" | $DD1I 'umask 077; cat > /tmp/wgk'
-  printf '%s\n' "$k2" | $DD2I 'umask 077; cat > /tmp/wgk'
-  $DD1 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p2 allowed-ips 10.99.201.113/32 endpoint 10.99.99.113:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.112/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
-  $DD2 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p1 allowed-ips 10.99.201.112/32 endpoint 10.99.99.112:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.113/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
-  echo direct >> "$STATE"
+  k1=$($DD1 'wg genkey') || return 1
+  p1=$(printf '%s\n' "$k1" | $DD1I 'wg pubkey') || return 1
+  k2=$($DD2 'wg genkey') || return 1
+  p2=$(printf '%s\n' "$k2" | $DD2I 'wg pubkey') || return 1
+  wg_resource_add link-direct1 wg_link direct1 create || return 1
+  printf '%s\n' "$k1" | $DD1I "sudo wg set wgd private-key /dev/stdin listen-port $WGPD peer $p2 allowed-ips 10.99.201.113/32 endpoint 10.99.99.113:$WGPD" || return 1
+  $DD1 "sudo ip addr add 10.99.201.112/24 dev wgd && sudo ip link set wgd mtu $WGMTU up" || return 1
+  wg_resource_add link-direct2 wg_link direct2 create || return 1
+  printf '%s\n' "$k2" | $DD2I "sudo wg set wgd private-key /dev/stdin listen-port $WGPD peer $p1 allowed-ips 10.99.201.112/32 endpoint 10.99.99.112:$WGPD" || return 1
+  $DD2 "sudo ip addr add 10.99.201.113/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
 }
 
 # WireGuard queues a peer's serial tx worker on CPU (peer->internal_id % online_cpus); internal_id is a global
@@ -201,41 +290,101 @@ place_serial_cpu(){
     got=$(probe_cpu)
     if [ "$got" = "$want" ]; then echo "serial tx worker placed on $want (attempt $n)"; return 0; fi
     echo "  attempt $n: serial stage on $got, want $want; recreating wg0" >&2
-    sleep 8; teardown; wg_dut_up; servers_up; $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
+    sleep 8; wg_tunnel_recreate || return 1
+    $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1" || return 1
   done
   echo "could not place the serial stage on $want" >&2; return 1
 }
 
-servers_up(){
-  [ "${WG_SKIP_SERVERS:-0}" != 1 ] || return 0
-  $D2 "sudo test -f /tmp/wg-iperf.pid && sudo kill \$(cat /tmp/wg-iperf.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf.pid
-       $NSX iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf.pid" ; }
-servers_down(){ $D2 "[ -f /tmp/wg-iperf.pid ] && sudo kill \$(cat /tmp/wg-iperf.pid) 2>/dev/null; sudo rm -f /tmp/wg-iperf.pid; true"; }
+server_select(){
+  local role=$1 other
+  [ "$WG_LEASE_SKIP_SERVERS" != 1 ] || return 0
+  case $role in tunnel) other=direct;; direct) other=tunnel;; *) return 1;; esac
+  wg_resource_remove "server-$other" wg_server_stop "$other" "$WG_LEASE_IPERF_BASE" || return 1
+  if [ -e "$WG_LEASE_DIR/server-$role" ] || [ -L "$WG_LEASE_DIR/server-$role" ]; then
+    if [ -L "$WG_LEASE_DIR/server-$role" ] || [ ! -f "$WG_LEASE_DIR/server-$role" ] ||
+       [ "$(cat "$WG_LEASE_DIR/server-$role")" != created ]; then
+      echo "ERROR: server $role has uncertain ownership" >&2
+      return 1
+    fi
+    return 0
+  fi
+  wg_resource_add "server-$role" wg_server_start "$role" "$WG_LEASE_IPERF_BASE"
+}
+
+server_restart(){
+  local role=$1
+  wg_resource_remove "server-$role" wg_server_stop "$role" "$WG_LEASE_IPERF_BASE" || return 1
+  server_select "$role"
+}
+
+wg_dut_down(){
+  local route result=0
+  wg_prepare_binding_cleanup || return 1
+  for route in far4 plain4 far6 plain6; do
+    wg_resource_remove "route-$route" wg_route "$route" delete || result=1
+  done
+  [ "$result" = 0 ] || return 1
+  wg_resource_remove link-dut wg_link dut delete || result=1
+  wg_resource_remove link-far wg_link far delete || result=1
+  return "$result"
+}
+
+wg_tunnel_recreate(){
+  wg_resource_remove tunnel wg_dut_down || return 1
+  wg_tunnel_start || return 1
+  wg_bind
+}
 
 teardown(){
-  [ "${WG_SKIP_SERVERS:-0}" = 1 ] || servers_down 2>/dev/null
-  dut 'sudo nft delete table inet wgnt 2>/dev/null; sudo ip link del wg0 2>/dev/null; rm -f /tmp/wgk; true' 2>/dev/null
-  if [ "${WG_SKIP_FW4:-0}" != 1 ]; then
-    dut 'for h in $(nft -a list chain inet fw4 forward 2>/dev/null | sed -n "s/.*wgrig.*# handle \([0-9]*\)/\1/p"); do nft delete rule inet fw4 forward handle $h; done; true' 2>/dev/null
-  fi
-  $D2 "$NSX ip link del wg0 2>/dev/null; $NSX ip rule del priority 12100 2>/dev/null; $NSX ip -6 rule del priority 12100 2>/dev/null;
-       $NSX ip route flush table 200 2>/dev/null; $NSX ip -6 route flush table 200 2>/dev/null; sudo ip link del wgd 2>/dev/null; rm -f /tmp/wgk; true" 2>/dev/null
-  $D1 "$NSX ip route del 10.99.200.0/24 2>/dev/null; $NSX ip -6 route del fd99:200::/64 2>/dev/null; sudo ip link del wgd 2>/dev/null; rm -f /tmp/wgk; true" 2>/dev/null
-  : > "$STATE"
+  local result=0
+  wg_resource_remove server-tunnel wg_server_stop tunnel "$WG_LEASE_IPERF_BASE" || result=1
+  wg_resource_remove server-direct wg_server_stop direct "$WG_LEASE_IPERF_BASE" || result=1
+  [ "$result" = 0 ] || return 1
+  wg_prepare_binding_cleanup || return 1
+  wg_resource_remove tunnel wg_dut_down || return 1
+  wg_resource_remove notrack wg_notrack_remove || result=1
+  wg_resource_remove fw4 wg_fw_remove || result=1
+  [ "$result" = 0 ] || return 1
+  wg_resource_remove link-direct1 wg_link direct1 delete || result=1
+  wg_resource_remove link-direct2 wg_link direct2 delete || result=1
+  [ "$result" = 0 ] || return 1
+  wg_release_binding
+}
+
+wg_probe_cleanup(){
+  wg_prepare_binding_cleanup || return 1
+  wg_resource_remove link-probe wg_probe_link delete || return 1
+  wg_release_binding || return 1
+  wg_lease_end
 }
 
 preflight(){
-  local out probe
-  probe=$(printf 'wgc%05x%04x' "$((BASHPID & 1048575))" "$RANDOM")
+  local out WG_LEASE_DIR="${WG_LEASE_DIR}.probe"
   if ! out=$(dut "sudo modprobe wireguard 2>/dev/null || true
-    if sudo ip link add $probe type wireguard 2>&1; then
-      sudo ip link del $probe || exit 1
-    else
-      exit 1
-    fi
     command -v wg >/dev/null 2>&1 || { echo NOWG; exit 1; }" 2>&1); then
     echo "DUT $DUT ($DUT_KIND): no WireGuard: $out" >&2
     [ "$DUT_KIND" = vendor ] && echo "  Install WireGuard tools and a kmod matching the running kernel; do not force an ABI mismatch." >&2
+    return 1
+  fi
+  wgfp_require_unbound || return 1
+  local WGFP=0
+  wg_lease_begin || return 1
+  if ! wg_reserve_binding; then
+    if [ -e "$WG_LEASE_DIR/binding" ] || [ -L "$WG_LEASE_DIR/binding" ]; then
+      wg_probe_cleanup || echo "ERROR: probe lease retained at $WG_LEASE_DIR" >&2
+    else
+      wg_lease_end || echo "ERROR: probe lease retained at $WG_LEASE_DIR" >&2
+    fi
+    return 1
+  fi
+  if ! wg_resource_add link-probe wg_probe_link create; then
+    echo "DUT $DUT ($DUT_KIND): WireGuard link probe failed" >&2
+    wg_probe_cleanup || echo "ERROR: probe lease retained at $WG_LEASE_DIR" >&2
+    return 1
+  fi
+  if ! wg_probe_cleanup; then
+    echo "ERROR: probe cleanup failed; retry with: $0 probe-teardown" >&2
     return 1
   fi
   $D1 'which wg iperf3 timeout >/dev/null' && $D2 'which wg iperf3 >/dev/null' || { echo "dells need wireguard-tools + iperf3, and the client needs timeout" >&2; return 1; }
@@ -304,15 +453,14 @@ run_cell(){
   for dir in $DIRS; do
    for rep in $(seq 1 $REPS); do
     if [ "${RECREATE:-0}" = 1 ] && [ "$kind" = dut ]; then   # new wg0 = new peer id = new serial tx worker CPU (id % ncpu)
-      teardown
-      wg_dut_up || { echo "DUT tunnel recreation failed" >&2; teardown; return 1; }
-      servers_up; $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
+      wg_tunnel_recreate || { echo "DUT tunnel recreation failed" >&2; return 1; }
+      $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1" || return 1
     fi
     case $dir in up) flag="";; down) flag="-R";; bidir) flag="--bidir";; esac
     win=$((DUR-STEADY_FROM-2)); tag="$name-$dir-r$rep"
     local udp=""; [ "$MODE" = udp ] && udp="-u -b $RATE -l $LEN"
-    # server is in RIG_NS on dell2 for DUT cells; the ceiling cell has its own root-ns server
-    if [ "$kind" = direct ]; then $D2 "sudo test -f /tmp/wg-iperf-d.pid && sudo kill \$(cat /tmp/wg-iperf-d.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf-d.pid; iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf-d.pid"; fi
+    # The direct cell uses a root-namespace server; DUT cells use the rig namespace.
+    if [ "$kind" = direct ]; then server_select direct || return 1; else server_select tunnel || return 1; fi
     for attempt in 1 2 3; do
     wgfp_counter_sample "$name" "$dir" "$rep" before "$attempt" || return 1
     dut_stat=${WG_DUT_STAT:-/tmp/wg-dut.stat}
@@ -352,7 +500,7 @@ EOS
       echo "  (rep $rep produced no traffic, attempt $attempt; retrying with the external iperf server)" >&2
     else
       echo "  (rep $rep produced no traffic, attempt $attempt; restarting the iperf3 server and retrying)" >&2
-      if [ "$kind" = direct ]; then $D2 "sudo test -f /tmp/wg-iperf-d.pid && sudo kill \$(cat /tmp/wg-iperf-d.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf-d.pid; iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf-d.pid"; else servers_up; fi
+      if [ "$kind" = direct ]; then server_restart direct || return 1; else server_restart tunnel || return 1; fi
     fi
     sleep 5
     done
@@ -366,12 +514,23 @@ EOS
   done
 }
 
+wg_single_cleanup(){
+  local rc=$?
+  trap - EXIT INT TERM
+  if teardown; then wg_lease_end || rc=1; else rc=1; fi
+  exit "$rc"
+}
+
 cmd=${1:-run}; [ $# -gt 0 ] && shift
 case $cmd in
-  teardown) teardown; echo "torn down"; exit 0;;
+  teardown) wg_lease_load && teardown && wg_lease_end || exit 4; echo "torn down"; exit 0;;
+  probe-teardown)
+    WG_LEASE_DIR="${WG_LEASE_DIR}.probe"
+    wg_lease_load && wg_probe_cleanup || exit 4
+    echo "probe torn down"; exit 0;;
   check)    preflight && echo "preflight OK ($DUT_KIND)"; exit $?;;
   setup|run) : ;;
-  *) echo "usage: $0 [setup|teardown|check|run] [cell...]" >&2; exit 2;;
+  *) echo "usage: $0 [setup|teardown|probe-teardown|check|run] [cell...]" >&2; exit 2;;
 esac
 [ "${WG_SKIP_SERVERS:-0}" != 1 ] || [ "$cmd" != run ] || [ "${WG_EXTERNAL_IPERF:-0}" = 1 ] ||
   { echo "WG_SKIP_SERVERS=1 with run requires WG_EXTERNAL_IPERF=1" >&2; exit 2; }
@@ -379,10 +538,17 @@ esac
   { echo "WG_SERIAL_CPU requires the iperf server" >&2; exit 2; }
 [ -z "${WGFP_COUNTER_LOG:-}" ] || [ "${WGFP:-0}" = 1 ] ||
   { echo "WGFP_COUNTER_LOG requires WGFP=1" >&2; exit 2; }
+case ${WG_NOTRACK:-0} in 0|1|2) ;; *) echo "WG_NOTRACK must be 0, 1 or 2" >&2; exit 2;; esac
+if [ -n "${WG_SERIAL_CPU:-}" ] && ! [[ $WG_SERIAL_CPU =~ ^[0-9]+$ ]]; then
+  echo "WG_SERIAL_CPU must be a CPU number" >&2; exit 2
+fi
 WANT="$*"; [ -z "$WANT" ] && WANT="wg-v4 wg-v6"
 if [ "${WG_SKIP_SERVERS:-0}" = 1 ] && [[ " $WANT " == *" ceiling-v4 "* ]]; then
   echo "WG_SKIP_SERVERS=1 does not support the ceiling-v4 cell" >&2; exit 2
 fi
+needdut=0; needdirect=0
+for c in $WANT; do case $c in wg-*) needdut=1;; ceiling-*) needdirect=1;; esac; done
+if [ $needdirect = 1 ] && [ "$WG_PORT" != eth4 ]; then echo "the ceiling cell is bound to the dell1/dell2 pair; run it without WG_PORT" >&2; exit 2; fi
 preflight || exit 3
 envrec(){
   dut 'echo "kernel: $(uname -r) $(uname -v | cut -c1-60)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; \
@@ -395,16 +561,19 @@ if echo "$ENVTXT" | grep -q -E "lockdep: PRESENT|PROVE_LOCKING=y|DEBUG_SPINLOCK=
   echo "REFUSING: DUT kernel has lock debugging enabled; numbers would be invalid (plans/archive/ask2-wireguard-plan.md 2.1)." >&2; exit 5
 fi
 wgfp_require_unbound || exit 4
-[ "${KEEP:-0}" = 1 ] || trap teardown EXIT
-teardown
-needdut=0; needdirect=0
-for c in $WANT; do case $c in wg-*) needdut=1;; ceiling-*) needdirect=1;; esac; done
-if [ $needdirect = 1 ] && [ "$WG_PORT" != eth4 ]; then echo "the ceiling cell is bound to the dell1/dell2 pair; run it without WG_PORT" >&2; exit 2; fi
-[ $needdut = 1 ] && { wg_dut_up || { echo "DUT tunnel setup failed" >&2; teardown; exit 4; }; }
-[ $needdirect = 1 ] && wg_direct_up
-[ "${WG_SKIP_SERVERS:-0}" = 1 ] || servers_up
+wg_lease_begin || exit 4
+trap wg_single_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+wg_reserve_binding || exit 4
+if [ $needdut = 1 ]; then
+  wg_tunnel_start && wg_network_up && wg_bind ||
+    { echo "DUT tunnel setup failed" >&2; exit 4; }
+fi
+if [ $needdirect = 1 ]; then wg_direct_up || { echo "Direct tunnel setup failed" >&2; exit 4; }; fi
+server_select tunnel || { echo "Server setup failed" >&2; exit 4; }
 [ -n "${WG_SERIAL_CPU:-}" ] && [ $needdut = 1 ] && { place_serial_cpu "$WG_SERIAL_CPU" || exit 6; }
-[ "$cmd" = setup ] && { echo "tunnel up; run cells with: $0 run <cell...>"; trap - EXIT; exit 0; }
+[ "$cmd" = setup ] && { echo "tunnel up; remove it with: $0 teardown"; trap - EXIT INT TERM; exit 0; }
 if [ $needdut = 1 ]; then   # prime the handshake and prove the path before measuring
   $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
   dut 'sudo wg show wg0 latest-handshakes' | awk '{print "handshake epoch: "$2}'
@@ -428,3 +597,4 @@ for (c,d),v in g.items():
     print("%-12s %-6s %3d %8.3f %8.3f %8.3f %7.3f %8.1f%% %8.1f%%"%(c,d,len(x),st.mean(x),min(x),max(x),st.pstdev(x) if len(x)>1 else 0,st.mean(b),st.mean(m)))
 PY
 echo "csv: $OUT"
+[ "${KEEP:-0}" != 1 ] || trap - EXIT INT TERM
