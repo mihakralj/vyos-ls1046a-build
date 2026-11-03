@@ -43,16 +43,24 @@
 #      REPS (repeat each cell/direction, summary mean/min/max/sd), DUT, DIRS, DUR, STEADY_FROM, STREAMS, WGMTU, OUTER=4|6, MODE=tcp|udp, LEN, RATE, OUT, KEEP
 #      WG_SKIP_SERVERS=1 leaves iperf servers untouched. For run, also set
 #      WG_EXTERNAL_IPERF=1 and provide the server on WG_IPERF_PORT (default 5231).
+#      WGFP_COUNTER_LOG=<path> records per-attempt WGFP counters before and after each cell.
 #      WG_SKIP_FW4=1 leaves the vendor's existing forwarding policy unchanged;
 #      use it only when that policy already permits the test traffic.
+#      WG_CLIENT_TIMEOUT caps each iperf client in seconds (default DUR+45).
 # The vendor DUT needs WireGuard tools and a kernel module matching its exact kernel ABI.
 set -u
 . "$(dirname "$0")/testrig-env.sh"
+. "$(dirname "$0")/testrig-wgfp-counters.sh"
 DUT_KIND=${DUT_KIND:-ask2}
 DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
 if [ "$DUT_KIND" = vendor ]; then RIG_NS=${RIG_NS:-$VENDOR_NS}; else RIG_NS=${RIG_NS:-}; fi
 DIRS=${DIRS:-"up down"}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}; STREAMS=${STREAMS:-4}
 REPS=${REPS:-1}; WGMTU=${WGMTU:-1420}; OUTER=${OUTER:-4}; MODE=${MODE:-tcp}; LEN=${LEN:-1280}; RATE=${RATE:-1G}
+if ! [[ $DUR =~ ^[1-9][0-9]{0,5}$ ]]; then echo "DUR must be a positive integer" >&2; exit 2; fi
+WG_CLIENT_TIMEOUT=${WG_CLIENT_TIMEOUT:-$((DUR+45))}
+if ! [[ $WG_CLIENT_TIMEOUT =~ ^[1-9][0-9]{0,6}$ ]] || (( WG_CLIENT_TIMEOUT <= DUR )); then
+  echo "WG_CLIENT_TIMEOUT must be an integer greater than DUR" >&2; exit 2
+fi
 # RUN_ON=gen2 (alias dell2): run on gen2 (see testrig-offload-quick.sh): gen2 commands run locally, gen1 and
 # the DUT go over ssh.
 RUN_ON=${RUN_ON:-agent}
@@ -84,7 +92,7 @@ rig(){   # rig gen1|gen2 <-n or empty>: the command prefix that runs a command o
   if [ "$1" = gen1 ]; then echo "ssh ${2:-} $SSHO $GEN1"; else echo "ssh ${2:-} $SSHO $GEN2"; fi
 }
 D1=$(rig $DA -n); D2=$(rig $DB -n)
-D1I=$(rig $DA);   D2I=$(rig $DB)
+D2I=$(rig $DB)
 DD1=$(rig gen1 -n); DD2=$(rig gen2 -n)   # literal gen1/gen2 (ceiling cell)
 DD1I=$(rig gen1);   DD2I=$(rig gen2)
 
@@ -217,26 +225,35 @@ teardown(){
 }
 
 preflight(){
-  local out
-  out=$(dut 'sudo modprobe wireguard 2>/dev/null; sudo ip link add wgchk type wireguard 2>&1; sudo ip link del wgchk 2>/dev/null; which wg >/dev/null 2>&1 || echo NOWG')
-  if [ -n "$out" ]; then
+  local out probe
+  probe=$(printf 'wgc%05x%04x' "$((BASHPID & 1048575))" "$RANDOM")
+  if ! out=$(dut "sudo modprobe wireguard 2>/dev/null || true
+    if sudo ip link add $probe type wireguard 2>&1; then
+      sudo ip link del $probe || exit 1
+    else
+      exit 1
+    fi
+    command -v wg >/dev/null 2>&1 || { echo NOWG; exit 1; }" 2>&1); then
     echo "DUT $DUT ($DUT_KIND): no WireGuard: $out" >&2
     [ "$DUT_KIND" = vendor ] && echo "  Install WireGuard tools and a kmod matching the running kernel; do not force an ABI mismatch." >&2
     return 1
   fi
-  $D1 'which wg iperf3 >/dev/null' && $D2 'which wg iperf3 >/dev/null' || { echo "dells need wireguard-tools + iperf3" >&2; return 1; }
+  $D1 'which wg iperf3 timeout >/dev/null' && $D2 'which wg iperf3 >/dev/null' || { echo "dells need wireguard-tools + iperf3, and the client needs timeout" >&2; return 1; }
 }
 
 # ---------- measurement ----------
-parse(){ python3 - "$1" "$STEADY_FROM" "$MODE" <<'PY'
+parse(){ python3 - "$1" "$STEADY_FROM" "$MODE" "$2" <<'PY'
 import json,math,sys
 try: j=json.load(open(sys.argv[1]))
-except Exception: print("0 0 0"); sys.exit()
+except (OSError,ValueError): print("0 0 0"); sys.exit()
 if j.get('error'): print("0 0 0"); sys.exit()
 f=float(sys.argv[2]); udp=sys.argv[3]=="udp"
 def sel(key):
     return [i[key] for i in j.get('intervals',[]) if key in i and i[key]['start']>=f-0.01 and not i[key].get('omitted')]
 a=sel('sum'); b=sel('sum_bidir_reverse')
+if sys.argv[4]=="bidir" and len(a)!=len(b):
+    print(f"ERROR: missing reverse iperf intervals in {sys.argv[1]}",file=sys.stderr)
+    sys.exit(1)
 def mean(iv): return sum(x['bits_per_second'] for x in iv)/len(iv)/1e9 if iv else 0
 g=mean(a)+mean(b)
 if not math.isfinite(g) or g < 0: print("0 0 0"); sys.exit()
@@ -244,7 +261,14 @@ e=j.get('end',{}); c=e.get('cpu_utilization_percent',{})
 if udp:
     s=e.get('sum',{}); x=s.get('lost_percent',0)
 else:
+    if sys.argv[4]=="bidir":
+        for key in ('sum_sent','sum_sent_bidir_reverse'):
+            value=e.get(key,{}).get('retransmits')
+            if not isinstance(value,int) or value<0:
+                print(f"ERROR: missing or invalid {key} retransmits in {sys.argv[1]}",file=sys.stderr)
+                sys.exit(1)
     x=e.get('sum_sent',{}).get('retransmits') or sum(i['sum'].get('retransmits',0) for i in j.get('intervals',[]))
+    x+=e.get('sum_sent_bidir_reverse',{}).get('retransmits',0) or 0
 print(f"{g:.9f} {c.get('host_total',0):.0f} {x}")
 PY
 }
@@ -290,6 +314,7 @@ run_cell(){
     # server is in RIG_NS on dell2 for DUT cells; the ceiling cell has its own root-ns server
     if [ "$kind" = direct ]; then $D2 "sudo test -f /tmp/wg-iperf-d.pid && sudo kill \$(cat /tmp/wg-iperf-d.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf-d.pid; iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf-d.pid"; fi
     for attempt in 1 2 3; do
+    wgfp_counter_sample "$name" "$dir" "$rep" before "$attempt" || return 1
     dut_stat=${WG_DUT_STAT:-/tmp/wg-dut.stat}
     if [ "$DUT_KIND" = vendor ]; then
       ssh $SSHO $DUT sh -s -- $STEADY_FROM $win > "$dut_stat" <<'EOS' &
@@ -307,21 +332,23 @@ EOS
     fi
     sp=$!
     pp=""; if [ "${PROF:-0}" = 1 ]; then dut_prof $STEADY_FROM $win > "$J/$tag.prof" & pp=$!; fi
-    $D1 "$NSC iperf3 -c $b -B $a -p $IPERF_P -P $STREAMS -t $DUR -i 1 -Z -J $flag $udp" > "$J/$tag.json" &
+    $D1 "$NSC timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c $b -B $a -p $IPERF_P -P $STREAMS -t $DUR -i 1 -Z -J $flag $udp" > "$J/$tag.json" &
     client_status=0; wait $! || client_status=$?
     stat_status=0; wait $sp || stat_status=$?
+    wgfp_counter_sample "$name" "$dir" "$rep" after "$attempt" || return 1
     [ -n "$pp" ] && wait $pp; sleep 1
-    if [ "${WG_SKIP_SERVERS:-0}" = 1 ] && [ "$stat_status" -ne 0 ]; then
+    if [ "$stat_status" -ne 0 ]; then
       echo "ERROR: DUT statistics sampling failed" >&2; return 1
     fi
-    read gbps gen xr < <(parse "$J/$tag.json")
+    parsed=$(parse "$J/$tag.json" "$dir") || { echo "ERROR: unable to parse iperf results" >&2; return 1; }
+    read gbps gen xr <<< "$parsed"
     read busy sirq mx rx3 rx4 mc < <(cpu_stats "$dut_stat")
     hw=$(hits_sum "$dut_stat")
     if [ "$client_status" -eq 0 ] && awk -v g="$gbps" 'BEGIN{exit !(g>0)}'; then break; fi
+    if [ "$attempt" -eq 3 ]; then
+      echo "ERROR: iperf produced no traffic or failed after $attempt attempts" >&2; return 1
+    fi
     if [ "${WG_SKIP_SERVERS:-0}" = 1 ]; then
-      if [ "$attempt" -eq 3 ]; then
-        echo "ERROR: external iperf produced no traffic or failed after $attempt attempts" >&2; return 1
-      fi
       echo "  (rep $rep produced no traffic, attempt $attempt; retrying with the external iperf server)" >&2
     else
       echo "  (rep $rep produced no traffic, attempt $attempt; restarting the iperf3 server and retrying)" >&2
@@ -329,9 +356,9 @@ EOS
     fi
     sleep 5
     done
-    # pps on the DUT's wire = rx packets on eth3+eth4 over the window
+    # Netdev RX counters can omit WGFP sink traffic; this is not wire PPS.
     pps=$(( (rx3 + rx4) / win ))
-    printf '%-12s %-5s r%s %7s Gbit/s  dutbusy %5s%% sirq %5s%% maxcore %5s%%  gen %3s%%  %s %s  pps %s  hw_hits %s  cpu %s\n' \
+    printf '%-12s %-5s r%s %7s Gbit/s  dutbusy %5s%% sirq %5s%% maxcore %5s%%  gen %3s%%  %s %s  netdev_rx_pps %s  hw_hits %s  cpu %s\n' \
       "$name" "$dir" "$rep" "$gbps" "$busy" "$sirq" "$mx" "$gen" "$([ "$MODE" = udp ] && echo loss% || echo retr)" "$xr" "$pps" "$hw" "$mc"
     echo "$(date +%H:%M:%S),$name,$dir,$rep,$gbps,$xr,$busy,$sirq,$mx,$gen,$pps,$hw,$mc" >> "$OUT"
     sleep 5
@@ -350,6 +377,8 @@ esac
   { echo "WG_SKIP_SERVERS=1 with run requires WG_EXTERNAL_IPERF=1" >&2; exit 2; }
 [ "${WG_SKIP_SERVERS:-0}" != 1 ] || [ -z "${WG_SERIAL_CPU:-}" ] ||
   { echo "WG_SERIAL_CPU requires the iperf server" >&2; exit 2; }
+[ -z "${WGFP_COUNTER_LOG:-}" ] || [ "${WGFP:-0}" = 1 ] ||
+  { echo "WGFP_COUNTER_LOG requires WGFP=1" >&2; exit 2; }
 WANT="$*"; [ -z "$WANT" ] && WANT="wg-v4 wg-v6"
 if [ "${WG_SKIP_SERVERS:-0}" = 1 ] && [[ " $WANT " == *" ceiling-v4 "* ]]; then
   echo "WG_SKIP_SERVERS=1 does not support the ceiling-v4 cell" >&2; exit 2
@@ -365,6 +394,7 @@ ENVTXT=$(envrec); echo "$ENVTXT"
 if echo "$ENVTXT" | grep -q -E "lockdep: PRESENT|PROVE_LOCKING=y|DEBUG_SPINLOCK=y"; then
   echo "REFUSING: DUT kernel has lock debugging enabled; numbers would be invalid (plans/archive/ask2-wireguard-plan.md 2.1)." >&2; exit 5
 fi
+wgfp_require_unbound || exit 4
 [ "${KEEP:-0}" = 1 ] || trap teardown EXIT
 teardown
 needdut=0; needdirect=0

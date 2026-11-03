@@ -32,6 +32,8 @@ applied stack before selecting Tier 2 work.
 
 **Historical FQ-depth limitation (source audit, 2026-11-03).** The injector's dump prints `np.frm_cnt & 0xffffff` and `np.byte_cnt` without endian conversion; 6.18.60's `qman_query_fq_np()` copies the management response directly. Other QMan portal fields are big-endian. If these counters are also big-endian, a one-frame count on this little-endian CPU can be masked to zero, and phase 1g's printed `byte_cnt=0x40000000` decodes to 64 bytes. That combination is consistent with the injected frame still queued, not proof it was dequeued. The report did not preserve the unmasked frame-count word, so the state cannot be reconstructed. A controlled count/byte-order check is required before localizing the missing frame.
 
+The installed `.70` vendor ASK detour and its input-FQ context were compared read-only with the ASK2 diagnostic on 2026-11-03; see `plans/ASK2-WIREGUARD-FASTPATH-PLAN.md` P4. The different FQD context is an investigation candidate, not an established fix.
+
 ## 2. Tier 1 — CAAM crypto acceleration (software XFRM, hardware math)
 
 No FMan/ASK2 changes. Steps 1–3 were completed on 2026-10-16 (no build change was needed). Steps 4–5 were run on 2026-10-17; reboot-clean passed 2026-10-21 (`.185`, image 0729: CAAM priorities and 167 self-tests identical after a cold boot, no xfrm leftovers, a re-established tunnel moved the CAAM counters again).
