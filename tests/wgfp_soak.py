@@ -3,12 +3,16 @@
 import json
 import os
 from pathlib import Path
+import shutil
+import socket
 import subprocess
+import time
 
 import pytest
 
 pytestmark = pytest.mark.host
 SCRIPT = Path(__file__).resolve().parents[1] / "bin/testrig-wgfp-soak.sh"
+STOP = Path(__file__).resolve().parents[1] / "bin/testrig-wgfp-stop.py"
 
 FAKE_SSH = r"""#!/usr/bin/env python3
 import json
@@ -47,10 +51,14 @@ elif "iperf3 -s -1" in command:
     state["pid"] = state.get("pid", 1000) + 1
     result = str(state["pid"])
 elif "iperf3 -c " in command:
-    if scenario == "client_fail":
+    if scenario in {"client_fail", "binding_changed_on_error"}:
+        if scenario == "binding_changed_on_error":
+            state["binding_other"] = True
         status = 1
     else:
         state["traffic"] = True
+        if scenario == "binding_changed_during_soak":
+            state["binding_other"] = True
         state["pid"] = state.get("pid", 1000) + 1
         result = str(state["pid"])
 elif "awk '{print $22}' /proc/" in command:
@@ -63,11 +71,19 @@ elif "echo off | sudo tee" in command:
     state["bound"] = False
 elif "cat /sys/module/wireguard/parameters/wgfp_peer" in command:
     bound = state.get("bound", scenario == "already_bound")
-    result = ("wg0 sealed=" + ("200" if state.get("traffic") else "100") + " punted=0") if bound else "off"
+    dev = "other" if state.get("binding_other", scenario == "already_bound") else "wg0"
+    result = ("on sealed=" + ("200" if state.get("traffic") else "100") +
+              " punted=0 dev=" + dev) if bound else "off"
 elif command == "date +%s":
     result = "1234567890"
-elif "pcd-snapshot capture" in command or "rm -f " in command:
+elif "pcd-snapshot capture" in command:
+    if scenario == "binding_changed_before_setup":
+        state["bound"] = True
+        state["binding_other"] = True
+elif "rm -f " in command:
     pass
+elif "python3 -c " in command and "pidfd_open" in command:
+    status = 1 if scenario == "no_pidfd" else 0
 elif "pcd-snapshot diff" in command:
     result = "rc=0"
 elif "/usr/sbin/ethtool -S " in command:
@@ -83,12 +99,23 @@ elif "cat /sys/kernel/debug/dpaa_wgfp/stats" in command:
         encoding = " frm_cnt_encoding=hostile"
     else:
         encoding = " frm_cnt_encoding=host"
-    result = f"xmit_fail=0{encoding}\nsink0 frm_cnt={10 if scenario == 'stuck_sink' else 0}"
+    if scenario == "missing_ern_before" or (
+            scenario == "missing_ern_final" and state["stats_reads"] >= 4):
+        ern = ""
+    elif scenario == "duplicate_ern_final" and state["stats_reads"] >= 4:
+        ern = " xmit_ern=0 xmit_ern=0"
+    elif scenario == "ern_increased" and state.get("traffic"):
+        ern = " xmit_ern=1"
+    else:
+        ern = f" xmit_ern={7 if scenario == 'existing_ern' else 0}"
+    result = f"xmit_fail=0{ern}{encoding}\nsink0 frm_cnt={10 if scenario == 'stuck_sink' else 0}"
 elif "cat /sys/kernel/debug/fman_pcd/0/fe_flow" in command:
     status = 1 if scenario == "flow_read_fail" else 0
     result = "empty"
 elif "journalctl" in command:
     pass
+elif remote[:2] == ["python3", "-"] and len(remote) == 6:
+    sys.stdin.read()
 elif remote[:2] == ["python3", "-"]:
     program = sys.stdin.read()
     duration = float(remote[-1])
@@ -188,9 +215,10 @@ def test_soak_passes_only_with_real_pool_recovery_and_results(tmp_path):
     assert "PASS: sink queues empty" in result.stdout
     assert "PASS: fast path sealed packets" in result.stdout
     assert state["bound"] is False
-    stopped = [args for _, args in commands if args[:3] == ["sh", "-s", "--"]]
+    stopped = [args for _, args in commands if args[:2] == ["python3", "-"] and len(args) == 6]
     assert len(stopped) == 8
-    assert all(len(args) == 5 and args[3].isdigit() and args[4] == "12345" for args in stopped)
+    assert all(args[2].isdigit() and args[3] == "12345" and args[5].isdigit()
+               for args in stopped)
 
 
 @pytest.mark.parametrize(
@@ -212,6 +240,10 @@ def test_soak_passes_only_with_real_pool_recovery_and_results(tmp_path):
         ("client_fail", "could not start iperf client"),
         ("stuck_sink", "sink queues not empty"),
         ("lost_count_marker", "sink queues not empty or unavailable"),
+        ("missing_ern_before", "missing or invalid xmit_ern counter"),
+        ("missing_ern_final", "xmit_ern 0 -> unavailable"),
+        ("duplicate_ern_final", "xmit_ern 0 -> unavailable"),
+        ("ern_increased", "xmit_ern 0 -> 1"),
     ],
 )
 def test_soak_fails_closed_and_unbinds(tmp_path, scenario, message):
@@ -220,7 +252,8 @@ def test_soak_fails_closed_and_unbinds(tmp_path, scenario, message):
     assert message in result.stdout + result.stderr
     assert state["bound"] is False
     if scenario == "client_fail":
-        assert len([args for _, args in commands if args[:3] == ["sh", "-s", "--"]]) == 4
+        assert len([args for _, args in commands
+                    if args[:2] == ["python3", "-"] and len(args) == 6]) == 4
 
 
 def test_soak_does_not_replace_an_existing_binding(tmp_path):
@@ -229,6 +262,26 @@ def test_soak_does_not_replace_an_existing_binding(tmp_path):
     assert "fast path already bound" in result.stderr
     assert not any("echo off" in " ".join(args) or "rm -f" in " ".join(args)
                    for _, args in commands)
+
+
+@pytest.mark.parametrize("scenario", [
+    "binding_changed_before_setup", "binding_changed_during_soak", "binding_changed_on_error",
+])
+def test_soak_does_not_unbind_another_users_fast_path(tmp_path, scenario):
+    result, commands, state = run_soak(tmp_path, scenario)
+    assert result.returncode != 0
+    assert state["bound"] is True
+    assert state["binding_other"] is True
+    assert not any("echo off" in " ".join(args) for _, args in commands)
+    if scenario == "binding_changed_before_setup":
+        assert not any("echo wg0" in " ".join(args) for _, args in commands)
+
+
+def test_soak_rejects_missing_pidfd_support_before_binding(tmp_path):
+    result, commands, _ = run_soak(tmp_path, "no_pidfd")
+    assert result.returncode != 0
+    assert "generator lacks Python pidfd support" in result.stderr
+    assert not any("echo wg0" in " ".join(args) for _, args in commands)
 
 
 @pytest.mark.parametrize("scenario", ["unverified_count", "unverified_count_suffix"])
@@ -257,6 +310,12 @@ def test_normal_software_consumption_is_not_mistaken_for_a_pool_leak(tmp_path):
     assert "PASS: BMan pool drift matches software-accounted consumption" in result.stdout
 
 
+def test_existing_enqueue_rejections_do_not_fail_a_clean_soak(tmp_path):
+    result, _, _ = run_soak(tmp_path, "existing_ern")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS: no asynchronous enqueue rejections" in result.stdout
+
+
 def test_short_empty_final_interval_is_not_a_stall(tmp_path):
     result, _, _ = run_soak(tmp_path, "short_zero_tail")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -268,3 +327,59 @@ def test_sample_time_includes_telemetry_overhead(tmp_path):
     sample = next(line for line in result.stdout.splitlines() if "t=" in line)
     elapsed = int(sample.split("t=", 1)[1].split("s", 1)[0])
     assert elapsed >= 2
+
+
+def process_start(pid):
+    stat = Path(f"/proc/{pid}/stat").read_text()
+    return int(stat[stat.rfind(")") + 2:].split()[19])
+
+
+def test_stop_rejects_reused_pid_without_signalling():
+    process = subprocess.Popen(["sleep", "30"])
+    try:
+        started = process_start(process.pid)
+        result = subprocess.run(
+            ["python3", str(STOP), str(process.pid), str(started + 1), "client", "5241"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode != 0
+        assert "was reused" in result.stderr
+        assert process.poll() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
+@pytest.mark.skipif(shutil.which("iperf3") is None, reason="iperf3 is required")
+def test_stop_checks_command_and_terminates_only_the_owned_iperf():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    process = subprocess.Popen(
+        ["iperf3", "-s", "-1", "-p", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(50):
+            if Path(f"/proc/{process.pid}/exe").resolve().name == "iperf3":
+                break
+            time.sleep(0.01)
+        assert process.poll() is None
+        started = process_start(process.pid)
+        wrong = subprocess.run(
+            ["python3", str(STOP), str(process.pid), str(started), "server", str(port % 65535 + 1)],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert wrong.returncode != 0
+        assert "does not match" in wrong.stderr
+        assert process.poll() is None
+        stopped = subprocess.run(
+            ["python3", str(STOP), str(process.pid), str(started), "server", str(port)],
+            capture_output=True, text=True, timeout=8,
+        )
+        assert stopped.returncode == 0, stopped.stderr
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)

@@ -1,0 +1,87 @@
+{
+	"mcpServers": {
+		"context7": {
+			"type": "stdio",
+			"command": "/mnt/builds/home/vyos/.local/bin/bunx",
+			"args": [
+				"--bun",
+				"-y",
+				"@upstash/context7-mcp"
+			],
+			"tools": [
+				"*"
+			]
+		},
+		"kagi": {
+			"type": "stdio",
+			"command": "/mnt/builds/home/vyos/.local/bin/kagi-mcp",
+			"args": [],
+			"tools": [
+				"*"
+			]
+		},
+		"mcp-ripgrep": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"-y",
+				"mcp-ripgrep@latest"
+			],
+			"tools": [
+				"*"
+			]
+		},
+		"piloty": {
+			"type": "stdio",
+			"command": "/mnt/builds/home/vyos/.local/bin/uvx",
+			"args": [
+				"--with",
+				"mcp>=1.2.1,<2",
+				"--from",
+				"git+https://github.com/yiwenlu66/PiloTY.git@61d822be3db850e1d3cd91e8a3880bd74cefa533",
+				"piloty"
+			],
+			"tools": [
+				"*"
+			]
+		},
+		"qdrant": {
+			"type": "stdio",
+			"command": "/mnt/builds/home/vyos/.local/bin/qdrant-mcp",
+			"args": [],
+			"tools": [
+				"*"
+			]
+		},
+		"semcode": {
+			"type": "stdio",
+			"command": "/mnt/builds/home/vyos/.cargo/bin/semcode-mcp",
+			"args": [
+				"--database",
+				"/mnt/builds/vyos-ls1046a-build/.semcode.db"
+			],
+			"tools": [
+				"*"
+			]
+		},
+		"sequentialthinking": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"-y",
+				"@modelcontextprotocol/server-sequential-thinking"
+			],
+			"tools": [
+				"*"
+			]
+		},
+		"tree-sitter": {
+			"type": "stdio",
+			"command": "/mnt/builds/home/vyos/.local/bin/tree-sitter-mcp-shim",
+			"args": [],
+			"tools": [
+				"*"
+			]
+		}
+	}
+}

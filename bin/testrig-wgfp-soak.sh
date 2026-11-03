@@ -7,7 +7,7 @@
 #             Leaves lab records in the ehash tables: reboot afterwards.
 #   soak      4 automatic TCP flows for DUR (default 600 s) through a live tunnel (KEEP=1 bin/testrig-wireguard.sh
 #             setup wg-v4). PORT_BASE selects the first of four server ports (default 5241).
-#             Samples the BMan hardware pool counts, sink frm_cnt and xmit_fail every 30 s; checks
+#             Samples the BMan hardware pool counts, sink frm_cnt and TX failures every 30 s; checks
 #             pcd-snapshot before binding vs after unbinding. The pool gate compares hardware drift with
 #             software-accounted buffer consumption; sink queues and fe_flow must be empty afterwards.
 #             Refuses kernels without the validated frm_cnt_encoding=host stats marker.
@@ -43,6 +43,15 @@ sink_count_verified(){
   printf '%s\n' "$1" | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "frm_cnt_encoding=host") found=1 }
                            END { exit !found }'
 }
+header_counter(){
+  printf '%s\n' "$1" | awk -v key="$2" '
+    NR == 1 {
+      for (i=1; i<=NF; i++)
+        if ($i ~ ("^" key "=[0-9]+$")) { split($i, a, "="); value=a[2]; found++ }
+    }
+    END { if (found != 1) exit 1; print value }
+  '
+}
 fails=0; ok(){ echo "  PASS: $*"; }; bad(){ echo "  FAIL: $*"; fails=$((fails+1)); }
 
 case $MODE in
@@ -51,7 +60,7 @@ overload)
   a0=$(bp_accounted eth3) || { echo "ABORT: cannot read eth3 pool accounting" >&2; exit 1; }
   PPS_LIST=0 SECS=20 TBLS=3 timeout 240 "$(dirname "$0")/testrig-wgfp-p2a.sh" > /tmp/wgfp-overload-p2a.log 2>&1 &
   p2a_pid=$!
-  for i in $(seq 1 60); do grep -q 'inserted 16 records' /tmp/wgfp-overload-p2a.log 2>/dev/null && break; sleep 1; done
+  for _ in $(seq 1 60); do grep -q 'inserted 16 records' /tmp/wgfp-overload-p2a.log 2>/dev/null && break; sleep 1; done
   sleep 7
   b1=$(bp eth3) || { bad "cannot read eth3 BMan pool"; b1=unavailable; }
   out=$($D1 'ping -c 100 -i 0.1 -W 1 10.99.2.113 | grep -o "[0-9.]*% packet loss"')
@@ -77,21 +86,28 @@ soak)
   server_pids=(); client_pids=(); server_files=(); client_files=()
   bound=0; snap_owned=0
   stop_owned(){
-    local side=$1 pid=${2%%:*} started=${2#*:} host
-    [[ $pid =~ ^[0-9]+$ && $started =~ ^[0-9]+$ && $pid -gt 1 ]] || return 1
+    local side=$1 pid started port host
+    IFS=: read -r pid started port <<< "$2"
+    [[ $pid =~ ^[0-9]+$ && $started =~ ^[0-9]+$ && $port =~ ^[0-9]+$ && $pid -gt 1 ]] || return 1
     if [ "$side" = server ]; then host=admin@192.168.1.113; else host=admin@192.168.1.112; fi
-    ssh $SSHO "$host" sh -s -- "$pid" "$started" <<'SH'
-pid=$1
-started=$2
-if [ -e "/proc/$pid/stat" ]; then
-  current=$(awk '{print $22}' "/proc/$pid/stat") || exit 1
-  if [ "$current" != "$started" ]; then
-    echo "PID $pid was reused; not signalling it" >&2
-    exit 1
-  fi
-  kill "$pid" || exit 1
-fi
-SH
+    ssh $SSHO "$host" python3 - "$pid" "$started" "$side" "$port" \
+      < "$(dirname "$0")/testrig-wgfp-stop.py"
+  }
+  owned_binding(){
+    [[ $1 == on*" dev=wg0" ]]
+  }
+  unbind_owned(){
+    local current
+    current=$(dut "sudo cat $WP") || { echo "ERROR: cannot inspect fast-path binding" >&2; return 1; }
+    if [ "$current" = off ]; then
+      bound=0
+    elif owned_binding "$current"; then
+      dut "echo off | sudo tee $WP >/dev/null" || return 1
+      bound=0
+    else
+      echo "ERROR: fast-path binding changed; refusing to unbind it" >&2
+      return 1
+    fi
   }
   read_iperf_result(){
     ssh $SSHO admin@192.168.1.112 python3 - "$1" "$DUR" <<'PY'
@@ -142,7 +158,7 @@ PY
     trap - EXIT INT TERM
     for token in "${client_pids[@]}"; do stop_owned client "$token" || rc=1; done
     if [ "$bound" = 1 ]; then
-      dut "echo off | sudo tee $WP >/dev/null" || { echo "ERROR: could not unbind fast path" >&2; rc=1; }
+      unbind_owned || { echo "ERROR: could not unbind owned fast path" >&2; rc=1; }
     fi
     for token in "${server_pids[@]}"; do stop_owned server "$token" || rc=1; done
     for p in "${server_files[@]}"; do
@@ -157,6 +173,10 @@ PY
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  for host in admin@192.168.1.112 admin@192.168.1.113; do
+    ssh $SSHO "$host" "python3 -c 'import os,signal; fd=os.pidfd_open(os.getpid()); os.close(fd); assert hasattr(signal,\"pidfd_send_signal\")'" ||
+      { echo "ABORT: generator lacks Python pidfd support" >&2; exit 1; }
+  done
   current=$(dut "sudo cat $WP") || { echo "ABORT: cannot read wgfp_peer" >&2; exit 1; }
   [ "$current" = off ] || { echo "ABORT: fast path already bound; refusing to replace it" >&2; exit 1; }
   stats=$(dut "sudo cat $DBG/stats") || { echo "ABORT: cannot read sink counters" >&2; exit 1; }
@@ -176,12 +196,15 @@ PY
   a4=$(bp_accounted eth4) || { echo "ABORT: cannot read eth4 pool accounting" >&2; exit 1; }
   $D2 "for p in ${ports[*]}; do listeners=\$(ss -H -ltn \"sport = :\$p\") || exit 1; [ -z \"\$listeners\" ] || { echo \"port \$p already in use\" >&2; exit 1; }; done" ||
     { echo "ABORT: iperf server ports are unavailable" >&2; exit 1; }
+  current=$(dut "sudo cat $WP") || { echo "ABORT: cannot recheck fast-path binding" >&2; exit 1; }
+  [ "$current" = off ] || { echo "ABORT: fast path became bound before setup" >&2; exit 1; }
   bound=1
   dut "echo wg0 | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer"; exit 1; }
   stats=$(dut "sudo cat $DBG/stats") || { echo "ABORT: cannot read sink counters" >&2; exit 1; }
-  x0=$(printf '%s\n' "$stats" | sed -n 's/.*xmit_fail=\([0-9]*\).*/\1/p' | head -1)
-  [[ $x0 =~ ^[0-9]+$ ]] || { echo "ABORT: missing xmit_fail counter" >&2; exit 1; }
+  x0=$(header_counter "$stats" xmit_fail) || { echo "ABORT: missing or invalid xmit_fail counter" >&2; exit 1; }
+  ern0=$(header_counter "$stats" xmit_ern) || { echo "ABORT: missing or invalid xmit_ern counter" >&2; exit 1; }
   peer0=$(dut "sudo cat $WP") || { echo "ABORT: cannot read fast-path counters" >&2; exit 1; }
+  owned_binding "$peer0" || { echo "ABORT: fast-path binding changed after setup" >&2; exit 1; }
   sealed0=$(printf '%s\n' "$peer0" | sed -n 's/.*sealed=\([0-9]*\).*/\1/p')
   [[ $sealed0 =~ ^[0-9]+$ ]] || { echo "ABORT: missing sealed counter" >&2; exit 1; }
   for p in "${ports[@]}"; do
@@ -191,7 +214,7 @@ PY
     [[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] || { echo "ABORT: invalid server PID" >&2; exit 1; }
     started=$($D2 "awk '{print \$22}' /proc/$pid/stat") || { echo "ABORT: server $p exited" >&2; exit 1; }
     [[ $started =~ ^[0-9]+$ ]] || { echo "ABORT: invalid server start time" >&2; exit 1; }
-    server_pids+=("$pid:$started")
+    server_pids+=("$pid:$started:$p")
   done
   $D2 "for p in ${ports[*]}; do listeners=\$(ss -H -ltn \"sport = :\$p\") || exit 1; [ -n \"\$listeners\" ] || { echo \"server \$p did not listen\" >&2; exit 1; }; done" ||
     { echo "ABORT: an iperf server did not start" >&2; exit 1; }
@@ -203,7 +226,7 @@ PY
     [[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] || { echo "ABORT: invalid client PID" >&2; exit 1; }
     started=$($D1 "awk '{print \$22}' /proc/$pid/stat") || { echo "ABORT: client $k exited" >&2; exit 1; }
     [[ $started =~ ^[0-9]+$ ]] || { echo "ABORT: invalid client start time" >&2; exit 1; }
-    client_pids+=("$pid:$started")
+    client_pids+=("$pid:$started:$((PORT_BASE+k))")
   done
   start=$SECONDS; deadline=$((DUR < 30 ? DUR : 30)); last_sealed=$sealed0
   while :; do
@@ -216,6 +239,7 @@ PY
       { echo "ABORT: empty or invalid BMan pool" >&2; exit 1; }
     stats=$(dut "sudo cat $DBG/stats") || { bad "cannot read sink counters"; stats=unavailable; }
     peer=$(dut "sudo cat $WP") || { bad "cannot read fast-path counters"; peer=unavailable; }
+    owned_binding "$peer" || { echo "ABORT: fast-path binding changed during soak" >&2; exit 1; }
     t=$((SECONDS - start))
     current_sealed=$(printf '%s\n' "$peer" | sed -n 's/.*sealed=\([0-9]*\).*/\1/p')
     if ! [[ $current_sealed =~ ^[0-9]+$ ]]; then
@@ -228,7 +252,7 @@ PY
       fi
       last_sealed=$current_sealed
     fi
-    echo "  t=${t}s BMan BPID:free eth3=$e3sample eth4=$e4sample $(printf '%s\n' "$stats" | grep -o 'xmit_fail=[0-9]*') frm_cnt=$(printf '%s\n' "$stats" | grep -o 'frm_cnt=[0-9]*' | cut -d= -f2 | tr '\n' ' ')$(printf '%s\n' "$peer" | grep -oE ' sealed=[0-9]+| punted=[0-9]+' | tr -d '\n')"
+    echo "  t=${t}s BMan BPID:free eth3=$e3sample eth4=$e4sample $(printf '%s\n' "$stats" | grep -oE 'xmit_fail=[0-9]+|xmit_ern=[0-9]+' | tr '\n' ' ')frm_cnt=$(printf '%s\n' "$stats" | grep -o 'frm_cnt=[0-9]*' | cut -d= -f2 | tr '\n' ' ')$(printf '%s\n' "$peer" | grep -oE ' sealed=[0-9]+| punted=[0-9]+' | tr -d '\n')"
     if [ "$t" -ge "$DUR" ] || [ "$deadline" -eq "$DUR" ]; then break; fi
     deadline=$((deadline + 30 < DUR ? deadline + 30 : DUR))
   done
@@ -243,8 +267,9 @@ PY
     tot=$(awk -v a="$tot" -v b="$b" 'BEGIN{print a+b}')
   done
   peer1=$(dut "sudo cat $WP") || { bad "cannot read fast-path counters"; peer1=; }
+  owned_binding "$peer1" || { echo "ABORT: fast-path binding changed before teardown" >&2; exit 1; }
   sealed1=$(printf '%s\n' "$peer1" | sed -n 's/.*sealed=\([0-9]*\).*/\1/p')
-  if dut "echo off | sudo tee $WP >/dev/null"; then bound=0; else bad "could not unbind fast path"; fi
+  if ! unbind_owned; then bad "could not unbind owned fast path"; exit 1; fi
   sleep 2
   if flow_table=$(dut "sudo cat /sys/kernel/debug/fman_pcd/0/fe_flow"); then
     left=$(printf '%s\n' "$flow_table" | grep -c 'flow\[')
@@ -253,7 +278,8 @@ PY
   fi
   sleep 5
   final_stats=$(dut "sudo cat $DBG/stats") || { bad "cannot read final sink counters"; final_stats=; }
-  xf=$(printf '%s\n' "$final_stats" | grep -o 'xmit_fail=[0-9]*' | cut -d= -f2)
+  xf=$(header_counter "$final_stats" xmit_fail) || xf=unavailable
+  ernf=$(header_counter "$final_stats" xmit_ern) || ernf=unavailable
   e3b=$(bp eth3) || { bad "cannot read eth3 BMan pool"; e3b=unavailable; }
   e4b=$(bp eth4) || { bad "cannot read eth4 BMan pool"; e4b=unavailable; }
   a3b=$(bp_accounted eth3) || { bad "cannot read eth3 pool accounting"; a3b=unavailable; }
@@ -265,11 +291,12 @@ PY
     errs="journal unavailable"
   fi
   diffout=$(dut "sudo pcd-snapshot diff $snap 2>&1; echo rc=\$?")
-  echo "  mean up over ${DUR}s: $(awk -v t=$tot 'BEGIN{printf "%.3f", t/1e9}') Gbit/s; BMan BPID:free eth3 $e3 -> $e3b (accounted $a3 -> $a3b), eth4 $e4 -> $e4b (accounted $a4 -> $a4b); xmit_fail $xf; fe_flow left $left"
+  echo "  mean up over ${DUR}s: $(awk -v t=$tot 'BEGIN{printf "%.3f", t/1e9}') Gbit/s; BMan BPID:free eth3 $e3 -> $e3b (accounted $a3 -> $a3b), eth4 $e4 -> $e4b (accounted $a4 -> $a4b); xmit_fail $xf; xmit_ern $ernf; fe_flow left $left"
   pool_balanced "$e3" "$a3" "$e3b" "$a3b" && pool_balanced "$e4" "$a4" "$e4b" "$a4b" &&
     ok "BMan pool drift matches software-accounted consumption" ||
     bad "BMan/accounting drift eth3 $e3/$a3->$e3b/$a3b eth4 $e4/$a4->$e4b/$a4b"
-  [[ $xf =~ ^[0-9]+$ ]] && [ "$xf" -eq "$x0" ] && ok "no transmit failures" || bad "xmit_fail $x0 -> $xf"
+  [[ $xf =~ ^[0-9]+$ ]] && [ "$xf" = "$x0" ] && ok "no transmit failures" || bad "xmit_fail $x0 -> $xf"
+  [[ $ernf =~ ^[0-9]+$ ]] && [ "$ernf" = "$ern0" ] && ok "no asynchronous enqueue rejections" || bad "xmit_ern $ern0 -> $ernf"
   [[ $sealed1 =~ ^[0-9]+$ ]] && [ "$sealed1" -gt "$sealed0" ] && ok "fast path sealed packets" || bad "fast path sealed no packets"
   [ "$left" = 0 ] && ok "every record withdrawn" || bad "$left records left"
   if sink_count_verified "$final_stats" && printf '%s\n' "$final_stats" | awk '
