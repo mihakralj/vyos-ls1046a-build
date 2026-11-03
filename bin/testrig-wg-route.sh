@@ -58,10 +58,13 @@ case $operation in
     [ -z "$rules" ] || { echo "ERROR: rule priority $priority is in use" >&2; exit 10; }
     routes=$(table_routes) || exit 10
     [ -z "$routes" ] || { echo "ERROR: route table $table is in use" >&2; exit 10; }
-    route_change add || exit 11
+    if ! route_change add; then
+      echo "ERROR: route creation outcome is uncertain; retain the lease" >&2
+      exit 1
+    fi
     if ! rule_change add; then
-      route_change del || exit 1
-      exit 12
+      echo "ERROR: policy rule creation outcome is uncertain; retain the route and lease" >&2
+      exit 1
     fi
     ;;
   delete)

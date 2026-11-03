@@ -61,11 +61,11 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=8)
 if [ -n "$RIG_KEY" ]; then SSH+=(-i "$RIG_KEY"); fi
 TABLE="wgmatrix${BASHPID}${RANDOM}"
 TABLE_TOKEN="${TABLE}x${RANDOM}"
-TABLE_OWNED=0
+TABLE_MAY_EXIST=0
 cleanup() {
   local rc=$? listing handle
   trap - EXIT INT TERM
-  if [ "$TABLE_OWNED" = 1 ]; then
+  if [ "$TABLE_MAY_EXIST" = 1 ]; then
     if listing=$("${SSH[@]}" -n "$DUT" "sudo -n nft -a list table inet $TABLE"); then
       if handle=$(printf '%s\n' "$listing" | awk -v table="$TABLE" -v token="$TABLE_TOKEN" '
         NR == 1 && $1 == "table" && $2 == "inet" && $3 == table {
@@ -73,13 +73,17 @@ cleanup() {
         }
         $1 == "comment" && $2 == "\"" token "\"" && NF == 2 { owned = 1 }
         END { if (handle && owned) print handle; else exit 1 }'); then
-        "${SSH[@]}" -n "$DUT" "sudo -n nft delete table inet handle $handle" || rc=1
+        if "${SSH[@]}" -n "$DUT" "sudo -n nft delete table inet handle $handle"; then
+          rm -- "$run_dir/nft-pending" || rc=1
+        else
+          rc=1
+        fi
       else
         echo "ERROR: nft table ownership changed; refusing to remove $TABLE" >&2
         rc=1
       fi
     else
-      echo "ERROR: cannot inspect owned nft table $TABLE" >&2
+      echo "ERROR: cannot inspect possibly created nft table $TABLE" >&2
       rc=1
     fi
   fi
@@ -89,32 +93,26 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The underlying rigs delete fixed names, route tables and pidfiles at setup
-# and teardown. Refuse existing resources instead of adopting or removing them.
+# Fixed interface names and listening ports cannot be shared. The runners
+# verify ownership of their uniquely tagged routes, rules and server state.
 "${SSH[@]}" "$DUT" sh -s -- "$DUT_KIND" "${WGFP:-0}" "${WG_SKIP_FW4:-0}" <<'REMOTE'
 set -eu
 kind=$1
 admin() { if [ "$kind" = vendor ]; then "$@"; else sudo -n "$@"; fi; }
 for cmd in ip awk; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
 admin nft --version >/dev/null || { echo "Cannot run nft on DUT" >&2; exit 1; }
-for n in wg0 wgchk wgd; do
-  if ip link show "$n" >/dev/null 2>&1; then echo "$n already exists on DUT" >&2; exit 1; fi
-done
+if ip link show wg0 >/dev/null 2>&1; then echo "wg0 already exists on DUT" >&2; exit 1; fi
 for k in $(seq 0 15); do
   if ip link show "wgm$k" >/dev/null 2>&1; then echo "wgm$k already exists on DUT" >&2; exit 1; fi
 done
-for f in /tmp/wgk /tmp/wgmk; do
-  if [ -e "$f" ] || [ -L "$f" ]; then echo "$f already exists on DUT" >&2; exit 1; fi
+for subnet in 200 $(seq 210 225); do
+  routes=$(admin ip -4 route show exact "10.99.$subnet.0/24") || exit 1
+  [ -z "$routes" ] || { echo "Test route 10.99.$subnet.0/24 already exists on DUT" >&2; exit 1; }
 done
-tables=$(admin nft list tables) || { echo "Cannot inspect DUT nft tables" >&2; exit 1; }
-if printf '%s\n' "$tables" | grep -Fxq 'table inet wgnt'; then
-  echo "DUT nft table inet wgnt already exists" >&2; exit 1
-fi
+routes=$(admin ip -6 route show exact fd99:200::/64) || exit 1
+[ -z "$routes" ] || { echo "IPv6 test route already exists on DUT" >&2; exit 1; }
 if [ "$kind" = vendor ] && [ "$3" != 1 ]; then
-  rules=$(nft -a list chain inet fw4 forward) || { echo "Cannot inspect vendor forward rules" >&2; exit 1; }
-  if printf '%s\n' "$rules" | grep -Eq 'wgrig|wgmrig'; then
-    echo "Vendor forward rules already use a WireGuard rig comment" >&2; exit 1
-  fi
+  nft -a list chain inet fw4 forward >/dev/null || { echo "Cannot inspect vendor forward rules" >&2; exit 1; }
 fi
 if [ "$2" = 1 ]; then
   peer=$(admin cat /sys/module/wireguard/parameters/wgfp_peer) || exit 1
@@ -140,29 +138,11 @@ ns=$1
 net() { if [ "$ns" = - ]; then "$@"; else sudo -n ip netns exec "$ns" "$@"; fi; }
 if [ "$ns" != - ]; then sudo -n ip netns exec "$ns" true || exit 1; fi
 for cmd in ip ss timeout; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
-for n in wg0 wgd $(seq -f wgm%g 0 15); do
+for n in wg0 $(seq -f wgm%g 0 15); do
   if ip link show "$n" >/dev/null 2>&1 ||
      { [ "$ns" != - ] && net ip link show "$n" >/dev/null 2>&1; }; then
     echo "$n already exists on generator" >&2; exit 1
   fi
-done
-for f in /tmp/wgk /tmp/wgmk; do
-  if [ -e "$f" ] || [ -L "$f" ]; then echo "$f already exists on generator" >&2; exit 1; fi
-done
-for family in -4 -6; do
-  rules=$(net ip "$family" rule show) || { echo "Cannot inspect $family rules" >&2; exit 1; }
-  for priority in 12100 $(seq 12200 12215); do
-    if printf '%s\n' "$rules" | grep -q "^$priority:"; then
-      echo "$family rule $priority already exists" >&2; exit 1
-    fi
-  done
-  for table in 200 $(seq 220 235); do
-    if routes=$(net ip "$family" route show table "$table" 2>&1); then
-      [ -z "$routes" ] || { echo "$family route table $table is in use" >&2; exit 1; }
-    elif ! printf '%s\n' "$routes" | grep -q 'FIB table does not exist'; then
-      echo "Cannot inspect $family route table $table: $routes" >&2; exit 1
-    fi
-  done
 done
 for subnet in 200 $(seq 210 225); do
   routes=$(net ip -4 route show exact "10.99.$subnet.0/24") || exit 1
@@ -175,9 +155,6 @@ for port in 51820 51830 51831 51832 51833; do
   [ -z "$sockets" ] || { echo "UDP port $port already in use on generator" >&2; exit 1; }
 done
 if [ "$2" != 1 ]; then
-  for f in /tmp/wg-iperf.pid $(seq -f /tmp/wgm-iperf-%g.pid 0 15); do
-    if [ -e "$f" ] || [ -L "$f" ]; then echo "$f already exists on generator" >&2; exit 1; fi
-  done
   for port in 5231 5240 5241 5242 5243; do
     sockets=$(net ss -H -ltn "sport = :$port") || exit 1
     [ -z "$sockets" ] || { echo "TCP port $port already in use on generator" >&2; exit 1; }
@@ -193,8 +170,9 @@ if [ "${WGFP:-0}" = 1 ]; then export WGFP_COUNTER_LOG=${WGFP_COUNTER_LOG:-"$run_
 mkdir -p "$J"
 echo "Per-run artifacts: $run_dir"
 if [ "$DUT_KIND" = ask2 ]; then
+  printf '%s\n%s\n' "$TABLE" "$TABLE_TOKEN" > "$run_dir/nft-pending"
+  TABLE_MAY_EXIST=1
   "${SSH[@]}" -n "$DUT" "sudo -n nft 'create table inet $TABLE { comment \"$TABLE_TOKEN\"; }'"
-  TABLE_OWNED=1
   "${SSH[@]}" -n "$DUT" "sudo -n nft 'add chain inet $TABLE pre { type filter hook prerouting priority -300 ; }' && \
     sudo -n nft 'add chain inet $TABLE out { type filter hook output priority -300 ; }' && \
     sudo -n nft add rule inet $TABLE pre ip saddr 10.99.2.113 ip daddr 10.99.2.185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
