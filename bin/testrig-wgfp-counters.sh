@@ -8,6 +8,10 @@ wgfp_require_unbound() {
     { echo "ERROR: cannot read WGFP counters before setup" >&2; return 1; }
   [ "$state" = off ] ||
     { echo "ERROR: WGFP is already bound; refusing to replace it" >&2; return 1; }
+  state=$(dut 'sudo cat /sys/module/wireguard/parameters/wgfp_peer_lease') ||
+    { echo "ERROR: atomic WGFP reservation is unavailable; refusing setup" >&2; return 1; }
+  [ "$state" = unowned ] ||
+    { echo "ERROR: WGFP is already reserved; refusing to replace it" >&2; return 1; }
 }
 
 wgfp_counter_sample() {

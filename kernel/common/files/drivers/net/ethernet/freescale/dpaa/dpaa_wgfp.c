@@ -26,7 +26,7 @@
  *   echo "touch <m>"   > .../ctl   0 none, 1 first and last 64 B, 2 read the
  *                                  whole frame, 3 read and write the whole frame
  *   echo "reset"       > .../ctl   zero the counters
- *   echo "destroy"     > .../ctl   retire and free the queues
+ *   echo "destroy"     > .../ctl   refused until safe queue teardown exists
  *   cat .../stats                  fqid, cpu, frames, bytes, errors, polls, FQ state
  */
 
@@ -77,7 +77,6 @@ struct wgfp_sink {
 	struct qman_portal *portal;
 	int cpu;
 	bool created;
-	bool napi_added;
 	u64 frames;
 	u64 bytes;
 	u64 errs;
@@ -92,6 +91,7 @@ static struct net_device *wgfp_ndev;
 static struct dentry *wgfp_dir;
 static unsigned int wgfp_touch = 2;
 static unsigned int wgfp_nsinks;
+static bool wgfp_pool_failed;
 static DEFINE_MUTEX(wgfp_lock);
 
 /* Consumer hook (the wireguard module) and the egress frame queue. */
@@ -231,37 +231,25 @@ static int wgfp_poll(struct napi_struct *napi, int budget)
 	return cleaned;
 }
 
-static void wgfp_sink_free(struct wgfp_sink *s)
-{
-	int err;
-
-	if (!s->created)
-		return;
-	err = qman_retire_fq(&s->fq, NULL);
-	if (err < 0)
-		pr_err("dpaa_wgfp: qman_retire_fq(%u) = %d\n",
-		       qman_fq_fqid(&s->fq), err);
-	err = qman_oos_fq(&s->fq);
-	if (err < 0)
-		pr_err("dpaa_wgfp: qman_oos_fq(%u) = %d\n",
-		       qman_fq_fqid(&s->fq), err);
-	qman_destroy_fq(&s->fq);
-	if (s->napi_added) {
-		napi_disable(&s->napi);
-		netif_napi_del(&s->napi);
-		s->napi_added = false;
-	}
-	s->created = false;
-}
-
 static int wgfp_sink_create(struct wgfp_sink *s, int cpu)
 {
 	struct qm_mcc_initfq opts;
 	int err;
 
+	if (WARN_ON_ONCE(s->created))
+		return -EBUSY;
 	memset(s, 0, sizeof(*s));
 	s->cpu = cpu;
 	s->fq.cb.dqrr = wgfp_dqrr;
+
+	memset(&opts, 0, sizeof(opts));
+	opts.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ |
+				   QM_INITFQ_WE_TDTHRESH);
+	opts.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_TDE);
+	qm_fqd_set_destwq(&opts.fqd, qman_affine_channel(cpu), WGFP_WQ);
+	err = qm_fqd_set_taildrop(&opts.fqd, WGFP_SINK_TD, 1);
+	if (err < 0)
+		return err;
 
 	err = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
 			     QMAN_FQ_FLAG_NO_ENQUEUE, &s->fq);
@@ -271,36 +259,11 @@ static int wgfp_sink_create(struct wgfp_sink *s, int cpu)
 
 	netif_napi_add(wgfp_ndev, &s->napi, wgfp_poll);
 	napi_enable(&s->napi);
-	s->napi_added = true;
-
-	memset(&opts, 0, sizeof(opts));
-	opts.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ |
-				   QM_INITFQ_WE_TDTHRESH);
-	opts.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_TDE);
-	qm_fqd_set_destwq(&opts.fqd, qman_affine_channel(cpu), WGFP_WQ);
-	err = qm_fqd_set_taildrop(&opts.fqd, WGFP_SINK_TD, 1);
-	if (err < 0) {
-		wgfp_sink_free(s);
-		return err;
-	}
 	err = qman_init_fq(&s->fq, QMAN_INITFQ_FLAG_SCHED, &opts);
-	if (err) {
+	if (err)
 		pr_err("dpaa_wgfp: qman_init_fq(%u) = %d\n",
 		       qman_fq_fqid(&s->fq), err);
-		wgfp_sink_free(s);
-		return err;
-	}
-	return 0;
-}
-
-static int wgfp_destroy_all(void)
-{
-	unsigned int i;
-
-	for (i = 0; i < WGFP_MAX_SINKS; i++)
-		wgfp_sink_free(&wgfp_sinks[i]);
-	wgfp_nsinks = 0;
-	return 0;
+	return err;
 }
 
 static int wgfp_create_all(unsigned int n)
@@ -309,6 +272,8 @@ static int wgfp_create_all(unsigned int n)
 	unsigned int i;
 	int err;
 
+	if (wgfp_pool_failed)
+		return -EIO;
 	if (wgfp_nsinks)
 		return -EBUSY;
 	if (!n || n > WGFP_MAX_SINKS)
@@ -320,7 +285,9 @@ static int wgfp_create_all(unsigned int n)
 	for (i = 0; i < n; i++) {
 		err = wgfp_sink_create(&wgfp_sinks[i], i);
 		if (err) {
-			wgfp_destroy_all();
+			/* A timed-out init may still have scheduled its FQ. */
+			WRITE_ONCE(wgfp_pool_failed, true);
+			pr_err("dpaa_wgfp: sink setup failed; retaining allocated queues until reboot\n");
 			return err;
 		}
 		pr_info("dpaa_wgfp: sink fqid=0x%x on cpu %u\n",
@@ -361,12 +328,15 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			s->polls = s->irqs = s->sum = 0;
 		}
 	} else if (!strncmp(buf, "destroy", 7)) {
-		err = wgfp_destroy_all();
+		pr_warn_ratelimited("dpaa_wgfp: sink destruction is not yet safe; reboot to release queues\n");
+		err = -EOPNOTSUPP;
 	} else {
 		err = -EINVAL;
 	}
 	mutex_unlock(&wgfp_lock);
-	return err ? err : count;
+	if (err)
+		return err;
+	return count;
 }
 
 static const struct file_operations wgfp_ctl_fops = {
@@ -380,8 +350,9 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	unsigned int i;
 
 	mutex_lock(&wgfp_lock);
-	seq_printf(m, "touch=%u sinks=%u ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu\n",
-		   wgfp_touch, wgfp_nsinks, !!rcu_access_pointer(wgfp_ops),
+	seq_printf(m, "touch=%u sinks=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu\n",
+		   wgfp_touch, wgfp_nsinks, READ_ONCE(wgfp_pool_failed),
+		   !!rcu_access_pointer(wgfp_ops),
 		   READ_ONCE(wgfp_neg), dpaa_wgfp_stat_sum(&wgfp_xmit_ok),
 		   (u64)atomic64_read(&wgfp_xmit_fail),
 		   (u64)atomic64_read(&wgfp_xmit_ern));

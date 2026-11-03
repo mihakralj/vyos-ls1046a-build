@@ -12,6 +12,7 @@
 # Env:   TUNNELS=4 ACTIVE=<n>  (n of the tunnels carry traffic; default all)   DIRS="up down"  DUR=30 STEADY_FROM=10
 #        STREAMS=2 (per tunnel)  REPS=3  DUT_KIND=ask2|vendor  OUT=<csv>
 #        WGFP=1 binds the DPAA WireGuard fast path to all wgm<K> after setup (multi-peer gate)
+#        ASK2 software and WGFP runs both require the exclusive wgfp_peer_lease reservation.
 #        WG_SKIP_SERVERS=1 leaves servers untouched; for run also set WG_EXTERNAL_IPERF=1.
 #        WG_IPERF_BASE selects the externally managed server ports (default 5240).
 #        WGFP_COUNTER_LOG=<path> records WGFP counters before and after each cell.
@@ -100,46 +101,47 @@ wg_bound_links_owned(){
 }
 
 teardown(){
-  local k result=0 expected=""
+  local k result=0
   if [ "$WG_LEASE_SKIP_SERVERS" != 1 ]; then
     for k in $(seq 0 $((WG_LEASE_COUNT-1))); do
       wg_resource_remove "server-$k" wg_server_stop "s$k" "$((WG_LEASE_IPERF_BASE+k))" || result=1
     done
   fi
   [ "$result" = 0 ] || return 1
-  for k in $(seq 0 $((WG_LEASE_COUNT-1))); do expected="${expected:+$expected }wgm$k"; done
-  wg_unbind_expected "$expected" || return 1
+  wg_prepare_binding_cleanup || return 1
   for k in $(seq 0 $((WG_LEASE_COUNT-1))); do
     wg_resource_remove "route-far-$k" wg_route far delete "$k" || result=1
     wg_resource_remove "route-plain-$k" wg_route plain delete "$k" || result=1
   done
   [ "$result" = 0 ] || return 1
   for k in $(seq 0 $((WG_LEASE_COUNT-1))); do
-    wg_dut_link delete "$k" || result=1
-    wg_far_link delete "$k" || result=1
+    wg_resource_remove "link-dut-$k" wg_dut_link delete "$k" || result=1
+    wg_resource_remove "link-far-$k" wg_far_link delete "$k" || result=1
   done
+  [ "$result" = 0 ] || return 1
   if [ "$DUT_KIND" = vendor ] && [ "$WG_LEASE_SKIP_FW4" != 1 ]; then
     dut "rules=\$(nft -a list chain inet fw4 forward) || exit 1
       printf '%s\\n' \"\$rules\" | awk -v tag='wgmrig-$WG_OWNER_TOKEN' '
         index(\$0, \"comment \\\"\" tag \"\\\"\") { for (i=1; i<NF; i++) if (\$i == \"handle\" && \$(i+1) ~ /^[0-9]+$/) print \$(i+1) }
       ' | while read -r h; do nft delete rule inet fw4 forward handle \"\$h\" || exit 1; done" || result=1
   fi
-  return "$result"
+  [ "$result" = 0 ] || return 1
+  wg_release_binding
 }
 
 setup(){
-  dut 'sudo modprobe wireguard 2>/dev/null; true'
-  local k s p k1 k2 p1 p2
+  [ "$DUT_KIND" = ask2 ] || dut 'sudo modprobe wireguard 2>/dev/null; true'
+  local k s p k1 k2 p1 p2 expected="" aliases=""
   for k in $(seq 0 $((TUNNELS-1))); do
     s=$(sub $k); p=$(wport $k)
     k1=$(dut 'wg genkey') || return 1
     p1=$(printf '%s\n' "$k1" | duti 'wg pubkey') || return 1
     k2=$($D2 'wg genkey') || return 1
     p2=$(printf '%s\n' "$k2" | $D2I 'wg pubkey') || return 1
-    wg_dut_link create "$k" || return 1
+    wg_resource_add "link-dut-$k" wg_dut_link create "$k" || return 1
     printf '%s\n' "$k1" | duti "sudo wg set wgm$k private-key /dev/stdin listen-port $p peer $p2 allowed-ips 10.99.$s.113/32 endpoint $D2_OUT:$p" || return 1
     dut "sudo ip addr add 10.99.$s.1/24 dev wgm$k && sudo ip link set wgm$k mtu $WGMTU up" || return 1
-    wg_far_link create "$k" || return 1
+    wg_resource_add "link-far-$k" wg_far_link create "$k" || return 1
     printf '%s\n' "$k2" | $D2I "$NSX wg set wgm$k private-key /dev/stdin listen-port $p peer $p1 allowed-ips 10.99.$s.1/32,10.99.1.0/24 endpoint $DUT_OUT:$p" || return 1
     $D2 "$NSX ip addr add 10.99.$s.113/24 dev wgm$k && $NSX ip link set wgm$k mtu $WGMTU up" || return 1
     wg_resource_add "route-far-$k" wg_route far add "$k" || return 1
@@ -152,18 +154,20 @@ setup(){
     if [ "${WG_SKIP_FW4:-0}" = 1 ]; then
       echo "Using the vendor's existing forwarding policy; no fw4 rules inserted" >&2
     else
-      dut "nft insert rule inet fw4 forward oifname 'wgm*' counter accept comment 'wgmrig-$WG_OWNER_TOKEN' && nft insert rule inet fw4 forward iifname 'wgm*' counter accept comment 'wgmrig-$WG_OWNER_TOKEN'" ||
-        { echo "Failed to insert vendor fw4 rules" >&2; return 1; }
+      for k in $(seq 0 $((TUNNELS-1))); do
+        dut "nft insert rule inet fw4 forward oifname 'wgm$k' counter accept comment 'wgmrig-$WG_OWNER_TOKEN' && nft insert rule inet fw4 forward iifname 'wgm$k' counter accept comment 'wgmrig-$WG_OWNER_TOKEN'" ||
+          { echo "Failed to insert vendor fw4 rules for wgm$k" >&2; return 1; }
+      done
     fi
   fi
   for k in $(seq 0 $((TUNNELS-1))); do $D1 "$NSX ping -c2 -W2 -I 10.99.1.112 10.99.$(sub $k).113 >/dev/null 2>&1"; done
   dut 'sudo wg show all latest-handshakes' | awk '{print "handshake "$1" "$3}'
   if [ "${WGFP:-0}" = 1 ]; then
-    wgfp_require_unbound || return 1
-    printf 'pending\n' > "$WG_LEASE_DIR/binding" || return 1
-    dut "echo '$(for k in $(seq 0 $((TUNNELS-1))); do printf 'wgm%s ' $k; done)' | sudo tee /sys/module/wireguard/parameters/wgfp_peer >/dev/null" ||
-      { echo "wgfp bind failed" >&2; return 1; }
-    printf 'created\n' > "$WG_LEASE_DIR/binding" || return 1
+    for k in $(seq 0 $((TUNNELS-1))); do
+      expected="${expected:+$expected }wgm$k"
+      aliases="${aliases:+$aliases }wgo-$WG_OWNER_TOKEN-d$k"
+    done
+    wg_activate_binding "$expected" "$aliases" || return 1
     echo "wgfp: $(dut "sudo cat /sys/module/wireguard/parameters/wgfp_peer")"
   fi
 }
@@ -210,14 +214,20 @@ wg_multi_cleanup(){
 }
 
 cmd=${1:-run}
+if [ "$cmd" != teardown ] && [ "${WGFP:-0}" = 1 ] && (( TUNNELS > 8 )); then
+  echo "WGFP supports at most 8 WireGuard devices" >&2
+  exit 2
+fi
 case $cmd in
   teardown) wg_lease_load && teardown && wg_lease_end || exit 4; echo "torn down"; exit 0;;
   setup)
+    [ "$DUT_KIND" != ask2 ] || dut 'sudo modprobe wireguard 2>/dev/null; true'
     wgfp_require_unbound || exit 4
     wg_lease_begin || exit 4
     trap wg_multi_cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    wg_reserve_binding || exit 4
     setup || exit 4
     trap - EXIT INT TERM
     exit 0;;
@@ -231,11 +241,13 @@ esac
 
 ENVTXT=$(dut 'echo "kernel: $(uname -r)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; echo "gov: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null) $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)"' 2>/dev/null); echo "$ENVTXT"
 if echo "$ENVTXT" | grep -q "lockdep: PRESENT"; then echo "REFUSING: lock debugging kernel" >&2; exit 5; fi
+[ "$DUT_KIND" != ask2 ] || dut 'sudo modprobe wireguard 2>/dev/null; true'
 wgfp_require_unbound || exit 4
 wg_lease_begin || exit 4
 trap wg_multi_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+wg_reserve_binding || exit 4
 setup || { echo "setup failed" >&2; exit 4; }
 WP=/sys/module/wireguard/parameters/wgfp_peer
 echo "ts,tunnels,active,dir,rep,gbps,retrans,dut_busy,hot_cpus,per_tunnel_gbps" > "$OUT"

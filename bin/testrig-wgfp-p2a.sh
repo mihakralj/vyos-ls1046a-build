@@ -17,13 +17,14 @@ PPS_LIST=${PPS_LIST:-"100000 200000 300000 400000 500000 0"}
 KEYHEX=${KEYHEX:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
 TBLS=${TBLS:-"0 2 3"}
 OUT=${OUT:-/mnt/builds/ask2-review/oracle/wgfp-p2a-$(date +%Y%m%d-%H%M).csv}
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 dut(){ ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185 "$1"; }
 D2="ssh -n $SSHO admin@192.168.1.113"
 DBG=/sys/kernel/debug/dpaa_wgfp; FE=/sys/kernel/debug/fman_pcd/0/fe_flow
 fail(){ echo "ABORT: $*" >&2; exit 1; }
 
+[ "${RECREATE:-0}" != 1 ] || fail "sink destruction is not safe; reboot before changing SINKS"
 dut "sudo test -d $DBG" || fail "no $DBG"
 dut 'sudo test -e /sys/module/wireguard/parameters/wgfp_lab || sudo modprobe wireguard; sudo test -e /sys/module/wireguard/parameters/wgfp_lab' || fail "wireguard module without the fast path hook (patch 4015)"
 dut 'zcat /proc/config.gz | grep -qE "^CONFIG_(PROVE_LOCKING|DEBUG_SPINLOCK)=y"' && fail "lock debugging kernel"
@@ -40,10 +41,9 @@ D2IF=$($D2 "ip -o addr show | awk '/10.99.2.113/ {print \$2}' | head -1")
 [ -n "$D2IF" ] || fail "dell2 interface for 10.99.2.113 not found"
 echo "dell2 interface: $D2IF"
 
-if [ "${RECREATE:-0}" = 1 ]; then dut "echo destroy | sudo tee $DBG/ctl >/dev/null"; fi
 if dut "sudo cat $DBG/stats" | grep -q "sinks=$SINKS"; then echo "reusing $SINKS sinks"
 else dut "echo 'create $SINKS' | sudo tee $DBG/ctl >/dev/null" || fail "sink create failed"; fi
-FQIDS=($(dut "sudo cat $DBG/stats" | sed -n 's/.*fqid=0x\([0-9a-f]*\).*/\1/p'))
+mapfile -t FQIDS < <(dut "sudo cat $DBG/stats" | sed -n 's/.*fqid=0x\([0-9a-f]*\).*/\1/p')
 [ ${#FQIDS[@]} -eq "$SINKS" ] || fail "expected $SINKS sinks, got ${#FQIDS[@]}"
 
 SIP=0a630170; DIP=0a630271; ZERO32=$(printf '00%.0s' $(seq 1 32))

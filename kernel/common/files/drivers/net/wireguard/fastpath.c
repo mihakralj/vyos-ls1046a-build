@@ -23,6 +23,7 @@
 #include <crypto/chacha20poly1305.h>
 #include <crypto/poly1305.h>
 #include <linux/atomic.h>
+#include <linux/bitops.h>
 #include <linux/etherdevice.h>
 #include <linux/fsl/dpaa_wgfp.h>
 #include <linux/hashtable.h>
@@ -35,6 +36,7 @@
 #include <linux/ipv6.h>
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
+#include <linux/rtnetlink.h>
 #include <linux/udp.h>
 #include <net/checksum.h>
 #include <net/ip.h>
@@ -79,6 +81,8 @@ static struct wgfp_lab wgfp_lab_state;
 static bool wgfp_lab_on;
 static DEFINE_MUTEX(wgfp_lab_lock);
 static char wgfp_lab_cfg[16] = "off";
+#define WGFP_OWNER_TOKEN_LEN	32
+static char wgfp_peer_owner[WGFP_OWNER_TOKEN_LEN + 1];
 struct wgfp_binds;
 static struct wgfp_binds __rcu *wgfp_bs;
 
@@ -221,6 +225,8 @@ static int wgfp_lab_cfg_set(const char *val, const struct kernel_param *kp)
 	if (!strcmp(buf, "off")) {
 		wgfp_lab_stop();
 		strscpy(wgfp_lab_cfg, "off", sizeof(wgfp_lab_cfg));
+	} else if (wgfp_peer_owner[0]) {
+		err = -EBUSY;
 	} else {
 		wgfp_lab_stop();
 		err = rcu_access_pointer(wgfp_bs) ? -EBUSY : wgfp_lab_start(buf);
@@ -278,9 +284,14 @@ MODULE_PARM_DESC(wgfp_lab, "DPAA fast path lab seal (P2a): see fastpath.c; \"off
  *
  * Writing a list replaces the bound set (a full teardown and rebuild: flows
  * relearn within a second; the VyOS CLI writes the whole list on commit).
+ * A wgfp_peer_lease reservation blocks other peer and lab writers.  A leased
+ * bind resolves owner-tagged link altnames; stop retains the reservation until
+ * the owner has removed its links and explicitly releases it.
  */
 
 #define WGFP_MAX_BIND	8
+#define WGFP_OWNER_ALIAS_MAX	63
+#define WGFP_OWNER_ALIASES_SIZE	(WGFP_MAX_BIND * (WGFP_OWNER_ALIAS_MAX + 1))
 
 struct wgfp_tmpl {
 	struct rcu_head rcu;
@@ -294,6 +305,7 @@ struct wgfp_tmpl {
 struct wgfp_binds {
 	unsigned int n;
 	struct net_device *wgdev[WGFP_MAX_BIND];	/* references */
+	unsigned long invalidated;
 };
 
 /* One peer with learned flows.  Created by the first flow, freed by the aging
@@ -319,6 +331,7 @@ static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 			     const struct dpaa_wgfp_tuple *t, bool *absent);
 
 static char wgfp_peer_cfg[WGFP_MAX_BIND * (IFNAMSIZ + 1) + 8] = "off";
+static char wgfp_owner_aliases[WGFP_OWNER_ALIASES_SIZE];
 static DEFINE_PER_CPU(atomic64_t, wgfp_sealed);
 static atomic64_t wgfp_declined, wgfp_rekeys, wgfp_punted;
 static DEFINE_PER_CPU(atomic64_t, wgfp_rx_frames);
@@ -1415,7 +1428,7 @@ static void wgfp_flows_flush(void)
  * runs under RTNL and the stop sleeps in the record API: defer it.
  */
 static void wgfp_peer_stop(void);
-static int wgfp_peer_start(char *names);
+static int wgfp_peer_start(char *names, bool distinct);
 
 static void wgfp_stop_work_fn(struct work_struct *w)
 {
@@ -1428,8 +1441,10 @@ static void wgfp_stop_work_fn(struct work_struct *w)
 	bs = rcu_dereference_protected(wgfp_bs, lockdep_is_held(&wgfp_lab_lock));
 	if (bs) {
 		for (i = 0; i < bs->n; i++) {
-			if (bs->wgdev[i]->reg_state != NETREG_REGISTERED) {
-				pr_info("fastpath: %s unregistered, unbinding it\n",
+			if (test_bit(i, &bs->invalidated) ||
+			    READ_ONCE(bs->wgdev[i]->reg_state) != NETREG_REGISTERED ||
+			    dev_net(bs->wgdev[i]) != &init_net) {
+				pr_info("fastpath: %s unregistered or moved, unbinding it\n",
 					bs->wgdev[i]->name);
 				gone = true;
 				continue;
@@ -1443,8 +1458,10 @@ static void wgfp_stop_work_fn(struct work_struct *w)
 
 		wgfp_peer_stop();
 		strscpy(wgfp_peer_cfg, "off", sizeof(wgfp_peer_cfg));
+		wgfp_owner_aliases[0] = '\0';
 		strscpy(copy, strim(names), sizeof(copy));
-		if (copy[0] && !wgfp_peer_start(names))	/* consumes names */
+		if (!wgfp_peer_owner[0] && copy[0] &&
+		    !wgfp_peer_start(names, false))	/* consumes names */
 			strscpy(wgfp_peer_cfg, copy, sizeof(wgfp_peer_cfg));
 	}
 	mutex_unlock(&wgfp_lab_lock);
@@ -1463,8 +1480,10 @@ static int wgfp_netdev_event(struct notifier_block *nb, unsigned long event,
 	rcu_read_lock();
 	bs = rcu_dereference(wgfp_bs);
 	for (i = 0; bs && i < bs->n; i++)
-		if (bs->wgdev[i] == dev)
+		if (bs->wgdev[i] == dev) {
+			set_bit(i, &bs->invalidated);
 			schedule_work(&wgfp_stop_work);
+		}
 	rcu_read_unlock();
 	return NOTIFY_DONE;
 }
@@ -1494,10 +1513,11 @@ static void wgfp_peer_stop(void)
 }
 
 /* @names: space-separated wg devices.  Called with wgfp_lab_lock held. */
-static int wgfp_peer_start(char *names)
+static int wgfp_peer_start(char *names, bool distinct)
 {
 	struct wgfp_binds *bs;
-	char *name;
+	char *name, *resolved_names[WGFP_MAX_BIND];
+	unsigned int i;
 	int err;
 
 	bs = kzalloc(sizeof(*bs), GFP_KERNEL);
@@ -1515,6 +1535,16 @@ static int wgfp_peer_start(char *names)
 		dev = dev_get_by_name(&init_net, name);
 		if (!dev)
 			goto err;
+		if (distinct) {
+			for (i = 0; i < bs->n; i++) {
+				if (bs->wgdev[i] == dev) {
+					dev_put(dev);
+					err = -EINVAL;
+					goto err;
+				}
+			}
+		}
+		resolved_names[bs->n] = name;
 		bs->wgdev[bs->n++] = dev;
 		err = -EINVAL;
 		if (!dev->rtnl_link_ops || strcmp(dev->rtnl_link_ops->kind, "wireguard"))
@@ -1526,15 +1556,30 @@ static int wgfp_peer_start(char *names)
 	err = dpaa_wgfp_register(&wgfp_peer_ops, NULL);
 	if (err)
 		goto err;
-	rcu_assign_pointer(wgfp_bs, bs);
 	err = register_netdevice_notifier(&wgfp_netdev_nb);
+	if (err)
+		goto err_consumer;
+	rtnl_lock();
+	for (i = 0; i < bs->n; i++) {
+		if (READ_ONCE(bs->wgdev[i]->reg_state) != NETREG_REGISTERED ||
+		    dev_net(bs->wgdev[i]) != &init_net ||
+		    __dev_get_by_name(&init_net, resolved_names[i]) != bs->wgdev[i]) {
+			err = -ENODEV;
+			break;
+		}
+	}
+	if (!err)
+		rcu_assign_pointer(wgfp_bs, bs);
+	rtnl_unlock();
 	if (err) {
-		wgfp_peer_stop();
-		return err;
+		unregister_netdevice_notifier(&wgfp_netdev_nb);
+		goto err_consumer;
 	}
 	schedule_delayed_work(&wgfp_age_work, WGFP_AGE_PERIOD);
 	pr_info("fastpath peer mode on: %u device(s)\n", bs->n);
 	return 0;
+err_consumer:
+	dpaa_wgfp_unregister();
 err:
 	while (bs->n)
 		dev_put(bs->wgdev[--bs->n]);
@@ -1551,6 +1596,10 @@ static int wgfp_peer_cfg_set(const char *val, const struct kernel_param *kp)
 	strim(buf);
 	strscpy(copy, buf, sizeof(copy));
 	mutex_lock(&wgfp_lab_lock);
+	if (wgfp_peer_owner[0]) {
+		err = -EBUSY;
+		goto out;
+	}
 	wgfp_peer_stop();
 	strscpy(wgfp_peer_cfg, "off", sizeof(wgfp_peer_cfg));
 	if (!strcmp(buf, "off") || !buf[0]) {
@@ -1558,13 +1607,185 @@ static int wgfp_peer_cfg_set(const char *val, const struct kernel_param *kp)
 	} else if (wgfp_lab_on) {
 		err = -EBUSY;
 	} else {
-		err = wgfp_peer_start(copy);
+		err = wgfp_peer_start(copy, false);
 		if (!err)
 			strscpy(wgfp_peer_cfg, buf, sizeof(wgfp_peer_cfg));
 	}
+out:
 	mutex_unlock(&wgfp_lab_lock);
 	return err;
 }
+
+static char *wgfp_next_arg(char **args)
+{
+	char *arg;
+
+	while ((arg = strsep(args, " \t\n")) && !*arg)
+		;
+	return arg;
+}
+
+static bool wgfp_owner_token_valid(const char *token)
+{
+	size_t i;
+
+	if (!token || strlen(token) != WGFP_OWNER_TOKEN_LEN)
+		return false;
+	for (i = 0; i < WGFP_OWNER_TOKEN_LEN; i++)
+		if (!((token[i] >= '0' && token[i] <= '9') ||
+		      (token[i] >= 'a' && token[i] <= 'f')))
+			return false;
+	return true;
+}
+
+static bool wgfp_owner_alias_valid(const char *alias, const char *token)
+{
+	const char *suffix;
+	size_t len = strlen(alias);
+
+	if (len <= WGFP_OWNER_TOKEN_LEN + 5 || len > WGFP_OWNER_ALIAS_MAX ||
+	    strncmp(alias, "wgo-", 4) ||
+	    strncmp(alias + 4, token, WGFP_OWNER_TOKEN_LEN) ||
+	    alias[WGFP_OWNER_TOKEN_LEN + 4] != '-')
+		return false;
+	for (suffix = alias + WGFP_OWNER_TOKEN_LEN + 5; *suffix; suffix++)
+		if (!((*suffix >= 'a' && *suffix <= 'z') ||
+		      (*suffix >= '0' && *suffix <= '9') ||
+		      *suffix == '-'))
+			return false;
+	return true;
+}
+
+static int wgfp_peer_lease_set(const char *val, const struct kernel_param *kp)
+{
+	char aliases[WGFP_OWNER_ALIASES_SIZE] = "";
+	char copy[WGFP_OWNER_ALIASES_SIZE];
+	char *items[WGFP_MAX_BIND], *input, *args, *action, *token, *arg;
+	struct wgfp_binds *bs;
+	unsigned int n = 0, i;
+	int err = 0;
+
+	input = kstrdup(val, GFP_KERNEL);
+	if (!input)
+		return -ENOMEM;
+	args = strim(input);
+	action = wgfp_next_arg(&args);
+	token = wgfp_next_arg(&args);
+	if (!action || !wgfp_owner_token_valid(token)) {
+		err = -EINVAL;
+		goto out_free;
+	}
+	if (!strcmp(action, "bind")) {
+		while ((arg = wgfp_next_arg(&args))) {
+			if (n == WGFP_MAX_BIND) {
+				err = -E2BIG;
+				goto out_free;
+			}
+			if (!wgfp_owner_alias_valid(arg, token)) {
+				err = -EINVAL;
+				goto out_free;
+			}
+			for (i = 0; i < n; i++)
+				if (!strcmp(items[i], arg)) {
+					err = -EINVAL;
+					goto out_free;
+				}
+			items[n++] = arg;
+			if ((n > 1 && strlcat(aliases, " ", sizeof(aliases)) >=
+				      sizeof(aliases)) ||
+			    strlcat(aliases, arg, sizeof(aliases)) >= sizeof(aliases)) {
+				err = -E2BIG;
+				goto out_free;
+			}
+		}
+		if (!n) {
+			err = -EINVAL;
+			goto out_free;
+		}
+	} else if ((strcmp(action, "reserve") && strcmp(action, "stop") &&
+		    strcmp(action, "release")) || wgfp_next_arg(&args)) {
+		err = -EINVAL;
+		goto out_free;
+	}
+
+	mutex_lock(&wgfp_lab_lock);
+	if (!strcmp(action, "reserve")) {
+		if (wgfp_peer_owner[0]) {
+			if (strcmp(wgfp_peer_owner, token))
+				err = -EBUSY;
+		} else if (rcu_access_pointer(wgfp_bs) || wgfp_lab_on) {
+			err = -EBUSY;
+		} else {
+			strscpy(wgfp_peer_owner, token, sizeof(wgfp_peer_owner));
+		}
+		goto out_unlock;
+	}
+	if (strcmp(wgfp_peer_owner, token)) {
+		err = -EPERM;
+		goto out_unlock;
+	}
+	if (!strcmp(action, "stop")) {
+		wgfp_peer_stop();
+		strscpy(wgfp_peer_cfg, "off", sizeof(wgfp_peer_cfg));
+		wgfp_owner_aliases[0] = '\0';
+	} else if (!strcmp(action, "release")) {
+		if (rcu_access_pointer(wgfp_bs)) {
+			err = -EBUSY;
+		} else {
+			wgfp_peer_owner[0] = '\0';
+			wgfp_owner_aliases[0] = '\0';
+		}
+	} else if (rcu_access_pointer(wgfp_bs)) {
+		if (strcmp(wgfp_owner_aliases, aliases))
+			err = -EBUSY;
+	} else if (wgfp_lab_on) {
+		err = -EBUSY;
+	} else {
+		strscpy(copy, aliases, sizeof(copy));
+		err = wgfp_peer_start(copy, true);
+		if (!err) {
+			bs = rcu_dereference_protected(wgfp_bs,
+						lockdep_is_held(&wgfp_lab_lock));
+			wgfp_peer_cfg[0] = '\0';
+			for (i = 0; i < bs->n; i++) {
+				if (i)
+					strlcat(wgfp_peer_cfg, " ",
+						sizeof(wgfp_peer_cfg));
+				strlcat(wgfp_peer_cfg, bs->wgdev[i]->name,
+					sizeof(wgfp_peer_cfg));
+			}
+			strscpy(wgfp_owner_aliases, aliases,
+				sizeof(wgfp_owner_aliases));
+		}
+	}
+out_unlock:
+	mutex_unlock(&wgfp_lab_lock);
+out_free:
+	kfree(input);
+	return err;
+}
+
+static int wgfp_peer_lease_get(char *buf, const struct kernel_param *kp)
+{
+	int len;
+
+	mutex_lock(&wgfp_lab_lock);
+	if (wgfp_peer_owner[0])
+		len = scnprintf(buf, PAGE_SIZE, "owned=%s dev=%s\n",
+				wgfp_peer_owner, wgfp_peer_cfg);
+	else
+		len = scnprintf(buf, PAGE_SIZE, "unowned\n");
+	mutex_unlock(&wgfp_lab_lock);
+	return len;
+}
+
+static const struct kernel_param_ops wgfp_peer_lease_ops = {
+	.set = wgfp_peer_lease_set,
+	.get = wgfp_peer_lease_get,
+};
+module_param_cb(wgfp_peer_lease, &wgfp_peer_lease_ops, NULL, 0600);
+MODULE_PARM_DESC(wgfp_peer_lease,
+		 "Atomic WGFP reservation: reserve, bind, stop or release with an owner token");
 
 static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 {
@@ -1602,9 +1823,9 @@ MODULE_PARM_DESC(wgfp_peer, "DPAA fast path for the peers of these wg devices: \
 
 void wg_fastpath_uninit(void)
 {
-	cancel_work_sync(&wgfp_stop_work);
 	mutex_lock(&wgfp_lab_lock);
 	wgfp_peer_stop();
 	wgfp_lab_stop();
 	mutex_unlock(&wgfp_lab_lock);
+	cancel_work_sync(&wgfp_stop_work);
 }
