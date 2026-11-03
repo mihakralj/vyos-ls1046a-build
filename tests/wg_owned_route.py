@@ -23,10 +23,10 @@ def namespace_available():
         pytest.skip(f"disposable network namespace unavailable: {probe.stderr.strip()}")
 
 
-def run_in_namespace(script):
+def run_in_namespace(script, env=None):
     return subprocess.run(
         ["unshare", "-Urn", "sh", "-eu", "-c", script, "_", str(ROUTE)],
-        text=True, capture_output=True, check=False, env=os.environ,
+        text=True, capture_output=True, check=False, env=env or os.environ,
     )
 
 
@@ -104,6 +104,27 @@ def test_failed_route_creation_does_not_add_rule():
         'if sh "$1" add far 18000 2000200 10.99.210.113 10.99.1.0/24 '
         'missing0 1420 11259375; then exit 1; fi; '
         '[ -z "$(ip rule show pref 18000)" ]'
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(("fail_command", "expect_rule"), [("route add", False), ("rule add", True)])
+def test_failed_netlink_operation_can_have_committed(tmp_path, fail_command, expect_rule):
+    ip = shutil.which("ip")
+    wrapper = tmp_path / "ip"
+    wrapper.write_text(
+        f'#!/bin/sh\nif [ "$2 $3" = "{fail_command}" ]; then "{ip}" "$@" || exit 1; exit 1; fi\n'
+        f'exec "{ip}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    env = os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    rule_check = '[ -n "$(ip rule show pref 18000)" ]' if expect_rule else '[ -z "$(ip rule show pref 18000)" ]'
+    result = run_in_namespace(
+        'ip link add test0 type dummy; ip link set test0 up; '
+        'if sh "$1" add far 18000 2000200 10.99.210.113 10.99.1.0/24 '
+        'test0 1420 11259375; then exit 1; else rc=$?; fi; '
+        '[ "$rc" -eq 1 ]; [ -n "$(ip route show table 2000200)" ]; ' + rule_check,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
 
