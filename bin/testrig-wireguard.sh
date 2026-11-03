@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # testrig-wireguard.sh — WireGuard throughput harness for the dell1 / DUT / dell2 10G rig.
 #
-# WireGuard is never offloaded by ASK2 or the vendor fast path (ChaCha20-Poly1305 runs in
-# software, NEON on the A72), so this measures the DUT's software crypto + forwarding cost.
-# The tunnel is terminated ON THE DUT; the far end is dell2:
+# ChaCha20-Poly1305 runs in software, using NEON on the A72. On ASK2, WGFP=1 can
+# accelerate eligible forwarding and outer receive paths. The tunnel terminates
+# on the DUT; the far end is dell2:
 #
 #   dell1 --plain--> DUT eth3 --route--> wg0 (encrypt) --UDP/51820--> DUT eth4 --> dell2 wg0 (decrypt)
 #
@@ -41,8 +41,11 @@
 #      DUT_KIND=ask2|vendor   (vendor = OpenWrt NXP ASK; RIG_NS=$VENDOR_NS is implied). Hosts and key: bin/testrig-env.sh
 #      WG_PORT=eth4|eth3 (the DUT port that carries the encrypted leg; default eth4)
 #      REPS (repeat each cell/direction, summary mean/min/max/sd), DUT, DIRS, DUR, STEADY_FROM, STREAMS, WGMTU, OUTER=4|6, MODE=tcp|udp, LEN, RATE, OUT, KEEP
-# The vendor DUT needs a WireGuard kernel module built for its exact kernel; the OpenWrt feed kmod does not match
-# the vendor kernel hash, so `check` reports that and `run` refuses until one is installed.
+#      WG_SKIP_SERVERS=1 leaves iperf servers untouched. For run, also set
+#      WG_EXTERNAL_IPERF=1 and provide the server on WG_IPERF_PORT (default 5231).
+#      WG_SKIP_FW4=1 leaves the vendor's existing forwarding policy unchanged;
+#      use it only when that policy already permits the test traffic.
+# The vendor DUT needs WireGuard tools and a kernel module matching its exact kernel ABI.
 set -u
 . "$(dirname "$0")/testrig-env.sh"
 DUT_KIND=${DUT_KIND:-ask2}
@@ -85,11 +88,17 @@ D1I=$(rig $DA);   D2I=$(rig $DB)
 DD1=$(rig gen1 -n); DD2=$(rig gen2 -n)   # literal gen1/gen2 (ceiling cell)
 DD1I=$(rig gen1);   DD2I=$(rig gen2)
 
-WGP=51820; WGPD=51821; IPERF_P=5231
+WGP=51820; WGPD=51821; IPERF_P=${WG_IPERF_PORT:-5231}
+if ! [[ $IPERF_P =~ ^[1-9][0-9]{0,4}$ ]] || (( IPERF_P > 65535 )); then
+  echo "WG_IPERF_PORT must be a port number from 1 to 65535" >&2; exit 2
+fi
+if [ "$IPERF_P" != 5231 ] && [ "${WG_SKIP_SERVERS:-0}" != 1 ]; then
+  echo "WG_IPERF_PORT requires WG_SKIP_SERVERS=1 and an externally managed server" >&2; exit 2
+fi
 if [ "$OUTER" = 6 ]; then DUT_OUT=$O_DUT6; D2_OUT=$O_T6; EP="[$D2_OUT]:$WGP"; else DUT_OUT=$O_DUT4; D2_OUT=$O_T4; EP="$D2_OUT:$WGP"; fi
 # the far dell reaches the DUT's outer address on the same /24 (or /64), so no extra routes are needed for the outer leg.
 
-STATE=/tmp/wg-rig.state; touch $STATE 2>/dev/null
+STATE=${WG_STATE_PATH:-/tmp/wg-rig.state}; touch "$STATE" 2>/dev/null
 
 # name|inner client addr (plain-leg dell)|inner server addr (far wg0 end)|family|wg
 CELLS_ALL="
@@ -135,7 +144,12 @@ wg_dut_up(){
   # OpenWrt fw4: wg0 belongs to no zone, so forwarded traffic to/from it falls through to handle_reject.
   # Runtime-only accept rules (comment wgrig), removed again in teardown.
   if [ "$DUT_KIND" = vendor ]; then
-    dut 'nft insert rule inet fw4 forward oifname "wg0" counter accept comment "wgrig"; nft insert rule inet fw4 forward iifname "wg0" counter accept comment "wgrig"'
+    if [ "${WG_SKIP_FW4:-0}" = 1 ]; then
+      echo "Using the vendor's existing forwarding policy; no fw4 rules inserted" >&2
+    else
+      dut 'nft insert rule inet fw4 forward oifname "wg0" counter accept comment "wgrig" && nft insert rule inet fw4 forward iifname "wg0" counter accept comment "wgrig"' ||
+        { echo "Failed to insert vendor fw4 rules" >&2; return 1; }
+    fi
   fi
   # Optional experiment: keep the OUTER tunnel UDP out of conntrack (WG_NOTRACK=1). The serial wg tx worker
   # pays for netfilter hooks on every outer packet; this measures how much of the ceiling that is.
@@ -145,7 +159,7 @@ wg_dut_up(){
   if [ "${WG_NOTRACK:-0}" = 2 ]; then
     dut "sudo nft add table inet wgnt; sudo nft 'add chain inet wgnt pre { type filter hook prerouting priority -300 ; }'; sudo nft 'add chain inet wgnt out { type filter hook output priority -300 ; }'; sudo nft add rule inet wgnt pre notrack; sudo nft add rule inet wgnt out notrack"
   fi
-  echo dut >> $STATE
+  echo dut >> "$STATE"
   # WGFP=1: bind the DPAA WireGuard fast path to the new wg0 (fast-path matrix column)
   if [ "${WGFP:-0}" = 1 ]; then dut "echo wg0 | sudo tee /sys/module/wireguard/parameters/wgfp_peer >/dev/null" || return 1; fi
 }
@@ -158,7 +172,7 @@ wg_direct_up(){   # dell1 <-> dell2 over enp2s0 (no DUT); root namespaces
   printf '%s\n' "$k2" | $DD2I 'umask 077; cat > /tmp/wgk'
   $DD1 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p2 allowed-ips 10.99.201.113/32 endpoint 10.99.99.113:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.112/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
   $DD2 "sudo ip link del wgd 2>/dev/null; sudo ip link add wgd type wireguard && sudo wg set wgd private-key /tmp/wgk listen-port $WGPD peer $p1 allowed-ips 10.99.201.112/32 endpoint 10.99.99.112:$WGPD && rm -f /tmp/wgk && sudo ip addr add 10.99.201.113/24 dev wgd && sudo ip link set wgd mtu $WGMTU up"
-  echo direct >> $STATE
+  echo direct >> "$STATE"
 }
 
 # WireGuard queues a peer's serial tx worker on CPU (peer->internal_id % online_cpus); internal_id is a global
@@ -185,17 +199,21 @@ place_serial_cpu(){
 }
 
 servers_up(){
+  [ "${WG_SKIP_SERVERS:-0}" != 1 ] || return 0
   $D2 "sudo test -f /tmp/wg-iperf.pid && sudo kill \$(cat /tmp/wg-iperf.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf.pid
        $NSX iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf.pid" ; }
 servers_down(){ $D2 "[ -f /tmp/wg-iperf.pid ] && sudo kill \$(cat /tmp/wg-iperf.pid) 2>/dev/null; sudo rm -f /tmp/wg-iperf.pid; true"; }
 
 teardown(){
-  servers_down 2>/dev/null
-  dut 'sudo nft delete table inet wgnt 2>/dev/null; sudo ip link del wg0 2>/dev/null; rm -f /tmp/wgk; for h in $(nft -a list chain inet fw4 forward 2>/dev/null | sed -n "s/.*wgrig.*# handle \([0-9]*\)/\1/p"); do nft delete rule inet fw4 forward handle $h; done; true' 2>/dev/null
+  [ "${WG_SKIP_SERVERS:-0}" = 1 ] || servers_down 2>/dev/null
+  dut 'sudo nft delete table inet wgnt 2>/dev/null; sudo ip link del wg0 2>/dev/null; rm -f /tmp/wgk; true' 2>/dev/null
+  if [ "${WG_SKIP_FW4:-0}" != 1 ]; then
+    dut 'for h in $(nft -a list chain inet fw4 forward 2>/dev/null | sed -n "s/.*wgrig.*# handle \([0-9]*\)/\1/p"); do nft delete rule inet fw4 forward handle $h; done; true' 2>/dev/null
+  fi
   $D2 "$NSX ip link del wg0 2>/dev/null; $NSX ip rule del priority 12100 2>/dev/null; $NSX ip -6 rule del priority 12100 2>/dev/null;
        $NSX ip route flush table 200 2>/dev/null; $NSX ip -6 route flush table 200 2>/dev/null; sudo ip link del wgd 2>/dev/null; rm -f /tmp/wgk; true" 2>/dev/null
   $D1 "$NSX ip route del 10.99.200.0/24 2>/dev/null; $NSX ip -6 route del fd99:200::/64 2>/dev/null; sudo ip link del wgd 2>/dev/null; rm -f /tmp/wgk; true" 2>/dev/null
-  : > $STATE
+  : > "$STATE"
 }
 
 preflight(){
@@ -203,7 +221,7 @@ preflight(){
   out=$(dut 'sudo modprobe wireguard 2>/dev/null; sudo ip link add wgchk type wireguard 2>&1; sudo ip link del wgchk 2>/dev/null; which wg >/dev/null 2>&1 || echo NOWG')
   if [ -n "$out" ]; then
     echo "DUT $DUT ($DUT_KIND): no WireGuard: $out" >&2
-    [ "$DUT_KIND" = vendor ] && echo "  vendor DUT: the OpenWrt feed kmod-wireguard targets kernel hash b33bbf..., the vendor kernel is a2a056...; apk refuses it. Build wireguard.ko against the vendor tree." >&2
+    [ "$DUT_KIND" = vendor ] && echo "  Install WireGuard tools and a kmod matching the running kernel; do not force an ABI mismatch." >&2
     return 1
   fi
   $D1 'which wg iperf3 >/dev/null' && $D2 'which wg iperf3 >/dev/null' || { echo "dells need wireguard-tools + iperf3" >&2; return 1; }
@@ -211,21 +229,23 @@ preflight(){
 
 # ---------- measurement ----------
 parse(){ python3 - "$1" "$STEADY_FROM" "$MODE" <<'PY'
-import json,sys
+import json,math,sys
 try: j=json.load(open(sys.argv[1]))
 except Exception: print("0 0 0"); sys.exit()
+if j.get('error'): print("0 0 0"); sys.exit()
 f=float(sys.argv[2]); udp=sys.argv[3]=="udp"
 def sel(key):
     return [i[key] for i in j.get('intervals',[]) if key in i and i[key]['start']>=f-0.01 and not i[key].get('omitted')]
 a=sel('sum'); b=sel('sum_bidir_reverse')
 def mean(iv): return sum(x['bits_per_second'] for x in iv)/len(iv)/1e9 if iv else 0
 g=mean(a)+mean(b)
+if not math.isfinite(g) or g < 0: print("0 0 0"); sys.exit()
 e=j.get('end',{}); c=e.get('cpu_utilization_percent',{})
 if udp:
     s=e.get('sum',{}); x=s.get('lost_percent',0)
 else:
     x=e.get('sum_sent',{}).get('retransmits') or sum(i['sum'].get('retransmits',0) for i in j.get('intervals',[]))
-print(f"{g:.3f} {c.get('host_total',0):.0f} {x}")
+print(f"{g:.9f} {c.get('host_total',0):.0f} {x}")
 PY
 }
 
@@ -254,12 +274,15 @@ run_cell(){
   name=$name$PORTSUF   # the encrypted-leg port is part of the cell identity (CSV, JSON file names)
   local NSC="$NSX"; [ "$kind" = direct ] && NSC="sudo"   # direct pair uses root namespaces
   if ! $D1 "$NSC ping -c3 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
-    printf '%-12s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,-,0,0,0,0,0,0,0,0,SKIP,-" >> "$OUT"; return
+    printf '%-12s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,-,0,0,0,0,0,0,0,0,SKIP,-" >> "$OUT"
+    if [ "${WG_SKIP_SERVERS:-0}" = 1 ]; then return 1; else return 0; fi
   fi
   for dir in $DIRS; do
    for rep in $(seq 1 $REPS); do
     if [ "${RECREATE:-0}" = 1 ] && [ "$kind" = dut ]; then   # new wg0 = new peer id = new serial tx worker CPU (id % ncpu)
-      teardown; wg_dut_up; servers_up; $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
+      teardown
+      wg_dut_up || { echo "DUT tunnel recreation failed" >&2; teardown; return 1; }
+      servers_up; $D1 "$NSX ping -c3 -W2 -I $P4 $TI4 >/dev/null 2>&1"
     fi
     case $dir in up) flag="";; down) flag="-R";; bidir) flag="--bidir";; esac
     win=$((DUR-STEADY_FROM-2)); tag="$name-$dir-r$rep"
@@ -267,15 +290,15 @@ run_cell(){
     # server is in RIG_NS on dell2 for DUT cells; the ceiling cell has its own root-ns server
     if [ "$kind" = direct ]; then $D2 "sudo test -f /tmp/wg-iperf-d.pid && sudo kill \$(cat /tmp/wg-iperf-d.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf-d.pid; iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf-d.pid"; fi
     for attempt in 1 2 3; do
-    dut_stat=/tmp/wg-dut.stat
+    dut_stat=${WG_DUT_STAT:-/tmp/wg-dut.stat}
     if [ "$DUT_KIND" = vendor ]; then
-      ssh $SSHO $DUT sh -s -- $STEADY_FROM $win > $dut_stat <<'EOS' &
+      ssh $SSHO $DUT sh -s -- $STEADY_FROM $win > "$dut_stat" <<'EOS' &
 sf=$1; w=$2
 snap(){ grep '^cpu' /proc/stat; for i in eth3 eth4; do echo "N $i $(cat /sys/class/net/$i/statistics/rx_packets)"; done; echo --; }
 sleep $sf; snap; sleep $w; snap
 EOS
     else
-      ssh $SSHO $DUT bash -s -- $STEADY_FROM $win > $dut_stat <<'EOS' &
+      ssh $SSHO $DUT bash -s -- $STEADY_FROM $win > "$dut_stat" <<'EOS' &
 sf=$1; w=$2
 snap(){ grep '^cpu' /proc/stat; for i in eth3 eth4; do echo "N $i $(cat /sys/class/net/$i/statistics/rx_packets)"; done
         sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats 2>/dev/null | sed -n 's/.*record_dma=\(0x[0-9a-f]*\).*pkt_count=\([0-9]*\).*/E \1 \2/p'; echo --; }
@@ -285,13 +308,25 @@ EOS
     sp=$!
     pp=""; if [ "${PROF:-0}" = 1 ]; then dut_prof $STEADY_FROM $win > "$J/$tag.prof" & pp=$!; fi
     $D1 "$NSC iperf3 -c $b -B $a -p $IPERF_P -P $STREAMS -t $DUR -i 1 -Z -J $flag $udp" > "$J/$tag.json" &
-    wait $!; wait $sp; [ -n "$pp" ] && wait $pp; sleep 1
+    client_status=0; wait $! || client_status=$?
+    stat_status=0; wait $sp || stat_status=$?
+    [ -n "$pp" ] && wait $pp; sleep 1
+    if [ "${WG_SKIP_SERVERS:-0}" = 1 ] && [ "$stat_status" -ne 0 ]; then
+      echo "ERROR: DUT statistics sampling failed" >&2; return 1
+    fi
     read gbps gen xr < <(parse "$J/$tag.json")
-    read busy sirq mx rx3 rx4 mc < <(cpu_stats $dut_stat)
-    hw=$(hits_sum $dut_stat)
-    if awk -v g="$gbps" 'BEGIN{exit !(g>0.05)}'; then break; fi
-    echo "  (rep $rep produced no traffic, attempt $attempt; restarting the iperf3 server and retrying)" >&2
-    if [ "$kind" = direct ]; then $D2 "sudo test -f /tmp/wg-iperf-d.pid && sudo kill \$(cat /tmp/wg-iperf-d.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf-d.pid; iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf-d.pid"; else servers_up; fi
+    read busy sirq mx rx3 rx4 mc < <(cpu_stats "$dut_stat")
+    hw=$(hits_sum "$dut_stat")
+    if [ "$client_status" -eq 0 ] && awk -v g="$gbps" 'BEGIN{exit !(g>0)}'; then break; fi
+    if [ "${WG_SKIP_SERVERS:-0}" = 1 ]; then
+      if [ "$attempt" -eq 3 ]; then
+        echo "ERROR: external iperf produced no traffic or failed after $attempt attempts" >&2; return 1
+      fi
+      echo "  (rep $rep produced no traffic, attempt $attempt; retrying with the external iperf server)" >&2
+    else
+      echo "  (rep $rep produced no traffic, attempt $attempt; restarting the iperf3 server and retrying)" >&2
+      if [ "$kind" = direct ]; then $D2 "sudo test -f /tmp/wg-iperf-d.pid && sudo kill \$(cat /tmp/wg-iperf-d.pid) 2>/dev/null; sleep 0.3; sudo rm -f /tmp/wg-iperf-d.pid; iperf3 -s -p $IPERF_P -D -I /tmp/wg-iperf-d.pid"; else servers_up; fi
+    fi
     sleep 5
     done
     # pps on the DUT's wire = rx packets on eth3+eth4 over the window
@@ -311,7 +346,14 @@ case $cmd in
   setup|run) : ;;
   *) echo "usage: $0 [setup|teardown|check|run] [cell...]" >&2; exit 2;;
 esac
+[ "${WG_SKIP_SERVERS:-0}" != 1 ] || [ "$cmd" != run ] || [ "${WG_EXTERNAL_IPERF:-0}" = 1 ] ||
+  { echo "WG_SKIP_SERVERS=1 with run requires WG_EXTERNAL_IPERF=1" >&2; exit 2; }
+[ "${WG_SKIP_SERVERS:-0}" != 1 ] || [ -z "${WG_SERIAL_CPU:-}" ] ||
+  { echo "WG_SERIAL_CPU requires the iperf server" >&2; exit 2; }
 WANT="$*"; [ -z "$WANT" ] && WANT="wg-v4 wg-v6"
+if [ "${WG_SKIP_SERVERS:-0}" = 1 ] && [[ " $WANT " == *" ceiling-v4 "* ]]; then
+  echo "WG_SKIP_SERVERS=1 does not support the ceiling-v4 cell" >&2; exit 2
+fi
 preflight || exit 3
 envrec(){
   dut 'echo "kernel: $(uname -r) $(uname -v | cut -c1-60)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; \
@@ -328,9 +370,9 @@ teardown
 needdut=0; needdirect=0
 for c in $WANT; do case $c in wg-*) needdut=1;; ceiling-*) needdirect=1;; esac; done
 if [ $needdirect = 1 ] && [ "$WG_PORT" != eth4 ]; then echo "the ceiling cell is bound to the dell1/dell2 pair; run it without WG_PORT" >&2; exit 2; fi
-[ $needdut = 1 ] && { wg_dut_up || { echo "DUT tunnel setup failed" >&2; exit 4; }; }
+[ $needdut = 1 ] && { wg_dut_up || { echo "DUT tunnel setup failed" >&2; teardown; exit 4; }; }
 [ $needdirect = 1 ] && wg_direct_up
-servers_up
+[ "${WG_SKIP_SERVERS:-0}" = 1 ] || servers_up
 [ -n "${WG_SERIAL_CPU:-}" ] && [ $needdut = 1 ] && { place_serial_cpu "$WG_SERIAL_CPU" || exit 6; }
 [ "$cmd" = setup ] && { echo "tunnel up; run cells with: $0 run <cell...>"; trap - EXIT; exit 0; }
 if [ $needdut = 1 ]; then   # prime the handshake and prove the path before measuring
@@ -342,11 +384,11 @@ echo "DUT=$DUT kind=$DUT_KIND mode=$MODE streams=$STREAMS dur=$DUR mtu=$WGMTU ou
 for line in $CELLS_ALL; do
   IFS='|' read -r name a b fam kind <<<"$line"
   [[ " $WANT " == *" $name "* ]] || continue
-  run_cell "$name" "$a" "$b" "$fam" "$kind"
+  run_cell "$name" "$a" "$b" "$fam" "$kind" || exit 4
 done
 python3 - "$OUT" <<'PY'
 import csv,sys,statistics as st,collections
-rows=[r for r in csv.DictReader(open(sys.argv[1])) if r['dir']!='-' and float(r['gbps'])>0.05]   # zero-traffic reps are failures, never averaged
+rows=[r for r in csv.DictReader(open(sys.argv[1])) if r['dir']!='-' and float(r['gbps'])>0]   # zero-traffic reps are failures, never averaged
 g=collections.OrderedDict()
 for r in rows: g.setdefault((r['cell'],r['dir']),[]).append(r)
 print("\nSUMMARY (steady-window Gbit/s over reps)")
