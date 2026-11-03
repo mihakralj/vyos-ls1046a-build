@@ -17,16 +17,18 @@ WireGuard is not a vendor-parity item: neither the vendor ASK nor ASK2 hardware-
 | Fast path TX, P2b-1 (patch 4017, `wgfp_peer`) | Gate G2 PASS on image 0347: 2.62 Gbit/s on 4 flows, survives the 120 s rekey, no Invalid MAC. Superseded by P2b-2/P2b-3. |
 | Fast path TX, P2b-2 automatic flow install (patch 4018) | Gate PASS 2026-11-02 (image `2026.11.02-1519-rolling`): 2.94 / 3.12 Gbit/s on 4 flows, no hand steering. |
 | Fast path TX, P2b-3 punt, roaming, AllowedIPs, wg0 delete | Gate PASS 2026-11-02 (image `2026.11.02-1632-rolling`): every test plus upstream `netns.sh` (553 steps). |
-| Fast path TX, P2c multi-peer, CLI, sink tail drop (closing step A) | Implemented 2026-11-02, compiled and linked locally; not yet built in CI or board-tested. |
-| Fast path RX (P3), offline-port reinjection (P4), order restoration (P5) | Not started. |
+| Fast path TX, P2c multi-peer, CLI, sink tail drop (closing step A) | Multi-tunnel TX measured on images 1818 and 2011. The CLI and overload gates remain open. |
+| Fast path RX (P3) | Active in image 2011, but G3 has not passed. Exact-tuple firewall provenance and ingress identity are unresolved; local RX fixes need a new image. |
+| TX backpressure and telemetry | A local WGFP-only QMan full-ring and asynchronous-rejection path plus per-CPU hot counters are not yet in an image. Hardware rejection and throughput gains remain unverified. |
+| Offline-port reinjection (P4), per-flow order restoration (P5) | Not implemented. |
 
-## 2. Architecture (unchanged, kept for the remaining phases)
+## 2. Architecture
 
 ```mermaid
 flowchart LR
-    subgraph TX["TX: plaintext into the tunnel (P2b-1 done, P2b-2/3 open)"]
-        A["LAN frame<br/>eth3 RX"] --> B["FMan parser + KeyGen<br/>46B inner 5-tuple"]
-        B -->|"ehash HIT<br/>record = ENQ to peer FQ k"| C["QMan FQ k"]
+    subgraph TX["TX: plaintext into the tunnel"]
+        A["LAN frame<br/>eth3 RX"] --> B["FMan parser + KeyGen<br/>50B routed-flow key"]
+        B -->|"ehash HIT<br/>record = ENQ to sink k"| C["QMan sink FQ k"]
         B -->|"MISS"| S["normal stack<br/>wg_xmit (learns the flow)"]
         C --> D["CPU worker<br/>in-place ChaCha20-Poly1305<br/>prepend Eth+IP+UDP+WG header"]
         D --> E["eth4 no-confirm TX FQ"]
@@ -35,23 +37,24 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph RX["RX: tunnel to plaintext (P3/P4 open)"]
+    subgraph RX["RX: current P3 and proposed P4"]
         A2["outer UDP frame<br/>eth4 RX"] --> B2["FMan KeyGen<br/>outer UDP 5-tuple"]
         B2 -->|"ehash HIT"| C2["QMan RX FQ"]
-        B2 -->|"MISS / handshake"| S2["normal stack"]
-        C2 --> D2["CPU worker<br/>type, keypair, replay check,<br/>in-place decrypt"]
-        D2 -->|"P3"| E2["build_skb + netif_receive_skb(wg0)"]
-        D2 -->|"P4"| F2["offline-port input FQ<br/>FMan forwards inner packet"]
+        B2 -->|"MISS"| S2["normal IP and UDP stack"]
+        C2 --> D2["copy to skb; validate outer packet<br/>wg_packet_receive"]
+        D2 --> E2["upstream decrypt workers<br/>replay and AllowedIPs checks"]
+        E2 --> G2["wg0 NAPI/GRO<br/>Linux forwarding stack"]
+        E2 -. "P4 proposal" .-> F2["offline-port input FQ<br/>FMan forwards inner packet"]
     end
 ```
 
-The design rules still apply:
+The local UDP-checksum and buffer-lifetime fixes shown in the P3 receive path are not yet in image 2011. The design rules still apply:
 
-- The per-peer fast-path state lives inside the `wireguard` module, and `ask.ko` supplies only record insert/delete and FQ ids.
-- Records are installed by the slow path, so a MISS stays safe.
-- Each peer gets N FQs (start at 4) with flows assigned round-robin, which keeps per-flow order through QMan.
-- Frames are processed in place on the BMan buffer.
-- Any unexpected state punts to the stack.
+- The per-peer fast-path state lives inside the `wireguard` module; `dpaa_wgfp` supplies the sink FQs and record operations. The relevant ingress port must already have an armed PCD table.
+- Records are installed by the slow path; a MISS uses the normal stack. Failed record deletion and admission provenance still need the handling described below.
+- Distinct TX flows are assigned round-robin to shared sink FQs, preserving each flow's sink order; a peer's outer RX flow currently uses one sink.
+- TX seals in place in the BMan buffer; P3 RX currently copies to an skb.
+- Known TX declines and invalid P3 headers are punted; an unparseable or unmatched sink frame is dropped.
 
 ## 3. Remaining phases, gates and kill criteria
 
@@ -85,7 +88,7 @@ All of it is in `fastpath.c`; no DPAA or `ask.ko` change.
 - **Roaming:** each frame compares the template's outer destination with `peer->endpoint.addr4` unlocked (the same unlocked test `wg_socket_set_peer_endpoint()` uses). A mismatch punts and runs the template refresh at once (`mod_delayed_work`). A refresh that finds no IPv4 endpoint, no route via the egress port or no valid neighbour now clears the template, so frames punt instead of leaving with stale headers.
 - **AllowedIPs:** the 2 s aging pass looks up each installed record's inner destination with `wg_allowedips_lookup_dst()` (an skb holding one IPv4 header as the probe) and withdraws records that no longer map to the bound peer.
 - **Re-learning without a ct:** `wgfp_ct_admitted()` takes the conntrack proof from the skb when present, else looks the entry up by tuple (`nf_conntrack_find_get`, default zone) and requires `IPS_SEEN_REPLY`, no NAT, no master, no helper. This fixes two board-observed gaps. A UDP flow was never learned, because the flowtable takes it on the first reply, so every later packet from the plain side arrives without a ct (`[HW_OFFLOAD]` in conntrack, `flows=0` after 1500 packets). And a withdrawn flow could never come back.
-- **wg0 or egress deletion:** a netdevice notifier (registered while peer mode is on) schedules a stop on `NETDEV_UNREGISTER` of either device, so `ip link del wg0` no longer waits on the references peer mode holds.
+- **wg0 deletion:** a netdevice notifier schedules a stop on `NETDEV_UNREGISTER` of a bound WireGuard device, so `ip link del wg0` no longer waits on the references peer mode holds. The notifier does not cover physical egress removal.
 
 Harness: `bin/testrig-wgfp-p2b3.sh [rekey rekey120 roam aip pmtu del netns]`, `STOCK=1` for the stock reference. Baseline on `.185` (image `2026.11.02-1519-rolling`, P2b-2 code), one TCP flow ~1.3 Gbit/s, dell2 with `persistent-keepalive 1`:
 
@@ -112,7 +115,7 @@ Harness: `bin/testrig-wgfp-p2b3.sh [rekey rekey120 roam aip pmtu del netns]`, `S
 
 **Gate:** 2T and 4T `up` are at least the software lanes=3 results (1.72 and 1.91 Gbit/s), with no cross-peer seal.
 
-### Closing step A implementation (2026-11-02, compiled and linked, not yet built in CI or board-tested)
+### Closing step A implementation (2026-11-02; deployed on 1818 and 2011)
 
 **Multi-peer and multi-device (P2c).** `wgfp_peer` takes a list of wg devices (`echo "wg0 wg1" > /sys/module/wireguard/parameters/wgfp_peer`; `off` unbinds). Writing a list rebinds the whole set (full teardown and rebuild; flows relearn within a second). Every peer of a bound device is eligible. Per-peer state (`struct wgfp_pst`: peer reference, template, timer pacing) is created by the peer's first learned flow and freed by the aging pass once it has none. The sink path finds the flow lock-free (RCU hash; entries unhashed with `hash_del_rcu()` and freed with `kfree_rcu()`) and the peer through it, so the four sinks stay shared and no per-peer FQs are needed. The egress port now comes from each peer's own route: `dpaa_wgfp_egress(dev)` returns a handle to a no-confirm TX FQ allocated once per DPAA port (each `dpaa_alloc_offload_tx_fq()` call creates a new FQ, so it must not be called per refresh), and `dpaa_wgfp_xmit()` takes it. A peer whose route leaves through a non-DPAA port gets no template and stays on the stack. The read-out adds `peers` and `dev`. Up to 8 devices.
 
@@ -122,7 +125,31 @@ Harness: `bin/testrig-wgfp-p2b3.sh [rekey rekey120 roam aip pmtu del netns]`, `S
 
 **vyos-1x pinned.** Writing 059 showed that patches 027 (FMan DT port order) and 047 no longer apply to upstream `rolling`. Upstream T3871 (`c73faac7f`, 2026-10-31) removed the `vyos_net_name` udev helper in favour of a slot-anchored naming store. The CI cache key held the literal word `rolling`, and every shipping image so far used a deb cached from upstream `91bf0ef51` (2026-10-30), so the drift stayed hidden. Any patch change would have forced a fresh build against `rolling` and failed. `bin/ci-setup-vyos1x.sh` now pins `VYOS1X_COMMIT=91bf0ef51026b82f5714c809d6d651a8b9c7aacb`; on that commit all 45 patches apply. `patch-rot-check.yml` gates on the pin and probes `rolling` as advisory; the probe now also copies `data/vyos-1x-files` first, as the build does. On `rolling`, 027 and 031 fail today. Moving the pin requires porting 027/047 to the T3871 store, verified on the board (eth0 must remain the management port).
 
-**Sink tail drop (A3).** The sink FQs had no tail drop. Baseline 2026-11-02 (image `2026.11.02-1632-rolling`): during an unpaced P2a run (sinks saturated), an unrelated forwarded ping from dell1 through the same ingress port lost 34% (plus 10 errors), because the sink backlog drained eth3's buffer pool. `dpaa_wgfp.c` now sets FQ-local tail drop (`QM_FQCTRL_TDE`, 512 KiB per sink, about 350 MTU frames, so four sinks stay inside the ~2,270-buffer pool). FQ-local tail drop is the mechanism F-199 proved works for FE-fed FQs; the CGR path does not see FE enqueues. Harness: `bin/testrig-wgfp-soak.sh overload` (gate: side-flow loss ≤ 1%, eth3 `bpool` recovers) and `bin/testrig-wgfp-soak.sh soak` (10 min, 4 flows; gate: eth3/eth4 `bpool` back within 64, `xmit_fail` 0, no kernel errors, `fe_flow` empty, `pcd-snapshot diff` clean).
+**Sink tail drop (A3).** The sink FQs had no tail drop. Baseline 2026-11-02 (image `2026.11.02-1632-rolling`): during an unpaced P2a run, an unrelated forwarded ping from dell1 through the same ingress port lost 34% (plus 10 errors). Exhaustion by sink backlog was suspected, but the historical software pool accounting and unvalidated sink counts do not establish that cause. `dpaa_wgfp.c` now sets FQ-local tail drop (`QM_FQCTRL_TDE`, 512 KiB per sink, nominally about 350 MTU frames); whether this bounds real buffer use and protects side traffic still needs the overload gate. FQ-local tail drop is the mechanism F-199 proved works for FE-fed FQs; the CGR path does not see FE enqueues. Harness: `bin/testrig-wgfp-soak.sh overload` (gate: side-flow loss ≤ 1%, balanced eth3 pool) and `bin/testrig-wgfp-soak.sh soak` (10 min, 4 flows; gate: balanced eth3/eth4 pools, `xmit_fail` 0, no kernel errors, `fe_flow` empty, `pcd-snapshot diff` clean).
+
+**Pool-gate correction (2026-11-02).** The completed 1818 soak reported no transmit failures and zero sink queue counts, with empty flow tables and a clean PCD snapshot, but its pool-health and sink-emptiness gates are unverified. `ethtool`'s `bpool [TOTAL]` is software per-CPU accounting, not the number of free BMan buffers. The harness now reads the hardware pool-content register for each interface's BPID with `bin/bman-pool-count.py`. The 1818 pre-soak hardware baseline was not recorded, so it cannot retroactively establish that gate.
+
+A 20-second smoke on image 2011 showed why comparing the hardware free count directly to its starting value is also insufficient: eth3 fell from 1782 to 1558, while its software-accounted supply fell by exactly the same 224 buffers. The DPAA driver refills each CPU's allocation only below its 80-buffer threshold, so ordinary software RX can lower the hardware count without a fast-path leak. At idle, the revised gate compares the change in hardware free buffers with the change in software-accounted supply, allowing a 64-buffer tolerance and rejecting changed BPIDs or missing readings. This detects a growing unexplained discrepancy; it does not prove that every possible memory leak is absent or capture transient depletion between samples. The smoke passed the pool-drift check with 3.275 Gbit/s, no reported transmit failures, no remaining flows, and a clean PCD snapshot; sink emptiness is unverified. The soak runner uses owned process IDs and non-destructive kernel logs; the overload runner's generator still needs safe process control before it can be run.
+
+The pool reader now uses an aligned native 32-bit MMIO load followed by big-endian conversion, avoiding a byte-copy from the register mapping. A further isolated 20-second smoke on image 2011 measured 3.909 Gbit/s, with pool/accounting changes matching, no reported TX failures, zero reported sink counts, an empty flow table, and a clean PCD diff; sink emptiness is unverified. The temporary tunnel and servers were removed without disturbing existing listeners. This measures the installed image, not the unbuilt kernel changes. The soak's iperf-result check also rejects missing, discontinuous, non-finite, excessively coarse or stalled intervals instead of relying only on a positive aggregate rate; a short final interval below 0.5 s may be empty.
+
+**Image 2011 600-second TX soak:** all four iperf clients ran for 600.001–600.003 s with no zero-throughput one-second intervals, averaging 2.813 Gbit/s in aggregate. Hardware free counts and software accounting changed identically: eth3 BPID 3, 1543 → 1885; eth4 BPID 4, 2345 → 2318. The differential pool gate passed; the reported `xmit_fail` and sink counts stayed zero, flow records were empty after unbind, and the kernel-warning and PCD-snapshot checks passed. Sink emptiness is unverified. The QMan defect below means zero reported failures does not exclude silent full-ring failures on this image. The DUT and isolated servers were cleaned up. This TX soak does not validate the unbuilt P3 fixes or the G3 receive gate. The original sample labels counted only sleep time, not telemetry overhead, so the apparent flat sealing counter at nominal `t=480–600` was after the actual 600-second traffic finished; the runner now uses elapsed time and requires full-duration client results.
+
+**Sink-depth gate suspended (2026-11-03).** `dpaa_wgfp` prints `qm_mcr_np_get(&np, frm_cnt)`, which masks the raw management-response word without byte-order conversion. If the count is big-endian, as other portal fields are, this little-endian host can report zero for a nonempty queue. A zero printed count therefore does not establish empty sinks or make the preceding soak's differential pool result a full leak verdict. The soak runner now refuses to run unless the kernel advertises `frm_cnt_encoding=host`; no current image or staged kernel code advertises it. Add that marker only after correcting and validating the count against a known queued frame, then rerun the gate.
+
+**QMan TX ownership correction, local only (2026-11-02).** The 6.18.60 `qman_enqueue()` returns zero even if `qm_eqcr_start_stash()` or `qm_eqcr_start_no_stash()` returns NULL, contrary to its documented full-ring error contract. Read-only disassembly of image 2011 confirms the NULL branch reaches a zero return; ring saturation was not induced or observed. Consequently `dpaa_wgfp_xmit()` can count an unsubmitted FD as successful, skip its retries and strand its BMan buffer. Local patch `4019` supplies a separate `qman_enqueue_fqid()` that returns `-EBUSY` on a full ring, so WGFP's existing eight retries and final release execute.
+
+The existing WGFP egress object also contains only an FQID, so its QMan software-ERN tag is zero rather than a registered callback. On this image, a rejection with that tag would encounter the F-102 NULL guard; source and live disassembly show that guard loops without consuming the MR entry. No such rejection was reproduced. Patch `4019` also permits a destination FQID to use a separately registered callback tag. `dpaa_wgfp` reserves one tag FQID for its built-in lifetime, counts asynchronous ERNs in `xmit_ern` and `xmit_fail`, and returns their BMan buffers; the tag is independent of the port-owned egress FQs. `xmit_ok` counts EQCR submissions, not confirmed wire delivery, and an asynchronous rejection can increment both `xmit_ok` and `xmit_fail`. The F-102 NULL-MR handling for other callers remains a separate unresolved defect.
+
+The new function deliberately duplicates the portal enqueue sequence rather than changing the legacy API: a global `-EBUSY` change makes unhandled failure paths reachable in other clients. In particular CAAM QI does not unmap its request descriptor on synchronous enqueue failure, and the DPAA AF_XDP path releases and reserves completions for an entire descriptor batch before enqueueing, then abandons the remainder on error. Completions are ordered, so immediately completing the tail could release earlier in-flight buffers. These are source-derived concerns, not reproduced failures; the generic `qman_enqueue()` defect remains open pending a cross-client ownership fix. Patch `4019` was generated from an isolated clean canonical preimage, but its canonical-branch integration and round-trip remain pending; do not run the round-trip script against the dirty shared kernel checkout, because it performs a checkout. Its `verify` command can also return success with missing or new patches, and can print `VERIFIED` despite missing patches; inspect the full result and confirm `4019` is included rather than relying on its exit status.
+
+The `sealed`, `xmit_ok`, `rx` and `rx_stack` hot telemetry counters are also per-CPU locally, summed across all possible CPUs on read; the cryptographic nonce remains the shared atomic counter. Sharding the RX counters can avoid contention between peer sinks, but cannot distribute a single tunnel across sinks. On an idle `.185`, a synthetic four-thread atomic microbenchmark measured roughly 34 ns per operation for one shared cache line versus 3.7 ns for separate per-thread cache lines. That does not measure the kernel change or prove a throughput gain. The scoped QMan path and counters have host regressions and ARM64 object builds, but need a new operator-installed image, controlled TX/RX A/B, and safe full-ring/ERN tests before production claims. Physical-port unregister and ifindex reuse remain unsupported: the cached egress FQIDs belong to the port, and tag lifetime alone does not keep those FQs or ingress buffer pools alive.
+
+**Local regression rerun (2026-11-03).** The focused WGFP RX/lifetime, per-CPU stats, QMan enqueue/ownership, BMan pool reader, soak-gate, and external WireGuard rig host tests passed (60 tests). Shell syntax and Python byte-compilation also passed. These are host/source checks only: they do not validate patch 4019 in a built image, hardware EQCR saturation/ERN delivery, live sink depth, DMA ownership, or P3 throughput.
+
+The vendor ASK source is at `/mnt/builds/ASK`. A fresh fetch found `origin/master` and `origin/mt-6.12.y` both at `5dc4976f8852`; the local `master` checkout is 19 commits behind, so use the remote ref when checking the latest source. The reachable `.70` board runs OpenWrt 25.12.6, Linux 6.12.112, and ASK package `1.2.1~849e1a9112e0`. That identifier is the annotated tag `mono-1.2.1`, which points to commit `c229b43096e6`, an ancestor of the latest branches. Use that tag when comparing the exact installed version; further component-specific SDK and live-oracle checks are still required before FMan changes.
+
+**DMA contract gap, source-derived.** Mainline `dpaa_eth.c` maps pool pages `DMA_FROM_DEVICE`, but WGFP modifies those pages on the CPU and `dpaa_wgfp_xmit()` syncs the transmit range as `DMA_TO_DEVICE`. Linux's DMA API requires a bidirectional mapping when the CPU writes a device-receive buffer; the fast path also treats a DMA address as a physical address and reuses it across ingress and egress devices. These assumptions need an ownership and mapping audit, including bounce buffers and device domains, before non-coherent or translated DMA can be supported. On the tested `.185`, the FMan device-tree node is `dma-coherent`, there are no per-port non-coherent overrides or IOMMU groups, and the SWIOTLB `used` and high-water counters were both zero after the smoke. This reduces concern for that run but does not establish a general DMA contract or prove a hardware fault; no DMA mapping change was made.
 
 **Security review (A4), `fastpath.c` against upstream `send.c`/`noise.c`.**
 
@@ -134,21 +161,23 @@ Harness: `bin/testrig-wgfp-p2b3.sh [rekey rekey120 roam aip pmtu del netns]`, `S
 - Semantic deltas, all shared with nf flowtable offload and documented: after admission a flow skips the firewall and conntrack TCP window checks until its record is withdrawn; an AllowedIPs change takes effect within one aging period (2 s); a non-first IP fragment of an offloaded flow is not matched (no ports) and takes the stack. A first fragment is sealed as a normal packet, which WireGuard permits.
 - Carry cost: every upstream WireGuard security fix in `send.c`, `noise.c`, `timers.c` or `allowedips.c` must be checked against `fastpath.c`.
 
-### P3 implementation (2026-11-02, compiled and linked, not yet built in CI or board-tested)
+### P3 implementation (2026-11-02; deployed on 1818 and 2011)
 
 **Measurement first.** Software `down` on `.185` (image `2026.11.02-1632-rolling`, 4 TCP flows, `wgfp_peer off`): 1.61 Gbit/s. CPU2, the RX CPU of the single outer UDP flow, sits at 100% softirq, while the other three are 84–88% busy with the decrypt/encrypt workers. `perf` on CPU2: `__netif_receive_skb` 82%, of which netfilter `nf_hook_slow` 40% (`nft_do_chain` 12.6%, `nf_conntrack_in` 8%), IP input and routing ~10%, UDP socket delivery ~5%, `wg_receive`/`wg_packet_receive` 16%, DPAA RX 15%. The serial cost is the outer packet's trip through IP input and the INPUT firewall, not decryption, which upstream already spreads over all cores.
 
 **Silicon check.** The plan assumed an ehash record could steer the inbound outer flow, but qdrant (2026-09-06) held that to-self traffic bypasses the ehash (`pr_word & 0x0044`). Re-tested: a record for UDP `10.99.2.113:40001 -> 10.99.2.185:51999` (the DUT's own eth4 address) steered 200 of 200 packets to a sink (`tbl[2]` = eth4). To-self UDP does hit records; qdrant corrected.
 
-**Design.** One ehash record per peer for its inbound outer flow (endpoint -> local source address, UDP, endpoint port -> listen port, on the port the peer's route uses), kept in step with the template by the refresh work (`wgfp_pst_rx_sync()`). It is installed once the outer conntrack entry is established, not NAT'ed and without a helper, and withdrawn on a template or endpoint change, peer removal, unbind or `wgfp_rx=0`. It does not age (it lives with the peer state). The sink hands such frames to `wgfp_rx_frame()`, which copies the frame into an skb, checks for plain IPv4 with a valid header checksum (anything else goes to `netif_receive_skb()`), and calls upstream `wg_packet_receive()` exactly as `wg_receive()` would. Decryption, the replay window, the inner AllowedIPs source check, ordering, handshakes and cookies stay upstream code; only IP input, netfilter, conntrack and the UDP socket lookup are skipped, for the one admitted endpoint 5-tuple (flowtable-like semantics: firewall changes apply when the record is withdrawn). Read-out adds `rx` and `rx_stack`. Limits: the peer state that carries the record is created by TX learning, so a receive-only peer (no inner flow sent through the fast path) gets no RX record; one outer flow is still one sink and one CPU, but that CPU now does far less per packet.
+**Design.** One ehash record per peer for its inbound outer flow (endpoint -> local source address, UDP, endpoint port -> listen port, on the port the peer's route uses), kept in step with the template by the refresh work (`wgfp_pst_rx_sync()`). Image 2011 installs it based on the conntrack or untracked-keypair checks described below, and withdraws it on a template or endpoint change, peer removal, unbind or `wgfp_rx=0`. It does not age (it lives with the peer state). The sink copies the frame into an skb and calls upstream `wg_packet_receive()`; the local, not-yet-built version validates the IPv4 header and the IPv4/IPv6 UDP length and checksum before doing so, and punts invalid packets to `netif_receive_skb()`. Decryption, the replay window, the inner AllowedIPs source check, ordering, handshakes and cookies stay upstream code; IP input, netfilter, conntrack and the UDP socket lookup are skipped. Read-out adds `rx` and `rx_stack`. Peer state is created by TX learning, so a receive-only peer gets no RX record; one outer flow is still one sink and one CPU.
 
 **Gate G3** unchanged: `down` >= 2.6 Gbit/s on four flows, kill below 2.2; plus the P2b-3 suite with `wgfp_rx=1`.
 
-**Untracked outer flows (fixed 2026-11-02, after image 1818).** VyOS untracks the WireGuard UDP ports (`system conntrack ignore`, applied automatically for VyOS-configured tunnels by vyos-1x patch 057, and by `bin/wg-matrix.sh` for the rig). The outer flow then has no conntrack entry, and the first P3 cut, which required an established entry, would never install the RX record in a production configuration. `wgfp_pst_rx_sync()` now admits the record when the lookup finds no entry and the peer has a current keypair that can receive (`wgfp_peer_can_receive()`): a completed handshake means the peer's packets came in through the input firewall. An entry that exists but is NAT'ed or has a helper still refuses. Image 1818 does not carry this fix, so its matrix `down`/`bidir` cells are TX fast path plus software RX.
+**Untracked outer flows and admission gap.** VyOS untracks the WireGuard UDP ports (`system conntrack ignore`, applied automatically by vyos-1x patch 057 and by `bin/wg-matrix.sh`). Image 2011 admits an untracked tuple when the peer has a current receiving keypair; image 1818 lacked that path, so its `down`/`bidir` cells used software RX. A current keypair proves an earlier handshake, not that a newly configured exact endpoint and ingress passed INPUT. Likewise `IPS_SEEN_REPLY` alone is not proof that the specific inbound packet passed INPUT: conntrack runs before the filter. These are source-derived concerns, not board reproductions; P3 is not production-hardened until exact-tuple, ingress-specific admission is proven and tested, including manual endpoint changes and roaming. Existing NAT/helper checks do not close this gap.
 
-**CLI note.** With C, a device opted in through `set interfaces wireguard wgN offload ipv4` also accelerates its inner IPv6 flows. The leaf name understates that; a family gate (or a renamed leaf) is a follow-up, not a correctness issue.
+**CLI family gap.** With C, `set interfaces wireguard wgN offload ipv4` also accelerates inner IPv6 flows, contrary to the per-family meaning of the leaf. The fix must deliberately enforce the selected family without silently removing IPv6 support.
 
-### Closing step C implementation: IPv6 (2026-11-02, compiled, not yet built in CI or board-tested)
+**Flow identity and deletion gaps.** The writer distinguishes tuple plus ingress ifindex, but `wgfp_flow_lookup()` at the sink compares only the tuple, and the frame does not carry an ingress identity. Equal tuples on two ports can select the wrong flow or peer. Do not use BPID as the identity: ports can share pools. Moreover, `wgfp_flow_work_fn()` frees an installed software flow after a failed hardware delete, potentially leaving a stale record; teardown also ignores deletion errors. Resolve record ownership and deletion failures before relying on duplicate-tuple guards or extending P3. These findings are source-derived and have not been reproduced on the board.
+
+### Closing step C implementation: IPv6 (2026-11-02; in image 2011, IPv6 gates pending)
 
 **C1, IPv6 inner flows.** The flow tuple carries a family and 16-byte addresses (`struct dpaa_wgfp_tuple`, compared and hashed whole, always built zero-initialised). `wgfp_key()` emits the silicon-verified dual-lane layout for IPv6 (family 0x60, zero 8-byte v4 lane, src6 @9, dst6 @25, then proto/ports/VID/SID as for IPv4; qdrant 2026-08-21 and 2026-09-06), in the same 50-byte per-port table, so no FMan change is needed. One parser (`wgfp_parse()`) serves the sink path and learning: plain IPv4 (no options, no fragments) or IPv6 without extension headers, TCP or UDP; learning reads the headers through `skb_header_pointer()`. The seal path decrements the hop limit for IPv6 (no checksum). The conntrack lookup and the AllowedIPs probe handle both families.
 
@@ -158,7 +187,7 @@ Harness: `bin/testrig-wgfp-p2b3.sh [rekey rekey120 roam aip pmtu del netns]`, `S
 
 ### Close-out status and leftovers (2026-11-02)
 
-Image `vyos-2026.11.02-1818-rolling` (CI run 41499179221, commits `526d1ef7` A and `c93c9c7b` P3) carries closing step A and P3; C (IPv6) is written and compiled but not yet committed; D waits on the P3 measurement. Board gates still to run on 1818: P2b-2 throughput and the P2b-3 suite (regression after the multi-peer rewrite), `bin/testrig-wgfp-soak.sh overload` (sink tail drop; baseline 34% side-flow loss) and `soak` (10 min, `pcd-snapshot` clean), the CLI (`set interfaces wireguard wg0 offload ipv4` binds without the module parameter, survives reboot and `wg0` re-creation), two tunnels bound at once (P2c gate: 2T and 4T `up` at least 1.72 and 1.91 Gbit/s), and G3 (`AUTO=1 FLOWS=0 REV=4`: `down` at least 2.6 Gbit/s, A/B with `wgfp_rx=0`).
+**Build snapshot:** image `vyos-2026.11.02-1818-rolling` (CI run 41499179221, commits `526d1ef7` A and `c93c9c7b` P3) carried closing step A and the initial P3; IPv6 and untracked RX admission followed in image 2011. Since 1818, P2b-2 and P2b-3 have passed and multi-tunnel throughput has been measured. The overload test, CLI lifecycle, IPv6 and G3 gates remain open.
 
 **Fast-path matrix, image 1818 (2026-11-02, `WGFP=1 TAG=wgfp bin/wg-matrix.sh 185`, same method as the software matrix: 1 tunnel 4 streams 5 fresh-tunnel reps, 2/4 tunnels 2 streams each 3 reps, 30 s with the first 10 s discarded, VyOS `system conntrack ignore` on the tunnel ports; csv `oracle/wgfp-185-t{1,2,4}.csv`). Medians in Gbit/s:**
 
@@ -176,16 +205,79 @@ Image `vyos-2026.11.02-1818-rolling` (CI run 41499179221, commits `526d1ef7` A a
 
 The fast path leads `.106` in all nine cells, including 1-tunnel `bidir`, the one cell the software path lost. P2c gate passed (2T `up` 3.53 >= 1.72, 4T `up` 3.80 >= 1.91; both peers bound, no install failures). `down` and `bidir` on this image are TX fast path plus software RX: with the ports untracked, the 1818 P3 cut never installs its RX record (fixed in `758b6014`), so G3 (`down` >= 2.6) is still open and is the next measurement. The 1-tunnel `up` figure (2.63) is lower than the P2b harness's 3.16 because the matrix uses 4 iperf3 streams with kernel-chosen ports rather than 4 pinned flows.
 
+**Image 2011 matrix (2026-11-02).** The untracked-RX admission fix is present. IPv4-inner medians in Gbit/s, with the first 10 s of each 30 s run discarded:
+
+| Tunnels | Up | Down | Bidir |
+|---:|---:|---:|---:|
+| 1 | 2.740 | 1.768 | 2.238 |
+| 2 | 3.839 | 2.240 | 2.772 |
+| 4 | 4.145 | 2.357 | 2.963 |
+
+The one-tunnel cells use four streams and five repetitions; the two- and four-tunnel cells use two streams per tunnel and three repetitions. The single-tunnel runner prints means, not medians: its download and bidir means are 1.787 and 2.229. Privileged P3 counters increased in the two- and four-tunnel runs; the initial counter monitor lacked permission, so there is no corresponding per-run P3 evidence for the one-tunnel cells. A separate 2011 smoke did observe P3 activity. One-tunnel download is below G3's 2.2 kill criterion; G3 is not passed.
+
+**Isolated repeat on image 2011 (2026-11-03).** The same IPv4/MTU 1420 matrix and repetition counts, with outer UDP untracked, produced these medians in Gbit/s:
+
+| Tunnels | Up | Down | Bidir |
+|---:|---:|---:|---:|
+| 1 | 2.738 | 1.717 | 2.211 |
+| 2 | 3.874 | 2.235 | 2.782 |
+| 4 | 4.140 | 2.381 | 2.987 |
+
+All 33 repetitions and 69 iperf JSONs passed duration and steady-interval checks. TX and RX counters increased across the two- and four-tunnel suites, but the one-tunnel runs have no separate per-cell RX counter proof. Afterward the fast path was unbound, flow tables were empty, the PCD snapshot matched, and shared listener inventory was unchanged; sink counts reported zero but do not establish queue emptiness. Image 2011 lacks the local RX and QMan corrections; its zero reported transmit failures cannot rule out the known silent full-ring failure. The one-tunnel download remains below G3's kill threshold. CSVs: `oracle/wgfp-matrix-1793680175-9916-185-t{1,2,4}.csv`.
+
+**Fresh OpenWrt comparison (2026-11-03).** Sequential runs on `.70` (the current replacement for the former `.106` vendor-ASK reference, running Mono OpenWrt 25.12.6, Linux 6.12.112, `ask-flowtable` 1.2.1 and `cdx`) and `.185` (VyOS image 2011, ASK2/WGFP enabled) used the same IPv4/MTU 1420 matrix. Each 30-second result discards the first 10 seconds; one tunnel has four streams and five repetitions, while two and four tunnels have two streams per tunnel and three repetitions. Values are median Gbit/s; bidirectional values sum both directions.
+
+| Tunnels | `.70` up | `.70` down | `.70` bidir | `.185` up | `.185` down | `.185` bidir |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1.105 | 1.252 | 1.554 | 2.738 | 1.717 | 2.211 |
+| 2 | 1.146 | 1.512 | 1.619 | 3.874 | 2.235 | 2.782 |
+| 4 | 1.179 | 1.608 | 1.649 | 4.140 | 2.381 | 2.987 |
+
+`.70` is the current vendor-ASK reference in the role formerly served by `.106`; the measurements are sequential, not a simultaneous controlled comparison, and loaded modules do not prove each `.70` flow was hardware-offloaded. `.70` used its existing ACCEPT forwarding policy and `schedutil` governor; `.185` used the performance governor and untracked outer WireGuard UDP. On `.70`, temperature samples peaked at 51°C, and sampled CPU frequencies ranged from 0.7 to 1.6 GHz, including idle. The one- and two-tunnel results and the later four-tunnel retry together contain 33 independently checked CSV rows and 69 iperf JSONs. Six final intervals lasted 1.25–1.53 seconds; one four-tunnel `up` repetition had two one-second zero-throughput intervals on tunnel 2. That tunnel averaged only 10.6–14.7 Mbit/s across the three `up` repetitions, despite the other tunnels carrying hundreds of Mbit/s each; the cause is unproven. High retransmit counts and this imbalance qualify the aggregate comparison.
+
+The original four-tunnel attempt stopped because the harness treated a nonzero 15.7 Mbit/s tunnel as no traffic. The single- and multi-tunnel harnesses now retain positive low-rate results and still reject zero traffic or failed clients; the four-tunnel cells were then rerun, not substituted with the aborted trial. Both DUTs and the generator tunnel resources were cleaned up, and the shared listener inventories were unchanged. `.70` CSVs: `oracle/wg-vendor-matrix-1793682079-26153-70-t{1,2}.csv` and `oracle/wg-vendor-matrix-1793683481-44963-70-t4.csv`. The `.185` result and P3/QMan qualifications are unchanged from the preceding paragraph.
+
+**Single-tunnel RX profile, image 2011.** Four paired 4-stream IPv4 downloads used the same bound tunnel, with 35 measured seconds after 5 s omitted. Rates below are Gbit/s; retransmits are sender counts.
+
+| Order | P3 on | P3 off | Retransmits on / off |
+|---|---:|---:|---:|
+| off → on | 1.665 | 1.726 | 23,258 / 74,847 |
+| on → off | 1.724 | 1.643 | 4,299 / 130,586 |
+| off → on | 1.818 | 1.704 | 17,195 / 21,666 |
+| on → off | 1.690 | 1.663 | 22,892 / 19,437 |
+
+P3 counters increased by 6.10, 6.42, 6.71 and 6.34 million respectively only in the on runs. Rates vary and none passes G3. In 15-second system-wide CPU-clock samples, P3's sink CPU was about 91% busy while the other CPUs were about 61–62% busy; overall idle samples rose from 17.83% to 31.11%. On the P3 run, ChaCha NEON accounted for 16.62% of all samples, Poly1305 for 5.13%, memcpy for 3.67%, BMan release for 1.63%, and `queue_work_on` for 0.98%. These are sample shares including idle, not proof of causation. The result supports investigating the single receive sink and copy cost before replacing upstream's already-parallel decrypt queue. The checksum/lifetime fixes were not in this image, so their cost is still unknown. Each PCD diff was clean; cleanup unbound the fast path and emptied the flow tables. Sink queue emptiness is unverified.
+
+**DWARF-enabled RX profile (2026-11-03).** The build host has `libdw-dev`, `libelf-dev`, `libunwind-dev` and `libbz2-dev`; the static perf 6.18.60 used here has ELF, DWARF and libdw unwinding enabled. Its separate libunwind backend is disabled, but libdw supplies the unwinder. A supervised P3-off/on pair on image 2011 used four streams, 35 measured seconds after 5 s omitted, and `perf record -a -e cpu-clock -F 99 --call-graph dwarf` for 15 s per run. P3-off averaged 1.704 Gbit/s and P3-on 1.700 Gbit/s. Both perf logs were free of the earlier missing-unwinder warning and reported zero lost samples; P3-on installed the outer record and its receive traffic concentrated on one sink. The PCD snapshot matched after unbinding.
+
+Aggregating the on-mode profile by leaf symbol across all commands gives 19.31% in `chacha_4block_xor_neon`, 5.10% in `poly1305_blocks_neon`, 3.80% in `memcpy`, 1.14% in `queue_work_on`, and 0.72% in `wg_prev_queue_dequeue`. These shares include idle time; sink-path copies appear in the call stacks. The earlier per-command report omitted groups below 0.3%, so its 0.59% `queue_work_on` group was not the total. Current WireGuard uses one shared decrypt `ptr_ring` with per-CPU workers; the profile does not establish that replacing it would improve throughput or that contention is absent. This single, non-randomized pair is not a definitive A/B result, and image 2011 does not contain the staged RX or QMan corrections.
+
+Sorting that same P3-on recording by CPU and leaf symbol puts the ChaCha NEON shares at 5.91%, 5.44%, 6.80% and 1.16% on CPUs 0–3 respectively: decrypt work already reaches all four CPUs, with most of it on the first three. CPU 3 accounts for 3.16% in `memcpy`, 1.30% in `bman_release`, 1.30% in `wgfp_peer_frame`, 1.14% in `queue_work_on`, and 4.63% idle. These are shares of **all system-wide samples**, not percentages of one CPU's time. They identify where this one workload spent sampled time, but do not by themselves establish saturation, contention, or the benefit of counter steering.
+
+**Decrypt-queue contention timing (2026-11-03).** A second static perf 6.18.60 build enabled both libdw unwinding and libtraceevent decoding. On image 2011, a supervised off→on P3 pair used four-stream downloads for 35 measured seconds after 5 s omitted; the averages were 1.698 and 1.662 Gbit/s, with 223,919 and 12,839 sender retransmits respectively. During 15 s of each run, `perf record -a -e lock:contention_begin,lock:contention_end -c 1 --call-graph dwarf,2048` recorded every reported contention event. The installed module disassembly and source identify the worker's directly contended `_raw_spin_lock_bh` as the shared decrypt `ptr_ring` consumer lock. Its begin/end timestamps paired by CPU, thread and lock yielded 67 waits for P3 off and 70 for P3 on: respective median waits were 11.56 and 11.52 µs, p95 16.28 and 16.48 µs, maxima 18.64 and 19.32 µs, and total observed wait across all workers 0.720 and 0.756 ms. No direct WireGuard producer-lock contention was captured in either window.
+
+The recordings reported zero lost samples; two unrelated begin events in the off recording were unmatched, but all 137 consumer-lock waits paired. Interrupts while a WireGuard worker was running were not attributed to the worker's queue lock. The trace covers only contended slow paths, one workload and one non-randomized pair, adds tracing overhead, and does not measure occupancy, uncontended lock cost or all possible workloads. It shows real but small observed consumer-lock wait in this sample, not that queue contention can never matter. There is still no measured basis for replacing the queue here. P3-on receive counters advanced, the peak sampled temperature was 59°C, the fast path was unbound, and the PCD snapshot matched afterward; sink queue emptiness remains unverified. Artifacts: session `files/wgfp-lock-timing-1793684556-59561/`.
+
+**Decrypt-worker scheduling (2026-11-03).** Two supervised 4-stream download pairs used 15 s per mode of per-CPU workqueue tracepoint counts, filtered to `wg_packet_decrypt_worker`. In the first pair (P3 on→off), throughput was 1.612/1.667 Gbit/s and the decrypt worker started 191,180/162,259 times. In the second (off→on), throughput was 1.635/1.698 Gbit/s with 177,760/186,684 starts. For the second pair, `wg0`'s successful RX packet counter was read immediately around each trace: it increased by 2,326,830/2,287,971 packets, or approximately 13.1/12.3 received packets per worker execution. These are aggregate ratios, not per-execution queue-depth or batch measurements; packet-count and trace windows differ slightly, and an execution can cross a window boundary.
+
+All four CPUs executed decrypt workers in each run. In the second pair, starts by CPU 0–3 were 47,263/52,304/22,133/56,060 with P3 off and 51,258/52,584/30,999/51,843 with P3 on. Workqueue enqueue events came from CPU 2 in both cases; P3's RX traffic also concentrated on its CPU-2 sink. These counts measure queued work and worker starts, not scheduler wakeups, occupancy, or cost per execution. Tracepoint overhead and the short workload limit causal conclusions; the reversed test order is not a controlled throughput benchmark. P3 RX counters advanced only in the on runs. Peak sampled temperature was 60°C, tracing was disabled afterward, both PCD snapshots matched, and owned tunnel/server resources were removed. Session artifacts: `files/wgfp-workqueue-profile-1793685184-66036/` and `files/wgfp-workqueue-profile-1793685361-66644/`.
+
+**Crypto queue replacement contract.** In 6.18.60, `wg_queue_enqueue_per_device_and_peer()` puts a packet in the peer's ordered queue as `UNCRYPTED` before publishing it to the shared device crypto ring. If that ring is full, the `-EPIPE` path marks the already-queued packet `DEAD` so it cannot block later packets. Per-CPU decrypt workers drain the shared ring; release/acquire packet-state publication lets the peer's serial NAPI poll consume completed packets in order, validate replay counters, and release peer and keypair references. A replacement must retain those ordering, overflow, publication and lifetime guarantees; comparing CPU samples alone is not a contention measurement. Measure queue occupancy, lock contention and wakeups under the target workload before choosing a replacement.
+
+**Requested optimization areas.** TX already spreads distinct inner flows over four sinks; it does not parallelize one inner flow. P3 skips the outer software stack but still copies into an skb, relies on upstream decrypt workers, and needs TX learning to create peer state. Counter-based RX distribution is not implemented: adding the changing WireGuard counter to the shared ehash key would break exact-tuple lookup, so a separate silicon-proven dispatch mechanism is required. The current kernel already uses `ptr_ring` and per-CPU crypto workers; replacing those queues requires a measured bottleneck and must retain replay, ordering, backpressure and teardown semantics. Offline-port reinjection is not implemented: the Qdrant phase 1h record reports that patch 0191's scheme setup still produced no capture; the earlier default/error-FQ test also saw no frames. Whether the input FQ drained is unverified because its count may be byte-swapped. The 0191 report lacks an exact image or raw log, and current-stack behavior remains unverified. Authentication, AllowedIPs, firewall/conntrack admission, NAT, routing, TTL, and buffer ownership must remain correct before any decrypted packet bypasses the stack.
+
+The SDK's KeyGen `extractedOrs` can affect FQID bits without adding the extracted byte to the comparison key. It is an investigation candidate, not an implementation: ASK2's FE `ENQUEUE_PKT` uses a fixed record FQID, so whether a counter-derived FQID can survive that terminal is unproven. A historical non-FE exact-match CC graft using an FQID-override exit stalled the RX FIFO; bypassing the FE terminal is not a safe shortcut (`arch/fman-fe-ehash.md` §1). Header-relative extraction, short or fragmented packets, queue allocation, ordering and reversible teardown also need proof. The former live oracle at `.106` is unavailable; `.70` now serves as its vendor-ASK replacement, but hardware programming still requires the mandatory live-oracle and SDK cross-check. Do not program KeyGen or FE on this hypothesis.
+
 Leftovers after those gates, in order of value:
 
-- **Receive-only peers get no RX record.** Peer state (and with it the P3 outer record) is created by TX learning, so a peer that only sends to us (a one-way UDP download, a peer whose inner flows enter on a non-DPAA port) stays on the software receive path. Create peer state for every peer of a bound device at bind time and on peer add.
+- **Receive-only peers get no RX record.** Peer state (and with it the P3 outer record) is created by TX learning, so a peer that only sends to us (a one-way UDP download, a peer whose inner flows enter on a non-DPAA port) stays on the software receive path. Design bounded peer-state activation with authenticated, current-tuple firewall provenance, peer removal, reaping and re-engagement; a current keypair alone does not establish that a manually changed endpoint passed INPUT.
 - **Zero-copy RX and punt** (master plan §4.8 item 3): every P3 frame is copied into a fresh skb today.
 - **Per-flow cap** (P5, master §4.8 item 4): one inner flow is one sink and one core, about 1.0–1.3 Gbit/s.
 - **DPAA RX headroom for an IPv6 outer header**: the seal needs 64 bytes in front of the frame for IPv6 (44 for IPv4); if `f->off` is smaller every IPv6-outer frame is punted. Read `f->off` on the board with C, and raise the headroom if needed.
 - **The ~10 s dip** seen in the 140 s `rekey120` run (0.88–0.99 Gbit/s once every ~10 s, before the rekey too): check whether the software path shows it, then correlate with the 2 s aging pass and the 1 s template refresh.
 - **Placement by load** (master §4.8 item 5) instead of round-robin.
 - **Binding limits**: up to 8 devices; any binding change rebuilds everything (fine for config commits, not for frequent changes).
-- **P4 (offline-port reinjection)** only if, after P3, inner forwarding through the stack is the measured bottleneck of `down`; decided jointly with IPsec tier 2. **P5** only for a named single-flow need.
+- **P4 (offline-port reinjection)** shares its unresolved O/H prerequisites with IPsec tier 2. **P5** addresses the requested single-flow multi-core TX scaling and must preserve ordering and replay behavior.
 - Generalize `dpaa_wgfp` into the shared steer-to-consumer substrate (master §4.8 item 1) once WireGuard is closed.
 
 ### Before P2b-2: explain the P2a plateau (resolved 2026-11-02)
@@ -202,32 +294,26 @@ The same runs showed a second problem: with all four sinks saturated, SSH to the
 - Known limits: only flows learned from a packet that still carries a conntrack entry. A flow already in the software flowtable has none; it is tracked from its first established packet, and later packets only count toward admission. A fast-pathed flow skips firewall changes until withdrawn, as an offloaded flowtable flow does. The flow table takes one global spinlock per slow-path packet of the bound peer. The `wgdev` reference held by peer mode blocks deleting `wg0` while bound (P2b-3).
 - Harness: `AUTO=1 bin/testrig-wgfp-p2b.sh` skips the debugfs steering and checks that `wgfp_peer off` leaves no records in `fe_flow`.
 - **Board result 2026-11-02** (`.185`, image `2026.11.02-0440-rolling`, warm boot after install, tunnel from `KEEP=1 bin/testrig-wireguard.sh setup wg-v4`): `AUTO=1 DUR=20` gave 2.465 Gbit/s up (flows 0.29 / 0.26 / 0.99 / 0.93), 4,491,662 sealed, `install_fail=0`, `decline_withdraws=0`, and `fe_flow` empty after `off`. Install, aging and teardown work. The flow table learns, installs and withdraws on its own. The record's silicon counter (`fe_ehash_stats pkt_count`) tracks `sealed` packet for packet, so aging keeps a busy flow installed for its whole life (0.5 s on-board poll). The 8 installs / 4 withdraws were iperf3's 4 control connections (5 packets each), which got records and aged out after 10 s. **Gate miss cause:** sink choice. The 4 control connections took sinks 0 and 1 (5 frames each), and all 4 data flows hashed onto sinks 2 and 3 (`hash % sinks`), so two cores sealed everything.
-- **Fix (not yet built):** `fastpath.c` now tracks a flow from its first conntrack-proven packet but installs a record only after `WGFP_ADMIT` = 32 slow-path packets. Later packets need no ct, because once the software flowtable has the flow its packets reach `wg_xmit()` without one (seen: conntrack `[OFFLOAD]` for the inner flow). A tracked flow that does not reach the threshold within 10 s is forgotten, so mice never take a record or a sink. Sinks are assigned round-robin per install instead of by tuple hash. This replaces the "learned only at the packet that triggers `flow add`" limit below.
+- **Fix:** `fastpath.c` now tracks a flow from its first conntrack-proven packet but installs a record only after `WGFP_ADMIT` = 32 slow-path packets. Later packets need no ct, because once the software flowtable has the flow its packets reach `wg_xmit()` without one (seen: conntrack `[OFFLOAD]` for the inner flow). A tracked flow that does not reach the threshold within 10 s is forgotten, so mice never take a record or a sink. Sinks are assigned round-robin per install instead of by tuple hash. This replaces the "learned only at the packet that triggers `flow add`" limit below.
 - **Gate PASSED 2026-11-02** on `.185` (image `2026.11.02-1519-rolling`, CI run 41470453447, commit `d072765a`, first boot after install; boot type not recorded): `AUTO=1 DUR=20 bin/testrig-wgfp-p2b.sh` gave 2.942 Gbit/s up (flows 0.64 / 0.66 / 0.65 / 0.99), repeat 3.122 Gbit/s. Exactly 4 installs per run, one per sink (sink frames 1.16M / 1.21M / 1.19M / 1.80M), none for the iperf3 control connections. `install_fail=0`, `decline_withdraws=0`, FIN withdrew every record at flow end, `fe_flow` empty after `off`, MURAM `used` 58764 before and after, no new kernel errors. The remaining imbalance (one flow near 1 Gbit/s, three near 0.6) is per-flow TCP behaviour, not sink placement.
 
 ### P3. RX fast path with skb reinjection (gate G3)
 
-Install an outer-UDP record per peer endpoint that ENQs to a set of peer RX FQs. The worker:
-
-1. validates the message type;
-2. finds the keypair by receiver index;
-3. checks the replay counter;
-4. decrypts in place and strips the outer headers;
-5. calls `build_skb` on the same buffer and `netif_receive_skb` on `wg0`.
-
-Handshake and cookie messages pass to the stack unchanged.
+The implemented path uses one outer-UDP record per learned peer endpoint and one sink FQ. It copies frames into an skb and hands them to upstream `wg_packet_receive()`, which owns message validation, key selection, decryption, replay and AllowedIPs checks. Decrypted traffic goes through wg0 NAPI/GRO and the normal Linux stack. The original zero-copy, multi-FQ proposal is not implemented; handshake and cookie messages matching the admitted outer tuple can also reach upstream WireGuard through the sink.
 
 **Gate G3:** `down` reaches at least 2.6 Gbit/s on four flows (software today: about 1.58), and the replay-window and out-of-order netns tests pass. **Kill:** below 2.2 Gbit/s. **Effort:** 2 to 3 weeks; it shares the keypair and replay code with P2b.
 
 ### P4. Offline-port reinjection (shared with IPsec Tier 2) (gate G4)
 
-Enqueue the decrypted frame to the offline port's input FQ so FMan forwards the inner packet. The work starts by board-validating inject/capture patches 0183/0184, which are untested.
+Enqueue the authenticated and policy-admitted decrypted frame to the offline port's input FQ so FMan forwards the inner packet. Earlier O/H inject/capture experiments did not deliver a frame to the configured default/error capture sink; whether the input FQ drained is unverified because its count may be byte-swapped. Qdrant records a subsequent patch 0191 KeyGen test that still missed the CC capture sink; that test left the port default/error FQIDs zero. The offline path must be proven independently before integrating it with WireGuard.
+
+The current P3 path copies the received frame into an skb and releases the original BMan buffer before WireGuard decrypts it. The decrypted packet is therefore not automatically available in that original buffer for an in-place offline-port enqueue. A zero-copy design must explicitly transfer or reconstruct buffer ownership across authentication, replay and AllowedIPs checks, DMA mapping, enqueue rejection, and teardown; otherwise use a proven copy-based handoff.
 
 **Gate G4:** injected frames reach the LAN egress with correct L2 rewrite and TTL, with no FE leak and a clean `pcd-snapshot`. **Kill/defer:** if the offline-port FE path wedges or leaks, stop at P3. Decide on P4 jointly with `plans/ASK2-IPSEC-OFFLOAD-PLAN.md`, because both need this substrate. **Effort:** 4 to 8 weeks; this is the highest-risk phase.
 
 ### P5. Order restoration for a single inner flow (gate G5)
 
-Do this only if a named workload needs more than about 1.5 Gbit/s per inner flow. Add `qman_enqueue_orp()` (about 40 lines in `qman.c`/`qman.h`; mainline 6.18.55 already has the `seqnum`, `orpc` and `AVOIDBLOCK` fields). Use an input FQ with ORP window 256 (less than the 8128 replay window), and count `ORPWINDOW_LATE/EARLY` rejects as drops.
+Do this only if a named workload needs more than about 1.5 Gbit/s per inner flow. The SDK's `qman_enqueue_orp()` uses a 14-bit sequence, ORP FQID and the ORP verb, but the helper alone is not the design: dropped or skipped sequence numbers require a `HOLE` or another proven advance strategy, enqueue rejection can arrive asynchronously, and different input FQs do not automatically share an order-definition stream. Define allocation, sequencing, wraparound, backpressure, teardown and these failure paths before selecting an ORP window; do not assume that a 40-line helper is sufficient.
 
 **Gate G5:** one inner TCP flow reaches at least 2.2 Gbit/s with no extra reorder retransmits. **Kill:** a reject rate above 0.1% or any stall.
 
@@ -257,8 +343,8 @@ Software path:
 
 Fast path:
 
-- [ ] Explain the P2a plateau (see section 3).
-- [ ] Determine the behaviour of a full sink FQ (no tail-drop configured; risk of an invisible A6-LOSS-style backlog) and localise the 5% loss at line rate (RX buffer pool of about 2,270 buffers; BMI discard counters are disabled on this image).
+- [x] Explain the P2a plateau (see section 3).
+- [ ] Validate sink tail drop under overload and localise line-rate loss. The harness must first avoid `eval`, global pktgen resets and unowned process cleanup; it also changes panic settings and leaves lab records requiring a reboot.
 - [ ] Confirm the RX buffer headroom and tailroom on a live FD dump from `.185` (the F-203/F-222 order-0 buffer patches change buffer sizing).
 - [ ] Find how pool-channel FQs are created in `dpaa_eth` (`dpaa_fq_setup`) so the per-peer FQ sets can reuse the helpers, and whether the portal count limits K.
 - [ ] Fix the O(N^2) flow-stats refresh and check FE wedge history before multi-peer deployment.
@@ -273,6 +359,9 @@ Fast path:
 | FE wedge or FE-index leak on new record shapes | P2b-2, P3, P4 | Existing record shape; one port at a time; cold boot; panic-on-lockup; `pcd-snapshot` diff |
 | Full sink FQ backs up into the FE | P2b-2, P3 | Size the FQ and congestion group before enabling; explicit overload test |
 | BMan depletion or double release | P2b to P4 | Release only through `dpaa_fd_release`; 10-minute soak with depletion counters |
+| RX INPUT provenance, ingress ambiguity or stale hardware record | P2b-2, P3 | Fail-closed admission and deletion handling; exact-tuple/ingress and endpoint-change tests before production use |
+| Full QMan ring or asynchronous TX rejection | P2a to P4 | Local WGFP-only `4019` path; validate retries, ERNs, buffer ownership and teardown on a new image. Legacy callers remain unaudited |
+| RX-to-TX DMA direction, translation or bounce-buffer mismatch | P2a to P4 | Audit shared-pool mapping and device domains; do not assume non-coherent or translated DMA is safe |
 | Divergence from upstream WireGuard semantics (rekey, roaming, timers, cookies) | P2b-3, P3 | Punt to the stack on any doubt; netns selftest on every change; slow path stays authoritative |
 | Memory-bandwidth ceiling near 4 Gbit/s | P2c to P4 | Measure before quoting targets |
 | No fast path for a peer behind a non-engaged port; ASK and VPP mutually exclusive per port | product | Documented; the fast path is an add-on for ASK-engaged ports |

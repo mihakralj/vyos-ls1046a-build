@@ -97,15 +97,17 @@ static DEFINE_MUTEX(wgfp_lock);
 /* Consumer hook (the wireguard module) and the egress frame queue. */
 static const struct dpaa_wgfp_ops __rcu *wgfp_ops;
 static void *wgfp_ops_priv;
-/* Egress ports: one no-confirm TX FQ per DPAA port, allocated once (each
- * dpaa_alloc_offload_tx_fq() call creates a new FQ) and never freed before
- * the port (the driver's teardown owns it).  Readers index it locklessly;
- * wgfp_neg is published after the entry is complete. */
-static struct qman_fq wgfp_eg_fq[WGFP_MAX_EGRESS];
+/* The tag FQ is reserved for the lifetime of this built-in driver, independent
+ * of the port-owned egress FQs, so late ERNs always reach our callback.
+ * Readers index the egress FQIDs locklessly after wgfp_neg is published. */
+static struct qman_fq wgfp_ern_fq;
+static bool wgfp_ern_fq_ready;
+static u32 wgfp_eg_fqid[WGFP_MAX_EGRESS];
 static int wgfp_eg_ifindex[WGFP_MAX_EGRESS];
 static int wgfp_neg;
-static atomic64_t wgfp_xmit_ok = ATOMIC64_INIT(0);
+static DEFINE_PER_CPU(atomic64_t, wgfp_xmit_ok);
 static atomic64_t wgfp_xmit_fail = ATOMIC64_INIT(0);
+static atomic64_t wgfp_xmit_ern = ATOMIC64_INIT(0);
 
 static void wgfp_touch_frame(struct wgfp_sink *s, u8 *p, u32 len)
 {
@@ -378,10 +380,11 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	unsigned int i;
 
 	mutex_lock(&wgfp_lock);
-	seq_printf(m, "touch=%u sinks=%u ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu\n",
+	seq_printf(m, "touch=%u sinks=%u ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu\n",
 		   wgfp_touch, wgfp_nsinks, !!rcu_access_pointer(wgfp_ops),
-		   READ_ONCE(wgfp_neg), (u64)atomic64_read(&wgfp_xmit_ok),
-		   (u64)atomic64_read(&wgfp_xmit_fail));
+		   READ_ONCE(wgfp_neg), dpaa_wgfp_stat_sum(&wgfp_xmit_ok),
+		   (u64)atomic64_read(&wgfp_xmit_fail),
+		   (u64)atomic64_read(&wgfp_xmit_ern));
 	for (i = 0; i < wgfp_nsinks; i++) {
 		struct wgfp_sink *s = &wgfp_sinks[i];
 		struct qm_mcr_queryfq_np np;
@@ -435,6 +438,14 @@ void dpaa_wgfp_unregister(void)
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_unregister);
 
+static void wgfp_egress_ern(struct qman_portal *portal, struct qman_fq *fq,
+			    const union qm_mr_entry *msg)
+{
+	atomic64_inc(&wgfp_xmit_ern);
+	atomic64_inc(&wgfp_xmit_fail);
+	dpaa_wgfp_fd_release(&msg->ern.fd);
+}
+
 int dpaa_wgfp_egress(struct net_device *dev)
 {
 	int i, n, ret;
@@ -452,11 +463,20 @@ int dpaa_wgfp_egress(struct net_device *dev)
 	ret = -ENOSPC;
 	if (n == WGFP_MAX_EGRESS)
 		goto out;
+	if (!wgfp_ern_fq_ready) {
+		wgfp_ern_fq.cb.ern = wgfp_egress_ern;
+		ret = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
+				     QMAN_FQ_FLAG_NO_MODIFY, &wgfp_ern_fq);
+		if (ret) {
+			pr_err("dpaa_wgfp: allocate ERN tag: %d\n", ret);
+			goto out;
+		}
+		wgfp_ern_fq_ready = true;
+	}
 	ret = dpaa_alloc_offload_tx_fq(dev, &fqid);
 	if (ret)
 		goto out;
-	memset(&wgfp_eg_fq[n], 0, sizeof(wgfp_eg_fq[n]));
-	wgfp_eg_fq[n].fqid = fqid;
+	wgfp_eg_fqid[n] = fqid;
 	wgfp_eg_ifindex[n] = dev->ifindex;
 	smp_store_release(&wgfp_neg, n + 1);
 	pr_info("dpaa_wgfp: egress %u = %s, no-confirm tx fqid=0x%x\n", n,
@@ -615,8 +635,8 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 	dma_sync_single_for_device(f->dev, f->addr + new_off, new_len,
 				   DMA_TO_DEVICE);
 	while (tries--) {
-		if (!qman_enqueue(&wgfp_eg_fq[egress], &fd)) {
-			atomic64_inc(&wgfp_xmit_ok);
+		if (!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], &fd)) {
+			dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
 			return;
 		}
 		cpu_relax();

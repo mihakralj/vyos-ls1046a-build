@@ -319,8 +319,10 @@ static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 			     const struct dpaa_wgfp_tuple *t, bool *absent);
 
 static char wgfp_peer_cfg[WGFP_MAX_BIND * (IFNAMSIZ + 1) + 8] = "off";
-static atomic64_t wgfp_sealed, wgfp_declined, wgfp_rekeys, wgfp_punted;
-static atomic64_t wgfp_rx_frames, wgfp_rx_stack;
+static DEFINE_PER_CPU(atomic64_t, wgfp_sealed);
+static atomic64_t wgfp_declined, wgfp_rekeys, wgfp_punted;
+static DEFINE_PER_CPU(atomic64_t, wgfp_rx_frames);
+static DEFINE_PER_CPU(atomic64_t, wgfp_rx_stack);
 
 /* Resolve @dst's neighbour on @dev into @t's Ethernet header; false (and an
  * ARP/ND probe) while it is not valid. */
@@ -686,17 +688,17 @@ static bool wgfp_endpoint_matches(const struct wg_peer *peer,
  * P3: an inbound outer frame of a peer endpoint (the record admits only
  * that exact UDP 5-tuple).  Copy it into an sk_buff and give it to upstream
  * wg_packet_receive() as wg_receive() would, minus the IP/netfilter/UDP layers
- * in front.  A header that is not plain IPv4 with a valid checksum goes
- * through the full stack instead.  NAPI context, RCU held by the sink.
+ * in front.  Packets that fail the IP or UDP checks go through the full stack.
+ * NAPI context, RCU held by the sink.
  */
 static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 {
-	const u8 *l3 = f->buf + f->off + ETH_HLEN;
-	const struct iphdr *iph = (const struct iphdr *)l3;
-	const struct ipv6hdr *ip6 = (const struct ipv6hdr *)l3;
+	const struct iphdr *iph;
+	const struct ipv6hdr *ip6;
+	const struct udphdr *udp;
 	struct net_device *dev = dev_get_by_index_rcu(&init_net, fl->ifindex);
 	struct sk_buff *skb;
-	u32 len, hl;
+	u32 len, hl, udp_len;
 	bool plain;
 
 	if (!dev || !(dev->flags & IFF_UP))
@@ -707,6 +709,8 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 	skb_put_data(skb, f->buf + f->off, f->len);
 	dpaa_wgfp_drop(f);
 	skb->protocol = eth_type_trans(skb, dev);
+	iph = (const struct iphdr *)skb->data;
+	ip6 = (const struct ipv6hdr *)skb->data;
 	/* the tuple matched, so the IP header and the UDP ports are there */
 	if (fl->t.family == AF_INET) {
 		hl = sizeof(*iph);
@@ -718,10 +722,26 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 		len = hl + ntohs(ip6->payload_len);
 		plain = ip6->nexthdr == IPPROTO_UDP;
 	}
-	plain = plain && skb->pkt_type == PACKET_HOST &&
-		len <= f->len - ETH_HLEN;
+	plain = plain && skb->pkt_type == PACKET_HOST && len <= skb->len &&
+		len >= hl + sizeof(*udp);
+	if (plain) {
+		udp = (const struct udphdr *)(skb->data + hl);
+		udp_len = ntohs(udp->len);
+		plain = udp_len >= sizeof(*udp) && udp_len <= len - hl;
+		if (plain && udp->check) {
+			__wsum csum = csum_partial(udp, udp_len, 0);
+
+			plain = fl->t.family == AF_INET ?
+				!csum_tcpudp_magic(iph->saddr, iph->daddr, udp_len,
+						   IPPROTO_UDP, csum) :
+				!csum_ipv6_magic(&ip6->saddr, &ip6->daddr, udp_len,
+						 IPPROTO_UDP, csum);
+		} else if (fl->t.family == AF_INET6) {
+			plain = false;
+		}
+	}
 	if (unlikely(!plain)) {
-		atomic64_inc(&wgfp_rx_stack);
+		dpaa_wgfp_stat_inc(&wgfp_rx_stack);
 		netif_receive_skb(skb);
 		return 1;
 	}
@@ -729,7 +749,7 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 	skb_reset_network_header(skb);
 	skb_set_transport_header(skb, hl);
 	skb->skb_iif = dev->ifindex;
-	atomic64_inc(&wgfp_rx_frames);
+	dpaa_wgfp_stat_inc(&wgfp_rx_frames);
 	wg_packet_receive(fl->pst->peer->device, skb);
 	return 1;
 }
@@ -853,7 +873,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 			wg_packet_send_queued_handshake_initiation(peer, false);
 		}
 	}
-	atomic64_inc(&wgfp_sealed);
+	dpaa_wgfp_stat_inc(&wgfp_sealed);
 	dpaa_wgfp_xmit(f, t->egress, hdr - f->buf,
 		       t->hlen + sizeof(struct message_data) + plain +
 		       POLY1305_DIGEST_SIZE);
@@ -1558,12 +1578,12 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 		tmpl += rcu_access_pointer(pst->tmpl) != NULL;
 	spin_unlock_bh(&wgfp_flows_lock);
 	return scnprintf(buf, PAGE_SIZE, "on sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld decline_withdraws=%lld aip_withdraws=%lld dev=%s\n",
-			 (long long)atomic64_read(&wgfp_sealed),
+			 (long long)dpaa_wgfp_stat_sum(&wgfp_sealed),
 			 (long long)atomic64_read(&wgfp_declined),
 			 (long long)atomic64_read(&wgfp_punted),
 			 (long long)atomic64_read(&wgfp_rekeys),
-			 (long long)atomic64_read(&wgfp_rx_frames),
-			 (long long)atomic64_read(&wgfp_rx_stack),
+			 (long long)dpaa_wgfp_stat_sum(&wgfp_rx_frames),
+			 (long long)dpaa_wgfp_stat_sum(&wgfp_rx_stack),
 			 READ_ONCE(wgfp_npsts), tmpl, READ_ONCE(wgfp_nflows),
 			 (long long)atomic64_read(&wgfp_installs),
 			 (long long)atomic64_read(&wgfp_install_fail),
