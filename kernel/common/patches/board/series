@@ -459,6 +459,11 @@
 # Upstream-Status: Inappropriate | Risk-Tier: B
 4018-wireguard-fastpath-learn-hook.patch
 
+# A WGFP enqueue uses a registered ERN tag independent of the destination FQ
+# and reports EQCR-full backpressure; the legacy enqueue path is unchanged.
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4019-qman-enqueue-fqid.patch
+
 # R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
 # Upstream-Status: Pending | Risk-Tier: C
 0176-dpaa-rx-stats-before-stack-verdict.patch
