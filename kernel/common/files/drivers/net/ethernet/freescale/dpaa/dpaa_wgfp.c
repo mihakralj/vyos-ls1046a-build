@@ -563,6 +563,7 @@ int dpaa_wgfp_flow_del(struct net_device *in, const struct dpaa_wgfp_tuple *t)
 {
 	u8 key[FMAN_PCD_FE_ROUTED_KEY_SIZE];
 	struct fman *fm;
+	unsigned int wedged;
 	u8 port_id;
 	int ks, err;
 
@@ -570,7 +571,15 @@ int dpaa_wgfp_flow_del(struct net_device *in, const struct dpaa_wgfp_tuple *t)
 	if (err)
 		return err;
 	wgfp_key(t, key);
-	return fman_pcd_fe_flow_del(fm, port_id, key, ks);
+	wedged = fman_pcd_ehash_sync_wedged_count();
+	err = fman_pcd_fe_flow_del(fm, port_id, key, ks);
+	/* A SYNC timeout retains the record but del_key still returns 0:
+	 * report it so the caller quarantines instead of freeing. A wedge
+	 * from a concurrent insert gives a conservative false positive.
+	 */
+	if (!err && fman_pcd_ehash_sync_wedged_count() != wedged)
+		return -ETIMEDOUT;
+	return err;
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_flow_del);
 
