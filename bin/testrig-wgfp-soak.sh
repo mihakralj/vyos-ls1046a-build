@@ -40,8 +40,14 @@ pool_balanced(){
   (( drift >= -64 && drift <= 64 ))
 }
 sink_count_verified(){
-  printf '%s\n' "$1" | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "frm_cnt_encoding=host") found=1 }
-                           END { exit !found }'
+  printf '%s\n' "$1" | awk 'NR == 1 {
+                             for (i=1; i<=NF; i++)
+                               if ($i ~ /^frm_cnt_encoding=/) {
+                                 found++
+                                 if ($i == "frm_cnt_encoding=host") host++
+                               }
+                           }
+                           END { exit !(found == 1 && host == 1) }'
 }
 header_counter(){
   printf '%s\n' "$1" | awk -v key="$2" '
