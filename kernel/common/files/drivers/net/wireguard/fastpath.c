@@ -323,9 +323,9 @@ struct wgfp_pst {
 	bool stopping;
 };
 
-static bool wgfp_rx = true;
+static bool wgfp_rx;
 module_param(wgfp_rx, bool, 0600);
-MODULE_PARM_DESC(wgfp_rx, "WireGuard DPAA fast path: also steer each peer's inbound outer flow (P3)");
+MODULE_PARM_DESC(wgfp_rx, "Experimental P3 receive offload; bypasses INPUT filtering (default off)");
 static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t);
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 			     const struct dpaa_wgfp_tuple *t, bool *absent);
@@ -920,11 +920,10 @@ static bool wgfp_peer_can_receive(struct wg_peer *peer)
  * P3: keep the peer's outer record in line with its template (called by the
  * refresh work, process context).  The outer flow is endpoint -> local source
  * address, UDP, endpoint port -> listen port, arriving on the template's port.
- * Installed once the outer conntrack entry is established, not NAT'ed and
- * without a helper (the firewall admitted it), or, when the outer flow is
- * untracked and has no entry, once a handshake with the peer has completed;
- * withdrawn when the template or the endpoint changes, the peer dies or
- * wgfp_rx is off.
+ * The experimental admission heuristic uses conntrack or a completed
+ * handshake; neither proves that this exact tuple and ingress passed INPUT.
+ * Records are withdrawn asynchronously when the template or endpoint changes,
+ * the peer dies or wgfp_rx is off.
  */
 static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 {
@@ -938,6 +937,7 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 		const struct udphdr *udp = (const struct udphdr *)(t->hdr + t->hlen -
 								   sizeof(*udp));
 
+		pr_warn_once("wireguard: experimental P3 receive offload bypasses INPUT filtering\n");
 		if (t->family == AF_INET) {
 			rt.saddr = ((const struct iphdr *)l3)->daddr;
 			rt.daddr = ((const struct iphdr *)l3)->saddr;
@@ -962,11 +962,10 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 
 			want = wgfp_ct_admitted(dev_net(pst->wgdev), NULL, &rt,
 						&absent);
-			/* VyOS untracks the WireGuard ports (`system conntrack
-			 * ignore`, applied automatically for configured
-			 * tunnels), so there is often no entry at all.  Then a
-			 * completed handshake is the proof: the peer's
-			 * handshake came in through the input firewall. */
+			/*
+			 * VyOS normally untracks WireGuard ports. A prior
+			 * handshake does not prove INPUT accepted this tuple.
+			 */
 			if (!want && absent)
 				want = wgfp_peer_can_receive(pst->peer);
 		}
@@ -1006,10 +1005,9 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 /* ---- learning ---- */
 
 /*
- * Proof the firewall admitted the flow: an established conntrack entry, not
- * NAT'ed, without a master or a helper.  A packet the software flowtable
- * forwarded carries no ct (and neither does any packet of a flow whose record
- * was withdrawn after the flowtable took it), so look the entry up by tuple.
+ * Check for an established conntrack entry without NAT, master or helper.
+ * Packets forwarded by the software flowtable may have no attached entry, so
+ * look it up by tuple. A tuple-only lookup does not prove INPUT accepted it.
  */
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 			     const struct dpaa_wgfp_tuple *t, bool *absent)
