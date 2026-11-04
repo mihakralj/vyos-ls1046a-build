@@ -350,7 +350,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	unsigned int i;
 
 	mutex_lock(&wgfp_lock);
-	seq_printf(m, "touch=%u sinks=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu frm_cnt_encoding=unknown\n",
+	seq_printf(m, "touch=%u sinks=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, wgfp_nsinks, READ_ONCE(wgfp_pool_failed),
 		   !!rcu_access_pointer(wgfp_ops),
 		   READ_ONCE(wgfp_neg), dpaa_wgfp_stat_sum(&wgfp_xmit_ok),
@@ -368,10 +368,15 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 			   i, s->cpu, qman_fq_fqid(&s->fq), s->frames,
 			   s->bytes, s->errs, s->sg, s->irqs, s->polls);
 		if (!err) {
-			/* Keep the unmasked words until their byte order is verified. */
-			seq_printf(m, " state=0x%02x frm_cnt=%u frm_cnt_raw=0x%08x byte_cnt_raw=0x%08x",
+			/* The management response counters are big-endian (verified on
+			 * the DUT: byte_cnt / frm_cnt equals the fixed frame size only
+			 * after a 32-bit swap); qm_mcr_np_get() does not convert.
+			 * Raw words stay for cross-checking.
+			 */
+			seq_printf(m, " state=0x%02x frm_cnt=%u byte_cnt=%u frm_cnt_raw=0x%08x byte_cnt_raw=0x%08x",
 				   np.state & QM_MCR_NP_STATE_MASK,
-				   qm_mcr_np_get(&np, frm_cnt),
+				   be32_to_cpu(np.frm_cnt) & qm_mcr_frm_cnt_mask,
+				   be32_to_cpu(np.byte_cnt),
 				   np.frm_cnt, np.byte_cnt);
 		} else {
 			seq_printf(m, " query_err=%d", err);

@@ -13,7 +13,8 @@ typedef unsigned long long u64;
 #define READ_ONCE(x) (x)
 #define rcu_access_pointer(x) (x)
 #define QM_MCR_NP_STATE_MASK 0x07
-#define qm_mcr_np_get(np, field) ((np)->field & 0x00ffffffU)
+#define qm_mcr_frm_cnt_mask 0x00ffffffU
+#define be32_to_cpu(x) __builtin_bswap32(x)
 
 struct qman_fq { unsigned int fqid; };
 struct wgfp_sink {
@@ -84,10 +85,10 @@ int main(void)
 	wgfp_sinks[1].fq.fqid = 0x2bf;
 	wgfp_sinks[1].cpu = 1;
 	assert(wgfp_stats_show(&output, NULL) == 0);
-	assert(strstr(output.buf, "frm_cnt_encoding=unknown\n"));
+	assert(strstr(output.buf, "frm_cnt_encoding=host\n"));
 	assert(strstr(output.buf,
 		      "sink0 cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
-		      " state=0x05 frm_cnt=0 frm_cnt_raw=0x01000000 byte_cnt_raw=0x40000000\n"));
+		      " state=0x05 frm_cnt=1 byte_cnt=64 frm_cnt_raw=0x01000000 byte_cnt_raw=0x40000000\n"));
 	assert(strstr(output.buf,
 		      "sink1 cpu=1 fqid=0x2bf frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
 		      " query_err=-110\n"));
