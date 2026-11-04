@@ -508,7 +508,8 @@ static void wgfp_pst_refresh(struct work_struct *w)
 #define WGFP_BATCH		16	/* job arrays live on the stack */
 #define WGFP_ADMIT		32	/* slow-path packets before a record */
 
-enum { WGFP_LEARNING, WGFP_PENDING, WGFP_INSTALLING, WGFP_INSTALLED, WGFP_FAILED };
+enum { WGFP_LEARNING, WGFP_PENDING, WGFP_INSTALLING, WGFP_INSTALLED, WGFP_FAILED,
+       WGFP_STUCK /* delete failed: record may still be linked, keep the owner */ };
 
 /* Writers hold wgfp_flows_lock; the sink path reads the table under RCU, so
  * entries are unhashed with hash_del_rcu() and freed with kfree_rcu(). */
@@ -532,7 +533,7 @@ static DEFINE_HASHTABLE(wgfp_flows, WGFP_FLOW_BITS);
 static DEFINE_HASHTABLE(wgfp_psts, WGFP_PST_BITS);
 static DEFINE_SPINLOCK(wgfp_flows_lock);
 static unsigned int wgfp_nflows, wgfp_npsts;
-static atomic64_t wgfp_installs, wgfp_withdraws, wgfp_install_fail;
+static atomic64_t wgfp_installs, wgfp_withdraws, wgfp_install_fail, wgfp_withdraw_fail;
 static atomic64_t wgfp_decline_withdraws, wgfp_aip_withdraws;
 static void wgfp_flow_work_fn(struct work_struct *w);
 static void wgfp_age_fn(struct work_struct *w);
@@ -1191,7 +1192,7 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 	hash_for_each_safe(wgfp_flows, bkt, tmp, fl, node) {
 		bool add;
 
-		if (fl->state == WGFP_INSTALLING)
+		if (fl->state == WGFP_INSTALLING || fl->state == WGFP_STUCK)
 			continue;
 		if (fl->del) {
 			if (fl->state != WGFP_INSTALLED) {
@@ -1240,6 +1241,11 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 			fl->since = jiffies;
 			if (fl->del)
 				more = true;	/* FIN while installing */
+		} else if (err < 0) {
+			/* not provably unlinked: keep the entry so the tuple is
+			 * neither relearned nor reinserted over a live record */
+			atomic64_inc(&wgfp_withdraw_fail);
+			fl->state = WGFP_STUCK;
 		} else {
 			atomic64_inc(&wgfp_withdraws);
 			wgfp_flow_free_locked(fl);
@@ -1403,15 +1409,23 @@ static void wgfp_flows_flush(void)
 			struct dpaa_wgfp_tuple t = fl->t;
 			int ifindex = fl->ifindex;
 			struct net_device *dev;
+			int err = -ENODEV;
 
 			spin_unlock_bh(&wgfp_flows_lock);
 			dev = dev_get_by_index(&init_net, ifindex);
 			if (dev) {
-				dpaa_wgfp_flow_del(dev, &t);
+				err = dpaa_wgfp_flow_del(dev, &t);
 				dev_put(dev);
 			}
-			atomic64_inc(&wgfp_withdraws);
+			if (err < 0) {
+				atomic64_inc(&wgfp_withdraw_fail);
+				pr_warn_ratelimited("wgfp: teardown could not delete a record (%d); it may still steer packets\n", err);
+			} else {
+				atomic64_inc(&wgfp_withdraws);
+			}
 			spin_lock_bh(&wgfp_flows_lock);
+		} else if (fl->state == WGFP_STUCK) {
+			pr_warn_ratelimited("wgfp: teardown with an unresolved record\n");
 		}
 		wgfp_flow_free_locked(fl);
 	}
@@ -1796,7 +1810,7 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 	hash_for_each(wgfp_psts, bkt, pst, node)
 		tmpl += rcu_access_pointer(pst->tmpl) != NULL;
 	spin_unlock_bh(&wgfp_flows_lock);
-	return scnprintf(buf, PAGE_SIZE, "on sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld decline_withdraws=%lld aip_withdraws=%lld dev=%s\n",
+	return scnprintf(buf, PAGE_SIZE, "on sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld withdraw_fail=%lld decline_withdraws=%lld aip_withdraws=%lld dev=%s\n",
 			 (long long)dpaa_wgfp_stat_sum(&wgfp_sealed),
 			 (long long)atomic64_read(&wgfp_declined),
 			 (long long)atomic64_read(&wgfp_punted),
@@ -1807,6 +1821,7 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 			 (long long)atomic64_read(&wgfp_installs),
 			 (long long)atomic64_read(&wgfp_install_fail),
 			 (long long)atomic64_read(&wgfp_withdraws),
+			 (long long)atomic64_read(&wgfp_withdraw_fail),
 			 (long long)atomic64_read(&wgfp_decline_withdraws),
 			 (long long)atomic64_read(&wgfp_aip_withdraws),
 			 wgfp_peer_cfg);
