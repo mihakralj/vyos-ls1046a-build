@@ -16,7 +16,9 @@ MODE=${1:-}; DUR=${DUR:-600}; PORT_BASE=${PORT_BASE:-5241}
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 dut(){ ssh -n $SSHO -i $HOME/.ssh/vyos_key vyos@192.168.1.185 "$1"; }
 D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
-WP=/sys/module/wireguard/parameters/wgfp_peer; DBG=/sys/kernel/debug/dpaa_wgfp
+WP=/sys/module/wireguard/parameters/wgfp_peer; WL=/sys/module/wireguard/parameters/wgfp_peer_lease
+LEASE_TOKEN=${WG_LEASE_TOKEN:-$(cat "${WG_STATE_PATH:-/tmp/wg-rig}.single-lease/token" 2>/dev/null)}
+DBG=/sys/kernel/debug/dpaa_wgfp
 bp(){
   case "$1" in eth3|eth4) ;; *) echo "invalid pool interface: $1" >&2; return 2;; esac
   ssh $SSHO -i "$HOME/.ssh/vyos_key" vyos@192.168.1.185 sudo -n python3 - "$1" \
@@ -108,7 +110,7 @@ soak)
     if [ "$current" = off ]; then
       bound=0
     elif owned_binding "$current"; then
-      dut "echo off | sudo tee $WP >/dev/null" || return 1
+      dut "echo 'stop $LEASE_TOKEN' | sudo tee $WL >/dev/null" || return 1
       bound=0
     else
       echo "ERROR: fast-path binding changed; refusing to unbind it" >&2
@@ -183,6 +185,7 @@ PY
     ssh $SSHO "$host" "python3 -c 'import os,signal; fd=os.pidfd_open(os.getpid()); os.close(fd); assert hasattr(signal,\"pidfd_send_signal\")'" ||
       { echo "ABORT: generator lacks Python pidfd support" >&2; exit 1; }
   done
+  [[ $LEASE_TOKEN =~ ^[0-9a-f]{32}$ ]] || { echo "ABORT: no wgfp lease token (run KEEP=1 bin/testrig-wireguard.sh setup wg-v4)" >&2; exit 1; }
   current=$(dut "sudo cat $WP") || { echo "ABORT: cannot read wgfp_peer" >&2; exit 1; }
   [ "$current" = off ] || { echo "ABORT: fast path already bound; refusing to replace it" >&2; exit 1; }
   stats=$(dut "sudo cat $DBG/stats") || { echo "ABORT: cannot read sink counters" >&2; exit 1; }
@@ -205,7 +208,7 @@ PY
   current=$(dut "sudo cat $WP") || { echo "ABORT: cannot recheck fast-path binding" >&2; exit 1; }
   [ "$current" = off ] || { echo "ABORT: fast path became bound before setup" >&2; exit 1; }
   bound=1
-  dut "echo wg0 | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer"; exit 1; }
+  dut "echo 'bind $LEASE_TOKEN wgo-$LEASE_TOKEN-dut' | sudo tee $WL >/dev/null" || { echo "ABORT: wgfp_peer_lease bind"; exit 1; }
   stats=$(dut "sudo cat $DBG/stats") || { echo "ABORT: cannot read sink counters" >&2; exit 1; }
   x0=$(header_counter "$stats" xmit_fail) || { echo "ABORT: missing or invalid xmit_fail counter" >&2; exit 1; }
   ern0=$(header_counter "$stats" xmit_ern) || { echo "ABORT: missing or invalid xmit_ern counter" >&2; exit 1; }
