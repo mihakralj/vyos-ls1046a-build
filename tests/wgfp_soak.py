@@ -65,9 +65,9 @@ elif "awk '{print $22}' /proc/" in command:
     result = "12345"
 elif "test ! -e " in command or "ss -H -ltn " in command:
     pass
-elif "echo wg0 | sudo tee" in command:
+elif "bind " in command and "wgfp_peer_lease" in command:
     state["bound"] = True
-elif "echo off | sudo tee" in command:
+elif "stop " in command and "wgfp_peer_lease" in command:
     state["bound"] = False
 elif "cat /sys/module/wireguard/parameters/wgfp_peer" in command:
     bound = state.get("bound", scenario == "already_bound")
@@ -266,7 +266,7 @@ def test_soak_does_not_replace_an_existing_binding(tmp_path):
     result, commands, _ = run_soak(tmp_path, "already_bound")
     assert result.returncode != 0
     assert "fast path already bound" in result.stderr
-    assert not any("echo off" in " ".join(args) or "rm -f" in " ".join(args)
+    assert not any("wgfp_peer_lease" in " ".join(args) or "rm -f" in " ".join(args)
                    for _, args in commands)
 
 
@@ -278,16 +278,16 @@ def test_soak_does_not_unbind_another_users_fast_path(tmp_path, scenario):
     assert result.returncode != 0
     assert state["bound"] is True
     assert state["binding_other"] is True
-    assert not any("echo off" in " ".join(args) for _, args in commands)
+    assert not any("stop " in " ".join(args) and "wgfp_peer_lease" in " ".join(args) for _, args in commands)
     if scenario == "binding_changed_before_setup":
-        assert not any("echo wg0" in " ".join(args) for _, args in commands)
+        assert not any("bind " in " ".join(args) for _, args in commands)
 
 
 def test_soak_rejects_missing_pidfd_support_before_binding(tmp_path):
     result, commands, _ = run_soak(tmp_path, "no_pidfd")
     assert result.returncode != 0
     assert "generator lacks Python pidfd support" in result.stderr
-    assert not any("echo wg0" in " ".join(args) for _, args in commands)
+    assert not any("bind " in " ".join(args) for _, args in commands)
 
 
 @pytest.mark.parametrize(
@@ -301,7 +301,7 @@ def test_soak_rejects_unverified_queue_counters_before_binding(tmp_path, scenari
     assert result.returncode != 0
     assert "sink frm_cnt byte order is unverified" in result.stderr
     assert not state.get("bound", False)
-    assert not any("echo wg0" in " ".join(args) or "iperf3 " in " ".join(args)
+    assert not any("bind " in " ".join(args) or "iperf3 " in " ".join(args)
                    or "pcd-snapshot capture" in " ".join(args)
                    for _, args in commands)
 
