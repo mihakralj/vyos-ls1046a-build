@@ -2654,6 +2654,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-272 VLAN insert inner EtherType after PPPoE insert"
 fi
 
+# F-273 (WGFP gate 2, 2026-11-04): export a reader for the F-271
+# ehash_sync_wedged counter so WGFP can detect an unsynced delete. After F-271.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_273.py" 2>&1
+    echo "### fman_pcd.c: F-273 ehash_sync_wedged reader export"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
