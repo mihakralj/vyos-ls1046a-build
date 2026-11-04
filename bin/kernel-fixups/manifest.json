@@ -71,11 +71,12 @@
     "F_271.py": "fman_pcd.c: F-271 (R7 step 1, 2026-10-29) retries the ehash FMFP_EXTC[INV0] SYNC up to 3 times and exports ehash_sync_timeouts/ehash_sync_recovered/ehash_sync_wedged read-only module parameters. After F-269.",
     "F_272.py": "fman_pcd.c: F-272 (G2 PPPoE over VLAN, 2026-10-29) makes the inline ehash INSERT_VLAN_HDR (0x42) word carry the running l2_eth_type instead of the flow IP eth_type: after INSERT_PPPoE_HDR (0x43) the inner EtherType below the new tag is 0x8864 (vendor create_vlan_ins_hm() takes info->eth_type, which create_pppoe_ins_hm() set to ETHERTYPE_PPPOE). Byte-identical for every record without 0x43. After F-261.",
     "F_273.py": "fman_pcd.c/fman_pcd.h: F-273 (WGFP gate 2, 2026-11-04) exports fman_pcd_ehash_sync_wedged_count(), a read-only reader of the F-271 ehash_sync_wedged counter, so a caller can detect that a delete's SYNC timed out (record retained, del_key still returns 0). No register, descriptor or record change. After F-271.",
-    "F_274.py": "fman_port.c: F-274 (WGFP gate 3, 2026-11-04) makes fman_port_disable() return -EBUSY (with a ratelimited dev_warn) when the QMI/BMI busy poll times out, as the SDK does, instead of returning 0. All callers audited: dpaa_stop, mac_start_failed, F-211 and af_xdp detach ignore or continue; af_xdp attach and 0163 recover now re-enable the port on failure. Success still means only busy bits cleared, not that DDR ehash walkers drained.",
+    "F_274.py": "fman_port.c: F-274 (WGFP gate 3, 2026-11-04) makes fman_port_disable() return -EBUSY (with a ratelimited dev_warn) when the QMI/BMI busy poll times out, as the SDK does, instead of returning 0. F-277 makes F-211 abort before KeyGen/parser changes on this failure. Success still means only busy bits cleared, not that DDR ehash walkers drained.",
     "F_275.py": "net/xdp/xsk_buff_pool.c/.h + xsk.c: F-275 retains XSK pool/netdev ownership and transfers failed-bind pool cleanup to the deferred worker when ZC detach returns -EAGAIN.",
-    "F_276.py": "dpaa_eth.h: F-276 adds pending XSK pool ownership so AF_XDP detach can retry an incomplete BMan drain without unmapping UMEM or freeing its BPID."
+    "F_276.py": "dpaa_eth.h: F-276 adds pending XSK pool ownership so AF_XDP detach can retry an incomplete BMan drain without unmapping UMEM or freeing its BPID.",
+    "F_277.py": "fman_pcd_kg.c: F-277 makes F-211 abort v6 arming before KeyGen/parser writes if fman_port_disable() fails; on -EBUSY the port remains forced down and existing FE state is retained. A successful disable still does not prove DDR ehash walkers have drained."
   },
-  "count": 64,
+  "count": 65,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {},
   "removed_dead": [
