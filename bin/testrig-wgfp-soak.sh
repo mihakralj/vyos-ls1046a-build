@@ -307,11 +307,12 @@ PY
   [ "$left" = 0 ] && ok "every record withdrawn" || bad "$left records left"
   if sink_count_verified "$final_stats" && printf '%s\n' "$final_stats" | awk '
     $1 ~ /^sink[0-9]+$/ {
-      sinks++; found=0
-      for (i=1; i<=NF; i++) if ($i ~ /^frm_cnt=[0-9]+$/) {
-        split($i, a, "="); found=1; if (a[2] != 0) bad=1
+      sinks++; found=0; bytes=0
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^frm_cnt=[0-9]+$/) { split($i, a, "="); found=1; if (a[2] != 0) bad=1 }
+        if ($i ~ /^byte_cnt=[0-9]+$/) { split($i, a, "="); bytes=1; if (a[2] != 0) bad=1 }
       }
-      if (!found) bad=1
+      if (!found || !bytes) bad=1
     }
     END { exit !(sinks > 0 && !bad) }
   '; then ok "sink queues empty"; else bad "sink queues not empty or unavailable"; fi

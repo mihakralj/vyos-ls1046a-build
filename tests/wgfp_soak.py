@@ -114,7 +114,7 @@ elif "cat /sys/kernel/debug/dpaa_wgfp/stats" in command:
         ern = " xmit_ern=1"
     else:
         ern = f" xmit_ern={7 if scenario == 'existing_ern' else 0}"
-    result = f"xmit_fail=0{ern}{encoding}\nsink0 frm_cnt={10 if scenario == 'stuck_sink' else 0}"
+    result = f"xmit_fail=0{ern}{encoding}\nsink0 frm_cnt={10 if scenario == 'stuck_sink' else 0} byte_cnt={14340 if scenario == 'stuck_sink' else 0}"
 elif "cat /sys/kernel/debug/fman_pcd/0/fe_flow" in command:
     status = 1 if scenario == "flow_read_fail" else 0
     result = "empty"
