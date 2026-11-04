@@ -2669,6 +2669,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     echo "### fman_port.c: F-274 fman_port_disable reports drain timeout"
 fi
 
+# F-275: retry a transient AF_XDP detach failure without dropping the XSK
+# pool/netdev references. The DPAA callback returns -EAGAIN before teardown
+# when the RX port cannot yet be disabled.
+if [ -f net/xdp/xsk_buff_pool.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_275.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_276.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-xsk-detach-retry.py" \
+        "${GITHUB_WORKSPACE}/kernel/common/files/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c"
+    echo "### AF_XDP detach: F-275 retry with F-276 BMan drain retention"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
