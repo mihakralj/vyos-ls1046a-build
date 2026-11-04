@@ -18,7 +18,7 @@ Agent guidance for this repo. Legend: → leads-to; ∵ because; ¬ not; w/ w/o 
 qdrant MCP is authoritative persistent memory for diagnoses, root causes, failed attempts, and hardware facts.
 
 1. Before non-trivial work or continuing a topic, run several focused `qdrant-find` queries before mass reads. Search symptoms, components, subsystem, and file/patch names. Prefer the newer dated source on conflict.
-2. Before a FMan/PCD/KeyGen/ASK change, cross-check: (a) Qdrant NXP/SDK findings for the register or SDK function, (b) `.kilo/worktrees/nxp-sdk/` port status and `arch/fman-microcode-210-programming-reference.md`, and (c) live ASK on `.106` (`/proc/fqid_stats/pcd/`, `/sys/kernel/debug/fman/...`, `ask-check`). Precedence: live `.106` > Qdrant SDK docs > nxp-sdk. Any disagreement halts the change pending resolution.
+2. Before a FMan/PCD/KeyGen/ASK change, cross-check: (a) Qdrant NXP/SDK findings for the register or SDK function, (b) `.kilo/worktrees/nxp-sdk/` port status and `arch/fman-microcode-210-programming-reference.md`, and (c) live ASK on `.70` (root@192.168.1.70, vendor reference board, latest vendor ASK) (`/proc/fqid_stats/pcd/`, `/sys/kernel/debug/fman/...`, `ask-check`). Precedence: live `.70` > Qdrant SDK docs > nxp-sdk. Any disagreement halts the change pending resolution.
 3. After a durable insight, `qdrant-store` dense prose covering symptom, root cause, fix (paths/patches), verification, date, and tags. Keep AGENTS.md structural; store evolving evidence in qdrant.
 4. **END-OF-SESSION (MUST):** If the session produced board results, root cause/architecture decisions, fixup iterations, or revert patterns, run `bin/qdrant-reconcile.sh`, verify high-value signals against qdrant, and store gaps. Command: `/qdrant-reconcile`.
 
