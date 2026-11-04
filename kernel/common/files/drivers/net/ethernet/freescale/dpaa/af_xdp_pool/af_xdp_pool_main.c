@@ -844,12 +844,13 @@ if (_pcd)
 	(void)fman_pcd_port_ensure_params_page(_pcd, rxp);
 
 wret = fman_port_disable(rxp);
-if (!wret) {
+if (!wret)
 wret = fman_port_set_rx_bpool(rxp,
        (u8)priv->dpaa_bp->bpid,
        (u8)priv->xsk_bpid[queue_id]);
+/* F-274: a drain timeout (-EBUSY) skips the reprogram; the port must
+ * come back up either way. */
 fman_port_enable(rxp);
-}
 if (wret) {
 priv->xsk_pool_attach_fail++;
 dev_warn(priv->net_dev->dev.parent,

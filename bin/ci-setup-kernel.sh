@@ -2661,6 +2661,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-273 ehash_sync_wedged reader export"
 fi
 
+# F-274 (WGFP gate 3, 2026-11-04): fman_port_disable() returned 0 on a BMI/QMI
+# drain timeout; return -EBUSY like the SDK. Callers audited (see F_274.py);
+# af_xdp_pool attach and 0163 recover re-enable the port on failure.
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_274.py" 2>&1
+    echo "### fman_port.c: F-274 fman_port_disable reports drain timeout"
+fi
+
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
 : # fix -- fe_obs itself is native 0169 content, so this bug fix
 : # belongs with it). This closes round 2 of the patch-fold campaign:
