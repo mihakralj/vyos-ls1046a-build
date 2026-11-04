@@ -97,6 +97,12 @@ elif "cat /sys/kernel/debug/dpaa_wgfp/stats" in command:
         encoding = ""
     elif scenario == "unverified_count_suffix":
         encoding = " frm_cnt_encoding=hostile"
+    elif scenario == "unknown_count":
+        encoding = " frm_cnt_encoding=unknown"
+    elif scenario == "conflicting_count_markers":
+        encoding = " frm_cnt_encoding=host frm_cnt_encoding=unknown"
+    elif scenario == "duplicate_count_marker":
+        encoding = " frm_cnt_encoding=host frm_cnt_encoding=host"
     else:
         encoding = " frm_cnt_encoding=host"
     if scenario == "missing_ern_before" or (
@@ -284,7 +290,12 @@ def test_soak_rejects_missing_pidfd_support_before_binding(tmp_path):
     assert not any("echo wg0" in " ".join(args) for _, args in commands)
 
 
-@pytest.mark.parametrize("scenario", ["unverified_count", "unverified_count_suffix"])
+@pytest.mark.parametrize(
+    "scenario", [
+        "unverified_count", "unverified_count_suffix", "unknown_count",
+        "conflicting_count_markers", "duplicate_count_marker",
+    ]
+)
 def test_soak_rejects_unverified_queue_counters_before_binding(tmp_path, scenario):
     result, commands, state = run_soak(tmp_path, scenario)
     assert result.returncode != 0

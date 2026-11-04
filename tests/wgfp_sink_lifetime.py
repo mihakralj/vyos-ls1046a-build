@@ -26,6 +26,21 @@ def test_sink_pool_is_not_destroyed_or_reused_after_uncertain_creation(tmp_path)
     subprocess.run([str(binary)], check=True)
 
 
+def test_sink_stats_preserve_unmasked_counts_and_report_query_failures(tmp_path):
+    source = SOURCE.read_text()
+    start = source.index("static int wgfp_stats_show(")
+    end = source.index("\nDEFINE_SHOW_ATTRIBUTE(wgfp_stats);", start)
+    (tmp_path / "wgfp_stats_body.h").write_text(source[start:end])
+    binary = tmp_path / "wgfp_sink_stats"
+    subprocess.run(
+        ["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+         "-Wno-unused-parameter", "-I", str(tmp_path),
+         str(ROOT / "tests/dut/wgfp_sink_stats.c"), "-o", str(binary)],
+        check=True,
+    )
+    subprocess.run([str(binary)], check=True)
+
+
 @pytest.mark.parametrize(
     ("script", "settings"),
     [
