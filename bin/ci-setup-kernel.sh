@@ -2669,6 +2669,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     echo "### fman_port.c: F-274 fman_port_disable reports drain timeout"
 fi
 
+# F-277: do not mutate KeyGen/parser state when F-274 reports a failed
+# RX-port disable in the F-211 IPv6 arm path.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_277.py" 2>&1
+    echo "### fman_pcd_kg.c: F-277 abort v6 arm on port-disable error"
+fi
+
 # F-275: retry a transient AF_XDP detach failure without dropping the XSK
 # pool/netdev references. The DPAA callback returns -EAGAIN before teardown
 # when the RX port cannot yet be disabled.
