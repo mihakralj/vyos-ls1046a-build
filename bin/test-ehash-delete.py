@@ -3,8 +3,8 @@
 
 Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>
 The tree must already carry the F-254/F-256, F-264, F-267, F-269, F-271,
-F-282 and F-283 fixups; ci-setup-kernel.sh runs this after the SYNC telemetry
-is applied. Keys select one of two
+F-282 through F-286 fixups; ci-setup-kernel.sh runs this after their
+integration. Keys select one of two
 buckets by their second byte, so one bucket fills while the other must stay
 reachable.
 
@@ -190,6 +190,18 @@ static u64 fake_ktime_ns;
 static unsigned int metadata_freed, fail_in;
 static bool wmb_pending, barrier;
 static struct fman_pcd_ehash_table *cur;
+static bool hc_sync_enabled;
+static int hc_sync_result;
+static unsigned int hc_sync_calls;
+
+static int fman_pcd_hc_ehash_sync(struct fman_pcd *pcd)
+{
+	(void)pcd;
+	if (!hc_sync_enabled)
+		return 0;
+	hc_sync_calls++;
+	return hc_sync_result;
+}
 
 static struct block *block_of(const void *va)
 {
@@ -268,7 +280,6 @@ static void udelay(unsigned int us)
 	fake_ktime_ns += (u64)us * 1000;
 }
 static u64 ktime_get_ns(void) { return fake_ktime_ns; }
-#define pr_warn(...) ((void)0)
 static struct fman *fman_pcd_get_fman(struct fman_pcd *pcd)
 {
 	return pcd->fman;
@@ -401,21 +412,15 @@ static void make_key(u8 *key, unsigned int id, unsigned int bucket)
 static int add(struct fman_pcd_ehash_table *t, unsigned int id,
 	       unsigned int bucket)
 {
-	struct fman_pcd_ehash_flow *flow = calloc(1, sizeof(*flow));
+	struct fman_pcd_ehash_flow *flow;
 	dma_addr_t rdma;
 	u8 *r;
 	u8 key[KEY_MAX];
-	int err;
+	int err, f269_err;
 
+@ADD_GUARD@
+	flow = calloc(1, sizeof(*flow));
 	assert(flow);
-	if (t->draining) {
-		free(flow);
-		return -ESHUTDOWN;
-	}
-	if (fman_pcd_ehash_recover(t)) {
-		free(flow);
-		return -ETIMEDOUT;
-	}
 	r = dma_pool_zalloc(t->rec_pool, GFP_KERNEL, &rdma);
 	assert(r);
 	make_key(key, id, bucket);
@@ -616,6 +621,101 @@ static void test_delete_timeout(void)
 	assert(uncertain_frees > 0);
 }
 
+static void test_hc_sync_failure_quarantine(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+	unsigned int freed, calls, uncertain;
+
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(add(&t, i, 0) == 0);
+
+	hc_sync_calls = 0;
+	hc_sync_enabled = true;
+	hc_sync_result = -ETIMEDOUT;
+	freed = metadata_freed;
+	uncertain = uncertain_frees;
+	assert(del(&t, 1, 0) == -ETIMEDOUT);
+	assert(hc_sync_calls == 1 && metadata_freed == freed);
+	assert(indexed(0) == 2 && t.poisoned && uncertain_frees == uncertain);
+	assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
+
+	hc_sync_result = 0;
+	calls = hc_sync_calls;
+	assert(drain(&t) == 0);
+	assert(hc_sync_calls > calls && metadata_freed > freed);
+	assert(live(false) == 0 && live(true) == 0);
+	hc_sync_enabled = false;
+}
+
+static void test_hc_sync_error_propagation(void)
+{
+	static const int errors[] = { -EBUSY, -EIO, -ENODEV, -ETIMEDOUT };
+
+	for (unsigned int i = 0; i < sizeof(errors) / sizeof(errors[0]); i++) {
+		struct fman fm = { 0 };
+		struct fman_pcd pcd = { .fman = &fm };
+		struct fman_pcd_ehash_table t;
+		unsigned int freed;
+
+		setup(&t, &pcd, 50);
+		for (unsigned int k = 0; k < 3; k++)
+			assert(add(&t, k, 0) == 0);
+		mark_current_generation_uncertain(&t, 0);
+		hc_sync_enabled = true;
+		hc_sync_result = errors[i];
+		freed = metadata_freed;
+
+		/* A post-unlink barrier failure retains the old generation. */
+		assert(del(&t, 1, 0) == errors[i]);
+		assert(t.poisoned && indexed(0) == 2);
+		assert(metadata_freed == freed && uncertain_frees == 0);
+		assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
+
+		/* Recovery failure is pre-unlink and blocks all mutations. */
+		assert(del(&t, 0, 0) == errors[i]);
+		assert(add(&t, 3, 0) == errors[i]);
+		assert(indexed(0) == 2 && hits(&t, 0, 0) && !hits(&t, 3, 0));
+		assert(metadata_freed == freed && uncertain_frees == 0);
+
+		/* Drain clears heads but cannot reclaim on a barrier error. */
+		assert(drain(&t) == errors[i]);
+		assert(t.draining && !heads[0] && indexed(0) == 2);
+		assert(metadata_freed == freed && uncertain_frees == 0);
+		hc_sync_result = 0;
+		assert(drain(&t) == 0);
+		assert(uncertain_frees > 0);
+		hc_sync_enabled = false;
+	}
+}
+
+static void test_hc_insert_published_before_error(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(add(&t, i, 0) == 0);
+	mark_current_generation_uncertain(&t, 0);
+	hc_sync_enabled = true;
+	hc_sync_result = -EIO;
+
+	/* The new record is already visible; report success and retain it. */
+	assert(add(&t, 3, 0) == 0);
+	assert(t.poisoned && indexed(0) == 4 && hits(&t, 3, 0));
+	assert(uncertain_frees == 0);
+	assert(add(&t, 4, 0) == -EIO && del(&t, 1, 0) == -EIO);
+	assert(indexed(0) == 4 && hits(&t, 1, 0));
+	hc_sync_result = 0;
+	assert(del(&t, 1, 0) == 0);
+	assert(drain(&t) == 0 && uncertain_frees > 0);
+	hc_sync_enabled = false;
+}
+
 static void test_insert_timeout(void)
 {
 	struct fman fm = { 0 };
@@ -739,8 +839,10 @@ static void test_sync_diagnostics(void)
 	u32 extc = 0;
 
 	assert(!ehash_sync_diag && ehash_sync_diag_attempts == 0);
+	hc_sync_calls = 0;
 	fm.polls = 2;
 	assert(fman_pcd_ehash_sync(&t, &extc) == 0 && extc == 0);
+	assert(hc_sync_calls == 0);
 	assert(syncs == writes + 1 && reads == polls + 3);
 	writes = syncs;
 	polls = reads;
@@ -782,6 +884,26 @@ static void test_sync_diagnostics(void)
 	assert(ehash_sync_diag_last_extc == 0 &&
 	       ehash_sync_diag_last_pending_extc == INV0);
 	ehash_sync_diag = false;
+
+	/* The second barrier is inert by default and fail-closed when enabled. */
+	hc_sync_enabled = true;
+	hc_sync_result = 0;
+	assert(fman_pcd_ehash_sync(&t, &extc) == 0 && hc_sync_calls == 1);
+	hc_sync_result = -ETIMEDOUT;
+	assert(fman_pcd_ehash_sync(&t, &extc) == -ETIMEDOUT && extc == 0);
+	assert(hc_sync_calls == 2);
+	hc_sync_result = -EBUSY;	/* qman_enqueue rejection */
+	assert(fman_pcd_ehash_sync(&t, &extc) == -EBUSY && extc == 0);
+	hc_sync_result = -EIO;		/* HC error-FQ confirmation */
+	assert(fman_pcd_ehash_sync(&t, &extc) == -EIO && extc == 0);
+	assert(hc_sync_calls == 4);
+	pcd.fman = NULL;
+	hc_sync_result = -ENODEV;	/* enabled gate without an HC port */
+	assert(fman_pcd_ehash_sync(&t, &extc) == -ENODEV && extc == 0);
+	assert(hc_sync_calls == 5);
+	pcd.fman = &fm;
+	hc_sync_result = 0;
+	hc_sync_enabled = false;
 }
 
 static void test_missing_and_invalid(void)
@@ -819,6 +941,9 @@ int main(void)
 	test_insert_enomem();
 	test_delete_enomem();
 	test_delete_timeout();
+	test_hc_sync_failure_quarantine();
+	test_hc_sync_error_propagation();
+	test_hc_insert_published_before_error();
 	test_insert_timeout();
 	test_sync_retry();
 	test_sync_diagnostics();
@@ -831,7 +956,9 @@ int main(void)
 """
 
 def extract_function(source: str, name: str) -> str:
-    match = re.search(rf"static (?:int|void|u8) {name}\([^;]*?\n\{{\n", source)
+    match = re.search(
+        rf"(?m)^(?:static )?(?:int|void|u8|ssize_t|enum qman_cb_dqrr_result) "
+        rf"{re.escape(name)}\([^;]*?\n\{{\n", source)
     if match is None:
         raise ValueError(f"Kernel function {name} was not found")
     end = source.index("\n}\n", match.end()) + len("\n}\n")
@@ -847,6 +974,21 @@ def extract_add_tail(source: str) -> str:
         raise ValueError("add_key() F-269 publish block was not found")
     start = source.index(first)
     return source[start:source.index(last, start)]
+
+
+def extract_add_guard(source: str) -> str:
+    add = extract_function(source, "fman_pcd_ehash_add_key")
+    first = "\tif (t->draining)\n"
+    last = "\tif (key_size > FMAN_EHASH_FLOW_KEY_MAX)\n"
+    if add.count(first) != 1 or add.count(last) != 1:
+        raise ValueError("add_key() recovery guard was not found")
+    start = add.index(first)
+    return add[start:add.index(last, start)]
+
+
+def extract_struct(source: str, name: str) -> str:
+    start = source.index(f"struct {name} {{\n")
+    return source[start:source.index("\n};", start) + len("\n};")]
 
 
 SANITIZERS = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
@@ -883,7 +1025,8 @@ def sanitizers_usable(compiler: list, directory: Path, env: dict) -> bool:
 def main() -> None:
     if len(sys.argv) != 2:
         sys.exit("Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>")
-    source = (Path(sys.argv[1]) /
+    source_root = Path(sys.argv[1])
+    source = (source_root /
               "drivers/net/ethernet/freescale/fman/fman_pcd.c").read_text()
     before_sync = (
         "fman_pcd_ehash_cu_stride", "fman_pcd_ehash_cu_free",
@@ -901,12 +1044,14 @@ def main() -> None:
     functions += "\n" + sync + "\n"
     functions += "\n".join(extract_function(source, name) for name in after_sync)
     tail = extract_add_tail(source)
+    guard = extract_add_guard(source)
     with tempfile.TemporaryDirectory(prefix="ask2-ehash-delete-") as directory:
         path = Path(directory)
         code = path / "delete.c"
         binary = path / "delete"
         code.write_text(HARNESS.replace("@KERNEL_FUNCTIONS@", functions)
-                        .replace("@ADD_TAIL@", tail))
+                        .replace("@ADD_TAIL@", tail)
+                        .replace("@ADD_GUARD@", guard))
         # Leak accounting is explicit in the harness (freed-allocation
         # counters), so LSan, which needs ptrace, is not required.
         env = {**os.environ,
@@ -914,7 +1059,8 @@ def main() -> None:
         compiler = host_compiler()
         build = [*compiler, "-std=gnu11", "-Wall", "-Wextra",
                  str(code), "-o", str(binary)]
-        if sanitizers_usable(compiler, path, env):
+        use_sanitizers = sanitizers_usable(compiler, path, env)
+        if use_sanitizers:
             build += SANITIZERS
         else:
             print("note: sanitizers unavailable; counter checks only",
@@ -923,6 +1069,138 @@ def main() -> None:
             sys.exit("FAIL: harness does not compile against this kernel source")
         if subprocess.run([str(binary)], env=env).returncode != 0:
             sys.exit("FAIL: ehash delete harness found a violation (see above)")
+
+        hc_source = (source_root /
+                     "drivers/net/ethernet/freescale/fman/fman_pcd_hc.c").read_text()
+        if "smp_store_release(&hc_state, hc);" not in hc_source:
+            sys.exit("FAIL: HC state must be published before the barrier can read it")
+        param = re.search(
+            r"static bool ehash_hc_sync_enable;\n"
+            r"module_param_named\(ehash_hc_sync_enable,\s*"
+            r"ehash_hc_sync_enable,\s*bool,\s*0400\);", hc_source)
+        if not param:
+            sys.exit("FAIL: HC barrier must be a read-only boot parameter")
+        hc_functions = param.group() + "\n"
+        hc_functions += "\n".join(
+            extract_function(hc_source, name)
+            for name in ("hc_dqrr", "hc_sync_one",
+                         "fman_pcd_hc_ehash_sync", "hc_fini")
+        )
+        (path / "hc_barrier_body.h").write_text(hc_functions)
+        hc_binary = path / "hc-barrier"
+        hc_harness = (Path(__file__).resolve().parents[1] /
+                      "tests/dut/fman_hc_barrier.c")
+        hc_build = [*compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(path), str(hc_harness), "-o", str(hc_binary)]
+        if use_sanitizers:
+            hc_build += SANITIZERS
+        if subprocess.run(hc_build).returncode != 0:
+            sys.exit("FAIL: HC barrier harness does not compile")
+        failed = [
+            scenario for scenario in ("boot", "sequence", "transport")
+            if subprocess.run([str(hc_binary), scenario], env=env).returncode
+        ]
+        if failed:
+            sys.exit(f"FAIL: HC barrier scenarios failed: {', '.join(failed)}")
+
+        teardown = "\n".join(
+            extract_function(source, name)
+            for name in ("fman_pcd_fe_disengage_full_write",
+                         "fman_pcd_ehash_write")
+        )
+        (path / "fman_teardown_body.h").write_text(teardown)
+        teardown_binary = path / "fman-teardown"
+        teardown_harness = (Path(__file__).resolve().parents[1] /
+                            "tests/dut/fman_teardown.c")
+        teardown_build = [
+            *compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "-Wno-unused-parameter", "-Wno-sign-compare", "-I", str(path),
+            str(teardown_harness), "-o", str(teardown_binary),
+        ]
+        if use_sanitizers:
+            teardown_build += SANITIZERS
+        if subprocess.run(teardown_build).returncode != 0:
+            sys.exit("FAIL: FMan teardown harness does not compile")
+        if subprocess.run([str(teardown_binary)], env=env).returncode != 0:
+            sys.exit("FAIL: FMan teardown did not fail closed")
+
+        token_start = source.index("static atomic64_t fman_pcd_fe_token_seq")
+        token_end = source.index(
+            "EXPORT_SYMBOL_GPL(fman_pcd_fe_alloc_token);", token_start
+        ) + len("EXPORT_SYMBOL_GPL(fman_pcd_fe_alloc_token);")
+        lookup_start = source.index("/* F-280: the live flow for @key")
+        lookup_end = source.index("int fman_pcd_fe_flow_add(", lookup_start)
+        identity = source[token_start:token_end] + "\n"
+        identity += source[lookup_start:lookup_end]
+        identity += "\n".join(
+            extract_function(source, name)
+            for name in ("fman_pcd_fe_flow_add",
+                         "fman_pcd_fe_flow_del_checked",
+                         "fman_pcd_fe_flow_del_owner",
+                         "fman_pcd_fe_flow_del_identified",
+                         "fman_pcd_fe_flow_get_stats_checked",
+                         "fman_pcd_fe_flow_get_stats",
+                         "fman_pcd_fe_flow_get_stats_identified")
+        )
+        (path / "fman_identity_body.h").write_text(identity)
+        pcd_header = (source_root / "include/linux/fsl/fman_pcd.h").read_text()
+        (path / "fman_identity_types.h").write_text("\n".join(
+            extract_struct(pcd_header, name)
+            for name in ("fman_pcd_fe_flow_action", "fman_pcd_nat_params",
+                         "fman_pcd_vlan_params")
+        ))
+        identity_binary = path / "fman-identity"
+        identity_harness = (Path(__file__).resolve().parents[1] /
+                            "tests/dut/fman_ehash_identity.c")
+        identity_build = [
+            *compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "-Wno-unused-parameter", "-pthread", "-I", str(path),
+            str(identity_harness), "-o", str(identity_binary),
+        ]
+        if use_sanitizers:
+            identity_build += SANITIZERS
+        if subprocess.run(identity_build).returncode != 0:
+            sys.exit("FAIL: FMan identity harness does not compile")
+        if subprocess.run([str(identity_binary)], env=env).returncode != 0:
+            sys.exit("FAIL: FMan identity harness found a violation")
+
+        lookup_end = source.index(
+            "static int fman_pcd_ehash_token_add_check", lookup_start
+        )
+        debugfs = source[lookup_start:lookup_end]
+        debugfs += "\n".join(
+            extract_function(source, name)
+            for name in ("fman_pcd_ehash_add_key_natwrap_dbgfs",
+                         "fman_pcd_ehash_debug_clear",
+                         "fman_pcd_fe_flow_write")
+        )
+        (path / "fman_debugfs_owner_body.h").write_text(debugfs)
+        owner_constants = []
+        for owner in ("MASK", "ASK", "FLOWER", "NTUPLE", "WGFP", "DEBUGFS"):
+            match = re.search(
+                rf"(?m)^#define FMAN_PCD_FE_OWNER_{owner}\b[^\n]*",
+                pcd_header,
+            )
+            if not match:
+                sys.exit(f"FAIL: FMan owner constant {owner} is missing")
+            owner_constants.append(match.group())
+        (path / "fman_debugfs_owner_constants.h").write_text(
+            "\n".join(owner_constants) + "\n"
+        )
+        debugfs_binary = path / "fman-debugfs-owner"
+        debugfs_harness = (Path(__file__).resolve().parents[1] /
+                           "tests/dut/fman_debugfs_owner.c")
+        debugfs_build = [
+            *compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "-Wno-unused-parameter", "-Wno-sign-compare", "-I", str(path),
+            str(debugfs_harness), "-o", str(debugfs_binary),
+        ]
+        if use_sanitizers:
+            debugfs_build += SANITIZERS
+        if subprocess.run(debugfs_build).returncode != 0:
+            sys.exit("FAIL: FMan debugfs ownership harness does not compile")
+        if subprocess.run([str(debugfs_binary)], env=env).returncode != 0:
+            sys.exit("FAIL: FMan debugfs ownership harness found a violation")
 
 
 if __name__ == "__main__":

@@ -157,6 +157,7 @@ struct fman_pcd_hc {
 	bool in_flight;
 	bool done;
 	u32 seq;
+	u32 in_flight_seq;
 	enum hc_src last_src;
 	u32 last_status;
 	u32 last_words[4];
@@ -169,6 +170,7 @@ struct fman_pcd_hc {
 	u64 ern;
 	u64 enq_err;
 	u64 timeouts;
+	u64 bad_seq;
 	u64 lat_min_ns;
 	u64 lat_max_ns;
 	u64 lat_sum_ns;
@@ -206,6 +208,8 @@ static enum qman_cb_dqrr_result hc_dqrr(struct fman_pcd_hc_fq *hfq,
 {
 	struct fman_pcd_hc *hc = hfq->hc;
 	unsigned long flags;
+	u32 expected = 0, actual = 0;
+	bool bad_seq = false;
 	int i;
 
 	spin_lock_irqsave(&hc->cb_lock, flags);
@@ -219,14 +223,25 @@ static enum qman_cb_dqrr_result hc_dqrr(struct fman_pcd_hc_fq *hfq,
 			hc->last_words[i] = be32_to_cpu(hc->buf[i]);
 		hc->last_status = be32_to_cpu(dq->fd.status);
 		hc->last_src = src;
-		if (src == HC_SRC_ERR)
+		if (hc->last_words[3] != hc->in_flight_seq) {
+			expected = hc->in_flight_seq;
+			actual = hc->last_words[3];
+			hc->bad_seq++;
+			WRITE_ONCE(hc->failed, true);
+			bad_seq = true;
+		} else if (src == HC_SRC_ERR || hc->last_status) {
 			hc->err_frames++;
-		else
+		} else {
 			hc->confirmed++;
+		}
 		hc->in_flight = false;
 		hc->done = true;
 	}
 	spin_unlock_irqrestore(&hc->cb_lock, flags);
+
+	if (bad_seq)
+		pr_err_ratelimited("fman_pcd_hc: sequence mismatch expected %08x got %08x; buffer retained until reboot\n",
+				   expected, actual);
 
 	return qman_cb_dqrr_consume;
 }
@@ -407,7 +422,7 @@ static int hc_init(struct fman_pcd_hc *hc, unsigned int hwport,
 	void __iomem *bmi;
 	int err;
 
-	if (hc->failed)
+	if (READ_ONCE(hc->failed))
 		return -EIO;
 	if (hc->enabled)
 		return -EALREADY;
@@ -462,7 +477,7 @@ static int hc_sync_one(struct fman_pcd_hc *hc)
 	struct qm_fd fd;
 	unsigned long flags;
 	u64 start, elapsed;
-	bool done;
+	bool done, failed;
 	int err;
 
 	memset(hc->buf, 0, HC_FRAME_LEN);
@@ -474,6 +489,7 @@ static int hc_sync_one(struct fman_pcd_hc *hc)
 	qm_fd_set_contig(&fd, 0, HC_FRAME_LEN);
 
 	spin_lock_irqsave(&hc->cb_lock, flags);
+	hc->in_flight_seq = hc->seq;
 	hc->in_flight = true;
 	hc->done = false;
 	hc->last_src = HC_SRC_NONE;
@@ -498,11 +514,12 @@ static int hc_sync_one(struct fman_pcd_hc *hc)
 		done = hc->done;
 		if (!done && ktime_get_ns() - start >= HC_TIMEOUT_NS) {
 			hc->in_flight = false;
-			hc->failed = true;
+			WRITE_ONCE(hc->failed, true);
 			hc->timeouts++;
 		}
+		failed = hc->failed;
 		spin_unlock_irqrestore(&hc->cb_lock, flags);
-		if (done || hc->failed)
+		if (done || failed)
 			break;
 		if (ktime_get_ns() - start < HC_BUSY_POLL_NS)
 			udelay(1);
@@ -523,7 +540,8 @@ static int hc_sync_one(struct fman_pcd_hc *hc)
 	if (elapsed > hc->lat_max_ns)
 		hc->lat_max_ns = elapsed;
 	hc->lat_sum_ns += elapsed;
-	return hc->last_src == HC_SRC_ERR ? -EIO : 0;
+	return failed || hc->last_src == HC_SRC_ERR || hc->last_status ?
+		-EIO : 0;
 }
 
 static int hc_sync(struct fman_pcd_hc *hc, unsigned int n)
@@ -531,7 +549,7 @@ static int hc_sync(struct fman_pcd_hc *hc, unsigned int n)
 	unsigned int i;
 	int err = 0;
 
-	if (hc->failed)
+	if (READ_ONCE(hc->failed))
 		return -EIO;
 	if (!hc->enabled)
 		return -ENODEV;
@@ -549,7 +567,7 @@ static int hc_fini(struct fman_pcd_hc *hc)
 {
 	int err;
 
-	if (hc->failed)
+	if (READ_ONCE(hc->failed))
 		return -EIO;
 	if (!hc->enabled)
 		return 0;
@@ -584,7 +602,7 @@ static int hc_show(struct seq_file *s, void *unused)
 
 	mutex_lock(&hc->lock);
 	seq_printf(s, "state %s%s%s\n",
-		   hc->failed ? "failed" : hc->enabled ? "enabled" : "idle",
+		   READ_ONCE(hc->failed) ? "failed" : hc->enabled ? "enabled" : "idle",
 		   hc->claimed ? " claimed" : "",
 		   hc->leaked_fqs ? " leaked_fqs" : "");
 	seq_printf(s, "hwport 0x%02x chan 0x%03x conf_chan 0x%03x\n",
@@ -594,8 +612,9 @@ static int hc_show(struct seq_file *s, void *unused)
 			   qman_fq_fqid(&hc->tx.fq),
 			   qman_fq_fqid(&hc->conf.fq),
 			   qman_fq_fqid(&hc->err.fq));
-	seq_printf(s, "sent %llu confirmed %llu err %llu timeouts %llu\n",
-		   hc->sent, hc->confirmed, hc->err_frames, hc->timeouts);
+	seq_printf(s, "sent %llu confirmed %llu err %llu timeouts %llu bad_seq %llu\n",
+		   hc->sent, hc->confirmed, hc->err_frames, hc->timeouts,
+		   hc->bad_seq);
 	seq_printf(s, "late %llu stray %llu ern %llu enq_err %llu\n",
 		   hc->late, hc->stray, hc->ern, hc->enq_err);
 	completed = hc->confirmed + hc->err_frames;
@@ -696,7 +715,7 @@ void fman_pcd_hc_debugfs_init(struct dentry *parent, struct fman_pcd *pcd)
 {
 	struct fman_pcd_hc *hc;
 
-	if (IS_ERR_OR_NULL(parent) || hc_state)
+	if (IS_ERR_OR_NULL(parent) || READ_ONCE(hc_state))
 		return;
 
 	hc = kzalloc(sizeof(*hc), GFP_KERNEL);
@@ -708,7 +727,7 @@ void fman_pcd_hc_debugfs_init(struct dentry *parent, struct fman_pcd *pcd)
 	hc->fman = fman_pcd_get_fman(pcd);
 	hc->hwport = HC_DEFAULT_HWPORT;
 	hc->chan = HC_DEFAULT_CHANNEL;
-	hc_state = hc;
+	smp_store_release(&hc_state, hc);
 
 	debugfs_create_file("hc", 0600, parent, hc, &hc_fops);
 }
