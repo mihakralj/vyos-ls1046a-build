@@ -23,8 +23,11 @@ KSRC_ABS="${1:?Usage: ci-build-accel-ppp.sh /path/to/kernel-source}"
 DEST_DIR="${2:-$(pwd)}"
 WORKSPACE="${GITHUB_WORKSPACE:-.}"
 
-# Match VyOS upstream package.toml commit
-ACCEL_COMMIT="3e30d9b"
+# Match VyOS upstream package.toml commit (vyos-build linux-kernel
+# package.toml, 2026-10-29). Must contain a9e5f8b (T9187): on >= 6.6 an
+# ETH_P_ALL packet_type needs af_packet_net, else dev_add_pack() WARNs and
+# vlan_mon never registers its tap (seen on .185, image 2026.11.05-0322).
+ACCEL_COMMIT="9c2c18e"
 ACCEL_SRC=""
 
 ### Locate accel-ppp-ng source — reuse build.py's clone if available
@@ -51,7 +54,20 @@ fi
 cd "$ACCEL_SRC"
 git reset --hard HEAD 2>/dev/null || true
 git clean --force -d -x 2>/dev/null || true
-git checkout "$ACCEL_COMMIT" 2>/dev/null || echo "WARNING: commit $ACCEL_COMMIT not found, using HEAD"
+if ! git cat-file -e "${ACCEL_COMMIT}^{commit}" 2>/dev/null; then
+  git fetch --quiet origin 2>&1 || true
+  git cat-file -e "${ACCEL_COMMIT}^{commit}" 2>/dev/null \
+    || git fetch --quiet --unshallow origin 2>&1 || true
+fi
+if ! git checkout --quiet "$ACCEL_COMMIT"; then
+  echo "ERROR: accel-ppp-ng commit $ACCEL_COMMIT not available"
+  exit 1
+fi
+echo "### accel-ppp-ng at $(git rev-parse --short=12 HEAD)"
+if ! grep -q 'vlan_pt.af_packet_net' drivers/vlan_mon/vlan_mon.c; then
+  echo "ERROR: vlan_mon.c lacks the af_packet_net fix (T9187); ETH_P_ALL tap would not register"
+  exit 1
+fi
 
 ### Extract kernel version from built linux-image .deb
 KIMAGE_DEB=$(find "$DEST_DIR" -maxdepth 1 -name 'linux-image-*.deb' ! -name '*-dbg*' | head -1)
