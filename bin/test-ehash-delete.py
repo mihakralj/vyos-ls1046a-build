@@ -3,7 +3,7 @@
 
 Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>
 The tree must already carry the F-254/F-256, F-264, F-267 and F-269 fixups;
-ci-setup-kernel.sh runs this right after F-269. Keys select one of two
+ci-setup-kernel.sh runs this after F-271. Keys select one of two
 buckets by their second byte, so one bucket fills while the other must stay
 reachable.
 
@@ -12,8 +12,10 @@ add_key()'s publish tail. Only allocation, list and hardware interfaces are
 stubbed. After every bucket-head store a model of the microcode 210.10.1
 lookup (cumulative nodes, decomp/en-exthash-lookup.asm) walks every bucket.
 Present keys must hit, deleted keys must miss, and a pool block may be freed
-only after a SYNC that completed after the head store that unlinked it. This
-checks layout, lifetime and reachability invariants, not silicon.
+only after a SYNC that completed after the head store that unlinked it.
+Fault cases cover timeout quarantine, mutation exclusion, recovery and
+fail-closed drain. The harness models the documented SYNC contract; it is
+not hardware lifecycle validation.
 """
 
 import os
@@ -70,6 +72,18 @@ static void put_unaligned_be64(u64 v, u8 *p) { v = htobe64(v); memcpy(p, &v, 8);
 struct list_head { struct list_head *next, *prev; };
 #define list_entry(ptr, type, member) \
 	((type *)((char *)(ptr) - offsetof(type, member)))
+static void INIT_LIST_HEAD(struct list_head *head)
+{
+	head->next = head;
+	head->prev = head;
+}
+static void list_add_tail(struct list_head *node, struct list_head *head)
+{
+	node->next = head;
+	node->prev = head->prev;
+	head->prev->next = node;
+	head->prev = node;
+}
 #define list_for_each_entry_safe(pos, tmp, head, member) \
 	for ((pos) = (head)->next == (head) ? NULL : \
 	     list_entry((head)->next, __typeof__(*(pos)), member); \
@@ -121,6 +135,7 @@ struct fman_pcd_ehash_flow {
 	u8 key_size;
 };
 struct fman_pcd_ehash_cu {
+	struct list_head quarantine_node;
 	unsigned int n;
 	struct {
 		void *va;
@@ -138,18 +153,29 @@ struct fman_pcd_ehash_table {
 	void *rec_pool;
 	void *cu_pool;
 	struct fman_pcd_ehash_cu **cu;
+	struct list_head quarantined_cu;
+	struct list_head quarantined_flows;
+	bool poisoned;
+	bool draining;
 };
 
 /* Every pool block the code under test owns, with the last head store
  * after which the FMan walker could reach it. */
-struct block { void *va; bool node; bool live; unsigned int seen; };
+struct block {
+	void *va;
+	bool node;
+	bool live;
+	bool uncertain;
+	unsigned int seen;
+};
 static struct block blocks[256];
 static unsigned int nblocks;
 static unsigned int head_writes, sync_mark, syncs, reads, warnings;
+static unsigned int uncertain_frees;
 static unsigned int ehash_sync_timeouts, ehash_sync_recovered, ehash_sync_wedged;
 #define FMAN_EHASH_SYNC_TRIES 3
 static unsigned int metadata_freed, fail_in;
-static bool wmb_pending, barrier, draining;
+static bool wmb_pending, barrier;
 static struct fman_pcd_ehash_table *cur;
 
 static struct block *block_of(const void *va)
@@ -282,8 +308,7 @@ static void *dma_pool_zalloc(void *pool, int gfp, dma_addr_t *dma)
 	*dma = (uintptr_t)va;
 	return va;
 }
-/* A block may be freed only once no head reaches it and a SYNC completed
- * after the head store that unlinked it (drain runs with ports detached). */
+/* Every retirement requires a successful post-unlink SYNC. */
 static void dma_pool_free(void *pool, void *va, dma_addr_t dma)
 {
 	struct block *blk = block_of(va);
@@ -291,7 +316,9 @@ static void dma_pool_free(void *pool, void *va, dma_addr_t dma)
 	assert(blk && dma == (uintptr_t)va);
 	assert(blk->node == (pool == cur->cu_pool));
 	assert(blk->node || pool == cur->rec_pool);
-	assert(draining || blk->seen == 0 || sync_mark > blk->seen);
+	if (blk->uncertain)
+		uncertain_frees++;
+	assert(blk->seen == 0 || sync_mark > blk->seen);
 	blk->live = false;
 	free(va);
 }
@@ -335,9 +362,13 @@ static void setup(struct fman_pcd_ehash_table *t, struct fman_pcd *pcd,
 		.rec_pool = &pool_tags[0], .cu_pool = &pool_tags[1], .cu = cus };
 	t->flows.next = t->flows.prev = &t->flows;
 	cur = t;
+	INIT_LIST_HEAD(&t->flows);
+	INIT_LIST_HEAD(&t->quarantined_cu);
+	INIT_LIST_HEAD(&t->quarantined_flows);
 	nblocks = head_writes = sync_mark = syncs = reads = warnings = 0;
 	metadata_freed = fail_in = 0;
-	wmb_pending = barrier = draining = false;
+	uncertain_frees = 0;
+	wmb_pending = barrier = false;
 }
 
 static void make_key(u8 *key, unsigned int id, unsigned int bucket)
@@ -353,11 +384,21 @@ static int add(struct fman_pcd_ehash_table *t, unsigned int id,
 {
 	struct fman_pcd_ehash_flow *flow = calloc(1, sizeof(*flow));
 	dma_addr_t rdma;
-	u8 *r = dma_pool_zalloc(t->rec_pool, GFP_KERNEL, &rdma);
+	u8 *r;
 	u8 key[KEY_MAX];
 	int err;
 
-	assert(flow && r);
+	assert(flow);
+	if (t->draining) {
+		free(flow);
+		return -ESHUTDOWN;
+	}
+	if (fman_pcd_ehash_recover(t)) {
+		free(flow);
+		return -ETIMEDOUT;
+	}
+	r = dma_pool_zalloc(t->rec_pool, GFP_KERNEL, &rdma);
+	assert(r);
 	make_key(key, id, bucket);
 	memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, t->key_size);
 	flow->bucket_h = (u64 *)((u8 *)t->table_base +
@@ -411,14 +452,30 @@ static unsigned int live(bool node)
 	return n;
 }
 
-static void drain(struct fman_pcd_ehash_table *t)
+/* Snapshot the current published generation as if a walker could still be
+ * using it after a later head replacement. This is a test oracle, not a
+ * claim that silicon retains the pointer or that INV0 is a DDR barrier. */
+static void mark_current_generation_uncertain(struct fman_pcd_ehash_table *t,
+					      unsigned int bucket)
 {
-	draining = true;
-	fman_pcd_ehash_flow_drain(t);
-	draining = false;
+	(void)walk(t, bucket, NULL, true);
+	for (unsigned int i = 0; i < nblocks; i++)
+		if (blocks[i].live && blocks[i].seen == head_writes)
+			blocks[i].uncertain = true;
+}
+
+static int drain(struct fman_pcd_ehash_table *t)
+{
+	int err = fman_pcd_ehash_flow_drain(t);
+
+	if (err)
+		return err;
 	assert(!heads[0] && !heads[2] && !cus[0] && !cus[1]);
 	assert(t->flows.next == &t->flows && !bidx[0].first && !bidx[1].first);
+	assert(t->quarantined_cu.next == &t->quarantined_cu);
+	assert(t->quarantined_flows.next == &t->quarantined_flows);
 	assert(live(false) == 0 && live(true) == 0);
+	return 0;
 }
 
 /* Fill one bucket, delete in @order, and check every step against the
@@ -458,7 +515,7 @@ static void test_bucket(u8 key_size, unsigned int n, const unsigned int *order)
 		assert(del(&t, id, 0) == -ENOENT);
 	}
 	assert(!heads[0] && !cus[0]);
-	drain(&t);
+	assert(drain(&t) == 0);
 }
 
 static void test_insert_enomem(void)
@@ -480,7 +537,7 @@ static void test_insert_enomem(void)
 			assert(hits(&t, i, 0));
 		assert(live(false) == 3 && live(true) == 1);
 	}
-	drain(&t);
+	assert(drain(&t) == 0);
 }
 
 static void test_delete_enomem(void)
@@ -501,7 +558,7 @@ static void test_delete_enomem(void)
 	assert(add(&t, 4, 0) == 0);
 	for (unsigned int i = 1; i < 5; i++)
 		assert(hits(&t, i, 0));
-	drain(&t);
+	assert(drain(&t) == 0);
 }
 
 static void test_delete_timeout(void)
@@ -517,25 +574,27 @@ static void test_delete_timeout(void)
 	for (unsigned int i = 0; i < 3; i++)
 		assert(add(&t, i, 0) == 0);
 	assert(syncs == 1 && warnings == 0);
+	mark_current_generation_uncertain(&t, 0);
 	fm.timeout = true;
 	freed = metadata_freed;
 	synced = syncs;
 	reads = 0;
-	assert(del(&t, 1, 0) == 0);	/* publishes node C 5, keeps B */
+	assert(del(&t, 1, 0) == -ETIMEDOUT);	/* unlinked, quarantined */
 	assert(syncs == synced + 3 && reads == 300000 && warnings == 3);
 	assert(ehash_sync_wedged == 1 && ehash_sync_timeouts == 3 && ehash_sync_recovered == 0);
-	assert(metadata_freed == freed + 2);	/* flow + old node list */
+	assert(metadata_freed == freed);
 	assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
-	assert(live(false) == 3 && live(true) == 2);	/* record + old node kept */
+	assert(live(false) == 3 && live(true) == 2);
 	rec = &blocks[1];
 	node = &blocks[4];
 	assert(rec->live && !rec->node && node->live && node->node);
 	assert(rec->va && ((u8 *)rec->va)[FMAN_EHASH_FLOW_KEY_OFF] == 1);
-	rec->live = node->live = false;	/* test cleanup only */
-	free(rec->va);
-	free(node->va);
+	assert(del(&t, 0, 0) == -ETIMEDOUT);
+	assert(drain(&t) == -ETIMEDOUT);
+	assert(rec->live && node->live && uncertain_frees == 0);
 	fm.timeout = false;
-	drain(&t);
+	assert(drain(&t) == 0);
+	assert(uncertain_frees > 0);
 }
 
 static void test_insert_timeout(void)
@@ -554,11 +613,77 @@ static void test_insert_timeout(void)
 	for (unsigned int i = 0; i < 3; i++)
 		assert(hits(&t, i, 0));
 	assert(live(true) == 2);	/* new node + kept old node */
-	blocks[2].live = false;	/* test cleanup only: the old node */
-	assert(blocks[2].node);
-	free(blocks[2].va);
 	fm.timeout = false;
-	drain(&t);
+	assert(drain(&t) == 0);
+}
+
+static void test_uncertain_generation_quarantine(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+	unsigned int freed;
+
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(add(&t, i, 0) == 0);
+	assert(live(true) == 1);
+	mark_current_generation_uncertain(&t, 0);
+
+	/* This publish leaves the previous generation quarantined. */
+	fm.timeout = true;
+	assert(add(&t, 3, 0) == 0);
+	assert(warnings == 1 && live(true) == 3);
+	assert(hits(&t, 0, 0) && hits(&t, 1, 0) &&
+	       hits(&t, 2, 0) && hits(&t, 3, 0));
+
+	/* Mutations stay blocked while recovery SYNC times out. */
+	assert(del(&t, 0, 0) == -ETIMEDOUT);
+	assert(add(&t, 0, 0) == -ETIMEDOUT);
+	assert(uncertain_frees == 0);
+
+	/* A failed drain removes heads but retains every reachable allocation. */
+	freed = metadata_freed;
+	assert(drain(&t) == -ETIMEDOUT);
+	assert(t.draining && !heads[0] && indexed(0) == 4);
+	assert(live(false) == 4 && live(true) == 3);
+	assert(metadata_freed == freed && uncertain_frees == 0);
+	assert(add(&t, 4, 0) == -ESHUTDOWN);
+
+	/* A later successful barrier releases all retained generations. */
+	fm.timeout = false;
+	assert(drain(&t) == 0);
+	assert(uncertain_frees > 0);
+}
+
+static void test_uncertain_generation_delete_reinsert(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t;
+
+	setup(&t, &pcd, 50);
+	for (unsigned int i = 0; i < 3; i++)
+		assert(add(&t, i, 0) == 0);
+	mark_current_generation_uncertain(&t, 0);
+
+	fm.timeout = true;
+	assert(add(&t, 3, 0) == 0);
+	assert(del(&t, 1, 0) == -ETIMEDOUT);
+	assert(add(&t, 1, 0) == -ETIMEDOUT);
+	assert(indexed(0) == 4 && hits(&t, 1, 0));
+	assert(uncertain_frees == 0);
+
+	/* The successful recovery barrier must precede delete and reinsertion. */
+	fm.timeout = false;
+	assert(del(&t, 1, 0) == 0);
+	assert(indexed(0) == 3 && !hits(&t, 1, 0));
+	assert(add(&t, 1, 0) == 0);
+	assert(indexed(0) == 4);
+	for (unsigned int i = 0; i < 4; i++)
+		assert(hits(&t, i, 0));
+	assert(uncertain_frees > 0);
+	assert(drain(&t) == 0);
 }
 
 static void test_sync_retry(void)
@@ -581,7 +706,7 @@ static void test_sync_retry(void)
 	assert(ehash_sync_wedged == wedged);
 	assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
 	assert(live(true) == 1 && live(false) == 2);
-	drain(&t);
+	assert(drain(&t) == 0);
 }
 
 static void test_missing_and_invalid(void)
@@ -622,7 +747,9 @@ int main(void)
 	test_insert_timeout();
 	test_sync_retry();
 	test_missing_and_invalid();
-	puts("OK: ehash cumulative-node buckets (walker model), copy-on-write SYNC-before-free, ENOMEM, SYNC-timeout retention, drain");
+	test_uncertain_generation_quarantine();
+	test_uncertain_generation_delete_reinsert();
+	puts("OK: ehash walker model; generation quarantine, blocked delete/reinsert, recovery, and fail-closed drain");
 	return 0;
 }
 """
@@ -639,11 +766,11 @@ def extract_add_tail(source: str) -> str:
     """add_key()'s F-269 publish block: flow fields through the old-node
     free. Everything between runs unchanged in the harness."""
     first = "\tflow->record = r;\n\tflow->record_dma = rdma;\n"
-    last = "\t\t\tfman_pcd_ehash_cu_free(t, old_cu);\n\t}\n"
+    last = "\t/* F-148 v6: Write key + mask to CC match table"
     if source.count(first) != 1 or source.count(last) != 1:
         raise ValueError("add_key() F-269 publish block was not found")
     start = source.index(first)
-    return source[start:source.index(last, start) + len(last)]
+    return source[start:source.index(last, start)]
 
 
 SANITIZERS = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
@@ -685,6 +812,7 @@ def main() -> None:
     functions = "\n".join(extract_function(source, name) for name in (
         "fman_pcd_ehash_cu_stride", "fman_pcd_ehash_cu_free",
         "fman_pcd_ehash_bucket_publish", "fman_pcd_ehash_sync",
+        "fman_pcd_ehash_recover",
         "fman_pcd_ehash_flow_drain", "fman_pcd_ehash_del_key"))
     tail = extract_add_tail(source)
     with tempfile.TemporaryDirectory(prefix="ask2-ehash-delete-") as directory:

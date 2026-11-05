@@ -26,7 +26,12 @@
  *   echo "touch <m>"   > .../ctl   0 none, 1 first and last 64 B, 2 read the
  *                                  whole frame, 3 read and write the whole frame
  *   echo "reset"       > .../ctl   zero the counters
- *   echo "destroy"     > .../ctl   refused until safe queue teardown exists
+ *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
+ *
+ * Sink lifetime contract: sink FQs are never retired or destroyed.  Stale FE
+ * records left by a failed delete keep steering into a live sink, whose
+ * no-consumer path releases every frame to BMan, so no FQRN/ORL/drain path
+ * is needed.  Queues are released only by reboot.
  *   cat .../stats                  fqid, cpu, frames, bytes, errors, polls, FQ state
  */
 
@@ -328,7 +333,7 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			s->polls = s->irqs = s->sum = 0;
 		}
 	} else if (!strncmp(buf, "destroy", 7)) {
-		pr_warn_ratelimited("dpaa_wgfp: sink destruction is not yet safe; reboot to release queues\n");
+		pr_warn_ratelimited("dpaa_wgfp: sinks are boot-lifetime; reboot to release queues\n");
 		err = -EOPNOTSUPP;
 	} else {
 		err = -EINVAL;
@@ -412,10 +417,15 @@ EXPORT_SYMBOL_GPL(dpaa_wgfp_register);
 
 void dpaa_wgfp_unregister(void)
 {
+	/*
+	 * Hold wgfp_lock across the grace period: readers load wgfp_ops and
+	 * wgfp_ops_priv separately, so a register racing in before old readers
+	 * finish would pair the old ops with the new priv.
+	 */
 	mutex_lock(&wgfp_lock);
 	rcu_assign_pointer(wgfp_ops, NULL);
-	mutex_unlock(&wgfp_lock);
 	synchronize_rcu();
+	mutex_unlock(&wgfp_lock);
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_unregister);
 
@@ -553,6 +563,7 @@ int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,
 	action.key_size = ks;
 	action.table_idx = 0;
 	action.rx_fqid = qman_fq_fqid(&wgfp_sinks[sink].fq);
+	action.flags = FMAN_PCD_FE_OWNER_WGFP;	/* F-280 */
 	mutex_unlock(&wgfp_lock);
 	err = fman_pcd_fe_flow_add(fm, port_id, &action);
 	return err ? err : sink;
@@ -572,10 +583,10 @@ int dpaa_wgfp_flow_del(struct net_device *in, const struct dpaa_wgfp_tuple *t)
 		return err;
 	wgfp_key(t, key);
 	wedged = fman_pcd_ehash_sync_wedged_count();
-	err = fman_pcd_fe_flow_del(fm, port_id, key, ks);
-	/* A SYNC timeout retains the record but del_key still returns 0:
-	 * report it so the caller quarantines instead of freeing. A wedge
-	 * from a concurrent insert gives a conservative false positive.
+	err = fman_pcd_fe_flow_del_owner(fm, port_id, key, ks,
+					 FMAN_PCD_FE_OWNER_WGFP);
+	/* A delete reports its own SYNC timeout. Also fail closed if any SYNC
+	 * wedged during this operation, even if the wedge was unrelated.
 	 */
 	if (!err && fman_pcd_ehash_sync_wedged_count() != wedged)
 		return -ETIMEDOUT;

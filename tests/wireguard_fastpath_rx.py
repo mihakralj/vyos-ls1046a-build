@@ -25,9 +25,10 @@ def test_rx_lifetime_and_udp_checksums(tmp_path):
     subprocess.run([str(binary)], check=True)
 
 
-def test_rx_admission_requires_explicit_opt_in(tmp_path):
+def test_rx_admission_stays_disabled_until_provenance_is_safe(tmp_path):
     source = SOURCE.read_text()
-    flag_start = source.index("static bool wgfp_rx")
+    assert "module_param(wgfp_rx" not in source
+    flag_start = source.index("static const bool wgfp_rx")
     flag_end = source.index("\n", flag_start)
     start = source.index("static void wgfp_pst_rx_sync(", flag_end)
     start = source.index("static void wgfp_pst_rx_sync(", start + 1)

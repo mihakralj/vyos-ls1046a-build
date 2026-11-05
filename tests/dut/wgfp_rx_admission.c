@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Host harness for wgfp_pst_rx_sync() and the module parameter default. */
+/* Host harness for the fail-closed wgfp_pst_rx_sync() default. */
 #include <arpa/inet.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -83,11 +83,10 @@ static u32 wgfp_tuple_hash(const struct dpaa_wgfp_tuple *tuple)
 	(void)tuple;
 	return 1;
 }
-static struct wgfp_flow *wgfp_flow_find(const struct dpaa_wgfp_tuple *tuple,
-					int ifindex, u32 hash)
+static struct wgfp_flow *wgfp_flow_find_tuple(
+	const struct dpaa_wgfp_tuple *tuple, u32 hash)
 {
 	(void)tuple;
-	(void)ifindex;
 	(void)hash;
 	return NULL;
 }
@@ -115,40 +114,17 @@ int main(void)
 		.family = AF_INET,
 		.hlen = ETH_HLEN + sizeof(struct iphdr) + sizeof(struct udphdr),
 	};
-	struct iphdr *ip = (struct iphdr *)(tmpl.hdr + ETH_HLEN);
-	struct udphdr *udp = (struct udphdr *)(tmpl.hdr + ETH_HLEN +
-					       sizeof(struct iphdr));
-	struct wgfp_flow *flow;
-
-	ip->saddr = htonl(0x0a000001);
-	ip->daddr = htonl(0x0a000002);
-	udp->source = htons(51820);
-	udp->dest = htons(51821);
 
 	wgfp_pst_rx_sync(&pst, &tmpl);
 	if (pst.rxfl || wgfp_nflows || admission_checks || work_queued || warnings) {
-		fprintf(stderr, "default receive mode unexpectedly admitted a flow\n");
+		fprintf(stderr, "disabled receive mode unexpectedly admitted a flow\n");
 		return 1;
 	}
 
-	wgfp_rx = true;
 	wgfp_pst_rx_sync(&pst, &tmpl);
-	flow = pst.rxfl;
-	if (!flow || !flow->rx || flow->ifindex != tmpl.ifindex ||
-	    flow->t.saddr != ip->daddr || flow->t.daddr != ip->saddr ||
-	    flow->t.sport != udp->dest || flow->t.dport != udp->source ||
-	    wgfp_nflows != 1 || admission_checks != 1 ||
-	    work_queued != 1 || warnings != 1) {
-		fprintf(stderr, "explicit receive opt-in did not schedule the flow\n");
+	if (pst.rxfl || wgfp_nflows || admission_checks || work_queued || warnings) {
+		fprintf(stderr, "repeated sync changed disabled receive state\n");
 		return 2;
 	}
-
-	wgfp_rx = false;
-	wgfp_pst_rx_sync(&pst, &tmpl);
-	if (pst.rxfl || !flow->del || work_queued != 2) {
-		fprintf(stderr, "disabling receive mode did not schedule withdrawal\n");
-		return 3;
-	}
-	free(flow);
 	return 0;
 }
