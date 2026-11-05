@@ -17,13 +17,22 @@ def test_failed_fe_delete_retains_owner_and_blocks_reinsert(tmp_path):
     end = source.index("/* FE-VM debugfs flow insert helper", start)
     end = source.rindex("/* ----", start, end)
     (tmp_path / "ask_fe_orphan_body.h").write_text(source[start:end])
+    start = source.index("static int ask_flow_fe_owner_status(")
+    end = source.index("static int ask_neigh_republish(", start)
+    (tmp_path / "ask_fe_owner_status.h").write_text(source[start:end])
+    start = source.index("struct ask_flush_victim {")
+    end = source.index("static int ask_pppoe_collect(", start)
+    flush = source[start:end]
+    start = source.index("static void ask_flow_flush_matching(", end)
+    end = source.index("static void ask_pppoe_flush_fn(", start)
+    (tmp_path / "ask_fe_flush_body.h").write_text(flush + source[start:end])
     binary = tmp_path / "ask_fe_orphan"
     subprocess.run(
         [
-            "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-pthread",
             "-Wno-unused-parameter", "-Wno-unused-function",
             "-I", str(tmp_path), str(HARNESS), "-o", str(binary),
         ],
         check=True,
     )
-    subprocess.run([str(binary)], check=True)
+    subprocess.run([str(binary)], check=True, timeout=30)

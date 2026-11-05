@@ -95,9 +95,11 @@ struct ask_bridge_rec {
 	bool             filtering;	/* learned on a VLAN-filtering bridge */
 	u8               act;		/* enum ask_bridge_act */
 	u32              fqid;		/* out's no-confirm TX FQ */
+	u64              fe_token;	/* identity of the installed FE record */
 	u64              pkts;		/* last hardware hit count read */
 	unsigned long    last_hit;	/* jiffies of the last count change */
-	bool             dead;		/* table freed by a disengage */
+	bool             unsettled;	/* deletion or reclamation unresolved */
+	bool             dead;		/* disengage bookkeeping assumes table gone */
 };
 
 /* A learned SA taken over as externally learned; ask.ko hands it back. */
@@ -451,16 +453,20 @@ static void ask_bridge_rec_del(struct ask_bridge_rec *r)
 	const u8 *sa = r->key + ASK_BRIDGE_K_SA;
 	int rc;
 
+	/* Identity alone cannot prove reclamation or egress-FQ quiescence. */
+	if (r->unsettled && !r->dead)
+		return;
 	if (!r->dead) {
-		/* A failed delete has already unlinked the record (F-254/F-256
-		 * keep only the memory), so tracking goes either way. */
 		rc = ask_hw_l2_record(r->port, r->key, 0, r->act, r->vid,
-				      false);
-		if (rc)
-			pr_warn_ratelimited("ask: bridge: delete %pM>%pM tci 0x%04x on port 0x%02x: %d\n",
+				      r->fe_token, false);
+		if (rc) {
+			r->unsettled = true;
+			pr_warn_ratelimited("ask: bridge: delete %pM>%pM tci 0x%04x on port 0x%02x: %d; retaining unsettled record\n",
 					    sa, r->key + ASK_BRIDGE_K_DA,
 					    get_unaligned_be16(r->key + ASK_BRIDGE_K_TCI),
 					    r->port, rc);
+			return;
+		}
 	}
 	list_del(&r->node);
 	ask_bridge_n_recs--;
@@ -479,13 +485,16 @@ static void ask_bridge_resync(void)
 	ASSERT_RTNL();
 	lockdep_assert_held(&ask_bridge_lock);
 
-	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node)
+	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node) {
+		if (r->unsettled && !r->dead)
+			continue;
 		if (r->dead ||
 		    !ask_bridge_flow_ok(r->br_ifindex, r->in_ifindex,
 					r->out_ifindex, r->key, r->vid,
 					r->filtering, &iport, &fqid, &act) ||
 		    iport != r->port || fqid != r->fqid || act != r->act)
 			ask_bridge_rec_del(r);
+	}
 }
 
 static struct ask_bridge_rec *ask_bridge_rec_find(u8 port, const u8 *key)
@@ -529,7 +538,13 @@ static void ask_bridge_admit_key(struct net_device *br, struct net_device *in,
 	r = kzalloc(sizeof(*r), GFP_KERNEL);
 	if (!r)
 		return;
-	rc = ask_hw_l2_record(iport, key, fqid, act, vid, true);
+	r->fe_token = fman_pcd_fe_alloc_token();
+	if (!r->fe_token) {
+		kfree(r);
+		pr_err_ratelimited("ask: bridge: FE identity exhausted; record stays in software\n");
+		return;
+	}
+	rc = ask_hw_l2_record(iport, key, fqid, act, vid, r->fe_token, true);
 	if (rc) {
 		kfree(r);
 		pr_warn_ratelimited("ask: bridge: add %pM>%pM tci 0x%04x act %u on port 0x%02x failed: %d\n",
@@ -653,9 +668,20 @@ static void ask_bridge_age_fn(struct work_struct *w)
 							   r->br_ifindex);
 		unsigned long age = br ?
 			clock_t_to_jiffies(br_get_ageing_time(br)) : 0;
+		int rc = -ENOENT;
 
-		if (!r->dead && !ask_hw_l2_record_hits(r->port, r->key, &pkts) &&
-		    pkts != r->pkts) {
+		if (r->unsettled)
+			continue;
+		if (!r->dead)
+			rc = ask_hw_l2_record_hits(r->port, r->key, r->fe_token,
+						   &pkts);
+		if (rc == -ESTALE) {
+			r->unsettled = true;
+			pr_warn_ratelimited("ask: bridge: stats identity changed on port 0x%02x; retaining unsettled record\n",
+					    r->port);
+			continue;
+		}
+		if (!rc && pkts != r->pkts) {
 			r->pkts = pkts;
 			r->last_hit = now;
 		} else if (age && time_after_eq(now, r->last_hit + age)) {
@@ -670,16 +696,15 @@ static void ask_bridge_age_fn(struct work_struct *w)
 	rtnl_unlock();
 }
 
-/* @hw_port_id was disengaged: its table and records are gone. The worker
- * releases the SAs (needs rtnl); dead records never match a lookup, so a
- * quick re-engage installs afresh. */
+/* A void disengage result cannot settle an earlier failed deletion. Keep
+ * those records tracked even when the port changes role. */
 void ask_bridge_forget_port(u8 hw_port_id)
 {
 	struct ask_bridge_rec *r;
 
 	mutex_lock(&ask_bridge_lock);
 	list_for_each_entry(r, &ask_bridge_recs, node)
-		if (r->port == hw_port_id)
+		if (r->port == hw_port_id && !r->unsettled)
 			r->dead = true;
 	mutex_unlock(&ask_bridge_lock);
 	ask_bridge_kick();

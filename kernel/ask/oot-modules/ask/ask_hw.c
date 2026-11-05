@@ -1004,23 +1004,23 @@ struct fman *ask_hw_get_fman(void)
 EXPORT_SYMBOL_GPL(ask_hw_get_fman);
 
 /* T-M7-2 S1: recover the per-egress-interface TX FQID saved in the
- * ask_hw_flow_insert() cookie. The caller invokes this immediately after a
- * successful insert and before the cookie is published to any destroy path;
- * RCU still protects the xarray load against asynchronous teardown. */
+ * ask_hw_flow_insert() cookie. Cookie entries are freed immediately after
+ * xa_erase(), so hold the xarray lock until the value has been copied. */
 int ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct ask_hw_flow_cookie *ck;
+	unsigned long flags;
 
 	if (!h || !fqid || !hw_flow_id)
 		return -EINVAL;
 
 	*fqid = 0;
-	rcu_read_lock();
+	xa_lock_irqsave(&h->flow_cookies, flags);
 	ck = ask_hw_cookie_lookup(h, hw_flow_id);
 	if (ck)
 		*fqid = READ_ONCE(ck->sink_fqid);
-	rcu_read_unlock();
+	xa_unlock_irqrestore(&h->flow_cookies, flags);
 
 	return *fqid ? 0 : -ENOENT;
 }
@@ -1993,36 +1993,41 @@ static struct ask_hw_port *ask_hw_l2_port(struct ask_hw_pcd *h, u8 hw_port_id)
  * Add or remove one bridge record (@key -> @fqid) in @hw_port_id's L2_DA
  * table. h->lock makes the profile check and the table
  * operation atomic against disengage: with no per-port table,
- * fman_pcd_fe_flow_add() would fall back to the global ROUTED table. A
- * delete on a port that is no longer L2_DA is a no-op (its table and
- * records were freed with it).
+ * fman_pcd_fe_flow_add() would fall back to the global ROUTED table.
+ * A missing context or L2 port does not prove that the old table was
+ * safely removed; leave the caller's record retained.
  */
 int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
-		     u16 vid, bool add)
+		     u16 vid, u64 fe_token, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
 	int rc;
 
+	if (!key || !fe_token)
+		return -EINVAL;
 	if (!h)
-		return add ? -ENODEV : 0;
+		return -ENODEV;
 	if (add) {
 		rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(),
 					  act, vid, &a);
 		if (rc)
 			return rc;
+		a.owner_token = fe_token;
 	} else {
 		memcpy(a.key, key, FMAN_PCD_FE_L2_DA_KEY_SIZE);
 	}
 
 	mutex_lock(&h->lock);
 	if (!ask_hw_l2_port(h, hw_port_id))
-		rc = add ? -ENODEV : 0;
+		rc = -ENODEV;
 	else if (add)
 		rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
 	else
-		rc = fman_pcd_fe_flow_del(h->fman, hw_port_id, a.key,
-					  FMAN_PCD_FE_L2_DA_KEY_SIZE);
+		rc = fman_pcd_fe_flow_del_identified(h->fman, hw_port_id, a.key,
+						    FMAN_PCD_FE_L2_DA_KEY_SIZE,
+						    FMAN_PCD_FE_OWNER_ASK,
+						    fe_token);
 	mutex_unlock(&h->lock);
 	return rc;
 }
@@ -2030,20 +2035,25 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 /* One record's hardware packet count (the FE writes it on every hit,
  * qdrant 2026-08-22). O(records in the port's table) under fe_lock: for the
  * bridge ageing pass only, never a per-flow stats path (2026-10-10 convoy). */
-int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts)
+int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
+			  u64 *pkts)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	u64 bytes;
 	u32 ts;
 	int rc;
 
+	if (!key || !fe_token || !pkts)
+		return -EINVAL;
 	if (!h)
 		return -ENODEV;
 	mutex_lock(&h->lock);
 	rc = ask_hw_l2_port(h, hw_port_id) ?
-		fman_pcd_fe_flow_get_stats(h->fman, hw_port_id, key,
-					   FMAN_PCD_FE_L2_DA_KEY_SIZE,
-					   pkts, &bytes, &ts) : -ENODEV;
+		fman_pcd_fe_flow_get_stats_identified(h->fman, hw_port_id, key,
+						      FMAN_PCD_FE_L2_DA_KEY_SIZE,
+						      FMAN_PCD_FE_OWNER_ASK,
+						      fe_token, pkts, &bytes,
+						      &ts) : -ENODEV;
 	mutex_unlock(&h->lock);
 	return rc;
 }

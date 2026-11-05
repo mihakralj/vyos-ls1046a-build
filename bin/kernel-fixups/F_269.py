@@ -542,6 +542,44 @@ CALLER_EDITS = [
 ''', 1),
 ]
 
+CLEAR_DONE = "F-269 clear error propagation"
+CLEAR_EDITS = [
+('''	else if (!strncmp(buf, "clear", 5)) {
+		fman_pcd_ehash_drain(pcd);
+		err = 0;
+	}''',
+ '''	else if (!strncmp(buf, "clear", 5)) {
+		/* F-269 clear error propagation */
+		err = fman_pcd_ehash_drain(pcd);
+	}''', 1),
+]
+
+FULL_DISENGAGE_DONE = "F-269 full-disengage error propagation"
+FULL_DISENGAGE_EDITS = [
+('''    /* Step 1-3: SDK-correct ordered teardown (same as fe_arm disengage) */
+    __fman_pcd_fe_arm_disengage(pcd, (u8)port_id);
+
+    /* Step 4: de-wedge the port (zero workspace, re-init ring, restart BMI) */
+    ret = fman_pcd_port_recover(pcd, (u8)port_id);
+    if (ret)
+        pr_warn("fman_pcd fe_disengage_full: port 0x%02x recover returned %d\\n",
+            port_id, ret);
+''',
+ '''    /* F-269 full-disengage error propagation */
+    ret = __fman_pcd_fe_arm_disengage(pcd, (u8)port_id);
+    if (ret)
+        return ret;
+
+    /* Step 4: de-wedge the port (zero workspace, re-init ring, restart BMI) */
+    ret = fman_pcd_port_recover(pcd, (u8)port_id);
+    if (ret) {
+        pr_warn("fman_pcd fe_disengage_full: port 0x%02x recover returned %d\\n",
+            port_id, ret);
+        return ret;
+    }
+''', 1),
+]
+
 
 def main():
     try:
@@ -597,6 +635,38 @@ def main():
             1)
     else:
         print("### F-269: fail-closed teardown callers already applied")
+
+    if CLEAR_DONE not in src:
+        for i, (old, _new, want) in enumerate(CLEAR_EDITS):
+            n = src.count(old)
+            if n != want:
+                print(f"### F-269: FATAL: clear propagation anchor {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        for old, new, _want in CLEAR_EDITS:
+            src = src.replace(old, new, 1)
+    else:
+        for i, (_old, new, want) in enumerate(CLEAR_EDITS):
+            n = src.count(new)
+            if n != want:
+                print(f"### F-269: FATAL: applied clear propagation {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        print("### F-269: clear error propagation already applied")
+
+    if FULL_DISENGAGE_DONE not in src:
+        for i, (old, _new, want) in enumerate(FULL_DISENGAGE_EDITS):
+            n = src.count(old)
+            if n != want:
+                print(f"### F-269: FATAL: full-disengage anchor {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        for old, new, _want in FULL_DISENGAGE_EDITS:
+            src = src.replace(old, new, 1)
+    else:
+        for i, (_old, new, want) in enumerate(FULL_DISENGAGE_EDITS):
+            n = src.count(new)
+            if n != want:
+                print(f"### F-269: FATAL: applied full-disengage {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        print("### F-269: full-disengage error propagation already applied")
 
     src = src.replace("no SYNC, as before F-269",
                       "completed FPM SYNC required before reclaim", 1)

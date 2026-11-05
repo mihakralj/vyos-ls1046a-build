@@ -939,6 +939,11 @@ scripts/config --set-val CONFIG_NLS_ISO8859_1 y
 scripts/config --set-val CONFIG_NLS_UTF8 y
 scripts/config --set-val CONFIG_SQUASHFS y
 scripts/config --set-val CONFIG_OVERLAY_FS y
+# FMan/DPAA devres teardown cannot veto a failed hardware drain.
+scripts/config --set-val CONFIG_FSL_FMAN y
+scripts/config --set-val CONFIG_FSL_DPAA y
+scripts/config --set-val CONFIG_FSL_DPAA_ETH y
+scripts/config --disable CONFIG_OF_OVERLAY
 scripts/config --set-val CONFIG_FUSE_FS y
 scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
 scripts/config --set-val CONFIG_FSL_EDMA y
@@ -1027,6 +1032,8 @@ if [ "${KASAN:-false}" = "true" ]; then
     scripts/config --enable CONFIG_KASAN_VMALLOC
     make olddefconfig
 fi
+
+bash "${GITHUB_WORKSPACE:?}/kernel/common/scripts/check-fman-config.sh" .config
 
 LS1046A_POSTDEFCONFIG_EOF
 
@@ -2712,15 +2719,28 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-283: opt-in passive telemetry for real INV0 SYNC latency and state.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_283.py" 2>&1
     echo "### fman_pcd.c: F-283 ehash SYNC timing telemetry (default off)"
-    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: ehash bucket and SYNC telemetry harness passed"
 fi
 
 # F-284: link the opt-in Host-Command SYNC probe (fman_pcd_hc.c, staged from
 # kernel/common/files). Inert until "init" is written to fman_pcd/<N>/hc.
+if [ ! -f drivers/net/ethernet/freescale/fman/fman_pcd_hc.c ] ||
+   [ ! -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    echo "### F-286: FATAL: FMan PCD and HC sources are required for ASK ownership"
+    exit 1
+fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_hc.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_284.py" 2>&1
     echo "### fman_pcd: F-284 HC SYNC probe linked (default off)"
+    # F-285: only use HC SYNC as a second ehash barrier when explicitly
+    # enabled; unavailable/uninitialized HC fails closed in F-269.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_285.py" 2>&1
+    echo "### fman_pcd: F-285 opt-in production ehash HC barrier"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_286.py" 2>&1
+    echo "### fman_pcd: F-286 identified FE record ownership"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_287.py" 2>&1
+    echo "### fman_pcd: F-287 debugfs and keyless ownership guards"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash bucket and INV0/HC barrier harness passed"
 fi
 
 # F-275: retry a transient AF_XDP detach failure without dropping the XSK
