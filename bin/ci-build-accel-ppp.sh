@@ -61,6 +61,12 @@ if [ -z "$KIMAGE_DEB" ]; then
 fi
 KVER=$(basename "$KIMAGE_DEB" | sed 's/^linux-image-//; s/_.*$//')
 echo "### Kernel version for module ABI matching: $KVER"
+# modules_prepare and the CMake-driven `make -C $KDIR M=...` regenerate
+# kernel.release; without LOCALVERSION they produce `6.x.y+` vermagic and
+# the board rejects the modules. Inherit the shipped suffix (-vyos).
+case "$KVER" in
+  *-*) export LOCALVERSION="-${KVER#*-}" ;;
+esac
 
 ### Prepare kernel tree for out-of-tree module builds
 echo "### Preparing kernel tree for module builds"
@@ -170,11 +176,42 @@ if ! make -j$(nproc) 2>&1; then
   echo "### Built daemon-only (no ipoe.ko/vlan_mon.ko kernel modules)"
 fi
 
-### Sign kernel modules if sign-modules.sh is available
-SIGN_SCRIPT="$WORKSPACE/vyos-build/scripts/package-build/linux-kernel/sign-modules.sh"
-if [ -x "$SIGN_SCRIPT" ]; then
-  echo "### Signing kernel modules"
-  "$SIGN_SCRIPT" . || echo "WARNING: Module signing failed (continuing)"
+### Sign (then xz-compress) kernel modules with the key vmlinux trusts.
+# Upstream sign-modules.sh silently no-ops unless /tmp/ephemeral.{key,pem}
+# exist, which never happens here; CPack then fails on missing *.ko.xz
+# (vyos-build accel-ppp-ng patch 0001 installs ${KMOD_EXT}=.ko.xz when
+# CONFIG_MODULE_COMPRESS_XZ=y). Sign with the persistent F-217 key, verify
+# vermagic, and compress after signing (--keep so CMake doesn't rebuild an
+# unsigned .ko during cpack's preinstall).
+SIGN_KEY="$WORKSPACE/ask-persistent-keys/signing_key.pem"
+SIGN_CERT="$WORKSPACE/ask-persistent-keys/signing_key.x509"
+if [ ! -f "$SIGN_KEY" ] || [ ! -f "$SIGN_CERT" ]; then
+  SIGN_KEY="$KSRC_ABS/certs/signing_key.pem"
+  SIGN_CERT="$KSRC_ABS/certs/signing_key.x509"
+fi
+SIGN_FILE="$KSRC_ABS/scripts/sign-file"
+KMODS=$(find . -type f -name '*.ko')
+if [ -n "$KMODS" ]; then
+  if [ ! -x "$SIGN_FILE" ] || [ ! -f "$SIGN_KEY" ] || [ ! -f "$SIGN_CERT" ]; then
+    echo "ERROR: cannot sign accel-ppp-ng modules (sign-file=$SIGN_FILE key=$SIGN_KEY cert=$SIGN_CERT)"
+    exit 1
+  fi
+  COMPRESS_XZ=0
+  grep -qx 'CONFIG_MODULE_COMPRESS_XZ=y' "$KSRC_ABS/.config" 2>/dev/null && COMPRESS_XZ=1
+  for mod in $KMODS; do
+    VERMAGIC=$(modinfo -F vermagic "$mod" 2>/dev/null || strings "$mod" | sed -n 's/^vermagic=//p' | head -1)
+    case "$VERMAGIC" in
+      "$KVER "*) ;;
+      *) echo "ERROR: $mod vermagic '$VERMAGIC' does not match kernel $KVER"; exit 1 ;;
+    esac
+    echo "### Signing $mod (vermagic: $VERMAGIC)"
+    "$SIGN_FILE" sha512 "$SIGN_KEY" "$SIGN_CERT" "$mod" || { echo "ERROR: sign-file failed for $mod"; exit 1; }
+    tail -c 28 "$mod" | grep -q '~Module signature appended~' || { echo "ERROR: $mod has no signature after signing"; exit 1; }
+    if [ "$COMPRESS_XZ" -eq 1 ]; then
+      rm -f "$mod.xz"
+      xz --compress --keep --check=crc32 --lzma2=dict=1MiB "$mod" || { echo "ERROR: xz failed for $mod"; exit 1; }
+    fi
+  done
 fi
 
 ### Package with cpack
