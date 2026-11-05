@@ -886,7 +886,7 @@ for package in $packages; do
       fi
       echo "### Building accel-ppp-ng ARM64 packages"
       "$GITHUB_WORKSPACE/bin/ci-build-accel-ppp.sh" "$KSRC_ABS_ACCEL" "$(pwd)" || \
-        echo "WARNING: accel-ppp-ng build failed (non-fatal) — PPPoE/L2TP will be unavailable"
+        echo "::warning::accel-ppp-ng build failed (non-fatal) — PPPoE/L2TP will be unavailable"
       echo "### accel-ppp-ng .debs in package dir:"
       ls -lh accel-ppp*.deb 2>/dev/null || echo "  (none produced)"
     fi
