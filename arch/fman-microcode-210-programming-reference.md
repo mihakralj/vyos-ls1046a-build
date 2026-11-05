@@ -783,12 +783,16 @@ reads `0x00000000` idle, `echo sync` clears immediately (0 polls), all fault
 taps clean, port healthy — **the register itself is safe and responsive in
 isolation.**
 
-**[NOTE] Applicability caveat.** §5.12.14.1 is documented in the context of
-swapping *Action Descriptors*; whether the same protocol governs the
-DDR-resident ehash *bucket chain* (a different data structure) is not
-resolved by the RM content found so far. Both are
-live-walked-by-the-FMan-controller structures, and the RM treats
-synchronization as categorically necessary for that class of update.
+**[NOTE] FPM SYNC scope.** The RM gives a general ordering contract beyond
+the Action Descriptor example in §5.12.14.1: §5.6 says a SYNC task stalls
+until all tasks ahead of it have finished, and §5.7.3.14 maps `FMFP_EXTC`
+`INVn` to execution of an external-request TNUM. The 210.10.1 FE external-hash
+lookup is part of packet processing through the FPM, so a completed `INV0`
+has a documented source-level basis for draining earlier lookups before their
+DDR bucket generations are reclaimed. The RM does not name the external-hash
+walker explicitly, and no ehash-timeout or stale-generation fault has been
+induced on silicon. This supports using completed `INV0` as the software
+reclamation barrier; it is not hardware lifecycle validation.
 
 ### 5.4 The SYNC requirement in practice: F-168, and what remains open
 

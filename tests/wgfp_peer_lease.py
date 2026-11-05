@@ -17,7 +17,7 @@ def test_peer_reservation_serializes_writers_and_recovers_lost_responses(tmp_pat
         ("static int wgfp_lab_cfg_set(", "\nstatic int wgfp_lab_cfg_get("),
         ("static void wgfp_stop_work_fn(", "\nstatic DECLARE_WORK("),
         ("static int wgfp_netdev_event(", "\nstatic struct notifier_block wgfp_netdev_nb"),
-        ("static void wgfp_peer_stop(void)\n{", "\nstatic const struct kernel_param_ops wgfp_peer_lease_ops"),
+        ("static int wgfp_peer_stop(void)\n{", "\nstatic const struct kernel_param_ops wgfp_peer_lease_ops"),
     ]
     body = "\n".join(
         source[begin:source.index(end, begin)]
