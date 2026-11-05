@@ -2676,6 +2676,28 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo "### fman_pcd_kg.c: F-277 abort v6 arm on port-disable error"
 fi
 
+# F-278: fman_pcd_release() is a void devm action that cannot veto teardown
+# after a failed ehash drain; forbid sysfs unbind of the built-in FMan parent.
+if [ -f drivers/net/ethernet/freescale/fman/fman.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_278.py" 2>&1
+    echo "### fman.c: F-278 suppress FMan sysfs unbind"
+fi
+
+# F-279: tc-flower (0198) and ntuple (0194) keep ehash owners whose delete
+# failed instead of freeing them; dpaa/mac sysfs unbind suppressed so the
+# netdev-freeing dpaa_remove() cannot drop retained owners.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_279.py" 2>&1
+    echo "### dpaa: F-279 flower/ntuple delete ownership"
+fi
+
+# F-280: shared ehash records carry an owner (ASK/flower/ntuple/WGFP) so one
+# subsystem cannot evict or delete a key another still tracks. After F-279.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_280.py" 2>&1
+    echo "### fman_pcd/dpaa: F-280 ehash owner classes"
+fi
+
 # F-275: retry a transient AF_XDP detach failure without dropping the XSK
 # pool/netdev references. The DPAA callback returns -EAGAIN before teardown
 # when the RX port cannot yet be disabled.

@@ -1,12 +1,12 @@
 # ASK2 jumbo MTU plan: reach vendor parity (9000+)
 
-Status: **Step 0 passed 2026-10-31; Option B adopted (staged, not committed).** Option A/C are no longer needed.
+Status: **Step 0 passed 2026-10-31; Option B adopted.** Patch 0177 was repaired, built in CI run `41887348300`, and is installed on `.185` in image `2026.11.04-1827` (kernel `6.18.60-vyos`). The board is currently at MTU 1500; the new image's jumbo path and 1500-MTU forwarding regression have not yet been exercised.
 
 ### Step 0 result (HW, `.185`, image 2026.10.31-0245, offload engaged, cold-ish boot)
 
 With the 0177 buffer clamp neutralised (mEMAC MAXFRM written live to 9026 after `ip link set mtu 9000`), DF pings at 3000, 3600, 4500, 6000 and 8972 passed through the DUT, and `iperf3 -P4` at MTU 9000 with hardware offload engaged ran 9.86 Gbit/s (127 retransmits), `fe_ehash_stats` hits growing (about 650k per 3 s), `rx dma error` and `rx frame physical error` 0, no kernel warnings, no wedge. Mainline RX scatter-gather (`sg_fd_to_skb()`) and the FE hit path both handle multi-buffer frames, so the vendor-style contiguous 10 KB buffers are unnecessary.
 
-Change staged: `0177` no longer caps the MAC max frame by `dpaa_bp->size`; `data/vyos-1x-036/037/043` guard ceilings raised 3600 to 9000. Still to do: A3 at 9000 on the new image, 30 min soak at MTU 9000 (log `MemFree`, buddyinfo), MTU 1500 regression (A1, B1, C1), and VLAN/PPPoE at jumbo.
+The repaired `0177` no longer caps the MAC max frame by `dpaa_bp->size`; the `data/vyos-1x-036/037/043` guard ceilings are raised to 9000. Still to do on the installed image `2026.11.04-1923`: A3 at 9000, a 30 min MTU-9000 soak (log `MemFree`, buddyinfo), MTU-1500 forwarding regression (A1, B1, C1), and VLAN/PPPoE jumbo tests. These require a planned traffic window; the current board has active VLAN and PPPoE interfaces.
 
 
 
