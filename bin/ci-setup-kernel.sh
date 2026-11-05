@@ -2631,8 +2631,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # models it. After F-269.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_271.py" 2>&1
     echo "### fman_pcd.c: F-271 ehash SYNC retry and counters"
-    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: ehash bucket harness passed"
 fi
 
 # F-270 (engaged-port oversize wedge, 2026-10-22): plain routed ehash records
@@ -2711,6 +2709,18 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_282.py" 2>&1
     echo "### fman_pcd.c: F-282 ehash SYNC timeout injection (default off)"
+    # F-283: opt-in passive telemetry for real INV0 SYNC latency and state.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_283.py" 2>&1
+    echo "### fman_pcd.c: F-283 ehash SYNC timing telemetry (default off)"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash bucket and SYNC telemetry harness passed"
+fi
+
+# F-284: link the opt-in Host-Command SYNC probe (fman_pcd_hc.c, staged from
+# kernel/common/files). Inert until "init" is written to fman_pcd/<N>/hc.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_hc.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_284.py" 2>&1
+    echo "### fman_pcd: F-284 HC SYNC probe linked (default off)"
 fi
 
 # F-275: retry a transient AF_XDP detach failure without dropping the XSK

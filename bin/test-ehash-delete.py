@@ -2,8 +2,9 @@
 """Run the patched ehash insert/delete code against a model of the FMan walker.
 
 Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>
-The tree must already carry the F-254/F-256, F-264, F-267 and F-269 fixups;
-ci-setup-kernel.sh runs this after F-271. Keys select one of two
+The tree must already carry the F-254/F-256, F-264, F-267, F-269, F-271,
+F-282 and F-283 fixups; ci-setup-kernel.sh runs this after the SYNC telemetry
+is applied. Keys select one of two
 buckets by their second byte, so one bucket fills while the other must stay
 reachable.
 
@@ -59,6 +60,7 @@ typedef u64 dma_addr_t;
 #define BUCKETS 2
 #define INV0 0x80000000U
 #define GFP_KERNEL 0
+#define READ_ONCE(x) (x)
 #define swab64(x) __builtin_bswap64(x)
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -173,6 +175,17 @@ static unsigned int nblocks;
 static unsigned int head_writes, sync_mark, syncs, reads, warnings;
 static unsigned int uncertain_frees;
 static unsigned int ehash_sync_timeouts, ehash_sync_recovered, ehash_sync_wedged;
+static unsigned int ehash_sync_inject, ehash_sync_injected;
+static bool ehash_sync_diag;
+static unsigned int ehash_sync_diag_attempts, ehash_sync_diag_completed;
+static unsigned int ehash_sync_diag_pending, ehash_sync_diag_max_polls;
+static unsigned int ehash_sync_diag_last_extc, ehash_sync_diag_last_pending_extc;
+static unsigned long long ehash_sync_diag_max_ns;
+static unsigned long long ehash_sync_diag_lt_1us, ehash_sync_diag_lt_10us;
+static unsigned long long ehash_sync_diag_lt_100us, ehash_sync_diag_lt_1ms;
+static unsigned long long ehash_sync_diag_lt_10ms, ehash_sync_diag_lt_100ms;
+static unsigned long long ehash_sync_diag_ge_100ms;
+static u64 fake_ktime_ns;
 #define FMAN_EHASH_SYNC_TRIES 3
 static unsigned int metadata_freed, fail_in;
 static bool wmb_pending, barrier;
@@ -249,7 +262,13 @@ static void head_store(u64 *head, u64 value)
 
 static void wmb(void) { wmb_pending = true; }
 static void dma_wmb(void) { barrier = true; }
-static void udelay(unsigned int us) { assert(us == 1); }
+static void udelay(unsigned int us)
+{
+	assert(us == 1);
+	fake_ktime_ns += (u64)us * 1000;
+}
+static u64 ktime_get_ns(void) { return fake_ktime_ns; }
+#define pr_warn(...) ((void)0)
 static struct fman *fman_pcd_get_fman(struct fman_pcd *pcd)
 {
 	return pcd->fman;
@@ -709,6 +728,62 @@ static void test_sync_retry(void)
 	assert(drain(&t) == 0);
 }
 
+static void test_sync_diagnostics(void)
+{
+	struct fman fm = { 0 };
+	struct fman_pcd pcd = { .fman = &fm };
+	struct fman_pcd_ehash_table t = { .pcd = &pcd };
+	unsigned int completed = ehash_sync_diag_completed;
+	unsigned int pending = ehash_sync_diag_pending;
+	unsigned int writes = syncs, polls = reads;
+	u32 extc = 0;
+
+	assert(!ehash_sync_diag && ehash_sync_diag_attempts == 0);
+	fm.polls = 2;
+	assert(fman_pcd_ehash_sync(&t, &extc) == 0 && extc == 0);
+	assert(syncs == writes + 1 && reads == polls + 3);
+	writes = syncs;
+	polls = reads;
+	fm.polls = 2;
+	ehash_sync_diag = true;
+	assert(fman_pcd_ehash_sync(&t, &extc) == 0 && extc == 0);
+	assert(ehash_sync_diag_attempts == 1);
+	assert(ehash_sync_diag_completed == completed + 1);
+	assert(ehash_sync_diag_pending == pending);
+	assert(syncs == writes + 1 && reads == polls + 3);
+	assert(ehash_sync_diag_max_polls == 3);
+	assert(ehash_sync_diag_max_ns == 2000);
+	assert(ehash_sync_diag_lt_10us == 1 && ehash_sync_diag_last_extc == 0);
+
+	/* F-282's post-completion injection must not look like a real pending INV0. */
+	ehash_sync_inject = 1;
+	writes = syncs;
+	polls = reads;
+	assert(fman_pcd_ehash_sync(&t, &extc) == 0);
+	assert(syncs == writes + 2 && reads == polls + 2);
+	assert(ehash_sync_injected == 1 && ehash_sync_inject == 0);
+	assert(ehash_sync_diag_completed == completed + 3);
+	assert(ehash_sync_diag_pending == pending);
+
+	fm.timeout = true;
+	pending = ehash_sync_diag_pending;
+	writes = syncs;
+	polls = reads;
+	assert(fman_pcd_ehash_sync(&t, &extc) == -ETIMEDOUT);
+	assert(syncs == writes + FMAN_EHASH_SYNC_TRIES);
+	assert(reads == polls + FMAN_EHASH_SYNC_TRIES * 100000U);
+	assert(ehash_sync_diag_pending == pending + FMAN_EHASH_SYNC_TRIES);
+	assert(ehash_sync_diag_max_polls == 100000);
+	assert(ehash_sync_diag_last_extc == INV0 &&
+	       ehash_sync_diag_last_pending_extc == INV0);
+	assert(ehash_sync_diag_ge_100ms == FMAN_EHASH_SYNC_TRIES);
+	fm.timeout = false;
+	assert(fman_pcd_ehash_sync(&t, &extc) == 0);
+	assert(ehash_sync_diag_last_extc == 0 &&
+	       ehash_sync_diag_last_pending_extc == INV0);
+	ehash_sync_diag = false;
+}
+
 static void test_missing_and_invalid(void)
 {
 	struct fman fm = { 0 };
@@ -746,6 +821,7 @@ int main(void)
 	test_delete_timeout();
 	test_insert_timeout();
 	test_sync_retry();
+	test_sync_diagnostics();
 	test_missing_and_invalid();
 	test_uncertain_generation_quarantine();
 	test_uncertain_generation_delete_reinsert();
@@ -809,11 +885,21 @@ def main() -> None:
         sys.exit("Usage: python3 bin/test-ehash-delete.py <kernel-source-dir>")
     source = (Path(sys.argv[1]) /
               "drivers/net/ethernet/freescale/fman/fman_pcd.c").read_text()
-    functions = "\n".join(extract_function(source, name) for name in (
+    before_sync = (
         "fman_pcd_ehash_cu_stride", "fman_pcd_ehash_cu_free",
-        "fman_pcd_ehash_bucket_publish", "fman_pcd_ehash_sync",
-        "fman_pcd_ehash_recover",
-        "fman_pcd_ehash_flow_drain", "fman_pcd_ehash_del_key"))
+        "fman_pcd_ehash_bucket_publish", "fman_pcd_ehash_sync_diag_record")
+    functions = "\n".join(extract_function(source, name) for name in before_sync)
+    sync = extract_function(source, "fman_pcd_ehash_sync")
+    sync = sync.replace(
+        "WRITE_ONCE(ehash_sync_inject, ehash_sync_inject - 1);",
+        "ehash_sync_inject--;")
+    if "WRITE_ONCE(ehash_sync_inject" in sync:
+        sys.exit("FAIL: could not normalize F-282 param write for host harness")
+    after_sync = (
+        "fman_pcd_ehash_recover", "fman_pcd_ehash_flow_drain",
+        "fman_pcd_ehash_del_key")
+    functions += "\n" + sync + "\n"
+    functions += "\n".join(extract_function(source, name) for name in after_sync)
     tail = extract_add_tail(source)
     with tempfile.TemporaryDirectory(prefix="ask2-ehash-delete-") as directory:
         path = Path(directory)
