@@ -62,14 +62,15 @@ tables are the API**.
 revisions said the HC doorbell was absent because `caps=0x17` has bit 3
 (`FMAN_CAP_HC_DISPATCH`) clear and `fmd_host_cmd_send()` returns `-ENXIO`.
 That bitmask is not decoded from the blob. Our own patch `0086a` assigns it
-(`major>=210 → 0x17`), so it only says that our kernel never built an HC
-path. The vendor reference board `.70` runs the same 210.10.1 microcode,
-dedicates O/H `port@82000` (hwport 0x02, QMan channel 0x809) to HC, and
-uses `FmHcPcdSync()` (an `HC_HCOR_OPCODE_SYNC` frame) as its ehash update
-barrier. Whether HC executes on our mainline-based stack is untested. F-284
-(`fman_pcd_hc.c`, debugfs `fman_pcd/<N>/hc`, off by default) is the probe
-that answers it on silicon. Until it does, the register → MURAM → silicon
-path documented here remains the only path proven on this board.
+(`major>=210 → 0x17`), so it only says that our kernel never enabled the
+separate HC-dispatch capability. The vendor reference board `.70` runs the
+same 210.10.1 microcode, dedicates O/H `port@82000` (hwport 0x02, QMan
+channel 0x809) to HC, and uses `FmHcPcdSync()` (an `HC_HCOR_OPCODE_SYNC`
+frame) as its ehash update barrier. F-284, cold-boot tested on `.185` with
+image 0553, confirmed 110,101/110,101 HC SYNC frames on that microcode.
+This proves the HC-frame transport and confirmation path execute on our
+mainline stack; it does not prove that the confirmation drains our DDR ehash
+walkers or that the distinct `fmd_host_cmd_send()` dispatch API is available.
 
 ### 1.1 The NXP microcode families
 
@@ -88,8 +89,12 @@ feature family (`106` = IPACC: custom classification, independent mode, host
 commands, IPv4/6 frag/reassembly, IPsec, header manipulation; `107` = DSAR +
 partial IPACC; `108` = NG-CAPWAP + FE + IPACC). Second number = HW rev (`.3`
 = FMANv3 Rev1, `.4` = FMANv3 > Rev1; LS1046A r1.0 ⇒ `106.4.18`). `210.x` is
-proprietary, newer than every public family, and diverges from all of them by
-shipping with the HC bit clear.
+proprietary and newer than every public family. Our kernel's `caps=0x17`
+value sets the separate HC-dispatch capability clear, but that mask is
+assigned by patch `0086a`, not decoded from the microcode; it does not
+establish that HC SYNC frames on the dedicated O/H port are unsupported.
+F-284 confirms those frames execute on 210.10.1, while the separate
+`fmd_host_cmd_send()` dispatch path remains unverified.
 
 | Family | CC | IM | HC | IPF | IPR | HM | DSAR | CAPWAP |
 |---|---|---|---|---|---|---|---|---|

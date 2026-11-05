@@ -39,6 +39,7 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/list.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>		/* ARPHRD_PPP: T-M6-SP4 session-down flush */
@@ -519,16 +520,18 @@ struct ask_flow_pending {
 	__be32                  dst_ip;
 	enum ask_hw_dir         dir;	/* pipeline bound at REPLACE time */
 	unsigned long           jiffies_inserted;
-	u32                     generation; /* A3: owner stamp for replay guard */
+	u64                     generation; /* A3: owner stamp for replay guard */
 };
 
 static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       const struct ask_flow_key *key, u32 oif,
 			       u32 action_flags, enum ask_hw_dir dir,
-			       u32 generation);
+			       u64 generation);
 
 static LIST_HEAD(ask_flow_pending_list);
 static DEFINE_SPINLOCK(ask_flow_pending_lock);
+/* Routed publication and withdrawal may sleep; never acquire RTNL here. */
+static DEFINE_MUTEX(ask_flow_lifecycle_lock);
 static unsigned int ask_flow_pending_count;
 static atomic_t ask_flow_pending_deferred = ATOMIC_INIT(0);
 static atomic_t ask_flow_pending_resolved = ATOMIC_INIT(0);
@@ -566,14 +569,15 @@ ask_flow_pending_take_one(int ifindex, int alt_ifindex, __be32 dst_ip)
 	return ret;
 }
 
-static bool ask_flow_pending_drop_cookie(u64 cookie)
+static bool ask_flow_pending_drop_cookie(u64 cookie, u64 generation)
 {
 	struct ask_flow_pending *p, *tmp;
 	bool found = false;
 
 	spin_lock_bh(&ask_flow_pending_lock);
 	list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
-		if (p->cookie == cookie) {
+		if (p->cookie == cookie && p->generation &&
+		    p->generation <= generation) {
 			list_del(&p->node);
 			ask_flow_pending_count--;
 			found = true;
@@ -593,7 +597,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 				    int ingress_ifindex,
 				    __be32 dst_ip,
 				    enum ask_hw_dir dir,
-				    u32 generation)
+				    u64 generation)
 {
 	struct ask_flow_pending *p, *iter;
 
@@ -623,6 +627,11 @@ static int ask_flow_pending_enqueue(u64 cookie,
 	 */
 	list_for_each_entry(iter, &ask_flow_pending_list, node) {
 		if (iter->cookie == cookie) {
+			if (iter->generation > generation) {
+				spin_unlock_bh(&ask_flow_pending_lock);
+				kfree(p);
+				return -ESTALE;
+			}
 			iter->key              = *key;
 			iter->oif              = oif;
 			iter->action_flags     = action_flags;
@@ -702,14 +711,19 @@ static int ask_flow_pending_enqueue(u64 cookie,
 	while ((p = ask_flow_pending_take_one(drain_ifindex, dev->ifindex,
 					      dst_ip))) {
 		drained++;
+		mutex_lock(&ask_flow_lifecycle_lock);
+		if (!ask_flow_gen_is_current(t, p->cookie, p->generation)) {
+			pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%llu (destroyed/superseded)\n",
+					    p->cookie, p->generation);
+			goto resolved_next;
+		}
 		/* Re-resolve so we always pick up the fresh n->ha. */
 		ask_resolve_neigh_v4(dev, dst_ip,
 				     p->key.next_hop_mac, p->key.egress_mac);
 		/* F-111: Drop pending entries with multicast/broadcast
 		 * next-hop — these can never be HW-offloaded. */
 		if (is_multicast_ether_addr(p->key.next_hop_mac)) {
-			kfree(p);
-			continue;
+			goto resolved_next;
 		}
 		if (is_zero_ether_addr(p->key.next_hop_mac)) {
 			/* Race: neigh went back to INCOMPLETE between
@@ -723,22 +737,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 						     p->generation) == 0)
 				pr_info_ratelimited("ask: flow_offload: PR14y re-park cookie=0x%llx dev=%s\n",
 						    p->cookie, netdev_name(dev));
-			kfree(p);
-			continue;
-		}
-
-		/*
-		 * T-M6-A3 (R2): discard a pending entry whose cookie was
-		 * destroyed (tombstoned) or superseded by a newer REPLACE
-		 * while it waited for the neighbour. Replaying it would
-		 * resurrect a flow no conntrack owns.
-		 */
-		if (p->generation != 0 &&
-		    !ask_flow_gen_is_current(t, p->cookie, p->generation)) {
-			pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%u (destroyed/superseded)\n",
-					    p->cookie, p->generation);
-			kfree(p);
-			continue;
+			goto resolved_next;
 		}
 
 		/*
@@ -777,6 +776,8 @@ static int ask_flow_pending_enqueue(u64 cookie,
 			pr_info_ratelimited("ask: flow_offload: PR14y deferred-insert FAIL rc=%d cookie=0x%llx dev=%s\n",
 					    rc, p->cookie, netdev_name(dev));
 		}
+resolved_next:
+		mutex_unlock(&ask_flow_lifecycle_lock);
 		kfree(p);
 	}
 
@@ -799,11 +800,12 @@ struct ask_neigh_mac_ctx {
 struct ask_neigh_mac_fixup {
 	struct list_head    node;
 	u64                 cookie;
+	u64                 fe_token;
 	struct ask_flow_key key;    /* copy with next_hop_mac already patched */
 	u32                 oif;
 	u32                 action_flags;
 	u8                  dir;
-	u32                 generation; /* A3: owner stamp snapshotted at collect */
+	u64                 generation; /* A3: owner stamp snapshotted at collect */
 };
 
 /*
@@ -845,6 +847,7 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
 	if (!fx)
 		return 0;                           /* best-effort; skip on OOM */
 	fx->cookie       = f->cookie;
+	fx->fe_token     = f->fe_token;
 	fx->key          = f->key;
 	ether_addr_copy(fx->key.next_hop_mac, ctx->new_mac);
 	fx->oif          = f->oif;
@@ -858,10 +861,10 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
 
 static int ask_fe_flow_insert(const struct ask_flow_key *key,
 			      unsigned long enq_off, u32 tx_fqid,
-			      const struct net_device *egress_dev);
-static int ask_fe_flow_remove(const struct ask_flow_key *key);
+			      const struct net_device *egress_dev, u64 fe_token);
+static int ask_fe_flow_remove(const struct ask_flow_key *key, u64 fe_token);
 static int ask_fe_flow_remove_retain(const struct ask_flow_key *key,
-				     u64 cookie, const char *what);
+				     u64 cookie, u64 fe_token, const char *what);
 
 /*
  * Install the FE-VM record for an already-published cookie. Single copy of
@@ -869,10 +872,14 @@ static int ask_fe_flow_remove_retain(const struct ask_flow_key *key,
  * republish path.
  */
 static int ask_flow_fe_install(const struct ask_flow_key *key, u32 hw_id,
-			       const struct net_device *egress_dev, u64 cookie)
+			       const struct net_device *egress_dev, u64 cookie,
+			       u64 fe_token)
 {
 	u32 tx_fqid = 0;
-	int rc = ask_hw_flow_get_sink_fqid(hw_id, &tx_fqid);
+	int rc;
+
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	rc = ask_hw_flow_get_sink_fqid(hw_id, &tx_fqid);
 
 	/* T-M7-2 S1 / 2026-08-21 PANIC FIX: the sink FQID MUST be the
 	 * per-egress NO-CONFIRM TX FQ (F-199, B0V=0). Targeting the confirmed
@@ -888,7 +895,57 @@ static int ask_flow_fe_install(const struct ask_flow_key *key, u32 hw_id,
 	/* VLAN flows use the same ehash record path; ask_fe_flow_insert()
 	 * populates the VLAN opcode fields when key->vlan_edit_flags is set. */
 	return ask_fe_flow_insert(key, ask_hw_get_enq_fe_off(), tx_fqid,
-				  egress_dev);
+				  egress_dev, fe_token);
+}
+
+static bool ask_flow_token_is_current(struct ask_flow_table *t, u64 cookie,
+				      u64 fe_token)
+{
+	struct ask_flow *cur;
+	bool matches;
+
+	rcu_read_lock();
+	cur = ask_flow_lookup(t, cookie);
+	matches = cur && fe_token && cur->fe_token == fe_token;
+	rcu_read_unlock();
+	return matches;
+}
+
+static int ask_flow_fe_owner_status(struct ask_flow_table *t, u64 cookie,
+				    u64 generation, u64 fe_token)
+{
+	struct ask_flow *fl;
+	bool matches, hw_backed;
+
+	if (!ask_flow_gen_is_current(t, cookie, generation))
+		return -ESTALE;
+	rcu_read_lock();
+	fl = ask_flow_lookup(t, cookie);
+	matches = fl && fl->generation == generation &&
+		  fl->fe_token == fe_token && fe_token;
+	hw_backed = matches && fl->hw_backed;
+	rcu_read_unlock();
+	if (!matches)
+		return -ESTALE;
+	return hw_backed ? 0 : -EOPNOTSUPP;
+}
+
+static int ask_flow_withdraw_owned(struct ask_flow_table *t, u64 cookie,
+				   u64 generation, u64 fe_token,
+				   const struct ask_flow_key *key,
+				   bool hw_backed, const char *what)
+{
+	int rc;
+
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	if (!fe_token || !key)
+		return -EINVAL;
+	if (hw_backed) {
+		rc = ask_fe_flow_remove_retain(key, cookie, fe_token, what);
+		if (rc)
+			return rc;
+	}
+	return ask_flow_remove_owned_identified(t, cookie, generation, fe_token);
 }
 
 /*
@@ -900,35 +957,53 @@ static int ask_flow_fe_install(const struct ask_flow_key *key, u32 hw_id,
 static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       const struct ask_flow_key *key, u32 oif,
 			       u32 action_flags, enum ask_hw_dir dir,
-			       u32 generation)
+			       u64 generation)
 {
 	struct ask_flow *cur;
 	bool hw_backed = false;
 	u32 hw_id = 0;
+	u64 fe_token = 0;
 	int rc;
 
-	rc = ask_flow_insert_owned(t, cookie, key, oif, action_flags, dir,
-				   generation, &hw_id);
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	rc = ask_flow_insert_owned_identified(t, cookie, key, oif,
+					      action_flags, dir, generation,
+					      &hw_id, &fe_token);
 	if (rc)
 		return rc;
 
 	rcu_read_lock();
 	cur = ask_flow_lookup(t, cookie);
-	if (cur)
+	if (cur && cur->fe_token == fe_token)
 		hw_backed = cur->hw_backed;
+	else
+		rc = -ESTALE;
 	rcu_read_unlock();
+	if (rc)
+		return rc;
 	if (!hw_backed)
 		return 0;
 
-	rc = ask_flow_fe_install(key, hw_id, NULL, cookie);
+	if (!ask_flow_gen_is_current(t, cookie, generation)) {
+		(void)ask_flow_remove_owned_identified(t, cookie, generation,
+						       fe_token);
+		return -ESTALE;
+	}
+	rc = ask_flow_fe_install(key, hw_id, NULL, cookie, fe_token);
 	if (rc) {
-		(void)ask_flow_remove_owned(t, cookie, generation);
+		int wrc = ask_flow_withdraw_owned(t, cookie, generation,
+						  fe_token, key, hw_backed,
+						  "neigh republish rollback");
+
+		if (wrc && wrc != -ENOENT && wrc != -ESTALE)
+			return wrc;
 		return rc;
 	}
-	if (!ask_flow_gen_is_current(t, cookie, generation)) {
-		rc = ask_fe_flow_remove_retain(key, cookie, "stale republish");
-		(void)ask_flow_remove_owned(t, cookie, generation);
-		if (rc && rc != -EAGAIN)
+	if (!ask_flow_gen_is_current(t, cookie, generation) ||
+	    !ask_flow_token_is_current(t, cookie, fe_token)) {
+		rc = ask_flow_withdraw_owned(t, cookie, generation, fe_token,
+					     key, true, "stale republish");
+		if (rc && rc != -ENOENT && rc != -ESTALE)
 			return rc;
 		return -ESTALE;
 	}
@@ -976,19 +1051,21 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 		struct ask_flow *cur;
 		struct ask_flow_key old_key;
 		bool snapshot_ok = false;
+		bool hw_backed = false;
+		bool replaced;
 
+		mutex_lock(&ask_flow_lifecycle_lock);
 		rcu_read_lock();
 		cur = ask_flow_lookup(t, fx->cookie);
-		if (cur) {
+		if (cur && cur->generation == fx->generation &&
+		    cur->fe_token == fx->fe_token) {
 			old_key = cur->key;
+			hw_backed = cur->hw_backed;
 			snapshot_ok = true;
 		}
 		rcu_read_unlock();
-		if (!snapshot_ok) {
-			list_del(&fx->node);
-			kfree(fx);
-			continue;
-		}
+		if (!snapshot_ok)
+			goto neigh_next;
 
 		/*
 		 * T-M6-A3 (R2/R5): only rebuild if the flow we snapshotted at
@@ -1001,34 +1078,24 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 		 * revive a concurrently-destroyed cookie.
 		 */
 		if (!ask_flow_gen_is_current(t, fx->cookie, fx->generation)) {
-			pr_info_ratelimited("ask: neigh: skip stale-MAC rebuild cookie=0x%llx gen=%u (destroyed/superseded)\n",
+			pr_info_ratelimited("ask: neigh: skip stale-MAC rebuild cookie=0x%llx gen=%llu (destroyed/superseded)\n",
 					    fx->cookie, fx->generation);
-			list_del(&fx->node);
-			kfree(fx);
-			continue;
+			goto neigh_next;
 		}
 
-		ask_flow_remove_owned(t, fx->cookie, fx->generation);
+		/* Preserve the software owner and hardware cookie if FE
+		 * withdrawal is uncertain. */
+		rc = ask_flow_withdraw_owned(t, fx->cookie, fx->generation,
+					     fx->fe_token, &old_key, hw_backed,
+					     "neigh stale-MAC");
+		if (rc)
+			goto neigh_next;
 		rcu_read_lock();
 		cur = ask_flow_lookup(t, fx->cookie);
+		replaced = cur != NULL;
 		rcu_read_unlock();
-		if (cur) {
-			list_del(&fx->node);
-			kfree(fx);
-			continue;
-		}
-		/* The silicon record is keyed on the 5-tuple (not the MAC), so
-		 * it must be deleted before it can be re-created. */
-		rc = ask_fe_flow_remove_retain(&old_key, fx->cookie,
-					       "neigh stale-MAC");
-		if (rc) {
-			list_del(&fx->node);
-			kfree(fx);
-			continue;
-		}
-		/* Re-check ownership after the remove: a DESTROY racing the
-		 * remove tombstones the cookie, and insert_owned will then
-		 * refuse to republish (returns -ESTALE) — no resurrection. */
+		if (replaced)
+			goto neigh_next;
 		rc = ask_neigh_republish(t, fx->cookie, &fx->key, fx->oif,
 					 fx->action_flags, fx->dir,
 					 fx->generation);
@@ -1054,6 +1121,8 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 			pr_info_ratelimited("ask: neigh: stale-MAC rebuild cookie=0x%llx dev=%s dst_ip=%pI4 nh=%pM rc=%d\n",
 					    fx->cookie, netdev_name(dev), dst_ip,
 					    fx->key.next_hop_mac, rc);
+neigh_next:
+		mutex_unlock(&ask_flow_lifecycle_lock);
 		list_del(&fx->node);
 		kfree(fx);
 	}
@@ -1189,18 +1258,16 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 	}
 	spin_unlock_bh(&ask_flow_pending_lock);
 
-	/* Now replay HW insert for each ready cookie, lock-free. */
+	/* Replay each ready cookie without holding the pending-list spinlock. */
 	list_for_each_entry_safe(p, tmp, &ready, node) {
 		int rc;
 
 		list_del(&p->node);
-		/* A3 (R2): skip cookies destroyed/superseded while parked. */
-		if (p->generation != 0 &&
-		    !ask_flow_gen_is_current(t, p->cookie, p->generation)) {
-			pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%u (poll, destroyed/superseded)\n",
+		mutex_lock(&ask_flow_lifecycle_lock);
+		if (!ask_flow_gen_is_current(t, p->cookie, p->generation)) {
+			pr_info_ratelimited("ask: flow_offload: drop stale pending cookie=0x%llx gen=%llu (poll, destroyed/superseded)\n",
 					    p->cookie, p->generation);
-			kfree(p);
-			continue;
+			goto poll_next;
 		}
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
@@ -1224,6 +1291,8 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 					    rc, p->cookie, p->egress_ifindex,
 					    p->ingress_ifindex);
 		}
+poll_next:
+		mutex_unlock(&ask_flow_lifecycle_lock);
 		kfree(p);
 	}
 
@@ -2210,189 +2279,129 @@ EXPORT_SYMBOL_GPL(ask_fe_build_key_dual);
 #endif
 
 /* ------------------------------------------------------------------------- */
-/* F-269 caller ownership: retained FE records whose delete failed.          */
+/* F-269 caller containment: keys whose FE delete failed.                   */
 /*                                                                            */
-/* fman_pcd_fe_flow_del() fails BEFORE unlinking (-ESHUTDOWN draining,        */
-/* -ETIMEDOUT poisoned table) or after an unlink whose SYNC timed out; in the */
-/* latter case the PCD quarantines the record itself and a later delete of   */
-/* the same key returns -ENOENT. A record that may still be linked must keep */
-/* an owner, so the FE key moves here once the software flow is gone and is  */
-/* retried until the delete succeeds or reports -ENOENT. An insert of the    */
-/* same FE key settles the orphan first and fails with -EBUSY otherwise, so  */
-/* a retry can never remove a record a newer flow owns.                      */
+/* A failed delete may be linked or unlinked without a completed barrier.    */
+/* Retain its key and exclude ASK flowtable reinsertion. A key-only retry    */
+/* cannot distinguish the old record from a same-owner replacement. This    */
+/* does not retain the egress FQ or netdevice used by an unsettled record.   */
 /* ------------------------------------------------------------------------- */
 struct ask_fe_orphan {
 	struct list_head node;
 	u64 cookie;
+	u64 fe_token;
 	u8 port_id;
 	u8 k[ASK_FE_KEY_SIZE_DUAL];
+	bool emergency;
 };
 
 static LIST_HEAD(ask_fe_orphans);
 static DEFINE_MUTEX(ask_fe_orphan_lock);
+static struct ask_fe_orphan ask_fe_emergency[256];
 static unsigned int ask_fe_orphan_count;
-static unsigned int ask_fe_orphan_backoff_ms = 100;
-static bool ask_fe_orphan_live = true;
 static atomic_t ask_fe_orphan_retained = ATOMIC_INIT(0);
-static atomic_t ask_fe_orphan_settled = ATOMIC_INIT(0);
-static void ask_fe_orphan_retry_fn(struct work_struct *w);
-static DECLARE_DELAYED_WORK(ask_fe_orphan_work, ask_fe_orphan_retry_fn);
 
-#define ASK_FE_ORPHAN_BACKOFF_MAX_MS	30000U
-
-/* Delete settled: removed now, or already unlinked/quarantined by the PCD. */
+/* The FMan API treats an absent key as a settled no-op after recovery. */
 static bool ask_fe_del_settled(int rc)
 {
-	return rc == 0 || rc == -ENOENT;
+	return rc == 0 || rc == -ENOENT || rc == -ESTALE;
 }
 
-static int ask_fe_orphan_del(struct fman *fm, const struct ask_fe_orphan *o)
+static bool ask_fe_orphan_present_locked(u8 port_id,
+					 const u8 k[ASK_FE_KEY_SIZE_DUAL])
 {
-	u8 k[ASK_FE_KEY_SIZE_DUAL];
+	struct ask_fe_orphan *o;
 
-	memcpy(k, o->k, sizeof(k));
-	return fman_pcd_fe_flow_del(fm, o->port_id, k, sizeof(k));
-}
-
-/* Caller holds ask_fe_orphan_lock. */
-static void ask_fe_orphan_kick_locked(bool reset)
-{
-	if (reset)
-		ask_fe_orphan_backoff_ms = 100;
-	if (ask_fe_orphan_live && ask_fe_orphan_count)
-		mod_delayed_work(system_wq, &ask_fe_orphan_work,
-				 msecs_to_jiffies(ask_fe_orphan_backoff_ms));
-}
-
-static void ask_fe_orphan_retry_fn(struct work_struct *w)
-{
-	struct ask_fe_orphan *o, *tmp;
-	struct fman *fm = ask_hw_get_fman();
-	unsigned int left = 0;
-
-	mutex_lock(&ask_fe_orphan_lock);
-	list_for_each_entry_safe(o, tmp, &ask_fe_orphans, node) {
-		int rc = fm ? ask_fe_orphan_del(fm, o) : -ENODEV;
-
-		if (ask_fe_del_settled(rc)) {
-			list_del(&o->node);
-			ask_fe_orphan_count--;
-			atomic_inc(&ask_fe_orphan_settled);
-			pr_info_ratelimited("ask: flow_offload: retained FE record settled cookie=0x%llx rc=%d\n",
-					    o->cookie, rc);
-			kfree(o);
-		} else {
-			left++;
-		}
-	}
-	if (left) {
-		ask_fe_orphan_backoff_ms = min(ask_fe_orphan_backoff_ms * 2,
-					       ASK_FE_ORPHAN_BACKOFF_MAX_MS);
-		pr_warn_ratelimited("ask: flow_offload: %u FE record(s) still retained after failed delete\n",
-				    left);
-		ask_fe_orphan_kick_locked(false);
-	}
-	mutex_unlock(&ask_fe_orphan_lock);
+	lockdep_assert_held(&ask_fe_orphan_lock);
+	list_for_each_entry(o, &ask_fe_orphans, node)
+		if (o->port_id == port_id && !memcmp(o->k, k, sizeof(o->k)))
+			return true;
+	return false;
 }
 
 /*
  * Delete the FE record for @key; on failure keep its FE key as an orphan.
- * Returns 0 when the delete settled, -EAGAIN when the record is retained
- * for retry, or the delete error if even retention failed (no memory): in
- * that case the caller must keep its own owner.
+ * Returns 0 when the delete settled, or -EAGAIN when its key is quarantined.
+ * The emergency slot blocks the entire port if allocation fails.
  */
 static int ask_fe_flow_remove_retain(const struct ask_flow_key *key,
-				     u64 cookie, const char *what)
+				     u64 cookie, u64 fe_token, const char *what)
 {
 	struct ask_fe_orphan *o;
-	int rc = ask_fe_flow_remove(key);
+	u8 k[ASK_FE_KEY_SIZE_DUAL];
+	int rc;
 
-	if (ask_fe_del_settled(rc))
+	if (!key)
+		return -EINVAL;
+	ask_fe_build_key_dual(key, k);
+	mutex_lock(&ask_fe_orphan_lock);
+	if (ask_fe_emergency[key->port_id].emergency ||
+	    ask_fe_orphan_present_locked(key->port_id, k)) {
+		mutex_unlock(&ask_fe_orphan_lock);
+		return -EAGAIN;
+	}
+	rc = ask_fe_flow_remove(key, fe_token);
+	if (ask_fe_del_settled(rc)) {
+		mutex_unlock(&ask_fe_orphan_lock);
 		return 0;
-	if (rc == -EINVAL)
-		return rc;
+	}
 
 	o = kzalloc(sizeof(*o), GFP_KERNEL);
 	if (!o) {
-		pr_err_ratelimited("ask: flow_offload: %s FE delete failed cookie=0x%llx rc=%d and cannot be retained\n",
-				   what, cookie, rc);
-		return rc;
+		o = &ask_fe_emergency[key->port_id];
+		o->emergency = true;
+		pr_err_ratelimited("ask: flow_offload: %s FE delete failed cookie=0x%llx rc=%d; no memory, port 0x%02x quarantined (hardware may still forward)\n",
+				   what, cookie, rc, key->port_id);
 	}
 	o->cookie = cookie;
+	o->fe_token = fe_token;
 	o->port_id = key->port_id;
-	ask_fe_build_key_dual(key, o->k);
-
-	mutex_lock(&ask_fe_orphan_lock);
+	memcpy(o->k, k, sizeof(o->k));
 	list_add_tail(&o->node, &ask_fe_orphans);
 	ask_fe_orphan_count++;
 	atomic_inc(&ask_fe_orphan_retained);
-	ask_fe_orphan_kick_locked(true);
 	mutex_unlock(&ask_fe_orphan_lock);
-	pr_warn_ratelimited("ask: flow_offload: %s FE delete failed cookie=0x%llx rc=%d; record retained for retry\n",
+	pr_warn_ratelimited("ask: flow_offload: %s FE delete failed cookie=0x%llx rc=%d; key quarantined without retry\n",
 			    what, cookie, rc);
 	return -EAGAIN;
 }
 
-/*
- * Before an insert: settle any orphan with the same port and FE key. Returns
- * -EBUSY if it is still retained (the flow stays in software).
- */
-static int ask_fe_orphan_claim(struct fman *fm, u8 port_id,
-			       const u8 k[ASK_FE_KEY_SIZE_DUAL])
+/* Serialize publication with deletion and orphan registration. */
+static int ask_fe_flow_publish(struct fman *fm, u8 port_id,
+			       const u8 k[ASK_FE_KEY_SIZE_DUAL],
+			       const struct fman_pcd_fe_flow_action *action)
 {
-	struct ask_fe_orphan *o, *tmp;
-	int ret = 0;
+	int rc;
 
 	mutex_lock(&ask_fe_orphan_lock);
-	list_for_each_entry_safe(o, tmp, &ask_fe_orphans, node) {
-		int rc;
-
-		if (o->port_id != port_id || memcmp(o->k, k, sizeof(o->k)))
-			continue;
-		rc = ask_fe_orphan_del(fm, o);
-		if (!ask_fe_del_settled(rc)) {
-			ret = -EBUSY;
-			break;
-		}
-		list_del(&o->node);
-		ask_fe_orphan_count--;
-		atomic_inc(&ask_fe_orphan_settled);
-		kfree(o);
-	}
+	if (ask_fe_emergency[port_id].emergency ||
+	    ask_fe_orphan_present_locked(port_id, k))
+		rc = -EBUSY;
+	else
+		rc = fman_pcd_fe_flow_add(fm, port_id, action);
 	mutex_unlock(&ask_fe_orphan_lock);
-	return ret;
+	return rc;
 }
 
-/* Module exit: stop retries, make one last attempt, report what remains. */
+/* Module exit does not prove that retained hardware owners were settled. */
 static void ask_fe_orphan_exit(void)
 {
 	struct ask_fe_orphan *o, *tmp;
-	struct fman *fm;
 	unsigned int left = 0;
 
 	mutex_lock(&ask_fe_orphan_lock);
-	ask_fe_orphan_live = false;
-	mutex_unlock(&ask_fe_orphan_lock);
-	cancel_delayed_work_sync(&ask_fe_orphan_work);
-
-	fm = ask_hw_get_fman();
-	mutex_lock(&ask_fe_orphan_lock);
 	list_for_each_entry_safe(o, tmp, &ask_fe_orphans, node) {
-		int rc = fm ? ask_fe_orphan_del(fm, o) : -ENODEV;
-
-		if (!ask_fe_del_settled(rc)) {
-			left++;
-			pr_err("ask: flow_offload: exit with FE record still linked cookie=0x%llx port=0x%02x rc=%d; PCD table teardown owns it\n",
-			       o->cookie, o->port_id, rc);
-		}
+		left++;
+		pr_err("ask: flow_offload: exit with unsettled FE record cookie=0x%llx port=0x%02x; teardown not verified\n",
+		       o->cookie, o->port_id);
 		list_del(&o->node);
 		ask_fe_orphan_count--;
-		kfree(o);
+		if (!o->emergency)
+			kfree(o);
 	}
 	mutex_unlock(&ask_fe_orphan_lock);
-	ask_pr_info("flow_offload: retained FE deletes retained=%d settled=%d unsettled_at_exit=%u\n",
-		    atomic_read(&ask_fe_orphan_retained),
-		    atomic_read(&ask_fe_orphan_settled), left);
+	ask_pr_info("flow_offload: quarantined FE keys=%d unsettled_at_exit=%u\n",
+		    atomic_read(&ask_fe_orphan_retained), left);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2405,15 +2414,15 @@ static void ask_fe_orphan_exit(void)
  */
 static int ask_fe_flow_insert(const struct ask_flow_key *key,
 			      unsigned long enq_off, u32 tx_fqid,
-			      const struct net_device *egress_dev)
+			      const struct net_device *egress_dev, u64 fe_token)
 {
 	struct fman_pcd_fe_flow_action action;
 	struct fman *fm;
 	int rc, table_idx;
 	u8 key_buf[ASK_FE_KEY_SIZE_DUAL];
 
-	if (!key) {
-		ask_pr_dbg("fe_flow_insert: NULL key (flow destroyed) -- skipping\n");
+	if (!key || !fe_token) {
+		ask_pr_warn("fe_flow_insert: missing key or FE owner token\n");
 		return -EINVAL;
 	}
 
@@ -2436,6 +2445,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	ask_fe_build_key_dual(key, key_buf);
 	memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_DUAL);
 	action.key_size = ASK_FE_KEY_SIZE_DUAL;
+	action.owner_token = fe_token;
 	table_idx = 0;
 	action.enq_off   = enq_off;
 	/* F-204 / T-M6-1 Phase 2a: explicit ehash selector. This is SEPARATE
@@ -2557,12 +2567,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 
 	/* Drive the real FMan (fman_get_pcd -> ehash) and surface failures so
 	 * callers can roll back provisional HW-backed ownership. */
-	rc = ask_fe_orphan_claim(fm, key->port_id, key_buf);
-	if (rc) {
-		ask_pr_warn("fe_flow_insert: FE key still retained after failed delete; flow stays in software\n");
-		return rc;
-	}
-	rc = fman_pcd_fe_flow_add(fm, key->port_id, &action);
+	rc = ask_fe_flow_publish(fm, key->port_id, key_buf, &action);
 	if (rc)
 		ask_pr_warn("F-195 flow-add return=%d fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u\n",
 			    rc, fm, &action, key->port_id, table_idx,
@@ -2576,7 +2581,7 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
  * port_id prefix, preserved in @key since insert time), so fman_pcd_fe_flow_del
  * (per-key, F-117) matches and unlinks just this flow — not clear-all.
  */
-static int ask_fe_flow_remove(const struct ask_flow_key *key)
+static int ask_fe_flow_remove(const struct ask_flow_key *key, u64 fe_token)
 {
 	struct fman *fm;
 	u8 k[ASK_FE_KEY_SIZE_DUAL];
@@ -2599,7 +2604,8 @@ static int ask_fe_flow_remove(const struct ask_flow_key *key)
 	 * selects THIS port's routed-IPv4 table instance (F-220/F-221), matching
 	 * the insert side which passed key->port_id. v6 delete still selects the
 	 * global table by key length; the port arg is harmless there. */
-	return fman_pcd_fe_flow_del(fm, key->port_id, k, klen);
+	return fman_pcd_fe_flow_del_identified(fm, key->port_id, k, klen,
+					       FMAN_PCD_FE_OWNER_ASK, fe_token);
 }
 
 
@@ -2903,25 +2909,37 @@ static u16 ask_flow_cookie_mtu(unsigned long cookie)
 struct ask_flush_victim {
 	struct list_head node;
 	u64 cookie;
-	u32 generation;
+	u64 fe_token;
+	u64 generation;
+	bool hw_backed;
 	struct ask_flow_key key;
 };
 
-static int ask_pppoe_collect(struct ask_flow *f, void *arg)
+static int ask_collect_flush_victim(struct ask_flow *f, void *arg)
 {
 	struct ask_flush_victim *v;
 
-	if (!(f->key.vlan_edit_flags &
-	      (ASK_VLANF_PPPOE_STRIP | ASK_VLANF_PPPOE_INSERT)))
-		return 0;
 	v = kzalloc(sizeof(*v), GFP_ATOMIC);
-	if (!v)
+	if (!v) {
+		pr_warn_ratelimited("ask: flow_offload: cannot collect cookie=0x%llx for withdrawal; flow retained\n",
+				    f->cookie);
 		return 0;
+	}
 	v->cookie = f->cookie;
+	v->fe_token = f->fe_token;
 	v->generation = f->generation;
+	v->hw_backed = f->hw_backed;
 	v->key = f->key;
 	list_add_tail(&v->node, arg);
 	return 0;
+}
+
+static int ask_pppoe_collect(struct ask_flow *f, void *arg)
+{
+	if (!(f->key.vlan_edit_flags &
+	      (ASK_VLANF_PPPOE_STRIP | ASK_VLANF_PPPOE_INSERT)))
+		return 0;
+	return ask_collect_flush_victim(f, arg);
 }
 
 /*
@@ -2936,24 +2954,55 @@ static void ask_flow_flush_matching(int (*collect)(struct ask_flow *, void *),
 	struct ask_flush_victim *v, *tmp;
 	LIST_HEAD(victims);
 	unsigned int n = 0;
+	int rc;
 
 	if (!t)
 		return;
-	ask_flow_walk(t, collect, &victims);
+	rc = ask_flow_walk(t, collect, &victims);
+	if (rc)
+		pr_warn_ratelimited("ask: flow_offload: %s walk failed rc=%d; some flows may remain\n",
+				    what, rc);
 	list_for_each_entry_safe(v, tmp, &victims, node) {
-		/* The SW remove does not touch silicon, and the nft DESTROY
-		 * that follows finds no entry and returns early: without this
-		 * the ehash record (old SID, old concentrator MAC) outlives
-		 * the session and forwards a matching tuple into it. */
-		if (!ask_flow_remove_owned(t, v->cookie, v->generation)) {
-			if (!ask_fe_flow_remove_retain(&v->key, v->cookie, what))
-				n++;
+		struct ask_flow *cur;
+		bool matches;
+
+		mutex_lock(&ask_flow_lifecycle_lock);
+		if (!v->fe_token) {
+			pr_warn_ratelimited("ask: flow_offload: %s cookie=0x%llx lacks an FE token; flow retained\n",
+					    what, v->cookie);
+			goto next;
 		}
+		rcu_read_lock();
+		cur = ask_flow_lookup(t, v->cookie);
+		matches = cur && cur->generation == v->generation &&
+			  cur->fe_token == v->fe_token;
+		rcu_read_unlock();
+		if (!matches)
+			goto next;
+		if (!ask_flow_gen_tombstone_if_current(t, v->cookie,
+						      v->generation)) {
+			pr_warn_ratelimited("ask: flow_offload: %s cookie=0x%llx generation changed; flow retained\n",
+					    what, v->cookie);
+			goto next;
+		}
+		ask_flow_pending_drop_cookie(v->cookie, v->generation);
+		rc = ask_flow_withdraw_owned(t, v->cookie, v->generation,
+					     v->fe_token, &v->key, v->hw_backed,
+					     what);
+		if (!rc)
+			n++;
+		if (!rc || rc == -ENOENT || rc == -ESTALE)
+			ask_flow_gen_release(t, v->cookie, v->generation);
+		else if (rc != -EAGAIN)
+			pr_warn_ratelimited("ask: flow_offload: %s cookie=0x%llx removal failed rc=%d\n",
+					    what, v->cookie, rc);
+next:
+		mutex_unlock(&ask_flow_lifecycle_lock);
 		list_del(&v->node);
 		kfree(v);
 	}
 	if (n)
-		pr_info("ask: flow_offload: %s, removed %u HW flow(s)\n",
+		pr_info("ask: flow_offload: %s, removed %u flow(s)\n",
 			what, n);
 }
 
@@ -2979,18 +3028,9 @@ EXPORT_SYMBOL_GPL(ask_flow_pppoe_flush);
  */
 static int ask_v6_frag_collect(struct ask_flow *f, void *arg)
 {
-	struct ask_flush_victim *v;
-
 	if (f->key.l3_proto != ASK_FLOW_L3_IPV6 || !f->key.egress_mtu)
 		return 0;
-	v = kzalloc(sizeof(*v), GFP_ATOMIC);
-	if (!v)
-		return 0;
-	v->cookie = f->cookie;
-	v->generation = f->generation;
-	v->key = f->key;
-	list_add_tail(&v->node, arg);
-	return 0;
+	return ask_collect_flush_victim(f, arg);
 }
 
 static void ask_v6_frag_flush_fn(struct work_struct *w)
@@ -3059,21 +3099,12 @@ static bool ask_devchg_hit(u32 ifindex)
 
 static int ask_devchg_collect(struct ask_flow *f, void *arg)
 {
-	struct ask_flush_victim *v;
-
 	if (!f->key.l4_proto)
 		return 0;
 	if (!ask_devchg_snap_all && !ask_devchg_hit(f->oif) &&
 	    !ask_devchg_hit(f->key.iif) && !ask_devchg_hit(f->key.nh_ifindex))
 		return 0;
-	v = kzalloc(sizeof(*v), GFP_ATOMIC);
-	if (!v)
-		return 0;
-	v->cookie = f->cookie;
-	v->generation = f->generation;
-	v->key = f->key;
-	list_add_tail(&v->node, arg);
-	return 0;
+	return ask_collect_flush_victim(f, arg);
 }
 
 static void ask_devchg_flush_fn(struct work_struct *w)
@@ -3133,7 +3164,6 @@ static bool ask_fdb_live;
 
 static int ask_fdbchg_collect(struct ask_flow *f, void *arg)
 {
-	struct ask_flush_victim *v;
 	unsigned int i;
 	bool hit = false;
 
@@ -3149,14 +3179,7 @@ static int ask_fdbchg_collect(struct ask_flow *f, void *arg)
 		hit = !is_zero_ether_addr(f->key.next_hop_mac);
 	if (!hit)
 		return 0;
-	v = kzalloc(sizeof(*v), GFP_ATOMIC);
-	if (!v)
-		return 0;
-	v->cookie = f->cookie;
-	v->generation = f->generation;
-	v->key = f->key;
-	list_add_tail(&v->node, arg);
-	return 0;
+	return ask_collect_flush_victim(f, arg);
 }
 
 static void ask_fdbchg_flush_fn(struct work_struct *w)
@@ -3251,7 +3274,6 @@ static bool ask_fibchg_pfx_match(const struct ask_fibchg_pfx *p, u8 l3,
 
 static int ask_fibchg_collect(struct ask_flow *f, void *arg)
 {
-	struct ask_flush_victim *v;
 	unsigned int i;
 	bool hit = ask_fibchg_snap_all;
 
@@ -3267,14 +3289,7 @@ static int ask_fibchg_collect(struct ask_flow *f, void *arg)
 	}
 	if (!hit)
 		return 0;
-	v = kzalloc(sizeof(*v), GFP_ATOMIC);
-	if (!v)
-		return 0;
-	v->cookie = f->cookie;
-	v->generation = f->generation;
-	v->key = f->key;
-	list_add_tail(&v->node, arg);
-	return 0;
+	return ask_collect_flush_victim(f, arg);
 }
 
 static void ask_fibchg_flush_fn(struct work_struct *w)
@@ -3403,19 +3418,21 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	struct in6_addr dst_ip6 = {};   /* T-M6-1: v6 next-hop for neigh resolve */
 	u8 direct_dst_mac[ETH_ALEN] = {};
 	u8 direct_src_mac[ETH_ALEN] = {};
+	u64 fe_token = 0;
 	bool direct_mac = false;
 	bool is_v6;
 	bool defer_nh;
 	u32 hw_id = 0;
 	u32 action_flags = 0;
 	u32 oif = 0;
-	u32 generation;
+	u64 generation;
 	u32 true_iif = 0;
 	bool have_meta_iif = false;
 	struct ask_pppoe_info pppoe_info;
 	int pppoe;
 	int rc;
 
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
 	if (!t) {
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (no default table) cookie=0x%lx\n",
 				    f->cookie);
@@ -3924,11 +3941,20 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 */
 	{
 		struct ask_flow *existing;
+		u64 existing_gen = 0;
 
 		rcu_read_lock();
 		existing = ask_flow_lookup(t, (u64)f->cookie);
+		if (existing)
+			existing_gen = existing->generation;
 		rcu_read_unlock();
 		if (existing) {
+			if (!ask_flow_gen_is_current(t, (u64)f->cookie,
+						     existing_gen)) {
+				pr_warn_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx has an unsettled owner; flow retained\n",
+						    f->cookie);
+				return -EAGAIN;
+			}
 			pr_info_ratelimited("ask: flow_offload: REPLACE dedup cookie=0x%lx ingress=%s (already installed via first-arrival block)\n",
 					    f->cookie,
 					    ingress_dev ? netdev_name(ingress_dev) : "?");
@@ -4250,9 +4276,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			return -EOPNOTSUPP;
 		}
 
-		rc = ask_flow_insert_owned(t, (u64)f->cookie, &key, oif,
-					   action_flags, __dir, generation,
-					   &hw_id);
+		rc = ask_flow_insert_owned_identified(t, (u64)f->cookie, &key,
+						      oif, action_flags, __dir,
+						      generation, &hw_id,
+						      &fe_token);
 	}
 	if (rc == -EEXIST)
 		return 0;
@@ -4271,50 +4298,38 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return rc;
 	}
 
-	/*
-	 * PR14r (2026-05-17): the previous packed-id tier check
-	 * (hw_id & 0xffff0000) was a holdover from the pre-PR14j packed
-	 * (token<<16 | slot) encoding.  Since PR14j the hw_id is an
-	 * xarray cookie that starts at 1, so this check ALWAYS reported
-	 * "SW-fallback" — masking the fact that HW offload was actually
-	 * working.  The authoritative HW-vs-SW signal is the
-	 * "ask: flow: hw_insert OK ..." vs "ask: flow: hw_insert=-NN
-	 * (SW-fallback)" pr_info emitted by ask_flow.c at insert time
-	 * (one log line per cookie, immediately precedes this one).
-	 * Drop the misleading "tier" string here; keep cookie + hw_id
-	 * for cross-referencing.
-	 */
 	if (READ_ONCE(ask_f266_trace))
 		pr_info("ask: f266: REPLACE done cookie=0x%lx l3=%u sport=%u dport=%u hw_id=0x%08x\n",
 			f->cookie, key.l3_proto, ntohs(key.sport),
 			ntohs(key.dport), hw_id);
-	pr_info_ratelimited("ask: flow_offload: REPLACE installed cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
+	pr_info_ratelimited("ask: flow_offload: REPLACE staged cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
 			    f->cookie, hw_id,
 			    ingress_dev ? netdev_name(ingress_dev) : "?", oif,
 			    key.next_hop_mac, key.egress_mac);
-	/*
-	 * T-M6-A3 (R4): close the rht-publish -> FE-install race window.
-	 * ask_flow_insert_owned() has published the SW entry and HW cookie,
-	 * but the per-key FE record is installed below. A DESTROY can race
-	 * between those two operations. Check ownership BEFORE FE install;
-	 * if tombstoned/superseded, remove only our generation and stop.
-	 */
-	if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
-		(void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
-		return 0;
+	/* Reject stale or software-only owners before using hw_id as a cookie. */
+	rc = ask_flow_fe_owner_status(t, (u64)f->cookie, generation, fe_token);
+	if (rc) {
+		int rrc = ask_flow_remove_owned_identified(t, (u64)f->cookie,
+							 generation, fe_token);
+
+		if (rrc && rrc != -ENOENT && rrc != -ESTALE) {
+			ask_pr_warn("flow_offload: REPLACE owner cleanup=%d cookie=0x%lx\n",
+				    rrc, f->cookie);
+			return rrc;
+		}
+		return rc == -ESTALE ? 0 : rc;
 	}
 	/* Keep offload ownership transactional: only keep the flow in the
 	 * HW-backed table if the FE-VM record was actually installed. */
-	rc = ask_flow_fe_install(&key, hw_id, egress_dev, f->cookie);
+	rc = ask_flow_fe_install(&key, hw_id, egress_dev, f->cookie, fe_token);
 	if (rc) {
-		int rrc;
+		int rrc = ask_flow_withdraw_owned(t, (u64)f->cookie, generation,
+						  fe_token, &key, true,
+						  "REPLACE rollback");
 
 		ask_pr_warn("flow_offload: REPLACE rollback cookie=0x%lx fe_flow_insert=%d\n",
 			    f->cookie, rc);
-		/* Owned remove: only tear down if we are still the owner —
-		 * a newer REPLACE that already superseded us must survive. */
-		rrc = ask_flow_remove_owned(t, (u64)f->cookie, generation);
-		if (rrc && rrc != -ESTALE)
+		if (rrc && rrc != -ENOENT && rrc != -ESTALE)
 			ask_pr_warn("flow_offload: REPLACE rollback remove=%d cookie=0x%lx\n",
 				    rrc, f->cookie);
 		return rc;
@@ -4325,14 +4340,14 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * If we are no longer the owner, delete the FE record we just wrote
 	 * and drop our SW entry so no orphan silicon record survives.
 	 */
-	if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation)) {
-		rc = ask_fe_flow_remove_retain(&key, (u64)f->cookie,
-					       "stale REPLACE");
-		(void)ask_flow_remove_owned(t, (u64)f->cookie, generation);
-		if (rc && rc != -EAGAIN)
+	if (!ask_flow_gen_is_current(t, (u64)f->cookie, generation) ||
+	    !ask_flow_token_is_current(t, (u64)f->cookie, fe_token)) {
+		rc = ask_flow_withdraw_owned(t, (u64)f->cookie, generation,
+					     fe_token, &key, true, "stale REPLACE");
+		if (rc && rc != -ENOENT && rc != -ESTALE)
 			return rc;
-		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — record %s\n",
-				    f->cookie, rc ? "retained for retry" : "removed");
+		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — %s\n",
+				    f->cookie, rc ? "owner superseded" : "FE record removed");
 		return 0;
 	}
 
@@ -4342,9 +4357,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 {
 	struct ask_flow_table *t = ask_flow_default_table();
-	u32 destroy_gen;
+	u64 destroy_gen;
 	int rc;
 
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
 	xa_erase(&ask_offload_first_seen, f->cookie);
 	if (!t)
 		return -EOPNOTSUPP;
@@ -4358,8 +4374,20 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 	 * check. Snapshot the generation we are destroying so the owned-remove
 	 * below cannot tear down a NEWER REPLACE that raced in after us.
 	 */
-	destroy_gen = ask_flow_gen_current(t, (u64)f->cookie);
-	ask_flow_gen_tombstone(t, (u64)f->cookie);
+	destroy_gen = ask_flow_gen_tombstone(t, (u64)f->cookie);
+	if (!destroy_gen) {
+		bool has_flow;
+
+		rcu_read_lock();
+		has_flow = ask_flow_lookup(t, (u64)f->cookie) != NULL;
+		rcu_read_unlock();
+		if (has_flow) {
+			ask_pr_warn("flow_offload: DESTROY cookie=0x%lx has no generation; retaining flow\n",
+				    f->cookie);
+			return -ESTALE;
+		}
+		return 0;
+	}
 
 	/*
 	 * PR14y: drop any pending deferred-insert entry for this cookie
@@ -4368,7 +4396,7 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 	 * lookup below would return -ENOENT and we'd silently succeed,
 	 * but the pending entry would leak until module unload.
 	 */
-	if (ask_flow_pending_drop_cookie((u64)f->cookie)) {
+	if (ask_flow_pending_drop_cookie((u64)f->cookie, destroy_gen)) {
 		ask_pr_dbg("flow_offload: DESTROY drop pending cookie=0x%lx\n",
 			   f->cookie);
 		/* Fall through — also try the rht remove in case the
@@ -4380,69 +4408,71 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 	{
 		struct ask_flow *fl;
 		struct ask_flow_key dkey;
+		u64 fe_token = 0;
+		u64 flow_gen = 0;
 		bool have_key = false;
+		bool hw_backed = false;
 
 		rcu_read_lock();
 		fl = ask_flow_lookup(t, (u64)f->cookie);
 		if (fl) {
+			flow_gen = fl->generation;
 			dkey = fl->key;
+			fe_token = fl->fe_token;
+			hw_backed = fl->hw_backed;
 			have_key = true;
 		}
 		rcu_read_unlock();
 
-		/*
-		 * A3: owned remove bounded by the generation we tombstoned.
-		 * If a newer REPLACE re-claimed this recycled cookie between
-		 * our tombstone and here, remove_owned is a no-op and we must
-		 * NOT delete its FE record — so gate ask_fe_flow_remove on the
-		 * remove actually happening for our generation.
-		 */
-		rc = ask_flow_remove_owned(t, (u64)f->cookie, destroy_gen);
+		if (!have_key) {
+			ask_flow_gen_release(t, (u64)f->cookie, destroy_gen);
+			return 0;
+		}
+		if (flow_gen != destroy_gen) {
+			if (flow_gen < destroy_gen) {
+				ask_pr_warn("flow_offload: DESTROY cookie=0x%lx has older live flow; retaining ownership\n",
+					    f->cookie);
+				return -ESTALE;
+			}
+			return 0;
+		}
+		if (!fe_token) {
+			ask_pr_warn("flow_offload: DESTROY cookie=0x%lx has no FE token; retaining ownership\n",
+				    f->cookie);
+			return -EOPNOTSUPP;
+		}
+
+		/* Do not release the software owner or its hardware cookie
+		 * until the identified FE deletion has settled. */
+		rc = ask_flow_withdraw_owned(t, (u64)f->cookie, destroy_gen,
+					     fe_token, &dkey, hw_backed, "DESTROY");
 		if (rc == -ENOENT) {
 			if (READ_ONCE(ask_f266_trace))
 				pr_info("ask: f266: DESTROY no-flow (ENOENT) cookie=0x%lx\n",
 					f->cookie);
-			ask_flow_gen_release(t, (u64)f->cookie);
+			ask_flow_gen_release(t, (u64)f->cookie, destroy_gen);
 			return 0;
 		}
 		if (rc == -ESTALE) {
 			if (READ_ONCE(ask_f266_trace))
 				pr_info("ask: f266: DESTROY stale (ESTALE) cookie=0x%lx\n",
 					f->cookie);
-			/* A newer REPLACE re-claimed this recycled cookie
-			 * after our tombstone. It owns the flow and its FE
-			 * record now — do NOT delete it, do NOT release the
-			 * registry (the new owner's generation lives there). */
-			pr_info_ratelimited("ask: flow_offload: DESTROY cookie=0x%lx superseded by newer REPLACE — FE delete skipped\n",
+			pr_info_ratelimited("ask: flow_offload: DESTROY cookie=0x%lx superseded by newer owner — preserving it\n",
 					    f->cookie);
 			return 0;
 		}
-		if (rc)
+		if (rc) {
+			pr_warn_ratelimited("ask: flow_offload: DESTROY cookie=0x%lx withdrawal failed rc=%d; owner and tombstone retained\n",
+					    f->cookie, rc);
 			return rc;
+		}
 
 		ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
-		if (READ_ONCE(ask_f266_trace) && have_key)
-			pr_info("ask: f266: DESTROY fe-remove cookie=0x%lx l3=%u sport=%u dport=%u\n",
+		if (READ_ONCE(ask_f266_trace) && hw_backed)
+			pr_info("ask: f266: DESTROY fe-removed cookie=0x%lx l3=%u sport=%u dport=%u\n",
 				f->cookie, dkey.l3_proto, ntohs(dkey.sport),
 				ntohs(dkey.dport));
-		/* Fix B: per-key FE-VM delete (F-117) — removes just this
-		 * flow's silicon record instead of clearing every flow.
-		 * T-M6-8d (ehash-vlan-revival): a VLAN flow now lives in the
-		 * same ehash table as routed/NAT, so plain ask_fe_flow_remove()
-		 * covers it too. */
-		if (have_key) {
-			rc = ask_fe_flow_remove_retain(&dkey, (u64)f->cookie,
-						       "DESTROY");
-			if (rc && rc != -EAGAIN) {
-				pr_warn_ratelimited("ask: flow_offload: DESTROY FE delete failed cookie=0x%lx rc=%d; generation retained as tombstone\n",
-						    f->cookie, rc);
-				return rc;
-			}
-		}
-		/* Registry entry no longer needed: the software flow is gone
-		 * and any FE record that may still be linked is owned by the
-		 * retained-delete list, which blocks reinsertion of its key. */
-		ask_flow_gen_release(t, (u64)f->cookie);
+		ask_flow_gen_release(t, (u64)f->cookie, destroy_gen);
 	}
 	return 0;
 }
@@ -4469,7 +4499,7 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	u64 hw_pkts = 0, hw_bytes = 0;
 	struct ask_flow *fl;
 	struct fman *fm;
-	u32 generation;
+	u64 generation, fe_token;
 	u8 port_id;
 
 	*d_packets = 0;
@@ -4486,6 +4516,7 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	key = fl->key;          /* value copy; safe to use after unlock */
 	port_id = fl->key.port_id;
 	generation = fl->generation;
+	fe_token = fl->fe_token;
 	rcu_read_unlock();
 
 	fm = ask_hw_get_fman();
@@ -4493,9 +4524,11 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 		return false;
 
 	ask_fe_build_key_dual(&key, kbuf);
-	if (fman_pcd_fe_flow_get_stats(fm, port_id, kbuf,
-				       ASK_FE_KEY_SIZE_DUAL,
-				       &hw_pkts, &hw_bytes, NULL) != 0)
+	if (fman_pcd_fe_flow_get_stats_identified(fm, port_id, kbuf,
+						  ASK_FE_KEY_SIZE_DUAL,
+						  FMAN_PCD_FE_OWNER_ASK,
+						  fe_token, &hw_pkts,
+						  &hw_bytes, NULL) != 0)
 		return false;
 
 	/*
@@ -4508,7 +4541,8 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	 */
 	rcu_read_lock();
 	fl = ask_flow_lookup(t, cookie);
-	if (fl && fl->hw_backed && fl->generation == generation) {
+	if (fl && fl->hw_backed && fl->generation == generation &&
+	    fl->fe_token == fe_token) {
 		u32 rx_ifindex, tx_ifindex;
 
 		ask_flow_set_hw_stats(fl, hw_pkts, hw_bytes,
@@ -4659,6 +4693,7 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 {
 	struct flow_cls_offload *f = type_data;
 	struct net_device *dev = ask_flow_block_priv_dev(cb_priv);
+	int rc;
 
 	/*
 	 * TC_SETUP_CLSMATCHALL is owned by the DPAA1 ingress-policer block
@@ -4685,11 +4720,17 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 		pr_info_ratelimited("ask: flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
 				    f->cookie,
 				    dev ? netdev_name(dev) : "?");
-		return ask_flow_offload_replace(dev, f);
+		mutex_lock(&ask_flow_lifecycle_lock);
+		rc = ask_flow_offload_replace(dev, f);
+		mutex_unlock(&ask_flow_lifecycle_lock);
+		return rc;
 	case FLOW_CLS_DESTROY:
 		pr_info_ratelimited("ask: flow_offload: cb invoked DESTROY cookie=0x%lx\n",
 				    f->cookie);
-		return ask_flow_offload_destroy(f);
+		mutex_lock(&ask_flow_lifecycle_lock);
+		rc = ask_flow_offload_destroy(f);
+		mutex_unlock(&ask_flow_lifecycle_lock);
+		return rc;
 	case FLOW_CLS_STATS:
 		/* STATS fires once per refresh interval per flow; keep at
 		 * dbg level to avoid spam. */

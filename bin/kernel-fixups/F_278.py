@@ -2,9 +2,10 @@
 
 fman_pcd_release() runs from a void devm action, so it cannot veto driver-core
 teardown after an ehash drain fails. PCD init is the last step of fman_probe(),
-and FMan is built in (=y), so after a successful probe the release is reachable
-only through sysfs unbind. Suppressing bind attrs removes that path; the action
-then runs only on probe failure, before any FE/ehash state can exist.
+and FMan is built in (=y). The board also disables OF_OVERLAY, while FMan and
+DPAA suppress sysfs bind attrs, so supported runtime unbind, module unload and
+overlay removal paths are unavailable. The devres action remains reachable on
+probe failure, before dependent netdev consumers can engage PCD.
 """
 
 import sys
@@ -25,8 +26,8 @@ NEW = (
     "\t.driver = {\n"
     "\t\t.name = \"fsl-fman\",\n"
     "\t\t.of_match_table = fman_match,\n"
-    "\t\t/* F-278: no sysfs unbind; fman_pcd_release() cannot veto a\n"
-    "\t\t * live teardown when ehash/MURAM owners are still retained. */\n"
+    "\t\t/* F-278: no sysfs unbind; board config disables OF_OVERLAY\n"
+    "\t\t * because fman_pcd_release() cannot veto live devres teardown. */\n"
     "\t\t.suppress_bind_attrs = true,\n"
     "\t},\n"
 )
