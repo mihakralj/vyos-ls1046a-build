@@ -2698,6 +2698,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd/dpaa: F-280 ehash owner classes"
 fi
 
+# F-281: fman_port has no .remove but devm-maps its BMI/QMI registers, which
+# the MAC and PCD keep using; forbid sysfs unbind of the built-in port driver.
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_281.py" 2>&1
+    echo "### fman_port.c: F-281 suppress FMan port sysfs unbind"
+fi
+
+# F-282: lab-only ehash SYNC timeout injection (ehash_sync_inject countdown,
+# default 0). The real INV0 SYNC still completes; only the outcome is
+# reported as a timeout. After F-273 and the ehash harness.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_282.py" 2>&1
+    echo "### fman_pcd.c: F-282 ehash SYNC timeout injection (default off)"
+fi
+
 # F-275: retry a transient AF_XDP detach failure without dropping the XSK
 # pool/netdev references. The DPAA callback returns -EAGAIN before teardown
 # when the RX port cannot yet be disabled.
