@@ -58,10 +58,18 @@ programs it by writing MURAM-resident configuration tables through FMan CCSR
 registers. It is never invoked via a software API or opcode dispatch — **the
 tables are the API**.
 
-**[SPEC]** The Host Command (HC) doorbell is **absent** from this blob:
-`caps=0x17 = 0b0001_0111` (bits 0, 1, 2, 4 set; bit 3 `FMAN_CAP_HC_DISPATCH`
-clear). `fmd_host_cmd_send()` returns `-ENXIO`. The only productive
-programming path is the register → MURAM → silicon path documented here.
+**Correction (2026-11-05): Host Command is not proven absent.** Earlier
+revisions said the HC doorbell was absent because `caps=0x17` has bit 3
+(`FMAN_CAP_HC_DISPATCH`) clear and `fmd_host_cmd_send()` returns `-ENXIO`.
+That bitmask is not decoded from the blob. Our own patch `0086a` assigns it
+(`major>=210 → 0x17`), so it only says that our kernel never built an HC
+path. The vendor reference board `.70` runs the same 210.10.1 microcode,
+dedicates O/H `port@82000` (hwport 0x02, QMan channel 0x809) to HC, and
+uses `FmHcPcdSync()` (an `HC_HCOR_OPCODE_SYNC` frame) as its ehash update
+barrier. Whether HC executes on our mainline-based stack is untested. F-284
+(`fman_pcd_hc.c`, debugfs `fman_pcd/<N>/hc`, off by default) is the probe
+that answers it on silicon. Until it does, the register → MURAM → silicon
+path documented here remains the only path proven on this board.
 
 ### 1.1 The NXP microcode families
 
@@ -667,7 +675,7 @@ following it finds almost entirely zeroed memory — no recognizable AD,
 explained structurally (§5.3.2's index×16 convention), but no evidence of an
 active DDR-backed table exists downstream. (3) The vendor's two genuine
 distributions declare `aging="yes"`, and aging-enabled tables structurally
-require the Host Command this blob lacks (§5.3.3) — so `.106`'s ehash tables
+require Host Command (§5.3.3), which our stack does not yet drive (see the §1 correction; F-284 probes it) — so `.106`'s ehash tables
 may be unable to receive a dynamically-inserted key on this microcode
 regardless of any software bug. A full grep of the vendor SDK finds **zero
 callers** that ever set the `UPDATE_FPM_EXTC` flag either — `.106` has never
@@ -1791,7 +1799,7 @@ with every other field this project's ehash path configures.
 
 | Item | Evidence |
 |---|---|
-| **Host Command doorbell** | `caps=0x17`, bit 3 clear; `fmd_host_cmd_send()` returns `-ENXIO`; `fman_irq()` never services FCEV/REV events |
+| **Host Command path in our kernel** | Absent from our software only, not from the microcode. `caps=0x17` is self-assigned by patch `0086a`; `fmd_host_cmd_send()` returns `-ENXIO`; `fman_irq()` never services FCEV/REV events. Vendor `.70` drives HC SYNC on the same 210.10.1 blob through O/H port 0x02, channel 0x809. F-284 is the opt-in probe (correction 2026-11-05, see §1). |
 | **Custom microcode opcodes** | NXP's microcode SDK, compiler, and signing keys are not distributed to any client |
 | **FE-VM ISA** | No public documentation, no disassembler, no simulator |
 
