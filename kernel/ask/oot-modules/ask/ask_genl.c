@@ -850,8 +850,7 @@ struct ask_flow_table *t = ask_flow_default_table();
 if (!t)
 return -ENOENT;
 
-ask_flow_flush(t);
-return 0;
+return ask_flow_flush(t);
 }
 
 /* ------------------------------------------------------------------------- */

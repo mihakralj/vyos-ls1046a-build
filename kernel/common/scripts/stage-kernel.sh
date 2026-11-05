@@ -258,8 +258,9 @@ if [[ "$STAGE_ONLY" == "1" ]]; then
 fi
 
 info "running make olddefconfig…"
-( cd "$KSRC" && make ARCH="$ARCH" ${CROSS_COMPILE:+CROSS_COMPILE="$CROSS_COMPILE"} olddefconfig ) >/dev/null 2>&1 \
-    || warn "make olddefconfig exited non-zero (config may have unresolved symbols)"
+( cd "$KSRC" && make ARCH="$ARCH" ${CROSS_COMPILE:+CROSS_COMPILE="$CROSS_COMPILE"} olddefconfig ) >/dev/null \
+    || err "make olddefconfig failed (config may have unresolved symbols)"
+bash "$SCRIPT_DIR/check-fman-config.sh" "$DEFCONFIG"
 
 ok "stage-kernel done (kernel=linux-$KVER)"
 echo "Tree ready at: $KSRC"

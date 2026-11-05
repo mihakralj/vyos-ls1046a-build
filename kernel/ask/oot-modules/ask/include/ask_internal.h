@@ -129,8 +129,9 @@ struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
 int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
-		      u16 vid, bool add);
-int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts);
+		      u16 vid, u64 fe_token, bool add);
+int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
+			   u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
 
@@ -840,6 +841,7 @@ struct ask_flow {
 struct rhash_head node;
 struct rcu_head rcu;
 u64 cookie;
+u64 fe_token;
 struct ask_flow_key key;
 u32 hw_flow_id;
 u32 oif;
@@ -875,7 +877,7 @@ bool hw_backed;
  * at insert, immutable, read under rcu_read_lock alongside hw_flow_id. A
  * DESTROY/worker carrying an older generation must not act on this flow.
  */
-u32 generation;
+u64 generation;
 struct ask_flow_stats stats;
 /*
  * T-M8-3: baseline of the silicon FE ehash record's cumulative
@@ -912,12 +914,12 @@ u64 hw_reported_bytes;
  * flow (CR-004), or leaving an orphan silicon record if a DESTROY races the
  * post-publish FE install (a MURAM-leak class per AGENTS.md S6).
  *
- * A monotonic per-cookie generation plus a tombstone closes all of these:
- *  - REPLACE bumps the generation and clears any tombstone (new owner).
+ * A boot-unique generation plus a tombstone protects these operations:
+ *  - REPLACE claims a new generation and clears any tombstone.
  *  - The generation is checked immediately before the rhashtable publish; a
  *    superseded REPLACE rolls back its own HW and does not publish.
- *  - DESTROY tombstones the cookie; it is idempotent but can never affect a
- *    newer generation.
+ *  - DESTROY snapshots and tombstones the generation atomically; conditional
+ *    release cannot erase a newer claim.
  *  - Workers (neigh rebuild, pending replay) snapshot the generation and
  *    discard on mismatch/tombstone.
  *
@@ -982,9 +984,8 @@ int ask_flow_insert(struct ask_flow_table *t,
     enum ask_hw_dir dir,
     u32 *out_hw_id);
 
-/* Remove by cookie. Returns 0 on success, -ENOENT if not present.
- * Unconditional: used by administrative flush, teardown, and tests. Does not
- * consult the generation registry. Production DESTROY uses the _owned form. */
+/* Remove a legacy, non-tokenized flow by cookie. Tokenized FE owners must use
+ * the identified lifecycle path and return -EBUSY to this legacy API. */
 int ask_flow_remove(struct ask_flow_table *t, u64 cookie);
 
 /*
@@ -1006,9 +1007,16 @@ int ask_flow_remove(struct ask_flow_table *t, u64 cookie);
 int ask_flow_insert_owned(struct ask_flow_table *t, u64 cookie,
 			  const struct ask_flow_key *key,
 			  u32 oif, u32 action_flags, enum ask_hw_dir dir,
-			  u32 generation, u32 *out_hw_id);
+			  u64 generation, u32 *out_hw_id);
+int ask_flow_insert_owned_identified(struct ask_flow_table *t, u64 cookie,
+				    const struct ask_flow_key *key,
+				    u32 oif, u32 action_flags,
+				    enum ask_hw_dir dir, u64 generation,
+				    u32 *out_hw_id, u64 *out_fe_token);
 int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
-			  u32 generation);
+			  u64 generation);
+int ask_flow_remove_owned_identified(struct ask_flow_table *t, u64 cookie,
+				    u64 generation, u64 fe_token);
 
 /* ------------------------------------------------------------------------- */
 /* T-M6-A3: per-cookie ownership generation registry.                         */
@@ -1020,25 +1028,28 @@ int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
 /* ------------------------------------------------------------------------- */
 
 /*
- * Claim ownership for a REPLACE: bump the cookie's generation, clear any
- * tombstone, and return the new generation (>= 1). Returns 0 on OOM; the
+ * Claim ownership for a REPLACE: allocate a boot-unique generation, clear any
+ * tombstone, and return the new generation (>= 1). Returns 0 on exhaustion or OOM; the
  * caller MUST fail the REPLACE to software rather than publish an unguarded
  * flow (memory pressure must not reopen CR-004).
  */
-u32  ask_flow_gen_next(struct ask_flow_table *t, u64 cookie);
+u64  ask_flow_gen_next(struct ask_flow_table *t, u64 cookie);
 
 /* Current owning generation for a cookie, or 0 if unknown. */
-u32  ask_flow_gen_current(struct ask_flow_table *t, u64 cookie);
+u64  ask_flow_gen_current(struct ask_flow_table *t, u64 cookie);
 
 /* True iff @gen is the current, non-tombstoned owner of @cookie. */
-bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u32 gen);
+bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u64 gen);
 
-/* Mark a cookie tombstoned (DESTROY). Idempotent. */
-void ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie);
+/* Atomically tombstone and return the current generation, or 0 if absent. */
+u64 ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie);
 
-/* Drop the registry entry entirely (called when the SW flow is finally
- * freed and no worker can still reference the cookie). Idempotent. */
-void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie);
+/* Tombstone only if the cookie still has the specified generation. */
+bool ask_flow_gen_tombstone_if_current(struct ask_flow_table *t, u64 cookie,
+				       u64 gen);
+
+/* Erase only the specified tombstoned generation. */
+void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie, u64 gen);
 
 /*
  * Snapshot the per-flow stats into the caller-supplied out parameters.
@@ -1069,8 +1080,8 @@ void ask_flow_set_hw_stats(struct ask_flow *f, u64 hw_packets, u64 hw_bytes,
 typedef int (*ask_flow_walk_fn)(struct ask_flow *f, void *arg);
 int ask_flow_walk(struct ask_flow_table *t, ask_flow_walk_fn fn, void *arg);
 
-/* Flush every flow (used by ASK_CMD_FLUSH_FLOWS). */
-void ask_flow_flush(struct ask_flow_table *t);
+/* Flush legacy flows; return an error if identified FE owners remain. */
+int ask_flow_flush(struct ask_flow_table *t);
 
 /*
  * PR14j direction-aware FLOW_BLOCK_BIND.
