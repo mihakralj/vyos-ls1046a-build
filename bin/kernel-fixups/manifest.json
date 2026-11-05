@@ -74,9 +74,12 @@
     "F_274.py": "fman_port.c: F-274 (WGFP gate 3, 2026-11-04) makes fman_port_disable() return -EBUSY (with a ratelimited dev_warn) when the QMI/BMI busy poll times out, as the SDK does, instead of returning 0. F-277 makes F-211 abort before KeyGen/parser changes on this failure. Success still means only busy bits cleared, not that DDR ehash walkers drained.",
     "F_275.py": "net/xdp/xsk_buff_pool.c/.h + xsk.c: F-275 retains XSK pool/netdev ownership and transfers failed-bind pool cleanup to the deferred worker when ZC detach returns -EAGAIN.",
     "F_276.py": "dpaa_eth.h: F-276 adds pending XSK pool ownership so AF_XDP detach can retry an incomplete BMan drain without unmapping UMEM or freeing its BPID.",
-    "F_277.py": "fman_pcd_kg.c: F-277 makes F-211 abort v6 arming before KeyGen/parser writes if fman_port_disable() fails; on -EBUSY the port remains forced down and existing FE state is retained. A successful disable still does not prove DDR ehash walkers have drained."
+    "F_277.py": "fman_pcd_kg.c: F-277 makes F-211 abort v6 arming before KeyGen/parser writes if fman_port_disable() fails; on -EBUSY the port remains forced down and existing FE state is retained. A successful disable still does not prove DDR ehash walkers have drained.",
+    "F_278.py": "fman.c: F-278 sets fman_driver.suppress_bind_attrs so the void devm fman_pcd_release() action is unreachable after a successful probe (FMan is built in; PCD init is the last probe step). Release then runs only on probe failure, before any FE/ehash owner exists. Does not prove walker quiescence.",
+    "F_279.py": "dpaa_eth.c/dpaa_eth.h/dpaa_ethtool.c/mac.c: F-279 keeps tc-flower (0198) and ntuple (0194) ehash owners when a delete fails: flower ops serialize on flower_mutex, failed deletes stay on cls_flower_orphans (retried on the next flower op; the key is refused with -EBUSY until settled), duplicate keys across flower cookies or ntuple locations are refused, ntuple fails a replace whose old delete failed, -ENOENT counts as settled. Suppresses sysfs unbind of dpaa/mac drivers so dpaa_remove() (which frees the netdev) is unreachable after probe. After F-278.",
+    "F_280.py": "fman_pcd.h/fman_pcd.c/dpaa_eth.c/dpaa_ethtool.c: F-280 tags each shared ehash record with an owner class carried in fman_pcd_fe_flow_action.flags low byte (ASK=0 default, FLOWER=1, NTUPLE=2, WGFP=3). fe_flow_add refuses another owner's key with -EEXIST (same-owner re-insert keeps F-219 eviction for conntrack churn); new fman_pcd_fe_flow_del_owner() treats another owner's key as already gone (0) and refuses non-ASK clear-all with -EINVAL; fman_pcd_fe_flow_del() deletes as ASK. dpaa_wgfp.c (kernel/common/files) passes OWNER_WGFP directly. After F-279."
   },
-  "count": 65,
+  "count": 68,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {},
   "removed_dead": [

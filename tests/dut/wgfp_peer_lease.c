@@ -22,12 +22,15 @@
 #define NETDEV_UNREGISTER 2
 #define NOTIFY_DONE 0
 #define WGFP_AGE_PERIOD 1
+#define pr_warn_ratelimited(...) ((void)0)
+#define pr_err(...) ((void)0)
 #define rcu_access_pointer(p) (p)
 #define rcu_dereference(p) (p)
 #define rcu_dereference_protected(p, c) (p)
 #define rcu_assign_pointer(p, v) ((p) = (v))
 #define RCU_INIT_POINTER(p, v) ((p) = (v))
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
 #define lockdep_is_held(x) 1
 #define rcu_read_lock() ((void)0)
 #define rcu_read_unlock() ((void)0)
@@ -50,6 +53,7 @@ struct wgfp_binds {
 	unsigned int n;
 	struct net_device *wgdev[WGFP_MAX_BIND];
 	unsigned long invalidated;
+	bool stopping;
 };
 struct netdev_notifier_info { struct net_device *dev; };
 
@@ -63,6 +67,7 @@ static struct wgfp_binds *wgfp_bs;
 static int init_net, other_net, wgfp_peer_ops, wgfp_netdev_nb, wgfp_age_work;
 static struct work_struct wgfp_stop_work;
 static int starts, stops, lab_starts, register_error, unregister_during_lookup;
+static int flow_flush_error, module_refs;
 static bool alias_two_is_first, move_during_lookup, event_during_registration;
 static bool notifier_active, stop_work_pending, event_during_cancel;
 static bool alias_reassign_in_register, alias_reassigned, published_during_registration;
@@ -185,7 +190,7 @@ static void unregister_netdevice_notifier(int *nb)
 	notifier_active = false;
 }
 static void synchronize_rcu(void) {}
-static void wgfp_flows_flush(void) {}
+static int wgfp_flows_flush(void) { return flow_flush_error; }
 static void wgfp_psts_reap(bool all) {}
 static void schedule_delayed_work(int *work, int delay) {}
 static void schedule_work(struct work_struct *work) { stop_work_pending = true; }
@@ -204,7 +209,10 @@ static struct net_device *netdev_notifier_info_to_dev(void *ptr)
 }
 static void wgfp_lab_stop(void) { wgfp_lab_on = false; }
 static int wgfp_lab_start(const char *cfg) { lab_starts++; wgfp_lab_on = true; return 0; }
-static void wgfp_peer_stop(void);
+static bool try_module_get(void *module) { module_refs++; return true; }
+static void module_put(void *module) { assert(module_refs > 0); module_refs--; }
+#define THIS_MODULE NULL
+static int wgfp_peer_stop(void);
 static int wgfp_peer_start(char *names, bool distinct);
 
 #include "wgfp_peer_lease_body.h"
@@ -223,8 +231,9 @@ static int command(const char *action, const char *token, const char *extra)
 static void reset(void)
 {
 	pthread_mutex_lock(&wgfp_lab_lock);
-	wgfp_peer_stop();
+	assert(wgfp_peer_stop() == 0);
 	pthread_mutex_unlock(&wgfp_lab_lock);
+	assert(module_refs == 0);
 	memset(devices, 0, sizeof(devices));
 	strcpy(devices[0].name, "wg0");
 	strcpy(devices[1].name, "wg1");
@@ -241,6 +250,8 @@ static void reset(void)
 	notifier_active = stop_work_pending = event_during_cancel = false;
 	alias_reassign_in_register = alias_reassigned = published_during_registration = false;
 	notifier_register_error = 0;
+	flow_flush_error = 0;
+	module_refs = 0;
 }
 
 static void reservation_and_idempotent_cleanup(void)
@@ -277,6 +288,7 @@ static void reservation_and_idempotent_cleanup(void)
 	assert(command("stop", token_b, NULL) == -EPERM);
 	assert(command("stop", token_a, NULL) == 0);
 	assert(command("stop", token_a, NULL) == 0 && stops == 1);
+	assert(module_refs == 0);
 	assert(wgfp_peer_cfg_set("wg1", NULL) == -EBUSY);
 	assert(command("bind", token_a, aliases[0]) == 0 && starts == 2);
 	assert(command("stop", token_a, NULL) == 0);
@@ -284,6 +296,45 @@ static void reservation_and_idempotent_cleanup(void)
 	wgfp_peer_lease_get(output, NULL);
 	assert(!strcmp(output, "unowned\n"));
 	assert(!devices[0].references && !devices[1].references);
+}
+
+static void failed_flow_flush_retains_binding_consumer_and_module(void)
+{
+	struct netdev_notifier_info event = { .dev = &devices[0] };
+
+	reset();
+	assert(command("reserve", token_a, NULL) == 0);
+	assert(command("bind", token_a, aliases[0]) == 0);
+	assert(module_refs == 1);
+	flow_flush_error = -ETIMEDOUT;
+	assert(command("stop", token_a, NULL) == -ETIMEDOUT);
+	assert(wgfp_bs && wgfp_bs->stopping && notifier_active);
+	assert(stops == 0 && devices[0].references == 1 && module_refs == 1);
+	assert(!strcmp(wgfp_peer_cfg, "wg0"));
+	assert(!strcmp(wgfp_peer_owner, token_a));
+	assert(!strcmp(wgfp_owner_aliases, aliases[0]));
+	assert(wgfp_peer_cfg_set("wg1", NULL) == -EBUSY);
+	assert(wgfp_bs && stops == 0 && module_refs == 1);
+	flow_flush_error = 0;
+	assert(command("stop", token_a, NULL) == 0);
+	assert(!wgfp_bs && !notifier_active && stops == 1);
+	assert(!devices[0].references && !module_refs);
+	assert(command("release", token_a, NULL) == 0);
+
+	assert(command("reserve", token_a, NULL) == 0);
+	assert(command("bind", token_a, aliases[0]) == 0);
+	devices[0].reg_state = 2;
+	flow_flush_error = -ETIMEDOUT;
+	assert(wgfp_netdev_event(NULL, NETDEV_UNREGISTER, &event) == NOTIFY_DONE);
+	wgfp_stop_work_fn(NULL);
+	assert(wgfp_bs && wgfp_bs->stopping && notifier_active);
+	assert(stops == 1 && devices[0].references == 1 && module_refs == 1);
+	assert(!strcmp(wgfp_peer_cfg, "wg0"));
+	flow_flush_error = 0;
+	assert(command("stop", token_a, NULL) == 0);
+	assert(!wgfp_bs && !notifier_active && stops == 2);
+	assert(!devices[0].references && !module_refs);
+	assert(command("release", token_a, NULL) == 0);
 }
 
 static void preserves_ownership_on_failures_and_unregister(void)
@@ -468,6 +519,7 @@ static void legacy_binding_and_reservation_cannot_both_win(void)
 int main(void)
 {
 	reservation_and_idempotent_cleanup();
+	failed_flow_flush_retains_binding_consumer_and_module();
 	preserves_ownership_on_failures_and_unregister();
 	stale_stop_work_preserves_new_binding();
 	unregister_ignores_unrelated_devices();

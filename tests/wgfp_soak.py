@@ -204,6 +204,7 @@ def run_soak(tmp_path, scenario, port_base="5241"):
         "FAKE_SSH_STATE": str(state_file),
         "FAKE_SSH_LOG": str(log_file),
         "FAKE_SSH_SCENARIO": scenario,
+        "WG_LEASE_TOKEN": "0123456789abcdef0123456789abcdef",
     }
     result = subprocess.run(
         ["bash", str(SCRIPT), "soak"], env=env, text=True,
