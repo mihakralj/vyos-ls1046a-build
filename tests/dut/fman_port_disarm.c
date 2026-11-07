@@ -30,7 +30,7 @@ struct fman_port {
 	struct bmi_regs *bmi_regs;
 };
 
-enum failure { NONE, STOP, START, LCV };
+enum failure { NONE, STOP, LCV };
 static enum failure failure;
 static struct fman_port_hwp_regs hwp;
 static unsigned int lcv_writes, delays;
@@ -38,10 +38,9 @@ static unsigned int lcv_writes, delays;
 static void iowrite32be(u32 value, u32 *address)
 {
 	if (address == &hwp.fmpr_pcac) {
-		if (value == HWP_HXS_PCAC_PSTOP)
-			*address = failure == STOP ? HWP_HXS_PCAC_PSTAT : 0;
-		else
-			*address = failure == START ? 0 : HWP_HXS_PCAC_PSTAT;
+		/* PSTAT means an active parse; this silicon never asserts it on restart. */
+		*address = value == HWP_HXS_PCAC_PSTOP && failure == STOP ?
+			   HWP_HXS_PCAC_PSTAT : 0;
 	} else {
 		lcv_writes++;
 		*address = value;
@@ -67,15 +66,14 @@ int main(void)
 	failure = STOP;
 	assert(fman_port_clear_lcv_split(&port) == -ETIMEDOUT);
 	assert(!lcv_writes && delays == 100);
-	failure = START;
-	delays = 0;
-	assert(fman_port_clear_lcv_split(&port) == -ETIMEDOUT);
-	assert(lcv_writes == HWP_HXS_COUNT && delays == 100);
 	failure = LCV;
+	delays = 0;
 	assert(fman_port_clear_lcv_split(&port) == -EIO);
-	assert(hwp.fmpr_pcac & HWP_HXS_PCAC_PSTAT);
+	assert(!hwp.fmpr_pcac && !delays);
 	failure = NONE;
+	lcv_writes = 0;
 	assert(!fman_port_clear_lcv_split(&port));
+	assert(lcv_writes == HWP_HXS_COUNT && !hwp.fmpr_pcac && !delays);
 
 	assert(!fman_port_verify_fe_detached(&port));
 	bmi.rx.fmbm_rccb = 0x100;
@@ -87,6 +85,6 @@ int main(void)
 	assert(fman_port_verify_fe_detached(&port) == -EIO);
 	bmi.rx.fmbm_rfpne = 0x00500002U;
 	assert(!fman_port_verify_fe_detached(&port));
-	puts("RX disarm: parser timeout and routing readback failures detected");
+	puts("RX disarm: parser stop timeout, restart and routing readback failures detected");
 	return 0;
 }

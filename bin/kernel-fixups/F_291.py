@@ -710,19 +710,15 @@ static int stop_port_hwp(struct fman_port *port)
 """
 
 START = """\
+/*
+ * Clearing PSTOP restarts the port parser. PSTAT reports an active parse
+ * (0 = idle) and does not acknowledge a restart, so an idle port reads 0
+ * here and polling it can only time out.
+ */
 static int start_port_hwp(struct fman_port *port)
 {
-\tstruct fman_port_hwp_regs __iomem *regs = port->hwp_regs;
-\tint i;
-
-\tiowrite32be(0, &regs->fmpr_pcac);
-\tfor (i = 0; i < 100; i++) {
-\t\tif (ioread32be(&regs->fmpr_pcac) & HWP_HXS_PCAC_PSTAT)
-\t\t\treturn 0;
-\t\tudelay(10);
-\t}
-\tpr_err("Timeout starting HW Parser\\n");
-\treturn -ETIMEDOUT;
+\tiowrite32be(0, &port->hwp_regs->fmpr_pcac);
+\treturn 0;
 }
 
 """
