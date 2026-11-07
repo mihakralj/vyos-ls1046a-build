@@ -532,6 +532,7 @@ The paced increments agree within the sampling brackets. In unpaced 2, the FE in
   - add a single-flow cell to `bin/testrig-wgfp-p2b.sh` and `bin/testrig-wireguard-multi.sh`;
   - add per-run FQ and record counters to the CSV;
   - make `bin/testrig-wireguard.sh`, and the other `testrig-*` scripts, refuse or loudly flag a DUT kernel with `PROVE_LOCKING`.
+  - **ASK2-only summary line (2026-11-07):** `[WGFP=1] [REPS=3] [PORT=eth4] bin/wg-line.sh` runs one tunnel, 4 streams, a fresh tunnel per rep, `wg-v4`/`wg-v6` x `up`/`down`/`bidir` through `wg-parity.sh ask2` (no vendor DUT) and prints one line of six medians in Gbit/s: `up-v4 up-v6 dn-v4 dn-v6 bi-v4 bi-v6`, labelled with the running image, mode (`wgfp`/`sw`) and port, appended to `$RIG_OUT/wg-line.txt`. `bin/wg-line.py` does the formatting (failed reps excluded, missing cells `-`); `tests/wg_line.py` covers it.
 - **Release hygiene:** keep `latest.iso` on a production image, and name KUnit builds so they cannot be mistaken for releases.
 
 ## 5. Open items

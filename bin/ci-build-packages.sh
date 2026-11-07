@@ -301,8 +301,11 @@ for package in $packages; do
     mkdir -p "$CACHE_DIR"
     find "$CACHE_DIR" -maxdepth 1 -name 'vyos-1x_*' -mtime +14 -delete 2>/dev/null || true
     if [ -n "$UPSTREAM_SHA" ] && [ -n "$PATCH_HASH" ]; then
-      CACHE_KEY="vyos-1x_${UPSTREAM_SHA}_${PATCH_HASH}"
-      CACHED=$(find "$CACHE_DIR" -maxdepth 1 -name "${CACHE_KEY}__*_arm64.deb" 2>/dev/null | sort)
+      # v2: the entry holds every installable deb the vyos-1x build emits, not only
+      # vyos-1x itself; v1 entries (vyos-1x only) let live-build pull libvyosconfig0
+      # and vyos-user-utils from upstream rolling (image 2026.11.07-2010).
+      CACHE_KEY="vyos-1x_v2_${UPSTREAM_SHA}_${PATCH_HASH}"
+      CACHED=$(find "$CACHE_DIR" -maxdepth 1 -name "${CACHE_KEY}__*.deb" 2>/dev/null | sort)
       if [ -n "$CACHED" ] && cache_debs_intact $CACHED; then
         echo "### vyos-1x cache HIT (key=$CACHE_KEY)"
         for c in $CACHED; do
@@ -506,7 +509,9 @@ for package in $packages; do
   # don't silently re-break the guard.
   if [ "$package" == "vyos-1x" ] && [ "$SKIP_VYOS1X_BUILD" -eq 0 ] && [ -n "${CACHE_KEY:-}" ]; then
     cached_count=0
-    for built in vyos-1x_*_arm64.deb ../vyos-1x_*_arm64.deb; do
+    # Every installable package of the vyos-1x source build (dbgsym and
+    # build-deps excluded); all must come from the same pinned commit.
+    for built in {,../}{vyos-1x,vyos-1x-aws,vyos-1x-smoketest,vyos-1x-vmware,vyos-user-utils,libvyosconfig0}_*.deb; do
       [ -f "$built" ] || continue
       # Stage then atomically rename (same filesystem) so a job killed
       # mid-copy never leaves a truncated .deb visible under the final
@@ -520,7 +525,7 @@ for package in $packages; do
       mv "$stage" "$dest"
       cached_count=$((cached_count + 1))
     done
-    if [ "$cached_count" -gt 0 ]; then
+    if ls "$CACHE_DIR/${CACHE_KEY}__vyos-1x_"*_arm64.deb >/dev/null 2>&1; then
       echo "### Cached $cached_count vyos-1x .deb(s) under key $CACHE_KEY"
       ls -lh "$CACHE_DIR/${CACHE_KEY}__"*.deb 2>/dev/null || true
     else
