@@ -2947,6 +2947,39 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-225 v4 ehash key_size 14->46 (dual-lane GEC key)"
 fi
 
+# F-298 updates the CGR wrapper introduced by F-297.
+if [ -d drivers/soc/fsl/qbman ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_296.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-qbman-portal-guard 2>&1
+    echo "### QBMan: F-296 portal sysfs unbind guards verified"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_297.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_298.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_299.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_300.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_303.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_305.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_306.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-update.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-owner.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-retire-snapshot 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-verb 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-shutdown-responses 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --characterize 2>&1
+    echo "### QMan: F-297/F-298/F-300 CGR host containment verified"
+fi
+
+if [ -f drivers/crypto/caam/qi.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_301.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_302.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_304.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-eqcr 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-crypto 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-init 2>&1
+    echo "### CAAM QI: F-301/F-302/F-304 targeted host tests passed"
+fi
+
 # F-210/F-211/F-212 (T-M6-1 IPv6 productization steps 2-4, 2026-08-19):
 # default-OFF, byte-identical-for-v4 production plumbing for the silicon-proven
 # dual-family dispatch recipe. F-210 writes table1's vendor node at gro+16;
@@ -2983,6 +3016,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_293.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-global-sync.py" "$(pwd)" 2>&1
     echo "### fman.c/fman_pcd.c: F-293 global INV0 serialization harness passed"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
+    echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_295.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
+    echo "### dpaa_eth.c: F-295 offload FQ initialization quarantine verified"
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
     echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
     # T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26, plans/ASK2-VLAN-REARCH.md):

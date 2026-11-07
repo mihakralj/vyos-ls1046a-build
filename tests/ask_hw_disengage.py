@@ -11,12 +11,30 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "kernel/ask/oot-modules/ask/ask_hw.c"
 GENL = ROOT / "kernel/ask/oot-modules/ask/ask_genl.c"
 HARNESS = ROOT / "tests/dut/ask_hw_disengage.c"
+BRINGUP_HARNESS = ROOT / "tests/dut/ask_hw_bringup.c"
 
 
 def _slice(source, start, end):
     i = source.index(start)
     j = source.index(end, i) + len(end)
     return source[i:j]
+
+
+def test_bringup_does_not_create_unused_global_tx_fq(tmp_path):
+    source = SOURCE.read_text()
+    (tmp_path / "ask_hw_bringup_body.h").write_text(
+        _slice(source, "int ask_hw_pcd_bringup(void)\n{", "\n}\n")
+    )
+    binary = tmp_path / "ask_hw_bringup"
+    subprocess.run(
+        [
+            "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "-Wno-unused-function", "-Wno-unused-parameter",
+            "-I", str(tmp_path), str(BRINGUP_HARNESS), "-o", str(binary),
+        ],
+        check=True,
+    )
+    subprocess.run([str(binary)], check=True, timeout=30)
 
 
 def test_failed_disengage_is_reported_and_retained(tmp_path):
