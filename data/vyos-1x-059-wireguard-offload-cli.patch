@@ -23,12 +23,10 @@ index d22230de4..db00a8a1b 100644
              <properties>
                <help>peer alias</help>
 diff --git a/src/conf_mode/interfaces_wireguard.py b/src/conf_mode/interfaces_wireguard.py
-index 8d7e7c45d..a8bb264cd 100755
+index 8d7e7c45d..18478723b 100755
 --- a/src/conf_mode/interfaces_wireguard.py
 +++ b/src/conf_mode/interfaces_wireguard.py
-@@ -57,6 +57,13 @@ def get_config(config=None):
-     base = ['interfaces', 'wireguard']
-     ifname, wireguard = get_interface_dict(conf, base)
+@@ -59,2 +59,9 @@ def get_config(config=None):
  
 +    # LS1046A DPAA WireGuard fast path: the kernel binds a whole set of
 +    # devices at once, so every commit computes the full opted-in list.
@@ -38,13 +36,52 @@ index 8d7e7c45d..a8bb264cd 100755
 +        and not conf.exists(base + [i, 'disable']))
 +
      # Check if a port was changed
-     tmp = is_node_changed(conf, base + [ifname, 'port'])
-     if tmp: wireguard['port_changed'] = {}
-@@ -173,6 +180,34 @@ def generate(wireguard):
-     return None
- 
+@@ -175,2 +182,82 @@ def generate(wireguard):
  
 +WGFP_PARAM = '/sys/module/wireguard/parameters/wgfp_peer'
++WGFP_LEASE_PARAM = '/sys/module/wireguard/parameters/wgfp_peer_lease'
++
++
++def wgfp_status():
++    try:
++        with open(WGFP_PARAM) as f:
++            cur = f.read().strip()
++    except OSError as e:
++        raise ConfigError(f'Cannot read WireGuard offload status: {e.strerror}') from e
++    if 'stopping=1' in cur.split():
++        raise ConfigError('WireGuard offload teardown is incomplete; the binding is retained')
++    if cur != 'off':
++        names = cur.partition(' dev=')[2].strip()
++        if not cur.startswith('on ') or not names or names == 'off':
++            raise ConfigError('Unrecognized WireGuard offload status')
++    return cur
++
++
++def wgfp_check_lease(ifaces, cur):
++    if not (ifaces or cur != 'off') or not os.path.exists(WGFP_LEASE_PARAM):
++        return
++    try:
++        with open(WGFP_LEASE_PARAM) as f:
++            lease = f.read().strip()
++    except OSError as e:
++        raise ConfigError(f'Cannot read WireGuard offload reservation: {e.strerror}') from e
++    if lease == 'unowned':
++        return
++    if lease.startswith('owned=') and ' dev=' in lease:
++        raise ConfigError('WireGuard offload is reserved by another operation')
++    raise ConfigError('Unrecognized WireGuard offload reservation status')
++
++
++def wgfp_defer_missing(ifaces, cur, warn=True):
++    missing = [name for name in ifaces if not os.path.exists(f'/sys/class/net/{name}')]
++    if missing:
++        bound = cur.partition(' dev=')[2].split() if cur != 'off' else []
++        if any(name not in ifaces for name in bound):
++            raise ConfigError(f'Cannot defer WireGuard offload replacement; interfaces unavailable: {", ".join(missing)}')
++        if warn:
++            print(f'WARNING: WireGuard offload not applied; interfaces unavailable: {", ".join(missing)}')
++        return True
++    return False
 +
 +
 +def wgfp_bind(ifaces):
@@ -55,13 +92,17 @@ index 8d7e7c45d..a8bb264cd 100755
 +    Flows are installed only for traffic arriving on a port with
 +    `offload ipv4`; others stay on the software path.
 +    """
++    from errno import ENODEV
++
 +    if not os.path.exists(WGFP_PARAM):
 +        if ifaces:
 +            print('WARNING: WireGuard offload is not supported by this kernel')
 +        return
 +    want = ' '.join(ifaces) or 'off'
-+    with open(WGFP_PARAM) as f:
-+        cur = f.read().strip()
++    cur = wgfp_status()
++    wgfp_check_lease(ifaces, cur)
++    if wgfp_defer_missing(ifaces, cur):
++        return
 +    have = cur.split('dev=', 1)[1].strip() if 'dev=' in cur else 'off'
 +    if have == want:
 +        return
@@ -69,18 +110,25 @@ index 8d7e7c45d..a8bb264cd 100755
 +        with open(WGFP_PARAM, 'w') as f:
 +            f.write(want)
 +    except OSError as e:
-+        print(f'WARNING: WireGuard offload for "{want}" failed: {e.strerror}')
++        if e.errno == ENODEV:
++            cur = wgfp_status()
++            wgfp_check_lease(ifaces, cur)
++            if cur == 'off' and wgfp_defer_missing(ifaces, cur):
++                return
++        raise ConfigError(f'WireGuard offload for "{want}" failed: {e.strerror}') from e
 +
 +
  def apply(wireguard):
-     check_kmod('wireguard')
+@@ -178,2 +265,7 @@ def apply(wireguard):
  
-@@ -223,6 +258,8 @@ def apply(wireguard):
-             domain_action = 'stop'
-     call(f'systemctl {domain_action} vyos-domain-resolver.service')
++    if os.path.exists(WGFP_PARAM):
++        cur = wgfp_status()
++        wgfp_check_lease(wireguard['wgfp_ifaces'], cur)
++        wgfp_defer_missing(wireguard['wgfp_ifaces'], cur, warn=False)
++
+     wg = WireGuardIf(**wireguard)
+@@ -225,2 +317,4 @@ def apply(wireguard):
  
 +    wgfp_bind(wireguard['wgfp_ifaces'])
 +
      # run the dependents
-     call_dependents()
- 

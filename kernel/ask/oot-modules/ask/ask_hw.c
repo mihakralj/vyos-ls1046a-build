@@ -62,7 +62,7 @@
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
 #include <net/addrconf.h>               /* F-219: ipv6_addr_type, in6_dev_get */
 #include <net/if_inet6.h>               /* F-219: struct inet6_dev / inet6_ifaddr */
-#include <soc/fsl/qman.h>          /* qman_alloc_fqid, qman_create_fq, QMAN_FQ_FLAG_NO_ENQUEUE */
+#include <soc/fsl/qman.h>
 
 #include <uapi/linux/ask/ask.h>	/* ASK_FAM_V4 / ASK_FAM_V6 family-mask bits */
 #include "include/ask_internal.h"
@@ -528,13 +528,6 @@ struct ask_hw_pcd {
 	 * XA_FLAGS_ALLOC1 keeps cookie 0 as the "no HW backing" sentinel.
 	 */
 	struct xarray   flow_cookies;
-	/* P4.1: dedicated QMan TX FQ for hardware direct-enqueue.
-	 * Allocated at bringup, released at teardown, used by
-	 * ask_hw_resolve_oif_fqid() as the preferred egress FQ
-	 * for all CC-tree flows (avoids mainline dpaa_eth FQ
-	 * taildrop bottleneck). */
-	struct qman_fq  dedicated_fq;
-	bool            dedicated_fq_ready;
 
 	/*
 	 * T-M7-2 S4 (2026-08-15): per-egress-interface no-confirm TX FQ cache.
@@ -1066,53 +1059,6 @@ int ask_hw_pcd_bringup(void)
 	put_device(&pdev->dev);
 
 	ask_pr_info("hw: board-substrate FMan handle bound; per-flow CC/HM offload available\n");
-	/* P4.1: allocate a dedicated QMan TX FQ for hardware direct-enqueue.
-	 * All CC-tree flows use this FQ as their egress target, bypassing the
-	 * mainline dpaa_eth per-port TX FQ (whose taildrop limits sustained
-	 * throughput to ~1.5 Gbps). Falls back to dpaa_get_tx_fqid() on failure.
-	 *
-	 * The FQ is scheduled onto the FMan DC-portal channel 0x801 (MAC10/eth4
-	 * TX side) so QMan delivers hardware-enqueued frames direct-to-wire
-	 * without software portal involvement. Prior to 2026-07-08 the flag was
-	 * NO_ENQUEUE which silently dropped all frames (107K retransmits). */
-	{
-		u32 fqid;
-		int rc = qman_alloc_fqid(&fqid);
-
-		if (rc == 0) {
-			struct qman_fq *fq = &h->dedicated_fq;
-			struct qm_mcc_initfq initfq;
-
-			memset(fq, 0, sizeof(*fq));
-			fq->fqid = fqid;
-			rc = qman_create_fq(fqid, QMAN_FQ_FLAG_TO_DCPORTAL, fq);
-			if (rc == 0) {
-				memset(&initfq, 0, sizeof(initfq));
-				initfq.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL |
-							     QM_INITFQ_WE_DESTWQ);
-				initfq.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
-				/* Channel 0x801 = FMan MAC10 (eth4) TX DC portal. */
-				qm_fqd_set_destwq(&initfq.fqd, 0x801, 0);
-				rc = qman_init_fq(fq, QMAN_INITFQ_FLAG_SCHED, &initfq);
-				if (rc == 0) {
-					h->dedicated_fq_ready = true;
-					ask_pr_info("hw: dedicated TX FQ 0x%x allocated ch=0x801\n",
-						    fqid);
-				} else {
-					qman_destroy_fq(fq);
-					qman_release_fqid(fqid);
-					ask_pr_warn("hw: qman_init_fq(0x%x) failed rc=%d\n",
-						    fqid, rc);
-				}
-			} else {
-				qman_release_fqid(fqid);
-				ask_pr_warn("hw: qman_create_fq(0x%x) failed rc=%d\n",
-					    fqid, rc);
-			}
-		} else {
-			ask_pr_warn("hw: qman_alloc_fqid failed rc=%d\n", rc);
-		}
-	}
 	return 0;
 }
 
@@ -1153,16 +1099,6 @@ void ask_hw_pcd_teardown(void)
 		if (p->in_use)
 			ask_hw_punt_apply(h, p, 0);	/* F-266 */
 	}
-	/* P4.1: release dedicated TX FQ before draining flow cookies. */
-	if (h->dedicated_fq_ready) {
-		u32 fqid = h->dedicated_fq.fqid;
-
-		qman_destroy_fq(&h->dedicated_fq);
-		qman_release_fqid(fqid);
-		h->dedicated_fq_ready = false;
-		ask_pr_info("hw: dedicated TX FQ 0x%x released\n", fqid);
-	}
-
 	/*
 	 * Drain any flow cookies that survived to teardown.
 	 * CR-007: Fork-A HM refcount balancing removed — the FE-VM ehash
@@ -1289,21 +1225,6 @@ static int ask_fq_probe_set(const char *val, const struct kernel_param *kp)
 	}
 
 	mutex_lock(&h->lock);
-
-	if (h->dedicated_fq_ready) {
-		struct qman_fq fq = { .fqid = h->dedicated_fq.fqid };
-		struct qm_mcr_queryfq_np np;
-
-		memset(&np, 0, sizeof(np));
-		rc = qman_query_fq_np(&fq, &np);
-		if (rc)
-			pr_info("ask: FQ-PROBE dedicated fqid=0x%x query rc=%d\n",
-				fq.fqid, rc);
-		else
-			pr_info("ask: FQ-PROBE dedicated fqid=0x%x state=0x%02x frm_cnt=%u byte_cnt=%u\n",
-				fq.fqid, np.state & QM_MCR_NP_STATE_MASK,
-				qm_mcr_np_get(&np, frm_cnt), np.byte_cnt);
-	}
 
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
 		struct qman_fq fq;
@@ -1517,8 +1438,8 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 	 * with numKeys=1 (F-091), and arms the port for FE-VM dispatch.
 	 * This replaces the debugfs bridge — debugfs is for diagnostics only.
 	 *
-	 * F-157 (2026-08-01) historically passed h->dedicated_fq (a single
-	 * module-global QMan FQ pinned to channel 0x801 = eth4/MAC10 TX) as
+	 * F-157 (2026-08-01) historically passed a module-global QMan FQ
+	 * pinned to channel 0x801 = eth4/MAC10 TX as
 	 * the shared FE-VM ENQ-singleton target. That is WRONG for any ingress
 	 * port other than eth4: the shared ENQ singleton feeds the record's
 	 * next-FE for flows inserted WITHOUT a per-egress action.tx_fqid, so a
@@ -2096,8 +2017,7 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc)
 	 * dedicated FQ with B0V=0 (no confirmation) on the same channel; we
 	 * cache it per ifindex so each egress port allocates exactly once.
 	 * The FQ is owned by fsl_dpa (netdev dpaa_fq_list) — never destroyed
-	 * here. On any allocation failure we fall back to the confirmed
-	 * queue-0 TX FQ so forwarding still works (just slower). */
+	 * here. Allocation failure keeps the flow in software. */
 	dev = dev_get_by_index(&init_net, ifindex);
 	if (!dev)
 		return -ENODEV;

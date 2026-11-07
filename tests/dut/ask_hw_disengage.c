@@ -31,7 +31,6 @@ enum fman_pcd_fe_profile { FMAN_PCD_FE_PROFILE_ROUTED, FMAN_PCD_FE_PROFILE_L2_DA
 struct mutex { int held; };
 struct fman { int unused; };
 struct device { int refs; };
-struct qman_fq { u32 fqid; };
 struct xarray { int unused; };
 struct kmem_cache { int unused; };
 struct ask_hw_flow_cookie { int unused; };
@@ -58,8 +57,6 @@ struct ask_hw_pcd {
 	struct fman *fman;
 	struct ask_hw_port port[ASK_HW_MAX_PORTS];
 	struct xarray flow_cookies;
-	struct qman_fq dedicated_fq;
-	bool dedicated_fq_ready;
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -78,7 +75,7 @@ static struct device fman_dev = { .refs = 1 };
 static int disengage_rc, reserve_rc, engage_rc, punt_rc, vlan_rc;
 static int disengages, engages, forgets, flushes;
 static int punt_calls, vlan_teardowns, prepare_calls;
-static int module_refs, fq_destroys;
+static int module_refs;
 static int prewarms, bridge_kicks;
 static bool rtnl_held;
 static bool allow_module_get, check_forget_race, expect_unpublished;
@@ -211,8 +208,6 @@ static int fman_pcd_fe_engage_profile(struct fman *f, u8 port, u32 fqid,
 static unsigned long fman_pcd_fe_enq_get_offset(struct fman *f) { (void)f; return 0x40; }
 static struct device *fman_get_dev(struct fman *f) { (void)f; return &fman_dev; }
 static void put_device(struct device *d) { d->refs--; }
-static void qman_destroy_fq(struct qman_fq *fq) { (void)fq; fq_destroys++; }
-static void qman_release_fqid(u32 fqid) { (void)fqid; }
 static void xa_destroy(struct xarray *xa) { (void)xa; }
 static void *xa_erase(struct xarray *xa, unsigned long idx) { (void)xa; (void)idx; return NULL; }
 static void kmem_cache_free(struct kmem_cache *c, void *p) { (void)c; free(p); }
@@ -262,7 +257,7 @@ static void reset(void)
 	disengage_rc = reserve_rc = engage_rc = punt_rc = vlan_rc = 0;
 	disengages = engages = forgets = flushes = 0;
 	punt_calls = vlan_teardowns = prepare_calls = 0;
-	module_refs = fq_destroys = 0;
+	module_refs = 0;
 	prewarms = bridge_kicks = 0;
 	rtnl_held = false;
 	allow_module_get = ask_hw_ready = true;
@@ -350,15 +345,13 @@ int main(void)
 	assert(!h->port[0].offload_engaged && !h->port[0].fe_retained);
 	assert(forgets == 1 && flushes == 4 && !ask_hw_port_l2[0] && !module_refs);
 	assert(!h->port[0].teardown_in_progress && !h->port[0].module_pinned);
-	h->dedicated_fq_ready = true;
 	ask_hw_pcd_teardown();
-	assert(fq_destroys == 1 && fman_dev.refs == 0 && !ask_hw_pcd_inst);
+	assert(fman_dev.refs == 0 && !ask_hw_pcd_inst);
 
 	/* An engage error may leave hardware state: retain the module and stop
 	 * both new arms and teardown, without pretending rollback succeeded. */
 	reset();
 	h = new_pcd();
-	h->dedicated_fq_ready = true;
 	engage_rc = -ETIMEDOUT;
 	expect_unpublished = true;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
@@ -375,14 +368,13 @@ int main(void)
 	assert(!families[0x10]);
 	assert(ask_hw_offload_disengage(0x10) == -ESHUTDOWN);
 	ask_hw_pcd_teardown();
-	assert(!disengages && !fq_destroys && fman_dev.refs == 1);
+	assert(!disengages && ask_hw_pcd_inst == h && fman_dev.refs == 1);
 	discard_retained_fixture(h);
 
 	/* A failed disengage must retain owners and resources; family removal
 	 * still queues asynchronous PPPoE withdrawal. */
 	reset();
 	h = new_pcd();
-	h->dedicated_fq_ready = true;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
 					     false, 0) == 0);
 	disengage_rc = -ETIMEDOUT;
@@ -392,7 +384,7 @@ int main(void)
 	assert(ask_hw_offload_disengage(0x10) == -ESHUTDOWN);
 	assert(disengages == 1);
 	ask_hw_pcd_teardown();
-	assert(ask_hw_pcd_inst == h && !fq_destroys && fman_dev.refs == 1);
+	assert(ask_hw_pcd_inst == h && fman_dev.refs == 1);
 	assert(ask_hw_offload_disengage(0x11) == 0);
 	discard_retained_fixture(h);
 
@@ -436,7 +428,6 @@ int main(void)
 	/* Legacy CC owners remain pinned if their teardown cannot be proved. */
 	reset();
 	h = new_pcd();
-	h->dedicated_fq_ready = true;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_L2_DA,
 					     false, ASK_FAM_V4) == 0);
 	assert(ask_hw_port_l2[0] == (1UL << 0x10));
@@ -448,7 +439,7 @@ int main(void)
 	assert(!forgets && flushes == 1);
 	assert(ask_hw_offload_disengage(0x10) == -ESHUTDOWN);
 	ask_hw_pcd_teardown();
-	assert(ask_hw_pcd_inst == h && !fq_destroys && fman_dev.refs == 1);
+	assert(ask_hw_pcd_inst == h && fman_dev.refs == 1);
 	discard_retained_fixture(h);
 
 	/* Netlink failures never publish the requested family, including a
