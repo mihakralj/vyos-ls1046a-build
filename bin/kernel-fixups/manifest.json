@@ -103,9 +103,10 @@
     "F_303.py": "qman.c: snapshot ALTER_RETIRE flags before subsequent shutdown portal operations can reuse the result. A concurrent overwrite before the snapshot, asynchronous retirement flags, ring ownership, MC serialization and FQ lifetimes remain open. Host characterization: bin/test-qman-mc-timeout.py.",
     "F_304.py": "caam/qi.c: skip duplicate QI resource cleanup after devm_add_action_or_reset has already invoked caam_qi_shutdown on registration failure. Other QMan failure and parent-lifetime paths remain open. Host harness: bin/test-caam-qi-ownership.py --check-init.",
     "F_305.py": "qman.c: reject and report mismatched QUERYFQ and QUERYFQ_NP response verbs instead of copying another command's result or treating its FQID error as end-of-range. Same-verb stale results, result races, timeout ownership and the QMan gate remain open. Host harness: bin/test-qman-mc-timeout.py --check-verb.",
-    "F_306.py": "qman.c: reject failed or wrong-verb query responses and wrong-verb retirement/OOS responses during FQ shutdown. Same-verb stale results, response races, ring dispatch and owner lifetime remain unresolved. Host harness: bin/test-qman-mc-timeout.py --check-shutdown-responses."
+    "F_306.py": "qman.c: reject failed or wrong-verb query responses and wrong-verb retirement/OOS responses during FQ shutdown. Same-verb stale results, response races, ring dispatch and owner lifetime remain unresolved. Host harness: bin/test-qman-mc-timeout.py --check-shutdown-responses.",
+    "F_307.py": "fman_pcd.c: lab-only ehash walker probe (root 0600 countdown ehash_walker_probe, default 0). On a probed delete, reads the unlinked record's hardware packet_count at +256 after unlink and after the SYNC, retains the record and replaced cumulative nodes, and reports ehash_walker_probe_inflight (SYNC-window HITs, positive control) and ehash_walker_probe_late (HITs after SYNC completion, computed on read). No record or register write. Host harness: bin/test-ehash-walker-probe.py."
   },
-  "count": 94,
+  "count": 95,
   "count_note": "Total *.py in bin/kernel-fixups/ (active + mutate.py helper). test-fixups.sh check[5] asserts this equals the file count on disk.",
   "dormant": {},
   "removed_dead": [
