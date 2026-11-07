@@ -97,6 +97,7 @@ struct ask_hw_ucode_version {
 
 int  ask_hw_ucode_get_version(struct ask_hw_ucode_version *out);
 int  ask_hw_init(void);
+void ask_hw_set_ready(bool ready);
 void ask_hw_exit(void);
 
 /*
@@ -113,15 +114,15 @@ void ask_hw_exit(void);
  *
  * Return (engage): 0 on success or if already engaged; -ENODEV if no HW
  * backing (non-DPAA host / PCD bring-up failed); negative errno from the
- * board engage on failure.  disengage is void and idempotent.
+ * board engage on failure. Disengage returns an error if state is retained.
  */
 int  ask_hw_offload_engage(u8 hw_port_id);
 int  ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
-				bool if_engaged);
+				bool if_engaged, u8 family_mask);
 int  ask_hw_b2_l2_engage(const char *ifname);
 int  ask_hw_b2_l2_record(const char *iifname, const u8 *key,
 			 const char *oifname, bool add);
-void ask_hw_offload_disengage(u8 hw_port_id);
+int ask_hw_offload_disengage(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 /* T-M6-2 B3a bridge helpers (ask_hw.c). */
@@ -442,6 +443,13 @@ struct ask_flow_key;
 int  ask_hw_flow_preflight(const struct ask_flow_key *key,
                            u32 oif, u32 action_flags,
                            enum ask_hw_dir dir);
+int  ask_hw_flow_family_ok(u8 hw_port_id, const struct ask_flow_key *key);
+int ask_hw_flow_policy_snapshot(u64 *seq);
+bool ask_hw_flow_policy_current(const struct ask_flow_key *key);
+/* Successful begin holds the PCD mutex and an ASK module reference. */
+int ask_hw_flow_publish_begin(const struct ask_flow_key *key, unsigned long enq_off,
+			      struct ask_hw_pcd **guard, struct fman **fm);
+void ask_hw_flow_publish_end(struct ask_hw_pcd *guard);
 /* NAT offload gates: IPv4 is shipping/default-on; NAT66 is experiment/default-off. */
 bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
@@ -459,16 +467,19 @@ bool ask_hw_bridge_vlan_armed_port(u8 hw_port_id);
 bool ask_vlan_push_only_enabled(void);
 bool ask_hw_vlan_offload_armed(void);
 bool ask_hw_bridge_offload_armed(void);
+bool ask_hw_pppoe_offload_armed(void);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
+int  ask_flow_vlan_flush(void);
+int  ask_flow_pppoe_flush_sync(void);
+int  ask_bridge_vlan_flush(void);
+int  ask_bridge_flush_all(void);
+void ask_bridge_vlan_pause(void);
+void ask_bridge_vlan_resume(void);
 void ask_flow_pppoe_flush(void);
 void ask_flow_fdb_change(const u8 *addr, int ifindex);
-int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
-			  struct net_device *egress_dev);
-void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
-void ask_vlan_cc_teardown_port(u8 port_id);
+int  ask_vlan_cc_teardown_port(u8 port_id);
 int  ask_vlan_cc_agg_stats(u8 port_id, u64 *packets, u64 *bytes);
-/* R4c-3: re-assert the FE-VM ehash graft after a VLAN CC tree teardown so
- * routed/NAT stays HW-offloaded on an ASK-engaged port. No-op if not engaged. */
+/* Legacy exported re-engage helper; no in-tree callers. */
 int  ask_hw_fe_reengage(u8 hw_port_id);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
@@ -527,6 +538,15 @@ struct u64_stats_sync syncp;
 u64 packets;
 u64 bytes;
 u64 last_seen_ns;
+};
+
+struct ask_pppoe_info {
+	u16 sid;			/* host order */
+	u16 vid;			/* session VLAN, 0 = untagged */
+	int ifindex;			/* physical session port */
+	int session_ifindex;		/* PPP netdevice */
+	u8 peer_mac[ETH_ALEN];
+	u8 src_mac[ETH_ALEN];
 };
 
 struct ask_flow_key {
@@ -644,6 +664,11 @@ u8     nat_flags;
 	 */
 	u8     nh_ip[16];
 	u32    nh_ifindex;
+	/* Software-only session snapshot for REPLACE and neighbour replay. */
+	struct ask_pppoe_info pppoe_session;
+	u64    pppoe_session_epoch;
+	/* Software-only family policy snapshot; never serialized into the FE key. */
+	u64    family_policy_seq;
 } __packed;
 
 /*
@@ -1112,13 +1137,6 @@ enum ask_flow_direction {
 int ask_flow_offload_classify_dir(const struct net_device *dev);
 #define ASK_PPPOE_DECAP	1	/* PPPoE -> LAN: strip */
 #define ASK_PPPOE_ENCAP	2	/* LAN -> PPPoE: insert */
-struct ask_pppoe_info {
-	u16 sid;			/* host order */
-	u16 vid;			/* G2: session VLAN, 0 = untagged */
-	int ifindex;			/* the session's physical port */
-	u8  peer_mac[ETH_ALEN];		/* ENCAP: concentrator */
-	u8  src_mac[ETH_ALEN];		/* ENCAP: our port */
-};
 int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi);
 
 /* ------------------------------------------------------------------------- */
@@ -1137,6 +1155,7 @@ struct flow_block_offload;
 enum tc_setup_type;
 
 int  ask_flow_offload_init(void);
+int  ask_flow_offload_register(void);
 void ask_flow_offload_exit(void);
 /* Minimum flow age before HW offload (module param offload_delay_ms); returns
  * the previous value. KUnit sets 0 to keep REPLACE immediate. */

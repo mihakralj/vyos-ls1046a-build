@@ -176,6 +176,7 @@ static unsigned int head_writes, sync_mark, syncs, reads, warnings;
 static unsigned int uncertain_frees;
 static unsigned int ehash_sync_timeouts, ehash_sync_recovered, ehash_sync_wedged;
 static unsigned int ehash_sync_inject, ehash_sync_injected;
+static unsigned int ehash_poison_clears;
 static bool ehash_sync_diag;
 static unsigned int ehash_sync_diag_attempts, ehash_sync_diag_completed;
 static unsigned int ehash_sync_diag_pending, ehash_sync_diag_max_polls;
@@ -691,6 +692,73 @@ static void test_hc_sync_error_propagation(void)
 	}
 }
 
+static void test_missing_sync_owner_blocks_insert(void)
+{
+	for (unsigned int mode = 0; mode < 4; mode++) {
+		struct fman fm = { 0 };
+		struct fman_pcd pcd = { .fman = &fm };
+		struct fman_pcd_ehash_table t;
+		unsigned int calls = hc_sync_calls;
+
+		setup(&t, &pcd, 50);
+		hc_sync_enabled = mode & 2;
+		hc_sync_result = 0;
+		if (mode & 1)
+			t.pcd = NULL;
+		else
+			pcd.fman = NULL;
+
+		assert(add(&t, 0, 0) == -ENODEV);
+		assert(!heads[0] && !indexed(0) && !nblocks);
+		assert(!syncs && hc_sync_calls == calls);
+		t.pcd = &pcd;
+		pcd.fman = &fm;
+		hc_sync_enabled = false;
+		assert(drain(&t) == 0);
+	}
+}
+
+static void test_missing_sync_owner_retains_generations(void)
+{
+	for (unsigned int mode = 0; mode < 4; mode++) {
+		struct fman fm = { 0 };
+		struct fman_pcd pcd = { .fman = &fm };
+		struct fman_pcd_ehash_table t;
+		unsigned int freed, writes, calls;
+
+		setup(&t, &pcd, 50);
+		for (unsigned int i = 0; i < 3; i++)
+			assert(add(&t, i, 0) == 0);
+		mark_current_generation_uncertain(&t, 0);
+		freed = metadata_freed;
+		writes = syncs;
+		calls = hc_sync_calls;
+		hc_sync_enabled = mode & 2;
+		hc_sync_result = 0;
+		if (mode & 1)
+			t.pcd = NULL;
+		else
+			pcd.fman = NULL;
+
+		assert(del(&t, 1, 0) == -ENODEV);
+		assert(t.poisoned && indexed(0) == 2);
+		assert(!hits(&t, 1, 0) && hits(&t, 0, 0) && hits(&t, 2, 0));
+		assert(metadata_freed == freed && uncertain_frees == 0);
+		assert(del(&t, 0, 0) == -ENODEV);
+		assert(add(&t, 3, 0) == -ENODEV);
+		assert(drain(&t) == -ENODEV);
+		assert(t.draining && metadata_freed == freed && uncertain_frees == 0);
+		assert(syncs == writes && hc_sync_calls == calls);
+
+		t.pcd = &pcd;
+		pcd.fman = &fm;
+		hc_sync_enabled = false;
+		assert(drain(&t) == 0);
+		assert(live(false) == 0 && live(true) == 0);
+		assert(uncertain_frees > 0);
+	}
+}
+
 static void test_hc_insert_published_before_error(void)
 {
 	struct fman fm = { 0 };
@@ -741,7 +809,7 @@ static void test_uncertain_generation_quarantine(void)
 	struct fman fm = { 0 };
 	struct fman_pcd pcd = { .fman = &fm };
 	struct fman_pcd_ehash_table t;
-	unsigned int freed;
+	unsigned int freed, clears;
 
 	setup(&t, &pcd, 50);
 	for (unsigned int i = 0; i < 3; i++)
@@ -771,8 +839,10 @@ static void test_uncertain_generation_quarantine(void)
 
 	/* A later successful barrier releases all retained generations. */
 	fm.timeout = false;
+	clears = ehash_poison_clears;
 	assert(drain(&t) == 0);
 	assert(uncertain_frees > 0);
+	assert(ehash_poison_clears == clears + 1);
 }
 
 static void test_uncertain_generation_delete_reinsert(void)
@@ -780,6 +850,7 @@ static void test_uncertain_generation_delete_reinsert(void)
 	struct fman fm = { 0 };
 	struct fman_pcd pcd = { .fman = &fm };
 	struct fman_pcd_ehash_table t;
+	unsigned int clears;
 
 	setup(&t, &pcd, 50);
 	for (unsigned int i = 0; i < 3; i++)
@@ -795,7 +866,9 @@ static void test_uncertain_generation_delete_reinsert(void)
 
 	/* The successful recovery barrier must precede delete and reinsertion. */
 	fm.timeout = false;
+	clears = ehash_poison_clears;
 	assert(del(&t, 1, 0) == 0);
+	assert(ehash_poison_clears == clears + 1);
 	assert(indexed(0) == 3 && !hits(&t, 1, 0));
 	assert(add(&t, 1, 0) == 0);
 	assert(indexed(0) == 4);
@@ -898,12 +971,17 @@ static void test_sync_diagnostics(void)
 	assert(fman_pcd_ehash_sync(&t, &extc) == -EIO && extc == 0);
 	assert(hc_sync_calls == 4);
 	pcd.fman = NULL;
-	hc_sync_result = -ENODEV;	/* enabled gate without an HC port */
+	hc_sync_result = 0;
 	assert(fman_pcd_ehash_sync(&t, &extc) == -ENODEV && extc == 0);
-	assert(hc_sync_calls == 5);
+	assert(hc_sync_calls == 4);
+	hc_sync_enabled = false;
+	assert(fman_pcd_ehash_sync(&t, &extc) == -ENODEV && extc == 0);
+	t.pcd = NULL;
+	assert(fman_pcd_ehash_sync(&t, &extc) == -ENODEV && extc == 0);
+	assert(hc_sync_calls == 4);
+	t.pcd = &pcd;
 	pcd.fman = &fm;
 	hc_sync_result = 0;
-	hc_sync_enabled = false;
 }
 
 static void test_missing_and_invalid(void)
@@ -943,6 +1021,8 @@ int main(void)
 	test_delete_timeout();
 	test_hc_sync_failure_quarantine();
 	test_hc_sync_error_propagation();
+	test_missing_sync_owner_blocks_insert();
+	test_missing_sync_owner_retains_generations();
 	test_hc_insert_published_before_error();
 	test_insert_timeout();
 	test_sync_retry();
@@ -957,7 +1037,7 @@ int main(void)
 
 def extract_function(source: str, name: str) -> str:
     match = re.search(
-        rf"(?m)^(?:static )?(?:int|void|u8|ssize_t|enum qman_cb_dqrr_result) "
+        rf"(?m)^(?:static )?(?:bool|int|void|u8|ssize_t|enum qman_cb_dqrr_result) "
         rf"{re.escape(name)}\([^;]*?\n\{{\n", source)
     if match is None:
         raise ValueError(f"Kernel function {name} was not found")
@@ -1047,6 +1127,7 @@ def main() -> None:
     guard = extract_add_guard(source)
     with tempfile.TemporaryDirectory(prefix="ask2-ehash-delete-") as directory:
         path = Path(directory)
+        (path / "fman_ehash_add_guard.h").write_text(guard)
         code = path / "delete.c"
         binary = path / "delete"
         code.write_text(HARNESS.replace("@KERNEL_FUNCTIONS@", functions)
@@ -1103,11 +1184,20 @@ def main() -> None:
         if failed:
             sys.exit(f"FAIL: HC barrier scenarios failed: {', '.join(failed)}")
 
-        teardown = "\n".join(
+        lifecycle_lock = (
+            "F-291: caller holds fe_lock across this check and publication."
+            in source
+        )
+        chain_guard = "static bool fman_pcd_fe_debug_mutation_blocked_locked(" in source
+        guard = (extract_function(source, "fman_pcd_fe_debug_mutation_blocked_locked")
+                 if chain_guard else "")
+        teardown = guard + "\n".join(
             extract_function(source, name)
             for name in ("fman_pcd_fe_disengage_full_write",
                          "fman_pcd_ehash_write")
         )
+        if lifecycle_lock:
+            teardown += "\n" + extract_function(source, "fman_pcd_port_recover")
         (path / "fman_teardown_body.h").write_text(teardown)
         teardown_binary = path / "fman-teardown"
         teardown_harness = (Path(__file__).resolve().parents[1] /
@@ -1117,12 +1207,54 @@ def main() -> None:
             "-Wno-unused-parameter", "-Wno-sign-compare", "-I", str(path),
             str(teardown_harness), "-o", str(teardown_binary),
         ]
+        if lifecycle_lock:
+            teardown_build += ["-DFMAN_TEST_LIFECYCLE_LOCK",
+                               "-DFMAN_TEST_RECOVERY_BLOCKED"]
+        if chain_guard:
+            teardown_build += ["-DFMAN_TEST_DEBUG_CHAIN_GUARD"]
         if use_sanitizers:
             teardown_build += SANITIZERS
         if subprocess.run(teardown_build).returncode != 0:
             sys.exit("FAIL: FMan teardown harness does not compile")
         if subprocess.run([str(teardown_binary)], env=env).returncode != 0:
             sys.exit("FAIL: FMan teardown did not fail closed")
+
+        # F-289: check retained state before even the armed-port fast path.
+        engage = extract_function(
+            source, "__fman_pcd_fe_engage_profile_locked" if lifecycle_lock
+            else "fman_pcd_fe_engage_profile"
+        )
+        gate = engage.find("fman_pcd_fe_retained_check(pcd, hw_port_id)")
+        armed = engage.find("test_bit(hw_port_id, pcd->fe_port_armed)")
+        arm = engage.find("__fman_pcd_fe_arm_engage(")
+        if not (0 <= gate < armed < arm):
+            sys.exit("FAIL: engage must refuse retained FE state before arming KG")
+        retained_check = extract_function(source, "fman_pcd_fe_retained_check")
+        retained = retained_check + "\n"
+        if lifecycle_lock:
+            retained += extract_function(source, "__fman_pcd_fe_disengage_locked")
+        retained += extract_function(source, "fman_pcd_fe_disengage")
+        (path / "fman_retained_body.h").write_text(retained)
+        retained_binary = path / "fman-retained"
+        retained_harness = (Path(__file__).resolve().parents[1] /
+                            "tests/dut/fman_retained.c")
+        retained_build = [
+            *compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "-Wno-unused-parameter", "-I", str(path),
+            str(retained_harness), "-o", str(retained_binary),
+        ]
+        if "F-291: failed FE programming cannot be retried safely" in source:
+            if "test_bit(port_id, pcd->fe_port_faulted)" not in retained_check:
+                sys.exit("FAIL: F-291 retained check does not fence port faults")
+            retained_build.append("-DFMAN_TEST_PORT_FAULT")
+        if lifecycle_lock:
+            retained_build.append("-DFMAN_TEST_LIFECYCLE_LOCK")
+        if use_sanitizers:
+            retained_build += SANITIZERS
+        if subprocess.run(retained_build).returncode != 0:
+            sys.exit("FAIL: FMan retained-teardown harness does not compile")
+        if subprocess.run([str(retained_binary)], env=env).returncode != 0:
+            sys.exit("FAIL: failed FE disengage is not reported and retained")
 
         token_start = source.index("static atomic64_t fman_pcd_fe_token_seq")
         token_end = source.index(
@@ -1157,6 +1289,8 @@ def main() -> None:
             "-Wno-unused-parameter", "-pthread", "-I", str(path),
             str(identity_harness), "-o", str(identity_binary),
         ]
+        if lifecycle_lock:
+            identity_build.append("-DFMAN_TEST_LIFECYCLE_LOCK")
         if use_sanitizers:
             identity_build += SANITIZERS
         if subprocess.run(identity_build).returncode != 0:
@@ -1167,7 +1301,7 @@ def main() -> None:
         lookup_end = source.index(
             "static int fman_pcd_ehash_token_add_check", lookup_start
         )
-        debugfs = source[lookup_start:lookup_end]
+        debugfs = guard + source[lookup_start:lookup_end]
         debugfs += "\n".join(
             extract_function(source, name)
             for name in ("fman_pcd_ehash_add_key_natwrap_dbgfs",
@@ -1195,6 +1329,8 @@ def main() -> None:
             "-Wno-unused-parameter", "-Wno-sign-compare", "-I", str(path),
             str(debugfs_harness), "-o", str(debugfs_binary),
         ]
+        if chain_guard:
+            debugfs_build += ["-DFMAN_TEST_DEBUG_CHAIN_GUARD"]
         if use_sanitizers:
             debugfs_build += SANITIZERS
         if subprocess.run(debugfs_build).returncode != 0:
