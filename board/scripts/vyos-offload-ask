@@ -1,32 +1,20 @@
 #!/bin/bash
 # vyos-offload-ask — engage/disengage the ASK2 FE-VM offload datapath
 #
-# TWO ENGAGEMENT MODES:
-#
 # engage / disengage  (PRODUCTION path)
 #     Uses ASK generic-netlink commands (engage/disengage) through YNL.
 #     This reaches ask_hw_offload_engage()/disengage() and the kernel API
 #     fman_pcd_fe_engage()/fman_pcd_fe_disengage() path (no debugfs writes).
 #
-#   hit-engage / hit-disengage  (HIT TEST — SHORT-TERM VERIFICATION ONLY)
-#     Builds full FE chain via debugfs verbs and engages RCCB→FE_ENTER
-#     direct.  ENQ FE targets the port's kernel Rx FQ (miss_fqid) so
-#     HIT frames reach the kernel — observable as normal traffic.
-#     SHORT-TERM ONLY: production path uses a dedicated TX FQ allocated
-#     by ask.ko on a FMan DC portal.  This mode proves the HIT gate;
-#     the FQID wiring moves to kernel/ask.ko once HIT is confirmed.
+# hit-engage / hit-disengage are disabled until debugfs lifecycle ownership
+# and hardware quiescence have been established.
 #
 # Usage:
 #   vyos-offload-ask [--port 0x10|0x11] engage|disengage|status
-#   vyos-offload-ask [--port 0x10|0x11] hit-engage [keysize] [ekfc_hex]
-#   vyos-offload-ask [--port 0x10|0x11] hit-disengage
+#   vyos-offload-ask [--port 0x10|0x11] hit-engage|hit-disengage  (disabled)
 #   vyos-offload-ask [--port 0x10|0x11] flow-add <key_hex> [enq_fe_off]
 #   vyos-offload-ask [--port 0x10|0x11] flow-del|flow-list|flow-stats
 #
-# Default keysize=8 (SIP+DIP, EKFC=0x00180000) — safe, won't stall BMI.
-# Use keysize=14 EKFC=801c0006 (PORT_ID + 5-tuple, HW-confirmed 2026-08-06/07/08)
-# once keysize=8 HIT is confirmed. The old keysize=13 EKFC=001c0006 is superseded.
-
 set -e
 
 PCD_BASE="/sys/kernel/debug/fman_pcd/0"
@@ -62,24 +50,6 @@ ynl_do() {
 # ---------------------------------------------------------------------------
 port_id_dec() {
     printf '%d' "$((PORT))" 2>/dev/null || die "invalid --port value '$PORT'"
-}
-
-# ---------------------------------------------------------------------------
-# resolve_fqid — port's kernel Rx default FQID (hex, no 0x prefix).
-# Returns e.g. "292" for eth4.  Falls back to "" on failure.
-# ---------------------------------------------------------------------------
-resolve_fqid() {
-    local path dec
-
-    case "$PORT" in
-        0x11) path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids" ;;
-        0x10) path="/sys/devices/platform/soc/1a00000.fman/1af0000.ethernet/net/eth3/fqids" ;;
-        *)    path=$(find /sys/devices/platform/soc -name fqids -path "*/net/*" 2>/dev/null | head -1) ;;
-    esac
-
-    [ -r "$path" ] || { echo ""; return; }
-    dec=$(awk '/^Rx default:/ {print $3}' "$path" 2>/dev/null)
-    printf "%x" "$dec" 2>/dev/null || echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -126,21 +96,17 @@ family() {
 # ---------------------------------------------------------------------------
 # disengage — PRODUCTION path teardown via generic-netlink/YNL.
 #
-# CR-003 fail-closed: a bare `disengage` YNL call is a no-op while offloaded
-# flows are still live — the committed hardware flowtable re-arms the FE the
-# instant offloadable traffic reappears, so the port never actually returns to
-# software forwarding. To disengage for real we must FIRST tear down the flows
-# that keep it armed, THEN disengage, THEN verify the port is unarmed and fail
-# loudly if it is not. The VyOS commit path (set_ask_offload) depends on this
-# non-zero exit to fail the commit closed rather than silently leaving the FE
-# armed. Flow teardown uses the production YNL `flush-flows` command plus a
-# conntrack flush (which drops the nft-flowtable offload records that would
-# otherwise re-insert); the fe_arm read is debugfs read-only verification, not
-# a debugfs control write.
+# The kernel reserves FE ownership and refuses disengage while any table has
+# live or uncertain owners. Do not flush global conntrack or ASK flow state
+# before that check: a refused port-scoped request must not disrupt other ports.
+# Busy owners must be settled by their owners before retrying. The fe_arm read
+# is read-only verification, not a debugfs control write.
 # ---------------------------------------------------------------------------
 disengage() {
-    local port_id armed
+    local port_id port_hex state armed faulted fault_state entry
+    local -a arm_fields fault_fields
     port_id="$(port_id_dec)"
+    port_hex="$(printf '0x%02x' "$port_id")"
 
     # 0. Nothing to tear down when ask.ko is not loaded: no port can be
     #    engaged. Failing here would fail the VyOS ethernet commit and leave
@@ -150,202 +116,80 @@ disengage() {
         return 0
     fi
 
-    # The fe_port_armed bit is the per-port engagement guard (F-107). A port
-    # not listed is not engaged: skip the global flushes below, which would
-    # otherwise drop every conntrack entry on each commit touching a
-    # non-offloaded port such as eth0.
+    info "disengaging port $PORT..."
+    ynl_do disengage "{\"port-id\": $port_id}" \
+        || die "disengage of $PORT failed; live or uncertain FE owners may remain on this or another port. No global flow flush was attempted."
+
     if [ -r "$PCD_BASE/fe_arm" ]; then
-        armed=$(grep '^Armed ports:' "$PCD_BASE/fe_arm" 2>/dev/null || true)
-        case " $armed " in
-            *" $PORT "*) ;;
-            *)
-                ( ynl_do disengage "{\"port-id\": $port_id}" ) >/dev/null 2>&1 || true
-                info "port $PORT not engaged; nothing to disengage"
-                return 0
-                ;;
+        state=$(cat "$PCD_BASE/fe_arm" 2>/dev/null) \
+            || die "disengage of $PORT succeeded but FE arm state is unreadable"
+        armed=$(printf '%s\n' "$state" | grep '^Armed ports:' || true)
+        [ -n "$armed" ] \
+            || die "disengage of $PORT succeeded but FE arm state is unreadable"
+        [[ "$armed" != *$'\n'* ]] \
+            || die "disengage of $PORT succeeded but FE arm state is unreadable"
+        read -r -a arm_fields <<< "$armed"
+        [ "${#arm_fields[@]}" -ge 3 ] && [ "${arm_fields[1]}" = "ports:" ] \
+            || die "disengage of $PORT succeeded but FE arm state is unreadable"
+        if [ "${arm_fields[2]}" = "(none)" ]; then
+            [ "${#arm_fields[@]}" -eq 3 ] \
+                || die "disengage of $PORT succeeded but FE arm state is unreadable"
+        else
+            for entry in "${arm_fields[@]:2}"; do
+                [[ "$entry" =~ ^0x(0[89a-f]|1[0-9a-f]|2[0-7])$ ]] \
+                    || die "disengage of $PORT succeeded but FE arm state is unreadable"
+                [ "$entry" != "$port_hex" ] \
+                    || die "disengage did not hold for $PORT — still armed ($armed)"
+            done
+        fi
+
+        faulted=$(printf '%s\n' "$state" | grep '^Faulted ports:' || true)
+        fault_state=$(printf '%s\n' "$state" | grep '^FE fault/staging:' || true)
+        if [ -z "$faulted" ] && [ -z "$fault_state" ]; then
+            [[ "$state" != *"debugfs FE arm changes disabled: ownership unresolved"* ]] \
+                || die "disengage of $PORT succeeded but FE fault state is unreadable"
+            warn "$PCD_BASE/fe_arm has no fault state; disengage fault state unverified"
+            info "DISENGAGED (fault state unverified)"
+            return 0
+        fi
+        [ -n "$faulted" ] && [[ "$faulted" != *$'\n'* ]] \
+            || die "disengage of $PORT succeeded but FE fault state is unreadable"
+        read -r -a fault_fields <<< "$faulted"
+        [ "${#fault_fields[@]}" -ge 3 ] && [ "${fault_fields[1]}" = "ports:" ] \
+            || die "disengage of $PORT succeeded but FE fault state is unreadable"
+        if [ "${fault_fields[2]}" = "(none)" ]; then
+            [ "${#fault_fields[@]}" -eq 3 ] \
+                || die "disengage of $PORT succeeded but FE fault state is unreadable"
+        else
+            for entry in "${fault_fields[@]:2}"; do
+                [[ "$entry" =~ ^0x(0[89a-f]|1[0-9a-f]|2[0-7])$ ]] \
+                    || die "disengage of $PORT succeeded but FE fault state is unreadable"
+            done
+            die "disengage of $PORT is unverified; FE faulted ports remain ($faulted)"
+        fi
+        case "$fault_state" in
+            "FE fault/staging: no") ;;
+            "FE fault/staging: yes")
+                die "disengage of $PORT is unverified; FE fault or staging state remains" ;;
+            *) die "disengage of $PORT succeeded but FE fault state is unreadable" ;;
         esac
     else
-        # Engagement state unknown (debugfs absent/unreadable). Never run the
-        # global flushes on a guess: do only the port-scoped disengage, and
-        # fail the commit if the kernel refuses it.
-        warn "$PCD_BASE/fe_arm unreadable; port-scoped disengage only, no conntrack flush"
-        ynl_do disengage "{\"port-id\": $port_id}" \
-            || die "disengage of $PORT failed and engagement state is unreadable"
+        warn "$PCD_BASE/fe_arm unreadable; disengage state unverified"
         info "DISENGAGED (state unverified)"
         return 0
-    fi
-
-    info "disengaging port $PORT..."
-
-    # 1. Drop the flow records that keep the FE armed. flush-flows is the
-    #    production genl command; conntrack -F clears the nft-flowtable
-    #    offload entries that would immediately re-insert HW flows.
-    if [ -n "$YNL_BIN" ] && [ -x "$YNL_BIN" ]; then
-        "$YNL_BIN" --family ask --do flush-flows --json '{}' >/dev/null 2>&1 || true
-    fi
-    if command -v conntrack >/dev/null 2>&1; then
-        conntrack -F >/dev/null 2>&1 || true
-    fi
-
-    # 2. Production disengage.
-    ynl_do disengage "{\"port-id\": $port_id}"
-
-    # 3. Fail-closed verification: the port MUST NOT remain armed. Read the
-    #    authoritative FE arm state; if this port is still listed, the
-    #    disengage did not hold and we must report failure so the caller
-    #    (VyOS commit) fails closed instead of believing it reached software
-    #    forwarding.
-    if [ -r "$PCD_BASE/fe_arm" ]; then
-        armed=$(grep '^Armed ports:' "$PCD_BASE/fe_arm" 2>/dev/null || true)
-        case " $armed " in
-            *" $PORT "*)
-                die "disengage did not hold for $PORT — still armed ($armed). Flush offloaded flows and retry."
-                ;;
-        esac
     fi
     info "DISENGAGED"
 }
 
 # ---------------------------------------------------------------------------
-# hit_engage [keysize] [ekfc_hex] [preflow_key_hex]
-#
-# SHORT-TERM HIT VERIFICATION: builds full FE chain via debugfs verbs with
-# miss_fqid as ENQ target, then arms RCCB→FE_ENTER direct.
-#
-# CRITICAL: preflow_key_hex (optional) is inserted BEFORE the fe_arm write.
-# This eliminates the MISS window between RFPNE switching to AC_CC mode and
-# flow insertion — every arriving frame is a HIT from the very first packet.
-# Without pre-insertion, the pool depletes from MISS frames and port goes deaf.
-#
-# Defaults: keysize=8 (SIP+DIP, safe)
-#           ekfc=00180000 (IPSRC1|IPDST1 = 8 bytes MSB-first)
-#           preflow = (none — insert separately via flow-add)
+# hit_engage / hit_disengage — the debugfs lifecycle is not ownership-safe.
 # ---------------------------------------------------------------------------
 hit_engage() {
-    local keysize ekfc preflow miss_fqid hash_fe_off fe_enter_off enq_fe_off
-
-    keysize="${1:-8}"
-    ekfc="${2:-00180000}"
-    preflow="${3:-}"
-
-    miss_fqid=$(resolve_fqid)
-    [ -z "$miss_fqid" ] && die "cannot resolve port Rx FQID — sysfs fqids not available"
-
-    info "HIT-TEST engage: port $PORT  keysize=$keysize  EKFC=0x$ekfc  ENQ→FQ 0x$miss_fqid"
-    info "HIT-TEST NOTE: ENQ targets kernel Rx FQ for observability — SHORT-TERM ONLY"
-
-    # Step 1: arm workspace pool FIRST (FmPortSetFESupport).
-    # CRITICAL: must allocate MURAM workspace BEFORE the FE chain so the pool
-    # range does not overlap FE_ENTER or singletons.  Overlap caused BMI stall
-    # on first frame (pool carved workspace at FE_ENTER AD offset, corrupt).
-    echo "set $PORT" > "$PCD_BASE/fe_port" || die "fe_port set failed (FmPortSetFESupport)"
-
-    # Step 2: acquire FE pool reference
-    echo "get" > "$PCD_BASE/fe_pool" || die "fe_pool get failed"
-
-    # Step 3: build singletons — EXIT, MUX, TRANSITION (ENQ built separately)
-    echo "build" > "$PCD_BASE/fe_singletons" || die "fe_singletons build failed"
-
-    # Step 4: configure ehash table
-    # Bucket count = mask+1; the DDR bucket array is 16 B/bucket, allocated as a
-    # single dma_alloc_coherent() (patch 0130).  mask 0x7fff = 32768 buckets =
-    # 512 KiB = an order-7 (128 contiguous pages) coherent alloc, which fails
-    # -ENOMEM on this platform even on a fresh boot (no CMA region for the FMan
-    # dev; the buddy allocator cannot reliably serve order-7).  0x0fff = 4096
-    # buckets = 64 KiB = order-4, which allocates reliably.  The mask is
-    # self-consistent end-to-end: fman_pcd_ehash_bucket_index() masks the CRC64
-    # with this same value, table_set() sizes by it, and the silicon node encodes
-    # hash_mask_bits from it — so HIT is preserved for any 2^n-1 mask.  4096
-    # buckets is ample for the handful of flows this verification path inserts.
-    echo "set 0x0fff $keysize 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
-
-    # Step 5: build EXT_HASH FE (consumes ehash config)
-    echo "build" > "$PCD_BASE/fe_hashfe" || die "fe_hashfe build failed"
-
-    # Step 6: build ENQ FE — target is miss_fqid (kernel Rx FQ)
-    # ARCHITECTURE NOTE: production path targets dedicated TX FQ on FMan
-    # DC portal, allocated by ask.ko.  This uses the Rx FQ as a loopback
-    # for HIT observation.  HIT frames reach the kernel normally via NAPI.
-    echo "build $miss_fqid" > "$PCD_BASE/fe_enq" || die "fe_enq build failed"
-
-    # Step 7: read EXT_HASH FE MURAM offset for FE_ENTER wiring
-    hash_fe_off=$(read_fe_offset "fe_hashfe" 'hash_fe\s+off=')
-    [ -z "$hash_fe_off" ] && die "cannot read EXT_HASH FE offset from fe_hashfe"
-    info "HIT-TEST: EXT_HASH FE @ $hash_fe_off"
-
-    # Step 8: build FE_ENTER AD pointing to EXT_HASH FE
-    echo "build $hash_fe_off" > "$PCD_BASE/fe_enter" || die "fe_enter build failed"
-
-    # Step 9 (now renumbered): read FE_ENTER MURAM offset
-    fe_enter_off=$(read_fe_offset "fe_enter" 'root_ad\s+off=')
-    [ -z "$fe_enter_off" ] && die "cannot read FE_ENTER offset from fe_enter"
-    info "HIT-TEST: FE_ENTER AD @ $fe_enter_off"
-
-    # CRITICAL: pre-insert flow BEFORE engaging RFPNE to AC_CC mode.
-    # This eliminates the MISS window — if the first frame is a HIT,
-    # the FE buffer pool is consumed AND returned correctly (no leak).
-    # Without this, background traffic fills the pool before flow-add.
-    if [ -n "$preflow" ]; then
-        enq_fe_off=$(read_fe_offset "fe_enq" 'enq\[0\]\s+off=')
-        echo "add 0 ${preflow} ${enq_fe_off:-0}" > "$PCD_BASE/fe_flow" \
-            || die "pre-flow insert failed"
-        info "HIT-TEST: pre-inserted flow key=$preflow (bucket will be computed by kernel)"
-    fi
-
-    # Step 10: the fe_arm ABI cannot carry EKFC. Reconfigure the bound
-    # scheme explicitly while it is idle so KeyGen extracts exactly the
-    # preinserted key width. F-169 performs disable → mutate → re-enable.
-    # The ASK FE harness uses scheme 4; do not infer this from the port ID.
-    [ -w "$PCD_BASE/fe_kg_ekfc" ] \
-        || die "fe_kg_ekfc unavailable; cannot verify EKFC=0x$ekfc"
-    echo "set 4 $ekfc" > "$PCD_BASE/fe_kg_ekfc" \
-        || die "scheme 4 EKFC configuration failed"
-    info "HIT-TEST: scheme 4 EKFC configured to 0x$ekfc"
-
-    # Step 11 (final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active).
-    echo "engage $PORT $fe_enter_off" > "$PCD_BASE/fe_arm" \
-        || die "fe_arm engage failed"
-
-    # Show state for verification
-    enq_fe_off=$(read_fe_offset "fe_enq" 'enq\[0\]\s+off=')
-    info "HIT-TEST: ENGAGED"
-    info "  FE chain:  FE_ENTER($fe_enter_off) → EXT_HASH($hash_fe_off) → MUX → ENQ($enq_fe_off)"
-    info "  HIT path:  FE-VM ehash lookup → ENQ → FQ 0x$miss_fqid → kernel NAPI"
-    info "  MISS path: EXT_HASH word6 → EXIT → DEALLOCATE"
-    info "  Insert flows with: $0 --port $PORT flow-add <${keysize}B_key_hex>"
+    die "HIT diagnostic disabled: FE lifecycle ownership and quiescence are unresolved"
 }
 
-# ---------------------------------------------------------------------------
-# hit_disengage — teardown FE chain in reverse build order.
-# ---------------------------------------------------------------------------
 hit_disengage() {
-    local armed_ports
-
-    info "HIT-TEST disengage: port $PORT..."
-
-    # F-076's handler assumes the requested port has an active FE arm and
-    # dereferences its state without an absent-port guard. Avoid invoking it
-    # after a failed engage or a prior teardown.
-    armed_ports=$(grep '^Armed ports:' "$PCD_BASE/fe_arm" 2>/dev/null || true)
-    case " $armed_ports " in
-        *" $PORT "*) ;;
-        *)
-            info "HIT-TEST: port $PORT is already disarmed — no teardown needed"
-            return
-            ;;
-    esac
-
-    # F-076's full-recovery handler is unsafe for this debugfs harness: an
-    # inactive call NULL-dereferences, and an active call rebooted the DUT.
-    # F-075's minimal ordering is safe: release the per-port FE workspace
-    # before disarming the FE arm. Do not clear shared objects or put fe_pool;
-    # __fman_pcd_fe_arm_disengage() owns that cleanup and F-136 keeps the
-    # shared chain warm.
-    echo "del $PORT" > "$PCD_BASE/fe_port" \
-        || die "FE per-port workspace release failed"
-    echo "disengage $PORT" > "$PCD_BASE/fe_arm" \
-        || die "FE disarm failed"
-    info "HIT-TEST: DISENGAGED — per-port state released; shared FE chain remains warm"
+    die "HIT diagnostic disabled: FE lifecycle ownership and quiescence are unresolved"
 }
 
 # ---------------------------------------------------------------------------
@@ -397,7 +241,8 @@ flow_add() {
 flow_del() {
     local key="${1:-}"
     if [ -z "$key" ]; then
-        echo "clear" > "$PCD_BASE/fe_flow" 2>/dev/null || true
+        echo "clear" > "$PCD_BASE/fe_flow" \
+            || die "flow clear failed; FE state unverified"
         info "flows CLEARED (all)"
         return
     fi
@@ -424,10 +269,7 @@ case "$VERB" in
     status)         status ;;
     flow-add)       flow_add "$@" ;;
     flow-del)       flow_del "$@" ;;
-    flow-clear)
-        echo "clear" > "$PCD_BASE/fe_flow" 2>/dev/null || true
-        info "flows CLEARED"
-        ;;
+    flow-clear)     flow_del ;;
     flow-list)
         [ -f "$PCD_BASE/fe_flow" ] && \
             grep -oP 'flow\[\d+\] bucket=\S+ rec=\S+ .*' "$PCD_BASE/fe_flow" 2>/dev/null \
@@ -448,11 +290,8 @@ Production path (CONT_LOOKUP scaffold, FE-VM dormant):
                           engaged port; kill switches are ask.* module params)
   disengage                disarm, restore RSS
 
-HIT verification (FE-VM active, SHORT-TERM TEST):
-  hit-engage [ks] [ekfc]  build FE chain + arm RCCB→FE_ENTER
-                          ks   = keysize in bytes   (default 8)
-                          ekfc = EKFC hex, no 0x    (default 00180000)
-  hit-disengage           clear FE chain + disarm
+HIT verification:
+  hit-engage / hit-disengage  disabled until lifecycle ownership is proven
 
 Flow management:
   flow-add <key_hex>      insert flow (key_hex = keysize*2 hex chars)

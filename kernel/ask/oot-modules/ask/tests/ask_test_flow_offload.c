@@ -1033,7 +1033,8 @@ KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), -EOPNOTSUPP);
 
 /* t0 transmits DIRECT toward the concentrator: encap with its MACs. */
 t0->xmit_type = FLOW_OFFLOAD_XMIT_DIRECT;
-t0->out.ifidx = 5;
+t0->out.ifidx = 12;
+t0->out.hw_ifidx = 5;
 ether_addr_copy(t0->out.h_dest, ac);
 ether_addr_copy(t0->out.h_source, me);
 KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c0, &pi), ASK_PPPOE_ENCAP);
@@ -1041,6 +1042,12 @@ KUNIT_EXPECT_EQ(test, pi.sid, (u16)7);
 KUNIT_EXPECT_MEMEQ(test, pi.peer_mac, ac, ETH_ALEN);
 KUNIT_EXPECT_MEMEQ(test, pi.src_mac, me, ETH_ALEN);
 KUNIT_EXPECT_EQ(test, pi.ifindex, 5);
+KUNIT_EXPECT_EQ(test, pi.session_ifindex, 12);
+KUNIT_EXPECT_EQ(test, ask_flow_cookie_pppoe(c1, &pi), ASK_PPPOE_DECAP);
+KUNIT_EXPECT_EQ(test, pi.ifindex, 5);
+KUNIT_EXPECT_EQ(test, pi.session_ifindex, 12);
+KUNIT_EXPECT_MEMEQ(test, pi.peer_mac, ac, ETH_ALEN);
+KUNIT_EXPECT_MEMEQ(test, pi.src_mac, me, ETH_ALEN);
 
 /* Session 0 would key like a plain frame: refused both ways. */
 t1->encap[0].id = 0;

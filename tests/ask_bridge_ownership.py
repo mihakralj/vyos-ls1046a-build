@@ -25,16 +25,28 @@ def test_bridge_record_identity_and_unsettled_ownership(tmp_path):
     (tmp_path / "bridge_hw.h").write_text(
         section(hw, "int ask_hw_l2_record(", "\nvoid ask_hw_prewarm_egress_fq(")
     )
+    (tmp_path / "bridge_switch.h").write_text(
+        section(hw, "static int ask_bridge_offload_set(",
+                "\nstatic const struct kernel_param_ops")
+    )
+    (tmp_path / "bridge_debug.h").write_text(
+        section(hw, "int ask_hw_b2_l2_record(",
+                "\nstruct ask_hw_fe_transition")
+    )
     (tmp_path / "bridge_delete.h").write_text(
         section(bridge, "static bool ask_bridge_sa_in_use(",
                 "\n/* Send one FDB notification")
         + "\n"
-        + section(bridge, "static void ask_bridge_rec_del(",
+        + section(bridge, "static int ask_bridge_rec_del(",
                   "\n/* Install a record with ingress-form")
     )
     (tmp_path / "bridge_admit.h").write_text(
         section(bridge, "static void ask_bridge_admit_key(",
                 "\n/*\n * A candidate carries")
+    )
+    (tmp_path / "bridge_work.h").write_text(
+        section(bridge, "static void ask_bridge_work_fn(",
+                "\n/* Delete records idle")
     )
     (tmp_path / "bridge_age.h").write_text(
         section(bridge, "static void ask_bridge_age_fn(",
@@ -47,10 +59,10 @@ def test_bridge_record_identity_and_unsettled_ownership(tmp_path):
     binary = tmp_path / "ask_bridge_ownership"
     subprocess.run(
         [
-            "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-pthread",
             "-Wno-unused-parameter", "-I", str(tmp_path),
             str(HARNESS), "-o", str(binary),
         ],
         check=True,
     )
-    subprocess.run([str(binary)], check=True)
+    subprocess.run([str(binary)], check=True, timeout=30)

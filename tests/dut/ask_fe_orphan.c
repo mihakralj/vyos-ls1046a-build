@@ -19,6 +19,7 @@ static int atomic_read(const atomic_t *a) { return a->counter; }
 
 struct list_head { struct list_head *next, *prev; };
 #define LIST_HEAD(n) struct list_head n = { &(n), &(n) }
+static bool list_empty(const struct list_head *h) { return h->next == h; }
 static void list_add_tail(struct list_head *e, struct list_head *h)
 {
 	e->prev = h->prev;
@@ -47,9 +48,28 @@ struct mutex { pthread_mutex_t native; bool held; pthread_t owner; };
 #define DEFINE_MUTEX(n) struct mutex n = { .native = PTHREAD_MUTEX_INITIALIZER }
 #define lockdep_assert_held(m) \
 	assert((m)->held && pthread_equal((m)->owner, pthread_self()))
+static pthread_mutex_t event_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t event_cond = PTHREAD_COND_INITIALIZER;
+static struct mutex *watched_mutex;
+static bool watched_waiting;
+
 static void mutex_lock(struct mutex *m)
 {
-	assert(pthread_mutex_lock(&m->native) == 0);
+	int rc;
+
+	if (m == watched_mutex) {
+		rc = pthread_mutex_trylock(&m->native);
+		if (rc == EBUSY) {
+			assert(!pthread_mutex_lock(&event_lock));
+			watched_waiting = true;
+			assert(!pthread_cond_broadcast(&event_cond));
+			assert(!pthread_mutex_unlock(&event_lock));
+			rc = pthread_mutex_lock(&m->native);
+		}
+	} else {
+		rc = pthread_mutex_lock(&m->native);
+	}
+	assert(rc == 0);
 	m->held = true;
 	m->owner = pthread_self();
 }
@@ -60,8 +80,6 @@ static void mutex_unlock(struct mutex *m)
 	assert(pthread_mutex_unlock(&m->native) == 0);
 }
 static struct mutex *owner_guard;
-static pthread_mutex_t event_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t event_cond = PTHREAD_COND_INITIALIZER;
 static bool pause_delete, pause_add, operation_waiting, operation_release;
 static bool other_started;
 
@@ -85,6 +103,22 @@ static void pause_operation(void)
 #define GFP_ATOMIC 0
 #define rcu_read_lock() do { } while (0)
 #define rcu_read_unlock() do { } while (0)
+
+#define THIS_MODULE NULL
+static int module_refs;
+static bool module_get_allowed = true;
+static bool try_module_get(void *module)
+{
+	if (!module_get_allowed)
+		return false;
+	module_refs++;
+	return true;
+}
+static void module_put(void *module)
+{
+	assert(module_refs > 0);
+	module_refs--;
+}
 
 static int alloc_fail, live_allocs;
 static unsigned int warning_count;
@@ -120,7 +154,11 @@ static struct fman the_fman;
 static struct fman *fman_ptr = &the_fman;
 static struct fman *ask_hw_get_fman(void) { return fman_ptr; }
 
-struct ask_flow_key { u8 port_id; u8 id; };
+#define ASK_VLANF_POP 1
+#define ASK_VLANF_PUSH 2
+#define ASK_VLANF_PPPOE_STRIP 4
+#define ASK_VLANF_PPPOE_INSERT 8
+struct ask_flow_key { u8 port_id; u8 id; u8 vlan_edit_flags; };
 static void ask_fe_build_key_dual(const struct ask_flow_key *key,
 				  u8 k[ASK_FE_KEY_SIZE_DUAL])
 {
@@ -190,8 +228,24 @@ static bool flush_owner_present;
 static u64 current_generation;
 static bool generation_tombstoned;
 static unsigned int pending_drops, generation_releases;
-static int delete_calls_at_removal, sw_removals;
+static int delete_calls_at_removal, sw_removals, sw_remove_result;
 static DEFINE_MUTEX(ask_flow_lifecycle_lock);
+static bool vlan_armed;
+static bool ask_hw_vlan_offload_armed(void) { return vlan_armed; }
+static bool pppoe_armed;
+static bool ask_hw_pppoe_offload_armed(void) { return pppoe_armed; }
+static u64 ask_vlan_pending_epoch, ask_pppoe_pending_epoch;
+
+static int ask_flow_pending_invalidate(u64 *epoch, u8 flags)
+{
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	assert((epoch == &ask_vlan_pending_epoch &&
+		flags == (ASK_VLANF_POP | ASK_VLANF_PUSH)) ||
+	       (epoch == &ask_pppoe_pending_epoch &&
+		flags == (ASK_VLANF_PPPOE_STRIP | ASK_VLANF_PPPOE_INSERT)));
+	++*epoch;
+	return 0;
+}
 
 static bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie,
 				    u64 generation)
@@ -205,7 +259,7 @@ static bool ask_flow_gen_tombstone_if_current(struct ask_flow_table *t,
 {
 	assert(t == &flush_table);
 	if (cookie != flush_flow.cookie || !generation ||
-	    generation != current_generation)
+	    generation != current_generation || generation_tombstoned)
 		return false;
 	generation_tombstoned = true;
 	return true;
@@ -244,7 +298,7 @@ static int ask_flow_walk(struct ask_flow_table *t,
 			 int (*collect)(struct ask_flow *, void *), void *arg)
 {
 	assert(t == &flush_table);
-	return collect(&flush_flow, arg);
+	return flush_owner_present ? collect(&flush_flow, arg) : 0;
 }
 static int ask_flow_remove_owned_identified(struct ask_flow_table *t, u64 cookie,
 					    u64 gen, u64 fe_token)
@@ -253,9 +307,18 @@ static int ask_flow_remove_owned_identified(struct ask_flow_table *t, u64 cookie
 	assert(gen == flush_flow.generation && flush_owner_present);
 	assert(fe_token == flush_flow.fe_token);
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	if (sw_remove_result)
+		return sw_remove_result;
 	delete_calls_at_removal = del_calls[flush_flow.key.id];
 	sw_removals++;
 	flush_owner_present = false;
+	return 0;
+}
+
+static u64 ask_pppoe_session_snapshot(void) { return 0; }
+static int ask_pppoe_session_finish_withdrawal(u64 epoch)
+{
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
 	return 0;
 }
 
@@ -356,7 +419,297 @@ static void check_interleaving(u8 id, bool delete_first)
 	pause_delete = pause_add = false;
 }
 
-int main(void)
+static void *vlan_inflight_publisher(void *arg)
+{
+	mutex_lock(&ask_flow_lifecycle_lock);
+	pause_operation();
+	flush_owner_present = true;
+	replacement_present[flush_flow.key.id] = true;
+	replacement_token[flush_flow.key.id] = flush_flow.fe_token;
+	mutex_unlock(&ask_flow_lifecycle_lock);
+	return NULL;
+}
+
+static void *vlan_flush_thread(void *arg)
+{
+	int *result = arg;
+
+	assert(pthread_mutex_lock(&event_lock) == 0);
+	other_started = true;
+	assert(pthread_cond_broadcast(&event_cond) == 0);
+	assert(pthread_mutex_unlock(&event_lock) == 0);
+	*result = ask_flow_vlan_flush();
+	return NULL;
+}
+
+static void check_vlan_flush(void)
+{
+	pthread_t publisher, flusher;
+	int result = -1;
+
+	flush_flow = (struct ask_flow) {
+		.key = { .port_id = 0x40, .id = 9,
+			 .vlan_edit_flags = ASK_VLANF_POP },
+		.cookie = 9, .fe_token = 90, .generation = 2,
+		.hw_backed = true,
+	};
+	flush_owner_present = false;
+	current_generation = 2;
+	generation_tombstoned = false;
+	allocator_expect_lock = false;
+	operation_waiting = operation_release = other_started = false;
+	assert(pthread_create(&publisher, NULL, vlan_inflight_publisher, NULL) == 0);
+	assert(pthread_mutex_lock(&event_lock) == 0);
+	while (!operation_waiting)
+		assert(pthread_cond_wait(&event_cond, &event_lock) == 0);
+	assert(pthread_mutex_unlock(&event_lock) == 0);
+	vlan_armed = false;
+	assert(pthread_create(&flusher, NULL, vlan_flush_thread, &result) == 0);
+	assert(pthread_mutex_lock(&event_lock) == 0);
+	while (!other_started)
+		assert(pthread_cond_wait(&event_cond, &event_lock) == 0);
+	assert(pthread_mutex_trylock(&ask_flow_lifecycle_lock.native) == EBUSY);
+	assert(!del_calls[9]);
+	operation_release = true;
+	assert(pthread_cond_broadcast(&event_cond) == 0);
+	assert(pthread_mutex_unlock(&event_lock) == 0);
+	assert(pthread_join(publisher, NULL) == 0);
+	assert(pthread_join(flusher, NULL) == 0);
+	assert(result == 0 && !flush_owner_present && !replacement_present[9]);
+	assert(del_calls[9] == 1 && generation_releases == 1);
+
+	/* A failed snapshot leaves the owner intact and a retry can withdraw it. */
+	flush_flow.key.id = 10;
+	flush_flow.cookie = 10;
+	flush_flow.fe_token = 100;
+	flush_flow.generation = 3;
+	flush_owner_present = true;
+	current_generation = 3;
+	alloc_fail = 1;
+	assert(ask_flow_vlan_flush() == -ENOMEM);
+	assert(flush_owner_present && !del_calls[10] && !generation_tombstoned);
+	alloc_fail = 0;
+	assert(ask_flow_vlan_flush() == 0 && !flush_owner_present);
+	assert(del_calls[10] == 1);
+
+	/* Non-VLAN and software-only flows are not removed. */
+	flush_flow.key.vlan_edit_flags = 0;
+	flush_owner_present = true;
+	current_generation = 4;
+	assert(ask_flow_vlan_flush() == 0 && flush_owner_present);
+	flush_flow.key.vlan_edit_flags = ASK_VLANF_PUSH;
+	flush_flow.hw_backed = false;
+	assert(ask_flow_vlan_flush() == 0 && flush_owner_present);
+	vlan_armed = true;
+	assert(ask_flow_vlan_flush() == -EINVAL && flush_owner_present);
+	vlan_armed = false;
+
+	/* An uncertain FE unlink is surfaced and blocks a successful retry. */
+	flush_flow.key.id = 11;
+	flush_flow.cookie = 11;
+	flush_flow.fe_token = 110;
+	flush_flow.generation = 4;
+	flush_flow.hw_backed = true;
+	del_rc[11] = -ETIMEDOUT;
+	assert(ask_flow_vlan_flush() == -EAGAIN);
+	assert(flush_owner_present && ask_fe_orphan_count == 1 && module_refs == 1);
+	assert(ask_flow_vlan_flush() == -EBUSY);
+	ask_fe_orphan_exit();
+	assert(!module_refs);
+	flush_owner_present = false;
+	generation_tombstoned = false;
+	current_generation = 0;
+
+	/* Ordinary flush still drops its old software owner, not the replacement. */
+	flush_flow.key.id = 13;
+	flush_flow.cookie = 13;
+	flush_flow.fe_token = 130;
+	flush_flow.generation = 5;
+	flush_owner_present = true;
+	current_generation = 5;
+	replacement_present[13] = true;
+	replacement_token[13] = 131;
+	ask_flow_flush_matching(collect_flush_flow, "superseded flush");
+	assert(!flush_owner_present && replacement_present[13]);
+	assert(del_calls[13] == 1 && !current_generation);
+
+	/* A replacement owned outside the collected flow is not withdrawn. */
+	flush_flow.key.id = 12;
+	flush_flow.cookie = 12;
+	flush_flow.fe_token = 120;
+	flush_flow.generation = 5;
+	flush_owner_present = true;
+	current_generation = 5;
+	replacement_present[12] = true;
+	replacement_token[12] = 121;
+	assert(ask_flow_vlan_flush() == -ESTALE);
+	assert(!flush_owner_present && replacement_present[12]);
+	assert(del_calls[12] == 1 && !current_generation);
+	assert(ask_flow_vlan_flush() == -ESTALE);
+	assert(del_calls[12] == 1 && replacement_present[12]);
+
+	allocator_expect_lock = true;
+	sw_removals = delete_calls_at_removal = 0;
+	pending_drops = generation_releases = 0;
+	del_calls[9] = del_calls[10] = del_calls[11] = 0;
+	del_rc[11] = 0;
+	assert(!live_allocs);
+}
+
+static void check_vlan_mismatch_with_sw_failure(void)
+{
+	flush_flow = (struct ask_flow) {
+		.key = { .port_id = 0x40, .id = 14,
+			 .vlan_edit_flags = ASK_VLANF_PUSH },
+		.cookie = 14, .fe_token = 140, .generation = 6,
+		.hw_backed = true,
+	};
+	flush_owner_present = true;
+	current_generation = 6;
+	replacement_present[14] = true;
+	replacement_token[14] = 141;
+	sw_remove_result = -EIO;
+	allocator_expect_lock = false;
+	assert(ask_flow_vlan_flush() == -EIO);
+	assert(flush_owner_present && replacement_present[14]);
+	assert(del_calls[14] == 1 && generation_tombstoned);
+	sw_remove_result = 0;
+	assert(ask_flow_vlan_flush() == -ESTALE);
+	assert(flush_owner_present && replacement_present[14]);
+	assert(del_calls[14] == 1);
+}
+
+static void *pppoe_flush_thread(void *arg)
+{
+	int *result = arg;
+
+	*result = ask_flow_pppoe_flush_sync();
+	return NULL;
+}
+
+static void check_pppoe_flush(void)
+{
+	pthread_t publisher, flusher;
+	int result = -1;
+
+	flush_flow = (struct ask_flow) {
+		.key = { .port_id = 0x40, .id = 20,
+			 .vlan_edit_flags = ASK_VLANF_PPPOE_STRIP },
+		.cookie = 20, .fe_token = 200, .generation = 2,
+		.hw_backed = true,
+	};
+	flush_owner_present = false;
+	current_generation = 2;
+	allocator_expect_lock = false;
+	pppoe_armed = true;
+	assert(ask_flow_pppoe_flush_sync() == -EINVAL);
+	pppoe_armed = false;
+	operation_waiting = operation_release = watched_waiting = false;
+	assert(!pthread_create(&publisher, NULL, vlan_inflight_publisher, NULL));
+	assert(!pthread_mutex_lock(&event_lock));
+	while (!operation_waiting)
+		assert(!pthread_cond_wait(&event_cond, &event_lock));
+	assert(!pthread_mutex_unlock(&event_lock));
+	watched_mutex = &ask_flow_lifecycle_lock;
+	assert(!pthread_create(&flusher, NULL, pppoe_flush_thread, &result));
+	assert(!pthread_mutex_lock(&event_lock));
+	while (!watched_waiting)
+		assert(!pthread_cond_wait(&event_cond, &event_lock));
+	assert(!del_calls[20]);
+	operation_release = true;
+	assert(!pthread_cond_broadcast(&event_cond));
+	assert(!pthread_mutex_unlock(&event_lock));
+	assert(!pthread_join(publisher, NULL));
+	assert(!pthread_join(flusher, NULL));
+	watched_mutex = NULL;
+	assert(result == 0 && !flush_owner_present && !replacement_present[20]);
+	assert(del_calls[20] == 1 && generation_releases == 1);
+
+	flush_flow.key.id = 21;
+	flush_flow.key.vlan_edit_flags = ASK_VLANF_PPPOE_INSERT | ASK_VLANF_PUSH;
+	flush_flow.cookie = 21;
+	flush_flow.fe_token = 210;
+	flush_flow.generation = 3;
+	flush_owner_present = true;
+	current_generation = 3;
+	replacement_present[21] = true;
+	replacement_token[21] = 210;
+	alloc_fail = 1;
+	assert(ask_flow_pppoe_flush_sync() == -ENOMEM);
+	assert(flush_owner_present && !del_calls[21] && !generation_tombstoned);
+	alloc_fail = 0;
+	assert(!ask_flow_pppoe_flush_sync());
+	assert(!flush_owner_present && !replacement_present[21]);
+
+	flush_flow.key.id = 22;
+	flush_flow.key.vlan_edit_flags = ASK_VLANF_POP;
+	flush_flow.cookie = 22;
+	flush_flow.fe_token = 220;
+	flush_flow.generation = 4;
+	flush_owner_present = true;
+	current_generation = 4;
+	assert(!ask_flow_pppoe_flush_sync() && flush_owner_present);
+	flush_flow.key.vlan_edit_flags = ASK_VLANF_PPPOE_STRIP;
+	flush_flow.hw_backed = false;
+	assert(!ask_flow_pppoe_flush_sync() && !flush_owner_present);
+	assert(!del_calls[22]);
+
+	flush_flow.key.id = 23;
+	flush_flow.cookie = 23;
+	flush_flow.fe_token = 230;
+	flush_flow.generation = 5;
+	flush_flow.hw_backed = true;
+	flush_owner_present = true;
+	current_generation = 5;
+	del_rc[23] = -ETIMEDOUT;
+	assert(ask_flow_pppoe_flush_sync() == -EAGAIN);
+	assert(flush_owner_present && ask_fe_orphan_count == 1 && module_refs == 1);
+	assert(ask_flow_pppoe_flush_sync() == -EBUSY);
+	ask_fe_orphan_exit();
+	assert(!module_refs);
+	flush_owner_present = false;
+	generation_tombstoned = false;
+	current_generation = 0;
+
+	flush_flow.key.id = 24;
+	flush_flow.cookie = 24;
+	flush_flow.fe_token = 240;
+	flush_flow.generation = 6;
+	flush_owner_present = true;
+	current_generation = 6;
+	replacement_present[24] = true;
+	replacement_token[24] = 241;
+	assert(ask_flow_pppoe_flush_sync() == -ESTALE);
+	assert(!flush_owner_present && replacement_present[24]);
+	assert(ask_flow_pppoe_flush_sync() == -ESTALE);
+	assert(del_calls[24] == 1 && replacement_present[24]);
+	assert(!live_allocs);
+}
+
+static void check_pppoe_mismatch_with_sw_failure(void)
+{
+	flush_flow = (struct ask_flow) {
+		.key = { .port_id = 0x40, .id = 25,
+			 .vlan_edit_flags = ASK_VLANF_PPPOE_INSERT },
+		.cookie = 25, .fe_token = 250, .generation = 7,
+		.hw_backed = true,
+	};
+	flush_owner_present = true;
+	current_generation = 7;
+	replacement_present[25] = true;
+	replacement_token[25] = 251;
+	sw_remove_result = -EIO;
+	allocator_expect_lock = false;
+	assert(ask_flow_pppoe_flush_sync() == -EIO);
+	assert(flush_owner_present && replacement_present[25]);
+	assert(del_calls[25] == 1 && generation_tombstoned);
+	sw_remove_result = 0;
+	assert(ask_flow_pppoe_flush_sync() == -ESTALE);
+	assert(flush_owner_present && replacement_present[25]);
+	assert(del_calls[25] == 1);
+}
+
+int main(int argc, char **argv)
 {
 	struct ask_flow_key a = { .port_id = 0x10, .id = 1 };
 	struct ask_flow_key b = { .port_id = 0x10, .id = 2 };
@@ -367,8 +720,29 @@ int main(void)
 	unsigned int warnings;
 
 	owner_guard = &ask_fe_orphan_lock;
+	if (argc > 1 && !strcmp(argv[1], "sw-remove-failure")) {
+		check_vlan_mismatch_with_sw_failure();
+		return 0;
+	}
+	if (argc > 1 && !strcmp(argv[1], "pppoe")) {
+		check_pppoe_flush();
+		return 0;
+	}
+	if (argc > 1 && !strcmp(argv[1], "pppoe-sw-remove-failure")) {
+		check_pppoe_mismatch_with_sw_failure();
+		return 0;
+	}
 	key_bytes(1, ka);
 	key_bytes(2, kb);
+
+	/* Do not mutate an FE owner if its module cannot be pinned. */
+	module_get_allowed = false;
+	calls = del_calls[1];
+	assert(ask_fe_flow_remove_retain(&a, 1, 1, "t") == -ESHUTDOWN);
+	assert(del_calls[1] == calls && !ask_fe_orphan_count && !module_refs);
+	module_get_allowed = true;
+
+	check_vlan_flush();
 
 	assert(ask_fe_flow_remove_retain(NULL, 0, 1, "t") == -EINVAL);
 
@@ -376,12 +750,12 @@ int main(void)
 	assert(ask_fe_flow_remove_retain(&a, 1, 1, "t") == 0);
 	del_rc[1] = -ENOENT;
 	assert(ask_fe_flow_remove_retain(&a, 1, 1, "t") == 0);
-	assert(ask_fe_orphan_count == 0);
+	assert(ask_fe_orphan_count == 0 && !module_refs);
 
 	/* A failed delete retains the key; do not retry an uncertain unlink. */
 	del_rc[1] = -ETIMEDOUT;
 	assert(ask_fe_flow_remove_retain(&a, 1, 1, "t") == -EAGAIN);
-	assert(ask_fe_orphan_count == 1);
+	assert(ask_fe_orphan_count == 1 && module_refs == 1);
 
 	/* A same-owner caller can publish a replacement after recovery. */
 	replacement_present[1] = true;
@@ -450,7 +824,7 @@ int main(void)
 	warnings = warning_count;
 	ask_flow_flush_matching(ask_collect_flush_victim, "collector OOM");
 	assert(flush_owner_present && del_calls[5] == calls);
-	assert(warning_count == warnings + 1);
+	assert(warning_count == warnings + 2);
 	allocator_expect_lock = true;
 	alloc_fail = 0;
 
@@ -468,6 +842,7 @@ int main(void)
 	alloc_fail = 0;
 	assert(flush_owner_present && sw_removals == calls);
 	assert(generation_tombstoned && ask_fe_orphan_count == 2);
+	assert(module_refs == 2);
 	assert(ask_fe_emergency[0x20].emergency);
 	assert(ask_fe_emergency[0x20].cookie == 5);
 	key_bytes(5, kb);
@@ -522,7 +897,7 @@ int main(void)
 	/* Exercise both publication/delete interleavings against the real lock. */
 	check_interleaving(3, true);
 	check_interleaving(4, false);
-	assert(ask_fe_orphan_count == 5);
+	assert(ask_fe_orphan_count == 5 && module_refs == 5);
 
 	/* An old cookie's settled mismatch must leave the new FE owner live. */
 	c.port_id = 0x30;
@@ -531,7 +906,7 @@ int main(void)
 	memcpy(action.key, kb, sizeof(kb));
 	action.owner_token = 200;
 	assert(ask_fe_flow_publish(&the_fman, c.port_id, kb, &action) == 0);
-	assert(ask_fe_flow_remove_retain(&c, 80, 100, "stale") == 0);
+	assert(ask_fe_flow_remove_retain(&c, 80, 100, "stale") == -ESTALE);
 	assert(replacement_present[8] && replacement_token[8] == 200);
 	assert(ask_fe_flow_remove_retain(&c, 81, 200, "current") == 0);
 	assert(!replacement_present[8] && ask_fe_orphan_count == 5);
@@ -543,7 +918,7 @@ int main(void)
 	assert(del_calls[1] + del_calls[2] + del_calls[3] +
 	       del_calls[4] + del_calls[5] == calls);
 	assert(replacement_present[1] && ask_fe_orphan_count == 0);
-	assert(live_allocs == 0);
+	assert(live_allocs == 0 && !module_refs);
 
 	printf("ask_fe_orphan: all checks passed\n");
 	return 0;

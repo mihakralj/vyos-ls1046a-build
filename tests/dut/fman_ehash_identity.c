@@ -32,6 +32,7 @@ typedef u64 __be64;
 #define dma_rmb() do { } while (0)
 #define pr_info(...) do { } while (0)
 #define pr_debug(...) do { } while (0)
+#define pr_warn_ratelimited(...) do { } while (0)
 #define dev_warn(...) do { } while (0)
 #define dev_dbg(...) do { } while (0)
 
@@ -91,6 +92,7 @@ struct fman_pcd_ehash_flow {
 };
 struct fman_pcd_ehash_table {
 	struct hlist_head bidx[4];
+	struct fman_pcd *pcd;
 	u8 key_size;
 	u32 hash_mask;
 	u8 hash_shift;
@@ -98,8 +100,11 @@ struct fman_pcd_ehash_table {
 	bool poisoned;
 };
 struct fman_pcd_fe_obj { unsigned long muram_off; };
+struct fman_pcd_fe_port { struct fman_pcd_ehash_table *table_v4; };
 struct fman_pcd {
 	struct mutex fe_lock;
+	unsigned long fe_port_armed[1], fe_port_faulted[1];
+	struct fman_pcd_fe_port *port;
 	struct fman_pcd_ehash_table *table;
 	struct { struct fman_pcd_fe_obj *first; } fe_enq;
 	unsigned long fe_exit_off;
@@ -107,9 +112,21 @@ struct fman_pcd {
 };
 struct fman { struct fman_pcd *pcd; };
 
+#ifdef FMAN_TEST_LIFECYCLE_LOCK
+static bool test_bit(unsigned int bit, const unsigned long *map)
+{
+	return !!(*map & (1UL << bit));
+}
+static struct fman_pcd_fe_port *
+fman_pcd_fe_port_find(struct fman_pcd *pcd, u8 port)
+{
+	return pcd->port;
+}
+#endif
+
 #define list_first_entry_or_null(head, type, member) ((head)->first)
 static struct fman_pcd *fman_get_pcd(struct fman *fm) { return fm ? fm->pcd : NULL; }
-static struct fman *fman_pcd_get_fman(struct fman_pcd *pcd) { return NULL; }
+static struct fman *fman_pcd_get_fman(struct fman_pcd *pcd) { return pcd->fman; }
 static struct fman_pcd_ehash_table *
 fman_pcd_ehash_table_for_port(struct fman_pcd *pcd, u8 port)
 {
@@ -126,9 +143,15 @@ static unsigned int fman_pcd_ehash_bucket_index(const u8 *key, u8 size,
 	return key[0] & mask;
 }
 static u32 fman_pcd_resolve_miss_fqid(struct fman_pcd *pcd, u8 port) { return 1; }
-static void fman_set_fpm_extc(struct fman *fm, u32 value) { }
+static unsigned int sync_writes;
+static void fman_set_fpm_extc(struct fman *fm, u32 value)
+{
+	assert(fm && value == 0x80000000U);
+	sync_writes++;
+}
 static u32 fman_get_fpm_extc(struct fman *fm) { return 0; }
 static void udelay(unsigned int n) { }
+static unsigned int ehash_insert_sync_timeouts;	/* F-288 */
 
 static int fman_pcd_ehash_recover(struct fman_pcd_ehash_table *t);
 static int fman_pcd_ehash_del_key(struct fman_pcd_ehash_table *t,
@@ -183,8 +206,10 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
 {
 	unsigned int b = fman_pcd_ehash_bucket_index(key, key_size,
 						    t->hash_shift, t->hash_mask);
+	int f269_err;
 
 	add_calls++;
+#include "fman_ehash_add_guard.h"
 	if (add_rc)
 		return add_rc;
 	assert(key_size == t->key_size);
@@ -250,11 +275,39 @@ static void test_owner_identity(void)
 	u32 ts = 999;
 	int before;
 
+	table.pcd = &pcd;
+	pcd.fman = &fm;
+
+#ifdef FMAN_TEST_LIFECYCLE_LOCK
+	struct fman_pcd_fe_port port = { .table_v4 = &table };
+
+	assert(fman_pcd_fe_flow_add(&fm, 0x28, &a) == -EINVAL);
+	assert(fman_pcd_fe_flow_add(&fm, 0x10, &a) == -ENODEV);
+	pcd.fe_port_armed[0] = 1UL << 0x10;
+	assert(fman_pcd_fe_flow_add(&fm, 0x10, &a) == -ENODEV);
+	pcd.port = &port;
+	port.table_v4 = NULL;
+	assert(fman_pcd_fe_flow_add(&fm, 0x10, &a) == -ENODEV);
+	port.table_v4 = &table;
+	pcd.fe_port_faulted[0] = 1UL << 0x10;
+	assert(fman_pcd_fe_flow_add(&fm, 0x10, &a) == -ESHUTDOWN);
+	pcd.fe_port_faulted[0] = 0;
+	assert(!add_calls && !pcd.fe_lock.held);
+#endif
+
 	a.flags = FMAN_PCD_FE_OWNER_DEBUGFS;
 	assert(fman_pcd_fe_flow_add(&fm, 0x10, &a) == -EINVAL);
 	assert(!add_calls);
 	a.flags = FMAN_PCD_FE_OWNER_ASK;
+	table.pcd = NULL;
+	assert(fman_pcd_fe_flow_add(&fm, 0x10, &a) == -ENODEV);
+	table.pcd = &pcd;
+	pcd.fman = NULL;
+	assert(fman_pcd_fe_flow_add(&fm, 0x10, &a) == -ENODEV);
+	assert(!table.bidx[1].first && !sync_writes && !pcd.fe_lock.held);
+	pcd.fman = &fm;
 	assert(!fman_pcd_fe_flow_add(&fm, 0x10, &a));
+	assert(sync_writes == 1);
 	assert(live.owner == FMAN_PCD_FE_OWNER_ASK && live.owner_token == 100);
 	live.owner = FMAN_PCD_FE_OWNER_DEBUGFS;
 	a.owner_token = 200;
