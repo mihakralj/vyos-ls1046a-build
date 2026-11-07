@@ -1,6 +1,6 @@
 # ASK2 WireGuard plan: remaining work (software path and zero-skb fast path)
 
-**2026-10-15 · dpaa1 · Status: open.** This is the single active WireGuard plan. The completed work, which covers the measurements, profiles, the P0/P1/P2a/P2b-1 builds and the gate results, has moved to the archive:
+**2026-10-15, updated 2026-11-07 · dpaa1 · Status: open.** This is the single active WireGuard plan. The completed work, which covers the measurements, profiles, the P0/P1/P2a/P2b-1 builds and the gate results, has moved to the archive:
 
 - `plans/archive/ask2-wireguard-plan.md`: software throughput. It covers the stage 0 baseline, stage -1 (lockdep debug kernel), patches 4011/056/057/4016, the retired GRO patch 4012, E1 `noqueue`, E2 `tx_lanes=3`, P2b-1 results and the conntrack-hook analysis.
 - `plans/archive/ask2-wireguard-matrix-106-vs-185.md`: the 2026-10-12/13 nine-cell matrix (image 2243, before `tx_lanes`).
@@ -21,6 +21,37 @@ WireGuard is not a vendor-parity item: neither the vendor ASK nor ASK2 hardware-
 | Fast path RX (P3) | Withdrawn: no runtime enable exists until INPUT provenance and ingress identity are proven. Images predating this containment must not enable P3; G3 is not passed. |
 | TX backpressure and telemetry | The WGFP-only QMan full-ring and asynchronous-rejection path plus per-CPU hot counters shipped in image 0629. Controlled hardware rejection and throughput gains remain unverified. |
 | Offline-port reinjection (P4), per-flow order restoration (P5) | Not implemented. |
+| QMan/CAAM/DPAA lifetime containment F-294..F-306, WGFP CLI control safety | Commit `de6d1d17`, CI run 42404963840, image `2026.11.07-1911-rolling`. Stage 1 board checks passed on `.185` (see below); no acceleration change relative to image 0333. |
+
+### Path to full acceleration (2026-11-07)
+
+Today only IPv4 TX is accelerated: about 2.8 to 3.1 Gbit/s on four flows, against about 1.7 to 1.9 Gbit/s in software. Decrypt, IPv6 and single-flow scaling stay on the software path, and encryption always runs on the CPUs because CAAM Era 8 has no ChaCha20-Poly1305. Reaching bidirectional, dual-family acceleration takes the stages below, in dependency order. Stages 1 and 2 are not WireGuard features, but P3 cannot be re-enabled without them; stages 6 and 7 are demand-driven.
+
+```mermaid
+flowchart LR
+    S1["1. Validate de6d1d17"] --> S2["2. Safety gates<br/>walker, QMan, FE teardown"]
+    S2 --> S3["3. P3 RX offload<br/>gate G3"]
+    S3 --> S4["4. IPv6"]
+    S3 --> S5["5. Overload, multi-peer, CLI"]
+    S3 --> S6["6. P5 single flow<br/>gate G5"]
+    S3 --> S7["7. P4 offline-port reinjection<br/>gate G4"]
+```
+
+1. **Validate the current build.** On the image from `de6d1d17`, check that moving a DPAA port to another namespace is refused (F-294), that QMan/BMan portals expose no `bind`/`unbind` (F-296), and that `ask-check` is no worse than on image 0333. Then rerun the WGFP soak and the nine-cell matrix for regressions.
+   - **Result (2026-11-07, `.185`, image `2026.11.07-1911-rolling`, kernel `6.18.60-vyos`, operator install then first boot; boot type not recorded).** `ip link set eth3 netns` was refused with "The interface netns is immutable" and eth3 stayed in place (F-294). `qman_portal`, `bman_portal`, `qman_ccsr` and `bman_ccsr` expose no `bind`/`unbind` (F-296); `caam`, `caam_jr` and `fsl-fman_xmdio` still do. `ask-check` reported 47 OK, 2 WARN, 0 FAIL, the same as image 0333; the ehash SYNC timeout, wedge and insert-timeout counters stayed 0, taint was 4096 (out-of-tree only), and the only kernel error was the known OH-port probe message. The 120 s soak (`KEEP=1 bin/testrig-wireguard.sh setup wg-v4`, then `DUR=120 bin/testrig-wgfp-soak.sh soak`) passed all 8 gates at 2.700 Gbit/s, with 29.6M packets sealed, `punted=0`, no `xmit_fail` or `xmit_ern`, BMan drift equal to accounted consumption, every record withdrawn, empty sinks and a clean `pcd-snapshot` diff (0241: 2.79, 0318: 2.74). The nine-cell matrix was not rerun. None of this exercises the new fault paths, which remain host evidence.
+2. **Close the safety gates.** These block every later stage:
+   - DDR-walker quiescence: a discriminating test that holds or identifies a specific in-flight ehash lookup across a SYNC, plus proof that port disable (F-274/F-211) is a real barrier. The 2026-11-05 load-correlation run is not that test.
+   - F-269 timeout quarantine and recovery on a natural pending SYNC, not only an injected one.
+   - QMan portal protocol: the strict host model still reports 2 MC and 5 shutdown cases. This needs full-transaction command ownership, identity-aware FQRN/FQRL handling, MR/DQRR/SDQCR ownership during shutdown, and owner retention on busy or timeout results.
+   - FE teardown ownership: an end-to-end contract for exported disengage, bridge/FDB, egress FQ and netdevice lifetime, PPP and VLAN withdrawal, and stale external DESTROY.
+   - The F-168/F-215 RX SYNC fold correction and the `fman_pcd_port_recover()` pool-offset error.
+3. **Re-enable P3 receive offload.** Prove exact-tuple INPUT provenance and ingress identity per flow (the sink frame needs an ingress ID), show that withdrawal under traffic leaves no stale sink flow, and enforce the family policy. Then pass G3: `down` at least 2.6 Gbit/s on four flows (about 1.6 today), with the replay-window and out-of-order netns tests; kill below 2.2. Alongside this, prove a counter-based RX distribution that does not depend on the exact-match key and resolve per-portal NAPI/IRQ ownership, because one outer flow currently saturates one CPU. Profile the crypto queues before replacing them, and confirm RX headroom and tailroom from a live FD dump on `.185`.
+4. **IPv6.** Add a family-aware control path and an `offload ipv6` CLI leaf; the C1/C2 code exists but learning is disabled. Choose IPv6 outer UDP checksum handling (the FMan TX checksum command or a software sum) and pass the IPv6 inner and outer gates on the board.
+5. **Overload, multi-peer and CLI close-out.** Validate sink tail drop under overload (side-flow loss at most 1%, balanced pool) once the harness has safe process control. Fix the O(N²) flow-stats refresh and check the FE wedge history before multi-peer deployment. Validate the reservation and revised rigs on the board, then pass the CLI lifecycle gates.
+6. **P5, single-flow order restoration.** Check the `qman_enqueue_orp` verb and ORP-field encoding against LS1046A RM chapter 3 in qdrant, then spread one inner flow across sinks. Gate G5: one TCP flow at least 2.2 Gbit/s (about 1.1 to 1.3 today) with no extra reorder retransmits. Build it only for a named single-flow workload.
+7. **P4, offline-port reinjection (optional).** Hand decrypted packets back to FMan through an offline port, removing the skb copy and stack forwarding. Decide jointly with the IPsec plan; it needs safe offline-port FQ ownership and a post-decrypt buffer and policy handoff. Gate G4: correct L2 rewrite and TTL, no FE leak, clean `pcd-snapshot`.
+
+Ceilings that remain after all stages: encryption on the CPUs, the unmeasured memory-bandwidth ceiling near 4 Gbit/s, and no fast path for peers behind ports that are not ASK-engaged.
 
 ## 2. Architecture
 
