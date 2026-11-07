@@ -210,7 +210,9 @@ int  fman_pcd_offload_engage(struct fman *fm, u8 hw_port_id);
 void fman_pcd_offload_disengage(struct fman *fm, u8 hw_port_id);
 
 int  fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id, u32 enq_fqid);
-void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);
+int fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);	/* F-289 */
+int fman_pcd_fe_disengage_prepared(struct fman *fm, u8 hw_port_id,
+				    int (*prepare)(void *), void *data);
 int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
 			   const struct fman_pcd_fe_flow_action *action);
 int  fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
@@ -237,4 +239,3 @@ unsigned long fman_pcd_fe_enq_get_offset(struct fman *fm);
 unsigned long fman_pcd_fe_root_get_offset(struct fman *fm);
 
 #endif /* __ASK_FMAN_CAPS_H */
-
