@@ -1,0 +1,204 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 9 Nov 2026 12:00:00 +0000
+Subject: [PATCH] netfilter: nf_flow_table: keep flows whose hardware record
+ may still forward
+
+The flowtable reduced every driver callback to "installed" or "not", so it
+could not tell an owner that kept a hardware record from one that declined.
+Three cases leave a record forwarding while software believes it is gone:
+
+1. REPLACE on a reused cookie whose previous record is not yet withdrawn
+   (tombstoned) returned an error indistinguishable from a decline. The flow
+   lost IPS_HW_OFFLOAD and fell back to software while the old record still
+   forwarded.
+2. A failed DESTROY in either direction was ignored. The flow was marked
+   HW_DEAD and removed, freeing the cookie for reuse with the record live.
+3. nf_flow_table_free() freed flows whose delete never settled.
+
+Give the callback results owner-specific meaning:
+
+- REPLACE returning -EINPROGRESS means "not installed, but a record I own
+  for this cookie may still forward"; it counts as hardware-live.
+- DESTROY failing with anything other than -EOPNOTSUPP/-ENOENT means the
+  record may remain. The work keeps IPS_HW_OFFLOAD, does not set HW_DEAD and
+  clears HW_DYING so gc retries the delete.
+- At table free, a flow still hardware-live after the final flushes is
+  unhashed and quarantined: its conntrack reference is dropped after RCU and
+  the flow object is intentionally leaked so its cookie address is never
+  reused. A warning reports the count.
+
+Drivers that return 0 or -EOPNOTSUPP keep the old behaviour.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+diff --git a/net/netfilter/nf_flow_table_core.c b/net/netfilter/nf_flow_table_core.c
+index f1f1190..0b346a4 100644
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -763,8 +763,48 @@ void nf_flow_table_cleanup(struct net_device *dev)
+ }
+ EXPORT_SYMBOL_GPL(nf_flow_table_cleanup);
+ 
++/* Called once all offload work for the table has been flushed. A flow whose
++ * hardware delete never settled may still be named by a live record through
++ * its tuple address (the offload cookie). Drop its table, route and conntrack
++ * references so device and namespace teardown can finish, but never free the
++ * object: reusing the address as a new cookie could match the old record.
++ */
++static void flow_offload_quarantine_rcu(struct rcu_head *rcu_head)
++{
++	struct flow_offload *flow = container_of(rcu_head, struct flow_offload, rcu_head);
++
++	nf_ct_put(flow->ct);
++	flow->ct = NULL;
++}
++
++static void nf_flow_table_free_step(struct nf_flowtable *flow_table,
++				    struct flow_offload *flow, void *data)
++{
++	unsigned int *quarantined = data;
++
++	if (test_bit(NF_FLOW_HW, &flow->flags) &&
++	    !test_bit(NF_FLOW_HW_DEAD, &flow->flags)) {
++		rhashtable_remove_fast(&flow_table->rhashtable,
++				       &flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].node,
++				       nf_flow_offload_rhash_params);
++		rhashtable_remove_fast(&flow_table->rhashtable,
++				       &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].node,
++				       nf_flow_offload_rhash_params);
++		if (flow->type == NF_FLOW_OFFLOAD_ROUTE)
++			flow_offload_route_release(flow);
++		call_rcu(&flow->rcu_head, flow_offload_quarantine_rcu);
++		(*quarantined)++;
++		return;
++	}
++	flow_offload_del(flow_table, flow);
++}
++
++#define NF_FLOW_TABLE_FREE_SETTLE_PASSES	8
++
+ void nf_flow_table_free(struct nf_flowtable *flow_table)
+ {
++	unsigned int pass, quarantined = 0;
++
+ 	mutex_lock(&flowtable_lock);
+ 	list_del(&flow_table->list);
+ 	mutex_unlock(&flowtable_lock);
+@@ -774,7 +814,18 @@ void nf_flow_table_free(struct nf_flowtable *flow_table)
+ 	/* ... no more pending work after this stage ... */
+ 	nf_flow_table_iterate(flow_table, nf_flow_table_do_cleanup, NULL);
+ 	nf_flow_table_gc_run(flow_table);
+-	nf_flow_table_offload_flush_cleanup(flow_table);
++	/* An unsettled delete re-arms itself on the next gc pass, so retry a
++	 * bounded number of times. The final flush leaves no work that could
++	 * reach the table after it is freed.
++	 */
++	for (pass = 0; pass < NF_FLOW_TABLE_FREE_SETTLE_PASSES; pass++)
++		nf_flow_table_offload_flush_cleanup(flow_table);
++	nf_flow_table_offload_flush(flow_table);
++	nf_flow_table_iterate(flow_table, nf_flow_table_free_step,
++			      &quarantined);
++	if (quarantined)
++		pr_warn("nf_flow_table: %u flow(s) with unsettled hardware delete quarantined at table free\n",
++			quarantined);
+ 	rhashtable_destroy(&flow_table->rhashtable);
+ }
+ EXPORT_SYMBOL_GPL(nf_flow_table_free);
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+index 3524206..82ec1c3 100644
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -908,6 +908,7 @@ static int nf_flow_offload_tuple(struct nf_flowtable *flowtable,
+ 	struct netlink_ext_ack extack = {};
+ 	struct flow_block_cb *block_cb;
+ 	__be16 proto = ETH_P_ALL;
++	bool unsettled = false;
+ 	int err, i = 0;
+ 
+ 	nf_flow_offload_init(&cls_flow, proto, priority, cmd,
+@@ -919,7 +920,17 @@ static int nf_flow_offload_tuple(struct nf_flowtable *flowtable,
+ 	list_for_each_entry(block_cb, block_cb_list, list) {
+ 		err = block_cb->cb(TC_SETUP_CLSFLOWER, &cls_flow,
+ 				   block_cb->cb_priv);
+-		if (err < 0)
++		/* Owner-specific results: a REPLACE that returns -EINPROGRESS
++		 * declined to install but a record it owns for this cookie
++		 * may still forward, so it counts as hardware-live. A DESTROY
++		 * that fails with anything other than "not mine" leaves such
++		 * a record behind and the flow must not be declared dead.
++		 */
++		if (cmd == FLOW_CLS_DESTROY && err < 0 &&
++		    err != -EOPNOTSUPP && err != -ENOENT)
++			unsettled = true;
++		if (err < 0 &&
++		    !(cmd == FLOW_CLS_REPLACE && err == -EINPROGRESS))
+ 			continue;
+ 
+ 		i++;
+@@ -929,7 +940,7 @@ static int nf_flow_offload_tuple(struct nf_flowtable *flowtable,
+ 	if (cmd == FLOW_CLS_STATS)
+ 		memcpy(stats, &cls_flow.stats, sizeof(*stats));
+ 
+-	return i;
++	return unsettled ? -EBUSY : i;
+ }
+ 
+ static int flow_offload_tuple_add(struct flow_offload_work *offload,
+@@ -943,13 +954,16 @@ static int flow_offload_tuple_add(struct flow_offload_work *offload,
+ 				     &offload->flowtable->flow_block.cb_list);
+ }
+ 
+-static void flow_offload_tuple_del(struct flow_offload_work *offload,
+-				   enum flow_offload_tuple_dir dir)
++static int flow_offload_tuple_del(struct flow_offload_work *offload,
++				  enum flow_offload_tuple_dir dir)
+ {
+-	nf_flow_offload_tuple(offload->flowtable, offload->flow, NULL, dir,
+-			      offload->flowtable->priority,
+-			      FLOW_CLS_DESTROY, NULL,
+-			      &offload->flowtable->flow_block.cb_list);
++	int ret;
++
++	ret = nf_flow_offload_tuple(offload->flowtable, offload->flow, NULL,
++				    dir, offload->flowtable->priority,
++				    FLOW_CLS_DESTROY, NULL,
++				    &offload->flowtable->flow_block.cb_list);
++	return ret < 0 ? ret : 0;
+ }
+ 
+ static int flow_offload_rule_add(struct flow_offload_work *offload,
+@@ -1012,12 +1026,27 @@ static void flow_offload_hw_close_fixup(struct flow_offload *flow)
+ 
+ static void flow_offload_work_del(struct flow_offload_work *offload)
+ {
+-	clear_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
+-	flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_ORIGINAL);
+-	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &offload->flow->flags))
+-		flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_REPLY);
+-	flow_offload_hw_close_fixup(offload->flow);
+-	set_bit(NF_FLOW_HW_DEAD, &offload->flow->flags);
++	struct flow_offload *flow = offload->flow;
++	int err, rerr = 0;
++
++	err = flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_ORIGINAL);
++	if (test_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags))
++		rerr = flow_offload_tuple_del(offload, FLOW_OFFLOAD_DIR_REPLY);
++	if (err || rerr) {
++		/* A hardware record may still forward. Keep the flow, its
++		 * cookie and its hardware-live state; clearing HW_DYING lets
++		 * gc retry the delete. Settled callbacks treat a repeated
++		 * DESTROY as "not mine".
++		 */
++		net_warn_ratelimited("nf_flow_table_offload: hardware delete unsettled flow=%p err=%d/%d, retained for retry\n",
++				     flow, err, rerr);
++		smp_mb__before_atomic();
++		clear_bit(NF_FLOW_HW_DYING, &flow->flags);
++		return;
++	}
++	clear_bit(IPS_HW_OFFLOAD_BIT, &flow->ct->status);
++	flow_offload_hw_close_fixup(flow);
++	set_bit(NF_FLOW_HW_DEAD, &flow->flags);
+ }
+ 
+ static void flow_offload_tuple_stats(struct flow_offload_work *offload,

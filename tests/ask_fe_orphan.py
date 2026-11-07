@@ -14,16 +14,15 @@ HARNESS = ROOT / "tests/dut/ask_fe_orphan.c"
 def test_failed_fe_delete_retains_owner_and_blocks_reinsert(tmp_path):
     source = SOURCE.read_text()
     start = source.index("struct ask_fe_orphan {")
-    end = source.index("/* FE-VM debugfs flow insert helper", start)
-    end = source.rindex("/* ----", start, end)
+    end = source.index("\n}", source.index("static void ask_fe_orphan_exit(", start)) + 2
     (tmp_path / "ask_fe_orphan_body.h").write_text(source[start:end])
     start = source.index("static int ask_flow_fe_owner_status(")
     end = source.index("static int ask_neigh_republish(", start)
     (tmp_path / "ask_fe_owner_status.h").write_text(source[start:end])
     start = source.index("struct ask_flush_victim {")
-    end = source.index("static int ask_pppoe_collect(", start)
+    end = source.index("/* Process context only.", start)
     flush = source[start:end]
-    start = source.index("static void ask_flow_flush_matching(", end)
+    start = source.index("static int __ask_flow_flush_matching(", end)
     end = source.index("static void ask_pppoe_flush_fn(", start)
     (tmp_path / "ask_fe_flush_body.h").write_text(flush + source[start:end])
     binary = tmp_path / "ask_fe_orphan"
@@ -36,3 +35,6 @@ def test_failed_fe_delete_retains_owner_and_blocks_reinsert(tmp_path):
         check=True,
     )
     subprocess.run([str(binary)], check=True, timeout=30)
+    subprocess.run([str(binary), "sw-remove-failure"], check=True, timeout=30)
+    subprocess.run([str(binary), "pppoe"], check=True, timeout=30)
+    subprocess.run([str(binary), "pppoe-sw-remove-failure"], check=True, timeout=30)

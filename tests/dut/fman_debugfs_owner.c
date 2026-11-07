@@ -19,8 +19,11 @@ typedef uint64_t u64;
 #define FMAN_EHASH_FLOW_KEY_MAX 56
 #define FMAN_EHASH_FLOW_KEY_OFF 8
 #define pr_debug(...) ((void)0)
+#define pr_warn_ratelimited(...) ((void)0)
 #define dev_warn(...) ((void)0)
 #define dev_dbg(...) ((void)0)
+#define lockdep_assert_held(lock) assert((lock)->locked)
+#define bitmap_empty(map, bits) (!(map)[0])
 #define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
 
 #include "fman_debugfs_owner_constants.h"
@@ -69,17 +72,21 @@ struct fman_pcd_ehash_flow {
 struct fman_pcd_ehash_table {
 	struct list_head node, flows, quarantined_flows, quarantined_cu;
 	struct hlist_head bidx[4];
+	struct fman_pcd *pcd;
 	u8 key_size, hash_shift;
 	u32 hash_mask;
 	bool draining, poisoned;
 };
 struct fman_pcd_fe_obj { struct list_head node; unsigned long muram_off; };
-struct fman;
+struct fman { int unused; };
 struct fman_pcd {
 	struct mutex fe_lock;
 	struct list_head fe_ehash_tables, fe_enq;
 	unsigned long fe_exit_off;
 	struct fman *fman;
+	bool fe_vm_chain_built, fe_vm_chain_faulted, fe_obs_armed;
+	unsigned long fe_port_armed[1], fe_port_faulted[1];
+	void *fe_arming_v4_table;
 };
 struct fman_pcd_nat_params;
 struct fman_pcd_vlan_params;
@@ -136,12 +143,21 @@ fman_pcd_ehash_table_by_index(struct fman_pcd *pcd, unsigned int index)
 }
 static struct fman *fman_pcd_get_fman(struct fman_pcd *pcd)
 {
-	(void)pcd;
-	return NULL;
+	return pcd->fman;
 }
-static void fman_set_fpm_extc(struct fman *fm, u32 value) { (void)fm; (void)value; }
+static unsigned int sync_writes;
+static void fman_set_fpm_extc(struct fman *fm, u32 value)
+{
+	assert(fm && value == 0x80000000U);
+	sync_writes++;
+}
 static u32 fman_get_fpm_extc(struct fman *fm) { (void)fm; return 0; }
 static void udelay(unsigned int n) { (void)n; }
+static unsigned int ehash_insert_sync_timeouts;	/* F-288 */
+static int fman_pcd_ehash_recover(struct fman_pcd_ehash_table *t)
+{
+	return t->poisoned ? -ETIMEDOUT : 0;
+}
 static int fman_pcd_ehash_flow_clear_all(struct fman_pcd *pcd);
 static int fman_pcd_ehash_del_key(struct fman_pcd_ehash_table *t,
 				  const u8 *key, u8 key_size);
@@ -200,10 +216,12 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
 				  u8 owner, u64 owner_token)
 {
 	struct fman_pcd_ehash_flow *old;
+	int f269_err;
 
 	(void)enq_off; (void)fqid; (void)stats; (void)dst; (void)src;
 	(void)eth_type; (void)nat; (void)vlan;
 	add_calls++;
+#include "fman_ehash_add_guard.h"
 	if (add_error)
 		return add_error;
 	if (key_size != t->key_size)
@@ -261,6 +279,7 @@ int main(void)
 		FMAN_PCD_FE_OWNER_FLOWER, FMAN_PCD_FE_OWNER_NTUPLE,
 		FMAN_PCD_FE_OWNER_WGFP };
 	struct fman_pcd pcd = {};
+	struct fman fm = {};
 	struct fman_pcd_ehash_table t0 = { .key_size = 2, .hash_mask = 3 };
 	struct fman_pcd_ehash_table t1 = { .key_size = 2, .hash_mask = 3 };
 	struct fman_pcd_fe_obj enq = { .muram_off = 0x100 };
@@ -270,6 +289,9 @@ int main(void)
 	struct list_head uncertain;
 	unsigned int before;
 
+	pcd.fman = &fm;
+	t0.pcd = &pcd;
+	t1.pcd = &pcd;
 	init_list(&pcd.fe_ehash_tables);
 	init_list(&pcd.fe_enq);
 	init_list(&t0.flows); init_list(&t0.quarantined_flows);
@@ -278,6 +300,16 @@ int main(void)
 	list_add_tail(&t0.node, &pcd.fe_ehash_tables);
 	list_add_tail(&t1.node, &pcd.fe_ehash_tables);
 	list_add_tail(&enq.node, &pcd.fe_enq);
+
+#ifdef FMAN_TEST_DEBUG_CHAIN_GUARD
+	pcd.fe_obs_armed = true;
+	assert(run(&file, "add 0 0102 1") == -EBUSY);
+	assert(run(&file, "del 0102") == -EBUSY);
+	assert(run(&file, "clear") == -EBUSY);
+	assert(!add_calls && !del_calls && !clear_calls && !sync_writes &&
+	       !pcd.fe_lock.locked);
+	pcd.fe_obs_armed = false;
+#endif
 
 	for (size_t i = 0; i < sizeof(owners) / sizeof(owners[0]); i++) {
 		flow = install_flow(&t0, a, owners[i], i ? 0 : 123);
@@ -292,7 +324,16 @@ int main(void)
 		remove_flow(&t0, flow);
 	}
 
+	t0.pcd = NULL;
+	assert(run(&file, "add 0 0102 1") == -ENODEV);
+	t0.pcd = &pcd;
+	pcd.fman = NULL;
+	assert(run(&file, "add 0 0102 1") == -ENODEV);
+	assert(!fman_pcd_ehash_lookup(&t0, a, 2));
+	assert(!sync_writes && !pcd.fe_lock.locked);
+	pcd.fman = &fm;
 	assert(run(&file, "add 0 0102 1") == 12);
+	assert(sync_writes == 1);
 	flow = fman_pcd_ehash_lookup(&t0, a, 2);
 	assert(flow && flow->owner == FMAN_PCD_FE_OWNER_DEBUGFS &&
 	       flow->owner_token == 0);
@@ -332,6 +373,17 @@ int main(void)
 	assert(run(&file, "clear") == 5);
 	assert(!fman_pcd_ehash_lookup(&t0, a, 2));
 	assert(!pcd.fe_lock.locked);
+
+#ifdef FMAN_TEST_DEBUG_CHAIN_GUARD
+	pcd.fe_vm_chain_built = true;
+	before = add_calls + del_calls + clear_calls + sync_writes;
+	assert(run(&file, "add 0 0102 1") == -ESHUTDOWN);
+	assert(run(&file, "del 0102") == -ESHUTDOWN);
+	assert(run(&file, "clear") == -ESHUTDOWN);
+	assert(before == add_calls + del_calls + clear_calls + sync_writes);
+	assert(!pcd.fe_lock.locked);
+	pcd.fe_vm_chain_built = false;
+#endif
 
 	copy_fails = true;
 	assert(run(&file, "clear") == -EFAULT);

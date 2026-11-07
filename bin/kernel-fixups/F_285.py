@@ -5,6 +5,8 @@ changing the barrier while an ehash operation or HC teardown is in flight.
 Lab operators must initialize the F-284 HC port before any ehash mutation;
 an enabled but unavailable HC port fails closed so F-269 retains uncertain
 records and generations. Recovery from a latched HC failure requires a reboot.
+Missing FMan ownership prevents insertion and fails the barrier closed,
+regardless of the HC setting.
 """
 
 import sys
@@ -105,8 +107,8 @@ NO_FMAN_OLD = (
 )
 NO_FMAN_NEW = (
     "\tif (!fman) {\n"
-    "\t\tdma_wmb();\n"
-    "\t\treturn fman_pcd_hc_ehash_sync(t->pcd);\n"
+    '\t\tpr_warn_ratelimited("fman_pcd: ehash SYNC has no FMan owner; retaining state\\n");\n'
+    "\t\treturn -ENODEV;\n"
     "\t}\n"
 )
 
@@ -166,6 +168,10 @@ ADD_GUARD_OLD = (
 ADD_GUARD_NEW = (
     "\tif (t->draining)\n"
     "\t\treturn -ESHUTDOWN;\n"
+    "\tif (!t->pcd || !fman_pcd_get_fman(t->pcd)) {\n"
+    '\t\tpr_warn_ratelimited("fman_pcd: ehash insert has no FMan owner\\n");\n'
+    "\t\treturn -ENODEV;\n"
+    "\t}\n"
     "\tf269_err = fman_pcd_ehash_recover(t);\n"
     "\tif (f269_err)\n"
     "\t\treturn f269_err;\n"

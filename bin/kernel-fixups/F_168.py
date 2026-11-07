@@ -59,8 +59,8 @@ kroot = "drivers/net/ethernet/freescale/fman"
 port_c = os.path.join(kroot, "fman_port.c")
 
 if not os.path.exists(port_c):
-    print("### F-168: fman_port.c not found")
-    sys.exit(0)
+    print("### F-168: FATAL: fman_port.c not found")
+    sys.exit(1)
 
 with open(port_c) as f:
     src = f.read()
@@ -106,21 +106,43 @@ new = anchor + '''
 \t}
 '''
 
-if new in src:
-    print("### F-168: already applied")
-elif anchor in src:
-    src = src.replace(anchor, new, 1)
-    changes += 1
-    print("### F-168: FMFP_EXTC SYNC assertion inserted into fman_port_set_cc_base()")
-else:
-    print(
-        "### F-168: FATAL: expected 'iowrite32be(cc_muram_off, "
-        "&port->bmi_regs->rx.fmbm_rccb);' anchor not found verbatim in "
-        "fman_port.c -- source has likely drifted since this fixup was "
-        "written. Refusing to guess; fix the anchor text in F_168.py "
-        "against the current fman_port.c before retrying."
-    )
+start = "int fman_port_set_cc_base("
+end = "EXPORT_SYMBOL_GPL(fman_port_set_cc_base);"
+if src.count(start) != 1 or src.count(end) != 1:
+    print("### F-168: FATAL: missing or duplicate RX CC-base function")
     sys.exit(1)
+first = src.index(start)
+last = src.index(end, first)
+body = src[first:last]
+sync = "fman_set_fpm_extc(port->fm, inv0);"
+guard = "\tif (cc_muram_off && fman_cc_engaged_get(port->fm) == 0) {\n"
+
+# Patch 0191 already contains the F-215-guarded RX block. Re-inserting
+# F-168 ahead of it would bypass the first-port-only guard.
+if guard in body:
+    if (body.count(guard) != 1 or body.count(sync) != 1 or
+            body.index(guard) > body.index(sync)):
+        print("### F-168: FATAL: duplicate or invalid guarded RX SYNC")
+        sys.exit(1)
+    print("### F-168: F-215-guarded RX SYNC already present")
+    sys.exit(0)
+
+if "F-215(sync-gate)" in body or "fman_cc_engaged_get(" in body:
+    print("### F-168: FATAL: incomplete F-215 RX SYNC guard")
+    sys.exit(1)
+if new in body:
+    if body.count(sync) != 1:
+        print("### F-168: FATAL: duplicate RX SYNC")
+        sys.exit(1)
+    print("### F-168: already applied")
+    sys.exit(0)
+if body.count(sync) or src.count(anchor) != 1 or body.count(anchor) != 1:
+    print("### F-168: FATAL: RX SYNC or RCCB anchor drifted")
+    sys.exit(1)
+
+src = src.replace(anchor, new, 1)
+changes += 1
+print("### F-168: FMFP_EXTC SYNC assertion inserted into fman_port_set_cc_base()")
 
 if changes:
     with open(port_c, "w") as f:
@@ -128,4 +150,4 @@ if changes:
     print(f"### F-168: {changes} change(s) applied")
 else:
     print("### F-168: no changes applied")
-    sys.exit(1)
+    sys.exit(0)

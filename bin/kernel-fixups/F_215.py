@@ -53,6 +53,11 @@ path already tolerated. Readback/poll bounded + non-fatal as before. Qdrant +
 vendor-source gated. Idempotent via F-215 markers. MUST run AFTER F-167 (struct
 fman accessors pattern) and AFTER F-168 (rewrites its INV0 block). Place right
 after F-168 in ci-setup-kernel.sh.
+
+The original serialization and one-call-per-transition assumptions above are
+not generally valid. F-292 follows this fixup and serializes RX/OH operations
+and accounts per-port transitions; it does not serialize other INV0 writers or
+repair the non-fatal timeout path.
 """
 
 import os
