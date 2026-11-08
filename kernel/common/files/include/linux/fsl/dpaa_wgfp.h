@@ -46,6 +46,7 @@ struct dpaa_wgfp_frame {
 	u32 off;		/* offset of the frame data in the buffer */
 	u32 len;		/* frame length */
 	u32 buf_size;		/* usable buffer size from the buffer start */
+	int ingress_ifindex;	/* port the steered record belongs to */
 	void *fd;		/* the dequeued struct qm_fd (opaque to users) */
 };
 
@@ -89,10 +90,12 @@ void dpaa_wgfp_set_family_policy(dpaa_wgfp_family_fn fn);
 bool dpaa_wgfp_family_ok(struct net_device *dev, u8 family);
 /* True when @dev is a DPAA port whose ehash table is armed (ASK engaged). */
 bool dpaa_wgfp_port_ok(struct net_device *dev);
-/* Steer @t arriving on @in to sink (@hash % sinks). Process context only.
- * Returns the sink index or a negative errno. */
+/* Steer @t arriving on @in to a sink belonging to @in (so the dequeued frame
+ * carries its ingress port). @rx selects the fan-out distributor, when one is
+ * configured, so one outer flow can be decrypted on several CPUs. Process
+ * context only. Returns 0 on success or a negative errno. */
 int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,
-		       u32 hash);
+		       u32 hash, bool rx);
 int dpaa_wgfp_flow_del(struct net_device *in, const struct dpaa_wgfp_tuple *t);
 /* Silicon packet counter of the record for @t. Process context only. */
 int dpaa_wgfp_flow_packets(struct net_device *in,
@@ -112,7 +115,8 @@ static inline void dpaa_wgfp_set_family_policy(dpaa_wgfp_family_fn fn) { }
 static inline bool dpaa_wgfp_family_ok(struct net_device *dev, u8 family) { return false; }
 static inline bool dpaa_wgfp_port_ok(struct net_device *dev) { return false; }
 static inline int dpaa_wgfp_flow_add(struct net_device *in,
-				     const struct dpaa_wgfp_tuple *t, u32 hash)
+				     const struct dpaa_wgfp_tuple *t, u32 hash,
+				     bool rx)
 { return -ENODEV; }
 static inline int dpaa_wgfp_flow_del(struct net_device *in,
 				     const struct dpaa_wgfp_tuple *t)
