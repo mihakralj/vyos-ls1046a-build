@@ -73,6 +73,7 @@ goto err_flow;
 	if (rc)
 		goto err_register;
 
+	ask_align_start();
 	ask_hw_set_ready(true);
 	ask_pr_info("ready (genl family registered, flow_offload + hw + genl active)\n");
 	return 0;
@@ -107,6 +108,7 @@ err_hw:
 static void __exit ask_exit(void)
 {
 	ask_hw_set_ready(false);
+	ask_align_stop();
 	ask_genl_unregister();
 	ask_debugfs_exit();
 	ask_flow_offload_exit();
