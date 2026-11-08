@@ -2683,6 +2683,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     echo "### fman_port.c: F-308 rx start margin harness passed"
 fi
 
+# F-309: WireGuard MAX_QUEUED_PACKETS 1024 -> 4096. The decrypt ring overflowed
+# in bursts (silent DEAD drops, ~1-2 % loss) and capped downloads near 1.9 Gbit/s.
+if [ -f drivers/net/wireguard/messages.h ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_309.py" 2>&1
+    grep -q 'MAX_QUEUED_PACKETS = 4096' drivers/net/wireguard/messages.h
+    echo "### wireguard: F-309 MAX_QUEUED_PACKETS 4096"
+fi
+
 # F-277: do not mutate KeyGen/parser state when F-274 reports a failed
 # RX-port disable in the F-211 IPv6 arm path.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
