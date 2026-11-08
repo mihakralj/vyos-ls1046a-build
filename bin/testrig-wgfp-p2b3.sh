@@ -20,8 +20,14 @@ st(){ dut "sudo cat $WP" | sed 's/ tmpl=[0-9]//'; }
 fails=0; ok(){ echo "  PASS: $*"; }; bad(){ echo "  FAIL: $*"; fails=$((fails+1)); }
 
 STOCK=${STOCK:-0}
-on(){ dut "echo off | sudo tee $WP >/dev/null"; [ "$STOCK" = 1 ] && return
-      dut "echo wg0 | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer"; exit 1; }; }
+# Binding goes through the wgfp_peer_lease reservation of the KEEP=1 tunnel setup (a plain write to
+# wgfp_peer is refused while it exists). WGFP_RX=1 also turns on P3 receive offload for the run.
+WL=/sys/module/wireguard/parameters/wgfp_peer_lease; RX=/sys/module/wireguard/parameters/wgfp_rx
+TOK=${WG_LEASE_TOKEN:-$(cat "${WG_STATE_PATH:-/tmp/wg-rig}.single-lease/token" 2>/dev/null)}
+need_tok(){ [[ $TOK =~ ^[0-9a-f]{32}$ ]] || { echo "ABORT: no wgfp lease token (run KEEP=1 bin/testrig-wireguard.sh setup wg-v4)"; exit 1; }; }
+off(){ [ "$(dut "sudo cat $WP")" = off ] || { need_tok; dut "echo 'stop $TOK' | sudo tee $WL >/dev/null"; }; }
+on(){ need_tok; off; dut "echo ${WGFP_RX:-0} | sudo tee $RX >/dev/null"; [ "$STOCK" = 1 ] && return
+      dut "echo 'bind $TOK wgo-$TOK-dut' | sudo tee $WL >/dev/null" || { echo "ABORT: wgfp_peer_lease bind"; exit 1; }; }
 ka(){ $D2 "sudo wg set wg0 peer \$(sudo wg show wg0 peers) persistent-keepalive $1"; }
 srv(){ $D2 'sudo pkill -f "^iperf3 -s -p 5241"; iperf3 -s -p 5241 -D'; }
 # flow <name> <event command run with eval at EV>: prints intervals, leaves the iperf json in /tmp/p2b3.json on dell1
@@ -191,7 +197,7 @@ chmod +x /tmp/ncatshim/ncat"
 T="$*"; [ -z "$T" ] && T="rekey roam aip pmtu"
 echo "DUT $(dut 'uname -v | cut -c1-40'); tests: $T"
 for t in $T; do "t_$t"; done
-dut "echo off | sudo tee $WP >/dev/null; sudo cat $FE 2>/dev/null | grep -c 'flow\[' | sed 's/^/fe_flow records after off: /'" 2>/dev/null
+off; dut "echo 0 | sudo tee $RX >/dev/null; sudo cat $FE 2>/dev/null | grep -c 'flow\[' | sed 's/^/fe_flow records after off: /'" 2>/dev/null
 dut 'sudo dmesg --level=err,warn | grep -iE "bug|oops|warn|stall|lockup" | grep -v "callbacks suppressed" | tail -3'
 echo "P2b-3 gate: $fails failure(s)"
 exit $((fails > 0))
