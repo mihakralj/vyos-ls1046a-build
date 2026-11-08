@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH] netfilter: nf_flow_table: read final hardware stats before
+ deleting an offloaded flow
+
+With a counter-enabled hardware flowtable, conntrack accounting only sees
+offloaded traffic through the periodic FLOW_CLS_STATS poll. The DESTROY
+work deletes the hardware record without a last poll, so the packets and
+bytes forwarded since the previous poll are lost. With patch 140 a TCP flow
+is deleted at its first FIN, so every offloaded TCP connection loses its
+tail (board .185, 2026-11-02: a 10 s iperf3 flow reported 5.62M packets to
+conntrack while the silicon record had already counted 6.12M two seconds
+before the end; UDP flows that age out were exact).
+
+Run the stats work for the flow before the delete when the flowtable has
+NF_FLOWTABLE_COUNTER set.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+index 1bd76c2..b05bf9d 100644
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -1066,6 +1066,13 @@ static void flow_offload_work_handler(struct work_struct *work)
+ 			NF_FLOW_TABLE_STAT_DEC_ATOMIC(net, count_wq_add);
+ 			break;
+ 		case FLOW_CLS_DESTROY:
++			/* Harvest the counters accrued since the last stats
++			 * poll before the hardware record is deleted, or the
++			 * tail of every offloaded flow is lost to conntrack
++			 * accounting (up to one gc interval per flow).
++			 */
++			if (offload->flowtable->flags & NF_FLOWTABLE_COUNTER)
++				flow_offload_work_stats(offload);
+ 			flow_offload_work_del(offload);
+ 			NF_FLOW_TABLE_STAT_DEC_ATOMIC(net, count_wq_del);
+ 			break;

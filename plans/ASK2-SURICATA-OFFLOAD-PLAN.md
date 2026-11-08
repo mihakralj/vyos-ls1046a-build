@@ -120,6 +120,23 @@ Shunting acceptance, in addition to the validation stages below:
 - Throughput of a long shunted flow matches the unicast HW cell.
 - Short-flow CPS with inspection is recorded as the new SW-bound limit.
 
+### Stage 3/4 prototype result (2026-11-02)
+
+Run on `.185` (image `2026.10.31-0511-rolling`, Suricata 7.0.10 with NFQ), runtime only, outside the VyOS CLI. The script is `bin/testrig-suricata-g7-proto.sh up|down|show`, copied to the DUT and run as root: an `inet ask2_ips` table queues forwarded TCP/UDP from 10.99.0.0/16 to queue 0 with `bypass` at forward priority -20, a second chain at -19 copies `meta mark & 0x100000` into the ct mark, ct-marked flows skip the queue, and the IPv4 flowtable rule (`vyos_filter VYOS_FORWARD_filter` handle 10) is replaced with `ct mark & 0x100000 == 0x100000 counter flow add @VYOS_FLOWTABLE_FT`. Suricata runs with `nfq.mode=accept`, `nfq.fail-open=yes`, `nfq.bypass-mark=0x100000`, `nfq.bypass-mask=0x100000`.
+
+Findings:
+
+- **`stream.bypass` with `stream.reassembly.depth` never marked a one-way bulk flow.** It needs both directions at depth; an upload's reply direction carries only ACKs. A 15 s iperf3 flow stayed queued through Suricata the whole time (396 Mbit/s, 644k packets, 0 marked). Depth-based shunting must use a rule instead: `alert tcp any any -> any <ports> (flow:established,to_server; stream_size:client,>,1048576; flowbits:isnotset,ask2.alerted; bypass; noalert; sid:...;)`.
+- **The mark → ct mark → flowtable → ASK2 chain works.** With that rule, a long flow went `[HW_OFFLOAD] mark=1048576` after about 1.7 MB through Suricata and then ran at 8.8–9.4 Gbit/s. A 300 KB flow never got the mark and stayed in software.
+- **Suricata's `bypass` ignores earlier alerts.** An alerted flow (alert sid fired) was still bypassed and offloaded. Gate every bypass rule on a flowbit that every alert rule sets (`flowbits:set,ask2.alerted` / `isnotset`). With that, the alerted flow stayed in software (210 Mbit/s, `mark=0`) and an unalerted flow on another port went to hardware. Arbitrary third-party rule sets do not set that flowbit, so a production design needs a different alert signal (for example, `noalert`-free rules feeding a separate verdict) or must restrict bypass to traffic classes with no alert rules.
+- **Suricata stopped:** existing hardware flows stay offloaded until revoked. New flows pass through fail-open unmarked and stay in software (1.1 Gbit/s).
+- **Revocation by `conntrack -D -m 0x100000/0x100000`** worked for a routed flow: the connection survived, got a fresh unmarked entry and fell back to software. This cannot be used for NAT flows (the mapping is lost), so production revocation needs another mechanism (clear the mark and tear down the flowtable entry without deleting the conntrack entry).
+- Teardown left MURAM `used` at 58764, no records, `ask-check` READY, and no kernel errors.
+
+### Relation to the shared steer substrate (2026-11-02)
+
+The steer-to-consumer substrate proposed in `ASK2-MASTER-PLAN.md` §4.8 item 1 (an ehash record delivering one flow's frames to a software sink without the IP stack) only helps an inline (IPS) Suricata: the consumer would feed Suricata's packet ring and forward or drop per verdict. It does not help the native passive (AF_PACKET IDS) service today: ASK2 has no path that both forwards a flow in silicon and copies it to an inspector. The microcode's per-flow replicator (`REPLICATE_PKT`, opcode 0x02, used by the vendor for multicast) could in principle do this, but ASK2 has never exercised it, and it copies every packet of the flow, so the inspector would carry the full rate of each mirrored flow (`ASK2-SILICON-TELEMETRY-PLAN.md` §5; corrected 2026-11-07). For the passive service the flow-shunting model above (inspect the slow-path prefix, then let the flowtable offload) stays the design.
+
 ## Decisions and safety contract
 
 The design is not ready for implementation until the following questions are

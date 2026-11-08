@@ -14,17 +14,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# LS1046A ASK2: offload granularity is per port (`offload ipv4|ipv6` engages
-# the port) and nothing finer. VLAN and PPPoE offload are automatic parts of an
-# engaged port, so the per-port `offload vlan` and `offload pppoe` leaves are
-# retired. Drop them; the family leaves (`offload ipv4`/`ipv6`) are untouched,
-# so a port that had them stays engaged and now gets VLAN/PPPoE offload
-# automatically.
+# LS1046A ASK2: the single `interfaces ethernet <n> offload ask` knob is
+# replaced by independent per-family knobs `offload ipv4` and `offload ipv6`.
+# A stored `offload ask` meant "offload both families", so migrate it to both.
 
 from vyos.configtree import ConfigTree
 
 base = ['interfaces', 'ethernet']
-retired = ['vlan', 'pppoe']
 
 
 def migrate(config: ConfigTree) -> None:
@@ -32,7 +28,12 @@ def migrate(config: ConfigTree) -> None:
         return
 
     for ifname in config.list_nodes(base):
-        for leaf in retired:
-            path = base + [ifname, 'offload', leaf]
-            if config.exists(path):
-                config.delete(path)
+        ask_path = base + [ifname, 'offload', 'ask']
+        if not config.exists(ask_path):
+            continue
+
+        # `offload ask` == both families. Preserve intent as ipv4 + ipv6,
+        # then drop the retired node.
+        config.delete(ask_path)
+        config.set(base + [ifname, 'offload', 'ipv4'])
+        config.set(base + [ifname, 'offload', 'ipv6'])

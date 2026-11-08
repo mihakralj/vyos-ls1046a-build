@@ -42,6 +42,7 @@ ask_bridge.o \
 ask_neigh.o \
 ask_op.o \
 ask_stats.o \
+ask_align.o \
 ask_debugfs.o
 
 # PR4 (M0.4): kunit test harness. Built as a SEPARATE module

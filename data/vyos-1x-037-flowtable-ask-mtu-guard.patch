@@ -18,7 +18,7 @@ index cc58ead..da385b0 100755
 +    # 1500 is inside the range, so standard interfaces pass. Widen once a
 +    # larger range is validated on the FMan RX pool.
 +    ASK_FT_MTU_MIN = 1280
-+    ASK_FT_MTU_MAX = 3600
++    ASK_FT_MTU_MAX = 9000
 +    mtu_path = f'/sys/class/net/{ifname}/mtu'
 +    try:
 +        with open(mtu_path) as f:

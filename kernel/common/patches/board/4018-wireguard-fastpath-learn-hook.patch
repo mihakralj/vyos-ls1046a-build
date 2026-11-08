@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 2 Nov 2026 12:00:00 +0000
+Subject: [PATCH] wireguard: hand packets between the stack and the DPAA fast
+ path learner (P2b-2/P3)
+
+wg_xmit() hands each packet with a resolved peer and endpoint to
+wg_fastpath_learn() (drivers/net/wireguard/fastpath.c), which installs an
+FMan record for eligible inner flows so later frames are sealed on the
+DPAA fast path without an sk_buff. A no-op unless the fast path is bound
+to this peer (wgfp_peer module parameter); a stub without FSL_DPAA_ETH.
+
+wg_receive() hands each packet the UDP tunnel delivered to
+wg_fastpath_rx_observe().  That callback runs after IP input and the
+INPUT hook, so an observation proves the exact outer tuple passed INPUT;
+P3 installs a receive record only for a tuple observed on the same
+ingress port.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/wireguard/device.c b/drivers/net/wireguard/device.c
+index 040d77cec..3c6086e0b 100644
+--- a/drivers/net/wireguard/device.c
++++ b/drivers/net/wireguard/device.c
+@@ -10,6 +10,7 @@
+ #include "ratelimiter.h"
+ #include "peer.h"
+ #include "messages.h"
++#include "fastpath.h"
+ 
+ #include <linux/module.h>
+ #include <linux/rtnetlink.h>
+@@ -170,6 +171,9 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
+ 		goto err_peer;
+ 	}
+ 
++	/* DPAA fast path (P2b-2): learn the inner flow for a hardware record. */
++	wg_fastpath_learn(peer, skb);
++
+ 	mtu = skb_valid_dst(skb) ? dst_mtu(skb_dst(skb)) : dev->mtu;
+ 
+ 	__skb_queue_head_init(&packets);
+diff --git a/drivers/net/wireguard/socket.c b/drivers/net/wireguard/socket.c
+index 253488f..1518ab7 100644
+--- a/drivers/net/wireguard/socket.c
++++ b/drivers/net/wireguard/socket.c
+@@ -8,6 +8,7 @@
+ #include "socket.h"
+ #include "queueing.h"
+ #include "messages.h"
++#include "fastpath.h"
+ 
+ #include <linux/ctype.h>
+ #include <linux/net.h>
+@@ -323,6 +324,7 @@ static int wg_receive(struct sock *sk, struct sk_buff *skb)
+ 	if (unlikely(!wg))
+ 		goto err;
+ 	skb_mark_not_on_list(skb);
++	wg_fastpath_rx_observe(wg, skb);
+ 	wg_packet_receive(wg, skb);
+ 	return 0;
+ 

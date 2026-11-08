@@ -58,10 +58,19 @@ programs it by writing MURAM-resident configuration tables through FMan CCSR
 registers. It is never invoked via a software API or opcode dispatch — **the
 tables are the API**.
 
-**[SPEC]** The Host Command (HC) doorbell is **absent** from this blob:
-`caps=0x17 = 0b0001_0111` (bits 0, 1, 2, 4 set; bit 3 `FMAN_CAP_HC_DISPATCH`
-clear). `fmd_host_cmd_send()` returns `-ENXIO`. The only productive
-programming path is the register → MURAM → silicon path documented here.
+**Correction (2026-11-05): Host Command is not proven absent.** Earlier
+revisions said the HC doorbell was absent because `caps=0x17` has bit 3
+(`FMAN_CAP_HC_DISPATCH`) clear and `fmd_host_cmd_send()` returns `-ENXIO`.
+That bitmask is not decoded from the blob. Our own patch `0086a` assigns it
+(`major>=210 → 0x17`), so it only says that our kernel never enabled the
+separate HC-dispatch capability. The vendor reference board `.70` runs the
+same 210.10.1 microcode, dedicates O/H `port@82000` (hwport 0x02, QMan
+channel 0x809) to HC, and uses `FmHcPcdSync()` (an `HC_HCOR_OPCODE_SYNC`
+frame) as its ehash update barrier. F-284, cold-boot tested on `.185` with
+image 0553, confirmed 110,101/110,101 HC SYNC frames on that microcode.
+This proves the HC-frame transport and confirmation path execute on our
+mainline stack; it does not prove that the confirmation drains our DDR ehash
+walkers or that the distinct `fmd_host_cmd_send()` dispatch API is available.
 
 ### 1.1 The NXP microcode families
 
@@ -80,8 +89,12 @@ feature family (`106` = IPACC: custom classification, independent mode, host
 commands, IPv4/6 frag/reassembly, IPsec, header manipulation; `107` = DSAR +
 partial IPACC; `108` = NG-CAPWAP + FE + IPACC). Second number = HW rev (`.3`
 = FMANv3 Rev1, `.4` = FMANv3 > Rev1; LS1046A r1.0 ⇒ `106.4.18`). `210.x` is
-proprietary, newer than every public family, and diverges from all of them by
-shipping with the HC bit clear.
+proprietary and newer than every public family. Our kernel's `caps=0x17`
+value sets the separate HC-dispatch capability clear, but that mask is
+assigned by patch `0086a`, not decoded from the microcode; it does not
+establish that HC SYNC frames on the dedicated O/H port are unsupported.
+F-284 confirms those frames execute on 210.10.1, while the separate
+`fmd_host_cmd_send()` dispatch path remains unverified.
 
 | Family | CC | IM | HC | IPF | IPR | HM | DSAR | CAPWAP |
 |---|---|---|---|---|---|---|---|---|
@@ -667,7 +680,7 @@ following it finds almost entirely zeroed memory — no recognizable AD,
 explained structurally (§5.3.2's index×16 convention), but no evidence of an
 active DDR-backed table exists downstream. (3) The vendor's two genuine
 distributions declare `aging="yes"`, and aging-enabled tables structurally
-require the Host Command this blob lacks (§5.3.3) — so `.106`'s ehash tables
+require Host Command (§5.3.3), which our stack does not yet drive (see the §1 correction; F-284 probes it) — so `.106`'s ehash tables
 may be unable to receive a dynamically-inserted key on this microcode
 regardless of any software bug. A full grep of the vendor SDK finds **zero
 callers** that ever set the `UPDATE_FPM_EXTC` flag either — `.106` has never
@@ -783,12 +796,16 @@ reads `0x00000000` idle, `echo sync` clears immediately (0 polls), all fault
 taps clean, port healthy — **the register itself is safe and responsive in
 isolation.**
 
-**[NOTE] Applicability caveat.** §5.12.14.1 is documented in the context of
-swapping *Action Descriptors*; whether the same protocol governs the
-DDR-resident ehash *bucket chain* (a different data structure) is not
-resolved by the RM content found so far. Both are
-live-walked-by-the-FMan-controller structures, and the RM treats
-synchronization as categorically necessary for that class of update.
+**[NOTE] FPM SYNC scope.** The RM gives a general ordering contract beyond
+the Action Descriptor example in §5.12.14.1: §5.6 says a SYNC task stalls
+until all tasks ahead of it have finished, and §5.7.3.14 maps `FMFP_EXTC`
+`INVn` to execution of an external-request TNUM. The 210.10.1 FE external-hash
+lookup is part of packet processing through the FPM, so a completed `INV0`
+has a documented source-level basis for draining earlier lookups before their
+DDR bucket generations are reclaimed. The RM does not name the external-hash
+walker explicitly, and no ehash-timeout or stale-generation fault has been
+induced on silicon. This supports using completed `INV0` as the software
+reclamation barrier; it is not hardware lifecycle validation.
 
 ### 5.4 The SYNC requirement in practice: F-168, and what remains open
 
@@ -1787,7 +1804,7 @@ with every other field this project's ehash path configures.
 
 | Item | Evidence |
 |---|---|
-| **Host Command doorbell** | `caps=0x17`, bit 3 clear; `fmd_host_cmd_send()` returns `-ENXIO`; `fman_irq()` never services FCEV/REV events |
+| **Host Command path in our kernel** | Absent from our software only, not from the microcode. `caps=0x17` is self-assigned by patch `0086a`; `fmd_host_cmd_send()` returns `-ENXIO`; `fman_irq()` never services FCEV/REV events. Vendor `.70` drives HC SYNC on the same 210.10.1 blob through O/H port 0x02, channel 0x809. F-284 is the opt-in probe (correction 2026-11-05, see §1). |
 | **Custom microcode opcodes** | NXP's microcode SDK, compiler, and signing keys are not distributed to any client |
 | **FE-VM ISA** | No public documentation, no disassembler, no simulator |
 
