@@ -68,9 +68,18 @@ goto err_flow;
 	if (rc)
 		goto err_genl;
 
+	/* Native block callbacks pin the module until their blocks unbind. */
+	rc = ask_flow_offload_register();
+	if (rc)
+		goto err_register;
+
+	ask_align_start();
+	ask_hw_set_ready(true);
 	ask_pr_info("ready (genl family registered, flow_offload + hw + genl active)\n");
 	return 0;
 
+err_register:
+	ask_genl_unregister();
 err_genl:
 	ask_debugfs_exit();
 err_debugfs:
@@ -98,6 +107,8 @@ err_hw:
 
 static void __exit ask_exit(void)
 {
+	ask_hw_set_ready(false);
+	ask_align_stop();
 	ask_genl_unregister();
 	ask_debugfs_exit();
 	ask_flow_offload_exit();

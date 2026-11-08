@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Probe whether a bucket of unified-diff patches still applies to upstream HEAD.
 #
-# Usage: patch-rot-probe.sh <repo-url> <branch> <dest-dir> <patch-glob>
+# Usage: patch-rot-probe.sh <repo-url> <branch|40-hex sha> <dest-dir> <patch-glob> [new-file dir]
+#   [new-file dir] is copied over the tree first, as the build does with
+#   data/vyos-1x-files (some patches edit files that only exist there).
 #
 # This deliberately MIRRORS the real build's apply semantics rather than doing
 # an independent per-patch `git apply --check`:
@@ -34,8 +36,8 @@
 
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-    echo "usage: $0 <repo-url> <branch> <dest-dir> <patch-glob>" >&2
+if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+    echo "usage: $0 <repo-url> <branch|sha> <dest-dir> <patch-glob> [new-file dir]" >&2
     exit 2
 fi
 
@@ -43,6 +45,7 @@ repo_url="$1"
 branch="$2"
 dest="$3"
 glob="$4"
+files="${5:-}"
 
 root="$(pwd)"
 
@@ -58,10 +61,20 @@ rm -rf "$dest"
 # An explicit branch is used rather than the remote default so a future rename
 # fails loudly here instead of silently degrading the check — the 2026-05-30
 # `current` -> `rolling` rename left this workflow inert for eight weeks.
-git clone --branch "$branch" --depth 1 "$repo_url" "$dest"
+if [[ "$branch" =~ ^[0-9a-f]{40}$ ]]; then
+    # a pinned commit (bin/ci-setup-vyos1x.sh VYOS1X_COMMIT)
+    git init -q "$dest"
+    git -C "$dest" fetch -q --depth 1 "$repo_url" "$branch"
+    git -C "$dest" checkout -q FETCH_HEAD
+else
+    git clone --branch "$branch" --depth 1 "$repo_url" "$dest"
+fi
 echo "::endgroup::"
 
 cd "$dest"
+if [ -n "$files" ]; then
+    cp -a "$root/$files/." .
+fi
 
 cat > .gitattributes <<'GITATTR'
 *.c     merge=mergiraf

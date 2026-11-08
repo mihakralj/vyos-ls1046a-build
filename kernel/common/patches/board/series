@@ -452,6 +452,18 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4016-wireguard-tx-lanes.patch
 
+# ── 4018: WireGuard fast path P2b-2 automatic flow install (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md) ──
+# wg_xmit() offers packets of the fast-path-bound peer to wg_fastpath_learn()
+# (kernel/common/files/drivers/net/wireguard/fastpath.c), which installs FMan
+# records through dpaa_wgfp_flow_add(). Inert unless wgfp_peer is set.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4018-wireguard-fastpath-learn-hook.patch
+
+# A WGFP enqueue uses a registered ERN tag independent of the destination FQ
+# and reports EQCR-full backpressure; the legacy enqueue path is unchanged.
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4019-qman-enqueue-fqid.patch
+
 # R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
 # Upstream-Status: Pending | Risk-Tier: C
 0176-dpaa-rx-stats-before-stack-verdict.patch

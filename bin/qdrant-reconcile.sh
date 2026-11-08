@@ -6,13 +6,15 @@ set -euo pipefail
 
 DAYS="${1:-14}"
 SINCE="$(date -d "-${DAYS} days" +%Y-%m-%d)"
+COMMITS=$(git log --oneline --since="${SINCE}")
+FULL_LOG=$(git log --format="%h %ai %s" --since="${SINCE}")
 
 echo "=== QDRANT RECONCILIATION REPORT ==="
 echo "Period: ${SINCE} to $(date +%Y-%m-%d)"
 echo ""
 
 # Count commits in period
-TOTAL=$(git log --oneline --since="${SINCE}" | wc -l)
+TOTAL=$(printf '%s\n' "$COMMITS" | awk 'NF { n++ } END { print n+0 }')
 echo "Total commits in period: ${TOTAL}"
 echo ""
 
@@ -20,11 +22,15 @@ echo ""
 echo "--- COMMIT CATEGORIES ---"
 echo ""
 
-FIXES=$(git log --oneline --since="${SINCE}" | grep -iE "fix|F-[0-9]" | wc -l)
-DOCS=$(git log --oneline --since="${SINCE}" | grep -iE "docs|plan|spec|arch" | wc -l)
-BUILD=$(git log --oneline --since="${SINCE}" | grep -iE "build|ci|chore" | wc -l)
-FEAT=$(git log --oneline --since="${SINCE}" | grep -iE "feat" | wc -l)
-REVERT=$(git log --oneline --since="${SINCE}" | grep -iE "revert" | wc -l)
+count_matches() {
+  printf '%s\n' "$COMMITS" | awk -v pattern="$1" \
+    'tolower($0) ~ pattern { n++ } END { print n+0 }'
+}
+FIXES=$(count_matches 'fix|f-[0-9]')
+DOCS=$(count_matches 'docs|plan|spec|arch')
+BUILD=$(count_matches 'build|ci|chore')
+FEAT=$(count_matches 'feat')
+REVERT=$(count_matches 'revert')
 
 echo "  Fixes (F-xxx, fix):     ${FIXES}"
 echo "  Documentation:          ${DOCS}"
@@ -35,12 +41,18 @@ echo ""
 
 # Extract fixup IDs from commits
 echo "--- FIXUP IDs IN PERIOD ---"
-git log --oneline --since="${SINCE}" | grep -oE "F-[0-9]+" | sort -t'-' -k2 -n -u
+printf '%s\n' "$COMMITS" | awk '{
+  line = $0
+  while (match(line, /F-[0-9]+/)) {
+    print substr(line, RSTART, RLENGTH)
+    line = substr(line, RSTART + RLENGTH)
+  }
+}' | sort -t'-' -k2 -n -u
 echo ""
 
 # List all commits for agent review
 echo "--- FULL COMMIT LOG (newest first) ---"
-git log --format="%h %ai %s" --since="${SINCE}"
+[ -z "$FULL_LOG" ] || printf '%s\n' "$FULL_LOG"
 echo ""
 
 # Identify high-value knowledge signals
@@ -48,24 +60,32 @@ echo "--- HIGH-VALUE KNOWLEDGE SIGNALS ---"
 echo "(These commit patterns almost always contain qdrant-worthy knowledge)"
 echo ""
 
+show_matches() {
+  printf '%s\n' "$COMMITS" | awk -v pattern="$1" \
+    'tolower($0) ~ pattern { print; found=1 } END { if (!found) print "  (none)" }'
+}
+
 echo "Board test results:"
-git log --oneline --since="${SINCE}" | grep -iE "board|silicon|HIT|MISS|test.*pass|test.*fail|soak|deploy|ISO" || echo "  (none)"
+show_matches 'board|silicon|hit|miss|test.*pass|test.*fail|soak|deploy|iso'
 echo ""
 
 echo "Root cause findings:"
-git log --oneline --since="${SINCE}" | grep -iE "root cause|discovered|found|oracle|decisive|confirmed|disproven|refuted" || echo "  (none)"
+show_matches 'root cause|discovered|found|oracle|decisive|confirmed|disproven|refuted'
 echo ""
 
 echo "Architectural decisions:"
-git log --oneline --since="${SINCE}" | grep -iE "retire|un-retire|architectural|pivot|shipping|dead.end|decision" || echo "  (none)"
+show_matches 'retire|un-retire|architectural|pivot|shipping|dead.end|decision'
 echo ""
 
 echo "Reverts and oscillations:"
-git log --oneline --since="${SINCE}" | grep -iE "revert|oscillat|supersed" || echo "  (none)"
+show_matches 'revert|oscillat|supersed'
 echo ""
 
 echo "Iteration sagas (multiple versions of same fix):"
-git log --oneline --since="${SINCE}" | grep -oE "F-[0-9]+.*v[0-9]+" | sort -u || echo "  (none)"
+printf '%s\n' "$COMMITS" | awk '
+  match($0, /F-[0-9]+.*v[0-9]+/) { print substr($0, RSTART, RLENGTH); found=1 }
+  END { if (!found) print "  (none)" }
+' | sort -u
 echo ""
 
 echo "=== ACTION REQUIRED ==="

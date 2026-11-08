@@ -49,7 +49,8 @@
 # HW vs SW labeling is auto-detected per DUT (`detect_mode`): a DUT with an
 # nftables flowtable in "offload hardware" mode and an armed FE (fe_arm) is
 # labeled HW; anything else (e.g. .106, which has no flowtable at all) is
-# labeled SW — this is a legitimate baseline, not a failure.
+# labeled SW — this is a legitimate baseline, not a failure. Tracked FE
+# faults or incomplete fault readback are labeled UNKNOWN.
 #
 # KNOWN ISSUE (2026-10-02, ASK2/.185 only, VLAN offload armed): bidirectional
 # traffic on a vlan-port/vlan-vlan combo has wedged eth3 into the documented
@@ -153,11 +154,22 @@ cmd_setup() {
 }
 
 # ------------------------------------------------------------ mode detection
-# Prints "HW" if the DUT has an armed hardware flowtable, else "SW".
+# Prints HW for an armed hardware flowtable, SW for the baseline, or UNKNOWN.
 detect_mode() {
-  local has_offload_flag has_fe_armed
+  local has_offload_flag has_fe_armed state faulted fault_state
   has_offload_flag=$(SSHD "sudo nft list ruleset 2>/dev/null | grep -A3 'flowtable' | grep -c 'flags offload'" 2>/dev/null)
-  has_fe_armed=$(SSHD "sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm 2>/dev/null | grep -c 'Armed ports: 0x'" 2>/dev/null)
+  state=$(SSHD "sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm 2>/dev/null" 2>/dev/null || true)
+  faulted=$(grep '^Faulted ports:' <<<"$state" || true)
+  fault_state=$(grep '^FE fault/staging:' <<<"$state" || true)
+  if [[ -n "$faulted" || -n "$fault_state" ||
+        "$state" == *"debugfs FE arm changes disabled: ownership unresolved"* ]]; then
+    if [[ "$faulted" != "Faulted ports: (none)" ||
+          "$fault_state" != "FE fault/staging: no" ]]; then
+      echo "UNKNOWN"
+      return
+    fi
+  fi
+  has_fe_armed=$(grep -c '^Armed ports: 0x' <<<"$state" || true)
   if [ "${has_offload_flag:-0}" -gt 0 ] 2>/dev/null && [ "${has_fe_armed:-0}" -gt 0 ] 2>/dev/null; then
     echo "HW"
   else

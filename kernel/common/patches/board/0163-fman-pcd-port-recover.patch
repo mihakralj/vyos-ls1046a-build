@@ -40,7 +40,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -7,6 +7,139 @@ err_free:
+@@ -7,6 +7,141 @@ err_free:
  }
  EXPORT_SYMBOL_GPL(fman_pcd_init);
  
@@ -102,8 +102,10 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +
 +	/* Step 1: stop BMI RX so no new FE_ENTER tasks start. */
 +	ret = fman_port_disable(port);
-+	if (ret)
++	if (ret) {
++		fman_port_enable(port);
 +		return ret;
++	}
 +
 +	/* Step 2: zero all workspace pool slots. */
 +	memset_io(pool_base, 0, (size_t)tnums * 512u);

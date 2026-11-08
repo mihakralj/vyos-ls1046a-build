@@ -25,6 +25,12 @@
 #   NOPRIME=1 skip priming of the single flow: it stays on the kernel path (the miss path when ASK is engaged).
 #             With BIDIR=1, dell2 sends its own flows (sports as dell1, dport 9001) instead of the reverse
 #             tuples and nothing is warmed, so both directions stay on the kernel path.
+#             FLOWS > 50000: UDP sport and dport both vary (SPS x (SPS+1) >= FLOWS combinations; pktgen steps the
+#             two counters independently, so coprime spans cover the whole product).
+#   WARM_MAX=S, WARM_PARTIAL=1  warm-up limit in seconds (180); continue with whatever is offloaded instead of
+#             refusing (the hw share column then shows the fallback). WARM_SECS=S: vendor warm-up time (5).
+#   DURING='cmd'  run cmd (evaluated here, in the background) at the start of every measured window and wait for it;
+#             its output goes to DURING_OUT. Used by bin/testrig-suite-abcd.sh for latency, CPS and control-plane probes.
 #   CONFIRM=N confirm runs after an a2 search (3).
 #   DRY=1     print the pktgen configuration instead of running it (the counters are still read).
 #   MAXPPS=N  a2 searches 0..N only and skips the unpaced line-rate probe (kernel-path runs).
@@ -35,6 +41,7 @@
 set -u
 . "$(dirname "$0")/testrig-env.sh"
 rig_require GEN1 GEN2
+SPS=1; DPSPAN=1   # UDP source / destination port spans of the flow set (see trial)
 DUT_KIND=${DUT_KIND:-ask2}; LOSS=${LOSS:-0.001}; TRIAL=${TRIAL:-10}; STEPS=${STEPS:-7}
 THREADS=${THREADS:-4}; BURST=${BURST:-32}; BIDIR=${BIDIR:-0}; FLOWS=${FLOWS:-1}; NOPRIME=${NOPRIME:-0}; DRY=${DRY:-0}
 OUT=${OUT:-$RIG_OUT/pktgen-$DUT_KIND-$(date +%Y%m%d).csv}; mkdir -p "$(dirname "$OUT")"
@@ -102,9 +109,11 @@ pgsh(){ # host-cmd: run stdin as root on that dell, or print it (DRY=1)
 pg_run(){ # dir(1 = dell1->dell2, 2 = dell2->dell1) size pps count udp_src_min udp_src_max udp_dst threads -> us
   local dir=$1; shift
   local size=$1 pps=$2 cnt=$3 smin=$4 smax=$5 dp=$6 nt=$7
-  local h=$D1S s=$SRC d=$DST m=$MAC v=$VLAN s0=$smin s1=$smax d0=$dp d1=$dp
-  [ $dir = 2 ] && { h=$D2S; s=$SRC2; d=$DST2; m=$MAC2; v=$VLAN2; s0=$dp; s1=$dp; d0=$smin; d1=$smax; }
+  local h=$D1S s=$SRC d=$DST m=$MAC v=$VLAN s0=$smin s1=$smax d0=$dp d1=$((dp + DPSPAN - 1))
+  [ $dir = 2 ] && { h=$D2S; s=$SRC2; d=$DST2; m=$MAC2; v=$VLAN2; s0=$dp; s1=$((dp + DPSPAN - 1)); d0=$smin; d1=$smax; }
   [ $dir = 2 ] && [ "$NOPRIME" = 1 ] && { s0=$smin; s1=$smax; d0=9001; d1=9001; }   # never a reply
+  # pktgen's sequential port sweep wraps at udp_*_max (exclusive): widen a sweep by one so N flows are N flows
+  [ $s1 -gt $s0 ] && s1=$((s1 + 1)); [ $d1 -gt $d0 ] && d1=$((d1 + 1))
   pgsh "$h" <<EOF
 set -e
 modprobe pktgen
@@ -135,6 +144,8 @@ EOF
 measure(){ # size pps count smin smax dp threads
   local t0 r0 p0 t1 r1 p1 t2 r2 us us2 f
   t0=$(ctr d1 tx); r0=$(ctr d2 rx); p0=$(proof)
+  local dpid=""
+  [ -n "${DURING:-}" ] && { ( eval "$DURING" ) > "${DURING_OUT:-/dev/null}" 2>&1 & dpid=$!; }
   if [ "$BIDIR" = 1 ]; then   # half the rate and count each way, both dells at once
     t2=$(ctr d2 tx); r2=$(ctr d1 rx); f=$(mktemp)
     pg_run 2 "$1" $(( $2 / 2 )) $(( $3 / 2 )) "$4" "$5" "$6" "$7" > "$f" &
@@ -143,6 +154,7 @@ measure(){ # size pps count smin smax dp threads
   else
     us=$(pg_run 1 "$@")   # pktgen wall time; offered pps = MAC TX count / that time
   fi
+  [ -n "$dpid" ] && wait "$dpid"
   sleep 1
   [ "$DRY" = 1 ] || dut true || { echo "DUT unreachable after the trial: stopping"; exit 3; }
   t1=$(ctr d1 tx); r1=$(ctr d2 rx); p1=$(proof)
@@ -165,15 +177,16 @@ warm(){ # size sport_min: keep every flow alive at 50 kpps each way until the DU
   # 2026-10-10: inserts run at ~255 flows/s (~32 s for 8192) while idle records age out after 30 s, and a
   # line-rate flood racing the inserts wedged the FE (FMFP_EXTC INV0 stuck); so traffic continues until
   # conntrack shows every flow [HW_OFFLOAD], and only then does the measured trial start.
-  local f b1 b2 n=0 last=-1 still=0 t want=$((FLOWS - FLOWS / 200))   # >= 99.5 %: a rare flow misses
+  local f b1 b2 n=0 last=-1 still=0 t=0 want=$((FLOWS - FLOWS / 200))   # >= 99.5 %: a rare flow misses
   f=$(mktemp)
-  pg_run 2 "$1" 50000 $((50000 * 180)) "$2" $(($2 + FLOWS - 1)) 9000 "$THREADS" > "$f" & b2=$!
-  pg_run 1 "$1" 50000 $((50000 * 180)) "$2" $(($2 + FLOWS - 1)) 9000 "$THREADS" > /dev/null & b1=$!
-  if [ "$DUT_KIND" = vendor ] || [ "$DRY" = 1 ]; then sleep 5; n=$FLOWS
+  pg_run 2 "$1" 50000 $((50000 * ${WARM_MAX:-180})) "$2" $(($2 + SPS - 1)) 9000 "$THREADS" > "$f" & b2=$!
+  pg_run 1 "$1" 50000 $((50000 * ${WARM_MAX:-180})) "$2" $(($2 + SPS - 1)) 9000 "$THREADS" > /dev/null & b1=$!
+  if [ "$DUT_KIND" = vendor ] || [ "$DRY" = 1 ]; then sleep "${WARM_SECS:-5}"; n=$FLOWS
   else
-    for t in $(seq 1 180); do
+    for t in $(seq 1 "${WARM_MAX:-180}"); do
       sleep 1
-      n=$(dut "sudo conntrack -L -p udp 2>/dev/null | grep HW_OFFLOAD | grep -c '=9000 ' || true"); n=${n:-0}
+      if [ "$DPSPAN" -gt 1 ]; then n=$(dut "sudo conntrack -L -p udp 2>/dev/null | grep -c HW_OFFLOAD || true")
+      else n=$(dut "sudo conntrack -L -p udp 2>/dev/null | grep HW_OFFLOAD | grep -c '=9000 ' || true"); fi; n=${n:-0}
       [ "$n" -ge "$want" ] && break
       if [ "$n" = "$last" ]; then still=$((still + 1)); [ $still -ge 20 ] && break; else still=0; fi
       last=$n
@@ -182,17 +195,23 @@ warm(){ # size sport_min: keep every flow alive at 50 kpps each way until the DU
   fi
   $D1 "$NS sh -c 'echo stop > /proc/net/pktgen/pgctrl'"; $D2 "$NS sh -c 'echo stop > /proc/net/pktgen/pgctrl'"
   wait $b1 $b2; rm -f "$f"
-  [ "$n" -ge "$want" ] || { echo "warm: only $n of $FLOWS flows offloaded; refusing to flood"; exit 4; }
+  WARMED=$n
+  if [ "$n" -lt "$want" ]; then
+    [ "${WARM_PARTIAL:-0}" = 1 ] && { echo "warm: only $n of $FLOWS flows offloaded; continuing (WARM_PARTIAL)"; return 0; }
+    echo "warm: only $n of $FLOWS flows offloaded; refusing to flood"; exit 4
+  fi
 }
 trial(){ # path size pps secs
   local pps=$3 n sp=9000
   [ "${4:-0}" -ge 1 ] || { echo "trial: SECS must be >= 1 (pktgen count 0 means send forever)"; exit 2; }
   n=$(( ${pps:-0} > 0 ? pps*$4 : $(lrate $2)*$4 ))
   [ "$FLOWS" -gt 1 ] && sp=10000
+  SPS=$FLOWS; DPSPAN=1
+  if [ "$FLOWS" -gt 50000 ]; then SPS=$(awk -v n=$FLOWS 'BEGIN{r=int(sqrt(n)); if(r*(r+1)<n) r++; print r}'); DPSPAN=$((SPS + 1)); fi
   if [ "$NOPRIME" = 1 ]; then :
   elif [ "$BIDIR" = 1 ]; then warm "$2" $sp
   elif [ "$FLOWS" = 1 ]; then prime 9000; fi
-  measure "$2" "$pps" "$n" $sp $((sp + FLOWS - 1)) 9000 "$THREADS"
+  measure "$2" "$pps" "$n" $sp $((sp + SPS - 1)) 9000 "$THREADS"
   log trial "$1" "$2" "$pps"
 }
 ok(){ awk -v l="$LOSSP" -v m="$LOSS" 'BEGIN{exit !(l+0<=m+0)}'; }

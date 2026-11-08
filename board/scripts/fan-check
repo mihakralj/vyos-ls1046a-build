@@ -4,9 +4,11 @@
 # Usage:   fan-check
 #
 # Reports (one line per item):
-#   - all 5 thermal zones (ddr, serdes, fman, cluster, sec) with current
-#     temperature, fan-pid setpoint, fan-pid crit_temp, and a
-#     [COOL]/[WARM]/[HOT]/[CRIT] tag based on those thresholds
+#   - all 8 fan-pid temperature zones: the 5 SoC thermal zones (ddr, serdes,
+#     fman, cluster, sec) and the 3 board TMP431 readings (PCB,
+#     CPU, SFP+), each with current temperature, fan-pid
+#     setpoint, fan-pid crit_temp, and a [COOL]/[WARM]/[HOT]/[CRIT] tag based
+#     on those thresholds
 #   - EMC2305 per-channel PWM duty (raw 0..255 and percent), calibrated
 #     minimum running duty, tachometer RPM, fault flag, and operating state
 #   - fan-pid daemon status + uptime + last log line + per-zone PWM demands
@@ -37,6 +39,9 @@ declare -A SETPOINT=(
     [fman-thermal]=70
     [cluster-thermal]=65
     [sec-thermal]=65
+    [PCB]=60
+    [CPU]=70
+    [SFP+]=60
 )
 declare -A CRIT=(
     [ddr-thermal]=80
@@ -44,6 +49,20 @@ declare -A CRIT=(
     [fman-thermal]=87
     [cluster-thermal]=85
     [sec-thermal]=85
+    [PCB]=85
+    [CPU]=85
+    [SFP+]=85
+)
+# Board TMP431 zones: label -> "<DT node suffix>:<hwmon temp file>". Matched by
+# device-tree node because the i2c bus number and hwmon index are probe-order
+# dependent. Mux ch1 chip = PCB (PCB = local temp1, CPU = remote
+# probe on the CPU, temp2); mux ch2 chip = SFP+ (local temp1 only; its remote input is
+# unconnected, constant 0.0 C, and is not a zone). Mirrors fan-pid's
+# ZONES[].hwmon entries.
+declare -A HWMON_ZONE=(
+    [PCB]="i2c-mux@70/i2c@1/temp-sensor@4c:temp1_input"
+    [CPU]="i2c-mux@70/i2c@1/temp-sensor@4c:temp2_input"
+    [SFP+]="i2c-mux@70/i2c@2/temp-sensor@4c:temp1_input"
 )
 HARD_FAULT_TEMP=100
 PWM_MAX=255
@@ -74,8 +93,23 @@ if [ -r "$FLOOR_STATE_FILE" ]; then
     done < "$FLOOR_STATE_FILE"
 fi
 
-# Display order (matches the daemon's max-policy combine ordering)
-ZONE_ORDER=(ddr-thermal serdes-thermal fman-thermal cluster-thermal sec-thermal)
+# Display order (matches the daemon's ZONES order: SoC first, then board)
+ZONE_ORDER=(ddr-thermal serdes-thermal fman-thermal cluster-thermal sec-thermal
+            PCB CPU SFP+)
+# Display labels for the table. Keys stay the fan-pid zone names (and, for the
+# SoC zones, the thermal_zone type strings); only what is printed changes.
+# CPU-int is the SoC's own TMU site in the A72 cluster; CPU-ext is the PCB
+# TMP431's remote probe on the CPU (fan-pid zone "CPU").
+declare -A LABEL=(
+    [ddr-thermal]=Memory
+    [serdes-thermal]=SerDes
+    [fman-thermal]=FMan
+    [cluster-thermal]=CPU-int
+    [sec-thermal]=Crypto
+    [PCB]=PCB
+    [CPU]=CPU-ext
+    [SFP+]=SFP+
+)
 
 # ---------------------------------------------------------------------------
 # Colour escapes (TTY only). Same convention as ask-check.
@@ -133,6 +167,22 @@ for z in /sys/class/thermal/thermal_zone*; do
 done
 
 # ---------------------------------------------------------------------------
+# Locate the board TMP431 readings by hwmon name + device-tree node.
+# ---------------------------------------------------------------------------
+for h in /sys/class/hwmon/hwmon*; do
+    [ "$(cat "$h/name" 2>/dev/null)" = tmp431 ] || continue
+    of_node=$(readlink -f "$h/device/of_node" 2>/dev/null) || continue
+    for zone in "${!HWMON_ZONE[@]}"; do
+        spec=${HWMON_ZONE[$zone]}
+        node=${spec%%:*}
+        file=${spec##*:}
+        case "$of_node" in
+            */"$node") [ -r "$h/$file" ] && ZONE_PATH[$zone]=$h/$file ;;
+        esac
+    done
+done
+
+# ---------------------------------------------------------------------------
 # Helpers.
 # ---------------------------------------------------------------------------
 read_temp_c() {
@@ -180,14 +230,15 @@ hot_or_crit=0
 printf "  %-16s  %7s  %8s  %8s  %s\n" "zone" "temp" "setpoint" "crit" "state"
 printf "  %s\n" "---------------------------------------------------------------"
 for zone in "${ZONE_ORDER[@]}"; do
+    label=${LABEL[$zone]:-$zone}
     path=${ZONE_PATH[$zone]:-}
     if [ -z "$path" ]; then
-        printf "  %-16s  %s\n" "$zone" "${C_DIM}(not present)${C_RST}"
+        printf "  %-16s  %s\n" "$label" "${C_DIM}(not present)${C_RST}"
         continue
     fi
     t=$(read_temp_c "$path")
     if [ "$t" = "?" ]; then
-        printf "  %-16s  %s\n" "$zone" "${C_RED}(read failed)${C_RST}"
+        printf "  %-16s  %s\n" "$label" "${C_RED}(read failed)${C_RST}"
         continue
     fi
     state=$(classify_zone "$t" "$zone")
@@ -195,7 +246,7 @@ for zone in "${ZONE_ORDER[@]}"; do
     sp=${SETPOINT[$zone]}
     ct=${CRIT[$zone]}
     printf "  %-16s  %s%6s C%s  %6d C  %6d C  %s[%s]%s\n" \
-        "$zone" "$col" "$t" "$C_RST" "$sp" "$ct" "$col" "$state" "$C_RST"
+        "$label" "$col" "$t" "$C_RST" "$sp" "$ct" "$col" "$state" "$C_RST"
     [ "$state" = HOT ] || [ "$state" = CRIT ] && hot_or_crit=1
 done
 echo

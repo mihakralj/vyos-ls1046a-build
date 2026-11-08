@@ -622,28 +622,28 @@ ask_flow_table_destroy(&t);
 /* T-M6-A3: ownership generation registry + owned insert/remove              */
 /* ------------------------------------------------------------------------- */
 
-/* Generations are monotonic per cookie, start at 1, survive tombstone. */
+/* Generations are boot-unique, increase across claims, and survive tombstone. */
 static void ask_flow_test_gen_monotonic(struct kunit *test)
 {
 struct ask_flow_table t;
-u32 g1, g2, g3;
+u64 g1, g2, g3;
 
 KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-mono"), 0);
 
 g1 = ask_flow_gen_next(&t, 0xC0DE);
 g2 = ask_flow_gen_next(&t, 0xC0DE);
-KUNIT_EXPECT_EQ(test, g1, 1u);
-KUNIT_EXPECT_EQ(test, g2, 2u);
-KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xC0DE, 2u));
-KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xC0DE, 1u));
+KUNIT_EXPECT_NE(test, g1, 0ULL);
+KUNIT_EXPECT_GT(test, g2, g1);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xC0DE, g2));
+KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xC0DE, g1));
 
 /* Tombstone drops is_current for every generation, but a subsequent
  * claim resumes monotonically (new owner) and clears the tombstone. */
-ask_flow_gen_tombstone(&t, 0xC0DE);
-KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xC0DE, 2u));
+KUNIT_EXPECT_EQ(test, ask_flow_gen_tombstone(&t, 0xC0DE), g2);
+KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xC0DE, g2));
 g3 = ask_flow_gen_next(&t, 0xC0DE);
-KUNIT_EXPECT_EQ(test, g3, 3u);
-KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xC0DE, 3u));
+KUNIT_EXPECT_GT(test, g3, g2);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xC0DE, g3));
 
 ask_flow_table_destroy(&t);
 }
@@ -653,7 +653,8 @@ static void ask_flow_test_gen_stale_destroy_noop(struct kunit *test)
 {
 struct ask_flow_table t;
 struct ask_flow_key key;
-u32 hw_id = 0, gen_old, gen_new;
+u32 hw_id = 0;
+u64 gen_old, gen_new;
 struct ask_flow *f;
 int rc;
 
@@ -665,8 +666,8 @@ make_key_v4(&key, htonl(0x0a000001), htonl(0x0a000002),
  * that lost the race); new owner claims gen 2 and publishes. */
 gen_old = ask_flow_gen_next(&t, 0xABCD);
 gen_new = ask_flow_gen_next(&t, 0xABCD);
-KUNIT_ASSERT_EQ(test, gen_old, 1u);
-KUNIT_ASSERT_EQ(test, gen_new, 2u);
+KUNIT_ASSERT_NE(test, gen_old, 0ULL);
+KUNIT_ASSERT_GT(test, gen_new, gen_old);
 
 rc = ask_flow_insert_owned(&t, 0xABCD, &key, 7, 0, ASK_HW_DIR_FWD,
    gen_new, &hw_id);
@@ -697,7 +698,8 @@ static void ask_flow_test_gen_publish_refused_after_tombstone(struct kunit *test
 {
 struct ask_flow_table t;
 struct ask_flow_key key;
-u32 hw_id = 0, gen;
+u32 hw_id = 0;
+u64 gen;
 int rc;
 
 KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-tomb"), 0);
@@ -747,7 +749,7 @@ ask_flow_table_destroy(&t);
 static void ask_flow_test_gen_current_contract(struct kunit *test)
 {
 struct ask_flow_table t;
-u32 g1, g2;
+u64 g1, g2;
 
 KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-curr"), 0);
 
@@ -755,7 +757,7 @@ KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-curr"), 0);
 KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), 0u);
 
 g1 = ask_flow_gen_next(&t, 0xBEEF);
-KUNIT_EXPECT_EQ(test, g1, 1u);
+KUNIT_EXPECT_NE(test, g1, 0ULL);
 KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), g1);
 
 ask_flow_gen_tombstone(&t, 0xBEEF);
@@ -764,61 +766,84 @@ KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), g1);
 KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xBEEF, g1));
 
 g2 = ask_flow_gen_next(&t, 0xBEEF);
-KUNIT_EXPECT_EQ(test, g2, g1 + 1);
+KUNIT_EXPECT_GT(test, g2, g1);
 KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xBEEF), g2);
 
 ask_flow_table_destroy(&t);
 }
 
-/* gen_release: the registry entry is erased so gen_current() reads 0 and a
- * fresh claim restarts at 1. NULL-table entry points are defensive no-ops. */
+/* Release only a matching tombstone; a recycled cookie gets a new identity. */
 static void ask_flow_test_gen_release_contract(struct kunit *test)
 {
 struct ask_flow_table t;
+u64 old, new_gen;
 
 KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-rel"), 0);
 
-KUNIT_ASSERT_EQ(test, ask_flow_gen_next(&t, 0xFEED), 1u);
-ask_flow_gen_release(&t, 0xFEED);
+old = ask_flow_gen_next(&t, 0xFEED);
+KUNIT_ASSERT_NE(test, old, 0ULL);
+/* Releasing a live generation must not erase it. */
+ask_flow_gen_release(&t, 0xFEED, old);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xFEED, old));
+KUNIT_ASSERT_EQ(test, ask_flow_gen_tombstone(&t, 0xFEED), old);
+ask_flow_gen_release(&t, 0xFEED, old);
 KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xFEED), 0u);
-KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xFEED, 1u));
-/* A released cookie claims generation 1 again on the next REPLACE. */
-KUNIT_EXPECT_EQ(test, ask_flow_gen_next(&t, 0xFEED), 1u);
+KUNIT_EXPECT_FALSE(test, ask_flow_gen_is_current(&t, 0xFEED, old));
+new_gen = ask_flow_gen_next(&t, 0xFEED);
+KUNIT_EXPECT_GT(test, new_gen, old);
+ask_flow_gen_release(&t, 0xFEED, old);
+KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xFEED, new_gen));
 
 ask_flow_gen_tombstone(NULL, 0xFEED);
-ask_flow_gen_release(NULL, 0xFEED);
+ask_flow_gen_release(NULL, 0xFEED, old);
 KUNIT_EXPECT_EQ(test, ask_flow_gen_current(NULL, 0xFEED), 0u);
 KUNIT_EXPECT_EQ(test, ask_flow_gen_next(NULL, 0xFEED), 0u);
 
 ask_flow_table_destroy(&t);
 }
 
-/* gen wrap: seeded at the u32 maximum via a crafted xa_store, the next claim
- * wraps to 1 — generation 0 is never handed out (it means "unknown"). */
-static void ask_flow_test_gen_wrap_never_zero(struct kunit *test)
+/* A stale release must not erase a tombstone belonging to a newer claim. */
+static void ask_flow_test_gen_stale_release(struct kunit *test)
 {
 struct ask_flow_table t;
-unsigned long flags;
-void *stale;
+u64 old, new_gen;
 
-KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-wrap"), 0);
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-gen-release"), 0);
 
-xa_lock_irqsave(&t.gen_by_cookie, flags);
-stale = __xa_store(&t.gen_by_cookie, 0xDEAD,
-		   xa_mk_value(((unsigned long)U32_MAX << 1) |
-			       ASK_GEN_LIVE),
-		   GFP_ATOMIC);
-xa_unlock_irqrestore(&t.gen_by_cookie, flags);
-KUNIT_ASSERT_FALSE(test, xa_is_err(stale));
+old = ask_flow_gen_next(&t, 0xDEAD);
+KUNIT_ASSERT_EQ(test, ask_flow_gen_tombstone(&t, 0xDEAD), old);
+new_gen = ask_flow_gen_next(&t, 0xDEAD);
+KUNIT_ASSERT_GT(test, new_gen, old);
+KUNIT_ASSERT_EQ(test, ask_flow_gen_tombstone(&t, 0xDEAD), new_gen);
+ask_flow_gen_release(&t, 0xDEAD, old);
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xDEAD), new_gen);
+ask_flow_gen_release(&t, 0xDEAD, new_gen);
+KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xDEAD), 0ULL);
 
-KUNIT_EXPECT_EQ(test, ask_flow_gen_current(&t, 0xDEAD), U32_MAX);
-KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xDEAD, U32_MAX));
+ask_flow_table_destroy(&t);
+}
 
-/* decode == U32_MAX, +1 wraps to 0 — the "never hand out 0" guard
- * (it means "unknown") forces the fresh claim to 1. */
-KUNIT_EXPECT_EQ(test, ask_flow_gen_next(&t, 0xDEAD), 1u);
-KUNIT_EXPECT_TRUE(test, ask_flow_gen_is_current(&t, 0xDEAD, 1u));
+static void ask_flow_test_flush_retains_identified_owner(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id = 0;
+u64 gen, token = 0;
 
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-flush-owner"), 0);
+make_key_v4(&key, htonl(0x0a000005), htonl(0x0a000006),
+    htons(3333), htons(8080));
+gen = ask_flow_gen_next(&t, 0x1234);
+KUNIT_ASSERT_NE(test, gen, 0ULL);
+KUNIT_ASSERT_EQ(test, ask_flow_insert_owned_identified(&t, 0x1234, &key,
+    7, 0, ASK_HW_DIR_FWD, gen, &hw_id, &token), 0);
+KUNIT_ASSERT_NE(test, token, 0ULL);
+KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0x1234), -EBUSY);
+KUNIT_EXPECT_EQ(test, ask_flow_flush(&t), -EBUSY);
+KUNIT_EXPECT_EQ(test, atomic_read(&t.num_flows), 1);
+KUNIT_EXPECT_EQ(test, ask_flow_remove_owned_identified(&t, 0x1234,
+    gen, token), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_flush(&t), 0);
 ask_flow_table_destroy(&t);
 }
 
@@ -895,7 +920,8 @@ KUNIT_CASE(ask_flow_test_gen_publish_refused_after_tombstone),
 KUNIT_CASE(ask_flow_test_gen_legacy_paths_unaffected),
 KUNIT_CASE(ask_flow_test_gen_current_contract),
 KUNIT_CASE(ask_flow_test_gen_release_contract),
-KUNIT_CASE(ask_flow_test_gen_wrap_never_zero),
+KUNIT_CASE(ask_flow_test_gen_stale_release),
+KUNIT_CASE(ask_flow_test_flush_retains_identified_owner),
 KUNIT_CASE(ask_flow_test_neigh_follow_nexthop),
 {}
 };

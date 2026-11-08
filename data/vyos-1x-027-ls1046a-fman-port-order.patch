@@ -1,63 +1,152 @@
-From 621a3d5670ccd03a86c7bbfb4843e592529de647 Mon Sep 17 00:00:00 2001
-From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Mon, 20 Jul 2026 03:56:43 +0000
-Subject: [PATCH] temp: vyos-1x-027-ls1046a-fman-port-order.patch
-
----
- src/udev/vyos_net_name | 34 ++++++++++++++++++++++++++++++++++
- 1 file changed, 34 insertions(+)
-
-diff --git a/src/udev/vyos_net_name b/src/udev/vyos_net_name
-index 388cc78..ac5e6db 100755
---- a/src/udev/vyos_net_name
-+++ b/src/udev/vyos_net_name
-@@ -114,6 +114,37 @@ def get_biosdevname(ifname: str) -> str:
-     return intf if biosname == '' else biosname
+diff --git a/python/vyos/ifconfig/ifname_store.py b/python/vyos/ifconfig/ifname_store.py
+index b527c7348..080f6e3f5 100644
+--- a/python/vyos/ifconfig/ifname_store.py
++++ b/python/vyos/ifconfig/ifname_store.py
+@@ -107,6 +107,9 @@ def canonical_sort_key(device: dict) -> tuple:
+     properties = device.get('properties') or {}
+     path = properties.get('ID_PATH', '')
+     rank = _BUS_RANK.get(properties.get('ID_BUS', ''), _BUS_RANK_UNKNOWN)
++    # LS1046A front-panel position first: its FMan MACs probe in DT address
++    # order, which is not the order of the ports on the case
++    board = device.get('board_port', _LABEL_UNKNOWN)
+ 
+     # a labelled adapter outranks the PCI address, which on ESXi does not
+     # follow the order the adapters were added in. Unlabelled hardware sorts
+@@ -118,7 +121,7 @@ def canonical_sort_key(device: dict) -> tuple:
+     segments = [tuple(int(part, 16) for part in m.groups())
+                 for m in _PCI_BDF.finditer(path)]
+ 
+-    return (rank, label, segments, path, device.get('mac') or '')
++    return (board, rank, label, segments, path, device.get('mac') or '')
  
  
-+def get_fman_predefined(intf_name: str) -> str:
-+    """NXP LS1046A (Mono Gateway DK): FMan MACs probe in DT unit-address
-+    order, which does not match the physical front-panel port order. Map
-+    the netdev's FMan MAC of_node to the canonical physical name so a
-+    fresh install or live boot (no hw-id entries yet) enumerates eth0..eth4
-+    left-to-right: eth0/eth1/eth2 = left/center/right RJ45, eth3/eth4 =
-+    left/right SFP+. Returns '' on any other hardware (config-file hw-id
-+    mapping always takes precedence over this fallback).
+ def is_hyperv_nic(device: dict) -> bool:
+@@ -163,6 +166,34 @@ def port_label_index(ifname: str, sys_class_net: str = '/sys/class/net') -> int:
+     return int(m.group(1)) if m else _LABEL_UNKNOWN
+ 
+ 
++# NXP LS1046A (Mono Gateway DK): FMan MAC device-tree node -> front-panel
++# position. eth0/eth1/eth2 = left/center/right RJ45, eth3/eth4 = left/right SFP+.
++_LS1046A_FMAN_PORTS = {
++    'ethernet@e8000': 0,  # FMan MAC5,  left RJ45
++    'ethernet@ea000': 1,  # FMan MAC6,  center RJ45
++    'ethernet@e2000': 2,  # FMan MAC2,  right RJ45
++    'ethernet@f0000': 3,  # FMan MAC9,  left SFP+
++    'ethernet@f2000': 4,  # FMan MAC10, right SFP+
++}
++_DT_COMPATIBLE = Path('/proc/device-tree/compatible')
++
++
++def board_port_index(ifname: str, sys_class_net: str = '/sys/class/net',
++                     compatible: Path = None) -> int:
++    """Front-panel position of an LS1046A FMan port, from its DT node - a
++    fixed hardware property, unlike the probe order. _LABEL_UNKNOWN on any
++    other hardware.
 +    """
 +    try:
-+        with open('/proc/device-tree/compatible', 'rb') as f:
-+            if b'fsl,ls1046a' not in f.read():
-+                return ''
++        if b'fsl,ls1046a' not in (compatible or _DT_COMPATIBLE).read_bytes():
++            return _LABEL_UNKNOWN
 +    except OSError:
-+        return ''
-+    fman_map = {
-+        'ethernet@e8000': 'eth0',  # FMan MAC5,  left RJ45
-+        'ethernet@ea000': 'eth1',  # FMan MAC6,  center RJ45
-+        'ethernet@e2000': 'eth2',  # FMan MAC2,  right RJ45
-+        'ethernet@f0000': 'eth3',  # FMan MAC9,  left SFP+
-+        'ethernet@f2000': 'eth4',  # FMan MAC10, right SFP+
-+    }
-+    try:
-+        of_node = os.path.basename(
-+            os.path.realpath(f'/sys/class/net/{intf_name}/device/of_node')
-+        )
-+    except OSError:
-+        return ''
-+    return fman_map.get(of_node, '')
++        return _LABEL_UNKNOWN
++    node = Path(sys_class_net) / ifname / 'device' / 'of_node'
++    return _LS1046A_FMAN_PORTS.get(os.path.basename(os.path.realpath(node)),
++                                   _LABEL_UNKNOWN)
 +
 +
- def leave_rescan_hint(intf_name: str, hwid: str):
-     """Write interface information reported by udev
+ def permanent_mac(ifname: str, sys_class_net: str = '/sys/class/net') -> str:
+     """Permanent hardware address, falling back to the current one when the
+     driver cannot report it separately.
+@@ -256,6 +287,13 @@ def discover_devices(sys_class_net: str = '/sys/class/net') -> list:
+         if not mac and not wwan:
+             continue
  
-@@ -162,6 +193,9 @@ def on_boot_event(intf_name: str, hwid: str, predefined: str = '') -> str:
-     add_assigned_interfaces(interfaces)
-     logger.debug(f'{intf_name} ({hwid}): already assigned this boot: {interfaces}')
- 
-+    if not predefined:
-+        predefined = get_fman_predefined(intf_name)
++        properties = read_properties(entry.name)
++        board_port = board_port_index(entry.name, sys_class_net)
++        if board_port != _LABEL_UNKNOWN:
++            # the board DT carries two ethernetN aliases for three of the FMan
++            # MACs, so udev's onboard name for them flips between boots
++            properties.pop('ID_NET_NAME_ONBOARD', None)
 +
-     if predefined:
-         newname = predefined
-     else:
--- 
-2.39.5
+         devices.append({
+             'name': entry.name,
+             'mac': mac,
+@@ -264,7 +302,8 @@ def discover_devices(sys_class_net: str = '/sys/class/net') -> list:
+             'label_index': (port_label_index(entry.name, sys_class_net)
+                             if is_vmware_nic(entry.name, sys_class_net)
+                             else _LABEL_UNKNOWN),
+-            'properties': read_properties(entry.name),
++            'board_port': board_port,
++            'properties': properties,
+         })
+ 
+     ambiguous = ambiguous_keys([device['properties'] for device in devices])
+diff --git a/src/tests/test_ifname_store.py b/src/tests/test_ifname_store.py
+index 40a975ba5..d30a36ecd 100644
+--- a/src/tests/test_ifname_store.py
++++ b/src/tests/test_ifname_store.py
+@@ -30,6 +30,7 @@
+ 
+ from vyos.ifconfig.ifname_store import STORE_VERSION
+ from vyos.ifconfig.ifname_store import canonical_sort_key
++from vyos.ifconfig.ifname_store import board_port_index
+ from vyos.ifconfig.ifname_store import config_dir_is_mounted
+ from vyos.ifconfig.ifname_store import device_matches
+ from vyos.ifconfig.ifname_store import ambiguous_keys
+@@ -81,6 +82,57 @@ def test_pci_before_usb(self):
+         usb = dev('y', 'usb-0:1:1.0', 'aa:00:00:00:00:00', bus='usb')
+         self.assertLess(canonical_sort_key(pci), canonical_sort_key(usb))
+ 
++    def test_ls1046a_ports_are_named_in_front_panel_order(self):
++        # probe/ID_PATH order is e2000, e8000, ea000, f0000, f2000; the case
++        # reads e8000, ea000, e2000, f0000, f2000 - and a USB NIC present at
++        # first boot must not take eth0
++        panel = ['e8000', 'ea000', 'e2000', 'f0000', 'f2000']
++        devices = []
++        for i, unit in enumerate(sorted(panel)):
++            d = dev(f'eth{i}', f'platform-1a{unit}.ethernet', f'00:00:00:00:00:0{i}', bus='')
++            d['board_port'] = panel.index(unit)
++            devices.append(d)
++        devices.append(dev('eth5', 'platform-xhci-usb-0:1:1.0', '00:00:00:00:01:00', bus='usb'))
++        order = [d['properties']['ID_PATH'] for d in sorted(devices, key=canonical_sort_key)]
++        self.assertEqual(order, [f'platform-1a{u}.ethernet' for u in panel]
++                         + ['platform-xhci-usb-0:1:1.0'])
++
++    def test_board_port_index_needs_ls1046a(self):
++        with tempfile.TemporaryDirectory() as d:
++            self._board_port_index(Path(d))
++
++    def _board_port_index(self, tmp):
++        node = tmp / 'dt' / 'ethernet@e2000'
++        node.mkdir(parents=True)
++        (tmp / 'net' / 'eth0' / 'device').mkdir(parents=True)
++        (tmp / 'net' / 'eth0' / 'device' / 'of_node').symlink_to(node)
++        compat = tmp / 'compatible'
++        compat.write_bytes(b'mono,gateway-dk\0fsl,ls1046a\0')
++        self.assertEqual(board_port_index('eth0', str(tmp / 'net'), compat), 2)
++        compat.write_bytes(b'acme,board\0')
++        self.assertEqual(board_port_index('eth0', str(tmp / 'net'), compat), _LABEL_UNKNOWN)
++        self.assertEqual(board_port_index('eth0', str(tmp / 'net'), tmp / 'none'), _LABEL_UNKNOWN)
++
++    def test_ls1046a_port_is_not_keyed_on_its_onboard_name(self):
++        # ethernet2 and ethernet5 both alias ea000: end2/end5 alternate
++        with tempfile.TemporaryDirectory() as d:
++            tmp = Path(d)
++            node = tmp / 'dt' / 'ethernet@ea000'
++            node.mkdir(parents=True)
++            dev_dir = tmp / 'net' / 'eth1' / 'device'
++            dev_dir.mkdir(parents=True)
++            (dev_dir / 'of_node').symlink_to(node)
++            (tmp / 'net' / 'eth1' / 'address').write_text('e8:f6:d7:00:16:01\n')
++            compat = tmp / 'compatible'
++            compat.write_bytes(b'fsl,ls1046a\0')
++            props = {'ID_NET_NAME_ONBOARD': 'end5', 'ID_PATH': 'platform-1aea000.ethernet'}
++            with mock.patch('vyos.ifconfig.ifname_store._DT_COMPATIBLE', compat), \
++                 mock.patch('vyos.ifconfig.ifname_store.read_properties', return_value=dict(props)), \
++                 mock.patch('vyos.ifconfig.ifname_store.permanent_mac', return_value='e8:f6:d7:00:16:01'):
++                devices = discover_devices(str(tmp / 'net'))
++            self.assertEqual(devices[0]['key'], 'ID_PATH=platform-1aea000.ethernet')
++            self.assertEqual(devices[0]['board_port'], 1)
++
+     def test_order_is_independent_of_mac(self):
+         # the whole point: a numerically higher MAC in a lower slot still wins
+         low_slot = dev('x', 'pci-0000:00:02.0', 'ff:ff:ff:ff:ff:ff')

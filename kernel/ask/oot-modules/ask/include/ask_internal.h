@@ -97,6 +97,7 @@ struct ask_hw_ucode_version {
 
 int  ask_hw_ucode_get_version(struct ask_hw_ucode_version *out);
 int  ask_hw_init(void);
+void ask_hw_set_ready(bool ready);
 void ask_hw_exit(void);
 
 /*
@@ -113,15 +114,15 @@ void ask_hw_exit(void);
  *
  * Return (engage): 0 on success or if already engaged; -ENODEV if no HW
  * backing (non-DPAA host / PCD bring-up failed); negative errno from the
- * board engage on failure.  disengage is void and idempotent.
+ * board engage on failure. Disengage returns an error if state is retained.
  */
 int  ask_hw_offload_engage(u8 hw_port_id);
 int  ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
-				bool if_engaged);
+				bool if_engaged, u8 family_mask);
 int  ask_hw_b2_l2_engage(const char *ifname);
 int  ask_hw_b2_l2_record(const char *iifname, const u8 *key,
 			 const char *oifname, bool add);
-void ask_hw_offload_disengage(u8 hw_port_id);
+int ask_hw_offload_disengage(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 /* T-M6-2 B3a bridge helpers (ask_hw.c). */
@@ -129,8 +130,9 @@ struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
 int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
-		      u16 vid, bool add);
-int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 *pkts);
+		      u16 vid, u64 fe_token, bool add);
+int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
+			   u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
 
@@ -441,6 +443,13 @@ struct ask_flow_key;
 int  ask_hw_flow_preflight(const struct ask_flow_key *key,
                            u32 oif, u32 action_flags,
                            enum ask_hw_dir dir);
+int  ask_hw_flow_family_ok(u8 hw_port_id, const struct ask_flow_key *key);
+int ask_hw_flow_policy_snapshot(u64 *seq);
+bool ask_hw_flow_policy_current(const struct ask_flow_key *key);
+/* Successful begin holds the PCD mutex and an ASK module reference. */
+int ask_hw_flow_publish_begin(const struct ask_flow_key *key, unsigned long enq_off,
+			      struct ask_hw_pcd **guard, struct fman **fm);
+void ask_hw_flow_publish_end(struct ask_hw_pcd *guard);
 /* NAT offload gates: IPv4 is shipping/default-on; NAT66 is experiment/default-off. */
 bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
@@ -458,16 +467,19 @@ bool ask_hw_bridge_vlan_armed_port(u8 hw_port_id);
 bool ask_vlan_push_only_enabled(void);
 bool ask_hw_vlan_offload_armed(void);
 bool ask_hw_bridge_offload_armed(void);
+bool ask_hw_pppoe_offload_armed(void);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
+int  ask_flow_vlan_flush(void);
+int  ask_flow_pppoe_flush_sync(void);
+int  ask_bridge_vlan_flush(void);
+int  ask_bridge_flush_all(void);
+void ask_bridge_vlan_pause(void);
+void ask_bridge_vlan_resume(void);
 void ask_flow_pppoe_flush(void);
 void ask_flow_fdb_change(const u8 *addr, int ifindex);
-int  ask_vlan_cc_flow_add(const struct ask_flow_key *key, u32 tx_fqid,
-			  struct net_device *egress_dev);
-void ask_vlan_cc_flow_del(const struct ask_flow_key *key);
-void ask_vlan_cc_teardown_port(u8 port_id);
+int  ask_vlan_cc_teardown_port(u8 port_id);
 int  ask_vlan_cc_agg_stats(u8 port_id, u64 *packets, u64 *bytes);
-/* R4c-3: re-assert the FE-VM ehash graft after a VLAN CC tree teardown so
- * routed/NAT stays HW-offloaded on an ASK-engaged port. No-op if not engaged. */
+/* Legacy exported re-engage helper; no in-tree callers. */
 int  ask_hw_fe_reengage(u8 hw_port_id);
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
@@ -526,6 +538,15 @@ struct u64_stats_sync syncp;
 u64 packets;
 u64 bytes;
 u64 last_seen_ns;
+};
+
+struct ask_pppoe_info {
+	u16 sid;			/* host order */
+	u16 vid;			/* session VLAN, 0 = untagged */
+	int ifindex;			/* physical session port */
+	int session_ifindex;		/* PPP netdevice */
+	u8 peer_mac[ETH_ALEN];
+	u8 src_mac[ETH_ALEN];
 };
 
 struct ask_flow_key {
@@ -643,6 +664,11 @@ u8     nat_flags;
 	 */
 	u8     nh_ip[16];
 	u32    nh_ifindex;
+	/* Software-only session snapshot for REPLACE and neighbour replay. */
+	struct ask_pppoe_info pppoe_session;
+	u64    pppoe_session_epoch;
+	/* Software-only family policy snapshot; never serialized into the FE key. */
+	u64    family_policy_seq;
 } __packed;
 
 /*
@@ -840,6 +866,7 @@ struct ask_flow {
 struct rhash_head node;
 struct rcu_head rcu;
 u64 cookie;
+u64 fe_token;
 struct ask_flow_key key;
 u32 hw_flow_id;
 u32 oif;
@@ -875,7 +902,7 @@ bool hw_backed;
  * at insert, immutable, read under rcu_read_lock alongside hw_flow_id. A
  * DESTROY/worker carrying an older generation must not act on this flow.
  */
-u32 generation;
+u64 generation;
 struct ask_flow_stats stats;
 /*
  * T-M8-3: baseline of the silicon FE ehash record's cumulative
@@ -912,12 +939,12 @@ u64 hw_reported_bytes;
  * flow (CR-004), or leaving an orphan silicon record if a DESTROY races the
  * post-publish FE install (a MURAM-leak class per AGENTS.md S6).
  *
- * A monotonic per-cookie generation plus a tombstone closes all of these:
- *  - REPLACE bumps the generation and clears any tombstone (new owner).
+ * A boot-unique generation plus a tombstone protects these operations:
+ *  - REPLACE claims a new generation and clears any tombstone.
  *  - The generation is checked immediately before the rhashtable publish; a
  *    superseded REPLACE rolls back its own HW and does not publish.
- *  - DESTROY tombstones the cookie; it is idempotent but can never affect a
- *    newer generation.
+ *  - DESTROY snapshots and tombstones the generation atomically; conditional
+ *    release cannot erase a newer claim.
  *  - Workers (neigh rebuild, pending replay) snapshot the generation and
  *    discard on mismatch/tombstone.
  *
@@ -982,9 +1009,8 @@ int ask_flow_insert(struct ask_flow_table *t,
     enum ask_hw_dir dir,
     u32 *out_hw_id);
 
-/* Remove by cookie. Returns 0 on success, -ENOENT if not present.
- * Unconditional: used by administrative flush, teardown, and tests. Does not
- * consult the generation registry. Production DESTROY uses the _owned form. */
+/* Remove a legacy, non-tokenized flow by cookie. Tokenized FE owners must use
+ * the identified lifecycle path and return -EBUSY to this legacy API. */
 int ask_flow_remove(struct ask_flow_table *t, u64 cookie);
 
 /*
@@ -1006,9 +1032,16 @@ int ask_flow_remove(struct ask_flow_table *t, u64 cookie);
 int ask_flow_insert_owned(struct ask_flow_table *t, u64 cookie,
 			  const struct ask_flow_key *key,
 			  u32 oif, u32 action_flags, enum ask_hw_dir dir,
-			  u32 generation, u32 *out_hw_id);
+			  u64 generation, u32 *out_hw_id);
+int ask_flow_insert_owned_identified(struct ask_flow_table *t, u64 cookie,
+				    const struct ask_flow_key *key,
+				    u32 oif, u32 action_flags,
+				    enum ask_hw_dir dir, u64 generation,
+				    u32 *out_hw_id, u64 *out_fe_token);
 int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
-			  u32 generation);
+			  u64 generation);
+int ask_flow_remove_owned_identified(struct ask_flow_table *t, u64 cookie,
+				    u64 generation, u64 fe_token);
 
 /* ------------------------------------------------------------------------- */
 /* T-M6-A3: per-cookie ownership generation registry.                         */
@@ -1020,25 +1053,28 @@ int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
 /* ------------------------------------------------------------------------- */
 
 /*
- * Claim ownership for a REPLACE: bump the cookie's generation, clear any
- * tombstone, and return the new generation (>= 1). Returns 0 on OOM; the
+ * Claim ownership for a REPLACE: allocate a boot-unique generation, clear any
+ * tombstone, and return the new generation (>= 1). Returns 0 on exhaustion or OOM; the
  * caller MUST fail the REPLACE to software rather than publish an unguarded
  * flow (memory pressure must not reopen CR-004).
  */
-u32  ask_flow_gen_next(struct ask_flow_table *t, u64 cookie);
+u64  ask_flow_gen_next(struct ask_flow_table *t, u64 cookie);
 
 /* Current owning generation for a cookie, or 0 if unknown. */
-u32  ask_flow_gen_current(struct ask_flow_table *t, u64 cookie);
+u64  ask_flow_gen_current(struct ask_flow_table *t, u64 cookie);
 
 /* True iff @gen is the current, non-tombstoned owner of @cookie. */
-bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u32 gen);
+bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u64 gen);
 
-/* Mark a cookie tombstoned (DESTROY). Idempotent. */
-void ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie);
+/* Atomically tombstone and return the current generation, or 0 if absent. */
+u64 ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie);
 
-/* Drop the registry entry entirely (called when the SW flow is finally
- * freed and no worker can still reference the cookie). Idempotent. */
-void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie);
+/* Tombstone only if the cookie still has the specified generation. */
+bool ask_flow_gen_tombstone_if_current(struct ask_flow_table *t, u64 cookie,
+				       u64 gen);
+
+/* Erase only the specified tombstoned generation. */
+void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie, u64 gen);
 
 /*
  * Snapshot the per-flow stats into the caller-supplied out parameters.
@@ -1069,8 +1105,8 @@ void ask_flow_set_hw_stats(struct ask_flow *f, u64 hw_packets, u64 hw_bytes,
 typedef int (*ask_flow_walk_fn)(struct ask_flow *f, void *arg);
 int ask_flow_walk(struct ask_flow_table *t, ask_flow_walk_fn fn, void *arg);
 
-/* Flush every flow (used by ASK_CMD_FLUSH_FLOWS). */
-void ask_flow_flush(struct ask_flow_table *t);
+/* Flush legacy flows; return an error if identified FE owners remain. */
+int ask_flow_flush(struct ask_flow_table *t);
 
 /*
  * PR14j direction-aware FLOW_BLOCK_BIND.
@@ -1101,13 +1137,6 @@ enum ask_flow_direction {
 int ask_flow_offload_classify_dir(const struct net_device *dev);
 #define ASK_PPPOE_DECAP	1	/* PPPoE -> LAN: strip */
 #define ASK_PPPOE_ENCAP	2	/* LAN -> PPPoE: insert */
-struct ask_pppoe_info {
-	u16 sid;			/* host order */
-	u16 vid;			/* G2: session VLAN, 0 = untagged */
-	int ifindex;			/* the session's physical port */
-	u8  peer_mac[ETH_ALEN];		/* ENCAP: concentrator */
-	u8  src_mac[ETH_ALEN];		/* ENCAP: our port */
-};
 int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi);
 
 /* ------------------------------------------------------------------------- */
@@ -1126,6 +1155,7 @@ struct flow_block_offload;
 enum tc_setup_type;
 
 int  ask_flow_offload_init(void);
+int  ask_flow_offload_register(void);
 void ask_flow_offload_exit(void);
 /* Minimum flow age before HW offload (module param offload_delay_ms); returns
  * the previous value. KUnit sets 0 to keep REPLACE immediate. */
@@ -1323,6 +1353,12 @@ struct rtnl_link_stats64;
 
 int  ask_stats_init(void);
 void ask_stats_exit(void);
+/* Adaptive RX alignment (ask_align.c): per-port FMBM_REBM start margin. */
+#define ASK_ALIGN_MARGIN_A	256	/* edit length change == 0 mod 8 */
+#define ASK_ALIGN_MARGIN_B	260	/* edit length change == 4 mod 8 (VLAN POP/PUSH) */
+void ask_align_account(u8 port_id, u8 vlan_edit_flags, u64 bytes);
+void ask_align_start(void);
+void ask_align_stop(void);
 void ask_port_stats_add(int ifindex, u64 rx_packets, u64 rx_bytes,
 			u64 tx_packets, u64 tx_bytes);
 void ask_port_stats_zero(int ifindex);
