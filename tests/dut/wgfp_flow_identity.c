@@ -55,8 +55,11 @@ int main(void)
 	struct wgfp_flow first = { .t = tuple, .ifindex = 5 };
 	struct wgfp_flow second = { .t = tuple, .ifindex = 6 };
 
+	/* the TX path handles both families; the per-port offload policy
+	 * (dpaa_wgfp_family_ok) decides which a port admits */
 	assert(wgfp_tx_family_allowed(AF_INET));
-	assert(!wgfp_tx_family_allowed(AF_INET6));
+	assert(wgfp_tx_family_allowed(AF_INET6));
+	assert(!wgfp_tx_family_allowed(0));
 	flow_list[flow_count++] = &first;
 	assert(wgfp_flow_find(&tuple, first.ifindex,
 			      wgfp_tuple_hash(&tuple)) == &first);

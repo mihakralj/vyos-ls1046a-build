@@ -70,7 +70,23 @@ struct dpaa_wgfp_tuple {
 	u8 _pad[2];
 };
 
+/*
+ * Offload family policy. WireGuard has no offload setting of its own: a flow
+ * is accelerated when the port it arrives on (inner family) and the port
+ * under the tunnel (outer family) carry `set interfaces ethernet ethN offload
+ * ipv4|ipv6`. ask.ko owns that per-port mask and provides it here; with no
+ * provider registered nothing is admitted.
+ */
+#define DPAA_WGFP_FAM_V4	0x1
+#define DPAA_WGFP_FAM_V6	0x2
+typedef u8 (*dpaa_wgfp_family_fn)(struct net_device *dev);
+
 #if IS_ENABLED(CONFIG_FSL_DPAA_ETH)
+/* @fn runs under rcu_read_lock() and must not sleep; NULL unregisters and
+ * waits for running callers. */
+void dpaa_wgfp_set_family_policy(dpaa_wgfp_family_fn fn);
+/* Does @dev's port have offload for @family (AF_INET or AF_INET6)? */
+bool dpaa_wgfp_family_ok(struct net_device *dev, u8 family);
 /* True when @dev is a DPAA port whose ehash table is armed (ASK engaged). */
 bool dpaa_wgfp_port_ok(struct net_device *dev);
 /* Steer @t arriving on @in to sink (@hash % sinks). Process context only.
@@ -92,6 +108,8 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 /* Return the buffer to its pool. */
 void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f);
 #else
+static inline void dpaa_wgfp_set_family_policy(dpaa_wgfp_family_fn fn) { }
+static inline bool dpaa_wgfp_family_ok(struct net_device *dev, u8 family) { return false; }
 static inline bool dpaa_wgfp_port_ok(struct net_device *dev) { return false; }
 static inline int dpaa_wgfp_flow_add(struct net_device *in,
 				     const struct dpaa_wgfp_tuple *t, u32 hash)

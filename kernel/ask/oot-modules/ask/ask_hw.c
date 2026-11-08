@@ -51,6 +51,7 @@
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
 #include <linux/fsl/fman_pcd.h>
+#include <linux/fsl/dpaa_wgfp.h>      /* WireGuard fast path family policy */
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
 #include <linux/rtnetlink.h>       /* rtnl_lock/rtnl_unlock, CR-012 */
@@ -446,6 +447,33 @@ int ask_hw_flow_family_ok(u8 hw_port_id, const struct ask_flow_key *key)
 	if (key->l3_proto == ASK_FLOW_L3_IPV6)
 		return (fmask & ASK_FAM_V6) ? 0 : -EOPNOTSUPP;
 	return -EOPNOTSUPP;
+}
+
+/*
+ * WireGuard fast path family policy (dpaa_wgfp.h): WireGuard has no offload
+ * setting; dpaa_wgfp admits a flow by the same per-port mask and L2-port
+ * exclusion as ask_hw_flow_family_ok(), for the ingress port (inner family)
+ * and the port under the tunnel (outer family). Runs under RCU, no sleeping.
+ */
+static u8 ask_hw_wgfp_family(struct net_device *dev)
+{
+	struct fman_port *port;
+	u8 id, m, out = 0;
+
+	if (is_vlan_dev(dev))
+		dev = vlan_dev_real_dev(dev);
+	port = dpaa_get_rx_fman_port(dev);
+	if (!port)
+		return 0;
+	id = fman_port_get_id(port);
+	if (test_bit(id, ask_hw_port_l2))
+		return 0;
+	m = ask_hw_port_family_get(id);
+	if (m & ASK_FAM_V4)
+		out |= DPAA_WGFP_FAM_V4;
+	if (m & ASK_FAM_V6)
+		out |= DPAA_WGFP_FAM_V6;
+	return out;
 }
 
 /*
@@ -2509,9 +2537,13 @@ int ask_hw_init(void)
 
 void ask_hw_set_ready(bool ready)
 {
+	if (!ready)	/* waits for running WGFP callers before teardown */
+		dpaa_wgfp_set_family_policy(NULL);
 	kernel_param_lock(THIS_MODULE);
 	WRITE_ONCE(ask_hw_ready, ready);
 	kernel_param_unlock(THIS_MODULE);
+	if (ready)
+		dpaa_wgfp_set_family_policy(ask_hw_wgfp_family);
 }
 
 void ask_hw_exit(void)
