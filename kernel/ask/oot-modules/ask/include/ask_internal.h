@@ -1353,6 +1353,12 @@ struct rtnl_link_stats64;
 
 int  ask_stats_init(void);
 void ask_stats_exit(void);
+/* Adaptive RX alignment (ask_align.c): per-port FMBM_REBM start margin. */
+#define ASK_ALIGN_MARGIN_A	256	/* edit length change == 0 mod 8 */
+#define ASK_ALIGN_MARGIN_B	260	/* edit length change == 4 mod 8 (VLAN POP/PUSH) */
+void ask_align_account(u8 port_id, u8 vlan_edit_flags, u64 bytes);
+void ask_align_start(void);
+void ask_align_stop(void);
 void ask_port_stats_add(int ifindex, u64 rx_packets, u64 rx_bytes,
 			u64 tx_packets, u64 tx_bytes);
 void ask_port_stats_zero(int ifindex);

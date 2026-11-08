@@ -2677,6 +2677,10 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_274.py" 2>&1
     echo "### fman_port.c: F-274 fman_port_disable reports drain timeout"
+    # F-308: runtime RX start margin for ASK2 adaptive alignment (needs F-274).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_308.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-rx-margin.py" "$(pwd)" 2>&1
+    echo "### fman_port.c: F-308 rx start margin harness passed"
 fi
 
 # F-277: do not mutate KeyGen/parser state when F-274 reports a failed

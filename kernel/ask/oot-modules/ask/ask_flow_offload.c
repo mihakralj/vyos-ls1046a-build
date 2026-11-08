@@ -5078,6 +5078,8 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 		 */
 		ask_port_stats_add(rx_ifindex, *d_packets, *d_bytes, 0, 0);
 		ask_port_stats_add(tx_ifindex, 0, 0, *d_packets, *d_bytes);
+		/* Adaptive RX alignment: bytes per ingress port and edit class. */
+		ask_align_account(port_id, key.vlan_edit_flags, *d_bytes);
 		return true;
 	}
 	rcu_read_unlock();

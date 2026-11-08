@@ -735,6 +735,33 @@ two builds and two boots, with 10 runs per cell except WireGuard (3).
 - **What is missing:** a cold boot, and a same-session paired run against
   `.185`. OWRT can no longer be re-run.
 
+## vlan-port bidirectional ceiling: root cause and adaptive alignment (2026-11-08)
+
+The vlan-port bidirectional cell was the one flow type below the ~18 Gbit/s two-way level on both ASK2 and the vendor stack (ASK2 13.1 / 13.0 Gbit/s on image `2026.11.07-2039`, every one-way cell at line rate). It is an FMan alignment limit, not a VLAN opcode cost.
+
+**Measurement (`.185`, image `2026.11.07-2039-rolling`, cold boot).** Two concurrent one-way `iperf3 -P8` flows with mEMAC counter deltas (MAC9 `0x1af0000`, MAC10 `0x1af2000`; `rdrp` at +0x158, `rerr` +0x138, pause `rxpf`/`txpf` +0x118/+0x218):
+
+| Flows | Gbit/s | `rdrp` eth3 / eth4 |
+|---|---|---|
+| plain ↔ plain | 8.20 + 8.69 | 853 / 760 |
+| vlan-vlan ↔ vlan-vlan | 8.50 + 8.64 | 524 / 493 |
+| POP ↔ PUSH (vlan-port) | 6.20 + 6.89 | 358k / 352k |
+| POP + plain reverse | 7.44 + 7.38 | 217k / 190k |
+| PUSH + plain forward | 7.24 + 7.15 | 271k / 215k |
+
+The loss is mEMAC RX FIFO overflow on both ports at once, with no pause frames and healthy BMan pools. Any single POP or PUSH triggers it; vlan-vlan, which strips and pushes, does not. What sets POP and PUSH apart is the length change: RX data starts at 256, POP leaves the frame at 260 and PUSH at 252.
+
+**A/B.** Setting the RX start margin (`FMBM_REBM`, BMI `0x01a90000`/`0x01a91000` + 0x1c, port disabled around the write) to 260 on both ports puts POP at 264 and PUSH at 256: vlan-port went to 6.57 + 7.88 Gbit/s with `rdrp` 0 / 0, while plain (5.54 + 5.81, `rdrp` ~77k) and vlan-vlan (5.45 + 5.90, ~84k), now at 260, collapsed instead. Margins 316/260 (POP at 320) gave the same split. PPPoE (±8 B) runs at full rate at 256. So FMan needs an 8-byte-aligned frame start after the edit; an unaligned RX DMA write costs little. This is the same family as the A6-LOSS fix (RX data 64-byte aligned, `dc8591ae`) and erratum A050385, and explains the vendor parity.
+
+**Fix: adaptive per-port margin.** One margin per RX port cannot align both length-neutral and ±4 B edits, so each port follows its offloaded byte mix. Class A (edit length change ≡ 0 mod 8: routed, NAT, VLAN translate, PPPoE) uses 256; class B (≡ 4 mod 8: VLAN POP or PUSH, also with PPPoE) uses 260. There is no setting.
+
+- Kernel F-308 (`bin/kernel-fixups/F_308.py`, harness `bin/test-rx-margin.py`): `fman_port_set_rx_start_margin()` validates the margin against live registers (multiple of 4, at least the internal-context end from `FMBM_RICP`, start + 64 + end ≤ smallest valid `FMBM_EBMPI` pool), quiesces the BMI with `fman_port_disable()` (keeps the old margin on F-274 `-EBUSY`), writes and reads back `FMBM_REBM` and re-enables only a port that was enabled. Caller holds RTNL.
+- `ask.ko` (`ask_align.c`, test `tests/ask_align.py`): the per-poll hardware byte deltas from `ask_fe_flow_refresh_hw_stats()` are added per ingress BMI port and class. Every 5 s a port switches when it carried at least 1 GB in the window (about 1.6 Gbit/s, so 1G ports such as eth0 never move), the other class outweighed the current one more than 2×, for two windows in a row. `ask.align_adaptive=N` restores 256; module unload restores 256; `ask.align_ports` shows the ports it has set.
+
+**Limits.** A port carrying heavy length-neutral and heavy ±4 B traffic at once can align only the larger share. With zero MAC drops, vlan-port bidir still totalled about 14.5 Gbit/s against about 17 for the aligned controls; that smaller limiter (possibly PUSH's +0.26 % egress oversubscription on eth3) is open.
+
+**Validation still required.** CI build, then on the board: vlan-port bidir `rdrp` below 1 % of today's (~355k per port per 12 s) and at least 14 Gbit/s with `ask.align_ports` showing 0x10/0x11 at 260, the full flow-type matrix with no other row below the 2039 baseline, a switch back to 256 under plain traffic, and `align_adaptive=N` restoring 256.
+
 ## Evidence still required
 
 | Surface | Current acceptance state | Required comparison |
