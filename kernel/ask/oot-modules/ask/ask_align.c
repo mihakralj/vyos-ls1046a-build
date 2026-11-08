@@ -17,10 +17,12 @@
  *
  * Bytes are the per-poll hardware deltas ask_fe_flow_refresh_hw_stats()
  * already computes, attributed to the flow's ingress BMI port. Every
- * ASK_ALIGN_PERIOD the worker switches a port when it carried at least
+ * ASK_ALIGN_PERIOD (2 s) the worker switches a port when it carried at least
  * ASK_ALIGN_MIN_BYTES (misalignment only costs near line rate, and 1G ports
  * such as eth0 never reach it) and the other class outweighed the current
- * one ASK_ALIGN_RATIO times, for ASK_ALIGN_STREAK windows in a row. A switch
+ * one ASK_ALIGN_RATIO times, for ASK_ALIGN_STREAK windows in a row; windows
+ * below the floor (idle, or no stats poll landed yet) neither count nor reset.
+ * A switch takes ~4-8 s including the 1-4 s flowtable stats lag. A switch
  * quiesces the RX port for microseconds (F-308 fman_port_set_rx_start_margin).
  * align_adaptive=N restores 256 everywhere; module exit does the same.
  */
@@ -38,8 +40,8 @@ u8 fman_port_get_id(struct fman_port *port);
 int fman_port_set_rx_start_margin(struct fman_port *port, u16 margin);	/* F-308 */
 
 #define ASK_ALIGN_PORTS		64	/* BMI hard port ids */
-#define ASK_ALIGN_PERIOD	(5 * HZ)
-#define ASK_ALIGN_MIN_BYTES	(1000ULL * 1000 * 1000)	/* per period: ~1.6 Gbit/s */
+#define ASK_ALIGN_PERIOD	(2 * HZ)
+#define ASK_ALIGN_MIN_BYTES	(400ULL * 1000 * 1000)	/* per period: ~1.6 Gbit/s */
 #define ASK_ALIGN_RATIO		2
 #define ASK_ALIGN_STREAK	2
 
@@ -76,12 +78,14 @@ static u16 ask_align_decide(u64 a, u64 b, u16 cur, u8 *streak)
 {
 	u16 want = cur;
 
-	if (a + b >= ASK_ALIGN_MIN_BYTES) {
-		if (cur == ASK_ALIGN_MARGIN_A && b > ASK_ALIGN_RATIO * a)
-			want = ASK_ALIGN_MARGIN_B;
-		else if (cur == ASK_ALIGN_MARGIN_B && a > ASK_ALIGN_RATIO * b)
-			want = ASK_ALIGN_MARGIN_A;
-	}
+	/* Too little traffic to judge (idle, or this window's stats polls have
+	 * not landed yet): keep both the margin and the streak. */
+	if (a + b < ASK_ALIGN_MIN_BYTES)
+		return cur;
+	if (cur == ASK_ALIGN_MARGIN_A && b > ASK_ALIGN_RATIO * a)
+		want = ASK_ALIGN_MARGIN_B;
+	else if (cur == ASK_ALIGN_MARGIN_B && a > ASK_ALIGN_RATIO * b)
+		want = ASK_ALIGN_MARGIN_A;
 	if (want == cur) {
 		*streak = 0;
 		return cur;
