@@ -129,8 +129,13 @@ t_pmtu(){
   local d0 p0 i0 out
   on; d0=$(cnt decline_withdraws); p0=$(cnt punted); i0=$(cnt installs)
   echo_srv
-  # dell1 pins the tunnel route MTU at 1420; lift it so the DF packet leaves at 1488
-  $D1 'sudo ip route replace 10.99.200.0/24 via 10.99.1.185 mtu 1500; sudo ip route flush cache'
+  # dell1 pins the tunnel route MTU at 1420; lift it so the DF packet leaves at 1488. The tunnel rig keeps
+  # that route in its own policy table with proto/realm ownership tags, so change the MTU on that route
+  # (a main-table replace never wins and is left behind, which teardown cannot recognise).
+  rt=$($D1 "ip -4 route show table all exact 10.99.200.0/24 | grep ' table [0-9]' | head -1")
+  [ -n "$rt" ] || { bad "rig route for 10.99.200.0/24 not found on dell1"; return; }
+  rtmtu(){ $D1 "sudo ip route change $(echo "$rt" | sed "s/ mtu [0-9]*//") mtu $1 && sudo ip route flush cache"; }
+  rtmtu 1500
   out=$($D1 "python3 -c \"
 import socket,time
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('10.99.1.112',9101)); s.connect(('10.99.200.113',9100))
@@ -146,9 +151,8 @@ for i in range(3):
   except OSError as e: err=e.strerror
   time.sleep(0.3)
 print('echoes',got,'ip_mtu',s.getsockopt(socket.IPPROTO_IP,14),'err',err or '-')\"")
-  $D1 'sudo ip route replace 10.99.200.0/24 via 10.99.1.185 mtu 1420'
+  rtmtu 1420
   echo "  dell1: $out"; echo "  DUT:   $(st)"
-  $D1 'sudo ip route flush cache'
   [ "$(cnt installs)" -gt "$i0" ] && ok "UDP flow learned and installed" || bad "UDP flow never installed"
   echo "$out" | grep -q 'ip_mtu 1420' && ok "PMTU learned from the punted packet's ICMP" || bad "no frag-needed (PMTU not 1420)"
   [ "$(cnt decline_withdraws)" -gt "$d0" ] && ok "oversize withdrew the record" || bad "no decline withdraw (flow learned?)"

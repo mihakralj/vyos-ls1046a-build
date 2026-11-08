@@ -20,14 +20,18 @@ QUICK = {  # type: (upload cell, download cell, bidir cell), {f} = 4|6
     "vlan-port": ("vlanport-v{f}", "portvlan-v{f}", "vlanport-v{f}-bidir"),
     "pppoe": ("pppoe-up-v{f}", "pppoe-down-v{f}", "pppoe-up-v{f}-bidir"),
 }
-ROWS = ["unicast", "nat", "vlan-vlan", "vlan-port", "pppoe", "wireguard", "wireguard6", "ipsec", "bridge",
+NINEK = ["unicast", "nat", "vlan-vlan", "vlan-port"]   # MTU 9000 rows, from quick9k-*.csv
+LABEL = {"vlan-vlan-9k": "vlan-9k"}
+ROWS = ["unicast", "nat", "vlan-vlan", "vlan-port", "pppoe", "bridge"] + [f"{t}-9k" for t in NINEK] + [
+        "wireguard", "wireguard6", "ipsec",
         "broadcast", "multicast", "fragments", "policer"]
 DIRS = ("up", "down", "bidir")
 
 
 def collect(run):
     vals, verd = defaultdict(list), defaultdict(list)
-    for p in sorted(Path(run).glob("quick-*.csv")):
+    for p in sorted(Path(run).glob("quick-*.csv")) + sorted(Path(run).glob("quick9k-*.csv")):
+        pre = "9k:" if p.name.startswith("quick9k-") else ""
         for r in csv.reader(open(p)):
             if len(r) < 11 or r[1] == "cell":
                 continue
@@ -36,8 +40,8 @@ def collect(run):
             except ValueError:
                 continue
             if g > 0.05:
-                vals[r[1]].append(g)
-                verd[r[1]].append(r[10])
+                vals[pre + r[1]].append(g)
+                verd[pre + r[1]].append(r[10])
     # wg-*.csv: IPv4 outer transport; wg6-*.csv: IPv6 outer (OUTER=6). Columns are the inner family.
     for p in sorted(Path(run).glob("wg-*.csv")) + sorted(Path(run).glob("wg6-*.csv")):
         row = "wireguard6" if p.name.startswith("wg6-") else "wireguard"
@@ -54,7 +58,9 @@ def collect(run):
     for t in ROWS:
         for f in ("4", "6"):
             for i, d in enumerate(DIRS):
-                key = QUICK[t][i].format(f=f) if t in QUICK else f"{t}-v{f}-{d}"
+                base = t.removesuffix("-9k")
+                pre = "9k:" if t.endswith("-9k") else ""
+                key = pre + QUICK[base][i].format(f=f) if base in QUICK else f"{t}-v{f}-{d}"
                 v = vals.get(key)
                 table[(t, f, d)] = (max(v) if v else None, len(v or ()),
                                     "/".join(sorted(set(verd.get(key, ())))))
@@ -69,7 +75,7 @@ def render(table):
     out = ["Flow type".ljust(16) + "Upload".ljust(16) + "Download".ljust(18) + "Bidir",
            " " * 10 + "".join(f"{fam:>8}" for _ in DIRS for fam in ("v4", "v6"))]
     for t in ROWS:
-        out.append(t.ljust(10) + "".join(f"{fmt(table[(t, f, d)][0]):>8}"
+        out.append(LABEL.get(t, t).ljust(12) + "".join(f"{fmt(table[(t, f, d)][0]):>8}"
                                          for d in DIRS for f in ("4", "6")))
     return "\n".join(out)
 
