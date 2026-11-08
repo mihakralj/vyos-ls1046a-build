@@ -43,6 +43,13 @@ fi
 if [ "$DUT_KIND" = vendor ] && [ "${WGFP:-0}" = 1 ]; then
   echo "WGFP is available only on the ASK2 DUT" >&2; exit 2
 fi
+# WGFP_RX=1: P3 receive offload on for the run (it defaults off); down/bidir must then show
+# direct-RX frames. The DUT's previous setting is restored on exit.
+WGFP_RX=${WGFP_RX:-0}
+case $WGFP_RX in 0|1) ;; *) echo "WGFP_RX must be 0 or 1" >&2; exit 2 ;; esac
+if [ "$WGFP_RX" = 1 ] && [ "${WGFP:-0}" != 1 ]; then
+  echo "WGFP_RX=1 needs WGFP=1" >&2; exit 2
+fi
 if [ "$DUT_KIND" = ask2 ] && [ "${WG_NOTRACK:-0}" != 0 ]; then
   echo "The ASK2 matrix already applies scoped NOTRACK; leave WG_NOTRACK unset" >&2; exit 2
 fi
@@ -62,9 +69,15 @@ if [ -n "$RIG_KEY" ]; then SSH+=(-i "$RIG_KEY"); fi
 TABLE="wgmatrix${BASHPID}${RANDOM}"
 TABLE_TOKEN="${TABLE}x${RANDOM}"
 TABLE_MAY_EXIST=0
+RX_ORIG=
+RXP=/sys/module/wireguard/parameters/wgfp_rx
 cleanup() {
   local rc=$? listing handle
   trap - EXIT INT TERM
+  if [ -n "$RX_ORIG" ]; then
+    "${SSH[@]}" -n "$DUT" "echo $RX_ORIG | sudo -n tee $RXP >/dev/null" ||
+      { echo "ERROR: cannot restore $RXP=$RX_ORIG" >&2; rc=1; }
+  fi
   if [ "$TABLE_MAY_EXIST" = 1 ]; then
     if listing=$("${SSH[@]}" -n "$DUT" "sudo -n nft -a list table inet $TABLE"); then
       if handle=$(printf '%s\n' "$listing" | awk -v table="$TABLE" -v token="$TABLE_TOKEN" '
@@ -178,13 +191,18 @@ if [ "$DUT_KIND" = ask2 ]; then
     sudo -n nft add rule inet $TABLE pre ip saddr 10.99.2.113 ip daddr 10.99.2.185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
     sudo -n nft add rule inet $TABLE out ip saddr 10.99.2.185 ip daddr 10.99.2.113 udp sport 51820-51833 udp dport 51820-51833 notrack"
 fi
+if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then
+  RX_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $RXP") || exit 1
+  "${SSH[@]}" -n "$DUT" "echo $WGFP_RX | sudo -n tee $RXP >/dev/null" || exit 1
+  echo "wgfp_rx: $RX_ORIG -> $WGFP_RX"
+fi
 echo "##### $WHO: 1 tunnel, 4 streams, $REPS1 reps with a fresh tunnel each"
 REPS=$REPS1 RECREATE=1 DIRS="up down bidir" STREAMS=4 OUT=$OUTDIR/$TAG-$WHO-t1.csv bin/testrig-wireguard.sh run wg-v4
 for A in 2 4; do
   echo "##### $WHO: $A tunnels, 2 streams each, $REPSN reps"
   REPS=$REPSN DIRS="up down bidir" TUNNELS=$A ACTIVE=$A OUT=$OUTDIR/$TAG-$WHO-t$A.csv bin/testrig-wireguard-multi.sh run
 done
-python3 - "$OUTDIR" "$TAG" "$WHO" "$REPS1" "$REPSN" "${WGFP:-0}" "${WGFP_COUNTER_LOG:-}" "$J" "$DUR" "$STEADY_FROM" <<'PY'
+python3 - "$OUTDIR" "$TAG" "$WHO" "$REPS1" "$REPSN" "${WGFP:-0}" "${WGFP_COUNTER_LOG:-}" "$J" "$DUR" "$STEADY_FROM" "$WGFP_RX" <<'PY'
 import collections
 import csv
 import json
@@ -194,7 +212,7 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-out, tag, who, reps1, repsn, wgfp, counter_file, json_dir, duration, steady_from = sys.argv[1:]
+out, tag, who, reps1, repsn, wgfp, counter_file, json_dir, duration, steady_from, wgfp_rx = sys.argv[1:]
 duration, steady_from = int(duration), int(steady_from)
 directions = ("up", "down", "bidir")
 summary = {}
@@ -284,7 +302,7 @@ try:
 
         def parse_sinks(text, expected):
             sinks = {}
-            for line in text.split("|"):
+            for line in (text.split("|") if text else []):
                 fields = line.split()
                 if not fields or not fields[0].startswith("sink") or not fields[0][4:].isascii() \
                         or not fields[0][4:].isdecimal() or fields[0] in sinks:
@@ -295,7 +313,7 @@ try:
                     raise ValueError(f"{fields[0]}: invalid or duplicate FQID")
                 counters = parse_counters(" ".join(fields[1:]), {"frames", "errs", "sg"})
                 sinks[fields[0]] = (int(fqids[0], 16), counters)
-            if expected < 1 or len(sinks) != expected or len({v[0] for v in sinks.values()}) != expected:
+            if len(sinks) != expected or len({v[0] for v in sinks.values()}) != expected:
                 raise ValueError("incomplete or duplicate WGFP sink FQIDs")
             return sinks
 
@@ -318,12 +336,14 @@ try:
                         raise ValueError(f"{cell} {direction} r{rep}: missing WGFP counter pair")
                     pair = samples[max(attempts)]
                     before, after = pair["before"], pair["after"]
-                    # P3 receive offload is withdrawn (2026-11-05): only TX seals, and the
-                    # direct-RX counter must stay still; a moving rx means P3 is active.
+                    # P3 receive offload defaults off: unless the run asked for it (WGFP_RX=1),
+                    # the direct-RX counter must stay still; with it, down/bidir must move it.
                     if direction != "down" and after["sealed"] <= before["sealed"]:
                         raise ValueError(f"{cell} {direction} r{rep}: fast-path counters did not advance")
-                    if after["rx"] != before["rx"]:
+                    if wgfp_rx != "1" and after["rx"] != before["rx"]:
                         raise ValueError(f"{cell} {direction} r{rep}: P3 receive counter advanced")
+                    if wgfp_rx == "1" and direction != "up" and after["rx"] <= before["rx"]:
+                        raise ValueError(f"{cell} {direction} r{rep}: P3 receive counter did not advance")
                     if after["install_fail"] != before["install_fail"] or after["peers"] < tunnels:
                         raise ValueError(f"{cell} {direction} r{rep}: installation or peer count failed")
                     if direction != "down" and after["xmit_ok"] <= before["xmit_ok"]:
@@ -331,12 +351,15 @@ try:
                     if any(after[name] != before[name] for name in ("xmit_fail", "xmit_ern")):
                         raise ValueError(f"{cell} {direction} r{rep}: QMan failures or rejections changed")
                     old_sinks, new_sinks = before["sink_data"], after["sink_data"]
-                    if (old_sinks.keys() != new_sinks.keys()
+                    # per-port sinks are created with a port's first record, so sinks may
+                    # appear during a run; one that vanishes or changes FQID is still an error
+                    if (not old_sinks.keys() <= new_sinks.keys()
                             or any(old_sinks[name][0] != new_sinks[name][0] for name in old_sinks)):
                         raise ValueError(f"{cell} {direction} r{rep}: sink FQ identities changed")
                     deltas = []
-                    for name in old_sinks:
-                        old, new = old_sinks[name][1], new_sinks[name][1]
+                    zero = {"frames": 0, "errs": 0, "sg": 0}
+                    for name in new_sinks:
+                        old, new = old_sinks.get(name, (0, zero))[1], new_sinks[name][1]
                         if new["frames"] < old["frames"]:
                             raise ValueError(f"{cell} {direction} r{rep}: sink frame counter decreased")
                         if any(new[field] != old[field] for field in ("errs", "sg")):

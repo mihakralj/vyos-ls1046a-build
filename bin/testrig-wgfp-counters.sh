@@ -79,7 +79,9 @@ wgfp_counter_sample() {
       count++
     }
     END {
-      if (invalid || sink_fields != 1 || expected < 1 || count != expected) exit 1
+      # per-port sinks (stage 3) appear with the first record on a port, so a
+      # freshly bound peer legitimately has none
+      if (invalid || sink_fields != 1 || expected < 0 || count != expected) exit 1
       print lines
     }'); then
     echo "ERROR: missing, duplicate or invalid WGFP sink counters" >&2
