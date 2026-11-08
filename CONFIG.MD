@@ -1,25 +1,28 @@
 # Mono Gateway: VyOS Router Configuration with ASK2
 
-This guide configures the Mono Gateway Development Kit with this repository's LS1046A VyOS image. It builds a stateful home router and explains how to check that eligible traffic uses the board's ASK2/FMan hardware offload. It assumes basic terminal and IP-networking knowledge, but not prior VyOS experience.
+This guide configures the Mono Gateway Development Kit with this repository's LS1046A VyOS image. It builds a stateful home router with a WAN zone and a LAN zone that includes the management network, then shows how to check that eligible traffic uses the board's ASK2/FMan hardware offload. It assumes basic terminal and IP-networking knowledge, but not prior VyOS experience.
 
-The commands are an example for the current single-image build, not a generic VyOS recipe. They assume a **freshly installed board running the factory configuration shipped in the ISO**, with nothing changed yet. Chapter 1 lists exactly what that starting point contains.
+The commands are written for this repository's single-image build, starting from a **freshly installed board running the factory configuration shipped in the ISO**. Chapter 1 lists exactly what that starting point contains.
+
+> **Validation status:** This is a draft based on the repository's factory configuration and current source, not a walkthrough verified end to end on a named ISO. The current port-mapping changes still need fresh-install and upgrade checks on a board. Check your image and physical port names, and complete the tests below before relying on this configuration. Record the image version and test date here when that validation is done.
 
 **What you end up with**
 
 | Piece | Result |
 |---|---|
-| WAN | `eth4`, address from your ISP via DHCP |
-| Trusted LAN zone | `eth0`, `eth1`, `eth2`, `eth3`; `eth1`–`eth2` keep their factory DHCP clients |
-| Example LAN network | `eth3`, router at `192.168.50.1/24` |
+| WAN | `eth4` (right SFP+), address from your ISP via DHCP. RJ45 alternative in chapter 1. |
+| Home LAN | `eth3` (left SFP+), router at `192.168.50.1/24` |
+| Management | `eth0` (left RJ45) at `10.1.1.1/24`, in the LAN zone; the only interface allowed to initiate SSH to the router |
+| Spare ports | `eth1` and `eth2` are LAN-zone members but remain disabled until you need them |
 | DHCP | On `eth3` only: `192.168.50.100` to `192.168.50.199` |
-| DNS | The router resolves names itself (no third-party resolver), with DNSSEC validation |
-| Firewall | Stateful IPv4 and IPv6 policy between WAN, LAN, and the router |
-| NAT | The example `eth3` subnet masqueraded behind the WAN address |
-| Time | The factory NTP servers, served to the example LAN only |
-| Management | `eth0` at static `10.1.1.1/24`; SSH allowed from the trusted LAN zone; the published factory key removed; optional key-only login |
-| Offload | ASK2 hardware forwarding for eligible traffic; optional IPv6 |
+| DNS | The router runs its own recursive resolver, with DNSSEC validation |
+| Firewall | Zone-based, default deny, stateful, IPv4 and IPv6 |
+| NAT | The home LAN masqueraded behind the WAN address |
+| Time | The factory NTP servers, served to the home LAN only |
+| SSH | Management network only, key-only, published factory key removed |
+| Offload | ASK2 hardware forwarding for eligible IPv4 traffic; IPv6 offload off until validated |
 
-Time budget: 60 to 90 minutes the first time, most of it reading.
+Allow at least one to two hours the first time, plus time to test your ISP connection and hardware offload. Do not rush a confirmed commit.
 
 ---
 
@@ -27,7 +30,7 @@ Time budget: 60 to 90 minutes the first time, most of it reading.
 
 1. [Before you start](#1-before-you-start)
 2. [How VyOS thinks (10-minute crash course)](#2-how-vyos-thinks-10-minute-crash-course)
-3. [System basics](#3-system-basics)
+3. [System basics and credentials](#3-system-basics-and-credentials)
 4. [Interfaces](#4-interfaces)
 5. [Firewall](#5-firewall)
 6. [NAT](#6-nat)
@@ -37,13 +40,14 @@ Time budget: 60 to 90 minutes the first time, most of it reading.
 10. [IPv6 (optional)](#10-ipv6-optional)
 11. [Living with it: backups, upgrades, troubleshooting](#11-living-with-it-backups-upgrades-troubleshooting)
 - [Appendix A: Complete configuration as set commands](#appendix-a-complete-configuration-as-set-commands)
-- [Appendix B: Further reading](#appendix-b-further-reading)
+- [Appendix B: Plan B and C staged commands](#appendix-b-plan-b-and-c-staged-commands)
+- [Appendix C: Further reading](#appendix-c-further-reading)
 
-Most configuration chapters follow the same rhythm:
+Every configuration chapter follows the same rhythm:
 
 - **Why**: what problem this solves
-- **Configure**: a hierarchical view where useful, followed by the commands
-- **Verify**: commands that prove it works
+- **Configure**: where shown, an abridged *hierarchical view* of the plan A target state, then the *set commands* that build it
+- **Verify**: checks for the expected behavior, with limitations called out where applicable
 - **So what**: what you have now, and what it unlocks
 
 ---
@@ -52,9 +56,17 @@ Most configuration chapters follow the same rhythm:
 
 ### Installation, console, and defaults
 
-First install the LS1046A image using [INSTALL.md](./INSTALL.md). Initial installation is performed from the USB-live system; **never run `install image` on an installed system**. Keep the serial console connected at 115200 8N1 while configuring interfaces and firewall rules, especially while changing `eth0`, the management port.
+First install the LS1046A image using [INSTALL.md](./INSTALL.md). Installation is performed from the USB-live system; **never run `install image` on an installed system**, because it repartitions eMMC.
 
-Log in on the serial console as `vyos`, using the password you typed at the `install image` prompt. The installer accepts the well-known default `vyos` with only a warning, and the USB-live system you installed from uses `vyos`/`vyos`, so treat this password as **temporary** whatever you chose: chapter 3 replaces it before the WAN is connected. Until chapter 4 gives `eth0` a fixed address, the console is the only path whose address you know in advance.
+Keep the serial console connected at 115200 8N1 for the whole guide. It is the recovery path if an interface or firewall change interrupts SSH, but it still requires valid login credentials; keep a working authenticated session while changing them.
+
+Log in on the serial console as `vyos`, using the password you typed at the `install image` prompt. The installer accepts the well-known default `vyos` with only a warning, so treat this password as **temporary** whatever you chose: chapter 3 replaces it before any network is connected.
+
+### Test equipment and tools
+
+Have a management laptop, a separate home LAN client, and a test device on a reachable WAN-side network. The examples assume a Unix-like shell; the clients need `ping`, `nc` and `dig`, and the management laptop needs `ssh` and `ssh-keygen`. To test offload in chapter 9, provide `iperf3` on the LAN client and a reachable server you control on the WAN side.
+
+The router-side tests use `tcpdump`, `nft`, `conntrack` and `ynl`. Check that they are available on your image with `command -v tcpdump`, `command -v nft`, `command -v conntrack` and `command -v ynl`; do not assume a missing tool produced a passing result. If router-side capture is unavailable, capture the router-facing WAN port with a suitable mirror or tap and still check the firewall counters. Prepare any missing test equipment before the WAN gate rather than connecting an unprotected router to obtain it.
 
 ### The factory starting point
 
@@ -62,41 +74,51 @@ A fresh install boots the factory configuration from the ISO:
 
 | Area | Factory setting | Changed in this guide |
 |---|---|---|
-| Interfaces | DHCP client on all five ports; `eth0` described as `MGMT (left RJ45)` | Chapter 4: static `eth0` and `eth3`, `eth4` stays DHCP |
-| ASK2 offload | `offload ipv4` and `offload ipv6` on `eth1`–`eth4`; none on `eth0` | Unchanged |
-| Flowtable | Hardware flowtable `FT` on `eth1`–`eth4`; IPv4 and IPv6 forward rule 10 `action offload`; `hardware-offload-delay 500` | Unchanged; chapter 9 explains it |
+| Interfaces | DHCP client on all five ports; `eth0` described as `MGMT (left RJ45)` | Chapter 4: static `eth0` and `eth3`, `eth4` stays DHCP, `eth1` and `eth2` disabled |
+| ASK2 offload | `offload ipv4` and `offload ipv6` on `eth1` to `eth4`; none on `eth0` | Chapter 4: IPv6 offload turned off on the active ports before connecting WAN; chapter 9 explains why |
+| Flowtable | Hardware flowtable `FT` on `eth1` to `eth4`; IPv4 and IPv6 forward rule 10 `action offload`; `hardware-offload-delay 500` | Unchanged; chapter 9 explains it |
 | Firewall | No zones, no rulesets, no input filtering | Chapter 5 |
 | NAT | None | Chapter 6 |
-| SSH | Enabled on port 22, listening on every address | Chapter 5 firewalls it; chapter 8.4 disables passwords |
-| Login | User `vyos` with the temporary install-time password (possibly the default `vyos`), **plus** the published factory `vanityssh@vyos` public key | Chapter 3 sets a new password and replaces the key |
+| SSH | Enabled on port 22, listening on every address | Chapter 5 firewalls it; chapter 8.4 binds it to management and disables passwords |
+| Login | User `vyos` with the temporary install-time password, **plus** the published factory `vanityssh@vyos` public key | Chapter 3 sets a new password and replaces the key |
 | NTP | Servers `time.apple.com`, `time.cloudflare.com`, `time.google.com`; clients allowed from all private ranges | Chapter 8.3 limits clients |
 | System | Host name `vyos`, 100 commit revisions, update check, watchdog | Chapter 3 |
-| DHCP server, DNS, IPv6 | None | Chapters 8 and 10 |
+| DHCP server, DNS, global IPv6 | None configured; IPv6 link-local addresses may exist | Chapters 8 and 10 |
 
-There is **no firewall** in the factory configuration. SSH answers on every port that has an address, the install-time password may be the default `vyos`, and the private half of the `vanityssh@vyos` key is published in [INSTALL.md](./INSTALL.md#ssh-access--vanity-key). Anyone who can reach the router may be able to log in until you replace those credentials.
+There is **no firewall** in the factory configuration. SSH answers on every port that has an address, the install-time password may be the default `vyos`, and the private half of the `vanityssh@vyos` key is published in [INSTALL.md](./INSTALL.md#ssh-access--vanity-key). Until chapter 3 is done, anyone who can reach the router may be able to log in.
 
-> **Do not connect the WAN yet.** Until chapter 5 ends, connect only:
+> **Do not connect the WAN yet.** Start with only the serial console connected. After replacing the credentials in chapter 3, and until the [WAN gate in section 5.9](#59-connect-the-wan) passes, connect only:
 > - the serial console;
 > - `eth0` (left RJ45), to your management laptop;
-> - `eth3` (left SFP+), to your LAN switch, if you want to test from it.
+> - your LAN port (default `eth3`, left SFP+), to a LAN client or switch for testing.
 >
-> Leave `eth4` (right SFP+) and `eth1`–`eth2` unplugged. Plug in the WAN only after the [WAN gate in section 5.8](#58-connect-the-wan) passes: the password changed, the factory key replaced with your own, and the firewall committed and verified.
-
-ASK2 still has open feature and safety-validation gaps. Because it is enabled in the factory configuration, review chapter 9 and the linked master plan before relying on hardware forwarding in your network.
+> Leave the WAN port and the spare ports unplugged.
 
 To confirm the starting point, run `show version`, `show configuration commands` and `show offload config` in operational mode. See [CLI-AND-TOOLS.md](./CLI-AND-TOOLS.md) for the build-specific commands.
 
-### Identify the physical ports
+### Choose your WAN and LAN ports
 
-| VyOS interface | Mono Gateway port | Role in this example |
-|---|---|---|
-| `eth0` | Left RJ45 | Trusted LAN; management at static `10.1.1.1/24` |
-| `eth1` | Center RJ45 | Trusted LAN; factory DHCP client unchanged |
-| `eth2` | Right RJ45 | Trusted LAN; factory DHCP client unchanged |
-| `eth3` | Left SFP+ | Trusted LAN; example `192.168.50.0/24` network |
-| `eth4` | Right SFP+ | WAN; DHCP client |
+| VyOS interface | Mono Gateway port |
+|---|---|
+| `eth0` | Left RJ45 |
+| `eth1` | Center RJ45 |
+| `eth2` | Right RJ45 |
+| `eth3` | Left SFP+ |
+| `eth4` | Right SFP+ |
 
-The SFP+ cages support **10G only** on this build. A 1G-only module or peer will not provide the intended link. If your ISP or LAN is 1G-only, choose an RJ45 port instead and adjust every affected zone membership, interface, flowtable, NAT and service setting consistently; preserve a management path. A fresh install names the ports as shown above. Confirm by plugging in one cable at a time and checking `show interfaces`; see [HARDWARE.md](./HARDWARE.md#33-vyos-port-naming).
+`eth0` is always management in this guide. The other decision depends on your cables:
+
+> **The SFP+ cages support 10G only on this build.** A 1G-only module or peer will not link. Most home ISP modems and ONTs hand off over RJ45, so check yours before deciding.
+
+| Plan | When to use it | WAN | Home LAN | Disabled |
+|---|---|---|---|---|
+| **A (default)** | ISP hands off 10G SFP+, LAN switch has 10G SFP+ | `eth4` | `eth3` | `eth1`, `eth2` |
+| **B** | ISP hands off over RJ45, LAN switch has 10G SFP+ | `eth2` | `eth3` | `eth1`, `eth4` |
+| **C** | Both ISP and LAN switch are RJ45 | `eth2` | `eth1` | `eth3`, `eth4` |
+
+The main chapters are written for **plan A**. For plan B or C, follow the same stages but use the replacement commands and checks in [Appendix B](#appendix-b-plan-b-and-c-staged-commands) whenever a chapter points there; do not also run the plan A interface-specific commands. The appendix keeps `eth0` as management and puts every non-WAN port in the LAN zone. Confirm the physical naming with one cable at a time after chapter 3, checking `show interfaces`; see [HARDWARE.md](./HARDWARE.md#33-vyos-port-naming).
+
+All three plans assume an Ethernet WAN that obtains IPv4 addressing and a default route by DHCP. A provider requiring PPPoE, a VLAN tag, a static address, or another authentication method needs additional configuration not covered by this walkthrough. Check the ISP's requirements and make sure its subnet does not overlap either local subnet before proceeding.
 
 ### The network we are building
 
@@ -109,11 +131,11 @@ flowchart TB
         wan["eth4 · zone WAN<br/>address via DHCP from ISP"]
         local["zone LOCAL<br/>the router itself"]
         lan["eth3 · zone LAN<br/>192.168.50.1/24"]
-        mgmt["eth0 · zone LAN<br/>10.1.1.1/24 management"]
-        other["eth1–eth2 · zone LAN<br/>factory DHCP clients"]
+        mgmt["eth0 · zone LAN<br/>10.1.1.1/24"]
+        spare["eth1, eth2 · zone LAN<br/>disabled"]
         wan --- local --- lan
         local --- mgmt
-        local --- other
+        local ~~~ spare
     end
     laptop["Management laptop<br/>static 10.1.1.2/24, no gateway"]
     sw["Switch / Wi-Fi access point"]
@@ -124,7 +146,9 @@ flowchart TB
     mgmt --- laptop
 ```
 
-The LAN zone is a **firewall grouping**, not a switch or bridge. `eth0` gets a fixed management address; `eth1`–`eth2` keep their factory DHCP clients. None of them automatically shares the `eth3` subnet, DHCP service, or NAT rule. Intra-zone traffic is not isolated by the zone by default; use separate zones or intra-zone filtering if those networks should not trust one another.
+The internet is untrusted. The home and management networks are separate IP subnets in the same LAN firewall zone, not a bridge or a single Ethernet segment. The home subnet gets internet access and the router's services; a rule restricts new SSH connections to the management cable and subnet.
+
+**Same zone is not isolation.** VyOS permits routed traffic between interfaces in the same zone by default, so a device with suitable routes can reach another LAN subnet. The management laptop's example configuration has no gateway, but that is not a firewall. If the management devices must be isolated from the home LAN, add and test an intra-zone policy; do not assume the shared zone provides isolation. Disabled spare ports join the zone now but have no address or service until deliberately configured.
 
 ### The plan, written down
 
@@ -133,25 +157,23 @@ Write these values down before you type anything. Changing a subnet later is pos
 | Setting | Value in this guide | Your value |
 |---|---|---|
 | WAN interface | `eth4` | |
-| Trusted LAN zone members | `eth0`, `eth1`, `eth2`, `eth3` | |
+| Home LAN interface | `eth3` | |
 | Management interface | `eth0` | |
-| Management address | `10.1.1.1/24` | |
-| Management laptop | static `10.1.1.2`–`10.1.1.254`, no gateway | |
-| Example addressed LAN interface | `eth3` | |
-| LAN subnet | `192.168.50.0/24` | |
-| Router LAN address | `192.168.50.1` | |
+| Management network | `10.1.1.0/24`, router `10.1.1.1` | |
+| Management laptop | static `10.1.1.2/24`, no gateway | |
+| Home LAN subnet | `192.168.50.0/24`, router `192.168.50.1` | |
 | DHCP pool | `192.168.50.100` to `192.168.50.199` | |
 | Static/reserved range | `192.168.50.2` to `192.168.50.99` | |
 | Local domain | `home.arpa` | |
 | Time zone | `America/Los_Angeles` | |
 
-Choose an example LAN subnet that does **not** overlap the WAN, the `10.1.1.0/24` management network, or any other connected network. If you change it, update the interface, `LAN-NETS`, NAT, DHCP, DNS, NTP, and SSH examples consistently. Multiple DHCP clients can also install multiple default routes; check that the intended WAN route is selected in chapter 7.
+Why `192.168.50.0/24` and `10.1.1.0/24`? Consumer routers and ISP modems commonly use `192.168.0.x`, `192.168.1.x` and `10.0.0.x`. Avoiding those means your LAN will not collide with the network on the other side of the ISP box, or with a network your laptop joins elsewhere. If you change either subnet, update the interface, groups, NAT, DHCP, DNS and NTP examples consistently.
 
 ---
 
 ## 2. How VyOS thinks (10-minute crash course)
 
-Read this chapter even if you skim the others. Almost every mistake with VyOS comes from not knowing the three layers of configuration.
+Read this chapter even if you skim the others. Almost every beginner mistake with VyOS comes from not knowing the three layers of configuration.
 
 ### Two modes
 
@@ -203,7 +225,7 @@ set interfaces ethernet eth3 address '192.168.50.1/24'
 set interfaces ethernet eth3 description 'LAN'
 ```
 
-The guide uses both where useful. The tree is for understanding; the flat commands are for typing.
+Every chapter shows both. The tree is for understanding, the commands are for typing.
 
 You can also move around the tree like directories:
 
@@ -224,13 +246,15 @@ Press `Tab` to complete, `?` to list options with a short description. You can e
 |---|---|
 | `compare` | Show pending changes before committing |
 | `discard` | Throw away all uncommitted changes |
-| `commit-confirm 5` | Commit, but roll back automatically unless you type `confirm` within 5 minutes |
+| `commit-confirm 5` | Commit, but revert automatically unless you type `confirm` within 5 minutes |
 | `confirm` | Keep a `commit-confirm` change |
 | `show system commit` (op mode) | List previous commits |
 | `compare 3` | Diff the candidate against commit revision 3 |
-| `rollback 3` | Return to commit revision 3 (check `rollback ?` on your build; behavior has changed between versions) |
+| `rollback 3` | Restore commit revision 3 and reboot |
 
-> **Golden rule:** whenever you change firewall rules, interface addresses, or SSH over a remote session, use `commit-confirm`. If you lock yourself out, the router lets you back in after a few minutes. The alternative is walking to the box with a keyboard.
+With the current VyOS default, an unconfirmed commit causes a reboot into the last **saved** configuration. The optional `set system config-management commit-confirm action reload` changes that behavior to a reload of the previous committed revision; check the confirmation prompt on your image. Ordinary `rollback 3` also prompts for a reboot. These behaviors are based on the pinned source and still need validation on the named target image.
+
+> **Golden rule:** save the last known-good configuration before changing credentials, firewall rules, interface addresses, or SSH; use `commit-confirm`, test from a second session, then `confirm` and `save`. Do not save an unconfirmed change. A timer is a recovery aid, not a substitute for a working serial login and a tested recovery path.
 
 ### Habits worth having from day one
 
@@ -240,13 +264,13 @@ Press `Tab` to complete, `?` to list options with a short description. You can e
 
 ---
 
-## 3. System basics
+## 3. System basics and credentials
 
 ### Why
 
 Hostname, domain, and time zone appear in logs, DHCP, and DNS. Getting them right now avoids confusing logs later. The factory configuration already keeps 100 commit revisions; the command below only makes that explicit.
 
-More importantly, the factory login is not secret. The install-time password is temporary and may be the default `vyos`, and the login trusts the `vanityssh@vyos` public key, whose private key is published in [INSTALL.md](./INSTALL.md#ssh-access--vanity-key). Replace both now, before any network beyond your management laptop is connected. This is the first of the three conditions for connecting the WAN.
+More importantly, the factory login is not secret. The install-time password may be the default `vyos`, and the login trusts the `vanityssh@vyos` public key, whose private key is published in [INSTALL.md](./INSTALL.md#ssh-access--vanity-key). Replace both now, before anything but the serial console is connected.
 
 On your laptop, create a key if you do not have one yet:
 
@@ -254,13 +278,14 @@ On your laptop, create a key if you do not have one yet:
 ssh-keygen -t ed25519
 cat ~/.ssh/id_ed25519.pub
 # ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...  you@laptop
+ssh-keygen -y -f ~/.ssh/id_ed25519
 ```
 
-The key is the long middle part. Replace the abbreviated placeholder below with the complete public key, and the passphrase with your own long passphrase, before entering the commands on the router.
+The last command derives the public key from the private key; its type and long middle part must match the `.pub` file. It may ask for the private key's local passphrase. Replace the abbreviated placeholder below with the complete matching public key, and the router password with your own, before entering the commands.
 
 ### Configure
 
-Hierarchical view:
+What `show system` will print after the commit (the password appears only as a hash):
 
 ```text
 system {
@@ -272,7 +297,7 @@ system {
     login {
         user vyos {
             authentication {
-                plaintext-password ****************
+                encrypted-password $6$...
                 public-keys laptop {
                     key AAAAC3NzaC1lZDI1NTE5AAAA...
                     type ssh-ed25519
@@ -296,27 +321,34 @@ set system login user vyos authentication plaintext-password 'a-long-passphrase-
 delete system login user vyos authentication public-keys 'vanityssh@vyos'
 set system login user vyos authentication public-keys laptop key 'AAAAC3NzaC1lZDI1NTE5AAAA...'
 set system login user vyos authentication public-keys laptop type 'ssh-ed25519'
-commit
-save
+compare
+commit-confirm 10
 ```
 
-The plaintext password is hashed on commit; `show system login` shows only the hash. Stay logged in on the serial console: you cannot test SSH until chapter 4 gives `eth0` an address. Chapter 8.4 disables password login over SSH once your key is proven.
+You type the password as `plaintext-password`; VyOS hashes it on commit and stores only `encrypted-password`.
 
-> **Why `home.arpa`?** It is the domain reserved for home networks by RFC 8375. Do not use `.local` (taken by mDNS, which your printer and phone use) or a made-up TLD like `.lan` or `.home` (they may become real some day, and `.internal` is reserved for private use too, but `home.arpa` says exactly what it is).
+> **Why `home.arpa`?** It is the domain reserved for home networks by RFC 8375. Do not use `.local` (taken by mDNS, which your printer and phone use) or a made-up TLD like `.lan` or `.home` (they may become real some day). `home.arpa` says exactly what it is.
 
 ### Verify
 
 ```text
-run show configuration commands | match system
 run show configuration commands | match public-keys
 run show date
 ```
 
-The `public-keys` output must list `laptop` and must not list `vanityssh@vyos`. Log out of the console and back in with the new password.
+The `public-keys` output must list `laptop` and must not list `vanityssh@vyos`. Keep the original serial login open. Leave configuration mode with `exit`, then, as the unprivileged `vyos` user, start a nested login:
+
+```text
+/usr/bin/su - vyos
+```
+
+Enter the **new router password** when prompted. A successful nested login tests the password without discarding the original session; type `exit` once to return to that session, then run `configure`, `confirm`, and `save`. The SSH key is tested independently in chapter 4 before WAN is connected.
+
+If `su` fails, does not ask for a password, or the timer expires, do not treat it as a successful password test and do not confirm or save. Let the timer restore the saved configuration, regain the serial login with the previous password, and retry or use a tested second-login recovery method. The nested-login procedure itself must be verified on the target ISO.
 
 ### So what
 
-The router has an identity, a long undo history, and credentials that only you know. Next: give it addresses.
+The router has an identity, a long undo history, and credentials that only you know. That is the first of the conditions for connecting the WAN. Next: give it addresses.
 
 ---
 
@@ -324,13 +356,14 @@ The router has an identity, a long undo history, and credentials that only you k
 
 ### Why
 
-The example LAN gets a fixed address for its gateway, and `eth0` gets a fixed, easy-to-remember management address. The WAN asks the ISP for an address via DHCP. `eth1` and `eth2` keep their factory DHCP clients.
+Each active port gets a clear job:
 
-`10.1.1.1` is used for management because it is short and unlikely to collide with other networks. Consumer routers and ISP modems commonly use `192.168.0.1`, `192.168.1.1` and `10.0.0.1`; one of those could clash with the WAN or another network you join. A static address also avoids a second default route from a DHCP client on `eth0`. The management network does not need DHCP or a gateway: give the laptop a static address such as `10.1.1.2/24`, then use `ssh vyos@10.1.1.1`.
+- **`eth0`, management:** a fixed, easy-to-remember address. It needs no DHCP and no gateway, because the only thing on it is your laptop.
+- **`eth3`, home LAN:** a fixed address, because every device will use it as its gateway.
+- **`eth4`, WAN:** keeps the factory DHCP client for the DHCP-based ISP connection assumed by this guide.
+- **`eth1` and `eth2`, spare:** disabled and without DHCP. An unused DHCP client could obtain a competing default route. They will be LAN-zone members, but re-enable and address one only when you have a job for it and have considered the intra-zone policy.
 
 > **Make this change from the serial console.** Any SSH session using the DHCP address `eth0` received at boot drops when the address changes.
-
-> **Keep the WAN cable unplugged until section 5.8.** Factory SSH and offload are already active, and there is no firewall yet.
 
 ### Configure
 
@@ -341,6 +374,14 @@ interfaces {
     ethernet eth0 {
         address 10.1.1.1/24
         description MGMT
+    }
+    ethernet eth1 {
+        description SPARE
+        disable
+    }
+    ethernet eth2 {
+        description SPARE
+        disable
     }
     ethernet eth3 {
         address 192.168.50.1/24
@@ -353,22 +394,35 @@ interfaces {
 }
 ```
 
-Commands:
+Commands for **plan A**. For plan B or C, use the chapter 4 block in [Appendix B](#appendix-b-plan-b-and-c-staged-commands) instead.
 
 ```text
 delete interfaces ethernet eth0 address 'dhcp'
 set interfaces ethernet eth0 description 'MGMT'
 set interfaces ethernet eth0 address '10.1.1.1/24'
+delete interfaces ethernet eth1 address 'dhcp'
+set interfaces ethernet eth1 description 'SPARE'
+set interfaces ethernet eth1 disable
+delete interfaces ethernet eth2 address 'dhcp'
+set interfaces ethernet eth2 description 'SPARE'
+set interfaces ethernet eth2 disable
 delete interfaces ethernet eth3 address 'dhcp'
 set interfaces ethernet eth3 description 'LAN'
 set interfaces ethernet eth3 address '192.168.50.1/24'
 set interfaces ethernet eth4 description 'WAN'
-set interfaces ethernet eth4 address 'dhcp'
+delete interfaces ethernet eth3 offload ipv6
+delete interfaces ethernet eth4 offload ipv6
 compare
-commit-confirm 5
+commit-confirm 10
 ```
 
-The two `delete` commands remove the factory DHCP clients from `eth0` and `eth3`; `eth4` keeps its factory DHCP client. From the console, verify the addresses. Give the management laptop the static address `10.1.1.2/24` and run `ssh vyos@10.1.1.1` before the timer expires. It should log in with your key, not ask for a password. Then:
+Give the management laptop the static address `10.1.1.2/24` with no gateway, and before the timer expires run:
+
+```bash
+ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no vyos@10.1.1.1
+```
+
+It must log in with your key, not the router password. A prompt to unlock your private key is local to the laptop and is different from the router password. If this fails, keep the original console session and let the timer revert; do not confirm or save. If it succeeds, return to the console:
 
 ```text
 confirm
@@ -377,9 +431,11 @@ save
 
 Notes:
 
-- `hw-id` lines you see in `show interfaces ethernet` are the MAC addresses that pin each name to a physical port. Leave them alone.
-- Leave MTU at 1500 unless you have an end-to-end reason to change it. ASK2 validates an MTU of 1280–3600 on engaged ports; VPP/AF_XDP has its own, lower limit.
-- Do not add a bridge to make these ports share a subnet: on this ASK2 build, bridge-member ports use the bridge offload path instead of routed offload.
+- The current pinned VyOS port-naming work uses `/config/interface-mapping.json` rather than keeping `hw-id` in the interface configuration. Fresh-install and upgrade validation is still pending; verify each physical port before relying on its name and do not hand-edit the mapping file.
+- Leave MTU at 1500 unless you have an end-to-end reason to change it. ASK2 validates an MTU of 1280 to 3600 on engaged ports.
+- Do not bridge ports to make them share a subnet: on this ASK2 build, bridge-member ports use the bridge offload path instead of routed offload.
+- The disabled ports stay listed in the factory flowtable `FT`. That is harmless: a disabled port carries no traffic.
+- The two `delete ... offload ipv6` commands turn off IPv6 **hardware** offload on the active ports before WAN is connected. IPv6 can still use software forwarding; chapter 9 explains the open limitation.
 
 ### Verify
 
@@ -387,11 +443,11 @@ Notes:
 run show interfaces
 ```
 
-Expected: `eth0` shows `10.1.1.1/24`, and `eth3` shows `192.168.50.1/24` and has link if its cable and 10G peer are connected. `eth4` should have no DHCP lease yet with its cable unplugged. `eth1` and `eth2` still have their factory DHCP clients.
+For plan A, `eth0` should show `10.1.1.1/24`; `eth3` should show `192.168.50.1/24` and have link if its cable and 10G peer are connected; `eth1` and `eth2` should show `A/D` (administratively down); `eth4` should have no lease yet with its cable unplugged. Use the plan-specific checks in Appendix B for plans B and C.
 
 ### So what
 
-Both sides exist. Before the WAN side talks to the internet, it needs a firewall.
+Every port now has exactly one job, and the ones without a job are off. Before the WAN side talks to the internet, it needs a firewall.
 
 ---
 
@@ -401,24 +457,24 @@ This is the longest chapter because it matters most. Take your time.
 
 ### 5.1 Concepts in four paragraphs
 
-**Stateful.** Conntrack recognizes replies to accepted connections. The rulesets below allow established and related packets explicitly, while a global policy drops invalid traffic.
+**Stateful.** The firewall tracks connections. When your laptop opens a connection to a website, reply packets are recognized as part of that connection. The default-drop rulesets below start with a rule 5 that accepts those *established* and *related* packets; subsequent rules decide which new connections are allowed. The router-origin `LOCAL-*` rulesets instead default to accept. Section 5.2 explains why the state accept is not global.
 
-**Default deny between zones.** Unsolicited WAN-to-LAN and WAN-to-router traffic is dropped except for the explicit rules. LAN-to-WAN and router-originated traffic have their own permissions; traffic within the LAN zone is not isolated by default.
+**Default deny.** Anything not explicitly allowed is dropped. You open holes on purpose; you never close them in a panic after the fact.
 
-**Zones.** Instead of writing rules per interface, you group interfaces into zones and write one ruleset per *direction between zones*. We use three:
+**Zones.** Instead of writing rules per interface, you group interfaces into zones and write one ruleset per *direction between zones*. For plan A we use three:
 
 | Zone | Contains | Meaning |
 |---|---|---|
 | `WAN` | `eth4` | The internet. Untrusted. |
-| `LAN` | `eth0`, `eth1`, `eth2`, `eth3` | Trusted networks; the ports remain separate interfaces. |
+| `LAN` | `eth0`, `eth1`, `eth2`, `eth3` | Management and home LAN subnets; `eth1` and `eth2` remain disabled. |
 | `LOCAL` | the router itself | Traffic *to* or *from* VyOS, not *through* it. |
 
-**The matrix.** Every arrow between zones gets a ruleset. Reading it row by row: "traffic **from** this zone **to** that zone":
+**The matrix.** Every arrow between zones gets a ruleset. Read it row by row: traffic **from** this zone **to** that zone. "Dropped" means there is no ruleset for that direction, so the zone default applies.
 
 | from \ to | **LAN** | **WAN** | **LOCAL** (router) |
 |---|---|---|---|
-| **LAN** | No intra-zone isolation by default; not a bridge | `LAN-WAN`: allow configured sources | `LAN-LOCAL`: DHCP, DNS, NTP, SSH, ping |
-| **WAN** | `WAN-LAN`: allow replies, drop other new traffic | | `WAN-LOCAL`: replies, DHCP, rate-limited ping |
+| **LAN** | intra-zone traffic allowed by default | `LAN-WAN`: new connections from the home subnet | `LAN-LOCAL`: DHCP, DNS, NTP, ping; SSH from management only |
+| **WAN** | `WAN-LAN`: replies only | | `WAN-LOCAL`: replies, DHCP from ISP, rate-limited ping |
 | **LOCAL** | `LOCAL-LAN`: allow | `LOCAL-WAN`: allow | |
 
 Each ruleset exists twice: one for IPv4 (`-v4`), one for IPv6 (`-v6`). We configure IPv6 rules even if you do not have IPv6 yet. When your ISP turns it on one day, you are already protected instead of accidentally wide open.
@@ -427,7 +483,7 @@ Each ruleset exists twice: one for IPv4 (`-v4`), one for IPv6 (`-v6`). We config
 
 #### Why
 
-These are kernel-level protections and the global invalid-packet policy. Established and related traffic is accepted in the individual rulesets.
+These are kernel-level protections, plus the one global state rule this build allows: drop invalid packets.
 
 #### Configure
 
@@ -443,7 +499,7 @@ firewall {
         log-martians enable
         receive-redirects disable
         send-redirects disable
-        source-validation loose
+        source-validation strict
         state-policy {
             invalid {
                 action drop
@@ -466,23 +522,23 @@ set firewall global-options receive-redirects 'disable'
 set firewall global-options send-redirects 'disable'
 set firewall global-options log-martians 'enable'
 set firewall global-options syn-cookies 'enable'
-set firewall global-options source-validation 'loose'
+set firewall global-options source-validation 'strict'
 ```
 
-**ASK2 ordering matters.** The factory hardware flowtable has an `action offload` rule in each forward filter. A global `established` or `related` **accept** shadows those rules, and this build rejects that combination at commit. That is why this guide sets only the global `invalid` drop and accepts established and related traffic in each ruleset instead. Do not add a global `state-policy established` or `related` accept. See chapter 9 for the hardware flowtable.
+> **Why no global "accept established"?** Most VyOS guides accept established and related traffic once, globally. On this build that would break hardware offload: the factory forward rule 10 (`action offload`, chapter 9) must see established packets to hand them to the hardware, and a global accept runs first and shadows it. The build rejects that combination at commit. So the global policy only drops `invalid`, and each default-drop ruleset accepts established and related traffic itself, in rule 5. Do not add a global `state-policy established` or `related` accept.
 
-What each one buys you:
+What each option buys you:
 
 | Option | Plain English |
 |---|---|
-| `state-policy invalid drop` | Drop packets conntrack considers invalid; established/related accepts are in the zone rulesets. |
+| `state-policy invalid drop` | Packets that fit no known connection and are not a valid start of one are garbage or an attack. |
 | `all-ping enable` | The router *can* answer pings. Whether it *does* is decided by the zone rules below. |
 | `broadcast-ping disable` | Do not answer pings sent to a broadcast address (classic amplification trick). |
 | `ip-src-route` / `ipv6-src-route disable` | Ignore packets that try to dictate their own path through the network. |
 | `receive-redirects` / `send-redirects disable` | ICMP redirects are a routing shortcut nobody needs at home and an attacker might enjoy. |
 | `log-martians enable` | Log packets with impossible source addresses. Interesting to read, occasionally useful. |
 | `syn-cookies enable` | Survive SYN floods without running out of memory. |
-| `source-validation loose` | IPv4 reverse-path validation requires a route to the source, without requiring the return route to use the incoming interface. This is less likely to break management with multiple DHCP-connected ports. It is not IPv6 source validation. |
+| `source-validation strict` | IPv4 reverse-path filtering: drop packets when the best return route to their source uses a different interface. This fits the example's single uplink and symmetric routes; use `loose` if you introduce asymmetric routing. It does not cover IPv6. |
 
 Do not commit yet; the rulesets come next and we commit everything together.
 
@@ -490,7 +546,7 @@ Do not commit yet; the rulesets come next and we commit everything together.
 
 #### Why
 
-Groups are named lists of addresses or ports. Rules reference the name, so when something changes you update one group instead of ten rules.
+Groups are named lists of addresses. Rules reference the name, so when something changes you update one group instead of ten rules.
 
 #### Configure
 
@@ -515,8 +571,12 @@ firewall {
             network 240.0.0.0/4
         }
         network-group LAN-NETS {
-            description "Our own LAN subnets"
+            description "Home LAN subnets"
             network 192.168.50.0/24
+        }
+        network-group MGMT-NETS {
+            description "Management subnets"
+            network 10.1.1.0/24
         }
     }
 }
@@ -525,8 +585,10 @@ firewall {
 Commands:
 
 ```text
-set firewall group network-group LAN-NETS description 'Our own LAN subnets'
+set firewall group network-group LAN-NETS description 'Home LAN subnets'
 set firewall group network-group LAN-NETS network '192.168.50.0/24'
+set firewall group network-group MGMT-NETS description 'Management subnets'
+set firewall group network-group MGMT-NETS network '10.1.1.0/24'
 
 set firewall group network-group BOGONS-V4 description 'Addresses that must never appear as a source on the internet'
 set firewall group network-group BOGONS-V4 network '0.0.0.0/8'
@@ -543,7 +605,7 @@ set firewall group network-group BOGONS-V4 network '224.0.0.0/4'
 set firewall group network-group BOGONS-V4 network '240.0.0.0/4'
 ```
 
-> **Why is `100.64.0.0/10` not in the bogon list?** That range is "carrier-grade NAT" space. Some ISPs put customers behind CGNAT and their own infrastructure uses it. Blocking it can break your connection in ways that are miserable to debug. The same caution applies if your WAN sits behind an ISP router that hands out `192.168.x.x`: in that case, remove `192.168.0.0/16` from this group.
+> **Why is `100.64.0.0/10` not in the bogon list?** That range is carrier-grade NAT space, which some ISPs use on their infrastructure. A private WAN may also legitimately receive traffic from `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`: rule 20 below drops new router-directed traffic from those ranges after the DHCP and established-flow exceptions. If you need a specific upstream diagnostic or service, add and test a narrowly scoped exception before the bogon rule rather than removing an entire range without considering the effect. Private WAN addressing must not overlap either local subnet.
 
 ### 5.4 IPv4 rulesets
 
@@ -621,7 +683,7 @@ set firewall ipv4 name WAN-LOCAL-v4 rule 30 limit rate '5/second'
 set firewall ipv4 name WAN-LOCAL-v4 rule 30 limit burst '10'
 ```
 
-Why this order: after established/related traffic, **DHCP precedes the bogon rule**. Some ISPs send DHCP replies from private addresses; blocking those before rule 10 can prevent an address assignment.
+Why this order: after replies, **DHCP comes before the bogon rule**. Some ISPs send DHCP replies from private addresses. If rule 20 came first, your router would block its own ISP and never get an address. Rules are evaluated top to bottom and the first match wins.
 
 Why allow ping: it helps your ISP (and you) diagnose problems, and "stealth mode" buys nothing real: the scanners already know your address is there. If you disagree, delete rule 30. It is your router.
 
@@ -655,7 +717,7 @@ set firewall ipv4 name WAN-LAN-v4 rule 5 state 'established'
 set firewall ipv4 name WAN-LAN-v4 rule 5 state 'related'
 ```
 
-Rule 5 allows replies to accepted connections. Other inbound traffic is dropped unless you add a specific rule, as in the optional port-forward example in chapter 6.
+Replies to things your devices asked for come back through rule 5. Anything else is unsolicited and dropped. Port forwards (chapter 6) add rules here.
 
 #### Your devices going out: `LAN-WAN-v4`
 
@@ -673,7 +735,7 @@ firewall {
             }
             rule 10 {
                 action accept
-                description "Anything from our own subnet"
+                description "New connections from the home LAN"
                 source {
                     group {
                         network-group LAN-NETS
@@ -693,11 +755,11 @@ set firewall ipv4 name LAN-WAN-v4 rule 5 description 'Established and related'
 set firewall ipv4 name LAN-WAN-v4 rule 5 state 'established'
 set firewall ipv4 name LAN-WAN-v4 rule 5 state 'related'
 set firewall ipv4 name LAN-WAN-v4 rule 10 action 'accept'
-set firewall ipv4 name LAN-WAN-v4 rule 10 description 'Anything from our own subnet'
+set firewall ipv4 name LAN-WAN-v4 rule 10 description 'New connections from the home LAN'
 set firewall ipv4 name LAN-WAN-v4 rule 10 source group network-group 'LAN-NETS'
 ```
 
-New IPv4 connections are accepted only from `LAN-NETS`, which initially contains the example `eth3` subnet. If another LAN-zone interface should route traffic to the internet, add its actual subnet to `LAN-NETS` and provide an appropriate NAT rule; zone membership alone does neither. The `10.1.1.0/24` management network is deliberately left out: it can reach the router, but not the internet.
+Why not just `default-action accept`? Because a device with a misconfigured or spoofed address should not be able to send traffic out under your name. Allowing only `LAN-NETS` costs one rule.
 
 #### Your devices talking to the router: `LAN-LOCAL-v4`
 
@@ -715,24 +777,13 @@ firewall {
             }
             rule 10 {
                 action accept
-                description "DHCP requests to router"
+                description DHCP
                 destination {
                     port 67
                 }
                 protocol udp
                 source {
                     port 68
-                }
-            }
-            rule 11 {
-                action accept
-                description "DHCP replies to router"
-                destination {
-                    port 68
-                }
-                protocol udp
-                source {
-                    port 67
                 }
             }
             rule 20 {
@@ -753,16 +804,25 @@ firewall {
             }
             rule 40 {
                 action accept
-                description SSH
-                destination {
-                    port 22
-                }
-                protocol tcp
+                description ICMP
+                protocol icmp
             }
             rule 50 {
                 action accept
-                description ICMP
-                protocol icmp
+                description "SSH from management"
+                destination {
+                    address 10.1.1.1
+                    port 22
+                }
+                inbound-interface {
+                    name eth0
+                }
+                protocol tcp
+                source {
+                    group {
+                        network-group MGMT-NETS
+                    }
+                }
             }
             rule 999 {
                 action drop
@@ -782,15 +842,10 @@ set firewall ipv4 name LAN-LOCAL-v4 rule 5 description 'Established and related'
 set firewall ipv4 name LAN-LOCAL-v4 rule 5 state 'established'
 set firewall ipv4 name LAN-LOCAL-v4 rule 5 state 'related'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 10 description 'DHCP requests to router'
+set firewall ipv4 name LAN-LOCAL-v4 rule 10 description 'DHCP'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 protocol 'udp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 source port '68'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 destination port '67'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 description 'DHCP replies to router'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 protocol 'udp'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 source port '67'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 destination port '68'
 set firewall ipv4 name LAN-LOCAL-v4 rule 20 action 'accept'
 set firewall ipv4 name LAN-LOCAL-v4 rule 20 description 'DNS'
 set firewall ipv4 name LAN-LOCAL-v4 rule 20 protocol 'tcp_udp'
@@ -800,20 +855,23 @@ set firewall ipv4 name LAN-LOCAL-v4 rule 30 description 'NTP'
 set firewall ipv4 name LAN-LOCAL-v4 rule 30 protocol 'udp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 30 destination port '123'
 set firewall ipv4 name LAN-LOCAL-v4 rule 40 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 40 description 'SSH'
-set firewall ipv4 name LAN-LOCAL-v4 rule 40 protocol 'tcp'
-set firewall ipv4 name LAN-LOCAL-v4 rule 40 destination port '22'
+set firewall ipv4 name LAN-LOCAL-v4 rule 40 description 'ICMP'
+set firewall ipv4 name LAN-LOCAL-v4 rule 40 protocol 'icmp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 50 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 50 description 'ICMP'
-set firewall ipv4 name LAN-LOCAL-v4 rule 50 protocol 'icmp'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 description 'SSH from management'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 inbound-interface name 'eth0'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 source group network-group 'MGMT-NETS'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 destination address '10.1.1.1'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 destination port '22'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 protocol 'tcp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 999 action 'drop'
 set firewall ipv4 name LAN-LOCAL-v4 rule 999 description 'Log everything else'
 set firewall ipv4 name LAN-LOCAL-v4 rule 999 log
 ```
 
-Rule 10 allows requests to the `eth3` DHCP server; rule 11 allows replies to the router's factory DHCP clients on `eth1`–`eth2`. DHCP servers on those interfaces must be trusted. The other rules allow only the listed services to the router; the final drop is logged.
+Rule 50 accepts new SSH connections only when all three match: they arrive on `eth0`, originate in `MGMT-NETS`, and target `10.1.1.1`. The home LAN's devices do not get a router login prompt. Other unmatched traffic is dropped and logged. Chapter 8.4 also binds SSH to the management address; neither control isolates the management laptop from other LAN devices.
 
-#### The router talking out: `LOCAL-WAN-v4` and `LOCAL-LAN-v4`
+#### The router talking out: `LOCAL-*-v4`
 
 ```text
 firewall {
@@ -837,13 +895,13 @@ set firewall ipv4 name LOCAL-LAN-v4 default-action 'accept'
 set firewall ipv4 name LOCAL-LAN-v4 description 'Router to LAN'
 ```
 
-The router needs to reach DNS root servers, NTP servers, image updates, and answer LAN clients. If you cannot trust the router itself, firewall rules are the wrong layer to fix that.
+The router needs to reach DNS root servers, NTP servers, image updates, and answer its clients. If you cannot trust the router itself, firewall rules are the wrong layer to fix that.
 
 ### 5.5 IPv6 rulesets
 
 Even with no IPv6 from your ISP today, configure these now. IPv6 has two differences that change the rules:
 
-- **No NAT is used in this example.** Devices with delegated global addresses depend on the firewall, not address translation, to reject unsolicited inbound connections.
+- **No NAT.** Devices get globally routable addresses. The firewall (specifically `WAN-LAN-v6` with default drop) is the *only* thing keeping inbound connections out. This is fine; it is exactly what NAT was accidentally doing for you in IPv4.
 - **ICMPv6 is not optional.** IPv6 uses ICMPv6 for neighbor discovery (its version of ARP), router advertisements, and path MTU discovery. Block it and IPv6 breaks in slow, mysterious ways (RFC 4890 has the full story).
 
 #### `WAN-LOCAL-v6`
@@ -931,24 +989,29 @@ set firewall ipv6 name WAN-LOCAL-v6 rule 30 protocol 'icmpv6'
 Two things worth noticing:
 
 - Rules 20/21 are a pattern: "accept up to the limit, then drop the rest". Without rule 21, excess pings would fall through to rule 30 and be accepted anyway. Order matters.
-- There is no IPv6 bogon list here. Router advertisements and some DHCPv6 replies use link-local addresses, so a blanket WAN link-local drop can break IPv6. Add deployment-specific IPv6 anti-spoofing if required; IPv4 `source-validation` does not provide it.
+- There is no IPv6 bogon list. Your ISP's router advertisements and DHCPv6 replies come from *link-local* (`fe80::/10`) addresses, so the naive "drop link-local from WAN" rule breaks IPv6 entirely.
 
-#### `WAN-LAN-v6`, `LAN-WAN-v6`, `LOCAL-*-v6`
+#### `WAN-LAN-v6` and `LAN-WAN-v6`
 
 ```text
 firewall {
     ipv6 {
         name LAN-WAN-v6 {
-            default-action accept
+            default-action drop
             description "LAN to Internet (IPv6)"
-        }
-        name LOCAL-LAN-v6 {
-            default-action accept
-            description "Router to LAN (IPv6)"
-        }
-        name LOCAL-WAN-v6 {
-            default-action accept
-            description "Router to Internet (IPv6)"
+            rule 5 {
+                action accept
+                description "Established and related"
+                state established
+                state related
+            }
+            rule 10 {
+                action accept
+                description "New connections from the home LAN port"
+                inbound-interface {
+                    name eth3
+                }
+            }
         }
         name WAN-LAN-v6 {
             default-action drop
@@ -971,15 +1034,19 @@ set firewall ipv6 name WAN-LAN-v6 rule 5 action 'accept'
 set firewall ipv6 name WAN-LAN-v6 rule 5 description 'Established and related'
 set firewall ipv6 name WAN-LAN-v6 rule 5 state 'established'
 set firewall ipv6 name WAN-LAN-v6 rule 5 state 'related'
-set firewall ipv6 name LAN-WAN-v6 default-action 'accept'
+
+set firewall ipv6 name LAN-WAN-v6 default-action 'drop'
 set firewall ipv6 name LAN-WAN-v6 description 'LAN to Internet (IPv6)'
-set firewall ipv6 name LOCAL-WAN-v6 default-action 'accept'
-set firewall ipv6 name LOCAL-WAN-v6 description 'Router to Internet (IPv6)'
-set firewall ipv6 name LOCAL-LAN-v6 default-action 'accept'
-set firewall ipv6 name LOCAL-LAN-v6 description 'Router to LAN (IPv6)'
+set firewall ipv6 name LAN-WAN-v6 rule 5 action 'accept'
+set firewall ipv6 name LAN-WAN-v6 rule 5 description 'Established and related'
+set firewall ipv6 name LAN-WAN-v6 rule 5 state 'established'
+set firewall ipv6 name LAN-WAN-v6 rule 5 state 'related'
+set firewall ipv6 name LAN-WAN-v6 rule 10 action 'accept'
+set firewall ipv6 name LAN-WAN-v6 rule 10 description 'New connections from the home LAN port'
+set firewall ipv6 name LAN-WAN-v6 rule 10 inbound-interface name 'eth3'
 ```
 
-`LAN-WAN-v6` allows new IPv6 traffic from all four trusted LAN interfaces. It does **not** validate the source prefix. Add prefix-aware filtering if that trust model is too broad, particularly when delegations can change. Rule 5 in `WAN-LAN-v6` allows established and related replies, including connection-related ICMPv6 errors.
+For plan C, replace the last command with the chapter 5.5 command in [Appendix B](#appendix-b-plan-b-and-c-staged-commands); plan B uses `eth3` as shown. `LAN-WAN-v6` is the same policy as `LAN-WAN-v4`, written for IPv6's constraints. In IPv4, "new connections from `LAN-NETS`" works because the subnet is fixed. Your IPv6 prefix comes from the ISP and can change, so instead of matching the source prefix, rule 10 matches the home LAN port. Only that port starts new outbound connections.
 
 #### `LAN-LOCAL-v6`
 
@@ -1000,17 +1067,6 @@ firewall {
                 description "ICMPv6 (neighbor discovery, router solicitation, ping)"
                 protocol icmpv6
             }
-            rule 11 {
-                action accept
-                description "DHCPv6 replies to router"
-                destination {
-                    port 546
-                }
-                protocol udp
-                source {
-                    port 547
-                }
-            }
             rule 20 {
                 action accept
                 description DNS
@@ -1026,14 +1082,6 @@ firewall {
                     port 123
                 }
                 protocol udp
-            }
-            rule 40 {
-                action accept
-                description SSH
-                destination {
-                    port 22
-                }
-                protocol tcp
             }
             rule 999 {
                 action drop
@@ -1055,11 +1103,6 @@ set firewall ipv6 name LAN-LOCAL-v6 rule 5 state 'related'
 set firewall ipv6 name LAN-LOCAL-v6 rule 10 action 'accept'
 set firewall ipv6 name LAN-LOCAL-v6 rule 10 description 'ICMPv6 (neighbor discovery, router solicitation, ping)'
 set firewall ipv6 name LAN-LOCAL-v6 rule 10 protocol 'icmpv6'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 action 'accept'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 description 'DHCPv6 replies to router'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 protocol 'udp'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 source port '547'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 destination port '546'
 set firewall ipv6 name LAN-LOCAL-v6 rule 20 action 'accept'
 set firewall ipv6 name LAN-LOCAL-v6 rule 20 description 'DNS'
 set firewall ipv6 name LAN-LOCAL-v6 rule 20 protocol 'tcp_udp'
@@ -1068,13 +1111,20 @@ set firewall ipv6 name LAN-LOCAL-v6 rule 30 action 'accept'
 set firewall ipv6 name LAN-LOCAL-v6 rule 30 description 'NTP'
 set firewall ipv6 name LAN-LOCAL-v6 rule 30 protocol 'udp'
 set firewall ipv6 name LAN-LOCAL-v6 rule 30 destination port '123'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 action 'accept'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 description 'SSH'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 protocol 'tcp'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 destination port '22'
 set firewall ipv6 name LAN-LOCAL-v6 rule 999 action 'drop'
 set firewall ipv6 name LAN-LOCAL-v6 rule 999 description 'Log everything else'
 set firewall ipv6 name LAN-LOCAL-v6 rule 999 log
+```
+
+There is no IPv6 SSH allow rule. The ICMPv6 rule also keeps link-local neighbor discovery working on the management cable, even though no global IPv6 management address is configured.
+
+#### The router talking out: `LOCAL-*-v6`
+
+```text
+set firewall ipv6 name LOCAL-WAN-v6 default-action 'accept'
+set firewall ipv6 name LOCAL-WAN-v6 description 'Router to Internet (IPv6)'
+set firewall ipv6 name LOCAL-LAN-v6 default-action 'accept'
+set firewall ipv6 name LOCAL-LAN-v6 description 'Router to LAN (IPv6)'
 ```
 
 ### 5.6 Zones: wiring it together
@@ -1089,7 +1139,7 @@ So far you have written rulesets, but nothing uses them. Zones say which interfa
 firewall {
     zone LAN {
         default-action drop
-        description "Home network"
+        description "Home and management networks"
         from LOCAL {
             firewall {
                 ipv6-name LOCAL-LAN-v6
@@ -1156,7 +1206,7 @@ set firewall zone WAN from LAN firewall ipv6-name 'LAN-WAN-v6'
 set firewall zone WAN from LOCAL firewall name 'LOCAL-WAN-v4'
 set firewall zone WAN from LOCAL firewall ipv6-name 'LOCAL-WAN-v6'
 
-set firewall zone LAN description 'Home network'
+set firewall zone LAN description 'Home and management networks'
 set firewall zone LAN default-action 'drop'
 set firewall zone LAN member interface 'eth0'
 set firewall zone LAN member interface 'eth1'
@@ -1175,36 +1225,52 @@ set firewall zone LOCAL from WAN firewall name 'WAN-LOCAL-v4'
 set firewall zone LOCAL from WAN firewall ipv6-name 'WAN-LOCAL-v6'
 ```
 
-How to read a zone block: `zone LOCAL from WAN firewall name WAN-LOCAL-v4` means traffic arriving at the router **from** WAN is checked against `WAN-LOCAL-v4`. All four LAN ports share the same trust policy, but their addresses and L2 networks stay separate. Without intra-zone filtering, the zone does not isolate traffic routed between them.
+For plans B and C, replace the five `member interface` commands above with the chapter 5.6 commands in [Appendix B](#appendix-b-plan-b-and-c-staged-commands); enter the other zone commands unchanged. How to read a zone block: `zone LOCAL from WAN firewall name WAN-LOCAL-v4` means "traffic arriving **in** zone LOCAL **from** zone WAN is checked against `WAN-LOCAL-v4`".
 
-The `LOCAL` zone has no `default-action` line; it defaults to drop. Any direction without a `from` block is also dropped by the zone default. Default deny, all the way down.
+The `LOCAL` zone has no `default-action` line; it defaults to drop. Any direction between different zones without a `from` block is also dropped by the destination zone default. Intra-zone traffic is a separate policy and is allowed by default, as explained in chapter 1.
 
-Now commit everything from chapter 5 at once, keeping the console open:
+### 5.7 Commit with a safety net
+
+Commit everything from this chapter at once, from the serial console:
 
 ```text
 compare
-commit-confirm 5
+commit-confirm 10
 ```
 
-Verify SSH to `10.1.1.1` from the management laptop and, if used, DHCP on `eth1`–`eth2`. Open a second management session before confirming. Once those checks pass:
+Before the timer expires, keep the console session open and test from **two** clients:
+
+1. From the management laptop, open a **new** key-only SSH session using the command in chapter 4. It must work.
+2. Connect a LAN client to the home LAN port. Give it `192.168.50.20/24` and gateway `192.168.50.1` temporarily; DHCP comes in chapter 8. For plan A or B the port is `eth3`; for plan C it is `eth1`.
+3. On the console, note the rule 999 packet count in `run show firewall ipv4 name LAN-LOCAL-v4`. From the LAN client, run:
+
+   ```bash
+   ping -c 3 192.168.50.1
+   ping -c 3 10.1.1.1
+   nc -vz -w 5 192.168.50.1 22
+   nc -vz -w 5 10.1.1.1 22
+   ```
+
+   Both pings should succeed, proving the client can reach both router addresses. Both new TCP connections must fail; the rule 999 count should increase when repeated. A failed SSH attempt alone is not proof of firewall enforcement. If pings, counters, or the management login do not behave as expected, do not confirm or connect WAN.
+
+Then:
 
 ```text
 confirm
 save
 ```
 
-If `commit` fails, read the error before retrying. If connectivity is lost, let the confirmation timer roll the change back and use the serial console.
+If `commit` fails, read the error: it names the exact path that is wrong (usually a typo in a ruleset name referenced by a zone). If you lose the management session, let the timer revert the change and use the serial console.
 
-### 5.7 Verify
+### 5.8 Verify
 
 ```text
 run show firewall
 run show firewall ipv4 name LAN-LOCAL-v4
-run show configuration commands | match 'firewall zone LAN member'
-run show interfaces ethernet eth0
+run show configuration commands | match 'firewall zone'
 ```
 
-Confirm that the zone contains `eth0`–`eth3` and that `eth0` still has `10.1.1.1/24`. For the ground truth, from an operational shell look at what the kernel actually received:
+For the ground truth, look at what the kernel actually received:
 
 ```text
 sudo nft list ruleset | less
@@ -1212,29 +1278,52 @@ sudo nft list ruleset | less
 
 You will see chains named after your rulesets and the zone jumps that connect them. This is the same firewall, without the VyOS abstraction on top. Worth a skim once, so it is not a mystery when you need it.
 
-### 5.8 Connect the WAN
+### 5.9 Connect the WAN
 
 Plug in the WAN only when every item below is true:
 
 | Check | How to confirm |
 |---|---|
-| Password replaced (chapter 3) | You logged in on the console with the chapter 3 password, not the install-time one |
-| Factory key removed, your key added (chapter 3) | `run show configuration commands \| match public-keys` lists `laptop` but not `vanityssh@vyos`; `ssh vyos@10.1.1.1` logs in with your key |
-| Firewall committed and saved (this chapter) | `confirm` and `save` completed in 5.6 |
-| Zones in place | `run show firewall` shows the `WAN`, `LAN` and `LOCAL` zones; `eth4` is the only `WAN` member |
-| SSH closed from the WAN | `run show firewall ipv4 name WAN-LOCAL-v4` has no SSH accept rule |
+| Password replaced (chapter 3) | The nested login prompted for and accepted the chapter 3 password |
+| Factory key removed, your key added (chapter 3) | `run show configuration commands \| match public-keys` lists `laptop` but not `vanityssh@vyos` |
+| Spare ports off (chapter 4) | `run show interfaces` shows the two selected spare ports as `A/D` |
+| Firewall committed and saved (5.7) | `confirm` and `save` completed |
+| Zones in place | The chosen WAN port is the only `WAN` member; `eth0` and all other non-WAN ports belong to `LAN` |
+| IPv6 hardware offload disabled | The active LAN and WAN ports have no `offload ipv6` leaf; see chapters 4 and 9 |
+| SSH limited to management | Both LAN-side reachability and SSH-denial tests in 5.7 passed; a new management key login worked |
 
-If any check fails, fix it first. Then plug the ISP cable into `eth4` (right SFP+). Within a few seconds:
+If any check fails, fix it first. Then plug the ISP cable into the selected WAN port: `eth4` for plan A, `eth2` for B or C. For plan A:
 
 ```text
 run show interfaces ethernet eth4
 ```
 
-should show an address from your ISP. If you also use `eth1` or `eth2`, connect them now, only to networks you trust.
+should show an address from your ISP. For B or C, use the chapter 5.9 check in Appendix B. Write the address down for the next test; confirm that the WAN subnet does not overlap either local subnet.
 
-### 5.9 So what
+**Test from the WAN side.** An address in RFC 1918 private space or `100.64.0.0/10` cannot normally be reached directly from a phone on the public internet. In that case use a separate test device on the router's upstream network; if you also want to test exposure through the ISP device, test its public address and any upstream port forwarding separately. A public WAN can be tested from a phone on mobile data or another external network.
 
-The WAN-facing policy drops unsolicited inbound connections except for the listed router-local traffic. The four LAN ports are trusted members of the same zone; only `eth3` has the example client subnet. Test the rules from the actual networks, including IPv6, before relying on them. Chapter 6 adds NAT for the example subnet.
+First prove that the packets reach this router. From a second management session, capture on the selected WAN interface while the test device sends the probes below. For plan A:
+
+```text
+sudo tcpdump -ni eth4 'icmp or tcp port 22 or tcp port 53 or udp port 53'
+```
+
+For B or C, use the capture command in Appendix B. Stop the capture with Ctrl-C after testing. From the test device, replacing `<wan-address>`:
+
+```bash
+ping -c 3 <wan-address>                        # positive control when permitted
+nc -vz -w 5 <wan-address> 22                  # must not connect
+nc -vz -w 5 <wan-address> 53                  # must not connect
+dig @<wan-address> example.com +time=2 +tries=1  # UDP DNS must not answer
+```
+
+An ICMP reply is a useful positive control when the test source is allowed by `WAN-LOCAL-v4` rule 30. A private upstream source may instead hit the earlier bogon rule, and upstream equipment may block ping. In either case, seeing the actual TCP and UDP probes arrive in the capture is the positive path check. Compare `run show firewall ipv4 name WAN-LOCAL-v4` counters before and after each probe: the bogon rule or default drop must increase. A timeout without a captured packet and matching counter is **inconclusive**, not proof that this firewall blocked it. If the test path cannot be established, leave WAN disconnected or behind a trusted upstream firewall until it can be checked.
+
+If you enable IPv6 later, repeat an equivalent reachable-source test with TCP and UDP against the router's IPv6 WAN address, and TCP against a LAN device's global IPv6 address. Capture on WAN and check the IPv6 `WAN-LOCAL-v6` and `WAN-LAN-v6` counters; a remote timeout alone is still inconclusive.
+
+### 5.10 So what
+
+The intended policy drops unsolicited inbound traffic and restricts new router SSH sessions to the management cable. The WAN-side tests above are required before relying on it; repeat them for IPv6 if you enable it. The home LAN still needs NAT and services before it can use the internet.
 
 ---
 
@@ -1255,7 +1344,9 @@ nat {
                 name eth4
             }
             source {
-                address 192.168.50.0/24
+                group {
+                    network-group LAN-NETS
+                }
             }
             translation {
                 address masquerade
@@ -1268,27 +1359,29 @@ nat {
 ```text
 set nat source rule 100 description 'LAN to Internet'
 set nat source rule 100 outbound-interface name 'eth4'
-set nat source rule 100 source address '192.168.50.0/24'
+set nat source rule 100 source group network-group 'LAN-NETS'
 set nat source rule 100 translation address 'masquerade'
 commit
 save
 ```
 
+For plans B and C, use the chapter 6 source-NAT block in [Appendix B](#appendix-b-plan-b-and-c-staged-commands) instead. NAT uses the same `LAN-NETS` group as the firewall, so adding a subnet later is one edit, not two. This example includes only the home subnet: sharing the LAN zone does not automatically give management internet access.
+
 ### Verify
 
-From the router, try an internet address. This pings `a.root-servers.net`:
+From the router, try a reachable internet address. This example pings `a.root-servers.net`:
 
 ```text
 run ping 198.41.0.4 count 3
 ```
 
-Some networks filter ICMP, so a failed ping alone does not establish that the route is broken.
-
-From a LAN device: DHCP is not running yet (chapter 8), so give your laptop a temporary static address `192.168.50.10/24`, gateway `192.168.50.1`, and ping the same address. Then watch the translation happen:
+From the LAN client still on the temporary static address `192.168.50.20/24`, set its gateway to `192.168.50.1`, ping the same address, and watch the translation happen:
 
 ```text
 run show nat source translations
 ```
+
+If that server or the upstream network does not answer ICMP, use an endpoint you control that permits it; a timeout alone does not establish a NAT failure.
 
 ### Optional: port forwarding
 
@@ -1345,9 +1438,15 @@ set firewall ipv4 name WAN-LAN-v4 rule 100 protocol 'tcp'
 set firewall ipv4 name WAN-LAN-v4 rule 100 destination address '192.168.50.50'
 set firewall ipv4 name WAN-LAN-v4 rule 100 destination port '25565'
 set firewall ipv4 name WAN-LAN-v4 rule 100 state 'new'
+compare
+commit-confirm 5
 ```
 
-Note the firewall rule matches the **internal** address: destination NAT happens before the firewall looks at the packet. Give the target device a DHCP reservation (chapter 8) so its address does not wander off. Review the candidate, use `commit-confirm 5`, test from an external network, then `confirm` and `save`.
+Test from an external network, then `confirm` and `save`. Note the firewall rule matches the **internal** address: destination NAT happens before the firewall looks at the packet. Give the target device a DHCP reservation (chapter 8) so its address does not wander off.
+
+For plans B and C, replace the `inbound-interface` command with the optional port-forward command in Appendix B; the other commands are unchanged. A private or CGNAT WAN also needs a reachable upstream path or port forward before an external test can prove anything.
+
+> **Closing a port forward on this board needs an extra check.** Deleting the rules should stop *new* connections, but sessions already handed to the hardware may continue. After removing a forward, flush connection state and verify retirement as shown in [9.5](#95-after-changing-firewall-or-nat-policy).
 
 Every port forward is a door into your house. Open the ones you need, close the ones you stopped using, and prefer a VPN for remote access to anything with a login page.
 
@@ -1361,12 +1460,11 @@ Your LAN reaches the internet. Inbound stays closed except where you deliberatel
 
 ### Why
 
-A router's core job is deciding where each packet goes next. At home, that decision is almost always "LAN stuff stays on the LAN, everything else goes to the ISP". The good news: you have already configured it.
+A router's core job is deciding where each packet goes next. At home, that decision is almost always "LAN stuff stays on the LAN, everything else goes to the ISP". The good news: you have already configured it. These examples use plan A; Appendix B lists the expected interfaces for plans B and C.
 
-- `eth3` has `192.168.50.1/24`, so VyOS automatically knows `192.168.50.0/24` is directly connected on `eth3`.
-- If the ISP provides a gateway via DHCP on `eth4`, VyOS can install it as a default route (`0.0.0.0/0`).
-
-The factory DHCP clients on `eth1`–`eth2` may also supply default routes. Check the selected route rather than assuming it points to `eth4`. Adjust route preferences for your networks if needed. The `10.1.1.0/24` management network is directly connected, so it needs no route.
+- `eth0` and `eth3` have static addresses, so VyOS automatically knows `10.1.1.0/24` and `192.168.50.0/24` are directly connected.
+- The ISP's DHCP reply on `eth4` includes a **default gateway**. VyOS installs it as the default route (`0.0.0.0/0`).
+- `eth4` is the only DHCP client left (chapter 4 disabled the others), so it is the only possible source of a default route. No competing routes, nothing to tune.
 
 ### Verify
 
@@ -1374,10 +1472,11 @@ The factory DHCP clients on `eth1`–`eth2` may also supply default routes. Chec
 run show ip route
 ```
 
-Expected output, roughly:
+Expected plan A output, roughly:
 
 ```text
 S>* 0.0.0.0/0 [210/0] via 203.0.113.1, eth4
+C>* 10.1.1.0/24 is directly connected, eth0
 C>* 192.168.50.0/24 is directly connected, eth3
 C>* 203.0.113.0/24 is directly connected, eth4
 ```
@@ -1391,6 +1490,8 @@ How to read it:
 | `>` | Selected as the best route |
 | `*` | Installed in the kernel forwarding table |
 | `[210/0]` | `[administrative distance / metric]`. Lower distance wins when several sources offer the same prefix. DHCP routes default to 210 so a manually configured static route (distance 1) overrides them. |
+
+For plan A, the selected default route should point to `eth4`. For B and C it should point to `eth2`; see Appendix B. Investigate any unexpected competing default routes.
 
 ### Optional: a static route
 
@@ -1411,13 +1512,16 @@ protocols {
 ```text
 set protocols static route 10.20.0.0/24 description 'Lab network behind 192.168.50.250'
 set protocols static route 10.20.0.0/24 next-hop '192.168.50.250'
+set firewall group network-group LAN-NETS network '10.20.0.0/24'
+commit
+save
 ```
 
-If that network should reach the internet, add `10.20.0.0/24` to `LAN-NETS` and supply a suitable additional NAT rule or source group. Review and commit the change, verify the route, then save.
+Adding `10.20.0.0/24` to `LAN-NETS` updates the outbound firewall rule and the NAT rule at once.
 
 ### So what
 
-Packets know where to go. Dynamic routing (OSPF, BGP) exists in VyOS and is excellent, but a home with one ISP does not need it. Resist the urge. Or do not resist it, but do it in a lab first.
+Packets know where to go, and there is only one way out. Dynamic routing (OSPF, BGP) exists in VyOS and is excellent, but a home with one ISP does not need it. Resist the urge. Or do not resist it, but do it in a lab first.
 
 ---
 
@@ -1429,7 +1533,7 @@ These are the services your devices actually feel. Each one is small.
 
 #### Why
 
-Devices joining your network need an address, a gateway, and a DNS server. DHCP hands out all three automatically. This server listens on `eth3` only; it does not serve the management network on `eth0`, change the factory DHCP clients on `eth1`–`eth2`, or serve devices attached to those separate networks.
+Devices joining your network need an address, a gateway, and a DNS server. DHCP hands out all three automatically. For plan A the server listens on `eth3` only; the management network uses a static address on purpose. See Appendix B for the other plans.
 
 #### Configure
 
@@ -1451,10 +1555,6 @@ service {
                 range 0 {
                     start 192.168.50.100
                     stop 192.168.50.199
-                }
-                static-mapping nas {
-                    ip-address 192.168.50.10
-                    mac 00:11:22:33:44:55
                 }
                 subnet-id 1
             }
@@ -1479,23 +1579,27 @@ commit
 save
 ```
 
-Reservations (always the same address for one device) are `static-mapping` entries. The `nas` entry in the hierarchical example is optional. Use addresses *outside* the dynamic range, replace the example MAC address, and commit and save after adding it:
+For plan C, replace the `listen-interface` command with the chapter 8.1 command in [Appendix B](#appendix-b-plan-b-and-c-staged-commands). Plan B uses `eth3` as shown; the other DHCP commands are unchanged.
+
+Reservations (always the same address for one device) are `static-mapping` entries. Use addresses in the reserved range `.2` to `.99`, outside the dynamic pool, and replace the example MAC address:
 
 ```text
 set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 static-mapping nas ip-address '192.168.50.10'
 set service dhcp-server shared-network-name LAN subnet 192.168.50.0/24 static-mapping nas mac '00:11:22:33:44:55'
+commit
+save
 ```
 
 Field notes:
 
 - `subnet-id` is a unique number per subnet, required by the DHCP engine (Kea). Any number works; keep it stable.
 - `authoritative` makes the server correct clients holding stale leases from a previous router quickly, instead of letting them time out.
-- `hostfile-update` publishes DHCP lease names to the local host service. Whether a particular `nas.home.arpa` name appears depends on the client's lease name and domain; verify it with a DNS query.
+- `hostfile-update` publishes DHCP lease names to the router's local host list, so a client that sends its name (say, `nas`) becomes resolvable as `nas.home.arpa`. Verify with a DNS query; not every device sends a name.
 - One-day leases (`86400` seconds) are a good balance: short enough that departed guests free their address, long enough that nothing chats with the server all day.
 
 #### Verify
 
-Switch your laptop back to DHCP, reconnect, and on the router:
+Switch the LAN client from its temporary static address back to DHCP, reconnect, and on the router:
 
 ```text
 run show dhcp server leases
@@ -1509,11 +1613,11 @@ Every website visit starts with a DNS lookup, so whoever answers your DNS querie
 
 VyOS includes a full **recursive resolver** (PowerDNS Recursor). With no upstream configured, it asks the DNS root servers, then the `.com` servers, then the domain's own servers, exactly like the big public resolvers do internally. The result:
 
-- **Neutral:** no single third party receives your full query history.
+- **Distributed:** no single recursive resolver receives every query; the ISP or another network observer can still see unencrypted DNS traffic.
 - **Validated:** with DNSSEC set to `validate`, forged answers for signed domains are rejected on your own router.
 - **Cached:** repeat lookups can be answered locally.
 
-The trade-off: the first lookup of a never-seen domain is a little slower than hitting a giant shared cache, and queries leave your network unencrypted (each authoritative server sees only the queries for its own zone). For most homes that is a good trade.
+The trade-off: the first lookup of a never-seen domain may be slower than hitting a shared cache, and queries leave your network unencrypted (each authoritative server sees the queries for its own zone). For most homes that is a good trade.
 
 #### Configure
 
@@ -1547,7 +1651,7 @@ commit
 save
 ```
 
-On a clean DNS configuration, with no forwarding `name-server`, `dhcp`, `system` or domain-specific upstream configured, the recursor resolves directly. `system name-server 127.0.0.1` adds the local resolver for the router's own lookups. The factory DHCP clients on `eth1`, `eth2` and `eth4` may still learn resolvers from their networks; check `show dns forwarding` statistics if lookups take an unexpected path.
+Notice what is *missing*: there is no `name-server`, `dhcp` or `system` option under `service dns forwarding`. That absence is what turns on full recursion. `system name-server 127.0.0.1` makes the router itself use its own resolver too (for NTP, updates, and so on).
 
 #### If you prefer forwarding
 
@@ -1561,11 +1665,21 @@ set service dns forwarding dhcp 'eth4'
 set service dns forwarding name-server '<resolver-ip>'
 ```
 
-Common public options include Quad9 (`9.9.9.9`), Cloudflare (`1.1.1.1`), and Google (`8.8.8.8`). They differ in logging policy, filtering, and jurisdiction; read their privacy policies and choose deliberately rather than by habit. Replace `<resolver-ip>` before committing; the two alternatives above are not meant to be pasted together.
+For plans B and C, use the chapter 8.2 DHCP-forwarder command in Appendix B instead of the `eth4` command. This is optional; the default recursive resolver above does not need it.
+
+After choosing a forwarder, `compare` and use `commit-confirm 5`; test the DNS queries below, then `confirm` and `save` only if they work.
+
+Common public options include Quad9 (`9.9.9.9`), Cloudflare (`1.1.1.1`), and Google (`8.8.8.8`). They differ in logging policy, filtering, and jurisdiction; read their privacy policies and choose deliberately rather than by habit.
 
 #### Verify
 
-From a LAN device:
+On the router, check `run show date` and confirm that it uses only its own resolver:
+
+```text
+cat /etc/resolv.conf
+```
+
+Expected: `nameserver 127.0.0.1` and nothing else. Then, from a LAN device:
 
 ```bash
 dig @192.168.50.1 example.com            # should return an A record
@@ -1573,21 +1687,23 @@ dig @192.168.50.1 example.com +dnssec    # look for the "ad" flag: authenticated
 dig @192.168.50.1 dnssec-failed.org      # deliberately broken DNSSEC: expect SERVFAIL
 ```
 
-A `SERVFAIL` for the deliberately broken domain is expected when validation works, but can also result from connectivity or time problems. Check the successful signed-domain lookup as well.
-
-On the router:
-
-```text
-run show dns forwarding statistics
-```
+Read the second and third results together: the `ad` flag shows validation succeeds on a good domain, and the `SERVFAIL` shows the router refuses an answer it cannot verify. A `SERVFAIL` alone could also mean a connectivity or clock problem. Correct an obviously wrong clock and check NTP synchronization in 8.3 before treating DNSSEC failures as conclusive.
 
 ### 8.3 NTP: keep time honest
 
 #### Why
 
-TLS certificates, logs, two-factor codes, and DNSSEC signatures all depend on correct time. The factory configuration already syncs from `time.apple.com`, `time.cloudflare.com` and `time.google.com`, but allows clients from every private range and answers on every address. Keep the servers and narrow the service to the example LAN.
+TLS certificates, logs, two-factor codes, and DNSSEC signatures all depend on correct time. The factory configuration already syncs from `time.apple.com`, `time.cloudflare.com` and `time.google.com`, but serves time to every private range on every address. Keep the servers; narrow the service to the home LAN.
 
 #### Configure
+
+The factory file stores NTP under `system ntp`; the pinned VyOS migration is expected to move it to `service ntp` at boot. Before changing it, check the running configuration:
+
+```text
+run show configuration commands | match 'service ntp'
+```
+
+Confirm that the three factory servers and the `allow-client` entries are present. If they are not, stop and check the image and migration before proceeding; do not assume this example retains working time sources.
 
 ```text
 service {
@@ -1614,102 +1730,171 @@ commit
 save
 ```
 
-The `delete` removes the factory private-range client list. VyOS permits only one IPv4 NTP listen address, so the service answers on the `eth3` address only; the management network on `eth0` does not need it.
+The `delete` removes the factory client list. VyOS permits one IPv4 NTP listen address, so the service answers on the home LAN only; the management laptop does not need it.
 
 #### Verify
 
 ```text
-run show ntp
+run show ntp sources
 ```
 
-Within a minute or two you should see sources with one marked as selected.
+Once synchronization succeeds, one source should be marked as selected (`^*`). If none is selected, check name resolution, WAN reachability and the system clock.
 
-### 8.4 SSH: trusted-LAN access and keys
+### 8.4 SSH: management-only, key-only
 
 #### Why
 
-SSH is permitted by `LAN-LOCAL` from all four trusted LAN interfaces and denied for new WAN connections by `WAN-LOCAL`. The factory SSH service listens on every address; the firewall, not an `eth3`-only bind, preserves management via `eth0` at `10.1.1.1`. Chapter 3 already replaced the factory key with yours. Once that key is proven from each management path, turn off password login over SSH.
+The LAN-to-LOCAL firewall rule already limits new SSH sessions to `eth0` and the management subnet. Binding the SSH service to the management address adds a second layer: there is no listener on the WAN or home LAN address. Then, with your key proven, turn off passwords.
 
 #### Configure
-
-Make the port explicit:
 
 ```text
 service {
     ssh {
+        disable-password-authentication
+        listen-address 10.1.1.1
         port 22
     }
 }
 ```
 
+First bind the service:
+
 ```text
+set service ssh listen-address '10.1.1.1'
 set service ssh port '22'
-commit
-save
+commit-confirm 5
 ```
 
-Test from the laptop **in a new terminal**, keeping the console session open:
-
-```bash
-ssh vyos@192.168.50.1
-```
-
-Also test `ssh vyos@10.1.1.1` from the management laptop on `eth0`. The `WAN-LOCAL` firewall is what keeps SSH closed to the internet.
-
-Only once key login works, turn off passwords:
+From the management laptop, open a **new** key-only session using the command in chapter 4. If it works, `confirm` and `save` the binding before the next confirmed commit. Then disable passwords:
 
 ```text
 set service ssh disable-password-authentication
 commit-confirm 5
 ```
 
-Open another SSH session to confirm you can still get in, then type `confirm` and `save`. This is the `commit-confirm` habit from chapter 2 earning its keep.
+Open another new key-only session to confirm your key still gets you in, then `confirm` and `save`. The serial console still accepts the tested router password; keep it and a recovery method available in case the key is lost.
+
+#### Verify
+
+```text
+sudo ss -tlnp | grep ':22 '
+```
+
+Expected: one listener, on `10.1.1.1:22`.
 
 ### 8.5 So what
 
-Devices on the example `eth3` network can obtain addresses, use the resolver, and reach the router's time service. `eth1` and `eth2` keep their factory DHCP clients; expand services and source rules deliberately if those networks need them. ASK2 verification and optional IPv6 come next.
+After the checks pass, home LAN devices can obtain addresses, use the validating resolver, and synchronize time. Management SSH is restricted to the management cable and key authentication. The next chapter checks which traffic actually uses hardware; continue to verify the firewall and services on your image.
 
 ---
 
 ## 9. ASK2 hardware offload
 
-### Why
+### 9.1 Why
 
-ASK2 programs the LS1046A FMan to forward eligible established flows in hardware. Linux still handles connection setup, firewall decisions, misses, and traffic that cannot be offloaded. The hardware fast path can bypass subsequent Linux firewall and queue processing, so check existing flows when changing policy and test the behavior you depend on; do not assume every packet continues to increment software rule counters.
+Normally every packet walks the full Linux forwarding path and firewall. ASK2 can program the LS1046A's FMan to forward eligible **established** flows in hardware instead: Linux handles connection setup and the initial firewall decisions, then later packets can bypass the software forwarding path. Actual hardware use and throughput depend on the image, ports, and traffic; measure them rather than assuming line rate.
 
-The current implementation supports routed IPv4/IPv6 TCP and UDP and eligible NAT44/NAT66/PAT, single-tag VLAN, and PPPoE traffic. These are not a blanket guarantee for every combination or image. Multicast, IPsec, tunnels, and several bridge, fragment, and QoS cases still have gaps or use software. In particular, the FMan ingress policer does not police ASK-forwarded traffic on an ASK-engaged port. Check the current [ASK2 master plan](./plans/ASK2-MASTER-PLAN.md) before relying on a feature.
+Two consequences follow, and the rest of this chapter is about handling them:
 
-> **Safety status:** Validation is not complete. The master plan records possible IPv6 fragment-ID reuse when concurrent oversized flows use hardware fragmentation, and NAT44 TCP FIN handling still needs measurement. Test the behavior your network requires and use the software path where these risks are unacceptable.
+1. **The hardware does not re-check the firewall.** New connections should follow the changed policy, but a flow already in hardware may continue. Section 9.5 describes the reset and retirement checks needed before relying on a tighter policy.
+2. **Not everything is validated yet.** IPv4 routed TCP/UDP and NAT44 are the main implemented path, but the master plan still records NAT44 FIN behavior as unmeasured. Per-port acceptance for the 1G RJ45 ports is also incomplete, including routed `eth1` HIT/load testing; plans B and C are not yet fully validated on those ports. This is a validation gap, not proof that they fail. IPv6 has an open issue: concurrent oversized flows using hardware fragmentation can reuse fragment IDs. Chapter 4 disables IPv6 hardware offload on the active ports before WAN is connected. Check the [ASK2 master plan](./plans/ASK2-MASTER-PLAN.md) for the status of your image and use the software fallback in 9.6 if these limitations are unacceptable.
 
-### Configure
+### 9.2 Check what the factory enabled
 
-The factory `FT` is a **hardware** flowtable covering `eth1`–`eth4`, with IPv4 and IPv6 forward rules and a 500 ms minimum flow age. It has been active since first boot. The following commands show the pieces needed for the example IPv4 path on `eth3` and `eth4`; they change nothing on the factory configuration and are listed so you can see, or rebuild, each piece:
+The factory configuration has offload on from first boot. Chapter 4 already removed IPv6 offload from the active ports. From configuration mode:
 
 ```text
-firewall {
-    flowtable FT {
-        interface eth3
-        interface eth4
-        offload hardware
+run show offload config
+run show configuration commands | match offload
+run show configuration commands | match flowtable
+```
+
+The active LAN and WAN ports should have `offload ipv4` but no `offload ipv6`. Disabled spare ports can still have both factory leaves. `FT` remains a hardware flowtable on `eth1` to `eth4`, with forward rule 10 set to `action offload` for both IP families and `hardware-offload-delay 500`; short-lived flows stay in software. `show offload config` may mark a port as not armed when the image lacks the debugfs status node, so use the traffic and counter proof below rather than relying on that marker alone.
+
+### 9.3 Confirm IPv6 hardware offload is off
+
+```text
+interfaces {
+    ethernet eth3 {
+        offload {
+            ipv4
+        }
     }
-    ipv4 {
-        forward {
-            filter {
-                rule 10 {
-                    action offload
-                    offload-target FT
-                    state established
-                    state related
-                }
-            }
+    ethernet eth4 {
+        offload {
+            ipv4
         }
     }
 }
 ```
 
+This is the plan A result of the chapter 4 changes, not another command to enter. For B or C, check the selected active LAN and WAN ports instead. If either still has `offload ipv6`, remove that leaf from the console with `commit-confirm`, test connectivity, then `confirm` and `save`. IPv6 can still be forwarded and firewalled in software. Chapter 10 explains the later opt-in.
+
+### 9.4 Prove packets hit the hardware
+
+Start a sustained TCP transfer **through** the router, for example from a LAN client to a reachable `iperf3` server you control on the internet side, listening on the default TCP port 5201:
+
+```bash
+iperf3 -c SERVER_IP -t 30
+```
+
+While it runs, on the router:
+
 ```text
-set interfaces ethernet eth3 offload ipv4
-set interfaces ethernet eth4 offload ipv4
+run show offload flow
+sudo ynl --family ask --dump dump-flows --output-json
+sudo conntrack -L -f ipv4 -p tcp --dport 5201 -o id
+```
+
+`show offload flow` decodes addresses for readability. The raw YNL JSON emits binary IP attributes such as `src-ip` and `dst-ip` as hexadecimal strings: for example, IPv4 `192.168.50.20` appears as `c0a83214`. Use the protocol and ports to correlate the data transfer across the views; `iperf3` also creates a separate control connection, which may remain in software. The decoded view alone does not establish hardware backing. In the raw data-flow record, `offloaded` should be `1`, and the same flow's `packets` and `bytes` should increase between dumps taken several seconds apart while the transfer is running. The matching conntrack entry should also show `[HW_OFFLOAD]`.
+
+For IPv6, run `iperf3 -6 -c SERVER_IPV6 -t 30` on the LAN client against an IPv6-reachable server, use `-f ipv6` in the router's conntrack command, and correlate the 16-byte IPv6 addresses and ports in the YNL dump.
+
+An empty list while idle is normal. For VLAN CC-path flows, `agg-packets` and `agg-bytes` are port-wide aggregates, not proof of an individual flow. For the offload configuration, `ask-check`, and the debugfs caveat, see [CLI-AND-TOOLS.md](./CLI-AND-TOOLS.md#11-hardware-routing-offload-ask2).
+
+### 9.5 After changing firewall or NAT policy
+
+Because offloaded flows skip the software firewall, plan for existing hardware flows whenever you **remove or tighten** a rule, such as closing a port forward or blocking a device, or change a NAT mapping that affects active sessions. Before the change, identify any affected flows by ID and tuple in the YNL dump and keep serial access available. After committing the change, from configuration mode:
+
+```text
+run reset conntrack
+```
+
+Answer the confirmation prompt only after warning users: this flushes **all** tracked and expected connections, not just the selected flow. It can interrupt SSH and other sessions, and applications may need manual reconnection. Hardware flow retirement can happen asynchronously, so do not assume the flush immediately removed every hardware entry.
+
+While the previously allowed client continues to attempt the now-blocked traffic, inspect the dump again and allow time for retirement:
+
+```text
+sudo ynl --family ask --dump dump-flows --output-json
+```
+
+Verify that the old hardware record is gone, that the blocked traffic actually stops, and that a fresh connection is denied; use firewall counters or a packet capture as well as the flow ID and tuple. A listed flow may be a newly created connection, so compare identities rather than assuming every entry is old. If the prohibited traffic continues or retirement cannot be verified, disconnect or otherwise isolate the affected WAN/LAN path until it is safe, keep management available, and investigate or report the result. Do not rely on an unverified software fallback to enforce the new policy.
+
+This also applies when you **add** a rule that denies traffic previously allowed. A purely permissive change does not require retiring previously allowed flows, but still test the new behavior.
+
+### 9.6 Switching active ports to software
+
+Before requesting software forwarding, record the IDs and tuples of existing hardware-backed flows in the YNL dump from 9.4. Keep serial access available. Remove the active ports' remaining IPv4 family leaves; these plan A commands assume chapter 4 already removed IPv6. For B or C use the chapter 9.6 commands in [Appendix B](#appendix-b-plan-b-and-c-staged-commands):
+
+```text
+delete interfaces ethernet eth3 offload ipv4
+delete interfaces ethernet eth4 offload ipv4
+compare
+commit-confirm 5
+```
+
+If you later re-enabled IPv6 offload, also remove its leaf on each active port. After the commit, check connectivity and repeat the YNL dump: the recorded old flows must be gone or report `offloaded: 0`. Run a fresh sustained transfer and use the commands in 9.4 to find its matching conntrack entry without `[HW_OFFLOAD]`; a matching YNL record, if present, must report `offloaded: 0`. If IPv6 offload was active, repeat with an IPv6 transfer. A conntrack `[OFFLOAD]` tag without `[HW_OFFLOAD]` indicates the software flowtable, not ASK hardware forwarding. Repeat the checks to look for re-arming, and do not treat a failed or unavailable dump as an empty result. If old flows linger, allow time for retirement and, if needed, use the disruptive conntrack reset and checks in 9.5. If either old-flow retirement or the new software path cannot be verified, do not confirm; isolate the affected path if necessary and investigate. Confirm and save only when all checks pass.
+
+This does not remove ASK from the image or the factory offload leaves from the disabled spare ports; re-enabling a spare can engage ASK again. The `FT` configuration remains present, so do not infer the live datapath from that configuration alone. Older images had a flowtable re-arm bug; see [CLI-AND-TOOLS.md](./CLI-AND-TOOLS.md#11-hardware-routing-offload-ask2) for the version caveat. ASK and VPP are mutually exclusive **per port**; remove one assignment before putting that port in the other dataplane.
+
+### 9.7 Rebuilding the factory offload configuration
+
+Only needed if you removed pieces and want the factory state back. This matches the factory configuration exactly, minus the IPv6 leaves this guide turns off:
+
+```text
+set firewall flowtable FT interface 'eth1'
+set firewall flowtable FT interface 'eth2'
 set firewall flowtable FT interface 'eth3'
 set firewall flowtable FT interface 'eth4'
 set firewall flowtable FT offload 'hardware'
@@ -1717,62 +1902,24 @@ set firewall ipv4 forward filter rule 10 action 'offload'
 set firewall ipv4 forward filter rule 10 offload-target 'FT'
 set firewall ipv4 forward filter rule 10 state 'established'
 set firewall ipv4 forward filter rule 10 state 'related'
+set firewall ipv6 forward filter rule 10 action 'offload'
+set firewall ipv6 forward filter rule 10 offload-target 'FT'
+set firewall ipv6 forward filter rule 10 state 'established'
+set firewall ipv6 forward filter rule 10 state 'related'
 set firewall global-options hardware-offload-delay '500'
+set interfaces ethernet eth1 offload ipv4
+set interfaces ethernet eth2 offload ipv4
+set interfaces ethernet eth3 offload ipv4
+set interfaces ethernet eth4 offload ipv4
 compare
 commit-confirm 5
 ```
 
-Verify connectivity from a second session, then:
+Check connectivity and repeat the flow test in 9.4 before `confirm` and `save`. Do not put the same interface in a second flowtable, and do not change forward rule 10's action. A software flowtable is **not** ASK2 hardware offload.
 
-```text
-confirm
-save
-```
+### 9.8 So what
 
-Do not put the same interface in a second flowtable or replace forward rule 10 with a different action. A software flowtable is **not** ASK2 hardware offload.
-
-Each `offload ipv4` or `offload ipv6` leaf engages that family on one physical ingress port. NAT, VLAN and PPPoE are automatic for eligible flows; there is no `ask`, `vlan`, `nat` or `pppoe` offload leaf. `eth0` remains outside the factory hardware flowtable and is not changed here, preserving the management path. `eth1` and `eth2` keep their factory offload settings.
-
-On images containing the newer automatic-flowtable support, an engaged port not listed in a user flowtable can instead join the generated `VYOS_FLOWTABLE_ASK_AUTO`. A user flowtable such as factory `FT` takes precedence for every port it lists. The generated chain excludes certain FTP, PPTP and SIP control flows; do not assume that custom `FT` rules apply the same exclusions. The 500 ms delay reduces immediate offload of short flows but is not a substitute for testing TCP teardown and policy changes. The delay is global to ASK, not specific to `eth3` and `eth4`.
-
-### Verify
-
-Start a sustained TCP transfer **through** the router, for example from an `eth3` LAN client to an `iperf3` server you control on the WAN side. Replace `SERVER_IP` with that server's address:
-
-```bash
-iperf3 -c SERVER_IP -t 30
-```
-
-While it runs, in the router's operational shell:
-
-```text
-show offload config
-show offload flow
-sudo ask-check
-sudo ynl --family ask --dump dump-flows --output-json
-sudo conntrack -L -f ipv4
-```
-
-Look for the test tuple in the ASK flow dump with `offloaded` set to `1`, and repeat the dump while traffic continues: its hardware packet/byte counters should increase. A corresponding `[HW_OFFLOAD]` conntrack entry and `ask-check` results are useful corroboration, but a conntrack tag alone does not prove packets are hitting hardware. An empty flow list while idle is normal; an unsupported flow can remain in software.
-
-For VLAN CC-path flows, the per-flow packet and byte fields may stay at zero; the reported `agg-packets` and `agg-bytes` are port-wide hardware totals, not proof that one particular flow hit. The untagged test above uses per-flow counters.
-
-Some builds of `show offload config` mark configured ports with `*` when their debugfs state is unavailable, including production images without debugfs. Treat the display as configuration intent, not conclusive proof of live hardware state; use the production YNL flow counters and `ask-check`.
-
-### Returning the example ports to software
-
-To disable ASK on `eth3` and `eth4`, remove **both** family leaves that are present on each port, then commit and verify connectivity. Removing only IPv4 leaves IPv6 offload enabled. Do this in a maintenance window, keep the serial console available, and do not touch the `eth0` management port.
-
-```text
-delete interfaces ethernet eth3 offload ipv4
-delete interfaces ethernet eth3 offload ipv6
-delete interfaces ethernet eth4 offload ipv4
-delete interfaces ethernet eth4 offload ipv6
-compare
-commit-confirm 5
-```
-
-Confirm and save only after checking the transition. Older images had a flowtable re-arm bug; see [CLI-AND-TOOLS.md](./CLI-AND-TOOLS.md#11-hardware-routing-offload-ask2) for the version caveat. ASK and VPP are mutually exclusive **per port**; remove one assignment before putting that port in the other dataplane.
+Eligible established IPv4 flows can run in hardware, but only a real flow and hardware counters establish that they do. IPv6 hardware offload was disabled by this guide, not by the factory default; policy changes need the retirement checks above.
 
 ---
 
@@ -1780,9 +1927,9 @@ Confirm and save only after checking the transition. Older images had a flowtabl
 
 ### Why
 
-If your ISP offers IPv6 prefix delegation, the example `eth3` LAN can use global IPv6 addresses without NAT. Chapter 5 sets the corresponding WAN firewall policy. Skip this chapter if the ISP does not provide suitable IPv6 service.
+If your ISP offers IPv6, using it gives every device a real public address (protected by the firewall rules you already wrote in 5.5), avoids NAT for modern services, and is where the internet is slowly heading. If your ISP does not offer it, skip this chapter: your firewall is already prepared for the day it does.
 
-With **DHCPv6 prefix delegation (PD)**, the router receives a block such as a `/56` or `/60` and assigns a `/64` to `eth3`. Devices use router advertisements (SLAAC). This does not assign prefixes or router advertisements to `eth0`–`eth2`; the management network stays IPv4-only.
+This example assumes **DHCPv6 prefix delegation (PD)**: your router receives a whole block (commonly a `/56` or `/60`) and assigns a `/64` out of it to `eth3`. Devices configure themselves from router advertisements (SLAAC). No global IPv6 management address is configured on `eth0`; its link-local address may still exist.
 
 ### Configure
 
@@ -1828,12 +1975,7 @@ compare
 commit-confirm 5
 ```
 
-Verify IPv4 management and the new IPv6 connectivity, then:
-
-```text
-confirm
-save
-```
+For B or C, use the chapter 10 block in [Appendix B](#appendix-b-plan-b-and-c-staged-commands) instead. Check management access and IPv6 connectivity, then `confirm` and `save`.
 
 What each piece does:
 
@@ -1846,7 +1988,7 @@ What each piece does:
 | `interface eth3 address 1` | The router takes `::1` in that `/64` |
 | `router-advert ... prefix ::/64` | Advertise whatever `/64` `eth3` currently has, so devices configure themselves |
 
-Dual-stack devices can keep using `192.168.50.1` over IPv4 for DNS; the resolver can also return IPv6 AAAA answers. IPv6-only clients need a reachable IPv6 DNS listener and appropriate advertisement and firewall settings, which are outside this example.
+Dual-stack devices keep using `192.168.50.1` over IPv4 for DNS, which happily returns IPv6 (AAAA) answers, so no extra DNS configuration is needed.
 
 ### Verify
 
@@ -1855,57 +1997,57 @@ run show interfaces
 run show ipv6 route
 ```
 
-`eth3` should have a global IPv6 address ending in `::1`, and there should be a `::/0` default route via `eth4`. From a LAN device, run `ping -6 2001:4860:4860::8888` or use an IPv6 test site. Test that unsolicited inbound connections from WAN are denied.
+For plan A, `eth3` should have a global IPv6 address ending in `::1`, and there should be a `::/0` default route via `eth4`; see Appendix B for the other plans. From a LAN device, run `ping -6 2001:4860:4860::8888` or open an IPv6 test site. Then perform the IPv6 WAN-side capture, counter, and TCP/UDP tests described in 5.9. A timeout without evidence that the probes reached the router and matched a drop rule is inconclusive.
 
-### IPv6 hardware offload
+### Opting in to IPv6 hardware offload
 
-The factory configuration already sets `offload ipv6` on `eth3` and `eth4` and has the `FT` IPv6 forward rule, so no change is needed. These commands rebuild those pieces if you removed them:
+Chapter 4 turned it off because of an open validation issue. Once the [ASK2 master plan](./plans/ASK2-MASTER-PLAN.md) marks IPv6 fragmentation as resolved for your image, re-enable it for plan A:
 
 ```text
 set interfaces ethernet eth3 offload ipv6
 set interfaces ethernet eth4 offload ipv6
-set firewall ipv6 forward filter rule 10 action 'offload'
-set firewall ipv6 forward filter rule 10 offload-target 'FT'
-set firewall ipv6 forward filter rule 10 state 'established'
-set firewall ipv6 forward filter rule 10 state 'related'
 compare
 commit-confirm 5
 ```
 
-Confirm and save after verification. Repeat the chapter 9 test with an IPv6 TCP/UDP flow and `sudo conntrack -L -f ipv6`; check the matching YNL flow counters, not just the presence of the CLI leaves.
+For B or C, use the IPv6 opt-in commands in Appendix B instead. Then repeat the 9.4 proof with an IPv6 transfer before confirming and saving.
 
-To undo the PD example, remove the specific DHCPv6, PD and router-advert settings added above, after checking that no other configuration uses them. This does not remove factory ASK2 IPv6 offload leaves; disable those separately as shown in chapter 9 if desired.
+### So what
+
+Dual-stack, with the same default-deny posture on both protocols. If something breaks, remove the six PD and router-advert lines and you are back to a working IPv4-only router; nothing else depends on them.
 
 ---
 
 ## 11. Living with it: backups, upgrades, troubleshooting
 
+The commands in this chapter are in **operational mode** unless marked otherwise. After confirming and saving the last configuration change, enter `exit` to leave configuration mode. If you remain in configuration mode, prefix operational commands with `run`.
+
 ### Backups
 
-The saved VyOS configuration is `/config/config.boot`. Back it up; the backup contains secrets and does not include every external file or image.
+Your entire router configuration is one text file: `/config/config.boot`. Back it up.
 
 ```text
 # Readable dump of the config as set commands (op mode)
 show configuration commands
 
-# Ask VyOS to redact known private configuration fields
+# Same, with known secrets masked
 show configuration commands | strip-private
 ```
 
-From a trusted client, copy the saved file to protected storage:
+From the management laptop, copy the saved file to protected storage:
 
 ```bash
-scp vyos@192.168.50.1:/config/config.boot ./mono-config.boot
+scp vyos@10.1.1.1:/config/config.boot ./mono-config.boot
 chmod 600 ./mono-config.boot
 ```
 
-> Configurations can contain password hashes, VPN/API keys, private keys, addresses and other sensitive data. Use `strip-private` before sharing, but inspect the result manually: it is not a guarantee that every sensitive value or identifying detail has been removed.
+> Configurations contain password hashes, keys, addresses and other sensitive data. Use `strip-private` before sharing a config anywhere (forums, chats, AI assistants), and still read the result before you paste it: it masks the fields it knows about, not everything that might identify you.
 
 For automatic off-box history on every commit, see `set system config-management commit-archive location ?`.
 
 ### Upgrades
 
-VyOS can keep multiple images side by side. Keep a working previous image and serial access, and follow [INSTALL.md](./INSTALL.md) for the Mono Gateway upgrade and recovery procedure.
+VyOS keeps multiple images side by side, which can help recover from an upgrade. Configuration migrations and other changes are not necessarily backward-compatible, so keep a separate backup and test the recovery procedure. Keep serial access and follow [INSTALL.md](./INSTALL.md) for the Mono Gateway upgrade and recovery procedure. Use the LS1046A ISO and its matching signature sidecar.
 
 ```text
 add system image <url-or-path-to-new-image>
@@ -1913,53 +2055,66 @@ show system image
 reboot
 ```
 
-The installed-system `add system image` path retains the configuration and updates the board's U-Boot image selection. If something misbehaves and the previous image remains installed, select it:
+`add system image` keeps your configuration and updates the board's U-Boot image selection. If something misbehaves:
 
 ```text
 set system image default-boot '<previous-version>'
 reboot
 ```
 
-Use the LS1046A ISO and its matching signature sidecar. Do not use `install image` from the installed system: it repartitions eMMC.
+After any upgrade, rerun the 9.4 proof: offload behavior is image-specific.
 
 ### Troubleshooting cheat sheet
 
+These interface-specific examples use plan A. For B or C, the exact WAN and LAN checks are listed by stage in Appendix B.
+
 | Symptom | Look here |
 |---|---|
-| Something on the LAN cannot reach the router | `show log firewall` and look for `LAN-LOCAL` drops (that is what rule 999 logs) |
-| Lost `eth0` management | Use the serial console; check `show interfaces ethernet eth0` for `10.1.1.1/24`, LAN zone membership, and that the laptop has a static `10.1.1.x/24` address |
-| Lost DHCP renewal on `eth1`/`eth2` | Check LAN zone membership and the DHCP-reply rule in `LAN-LOCAL-v4` |
-| No link on `eth3` or `eth4` | Check `show interfaces ethernet eth3`/`eth4` and `sfp-check`; the SFP+ cages require a compatible 10G peer |
-| Watch logs live | `monitor log` |
+| A LAN device cannot reach a router service | `show log firewall` and look for `LAN-LOCAL` drops (rule 999 logs them) |
+| SSH from the LAN does not connect | By design. Use the management laptop on `eth0` |
+| Lost management access | Serial console; check `show interfaces ethernet eth0` for `10.1.1.1/24`, `eth0` in zone `LAN`, `LAN-LOCAL-v4` rule 50, `ss -tlnp` for the SSH listener, and that the laptop has a static `10.1.1.x/24` address |
+| No link on an SFP+ port | `show interfaces ethernet eth3` / `eth4` and `sfp-check`; the cages require a 10G peer (see chapter 1 for RJ45 plans) |
 | No WAN address | `show interfaces ethernet eth4`, then `monitor traffic interface eth4 filter "udp port 67 or udp port 68"` to see whether DHCP packets flow at all |
-| No internet from LAN, router itself works | Check the selected default route, `LAN-NETS`, the NAT source subnet and `show nat source translations`; the example NAT covers `eth3` only |
-| ASK2 has no hardware flows | Check `show offload config`, `show offload flow`, `sudo ask-check` and the YNL dump during sustained eligible traffic; inspect flowtable membership and global state-policy ordering |
-| Names do not resolve | `dig @192.168.50.1 example.com` from LAN; `show dns forwarding statistics`; temporarily try a forwarder (8.2) to see if your ISP blocks outbound DNS |
-| Port forward does not work | Both pieces present? `show nat destination rules` and `WAN-LAN-v4` rule. Test from *outside* your network (mobile data), not from the LAN. |
+| No internet from LAN, router itself works | One default route via `eth4` (`show ip route`)? Client inside `LAN-NETS`? `show nat source translations` empty means NAT is not matching |
+| A rule change "does not take effect" | Existing flows may be in hardware: use the disruptive reset and retirement verification in 9.5, keeping serial access |
+| No hardware flows | `show offload config` and the YNL dump during a sustained transfer (9.4); inspect flowtable membership; confirm nobody added a global `state-policy established` accept |
+| Names do not resolve | `dig @192.168.50.1 example.com` from LAN; `cat /etc/resolv.conf` on the router; temporarily try a forwarder (8.2) to see if your ISP blocks outbound DNS |
+| Port forward does not work | Both pieces present? `show nat destination rules` and the `WAN-LAN-v4` rule. Test from *outside* your network (mobile data), not from the LAN |
 | What connections are open | `show conntrack table ipv4` |
 | Which route is used | `show ip route <address>` |
 | What did I change last week | `show system commit`, then `compare <N>` in config mode |
-| What does the kernel actually do | `sudo nft list ruleset`; compare software firewall counters with ASK YNL hardware counters |
+| What does the kernel actually do | `sudo nft list ruleset`; compare software firewall counters with the ASK YNL hardware counters |
 
 ### So what
 
-Keep a current backup and serial access, and re-test the policy and hardware path after changes. Software and hardware counters describe different parts of the datapath.
+Keep backups and serial access, test changes on the image you run, and verify that old hardware flows retire when tightening policy. The checks in this guide are a starting point, not a substitute for validating your own network.
 
 ---
 
 ## Appendix A: Complete configuration as set commands
 
-This is a consolidated reference for the example, not a script to paste blindly. It starts from the factory configuration of a fresh install, including `FT`. It sets `eth0` to the static management address `10.1.1.1/24` and leaves the `eth1`–`eth2` DHCP clients unchanged. Replace the SSH key and other example values, and follow the staged commits and verification in the chapters above. Apply it from the serial console. Replace the password placeholder too. The optional IPv6 commands are intentionally commented out.
+The whole guide in one block, for **plan A** (WAN `eth4`, LAN `eth3`, spare `eth1` and `eth2`). It starts from the factory configuration of a fresh install, including `FT`. It is a reference, not a script to paste blindly: follow the staged commits and checks in the chapters, apply it from the serial console, and replace the password, SSH key and any example values first. The optional IPv6 commands are commented out.
+
+For plans B and C, use the staged replacements in [Appendix B](#appendix-b-plan-b-and-c-staged-commands). If you also want a consolidated reference, save this block to a file and swap the interface names:
+
+```bash
+# Plan B: WAN on eth2 (RJ45), eth4 becomes the spare
+sed -e 's/eth4/@@/g; s/eth2/eth4/g; s/@@/eth2/g' plan-a.txt > plan-b.txt
+
+# Plan C: plan B, plus LAN on eth1 (RJ45), eth3 becomes the spare
+sed -e 's/eth4/@@/g; s/eth2/eth4/g; s/@@/eth2/g; s/eth3/##/g; s/eth1/eth3/g; s/##/eth1/g' plan-a.txt > plan-c.txt
+```
+
+The swap keeps every interface reference in this block consistent; it does not convert the explanatory chapters or replace their staged tests. The SSH password-disable line is commented only to prevent premature use: chapter 8.4 requires it after a successful key-only login.
 
 ```text
-# ---------- System ----------
+# ---------- System and credentials ----------
 set system host-name 'router'
 set system domain-name 'home.arpa'
 set system time-zone 'America/Los_Angeles'
 set system config-management commit-revisions '100'
-set system login user vyos authentication plaintext-password 'a-long-passphrase-you-will-remember'
+set system login user vyos authentication plaintext-password 'REPLACE-WITH-YOUR-PASSPHRASE'
 delete system login user vyos authentication public-keys 'vanityssh@vyos'
-set system name-server '127.0.0.1'
 set system login user vyos authentication public-keys laptop key 'REPLACE-WITH-YOUR-PUBLIC-KEY'
 set system login user vyos authentication public-keys laptop type 'ssh-ed25519'
 
@@ -1967,11 +2122,18 @@ set system login user vyos authentication public-keys laptop type 'ssh-ed25519'
 delete interfaces ethernet eth0 address 'dhcp'
 set interfaces ethernet eth0 description 'MGMT'
 set interfaces ethernet eth0 address '10.1.1.1/24'
+delete interfaces ethernet eth1 address 'dhcp'
+set interfaces ethernet eth1 description 'SPARE'
+set interfaces ethernet eth1 disable
+delete interfaces ethernet eth2 address 'dhcp'
+set interfaces ethernet eth2 description 'SPARE'
+set interfaces ethernet eth2 disable
 delete interfaces ethernet eth3 address 'dhcp'
 set interfaces ethernet eth3 description 'LAN'
 set interfaces ethernet eth3 address '192.168.50.1/24'
 set interfaces ethernet eth4 description 'WAN'
-set interfaces ethernet eth4 address 'dhcp'
+delete interfaces ethernet eth3 offload ipv6
+delete interfaces ethernet eth4 offload ipv6
 
 # ---------- Firewall: global ----------
 set firewall global-options state-policy invalid action 'drop'
@@ -1983,11 +2145,13 @@ set firewall global-options receive-redirects 'disable'
 set firewall global-options send-redirects 'disable'
 set firewall global-options log-martians 'enable'
 set firewall global-options syn-cookies 'enable'
-set firewall global-options source-validation 'loose'
+set firewall global-options source-validation 'strict'
 
 # ---------- Firewall: groups ----------
-set firewall group network-group LAN-NETS description 'Our own LAN subnets'
+set firewall group network-group LAN-NETS description 'Home LAN subnets'
 set firewall group network-group LAN-NETS network '192.168.50.0/24'
+set firewall group network-group MGMT-NETS description 'Management subnets'
+set firewall group network-group MGMT-NETS network '10.1.1.0/24'
 set firewall group network-group BOGONS-V4 description 'Addresses that must never appear as a source on the internet'
 set firewall group network-group BOGONS-V4 network '0.0.0.0/8'
 set firewall group network-group BOGONS-V4 network '10.0.0.0/8'
@@ -2038,7 +2202,7 @@ set firewall ipv4 name LAN-WAN-v4 rule 5 description 'Established and related'
 set firewall ipv4 name LAN-WAN-v4 rule 5 state 'established'
 set firewall ipv4 name LAN-WAN-v4 rule 5 state 'related'
 set firewall ipv4 name LAN-WAN-v4 rule 10 action 'accept'
-set firewall ipv4 name LAN-WAN-v4 rule 10 description 'Anything from our own subnet'
+set firewall ipv4 name LAN-WAN-v4 rule 10 description 'New connections from the home LAN'
 set firewall ipv4 name LAN-WAN-v4 rule 10 source group network-group 'LAN-NETS'
 
 set firewall ipv4 name LAN-LOCAL-v4 default-action 'drop'
@@ -2048,15 +2212,10 @@ set firewall ipv4 name LAN-LOCAL-v4 rule 5 description 'Established and related'
 set firewall ipv4 name LAN-LOCAL-v4 rule 5 state 'established'
 set firewall ipv4 name LAN-LOCAL-v4 rule 5 state 'related'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 10 description 'DHCP requests to router'
+set firewall ipv4 name LAN-LOCAL-v4 rule 10 description 'DHCP'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 protocol 'udp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 source port '68'
 set firewall ipv4 name LAN-LOCAL-v4 rule 10 destination port '67'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 description 'DHCP replies to router'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 protocol 'udp'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 source port '67'
-set firewall ipv4 name LAN-LOCAL-v4 rule 11 destination port '68'
 set firewall ipv4 name LAN-LOCAL-v4 rule 20 action 'accept'
 set firewall ipv4 name LAN-LOCAL-v4 rule 20 description 'DNS'
 set firewall ipv4 name LAN-LOCAL-v4 rule 20 protocol 'tcp_udp'
@@ -2066,12 +2225,15 @@ set firewall ipv4 name LAN-LOCAL-v4 rule 30 description 'NTP'
 set firewall ipv4 name LAN-LOCAL-v4 rule 30 protocol 'udp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 30 destination port '123'
 set firewall ipv4 name LAN-LOCAL-v4 rule 40 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 40 description 'SSH'
-set firewall ipv4 name LAN-LOCAL-v4 rule 40 protocol 'tcp'
-set firewall ipv4 name LAN-LOCAL-v4 rule 40 destination port '22'
+set firewall ipv4 name LAN-LOCAL-v4 rule 40 description 'ICMP'
+set firewall ipv4 name LAN-LOCAL-v4 rule 40 protocol 'icmp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 50 action 'accept'
-set firewall ipv4 name LAN-LOCAL-v4 rule 50 description 'ICMP'
-set firewall ipv4 name LAN-LOCAL-v4 rule 50 protocol 'icmp'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 description 'SSH from management'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 inbound-interface name 'eth0'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 source group network-group 'MGMT-NETS'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 destination address '10.1.1.1'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 destination port '22'
+set firewall ipv4 name LAN-LOCAL-v4 rule 50 protocol 'tcp'
 set firewall ipv4 name LAN-LOCAL-v4 rule 999 action 'drop'
 set firewall ipv4 name LAN-LOCAL-v4 rule 999 description 'Log everything else'
 set firewall ipv4 name LAN-LOCAL-v4 rule 999 log
@@ -2113,12 +2275,16 @@ set firewall ipv6 name WAN-LAN-v6 rule 5 action 'accept'
 set firewall ipv6 name WAN-LAN-v6 rule 5 description 'Established and related'
 set firewall ipv6 name WAN-LAN-v6 rule 5 state 'established'
 set firewall ipv6 name WAN-LAN-v6 rule 5 state 'related'
-set firewall ipv6 name LAN-WAN-v6 default-action 'accept'
+
+set firewall ipv6 name LAN-WAN-v6 default-action 'drop'
 set firewall ipv6 name LAN-WAN-v6 description 'LAN to Internet (IPv6)'
-set firewall ipv6 name LOCAL-WAN-v6 default-action 'accept'
-set firewall ipv6 name LOCAL-WAN-v6 description 'Router to Internet (IPv6)'
-set firewall ipv6 name LOCAL-LAN-v6 default-action 'accept'
-set firewall ipv6 name LOCAL-LAN-v6 description 'Router to LAN (IPv6)'
+set firewall ipv6 name LAN-WAN-v6 rule 5 action 'accept'
+set firewall ipv6 name LAN-WAN-v6 rule 5 description 'Established and related'
+set firewall ipv6 name LAN-WAN-v6 rule 5 state 'established'
+set firewall ipv6 name LAN-WAN-v6 rule 5 state 'related'
+set firewall ipv6 name LAN-WAN-v6 rule 10 action 'accept'
+set firewall ipv6 name LAN-WAN-v6 rule 10 description 'New connections from the home LAN port'
+set firewall ipv6 name LAN-WAN-v6 rule 10 inbound-interface name 'eth3'
 
 set firewall ipv6 name LAN-LOCAL-v6 default-action 'drop'
 set firewall ipv6 name LAN-LOCAL-v6 description 'LAN to router (IPv6)'
@@ -2129,11 +2295,6 @@ set firewall ipv6 name LAN-LOCAL-v6 rule 5 state 'related'
 set firewall ipv6 name LAN-LOCAL-v6 rule 10 action 'accept'
 set firewall ipv6 name LAN-LOCAL-v6 rule 10 description 'ICMPv6 (neighbor discovery, router solicitation, ping)'
 set firewall ipv6 name LAN-LOCAL-v6 rule 10 protocol 'icmpv6'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 action 'accept'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 description 'DHCPv6 replies to router'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 protocol 'udp'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 source port '547'
-set firewall ipv6 name LAN-LOCAL-v6 rule 11 destination port '546'
 set firewall ipv6 name LAN-LOCAL-v6 rule 20 action 'accept'
 set firewall ipv6 name LAN-LOCAL-v6 rule 20 description 'DNS'
 set firewall ipv6 name LAN-LOCAL-v6 rule 20 protocol 'tcp_udp'
@@ -2142,13 +2303,14 @@ set firewall ipv6 name LAN-LOCAL-v6 rule 30 action 'accept'
 set firewall ipv6 name LAN-LOCAL-v6 rule 30 description 'NTP'
 set firewall ipv6 name LAN-LOCAL-v6 rule 30 protocol 'udp'
 set firewall ipv6 name LAN-LOCAL-v6 rule 30 destination port '123'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 action 'accept'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 description 'SSH'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 protocol 'tcp'
-set firewall ipv6 name LAN-LOCAL-v6 rule 40 destination port '22'
 set firewall ipv6 name LAN-LOCAL-v6 rule 999 action 'drop'
 set firewall ipv6 name LAN-LOCAL-v6 rule 999 description 'Log everything else'
 set firewall ipv6 name LAN-LOCAL-v6 rule 999 log
+
+set firewall ipv6 name LOCAL-WAN-v6 default-action 'accept'
+set firewall ipv6 name LOCAL-WAN-v6 description 'Router to Internet (IPv6)'
+set firewall ipv6 name LOCAL-LAN-v6 default-action 'accept'
+set firewall ipv6 name LOCAL-LAN-v6 description 'Router to LAN (IPv6)'
 
 # ---------- Firewall: zones ----------
 set firewall zone WAN description 'Internet'
@@ -2158,7 +2320,7 @@ set firewall zone WAN from LAN firewall name 'LAN-WAN-v4'
 set firewall zone WAN from LAN firewall ipv6-name 'LAN-WAN-v6'
 set firewall zone WAN from LOCAL firewall name 'LOCAL-WAN-v4'
 set firewall zone WAN from LOCAL firewall ipv6-name 'LOCAL-WAN-v6'
-set firewall zone LAN description 'Home network'
+set firewall zone LAN description 'Home and management networks'
 set firewall zone LAN default-action 'drop'
 set firewall zone LAN member interface 'eth0'
 set firewall zone LAN member interface 'eth1'
@@ -2178,7 +2340,7 @@ set firewall zone LOCAL from WAN firewall ipv6-name 'WAN-LOCAL-v6'
 # ---------- NAT ----------
 set nat source rule 100 description 'LAN to Internet'
 set nat source rule 100 outbound-interface name 'eth4'
-set nat source rule 100 source address '192.168.50.0/24'
+set nat source rule 100 source group network-group 'LAN-NETS'
 set nat source rule 100 translation address 'masquerade'
 
 # ---------- DHCP ----------
@@ -2201,27 +2363,17 @@ set service dns forwarding allow-from '192.168.50.0/24'
 set service dns forwarding allow-from '127.0.0.0/8'
 set service dns forwarding cache-size '10000'
 set service dns forwarding dnssec 'validate'
+set system name-server '127.0.0.1'
 
-# ---------- NTP ----------
+# ---------- NTP (factory servers kept) ----------
 delete service ntp allow-client
 set service ntp allow-client address '192.168.50.0/24'
 set service ntp listen-address '192.168.50.1'
 
-# ---------- SSH (add disable-password-authentication after testing your key) ----------
+# ---------- SSH (add the last line only after your key login works) ----------
+set service ssh listen-address '10.1.1.1'
 set service ssh port '22'
 # set service ssh disable-password-authentication
-
-# ---------- ASK2 IPv4 hardware offload ----------
-set interfaces ethernet eth3 offload ipv4
-set interfaces ethernet eth4 offload ipv4
-set firewall flowtable FT interface 'eth3'
-set firewall flowtable FT interface 'eth4'
-set firewall flowtable FT offload 'hardware'
-set firewall ipv4 forward filter rule 10 action 'offload'
-set firewall ipv4 forward filter rule 10 offload-target 'FT'
-set firewall ipv4 forward filter rule 10 state 'established'
-set firewall ipv4 forward filter rule 10 state 'related'
-set firewall global-options hardware-offload-delay '500'
 
 # ---------- IPv6 (optional, only if your ISP provides DHCPv6-PD) ----------
 # set interfaces ethernet eth4 address 'dhcpv6'
@@ -2230,18 +2382,225 @@ set firewall global-options hardware-offload-delay '500'
 # set interfaces ethernet eth4 dhcpv6-options pd 0 interface eth3 address '1'
 # set interfaces ethernet eth4 dhcpv6-options pd 0 interface eth3 sla-id '0'
 # set service router-advert interface eth3 prefix '::/64'
-# set interfaces ethernet eth3 offload ipv6
-# set interfaces ethernet eth4 offload ipv6
-# set firewall ipv6 forward filter rule 10 action 'offload'
-# set firewall ipv6 forward filter rule 10 offload-target 'FT'
-# set firewall ipv6 forward filter rule 10 state 'established'
-# set firewall ipv6 forward filter rule 10 state 'related'
 ```
 
-## Appendix B: Further reading
+---
 
-- [INSTALL.md](./INSTALL.md) — USB installation, upgrades and recovery.
-- [HARDWARE.md](./HARDWARE.md#3-network-port-layout) — physical ports and VyOS naming.
-- [CLI-AND-TOOLS.md](./CLI-AND-TOOLS.md) — ASK2 controls and board diagnostics.
-- [Dual-dataplane contract](./plans/DUAL-DATAPLANE.md) — ASK, kernel and VPP ownership and per-interface switching.
-- [ASK2 master plan](./plans/ASK2-MASTER-PLAN.md) — current feature status, known limitations and hardware-validation gates.
+## Appendix B: Plan B and C staged commands
+
+These are **replacements**, not extra commands to add after the plan A equivalents. Follow chapters 1–11 in order, keep the same confirmed commits and tests, and substitute the blocks or individual lines below at the indicated stages. All other commands are unchanged. In particular, keep the `eth0` management address and SSH restriction unchanged, and do not bridge the ports.
+
+| Plan | WAN | Home LAN | Disabled spares | LAN-zone members |
+|---|---|---|---|---|
+| B | `eth2`, right RJ45 | `eth3`, left SFP+ | `eth1`, `eth4` | `eth0`, `eth1`, `eth3`, `eth4` |
+| C | `eth2`, right RJ45 | `eth1`, center RJ45 | `eth3`, `eth4` | `eth0`, `eth1`, `eth3`, `eth4` |
+
+Both plans use RJ45 offload ports whose complete ASK2 per-port acceptance is still pending. Follow the software-fallback guidance in chapter 9 if this is not acceptable, and validate the chosen plan on the actual image.
+
+### Chapter 4: Interfaces
+
+Use the appropriate block **instead of** the chapter 4 plan A commands, from the serial configuration session. WAN stays unplugged.
+
+**Plan B:**
+
+```text
+delete interfaces ethernet eth0 address 'dhcp'
+set interfaces ethernet eth0 description 'MGMT'
+set interfaces ethernet eth0 address '10.1.1.1/24'
+delete interfaces ethernet eth1 address 'dhcp'
+set interfaces ethernet eth1 description 'SPARE'
+set interfaces ethernet eth1 disable
+delete interfaces ethernet eth4 address 'dhcp'
+set interfaces ethernet eth4 description 'SPARE'
+set interfaces ethernet eth4 disable
+delete interfaces ethernet eth3 address 'dhcp'
+set interfaces ethernet eth3 description 'LAN'
+set interfaces ethernet eth3 address '192.168.50.1/24'
+set interfaces ethernet eth2 description 'WAN'
+delete interfaces ethernet eth3 offload ipv6
+delete interfaces ethernet eth2 offload ipv6
+compare
+commit-confirm 10
+```
+
+**Plan C:**
+
+```text
+delete interfaces ethernet eth0 address 'dhcp'
+set interfaces ethernet eth0 description 'MGMT'
+set interfaces ethernet eth0 address '10.1.1.1/24'
+delete interfaces ethernet eth3 address 'dhcp'
+set interfaces ethernet eth3 description 'SPARE'
+set interfaces ethernet eth3 disable
+delete interfaces ethernet eth4 address 'dhcp'
+set interfaces ethernet eth4 description 'SPARE'
+set interfaces ethernet eth4 disable
+delete interfaces ethernet eth1 address 'dhcp'
+set interfaces ethernet eth1 description 'LAN'
+set interfaces ethernet eth1 address '192.168.50.1/24'
+set interfaces ethernet eth2 description 'WAN'
+delete interfaces ethernet eth1 offload ipv6
+delete interfaces ethernet eth2 offload ipv6
+compare
+commit-confirm 10
+```
+
+Before confirming, perform the chapter 4 key-only SSH test from the management laptop. If it succeeds, `confirm` and `save` on the console. Then run `run show interfaces`: for B, `eth1` and `eth4` must be administratively down and `eth3` must have `192.168.50.1/24`; for C, `eth3` and `eth4` must be down and `eth1` must have that address. In both plans `eth0` must have `10.1.1.1/24`, and `eth2` keeps DHCP but has no WAN lease while unplugged.
+
+### Chapter 5: Firewall and WAN gate
+
+In section 5.5, use the appropriate home-LAN match as the last `LAN-WAN-v6` command. Plan B's command is the same as the main chapter; plan C's is different:
+
+```text
+# Plan B
+set firewall ipv6 name LAN-WAN-v6 rule 10 inbound-interface name 'eth3'
+
+# Plan C
+set firewall ipv6 name LAN-WAN-v6 rule 10 inbound-interface name 'eth1'
+```
+
+In section 5.6, replace the five plan A zone-member commands with these commands for **either** plan. Enter the remaining zone descriptions, defaults, and `from` rules from the chapter unchanged:
+
+```text
+set firewall zone WAN member interface 'eth2'
+set firewall zone LAN member interface 'eth0'
+set firewall zone LAN member interface 'eth1'
+set firewall zone LAN member interface 'eth3'
+set firewall zone LAN member interface 'eth4'
+```
+
+Complete the section 5.7 tests before confirming: the home LAN test client plugs into `eth3` for B or `eth1` for C. Verify the WAN gate in 5.9 before connecting `eth2`. For both plans, use these WAN-side checks in place of the `eth4` examples:
+
+```text
+run show interfaces ethernet eth2
+sudo tcpdump -ni eth2 'icmp or tcp port 22 or tcp port 53 or udp port 53'
+```
+
+For IPv6 testing later, use `sudo tcpdump -ni eth2 'icmp6 or tcp port 22 or tcp port 53 or udp port 53'`. Follow the same positive-path and firewall-counter checks in 5.9; a timeout alone is not a pass.
+
+### Chapters 6 and 7: NAT and routing
+
+For either plan, use this complete chapter 6 source-NAT block instead of the plan A block:
+
+```text
+set nat source rule 100 description 'LAN to Internet'
+set nat source rule 100 outbound-interface name 'eth2'
+set nat source rule 100 source group network-group 'LAN-NETS'
+set nat source rule 100 translation address 'masquerade'
+commit
+save
+```
+
+If configuring the optional port forward, replace only its plan A `inbound-interface` command with:
+
+```text
+set nat destination rule 100 inbound-interface name 'eth2'
+```
+
+Enter the other destination-NAT and firewall commands from chapter 6 unchanged. In chapter 7, `run show ip route` should show the DHCP default route via `eth2`; the home connected route is via `eth3` for B or `eth1` for C, and the management route is via `eth0`.
+
+### Chapter 8: LAN services
+
+In section 8.1, use the corresponding DHCP listen command and enter the remaining DHCP commands from that section unchanged:
+
+```text
+# Plan B
+set service dhcp-server listen-interface 'eth3'
+
+# Plan C
+set service dhcp-server listen-interface 'eth1'
+```
+
+If using the **optional** ISP-DHCP DNS forwarder in section 8.2, both plans use this command instead of the `eth4` example:
+
+```text
+set service dns forwarding dhcp 'eth2'
+```
+
+The DNS, NTP, and SSH address settings do not otherwise change. Test DHCP, DNS, NTP, and the management key-only login as described in chapter 8.
+
+### Chapter 9: Software fallback
+
+In section 9.2, inspect `run show offload config` and `run show configuration commands | match offload`. The active ports should have IPv4 offload configured and IPv6 offload removed: `eth3`/`eth2` for B, `eth1`/`eth2` for C. Use the same flow and counter tests as chapter 9.
+
+If requesting the software fallback in section 9.6, use the applicable block instead of the plan A commands:
+
+```text
+# Plan B
+delete interfaces ethernet eth3 offload ipv4
+delete interfaces ethernet eth2 offload ipv4
+compare
+commit-confirm 5
+```
+
+```text
+# Plan C
+delete interfaces ethernet eth1 offload ipv4
+delete interfaces ethernet eth2 offload ipv4
+compare
+commit-confirm 5
+```
+
+If IPv6 hardware offload was re-enabled later, remove its leaves on the same active ports too. Record and verify retirement of old hardware flows, then check a new sustained flow and connectivity before confirming and saving, as in section 9.6.
+
+### Chapter 10: Optional IPv6
+
+Use the appropriate complete block instead of the plan A prefix-delegation and router-advert commands. Change the requested prefix length if your ISP requires a different one.
+
+**Plan B:**
+
+```text
+set interfaces ethernet eth2 address 'dhcpv6'
+set interfaces ethernet eth2 ipv6 address 'autoconf'
+set interfaces ethernet eth2 dhcpv6-options pd 0 length '56'
+set interfaces ethernet eth2 dhcpv6-options pd 0 interface eth3 address '1'
+set interfaces ethernet eth2 dhcpv6-options pd 0 interface eth3 sla-id '0'
+set service router-advert interface eth3 prefix '::/64'
+compare
+commit-confirm 5
+```
+
+**Plan C:**
+
+```text
+set interfaces ethernet eth2 address 'dhcpv6'
+set interfaces ethernet eth2 ipv6 address 'autoconf'
+set interfaces ethernet eth2 dhcpv6-options pd 0 length '56'
+set interfaces ethernet eth2 dhcpv6-options pd 0 interface eth1 address '1'
+set interfaces ethernet eth2 dhcpv6-options pd 0 interface eth1 sla-id '0'
+set service router-advert interface eth1 prefix '::/64'
+compare
+commit-confirm 5
+```
+
+Test before confirming and saving. `run show ipv6 route` should show the default route via `eth2`; `run show interfaces` should show the delegated `::1` address on `eth3` for B or `eth1` for C. Perform the WAN-side IPv6 capture and firewall-counter checks from section 5.9.
+
+Only after the master plan clears the IPv6 hardware-fragmentation issue for your image, replace the chapter 10 opt-in commands with the matching block:
+
+```text
+# Plan B
+set interfaces ethernet eth3 offload ipv6
+set interfaces ethernet eth2 offload ipv6
+compare
+commit-confirm 5
+```
+
+```text
+# Plan C
+set interfaces ethernet eth1 offload ipv6
+set interfaces ethernet eth2 offload ipv6
+compare
+commit-confirm 5
+```
+
+Repeat the IPv6 hardware-flow proof in 9.4 before confirming and saving.
+
+---
+
+## Appendix C: Further reading
+
+- [INSTALL.md](./INSTALL.md) — fresh installation, image upgrades, serial access, and recovery.
+- [HARDWARE.md](./HARDWARE.md) — physical ports, interface naming, and SFP+ requirements.
+- [CLI-AND-TOOLS.md](./CLI-AND-TOOLS.md) — image-specific operational commands and ASK2 diagnostics.
+- [ASK2 master plan](./plans/ASK2-MASTER-PLAN.md) — current feature, validation, and safety status.
+- [Dual dataplane plan](./plans/DUAL-DATAPLANE.md) — ASK and VPP per-interface ownership and reversibility.
