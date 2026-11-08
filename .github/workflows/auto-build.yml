@@ -670,7 +670,7 @@ jobs:
 
       # ─── Update-check feed ──────────────────────────────────────────
       # Two build flavors:
-      #   • main: writes version.json + aliases (version-default.json, version-vpp.json).
+      #   • main: writes version.json (the version-default/-vpp aliases were dropped 2026-11-08).
       #   • nxp-sdk: writes version-nxp.json pointing to the nxp-ask release.
       - name: "Release publishing: write update-check feed"
         env:
@@ -691,9 +691,7 @@ jobs:
             }
           ]
           EOF
-            cp version.json version-default.json
-            cp version.json version-vpp.json
-            echo "### Wrote canonical version.json + aliases (version-default.json, version-vpp.json)"
+            echo "### Wrote canonical version.json"
             cat version.json
           elif [[ "${{ github.ref_name }}" == nxp-sdk* ]]; then
             URL="https://github.com/${REPO}/releases/download/nxp-ask/${IMAGE_ISO}"
@@ -716,7 +714,7 @@ jobs:
           set -e
           sudo chown -R $(whoami):$(whoami) ./*
           if [ "${{ github.ref_name }}" = "main" ]; then
-            FEEDS="version.json version-default.json version-vpp.json"
+            FEEDS="version.json"
           else
             FEEDS="version-nxp.json"
           fi
@@ -739,7 +737,7 @@ jobs:
           tagging_message: ${{ github.ref_name == 'main' && needs.build_iso.outputs.build_version || '' }}
           commit_message: ${{ needs.build_iso.outputs.build_version }}
           commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          file_pattern: ${{ github.ref_name == 'main' && 'version.json version-default.json version-vpp.json' || 'version-nxp.json' }}
+          file_pattern: ${{ github.ref_name == 'main' && 'version.json' || 'version-nxp.json' }}
 
       - name: "Release publishing: update git tag for nxp-ask"
         if: startsWith(github.ref_name, 'nxp-sdk')
