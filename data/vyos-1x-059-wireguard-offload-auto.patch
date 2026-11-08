@@ -1,42 +1,22 @@
-diff --git a/interface-definitions/interfaces_wireguard.xml.in b/interface-definitions/interfaces_wireguard.xml.in
-index d22230de4..db00a8a1b 100644
---- a/interface-definitions/interfaces_wireguard.xml.in
-+++ b/interface-definitions/interfaces_wireguard.xml.in
-@@ -60,6 +60,19 @@
-               #include <include/constraint/wireguard-keys.xml.i>
-             </properties>
-           </leafNode>
-+          <node name="offload">
-+            <properties>
-+              <help>Hardware-assisted encryption path (LS1046A DPAA)</help>
-+            </properties>
-+            <children>
-+              <leafNode name="ipv4">
-+                <properties>
-+                  <help>Encrypt inner IPv4 TCP/UDP flows on the DPAA fast path (ingress port needs offload ipv4)</help>
-+                  <valueless/>
-+                </properties>
-+              </leafNode>
-+            </children>
-+          </node>
-           <tagNode name="peer">
-             <properties>
-               <help>peer alias</help>
 diff --git a/src/conf_mode/interfaces_wireguard.py b/src/conf_mode/interfaces_wireguard.py
-index 8d7e7c45d..18478723b 100755
+index 8d7e7c45d..a470d66b0 100755
 --- a/src/conf_mode/interfaces_wireguard.py
 +++ b/src/conf_mode/interfaces_wireguard.py
-@@ -59,2 +59,9 @@ def get_config(config=None):
+@@ -58,4 +58,12 @@ def get_config(config=None):
+     ifname, wireguard = get_interface_dict(conf, base)
  
-+    # LS1046A DPAA WireGuard fast path: the kernel binds a whole set of
-+    # devices at once, so every commit computes the full opted-in list.
++    # LS1046A DPAA WireGuard fast path: implicit, there is no CLI leaf. The
++    # kernel binds a whole set of devices at once, so every commit computes the
++    # full list of enabled interfaces; it accelerates only the flows that
++    # arrive on a port with `offload ipv4`, all others stay in software.
 +    wireguard['wgfp_ifaces'] = sorted(
 +        i for i in conf.list_nodes(base)
-+        if conf.exists(base + [i, 'offload', 'ipv4'])
-+        and not conf.exists(base + [i, 'disable']))
++        if not conf.exists(base + [i, 'disable']))
 +
      # Check if a port was changed
-@@ -175,2 +182,82 @@ def generate(wireguard):
+     tmp = is_node_changed(conf, base + [ifname, 'port'])
+@@ -174,7 +182,98 @@ def generate(wireguard):
+ 
  
 +WGFP_PARAM = '/sys/module/wireguard/parameters/wgfp_peer'
 +WGFP_LEASE_PARAM = '/sys/module/wireguard/parameters/wgfp_peer_lease'
@@ -84,20 +64,26 @@ index 8d7e7c45d..18478723b 100755
 +    return False
 +
 +
++WGFP_MAX_BIND = 8  # drivers/net/wireguard/fastpath.c WGFP_MAX_BIND
++
++
 +def wgfp_bind(ifaces):
-+    """Bind the DPAA fast path to the opted-in devices (LS1046A kernel only).
++    """Bind the DPAA fast path to every enabled WireGuard device (LS1046A kernel only).
 +
 +    The parameter reads "off" or "on ... dev=<list>"; writing a list rebinds
 +    everything (flows relearn within a second), so write only on a change.
 +    Flows are installed only for traffic arriving on a port with
-+    `offload ipv4`; others stay on the software path.
++    `offload ipv4`; others stay on the software path. The kernel binds at
++    most WGFP_MAX_BIND devices; the rest stay on the software path.
 +    """
 +    from errno import ENODEV
 +
 +    if not os.path.exists(WGFP_PARAM):
-+        if ifaces:
-+            print('WARNING: WireGuard offload is not supported by this kernel')
 +        return
++    if len(ifaces) > WGFP_MAX_BIND:
++        print(f'WARNING: WireGuard offload covers {WGFP_MAX_BIND} interfaces; '
++              f'{", ".join(ifaces[WGFP_MAX_BIND:])} stay on the software path')
++        ifaces = ifaces[:WGFP_MAX_BIND]
 +    want = ' '.join(ifaces) or 'off'
 +    cur = wgfp_status()
 +    wgfp_check_lease(ifaces, cur)
@@ -119,7 +105,7 @@ index 8d7e7c45d..18478723b 100755
 +
 +
  def apply(wireguard):
-@@ -178,2 +265,7 @@ def apply(wireguard):
+     check_kmod('wireguard')
  
 +    if os.path.exists(WGFP_PARAM):
 +        cur = wgfp_status()
@@ -127,8 +113,11 @@ index 8d7e7c45d..18478723b 100755
 +        wgfp_defer_missing(wireguard['wgfp_ifaces'], cur, warn=False)
 +
      wg = WireGuardIf(**wireguard)
-@@ -225,2 +317,4 @@ def apply(wireguard):
+ 
+@@ -224,4 +323,6 @@ def apply(wireguard):
+     call(f'systemctl {domain_action} vyos-domain-resolver.service')
  
 +    wgfp_bind(wireguard['wgfp_ifaces'])
 +
      # run the dependents
+     call_dependents()
