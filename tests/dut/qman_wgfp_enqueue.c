@@ -87,6 +87,7 @@ static bool wgfp_ern_fq_ready;
 static u32 wgfp_eg_fqid[WGFP_MAX_EGRESS];
 static int wgfp_eg_ifindex[WGFP_MAX_EGRESS], wgfp_neg, wgfp_lock;
 static atomic64_t wgfp_xmit_ok, wgfp_xmit_fail, wgfp_xmit_ern;
+static atomic64_t wgfp_rx_ern __attribute__((unused));
 static int portal_refs, irq_depth, full_attempts, starts, commits;
 static int ci_updates, relaxes, dma_syncs, releases, allocations, registrations;
 static int create_error;

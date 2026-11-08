@@ -20,7 +20,15 @@ struct qman_fq { unsigned int fqid; };
 struct wgfp_sink {
 	struct qman_fq fq;
 	int cpu;
+	bool dist;
 	u64 frames, bytes, errs, sg, irqs, polls;
+};
+struct wgfp_port {
+	int ifindex;
+	unsigned int nsinks;
+	bool dist;
+	struct wgfp_sink dist_sink;
+	struct wgfp_sink sink[4];
 };
 struct qm_mcr_queryfq_np {
 	uint8_t state;
@@ -31,12 +39,16 @@ struct seq_file {
 	size_t len;
 };
 
-static struct wgfp_sink wgfp_sinks[2];
-static unsigned int wgfp_touch = 2, wgfp_nsinks = 2;
+static struct wgfp_sink wgfp_global[2];
+static unsigned int wgfp_nglobal = 2;
+static struct wgfp_port wgfp_ports[2];
+static unsigned int wgfp_nports;
+static unsigned int wgfp_touch = 2, wgfp_per_port = 2, wgfp_fanout = 32;
 static bool wgfp_pool_failed;
 static int wgfp_lock, wgfp_neg;
 static void *wgfp_ops;
 static u64 wgfp_xmit_ok, wgfp_xmit_fail, wgfp_xmit_ern;
+static u64 wgfp_rx_enq_fail, wgfp_rx_ern;
 
 static void mutex_lock(int *lock) { (void)lock; }
 static void mutex_unlock(int *lock) { (void)lock; }
@@ -81,16 +93,16 @@ int main(void)
 {
 	struct seq_file output = {};
 
-	wgfp_sinks[0].fq.fqid = 0x2be;
-	wgfp_sinks[1].fq.fqid = 0x2bf;
-	wgfp_sinks[1].cpu = 1;
+	wgfp_global[0].fq.fqid = 0x2be;
+	wgfp_global[1].fq.fqid = 0x2bf;
+	wgfp_global[1].cpu = 1;
 	assert(wgfp_stats_show(&output, NULL) == 0);
 	assert(strstr(output.buf, "frm_cnt_encoding=host\n"));
 	assert(strstr(output.buf,
-		      "sink0 cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
+		      "sink0 port=0 kind=global cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
 		      " state=0x05 frm_cnt=1 byte_cnt=64 frm_cnt_raw=0x01000000 byte_cnt_raw=0x40000000\n"));
 	assert(strstr(output.buf,
-		      "sink1 cpu=1 fqid=0x2bf frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
+		      "sink1 port=0 kind=global cpu=1 fqid=0x2bf frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
 		      " query_err=-110\n"));
 	return 0;
 }

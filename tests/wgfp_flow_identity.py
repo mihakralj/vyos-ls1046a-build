@@ -24,5 +24,5 @@ def test_sink_lookup_rejects_cross_ingress_tuple_ambiguity(tmp_path):
     )
     subprocess.run([str(binary)], check=True)
 
-    assert "wgfp_flow_find_tuple(&t, hash)" in source
+    assert "wgfp_flow_find_tuple(&t, skb->skb_iif, hash)" in source
     assert source.count("wgfp_tx_family_allowed(") >= 3

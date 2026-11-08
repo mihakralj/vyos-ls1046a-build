@@ -16,8 +16,8 @@
  *        > /sys/module/wireguard/parameters/wgfp_lab
  *   echo off > /sys/module/wireguard/parameters/wgfp_lab
  *
- * Input frames must be Ethernet + IPv4; others are declined (the DPAA sink
- * just releases them).
+ * Input frames must be Ethernet + IP carrying TCP or UDP; others are
+ * declined (the DPAA sink just releases them).  Lab mode is IPv4-only.
  */
 
 #include <crypto/chacha20poly1305.h>
@@ -271,10 +271,14 @@ MODULE_PARM_DESC(wgfp_lab, "DPAA fast path lab seal (P2a): see fastpath.c; \"off
  * (handshake queueing, ICMP, PMTU, TTL, AllowedIPs).  AllowedIPs are re-checked
  * for every record each aging period.
  *
- * P3 receive offload is unavailable: wgfp_rx is hard-disabled because the
- * current admission evidence does not prove that the exact tuple and ingress
- * passed INPUT, and sink FDs do not carry ingress identity.  Do not restore an
- * enable control until both properties and policy withdrawal are proven.
+ * P3 receive offload (wgfp_rx): an outer flow is admitted only after one of
+ * its packets was delivered to the WireGuard socket on the stack, which proves
+ * the exact tuple passed INPUT, and the ingress port comes from that
+ * observation.  Sink queues are per port, so a dequeued frame carries its
+ * ingress identity and cannot select a flow learned on another port.  The RX
+ * record drives a per-port distributor that round-robins the untouched buffer
+ * to the port's worker queues, so decryption of one outer flow spreads over
+ * the CPUs instead of pinning one.  Off by default; the board gates use it.
  *
  *   echo "wg0 [wg1 ...]" > /sys/module/wireguard/parameters/wgfp_peer
  *   echo off > /sys/module/wireguard/parameters/wgfp_peer
@@ -321,8 +325,37 @@ struct wgfp_pst {
 	bool stopping;
 };
 
-static const bool wgfp_rx = false;
-static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t);
+/*
+ * P3 admission.  A flow is admitted only after a packet of its exact outer
+ * tuple was delivered to the WireGuard socket on the same ingress port.
+ * wg_receive() runs when the UDP tunnel encap delivers to the socket, i.e.
+ * after IP input and the INPUT hook, so that observation proves this tuple
+ * passed INPUT; skb_iif identifies the port.  The record then steers later
+ * packets around that path.  As with an offloaded flowtable flow, the record
+ * stays until the endpoint, the template or the binding changes, or the port
+ * drops the family; a later firewall change does not re-admit it.
+ */
+#define WGFP_OBS_PER_CPU	8
+
+struct wgfp_obs {
+	struct dpaa_wgfp_tuple t;
+	int wg_ifindex;
+	int ifindex;
+	unsigned long jiffies;
+};
+
+struct wgfp_obs_ring {
+	u32 seq;
+	struct wgfp_obs e[WGFP_OBS_PER_CPU];
+	u32 next;
+};
+
+static DEFINE_PER_CPU(struct wgfp_obs_ring, wgfp_obs);
+
+static bool wgfp_rx;
+module_param(wgfp_rx, bool, 0600);
+MODULE_PARM_DESC(wgfp_rx, "P3 receive offload for tuples observed on the stack");
+static void wgfp_pst_rx_sync(struct wgfp_pst *pst);
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 			     const struct dpaa_wgfp_tuple *t, bool *absent);
 
@@ -489,7 +522,7 @@ static void wgfp_pst_refresh(struct work_struct *w)
 	old = rcu_replace_pointer(pst->tmpl, t, true);
 	if (old)
 		kfree_rcu(old, rcu);
-	wgfp_pst_rx_sync(pst, t);
+	wgfp_pst_rx_sync(pst);
 	if (!READ_ONCE(pst->stopping))
 		schedule_delayed_work(&pst->refresh, HZ);
 }
@@ -609,14 +642,14 @@ static struct wgfp_flow *wgfp_flow_find(const struct dpaa_wgfp_tuple *t,
 	return NULL;
 }
 
-/* A sink FD has no ingress ID. Keep each tuple unique across all ports. */
+/* Same tuple and ingress port (a sink frame carries its port). */
 static struct wgfp_flow *wgfp_flow_find_tuple(const struct dpaa_wgfp_tuple *t,
-					      u32 hash)
+					      int ifindex, u32 hash)
 {
 	struct wgfp_flow *fl;
 
 	hash_for_each_possible(wgfp_flows, fl, node, hash)
-		if (wgfp_tuple_eq(&fl->t, t))
+		if (fl->ifindex == ifindex && wgfp_tuple_eq(&fl->t, t))
 			return fl;
 	return NULL;
 }
@@ -628,14 +661,15 @@ static bool wgfp_tx_family_allowed(u8 family)
 	return family == AF_INET || family == AF_INET6;
 }
 
-/* Sink side, under RCU; reject ambiguity rather than selecting a peer. */
-static struct wgfp_flow *wgfp_flow_lookup(const struct dpaa_wgfp_tuple *t)
+/* Sink side, under RCU; the frame's port must be the flow's port. */
+static struct wgfp_flow *wgfp_flow_lookup(const struct dpaa_wgfp_tuple *t,
+					  int ifindex)
 {
 	struct wgfp_flow *fl;
 	struct wgfp_flow *match = NULL;
 
 	hash_for_each_possible_rcu(wgfp_flows, fl, node, wgfp_tuple_hash(t))
-		if (wgfp_tuple_eq(&fl->t, t)) {
+		if (fl->ifindex == ifindex && wgfp_tuple_eq(&fl->t, t)) {
 			if (match) {
 				pr_warn_ratelimited(
 					"wgfp: ambiguous sink tuple; dropping frame\n");
@@ -817,7 +851,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 			f->len - ETH_HLEN, f->len - ETH_HLEN, &tup, &ip_len))
 		return 0;
 	iph = (const struct iphdr *)inner;
-	fl = wgfp_flow_lookup(&tup);
+	fl = wgfp_flow_lookup(&tup, f->ingress_ifindex);
 	if (!fl)
 		return 0;
 	if (!wgfp_tx_family_allowed(tup.family))
@@ -928,70 +962,139 @@ static const struct dpaa_wgfp_ops wgfp_peer_ops = {
 	.frame = wgfp_peer_frame,
 };
 
-/* A current keypair that can receive: a handshake with the peer completed. */
-static bool wgfp_peer_can_receive(struct wg_peer *peer)
+/* Is @t the peer's current endpoint (unlocked, as wgfp_endpoint_matches())? */
+static bool wgfp_endpoint_is(const struct wg_peer *peer,
+			     const struct dpaa_wgfp_tuple *t)
 {
-	struct noise_keypair *kp;
-	bool ok;
-
-	rcu_read_lock_bh();
-	kp = rcu_dereference_bh(peer->keypairs.current_keypair);
-	ok = kp && READ_ONCE(kp->receiving.is_valid) &&
-	     !wg_birthdate_has_expired(kp->sending.birthdate, REJECT_AFTER_TIME);
-	rcu_read_unlock_bh();
-	return ok;
+	if (READ_ONCE(peer->endpoint.addr.sa_family) != t->family)
+		return false;
+	if (t->family == AF_INET)
+		return READ_ONCE(peer->endpoint.addr4.sin_port) == t->sport &&
+		       READ_ONCE(peer->endpoint.addr4.sin_addr.s_addr) == t->saddr;
+	return READ_ONCE(peer->endpoint.addr6.sin6_port) == t->sport &&
+	       !memcmp(&peer->endpoint.addr6.sin6_addr, &t->saddr6, 16);
 }
 
-/* P3 admission is deliberately inert until exact INPUT and ingress provenance
- * can be established. */
-static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
+/*
+ * Called from wg_receive() in the UDP tunnel encap path, after IP input and
+ * the INPUT hook delivered the packet to the WireGuard socket.  Record the
+ * exact outer tuple and the ingress port; wgfp_pst_rx_sync() admits a record
+ * only for a tuple observed this way.  Lockless: one writer per CPU.
+ */
+void wg_fastpath_rx_observe(struct wg_device *wg, struct sk_buff *skb)
+{
+	struct wgfp_obs_ring *ring;
+	struct dpaa_wgfp_tuple t = {};
+	struct wgfp_obs *o;
+	const struct iphdr *iph;
+	const struct ipv6hdr *ip6;
+	const struct udphdr *udp;
+	u32 avail;
+
+	if (!wg || !skb || !wg->dev || !skb->skb_iif)
+		return;
+	if ((u8 *)skb_transport_header(skb) < skb->head ||
+	    (u8 *)(udp_hdr(skb) + 1) > skb_tail_pointer(skb))
+		return;
+	udp = udp_hdr(skb);
+	if (skb->protocol == htons(ETH_P_IP)) {
+		iph = ip_hdr(skb);
+		if ((u8 *)iph < skb->head ||
+		    (u8 *)(iph + 1) > (u8 *)udp ||
+		    iph->version != 4 || iph->protocol != IPPROTO_UDP ||
+		    iph->ihl != 5 || ip_is_fragment(iph))
+			return;
+		t.family = AF_INET;
+		t.saddr = iph->saddr;
+		t.daddr = iph->daddr;
+	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		ip6 = ipv6_hdr(skb);
+		if ((u8 *)ip6 < skb->head ||
+		    (u8 *)(ip6 + 1) > (u8 *)udp ||
+		    ip6->version != 6 || ip6->nexthdr != IPPROTO_UDP)
+			return;
+		t.family = AF_INET6;
+		t.saddr6 = ip6->saddr;
+		t.daddr6 = ip6->daddr;
+	} else {
+		return;
+	}
+	avail = (u8 *)skb_tail_pointer(skb) - (u8 *)udp;
+	if (avail < sizeof(*udp))
+		return;
+	t.sport = udp->source;
+	t.dport = udp->dest;
+	t.proto = IPPROTO_UDP;
+
+	ring = this_cpu_ptr(&wgfp_obs);
+	o = &ring->e[ring->next++ % WGFP_OBS_PER_CPU];
+	WRITE_ONCE(ring->seq, ring->seq + 1);
+	smp_wmb();
+	o->t = t;
+	o->wg_ifindex = wg->dev->ifindex;
+	o->ifindex = skb->skb_iif;
+	o->jiffies = jiffies;
+	smp_wmb();
+	WRITE_ONCE(ring->seq, ring->seq + 1);
+}
+
+/* Find an observation of @pst's current endpoint on any port. */
+static bool wgfp_rx_observed(struct wgfp_pst *pst, struct dpaa_wgfp_tuple *rt,
+			     int *ifindex)
+{
+	int cpu;
+	unsigned int i;
+
+	for_each_possible_cpu(cpu) {
+		struct wgfp_obs_ring *ring = per_cpu_ptr(&wgfp_obs, cpu);
+		u32 seq;
+
+		seq = READ_ONCE(ring->seq);
+		if (seq & 1)
+			continue;
+		smp_rmb();
+		for (i = 0; i < WGFP_OBS_PER_CPU; i++) {
+			struct wgfp_obs *o = &ring->e[i];
+
+			if (!o->t.family ||
+			    o->wg_ifindex != pst->wgdev->ifindex ||
+			    o->ifindex <= 0)
+				continue;
+			if (!wgfp_endpoint_is(pst->peer, &o->t))
+				continue;
+			*rt = o->t;
+			*ifindex = o->ifindex;
+			smp_rmb();
+			if (READ_ONCE(ring->seq) == seq)
+				return true;
+			break;	/* racing writer: try another CPU's ring */
+		}
+	}
+	return false;
+}
+
+/* Install, move or withdraw the peer's outer RX record. */
+static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 {
 	struct dpaa_wgfp_tuple rt = {};
 	struct wgfp_flow *fl;
 	bool want = false;
+	int ifindex = 0;
 
-	if (t && READ_ONCE(wgfp_rx) && !READ_ONCE(pst->peer->is_dead) &&
-	    !READ_ONCE(pst->stopping)) {
-		const u8 *l3 = t->hdr + ETH_HLEN;
-		const struct udphdr *udp = (const struct udphdr *)(t->hdr + t->hlen -
-								   sizeof(*udp));
+	if (READ_ONCE(wgfp_rx) && !READ_ONCE(pst->peer->is_dead) &&
+	    !READ_ONCE(pst->stopping) && wgfp_rx_observed(pst, &rt, &ifindex)) {
+		struct net_device *dev = dev_get_by_index(&init_net, ifindex);
 
-		pr_warn_once("wireguard: experimental P3 receive offload bypasses INPUT filtering\n");
-		if (t->family == AF_INET) {
-			rt.saddr = ((const struct iphdr *)l3)->daddr;
-			rt.daddr = ((const struct iphdr *)l3)->saddr;
-		} else {
-			rt.saddr6 = ((const struct ipv6hdr *)l3)->daddr;
-			rt.daddr6 = ((const struct ipv6hdr *)l3)->saddr;
-		}
-		rt.family = t->family;
-		rt.sport = udp->dest;
-		rt.dport = udp->source;
-		rt.proto = IPPROTO_UDP;
-		/* Admission is checked once.  With both directions on the fast
-		 * path the outer conntrack entry sees no packets and expires;
-		 * like an offloaded flowtable flow, the admitted record stays
-		 * until the endpoint, the template or the binding changes. */
-		spin_lock_bh(&wgfp_flows_lock);
-		want = pst->rxfl && pst->rxfl->ifindex == t->ifindex &&
-		       wgfp_tuple_eq(&pst->rxfl->t, &rt);
-		spin_unlock_bh(&wgfp_flows_lock);
-		if (!want) {
-			bool absent = false;
-
-			want = wgfp_ct_admitted(dev_net(pst->wgdev), NULL, &rt,
-						&absent);
-			/*
-			 * VyOS normally untracks WireGuard ports. A prior
-			 * handshake does not prove INPUT accepted this tuple.
-			 */
-			if (!want && absent)
-				want = wgfp_peer_can_receive(pst->peer);
-		}
+		/* outer family policy of the port the flow arrives on */
+		want = dev && dpaa_wgfp_family_ok(dev, rt.family);
+		if (dev)
+			dev_put(dev);
+		if (want)
+			pr_warn_once("wireguard: P3 receive offload admits only tuples observed on the stack\n");
 	}
 	spin_lock_bh(&wgfp_flows_lock);
 	fl = pst->rxfl;
-	if (fl && (!want || fl->ifindex != t->ifindex ||
+	if (fl && (!want || fl->ifindex != ifindex ||
 		   !wgfp_tuple_eq(&fl->t, &rt))) {
 		if (!fl->del) {
 			fl->del = true;
@@ -1001,13 +1104,13 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst, const struct wgfp_tmpl *t)
 		fl = NULL;
 	}
 	if (want && !fl && wgfp_nflows < WGFP_FLOW_MAX &&
-	    !wgfp_flow_find_tuple(&rt, wgfp_tuple_hash(&rt))) {
+	    !wgfp_flow_find_tuple(&rt, ifindex, wgfp_tuple_hash(&rt))) {
 		fl = kzalloc(sizeof(*fl), GFP_ATOMIC);
 		if (fl) {
 			fl->t = rt;
 			fl->pst = pst;
 			fl->rx = true;
-			fl->ifindex = t->ifindex;
+			fl->ifindex = ifindex;
 			fl->hash = wgfp_tuple_hash(&rt);
 			fl->state = WGFP_PENDING;
 			fl->since = jiffies;
@@ -1175,7 +1278,7 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		goto out;
 	}
 	if (fin || wgfp_nflows >= WGFP_FLOW_MAX ||
-	    wgfp_flow_find_tuple(&t, hash))
+	    wgfp_flow_find_tuple(&t, skb->skb_iif, hash))
 		goto out;
 	if (!wgfp_ct_admitted(dev_net(skb->dev), skb, &t, NULL))
 		goto out;
@@ -1207,7 +1310,7 @@ out:
 static void wgfp_flow_work_fn(struct work_struct *w)
 {
 	struct { struct wgfp_flow *fl; struct dpaa_wgfp_tuple t; int ifindex;
-		 bool add; } job[WGFP_BATCH];
+		 bool add, rx; } job[WGFP_BATCH];
 	/* ponytail: round-robin sink choice; per-sink load (silicon counters)
 	 * if long-lived flows pile up on one sink after churn. */
 	static unsigned int rr;
@@ -1242,6 +1345,7 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 		job[n].t = fl->t;
 		job[n].ifindex = fl->ifindex;
 		job[n].add = add;
+		job[n].rx = fl->rx;
 		n++;
 	}
 	spin_unlock_bh(&wgfp_flows_lock);
@@ -1252,7 +1356,8 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 
 		if (dev) {
 			err = job[i].add ?
-			      dpaa_wgfp_flow_add(dev, &job[i].t, rr++) :
+			      dpaa_wgfp_flow_add(dev, &job[i].t, rr++,
+						 job[i].rx) :
 			      dpaa_wgfp_flow_del(dev, &job[i].t);
 			dev_put(dev);
 		}
