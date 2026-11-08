@@ -20,7 +20,7 @@ QUICK = {  # type: (upload cell, download cell, bidir cell), {f} = 4|6
     "vlan-port": ("vlanport-v{f}", "portvlan-v{f}", "vlanport-v{f}-bidir"),
     "pppoe": ("pppoe-up-v{f}", "pppoe-down-v{f}", "pppoe-up-v{f}-bidir"),
 }
-ROWS = ["unicast", "nat", "vlan-vlan", "vlan-port", "pppoe", "wireguard", "ipsec", "bridge",
+ROWS = ["unicast", "nat", "vlan-vlan", "vlan-port", "pppoe", "wireguard", "wireguard6", "ipsec", "bridge",
         "broadcast", "multicast", "fragments", "policer"]
 DIRS = ("up", "down", "bidir")
 
@@ -38,7 +38,9 @@ def collect(run):
             if g > 0.05:
                 vals[r[1]].append(g)
                 verd[r[1]].append(r[10])
-    for p in sorted(Path(run).glob("wg-*.csv")):
+    # wg-*.csv: IPv4 outer transport; wg6-*.csv: IPv6 outer (OUTER=6). Columns are the inner family.
+    for p in sorted(Path(run).glob("wg-*.csv")) + sorted(Path(run).glob("wg6-*.csv")):
+        row = "wireguard6" if p.name.startswith("wg6-") else "wireguard"
         for r in csv.DictReader(open(p)):
             cell = r.get("cell", "").removesuffix("-eth3")
             try:
@@ -46,8 +48,8 @@ def collect(run):
             except ValueError:
                 continue
             if cell in ("wg-v4", "wg-v6") and g > 0.05:
-                vals[f"wireguard-{cell[3:]}-{r['dir']}"].append(g)
-                verd[f"wireguard-{cell[3:]}-{r['dir']}"].append("SW")
+                vals[f"{row}-{cell[3:]}-{r['dir']}"].append(g)
+                verd[f"{row}-{cell[3:]}-{r['dir']}"].append("TX+RX")
     table = {}
     for t in ROWS:
         for f in ("4", "6"):
