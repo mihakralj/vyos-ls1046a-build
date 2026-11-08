@@ -1,5 +1,5 @@
 diff --git a/python/vyos/ifconfig/ifname_store.py b/python/vyos/ifconfig/ifname_store.py
-index b527c7348..b0757cb35 100644
+index b527c7348..080f6e3f5 100644
 --- a/python/vyos/ifconfig/ifname_store.py
 +++ b/python/vyos/ifconfig/ifname_store.py
 @@ -107,6 +107,9 @@ def canonical_sort_key(device: dict) -> tuple:
@@ -38,13 +38,13 @@ index b527c7348..b0757cb35 100644
 +
 +
 +def board_port_index(ifname: str, sys_class_net: str = '/sys/class/net',
-+                     compatible: Path = _DT_COMPATIBLE) -> int:
++                     compatible: Path = None) -> int:
 +    """Front-panel position of an LS1046A FMan port, from its DT node - a
 +    fixed hardware property, unlike the probe order. _LABEL_UNKNOWN on any
 +    other hardware.
 +    """
 +    try:
-+        if b'fsl,ls1046a' not in compatible.read_bytes():
++        if b'fsl,ls1046a' not in (compatible or _DT_COMPATIBLE).read_bytes():
 +            return _LABEL_UNKNOWN
 +    except OSError:
 +        return _LABEL_UNKNOWN
@@ -56,16 +56,32 @@ index b527c7348..b0757cb35 100644
  def permanent_mac(ifname: str, sys_class_net: str = '/sys/class/net') -> str:
      """Permanent hardware address, falling back to the current one when the
      driver cannot report it separately.
-@@ -264,6 +295,7 @@ def discover_devices(sys_class_net: str = '/sys/class/net') -> list:
+@@ -256,6 +287,13 @@ def discover_devices(sys_class_net: str = '/sys/class/net') -> list:
+         if not mac and not wwan:
+             continue
+ 
++        properties = read_properties(entry.name)
++        board_port = board_port_index(entry.name, sys_class_net)
++        if board_port != _LABEL_UNKNOWN:
++            # the board DT carries two ethernetN aliases for three of the FMan
++            # MACs, so udev's onboard name for them flips between boots
++            properties.pop('ID_NET_NAME_ONBOARD', None)
++
+         devices.append({
+             'name': entry.name,
+             'mac': mac,
+@@ -264,7 +302,8 @@ def discover_devices(sys_class_net: str = '/sys/class/net') -> list:
              'label_index': (port_label_index(entry.name, sys_class_net)
                              if is_vmware_nic(entry.name, sys_class_net)
                              else _LABEL_UNKNOWN),
-+            'board_port': board_port_index(entry.name, sys_class_net),
-             'properties': read_properties(entry.name),
+-            'properties': read_properties(entry.name),
++            'board_port': board_port,
++            'properties': properties,
          })
  
+     ambiguous = ambiguous_keys([device['properties'] for device in devices])
 diff --git a/src/tests/test_ifname_store.py b/src/tests/test_ifname_store.py
-index 40a975ba5..ff5f22572 100644
+index 40a975ba5..d30a36ecd 100644
 --- a/src/tests/test_ifname_store.py
 +++ b/src/tests/test_ifname_store.py
 @@ -30,6 +30,7 @@
@@ -76,7 +92,7 @@ index 40a975ba5..ff5f22572 100644
  from vyos.ifconfig.ifname_store import config_dir_is_mounted
  from vyos.ifconfig.ifname_store import device_matches
  from vyos.ifconfig.ifname_store import ambiguous_keys
-@@ -81,6 +82,37 @@ def test_pci_before_usb(self):
+@@ -81,6 +82,57 @@ def test_pci_before_usb(self):
          usb = dev('y', 'usb-0:1:1.0', 'aa:00:00:00:00:00', bus='usb')
          self.assertLess(canonical_sort_key(pci), canonical_sort_key(usb))
  
@@ -110,6 +126,26 @@ index 40a975ba5..ff5f22572 100644
 +        compat.write_bytes(b'acme,board\0')
 +        self.assertEqual(board_port_index('eth0', str(tmp / 'net'), compat), _LABEL_UNKNOWN)
 +        self.assertEqual(board_port_index('eth0', str(tmp / 'net'), tmp / 'none'), _LABEL_UNKNOWN)
++
++    def test_ls1046a_port_is_not_keyed_on_its_onboard_name(self):
++        # ethernet2 and ethernet5 both alias ea000: end2/end5 alternate
++        with tempfile.TemporaryDirectory() as d:
++            tmp = Path(d)
++            node = tmp / 'dt' / 'ethernet@ea000'
++            node.mkdir(parents=True)
++            dev_dir = tmp / 'net' / 'eth1' / 'device'
++            dev_dir.mkdir(parents=True)
++            (dev_dir / 'of_node').symlink_to(node)
++            (tmp / 'net' / 'eth1' / 'address').write_text('e8:f6:d7:00:16:01\n')
++            compat = tmp / 'compatible'
++            compat.write_bytes(b'fsl,ls1046a\0')
++            props = {'ID_NET_NAME_ONBOARD': 'end5', 'ID_PATH': 'platform-1aea000.ethernet'}
++            with mock.patch('vyos.ifconfig.ifname_store._DT_COMPATIBLE', compat), \
++                 mock.patch('vyos.ifconfig.ifname_store.read_properties', return_value=dict(props)), \
++                 mock.patch('vyos.ifconfig.ifname_store.permanent_mac', return_value='e8:f6:d7:00:16:01'):
++                devices = discover_devices(str(tmp / 'net'))
++            self.assertEqual(devices[0]['key'], 'ID_PATH=platform-1aea000.ethernet')
++            self.assertEqual(devices[0]['board_port'], 1)
 +
      def test_order_is_independent_of_mac(self):
          # the whole point: a numerically higher MAC in a lower slot still wins
