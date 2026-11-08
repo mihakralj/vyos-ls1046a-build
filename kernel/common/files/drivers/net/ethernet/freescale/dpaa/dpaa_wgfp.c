@@ -530,6 +530,35 @@ static void wgfp_key(const struct dpaa_wgfp_tuple *t, u8 *key)
 	memcpy(key + 44, &t->dport, 2);
 }
 
+/* Offload family policy, provided by ask.ko (see dpaa_wgfp.h). */
+static dpaa_wgfp_family_fn __rcu wgfp_family_fn;
+
+void dpaa_wgfp_set_family_policy(dpaa_wgfp_family_fn fn)
+{
+	rcu_assign_pointer(wgfp_family_fn, fn);
+	if (!fn)
+		synchronize_rcu();
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_set_family_policy);
+
+bool dpaa_wgfp_family_ok(struct net_device *dev, u8 family)
+{
+	dpaa_wgfp_family_fn fn;
+	u8 want, mask = 0;
+
+	want = family == AF_INET ? DPAA_WGFP_FAM_V4 :
+	       family == AF_INET6 ? DPAA_WGFP_FAM_V6 : 0;
+	if (!dev || !want)
+		return false;
+	rcu_read_lock();
+	fn = rcu_dereference(wgfp_family_fn);
+	if (fn)
+		mask = fn(dev);
+	rcu_read_unlock();
+	return mask & want;
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_family_ok);
+
 bool dpaa_wgfp_port_ok(struct net_device *dev)
 {
 	struct fman *fm;
@@ -549,6 +578,9 @@ int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,
 	u8 port_id;
 	int ks, err;
 
+	/* the ingress port's `offload ipv4|ipv6` admits the inner family */
+	if (!dpaa_wgfp_family_ok(in, t->family))
+		return -EOPNOTSUPP;
 	err = wgfp_fm_port(in, &fm, &port_id, &ks);
 	if (err)
 		return err;

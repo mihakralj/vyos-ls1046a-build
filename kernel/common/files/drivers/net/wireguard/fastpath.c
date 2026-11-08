@@ -384,7 +384,8 @@ static struct wgfp_tmpl *wgfp_tmpl4(struct wgfp_pst *pst, const struct endpoint 
 		goto out;
 	t->egress = dpaa_wgfp_egress(rt->dst.dev);	/* < 0: not a DPAA port */
 	nh = rt_nexthop(rt, fl.daddr);
-	if (t->egress < 0 ||
+	/* outer family policy: the port under the tunnel */
+	if (t->egress < 0 || !dpaa_wgfp_family_ok(rt->dst.dev, AF_INET) ||
 	    !wgfp_tmpl_l2(t, rt->dst.dev, &arp_tbl, &nh, htons(ETH_P_IP))) {
 		kfree(t);
 		t = NULL;
@@ -441,7 +442,7 @@ static struct wgfp_tmpl *wgfp_tmpl6(struct wgfp_pst *pst, const struct endpoint 
 		goto out;
 	t->egress = dpaa_wgfp_egress(dst->dev);
 	nh = rt6_nexthop(dst_rt6_info(dst), &fl.daddr);
-	if (t->egress < 0 ||
+	if (t->egress < 0 || !dpaa_wgfp_family_ok(dst->dev, AF_INET6) ||
 	    !wgfp_tmpl_l2(t, dst->dev, &nd_tbl, nh, htons(ETH_P_IPV6))) {
 		kfree(t);
 		t = NULL;
@@ -620,9 +621,11 @@ static struct wgfp_flow *wgfp_flow_find_tuple(const struct dpaa_wgfp_tuple *t,
 	return NULL;
 }
 
+/* Families the TX path handles; which of them a port admits is the port's
+ * offload policy (dpaa_wgfp_family_ok()). */
 static bool wgfp_tx_family_allowed(u8 family)
 {
-	return family == AF_INET;
+	return family == AF_INET || family == AF_INET6;
 }
 
 /* Sink side, under RCU; reject ambiguity rather than selecting a peer. */
@@ -1115,7 +1118,7 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	u8 hb[sizeof(struct ipv6hdr) + 4];
 	unsigned int thoff, nhoff, i;
 	const u8 *l3;
-	bool fin = false;
+	bool fin = false, in_ok;
 	u32 hash, len, total;
 
 	if (!bs || READ_ONCE(bs->stopping) || !skb->skb_iif ||
@@ -1134,8 +1137,14 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	if (!l3 || !wgfp_parse(l3, skb->protocol, min_t(u32, sizeof(hb), total),
 			       total, &t, &len))
 		return;
-	/* The VyOS interface contract exposes only `offload ipv4` today. */
 	if (!wgfp_tx_family_allowed(t.family))
+		return;
+	/* Inner family policy: the ingress port's `offload ipv4|ipv6`. */
+	rcu_read_lock();
+	in_ok = dpaa_wgfp_family_ok(dev_get_by_index_rcu(&init_net, skb->skb_iif),
+				    t.family);
+	rcu_read_unlock();
+	if (!in_ok)
 		return;
 	thoff = nhoff + (t.family == AF_INET ?
 		sizeof(struct iphdr) : sizeof(struct ipv6hdr));
@@ -1359,12 +1368,14 @@ static void wgfp_age_fn(struct work_struct *w)
 	for (i = 0; i < n; i++) {
 		struct net_device *dev = dev_get_by_index(&init_net, job[i].ifindex);
 		struct wgfp_pst *pst = job[i].pst;
-		bool foreign = false;
+		bool foreign = false, family = false;
 		u64 pkts = 0;
 		int err = -ENODEV;
 
 		if (dev) {
 			err = dpaa_wgfp_flow_packets(dev, &job[i].t, &pkts);
+			/* the port may have dropped this family since install */
+			family = dpaa_wgfp_family_ok(dev, job[i].t.family);
 			dev_put(dev);
 		}
 		if (probe) {
@@ -1387,7 +1398,10 @@ static void wgfp_age_fn(struct work_struct *w)
 		 * touch it if it is still the entry the table holds */
 		fl = wgfp_flow_find(&job[i].t, job[i].ifindex, job[i].hash);
 		if (fl == job[i].fl && fl->state == WGFP_INSTALLED && !fl->del) {
-			if (foreign) {
+			if (!family) {
+				fl->del = true;
+				kick = true;
+			} else if (foreign) {
 				fl->del = true;
 				kick = true;
 				atomic64_inc(&wgfp_aip_withdraws);
