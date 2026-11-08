@@ -135,7 +135,7 @@ Findings:
 
 ### Relation to the shared steer substrate (2026-11-02)
 
-The steer-to-consumer substrate proposed in `ASK2-MASTER-PLAN.md` §4.8 item 1 (an ehash record delivering one flow's frames to a software sink without the IP stack) only helps an inline (IPS) Suricata: the consumer would feed Suricata's packet ring and forward or drop per verdict. It does not help the native passive (AF_PACKET IDS) service: FMan has no frame replicator, so a flow cannot be both forwarded in silicon and copied to an inspector. For the passive service the flow-shunting model above (inspect the slow-path prefix, then let the flowtable offload) stays the design.
+The steer-to-consumer substrate proposed in `ASK2-MASTER-PLAN.md` §4.8 item 1 (an ehash record delivering one flow's frames to a software sink without the IP stack) only helps an inline (IPS) Suricata: the consumer would feed Suricata's packet ring and forward or drop per verdict. It does not help the native passive (AF_PACKET IDS) service today: ASK2 has no path that both forwards a flow in silicon and copies it to an inspector. The microcode's per-flow replicator (`REPLICATE_PKT`, opcode 0x02, used by the vendor for multicast) could in principle do this, but ASK2 has never exercised it, and it copies every packet of the flow, so the inspector would carry the full rate of each mirrored flow (`ASK2-SILICON-TELEMETRY-PLAN.md` §5; corrected 2026-11-07). For the passive service the flow-shunting model above (inspect the slow-path prefix, then let the flowtable offload) stays the design.
 
 ## Decisions and safety contract
 
