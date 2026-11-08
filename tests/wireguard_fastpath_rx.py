@@ -25,16 +25,15 @@ def test_rx_lifetime_and_udp_checksums(tmp_path):
     subprocess.run([str(binary)], check=True)
 
 
-def test_rx_admission_stays_disabled_until_provenance_is_safe(tmp_path):
+def test_rx_admission_requires_stack_observation_and_port(tmp_path):
     source = SOURCE.read_text()
-    assert "module_param(wgfp_rx" not in source
-    flag_start = source.index("static const bool wgfp_rx")
-    flag_end = source.index("\n", flag_start)
-    start = source.index("static void wgfp_pst_rx_sync(", flag_end)
-    start = source.index("static void wgfp_pst_rx_sync(", start + 1)
-    end = source.index("\n/* ---- learning ---- */", start)
+    assert "module_param(wgfp_rx, bool, 0600)" in source
+    start = source.index("#define WGFP_OBS_PER_CPU")
+    mid = source.index("\nstatic bool wgfp_ct_admitted", start)
+    fstart = source.index("static bool wgfp_endpoint_is(")
+    fend = source.index("\n/* ---- learning ---- */", fstart)
     (tmp_path / "wgfp_rx_admission_body.h").write_text(
-        source[flag_start:flag_end] + "\n" + source[start:end]
+        source[start:mid] + "\n" + source[fstart:fend]
     )
     binary = tmp_path / "wgfp_rx_admission"
     subprocess.run(

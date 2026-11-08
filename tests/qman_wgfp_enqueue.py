@@ -57,7 +57,7 @@ def test_enqueue_backpressure_and_ern_ownership(tmp_path):
     subprocess.run(
         [
             "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-            "-Wno-unused-parameter", "-I", str(tmp_path),
+            "-Wno-unused-parameter", "-Wno-unused-function", "-I", str(tmp_path),
             str(HARNESS), "-o", str(binary),
         ],
         check=True,

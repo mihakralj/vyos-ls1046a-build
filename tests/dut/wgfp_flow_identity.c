@@ -63,13 +63,19 @@ int main(void)
 	flow_list[flow_count++] = &first;
 	assert(wgfp_flow_find(&tuple, first.ifindex,
 			      wgfp_tuple_hash(&tuple)) == &first);
-	assert(wgfp_flow_find_tuple(&tuple, wgfp_tuple_hash(&tuple)) == &first);
-	assert(wgfp_flow_lookup(&tuple) == &first);
+	assert(wgfp_flow_find_tuple(&tuple, first.ifindex,
+				    wgfp_tuple_hash(&tuple)) == &first);
+	assert(wgfp_flow_lookup(&tuple, first.ifindex) == &first);
 
 	flow_list[flow_count++] = &second;
 	assert(wgfp_flow_find(&tuple, second.ifindex,
 			      wgfp_tuple_hash(&tuple)) == &second);
-	assert(wgfp_flow_find_tuple(&tuple, wgfp_tuple_hash(&tuple)) == &first);
-	assert(wgfp_flow_lookup(&tuple) == NULL);
+	assert(wgfp_flow_find_tuple(&tuple, first.ifindex,
+				    wgfp_tuple_hash(&tuple)) == &first);
+	/* the sink frame carries its ingress port, so equal tuples on two
+	 * ports select their own flow instead of being ambiguous */
+	assert(wgfp_flow_lookup(&tuple, first.ifindex) == &first);
+	assert(wgfp_flow_lookup(&tuple, second.ifindex) == &second);
+	assert(wgfp_flow_lookup(&tuple, 7) == NULL);
 	return 0;
 }

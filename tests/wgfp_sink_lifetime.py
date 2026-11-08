@@ -28,7 +28,7 @@ def test_sink_pool_is_not_destroyed_or_reused_after_uncertain_creation(tmp_path)
 
 def test_sink_stats_preserve_unmasked_counts_and_report_query_failures(tmp_path):
     source = SOURCE.read_text()
-    start = source.index("static int wgfp_stats_show(")
+    start = source.index("static void wgfp_sink_show(")
     end = source.index("\nDEFINE_SHOW_ATTRIBUTE(wgfp_stats);", start)
     (tmp_path / "wgfp_stats_body.h").write_text(source[start:end])
     binary = tmp_path / "wgfp_sink_stats"
@@ -77,10 +77,9 @@ REGISTER_HARNESS = r"""
 struct dpaa_wgfp_ops { int unused; };
 static const struct dpaa_wgfp_ops __rcu *wgfp_ops;
 static void *wgfp_ops_priv;
-static unsigned int wgfp_nsinks = 1;
+static unsigned int wgfp_per_port;
 static int wgfp_lock, lock_held;
 static int num_online_cpus(void) { return 1; }
-static int wgfp_create_all(unsigned int n) { (void)n; return 0; }
 static void mutex_lock(int *m) { (void)m; assert(!lock_held); lock_held = 1; }
 static void mutex_unlock(int *m) { (void)m; assert(lock_held); lock_held = 0; }
 /* An old reader still in flight: it already loaded the old ops and loads
@@ -101,6 +100,7 @@ int main(void)
 	assert(dpaa_wgfp_register(&new_ops, &new_priv) == -EBUSY);
 	dpaa_wgfp_unregister();
 	assert(gp_checked && !lock_held && wgfp_ops == NULL);
+	assert(wgfp_per_port == 1);
 	assert(dpaa_wgfp_register(&new_ops, &new_priv) == 0);
 	assert(wgfp_ops_priv == &new_priv);
 	return 0;
