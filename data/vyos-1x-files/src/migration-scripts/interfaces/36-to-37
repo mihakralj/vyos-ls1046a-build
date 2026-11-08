@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+#
+# Copyright VyOS maintainers and contributors <maintainers@vyos.io>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 or later as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# LS1046A ASK2: offload granularity is per port (`offload ipv4|ipv6` engages
+# the port) and nothing finer. VLAN and PPPoE offload are automatic parts of an
+# engaged port, so the per-port `offload vlan` and `offload pppoe` leaves are
+# retired. Drop them; the family leaves (`offload ipv4`/`ipv6`) are untouched,
+# so a port that had them stays engaged and now gets VLAN/PPPoE offload
+# automatically.
+#
+# This script and 35-to-36 were 34-to-35 and 35-to-36 before upstream T3871
+# took 34-to-35 (hw-id -> interface mapping store). An LS1046A config already
+# at the old version 35 or 36 never ran that one, and the ethernet schema has
+# no hw-id any more, so run it here too. It only acts on hw-id nodes that are
+# still present, so a config that already went through it is unchanged.
+
+from pathlib import Path
+
+from vyos.configtree import ConfigTree
+from vyos.utils.system import load_as_module_source
+
+base = ['interfaces', 'ethernet']
+retired = ['vlan', 'pppoe']
+
+
+def migrate(config: ConfigTree) -> None:
+    load_as_module_source('interfaces_t3871',
+                          str(Path(__file__).with_name('34-to-35'))).migrate(config)
+
+    if not config.exists(base):
+        return
+
+    for ifname in config.list_nodes(base):
+        for leaf in retired:
+            path = base + [ifname, 'offload', leaf]
+            if config.exists(path):
+                config.delete(path)
