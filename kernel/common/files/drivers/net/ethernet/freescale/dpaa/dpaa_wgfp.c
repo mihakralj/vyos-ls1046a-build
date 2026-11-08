@@ -28,7 +28,7 @@
  *                                  whole frame, 3 read and write the whole frame
  *   echo "fanout <b>"  > .../ctl   RX records go through a per-port distributor
  *                                  that switches worker every b frames
- *                                  (default 32, 0 = record targets one worker);
+ *                                  (default 0 = record targets one worker);
  *                                  applies to records installed afterwards
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
@@ -124,8 +124,11 @@ static unsigned int wgfp_touch = 2;
 static unsigned int wgfp_per_port;	/* worker queues per port */
 /* RX fan-out batch: the distributor moves to the next worker every
  * wgfp_fanout frames (0 = no distributor).  Whole bursts stay on one worker,
- * so an inner flow is reordered only at batch boundaries. */
-static unsigned int wgfp_fanout = 32;
+ * so an inner flow is reordered only at batch boundaries.  Off by default:
+ * on .185 (image 0436, 4 TCP flows down) fanout 32 gave 1.42 Gbit/s against
+ * 1.93 with 0, because the reordering made the receivers ACK every segment
+ * and the extra ACKs cost more sealing work than the spread saved. */
+static unsigned int wgfp_fanout;
 #define WGFP_FANOUT_MAX	1024
 static bool wgfp_pool_failed;
 static DEFINE_MUTEX(wgfp_lock);

@@ -4,7 +4,7 @@
 # Checks, on a live tunnel and with the fast path bound:
 #   1. a receive record is admitted only after the exact outer tuple was seen on
 #      the stack, and frames then take the sink path (rx advances);
-#   2. removing the family from the port the outer flow arrives on withdraws the
+#   2. removing IPv4 (family 2) from the port the outer flow arrives on withdraws the
 #      RX record under traffic: rx freezes, fe_flow loses one record, the flow
 #      keeps running in software, and no stale sink flow is left;
 #   3. restoring the family relearns and reinstalls the record, and rx advances
@@ -15,6 +15,8 @@
 #
 # Prereq: KEEP=1 bin/testrig-wireguard.sh setup wg-v4 (tunnel wg0, endpoint
 # dell2 10.99.2.113), ASK engaged on eth3/eth4, an image with the P3 build.
+# Family 0 would be a full disengage, which ask.ko refuses while WGFP owns
+# live FE records, so the withdrawal drops only the outer family.
 # Usage: [EV=8] [PORT=eth4] [RXP=0x11] bin/testrig-wgfp-p3.sh
 set -u
 EV=${EV:-8}
@@ -33,14 +35,18 @@ cnt(){ dut "sudo cat $WP" | grep -o "$1=[0-9]*" | cut -d= -f2 | head -1; }
 records(){ dut "sudo cat $FE" | grep -c 'flow\['; }
 rxon(){ dut "echo 1 | sudo tee $RX >/dev/null" || { echo "ABORT: no wgfp_rx parameter (image predates P3)"; exit 1; }; }
 rxoff(){ dut "echo 0 | sudo tee $RX >/dev/null"; }
-on(){ rxoff; dut "echo off | sudo tee $WP >/dev/null"; dut "echo wg0 | sudo tee $WP >/dev/null" || { echo "ABORT: wgfp_peer"; exit 1; }; }
+WL=/sys/module/wireguard/parameters/wgfp_peer_lease
+TOK=${WG_LEASE_TOKEN:-$(cat "${WG_STATE_PATH:-/tmp/wg-rig}.single-lease/token" 2>/dev/null)}
+[[ $TOK =~ ^[0-9a-f]{32}$ ]] || { echo "ABORT: no wgfp lease token (run KEEP=1 bin/testrig-wireguard.sh setup wg-v4)"; exit 1; }
+off(){ [ "$(dut "sudo cat $WP")" = off ] || dut "echo 'stop $TOK' | sudo tee $WL >/dev/null"; }
+on(){ rxoff; off; dut "echo 'bind $TOK wgo-$TOK-dut' | sudo tee $WL >/dev/null" || { echo "ABORT: wgfp_peer_lease bind"; exit 1; }; }
 fam(){ dut "sudo $ASK --port $RXP family $1 >/dev/null"; }
 srv(){ $D2 'sudo pkill -f "^iperf3 -s -p 5241"; iperf3 -s -p 5241 -D'; }
 dstart(){ # dstart <seconds> <json>
   local cp=$((42000 + RANDOM % 8000))
   $D1 "iperf3 -c 10.99.200.113 -B 10.99.1.112 --cport $cp -p 5241 -R -t $1 -i 1 -J > $2 2>&1 &"
 }
-dwait(){ $D1 "while pgrep -f 'iperf3 .*-c 10.99.200.113' >/dev/null; do sleep 1; done"; }
+dwait(){ $D1 "while pgrep -f '[i]perf3 .*-c 10.99.200.113' >/dev/null; do sleep 1; done"; }
 div(){ $D1 "python3 -c \"import json;d=json.load(open('$1'));print(' '.join('%.2f'%(i['sum']['bits_per_second']/1e9) for i in d['intervals']))\"" 2>/dev/null; }
 drtx(){ $D1 "python3 -c \"import json;print(json.load(open('$1'))['end']['sum_sent'].get('retransmits','?'))\"" 2>/dev/null; }
 dmean(){ echo "$1" | awk -v a="$2" -v b="$3" '{s=0;n=0;for(i=a;i<=b&&i<=NF;i++){s+=$i;n++} printf "%.2f", n?s/n:0}'; }
@@ -76,36 +82,38 @@ echo "  records $F0 -> $F1; installs $I0 -> $I1; rx $RX0 -> $R1 (delta $((R1-RX0
 [ "$F1" -gt "$F0" ] && ok "RX record installed" || bad "no RX record in fe_flow"
 [ "${R1:-0}" -gt "${RX0:-0}" ] && ok "frames took the receive fast path" || bad "rx did not advance (P3 not engaged)"
 
-echo "== withdrawal under traffic: download spans the family change on $PORT (0x$RXP)"
-dstart 26 /tmp/p3-wd.json
+echo "== withdrawal under traffic: download spans the family change on $PORT ($RXP)"
+LPHEX=$(printf '%04x' "$(dut 'sudo wg show wg0 listen-port')")
+# the outer RX record: proto 0x11, any source port, destination = listen port
+rxrec(){ dut "sudo cat $FE" | grep 'flow\[' | grep -cE "11[0-9a-f]{4}${LPHEX}00000000\$"; }
+dstart 50 /tmp/p3-wd.json
 sleep "$EV"
-RXB=$(cnt rx); FB=$(records)
-echo "  before: $(st)"
-fam 0; sleep 6
-RXA=$(cnt rx); FA=$(records)
-echo "  after family 0 (6 s): records $FB -> $FA; rx $RXB -> $RXA"
-[ "$FA" -lt "$FB" ] && ok "RX record withdrawn" || bad "RX record not withdrawn"
-[ "$RXA" = "$RXB" ] && ok "no frames reached the withdrawn record" || bad "rx still advancing after withdrawal"
-sleep 8
-fam 3
+RB=$(rxrec); RXB=$(cnt rx)
+echo "  before: RX records $RB; $(st)"
+[ "$RB" -ge 1 ] || bad "no RX record before the family change"
+fam 2; sleep 3
+RA=$(rxrec); RXA1=$(cnt rx); sleep 3; RXA2=$(cnt rx)
+echo "  after family 2 = IPv6 only: RX records $RB -> $RA; rx $RXB -> $RXA1 -> $RXA2 (3 s apart, after settling)"
+[ "$RA" = 0 ] && ok "RX record withdrawn" || bad "RX record not withdrawn"
+[ "$RXA1" = "$RXA2" ] && ok "no frames reach the withdrawn record" || bad "rx still advancing after withdrawal"
+sleep 4
+echo "== restore: family 3 with the download still running"
+fam 3; sleep 4
+RR=$(rxrec); RXR=$(cnt rx)
+echo "  RX records $RA -> $RR; rx $RXA2 -> $RXR"
+[ "$RR" -ge 1 ] && ok "RX record relearned from a stack observation" || bad "RX record not reinstalled"
+[ "${RXR:-0}" -gt "${RXA2:-0}" ] && ok "fast path resumed" || bad "rx did not resume"
 dwait
 IV=$(div /tmp/p3-wd.json)
-WPRE=$(dmean "$IV" 2 $((EV+1)))
-WPOST=$(dmean "$IV" $((EV+3)) $((EV+8)))
-echo "  download before ${WPRE} Gbit/s, software after withdrawal ${WPOST} Gbit/s"
+WPRE=$(dmean "$IV" 2 $((EV-1)))
+WPOST=$(dmean "$IV" $((EV+4)) $((EV+9)))
+WBACK=$(dmean "$IV" 36 46)
+echo "  download: P3 ${WPRE}, software after withdrawal ${WPOST}, P3 again ${WBACK} Gbit/s; retransmits $(drtx /tmp/p3-wd.json)"
 awk -v a="$WPRE" -v b="$WPOST" 'BEGIN{exit !(b >= 0.5*a)}' && ok "flow continued in software" || bad "flow stalled"
-
-echo "== restore: relearn and reinstall the RX record"
-sleep 2
-RX2=$(cnt rx); F2=$(records)
-dstart 8 /tmp/p3-back.json; dwait
-sleep 2
-RX3=$(cnt rx); F3=$(records)
-echo "  records $F2 -> $F3; rx $RX2 -> $RX3"
-[ "$F3" -gt "$F2" ] && ok "RX record relearned" || bad "RX record not reinstalled"
-[ "${RX3:-0}" -gt "${RX2:-0}" ] && ok "fast path resumed" || bad "rx did not resume"
+S=$(dut "sudo cat $DBG/stats" | head -1)
+echo "  $(echo "$S" | grep -o 'rx_enq_fail=[0-9]* rx_ern=[0-9]*')"
 
 echo "== G3 (separate): echo 1 > $RX; WGFP=1 REPS=3 PORT=$PORT DIRS=down CELLS=wg-v4 bin/wg-line.sh"
-rxoff
+rxoff; off
 [ "$fails" = 0 ] && echo "P3 WITHDRAWAL GATE: PASS" || echo "P3 WITHDRAWAL GATE: $fails FAILURE(S)"
 exit "$fails"
