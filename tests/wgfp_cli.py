@@ -1,4 +1,4 @@
-"""Host tests for the WireGuard fast-path CLI's sysfs error handling."""
+"""Host tests for the implicit WireGuard fast-path binding (patch 059): sysfs error handling and the device cap."""
 
 from contextlib import contextmanager
 import errno
@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 pytestmark = pytest.mark.host
-PATCH = Path(__file__).resolve().parents[1] / "data/vyos-1x-059-wireguard-offload-cli.patch"
+PATCH = Path(__file__).resolve().parents[1] / "data/vyos-1x-059-wireguard-offload-auto.patch"
 
 
 class ConfigError(Exception):
@@ -275,8 +275,24 @@ def test_changed_binding_is_written():
     assert parameter.writes == ["wg0 wg1"]
 
 
-def test_unsupported_kernel_still_warns_without_writing(capsys):
+def test_unsupported_kernel_is_silent_without_writing(capsys):
+    # Offload is implicit, so a kernel without the fast path must not warn on every commit.
     parameter = FakeParameter(exists=False)
     bind_function(parameter)(["wg0"])
-    assert "not supported" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""
     assert parameter.writes == []
+
+
+def test_binding_is_capped_at_the_kernel_limit(capsys):
+    parameter = FakeParameter("off")
+    ifaces = [f"wg{i}" for i in range(10)]
+    bind_function(parameter)(ifaces)
+    assert parameter.writes == [" ".join(ifaces[:8])]
+    out = capsys.readouterr().out
+    assert "wg8, wg9 stay on the software path" in out
+
+
+def test_patch_has_no_wireguard_offload_leaf():
+    patch = PATCH.read_text()
+    assert "interfaces_wireguard.xml.in" not in patch
+    assert "'offload'" not in patch
