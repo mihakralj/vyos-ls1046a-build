@@ -52,6 +52,7 @@
 #include <linux/u64_stats_sync.h>
 #include <linux/ktime.h>
 #include <linux/errno.h>
+#include <linux/fsl/fman_pcd.h>
 
 #include "include/ask_internal.h"
 
@@ -128,24 +129,23 @@ EXPORT_SYMBOL_GPL(ask_flow_table_create);
 /* -------------------------------------------------------------------------
  * T-M6-A3: per-cookie ownership generation registry.
  *
- * Value-encoded xarray: entry = xa_mk_value((gen << 1) | state). gen is a
- * 31-bit monotonic counter per cookie; wrap is a non-issue (2^31 REPLACEs of
- * one recycled cookie). Value entries need no allocation, so a tombstone can
- * outlive the ask_flow with zero heap cost and no leak.
+ * Value-encoded xarray: entry = xa_mk_value((gen << 1) | state).
+ * Generations use the built-in FMan's boot-lifetime sequence so erasing a
+ * tombstone cannot recycle an identity while an older worker is still live.
  * ------------------------------------------------------------------------- */
 
 #define ASK_GEN_STATE_BITS 1
 #define ASK_GEN_STATE_MASK ((1UL << ASK_GEN_STATE_BITS) - 1)
 
-static unsigned long ask_gen_encode(u32 gen, u8 state)
+static unsigned long ask_gen_encode(u64 gen, u8 state)
 {
 	return ((unsigned long)gen << ASK_GEN_STATE_BITS) |
 	       (state & ASK_GEN_STATE_MASK);
 }
 
-static u32 ask_gen_decode_gen(unsigned long v)
+static u64 ask_gen_decode_gen(unsigned long v)
 {
-	return (u32)(v >> ASK_GEN_STATE_BITS);
+	return (u64)(v >> ASK_GEN_STATE_BITS);
 }
 
 static u8 ask_gen_decode_state(unsigned long v)
@@ -153,22 +153,23 @@ static u8 ask_gen_decode_state(unsigned long v)
 	return (u8)(v & ASK_GEN_STATE_MASK);
 }
 
-u32 ask_flow_gen_next(struct ask_flow_table *t, u64 cookie)
+u64 ask_flow_gen_next(struct ask_flow_table *t, u64 cookie)
 {
-	unsigned long flags, old;
-	void *entry;
-	u32 gen;
+	unsigned long flags;
+	u64 gen;
 	int rc;
 
 	if (!t)
 		return 0;
 
 	xa_lock_irqsave(&t->gen_by_cookie, flags);
-	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
-	old = xa_is_value(entry) ? xa_to_value(entry) : 0;
-	gen = ask_gen_decode_gen(old) + 1;
-	if (gen == 0)
-		gen = 1; /* never hand out generation 0 (means "unknown") */
+	gen = fman_pcd_fe_alloc_token();
+	/* XArray reserves one tag bit, and the encoded state needs another. */
+	if (!gen || gen > (ULONG_MAX >> 2)) {
+		xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+		ask_pr_warn("flow: generation sequence exhausted\n");
+		return 0;
+	}
 	/* GFP_ATOMIC: we hold xa_lock. On failure return 0 so the caller
 	 * fails the REPLACE to software rather than publishing unguarded. */
 	rc = xa_err(__xa_store(&t->gen_by_cookie, (unsigned long)cookie,
@@ -184,11 +185,11 @@ u32 ask_flow_gen_next(struct ask_flow_table *t, u64 cookie)
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_next);
 
-u32 ask_flow_gen_current(struct ask_flow_table *t, u64 cookie)
+u64 ask_flow_gen_current(struct ask_flow_table *t, u64 cookie)
 {
 	unsigned long flags;
 	void *entry;
-	u32 gen = 0;
+	u64 gen = 0;
 
 	if (!t)
 		return 0;
@@ -201,7 +202,7 @@ u32 ask_flow_gen_current(struct ask_flow_table *t, u64 cookie)
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_current);
 
-bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u32 gen)
+bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u64 gen)
 {
 	unsigned long flags, v;
 	void *entry;
@@ -221,35 +222,70 @@ bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u32 gen)
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_is_current);
 
-void ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie)
+static u64 ask_flow_gen_tombstone_expected(struct ask_flow_table *t, u64 cookie,
+					   u64 expected, bool live_only)
 {
 	unsigned long flags;
 	void *entry;
-	u32 gen;
+	u64 gen;
+	int rc;
 
 	if (!t)
-		return;
+		return 0;
 	xa_lock_irqsave(&t->gen_by_cookie, flags);
 	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
-	gen = xa_is_value(entry) ? ask_gen_decode_gen(xa_to_value(entry)) : 0;
-	/* Preserve the generation, flip state to TOMBSTONED. GFP_ATOMIC under
-	 * lock; a store failure only loses the tombstone hint, and the
-	 * generation compare in insert_owned still blocks a stale publish. */
-	__xa_store(&t->gen_by_cookie, (unsigned long)cookie,
-		   xa_mk_value(ask_gen_encode(gen, ASK_GEN_TOMBSTONED)),
-		   GFP_ATOMIC);
+	if (!xa_is_value(entry)) {
+		xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+		return 0;
+	}
+	gen = ask_gen_decode_gen(xa_to_value(entry));
+	if (expected &&
+	    (gen != expected ||
+	     (live_only && ask_gen_decode_state(xa_to_value(entry)) !=
+			   ASK_GEN_LIVE))) {
+		xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+		return 0;
+	}
+	rc = xa_err(__xa_store(&t->gen_by_cookie, (unsigned long)cookie,
+			       xa_mk_value(ask_gen_encode(gen,
+							  ASK_GEN_TOMBSTONED)),
+			       GFP_ATOMIC));
 	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
+	if (rc) {
+		ask_pr_warn("flow: tombstone store failed for cookie=0x%llx rc=%d\n",
+			    cookie, rc);
+		return 0;
+	}
+	return gen;
+}
+
+u64 ask_flow_gen_tombstone(struct ask_flow_table *t, u64 cookie)
+{
+	return ask_flow_gen_tombstone_expected(t, cookie, 0, false);
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_tombstone);
 
-void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie)
+bool ask_flow_gen_tombstone_if_current(struct ask_flow_table *t, u64 cookie,
+				      u64 gen)
+{
+	return gen &&
+	       ask_flow_gen_tombstone_expected(t, cookie, gen, true) == gen;
+}
+EXPORT_SYMBOL_GPL(ask_flow_gen_tombstone_if_current);
+
+void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie, u64 gen)
 {
 	unsigned long flags;
+	void *entry;
 
-	if (!t)
+	if (!t || !gen)
 		return;
 	xa_lock_irqsave(&t->gen_by_cookie, flags);
-	__xa_erase(&t->gen_by_cookie, (unsigned long)cookie);
+	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
+	if (xa_is_value(entry) &&
+	    ask_gen_decode_gen(xa_to_value(entry)) == gen &&
+	    ask_gen_decode_state(xa_to_value(entry)) == ASK_GEN_TOMBSTONED)
+		__xa_erase(&t->gen_by_cookie, (unsigned long)cookie);
 	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_release);
@@ -325,15 +361,20 @@ return rhashtable_lookup_fast(&t->rht, &cookie, ask_flow_rht_params);
 EXPORT_SYMBOL_GPL(ask_flow_lookup);
 
 /*
- * R9 admission budget: the vendor ASK caps the table at 32768 directions
- * and overflows to software. Same ceiling here; 0 disables the cap. It
+ * R9 admission budget; 0 disables the cap. The vendor documents 32768
+ * directions but holds 131,072 bidirectional flows in hardware (measured
+ * 2026-10-31, OpenWrt .70: hw share 0.92 to 262k flows). With 32768 here, hw
+ * share was exactly 32768 / (2 x flows) (0.19 at 64k flows, 66 % loss). With
+ * the cap off, 65,536 and 131,072 flows ran at 0 % loss, 100 % hardware, MURAM
+ * unchanged (chained buckets, F-269). 262,144 flows collapse on both DUTs, so
+ * the default is the proven 262144 directions (131,072 flows). It
  * counts flow directions (one per ask_flow), so a bidirectional TCP
  * connection uses two. An over-budget insert returns -ENOSPC and the flow
  * stays on the kernel software path; ask_flow_overflow counts the refusals.
  */
-static unsigned int ask_max_flows = 32768;
+static unsigned int ask_max_flows = 262144;
 module_param_named(max_flows, ask_max_flows, uint, 0644);
-MODULE_PARM_DESC(max_flows, "Admission ceiling on offloaded flow directions (0 = unlimited, default 32768)");
+MODULE_PARM_DESC(max_flows, "Admission ceiling on offloaded flow directions (0 = unlimited, default 262144)");
 static atomic_t ask_flow_overflow = ATOMIC_INIT(0);
 
 u32 ask_flow_max_flows(void)
@@ -351,12 +392,14 @@ static int ask_flow_insert_core(struct ask_flow_table *t,
     const struct ask_flow_key *key,
     u32 oif, u32 action_flags,
     enum ask_hw_dir dir,
-    u32 generation,
-    u32 *out_hw_id)
+    u64 generation,
+    u32 *out_hw_id,
+    u64 *out_fe_token)
 {
 struct ask_flow *f;
 int rc;
 u32 hw_id = 0;
+u64 fe_token = 0;
 bool hw_inserted = false;
 
 if (!t || !key || !out_hw_id)
@@ -402,7 +445,15 @@ f = kzalloc(sizeof(*f), GFP_KERNEL);
 if (!f)
 return -ENOMEM;
 
+if (out_fe_token) {
+fe_token = fman_pcd_fe_alloc_token();
+if (!fe_token) {
+kfree(f);
+return -EOVERFLOW;
+}
+}
 f->cookie       = cookie;
+f->fe_token     = fe_token;
 f->key          = *key;
 f->oif          = oif;
 f->action_flags = action_flags;
@@ -551,11 +602,11 @@ if (hw_inserted) {
 int rm_rc = ask_hw_flow_remove(hw_id);
 
 if (rm_rc && rm_rc != -ENODEV)
-ask_pr_warn("flow: stale-publish HW rollback (cookie=0x%llx gen=%u) rc=%d\n",
+ask_pr_warn("flow: stale-publish HW rollback (cookie=0x%llx gen=%llu) rc=%d\n",
     cookie, generation, rm_rc);
 }
 kfree(f);
-pr_info_ratelimited("ask: flow: REPLACE cookie=0x%llx gen=%u superseded before publish — not offloaded\n",
+pr_info_ratelimited("ask: flow: REPLACE cookie=0x%llx gen=%llu superseded before publish — not offloaded\n",
     cookie, generation);
 return -ESTALE;
 }
@@ -595,6 +646,8 @@ atomic_inc(&t->num_flows);
 if (hw_inserted)
 atomic_inc(&t->num_hw_backed);
 *out_hw_id = hw_id;
+if (out_fe_token)
+*out_fe_token = fe_token;
 return 0;
 }
 
@@ -611,25 +664,40 @@ int ask_flow_insert(struct ask_flow_table *t,
     enum ask_hw_dir dir,
     u32 *out_hw_id)
 {
-u32 gen = t ? ask_flow_gen_next(t, cookie) : 0;
+u64 gen = t ? ask_flow_gen_next(t, cookie) : 0;
 
+if (t && !gen)
+return -EAGAIN;
 return ask_flow_insert_core(t, cookie, key, oif, action_flags, dir,
-    gen, out_hw_id);
+    gen, out_hw_id, NULL);
 }
 EXPORT_SYMBOL_GPL(ask_flow_insert);
 
 int ask_flow_insert_owned(struct ask_flow_table *t, u64 cookie,
   const struct ask_flow_key *key,
   u32 oif, u32 action_flags, enum ask_hw_dir dir,
-  u32 generation, u32 *out_hw_id)
+  u64 generation, u32 *out_hw_id)
 {
 return ask_flow_insert_core(t, cookie, key, oif, action_flags, dir,
-    generation, out_hw_id);
+    generation, out_hw_id, NULL);
 }
 EXPORT_SYMBOL_GPL(ask_flow_insert_owned);
 
+int ask_flow_insert_owned_identified(struct ask_flow_table *t, u64 cookie,
+				    const struct ask_flow_key *key,
+				    u32 oif, u32 action_flags,
+				    enum ask_hw_dir dir, u64 generation,
+				    u32 *out_hw_id, u64 *out_fe_token)
+{
+if (!out_fe_token || !generation)
+return -EINVAL;
+return ask_flow_insert_core(t, cookie, key, oif, action_flags, dir,
+    generation, out_hw_id, out_fe_token);
+}
+EXPORT_SYMBOL_GPL(ask_flow_insert_owned_identified);
+
 static int ask_flow_remove_core(struct ask_flow_table *t, u64 cookie,
-u32 generation, bool honor_generation)
+u64 generation, bool honor_generation, u64 fe_token)
 {
 struct ask_flow *f;
 u32 hw_id;
@@ -645,6 +713,14 @@ if (!f) {
 rcu_read_unlock();
 return -ENOENT;
 }
+if (f->fe_token && !fe_token) {
+rcu_read_unlock();
+return -EBUSY;
+}
+if (fe_token && f->fe_token != fe_token) {
+rcu_read_unlock();
+return -ESTALE;
+}
 /*
  * T-M6-A3: generation-bounded remove. A DESTROY (or worker) that
  * carries an OLDER generation than the flow currently occupying this
@@ -656,7 +732,7 @@ return -ENOENT;
 if (honor_generation && generation != 0 &&
     f->generation > generation) {
 rcu_read_unlock();
-pr_info_ratelimited("ask: flow: stale DESTROY cookie=0x%llx gen=%u < live gen=%u — ignored\n",
+pr_info_ratelimited("ask: flow: stale DESTROY cookie=0x%llx gen=%llu < live gen=%llu — ignored\n",
     cookie, generation, f->generation);
 return -ESTALE;
 }
@@ -717,16 +793,25 @@ return 0;
 
 int ask_flow_remove(struct ask_flow_table *t, u64 cookie)
 {
-return ask_flow_remove_core(t, cookie, 0, false);
+return ask_flow_remove_core(t, cookie, 0, false, 0);
 }
 EXPORT_SYMBOL_GPL(ask_flow_remove);
 
 int ask_flow_remove_owned(struct ask_flow_table *t, u64 cookie,
-  u32 generation)
+  u64 generation)
 {
-return ask_flow_remove_core(t, cookie, generation, true);
+return ask_flow_remove_core(t, cookie, generation, true, 0);
 }
 EXPORT_SYMBOL_GPL(ask_flow_remove_owned);
+
+int ask_flow_remove_owned_identified(struct ask_flow_table *t, u64 cookie,
+				    u64 generation, u64 fe_token)
+{
+if (!fe_token)
+return -EINVAL;
+return ask_flow_remove_core(t, cookie, generation, true, fe_token);
+}
+EXPORT_SYMBOL_GPL(ask_flow_remove_owned_identified);
 
 /* -------------------------------------------------------------------------
  * Stats
@@ -883,19 +968,23 @@ EXPORT_SYMBOL_GPL(ask_flow_walk);
  * ask_flow_remove() path outside it — which keeps exactly one implementation
  * of teardown ordering, HW release and counter maintenance.
  */
-void ask_flow_flush(struct ask_flow_table *t)
+int ask_flow_flush(struct ask_flow_table *t)
 {
 int removed = 0;
 unsigned int stalls = 0;
 
 if (!t)
-return;
+return -EINVAL;
 
 for (;;) {
-u64 batch[ASK_FLOW_FLUSH_BATCH];
+struct {
+u64 cookie;
+u64 generation;
+} batch[ASK_FLOW_FLUSH_BATCH];
 struct rhashtable_iter iter;
 struct ask_flow *f;
 unsigned int n = 0, i, freed = 0;
+int error = 0;
 
 /* Phase 1 — collect only. No allocation, no sleeping. */
 rhashtable_walk_enter(&t->rht, &iter);
@@ -907,7 +996,9 @@ if (PTR_ERR(f) == -EAGAIN)
 continue;
 break;
 }
-batch[n++] = f->cookie;
+batch[n].cookie = f->cookie;
+batch[n].generation = f->generation;
+n++;
 }
 rhashtable_walk_stop(&iter);
 rhashtable_walk_exit(&iter);
@@ -916,14 +1007,21 @@ if (!n)
 break;
 
 /*
- * Phase 2 — process context, safe to sleep. ask_flow_remove()
- * performs the HW teardown and decrements both counters.
- * -ENOENT means a concurrent remove won the race; that is
- * success from flush's point of view.
+ * Phase 2 — process context, safe to sleep. Generation-bounded removal
+ * cannot remove a newer cookie; tokenized FE owners must be removed by
+ * their identified lifecycle path instead.
  */
 for (i = 0; i < n; i++) {
-if (ask_flow_remove(t, batch[i]) == 0)
+int rc;
+
+if (!batch[i].generation)
+rc = -ESTALE;
+else
+rc = ask_flow_remove_owned(t, batch[i].cookie, batch[i].generation);
+if (!rc)
 freed++;
+else if (rc != -ENOENT && !error)
+error = rc;
 }
 removed += freed;
 
@@ -940,7 +1038,7 @@ removed += freed;
 if (!freed && ++stalls >= ASK_FLOW_FLUSH_MAX_STALLS) {
 ask_pr_warn("flow: flush gave up after %u zero-progress passes on '%s' (%d removed)\n",
     stalls, t->tag ? t->tag : "?", removed);
-break;
+return error ? error : -EAGAIN;
 }
 if (freed)
 stalls = 0;
@@ -949,6 +1047,7 @@ stalls = 0;
 ask_pr_dbg("flow: flushed table '%s' (%d entries, hw_backed now %d)\n",
    t->tag ? t->tag : "?", removed,
    atomic_read(&t->num_hw_backed));
+return 0;
 }
 EXPORT_SYMBOL_GPL(ask_flow_flush);
 

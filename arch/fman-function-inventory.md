@@ -37,8 +37,12 @@ otherwise.
 | 12 | **IP Fragmentation** | **210-only** (unconsumed) | BIT 7 placeholder | None |
 
 Capability bitmask: `0x17 = CC_EXACT_MATCH | HM_NODES | POLICER_TRTCM |
-PARSER_SOFTSEQ`. Bit 3 (`HC_DISPATCH`) is deliberately clear; the Host
-Command doorbell is absent from this blob.
+PARSER_SOFTSEQ`. Bit 3 (`HC_DISPATCH`) is clear because our patch `0086a`
+assigns this mask; it only indicates that the cap-gated dispatch API is not
+enabled, not that the blob lacks Host Command. The `fmd_host_cmd_send()` path is
+distinct from HC SYNC frames sent through the dedicated O/H port. F-284
+confirmed the latter's transport and confirmation on `.185` with 210.10.1;
+it does not prove ehash-walker quiescence. See `FmHcPcdSync()` below.
 
 **[NOTE]** "210-only" labels here describe caps-bit gating and driver
 consumption. Per the main reference doc's entry-point analysis, code for
@@ -127,11 +131,11 @@ active config (`USE_ENHANCED_EHASH=1`).
 
 | Function | Relevance | Notes |
 |---|---|---|
-| `FmHcPcdSync()` | **E, ruled out on this board** | `[SDK]`, read completely. Builds a genuine `HC_HCOR_OPCODE_SYNC` **Host Command frame** and enqueues it via `EnQFrm()` to the FMan's dedicated HC port/queue — a real hardware frame dispatch, not a CCSR register poke. This board's 210.10.1 microcode has **no Host Command support** (`caps=0x17` bit 3 clear, `fmd_host_cmd_send()` returns `-ENXIO`) — this exact mechanism is structurally unavailable regardless of whether it would help. Since `ExternalHashTableAddKey()`'s fast path never calls it anyway, this also weakens (not proves false) the general "missing sync on insert" hypothesis — vendor doesn't need *any* sync, HC-based or otherwise, for a plain insert either. |
-| `FmHcPcdCcDoDynamicChange()` | — | `[SDK]` Same HC-frame pattern, `HC_HCOR_OPCODE_CC` — used for live AD swaps via Host Command; N/A on this board (no HC). |
+| `FmHcPcdSync()` | **E, F-284 transport board-validated; production barrier not integrated** | `[SDK]`, read completely. Builds a genuine `HC_HCOR_OPCODE_SYNC` **Host Command frame** and enqueues it via `EnQFrm()` to the FMan's dedicated HC port/queue — a real hardware frame dispatch, not a CCSR register poke. Correction 2026-11-05: `caps=0x17` bit 3 is self-assigned by our patch `0086a`, not decoded from the microcode. Vendor `.70` runs the same 210.10.1 blob and uses this call as its ehash barrier via O/H port 0x02 (channel 0x809). F-284 (`fman_pcd_hc.c`, debugfs `fman_pcd/<N>/hc`) confirmed HC SYNC completion on `.185` image 0553: 110,101/110,101 frames confirmed; max measured round-trip 161 µs. Production ehash retirement still uses INV0; the next step is an opt-in HC-plus-INV0 barrier in F-269 with fail-closed retention. Since `ExternalHashTableAddKey()`'s fast path never calls it anyway, this evidence does not establish a need for insert-side sync. |
+| `FmHcPcdCcDoDynamicChange()` | — | `[SDK]` Same HC-frame pattern, `HC_HCOR_OPCODE_CC` — used for live AD swaps via Host Command; not ported (only SYNC is probed by F-284). |
 | `FmHcPcdCcDoDynamicChangeWithAging()` / `FmHcPcdCcResetAgingMask()` | — | `[ASK]`-added, aging-specific HC opcodes (`HC_HCOR_OPCODE_CC_UPDATE_WITH_AGING`, `HC_HCOR_OPCODE_CC_AGE_MASK`). This branch's own `fe_ehash` does not request aging — not applicable. |
 | `FmHcGetPort()` | — | Trivial accessor. |
-| `FmHcPcdDbgUcodeHCmd()` / `FmHcPcdDbgUcodeTest()` / `FmHcPcdDMAreadTest()` | T | `[999-5.4]` only, gated `CONFIG_DBG_UCODE_INFRA`/`CONFIG_DMAR_TEST` — debug/DMA-test HC opcodes, all still Host-Command-frame-based (same "structurally unavailable on this board" reasoning as `FmHcPcdSync()` above). |
+| `FmHcPcdDbgUcodeHCmd()` / `FmHcPcdDbgUcodeTest()` / `FmHcPcdDMAreadTest()` | T | `[999-5.4]` only, gated `CONFIG_DBG_UCODE_INFRA`/`CONFIG_DMAR_TEST` — debug/DMA-test HC opcodes, all still Host-Command-frame-based (not ported; see the `FmHcPcdSync()` correction above). |
 
 **`Peripherals/FM/Pcd/fm_manip.c`, `fm_plcr.c`, `Peripherals/FM/fm.c`, `fm_muram.c`, `Peripherals/FM/SP/fm_sp.c`** — swept, low/no relevance
 

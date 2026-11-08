@@ -1,14 +1,14 @@
 diff --git a/interface-definitions/include/version/interfaces-version.xml.i b/interface-definitions/include/version/interfaces-version.xml.i
-index 4ec3a6a..bf518b1 100644
+index bf518b1d7..c214f07bb 100644
 --- a/interface-definitions/include/version/interfaces-version.xml.i
 +++ b/interface-definitions/include/version/interfaces-version.xml.i
 @@ -1,3 +1,3 @@
  <!-- include start from include/version/interfaces-version.xml.i -->
--<syntaxVersion component='interfaces' version='35'></syntaxVersion>
-+<syntaxVersion component='interfaces' version='36'></syntaxVersion>
+-<syntaxVersion component='interfaces' version='36'></syntaxVersion>
++<syntaxVersion component='interfaces' version='37'></syntaxVersion>
  <!-- include end -->
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index b0d63f1..1e9f870 100644
+index 604b72249..9a8c9d1e2 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
 @@ -113,18 +113,6 @@
@@ -31,10 +31,10 @@ index b0d63f1..1e9f870 100644
                  <properties>
                    <help>Enable Receive Packet Steering</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 82c70a8..8e4346d 100644
+index 922e205f5..d393ebd21 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -337,27 +337,16 @@ def set_hw_tc_offload(self, state, warn=True):
+@@ -366,27 +366,16 @@ def set_hw_tc_offload(self, state, warn=True):
              'hw-tc-offload', 'hw-tc-offload', state, enabled, fixed, warn
          )
  
@@ -67,7 +67,7 @@ index 82c70a8..8e4346d 100644
          """
          # Physical ingress FMan hwport IDs (DT-authoritative, all five ports).
          port_map = {
-@@ -372,7 +361,7 @@ def set_ask_offload(self, family_mask: int, vlan: bool = False, bridge: bool = F
+@@ -401,7 +390,7 @@ def set_ask_offload(self, family_mask: int, vlan: bool = False, bridge: bool = F
          if not os.path.exists(tool):
              raise ConfigError(f'ASK offload helper not found: {tool}')
  
@@ -76,7 +76,7 @@ index 82c70a8..8e4346d 100644
          # the production nft hardware flowtable cannot reach a port whose
          # ethtool hw-tc-offload feature is off, even though ask.ko itself
          # reports the port "engaged" -- ask_hw_offload_engage() and the
-@@ -390,14 +379,9 @@ def set_ask_offload(self, family_mask: int, vlan: bool = False, bridge: bool = F
+@@ -419,14 +408,9 @@ def set_ask_offload(self, family_mask: int, vlan: bool = False, bridge: bool = F
          if int(family_mask) != 0:
              self._popen(f'ethtool -K {self.ifname} hw-tc-offload on')
  
@@ -93,7 +93,7 @@ index 82c70a8..8e4346d 100644
          out, rc = self._popen(cmd)
          if rc:
              msg = (out or '').strip().splitlines()
-@@ -776,23 +760,7 @@ def update(self, config):
+@@ -805,23 +789,7 @@ def update(self, config):
          # bit0=IPv4, bit1=IPv6; mask 0 disengages the port.
          ask_mask = ((1 if dict_search('offload.ipv4', config) is not None else 0) |
                      (2 if dict_search('offload.ipv6', config) is not None else 0))
@@ -119,10 +119,10 @@ index 82c70a8..8e4346d 100644
          # RPS - Receive Packet Steering
          # ASK's IPv6/NAT/VLAN misses take the kernel RX softirq path; on this
 diff --git a/src/conf_mode/interfaces_bridge.py b/src/conf_mode/interfaces_bridge.py
-index 4e16005..5e24b89 100755
+index ba98e6ce8..e25880c99 100644
 --- a/src/conf_mode/interfaces_bridge.py
 +++ b/src/conf_mode/interfaces_bridge.py
-@@ -28,7 +28,6 @@
+@@ -26,7 +26,6 @@
  from vyos.configverify import verify_vrf
  from vyos.configverify import verify_mtu_ipv6
  from vyos.ifconfig import BridgeIf
@@ -130,7 +130,7 @@ index 4e16005..5e24b89 100755
  from vyos.configdict import has_address_configured
  from vyos.configdict import has_vrf_configured
  from vyos.configdep import set_dependents
-@@ -218,48 +217,6 @@ def verify(bridge):
+@@ -216,48 +215,6 @@ def verify(bridge):
  def generate(bridge):
      return None
  
@@ -179,7 +179,7 @@ index 4e16005..5e24b89 100755
  def apply(bridge):
      br = BridgeIf(bridge['ifname'])
      if 'deleted' in bridge:
-@@ -268,8 +225,6 @@ def apply(bridge):
+@@ -266,8 +223,6 @@ def apply(bridge):
      else:
          br.update(bridge)
  
@@ -189,10 +189,10 @@ index 4e16005..5e24b89 100755
      if 'member' in bridge:
          if 'interface_remove' in bridge['member']:
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 45a137f..292992a 100755
+index e473e14b0..c39b9dfa8 100644
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -415,30 +415,6 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -417,30 +417,6 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
                  f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
              )
  
@@ -223,7 +223,7 @@ index 45a137f..292992a 100755
          # ASK FMan FE forwarding is bounded to the order-0 RX buffer range on
          # this board. The DPAA1 RX pool is one contiguous 4 KiB order-0 page
          # (F-222); frames above the ~3600 ceiling overrun the one-buffer FMan
-@@ -458,7 +434,7 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -460,7 +436,7 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
                      f'{ASK_OFFLOAD_MTU_MIN} and {ASK_OFFLOAD_MTU_MAX} '
                      f'(configured MTU {mtu} is outside the contiguous-buffer range '
                      f'and can wedge the FMan RX path). Set a supported MTU '

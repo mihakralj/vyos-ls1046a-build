@@ -179,7 +179,7 @@ index 2af7d64..1bd76c2 100644
  	set_bit(NF_FLOW_HW_DEAD, &offload->flow->flags);
  }
  
-@@ -1055,6 +1076,21 @@ static void flow_offload_work_handler(struct work_struct *work)
+@@ -1055,6 +1076,20 @@ static void flow_offload_work_handler(struct work_struct *work)
  		default:
  			WARN_ON_ONCE(1);
  	}
@@ -197,7 +197,6 @@ index 2af7d64..1bd76c2 100644
 +		set_bit(NF_FLOW_HW_DYING, &offload->flow->flags);
 +		flow_offload_work_del(offload);
 +	}
-+
  	smp_mb__before_atomic();
  	clear_bit(NF_FLOW_PENDING, &offload->flow->flags);
  

@@ -39,7 +39,15 @@ done
 sleep 3; d "ping -c 3 -W 2 -I $PORT $PEER >/dev/null 2>&1; echo \$?" | { read r; chk ping-after-mtu "$r" 0; }
 
 echo "== link down/up x3"
+# An admin down drops the IPv6 link-local addresses of the port and its VLAN uppers. VyOS adds them
+# itself (addr_gen_mode=1), so nothing restores them after a raw `ip link` flap and forwarded IPv6
+# stops resolving neighbours. Save them first and put them back after the flap.
+LL=$(d "for i in $PORT \$(ls /sys/class/net | grep '^$PORT\.'); do ip -6 -o addr show dev \$i scope link | awk -v i=\$i '{print i, \$4}'; done")
 for i in 1 2 3; do d "sudo ip link set $PORT down; sleep 2; sudo ip link set $PORT up"; sleep 6; done
+printf '%s\n' "$LL" | while read -r dev addr; do
+  [ -n "$addr" ] && d "ip -6 addr show dev $dev scope link | grep -q ' $addr ' || sudo ip -6 addr add $addr dev $dev" </dev/null
+done
+chk ll-after-flap "$(d "for i in $PORT \$(ls /sys/class/net | grep '^$PORT\.'); do ip -6 -o addr show dev \$i scope link; done | wc -l")" "$(printf '%s\n' "$LL" | grep -c .)"
 d "ping -c 3 -W 2 -I $PORT $PEER >/dev/null 2>&1; echo \$?" | { read r; chk ping-after-flap "$r" 0; }
 chk muram-after-flap "$(used)" "$BASE"
 

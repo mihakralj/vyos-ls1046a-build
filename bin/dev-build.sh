@@ -146,6 +146,7 @@ cmd_push() {
 
 # ── kernel: stage + build + push ──────────────────────────────────────
 cmd_kernel() {
+    [ "${STAGE_ONLY:-0}" != "1" ] || die "STAGE_ONLY=1 cannot be used for a kernel build"
     hdr "Stage kernel tree (KERNEL=$KVER)"
     # stage-kernel.sh handles patches, file injection, defconfig fragment
     # merge AND `make olddefconfig` — it is the single source of truth for

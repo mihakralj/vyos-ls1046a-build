@@ -51,11 +51,8 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 		return -EFAULT;
 	buf[len] = '\0';
 
-	/* T-M6-2 B2: "l2engage <iif>" |
-	 * "l2add <iif> <da> <sa> <tci> <ethertype> <oif>" |
-	 * "l2del <iif> <da> <sa> <tci> <ethertype>" -- hand-armed bridge
-	 * records, bring-up only. <tci> and <ethertype> are hex (0 = untagged,
-	 * 0x0800); F-255's L2_DA key is DA+SA+TCI+EtherType (plan §13.32). */
+	/* B2 "l2engage <iif>" remains available. Manual "l2add" and
+	 * "l2del" are refused until their FE ownership can be tracked. */
 	if (!strncmp(buf, "l2", 2)) {
 		char iif[IFNAMSIZ], oif[IFNAMSIZ], dmac[18], smac[18];
 		u8 da[ETH_ALEN], sa[ETH_ALEN], key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
@@ -93,7 +90,9 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 		 * ask_hw_prewarm_egress_fq()). */
 		ask_hw_prewarm_egress_fq((u8)port);
 	} else if (!strcmp(verb, "disengage")) {
-		ask_hw_offload_disengage((u8)port);
+		rc = ask_hw_offload_disengage((u8)port);
+		if (rc)
+			return rc;
 	} else {
 		return -EINVAL;
 	}

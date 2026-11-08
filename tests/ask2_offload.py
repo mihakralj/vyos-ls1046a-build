@@ -51,10 +51,20 @@ def test_ask2_module_and_ports_armed(lab_report):
     _assert_armed(_bench())
 
 
+def _assert_no_tracked_fe_faults(arm):
+    faulted = re.findall(r"^Faulted ports:.*$", arm, re.MULTILINE)
+    fault_state = re.findall(r"^FE fault/staging:.*$", arm, re.MULTILINE)
+    if (faulted or fault_state or
+            "debugfs FE arm changes disabled: ownership unresolved" in arm):
+        assert faulted == ["Faulted ports: (none)"], arm
+        assert fault_state == ["FE fault/staging: no"], arm
+
+
 def _assert_armed(bench):
     dut = bench.endpoint("dut")
     assert dut.execute(["test", "-d", "/sys/module/ask"]).rc == 0, "ask.ko is not loaded"
     arm = _dut_read(bench, FE_ARM)
+    _assert_no_tracked_fe_faults(arm)
     assert re.search(r"fe_pool engaged:\s+YES", arm), arm
     for interface in (bench.dut["lan_if"], bench.dut["wan_if"]):
         assert PORT_IDS[interface] in arm.split("Armed ports:")[1].split("\n")[0], (interface, arm)
@@ -170,6 +180,7 @@ def test_disengage_is_reversible(lab_report):
     try:
         _set_families(bench, 0)
         arm = _dut_read(bench, FE_ARM)
+        _assert_no_tracked_fe_faults(arm)
         assert "(none)" in arm.split("Armed ports:")[1].split("\n")[0], arm
         end = _iperf(bench, 4, "-u", "-b", "100M", "-l", "1200", "-t", "2")
         assert end["sum"]["lost_packets"] == 0, f"forwarding broke while disengaged: {end['sum']}"

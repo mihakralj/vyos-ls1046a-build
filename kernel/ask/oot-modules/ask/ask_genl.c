@@ -850,8 +850,7 @@ struct ask_flow_table *t = ask_flow_default_table();
 if (!t)
 return -ENOENT;
 
-ask_flow_flush(t);
-return 0;
+return ask_flow_flush(t);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -882,8 +881,8 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 
 	/*
 	 * ASK_ATTR_FAMILY_MASK selects which L3 families this port offloads
-	 * (CLI `offload ipv4` / `offload ipv6`). Absent => both. Set the mask
-	 * BEFORE engage so admission is correct from the first frame. This is
+	 * (CLI `offload ipv4` / `offload ipv6`). Absent => both. The hardware
+	 * layer publishes the mask after a successful engage. This is
 	 * the only per-port policy: VLAN, NAT, PPPoE and bridge offload are
 	 * automatic capabilities of an engaged port (global module-param kill
 	 * switches), so engage carries nothing else.
@@ -893,8 +892,6 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	if (!fam_mask || (fam_mask & ~(ASK_FAM_V4 | ASK_FAM_V6)))
 		return -EINVAL;	/* engage with no/unknown family is nonsensical */
 
-	ask_hw_offload_set_family(port_id, fam_mask);
-
 	/* T-M6-2 B3a (bridge plan D1): a bridge member engages as L2_DA, any
 	 * other port ROUTED. rtnl keeps membership stable across the decision
 	 * and the engage; a port armed with the other profile is switched. */
@@ -902,7 +899,7 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	dev = ask_hw_port_netdev(port_id);
 	rc = ask_hw_offload_engage_role(port_id,
 			dev ? ask_bridge_port_profile(dev) :
-			      FMAN_PCD_FE_PROFILE_ROUTED, false);
+			      FMAN_PCD_FE_PROFILE_ROUTED, false, fam_mask);
 	rtnl_unlock();
 	if (rc) {
 		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
@@ -924,6 +921,7 @@ static int ask_genl_disengage_doit(struct sk_buff *skb, struct genl_info *info)
 {
 struct nlattr *port_attr;
 u8 port_id;
+int rc;
 
 port_attr = info->attrs[ASK_ATTR_PORT_ID];
 if (!port_attr)
@@ -931,7 +929,9 @@ return -EINVAL;
 
 port_id = nla_get_u8(port_attr);
 
-ask_hw_offload_disengage(port_id);
+rc = ask_hw_offload_disengage(port_id);
+if (rc)
+return rc;
 
 ask_pr_info("genl: disengaged port 0x%02x\n", port_id);
 return 0;

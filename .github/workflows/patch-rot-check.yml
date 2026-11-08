@@ -71,10 +71,22 @@ jobs:
             || sudo install -m 0755 "$tmp/mergiraf" /usr/local/bin/mergiraf
           mergiraf --version
 
-      - name: Check vyos-1x patches (cumulative, mirrors ci-setup-vyos1x.sh)
+      # vyos-1x is pinned (bin/ci-setup-vyos1x.sh VYOS1X_COMMIT): the gate is
+      # the pinned commit the build really uses; rolling is the advance
+      # warning for the next pin move (advisory: 027/047 need a port to the
+      # upstream T3871 naming store first, 2026-11-02).
+      - name: Check vyos-1x patches against the pinned commit (cumulative, mirrors ci-setup-vyos1x.sh)
+        run: |
+          pin=$(sed -n 's/^VYOS1X_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' target/bin/ci-setup-vyos1x.sh)
+          [ -n "$pin" ] || { echo "::error::VYOS1X_COMMIT not found in bin/ci-setup-vyos1x.sh"; exit 1; }
+          bash .github/scripts/patch-rot-probe.sh \
+            https://github.com/vyos/vyos-1x.git "$pin" vyos-1x-probe 'target/data/vyos-1x-*.patch' target/data/vyos-1x-files
+
+      - name: Check vyos-1x patches against rolling (advisory, next pin move)
+        continue-on-error: true
         run: |
           bash .github/scripts/patch-rot-probe.sh \
-            https://github.com/vyos/vyos-1x.git rolling vyos-1x-probe 'target/data/vyos-1x-*.patch'
+            https://github.com/vyos/vyos-1x.git rolling vyos-1x-rolling-probe 'target/data/vyos-1x-*.patch' target/data/vyos-1x-files
 
       - name: Check vyos-build patches (cumulative, mirrors ci-setup-vyos-build.sh)
         run: |

@@ -790,6 +790,28 @@ else
     echo "ERROR: $NF_FLOW_HWDEL_PATCH missing"; exit 1
 fi
 
+# Final FLOW_CLS_STATS before the HW delete, so conntrack accounting (and any
+# conntrack-based IPFIX export) keeps the tail of each offloaded flow.
+# Applies after 140 (same file; staged patches apply in sort order).
+NF_FLOW_FINALSTATS_PATCH="$COMMON_FIXES_DIR/145-nf-flow-offload-final-stats-on-delete.patch"
+if [ -f "$NF_FLOW_FINALSTATS_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_FINALSTATS_PATCH") (final HW stats before delete)"
+    cp "$NF_FLOW_FINALSTATS_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "ERROR: $NF_FLOW_FINALSTATS_PATCH missing"; exit 1
+fi
+
+# Owner-specific callback results: REPLACE -EINPROGRESS keeps a reused cookie
+# hardware-live, a failed DESTROY is retried instead of declaring the flow
+# dead, and table free quarantines still-live flows. Applies after 145.
+NF_FLOW_OWNER_PATCH="$COMMON_FIXES_DIR/150-nf-flow-offload-owner-settled-delete.patch"
+if [ -f "$NF_FLOW_OWNER_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_OWNER_PATCH") (owner-settled flowtable delete)"
+    cp "$NF_FLOW_OWNER_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "ERROR: $NF_FLOW_OWNER_PATCH missing"; exit 1
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
@@ -928,6 +950,11 @@ scripts/config --set-val CONFIG_NLS_ISO8859_1 y
 scripts/config --set-val CONFIG_NLS_UTF8 y
 scripts/config --set-val CONFIG_SQUASHFS y
 scripts/config --set-val CONFIG_OVERLAY_FS y
+# FMan/DPAA devres teardown cannot veto a failed hardware drain.
+scripts/config --set-val CONFIG_FSL_FMAN y
+scripts/config --set-val CONFIG_FSL_DPAA y
+scripts/config --set-val CONFIG_FSL_DPAA_ETH y
+scripts/config --disable CONFIG_OF_OVERLAY
 scripts/config --set-val CONFIG_FUSE_FS y
 scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
 scripts/config --set-val CONFIG_FSL_EDMA y
@@ -1016,6 +1043,8 @@ if [ "${KASAN:-false}" = "true" ]; then
     scripts/config --enable CONFIG_KASAN_VMALLOC
     make olddefconfig
 fi
+
+bash "${GITHUB_WORKSPACE:?}/kernel/common/scripts/check-fman-config.sh" .config
 
 LS1046A_POSTDEFCONFIG_EOF
 
@@ -2059,20 +2088,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-167 fe_extc FMFP_EXTC SYNC probe (debugfs, inert by default)"
 fi
 
-# F-168 (2026-08-06, Task #26 follow-up to F-167): F-167's standalone probe
-# board-confirmed FMFP_EXTC is safe/responsive to touch in isolation. F-168
-# wires a real SYNC assertion into fman_port_set_cc_base() -- between the
-# fmbm_rccb write (repoints the AC_CC dispatch target) and the fmbm_rfpne
-# write (enables dispatch into it) -- to test whether this prevents the
-# port-wedge that has reproducibly occurred on every prior arm attempt this
-# session. Scoped to the arm path only (cc_muram_off != 0); teardown is
-# untouched. Depends on F-167's fman_get_fpm_extc()/fman_set_fpm_extc()
-# accessors already being present in fman.c/fman.h.
+# F-168/F-215: patch 0191 already contains the first-port-only RX SYNC;
+# do not insert an unguarded duplicate. F-292 serializes RX/OH port accounting.
 if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_168.py" 2>&1
-    echo "### fman_port.c: F-168 FMFP_EXTC SYNC assertion in fman_port_set_cc_base() (arm path)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_215.py" 2>&1
-    echo "### fman.c/h + fman_port.c: F-215 gate global INV0 SYNC to first engaged port only"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_292.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-cc-sync-gate.py" "$(pwd)" 2>&1
+    echo "### fman_port.c: RX/OH SYNC transition accounting verified"
 fi
 
 # F-169 (2026-08-06, Task #26 / T-M3-R attempt 2 follow-up): T-M3-R attempt 1
@@ -2620,8 +2643,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # models it. After F-269.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_271.py" 2>&1
     echo "### fman_pcd.c: F-271 ehash SYNC retry and counters"
-    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: ehash bucket harness passed"
 fi
 
 # F-270 (engaged-port oversize wedge, 2026-10-22): plain routed ehash records
@@ -2641,6 +2662,117 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_272.py" 2>&1
     echo "### fman_pcd.c: F-272 VLAN insert inner EtherType after PPPoE insert"
+fi
+
+# F-273 (WGFP gate 2, 2026-11-04): export a reader for the F-271
+# ehash_sync_wedged counter so WGFP can detect an unsynced delete. After F-271.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_273.py" 2>&1
+    echo "### fman_pcd.c: F-273 ehash_sync_wedged reader export"
+fi
+
+# F-274 (WGFP gate 3, 2026-11-04): fman_port_disable() returned 0 on a BMI/QMI
+# drain timeout; return -EBUSY like the SDK. Callers audited (see F_274.py);
+# af_xdp_pool attach and 0163 recover re-enable the port on failure.
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_274.py" 2>&1
+    echo "### fman_port.c: F-274 fman_port_disable reports drain timeout"
+    # F-308: runtime RX start margin for ASK2 adaptive alignment (needs F-274).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_308.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-rx-margin.py" "$(pwd)" 2>&1
+    echo "### fman_port.c: F-308 rx start margin harness passed"
+fi
+
+# F-309: WireGuard MAX_QUEUED_PACKETS 1024 -> 4096. The decrypt ring overflowed
+# in bursts (silent DEAD drops, ~1-2 % loss) and capped downloads near 1.9 Gbit/s.
+if [ -f drivers/net/wireguard/messages.h ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_309.py" 2>&1
+    grep -q 'MAX_QUEUED_PACKETS = 4096' drivers/net/wireguard/messages.h
+    echo "### wireguard: F-309 MAX_QUEUED_PACKETS 4096"
+fi
+
+# F-277: do not mutate KeyGen/parser state when F-274 reports a failed
+# RX-port disable in the F-211 IPv6 arm path.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_277.py" 2>&1
+    echo "### fman_pcd_kg.c: F-277 abort v6 arm on port-disable error"
+fi
+
+# F-278: fman_pcd_release() is a void devm action that cannot veto teardown
+# after a failed ehash drain; forbid sysfs unbind of the built-in FMan parent.
+if [ -f drivers/net/ethernet/freescale/fman/fman.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_278.py" 2>&1
+    echo "### fman.c: F-278 suppress FMan sysfs unbind"
+fi
+
+# F-279: tc-flower (0198) and ntuple (0194) keep ehash owners whose delete
+# failed instead of freeing them; dpaa/mac sysfs unbind suppressed so the
+# netdev-freeing dpaa_remove() cannot drop retained owners.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_279.py" 2>&1
+    echo "### dpaa: F-279 flower/ntuple delete ownership"
+fi
+
+# F-280: shared ehash records carry an owner (ASK/flower/ntuple/WGFP) so one
+# subsystem cannot evict or delete a key another still tracks. After F-279.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_280.py" 2>&1
+    echo "### fman_pcd/dpaa: F-280 ehash owner classes"
+fi
+
+# F-281: fman_port has no .remove but devm-maps its BMI/QMI registers, which
+# the MAC and PCD keep using; forbid sysfs unbind of the built-in port driver.
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_281.py" 2>&1
+    echo "### fman_port.c: F-281 suppress FMan port sysfs unbind"
+fi
+
+# F-282: lab-only ehash SYNC timeout injection (ehash_sync_inject countdown,
+# default 0). The real INV0 SYNC still completes; only the outcome is
+# reported as a timeout. After F-273 and the ehash harness.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_282.py" 2>&1
+    echo "### fman_pcd.c: F-282 ehash SYNC timeout injection (default off)"
+    # F-283: opt-in passive telemetry for real INV0 SYNC latency and state.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_283.py" 2>&1
+    echo "### fman_pcd.c: F-283 ehash SYNC timing telemetry (default off)"
+fi
+
+# F-284: link the opt-in Host-Command SYNC probe (fman_pcd_hc.c, staged from
+# kernel/common/files). Inert until "init" is written to fman_pcd/<N>/hc.
+if [ ! -f drivers/net/ethernet/freescale/fman/fman_pcd_hc.c ] ||
+   [ ! -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    echo "### F-286: FATAL: FMan PCD and HC sources are required for ASK ownership"
+    exit 1
+fi
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_hc.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_284.py" 2>&1
+    echo "### fman_pcd: F-284 HC SYNC probe linked (default off)"
+    # F-285: only use HC SYNC as a second ehash barrier when explicitly
+    # enabled; unavailable/uninitialized HC fails closed in F-269.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_285.py" 2>&1
+    echo "### fman_pcd: F-285 opt-in production ehash HC barrier"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_286.py" 2>&1
+    echo "### fman_pcd: F-286 identified FE record ownership"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_287.py" 2>&1
+    echo "### fman_pcd: F-287 debugfs and keyless ownership guards"
+    # F-288: telemetry only (F-177 insert SYNC timeouts, F-269 poison clears).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_288.py" 2>&1
+    echo "### fman_pcd: F-288 insert SYNC timeout and poison-clear counters"
+    # F-289: FE disengage reports errors; unresolved state blocks re-engagement.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_289.py" 2>&1
+    echo "### fman_pcd: F-289 FE disengage error propagation and retained-state engage gate"
+fi
+
+# F-275: retry a transient AF_XDP detach failure without dropping the XSK
+# pool/netdev references. The DPAA callback returns -EAGAIN before teardown
+# when the RX port cannot yet be disabled.
+if [ -f net/xdp/xsk_buff_pool.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_275.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_276.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-xsk-detach-retry.py" \
+        "${GITHUB_WORKSPACE}/kernel/common/files/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c"
+    echo "### AF_XDP detach: F-275 retry with F-276 BMan drain retention"
 fi
 
 : # F-184 folded into patch 0169 (fe_obs_enq_one list_del arm-panic
@@ -2827,6 +2959,39 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-225 v4 ehash key_size 14->46 (dual-lane GEC key)"
 fi
 
+# F-298 updates the CGR wrapper introduced by F-297.
+if [ -d drivers/soc/fsl/qbman ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_296.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-qbman-portal-guard 2>&1
+    echo "### QBMan: F-296 portal sysfs unbind guards verified"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_297.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_298.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_299.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_300.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_303.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_305.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_306.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-update.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-owner.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-retire-snapshot 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-verb 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-shutdown-responses 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --characterize 2>&1
+    echo "### QMan: F-297/F-298/F-300 CGR host containment verified"
+fi
+
+if [ -f drivers/crypto/caam/qi.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_301.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_302.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_304.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-eqcr 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-crypto 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-init 2>&1
+    echo "### CAAM QI: F-301/F-302/F-304 targeted host tests passed"
+fi
+
 # F-210/F-211/F-212 (T-M6-1 IPv6 productization steps 2-4, 2026-08-19):
 # default-OFF, byte-identical-for-v4 production plumbing for the silicon-proven
 # dual-family dispatch recipe. F-210 writes table1's vendor node at gro+16;
@@ -2843,6 +3008,37 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd_kg.c: F-212 gated parser LCV split + restore"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_214.py" 2>&1
     echo "### fman_keygen.c/pcd_kg.c: F-214 gated cls-plan0 pass-all (QLCV fix)"
+    # F-290 replaces the F-214 classification-plan function, so it must run
+    # after F-214 has introduced that function.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_290.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-keygen-window.py" "$(pwd)" 2>&1
+    echo "### fman_keygen: F-290 indirect-window fault harness passed"
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: ehash bucket and INV0/HC barrier harness passed"
+    # F-291 fences FE disarm/recovery/debugfs ownership and exports
+    # fman_pcd_fe_disengage_prepared() for ask.ko. Its harnesses model the
+    # pre-F-293 retrying INV0 helper, so they run before F-293 rewrites it.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_291.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-delete.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-arm-workspace.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: F-291 FE ownership fences and harnesses passed"
+    # F-293 needs F-292's cc_port_lock and serializes every INV0 writer
+    # behind one fail-closed helper (timeout poisons until cold boot).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_293.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-global-sync.py" "$(pwd)" 2>&1
+    echo "### fman.c/fman_pcd.c: F-293 global INV0 serialization harness passed"
+    # F-307 lab walker probe (default off): retains probed deleted records
+    # and reports post-SYNC HITs; needs F-293's final del_key/SYNC form.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_307.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-walker-probe.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: F-307 ehash walker probe harness passed"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
+    echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_295.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
+    echo "### dpaa_eth.c: F-295 offload FQ initialization quarantine verified"
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
     echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
     # T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26, plans/ASK2-VLAN-REARCH.md):

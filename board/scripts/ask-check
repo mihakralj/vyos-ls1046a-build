@@ -300,10 +300,33 @@ if [ -r "$SYNCP/ehash_sync_wedged" ]; then
     s_to=$(cat "$SYNCP/ehash_sync_timeouts" 2>/dev/null || echo 0)
     s_rec=$(cat "$SYNCP/ehash_sync_recovered" 2>/dev/null || echo 0)
     s_wd=$(cat "$SYNCP/ehash_sync_wedged" 2>/dev/null || echo 0)
+    # F-282: injected "timeouts" follow a completed SYNC; only real ones count.
+    s_inj=$(cat "$SYNCP/ehash_sync_injected" 2>/dev/null || echo 0)
     if [ "$s_wd" = 0 ]; then
         record_ok "ehash SYNC never wedged (timeouts=${s_to} recovered_by_retry=${s_rec})"
+    elif [ "$s_inj" -ge "$s_to" ]; then
+        record_warn "ehash SYNC wedged ${s_wd}x, all ${s_to} timeout(s) lab-injected via F-282 ehash_sync_inject (no real silicon timeout)"
     else
         record_fail "ehash SYNC wedged ${s_wd}x (timeouts=${s_to} recovered=${s_rec}): FMan needs a cold boot"
+    fi
+    # F-288: F-177 post-insert SYNC timeouts (never injected) and poison clears.
+    if [ -r "$SYNCP/ehash_insert_sync_timeouts" ]; then
+        s_ins=$(cat "$SYNCP/ehash_insert_sync_timeouts" 2>/dev/null || echo 0)
+        s_pc=$(cat "$SYNCP/ehash_poison_clears" 2>/dev/null || echo 0)
+        if [ "$s_ins" = 0 ]; then
+            record_ok "ehash insert SYNC never timed out (poison_clears=${s_pc})"
+        else
+            record_fail "ehash insert SYNC timed out ${s_ins}x (poison_clears=${s_pc}): FMan stall suspected, cold boot"
+        fi
+    fi
+    # F-289: FE disengages that kept FMan state; re-engage stays refused until drained.
+    if [ -r "$SYNCP/fe_disengage_retained" ]; then
+        s_ret=$(cat "$SYNCP/fe_disengage_retained" 2>/dev/null || echo 0)
+        if [ "$s_ret" = 0 ]; then
+            record_ok "every FE disengage completed (no retained FE state)"
+        else
+            record_fail "FE disengage left state retained ${s_ret}x: port stays disarmed until a drain succeeds, cold boot"
+        fi
     fi
 fi
 

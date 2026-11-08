@@ -23,8 +23,11 @@ KSRC_ABS="${1:?Usage: ci-build-accel-ppp.sh /path/to/kernel-source}"
 DEST_DIR="${2:-$(pwd)}"
 WORKSPACE="${GITHUB_WORKSPACE:-.}"
 
-# Match VyOS upstream package.toml commit
-ACCEL_COMMIT="3e30d9b"
+# Match VyOS upstream package.toml commit (vyos-build linux-kernel
+# package.toml, 2026-10-29). Must contain a9e5f8b (T9187): on >= 6.6 an
+# ETH_P_ALL packet_type needs af_packet_net, else dev_add_pack() WARNs and
+# vlan_mon never registers its tap (seen on .185, image 2026.11.05-0322).
+ACCEL_COMMIT="9c2c18e"
 ACCEL_SRC=""
 
 ### Locate accel-ppp-ng source — reuse build.py's clone if available
@@ -51,7 +54,20 @@ fi
 cd "$ACCEL_SRC"
 git reset --hard HEAD 2>/dev/null || true
 git clean --force -d -x 2>/dev/null || true
-git checkout "$ACCEL_COMMIT" 2>/dev/null || echo "WARNING: commit $ACCEL_COMMIT not found, using HEAD"
+if ! git cat-file -e "${ACCEL_COMMIT}^{commit}" 2>/dev/null; then
+  git fetch --quiet origin 2>&1 || true
+  git cat-file -e "${ACCEL_COMMIT}^{commit}" 2>/dev/null \
+    || git fetch --quiet --unshallow origin 2>&1 || true
+fi
+if ! git checkout --quiet "$ACCEL_COMMIT"; then
+  echo "ERROR: accel-ppp-ng commit $ACCEL_COMMIT not available"
+  exit 1
+fi
+echo "### accel-ppp-ng at $(git rev-parse --short=12 HEAD)"
+if ! grep -q 'vlan_pt.af_packet_net' drivers/vlan_mon/vlan_mon.c; then
+  echo "ERROR: vlan_mon.c lacks the af_packet_net fix (T9187); ETH_P_ALL tap would not register"
+  exit 1
+fi
 
 ### Extract kernel version from built linux-image .deb
 KIMAGE_DEB=$(find "$DEST_DIR" -maxdepth 1 -name 'linux-image-*.deb' ! -name '*-dbg*' | head -1)
@@ -61,6 +77,12 @@ if [ -z "$KIMAGE_DEB" ]; then
 fi
 KVER=$(basename "$KIMAGE_DEB" | sed 's/^linux-image-//; s/_.*$//')
 echo "### Kernel version for module ABI matching: $KVER"
+# modules_prepare and the CMake-driven `make -C $KDIR M=...` regenerate
+# kernel.release; without LOCALVERSION they produce `6.x.y+` vermagic and
+# the board rejects the modules. Inherit the shipped suffix (-vyos).
+case "$KVER" in
+  *-*) export LOCALVERSION="-${KVER#*-}" ;;
+esac
 
 ### Prepare kernel tree for out-of-tree module builds
 echo "### Preparing kernel tree for module builds"
@@ -170,11 +192,42 @@ if ! make -j$(nproc) 2>&1; then
   echo "### Built daemon-only (no ipoe.ko/vlan_mon.ko kernel modules)"
 fi
 
-### Sign kernel modules if sign-modules.sh is available
-SIGN_SCRIPT="$WORKSPACE/vyos-build/scripts/package-build/linux-kernel/sign-modules.sh"
-if [ -x "$SIGN_SCRIPT" ]; then
-  echo "### Signing kernel modules"
-  "$SIGN_SCRIPT" . || echo "WARNING: Module signing failed (continuing)"
+### Sign (then xz-compress) kernel modules with the key vmlinux trusts.
+# Upstream sign-modules.sh silently no-ops unless /tmp/ephemeral.{key,pem}
+# exist, which never happens here; CPack then fails on missing *.ko.xz
+# (vyos-build accel-ppp-ng patch 0001 installs ${KMOD_EXT}=.ko.xz when
+# CONFIG_MODULE_COMPRESS_XZ=y). Sign with the persistent F-217 key, verify
+# vermagic, and compress after signing (--keep so CMake doesn't rebuild an
+# unsigned .ko during cpack's preinstall).
+SIGN_KEY="$WORKSPACE/ask-persistent-keys/signing_key.pem"
+SIGN_CERT="$WORKSPACE/ask-persistent-keys/signing_key.x509"
+if [ ! -f "$SIGN_KEY" ] || [ ! -f "$SIGN_CERT" ]; then
+  SIGN_KEY="$KSRC_ABS/certs/signing_key.pem"
+  SIGN_CERT="$KSRC_ABS/certs/signing_key.x509"
+fi
+SIGN_FILE="$KSRC_ABS/scripts/sign-file"
+KMODS=$(find . -type f -name '*.ko')
+if [ -n "$KMODS" ]; then
+  if [ ! -x "$SIGN_FILE" ] || [ ! -f "$SIGN_KEY" ] || [ ! -f "$SIGN_CERT" ]; then
+    echo "ERROR: cannot sign accel-ppp-ng modules (sign-file=$SIGN_FILE key=$SIGN_KEY cert=$SIGN_CERT)"
+    exit 1
+  fi
+  COMPRESS_XZ=0
+  grep -qx 'CONFIG_MODULE_COMPRESS_XZ=y' "$KSRC_ABS/.config" 2>/dev/null && COMPRESS_XZ=1
+  for mod in $KMODS; do
+    VERMAGIC=$(modinfo -F vermagic "$mod" 2>/dev/null || strings "$mod" | sed -n 's/^vermagic=//p' | head -1)
+    case "$VERMAGIC" in
+      "$KVER "*) ;;
+      *) echo "ERROR: $mod vermagic '$VERMAGIC' does not match kernel $KVER"; exit 1 ;;
+    esac
+    echo "### Signing $mod (vermagic: $VERMAGIC)"
+    "$SIGN_FILE" sha512 "$SIGN_KEY" "$SIGN_CERT" "$mod" || { echo "ERROR: sign-file failed for $mod"; exit 1; }
+    tail -c 28 "$mod" | grep -q '~Module signature appended~' || { echo "ERROR: $mod has no signature after signing"; exit 1; }
+    if [ "$COMPRESS_XZ" -eq 1 ]; then
+      rm -f "$mod.xz"
+      xz --compress --keep --check=crc32 --lzma2=dict=1MiB "$mod" || { echo "ERROR: xz failed for $mod"; exit 1; }
+    fi
+  done
 fi
 
 ### Package with cpack

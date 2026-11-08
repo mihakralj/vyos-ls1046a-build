@@ -32,6 +32,7 @@ import sys
 
 PCD = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
 DONE = "fman_pcd_ehash_bucket_publish("
+SAFETY_DONE = "F-269 timeout ownership quarantine"
 
 EDITS = [
     ('#include <linux/dmapool.h>\n',
@@ -68,6 +69,517 @@ EDITS = [
      '/*\n * F-117: delete ONE flow whose key matches @key. O(bucket) since F-264.\n * F-269: rebuild the bucket without the flow and switch its head, then\n * SYNC, then free the record and the replaced nodes.\n * Caller holds pcd->fe_lock (same contract as add_key).\n */\nstatic int fman_pcd_ehash_del_key(struct fman_pcd_ehash_table *t,\n\t\t\t\t  const u8 *key, u8 key_size)\n{\n\tstruct fman_pcd_ehash_flow *x = NULL, *f;\n\tstruct fman_pcd_ehash_cu *old_cu = NULL;\n\tu32 extc;\n\n\tif (!t || !key || key_size == 0 || key_size != t->key_size)\n\t\treturn -EINVAL;\n\n\t/* F-264: only the key\'s own bucket can hold it. */\n\thlist_for_each_entry(f, &t->bidx[fman_pcd_ehash_bucket_index(key, key_size,\n\t\t\t\t\t\tt->hash_shift, t->hash_mask)], bnode) {\n\t\tif (f->key_size == key_size &&\n\t\t    !memcmp((u8 *)f->record + FMAN_EHASH_FLOW_KEY_OFF,\n\t\t\t    key, key_size)) {\n\t\t\tx = f;\n\t\t\tbreak;\n\t\t}\n\t}\n\tif (!x)\n\t\treturn -ENOENT;\n\n\tif (fman_pcd_ehash_bucket_publish(t, x->index, x, &old_cu)) {\n\t\t/* No memory for new nodes: take the bucket out of hardware.\n\t\t * Its other flows stay in software until its next rebuild. */\n\t\tWRITE_ONCE(*x->bucket_h, 0);\n\t\told_cu = t->cu[x->index];\n\t\tt->cu[x->index] = NULL;\n\t\tpr_warn_ratelimited("fman_pcd: F-269 bucket %u rebuild failed: bucket left to software\\n",\n\t\t\t\t    x->index);\n\t}\n\n\tlist_del(&x->node);\n\thlist_del(&x->bnode);\t/* F-264 */\n\n\t/* F-254: a lookup that read the old head may still be in flight. */\n\tif (fman_pcd_ehash_sync(t, &extc)) {\n\t\tconst u8 *f256_r = x->record;\n\n\t\t/* F-256: a stuck task may still reference the record or the\n\t\t * replaced nodes -- keep them (leak; the FMan is wedged and\n\t\t * needs a cold boot) and log what the record held. */\n\t\tpr_warn("fman_pcd: F-256 delete SYNC timed out (fmfp_extc=0x%08x): record %pad kept, not freed\\n",\n\t\t\textc, &x->record_dma);\n\t\tpr_warn("fman_pcd: F-256 record %pad hdr+key %64phN\\n",\n\t\t\t&x->record_dma, f256_r);\n\t\tpr_warn("fman_pcd: F-256 record %pad stats@256 %24phN\\n",\n\t\t\t&x->record_dma, f256_r + 256);\n\t\tkfree(old_cu);\n\t\tkfree(x);\n\t\treturn 0;\n\t}\n\n\t/* The block holds the record and its FE context (F-267). */\n\tfman_pcd_ehash_cu_free(t, old_cu);\n\tdma_pool_free(t->rec_pool, x->record, x->record_dma);\n\tkfree(x);\n\treturn 0;\n}\n', 1),
 ]
 
+SAFETY_EDITS = [
+    ('''struct fman_pcd_ehash_cu {
+\tunsigned int n;
+\tstruct {
+\t\tvoid *va;
+\t\tdma_addr_t dma;
+\t} node[];
+};
+''',
+     '''struct fman_pcd_ehash_cu {
+\tstruct list_head quarantine_node;
+\tunsigned int n;
+\tstruct {
+\t\tvoid *va;
+\t\tdma_addr_t dma;
+\t} node[];
+};
+''', 1),
+    ('''\tstruct fman_pcd_ehash_cu **cu;\t/* F-269: published nodes per bucket */
+};
+''',
+     '''\tstruct fman_pcd_ehash_cu **cu;\t/* F-269: published nodes per bucket */
+\tstruct list_head quarantined_cu;
+\tstruct list_head quarantined_flows;
+\tbool poisoned;
+\tbool draining;
+};
+''', 1),
+    ('''\tINIT_LIST_HEAD(&t->flows);
+\tt->dev = fman_get_dev(pcd->fman);\t/* F-142 */
+''',
+     '''\tINIT_LIST_HEAD(&t->flows);
+\tINIT_LIST_HEAD(&t->quarantined_cu);
+\tINIT_LIST_HEAD(&t->quarantined_flows);
+\tt->dev = fman_get_dev(pcd->fman);\t/* F-142 */
+''', 1),
+    ('''\t\tcu = kzalloc(struct_size(cu, node, nodes), GFP_KERNEL);
+\t\tif (!cu)
+\t\t\treturn -ENOMEM;
+\t\tfor (i = 0; i < nodes; i++) {
+''',
+     '''\t\tcu = kzalloc(struct_size(cu, node, nodes), GFP_KERNEL);
+\t\tif (!cu)
+\t\t\treturn -ENOMEM;
+\t\tINIT_LIST_HEAD(&cu->quarantine_node);
+\t\tfor (i = 0; i < nodes; i++) {
+''', 1),
+    ('''static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+\t\t\t\t  const u8 *key, u8 key_size,
+\t\t\t\t  u32 enq_off, u32 fqid, bool stats,
+\t\t\t\t  const u8 *l2_dst, const u8 *l2_src,
+\t\t\t\t  u16 eth_type,
+\t\t\t\t  const struct fman_pcd_nat_params *nat,
+\t\t\t\t  const struct fman_pcd_vlan_params *vlan)
+{
+\tint frag_bpid = 0;\t/* F-262 */
+''',
+     '''static int fman_pcd_ehash_recover(struct fman_pcd_ehash_table *t)
+{
+\tstruct fman_pcd_ehash_cu *cu, *cu_tmp;
+\tstruct fman_pcd_ehash_flow *flow, *flow_tmp;
+\tu32 extc;
+
+\tif (!t->poisoned)
+\t\treturn 0;
+\tif (fman_pcd_ehash_sync(t, &extc))
+\t\treturn -ETIMEDOUT;
+
+\tlist_for_each_entry_safe(cu, cu_tmp, &t->quarantined_cu,
+\t\t\t\t quarantine_node) {
+\t\tlist_del(&cu->quarantine_node);
+\t\tfman_pcd_ehash_cu_free(t, cu);
+\t}
+\tlist_for_each_entry_safe(flow, flow_tmp, &t->quarantined_flows, node) {
+\t\tlist_del(&flow->node);
+\t\tdma_pool_free(t->rec_pool, flow->record, flow->record_dma);
+\t\tkfree(flow);
+\t}
+\tt->poisoned = false;
+\treturn 0;
+}
+
+static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+\t\t\t\t  const u8 *key, u8 key_size,
+\t\t\t\t  u32 enq_off, u32 fqid, bool stats,
+\t\t\t\t  const u8 *l2_dst, const u8 *l2_src,
+\t\t\t\t  u16 eth_type,
+\t\t\t\t  const struct fman_pcd_nat_params *nat,
+\t\t\t\t  const struct fman_pcd_vlan_params *vlan)
+{
+\tint frag_bpid = 0;\t/* F-262 */
+
+
+''', 1),
+    ('''\t\tif (key_size == 0 || key_size != t->key_size)
+\t\treturn -EINVAL;
+\tif (key_size > FMAN_EHASH_FLOW_KEY_MAX)
+''',
+     '''\t\tif (key_size == 0 || key_size != t->key_size)
+\t\treturn -EINVAL;
+\tif (t->draining)
+\t\treturn -ESHUTDOWN;
+\tif (fman_pcd_ehash_recover(t))
+\t\treturn -ETIMEDOUT;
+\tif (key_size > FMAN_EHASH_FLOW_KEY_MAX)
+''', 1),
+    ('''\t\tif (fman_pcd_ehash_sync(t, &extc))
+\t\t\tpr_warn_ratelimited("fman_pcd: F-269 insert SYNC timed out (fmfp_extc=0x%08x): bucket %u old nodes kept\\n",
+\t\t\t\t\t    extc, index);
+\t\telse
+\t\t\tfman_pcd_ehash_cu_free(t, old_cu);
+''',
+     '''\t\tif (fman_pcd_ehash_sync(t, &extc)) {
+\t\t\tlist_add_tail(&old_cu->quarantine_node,
+\t\t\t\t      &t->quarantined_cu);
+\t\t\tt->poisoned = true;
+\t\t\tpr_warn_ratelimited("fman_pcd: F-269 insert SYNC timed out (fmfp_extc=0x%08x): bucket %u generation quarantined\\n",
+\t\t\t\t\t    extc, index);
+\t\t} else {
+\t\t\tfman_pcd_ehash_cu_free(t, old_cu);
+\t\t}
+''', 1),
+    ('''\tif (!t || !key || key_size == 0 || key_size != t->key_size)
+\t\treturn -EINVAL;
+
+\t/* F-264: only the key's own bucket can hold it. */
+''',
+     '''\tif (!t || !key || key_size == 0 || key_size != t->key_size)
+\t\treturn -EINVAL;
+\tif (t->draining)
+\t\treturn -ESHUTDOWN;
+\tif (fman_pcd_ehash_recover(t))
+\t\treturn -ETIMEDOUT;
+
+\t/* F-264: only the key's own bucket can hold it. */
+''', 1),
+    ('''\t\tkfree(old_cu);
+\t\tkfree(x);
+\t\treturn 0;
+\t}
+
+\t/* The block holds the record and its FE context (F-267). */
+''',
+     '''\t\tif (old_cu)
+\t\t\tlist_add_tail(&old_cu->quarantine_node,
+\t\t\t\t      &t->quarantined_cu);
+\t\tlist_add_tail(&x->node, &t->quarantined_flows);
+\t\tt->poisoned = true;
+\t\treturn -ETIMEDOUT;
+\t}
+
+\t/* The block holds the record and its FE context (F-267). */
+''', 1),
+    ('''\tif (!pcd)
+\t\treturn;
+
+\tlist_for_each_entry(t, &pcd->fe_ehash_tables, node)
+\t\tfman_pcd_ehash_flow_drain(t);
+}
+''',
+     '''\tif (!pcd)
+\t\treturn 0;
+
+\tlist_for_each_entry(t, &pcd->fe_ehash_tables, node) {
+\t\tint err = fman_pcd_ehash_flow_drain(t);
+
+\t\tif (err)
+\t\t\treturn err;
+\t}
+\treturn 0;
+}
+''', 1),
+    ('''static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t);
+''',
+     '''static int fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t);
+''', 1),
+    ('''static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t)
+{
+\tstruct fman_pcd_ehash_flow *flow, *tmp;
+\tu32 i;
+
+\tlist_for_each_entry_safe(flow, tmp, &t->flows, node) {
+\t\tWRITE_ONCE(*flow->bucket_h, 0);
+\t\tlist_del(&flow->node);
+\t\thlist_del(&flow->bnode);\t/* F-264 */
+\t\tdma_pool_free(t->rec_pool, flow->record, flow->record_dma);
+\t\tkfree(flow);
+\t}
+\tfor (i = 0; i <= t->hash_mask; i++) {
+\t\tfman_pcd_ehash_cu_free(t, t->cu[i]);\t/* F-269 */
+\t\tt->cu[i] = NULL;
+\t}
+}
+''',
+     '''static int fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t)
+{
+\tstruct fman_pcd_ehash_flow *flow, *flow_tmp;
+\tstruct fman_pcd_ehash_cu *cu, *cu_tmp;
+\tu32 i;
+\tu32 extc;
+
+\tt->draining = true;
+\tfor (i = 0; i <= t->hash_mask; i++) {
+\t\tu64 *head = (u64 *)((u8 *)t->table_base +
+\t\t\t\t    (size_t)i * FMAN_EHASH_BUCKET_SIZE);
+
+\t\tWRITE_ONCE(*head, 0);
+\t}
+\tdma_wmb();
+\tif (fman_pcd_ehash_sync(t, &extc))
+\t\treturn -ETIMEDOUT;
+
+\tlist_for_each_entry_safe(flow, flow_tmp, &t->flows, node) {
+\t\tlist_del(&flow->node);
+\t\thlist_del(&flow->bnode);
+\t\tdma_pool_free(t->rec_pool, flow->record, flow->record_dma);
+\t\tkfree(flow);
+\t}
+\tlist_for_each_entry_safe(flow, flow_tmp, &t->quarantined_flows, node) {
+\t\tlist_del(&flow->node);
+\t\tdma_pool_free(t->rec_pool, flow->record, flow->record_dma);
+\t\tkfree(flow);
+\t}
+\tfor (i = 0; i <= t->hash_mask; i++) {
+\t\tfman_pcd_ehash_cu_free(t, t->cu[i]);
+\t\tt->cu[i] = NULL;
+\t}
+\tlist_for_each_entry_safe(cu, cu_tmp, &t->quarantined_cu,
+\t\t\t\t quarantine_node) {
+\t\tlist_del(&cu->quarantine_node);
+\t\tfman_pcd_ehash_cu_free(t, cu);
+\t}
+\tt->poisoned = false;
+\tt->draining = false;
+\treturn 0;
+}
+''', 1),
+    ('''static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+\t\t\t\t      struct fman_pcd_ehash_table *t);
+''',
+     '''static int fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+\t\t\t\t     struct fman_pcd_ehash_table *t);
+''', 1),
+    ('''static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+\t\t\t\t      struct fman_pcd_ehash_table *t)
+{
+\tlist_del(&t->node);
+\tfman_pcd_ehash_flow_drain(t);
+\t/* Leaves the pages of records F-256 kept allocated. */
+\tdma_pool_destroy(t->rec_pool);
+\tdma_pool_destroy(t->cu_pool);\t/* F-269 */
+\tdma_free_coherent(t->dev, t->table_size, t->table_base, t->table_dma);
+\tkvfree(t->bidx);\t/* F-264 */
+\tkvfree(t->cu);\t/* F-269 */
+\tkfree(t);
+\tfman_pcd_ehash_int_buf_put(pcd);
+}
+''',
+     '''static int fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+\t\t\t\t     struct fman_pcd_ehash_table *t)
+{
+\tint err;
+
+\terr = fman_pcd_ehash_flow_drain(t);
+\tif (err)
+\t\treturn err;
+\tlist_del(&t->node);
+\t/* Leaves the pages of records F-256 kept allocated. */
+\tdma_pool_destroy(t->rec_pool);
+\tdma_pool_destroy(t->cu_pool);\t/* F-269 */
+\tdma_free_coherent(t->dev, t->table_size, t->table_base, t->table_dma);
+\tkvfree(t->bidx);\t/* F-264 */
+\tkvfree(t->cu);\t/* F-269 */
+\tkfree(t);
+\tfman_pcd_ehash_int_buf_put(pcd);
+\treturn 0;
+}
+''', 1),
+    ('''static void fman_pcd_ehash_drain(struct fman_pcd *pcd)
+{
+\tstruct fman_pcd_ehash_table *t, *tmp;
+
+\tlist_for_each_entry_safe(t, tmp, &pcd->fe_ehash_tables, node)
+\t\tfman_pcd_ehash_table_free(pcd, t);
+}
+''',
+     '''static int fman_pcd_ehash_drain(struct fman_pcd *pcd)
+{
+\tstruct fman_pcd_ehash_table *t, *tmp;
+
+\tlist_for_each_entry_safe(t, tmp, &pcd->fe_ehash_tables, node) {
+\t\tint err = fman_pcd_ehash_table_free(pcd, t);
+
+\t\tif (err)
+\t\t\treturn err;
+\t}
+\treturn 0;
+}
+''', 1),
+    ('''static void fman_pcd_ehash_flow_clear_all(struct fman_pcd *pcd)''',
+     '''static int fman_pcd_ehash_flow_clear_all(struct fman_pcd *pcd)''', 1),
+    ('''\t\tfman_pcd_ehash_flow_clear_all(pcd);
+\t\tmutex_unlock(&pcd->fe_lock);
+\t\treturn count;
+''',
+     '''\t\terr = fman_pcd_ehash_flow_clear_all(pcd);
+\t\tmutex_unlock(&pcd->fe_lock);
+\t\treturn err ? err : count;
+''', 1),
+    ('''\t\tfman_pcd_ehash_flow_clear_all(pcd);
+\t\tmutex_unlock(&pcd->fe_lock);
+\t\treturn 0;
+''',
+     '''\t\tint err = fman_pcd_ehash_flow_clear_all(pcd);
+
+\t\tmutex_unlock(&pcd->fe_lock);
+\t\treturn err;
+''', 1),
+]
+
+
+CALLER_DONE = "F-269 fail-closed teardown callers"
+CALLER_EDITS = [
+    ('''static int fman_pcd_fe_port_del(struct fman_pcd *pcd, u8 port_id)
+{
+\tstruct muram_info *muram = fman_get_muram(pcd->fman);
+\tstruct fman *fman = fman_pcd_get_fman(pcd);
+\tstruct fman_pcd_fe_port *fp;
+\tstruct fman_port *port;
+\tu32 params_off;
+''',
+     '''static int fman_pcd_fe_port_del(struct fman_pcd *pcd, u8 port_id)
+{
+\tstruct muram_info *muram = fman_get_muram(pcd->fman);
+\tstruct fman *fman = fman_pcd_get_fman(pcd);
+\tstruct fman_pcd_fe_port *fp;
+\tstruct fman_port *port;
+\tu32 params_off;
+\tint err;
+''', 1),
+    ('''\tfp = fman_pcd_fe_port_find(pcd, port_id);
+\tif (!fp)
+\t\treturn -ENOENT;
+
+\t/*
+\t * Inverse of set(): unhook the ctrl-params page management index
+''',
+     '''\tfp = fman_pcd_fe_port_find(pcd, port_id);
+\tif (!fp)
+\t\treturn -ENOENT;
+\tif (fp->table_v4) {
+\t\terr = fman_pcd_ehash_table_free(pcd, fp->table_v4);
+\t\tif (err)
+\t\t\treturn err;
+\t\tfp->table_v4 = NULL;
+\t}
+
+\t/*
+\t * Inverse of set(): unhook the ctrl-params page management index
+''', 1),
+    ('''\t/* F-220(port-del-free): release this port's v4 table instance
+\t * (list_del + flow drain + dma_free + int-buf refcount put). */
+\tif (fp->table_v4) {
+\t\tfman_pcd_ehash_table_free(pcd, fp->table_v4);
+\t\tfp->table_v4 = NULL;
+\t}
+''', '', 1),
+    ('''static void fman_pcd_fe_port_drain(struct fman_pcd *pcd)
+{
+\tstruct fman_pcd_fe_port *fp, *tmp;
+
+\tlist_for_each_entry_safe(fp, tmp, &pcd->fe_ports, node) {
+\t\tfman_pcd_muram_free(pcd, fp->mgmt_off, fp->mgmt_size);
+''',
+     '''static int fman_pcd_fe_port_drain(struct fman_pcd *pcd)
+{
+\tstruct fman_pcd_fe_port *fp, *tmp;
+
+\tlist_for_each_entry_safe(fp, tmp, &pcd->fe_ports, node) {
+\t\tint err;
+
+\t\tif (fp->table_v4) {
+\t\t\terr = fman_pcd_ehash_table_free(pcd, fp->table_v4);
+\t\t\tif (err)
+\t\t\t\treturn err;
+\t\t\tfp->table_v4 = NULL;
+\t\t}
+\t\tfman_pcd_muram_free(pcd, fp->mgmt_off, fp->mgmt_size);
+''', 1),
+    ('''\t\tif (fp->table_v4) {
+\t\t\tfman_pcd_ehash_table_free(pcd, fp->table_v4);\t/* F-220(port-drain-free) */
+\t\t\tfp->table_v4 = NULL;
+\t\t}
+\t\tlist_del(&fp->node);
+\t\tkfree(fp);
+\t}
+}
+''',
+     '''\t\tlist_del(&fp->node);
+\t\tkfree(fp);
+\t}
+\treturn 0;
+}
+''', 1),
+    ('''static int __fman_pcd_fe_arm_disengage(struct fman_pcd *pcd,
+\t\t\t\t       unsigned int port_id)
+{
+\tif (port_id < 0x08 || port_id >= 0x28)
+''',
+     '''static int __fman_pcd_fe_arm_disengage(struct fman_pcd *pcd,
+\t\t\t\t       unsigned int port_id)
+{
+\tint err;
+
+\tif (port_id < 0x08 || port_id >= 0x28)
+''', 1),
+    ('''\tif (pcd->fe_arming_v4_table) {
+\t\tfman_pcd_ehash_table_free(pcd, pcd->fe_arming_v4_table);
+\t\tpcd->fe_arming_v4_table = NULL;
+\t}
+\tfsleep(5000);
+\tfman_pcd_fe_adv_offload(pcd, (u8)port_id, false);\t/* F-262 */
+\tfman_pcd_fe_port_del(pcd, (u8)port_id);
+''',
+     '''\tif (pcd->fe_arming_v4_table) {
+\t\terr = fman_pcd_ehash_table_free(pcd, pcd->fe_arming_v4_table);
+\t\tif (err)
+\t\t\treturn err;
+\t\tpcd->fe_arming_v4_table = NULL;
+\t}
+\tfsleep(5000);
+\tfman_pcd_fe_adv_offload(pcd, (u8)port_id, false);\t/* F-262 */
+\terr = fman_pcd_fe_port_del(pcd, (u8)port_id);
+\tif (err && err != -ENOENT)
+\t\treturn err;
+''', 1),
+    ('''void fman_pcd_release(struct fman_pcd *pcd)
+{
+\tif (!pcd)
+''',
+     '''void fman_pcd_release(struct fman_pcd *pcd)
+{
+\tint err;
+
+\tif (!pcd)
+''', 1),
+    ('''\tfman_pcd_fe_port_drain(pcd);
+\tWARN_ON(!list_empty(&pcd->fe_ports));
+\tfman_pcd_ehash_drain(pcd);
+\tWARN_ON(!list_empty(&pcd->fe_ehash_tables));
+''',
+     '''\terr = fman_pcd_fe_port_drain(pcd);
+\tif (!err)
+\t\terr = fman_pcd_ehash_drain(pcd);
+\tif (err) {
+\t\tdev_crit(fman_get_dev(pcd->fman),
+\t\t\t "fman_pcd: teardown SYNC failed; retaining PCD and DMA owners (%d)\\n",
+\t\t\t err);
+\t\treturn;
+\t}
+\tWARN_ON(!list_empty(&pcd->fe_ports));
+\tWARN_ON(!list_empty(&pcd->fe_ehash_tables));
+''', 1),
+    ('''key_size);
+\t}
+''',
+     '''key_size);
+\t\telse if (drc != -ENOENT)
+\t\t\treturn drc;
+\t}
+''', 1),
+]
+
+CLEAR_DONE = "F-269 clear error propagation"
+CLEAR_EDITS = [
+('''	else if (!strncmp(buf, "clear", 5)) {
+		fman_pcd_ehash_drain(pcd);
+		err = 0;
+	}''',
+ '''	else if (!strncmp(buf, "clear", 5)) {
+		/* F-269 clear error propagation */
+		err = fman_pcd_ehash_drain(pcd);
+	}''', 1),
+]
+
+FULL_DISENGAGE_DONE = "F-269 full-disengage error propagation"
+FULL_DISENGAGE_EDITS = [
+('''    /* Step 1-3: SDK-correct ordered teardown (same as fe_arm disengage) */
+    __fman_pcd_fe_arm_disengage(pcd, (u8)port_id);
+
+    /* Step 4: de-wedge the port (zero workspace, re-init ring, restart BMI) */
+    ret = fman_pcd_port_recover(pcd, (u8)port_id);
+    if (ret)
+        pr_warn("fman_pcd fe_disengage_full: port 0x%02x recover returned %d\\n",
+            port_id, ret);
+''',
+ '''    /* F-269 full-disengage error propagation */
+    ret = __fman_pcd_fe_arm_disengage(pcd, (u8)port_id);
+    if (ret)
+        return ret;
+
+    /* Step 4: de-wedge the port (zero workspace, re-init ring, restart BMI) */
+    ret = fman_pcd_port_recover(pcd, (u8)port_id);
+    if (ret) {
+        pr_warn("fman_pcd fe_disengage_full: port 0x%02x recover returned %d\\n",
+            port_id, ret);
+        return ret;
+    }
+''', 1),
+]
+
 
 def main():
     try:
@@ -76,23 +588,92 @@ def main():
     except FileNotFoundError:
         print(f"### F-269: FATAL: {PCD} not found")
         sys.exit(1)
-    if DONE in src:
-        print("### F-269: already applied")
-        return
-    for i, (old, _new, want) in enumerate(EDITS):
-        n = src.count(old)
-        if n != want:
-            print(f"### F-269: FATAL: anchor {i} in {PCD} found {n} times (expected {want})")
-            sys.exit(1)
-    for old, new, _want in EDITS:
-        src = src.replace(old, new)
-    for gone in ("prev_head", "old_native"):
-        if gone in src:
-            print(f"### F-269: FATAL: chained-record state survived: {gone}")
-            sys.exit(1)
+    if DONE not in src:
+        for i, (old, _new, want) in enumerate(EDITS):
+            n = src.count(old)
+            if n != want:
+                print(f"### F-269: FATAL: anchor {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        for old, new, _want in EDITS:
+            src = src.replace(old, new)
+        for gone in ("prev_head", "old_native"):
+            if gone in src:
+                print(f"### F-269: FATAL: chained-record state survived: {gone}")
+                sys.exit(1)
+    else:
+        print("### F-269: cumulative-node rewrite already applied")
+
+    if SAFETY_DONE not in src:
+        for i, (old, _new, want) in enumerate(SAFETY_EDITS):
+            n = src.count(old)
+            if n != want:
+                print(f"### F-269: FATAL: ownership anchor {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        for old, new, _want in SAFETY_EDITS:
+            src = src.replace(old, new)
+        src = src.replace("bool poisoned;\n",
+                          "bool poisoned;\t/* F-269 timeout ownership quarantine */\n",
+                          1)
+        src = src.replace(
+            "/* A timeout poisons all mutations until a later SYNC covers every saved\n",
+            "/* F-269 timeout ownership quarantine: a timeout poisons all mutations until a later SYNC covers every saved\n",
+            1)
+    else:
+        print("### F-269: timeout ownership quarantine already applied")
+
+    if CALLER_DONE not in src:
+        for i, (old, _new, want) in enumerate(CALLER_EDITS):
+            n = src.count(old)
+            if n != want:
+                print(f"### F-269: FATAL: teardown caller anchor {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        for old, new, _want in CALLER_EDITS:
+            src = src.replace(old, new)
+        src = src.replace(
+            "static int fman_pcd_fe_port_del(",
+            "/* F-269 fail-closed teardown callers */\nstatic int fman_pcd_fe_port_del(",
+            1)
+    else:
+        print("### F-269: fail-closed teardown callers already applied")
+
+    if CLEAR_DONE not in src:
+        for i, (old, _new, want) in enumerate(CLEAR_EDITS):
+            n = src.count(old)
+            if n != want:
+                print(f"### F-269: FATAL: clear propagation anchor {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        for old, new, _want in CLEAR_EDITS:
+            src = src.replace(old, new, 1)
+    else:
+        for i, (_old, new, want) in enumerate(CLEAR_EDITS):
+            n = src.count(new)
+            if n != want:
+                print(f"### F-269: FATAL: applied clear propagation {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        print("### F-269: clear error propagation already applied")
+
+    if FULL_DISENGAGE_DONE not in src:
+        for i, (old, _new, want) in enumerate(FULL_DISENGAGE_EDITS):
+            n = src.count(old)
+            if n != want:
+                print(f"### F-269: FATAL: full-disengage anchor {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        for old, new, _want in FULL_DISENGAGE_EDITS:
+            src = src.replace(old, new, 1)
+    else:
+        for i, (_old, new, want) in enumerate(FULL_DISENGAGE_EDITS):
+            n = src.count(new)
+            if n != want:
+                print(f"### F-269: FATAL: applied full-disengage {i} in {PCD} found {n} times (expected {want})")
+                sys.exit(1)
+        print("### F-269: full-disengage error propagation already applied")
+
+    src = src.replace("no SYNC, as before F-269",
+                      "completed FPM SYNC required before reclaim", 1)
+
     with open(PCD, "w") as f:
         f.write(src)
-    print("### F-269: ehash buckets publish vendor cumulative nodes (copy-on-write, SYNC before free)")
+    print("### F-269: cumulative buckets with timeout-generation quarantine")
 
 
 if __name__ == "__main__":

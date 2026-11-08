@@ -57,13 +57,36 @@ cli(){ # VyOS config commands -> one commit; a script-template commit returns 0 
   if grep -qi 'commit failed' <<<"$out"; then echo "$out"; return 1; fi
 }
 offload(){ # on|off: ASK engage on eth3/eth4, both families (the rig config)
-  local v=set i f c=()
+  local v=set i f state armed faulted fault_state c=()
   [ $1 = off ] && v=delete
   for i in eth3 eth4; do for f in ipv4 ipv6; do c+=("$v interfaces ethernet $i offload $f"); done; done
   cli "${c[@]}" || { say "offload $1: commit failed"; exit 1; }
   sleep 3
-  if [ $1 = on ]; then $DUT 'sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm' | grep -E '^Armed ports:' | grep -q '0x10.*0x11' || { say "re-engage did not arm 0x10 0x11"; exit 1; }; off=0
-  else $DUT 'sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm' | grep -qE 'Armed ports:.*0x1[01]' && { say "disengage left a port armed"; exit 1; }; off=1; fi
+  state=$($DUT 'sudo cat /sys/kernel/debug/fman_pcd/0/fe_arm') \
+    || { say "FE arm read failed"; exit 1; }
+  armed=$(grep '^Armed ports:' <<<"$state" || true)
+  [[ "$armed" == "Armed ports: (none)" ||
+     "$armed" =~ ^Armed[[:space:]]ports:([[:space:]]0x(0[89a-f]|1[0-9a-f]|2[0-7]))+$ ]] \
+    || { say "FE arm readback malformed"; exit 1; }
+  faulted=$(grep '^Faulted ports:' <<<"$state" || true)
+  fault_state=$(grep '^FE fault/staging:' <<<"$state" || true)
+  if [[ -n "$faulted" || -n "$fault_state" ||
+        "$state" == *"debugfs FE arm changes disabled: ownership unresolved"* ]]; then
+    [[ "$faulted" == "Faulted ports: (none)" &&
+       "$fault_state" == "FE fault/staging: no" ]] \
+      || { say "FE fault/staging state unresolved"; exit 1; }
+  else
+    say "warning: FE fault/staging state unavailable"
+  fi
+  if [ $1 = on ]; then
+    [[ " $armed " == *" 0x10 "* && " $armed " == *" 0x11 "* ]] \
+      || { say "re-engage did not arm 0x10 0x11"; exit 1; }
+    off=0
+  else
+    [[ " $armed " != *" 0x10 "* && " $armed " != *" 0x11 "* ]] \
+      || { say "disengage left a port armed"; exit 1; }
+    off=1
+  fi
   say "offload $1"
 }
 dut_snap(){ # -> "conntrack_count drops table_full cpu_busy_jiffies cpu_total_jiffies"

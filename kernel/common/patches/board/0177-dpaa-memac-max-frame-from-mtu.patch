@@ -1,25 +1,27 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A <ask20@vyos-ls1046a-build>
 Date: Wed, 28 Oct 2026 00:00:00 +0000
-Subject: [PATCH] dpaa: bound mEMAC max frame by MTU and RX buffer (0177)
+Subject: [PATCH] dpaa: keep mEMAC max frame aligned with MTU (0177)
 
-The mEMAC MAXFRM register stays at the fsl_fm_max_frm default (9600) so the
-MAC admits wire frames no 4 KiB RX buffer can hold, which wedges the port
-(Qdrant 2026-08-16). Add a mac set_max_frame op and program it on open and
-on MTU change: max(mtu,1500)+ETH_HLEN+FCS+2 VLAN tags, capped by
-fsl_fm_max_frm and the RX buffer size. plans/ASK2-VENDOR-ASK-REVIEW.md R2.
+Set the MAC receive frame limit from the configured MTU on open and on MTU
+change, with Ethernet/FCS and two VLAN tags of slack, capped by
+fsl_fm_max_frm. The 2026-10-31 hardware test confirmed that RX scatter-gather
+handles frames larger than one bpool buffer, including offloaded MTU-9000
+traffic at 9.86 Gbit/s. This removes the prior dpaa_bp->size clamp.
+plans/ASK2-JUMBO-MTU-PLAN.md.
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 3edc8d1..f1febcf 100644
+index bec7a2b..15a2a88 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -2939,6 +2939,24 @@ static void dpaa_eth_napi_disable(struct dpaa_priv *priv)
+@@ -3632,6 +3632,24 @@ static void dpaa_eth_napi_disable(struct dpaa_priv *priv)
  	}
  }
  
 +/* Bound what the MAC admits by the MTU (two VLAN tags of slack, 1500 floor for
-+ * PPPoE/VLAN ingress) and by the single RX buffer, so no accepted frame can
-+ * exceed the buffer. The boot-time 9600 default otherwise wedges the port.
++ * PPPoE/VLAN ingress). Frames longer than one RX buffer arrive as multi-buffer
++ * scatter-gather FDs (sg_fd_to_skb()), so the buffer size is not a bound; the
++ * boot-time 9600 default would admit frames above the configured MTU.
 + */
 +static int dpaa_apply_max_frame(struct dpaa_priv *priv, int mtu)
 +{
@@ -31,14 +33,13 @@ index 3edc8d1..f1febcf 100644
 +
 +	mfl = max(mtu, ETH_DATA_LEN) + ETH_HLEN + ETH_FCS_LEN + 2 * VLAN_HLEN;
 +	mfl = min_t(u32, mfl, fman_get_max_frm());
-+	mfl = min_t(u32, mfl, priv->dpaa_bp->size);
 +	return mac_dev->set_max_frame(mac_dev->fman_mac, mfl);
 +}
 +
  static int dpaa_open(struct net_device *net_dev)
  {
  	struct mac_device *mac_dev;
-@@ -2949,6 +2967,10 @@ static int dpaa_open(struct net_device *net_dev)
+@@ -3642,6 +3660,10 @@ static int dpaa_open(struct net_device *net_dev)
  	mac_dev = priv->mac_dev;
  	dpaa_eth_napi_enable(priv);
  
@@ -49,7 +50,7 @@ index 3edc8d1..f1febcf 100644
  	err = phylink_of_phy_connect(mac_dev->phylink,
  				     mac_dev->dev->of_node, 0);
  	if (err)
-@@ -3016,9 +3038,15 @@ static int dpaa_change_mtu(struct net_device *net_dev, int new_mtu)
+@@ -3709,9 +3731,15 @@ static int dpaa_change_mtu(struct net_device *net_dev, int new_mtu)
  {
  	struct dpaa_priv *priv = netdev_priv(net_dev);
  
@@ -66,15 +67,14 @@ index 3edc8d1..f1febcf 100644
  	return 0;
  }
 diff --git a/drivers/net/ethernet/freescale/fman/fman_memac.c b/drivers/net/ethernet/freescale/fman/fman_memac.c
-index 0291093..a44a11f 100644
+index 0291093..8a7e0e9 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_memac.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_memac.c
-@@ -846,6 +846,21 @@ static int memac_set_tstamp(struct fman_mac *memac, bool enable)
+@@ -846,6 +846,20 @@ static int memac_set_tstamp(struct fman_mac *memac, bool enable)
  	return 0; /* Always enabled. */
  }
  
-+/* Reprogram the live MAC receive frame limit. The 9600 boot-time default
-+ * accepts wire frames no RX buffer can hold, which wedges the port.
++/* Reprogram the live MAC receive frame limit so it tracks the configured MTU.
 + */
 +static int memac_set_max_frame(struct fman_mac *memac, u16 max_frame)
 +{
@@ -91,7 +91,7 @@ index 0291093..a44a11f 100644
  static int memac_del_hash_mac_address(struct fman_mac *memac,
  				      enet_addr_t *eth_addr)
  {
-@@ -1087,6 +1102,7 @@ int memac_initialization(struct mac_device *mac_dev,
+@@ -1087,6 +1101,7 @@ int memac_initialization(struct mac_device *mac_dev,
  	mac_dev->set_exception		= memac_set_exception;
  	mac_dev->set_allmulti		= memac_set_allmulti;
  	mac_dev->set_tstamp		= memac_set_tstamp;
