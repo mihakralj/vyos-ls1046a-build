@@ -318,9 +318,12 @@ try:
                         raise ValueError(f"{cell} {direction} r{rep}: missing WGFP counter pair")
                     pair = samples[max(attempts)]
                     before, after = pair["before"], pair["after"]
-                    names = ("sealed",) if direction == "up" else ("rx",) if direction == "down" else ("sealed", "rx")
-                    if any(after[name] <= before[name] for name in names):
+                    # P3 receive offload is withdrawn (2026-11-05): only TX seals, and the
+                    # direct-RX counter must stay still; a moving rx means P3 is active.
+                    if direction != "down" and after["sealed"] <= before["sealed"]:
                         raise ValueError(f"{cell} {direction} r{rep}: fast-path counters did not advance")
+                    if after["rx"] != before["rx"]:
+                        raise ValueError(f"{cell} {direction} r{rep}: P3 receive counter advanced")
                     if after["install_fail"] != before["install_fail"] or after["peers"] < tunnels:
                         raise ValueError(f"{cell} {direction} r{rep}: installation or peer count failed")
                     if direction != "down" and after["xmit_ok"] <= before["xmit_ok"]:

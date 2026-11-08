@@ -19,7 +19,7 @@
 #
 # PPPoE cells enable RPS on dell1's DUT-facing NIC for the run (see rps_set); other cells leave it off.
 # Usage: bin/testrig-offload-quick.sh [cell ...]       (default: the 10 base cells)
-# Env:   DUT_KIND DUT DUR STEADY_FROM STREAMS OUT BIDIR J SAMPLE RUN_ON OUTDIR (SAMPLE=1: ASK2 per-second conntrack+CPU sampler)
+# Env:   DUT_KIND DUT DUR STEADY_FROM STREAMS OUT BIDIR J SAMPLE RUN_ON OUTDIR IPERF_ARGS (extra iperf3 client args, e.g. "-b 1150M") (SAMPLE=1: ASK2 per-second conntrack+CPU sampler)
 set -u
 . "$(dirname "$0")/testrig-env.sh"
 DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}; STREAMS=${STREAMS:-8}
@@ -222,7 +222,7 @@ done
 EOS
   smp=$!
   fi
-  $G "$NSX iperf3 -c $b -B $a -p 5201 -P $STREAMS -t $DUR -i 1 -Z $BIDIR_ARG -J" > "$J/$tag.json" &
+  $G "$NSX iperf3 -c $b -B $a -p 5201 -P $STREAMS -t $DUR -i 1 -Z $BIDIR_ARG ${IPERF_ARGS:-} -J" > "$J/$tag.json" &
   p1=$!; wait $p1 $sp $smp; sleep 1
   if ! read gbps gen rt bytes < <(parse "$J/$tag.json"); then
     echo "ERROR: invalid iperf3 result for $tag" >&2

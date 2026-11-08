@@ -1354,7 +1354,7 @@ PY
         printf '%s\t%s\t1\tbefore\t1\ton sealed=0 rx=0 peers=%s install_fail=0\t%s\t%s\n' \
             "$cell" "$dir" "$peers" "sinks=1 xmit_ok=0 xmit_fail=0 xmit_ern=0" \
             "sink0 fqid=0x2be frames=10 errs=0 sg=0" >> "$WGFP_COUNTER_LOG"
-        rx=10; [ "${FAKE_MATRIX_FAIL:-}" != no_rx ] || rx=0
+        rx=0; [ "${FAKE_MATRIX_FAIL:-}" != rx_moved ] || rx=10
         qman="sinks=1 xmit_ok=10 xmit_fail=0 xmit_ern=0"
         sink="sink0 fqid=0x2be frames=20 errs=0 sg=0"
         case "${FAKE_MATRIX_FAIL:-}" in
@@ -1492,12 +1492,12 @@ def test_matrix_refuses_to_delete_an_unverified_nft_table(tmp_path, failure):
     assert len(list((tmp_path / "out").glob("*/nft-pending"))) == 1
 
 
-def test_matrix_rejects_missing_fast_path_receive_and_removes_its_table(tmp_path):
+def test_matrix_rejects_p3_receive_activity_and_removes_its_table(tmp_path):
     result, commands, rigs = run_matrix(
-        tmp_path, "185", {"WGFP": "1", "FAKE_MATRIX_FAIL": "no_rx"}
+        tmp_path, "185", {"WGFP": "1", "FAKE_MATRIX_FAIL": "rx_moved"}
     )
     assert result.returncode != 0
-    assert "fast-path counters did not advance" in result.stderr
+    assert "P3 receive counter advanced" in result.stderr
     assert len(rigs) == 3
     assert any("nft delete table" in command for command in commands)
 
