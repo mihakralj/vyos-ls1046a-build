@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # testrig-ask2-matrix.sh — ASK2-only flow-type matrix (plans/ASK2-PERF-MATRIX-PLAN.md, Layer A, first cut).
 #   unicast, nat, vlan-vlan, vlan-port, pppoe: bin/testrig-offload-quick.sh cells, unidir then BIDIR=1
-#   wireguard: bin/wg-parity.sh ask2 (1 tunnel on eth4, fresh tunnel per rep)
+#   wireguard: bin/wg-parity.sh ask2 (1 tunnel on eth4, fresh tunnel per rep); wireguard6: the same with OUTER=6
 #   ipsec, bridge, broadcast, multicast, fragments, policer: not wired yet, printed as "-"
 # Every cell runs REPS short reps (DUR s, steady window from STEADY_FROM s); the table keeps the FASTEST rep.
 # Usage: bin/testrig-ask2-matrix.sh            Env: REPS=3 WG_REPS=$REPS DUR=10 STEADY_FROM=3 BIDIR_DUR=20 BIDIR_STEADY_FROM=12 WGFP=1|0 OUTDIR=...
@@ -32,5 +32,7 @@ for r in $(seq 1 "$REPS"); do
 done
 echo "##### wireguard $(date +%T)"
 OUTDIR=$RUN REPS=$WG_REPS PORTS=eth4 TAG=wg CELLS="wg-v4 wg-v6" DIRS="up down bidir" "$HERE/wg-parity.sh" ask2
+echo "##### wireguard6 (IPv6 outer transport) $(date +%T)"
+OUTER=6 OUTDIR=$RUN REPS=$WG_REPS PORTS=eth4 TAG=wg6 CELLS="wg-v4 wg-v6" DIRS="up down bidir" "$HERE/wg-parity.sh" ask2
 echo "##### done $(date +%T), raw results in $RUN"
 python3 "$HERE/ask2-matrix-table.py" "$RUN"

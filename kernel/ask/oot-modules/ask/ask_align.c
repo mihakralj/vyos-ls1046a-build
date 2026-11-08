@@ -25,6 +25,14 @@
  * A switch takes ~4-8 s including the 1-4 s flowtable stats lag. A switch
  * quiesces the RX port for microseconds (F-308 fman_port_set_rx_start_margin).
  * align_adaptive=N restores 256 everywhere; module exit does the same.
+ *
+ * Margin 260 only on ports whose frames fit one RX buffer (2026-11-08, .185,
+ * image 2054): at 260 every frame that needs a second buffer (> ~3.5 KB,
+ * scatter-gather) was lost on the port -- routed, VLAN and vlan-port, v4 and
+ * v6 -- while 3000 B frames passed and margin 256 carries MTU 9000. So a port
+ * whose netdev MTU exceeds ASK_ALIGN_B_MAX_MTU stays at 256 (it pays the
+ * misaligned +-4 B DMA cost instead of dropping frames), and a port at 260
+ * whose MTU is raised past it goes back to 256 within one period.
  */
 #include <linux/atomic.h>
 #include <linux/moduleparam.h>
@@ -44,6 +52,10 @@ int fman_port_set_rx_start_margin(struct fman_port *port, u16 margin);	/* F-308 
 #define ASK_ALIGN_MIN_BYTES	(400ULL * 1000 * 1000)	/* per period: ~1.6 Gbit/s */
 #define ASK_ALIGN_RATIO		2
 #define ASK_ALIGN_STREAK	2
+/* largest MTU proven single-buffer at margin 260 (3000 B DF pings passed, 4000 B
+ * were lost). ponytail: measured bound; derive it from the RX pool size and
+ * FMBM_REBM end margin if MTUs between 3000 and ~3500 matter. */
+#define ASK_ALIGN_B_MAX_MTU	3000
 
 static atomic64_t ask_align_bytes[ASK_ALIGN_PORTS][2];
 static u16 ask_align_margin[ASK_ALIGN_PORTS];	/* 0 = never changed (256) */
@@ -96,6 +108,16 @@ static u16 ask_align_decide(u64 a, u64 b, u16 cur, u8 *streak)
 	return want;
 }
 
+/*
+ * The margin a port may actually use: margin B only while its MTU keeps every
+ * frame in one RX buffer. Pure, for the host harness.
+ */
+static u16 ask_align_gate(u16 want, unsigned int mtu)
+{
+	return (want == ASK_ALIGN_MARGIN_B && mtu > ASK_ALIGN_B_MAX_MTU) ?
+		ASK_ALIGN_MARGIN_A : want;
+}
+
 void ask_align_account(u8 port_id, u8 vlan_edit_flags, u64 bytes)
 {
 	if (!bytes || port_id >= ASK_ALIGN_PORTS || !READ_ONCE(ask_align_on))
@@ -103,18 +125,30 @@ void ask_align_account(u8 port_id, u8 vlan_edit_flags, u64 bytes)
 	atomic64_add(bytes, &ask_align_bytes[port_id][ask_align_class(vlan_edit_flags)]);
 }
 
-/* RTNL held. Programs @margin on the RX port with BMI id @port_id. */
-static int ask_align_apply(u8 port_id, u16 margin)
+/* RTNL held. The netdev and RX fman_port with BMI id @port_id, or NULL. */
+static struct net_device *ask_align_dev(u8 port_id, struct fman_port **portp)
 {
 	struct net_device *dev;
 
 	for_each_netdev(&init_net, dev) {
 		struct fman_port *port = dpaa_get_rx_fman_port(dev);
 
-		if (port && fman_port_get_id(port) == port_id)
-			return fman_port_set_rx_start_margin(port, margin);
+		if (port && fman_port_get_id(port) == port_id) {
+			*portp = port;
+			return dev;
+		}
 	}
-	return -ENODEV;
+	return NULL;
+}
+
+/* RTNL held. Programs @margin on the RX port with BMI id @port_id. */
+static int ask_align_apply(u8 port_id, u16 margin)
+{
+	struct fman_port *port;
+
+	if (!ask_align_dev(port_id, &port))
+		return -ENODEV;
+	return fman_port_set_rx_start_margin(port, margin);
 }
 
 static void ask_align_set(u8 port_id, u16 margin, u64 a, u64 b)
@@ -162,7 +196,15 @@ static void ask_align_work_fn(struct work_struct *w)
 		u64 b = atomic64_xchg(&ask_align_bytes[p][1], 0);
 		u16 cur = ask_align_margin[p] ?: ASK_ALIGN_MARGIN_A;
 		u16 want = ask_align_decide(a, b, cur, &ask_align_streak[p]);
+		struct fman_port *port;
+		struct net_device *dev;
 
+		/* the MTU gate also pulls a 260 port back after an MTU increase */
+		if (want == ASK_ALIGN_MARGIN_B || cur == ASK_ALIGN_MARGIN_B) {
+			dev = ask_align_dev(p, &port);
+			if (dev)
+				want = ask_align_gate(want, READ_ONCE(dev->mtu));
+		}
 		if (want != cur)
 			ask_align_set(p, want, a, b);
 	}

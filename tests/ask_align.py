@@ -70,6 +70,14 @@ int main(void)
 	/* a window above the floor that agrees with the margin resets a streak */
 	s = 1;
 	CHECK(ask_align_decide(3 * G, 0, 256, &s) == 256 && s == 0);
+
+	/* the MTU gate: 260 only while every frame fits one RX buffer */
+	CHECK(ask_align_gate(260, 1500) == 260);
+	CHECK(ask_align_gate(260, ASK_ALIGN_B_MAX_MTU) == 260);
+	CHECK(ask_align_gate(260, ASK_ALIGN_B_MAX_MTU + 1) == 256);
+	CHECK(ask_align_gate(260, 9000) == 256);
+	CHECK(ask_align_gate(256, 9000) == 256);
+	CHECK(ask_align_gate(256, 1500) == 256);
 	return fails != 0;
 }
 """
@@ -88,10 +96,11 @@ def test_align_policy(tmp_path):
     for name in ("ASK_VLANF_POP", "ASK_VLANF_PUSH", "ASK_VLANF_PPPOE_STRIP", "ASK_VLANF_PPPOE_INSERT",
                  "ASK_ALIGN_MARGIN_A", "ASK_ALIGN_MARGIN_B"):
         defs.append(re.search(rf"^#define\s+{name}\s+\S+", hdr, re.M).group(0))
-    for name in ("ASK_ALIGN_MIN_BYTES", "ASK_ALIGN_RATIO", "ASK_ALIGN_STREAK"):
+    for name in ("ASK_ALIGN_MIN_BYTES", "ASK_ALIGN_RATIO", "ASK_ALIGN_STREAK", "ASK_ALIGN_B_MAX_MTU"):
         defs.append(re.search(rf"^#define\s+{name}\s+[^\n/]+", src, re.M).group(0))
     funcs = extract(src, "static unsigned int ask_align_class(u8 vlan_edit_flags)\n{\n") + \
-        extract(src, "static u16 ask_align_decide(u64 a, u64 b, u16 cur, u8 *streak)\n{\n")
+        extract(src, "static u16 ask_align_decide(u64 a, u64 b, u16 cur, u8 *streak)\n{\n") + \
+        extract(src, "static u16 ask_align_gate(u16 want, unsigned int mtu)\n{\n")
     c = tmp_path / "align.c"
     c.write_text(HARNESS.replace("@DEFS@", "\n".join(defs)).replace("@FUNCS@", funcs))
     exe = tmp_path / "align"
