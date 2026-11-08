@@ -37,7 +37,7 @@ flowchart LR
     style E fill:#340,stroke:#333,color:#aaa
     style F fill:#963,stroke:#333,color:#fff
     style G fill:#4a9,stroke:#333,color:#fff
-    style H fill:#ccc,stroke:#333,color:#111   
+ 
 ```
 This diagram provides a a high-level picture of how 'Modes' and 'Configuration states' interact. The boot process is truncated for clarity.
 # Modes
