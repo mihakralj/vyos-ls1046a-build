@@ -2,8 +2,9 @@
 """
 fan-pid — multi-zone PID EMC2305 fan controller for the LS1046A Mono Gateway DK.
 
-Drives the EMC2305 PWM from the hottest of the SoC's five thermal zones (ddr,
-serdes, fman, cluster, sec). Each tick: read zones, run a per-zone PI controller
+Drives the EMC2305 PWM from the hottest of eight temperature zones: the SoC's
+five TMU thermal zones (ddr, serdes, fman, cluster, sec) plus three board-level
+TMP431 readings (see BOARD SENSORS). Each tick: read zones, run a per-zone PI controller
 seeded at the learned idle floor, take the max demand (any zone can win),
 EMA-smooth it, clamp each fan up to its own learned spinning floor at the output
 stage, and write the duty registers directly over /dev/i2c. The floor is a
@@ -38,11 +39,14 @@ from typing import Optional
 # PWM units per degree and per degree-tick; each zone has its own time constant.
 @dataclass
 class Zone:
-    name: str            # /sys/class/thermal/thermal_zone*/type string
+    name: str            # thermal_zone*/type string, or a label for hwmon zones
     setpoint: float      # target temp (C)
     crit_temp: float     # if T >= crit, force MAX_PWM
     kp: float            # proportional gain (PWM per C)
     ki: float            # integral gain (PWM per (C * tick))
+    # hwmon-sourced zone: (hwmon name, device-tree node path suffix, temp file).
+    # None means a /sys/class/thermal zone matched by `name`.
+    hwmon: Optional[tuple[str, str, str]] = None
     last_temp: float = 0.0
     integral: float = 0.0
 
@@ -64,7 +68,32 @@ ZONES = [
     Zone("fman-thermal",    setpoint=70.0, crit_temp=87.0, kp=6.0,  ki=0.30),
     Zone("cluster-thermal", setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
     Zone("sec-thermal",     setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
+    # ---- BOARD SENSORS (added 2026-11-08) ----
+    # Two TI TMP431 chips (driver tmp401) at 0x4c on channels 1 and 2 of the
+    # PCA9545 mux behind i2c0 (DT "Thermal sensors"). temp1 = the chip's own
+    # (local) diode, temp2 = its remote-diode input. Per the board owner:
+    #   mux ch1 chip = PCB sensor, both channels used:
+    #     PCB = temp1 (local, the board itself),
+    #     CPU = temp2 (remote probe on the CPU; tracks the SoC TMU zones
+    #           within ~1 C, an independent second reading)
+    #   mux ch2 chip = SFP+ sensor, one channel used: SFP+ = temp1 (local).
+    #     Its remote input reads a constant 0.0 C with temp2_fault=0 (.185,
+    #     2026-11-08), i.e. not connected, so it is deliberately not a zone.
+    # Identified by DT node, not by i2c bus or hwmon index (both are
+    # probe-order dependent). Crit 85 C = the TMP431's own programmed crit
+    # limit. Idle readings when added: PCB 34 C, CPU 54 C,
+    # SFP+ 41 C, so these are backstops; the SoC zones normally lead.
+    # Board temperatures move slowly, hence the ddr-like gains.
+    Zone("PCB",          setpoint=60.0, crit_temp=85.0, kp=4.0, ki=0.20,
+         hwmon=("tmp431", "i2c-mux@70/i2c@1/temp-sensor@4c", "temp1_input")),
+    Zone("CPU",          setpoint=70.0, crit_temp=85.0, kp=4.0, ki=0.20,
+         hwmon=("tmp431", "i2c-mux@70/i2c@1/temp-sensor@4c", "temp2_input")),
+    Zone("SFP+",         setpoint=60.0, crit_temp=85.0, kp=4.0, ki=0.20,
+         hwmon=("tmp431", "i2c-mux@70/i2c@2/temp-sensor@4c", "temp1_input")),
 ]
+# The tmp401 module can bind after fan-pid starts; missing zones are re-probed
+# at this interval and picked up without a restart.
+ZONE_RESCAN_S = 30.0
 # Aliases tolerated for thermal_zone "type" string differences across kernels.
 # (mainline 6.18 uses "ddr-thermal"/"cluster-thermal", SDK 6.6 uses
 #  "core_cluster" instead of "cluster-thermal".  Add as encountered.)
@@ -130,7 +159,8 @@ USE_RAW_TACH = False
 # The kernel 6.18 emc2305 sysfs PWM path silently drops sub-MAX writes (the chip
 # is in direct-PWM mode, FAN_CONFIG1 bit7=0), so all PWM writes go straight to the
 # duty register over /dev/i2c with I2C_SLAVE_FORCE. i2c-dev is modprobe'd at start
-# since we don't ship lm-sensors.
+# in case nothing else has loaded it. (lm-sensors is in the image as a vyos-1x
+# dependency, but it reads hwmon sysfs and does not need /dev/i2c-*.)
 EMC2305_I2C_ADDR = 0x2e          # SMBus 7-bit address on i2c-7
 EMC2305_FAN1_DUTY_REG = 0x30     # default duty reg; per-fan regs come from FAN_DEFS
 I2C_SLAVE_FORCE = 0x0706         # claim addr even though the kernel driver holds it
@@ -408,7 +438,11 @@ def neutralize_kernel_cooling_devices() -> None:
 
 
 def find_thermal_zones() -> dict[str, str]:
-    """Map canonical zone names to sysfs temp paths; missing zones are allowed."""
+    """Map canonical zone names to sysfs temp paths; missing zones are allowed.
+
+    Covers both kinds of zone: /sys/class/thermal zones matched by type string,
+    and hwmon zones matched by hwmon name + device-tree node + temp file.
+    """
     found: dict[str, str] = {}
     for entry in sorted(os.listdir("/sys/class/thermal")):
         if not entry.startswith("thermal_zone"):
@@ -423,14 +457,43 @@ def find_thermal_zones() -> dict[str, str]:
         except OSError:
             continue
         for z in ZONES:
-            if t == z.name or t in ZONE_ALIASES.get(z.name, ()):
+            if z.hwmon is None and (t == z.name or t in ZONE_ALIASES.get(z.name, ())):
                 found[z.name] = temp_path
                 break
+    found.update(find_hwmon_zones())
+    return found
+
+
+def find_hwmon_zones() -> dict[str, str]:
+    """Map hwmon-sourced zones to their tempN_input paths (by DT node, not index)."""
+    found: dict[str, str] = {}
+    wanted = [z for z in ZONES if z.hwmon is not None]
+    if not wanted:
+        return found
+    try:
+        entries = sorted(os.listdir("/sys/class/hwmon"))
+    except OSError:
+        return found
+    for entry in entries:
+        hdir = f"/sys/class/hwmon/{entry}"
+        try:
+            with open(f"{hdir}/name") as f:
+                hname = f.read().strip()
+        except OSError:
+            continue
+        of_node = os.path.realpath(f"{hdir}/device/of_node")
+        for z in wanted:
+            chip, node_suffix, temp_file = z.hwmon
+            if hname != chip or not of_node.endswith("/" + node_suffix):
+                continue
+            temp_path = f"{hdir}/{temp_file}"
+            if os.path.exists(temp_path):
+                found[z.name] = temp_path
     return found
 
 
 def read_temp(path: str) -> Optional[float]:
-    """Read /sys/class/thermal/.../temp (millidegC) -> degC float, or None."""
+    """Read a millidegC sysfs temp (thermal zone temp or hwmon tempN_input)."""
     try:
         with open(path) as f:
             return int(f.read().strip()) / 1000.0
@@ -525,6 +588,22 @@ class Controller:
         self.export_floors()
         self.smoothed_pwm = float(self.min_floor())
         self.last_log_t = 0.0
+        self.next_rescan_t = time.monotonic() + ZONE_RESCAN_S
+
+    def rescan_missing_zones(self) -> None:
+        """Pick up zones whose sensor appeared after startup (late module bind)."""
+        if all(z.name in self.zone_paths for z in ZONES):
+            return
+        now = time.monotonic()
+        if now < self.next_rescan_t:
+            return
+        self.next_rescan_t = now + ZONE_RESCAN_S
+        for name, path in find_thermal_zones().items():
+            if name not in self.zone_paths:
+                self.zone_paths[name] = path
+                syslog.syslog(syslog.LOG_INFO,
+                              f"fan-pid: zone {name} appeared ({path}); now controlling "
+                              f"{len(self.zone_paths)} zones")
 
     def min_floor(self) -> int:
         """Lowest floor across driven fans (the shared-demand clamp)."""
@@ -569,6 +648,7 @@ class Controller:
         any_fault    = False
         max_pwm_zone = float(PWM_FLOOR)
 
+        self.rescan_missing_zones()
         for z in ZONES:
             path = self.zone_paths.get(z.name)
             if path is None:
@@ -772,8 +852,10 @@ class Controller:
                 rpm_disp = f"{rpm}rpm"
             fan_str_parts.append(f"{fan['name']}={fan['floor']}/{pwm}/{PWM_MAX}({rpm_disp})")
         fan_str = " ".join(fan_str_parts)
-        zt_str = " ".join(f"{n.split('-')[0]}={t:.1f}" for n, t in zt.items())
-        zp_str = " ".join(f"{n.split('-')[0]}={p:.0f}" for n, p in zp.items())
+        # Short labels: "ddr", "cluster", ..., "PCB" (only the
+        # "-thermal" suffix is dropped, so the TMP431 labels stay distinct).
+        zt_str = " ".join(f"{n.removesuffix('-thermal')}={t:.1f}" for n, t in zt.items())
+        zp_str = " ".join(f"{n.removesuffix('-thermal')}={p:.0f}" for n, p in zp.items())
         syslog.syslog(syslog.LOG_INFO,
                       f"fan-pid: {fan_str} | T[{zt_str}] | demand[{zp_str}]")
 
