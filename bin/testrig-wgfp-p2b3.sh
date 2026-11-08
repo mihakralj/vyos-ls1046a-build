@@ -197,6 +197,7 @@ chmod +x /tmp/ncatshim/ncat"
 T="$*"; [ -z "$T" ] && T="rekey roam aip pmtu"
 echo "DUT $(dut 'uname -v | cut -c1-40'); tests: $T"
 for t in $T; do "t_$t"; done
+$D2 'sudo pkill -f "^iperf3 -s -p 5241 -D"' || true   # srv() leaves it running; later rigs need 5241
 off; dut "echo 0 | sudo tee $RX >/dev/null; sudo cat $FE 2>/dev/null | grep -c 'flow\[' | sed 's/^/fe_flow records after off: /'" 2>/dev/null
 dut 'sudo dmesg --level=err,warn | grep -iE "bug|oops|warn|stall|lockup" | grep -v "callbacks suppressed" | tail -3'
 echo "P2b-3 gate: $fails failure(s)"
