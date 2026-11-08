@@ -2,8 +2,8 @@
 
 Extracts ask_align_class() and ask_align_decide() with the constants they use and runs
 them under ASan/UBSan: +-4 B edits (POP xor PUSH, also with PPPoE) are class B and
-length-neutral ones class A; a port switches only above the load floor, on a strict 2x
-majority, after two consecutive windows, and switches back the same way.
+length-neutral ones class A; a port switches only on a strict 2x majority in two windows above the
+load floor (idle windows in between neither count nor reset), and switches back the same way.
 """
 import re
 import subprocess
@@ -39,8 +39,15 @@ int main(void)
 	CHECK(ask_align_class(ASK_VLANF_PUSH | ASK_VLANF_PPPOE_INSERT) == 1);
 	CHECK(ask_align_class(ASK_VLANF_POP | ASK_VLANF_PUSH | ASK_VLANF_PPPOE_STRIP) == 0);
 
-	/* below the load floor nothing moves, and the streak resets */
+	/* below the load floor nothing moves and the streak is kept */
 	CHECK(ask_align_decide(0, ASK_ALIGN_MIN_BYTES - 1, 256, &s) == 256 && s == 0);
+	s = 1;
+	CHECK(ask_align_decide(0, ASK_ALIGN_MIN_BYTES - 1, 256, &s) == 256 && s == 1);
+	/* so an idle window between two POP/PUSH windows still switches */
+	s = 0;
+	CHECK(ask_align_decide(0, 3 * G, 256, &s) == 256 && s == 1);
+	CHECK(ask_align_decide(0, 0, 256, &s) == 256 && s == 1);
+	CHECK(ask_align_decide(0, 3 * G, 256, &s) == 260 && s == 0);
 	/* POP/PUSH-dominated: switch to 260 on the second consecutive window */
 	CHECK(ask_align_decide(G / 10, 3 * G, 256, &s) == 256 && s == 1);
 	CHECK(ask_align_decide(G / 10, 3 * G, 256, &s) == 260 && s == 0);
@@ -60,6 +67,9 @@ int main(void)
 	/* idle port keeps its margin */
 	s = 0;
 	CHECK(ask_align_decide(0, 0, 260, &s) == 260 && s == 0);
+	/* a window above the floor that agrees with the margin resets a streak */
+	s = 1;
+	CHECK(ask_align_decide(3 * G, 0, 256, &s) == 256 && s == 0);
 	return fails != 0;
 }
 """
