@@ -77,6 +77,7 @@
 struct device *dpaa_wgfp_dma_dev(u8 bpid);
 bool dpaa_wgfp_fd_has_error(const struct qm_fd *fd);
 void dpaa_wgfp_fd_release(const struct qm_fd *fd);
+bool dpaa_buf_stale_check(dma_addr_t addr, u8 bpid, const char *where);
 
 #define WGFP_MAX_SINKS	4	/* worker queues per ingress port */
 #define WGFP_MAX_PORTS	8
@@ -306,6 +307,11 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	}
 
 	addr = qm_fd_addr(fd);
+	/* 4022 bad-page hunt: a stale pool entry is reported and leaked */
+	if (unlikely(dpaa_buf_stale_check(addr, fd->bpid, "wgfp"))) {
+		s->errs++;
+		return qman_cb_dqrr_consume;
+	}
 	off = qm_fd_get_offset(fd);
 	len = qm_fd_get_length(fd);
 	dev = dpaa_wgfp_dma_dev(fd->bpid);

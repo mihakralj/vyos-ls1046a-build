@@ -491,3 +491,12 @@
 # R12 of plans/ASK2-VENDOR-ASK-REVIEW.md: 10G RX BMI FIFO 24 KB -> 64 KB (module param).
 # Upstream-Status: Pending | Risk-Tier: C
 0179-fman-port-rx10g-fifo-size.patch
+
+# ── 4022: bad-page hunt (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md, 2026-11-09) ──
+# FMan RX DMA'd a frame into a live page table: a BMan pool held a freed page.
+# Check that every buffer software releases to BMan, and every RX frame the
+# driver dequeues, is a page the driver holds; report (WARN_ONCE + dump_page)
+# and leak a stale one. fsl_dpa.buf_check=0 disables. Debug aid, remove once
+# the stale-entry source is found.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4022-dpaa-stale-buffer-check.patch
