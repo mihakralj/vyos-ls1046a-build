@@ -834,6 +834,28 @@ Fast path:
 4. **Before P5:** go ahead only for a named single-flow workload.
 5. **At any kill criterion:** stop that phase, keep everything already shipped and re-plan.
 
+## 7a. ASK `exp/wireguard` comparison and imports (2026-11-09)
+
+Reference: vendor ASK `origin/exp/wireguard` (tip `f8881de`, 13 commits). ASK reports 4.5 to 6.7 Gbit/s download on its own rig, kernel and governor, so the numbers do not transfer to ours.
+
+**Imported (default off, compile-checked and host-tested only):**
+
+- Board patch `4021-qman-enqueue-orp.patch`: `QM_FQCTRL_ORP`, `QM_FQD_ORPC()`, `QM_EQCR_VERB_ORP` and `qman_enqueue_orp_fqid()` (14-bit sequence number, hole flag). Constants and EQCR layout checked against the NXP SDK (`include/linux/fsl_qman.h`, `qman_high.c`).
+- ORP "spread" receive mode in `dpaa_wgfp.c`, enabled with `echo "spread 1" > /sys/kernel/debug/dpaa_wgfp/ctl` before records are installed. The RX steer queue sits on the port's pool channel (`priv->channel`, dequeued by every portal) with `ORP|AVOIDBLOCK|TDE`, `orprws` 5, `oa` 1, `olws` 3. Every dequeued frame owes the ORP exactly one enqueue: the forwarded frame (`dpaa_wgfp_xmit`), or a hole from the callback's settle step. Ring-full waits retry for up to 5 ms. Counters: `orp_frames`, `orp_holes`, `orp_wait_fail`, `orp_hole_ern` in the stats file.
+
+**Not applicable:** RXCSUM (already on), shared common buffer-pool count (our pools are per port), hardware timestamping default (runtime toggle, default off), cdx timer-thread phantom load (`ask.ko` has no `TASK_UNINTERRUPTIBLE` timer sleeps).
+
+**Deferred, each needs board measurement first:**
+
+- Inline decrypt of small packets (at most 256 B) on the sink CPU, instead of handing them to a worker: add as a `wgfp_rx_fast` policy once spread mode has numbers.
+- Raw-buffer flowtable forward (ASK patch 186) as an analogue of P6 mode 2: needs a flowtable raw-forward hook; large kernel patch.
+- Opt-in GRO from `dpaa_eth_poll`: forwarded traffic pays GSO resegmentation, so only worth it for locally terminated flows.
+- CPU governor: ASK found schedutil clocking down softirq-saturated CPUs. Compare `performance` against `schedutil` on the rig before the next throughput run (operational, no code).
+
+**Risks:** a lost ORP enqueue stalls later frames until the window auto-advances (similar in kind to the open two-tunnel P6 hang); how TDE tail drop on an ORP queue interacts with holes is unverified (ASK used a congestion group); the sequence number is assigned by QMan on the FMan enqueue, as ASK relies on for this silicon.
+
+**Gate:** board run with `spread 0` against `spread 1` on the single-flow download case; ship default-on only if throughput rises and `orp_wait_fail`, `orp_hole_ern` stay 0 with no stall at idle.
+
 ## 8. References
 
 - Archived history: `plans/archive/ask2-wireguard-plan.md`, `plans/archive/ask2-wireguard-matrix-106-vs-185.md`, `plans/archive/ASK2-WIREGUARD-FASTPATH-PLAN-2026-10-15.md`.

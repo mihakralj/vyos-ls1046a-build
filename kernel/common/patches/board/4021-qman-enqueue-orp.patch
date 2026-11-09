@@ -1,0 +1,111 @@
+diff --git a/drivers/soc/fsl/qbman/qman.c b/drivers/soc/fsl/qbman/qman.c
+index 35f8073..1d8b899 100644
+--- a/drivers/soc/fsl/qbman/qman.c
++++ b/drivers/soc/fsl/qbman/qman.c
+@@ -181,13 +181,14 @@ struct qm_eqcr_entry {
+ 	u8 _ncw_verb; /* writes to this are non-coherent */
+ 	u8 dca;
+ 	__be16 seqnum;
+-	u8 __reserved[4];
++	__be32 orp;	/* 24-bit, FQID of the ORP queue */
+ 	__be32 fqid;	/* 24-bit */
+ 	__be32 tag;
+ 	struct qm_fd fd;
+ 	u8 __reserved3[32];
+ } __packed __aligned(8);
+ #define QM_EQCR_VERB_VBIT		0x80
++#define QM_EQCR_VERB_ORP		0x02	/* enable order restoration */
+ #define QM_EQCR_VERB_CMD_MASK		0x61	/* but only one value; */
+ #define QM_EQCR_VERB_CMD_ENQUEUE	0x01
+ #define QM_EQCR_SEQNUM_NESN		0x8000	/* Advance NESN */
+@@ -2558,6 +2559,53 @@ out:
+ }
+ EXPORT_SYMBOL_GPL(qman_enqueue_fqid);
+ 
++/*
++ * Enqueue under an order restoration point (RM ch. 3, order restoration):
++ * @orp_fqid is the ORP-enabled queue the frame came from and @seqnum the
++ * DQRR seqnum it carried. With @hole no frame is enqueued: the sequence
++ * number is only filled so later frames are not held behind it. The caller
++ * owes the ORP exactly one such command (frame or hole) per dequeued frame.
++ * Returns -EBUSY on a full EQCR, nothing is consumed then.
++ */
++int qman_enqueue_orp_fqid(struct qman_fq *tag_fq, u32 fqid, u32 orp_fqid,
++			  u16 seqnum, bool hole, const struct qm_fd *fd)
++{
++	struct qman_portal *p;
++	struct qm_eqcr_entry *eq;
++	unsigned long irqflags;
++	u8 avail;
++
++	p = get_affine_portal();
++	local_irq_save(irqflags);
++
++	if (p->use_eqcr_ci_stashing) {
++		eq = qm_eqcr_start_stash(&p->p);
++	} else {
++		avail = qm_eqcr_get_avail(&p->p);
++		if (avail < 2)
++			update_eqcr_ci(p, avail);
++		eq = qm_eqcr_start_no_stash(&p->p);
++	}
++
++	if (unlikely(!eq))
++		goto out;
++
++	/* NESN and NLIS stay clear: one frame per sequence number */
++	eq->seqnum = cpu_to_be16(seqnum & QM_EQCR_SEQNUM_SEQMASK);
++	eq->orp = cpu_to_be32(orp_fqid & QM_FQID_MASK);
++	qm_fqid_set(eq, fqid);
++	eq->tag = cpu_to_be32(fq_to_tag(tag_fq));
++	eq->fd = *fd;
++
++	qm_eqcr_pvb_commit(&p->p, QM_EQCR_VERB_ORP |
++			   (hole ? 0 : QM_EQCR_VERB_CMD_ENQUEUE));
++out:
++	local_irq_restore(irqflags);
++	put_affine_portal();
++	return eq ? 0 : -EBUSY;
++}
++EXPORT_SYMBOL_GPL(qman_enqueue_orp_fqid);
++
+ static int qm_modify_cgr(struct qman_cgr *cgr, u32 flags,
+ 			 struct qm_mcc_initcgr *opts)
+ {
+diff --git a/include/soc/fsl/qman.h b/include/soc/fsl/qman.h
+index b2501c2..2e118ff 100644
+--- a/include/soc/fsl/qman.h
++++ b/include/soc/fsl/qman.h
+@@ -502,6 +502,7 @@ static inline int qm_fqd_get_wq(const struct qm_fqd *fqd)
+ #define QM_FQCTRL_MASK		0x07ff	/* 'fq_ctrl' flags; */
+ #define QM_FQCTRL_CGE		0x0400	/* Congestion Group Enable */
+ #define QM_FQCTRL_TDE		0x0200	/* Tail-Drop Enable */
++#define QM_FQCTRL_ORP		0x0100	/* ORP Enable */
+ #define QM_FQCTRL_CTXASTASHING	0x0080	/* Context-A stashing */
+ #define QM_FQCTRL_CPCSTASH	0x0040	/* CPC Stash Enable */
+ #define QM_FQCTRL_FORCESFDR	0x0008	/* High-priority SFDRs */
+@@ -1102,6 +1103,24 @@ int qman_enqueue(struct qman_fq *fq, const struct qm_fd *fd);
+ int qman_enqueue_fqid(struct qman_fq *tag_fq, u32 fqid,
+ 		      const struct qm_fd *fd);
+ 
++/* FQD 'orpc': orprws[3-5] window size, oa[2] auto-advance, olws[0-1] late window */
++#define QM_FQD_ORPC(orprws, oa, olws) \
++	((u8)((((orprws) & 7) << 3) | (((oa) & 1) << 2) | ((olws) & 3)))
++
++/**
++ * qman_enqueue_orp_fqid - Enqueue (or fill a hole) under an order restoration point
++ * @tag_fq: registered frame queue object used to route software ERNs
++ * @fqid: destination frame queue ID
++ * @orp_fqid: FQID of the QM_FQCTRL_ORP queue the frame was dequeued from
++ * @seqnum: the dequeued frame's DQRR seqnum
++ * @hole: consume @seqnum without enqueuing a frame (@fqid and @fd unused)
++ * @fd: descriptor of the frame to be enqueued
++ *
++ * Returns zero on submission or -EBUSY if the ring is full.
++ */
++int qman_enqueue_orp_fqid(struct qman_fq *tag_fq, u32 fqid, u32 orp_fqid,
++			  u16 seqnum, bool hole, const struct qm_fd *fd);
++
+ /**
+  * qman_alloc_fqid_range - Allocate a contiguous range of FQIDs
+  * @result: is set by the API to the base FQID of the allocated range

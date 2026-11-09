@@ -208,6 +208,12 @@ static void cpu_relax(void)
 	relaxes++;
 }
 
+static bool wgfp_orp_xmit(struct dpaa_wgfp_frame *f, int egress,
+			  const struct qm_fd *fd)
+{
+	return false;
+}
+
 #include "qman_wgfp_body.h"
 
 static void reset(void)

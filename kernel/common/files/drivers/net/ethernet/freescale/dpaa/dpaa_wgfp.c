@@ -34,6 +34,18 @@
  *                                  the worker on the distributor's CPU, which
  *                                  also does the distributing (0 = even
  *                                  round-robin, the default)
+ *   echo "spread <0|1>" > .../ctl  RX records target a per-port ORDERED queue
+ *                                  on the port's pool channel instead (after
+ *                                  ASK exp/wireguard patch 187): QMan's order
+ *                                  restoration point (QM_FQCTRL_ORP) lets every
+ *                                  CPU decrypt a single tunnel's frames and
+ *                                  puts them back in order at the egress
+ *                                  enqueue, so no software distributor is
+ *                                  needed and the inner flow is not reordered.
+ *                                  Every dequeued frame owes the ORP exactly
+ *                                  one enqueue: the frame itself, or a hole.
+ *                                  Applies to records installed afterwards;
+ *                                  takes precedence over "fanout".
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
  *
@@ -96,6 +108,7 @@ struct wgfp_sink {
 	int cpu;
 	bool created;
 	bool dist;		/* fan-out distributor, not a worker */
+	bool orp;		/* ordered pool-channel queue (spread mode) */
 	u64 frames;
 	u64 bytes;
 	u64 errs;
@@ -115,8 +128,39 @@ struct wgfp_port {
 	bool dist;
 	atomic_t rr;		/* round-robin distributor cursor */
 	struct wgfp_sink dist_sink;
+	bool orp;
+	struct wgfp_sink orp_sink;
 	struct wgfp_sink sink[WGFP_MAX_SINKS];
 };
+
+/* ORP window: orprws 5 = 1024 frames in flight; auto-advance (OA) past a frame
+ * still owed once the window is exhausted; late-arrival window 3 so a delayed
+ * frame is accepted late (out of order) instead of rejected.  Values from ASK
+ * exp/wireguard (VWD_WG_ORP_WINDOW); RM ch. 3 "order restoration". */
+#define WGFP_ORP_RWS		5
+#define WGFP_ORP_OA		1
+#define WGFP_ORP_OLWS		3
+/* QMan can leave every ring of a portal full for ~200 us; ASK waits up to 5 ms
+ * for room before giving a sequence number up. */
+#define WGFP_ORP_WAIT_NS	(5 * NSEC_PER_MSEC)
+
+/* The frame the running callback owes the ORP.  Per CPU: the callback runs in
+ * softirq on the portal's own CPU and nothing interleaves with it. */
+struct wgfp_orp_ctx {
+	struct wgfp_sink *sink;
+	u32 orp_fqid;
+	u16 seq;
+	bool owed;
+};
+static DEFINE_PER_CPU(struct wgfp_orp_ctx, wgfp_orp_ctx);
+
+/* Each CPU's own NAPI for the pool-channel queue: any portal may dequeue it. */
+struct wgfp_orp_napi {
+	struct napi_struct napi;
+	struct qman_portal *portal;
+};
+static DEFINE_PER_CPU(struct wgfp_orp_napi, wgfp_orp_napi);
+static bool wgfp_orp_napi_ready;
 
 static struct wgfp_sink wgfp_global[WGFP_MAX_SINKS];
 static unsigned int wgfp_nglobal;
@@ -140,6 +184,18 @@ static unsigned int wgfp_fanout;
  * 1-3 have headroom.  wgfp_fanout_home = m gives worker 0 one batch in m. */
 static unsigned int wgfp_fanout_home;
 #define WGFP_FANOUT_HOME_MAX	64
+/* Spread mode: RX records go to the port's ORP queue (default off). */
+static bool wgfp_spread;
+/* Hole commands carry an empty descriptor; their rejections must not be freed
+ * as frames, so they get their own tag queue. */
+static struct qman_fq wgfp_hole_fq;
+static bool wgfp_hole_ready;
+static atomic64_t wgfp_orp_frames = ATOMIC64_INIT(0);
+static atomic64_t wgfp_orp_holes = ATOMIC64_INIT(0);
+static atomic64_t wgfp_orp_wait_fail = ATOMIC64_INIT(0);
+static atomic64_t wgfp_orp_hole_ern = ATOMIC64_INIT(0);
+static void wgfp_hole_ern_cb(struct qman_portal *portal, struct qman_fq *fq,
+			     const union qm_mr_entry *msg);
 static bool wgfp_pool_failed;
 static DEFINE_MUTEX(wgfp_lock);
 
@@ -215,10 +271,10 @@ static unsigned int wgfp_fanout_pick(unsigned int b, unsigned int n,
 	return j < home ? j : j + 1;
 }
 
-static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
-					  struct qman_fq *fq,
-					  const struct qm_dqrr_entry *dq,
-					  bool sched_napi)
+static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
+					       struct qman_fq *fq,
+					       const struct qm_dqrr_entry *dq,
+					       bool sched_napi)
 {
 	struct wgfp_sink *s = container_of(fq, struct wgfp_sink, fq);
 	const struct qm_fd *fd = &dq->fd;
@@ -326,6 +382,76 @@ release:
 	return qman_cb_dqrr_consume;
 }
 
+/* Give the ORP the sequence number of a frame that is going nowhere. */
+static void wgfp_orp_hole(struct wgfp_orp_ctx *c)
+{
+	struct qm_fd fd;
+	ktime_t end = ktime_add_ns(ktime_get(), WGFP_ORP_WAIT_NS);
+
+	qm_fd_clear_fd(&fd);
+	c->owed = false;
+	do {
+		if (!qman_enqueue_orp_fqid(&wgfp_hole_fq, 0, c->orp_fqid, c->seq,
+					   true, &fd)) {
+			atomic64_inc(&wgfp_orp_holes);
+			return;
+		}
+		cpu_relax();
+	} while (ktime_before(ktime_get(), end));
+	/* A lost hole stalls later frames until the window auto-advances. */
+	atomic64_inc(&wgfp_orp_wait_fail);
+}
+
+static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
+					  struct qman_fq *fq,
+					  const struct qm_dqrr_entry *dq,
+					  bool sched_napi)
+{
+	struct wgfp_sink *s = container_of(fq, struct wgfp_sink, fq);
+	struct wgfp_orp_ctx *c;
+	enum qman_cb_dqrr_result r;
+
+	if (likely(!s->orp))
+		return wgfp_dqrr_frame(portal, fq, dq, sched_napi);
+
+	if (sched_napi) {
+		struct wgfp_orp_napi *n = this_cpu_ptr(&wgfp_orp_napi);
+
+		qman_p_irqsource_remove(portal, QM_PIRQ_DQRI);
+		n->portal = portal;
+		s->irqs++;
+		napi_schedule(&n->napi);
+		return qman_cb_dqrr_stop;
+	}
+	if (unlikely(!(dq->stat & QM_DQRR_STAT_FD_VALID)))
+		return qman_cb_dqrr_consume;
+
+	c = this_cpu_ptr(&wgfp_orp_ctx);
+	c->sink = s;
+	c->orp_fqid = qman_fq_fqid(fq);
+	c->seq = be16_to_cpu(dq->seqnum);
+	c->owed = true;
+	atomic64_inc(&wgfp_orp_frames);
+	r = wgfp_dqrr_frame(portal, fq, dq, false);
+	/* Whatever path the frame took, its place in the sequence is settled. */
+	if (c->owed)
+		wgfp_orp_hole(c);
+	return r;
+}
+
+static int wgfp_orp_poll(struct napi_struct *napi, int budget)
+{
+	struct wgfp_orp_napi *n = container_of(napi, struct wgfp_orp_napi, napi);
+	int cleaned;
+
+	cleaned = qman_p_poll_dqrr(n->portal, budget);
+	if (cleaned < budget) {
+		napi_complete_done(napi, cleaned);
+		qman_p_irqsource_add(n->portal, QM_PIRQ_DQRI);
+	}
+	return cleaned;
+}
+
 static int wgfp_poll(struct napi_struct *napi, int budget)
 {
 	struct wgfp_sink *s = container_of(napi, struct wgfp_sink, napi);
@@ -338,6 +464,93 @@ static int wgfp_poll(struct napi_struct *napi, int budget)
 		qman_p_irqsource_add(s->portal, QM_PIRQ_DQRI);
 	}
 	return cleaned;
+}
+
+static void wgfp_hole_ern_cb(struct qman_portal *portal, struct qman_fq *fq,
+			     const union qm_mr_entry *msg)
+{
+	/* Empty descriptor: nothing to free; QMan skips the place on its own
+	 * once the window moves on. */
+	atomic64_inc(&wgfp_orp_hole_ern);
+	pr_warn_ratelimited("dpaa_wgfp: ORP hole %u of fqid 0x%x rejected (rc 0x%02x)\n",
+			    be16_to_cpu(msg->ern.seqnum), (u32)qm_fqid_get(&msg->ern),
+			    msg->ern.rc);
+}
+
+static int wgfp_orp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
+				u16 channel)
+{
+	struct qm_mcc_initfq opts;
+	int err;
+
+	if (WARN_ON_ONCE(s->created))
+		return -EBUSY;
+	memset(s, 0, sizeof(*s));
+	s->cpu = -1;
+	s->port = port;
+	s->orp = true;
+	s->fq.cb.dqrr = wgfp_dqrr;
+
+	memset(&opts, 0, sizeof(opts));
+	opts.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ |
+				   QM_INITFQ_WE_TDTHRESH | QM_INITFQ_WE_ORPC);
+	opts.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_TDE |
+				       QM_FQCTRL_ORP | QM_FQCTRL_AVOIDBLOCK);
+	opts.fqd.orpc = QM_FQD_ORPC(WGFP_ORP_RWS, WGFP_ORP_OA, WGFP_ORP_OLWS);
+	qm_fqd_set_destwq(&opts.fqd, channel, WGFP_WQ);
+	err = qm_fqd_set_taildrop(&opts.fqd, WGFP_SINK_TD * WGFP_MAX_SINKS, 1);
+	if (err < 0)
+		return err;
+	err = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
+			     QMAN_FQ_FLAG_NO_ENQUEUE, &s->fq);
+	if (err)
+		return err;
+	s->created = true;
+	err = qman_init_fq(&s->fq, QMAN_INITFQ_FLAG_SCHED, &opts);
+	if (err)
+		pr_err("dpaa_wgfp: qman_init_fq(%u) ORP = %d\n",
+		       qman_fq_fqid(&s->fq), err);
+	return err;
+}
+
+static int wgfp_port_orp_locked(struct wgfp_port *p, struct net_device *in)
+{
+	const struct cpumask *affine = qman_affine_cpus();
+	struct dpaa_priv *priv = netdev_priv(in);
+	unsigned int cpu;
+	int err;
+
+	if (p->orp)
+		return 0;
+	if (!READ_ONCE(wgfp_hole_ready)) {
+		wgfp_hole_fq.cb.ern = wgfp_hole_ern_cb;
+		err = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
+				     QMAN_FQ_FLAG_NO_MODIFY, &wgfp_hole_fq);
+		if (err) {
+			pr_err("dpaa_wgfp: allocate hole tag queue: %d\n", err);
+			return err;
+		}
+		WRITE_ONCE(wgfp_hole_ready, true);
+	}
+	if (!wgfp_orp_napi_ready) {
+		for_each_cpu(cpu, affine) {
+			struct wgfp_orp_napi *n = &per_cpu(wgfp_orp_napi, cpu);
+
+			netif_napi_add(wgfp_ndev, &n->napi, wgfp_orp_poll);
+			napi_enable(&n->napi);
+		}
+		wgfp_orp_napi_ready = true;
+	}
+	err = wgfp_orp_sink_create(&p->orp_sink, p, priv->channel);
+	if (err) {
+		WRITE_ONCE(wgfp_pool_failed, true);
+		pr_err("dpaa_wgfp: ORP queue setup failed; retaining allocated queues until reboot\n");
+		return err;
+	}
+	p->orp = true;
+	pr_info("dpaa_wgfp: port ifindex %d ORP queue fqid=0x%x channel 0x%x\n",
+		p->ifindex, qman_fq_fqid(&p->orp_sink.fq), priv->channel);
+	return 0;
 }
 
 static int wgfp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
@@ -380,6 +593,9 @@ static int wgfp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 	return err;
 }
 
+/* The port's ordered queue, on its pool channel (dequeued by every affine
+ * portal).  AVOIDBLOCK hands each frame to any portal with room instead of
+ * parking the active queue on one portal's ring. */
 static int wgfp_global_create(unsigned int n)
 {
 	const struct cpumask *affine = qman_affine_cpus();
@@ -538,6 +754,11 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_fanout, n);
+	} else if (sscanf(buf, "spread %u", &n) == 1) {
+		if (n > 1)
+			err = -EINVAL;
+		else
+			WRITE_ONCE(wgfp_spread, n);
 	} else if (sscanf(buf, "touch %u", &n) == 1) {
 		if (n > 3)
 			err = -EINVAL;
@@ -568,6 +789,10 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 				s->polls = s->irqs = s->sum = 0;
 			}
 		}
+		atomic64_set(&wgfp_orp_frames, 0);
+		atomic64_set(&wgfp_orp_holes, 0);
+		atomic64_set(&wgfp_orp_wait_fail, 0);
+		atomic64_set(&wgfp_orp_hole_ern, 0);
 	} else if (!strncmp(buf, "destroy", 7)) {
 		pr_warn_ratelimited("dpaa_wgfp: sinks are boot-lifetime; reboot to release queues\n");
 		err = -EOPNOTSUPP;
@@ -622,8 +847,9 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	mutex_lock(&wgfp_lock);
 	total = wgfp_nglobal;
 	for (i = 0; i < wgfp_nports; i++)
-		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu frm_cnt_encoding=host\n",
+		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
+			 !!wgfp_ports[i].orp;
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -633,7 +859,12 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   (u64)atomic64_read(&wgfp_xmit_fail),
 		   (u64)atomic64_read(&wgfp_xmit_ern),
 		   (u64)atomic64_read(&wgfp_rx_enq_fail),
-		   (u64)atomic64_read(&wgfp_rx_ern));
+		   (u64)atomic64_read(&wgfp_rx_ern),
+		   READ_ONCE(wgfp_spread),
+		   (u64)atomic64_read(&wgfp_orp_frames),
+		   (u64)atomic64_read(&wgfp_orp_holes),
+		   (u64)atomic64_read(&wgfp_orp_wait_fail),
+		   (u64)atomic64_read(&wgfp_orp_hole_ern));
 	for (i = 0; i < wgfp_nglobal; i++)
 		wgfp_sink_show(m, idx++, &wgfp_global[i], "global", 0);
 	for (i = 0; i < wgfp_nports; i++) {
@@ -644,6 +875,9 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 				       p->ifindex);
 		if (p->dist)
 			wgfp_sink_show(m, idx++, &p->dist_sink, "dist",
+				       p->ifindex);
+		if (p->orp)
+			wgfp_sink_show(m, idx++, &p->orp_sink, "orp",
 				       p->ifindex);
 	}
 	mutex_unlock(&wgfp_lock);
@@ -874,7 +1108,9 @@ int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,
 	}
 	/* One outer flow can be decrypted on several CPUs: point its RX record
 	 * at the port's distributor, which round-robins to these workers. */
-	if (rx && wgfp_fanout && !wgfp_port_dist_locked(port))
+	if (rx && wgfp_spread && !wgfp_port_orp_locked(port, in))
+		sink = &port->orp_sink;
+	else if (rx && wgfp_fanout && !wgfp_port_dist_locked(port))
 		sink = &port->dist_sink;
 	else
 		sink = &port->sink[hash % port->nsinks];
@@ -934,9 +1170,36 @@ EXPORT_SYMBOL_GPL(dpaa_wgfp_flow_packets);
 
 void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
 {
+	/* An ORP frame's sequence number is given up by the callback's settle. */
 	dpaa_wgfp_fd_release(f->fd);
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_drop);
+
+/* Send the frame its ORP slot owes; false when this CPU owes nothing. */
+static bool wgfp_orp_xmit(struct dpaa_wgfp_frame *f, int egress,
+			  const struct qm_fd *fd)
+{
+	struct wgfp_orp_ctx *c = this_cpu_ptr(&wgfp_orp_ctx);
+	ktime_t end;
+
+	if (likely(!c->owed))
+		return false;
+	end = ktime_add_ns(ktime_get(), WGFP_ORP_WAIT_NS);
+	do {
+		if (!qman_enqueue_orp_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress],
+					   c->orp_fqid, c->seq, false, fd)) {
+			c->owed = false;
+			dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
+			return true;
+		}
+		cpu_relax();
+	} while (ktime_before(ktime_get(), end));
+	/* Nothing enqueued: the settle step fills the hole. */
+	atomic64_inc(&wgfp_orp_wait_fail);
+	atomic64_inc(&wgfp_xmit_fail);
+	dpaa_wgfp_fd_release(f->fd);
+	return true;
+}
 
 void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 		    u32 new_len)
@@ -955,6 +1218,8 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 	qm_fd_set_contig(&fd, new_off, new_len);
 	dma_sync_single_for_device(f->dev, f->addr + new_off, new_len,
 				   DMA_TO_DEVICE);
+	if (unlikely(wgfp_orp_xmit(f, egress, &fd)))
+		return;
 	while (tries--) {
 		if (!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], &fd)) {
 			dpaa_wgfp_stat_inc(&wgfp_xmit_ok);

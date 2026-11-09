@@ -36,6 +36,9 @@ typedef unsigned long long u64;
 #define PTR_ERR(p) ((long)(p))
 #define IS_ERR(p) ((long)(p) < 0 && (long)(p) >= -4095)
 #define atomic_set(p, v) (*(p) = (v))
+#define atomic64_set(p, v) (*(p) = (v))
+static bool wgfp_spread;
+static long long wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
 
 struct qman_portal;
 union qm_mr_entry;
@@ -63,8 +66,10 @@ struct wgfp_port {
 	int ifindex;
 	unsigned int nsinks;
 	bool dist;
+	bool orp;
 	int rr;
 	struct wgfp_sink dist_sink;
+	struct wgfp_sink orp_sink;
 	struct wgfp_sink sink[WGFP_MAX_SINKS];
 };
 struct net_device {

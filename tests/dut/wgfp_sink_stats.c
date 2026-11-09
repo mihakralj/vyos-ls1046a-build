@@ -27,7 +27,9 @@ struct wgfp_port {
 	int ifindex;
 	unsigned int nsinks;
 	bool dist;
+	bool orp;
 	struct wgfp_sink dist_sink;
+	struct wgfp_sink orp_sink;
 	struct wgfp_sink sink[4];
 };
 struct qm_mcr_queryfq_np {
@@ -50,6 +52,8 @@ static int wgfp_lock, wgfp_neg;
 static void *wgfp_ops;
 static u64 wgfp_xmit_ok, wgfp_xmit_fail, wgfp_xmit_ern;
 static u64 wgfp_rx_enq_fail, wgfp_rx_ern;
+static bool wgfp_spread;
+static u64 wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
 
 static void mutex_lock(int *lock) { (void)lock; }
 static void mutex_unlock(int *lock) { (void)lock; }

@@ -471,6 +471,11 @@
 # Upstream-Status: Inappropriate | Risk-Tier: B
 4020-wireguard-fastpath-rx-bookkeeping.patch
 
+# QMan order restoration enqueue (ORP verb, HOLE) and QM_FQCTRL_ORP, for the
+# WGFP ordered-spread receive mode (ASK exp/wireguard patch 187 analogue).
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4021-qman-enqueue-orp.patch
+
 # R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
 # Upstream-Status: Pending | Risk-Tier: C
 0176-dpaa-rx-stats-before-stack-verdict.patch

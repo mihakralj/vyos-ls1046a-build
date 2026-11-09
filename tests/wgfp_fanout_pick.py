@@ -14,7 +14,7 @@ HARNESS = ROOT / "tests/dut/wgfp_fanout_pick.c"
 def test_fanout_pick_weights_the_distributor_cpu(tmp_path):
     source = SOURCE.read_text()
     start = source.index("static unsigned int wgfp_fanout_pick(")
-    end = source.index("\nstatic enum qman_cb_dqrr_result wgfp_dqrr(", start)
+    end = source.index("\nstatic enum qman_cb_dqrr_result wgfp_dqrr_frame(", start)
     (tmp_path / "wgfp_fanout_pick_body.h").write_text(source[start:end])
     binary = tmp_path / "wgfp_fanout_pick"
     subprocess.run(
