@@ -21,8 +21,14 @@ def function(source, name):
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.exit("usage: test-fman-disarm.py <kernel-source-dir>")
+    # --only a,b: run just those harnesses (e.g. the F-310 teardown-order
+    # checks after F-293, which retires the pre-F-293 debugfs INV0 writer
+    # that fman_debugfs_lifecycle models).
+    only = None
+    if len(sys.argv) == 4 and sys.argv[2] == "--only":
+        only = set(sys.argv[3].split(","))
+    elif len(sys.argv) != 2:
+        sys.exit("usage: test-fman-disarm.py <kernel-source-dir> [--only name[,name...]]")
     directory = Path(sys.argv[1]) / "drivers/net/ethernet/freescale/fman"
     kg = (directory / "fman_pcd_kg.c").read_text()
     pcd = (directory / "fman_pcd.c").read_text()
@@ -92,6 +98,11 @@ def main():
     root = Path(__file__).resolve().parents[1]
     compiler = shlex.split(os.environ.get("HOSTCC", "cc"))
     compile_flags = ["-DFMAN_WORKSPACE_PRE_KG=1"] if workspace_pre_kg else []
+    # F-310 (teardown order): detach -> SYNC -> RCCB 0, SYNC before the
+    # workspace MURAM frees, release drain fails closed.
+    f310 = "F-310" in kg and "F-310" in pcd
+    if f310:
+        compile_flags.append("-DFMAN_F310=1")
     with tempfile.TemporaryDirectory(prefix="fman-disarm-") as tmp:
         tmp = Path(tmp)
         (tmp / "disarm_body.h").write_text(disarm)
@@ -103,6 +114,10 @@ def main():
         (tmp / "workspace_disarm_body.h").write_text(
             function(pcd, "fman_pcd_fe_port_del")
         )
+        if f310:
+            (tmp / "port_drain_body.h").write_text(
+                function(pcd, "fman_pcd_fe_port_drain")
+            )
         (tmp / "arm_failure_body.h").write_text(
             function(pcd, "fman_pcd_fe_fault_arm") + engage_locked + engage
         )
@@ -141,11 +156,19 @@ def main():
              "fman_pcd_ehash_write", "fman_pcd_fe_kg_ekfc_write")
         )
         (tmp / "debugfs_chain_body.h").write_text(debug_chain)
-        for name in ("fman_disarm", "fman_prepared_disarm",
-                     "fman_port_disarm", "fman_arm_fault",
-                     "fman_kg_arm_started", "fman_arm_table",
-                     "fman_debugfs_lifecycle", "fman_workspace_disarm",
-                     "fman_fe_context", "fman_debugfs_chain"):
+        names = ["fman_disarm", "fman_prepared_disarm",
+                 "fman_port_disarm", "fman_arm_fault",
+                 "fman_kg_arm_started", "fman_arm_table",
+                 "fman_debugfs_lifecycle", "fman_workspace_disarm",
+                 "fman_fe_context", "fman_debugfs_chain"]
+        if f310:
+            names.append("fman_port_drain")
+        if only is not None:
+            unknown = only - set(names)
+            if unknown:
+                sys.exit(f"FAIL: unknown or unavailable harness(es): {sorted(unknown)}")
+            names = [name for name in names if name in only]
+        for name in names:
             binary = tmp / name
             subprocess.run(
                 [*compiler, *compile_flags, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",

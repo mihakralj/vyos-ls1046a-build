@@ -3048,6 +3048,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_307.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-ehash-walker-probe.py" "$(pwd)" 2>&1
     echo "### fman_pcd.c: F-307 ehash walker probe harness passed"
+    # F-310 (T2 teardown order): KG disarm puts the scheme back to RSS, SYNCs,
+    # then clears RCCB; port delete SYNCs between the workspace unpublish and
+    # the MURAM frees; the release-only port drain refuses armed/faulted ports.
+    # Needs F-293's serialized fman_fpm_extc_sync(). The full disarm harness
+    # models the pre-F-293 debugfs INV0 writer, so only its F-310 parts run here.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_310.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_workspace_disarm,fman_port_drain 2>&1
+    echo "### fman_pcd.c/fman_pcd_kg.c: F-310 teardown order harness passed"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
