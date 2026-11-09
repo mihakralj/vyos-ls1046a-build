@@ -44,6 +44,7 @@ static unsigned int wgfp_nglobal = 2;
 static struct wgfp_port wgfp_ports[2];
 static unsigned int wgfp_nports;
 static unsigned int wgfp_touch = 2, wgfp_per_port = 2, wgfp_fanout = 32;
+static unsigned int wgfp_fanout_home = 5;
 static bool wgfp_pool_failed;
 static int wgfp_lock, wgfp_neg;
 static void *wgfp_ops;

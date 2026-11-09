@@ -30,6 +30,10 @@
  *                                  that switches worker every b frames
  *                                  (default 0 = record targets one worker);
  *                                  applies to records installed afterwards
+ *   echo "fanout <b> <m>" > .../ctl  as above, and only one batch in m goes to
+ *                                  the worker on the distributor's CPU, which
+ *                                  also does the distributing (0 = even
+ *                                  round-robin, the default)
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
  *
@@ -130,6 +134,12 @@ static unsigned int wgfp_per_port;	/* worker queues per port */
  * and the extra ACKs cost more sealing work than the spread saved. */
 static unsigned int wgfp_fanout;
 #define WGFP_FANOUT_MAX	1024
+/* The distributor runs on CPU 0, next to worker 0, and re-enqueueing every
+ * frame costs that CPU about a quarter of its time (.185, image 0540, one
+ * tunnel at 3.4 Gbit/s), so an even split saturates CPU 0 first while CPUs
+ * 1-3 have headroom.  wgfp_fanout_home = m gives worker 0 one batch in m. */
+static unsigned int wgfp_fanout_home;
+#define WGFP_FANOUT_HOME_MAX	64
 static bool wgfp_pool_failed;
 static DEFINE_MUTEX(wgfp_lock);
 
@@ -187,6 +197,24 @@ static void wgfp_touch_frame(struct wgfp_sink *s, u8 *p, u32 len)
 	s->sum += sum;
 }
 
+/* Worker for distributor batch b of a port with n workers, where worker
+ * `home` shares the distributor's CPU: with m >= 2 every m-th batch goes to
+ * home and the rest go round-robin over the others; m < 2, or a home that is
+ * not one of the workers, gives the plain round-robin b % n. */
+static unsigned int wgfp_fanout_pick(unsigned int b, unsigned int n,
+				     unsigned int home, unsigned int m)
+{
+	unsigned int j;
+
+	if (n < 2 || m < 2 || home >= n)
+		return b % n;
+	if (b % m == 0)
+		return home;
+	/* b - (b / m + 1) earlier batches in [0, b] did not go home */
+	j = (b - b / m - 1) % (n - 1);
+	return j < home ? j : j + 1;
+}
+
 static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 					  struct qman_fq *fq,
 					  const struct qm_dqrr_entry *dq,
@@ -242,8 +270,10 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 
 		if (unlikely(!p || !p->nsinks))
 			goto release;
-		i = ((unsigned int)atomic_inc_return(&p->rr) /
-		     max_t(unsigned int, READ_ONCE(wgfp_fanout), 1)) % p->nsinks;
+		i = wgfp_fanout_pick((unsigned int)atomic_inc_return(&p->rr) /
+				     max_t(unsigned int, READ_ONCE(wgfp_fanout), 1),
+				     p->nsinks, s->cpu,
+				     READ_ONCE(wgfp_fanout_home));
 		dst = &p->sink[i];
 		qm_fd_clear_fd(&nfd);
 		nfd.bpid = fd->bpid;
@@ -476,7 +506,7 @@ static int wgfp_port_dist_locked(struct wgfp_port *p)
 static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			      size_t count, loff_t *ppos)
 {
-	unsigned int n;
+	unsigned int n, home;
 	char buf[48];
 	int err = 0;
 
@@ -494,6 +524,14 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = n ? wgfp_global_create(n) : 0;
 			if (!err && n)
 				wgfp_per_port = n;
+		}
+	} else if (sscanf(buf, "fanout %u %u", &n, &home) == 2) {
+		if (n > WGFP_FANOUT_MAX || home == 1 ||
+		    home > WGFP_FANOUT_HOME_MAX) {
+			err = -EINVAL;
+		} else {
+			WRITE_ONCE(wgfp_fanout, n);
+			WRITE_ONCE(wgfp_fanout_home, home);
 		}
 	} else if (sscanf(buf, "fanout %u", &n) == 1) {
 		if (n > WGFP_FANOUT_MAX)
@@ -585,8 +623,9 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	total = wgfp_nglobal;
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
+		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
 		   READ_ONCE(wgfp_pool_failed),
 		   !!rcu_access_pointer(wgfp_ops),

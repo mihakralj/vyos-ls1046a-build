@@ -85,6 +85,8 @@ static unsigned int wgfp_nports;
 static unsigned int wgfp_touch = 2, wgfp_per_port;
 static unsigned int wgfp_fanout = 32;
 #define WGFP_FANOUT_MAX 1024
+static unsigned int wgfp_fanout_home;
+#define WGFP_FANOUT_HOME_MAX 64
 static bool wgfp_pool_failed;
 static struct qman_fq wgfp_rx_ern_fq;
 static bool wgfp_rx_ern_ready;
@@ -240,5 +242,11 @@ int main(void)
 	assert(control("fanout 0") > 0 && wgfp_fanout == 0);
 	assert(control("fanout 64") > 0 && wgfp_fanout == 64);
 	assert(control("fanout 1025") == -EINVAL && wgfp_fanout == 64);
+	assert(control("fanout 32 5") > 0 && wgfp_fanout == 32 && wgfp_fanout_home == 5);
+	assert(control("fanout 16") > 0 && wgfp_fanout == 16 && wgfp_fanout_home == 5);
+	assert(control("fanout 16 1") == -EINVAL && wgfp_fanout_home == 5);
+	assert(control("fanout 16 65") == -EINVAL && wgfp_fanout_home == 5);
+	assert(control("fanout 2000 4") == -EINVAL && wgfp_fanout == 16);
+	assert(control("fanout 32 0") > 0 && wgfp_fanout_home == 0);
 	return 0;
 }
