@@ -21,6 +21,8 @@ def test_p6_decrypt_forward_handoff_and_punts(tmp_path):
     body = _between(source, "static bool wgfp_parse(", "\n/* Writer side")
     body += "\n" + _between(source, "static int wgfp_rx_fast_stack(", "\n/*\n * P2b-3 slow-path punt")
     (tmp_path / "wgfp_p6_body.h").write_text(body)
+    tail = _between(source, "bool wg_fastpath_rx_tail(", "\n/* P6 stack hand-off")
+    (tmp_path / "wgfp_p7_body.h").write_text(tail)
     binary = tmp_path / "wgfp_p6"
     subprocess.run(
         ["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",

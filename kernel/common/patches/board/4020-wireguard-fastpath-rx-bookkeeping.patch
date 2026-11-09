@@ -2,7 +2,7 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 Date: Mon, 9 Nov 2026 12:00:00 +0000
 Subject: [PATCH] wireguard: let the DPAA fast path reuse the receive
- bookkeeping (P6)
+ bookkeeping (P6, P7)
 
 The DPAA fast path (drivers/net/wireguard/fastpath.c) decrypts data
 packets of a peer's current keypair in place in the receive buffer.
@@ -11,10 +11,16 @@ the receive statistics of this file through three thin wrappers, so the
 packets it decrypts and the packets that take the normal receive path
 share one replay window and one set of timers instead of a copy.
 
+Also offer each decrypted, AllowedIPs-checked packet to
+wg_fastpath_rx_tail() before napi_gro_receive(): the fast path may send
+a flow the stack has already forwarded straight to its egress port (P7,
+module parameter wgfp_rx_tail, off by default). Receive statistics are
+unchanged.
+
 Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 ---
 diff --git a/drivers/net/wireguard/receive.c b/drivers/net/wireguard/receive.c
-index eb8851113..02fa1a4e1 100644
+index eb8851113..38bdf80ae 100644
 --- a/drivers/net/wireguard/receive.c
 +++ b/drivers/net/wireguard/receive.c
 @@ -10,6 +10,7 @@
@@ -53,5 +59,16 @@ index eb8851113..02fa1a4e1 100644
  static void wg_packet_consume_data_done(struct wg_peer *peer,
  					struct sk_buff *skb,
  					struct endpoint *endpoint)
+@@ -408,7 +430,9 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
+ 	if (unlikely(routed_peer != peer))
+ 		goto dishonest_packet_peer;
+ 
+-	napi_gro_receive(&peer->napi, skb);
++	/* the DPAA fast path may forward a learned flow directly (P7) */
++	if (!wg_fastpath_rx_tail(peer, skb))
++		napi_gro_receive(&peer->napi, skb);
+ 	update_rx_stats(peer, message_data_len(len_before_trim));
+ 	return;
+ 
 -- 
 2.43.0

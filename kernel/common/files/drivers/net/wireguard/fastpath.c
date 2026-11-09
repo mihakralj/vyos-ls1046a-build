@@ -563,6 +563,7 @@ struct wgfp_flow {
 	bool del;
 	bool gone;		/* unhashed, waiting for its grace period */
 	bool rx;		/* P3: the peer's inbound outer flow */
+	u8 slot;		/* sink index given to dpaa_wgfp_flow_add() */
 	u8 idle;
 	u64 pkts;
 	unsigned long since;
@@ -746,6 +747,11 @@ static unsigned int wgfp_rx_fast;
 module_param(wgfp_rx_fast, uint, 0600);
 MODULE_PARM_DESC(wgfp_rx_fast, "P6 in-place decrypt on P3 sinks: 0 off, 1 decrypt then stack, 2 also forward learned inner flows");
 
+/* P7, see wg_fastpath_rx_tail() */
+static bool wgfp_rx_tail;
+module_param(wgfp_rx_tail, bool, 0600);
+MODULE_PARM_DESC(wgfp_rx_tail, "P7: forward learned inner flows directly at the end of the upstream receive path");
+
 static DEFINE_PER_CPU(atomic64_t, wgfp_p6_fwd);
 static DEFINE_PER_CPU(atomic64_t, wgfp_p6_stack);
 static atomic64_t wgfp_p6_punt, wgfp_p6_replay, wgfp_p6_auth, wgfp_p6_err,
@@ -833,7 +839,9 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 	int egress;
 	bool ok;
 
-	if (READ_ONCE(wgfp_rx_fast) < 2 || !READ_ONCE(wgfp_rx) || !bs ||
+	/* the records serve P6 direct forward and the P7 tail */
+	if (!((READ_ONCE(wgfp_rx_fast) >= 2 && READ_ONCE(wgfp_rx)) ||
+	      READ_ONCE(wgfp_rx_tail)) || !bs ||
 	    READ_ONCE(bs->stopping) || !out || !dst || dst_xfrm(dst) ||
 	    !skb->skb_iif)
 		return NF_ACCEPT;
@@ -957,6 +965,77 @@ static void wgfp_nf_unregister(void)
 static void wgfp_nf_register(void) { }
 static void wgfp_nf_unregister(void) { }
 #endif
+
+/*
+ * P7 (wgfp_rx_tail): the end of upstream's ordered receive path.  Upstream
+ * keeps decrypting on every CPU and keeps the per-peer order; a decrypted
+ * inner packet of a learned flow (struct wgfp_rflow, same admission and 1 s
+ * lifetime as P6) then leaves straight for its egress port instead of
+ * napi_gro_receive(): TTL / hop limit decremented, the learned Ethernet header
+ * pushed, dev_direct_xmit() on a flow-hashed queue (a flow keeps its queue
+ * when the peer's NAPI thread changes CPU).  GRO, ip_forward, the forward and
+ * postrouting hooks, the qdisc and GSO are skipped.  Called from
+ * wg_packet_consume_data_done() after the AllowedIPs check, NAPI context;
+ * false leaves the skb to upstream untouched.
+ */
+static DEFINE_PER_CPU(atomic64_t, wgfp_p7_fwd);
+static atomic64_t wgfp_p7_drop;
+
+bool wg_fastpath_rx_tail(struct wg_peer *peer, struct sk_buff *skb)
+{
+	struct dpaa_wgfp_tuple t = {};
+	const struct wgfp_rflow *r;
+	struct net_device *eg;
+	u8 hb[sizeof(struct ipv6hdr) + 14];
+	u32 hl, len, n, q;
+	const u8 *l3;
+	bool done = false;
+
+	if (!READ_ONCE(wgfp_rx_tail) || !skb->len)
+		return false;
+	n = min_t(u32, sizeof(hb), skb->len);
+	l3 = skb_header_pointer(skb, 0, n, hb);
+	if (!l3 || !wgfp_parse(l3, skb->protocol, n, skb->len, &t, &len) ||
+	    len != skb->len)
+		return false;
+	hl = t.family == AF_INET ? sizeof(struct iphdr) : sizeof(struct ipv6hdr);
+	/* SYN, FIN and RST go through the stack (conntrack sees the flow end) */
+	if (t.proto == IPPROTO_TCP &&
+	    (n < hl + 14 || (l3[hl + 13] & (TCPHDR_FIN | TCPHDR_RST | TCPHDR_SYN))))
+		return false;
+	/* TTL 1 needs an ICMP error; ip_rcv() would drop a bad header */
+	if (t.family == AF_INET ? (((const struct iphdr *)l3)->ttl <= 1 ||
+				   ip_fast_csum(l3, 5)) :
+	    ((const struct ipv6hdr *)l3)->hop_limit <= 1)
+		return false;
+	rcu_read_lock();
+	r = wgfp_rflow_lookup(&t, peer->device->dev->ifindex, wgfp_tuple_hash(&t));
+	if (!r || time_after(jiffies, READ_ONCE(r->expires)) ||
+	    r->peer_id != peer->internal_id || skb->len > r->mtu)
+		goto out;
+	eg = dev_get_by_index_rcu(&init_net, r->l2.ifindex);
+	if (!eg || !(eg->flags & IFF_UP) ||
+	    !pskb_may_pull(skb, hl) || skb_cow_head(skb, ETH_HLEN))
+		goto out;
+	q = reciprocal_scale(skb_get_hash(skb), eg->real_num_tx_queues);
+	if (t.family == AF_INET)
+		ip_decrease_ttl(ip_hdr(skb));
+	else
+		ipv6_hdr(skb)->hop_limit--;
+	memcpy(skb_push(skb, ETH_HLEN), r->l2.hdr, ETH_HLEN);
+	skb_reset_mac_header(skb);
+	skb->mac_len = ETH_HLEN;
+	skb->dev = eg;
+	skb->ip_summed = CHECKSUM_NONE;	/* inner checksums are intact */
+	if (dev_xmit_complete(dev_direct_xmit(skb, q)))
+		dpaa_wgfp_stat_inc(&wgfp_p7_fwd);
+	else
+		atomic64_inc(&wgfp_p7_drop);	/* dev_direct_xmit() freed it */
+	done = true;
+out:
+	rcu_read_unlock();
+	return done;
+}
 
 /* P6 stack hand-off: the plaintext inner packet at @pt as an skb on the wg
  * device, prepared like wg_packet_consume_data_done() does. */
@@ -1753,16 +1832,38 @@ out:
 
 /* ---- install, withdraw, aging ---- */
 
+/*
+ * The sink (CPU) for a new record: the least used among the records of the
+ * same port and kind (P3 outer RX, or TX), so four tunnels decrypt on four
+ * CPUs even after churn.  dpaa_wgfp takes the index modulo its sink count.
+ * ponytail: counts records, not traffic; per-sink silicon counters if one
+ * heavy flow and many mice share a port.
+ */
+#define WGFP_SLOTS	8
+
+static u8 wgfp_flow_slot_locked(const struct wgfp_flow *nfl)
+{
+	unsigned int use[WGFP_SLOTS] = {}, n = min_t(unsigned int, nr_cpu_ids, WGFP_SLOTS);
+	const struct wgfp_flow *fl;
+	unsigned int bkt, i, best = 0;
+
+	hash_for_each(wgfp_flows, bkt, fl, node)
+		if (fl != nfl && fl->ifindex == nfl->ifindex && fl->rx == nfl->rx &&
+		    (fl->state == WGFP_INSTALLED || fl->state == WGFP_INSTALLING))
+			use[fl->slot % n]++;
+	for (i = 1; i < n; i++)
+		if (use[i] < use[best])
+			best = i;
+	return best;
+}
+
 /* Install PENDING records, withdraw del-marked ones.  Only this worker and
  * the teardown (after cancelling it) free entries; nobody frees an
  * INSTALLING entry, so the job pointers stay valid across the unlock. */
 static void wgfp_flow_work_fn(struct work_struct *w)
 {
 	struct { struct wgfp_flow *fl; struct dpaa_wgfp_tuple t; int ifindex;
-		 bool add, rx; } job[WGFP_BATCH];
-	/* ponytail: round-robin sink choice; per-sink load (silicon counters)
-	 * if long-lived flows pile up on one sink after churn. */
-	static unsigned int rr;
+		 bool add, rx; u8 slot; } job[WGFP_BATCH];
 	struct wgfp_flow *fl;
 	struct hlist_node *tmp;
 	unsigned int n = 0, i, bkt;
@@ -1789,7 +1890,10 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 			more = true;
 			break;
 		}
+		if (add)
+			fl->slot = wgfp_flow_slot_locked(fl);
 		fl->state = WGFP_INSTALLING;
+		job[n].slot = fl->slot;
 		job[n].fl = fl;
 		job[n].t = fl->t;
 		job[n].ifindex = fl->ifindex;
@@ -1805,7 +1909,7 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 
 		if (dev) {
 			err = job[i].add ?
-			      dpaa_wgfp_flow_add(dev, &job[i].t, rr++,
+			      dpaa_wgfp_flow_add(dev, &job[i].t, job[i].slot,
 						 job[i].rx) :
 			      dpaa_wgfp_flow_del(dev, &job[i].t);
 			dev_put(dev);
@@ -2458,7 +2562,7 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 	hash_for_each(wgfp_psts, bkt, pst, node)
 		tmpl += rcu_access_pointer(pst->tmpl) != NULL;
 	spin_unlock_bh(&wgfp_flows_lock);
-	return scnprintf(buf, PAGE_SIZE, "on stopping=%u sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld withdraw_fail=%lld decline_withdraws=%lld aip_withdraws=%lld p6=%u p6_fwd=%lld p6_stack=%lld p6_punt=%lld p6_replay=%lld p6_auth=%lld p6_err=%lld p6_aip=%lld p6_nomem=%lld p6_learn=%lld rflows=%u dev=%s\n",
+	return scnprintf(buf, PAGE_SIZE, "on stopping=%u sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld withdraw_fail=%lld decline_withdraws=%lld aip_withdraws=%lld p6=%u p6_fwd=%lld p6_stack=%lld p6_punt=%lld p6_replay=%lld p6_auth=%lld p6_err=%lld p6_aip=%lld p6_nomem=%lld p6_learn=%lld rflows=%u p7=%u p7_fwd=%lld p7_drop=%lld dev=%s\n",
 			 stopping,
 			 (long long)dpaa_wgfp_stat_sum(&wgfp_sealed),
 			 (long long)atomic64_read(&wgfp_declined),
@@ -2484,6 +2588,9 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 			 (long long)atomic64_read(&wgfp_p6_nomem),
 			 (long long)atomic64_read(&wgfp_p6_learn),
 			 READ_ONCE(wgfp_nrflows),
+			 READ_ONCE(wgfp_rx_tail),
+			 (long long)dpaa_wgfp_stat_sum(&wgfp_p7_fwd),
+			 (long long)atomic64_read(&wgfp_p7_drop),
 			 wgfp_peer_cfg);
 }
 

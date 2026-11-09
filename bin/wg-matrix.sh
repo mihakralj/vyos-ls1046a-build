@@ -57,6 +57,13 @@ case $WGFP_RX_FAST in ''|0|1|2) ;; *) echo "WGFP_RX_FAST must be 0, 1 or 2" >&2;
 if [ -n "$WGFP_RX_FAST" ] && [ "$WGFP_RX" != 1 ]; then
   echo "WGFP_RX_FAST needs WGFP_RX=1" >&2; exit 2
 fi
+# WGFP_RX_TAIL=0|1: P7 direct forward at the end of the upstream receive path (wireguard.wgfp_rx_tail);
+# unset leaves the DUT's setting alone. Needs WGFP=1. Restored on exit.
+WGFP_RX_TAIL=${WGFP_RX_TAIL:-}
+case $WGFP_RX_TAIL in ''|0|1) ;; *) echo "WGFP_RX_TAIL must be 0 or 1" >&2; exit 2 ;; esac
+if [ -n "$WGFP_RX_TAIL" ] && [ "${WGFP:-0}" != 1 ]; then
+  echo "WGFP_RX_TAIL needs WGFP=1" >&2; exit 2
+fi
 if [ "$DUT_KIND" = ask2 ] && [ "${WG_NOTRACK:-0}" != 0 ]; then
   echo "The ASK2 matrix already applies scoped NOTRACK; leave WG_NOTRACK unset" >&2; exit 2
 fi
@@ -81,9 +88,15 @@ RX_ORIG=
 RXP=/sys/module/wireguard/parameters/wgfp_rx
 FAST_ORIG=
 FASTP=/sys/module/wireguard/parameters/wgfp_rx_fast
+TAIL_ORIG=
+TAILP=/sys/module/wireguard/parameters/wgfp_rx_tail
 cleanup() {
   local rc=$? listing handle
   trap - EXIT INT TERM
+  if [ -n "$TAIL_ORIG" ]; then
+    "${SSH[@]}" -n "$DUT" "echo $TAIL_ORIG | sudo -n tee $TAILP >/dev/null" ||
+      { echo "ERROR: cannot restore $TAILP=$TAIL_ORIG" >&2; rc=1; }
+  fi
   if [ -n "$FAST_ORIG" ]; then
     "${SSH[@]}" -n "$DUT" "echo $FAST_ORIG | sudo -n tee $FASTP >/dev/null" ||
       { echo "ERROR: cannot restore $FASTP=$FAST_ORIG" >&2; rc=1; }
@@ -214,6 +227,12 @@ if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then
       { echo "ERROR: this image has no $FASTP (P6)" >&2; exit 1; }
     "${SSH[@]}" -n "$DUT" "echo $WGFP_RX_FAST | sudo -n tee $FASTP >/dev/null" || exit 1
     echo "wgfp_rx_fast: $FAST_ORIG -> $WGFP_RX_FAST"
+  fi
+  if [ -n "$WGFP_RX_TAIL" ]; then
+    TAIL_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $TAILP") ||
+      { echo "ERROR: this image has no $TAILP (P7)" >&2; exit 1; }
+    "${SSH[@]}" -n "$DUT" "echo $WGFP_RX_TAIL | sudo -n tee $TAILP >/dev/null" || exit 1
+    echo "wgfp_rx_tail: $TAIL_ORIG -> $WGFP_RX_TAIL"
   fi
 fi
 echo "##### $WHO: 1 tunnel, 4 streams, $REPS1 reps with a fresh tunnel each"

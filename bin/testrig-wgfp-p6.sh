@@ -16,7 +16,9 @@
 #
 # Prereq: KEEP=1 bin/testrig-wireguard.sh setup wg-v4 (tunnel wg0, endpoint dell2 10.99.2.113, inner
 # 10.99.200.113), ASK engaged on eth3/eth4, an image with P6 (wireguard.wgfp_rx_fast exists).
-# Usage: [GEN_IF=enp1s0f0np0] bin/testrig-wgfp-p6.sh
+# P7=1 runs the same gate for the P7 tail instead (wgfp_rx_tail=1, wgfp_rx_fast=0): steps 1 (p7_fwd), 5, 6
+# (wgfp_rx_tail 1 -> 0 -> 1) and 7; steps 2-4 test P6's own decrypt and are skipped.
+# Usage: [P7=1] [GEN_IF=enp1s0f0np0] bin/testrig-wgfp-p6.sh
 set -u
 GEN_IF=${GEN_IF:-enp1s0f0np0}
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
@@ -25,6 +27,9 @@ D1="ssh -n $SSHO admin@192.168.1.112"; D2="ssh -n $SSHO admin@192.168.1.113"
 WP=/sys/module/wireguard/parameters/wgfp_peer
 RX=/sys/module/wireguard/parameters/wgfp_rx
 FAST=/sys/module/wireguard/parameters/wgfp_rx_fast
+TAIL=/sys/module/wireguard/parameters/wgfp_rx_tail
+P7=${P7:-0}
+if [ "$P7" = 1 ]; then FWD=p7_fwd; else FWD=p6_fwd; fi
 WL=/sys/module/wireguard/parameters/wgfp_peer_lease
 fails=0; ok(){ echo "  PASS: $*"; }; bad(){ echo "  FAIL: $*"; fails=$((fails+1)); }
 cnt(){ dut "sudo cat $WP" | grep -o " $1=[0-9]*" | cut -d= -f2 | head -1; }
@@ -36,6 +41,9 @@ TOK=${WG_LEASE_TOKEN:-$(cat "${WG_STATE_PATH:-/tmp/wg-rig}.single-lease/token" 2
 off(){ [ "$(dut "sudo cat $WP")" = off ] || dut "echo 'stop $TOK' | sudo tee $WL >/dev/null"; }
 on(){ off; dut "echo 'bind $TOK wgo-$TOK-dut' | sudo tee $WL >/dev/null" || { echo "ABORT: wgfp_peer_lease bind"; exit 1; }; }
 fast(){ dut "echo $1 | sudo tee $FAST >/dev/null"; }
+tail_(){ dut "echo $1 | sudo tee $TAIL >/dev/null"; }
+# the mode under test: on (2 for P6, 1 for P7) or off
+mode(){ if [ "$P7" = 1 ]; then tail_ "$1"; else fast "$([ "$1" = 0 ] && echo 0 || echo 2)"; fi; }
 srv(){ $D2 'sudo pkill -f "^iperf3 -s -p 5241"; iperf3 -s -p 5241 -D'; }
 dstart(){ # dstart <seconds> <json>
   local cp=$((42000 + RANDOM % 8000))
@@ -49,16 +57,20 @@ dmax(){ echo "$1" | awk -v a="$2" -v b="$3" '{m=0;for(i=a;i<=b&&i<=NF;i++) if($i
 netem(){ $D2 "sudo tc qdisc replace dev $GEN_IF root netem $1"; }
 nonetem(){ $D2 "sudo tc qdisc del dev $GEN_IF root 2>/dev/null; true"; }
 FW=p6gate
-fwon(){ dut "sudo nft 'add table inet $FW; add chain inet $FW fwd { type filter hook forward priority 0; }; add rule inet $FW fwd ip saddr 10.99.200.113 ip daddr 10.99.1.112 tcp sport 5241 drop'"; }
+fwon(){ dut "sudo nft 'add table inet $FW; add chain inet $FW p6fwd { type filter hook forward priority 0; }; add rule inet $FW p6fwd ip saddr 10.99.200.113 ip daddr 10.99.1.112 tcp sport 5241 drop'"; }
 fwoff(){ dut "sudo nft delete table inet $FW 2>/dev/null; true"; }
 
 RX_ORIG=$(dut "sudo cat $RX") || exit 1
 FAST_ORIG=$(dut "sudo cat $FAST") || { echo "ABORT: no $FAST (image predates P6)"; exit 1; }
+TAIL_ORIG=N
+if [ "$P7" = 1 ]; then TAIL_ORIG=$(dut "sudo cat $TAIL") || { echo "ABORT: no $TAIL (image predates P7)"; exit 1; }; fi
 cleanup(){
   trap - EXIT INT TERM
   nonetem; fwoff
   $D1 "pkill -f '[i]perf3 .*-c 10.99.200.113'" 2>/dev/null
+  $D2 "pkill -f '^iperf3 -s -p 5241'" 2>/dev/null
   dut "echo $FAST_ORIG | sudo tee $FAST >/dev/null; echo $RX_ORIG | sudo tee $RX >/dev/null"
+  [ "$P7" = 1 ] && dut "echo $TAIL_ORIG | sudo tee $TAIL >/dev/null"
   off
   echo "restored wgfp_rx=$RX_ORIG wgfp_rx_fast=$FAST_ORIG, fast path unbound"
 }
@@ -71,17 +83,18 @@ echo "== setup: tunnel wg0, fast path bound, P3 on"
 on; dut "echo 1 | sudo tee $RX >/dev/null"; srv
 dut 'ping -c 1 -W 1 10.99.200.113 >/dev/null' || { echo "ABORT: no tunnel"; exit 1; }
 
-echo "== 1. wgfp_rx_fast 2: direct forward"
-fast 2; sleep 2
+echo "== 1. $([ "$P7" = 1 ] && echo "wgfp_rx_tail 1: direct forward at the end of the upstream path" || echo "wgfp_rx_fast 2: direct forward")"
+mode 1; sleep 2
 A=$(snap); dstart 20 /tmp/p6-fwd.json; dwait; B=$(snap)
 IV=$(div /tmp/p6-fwd.json); M2=$(dmean "$IV" 5 18)
-echo "  download mean $M2 Gbit/s, retransmits $(drtx /tmp/p6-fwd.json); p6_fwd +$(d p6_fwd "$B" "$A") p6_stack +$(d p6_stack "$B" "$A") p6_punt +$(d p6_punt "$B" "$A") p6_learn +$(d p6_learn "$B" "$A") rx(P3) +$(d rx "$B" "$A") rflows=$(of "$B" rflows)"
-[ "$(d p6_fwd "$B" "$A")" -gt 10000 ] && ok "frames forwarded without an skb" || bad "p6_fwd did not advance"
+echo "  download mean $M2 Gbit/s, retransmits $(drtx /tmp/p6-fwd.json); $FWD +$(d $FWD "$B" "$A") p6_stack +$(d p6_stack "$B" "$A") p6_punt +$(d p6_punt "$B" "$A") p6_learn +$(d p6_learn "$B" "$A") rx(P3) +$(d rx "$B" "$A") rflows=$(of "$B" rflows)"
+[ "$(d $FWD "$B" "$A")" -gt 10000 ] && ok "frames forwarded directly ($FWD)" || bad "$FWD did not advance"
 [ "$(d p6_learn "$B" "$A")" -gt 0 ] && ok "inner flow learned from the stack" || bad "no inner flow learned"
 [ "$(d p6_auth "$B" "$A")" = 0 ] && [ "$(d p6_err "$B" "$A")" = 0 ] && [ "$(d p6_aip "$B" "$A")" = 0 ] &&
   ok "no authentication, frame or AllowedIPs errors" || bad "p6_auth/p6_err/p6_aip moved"
 awk -v m="$M2" 'BEGIN{exit !(m > 0.5)}' && ok "flow ran ($M2 Gbit/s)" || bad "flow too slow ($M2 Gbit/s)"
 
+if [ "$P7" != 1 ]; then
 echo "== 2. wgfp_rx_fast 1: decrypt, then the stack"
 fast 1; sleep 2
 A=$(snap); dstart 15 /tmp/p6-stack.json; dwait; B=$(snap)
@@ -105,21 +118,23 @@ RP=$(d p6_replay "$B" "$A")
 echo "  p6_fwd +$(d p6_fwd "$B" "$A") p6_stack +$(d p6_stack "$B" "$A") p6_replay +$RP; download mean $(dmean "$(div /tmp/p6-reo.json)" 3 10) Gbit/s"
 [ "$RP" = 0 ] && ok "no replay drop under reordering" || bad "reordered packets refused ($RP)"
 [ "$(d p6_fwd "$B" "$A")" -gt 0 ] && ok "reordered flow still on the fast path" || bad "no P6 frames under reordering"
+fast 2
+fi
 
 echo "== 5. a forward drop rule added mid-flow stops the flow"
 dstart 30 /tmp/p6-fw.json
-sleep 8; fwon; sleep 2; F0=$(cnt p6_fwd); sleep 3; F1=$(cnt p6_fwd); sleep 1; fwoff
+sleep 8; fwon; sleep 2; F0=$(cnt $FWD); sleep 3; F1=$(cnt $FWD); sleep 1; fwoff
 dwait
 IV=$(div /tmp/p6-fw.json)
 PRE=$(dmean "$IV" 3 7); BLK=$(dmax "$IV" 11 13); POST=$(dmax "$IV" 20 29)
-echo "  download before ${PRE}, max while blocked ${BLK}, max after removal ${POST} Gbit/s; p6_fwd while blocked $F0 -> $F1"
+echo "  download before ${PRE}, max while blocked ${BLK}, max after removal ${POST} Gbit/s; $FWD while blocked $F0 -> $F1"
 awk -v b="$BLK" 'BEGIN{exit !(b < 0.05)}' && ok "flow stopped within a record lifetime" || bad "flow kept running past the drop rule ($BLK)"
-[ "$F0" = "$F1" ] && ok "no direct forwarding while the firewall drops" || bad "p6_fwd advanced under the drop rule"
+[ "$F0" = "$F1" ] && ok "no direct forwarding while the firewall drops" || bad "$FWD advanced under the drop rule"
 awk -v p="$POST" 'BEGIN{exit !(p > 0.1)}' && ok "flow back after the rule was removed" || bad "flow did not recover"
 
-echo "== 6. wgfp_rx_fast 2 -> 0 -> 2 under traffic"
+echo "== 6. mode on -> off -> on under traffic"
 dstart 21 /tmp/p6-tog.json
-sleep 7; fast 0; sleep 7; fast 2; dwait
+sleep 7; mode 0; sleep 7; mode 1; dwait
 IV=$(div /tmp/p6-tog.json)
 echo "  download: P6 $(dmean "$IV" 3 6), P3 $(dmean "$IV" 9 13), P6 again $(dmean "$IV" 16 20) Gbit/s"
 LOW=$(echo "$IV" | awk '{m=99;for(i=3;i<=20&&i<=NF;i++) if($i<m) m=$i; print m}')
@@ -128,7 +143,7 @@ awk -v l="$LOW" 'BEGIN{exit !(l > 0.1)}' && ok "flow ran through both switches" 
 echo "== 7. unbind under traffic"
 dstart 12 /tmp/p6-unbind.json; sleep 5; off; dwait
 on; dut "echo 1 | sudo tee $RX >/dev/null"
-NEW=$(dut "sudo dmesg | tail -n +$((KMSG0 + 1)) | grep -E 'WARNING|BUG|Oops|refcount|leak|wgfp: ' | grep -v 'fastpath peer mode on' | head -5")
+NEW=$(dut "sudo dmesg | tail -n +$((KMSG0 + 1)) | grep -E 'WARNING|BUG:|Oops:|refcount|leak|[^_]wgfp: |fastpath: '| grep -v 'fastpath peer mode on' | head -5")
 [ -z "$NEW" ] && ok "no kernel warnings" || { bad "kernel messages:"; echo "$NEW" | sed 's/^/    /'; }
 
 [ "$fails" = 0 ] && echo "P6 GATE: PASS" || echo "P6 GATE: $fails FAILURE(S)"

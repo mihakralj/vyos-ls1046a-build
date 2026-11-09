@@ -47,6 +47,15 @@ typedef uint64_t u64;
 #define dpaa_wgfp_stat_inc(p) (++*(p))
 #define DEV_STATS_INC(d, f) ((d)->f++)
 #define WGFP_RX_HEADROOM 128
+#define CHECKSUM_NONE 0
+#define rcu_read_lock() do { } while (0)
+#define rcu_read_unlock() do { } while (0)
+static bool wgfp_rx_tail = true;
+static long wgfp_p7_fwd, wgfp_p7_drop;
+static int init_net, direct_xmits, direct_q, direct_ret;
+static struct net_device *direct_dev;
+static u32 direct_len;
+static u8 direct_hdr[ETH_HLEN];
 
 static unsigned long jiffies = 1000;
 
@@ -55,6 +64,7 @@ struct net_device {
 	int ifindex;
 	u8 dev_addr[ETH_ALEN];
 	int rx_dropped, rx_errors, rx_frame_errors;
+	unsigned int real_num_tx_queues;
 };
 
 struct dpaa_wgfp_tuple {
@@ -75,7 +85,7 @@ struct noise_keypair {
 	struct { u64 counter; } receiving_counter;
 };
 
-struct wg_device { int peer_allowedips; };
+struct wg_device { int peer_allowedips; struct net_device *dev; };
 struct wg_peer {
 	struct wg_device *device;
 	struct { struct noise_keypair *current_keypair; } keypairs;
@@ -91,7 +101,7 @@ struct wgfp_flow {
 	struct dpaa_wgfp_tuple t;
 	struct wgfp_pst *pst;
 };
-struct wgfp_tmpl { int egress; u8 hdr[ETH_HLEN]; };
+struct wgfp_tmpl { int egress; int ifindex; u8 hdr[ETH_HLEN]; };
 struct wgfp_rflow {
 	struct dpaa_wgfp_tuple t;
 	int wg_ifindex;
@@ -106,7 +116,8 @@ struct sk_buff {
 	u8 *data;
 	u32 len;
 	unsigned short protocol;
-	int ip_summed, csum_level;
+	int ip_summed, csum_level, mac_len;
+	struct net_device *dev;
 };
 
 static unsigned int wgfp_rx_fast = 2;
@@ -216,6 +227,32 @@ static struct wg_peer *wg_allowedips_lookup_src(int *t, struct sk_buff *skb)
 	return aip_peer;
 }
 static void wg_peer_put(struct wg_peer *p) { (void)p; }
+static const void *skb_header_pointer(const struct sk_buff *skb, int off, int len, void *buf)
+{
+	(void)buf;
+	return (u32)(off + len) <= skb->len ? skb->data + off : NULL;
+}
+static bool pskb_may_pull(struct sk_buff *skb, u32 len) { return len <= skb->len; }
+static int skb_cow_head(struct sk_buff *skb, u32 h) { return skb->data - skb->storage < (long)h; }
+static u8 *skb_push(struct sk_buff *skb, u32 n) { skb->data -= n; skb->len += n; return skb->data; }
+static u32 skb_get_hash(struct sk_buff *skb) { (void)skb; return 0x80000000u; }
+static u32 reciprocal_scale(u32 v, u32 n) { return (u32)(((u64)v * n) >> 32); }
+static struct net_device *tail_eg;
+static struct net_device *dev_get_by_index_rcu(int *net, int ifindex)
+{
+	(void)net;
+	return tail_eg && tail_eg->ifindex == ifindex ? tail_eg : NULL;
+}
+static bool dev_xmit_complete(int rc) { return rc == 0; }
+static int dev_direct_xmit(struct sk_buff *skb, u16 q)
+{
+	direct_xmits++;
+	direct_q = q;
+	direct_dev = skb->dev;
+	direct_len = skb->len;
+	memcpy(direct_hdr, skb->data, ETH_HLEN);
+	return direct_ret;
+}
 static void kfree_skb(struct sk_buff *skb) { free(skb); }
 static void netif_receive_skb(struct sk_buff *skb)
 {
@@ -232,6 +269,7 @@ struct message_data {
 };
 
 #include "wgfp_p6_body.h"
+#include "wgfp_p7_body.h"
 
 /* ---- fixtures ---- */
 
@@ -520,12 +558,60 @@ static void test_left_to_p3(void)
 	CHECK(run(&p, &f) == 1 && drops == 1 && wgfp_p6_err == 1);
 }
 
+static void test_tail(void)
+{
+	struct net_device eth3 = { .flags = IFF_UP, .ifindex = 5, .real_num_tx_queues = 8 };
+	struct pkt p = { .inner_proto = IPPROTO_TCP, .tcp_flags = 0x10, .ttl = 64,
+			 .payload = 100, .key_idx = 7 };
+	struct sk_buff skb;
+	struct iphdr *i4;
+
+	eth3.ifindex = 5;
+	wgd.dev = &wg0;
+	tail_eg = &eth3;
+	learn(&p);			/* the frame now holds the inner packet in clear */
+	rec.l2.ifindex = 5;
+#define FRESH() do { memset(&skb, 0, sizeof(skb)); skb.data = skb.storage + 128; \
+	memcpy(skb.data, frame + inner_off, inner_len); skb.len = inner_len; \
+	skb.protocol = htons(ETH_P_IP); direct_xmits = 0; } while (0)
+	FRESH();
+	CHECK(wg_fastpath_rx_tail(&peer, &skb));
+	CHECK(direct_xmits == 1 && direct_dev == &eth3 && direct_len == ETH_HLEN + inner_len);
+	CHECK(!memcmp(direct_hdr, out_l2, ETH_HLEN) && skb.mac_len == ETH_HLEN);
+	CHECK(skb.ip_summed == CHECKSUM_NONE && direct_q < 8);
+	i4 = (struct iphdr *)(skb.data + ETH_HLEN);
+	CHECK(i4->ttl == 63 && ip_fast_csum((u8 *)i4, 5) == 0);
+
+	/* each refusal leaves the skb exactly as it was */
+#define REFUSED(setup, undo) do { FRESH(); setup; u8 copy[2048]; memcpy(copy, skb.storage, sizeof(copy)); \
+	CHECK(!wg_fastpath_rx_tail(&peer, &skb) && direct_xmits == 0); \
+	CHECK(!memcmp(copy, skb.storage, sizeof(copy)) && skb.data == skb.storage + 128); undo; } while (0)
+	REFUSED(wgfp_rx_tail = false, wgfp_rx_tail = true);
+	REFUSED(rec.expires = jiffies - 1, rec.expires = jiffies + HZ);
+	REFUSED(rec.peer_id = 1, rec.peer_id = peer.internal_id);
+	REFUSED(rec.mtu = inner_len - 1, rec.mtu = 1420);
+	REFUSED(eth3.flags = 0, eth3.flags = IFF_UP);
+	REFUSED(rec.wg_ifindex = 77, rec.wg_ifindex = wg0.ifindex);
+	REFUSED((skb.data[8] = 1, skb.data[10] = 0, skb.data[11] = 0, ((struct iphdr *)skb.data)->check = htons(ip_fast_csum(skb.data, 5))), (void)0);
+	REFUSED(skb.data[20 + 13] = 0x02, (void)0);	/* SYN */
+	REFUSED(skb.data[20 + 13] = 0x11, (void)0);	/* FIN */
+	REFUSED(skb.data[1] ^= 0x04, (void)0);		/* header checksum broken (tos) */
+	REFUSED(skb.len = inner_len + 4, (void)0);	/* trailing bytes: not trimmed */
+
+	/* a failed transmit still consumed the skb and is counted */
+	FRESH();
+	direct_ret = 1;
+	CHECK(wg_fastpath_rx_tail(&peer, &skb) && wgfp_p7_drop == 1);
+	direct_ret = 0;
+}
+
 int main(void)
 {
 	test_forward_v4();
 	test_forward_v6_over_v6();
 	test_stack_handoffs();
 	test_left_to_p3();
+	test_tail();
 	free(last_skb);
 	puts("wgfp_p6: ok");
 	return 0;

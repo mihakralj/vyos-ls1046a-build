@@ -99,6 +99,21 @@ if [ -f "$NS_FRAG" ]; then
     sed -i 's/^CONFIG_NET_SCH_FQ=m$/CONFIG_NET_SCH_FQ=y/' "$NS_FRAG"
 fi
 
+# Same trap for pstore: vyos-build's 00-filesystems.config is merged after our
+# kernel/common/kernel-config/10-pstore-ramoops.config and disables
+# PSTORE_RAM/CONSOLE/PMSG, so the DT ramoops region (0xb0000000, 1 MiB) was
+# never used and a hang or panic left no record (found 2026-11-09, image 0346).
+FS_FRAG=vyos-build/scripts/package-build/linux-kernel/config/00-filesystems.config
+if [ -f "$FS_FRAG" ]; then
+    n=$(grep -cE '^# CONFIG_PSTORE_(RAM|CONSOLE|PMSG|FTRACE) is not set$' "$FS_FRAG" || true)
+    echo "### Enabling ramoops pstore in $FS_FRAG ($n lines)"
+    sed -i -E 's/^# CONFIG_PSTORE_(RAM|CONSOLE|PMSG|FTRACE) is not set$/CONFIG_PSTORE_\1=y/' "$FS_FRAG"
+    grep -qx 'CONFIG_PSTORE_FTRACE=y' "$FS_FRAG" || echo 'CONFIG_PSTORE_FTRACE=y' >> "$FS_FRAG"
+    for o in RAM CONSOLE PMSG FTRACE; do
+        grep -qx "CONFIG_PSTORE_$o=y" "$FS_FRAG" || { echo "::error::CONFIG_PSTORE_$o=y missing from $FS_FRAG"; exit 1; }
+    done
+fi
+
 ### Kernel patches (INA234 hwmon, SFP rollball PHY)
 KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
