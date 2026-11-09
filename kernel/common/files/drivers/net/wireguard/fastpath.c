@@ -29,6 +29,7 @@
 #include <linux/hashtable.h>
 #include <linux/hex.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/inet.h>
 #include <linux/jhash.h>
 #include <linux/tcp.h>
@@ -46,9 +47,13 @@
 #include <linux/inetdevice.h>
 #include <linux/jiffies.h>
 #include <linux/workqueue.h>
+#include <linux/netfilter.h>
 #include <net/arp.h>
+#include <net/inet_ecn.h>
+#include <net/ip6_route.h>
 #include <net/neighbour.h>
 #include <net/route.h>
+#include <net/tcp.h>
 #if IS_REACHABLE(CONFIG_NF_CONNTRACK)
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_core.h>
@@ -320,6 +325,7 @@ struct wgfp_pst {
 	struct wgfp_tmpl __rcu *tmpl;
 	struct delayed_work refresh;
 	unsigned long last_timer;
+	unsigned long last_rx_timer;	/* P6 receive timers, same 10 ms rate */
 	unsigned int nflows;		/* under wgfp_flows_lock */
 	struct wgfp_flow *rxfl;		/* P3 outer record, under the lock */
 	bool stopping;
@@ -377,10 +383,13 @@ static bool wgfp_tmpl_l2(struct wgfp_tmpl *t, struct net_device *dev,
 	n = tbl == &arp_tbl ? __ipv4_neigh_lookup(dev, *(const u32 *)nh) :
 	    __ipv6_neigh_lookup(dev, nh);
 	if (!n || !(n->nud_state & NUD_VALID)) {
-		if (n)
-			neigh_release(n);
-		else
-			neigh_event_send(__neigh_create(tbl, nh, dev, true), NULL);
+		if (!n) {
+			n = __neigh_create(tbl, nh, dev, true);
+			if (IS_ERR(n))
+				return false;
+			neigh_event_send(n, NULL);
+		}
+		neigh_release(n);
 		return false;
 	}
 	read_lock_bh(&n->lock);
@@ -706,6 +715,441 @@ static void wgfp_flow_withdraw(struct wgfp_flow *fl, atomic64_t *why)
 
 /* ---- sink path ---- */
 
+/* ---- P6: zero-skb decrypt (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md 4b) ----
+ *
+ * wgfp_rx_fast (needs wgfp_rx): a data message of the peer's current keypair
+ * that reaches a P3 sink is decrypted in place in the DPAA buffer, checked
+ * against upstream's own replay window (wg_fastpath_rx_validate()) and feeds
+ * upstream's receive timers and stats.  1 = the plaintext is then copied into
+ * an skb on the wg device, as upstream's receive path would hand it on (still
+ * no crypto queue, no per-peer serial poll).  2 = an inner flow the stack has
+ * forwarded leaves directly: outer headers dropped, the learned Ethernet
+ * header written, TTL / hop limit decremented, dpaa_wgfp_xmit() on the egress
+ * port's no-confirm TX FQ.
+ *
+ * An inner flow is learned (struct wgfp_rflow) only from a packet of a bound
+ * wg device seen at POST_ROUTING, i.e. after routing and the forward
+ * firewall, with an established non-NAT conntrack entry, a non-xfrm route to
+ * an ASK2 DPAA port that offloads the family, and a valid neighbour.  A record
+ * lives WGFP_RFLOW_LIFE: then the next packet takes the stack again and, if
+ * the stack still forwards it, renews the record.  So route, neighbour, MTU,
+ * firewall, family-policy and AllowedIPs changes take effect within a second,
+ * at the cost of one stack packet per flow per second.
+ *
+ * Everything else goes on to the P3 path untouched (other keypairs,
+ * handshakes, keepalives, VLAN-tagged or non-local outer frames).  After a
+ * successful decrypt the buffer holds plaintext, so from there on a frame is
+ * forwarded, handed to the stack or dropped, never punted.  The UDP checksum
+ * is not verified: the AEAD tag authenticates every byte that is used.
+ */
+static unsigned int wgfp_rx_fast;
+module_param(wgfp_rx_fast, uint, 0600);
+MODULE_PARM_DESC(wgfp_rx_fast, "P6 in-place decrypt on P3 sinks: 0 off, 1 decrypt then stack, 2 also forward learned inner flows");
+
+static DEFINE_PER_CPU(atomic64_t, wgfp_p6_fwd);
+static DEFINE_PER_CPU(atomic64_t, wgfp_p6_stack);
+static atomic64_t wgfp_p6_punt, wgfp_p6_replay, wgfp_p6_auth, wgfp_p6_err,
+		  wgfp_p6_aip, wgfp_p6_nomem, wgfp_p6_learn;
+
+#define WGFP_RFLOW_BITS		10
+#define WGFP_RFLOW_MAX		4096
+#define WGFP_RFLOW_LIFE		HZ
+/* skb headroom for the stack hand-off: what the DPAA TX path wants in front */
+#define WGFP_RX_HEADROOM	128
+
+struct wgfp_rflow {
+	struct hlist_node node;		/* wgfp_rflows, writers under wgfp_flows_lock */
+	struct rcu_head rcu;
+	struct dpaa_wgfp_tuple t;	/* inner flow */
+	int wg_ifindex;			/* the wg device it arrives on */
+	u64 peer_id;			/* wg_peer.internal_id owning the source */
+	u32 mtu;			/* egress route MTU */
+	unsigned long expires;
+	struct wgfp_tmpl l2;		/* Ethernet header, egress handle and port */
+};
+
+static DEFINE_HASHTABLE(wgfp_rflows, WGFP_RFLOW_BITS);
+static unsigned int wgfp_nrflows;
+
+static struct wgfp_rflow *wgfp_rflow_lookup(const struct dpaa_wgfp_tuple *t,
+					    int wg_ifindex, u32 hash)
+{
+	struct wgfp_rflow *r;
+
+	hash_for_each_possible_rcu(wgfp_rflows, r, node, hash)
+		if (r->wg_ifindex == wg_ifindex && wgfp_tuple_eq(&r->t, t))
+			return r;
+	return NULL;
+}
+
+/* Free expired records (@all: every record; no reader or writer is left). */
+static void wgfp_rflows_reap(bool all)
+{
+	struct wgfp_rflow *r;
+	struct hlist_node *tmp;
+	unsigned int bkt;
+
+	spin_lock_bh(&wgfp_flows_lock);
+	hash_for_each_safe(wgfp_rflows, bkt, tmp, r, node) {
+		if (!all && time_before(jiffies, r->expires))
+			continue;
+		hash_del_rcu(&r->node);
+		wgfp_nrflows--;
+		kfree_rcu(r, rcu);
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+}
+
+/* An egress handle is allocated in process context; the hook asks for it,
+ * at most once a second (a port that cannot get one must not storm). */
+static int wgfp_eg_want;
+static unsigned long wgfp_eg_next;
+
+static void wgfp_eg_work_fn(struct work_struct *w)
+{
+	struct net_device *dev = dev_get_by_index(&init_net, xchg(&wgfp_eg_want, 0));
+
+	if (dev) {
+		dpaa_wgfp_egress(dev);
+		dev_put(dev);
+	}
+}
+static DECLARE_WORK(wgfp_eg_work, wgfp_eg_work_fn);
+
+#if IS_ENABLED(CONFIG_NETFILTER)
+static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
+				    const struct nf_hook_state *state)
+{
+	struct wgfp_binds *bs = rcu_dereference(wgfp_bs);
+	struct net_device *out = state->out, *wgdev = NULL;
+	struct dpaa_wgfp_tuple t = {};
+	struct dst_entry *dst = skb_dst(skb);
+	struct wgfp_rflow *r, *old;
+	struct wg_peer *peer;
+	u8 hb[sizeof(struct ipv6hdr) + 14];
+	unsigned int i, hl;
+	const u8 *l3;
+	u32 hash, len, total;
+	int egress;
+	bool ok;
+
+	if (READ_ONCE(wgfp_rx_fast) < 2 || !READ_ONCE(wgfp_rx) || !bs ||
+	    READ_ONCE(bs->stopping) || !out || !dst || dst_xfrm(dst) ||
+	    !skb->skb_iif)
+		return NF_ACCEPT;
+	/* skb_iif is only a bound wg device for a packet it received and the
+	 * stack forwarded: locally generated packets carry 0 */
+	for (i = 0; i < bs->n; i++)
+		if (bs->wgdev[i]->ifindex == skb->skb_iif)
+			wgdev = bs->wgdev[i];
+	if (!wgdev || skb->len <= skb_network_offset(skb))
+		return NF_ACCEPT;
+	total = skb->len - skb_network_offset(skb);
+	l3 = skb_header_pointer(skb, skb_network_offset(skb),
+				min_t(u32, sizeof(hb), total), hb);
+	if (!l3 || !wgfp_parse(l3, skb->protocol, min_t(u32, sizeof(hb), total),
+			       total, &t, &len))
+		return NF_ACCEPT;
+	hl = t.family == AF_INET ? sizeof(struct iphdr) : sizeof(struct ipv6hdr);
+	/* a closing TCP flow is not (re)learned */
+	if (t.proto == IPPROTO_TCP &&
+	    (min_t(u32, sizeof(hb), total) < hl + 14 ||
+	     (l3[hl + 13] & (TCPHDR_FIN | TCPHDR_RST | TCPHDR_SYN))))
+		return NF_ACCEPT;
+	hash = wgfp_tuple_hash(&t);
+	r = wgfp_rflow_lookup(&t, wgdev->ifindex, hash);
+	if (r && time_before(jiffies, READ_ONCE(r->expires)))
+		return NF_ACCEPT;
+	/* ponytail: a VLAN egress takes the stack hand-off; direct transmit
+	 * needs the tag in the template and the physical port's handle */
+	if (is_vlan_dev(out) || !dpaa_wgfp_family_ok(out, t.family))
+		return NF_ACCEPT;
+	egress = dpaa_wgfp_egress_find(out);
+	if (egress < 0) {
+		if (time_after(jiffies, READ_ONCE(wgfp_eg_next))) {
+			WRITE_ONCE(wgfp_eg_next, jiffies + HZ);
+			WRITE_ONCE(wgfp_eg_want, out->ifindex);
+			schedule_work(&wgfp_eg_work);
+		}
+		return NF_ACCEPT;
+	}
+	if (!wgfp_ct_admitted(state->net, skb, &t, NULL))
+		return NF_ACCEPT;
+	/* the inner source must belong to a peer of this device */
+	peer = wg_allowedips_lookup_src(&((struct wg_device *)netdev_priv(wgdev))->peer_allowedips,
+					skb);
+	if (!peer)
+		return NF_ACCEPT;
+	r = kzalloc(sizeof(*r), GFP_ATOMIC);
+	if (!r) {
+		wg_peer_put(peer);
+		return NF_ACCEPT;
+	}
+	r->peer_id = peer->internal_id;
+	wg_peer_put(peer);
+	if (t.family == AF_INET) {
+		const struct rtable *rt = skb_rtable(skb);
+		__be32 nh = rt_nexthop(rt, ip_hdr(skb)->daddr);
+
+		ok = rt->rt_gw_family != AF_INET6 &&
+		     wgfp_tmpl_l2(&r->l2, out, &arp_tbl, &nh, htons(ETH_P_IP));
+	} else {
+		ok = wgfp_tmpl_l2(&r->l2, out, &nd_tbl,
+				  rt6_nexthop(dst_rt6_info(dst), &ipv6_hdr(skb)->daddr),
+				  htons(ETH_P_IPV6));
+	}
+	if (!ok) {
+		kfree(r);
+		return NF_ACCEPT;
+	}
+	r->t = t;
+	r->wg_ifindex = wgdev->ifindex;
+	r->mtu = dst_mtu(dst);
+	r->expires = jiffies + WGFP_RFLOW_LIFE;
+	r->l2.egress = egress;
+	r->l2.family = t.family;
+	r->l2.hlen = ETH_HLEN;
+
+	spin_lock_bh(&wgfp_flows_lock);
+	old = wgfp_rflow_lookup(&t, wgdev->ifindex, hash);
+	if (old) {
+		hlist_replace_rcu(&old->node, &r->node);
+		kfree_rcu(old, rcu);
+	} else if (wgfp_nrflows < WGFP_RFLOW_MAX) {
+		hash_add_rcu(wgfp_rflows, &r->node, hash);
+		wgfp_nrflows++;
+	} else {
+		kfree(r);
+		r = NULL;
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+	if (r)
+		atomic64_inc(&wgfp_p6_learn);
+	return NF_ACCEPT;
+}
+
+/* After every other POST_ROUTING hook (SNAT included): what is seen here is
+ * what the stack actually sends. */
+static const struct nf_hook_ops wgfp_nf_ops[] = {
+	{ .hook = wgfp_rflow_hook, .pf = NFPROTO_IPV4,
+	  .hooknum = NF_INET_POST_ROUTING, .priority = INT_MAX },
+	{ .hook = wgfp_rflow_hook, .pf = NFPROTO_IPV6,
+	  .hooknum = NF_INET_POST_ROUTING, .priority = INT_MAX },
+};
+static bool wgfp_nf_on;
+
+static void wgfp_nf_register(void)
+{
+	int err = nf_register_net_hooks(&init_net, wgfp_nf_ops, ARRAY_SIZE(wgfp_nf_ops));
+
+	if (err)
+		pr_warn("wgfp: no P6 inner-flow learning (%d); wgfp_rx_fast 2 acts as 1\n", err);
+	wgfp_nf_on = !err;
+}
+
+static void wgfp_nf_unregister(void)
+{
+	if (wgfp_nf_on)
+		nf_unregister_net_hooks(&init_net, wgfp_nf_ops, ARRAY_SIZE(wgfp_nf_ops));
+	wgfp_nf_on = false;
+}
+#else
+static void wgfp_nf_register(void) { }
+static void wgfp_nf_unregister(void) { }
+#endif
+
+/* P6 stack hand-off: the plaintext inner packet at @pt as an skb on the wg
+ * device, prepared like wg_packet_consume_data_done() does. */
+static int wgfp_rx_fast_stack(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
+			      const u8 *pt, u32 len, u8 ds, u32 msg_len)
+{
+	struct net_device *dev = pst->wgdev;
+	struct wg_peer *routed;
+	struct sk_buff *skb;
+
+	skb = netdev_alloc_skb(dev, WGFP_RX_HEADROOM + len);
+	if (unlikely(!skb)) {
+		dpaa_wgfp_drop(f);
+		DEV_STATS_INC(dev, rx_dropped);
+		atomic64_inc(&wgfp_p6_nomem);
+		return 1;
+	}
+	skb_reserve(skb, WGFP_RX_HEADROOM);
+	skb_put_data(skb, pt, len);
+	dpaa_wgfp_drop(f);
+	skb_reset_mac_header(skb);
+	skb_reset_network_header(skb);
+	/* the Poly1305 tag covered it: as upstream, no checksum to verify */
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
+	skb->csum_level = ~0;
+	if ((pt[0] >> 4) == 4) {
+		skb->protocol = htons(ETH_P_IP);
+		INET_ECN_decapsulate(skb, ds, ip_hdr(skb)->tos);
+	} else {
+		skb->protocol = htons(ETH_P_IPV6);
+		INET_ECN_decapsulate(skb, ds, ipv6_get_dsfield(ipv6_hdr(skb)));
+	}
+	routed = wg_allowedips_lookup_src(&pst->peer->device->peer_allowedips, skb);
+	wg_peer_put(routed);
+	if (unlikely(routed != pst->peer)) {
+		DEV_STATS_INC(dev, rx_errors);
+		DEV_STATS_INC(dev, rx_frame_errors);
+		atomic64_inc(&wgfp_p6_aip);
+		kfree_skb(skb);
+		return 1;
+	}
+	wg_fastpath_rx_stats(pst->peer, msg_len);
+	dpaa_wgfp_stat_inc(&wgfp_p6_stack);
+	netif_receive_skb(skb);
+	return 1;
+}
+
+/* P6 direct forward of the inner packet at @pt (@len bytes) of a learned
+ * flow; false leaves the frame untouched for the stack hand-off. */
+static bool wgfp_rx_forward(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
+			    u8 *pt, u32 len, u32 msg_len)
+{
+	struct dpaa_wgfp_tuple t = {};
+	const struct wgfp_rflow *r;
+	u32 hl, tlen;
+	u8 *hdr;
+
+	if (!wgfp_parse(pt, (pt[0] >> 4) == 4 ? htons(ETH_P_IP) : htons(ETH_P_IPV6),
+			len, len, &t, &tlen))
+		return false;
+	hl = t.family == AF_INET ? sizeof(struct iphdr) : sizeof(struct ipv6hdr);
+	/* SYN, FIN and RST go through the stack (conntrack sees the flow end) */
+	if (t.proto == IPPROTO_TCP &&
+	    (len < hl + 14 || (pt[hl + 13] & (TCPHDR_FIN | TCPHDR_RST | TCPHDR_SYN))))
+		return false;
+	r = wgfp_rflow_lookup(&t, pst->wgdev->ifindex, wgfp_tuple_hash(&t));
+	if (!r || time_after(jiffies, READ_ONCE(r->expires)) ||
+	    r->peer_id != pst->peer->internal_id || len > r->mtu)
+		return false;
+	if (t.family == AF_INET) {
+		struct iphdr *iph = (struct iphdr *)pt;
+
+		/* ip_rcv() would drop a bad header; TTL 1 needs an ICMP error */
+		if (iph->ttl <= 1 || ip_fast_csum((const u8 *)iph, iph->ihl))
+			return false;
+		ip_decrease_ttl(iph);
+	} else {
+		struct ipv6hdr *ip6 = (struct ipv6hdr *)pt;
+
+		if (ip6->hop_limit <= 1)
+			return false;
+		ip6->hop_limit--;
+	}
+	hdr = pt - ETH_HLEN;
+	memcpy(hdr, r->l2.hdr, ETH_HLEN);
+	wg_fastpath_rx_stats(pst->peer, msg_len);
+	dpaa_wgfp_stat_inc(&wgfp_p6_fwd);
+	dpaa_wgfp_xmit(f, r->l2.egress, hdr - f->buf, ETH_HLEN + len);
+	return true;
+}
+
+/*
+ * P6 in the P3 sink, for the outer flow @fl arriving on @dev.  Returns 0 to
+ * leave the frame (unchanged) to the P3 path, 1 when it was consumed.  NAPI
+ * context, RCU held by the sink.
+ */
+static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
+			      struct net_device *dev)
+{
+	const struct ethhdr *eth = (const struct ethhdr *)(f->buf + f->off);
+	struct wgfp_pst *pst = fl->pst;
+	struct wg_peer *peer = pst->peer;
+	struct noise_keypair *kp;
+	struct message_data *msg;
+	const struct udphdr *udp;
+	u32 hl, ilen, ulen, clen, plen, len;
+	u8 ds, *pt;
+	u64 nonce;
+
+	if (f->len < ETH_HLEN || !(pst->wgdev->flags & IFF_UP) ||
+	    !ether_addr_equal(eth->h_dest, dev->dev_addr))
+		return 0;
+	if (fl->t.family == AF_INET) {
+		const struct iphdr *iph = (const struct iphdr *)(eth + 1);
+
+		if (eth->h_proto != htons(ETH_P_IP) ||
+		    f->len < ETH_HLEN + sizeof(*iph) || iph->ihl != 5 ||
+		    ip_is_fragment(iph) || ip_fast_csum((const u8 *)iph, 5))
+			return 0;
+		hl = sizeof(*iph);
+		ilen = ntohs(iph->tot_len);
+		ds = iph->tos;
+	} else {
+		const struct ipv6hdr *ip6 = (const struct ipv6hdr *)(eth + 1);
+
+		if (eth->h_proto != htons(ETH_P_IPV6) ||
+		    f->len < ETH_HLEN + sizeof(*ip6) || ip6->nexthdr != IPPROTO_UDP)
+			return 0;
+		hl = sizeof(*ip6);
+		ilen = hl + ntohs(ip6->payload_len);
+		ds = ipv6_get_dsfield(ip6);
+	}
+	if (ilen < hl + sizeof(*udp) || ETH_HLEN + ilen > f->len)
+		return 0;
+	udp = (const struct udphdr *)((const u8 *)(eth + 1) + hl);
+	ulen = ntohs(udp->len);
+	/* keepalives (no plaintext) and runts stay on the P3 path */
+	if (ulen > ilen - hl || ulen <= sizeof(*udp) + MESSAGE_MINIMUM_LENGTH ||
+	    (fl->t.family == AF_INET6 && !udp->check))
+		return 0;
+	msg = (struct message_data *)(udp + 1);
+	if (msg->header.type != cpu_to_le32(MESSAGE_DATA))
+		return 0;
+	/* only the current keypair; the previous and the next one (whose
+	 * first packet confirms a handshake) take the stack */
+	kp = rcu_dereference(peer->keypairs.current_keypair);
+	if (!kp || kp->entry.index != msg->key_idx || READ_ONCE(peer->is_dead) ||
+	    !READ_ONCE(kp->receiving.is_valid) ||
+	    wg_birthdate_has_expired(kp->receiving.birthdate, REJECT_AFTER_TIME) ||
+	    READ_ONCE(kp->receiving_counter.counter) >= REJECT_AFTER_MESSAGES)
+		return 0;
+	nonce = le64_to_cpu(msg->counter);
+	pt = (u8 *)(msg + 1);
+	clen = ulen - sizeof(*udp) - sizeof(*msg);	/* ciphertext + tag */
+	/* leaves the buffer untouched when the tag does not verify */
+	if (!chacha20poly1305_decrypt(pt, pt, clen, NULL, 0, nonce,
+				      kp->receiving.key)) {
+		atomic64_inc(&wgfp_p6_auth);
+		dpaa_wgfp_drop(f);
+		return 1;
+	}
+	/* after authentication, as wg_packet_rx_poll() does */
+	if (!wg_fastpath_rx_validate(kp, nonce)) {
+		atomic64_inc(&wgfp_p6_replay);
+		dpaa_wgfp_drop(f);
+		return 1;
+	}
+	if (time_after(jiffies, READ_ONCE(pst->last_rx_timer))) {
+		WRITE_ONCE(pst->last_rx_timer, jiffies + HZ / 100);
+		wg_fastpath_rx_timers(peer);
+	}
+	plen = clen - POLY1305_DIGEST_SIZE;
+	if ((pt[0] >> 4) == 4 && plen >= sizeof(struct iphdr))
+		len = ntohs(((const struct iphdr *)pt)->tot_len);
+	else if ((pt[0] >> 4) == 6 && plen >= sizeof(struct ipv6hdr))
+		len = sizeof(struct ipv6hdr) +
+		      ntohs(((const struct ipv6hdr *)pt)->payload_len);
+	else
+		len = 0;
+	if (unlikely(len < sizeof(struct iphdr) || len > plen)) {
+		DEV_STATS_INC(pst->wgdev, rx_errors);
+		DEV_STATS_INC(pst->wgdev, rx_frame_errors);
+		atomic64_inc(&wgfp_p6_err);
+		dpaa_wgfp_drop(f);
+		return 1;
+	}
+	/* outer ECT(1) or CE needs INET_ECN_decapsulate(): the stack hand-off */
+	if (READ_ONCE(wgfp_rx_fast) >= 2 && !(ds & INET_ECN_ECT_1) &&
+	    wgfp_rx_forward(f, pst, pt, len, ulen - sizeof(*udp)))
+		return 1;
+	return wgfp_rx_fast_stack(f, pst, pt, len, ds, ulen - sizeof(*udp));
+}
+
 /*
  * P2b-3 slow-path punt: copy the frame into an sk_buff and receive it again on
  * the ingress port of its flow, so the stack forwards it into wg_xmit() (or
@@ -774,6 +1218,11 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 
 	if (!dev || !(dev->flags & IFF_UP))
 		return 0;
+	if (READ_ONCE(wgfp_rx_fast)) {
+		if (wgfp_rx_fast_frame(f, fl, dev))
+			return 1;
+		atomic64_inc(&wgfp_p6_punt);
+	}
 	skb = netdev_alloc_skb_ip_align(dev, f->len);
 	if (!skb)
 		return 0;
@@ -1525,6 +1974,7 @@ static void wgfp_age_fn(struct work_struct *w)
 	kfree_skb(probe);
 	if (kick)
 		queue_work(system_wq, &wgfp_flow_work);
+	wgfp_rflows_reap(false);
 	wgfp_psts_reap(false);
 	if (rcu_access_pointer(wgfp_bs))
 		schedule_delayed_work(&wgfp_age_work, WGFP_AGE_PERIOD);
@@ -1684,9 +2134,12 @@ static int wgfp_peer_stop(void)
 	if (err)
 		return err;
 	RCU_INIT_POINTER(wgfp_bs, NULL);	/* learning runs under RCU-bh */
+	wgfp_nf_unregister();
+	cancel_work_sync(&wgfp_eg_work);
 	unregister_netdevice_notifier(&wgfp_netdev_nb);
 	synchronize_rcu();
 	dpaa_wgfp_unregister();		/* synchronize_rcu(): no sink path left */
+	wgfp_rflows_reap(true);
 	wgfp_psts_reap(true);
 	for (i = 0; i < bs->n; i++)
 		dev_put(bs->wgdev[i]);
@@ -1764,6 +2217,7 @@ static int wgfp_peer_start(char *names, bool distinct)
 		unregister_netdevice_notifier(&wgfp_netdev_nb);
 		goto err_consumer;
 	}
+	wgfp_nf_register();
 	schedule_delayed_work(&wgfp_age_work, WGFP_AGE_PERIOD);
 	pr_info("fastpath peer mode on: %u device(s)\n", bs->n);
 	return 0;
@@ -2004,7 +2458,7 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 	hash_for_each(wgfp_psts, bkt, pst, node)
 		tmpl += rcu_access_pointer(pst->tmpl) != NULL;
 	spin_unlock_bh(&wgfp_flows_lock);
-	return scnprintf(buf, PAGE_SIZE, "on stopping=%u sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld withdraw_fail=%lld decline_withdraws=%lld aip_withdraws=%lld dev=%s\n",
+	return scnprintf(buf, PAGE_SIZE, "on stopping=%u sealed=%lld declined=%lld punted=%lld rekeys=%lld rx=%lld rx_stack=%lld peers=%u tmpl=%u flows=%u installs=%lld install_fail=%lld withdraws=%lld withdraw_fail=%lld decline_withdraws=%lld aip_withdraws=%lld p6=%u p6_fwd=%lld p6_stack=%lld p6_punt=%lld p6_replay=%lld p6_auth=%lld p6_err=%lld p6_aip=%lld p6_nomem=%lld p6_learn=%lld rflows=%u dev=%s\n",
 			 stopping,
 			 (long long)dpaa_wgfp_stat_sum(&wgfp_sealed),
 			 (long long)atomic64_read(&wgfp_declined),
@@ -2019,6 +2473,17 @@ static int wgfp_peer_cfg_get(char *buf, const struct kernel_param *kp)
 			 (long long)atomic64_read(&wgfp_withdraw_fail),
 			 (long long)atomic64_read(&wgfp_decline_withdraws),
 			 (long long)atomic64_read(&wgfp_aip_withdraws),
+			 READ_ONCE(wgfp_rx_fast),
+			 (long long)dpaa_wgfp_stat_sum(&wgfp_p6_fwd),
+			 (long long)dpaa_wgfp_stat_sum(&wgfp_p6_stack),
+			 (long long)atomic64_read(&wgfp_p6_punt),
+			 (long long)atomic64_read(&wgfp_p6_replay),
+			 (long long)atomic64_read(&wgfp_p6_auth),
+			 (long long)atomic64_read(&wgfp_p6_err),
+			 (long long)atomic64_read(&wgfp_p6_aip),
+			 (long long)atomic64_read(&wgfp_p6_nomem),
+			 (long long)atomic64_read(&wgfp_p6_learn),
+			 READ_ONCE(wgfp_nrflows),
 			 wgfp_peer_cfg);
 }
 

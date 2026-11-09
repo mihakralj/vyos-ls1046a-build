@@ -161,6 +161,20 @@ static void wg_packet_receive(void *device, struct sk_buff *skb)
 	free(skb);
 }
 
+/* P6 (wgfp_rx_fast) declines every frame here: the P3 path is under test. */
+#define READ_ONCE(x) (x)
+#define atomic64_inc(p) (++*(p))
+static unsigned int wgfp_rx_fast = 1;
+static int wgfp_p6_punt;
+static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
+			      struct net_device *d)
+{
+	(void)f;
+	(void)fl;
+	(void)d;
+	return 0;
+}
+
 #include "wgfp_rx_body.h"
 
 enum packet_kind {
@@ -222,7 +236,8 @@ static int test_packet(int family, enum packet_kind kind, bool expect_fast)
 		udp->len = htons(udp_len + 1);
 
 	fast = stack = delivered_len = wgfp_rx_frames = wgfp_rx_stack = 0;
-	if (wgfp_rx_frame(&f, &flow) != 1 ||
+	wgfp_p6_punt = 0;
+	if (wgfp_rx_frame(&f, &flow) != 1 || wgfp_p6_punt != 1 ||
 	    fast != expect_fast || stack != !expect_fast ||
 	    wgfp_rx_frames != expect_fast || wgfp_rx_stack != !expect_fast ||
 	    (expect_fast && delivered_len != (int)ip_len)) {

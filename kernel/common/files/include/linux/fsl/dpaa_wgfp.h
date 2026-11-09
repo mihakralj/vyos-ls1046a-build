@@ -105,6 +105,8 @@ void dpaa_wgfp_unregister(void);
 /* Egress handle (>= 0) of a DPAA port: its no-confirm TX frame queue,
  * allocated on first use.  Process context, not under RTNL. */
 int dpaa_wgfp_egress(struct net_device *dev);
+/* The handle dpaa_wgfp_egress() already gave @dev, or -ENOENT; any context. */
+int dpaa_wgfp_egress_find(const struct net_device *dev);
 /* Transmit the (modified) buffer on @egress: new data offset and length. */
 void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 		    u32 new_len);
@@ -129,6 +131,7 @@ static inline int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv
 { return -ENODEV; }
 static inline void dpaa_wgfp_unregister(void) { }
 static inline int dpaa_wgfp_egress(struct net_device *dev) { return -ENODEV; }
+static inline int dpaa_wgfp_egress_find(const struct net_device *dev) { return -ENODEV; }
 static inline void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int e, u32 o, u32 l) { }
 static inline void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f) { }
 #endif

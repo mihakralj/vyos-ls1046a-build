@@ -709,6 +709,17 @@ out:
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_egress);
 
+int dpaa_wgfp_egress_find(const struct net_device *dev)
+{
+	int i, n = smp_load_acquire(&wgfp_neg);
+
+	for (i = 0; i < n; i++)
+		if (wgfp_eg_ifindex[i] == dev->ifindex)
+			return i;
+	return -ENOENT;
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_egress_find);
+
 /*
  * P2b-2: flow records that steer an inner flow to a sink, on the ingress
  * port's own per-port ehash table (the table ASK2 arms on engage).  Same

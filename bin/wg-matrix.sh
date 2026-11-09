@@ -50,6 +50,13 @@ case $WGFP_RX in 0|1) ;; *) echo "WGFP_RX must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$WGFP_RX" = 1 ] && [ "${WGFP:-0}" != 1 ]; then
   echo "WGFP_RX=1 needs WGFP=1" >&2; exit 2
 fi
+# WGFP_RX_FAST=0|1|2: P6 in-place decrypt (wireguard.wgfp_rx_fast) for the run; unset leaves the
+# DUT's setting alone. Needs WGFP_RX=1. Restored on exit.
+WGFP_RX_FAST=${WGFP_RX_FAST:-}
+case $WGFP_RX_FAST in ''|0|1|2) ;; *) echo "WGFP_RX_FAST must be 0, 1 or 2" >&2; exit 2 ;; esac
+if [ -n "$WGFP_RX_FAST" ] && [ "$WGFP_RX" != 1 ]; then
+  echo "WGFP_RX_FAST needs WGFP_RX=1" >&2; exit 2
+fi
 if [ "$DUT_KIND" = ask2 ] && [ "${WG_NOTRACK:-0}" != 0 ]; then
   echo "The ASK2 matrix already applies scoped NOTRACK; leave WG_NOTRACK unset" >&2; exit 2
 fi
@@ -72,9 +79,15 @@ TABLE_TOKEN="${TABLE}x${RANDOM}"
 TABLE_MAY_EXIST=0
 RX_ORIG=
 RXP=/sys/module/wireguard/parameters/wgfp_rx
+FAST_ORIG=
+FASTP=/sys/module/wireguard/parameters/wgfp_rx_fast
 cleanup() {
   local rc=$? listing handle
   trap - EXIT INT TERM
+  if [ -n "$FAST_ORIG" ]; then
+    "${SSH[@]}" -n "$DUT" "echo $FAST_ORIG | sudo -n tee $FASTP >/dev/null" ||
+      { echo "ERROR: cannot restore $FASTP=$FAST_ORIG" >&2; rc=1; }
+  fi
   if [ -n "$RX_ORIG" ]; then
     "${SSH[@]}" -n "$DUT" "echo $RX_ORIG | sudo -n tee $RXP >/dev/null" ||
       { echo "ERROR: cannot restore $RXP=$RX_ORIG" >&2; rc=1; }
@@ -196,6 +209,12 @@ if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then
   RX_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $RXP") || exit 1
   "${SSH[@]}" -n "$DUT" "echo $WGFP_RX | sudo -n tee $RXP >/dev/null" || exit 1
   echo "wgfp_rx: $RX_ORIG -> $WGFP_RX"
+  if [ -n "$WGFP_RX_FAST" ]; then
+    FAST_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $FASTP") ||
+      { echo "ERROR: this image has no $FASTP (P6)" >&2; exit 1; }
+    "${SSH[@]}" -n "$DUT" "echo $WGFP_RX_FAST | sudo -n tee $FASTP >/dev/null" || exit 1
+    echo "wgfp_rx_fast: $FAST_ORIG -> $WGFP_RX_FAST"
+  fi
 fi
 echo "##### $WHO: 1 tunnel, 4 streams, $REPS1 reps with a fresh tunnel each"
 REPS=$REPS1 RECREATE=1 DIRS="up down bidir" STREAMS=4 OUT=$OUTDIR/$TAG-$WHO-t1.csv bin/testrig-wireguard.sh run wg-v4
@@ -329,6 +348,10 @@ try:
         for line in Path(counter_file).read_text().splitlines():
             cell, direction, rep, phase, attempt, state, qman, sink_data = line.split("\t")
             counters = parse_counters(state, {"sealed", "rx", "peers", "install_fail"})
+            # P6 (wgfp_rx_fast) consumes sink frames before the P3 copy: they are received too
+            optional = dict(f.partition("=")[::2] for f in state.split() if "=" in f)
+            counters["rx"] += sum(int(optional[k]) for k in ("p6_fwd", "p6_stack")
+                                  if optional.get(k, "").isdecimal())
             counters.update(parse_counters(qman, {"sinks", "xmit_ok", "xmit_fail", "xmit_ern"}))
             counters["sink_data"] = parse_sinks(sink_data, counters["sinks"])
             key = (cell, direction, int(rep), int(attempt))

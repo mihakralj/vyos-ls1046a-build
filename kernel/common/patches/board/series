@@ -464,6 +464,13 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4019-qman-enqueue-fqid.patch
 
+# ── 4020: WireGuard fast path P6 receive bookkeeping (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md 4b) ──
+# Thin wrappers around counter_validate(), keep_key_fresh() + the receive
+# timers, and update_rx_stats(), so packets fastpath.c decrypts in place share
+# upstream's replay window and timers. Inert unless wgfp_rx_fast is set.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4020-wireguard-fastpath-rx-bookkeeping.patch
+
 # R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
 # Upstream-Status: Pending | Risk-Tier: C
 0176-dpaa-rx-stats-before-stack-verdict.patch

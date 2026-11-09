@@ -192,12 +192,18 @@ static void unregister_netdevice_notifier(int *nb)
 static void synchronize_rcu(void) {}
 static int wgfp_flows_flush(void) { return flow_flush_error; }
 static void wgfp_psts_reap(bool all) {}
+static void wgfp_rflows_reap(bool all) {}
+static void wgfp_nf_register(void) {}
+static void wgfp_nf_unregister(void) {}
+static struct work_struct wgfp_eg_work;
 static void schedule_delayed_work(int *work, int delay) {}
 static void schedule_work(struct work_struct *work) { stop_work_pending = true; }
 static void cancel_work_sync(struct work_struct *work)
 {
 	struct netdev_notifier_info event = { .dev = &devices[0] };
 
+	if (work == &wgfp_eg_work)
+		return;
 	stop_work_pending = false;
 	if (notifier_active && event_during_cancel)
 		wgfp_netdev_event(NULL, NETDEV_UNREGISTER, &event);

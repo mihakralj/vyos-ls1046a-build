@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 9 Nov 2026 12:00:00 +0000
+Subject: [PATCH] wireguard: let the DPAA fast path reuse the receive
+ bookkeeping (P6)
+
+The DPAA fast path (drivers/net/wireguard/fastpath.c) decrypts data
+packets of a peer's current keypair in place in the receive buffer.
+Give it the replay check, the receive timers and keep_key_fresh(), and
+the receive statistics of this file through three thin wrappers, so the
+packets it decrypts and the packets that take the normal receive path
+share one replay window and one set of timers instead of a copy.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/wireguard/receive.c b/drivers/net/wireguard/receive.c
+index eb8851113..02fa1a4e1 100644
+--- a/drivers/net/wireguard/receive.c
++++ b/drivers/net/wireguard/receive.c
+@@ -10,6 +10,7 @@
+ #include "messages.h"
+ #include "cookie.h"
+ #include "socket.h"
++#include "fastpath.h"
+ 
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
+@@ -332,6 +333,27 @@ out:
+ 
+ #include "selftest/counter.c"
+ 
++/* The DPAA fast path (fastpath.c, P6) decrypts some data packets of the
++ * current keypair itself.  It keeps their replay window, timers and stats on
++ * the same state and code as the packets that come through this file. */
++bool wg_fastpath_rx_validate(struct noise_keypair *keypair, u64 nonce)
++{
++	return counter_validate(&keypair->receiving_counter, nonce);
++}
++
++void wg_fastpath_rx_timers(struct wg_peer *peer)
++{
++	keep_key_fresh(peer);
++	wg_timers_any_authenticated_packet_received(peer);
++	wg_timers_any_authenticated_packet_traversal(peer);
++	wg_timers_data_received(peer);
++}
++
++void wg_fastpath_rx_stats(struct wg_peer *peer, size_t len)
++{
++	update_rx_stats(peer, len);
++}
++
+ static void wg_packet_consume_data_done(struct wg_peer *peer,
+ 					struct sk_buff *skb,
+ 					struct endpoint *endpoint)
+-- 
+2.43.0
