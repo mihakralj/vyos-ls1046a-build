@@ -3255,25 +3255,28 @@ insert_at = idx + len(ANCHOR_FIRST)
 src = src[:insert_at] + KEY_BLOCK + src[insert_at:]
 
 # Inject the snapshot block AFTER the `make bindeb-pkg ...` line.
-BINDEB_ANCHOR = "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} KDEB_PKGVERSION=${KERNEL_VERSION}-1"
+# Upstream since T9591 (vyos-build 1d6ec63, 2026-11-09): KERNEL_SUFFIX is
+# -${KERNEL_REVISION}-${KERNEL_FLAVOR} (release 6.18.62-1-vyos) and the Debian
+# version is ${KERNEL_VERSION}-${KERNEL_REVISION}.
+BINDEB_ANCHOR = "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} KDEB_PKGVERSION=${KERNEL_VERSION}-${KERNEL_REVISION}"
 # F-217/kernel-skew fix: append a strictly-monotonic per-build suffix to the
-# kernel .deb version. Without it, every rebuild of 6.18.44 produces version
-# "6.18.44-1"; the persistent chroot already has that version installed, so
-# `apt install linux-image-6.18.44-vyos` is a no-op and the ISO ships the
+# kernel .deb version. Without it, every rebuild of 6.18.62 produces version
+# "6.18.62-1"; the persistent chroot already has that version installed, so
+# `apt install linux-image-6.18.62-1-vyos` is a no-op and the ISO ships the
 # PREVIOUS run's vmlinuz (stale kernel, old module-signing keyring) alongside a
 # freshly rebuilt squashfs/ask.ko -> "Key was rejected by service" on the board.
 # BUILD_VERSION (e.g. 2026.08.20-0026-rolling) reduces to digits (20260820.0026)
 # which sorts monotonically; fall back to the epoch second if unset. The
-# ask-modules .deb Depends on the release string (linux-image-<KVER>-vyos), NOT
+# ask-modules .deb Depends on the release string (linux-image-<KVER>-<rev>-vyos), NOT
 # this Debian version, so the OOT dependency stays satisfied.
 BINDEB_REPLACE = (
     'KDEB_SUFFIX="$(printf "%s" "${BUILD_VERSION:-}" | tr -cd "0-9." | sed "s/^[.]*//;s/[.]*$//")"\n'
     '[ -n "$KDEB_SUFFIX" ] || KDEB_SUFFIX="$(date -u +%Y%m%d.%H%M%S)"\n'
-    'echo "I: ASK2 kernel .deb version = ${KERNEL_VERSION}-1+b${KDEB_SUFFIX} (per-build, forces chroot upgrade)"\n'
+    'echo "I: ASK2 kernel .deb version = ${KERNEL_VERSION}-${KERNEL_REVISION}+b${KDEB_SUFFIX} (per-build, forces chroot upgrade)"\n'
     "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} "
-    'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
+    'KDEB_PKGVERSION="${KERNEL_VERSION}-${KERNEL_REVISION}+b${KDEB_SUFFIX}"'
 )
-PERBUILD_MARK = 'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
+PERBUILD_MARK = 'KDEB_PKGVERSION="${KERNEL_VERSION}-${KERNEL_REVISION}+b${KDEB_SUFFIX}"'
 bidx = src.find(BINDEB_ANCHOR)
 if bidx >= 0:
     # Replace the fixed-version bindeb-pkg line with the per-build-versioned form
@@ -3286,7 +3289,7 @@ else:
     print(f"ERROR: ASK2 v2 bindeb-pkg anchor not found in {bk}", file=sys.stderr)
     sys.exit(1)
 # Re-find the (now replaced) bindeb line to anchor the snapshot block after it.
-bidx = src.find("KDEB_PKGVERSION=\"${KERNEL_VERSION}-1+b${KDEB_SUFFIX}\"")
+bidx = src.find(PERBUILD_MARK)
 if bidx < 0:
     print(f"ERROR: ASK2 per-build bindeb line not found after replace in {bk}", file=sys.stderr)
     sys.exit(1)

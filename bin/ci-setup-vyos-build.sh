@@ -249,11 +249,15 @@ else
   ASK_KERNEL_DEB=
 fi
 if [ -n "$ASK_KERNEL_DEB" ]; then
-  # linux-image-6.6.137-vyos_6.6.137-1_arm64.deb -> 6.6.137
-  ASK_KVER=$(basename "$ASK_KERNEL_DEB" | sed -E 's/^linux-image-([0-9]+\.[0-9]+\.[0-9]+)-vyos_.*$/\1/')
+  # linux-image-6.18.62-1-vyos_6.18.62-1+b..._arm64.deb -> 6.18.62 and 1
+  # (T9591 revision; an older linux-image-6.6.137-vyos_* name has none)
+  ASK_KVER=$(basename "$ASK_KERNEL_DEB" | sed -E 's/^linux-image-([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+-)?vyos_.*$/\1/')
+  ASK_KREV=$(basename "$ASK_KERNEL_DEB" | sed -nE 's/^linux-image-[0-9]+\.[0-9]+\.[0-9]+-([0-9]+)-vyos_.*$/\1/p')
   if [ -n "$ASK_KVER" ] && [ "$ASK_KVER" != "$(basename "$ASK_KERNEL_DEB")" ]; then
-    echo "### Pinning defaults.toml kernel_version -> $ASK_KVER (from $(basename "$ASK_KERNEL_DEB"))"
+    echo "### Pinning defaults.toml kernel_version -> $ASK_KVER${ASK_KREV:+, kernel_revision -> $ASK_KREV} (from $(basename "$ASK_KERNEL_DEB"))"
     sed -i -E "s/^(\\s*kernel_version\\s*=\\s*)\"[^\"]+\"/\\1\"$ASK_KVER\"/" \
+      vyos-build/data/defaults.toml
+    [ -z "$ASK_KREV" ] || sed -i -E "s/^(\\s*kernel_revision\\s*=\\s*)\"[^\"]+\"/\\1\"$ASK_KREV\"/" \
       vyos-build/data/defaults.toml
     grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
   else

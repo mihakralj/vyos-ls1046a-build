@@ -114,6 +114,13 @@ KVER=""
 [ -z "$KVER" ] && [ -f versions.lock ] && \
     KVER=$(. versions.lock >/dev/null 2>&1; printf '%s' "$KERNEL_VERSION")
 KVER="${KVER:-6.18.34}"
+# VyOS internal kernel revision (vyos-build T9591): release = <KVER>-<KREV>-vyos.
+KREV=""
+[ -f vyos-build/data/defaults.toml ] && \
+    KREV=$(awk -F'"' '/^kernel_revision/ {print $2; exit}' vyos-build/data/defaults.toml)
+[ -z "$KREV" ] && [ -f versions.lock ] && \
+    KREV=$(. versions.lock >/dev/null 2>&1; printf '%s' "$KERNEL_REVISION")
+KREV="${KREV:-1}"
 KSRC="$REPO_ROOT/work/linux-$KVER"
 
 # ── SSH/rsync wrappers ────────────────────────────────────────────────
@@ -160,15 +167,15 @@ cmd_kernel() {
 
     hdr "Building kernel (native arm64, -j$JOBS)"
     local _T0=$SECONDS
-    # LOCALVERSION=-vyos is MANDATORY — it is the vermagic suffix every
-    # released kernel uses (build-kernel.sh:42 default, CI ships `*-vyos`
+    # LOCALVERSION=-<KREV>-vyos is MANDATORY — it is the vermagic suffix every
+    # released kernel uses (build-kernel.sh default, CI ships `*-<rev>-vyos`
     # .deb packages). Without it the dev-built kernel reports `6.18.31+`
     # which mismatches every signed -vyos OOT module and breaks ask.ko
     # insmod on the DUT. See AGENTS.md "Kernel signing artifacts" and
     # Qdrant memory "kernel LOCALVERSION invariant".
     (
         cd "$KSRC"
-        make ARCH="$ARCH" LOCALVERSION=-vyos -j"$JOBS" Image
+        make ARCH="$ARCH" LOCALVERSION="-${KREV}-vyos" -j"$JOBS" Image
     )
     ok "Kernel built in $(( SECONDS - _T0 ))s"
 

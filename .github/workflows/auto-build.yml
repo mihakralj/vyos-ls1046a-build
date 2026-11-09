@@ -230,14 +230,9 @@ jobs:
         with:
           repository: vyos/vyos-build
           path: vyos-build
-          # Pinned 2026-11-09: upstream T9591 (vyos-build 1d6ec63, merged 9ba01bd)
-          # adds kernel_revision (6.18.60 -> 6.18.60-1-vyos: uname -r, module dir,
-          # linux-image package name) and rewrites the bindeb-pkg line that
-          # bin/ci-setup-kernel.sh anchors on, so every build failed (run
-          # 42664308566). b541dd7 is the last first-parent commit before it
-          # (kernel 6.18.60). Unpin after porting our -vyos LOCALVERSION/vermagic,
-          # ask-modules deb and the bindeb anchor to kernel_revision.
-          ref: b541dd70eedd78455861af42cfd262e712a75803
+          # Tracks upstream rolling. Since T9591 (2026-11-09) the kernel release is
+          # <kernel_version>-<kernel_revision>-vyos (6.18.62-1-vyos); our setup,
+          # cache key and dev scripts follow kernel_revision from defaults.toml.
           # vyos-build/build/ (chroot, live-build's own package cache,
           # .build/ stage markers) is gitignored — actions/checkout's
           # default clean:true runs `git clean -ffdx` on EVERY run, which

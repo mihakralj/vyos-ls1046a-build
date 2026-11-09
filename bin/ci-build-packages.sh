@@ -193,7 +193,14 @@ for package in $packages; do
     echo "I: ASK2 F-217 — cache-key signing SKID=${ASK_PERSIST_SKID:-unknown}"
 
     KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
+    # T9591: the release string carries kernel_revision (6.18.62-1-vyos); a
+    # revision bump of the same upstream version must not replay the old kernel.
+    KREV=$(awk -F'"' '/^kernel_revision/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
+    [ -z "$KREV" ] || KVER="${KVER}-${KREV}"
     KERNEL_HASH=$( {
+      # Upstream's own kernel build script (its LOCALVERSION/KDEB_PKGVERSION
+      # lines changed under us in T9591).
+      cat "$GITHUB_WORKSPACE/vyos-build/scripts/package-build/linux-kernel/build-kernel.sh" 2>/dev/null
       find "$GITHUB_WORKSPACE/data/kernel-config" -maxdepth 1 -name '*.config' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       find "$GITHUB_WORKSPACE/data/kernel-patches" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       # kernel/common/ is the canonical home for kernel config fragments and
