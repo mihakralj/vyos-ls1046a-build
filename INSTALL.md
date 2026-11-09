@@ -71,9 +71,12 @@ sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/rdiskN bs=4m
 
 ## Step 2 — Boot from USB
 
-1. Insert the USB drive into the Mono Gateway
-2. Connect serial console (115200 8N1)
-3. Power on and **press any key** during the U-Boot countdown to stop autoboot
+Before you begin: Ensure the boot dip-switch on the PCB is set to NOR.
+
+1. Boot from NOR
+2. Insert the USB drive into the Mono Gateway
+3. Connect serial console (115200 8N1)
+4. Power on and **press any key** during the U-Boot countdown to stop autoboot
 
 Factory U-Boot boots OpenWrt from eMMC. It has no USB boot command, so you must tell it to run the boot script from USB.
 
