@@ -118,12 +118,10 @@ Flow types (one row each):
 | `vlan-port` | tagged ↔ untagged | V05–V08, V11–V12 | |
 | `pppoe` | PPPoE encap/decap on `pppoe10` | P01–P04 | Up = encap (LAN→WAN), Down = decap |
 | `wireguard` | tunnel terminated on DUT | `testrig-wg*`, `testrig-wgfp-*` | software crypto; expected HW share 0 |
-| `ipsec` | ESP tunnel (Tier 1 today) | strongSwan peer | expected software until tier 1.5 lands |
 | `bridge` | L2 forwarding across `br0` members | B01–B06 | L2 only; no NAT |
-| `broadcast` | 255.255.255.255 / subnet broadcast, UDP | new generator | no TCP and no meaningful reverse/bidir; invalid slots print `-` |
-| `multicast` | 239.x / ff3e:: (routed and bridged) | G01–G03 tooling | ASK2 today = software forwarding; still report the number |
-| `fragments` | MTU/DF/fragment cells | F01–F05 | throughput plus correctness marker |
 | `policer` | ingress policer, shaped rate | Q01 | delivered within ±15 % of configured rate |
+
+Not measured (decision 2026-11-09): `ipsec`, `multicast` and `broadcast` have no ASK2 hardware offload (IPsec has only the Tier 1 CAAM crypto substrate, multicast/MDB replication is not implemented, broadcast/BUM stays in the kernel by design), so their rows would only show the Linux software rate; fragment cells are not needed. Add a row back when its offload exists.
 
 Rules:
 

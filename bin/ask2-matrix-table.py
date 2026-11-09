@@ -22,9 +22,10 @@ QUICK = {  # type: (upload cell, download cell, bidir cell), {f} = 4|6
 }
 NINEK = ["unicast", "nat", "vlan-vlan", "vlan-port"]   # MTU 9000 rows, from quick9k-*.csv
 LABEL = {"vlan-vlan-9k": "vlan-9k"}
-ROWS = ["unicast", "nat", "vlan-vlan", "vlan-port", "pppoe", "bridge"] + [f"{t}-9k" for t in NINEK] + [
-        "wireguard", "wireguard6", "ipsec",
-        "broadcast", "multicast", "fragments", "policer"]
+ROWS = ["unicast", "nat", "vlan-vlan", "vlan-port", "pppoe", "bridge"] + [f"{t}-9k" for t in NINEK] + ["bridge-9k",
+        "wireguard", "wireguard6", "policer"]
+# Not measured (decision 2026-11-09): ipsec, multicast and broadcast have no ASK2 hardware offload,
+# so a row would only show the Linux software rate; fragment cells are not needed either.
 DIRS = ("up", "down", "bidir")
 
 
@@ -42,6 +43,29 @@ def collect(run):
             if g > 0.05:
                 vals[pre + r[1]].append(g)
                 verd[pre + r[1]].append(r[10])
+    # bridge-<mtu>.csv (bin/testrig-ask2-bridge.sh): ts,mtu,fam,dir,rep,gbps,dut_busy
+    for p in sorted(Path(run).glob("bridge-*.csv")):
+        for r in csv.DictReader(open(p)):
+            try:
+                g = float(r["gbps"])
+            except (KeyError, ValueError):
+                continue
+            row = "bridge" if r["mtu"] == "1500" else "bridge-9k"
+            if g > 0.05:
+                vals[f"{row}-v{r['fam']}-{r['dir']}"].append(g)
+                verd[f"{row}-v{r['fam']}-{r['dir']}"].append("HW" if float(r["dut_busy"]) < 10 else "SW?")
+    # policer-*.csv (bin/testrig-ask2-policer.sh): delivered upload rate through the 1G ingress policer
+    for p in sorted(Path(run).glob("policer-*.csv")):
+        for r in csv.reader(open(p)):
+            if len(r) < 11 or r[1] not in ("unicast-v4", "unicast-v6"):
+                continue
+            try:
+                g = float(r[2])
+            except ValueError:
+                continue
+            if g > 0.05:
+                vals[f"policer-v{r[1][-1]}-up"].append(g)
+                verd[f"policer-v{r[1][-1]}-up"].append("HW")
     # wg-*.csv: IPv4 outer transport; wg6-*.csv: IPv6 outer (OUTER=6). Columns are the inner family.
     for p in sorted(Path(run).glob("wg-*.csv")) + sorted(Path(run).glob("wg6-*.csv")):
         row = "wireguard6" if p.name.startswith("wg6-") else "wireguard"
