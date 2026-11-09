@@ -52,9 +52,17 @@ struct qman_fq {
 };
 struct napi_struct { int unused; };
 struct wgfp_port;
+struct wgfp_sink_pc {
+	uint64_t frames, bytes;
+};
+#ifndef for_each_possible_cpu
+#define for_each_possible_cpu(cpu) for ((cpu) = 0; (cpu) < 1; (cpu)++)
+#define per_cpu_ptr(p, cpu) ((void)(cpu), (p))
+#endif
 struct wgfp_sink {
 	struct qman_fq fq;
 	struct napi_struct napi;
+	struct wgfp_sink_pc *pc;
 	struct wgfp_port *port;
 	int cpu;
 	bool created;

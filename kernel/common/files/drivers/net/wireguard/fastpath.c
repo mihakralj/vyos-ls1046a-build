@@ -1143,6 +1143,7 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	const struct udphdr *udp;
 	u32 hl, ilen, ulen, clen, plen, len;
 	u8 ds, *pt;
+	unsigned long t;
 	u64 nonce;
 
 	if (f->len < ETH_HLEN || !(pst->wgdev->flags & IFF_UP) ||
@@ -1203,10 +1204,11 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 		dpaa_wgfp_drop(f);
 		return 1;
 	}
-	if (time_after(jiffies, READ_ONCE(pst->last_rx_timer))) {
-		WRITE_ONCE(pst->last_rx_timer, jiffies + HZ / 100);
+	/* spread mode decrypts one peer on every CPU: one of them takes each turn */
+	t = READ_ONCE(pst->last_rx_timer);
+	if (time_after(jiffies, t) &&
+	    cmpxchg(&pst->last_rx_timer, t, jiffies + HZ / 100) == t)
 		wg_fastpath_rx_timers(peer);
-	}
 	plen = clen - POLY1305_DIGEST_SIZE;
 	if ((pt[0] >> 4) == 4 && plen >= sizeof(struct iphdr))
 		len = ntohs(((const struct iphdr *)pt)->tot_len);

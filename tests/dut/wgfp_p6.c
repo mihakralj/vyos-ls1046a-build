@@ -26,6 +26,7 @@ typedef uint64_t u64;
 #define unlikely(x) (x)
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x, v) ((x) = (v))
+#define cmpxchg(p, o, n) ({ __typeof__(*(p)) __o = *(p); if (__o == (o)) *(p) = (n); __o; })
 #define rcu_dereference(p) (p)
 #define cpu_to_le32(x) (x)
 #define le64_to_cpu(x) (x)

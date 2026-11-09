@@ -17,8 +17,16 @@ typedef unsigned long long u64;
 #define be32_to_cpu(x) __builtin_bswap32(x)
 
 struct qman_fq { unsigned int fqid; };
+struct wgfp_sink_pc {
+	uint64_t frames, bytes;
+};
+#ifndef for_each_possible_cpu
+#define for_each_possible_cpu(cpu) for ((cpu) = 0; (cpu) < 1; (cpu)++)
+#define per_cpu_ptr(p, cpu) ((void)(cpu), (p))
+#endif
 struct wgfp_sink {
 	struct qman_fq fq;
+	struct wgfp_sink_pc *pc;
 	int cpu;
 	bool dist;
 	u64 frames, bytes, errs, sg, irqs, polls;
@@ -97,7 +105,16 @@ static void seq_putc(struct seq_file *m, char c)
 int main(void)
 {
 	struct seq_file output = {};
+	struct wgfp_sink_pc orp_pc = { .frames = 7, .bytes = 700 };
 
+	wgfp_nports = 1;
+	wgfp_ports[0].ifindex = 6;
+	wgfp_ports[0].orp = true;
+	wgfp_ports[0].orp_sink.fq.fqid = 0x300;
+	wgfp_ports[0].orp_sink.cpu = -1;
+	wgfp_ports[0].orp_sink.frames = 1;	/* per-CPU counts add to it */
+	wgfp_ports[0].orp_sink.bytes = 100;
+	wgfp_ports[0].orp_sink.pc = &orp_pc;
 	wgfp_global[0].fq.fqid = 0x2be;
 	wgfp_global[1].fq.fqid = 0x2bf;
 	wgfp_global[1].cpu = 1;
@@ -109,5 +126,6 @@ int main(void)
 	assert(strstr(output.buf,
 		      "sink1 port=0 kind=global cpu=1 fqid=0x2bf frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
 		      " query_err=-110\n"));
+	assert(strstr(output.buf, "port=6 kind=orp cpu=-1 fqid=0x300 frames=8 bytes=800 "));
 	return 0;
 }

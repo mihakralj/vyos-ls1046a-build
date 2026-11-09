@@ -101,6 +101,13 @@ bool dpaa_buf_stale_check(dma_addr_t addr, u8 bpid, const char *where);
 
 struct wgfp_port;
 
+/* Frame/byte counts of a sink every CPU dequeues (the ORP queue): kept per
+ * CPU so the hot path does not bounce one cache line between four cores. */
+struct wgfp_sink_pc {
+	u64 frames;
+	u64 bytes;
+};
+
 struct wgfp_sink {
 	struct qman_fq fq;
 	struct napi_struct napi;
@@ -110,6 +117,7 @@ struct wgfp_sink {
 	bool created;
 	bool dist;		/* fan-out distributor, not a worker */
 	bool orp;		/* ordered pool-channel queue (spread mode) */
+	struct wgfp_sink_pc __percpu *pc;	/* ORP sink only */
 	u64 frames;
 	u64 bytes;
 	u64 errs;
@@ -191,13 +199,26 @@ static bool wgfp_spread;
  * as frames, so they get their own tag queue. */
 static struct qman_fq wgfp_hole_fq;
 static bool wgfp_hole_ready;
-static atomic64_t wgfp_orp_frames = ATOMIC64_INIT(0);
+static DEFINE_PER_CPU(atomic64_t, wgfp_orp_frames);
 static atomic64_t wgfp_orp_holes = ATOMIC64_INIT(0);
 static atomic64_t wgfp_orp_wait_fail = ATOMIC64_INIT(0);
 static atomic64_t wgfp_orp_hole_ern = ATOMIC64_INIT(0);
 static void wgfp_hole_ern_cb(struct qman_portal *portal, struct qman_fq *fq,
 			     const union qm_mr_entry *msg);
 static bool wgfp_pool_failed;
+
+static inline void wgfp_sink_count(struct wgfp_sink *s, u32 len)
+{
+	if (s->pc) {
+		struct wgfp_sink_pc *pc = this_cpu_ptr(s->pc);
+
+		pc->frames++;
+		pc->bytes += len;
+		return;
+	}
+	s->frames++;
+	s->bytes += len;
+}
 static DEFINE_MUTEX(wgfp_lock);
 
 /* Consumer hook (the wireguard module) and the egress frame queue. */
@@ -347,8 +368,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 			atomic64_inc(&wgfp_rx_enq_fail);
 			goto release;
 		}
-		s->frames++;
-		s->bytes += len;
+		wgfp_sink_count(s, len);
 		return qman_cb_dqrr_consume;
 	}
 
@@ -371,8 +391,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 
 		if (ops->frame(wgfp_ops_priv, &f)) {
 			rcu_read_unlock();
-			s->frames++;
-			s->bytes += len;
+			wgfp_sink_count(s, len);
 			return qman_cb_dqrr_consume;
 		}
 	}
@@ -381,8 +400,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	wgfp_touch_frame(s, p, len);
 	dma_sync_single_for_device(dev, addr + off, len, DMA_FROM_DEVICE);
 
-	s->frames++;
-	s->bytes += len;
+	wgfp_sink_count(s, len);
 release:
 	dpaa_wgfp_fd_release(fd);
 	return qman_cb_dqrr_consume;
@@ -437,7 +455,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 	c->orp_fqid = qman_fq_fqid(fq);
 	c->seq = be16_to_cpu(dq->seqnum);
 	c->owed = true;
-	atomic64_inc(&wgfp_orp_frames);
+	dpaa_wgfp_stat_inc(&wgfp_orp_frames);
 	r = wgfp_dqrr_frame(portal, fq, dq, false);
 	/* Whatever path the frame took, its place in the sequence is settled. */
 	if (c->owed)
@@ -492,6 +510,9 @@ static int wgfp_orp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 	if (WARN_ON_ONCE(s->created))
 		return -EBUSY;
 	memset(s, 0, sizeof(*s));
+	s->pc = alloc_percpu(struct wgfp_sink_pc);
+	if (!s->pc)
+		return -ENOMEM;
 	s->cpu = -1;
 	s->port = port;
 	s->orp = true;
@@ -505,12 +526,14 @@ static int wgfp_orp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 	opts.fqd.orpc = QM_FQD_ORPC(WGFP_ORP_RWS, WGFP_ORP_OA, WGFP_ORP_OLWS);
 	qm_fqd_set_destwq(&opts.fqd, channel, WGFP_WQ);
 	err = qm_fqd_set_taildrop(&opts.fqd, WGFP_SINK_TD * WGFP_MAX_SINKS, 1);
-	if (err < 0)
-		return err;
-	err = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
-			     QMAN_FQ_FLAG_NO_ENQUEUE, &s->fq);
-	if (err)
-		return err;
+	if (err >= 0)
+		err = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
+				     QMAN_FQ_FLAG_NO_ENQUEUE, &s->fq);
+	if (err) {
+		free_percpu(s->pc);
+		s->pc = NULL;
+		return err < 0 ? err : -EINVAL;
+	}
 	s->created = true;
 	err = qman_init_fq(&s->fq, QMAN_INITFQ_FLAG_SCHED, &opts);
 	if (err)
@@ -772,6 +795,7 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			wgfp_touch = n;
 	} else if (!strncmp(buf, "reset", 5)) {
 		unsigned int i, j;
+		int cpu;
 
 		for (i = 0; i < wgfp_nglobal; i++) {
 			struct wgfp_sink *s = &wgfp_global[i];
@@ -795,7 +819,19 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 				s->polls = s->irqs = s->sum = 0;
 			}
 		}
-		atomic64_set(&wgfp_orp_frames, 0);
+		for (i = 0; i < wgfp_nports; i++) {
+			struct wgfp_port *p = &wgfp_ports[i];
+
+			if (!p->orp_sink.pc)
+				continue;
+			for_each_possible_cpu(cpu)
+				*per_cpu_ptr(p->orp_sink.pc, cpu) =
+					(struct wgfp_sink_pc){};
+			p->orp_sink.errs = p->orp_sink.sg = 0;
+			p->orp_sink.polls = p->orp_sink.irqs = 0;
+		}
+		for_each_possible_cpu(cpu)
+			atomic64_set(per_cpu_ptr(&wgfp_orp_frames, cpu), 0);
 		atomic64_set(&wgfp_orp_holes, 0);
 		atomic64_set(&wgfp_orp_wait_fail, 0);
 		atomic64_set(&wgfp_orp_hole_ern, 0);
@@ -821,14 +857,21 @@ static void wgfp_sink_show(struct seq_file *m, unsigned int idx,
 			   struct wgfp_sink *s, const char *kind, int ifindex)
 {
 	struct qm_mcr_queryfq_np np;
-	int err;
+	u64 frames = s->frames, bytes = s->bytes;
+	int err, cpu;
 
+	if (s->pc) {
+		for_each_possible_cpu(cpu) {
+			frames += per_cpu_ptr(s->pc, cpu)->frames;
+			bytes += per_cpu_ptr(s->pc, cpu)->bytes;
+		}
+	}
 	memset(&np, 0, sizeof(np));
 	err = qman_query_fq_np(&s->fq, &np);
 	seq_printf(m,
 		   "sink%u port=%d kind=%s cpu=%d fqid=0x%x frames=%llu bytes=%llu errs=%llu sg=%llu irqs=%llu polls=%llu",
-		   idx, ifindex, kind, s->cpu, qman_fq_fqid(&s->fq), s->frames,
-		   s->bytes, s->errs, s->sg, s->irqs, s->polls);
+		   idx, ifindex, kind, s->cpu, qman_fq_fqid(&s->fq), frames,
+		   bytes, s->errs, s->sg, s->irqs, s->polls);
 	if (!err) {
 		/* The management response counters are big-endian (verified on
 		 * the DUT: byte_cnt / frm_cnt equals the fixed frame size only
@@ -867,7 +910,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   (u64)atomic64_read(&wgfp_rx_enq_fail),
 		   (u64)atomic64_read(&wgfp_rx_ern),
 		   READ_ONCE(wgfp_spread),
-		   (u64)atomic64_read(&wgfp_orp_frames),
+		   dpaa_wgfp_stat_sum(&wgfp_orp_frames),
 		   (u64)atomic64_read(&wgfp_orp_holes),
 		   (u64)atomic64_read(&wgfp_orp_wait_fail),
 		   (u64)atomic64_read(&wgfp_orp_hole_ern));
