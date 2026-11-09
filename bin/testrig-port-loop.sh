@@ -18,7 +18,7 @@ chk(){ if [ "$2" = "$3" ]; then echo "PASS $1 ($3)"; else echo "FAIL $1: got '$2
 used(){ d "sudo cat /sys/kernel/debug/fman_pcd/0/muram_budget | awk '/^used/{print \$2}'"; }
 snapdiff(){ d "sudo pcd-snapshot diff /tmp/pl-base.json 2>&1 | tail -2"; }
 tool(){ d "sudo /usr/local/bin/vyos-offload-ask --port $HW $*" 2>&1; }
-kerr(){ d "sudo dmesg | tail -200 | grep -ciE 'oops|BUG:|WARNING:|call trace'"; }
+kerr(){ d "sudo dmesg | tail -200 | grep -ciE '\\boops\\b|BUG:|WARNING:|call trace'"; }
 
 echo "== $PORT ($HW) baseline"
 d "sudo ask-check 2>&1 | grep -E 'FAIL|Summary' | head -3"
