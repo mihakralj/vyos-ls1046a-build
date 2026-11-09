@@ -1061,7 +1061,8 @@ static int wgfp_rx_fast_stack(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
 	/* the Poly1305 tag covered it: as upstream, no checksum to verify */
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
 	skb->csum_level = ~0;
-	if ((pt[0] >> 4) == 4) {
+	/* pt went back to BMan above: read the copy */
+	if ((skb->data[0] >> 4) == 4) {
 		skb->protocol = htons(ETH_P_IP);
 		INET_ECN_decapsulate(skb, ds, ip_hdr(skb)->tos);
 	} else {

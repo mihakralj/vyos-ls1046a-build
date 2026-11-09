@@ -46,6 +46,12 @@
  *                                  one enqueue: the frame itself, or a hole.
  *                                  Applies to records installed afterwards;
  *                                  takes precedence over "fanout".
+ *   echo "orp_td <B>"  > .../ctl   ORP queue tail drop in bytes (64 KiB..16 MiB,
+ *                                  default 2 MiB)
+ *   echo "orp_stash <0|1>" > ...   QMan stashing on the ORP queue (default 0)
+ *                                  Both apply when a port's ORP queue is
+ *                                  created (once per boot), so set them before
+ *                                  the first spread record.
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
  *
@@ -195,6 +201,16 @@ static unsigned int wgfp_fanout_home;
 #define WGFP_FANOUT_HOME_MAX	64
 /* Spread mode: RX records go to the port's ORP queue (default off). */
 static bool wgfp_spread;
+/* ORP queue settings, taken when a port's ORP queue is created (boot
+ * lifetime, so set them before the first spread record): tail-drop bytes,
+ * and QMan stashing of annotation, data and context lines as mainline
+ * dpaa_eth sets on its RX queues (ASK exp/wireguard stashes its steer
+ * queues too).  Defaults keep the original queue. */
+#define WGFP_ORP_TD_DEF		(WGFP_SINK_TD * WGFP_MAX_SINKS)
+#define WGFP_ORP_TD_MIN		(64 * 1024)
+#define WGFP_ORP_TD_MAX		(16 * 1024 * 1024)
+static u32 wgfp_orp_td = WGFP_ORP_TD_DEF;
+static bool wgfp_orp_stash;
 /* Hole commands carry an empty descriptor; their rejections must not be freed
  * as frames, so they get their own tag queue. */
 static struct qman_fq wgfp_hole_fq;
@@ -525,7 +541,16 @@ static int wgfp_orp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 				       QM_FQCTRL_ORP | QM_FQCTRL_AVOIDBLOCK);
 	opts.fqd.orpc = QM_FQD_ORPC(WGFP_ORP_RWS, WGFP_ORP_OA, WGFP_ORP_OLWS);
 	qm_fqd_set_destwq(&opts.fqd, channel, WGFP_WQ);
-	err = qm_fqd_set_taildrop(&opts.fqd, WGFP_SINK_TD * WGFP_MAX_SINKS, 1);
+	if (READ_ONCE(wgfp_orp_stash)) {
+		opts.we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);
+		opts.fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CTXASTASHING);
+		opts.fqd.context_a.stashing.exclusive =
+			QM_STASHING_EXCL_DATA | QM_STASHING_EXCL_CTX |
+			QM_STASHING_EXCL_ANNOTATION;
+		qm_fqd_set_stashing(&opts.fqd, 1, 2,
+				    DIV_ROUND_UP(sizeof(struct qman_fq), 64));
+	}
+	err = qm_fqd_set_taildrop(&opts.fqd, READ_ONCE(wgfp_orp_td), 1);
 	if (err >= 0)
 		err = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
 				     QMAN_FQ_FLAG_NO_ENQUEUE, &s->fq);
@@ -788,6 +813,16 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_spread, n);
+	} else if (sscanf(buf, "orp_td %u", &n) == 1) {
+		if (n < WGFP_ORP_TD_MIN || n > WGFP_ORP_TD_MAX)
+			err = -EINVAL;
+		else
+			WRITE_ONCE(wgfp_orp_td, n);
+	} else if (sscanf(buf, "orp_stash %u", &n) == 1) {
+		if (n > 1)
+			err = -EINVAL;
+		else
+			WRITE_ONCE(wgfp_orp_stash, n);
 	} else if (sscanf(buf, "touch %u", &n) == 1) {
 		if (n > 3)
 			err = -EINVAL;
@@ -898,7 +933,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -909,7 +944,8 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   (u64)atomic64_read(&wgfp_xmit_ern),
 		   (u64)atomic64_read(&wgfp_rx_enq_fail),
 		   (u64)atomic64_read(&wgfp_rx_ern),
-		   READ_ONCE(wgfp_spread),
+		   READ_ONCE(wgfp_spread), READ_ONCE(wgfp_orp_td),
+		   READ_ONCE(wgfp_orp_stash),
 		   dpaa_wgfp_stat_sum(&wgfp_orp_frames),
 		   (u64)atomic64_read(&wgfp_orp_holes),
 		   (u64)atomic64_read(&wgfp_orp_wait_fail),

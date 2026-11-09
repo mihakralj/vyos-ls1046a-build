@@ -132,7 +132,15 @@ static struct wgfp_rflow *rflow;
 static struct wg_peer *aip_peer;
 static struct sk_buff *last_skb;
 
-static void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f) { (void)f; drops++; }
+/* The buffer goes back to BMan: FMan may refill it at once, so scribble it
+ * (0x6b reads as IP version 6) to catch a read after release. */
+static bool scribble = true;
+static void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
+{
+	drops++;
+	if (scribble)
+		memset(f->buf + f->off, 0x6b, f->len);
+}
 static void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 off, u32 len)
 {
 	(void)f;
@@ -546,11 +554,13 @@ static void test_left_to_p3(void)
 	f = build(&p);
 	memcpy(before, frame, sizeof(frame));
 	reset();
+	scribble = false;	/* the check below is on the released buffer */
 	{
 		struct wgfp_flow fl = { .t.family = AF_INET, .pst = &pst };
 
 		CHECK(wgfp_rx_fast_frame(&f, &fl, &port) == 1);
 	}
+	scribble = true;
 	CHECK(drops == 1 && wgfp_p6_auth == 1 && !memcmp(before, frame, sizeof(frame)));
 	CHECK(!seen[31]);				/* the window did not move */
 

@@ -38,6 +38,10 @@ typedef unsigned long long u64;
 #define atomic_set(p, v) (*(p) = (v))
 #define atomic64_set(p, v) (*(p) = (v))
 static bool wgfp_spread;
+#define WGFP_ORP_TD_MIN (64 * 1024)
+#define WGFP_ORP_TD_MAX (16 * 1024 * 1024)
+static unsigned int wgfp_orp_td = 2 * 1024 * 1024;
+static bool wgfp_orp_stash;
 static long long wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
 
 struct qman_portal;
