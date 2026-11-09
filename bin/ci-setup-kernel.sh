@@ -3056,6 +3056,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_310.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_workspace_disarm,fman_port_drain 2>&1
     echo "### fman_pcd.c/fman_pcd_kg.c: F-310 teardown order harness passed"
+    # F-311 (T2 engage order, inverse of F-310): RCCB + first-port SYNC +
+    # CC_EN while the scheme is still RSS, then the AC_CC scheme; a failed
+    # scheme write keeps RCCB at the node. Needs F-310 (same harness script).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_311.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_kg_arm_order 2>&1
+    echo "### fman_pcd_kg.c: F-311 engage order harness passed"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"

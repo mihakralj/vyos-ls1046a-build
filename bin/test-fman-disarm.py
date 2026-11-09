@@ -103,6 +103,9 @@ def main():
     f310 = "F-310" in kg and "F-310" in pcd
     if f310:
         compile_flags.append("-DFMAN_F310=1")
+    # F-311 (engage order): RCCB + first-port SYNC + CC_EN before the AC_CC
+    # scheme; a failed scheme write keeps RCCB.
+    f311 = "F-311" in kg
     with tempfile.TemporaryDirectory(prefix="fman-disarm-") as tmp:
         tmp = Path(tmp)
         (tmp / "disarm_body.h").write_text(disarm)
@@ -118,6 +121,8 @@ def main():
             (tmp / "port_drain_body.h").write_text(
                 function(pcd, "fman_pcd_fe_port_drain")
             )
+        if f311:
+            (tmp / "kg_arm_full.h").write_text(kg_arm)
         (tmp / "arm_failure_body.h").write_text(
             function(pcd, "fman_pcd_fe_fault_arm") + engage_locked + engage
         )
@@ -163,6 +168,8 @@ def main():
                  "fman_fe_context", "fman_debugfs_chain"]
         if f310:
             names.append("fman_port_drain")
+        if f311:
+            names.append("fman_kg_arm_order")
         if only is not None:
             unknown = only - set(names)
             if unknown:
