@@ -24,12 +24,15 @@ def main():
     harness = (Path(__file__).resolve().parents[1] /
                "tests/dut/fman_cc_sync_gate.c")
     compiler = shlex.split(os.environ.get("HOSTCC", "cc"))
+    # T5: after F-293 the gate uses fman_fpm_extc_sync(); the harness then
+    # also checks timeout accounting and concurrent arm/disarm churn.
+    flags = ["-DFMAN_F293=1"] if all("fman_fpm_extc_sync(" in b for b in bodies) else []
     with tempfile.TemporaryDirectory(prefix="fman-cc-sync-gate-") as directory:
         path = Path(directory)
         (path / "fman_cc_sync_body.h").write_text("\n".join(bodies))
         binary = path / "fman-cc-sync-gate"
         subprocess.run(
-            [*compiler, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+            [*compiler, *flags, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
              "-Wno-unused-parameter", "-pthread", "-I", str(path), str(harness),
              "-o", str(binary)],
             check=True,

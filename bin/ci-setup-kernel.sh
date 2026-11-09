@@ -3043,6 +3043,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_293.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-global-sync.py" "$(pwd)" 2>&1
     echo "### fman.c/fman_pcd.c: F-293 global INV0 serialization harness passed"
+    # T5: re-run the RX/OH first-port gate on its final (F-293) form: SYNC
+    # timeout leaves accounting/CC_EN untouched; concurrent arm/disarm churn
+    # keeps count == engaged ports and never SYNCs with a port engaged.
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-cc-sync-gate.py" "$(pwd)" 2>&1
+    echo "### fman_port.c: T5 first-port SYNC accounting harness passed"
     # F-307 lab walker probe (default off): retains probed deleted records
     # and reports post-SYNC HITs; needs F-293's final del_key/SYNC form.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_307.py" 2>&1
