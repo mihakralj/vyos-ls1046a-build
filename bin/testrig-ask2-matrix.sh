@@ -2,7 +2,8 @@
 # testrig-ask2-matrix.sh — ASK2-only flow-type matrix (plans/ASK2-PERF-MATRIX-PLAN.md, Layer A, first cut).
 #   unicast, nat, vlan-vlan, vlan-port, pppoe: bin/testrig-offload-quick.sh cells, unidir then BIDIR=1
 #   wireguard: bin/wg-parity.sh ask2 (1 tunnel on eth4, fresh tunnel per rep); wireguard6: the same with OUTER=6
-#   ipsec, bridge, broadcast, multicast, fragments, policer: not wired yet, printed as "-"
+#   bridge, *-9k, policer, 2/4-tunnel WireGuard: bin/testrig-ask2-bridge.sh, testrig-ask2-9k.sh,
+#   testrig-ask2-policer.sh, wg-matrix.sh (same run dir). ipsec/multicast/broadcast/fragments: not measured
 # Every cell runs REPS short reps (DUR s, steady window from STEADY_FROM s); the table keeps the FASTEST rep.
 # Usage: bin/testrig-ask2-matrix.sh            Env: REPS=3 WG_REPS=$REPS DUR=10 STEADY_FROM=3 BIDIR_DUR=20 BIDIR_STEADY_FROM=12 WGFP=1|0 OUTDIR=...
 # Output: the table on stdout; raw CSVs, JSON and matrix.csv (with verdicts) in $OUTDIR/ask2-matrix-<stamp>/.
