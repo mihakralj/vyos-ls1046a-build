@@ -19,6 +19,9 @@
 #        WG_SKIP_FW4=1 leaves the vendor's existing forwarding policy unchanged;
 #        use it only when that policy already permits the test traffic.
 #        WG_CLIENT_TIMEOUT caps each iperf client in seconds (default DUR+45).
+#        INNER=6 carries IPv6 inside the tunnels (fd99:(210+K)::/64, DUT ::1, dell2 ::113; dell1 fd99:1::112)
+#        instead of IPv4; the outer transport stays IPv4. JSON files then start with wgm6- and counter cells
+#        are labelled <N>v6.
 # Everything is runtime-only and removed by an EXIT trap (KEEP=1 leaves it up).
 set -u
 . "$(dirname "$0")/testrig-env.sh"
@@ -30,7 +33,8 @@ DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
 if [ "$DUT_KIND" = vendor ]; then RIG_NS=${RIG_NS:-$VENDOR_NS}; else RIG_NS=${RIG_NS:-}; fi
 rig_require GEN1 GEN2
 TUNNELS=${TUNNELS:-4}; ACTIVE=${ACTIVE:-$TUNNELS}; DIRS=${DIRS:-"up down"}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}
-STREAMS=${STREAMS:-2}; REPS=${REPS:-3}; WGMTU=${WGMTU:-1420}
+STREAMS=${STREAMS:-2}; REPS=${REPS:-3}; WGMTU=${WGMTU:-1420}; INNER=${INNER:-4}
+case $INNER in 4) JPRE=wgm; CTAG="";; 6) JPRE=wgm6; CTAG=v6;; *) echo "INNER must be 4 or 6" >&2; exit 2;; esac
 if ! [[ $TUNNELS =~ ^([1-9]|1[0-6])$ && $ACTIVE =~ ^([1-9]|1[0-6])$ ]] ||
    (( ACTIVE > TUNNELS )); then
   echo "TUNNELS and ACTIVE must be 1..16, with ACTIVE <= TUNNELS" >&2; exit 2
@@ -70,6 +74,7 @@ WG_STOP_HELPER="$(dirname "$0")/testrig-wgfp-stop.py"
 sub(){ echo $((210+$1)); }          # inner third octet of tunnel K
 wport(){ echo $((51830+$1)); }      # outer UDP port of tunnel K
 sport(){ echo $((IPERF_BASE+$1)); } # iperf3 server port of tunnel K
+far6(){ echo "fd99:$(sub "$1")::113"; }   # dell2 inner IPv6 address of tunnel K (INNER=6)
 
 wg_dut_link(){
   duti "sudo sh -s -- $1 wgm$2 wgo-$WG_OWNER_TOKEN-d$2" < "$WG_LINK_HELPER"
@@ -87,6 +92,19 @@ wg_route(){
     $D2I "$NSX sh -s -- $action far $priority $table 10.99.$subnet.113 10.99.1.0/24 wgm$k $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
   else
     $D1I "$NSX sh -s -- $action plain $priority $table 10.99.1.112 10.99.$subnet.0/24 10.99.1.185 $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+  fi
+}
+# IPv6 inner routes reuse the tunnel's priority/table (IPv4 and IPv6 rules and tables are separate)
+wg_route6(){
+  local side=$1 action=$2 k=$3 priority table realm subnet
+  subnet=$(sub "$k")
+  priority=$((1000 + 16#${WG_OWNER_TOKEN:0:6} % 30000 + k))
+  table=$((1000000 + 16#${WG_OWNER_TOKEN:6:6} * 16 + k))
+  realm=$(( (16#${WG_OWNER_TOKEN:12:8} & 0x7fffffff) + 1 ))
+  if [ "$side" = far ]; then
+    $D2I "$NSX sh -s -- $action far $priority $table fd99:$subnet::113 fd99:1::/64 wgm$k $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+  else
+    $D1I "$NSX sh -s -- $action plain $priority $table fd99:1::112 fd99:$subnet::/64 fd99:1::185 $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
   fi
 }
 wg_server_run(){
@@ -110,6 +128,8 @@ teardown(){
   [ "$result" = 0 ] || return 1
   wg_prepare_binding_cleanup || return 1
   for k in $(seq 0 $((WG_LEASE_COUNT-1))); do
+    wg_resource_remove "route-far6-$k" wg_route6 far delete "$k" || result=1
+    wg_resource_remove "route-plain6-$k" wg_route6 plain delete "$k" || result=1
     wg_resource_remove "route-far-$k" wg_route far delete "$k" || result=1
     wg_resource_remove "route-plain-$k" wg_route plain delete "$k" || result=1
   done
@@ -131,21 +151,28 @@ teardown(){
 
 setup(){
   [ "$DUT_KIND" = ask2 ] || dut 'sudo modprobe wireguard 2>/dev/null; true'
-  local k s p k1 k2 p1 p2 expected="" aliases=""
+  local k s p k1 k2 p1 p2 expected="" aliases="" a6d="" a6f=""
   for k in $(seq 0 $((TUNNELS-1))); do
     s=$(sub $k); p=$(wport $k)
+    if [ "$INNER" = 6 ]; then a6d=",fd99:$s::113/128"; a6f=",fd99:$s::1/128,fd99:1::/64"; fi
     k1=$(dut 'wg genkey') || return 1
     p1=$(printf '%s\n' "$k1" | duti 'wg pubkey') || return 1
     k2=$($D2 'wg genkey') || return 1
     p2=$(printf '%s\n' "$k2" | $D2I 'wg pubkey') || return 1
     wg_resource_add "link-dut-$k" wg_dut_link create "$k" || return 1
-    printf '%s\n' "$k1" | duti "sudo wg set wgm$k private-key /dev/stdin listen-port $p peer $p2 allowed-ips 10.99.$s.113/32 endpoint $D2_OUT:$p" || return 1
+    printf '%s\n' "$k1" | duti "sudo wg set wgm$k private-key /dev/stdin listen-port $p peer $p2 allowed-ips 10.99.$s.113/32$a6d endpoint $D2_OUT:$p" || return 1
     dut "sudo ip addr add 10.99.$s.1/24 dev wgm$k && sudo ip link set wgm$k mtu $WGMTU up" || return 1
+    [ "$INNER" != 6 ] || dut "sudo ip -6 addr add fd99:$s::1/64 dev wgm$k nodad" || return 1
     wg_resource_add "link-far-$k" wg_far_link create "$k" || return 1
-    printf '%s\n' "$k2" | $D2I "$NSX wg set wgm$k private-key /dev/stdin listen-port $p peer $p1 allowed-ips 10.99.$s.1/32,10.99.1.0/24 endpoint $DUT_OUT:$p" || return 1
+    printf '%s\n' "$k2" | $D2I "$NSX wg set wgm$k private-key /dev/stdin listen-port $p peer $p1 allowed-ips 10.99.$s.1/32,10.99.1.0/24$a6f endpoint $DUT_OUT:$p" || return 1
     $D2 "$NSX ip addr add 10.99.$s.113/24 dev wgm$k && $NSX ip link set wgm$k mtu $WGMTU up" || return 1
+    [ "$INNER" != 6 ] || $D2 "$NSX ip -6 addr add fd99:$s::113/64 dev wgm$k nodad" || return 1
     wg_resource_add "route-far-$k" wg_route far add "$k" || return 1
     wg_resource_add "route-plain-$k" wg_route plain add "$k" || return 1
+    if [ "$INNER" = 6 ]; then
+      wg_resource_add "route-far6-$k" wg_route6 far add "$k" || return 1
+      wg_resource_add "route-plain6-$k" wg_route6 plain add "$k" || return 1
+    fi
     if [ "${WG_SKIP_SERVERS:-0}" != 1 ]; then
       wg_resource_add "server-$k" wg_server_start "s$k" "$((WG_LEASE_IPERF_BASE+k))" || return 1
     fi
@@ -161,6 +188,12 @@ setup(){
     fi
   fi
   for k in $(seq 0 $((TUNNELS-1))); do $D1 "$NSX ping -c2 -W2 -I 10.99.1.112 10.99.$(sub $k).113 >/dev/null 2>&1"; done
+  if [ "$INNER" = 6 ]; then
+    for k in $(seq 0 $((TUNNELS-1))); do
+      $D1 "$NSX ping -6 -c2 -W2 -I fd99:1::112 $(far6 $k) >/dev/null 2>&1" ||
+        { echo "ERROR: no IPv6 path fd99:1::112 -> $(far6 $k) through wgm$k" >&2; return 1; }
+    done
+  fi
   dut 'sudo wg show all latest-handshakes' | awk '{print "handshake "$1" "$3}'
   if [ "${WGFP:-0}" = 1 ]; then
     for k in $(seq 0 $((TUNNELS-1))); do
@@ -256,7 +289,7 @@ win=$((DUR-STEADY_FROM-2))
 for dir in $DIRS; do
   case $dir in up) flag="";; down) flag="-R";; bidir) flag="--bidir";; esac
   for rep in $(seq 1 $REPS); do
-    wgfp_counter_sample "$TUNNELS" "$dir" "$rep" before || exit 1
+    wgfp_counter_sample "$TUNNELS$CTAG" "$dir" "$rep" before || exit 1
     dut_stat=${WG_DUT_STAT:-/tmp/wgm-dut.stat}
     ssh $SSHO $DUT sh -s -- $STEADY_FROM $win > "$dut_stat" <<'EOS' &
 sf=$1; w=$2
@@ -265,14 +298,15 @@ sleep $sf; snap; sleep $w; snap
 EOS
     sp=$!; files=""; pids=""
     for k in $(seq 0 $((ACTIVE-1))); do
-      f="$J/wgm-$dir-n$ACTIVE-k$k-r$rep.json"; files="$files $f"
-      $D1 "$NSX timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c 10.99.$(sub $k).113 -B 10.99.1.112 -p $(sport $k) -P $STREAMS -t $DUR -i 1 -Z -J $flag" > "$f" &
+      f="$J/$JPRE-$dir-n$ACTIVE-k$k-r$rep.json"; files="$files $f"
+      if [ "$INNER" = 6 ]; then dst=$(far6 $k); src=fd99:1::112; else dst=10.99.$(sub $k).113; src=10.99.1.112; fi
+      $D1 "$NSX timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c $dst -B $src -p $(sport $k) -P $STREAMS -t $DUR -i 1 -Z -J $flag" > "$f" &
       pids="$pids $!"
     done
     client_status=0
     for pid in $pids; do wait "$pid" || client_status=1; done
     stat_status=0; wait $sp || stat_status=$?
-    wgfp_counter_sample "$TUNNELS" "$dir" "$rep" after || exit 1
+    wgfp_counter_sample "$TUNNELS$CTAG" "$dir" "$rep" after || exit 1
     sleep 1
     if [ "$client_status" -ne 0 ]; then
       echo "ERROR: iperf client failed; no traffic or an incomplete run" >&2; exit 1

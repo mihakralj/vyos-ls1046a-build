@@ -58,6 +58,7 @@ if [ "${KEEP:-0}" = 1 ]; then
 fi
 mkdir -p "$OUTDIR"
 for path in "$OUTDIR/$TAG-$WHO-t1.csv" "$OUTDIR/$TAG-$WHO-t2.csv" "$OUTDIR/$TAG-$WHO-t4.csv" \
+            "$OUTDIR/$TAG-$WHO-t2v6.csv" "$OUTDIR/$TAG-$WHO-t4v6.csv" \
             "${J:-}" "${WG_STATE_PATH:-}" "${WG_DUT_STAT:-}" "${WGFP_COUNTER_LOG:-}"; do
   [ -n "$path" ] || continue
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -202,6 +203,14 @@ for A in 2 4; do
   echo "##### $WHO: $A tunnels, 2 streams each, $REPSN reps"
   REPS=$REPSN DIRS="up down bidir" TUNNELS=$A ACTIVE=$A OUT=$OUTDIR/$TAG-$WHO-t$A.csv bin/testrig-wireguard-multi.sh run
 done
+# WG_INNER6=1 (default on the ASK2 DUT): the same 2/4-tunnel cells with IPv6 inside the tunnels (outer stays IPv4)
+[ "$DUT_KIND" = ask2 ] && WG_INNER6=${WG_INNER6:-1} || WG_INNER6=${WG_INNER6:-0}
+if [ "$WG_INNER6" = 1 ]; then
+  for A in 2 4; do
+    echo "##### $WHO: $A tunnels, IPv6 inner, 2 streams each, $REPSN reps"
+    INNER=6 REPS=$REPSN DIRS="up down bidir" TUNNELS=$A ACTIVE=$A OUT=$OUTDIR/$TAG-$WHO-t${A}v6.csv bin/testrig-wireguard-multi.sh run
+  done
+fi
 python3 - "$OUTDIR" "$TAG" "$WHO" "$REPS1" "$REPSN" "${WGFP:-0}" "${WGFP_COUNTER_LOG:-}" "$J" "$DUR" "$STEADY_FROM" "$WGFP_RX" <<'PY'
 import collections
 import csv
@@ -376,4 +385,17 @@ for tunnels in expected:
 if wgfp == "1":
     print(f"Per-cell WGFP counters: {counter_file}")
 PY
+if [ "$WG_INNER6" = 1 ]; then
+  python3 - "$OUTDIR/$TAG-$WHO" <<'PY6'
+import csv, statistics, sys
+print("\nIPv6 inner, fastest / median Gbit/s:")
+for a in ("2", "4"):
+    rows = list(csv.DictReader(open(f"{sys.argv[1]}-t{a}v6.csv")))
+    cells = []
+    for d in ("up", "down", "bidir"):
+        v = [float(r["gbps"]) for r in rows if r["dir"] == d and float(r["gbps"]) > 0]
+        cells.append(f"{d}={max(v):.3f}/{statistics.median(v):.3f}" if v else f"{d}=-")
+    print(f"{a}T v6 " + " ".join(cells))
+PY6
+fi
 echo "##### $WHO done"
