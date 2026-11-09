@@ -35,7 +35,11 @@ if [ "$WHO" = 185 ]; then
   cfg 'set system conntrack ignore ipv4 rule 10 protocol udp
 set system conntrack ignore ipv4 rule 10 destination port 51820-51833
 set system conntrack ignore ipv4 rule 20 protocol udp
-set system conntrack ignore ipv4 rule 20 source port 51820-51833'
+set system conntrack ignore ipv4 rule 20 source port 51820-51833
+set system conntrack ignore ipv6 rule 10 protocol udp
+set system conntrack ignore ipv6 rule 10 destination port 51820-51833
+set system conntrack ignore ipv6 rule 20 protocol udp
+set system conntrack ignore ipv6 rule 20 source port 51820-51833'
 fi
 for P in $PORTS; do
   echo "##### $WHO: tunnel on $P, 1 tunnel, 4 streams, $REPS reps with a fresh tunnel each, $(date +%T)"
