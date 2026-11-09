@@ -252,13 +252,20 @@ struct notifier_block { int unused; };
 static struct work_struct ask_devchg_flush_work;
 static unsigned int scheduled_work;
 static void schedule_work(struct work_struct *work) { scheduled_work++; }
-static void ask_devchg_queue(int ifindex) {}
+static int devchg_queued[4];
+static unsigned int devchg_n;
+static void ask_devchg_queue(int ifindex)
+{
+	if (devchg_n < 4)
+		devchg_queued[devchg_n++] = ifindex;
+}
 #define NUD_VALID 1
 #define rcu_read_lock() ((void)0)
 #define rcu_read_unlock() ((void)0)
 #define read_lock_bh(l) ((void)0)
 #define read_unlock_bh(l) ((void)0)
-static bool is_vlan_dev(const struct net_device *dev) { return false; }
+#define VLAN_TEST_TYPE 0x8100
+static bool is_vlan_dev(const struct net_device *dev) { return dev->type == VLAN_TEST_TYPE; }
 static struct net_device *vlan_dev_real_dev(struct net_device *dev) { return dev; }
 static struct net_device *dev_get_by_index_rcu(void *net, int ifindex)
 {
@@ -826,6 +833,24 @@ static void test_queue_and_failure(void)
 	reset_state();
 	assert(ask_pppoe_netdev_event(NULL, NETDEV_DOWN, &non_ppp) == NOTIFY_DONE);
 	assert(!scheduled_work && !ask_pppoe_session_epoch);
+
+	/* T1: a VLAN vif down/unregister retires the vif's records only. */
+	{
+		struct net_device vif = { .ifindex = 9, .type = VLAN_TEST_TYPE };
+		unsigned long events[] = { NETDEV_DOWN, NETDEV_UNREGISTER };
+
+		for (unsigned int e = 0; e < 2; e++) {
+			scheduled_work = 0;
+			devchg_n = 0;
+			assert(ask_pppoe_netdev_event(NULL, events[e], &vif) == NOTIFY_DONE);
+			assert(scheduled_work == 1 && devchg_n == 1 && devchg_queued[0] == 9);
+		}
+		scheduled_work = 0;
+		devchg_n = 0;
+		assert(ask_pppoe_netdev_event(NULL, NETDEV_UNREGISTER, &non_ppp) == NOTIFY_DONE);
+		assert(!scheduled_work && !devchg_n);
+	}
+	reset_state();
 	ask_pppoe_events_live = false;
 	assert(ask_pppoe_netdev_event(NULL, NETDEV_DOWN, &ppp) == NOTIFY_DONE);
 	assert(!scheduled_work && !ask_pppoe_session_epoch);

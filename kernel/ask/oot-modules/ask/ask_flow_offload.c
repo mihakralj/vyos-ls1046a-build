@@ -3858,6 +3858,19 @@ static int ask_pppoe_netdev_event(struct notifier_block *nb,
 			ask_devchg_queue(vlan_dev_real_dev(dev)->ifindex);
 		schedule_work(&ask_devchg_flush_work);
 	}
+	/*
+	 * T1: a VLAN vif going down or away. nf_flow_table_cleanup() matches
+	 * the flow's iifidx, which is the physical lower device on VLAN paths,
+	 * so it never sees these flows; without this the POP/PUSH records of
+	 * the deleted VID keep forwarding in hardware. Retire records whose
+	 * ingress (key.iif is the owning vif), egress or next-hop device is the
+	 * vif; only the vif, not its real device, whose other flows are fine.
+	 */
+	if ((event == NETDEV_DOWN || event == NETDEV_UNREGISTER) &&
+	    is_vlan_dev(dev) && ask_flow_default_table()) {
+		ask_devchg_queue(dev->ifindex);
+		schedule_work(&ask_devchg_flush_work);
+	}
 	return NOTIFY_DONE;
 }
 
