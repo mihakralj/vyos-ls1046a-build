@@ -20,6 +20,7 @@
  * declined (the DPAA sink just releases them).  Lab mode is IPv4-only.
  */
 
+#include <crypto/chacha.h>
 #include <crypto/chacha20poly1305.h>
 #include <crypto/poly1305.h>
 #include <linux/atomic.h>
@@ -40,6 +41,7 @@
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/udp.h>
+#include <linux/unaligned.h>
 #include <net/checksum.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
@@ -83,6 +85,104 @@ struct wgfp_lab {
 	atomic64_t counter;
 };
 
+/* Seal with the Poly1305 key block folded into the data's ChaCha pass.
+ * chacha20poly1305_encrypt() makes block 0 (the one-time Poly1305 key) with a
+ * separate 32-byte chacha20_crypt(), which arm64 sends to the generic C code
+ * (chacha_crypt_arch() takes NEON only above 64 bytes): 3-5% of a sealed
+ * packet.  Running ChaCha over the 64 bytes in front of the data plus the
+ * data gives block 0 from the same NEON pass, in lanes the tail call computes
+ * anyway (1420 = 4 x 320 + 140).  Those 64 bytes are saved and restored.
+ * Decrypt cannot do this: the tag is checked over the ciphertext before it
+ * is decrypted in place, so the key must exist first.
+ * -1: self-test against the library on the first seal, then 1 (0 if it
+ * differs); 0: library; 1: fold. */
+static int wgfp_seal_fold = -1;
+module_param(wgfp_seal_fold, int, 0600);
+MODULE_PARM_DESC(wgfp_seal_fold, "Seal: fold the Poly1305 key block into the NEON ChaCha pass (-1 self-test then on, 0 off, 1 on)");
+
+static void wgfp_seal_folded(u8 *p, u32 len, u64 nonce,
+			     const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	static const u8 pad0[16];
+	u8 *b0 = p - CHACHA_BLOCK_SIZE;
+	struct poly1305_desc_ctx mac;
+	struct chacha_state st;
+	u32 k[CHACHA_KEY_WORDS];
+	u8 save[CHACHA_BLOCK_SIZE];
+	__le64 iv[2] = { 0, cpu_to_le64(nonce) };
+	__le64 lens[2] = { 0, cpu_to_le64(len) };
+	int i;
+
+	for (i = 0; i < CHACHA_KEY_WORDS; i++)
+		k[i] = get_unaligned_le32(key + 4 * i);
+	chacha_init(&st, k, (const u8 *)iv);
+	memcpy(save, b0, sizeof(save));
+	memset(b0, 0, sizeof(save));
+	chacha20_crypt(&st, b0, b0, CHACHA_BLOCK_SIZE + len);
+	poly1305_init(&mac, b0);	/* block 0 keystream = the MAC key */
+	memcpy(b0, save, sizeof(save));
+	poly1305_update(&mac, p, len);
+	if (len & 0xf)
+		poly1305_update(&mac, pad0, 0x10 - (len & 0xf));
+	poly1305_update(&mac, (const u8 *)lens, sizeof(lens));
+	poly1305_final(&mac, p + len);
+	chacha_zeroize_state(&st);
+	memzero_explicit(k, sizeof(k));
+}
+
+/* Compare against the library once (lengths around the 64- and 320-byte
+ * boundaries and full-size packets); a CPU that loses the race seals with
+ * the library meanwhile. */
+static int wgfp_seal_selftest(void)
+{
+	static const u32 lens[] = { 1, 15, 16, 63, 64, 65, 255, 256, 320, 321,
+				    1280, 1420, 1424, 1440 };
+	static u8 a[CHACHA_BLOCK_SIZE + 1440 + POLY1305_DIGEST_SIZE];
+	static u8 b[1440 + POLY1305_DIGEST_SIZE];
+	static atomic_t busy = ATOMIC_INIT(0);
+	u8 key[CHACHA20POLY1305_KEY_SIZE];
+	int i, j, ok = 1;
+
+	if (atomic_xchg(&busy, 1))
+		return 0;
+	for (i = 0; i < sizeof(key); i++)
+		key[i] = 0x40 + i;
+	for (i = 0; i < ARRAY_SIZE(lens) && ok; i++) {
+		u32 len = lens[i];
+
+		memset(a, 0xa5, CHACHA_BLOCK_SIZE);
+		for (j = 0; j < len; j++)
+			a[CHACHA_BLOCK_SIZE + j] = b[j] = j * 7 + len;
+		chacha20poly1305_encrypt(b, b, len, NULL, 0, 0x0102030405ULL + len, key);
+		wgfp_seal_folded(a + CHACHA_BLOCK_SIZE, len, 0x0102030405ULL + len, key);
+		ok = !memcmp(a + CHACHA_BLOCK_SIZE, b, len + POLY1305_DIGEST_SIZE) &&
+		     !memchr_inv(a, 0xa5, CHACHA_BLOCK_SIZE);
+		if (!ok)
+			pr_err("wgfp: folded seal differs from the library at %u bytes; using the library\n",
+			       len);
+	}
+	WRITE_ONCE(wgfp_seal_fold, ok);
+	if (ok)
+		pr_info("wgfp: folded seal matches the library (%zu lengths)\n", ARRAY_SIZE(lens));
+	atomic_set(&busy, 0);
+	return ok;
+}
+
+/* In-place seal of @len bytes at @p (tag at p + len); @room = bytes in
+ * front of @p that are inside the buffer. */
+static void wgfp_seal(u8 *p, u32 len, u32 room, u64 nonce,
+		      const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	int fold = READ_ONCE(wgfp_seal_fold);
+
+	if (unlikely(fold < 0))
+		fold = wgfp_seal_selftest();
+	if (fold > 0 && likely(room >= CHACHA_BLOCK_SIZE))
+		wgfp_seal_folded(p, len, nonce, key);
+	else
+		chacha20poly1305_encrypt(p, p, len, NULL, 0, nonce, key);
+}
+
 static struct wgfp_lab wgfp_lab_state;
 static bool wgfp_lab_on;
 static DEFINE_MUTEX(wgfp_lab_lock);
@@ -122,7 +222,7 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 
 	memset(inner + ip_len, 0, plain - ip_len);
 	ctr = (u64)atomic64_inc_return(&l->counter) - 1;
-	chacha20poly1305_encrypt(inner, inner, plain, NULL, 0, ctr, l->key);
+	wgfp_seal(inner, plain, inner - f->buf, ctr, l->key);
 
 	hdr = inner - WGFP_HDR_LEN;
 	memcpy(hdr, l->tmpl, sizeof(l->tmpl));
@@ -1433,8 +1533,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	else
 		((struct ipv6hdr *)inner)->hop_limit--;
 	memset(inner + ip_len, 0, plain - ip_len);
-	chacha20poly1305_encrypt(inner, inner, plain, NULL, 0, ctr,
-				 kp->sending.key);
+	wgfp_seal(inner, plain, inner - f->buf, ctr, kp->sending.key);
 
 	hdr = inner - added - ETH_HLEN;
 	memcpy(hdr, t->hdr, t->hlen);
