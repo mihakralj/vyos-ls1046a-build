@@ -23,6 +23,7 @@
 #include <crypto/chacha.h>
 #include <crypto/chacha20poly1305.h>
 #include <crypto/poly1305.h>
+#include <crypto/utils.h>
 #include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/etherdevice.h>
@@ -181,6 +182,126 @@ static void wgfp_seal(u8 *p, u32 len, u32 room, u64 nonce,
 		wgfp_seal_folded(p, len, nonce, key);
 	else
 		chacha20poly1305_encrypt(p, p, len, NULL, 0, nonce, key);
+}
+
+/* The decrypt side of the same fold.  The tag must be checked over the
+ * ciphertext before it is decrypted in place, so block 0 and the first t
+ * bytes (t = the n mod 320 tail, rounded up to whole blocks) are done on a
+ * stack copy: one NEON call yields the MAC key and t bytes of plaintext,
+ * the rest (now a whole number of 320-byte NEON calls) is decrypted in
+ * place after the tag verifies, and the t bytes are copied back.  Same
+ * number of NEON calls as the library, minus its generic block 0; the
+ * buffer is untouched when the tag does not verify.  Applies when
+ * 64 < n and 0 < n mod 320 <= 256 (1420-byte packets: t = 192).
+ * -1: self-test on the first open, then 1 (0 if it differs); 0 library. */
+static int wgfp_open_fold = -1;
+module_param(wgfp_open_fold, int, 0600);
+MODULE_PARM_DESC(wgfp_open_fold, "Open: fold the Poly1305 key block into a NEON ChaCha call (-1 self-test then on, 0 off, 1 on)");
+
+#define WGFP_OPEN_HEAD	256
+
+static bool wgfp_open_foldable(size_t n)
+{
+	size_t r = n % (5 * CHACHA_BLOCK_SIZE);
+
+	return n > CHACHA_BLOCK_SIZE && r && r <= WGFP_OPEN_HEAD;
+}
+
+/* @n plaintext bytes at @p, tag at p + n; caller checked foldable */
+static bool wgfp_open_folded(u8 *p, size_t n, u64 nonce,
+			     const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	static const u8 pad0[16];
+	size_t head = min_t(size_t, n, ALIGN(n % (5 * CHACHA_BLOCK_SIZE),
+					     CHACHA_BLOCK_SIZE));
+	u8 buf[CHACHA_BLOCK_SIZE + WGFP_OPEN_HEAD];
+	__le64 iv[2] = { 0, cpu_to_le64(nonce) };
+	__le64 lens[2] = { 0, cpu_to_le64(n) };
+	struct poly1305_desc_ctx mac;
+	u8 tag[POLY1305_DIGEST_SIZE];
+	struct chacha_state st;
+	u32 k[CHACHA_KEY_WORDS];
+	bool ok;
+	int i;
+
+	for (i = 0; i < CHACHA_KEY_WORDS; i++)
+		k[i] = get_unaligned_le32(key + 4 * i);
+	chacha_init(&st, k, (const u8 *)iv);
+	memset(buf, 0, CHACHA_BLOCK_SIZE);
+	memcpy(buf + CHACHA_BLOCK_SIZE, p, head);
+	chacha20_crypt(&st, buf, buf, CHACHA_BLOCK_SIZE + head);
+	poly1305_init(&mac, buf);
+	poly1305_update(&mac, p, n);
+	if (n & 0xf)
+		poly1305_update(&mac, pad0, 0x10 - (n & 0xf));
+	poly1305_update(&mac, (const u8 *)lens, sizeof(lens));
+	poly1305_final(&mac, tag);
+	ok = !crypto_memneq(tag, p + n, POLY1305_DIGEST_SIZE);
+	if (ok) {
+		/* head is whole blocks here, so st continues at the next one */
+		if (n > head)
+			chacha20_crypt(&st, p + head, p + head, n - head);
+		memcpy(p, buf + CHACHA_BLOCK_SIZE, head);
+	}
+	chacha_zeroize_state(&st);
+	memzero_explicit(buf, CHACHA_BLOCK_SIZE + head);
+	memzero_explicit(k, sizeof(k));
+	return ok;
+}
+
+/* Seal with the library, open folded: plaintext and verdict must match for
+ * every foldable length, and a bad tag must leave the buffer untouched. */
+static int wgfp_open_selftest(void)
+{
+	static const u32 lens[] = { 65, 100, 127, 128, 255, 256, 321, 400,
+				    576, 1088, 1280 + 140, 1280 + 192, 1440 };
+	static u8 a[1440 + POLY1305_DIGEST_SIZE], m[1440 + POLY1305_DIGEST_SIZE];
+	static atomic_t busy = ATOMIC_INIT(0);
+	u8 key[CHACHA20POLY1305_KEY_SIZE];
+	int i, j, ok = 1;
+
+	if (atomic_xchg(&busy, 1))
+		return 0;
+	for (i = 0; i < sizeof(key); i++)
+		key[i] = 0x60 + i;
+	for (i = 0; i < ARRAY_SIZE(lens) && ok; i++) {
+		u32 len = lens[i];
+		u64 nonce = 0x0a0b0c0dULL + len;
+
+		for (j = 0; j < len; j++)
+			m[j] = j * 13 + len;
+		chacha20poly1305_encrypt(a, m, len, NULL, 0, nonce, key);
+		ok = wgfp_open_foldable(len) &&
+		     wgfp_open_folded(a, len, nonce, key) && !memcmp(a, m, len);
+		/* bad tag: refused, buffer as it was */
+		chacha20poly1305_encrypt(a, m, len, NULL, 0, nonce, key);
+		a[len] ^= 1;
+		memcpy(m, a, len + POLY1305_DIGEST_SIZE);
+		ok = ok && !wgfp_open_folded(a, len, nonce, key) &&
+		     !memcmp(a, m, len + POLY1305_DIGEST_SIZE);
+		if (!ok)
+			pr_err("wgfp: folded open differs from the library at %u bytes; using the library\n",
+			       len);
+	}
+	WRITE_ONCE(wgfp_open_fold, ok);
+	if (ok)
+		pr_info("wgfp: folded open matches the library (%zu lengths)\n", ARRAY_SIZE(lens));
+	atomic_set(&busy, 0);
+	return ok;
+}
+
+/* chacha20poly1305_decrypt() in place; @clen includes the tag */
+static bool wgfp_open(u8 *p, size_t clen, u64 nonce,
+		      const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	int fold = READ_ONCE(wgfp_open_fold);
+
+	if (unlikely(fold < 0))
+		fold = wgfp_open_selftest();
+	if (fold > 0 && clen > POLY1305_DIGEST_SIZE &&
+	    wgfp_open_foldable(clen - POLY1305_DIGEST_SIZE))
+		return wgfp_open_folded(p, clen - POLY1305_DIGEST_SIZE, nonce, key);
+	return chacha20poly1305_decrypt(p, p, clen, NULL, 0, nonce, key);
 }
 
 static struct wgfp_lab wgfp_lab_state;
@@ -1293,8 +1414,7 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	pt = (u8 *)(msg + 1);
 	clen = ulen - sizeof(*udp) - sizeof(*msg);	/* ciphertext + tag */
 	/* leaves the buffer untouched when the tag does not verify */
-	if (!chacha20poly1305_decrypt(pt, pt, clen, NULL, 0, nonce,
-				      kp->receiving.key)) {
+	if (!wgfp_open(pt, clen, nonce, kp->receiving.key)) {
 		atomic64_inc(&wgfp_p6_auth);
 		dpaa_wgfp_drop(f);
 		return 1;

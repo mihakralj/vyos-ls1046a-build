@@ -186,6 +186,10 @@ static bool chacha20poly1305_decrypt(u8 *dst, const u8 *src, size_t len,
 		dst[i] = src[i] ^ 0x5a;
 	return true;
 }
+static bool wgfp_open(u8 *p, size_t clen, u64 nonce, const u8 *key)
+{
+	return chacha20poly1305_decrypt(p, p, clen, NULL, 0, nonce, key);
+}
 static bool wg_fastpath_rx_validate(struct noise_keypair *kp, u64 nonce)
 {
 	(void)kp;

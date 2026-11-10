@@ -44,4 +44,4 @@ def test_p6_wiring():
     assert stop.index("dpaa_wgfp_unregister()") < stop.index("wgfp_rflows_reap(true)")
     # the replay check follows authentication
     fast = _between(source, "static int wgfp_rx_fast_frame(", "\n/*\n * P2b-3 slow-path punt")
-    assert fast.index("chacha20poly1305_decrypt(") < fast.index("wg_fastpath_rx_validate(")
+    assert fast.index("wgfp_open(") < fast.index("wg_fastpath_rx_validate(")
