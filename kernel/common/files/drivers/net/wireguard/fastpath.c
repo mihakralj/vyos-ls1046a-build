@@ -253,9 +253,11 @@ static bool wgfp_open_folded(u8 *p, size_t n, u64 nonce,
  * every foldable length, and a bad tag must leave the buffer untouched. */
 static int wgfp_open_selftest(void)
 {
+#define WGFP_OPEN_TEST_MAX	1472
 	static const u32 lens[] = { 65, 100, 127, 128, 255, 256, 321, 400,
-				    576, 1088, 1280 + 140, 1280 + 192, 1440 };
-	static u8 a[1440 + POLY1305_DIGEST_SIZE], m[1440 + POLY1305_DIGEST_SIZE];
+				    576, 1088, 1280 + 140, 1440, WGFP_OPEN_TEST_MAX };
+	static u8 a[WGFP_OPEN_TEST_MAX + POLY1305_DIGEST_SIZE];
+	static u8 m[WGFP_OPEN_TEST_MAX + POLY1305_DIGEST_SIZE];
 	static atomic_t busy = ATOMIC_INIT(0);
 	u8 key[CHACHA20POLY1305_KEY_SIZE];
 	int i, j, ok = 1;
@@ -267,6 +269,11 @@ static int wgfp_open_selftest(void)
 	for (i = 0; i < ARRAY_SIZE(lens) && ok; i++) {
 		u32 len = lens[i];
 		u64 nonce = 0x0a0b0c0dULL + len;
+
+		if (WARN_ON_ONCE(len > WGFP_OPEN_TEST_MAX)) {
+			ok = 0;
+			break;
+		}
 
 		for (j = 0; j < len; j++)
 			m[j] = j * 13 + len;
