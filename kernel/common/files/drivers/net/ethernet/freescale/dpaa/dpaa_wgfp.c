@@ -52,6 +52,8 @@
  *                                  Both apply when a port's ORP queue is
  *                                  created (once per boot), so set them before
  *                                  the first spread record.
+ *   echo "prefetch <0|1|2>" > ...  prefetch each dequeued frame: 1 for read,
+ *                                  2 for store (default 0); takes effect at once
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
  *
@@ -65,6 +67,7 @@
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/netdevice.h>
+#include <linux/prefetch.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/fsl/dpaa_flow_offload.h>
@@ -211,6 +214,27 @@ static bool wgfp_spread;
 #define WGFP_ORP_TD_MAX		(16 * 1024 * 1024)
 static u32 wgfp_orp_td = WGFP_ORP_TD_DEF;
 static bool wgfp_orp_stash;
+/* Prefetch the whole frame when a sink dequeues it.  FMan DMAs it to DDR,
+ * so the decrypt or seal otherwise takes its ~23 cache misses one at a time
+ * (.185, image 2345, P6+spread 1T download: 26 L2 refills and ~18k cycles per
+ * packet against ~9k for hot-cache ChaCha20-Poly1305).  1 = prefetch for
+ * read, 2 = for store (the AEAD rewrites the buffer in place); 0 = off. */
+static unsigned int wgfp_prefetch;
+
+static void wgfp_prefetch_frame(const u8 *p, u32 len)
+{
+	unsigned int mode = READ_ONCE(wgfp_prefetch);
+	u32 o;
+
+	if (!mode)
+		return;
+	for (o = 0; o < len; o += L1_CACHE_BYTES) {
+		if (mode == 2)
+			prefetchw(p + o);
+		else
+			prefetch(p + o);
+	}
+}
 /* Hole commands carry an empty descriptor; their rejections must not be freed
  * as frames, so they get their own tag queue. */
 static struct qman_fq wgfp_hole_fq;
@@ -390,6 +414,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 
 	p = (u8 *)phys_to_virt(addr) + off;
 	dma_sync_single_for_cpu(dev, addr + off, len, DMA_FROM_DEVICE);
+	wgfp_prefetch_frame(p, len);
 
 	rcu_read_lock();
 	ops = rcu_dereference(wgfp_ops);
@@ -818,6 +843,11 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_orp_td, n);
+	} else if (sscanf(buf, "prefetch %u", &n) == 1) {
+		if (n > 2)
+			err = -EINVAL;
+		else
+			WRITE_ONCE(wgfp_prefetch, n);
 	} else if (sscanf(buf, "orp_stash %u", &n) == 1) {
 		if (n > 1)
 			err = -EINVAL;
@@ -933,7 +963,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d prefetch=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -945,7 +975,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   (u64)atomic64_read(&wgfp_rx_enq_fail),
 		   (u64)atomic64_read(&wgfp_rx_ern),
 		   READ_ONCE(wgfp_spread), READ_ONCE(wgfp_orp_td),
-		   READ_ONCE(wgfp_orp_stash),
+		   READ_ONCE(wgfp_orp_stash), READ_ONCE(wgfp_prefetch),
 		   dpaa_wgfp_stat_sum(&wgfp_orp_frames),
 		   (u64)atomic64_read(&wgfp_orp_holes),
 		   (u64)atomic64_read(&wgfp_orp_wait_fail),
