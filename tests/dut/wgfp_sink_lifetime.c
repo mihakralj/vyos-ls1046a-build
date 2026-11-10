@@ -38,12 +38,14 @@ typedef unsigned long long u64;
 #define atomic_set(p, v) (*(p) = (v))
 #define atomic64_set(p, v) (*(p) = (v))
 static bool wgfp_spread;
+static bool wgfp_orp_napi_ready;
 #define WGFP_ORP_TD_MIN (64 * 1024)
 #define WGFP_ORP_TD_MAX (16 * 1024 * 1024)
 static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
 static bool wgfp_orp_stash;
 static unsigned int wgfp_prefetch;
 static unsigned int wgfp_prefetch_max;
+static bool wgfp_threaded;
 static long long wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
 
 struct qman_portal;
@@ -145,6 +147,15 @@ static unsigned int qman_fq_fqid(struct qman_fq *fq) { return fq->fqid; }
 static void netif_napi_add(int dev, struct napi_struct *napi,
 			   int (*poll)(struct napi_struct *, int)) {}
 static void napi_enable(struct napi_struct *napi) { napi_enabled++; }
+/* dpaa_wgfp.c wgfp_napi_add(): add, pin the thread (none here), enable */
+static void wgfp_napi_add(struct napi_struct *napi, int (*poll)(struct napi_struct *, int), int cpu)
+{
+	(void)cpu;
+	netif_napi_add(wgfp_ndev, napi, poll);
+	napi_enable(napi);
+}
+enum { NETDEV_NAPI_THREADED_DISABLED, NETDEV_NAPI_THREADED_ENABLED };
+static int dev_set_threaded(int dev, int threaded) { (void)dev; (void)threaded; return 0; }
 static int qman_init_fq(struct qman_fq *fq, unsigned int flags, struct qm_mcc_initfq *opts)
 {
 	init_calls++;
@@ -185,12 +196,17 @@ static ssize_t control(const char *cmd)
 static void successful_pool_cannot_be_destroyed(void)
 {
 	reset();
+	assert(control("threaded 2") == -EINVAL);
+	assert(control("threaded 1") > 0 && wgfp_threaded);
+	assert(control("threaded 0") > 0 && !wgfp_threaded);
 	assert(wgfp_global_create(2) == 0);
 	assert(wgfp_nglobal == 2 && create_calls == 2 && init_calls == 2);
 	assert(control("destroy") == -EOPNOTSUPP);
 	assert(wgfp_nglobal == 2 && wgfp_global[0].created && wgfp_global[1].created);
 	assert(destroyed == 0 && napi_enabled == 2);
 	assert(wgfp_global_create(2) == -EBUSY);
+	/* NAPIs exist now: threaded mode can no longer be switched */
+	assert(control("threaded 1") == -EBUSY && !wgfp_threaded);
 }
 
 static void failed_init_quarantines_the_pool(void)

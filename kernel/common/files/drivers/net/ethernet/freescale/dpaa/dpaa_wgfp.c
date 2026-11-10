@@ -55,6 +55,8 @@
  *   echo "prefetch <0|1|2>" > ...  prefetch each dequeued frame: 1 for read,
  *                                  2 for store (default 2); takes effect at once
  *   echo "prefetch_max <B>" > ...  prefetch at most B bytes per frame (0 = all)
+ *   echo "threaded <0|1>" > ...    run WGFP NAPIs in pinned kernel threads
+ *                                  (default 0); only before the first bind
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
  *
@@ -69,6 +71,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/netdevice.h>
 #include <linux/prefetch.h>
+#include <linux/sched.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/fsl/dpaa_flow_offload.h>
@@ -191,12 +194,31 @@ struct wgfp_orp_napi {
 };
 static DEFINE_PER_CPU(struct wgfp_orp_napi, wgfp_orp_napi);
 static bool wgfp_orp_napi_ready;
+/* threaded 1: WGFP's NAPIs run in kernel threads instead of softirq, so the
+ * scheduler shares a saturated CPU with user space.  With every CPU in
+ * softirq at 4 tunnels, SSH logins to the DUT failed (5 s timeout) for the
+ * whole run while ICMP to eth0 still answered (.185, image 0403).  Each
+ * thread polls its own CPU's QMan portal, which is not locked against other
+ * CPUs, so it is pinned to that CPU before its NAPI is enabled; and the knob
+ * is accepted only before WGFP has created any NAPI (once per boot, like
+ * orp_td), so no NAPI ever runs threaded without being pinned. */
+static bool wgfp_threaded;
+
 
 static struct wgfp_sink wgfp_global[WGFP_MAX_SINKS];
 static unsigned int wgfp_nglobal;
 static struct wgfp_port wgfp_ports[WGFP_MAX_PORTS];
 static unsigned int wgfp_nports;
 static struct net_device *wgfp_ndev;
+
+static void wgfp_napi_add(struct napi_struct *napi,
+			  int (*poll)(struct napi_struct *, int), int cpu)
+{
+	netif_napi_add(wgfp_ndev, napi, poll);
+	if (napi->thread && cpu >= 0)
+		set_cpus_allowed_ptr(napi->thread, cpumask_of(cpu));
+	napi_enable(napi);
+}
 static struct dentry *wgfp_dir;
 static unsigned int wgfp_touch = 2;
 static unsigned int wgfp_per_port;	/* worker queues per port */
@@ -644,8 +666,7 @@ static int wgfp_port_orp_locked(struct wgfp_port *p, struct net_device *in)
 		for_each_cpu(cpu, affine) {
 			struct wgfp_orp_napi *n = &per_cpu(wgfp_orp_napi, cpu);
 
-			netif_napi_add(wgfp_ndev, &n->napi, wgfp_orp_poll);
-			napi_enable(&n->napi);
+			wgfp_napi_add(&n->napi, wgfp_orp_poll, cpu);
 		}
 		wgfp_orp_napi_ready = true;
 	}
@@ -697,8 +718,7 @@ static int wgfp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 		return err;
 	s->created = true;
 
-	netif_napi_add(wgfp_ndev, &s->napi, wgfp_poll);
-	napi_enable(&s->napi);
+	wgfp_napi_add(&s->napi, wgfp_poll, s->cpu);
 	err = qman_init_fq(&s->fq, QMAN_INITFQ_FLAG_SCHED, &opts);
 	if (err)
 		pr_err("dpaa_wgfp: qman_init_fq(%u) = %d\n",
@@ -877,6 +897,17 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_orp_td, n);
+	} else if (sscanf(buf, "threaded %u", &n) == 1) {
+		if (n > 1)
+			err = -EINVAL;
+		else if (wgfp_nglobal || wgfp_nports || wgfp_orp_napi_ready)
+			err = -EBUSY;	/* NAPIs exist: set it before the first bind */
+		else
+			err = dev_set_threaded(wgfp_ndev, n ?
+					       NETDEV_NAPI_THREADED_ENABLED :
+					       NETDEV_NAPI_THREADED_DISABLED);
+		if (!err)
+			WRITE_ONCE(wgfp_threaded, n);
 	} else if (sscanf(buf, "prefetch_max %u", &n) == 1) {
 		if (n > 65536)
 			err = -EINVAL;
@@ -1002,7 +1033,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d prefetch=%u prefetch_max=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d prefetch=%u prefetch_max=%u threaded=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -1015,7 +1046,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   (u64)atomic64_read(&wgfp_rx_ern),
 		   READ_ONCE(wgfp_spread), READ_ONCE(wgfp_orp_td),
 		   READ_ONCE(wgfp_orp_stash), READ_ONCE(wgfp_prefetch),
-		   READ_ONCE(wgfp_prefetch_max),
+		   READ_ONCE(wgfp_prefetch_max), READ_ONCE(wgfp_threaded),
 		   dpaa_wgfp_stat_sum(&wgfp_orp_frames),
 		   (u64)atomic64_read(&wgfp_orp_holes),
 		   (u64)atomic64_read(&wgfp_orp_wait_fail),
