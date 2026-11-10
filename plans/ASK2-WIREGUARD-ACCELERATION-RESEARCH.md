@@ -457,3 +457,45 @@ The fast-path plan (`plans/ASK2-WIREGUARD-FASTPATH-PLAN.md`) carries open action
 | P5 (single inner flow across CPUs) is subsumed by spread: with ORP every CPU decrypts one outer flow and QMan restores order, which is what G5 asked for. Measure a single TCP stream with spread instead of building P5 | §3 item 6 | Stage B |
 | Fix the multi-tunnel harness: `bin/testrig-wireguard-multi.sh` reports `dut_busy` 0.3–3% while the DUT carries 3.7 Gbit/s of WireGuard (load average 8). Use perf cycle samples or `/proc/softirqs` deltas, since the kernel lacks `CONFIG_IRQ_TIME_ACCOUNTING` | new, 2026-11-09 | Stage A |
 | A/B the ORP queue settings on one image, with no rebuild between settings: `echo "orp_td <bytes>"` (tail drop, 64 KiB to 16 MiB, default 2 MiB) and `echo "orp_stash 1"` (mainline-style annotation, data and context stashing) to `/sys/kernel/debug/dpaa_wgfp/ctl`, both before the first spread record of the boot. Measured target: the 11–14% eth4 `rfdc` discards and 2–4M retransmits per 4T download run on image 2108. The pool holds about 2,560 buffers per port, so watch `rodc` when raising `orp_td` | new, 2026-11-09 | Stage D, first experiment |
+
+## 16. Results, 2026-11-09/10 (Stages A to D, first pass)
+
+All cells: P6 mode 2 (`wgfp_rx_fast=2`) with ORP spread (`spread 1`, `fanout 0`), inner IPv4, MTU 1420, 4 TCP streams per tunnel, performance governor, kdump-armed boards (kexec boot). Busy and cycles come from DUT-side `perf stat -a -x, -I 1000` with A72 PMU events, normalised by each counter's enabled time (`/mnt/builds/wgfp/plan/cell2.sh` and `sum3.py`). Cycles per packet use a 1368-byte TCP payload.
+
+**Measurement correction.** `perf record` cycle-sample counts undercount softirq-saturated time badly, and `/proc/stat` lacks IRQ time accounting. An early reading of "1T is only 54% busy" was wrong: exact counting shows the 1T and 4T downloads are both CPU-bound at 96–100%, at about 18–19k cycles per packet. Under saturation even the perf process is starved and its 1-second intervals stretch to about 10 s, which is why the enabled-time normalisation is required.
+
+**Stage C finding.** Hot-cache ChaCha20-Poly1305 (OpenSSL 3.0.20 on one A72) costs about 9.1k cycles per 1424-byte packet. In the datapath, crypto took about 13.7k of 18k cycles at IPC 1.06, with 26 L2 refills per packet: the whole DMA'd frame, roughly 1.7 KB, is fetched from DDR, and the in-place AEAD stalled on each miss in turn.
+
+**Stage D, frame prefetch (`echo "prefetch 2"`, default since `28b7f6c9`), `.106` image 0011, interleaved on one boot:**
+
+| Cell | prefetch 0 | prefetch 2 | Cycles/packet | Vendor `f8881de` |
+|---|---:|---:|---|---:|
+| 1T download | 3.735 / 3.767 | 4.589 / 4.605 | 18.0k → 14.6k, IPC 1.06 → 1.31 | 4.66 |
+| 4T download | 3.629 | 4.594 | | 4.7 (4.7–6.7) |
+| 1T upload | 3.941 / 3.945 | 4.249 / 4.252 | 17.0k → 15.8k | 4.86 |
+| 4T upload | 4.182 | 4.520 | | 4.35 |
+
+L2 refills stay at 26 per packet with prefetch; the misses overlap instead of serialising, and L1D refills per packet halve.
+
+**Other findings.**
+
+- 4T download and upload saturate the CPUs. FMan then discards 11–14% of eth4 frames because QMan refuses the ORP queue enqueue (`rfdc` with `rodc` = 0), which gives 1.4–2.2M retransmits per 30 s run. The `orp_td` and `orp_stash` A/B addresses this.
+- `orp_stash 1` failed on images 2345 and 0011. `qman_init_fq()` DMA-maps the `qman_fq` for context stashing, and the ORP sink sat in static `.bss`, which on arm64 is vmalloc space. The result was a WARN and `pool_failed=1`. It is fixed in `87e9b28c` (image 0030) by allocating the ORP sink with `kzalloc`.
+- Management is starved during 4T spread download: SSH and userspace get nothing for the whole run. This is a gate failure for spread default-on.
+- One P6+spread freeze happened on `.185` (image 2108, 1T download, 2 s after a bind). No dump was saved, because the kernel has no pseudo-NMI and only the buddy lockup detector, so a total freeze never panics.
+- The `bin/testrig-wireguard-multi.sh` `dut_busy` column is wrong (0.3–3% while saturated).
+
+**Remaining gaps to the vendor.** 1T download is within about 1.5% and 4T download is level; 4T upload is ahead. 1T upload is still about 13% behind (4.25 against 4.86): profile the seal path with prefetch on. Next candidates: the 4T queue loss (`orp_td`, `orp_stash`), batched BMan release, and the stitched AEAD from §9 (hot crypto is now about 60% of each packet).
+
+**IPv4-inner matrix, 2026-11-10.** Board `.106`, image 0011. Runtime configuration: P6 mode 2, spread, `prefetch 2`, `orp_td 8 MiB` set before the ORP queue is created. Median of 3 reps, Gbit/s, range in brackets; vendor `f8881de` in the last column (up / down / bidir).
+
+| Tunnels | Up | Down | Bidir | Vendor |
+|---:|---|---|---|---|
+| 1 | 4.36 (4.35–4.36) | 4.63 (4.62–4.63) | 4.52 (4.51–4.53) | 4.86 / 4.66 / 2.6 |
+| 2 | 4.59 (4.58–4.60) | 4.62 (4.62–4.63) | 4.54 (4.53–4.55), 1 of 3 black-holed | 4.31 / 4.47 / 2.4–3.6 |
+| 4 | 4.62 (4.61–4.64) | 4.62 (4.60–4.62) | 4.52 (4.51–4.55) | 4.35 / 4.7–6.7 / 2.9 |
+
+- **CPU-bound everywhere:** every cell ran at 96–100% busy and 14.6–15.9k cycles per packet. The DUT CPU is the ceiling throughout.
+- **Black hole, open bug:** one stream in each direction of tunnel 2 was dead from the start of one 2T bidir run.
+- **4T upload retransmits:** about 1.7M per run in every rep, from the 512 KiB worker-sink tail drop on eth3 ingress.
+- **4T download and the 8 MiB queue:** `rfdc` disappears, but `rodc` (pool empty) appears in 4T cells, because about 5,700 queued frames exceed the roughly 2,560 pool buffers. 8 MiB is therefore not the default; a 3/4/8 MiB A/B follows.

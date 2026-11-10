@@ -47,7 +47,7 @@
  *                                  Applies to records installed afterwards;
  *                                  takes precedence over "fanout".
  *   echo "orp_td <B>"  > .../ctl   ORP queue tail drop in bytes (64 KiB..16 MiB,
- *                                  default 2 MiB)
+ *                                  default 6 MiB)
  *   echo "orp_stash <0|1>" > ...   QMan stashing on the ORP queue (default 0)
  *                                  Both apply when a port's ORP queue is
  *                                  created (once per boot), so set them before
@@ -104,8 +104,15 @@ bool dpaa_buf_stale_check(dma_addr_t addr, u8 bpid, const char *where);
  * loses with it.  FQ-local tail drop (QM_FQCTRL_TDE) is evaluated against the
  * FQD's own byte count, which the FE ENQUEUE path does update (F-199 A6-LOSS);
  * 512 KiB is about 350 MTU frames per sink, so four sinks stay well inside
- * the pool.  QMan rejects the enqueue and FMan returns the buffer. */
-#define WGFP_SINK_TD	(512 * 1024)
+ * the pool.  QMan rejects the enqueue and FMan returns the buffer.
+ * 1 MiB since 2026-11-10: at 4 tunnels the CPUs saturate and 512 KiB sinks
+ * tail-dropped 12.1% of eth3 upload frames (BMI rfdc, rodc 0; ~1.7M TCP
+ * retransmits per 30 s run, .185 image 0030).  With the pool at 1280
+ * buffers/CPU (~5,100 per port) four 1 MiB sinks (~2,800 frames) keep the
+ * same margin.  Limit: a port that carries both a tunnel's ORP queue
+ * (WGFP_ORP_TD_DEF) and plaintext sinks can still empty its pool at
+ * saturation. */
+#define WGFP_SINK_TD	(1024 * 1024)
 #define WGFP_MAX_EGRESS	8
 
 struct wgfp_port;
@@ -213,7 +220,12 @@ static bool wgfp_spread;
  * and QMan stashing of annotation, data and context lines as mainline
  * dpaa_eth sets on its RX queues (ASK exp/wireguard stashes its steer
  * queues too).  Defaults keep the original queue. */
-#define WGFP_ORP_TD_DEF		(WGFP_SINK_TD * WGFP_MAX_SINKS)
+/* 6 MiB (~4,300 full frames), sized against the RX pool: at 4 tunnels the
+ * CPUs saturate and the queue fills.  With 640 buffers/CPU (~2,560 per port)
+ * 3 MiB still tail-dropped 10.6% (eth4 BMI rfdc) and 4-8 MiB emptied the
+ * pool instead (rodc 1.4-1.8%), .185 image 0030, 2026-11-10.  The pool is now
+ * 1280 buffers/CPU (bin/ci-setup-kernel.sh), so 6 MiB fits with headroom. */
+#define WGFP_ORP_TD_DEF		(6 * 1024 * 1024)
 #define WGFP_ORP_TD_MIN		(64 * 1024)
 #define WGFP_ORP_TD_MAX		(16 * 1024 * 1024)
 static u32 wgfp_orp_td = WGFP_ORP_TD_DEF;

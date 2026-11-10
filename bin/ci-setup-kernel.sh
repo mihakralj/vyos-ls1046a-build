@@ -1394,14 +1394,20 @@ fi
 # ~480 buffers/port) is all the hardware gets. Under bidir load it ran dry:
 # BMI fmbm_rodc (RX out-of-buffers discard) = 13.95M frames vs 12.53M TCP
 # retransmits in one 40 s port<->port run (.185, 2026-10-06). Cost ~10 MiB/port.
+# 2026-11-10: 640 -> 1280 for the WireGuard fast path. Its ORP receive queue
+# holds frames (and their buffers) while all four CPUs decrypt; at 4 tunnels
+# a 2-3 MiB queue tail-dropped 10-14% (eth4 BMI rfdc) and a 4-8 MiB queue
+# emptied the ~2,560-buffer pool instead (rodc 1.4%+, .185/.106 image
+# 0011/0030). 1280 x 4 CPUs leaves room for a deeper queue. Cost ~20 MiB/port;
+# the 0178 ingress CGR threshold scales with it (config_count based).
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
         drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
         $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t128' \
-        $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t640' \
+        $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t1280' \
         1 \
-        "A6-LOSS: RX bpool 128->640 bufs/CPU"
-    echo "### dpaa_eth.c: FSL_DPAA_ETH_MAX_BUF_COUNT=640 injected (mutate)"
+        "A6-LOSS + WGFP: RX bpool 128->1280 bufs/CPU"
+    echo "### dpaa_eth.c: FSL_DPAA_ETH_MAX_BUF_COUNT=1280 injected (mutate)"
 fi
 
 # A6-LOSS: start RX frame data on a cache line (vendor parity). Mainline RX

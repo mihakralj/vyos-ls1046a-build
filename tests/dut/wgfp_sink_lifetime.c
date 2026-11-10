@@ -14,7 +14,7 @@ typedef unsigned long long u64;
 #define WGFP_MAX_SINKS 4
 #define WGFP_MAX_PORTS 8
 #define WGFP_WQ 6
-#define WGFP_SINK_TD (512 * 1024)
+#define WGFP_SINK_TD (1024 * 1024)
 #define QMAN_FQ_FLAG_DYNAMIC_FQID 1
 #define QMAN_FQ_FLAG_NO_ENQUEUE 2
 #define QMAN_FQ_FLAG_NO_MODIFY 3
@@ -40,7 +40,7 @@ typedef unsigned long long u64;
 static bool wgfp_spread;
 #define WGFP_ORP_TD_MIN (64 * 1024)
 #define WGFP_ORP_TD_MAX (16 * 1024 * 1024)
-static unsigned int wgfp_orp_td = 2 * 1024 * 1024;
+static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
 static bool wgfp_orp_stash;
 static unsigned int wgfp_prefetch;
 static long long wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
