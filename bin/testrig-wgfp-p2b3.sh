@@ -134,7 +134,13 @@ t_pmtu(){
   # (a main-table replace never wins and is left behind, which teardown cannot recognise).
   rt=$($D1 "ip -4 route show table all exact 10.99.200.0/24 | grep ' table [0-9]' | head -1")
   [ -n "$rt" ] || { bad "rig route for 10.99.200.0/24 not found on dell1"; return; }
-  rtmtu(){ $D1 "sudo ip route change $(echo "$rt" | sed "s/ mtu [0-9]*//") mtu $1 && sudo ip route flush cache"; }
+  # `ip route show` prints the 32-bit realm tag as "realms FROM/TO", which `ip route change` rejects for
+  # values above 255 ('"realm" value is invalid'), so the MTU was never lifted; replay it as one number.
+  local rtc=${rt}
+  if [[ $rtc =~ realms\ ([0-9]+)/([0-9]+) ]]; then
+    rtc=${rtc/"realms ${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"/"realm $(( BASH_REMATCH[1] * 65536 + BASH_REMATCH[2] ))"}
+  fi
+  rtmtu(){ $D1 "sudo ip route change $(echo "$rtc" | sed "s/ mtu [0-9]*//") mtu $1 && sudo ip route flush cache"; }
   rtmtu 1500
   out=$($D1 "python3 -c \"
 import socket,time
