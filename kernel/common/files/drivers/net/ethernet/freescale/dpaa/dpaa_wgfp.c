@@ -53,7 +53,7 @@
  *                                  created (once per boot), so set them before
  *                                  the first spread record.
  *   echo "prefetch <0|1|2>" > ...  prefetch each dequeued frame: 1 for read,
- *                                  2 for store (default 0); takes effect at once
+ *                                  2 for store (default 2); takes effect at once
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
  *
@@ -222,8 +222,11 @@ static bool wgfp_orp_stash;
  * so the decrypt or seal otherwise takes its ~23 cache misses one at a time
  * (.185, image 2345, P6+spread 1T download: 26 L2 refills and ~18k cycles per
  * packet against ~9k for hot-cache ChaCha20-Poly1305).  1 = prefetch for
- * read, 2 = for store (the AEAD rewrites the buffer in place); 0 = off. */
-static unsigned int wgfp_prefetch;
+ * read, 2 = for store (the AEAD rewrites the buffer in place); 0 = off.
+ * Default 2: on .106 (image 0011, P6 + spread) it took 1T download from
+ * 3.74-3.77 to 4.59-4.61 Gbit/s (18.0k -> 14.6k cycles per packet), 4T
+ * download from 3.63 to 4.59, and 1T upload from 3.94 to 4.25. */
+static unsigned int wgfp_prefetch = 2;
 
 static void wgfp_prefetch_frame(const u8 *p, u32 len)
 {
