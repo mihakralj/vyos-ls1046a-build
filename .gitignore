@@ -101,6 +101,7 @@ ASK/fci/lib/src/*.la
 *.log
 /manifest.json
 /packages/
+.agents/local.md
 .clinerules/
 .clinehooks/
 .clineskills/
