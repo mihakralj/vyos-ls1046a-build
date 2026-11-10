@@ -499,3 +499,16 @@ L2 refills stay at 26 per packet with prefetch; the misses overlap instead of se
 - **Black hole, open bug:** one stream in each direction of tunnel 2 was dead from the start of one 2T bidir run.
 - **4T upload retransmits:** about 1.7M per run in every rep, from the 512 KiB worker-sink tail drop on eth3 ingress.
 - **4T download and the 8 MiB queue:** `rfdc` disappears, but `rodc` (pool empty) appears in 4T cells, because about 5,700 queued frames exceed the roughly 2,560 pool buffers. 8 MiB is therefore not the default; a 3/4/8 MiB A/B follows.
+
+**Queue and pool sizing, verified on image 0403 (`ad489d2e`, `.185`, 2026-11-10).** The image ships with `prefetch 2`, a 6 MiB ORP queue, 1 MiB worker sinks and 1280 buffers per CPU (`bpool [TOTAL]` 5120 per port). Spread was turned on per cell. Every eth4 (download) and eth3 (upload) BMI window that saw traffic read `rfdc` 0 and `rodc` 0.
+
+| Cell (IPv4 inner) | Gbit/s | Retransmits per 30 s | Before sizing |
+|---|---|---|---|
+| 4T down | 4.570 / 4.558 | 12k / 3.6k | about 2.1M |
+| 4T up | 4.544 / 4.541 | 710 / 654 | about 1.7M |
+| 4T bidir | 4.465 | 18k | 0.1–0.56M |
+| 1T up, tunnel on eth4 / eth3 | 4.279 / 4.275 | 172 / 58 | |
+| 1T down, tunnel on eth4 / eth3 | 4.584 / 4.559 | 8.2k / 0.8k | |
+| 1T bidir, tunnel on eth4 / eth3 | 4.427 / 4.438 | 73k / 66k | |
+
+Throughput is unchanged within noise; the gain is loss, and the 4T cells are now essentially lossless at CPU saturation. The orientation with the tunnel on eth3 behaves the same as with the tunnel on eth4.

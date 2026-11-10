@@ -66,6 +66,7 @@ static bool wgfp_spread;
 static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
 static bool wgfp_orp_stash;
 static unsigned int wgfp_prefetch = 2;
+static unsigned int wgfp_prefetch_max;
 static u64 wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
 
 static void mutex_lock(int *lock) { (void)lock; }
@@ -128,7 +129,7 @@ int main(void)
 	wgfp_global[1].cpu = 1;
 	assert(wgfp_stats_show(&output, NULL) == 0);
 	assert(strstr(output.buf, "frm_cnt_encoding=host\n"));
-	assert(strstr(output.buf, " spread=0 orp_td=6291456 orp_stash=0 prefetch=2 orp_frames="));
+	assert(strstr(output.buf, " spread=0 orp_td=6291456 orp_stash=0 prefetch=2 prefetch_max=0 orp_frames="));
 	assert(strstr(output.buf,
 		      "sink0 port=0 kind=global cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
 		      " state=0x05 frm_cnt=1 byte_cnt=64 frm_cnt_raw=0x01000000 byte_cnt_raw=0x40000000\n"));

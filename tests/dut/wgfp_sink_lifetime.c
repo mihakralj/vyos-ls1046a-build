@@ -43,6 +43,7 @@ static bool wgfp_spread;
 static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
 static bool wgfp_orp_stash;
 static unsigned int wgfp_prefetch;
+static unsigned int wgfp_prefetch_max;
 static long long wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
 
 struct qman_portal;

@@ -54,6 +54,7 @@
  *                                  the first spread record.
  *   echo "prefetch <0|1|2>" > ...  prefetch each dequeued frame: 1 for read,
  *                                  2 for store (default 2); takes effect at once
+ *   echo "prefetch_max <B>" > ...  prefetch at most B bytes per frame (0 = all)
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
  *
@@ -239,14 +240,23 @@ static bool wgfp_orp_stash;
  * 3.74-3.77 to 4.59-4.61 Gbit/s (18.0k -> 14.6k cycles per packet), 4T
  * download from 3.63 to 4.59, and 1T upload from 3.94 to 4.25. */
 static unsigned int wgfp_prefetch = 2;
+/* Prefetch at most this many bytes of a frame (0 = all of it).  Issuing a
+ * prefetch for every line stalls once the core's outstanding-miss slots are
+ * full: wgfp_dqrr_frame rose from 2.7% to 9.4% of cycles with prefetch 2
+ * (.185, image 0403, 1T upload); the A72 stream prefetcher may cover the
+ * rest of the frame once the first lines are in flight. */
+static unsigned int wgfp_prefetch_max;
 
 static void wgfp_prefetch_frame(const u8 *p, u32 len)
 {
 	unsigned int mode = READ_ONCE(wgfp_prefetch);
+	unsigned int max = READ_ONCE(wgfp_prefetch_max);
 	u32 o;
 
 	if (!mode)
 		return;
+	if (max && max < len)
+		len = max;
 	for (o = 0; o < len; o += L1_CACHE_BYTES) {
 		if (mode == 2)
 			prefetchw(p + o);
@@ -867,6 +877,11 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_orp_td, n);
+	} else if (sscanf(buf, "prefetch_max %u", &n) == 1) {
+		if (n > 65536)
+			err = -EINVAL;
+		else
+			WRITE_ONCE(wgfp_prefetch_max, n);
 	} else if (sscanf(buf, "prefetch %u", &n) == 1) {
 		if (n > 2)
 			err = -EINVAL;
@@ -987,7 +1002,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d prefetch=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d prefetch=%u prefetch_max=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -1000,6 +1015,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   (u64)atomic64_read(&wgfp_rx_ern),
 		   READ_ONCE(wgfp_spread), READ_ONCE(wgfp_orp_td),
 		   READ_ONCE(wgfp_orp_stash), READ_ONCE(wgfp_prefetch),
+		   READ_ONCE(wgfp_prefetch_max),
 		   dpaa_wgfp_stat_sum(&wgfp_orp_frames),
 		   (u64)atomic64_read(&wgfp_orp_holes),
 		   (u64)atomic64_read(&wgfp_orp_wait_fail),
