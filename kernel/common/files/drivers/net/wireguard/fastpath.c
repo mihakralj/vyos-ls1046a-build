@@ -86,6 +86,281 @@ struct wgfp_lab {
 	atomic64_t counter;
 };
 
+/* Open: the n mod 320 tail, rounded up to whole blocks, that the open fold
+ * decrypts on a stack copy together with block 0 (see wgfp_open_folded()). */
+#define WGFP_OPEN_HEAD	256
+
+static bool wgfp_open_foldable(size_t n)
+{
+	size_t r = n % (5 * CHACHA_BLOCK_SIZE);
+
+	return n > CHACHA_BLOCK_SIZE && r && r <= WGFP_OPEN_HEAD;
+}
+
+/*
+ * One NEON section a packet (fold mode 2).  The library, and modes 0 and 1,
+ * enter kernel_neon_begin()/end() once per ChaCha call and once per Poly1305
+ * update: three or four sections a full-size packet, 4.3-4.8% of a packet in
+ * the profiles.  Here ChaCha and Poly1305 run in one section, calling the
+ * lib/crypto/arm64 routines directly; packets up to WGFP_NEON_MIN bytes
+ * (ACKs) open none and run on general registers.  Those routines are global
+ * but not exported, so this is built only when WireGuard and both crypto
+ * libraries are built in (ASK master c7a6e76 does the same with exports).
+ */
+#if IS_BUILTIN(CONFIG_WIREGUARD) && IS_BUILTIN(CONFIG_CRYPTO_LIB_CHACHA) && \
+    IS_BUILTIN(CONFIG_CRYPTO_LIB_POLY1305) && IS_ENABLED(CONFIG_ARM64) && \
+    IS_ENABLED(CONFIG_CRYPTO_LIB_CHACHA_ARCH) && \
+    IS_ENABLED(CONFIG_CRYPTO_LIB_POLY1305_ARCH)
+#define WGFP_ONE_NEON	1
+
+#include <asm/neon.h>
+#include <crypto/internal/simd.h>
+
+static void wgfp_chacha_setup(struct chacha_state *st, u64 nonce,
+			      const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	__le64 iv[2] = { 0, cpu_to_le64(nonce) };
+	u32 k[CHACHA_KEY_WORDS];
+	int i;
+
+	for (i = 0; i < CHACHA_KEY_WORDS; i++)
+		k[i] = get_unaligned_le32(key + 4 * i);
+	chacha_init(st, k, (const u8 *)iv);
+	memzero_explicit(k, sizeof(k));
+}
+
+asmlinkage void chacha_block_xor_neon(const struct chacha_state *state,
+				      u8 *dst, const u8 *src, int nrounds);
+asmlinkage void chacha_4block_xor_neon(const struct chacha_state *state,
+				       u8 *dst, const u8 *src,
+				       int nrounds, int bytes);
+asmlinkage void poly1305_blocks_arm64(struct poly1305_block_state *state,
+				      const u8 *src, u32 len, u32 hibit);
+asmlinkage void poly1305_blocks_neon(struct poly1305_block_state *state,
+				     const u8 *src, u32 len, u32 hibit);
+
+#define WGFP_NEON_MIN	128
+
+/* chacha_doneon() of lib/crypto/arm64/chacha.h; inside a NEON section */
+static void wgfp_chacha_neon(struct chacha_state *st, u8 *dst, const u8 *src,
+			     unsigned int bytes)
+{
+	while (bytes) {
+		unsigned int l = min_t(unsigned int, bytes, 5 * CHACHA_BLOCK_SIZE);
+
+		if (l <= CHACHA_BLOCK_SIZE) {
+			u8 buf[CHACHA_BLOCK_SIZE];
+
+			memcpy(buf, src, l);
+			chacha_block_xor_neon(st, buf, buf, 20);
+			memcpy(dst, buf, l);
+			st->x[12]++;
+			break;
+		}
+		chacha_4block_xor_neon(st, dst, src, 20, l);
+		st->x[12] += DIV_ROUND_UP(l, CHACHA_BLOCK_SIZE);
+		bytes -= l;
+		src += l;
+		dst += l;
+	}
+}
+
+static void wgfp_chacha_gen(struct chacha_state *st, u8 *dst, const u8 *src,
+			    unsigned int bytes)
+{
+	u8 ks[CHACHA_BLOCK_SIZE];
+
+	while (bytes) {
+		unsigned int l = min_t(unsigned int, bytes, CHACHA_BLOCK_SIZE);
+
+		chacha_block_generic(st, ks, 20);
+		crypto_xor_cpy(dst, src, ks, l);
+		bytes -= l;
+		src += l;
+		dst += l;
+	}
+	memzero_explicit(ks, sizeof(ks));
+}
+
+/* direct calls: the perlasm routines are not BTI targets */
+static void wgfp_poly_blocks(struct poly1305_desc_ctx *mac, const u8 *src,
+			     unsigned int len, bool neon)
+{
+	if (neon)
+		poly1305_blocks_neon(&mac->state, src, len, 1);
+	else
+		poly1305_blocks_arm64(&mac->state, src, len, 1);
+}
+
+/* RFC 8439 tag of @n bytes at @m, no associated data; @neon: inside a NEON
+ * section.  Whole blocks only, so poly1305_final() just emits. */
+static void wgfp_mac(const u8 key[POLY1305_KEY_SIZE], const u8 *m,
+		     unsigned int n, bool neon, u8 tag[POLY1305_DIGEST_SIZE])
+{
+	unsigned int full = round_down(n, POLY1305_BLOCK_SIZE);
+	__le64 lens[2] = { 0, cpu_to_le64(n) };
+	struct poly1305_desc_ctx mac;
+	u8 blk[POLY1305_BLOCK_SIZE];
+
+	poly1305_init(&mac, key);
+	if (full)
+		wgfp_poly_blocks(&mac, m, full, neon);
+	if (n != full) {
+		memset(blk, 0, sizeof(blk));
+		memcpy(blk, m + full, n - full);
+		wgfp_poly_blocks(&mac, blk, sizeof(blk), neon);
+	}
+	wgfp_poly_blocks(&mac, (const u8 *)lens, sizeof(lens), neon);
+	poly1305_final(&mac, tag);
+}
+
+/* @room bytes in front of @p are inside the buffer: with 64, block 0 comes
+ * from the data's own first NEON call (the seal fold), else from a one-block
+ * NEON call. */
+static void wgfp_seal_one(u8 *p, u32 n, u32 room, u64 nonce,
+			  const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	bool neon = n > WGFP_NEON_MIN && crypto_simd_usable();
+	u8 ks[CHACHA_BLOCK_SIZE], save[CHACHA_BLOCK_SIZE];
+	u8 *b0 = p - CHACHA_BLOCK_SIZE;
+	struct chacha_state st;
+
+	wgfp_chacha_setup(&st, nonce, key);
+	if (!neon) {
+		chacha_block_generic(&st, ks, 20);	/* block 0: the MAC key */
+		wgfp_chacha_gen(&st, p, p, n);
+		wgfp_mac(ks, p, n, false, p + n);
+	} else if (room >= CHACHA_BLOCK_SIZE) {
+		memcpy(save, b0, sizeof(save));
+		memset(b0, 0, CHACHA_BLOCK_SIZE);
+		kernel_neon_begin();
+		wgfp_chacha_neon(&st, b0, b0, CHACHA_BLOCK_SIZE + n);
+		memcpy(ks, b0, sizeof(ks));
+		memcpy(b0, save, sizeof(save));
+		wgfp_mac(ks, p, n, true, p + n);
+		kernel_neon_end();
+	} else {
+		memset(ks, 0, sizeof(ks));
+		kernel_neon_begin();
+		chacha_block_xor_neon(&st, ks, ks, 20);
+		st.x[12]++;
+		wgfp_chacha_neon(&st, p, p, n);
+		wgfp_mac(ks, p, n, true, p + n);
+		kernel_neon_end();
+	}
+	chacha_zeroize_state(&st);
+	memzero_explicit(ks, sizeof(ks));
+}
+
+/* @n plaintext bytes at @p, tag at p + n; the buffer is untouched when the
+ * tag does not verify.  Block 0 rides with the open fold's head when the
+ * length allows it, else a one-block NEON call. */
+static bool wgfp_open_one(u8 *p, size_t n, u64 nonce,
+			  const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	bool neon = n > WGFP_NEON_MIN && crypto_simd_usable();
+	u8 buf[CHACHA_BLOCK_SIZE + WGFP_OPEN_HEAD];
+	u8 tag[POLY1305_DIGEST_SIZE];
+	struct chacha_state st;
+	size_t head = 0;
+	bool ok;
+
+	wgfp_chacha_setup(&st, nonce, key);
+	if (!neon) {
+		chacha_block_generic(&st, buf, 20);
+		wgfp_mac(buf, p, n, false, tag);
+		ok = !crypto_memneq(tag, p + n, POLY1305_DIGEST_SIZE);
+		if (ok)
+			wgfp_chacha_gen(&st, p, p, n);
+	} else {
+		memset(buf, 0, CHACHA_BLOCK_SIZE);
+		kernel_neon_begin();
+		if (wgfp_open_foldable(n)) {
+			head = min_t(size_t, n, ALIGN(n % (5 * CHACHA_BLOCK_SIZE),
+						      CHACHA_BLOCK_SIZE));
+			memcpy(buf + CHACHA_BLOCK_SIZE, p, head);
+			wgfp_chacha_neon(&st, buf, buf, CHACHA_BLOCK_SIZE + head);
+		} else {
+			chacha_block_xor_neon(&st, buf, buf, 20);
+			st.x[12]++;
+		}
+		wgfp_mac(buf, p, n, true, tag);
+		ok = !crypto_memneq(tag, p + n, POLY1305_DIGEST_SIZE);
+		if (ok) {
+			if (n > head)
+				wgfp_chacha_neon(&st, p + head, p + head, n - head);
+			memcpy(p, buf + CHACHA_BLOCK_SIZE, head);
+		}
+		kernel_neon_end();
+	}
+	chacha_zeroize_state(&st);
+	memzero_explicit(buf, CHACHA_BLOCK_SIZE + head);
+	return ok;
+}
+
+/* Both directions against the library once: seal with and without room in
+ * front, open of library-sealed data, and a forged tag refused with the
+ * buffer unchanged.  -1 while another CPU is testing. */
+static int wgfp_one_ok(void)
+{
+#define WGFP_ONE_TEST_MAX	1500
+	static const u32 lens[] = { 1, 15, 16, 17, 63, 64, 65, 127, 128, 129,
+				    143, 191, 192, 255, 256, 257, 319, 320, 321,
+				    576, 577, 1280, 1419, 1420, 1424, 1440, 1472,
+				    WGFP_ONE_TEST_MAX };
+	static u8 a[CHACHA_BLOCK_SIZE + WGFP_ONE_TEST_MAX + POLY1305_DIGEST_SIZE];
+	static u8 b[WGFP_ONE_TEST_MAX + POLY1305_DIGEST_SIZE];
+	static u8 m[WGFP_ONE_TEST_MAX];
+	static atomic_t busy = ATOMIC_INIT(0);
+	static int state = -1;
+	u8 key[CHACHA20POLY1305_KEY_SIZE], *p = a + CHACHA_BLOCK_SIZE;
+	int i, j, room, ok = 1;
+
+	if (READ_ONCE(state) >= 0)
+		return READ_ONCE(state);
+	if (atomic_xchg(&busy, 1))
+		return -1;
+	for (i = 0; i < sizeof(key); i++)
+		key[i] = 0x20 + i;
+	for (i = 0; i < ARRAY_SIZE(lens) && ok; i++) {
+		u32 len = lens[i];
+		u64 nonce = 0x0f0e0d0cULL + len;
+
+		if (WARN_ON_ONCE(len > WGFP_ONE_TEST_MAX)) {
+			ok = 0;
+			break;
+		}
+		for (j = 0; j < len; j++)
+			m[j] = j * 11 + len;
+		chacha20poly1305_encrypt(b, m, len, NULL, 0, nonce, key);
+		for (room = 0; room <= CHACHA_BLOCK_SIZE && ok; room += CHACHA_BLOCK_SIZE) {
+			memset(a, 0xa5, CHACHA_BLOCK_SIZE);
+			memcpy(p, m, len);
+			wgfp_seal_one(p, len, room, nonce, key);
+			ok = !memcmp(p, b, len + POLY1305_DIGEST_SIZE) &&
+			     !memchr_inv(a, 0xa5, CHACHA_BLOCK_SIZE);
+		}
+		memcpy(p, b, len + POLY1305_DIGEST_SIZE);
+		ok = ok && wgfp_open_one(p, len, nonce, key) && !memcmp(p, m, len);
+		memcpy(p, b, len + POLY1305_DIGEST_SIZE);
+		p[len] ^= 1;
+		ok = ok && !wgfp_open_one(p, len, nonce, key) &&
+		     !memcmp(p, b, len) && p[len] == (b[len] ^ 1);
+		if (!ok)
+			pr_err("wgfp: one-section AEAD differs from the library at %u bytes; not used\n",
+			       len);
+	}
+	if (ok)
+		pr_info("wgfp: one-section AEAD matches the library (%zu lengths)\n",
+			ARRAY_SIZE(lens));
+	WRITE_ONCE(state, ok);
+	atomic_set(&busy, 0);
+	return ok;
+}
+#else
+static int wgfp_one_ok(void) { return 0; }
+#endif
+
 /* Seal with the Poly1305 key block folded into the data's ChaCha pass.
  * chacha20poly1305_encrypt() makes block 0 (the one-time Poly1305 key) with a
  * separate 32-byte chacha20_crypt(), which arm64 sends to the generic C code
@@ -95,11 +370,12 @@ struct wgfp_lab {
  * anyway (1420 = 4 x 320 + 140).  Those 64 bytes are saved and restored.
  * Decrypt cannot do this: the tag is checked over the ciphertext before it
  * is decrypted in place, so the key must exist first.
- * -1: self-test against the library on the first seal, then 1 (0 if it
- * differs); 0: library; 1: fold. */
+ * -1: self-test against the library on the first seal, then 2 when the
+ * one-section path is built and matches, else 1 (0 if the fold differs);
+ * 0: library; 1: fold; 2: one NEON section a packet. */
 static int wgfp_seal_fold = -1;
 module_param(wgfp_seal_fold, int, 0600);
-MODULE_PARM_DESC(wgfp_seal_fold, "Seal: fold the Poly1305 key block into the NEON ChaCha pass (-1 self-test then on, 0 off, 1 on)");
+MODULE_PARM_DESC(wgfp_seal_fold, "Seal: -1 self-test then best, 0 library, 1 key block folded into the NEON pass, 2 one NEON section a packet");
 
 static void wgfp_seal_folded(u8 *p, u32 len, u64 nonce,
 			     const u8 key[CHACHA20POLY1305_KEY_SIZE])
@@ -142,10 +418,15 @@ static int wgfp_seal_selftest(void)
 	static u8 b[1440 + POLY1305_DIGEST_SIZE];
 	static atomic_t busy = ATOMIC_INIT(0);
 	u8 key[CHACHA20POLY1305_KEY_SIZE];
-	int i, j, ok = 1;
+	int i, j, ok = 1, one;
 
 	if (atomic_xchg(&busy, 1))
 		return 0;
+	one = wgfp_one_ok();
+	if (one < 0) {		/* another CPU is testing it: library this time */
+		atomic_set(&busy, 0);
+		return 0;
+	}
 	for (i = 0; i < sizeof(key); i++)
 		key[i] = 0x40 + i;
 	for (i = 0; i < ARRAY_SIZE(lens) && ok; i++) {
@@ -162,9 +443,11 @@ static int wgfp_seal_selftest(void)
 			pr_err("wgfp: folded seal differs from the library at %u bytes; using the library\n",
 			       len);
 	}
+	ok = ok ? (one ? 2 : 1) : 0;
 	WRITE_ONCE(wgfp_seal_fold, ok);
 	if (ok)
-		pr_info("wgfp: folded seal matches the library (%zu lengths)\n", ARRAY_SIZE(lens));
+		pr_info("wgfp: folded seal matches the library (%zu lengths), mode %d\n",
+			ARRAY_SIZE(lens), ok);
 	atomic_set(&busy, 0);
 	return ok;
 }
@@ -178,6 +461,12 @@ static void wgfp_seal(u8 *p, u32 len, u32 room, u64 nonce,
 
 	if (unlikely(fold < 0))
 		fold = wgfp_seal_selftest();
+#ifdef WGFP_ONE_NEON
+	if (likely(fold == 2)) {
+		wgfp_seal_one(p, len, room, nonce, key);
+		return;
+	}
+#endif
 	if (fold > 0 && likely(room >= CHACHA_BLOCK_SIZE))
 		wgfp_seal_folded(p, len, nonce, key);
 	else
@@ -193,19 +482,12 @@ static void wgfp_seal(u8 *p, u32 len, u32 room, u64 nonce,
  * number of NEON calls as the library, minus its generic block 0; the
  * buffer is untouched when the tag does not verify.  Applies when
  * 64 < n and 0 < n mod 320 <= 256 (1420-byte packets: t = 192).
- * -1: self-test on the first open, then 1 (0 if it differs); 0 library. */
+ * -1: self-test on the first open, then 2 when the one-section path is
+ * built and matches, else 1 (0 if the fold differs); 0 library; 1 fold;
+ * 2 one NEON section a packet. */
 static int wgfp_open_fold = -1;
 module_param(wgfp_open_fold, int, 0600);
-MODULE_PARM_DESC(wgfp_open_fold, "Open: fold the Poly1305 key block into a NEON ChaCha call (-1 self-test then on, 0 off, 1 on)");
-
-#define WGFP_OPEN_HEAD	256
-
-static bool wgfp_open_foldable(size_t n)
-{
-	size_t r = n % (5 * CHACHA_BLOCK_SIZE);
-
-	return n > CHACHA_BLOCK_SIZE && r && r <= WGFP_OPEN_HEAD;
-}
+MODULE_PARM_DESC(wgfp_open_fold, "Open: -1 self-test then best, 0 library, 1 key block folded into a NEON call, 2 one NEON section a packet");
 
 /* @n plaintext bytes at @p, tag at p + n; caller checked foldable */
 static bool wgfp_open_folded(u8 *p, size_t n, u64 nonce,
@@ -260,10 +542,15 @@ static int wgfp_open_selftest(void)
 	static u8 m[WGFP_OPEN_TEST_MAX + POLY1305_DIGEST_SIZE];
 	static atomic_t busy = ATOMIC_INIT(0);
 	u8 key[CHACHA20POLY1305_KEY_SIZE];
-	int i, j, ok = 1;
+	int i, j, ok = 1, one;
 
 	if (atomic_xchg(&busy, 1))
 		return 0;
+	one = wgfp_one_ok();
+	if (one < 0) {
+		atomic_set(&busy, 0);
+		return 0;
+	}
 	for (i = 0; i < sizeof(key); i++)
 		key[i] = 0x60 + i;
 	for (i = 0; i < ARRAY_SIZE(lens) && ok; i++) {
@@ -290,9 +577,11 @@ static int wgfp_open_selftest(void)
 			pr_err("wgfp: folded open differs from the library at %u bytes; using the library\n",
 			       len);
 	}
+	ok = ok ? (one ? 2 : 1) : 0;
 	WRITE_ONCE(wgfp_open_fold, ok);
 	if (ok)
-		pr_info("wgfp: folded open matches the library (%zu lengths)\n", ARRAY_SIZE(lens));
+		pr_info("wgfp: folded open matches the library (%zu lengths), mode %d\n",
+			ARRAY_SIZE(lens), ok);
 	atomic_set(&busy, 0);
 	return ok;
 }
@@ -305,6 +594,10 @@ static bool wgfp_open(u8 *p, size_t clen, u64 nonce,
 
 	if (unlikely(fold < 0))
 		fold = wgfp_open_selftest();
+#ifdef WGFP_ONE_NEON
+	if (likely(fold == 2) && clen > POLY1305_DIGEST_SIZE)
+		return wgfp_open_one(p, clen - POLY1305_DIGEST_SIZE, nonce, key);
+#endif
 	if (fold > 0 && clen > POLY1305_DIGEST_SIZE &&
 	    wgfp_open_foldable(clen - POLY1305_DIGEST_SIZE))
 		return wgfp_open_folded(p, clen - POLY1305_DIGEST_SIZE, nonce, key);

@@ -143,7 +143,7 @@ awk -v l="$LOW" 'BEGIN{exit !(l > 0.1)}' && ok "flow ran through both switches" 
 echo "== 7. unbind under traffic"
 dstart 12 /tmp/p6-unbind.json; sleep 5; off; dwait
 on; dut "echo 1 | sudo tee $RX >/dev/null"
-NEW=$(dut "sudo dmesg | tail -n +$((KMSG0 + 1)) | grep -E 'WARNING|BUG:|Oops:|refcount|leak|[^_]wgfp: |fastpath: '| grep -vE 'fastpath peer mode on|folded (seal|open) matches the library' | head -5")
+NEW=$(dut "sudo dmesg | tail -n +$((KMSG0 + 1)) | grep -E 'WARNING|BUG:|Oops:|refcount|leak|[^_]wgfp: |fastpath: '| grep -vE 'fastpath peer mode on|folded (seal|open) matches the library|one-section AEAD matches the library' | head -5")
 [ -z "$NEW" ] && ok "no kernel warnings" || { bad "kernel messages:"; echo "$NEW" | sed 's/^/    /'; }
 
 [ "$fails" = 0 ] && echo "P6 GATE: PASS" || echo "P6 GATE: $fails FAILURE(S)"

@@ -114,6 +114,19 @@ if [ -f "$FS_FRAG" ]; then
     done
 fi
 
+# WireGuard built in, and with it (by select) libchacha, libpoly1305 and
+# libchacha20poly1305: module text runs from 4 KiB-page vmalloc space (the ASK
+# vendor measured a module build ~6% slower on download, ASK 11324c2), and
+# fastpath.c's one-NEON-section AEAD calls lib/crypto/arm64 routines that are
+# global but not exported. vyos-build's 62-wireguard.config is merged after
+# our fragments and sets =m.
+WG_FRAG=vyos-build/scripts/package-build/linux-kernel/config/62-wireguard.config
+if [ -f "$WG_FRAG" ]; then
+    echo "### Building WireGuard in: CONFIG_WIREGUARD=y in $WG_FRAG"
+    sed -i 's/^CONFIG_WIREGUARD=m$/CONFIG_WIREGUARD=y/' "$WG_FRAG"
+    grep -qx 'CONFIG_WIREGUARD=y' "$WG_FRAG" || { echo "::error::CONFIG_WIREGUARD=y missing from $WG_FRAG"; exit 1; }
+fi
+
 ### Kernel patches (INA234 hwmon, SFP rollball PHY)
 KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
