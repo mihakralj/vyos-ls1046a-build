@@ -29,7 +29,7 @@ struct wgfp_sink {
 	struct wgfp_sink_pc *pc;
 	int cpu;
 	bool dist;
-	u64 frames, bytes, errs, sg, irqs, polls;
+	u64 frames, bytes, errs, sg, irqs;
 };
 struct wgfp_port {
 	int ifindex;
@@ -132,10 +132,10 @@ int main(void)
 	assert(strstr(output.buf, "frm_cnt_encoding=host\n"));
 	assert(strstr(output.buf, " spread=0 orp_td=6291456 orp_stash=0 prefetch=2 prefetch_max=0 threaded=0 orp_frames="));
 	assert(strstr(output.buf,
-		      "sink0 port=0 kind=global cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
+		      "sink0 port=0 kind=global cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0"
 		      " state=0x05 frm_cnt=1 byte_cnt=64 frm_cnt_raw=0x01000000 byte_cnt_raw=0x40000000\n"));
 	assert(strstr(output.buf,
-		      "sink1 port=0 kind=global cpu=1 fqid=0x2bf frames=0 bytes=0 errs=0 sg=0 irqs=0 polls=0"
+		      "sink1 port=0 kind=global cpu=1 fqid=0x2bf frames=0 bytes=0 errs=0 sg=0 irqs=0"
 		      " query_err=-110\n"));
 	assert(strstr(output.buf, "port=6 kind=orp cpu=-1 fqid=0x300 frames=8 bytes=800 "));
 	return 0;

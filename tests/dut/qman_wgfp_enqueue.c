@@ -203,6 +203,16 @@ static void dma_sync_single_for_device(struct device *dev, u64 addr,
 	dma_syncs++;
 }
 
+/* dpaa_wgfp_xmit()'s bounded wait: a fake clock that advances 25 us per read */
+#ifndef likely
+#define likely(x) (x)
+#endif
+#define WGFP_XMIT_WAIT_NS 100000LL
+typedef long long ktime_t;
+static long long fake_now;
+static ktime_t ktime_get(void) { fake_now += 25000; return fake_now; }
+static ktime_t ktime_add_ns(ktime_t t, long long ns) { return t + ns; }
+static int ktime_before(ktime_t a, ktime_t b) { return a < b; }
 static void cpu_relax(void)
 {
 	relaxes++;
@@ -296,7 +306,8 @@ static void test_egress_and_xmit(bool stash)
 	assert(dpaa_wgfp_egress(&netdev) == 0);
 	full_attempts = 8;
 	dpaa_wgfp_xmit(&frame, 0, 64, 1200);
-	assert(starts == 8 && commits == 0 && relaxes == 8);
+	/* 100 us at 25 us per clock read: 1 + 4 attempts, 4 relaxes, then drop */
+	assert(starts == 5 && commits == 0 && relaxes == 4);
 	assert(wgfp_xmit_ok == 0 && wgfp_xmit_fail == 1 && wgfp_xmit_ern == 0);
 	assert(releases == 1 && released_fd.addr == fd.addr);
 	assert(portal_refs == 0 && irq_depth == 0);

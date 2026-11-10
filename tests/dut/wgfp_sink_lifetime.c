@@ -38,7 +38,7 @@ typedef unsigned long long u64;
 #define atomic_set(p, v) (*(p) = (v))
 #define atomic64_set(p, v) (*(p) = (v))
 static bool wgfp_spread;
-static bool wgfp_orp_napi_ready;
+static bool wgfp_cpu_napi_ready;
 #define WGFP_ORP_TD_MIN (64 * 1024)
 #define WGFP_ORP_TD_MAX (16 * 1024 * 1024)
 static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
@@ -120,7 +120,6 @@ static void fake_log(const char *fmt, ...) { (void)fmt; }
 static int wgfp_dqrr(void) { return 0; }
 static void wgfp_rx_ern_cb(struct qman_portal *p, struct qman_fq *f,
 			   const union qm_mr_entry *m) { }
-static int wgfp_poll(struct napi_struct *napi, int budget) { return budget; }
 static void mutex_lock(int *lock) { (void)lock; }
 static void mutex_unlock(int *lock) { (void)lock; }
 static int copy_from_user(char *dst, const char *src, size_t n)
@@ -147,12 +146,19 @@ static unsigned int qman_fq_fqid(struct qman_fq *fq) { return fq->fqid; }
 static void netif_napi_add(int dev, struct napi_struct *napi,
 			   int (*poll)(struct napi_struct *, int)) {}
 static void napi_enable(struct napi_struct *napi) { napi_enabled++; }
-/* dpaa_wgfp.c wgfp_napi_add(): add, pin the thread (none here), enable */
-static void wgfp_napi_add(struct napi_struct *napi, int (*poll)(struct napi_struct *, int), int cpu)
+/* dpaa_wgfp.c wgfp_cpu_napi_ensure_locked(): one NAPI per affine CPU (4 here),
+ * created once, before the first queue is scheduled */
+static void wgfp_cpu_napi_ensure_locked(void)
 {
-	(void)cpu;
-	netif_napi_add(wgfp_ndev, napi, poll);
-	napi_enable(napi);
+	static struct napi_struct napis[4];
+
+	if (wgfp_cpu_napi_ready)
+		return;
+	for (int c = 0; c < 4; c++) {
+		netif_napi_add(wgfp_ndev, &napis[c], NULL);
+		napi_enable(&napis[c]);
+	}
+	wgfp_cpu_napi_ready = true;
 }
 enum { NETDEV_NAPI_THREADED_DISABLED, NETDEV_NAPI_THREADED_ENABLED };
 static int dev_set_threaded(int dev, int threaded) { (void)dev; (void)threaded; return 0; }
@@ -182,6 +188,7 @@ static void reset(void)
 	wgfp_per_port = 0;
 	wgfp_pool_failed = false;
 	create_calls = init_calls = destroyed = napi_enabled = 0;
+	wgfp_cpu_napi_ready = false;
 	fail_create = fail_init = fail_taildrop = 0;
 	offline_cpu = -1;
 }
@@ -203,7 +210,7 @@ static void successful_pool_cannot_be_destroyed(void)
 	assert(wgfp_nglobal == 2 && create_calls == 2 && init_calls == 2);
 	assert(control("destroy") == -EOPNOTSUPP);
 	assert(wgfp_nglobal == 2 && wgfp_global[0].created && wgfp_global[1].created);
-	assert(destroyed == 0 && napi_enabled == 2);
+	assert(destroyed == 0 && napi_enabled == 4);	/* per CPU, once */
 	assert(wgfp_global_create(2) == -EBUSY);
 	/* NAPIs exist now: threaded mode can no longer be switched */
 	assert(control("threaded 1") == -EBUSY && !wgfp_threaded);
@@ -216,7 +223,7 @@ static void failed_init_quarantines_the_pool(void)
 	assert(wgfp_global_create(4) == -ETIMEDOUT);
 	assert(wgfp_pool_failed && wgfp_nglobal == 0);
 	assert(wgfp_global[0].created && wgfp_global[1].created);
-	assert(create_calls == 2 && init_calls == 2 && napi_enabled == 2);
+	assert(create_calls == 2 && init_calls == 2 && napi_enabled == 4);
 	assert(destroyed == 0);
 	assert(wgfp_global_create(4) == -EIO && create_calls == 2);
 	assert(control("destroy") == -EOPNOTSUPP && destroyed == 0);
@@ -228,7 +235,7 @@ static void failed_allocation_keeps_previously_created_sinks(void)
 	fail_create = 2;
 	assert(wgfp_global_create(4) == -ENOSPC);
 	assert(wgfp_pool_failed && wgfp_global[0].created && !wgfp_global[1].created);
-	assert(destroyed == 0 && napi_enabled == 1);
+	assert(destroyed == 0 && napi_enabled == 4);
 	assert(wgfp_global_create(1) == -EIO && create_calls == 2);
 }
 

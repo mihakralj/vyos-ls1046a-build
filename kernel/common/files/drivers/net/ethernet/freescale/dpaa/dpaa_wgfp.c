@@ -11,7 +11,8 @@
  * flow pinned to a queue is dequeued in order on a single portal.  The
  * consumer follows the dpaa_eth pattern exactly: the portal interrupt handler
  * calls the callback with sched_napi == true, the callback masks the DQRR
- * interrupt and schedules the sink's NAPI, and the NAPI poll runs
+ * interrupt and schedules this CPU's WGFP NAPI (one per CPU for all sinks:
+ * they all poll the same portal), and the NAPI poll runs
  * qman_p_poll_dqrr(), which calls the callback again with sched_napi == false
  * to process the frame.  Another driver's NAPI polling the same portal may
  * dequeue our frames too; that is why the callback never relies on being in
@@ -64,7 +65,7 @@
  * records left by a failed delete keep steering into a live sink, whose
  * no-consumer path releases every frame to BMan, so no FQRN/ORL/drain path
  * is needed.  Queues are released only by reboot.
- *   cat .../stats                  fqid, cpu, frames, bytes, errors, polls, FQ state
+ *   cat .../stats                  fqid, cpu, frames, bytes, errors, irqs, FQ state
  */
 
 #include <linux/debugfs.h>
@@ -130,8 +131,6 @@ struct wgfp_sink_pc {
 
 struct wgfp_sink {
 	struct qman_fq fq;
-	struct napi_struct napi;
-	struct qman_portal *portal;
 	struct wgfp_port *port;	/* NULL for the legacy global set */
 	int cpu;
 	bool created;
@@ -142,7 +141,6 @@ struct wgfp_sink {
 	u64 bytes;
 	u64 errs;
 	u64 sg;
-	u64 polls;
 	u64 irqs;
 	u64 sum;	/* defeats dead-code elimination of the touch loop */
 };
@@ -176,6 +174,10 @@ struct wgfp_port {
 /* QMan can leave every ring of a portal full for ~200 us; ASK waits up to 5 ms
  * for room before giving a sequence number up. */
 #define WGFP_ORP_WAIT_NS	(5 * NSEC_PER_MSEC)
+/* The plain (unordered) TX enqueue waits up to 100 us for ring space before
+ * dropping: 8 back-to-back tries lost 8-10k frames per 4-tunnel download run
+ * with threaded NAPI (.185, image 1622; the ORP path, which waits, lost 0). */
+#define WGFP_XMIT_WAIT_NS	(100 * NSEC_PER_USEC)
 
 /* The frame the running callback owes the ORP.  Per CPU: the callback runs in
  * softirq on the portal's own CPU and nothing interleaves with it. */
@@ -187,13 +189,17 @@ struct wgfp_orp_ctx {
 };
 static DEFINE_PER_CPU(struct wgfp_orp_ctx, wgfp_orp_ctx);
 
-/* Each CPU's own NAPI for the pool-channel queue: any portal may dequeue it. */
-struct wgfp_orp_napi {
+/* One WGFP NAPI per CPU.  Every sink on a CPU (worker, distributor, global)
+ * and the pool-channel ORP queue are dequeued by that CPU's portal, so one
+ * poller per portal serves them all: a NAPI per sink only had several
+ * pollers take turns on the same portal (3 threads per CPU in threaded
+ * mode, -6..-12% at 4 tunnels, .185 image 1622). */
+struct wgfp_cpu_napi {
 	struct napi_struct napi;
 	struct qman_portal *portal;
 };
-static DEFINE_PER_CPU(struct wgfp_orp_napi, wgfp_orp_napi);
-static bool wgfp_orp_napi_ready;
+static DEFINE_PER_CPU(struct wgfp_cpu_napi, wgfp_cpu_napi);
+static bool wgfp_cpu_napi_ready;
 /* threaded 1: WGFP's NAPIs run in kernel threads instead of softirq, so the
  * scheduler shares a saturated CPU with user space.  With every CPU in
  * softirq at 4 tunnels, SSH logins to the DUT failed (5 s timeout) for the
@@ -384,6 +390,19 @@ static unsigned int wgfp_fanout_pick(unsigned int b, unsigned int n,
 	return j < home ? j : j + 1;
 }
 
+/* Same hand-off as dpaa_eth_napi_schedule(), to this CPU's WGFP NAPI. */
+static enum qman_cb_dqrr_result wgfp_sched(struct qman_portal *portal,
+					   struct wgfp_sink *s)
+{
+	struct wgfp_cpu_napi *n = this_cpu_ptr(&wgfp_cpu_napi);
+
+	qman_p_irqsource_remove(portal, QM_PIRQ_DQRI);
+	n->portal = portal;
+	s->irqs++;
+	napi_schedule(&n->napi);
+	return qman_cb_dqrr_stop;
+}
+
 static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 					       struct qman_fq *fq,
 					       const struct qm_dqrr_entry *dq,
@@ -397,14 +416,8 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	u32 off, len;
 	u8 *p;
 
-	if (sched_napi) {
-		/* Same hand-off as dpaa_eth_napi_schedule(). */
-		qman_p_irqsource_remove(portal, QM_PIRQ_DQRI);
-		s->portal = portal;
-		s->irqs++;
-		napi_schedule(&s->napi);
-		return qman_cb_dqrr_stop;
-	}
+	if (sched_napi)
+		return wgfp_sched(portal, s);
 
 	if (unlikely(dpaa_wgfp_fd_has_error(fd))) {
 		s->errs++;
@@ -530,15 +543,8 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 	if (likely(!s->orp))
 		return wgfp_dqrr_frame(portal, fq, dq, sched_napi);
 
-	if (sched_napi) {
-		struct wgfp_orp_napi *n = this_cpu_ptr(&wgfp_orp_napi);
-
-		qman_p_irqsource_remove(portal, QM_PIRQ_DQRI);
-		n->portal = portal;
-		s->irqs++;
-		napi_schedule(&n->napi);
-		return qman_cb_dqrr_stop;
-	}
+	if (sched_napi)
+		return wgfp_sched(portal, s);
 	if (unlikely(!(dq->stat & QM_DQRR_STAT_FD_VALID)))
 		return qman_cb_dqrr_consume;
 
@@ -555,9 +561,9 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 	return r;
 }
 
-static int wgfp_orp_poll(struct napi_struct *napi, int budget)
+static int wgfp_cpu_poll(struct napi_struct *napi, int budget)
 {
-	struct wgfp_orp_napi *n = container_of(napi, struct wgfp_orp_napi, napi);
+	struct wgfp_cpu_napi *n = container_of(napi, struct wgfp_cpu_napi, napi);
 	int cleaned;
 
 	cleaned = qman_p_poll_dqrr(n->portal, budget);
@@ -568,18 +574,16 @@ static int wgfp_orp_poll(struct napi_struct *napi, int budget)
 	return cleaned;
 }
 
-static int wgfp_poll(struct napi_struct *napi, int budget)
+/* Create the per-CPU NAPIs once, before the first queue is scheduled. */
+static void wgfp_cpu_napi_ensure_locked(void)
 {
-	struct wgfp_sink *s = container_of(napi, struct wgfp_sink, napi);
-	int cleaned;
+	unsigned int cpu;
 
-	s->polls++;
-	cleaned = qman_p_poll_dqrr(s->portal, budget);
-	if (cleaned < budget) {
-		napi_complete_done(napi, cleaned);
-		qman_p_irqsource_add(s->portal, QM_PIRQ_DQRI);
-	}
-	return cleaned;
+	if (wgfp_cpu_napi_ready)
+		return;
+	for_each_cpu(cpu, qman_affine_cpus())
+		wgfp_napi_add(&per_cpu(wgfp_cpu_napi, cpu).napi, wgfp_cpu_poll, cpu);
+	wgfp_cpu_napi_ready = true;
 }
 
 static void wgfp_hole_ern_cb(struct qman_portal *portal, struct qman_fq *fq,
@@ -645,9 +649,7 @@ static int wgfp_orp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 
 static int wgfp_port_orp_locked(struct wgfp_port *p, struct net_device *in)
 {
-	const struct cpumask *affine = qman_affine_cpus();
 	struct dpaa_priv *priv = netdev_priv(in);
-	unsigned int cpu;
 	int err;
 
 	if (p->orp)
@@ -662,14 +664,7 @@ static int wgfp_port_orp_locked(struct wgfp_port *p, struct net_device *in)
 		}
 		WRITE_ONCE(wgfp_hole_ready, true);
 	}
-	if (!wgfp_orp_napi_ready) {
-		for_each_cpu(cpu, affine) {
-			struct wgfp_orp_napi *n = &per_cpu(wgfp_orp_napi, cpu);
-
-			wgfp_napi_add(&n->napi, wgfp_orp_poll, cpu);
-		}
-		wgfp_orp_napi_ready = true;
-	}
+	wgfp_cpu_napi_ensure_locked();
 	if (!p->orp_sink) {
 		p->orp_sink = kzalloc(sizeof(*p->orp_sink), GFP_KERNEL);
 		if (!p->orp_sink)
@@ -718,7 +713,7 @@ static int wgfp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 		return err;
 	s->created = true;
 
-	wgfp_napi_add(&s->napi, wgfp_poll, s->cpu);
+	wgfp_cpu_napi_ensure_locked();
 	err = qman_init_fq(&s->fq, QMAN_INITFQ_FLAG_SCHED, &opts);
 	if (err)
 		pr_err("dpaa_wgfp: qman_init_fq(%u) = %d\n",
@@ -900,7 +895,7 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 	} else if (sscanf(buf, "threaded %u", &n) == 1) {
 		if (n > 1)
 			err = -EINVAL;
-		else if (wgfp_nglobal || wgfp_nports || wgfp_orp_napi_ready)
+		else if (wgfp_nglobal || wgfp_nports || wgfp_cpu_napi_ready)
 			err = -EBUSY;	/* NAPIs exist: set it before the first bind */
 		else
 			err = dev_set_threaded(wgfp_ndev, n ?
@@ -936,7 +931,7 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			struct wgfp_sink *s = &wgfp_global[i];
 
 			s->frames = s->bytes = s->errs = s->sg = 0;
-			s->polls = s->irqs = s->sum = 0;
+			s->irqs = s->sum = 0;
 		}
 		for (i = 0; i < wgfp_nports; i++) {
 			struct wgfp_port *p = &wgfp_ports[i];
@@ -945,13 +940,13 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 				struct wgfp_sink *s = &p->sink[j];
 
 				s->frames = s->bytes = s->errs = s->sg = 0;
-				s->polls = s->irqs = s->sum = 0;
+				s->irqs = s->sum = 0;
 			}
 			if (p->dist) {
 				struct wgfp_sink *s = &p->dist_sink;
 
 				s->frames = s->bytes = s->errs = s->sg = 0;
-				s->polls = s->irqs = s->sum = 0;
+				s->irqs = s->sum = 0;
 			}
 		}
 		for (i = 0; i < wgfp_nports; i++) {
@@ -963,7 +958,7 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			for_each_possible_cpu(cpu)
 				*per_cpu_ptr(o->pc, cpu) = (struct wgfp_sink_pc){};
 			o->errs = o->sg = 0;
-			o->polls = o->irqs = 0;
+			o->irqs = 0;
 		}
 		for_each_possible_cpu(cpu)
 			atomic64_set(per_cpu_ptr(&wgfp_orp_frames, cpu), 0);
@@ -1004,9 +999,9 @@ static void wgfp_sink_show(struct seq_file *m, unsigned int idx,
 	memset(&np, 0, sizeof(np));
 	err = qman_query_fq_np(&s->fq, &np);
 	seq_printf(m,
-		   "sink%u port=%d kind=%s cpu=%d fqid=0x%x frames=%llu bytes=%llu errs=%llu sg=%llu irqs=%llu polls=%llu",
+		   "sink%u port=%d kind=%s cpu=%d fqid=0x%x frames=%llu bytes=%llu errs=%llu sg=%llu irqs=%llu",
 		   idx, ifindex, kind, s->cpu, qman_fq_fqid(&s->fq), frames,
-		   bytes, s->errs, s->sg, s->irqs, s->polls);
+		   bytes, s->errs, s->sg, s->irqs);
 	if (!err) {
 		/* The management response counters are big-endian (verified on
 		 * the DUT: byte_cnt / frm_cnt equals the fixed frame size only
@@ -1391,7 +1386,7 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 		    u32 new_len)
 {
 	struct qm_fd fd = *(const struct qm_fd *)f->fd;
-	int tries = 8;
+	ktime_t end;
 
 	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
 		atomic64_inc(&wgfp_xmit_fail);
@@ -1406,13 +1401,18 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 				   DMA_TO_DEVICE);
 	if (unlikely(wgfp_orp_xmit(f, egress, &fd)))
 		return;
-	while (tries--) {
+	if (likely(!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], &fd))) {
+		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
+		return;
+	}
+	end = ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS);
+	do {
+		cpu_relax();
 		if (!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], &fd)) {
 			dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
 			return;
 		}
-		cpu_relax();
-	}
+	} while (ktime_before(ktime_get(), end));
 	atomic64_inc(&wgfp_xmit_fail);
 	dpaa_wgfp_fd_release(f->fd);
 }
