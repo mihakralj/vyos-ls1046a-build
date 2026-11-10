@@ -53,8 +53,7 @@
  *                                  created (once per boot), so set them before
  *                                  the first spread record.
  *   echo "prefetch <0|1|2>" > ...  prefetch each dequeued frame: 1 for read,
- *                                  2 for store (default 2), 3 = 2 plus the next
- *                                  DQRR entry's frame; takes effect at once
+ *                                  2 for store (default 2); takes effect at once
  *   echo "prefetch_max <B>" > ...  prefetch at most B bytes per frame (0 = all)
  *   echo "reset"       > .../ctl   zero the counters
  *   echo "destroy"     > .../ctl   always refused: sinks are boot-lifetime
@@ -248,54 +247,22 @@ static unsigned int wgfp_prefetch = 2;
  * rest of the frame once the first lines are in flight. */
 static unsigned int wgfp_prefetch_max;
 
-static void wgfp_prefetch_lines(const u8 *p, u32 len, bool w)
+static void wgfp_prefetch_frame(const u8 *p, u32 len)
 {
+	unsigned int mode = READ_ONCE(wgfp_prefetch);
 	unsigned int max = READ_ONCE(wgfp_prefetch_max);
 	u32 o;
 
+	if (!mode)
+		return;
 	if (max && max < len)
 		len = max;
 	for (o = 0; o < len; o += L1_CACHE_BYTES) {
-		if (w)
+		if (mode == 2)
 			prefetchw(p + o);
 		else
 			prefetch(p + o);
 	}
-}
-
-static void wgfp_prefetch_frame(const u8 *p, u32 len)
-{
-	unsigned int mode = READ_ONCE(wgfp_prefetch);
-
-	if (mode)
-		wgfp_prefetch_lines(p, len, mode >= 2);
-}
-
-/* prefetch 3: also start the next DQRR entry's frame, so its misses overlap
- * this frame's AEAD instead of stalling the next dequeue.  The DQRR is 16
- * entries of 64 bytes, aligned so that stepping past the last entry carries
- * into the bit above the ring (mainline qman.c dqrr_carryclear()).  The
- * entry may not be valid yet (a previous lap or a write in progress); a
- * prefetch never faults, and the checks keep it to a contiguous frame in RAM. */
-#define WGFP_DQRR_CARRY	((uintptr_t)16 * sizeof(struct qm_dqrr_entry))
-
-static void wgfp_prefetch_next(const struct qm_dqrr_entry *dq)
-{
-	const struct qm_dqrr_entry *nx;
-	const struct qm_fd *fd;
-	dma_addr_t a;
-	u32 len;
-
-	BUILD_BUG_ON(sizeof(struct qm_dqrr_entry) != 64);
-	nx = (const void *)((uintptr_t)(dq + 1) & ~WGFP_DQRR_CARRY);
-	fd = &nx->fd;
-	a = qm_fd_addr(fd);
-	len = qm_fd_get_length(fd);
-	if (qm_fd_get_format(fd) != qm_fd_contig || !a ||
-	    len > DPAA_WGFP_BUF_SIZE || !pfn_valid(PHYS_PFN(a)))
-		return;
-	wgfp_prefetch_lines((const u8 *)phys_to_virt(a) + qm_fd_get_offset(fd),
-			    len, true);
 }
 /* Hole commands carry an empty descriptor; their rejections must not be freed
  * as frames, so they get their own tag queue. */
@@ -477,8 +444,6 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	p = (u8 *)phys_to_virt(addr) + off;
 	dma_sync_single_for_cpu(dev, addr + off, len, DMA_FROM_DEVICE);
 	wgfp_prefetch_frame(p, len);
-	if (READ_ONCE(wgfp_prefetch) == 3)
-		wgfp_prefetch_next(dq);
 
 	rcu_read_lock();
 	ops = rcu_dereference(wgfp_ops);
@@ -918,7 +883,7 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 		else
 			WRITE_ONCE(wgfp_prefetch_max, n);
 	} else if (sscanf(buf, "prefetch %u", &n) == 1) {
-		if (n > 3)
+		if (n > 2)
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_prefetch, n);
