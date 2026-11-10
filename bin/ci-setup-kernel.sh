@@ -126,6 +126,16 @@ if [ -f "$WG_FRAG" ]; then
     sed -i 's/^CONFIG_WIREGUARD=m$/CONFIG_WIREGUARD=y/' "$WG_FRAG"
     grep -qx 'CONFIG_WIREGUARD=y' "$WG_FRAG" || { echo "::error::CONFIG_WIREGUARD=y missing from $WG_FRAG"; exit 1; }
 fi
+# ... and conntrack with it: built-in code cannot reach a module, so fastpath.c's
+# conntrack admission (IS_REACHABLE(CONFIG_NF_CONNTRACK)) compiled to a stub that
+# refused every flow and the fast path never engaged (image 2026.11.10-2247).
+# fastpath.c now #errors on that combination. VyOS loads conntrack every boot.
+NF_FRAG=vyos-build/scripts/package-build/linux-kernel/config/20-netfilter.config
+if [ -f "$NF_FRAG" ]; then
+    echo "### Building conntrack in: CONFIG_NF_CONNTRACK=y in $NF_FRAG"
+    sed -i 's/^CONFIG_NF_CONNTRACK=m$/CONFIG_NF_CONNTRACK=y/' "$NF_FRAG"
+    grep -qx 'CONFIG_NF_CONNTRACK=y' "$NF_FRAG" || { echo "::error::CONFIG_NF_CONNTRACK=y missing from $NF_FRAG"; exit 1; }
+fi
 
 ### Kernel patches (INA234 hwmon, SFP rollball PHY)
 KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel

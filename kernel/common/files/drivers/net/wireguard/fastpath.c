@@ -57,6 +57,11 @@
 #include <net/neighbour.h>
 #include <net/route.h>
 #include <net/tcp.h>
+/* Built-in WireGuard cannot reach a conntrack module: the admission below
+ * would compile to "refuse everything" and the fast path would never engage. */
+#if IS_BUILTIN(CONFIG_WIREGUARD) && IS_MODULE(CONFIG_NF_CONNTRACK)
+#error "WGFP: built-in WireGuard needs CONFIG_NF_CONNTRACK=y"
+#endif
 #if IS_REACHABLE(CONFIG_NF_CONNTRACK)
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_core.h>
