@@ -147,7 +147,11 @@ struct wgfp_port {
 	atomic_t rr;		/* round-robin distributor cursor */
 	struct wgfp_sink dist_sink;
 	bool orp;
-	struct wgfp_sink orp_sink;
+	/* kzalloc'd, not in this static array: with orp_stash QMan DMA-maps
+	 * the qman_fq for context stashing, and the kernel image's .bss is
+	 * not DMA-mappable on arm64 ("rejecting DMA map of vmalloc memory",
+	 * .185 image 2345).  Boot lifetime, like every sink. */
+	struct wgfp_sink *orp_sink;
 	struct wgfp_sink sink[WGFP_MAX_SINKS];
 };
 
@@ -620,7 +624,12 @@ static int wgfp_port_orp_locked(struct wgfp_port *p, struct net_device *in)
 		}
 		wgfp_orp_napi_ready = true;
 	}
-	err = wgfp_orp_sink_create(&p->orp_sink, p, priv->channel);
+	if (!p->orp_sink) {
+		p->orp_sink = kzalloc(sizeof(*p->orp_sink), GFP_KERNEL);
+		if (!p->orp_sink)
+			return -ENOMEM;
+	}
+	err = wgfp_orp_sink_create(p->orp_sink, p, priv->channel);
 	if (err) {
 		WRITE_ONCE(wgfp_pool_failed, true);
 		pr_err("dpaa_wgfp: ORP queue setup failed; retaining allocated queues until reboot\n");
@@ -628,7 +637,7 @@ static int wgfp_port_orp_locked(struct wgfp_port *p, struct net_device *in)
 	}
 	p->orp = true;
 	pr_info("dpaa_wgfp: port ifindex %d ORP queue fqid=0x%x channel 0x%x\n",
-		p->ifindex, qman_fq_fqid(&p->orp_sink.fq), priv->channel);
+		p->ifindex, qman_fq_fqid(&p->orp_sink->fq), priv->channel);
 	return 0;
 }
 
@@ -886,14 +895,14 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 		}
 		for (i = 0; i < wgfp_nports; i++) {
 			struct wgfp_port *p = &wgfp_ports[i];
+			struct wgfp_sink *o = p->orp_sink;
 
-			if (!p->orp_sink.pc)
+			if (!o || !o->pc)
 				continue;
 			for_each_possible_cpu(cpu)
-				*per_cpu_ptr(p->orp_sink.pc, cpu) =
-					(struct wgfp_sink_pc){};
-			p->orp_sink.errs = p->orp_sink.sg = 0;
-			p->orp_sink.polls = p->orp_sink.irqs = 0;
+				*per_cpu_ptr(o->pc, cpu) = (struct wgfp_sink_pc){};
+			o->errs = o->sg = 0;
+			o->polls = o->irqs = 0;
 		}
 		for_each_possible_cpu(cpu)
 			atomic64_set(per_cpu_ptr(&wgfp_orp_frames, cpu), 0);
@@ -992,7 +1001,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 			wgfp_sink_show(m, idx++, &p->dist_sink, "dist",
 				       p->ifindex);
 		if (p->orp)
-			wgfp_sink_show(m, idx++, &p->orp_sink, "orp",
+			wgfp_sink_show(m, idx++, p->orp_sink, "orp",
 				       p->ifindex);
 	}
 	mutex_unlock(&wgfp_lock);
@@ -1224,7 +1233,7 @@ int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,
 	/* One outer flow can be decrypted on several CPUs: point its RX record
 	 * at the port's distributor, which round-robins to these workers. */
 	if (rx && wgfp_spread && !wgfp_port_orp_locked(port, in))
-		sink = &port->orp_sink;
+		sink = port->orp_sink;
 	else if (rx && wgfp_fanout && !wgfp_port_dist_locked(port))
 		sink = &port->dist_sink;
 	else

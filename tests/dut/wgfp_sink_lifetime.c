@@ -82,7 +82,7 @@ struct wgfp_port {
 	bool orp;
 	int rr;
 	struct wgfp_sink dist_sink;
-	struct wgfp_sink orp_sink;
+	struct wgfp_sink *orp_sink;
 	struct wgfp_sink sink[WGFP_MAX_SINKS];
 };
 struct net_device {

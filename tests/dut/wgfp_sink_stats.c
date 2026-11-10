@@ -37,7 +37,7 @@ struct wgfp_port {
 	bool dist;
 	bool orp;
 	struct wgfp_sink dist_sink;
-	struct wgfp_sink orp_sink;
+	struct wgfp_sink *orp_sink;
 	struct wgfp_sink sink[4];
 };
 struct qm_mcr_queryfq_np {
@@ -115,11 +115,14 @@ int main(void)
 	wgfp_nports = 1;
 	wgfp_ports[0].ifindex = 6;
 	wgfp_ports[0].orp = true;
-	wgfp_ports[0].orp_sink.fq.fqid = 0x300;
-	wgfp_ports[0].orp_sink.cpu = -1;
-	wgfp_ports[0].orp_sink.frames = 1;	/* per-CPU counts add to it */
-	wgfp_ports[0].orp_sink.bytes = 100;
-	wgfp_ports[0].orp_sink.pc = &orp_pc;
+	static struct wgfp_sink orp_sink;
+
+	wgfp_ports[0].orp_sink = &orp_sink;
+	orp_sink.fq.fqid = 0x300;
+	orp_sink.cpu = -1;
+	orp_sink.frames = 1;	/* per-CPU counts add to it */
+	orp_sink.bytes = 100;
+	orp_sink.pc = &orp_pc;
 	wgfp_global[0].fq.fqid = 0x2be;
 	wgfp_global[1].fq.fqid = 0x2bf;
 	wgfp_global[1].cpu = 1;
