@@ -512,3 +512,11 @@ L2 refills stay at 26 per packet with prefetch; the misses overlap instead of se
 | 1T bidir, tunnel on eth4 / eth3 | 4.427 / 4.438 | 73k / 66k | |
 
 Throughput is unchanged within noise; the gain is loss, and the 4T cells are now essentially lossless at CPU saturation. The orientation with the tunnel on eth3 behaves the same as with the tunnel on eth4.
+
+**Second pass, 2026-11-10 (`.106` and `.185`).**
+
+- **`prefetch_max` (`0a7a3bec`):** capping the per-frame prefetch below the whole frame never helped; prefetching the whole frame is best, so the cap defaults to 0 (no cap).
+- **`prefetch 3` (`66e6b64e`, reverted in `a6f1daad`):** also prefetching the next DQRR entry's frame lost 4–6% in every cell tried. Mode 2 stays the default.
+- **Stitched AEAD (§9), negative on this CPU:** OpenSSL on the A72 measures ChaCha20 at 5.09 cycles/byte and ChaCha20-Poly1305 at 6.36 cycles/byte. A C prototype interleaving the ChaCha20 and Poly1305 passes was 3.6% slower on the A72 (and 12.5% faster on the Neoverse build host), so the A72 has no spare issue width to stitch into. BoringSSL's stitched code is Apache-2.0 and cannot be imported anyway. Not pursued for this board.
+- **FMan-global wedge (open, default-on blocker):** across two soaks (30 + 40 runs of saturated spread + P6 cells) one run wedged FMan: INV0 stuck at `fmfp_extc=0x80000000` with `ehash_sync_wedged`, all ports dead, recoverable only by a cold power-cycle. About 1 in 57 runs. Evidence in `/mnt/builds/wgfp/plan/wedge-106/`. Separately, about 1 run in 56 had a black-holed stream (the 2T bidir symptom above).
+- **Management starvation:** with `threaded 0`, SSH to the DUT fails about 5 times per saturated 4T run. `threaded 1` (`51f77866`, pinned NAPI threads) brought SSH failures to 0 (worst login 2.6 s) but cost 12% down (4.59/4.54 → 4.05/3.99 Gbit/s) and 6% up (4.59/4.45 → 4.23/4.22), with about 10k plain-path `xmit_fail` per run. Cause: every sink had its own NAPI, so threaded mode ran 12 threads (3 per CPU) sharing four portals. `34467019` moves all sinks onto one NAPI per CPU and gives the plain TX enqueue a 100 µs bounded wait; the A/B is being re-measured. A control-plane policer (CoPP) would not fix this, because it protects packet delivery to the CPU, not CPU time for the SSH process.
