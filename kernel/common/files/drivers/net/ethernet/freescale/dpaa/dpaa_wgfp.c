@@ -51,6 +51,7 @@
  *                                  default 6 MiB)
  *   echo "orp_stash <0|1>" > ...   QMan stashing on the ORP queue (default 0)
  *   echo "sink_stash <0|1>" > ...  QMan stashing on worker/global sinks created after (default 0)
+ *   echo "tx_batch <0..64>" > ...  hold this CPU's sealed frames and enqueue them as one burst (0 = off)
  *                                  Both apply when a port's ORP queue is
  *                                  created (once per boot), so set them before
  *                                  the first spread record.
@@ -581,12 +582,70 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 	return r;
 }
 
+/* Seal TX batching ("tx_batch <n>", 0 = off).  At one tunnel the four CPUs
+ * each seal one inner flow and enqueued every frame at once, so the flows
+ * left the port strictly alternating (mean run 1.05 packets at the peer).
+ * That defeats the peer's GRO: it sent 0.35 TCP ACKs per data packet against
+ * 0.11 when a Linux peer sealed, and every ACK is a frame this path then
+ * opens and forwards.  Inside wgfp_cpu_poll() this CPU's plain-path frames
+ * are held and enqueued as one burst, at n frames or at the end of the poll.
+ * A frame sent from any other context (another NAPI sharing the portal) is
+ * enqueued at once, so none can be stranded; ORP frames are never held. */
+#define WGFP_TXB_MAX	64
+static unsigned int wgfp_tx_batch;
+struct wgfp_txb {
+	bool active;
+	unsigned int n, lim;
+	u8 eg[WGFP_TXB_MAX];
+	struct qm_fd fd[WGFP_TXB_MAX];
+};
+static DEFINE_PER_CPU(struct wgfp_txb, wgfp_txb);
+
+/* One plain-path enqueue, waiting up to WGFP_XMIT_WAIT_NS for ring space;
+ * the buffer is released when the frame cannot be sent. */
+static void wgfp_tx_enqueue(int egress, const struct qm_fd *fd)
+{
+	ktime_t end;
+
+	if (likely(!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], fd))) {
+		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
+		return;
+	}
+	end = ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS);
+	do {
+		cpu_relax();
+		if (!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], fd)) {
+			dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
+			return;
+		}
+	} while (ktime_before(ktime_get(), end));
+	atomic64_inc(&wgfp_xmit_fail);
+	dpaa_wgfp_fd_release(fd);
+}
+
+static void wgfp_txb_flush(struct wgfp_txb *b)
+{
+	unsigned int i;
+
+	for (i = 0; i < b->n; i++)
+		wgfp_tx_enqueue(b->eg[i], &b->fd[i]);
+	b->n = 0;
+}
+
 static int wgfp_cpu_poll(struct napi_struct *napi, int budget)
 {
 	struct wgfp_cpu_napi *n = container_of(napi, struct wgfp_cpu_napi, napi);
+	struct wgfp_txb *b = this_cpu_ptr(&wgfp_txb);
+	unsigned int lim = min_t(unsigned int, READ_ONCE(wgfp_tx_batch), WGFP_TXB_MAX);
 	int cleaned;
 
+	b->lim = lim;
+	b->active = lim > 1;
 	cleaned = qman_p_poll_dqrr(n->portal, budget);
+	if (b->active) {
+		b->active = false;
+		wgfp_txb_flush(b);
+	}
 	if (cleaned < budget) {
 		napi_complete_done(napi, cleaned);
 		qman_p_irqsource_add(n->portal, QM_PIRQ_DQRI);
@@ -933,6 +992,11 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_orp_stash, n);
+	} else if (sscanf(buf, "tx_batch %u", &n) == 1) {
+		if (n > WGFP_TXB_MAX)
+			err = -EINVAL;
+		else
+			WRITE_ONCE(wgfp_tx_batch, n);
 	} else if (sscanf(buf, "sink_stash %u", &n) == 1) {
 		if (n > 1)
 			err = -EINVAL;
@@ -1048,7 +1112,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d sink_stash=%d prefetch=%u prefetch_max=%u threaded=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d sink_stash=%d prefetch=%u prefetch_max=%u threaded=%d tx_batch=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -1063,6 +1127,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   READ_ONCE(wgfp_orp_stash), READ_ONCE(wgfp_sink_stash),
 		   READ_ONCE(wgfp_prefetch),
 		   READ_ONCE(wgfp_prefetch_max), READ_ONCE(wgfp_threaded),
+		   READ_ONCE(wgfp_tx_batch),
 		   dpaa_wgfp_stat_sum(&wgfp_orp_frames),
 		   (u64)atomic64_read(&wgfp_orp_holes),
 		   (u64)atomic64_read(&wgfp_orp_wait_fail),
@@ -1407,7 +1472,7 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 		    u32 new_len)
 {
 	struct qm_fd fd = *(const struct qm_fd *)f->fd;
-	ktime_t end;
+	struct wgfp_txb *b;
 
 	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
 		atomic64_inc(&wgfp_xmit_fail);
@@ -1422,20 +1487,15 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 				   DMA_TO_DEVICE);
 	if (unlikely(wgfp_orp_xmit(f, egress, &fd)))
 		return;
-	if (likely(!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], &fd))) {
-		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
+	b = this_cpu_ptr(&wgfp_txb);
+	if (b->active) {
+		b->eg[b->n] = egress;
+		b->fd[b->n] = fd;
+		if (++b->n >= b->lim)
+			wgfp_txb_flush(b);
 		return;
 	}
-	end = ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS);
-	do {
-		cpu_relax();
-		if (!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], &fd)) {
-			dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
-			return;
-		}
-	} while (ktime_before(ktime_get(), end));
-	atomic64_inc(&wgfp_xmit_fail);
-	dpaa_wgfp_fd_release(f->fd);
+	wgfp_tx_enqueue(egress, &fd);
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_xmit);
 

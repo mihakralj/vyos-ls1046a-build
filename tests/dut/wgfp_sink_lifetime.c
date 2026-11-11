@@ -44,6 +44,8 @@ static bool wgfp_cpu_napi_ready;
 static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
 static bool wgfp_orp_stash;
 static bool wgfp_sink_stash;
+static unsigned int wgfp_tx_batch;
+#define WGFP_TXB_MAX 64
 static unsigned int wgfp_prefetch;
 static unsigned int wgfp_prefetch_max;
 static bool wgfp_threaded;

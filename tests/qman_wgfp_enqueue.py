@@ -50,6 +50,7 @@ def test_enqueue_backpressure_and_ern_ownership(tmp_path):
             "\nEXPORT_SYMBOL_GPL(qman_enqueue_fqid)",
         ),
         extract(wgfp, "static void wgfp_egress_ern(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_egress)"),
+        extract(wgfp, "#define WGFP_TXB_MAX", "\nstatic int wgfp_cpu_poll("),
         extract(wgfp, "void dpaa_wgfp_xmit(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)"),
     ]
     (tmp_path / "qman_wgfp_body.h").write_text("\n\n".join(bodies) + "\n")
@@ -57,7 +58,7 @@ def test_enqueue_backpressure_and_ern_ownership(tmp_path):
     subprocess.run(
         [
             "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-            "-Wno-unused-parameter", "-Wno-unused-function", "-I", str(tmp_path),
+            "-Wno-unused-parameter", "-Wno-unused-function", "-Wno-unused-variable", "-I", str(tmp_path),
             str(HARNESS), "-o", str(binary),
         ],
         check=True,
