@@ -352,6 +352,10 @@ static int ask_flow_offload_register(void)
 	return fail_init == REGISTER ? -EIO : 0;
 }
 static void ask_hw_set_ready(bool ready) { hw_ready = ready; }
+/* adaptive RX alignment (4d4db7a1): started last in ask_init(), stopped first in ask_exit() */
+static bool align_running;
+static void ask_align_start(void) { assert(!align_running); align_running = true; }
+static void ask_align_stop(void) { align_running = false; }
 #include "ask_main_body.h"
 
 int main(int argc, char **argv)
@@ -452,7 +456,7 @@ int main(int argc, char **argv)
 			memset(init_calls, 0, sizeof(init_calls));
 			memset(exit_calls, 0, sizeof(exit_calls));
 			fail_init = failure;
-			assert(ask_init() == -EIO && !hw_ready);
+			assert(ask_init() == -EIO && !hw_ready && !align_running);
 			/* No callback registration before all fallible setup passes. */
 			assert(init_calls[REGISTER] == (failure == REGISTER));
 			for (int i = 0; i < failure; i++)
@@ -460,9 +464,9 @@ int main(int argc, char **argv)
 			assert(!exit_calls[failure]);
 		}
 		fail_init = -1;
-		assert(!ask_init() && hw_ready);
+		assert(!ask_init() && hw_ready && align_running);
 		ask_exit();
-		assert(!hw_ready);
+		assert(!hw_ready && !align_running);
 	} else {
 		abort();
 	}

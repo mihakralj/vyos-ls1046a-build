@@ -117,6 +117,14 @@ static int ask_bridge_flush_all(void)
 	return bridge_all_result;
 }
 
+/* WGFP per-port family policy (97d5388f): ask_hw_set_ready() installs it once ready and clears
+ * it before the ready flag drops. */
+struct net_device;
+typedef u8 (*dpaa_wgfp_family_fn)(struct net_device *dev);
+static u8 ask_hw_wgfp_family(struct net_device *dev) { (void)dev; return 0; }
+static dpaa_wgfp_family_fn family_policy;
+static void dpaa_wgfp_set_family_policy(dpaa_wgfp_family_fn fn) { family_policy = fn; }
+
 #include "vlan_switch_body.h"
 
 static void *disable_before_ready(void *arg)
@@ -136,6 +144,7 @@ static void *publish_ready(void *arg)
 	pthread_cond_broadcast(&test_cond);
 	assert(!pthread_mutex_unlock(&test_lock));
 	ask_hw_set_ready(true);
+	assert(family_policy == ask_hw_wgfp_family);
 	assert(!pthread_mutex_lock(&test_lock));
 	ready_done = true;
 	pthread_cond_broadcast(&test_cond);
