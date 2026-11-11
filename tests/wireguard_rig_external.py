@@ -1314,21 +1314,24 @@ if os.environ.get("FAKE_MATRIX_FAIL") == "chain" and "nft 'add chain" in command
 """
 
 MATRIX_FAKE_RIG = r"""#!/usr/bin/env bash
-echo "$(basename "$0") $DUT $DUT_KIND" >> "$FAKE_RIG_LOG"
+echo "$(basename "$0") $DUT $DUT_KIND outer=${OUTER:-4}" >> "$FAKE_RIG_LOG"
 if [ "${FAKE_MATRIX_FAIL:-}" = single ] && [[ $0 = *testrig-wireguard.sh ]]; then
     echo "single failed" >&2
     exit 1
 fi
 cell=${TUNNELS:-wg-v4}
 peers=${TUNNELS:-1}
+# as the real multi runner: INNER=6 labels counters <N>v6 and writes wgm6- JSON
+ccell=$cell; jpre=wgm
+if [ "${INNER:-4}" = 6 ]; then ccell=${cell}v6; jpre=wgm6; fi
 printf 'dir,rep,gbps\n' > "$OUT"
 for dir in up down bidir; do
     printf '%s,1,1.5\n' "$dir" >> "$OUT"
-    python3 - "$J" "$cell" "$dir" "$DUR" "${FAKE_MATRIX_FAIL:-}" <<'PY'
+    python3 - "$J" "$cell" "$dir" "$DUR" "${FAKE_MATRIX_FAIL:-}" "$jpre" <<'PY'
 import json, sys
 from pathlib import Path
 
-directory, cell, direction, duration, failure = sys.argv[1:]
+directory, cell, direction, duration, failure, jpre = sys.argv[1:]
 duration = int(duration)
 tunnels = int(cell) if cell.isdigit() else 1
 rate = (1.8e9 if failure == "mismatch" else 1.5e9) / tunnels
@@ -1347,12 +1350,12 @@ for peer in range(tunnels):
     if direction == "bidir":
         end.update(sum_sent_bidir_reverse=stats, sum_received_bidir_reverse=stats)
     name = (f"wg-v4-{direction}-r1.json" if tunnels == 1 else
-            f"wgm-{direction}-n{tunnels}-k{peer}-r1.json")
+            f"{jpre}-{direction}-n{tunnels}-k{peer}-r1.json")
     (Path(directory) / name).write_text(json.dumps({"intervals": intervals, "end": end}))
 PY
     if [ "${WGFP:-0}" = 1 ]; then
         printf '%s\t%s\t1\tbefore\t1\ton sealed=0 rx=0 peers=%s install_fail=0\t%s\t%s\n' \
-            "$cell" "$dir" "$peers" "sinks=1 xmit_ok=0 xmit_fail=0 xmit_ern=0" \
+            "$ccell" "$dir" "$peers" "sinks=1 xmit_ok=0 xmit_fail=0 xmit_ern=0" \
             "sink0 fqid=0x2be frames=10 errs=0 sg=0" >> "$WGFP_COUNTER_LOG"
         rx=0; [ "${FAKE_MATRIX_FAIL:-}" != rx_moved ] || rx=10
         qman="sinks=1 xmit_ok=10 xmit_fail=0 xmit_ern=0"
@@ -1369,11 +1372,15 @@ PY
             sink_identity) sink="sink0 fqid=0x2bf frames=20 errs=0 sg=0" ;;
         esac
         printf '%s\t%s\t1\tafter\t1\ton sealed=10 rx=%s peers=%s install_fail=0\t%s\t%s\n' \
-            "$cell" "$dir" "$rx" "$peers" "$qman" "$sink" >> "$WGFP_COUNTER_LOG"
+            "$ccell" "$dir" "$rx" "$peers" "$qman" "$sink" >> "$WGFP_COUNTER_LOG"
     fi
 done
 echo "measurement complete"
 """
+
+
+# runner calls of one ASK2 matrix: 1T, 2T, 4T and the IPv6-inner 2T/4T rows (WG_INNER6 defaults on)
+ASK2_MATRIX_RUNS = 5
 
 
 def run_matrix(tmp_path, target, extra=None):
@@ -1443,7 +1450,8 @@ def test_matrix_uses_owned_scoped_nft_table_without_changing_vyos_config(tmp_pat
     assert any(f"nft -a list table inet {table}" in command for command in commands)
     assert sum("nft delete table inet handle 42" in command for command in commands) == 1
     assert not any("conntrack ignore" in command or "sysctl" in command for command in commands)
-    assert len(rigs) == 3 and all("vyos@192.168.1.185 ask2" in rig for rig in rigs)
+    assert len(rigs) == ASK2_MATRIX_RUNS and all("vyos@192.168.1.185 ask2" in rig for rig in rigs)
+    assert "ip6 saddr fd99:2::113 ip6 daddr fd99:2::185 udp sport 51820-51833 udp dport 51820-51833 notrack" in setup
     assert not list((tmp_path / "out").glob("*/nft-pending"))
 
 
@@ -1498,7 +1506,7 @@ def test_matrix_rejects_p3_receive_activity_and_removes_its_table(tmp_path):
     )
     assert result.returncode != 0
     assert "P3 receive counter advanced" in result.stderr
-    assert len(rigs) == 3
+    assert len(rigs) == ASK2_MATRIX_RUNS
     assert any("nft delete table" in command for command in commands)
 
 
@@ -1522,7 +1530,7 @@ def test_matrix_rejects_invalid_qman_transmit_counters(tmp_path, failure, messag
     )
     assert result.returncode != 0
     assert message in result.stderr
-    assert len(rigs) == 3
+    assert len(rigs) == ASK2_MATRIX_RUNS
     assert any("nft delete table" in command for command in commands)
 
 
@@ -1530,7 +1538,7 @@ def test_matrix_rejects_incomplete_iperf_intervals(tmp_path):
     result, commands, rigs = run_matrix(tmp_path, "185", {"FAKE_MATRIX_FAIL": "short"})
     assert result.returncode != 0
     assert "incomplete steady window" in result.stderr
-    assert len(rigs) == 3
+    assert len(rigs) == ASK2_MATRIX_RUNS
     assert any("nft delete table" in command for command in commands)
 
 
@@ -1538,7 +1546,7 @@ def test_matrix_rejects_csv_that_disagrees_with_iperf(tmp_path):
     result, commands, rigs = run_matrix(tmp_path, "185", {"FAKE_MATRIX_FAIL": "mismatch"})
     assert result.returncode != 0
     assert "differs from its iperf JSON" in result.stderr
-    assert len(rigs) == 3
+    assert len(rigs) == ASK2_MATRIX_RUNS
     assert any("nft delete table" in command for command in commands)
 
 
@@ -1651,3 +1659,15 @@ def test_matrix_preflight_ignores_legacy_key_files(tmp_path, which):
 def test_matrix_preflights_accept_empty_resources(tmp_path, which):
     result = run_preflight(tmp_path, which)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_matrix_runs_every_tunnel_over_ipv6_outer(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"OUTER": "6"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(rigs) == ASK2_MATRIX_RUNS and all(rig.endswith("outer=6") for rig in rigs)
+
+
+def test_matrix_rejects_unknown_outer_family(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"OUTER": "5"})
+    assert result.returncode == 2 and "OUTER must be 4 or 6" in result.stderr
+    assert rigs == []

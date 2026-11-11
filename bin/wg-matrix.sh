@@ -3,6 +3,7 @@
 #   1 tunnel : bin/testrig-wireguard.sh        (4 TCP streams, a NEW tunnel every rep so serial-worker placement is sampled)
 #   2, 4 tunnels : bin/testrig-wireguard-multi.sh (2 TCP streams per tunnel, one tunnel set per row)
 #   each x up / down / bidir, IPv4 inner, MTU 1420, 30 s runs (first 10 s discarded)
+#   OUTER=6 supported: every tunnel runs over IPv6 between the DUT and dell2 (use a separate TAG).
 # Usage: bin/wg-matrix.sh 70|106|185   Env: REPS1=5 REPSN=3 DUR=30 STEADY_FROM=10 OUTDIR=/mnt/builds/ask2-review/oracle
 # The rig creates tunnels outside VyOS config. On .185, a temporary nft table
 # untracks only this rig's outer UDP traffic; existing VyOS configuration is untouched.
@@ -37,9 +38,10 @@ if [ "$DUT_KIND" = vendor ]; then export RIG_NS=${RIG_NS:-$VENDOR_NS}; else expo
 if [ -n "$RIG_NS" ] && ! [[ $RIG_NS =~ ^[a-zA-Z0-9_.-]+$ ]]; then
   echo "Invalid RIG_NS" >&2; exit 2
 fi
-if [ "${WG_PORT:-eth4}" != eth4 ] || [ "${OUTER:-4}" != 4 ]; then
-  echo "The matrix requires WG_PORT=eth4 and OUTER=4 for both runners" >&2; exit 2
+if [ "${WG_PORT:-eth4}" != eth4 ]; then
+  echo "The matrix requires WG_PORT=eth4 for both runners" >&2; exit 2
 fi
+case ${OUTER:-4} in 4|6) export OUTER=${OUTER:-4} ;; *) echo "OUTER must be 4 or 6" >&2; exit 2 ;; esac
 if [ "$DUT_KIND" = vendor ] && [ "${WGFP:-0}" = 1 ]; then
   echo "WGFP is available only on the ASK2 DUT" >&2; exit 2
 fi
@@ -216,7 +218,9 @@ if [ "$DUT_KIND" = ask2 ]; then
   "${SSH[@]}" -n "$DUT" "sudo -n nft 'add chain inet $TABLE pre { type filter hook prerouting priority -300 ; }' && \
     sudo -n nft 'add chain inet $TABLE out { type filter hook output priority -300 ; }' && \
     sudo -n nft add rule inet $TABLE pre ip saddr 10.99.2.113 ip daddr 10.99.2.185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
-    sudo -n nft add rule inet $TABLE out ip saddr 10.99.2.185 ip daddr 10.99.2.113 udp sport 51820-51833 udp dport 51820-51833 notrack"
+    sudo -n nft add rule inet $TABLE out ip saddr 10.99.2.185 ip daddr 10.99.2.113 udp sport 51820-51833 udp dport 51820-51833 notrack && \
+    sudo -n nft add rule inet $TABLE pre ip6 saddr fd99:2::113 ip6 daddr fd99:2::185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
+    sudo -n nft add rule inet $TABLE out ip6 saddr fd99:2::185 ip6 daddr fd99:2::113 udp sport 51820-51833 udp dport 51820-51833 notrack"
 fi
 if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then
   RX_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $RXP") || exit 1
