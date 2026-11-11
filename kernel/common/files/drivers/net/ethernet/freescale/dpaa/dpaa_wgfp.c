@@ -50,6 +50,7 @@
  *   echo "orp_td <B>"  > .../ctl   ORP queue tail drop in bytes (64 KiB..16 MiB,
  *                                  default 6 MiB)
  *   echo "orp_stash <0|1>" > ...   QMan stashing on the ORP queue (default 0)
+ *   echo "sink_stash <0|1>" > ...  QMan stashing on worker/global sinks created after (default 0)
  *                                  Both apply when a port's ORP queue is
  *                                  created (once per boot), so set them before
  *                                  the first spread record.
@@ -156,10 +157,10 @@ struct wgfp_port {
 	atomic_t rr;		/* round-robin distributor cursor */
 	struct wgfp_sink dist_sink;
 	bool orp;
-	/* kzalloc'd, not in this static array: with orp_stash QMan DMA-maps
-	 * the qman_fq for context stashing, and the kernel image's .bss is
-	 * not DMA-mappable on arm64 ("rejecting DMA map of vmalloc memory",
-	 * .185 image 2345).  Boot lifetime, like every sink. */
+	/* kzalloc'd: with orp_stash QMan DMA-maps the qman_fq for context
+	 * stashing, and the kernel image's .bss is not DMA-mappable on arm64
+	 * ("rejecting DMA map of vmalloc memory", .185 image 2345); the port
+	 * array was static then.  Boot lifetime, like every sink. */
 	struct wgfp_sink *orp_sink;
 	struct wgfp_sink sink[WGFP_MAX_SINKS];
 };
@@ -211,9 +212,12 @@ static bool wgfp_cpu_napi_ready;
 static bool wgfp_threaded;
 
 
-static struct wgfp_sink wgfp_global[WGFP_MAX_SINKS];
+/* Allocated at init, not static: sink_stash makes QMan DMA-map each sink's
+ * qman_fq, and the kernel image's .bss is not DMA-mappable (as the ORP sink,
+ * see struct wgfp_port).  Boot lifetime, never freed. */
+static struct wgfp_sink *wgfp_global;		/* [WGFP_MAX_SINKS] */
 static unsigned int wgfp_nglobal;
-static struct wgfp_port wgfp_ports[WGFP_MAX_PORTS];
+static struct wgfp_port *wgfp_ports;		/* [WGFP_MAX_PORTS] */
 static unsigned int wgfp_nports;
 static struct net_device *wgfp_ndev;
 
@@ -259,6 +263,22 @@ static bool wgfp_spread;
 #define WGFP_ORP_TD_MAX		(16 * 1024 * 1024)
 static u32 wgfp_orp_td = WGFP_ORP_TD_DEF;
 static bool wgfp_orp_stash;
+/* Same stashing on the worker and global sinks (the queues P2b seals from and
+ * P3/P6 open from when not spread), as mainline dpaa_eth's RX queues and the
+ * ASK vendor's seal and steer queues do; taken at sink creation. */
+static bool wgfp_sink_stash;
+
+/* Annotation, two data lines and the FQ context stashed on dequeue. */
+static void wgfp_fqd_stash(struct qm_mcc_initfq *opts)
+{
+	opts->we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);
+	opts->fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CTXASTASHING);
+	opts->fqd.context_a.stashing.exclusive =
+		QM_STASHING_EXCL_DATA | QM_STASHING_EXCL_CTX |
+		QM_STASHING_EXCL_ANNOTATION;
+	qm_fqd_set_stashing(&opts->fqd, 1, 2,
+			    DIV_ROUND_UP(sizeof(struct qman_fq), 64));
+}
 /* Prefetch the whole frame when a sink dequeues it.  FMan DMAs it to DDR,
  * so the decrypt or seal otherwise takes its ~23 cache misses one at a time
  * (.185, image 2345, P6+spread 1T download: 26 L2 refills and ~18k cycles per
@@ -621,15 +641,8 @@ static int wgfp_orp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 				       QM_FQCTRL_ORP | QM_FQCTRL_AVOIDBLOCK);
 	opts.fqd.orpc = QM_FQD_ORPC(WGFP_ORP_RWS, WGFP_ORP_OA, WGFP_ORP_OLWS);
 	qm_fqd_set_destwq(&opts.fqd, channel, WGFP_WQ);
-	if (READ_ONCE(wgfp_orp_stash)) {
-		opts.we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);
-		opts.fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CTXASTASHING);
-		opts.fqd.context_a.stashing.exclusive =
-			QM_STASHING_EXCL_DATA | QM_STASHING_EXCL_CTX |
-			QM_STASHING_EXCL_ANNOTATION;
-		qm_fqd_set_stashing(&opts.fqd, 1, 2,
-				    DIV_ROUND_UP(sizeof(struct qman_fq), 64));
-	}
+	if (READ_ONCE(wgfp_orp_stash))
+		wgfp_fqd_stash(&opts);
 	err = qm_fqd_set_taildrop(&opts.fqd, READ_ONCE(wgfp_orp_td), 1);
 	if (err >= 0)
 		err = qman_create_fq(0, QMAN_FQ_FLAG_DYNAMIC_FQID |
@@ -701,6 +714,8 @@ static int wgfp_sink_create(struct wgfp_sink *s, struct wgfp_port *port,
 				   QM_INITFQ_WE_TDTHRESH);
 	opts.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_TDE);
 	qm_fqd_set_destwq(&opts.fqd, qman_affine_channel(cpu), WGFP_WQ);
+	if (READ_ONCE(wgfp_sink_stash))
+		wgfp_fqd_stash(&opts);
 	err = qm_fqd_set_taildrop(&opts.fqd, WGFP_SINK_TD, 1);
 	if (err < 0)
 		return err;
@@ -918,6 +933,11 @@ static ssize_t wgfp_ctl_write(struct file *file, const char __user *ubuf,
 			err = -EINVAL;
 		else
 			WRITE_ONCE(wgfp_orp_stash, n);
+	} else if (sscanf(buf, "sink_stash %u", &n) == 1) {
+		if (n > 1)
+			err = -EINVAL;
+		else
+			WRITE_ONCE(wgfp_sink_stash, n);
 	} else if (sscanf(buf, "touch %u", &n) == 1) {
 		if (n > 3)
 			err = -EINVAL;
@@ -1028,7 +1048,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d prefetch=%u prefetch_max=%u threaded=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d sink_stash=%d prefetch=%u prefetch_max=%u threaded=%d orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -1040,7 +1060,8 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   (u64)atomic64_read(&wgfp_rx_enq_fail),
 		   (u64)atomic64_read(&wgfp_rx_ern),
 		   READ_ONCE(wgfp_spread), READ_ONCE(wgfp_orp_td),
-		   READ_ONCE(wgfp_orp_stash), READ_ONCE(wgfp_prefetch),
+		   READ_ONCE(wgfp_orp_stash), READ_ONCE(wgfp_sink_stash),
+		   READ_ONCE(wgfp_prefetch),
 		   READ_ONCE(wgfp_prefetch_max), READ_ONCE(wgfp_threaded),
 		   dpaa_wgfp_stat_sum(&wgfp_orp_frames),
 		   (u64)atomic64_read(&wgfp_orp_holes),
@@ -1420,8 +1441,10 @@ EXPORT_SYMBOL_GPL(dpaa_wgfp_xmit);
 
 static int __init dpaa_wgfp_init(void)
 {
+	wgfp_global = kcalloc(WGFP_MAX_SINKS, sizeof(*wgfp_global), GFP_KERNEL);
+	wgfp_ports = kcalloc(WGFP_MAX_PORTS, sizeof(*wgfp_ports), GFP_KERNEL);
 	wgfp_ndev = alloc_netdev_dummy(0);
-	if (!wgfp_ndev)
+	if (!wgfp_global || !wgfp_ports || !wgfp_ndev)
 		return -ENOMEM;
 	wgfp_dir = debugfs_create_dir("dpaa_wgfp", NULL);
 	debugfs_create_file("ctl", 0200, wgfp_dir, NULL, &wgfp_ctl_fops);

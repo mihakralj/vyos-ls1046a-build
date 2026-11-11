@@ -43,6 +43,7 @@ static bool wgfp_cpu_napi_ready;
 #define WGFP_ORP_TD_MAX (16 * 1024 * 1024)
 static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
 static bool wgfp_orp_stash;
+static bool wgfp_sink_stash;
 static unsigned int wgfp_prefetch;
 static unsigned int wgfp_prefetch_max;
 static bool wgfp_threaded;
@@ -162,6 +163,8 @@ static void wgfp_cpu_napi_ensure_locked(void)
 }
 enum { NETDEV_NAPI_THREADED_DISABLED, NETDEV_NAPI_THREADED_ENABLED };
 static int dev_set_threaded(int dev, int threaded) { (void)dev; (void)threaded; return 0; }
+static int stash_calls;
+static void wgfp_fqd_stash(struct qm_mcc_initfq *opts) { (void)opts; stash_calls++; }
 static int qman_init_fq(struct qman_fq *fq, unsigned int flags, struct qm_mcc_initfq *opts)
 {
 	init_calls++;
@@ -206,8 +209,13 @@ static void successful_pool_cannot_be_destroyed(void)
 	assert(control("threaded 2") == -EINVAL);
 	assert(control("threaded 1") > 0 && wgfp_threaded);
 	assert(control("threaded 0") > 0 && !wgfp_threaded);
+	assert(control("sink_stash 2") == -EINVAL);
+	assert(control("sink_stash 1") > 0 && wgfp_sink_stash);
+	stash_calls = 0;
 	assert(wgfp_global_create(2) == 0);
 	assert(wgfp_nglobal == 2 && create_calls == 2 && init_calls == 2);
+	assert(stash_calls == 2);	/* each sink created with stashing */
+	assert(control("sink_stash 0") > 0 && !wgfp_sink_stash);
 	assert(control("destroy") == -EOPNOTSUPP);
 	assert(wgfp_nglobal == 2 && wgfp_global[0].created && wgfp_global[1].created);
 	assert(destroyed == 0 && napi_enabled == 4);	/* per CPU, once */
