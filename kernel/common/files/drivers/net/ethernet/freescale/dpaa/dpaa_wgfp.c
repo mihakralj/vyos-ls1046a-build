@@ -51,7 +51,7 @@
  *                                  default 6 MiB)
  *   echo "orp_stash <0|1>" > ...   QMan stashing on the ORP queue (default 0)
  *   echo "sink_stash <0|1>" > ...  QMan stashing on worker/global sinks created after (default 0)
- *   echo "tx_batch <0..64>" > ...  hold this CPU's sealed frames and enqueue them as one burst (0 = off)
+ *   echo "tx_batch <0..64>" > ...  hold this CPU's sealed frames and enqueue them as one burst (default 32, 0 = off)
  *                                  Both apply when a port's ORP queue is
  *                                  created (once per boot), so set them before
  *                                  the first spread record.
@@ -582,7 +582,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 	return r;
 }
 
-/* Seal TX batching ("tx_batch <n>", 0 = off).  At one tunnel the four CPUs
+/* Seal TX batching ("tx_batch <n>", default 32, 0 = off).  At one tunnel the four CPUs
  * each seal one inner flow and enqueued every frame at once, so the flows
  * left the port strictly alternating (mean run 1.05 packets at the peer).
  * That defeats the peer's GRO: it sent 0.35 TCP ACKs per data packet against
@@ -590,9 +590,13 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
  * opens and forwards.  Inside wgfp_cpu_poll() this CPU's plain-path frames
  * are held and enqueued as one burst, at n frames or at the end of the poll.
  * A frame sent from any other context (another NAPI sharing the portal) is
- * enqueued at once, so none can be stranded; ORP frames are never held. */
+ * enqueued at once, so none can be stranded; ORP frames are never held.
+ * 32 (A/B, .185 image 0550, means of 2 reps): 1T upload 4.69 -> 5.00 Gbit/s,
+ * peer ACKs per data packet 0.34 -> 0.13, peer same-flow run 1.05 -> 2.8
+ * (a Linux sealer gives 2.84); 4T upload +1.4%, download unchanged.  A poll
+ * holds at most what it dequeued, so light traffic sees no added delay. */
 #define WGFP_TXB_MAX	64
-static unsigned int wgfp_tx_batch;
+static unsigned int wgfp_tx_batch = 32;
 struct wgfp_txb {
 	bool active;
 	unsigned int n, lim;
