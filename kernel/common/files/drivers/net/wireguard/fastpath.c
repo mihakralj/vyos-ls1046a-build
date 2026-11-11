@@ -867,8 +867,32 @@ struct wgfp_pst {
 	unsigned long last_rx_timer;	/* P6 receive timers, same 10 ms rate */
 	unsigned int nflows;		/* under wgfp_flows_lock */
 	struct wgfp_flow *rxfl;		/* P3 outer record, under the lock */
+	atomic64_t __percpu *rx_pend;	/* P6 bytes not yet in peer->rx_bytes */
 	bool stopping;
 };
+
+/* P6 receive statistics.  Upstream update_rx_stats() adds every packet to
+ * peer->rx_bytes, one cache line that all four CPUs write in spread mode
+ * (0.7% of the download profile), without synchronisation.  The bytes collect
+ * per CPU instead and wgfp_rx_fold() moves them to the peer from the refresh
+ * worker once a second and at stop, so the peer's transfer count lags by up
+ * to a second.  The device counters stay per packet and per CPU. */
+static void wgfp_rx_stats(struct wgfp_pst *pst, u32 len)
+{
+	dev_sw_netstats_rx_add(pst->peer->device->dev, len);
+	atomic64_add(len, this_cpu_ptr(pst->rx_pend));
+}
+
+static void wgfp_rx_fold(struct wgfp_pst *pst)
+{
+	u64 sum = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		sum += atomic64_xchg(per_cpu_ptr(pst->rx_pend, cpu), 0);
+	if (sum)
+		pst->peer->rx_bytes += sum;
+}
 
 /*
  * P3 admission.  A flow is admitted only after a packet of its exact outer
@@ -1071,6 +1095,7 @@ static void wgfp_pst_refresh(struct work_struct *w)
 	if (old)
 		kfree_rcu(old, rcu);
 	wgfp_pst_rx_sync(pst);
+	wgfp_rx_fold(pst);
 	if (!READ_ONCE(pst->stopping))
 		schedule_delayed_work(&pst->refresh, HZ);
 }
@@ -1617,7 +1642,7 @@ static int wgfp_rx_fast_stack(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
 		kfree_skb(skb);
 		return 1;
 	}
-	wg_fastpath_rx_stats(pst->peer, msg_len);
+	wgfp_rx_stats(pst, msg_len);
 	dpaa_wgfp_stat_inc(&wgfp_p6_stack);
 	netif_receive_skb(skb);
 	return 1;
@@ -1661,7 +1686,7 @@ static bool wgfp_rx_forward(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
 	}
 	hdr = pt - ETH_HLEN;
 	memcpy(hdr, r->l2.hdr, ETH_HLEN);
-	wg_fastpath_rx_stats(pst->peer, msg_len);
+	wgfp_rx_stats(pst, msg_len);
 	dpaa_wgfp_stat_inc(&wgfp_p6_fwd);
 	dpaa_wgfp_xmit(f, r->l2.egress, hdr - f->buf, ETH_HLEN + len);
 	return true;
@@ -2253,6 +2278,11 @@ static struct wgfp_pst *wgfp_pst_get_locked(struct wg_peer *peer,
 	pst = kzalloc(sizeof(*pst), GFP_ATOMIC);
 	if (!pst)
 		return NULL;
+	pst->rx_pend = alloc_percpu_gfp(atomic64_t, GFP_ATOMIC);
+	if (!pst->rx_pend) {
+		kfree(pst);
+		return NULL;
+	}
 	pst->peer = wg_peer_get(peer);
 	pst->wgdev = wgdev;
 	INIT_DELAYED_WORK(&pst->refresh, wgfp_pst_refresh);
@@ -2510,6 +2540,9 @@ static void wgfp_psts_reap(bool all)
 			pst = dead[i];
 			cancel_delayed_work_sync(&pst->refresh);
 			kfree_rcu(rcu_dereference_protected(pst->tmpl, true), rcu);
+			/* no reader is left after synchronize_rcu() */
+			wgfp_rx_fold(pst);
+			free_percpu(pst->rx_pend);
 			wg_peer_put(pst->peer);
 			kfree_rcu(pst, rcu);
 		}

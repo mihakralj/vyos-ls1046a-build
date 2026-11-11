@@ -199,7 +199,7 @@ static bool wg_fastpath_rx_validate(struct noise_keypair *kp, u64 nonce)
 	return true;
 }
 static void wg_fastpath_rx_timers(struct wg_peer *p) { (void)p; timers++; }
-static void wg_fastpath_rx_stats(struct wg_peer *p, size_t len) { (void)p; stats += len; }
+static void wgfp_rx_stats(struct wgfp_pst *p, u32 len) { (void)p; stats += len; }
 static u32 wgfp_tuple_hash(const struct dpaa_wgfp_tuple *t) { (void)t; return 0; }
 static struct wgfp_rflow *wgfp_rflow_lookup(const struct dpaa_wgfp_tuple *t,
 					    int wg_ifindex, u32 hash)

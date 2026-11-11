@@ -6,8 +6,8 @@ Subject: [PATCH] wireguard: let the DPAA fast path reuse the receive
 
 The DPAA fast path (drivers/net/wireguard/fastpath.c) decrypts data
 packets of a peer's current keypair in place in the receive buffer.
-Give it the replay check, the receive timers and keep_key_fresh(), and
-the receive statistics of this file through three thin wrappers, so the
+Give it the replay check and the receive timers and keep_key_fresh()
+of this file through two thin wrappers, so the
 packets it decrypts and the packets that take the normal receive path
 share one replay window and one set of timers instead of a copy.
 
@@ -17,10 +17,14 @@ a flow the stack has already forwarded straight to its egress port (P7,
 module parameter wgfp_rx_tail, off by default). Receive statistics are
 unchanged.
 
+Both callers of counter_validate() run with bottom halves already off
+(wg_packet_rx_poll() and the fast path are NAPI polls), so it takes
+the replay-window lock with spin_lock() instead of spin_lock_bh().
+
 Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 ---
 diff --git a/drivers/net/wireguard/receive.c b/drivers/net/wireguard/receive.c
-index eb8851113..38bdf80ae 100644
+index eb8851113..c5cc20aa3 100644
 --- a/drivers/net/wireguard/receive.c
 +++ b/drivers/net/wireguard/receive.c
 @@ -10,6 +10,7 @@
@@ -31,13 +35,33 @@ index eb8851113..38bdf80ae 100644
  
  #include <linux/ip.h>
  #include <linux/ipv6.h>
-@@ -332,6 +333,27 @@ out:
+@@ -297,7 +298,11 @@ static bool counter_validate(struct noise_replay_counter *counter, u64 their_cou
+ 	unsigned long index, index_current, top, i;
+ 	bool ret = false;
+ 
+-	spin_lock_bh(&counter->lock);
++	/* Bottom halves are already off: both callers, wg_packet_rx_poll() and
++	 * the DPAA fast path's wg_fastpath_rx_validate(), run in NAPI poll
++	 * (threaded NAPI polls under local_bh_disable() too).  The _bh pair
++	 * was 1.2% of the fast path's download profile. */
++	spin_lock(&counter->lock);
+ 
+ 	if (unlikely(counter->counter >= REJECT_AFTER_MESSAGES + 1 ||
+ 		     their_counter >= REJECT_AFTER_MESSAGES))
+@@ -326,12 +331,28 @@ static bool counter_validate(struct noise_replay_counter *counter, u64 their_cou
+ 				&counter->backtrack[index]);
+ 
+ out:
+-	spin_unlock_bh(&counter->lock);
++	spin_unlock(&counter->lock);
+ 	return ret;
+ }
  
  #include "selftest/counter.c"
  
 +/* The DPAA fast path (fastpath.c, P6) decrypts some data packets of the
-+ * current keypair itself.  It keeps their replay window, timers and stats on
-+ * the same state and code as the packets that come through this file. */
++ * current keypair itself.  It keeps their replay window and timers on the
++ * same state and code as the packets that come through this file. */
 +bool wg_fastpath_rx_validate(struct noise_keypair *keypair, u64 nonce)
 +{
 +	return counter_validate(&keypair->receiving_counter, nonce);
@@ -51,15 +75,10 @@ index eb8851113..38bdf80ae 100644
 +	wg_timers_data_received(peer);
 +}
 +
-+void wg_fastpath_rx_stats(struct wg_peer *peer, size_t len)
-+{
-+	update_rx_stats(peer, len);
-+}
-+
  static void wg_packet_consume_data_done(struct wg_peer *peer,
  					struct sk_buff *skb,
  					struct endpoint *endpoint)
-@@ -408,7 +430,9 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
+@@ -408,7 +429,9 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
  	if (unlikely(routed_peer != peer))
  		goto dishonest_packet_peer;
  
