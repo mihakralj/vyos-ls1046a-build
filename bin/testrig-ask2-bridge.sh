@@ -5,6 +5,7 @@
 #   IPv6, at MTU 1500 and MTU 9000, REPS runs each; the table keeps the fastest.
 # Usage: OUTDIR=<matrix run dir> bin/testrig-ask2-bridge.sh   Env: REPS=3 DUR=10 STEADY_FROM=3
 #        BIDIR_DUR=20 BIDIR_STEADY_FROM=12 STREAMS=8 MTUS="1500 9000" NOREBOOT=1 (skip the final reboot)
+#        BRIDGE_OFFLOAD=0 measures the software bridge (ask.bridge_offload=0) for the SW matrix
 # Output: bridge-<mtu>.csv in OUTDIR (ts,mtu,fam,dir,rep,gbps,dut_busy). DUT busy is the offload
 #   check: a software bridge at these rates keeps the CPUs busy, the offloaded path does not.
 # It deletes eth3.10/eth4.20 and the eth3/eth4 addresses, so the DUT is REBOOTED at the end to get its
@@ -36,7 +37,8 @@ cleanup(){
 trap cleanup EXIT
 
 d "test -e /sys/module/ask/parameters/bridge_offload" || { echo "ABORT: ask.ko without bridge_offload"; exit 1; }
-d "echo 1 | sudo tee /sys/module/ask/parameters/bridge_offload >/dev/null
+case ${BRIDGE_OFFLOAD:-1} in 0|1) ;; *) echo "BRIDGE_OFFLOAD must be 0 or 1" >&2; exit 2 ;; esac
+d "echo ${BRIDGE_OFFLOAD:-1} | sudo tee /sys/module/ask/parameters/bridge_offload >/dev/null
 for v in eth3.10 eth4.20; do sudo ip link del \$v 2>/dev/null; done
 sudo ip addr flush dev eth3; sudo ip addr flush dev eth4
 sudo ip link add $BR type bridge vlan_filtering 0
