@@ -2,7 +2,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
 index 36842797f..bc1512516 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -2050,10 +2050,55 @@ static int dpaa_eth_init_ports(struct mac_device *mac_dev,
+@@ -2050,10 +2050,58 @@ static int dpaa_eth_init_ports(struct mac_device *mac_dev,
  	return err;
  }
  
@@ -13,9 +13,12 @@ index 36842797f..bc1512516 100644
 + * with a page type (buddy, page table, slab), is a stale pool entry.  Checked
 + * where software returns buffers to BMan and where an RX frame is dequeued;
 + * a stale buffer is reported and leaked, never handed on.
-+ * fsl_dpa.buf_check=0 turns the check off.
++ * Off by default: the RX check reads every frame's struct page, which cost
++ * 1T WireGuard download 1.1-1.5% and upload 1% (.106, image 0746), and it
++ * has not fired since it was added.  fsl_dpa.buf_check=1 (or the 0644
++ * parameter at runtime) turns it on for a hunt.
 + */
-+static bool buf_check = true;
++static bool buf_check;
 +module_param(buf_check, bool, 0644);
 +MODULE_PARM_DESC(buf_check, "Report and leak BMan buffers whose page the driver does not own");
 +static atomic64_t dpaa_buf_stale = ATOMIC64_INIT(0);
@@ -59,7 +62,7 @@ index 36842797f..bc1512516 100644
  
  	err = bman_release(dpaa_bp->pool, bmb, cnt);
  	/* Should never occur, address anyway to avoid leaking the buffers */
-@@ -3594,6 +3639,8 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+@@ -3594,6 +3642,8 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
  	dpaa_bp = dpaa_bpid2pool(dq->fd.bpid);
  	if (!dpaa_bp)
  		return qman_cb_dqrr_consume;

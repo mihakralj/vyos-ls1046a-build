@@ -1446,25 +1446,30 @@ void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_drop);
 
-/* Send the frame its ORP slot owes; false when this CPU owes nothing. */
+/* Send the frame its ORP slot owes; false when this CPU owes nothing.  Every
+ * forwarded download frame comes here, so the clock is read only once the
+ * ring turns out to be full, as in wgfp_tx_enqueue(). */
 static bool wgfp_orp_xmit(struct dpaa_wgfp_frame *f, int egress,
 			  const struct qm_fd *fd)
 {
 	struct wgfp_orp_ctx *c = this_cpu_ptr(&wgfp_orp_ctx);
-	ktime_t end;
+	ktime_t end = 0;
 
 	if (likely(!c->owed))
 		return false;
-	end = ktime_add_ns(ktime_get(), WGFP_ORP_WAIT_NS);
-	do {
+	for (;;) {
 		if (!qman_enqueue_orp_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress],
 					   c->orp_fqid, c->seq, false, fd)) {
 			c->owed = false;
 			dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
 			return true;
 		}
+		if (!end)
+			end = ktime_add_ns(ktime_get(), WGFP_ORP_WAIT_NS);
+		else if (!ktime_before(ktime_get(), end))
+			break;
 		cpu_relax();
-	} while (ktime_before(ktime_get(), end));
+	}
 	/* Nothing enqueued: the settle step fills the hole. */
 	atomic64_inc(&wgfp_orp_wait_fail);
 	atomic64_inc(&wgfp_xmit_fail);
