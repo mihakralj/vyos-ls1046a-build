@@ -149,7 +149,8 @@ nat_set(){
 }
 # dell1's mlx4 NIC cannot RSS-hash PPPoE frames, so every returning ACK lands on RX queue 0 / CPU0
 # and the whole TCP send path runs in that one softirq (about 5.9 Gbit/s ceiling, DUT idle).
-# RPS hashes on the inner flow instead. Runtime-only; applied for PPPoE cells, restored on exit.
+# RPS hashes on the inner flow instead. Runtime-only; applied for every cell with PPPoE on dell1's side
+# (pppoe*, wanfull*, wgwan*), restored on exit.
 D1_IF=${D1_IF:-$GEN_IF}
 [ -n "$RIG_NS" ] && D1_IF=${D1_IF_NS:-$GEN_IF_NS}   # the gen1 port facing the second DUT lives in the netns; sysfs shows it only from inside
 rps_set(){
@@ -210,7 +211,7 @@ for line in $CELLS_RUN; do
   if ! $G "$NSX ping -c2 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
     printf '%-15s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,0,0,0,0,0,0,0,0,SKIP" >> "$OUT"; continue
   fi
-  case $name in *pppoe*) rps_set on ;; *) rps_set off ;; esac
+  case $name in *pppoe*|wanfull*|wgwan*) rps_set on ;; *) rps_set off ;; esac
   tag="$name"; [ "$BIDIR" = 1 ] && tag="$name-bidir"
   if [ "$DUT_KIND" = opnsense ]; then
   if ! $S 'pfctl -si | grep -q "Status: Enabled" && pfctl -sn | grep -q "nat-anchor \"testrig\"" && pfctl -sr | grep -q "pass in quick on dtsec3 inet6"'; then
