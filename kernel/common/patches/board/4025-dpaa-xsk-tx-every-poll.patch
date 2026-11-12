@@ -1,0 +1,30 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index c51497af1..fb7720ae3 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3273,6 +3273,16 @@ static int dpaa_eth_poll(struct napi_struct *napi, int budget)
+ 	if (np->xdp_act & XDP_REDIRECT)
+ 		xdp_do_flush();
+ 
++	/* Flavor Tx drain and confirmation completion run on every poll, not
++	 * only when the poll ends early: a saturated Rx path would otherwise
++	 * starve XSK Tx.
++	 */
++	rcu_read_lock();
++	ops = rcu_dereference(priv->qmgmt_ops);
++	if (ops && ops->napi_tx_zc)
++		ops->napi_tx_zc(priv);
++	rcu_read_unlock();
++
+ if (cleaned < budget) {
+ 		napi_complete_done(napi, cleaned);
+ 
+@@ -3295,8 +3305,6 @@ if (cleaned < budget) {
+ 	 * xsk_set_tx_need_wakeup arms tx-need-wakeup when the budget
+ 	 * is exhausted OR the Tx ring drained. Spec sec 6.1.4.
+ 	 */
+-	if (ops && ops->napi_tx_zc)
+-	ops->napi_tx_zc(priv);
+ 	if (ops && ops->xsk_set_tx_need_wakeup)
+ 	ops->xsk_set_tx_need_wakeup(priv, np);
+ 

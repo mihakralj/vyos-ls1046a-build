@@ -506,3 +506,6 @@
 # AF_XDP zero-copy Tx confirmation: dedicated per-qband FQ owned by the flavor module; Tx error/ERN claim hook.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 4024-dpaa-xsk-tx-confirm-fq.patch
+# AF_XDP zero-copy: drain Tx and flush confirmations on every NAPI poll.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4025-dpaa-xsk-tx-every-poll.patch

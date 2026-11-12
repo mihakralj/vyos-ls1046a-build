@@ -46,6 +46,8 @@
 #include <linux/spinlock.h>
 #include <linux/dma-mapping.h>
 #include <linux/netdevice.h>
+#include <linux/sched/isolation.h>
+#include <linux/cpumask.h>
 #include <linux/etherdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/rtnetlink.h>
@@ -192,6 +194,7 @@ struct afx_txconf {
 	struct qman_fq fq;
 	struct dpaa_priv *priv;
 	u16 qid;
+	int cpu;		/* qband owner CPU, claimed in afx_pick_cpu() */
 };
 
 struct af_xdp_port {
@@ -228,6 +231,43 @@ static struct fman_port *afx_rx_port(struct dpaa_priv *priv)
 	fm = fman_bind(priv->mac_dev->fman_dev);
 	return fm ? fman_port_lookup_rx(fm, fman_port_get_id(
 			priv->mac_dev->port[DPAA_MAC_PORT_RX])) : NULL;
+}
+
+static DEFINE_SPINLOCK(afx_cpu_lock);
+static u8 afx_cpu_refs[NR_CPUS];
+
+/*
+ * Pick the CPU that submits and confirms one port's Tx: an online CPU with
+ * a QMan portal, outside isolcpus (VPP workers), least claimed.  Distinct
+ * ports get distinct CPUs while any are free; CPU 0 is used last.
+ */
+static int afx_pick_cpu(void)
+{
+	const struct cpumask *hk = housekeeping_cpumask(HK_TYPE_DOMAIN);
+	int cpu, best = -1;
+
+	spin_lock(&afx_cpu_lock);
+	for_each_cpu_and(cpu, cpu_online_mask, qman_affine_cpus()) {
+		if (!cpumask_test_cpu(cpu, hk))
+			continue;
+		if (best < 0 || afx_cpu_refs[cpu] < afx_cpu_refs[best] ||
+		    (afx_cpu_refs[cpu] == afx_cpu_refs[best] && best == 0))
+			best = cpu;
+	}
+	if (best < 0)
+		best = cpumask_first_and(cpu_online_mask, qman_affine_cpus());
+	if (best >= 0)
+		afx_cpu_refs[best]++;
+	spin_unlock(&afx_cpu_lock);
+	return best;
+}
+
+static void afx_put_cpu(int cpu)
+{
+	spin_lock(&afx_cpu_lock);
+	if (afx_cpu_refs[cpu])
+		afx_cpu_refs[cpu]--;
+	spin_unlock(&afx_cpu_lock);
 }
 
 /* Return one Tx chunk to user space: advance the completion ring, free the slot. */
@@ -321,6 +361,7 @@ static void afx_txconf_destroy(struct dpaa_priv *priv, struct afx_txconf *c)
 		dev_warn(dev, "af_xdp_pool: OOS Tx confirm FQ %u: %d\n",
 			 c->fq.fqid, err);
 	qman_destroy_fq(&c->fq);
+	afx_put_cpu(c->cpu);
 }
 
 /*
@@ -644,11 +685,18 @@ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
 	xsk_pool_set_rxq_info(pool, &priv->xsk_zc_rxq[queue_id]);
 
 	/* The qband's Tx is submitted and confirmed on this CPU. */
-	target_cpu = (int)queue_id % max(num_online_cpus(), 1U);
-	atomic_set(&priv->xsk_tx_inflight[queue_id], 0);
-	ret = afx_txconf_create(priv, port, queue_id, target_cpu);
-	if (ret)
+	target_cpu = afx_pick_cpu();
+	if (target_cpu < 0) {
+		ret = -ENODEV;
 		goto err_rxq;
+	}
+	atomic_set(&priv->xsk_tx_inflight[queue_id], 0);
+	port->txc.cpu = target_cpu;
+	ret = afx_txconf_create(priv, port, queue_id, target_cpu);
+	if (ret) {
+		afx_put_cpu(target_cpu);
+		goto err_rxq;
+	}
 
 	priv->xsk_bpid[queue_id] = port->bpid;
 	priv->xsk_bpool[queue_id] = port->bpool;
@@ -664,6 +712,9 @@ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
 		struct dpaa_percpu_priv *pcpu;
 
 		pcpu = per_cpu_ptr(priv->percpu_priv, target_cpu);
+		/* np.p is otherwise set only by a portal interrupt. */
+		if (!pcpu->np.p)
+			pcpu->np.p = qman_get_affine_portal(target_cpu);
 		WRITE_ONCE(priv->qmap[queue_id].napi, &pcpu->np.napi);
 		WRITE_ONCE(priv->qmap[queue_id].cpu, target_cpu);
 	}
@@ -1081,51 +1132,61 @@ static void af_xdp_pool_napi_tx_zc(struct dpaa_priv *priv)
 	if (raw_smp_processor_id() != READ_ONCE(priv->qmap[q].cpu))
 		return;
 
-	inflight = atomic_read(&priv->xsk_tx_inflight[q]);
-	if (inflight >= DPAA1_XSK_TX_MAX_INFLIGHT) {
-		priv->xsk_tx_backpressure++;
-		return;
-	}
-
-	budget = min_t(u32, DPAA1_XSK_TX_MAX_INFLIGHT - inflight, 64);
-	n = xsk_tx_peek_release_desc_batch(pool, budget);
-	if (!n)
-		return;
-
 	egress_fq = priv->egress_fqs[raw_smp_processor_id() %
 				     dpaa_max_num_txqs()];
 	descs = pool->tx_descs;
-	submitted = 0;
-	for (i = 0; i < n; i++) {
-		memset(&fd, 0, sizeof(fd));
-		qm_fd_addr_set64(&fd, xsk_buff_raw_get_dma(pool, descs[i].addr));
-		qm_fd_set_contig(&fd, 0, (int)descs[i].len);
-		fd.bpid = AFX_BPID_INV;
-		fd.cmd = cpu_to_be32(FM_FD_CMD_FCO |
-				     (qman_fq_fqid(&port->txc.fq) &
-				      AFX_FD_CMD_FQID_MASK));
 
-		/* DPAA_ENQUEUE_RETRIES is private to dpaa_eth.c. */
-		err = -EBUSY;
-		for (j = 0; j < 100000; j++) {
-			err = qman_enqueue(egress_fq, &fd);
-			if (err != -EBUSY)
-				break;
-		}
-		if (err) {
-			/* The ring slots are already consumed; complete the
-			 * rest unsent so the chunks return to user space.
-			 */
+	/* Ends when the ring is empty or the inflight cap is hit; a
+	 * confirmation then polls this CPU again.
+	 */
+	for (;;) {
+		inflight = atomic_read(&priv->xsk_tx_inflight[q]);
+		if (inflight >= DPAA1_XSK_TX_MAX_INFLIGHT) {
 			priv->xsk_tx_backpressure++;
-			xsk_tx_completed(pool, n - i);
-			break;
+			return;
 		}
-		atomic_inc(&priv->xsk_tx_inflight[q]);
-		submitted++;
-	}
 
-	if (submitted)
+		budget = min_t(u32, DPAA1_XSK_TX_MAX_INFLIGHT - inflight, 64);
+		n = xsk_tx_peek_release_desc_batch(pool, budget);
+		if (!n)
+			return;
+
+		submitted = 0;
+		for (i = 0; i < n; i++) {
+			memset(&fd, 0, sizeof(fd));
+			qm_fd_addr_set64(&fd, xsk_buff_raw_get_dma(pool,
+							descs[i].addr));
+			qm_fd_set_contig(&fd, 0, (int)descs[i].len);
+			fd.bpid = AFX_BPID_INV;
+			fd.cmd = cpu_to_be32(FM_FD_CMD_FCO |
+					     (qman_fq_fqid(&port->txc.fq) &
+					      AFX_FD_CMD_FQID_MASK));
+
+			/* DPAA_ENQUEUE_RETRIES is private to dpaa_eth.c. */
+			err = -EBUSY;
+			for (j = 0; j < 100000; j++) {
+				err = qman_enqueue(egress_fq, &fd);
+				if (err != -EBUSY)
+					break;
+			}
+			if (err) {
+				/* The ring slots are already consumed;
+				 * complete the rest unsent so the chunks
+				 * return to user space.
+				 */
+				priv->xsk_tx_backpressure++;
+				xsk_tx_completed(pool, n - i);
+				priv->xsk_tx_zc_submit++;
+				return;
+			}
+			atomic_inc(&priv->xsk_tx_inflight[q]);
+			submitted++;
+		}
 		priv->xsk_tx_zc_submit++;
+
+		if (n < budget)
+			return;
+	}
 }
 
 /*
