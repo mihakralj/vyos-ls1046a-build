@@ -1,0 +1,226 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index acdb903f6..9e3c785f1 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3385,6 +3385,30 @@ static enum qman_cb_dqrr_result rx_error_dqrr(struct qman_portal *portal,
+ 
+ 	net_dev = dpaa_fq->net_dev;
+ 	priv = netdev_priv(net_dev);
++
++	/* AF_XDP ZC: an error FD may carry an XSK pool buffer. The pool is not
++	 * in dpaa_bp_array[], so the lookup below would drop the FD and leak
++	 * the buffer. Defer to NAPI first (the release takes a BH lock).
++	 */
++	if (READ_ONCE(priv->xsk_port)) {
++		const struct dpaa_qmgmt_ops *ops;
++
++		rcu_read_lock();
++		ops = rcu_dereference(priv->qmgmt_ops);
++		if (ops && ops->rx_release) {
++			if (dpaa_eth_napi_schedule(this_cpu_ptr(priv->percpu_priv),
++						   portal, sched_napi)) {
++				rcu_read_unlock();
++				return qman_cb_dqrr_stop;
++			}
++			if (ops->rx_release(priv, &dq->fd)) {
++				rcu_read_unlock();
++				return qman_cb_dqrr_consume;
++			}
++		}
++		rcu_read_unlock();
++	}
++
+ 	dpaa_bp = dpaa_bpid2pool(dq->fd.bpid);
+ 	if (!dpaa_bp)
+ 		return qman_cb_dqrr_consume;
+@@ -4031,6 +4055,14 @@ static int dpaa_change_mtu(struct net_device *net_dev, int new_mtu)
+ 	if (priv->xdp_prog && !xdp_validate_mtu(priv, new_mtu))
+ 		return -EINVAL;
+ 
++	/* An attached AF_XDP pool bounds the frames the MAC may admit. */
++	if (priv->xsk_max_frm &&
++	    max(new_mtu, ETH_DATA_LEN) + ETH_HLEN + ETH_FCS_LEN + 2 * VLAN_HLEN >
++	    priv->xsk_max_frm) {
++		netdev_warn(net_dev, "MTU %d exceeds the AF_XDP buffer (max frame %u)\n",
++			    new_mtu, priv->xsk_max_frm);
++		return -EINVAL;
++	}
+ 	err = dpaa_apply_max_frame(priv, new_mtu);
+ 	if (err)
+ 		return err;
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 36c518b5e..f2af0c101 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -292,54 +292,15 @@ u32 hm_vlan_strip_handle;
+ 	struct bman_pool           *xsk_bpool[DPAA1_XSK_MAX_QBANDS];
+ 	unsigned int                xsk_max_qbands;
+ 
+-	/* M3-3 step 7 sub-increment 4a (patch 0103a): true-ZC RX Recover
+-	 * sw-ring reverse-map -- DORMANT infrastructure with no datapath
+-	 * consumer.  The productive Recover redirect (0103b) needs to turn a
+-	 * BMan-returned chunk DMA cookie (qm_fd_addr(fd)) back into the
+-	 * originating struct xdp_buff *, but kernel 6.18.31 has no
+-	 * xsk_buff_recv()/retrieve-by-dma primitive (the spec sec 6.1.15
+-	 * prose named an API that does not exist -- see sec 6.1.16).  Mainline
+-	 * ZC drivers (i40e/ice/mlx5) keep a per-RX-ring sw array of the
+-	 * xsk_buff_alloc() handles indexed by descriptor; DPAA1's FILL ->
+-	 * BMan-release path discards the handle after xsk_buff_xdp_get_dma().
+-	 * This array restores that mapping: at FILL-release time 0103b will
+-	 * record (chunk_dma -> xdp_buff) here; at RX it will look the cookie
+-	 * up.  Allocated/seeded/freed in attach/detach (0103a), but NEITHER
+-	 * recorded into NOR consulted by the datapath until 0103b flips the
+-	 * reprogram WRITE + redirect on -- so the running kernel is
+-	 * byte-identical to the 0102 build on every flavor.
+-	 *
+-	 * Indexed by qband; each entry is a flat array of
+-	 * DPAA1_XSK_INITIAL_SEED struct xdp_buff * slots keyed by UMEM chunk
+-	 * index, giving O(1) lookup with no hash collisions.
+-	 * xsk_chunk_map_len records the slot count actually allocated
+-	 * (0 = dormant/unallocated).
++	/* AF_XDP zero-copy RX ownership state, private to the flavor module
++	 * (af_xdp_pool).  xsk_port is non-NULL only while a pool is attached;
++	 * it holds the cookie -> xdp_buff map and the port-wide lock.  The
++	 * BMI pool is port-wide, so one pool owns the whole port.
++	 * xsk_max_frm is the largest MAC frame (MTU + L2 + FCS) the attached
++	 * pool can hold in one buffer; 0 when no pool is attached.
+ 	 */
+-struct xdp_buff           **xsk_chunk_map[DPAA1_XSK_MAX_QBANDS];
+-u32                         xsk_chunk_map_len[DPAA1_XSK_MAX_QBANDS];
+-
+-/* 0103b Recover-redirect: dma_addr_t -> head-index lookup.
+- *
+- * The reverse map above is keyed by the XSK pool head-index
+- * (xskb - pool->heads), which is stable for the pool's lifetime and
+- * directly indexes xsk_chunk_map[band][].  At FILL-release time the
+- * head-index is trivially available from the xdp_buff handle; at RX
+- * only the bare chunk DMA cookie (qm_fd_addr(fd)) survives, and
+- * kernel 6.18.31 exposes no dma_addr_t -> xdp_buff inversion.
+- *
+- * xsk_chunk_dma[band] is a sorted array of the per-head DMA cookies
+- * built once at attach (after xsk_pool_dma_map()); the parallel
+- * xsk_chunk_dma_idx[band] holds the matching head-index for each
+- * sorted cookie.  At RX an O(log n) bsearch on xsk_chunk_dma[]
+- * recovers the head-index, which then indexes xsk_chunk_map[].  This
+- * is correct for BOTH aligned-contiguous and fragmented UMEMs (no
+- * subtract+shift contiguity assumption -- spec sec 6.1.8 crash
+- * class).  Allocated/sorted in attach, freed in detach; NULL/0 when
+- * dormant.  xsk_chunk_dma_cnt is the sorted-entry count.
+- */
+-dma_addr_t                 *xsk_chunk_dma[DPAA1_XSK_MAX_QBANDS];
+-u32                        *xsk_chunk_dma_idx[DPAA1_XSK_MAX_QBANDS];
+-u32                         xsk_chunk_dma_cnt[DPAA1_XSK_MAX_QBANDS];
++	void                       *xsk_port;
++	u32                         xsk_max_frm;
+ 
+ 	/* AF_XDP zerocopy ethtool / debugfs counters. Bumped by the
+ 	 * flavor module's attach/detach/NAPI paths. Phase 2 introduces
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+index 4b40f4ae9..8843bb628 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+@@ -75,6 +75,11 @@ struct qm_fd;
+  *                    dpaa_tx_conf() path. Returns true to short-circuit
+  *                    the skb cleanup path; calls xsk_tx_completed()
+  *                    and atomic_dec(xsk_tx_inflight). Spec sec 6.1.4.
++ * @rx_release:       Called from the RX error FQ callback, in NAPI context,
++ *                    while a pool is attached. Returns true when the FD's
++ *                    buffer belongs to the attached XSK pool; the callee
++ *                    has then returned it to the pool and the FD is
++ *                    consumed. Returns false for any other FD.
+  */
+ struct dpaa_qmgmt_ops {
+ 	int  (*alloc_rx_fqs)(struct dpaa_priv *priv, struct list_head *list);
+@@ -91,6 +96,7 @@ void (*napi_tx_zc)(struct dpaa_priv *priv);
+ void (*xsk_set_tx_need_wakeup)(struct dpaa_priv *priv,
+        struct dpaa_napi_portal *np);
+ bool (*tx_conf_zc)(struct dpaa_priv *priv, const struct qm_fd *fd);
++	bool (*rx_release)(struct dpaa_priv *priv, const struct qm_fd *fd);
+ };
+ 
+ #ifdef CONFIG_DPAA_FLAVOR_OPS
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 3a1b3a263..72de37cc9 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1223,12 +1223,14 @@ static int set_ext_buffer_pools(struct fman_port *port)
+  *	  (normally the kernel page-pool BPID, priv->dpaa_bp->bpid)
+  * @new_bpid: the BPID to swap in (normally the dedicated XSK pool BPID,
+  *	  priv->xsk_bpid[band])
++ * @new_size: the buffer size to program with @new_bpid (bytes FMan may write
++ *	  from the buffer start, prefix included), or 0 to keep the current size
+  *
+  * M3-3 step 7 sub-increment 4 (patch 0102): the WRITE half of mechanism 3
+  * (reProgram) in the true-ZC RX plan (spec sec 6.1.7). Mutates the port's
+  * PERSISTENT external-buffer-pool table (port->ext_buf_pools.ext_buf_pool[])
+  * by replacing the entry whose .id == @old_bpid with @new_bpid (the .size is
+- * preserved), then rewrites the BMI bpool registers via set_bpools(). After
++ * replaced by @new_size when non-zero), then rewrites the BMI bpool registers via set_bpools(). After
+  * this, FMan RX BMI DMAs ingress frames into @new_bpid.
+  *
+  * IMPORTANT (the 0103b -22 root cause): this MUST operate on the persistent
+@@ -1257,23 +1259,27 @@ static int set_ext_buffer_pools(struct fman_port *port)
+  * @old_bpid is not present in the port's pool table, -EALREADY if
+  * @new_bpid == @old_bpid, or the set_bpools() error otherwise.
+  */
+-int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid)
++int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid,
++			   u16 new_size)
+ {
+ 	struct fman_ext_pools *ext_pools;
+ 	u8 ordered_array[FMAN_PORT_MAX_EXT_POOLS_NUM];
+ 	u16 sizes_array[BM_MAX_NUM_OF_POOLS];
+ 	struct fman_port_bpools bpools;
++	u16 old_size;
+ 	int i, slot = -1, err;
+ 
+ 	if (!port || port->port_type != FMAN_PORT_TYPE_RX)
+ 		return -EINVAL;
+ 
+-	if (new_bpid == old_bpid)
+-		return -EALREADY;
+-
+ 	/* Use the PERSISTENT pool table -- port->cfg was freed at init. */
+ 	ext_pools = &port->ext_buf_pools;
+ 
++	if (new_bpid == old_bpid &&
++	    (!new_size || (ext_pools->num_of_pools_used &&
++			   ext_pools->ext_buf_pool[0].size == new_size)))
++		return -EALREADY;
++
+ 	for (i = 0; i < ext_pools->num_of_pools_used; i++) {
+ 		if (ext_pools->ext_buf_pool[i].id == old_bpid) {
+ 			slot = i;
+@@ -1288,7 +1294,10 @@ int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid)
+ 		return -ENOENT;
+ 	}
+ 
++	old_size = ext_pools->ext_buf_pool[slot].size;
+ 	ext_pools->ext_buf_pool[slot].id = new_bpid;
++	if (new_size)
++		ext_pools->ext_buf_pool[slot].size = new_size;
+ 
+ 	/* Rebuild the BMI bpool registers from the persistent table without
+ 	 * going through set_ext_buffer_pools() (which reads the freed cfg).
+@@ -1319,6 +1328,7 @@ int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid)
+ 		 * ascending-order validation passes.
+ 		 */
+ 		ext_pools->ext_buf_pool[slot].id = old_bpid;
++		ext_pools->ext_buf_pool[slot].size = old_size;
+ 		dev_err(port->dev,
+ 			"%s: set_bpools() failed (%d), bpid reverted\n",
+ 			__func__, err);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index e6068ebb6..a6f00486c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -133,7 +133,8 @@ u8 fman_port_get_id(struct fman_port *port);
+  * caller); the productive af_xdp_pool attach call site is the gated
+  * final sub-increment (spec sec 6.1.12).
+  */
+-int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid);
++int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid,
++			   u16 new_size);
+ 
+ int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset);
+ 

@@ -6,12 +6,25 @@
 #include <stdio.h>
 
 typedef uint8_t u8;
+typedef uint64_t u64;
 struct bman_pool { int unused; };
 struct bm_buffer { uint64_t data; };
 
 static unsigned int pool_free;
 static int force_timeout_after = -1;
 static unsigned int acquires;
+static unsigned int released;
+
+static inline u64 bm_buffer_get64(const struct bm_buffer *buf)
+{
+	return buf->data;
+}
+
+static inline void count_release(void *ctx, u64 addr)
+{
+	(void)ctx; (void)addr;
+	released++;
+}
 
 /* Same contract as drivers/soc/fsl/qbman/bman.c: exact count or -ENOMEM. */
 static int bman_acquire(struct bman_pool *pool, struct bm_buffer *bufs, u8 num)
@@ -35,7 +48,8 @@ static int run(unsigned int free_bufs, int timeout_after)
 	pool_free = free_bufs;
 	force_timeout_after = timeout_after;
 	acquires = 0;
-	return DRAIN_CALL(&pool);
+	released = 0;
+	return DRAIN_CALL(&pool, count_release, NULL);
 }
 
 int main(void)
@@ -46,9 +60,9 @@ int main(void)
 	for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
 		int ret = run(sizes[i], -1);
 
-		if (ret || pool_free) {
-			fprintf(stderr, "pool of %u: ret=%d left=%u\n",
-				sizes[i], ret, pool_free);
+		if (ret || pool_free || released != sizes[i]) {
+			fprintf(stderr, "pool of %u: ret=%d left=%u released=%u\n",
+				sizes[i], ret, pool_free, released);
 			return 1;
 		}
 	}

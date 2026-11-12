@@ -15,11 +15,13 @@ HARNESS = ROOT / "tests/dut/dpaa_xsk_drain.c"
 # The loop that shipped before the fix: it waits for bman_acquire() to
 # return 0, which the kernel never does.
 LEGACY = """
-static int legacy_drain(struct bman_pool *bpool)
+static int legacy_drain(struct bman_pool *bpool,
+			void (*release)(void *ctx, u64 addr), void *ctx)
 {
 	struct bm_buffer bmbs[8];
 	int loops, n;
 
+	(void)release; (void)ctx;
 	for (loops = 0; loops < 16384; loops++) {
 		n = bman_acquire(bpool, bmbs, 8);
 		if (n < 0)

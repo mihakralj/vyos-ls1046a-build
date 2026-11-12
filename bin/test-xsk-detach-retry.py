@@ -19,7 +19,6 @@ if len(sys.argv) != 2:
 header = Path("include/net/xsk_buff_pool.h").read_text()
 core = Path("net/xdp/xsk_buff_pool.c").read_text()
 xsk_source = Path("net/xdp/xsk.c").read_text()
-dpaa_header = Path("drivers/net/ethernet/freescale/dpaa/dpaa_eth.h").read_text()
 dpaa = Path(sys.argv[1]).read_text()
 
 if "struct delayed_work work;" not in header:
@@ -49,9 +48,6 @@ if min(retry, clear_pool, drop_netdev) < 0 or not retry < clear_pool < drop_netd
     fail("retryable detach can clear the XSK association or netdev reference")
 if "schedule_delayed_work(&pool->work, HZ);" not in clear:
     fail("retryable detach is not rescheduled")
-if "xsk_pool_detach_pending[DPAA1_XSK_MAX_QBANDS]" not in dpaa_header:
-    fail("DPAA private state does not retain a pool during BMan drain retry")
-
 release_start = core.index("static void xp_release_deferred(struct work_struct *work)\n{")
 release_end = core.index("\nvoid xp_get_pool", release_start)
 release = core[release_start:release_end]
@@ -62,39 +58,28 @@ if min(defer, destroy_queue, destroy_pool) < 0 or not defer < destroy_queue < de
     fail("deferred release can destroy a pool after a retryable detach")
 
 detach_start = dpaa.index("static int af_xdp_pool_xsk_pool_detach")
-detach_end = dpaa.index("static int af_xdp_pool_xsk_wakeup", detach_start)
+detach_end = dpaa.index("\n}\n", detach_start)
 detach = dpaa[detach_start:detach_end]
-if "pool = priv->xsk_pool_detach_pending[queue_id];" not in detach:
-    fail("retry does not resume from the retained pending-pool owner")
+# The core pool worker retains the pool across -EAGAIN, so the driver keeps
+# no pending-pool pointer; it must instead fail closed before freeing anything.
 disable = detach.find("fman_port_disable(rxp)")
-unpublish = detach.find("rcu_assign_pointer(priv->xsk_pool[queue_id], NULL)")
 restore = detach.find("fman_port_set_rx_bpool(")
-dma_unmap = detach.find("xsk_pool_dma_unmap(pool")
-if min(disable, unpublish, restore, dma_unmap) < 0:
+quiesce = detach.find("port->quiesced = true")
+drain = detach.find("af_xdp_pool_drain_bman(port->bpool")
+live_check = detach.find("if (live) {")
+unpublish = detach.find("smp_store_release(&priv->xsk_port, NULL)")
+dma_unmap = detach.find("xsk_pool_dma_unmap(port->pool")
+free_bpool = detach.find("bman_free_pool(port->bpool)")
+if min(disable, restore, quiesce, drain, live_check, unpublish, dma_unmap, free_bpool) < 0:
     fail("detach is missing a required quiesce or cleanup operation")
-if not disable < restore < unpublish < dma_unmap:
-    fail("detach releases or hides pool state before port disable/BPID restore")
-if "return -EAGAIN;" not in detach[:unpublish]:
-    fail("detach does not defer before unpublishing the pool on port failure")
-drain = detach.find("bpool_drained = !bpool")
-drain_failure = detach.find("if (!bpool_drained)")
-drain_return = detach.find("return -EAGAIN;", drain_failure)
-if min(drain, drain_failure, drain_return, dma_unmap) < 0:
-    fail("detach does not fail closed on an incomplete BMan drain")
-if not unpublish < drain < drain_failure < drain_return < dma_unmap:
-    fail("BMan drain failure can release the UMEM DMA mapping or pool")
-if "af_xdp_pool_drain_bman(bpool)" not in detach:
-    fail("detach does not use the semantics-checked BMan drain helper")
+if not disable < restore < quiesce < drain < live_check < unpublish < dma_unmap < free_bpool:
+    fail("detach releases or hides pool state before the port is quiet and drained")
+if detach[:unpublish].count("return -EAGAIN;") < 4:
+    fail("detach does not defer on port, BPID, drain or outstanding-buffer failure")
 helper_start = dpaa.index("static int af_xdp_pool_drain_bman(")
 helper = dpaa[helper_start:dpaa.index("\n}\n", helper_start)]
 if "-ENOMEM" not in helper or "-ETIMEDOUT" in helper:
     fail("BMan drain must treat -ENOMEM as empty and other errors as retryable")
-if "priv->xsk_pool_detach_pending[queue_id] = pool;" not in detach:
-    fail("detach does not retain the pool for the next BMan drain attempt")
-clear_pending = detach.find("priv->xsk_pool_detach_pending[queue_id] = NULL")
-free_bpool = detach.find("bman_free_pool(bpool)")
-if min(clear_pending, free_bpool) < 0 or not free_bpool < clear_pending:
-    fail("pending-pool ownership is cleared before resource teardown completes")
 
 if not shutil.which("cc"):
     fail("host C compiler not found")

@@ -500,3 +500,6 @@
 # the stale-entry source is found.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 4022-dpaa-stale-buffer-check.patch
+# AF_XDP zero-copy RX correctness: error-FQ buffer release, MTU admission, BMI buffer size.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4023-dpaa-xsk-rx-correctness.patch

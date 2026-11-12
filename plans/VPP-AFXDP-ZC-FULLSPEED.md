@@ -151,6 +151,22 @@ Exit: every D1 to D7 is either reproduced by a failing check or downgraded in §
   - VPP `show interface` RX increments.
   - A frame that is one byte over the derived MTU is rejected at admission, not overrun.
 
+P2 as built (patch 4023 plus `af_xdp_pool_main.c`), where it refines §3.1:
+
+- **One map per port, not per band.** The BMI buffer pool is port-wide and any RX FQ can deliver any buffer, so a band map would lose buffers. A buffer is an XSK buffer when `fd->bpid == port->bpid`, on any FQ. A second attach on the same netdev fails with `-EBUSY`.
+- **One lock, `port->lock`.** XSK pool allocation, `xsk_buff_free()` and the redirect are not safe across CPUs, so the lock serialises refill (trylock from any CPU's NAPI), the RX hook, the error release and detach.
+- **`XDP_PASS` copies.** The pool swap is port-wide, so Linux traffic also lands in XSK buffers. The hook builds an skb with `xdp_build_skb_from_zc()`, frees the chunk, and delivers the skb after dropping the lock.
+- **Geometry.** `data_max = ALIGN_DOWN(rx_off + pool->frame_len, 16) - rx_off`. Attach rejects an MTU whose MAC admission size (`max(mtu, 1500) + ETH_HLEN + FCS + 2*VLAN_HLEN`) exceeds `data_max`, and `dpaa_change_mtu` rejects a later change through `priv->xsk_max_frm`. `fman_port_set_rx_bpool()` takes the buffer size. A cookie must be non-zero, 16-byte aligned and below 2^40, or the chunk is counted and left allocated.
+- **Error FQ.** `rx_error_dqrr` defers to NAPI (the XSK pool ops are not hard-IRQ safe), then calls the `rx_release` flavor op, which returns the chunk to the pool.
+- **Detach order.** Disable the port, restore bpid and size, quiesce, loop (drain BMan, wait for `map.live == 0`), unpublish, `synchronize_net()`, free. A drain that cannot finish returns `-EAGAIN` and the retry resumes. If chunks never return from QMan they are logged and stay allocated: the port is disabled, so nothing can write them again.
+- **Attach failure.** Any failure unwinds fully and returns an error (D12).
+- **Observability.** `/sys/kernel/debug/af_xdp_pool/zc_stats` shows map occupancy and the per-port drop, miss and fill counters.
+- **Known residual.** A redirect that fails after the program ran frees the chunk as mainline drivers do. A non-XSKMAP redirect target that copies and then fails could free twice. VPP only uses XSKMAP.
+- **`XDP_PASS` copy.** The hook allocates an skb and copies the frame itself, because `xdp_build_skb_from_zc()` places `skb_shared_info` at `frame_sz` and a full-size frame at 256 bytes of headroom would overrun it.
+- **Detach fails closed.** A non-zero map count after the settle loop returns `-EAGAIN`; nothing is freed until every chunk has come back. This relies on the F-275 core retry, which `bin/ci-setup-kernel.sh` applies; `kernel/common/scripts/stage-kernel.sh` does not, so a direct staging build is not supported for XSK detach.
+- **TX is not quiesced by detach (P4).** TX submission and confirmations are not stopped before the DMA unmap. P4 must close this together with the confirmation-FQ work.
+- **Open.** `ask_align.c` adapts the RX margin on ports with offloaded flows. It is not coordinated with an XSK-attached port.
+
 ### P3: wakeup and refill (D7)
 
 - Route RX and TX wakeups to `qmap[q].cpu`. The candidate mechanism is an IPI per band, kept only if a review confirms it is safe against the portal IRQ handler. Seed the pool on the first wakeup after attach.
