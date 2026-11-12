@@ -503,3 +503,6 @@
 # AF_XDP zero-copy RX correctness: error-FQ buffer release, MTU admission, BMI buffer size.
 # Upstream-Status: Inappropriate | Risk-Tier: B
 4023-dpaa-xsk-rx-correctness.patch
+# AF_XDP zero-copy Tx confirmation: dedicated per-qband FQ owned by the flavor module; Tx error/ERN claim hook.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4024-dpaa-xsk-tx-confirm-fq.patch

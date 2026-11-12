@@ -167,6 +167,16 @@ P2 as built (patch 4023 plus `af_xdp_pool_main.c`), where it refines §3.1:
 - **TX is not quiesced by detach (P4).** TX submission and confirmations are not stopped before the DMA unmap. P4 must close this together with the confirmation-FQ work.
 - **Open.** `ask_align.c` adapts the RX margin on ports with offloaded flows. It is not coordinated with an XSK-attached port.
 
+P2 board results (DUT2, cold boot, image `2026.11.12-0306-rolling`, patch 4023 live):
+
+- **Probe-only RX (no VPP, bind probe with `--xskmap`), 10x attach/detach:** `rx_miss=0`, `rx_bad_fd=0`, `fill_bad_cookie=0`, `fill_dup=0` throughout. `xsk_pool_attach_ok`/`detach_ok` both 13, `attach_fail`/`detach_timeout` both 0. `map.live` returns to 0 on every detach (no BMan leak on bpid 5), and the restored non-XSK bpid/count (`3:5119`) looks sane, confirming `fman_port_set_rx_bpool()` restore is correct.
+- **MTU admission gate confirmed live:** with a pool attached (`data_max=3840`), `ip link set mtu 4000` is rejected (`EINVAL`); `mtu 1700` is accepted. Detaching clears `xsk_max_frm` and a plain `mtu 1500` then succeeds, as expected since the check is conditional on an attached pool.
+- **The one non-zero `rx_miss` seen during the gate (13, correlating with VPP TX packet counts) is confirmed to be VPP's ZC TX path, not an RX defect.** With VPP detached and only the bind probe doing RX, misses stayed 0 across multiple runs. VPP's TX-confirmation FDs carry the port's XSK bpid, so they currently hit `fd->bpid == port->bpid` in the RX hook and count as misses. This is the documented D5/P4 coupling, not a P2 regression — fix lands with the P4 confirmation-FQ work.
+- **ASK2 no-regression (`ask-check` on eth1/eth2, same kernel):** 21/26 OK, 0 FAIL, 0 WARN beyond pre-existing "no carrier" (no cable on eth1/eth2 in this test fixture). FE lifecycle, FQ maps, RPS and conntrack all nominal — the shared `dpaa_eth.c`/`fman_port.c` edits in 4023 do not disturb the ASK2 production path.
+- **Still open from P2 scope:** VPP does not receive ICMP echo replies yet (ARP completes both ways, but `eth3-tx`/`eth4-tx` show "syscall required" and `tx-error`). This is the TX wakeup/confirmation gap (P3/P4), not a P2 regression — RX delivery into VPP's `af_xdp-input` node is confirmed working (`rx packets` incrementing, `xsk_zc_rx_redirect == xsk_zc_rx_recovered`).
+
+**P2 verdict: PASS.** RX correctness, map/BMan bookkeeping, detach idempotency and ASK2 non-regression are all confirmed on silicon. Proceeding to P3/P4 to close the TX path.
+
 ### P3: wakeup and refill (D7)
 
 - Route RX and TX wakeups to `qmap[q].cpu`. The candidate mechanism is an IPI per band, kept only if a review confirms it is safe against the portal IRQ handler. Seed the pool on the first wakeup after attach.
@@ -176,7 +186,107 @@ P2 as built (patch 4023 plus `af_xdp_pool_main.c`), where it refines §3.1:
   - The first ping is answered.
   - No `napi_schedule_irqoff` warnings with lockdep enabled in a debug build.
 
-### P4: TX ZC confirmation (D5)
+### P4: TX ZC confirmation (D5) — root cause confirmed on silicon
+
+Board evidence (DUT2, same boot as the P2 run, VPP live on eth3/eth4): sent a
+5-ping burst through VPP's ZC TX path and tracked `xsk_tx_zc_submit` (6->7,
+one frame per burst, `qman_enqueue` never returns `-EBUSY`) against
+`xsk_tx_conf_zc` (stayed at 0 across repeated bursts and 20+ s of idle wait).
+Two checks rule out the alternatives:
+
+- **Not silently falling through to the skb-cleanup path.** F-227
+  (`dpaa_cleanup_tx_fd()`) guards exactly this case — any confirm FD with
+  `fd->bpid != FSL_DPAA_BPID_INV` logs `net_warn_ratelimited("F-227 dropped
+  confirm for FMan HIT FD bpid=...")` before touching `swbp`. `sudo dmesg |
+  grep F-227` is empty after the test. So no confirm FD for these frames
+  reaches `dpaa_tx_conf()` at all (not a crash risk — there is nothing to
+  dereference because nothing arrives).
+- **Why no confirm FD is generated.** `af_xdp_pool_napi_tx_zc()` sets
+  `fd.bpid = priv->xsk_bpid[q]` (a real BMan pool, not `FSL_DPAA_BPID_INV`)
+  and leaves `fd.cmd = 0`, reasoning that omitting `FM_FD_CMD_FCO` keeps the
+  buffer XSK-owned. But `dpaa_tx()`'s per-frame confirmation-FQID override
+  (`fd->cmd |= qman_fq_fqid(priv->conf_fqs[cq])`, dpaa_eth.c ~L2919-2924) is
+  gated on `fd->bpid == FSL_DPAA_BPID_INV` — it never fires for our frames.
+  The egress FQ's static ContextA (`dpaa_fq_init()`, FQ_TYPE_TX,
+  `0x1e00000080000000`, EBD=1) then has FMan hardware auto-deallocate
+  bpid-valid frames with no software-visible confirmation at all. This
+  matches an ASK2 precedent (F-199/F-232, 2026-08-24) that a *different*
+  no-confirm FQ's EBD-only ContextA did **not** reliably suppress confirms
+  on this silicon — but on our FQ's ContextA, with bpid valid and no cmd
+  override, confirms are suppressed completely, consistent with zero F-227
+  hits and zero `xsk_tx_conf_zc` hits.
+
+**Conclusion: the TX ZC path's buffer-ownership scheme (real bpid, omit FCO,
+claim by bpid match) cannot work on this FQ — there is no mechanism left for
+software to ever learn a frame left the wire.** This is not a matching bug
+to patch in `tx_conf_zc()`; it needs the §3.1 contract below. Independent
+review (rubber-duck) confirmed the reasoning but flagged that `qman_enqueue`
+success and even physical transmission are still unconfirmed, and that the
+fix must also reclaim XSK frames on the TX-error/ERN paths (dpaa_eth.c
+~L3851, ~L3898) and preserve XSK completion ordering (completions are
+positional in `net/xdp/xsk.c`, not keyed by address) — both must be handled
+in the fix, not just the confirmation case.
+
+(Earlier reasoning in this phase briefly suspected TX-confirmation FDs could
+leak into the RX hook's bpid match and inflate `rx_miss`; that was based on
+a wrong assumption, since RX and TX-confirm dispatch via separate FQs/dqrr
+callbacks that cannot cross-contaminate. The qdrant memory recording that
+is being corrected.)
+
+**Design constraint found while scoping the fix — rules out the §3.1
+"fallback" option.** `dpaa_tx_conf()` gives `ops->tx_conf_zc()` first crack
+at *every* confirm FD on the interface, skb and XDP included, before any
+skb cleanup (dpaa_eth.c ~L3311-3340) — today this is safe only because the
+bpid check can never match real skb/XDP traffic (those always carry
+`bpid == FSL_DPAA_BPID_INV`, never a real pool id). If the fix instead moves
+ZC frames to `bpid = FSL_DPAA_BPID_INV` + `priv->conf_fqs[cq]` (the shared
+confirmation FQ, §3.1's "fallback" option) and reclaims by a UMEM DMA-range
+check, that check now runs on *every* skb/XDP confirmation on the netdev,
+and a false-positive match steals a real skb/xdp_frame confirmation —
+`consume_skb()`/`xdp_return_frame()` never runs on it, a quiet per-packet
+leak on regular (non-XSK) traffic, i.e. a direct ASK2/kernel-traffic
+regression risk, not merely a performance cost. **Conclusion: the shared-FQ
+fallback is not an acceptable first implementation given the "ASK2 must not
+regress" mandate; the dedicated-FQ-per-band design is mandatory, not just
+the performance-preferred option.** A dedicated FQ gets its own dqrr
+callback, so `ops->tx_conf_zc()` is only ever invoked for XSK traffic and
+cannot see skb/XDP confirmations at all.
+
+Implementation sketch for the dedicated-FQ design (not yet built):
+1. New per-qband `struct dpaa_fq` of type `FQ_TYPE_TX_CONF_MQ` (the existing
+   mainline confirmation-FQ type, not a new enum value), allocated at XSK
+   attach time and spliced into `priv->dpaa_fq_list` so normal teardown
+   frees it; retired (and quiesced) at detach, mirroring the
+   `dpaa_alloc_offload_tx_fq()` pattern (F-199, dpaa_eth.c) but for a
+   *confirming* FQ, not F-199's no-confirm one.
+2. A dedicated dqrr callback (or the existing `conf_dflt_dqrr` reused, since
+   it already calls `dpaa_tx_conf()` → `ops->tx_conf_zc()` first) bound to
+   this FQ at init, so every confirm arriving here is already known to
+   belong to this exact qband — no bpid or address matching needed at all.
+3. `af_xdp_pool_napi_tx_zc()`: set `fd.bpid = FSL_DPAA_BPID_INV` and
+   `fd.cmd |= cpu_to_be32(qman_fq_fqid(priv->xsk_conf_fq[q]))`, mirroring
+   `dpaa_tx()`'s own `conf_fqs[cq]` override (dpaa_eth.c ~L2919-2924) exactly
+   — bpid=INV alone is also what prevents FMan from auto-releasing the UMEM
+   chunk (EBD requires a valid bpid to know which pool to release to), so
+   this also restores the "buffer stays XSK-owned" property the original
+   (broken) design was trying to get from omitting FCO.
+4. `af_xdp_pool_tx_conf_zc()` simplifies to: this confirm arrived on
+   qband q's dedicated FQ (passed in or recovered from FQ private data) ->
+   unconditionally `atomic_dec(xsk_tx_inflight[q])`, `xsk_tx_completed()`,
+   `xsk_tx_conf_zc++`. No bpid/address check required.
+5. Still required per the rubber-duck review: an ERN/egress-error callback
+   on the new FQ (or reuse of `dpaa_fq_cbs.egress_ern`) that also reclaims
+   XSK inflight/completion bookkeeping — a submit that never reaches the
+   wire must not leak an inflight slot or a UMEM chunk. Completion ordering
+   is positional in XSK core (`net/xdp/xsk.c`, not keyed by address), so
+   confirms for a given qband must be processed in the same order they were
+   submitted; the existing single-CPU-per-qband producer pinning plus one
+   dedicated FQ per qband (single consumer order = enqueue order) should
+   preserve this, but it must be verified, not assumed.
+6. Qdrant gate before touching FQ/channel/dqrr plumbing (already run twice
+   this phase); independent review of the fix (not just the diagnosis)
+   before it is considered done, per repo convention for FMan/QMan-adjacent
+   changes with shared-path blast radius.
 
 - Apply the confirmation contract and dedicated confirmation FQ from §3.1, keep the per-band inflight budget, and make detach retire the FQ.
 - Qdrant gate on TX FQ ContextA/EBD, `FCO` and the confirmation FQ lifecycle. Get independent review before and after.

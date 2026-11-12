@@ -88,6 +88,12 @@
 #define AFX_FILL_BUDGET		256
 #define AFX_SETTLE_TRIES	200
 
+/* dpaa_eth.c-private: FD bpid meaning "no BMan buffer", and the FD command
+ * bits FMan reads for the confirmation: FCO plus the 24-bit confirmation FQID.
+ */
+#define AFX_BPID_INV		0xff
+#define AFX_FD_CMD_FQID_MASK	0x00ffffff
+
 /* AFX_MAP_BEGIN: plain C, extracted and exercised by tests/dpaa_xsk_zc.py */
 
 /*
@@ -170,14 +176,27 @@ struct afx_stats {
 	u64 rx_redirect_fail;	/* xdp_do_redirect() error; frame dropped */
 	u64 rx_drop;		/* DROP/ABORTED/other XDP verdicts */
 	u64 err_release;	/* error-FQ FD returned to the pool */
+	u64 tx_err;		/* Tx error/ERN FD completed to the XSK ring */
 	u64 fill_batches;
 	u64 fill_bad_cookie;	/* misaligned or out-of-range, left allocated */
 	u64 fill_dup;		/* cookie already live, left allocated */
 	u64 fill_release_fail;	/* bman_release() failed, chunk freed */
 };
 
+/*
+ * Dedicated Tx confirmation FQ of the attached qband.  Every ZC Tx FD names
+ * this FQID in its command word, so a confirmation reaching afx_txconf_dqrr()
+ * is by construction an XSK chunk; no other traffic is ever dispatched to it.
+ */
+struct afx_txconf {
+	struct qman_fq fq;
+	struct dpaa_priv *priv;
+	u16 qid;
+};
+
 struct af_xdp_port {
 	spinlock_t lock;
+	struct afx_txconf txc;
 	struct afx_map map;
 	struct xsk_buff_pool *pool;
 	struct bman_pool *bpool;
@@ -209,6 +228,99 @@ static struct fman_port *afx_rx_port(struct dpaa_priv *priv)
 	fm = fman_bind(priv->mac_dev->fman_dev);
 	return fm ? fman_port_lookup_rx(fm, fman_port_get_id(
 			priv->mac_dev->port[DPAA_MAC_PORT_RX])) : NULL;
+}
+
+/* Return one Tx chunk to user space: advance the completion ring, free the slot. */
+static void afx_tx_complete(struct dpaa_priv *priv, u16 q)
+{
+	struct xsk_buff_pool *pool;
+
+	rcu_read_lock();
+	pool = rcu_dereference(priv->xsk_pool[q]);
+	if (pool)
+		xsk_tx_completed(pool, 1);
+	rcu_read_unlock();
+	atomic_dec(&priv->xsk_tx_inflight[q]);
+}
+
+/*
+ * Confirmation FD of a ZC Tx frame.  Runs on the CPU that owns the qband
+ * (the FQ sits on that CPU's portal channel), the same context that
+ * submits, so each qband's completion ring has a single producer.  Mirrors
+ * dpaa_eth.c's dpaa_eth_napi_schedule(): from the portal interrupt only
+ * schedule NAPI, the entry is dequeued again from the poll loop.
+ */
+static enum qman_cb_dqrr_result afx_txconf_dqrr(struct qman_portal *portal,
+						struct qman_fq *fq,
+						const struct qm_dqrr_entry *dq,
+						bool sched_napi)
+{
+	struct afx_txconf *c = container_of(fq, struct afx_txconf, fq);
+	struct dpaa_priv *priv = c->priv;
+	struct dpaa_percpu_priv *pcpu = this_cpu_ptr(priv->percpu_priv);
+
+	if (sched_napi) {
+		qman_p_irqsource_remove(portal, QM_PIRQ_DQRI);
+		pcpu->np.p = portal;
+		napi_schedule(&pcpu->np.napi);
+		pcpu->in_interrupt++;
+		return qman_cb_dqrr_stop;
+	}
+
+	afx_tx_complete(priv, c->qid);
+	priv->xsk_tx_conf_zc++;
+	return qman_cb_dqrr_consume;
+}
+
+static int afx_txconf_create(struct dpaa_priv *priv, struct af_xdp_port *port,
+			     u16 qid, int cpu)
+{
+	struct afx_txconf *c = &port->txc;
+	struct qm_mcc_initfq initfq;
+	int err;
+
+	c->priv = priv;
+	c->qid = qid;
+	c->fq.cb.dqrr = afx_txconf_dqrr;
+
+	err = qman_create_fq(0, QMAN_FQ_FLAG_NO_ENQUEUE |
+			     QMAN_FQ_FLAG_DYNAMIC_FQID, &c->fq);
+	if (err)
+		return err;
+
+	memset(&initfq, 0, sizeof(initfq));
+	initfq.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL | QM_INITFQ_WE_DESTWQ);
+	initfq.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
+	/* Same work queue as the kernel's confirmation FQs. */
+	qm_fqd_set_destwq(&initfq.fqd, qman_affine_channel(cpu), 1);
+
+	err = qman_init_fq(&c->fq, QMAN_INITFQ_FLAG_SCHED, &initfq);
+	if (err < 0) {
+		qman_destroy_fq(&c->fq);
+		return err;
+	}
+	return 0;
+}
+
+/* Only called with nothing in flight, so the FQ is empty. */
+static void afx_txconf_destroy(struct dpaa_priv *priv, struct afx_txconf *c)
+{
+	struct device *dev = priv->net_dev->dev.parent;
+	int err, i;
+
+	err = qman_retire_fq(&c->fq, NULL);
+	if (err < 0)
+		dev_warn(dev, "af_xdp_pool: retire Tx confirm FQ %u: %d\n",
+			 c->fq.fqid, err);
+	/* 1: retirement pending until the portal sees the FQRN. */
+	for (i = 0; err >= 0 && i < 100 &&
+	     c->fq.state != qman_fq_state_retired; i++)
+		msleep(10);
+	err = qman_oos_fq(&c->fq);
+	if (err < 0)
+		dev_warn(dev, "af_xdp_pool: OOS Tx confirm FQ %u: %d\n",
+			 c->fq.fqid, err);
+	qman_destroy_fq(&c->fq);
 }
 
 /*
@@ -437,7 +549,7 @@ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
 	struct fman_port *rxp;
 	u32 rx_off, data_max, bsize;
 	u32 slots = 1U << AFX_TABLE_BITS;
-	int ret;
+	int ret, target_cpu;
 
 	if (!priv || !pool)
 		return -EINVAL;
@@ -531,6 +643,13 @@ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
 		goto err_rxq;
 	xsk_pool_set_rxq_info(pool, &priv->xsk_zc_rxq[queue_id]);
 
+	/* The qband's Tx is submitted and confirmed on this CPU. */
+	target_cpu = (int)queue_id % max(num_online_cpus(), 1U);
+	atomic_set(&priv->xsk_tx_inflight[queue_id], 0);
+	ret = afx_txconf_create(priv, port, queue_id, target_cpu);
+	if (ret)
+		goto err_rxq;
+
 	priv->xsk_bpid[queue_id] = port->bpid;
 	priv->xsk_bpool[queue_id] = port->bpool;
 	priv->xsk_max_frm = data_max;
@@ -543,7 +662,6 @@ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
 
 	{
 		struct dpaa_percpu_priv *pcpu;
-		int target_cpu = (int)queue_id % max(num_online_cpus(), 1U);
 
 		pcpu = per_cpu_ptr(priv->percpu_priv, target_cpu);
 		WRITE_ONCE(priv->qmap[queue_id].napi, &pcpu->np.napi);
@@ -595,6 +713,7 @@ err_unpublish:
 	priv->xsk_bpid[queue_id] = 0;
 	priv->xsk_bpool[queue_id] = NULL;
 	synchronize_net();
+	afx_txconf_destroy(priv, &port->txc);
 err_rxq:
 	xdp_rxq_info_unreg(&priv->xsk_zc_rxq[queue_id]);
 err_bpool:
@@ -748,11 +867,30 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
 		return -EAGAIN;
 	}
 
+	/* Quiesced: no new Tx is submitted once running NAPI passes have
+	 * ended.  Every submitted chunk must be confirmed before the pool and
+	 * the confirmation FQ go away.
+	 */
+	synchronize_net();
+	for (tries = 0; tries < AFX_SETTLE_TRIES; tries++) {
+		if (!atomic_read(&priv->xsk_tx_inflight[queue_id]))
+			break;
+		msleep(10);
+	}
+	if (atomic_read(&priv->xsk_tx_inflight[queue_id])) {
+		priv->xsk_pool_detach_timeout++;
+		dev_warn_ratelimited(priv->net_dev->dev.parent,
+				     "af_xdp_pool: %d Tx chunks still in flight; deferring detach\n",
+				     atomic_read(&priv->xsk_tx_inflight[queue_id]));
+		return -EAGAIN;
+	}
+
 	smp_store_release(&priv->xsk_port, NULL);
 	rcu_assign_pointer(priv->xsk_pool[queue_id], NULL);
 	priv->xsk_max_frm = 0;
 	synchronize_net();
 
+	afx_txconf_destroy(priv, &port->txc);
 	if (xdp_rxq_info_is_reg(&priv->xsk_zc_rxq[queue_id]))
 		xdp_rxq_info_unreg(&priv->xsk_zc_rxq[queue_id]);
 	xsk_pool_dma_unmap(port->pool, DMA_ATTR_SKIP_CPU_SYNC);
@@ -874,122 +1012,98 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
 }
 
 /*
- * af_xdp_pool_napi_tx_zc - drain XSK Tx ring into DPAA1 egress FQs
+ * af_xdp_pool_napi_tx_zc - drain the XSK Tx ring into the DPAA1 egress FQs
  *
- * M3-3 step 5 (patch 0085, spec sec 6.1.4). Called from
- * dpaa_eth_poll() tail inside the same rcu_read_lock() region as
- * napi_refill, AFTER napi_complete_done() and BEFORE the QMan
- * DQRR interrupt is re-armed.
+ * Called from dpaa_eth_poll() in the rcu_read_lock() region at NAPI
+ * completion.  Only the CPU that owns the attached qband submits, so the
+ * Tx ring has a single consumer.  Per call:
+ *   1. If inflight >= DPAA1_XSK_TX_MAX_INFLIGHT, count backpressure, stop.
+ *   2. Take up to min(MAX_INFLIGHT - inflight, 64) descriptors.
+ *   3. Per descriptor build a contiguous FD at the UMEM chunk and enqueue
+ *      it on this CPU's egress FQ.
  *
- * Per bound qband (priv->xsk_bpool[qband] non-NULL):
- *   1. atomic_read(xsk_tx_inflight[qband]). If >= DPAA1_XSK_TX_MAX_INFLIGHT
- *      (1024) -> bump xsk_tx_backpressure and skip.
- *   2. budget = min(MAX_INFLIGHT - inflight, 64).
- *   3. n = xsk_tx_peek_release_desc_batch(pool, budget).
- *   4. For each pool->tx_descs[i] in [0..n):
- *        - dma = xsk_buff_raw_get_dma(pool, d.addr)
- *        - Build qm_fd: contig 0/len, addr=dma, bpid=xsk_bpid[q]
- *          (the bpid is our TxConf claim marker; FCO NOT set --
- *          the XSK UMEM chunk is NOT BMan-owned).
- *        - egress_fq = priv->egress_fqs[raw_smp_processor_id() %
- *          dpaa_max_num_txqs()].
- *        - qman_enqueue retry loop (DPAA_ENQUEUE_RETRIES on -EBUSY).
- *          Hard fail: bump xsk_tx_backpressure, break inner loop.
- *        - Success: atomic_inc(xsk_tx_inflight[q]), submitted++.
- *   5. If submitted > 0: priv->xsk_tx_zc_submit++.
- *
- * Inflight decrement happens in af_xdp_pool_tx_conf_zc(). xsk_tx_completed(
- * pool, 1) is called there per claimed FD.
- *
- * NAPI-context. xsk_tx_inflight[] is atomic_t to be lockless against the
- * TxConf path which may run on a different CPU.
+ * FD ownership.  bpid is FSL_DPAA_BPID_INV, so FMan has no BMan pool to
+ * release the chunk to, and FCO plus the dedicated confirmation FQID makes
+ * FMan enqueue the confirmation to afx_txconf_dqrr() instead.  That, and
+ * only that, completes the chunk (xsk_tx_completed() + inflight--).  A real
+ * bpid here would let FMan deallocate the chunk into that pool with no
+ * confirmation at all.
  */
 static void af_xdp_pool_napi_tx_zc(struct dpaa_priv *priv)
 {
-struct xsk_buff_pool *pool;
-struct qman_fq *egress_fq;
-struct xdp_desc *descs;
-struct qm_fd fd;
-dma_addr_t dma;
-u32 budget, n, i, submitted;
-int inflight, j, err;
-u16 q;
+	struct xsk_buff_pool *pool;
+	struct af_xdp_port *port;
+	struct qman_fq *egress_fq;
+	struct xdp_desc *descs;
+	struct qm_fd fd;
+	u32 budget, n, i, submitted;
+	int inflight, j, err;
+	u16 q;
 
-if (!priv)
-return;
+	if (!priv)
+		return;
 
-for (q = 0; q < priv->xsk_max_qbands && q < DPAA1_XSK_MAX_QBANDS; q++) {
-if (!priv->xsk_bpool[q])
-continue;
-pool = rcu_dereference(priv->xsk_pool[q]);
-if (!pool)
-continue;
+	port = smp_load_acquire(&priv->xsk_port);
+	if (!port || READ_ONCE(port->quiesced))
+		return;
+	q = port->qid;
+	if (q >= priv->xsk_max_qbands || q >= DPAA1_XSK_MAX_QBANDS)
+		return;
+	pool = rcu_dereference(priv->xsk_pool[q]);
+	if (!pool)
+		return;
 
-/* v2: single-CPU pin. Only the qband-owner CPU drains this
- * qband's XSK Tx ring -> QMan enqueue. Other CPUs skip,
- * making each qband's Tx ring single-consumer (matches the
- * XSK SPSC cursor contract). Mirror of the 0084v2 fix on the
- * fill-ring side; same race, same one-line fix. The TxConf
- * side (af_xdp_pool_tx_conf_zc) is intentionally NOT pinned
- * — its bpid-claim scheme is designed for cross-CPU demux.
- */
-if (raw_smp_processor_id() != priv->qmap[q].cpu)
-continue;
+	/* Only the qband-owner CPU drains this qband's Tx ring, keeping it
+	 * single-consumer; confirmations arrive on the same CPU.
+	 */
+	if (raw_smp_processor_id() != READ_ONCE(priv->qmap[q].cpu))
+		return;
 
-inflight = atomic_read(&priv->xsk_tx_inflight[q]);
-if (inflight >= DPAA1_XSK_TX_MAX_INFLIGHT) {
-priv->xsk_tx_backpressure++;
-continue;
-}
+	inflight = atomic_read(&priv->xsk_tx_inflight[q]);
+	if (inflight >= DPAA1_XSK_TX_MAX_INFLIGHT) {
+		priv->xsk_tx_backpressure++;
+		return;
+	}
 
-budget = (u32)(DPAA1_XSK_TX_MAX_INFLIGHT - inflight);
-if (budget > 64)
-budget = 64;
+	budget = min_t(u32, DPAA1_XSK_TX_MAX_INFLIGHT - inflight, 64);
+	n = xsk_tx_peek_release_desc_batch(pool, budget);
+	if (!n)
+		return;
 
-n = xsk_tx_peek_release_desc_batch(pool, budget);
-if (!n)
-continue;
+	egress_fq = priv->egress_fqs[raw_smp_processor_id() %
+				     dpaa_max_num_txqs()];
+	descs = pool->tx_descs;
+	submitted = 0;
+	for (i = 0; i < n; i++) {
+		memset(&fd, 0, sizeof(fd));
+		qm_fd_addr_set64(&fd, xsk_buff_raw_get_dma(pool, descs[i].addr));
+		qm_fd_set_contig(&fd, 0, (int)descs[i].len);
+		fd.bpid = AFX_BPID_INV;
+		fd.cmd = cpu_to_be32(FM_FD_CMD_FCO |
+				     (qman_fq_fqid(&port->txc.fq) &
+				      AFX_FD_CMD_FQID_MASK));
 
-descs = pool->tx_descs;
-submitted = 0;
-for (i = 0; i < n; i++) {
-dma = xsk_buff_raw_get_dma(pool, descs[i].addr);
+		/* DPAA_ENQUEUE_RETRIES is private to dpaa_eth.c. */
+		err = -EBUSY;
+		for (j = 0; j < 100000; j++) {
+			err = qman_enqueue(egress_fq, &fd);
+			if (err != -EBUSY)
+				break;
+		}
+		if (err) {
+			/* The ring slots are already consumed; complete the
+			 * rest unsent so the chunks return to user space.
+			 */
+			priv->xsk_tx_backpressure++;
+			xsk_tx_completed(pool, n - i);
+			break;
+		}
+		atomic_inc(&priv->xsk_tx_inflight[q]);
+		submitted++;
+	}
 
-memset(&fd, 0, sizeof(fd));
-qm_fd_addr_set64(&fd, dma);
-qm_fd_set_contig(&fd, 0, (int)descs[i].len);
-fd.bpid = priv->xsk_bpid[q];
-/* No FM_FD_CMD_FCO: XSK UMEM chunk MUST NOT be released
- * to BMan. Release goes through xsk_tx_completed() in
- * the TxConf hook.
- */
-
-egress_fq = priv->egress_fqs[raw_smp_processor_id() %
-     dpaa_max_num_txqs()];
-
-err = -EBUSY;
-/* DPAA_ENQUEUE_RETRIES is a #define private to dpaa_eth.c
- * (value 100000); inline the same constant here rather than
- * exporting it through dpaa_eth.h. The value is a stable upper
- * bound on QMan EQCR slot-refill latency under congestion --
- * it has not changed since the driver was upstreamed.
- */
-for (j = 0; j < 100000; j++) {
-err = qman_enqueue(egress_fq, &fd);
-if (err != -EBUSY)
-break;
-}
-if (err) {
-priv->xsk_tx_backpressure++;
-break;
-}
-atomic_inc(&priv->xsk_tx_inflight[q]);
-submitted++;
-}
-
-if (submitted)
-priv->xsk_tx_zc_submit++;
-}
+	if (submitted)
+		priv->xsk_tx_zc_submit++;
 }
 
 /*
@@ -1026,50 +1140,52 @@ xsk_set_tx_need_wakeup(pool);
 }
 }
 
-/*
- * af_xdp_pool_tx_conf_zc - claim XSK-bpid TxConf FDs
- *
- * M3-3 step 5 (patch 0085, spec sec 6.1.4 round-trip closure).
- * Called from dpaa_tx_conf() BEFORE the skb-cleanup path. FD's bpid is
- * our claim marker (napi_tx_zc set fd.bpid = priv->xsk_bpid[q]).
- *
- * Returns true if FD claimed (caller MUST NOT run skb cleanup); false
- * otherwise.
- *
- * Per claimed FD:
- *   - atomic_dec(xsk_tx_inflight[q]) to free a budget slot.
- *   - xsk_tx_completed(pool, 1) to advance userspace CQ head one slot.
- *   - priv->xsk_tx_conf_zc++ for observability.
- *
- * If pool detached between submit and confirm (XDP_UNBIND while in
- * flight), skip xsk_tx_completed() but still atomic_dec -- inflight
- * MUST drop or the next attach starts polluted.
- */
-static bool af_xdp_pool_tx_conf_zc(struct dpaa_priv *priv,
-   const struct qm_fd *fd)
+/* True if @addr lies in a page of the attached UMEM. */
+static bool afx_addr_in_umem(struct xsk_buff_pool *pool, u64 addr)
 {
-struct xsk_buff_pool *pool;
-u8 bpid;
-u16 q;
+	u32 i;
 
-if (!priv || !fd)
-return false;
-
-bpid = fd->bpid;
-for (q = 0; q < priv->xsk_max_qbands && q < DPAA1_XSK_MAX_QBANDS; q++) {
-if (!priv->xsk_bpool[q])
-continue;
-if (priv->xsk_bpid[q] != bpid)
-continue;
-
-atomic_dec(&priv->xsk_tx_inflight[q]);
-pool = rcu_dereference(priv->xsk_pool[q]);
-if (pool)
-xsk_tx_completed(pool, 1);
-priv->xsk_tx_conf_zc++;
-return true;
+	for (i = 0; i < pool->dma_pages_cnt; i++)
+		if ((pool->dma_pages[i] & PAGE_MASK) == (addr & PAGE_MASK))
+			return true;
+	return false;
 }
-return false;
+
+/*
+ * af_xdp_pool_tx_err_zc - claim a ZC Tx FD that reached an error path
+ *
+ * Called from dpaa_tx_error() and the egress ERN handler, which would
+ * otherwise treat the FD address as an skb buffer.  Such an FD is ours if
+ * it carries our confirmation FQID; the UMEM address check covers an FD
+ * whose command word was rewritten on the way.  The chunk is completed to
+ * the XSK ring exactly as a confirmation would.  Runs in NAPI/portal
+ * context with rcu_read_lock() held; both paths are error-only.
+ */
+static bool af_xdp_pool_tx_err_zc(struct dpaa_priv *priv,
+				  const struct qm_fd *fd)
+{
+	struct af_xdp_port *port;
+	struct xsk_buff_pool *pool;
+	u16 q;
+
+	if (!priv || !fd || fd->bpid != AFX_BPID_INV)
+		return false;
+	port = smp_load_acquire(&priv->xsk_port);
+	if (!port)
+		return false;
+	q = port->qid;
+	pool = rcu_dereference(priv->xsk_pool[q]);
+	if (!pool)
+		return false;
+
+	if ((be32_to_cpu(fd->cmd) & AFX_FD_CMD_FQID_MASK) !=
+	    qman_fq_fqid(&port->txc.fq) &&
+	    !afx_addr_in_umem(pool, qm_fd_addr(fd)))
+		return false;
+
+	port->st.tx_err++;
+	afx_tx_complete(priv, q);
+	return true;
 }
 
 /* ---------- Ops tables ---------- */
@@ -1085,7 +1201,7 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
 .napi_refill            = af_xdp_pool_napi_refill,
 .napi_tx_zc             = af_xdp_pool_napi_tx_zc,
 .xsk_set_tx_need_wakeup = af_xdp_pool_xsk_set_tx_need_wakeup,
-.tx_conf_zc             = af_xdp_pool_tx_conf_zc,
+.tx_err_zc              = af_xdp_pool_tx_err_zc,
 };
 
 /* ---------- debugfs: /sys/kernel/debug/af_xdp_pool/qmap ----------

@@ -1,0 +1,120 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 9e3c785f1..c51497af1 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3218,6 +3218,23 @@ static void dpaa_rx_error(struct net_device *net_dev,
+ 	dpaa_fd_release(net_dev, fd);
+ }
+ 
++/* A zero-copy XSK Tx frame on an error path is not an skb: the flavor module
++ * completes its chunk to the XSK ring instead.
++ */
++static bool dpaa_tx_zc_fail(const struct dpaa_priv *priv,
++			    const struct qm_fd *fd)
++{
++	const struct dpaa_qmgmt_ops *ops;
++	bool claimed = false;
++
++	rcu_read_lock();
++	ops = rcu_dereference(priv->qmgmt_ops);
++	if (ops && ops->tx_err_zc)
++		claimed = ops->tx_err_zc((struct dpaa_priv *)priv, fd);
++	rcu_read_unlock();
++	return claimed;
++}
++
+ static void dpaa_tx_error(struct net_device *net_dev,
+ 			  const struct dpaa_priv *priv,
+ 			  struct dpaa_percpu_priv *percpu_priv,
+@@ -3232,6 +3249,9 @@ static void dpaa_tx_error(struct net_device *net_dev,
+ 
+ 	percpu_priv->stats.tx_errors++;
+ 
++	if (dpaa_tx_zc_fail(priv, fd))
++		return;
++
+ 	skb = dpaa_cleanup_tx_fd(priv, fd, false);
+ 	dev_kfree_skb(skb);
+ }
+@@ -3316,31 +3336,6 @@ static void dpaa_tx_conf(struct net_device *net_dev,
+ {
+ 	struct sk_buff	*skb;
+ 
+-	/* M3-3 step 5 (patch 0085): give the flavor module first crack
+-	 * at the TxConf FD. If it returns true, the FD belonged to an
+-	 * XSK qband (bpid matched priv->xsk_bpid[q]); the flavor has
+-	 * called xsk_tx_completed() and atomic_dec'd xsk_tx_inflight;
+-	 * we MUST NOT run dpaa_cleanup_tx_fd() on it (no skb backing
+-	 * -- the FD's DMA address is an XSK UMEM chunk still owned by
+-	 * the pool). Strictly NAPI-context. With no flavor module
+-	 * loaded (default flavor) ops is NULL and the fast path falls
+-	 * through to the existing skb cleanup verbatim. Spec sec 6.1.4
+-	 * round-trip closure.
+-	 */
+-	{
+-		const struct dpaa_qmgmt_ops *ops;
+-
+-		rcu_read_lock();
+-		ops = rcu_dereference(priv->qmgmt_ops);
+-		if (ops && ops->tx_conf_zc &&
+-		    ops->tx_conf_zc((struct dpaa_priv *)priv, fd)) {
+-			rcu_read_unlock();
+-			percpu_priv->tx_confirm++;
+-			return;
+-		}
+-		rcu_read_unlock();
+-	}
+-
+ 	if (unlikely(be32_to_cpu(fd->status) & FM_FD_STAT_TX_ERRORS)) {
+ 		if (net_ratelimit())
+ 			netif_warn(priv, hw, net_dev, "FD status = 0x%08x\n",
+@@ -3913,6 +3908,9 @@ static void egress_ern(struct qman_portal *portal,
+ 	percpu_priv->stats.tx_fifo_errors++;
+ 	count_ern(percpu_priv, msg);
+ 
++	if (dpaa_tx_zc_fail(priv, fd))
++		return;
++
+ 	skb = dpaa_cleanup_tx_fd(priv, fd, false);
+ 	dev_kfree_skb_any(skb);
+ }
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+index 8843bb628..5b3064946 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+@@ -48,7 +48,7 @@ struct dpaa_pcd_ops {
+ /* Forward declaration -- struct qm_fd is defined in <soc/fsl/qman.h>
+  * but we deliberately do NOT include that header here to keep this
+  * inter-module ABI surface minimal. Callers and implementors of
+- * tx_conf_zc must pull in qman.h themselves.
++ * tx_err_zc must pull in qman.h themselves.
+  */
+ struct qm_fd;
+ 
+@@ -71,10 +71,13 @@ struct qm_fd;
+  * @xsk_set_tx_need_wakeup: arm XSK tx-need-wakeup when in-flight budget
+  *                    is exhausted OR the Tx ring is drained.
+  *                    Spec sec 6.1.4.
+- * @tx_conf_zc:       M3-3 step 5 - claim XSK-bpid TxConf FDs in the
+- *                    dpaa_tx_conf() path. Returns true to short-circuit
+- *                    the skb cleanup path; calls xsk_tx_completed()
+- *                    and atomic_dec(xsk_tx_inflight). Spec sec 6.1.4.
++ * @tx_err_zc:        Called from the Tx error FQ callback and the egress
++ *                    ERN handler before the skb cleanup. Returns true when
++ *                    the FD is a zero-copy XSK Tx frame; the callee has
++ *                    then completed the chunk to the XSK ring and the FD
++ *                    must not be cleaned up as an skb. Confirmations of
++ *                    such frames never reach dpaa_tx_conf(): they go to a
++ *                    dedicated FQ owned by the flavor module.
+  * @rx_release:       Called from the RX error FQ callback, in NAPI context,
+  *                    while a pool is attached. Returns true when the FD's
+  *                    buffer belongs to the attached XSK pool; the callee
+@@ -95,7 +98,7 @@ void (*napi_refill)(struct dpaa_priv *priv);
+ void (*napi_tx_zc)(struct dpaa_priv *priv);
+ void (*xsk_set_tx_need_wakeup)(struct dpaa_priv *priv,
+        struct dpaa_napi_portal *np);
+-bool (*tx_conf_zc)(struct dpaa_priv *priv, const struct qm_fd *fd);
++bool (*tx_err_zc)(struct dpaa_priv *priv, const struct qm_fd *fd);
+ 	bool (*rx_release)(struct dpaa_priv *priv, const struct qm_fd *fd);
+ };
+ 
