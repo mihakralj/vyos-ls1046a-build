@@ -206,6 +206,7 @@ struct af_xdp_port {
 	u16 qid;
 	u8 bpid;
 	bool quiesced;		/* detach started: free, never redirect */
+	bool allmulti;		/* we hold a dev_set_allmulti() reference */
 	u16 rx_off;		/* FD offset FMan applies */
 	u32 data_max;		/* largest frame one buffer holds */
 	struct afx_stats st;
@@ -750,6 +751,17 @@ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
 	afx_fill_locked(priv, port);
 	spin_unlock_bh(&port->lock);
 
+	/* The MAC drops multicast that is not in its hash filter, and the
+	 * kernel never learns the groups the user-space stack joins (IPv6
+	 * neighbour discovery, OSPF, VRRP, mDNS).  Accept all multicast
+	 * while the pool is attached.
+	 */
+	if (!dev_set_allmulti(ndev, 1))
+		port->allmulti = true;
+	else
+		dev_warn(ndev->dev.parent,
+			 "af_xdp_pool: cannot enable allmulti; multicast may be dropped\n");
+
 	priv->xsk_zc_rx_armed++;
 	priv->xsk_pool_attach_ok++;
 	dev_info(ndev->dev.parent,
@@ -941,6 +953,8 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
 	priv->xsk_max_frm = 0;
 	synchronize_net();
 
+	if (port->allmulti)
+		dev_set_allmulti(priv->net_dev, -1);
 	afx_txconf_destroy(priv, &port->txc);
 	if (xdp_rxq_info_is_reg(&priv->xsk_zc_rxq[queue_id]))
 		xdp_rxq_info_unreg(&priv->xsk_zc_rxq[queue_id]);
@@ -1370,7 +1384,16 @@ seq_printf(m,
    priv->qmap[q].napi,
    atomic_read(&priv->xsk_tx_inflight[q]));
 }
+seq_printf(m, "  attached=%d\n", priv->xsk_port != NULL);
 seq_putc(m, '\n');
+}
+{
+int cpu;
+
+spin_lock(&afx_cpu_lock);
+for_each_online_cpu(cpu)
+seq_printf(m, "owner_cpu_refs cpu%d=%u\n", cpu, afx_cpu_refs[cpu]);
+spin_unlock(&afx_cpu_lock);
 }
 rtnl_unlock();
 return 0;
