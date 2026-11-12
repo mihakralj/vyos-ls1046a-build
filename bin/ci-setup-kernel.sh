@@ -1034,7 +1034,14 @@ scripts/config --set-val CONFIG_NFS_FS y
 scripts/config --set-val CONFIG_NFS_V4 y
 scripts/config --set-val CONFIG_NFS_V4_1 y
 scripts/config --set-val CONFIG_SUNRPC y
-scripts/config --set-val CONFIG_VFIO y
+# VFIO must build as a module: vpp.py's `apply()` modprobe/modprobe-r cycles
+# vfio + vfio_iommu_type1 on every `set vpp` / `delete vpp` commit so DPDK-bound
+# NICs release the IOMMU group. A built-in VFIO (=y, as this used to force)
+# cannot be unloaded, so `delete vpp` always fails with "Unloading Kernel
+# module vfio_iommu_type1 failed" and the commit aborts with VPP still bound.
+# CONFIG_VFIO and CONFIG_VFIO_IOMMU_TYPE1 are tristate upstream; force =m.
+scripts/config --set-val CONFIG_VFIO m
+scripts/config --set-val CONFIG_VFIO_IOMMU_TYPE1 m
 scripts/config --set-val CONFIG_CMA y
 scripts/config --set-val CONFIG_DMA_CMA y
 scripts/config --set-val CONFIG_CMA_SIZE_MBYTES 32
