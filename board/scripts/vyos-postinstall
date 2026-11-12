@@ -184,6 +184,12 @@ setup_uboot_env_once() {
                 echo "  Detected old inline-bootargs vyos format — refreshing for VPP bootarg space."
                 stale=1
             fi
+            # vyos_boot must append vyos.env's vyos_extra_args (the GRUB kernel options), else every boot
+            # kexecs once in system_option.py to add them.
+            if ! fw_printenv -n vyos_boot 2>/dev/null | grep -q 'vyos_extra_args'; then
+                echo "  Detected vyos_boot without vyos_extra_args — refreshing (avoids the boot-time kexec)."
+                stale=1
+            fi
             # Heal a stale/non-standard bootcmd. The most common cause is the
             # manual dev-loop `run ask_boot ...` (or any `tftp`/`dev_boot`
             # variant) left in QSPI NOR: because `add system image` only
@@ -232,7 +238,7 @@ setup_uboot_env_once() {
     vyos_load_val='ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img'
 
     local vyos_boot_val
-    vyos_boot_val='setenv bootargs BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 loglevel=4 systemd.show_status=true net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60; setenv bootargs ${bootargs} sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1 vyos-union=/boot/${vyos_image}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+    vyos_boot_val='setenv bootargs BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 loglevel=4 systemd.show_status=true net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60; setenv bootargs ${bootargs} sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1 vyos-union=/boot/${vyos_image}; setenv bootargs "${bootargs} ${vyos_extra_args}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 
     local vyos_val
     vyos_val='run vyos_load; run vyos_boot'
@@ -437,13 +443,46 @@ detect_current_image() {
     detect_latest_image "$root"
 }
 
+# The VyOS-managed kernel options of an image (system option kdump/kernel/...): its GRUB boot_opts minus
+# vyos-1x's BOOT_OPTS_STEM. U-Boot never reads GRUB, so without these on the U-Boot cmdline
+# system_option.py sees a MANAGED_PARAMS mismatch at boot and kexecs, on every boot.
+grub_extra_args() {
+    local image_name="$1" root="$2" opts t out=""
+    local -; set -f   # tokens are split on whitespace, never glob-expanded
+    opts=$(sed -n 's/^[[:space:]]*set boot_opts="\(.*\)"[[:space:]]*$/\1/p' \
+        "${root}/boot/grub/grub.cfg.d/vyos-versions/${image_name}.cfg" 2>/dev/null | head -1)
+    for t in $opts; do
+        case "$t" in
+            boot=live|rootdelay=5|noautologin|net.ifnames=0|biosdevname=0|vyos-union=*) ;;
+            # would break or inject into the U-Boot hush script that expands vyos_extra_args
+            *[\'\"\;\$\\]*) echo "WARNING: kernel option '$t' not passed to U-Boot (unsafe characters)" >&2 ;;
+            *) out="${out:+$out }$t" ;;
+        esac
+    done
+    echo "$out"
+}
+
+# U-Boot's ext4load does not replay the ext4 journal: a vyos.env change that is only committed to the
+# journal (sync alone) is invisible to U-Boot until the next clean unmount, so a power cut after an upgrade
+# boots the old file. EXT4_IOC_CHECKPOINT (_IOW('f', 43, __u32) = 0x4004662b, kernel >= 5.13) writes the
+# journal back to the filesystem without freezing it.
+fs_checkpoint() {
+    sync
+    python3 -c 'import fcntl,os,struct,sys; fd=os.open(sys.argv[1],os.O_RDONLY); fcntl.ioctl(fd,0x4004662b,struct.pack("I",0))' \
+        "$1" 2>/dev/null || echo "WARNING: ext4 journal checkpoint failed for $1; U-Boot sees it after the next clean shutdown" >&2
+}
+
 write_vyos_env() {
     local image_name="$1"
     local root="$2"
     local env_path="${root}/boot/${VYOS_ENV_FILE}"
+    local extra
+    extra=$(grub_extra_args "$image_name" "$root")
 
-    if printf 'vyos_image=%s\n' "$image_name" > "$env_path"; then
-        echo "✓ Written: ${env_path} → vyos_image=${image_name}"
+    if { printf 'vyos_image=%s\n' "$image_name"
+         [ -z "$extra" ] || printf 'vyos_extra_args=%s\n' "$extra"; } > "$env_path"; then
+        echo "✓ Written: ${env_path} → vyos_image=${image_name}${extra:+ vyos_extra_args=${extra}}"
+        fs_checkpoint "$env_path"
     else
         echo "ERROR: Cannot write ${env_path} — check permissions and mount state"
         RC=1
@@ -525,4 +564,5 @@ main() {
     exit $RC
 }
 
-main "$@"
+# Sourced (tests/vyos_postinstall_env.sh): define the functions only.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
