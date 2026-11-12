@@ -247,8 +247,9 @@ static unsigned int wgfp_fanout;
  * 1-3 have headroom.  wgfp_fanout_home = m gives worker 0 one batch in m. */
 static unsigned int wgfp_fanout_home;
 #define WGFP_FANOUT_HOME_MAX	64
-/* Spread mode: RX records go to the port's ORP queue (default off). */
-static bool wgfp_spread;
+/* Spread mode: RX records go to the port's ORP queue, so one tunnel's receive
+ * work runs on every CPU in order (default on; "spread 0" is the A/B switch). */
+static bool wgfp_spread = true;
 /* ORP queue settings, taken when a port's ORP queue is created (boot
  * lifetime, so set them before the first spread record): tail-drop bytes,
  * and QMan stashing of annotation, data and context lines as mainline

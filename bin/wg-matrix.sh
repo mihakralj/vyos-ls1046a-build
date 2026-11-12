@@ -45,9 +45,10 @@ case ${OUTER:-4} in 4|6) export OUTER=${OUTER:-4} ;; *) echo "OUTER must be 4 or
 if [ "$DUT_KIND" = vendor ] && [ "${WGFP:-0}" = 1 ]; then
   echo "WGFP is available only on the ASK2 DUT" >&2; exit 2
 fi
-# WGFP_RX=1: P3 receive offload on for the run (it defaults off); down/bidir must then show
-# direct-RX frames. The DUT's previous setting is restored on exit.
-WGFP_RX=${WGFP_RX:-0}
+# WGFP_RX: P3 receive offload for the run. It follows WGFP (offload on means the whole fast path,
+# as the kernel defaults do); WGFP_RX=1 makes down/bidir show direct-RX frames, WGFP_RX=0 is the
+# transmit-only A/B. The DUT's previous setting is restored on exit.
+WGFP_RX=${WGFP_RX:-${WGFP:-0}}
 case $WGFP_RX in 0|1) ;; *) echo "WGFP_RX must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$WGFP_RX" = 1 ] && [ "${WGFP:-0}" != 1 ]; then
   echo "WGFP_RX=1 needs WGFP=1" >&2; exit 2
@@ -391,7 +392,7 @@ try:
                         raise ValueError(f"{cell} {direction} r{rep}: missing WGFP counter pair")
                     pair = samples[max(attempts)]
                     before, after = pair["before"], pair["after"]
-                    # P3 receive offload defaults off: unless the run asked for it (WGFP_RX=1),
+                    # P3 receive offload follows WGFP_RX: without it (WGFP_RX=0),
                     # the direct-RX counter must stay still; with it, down/bidir must move it.
                     if direction != "down" and after["sealed"] <= before["sealed"]:
                         raise ValueError(f"{cell} {direction} r{rep}: fast-path counters did not advance")

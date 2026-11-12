@@ -1410,6 +1410,8 @@ def run_matrix(tmp_path, target, extra=None):
         "OUTER": "4",
         "WG_NOTRACK": "0",
         "WGFP": "0",
+        # the validator cases below exercise the transmit-only (WGFP_RX=0) checks
+        "WGFP_RX": "0",
         "WGFP_COUNTER_LOG": "",
         "WG_STATE_PATH": "",
         "WG_DUT_STAT": "",
@@ -1428,6 +1430,7 @@ def run_matrix(tmp_path, target, extra=None):
         "FAKE_NFT_STATE": str(tmp_path / "nft.json"),
     }
     env.update(extra or {})
+    env = {k: v for k, v in env.items() if v is not None}   # None in extra unsets a variable
     result = subprocess.run(
         ["bash", str(bin_dir / "wg-matrix.sh"), target],
         env=env, text=True, capture_output=True, timeout=30
@@ -1671,3 +1674,11 @@ def test_matrix_rejects_unknown_outer_family(tmp_path):
     result, commands, rigs = run_matrix(tmp_path, "185", {"OUTER": "5"})
     assert result.returncode == 2 and "OUTER must be 4 or 6" in result.stderr
     assert rigs == []
+
+
+def test_matrix_receive_offload_follows_wgfp(tmp_path):
+    # unset WGFP_RX with WGFP=1: the run switches P3 receive on and requires direct-RX frames
+    result, commands, rigs = run_matrix(
+        tmp_path, "185", {"WGFP": "1", "WGFP_RX": None, "FAKE_MATRIX_FAIL": "rx_moved"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "wgfp_rx:  -> 1" in result.stdout

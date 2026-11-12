@@ -921,7 +921,10 @@ struct wgfp_obs_ring {
 
 static DEFINE_PER_CPU(struct wgfp_obs_ring, wgfp_obs);
 
-static bool wgfp_rx;
+/* On by default: WireGuard offload follows the port offload, and a bound
+ * peer's receive side is accelerated like its transmit side (the P6, P2b-3
+ * and upstream netns.sh gates pass with it on; 0 is the A/B kill switch). */
+static bool wgfp_rx = true;
 module_param(wgfp_rx, bool, 0600);
 MODULE_PARM_DESC(wgfp_rx, "P3 receive offload for tuples observed on the stack");
 static void wgfp_pst_rx_sync(struct wgfp_pst *pst);
@@ -1307,7 +1310,7 @@ static void wgfp_flow_withdraw(struct wgfp_flow *fl, atomic64_t *why)
  * forwarded, handed to the stack or dropped, never punted.  The UDP checksum
  * is not verified: the AEAD tag authenticates every byte that is used.
  */
-static unsigned int wgfp_rx_fast;
+static unsigned int wgfp_rx_fast = 2;	/* default: decrypt in place and forward */
 module_param(wgfp_rx_fast, uint, 0600);
 MODULE_PARM_DESC(wgfp_rx_fast, "P6 in-place decrypt on P3 sinks: 0 off, 1 decrypt then stack, 2 also forward learned inner flows");
 
@@ -2183,7 +2186,7 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 		if (dev)
 			dev_put(dev);
 		if (want)
-			pr_warn_once("wireguard: P3 receive offload admits only tuples observed on the stack\n");
+			pr_info_once("wireguard: P3 receive offload admits only tuples observed on the stack\n");
 	}
 	spin_lock_bh(&wgfp_flows_lock);
 	fl = pst->rxfl;
