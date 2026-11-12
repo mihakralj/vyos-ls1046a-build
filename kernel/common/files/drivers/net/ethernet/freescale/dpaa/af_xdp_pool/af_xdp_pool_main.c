@@ -872,6 +872,35 @@ err_unmap:
 }
 
 /*
+ * Drain every buffer BMan still holds for the pool.  bman_acquire()
+ * returns -ENOMEM unless it yields exactly the requested count, so an
+ * empty or short pool is reported as an error, never as 0.  Mirror
+ * dpaa_bp_drain(): retry singly after a short eight-buffer acquire and
+ * treat -ENOMEM on a single acquire as empty.  -ETIMEDOUT or an
+ * exhausted budget is not proof of an empty pool and is retried.
+ */
+static int af_xdp_pool_drain_bman(struct bman_pool *bpool)
+{
+	struct bm_buffer bmbs[8];
+	u8 num = 8;
+	int loops, n;
+
+	for (loops = 0; loops < 16384; loops++) {
+		n = bman_acquire(bpool, bmbs, num);
+		if (n == -ENOMEM) {
+			if (num == 8) {
+				num = 1;
+				continue;
+			}
+			return 0;
+		}
+		if (n < 0)
+			return -EAGAIN;
+	}
+	return -EAGAIN;
+}
+
+/*
  * af_xdp_pool_xsk_pool_detach - tear down the AF_XDP zero-copy pool on an RX queue
  *
  * Patch 0076 (Phase 2 step 3, spec sec 5.3): the symmetric counterpart of
@@ -954,9 +983,6 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
 struct xsk_buff_pool *pool;
 struct bman_pool *bpool;
 struct fman_port *rxp;
-struct bm_buffer bmbs[8];
-int loops = 0;
-int n;
 int ret;
 bool pending;
 bool bpool_drained;
@@ -1055,23 +1081,13 @@ if (!pending) {
 /*
  * Step 6: drain the dedicated BMan pool.
  *
- * Loop bound = 16384 iterations (each iteration drains <= 8 buffers,
- * upper-bounded total = 131072 buffers — 16x the initial seed of
- * 8192 to tolerate refill activity that may have been in flight when
- * step 3 disabled the port).
+ * The loop bound (16384 acquires) is 16x the initial seed of 8192
+ * buffers, to tolerate refill activity in flight when step 3 disabled
+ * the port.
  */
 bpool_drained = !bpool;
 if (bpool) {
-	bpool_drained = false;
-	for (loops = 0; loops < 16384; loops++) {
-		n = bman_acquire(bpool, bmbs, 8);
-		if (n < 0)
-			break;
-		if (!n) {
-			bpool_drained = true;
-			break;
-		}
-	}
+	bpool_drained = af_xdp_pool_drain_bman(bpool) == 0;
 	if (!bpool_drained) {
 		priv->xsk_pool_detach_timeout++;
 		dev_warn_ratelimited(priv->net_dev->dev.parent,

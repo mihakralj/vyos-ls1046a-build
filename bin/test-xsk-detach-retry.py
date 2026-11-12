@@ -83,8 +83,12 @@ if min(drain, drain_failure, drain_return, dma_unmap) < 0:
     fail("detach does not fail closed on an incomplete BMan drain")
 if not unpublish < drain < drain_failure < drain_return < dma_unmap:
     fail("BMan drain failure can release the UMEM DMA mapping or pool")
-if "if (n < 0)" not in detach or "if (!n)" not in detach:
-    fail("BMan acquire errors are not distinguished from an empty pool")
+if "af_xdp_pool_drain_bman(bpool)" not in detach:
+    fail("detach does not use the semantics-checked BMan drain helper")
+helper_start = dpaa.index("static int af_xdp_pool_drain_bman(")
+helper = dpaa[helper_start:dpaa.index("\n}\n", helper_start)]
+if "-ENOMEM" not in helper or "-ETIMEDOUT" in helper:
+    fail("BMan drain must treat -ENOMEM as empty and other errors as retryable")
 if "priv->xsk_pool_detach_pending[queue_id] = pool;" not in detach:
     fail("detach does not retain the pool for the next BMan drain attempt")
 clear_pending = detach.find("priv->xsk_pool_detach_pending[queue_id] = NULL")

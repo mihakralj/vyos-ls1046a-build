@@ -1,404 +1,243 @@
-# VPP AF_XDP Zero-Copy Full-Speed Plan
-
-**Version 1.0.0 · 2026-07-21 · HADS 1.0.0**
-
-**Status pointer (2026-10-15):** no phase of this plan is complete; the ZC RX regression is still open. The current task IDs and order (T-M4-5a libxdp image, T-M4-4d DRV/`xsks_map[0]`/`xsk_zc_rx_redirect>0`, 4e ≥3.0 Gbit/s, 4f reversibility, 4g steered ZC RX) are in `plans/ASK2-MASTER-PLAN.md` §4.5. Where the board and image details in §2 and §11 below differ, master §4.5 wins.
-
-## AI READING INSTRUCTION
-
-This is the execution plan to drive the **VPP AF_XDP zero-copy (ZC) dataplane**
-on the LS1046A DPAA1 board to its maximum sustainable throughput. It is scoped
-to the AF_XDP overlay (state S2 in `plans/DUAL-DATAPLANE.md`) — the kernel keeps
-the netdev, VPP runs XSK sockets on top. It is **not** the FMan hardware-offload
-path (ASK2 AC_CC), which is tracked in `plans/ASK2-MASTER-PLAN.md`.
-
-Read `[SPEC]` blocks for binding requirements, `[NOTE]` for rationale/history,
-`[BUG]` for defects (symptom + cause + fix), `[?]` for unverified claims.
-Numbered `##` sections are stable anchors. Where this plan disagrees with
-`arch/fman-microcode-210-programming-reference.md` or the kernel source, those
-win — update this plan.
-
-Authoritative cross-references: `specs/dpaa1-afxdp-modernization-spec.md`
-(AF_XDP kernel design), `plans/DUAL-DATAPLANE.md` (S0/S2 state machine),
-`plans/VPP.md` (VPP native integration), AGENTS.md S5 (DPAA1 XDP invariants).
-
----
-
-## 1. Objective and Success Gate
-
-**[SPEC]** Goal: sustained, bidirectional VPP AF_XDP **zero-copy** forwarding on
-eth3/eth4 (10G SFP+), measured by `iperf3` through the board, with the ZC RX
-oracle `xsk_zc_rx_redirect` strictly increasing under load and TX ZC submits
-(`xsk_tx_zc_submit`) strictly increasing.
-
-**[SPEC]** Throughput targets (single VPP worker, one isolated A72 core):
-
-| Gate | Metric | Threshold | Basis |
-|------|--------|-----------|-------|
-| G-ZC-1 | `xsk_zc_rx_redirect` under load | strictly increasing (≥1000/s) | functional RX ZC |
-| G-ZC-2 | `xsk_tx_zc_submit` under load | strictly increasing | functional TX ZC |
-| G-ZC-3 | iperf3 single-stream through board | ≥ 3.0 Gbps | AF_XDP single-core realistic |
-| G-ZC-4 | iperf3 sustained 60 s | no collapse, 0 kernel copies | stability |
-| G-ZC-5 (stretch) | iperf3 multi-stream, multi-queue | ≥ 6.0 Gbps | multi-XSK Option A |
-
-**[NOTE]** The single-core AF_XDP ceiling on this hardware is ~3.5 Gbps
-(AGENTS.md S5: "~3.5 Gbps on 10G SFP+"). VPP does the L3 forwarding in software
-on the isolated poll-mode core; that core is the bottleneck, not the wire.
-Line-rate 10G is **not** an AF_XDP goal — it belongs to the FMan hardware-offload
-path (ASK2 AC_CC already reaches 9.62 Gbps, `plans/ASK2-MASTER-PLAN.md`).
-
-**[NOTE]** Strategic decision point for the operator: if the requirement is
-line-rate 10G forwarding, AF_XDP is the wrong tool and ASK2 AC_CC is the answer.
-AF_XDP's value is a *general-purpose* VPP dataplane (NAT, ACL, tunnels, PPPoE)
-at multi-Gbps, not raw forwarding speed. This plan assumes the former.
-
----
-
-## 2. Current State (2026-07-21)
-
-**[SPEC]** Board `.185`: `vyos-2026.07.21-0358-rolling`, kernel `6.18.38-vyos`,
-VPP 25.10. Peer `.106` on `10.99.1.0/24` (eth3) and `10.99.2.0/24` (eth4),
-10G SFP+ direct connect, link UP, native kernel iperf3 baseline **1.18 Gbps**.
-
-**[SPEC]** Verified-working reference point: on **2026-06-10**, image
-`2026.06.10-0124-rolling`, kernel **6.18.34-vyos**, the ZC RX oracle
-`xsk_zc_rx_redirect` fired **0→7→8** on the DUT with patches 0102b + 0103f +
-0103g. True zero-copy RX was HW-proven (FMan DMA'd echo-replies directly into
-XSK UMEM, driver recovered `xdp_buff` via the 0103a sorted-DMA reverse-map,
-`xdp_do_redirect` into XSKMAP, no `build_skb`). See qdrant
-`dpaa1-true-zc-rx-oracle-fired-dut-validated`.
-
-**[BUG] ZC RX regression on 6.18.38.** Symptom: on current kernel `6.18.38-vyos`
-`xsk_zc_rx_redirect` stays 0, `xsk_rx_branch` stays 0, VPP RX counters do not
-increment; ping/iperf3 through VPP fail. Cause: **not yet root-caused** — the
-productive datapath that fired on 6.18.34 no longer fires after four kernel
-bumps (6.18.34 → 6.18.38) and patch-stack churn. Candidate causes in §4. Fix:
-Phase 0 below. **Do not treat the "missing kallsyms symbols" observation as the
-bug** — `dpaa_xsk_chunk_lookup`/`dpaa_xsk_chunk_head_from_dma` are `static` and
-subject to dead-code elimination; their absence from `/proc/kallsyms` is
-expected and is **not** a reliable oracle. The authoritative oracle is
-`ethtool -S <netdev> | grep xsk_zc_rx_redirect`.
-
-**[BUG] Copy-mode RX is a dead end on DPAA1.** Symptom: kernel receives 536K
-packets on `defunct_eth3` but VPP XSK socket sees none; VPP RX counter frozen.
-Cause: the DPAA1 XDP generic-redirect (`bpf_redirect_map` → XSKMAP copy path)
-does not deliver into VPP's XSK socket. Fix: **abandon copy-mode**; pursue ZC
-only. Copy-mode was only ever a diagnostic scaffold (qdrant
-`blocker_b` 2026-05-28 explicitly warns "COPY-MODE redirect ... True ZC ...
-requires follow-on patches"). Verified dead-end 2026-07-21.
-
-**[SPEC]** Live board hacks applied 2026-07-21 that must be folded into patches
-(not left as manual edits): (a) `vpp.py` force `mode='copy'` — to be replaced by
-proper ZC selection; (b) `vpp.py` + `startup.conf.j2` LCP `default netns
-default`; (c) static ARP workarounds. These are captured in qdrant
-`vpp af_xdp copy-mode lcp netns` and enumerated in §6.
-
----
-
-## 3. Architecture Recap (why ZC, not copy)
-
-**[SPEC]** DPAA1 has no mainline XSK ZC support. The out-of-tree
-`af_xdp_pool` module (patches 0070–0114) implements it by:
-
-1. **Attach** (`af_xdp_pool_attach`): allocate a BMan pool with a fresh bpid,
-   `xsk_pool_dma_map()` on `priv->rx_dma_dev`, seed the pool from XSK UMEM
-   chunks, register a per-band `xdp_rxq_info` with `MEM_TYPE_XSK_BUFF_POOL`
-   (0103g), and reprogram the FMan RX port's primary bpid
-   (`fman_port_set_rx_bpool`, 0102) so silicon DMAs ingress frames **directly
-   into XSK UMEM chunks**.
-2. **RX** (`rx_default_dqrr` rx_hook, dispatched before the `dpaa_bpid2pool`
-   NULL-guard by 0103f): recover the `xdp_buff` for the incoming `dma_addr_t`
-   via the 0103a sorted reverse-map bsearch, `xsk_buff_set_size` +
-   `xsk_buff_dma_sync_for_cpu`, then `xdp_do_redirect` into the XSKMAP.
-3. **Refill** (napi): `xsk_buff_alloc_batch` → `bman_release` fresh chunks.
-4. **Detach**: restore the kernel page-pool bpid, unregister rxq, free the pool.
-
-**[SPEC]** The reprogram-WRITE (step 1 bpid flip) and the Recover-redirect
-(step 2) are **inseparable**: firing the reprogram without a working Recover
-DMAs silicon frames into XSK chunks that the kernel `build_skb` path then
-mis-consumes → free-list corruption / soft-lockup (qdrant `0103-blocker`
-§6.1.8). Any change that disables one must disable the other.
-
-**[NOTE]** Because ZC bypasses the kernel netdev entirely on the ZC-armed band,
-the LCP ARP problem (§6) is moot on that band — VPP owns the frames. LCP is only
-needed for the control-plane (ARP/ND/routing sync) on non-ZC traffic.
-
----
-
-## 4. Phase 0 — Restore ZC RX (regression fix) [BLOCKER]
-
-**[SPEC]** Nothing else proceeds until `xsk_zc_rx_redirect` increments again on
-6.18.38. This is a regression from a known-good state, so bisect against the
-2026-06-10 delta rather than re-deriving.
-
-### T-0.1 — Establish the correct oracle
-- **[SPEC]** Stop using `grep kallsyms`. Use, on the ZC-armed netdev
-  (`defunct_eth3` when VPP owns eth3):
-  `ethtool -S defunct_eth3 | grep -E 'xsk_zc_rx_redirect|xsk_zc_recover_lookup|xsk_rx_branch|xsk_zc_rx_armed|xsk_pool_attach_ok'`.
-- **[SPEC]** Reproduce the 2026-06-10 method that fired the oracle: bind a raw
-  XSK probe with XSKMAP (`bin/dpaa1-xsk-bind-probe.py eth3 0 4096 --hold N
-  --xskmap`) + DUT-side `ping -I eth3 <peer>` (echo-replies ingress on eth3, no
-  peer cooperation needed). This isolates the kernel ZC datapath from VPP and
-  from the copy/LCP layer. If the probe fires the oracle but VPP does not, the
-  regression is in the VPP integration (Phase 3), not the kernel.
-
-### T-0.2 — Confirm the kernel config gates the module
-- **[SPEC]** Verify in the built `.config`: `CONFIG_XDP_SOCKETS=y`,
-  `CONFIG_DPAA_AF_XDP_POOL` present (=y or =m), `CONFIG_BPF_SYSCALL=y`. Kconfig
-  dep chain: `DPAA_AF_XDP_POOL depends on FSL_DPAA_ETH && DPAA_FLAVOR_OPS &&
-  XDP_SOCKETS`. A silently-dropped `=m`→unset across the 6.18.38 bump would
-  remove the whole datapath while the build still succeeds.
-
-### T-0.3 — Verify patch application on 6.18.38 (no silent fuzz)
-- **[SPEC]** CI hard-gates `git apply --3way` failures
-  (`bin/ci-setup-kernel.sh` line ~1088 aborts). So 0103a/0103b/0103f/0103g
-  *apply*. But `--3way` can merge into a **different** location on drifted
-  source. Manually inspect the merged result in a throwaway build tree:
-  confirm the rx_hook dispatch in `dpaa_eth.c::rx_default_dqrr` still sits
-  **before** the `dpaa_bpid2pool(fd->bpid)` NULL-guard (0103f invariant). If the
-  6.18.38 `rx_default_dqrr` was refactored, `--3way` may have reinserted the
-  hook after the guard → frames dropped before the hook, oracle stuck at 0.
-  This is the **single most likely root cause** and matches the exact 0103f bug
-  signature from 2026-06-10.
-
-### T-0.4 — Audit Layer-2 fixup second-writers
-- **[BUG] Fixup/patch collision risk.** `F_100` and `F_103` both mutate
-  `af_xdp_pool_main.c` **after** the patch stack (Layer 2, per AGENTS.md S9).
-  `F_103` is SUPERSEDED/no-op but must be confirmed inert. `F_100`
-  (attach-path instrumentation) must not overwrite or displace the productive
-  reprogram-WRITE or the 0103g rxq registration. Run
-  `bin/mutate.py --check` for both and diff the pre/post `af_xdp_pool_main.c`.
-  Any fixup that mutates the productive body is a defect — fold it into the
-  owning patch or delete it.
-
-### T-0.5 — Verify 0103g rxq registration + reprogram gating
-- **[SPEC]** 0103g registers a per-band `struct xdp_rxq_info` with
-  `xdp_rxq_info_reg_mem_model(MEM_TYPE_XSK_BUFF_POOL, NULL)` and **gates the
-  reprogram-WRITE on successful rxq registration** (failure → `xsk_pool_attach_fail++`,
-  skip reprogram, no crash). Confirm on 6.18.38 that `xdp_rxq_info_reg()` still
-  has the same signature and that `xsk_pool_set_rxq_info()` exists. A signature
-  change here would make attach fail-soft (no ZC) rather than crash — exactly
-  the "armed but oracle stuck at 0" symptom.
-
-### T-0.6 — Cold-boot before each silicon test
-- **[SPEC]** AGENTS.md S6 §10.9: a deaf port is accumulated BMI/MURAM
-  corruption, not the commit under test. Warm reboot does not clear it. Every
-  Phase-0 attach/detach experiment starts from a cold power-cycle
-  (`restart-dut` skill). Record boot type per result.
-
-**Phase 0 exit gate:** `bin/dpaa1-xsk-bind-probe.py eth3 0 4096 --hold 30
---xskmap` + `ping -I eth3 <peer>` drives `xsk_zc_rx_redirect` strictly upward on
-a cold-booted 6.18.38 board. **G-ZC-1 met at kernel level.**
-
----
-
-## 5. Phase 1 — Single-Queue ZC through VPP
-
-**[SPEC]** Prove ZC end-to-end through VPP on **one** RX queue (qband 0), the
-only band whose bpid can be reprogrammed (§7). This removes the multi-queue
-variable while validating the VPP path.
-
-### T-1.1 — Force single XSK queue
-- **[SPEC]** Set VPP `rxq_num=1` so all RSS traffic that VPP consumes lands on
-  qband 0. In VyOS: the `xdp_options num_rx_queues` path in `vpp.py`
-  (`data/vyos-1x-010-vpp-platform-bus.patch`). Do **not** rely on F_104
-  (get_channels=4) here — that is Phase 4.
-
-### T-1.2 — Force ZC mode explicitly
-- **[SPEC]** `xdp_iface_create` must be called with `mode='zero-copy'` (maps to
-  api arg `mode=2`), **not** `auto` (which probes ZC then silently falls back to
-  copy) and **not** the current board hack `mode='copy'`. Replace the
-  2026-07-21 `mode='copy'` edit with a driver-aware selection: DPAA1
-  (`original_driver == 'fsl_dpa'`) → `zero-copy`.
-
-### T-1.3 — Enforce ZC MTU
-- **[SPEC]** MTU ≤ **1766** before VPP bind (AGENTS.md S5; VPP frame_size=1792,
-  needed=MTU+26). MTU must be set in a **separate commit before** adding the
-  interface to VPP (qdrant `MTU must be set BEFORE VPP bind`). F_101 lowers
-  `DPAA1_MIN_UMEM_CHUNK` 3840→1792 to accept VPP's 2048-byte chunks — keep it.
-
-### T-1.4 — Traffic source constraint
-- **[SPEC]** A DRV-mode XDP program on eth3 **hijacks local RX** — the board
-  cannot both source and sink test traffic on the same ZC-armed port. Test
-  traffic must be **peer-initiated** from `.106` (iperf3 client on peer →
-  server behind VPP), or use a second interface. This is GAP 2 from 2026-06-10
-  and the reason the oracle was proven functional but never throughput-tested.
-
-### T-1.5 — Verify the datapath, not just link
-- **[SPEC]** Under peer-initiated load, confirm simultaneously:
-  `xsk_zc_rx_redirect` ↑, `xsk_zc_recover_lookup` ↑ (tracks redirect 1:1),
-  `xsk_zc_rx_armed ≥ 1`, `FMBM_EBMPI[0]` shows the XSK bpid (via
-  `board/scripts/pcd-snapshot` or 0102b dev_info readback), and VPP
-  `show interface` RX counters increment. Kernel `build_skb` path must show
-  **zero** RX on the ZC band.
-
-**Phase 1 exit gate:** iperf3 peer→VPP→sink single-stream over one ZC queue,
-`xsk_zc_rx_redirect` increasing, VPP RX incrementing. **G-ZC-1 through the full
-VPP stack.**
-
----
-
-## 6. Phase 2 — ZC TX + Control-Plane Integration
-
-### T-2.1 — Enable and verify ZC TX
-- **[BUG] TX ZC not submitting.** Symptom: `xsk_tx_zc_submit=0`,
-  `xsk_tx_conf_zc=0` even when RX ZC works; TX falls to the `syscall required`
-  copy path (1271 errors observed 2026-07-21). Cause: TX ZC path (patch 0085
-  `dpaa-tx-zc-and-inflight-backpressure`) not exercised / not wired to VPP TX.
-  Fix: verify VPP issues `sendto()`-less ZC TX (needs
-  `XDP_USE_NEED_WAKEUP` handling, patch 0070 `xsk-wakeup`), confirm
-  `xsk_tx_zc_submit` ↑ under bidirectional load. **G-ZC-2.**
-
-### T-2.2 — Fix LCP netns (fold board hack into patch)
-- **[BUG] LCP default netns unset.** Symptom: `lcp default netns '<unset>'`;
-  `linux-cp/router: Failed to delete neighbor`; ARP not synced kernel↔VPP.
-  Cause: `lcp_pair_add()` in `control_vpp.py` never passes `netns`; the config
-  template omits `default netns`. Fix (fold the 2026-07-21 live edits into
-  `data/vyos-1x-010-vpp-platform-bus.patch`): add `default netns default` to the
-  `linux-cp { }` block in `startup.conf.j2`, and emit
-  `lcp default netns default` as a CLI command in `vpp.py` `apply()` **before**
-  `lcp_resync()`. Do **not** pass `netns` in the per-pair `lcp create` API
-  (it returned `-12 ENOMEM`).
-
-### T-2.3 — LCP is L3-only; do not expect L2/ARP bridging
-- **[SPEC]** LCP `type tap` is an L3 tunnel — it does **not** forward L2 frames
-  (ARP) between the physical port and the tap. For ZC-armed bands this is moot
-  (VPP owns RX). For the control plane, VPP must answer/originate ARP itself
-  (VPP has the interface IP via `lcp-sync`); the kernel tap is for routing-daemon
-  sync only. Verify VPP `show ip neighbors` populates from VPP's own ARP, not
-  from a kernel→tap bridge. Static ARP is a test crutch, **not** the shipping
-  design.
-
-### T-2.4 — Remove copy-mode fallback from shipping config
-- **[SPEC]** Once ZC is stable, the `mode='copy'` board hack is deleted. DPAA1
-  interfaces ship `mode='zero-copy'`. If ZC attach fails, the interface must
-  **fail loudly** (interface down + log), not silently degrade to a broken
-  copy-mode.
-
-**Phase 2 exit gate:** bidirectional iperf3, both `xsk_zc_rx_redirect` and
-`xsk_tx_zc_submit` increasing, control-plane ARP/routing stable, no static-ARP
-crutches. **G-ZC-2 + G-ZC-4.**
-
----
-
-## 7. Phase 3 — Multi-Queue ZC (stretch, for >3.5 Gbps)
-
-**[BUG] Only qband 0 accepts the bpid reprogram.** Symptom: on 4-queue RSS,
-`FMan RX-port BPID reprogram failed (-2 ENOENT)` for qbands 1–3; only qband 0
-DMAs into XSK UMEM. 75% of RSS-distributed frames bypass XSK. Cause: the FMan
-RX port exposes **one** primary bpid register (`FMBM_EBMPI[0]`); the current
-`fman_port_set_rx_bpool` (0102) reprograms only that. Fix options, in preference
-order:
-
-- **[SPEC] Option A — per-qband external bpid.** Investigate whether the FMan
-  BMI supports distinct bpids per RX FQ range via the external buffer pool
-  registers `FMBM_EBMPI[0..7]` (0102b already reads all 8 back). If silicon
-  allows one XSK bpid per qband, extend `fman_port_set_rx_bpool` to program the
-  band's slot. Validate against
-  `arch/fman-microcode-210-programming-reference.md` and the live NXP stack on
-  `.106` before writing (AGENTS.md S1 three-refs rule).
-- **[SPEC] Option B — RSS-collapse to queue0.** Reprogram the port's KG/RSS
-  scheme so all VPP-destined traffic hashes to qband 0 (single XSK), and let
-  `rxq_num=1`. Reuses the KG scheme-reprogram machinery from `0097`/`0104`
-  (ingress-policer PLCR attach). Simplest, but caps ZC at one core's worth of
-  traffic (~3.5 Gbps) — acceptable if G-ZC-3 is the real target.
-- **[SPEC] Option C — accept the cap.** Ship single-queue ZC (~3.5 Gbps). Point
-  users needing more at ASK2 AC_CC.
-
-**[NOTE]** F_104 (get_channels → 4 combined channels) already makes VPP create 4
-XSK sockets. Without Option A, three of them are attached to bands whose frames
-never arrive in XSK UMEM — wasted UMEM and misleading `xsk_zc_rx_armed=4`. Do
-**not** ship 4-queue advertising until Option A lands, or reduce to 1.
-
-**[SPEC] Thermal constraint on multi-core.** Multi-queue only helps if VPP has
-multiple worker cores to drain them. But AF_XDP poll-mode has no adaptive
-rx-mode on DPAA1 (`set interface rx-mode` fails), so multiple poll-mode workers
-run the cores hot → `HARDWARE PROTECTION shutdown` within ~30 min (AGENTS.md S5).
-Mitigations: `poll-sleep-usec 100` (mandatory), and realistically **cap at one
-worker core**. This means multi-queue ZC's practical benefit on this board is
-limited; Option B (single queue, one hot core, `poll-sleep-usec 100`) is the
-pragmatic shipping config.
-
-**Phase 3 exit gate (stretch):** multi-stream iperf3 ≥ 6 Gbps **or** documented
-decision to ship single-queue with the thermal rationale. **G-ZC-5 or explicit
-waiver.**
-
----
-
-## 8. Phase 4 — Throughput Tuning and CI Bake-In
-
-### T-4.1 — Measure and profile
-- **[SPEC]** iperf3 matrix: single/multi-stream, 60 s sustained, MTU 1766.
-  Record Gbps, `xsk_*` deltas, VPP `show run` node cycles, CPU via `mpstat`,
-  and thermals via `board/scripts/fan-check`. Compare against native-kernel
-  1.18 Gbps baseline and the AF_XDP ~3.5 Gbps ceiling.
-
-### T-4.2 — VPP knobs
-- **[SPEC]** Tune `poll-sleep-usec` (thermal vs latency), `buffers-per-numa`,
-  RX/TX ring sizes (`rxq_size`/`txq_size`), and UMEM chunk count. Single worker
-  pinned to isolated core 3 (`cpu-cores 1`, `main-core 3`).
-
-### T-4.3 — Fold all board hacks into version-controlled patches
-- **[SPEC]** Everything applied live to `.185` on 2026-07-21 must land in
-  `data/vyos-1x-010-vpp-platform-bus.patch` (ZC mode selection, LCP netns) and,
-  if kernel-side, in the board patch series / a new count-gated fixup. No
-  shipping behavior may depend on a manual SSH edit. Regenerate patches via
-  `git diff --cached` and verify `git apply --3way --check` (AGENTS.md S9).
-
-### T-4.4 — CI ISO + deploy + cold-boot validation
-- **[SPEC]** Build via `self-hosted-build.yml`, deploy the ISO to lxc200 with
-  the `build-image` skill, `add system image` on a **cold-booted** `.185`, and
-  re-run the full G-ZC-1…G-ZC-4 gate. Record image tag, run id, kernel version,
-  and boot type in qdrant.
-
-**Phase 4 exit gate:** reproducible ≥3.0 Gbps single-stream ZC on a
-freshly-installed CI ISO, all behavior patch-sourced, results in qdrant.
-**G-ZC-3 + G-ZC-4 on shipping image.**
-
----
-
-## 9. Risk Register
-
-**[SPEC]**
-
-| # | Risk | Likelihood | Mitigation |
-|---|------|-----------|------------|
-| R1 | 0103f hook-order lost to `--3way` drift on 6.18.38 | High | T-0.3 manual merge inspection; pin hook before NULL-guard |
-| R2 | `CONFIG_DPAA_AF_XDP_POOL` silently unset | Medium | T-0.2 config assertion in CI |
-| R3 | F_100/F_103 overwrite productive body | Medium | T-0.4 pre/post diff, fold or delete |
-| R4 | `xdp_rxq_info`/`xsk_pool_set_rxq_info` API drift | Medium | T-0.5 signature check; fail-soft already gated |
-| R5 | Multi-queue bpid reprogram unsolvable in silicon | Medium | Option B/C fallback to single queue |
-| R6 | Thermal shutdown under multi-core poll | High | `poll-sleep-usec 100`, cap 1 worker |
-| R7 | ZC crash (NULL rxq / free-list corruption) under flood | Medium | 0103g rxq gating + F_102 NULL-fq guard; **repro with pings, never floods, until cold-boot-safe** (AGENTS.md) |
-| R8 | gen_pool double-free on double-engage | Low | engagement guard (existing TODO) |
-
----
-
-## 10. Decision Log
-
-**[NOTE]**
-1. **ZC only; copy-mode abandoned.** DPAA1 XDP generic-redirect does not deliver
-   to VPP XSK. Copy-mode was a diagnostic scaffold, never a product path.
-2. **Regression-fix, not greenfield.** ZC RX was HW-validated 2026-06-10; Phase
-   0 bisects the 6.18.34→6.18.38 delta rather than re-deriving the datapath.
-3. **`xsk_zc_rx_redirect` is the oracle.** kallsyms grep of `static` helpers is
-   not a valid signal.
-4. **Single-queue is the pragmatic shipping config.** Multi-queue ZC is
-   thermally and silicon-constrained; ~3.5 Gbps single core is the honest AF_XDP
-   ceiling. >3.5 Gbps forwarding → ASK2 AC_CC, not AF_XDP.
-5. **All board hacks must become patches** before any claim of "working."
-
----
-
-## 11. Immediate Next Actions (ordered)
-
-**[SPEC]**
-1. Cold power-cycle `.185` (`restart-dut`).
-2. T-0.1: run `dpaa1-xsk-bind-probe.py --xskmap` + local `ping -I eth3`; read
-   `xsk_zc_rx_redirect`. If it fires → regression is in VPP integration (skip to
-   Phase 1). If it stays 0 → kernel regression, continue.
-3. T-0.3: inspect merged `rx_default_dqrr` in a build tree; confirm 0103f hook
-   sits before the `dpaa_bpid2pool` NULL-guard on 6.18.38.
-4. T-0.2 + T-0.4: assert `CONFIG_DPAA_AF_XDP_POOL`; diff F_100/F_103 effect on
-   `af_xdp_pool_main.c`.
-5. Report root cause, land the fix as a patch/fixup, rebuild, redeploy, re-gate.
+# VPP AF_XDP zero-copy: repair and performance plan
+
+Owner of the VPP zero-copy follow-up in `plans/ASK2-MASTER-PLAN.md` §4.5. Task IDs T-M4-5a and T-M4-4d to 4g keep their meaning; §8 maps them to the phases below.
+
+**Status.** On the current image, VPP binds eth3/eth4 (`defunct_eth3`, `defunct_eth4`) and receives nothing. The cause on DUT2 (`.106`) is proven and set out in §2.1. Source review found further defects in RX buffer geometry, frame ownership, wakeup, TX completion and detach, any of which would block a working path once the first is fixed. No fix has landed. Every claim below is labelled with its evidence level.
+
+Scope: the AF_XDP overlay (state S2 in `plans/DUAL-DATAPLANE.md`). The kernel keeps the netdev and VPP runs XSK sockets on top. ASK2 hardware offload (S1) is out of scope, except that this plan must not cost it any performance (§5).
+
+## 1. Goal and constraints
+
+Goal, in order:
+
+1. Correct ZC RX and TX through VPP on one queue per port, with every buffer owned exactly once.
+2. `delete vpp` returns the ports to the kernel without a power cycle, and `pcd-snapshot` matches S0.
+3. Best sustained single-core throughput, measured with iperf3 and TRex (`plans/TREX-NDR-PERF-PLAN.md`, S2 cell).
+4. A measured decision on more than one VPP worker (§4, P6).
+
+Constraints that hold in every phase:
+
+- No ASK2 regression. The gates are in §5.
+- A new datapath is tested with pings and small UDP first. Never flood a path that has not passed its correctness gate.
+- Cold-boot before each silicon experiment, and record the boot type with every result.
+- Use eth3/eth4 only; never touch eth0.
+- Image installation is the operator's step.
+- Run the qdrant gate and the independent-review steps listed per phase before changing FMan, BMan or BMI-facing code.
+
+## 2. Evidence
+
+### 2.1 Proven on DUT2
+
+Image 2026.11.11-2140, kernel 6.18.62, VPP 25.10, cold boot. VPP is bound to eth3/eth4 with `cpu-cores 1` and `poll-sleep-usec 100`.
+
+- Kernel log: `F-115 build: band=0 cnt=39139 pool_headroom=256 first_head_dma=0x0`, then `F-115 recover-miss: fd_dma=0x89e6c4000 ... base[0]=0x0 base[cnt-1]=0x0`.
+- `ethtool -S defunct_eth3`: `xsk_zc_eligible` climbs with pings, while `xsk_zc_rx_recovered`, `xsk_zc_recover_lookup` and `xsk_zc_rx_redirect` stay 0. `xsk_tx_zc_submit` is 2, `xsk_tx_conf_zc` is 0, and qmap debugfs shows `xsk_tx_inflight=13` on qband 0.
+- `FMBM_EBMPI[0]` holds the XSK BPID (5 on eth3, 6 on eth4) with buffer size 3584.
+- VPP's UMEM is unaligned. Upstream `src/plugins/af_xdp/device.c` sets `XDP_UMEM_UNALIGNED_CHUNK_FLAG`, `frame_headroom = sizeof(vlib_buffer_t)` and `frame_size = sizeof(vlib_buffer_t) + default data size`, and binds with `XDP_USE_NEED_WAKEUP`.
+
+Mechanism: `dpaa_xsk_build_dma_index()` snapshots `pool->heads[i]` DMA addresses at attach. In unaligned mode the kernel assigns `addr`/`dma` to an xskb only when it is allocated (`xp_init_dma_info()` skips it; `xp_get_xskb()` sets it). So every snapshot entry is 0, every lookup misses, the hook returns false, and the FD goes to the mainline path. There `dpaa_bpid2pool()` returns NULL for the XSK BPID and the frame is dropped silently. `xsk_rx_branch` is a dead counter; the oracles are `xsk_zc_rx_recovered` and `xsk_zc_rx_redirect`.
+
+### 2.2 Defects found in source
+
+File: `kernel/common/files/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c`, except where noted. "Source" means read in the code and checked against kernel 6.18.60. "DUT-consistent" means a live counter or log on DUT2 matches the prediction. None of these is DUT-proven by a controlled A/B test yet.
+
+| ID | Defect | Evidence | Effect |
+|---|---|---|---|
+| D1 | The recover index is a static snapshot of head DMA addresses, which is empty in unaligned mode (§2.1). | Proven | No ZC RX for VPP |
+| D2 | `xsk_chunk_map_len` is `DPAA1_XSK_INITIAL_SEED` (8192) while `heads_cnt` can be far larger (39139 on DUT2). `dpaa_xsk_chunk_record()` silently ignores larger indexes. | Source | Misses even in aligned mode with large UMEMs |
+| D3 | RX geometry. BMan receives `xsk_buff_xdp_get_dma()`, which is the XSK *data* address (`frame_dma + headroom + XDP_PACKET_HEADROOM`). FMan writes its buffer prefix there and the frame at FD offset, about 256 B later. The hook calls `xsk_buff_set_size(xdp, len)` without applying the FD offset, so VPP would get the prefix followed by a truncated frame. `fman_port_set_rx_bpool()` (patch 0102) swaps only the BPID and leaves the kernel pool size (3584) in `FMBM_EBMPI`, while VPP's usable frame is about 1792 B. A frame larger than the usable space overruns the next chunk. The hook also does not reject scatter/gather FDs, which become possible with `fsl_fm_max_frm=9600`. | Source; EBMPI size DUT-consistent | Wrong payload; UMEM overrun above about MTU 1500 |
+| D4 | Frame ownership is not exactly-once. A miss, no XDP program, `XDP_PASS`, `XDP_ABORTED` or a failed redirect returns false, and the mainline path drops the FD with no buffer owner. `XDP_DROP` sets `consumed` without `xsk_buff_free()`. The refill duplicate guard drops the round without freeing the handles it allocated. | Source | Pool drains to empty over time and RX stalls |
+| D5 | The TX ZC FD carries `bpid = xsk_bpid` with no `FM_FD_CMD_FCO` and no confirmation FQID. Mainline egress FQs are initialised with ContextA `EBD=1` ("deallocate buffers inside FMan", `dpaa_eth.c` `dpaa_fq_init()`). Mainline gets a TX confirmation only with `bpid = FSL_DPAA_BPID_INV`, `FCO` and `conf_fqid` (`dpaa_xmit()`). So FMan most likely releases each transmitted UMEM chunk into the XSK *RX* pool and sends no confirmation. | Source; DUT-consistent (`xsk_tx_conf_zc=0`, inflight stuck at 13) | VPP TX buffers never complete; TX chunks enter RX unrecorded |
+| D6 | Detach drain can never succeed. `bman_acquire()` returns `-ENOMEM` whenever the returned count differs from the requested count, so it never returns 0 (`drivers/soc/fsl/qbman/bman.c`). The drain loop treats `n < 0` as "not drained" and `n == 0` as empty, so every detach with a BMan pool returns `-EAGAIN`. Mainline `dpaa_bp_drain()` falls back from 8 to 1 on `-ENOMEM` and treats `-ENOMEM` at 1 as empty. Introduced by `2a0f0260` (the F-275/F-276 detach-retry work), which replaced `n <= 0` (empty) with fail-closed semantics. Before that, timeouts and partial pools were treated as empty. Drained cookies are also dropped without `xsk_buff_free()`. `bin/test-xsk-detach-retry.py` checks statement order only and does not model acquire semantics. | Source | `delete vpp` cannot release ZC; ports stay `defunct_*` until power cycle |
+| D7 | Wakeup runs on the wrong CPU. `af_xdp_pool_xsk_wakeup()` calls `napi_schedule_irqoff()` from VPP's syscall context, with IRQs enabled, on VPP's CPU (isolated CPU 3). DPAA NAPI belongs to a CPU-affine QMan portal, and both `af_xdp_pool_napi_refill()` and `af_xdp_pool_napi_tx_zc()` skip any CPU other than `qmap[q].cpu`. So a wakeup either refills nothing or polls another CPU's portal. `XDP_WAKEUP_TX` is not handled at all ("arrives with patch 0078", never landed). The attach seed is 0 because VPP fills its ring after bind, so refill depends on the first ingress interrupt on the portal CPU. | Source; DUT-consistent (`xsk_bman_seed_short=1`, refill only after ingress) | Cold-start RX and TX depend on unrelated traffic; possible portal race |
+| D8 | Each frame runs `bpf_net_ctx_set()`, `rcu_read_lock()` and `xdp_do_flush()` individually. | Source | Per-frame overhead; a performance item, not a correctness one |
+| D9 | Single queue by construction. Patch 4006 registers every rxq with `queue_index = 0`. The RX port has one primary pool (`FMBM_EBMPI[0]`), and BMI picks the pool by buffer size, not by FQ. Every qband maps to CPU 0 in qmap. | Source; DUT-consistent | Multi-queue ZC is blocked (P6) |
+| D11 | Detach retry is not lifetime-safe. The XSK core (`net/xdp/xsk_buff_pool.c`, `xp_clear_dev`/`xp_release_deferred`) logs a failed `ndo_bpf(XDP_SETUP_XSK_POOL, NULL)` and still clears and frees the pool, so F-275/F-276's pending raw pool pointer is not a lifetime guarantee. | Review, source | Use-after-free if a drain stays incomplete; detach must quiesce before returning |
+| D12 | Attach can report success after RXQ registration or BPID reprogramming fails (ZC RX disabled, bind still returns 0). | Review, source | False "ZC bound" with a dead RX path; roll back and fail the bind |
+| D10 | Debug noise in the hot setup paths (`pr_err("ZCBIND: ...")`, F-115 prints) and dead counters (`xsk_rx_branch`). | Source | Log noise; misleading oracles |
+
+### 2.3 Corrections to earlier documents
+
+- The earlier version of this plan assumed a 6.18.34→6.18.38 regression in hook placement. That is superseded by D1. It also said copy mode is a dead end; that is untested on the current image and irrelevant once ZC works. The "MTU ≤ 1766" rule is replaced by an MTU limit derived from the geometry (P2).
+- `plans/DUAL-DATAPLANE.md` said S2 has no silicon delta. True-ZC attach reprograms the RX port's primary BMI pool (`FMBM_EBMPI[0]` BPID) and must restore it on detach. That document now says so.
+- The single-core ceiling of about 3.5 Gbit/s quoted in older notes was never measured on a working ZC path. Treat it as unknown until P5.
+
+## 3. Target design
+
+### 3.1 Buffer ownership contract
+
+Each UMEM chunk handed to BMan has exactly one owner at every moment, and every exit path returns it to a known owner.
+
+```mermaid
+stateDiagram-v2
+    [*] --> UserFill : VPP writes addr to FILL ring
+    UserFill --> KernelHeld : xsk_buff_alloc_batch (refill CPU)
+    KernelHeld --> InBMan : map insert OK, then bman_release
+    KernelHeld --> KernelHeld : duplicate -> quarantine until owner resolved
+    KernelHeld --> UserFill : map full -> xsk_buff_free
+    InBMan --> InFD : FMan DMA, FD on RX FQ
+    InFD --> KernelHeld : hook: map lookup and erase, geometry checks
+    KernelHeld --> UserRx : XDP_REDIRECT ok -> RX ring
+    KernelHeld --> UserFill : DROP, PASS (after copy), ABORTED, redirect fail -> xsk_buff_free
+    InBMan --> KernelHeld : detach drain: bman_acquire, map erase
+    UserRx --> UserFill : VPP recycles
+```
+
+Rules:
+
+- **Map.** Use a per-band map keyed by the exact BMan cookie, holding the `xdp_buff *`. An entry is inserted *before* `bman_release()` and rolled back if the release fails. It is erased on lookup or drain. Size it from the outstanding bound, which is the fill ring size, not `heads_cnt`. An insert that collides with a live key is a duplicate: count it and quarantine the new handle, because `xsk_buff_free()` recycles it and the original may still be in BMan and DMA-writable. Release it only after the live owner is resolved. The recommended implementation is an open-addressed table with a power-of-two size of at least 2× the fill ring. Whether it needs locking depends on whether RX for the band always runs on `qmap[q].cpu` (P0 measures this). If not, use a per-band spinlock taken with BH disabled. A validated in-buffer back-pointer is a later optimisation only if the map shows up in profiles. It must range-check against `pool->heads` and compare `xskb->dma`, because the headroom is user-writable.
+- **Geometry.** Define `rx_off` as the FD data offset the port produces (read back at arm time). BMan receives `xskb->dma - rx_off`, so FMan writes the prefix into XSK headroom and the frame lands at `xdp->data`. Attach requires `pool->headroom + XDP_PACKET_HEADROOM >= rx_off`. The XSK pool's `FMBM_EBMPI` entry gets size `xsk_pool_get_rx_frame_size(pool) + rx_off`, not the kernel pool size. Detach restores both the BPID and the size. The hook accepts only contiguous FDs with `qm_fd_get_offset(fd) == rx_off` and length within the frame size. Anything else is freed and counted. MTU admission is computed from the same numbers, replacing the fixed `mtu <= 3290` check.
+- **Outcomes.** `XDP_REDIRECT` success hands the buffer to the RX ring. `XDP_PASS` copies into an skb (the way mainline ZC drivers do) and then frees the buffer. Every other outcome calls `xsk_buff_free()`. The hook always consumes an FD that carries the XSK BPID, so such an FD never reaches the mainline path. A map miss means the owner is unknown. It is counted (`xsk_zc_rx_miss`), warned about once, and dropped. A non-zero miss count fails every gate.
+- **Wakeup.** `ndo_xsk_wakeup` must make the band's NAPI run on `qmap[q].cpu`. One way is a per-band `call_single_data_t` IPI whose handler calls `napi_schedule_irqoff()` on that CPU. Never schedule the portal NAPI on the calling CPU. Handle both `XDP_WAKEUP_RX` (refill) and `XDP_WAKEUP_TX` (TX drain).
+- **TX.** Use the mainline confirmation contract: `bpid = FSL_DPAA_BPID_INV`, `FM_FD_CMD_FCO` and a confirmation FQID. The claim discriminator cannot be the BPID any more. The recommended design is a dedicated XSK confirmation FQ per band, created at attach and retired at detach. The fallback is a UMEM DMA-range check on the shared confirmation FQ. Keep one egress FQ per band, so confirmations arrive in submit order before `xsk_tx_completed()`.
+- **Detach.** Order: disable the port, restore the BPID and size, unpublish the pool, then drain with the mainline idiom (8, then 1, where `-ENOMEM` at 1 means empty and `-ETIMEDOUT` means retry with `-EAGAIN`). For each drained cookie, erase the map entry and call `xsk_buff_free()`. Retire the XSK confirmation FQ, then unmap. The F-276 pending-owner retry stays. The F-274 caveat (port-disable return does not prove the ehash walkers have drained) stays open and documented.
+
+### 3.2 Phase dependencies
+
+```mermaid
+flowchart LR
+    P0["P0 failing checks<br/>+ ASK2 baseline"] --> P1["P1 detach drain"]
+    P0 --> P2["P2 RX map, geometry,<br/>ownership"]
+    P1 --> P2
+    P2 --> P3["P3 wakeup + refill"]
+    P3 --> P4["P4 TX confirmation"]
+    P4 --> P5["P5 single-queue<br/>performance"]
+    P5 --> P6["P6 multi-worker<br/>feasibility"]
+    P5 --> P7["P7 VyOS integration<br/>+ release gate"]
+```
+
+P1 comes first because a working detach lets each experiment end with `delete vpp` instead of a power cycle.
+
+## 4. Phases
+
+### P0: failing checks and baseline (no behaviour change)
+
+- **T-P0-1 host harness.** Add `tests/dut/dpaa_xsk_zc.c` and `tests/dpaa_xsk_zc.py` (`pytestmark = pytest.mark.host`), modelled on `tests/ask_hw_disengage.py`. Cases, each failing on the current tree:
+  - The drain loop against a mock `bman_acquire()` with kernel semantics (`-ENOMEM` unless count == num), for pools of 0, 1, 7, 8 and 9 buffers (D6).
+  - Recovery against a mock unaligned pool where `heads[].dma` is 0 until allocation (D1).
+  - A recorded index above 8192 (D2).
+  - An ownership ledger across every hook outcome (D4).
+- **T-P0-2 bind probe.** Extend `bin/dpaa1-xsk-bind-probe.py` with three options. `--unaligned` with `--frame`/`--headroom` reproduces VPP's geometry (frame 2304, headroom 256). `--verify-l2` checks the destination MAC and ethertype of the first RX descriptors. `--tx N` submits N frames. With `ping -I eth3` from the DUT, the probe reproduces D1 without VPP, and later checks D3 payloads.
+- **T-P0-3 arm-time readback.** Log the expected `rx_off` once per attach, plus the `FMBM_EBMPI` id and size after reprogram, the pool headroom and `rx_frame_size`. Add per-CPU hit counters for the RX hook and refill, to settle the map locking decision.
+- **T-P0-4 D5 check.** With no ingress on the port, submit N TX ZC frames. Read the XSK BPID's free count with `bin/bman-pool-count.py` before and after, along with `xsk_tx_conf_zc`. A count rise of N with no confirmations confirms D5.
+- **T-P0-5 D7 check.** Start VPP with no ingress traffic. Then record `xsk_bman_refill_batches`, a new `xsk_wakeup_rx`/`xsk_wakeup_tx`/`xsk_wakeup_cpu_mismatch` counter set and the XSK pool count for 10 s.
+- **T-P0-6 ASK2 baseline** on the image under test, before any driver change. Capture `ask-check`, `pcd-snapshot`, and routed v4 uni and bidir throughput with n ≥ 3 alternating runs (§5). This is the reference for every later gate.
+
+Exit: every D1 to D7 is either reproduced by a failing check or downgraded in §2.2 with the evidence.
+
+### P1: detach drain (D6)
+
+- Make detach quiesce before returning (D11): the core destroys the pool even when `ndo_bpf` fails, so either drain to completion in the call or hold the pool through a core-compatible lifetime. Roll back and fail the bind on attach errors (D12). Use the mainline drain idiom described in §3.1. Free every drained cookie through the map, and keep the F-276 pending retry.
+- Extend `bin/test-xsk-detach-retry.py`, or the P0 harness, to model acquire semantics, so the order-only check cannot pass a broken loop again.
+- Qdrant gate: BMan acquire/drain, F-274/F-275/F-276, and AF_XDP detach quiescence. Get an independent review of the diagnosis before the fix and of the fix before reporting done.
+- **Gate (T-M4-4f).** After a cold boot, run attach and `delete vpp` 10 times with pings between cycles. Pass criteria:
+  - eth3/eth4 return as kernel netdevs and kernel pings pass.
+  - No `deferring detach` and no `Failed to disable zero-copy`.
+  - `pcd-snapshot` diff against S0 is empty.
+  - Kernel BMan pool counts are stable.
+  - S0→S1→S0 ASK2 engage/disengage still passes after the cycles.
+
+### P2: RX correctness (D1 to D4, D10)
+
+- Replace the snapshot index and the head-index map with the live cookie map from §3.1, and delete the sort, bsearch and F-115 code.
+- Apply the geometry contract. Extend the 0102 primitive (or add a sibling) so it sets the size of the XSK pool's `FMBM_EBMPI` entry and restores the original id and size. The kernel pool entry of an S0/S1 port is never touched.
+- Implement the outcome table, the new counters (`xsk_zc_rx_miss`, `xsk_zc_rx_free`, `xsk_zc_rx_pass_copy`, `xsk_zc_rx_bad_fd`, `xsk_zc_map_dup`), and the removal of the debug prints and dead counters.
+- Qdrant gate on `FMBM_EBMPI` layout and size semantics, the BMI buffer prefix and FD offset (`FMBM_RIM`/`FMBM_RPSO`, patch 0217), and scatter/gather selection. Cross-check against `arch/fman-microcode-210-programming-reference.md` and the LS1046A DPAA RM. Get independent review before and after.
+- **Gate (T-M4-4d).** Pass criteria:
+  - The probe with unaligned geometry, and then VPP, receives pings with correct L2 headers.
+  - `xsk_zc_rx_redirect` equals `xsk_zc_rx_recovered`.
+  - Miss and bad-FD counts are 0.
+  - Map occupancy returns to the BMan pool count after traffic stops.
+  - VPP `show interface` RX increments.
+  - A frame that is one byte over the derived MTU is rejected at admission, not overrun.
+
+### P3: wakeup and refill (D7)
+
+- Route RX and TX wakeups to `qmap[q].cpu`. The candidate mechanism is an IPI per band, kept only if a review confirms it is safe against the portal IRQ handler. Seed the pool on the first wakeup after attach.
+- Confirm VPP's behaviour against upstream `src/plugins/af_xdp/input.c` and `output.c`. VPP refills when at least 16 slots are free and calls `recvmsg(MSG_DONTWAIT)` only when `NEED_WAKEUP` is set. VyOS sets `no_syscall_lock` for DPAA1 (`data/vyos-1x-010-vpp-platform-bus.patch`), which changes the `trylock` path.
+- **Gate.** Pass criteria:
+  - Within 1 s of VPP start with no ingress, the XSK pool count is above 0 and `xsk_wakeup_cpu_mismatch` is 0.
+  - The first ping is answered.
+  - No `napi_schedule_irqoff` warnings with lockdep enabled in a debug build.
+
+### P4: TX ZC confirmation (D5)
+
+- Apply the confirmation contract and dedicated confirmation FQ from §3.1, keep the per-band inflight budget, and make detach retire the FQ.
+- Qdrant gate on TX FQ ContextA/EBD, `FCO` and the confirmation FQ lifecycle. Get independent review before and after.
+- **Gate.** Pass criteria:
+  - `xsk_tx_conf_zc` equals the frames submitted.
+  - Inflight returns to 0 when idle.
+  - The XSK RX pool count does not change from TX.
+  - VPP answers pings, and a bidirectional UDP stream at a fixed low rate shows no buffer loss in VPP `show buffers`.
+
+### P5: single-queue performance (T-M4-4e)
+
+- Batch the flush per NAPI poll: add a flavor op called at the end of `dpaa_eth_poll()`, and run one `bpf_net_ctx` and one flush per poll (D8). Tune the refill batch and threshold against BMan depletion. Profile the RX hook and refill with `perf`.
+- On the VPP side, tune `rxq_size`/`txq_size`, buffers and `poll-sleep-usec`. Watch the thermal trade-off: a poll-mode core without sleep has shut the board down, and `board/scripts/fan-check` must be logged.
+- Measure with iperf3 (60 s, both directions) and TRex NDR (64 B, 512 B, 1518 B and IMIX; S2 cell of `plans/TREX-NDR-PERF-PLAN.md`), and record VPP `show runtime`.
+- **Gate.** Pass criteria:
+  - At least 3.0 Gbit/s single-stream sustained for 60 s.
+  - Every correctness counter clean.
+  - Temperature within limits.
+  - Results recorded in qdrant.
+
+  Report the NDR figures as measured; this plan sets no target for them.
+
+### P6: more than one worker (D9)
+
+- Analysis to verify: the BMI chooses the pool by buffer size, not by FQ, so one port cannot give each RSS queue its own XSK pool. A frame filled from queue A's pool can arrive on queue B, where the XSK core would refuse it. Multi-queue ZC on one port therefore needs either a shared pool across queues or RSS collapsed to one queue (old Option B).
+- The cheaper gain is one queue per port with two workers (eth3 on one, eth4 on the other). This needs `isolate-cpus 2-3` and a reboot, and must be measured against the thermal limit.
+- **Gate:** a measured decision, recorded in this document, with throughput per worker count. Do not advertise more than one channel (F_104) until it delivers frames.
+
+### P7: VyOS integration and release (T-M4-5a, T-M4-4g)
+
+- Fold any board-side fixes into `data/vyos-1x-010-vpp-platform-bus.patch`:
+  - Explicit zero-copy mode for DPAA1, which fails loudly when attach falls back.
+  - MTU admission from the P2 geometry.
+  - Single queue until P6 says otherwise.
+- Pass `git apply --3way --check` against the pinned upstream. The CI log must show `### Cached N vyos-1x .deb(s)` with N ≥ 1.
+- Build a CI ISO and publish it to the relay. The operator installs it, and the gates are re-run after a cold boot. T-M4-4g is complete only when steered ZC RX, TX and reversibility all pass on a freshly installed image.
+
+## 5. ASK2 no-regression gates
+
+Every driver change in this plan must pass these before it is reported done:
+
+1. `bin/test-fixups.sh` and `bin/kernel-roundtrip.sh verify` pass. `bin/dev-build.sh kernel` builds with no new warnings, and module vermagic ends in `-vyos`.
+2. `bin/test-xsk-detach-retry.py <prepared af_xdp_pool_main.c>` and the P0 host harness pass.
+3. The RX hook stays cheap when no XSK pool is attached: one BPID compare per FD on the kernel path. FMan-forwarded hits never reach the CPU. If profiling shows a cost in S1, gate the hook with a static key that is enabled only while an XSK pool is attached.
+4. On an ASK2 port after a cold boot: `ask-check` is clean and the `pcd-snapshot` diff against the P0 baseline is empty. Routed v4 uni and bidir throughput is measured with n ≥ 3 alternating runs against the baseline image. A shortfall beyond run-to-run noise is a failure to root-cause, not to waive.
+5. Mixed mode (VPP on one port, ASK2 on the other) runs once per phase from P2 onward, with both gates checked.
+
+## 6. Bench and tooling
+
+- DUT2 (`.106`) carries VPP work. Access and serial details are in `.agents/local.md`. Traffic comes from dell1 and dell2 in the `n106` network namespace, and can only reach a ZC-armed port as peer-initiated traffic. DUT-local pings on the bound port use the probe's XSKMAP path.
+- Oracles: `ethtool -S defunct_ethN | grep xsk_`, `/sys/kernel/debug/af_xdp_pool/qmap`, `bin/bman-pool-count.py`, `board/scripts/pcd-snapshot`, and VPP `show interface`, `show errors`, `show buffers` and `show runtime`.
+
+## 7. Risks
+
+| Risk | Mitigation |
+|---|---|
+| A geometry or EBMPI size change corrupts memory | P0 readback first; host harness; independent review; pings only until the P2 gate |
+| A wakeup IPI races the portal IRQ handler | Review against `qman.c` portal locking before P3; lockdep debug build |
+| A dedicated TX confirmation FQ leaks on detach | Detach retire path in the P0 harness; 10-cycle P1/P4 gate |
+| Detach while FMan walkers are active (F-274) | Keep the F-276 pending retry; do not inject port-disable faults until quiescence is proven |
+| Thermal shutdown under poll mode | `poll-sleep-usec 100` stays the default; log temperatures in P5/P6 |
+| Fixups mutate the ZC path after patches apply | Edit the plain source or owning patch, re-run `bin/test-fixups.sh`, and confirm the counts still match for F_101 (`DPAA1_MIN_UMEM_CHUNK`), F_274 (`fman_port_disable`), F_275 (`net/xdp`) and F_276 (pending XSK ownership) |
+
+## 8. Master-plan task mapping
+
+| Task (master §4.5) | Phase gate |
+|---|---|
+| T-M4-5a operator installs a current image | P7, and before each DUT gate |
+| T-M4-4d DRV mode, `xsks_map[0]`, `xsk_zc_rx_redirect > 0` | P2 |
+| T-M4-4e ≥ 3.0 Gbit/s | P5 |
+| T-M4-4f reversibility | P1, re-checked in P4 and P7 |
+| T-M4-4g completion after steered ZC RX | P7 |
+
+## 9. Not yet verified
+
+- Independent review confirmed D6 and D7, and rated D1, D3 and D5 as source-correct but hardware-dependent (D1 is empty only for never-allocated heads; D5's release to the RX pool is a hypothesis). D3 to D7 are source-derived. P0 must reproduce each on DUT2 or downgrade it.
+- The FD data offset on the XSK pool, and whether the RX hook for a band always runs on `qmap[q].cpu`.
+- Whether the BMI can return any XSK buffer as part of a scatter/gather frame when the XSK pool size is programmed correctly.
+- The P6 claim that per-queue pools cannot work on one port.
+- The single-core throughput ceiling of a working ZC path.
