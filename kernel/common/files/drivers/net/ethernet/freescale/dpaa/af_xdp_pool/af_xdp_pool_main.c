@@ -920,9 +920,17 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
  *   and its NAPI context have been brought up.  Until that lands, the
  *   slot reads NULL and we return -ENOENT so the XSK core sees a clean
  *   error (no NAPI bound on this qband) instead of NULL-deref'ing in
- *   the IRQ-off scheduler path.  XDP_WAKEUP_TX handling lands with
+ *   the IRQ-off scheduler path.  XDP_WAKEUP_TX is handled below; originally planned for
  *   patch 0078 (qman_p_irqsource_add poke of the egress portal).
  */
+static void afx_wake_napi(void *info)
+{
+struct napi_struct *napi = info;
+
+if (!napi_if_scheduled_mark_missed(napi))
+napi_schedule_irqoff(napi);
+}
+
 static int af_xdp_pool_xsk_wakeup(struct dpaa_priv *priv, u32 queue_id,
   u32 flags)
 {
@@ -942,7 +950,21 @@ if (!napi_if_scheduled_mark_missed(napi))
 napi_schedule_irqoff(napi);
 }
 
-/* XDP_WAKEUP_TX path arrives with patch 0078. */
+/* Tx descriptors are drained by napi_tx_zc() on the qband-owner CPU
+ * only, so the poll that handles a Tx wakeup must run there.
+ */
+if (flags & XDP_WAKEUP_TX) {
+int cpu = READ_ONCE(priv->qmap[queue_id].cpu);
+
+if (cpu == raw_smp_processor_id()) {
+unsigned long flg;
+
+local_irq_save(flg);
+afx_wake_napi(napi);
+local_irq_restore(flg);
+} else
+smp_call_function_single(cpu, afx_wake_napi, napi, 0);
+}
 return 0;
 }
 
