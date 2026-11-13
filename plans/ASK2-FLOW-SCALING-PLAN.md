@@ -1,6 +1,49 @@
 # ASK2 flow scaling and pressure-aware elephant admission plan
 
-**Status:** Analysis and design only (2026-11-07, revised the same day). No code, patch, or image change described here is implemented. The revision replaces the BMan query helper with a CCSR pool-content read, removes the need for a REPLACE-time kernel patch, adds the retry cost of deferred admission, and puts a measurement phase (§3.0) before any adaptive work. The changes touch the flow insert path and therefore require the regression and board gates in §8; they do not close the F-291 teardown contract.
+**Status:** §0 (2026-11-13) is the active programme: measured scaling state on image 2026.11.13-0317 (F-312) and the staged work to make ASK2 consistent, fast and stable from one flow to the admission budget. F-312 (stats read off `fe_lock`) is shipped and board-verified. §1 onwards is the 2026-11-07 admission design (analysis only, not implemented); it is stage S6 of §0 and keeps its own gates in §8. Nothing here closes the F-291 teardown contract.
+
+## 0. Stability programme (2026-11-13)
+
+### 0.1 Measured state
+
+Rig: DUT1 (`.185`), dell1 TRex v3.08, routed IPv4 UDP 64 B, bidirectional, flows differ by UDP port (single 16-bit counter up to 64511 flows, a 256 x N sport x dport grid above that; the grid avoids the SIP ports 5060/5061, which ASK2 keeps in software by design). Ladder step: drain, hold N flows at 200 kpps for 120 s, then a 30 s trial at 3 Mpps (half the 64 B ceiling). Data: dell2 `/mnt/builds/ask2-review/oracle/trex-ladder-*`.
+
+- Forwarding is in silicon and lossless at every count up to the admission budget, 131,072 flows (262,144 directions), on the v2 harness (S0): 100 % offloaded, 0 of 90 M packets lost at 3 Mpps and at 0.5 Mpps, also with one or with back-to-back `conntrack -L` dumps running through hold and trial. The v1 harness collapsed at 131,072 flows (60-65 % loss, offloads torn down) on 3 of 3 runs, including with static ARP and with `max_flows` 524,288; neither ARP, the budget nor conntrack dumps reproduce it on v2, so it is attributed to the v1 procedure. Best remaining candidate: v1's drain wait gave up after 10 min, so a step could start while the previous step's overlapping tuples were still being torn down; S1's churn cases exercise that deliberately.
+- Throughput (best of all reps, image 0524, Mpps both directions): 64 B 4.71-4.94 (1 flow) and 6.06-6.09 (1024 flows); 512 B 3.62-3.76 (~80 % of line); 1518 B 1.53-1.62 (94-99 % of line). Curves are flat from NDR to MRR; MRR at 64 B is generator-limited to ~11 Mpps offered with a flow VM.
+- Control plane before F-312: the per-flow `FLOW_CLS_STATS` read slept on `pcd->fe_lock`, which inserts and deletes hold across FMFP_EXTC SYNC; above ~16k flows ~1000 `nf_ft_offload_stats` kworkers blocked (D state, the workqueue cap `WQ_DFL_ACTIVE` 1024) and install times doubled.
+- Control plane after F-312: no stats worker blocks at any count; up to 32,768 flows install in <= 12 s with 0 blocked tasks and >= 47 % CPU idle (load-average spikes are runnable bursts, not CPU saturation). Above 32,768 flows ~1020 `nf_ft_offload_add` workers queue on ASK's global `ask_flow_lifecycle_lock` (FLOW_CLS_REPLACE and DESTROY both take it, F-286/F-288 ownership); install runs at ~4k records/s (24-27 s at 49k-98k flows, 41-43 s at 122k-131k).
+- SYNC is not the insert cost: with `ehash_sync_diag_enable`, 99.4 % of ehash SYNCs (INV0 only; `ehash_hc_sync_enable=N`) finish in < 1 us, max 644 us. The ~200 us per record is software under the lifecycle lock.
+- Per-table bucket count is capped by the silicon at 32,768 (lookup microcode: mask = (1 << (hash_mask_bits & 0xf)) - 1). The bucket hash (reflected CRC-64 over the 50-byte key; offline model `bin/ehash-bucket-sim.py`) is linear over GF(2), so structured tuple sets fill buckets very unevenly: the 64,511-flow single-counter set uses only 16,384 eth3 buckets (15,359 hold 4 records, and that step passed), 131,072 grid flows produce the first 6-record buckets (64 per table).
+- Test-rig artifact found: TRex answers ARP only in service mode, so during long steps the DUT's neighbour entries for the generator hosts are probed and fail; ASK then tears down every flow behind the neighbour and re-adds them when TRex re-resolves (DESTROY and REPLACE storms of ~1 M callbacks). The same mechanism makes `nf_flow_offload_rule_alloc()` fail, which the PR14o diagnostic (`fixes/130`) reports as `alloc failed err=-12` although it is not an allocation failure. Static neighbour entries on the DUT remove it (122,880 flows: 450 missing -> 0 missing).
+- Harness weakness: the ladder sampled with `conntrack -L`, which takes 13-37 s per sample at 100k+ flows, overlaps the trial and is itself control-plane load; "full after" was quantised to ~11 s. `ynl --family ask --do get-info` returns `num-flows` (directions, atomic read) in 0.3 s.
+
+### 0.2 Stages
+
+Each stage keeps the repository rules: qdrant gate before FMan PCD changes, failing check first, independent review for FMan/PCD diagnoses and fixes, CI build, cold-boot board verification.
+
+- **S0 Harness (no image change).** Ladder v2: sample `num-flows` from `get-info` and `vmstat`/`/proc/net/softnet_stat` every 1 s (offload completion with 1 s resolution, CPU and kernel-path packet rate), no `conntrack -L` during holds or trials; static neighbour entries for the generator hosts on the DUT for every TRex run (or keep TRex in service mode, measured for its own cost); trial rate as a parameter; tuple shapes as a parameter (single counter, power-of-two grid, non-power-of-two grid, stride) with the offline bucket histogram printed for each set; three reps per step, cold boot per ladder. Retest the TRex NDR cells with static ARP, since DUT2's sporadic low NDRs may be neighbour aging.
+- **S1 Wide-variety baseline.** On the F-312 image with the S0 harness: flow counts 1 to 131,072 x tuple shapes, plus churn (new flows per second 1k/5k/20k with a fixed live set) and mixed frame sizes. Output one table per shape: completion time, peak blocked tasks, CPU, loss. This is the reference every later stage is judged against.
+- **S2 131,072-flow collapse.** Root-cause with S0 instrumentation: a 0.5 Mpps trial (overload vs miss), kernel-path packet rate during the trial (frames that missed hardware), per-bucket occupancy of the offloaded set, and A/B of dynamic vs static ARP and of the 0524 image, to settle regression vs procedure. Fix shape decided only after an independent review.
+- **S3 Insert path.** Profile one install burst at 64k flows (static perf build) to place the ~200 us per record. Candidate fixes, chosen by the profile: narrow `ask_flow_lifecycle_lock` to per-flow or hash-sharded ownership, batch the FE insert under one `fe_lock` hold, move the F-177 always-on INV0 probe after the `fe_lock` release (silicon-facing ordering: ask first, A/B on the ladder). Target: 64k flows installed in < 10 s with < 50 blocked tasks.
+- **S4 Remaining per-flow `fe_lock` users.** `fman_pcd_fe_ehash_keysize()` (WGFP calls it on every add, delete and stats poll) and the debugfs `fe_flow`/`fe_ehash_stats` walkers, which hold `fe_lock` for tens to hundreds of ms at 64k records: move the former to `fe_stats_lock`, make the walkers chunked or snapshot-based.
+- **S5 Neighbour-change cost.** A failing neighbour currently tears down and later re-adds every flow behind it (O(flows) DESTROY + REPLACE, ~1 M callbacks at 131k flows). Measure with a controlled ARP flap on a real responder, compare with the vendor ASK on `.70`, and decide whether flows should be parked (record kept, egress invalidated) instead of destroyed.
+- **S6 Admission.** The 2026-11-07 design below (§1-§10), starting with its §3.0 measurement, now on top of the S1 baseline.
+
+### 0.3 Progress
+
+- S0: `bin/testrig-flow-ladder.sh` (v2) with a persistent DUT sampler (one YNL session, 0.2 ms per `get-info`; the per-second `ynl` CLI it replaced cost ~15 % of DUT CPU in a profile), pinned generator neighbours, trial rate parameter. `bin/ehash-bucket-sim.py` models bucket occupancy of a tuple set (self-test: the F-307 silicon datum). Tuple-shape parameter and reps still to add.
+- S2: closed as a v1-harness artifact (see §0.1); the drain-race candidate moves to S1 churn.
+- S3 profile (perf, 30 s from the start of a 65,536-flow install, image 0317): offload work items 58.8 % of CPU; stats polls 16.2 % (bit-serial CRC under `fe_stats_lock` 5.7 % self, spin on that lock 4.8 %); add workers spinning on `ask_flow_lifecycle_lock` 14.6 %; `ask_flow_offload_replace` under the lock 10.5 %, of which the FMan insert itself is only 2.9 %; softirq for first packets before offload 21.5 %.
+- S3 fix 1, F-314: table-driven CRC-64 (NXP `crc64.h` form) and the stats read hashes before taking `fe_stats_lock`. Host check `bin/test-ehash-crc.py` (bit-serial reference, RM self-test vector, silicon bucket 0x507f); independent review OK. Board measurement pending.
+- S3 fix 2, workqueue concurrency: `nf_ft_offload_{add,del,stats}` `max_active` 1024 -> 4 (runtime A/B, same harness): blocked tasks 1,022 -> 1-2, run queue 120 -> 13, install of 131,072 flows 29 s -> 25 s, CPU and loss unchanged. Shipped as `board/scripts/99-nf-flowtable-wq.rules` (verified live on `.185`).
+- S3 remaining: the ~95 us per REPLACE under `ask_flow_lifecycle_lock` outside the FMan insert (xarray, ownership bookkeeping, route/neighbour work); profile with the two fixes in, then decide on narrowing the lock.
+- S4: F-313 moves `fman_pcd_fe_ehash_keysize()` (WGFP, every add/delete/stats) to `fe_stats_lock`; independent review OK. The debugfs `fe_flow`/`fe_ehash_stats` walkers are deferred (they only cost when read).
+
+### 0.4 Exit criteria
+
+- Every tuple shape: 100 % offload and 0 trial loss up to the admission budget; over-budget flows forwarded in software without loss at the trial rate.
+- Install of 64k flows in < 10 s, < 50 blocked tasks at any count, no stats or add convoy visible in `ps`.
+- Three reps per cell within 2 % of each other; no wedgecap capture, sync timeout or kernel warning over the full S1 matrix.
 
 ## Goal
 

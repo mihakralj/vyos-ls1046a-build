@@ -5014,8 +5014,9 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
  * ehash record so offloaded flows (whose frames bypass the kernel) report
  * real packet/byte totals to nft and to `dump-flows`.
  *
- * Lifetime/locking: fman_pcd_fe_flow_get_stats() takes pcd->fe_lock (a mutex),
- * so it cannot run under rcu_read_lock. We therefore (1) snapshot the flow's
+ * Lifetime/locking: the fman_pcd stats getter takes pcd->fe_stats_lock (a
+ * spinlock since F-312, not fe_lock); it is still called outside RCU because
+ * the record walk is the getter's business, not ours. We (1) snapshot the flow's
  * key/port/hw_backed under RCU, (2) drop RCU and read the silicon counters,
  * (3) re-look-up the cookie under RCU and store the result only if the SAME
  * live flow is still present — a concurrent DESTROY that freed the original

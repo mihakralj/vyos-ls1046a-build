@@ -466,6 +466,7 @@ chroot "$CHROOT" systemctl enable ls1046a-cpufreq.service || true
 mkdir -p "$CHROOT/etc/udev/rules.d"
 cp board/scripts/10-emc2305-fan-pid.rules "$CHROOT/etc/udev/rules.d/10-emc2305-fan-pid.rules"
 cp board/scripts/99-dpaa1-offloads.rules "$CHROOT/etc/udev/rules.d/99-dpaa1-offloads.rules"
+cp board/scripts/99-nf-flowtable-wq.rules "$CHROOT/etc/udev/rules.d/99-nf-flowtable-wq.rules"
 cp board/scripts/99-ls1046a-cpufreq.rules "$CHROOT/etc/udev/rules.d/99-ls1046a-cpufreq.rules"
 
 ### Board-level power-off GPIO hook (Mono Gateway DK).

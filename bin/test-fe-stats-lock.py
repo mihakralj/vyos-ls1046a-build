@@ -31,6 +31,10 @@ def check(src):
         errors.append("get_stats_checked still takes fe_lock")
     if len(LOCK.findall(get)) != 1 or len(UNLOCK.findall(get)) != 3:
         errors.append("get_stats_checked: expected 1 spin_lock / 3 spin_unlock on fe_stats_lock")
+    # F-313: WGFP calls the keysize accessor on every add, delete and stats poll
+    ks = function(src, "int fman_pcd_fe_ehash_keysize(")
+    if "fe_lock)" in ks.replace("fe_stats_lock)", "") or len(LOCK.findall(ks)) != 1 or len(UNLOCK.findall(ks)) != 1:
+        errors.append("fman_pcd_fe_ehash_keysize: expected fe_stats_lock only (F-313)")
     held = False
     for n, line in enumerate(src.splitlines(), 1):
         if LOCK.search(line):

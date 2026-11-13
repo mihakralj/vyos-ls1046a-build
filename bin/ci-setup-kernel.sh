@@ -3107,8 +3107,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # fe_lock, which inserts/deletes hold across FMFP_EXTC SYNC polls; writers
     # link/unlink/publish under it and table_free unpublishes before freeing.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_312.py" 2>&1
+    # F-313: the ehash keysize accessor (WGFP, every add/delete/stats poll)
+    # reads under the same fe_stats_lock. Needs F-312.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_313.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
-    echo "### fman_pcd.c: F-312 stats-lock structure check passed"
+    echo "### fman_pcd.c: F-312/F-313 stats-lock structure check passed"
+    # F-314: table-driven ehash CRC-64 (NXP crc64.h form); the stats read
+    # hashes before taking fe_stats_lock. Checked against the bit-serial
+    # reference, the RM self-test vector and the F-307 silicon bucket datum.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_314.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-crc.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: F-314 ehash CRC check passed"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
