@@ -108,9 +108,11 @@ board validation needs a CI image. Recommend: schedule the lane-scaling measurem
 
 **P-5. DPAA RX buffer order is settled (F-222 reverted F-203 order-1 → order-0) — do not revisit
 without a fragmentation-aware allocator.** The AGENTS.md correction record documents the
-`dev_alloc_pages()` failure + RX-deaf wedge at ~800 Mbit/s. Any future MTU/jumb work must keep
-single-buffer contiguity (FE path validated only on it) AND order-0 allocation. Effort: none
-(guard). Value: avoid re-introducing a known wedge.
+`dev_alloc_pages()` failure + RX-deaf wedge at ~800 Mbit/s. Keep order-0 allocation; do not
+revive order-1/order-2 pools. **Addendum (issue #50, 2026-11-09):** jumbo ≥9000 does **not**
+need that allocator — Option B (repaired 0177 + mainline RX scatter-gather) shipped and
+closed #50 without page_pool. FE multi-buffer hits were HW-validated 2026-10-31. Effort: none
+(guard). Value: avoid re-introducing a known wedge while still allowing SG jumbo.
 
 **P-6. VPP AF_XDP path pins `rx_queue_size/tx_queue_size 4096`, single RX queue (patch 010).**
 Fine for SFP+ 10G today. If VPP-side throughput stalls, next knobs: queue count vs CPU mapping,

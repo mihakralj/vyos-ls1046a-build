@@ -1,8 +1,8 @@
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 74fa59c..6335a91 100755
+index 6d8a1e141..41e2da86d 100644
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -65,6 +65,14 @@ def cli_path(option_path: str) -> str:
+@@ -63,6 +63,14 @@ def cli_path(option_path: str) -> str:
      """ Undo key mangling of a dotted option path for user-facing messages """
      return option_path.replace('.', ' ').replace('_', '-')
  
@@ -17,20 +17,17 @@ index 74fa59c..6335a91 100755
  def update_bond_options(conf: Config, eth_conf: dict) -> list:
      """
      Return list of blocked options if interface is a bond member
-@@ -410,6 +418,27 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -408,6 +416,24 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
              raise ConfigError(
                  f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
              )
-+        # ASK FMan FE forwarding is bounded to the order-0 RX buffer range on
-+        # this board. The DPAA1 RX pool is one contiguous 4 KiB order-0 page
-+        # (F-222); frames above the ~3600 ceiling overrun the one-buffer FMan
-+        # RX contract and wedge RX (cold-boot-only recovery), and below the
-+        # floor is untested. Clamp the MTU
-+        # to [ASK_OFFLOAD_MTU_MIN, ASK_OFFLOAD_MTU_MAX] and fail the commit
-+        # closed outside it, so a remote MTU change on an ASK interface cannot
-+        # brick connectivity. The default 1500 is inside the range, so
-+        # interfaces that never set an explicit MTU pass unchanged. Widen the
-+        # bounds only after validating a larger range on the FMan RX pool.
++        # ASK offload MTU must stay in [ASK_OFFLOAD_MTU_MIN, ASK_OFFLOAD_MTU_MAX]
++        # (1280..9000, HW-validated 2026-10-31 via Option B RX scatter-gather).
++        # The DPAA1 RX pool remains order-0 / 4 KiB (F-222); frames above one
++        # buffer arrive as mainline SG FDs. Fail the commit closed outside the
++        # validated band so a remote MTU change on an ASK interface cannot
++        # brick connectivity. Default 1500 passes unchanged. Do not raise the
++        # ceiling further without a new HW validation pass.
 +        mtu = ethernet.get('mtu')
 +        if mtu is not None:
 +            mtu_val = int(mtu)
@@ -38,8 +35,8 @@ index 74fa59c..6335a91 100755
 +                raise ConfigError(
 +                    f'Interface {ifname} ASK offload requires MTU between '
 +                    f'{ASK_OFFLOAD_MTU_MIN} and {ASK_OFFLOAD_MTU_MAX} '
-+                    f'(configured MTU {mtu} is outside the contiguous-buffer range '
-+                    f'and can wedge the FMan RX path). Set a supported MTU '
++                    f'(configured MTU {mtu} is outside the validated ASK '
++                    f'offload range). Set a supported MTU '
 +                    f'or disable "offload ask" first.'
 +                )
  

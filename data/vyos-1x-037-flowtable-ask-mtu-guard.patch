@@ -1,22 +1,18 @@
 
 diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
-index cc58ead..da385b0 100755
+index 45837ba8b..7de7363c8 100644
 --- a/src/conf_mode/firewall.py
 +++ b/src/conf_mode/firewall.py
-@@ -511,6 +511,32 @@ def verify_hardware_offload(ifname):
+@@ -525,6 +525,28 @@ def verify_hardware_offload(ifname):
      if not enabled and fixed:
          raise ConfigError(f'Interface "{ifname}" does not support hardware offload')
  
-+    # LS1046A ASK2 (2026-08-21): a hardware flowtable engages FMan FE
-+    # forwarding, bounded to the order-0 RX buffer's conservative MTU range
-+    # (1280..3600). The DPAA1 RX pool is one contiguous 4 KiB order-0 page
-+    # (F-222); frames above the ceiling overrun the one-buffer FMan RX contract
-+    # (cold-boot-only recovery), and below the floor is untested. Arming a
-+    # hardware flowtable on an interface whose MTU is outside this range can
-+    # brick connectivity remotely. Read the authoritative live MTU from sysfs
-+    # and fail closed outside [ASK_FT_MTU_MIN, ASK_FT_MTU_MAX]. The default
-+    # 1500 is inside the range, so standard interfaces pass. Widen once a
-+    # larger range is validated on the FMan RX pool.
++    # LS1046A ASK2: a hardware flowtable engages FMan FE forwarding. The
++    # validated MTU band is [ASK_FT_MTU_MIN, ASK_FT_MTU_MAX] (1280..9000;
++    # 2026-10-31 Option B / RX scatter-gather). RX stays order-0 / 4 KiB
++    # (F-222); larger frames use mainline SG. Fail closed if the live MTU
++    # from sysfs is outside the band. Default 1500 passes. Do not raise the
++    # ceiling further without a new HW validation pass.
 +    ASK_FT_MTU_MIN = 1280
 +    ASK_FT_MTU_MAX = 9000
 +    mtu_path = f'/sys/class/net/{ifname}/mtu'
@@ -29,7 +25,7 @@ index cc58ead..da385b0 100755
 +        raise ConfigError(
 +            f'Interface "{ifname}" hardware flowtable offload requires MTU '
 +            f'between {ASK_FT_MTU_MIN} and {ASK_FT_MTU_MAX} (live MTU {mtu} '
-+            f'is outside the validated range and can wedge the FMan RX path). '
++            f'is outside the validated ASK offload range). '
 +            f'Set a supported MTU before enabling "offload hardware".'
 +        )
 +

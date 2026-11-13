@@ -35,7 +35,7 @@ set interfaces ethernet eth<n> offload ipv6
 | Ports | `eth0`–`eth4` (eth0 is management by convention; avoid it). |
 | Automatic parts | VLAN, NAT44/NAT66/PAT, PPPoE (on the PPPoE source port) and bridge offload follow an engaged port. There are **no** `offload vlan` / `offload pppoe` leaves (removed by patch `054`), and no `ask` keyword. |
 | Side effects | Forces RPS on the port and enables `hw-tc-offload`. |
-| Validation | Commit fails if the helper `/usr/local/bin/vyos-offload-ask` is missing/errors, or if the MTU is outside **1280–3600**. |
+| Validation | Commit fails if the helper `/usr/local/bin/vyos-offload-ask` is missing/errors, or if the MTU is outside **1280–9000**. |
 
 The ISO's factory default config (`board/vyos-config/config.boot.dhcp`, installed as
 `/opt/vyatta/etc/config.boot.default`) ships with `offload ipv4` and `offload ipv6`
@@ -76,7 +76,7 @@ set firewall global-options hardware-offload-delay 500
 * `action offload` is non-terminal: an earlier `accept` rule matching established
   traffic in the same chain shadows it (commit warns for global state-policy accepts, patch `038`).
 * `hardware-offload-delay` (patch `055`): minimum flow age in ms, `0–60000`, default `0` (offload at once). It writes `/sys/module/ask/parameters/offload_delay_ms`.
-* Flowtable MTU guard (`037`) mirrors the 1280–3600 range; VLAN sub-interfaces are handled when the parent is listed (`043`).
+* Flowtable MTU guard (`037`) mirrors the 1280–9000 range; VLAN sub-interfaces are handled when the parent is listed (`043`).
 * Add the same flowtable rule for `ipv6` for IPv6 flows.
 
 #### Bridge offload

@@ -208,7 +208,7 @@ CASES = [("ctl-v4-1000", "4", "dfclear", "10.99.50.1", 972),  # control: fits th
          ("v6", "6", "default", "fd99:50::1", 1452),
          ("v4-dfclear-warm", "4", "dfclear", "10.99.50.1", 1472, 5990),  # flow already offloaded
          ("v6-warm", "6", "default", "fd99:50::1", 1452, 5991),
-         # R1 jumbo ingress: the LAN port and gen2 need MTU >= the IP size first (ASK range is 1280-3600)
+         # R1 jumbo ingress: the LAN port and gen2 need MTU >= the IP size first (ASK range is 1280-9000)
          ("v4-j2000", "4", "dfclear", "10.99.50.1", 1972), ("v6-j2000", "6", "default", "fd99:50::1", 1952),
          ("v4-j3000", "4", "dfclear", "10.99.50.1", 2972), ("v6-j3000", "6", "default", "fd99:50::1", 2952),
          ("v4-j3500", "4", "dfclear", "10.99.50.1", 3472), ("v6-j3500", "6", "default", "fd99:50::1", 3452)]

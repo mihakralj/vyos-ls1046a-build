@@ -47,9 +47,10 @@ Non-VLAN interfaces are byte-identical to the previous behaviour
 (get_hardware_offload_interface returns the name unchanged).
 
 diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+index 5f6fec8d3..0ac5f168b 100644
 --- a/src/conf_mode/firewall.py
 +++ b/src/conf_mode/firewall.py
-@@ -481,8 +481,29 @@ def verify_nested_group(group_name, group, groups, seen):
+@@ -518,8 +518,29 @@ def verify_nested_group(group_name, group, groups, seen):
          if 'include' in groups[g]:
              verify_nested_group(g, groups[g], groups, seen)
  
@@ -80,8 +81,8 @@ diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
      enabled, fixed = ethtool.get_hw_tc_offload()
  
      if not enabled and fixed:
-@@ -500,7 +521,7 @@ def verify_hardware_offload(ifname):
-     # larger range is validated on the FMan RX pool.
+@@ -533,7 +554,7 @@ def verify_hardware_offload(ifname):
+     # ceiling further without a new HW validation pass.
      ASK_FT_MTU_MIN = 1280
      ASK_FT_MTU_MAX = 9000
 -    mtu_path = f'/sys/class/net/{ifname}/mtu'
@@ -89,7 +90,7 @@ diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
      try:
          with open(mtu_path) as f:
              mtu = int(f.read().strip())
-@@ -767,7 +788,8 @@ def apply(firewall):
+@@ -838,7 +859,8 @@ def apply(firewall):
          for flowtable, flowtable_conf in firewall['flowtable'].items():
              if dict_search_args(flowtable_conf, 'offload') == 'hardware':
                  for ifname in flowtable_conf['interface']:
