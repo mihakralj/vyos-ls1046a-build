@@ -60,6 +60,7 @@
 #include <net/netevent.h>
 #include <net/ipv6.h>
 #include <net/netfilter/nf_conntrack.h>
+#include <net/netfilter/nf_conntrack_ecache.h>	/* IPCT_ASSURED for offloaded UDP */
 #include <net/route.h>		/* rt_nexthop(): routed-endpoint next hop */
 #include <net/ip6_route.h>	/* rt6_nexthop() */
 #include <net/addrconf.h>
@@ -3121,6 +3122,46 @@ static bool ask_tuple_pppoe_encap(const struct flow_offload_tuple *t,
 	       (!n_vlan || (*vid && *vid < VLAN_VID_MASK));
 }
 
+/*
+ * Offloaded UDP is never marked IPS_ASSURED by the kernel: nf_conntrack_udp_packet()
+ * sets it only for a packet it processes at least 2 s after the first (stream_ts),
+ * and an offloaded flow shows the kernel no packets after hand-over. A non-assured
+ * conntrack is an early_drop victim, so when a burst of new flows filled the
+ * conntrack table, offloaded UDP elephants were evicted like DNS mice and torn out
+ * of hardware (.185, 20k new flows/s: 29-42 % elephant loss; plans/
+ * ASK2-FLOW-SCALING-PLAN.md §0.3). Apply the kernel's own UDP rule from silicon
+ * evidence: called when a stats poll saw the hardware counters advance; the flow
+ * must have seen a reply and be past its stream window. TCP is assured at the
+ * handshake, before offload, and is left alone.
+ *
+ * Lifetime: runs in the FLOW_CLS_STATS work item, whose NF_FLOW_PENDING bit keeps
+ * flowtable gc from freeing the flow (and dropping its ct reference) meanwhile.
+ */
+static void ask_flow_cookie_assure_udp(unsigned long cookie)
+{
+	const struct flow_offload_tuple *t;
+	const struct flow_offload *flow;
+	struct nf_conn *ct;
+	int dir;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return;
+	t = (const struct flow_offload_tuple *)cookie;
+	dir = t->dir;
+	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+		return;
+	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
+	ct = flow->ct;
+	if (!ct || nf_ct_protonum(ct) != IPPROTO_UDP ||
+	    !test_bit(IPS_SEEN_REPLY_BIT, &ct->status) ||
+	    test_bit(IPS_ASSURED_BIT, &ct->status) ||
+	    (ct->status & IPS_NAT_CLASH) ||
+	    !time_after(jiffies, READ_ONCE(ct->proto.udp.stream_ts)))
+		return;
+	if (!test_and_set_bit(IPS_ASSURED_BIT, &ct->status))
+		nf_conntrack_event_cache(IPCT_ASSURED, ct);
+}
+
 int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
 {
 	const struct flow_offload_tuple *t, *o;
@@ -5202,6 +5243,10 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
 
 		if (is_hw_backed && refreshed && !d_packets)
 			lastused = 0;
+		/* Silicon saw this flow's packets: same evidence the kernel's
+		 * UDP tracker needs to mark it assured (early_drop protection). */
+		if (is_hw_backed && refreshed && d_packets)
+			ask_flow_cookie_assure_udp((unsigned long)f->cookie);
 
 		/* flow_stats_update() ACCUMULATES; cumulative silicon totals
 		 * must never be passed directly. d_* is current minus the

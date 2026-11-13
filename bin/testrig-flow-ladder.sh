@@ -19,47 +19,8 @@ st(){ printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a $P/STATUS; }
 D="ssh -n -o BatchMode=yes -o ConnectTimeout=20 -o IdentitiesOnly=yes -i $HOME/.ssh/vyos_key vyos@$DIP"
 T="ssh -n -o BatchMode=yes -o ConnectTimeout=20 $RIG_SSHK $GEN1"
 
-# DUT-side sampler (copied to the DUT as /tmp/ladder-sampler.py): one persistent process, one line per second until
-# killed; phase is read from /tmp/ladder-phase. It keeps one YNL netlink session (0.2 ms per get-info) and reads /proc
-# directly, so it forks nothing per sample (the per-second `ynl` CLI cost ~15 % of DUT CPU in the first v2 profile).
-SAMPLER=$(mktemp); trap 'rm -f "$SAMPLER"' EXIT
-cat > "$SAMPLER" <<'SAMP'
-import os, sys, time
-sys.path.insert(0, "/usr/share/ynl")
-from pyynl.lib import YnlFamily
-y = YnlFamily("/usr/share/ynl/specs/ask.yaml", "")
-def cpu():
-    f = [int(x) for x in open("/proc/stat").readline().split()[1:8]]   # user nice system idle iowait irq softirq
-    busy = f[0] + f[1] + f[2] + f[5] + f[6]
-    return busy, busy + f[3] + f[4]
-def kpath():
-    return sum(int(l.split()[0], 16) for l in open("/proc/net/softnet_stat"))
-def blocked():
-    n = 0
-    for p in os.listdir("/proc"):
-        if p.isdigit():
-            try:
-                with open(f"/proc/{p}/stat") as fh:
-                    n += fh.read().rsplit(")", 1)[1].split()[0] == "D"
-            except OSError:
-                pass
-    return n
-pb, pt = cpu(); pk = kpath()
-while True:
-    time.sleep(1)
-    b, t = cpu(); k = kpath()
-    try:
-        flows = y.do("get-info", {})["info"]["num-flows"] // 2
-    except Exception:
-        flows = 0
-    try:
-        phase = open("/tmp/ladder-phase").read().strip() or "-"
-    except OSError:
-        phase = "-"
-    running = open("/proc/loadavg").read().split()[3].split("/")[0]
-    print(int(time.time()), phase, flows, 100 * (b - pb) // (t - pt + 1), running, blocked(), k - pk, flush=True)
-    pb, pt, pk = b, t, k
-SAMP
+# DUT-side sampler: bin/ask2-ladder-sampler.py (one line per second; columns documented there).
+SAMPLER=$(dirname "$0")/ask2-ladder-sampler.py
 scp -q -o IdentitiesOnly=yes -i $HOME/.ssh/vyos_key "$SAMPLER" vyos@$DIP:/tmp/ladder-sampler.py || { st "flowladder2: cannot copy sampler to $DIP"; exit 2; }
 
 $D "sudo ip neigh replace $GEN_IP3 lladdr $GEN_MAC3 dev eth3 nud permanent && sudo ip neigh replace $GEN_IP4 lladdr $GEN_MAC4 dev eth4 nud permanent" \
