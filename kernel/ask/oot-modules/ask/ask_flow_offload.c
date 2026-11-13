@@ -3134,6 +3134,14 @@ static bool ask_tuple_pppoe_encap(const struct flow_offload_tuple *t,
  * must have seen a reply and be past its stream window. TCP is assured at the
  * handshake, before offload, and is left alone.
  *
+ * The reply itself is usually never seen by conntrack either: UDP is offload-
+ * eligible once confirmed (nft_flow_offload_eval), the flowtable takes the flow on
+ * its first packet and both directions then bypass conntrack, so the entry stays
+ * [UNREPLIED] (.185 image 1638: all four elephants). Each direction has its own
+ * silicon record and stats poll, so packets counted on the REPLY-direction record
+ * are a reply seen by the hardware: set IPS_SEEN_REPLY + IPCT_REPLY then, as
+ * nf_conntrack_in() does for the first reply packet. One-way UDP stays unassured.
+ *
  * Lifetime: runs in the FLOW_CLS_STATS work item, whose NF_FLOW_PENDING bit keeps
  * flowtable gc from freeing the flow (and dropping its ct reference) meanwhile.
  */
@@ -3152,8 +3160,12 @@ static void ask_flow_cookie_assure_udp(unsigned long cookie)
 		return;
 	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
 	ct = flow->ct;
-	if (!ct || nf_ct_protonum(ct) != IPPROTO_UDP ||
-	    !test_bit(IPS_SEEN_REPLY_BIT, &ct->status) ||
+	if (!ct || nf_ct_protonum(ct) != IPPROTO_UDP)
+		return;
+	if (dir == FLOW_OFFLOAD_DIR_REPLY &&
+	    !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+		nf_conntrack_event_cache(IPCT_REPLY, ct);
+	if (!test_bit(IPS_SEEN_REPLY_BIT, &ct->status) ||
 	    test_bit(IPS_ASSURED_BIT, &ct->status) ||
 	    (ct->status & IPS_NAT_CLASH) ||
 	    !time_after(jiffies, READ_ONCE(ct->proto.udp.stream_ts)))
