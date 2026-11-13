@@ -3122,6 +3122,51 @@ static bool ask_tuple_pppoe_encap(const struct flow_offload_tuple *t,
 	       (!n_vlan || (*vid && *vid < VLAN_VID_MASK));
 }
 
+int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
+{
+	const struct flow_offload_tuple *t, *o;
+	const struct flow_offload *flow;
+	int dir;
+
+	memset(pi, 0, sizeof(*pi));
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return 0;
+
+	t = (const struct flow_offload_tuple *)cookie;
+	dir = t->dir;
+	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+		return 0;
+	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
+	o = &flow->tuplehash[!dir].tuple;
+
+	if (!ask_tuple_has_pppoe(t) && !ask_tuple_has_pppoe(o))
+		return 0;
+
+	if (!o->encap_num && ask_tuple_pppoe_encap(t, &pi->sid, &pi->vid)) {
+		pi->ifindex = t->iifidx;
+		if (o->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
+		    (!o->out.hw_ifidx || o->out.hw_ifidx == pi->ifindex)) {
+			pi->session_ifindex = o->out.ifidx;
+			ether_addr_copy(pi->peer_mac, o->out.h_dest);
+			ether_addr_copy(pi->src_mac, o->out.h_source);
+		}
+		return ASK_PPPOE_DECAP;
+	}
+	if (!t->encap_num && ask_tuple_pppoe_encap(o, &pi->sid, &pi->vid) &&
+	    t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
+	    !is_zero_ether_addr(t->out.h_dest)) {
+		/* out.ifidx is the ppp netdev; out.hw_ifidx is the physical
+		 * port the session rides (nft_dev_path_info() hw_outdev). */
+		pi->ifindex = t->out.hw_ifidx ? t->out.hw_ifidx : t->out.ifidx;
+		pi->session_ifindex = t->out.ifidx;
+		ether_addr_copy(pi->peer_mac, t->out.h_dest);
+		ether_addr_copy(pi->src_mac, t->out.h_source);
+		return ASK_PPPOE_ENCAP;
+	}
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(ask_flow_cookie_pppoe);
+
 /*
  * Offloaded UDP is never marked IPS_ASSURED by the kernel: nf_conntrack_udp_packet()
  * sets it only for a packet it processes at least 2 s after the first (stream_ts),
@@ -3173,51 +3218,6 @@ static void ask_flow_cookie_assure_udp(unsigned long cookie)
 	if (!test_and_set_bit(IPS_ASSURED_BIT, &ct->status))
 		nf_conntrack_event_cache(IPCT_ASSURED, ct);
 }
-
-int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
-{
-	const struct flow_offload_tuple *t, *o;
-	const struct flow_offload *flow;
-	int dir;
-
-	memset(pi, 0, sizeof(*pi));
-	if (!cookie || !virt_addr_valid((void *)cookie))
-		return 0;
-
-	t = (const struct flow_offload_tuple *)cookie;
-	dir = t->dir;
-	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
-		return 0;
-	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
-	o = &flow->tuplehash[!dir].tuple;
-
-	if (!ask_tuple_has_pppoe(t) && !ask_tuple_has_pppoe(o))
-		return 0;
-
-	if (!o->encap_num && ask_tuple_pppoe_encap(t, &pi->sid, &pi->vid)) {
-		pi->ifindex = t->iifidx;
-		if (o->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
-		    (!o->out.hw_ifidx || o->out.hw_ifidx == pi->ifindex)) {
-			pi->session_ifindex = o->out.ifidx;
-			ether_addr_copy(pi->peer_mac, o->out.h_dest);
-			ether_addr_copy(pi->src_mac, o->out.h_source);
-		}
-		return ASK_PPPOE_DECAP;
-	}
-	if (!t->encap_num && ask_tuple_pppoe_encap(o, &pi->sid, &pi->vid) &&
-	    t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
-	    !is_zero_ether_addr(t->out.h_dest)) {
-		/* out.ifidx is the ppp netdev; out.hw_ifidx is the physical
-		 * port the session rides (nft_dev_path_info() hw_outdev). */
-		pi->ifindex = t->out.hw_ifidx ? t->out.hw_ifidx : t->out.ifidx;
-		pi->session_ifindex = t->out.ifidx;
-		ether_addr_copy(pi->peer_mac, t->out.h_dest);
-		ether_addr_copy(pi->src_mac, t->out.h_source);
-		return ASK_PPPOE_ENCAP;
-	}
-	return -EOPNOTSUPP;
-}
-EXPORT_SYMBOL_GPL(ask_flow_cookie_pppoe);
 
 /*
  * F-262: the route MTU nf_flow_table recorded for the cookie's direction
@@ -5280,6 +5280,58 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
  * to confirm whether nf_flow_table_offload reaches us or silently aborts
  * in nf_flow_offload_alloc().
  */
+/*
+ * S7 (plans/ASK2-FLOW-SCALING-PLAN.md): decide REPLACE/DESTROY for a cookie ASK has
+ * never installed without ask_flow_lifecycle_lock. Under a flood of short flows with
+ * offload_delay_ms set, every flow cost two lock round trips with no hardware work
+ * (.185, 20k new flows/s: ~34 % CPU in the delete jobs, the destroy handler and mutex
+ * spinning).
+ *
+ * A cookie is unknown when it has no flow, no generation (live or tombstoned) and no
+ * owner entry; the route/VLAN/PPPoE flush releases the generation but keeps the owner
+ * entry, so the owner entry must be part of the test. Only a REPLACE in the cookie's
+ * own flowtable work item creates any of the three; every other context only removes
+ * state, and nf_flowtable runs at most one work item per flow (NF_FLOW_PENDING) and
+ * does not free or reuse the flow (its tuple address is the cookie) before its DESTROY
+ * completes. So "unknown" stays true until the caller acts, and the results equal the
+ * locked path's for an unknown cookie (independent review 2026-11-13).
+ */
+static bool ask_flow_cookie_unknown(struct ask_flow_table *t, unsigned long cookie)
+{
+	bool known;
+
+	rcu_read_lock();
+	known = ask_flow_lookup(t, (u64)cookie) != NULL;
+	rcu_read_unlock();
+	return !known && !ask_flow_gen_current(t, (u64)cookie) &&
+	       !xa_load(&ask_flow_owner_block, cookie);
+}
+
+/* REPLACE: true = reject with -EAGAIN without the lock. ask_offload_too_young()
+ * stores the first-seen timestamp, so it runs only after every other condition;
+ * anything else (aged, delay 0, retained owner, unbound) takes the locked path. */
+static bool ask_flow_replace_too_young_unlocked(void *cb_priv,
+						struct flow_cls_offload *f)
+{
+	struct ask_flow_table *t = ask_flow_default_table();
+
+	return t && cb_priv && READ_ONCE(ask_offload_delay_ms) &&
+	       ask_flow_block_priv_bound(cb_priv) &&
+	       ask_flow_cookie_unknown(t, f->cookie) &&
+	       ask_offload_too_young(f->cookie);
+}
+
+/* DESTROY: true = done (first-seen erased, whatever the current delay), return 0. */
+static bool ask_flow_destroy_unknown_unlocked(struct flow_cls_offload *f)
+{
+	struct ask_flow_table *t = ask_flow_default_table();
+
+	if (!t || !ask_flow_cookie_unknown(t, f->cookie))
+		return false;
+	xa_erase(&ask_offload_first_seen, f->cookie);
+	return true;
+}
+
 static void ask_flow_owner_forget_settled(u64 cookie)
 {
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
@@ -5394,16 +5446,19 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 
 	switch (f->command) {
 	case FLOW_CLS_REPLACE:
-		pr_info_ratelimited("ask: flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
-				    f->cookie,
-				    dev ? netdev_name(dev) : "?");
+		ask_pr_dbg("flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
+			   f->cookie, dev ? netdev_name(dev) : "?");
+		if (ask_flow_replace_too_young_unlocked(cb_priv, f))
+			return -EAGAIN;	/* S7: never-installed, too young */
 		mutex_lock(&ask_flow_lifecycle_lock);
 		rc = ask_flow_owned_replace(cb_priv, dev, f);
 		mutex_unlock(&ask_flow_lifecycle_lock);
 		return rc;
 	case FLOW_CLS_DESTROY:
-		pr_info_ratelimited("ask: flow_offload: cb invoked DESTROY cookie=0x%lx\n",
-				    f->cookie);
+		ask_pr_dbg("flow_offload: cb invoked DESTROY cookie=0x%lx\n",
+			   f->cookie);
+		if (ask_flow_destroy_unknown_unlocked(f))
+			return 0;	/* S7: never installed */
 		mutex_lock(&ask_flow_lifecycle_lock);
 		rc = ask_flow_offload_destroy(f);
 		if (!rc)
