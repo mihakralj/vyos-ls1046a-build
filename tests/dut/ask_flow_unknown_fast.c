@@ -22,7 +22,7 @@ static struct ask_flow_table *table_ptr = &table;
 static bool has_flow[MAXC], bound = true, aged[MAXC];
 static u64 gen[MAXC];
 static bool owner[MAXC], first_seen[MAXC], small[MAXC];
-static unsigned int ask_offload_delay_ms = 500, ask_offload_min_packets, ask_offload_min_bytes;
+static unsigned int ask_offload_delay_ms = 500, ask_offload_flood_rate, ask_offload_min_packets, ask_offload_min_bytes;
 static int too_young_calls, erases;
 
 static struct xarray ask_flow_owner_block = { 1 }, ask_offload_first_seen = { 2 };

@@ -196,25 +196,88 @@ MODULE_PARM_DESC(f266_trace,
 		 "Trace every flow REPLACE/DESTROY with cookie, ports and ordering (default off)");
 MODULE_PARM_DESC(offload_delay_ms,
 		 "Minimum flow age before hardware offload, in ms (default 0: "
-		 "offload at the first REPLACE, like the vendor; a nonzero value "
-		 "delays by about a second, see the comment above)");
+		 "offload at the first REPLACE, like the vendor, except during a "
+		 "new-flow flood, see offload_flood_rate; a nonzero value delays by "
+		 "about a second, see the comment above)");
 
 static DEFINE_XARRAY(ask_offload_first_seen);
 
-/* True while @cookie is younger than offload_delay_ms (records its first
- * REPLACE). On memory pressure the flow is offloaded at once. */
+/*
+ * Flood-adaptive gate: while new connections arrive faster than
+ * offload_flood_rate per second, the age gate is at least
+ * ASK_OFFLOAD_FLOOD_DELAY_MS, so a mice flood stays in software (S7 rejects it
+ * without the lifecycle lock) while a quiet box offloads at the first REPLACE
+ * like the vendor. Arrivals are counted when a cookie's first-seen stamp is
+ * stored, two cookies (directions) per connection, over one-second windows;
+ * the flood state holds for the current and the previous window. 0 = no flood
+ * detection, the configured offload_delay_ms alone.
+ */
+static unsigned int ask_offload_flood_rate = 1000;
+module_param_named(offload_flood_rate, ask_offload_flood_rate, uint, 0644);
+MODULE_PARM_DESC(offload_flood_rate,
+		 "New connections per second above which hardware offload waits at "
+		 "least 500 ms (mice-flood protection; default 1000, 0 = off)");
+/* ponytail: fixed floor, the measured S7/§3.0 setting; a param if a rig needs another */
+#define ASK_OFFLOAD_FLOOD_DELAY_MS 500
+
+static atomic_t ask_offload_new_cur;		/* stamps in the current window */
+static unsigned int ask_offload_new_prev;	/* stamps in the window before */
+static unsigned long ask_offload_win_start;	/* 0 = no window yet */
+
+static void ask_offload_rate_note(void)
+{
+	unsigned long start = READ_ONCE(ask_offload_win_start), now = jiffies;
+
+	if (!(start && time_before(now, start + HZ)) &&
+	    cmpxchg(&ask_offload_win_start, start, now) == start) {
+		/* a window followed by a quiet one leaves no flood behind */
+		if (start && time_before(now, start + 2 * HZ)) {
+			WRITE_ONCE(ask_offload_new_prev,
+				   atomic_xchg(&ask_offload_new_cur, 0));
+		} else {
+			atomic_set(&ask_offload_new_cur, 0);
+			WRITE_ONCE(ask_offload_new_prev, 0);
+		}
+	}
+	atomic_inc(&ask_offload_new_cur);
+}
+
+static bool ask_offload_flooding(void)
+{
+	unsigned int thr = READ_ONCE(ask_offload_flood_rate) * 2;
+	unsigned long start = READ_ONCE(ask_offload_win_start);
+
+	if (!thr || !start || time_after_eq(jiffies, start + 2 * HZ))
+		return false;
+	return (unsigned int)atomic_read(&ask_offload_new_cur) > thr ||
+	       READ_ONCE(ask_offload_new_prev) > thr;
+}
+
+static unsigned int ask_offload_gate_ms(unsigned int ms)
+{
+	return ask_offload_flooding() ? max(ms, ASK_OFFLOAD_FLOOD_DELAY_MS) : ms;
+}
+
+/* True while @cookie is younger than the gate (offload_delay_ms, raised to the
+ * flood floor during a flood). The first REPLACE stores the stamp and counts the
+ * arrival; on memory pressure the flow is offloaded at once. */
 static bool ask_offload_too_young(unsigned long cookie)
 {
 	unsigned int ms = READ_ONCE(ask_offload_delay_ms);
 	void *e;
 
-	if (!ms)
+	if (!ms && !READ_ONCE(ask_offload_flood_rate))
 		return false;
 	e = xa_load(&ask_offload_first_seen, cookie);
-	if (!xa_is_value(e))
-		return !xa_err(xa_store(&ask_offload_first_seen, cookie,
-					xa_mk_value(jiffies), GFP_KERNEL));
-	return time_before(jiffies, xa_to_value(e) + msecs_to_jiffies(ms));
+	if (!xa_is_value(e)) {
+		if (xa_err(xa_store(&ask_offload_first_seen, cookie,
+				    xa_mk_value(jiffies), GFP_KERNEL)))
+			return false;
+		ask_offload_rate_note();
+		return ask_offload_gate_ms(ms) != 0;
+	}
+	ms = ask_offload_gate_ms(ms);
+	return ms && time_before(jiffies, xa_to_value(e) + msecs_to_jiffies(ms));
 }
 
 /*
@@ -5372,8 +5435,8 @@ static bool ask_flow_replace_deferred_unlocked(void *cb_priv,
 	struct ask_flow_table *t = ask_flow_default_table();
 
 	return t && cb_priv &&
-	       (READ_ONCE(ask_offload_delay_ms) || READ_ONCE(ask_offload_min_packets) ||
-		READ_ONCE(ask_offload_min_bytes)) &&
+	       (READ_ONCE(ask_offload_delay_ms) || READ_ONCE(ask_offload_flood_rate) ||
+		READ_ONCE(ask_offload_min_packets) || READ_ONCE(ask_offload_min_bytes)) &&
 	       ask_flow_block_priv_bound(cb_priv) &&
 	       ask_flow_cookie_unknown(t, f->cookie) &&
 	       (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie));
