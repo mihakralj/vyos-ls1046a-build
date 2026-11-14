@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""ask2_fixed.py <size> <flows> <rate> <seconds> — fixed-rate bidirectional run of stl/ask2_udp.py on ports 0+1
-after a 3 s 1 kpps priming run in both directions (rate per port, TRex syntax: '10%', '1mpps', '5gbps'). Prints per-port tx/rx packets and the drop rate."""
+"""ask2_fixed.py <size> <flows> <rate> <seconds> [prime] — fixed-rate bidirectional run of stl/ask2_udp.py on ports 0+1
+after a 3 s 1 kpps priming run in both directions (rate per port, TRex syntax: '10%', '1mpps', '5gbps'). Prints per-port tx/rx packets and the drop rate.
+prime 0 skips the priming run and the settle sleep, so an admission measurement starts at the first packet of the real
+rate (plans/ASK2-FLOW-SCALING-PLAN.md S8)."""
 import sys, time
 sys.path.insert(0, '/opt/trex/automation/trex_control_plane/interactive')
 from trex.stl.api import STLClient, STLProfile
 
 size, flows, rate, secs = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+prime = len(sys.argv) < 6 or sys.argv[5] != '0'
 c = STLClient(verbose_level='error')
 c.connect()
 try:
@@ -17,9 +20,10 @@ try:
         c.add_streams(STLProfile.load_py('/opt/trex/stl/ask2_udp.py', port_id=p, size=size, flows=flows).get_streams(), ports=[p])
     # prime: every tuple seen in both directions at a low rate, then give ASK2 time to offload it
     # (offload_delay_ms 500 + ~1 s flowtable refresh); without this the first second runs in software and drops
-    c.start(ports=[0, 1], mult="1kpps", duration=3)
-    c.wait_on_traffic(ports=[0, 1], timeout=20)
-    time.sleep(3)
+    if prime:
+        c.start(ports=[0, 1], mult="1kpps", duration=3)
+        c.wait_on_traffic(ports=[0, 1], timeout=20)
+        time.sleep(3)
     c.clear_stats()
     # stop explicitly: at 100 % with a flow VM the DP cores run behind and the duration timer fires late
     # (wait_on_traffic timed out at 60 s for a 30 s trial); tx counts what was actually sent
