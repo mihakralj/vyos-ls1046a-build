@@ -61,6 +61,7 @@
 #include <net/ipv6.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_ecache.h>	/* IPCT_ASSURED for offloaded UDP */
+#include <net/netfilter/nf_conntrack_acct.h>	/* S6 volume gate */
 #include <net/route.h>		/* rt_nexthop(): routed-endpoint next hop */
 #include <net/ip6_route.h>	/* rt6_nexthop() */
 #include <net/addrconf.h>
@@ -178,7 +179,7 @@ MODULE_PARM_DESC(ipv6_hw_frag,
  * value below ~1000 means "offload at the first retry" (~1 s). VyOS sets it
  * from `firewall global-options hardware-offload-delay` (vyos-1x-055).
  * First-REPLACE times live in a value xarray keyed by cookie until DESTROY
- * (sent for every flow of a hardware flowtable) erases them; they are not
+ * or the last block unbind erases them; they are not
  * erased on install, because each REPLACE reaches every bound block and all
  * of them (true ingress and egress-side echo) must judge the age against the
  * same time. 0 = offload at the first REPLACE. Default 0 since 2026-10-15
@@ -214,6 +215,59 @@ static bool ask_offload_too_young(unsigned long cookie)
 		return !xa_err(xa_store(&ask_offload_first_seen, cookie,
 					xa_mk_value(jiffies), GFP_KERNEL));
 	return time_before(jiffies, xa_to_value(e) + msecs_to_jiffies(ms));
+}
+
+/*
+ * S6 static volume gate (plans/ASK2-FLOW-SCALING-PLAN.md §3.3): keep a flow in
+ * software until its connection has carried offload_min_packets OR
+ * offload_min_bytes, counted over both directions so the two REPLACEs of a
+ * connection decide alike. 0/0 (default) = off. The counters come from conntrack
+ * accounting (net.netfilter.nf_conntrack_acct=1, new conntracks only); without
+ * it the gate fails open. A deferred flow is retried by flow_offload_refresh()
+ * at most once a second while it still passes through software.
+ */
+static unsigned int ask_offload_min_packets;
+module_param_named(offload_min_packets, ask_offload_min_packets, uint, 0644);
+MODULE_PARM_DESC(offload_min_packets,
+		 "Packets (both directions) a connection must carry before hardware offload (default 0: off)");
+static unsigned int ask_offload_min_bytes;
+module_param_named(offload_min_bytes, ask_offload_min_bytes, uint, 0644);
+MODULE_PARM_DESC(offload_min_bytes,
+		 "Bytes (both directions) a connection must carry before hardware offload (default 0: off)");
+static DEFINE_RATELIMIT_STATE(ask_offload_no_acct_rs, 60 * HZ, 1);
+
+/* Lifetime: called from the REPLACE work item, whose NF_FLOW_PENDING bit keeps
+ * the flow (and its ct reference) alive; no pointer is kept. */
+static bool ask_offload_too_small(unsigned long cookie)
+{
+	unsigned int mp = READ_ONCE(ask_offload_min_packets);
+	unsigned int mb = READ_ONCE(ask_offload_min_bytes);
+	const struct flow_offload_tuple *t;
+	const struct flow_offload *flow;
+	struct nf_conn_acct *acct;
+	u64 packets, bytes;
+	int dir;
+
+	if (!mp && !mb)
+		return false;
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return false;
+	t = (const struct flow_offload_tuple *)cookie;
+	dir = t->dir;
+	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+		return false;
+	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
+	acct = flow->ct ? nf_conn_acct_find(flow->ct) : NULL;
+	if (!acct) {
+		if (__ratelimit(&ask_offload_no_acct_rs))
+			pr_warn("ask: offload_min_packets/bytes set but conntrack accounting is off (net.netfilter.nf_conntrack_acct=1); offloading ungated\n");
+		return false;
+	}
+	packets = atomic64_read(&acct->counter[0].packets) +
+		  atomic64_read(&acct->counter[1].packets);
+	bytes = atomic64_read(&acct->counter[0].bytes) +
+		atomic64_read(&acct->counter[1].bytes);
+	return !((mp && packets >= mp) || (mb && bytes >= mb));
 }
 
 /* KUnit drives REPLACE directly and expects an immediate install. */
@@ -3997,8 +4051,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	if (rc)
 		return rc;
 
-	if (ask_offload_too_young(f->cookie))
-		return -EAGAIN;	/* software until offload_delay_ms; nf_flowtable retries */
+	/* software until offload_delay_ms and the S6 volume; nf_flowtable retries */
+	if (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie))
+		return -EAGAIN;
 
 	rc = ask_hw_flow_policy_snapshot(&family_policy_seq);
 	if (rc)
@@ -4052,7 +4107,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * fix needed in ask_flow_pending_poll_fn().
 	 */
 	if (ingress_dev) {
-		pr_info_ratelimited("ask: flow_offload: PR14z19 IIF override key.iif=%d (from ingress_dev=%s) cookie=0x%lx\n",
+		ask_pr_dbg("flow_offload: PR14z19 IIF override key.iif=%d (from ingress_dev=%s) cookie=0x%lx\n",
 				    ingress_dev->ifindex, netdev_name(ingress_dev), f->cookie);
 		key.iif = ingress_dev->ifindex;
 	}
@@ -4087,7 +4142,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			if (mm.key && mm.mask &&
 			    (mm.key->ingress_ifindex & mm.mask->ingress_ifindex)) {
 				if (key.iif != mm.key->ingress_ifindex)
-					pr_info_ratelimited("ask: flow_offload: META iif correction key.iif %d -> %u (block dev=%s) cookie=0x%lx\n",
+					ask_pr_dbg("flow_offload: META iif correction key.iif %d -> %u (block dev=%s) cookie=0x%lx\n",
 							    key.iif,
 							    mm.key->ingress_ifindex,
 							    ingress_dev ? netdev_name(ingress_dev) : "?",
@@ -4314,7 +4369,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 					egress_dev = z11_iif;
 					oif = z11_iif->ifindex;
 				}
-				pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 next-hop cookie=0x%lx nh-dst=%pI6c egress=%s\n",
+				ask_pr_dbg("flow_offload: T-M6-1 v6 next-hop cookie=0x%lx nh-dst=%pI6c egress=%s\n",
 						    f->cookie, &dst_ip6,
 						    egress_dev ? netdev_name(egress_dev) : "?");
 			}
@@ -4332,7 +4387,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 					egress_dev = z11_iif;
 					oif = z11_iif->ifindex;
 				}
-				pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
+				ask_pr_dbg("flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
 						    f->cookie, &z11_dst,
 						    egress_dev ? netdev_name(egress_dev) : "?");
 			}
@@ -4407,14 +4462,14 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			if (ti)
 				dev_put(ti);
 			if (!same_port) {
-				pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
+				ask_pr_dbg("flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
 						    f->cookie, netdev_name(ingress_dev),
 						    true_iif);
 				return -EOPNOTSUPP;
 			}
 		}
 	} else if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
-		pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
+		ask_pr_dbg("flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
 				    f->cookie, netdev_name(ingress_dev));
 		return -EOPNOTSUPP;
 	}
@@ -4526,7 +4581,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						    f->cookie);
 				return -EINPROGRESS;
 			}
-			pr_info_ratelimited("ask: flow_offload: REPLACE dedup cookie=0x%lx ingress=%s (already installed via first-arrival block)\n",
+			ask_pr_dbg("flow_offload: REPLACE dedup cookie=0x%lx ingress=%s (already installed via first-arrival block)\n",
 					    f->cookie,
 					    ingress_dev ? netdev_name(ingress_dev) : "?");
 			return 0;
@@ -4883,7 +4938,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		pr_info("ask: f266: REPLACE done cookie=0x%lx l3=%u sport=%u dport=%u hw_id=0x%08x\n",
 			f->cookie, key.l3_proto, ntohs(key.sport),
 			ntohs(key.dport), hw_id);
-	pr_info_ratelimited("ask: flow_offload: REPLACE staged cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
+	ask_pr_dbg("flow_offload: REPLACE staged cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
 			    f->cookie, hw_id,
 			    ingress_dev ? netdev_name(ingress_dev) : "?", oif,
 			    key.next_hop_mac, key.egress_mac);
@@ -5307,18 +5362,21 @@ static bool ask_flow_cookie_unknown(struct ask_flow_table *t, unsigned long cook
 	       !xa_load(&ask_flow_owner_block, cookie);
 }
 
-/* REPLACE: true = reject with -EAGAIN without the lock. ask_offload_too_young()
- * stores the first-seen timestamp, so it runs only after every other condition;
- * anything else (aged, delay 0, retained owner, unbound) takes the locked path. */
-static bool ask_flow_replace_too_young_unlocked(void *cb_priv,
-						struct flow_cls_offload *f)
+/* REPLACE: true = reject with -EAGAIN without the lock (too young, or below the
+ * S6 volume). ask_offload_too_young() stores the first-seen timestamp, so it runs
+ * only after every other condition; anything else (admitted, gates off, retained
+ * owner, unbound) takes the locked path. */
+static bool ask_flow_replace_deferred_unlocked(void *cb_priv,
+					       struct flow_cls_offload *f)
 {
 	struct ask_flow_table *t = ask_flow_default_table();
 
-	return t && cb_priv && READ_ONCE(ask_offload_delay_ms) &&
+	return t && cb_priv &&
+	       (READ_ONCE(ask_offload_delay_ms) || READ_ONCE(ask_offload_min_packets) ||
+		READ_ONCE(ask_offload_min_bytes)) &&
 	       ask_flow_block_priv_bound(cb_priv) &&
 	       ask_flow_cookie_unknown(t, f->cookie) &&
-	       ask_offload_too_young(f->cookie);
+	       (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie));
 }
 
 /* DESTROY: true = done (first-seen erased, whatever the current delay), return 0. */
@@ -5448,7 +5506,7 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 	case FLOW_CLS_REPLACE:
 		ask_pr_dbg("flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
 			   f->cookie, dev ? netdev_name(dev) : "?");
-		if (ask_flow_replace_too_young_unlocked(cb_priv, f))
+		if (ask_flow_replace_deferred_unlocked(cb_priv, f))
 			return -EAGAIN;	/* S7: never-installed, too young */
 		mutex_lock(&ask_flow_lifecycle_lock);
 		rc = ask_flow_owned_replace(cb_priv, dev, f);
@@ -5608,8 +5666,14 @@ static int ask_flow_offload_setup_tc_common(struct net_device *dev,
 			}
 			ask_port_stats_zero(dev->ifindex);
 		}
-		if (!any_bound)
+		if (!any_bound) {
 			WRITE_ONCE(ask_flow_first_pid, 0xff);
+			/* nf_tables unbinds before nf_flow_table_free(), so the
+			 * DESTROY of a flow still in the age gate reaches no
+			 * callback: drop its stamp here, or the entry leaks and a
+			 * recycled cookie inherits its age. */
+			xa_destroy(&ask_offload_first_seen);
+		}
 
 		ask_pr_dbg("flow_offload: UNBIND %s\n",
 			   netdev_name(dev));

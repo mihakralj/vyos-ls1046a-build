@@ -103,6 +103,14 @@ static int module_refs, priv_allocs, callback_allocs;
 static int stats_zero[8], unbinds, cleanup_calls;
 static bool module_live = true, fail_private_alloc, fail_callback_alloc;
 static u8 ask_flow_first_pid = 0x10;
+struct xarray { int id; };
+static struct xarray ask_offload_first_seen;
+static int first_seen_destroys;
+static void xa_destroy(struct xarray *xa)
+{
+	assert(xa == &ask_offload_first_seen);
+	first_seen_destroys++;
+}
 static void *kzalloc(size_t n, int flags)
 {
 	void *p;
@@ -387,21 +395,24 @@ int main(int argc, char **argv)
 		assert(flow_block_cb_lookup(&first,
 			ask_flow_offload_setup_tc_block_cb, &b));
 		assert(module_refs == 1 && ask_flow_first_pid == 0x10);
+		assert(!first_seen_destroys);
 		assert(setup(&first, &a, false, FLOW_BLOCK_UNBIND) == -ENOENT);
 		assert(!setup(&first, &b, false, FLOW_BLOCK_UNBIND));
 		assert(ask_flow_first_pid == 0xff);
+		/* last unbind drops first-seen stamps of flows that never reach DESTROY */
+		assert(first_seen_destroys == 1);
 		assert(withdraws == 2);
 	} else if (!strcmp(argv[1], "shared-device")) {
 		assert(!setup(&first, &a, false, FLOW_BLOCK_BIND));
 		assert(!setup(&second, &a, false, FLOW_BLOCK_BIND));
 		assert(!setup(&first, &a, false, FLOW_BLOCK_UNBIND));
 		assert(!stats_zero[a.ifindex] && !unbinds);
-		assert(ask_flow_first_pid == 0x10);
+		assert(ask_flow_first_pid == 0x10 && !first_seen_destroys);
 		assert(!setup(&second, &a, false, FLOW_BLOCK_UNBIND));
 		assert(stats_zero[a.ifindex] == 1 && unbinds == 1);
 		/* Both blocks withdrew before the last one released the port. */
 		assert(withdraws == 2 && withdraws_at_port_unbind == 2);
-		assert(ask_flow_first_pid == 0xff);
+		assert(ask_flow_first_pid == 0xff && first_seen_destroys == 1);
 	} else if (!strcmp(argv[1], "duplicate-bind")) {
 		assert(!setup(&first, &a, false, FLOW_BLOCK_BIND));
 		assert(setup(&first, &a, false, FLOW_BLOCK_BIND) == -EEXIST);

@@ -1,10 +1,10 @@
 """Host regression for the S7 lock-free fast path for never-installed cookies (ask_flow_offload.c).
 
-Extracts the real ask_flow_cookie_unknown(), ask_flow_replace_too_young_unlocked() and
+Extracts the real ask_flow_cookie_unknown(), ask_flow_replace_deferred_unlocked() and
 ask_flow_destroy_unknown_unlocked() and runs tests/dut/ask_flow_unknown_fast.c against them:
 an owner-only cookie, a generation or flow, an unbound block and a NULL cb_priv must take the
-locked path without storing a first-seen timestamp; only an unknown, bound, too-young cookie is
-rejected without the lock; DESTROY of an unknown cookie erases first-seen whatever the delay.
+locked path without storing a first-seen timestamp; only an unknown, bound cookie that is too young or (S6)
+below the volume threshold is rejected without the lock; DESTROY of an unknown cookie erases first-seen whatever the delay.
 """
 from pathlib import Path
 import os

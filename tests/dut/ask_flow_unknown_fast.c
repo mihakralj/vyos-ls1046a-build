@@ -21,8 +21,8 @@ static struct ask_flow_table table;
 static struct ask_flow_table *table_ptr = &table;
 static bool has_flow[MAXC], bound = true, aged[MAXC];
 static u64 gen[MAXC];
-static bool owner[MAXC], first_seen[MAXC];
-static unsigned int ask_offload_delay_ms = 500;
+static bool owner[MAXC], first_seen[MAXC], small[MAXC];
+static unsigned int ask_offload_delay_ms = 500, ask_offload_min_packets, ask_offload_min_bytes;
 static int too_young_calls, erases;
 
 static struct xarray ask_flow_owner_block = { 1 }, ask_offload_first_seen = { 2 };
@@ -59,13 +59,20 @@ static bool ask_offload_too_young(unsigned long c)
 	return !aged[c];
 }
 
+/* models ask_offload_too_small(): pure read, small until the volume threshold is met */
+static bool ask_offload_too_small(unsigned long c)
+{
+	return (ask_offload_min_packets || ask_offload_min_bytes) && small[c];
+}
+
 #include "ask_flow_unknown_fast_body.h"
 
 static void reset(void)
 {
 	memset(has_flow, 0, sizeof(has_flow)); memset(gen, 0, sizeof(gen));
 	memset(owner, 0, sizeof(owner)); memset(first_seen, 0, sizeof(first_seen));
-	memset(aged, 0, sizeof(aged));
+	memset(aged, 0, sizeof(aged)); memset(small, 0, sizeof(small));
+	ask_offload_min_packets = ask_offload_min_bytes = 0;
 	bound = true; ask_offload_delay_ms = 500; table_ptr = &table; too_young_calls = erases = 0;
 }
 
@@ -76,40 +83,52 @@ int main(void)
 
 	/* unknown cookie, bound, delay on: rejected without the lock, first-seen stored */
 	reset();
-	assert(ask_flow_replace_too_young_unlocked(&priv, &f));
+	assert(ask_flow_replace_deferred_unlocked(&priv, &f));
 	assert(first_seen[3] && too_young_calls == 1);
 	/* aged unknown cookie: not decided here, falls through to the locked path */
 	aged[3] = true;
-	assert(!ask_flow_replace_too_young_unlocked(&priv, &f));
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f));
 
 	/* a cookie with only an owner entry (route/VLAN/PPPoE flush leftover) is known: locked path,
 	 * and the age gate must not have been consulted (it stores first-seen as a side effect) */
 	reset(); owner[3] = true;
-	assert(!ask_flow_replace_too_young_unlocked(&priv, &f));
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f));
 	assert(!first_seen[3] && too_young_calls == 0);
 	assert(!ask_flow_destroy_unknown_unlocked(&f) && erases == 0);
 
 	/* generation entry (live or tombstoned) or a flow: known, locked path, no first-seen side effect */
 	reset(); gen[3] = 7;
-	assert(!ask_flow_replace_too_young_unlocked(&priv, &f) && too_young_calls == 0);
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f) && too_young_calls == 0);
 	assert(!ask_flow_destroy_unknown_unlocked(&f));
 	reset(); has_flow[3] = true;
-	assert(!ask_flow_replace_too_young_unlocked(&priv, &f) && too_young_calls == 0);
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f) && too_young_calls == 0);
 	assert(!ask_flow_destroy_unknown_unlocked(&f));
 
 	/* unbound block or NULL cb_priv: locked path, and no first-seen stored */
 	reset(); bound = false;
-	assert(!ask_flow_replace_too_young_unlocked(&priv, &f) && !first_seen[3] && too_young_calls == 0);
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f) && !first_seen[3] && too_young_calls == 0);
 	reset();
-	assert(!ask_flow_replace_too_young_unlocked(NULL, &f) && !first_seen[3]);
+	assert(!ask_flow_replace_deferred_unlocked(NULL, &f) && !first_seen[3]);
 
 	/* delay 0: never decided here */
 	reset(); ask_offload_delay_ms = 0;
-	assert(!ask_flow_replace_too_young_unlocked(&priv, &f));
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f));
+
+	/* S6 volume gate: an aged unknown cookie below the threshold is deferred without the lock */
+	reset(); ask_offload_min_packets = 16; aged[3] = true; first_seen[3] = true; small[3] = true;
+	assert(ask_flow_replace_deferred_unlocked(&priv, &f));
+	small[3] = false;
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f));
+	/* volume gate alone (delay 0): deferred, and no first-seen stored */
+	reset(); ask_offload_delay_ms = 0; ask_offload_min_bytes = 16384; small[3] = true;
+	assert(ask_flow_replace_deferred_unlocked(&priv, &f) && !first_seen[3]);
+	/* a known cookie never takes the unlocked decision, small or not */
+	reset(); ask_offload_min_packets = 16; small[3] = true; owner[3] = true;
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f) && too_young_calls == 0);
 
 	/* no table: both fall through */
 	reset(); table_ptr = NULL;
-	assert(!ask_flow_replace_too_young_unlocked(&priv, &f) && !ask_flow_destroy_unknown_unlocked(&f));
+	assert(!ask_flow_replace_deferred_unlocked(&priv, &f) && !ask_flow_destroy_unknown_unlocked(&f));
 
 	/* DESTROY of an unknown cookie: first-seen erased without the lock, whatever the delay */
 	reset(); first_seen[3] = true; ask_offload_delay_ms = 0;

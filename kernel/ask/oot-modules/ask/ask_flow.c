@@ -185,40 +185,32 @@ u64 ask_flow_gen_next(struct ask_flow_table *t, u64 cookie)
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_next);
 
+/* The read helpers take no lock: xa_load() is RCU-safe and a value entry has
+ * no lifetime, and the answer is stale the moment any lock would drop anyway. */
 u64 ask_flow_gen_current(struct ask_flow_table *t, u64 cookie)
 {
-	unsigned long flags;
 	void *entry;
-	u64 gen = 0;
 
 	if (!t)
 		return 0;
-	xa_lock_irqsave(&t->gen_by_cookie, flags);
 	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
-	if (xa_is_value(entry))
-		gen = ask_gen_decode_gen(xa_to_value(entry));
-	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
-	return gen;
+	return xa_is_value(entry) ? ask_gen_decode_gen(xa_to_value(entry)) : 0;
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_current);
 
 bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie, u64 gen)
 {
-	unsigned long flags, v;
+	unsigned long v;
 	void *entry;
-	bool ok = false;
 
 	if (!t || gen == 0)
 		return false;
-	xa_lock_irqsave(&t->gen_by_cookie, flags);
 	entry = xa_load(&t->gen_by_cookie, (unsigned long)cookie);
-	if (xa_is_value(entry)) {
-		v = xa_to_value(entry);
-		ok = (ask_gen_decode_gen(v) == gen) &&
-		     (ask_gen_decode_state(v) == ASK_GEN_LIVE);
-	}
-	xa_unlock_irqrestore(&t->gen_by_cookie, flags);
-	return ok;
+	if (!xa_is_value(entry))
+		return false;
+	v = xa_to_value(entry);
+	return ask_gen_decode_gen(v) == gen &&
+	       ask_gen_decode_state(v) == ASK_GEN_LIVE;
 }
 EXPORT_SYMBOL_GPL(ask_flow_gen_is_current);
 
