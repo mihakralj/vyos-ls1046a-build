@@ -186,7 +186,25 @@ P2 board results (DUT2, cold boot, image `2026.11.12-0306-rolling`, patch 4023 l
   - The first ping is answered.
   - No `napi_schedule_irqoff` warnings with lockdep enabled in a debug build.
 
-### P4: TX ZC confirmation (D5) — root cause confirmed on silicon
+### P4: TX ZC confirmation (D5) — implemented (patch 4024) and verified on DUT2
+
+As implemented: ZC Tx FDs carry `bpid = 0xff`, `FM_FD_CMD_FCO` and the FQID of a
+module-owned confirmation FQ (`af_xdp_pool`, one per qband, created at attach and
+retired at detach). Confirmations are completed from its DQRR callback on the
+qband-owner CPU. The `tx_conf_zc` flavor op is gone; `tx_err_zc` lets the Tx error
+FQ and egress ERN claim ZC FDs before skb cleanup. `ndo_xsk_wakeup(XDP_WAKEUP_TX)`
+schedules the owner CPU's NAPI (IPI when remote); without it VPP's Tx drained
+only on unrelated Rx polls.
+
+DUT2 result (CI image 2026.11.12-0433, VPP on eth3/eth4): ping 10/10 through VPP;
+`xsk_tx_conf_zc` equals the frames VPP transmitted (22/22, 13/13); no `F-227`
+lines; 5 attach/detach cycles via commit (`xsk_pool_detach_ok` 5, no timeout, no
+kernel warnings) followed by 5/5 ping. Not yet done: idle-inflight and BMan
+pool-drift readback, ERN/error-FD cmd preservation, throughput (P5). `ask-check`
+on this boot reports 36/39 OK; its one FAIL is the missing eth3/eth4 netdevs
+because VPP owns them, so it is not an ASK2 regression signal.
+
+Original root-cause evidence follows.
 
 Board evidence (DUT2, same boot as the P2 run, VPP live on eth3/eth4): sent a
 5-ping burst through VPP's ZC TX path and tracked `xsk_tx_zc_submit` (6->7,
