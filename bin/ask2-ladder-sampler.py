@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ask2-ladder-sampler.py: one line per second on the DUT until killed (run as root; copied by the testrig runners).
 
-Columns: epoch phase offloaded_flows cpu_busy_pct running blocked kpath_pps ct_entries ct_inserts_per_s
+Columns: epoch phase offloaded_flows cpu_busy_pct running blocked kpath_pps ct_entries ct_inserts_per_s load1 kworkers
   phase              contents of /tmp/ladder-phase ("-" when absent)
   offloaded_flows    ASK get-info num-flows / 2 (directions -> bidirectional flows), one persistent YNL session
   cpu_busy_pct       all-CPU busy share of the last second (/proc/stat)
@@ -10,6 +10,8 @@ Columns: epoch phase offloaded_flows cpu_busy_pct running blocked kpath_pps ct_e
   kpath_pps          packets the kernel network stack processed (/proc/net/softnet_stat), i.e. frames not in silicon
   ct_entries         nf_conntrack_count
   ct_inserts_per_s   conntrack insertions per second (/proc/net/stat/nf_conntrack "insert", summed over CPUs)
+  load1              1-minute load average (/proc/loadavg field 1)
+  kworkers           kernel worker threads alive (comm kworker/*), the column of the 2026-11 ladder tables
 Forks nothing per sample: the per-second `ynl` CLI it replaced cost ~15 % of DUT CPU.
 """
 import os, sys, time
@@ -35,16 +37,19 @@ def ct_inserts():
     return sum(int(r.split()[col], 16) for r in rows[1:] if r.strip())
 
 
-def blocked():
-    n = 0
+def tasks():
+    """(tasks in D state, kworker threads) from one /proc walk."""
+    n = kw = 0
     for p in os.listdir("/proc"):
         if p.isdigit():
             try:
                 with open(f"/proc/{p}/stat") as fh:
-                    n += fh.read().rsplit(")", 1)[1].split()[0] == "D"
-            except OSError:
+                    head, tail = fh.read().rsplit(")", 1)
+                n += tail.split()[0] == "D"
+                kw += head.split("(", 1)[1].startswith("kworker/")
+            except (OSError, IndexError):
                 pass
-    return n
+    return n, kw
 
 
 pb, pt = cpu(); pk = kpath(); pi = ct_inserts()
@@ -59,7 +64,10 @@ while True:
         phase = open("/tmp/ladder-phase").read().strip() or "-"
     except OSError:
         phase = "-"
-    running = open("/proc/loadavg").read().split()[3].split("/")[0]
+    la = open("/proc/loadavg").read().split()
+    running = la[3].split("/")[0]
     ct = open("/proc/sys/net/netfilter/nf_conntrack_count").read().strip()
-    print(int(time.time()), phase, flows, 100 * (b - pb) // (t - pt + 1), running, blocked(), k - pk, ct, i - pi, flush=True)
+    nblocked, nkw = tasks()
+    print(int(time.time()), phase, flows, 100 * (b - pb) // (t - pt + 1), running, nblocked, k - pk, ct, i - pi,
+          la[0], nkw, flush=True)
     pb, pt, pk, pi = b, t, k, i
