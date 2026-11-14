@@ -6,7 +6,7 @@
 # drivers: bin/trex/ (installed in /opt/trex on the generator).
 # TRex S1 (ASK2 hardware offload): routed IPv4 UDP, bidirectional symmetric, frame 64/512/1518 B x 1/1024/65536 flows.
 # Per cell, after priming: ndr binary searches (30 s trials, 0.5 % precision) for
-#   NDR loss <= 0.001 %   PDR <= 0.5 %   TP99 <= 1 %   TP90 <= 10 %
+#   NDR loss <= 0.001 %   PDR <= 0.5 %   TP90 <= 10 %
 # and MRR = delivered rate at 100 % offered (one 30 s trial). Rep loop is outermost, so every rep covers all cells.
 # One CSV row per result in <outdir>/results-<dut>.csv; rates are totals over both directions, measured by TRex
 # (tx_pps/rx_pps), throughput from the delivered rate. JSON, logs and DUT snapshots per search beside it.
@@ -43,7 +43,7 @@ for rep in $REPS; do for size in ${SIZES:-64 512 1518}; do for flows in ${FLOWS:
   c=r$rep-s$size-f$flows; alive "before $c"
   $T "cd /opt/trex && sudo python3 ask2_fixed.py $size $flows 1% 3 2>&1 | grep -E '^size'" > $O/$DUT-$c-prime.txt
   snap $O/$DUT-$c-dut-before.txt; res=""
-  for m in NDR:0.001 PDR:0.5 TP99:1 TP90:10; do
+  for m in NDR:0.001 PDR:0.5 TP90:10; do
     n=${m%%:*} p=${m#*:} J=/tmp/N-$DUT-$c-$n.json
     $T "cd /opt/trex && sudo ./ndr --stl --ports 0 1 --bi-dir --force-map -p $p -t 30 -e 0.5 -x 20 --opt-bin-search \
         --profile stl/ask2_udp.py --prof-tun size=$size,flows=$flows -o $J" > $O/$DUT-$c-$n.log 2>&1

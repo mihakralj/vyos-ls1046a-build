@@ -7,13 +7,17 @@ import csv, statistics, sys
 from collections import defaultdict
 from pathlib import Path
 
-METRICS = ("NDR", "PDR", "TP99", "TP90", "MRR")
+# TP99 (<= 1 % loss) is no longer measured or reported: the binary search lands on ~PDR, so it added a cell
+# without information. Rows for metrics not listed here (TP99 in older results) are ignored.
+METRICS = ("NDR", "PDR", "TP90", "MRR")
 
 
 def collect(out):
     g = defaultdict(list)
     for p in sorted(Path(out).glob("results-*.csv")):
         for r in csv.DictReader(open(p)):
+            if r["metric"] not in METRICS:
+                continue
             for dut in (r["dut"], "ALL"):
                 g[(dut, int(r["size"]), int(r["flows"]), r["metric"])].append(r)
     return g
@@ -58,8 +62,10 @@ def demo(tmp):
     hdr = "ts,dut,image,boot,rep,size,flows,metric,loss_limit_pct,rate_pct,tx_mpps,rx_mpps,drop_pct,gbps_l2,gbps_l1,pct_line,trial_s,iterations,elapsed_s"
     (tmp / "results-dut1.csv").write_text(hdr + "\nt,dut1,i,b,1,64,1,PDR,0.5,16,4.5,4.48,0.1,2.29,3.01,15.06,30,9,300\n"
                                           "t,dut1,i,b,2,64,1,PDR,0.5,16,4.6,4.52,0.1,2.31,3.04,15.19,30,9,300\n")
-    (tmp / "results-dut2.csv").write_text(hdr + "\nt,dut2,i,b,1,64,1,PDR,0.5,16,4.4,4.40,0.1,2.25,2.96,14.78,30,9,300\n")
+    (tmp / "results-dut2.csv").write_text(hdr + "\nt,dut2,i,b,1,64,1,PDR,0.5,16,4.4,4.40,0.1,2.25,2.96,14.78,30,9,300\n"
+                                          "t,dut2,i,b,1,64,1,TP99,1,17,4.5,4.45,0.9,2.27,2.99,14.95,30,9,300\n")
     g = collect(tmp)
+    assert not any(k[3] == "TP99" for k in g) and "TP99" not in render(g)   # older results: ignored
     s = summarize(g[("ALL", 64, 1, "PDR")])
     assert (s["n"], s["best"], s["min"], s["from_"]) == (3, 4.52, 4.40, "dut1/r2") and round(s["stdev"], 4) == 0.0611
     assert summarize(g[("dut2", 64, 1, "PDR")])["stdev"] == 0.0
