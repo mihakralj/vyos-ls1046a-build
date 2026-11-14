@@ -5181,6 +5181,68 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 }
 
 /*
+ * F-315: batched hardware stats. nf_flowtable polls every offloaded flow once
+ * 10 % of its timeout has passed (every 3 s at 30 s; ~44k polls/s at 131,072
+ * flows), and each poll used to hash the key, take fe_stats_lock and walk the
+ * bucket in DMA memory. Instead, one pass a second reads every ASK record's
+ * counters (fman_pcd_fe_stats_scan, read-only, under fe_stats_lock, at most
+ * ASK_STATS_SCAN_BUDGET records per hold) into its flow through the fe_token
+ * index, and the poll answers from that cache while it is under two seconds
+ * old; otherwise (scan not run yet, record missed, scan stalled) it reads the
+ * record itself as before. Design review 2026-11-14 (plans/ASK2-FLOW-SCALING-PLAN.md).
+ */
+#define ASK_STATS_SCAN_BUDGET	256	/* records per fe_stats_lock hold */
+static void ask_stats_scan_fn(struct work_struct *w);
+static DECLARE_DELAYED_WORK(ask_stats_scan_work, ask_stats_scan_fn);
+static bool ask_stats_scan_stopped;
+
+/* Runs under fe_stats_lock: no sleeping, no FMan PCD calls. */
+static void ask_stats_scan_record(void *arg, u64 fe_token, u64 packets, u64 bytes)
+{
+	struct ask_flow *f;
+
+	rcu_read_lock();
+	f = ask_flow_by_token(arg, fe_token);
+	if (f) {
+		WRITE_ONCE(f->hw_scan_packets, packets);
+		WRITE_ONCE(f->hw_scan_bytes, bytes);
+		smp_store_release(&f->hw_scan_jiffies, jiffies | 1);
+	}
+	rcu_read_unlock();
+}
+
+/* Caller holds rcu_read_lock() and a looked-up @f. */
+static bool ask_stats_scan_fresh(struct ask_flow *f, u64 *packets, u64 *bytes)
+{
+	unsigned long at = smp_load_acquire(&f->hw_scan_jiffies);
+
+	if (!at || !time_before(jiffies, at + 2 * HZ))
+		return false;
+	*packets = READ_ONCE(f->hw_scan_packets);
+	*bytes = READ_ONCE(f->hw_scan_bytes);
+	return true;
+}
+
+static void ask_stats_scan_fn(struct work_struct *w)
+{
+	struct ask_flow_table *t = ask_flow_default_table();
+	struct fman *fm = ask_hw_get_fman();
+	u32 cursor = 0;
+	int rc;
+
+	if (t && fm && atomic_read(&t->num_hw_backed)) {
+		do {
+			rc = fman_pcd_fe_stats_scan(fm, FMAN_PCD_FE_OWNER_ASK,
+						    &cursor, ASK_STATS_SCAN_BUDGET,
+						    ask_stats_scan_record, t);
+			cond_resched();
+		} while (rc == 0 && !READ_ONCE(ask_stats_scan_stopped));
+	}
+	if (!READ_ONCE(ask_stats_scan_stopped))
+		queue_delayed_work(system_unbound_wq, &ask_stats_scan_work, HZ);
+}
+
+/*
  * T-M8-3: refresh a HW-backed flow's cached counters from the silicon FE
  * ehash record so offloaded flows (whose frames bypass the kernel) report
  * real packet/byte totals to nft and to `dump-flows`.
@@ -5204,6 +5266,7 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	struct ask_flow *fl;
 	struct fman *fm;
 	u64 generation, fe_token;
+	bool cached;
 	u8 port_id;
 
 	*d_packets = 0;
@@ -5221,19 +5284,24 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	port_id = fl->key.port_id;
 	generation = fl->generation;
 	fe_token = fl->fe_token;
+	cached = ask_stats_scan_fresh(fl, &hw_pkts, &hw_bytes);
 	rcu_read_unlock();
 
-	fm = ask_hw_get_fman();
-	if (!fm)
-		return false;
+	/* F-315: the per-flow read only when the batched scan has not
+	 * reported this record within the last two seconds. */
+	if (!cached) {
+		fm = ask_hw_get_fman();
+		if (!fm)
+			return false;
 
-	ask_fe_build_key_dual(&key, kbuf);
-	if (fman_pcd_fe_flow_get_stats_identified(fm, port_id, kbuf,
-						  ASK_FE_KEY_SIZE_DUAL,
-						  FMAN_PCD_FE_OWNER_ASK,
-						  fe_token, &hw_pkts,
-						  &hw_bytes, NULL) != 0)
-		return false;
+		ask_fe_build_key_dual(&key, kbuf);
+		if (fman_pcd_fe_flow_get_stats_identified(fm, port_id, kbuf,
+							  ASK_FE_KEY_SIZE_DUAL,
+							  FMAN_PCD_FE_OWNER_ASK,
+							  fe_token, &hw_pkts,
+							  &hw_bytes, NULL) != 0)
+			return false;
+	}
 
 	/*
 	 * Re-look-up and store only if the SAME live flow still owns the
@@ -5911,6 +5979,10 @@ int ask_flow_offload_init(void)
 	schedule_delayed_work(&ask_flow_pending_poll_work,
 			      msecs_to_jiffies(ASK_FLOW_PENDING_POLL_INTERVAL_MS));
 
+	/* F-315: batched hardware stats, once a second while flows are offloaded. */
+	WRITE_ONCE(ask_stats_scan_stopped, false);
+	queue_delayed_work(system_unbound_wq, &ask_stats_scan_work, HZ);
+
 	/* T-M6-SP4: PPPoE session-down flush. */
 	spin_lock_bh(&ask_flow_pending_lock);
 	ask_pppoe_events_live = true;
@@ -5942,6 +6014,14 @@ int ask_flow_offload_init(void)
 void ask_flow_offload_exit(void)
 {
 	struct ask_flow_pending *p, *ptmp;
+
+	/*
+	 * F-315: stop the stats scan first, before any flow or the flow table
+	 * goes away (ask_flow_exit runs after this): block its re-arm, then wait
+	 * for a pass in flight.
+	 */
+	WRITE_ONCE(ask_stats_scan_stopped, true);
+	cancel_delayed_work_sync(&ask_stats_scan_work);
 
 	/*
 	 * PR14z9: stop the active poller before unregistering the

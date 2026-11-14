@@ -112,12 +112,14 @@ atomic_set(&t->num_flows, 0);
 atomic_set(&t->num_hw_backed, 0);
 t->tag = tag ? tag : "default";
 xa_init(&t->gen_by_cookie);
+xa_init(&t->by_token);
 
 rc = rhashtable_init(&t->rht, &ask_flow_rht_params);
 if (rc) {
 ask_pr_err("flow: rhashtable_init('%s') failed: %d\n",
    t->tag, rc);
 xa_destroy(&t->gen_by_cookie);
+xa_destroy(&t->by_token);
 return rc;
 }
 
@@ -334,6 +336,9 @@ rcu_barrier();
  * tombstone. Value entries need no per-entry free; xa_destroy suffices.
  */
 xa_destroy(&t->gen_by_cookie);
+/* F-315: the stats scan is stopped (ask_flow_offload_exit) and every flow
+ * freed by now; the index holds no references of its own. */
+xa_destroy(&t->by_token);
 ask_pr_dbg("flow: table '%s' destroyed (%d entries freed)\n",
    t->tag ? t->tag : "?",
    atomic_read(&t->num_flows));
@@ -351,6 +356,18 @@ return NULL;
 return rhashtable_lookup_fast(&t->rht, &cookie, ask_flow_rht_params);
 }
 EXPORT_SYMBOL_GPL(ask_flow_lookup);
+
+/* F-315: flow owning @fe_token, or NULL. Caller holds rcu_read_lock(). */
+struct ask_flow *ask_flow_by_token(struct ask_flow_table *t, u64 fe_token)
+{
+struct ask_flow *f;
+
+if (!t || !fe_token)
+return NULL;
+f = xa_load(&t->by_token, (unsigned long)fe_token);
+return f && f->fe_token == fe_token ? f : NULL;
+}
+EXPORT_SYMBOL_GPL(ask_flow_by_token);
 
 /*
  * R9 admission budget; 0 disables the cap. The vendor documents 32768
@@ -637,6 +654,15 @@ return rc;
 atomic_inc(&t->num_flows);
 if (hw_inserted)
 atomic_inc(&t->num_hw_backed);
+/*
+ * F-315: token index for the stats scan. No lock of its own: every
+ * token-carrying insert and remove runs under ask_flow_lifecycle_lock
+ * (ask_flow_offload.c), so a remove cannot land between the rhashtable
+ * insert above and this store. A failed store only costs the flow its
+ * cache; its stats polls use the per-flow read.
+ */
+if (fe_token)
+xa_store(&t->by_token, fe_token, f, GFP_KERNEL);
 *out_hw_id = hw_id;
 if (out_fe_token)
 *out_fe_token = fe_token;
@@ -779,6 +805,8 @@ atomic_dec(&t->num_hw_backed);
 }
 
 atomic_dec(&t->num_flows);
+if (f->fe_token)	/* F-315: before the grace period starts */
+xa_cmpxchg(&t->by_token, f->fe_token, f, NULL, 0);
 call_rcu(&f->rcu, ask_flow_free_rcu);
 return 0;
 }
@@ -827,10 +855,12 @@ EXPORT_SYMBOL_GPL(ask_flow_update_stats);
  * for dump-flows/get-flow, while also computing the DELTA that the nft
  * flowtable's flow_stats_update() (which accumulates) expects.
  *
- * Silicon totals are monotonic within one record lifetime. A per-key record
- * is destroyed and re-created on DESTROY->REPLACE, resetting the counters; if
- * the new absolute is below the previous baseline, report delta=current and
- * restart the baseline (same pattern as cumulative-counter netdev drivers).
+ * Counters are per record and a record is per fe_token (a rebuilt or
+ * re-offloaded flow is a new ask_flow with a new token and a zero baseline),
+ * so the counters never go backwards under one flow. A read below the
+ * baseline is an older value (F-315: the stats cache can lag a previous
+ * direct read by up to ~2 s): report no change and keep the baseline, each
+ * counter on its own, or the next fresh read would count the gap twice.
  * last_seen_ns advances only when at least one new packet arrived.
  */
 void ask_flow_set_hw_stats(struct ask_flow *f, u64 hw_packets, u64 hw_bytes,
@@ -842,16 +872,16 @@ void ask_flow_set_hw_stats(struct ask_flow *f, u64 hw_packets, u64 hw_bytes,
 		return;
 
 	u64_stats_update_begin(&f->stats.syncp);
-	dp = hw_packets >= f->hw_reported_packets ?
-		hw_packets - f->hw_reported_packets : hw_packets;
-	db = hw_bytes >= f->hw_reported_bytes ?
-		hw_bytes - f->hw_reported_bytes : hw_bytes;
-	f->hw_reported_packets = hw_packets;
-	f->hw_reported_bytes   = hw_bytes;
+	dp = hw_packets > f->hw_reported_packets ?
+		hw_packets - f->hw_reported_packets : 0;
+	db = hw_bytes > f->hw_reported_bytes ?
+		hw_bytes - f->hw_reported_bytes : 0;
+	f->hw_reported_packets += dp;
+	f->hw_reported_bytes   += db;
 	if (dp)
 		f->stats.last_seen_ns = ktime_get_ns();
-	f->stats.packets = hw_packets;
-	f->stats.bytes   = hw_bytes;
+	f->stats.packets = f->hw_reported_packets;
+	f->stats.bytes   = f->hw_reported_bytes;
 	u64_stats_update_end(&f->stats.syncp);
 
 	*d_packets = dp;
