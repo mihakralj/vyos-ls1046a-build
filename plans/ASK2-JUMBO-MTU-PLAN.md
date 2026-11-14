@@ -1,6 +1,16 @@
 # ASK2 jumbo MTU plan: reach vendor parity (9000+)
 
-Status: **Step 0 passed 2026-10-31; Option B adopted.** Patch 0177 was repaired, built in CI run `41887348300`, and is installed on `.185` in image `2026.11.04-1827` (kernel `6.18.60-vyos`). The board is currently at MTU 1500; the new image's jumbo path and 1500-MTU forwarding regression have not yet been exercised.
+Status: **Option B shipped; GitHub issue #50 closed without page_pool.** Step 0
+passed 2026-10-31. Patch 0177 was repaired (no `dpaa_bp->size` MAC clamp), built
+in CI run `41887348300` as image `2026.11.04-1827` (kernel `6.18.60-vyos`), and
+installed on `.185`. Contiguous jumbo via page_pool / order-N (issue #50
+Option A) is explicitly deferred — mainline RX SG plus the repaired 0177 carry
+MTU 9000 with offload: the F-308 board gate (2026-11-09, `.185`, image
+`2026.11.08-2332-rolling`, see `plans/ASK2-MASTER-PLAN.md` F-308 row) passed
+full-size DF pings at 9000 on routed, vlan-vlan and vlan-port, v4 and v6, and
+vlan-port-9k at 9.87–9.89 Gbit/s. A3 at 9000, the 30 min soak and the PPPoE
+jumbo test below are still open; they are separate follow-ups, not blockers
+for closing #50.
 
 ### Step 0 result (HW, `.185`, image 2026.10.31-0245, offload engaged, cold-ish boot)
 
@@ -74,7 +84,7 @@ flowchart TD
 | 1 | Qdrant gate (AGENTS.md S0/S1): at least three focused queries on BMI buffer size and `FMBM_*` fields, SG FD layout, F-203/F-222 history; cross-check `arch/fman-microcode-210-programming-reference.md`. Store a corrected note that mainline has RX scatter-gather and the real cause (0177 clamp plus `dpaa_bp->size` 3584) | Gate recorded; qdrant agrees; correction stored |
 | 2 | Check how the pool's buffer size reaches FMan (`fman_port` ext buffer size, `FMBM_EBMPI`) and what per-interface bpool count (`config_count`) is, to size memory: roughly count × raw size per port | Memory budget on the 4 GB board written down |
 | 3 | Implement Option A as a Layer-1 kernel patch (no bare `sed` on kernel C), retiring or reusing F-203/F-222 consistently, with the parameter default 0 | Builds; `bin/test-fixups.sh` passes; default build byte-identical in behaviour |
-| 4 | Raise the MTU guards: `data/vyos-1x-036` and `037` currently reject MTU outside 1280–2500. Allow up to the proven range, and document that jumbo needs `fsl_dpa.jumbo_rx=1` | Guard bounds match the proven range |
+| 4 | Raise the MTU guards. **Done under Option B:** `data/vyos-1x-036`/`037`/`043` now accept 1280–9000 with no module parameter (the `fsl_dpa.jumbo_rx=1` note applied only to Option A) | Guard bounds match the proven range |
 | 5 | Board validation after cold boot, one variable per run: MTU 3600, 4500, 6000, 9000 engaged; then a 30 min soak at 800 Mbit/s routed (the F-222 failure case) logging `MemFree` and `/proc/buddyinfo` | No wedge, no allocation failures, A3 at 9000 passes |
 | 6 | Regression at MTU 1500 with the parameter off and on: A1, A2, B1 (16k flows), C1, C2 | Within run-to-run noise of the 2026-10-30 results |
 | 7 | Re-run A3 against the vendor DUT and update `plans/ASK2-VENDOR-PERF-BATTERY.md` | Comparison row updated |

@@ -36,12 +36,12 @@ per-port-table (F-220/F-221) work all ran on order-0 4 KiB buffers before F-203.
 The per-port five-port v4 engage/table/FQ results from this session are
 independent of buffer order.
 
-CONSEQUENCE: ASK MTU must be clamped back to the mainline single-4K-buffer limit
-(~3600). The companion change lowers the vyos-1x-036/037 ASK MTU clamp from 7000
-to 3600 so an oversized-frame configuration cannot wedge RX the other way
-(fsl_fm_max_frm=9600 still lets the MAC accept a >4 KiB wire frame that no
-order-0 buffer can hold). Restoring true jumbo (>3600) later needs a proper
-page_pool / multi-size BMan pool or RX scatter-gather reassembly, not order-1.
+CONSEQUENCE (at the time): ASK MTU was clamped back to the single-4K-buffer
+limit (~3600) so an oversized-frame configuration could not wedge RX the other
+way. SUPERSEDED 2026-10-31 by Option B (issue #50 closed without page_pool):
+repaired board patch 0177 stopped clamping MAC max-frame to `dpaa_bp->size`,
+mainline `sg_fd_to_skb()` carries multi-buffer jumbo, and vyos-1x-036/037 raise
+the ASK MTU band to 1280–9000. Order-0 pools stay; do not revive order-1.
 
 S0 QDRANT GATE: cross-checked DPAA_BP_RAW_SIZE / dpaa_bp_size / dpaa_change_mtu
 ceiling, the order-1 fragmentation risk (F-203 docstring + this board result),
@@ -73,9 +73,9 @@ new = (
     " * (board .185 2026-08-21, ~800 Mbit/s routed transit, MemFree ~6.8 GB).\n"
     " * Revert to the mainline-proven order-0 single-4 KiB-page RX buffer. All\n"
     " * F-203 sites derive from this define, so this one line reverts them all;\n"
-    " * DPAA_BP_RAW_SIZE becomes 4096 and the ASK MTU clamp is lowered to ~3600\n"
-    " * (vyos-1x-036/037). ASK FE offload at standard MTU is unaffected (E25/E26\n"
-    " * HITs and F-220/F-221 per-port tables ran on order-0). */\n"
+    " * DPAA_BP_RAW_SIZE becomes 4096. Jumbo > one buffer is Option B (0177 +\n"
+    " * RX SG; issue #50); do not revive order-1. ASK FE offload at standard\n"
+    " * MTU is unaffected (E25/E26 HITs and F-220/F-221 ran on order-0). */\n"
     "#define DPAA_BP_ORDER 0\n"
 )
 

@@ -554,7 +554,7 @@ jobs:
           Formatting — use rich Markdown so the notes are easy to scan:
           - Wrap every command, CLI path, config node, interface name, file path, register,
             protocol/port, numeric value with a unit, and identifier in inline backticks
-            (e.g. `set interfaces ethernet eth3 offload ipv6`, `eth0`, `~7.3 Gbit/s`, `MTU 1280-3600`).
+            (e.g. `set interfaces ethernet eth3 offload ipv6`, `eth0`, `~7.3 Gbit/s`, `MTU 1280-9000`).
           - Show any multi-line command or config snippet as a fenced code block with a language
             hint (```bash or ```) — but never wrap the whole document in a fence.
           - Use `**bold**` for the group labels and to emphasize the single most important phrase

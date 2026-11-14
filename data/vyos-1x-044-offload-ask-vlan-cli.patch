@@ -1,5 +1,5 @@
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index 1e9f870..750e036 100644
+index 9a8c9d1e2..5af12d3f9 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
 @@ -113,6 +113,12 @@
@@ -16,10 +16,10 @@ index 1e9f870..750e036 100644
                  <properties>
                    <help>Enable Receive Packet Steering</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 97f56eb4c..8e104bd98 100644
+index 39394ec86..c7bccf50f 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -337,11 +337,15 @@ def set_hw_tc_offload(self, state, warn=True):
+@@ -366,11 +366,15 @@ def set_hw_tc_offload(self, state, warn=True):
              'hw-tc-offload', 'hw-tc-offload', state, enabled, fixed, warn
          )
  
@@ -36,7 +36,7 @@ index 97f56eb4c..8e104bd98 100644
          """
          # Physical ingress FMan hwport IDs (DT-authoritative, all five ports).
          port_map = {
-@@ -356,9 +360,15 @@ def set_ask_offload(self, family_mask: int):
+@@ -385,9 +389,15 @@ def set_ask_offload(self, family_mask: int):
          if not os.path.exists(tool):
              raise ConfigError(f'ASK offload helper not found: {tool}')
  
@@ -55,7 +55,7 @@ index 97f56eb4c..8e104bd98 100644
          if rc:
              msg = (out or '').strip().splitlines()
              detail = msg[-1] if msg else f'helper exited with rc={rc}'
-@@ -726,7 +736,11 @@ def update(self, config):
+@@ -755,7 +765,11 @@ def update(self, config):
          # bit0=IPv4, bit1=IPv6; mask 0 disengages the port.
          ask_mask = ((1 if dict_search('offload.ipv4', config) is not None else 0) |
                      (2 if dict_search('offload.ipv6', config) is not None else 0))
@@ -69,10 +69,10 @@ index 97f56eb4c..8e104bd98 100644
          # RPS - Receive Packet Steering
          # ASK's IPv6/NAT/VLAN misses take the kernel RX softirq path; on this
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 7c60f89..6f5c73d 100755
+index 41e2da86d..1aad4ee2f 100644
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -325,6 +325,19 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+@@ -416,6 +416,19 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
              raise ConfigError(
                  f'Interface {ifname} does not support ASK offload (supported: eth0, eth1, eth2, eth3, eth4)'
              )
@@ -89,6 +89,6 @@ index 7c60f89..6f5c73d 100755
 +            )
 +        if ifname == 'eth0':
 +            raise ConfigError('ASK VLAN offload is not supported on the eth0 management port')
-         # ASK FMan FE forwarding is bounded to the order-0 RX buffer range on
-         # this board. The DPAA1 RX pool is one contiguous 4 KiB order-0 page
-         # (F-222); frames above the ~3600 ceiling overrun the one-buffer FMan
+         # ASK offload MTU must stay in [ASK_OFFLOAD_MTU_MIN, ASK_OFFLOAD_MTU_MAX]
+         # (1280..9000, HW-validated 2026-10-31 via Option B RX scatter-gather).
+         # The DPAA1 RX pool remains order-0 / 4 KiB (F-222); frames above one

@@ -125,8 +125,10 @@ programming recipes. Resolve contradictions before touching code.
   readback return framework-appropriate fallback errors before `in_hw`.
   Never accept a rewrite as a no-op or call fallback successful after hardware
   has already modified/consumed a frame.
-- RX is order-0/4 KiB; ASK MTU range is 1280–3600. Change MTU only disengaged,
-  match endpoints, restore 1500 on exit/abort. Do not revive order-1 pools.
+- RX is order-0/4 KiB; ASK MTU range is 1280–9000 (Option B: mainline RX
+  scatter-gather; issue #50 closed without page_pool). Change MTU only
+  disengaged, match endpoints, restore 1500 on exit/abort. Do not revive
+  order-1 pools.
 - MTU-shrink fragmentation retains F-262's owned frag-info and RX triple:
   params misc `|=0x40000000`, RCMNE `0x0e`, RFENE `0x22`, readback and reverse
   restoration. IPv6 HW fragmentation defaults on by operator decision;
