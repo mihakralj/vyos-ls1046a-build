@@ -5187,28 +5187,35 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
  * bucket in DMA memory. Instead, one pass a second reads every ASK record's
  * counters (fman_pcd_fe_stats_scan, read-only, under fe_stats_lock, at most
  * ASK_STATS_SCAN_BUDGET records per hold) into its flow through the fe_token
- * index, and the poll answers from that cache while it is under two seconds
- * old; otherwise (scan not run yet, record missed, scan stalled) it reads the
+ * index, and the poll answers from that cache while it is fresh
+ * (ASK_STATS_SCAN_FRESH); otherwise (scan not run yet, record missed, scan stalled) it reads the
  * record itself as before. Design review 2026-11-14 (plans/ASK2-FLOW-SCALING-PLAN.md).
  */
 #define ASK_STATS_SCAN_BUDGET	256	/* records per fe_stats_lock hold */
+/*
+ * One pass per poll interval: nf_flowtable polls each flow once 10 % of its
+ * timeout has passed (3 s at the 30 s default), so a pass every second read
+ * every record three times per poll it served (0328 profile, 131,072 flows:
+ * the scan was 31 % of busy CPU). A cached value up to 4 s old is fine: the
+ * counters only grow and the timeout is 30 s.
+ */
+#define ASK_STATS_SCAN_PERIOD	(3 * HZ)
+#define ASK_STATS_SCAN_FRESH	(4 * HZ)
 static void ask_stats_scan_fn(struct work_struct *w);
 static DECLARE_DELAYED_WORK(ask_stats_scan_work, ask_stats_scan_fn);
 static bool ask_stats_scan_stopped;
 
-/* Runs under fe_stats_lock: no sleeping, no FMan PCD calls. */
+/* Runs under fe_stats_lock and the caller's rcu_read_lock(): no sleeping,
+ * no FMan PCD calls. */
 static void ask_stats_scan_record(void *arg, u64 fe_token, u64 packets, u64 bytes)
 {
-	struct ask_flow *f;
+	struct ask_flow *f = ask_flow_by_token(arg, fe_token);
 
-	rcu_read_lock();
-	f = ask_flow_by_token(arg, fe_token);
 	if (f) {
 		WRITE_ONCE(f->hw_scan_packets, packets);
 		WRITE_ONCE(f->hw_scan_bytes, bytes);
 		smp_store_release(&f->hw_scan_jiffies, jiffies | 1);
 	}
-	rcu_read_unlock();
 }
 
 /* Caller holds rcu_read_lock() and a looked-up @f. */
@@ -5216,7 +5223,7 @@ static bool ask_stats_scan_fresh(struct ask_flow *f, u64 *packets, u64 *bytes)
 {
 	unsigned long at = smp_load_acquire(&f->hw_scan_jiffies);
 
-	if (!at || !time_before(jiffies, at + 2 * HZ))
+	if (!at || !time_before(jiffies, at + ASK_STATS_SCAN_FRESH))
 		return false;
 	*packets = READ_ONCE(f->hw_scan_packets);
 	*bytes = READ_ONCE(f->hw_scan_bytes);
@@ -5232,14 +5239,18 @@ static void ask_stats_scan_fn(struct work_struct *w)
 
 	if (t && fm && atomic_read(&t->num_hw_backed)) {
 		do {
+			/* one RCU section per chunk, not per record */
+			rcu_read_lock();
 			rc = fman_pcd_fe_stats_scan(fm, FMAN_PCD_FE_OWNER_ASK,
 						    &cursor, ASK_STATS_SCAN_BUDGET,
 						    ask_stats_scan_record, t);
+			rcu_read_unlock();
 			cond_resched();
 		} while (rc == 0 && !READ_ONCE(ask_stats_scan_stopped));
 	}
 	if (!READ_ONCE(ask_stats_scan_stopped))
-		queue_delayed_work(system_unbound_wq, &ask_stats_scan_work, HZ);
+		queue_delayed_work(system_unbound_wq, &ask_stats_scan_work,
+				   ASK_STATS_SCAN_PERIOD);
 }
 
 /*
@@ -5288,7 +5299,7 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	rcu_read_unlock();
 
 	/* F-315: the per-flow read only when the batched scan has not
-	 * reported this record within the last two seconds. */
+	 * reported this record within ASK_STATS_SCAN_FRESH. */
 	if (!cached) {
 		fm = ask_hw_get_fman();
 		if (!fm)

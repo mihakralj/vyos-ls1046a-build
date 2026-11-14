@@ -17,7 +17,8 @@ SOURCE = ROOT / "kernel/ask/oot-modules/ask/ask_stats.c"
 
 
 def test_port_stats_are_per_cpu():
-    assert "atomic64_add" not in SOURCE.read_text()
+    src = SOURCE.read_text()
+    assert "atomic64_add(" not in src and "this_cpu_add(st->" not in src and "get_cpu_ptr(st->pcpu)" in src
 
 
 def test_port_stats_semantics(tmp_path):

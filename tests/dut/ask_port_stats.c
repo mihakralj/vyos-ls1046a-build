@@ -28,9 +28,9 @@ static void kfree(void *p) { if (p) live_allocs--; free(p); }
 #define free_percpu(p) kfree(p)
 #define per_cpu_ptr(p, cpu) (&(p)[cpu])
 #define for_each_possible_cpu(cpu) for ((cpu) = 0; (cpu) < NCPU; (cpu)++)
-/* this_cpu_add(p->field, v): p points at slot 0, slots are one struct apart */
-#define this_cpu_add(pcp, v) \
-	(*(u64 *)((char *)&(pcp) + cur_cpu * sizeof(struct ask_port_ctr)) += (v))
+static int preempt_off;
+#define get_cpu_ptr(p) (assert(!preempt_off), preempt_off = 1, &(p)[cur_cpu])
+#define put_cpu_ptr(p) do { assert(preempt_off); preempt_off = 0; } while (0)
 
 static void xa_init(struct xarray *xa) { memset(xa, 0, sizeof(*xa)); }
 static void xa_destroy(struct xarray *xa) { (void)xa; }
@@ -72,6 +72,8 @@ int main(void)
 
 	ask_stats_init();
 	ask_port_stats_add(0, 5, 5, 5, 5);		/* ifindex <= 0 ignored */
+	ask_port_stats_add(5, 0, 0, 0, 0);		/* nothing to add: no entry created */
+	assert(live_allocs == 0);
 	ask_port_stats_zero(3);				/* zero before create: no-op */
 	s = get(3);
 	assert(!s.rx_packets && !s.tx_bytes);

@@ -75,8 +75,10 @@ void ask_port_stats_add(int ifindex,
 			u64 tx_packets, u64 tx_bytes)
 {
 	struct ask_port_stats *st, *cur;
+	struct ask_port_ctr *c;
 
-	if (ifindex <= 0)
+	/* most stats polls carry nothing for one of the two directions */
+	if (ifindex <= 0 || !(rx_packets | rx_bytes | tx_packets | tx_bytes))
 		return;
 
 	st = xa_load(&ask_port_stats_xa, ifindex);
@@ -102,10 +104,16 @@ void ask_port_stats_add(int ifindex,
 		}
 	}
 
-	this_cpu_add(st->pcpu->rx_packets, rx_packets);
-	this_cpu_add(st->pcpu->rx_bytes, rx_bytes);
-	this_cpu_add(st->pcpu->tx_packets, tx_packets);
-	this_cpu_add(st->pcpu->tx_bytes, tx_bytes);
+	/* One preempt-off section with plain stores: this CPU's slot has no other
+	 * writer, and this_cpu_add() is an LL/SC loop per counter on the A72
+	 * (11.7 % of busy CPU at 131,072 flows, image 0328). WRITE_ONCE keeps each
+	 * 64-bit store whole for ask_port_stats_sum() on other CPUs. */
+	c = get_cpu_ptr(st->pcpu);
+	WRITE_ONCE(c->rx_packets, c->rx_packets + rx_packets);
+	WRITE_ONCE(c->rx_bytes, c->rx_bytes + rx_bytes);
+	WRITE_ONCE(c->tx_packets, c->tx_packets + tx_packets);
+	WRITE_ONCE(c->tx_bytes, c->tx_bytes + tx_bytes);
+	put_cpu_ptr(st->pcpu);
 }
 
 void ask_port_stats_zero(int ifindex)
