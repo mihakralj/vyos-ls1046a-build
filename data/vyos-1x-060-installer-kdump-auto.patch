@@ -1,0 +1,21 @@
+image_installer: preserve the kdump auto default on image upgrades
+
+config.boot carries no CLI defaults, so get_cli_kernel_options() rendered no
+crashkernel= for `system option kdump` without `memory`. This can cause an
+extra kexec when the new image boots.
+
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index 469e0d960..991ac1496 100755
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -661,7 +661,9 @@ def get_cli_kernel_options(config_file: str) -> list:
+                 cmdline_options.append(f'hugepages={count}')
+ 
+     # Crash kernel memory reservation for the capture kernel
+-    kdump_memory = options.get('kdump', {}).get('memory')
++    kdump_memory = None
++    if 'kdump' in options:
++        kdump_memory = (options['kdump'] or {}).get('memory', 'auto')
+     if kdump_memory:
+         if kdump_memory == 'auto':
+             # Tiered auto-sizing based on total system RAM
