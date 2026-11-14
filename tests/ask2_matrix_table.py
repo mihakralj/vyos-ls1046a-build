@@ -33,3 +33,15 @@ def test_table(tmp_path):
     assert rows["port-forward"].split() == ['port-forward', '-', '-', '-', '9.30', '-', '-']
     assert rows["wg+nat+pp+vl"].split() == ['wg+nat+pp+vl', '-', '-', '-', '-', '1.90', '-']
     assert len(lines) == 2 + len(amt.ROWS)
+    # per-cell statistics over all reps (matrix.csv: gbps=max, n, mean, stdev, min)
+    n, best, mean, sd, lo = amt.stats(amt.collect(tmp_path)[("unicast", "4", "up")][3])
+    assert (n, best, lo) == (3, 9.42, 9.30)
+    assert round(mean, 4) == 9.3733 and round(sd, 4) == 0.0643
+    assert amt.stats(()) == (0, None, None, None, None)
+    assert amt.stats((4.1,))[3] == 0.0
+    import sys
+    sys.argv = ["ask2-matrix-table.py", str(tmp_path)]
+    amt.main()
+    rows_csv = (tmp_path / "matrix.csv").read_text().splitlines()
+    assert rows_csv[0] == "type,fam,dir,gbps,n,verdicts,mean,stdev,min"
+    assert "unicast,v4,up,9.420,3,HW,9.373,0.064,9.300" in rows_csv
