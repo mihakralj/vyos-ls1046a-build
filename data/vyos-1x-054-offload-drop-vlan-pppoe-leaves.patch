@@ -1,5 +1,5 @@
 diff --git a/interface-definitions/include/version/interfaces-version.xml.i b/interface-definitions/include/version/interfaces-version.xml.i
-index bf518b1d7..c214f07bb 100644
+index bf518b1d7fdf0e25e2ee06a63feb1328b5d8fdf5..c214f07bbe1ae43460d0c15ce522a16194324bae 100644
 --- a/interface-definitions/include/version/interfaces-version.xml.i
 +++ b/interface-definitions/include/version/interfaces-version.xml.i
 @@ -1,3 +1,3 @@
@@ -8,7 +8,7 @@ index bf518b1d7..c214f07bb 100644
 +<syntaxVersion component='interfaces' version='37'></syntaxVersion>
  <!-- include end -->
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
-index 604b72249..9a8c9d1e2 100644
+index 604b722493ab565db4c56f0ac78ce81f487aff06..9a8c9d1e262a8a2551a2cb05d5395cd04f940b4d 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
 @@ -113,18 +113,6 @@
@@ -31,7 +31,7 @@ index 604b72249..9a8c9d1e2 100644
                  <properties>
                    <help>Enable Receive Packet Steering</help>
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index 922e205f5..d393ebd21 100644
+index 922e205f5234dbd42c0c10b0403f8d67a41b5dd2..d393ebd21f1a7b6d13f8d5f70599ecae99402ab0 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
 @@ -366,27 +366,16 @@ def set_hw_tc_offload(self, state, warn=True):
@@ -119,7 +119,7 @@ index 922e205f5..d393ebd21 100644
          # RPS - Receive Packet Steering
          # ASK's IPv6/NAT/VLAN misses take the kernel RX softirq path; on this
 diff --git a/src/conf_mode/interfaces_bridge.py b/src/conf_mode/interfaces_bridge.py
-index ba98e6ce8..e25880c99 100644
+index ba98e6ce80adc8bd9ca67fa6f81547f6e501a81b..e25880c9979980097f16149ad4b6495aec92b999 100644
 --- a/src/conf_mode/interfaces_bridge.py
 +++ b/src/conf_mode/interfaces_bridge.py
 @@ -26,7 +26,6 @@
@@ -189,7 +189,7 @@ index ba98e6ce8..e25880c99 100644
      if 'member' in bridge:
          if 'interface_remove' in bridge['member']:
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index e473e14b0..c39b9dfa8 100644
+index 4a2b550d4f2c40b5d682567a0304d76cd1b31ce3..1af615bc929c66cf4af3cb462c2d5b1ea4004000 100644
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
 @@ -417,30 +417,6 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
@@ -220,13 +220,13 @@ index e473e14b0..c39b9dfa8 100644
 -            )
 -        if ifname == 'eth0':
 -            raise ConfigError('ASK PPPoE offload is not supported on the eth0 management port')
-         # ASK FMan FE forwarding is bounded to the order-0 RX buffer range on
-         # this board. The DPAA1 RX pool is one contiguous 4 KiB order-0 page
-         # (F-222); frames above the ~3600 ceiling overrun the one-buffer FMan
-@@ -460,7 +436,7 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+         # Reject explicitly configured MTUs outside 1280..9000; an absent
+         # MTU is not checked here. This range is a configuration guard, not a
+         # guarantee that every packet path or jumbo scenario has been tested.
+@@ -453,7 +429,7 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
                      f'{ASK_OFFLOAD_MTU_MIN} and {ASK_OFFLOAD_MTU_MAX} '
-                     f'(configured MTU {mtu} is outside the contiguous-buffer range '
-                     f'and can wedge the FMan RX path). Set a supported MTU '
+                     f'(configured MTU {mtu} is outside the configured range). '
+                     f'Set a supported MTU '
 -                    f'or disable "offload ask" first.'
 +                    f'or disable "offload ipv4"/"offload ipv6" first.'
                  )

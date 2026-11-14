@@ -292,8 +292,9 @@ kept, so a port that had them stays engaged and now gets VLAN/PPPoE offload
 automatically.
 
 **Verify.** `interfaces_ethernet.py` `verify_offload` keeps the supported-port
-check, the VPP-exclusivity check and the F-222 MTU ceiling (1280-3600) for every
-engaged port. The MTU ceiling formerly ran only when `offload vlan` or
+check, the VPP-exclusivity check and the ASK MTU admission band (1280–9000) for
+every engaged port. This range does not establish validation for every MTU or
+workload. The MTU ceiling formerly ran only when `offload vlan` or
 `offload pppoe` was present (patch 044 split it off `_ask_on`); it now covers
 every engaged port again.
 
