@@ -2,7 +2,7 @@
 """test-fe-stats-scan.py <kernel-source-dir>: F-315 host check.
 
 Applies bin/kernel-fixups/F_315.py to a copy of fman_pcd.c and fman_pcd.h from the given (F-312/F-314-applied)
-tree, checks it is idempotent, then compiles the generated fman_pcd_fe_stats_scan() into tests/dut/fman_fe_stats_scan.c
+tree (or takes it as found when CI has applied it already), checks it is idempotent, then compiles the generated fman_pcd_fe_stats_scan() into tests/dut/fman_fe_stats_scan.c
 under ASan/UBSan: owner filter, big-endian counters, record budget and bucket cap per lock hold, resume across calls,
 a cursor past a smaller table's last bucket and a table freed between calls (no out-of-bounds bidx read).
 The generated function is also put through bin/test-fe-stats-lock.py's rule: nothing sleeps or frees under the lock.
@@ -26,8 +26,9 @@ def main():
             os.makedirs(os.path.join(d, os.path.dirname(rel)), exist_ok=True)
             shutil.copy(os.path.join(sys.argv[1], rel), os.path.join(d, rel))
         fix = os.path.join(ROOT, "bin/kernel-fixups/F_315.py")
+        # CI runs this after F-315 itself, so the tree may already carry it
         first = subprocess.run([sys.executable, fix], cwd=d, capture_output=True, text=True)
-        if first.returncode != 0 or "F-315: batched" not in first.stdout:
+        if first.returncode != 0 or not ("F-315: batched" in first.stdout or "already applied" in first.stdout):
             sys.exit(f"F-315 did not apply: {first.stdout}{first.stderr}")
         again = subprocess.run([sys.executable, fix], cwd=d, capture_output=True, text=True)
         if again.returncode != 0 or "already applied" not in again.stdout:
