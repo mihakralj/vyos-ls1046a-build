@@ -21,33 +21,64 @@
  * Counter set (rx_packets/rx_bytes/tx_packets/tx_bytes) is keyed by netdev
  * ifindex in an xarray. Entries are created lazily on first attribute, reset
  * (not freed) at FLOW_BLOCK_UNBIND, and freed at module exit. Writers are the
- * nf_flow_offload_stats_wq (WQ_UNBOUND, concurrent across CPUs), so every
- * field is an atomic64.
+ * nf_flow_offload_stats_wq (WQ_UNBOUND, concurrent across CPUs), so the
+ * counters are per-CPU: the A72 has no LSE atomics, and shared atomic64
+ * counters cost 3 % of CPU in LL/SC retries at 65536 flows.
  */
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/atomic.h>
+#include <linux/percpu.h>
 #include <linux/xarray.h>
 #include <linux/netdevice.h>
 #include "include/ask_internal.h"
 
+struct ask_port_ctr {
+	u64 rx_packets;
+	u64 rx_bytes;
+	u64 tx_packets;
+	u64 tx_bytes;
+};
+
+/* Zeroing records the current sum as a baseline instead of writing the
+ * per-CPU slots, which a remote CPU's in-flight add could overwrite. */
 struct ask_port_stats {
-	atomic64_t rx_packets;
-	atomic64_t rx_bytes;
-	atomic64_t tx_packets;
-	atomic64_t tx_bytes;
+	struct ask_port_ctr __percpu *pcpu;
+	struct ask_port_ctr base;
 };
 
 static struct xarray ask_port_stats_xa;
+
+static void ask_port_stats_sum(struct ask_port_stats *st, struct ask_port_ctr *sum)
+{
+	int cpu;
+
+	memset(sum, 0, sizeof(*sum));
+	for_each_possible_cpu(cpu) {
+		const struct ask_port_ctr *c = per_cpu_ptr(st->pcpu, cpu);
+
+		sum->rx_packets += READ_ONCE(c->rx_packets);
+		sum->rx_bytes   += READ_ONCE(c->rx_bytes);
+		sum->tx_packets += READ_ONCE(c->tx_packets);
+		sum->tx_bytes   += READ_ONCE(c->tx_bytes);
+	}
+}
+
+static void ask_port_stats_free(struct ask_port_stats *st)
+{
+	free_percpu(st->pcpu);
+	kfree(st);
+}
 
 void ask_port_stats_add(int ifindex,
 			u64 rx_packets, u64 rx_bytes,
 			u64 tx_packets, u64 tx_bytes)
 {
 	struct ask_port_stats *st, *cur;
+	struct ask_port_ctr *c;
 
-	if (ifindex <= 0)
+	/* most stats polls carry nothing for one of the two directions */
+	if (ifindex <= 0 || !(rx_packets | rx_bytes | tx_packets | tx_bytes))
 		return;
 
 	st = xa_load(&ask_port_stats_xa, ifindex);
@@ -55,28 +86,40 @@ void ask_port_stats_add(int ifindex,
 		st = kzalloc(sizeof(*st), GFP_KERNEL);
 		if (!st)
 			return;
+		st->pcpu = alloc_percpu(struct ask_port_ctr);
+		if (!st->pcpu) {
+			kfree(st);
+			return;
+		}
 
 		cur = xa_cmpxchg(&ask_port_stats_xa, ifindex, NULL, st,
 				 GFP_KERNEL);
 		if (xa_is_err(cur)) {
-			kfree(st);
+			ask_port_stats_free(st);
 			return;
 		}
 		if (cur) {	/* lost a concurrent create: use theirs */
-			kfree(st);
+			ask_port_stats_free(st);
 			st = cur;
 		}
 	}
 
-	atomic64_add(rx_packets, &st->rx_packets);
-	atomic64_add(rx_bytes, &st->rx_bytes);
-	atomic64_add(tx_packets, &st->tx_packets);
-	atomic64_add(tx_bytes, &st->tx_bytes);
+	/* One preempt-off section with plain stores: this CPU's slot has no other
+	 * writer, and this_cpu_add() is an LL/SC loop per counter on the A72
+	 * (11.7 % of busy CPU at 131,072 flows, image 0328). WRITE_ONCE keeps each
+	 * 64-bit store whole for ask_port_stats_sum() on other CPUs. */
+	c = get_cpu_ptr(st->pcpu);
+	WRITE_ONCE(c->rx_packets, c->rx_packets + rx_packets);
+	WRITE_ONCE(c->rx_bytes, c->rx_bytes + rx_bytes);
+	WRITE_ONCE(c->tx_packets, c->tx_packets + tx_packets);
+	WRITE_ONCE(c->tx_bytes, c->tx_bytes + tx_bytes);
+	put_cpu_ptr(st->pcpu);
 }
 
 void ask_port_stats_zero(int ifindex)
 {
 	struct ask_port_stats *st;
+	struct ask_port_ctr sum;
 
 	if (ifindex <= 0)
 		return;
@@ -85,15 +128,23 @@ void ask_port_stats_zero(int ifindex)
 	if (!st)
 		return;
 
-	atomic64_set(&st->rx_packets, 0);
-	atomic64_set(&st->rx_bytes, 0);
-	atomic64_set(&st->tx_packets, 0);
-	atomic64_set(&st->tx_bytes, 0);
+	ask_port_stats_sum(st, &sum);
+	WRITE_ONCE(st->base.rx_packets, sum.rx_packets);
+	WRITE_ONCE(st->base.rx_bytes, sum.rx_bytes);
+	WRITE_ONCE(st->base.tx_packets, sum.tx_packets);
+	WRITE_ONCE(st->base.tx_bytes, sum.tx_bytes);
+}
+
+/* A reader racing a zero can see the new baseline before the sum catches up. */
+static u64 ask_port_ctr_delta(u64 sum, u64 base)
+{
+	return sum > base ? sum - base : 0;
 }
 
 void ask_port_stats_get(int ifindex, struct rtnl_link_stats64 *hw)
 {
 	struct ask_port_stats *st;
+	struct ask_port_ctr sum;
 
 	if (ifindex <= 0 || !hw)
 		return;
@@ -104,10 +155,11 @@ void ask_port_stats_get(int ifindex, struct rtnl_link_stats64 *hw)
 
 	/* Add (never overwrite): the caller (dpaa_get_stats64) has already
 	 * summed the software per-CPU counters into *hw. */
-	hw->rx_packets += atomic64_read(&st->rx_packets);
-	hw->rx_bytes   += atomic64_read(&st->rx_bytes);
-	hw->tx_packets += atomic64_read(&st->tx_packets);
-	hw->tx_bytes   += atomic64_read(&st->tx_bytes);
+	ask_port_stats_sum(st, &sum);
+	hw->rx_packets += ask_port_ctr_delta(sum.rx_packets, READ_ONCE(st->base.rx_packets));
+	hw->rx_bytes   += ask_port_ctr_delta(sum.rx_bytes, READ_ONCE(st->base.rx_bytes));
+	hw->tx_packets += ask_port_ctr_delta(sum.tx_packets, READ_ONCE(st->base.tx_packets));
+	hw->tx_bytes   += ask_port_ctr_delta(sum.tx_bytes, READ_ONCE(st->base.tx_bytes));
 }
 
 int ask_stats_init(void)
@@ -127,7 +179,7 @@ void ask_stats_exit(void)
 	 * inside ask_port_stats_get(). */
 	xa_for_each(&ask_port_stats_xa, idx, st) {
 		xa_erase(&ask_port_stats_xa, idx);
-		kfree(st);
+		ask_port_stats_free(st);
 	}
 	xa_destroy(&ask_port_stats_xa);
 	ask_pr_dbg("stats: exit\n");

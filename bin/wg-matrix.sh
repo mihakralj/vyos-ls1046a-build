@@ -3,6 +3,7 @@
 #   1 tunnel : bin/testrig-wireguard.sh        (4 TCP streams, a NEW tunnel every rep so serial-worker placement is sampled)
 #   2, 4 tunnels : bin/testrig-wireguard-multi.sh (2 TCP streams per tunnel, one tunnel set per row)
 #   each x up / down / bidir, IPv4 inner, MTU 1420, 30 s runs (first 10 s discarded)
+#   OUTER=6 supported: every tunnel runs over IPv6 between the DUT and dell2 (use a separate TAG).
 # Usage: bin/wg-matrix.sh 70|106|185   Env: REPS1=5 REPSN=3 DUR=30 STEADY_FROM=10 OUTDIR=/mnt/builds/ask2-review/oracle
 # The rig creates tunnels outside VyOS config. On .185, a temporary nft table
 # untracks only this rig's outer UDP traffic; existing VyOS configuration is untouched.
@@ -37,18 +38,34 @@ if [ "$DUT_KIND" = vendor ]; then export RIG_NS=${RIG_NS:-$VENDOR_NS}; else expo
 if [ -n "$RIG_NS" ] && ! [[ $RIG_NS =~ ^[a-zA-Z0-9_.-]+$ ]]; then
   echo "Invalid RIG_NS" >&2; exit 2
 fi
-if [ "${WG_PORT:-eth4}" != eth4 ] || [ "${OUTER:-4}" != 4 ]; then
-  echo "The matrix requires WG_PORT=eth4 and OUTER=4 for both runners" >&2; exit 2
+if [ "${WG_PORT:-eth4}" != eth4 ]; then
+  echo "The matrix requires WG_PORT=eth4 for both runners" >&2; exit 2
 fi
+case ${OUTER:-4} in 4|6) export OUTER=${OUTER:-4} ;; *) echo "OUTER must be 4 or 6" >&2; exit 2 ;; esac
 if [ "$DUT_KIND" = vendor ] && [ "${WGFP:-0}" = 1 ]; then
   echo "WGFP is available only on the ASK2 DUT" >&2; exit 2
 fi
-# WGFP_RX=1: P3 receive offload on for the run (it defaults off); down/bidir must then show
-# direct-RX frames. The DUT's previous setting is restored on exit.
-WGFP_RX=${WGFP_RX:-0}
+# WGFP_RX: P3 receive offload for the run. It follows WGFP (offload on means the whole fast path,
+# as the kernel defaults do); WGFP_RX=1 makes down/bidir show direct-RX frames, WGFP_RX=0 is the
+# transmit-only A/B. The DUT's previous setting is restored on exit.
+WGFP_RX=${WGFP_RX:-${WGFP:-0}}
 case $WGFP_RX in 0|1) ;; *) echo "WGFP_RX must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$WGFP_RX" = 1 ] && [ "${WGFP:-0}" != 1 ]; then
   echo "WGFP_RX=1 needs WGFP=1" >&2; exit 2
+fi
+# WGFP_RX_FAST=0|1|2: P6 in-place decrypt (wireguard.wgfp_rx_fast) for the run; unset leaves the
+# DUT's setting alone. Needs WGFP_RX=1. Restored on exit.
+WGFP_RX_FAST=${WGFP_RX_FAST:-}
+case $WGFP_RX_FAST in ''|0|1|2) ;; *) echo "WGFP_RX_FAST must be 0, 1 or 2" >&2; exit 2 ;; esac
+if [ -n "$WGFP_RX_FAST" ] && [ "$WGFP_RX" != 1 ]; then
+  echo "WGFP_RX_FAST needs WGFP_RX=1" >&2; exit 2
+fi
+# WGFP_RX_TAIL=0|1: P7 direct forward at the end of the upstream receive path (wireguard.wgfp_rx_tail);
+# unset leaves the DUT's setting alone. Needs WGFP=1. Restored on exit.
+WGFP_RX_TAIL=${WGFP_RX_TAIL:-}
+case $WGFP_RX_TAIL in ''|0|1) ;; *) echo "WGFP_RX_TAIL must be 0 or 1" >&2; exit 2 ;; esac
+if [ -n "$WGFP_RX_TAIL" ] && [ "${WGFP:-0}" != 1 ]; then
+  echo "WGFP_RX_TAIL needs WGFP=1" >&2; exit 2
 fi
 if [ "$DUT_KIND" = ask2 ] && [ "${WG_NOTRACK:-0}" != 0 ]; then
   echo "The ASK2 matrix already applies scoped NOTRACK; leave WG_NOTRACK unset" >&2; exit 2
@@ -72,9 +89,21 @@ TABLE_TOKEN="${TABLE}x${RANDOM}"
 TABLE_MAY_EXIST=0
 RX_ORIG=
 RXP=/sys/module/wireguard/parameters/wgfp_rx
+FAST_ORIG=
+FASTP=/sys/module/wireguard/parameters/wgfp_rx_fast
+TAIL_ORIG=
+TAILP=/sys/module/wireguard/parameters/wgfp_rx_tail
 cleanup() {
   local rc=$? listing handle
   trap - EXIT INT TERM
+  if [ -n "$TAIL_ORIG" ]; then
+    "${SSH[@]}" -n "$DUT" "echo $TAIL_ORIG | sudo -n tee $TAILP >/dev/null" ||
+      { echo "ERROR: cannot restore $TAILP=$TAIL_ORIG" >&2; rc=1; }
+  fi
+  if [ -n "$FAST_ORIG" ]; then
+    "${SSH[@]}" -n "$DUT" "echo $FAST_ORIG | sudo -n tee $FASTP >/dev/null" ||
+      { echo "ERROR: cannot restore $FASTP=$FAST_ORIG" >&2; rc=1; }
+  fi
   if [ -n "$RX_ORIG" ]; then
     "${SSH[@]}" -n "$DUT" "echo $RX_ORIG | sudo -n tee $RXP >/dev/null" ||
       { echo "ERROR: cannot restore $RXP=$RX_ORIG" >&2; rc=1; }
@@ -190,12 +219,26 @@ if [ "$DUT_KIND" = ask2 ]; then
   "${SSH[@]}" -n "$DUT" "sudo -n nft 'add chain inet $TABLE pre { type filter hook prerouting priority -300 ; }' && \
     sudo -n nft 'add chain inet $TABLE out { type filter hook output priority -300 ; }' && \
     sudo -n nft add rule inet $TABLE pre ip saddr 10.99.2.113 ip daddr 10.99.2.185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
-    sudo -n nft add rule inet $TABLE out ip saddr 10.99.2.185 ip daddr 10.99.2.113 udp sport 51820-51833 udp dport 51820-51833 notrack"
+    sudo -n nft add rule inet $TABLE out ip saddr 10.99.2.185 ip daddr 10.99.2.113 udp sport 51820-51833 udp dport 51820-51833 notrack && \
+    sudo -n nft add rule inet $TABLE pre ip6 saddr fd99:2::113 ip6 daddr fd99:2::185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
+    sudo -n nft add rule inet $TABLE out ip6 saddr fd99:2::185 ip6 daddr fd99:2::113 udp sport 51820-51833 udp dport 51820-51833 notrack"
 fi
 if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then
   RX_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $RXP") || exit 1
   "${SSH[@]}" -n "$DUT" "echo $WGFP_RX | sudo -n tee $RXP >/dev/null" || exit 1
   echo "wgfp_rx: $RX_ORIG -> $WGFP_RX"
+  if [ -n "$WGFP_RX_FAST" ]; then
+    FAST_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $FASTP") ||
+      { echo "ERROR: this image has no $FASTP (P6)" >&2; exit 1; }
+    "${SSH[@]}" -n "$DUT" "echo $WGFP_RX_FAST | sudo -n tee $FASTP >/dev/null" || exit 1
+    echo "wgfp_rx_fast: $FAST_ORIG -> $WGFP_RX_FAST"
+  fi
+  if [ -n "$WGFP_RX_TAIL" ]; then
+    TAIL_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $TAILP") ||
+      { echo "ERROR: this image has no $TAILP (P7)" >&2; exit 1; }
+    "${SSH[@]}" -n "$DUT" "echo $WGFP_RX_TAIL | sudo -n tee $TAILP >/dev/null" || exit 1
+    echo "wgfp_rx_tail: $TAIL_ORIG -> $WGFP_RX_TAIL"
+  fi
 fi
 echo "##### $WHO: 1 tunnel, 4 streams, $REPS1 reps with a fresh tunnel each"
 REPS=$REPS1 RECREATE=1 DIRS="up down bidir" STREAMS=4 OUT=$OUTDIR/$TAG-$WHO-t1.csv bin/testrig-wireguard.sh run wg-v4
@@ -329,6 +372,10 @@ try:
         for line in Path(counter_file).read_text().splitlines():
             cell, direction, rep, phase, attempt, state, qman, sink_data = line.split("\t")
             counters = parse_counters(state, {"sealed", "rx", "peers", "install_fail"})
+            # P6 (wgfp_rx_fast) consumes sink frames before the P3 copy: they are received too
+            optional = dict(f.partition("=")[::2] for f in state.split() if "=" in f)
+            counters["rx"] += sum(int(optional[k]) for k in ("p6_fwd", "p6_stack")
+                                  if optional.get(k, "").isdecimal())
             counters.update(parse_counters(qman, {"sinks", "xmit_ok", "xmit_fail", "xmit_ern"}))
             counters["sink_data"] = parse_sinks(sink_data, counters["sinks"])
             key = (cell, direction, int(rep), int(attempt))
@@ -345,7 +392,7 @@ try:
                         raise ValueError(f"{cell} {direction} r{rep}: missing WGFP counter pair")
                     pair = samples[max(attempts)]
                     before, after = pair["before"], pair["after"]
-                    # P3 receive offload defaults off: unless the run asked for it (WGFP_RX=1),
+                    # P3 receive offload follows WGFP_RX: without it (WGFP_RX=0),
                     # the direct-RX counter must stay still; with it, down/bidir must move it.
                     if direction != "down" and after["sealed"] <= before["sealed"]:
                         raise ValueError(f"{cell} {direction} r{rep}: fast-path counters did not advance")

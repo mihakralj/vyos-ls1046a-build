@@ -7,6 +7,7 @@
 #include <string.h>
 
 typedef uint8_t u8;
+typedef uint32_t u32;
 #define FM_KG_MAX_NUM_OF_SCHEMES 32
 #define pr_info(...) ((void)0)
 #define pr_warn(...) ((void)0)
@@ -48,11 +49,13 @@ static unsigned int table_count;
 
 enum failure {
 	NONE, BIND, WIDEN, DISABLE, LCV, CC_BASE, READBACK, DETACH,
-	ADVANCED, TABLE, PORT, PORT_ABSENT, STOP_RX
+	ADVANCED, TABLE, PORT, PORT_ABSENT, STOP_RX, SYNC
 };
 static enum failure failure;
 static int setup_calls, bind_calls, lcv_calls, cc_calls, verify_calls;
 static int advanced_calls, table_calls, port_calls, released, disable_calls;
+/* F-310 ordering: step numbers of the detach, the SYNC and the RCCB clear. */
+static int steps, detach_step, sync_step, cc_step, sync_calls;
 
 static void mutex_lock(struct mutex *lock) { assert(!lock->held); lock->held = true; }
 static void mutex_unlock(struct mutex *lock) { assert(lock->held); lock->held = false; }
@@ -84,6 +87,8 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *kg, u8 id, bool bind)
 static int keygen_scheme_setup(struct fman_keygen *kg, u8 id, bool enable)
 {
 	setup_calls++;
+	if (setup_calls == 3)
+		detach_step = ++steps;
 	if ((failure == WIDEN && setup_calls == 1) ||
 	    (failure == DISABLE && setup_calls == 2) ||
 	    (failure == DETACH && setup_calls == 3))
@@ -99,8 +104,19 @@ static int fman_port_clear_lcv_split(struct fman_port *port)
 static int fman_port_set_cc_base(struct fman_port *port, unsigned int base)
 {
 	cc_calls++;
+	cc_step = ++steps;
 	assert(!base);
 	return failure == CC_BASE ? -EIO : 0;
+}
+static __attribute__((unused)) int
+fman_fpm_extc_sync(struct fman *fm, u32 *value, unsigned int *polls)
+{
+	assert(fm && value && polls);
+	sync_calls++;
+	sync_step = ++steps;
+	*value = 0;
+	*polls = 1;
+	return failure == SYNC ? -ETIMEDOUT : 0;
 }
 static void fman_port_clear_kg_direct_scheme(struct fman_port *port) { }
 static int fman_port_verify_fe_detached(struct fman_port *port)
@@ -166,6 +182,7 @@ static void reset(struct fman_keygen *kg, struct fman_port *port,
 	set_bit(0x10, pcd->fe_port_armed);
 	setup_calls = bind_calls = lcv_calls = cc_calls = verify_calls = 0;
 	advanced_calls = table_calls = port_calls = released = disable_calls = 0;
+	steps = detach_step = sync_step = cc_step = sync_calls = 0;
 }
 
 int main(void)
@@ -286,6 +303,24 @@ int main(void)
 	assert(released == 1 && !pcd.fe_arming_v4_table && !pcd.fe_port_faulted[0]);
 	assert(kg.schemes[0].used && !kg.schemes[0].next_engine);
 	assert(!kg.schemes[1].used);
+#ifdef FMAN_F310
+	/* F-310: scheme back to RSS, then SYNC, then RCCB 0. */
+	assert(sync_calls == 1 && detach_step && detach_step < sync_step &&
+	       sync_step < cc_step);
+
+	/* A failed detach or SYNC never clears RCCB: the scaffold stays the
+	 * target of any frame already in the CC engine. */
+	for (stage = DETACH; stage <= SYNC; stage += SYNC - DETACH) {
+		reset(&kg, &port, &fm, &pcd);
+		failure = stage;
+		assert(__fman_pcd_fe_arm_disengage(&pcd, 0x10) < 0);
+		assert(!cc_calls && !verify_calls && !port_calls && !released);
+		assert(test_bit(0x10, pcd.fe_port_faulted));
+		assert(sync_calls == (stage == SYNC));
+		if (stage == SYNC)
+			assert(kg.schemes[0].used && !kg.schemes[0].next_engine);
+	}
+#endif
 
 	reset(&kg, &port, &fm, &pcd);
 	fm.port = NULL;
@@ -308,6 +343,9 @@ int main(void)
 	reset(&kg, &port, &fm, &pcd);
 	fman_pcd_fe_fault_arm(&pcd, 0x10, false);
 	assert(!disable_calls && !released && test_bit(0x10, pcd.fe_port_faulted));
+	#ifdef FMAN_F310
+	puts("FE disarm: F-310 detach -> SYNC -> RCCB 0; failed detach/SYNC keep RCCB");
+#endif
 	puts("FE disarm: lower-layer failures retain state and fence retries");
 	return 0;
 }

@@ -53,7 +53,7 @@ static inline void mutex_unlock(pthread_mutex_t *lock)
 
 static void iowrite32be(u32 value, u32 *address) { *address = value; }
 static u32 ioread32be(u32 *address) { return *address; }
-static void udelay(unsigned int delay) { }
+static __attribute__((unused)) void udelay(unsigned int delay) { }
 static unsigned int fman_cc_engaged_get(struct fman *fm)
 {
 	unsigned int value = atomic_load(&fm->engaged);
@@ -68,12 +68,31 @@ static void fman_cc_engaged_dec(struct fman *fm)
 	if (atomic_load(&fm->engaged))
 		atomic_fetch_sub(&fm->engaged, 1);
 }
+#ifndef FMAN_F293
 static void fman_set_fpm_extc(struct fman *fm, u32 value)
 {
 	assert(value == 0x80000000U);
 	atomic_fetch_add(&fm->syncs, 1);
 }
 static u32 fman_get_fpm_extc(struct fman *fm) { return 0; }
+#else
+/* T5 (post-F-293): the gate calls the serialized, fail-closed INV0 helper.
+ * Every SYNC must be issued under cc_port_lock with no engaged port. */
+static atomic_bool sync_fail;
+static int fman_fpm_extc_sync(struct fman *fm, u32 *value, unsigned int *polls)
+{
+	assert(gate_depth && "first-port SYNC outside cc_port_lock");
+	assert(!atomic_load(&fm->engaged) && "first-port SYNC with a port engaged");
+	*value = 0;
+	*polls = 1;
+	if (atomic_load(&sync_fail)) {
+		*value = 0x80000000U;
+		return -ETIMEDOUT;
+	}
+	atomic_fetch_add(&fm->syncs, 1);
+	return 0;
+}
+#endif
 
 #include "fman_cc_sync_body.h"
 
@@ -174,10 +193,112 @@ static void test_concurrent_first_ports(void)
 	assert(!pthread_mutex_destroy(&fm.cc_port_lock));
 }
 
+#ifdef FMAN_F293
+/* T5: a refused/timed-out first-port SYNC changes no accounting, does not
+ * enable CC dispatch and releases the lock (RCCB was written; F-311's caller
+ * clears it). A later arm can still be the first port. */
+static void test_sync_timeout(void)
+{
+	struct fman fm = { .cc_port_lock = PTHREAD_MUTEX_INITIALIZER };
+	struct bmi_regs rx_regs = { .rx.fmbm_rfpne = NIA_ENG_HWK };
+	struct bmi_regs oh_regs = { 0 };
+	struct fman_port rx = {
+		.port_type = FMAN_PORT_TYPE_RX, .fm = &fm, .bmi_regs = &rx_regs,
+	};
+	struct fman_port oh = {
+		.port_type = FMAN_PORT_TYPE_OH, .fm = &fm, .bmi_regs = &oh_regs,
+	};
+
+	atomic_store(&sync_fail, true);
+	assert(fman_port_set_cc_base(&rx, 0x100) == -ETIMEDOUT);
+	assert(!fm.engaged && !rx.cc_engaged && !gate_depth);
+	assert(!(rx_regs.rx.fmbm_rfpne & NIA_KG_CC_EN));
+	assert(fman_port_set_oh_cc_base(&oh, 0x200) == -ETIMEDOUT);
+	assert(!fm.engaged && !oh.cc_engaged && !gate_depth);
+	assert(oh_regs.oh.fmbm_ofpne != (NIA_ENG_HWK | NIA_KG_CC_EN));
+	/* Clearing after the failure is a no-op for the accounting. */
+	assert(!fman_port_set_cc_base(&rx, 0));
+	assert(!fm.engaged && !rx_regs.rx.fmbm_rccb);
+	atomic_store(&sync_fail, false);
+	assert(!fman_port_set_cc_base(&rx, 0x100));
+	assert(fm.engaged == 1 && fm.syncs == 1 && rx.cc_engaged);
+	assert(!fman_port_set_cc_base(&rx, 0));
+	assert(!fm.engaged);
+	assert(!pthread_mutex_destroy(&fm.cc_port_lock));
+}
+
+/* T5: concurrent arm/disarm churn on different ports. The SYNC mock asserts
+ * lock held and no engaged port on every first-port SYNC; afterwards the
+ * counter equals the number of engaged ports. With an anchor port engaged
+ * throughout, the churn never issues a SYNC (F-215: never with a sibling). */
+#define CHURN 20000
+struct churn { struct fman_port *port; bool oh; };
+
+static void *churn_port(void *arg)
+{
+	struct churn *c = arg;
+
+	for (int i = 0; i < CHURN; i++) {
+		u32 base = (i & 1) ? 0 : 0x100 + (u32)i;
+		int err = c->oh ? fman_port_set_oh_cc_base(c->port, base) :
+				  fman_port_set_cc_base(c->port, base);
+
+		assert(!err);
+	}
+	return NULL;
+}
+
+static void test_concurrent_arm_disarm(bool anchored)
+{
+	struct fman fm = { .cc_port_lock = PTHREAD_MUTEX_INITIALIZER };
+	struct bmi_regs regs[4] = {
+		{ .rx = { .fmbm_rfpne = NIA_ENG_HWK } },
+		{ .rx = { .fmbm_rfpne = NIA_ENG_HWK } },
+		{ .rx = { .fmbm_rfpne = NIA_ENG_HWK } },
+		{ .oh = { 0, 0 } },
+	};
+	struct fman_port ports[4];
+	struct churn churns[3];
+	pthread_t threads[3];
+	unsigned int flags = 0;
+
+	for (int i = 0; i < 4; i++)
+		ports[i] = (struct fman_port) {
+			.port_type = i == 3 ? FMAN_PORT_TYPE_OH : FMAN_PORT_TYPE_RX,
+			.fm = &fm, .bmi_regs = &regs[i],
+		};
+	if (anchored)
+		assert(!fman_port_set_cc_base(&ports[0], 0x80));
+	for (int i = 0; i < 3; i++) {
+		churns[i] = (struct churn) { .port = &ports[i + 1], .oh = i == 2 };
+		assert(!pthread_create(&threads[i], NULL, churn_port, &churns[i]));
+	}
+	for (int i = 0; i < 3; i++)
+		assert(!pthread_join(threads[i], NULL));
+	for (int i = 0; i < 4; i++)
+		flags += ports[i].cc_engaged;
+	assert(fm.engaged == flags && fm.engaged == (anchored ? 1U : 0U));
+	if (anchored)
+		assert(fm.syncs == 1);
+	else
+		assert(fm.syncs >= 1);
+	if (anchored)
+		assert(!fman_port_set_cc_base(&ports[0], 0));
+	assert(!fm.engaged);
+	assert(!pthread_mutex_destroy(&fm.cc_port_lock));
+}
+#endif
+
 int main(void)
 {
 	test_transitions();
 	test_concurrent_first_ports();
+#ifdef FMAN_F293
+	test_sync_timeout();
+	test_concurrent_arm_disarm(true);
+	test_concurrent_arm_disarm(false);
+	puts("RX/OH CC SYNC: T5 timeout accounting and concurrent arm/disarm churn passed");
+#endif
 	puts("RX/OH CC SYNC: port transitions and concurrent first-port gate passed");
 	return 0;
 }

@@ -227,17 +227,18 @@ ask_flow_set_hw_stats(f, 250, 35000, &dp, &db);
 KUNIT_EXPECT_EQ(test, dp, 150ULL);
 KUNIT_EXPECT_EQ(test, db, 21000ULL);
 
-/* Silicon reset (record re-created below baseline): delta == new absolute. */
+/* F-315: a read below the baseline is an older (cached) value, not a
+ * reset: no change, baseline and totals kept. */
 ask_flow_set_hw_stats(f, 30, 4000, &dp, &db);
-KUNIT_EXPECT_EQ(test, dp, 30ULL);
-KUNIT_EXPECT_EQ(test, db, 4000ULL);
+KUNIT_EXPECT_EQ(test, dp, 0ULL);
+KUNIT_EXPECT_EQ(test, db, 0ULL);
 rcu_read_unlock();
 
-/* Absolute total for dump-flows tracks the latest hardware value. */
+/* Absolute total for dump-flows is the highest hardware value seen. */
 KUNIT_EXPECT_EQ(test,
 	ask_flow_get_stats(&t, 77, &packets, &bytes, &last_seen_ns), 0);
-KUNIT_EXPECT_EQ(test, packets, 30ULL);
-KUNIT_EXPECT_EQ(test, bytes,   4000ULL);
+KUNIT_EXPECT_EQ(test, packets, 250ULL);
+KUNIT_EXPECT_EQ(test, bytes,   35000ULL);
 KUNIT_EXPECT_GT(test, last_seen_ns, 0ULL);
 
 ask_flow_table_destroy(&t);

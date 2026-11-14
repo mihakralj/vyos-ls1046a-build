@@ -70,12 +70,11 @@ fi
 
 KVER=$(awk '/^VERSION/{v=$3} /^PATCHLEVEL/{p=$3} /^SUBLEVEL/{s=$3} END{print v"."p"."s}' "$KDIR/Makefile")
 
-# The in-tree kernel build produces modules with release string "<KVER>-vyos"
-# (LOCALVERSION=-vyos from build-kernel.sh — chosen so the kernel is a
-# drop-in replacement for VyOS's own kernel). The OOT modules must match
-# that exact release string; the kernel tree itself encodes that via its
-# own CONFIG_LOCALVERSION / localversion* files.
-KRELEASE="${KVER}-vyos"
+# The in-tree kernel build produces modules with release string
+# "<KVER>-<KERNEL_REVISION>-vyos" (LOCALVERSION from build-kernel.sh, matching
+# VyOS's own kernel since vyos-build T9591). The OOT modules must match that
+# exact release string.
+KRELEASE="${KVER}-${KERNEL_REVISION:-1}-vyos"
 
 # ── Resolve ASK source tree ─────────────────────────────────────────────
 #

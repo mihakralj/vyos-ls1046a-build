@@ -1,0 +1,73 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 36842797f..bc1512516 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -2050,10 +2050,58 @@ static int dpaa_eth_init_ports(struct mac_device *mac_dev,
+ 	return err;
+ }
+ 
++/* Bad-page hunt (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md, 2026-11-09): FMan RX
++ * DMA'd a received frame into a live page table, so a BMan pool held the
++ * address of a page the kernel had already freed.  Pool buffers are order-0
++ * pages the driver holds a reference on: a buffer page with no reference, or
++ * with a page type (buddy, page table, slab), is a stale pool entry.  Checked
++ * where software returns buffers to BMan and where an RX frame is dequeued;
++ * a stale buffer is reported and leaked, never handed on.
++ * Off by default: the RX check reads every frame's struct page, which cost
++ * 1T WireGuard download 1.1-1.5% and upload 1% (.106, image 0746), and it
++ * has not fired since it was added.  fsl_dpa.buf_check=1 (or the 0644
++ * parameter at runtime) turns it on for a hunt.
++ */
++static bool buf_check;
++module_param(buf_check, bool, 0644);
++MODULE_PARM_DESC(buf_check, "Report and leak BMan buffers whose page the driver does not own");
++static atomic64_t dpaa_buf_stale = ATOMIC64_INIT(0);
++
++bool dpaa_buf_stale_check(dma_addr_t addr, u8 bpid, const char *where);
++bool dpaa_buf_stale_check(dma_addr_t addr, u8 bpid, const char *where)
++{
++	static DEFINE_RATELIMIT_STATE(rs, 5 * HZ, 8);
++	unsigned long pfn = PHYS_PFN(addr);
++	struct page *page;
++	u64 n;
++
++	if (!READ_ONCE(buf_check))
++		return false;
++	page = pfn_valid(pfn) ? pfn_to_page(pfn) : NULL;
++	if (likely(page && page_ref_count(page) > 0 && !page_has_type(page)))
++		return false;
++	n = atomic64_inc_return(&dpaa_buf_stale);
++	WARN_ONCE(1, "dpaa: stale BMan buffer %pad bpid %u at %s\n",
++		  &addr, bpid, where);
++	if (__ratelimit(&rs)) {
++		pr_err("dpaa: stale BMan buffer %pad bpid %u at %s: ref %d type 0x%x (%llu so far)\n",
++		       &addr, bpid, where, page ? page_ref_count(page) : -1,
++		       page ? data_race(page->page_type) : 0, n);
++		if (page)
++			dump_page(page, "dpaa stale BMan buffer");
++	}
++	return true;
++}
++
+ static int dpaa_bman_release(const struct dpaa_bp *dpaa_bp,
+ 			     struct bm_buffer *bmb, int cnt)
+ {
+-	int err;
++	int err, i;
++
++	for (i = 0; i < cnt; i++)
++		if (unlikely(dpaa_buf_stale_check(bm_buf_addr(&bmb[i]),
++						  dpaa_bp->bpid, "release")))
++			return 0;	/* leak the whole batch */
+ 
+ 	err = bman_release(dpaa_bp->pool, bmb, cnt);
+ 	/* Should never occur, address anyway to avoid leaking the buffers */
+@@ -3594,6 +3642,8 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 	dpaa_bp = dpaa_bpid2pool(dq->fd.bpid);
+ 	if (!dpaa_bp)
+ 		return qman_cb_dqrr_consume;
++	if (unlikely(dpaa_buf_stale_check(addr, dq->fd.bpid, "rx")))
++		return qman_cb_dqrr_consume;
+ 
+ 	/* M3-3 step 3 (patch 0083): observational xsk-RX branch-eligibility
+ 	 * probe. Map the FD's FQID to a qband via the qmap[] populated by

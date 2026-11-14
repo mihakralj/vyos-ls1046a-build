@@ -99,6 +99,44 @@ if [ -f "$NS_FRAG" ]; then
     sed -i 's/^CONFIG_NET_SCH_FQ=m$/CONFIG_NET_SCH_FQ=y/' "$NS_FRAG"
 fi
 
+# Same trap for pstore: vyos-build's 00-filesystems.config is merged after our
+# kernel/common/kernel-config/10-pstore-ramoops.config and disables
+# PSTORE_RAM/CONSOLE/PMSG, so the DT ramoops region (0xb0000000, 1 MiB) was
+# never used and a hang or panic left no record (found 2026-11-09, image 0346).
+FS_FRAG=vyos-build/scripts/package-build/linux-kernel/config/00-filesystems.config
+if [ -f "$FS_FRAG" ]; then
+    n=$(grep -cE '^# CONFIG_PSTORE_(RAM|CONSOLE|PMSG|FTRACE) is not set$' "$FS_FRAG" || true)
+    echo "### Enabling ramoops pstore in $FS_FRAG ($n lines)"
+    sed -i -E 's/^# CONFIG_PSTORE_(RAM|CONSOLE|PMSG|FTRACE) is not set$/CONFIG_PSTORE_\1=y/' "$FS_FRAG"
+    grep -qx 'CONFIG_PSTORE_FTRACE=y' "$FS_FRAG" || echo 'CONFIG_PSTORE_FTRACE=y' >> "$FS_FRAG"
+    for o in RAM CONSOLE PMSG FTRACE; do
+        grep -qx "CONFIG_PSTORE_$o=y" "$FS_FRAG" || { echo "::error::CONFIG_PSTORE_$o=y missing from $FS_FRAG"; exit 1; }
+    done
+fi
+
+# WireGuard built in, and with it (by select) libchacha, libpoly1305 and
+# libchacha20poly1305: module text runs from 4 KiB-page vmalloc space (the ASK
+# vendor measured a module build ~6% slower on download, ASK 11324c2), and
+# fastpath.c's one-NEON-section AEAD calls lib/crypto/arm64 routines that are
+# global but not exported. vyos-build's 62-wireguard.config is merged after
+# our fragments and sets =m.
+WG_FRAG=vyos-build/scripts/package-build/linux-kernel/config/62-wireguard.config
+if [ -f "$WG_FRAG" ]; then
+    echo "### Building WireGuard in: CONFIG_WIREGUARD=y in $WG_FRAG"
+    sed -i 's/^CONFIG_WIREGUARD=m$/CONFIG_WIREGUARD=y/' "$WG_FRAG"
+    grep -qx 'CONFIG_WIREGUARD=y' "$WG_FRAG" || { echo "::error::CONFIG_WIREGUARD=y missing from $WG_FRAG"; exit 1; }
+fi
+# ... and conntrack with it: built-in code cannot reach a module, so fastpath.c's
+# conntrack admission (IS_REACHABLE(CONFIG_NF_CONNTRACK)) compiled to a stub that
+# refused every flow and the fast path never engaged (image 2026.11.10-2247).
+# fastpath.c now #errors on that combination. VyOS loads conntrack every boot.
+NF_FRAG=vyos-build/scripts/package-build/linux-kernel/config/20-netfilter.config
+if [ -f "$NF_FRAG" ]; then
+    echo "### Building conntrack in: CONFIG_NF_CONNTRACK=y in $NF_FRAG"
+    sed -i 's/^CONFIG_NF_CONNTRACK=m$/CONFIG_NF_CONNTRACK=y/' "$NF_FRAG"
+    grep -qx 'CONFIG_NF_CONNTRACK=y' "$NF_FRAG" || { echo "::error::CONFIG_NF_CONNTRACK=y missing from $NF_FRAG"; exit 1; }
+fi
+
 ### Kernel patches (INA234 hwmon, SFP rollball PHY)
 KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
@@ -996,7 +1034,14 @@ scripts/config --set-val CONFIG_NFS_FS y
 scripts/config --set-val CONFIG_NFS_V4 y
 scripts/config --set-val CONFIG_NFS_V4_1 y
 scripts/config --set-val CONFIG_SUNRPC y
-scripts/config --set-val CONFIG_VFIO y
+# VFIO must build as a module: vpp.py's `apply()` modprobe/modprobe-r cycles
+# vfio + vfio_iommu_type1 on every `set vpp` / `delete vpp` commit so DPDK-bound
+# NICs release the IOMMU group. A built-in VFIO (=y, as this used to force)
+# cannot be unloaded, so `delete vpp` always fails with "Unloading Kernel
+# module vfio_iommu_type1 failed" and the commit aborts with VPP still bound.
+# CONFIG_VFIO and CONFIG_VFIO_IOMMU_TYPE1 are tristate upstream; force =m.
+scripts/config --set-val CONFIG_VFIO m
+scripts/config --set-val CONFIG_VFIO_IOMMU_TYPE1 m
 scripts/config --set-val CONFIG_CMA y
 scripts/config --set-val CONFIG_DMA_CMA y
 scripts/config --set-val CONFIG_CMA_SIZE_MBYTES 32
@@ -1379,14 +1424,20 @@ fi
 # ~480 buffers/port) is all the hardware gets. Under bidir load it ran dry:
 # BMI fmbm_rodc (RX out-of-buffers discard) = 13.95M frames vs 12.53M TCP
 # retransmits in one 40 s port<->port run (.185, 2026-10-06). Cost ~10 MiB/port.
+# 2026-11-10: 640 -> 1280 for the WireGuard fast path. Its ORP receive queue
+# holds frames (and their buffers) while all four CPUs decrypt; at 4 tunnels
+# a 2-3 MiB queue tail-dropped 10-14% (eth4 BMI rfdc) and a 4-8 MiB queue
+# emptied the ~2,560-buffer pool instead (rodc 1.4%+, .185/.106 image
+# 0011/0030). 1280 x 4 CPUs leaves room for a deeper queue. Cost ~20 MiB/port;
+# the 0178 ingress CGR threshold scales with it (config_count based).
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
         drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
         $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t128' \
-        $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t640' \
+        $'#define FSL_DPAA_ETH_MAX_BUF_COUNT\\t1280' \
         1 \
-        "A6-LOSS: RX bpool 128->640 bufs/CPU"
-    echo "### dpaa_eth.c: FSL_DPAA_ETH_MAX_BUF_COUNT=640 injected (mutate)"
+        "A6-LOSS + WGFP: RX bpool 128->1280 bufs/CPU"
+    echo "### dpaa_eth.c: FSL_DPAA_ETH_MAX_BUF_COUNT=1280 injected (mutate)"
 fi
 
 # A6-LOSS: start RX frame data on a cache line (vendor parity). Mainline RX
@@ -3028,11 +3079,51 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_293.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-global-sync.py" "$(pwd)" 2>&1
     echo "### fman.c/fman_pcd.c: F-293 global INV0 serialization harness passed"
+    # T5: re-run the RX/OH first-port gate on its final (F-293) form: SYNC
+    # timeout leaves accounting/CC_EN untouched; concurrent arm/disarm churn
+    # keeps count == engaged ports and never SYNCs with a port engaged.
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-cc-sync-gate.py" "$(pwd)" 2>&1
+    echo "### fman_port.c: T5 first-port SYNC accounting harness passed"
     # F-307 lab walker probe (default off): retains probed deleted records
     # and reports post-SYNC HITs; needs F-293's final del_key/SYNC form.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_307.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-ehash-walker-probe.py" "$(pwd)" 2>&1
     echo "### fman_pcd.c: F-307 ehash walker probe harness passed"
+    # F-310 (T2 teardown order): KG disarm puts the scheme back to RSS, SYNCs,
+    # then clears RCCB; port delete SYNCs between the workspace unpublish and
+    # the MURAM frees; the release-only port drain refuses armed/faulted ports.
+    # Needs F-293's serialized fman_fpm_extc_sync(). The full disarm harness
+    # models the pre-F-293 debugfs INV0 writer, so only its F-310 parts run here.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_310.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_workspace_disarm,fman_port_drain 2>&1
+    echo "### fman_pcd.c/fman_pcd_kg.c: F-310 teardown order harness passed"
+    # F-311 (T2 engage order, inverse of F-310): RCCB + first-port SYNC +
+    # CC_EN while the scheme is still RSS, then the AC_CC scheme; a failed
+    # scheme write keeps RCCB at the node. Needs F-310 (same harness script).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_311.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_kg_arm_order 2>&1
+    echo "### fman_pcd_kg.c: F-311 engage order harness passed"
+    # F-312: the ehash stats reader takes its own spinlock (fe_stats_lock), not
+    # fe_lock, which inserts/deletes hold across FMFP_EXTC SYNC polls; writers
+    # link/unlink/publish under it and table_free unpublishes before freeing.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_312.py" 2>&1
+    # F-313: the ehash keysize accessor (WGFP, every add/delete/stats poll)
+    # reads under the same fe_stats_lock. Needs F-312.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_313.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: F-312/F-313 stats-lock structure check passed"
+    # F-314: table-driven ehash CRC-64 (NXP crc64.h form); the stats read
+    # hashes before taking fe_stats_lock. Checked against the bit-serial
+    # reference, the RM self-test vector and the F-307 silicon bucket datum.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_314.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-ehash-crc.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: F-314 ehash CRC check passed"
+    # F-315: batched read-only ehash counter scan for ask.ko's stats cache
+    # (FLOW_CLS_STATS polls then skip the CRC, fe_stats_lock and record read).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_315.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-scan.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c: F-315 stats scan check passed"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
@@ -3232,25 +3323,28 @@ insert_at = idx + len(ANCHOR_FIRST)
 src = src[:insert_at] + KEY_BLOCK + src[insert_at:]
 
 # Inject the snapshot block AFTER the `make bindeb-pkg ...` line.
-BINDEB_ANCHOR = "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} KDEB_PKGVERSION=${KERNEL_VERSION}-1"
+# Upstream since T9591 (vyos-build 1d6ec63, 2026-11-09): KERNEL_SUFFIX is
+# -${KERNEL_REVISION}-${KERNEL_FLAVOR} (release 6.18.62-1-vyos) and the Debian
+# version is ${KERNEL_VERSION}-${KERNEL_REVISION}.
+BINDEB_ANCHOR = "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} KDEB_PKGVERSION=${KERNEL_VERSION}-${KERNEL_REVISION}"
 # F-217/kernel-skew fix: append a strictly-monotonic per-build suffix to the
-# kernel .deb version. Without it, every rebuild of 6.18.44 produces version
-# "6.18.44-1"; the persistent chroot already has that version installed, so
-# `apt install linux-image-6.18.44-vyos` is a no-op and the ISO ships the
+# kernel .deb version. Without it, every rebuild of 6.18.62 produces version
+# "6.18.62-1"; the persistent chroot already has that version installed, so
+# `apt install linux-image-6.18.62-1-vyos` is a no-op and the ISO ships the
 # PREVIOUS run's vmlinuz (stale kernel, old module-signing keyring) alongside a
 # freshly rebuilt squashfs/ask.ko -> "Key was rejected by service" on the board.
 # BUILD_VERSION (e.g. 2026.08.20-0026-rolling) reduces to digits (20260820.0026)
 # which sorts monotonically; fall back to the epoch second if unset. The
-# ask-modules .deb Depends on the release string (linux-image-<KVER>-vyos), NOT
+# ask-modules .deb Depends on the release string (linux-image-<KVER>-<rev>-vyos), NOT
 # this Debian version, so the OOT dependency stays satisfied.
 BINDEB_REPLACE = (
     'KDEB_SUFFIX="$(printf "%s" "${BUILD_VERSION:-}" | tr -cd "0-9." | sed "s/^[.]*//;s/[.]*$//")"\n'
     '[ -n "$KDEB_SUFFIX" ] || KDEB_SUFFIX="$(date -u +%Y%m%d.%H%M%S)"\n'
-    'echo "I: ASK2 kernel .deb version = ${KERNEL_VERSION}-1+b${KDEB_SUFFIX} (per-build, forces chroot upgrade)"\n'
+    'echo "I: ASK2 kernel .deb version = ${KERNEL_VERSION}-${KERNEL_REVISION}+b${KDEB_SUFFIX} (per-build, forces chroot upgrade)"\n'
     "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} "
-    'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
+    'KDEB_PKGVERSION="${KERNEL_VERSION}-${KERNEL_REVISION}+b${KDEB_SUFFIX}"'
 )
-PERBUILD_MARK = 'KDEB_PKGVERSION="${KERNEL_VERSION}-1+b${KDEB_SUFFIX}"'
+PERBUILD_MARK = 'KDEB_PKGVERSION="${KERNEL_VERSION}-${KERNEL_REVISION}+b${KDEB_SUFFIX}"'
 bidx = src.find(BINDEB_ANCHOR)
 if bidx >= 0:
     # Replace the fixed-version bindeb-pkg line with the per-build-versioned form
@@ -3263,7 +3357,7 @@ else:
     print(f"ERROR: ASK2 v2 bindeb-pkg anchor not found in {bk}", file=sys.stderr)
     sys.exit(1)
 # Re-find the (now replaced) bindeb line to anchor the snapshot block after it.
-bidx = src.find("KDEB_PKGVERSION=\"${KERNEL_VERSION}-1+b${KDEB_SUFFIX}\"")
+bidx = src.find(PERBUILD_MARK)
 if bidx < 0:
     print(f"ERROR: ASK2 per-build bindeb line not found after replace in {bk}", file=sys.stderr)
     sys.exit(1)

@@ -24,7 +24,7 @@ typedef uint32_t u32;
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define smp_wmb() do { } while (0)
 #define smp_rmb() do { } while (0)
-#define pr_warn_once(...) (++warnings)
+#define pr_info_once(...) (++notices)
 #define hash_add_rcu(table, ...) ((void)(table))
 #define DEFINE_PER_CPU(type, name) type name
 #define this_cpu_ptr(p) (p)
@@ -93,7 +93,7 @@ struct wgfp_flow {
 
 static int wgfp_flows_lock, wgfp_flow_work, system_wq;
 static int wgfp_flows;
-static unsigned int wgfp_nflows, work_queued, warnings;
+static unsigned int wgfp_nflows, work_queued, notices;
 static unsigned long jiffies;
 
 static void spin_lock_bh(int *lock) { (void)lock; }
@@ -175,7 +175,7 @@ int main(void)
 
 	/* no observation: nothing admitted */
 	wgfp_pst_rx_sync(&pst);
-	if (pst.rxfl || wgfp_nflows || work_queued || warnings) {
+	if (pst.rxfl || wgfp_nflows || work_queued || notices) {
 		fprintf(stderr, "unobserved tuple admitted\n");
 		return 1;
 	}
@@ -185,7 +185,7 @@ int main(void)
 	wgfp_pst_rx_sync(&pst);
 	if (!pst.rxfl || wgfp_nflows != 1 || !work_queued ||
 	    pst.rxfl->ifindex != eth4.ifindex || !pst.rxfl->rx ||
-	    pst.rxfl->state != WGFP_PENDING || !warnings) {
+	    pst.rxfl->state != WGFP_PENDING || !notices) {
 		fprintf(stderr, "observed tuple not admitted with provenance\n");
 		return 2;
 	}

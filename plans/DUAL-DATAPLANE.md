@@ -39,11 +39,11 @@ stateDiagram-v2
 |---|---|---|---|---|
 | **S0** mainline | RSS (`…0002` DONE) | BMI → KG → RX FQ | FIFO/IC, warm params page | kernel |
 | **S1** ASK | AC_CC with the 14-byte EKFC (`0x801C0006`) | BMI → KG → RCCB → ehash → FE opcodes → TX FQ | + FE workspace, hash table, per-egress TX FQs | FMan for HITs, kernel for misses and exceptions |
-| **S2** VPP | RSS (same as S0) | same as S0 | same as S0 | VPP workers on XSK sockets |
+| **S2** VPP | RSS (same as S0) | S0, but `FMBM_EBMPI[0]` names the XSK BPID (true ZC) | same as S0 | VPP workers on XSK sockets |
 
 Properties:
 
-- **S2 is a userspace overlay on S0.** There is no silicon delta, so VPP needs no inverse beyond closing its sockets.
+- **S2 is a userspace overlay on S0 with one silicon delta.** True-ZC attach reprograms the RX port's primary BMI pool to the XSK BPID. Detach must drain that pool and restore the original BPID and size before `pcd-snapshot` matches S0. Plan and defects: `plans/VPP-AFXDP-ZC-FULLSPEED.md`.
 - **S1↔S0 is the only hard transition**, and it is entirely our code. There is no direct S1↔S2 edge.
 - **Boot always lands in S0.** ASK engages only on a config commit, never unconditionally at probe. The boot-time commit of a config that carries `offload` leaves (including the factory default since 2026-10-16) is such a commit. A wedged S1 is recoverable by rebooting, but only into a config without those leaves, for example by deleting them or booting the previous image.
 

@@ -17,11 +17,31 @@ def test_table(tmp_path):
     (tmp_path / "quick-uni-r1.csv").write_text("\n".join(q) + "\n")
     (tmp_path / "wg-185-eth4.csv").write_text(
         "ts,cell,dir,rep,gbps\nt,wg-v4,up,1,2.45\nt,wg-v6,bidir,1,4.7\n")
+    (tmp_path / "quick-wan-uni-r1.csv").write_text(
+        q[0] + "\nt,wanfull-up-v4,4.10,0,0,0,0,0,0,0.0,SW\nt,portfwd-down-v6,9.30,0,0,0,0,0,0,1.0,HW\n"
+        "t,wgwan-up-v4-bidir,1.90,0,0,0,0,0,0,0.0,SW\n")
     lines = amt.render(amt.collect(tmp_path)).splitlines()
+    rows = {line.split()[0]: line for line in lines[2:]}
     assert lines[0] == "Flow type       Upload          Download          Bidir"
     assert lines[1] == "                v4      v6      v4      v6      v4      v6"
-    assert lines[2] == "unicast       9.42       -       -    9.36    16.9       -"
-    assert lines[3] == "nat              -       -       -       -       -       -"
-    assert lines[6] == "pppoe         9.35       -    9.33       -       -       -"
-    assert lines[7] == "wireguard     2.45       -       -       -       -    4.70"
-    assert len(lines) == 14
+    assert rows["unicast"].split() == ['unicast', '9.42', '-', '-', '9.36', '16.9', '-']
+    assert rows["nat"].split() == ['nat', '-', '-', '-', '-', '-', '-']
+    assert rows["pppoe"].split() == ['pppoe', '9.35', '-', '9.33', '-', '-', '-']
+    assert rows["wireguard"].split() == ['wireguard', '2.45', '-', '-', '-', '-', '4.70']
+    # combined-WAN rows, recorded whatever the verdict
+    assert rows["nat+ppp+vlan"].split() == ['nat+ppp+vlan', '4.10', '-', '-', '-', '-', '-']
+    assert rows["port-forward"].split() == ['port-forward', '-', '-', '-', '9.30', '-', '-']
+    assert rows["wg+nat+pp+vl"].split() == ['wg+nat+pp+vl', '-', '-', '-', '-', '1.90', '-']
+    assert len(lines) == 2 + len(amt.ROWS)
+    # per-cell statistics over all reps (matrix.csv: gbps=max, n, mean, stdev, min)
+    n, best, mean, sd, lo = amt.stats(amt.collect(tmp_path)[("unicast", "4", "up")][3])
+    assert (n, best, lo) == (3, 9.42, 9.30)
+    assert round(mean, 4) == 9.3733 and round(sd, 4) == 0.0643
+    assert amt.stats(()) == (0, None, None, None, None)
+    assert amt.stats((4.1,))[3] == 0.0
+    import sys
+    sys.argv = ["ask2-matrix-table.py", str(tmp_path)]
+    amt.main()
+    rows_csv = (tmp_path / "matrix.csv").read_text().splitlines()
+    assert rows_csv[0] == "type,fam,dir,gbps,n,verdicts,mean,stdev,min"
+    assert "unicast,v4,up,9.420,3,HW,9.373,0.064,9.300" in rows_csv

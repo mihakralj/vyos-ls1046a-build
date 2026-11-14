@@ -464,6 +464,18 @@
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4019-qman-enqueue-fqid.patch
 
+# ── 4020: WireGuard fast path P6 receive bookkeeping (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md 4b) ──
+# Thin wrappers around counter_validate(), keep_key_fresh() + the receive
+# timers, and update_rx_stats(), so packets fastpath.c decrypts in place share
+# upstream's replay window and timers. Inert unless wgfp_rx_fast is set.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4020-wireguard-fastpath-rx-bookkeeping.patch
+
+# QMan order restoration enqueue (ORP verb, HOLE) and QM_FQCTRL_ORP, for the
+# WGFP ordered-spread receive mode (ASK exp/wireguard patch 187 analogue).
+# Upstream-Status: Inappropriate | Risk-Tier: C
+4021-qman-enqueue-orp.patch
+
 # R3 of plans/ASK2-VENDOR-ASK-REVIEW.md: software-flowtable frames counted as rx_dropped.
 # Upstream-Status: Pending | Risk-Tier: C
 0176-dpaa-rx-stats-before-stack-verdict.patch
@@ -479,3 +491,21 @@
 # R12 of plans/ASK2-VENDOR-ASK-REVIEW.md: 10G RX BMI FIFO 24 KB -> 64 KB (module param).
 # Upstream-Status: Pending | Risk-Tier: C
 0179-fman-port-rx10g-fifo-size.patch
+
+# ── 4022: bad-page hunt (plans/ASK2-WIREGUARD-FASTPATH-PLAN.md, 2026-11-09) ──
+# FMan RX DMA'd a frame into a live page table: a BMan pool held a freed page.
+# Check that every buffer software releases to BMan, and every RX frame the
+# driver dequeues, is a page the driver holds; report (WARN_ONCE + dump_page)
+# and leak a stale one. fsl_dpa.buf_check=0 disables. Debug aid, remove once
+# the stale-entry source is found.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4022-dpaa-stale-buffer-check.patch
+# AF_XDP zero-copy RX correctness: error-FQ buffer release, MTU admission, BMI buffer size.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4023-dpaa-xsk-rx-correctness.patch
+# AF_XDP zero-copy Tx confirmation: dedicated per-qband FQ owned by the flavor module; Tx error/ERN claim hook.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4024-dpaa-xsk-tx-confirm-fq.patch
+# AF_XDP zero-copy: drain Tx and flush confirmations on every NAPI poll.
+# Upstream-Status: Inappropriate | Risk-Tier: B
+4025-dpaa-xsk-tx-every-poll.patch

@@ -223,9 +223,10 @@ Key parameters:
       ├── initrd.img                   ← initrd
       └── 2026.03.27-0142-rolling.squashfs  ← VyOS squashfs
   ```
-- `/boot/vyos.env` content (single line, written by `vyos-postinstall`):
+- `/boot/vyos.env` content (written by `vyos-postinstall`; the second line only when the image's GRUB entry carries VyOS-managed kernel options):
   ```
   vyos_image=2026.03.27-0142-rolling
+  vyos_extra_args=panic=60 crashkernel=1G-8G:512M,8G-64G:768M,64G-:1G
   ```
 
 ### 4.2 Boot Sequence
@@ -294,10 +295,12 @@ Key parameters:
 | `set system image default-boot` | VyOS CLI → `grub.set_default()` | `grub.set_default()` patch |
 | Every boot | `vyos-postinstall.service` | Phase 2 writes current image name |
 
-- Format — single line, LF-terminated:
+- Format — LF-terminated `name=value` lines; `vyos_extra_args` (optional) is the image's GRUB `boot_opts` minus vyos-1x `BOOT_OPTS_STEM`, i.e. exactly the VyOS-managed kernel options:
   ```
   vyos_image=2026.03.27-0142-rolling
+  vyos_extra_args=panic=60 crashkernel=1G-8G:512M,8G-64G:768M,64G-:1G
   ```
+- `grub.set_default()` (patch 011) writes only `vyos_image`; the next boot's `vyos-postinstall.service` restores `vyos_extra_args`, so that boot kexecs once.
 - `env import -t` treats `\0` as EOF and `\n` as field separator.
 
 ---
@@ -319,10 +322,11 @@ The device tree blob `mono-gw.dtb` must be present in two locations:
 ## 7. KEXEC & DOUBLE-BOOT MECHANISM
 
 **[SPEC]**
-- VyOS `system_option.py` compares `/proc/cmdline` against `config.boot` `MANAGED_PARAMS` (hugepages, panic, mitigations).
+- VyOS `system_option.py` compares `/proc/cmdline` against the `config.boot` `MANAGED_PARAMS` (crashkernel, isolcpus, nohz_full, rcu_nocbs, hugepages, panic, mitigations, ...). On a mismatch during boot it runs `kexec -l /boot/vmlinuz --command-line=<corrected>` and `systemctl kexec`.
+- U-Boot never reads GRUB, where VyOS stores those options. `vyos-postinstall` therefore copies them into `vyos.env` as `vyos_extra_args`, and `vyos_boot` appends `"${bootargs} ${vyos_extra_args}"` before `booti`, so the first kernel already matches and no kexec happens. Without that (U-Boot env without `vyos_extra_args`), every boot with `system option kdump` or kernel tuning kexecs once.
+- After a `set system option kernel ...` commit, save and reboot, the first boot still kexecs once: the GRUB entry is new but `vyos.env` is refreshed by `vyos-postinstall.service` during that boot; later boots do not.
 - `kexec-load.service` and `kexec.service` are NOT masked — the 6.18.x kernel carries the QBMan kexec cleanup fix (`bman_requires_cleanup()` in `drivers/soc/fsl/qbman/`), allowing clean kexec on DPAA1.
-- `panic=60` is pre-baked into U-Boot bootargs to match `config.boot.default`.
-- Hugepages: NOT pre-allocated in bootargs by default. When VPP is enabled via `set vpp settings`, VPP adds `hugepagesz=2M hugepages=512` to managed params, triggering a one-time kexec reboot.
+- `panic=60` is pre-baked into U-Boot bootargs to match `config.boot.default` (it also arrives via `vyos_extra_args`; the duplicate is harmless).
 
 ---
 

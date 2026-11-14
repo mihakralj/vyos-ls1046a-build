@@ -484,8 +484,10 @@ hdr '6) Current-boot datapath integrity'
 if [ -z "$KLOG" ]; then
     record_skip 'current-boot kernel journal unavailable'
 else
+    # \bOops: -- the pstore backend logs "ramoops: using ..." at every boot,
+    # which a case-insensitive bare "Oops:" counted as a fatal line.
     fatal=$(echo "$KLOG" | grep -iE \
-        'kernel BUG|BUG:|Oops:|Call trace:|list_del corruption|list_add corruption|LIST_POISON|use-after-free|double free|general protection fault|soft lockup|rcu.*stall|FM_FD_ERR_NO_SCHEME|FM_FD_ERR_PHYSICAL|stale DESTROY.*failed|MURAM.*leak|HW rollback.*failed|rebuild rollback failed' \
+        'kernel BUG|BUG:|\bOops:|Call trace:|list_del corruption|list_add corruption|LIST_POISON|use-after-free|double free|general protection fault|soft lockup|rcu.*stall|FM_FD_ERR_NO_SCHEME|FM_FD_ERR_PHYSICAL|stale DESTROY.*failed|MURAM.*leak|HW rollback.*failed|rebuild rollback failed' \
         || true)
     if [ -z "$fatal" ]; then
         record_ok 'no fatal ASK/FMan lifecycle, list, DMA, QMan or MURAM errors this boot'

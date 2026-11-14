@@ -16,6 +16,13 @@
 #   nat-pppoe-up-v4  NAT44 masquerade on pppoe10, LAN -> PPPoE (encap + NAT, decap replies)
 #   nat-vlan-v4      NAT44 masquerade on eth4.20, VLAN 10 -> VLAN 20
 #   nat-vlan-v6      NAT66 masquerade on eth4.20, VLAN 10 -> VLAN 20
+# WAN cells (opt-in, name them or pass `wan`; need the environment bin/testrig-ask2-wan.sh sets up):
+#   wanfull-*  LAN (dell2) <-> WAN (dell1) over PPPoE on VLAN 7 (pppoe7 on eth3.7), NAT44 out of pppoe7,
+#              IPv6 routed over the same session
+#   portfwd-*  destination NAT on the WAN port: dell1 connects to the DUT's eth3 address, forwarded to dell2
+#   wgwan-*    LAN NAT44 into WireGuard wgw0 whose outer packets ride pppoe7 on VLAN 7; IPv6 inner routed
+# A client field ending in R runs the iperf3 client with -R (data from server to client): the download
+# of a NAT44 row, where the WAN side cannot open the connection.
 #
 # PPPoE cells enable RPS on dell1's DUT-facing NIC for the run (see rps_set); other cells leave it off.
 # Usage: bin/testrig-offload-quick.sh [cell ...]       (default: the 10 base cells)
@@ -83,10 +90,25 @@ nat-pppoe-up-v4|4p|d2|10.99.2.113|10.99.50.1
 nat-vlan-v4|4v|d1|10.99.10.112|10.99.20.113
 nat-vlan-v6|6v|d1|fd99:10::112|fd99:20::113
 "
+CELLS_WAN="
+wanfull-up-v4|4w|d2|10.99.2.113|10.99.57.1
+wanfull-down-v4|4w|d2R|10.99.2.113|10.99.57.1
+wanfull-up-v6|none|d2|fd99:2::113|fd99:57::1
+wanfull-down-v6|none|d1|fd99:57::1|fd99:2::113
+portfwd-up-v4|dnat4|d1R|10.99.1.112|10.99.1.185
+portfwd-down-v4|dnat4|d1|10.99.1.112|10.99.1.185
+portfwd-up-v6|dnat6|d1R|fd99:1::112|fd99:1::185
+portfwd-down-v6|dnat6|d1|fd99:1::112|fd99:1::185
+wgwan-up-v4|4wg|d2|10.99.2.113|10.99.230.112
+wgwan-down-v4|4wg|d2R|10.99.2.113|10.99.230.112
+wgwan-up-v6|none|d2|fd99:2::113|fd99:230::112
+wgwan-down-v6|none|d2R|fd99:2::113|fd99:230::112
+"
 WANT="$*"
 case " $WANT " in *" combo "*) WANT="$WANT nat-pppoe-up-v4 nat-vlan-v4 nat-vlan-v6" ;; esac
+case " $WANT " in *" wan "*) WANT="$WANT $(echo "$CELLS_WAN" | cut -d'|' -f1 | tr '\n' ' ')" ;; esac
 CELLS_RUN="$CELLS_ALL"
-[ -n "$WANT" ] && CELLS_RUN="$CELLS_ALL $CELLS_COMBO"
+[ -n "$WANT" ] && CELLS_RUN="$CELLS_ALL $CELLS_COMBO $CELLS_WAN"
 
 NAT66_RULE='oifname "eth4" ip6 saddr fd99:1::/64 counter masquerade comment "SRC-NAT66-100"'
 vyos_nat66_present=0
@@ -119,11 +141,16 @@ nat_set(){
     6r) $S 'sudo nft add table ip6 ask2q && sudo nft "add chain ip6 ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip6 ask2q post oifname eth3 ip6 saddr fd99:2::/64 masquerade' ;;
     6v) $S 'sudo nft add table ip6 ask2q && sudo nft "add chain ip6 ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip6 ask2q post oifname eth4.20 ip6 saddr fd99:10::/64 masquerade' ;;
     6) $S 'sudo nft add table ip6 ask2q && sudo nft "add chain ip6 ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip6 ask2q post oifname eth4 ip6 saddr fd99:1::/64 masquerade' ;;
+    4w) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2q post oifname pppoe7 ip saddr 10.99.2.0/24 masquerade' ;;
+    4wg) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q post { type nat hook postrouting priority srcnat ; }" && sudo nft add rule ip ask2q post oifname wgw0 ip saddr 10.99.2.0/24 masquerade' ;;
+    dnat4) $S 'sudo nft add table ip ask2q && sudo nft "add chain ip ask2q pre { type nat hook prerouting priority dstnat ; }" && sudo nft add rule ip ask2q pre iifname eth3 ip daddr 10.99.1.185 tcp dport 5201 dnat to 10.99.2.113' ;;
+    dnat6) $S 'sudo nft add table ip6 ask2q && sudo nft "add chain ip6 ask2q pre { type nat hook prerouting priority dstnat ; }" && sudo nft add rule ip6 ask2q pre iifname eth3 ip6 daddr fd99:1::185 tcp dport 5201 dnat to fd99:2::113' ;;
   esac
 }
 # dell1's mlx4 NIC cannot RSS-hash PPPoE frames, so every returning ACK lands on RX queue 0 / CPU0
 # and the whole TCP send path runs in that one softirq (about 5.9 Gbit/s ceiling, DUT idle).
-# RPS hashes on the inner flow instead. Runtime-only; applied for PPPoE cells, restored on exit.
+# RPS hashes on the inner flow instead. Runtime-only; applied for every cell with PPPoE on dell1's side
+# (pppoe*, wanfull*, wgwan*), restored on exit.
 D1_IF=${D1_IF:-$GEN_IF}
 [ -n "$RIG_NS" ] && D1_IF=${D1_IF_NS:-$GEN_IF_NS}   # the gen1 port facing the second DUT lives in the netns; sysfs shows it only from inside
 rps_set(){
@@ -173,15 +200,18 @@ printf '%-15s %7s %6s %6s %6s %8s %12s %6s  %s\n' cell Gbit/s busy% sirq% gen% r
 for line in $CELLS_RUN; do
   IFS='|' read -r name nat cli a b <<<"$line"
   if [ -n "$WANT" ] && ! [[ " $WANT " == *" $name "* ]]; then continue; fi
-  [ $cli = d1 ] && G="$D1" || G="$D2"
-  if ! $G "$NSX ping -c2 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
-    printf '%-15s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,0,0,0,0,0,0,0,0,SKIP" >> "$OUT"; continue
-  fi
+  case $cli in d1*) G="$D1" ;; *) G="$D2" ;; esac
+  REV=""; [[ $cli == *R ]] && REV="-R"
+  # NAT first: the path check must see the cell's own translation (wgwan v4 only passes dell1's
+  # allowed-ips once masqueraded; without it the check sees whatever the previous cell left)
   if ! nat_set "$nat" >/dev/null; then
     echo "ERROR: NAT setup failed for $name" >&2
     exit 1
   fi
-  case $name in *pppoe*) rps_set on ;; *) rps_set off ;; esac
+  if ! $G "$NSX ping -c2 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
+    printf '%-15s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,0,0,0,0,0,0,0,0,SKIP" >> "$OUT"; continue
+  fi
+  case $name in *pppoe*|wanfull*|wgwan*) rps_set on ;; *) rps_set off ;; esac
   tag="$name"; [ "$BIDIR" = 1 ] && tag="$name-bidir"
   if [ "$DUT_KIND" = opnsense ]; then
   if ! $S 'pfctl -si | grep -q "Status: Enabled" && pfctl -sn | grep -q "nat-anchor \"testrig\"" && pfctl -sr | grep -q "pass in quick on dtsec3 inet6"'; then
@@ -222,7 +252,7 @@ done
 EOS
   smp=$!
   fi
-  $G "$NSX iperf3 -c $b -B $a -p 5201 -P $STREAMS -t $DUR -i 1 -Z $BIDIR_ARG ${IPERF_ARGS:-} -J" > "$J/$tag.json" &
+  $G "$NSX iperf3 -c $b -B $a -p 5201 -P $STREAMS -t $DUR -i 1 -Z $REV $BIDIR_ARG ${IPERF_ARGS:-} -J" > "$J/$tag.json" &
   p1=$!; wait $p1 $sp $smp; sleep 1
   if ! read gbps gen rt bytes < <(parse "$J/$tag.json"); then
     echo "ERROR: invalid iperf3 result for $tag" >&2

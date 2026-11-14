@@ -1,27 +1,41 @@
-From bf42387c9db82816da78ea47ab6e1f30cbb3e86e Mon Sep 17 00:00:00 2001
+From c171196ef018eef37af63dbf9faa93ff4924fb9f Mon Sep 17 00:00:00 2001
 From: "miha.kralj" <miha.kralj@outlook.com>
 Date: Mon, 20 Jul 2026 03:56:42 +0000
 Subject: [PATCH] temp: vyos-1x-011-vyos-env-boot.patch
 
 ---
- python/vyos/system/grub.py     |  9 +++++++++
+ python/vyos/system/grub.py     | 23 +++++++++++++++++++++++
  src/op_mode/image_installer.py | 25 +++++++++++++++++++++++++
- 2 files changed, 34 insertions(+)
+ 2 files changed, 48 insertions(+)
 
 diff --git a/python/vyos/system/grub.py b/python/vyos/system/grub.py
-index fea12d8..2df5437 100644
+index fea12d803..e4a9eba17 100644
 --- a/python/vyos/system/grub.py
 +++ b/python/vyos/system/grub.py
-@@ -361,6 +361,15 @@ def set_default(version_name: str, root_dir: str = '') -> None:
+@@ -361,6 +361,29 @@ def set_default(version_name: str, root_dir: str = '') -> None:
      vars_current['default'] = gen_version_uuid(version_name)
      vars_write(vars_file, vars_current)
  
 +    # U-Boot boards: write /boot/vyos.env so bootloader knows the default image.
 +    # This is a best-effort write — non-fatal on GRUB-only systems.
 +    # IMPORTANT: grub.py has no logger — do NOT use logger.X() here.
++    # vyos_extra_args: the image's managed kernel options (boot_opts minus BOOT_OPTS_STEM), appended to
++    # bootargs by U-Boot's vyos_boot, else system_option.py kexecs at boot to add them.
++    # U-Boot's ext4load does not replay the journal, so checkpoint it (EXT4_IOC_CHECKPOINT,
++    # _IOW('f', 43, __u32) = 0x4004662b); after sync alone U-Boot can read stale blocks.
 +    try:
 +        env_path = Path(f'{root_dir}/boot/vyos.env')
-+        env_path.write_text(f'vyos_image={version_name}\n')
++        extra = get_boot_opts(version_name, root_dir).removeprefix(
++            BOOT_OPTS_STEM + version_name).strip()
++        env_path.write_text(f'vyos_image={version_name}\n'
++                            + (f'vyos_extra_args={extra}\n' if extra else ''))
++        import fcntl, os, struct
++        os.sync()
++        fd = os.open(env_path, os.O_RDONLY)
++        try:
++            fcntl.ioctl(fd, 0x4004662b, struct.pack('I', 0))
++        finally:
++            os.close(fd)
 +    except Exception:
 +        pass
 +
@@ -29,10 +43,10 @@ index fea12d8..2df5437 100644
  def common_write(root_dir: str = '', grub_common: dict[str, str] = {}) -> None:
      """Write common GRUB configuration file (overwrite everything)
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index ea5aed0..d1696be 100755
+index cf077cecc..a6f5eae64 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -1044,6 +1044,31 @@ def install_image() -> None:
+@@ -1125,6 +1125,31 @@ def install_image() -> None:
          # copy saved encrypted config volume
          copy_previous_encrypted_config(f'{DIR_DST_ROOT}/luks', image_name)
  
@@ -64,6 +78,3 @@ index ea5aed0..d1696be 100755
          if is_raid_install(install_target):
              write_dir: str = f'{DIR_DST_ROOT}/boot/{image_name}/rw'
              raid.update_default(write_dir)
--- 
-2.39.5
-

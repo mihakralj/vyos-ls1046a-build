@@ -1,0 +1,23 @@
+<netpdl name="NetPDL custom protocol" description="ASK2 G4 dispatch probe: ESP to a KeyGen scheme by NIA">
+<!--
+  G4 multi-table dispatch probe (plans/ASK2-MASTER-PLAN.md G4, 2026-11-09).
+  On the IPsec HXS (slot 12, AH and ESP) the routine writes the KeyGen-direct
+  NIA for one scheme and ends the parse: NIA_ENG_HWK 0x480000 | AC_CC 0x200 |
+  KG_DIRECT 0x100 | scheme id (0x14 = 20 here). KeyGen then runs that scheme
+  without the match-vector walk, so the port's routed scheme (lower id, mv 0)
+  keeps every other frame. Compile (vendor fmc, host build, see
+  specs/ask2-soft-parser-lcv-scheme-select.md 6s):
+    fmc -d etc/fmc/config/hxs_pdl_v3.xml -s g4_esp_dispatch.xml --sp_only -t 0x80
+  Result: 4 words, position independent:
+    0x095F0314 0x00480001 0x1BFF0001 0x1BFE0000
+  Attach: pmda[12].ssa = (old & ~0x7FF) | 0x400 | label.
+-->
+<protocol name="espschema" longname="espschema" prevproto="ipsec_esp">
+    <execute-code>
+      <before>
+        <assign-variable name="$nia" value="0x480314"/>
+        <action type="exit" confirm="yes" nextproto="end_parse"/>
+      </before>
+    </execute-code>
+  </protocol>
+</netpdl>

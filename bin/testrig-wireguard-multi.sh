@@ -22,6 +22,8 @@
 #        INNER=6 carries IPv6 inside the tunnels (fd99:(210+K)::/64, DUT ::1, dell2 ::113; dell1 fd99:1::112)
 #        instead of IPv4; the outer transport stays IPv4. JSON files then start with wgm6- and counter cells
 #        are labelled <N>v6.
+#        OUTER=6 runs the tunnels over IPv6 between the DUT and the far generator (eth4: fd99:2::185 <->
+#        fd99:2::113, eth3: fd99:1::185 <-> fd99:1::112), as bin/testrig-wireguard.sh OUTER=6 does.
 # Everything is runtime-only and removed by an EXIT trap (KEEP=1 leaves it up).
 set -u
 . "$(dirname "$0")/testrig-env.sh"
@@ -33,7 +35,7 @@ DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
 if [ "$DUT_KIND" = vendor ]; then RIG_NS=${RIG_NS:-$VENDOR_NS}; else RIG_NS=${RIG_NS:-}; fi
 rig_require GEN1 GEN2
 TUNNELS=${TUNNELS:-4}; ACTIVE=${ACTIVE:-$TUNNELS}; DIRS=${DIRS:-"up down"}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}
-STREAMS=${STREAMS:-2}; REPS=${REPS:-3}; WGMTU=${WGMTU:-1420}; INNER=${INNER:-4}
+STREAMS=${STREAMS:-2}; REPS=${REPS:-3}; WGMTU=${WGMTU:-1420}; INNER=${INNER:-4}; OUTER=${OUTER:-4}
 case $INNER in 4) JPRE=wgm; CTAG="";; 6) JPRE=wgm6; CTAG=v6;; *) echo "INNER must be 4 or 6" >&2; exit 2;; esac
 if ! [[ $TUNNELS =~ ^([1-9]|1[0-6])$ && $ACTIVE =~ ^([1-9]|1[0-6])$ ]] ||
    (( ACTIVE > TUNNELS )); then
@@ -57,9 +59,27 @@ SSHO="-o BatchMode=yes -o ConnectTimeout=8 $RIG_SSHK"
 NSX="sudo"; [ -n "$RIG_NS" ] && NSX="sudo ip netns exec $RIG_NS"
 dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO $DUT "$c"; }
 duti(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh $SSHO $DUT "$c"; }
-D1="ssh -n $SSHO $GEN1"; D2="ssh -n $SSHO $GEN2"
-D1I="ssh $SSHO $GEN1"; D2I="ssh $SSHO $GEN2"
-DUT_OUT=10.99.2.185; D2_OUT=10.99.2.113
+# WG_PORT=eth4 (default): dell1 plain on eth3, the tunnels' far ends on dell2 behind eth4.
+# WG_PORT=eth3 mirrors it: dell2 plain on eth4, the far ends on dell1 (the faster generator) behind eth3.
+WG_PORT=${WG_PORT:-eth4}
+case $WG_PORT in
+  eth4) GP=$GEN1; GF=$GEN2; P4=10.99.1.112; P6=fd99:1::112; PGW4=10.99.1.185; PGW6=fd99:1::185
+        PSUB4=10.99.1.0/24; PSUB6=fd99:1::/64; DUT_OUT=10.99.2.185; D2_OUT=10.99.2.113
+        DUT_OUT6=fd99:2::185; D2_OUT6=fd99:2::113 ;;
+  eth3) GP=$GEN2; GF=$GEN1; P4=10.99.2.113; P6=fd99:2::113; PGW4=10.99.2.185; PGW6=fd99:2::185
+        PSUB4=10.99.2.0/24; PSUB6=fd99:2::/64; DUT_OUT=10.99.1.185; D2_OUT=10.99.1.112
+        DUT_OUT6=fd99:1::185; D2_OUT6=fd99:1::112 ;;
+  *) echo "WG_PORT must be eth3 or eth4" >&2; exit 2 ;;
+esac
+# outer endpoints as WireGuard writes them (IPv6 in brackets)
+case $OUTER in
+  4) EP_DUT=$DUT_OUT; EP_FAR=$D2_OUT ;;
+  6) EP_DUT="[$DUT_OUT6]"; EP_FAR="[$D2_OUT6]" ;;
+  *) echo "OUTER must be 4 or 6" >&2; exit 2 ;;
+esac
+# D1 = the plain generator (iperf3 clients), D2 = the far ends (wgm<K>, iperf3 servers)
+D1="ssh -n $SSHO $GP"; D2="ssh -n $SSHO $GF"
+D1I="ssh $SSHO $GP"; D2I="ssh $SSHO $GF"
 # shellcheck disable=SC2034 # consumed by the sourced lease helper
 WG_LEASE_KIND=multi
 # shellcheck disable=SC2034 # consumed by the sourced lease helper
@@ -89,9 +109,9 @@ wg_route(){
   table=$((1000000 + 16#${WG_OWNER_TOKEN:6:6} * 16 + k))
   realm=$(( (16#${WG_OWNER_TOKEN:12:8} & 0x7fffffff) + 1 ))
   if [ "$side" = far ]; then
-    $D2I "$NSX sh -s -- $action far $priority $table 10.99.$subnet.113 10.99.1.0/24 wgm$k $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+    $D2I "$NSX sh -s -- $action far $priority $table 10.99.$subnet.113 $PSUB4 wgm$k $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
   else
-    $D1I "$NSX sh -s -- $action plain $priority $table 10.99.1.112 10.99.$subnet.0/24 10.99.1.185 $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+    $D1I "$NSX sh -s -- $action plain $priority $table $P4 10.99.$subnet.0/24 $PGW4 $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
   fi
 }
 # IPv6 inner routes reuse the tunnel's priority/table (IPv4 and IPv6 rules and tables are separate)
@@ -102,9 +122,9 @@ wg_route6(){
   table=$((1000000 + 16#${WG_OWNER_TOKEN:6:6} * 16 + k))
   realm=$(( (16#${WG_OWNER_TOKEN:12:8} & 0x7fffffff) + 1 ))
   if [ "$side" = far ]; then
-    $D2I "$NSX sh -s -- $action far $priority $table fd99:$subnet::113 fd99:1::/64 wgm$k $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+    $D2I "$NSX sh -s -- $action far $priority $table fd99:$subnet::113 $PSUB6 wgm$k $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
   else
-    $D1I "$NSX sh -s -- $action plain $priority $table fd99:1::112 fd99:$subnet::/64 fd99:1::185 $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
+    $D1I "$NSX sh -s -- $action plain $priority $table $P6 fd99:$subnet::/64 $PGW6 $WG_LEASE_MTU $realm" < "$WG_ROUTE_HELPER"
   fi
 }
 wg_server_run(){
@@ -154,17 +174,17 @@ setup(){
   local k s p k1 k2 p1 p2 expected="" aliases="" a6d="" a6f=""
   for k in $(seq 0 $((TUNNELS-1))); do
     s=$(sub $k); p=$(wport $k)
-    if [ "$INNER" = 6 ]; then a6d=",fd99:$s::113/128"; a6f=",fd99:$s::1/128,fd99:1::/64"; fi
+    if [ "$INNER" = 6 ]; then a6d=",fd99:$s::113/128"; a6f=",fd99:$s::1/128,$PSUB6"; fi
     k1=$(dut 'wg genkey') || return 1
     p1=$(printf '%s\n' "$k1" | duti 'wg pubkey') || return 1
     k2=$($D2 'wg genkey') || return 1
     p2=$(printf '%s\n' "$k2" | $D2I 'wg pubkey') || return 1
     wg_resource_add "link-dut-$k" wg_dut_link create "$k" || return 1
-    printf '%s\n' "$k1" | duti "sudo wg set wgm$k private-key /dev/stdin listen-port $p peer $p2 allowed-ips 10.99.$s.113/32$a6d endpoint $D2_OUT:$p" || return 1
+    printf '%s\n' "$k1" | duti "sudo wg set wgm$k private-key /dev/stdin listen-port $p peer $p2 allowed-ips 10.99.$s.113/32$a6d endpoint $EP_FAR:$p" || return 1
     dut "sudo ip addr add 10.99.$s.1/24 dev wgm$k && sudo ip link set wgm$k mtu $WGMTU up" || return 1
     [ "$INNER" != 6 ] || dut "sudo ip -6 addr add fd99:$s::1/64 dev wgm$k nodad" || return 1
     wg_resource_add "link-far-$k" wg_far_link create "$k" || return 1
-    printf '%s\n' "$k2" | $D2I "$NSX wg set wgm$k private-key /dev/stdin listen-port $p peer $p1 allowed-ips 10.99.$s.1/32,10.99.1.0/24$a6f endpoint $DUT_OUT:$p" || return 1
+    printf '%s\n' "$k2" | $D2I "$NSX wg set wgm$k private-key /dev/stdin listen-port $p peer $p1 allowed-ips 10.99.$s.1/32,$PSUB4$a6f endpoint $EP_DUT:$p" || return 1
     $D2 "$NSX ip addr add 10.99.$s.113/24 dev wgm$k && $NSX ip link set wgm$k mtu $WGMTU up" || return 1
     [ "$INNER" != 6 ] || $D2 "$NSX ip -6 addr add fd99:$s::113/64 dev wgm$k nodad" || return 1
     wg_resource_add "route-far-$k" wg_route far add "$k" || return 1
@@ -187,11 +207,11 @@ setup(){
       done
     fi
   fi
-  for k in $(seq 0 $((TUNNELS-1))); do $D1 "$NSX ping -c2 -W2 -I 10.99.1.112 10.99.$(sub $k).113 >/dev/null 2>&1"; done
+  for k in $(seq 0 $((TUNNELS-1))); do $D1 "$NSX ping -c2 -W2 -I $P4 10.99.$(sub $k).113 >/dev/null 2>&1"; done
   if [ "$INNER" = 6 ]; then
     for k in $(seq 0 $((TUNNELS-1))); do
-      $D1 "$NSX ping -6 -c2 -W2 -I fd99:1::112 $(far6 $k) >/dev/null 2>&1" ||
-        { echo "ERROR: no IPv6 path fd99:1::112 -> $(far6 $k) through wgm$k" >&2; return 1; }
+      $D1 "$NSX ping -6 -c2 -W2 -I $P6 $(far6 $k) >/dev/null 2>&1" ||
+        { echo "ERROR: no IPv6 path $P6 -> $(far6 $k) through wgm$k" >&2; return 1; }
     done
   fi
   dut 'sudo wg show all latest-handshakes' | awk '{print "handshake "$1" "$3}'
@@ -299,7 +319,7 @@ EOS
     sp=$!; files=""; pids=""
     for k in $(seq 0 $((ACTIVE-1))); do
       f="$J/$JPRE-$dir-n$ACTIVE-k$k-r$rep.json"; files="$files $f"
-      if [ "$INNER" = 6 ]; then dst=$(far6 $k); src=fd99:1::112; else dst=10.99.$(sub $k).113; src=10.99.1.112; fi
+      if [ "$INNER" = 6 ]; then dst=$(far6 $k); src=$P6; else dst=10.99.$(sub $k).113; src=$P4; fi
       $D1 "$NSX timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c $dst -B $src -p $(sport $k) -P $STREAMS -t $DUR -i 1 -Z -J $flag" > "$f" &
       pids="$pids $!"
     done

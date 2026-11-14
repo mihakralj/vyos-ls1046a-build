@@ -1,5 +1,5 @@
 From: VyOS LS1046A maintainers <ls1046a@vyos.local>
-Date: 2026-05-27
+Date: Wed, 27 May 2026 00:00:00 +0000
 Subject: [PATCH] dpaa_ethtool: expose AF_XDP zero-copy counters via ETH_SS_STATS
 
 Spec section 5.3 (dpaa1-afxdp-modernization-spec.md v4.4) lists 12 u64

@@ -203,10 +203,29 @@ static void dma_sync_single_for_device(struct device *dev, u64 addr,
 	dma_syncs++;
 }
 
+/* dpaa_wgfp_xmit()'s bounded wait: a fake clock that advances 25 us per read */
+#ifndef likely
+#define likely(x) (x)
+#endif
+#define WGFP_XMIT_WAIT_NS 100000LL
+typedef long long ktime_t;
+static long long fake_now;
+static ktime_t ktime_get(void) { fake_now += 25000; return fake_now; }
+static ktime_t ktime_add_ns(ktime_t t, long long ns) { return t + ns; }
+static int ktime_before(ktime_t a, ktime_t b) { return a < b; }
 static void cpu_relax(void)
 {
 	relaxes++;
 }
+
+static bool wgfp_orp_xmit(struct dpaa_wgfp_frame *f, int egress,
+			  const struct qm_fd *fd)
+{
+	return false;
+}
+
+#define DEFINE_PER_CPU(type, name) type name
+#define this_cpu_ptr(p) (p)
 
 #include "qman_wgfp_body.h"
 
@@ -222,6 +241,7 @@ static void reset(void)
 	portal_refs = irq_depth = full_attempts = starts = commits = 0;
 	ci_updates = relaxes = dma_syncs = releases = allocations = registrations = 0;
 	create_error = 0;
+	memset(&wgfp_txb, 0, sizeof(wgfp_txb));
 }
 
 static void test_ring(bool stash)
@@ -290,7 +310,8 @@ static void test_egress_and_xmit(bool stash)
 	assert(dpaa_wgfp_egress(&netdev) == 0);
 	full_attempts = 8;
 	dpaa_wgfp_xmit(&frame, 0, 64, 1200);
-	assert(starts == 8 && commits == 0 && relaxes == 8);
+	/* 100 us at 25 us per clock read: 1 + 4 attempts, 4 relaxes, then drop */
+	assert(starts == 5 && commits == 0 && relaxes == 4);
 	assert(wgfp_xmit_ok == 0 && wgfp_xmit_fail == 1 && wgfp_xmit_ern == 0);
 	assert(releases == 1 && released_fd.addr == fd.addr);
 	assert(portal_refs == 0 && irq_depth == 0);
@@ -309,12 +330,48 @@ static void test_egress_and_xmit(bool stash)
 	assert(wgfp_neg == 1 && allocations == 1 && registrations == 2);
 }
 
+/* Seal TX batching: held inside a poll, sent in order when the batch fills
+ * or at the end-of-poll flush, released (not lost) when the ring stays full,
+ * and never held outside a poll. */
+static void test_tx_batch(void)
+{
+	struct net_device netdev = { .ifindex = 3, .name = "eth3", .dpaa = true };
+	struct device dev = { 0 };
+	struct qm_fd fd = { .bpid = 4, .addr = 0x4000 };
+	struct dpaa_wgfp_frame frame = { .fd = &fd, .dev = &dev, .addr = fd.addr };
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	wgfp_txb.active = true;
+	wgfp_txb.lim = 3;
+	dpaa_wgfp_xmit(&frame, 0, 64, 1000);
+	dpaa_wgfp_xmit(&frame, 0, 64, 1001);
+	assert(commits == 0 && wgfp_txb.n == 2 && wgfp_xmit_ok == 0);
+	dpaa_wgfp_xmit(&frame, 0, 64, 1002);
+	assert(commits == 3 && wgfp_txb.n == 0 && wgfp_xmit_ok == 3);
+	assert(portal.p.entry.fd.len == 1002);
+	dpaa_wgfp_xmit(&frame, 0, 64, 1003);
+	assert(commits == 3 && wgfp_txb.n == 1);
+	wgfp_txb_flush(&wgfp_txb);
+	assert(commits == 4 && wgfp_txb.n == 0 && portal.p.entry.fd.len == 1003);
+	dpaa_wgfp_xmit(&frame, 0, 64, 1004);
+	full_attempts = 8;
+	wgfp_txb_flush(&wgfp_txb);
+	assert(wgfp_xmit_fail == 1 && releases == 1 && released_fd.addr == fd.addr);
+	assert(wgfp_txb.n == 0);
+	wgfp_txb.active = false;
+	full_attempts = 0;
+	dpaa_wgfp_xmit(&frame, 0, 64, 1005);
+	assert(commits == 5 && wgfp_txb.n == 0 && wgfp_xmit_ok == 5);
+}
+
 int main(void)
 {
 	test_ring(false);
 	test_ring(true);
 	test_egress_and_xmit(false);
 	test_egress_and_xmit(true);
+	test_tx_batch();
 	puts("QMan backpressure and WGFP egress ownership: OK");
 	return 0;
 }

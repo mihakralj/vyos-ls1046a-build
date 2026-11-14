@@ -137,6 +137,8 @@ static int qman_enqueue_fqid(struct qman_fq *tag, u32 fqid,
             enqueue,
             function(wgfp, "static void wgfp_egress_ern"),
             function(wgfp, "int dpaa_wgfp_egress"),
+            # tx_batch (76a03e06): the per-CPU burst state and flush that dpaa_wgfp_xmit() uses
+            wgfp[wgfp.index("#define WGFP_TXB_MAX"):wgfp.index("\nstatic int wgfp_cpu_poll(")],
             function(wgfp, "void dpaa_wgfp_xmit"),
         ]
         (path / "qman_wgfp_body.h").write_text("\n".join(bodies))
@@ -156,7 +158,7 @@ static int qman_enqueue_fqid(struct qman_fq *tag, u32 fqid,
             binary = path / name
             command = compiler + [
                 "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-                "-Wno-unused-parameter", "-Wno-unused-function",
+                "-Wno-unused-parameter", "-Wno-unused-function", "-Wno-unused-variable",
                 "-I", str(path), str(HARNESS / f"{name}.c"), "-o", str(binary),
             ]
             if controls:

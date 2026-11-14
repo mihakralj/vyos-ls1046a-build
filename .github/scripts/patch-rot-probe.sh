@@ -61,13 +61,20 @@ rm -rf "$dest"
 # An explicit branch is used rather than the remote default so a future rename
 # fails loudly here instead of silently degrading the check — the 2026-05-30
 # `current` -> `rolling` rename left this workflow inert for eight weeks.
+#
+# Full history, never --depth 1: the build's clone (vyos-build build.py) has
+# every blob, so `git apply --3way` really merges on context drift. A shallow
+# probe has only the tip's blobs, so --3way degrades to "lacks the necessary
+# blob ... Falling back to direct application" and reports FAIL for patches
+# the build applies cleanly (031/034/036/044/051-054 against 908f67c4f,
+# 2026-11-02 and 2026-11-09 scheduled runs).
 if [[ "$branch" =~ ^[0-9a-f]{40}$ ]]; then
     # a pinned commit (bin/ci-setup-vyos1x.sh VYOS1X_COMMIT)
     git init -q "$dest"
-    git -C "$dest" fetch -q --depth 1 "$repo_url" "$branch"
+    git -C "$dest" fetch -q "$repo_url" "$branch"
     git -C "$dest" checkout -q FETCH_HEAD
 else
-    git clone --branch "$branch" --depth 1 "$repo_url" "$dest"
+    git clone --branch "$branch" "$repo_url" "$dest"
 fi
 echo "::endgroup::"
 

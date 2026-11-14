@@ -1,0 +1,15 @@
+# 99-nf-flowtable-wq.rules — cap nf_flowtable hardware-offload workqueue concurrency
+#
+# nf_flow_table creates nf_ft_offload_add/_del/_stats with max_active 0 (WQ_DFL_ACTIVE = 1024). ASK2 serialises
+# REPLACE/DESTROY on one lock and reads stats under a spinlock, so at tens of thousands of flows up to 1024 workers
+# queued and spun on those locks. Measured on .185 with image 2026.11.13-1458 (plans/ASK2-FLOW-SCALING-PLAN.md S3):
+#   add/del/stats 1024     : 131,072 flows install 29 s, 1,023 blocked tasks, run queue 120 (image 0317)
+#   add/del/stats 4/4/4    : 23 s, 1 blocked, run queue 8, peak CPU 99 %
+#   add/del/stats 2/2/4    : 23 s, 1 blocked, run queue 10, peak CPU 86 % (65,536 flows: 15 s, peak 76 %)
+#   add/del/stats 1/1/4    : 26 s, 1 blocked, peak CPU 74 % (no lock spinning, but rule building no longer overlaps)
+# Two add/delete workers keep the install rate (one inside ASK's lock, one building the next rule) with the least
+# spinning; stats reads run in parallel under a short spinlock, one worker per A72 core.
+# The queues exist only while nf_flow_table is loaded; these rules apply when it loads.
+
+ACTION=="add", SUBSYSTEM=="workqueue", KERNEL=="nf_ft_offload_add|nf_ft_offload_del", ATTR{max_active}="2"
+ACTION=="add", SUBSYSTEM=="workqueue", KERNEL=="nf_ft_offload_stats", ATTR{max_active}="4"

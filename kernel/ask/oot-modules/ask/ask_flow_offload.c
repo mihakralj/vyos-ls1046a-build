@@ -60,6 +60,8 @@
 #include <net/netevent.h>
 #include <net/ipv6.h>
 #include <net/netfilter/nf_conntrack.h>
+#include <net/netfilter/nf_conntrack_ecache.h>	/* IPCT_ASSURED for offloaded UDP */
+#include <net/netfilter/nf_conntrack_acct.h>	/* S6 volume gate */
 #include <net/route.h>		/* rt_nexthop(): routed-endpoint next hop */
 #include <net/ip6_route.h>	/* rt6_nexthop() */
 #include <net/addrconf.h>
@@ -177,7 +179,7 @@ MODULE_PARM_DESC(ipv6_hw_frag,
  * value below ~1000 means "offload at the first retry" (~1 s). VyOS sets it
  * from `firewall global-options hardware-offload-delay` (vyos-1x-055).
  * First-REPLACE times live in a value xarray keyed by cookie until DESTROY
- * (sent for every flow of a hardware flowtable) erases them; they are not
+ * or the last block unbind erases them; they are not
  * erased on install, because each REPLACE reaches every bound block and all
  * of them (true ingress and egress-side echo) must judge the age against the
  * same time. 0 = offload at the first REPLACE. Default 0 since 2026-10-15
@@ -194,25 +196,141 @@ MODULE_PARM_DESC(f266_trace,
 		 "Trace every flow REPLACE/DESTROY with cookie, ports and ordering (default off)");
 MODULE_PARM_DESC(offload_delay_ms,
 		 "Minimum flow age before hardware offload, in ms (default 0: "
-		 "offload at the first REPLACE, like the vendor; a nonzero value "
-		 "delays by about a second, see the comment above)");
+		 "offload at the first REPLACE, like the vendor, except during a "
+		 "new-flow flood, see offload_flood_rate; a nonzero value delays by "
+		 "about a second, see the comment above)");
 
 static DEFINE_XARRAY(ask_offload_first_seen);
 
-/* True while @cookie is younger than offload_delay_ms (records its first
- * REPLACE). On memory pressure the flow is offloaded at once. */
+/*
+ * Flood-adaptive gate: while new connections arrive faster than
+ * offload_flood_rate per second, the age gate is at least
+ * ASK_OFFLOAD_FLOOD_DELAY_MS, so a mice flood stays in software (S7 rejects it
+ * without the lifecycle lock) while a quiet box offloads at the first REPLACE
+ * like the vendor. Arrivals are counted when a cookie's first-seen stamp is
+ * stored, two cookies (directions) per connection, over one-second windows;
+ * the flood state holds for the current and the previous window. 0 = no flood
+ * detection, the configured offload_delay_ms alone.
+ */
+static unsigned int ask_offload_flood_rate = 1000;
+module_param_named(offload_flood_rate, ask_offload_flood_rate, uint, 0644);
+MODULE_PARM_DESC(offload_flood_rate,
+		 "New connections per second above which hardware offload waits at "
+		 "least 500 ms (mice-flood protection; default 1000, 0 = off)");
+/* ponytail: fixed floor, the measured S7/§3.0 setting; a param if a rig needs another */
+#define ASK_OFFLOAD_FLOOD_DELAY_MS 500
+
+static atomic_t ask_offload_new_cur;		/* stamps in the current window */
+static unsigned int ask_offload_new_prev;	/* stamps in the window before */
+static unsigned long ask_offload_win_start;	/* 0 = no window yet */
+
+static void ask_offload_rate_note(void)
+{
+	unsigned long start = READ_ONCE(ask_offload_win_start), now = jiffies;
+
+	if (!(start && time_before(now, start + HZ)) &&
+	    cmpxchg(&ask_offload_win_start, start, now) == start) {
+		/* a window followed by a quiet one leaves no flood behind */
+		if (start && time_before(now, start + 2 * HZ)) {
+			WRITE_ONCE(ask_offload_new_prev,
+				   atomic_xchg(&ask_offload_new_cur, 0));
+		} else {
+			atomic_set(&ask_offload_new_cur, 0);
+			WRITE_ONCE(ask_offload_new_prev, 0);
+		}
+	}
+	atomic_inc(&ask_offload_new_cur);
+}
+
+static bool ask_offload_flooding(void)
+{
+	unsigned int thr = READ_ONCE(ask_offload_flood_rate) * 2;
+	unsigned long start = READ_ONCE(ask_offload_win_start);
+
+	if (!thr || !start || time_after_eq(jiffies, start + 2 * HZ))
+		return false;
+	return (unsigned int)atomic_read(&ask_offload_new_cur) > thr ||
+	       READ_ONCE(ask_offload_new_prev) > thr;
+}
+
+static unsigned int ask_offload_gate_ms(unsigned int ms)
+{
+	return ask_offload_flooding() ? max(ms, ASK_OFFLOAD_FLOOD_DELAY_MS) : ms;
+}
+
+/* True while @cookie is younger than the gate (offload_delay_ms, raised to the
+ * flood floor during a flood). The first REPLACE stores the stamp and counts the
+ * arrival; on memory pressure the flow is offloaded at once. */
 static bool ask_offload_too_young(unsigned long cookie)
 {
 	unsigned int ms = READ_ONCE(ask_offload_delay_ms);
 	void *e;
 
-	if (!ms)
+	if (!ms && !READ_ONCE(ask_offload_flood_rate))
 		return false;
 	e = xa_load(&ask_offload_first_seen, cookie);
-	if (!xa_is_value(e))
-		return !xa_err(xa_store(&ask_offload_first_seen, cookie,
-					xa_mk_value(jiffies), GFP_KERNEL));
-	return time_before(jiffies, xa_to_value(e) + msecs_to_jiffies(ms));
+	if (!xa_is_value(e)) {
+		if (xa_err(xa_store(&ask_offload_first_seen, cookie,
+				    xa_mk_value(jiffies), GFP_KERNEL)))
+			return false;
+		ask_offload_rate_note();
+		return ask_offload_gate_ms(ms) != 0;
+	}
+	ms = ask_offload_gate_ms(ms);
+	return ms && time_before(jiffies, xa_to_value(e) + msecs_to_jiffies(ms));
+}
+
+/*
+ * S6 static volume gate (plans/ASK2-FLOW-SCALING-PLAN.md §3.3): keep a flow in
+ * software until its connection has carried offload_min_packets OR
+ * offload_min_bytes, counted over both directions so the two REPLACEs of a
+ * connection decide alike. 0/0 (default) = off. The counters come from conntrack
+ * accounting (net.netfilter.nf_conntrack_acct=1, new conntracks only); without
+ * it the gate fails open. A deferred flow is retried by flow_offload_refresh()
+ * at most once a second while it still passes through software.
+ */
+static unsigned int ask_offload_min_packets;
+module_param_named(offload_min_packets, ask_offload_min_packets, uint, 0644);
+MODULE_PARM_DESC(offload_min_packets,
+		 "Packets (both directions) a connection must carry before hardware offload (default 0: off)");
+static unsigned int ask_offload_min_bytes;
+module_param_named(offload_min_bytes, ask_offload_min_bytes, uint, 0644);
+MODULE_PARM_DESC(offload_min_bytes,
+		 "Bytes (both directions) a connection must carry before hardware offload (default 0: off)");
+static DEFINE_RATELIMIT_STATE(ask_offload_no_acct_rs, 60 * HZ, 1);
+
+/* Lifetime: called from the REPLACE work item, whose NF_FLOW_PENDING bit keeps
+ * the flow (and its ct reference) alive; no pointer is kept. */
+static bool ask_offload_too_small(unsigned long cookie)
+{
+	unsigned int mp = READ_ONCE(ask_offload_min_packets);
+	unsigned int mb = READ_ONCE(ask_offload_min_bytes);
+	const struct flow_offload_tuple *t;
+	const struct flow_offload *flow;
+	struct nf_conn_acct *acct;
+	u64 packets, bytes;
+	int dir;
+
+	if (!mp && !mb)
+		return false;
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return false;
+	t = (const struct flow_offload_tuple *)cookie;
+	dir = t->dir;
+	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+		return false;
+	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
+	acct = flow->ct ? nf_conn_acct_find(flow->ct) : NULL;
+	if (!acct) {
+		if (__ratelimit(&ask_offload_no_acct_rs))
+			pr_warn("ask: offload_min_packets/bytes set but conntrack accounting is off (net.netfilter.nf_conntrack_acct=1); offloading ungated\n");
+		return false;
+	}
+	packets = atomic64_read(&acct->counter[0].packets) +
+		  atomic64_read(&acct->counter[1].packets);
+	bytes = atomic64_read(&acct->counter[0].bytes) +
+		atomic64_read(&acct->counter[1].bytes);
+	return !((mp && packets >= mp) || (mb && bytes >= mb));
 }
 
 /* KUnit drives REPLACE directly and expects an immediate install. */
@@ -3167,6 +3285,58 @@ int ask_flow_cookie_pppoe(unsigned long cookie, struct ask_pppoe_info *pi)
 EXPORT_SYMBOL_GPL(ask_flow_cookie_pppoe);
 
 /*
+ * Offloaded UDP is never marked IPS_ASSURED by the kernel: nf_conntrack_udp_packet()
+ * sets it only for a packet it processes at least 2 s after the first (stream_ts),
+ * and an offloaded flow shows the kernel no packets after hand-over. A non-assured
+ * conntrack is an early_drop victim, so when a burst of new flows filled the
+ * conntrack table, offloaded UDP elephants were evicted like DNS mice and torn out
+ * of hardware (.185, 20k new flows/s: 29-42 % elephant loss; plans/
+ * ASK2-FLOW-SCALING-PLAN.md §0.3). Apply the kernel's own UDP rule from silicon
+ * evidence: called when a stats poll saw the hardware counters advance; the flow
+ * must have seen a reply and be past its stream window. TCP is assured at the
+ * handshake, before offload, and is left alone.
+ *
+ * The reply itself is usually never seen by conntrack either: UDP is offload-
+ * eligible once confirmed (nft_flow_offload_eval), the flowtable takes the flow on
+ * its first packet and both directions then bypass conntrack, so the entry stays
+ * [UNREPLIED] (.185 image 1638: all four elephants). Each direction has its own
+ * silicon record and stats poll, so packets counted on the REPLY-direction record
+ * are a reply seen by the hardware: set IPS_SEEN_REPLY + IPCT_REPLY then, as
+ * nf_conntrack_in() does for the first reply packet. One-way UDP stays unassured.
+ *
+ * Lifetime: runs in the FLOW_CLS_STATS work item, whose NF_FLOW_PENDING bit keeps
+ * flowtable gc from freeing the flow (and dropping its ct reference) meanwhile.
+ */
+static void ask_flow_cookie_assure_udp(unsigned long cookie)
+{
+	const struct flow_offload_tuple *t;
+	const struct flow_offload *flow;
+	struct nf_conn *ct;
+	int dir;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return;
+	t = (const struct flow_offload_tuple *)cookie;
+	dir = t->dir;
+	if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+		return;
+	flow = container_of(t, struct flow_offload, tuplehash[dir].tuple);
+	ct = flow->ct;
+	if (!ct || nf_ct_protonum(ct) != IPPROTO_UDP)
+		return;
+	if (dir == FLOW_OFFLOAD_DIR_REPLY &&
+	    !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+		nf_conntrack_event_cache(IPCT_REPLY, ct);
+	if (!test_bit(IPS_SEEN_REPLY_BIT, &ct->status) ||
+	    test_bit(IPS_ASSURED_BIT, &ct->status) ||
+	    (ct->status & IPS_NAT_CLASH) ||
+	    !time_after(jiffies, READ_ONCE(ct->proto.udp.stream_ts)))
+		return;
+	if (!test_and_set_bit(IPS_ASSURED_BIT, &ct->status))
+		nf_conntrack_event_cache(IPCT_ASSURED, ct);
+}
+
+/*
  * F-262: the route MTU nf_flow_table recorded for the cookie's direction
  * (flow_offload_fill_route(): egress dst MTU, e.g. 1492 out of a PPPoE
  * session); 0 for a cookie that is not a flowtable tuple.
@@ -3858,6 +4028,19 @@ static int ask_pppoe_netdev_event(struct notifier_block *nb,
 			ask_devchg_queue(vlan_dev_real_dev(dev)->ifindex);
 		schedule_work(&ask_devchg_flush_work);
 	}
+	/*
+	 * T1: a VLAN vif going down or away. nf_flow_table_cleanup() matches
+	 * the flow's iifidx, which is the physical lower device on VLAN paths,
+	 * so it never sees these flows; without this the POP/PUSH records of
+	 * the deleted VID keep forwarding in hardware. Retire records whose
+	 * ingress (key.iif is the owning vif), egress or next-hop device is the
+	 * vif; only the vif, not its real device, whose other flows are fine.
+	 */
+	if ((event == NETDEV_DOWN || event == NETDEV_UNREGISTER) &&
+	    is_vlan_dev(dev) && ask_flow_default_table()) {
+		ask_devchg_queue(dev->ifindex);
+		schedule_work(&ask_devchg_flush_work);
+	}
 	return NOTIFY_DONE;
 }
 
@@ -3931,8 +4114,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	if (rc)
 		return rc;
 
-	if (ask_offload_too_young(f->cookie))
-		return -EAGAIN;	/* software until offload_delay_ms; nf_flowtable retries */
+	/* software until offload_delay_ms and the S6 volume; nf_flowtable retries */
+	if (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie))
+		return -EAGAIN;
 
 	rc = ask_hw_flow_policy_snapshot(&family_policy_seq);
 	if (rc)
@@ -3986,7 +4170,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * fix needed in ask_flow_pending_poll_fn().
 	 */
 	if (ingress_dev) {
-		pr_info_ratelimited("ask: flow_offload: PR14z19 IIF override key.iif=%d (from ingress_dev=%s) cookie=0x%lx\n",
+		ask_pr_dbg("flow_offload: PR14z19 IIF override key.iif=%d (from ingress_dev=%s) cookie=0x%lx\n",
 				    ingress_dev->ifindex, netdev_name(ingress_dev), f->cookie);
 		key.iif = ingress_dev->ifindex;
 	}
@@ -4021,7 +4205,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			if (mm.key && mm.mask &&
 			    (mm.key->ingress_ifindex & mm.mask->ingress_ifindex)) {
 				if (key.iif != mm.key->ingress_ifindex)
-					pr_info_ratelimited("ask: flow_offload: META iif correction key.iif %d -> %u (block dev=%s) cookie=0x%lx\n",
+					ask_pr_dbg("flow_offload: META iif correction key.iif %d -> %u (block dev=%s) cookie=0x%lx\n",
 							    key.iif,
 							    mm.key->ingress_ifindex,
 							    ingress_dev ? netdev_name(ingress_dev) : "?",
@@ -4248,7 +4432,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 					egress_dev = z11_iif;
 					oif = z11_iif->ifindex;
 				}
-				pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 next-hop cookie=0x%lx nh-dst=%pI6c egress=%s\n",
+				ask_pr_dbg("flow_offload: T-M6-1 v6 next-hop cookie=0x%lx nh-dst=%pI6c egress=%s\n",
 						    f->cookie, &dst_ip6,
 						    egress_dev ? netdev_name(egress_dev) : "?");
 			}
@@ -4266,7 +4450,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 					egress_dev = z11_iif;
 					oif = z11_iif->ifindex;
 				}
-				pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
+				ask_pr_dbg("flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
 						    f->cookie, &z11_dst,
 						    egress_dev ? netdev_name(egress_dev) : "?");
 			}
@@ -4341,14 +4525,14 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			if (ti)
 				dev_put(ti);
 			if (!same_port) {
-				pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
+				ask_pr_dbg("flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (block!=true-ingress %u — true ingress installs)\n",
 						    f->cookie, netdev_name(ingress_dev),
 						    true_iif);
 				return -EOPNOTSUPP;
 			}
 		}
 	} else if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
-		pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
+		ask_pr_dbg("flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
 				    f->cookie, netdev_name(ingress_dev));
 		return -EOPNOTSUPP;
 	}
@@ -4460,7 +4644,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						    f->cookie);
 				return -EINPROGRESS;
 			}
-			pr_info_ratelimited("ask: flow_offload: REPLACE dedup cookie=0x%lx ingress=%s (already installed via first-arrival block)\n",
+			ask_pr_dbg("flow_offload: REPLACE dedup cookie=0x%lx ingress=%s (already installed via first-arrival block)\n",
 					    f->cookie,
 					    ingress_dev ? netdev_name(ingress_dev) : "?");
 			return 0;
@@ -4817,7 +5001,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		pr_info("ask: f266: REPLACE done cookie=0x%lx l3=%u sport=%u dport=%u hw_id=0x%08x\n",
 			f->cookie, key.l3_proto, ntohs(key.sport),
 			ntohs(key.dport), hw_id);
-	pr_info_ratelimited("ask: flow_offload: REPLACE staged cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
+	ask_pr_dbg("flow_offload: REPLACE staged cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
 			    f->cookie, hw_id,
 			    ingress_dev ? netdev_name(ingress_dev) : "?", oif,
 			    key.next_hop_mac, key.egress_mac);
@@ -4997,12 +5181,86 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 }
 
 /*
+ * F-315: batched hardware stats. nf_flowtable polls every offloaded flow once
+ * 10 % of its timeout has passed (every 3 s at 30 s; ~44k polls/s at 131,072
+ * flows), and each poll used to hash the key, take fe_stats_lock and walk the
+ * bucket in DMA memory. Instead, one pass a second reads every ASK record's
+ * counters (fman_pcd_fe_stats_scan, read-only, under fe_stats_lock, at most
+ * ASK_STATS_SCAN_BUDGET records per hold) into its flow through the fe_token
+ * index, and the poll answers from that cache while it is fresh
+ * (ASK_STATS_SCAN_FRESH); otherwise (scan not run yet, record missed, scan stalled) it reads the
+ * record itself as before. Design review 2026-11-14 (plans/ASK2-FLOW-SCALING-PLAN.md).
+ */
+#define ASK_STATS_SCAN_BUDGET	256	/* records per fe_stats_lock hold */
+/*
+ * One pass per poll interval: nf_flowtable polls each flow once 10 % of its
+ * timeout has passed (3 s at the 30 s default), so a pass every second read
+ * every record three times per poll it served (0328 profile, 131,072 flows:
+ * the scan was 31 % of busy CPU). A cached value up to 4 s old is fine: the
+ * counters only grow and the timeout is 30 s.
+ */
+#define ASK_STATS_SCAN_PERIOD	(3 * HZ)
+#define ASK_STATS_SCAN_FRESH	(4 * HZ)
+static void ask_stats_scan_fn(struct work_struct *w);
+static DECLARE_DELAYED_WORK(ask_stats_scan_work, ask_stats_scan_fn);
+static bool ask_stats_scan_stopped;
+
+/* Runs under fe_stats_lock and the caller's rcu_read_lock(): no sleeping,
+ * no FMan PCD calls. */
+static void ask_stats_scan_record(void *arg, u64 fe_token, u64 packets, u64 bytes)
+{
+	struct ask_flow *f = ask_flow_by_token(arg, fe_token);
+
+	if (f) {
+		WRITE_ONCE(f->hw_scan_packets, packets);
+		WRITE_ONCE(f->hw_scan_bytes, bytes);
+		smp_store_release(&f->hw_scan_jiffies, jiffies | 1);
+	}
+}
+
+/* Caller holds rcu_read_lock() and a looked-up @f. */
+static bool ask_stats_scan_fresh(struct ask_flow *f, u64 *packets, u64 *bytes)
+{
+	unsigned long at = smp_load_acquire(&f->hw_scan_jiffies);
+
+	if (!at || !time_before(jiffies, at + ASK_STATS_SCAN_FRESH))
+		return false;
+	*packets = READ_ONCE(f->hw_scan_packets);
+	*bytes = READ_ONCE(f->hw_scan_bytes);
+	return true;
+}
+
+static void ask_stats_scan_fn(struct work_struct *w)
+{
+	struct ask_flow_table *t = ask_flow_default_table();
+	struct fman *fm = ask_hw_get_fman();
+	u32 cursor = 0;
+	int rc;
+
+	if (t && fm && atomic_read(&t->num_hw_backed)) {
+		do {
+			/* one RCU section per chunk, not per record */
+			rcu_read_lock();
+			rc = fman_pcd_fe_stats_scan(fm, FMAN_PCD_FE_OWNER_ASK,
+						    &cursor, ASK_STATS_SCAN_BUDGET,
+						    ask_stats_scan_record, t);
+			rcu_read_unlock();
+			cond_resched();
+		} while (rc == 0 && !READ_ONCE(ask_stats_scan_stopped));
+	}
+	if (!READ_ONCE(ask_stats_scan_stopped))
+		queue_delayed_work(system_unbound_wq, &ask_stats_scan_work,
+				   ASK_STATS_SCAN_PERIOD);
+}
+
+/*
  * T-M8-3: refresh a HW-backed flow's cached counters from the silicon FE
  * ehash record so offloaded flows (whose frames bypass the kernel) report
  * real packet/byte totals to nft and to `dump-flows`.
  *
- * Lifetime/locking: fman_pcd_fe_flow_get_stats() takes pcd->fe_lock (a mutex),
- * so it cannot run under rcu_read_lock. We therefore (1) snapshot the flow's
+ * Lifetime/locking: the fman_pcd stats getter takes pcd->fe_stats_lock (a
+ * spinlock since F-312, not fe_lock); it is still called outside RCU because
+ * the record walk is the getter's business, not ours. We (1) snapshot the flow's
  * key/port/hw_backed under RCU, (2) drop RCU and read the silicon counters,
  * (3) re-look-up the cookie under RCU and store the result only if the SAME
  * live flow is still present — a concurrent DESTROY that freed the original
@@ -5019,6 +5277,7 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	struct ask_flow *fl;
 	struct fman *fm;
 	u64 generation, fe_token;
+	bool cached;
 	u8 port_id;
 
 	*d_packets = 0;
@@ -5036,19 +5295,24 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 	port_id = fl->key.port_id;
 	generation = fl->generation;
 	fe_token = fl->fe_token;
+	cached = ask_stats_scan_fresh(fl, &hw_pkts, &hw_bytes);
 	rcu_read_unlock();
 
-	fm = ask_hw_get_fman();
-	if (!fm)
-		return false;
+	/* F-315: the per-flow read only when the batched scan has not
+	 * reported this record within ASK_STATS_SCAN_FRESH. */
+	if (!cached) {
+		fm = ask_hw_get_fman();
+		if (!fm)
+			return false;
 
-	ask_fe_build_key_dual(&key, kbuf);
-	if (fman_pcd_fe_flow_get_stats_identified(fm, port_id, kbuf,
-						  ASK_FE_KEY_SIZE_DUAL,
-						  FMAN_PCD_FE_OWNER_ASK,
-						  fe_token, &hw_pkts,
-						  &hw_bytes, NULL) != 0)
-		return false;
+		ask_fe_build_key_dual(&key, kbuf);
+		if (fman_pcd_fe_flow_get_stats_identified(fm, port_id, kbuf,
+							  ASK_FE_KEY_SIZE_DUAL,
+							  FMAN_PCD_FE_OWNER_ASK,
+							  fe_token, &hw_pkts,
+							  &hw_bytes, NULL) != 0)
+			return false;
+	}
 
 	/*
 	 * Re-look-up and store only if the SAME live flow still owns the
@@ -5188,6 +5452,10 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
 
 		if (is_hw_backed && refreshed && !d_packets)
 			lastused = 0;
+		/* Silicon saw this flow's packets: same evidence the kernel's
+		 * UDP tracker needs to mark it assured (early_drop protection). */
+		if (is_hw_backed && refreshed && d_packets)
+			ask_flow_cookie_assure_udp((unsigned long)f->cookie);
 
 		/* flow_stats_update() ACCUMULATES; cumulative silicon totals
 		 * must never be passed directly. d_* is current minus the
@@ -5209,6 +5477,61 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
  * to confirm whether nf_flow_table_offload reaches us or silently aborts
  * in nf_flow_offload_alloc().
  */
+/*
+ * S7 (plans/ASK2-FLOW-SCALING-PLAN.md): decide REPLACE/DESTROY for a cookie ASK has
+ * never installed without ask_flow_lifecycle_lock. Under a flood of short flows with
+ * offload_delay_ms set, every flow cost two lock round trips with no hardware work
+ * (.185, 20k new flows/s: ~34 % CPU in the delete jobs, the destroy handler and mutex
+ * spinning).
+ *
+ * A cookie is unknown when it has no flow, no generation (live or tombstoned) and no
+ * owner entry; the route/VLAN/PPPoE flush releases the generation but keeps the owner
+ * entry, so the owner entry must be part of the test. Only a REPLACE in the cookie's
+ * own flowtable work item creates any of the three; every other context only removes
+ * state, and nf_flowtable runs at most one work item per flow (NF_FLOW_PENDING) and
+ * does not free or reuse the flow (its tuple address is the cookie) before its DESTROY
+ * completes. So "unknown" stays true until the caller acts, and the results equal the
+ * locked path's for an unknown cookie (independent review 2026-11-13).
+ */
+static bool ask_flow_cookie_unknown(struct ask_flow_table *t, unsigned long cookie)
+{
+	bool known;
+
+	rcu_read_lock();
+	known = ask_flow_lookup(t, (u64)cookie) != NULL;
+	rcu_read_unlock();
+	return !known && !ask_flow_gen_current(t, (u64)cookie) &&
+	       !xa_load(&ask_flow_owner_block, cookie);
+}
+
+/* REPLACE: true = reject with -EAGAIN without the lock (too young, or below the
+ * S6 volume). ask_offload_too_young() stores the first-seen timestamp, so it runs
+ * only after every other condition; anything else (admitted, gates off, retained
+ * owner, unbound) takes the locked path. */
+static bool ask_flow_replace_deferred_unlocked(void *cb_priv,
+					       struct flow_cls_offload *f)
+{
+	struct ask_flow_table *t = ask_flow_default_table();
+
+	return t && cb_priv &&
+	       (READ_ONCE(ask_offload_delay_ms) || READ_ONCE(ask_offload_flood_rate) ||
+		READ_ONCE(ask_offload_min_packets) || READ_ONCE(ask_offload_min_bytes)) &&
+	       ask_flow_block_priv_bound(cb_priv) &&
+	       ask_flow_cookie_unknown(t, f->cookie) &&
+	       (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie));
+}
+
+/* DESTROY: true = done (first-seen erased, whatever the current delay), return 0. */
+static bool ask_flow_destroy_unknown_unlocked(struct flow_cls_offload *f)
+{
+	struct ask_flow_table *t = ask_flow_default_table();
+
+	if (!t || !ask_flow_cookie_unknown(t, f->cookie))
+		return false;
+	xa_erase(&ask_offload_first_seen, f->cookie);
+	return true;
+}
+
 static void ask_flow_owner_forget_settled(u64 cookie)
 {
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
@@ -5323,16 +5646,19 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 
 	switch (f->command) {
 	case FLOW_CLS_REPLACE:
-		pr_info_ratelimited("ask: flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
-				    f->cookie,
-				    dev ? netdev_name(dev) : "?");
+		ask_pr_dbg("flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
+			   f->cookie, dev ? netdev_name(dev) : "?");
+		if (ask_flow_replace_deferred_unlocked(cb_priv, f))
+			return -EAGAIN;	/* S7: never-installed, too young */
 		mutex_lock(&ask_flow_lifecycle_lock);
 		rc = ask_flow_owned_replace(cb_priv, dev, f);
 		mutex_unlock(&ask_flow_lifecycle_lock);
 		return rc;
 	case FLOW_CLS_DESTROY:
-		pr_info_ratelimited("ask: flow_offload: cb invoked DESTROY cookie=0x%lx\n",
-				    f->cookie);
+		ask_pr_dbg("flow_offload: cb invoked DESTROY cookie=0x%lx\n",
+			   f->cookie);
+		if (ask_flow_destroy_unknown_unlocked(f))
+			return 0;	/* S7: never installed */
 		mutex_lock(&ask_flow_lifecycle_lock);
 		rc = ask_flow_offload_destroy(f);
 		if (!rc)
@@ -5482,8 +5808,14 @@ static int ask_flow_offload_setup_tc_common(struct net_device *dev,
 			}
 			ask_port_stats_zero(dev->ifindex);
 		}
-		if (!any_bound)
+		if (!any_bound) {
 			WRITE_ONCE(ask_flow_first_pid, 0xff);
+			/* nf_tables unbinds before nf_flow_table_free(), so the
+			 * DESTROY of a flow still in the age gate reaches no
+			 * callback: drop its stamp here, or the entry leaks and a
+			 * recycled cookie inherits its age. */
+			xa_destroy(&ask_offload_first_seen);
+		}
 
 		ask_pr_dbg("flow_offload: UNBIND %s\n",
 			   netdev_name(dev));
@@ -5658,6 +5990,10 @@ int ask_flow_offload_init(void)
 	schedule_delayed_work(&ask_flow_pending_poll_work,
 			      msecs_to_jiffies(ASK_FLOW_PENDING_POLL_INTERVAL_MS));
 
+	/* F-315: batched hardware stats, once a second while flows are offloaded. */
+	WRITE_ONCE(ask_stats_scan_stopped, false);
+	queue_delayed_work(system_unbound_wq, &ask_stats_scan_work, HZ);
+
 	/* T-M6-SP4: PPPoE session-down flush. */
 	spin_lock_bh(&ask_flow_pending_lock);
 	ask_pppoe_events_live = true;
@@ -5689,6 +6025,14 @@ int ask_flow_offload_init(void)
 void ask_flow_offload_exit(void)
 {
 	struct ask_flow_pending *p, *ptmp;
+
+	/*
+	 * F-315: stop the stats scan first, before any flow or the flow table
+	 * goes away (ask_flow_exit runs after this): block its re-arm, then wait
+	 * for a pass in flight.
+	 */
+	WRITE_ONCE(ask_stats_scan_stopped, true);
+	cancel_delayed_work_sync(&ask_stats_scan_work);
 
 	/*
 	 * PR14z9: stop the active poller before unregistering the

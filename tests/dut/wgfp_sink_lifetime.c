@@ -14,7 +14,7 @@ typedef unsigned long long u64;
 #define WGFP_MAX_SINKS 4
 #define WGFP_MAX_PORTS 8
 #define WGFP_WQ 6
-#define WGFP_SINK_TD (512 * 1024)
+#define WGFP_SINK_TD (1024 * 1024)
 #define QMAN_FQ_FLAG_DYNAMIC_FQID 1
 #define QMAN_FQ_FLAG_NO_ENQUEUE 2
 #define QMAN_FQ_FLAG_NO_MODIFY 3
@@ -36,6 +36,20 @@ typedef unsigned long long u64;
 #define PTR_ERR(p) ((long)(p))
 #define IS_ERR(p) ((long)(p) < 0 && (long)(p) >= -4095)
 #define atomic_set(p, v) (*(p) = (v))
+#define atomic64_set(p, v) (*(p) = (v))
+static bool wgfp_spread;
+static bool wgfp_cpu_napi_ready;
+#define WGFP_ORP_TD_MIN (64 * 1024)
+#define WGFP_ORP_TD_MAX (16 * 1024 * 1024)
+static unsigned int wgfp_orp_td = 6 * 1024 * 1024;
+static bool wgfp_orp_stash;
+static bool wgfp_sink_stash;
+static unsigned int wgfp_tx_batch;
+#define WGFP_TXB_MAX 64
+static unsigned int wgfp_prefetch;
+static unsigned int wgfp_prefetch_max;
+static bool wgfp_threaded;
+static long long wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
 
 struct qman_portal;
 union qm_mr_entry;
@@ -49,9 +63,17 @@ struct qman_fq {
 };
 struct napi_struct { int unused; };
 struct wgfp_port;
+struct wgfp_sink_pc {
+	uint64_t frames, bytes;
+};
+#ifndef for_each_possible_cpu
+#define for_each_possible_cpu(cpu) for ((cpu) = 0; (cpu) < 1; (cpu)++)
+#define per_cpu_ptr(p, cpu) ((void)(cpu), (p))
+#endif
 struct wgfp_sink {
 	struct qman_fq fq;
 	struct napi_struct napi;
+	struct wgfp_sink_pc *pc;
 	struct wgfp_port *port;
 	int cpu;
 	bool created;
@@ -63,8 +85,10 @@ struct wgfp_port {
 	int ifindex;
 	unsigned int nsinks;
 	bool dist;
+	bool orp;
 	int rr;
 	struct wgfp_sink dist_sink;
+	struct wgfp_sink *orp_sink;
 	struct wgfp_sink sink[WGFP_MAX_SINKS];
 };
 struct net_device {
@@ -85,6 +109,8 @@ static unsigned int wgfp_nports;
 static unsigned int wgfp_touch = 2, wgfp_per_port;
 static unsigned int wgfp_fanout = 32;
 #define WGFP_FANOUT_MAX 1024
+static unsigned int wgfp_fanout_home;
+#define WGFP_FANOUT_HOME_MAX 64
 static bool wgfp_pool_failed;
 static struct qman_fq wgfp_rx_ern_fq;
 static bool wgfp_rx_ern_ready;
@@ -97,7 +123,6 @@ static void fake_log(const char *fmt, ...) { (void)fmt; }
 static int wgfp_dqrr(void) { return 0; }
 static void wgfp_rx_ern_cb(struct qman_portal *p, struct qman_fq *f,
 			   const union qm_mr_entry *m) { }
-static int wgfp_poll(struct napi_struct *napi, int budget) { return budget; }
 static void mutex_lock(int *lock) { (void)lock; }
 static void mutex_unlock(int *lock) { (void)lock; }
 static int copy_from_user(char *dst, const char *src, size_t n)
@@ -124,6 +149,24 @@ static unsigned int qman_fq_fqid(struct qman_fq *fq) { return fq->fqid; }
 static void netif_napi_add(int dev, struct napi_struct *napi,
 			   int (*poll)(struct napi_struct *, int)) {}
 static void napi_enable(struct napi_struct *napi) { napi_enabled++; }
+/* dpaa_wgfp.c wgfp_cpu_napi_ensure_locked(): one NAPI per affine CPU (4 here),
+ * created once, before the first queue is scheduled */
+static void wgfp_cpu_napi_ensure_locked(void)
+{
+	static struct napi_struct napis[4];
+
+	if (wgfp_cpu_napi_ready)
+		return;
+	for (int c = 0; c < 4; c++) {
+		netif_napi_add(wgfp_ndev, &napis[c], NULL);
+		napi_enable(&napis[c]);
+	}
+	wgfp_cpu_napi_ready = true;
+}
+enum { NETDEV_NAPI_THREADED_DISABLED, NETDEV_NAPI_THREADED_ENABLED };
+static int dev_set_threaded(int dev, int threaded) { (void)dev; (void)threaded; return 0; }
+static int stash_calls;
+static void wgfp_fqd_stash(struct qm_mcc_initfq *opts) { (void)opts; stash_calls++; }
 static int qman_init_fq(struct qman_fq *fq, unsigned int flags, struct qm_mcc_initfq *opts)
 {
 	init_calls++;
@@ -150,6 +193,7 @@ static void reset(void)
 	wgfp_per_port = 0;
 	wgfp_pool_failed = false;
 	create_calls = init_calls = destroyed = napi_enabled = 0;
+	wgfp_cpu_napi_ready = false;
 	fail_create = fail_init = fail_taildrop = 0;
 	offline_cpu = -1;
 }
@@ -164,12 +208,22 @@ static ssize_t control(const char *cmd)
 static void successful_pool_cannot_be_destroyed(void)
 {
 	reset();
+	assert(control("threaded 2") == -EINVAL);
+	assert(control("threaded 1") > 0 && wgfp_threaded);
+	assert(control("threaded 0") > 0 && !wgfp_threaded);
+	assert(control("sink_stash 2") == -EINVAL);
+	assert(control("sink_stash 1") > 0 && wgfp_sink_stash);
+	stash_calls = 0;
 	assert(wgfp_global_create(2) == 0);
 	assert(wgfp_nglobal == 2 && create_calls == 2 && init_calls == 2);
+	assert(stash_calls == 2);	/* each sink created with stashing */
+	assert(control("sink_stash 0") > 0 && !wgfp_sink_stash);
 	assert(control("destroy") == -EOPNOTSUPP);
 	assert(wgfp_nglobal == 2 && wgfp_global[0].created && wgfp_global[1].created);
-	assert(destroyed == 0 && napi_enabled == 2);
+	assert(destroyed == 0 && napi_enabled == 4);	/* per CPU, once */
 	assert(wgfp_global_create(2) == -EBUSY);
+	/* NAPIs exist now: threaded mode can no longer be switched */
+	assert(control("threaded 1") == -EBUSY && !wgfp_threaded);
 }
 
 static void failed_init_quarantines_the_pool(void)
@@ -179,7 +233,7 @@ static void failed_init_quarantines_the_pool(void)
 	assert(wgfp_global_create(4) == -ETIMEDOUT);
 	assert(wgfp_pool_failed && wgfp_nglobal == 0);
 	assert(wgfp_global[0].created && wgfp_global[1].created);
-	assert(create_calls == 2 && init_calls == 2 && napi_enabled == 2);
+	assert(create_calls == 2 && init_calls == 2 && napi_enabled == 4);
 	assert(destroyed == 0);
 	assert(wgfp_global_create(4) == -EIO && create_calls == 2);
 	assert(control("destroy") == -EOPNOTSUPP && destroyed == 0);
@@ -191,7 +245,7 @@ static void failed_allocation_keeps_previously_created_sinks(void)
 	fail_create = 2;
 	assert(wgfp_global_create(4) == -ENOSPC);
 	assert(wgfp_pool_failed && wgfp_global[0].created && !wgfp_global[1].created);
-	assert(destroyed == 0 && napi_enabled == 1);
+	assert(destroyed == 0 && napi_enabled == 4);
 	assert(wgfp_global_create(1) == -EIO && create_calls == 2);
 }
 
@@ -240,5 +294,11 @@ int main(void)
 	assert(control("fanout 0") > 0 && wgfp_fanout == 0);
 	assert(control("fanout 64") > 0 && wgfp_fanout == 64);
 	assert(control("fanout 1025") == -EINVAL && wgfp_fanout == 64);
+	assert(control("fanout 32 5") > 0 && wgfp_fanout == 32 && wgfp_fanout_home == 5);
+	assert(control("fanout 16") > 0 && wgfp_fanout == 16 && wgfp_fanout_home == 5);
+	assert(control("fanout 16 1") == -EINVAL && wgfp_fanout_home == 5);
+	assert(control("fanout 16 65") == -EINVAL && wgfp_fanout_home == 5);
+	assert(control("fanout 2000 4") == -EINVAL && wgfp_fanout == 16);
+	assert(control("fanout 32 0") > 0 && wgfp_fanout_home == 0);
 	return 0;
 }

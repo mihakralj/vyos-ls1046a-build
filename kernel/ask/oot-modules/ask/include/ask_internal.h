@@ -910,14 +910,23 @@ struct ask_flow_stats stats;
  * hardware totals are absolute; the nft flowtable's flow_stats_update()
  * ACCUMULATES, so ask_flow_offload_stats() must report the delta since
  * this baseline (mirrors sfc/cxgb4/enetc old_* pattern) and then advance
- * it. Guarded by stats.syncp. A per-key record is destroyed+recreated on
- * DESTROY->REPLACE, so the absolute can reset to < baseline; that is
- * treated as a counter reset (delta = current, baseline = current).
+ * it. Guarded by stats.syncp. A record belongs to one flow (one fe_token),
+ * so its counters never reset under this flow; a read below the baseline
+ * is an older value (F-315 cache) and leaves the baseline unchanged.
  * Distinct from stats.packets/bytes, which hold the ABSOLUTE total that
  * dump-flows/get-flow report.
  */
 u64 hw_reported_packets;
 u64 hw_reported_bytes;
+/*
+ * F-315 stats cache: silicon counters written by the once-a-second batched
+ * scan (ask_flow_offload.c, fman_pcd_fe_stats_scan) and read by
+ * FLOW_CLS_STATS while hw_scan_jiffies is fresh. hw_scan_jiffies is stored
+ * last with release semantics; 0 = never scanned.
+ */
+u64 hw_scan_packets;
+u64 hw_scan_bytes;
+unsigned long hw_scan_jiffies;
 };
 
 /*
@@ -968,6 +977,7 @@ struct ask_flow_table {
 struct rhashtable rht;
 atomic_t fake_hw_id_seq; /* PR7 placeholder until real hostcmd */
 struct xarray gen_by_cookie;   /* cookie -> xa_value(gen|state), A3 */
+struct xarray by_token;        /* F-315: fe_token -> struct ask_flow (RCU) */
 atomic_t num_flows;
 /*
  * Count of entries with ask_flow::hw_backed set. Lets the neigh
@@ -995,6 +1005,7 @@ void ask_flow_table_destroy(struct ask_flow_table *t);
 
 /* Lookup by cookie — RCU read-side, no allocation. */
 struct ask_flow *ask_flow_lookup(struct ask_flow_table *t, u64 cookie);
+struct ask_flow *ask_flow_by_token(struct ask_flow_table *t, u64 fe_token);
 
 /*
  * Insert. Builds an ask_flow from the supplied key/action, returns

@@ -71,6 +71,24 @@ static void *__xa_store(struct xarray *xa, unsigned long index, void *value,
 	xa->slots[free_slot] = (struct xarray_entry){ index, value, true };
 	return NULL;
 }
+/* F-315 token index: remove_core clears its own entry only */
+static void *xa_cmpxchg(struct xarray *xa, unsigned long index, void *old,
+			void *new, int gfp)
+{
+	unsigned int i;
+
+	(void)gfp;
+	assert(!new);
+	for (i = 0; i < 32; i++)
+		if (xa->slots[i].used && xa->slots[i].index == index) {
+			void *cur = xa->slots[i].value;
+
+			if (cur == old)
+				xa->slots[i].used = false;
+			return cur;
+		}
+	return NULL;
+}
 static void __xa_erase(struct xarray *xa, unsigned long index)
 {
 	unsigned int i;
@@ -106,6 +124,7 @@ struct ask_flow {
 struct rhashtable { struct ask_flow *slots[32]; };
 struct ask_flow_table {
 	struct xarray gen_by_cookie;
+	struct xarray by_token;
 	struct rhashtable rht;
 	atomic_t num_flows;
 	atomic_t num_hw_backed;

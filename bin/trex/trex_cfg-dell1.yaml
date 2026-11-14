@@ -1,0 +1,15 @@
+# TRex config for the NDR plan (plans/TREX-NDR-PERF-PLAN.md section 4): dell1 X710 p0 -> DUT eth3, p1 -> DUT eth4.
+# Inert until TRex starts; the ports must be bound to vfio-pci first (they are on i40e for the normal rig).
+- version: 2
+  interfaces: ['0000:01:00.0', '0000:01:00.1']
+  port_info:
+    - ip: 10.99.1.112
+      default_gw: 10.99.1.185
+    - ip: 10.99.2.113
+      default_gw: 10.99.2.185
+  platform:
+    master_thread_id: 0
+    latency_thread_id: 1
+    dual_if:
+      - socket: 0
+        threads: [2, 3]

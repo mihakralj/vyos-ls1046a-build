@@ -42,10 +42,11 @@ enum failure {
 	NONE, NO_ENTRY, NO_FMAN, NO_PORT, NO_MURAM, NO_PAGE, NO_INDEX,
 	NO_POOL, STALE_PAGE, NO_MAPPING, WRONG_OWNER,
 	TABLE_FAILURE, INDEX_WRITE_FAILURE, COUNTER_WRITE_FAILURE,
+	SYNC_FAILURE,
 };
 static enum failure failure;
 static u32 page[0x100 / sizeof(u32)];
-static unsigned int table_frees, muram_frees, writes, entry_frees;
+static unsigned int table_frees, muram_frees, writes, entry_frees, syncs;
 static unsigned long freed_offsets[5];
 
 static struct muram_info *fman_get_muram(struct fman *fm)
@@ -113,6 +114,14 @@ static void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long off,
 	assert(muram_frees < sizeof(freed_offsets) / sizeof(freed_offsets[0]));
 	freed_offsets[muram_frees++] = off;
 }
+/* F-310: barrier between the workspace unpublish and the MURAM frees. */
+static __attribute__((unused)) int fman_pcd_fe_teardown_sync(struct fman_pcd *pcd)
+{
+	assert(pcd);
+	assert(!page[FMAN_PP_FE_MGMT_IDX_OFF / sizeof(u32)] && !muram_frees);
+	syncs++;
+	return failure == SYNC_FAILURE ? -ETIMEDOUT : 0;
+}
 static void list_del(struct list_head *node) { node->removed = true; }
 static void kfree(void *ptr) { assert(ptr); entry_frees++; }
 
@@ -128,7 +137,11 @@ int main(void)
 	struct fman_pcd_fe_port fp;
 	struct fman_pcd pcd = { .fman = &fm, .port = &fp };
 
+#ifdef FMAN_F310
+	for (failure = NO_ENTRY; failure <= SYNC_FAILURE; failure++) {
+#else
 	for (failure = NO_ENTRY; failure <= COUNTER_WRITE_FAILURE; failure++) {
+#endif
 		int rc, expected;
 
 		fp = (struct fman_pcd_fe_port) {
@@ -146,7 +159,7 @@ int main(void)
 		fm.muram = failure == NO_MURAM ? NULL : &muram;
 		pcd.fman = failure == NO_FMAN ? NULL : &fm;
 		pcd.muram_pool = failure == NO_POOL ? NULL : &pool;
-		table_frees = muram_frees = writes = entry_frees = 0;
+		table_frees = muram_frees = writes = entry_frees = syncs = 0;
 		rc = fman_pcd_fe_port_del(&pcd, 0x10);
 		switch (failure) {
 		case NO_ENTRY: expected = -ENOENT; break;
@@ -154,7 +167,7 @@ int main(void)
 		case NO_FMAN: case NO_MURAM: case NO_PAGE: case NO_INDEX:
 			expected = -ENXIO;
 			break;
-		case TABLE_FAILURE: expected = -ETIMEDOUT; break;
+		case TABLE_FAILURE: case SYNC_FAILURE: expected = -ETIMEDOUT; break;
 		default: expected = -EIO; break;
 		}
 		assert(rc == expected && !muram_frees && !entry_frees &&
@@ -163,6 +176,8 @@ int main(void)
 			assert(!table_frees && !writes && fp.table_v4 == &table);
 		} else if (failure == TABLE_FAILURE) {
 			assert(table_frees == 1 && !writes && fp.table_v4 == &table);
+		} else if (failure == SYNC_FAILURE) {
+			assert(table_frees == 1 && !fp.table_v4 && writes == 2 && syncs == 1);
 		} else {
 			assert(table_frees == 1 && !fp.table_v4);
 			assert(writes == (failure == INDEX_WRITE_FAILURE ? 1U : 2U));
@@ -181,8 +196,11 @@ int main(void)
 	memset(page, 0, sizeof(page));
 	page[FMAN_PP_FE_MGMT_IDX_OFF / sizeof(u32)] = fp.mgmt_off;
 	page[FMAN_PP_FE_DEPL_CNT_OFF / sizeof(u32)] = 1;
-	table_frees = muram_frees = writes = entry_frees = 0;
+	table_frees = muram_frees = writes = entry_frees = syncs = 0;
 	assert(fman_pcd_fe_port_del(&pcd, 0x10) == 0);
+#ifdef FMAN_F310
+	assert(syncs == 1);
+#endif
 	assert(table_frees == 1 && muram_frees == 5 && writes == 2 &&
 	       entry_frees == 1 && fp.node.removed);
 	assert(freed_offsets[0] == 0x200 && freed_offsets[1] == 0x300 &&

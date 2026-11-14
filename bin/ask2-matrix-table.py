@@ -5,10 +5,11 @@ Upload / Download / Bidir x v4 / v6, FASTEST rep in Gbit/s. Invalid or unmeasure
 Usage: ask2-matrix-table.py <run-dir>
 Reads every quick-*.csv (bin/testrig-offload-quick.sh rows: ts,cell,gbps,...,verdict) and wg-*.csv
 (bin/testrig-wireguard.sh rows: ts,cell,dir,rep,gbps,...) in <run-dir>. Writes <run-dir>/matrix.csv
-(type,fam,dir,gbps=max,n,verdicts) and prints the table. Up = eth3 -> eth4 (PPPoE: encap), Down = the
+(type,fam,dir,gbps=max,n,verdicts,mean,stdev,min over all reps) and prints the table. Up = eth3 -> eth4 (PPPoE: encap), Down = the
 reverse, Bidir = sum of both directions.
 """
 import csv
+import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -19,11 +20,15 @@ QUICK = {  # type: (upload cell, download cell, bidir cell), {f} = 4|6
     "vlan-vlan": ("vlan-v{f}", "vlan-v{f}-rev", "vlan-v{f}-bidir"),
     "vlan-port": ("vlanport-v{f}", "portvlan-v{f}", "vlanport-v{f}-bidir"),
     "pppoe": ("pppoe-up-v{f}", "pppoe-down-v{f}", "pppoe-up-v{f}-bidir"),
+    # combined-WAN rows (bin/testrig-ask2-wan.sh, quick-wan-*.csv)
+    "port-forward": ("portfwd-up-v{f}", "portfwd-down-v{f}", "portfwd-down-v{f}-bidir"),
+    "nat+ppp+vlan": ("wanfull-up-v{f}", "wanfull-down-v{f}", "wanfull-up-v{f}-bidir"),
+    "wg+nat+pp+vl": ("wgwan-up-v{f}", "wgwan-down-v{f}", "wgwan-up-v{f}-bidir"),
 }
 NINEK = ["unicast", "nat", "vlan-vlan", "vlan-port"]   # MTU 9000 rows, from quick9k-*.csv
 LABEL = {"vlan-vlan-9k": "vlan-9k"}
 ROWS = ["unicast", "nat", "vlan-vlan", "vlan-port", "pppoe", "bridge"] + [f"{t}-9k" for t in NINEK] + ["bridge-9k",
-        "wireguard", "wireguard6", "policer"]
+        "wireguard", "wireguard6", "port-forward", "nat+ppp+vlan", "wg+nat+pp+vl", "policer"]
 # Not measured (decision 2026-11-09): ipsec, multicast and broadcast have no ASK2 hardware offload,
 # so a row would only show the Linux software rate; fragment cells are not needed either.
 DIRS = ("up", "down", "bidir")
@@ -87,8 +92,15 @@ def collect(run):
                 key = pre + QUICK[base][i].format(f=f) if base in QUICK else f"{t}-v{f}-{d}"
                 v = vals.get(key)
                 table[(t, f, d)] = (max(v) if v else None, len(v or ()),
-                                    "/".join(sorted(set(verd.get(key, ())))))
+                                    "/".join(sorted(set(verd.get(key, ())))), tuple(v or ()))
     return table
+
+
+def stats(v):
+    """n, best, mean, sample stdev, min of a cell's per-rep rates (stdev 0 for a single rep)."""
+    if not v:
+        return 0, None, None, None, None
+    return len(v), max(v), statistics.fmean(v), statistics.stdev(v) if len(v) > 1 else 0.0, min(v)
 
 
 def fmt(v):
@@ -110,9 +122,11 @@ def main():
     table = collect(sys.argv[1])
     with open(Path(sys.argv[1]) / "matrix.csv", "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["type", "fam", "dir", "gbps", "n", "verdicts"])
-        for (t, f, d), (v, n, vd) in table.items():
-            w.writerow([t, f"v{f}", d, "" if v is None else f"{v:.3f}", n, vd])
+        w.writerow(["type", "fam", "dir", "gbps", "n", "verdicts", "mean", "stdev", "min"])
+        for (t, f, d), (_, _, vd, vals) in table.items():
+            n, best, mean, sd, lo = stats(vals)
+            num = lambda x: "" if x is None else f"{x:.3f}"
+            w.writerow([t, f"v{f}", d, num(best), n, vd, num(mean), num(sd), num(lo)])
     print(render(table))
 
 

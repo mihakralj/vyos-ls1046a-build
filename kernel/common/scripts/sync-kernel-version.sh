@@ -62,14 +62,24 @@ _UPSTREAM_SERIES="${_UPSTREAM_KVER%.*}"
 export KERNEL_VERSION="$_UPSTREAM_KVER"
 export KERNEL_SERIES="$_UPSTREAM_SERIES"
 
+# VyOS internal kernel revision (vyos-build T9591, 2026-11-09): the release
+# string is <kernel_version>-<kernel_revision>-vyos, e.g. 6.18.62-1-vyos.
+# Same precedence as the version: env, defaults.toml, versions.lock, then 1.
+if [[ -z "${KERNEL_REVISION:-}" ]]; then
+    KERNEL_REVISION=$(awk -F'"' '/^[[:space:]]*kernel_revision[[:space:]]*=/ { print $2; exit }' "$_DEFAULTS_TOML" 2>/dev/null || true)
+    [[ -n "$KERNEL_REVISION" ]] || KERNEL_REVISION=$(awk -F'[:=}]' '/KERNEL_REVISION:=/ { gsub(/"/, "", $4); print $4; exit }' "$_VERSIONS_LOCK" 2>/dev/null || true)
+    KERNEL_REVISION="${KERNEL_REVISION:-1}"
+fi
+export KERNEL_REVISION
+
 # ── CLI mode (only when not sourced) ──────────────────────────────────
 # (return works in sourced context; exit works when run directly)
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     cmd="${1:-print}"
     case "$cmd" in
         print|"")
-            printf 'KERNEL_VERSION=%s\nKERNEL_SERIES=%s\nSOURCE=%s\n' \
-                "$KERNEL_VERSION" "$KERNEL_SERIES" "$_SOURCE"
+            printf 'KERNEL_VERSION=%s\nKERNEL_SERIES=%s\nKERNEL_REVISION=%s\nSOURCE=%s\n' \
+                "$KERNEL_VERSION" "$KERNEL_SERIES" "$KERNEL_REVISION" "$_SOURCE"
             ;;
         --check|check)
             lock_kver=$(_extract_lock_kver "$_VERSIONS_LOCK" 2>/dev/null || echo "")
