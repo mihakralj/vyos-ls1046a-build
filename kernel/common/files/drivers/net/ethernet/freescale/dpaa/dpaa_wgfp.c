@@ -176,10 +176,10 @@ struct wgfp_port {
 /* QMan can leave every ring of a portal full for ~200 us; ASK waits up to 5 ms
  * for room before giving a sequence number up. */
 #define WGFP_ORP_WAIT_NS	(5 * NSEC_PER_MSEC)
-/* The plain (unordered) TX enqueue waits up to 100 us for ring space before
- * dropping: 8 back-to-back tries lost 8-10k frames per 4-tunnel download run
- * with threaded NAPI (.185, image 1622; the ORP path, which waits, lost 0). */
+/* Plain TX waits 100 us per frame by default. Threaded NAPI batches share one
+ * 5 ms deadline per poll to bound time spent waiting on a full QMan ring. */
 #define WGFP_XMIT_WAIT_NS	(100 * NSEC_PER_USEC)
+#define WGFP_TX_POLL_WAIT_NS	(5 * NSEC_PER_MSEC)
 
 /* The frame the running callback owes the ORP.  Per CPU: the callback runs in
  * softirq on the portal's own CPU and nothing interleaves with it. */
@@ -599,24 +599,23 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 #define WGFP_TXB_MAX	64
 static unsigned int wgfp_tx_batch = 32;
 struct wgfp_txb {
-	bool active;
+	bool active, threaded;
 	unsigned int n, lim;
+	ktime_t end;
 	u8 eg[WGFP_TXB_MAX];
 	struct qm_fd fd[WGFP_TXB_MAX];
 };
 static DEFINE_PER_CPU(struct wgfp_txb, wgfp_txb);
 
-/* One plain-path enqueue, waiting up to WGFP_XMIT_WAIT_NS for ring space;
- * the buffer is released when the frame cannot be sent. */
-static void wgfp_tx_enqueue(int egress, const struct qm_fd *fd)
+/* One plain-path enqueue before a shared deadline; the buffer is released
+ * when the frame cannot be sent. */
+static void wgfp_tx_enqueue_until(int egress, const struct qm_fd *fd,
+				  ktime_t end)
 {
-	ktime_t end;
-
 	if (likely(!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], fd))) {
 		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
 		return;
 	}
-	end = ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS);
 	do {
 		cpu_relax();
 		if (!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], fd)) {
@@ -628,12 +627,22 @@ static void wgfp_tx_enqueue(int egress, const struct qm_fd *fd)
 	dpaa_wgfp_fd_release(fd);
 }
 
+static void wgfp_tx_enqueue(int egress, const struct qm_fd *fd)
+{
+	wgfp_tx_enqueue_until(egress, fd,
+			      ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS));
+}
+
 static void wgfp_txb_flush(struct wgfp_txb *b)
 {
 	unsigned int i;
 
-	for (i = 0; i < b->n; i++)
-		wgfp_tx_enqueue(b->eg[i], &b->fd[i]);
+	for (i = 0; i < b->n; i++) {
+		if (b->threaded)
+			wgfp_tx_enqueue_until(b->eg[i], &b->fd[i], b->end);
+		else
+			wgfp_tx_enqueue(b->eg[i], &b->fd[i]);
+	}
 	b->n = 0;
 }
 
@@ -644,6 +653,9 @@ static int wgfp_cpu_poll(struct napi_struct *napi, int budget)
 	unsigned int lim = min_t(unsigned int, READ_ONCE(wgfp_tx_batch), WGFP_TXB_MAX);
 	int cleaned;
 
+	b->threaded = READ_ONCE(wgfp_threaded);
+	b->end = b->threaded ?
+		ktime_add_ns(ktime_get(), WGFP_TX_POLL_WAIT_NS) : 0;
 	b->lim = lim;
 	b->active = lim > 1;
 	cleaned = qman_p_poll_dqrr(n->portal, budget);
