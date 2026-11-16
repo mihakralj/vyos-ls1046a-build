@@ -720,21 +720,12 @@ chmod +x "$CHROOT/usr/local/bin/vyos-mcp"
 cp board/scripts/led.py "$CHROOT/usr/local/bin/led"
 chmod +x "$CHROOT/usr/local/bin/led"
 
-### Load-driven status LED daemon: `monoledd` samples per-port rx/tx byte
-### counters ~3x/sec, log-maps the busiest port's throughput to the same
-### 32-step ramp as `led`, and fades the LP5812 RGBW LED so it "breathes"
-### with network load. Self-contained Python 3 (stdlib only), runs as root
-### like fan-pid, enabled via tmpfiles (live-build breaks systemctl enable).
-### Installed as /usr/local/bin/monoledd (no .py suffix, fan-pid/led convention).
 cp board/scripts/monoledd "$CHROOT/usr/local/bin/monoledd"
 chmod +x "$CHROOT/usr/local/bin/monoledd"
 cp board/systemd/monoledd.service "$CHROOT/etc/systemd/system/monoledd.service"
+cp board/systemd/vyos-led-reconcile.service "$CHROOT/etc/systemd/system/vyos-led-reconcile.service"
+cp board/systemd/vyos-led-reconcile.timer "$CHROOT/etc/systemd/system/vyos-led-reconcile.timer"
 cp board/systemd/monoledd.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/monoledd.conf"
-### udev rule: start monoledd.service the moment the kernel binds the LP5812
-### LED controller (SUBSYSTEM=i2c, DRIVER=lp5812). Mirrors the EMC2305 fan
-### rule — the tmpfiles-created multi-user.target.wants symlink can land after
-### multi-user.target is reached, so the daemon never starts on that boot
-### (observed 2026-08-19, image 1609). This guarantees a cold-boot start.
 mkdir -p "$CHROOT/etc/udev/rules.d"
 cp board/scripts/10-lp5812-monoledd.rules "$CHROOT/etc/udev/rules.d/10-lp5812-monoledd.rules"
 
