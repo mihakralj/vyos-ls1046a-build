@@ -50,7 +50,8 @@ def test_enqueue_backpressure_and_ern_ownership(tmp_path):
             "\nEXPORT_SYMBOL_GPL(qman_enqueue_fqid)",
         ),
         extract(wgfp, "static void wgfp_egress_ern(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_egress)"),
-        extract(wgfp, "#define WGFP_TXB_MAX", "\nstatic int wgfp_cpu_poll("),
+        extract(wgfp, "#define WGFP_XMIT_WAIT_NS", "\n\n/* The frame"),
+        extract(wgfp, "#define WGFP_TXB_MAX", "\n/* Create the per-CPU NAPIs once"),
         extract(wgfp, "void dpaa_wgfp_xmit(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)"),
     ]
     (tmp_path / "qman_wgfp_body.h").write_text("\n\n".join(bodies) + "\n")

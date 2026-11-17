@@ -177,7 +177,7 @@ struct wgfp_port {
  * for room before giving a sequence number up. */
 #define WGFP_ORP_WAIT_NS	(5 * NSEC_PER_MSEC)
 /* Plain TX waits 100 us per frame by default. Threaded NAPI batches share one
- * 5 ms deadline per poll to bound time spent waiting on a full QMan ring. */
+ * 5 ms poll deadline; unbatched and ORP frames retain their per-frame waits. */
 #define WGFP_XMIT_WAIT_NS	(100 * NSEC_PER_USEC)
 #define WGFP_TX_POLL_WAIT_NS	(5 * NSEC_PER_MSEC)
 
@@ -362,6 +362,13 @@ static int wgfp_neg;
 static DEFINE_PER_CPU(atomic64_t, wgfp_xmit_ok);
 static atomic64_t wgfp_xmit_fail = ATOMIC64_INIT(0);
 static atomic64_t wgfp_xmit_ern = ATOMIC64_INIT(0);
+/* Cause counters and xmit_fail are cumulative, independently sampled, and
+ * sum consistently only when transmit activity is quiescent. Unlike these,
+ * orp_wait_fail is resettable and also counts failed ORP holes. */
+static atomic64_t wgfp_xmit_frame_wait_fail = ATOMIC64_INIT(0);
+static atomic64_t wgfp_xmit_poll_wait_fail = ATOMIC64_INIT(0);
+static atomic64_t wgfp_xmit_invalid_egress = ATOMIC64_INIT(0);
+static atomic64_t wgfp_xmit_orp_wait_fail = ATOMIC64_INIT(0);
 
 static void wgfp_touch_frame(struct wgfp_sink *s, u8 *p, u32 len)
 {
@@ -607,15 +614,17 @@ struct wgfp_txb {
 };
 static DEFINE_PER_CPU(struct wgfp_txb, wgfp_txb);
 
-/* One plain-path enqueue before a shared deadline; the buffer is released
- * when the frame cannot be sent. */
+/* Threaded batches share a deadline; other frames start their wait after the
+ * first failed enqueue. The buffer is released if the frame cannot be sent. */
 static void wgfp_tx_enqueue_until(int egress, const struct qm_fd *fd,
-				  ktime_t end)
+				  ktime_t end, bool shared_deadline)
 {
 	if (likely(!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], fd))) {
 		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
 		return;
 	}
+	if (!shared_deadline)
+		end = ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS);
 	do {
 		cpu_relax();
 		if (!qman_enqueue_fqid(&wgfp_ern_fq, wgfp_eg_fqid[egress], fd)) {
@@ -623,14 +632,15 @@ static void wgfp_tx_enqueue_until(int egress, const struct qm_fd *fd,
 			return;
 		}
 	} while (ktime_before(ktime_get(), end));
+	atomic64_inc(shared_deadline ? &wgfp_xmit_poll_wait_fail :
+		     &wgfp_xmit_frame_wait_fail);
 	atomic64_inc(&wgfp_xmit_fail);
 	dpaa_wgfp_fd_release(fd);
 }
 
 static void wgfp_tx_enqueue(int egress, const struct qm_fd *fd)
 {
-	wgfp_tx_enqueue_until(egress, fd,
-			      ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS));
+	wgfp_tx_enqueue_until(egress, fd, 0, false);
 }
 
 static void wgfp_txb_flush(struct wgfp_txb *b)
@@ -639,7 +649,8 @@ static void wgfp_txb_flush(struct wgfp_txb *b)
 
 	for (i = 0; i < b->n; i++) {
 		if (b->threaded)
-			wgfp_tx_enqueue_until(b->eg[i], &b->fd[i], b->end);
+			wgfp_tx_enqueue_until(b->eg[i], &b->fd[i], b->end,
+					      true);
 		else
 			wgfp_tx_enqueue(b->eg[i], &b->fd[i]);
 	}
@@ -1129,7 +1140,7 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d sink_stash=%d prefetch=%u prefetch_max=%u threaded=%d tx_batch=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu xmit_frame_wait_fail=%llu xmit_poll_wait_fail=%llu xmit_invalid_egress=%llu xmit_orp_wait_fail=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d sink_stash=%d prefetch=%u prefetch_max=%u threaded=%d tx_batch=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=host\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -1138,6 +1149,10 @@ static int wgfp_stats_show(struct seq_file *m, void *unused)
 		   READ_ONCE(wgfp_neg), dpaa_wgfp_stat_sum(&wgfp_xmit_ok),
 		   (u64)atomic64_read(&wgfp_xmit_fail),
 		   (u64)atomic64_read(&wgfp_xmit_ern),
+		   (u64)atomic64_read(&wgfp_xmit_frame_wait_fail),
+		   (u64)atomic64_read(&wgfp_xmit_poll_wait_fail),
+		   (u64)atomic64_read(&wgfp_xmit_invalid_egress),
+		   (u64)atomic64_read(&wgfp_xmit_orp_wait_fail),
 		   (u64)atomic64_read(&wgfp_rx_enq_fail),
 		   (u64)atomic64_read(&wgfp_rx_ern),
 		   READ_ONCE(wgfp_spread), READ_ONCE(wgfp_orp_td),
@@ -1485,6 +1500,7 @@ static bool wgfp_orp_xmit(struct dpaa_wgfp_frame *f, int egress,
 	}
 	/* Nothing enqueued: the settle step fills the hole. */
 	atomic64_inc(&wgfp_orp_wait_fail);
+	atomic64_inc(&wgfp_xmit_orp_wait_fail);
 	atomic64_inc(&wgfp_xmit_fail);
 	dpaa_wgfp_fd_release(f->fd);
 	return true;
@@ -1497,6 +1513,7 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 	struct wgfp_txb *b;
 
 	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
+		atomic64_inc(&wgfp_xmit_invalid_egress);
 		atomic64_inc(&wgfp_xmit_fail);
 		dpaa_wgfp_fd_release(f->fd);
 		return;
