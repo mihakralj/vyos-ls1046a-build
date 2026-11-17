@@ -3,6 +3,7 @@
   <node name="system">
     <children>
       <node name="hardware">
+        <properties><help>Hardware settings</help></properties>
         <children>
           <node name="led" owner="${vyos_conf_scripts_dir}/system_hardware_led.py">
             <properties><help>Status LED settings</help><priority>990</priority></properties>
