@@ -105,7 +105,21 @@ Each needs its own A/B, including the 9k BBR bidir lock-out, hash collisions and
 - **Scope.** A flow admitted while a set FQ is unused shares a tail-drop with no other flow; flows never migrate, so churn can leave two flows on one FQ. The 8-stream bidirectional cell puts 16 data/ACK flows plus the iperf control connections on each port. 16 × 256 KiB equals the legacy 4 MiB per port; it is not a BMan pool reservation.
 - **Unlike the vendor.** Assignment is least-loaded, not hashed, and each FQ keeps an FQD byte tail-drop; there is no shared CGR, because FE-enqueue CGR membership is unproven.
 - **A/B.** `/sys/module/ask/parameters/egress_fqs` (16 or 0) applies to new flows only; each arm needs fresh connections after the previous arm's flows have aged out. `echo 1 > /sys/module/ask/parameters/fq_probe` prints the set with per-FQ `users`.
-- **Validation needed.** Cold boot; 9k BBR bidir P8 (reverse zero-seconds, `rfdc`, `rodc`); 9k CUBIC control; 1500 P1/P8 single-direction, to check 256 KiB per flow does not cap single-stream throughput.
+- **Intra-WQ credit.** All set FQs of a port sit on the same port-channel WQ (6). With `ICS_CRED = 0`, QMan's intra-WQ DRR is plain per-frame round robin, so FMan TX dequeue switches FQ every frame. The TX port then stalls near 770 kfps while its queues stay backlogged, and receiver GRO aggregation falls from about 9 to about 3 segments. F-316 therefore also programs `ICS_CRED = 0x4000` (16 KiB per visit) on set FQs (`td_bytes != 0`); the legacy FQ and WGFP keep 0. `0x7FFF` disables DRR (each visit drains the FQ), which costs about 3 ms of kernel-path RTT under load. `PREFERINCACHE` had no effect.
+- **Results (.185, cold boot, bidirectional BBR P8, ICS applied live with a lab module before the 0x4000 build).**
+
+  | MTU | Arm | Gbit/s | Kernel-path ping avg under load |
+  |---|---|---|---|
+  | 9000 | legacy FQ (`egress_fqs=0`) | 10.5–11.7, reverse zero-seconds 12 | 0.93 ms |
+  | 9000 | set, ICS 0 | 18.3–18.4 | 0.76 ms |
+  | 9000 | set, ICS 0x4000 | 18.5 | 0.84 ms |
+  | 9000 | set, ICS 0x7FFF | 19.3 | 3.8 ms |
+  | 1500 | legacy FQ | 17.5–17.9 | 0.63 ms |
+  | 1500 | set, ICS 0 | 15.6–15.7 | 0.71 ms |
+  | 1500 | set, ICS 0x1000 / 0x2000 / 0x4000 | 16.8 / 17.1 / 17.3–17.4 | 0.74 / 0.82 / 0.92 ms |
+  | 1500 | set, ICS 0x7FFF | 17.4–17.6 | 3.2 ms |
+
+  9000 CUBIC does not collapse on the legacy FQ (18.0); the lock-out is BBR-specific. Validation still needed: the 0x4000 build without the lab module, cold boot, readback of `ics` on the set FQs.
 
 ### Matched measurement protocol
 

@@ -68,6 +68,7 @@ struct qm_mcc_initfq {
 	u16 we_mask;
 	struct {
 		u16 fq_ctrl;
+		u16 ics_cred;
 		u8 cgid;
 		struct { struct { u8 exclusive; } stashing; } context_a;
 	} fqd;
@@ -93,6 +94,7 @@ enum { NETREG_REGISTERED, NETREG_UNREGISTERING, NETREG_UNREGISTERED };
 #define QM_INITFQ_WE_OAC 8
 #define QM_INITFQ_WE_TDTHRESH 16
 #define QM_INITFQ_WE_CONTEXTA 32
+#define QM_INITFQ_WE_ICSCRED 64
 #define QM_FQCTRL_PREFERINCACHE 1
 #define QM_FQCTRL_AVOIDBLOCK 2
 #define QM_FQCTRL_CGE 4
@@ -121,6 +123,7 @@ static const struct dpaa_fq_cbs dpaa_fq_cbs;
 static struct qman_fq *fq_table[32];
 static int create_error, init_error, creates, inits, destroys, frees;
 static int managed_allocations, holds, errors, cleanup_calls, pcd_teardowns;
+static u16 last_we_mask, last_ics_cred;
 static bool rtnl_held, expect_rtnl = true, expect_taildrop = true;
 static jmp_buf unregister_wait;
 
@@ -175,6 +178,8 @@ static int qman_init_fq(struct qman_fq *fq, u32 flags, struct qm_mcc_initfq *opt
 	assert(rtnl_held || !expect_rtnl);
 	inits++;
 	assert(fq_table[fq->idx] == fq);
+	last_we_mask = opts->we_mask;
+	last_ics_cred = opts->fqd.ics_cred;
 	if (expect_taildrop) {
 		assert(opts->we_mask & QM_INITFQ_WE_TDTHRESH);
 		assert(!(opts->we_mask & QM_INITFQ_WE_OAC));
@@ -307,6 +312,7 @@ int main(int argc, char **argv)
 		assert(fq->init && fq->wq == 6 && fq->channel == 0x801 && dev.refs == 1);
 		assert(!holds && !frees && managed_allocations == 1);
 		assert(last_taildrop == DPAA_FQ_TD);
+		assert(!(last_we_mask & QM_INITFQ_WE_ICSCRED));
 		puts("successful offload FQ remains usable");
 		return 0;
 	}
@@ -317,7 +323,8 @@ int main(int argc, char **argv)
 		fq = container_of(fq_table[14], struct dpaa_fq, fq_base);
 		assert(fqid == 7 && fq->td_bytes == 0x40000 && last_taildrop == 0x40000);
 		assert(fq->init && fq->wq == 6 && fq->fq_type == FQ_TYPE_TX_NO_CONFIRM);
-		puts("per-FQ tail-drop threshold reaches the FQD");
+		assert((last_we_mask & QM_INITFQ_WE_ICSCRED) && last_ics_cred == 0x4000);
+		puts("per-FQ tail-drop threshold and DRR credit reach the FQD");
 		return 0;
 	}
 #endif

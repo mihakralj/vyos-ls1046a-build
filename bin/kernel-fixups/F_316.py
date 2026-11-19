@@ -12,7 +12,12 @@ ask.ko now gives each flow its own FQ from a per-port set. To keep the port's
 aggregate bound where it is (and under the RX buffer pool), the per-flow FQs
 need a smaller threshold than DPAA_FQ_TD. This adds:
   * struct dpaa_fq.td_bytes (0 = DPAA_FQ_TD), used by dpaa_fq_init()'s
-    tail-drop branch,
+    tail-drop branch; a set FQ (td_bytes != 0) also gets ICS_CRED 0x4000,
+  * the set FQs share the port channel's WQ, and with ICS_CRED 0 QMan
+    rotates FQs every frame: FMan TX stalls near 770 kfps and receiver GRO
+    falls from ~9 to ~3 (1500 MTU, 8 BBR streams: 15.6 vs 17.5 Gbit/s
+    legacy). 0x4000 (16 KiB per visit) restores 17.3-17.4 for +0.3 ms
+    kernel-path RTT; 0x7FFF (no DRR, drain to empty) adds ~3 ms,
   * exported dpaa_alloc_offload_tx_fq_td(dev, td_bytes, *fqid), the F-199/
     F-295 allocator body with the threshold stored before dpaa_fq_init(),
   * dpaa_alloc_offload_tx_fq(dev, *fqid) kept as the td_bytes = 0 wrapper
@@ -40,7 +45,12 @@ EDITS = (
      "\t\t\tqm_fqd_set_taildrop(&initfq.fqd, DPAA_FQ_TD, 1);\n",
      "\t\t\t/* F-316: per-FQ threshold for the offload FQ set */\n"
      "\t\t\tqm_fqd_set_taildrop(&initfq.fqd, dpaa_fq->td_bytes ?\n"
-     "\t\t\t\t\t    dpaa_fq->td_bytes : DPAA_FQ_TD, 1);\n"),
+     "\t\t\t\t\t    dpaa_fq->td_bytes : DPAA_FQ_TD, 1);\n"
+     "\t\t\tif (dpaa_fq->td_bytes) {\n"
+     "\t\t\t\t/* F-316: 16 KiB intra-WQ DRR credit per visit */\n"
+     "\t\t\t\tinitfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_ICSCRED);\n"
+     "\t\t\t\tinitfq.fqd.ics_cred = cpu_to_be16(0x4000);\n"
+     "\t\t\t}\n"),
     (ETH_C, "allocator signature",
      "int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid)\n{\n",
      "int dpaa_alloc_offload_tx_fq_td(struct net_device *dev, u32 td_bytes,\n"
