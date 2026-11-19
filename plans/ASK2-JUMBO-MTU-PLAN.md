@@ -119,7 +119,15 @@ Each needs its own A/B, including the 9k BBR bidir lock-out, hash collisions and
   | 1500 | set, ICS 0x1000 / 0x2000 / 0x4000 | 16.8 / 17.1 / 17.3–17.4 | 0.74 / 0.82 / 0.92 ms |
   | 1500 | set, ICS 0x7FFF | 17.4–17.6 | 3.2 ms |
 
-  9000 CUBIC does not collapse on the legacy FQ (18.0); the lock-out is BBR-specific. Validation still needed: the 0x4000 build without the lab module, cold boot, readback of `ics` on the set FQs.
+  9000 CUBIC does not collapse on the legacy FQ (18.0); the lock-out is BBR-specific.
+- **Validated build (.185, cold boot, image with ICS 0x4000 in F-316, no lab override).** Readback: all 64 set FQs (16 on each of 4 ports) `fq_ctrl=0x0200 ics=0x4000 td=262144`; legacy FQ `ics=0`.
+
+  | MTU | Cell | Set FQs (`egress_fqs=16`) | Legacy (`egress_fqs=0`) |
+  |---|---|---|---|
+  | 1500 | BBR P8 | 17.30, 17.31, 17.40 (ping 0.90 ms) | 17.17, 16.50 (ping 0.63 ms) |
+  | 1500 | BBR P1 | 18.04 | 16.27 |
+  | 9000 | BBR P8 | 18.47, 18.53, zero zero-seconds (ping 0.86 ms) | 12.60, reverse zero-seconds 13 |
+  | 9000 | CUBIC P8 | 18.56 | not rerun |
 
 ### Matched measurement protocol
 
