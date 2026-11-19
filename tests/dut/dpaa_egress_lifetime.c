@@ -85,12 +85,12 @@ static int check_ask_reused_index(void)
 	reset();
 	memset(&hardware, 0, sizeof(hardware));
 	lookup_dev = &virtual;
-	if (ask_hw_resolve_oif_fqid(5, &after_move, false) >= 0) {
+	if (ask_hw_resolve_oif_fqid(5, &after_move, false, NULL) >= 0) {
 		puts("ASK cold non-DPAA control: FAILED");
 		return 1;
 	}
 	lookup_dev = &old;
-	if (ask_hw_resolve_oif_fqid(5, &old_fqid, true)) {
+	if (ask_hw_resolve_oif_fqid(5, &old_fqid, true, NULL)) {
 		puts("ASK physical egress allocation control: FAILED");
 		return 1;
 	}
@@ -100,7 +100,7 @@ static int check_ask_reused_index(void)
 #ifdef LIFETIME_ORACLE_CONTROLS
 	memset(hardware.noconf_tx, 0, sizeof(hardware.noconf_tx));
 #endif
-	rc = ask_hw_resolve_oif_fqid(5, &after_move, false);
+	rc = ask_hw_resolve_oif_fqid(5, &after_move, false, NULL);
 	if (!rc) {
 		printf("ASK reused ifindex: NOT CONTAINED (non-DPAA device returned FQ %u%s)\n",
 		       after_move, after_move == old_fqid ? " from old device" : "");

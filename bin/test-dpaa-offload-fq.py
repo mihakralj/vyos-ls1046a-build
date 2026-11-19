@@ -12,6 +12,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ALLOCATOR = "int dpaa_alloc_offload_tx_fq_td"
 HARNESS = ROOT / "tests/dut/dpaa_offload_fq.c"
 
 
@@ -41,7 +42,7 @@ def check_source_contract(dpaa, qman, net, netdev, rtnl, rtnl_header):
     if ("if (port)" not in setup or "QMAN_FQ_FLAG_TO_DCPORTAL" not in setup or
             "QMAN_FQ_FLAG_NO_MODIFY" not in setup):
         raise ValueError("DPAA egress port setup changed; review the model")
-    allocator = function(dpaa, "int dpaa_alloc_offload_tx_fq")
+    allocator = function(dpaa, ALLOCATOR if "F-316" in dpaa else "int dpaa_alloc_offload_tx_fq")
     lock = allocator.find("rtnl_lock();")
     create_fq = allocator.find("dpaa_fq_init(")
     unlock = allocator.find("rtnl_unlock();")
@@ -82,8 +83,10 @@ def run(kernel):
     rtnl = (kernel / "net/core/rtnetlink.c").read_text()
     rtnl_header = (kernel / "include/linux/rtnetlink.h").read_text()
     check_source_contract(dpaa, qman, net, netdev, rtnl, rtnl_header)
+    per_fq_td = "F-316" in dpaa
     body = "\n".join((
         function(dpaa, "static int dpaa_fq_init"),
+        *((function(dpaa, ALLOCATOR),) if per_fq_td else ()),
         function(dpaa, "int dpaa_alloc_offload_tx_fq"),
         function(dpaa, "static void dpaa_remove"),
     ))
@@ -96,12 +99,13 @@ def run(kernel):
                 "-std=gnu11", "-Wall", "-Wextra", "-Werror",
                 "-Wno-unused-parameter", "-Wno-unused-function",
                 *(["-DCGR_CONTAINMENT"] if "F-300: keep unsettled CGR owners alive" in dpaa else []),
+                *(["-DOFFLOAD_FQ_TD"] if per_fq_td else []),
                 "-I", str(path), str(HARNESS), "-o", str(binary),
             ],
             check=True,
         )
         for case in ("success", "create-error", "timeout", "init-error",
-                     "unregistered", "probe-error"):
+                     "unregistered", "probe-error", *(("td",) if per_fq_td else ())):
             subprocess.run([str(binary), case], check=True, timeout=30)
     print("Host model only: no QMan hardware or concurrent parent teardown tested.")
 

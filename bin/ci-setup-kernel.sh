@@ -3128,6 +3128,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_295.py" 2>&1
+    # F-316: per-FQ tail-drop for ask.ko's per-flow offload TX FQ set.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_316.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
     echo "### dpaa_eth.c: F-295 offload FQ initialization quarantine verified"
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"

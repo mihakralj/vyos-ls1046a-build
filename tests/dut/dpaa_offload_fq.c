@@ -56,6 +56,9 @@ struct dpaa_fq {
 	u32 fqid, flags;
 	u16 channel;
 	u8 wq;
+#ifdef OFFLOAD_FQ_TD
+	u32 td_bytes;
+#endif
 	int fq_type, xdp_rxq;
 };
 struct dpaa_pcd_ops { void (*teardown)(struct dpaa_priv *); };
@@ -209,7 +212,11 @@ static int dpaa_tx_fq_to_id(const struct dpaa_priv *priv, struct qman_fq *fq)
 static void qm_fqd_set_destwq(void *fqd, u16 channel, u8 wq) {}
 static void qm_fqd_set_oac(void *fqd, int value) {}
 static void qm_fqd_set_oal(void *fqd, size_t value) {}
-static void qm_fqd_set_taildrop(void *fqd, u32 threshold, int rounded) {}
+static u32 last_taildrop;
+static void qm_fqd_set_taildrop(void *fqd, u32 threshold, int rounded)
+{
+	last_taildrop = threshold;
+}
 static void qm_fqd_context_a_set64(void *fqd, uint64_t value) {}
 static void qm_fqd_set_stashing(void *fqd, int a, int b, int c) {}
 static int xdp_rxq_info_reg(int *info, struct net_device *dev, int queue, int napi)
@@ -299,9 +306,21 @@ int main(int argc, char **argv)
 		assert(fq->net_dev == &dev && fq->fq_type == FQ_TYPE_TX_NO_CONFIRM);
 		assert(fq->init && fq->wq == 6 && fq->channel == 0x801 && dev.refs == 1);
 		assert(!holds && !frees && managed_allocations == 1);
+		assert(last_taildrop == DPAA_FQ_TD);
 		puts("successful offload FQ remains usable");
 		return 0;
 	}
+
+#ifdef OFFLOAD_FQ_TD
+	if (!strcmp(argv[1], "td")) {
+		assert(dpaa_alloc_offload_tx_fq_td(&dev, 0x40000, &fqid) == 0);
+		fq = container_of(fq_table[14], struct dpaa_fq, fq_base);
+		assert(fqid == 7 && fq->td_bytes == 0x40000 && last_taildrop == 0x40000);
+		assert(fq->init && fq->wq == 6 && fq->fq_type == FQ_TYPE_TX_NO_CONFIRM);
+		puts("per-FQ tail-drop threshold reaches the FQD");
+		return 0;
+	}
+#endif
 
 	if (!strcmp(argv[1], "create-error")) {
 		create_error = -ENOSPC;
