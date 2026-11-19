@@ -259,6 +259,7 @@
 # previously ran as source mutations on every build. See patch body.
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0173-fman-pcd-fixup-fold.patch
+0174-fman-pcd-fe-action-dump.patch
 
 # ── ASK2 OH-port re-enqueue infra, phase 1a-1g (2026-09-01/02) ──
 # patch-series-cleanup (2026-09-11): squashed 0175+0176+0177+0178+0179+

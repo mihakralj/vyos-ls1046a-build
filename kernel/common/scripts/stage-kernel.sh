@@ -225,6 +225,16 @@ MEOF
         || echo 'obj-$(CONFIG_FSL_FMD_SHIM) += fmd_shim/' >> "$KSRC/drivers/soc/fsl/Makefile"
 fi
 
+[[ -f "$FILES_DIR/fman-pcd-fe-static-asserts.h" ]] \
+    || err "missing $FILES_DIR/fman-pcd-fe-static-asserts.h"
+[[ -f "$FILES_DIR/fman_pcd_fe_test.c" ]] \
+    || err "missing $FILES_DIR/fman_pcd_fe_test.c"
+FMAN_DIR="$KSRC/drivers/net/ethernet/freescale/fman"
+info "injecting FMan PCD static asserts and KUnit tests…"
+cp "$FILES_DIR/fman-pcd-fe-static-asserts.h" "$FMAN_DIR/"
+mkdir -p "$FMAN_DIR/tests"
+cp "$FILES_DIR/fman_pcd_fe_test.c" "$FMAN_DIR/tests/"
+
 # ── Inline Python patchers — RETIRED ────────────────────────────────────
 # Previously this script ran 3 inline Python patchers (patch-phylink.py,
 # patch-dpaa-xdp-queue-index.py, patch-xhci-ls1046a-quirks.py) against the
