@@ -1007,6 +1007,81 @@ class LedTests(unittest.TestCase):
             led.apply_state({'mode': 'auto'})
         self.assertEqual(json.loads(self.state.read_text()), {'mode': 'off'})
 
+    def test_auto_allowed_does_not_import_vyos_config_or_boot(self):
+        script = str(ROOT / 'src/conf_mode/system_hardware_led.py')
+        blocked = {'vyos.config': None, 'vyos.utils': None, 'vyos.utils.boot': None}
+        with patch.dict(sys.modules, blocked), patch.object(sys, 'argv', [script, '--auto-allowed']):
+            self.state.write_text('{"mode":"auto"}')
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(script, run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+            self.state.write_text('{"mode":"fixed","color":"01020304"}')
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(script, run_name='__main__')
+            self.assertEqual(result.exception.code, 1)
+
+    def test_reconcile_path_unit_and_slow_timer_wiring(self):
+        project = ROOT.parents[1]
+        path_unit = (project / 'board/systemd/vyos-led-reconcile.path').read_text()
+        timer = (project / 'board/systemd/vyos-led-reconcile.timer').read_text()
+        rule = (project / 'board/scripts/10-lp5812-monoledd.rules').read_text()
+        tmpfiles = (project / 'board/systemd/monoledd.tmpfiles').read_text()
+        installer = (project / 'bin/ci-setup-vyos-build.sh').read_text()
+        self.assertIn('PathChanged=/run/vyos-led-pending', path_unit)
+        self.assertIn('Unit=vyos-led-reconcile.service', path_unit)
+        self.assertNotIn('OnUnitInactiveSec=10s', timer)
+        self.assertIn('OnUnitInactiveSec=5min', timer)
+        self.assertIn('vyos-led-reconcile.path', tmpfiles)
+        self.assertIn('vyos-led-reconcile.path', rule)
+        self.assertIn('vyos-led-reconcile.service', rule)
+        self.assertIn('board/systemd/vyos-led-reconcile.path', installer)
+
+    def test_reconcile_cli_waits_for_busy_commit_lock(self):
+        self.devices()
+        led.apply_state({'mode': 'auto'}, pending=True)
+        boot = types.ModuleType('vyos.utils.boot')
+        boot.boot_configuration_complete = lambda: True
+        boot.boot_configuration_success = lambda: True
+        utils = types.ModuleType('vyos.utils')
+        utils.__path__ = []
+        config = types.ModuleType('vyos.config')
+        config.Config = object
+        modules = {'vyos.utils': utils, 'vyos.utils.boot': boot, 'vyos.config': config}
+        script = str(ROOT / 'src/conf_mode/system_hardware_led.py')
+        locks = [(None, 'busy'), (None, 'busy'), (object(), '')]
+        with patch.dict(sys.modules, modules), \
+             patch.object(led, 'acquire_commit_lock', side_effect=locks) as acquire, \
+             patch.object(led, 'release_commit_lock') as release, \
+             patch.object(led, 'read_running_config', return_value={'mode': 'auto'}), \
+             patch('time.sleep') as sleep, \
+             patch.object(sys, 'argv', [script, '--reconcile']):
+            runpy.run_path(script, run_name='__main__')
+        self.assertEqual(acquire.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        release.assert_called_once()
+        self.assertFalse(led.PENDING.exists())
+        self.assertTrue(led.auto_allowed())
+
+    def test_show_handles_vanished_and_corrupt_state(self):
+        spec = importlib.util.spec_from_file_location('show_led', ROOT / 'src/op_mode/show_hardware_led.py')
+        show = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(show)
+        self.state.write_text('{broken')
+        output = io.StringIO()
+        with patch('sys.stdout', output):
+            show.main()
+        self.assertIn('Mode: unavailable', output.getvalue())
+        self.state.unlink()
+        original_exists = Path.exists
+
+        def stale_exists(path):
+            return True if path == self.state else original_exists(path)
+
+        output = io.StringIO()
+        with patch.object(Path, 'exists', stale_exists), patch('sys.stdout', output):
+            show.main()
+        self.assertIn('Mode: unavailable', output.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

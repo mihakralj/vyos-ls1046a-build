@@ -4,10 +4,18 @@ import subprocess
 import sys
 import time
 
-from vyos.utils.boot import boot_configuration_complete, boot_configuration_success
 from vyos import ConfigError
-from vyos.config import Config
 from vyos.led_control import apply_state, auto_allowed, reconcile_state, validate
+
+if __name__ == '__main__' and sys.argv[1:] == ['--auto-allowed']:
+    try:
+        sys.exit(0 if auto_allowed() else 1)
+    except (ConfigError, OSError, ValueError) as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)
+
+from vyos.utils.boot import boot_configuration_complete, boot_configuration_success
+from vyos.config import Config
 
 
 class LedSettings(dict):
@@ -52,9 +60,12 @@ if __name__ == '__main__':
                 if time.monotonic() >= deadline:
                     raise ConfigError('VyOS boot configuration did not complete')
                 time.sleep(1)
-            reconcile_state(allow_default=boot_configuration_success())
-        elif sys.argv[1:] == ['--auto-allowed']:
-            sys.exit(0 if auto_allowed() else 1)
+            allow_default = boot_configuration_success()
+            lock_deadline = time.monotonic() + 60
+            while not reconcile_state(allow_default=allow_default):
+                if time.monotonic() >= lock_deadline:
+                    break
+                time.sleep(0.25)
         else:
             config = get_config()
             verify(config)

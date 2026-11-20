@@ -29,10 +29,12 @@ def validate(config):
         raise ConfigError('LED color must be eight hexadecimal digits RRGGBBWW')
 
 
-def read_state():
+def read_state(require_exists=False):
     try:
         config = json.loads(STATE.read_text())
     except FileNotFoundError:
+        if require_exists:
+            return None
         return {'mode': 'auto'}
     except json.JSONDecodeError as error:
         raise ConfigError(f'Invalid LED runtime state: {error}') from error
@@ -197,15 +199,15 @@ def reconcile_state(allow_default=True):
         if not PENDING.exists():
             if STATE.exists():
                 apply_hardware(read_state())
-                return
+                return True
             if not allow_default:
                 apply_hardware({'mode': 'off'})
-                return
+                return True
     commit_lock, message = acquire_commit_lock()
     if commit_lock is None:
         if message.startswith('Critical error opening commit lock file'):
             raise ConfigError(message)
-        return
+        return False
     try:
         try:
             running = read_running_config()
@@ -218,5 +220,6 @@ def reconcile_state(allow_default=True):
                                   f'failed to stop LED daemon: {stop_error}') from error
             raise ConfigError(f'Unable to read running LED configuration: {error}') from error
         apply_confirmed_state(running, allow_default)
+        return True
     finally:
         release_commit_lock(commit_lock)

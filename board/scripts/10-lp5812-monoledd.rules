@@ -1,1 +1,1 @@
-ACTION=="add|bind", SUBSYSTEM=="i2c", DRIVER=="lp5812", TAG+="systemd", ENV{SYSTEMD_WANTS}="vyos-led-reconcile.timer"
+ACTION=="add|bind", SUBSYSTEM=="i2c", DRIVER=="lp5812", TAG+="systemd", ENV{SYSTEMD_WANTS}+="vyos-led-reconcile.path vyos-led-reconcile.timer vyos-led-reconcile.service"

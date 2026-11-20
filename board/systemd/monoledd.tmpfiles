@@ -1,1 +1,2 @@
 L /etc/systemd/system/multi-user.target.wants/vyos-led-reconcile.timer - - - - /etc/systemd/system/vyos-led-reconcile.timer
+L /etc/systemd/system/multi-user.target.wants/vyos-led-reconcile.path - - - - /etc/systemd/system/vyos-led-reconcile.path

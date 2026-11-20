@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 
-from vyos.led_control import CHANNELS, LEDS, PENDING, STATE, read_state
+from vyos import ConfigError
+from vyos.led_control import CHANNELS, LEDS, PENDING, read_state
 
 
 def main():
-    config = read_state() if STATE.exists() else None
+    try:
+        config = read_state(require_exists=True)
+    except (ConfigError, OSError, ValueError):
+        config = None
     mode = config.get('mode', 'auto') if config is not None else 'unavailable'
     print(f"Mode: {mode}{' (pending)' if PENDING.exists() else ''}")
     if config and 'color' in config:

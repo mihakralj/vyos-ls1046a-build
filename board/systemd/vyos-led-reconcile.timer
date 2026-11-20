@@ -3,8 +3,8 @@ Description=Periodically reconcile VyOS status LED state
 
 [Timer]
 OnBootSec=5s
-OnUnitInactiveSec=10s
-AccuracySec=1s
+OnUnitInactiveSec=5min
+AccuracySec=10s
 Unit=vyos-led-reconcile.service
 
 [Install]
