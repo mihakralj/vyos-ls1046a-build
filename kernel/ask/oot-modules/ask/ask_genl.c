@@ -929,7 +929,9 @@ return -EINVAL;
 
 port_id = nla_get_u8(port_attr);
 
-rc = ask_hw_offload_disengage(port_id);
+rtnl_lock();
+rc = ask_hw_offload_disengage_admin(port_id);
+rtnl_unlock();
 if (rc)
 return rc;
 

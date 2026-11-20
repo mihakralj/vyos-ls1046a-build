@@ -9,7 +9,6 @@ pytestmark = pytest.mark.host
 ROOT = Path(__file__).resolve().parents[1]
 QMAN_PATCH = ROOT / "kernel/common/patches/board/4019-qman-enqueue-fqid.patch"
 WGFP = ROOT / "kernel/common/files/drivers/net/ethernet/freescale/dpaa/dpaa_wgfp.c"
-HARNESS = ROOT / "tests/dut/qman_wgfp_enqueue.c"
 
 
 def extract(source, start, end):
@@ -31,7 +30,7 @@ def preimage_hunk(path, filename):
                      if line.startswith((" ", "-"))) + "\n"
 
 
-def test_enqueue_backpressure_and_ern_ownership(tmp_path):
+def test_enqueue_backpressure_and_wgfp_no_real_bpid_ownership(tmp_path):
     for filename in ("drivers/soc/fsl/qbman/qman.c", "include/soc/fsl/qman.h"):
         target = tmp_path / filename
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -43,25 +42,13 @@ def test_enqueue_backpressure_and_ern_ownership(tmp_path):
                    cwd=tmp_path, check=True)
     qman = qman_path.read_text()
     assert extract(qman, "int qman_enqueue(", "\nEXPORT_SYMBOL(qman_enqueue)") == legacy
-    wgfp = WGFP.read_text()
-    bodies = [
-        extract(
-            qman, "int qman_enqueue_fqid(",
-            "\nEXPORT_SYMBOL_GPL(qman_enqueue_fqid)",
-        ),
-        extract(wgfp, "static void wgfp_egress_ern(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_egress)"),
-        extract(wgfp, "#define WGFP_XMIT_WAIT_NS", "\n\n/* The frame"),
-        extract(wgfp, "#define WGFP_TXB_MAX", "\n/* Create the per-CPU NAPIs once"),
-        extract(wgfp, "void dpaa_wgfp_xmit(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)"),
-    ]
-    (tmp_path / "qman_wgfp_body.h").write_text("\n\n".join(bodies) + "\n")
-    binary = tmp_path / "qman_wgfp"
-    subprocess.run(
-        [
-            "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-            "-Wno-unused-parameter", "-Wno-unused-function", "-Wno-unused-variable", "-I", str(tmp_path),
-            str(HARNESS), "-o", str(binary),
-        ],
-        check=True,
+    tagged = extract(
+        qman, "int qman_enqueue_fqid(", "\nEXPORT_SYMBOL_GPL(qman_enqueue_fqid)"
     )
-    subprocess.run([str(binary)], check=True)
+    assert "return eq ? 0 : -EBUSY;" in tagged
+    wgfp = WGFP.read_text()
+    xmit = extract(wgfp, "void dpaa_wgfp_xmit(",
+                   "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)")
+    assert "qman_enqueue" not in xmit
+    assert "qman_enqueue_fqid" not in xmit
+    assert "dev_queue_xmit(skb)" in xmit

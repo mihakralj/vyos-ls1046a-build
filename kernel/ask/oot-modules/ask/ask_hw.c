@@ -115,6 +115,8 @@ static u8 ask_hw_port_family[64];
 static u64 ask_hw_family_seq = 1;
 static u64 ask_hw_family_changed[ARRAY_SIZE(ask_hw_port_family)][2];
 static bool ask_hw_family_seq_exhausted;
+static u64 ask_hw_role_policy_seq[ARRAY_SIZE(ask_hw_port_family)];
+static bool ask_hw_role_admin_disabled[ARRAY_SIZE(ask_hw_port_family)];
 static bool ask_hw_ready;
 
 /* Ports engaged with the L2_DA profile (T-M6-2 B3a). Lockless for the routed,
@@ -1448,7 +1450,8 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  */
 static int ask_hw_offload_engage_profile(u8 hw_port_id,
 					 enum fman_pcd_fe_profile profile,
-					 bool from_flow, u8 family_mask)
+					 bool from_flow, u8 family_mask,
+					 u64 expected_role_policy_seq)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct ask_hw_port *p;
@@ -1461,6 +1464,21 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		return -EAGAIN;
 
 	mutex_lock(&h->lock);
+
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq)) {
+		rc = -EINVAL;
+		goto out_unlock;
+	}
+	if (expected_role_policy_seq &&
+	    ask_hw_role_admin_disabled[hw_port_id]) {
+		rc = -EACCES;
+		goto out_unlock;
+	}
+	if (expected_role_policy_seq &&
+	    expected_role_policy_seq != ask_hw_role_policy_seq[hw_port_id]) {
+		rc = -ESTALE;
+		goto out_unlock;
+	}
 
 	if (from_flow && !ask_hw_port_family_get(hw_port_id)) {
 		rc = -ENODEV;	/* administratively disabled: stay in software */
@@ -1597,7 +1615,8 @@ out_unlock:
 int ask_hw_offload_engage(u8 hw_port_id)
 {
 	return ask_hw_offload_engage_profile(hw_port_id,
-					     FMAN_PCD_FE_PROFILE_ROUTED, false, 0);
+					     FMAN_PCD_FE_PROFILE_ROUTED, false, 0,
+					     0);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
 
@@ -1619,23 +1638,43 @@ static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
 
 /*
  * Bridge plan D1 port role: engage @hw_port_id with @profile, disengaging it
- * first if it is armed with another one; the family mask survives. With
- * @if_engaged, a port that is not engaged is left alone (bridge join/leave).
- * Callers serialize on rtnl. Never call with ask_bridge_lock held: disengage
- * takes it.
+ * first if it is armed with another one. NETDEV_PRECHANGEUPPER uses the
+ * prepare/commit split: a successful prepare means FMan's readback-confirmed
+ * detach completed, while the saved family mask lets bridge reconciliation
+ * finish or roll back the generated role transition.
  */
-int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
-			       bool if_engaged, u8 family_mask)
+int ask_hw_offload_role_prepare(u8 hw_port_id,
+				enum fman_pcd_fe_profile profile,
+				bool if_engaged, u8 *family_mask,
+				bool *detached, u64 *policy_seq,
+				u64 expected_policy_seq)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	u8 fam;
 	bool engaged = false, other = false, retained = false, transitioning = false;
 	unsigned int i;
 
+	if (!family_mask || !detached || !policy_seq ||
+	    profile >= FMAN_PCD_FE_PROFILE_NR ||
+	    hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq))
+		return -EINVAL;
+	*detached = false;
+	*policy_seq = 0;
+	if (!READ_ONCE(ask_hw_ready))
+		return -EAGAIN;
 	if (!h)
 		return -ENODEV;
 	mutex_lock(&h->lock);
-	fam = family_mask ? family_mask : ask_hw_port_family_get(hw_port_id);
+	if (expected_policy_seq &&
+	    expected_policy_seq != ask_hw_role_policy_seq[hw_port_id]) {
+		mutex_unlock(&h->lock);
+		return -ESTALE;
+	}
+	if (ask_hw_role_admin_disabled[hw_port_id]) {
+		mutex_unlock(&h->lock);
+		return -EACCES;
+	}
+	fam = *family_mask ? *family_mask : ask_hw_port_family_get(hw_port_id);
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
 		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
 			retained = h->port[i].fe_retained;
@@ -1643,14 +1682,20 @@ int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 			engaged = h->port[i].offload_engaged;
 			other = engaged && h->port[i].engaged_profile != profile;
 		}
+	*family_mask = fam;
+	if (!ask_hw_role_policy_seq[hw_port_id])
+		ask_hw_role_policy_seq[hw_port_id] = 1;
+	*policy_seq = ask_hw_role_policy_seq[hw_port_id];
 	mutex_unlock(&h->lock);
 
 	if (retained)
 		return -ESHUTDOWN;
 	if (transitioning)
 		return -EAGAIN;
-	if (if_engaged && (!engaged || !fam))
+	if (if_engaged && (!engaged || !fam)) {
+		*family_mask = 0;
 		return 0;
+	}
 	if (other) {
 		int rc;
 
@@ -1658,9 +1703,49 @@ int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 			    hw_port_id, profile);
 		rc = ask_hw_offload_disengage(hw_port_id);
 		if (rc)
-			return rc;	/* F-289: stays disengaged, family cleared */
+			return rc;
+		*detached = true;
 	}
-	return ask_hw_offload_engage_profile(hw_port_id, profile, false, fam);
+	return 0;
+}
+
+int ask_hw_offload_role_commit(u8 hw_port_id,
+			       enum fman_pcd_fe_profile profile,
+			       u8 family_mask, u64 policy_seq)
+{
+	if (!family_mask)
+		return 0;
+	return ask_hw_offload_engage_profile(hw_port_id, profile, false,
+					     family_mask, policy_seq);
+}
+
+int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
+			       bool if_engaged, u8 family_mask)
+{
+	u8 saved;
+	u64 policy_seq, expected_policy_seq;
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	bool detached;
+	int rc;
+
+	if (!h)
+		return -ENODEV;
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq))
+		return -EINVAL;
+	mutex_lock(&h->lock);
+	++ask_hw_role_policy_seq[hw_port_id];
+	ask_hw_role_admin_disabled[hw_port_id] = false;
+	saved = family_mask ? family_mask : ask_hw_port_family_get(hw_port_id);
+	if (!saved)
+		saved = ASK_FAM_V4 | ASK_FAM_V6;
+	expected_policy_seq = ask_hw_role_policy_seq[hw_port_id];
+	mutex_unlock(&h->lock);
+	rc = ask_hw_offload_role_prepare(hw_port_id, profile, if_engaged,
+					 &saved, &detached, &policy_seq,
+					 expected_policy_seq);
+	if (rc || (if_engaged && !saved))
+		return rc;
+	return ask_hw_offload_role_commit(hw_port_id, profile, saved, policy_seq);
 }
 
 /* T-M6-2 B2 (debugfs only): engage @ifname's port with the L2_DA profile. */
@@ -1669,9 +1754,8 @@ int ask_hw_b2_l2_engage(const char *ifname)
 	u8 port;
 	int rc = ask_hw_b2_port_of(ifname, &port);
 
-	return rc ? rc : ask_hw_offload_engage_profile(port,
-						       FMAN_PCD_FE_PROFILE_L2_DA,
-						       false, 0);
+	return rc ? rc : ask_hw_offload_engage_role(
+		port, FMAN_PCD_FE_PROFILE_L2_DA, false, 0);
 }
 
 /* Manual records bypass bridge ownership and synchronous withdrawal. */
@@ -1781,8 +1865,9 @@ int ask_hw_offload_disengage(u8 hw_port_id)
 
 	p->offload_engaged = false;
 	p->teardown_in_progress = !rc;
-	if (!rc)
-		clear_bit(hw_port_id, ask_hw_port_l2);
+	/* Once the prepared detach began, L2 admission must stay closed even if
+	 * its final readback or teardown failed. */
+	clear_bit(hw_port_id, ask_hw_port_l2);
 	mutex_unlock(&h->lock);
 
 	if (rc) {
@@ -1807,6 +1892,22 @@ int ask_hw_offload_disengage(u8 hw_port_id)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
+
+int ask_hw_offload_disengage_admin(u8 hw_port_id)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+
+	if (!h)
+		return -ENODEV;
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq))
+		return -EINVAL;
+	mutex_lock(&h->lock);
+	ask_hw_role_admin_disabled[hw_port_id] = true;
+	++ask_hw_role_policy_seq[hw_port_id];
+	mutex_unlock(&h->lock);
+	return ask_hw_offload_disengage(hw_port_id);
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_disengage_admin);
 
 /* ------------------------------------------------------------------------- */
 /* Legacy ABI stubs (consumers/tests still name these; Stage C removes them)  */
@@ -1854,7 +1955,8 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
 	 * (genl ASK_CMD_ENGAGE) may enable a port, never traffic.
 	 */
 	rc = ask_hw_offload_engage_profile(port_id,
-					   FMAN_PCD_FE_PROFILE_ROUTED, true, 0);
+					   FMAN_PCD_FE_PROFILE_ROUTED, true, 0,
+					   0);
 	if (rc && rc != -ENODEV)
 		ask_pr_warn("hw: port-bind engage port 0x%02x dir=%u dev=%s failed: %d\n",
 			    port_id, dir,
@@ -2235,12 +2337,13 @@ int ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id)
 /* The port's `offload ipv4|ipv6` mask (ASK_FAM_V4/V6), 0 when disengaged. */
 u8 ask_hw_port_family_mask(u8 hw_port_id)
 {
-	return ask_hw_port_family_get(hw_port_id);
+	return READ_ONCE(ask_hw_ready) ? ask_hw_port_family_get(hw_port_id) : 0;
 }
 
 bool ask_hw_port_is_l2(u8 hw_port_id)
 {
-	return test_bit(hw_port_id, ask_hw_port_l2);
+	return READ_ONCE(ask_hw_ready) &&
+	       test_bit(hw_port_id, ask_hw_port_l2);
 }
 
 /* Cache-only egress FQ lookup: safe under rtnl (never allocates). */

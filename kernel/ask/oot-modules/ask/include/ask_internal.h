@@ -119,10 +119,19 @@ void ask_hw_exit(void);
 int  ask_hw_offload_engage(u8 hw_port_id);
 int  ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 				bool if_engaged, u8 family_mask);
+int ask_hw_offload_role_prepare(u8 hw_port_id,
+				enum fman_pcd_fe_profile profile,
+				bool if_engaged, u8 *family_mask,
+				bool *detached, u64 *policy_seq,
+				u64 expected_policy_seq);
+int ask_hw_offload_role_commit(u8 hw_port_id,
+			       enum fman_pcd_fe_profile profile,
+			       u8 family_mask, u64 policy_seq);
 int  ask_hw_b2_l2_engage(const char *ifname);
 int  ask_hw_b2_l2_record(const char *iifname, const u8 *key,
 			 const char *oifname, bool add);
 int ask_hw_offload_disengage(u8 hw_port_id);
+int ask_hw_offload_disengage_admin(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 /* T-M6-2 B3a bridge helpers (ask_hw.c). */
