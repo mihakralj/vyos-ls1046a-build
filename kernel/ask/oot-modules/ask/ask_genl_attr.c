@@ -110,3 +110,35 @@ const struct nla_policy ask_policer_policy[ASK_POLICER_ATTR_MAX + 1] = {
 [ASK_POLICER_ATTR_RATE_BPS]    = { .type = NLA_U32 },
 [ASK_POLICER_ATTR_BURST_BYTES] = { .type = NLA_U32 },
 };
+
+/*
+ * Per-operation request policies (ASK2-MASTER-PLAN §4.7).
+ * Each genl_ops entry supplies its own policy and maxattr under strict
+ * validation so commands never share one top-level attribute namespace
+ * (avoiding the ASK_FLOW_ATTR_ID == ASK_ATTR_INFO == 1 collision).
+ */
+const struct nla_policy ask_no_attr_policy[2] = {
+	[0] = { .type = NLA_REJECT },
+	[1] = { .type = NLA_REJECT },
+};
+
+const struct nla_policy ask_get_flow_op_policy[ASK_ATTR_FLOW + 1] = {
+	[ASK_FLOW_ATTR_ID] = { .type = NLA_U64 },
+	[ASK_ATTR_FLOW]    = NLA_POLICY_NESTED(ask_flow_policy),
+};
+
+const struct nla_policy ask_set_policer_op_policy[ASK_ATTR_POLICER + 1] = {
+	[ASK_POLICER_ATTR_PORT_ID]     = { .type = NLA_U8 },
+	[ASK_POLICER_ATTR_RATE_BPS]    = { .type = NLA_U32 },
+	[ASK_POLICER_ATTR_BURST_BYTES] = { .type = NLA_U32 },
+	[ASK_ATTR_POLICER]             = NLA_POLICY_NESTED(ask_policer_policy),
+};
+
+const struct nla_policy ask_engage_op_policy[ASK_ATTR_FAMILY_MASK + 1] = {
+	[ASK_ATTR_PORT_ID]     = { .type = NLA_U8 },
+	[ASK_ATTR_FAMILY_MASK] = { .type = NLA_U8 },
+};
+
+const struct nla_policy ask_disengage_op_policy[ASK_ATTR_PORT_ID + 1] = {
+	[ASK_ATTR_PORT_ID] = { .type = NLA_U8 },
+};

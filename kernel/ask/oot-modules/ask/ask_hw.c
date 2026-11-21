@@ -159,9 +159,42 @@ static u8 ask_hw_port_family_get(u8 hw_port_id)
  * NOT silicon-validated and is rejected in preflight even while this is true.
  */
 static bool ask_nat44_offload = true;
-module_param_named(nat44_offload, ask_nat44_offload, bool, 0644);
+static bool ask_nat44_disable_incomplete;
+
+static int ask_nat44_offload_set(const char *val, const struct kernel_param *kp)
+{
+	bool enabled;
+	int rc;
+
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
+	rc = kstrtobool(val ? val : "1", &enabled);
+	if (rc)
+		goto out;
+	if (enabled && ask_nat44_disable_incomplete) {
+		rc = -EBUSY;
+		goto out;
+	}
+	WRITE_ONCE(ask_nat44_offload, enabled);
+	if (READ_ONCE(ask_hw_ready) && !enabled) {
+		rc = ask_flow_nat44_flush();
+		ask_nat44_disable_incomplete = rc != 0;
+		if (rc)
+			ask_pr_err("hw: NAT44 offload disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
+				   rc);
+	}
+out:
+	module_put(THIS_MODULE);
+	return rc;
+}
+
+static const struct kernel_param_ops ask_nat44_offload_ops = {
+	.set = ask_nat44_offload_set,
+	.get = param_get_bool,
+};
+module_param_cb(nat44_offload, &ask_nat44_offload_ops, &ask_nat44_offload, 0644);
 MODULE_PARM_DESC(nat44_offload,
-		 "IPv4-to-IPv4 NAT/PAT FMan hardware offload (default 1; nat66 separate, nat46/nat64 not offloadable)");
+		 "IPv4-to-IPv4 NAT/PAT FMan hardware offload (default 1; 0 closes admission and withdraws identified records; nat66 separate, nat46/nat64 not offloadable)");
 
 bool ask_hw_nat44_offload_armed(void)
 {
@@ -183,9 +216,42 @@ EXPORT_SYMBOL_GPL(ask_hw_nat44_offload_armed);
  * opcode — and always fall back to software.
  */
 static bool ask_nat66_offload = true;
-module_param_named(nat66_offload, ask_nat66_offload, bool, 0644);
+static bool ask_nat66_disable_incomplete;
+
+static int ask_nat66_offload_set(const char *val, const struct kernel_param *kp)
+{
+	bool enabled;
+	int rc;
+
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
+	rc = kstrtobool(val ? val : "1", &enabled);
+	if (rc)
+		goto out;
+	if (enabled && ask_nat66_disable_incomplete) {
+		rc = -EBUSY;
+		goto out;
+	}
+	WRITE_ONCE(ask_nat66_offload, enabled);
+	if (READ_ONCE(ask_hw_ready) && !enabled) {
+		rc = ask_flow_nat66_flush();
+		ask_nat66_disable_incomplete = rc != 0;
+		if (rc)
+			ask_pr_err("hw: NAT66 offload disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
+				   rc);
+	}
+out:
+	module_put(THIS_MODULE);
+	return rc;
+}
+
+static const struct kernel_param_ops ask_nat66_offload_ops = {
+	.set = ask_nat66_offload_set,
+	.get = param_get_bool,
+};
+module_param_cb(nat66_offload, &ask_nat66_offload_ops, &ask_nat66_offload, 0644);
 MODULE_PARM_DESC(nat66_offload,
-		 "IPv6-to-IPv6 NAT FMan hardware offload (default 1; nat44 separate, nat46/nat64 not offloadable)");
+		 "IPv6-to-IPv6 NAT FMan hardware offload (default 1; 0 closes admission and withdraws identified records; nat44 separate, nat46/nat64 not offloadable)");
 
 bool ask_hw_nat66_offload_armed(void)
 {
@@ -2786,6 +2852,12 @@ int ask_hw_init(void)
 	(void)ask_hw_pcd_bringup();
 	return 0;
 }
+
+bool ask_hw_is_ready(void)
+{
+	return READ_ONCE(ask_hw_ready);
+}
+EXPORT_SYMBOL_GPL(ask_hw_is_ready);
 
 void ask_hw_set_ready(bool ready)
 {

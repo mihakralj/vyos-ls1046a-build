@@ -117,7 +117,7 @@ static void *kzalloc(size_t n, int flags) { return calloc(1, n); }
 static void kfree(void *p) { free(p); }
 
 struct ask_flow_key {
-	u8 l3_proto, l4_proto, port_id, vlan_edit_flags;
+	u8 l3_proto, l4_proto, port_id, vlan_edit_flags, nat_flags;
 	__be16 vlan_push_tci, vlan_push_tpid;
 	u8 next_hop_mac[ETH_ALEN], egress_mac[ETH_ALEN];
 	u64 family_policy_seq;
@@ -129,6 +129,7 @@ static struct ask_flow_table table;
 static unsigned long jiffies;
 static atomic_bool vlan_armed = ATOMIC_VAR_INIT(true);
 static atomic_bool pppoe_armed = ATOMIC_VAR_INIT(true);
+static atomic_bool nat44_armed = ATOMIC_VAR_INIT(true);
 static atomic_bool pppoe_port_armed = ATOMIC_VAR_INIT(true);
 static u8 ask_hw_port_family[64];
 static u64 ask_hw_family_seq = 1;
@@ -171,6 +172,7 @@ static unsigned long ask_hw_get_enq_fe_off(void) { return 1; }
 
 static bool ask_hw_vlan_offload_armed(void) { return atomic_load(&vlan_armed); }
 static bool ask_hw_pppoe_offload_armed(void) { return atomic_load(&pppoe_armed); }
+static bool ask_hw_nat44_offload_armed(void) { return atomic_load(&nat44_armed); }
 static bool ask_pppoe_port_armed(int ifindex, u8 l3_proto)
 {
 	unsigned int family = l3_proto == ASK_FLOW_L3_IPV4 ? ASK_FAM_V4 :
