@@ -16,22 +16,29 @@ The per-fan spinning floor is learned/maintained continuously by a guarded
 proportional seek (see the SEEK section), not hardcoded — users may attach
 different fans to CH1/CH2.
 
-Single Python file, one systemd unit, stdlib only. On SIGTERM it leaves PWM at
-MAX so a crash never suffocates the SoC; `systemctl stop fan-pid` goes full speed.
+On SIGTERM it leaves PWM at MAX so a crash never suffocates the SoC;
+`systemctl stop fan-pid` goes full speed.
 """
 from __future__ import annotations
 
 import array
 import fcntl
+import math
 import os
 import re
 import signal
+import socket
 import struct
+import subprocess
 import sys
 import syslog
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+from vyos.fan_control import (DEFAULTS, PENDING_TIMEOUT, SENSOR_MAX_AGE, ZONE_NAMES,
+                              clock_now, invalidate_applied, load_snapshot_record, pending_age,
+                              process_start_time, read_verification, write_applied)
 
 
 # ---------- Thermal tuning -------------------------------------------------------
@@ -51,6 +58,13 @@ class Zone:
     integral: float = 0.0
 
 
+def configured_zone(key: str, kp: float, ki: float,
+                    hwmon: Optional[tuple[str, str, str]] = None) -> Zone:
+    defaults = DEFAULTS[key]
+    return Zone(ZONE_NAMES[key], defaults['setpoint'], defaults['critical'],
+                kp, ki, hwmon)
+
+
 # Kp restored 2026-08-25 to the pre-48cfcec5 values (4/6/5). The 2026-05-17
 # softening (halving Kp) was compensating for a separate bug: step() clamped
 # each zone's demand UP to the learned idle floor before max(), which masked the
@@ -63,11 +77,11 @@ class Zone:
 # slamming to MAX at crit. Ki unchanged (same steady-state tracking contract);
 # crit_temp force-MAX unaffected.
 ZONES = [
-    Zone("ddr-thermal",     setpoint=65.0, crit_temp=80.0, kp=4.0,  ki=0.20),
-    Zone("serdes-thermal",  setpoint=70.0, crit_temp=85.0, kp=6.0,  ki=0.30),
-    Zone("fman-thermal",    setpoint=70.0, crit_temp=87.0, kp=6.0,  ki=0.30),
-    Zone("cluster-thermal", setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
-    Zone("sec-thermal",     setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
+    configured_zone('memory', 4.0, 0.20),
+    configured_zone('serdes', 6.0, 0.30),
+    configured_zone('fman', 6.0, 0.30),
+    configured_zone('cpu-int', 5.0, 0.25),
+    configured_zone('crypto', 5.0, 0.25),
     # ---- BOARD SENSORS (added 2026-11-08) ----
     # Two TI TMP431 chips (driver tmp401) at 0x4c on channels 1 and 2 of the
     # PCA9545 mux behind i2c0 (DT "Thermal sensors"). temp1 = the chip's own
@@ -84,12 +98,12 @@ ZONES = [
     # limit. Idle readings when added: PCB 34 C, CPU 54 C,
     # SFP+ 41 C, so these are backstops; the SoC zones normally lead.
     # Board temperatures move slowly, hence the ddr-like gains.
-    Zone("PCB",          setpoint=60.0, crit_temp=85.0, kp=4.0, ki=0.20,
-         hwmon=("tmp431", "i2c-mux@70/i2c@1/temp-sensor@4c", "temp1_input")),
-    Zone("CPU",          setpoint=70.0, crit_temp=85.0, kp=4.0, ki=0.20,
-         hwmon=("tmp431", "i2c-mux@70/i2c@1/temp-sensor@4c", "temp2_input")),
-    Zone("SFP+",         setpoint=60.0, crit_temp=85.0, kp=4.0, ki=0.20,
-         hwmon=("tmp431", "i2c-mux@70/i2c@2/temp-sensor@4c", "temp1_input")),
+    configured_zone('pcb', 4.0, 0.20,
+                    ("tmp431", "i2c-mux@70/i2c@1/temp-sensor@4c", "temp1_input")),
+    configured_zone('cpu-ext', 4.0, 0.20,
+                    ("tmp431", "i2c-mux@70/i2c@1/temp-sensor@4c", "temp2_input")),
+    configured_zone('sfp-plus', 4.0, 0.20,
+                    ("tmp431", "i2c-mux@70/i2c@2/temp-sensor@4c", "temp1_input")),
 ]
 # The tmp401 module can bind after fan-pid starts; missing zones are re-probed
 # at this interval and picked up without a restart.
@@ -143,6 +157,10 @@ TICK_SECONDS = 2.0   # control loop period
 LOG_INTERVAL = 30.0  # seconds between INFO log lines
 
 EMC2305_HWMON_NAME = "emc2305"
+I2C_DEVICES_ROOT = '/sys/bus/i2c/devices'
+EMC2305_DRIVER_ROOT = '/sys/bus/i2c/drivers/emc2305'
+HWMON_ROOT = '/sys/class/hwmon'
+I2C_DEV_ROOT = '/dev'
 PWM_FILE  = "pwm1"
 FAN_FILE  = "fan1_input"
 
@@ -152,9 +170,9 @@ FAN_DEFS = [
     {"name": "fan2", "duty_reg": 0x40, "tach_file": "fan2_input", "tach_reg": 0x4e},
 ]
 
-# True once set_tach_range_500() succeeds: RPM then comes from the raw 13-bit TACH
-# register (m=1). On failure we keep sysfs (m=2) so RPM is never 2x-inflated.
-USE_RAW_TACH = False
+TACH_MODES: dict[int, Optional[int]] = {0x30: None, 0x40: None}
+TACH_RETRY_SECONDS = 10.0
+TACH_RECOVERY_SAMPLES = 2
 
 # The kernel 6.18 emc2305 sysfs PWM path silently drops sub-MAX writes (the chip
 # is in direct-PWM mode, FAN_CONFIG1 bit7=0), so all PWM writes go straight to the
@@ -179,7 +197,6 @@ EMC2305_CFG_REG_FAN1    = 0x32     # Fan Configuration 1 (ch1)
 EMC2305_CFG_REG_FAN2    = 0x42     # Fan Configuration 1 (ch2)
 EMC2305_RANGE_MASK      = 0x60     # bits [6:5]
 EMC2305_RANGE_500       = 0x00     # RANGE=500 RPM, m=1
-EMC2305_TACH_MULTIPLIER = 1        # matches RANGE_500
 TACH_SILICON_FLOOR_RPM  = 484      # at/below this the count saturates -> reads 0
 
 HARD_FAULT_TEMP = 100.0  # any zone at/above this logs CRIT
@@ -194,73 +211,86 @@ PRESENCE_SPINUP_S = 3.0  # hold MAX this long before the 0-rpm presence read
 
 
 # ---------- sysfs helpers --------------------------------------------------------
-def find_emc2305_pwm() -> tuple[str, str]:
-    """Locate the EMC2305 hwmon by name (indices drift); return (pwm, fan) paths."""
-    for entry in sorted(os.listdir("/sys/class/hwmon")):
-        if not entry.startswith("hwmon"):
+def find_bound_emc2305() -> tuple[int, str]:
+    matches = []
+    for entry in os.listdir(I2C_DEVICES_ROOT):
+        match = re.fullmatch(r'(\d+)-002e', entry)
+        device = os.path.join(I2C_DEVICES_ROOT, entry)
+        driver = os.path.join(device, 'driver')
+        if (match and os.path.islink(driver) and os.path.isdir(EMC2305_DRIVER_ROOT) and
+                os.path.realpath(driver) == os.path.realpath(EMC2305_DRIVER_ROOT)):
+            matches.append((int(match.group(1)), os.path.realpath(device)))
+    if len(matches) != 1:
+        raise RuntimeError(f'expected one bound emc2305 at 0x2e, found {len(matches)}')
+    return matches[0]
+
+
+def find_emc2305_pwm(device: str) -> tuple[str, str]:
+    matches = []
+    for entry in sorted(os.listdir(HWMON_ROOT)):
+        if not entry.startswith('hwmon'):
             continue
-        name_path = f"/sys/class/hwmon/{entry}/name"
+        hwmon = os.path.join(HWMON_ROOT, entry)
         try:
-            with open(name_path) as f:
-                if f.read().strip() == EMC2305_HWMON_NAME:
-                    pwm  = f"/sys/class/hwmon/{entry}/{PWM_FILE}"
-                    fan  = f"/sys/class/hwmon/{entry}/{FAN_FILE}"
-                    if not os.path.exists(pwm):
-                        raise RuntimeError(f"{pwm} missing — wrong EMC2305 channel?")
-                    return pwm, fan
+            with open(os.path.join(hwmon, 'name')) as source:
+                name = source.read().strip()
         except OSError:
             continue
-    raise RuntimeError("EMC2305 hwmon not found (no entry named 'emc2305')")
+        if name == EMC2305_HWMON_NAME and os.path.realpath(os.path.join(hwmon, 'device')) == os.path.realpath(device):
+            pwm = os.path.join(hwmon, PWM_FILE)
+            fan = os.path.join(hwmon, FAN_FILE)
+            if os.path.exists(pwm) and os.path.exists(fan):
+                matches.append((pwm, fan))
+    if len(matches) != 1:
+        raise RuntimeError(f'expected one hwmon for bound emc2305, found {len(matches)}')
+    return matches[0]
 
 
-def find_emc2305_i2c() -> int:
-    """Open /dev/i2c-<bus> for the EMC2305 and claim 0x2e with I2C_SLAVE_FORCE.
-
-    FORCE is required because the kernel emc2305 driver also holds the address
-    (plain I2C_SLAVE returns EBUSY). Caller must os.close() the returned fd.
-    """
-    rx = re.compile(r"^(\d+)-002e$")
-    for entry in sorted(os.listdir("/sys/bus/i2c/devices")):
-        m = rx.match(entry)
-        if not m:
-            continue
-        bus = int(m.group(1))
-        # Confirm it is really an emc2305 (another chip could sit at 0x2e).
-        drv = f"/sys/bus/i2c/devices/{entry}/driver"
-        if os.path.islink(drv):
-            target = os.path.basename(os.readlink(drv))
-            if target != "emc2305":
-                continue
-        dev = f"/dev/i2c-{bus}"
-        if not os.path.exists(dev):
-            try:
-                os.system("modprobe i2c-dev >/dev/null 2>&1")
-            except Exception:
-                pass
-        if not os.path.exists(dev):
-            raise RuntimeError(f"{dev} missing (i2c-dev module not loaded?)")
-        fd = os.open(dev, os.O_RDWR)
+def find_emc2305_i2c(expected: tuple[int, str]) -> int:
+    bus, device = find_bound_emc2305()
+    if bus != expected[0] or os.path.realpath(device) != os.path.realpath(expected[1]):
+        raise RuntimeError('bound emc2305 changed before I2C open')
+    dev = os.path.join(I2C_DEV_ROOT, f'i2c-{bus}')
+    if not os.path.exists(dev):
         try:
-            fcntl.ioctl(fd, I2C_SLAVE_FORCE, EMC2305_I2C_ADDR)
-        except OSError:
-            os.close(fd)
-            raise
-        return fd
-    raise RuntimeError("No EMC2305 found on any i2c bus (no <bus>-002e entry under /sys/bus/i2c/devices)")
+            subprocess.run(['/sbin/modprobe', 'i2c-dev'], timeout=3, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f'could not load i2c-dev: {error}') from error
+    if not os.path.exists(dev):
+        raise RuntimeError(f"{dev} missing (i2c-dev module not loaded?)")
+    current = find_bound_emc2305()
+    if current[0] != bus or os.path.realpath(current[1]) != os.path.realpath(device):
+        raise RuntimeError('bound emc2305 changed before I2C open')
+    fd = os.open(dev, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        current = find_bound_emc2305()
+        if current[0] != bus or os.path.realpath(current[1]) != os.path.realpath(device):
+            raise RuntimeError('bound emc2305 changed before I2C claim')
+        fcntl.ioctl(fd, I2C_SLAVE_FORCE, EMC2305_I2C_ADDR)
+        current = find_bound_emc2305()
+        if current[0] != bus or os.path.realpath(current[1]) != os.path.realpath(device):
+            raise RuntimeError('bound emc2305 changed during I2C claim')
+    except (OSError, RuntimeError):
+        os.close(fd)
+        raise
+    return fd
 
 
-def i2c_write_pwm(i2c_fd: int, value: int, duty_reg: int = EMC2305_FAN1_DUTY_REG) -> None:
+def i2c_write_pwm(i2c_fd: int, value: int, duty_reg: int = EMC2305_FAN1_DUTY_REG) -> bool:
     """Write a duty register; log transient NACKs and retry on the next tick."""
     try:
-        os.write(i2c_fd, bytes([duty_reg, value & 0xFF]))
+        if os.write(i2c_fd, bytes([duty_reg, value & 0xFF])) != 2:
+            raise OSError("short I2C write")
+        return True
     except OSError as e:
         syslog.syslog(syslog.LOG_WARNING, f"fan-pid: i2c write failed (reg 0x{duty_reg:02x}): {e}")
+        return False
 
 
-def i2c_write_all_fans(i2c_fd: int, value: int) -> None:
+def i2c_write_all_fans(i2c_fd: int, value: int) -> dict[int, bool]:
     """Write the same duty to both physical fan channels."""
-    for fan in FAN_DEFS:
-        i2c_write_pwm(i2c_fd, value, fan["duty_reg"])
+    return {fan['duty_reg']: i2c_write_pwm(i2c_fd, value, fan['duty_reg']) for fan in FAN_DEFS}
 
 
 # ---------- EMC2305 SMBus access ------------------------------------------------
@@ -316,33 +346,46 @@ def i2c_read_word(i2c_fd: int, reg: int) -> Optional[int]:
         return None
 
 
-def set_tach_range_500(i2c_fd: int) -> None:
-    """Set Fan Config RANGE[1:0]=00 (m=1), preserving all other bits."""
-    ok = True
-    for reg in (EMC2305_CFG_REG_FAN1, EMC2305_CFG_REG_FAN2):
-        cur = i2c_read_byte(i2c_fd, reg)
-        if cur is None:
-            ok = False
-            continue
-        new = (cur & ~EMC2305_RANGE_MASK) | EMC2305_RANGE_500
-        if new != cur:
-            try:
-                _smbus_xfer(i2c_fd, I2C_SMBUS_WRITE, reg,
-                            I2C_SMBUS_BYTE_DATA, new)
-            except OSError as e:
-                syslog.syslog(syslog.LOG_WARNING,
-                              f"fan-pid: RANGE write failed (reg 0x{reg:02x}): {e}")
-                ok = False
-                continue
-        syslog.syslog(syslog.LOG_INFO,
-                      f"fan-pid: EMC2305 cfg 0x{reg:02x}: 0x{cur:02x} -> 0x{new:02x} "
-                      f"(RANGE=500 RPM, m=1)")
-    if not ok:
-        raise RuntimeError("could not program EMC2305 RANGE=500 on all channels")
+def current_tach_mode(i2c_fd: int, duty_reg: int) -> Optional[int]:
+    cfg_reg = {0x30: EMC2305_CFG_REG_FAN1, 0x40: EMC2305_CFG_REG_FAN2}.get(duty_reg)
+    if cfg_reg is None:
+        return None
+    value = i2c_read_byte(i2c_fd, cfg_reg)
+    if value is None:
+        return None
+    return {0: 1, 0x20: 2}.get(value & EMC2305_RANGE_MASK)
 
 
-def read_fan_rpm_raw(i2c_fd: int, tach_reg: int) -> Optional[int]:
-    """RPM from the raw 13-bit TACH register at m=1, or 0 if stalled/below floor."""
+def configure_tach_channel(i2c_fd: int, duty_reg: int) -> Optional[int]:
+    cfg_reg = {0x30: EMC2305_CFG_REG_FAN1, 0x40: EMC2305_CFG_REG_FAN2}.get(duty_reg)
+    if cfg_reg is None:
+        return None
+    current = i2c_read_byte(i2c_fd, cfg_reg)
+    if current is None:
+        TACH_MODES[duty_reg] = None
+        return None
+    desired = (current & ~EMC2305_RANGE_MASK) | EMC2305_RANGE_500
+    if desired != current:
+        try:
+            _smbus_xfer(i2c_fd, I2C_SMBUS_WRITE, cfg_reg, I2C_SMBUS_BYTE_DATA, desired)
+        except OSError as error:
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"fan-pid: RANGE write failed (reg 0x{cfg_reg:02x}): {error}")
+    mode = current_tach_mode(i2c_fd, duty_reg)
+    TACH_MODES[duty_reg] = mode
+    syslog.syslog(syslog.LOG_INFO if mode == 1 else syslog.LOG_WARNING,
+                  f"fan-pid: tach RANGE channel 0x{duty_reg:02x}: {mode or 'unknown'}")
+    return mode
+
+
+def set_tach_range_500(i2c_fd: int) -> dict[int, Optional[int]]:
+    return {fan['duty_reg']: configure_tach_channel(i2c_fd, fan['duty_reg']) for fan in FAN_DEFS}
+
+
+def read_fan_rpm_raw(i2c_fd: int, tach_reg: int, multiplier: int = 1) -> Optional[int]:
+    """RPM from the raw 13-bit TACH register, or 0 if stalled/below floor."""
+    if multiplier not in (1, 2):
+        return None
     word = i2c_read_word(i2c_fd, tach_reg)
     if word is None:
         return None
@@ -350,8 +393,8 @@ def read_fan_rpm_raw(i2c_fd: int, tach_reg: int) -> Optional[int]:
     count = raw >> EMC2305_TACH_UNUSE_BITS
     if count == 0:
         return 0
-    rpm = (EMC2305_RPM_FACTOR * EMC2305_TACH_MULTIPLIER) // count
-    return 0 if rpm <= TACH_SILICON_FLOOR_RPM else rpm
+    rpm = (EMC2305_RPM_FACTOR * multiplier) // count
+    return 0 if rpm <= TACH_SILICON_FLOOR_RPM * multiplier else rpm
 
 
 def _emc2305_cdev_names() -> set:
@@ -497,8 +540,49 @@ def read_temp(path: str) -> Optional[float]:
     try:
         with open(path) as f:
             return int(f.read().strip()) / 1000.0
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return None
+
+
+def read_sensor(zone: Zone, path: str) -> Optional[float]:
+    if zone.hwmon and zone.hwmon[2] == 'temp2_input':
+        fault_path = os.path.join(os.path.dirname(path), 'temp2_fault')
+        try:
+            with open(fault_path) as fault:
+                if int(fault.read().strip()) != 0:
+                    return None
+        except (OSError, ValueError):
+            return None
+    return read_temp(path)
+
+
+def sample_temperatures(zone_paths: dict[str, str]):
+    temperatures = {}
+    samples = {}
+    failures = {}
+    keys = {value: key for key, value in ZONE_NAMES.items()}
+    failures = {zone.name: 'missing' for zone in ZONES if not zone_paths.get(zone.name)}
+    if failures:
+        return temperatures, samples, failures
+    for zone in ZONES:
+        path = zone_paths[zone.name]
+        sampled = clock_now()
+        value = read_sensor(zone, path)
+        try:
+            if value is None or not math.isfinite(float(value)) or float(value) < -273.15:
+                raise ValueError('invalid temperature')
+            temperatures[zone.name] = float(value)
+            samples[keys[zone.name]] = sampled
+        except (TypeError, ValueError, OverflowError):
+            failures[zone.name] = 'unreadable'
+            return temperatures, samples, failures
+        now = clock_now()
+        for name, sampled in samples.items():
+            if now - sampled > SENSOR_MAX_AGE:
+                failures[ZONE_NAMES[name]] = 'stale'
+        if failures:
+            return temperatures, samples, failures
+    return temperatures, samples, failures
 
 
 def read_fan_rpm(path: str) -> Optional[int]:
@@ -510,49 +594,154 @@ def read_fan_rpm(path: str) -> Optional[int]:
 
 
 def fan_rpm(fan: dict, i2c_fd: int) -> Optional[int]:
-    """RPM via raw TACH (when RANGE=500 is programmed) else sysfs; None on error."""
-    if USE_RAW_TACH and "tach_reg" in fan:
-        return read_fan_rpm_raw(i2c_fd, fan["tach_reg"])
-    path = fan.get("tach_path")
-    return read_fan_rpm(path) if path else None
+    duty_reg = fan.get('duty_reg')
+    tach_reg = fan.get('tach_reg')
+    if duty_reg not in (0x30, 0x40):
+        return None
+    mode = current_tach_mode(i2c_fd, duty_reg)
+    TACH_MODES[duty_reg] = mode
+    if mode not in (1, 2) or tach_reg is None:
+        return None
+    rpm = read_fan_rpm_raw(i2c_fd, tach_reg, mode)
+    confirmed = current_tach_mode(i2c_fd, duty_reg)
+    TACH_MODES[duty_reg] = confirmed
+    return rpm if confirmed == mode else None
 
 
-def play_startup_whistle(i2c_fd: int) -> None:
-    """One-shot audible boot chirp; also spins fans up before presence detection."""
+def notify_watchdog() -> None:
+    address = os.environ.get('NOTIFY_SOCKET')
+    if not address:
+        return
+    if address.startswith('@'):
+        address = '\0' + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notifier:
+            notifier.setblocking(False)
+            notifier.sendto(b'WATCHDOG=1', address)
+    except OSError as error:
+        syslog.syslog(syslog.LOG_ERR, f"fan-pid: watchdog notification failed: {error}")
+
+
+def play_startup_whistle(i2c_fd: int, zone_paths: dict[str, str], fans: list[dict]) -> None:
+    """Play a startup chirp only for confirmed fans."""
+    snapshot_seen = False
     try:
         for _ in range(WHISTLE_PULSES):
             if not _running:
                 break
-            i2c_write_all_fans(i2c_fd, WHISTLE_LOW_PWM)
+            notify_watchdog()
+            try:
+                values, persisted, generation = load_snapshot_record(require=snapshot_seen)
+                snapshot_seen = snapshot_seen or persisted
+                if not persisted:
+                    raise ValueError('boot fan configuration is not reconciled')
+                read_verification(values, generation)
+                temperatures, _, failures = sample_temperatures(zone_paths)
+                if failures:
+                    raise ValueError('fan sensor readings unavailable')
+                if any(temperatures[ZONE_NAMES[name]] >= settings['critical'] or
+                       temperatures[ZONE_NAMES[name]] >= HARD_FAULT_TEMP
+                       for name, settings in values.items()):
+                    raise ValueError('fan sensor is at a critical temperature')
+                read_verification(values, generation)
+                age = pending_age()
+                if age is not None and age >= PENDING_TIMEOUT:
+                    raise ValueError('fan configuration reconciliation timed out')
+                active = {fan['duty_reg']: fan for fan in fans if fan.get('present') and fan.get('tach_ok')}
+                if EMC2305_FAN1_DUTY_REG not in active or any(
+                        fan.get('ever_seen') and not fan.get('present') for fan in fans):
+                    raise ValueError('fan presence is unconfirmed')
+                for reg, fan in active.items():
+                    mode = current_tach_mode(i2c_fd, reg)
+                    TACH_MODES[reg] = mode
+                    sampled = clock_now()
+                    rpm = fan_rpm(fan, i2c_fd)
+                    if (mode != 1 or TACH_MODES.get(reg) != 1 or type(rpm) is not int or
+                            rpm <= 0 or clock_now() - sampled > SENSOR_MAX_AGE):
+                        raise ValueError('fan tach or RANGE is unconfirmed')
+            except (OSError, ValueError, UnicodeError) as error:
+                syslog.syslog(syslog.LOG_ERR, f"fan-pid: skipping startup whistle: {error}")
+                i2c_write_all_fans(i2c_fd, PWM_MAX)
+                return
+            for fan in FAN_DEFS:
+                reg = fan['duty_reg']
+                value = WHISTLE_LOW_PWM if reg in active else PWM_MAX
+                if not i2c_write_pwm(i2c_fd, value, reg):
+                    raise OSError('startup fan duty write failed')
+                if value == PWM_MAX and i2c_read_byte(i2c_fd, reg) != PWM_MAX:
+                    raise OSError('unconfirmed fan duty readback')
             time.sleep(WHISTLE_HALF_S)
-            i2c_write_all_fans(i2c_fd, WHISTLE_HIGH_PWM)
+            results = i2c_write_all_fans(i2c_fd, WHISTLE_HIGH_PWM)
+            if not all(results.get(fan['duty_reg']) for fan in FAN_DEFS):
+                raise OSError('startup fan maximum write failed')
             time.sleep(WHISTLE_HALF_S)
     except Exception as e:
+        i2c_write_all_fans(i2c_fd, PWM_MAX)
         syslog.syslog(syslog.LOG_WARNING, f"fan-pid: startup whistle failed: {e!r}")
     syslog.syslog(syslog.LOG_INFO, "fan-pid: startup whistle complete — entering control loop")
 
 
-def detect_present_fans(i2c_fd: int, hwmon_dir: str) -> list[dict]:
-    """Flag each channel present/absent from its tach at full drive (post-whistle).
-
-    A channel reading 0 at MAX has no fan or an unwired tach; it is marked not
-    present with seek disabled.
-    """
+def detect_present_fans(i2c_fd: int, hwmon_dir: str,
+                        verified_outputs: Optional[dict[int, bool]] = None) -> list[dict]:
     detected = []
     for fan in FAN_DEFS:
         runtime = {**fan, "tach_path": os.path.join(hwmon_dir, fan["tach_file"])}
+        sampled = clock_now()
         rpm = fan_rpm(runtime, i2c_fd)
-        runtime["tach_ok"] = bool(rpm and rpm > 0)
+        elapsed = clock_now() - sampled
+        runtime['ever_seen'] = type(rpm) is int and rpm > 0
+        runtime['tach_mode'] = TACH_MODES.get(fan['duty_reg'])
+        runtime['sampled_at'] = sampled if 0 <= elapsed <= SENSOR_MAX_AGE else None
+        runtime["tach_ok"] = bool(runtime['ever_seen'] and runtime['sampled_at'] is not None and
+                                  runtime['tach_mode'] in (1, 2) and verified_outputs and
+                                  verified_outputs.get(fan['duty_reg']))
         runtime["present"] = runtime["tach_ok"]
         detected.append(runtime)
         if runtime["tach_ok"]:
             syslog.syslog(syslog.LOG_INFO,
                           f"fan-pid: {fan['name']} present ({rpm} rpm @ max)")
         else:
-            syslog.syslog(syslog.LOG_INFO,
-                          f"fan-pid: {fan['name']} not present "
-                          f"(0 rpm @ max on reg 0x{fan['duty_reg']:02x})")
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"fan-pid: {fan['name']} presence unconfirmed "
+                          f"(tach={rpm}, max_verified={bool(verified_outputs and verified_outputs.get(fan['duty_reg']))})")
     return detected
+
+
+def combine_startup_detections(initial: list[dict], final: list[dict]) -> list[dict]:
+    previous = {fan['duty_reg']: fan for fan in initial}
+    for fan in final:
+        earlier = previous.get(fan['duty_reg'], {})
+        fan['ever_seen'] = bool(fan.get('ever_seen') or earlier.get('ever_seen'))
+        first = earlier.get('sampled_at')
+        second = fan.get('sampled_at')
+        try:
+            elapsed = float(second) - float(first)
+        except (TypeError, ValueError, OverflowError):
+            elapsed = -1.0
+        fan['present'] = bool(fan.get('present') and earlier.get('present') and
+                              math.isfinite(elapsed) and TICK_SECONDS <= elapsed <= SENSOR_MAX_AGE and
+                              fan.get('tach_mode') in (1, 2) and
+                              fan.get('tach_mode') == earlier.get('tach_mode'))
+        fan['tach_ok'] = fan['present']
+    return final
+
+
+def spinup_and_detect(i2c_fd: int, hwmon_dir: str) -> list[dict]:
+    results = i2c_write_all_fans(i2c_fd, PWM_MAX) or {}
+    verified = {fan['duty_reg']: bool(results.get(fan['duty_reg'])) and
+                i2c_read_byte(i2c_fd, fan['duty_reg']) == PWM_MAX for fan in FAN_DEFS}
+    started = time.monotonic()
+    started_boot = clock_now()
+    while _running and time.monotonic() - started < PRESENCE_SPINUP_S:
+        remaining = PRESENCE_SPINUP_S - (time.monotonic() - started)
+        if remaining > 0:
+            time.sleep(min(0.2, remaining))
+    elapsed = time.monotonic() - started
+    boot_elapsed = clock_now() - started_boot
+    spun_up = (_running and elapsed >= PRESENCE_SPINUP_S and abs(boot_elapsed - elapsed) <= 0.1)
+    for reg in verified:
+        verified[reg] = spun_up and verified[reg] and i2c_read_byte(i2c_fd, reg) == PWM_MAX
+    return detect_present_fans(i2c_fd, hwmon_dir, verified_outputs=verified)
 
 
 # ---------- Controller ----------------------------------------------------------
@@ -560,8 +749,10 @@ class Controller:
     """One PI controller per zone, output combined via max() and sent to all fans."""
 
     def __init__(self, i2c_fd: int, fans: list[dict], hwmon_dir: str,
-                 zone_paths: dict[str, str], floors: dict[int, int]):
+                 zone_paths: dict[str, str], floors: dict[int, int],
+                 controller_device: Optional[str] = None):
         self.i2c_fd = i2c_fd
+        self.controller_device = controller_device
         self.zone_paths = zone_paths
         # Each fan carries a mutable floor (starts high at FLOOR_START, the seek
         # converges it down) plus its seek state. All fans share one PID demand
@@ -574,9 +765,20 @@ class Controller:
                 **fan,
                 "present": present,
                 "tach_ok": present,
+                "ever_seen": bool(fan.get('ever_seen', present)),
+                "recovering": not present,
+                "recovery_count": 0,
+                "stall_hysteresis": False,
+                "last_probe_at": None,
+                "max_since": None,
+                "max_boot": None,
+                "tach_mode": TACH_MODES.get(fan["duty_reg"]),
+                "next_range_retry": 0.0,
+                "recovered_tick": False,
                 "tach_path": os.path.join(hwmon_dir, fan["tach_file"]),
                 "floor": PWM_MAX if not present else max(FLOOR_MIN, min(PWM_MAX, start)),
-                "rpm": 0 if not present else None,        # last tach sample (for fan-check)
+                "rpm": None,
+                "rpm_at": None,
                 "last_written_pwm": -1,   # force first write
                 "seek_flat": 0,           # consecutive flat ticks (gates NEAR DOWN)
                 "seek_settle": 0,         # ticks to observe response after a DOWN step
@@ -585,10 +787,16 @@ class Controller:
                 "cooldown": 0,            # ticks where a DOWN move is blocked
                 "kick": False,            # request a 255 kick this tick
             })
-        self.export_floors()
+        initial_export_ok = self.export_floors()
         self.smoothed_pwm = float(self.min_floor())
         self.last_log_t = 0.0
         self.next_rescan_t = time.monotonic() + ZONE_RESCAN_S
+        self.snapshot_seen = False
+        self.active_settings = None
+        self.active_persisted = False
+        self.active_generation = None
+        self.ack_failed = False
+        self.output_failed = not initial_export_ok
 
     def rescan_missing_zones(self) -> None:
         """Pick up zones whose sensor appeared after startup (late module bind)."""
@@ -609,7 +817,7 @@ class Controller:
         """Lowest floor across driven fans (the shared-demand clamp)."""
         return min((f["floor"] for f in self.fans if f.get("present", True)), default=FLOOR_MIN)
 
-    def export_floors(self) -> None:
+    def export_floors(self) -> bool:
         """Atomically publish floors, presence, tach_source and per-fan RPM for fan-check.
 
         RPM is published because at m=1 the kernel sysfs fanN_input reads 2x high.
@@ -617,22 +825,43 @@ class Controller:
         tmp = f"{FLOOR_STATE_FILE}.tmp.{os.getpid()}"
         try:
             os.makedirs(FLOOR_STATE_DIR, exist_ok=True)
-            lines = [f"0x{f['duty_reg']:02x}={f['floor']}\n" for f in self.fans]
+            pid = os.getpid()
+            lines = ['export_version=1\n', f'export_updated={clock_now()}\n',
+                     f'export_pid={pid}\n', f'export_start={process_start_time(pid)}\n']
+            lines.extend(f"0x{f['duty_reg']:02x}={f['floor']}\n" for f in self.fans)
+            if self.controller_device is not None:
+                lines.append(f'controller_device={self.controller_device}\n')
             for f in self.fans:
                 lines.append(f"present:0x{f['duty_reg']:02x}={1 if f.get('present', True) else 0}\n")
-            lines.append(f"tach_source={'raw-m1' if USE_RAW_TACH else 'sysfs-m2'}\n")
+                if f['recovering'] or not f['present'] or f['tach_mode'] != 1:
+                    state = 'recovering' if f['duty_reg'] == EMC2305_FAN1_DUTY_REG or f['ever_seen'] else 'unknown'
+                else:
+                    state = 'present'
+                lines.append(f"fan_state:0x{f['duty_reg']:02x}={state}\n")
+            lines.append("tach_source=raw-m1\n")
+            for f in self.fans:
+                mode = f.get('tach_mode')
+                lines.append(f"tach_range:0x{f['duty_reg']:02x}={f'm{mode}' if mode in (1, 2) else 'unknown'}\n")
+                lines.append(f"tach_recovery:0x{f['duty_reg']:02x}={int(f['recovering'])}\n")
             for f in self.fans:
                 rpm = f.get("rpm")
-                if rpm is not None:
+                sampled = f.get('rpm_at')
+                if rpm is not None and sampled is not None:
                     lines.append(f"rpm:0x{f['duty_reg']:02x}={rpm}\n")
+                    lines.append(f"rpm_sample:0x{f['duty_reg']:02x}={sampled}\n")
             with open(tmp, "w") as fh:
                 fh.writelines(lines)
+                os.fchmod(fh.fileno(), 0o644)
             os.replace(tmp, FLOOR_STATE_FILE)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            return True
+        except (OSError, ValueError) as error:
+            for path in (tmp, FLOOR_STATE_FILE):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            syslog.syslog(syslog.LOG_ERR, f"fan-pid: fan telemetry export failed: {error}")
+            return False
 
     def integral_clamp(self, z: Zone) -> float:
         """Anti-windup bound: |integral| large enough to saturate the actuator."""
@@ -640,24 +869,254 @@ class Controller:
             return 0.0
         return (PWM_MAX - PWM_FLOOR) / z.ki
 
+    def reload_zone_settings(self) -> bool:
+        try:
+            values, persisted, generation = load_snapshot_record(require=self.snapshot_seen)
+        except (OSError, ValueError) as error:
+            syslog.syslog(syslog.LOG_ERR, f"fan-pid: invalid zone settings: {error}")
+            return False
+        self.snapshot_seen = self.snapshot_seen or persisted
+        self.active_persisted = persisted
+        by_name = {zone.name: zone for zone in ZONES}
+        for name, settings in values.items():
+            zone = by_name[ZONE_NAMES[name]]
+            if zone.setpoint != settings['setpoint'] or zone.crit_temp != settings['critical']:
+                zone.setpoint = settings['setpoint']
+                zone.crit_temp = settings['critical']
+                zone.integral = 0.0
+        self.active_settings = values
+        self.active_generation = generation
+        return True
+
+    def reset_recovery(self, fan: dict) -> None:
+        fan['recovering'] = True
+        fan['recovery_count'] = 0
+        fan['last_probe_at'] = None
+        fan['max_since'] = None
+        fan['max_boot'] = None
+
+    def record_max(self, fan: dict, success: bool) -> None:
+        if success:
+            now = time.monotonic()
+            boot = clock_now()
+            if (fan['max_since'] is not None and fan['max_boot'] is not None and
+                    (now < fan['max_since'] or boot < fan['max_boot'] or
+                     abs((boot - fan['max_boot']) - (now - fan['max_since'])) > 0.1)):
+                fan['max_since'] = None
+                fan['recovery_count'] = 0
+                fan['last_probe_at'] = None
+            if fan['max_since'] is None:
+                fan['max_since'] = now
+                fan['max_boot'] = boot
+        else:
+            fan['max_since'] = None
+            fan['max_boot'] = None
+            fan['recovery_count'] = 0
+            fan['last_probe_at'] = None
+
+    def refresh_tach_modes(self) -> None:
+        now = clock_now()
+        for fan in self.fans:
+            reg = fan['duty_reg']
+            previous = fan['tach_mode']
+            mode = current_tach_mode(self.i2c_fd, reg)
+            if mode != 1 and now >= fan['next_range_retry']:
+                mode = configure_tach_channel(self.i2c_fd, reg)
+                fan['next_range_retry'] = now + TACH_RETRY_SECONDS
+            mode = mode if mode in (1, 2) else None
+            TACH_MODES[reg] = mode
+            fan['tach_mode'] = mode
+            if mode != previous:
+                fan['rpm'] = None
+                fan['rpm_at'] = None
+                if fan['ever_seen']:
+                    self.reset_recovery(fan)
+                else:
+                    fan['max_since'] = None
+                    fan['max_boot'] = None
+                    fan['recovery_count'] = 0
+                    fan['last_probe_at'] = None
+            if mode != 1 and fan['present']:
+                fan['recovering'] = True
+
+    def probe_uncertain_fans(self) -> bool:
+        write_failed = False
+        for fan in self.fans:
+            fan['recovered_tick'] = False
+            if fan['present'] and not fan['recovering'] and fan['tach_mode'] == 1:
+                continue
+            reg = fan['duty_reg']
+            ok = i2c_write_pwm(self.i2c_fd, PWM_MAX, reg)
+            ok = ok and i2c_read_byte(self.i2c_fd, reg) == PWM_MAX
+            self.record_max(fan, ok)
+            fan['last_written_pwm'] = PWM_MAX if ok else -1
+            if not ok:
+                write_failed = True
+                continue
+            if time.monotonic() - fan['max_since'] < PRESENCE_SPINUP_S or fan['tach_mode'] not in (1, 2):
+                continue
+            sampled = clock_now()
+            rpm = fan_rpm(fan, self.i2c_fd)
+            if TACH_MODES.get(reg) != fan['tach_mode']:
+                fan['tach_mode'] = TACH_MODES.get(reg)
+                fan['rpm'] = None
+                fan['rpm_at'] = None
+                self.reset_recovery(fan)
+                continue
+            elapsed = clock_now() - sampled
+            if type(rpm) is not int or rpm <= 0 or elapsed < 0 or elapsed > SENSOR_MAX_AGE:
+                zero_fresh = type(rpm) is int and rpm == 0 and 0 <= elapsed <= SENSOR_MAX_AGE
+                fan['rpm'] = 0 if zero_fresh else None
+                fan['rpm_at'] = sampled if zero_fresh else None
+                fan['recovery_count'] = 0
+                fan['last_probe_at'] = None
+                continue
+            fan['rpm'] = rpm
+            fan['rpm_at'] = sampled
+            fan['ever_seen'] = True
+            if fan['tach_mode'] != 1:
+                fan['recovery_count'] = 0
+                fan['last_probe_at'] = None
+                continue
+            previous = fan['last_probe_at']
+            if previous is None or sampled - previous > SENSOR_MAX_AGE:
+                fan['recovery_count'] = 1
+            elif sampled - previous >= TICK_SECONDS:
+                fan['recovery_count'] += 1
+            else:
+                continue
+            fan['last_probe_at'] = sampled
+            required = max(TACH_RECOVERY_SAMPLES, SEEK_BLACKOUT) if fan['stall_hysteresis'] else TACH_RECOVERY_SAMPLES
+            if fan['recovery_count'] >= required:
+                if not fan['present']:
+                    fan['floor'] = FLOOR_START
+                    fan['floor_lo'] = FLOOR_MIN
+                fan['present'] = True
+                fan['tach_ok'] = True
+                fan['recovering'] = False
+                fan['stall_hysteresis'] = False
+                fan['recovered_tick'] = True
+                fan['recovery_count'] = 0
+                fan['last_probe_at'] = None
+                syslog.syslog(syslog.LOG_INFO, f"fan-pid: {fan['name']} tach recovered")
+        return write_failed
+
+    def precheck_fans(self, allow_seek: bool) -> bool:
+        for fan in self.fans:
+            if not fan['present'] or fan['recovering'] or fan['tach_mode'] != 1:
+                continue
+            sampled = clock_now()
+            rpm = fan_rpm(fan, self.i2c_fd)
+            elapsed = clock_now() - sampled
+            mode = TACH_MODES.get(fan['duty_reg'])
+            if type(rpm) is not int or rpm <= 0 or elapsed > SENSOR_MAX_AGE or mode != 1:
+                if type(rpm) is int and rpm == 0 and elapsed <= SENSOR_MAX_AGE and mode == 1:
+                    self._refine_floor(fan, allow_seek, (sampled, rpm))
+                else:
+                    fan['rpm'] = None
+                    fan['rpm_at'] = None
+                self.reset_recovery(fan)
+                self.invalidate_settings_ack()
+                return False
+        return True
+
+    def force_max(self) -> bool:
+        results = i2c_write_all_fans(self.i2c_fd, PWM_MAX)
+        all_ok = bool(results) and all(results.get(fan['duty_reg']) for fan in FAN_DEFS)
+        for fan in self.fans:
+            success = bool(results and results.get(fan['duty_reg']))
+            if success and (fan['recovering'] or not fan['present']):
+                success = i2c_read_byte(self.i2c_fd, fan['duty_reg']) == PWM_MAX
+            if not success and fan['ever_seen']:
+                self.reset_recovery(fan)
+            self.record_max(fan, success)
+            all_ok = all_ok and success
+            fan["last_written_pwm"] = -1
+        return all_ok
+
+    def invalidate_settings_ack(self) -> None:
+        try:
+            invalidate_applied()
+        except OSError as error:
+            syslog.syslog(syslog.LOG_ERR, f"fan-pid: cannot invalidate zone acknowledgement: {error}")
+
+    def settings_current(self) -> bool:
+        try:
+            read_verification(self.active_settings, self.active_generation)
+            age = pending_age()
+            if age is not None and age >= PENDING_TIMEOUT:
+                raise ValueError('fan configuration reconciliation timed out')
+            return True
+        except (OSError, ValueError, UnicodeError) as error:
+            syslog.syslog(syslog.LOG_ERR, f"fan-pid: pre-write configuration check failed: {error}")
+            return False
+
     def step(self) -> tuple[dict[str, int], dict[str, float], dict[str, float]]:
         """One control tick -> (fan_pwms, zone_temps, zone_pwms)."""
         zone_temps: dict[str, float] = {}
         zone_pwms:  dict[str, float] = {}
-        any_critical = False
+        settings_valid = self.reload_zone_settings()
+        verified = False
+        if settings_valid and self.active_persisted:
+            try:
+                read_verification(self.active_settings, self.active_generation)
+                verified = True
+            except (OSError, ValueError) as error:
+                syslog.syslog(syslog.LOG_ERR, f"fan-pid: unverified zone settings: {error}")
+        if not verified:
+            self.invalidate_settings_ack()
+        try:
+            age = pending_age()
+            pending_failed = age is not None and age >= PENDING_TIMEOUT
+        except (OSError, ValueError, UnicodeError) as error:
+            syslog.syslog(syslog.LOG_ERR, f"fan-pid: invalid pending state: {error}")
+            pending_failed = True
+        if pending_failed:
+            syslog.syslog(syslog.LOG_ERR, "fan-pid: fan configuration reconciliation timed out")
+        recovery_latched = self.ack_failed or self.output_failed
+        config_failsafe = not settings_valid or not verified or pending_failed or recovery_latched
+        self.refresh_tach_modes()
+        recovery_write_failed = self.probe_uncertain_fans()
+        known_recovery = any(fan['ever_seen'] and (fan['recovering'] or fan['tach_mode'] != 1)
+                             for fan in self.fans)
+        chassis = next((fan for fan in self.fans if fan['duty_reg'] == EMC2305_FAN1_DUTY_REG), None)
+        chassis_present = bool(chassis and chassis.get('present') and chassis.get('tach_ok') and
+                               not chassis['recovering'] and chassis['tach_mode'] == 1)
+        if not chassis_present:
+            syslog.syslog(syslog.LOG_ERR, "fan-pid: chassis fan not detected; PWM forced to MAX")
+        any_critical = config_failsafe or not chassis_present or known_recovery or recovery_write_failed
+        forced_ok = True
+        if any_critical:
+            self.invalidate_settings_ack()
+            forced_ok = self.force_max()
         any_fault    = False
         max_pwm_zone = float(PWM_FLOOR)
 
         self.rescan_missing_zones()
+        temperatures, samples, sensor_failures = sample_temperatures(self.zone_paths)
+        if verified:
+            try:
+                read_verification(self.active_settings, self.active_generation)
+            except (OSError, ValueError) as error:
+                verified = False
+                config_failsafe = True
+                any_critical = True
+                self.invalidate_settings_ack()
+                forced_ok = self.force_max() and forced_ok
+                syslog.syslog(syslog.LOG_ERR, f"fan-pid: zone verification expired: {error}")
+        if sensor_failures:
+            self.invalidate_settings_ack()
+            forced_ok = self.force_max() and forced_ok
+            any_critical = True
+            for name in sensor_failures:
+                self.zone_paths.pop(name, None)
+            self.next_rescan_t = min(self.next_rescan_t, time.monotonic() + TICK_SECONDS)
+            syslog.syslog(syslog.LOG_ERR, f"fan-pid: sensor readings unavailable: {sensor_failures}")
         for z in ZONES:
-            path = self.zone_paths.get(z.name)
-            if path is None:
+            if z.name in sensor_failures or z.name not in temperatures:
                 continue
-            t = read_temp(path)
-            if t is None:
-                t = z.last_temp   # reuse last good temp on a transient read failure
-            else:
-                z.last_temp = t
+            t = temperatures[z.name]
+            z.last_temp = t
             zone_temps[z.name] = t
 
             if t >= HARD_FAULT_TEMP:
@@ -715,13 +1174,38 @@ class Controller:
         # clamped up to each floor. A kick always wins as a one-tick MAX pulse.
         allow_floor_seek = (not any_critical and not any_fault
                             and max_pwm_zone <= self.min_floor())
+        precheck_ok = self.precheck_fans(allow_floor_seek)
+        if not precheck_ok:
+            forced_ok = self.force_max() and forced_ok
+            any_critical = True
+            shared = PWM_MAX
+            self.smoothed_pwm = float(PWM_MAX)
+            allow_floor_seek = False
+            for zone in ZONES:
+                zone.integral = 0.0
+        export_ok = self.export_floors()
+        if not export_ok:
+            self.output_failed = True
+            self.invalidate_settings_ack()
+            forced_ok = self.force_max() and forced_ok
+            any_critical = True
+            config_failsafe = True
+            shared = PWM_MAX
+            self.smoothed_pwm = float(PWM_MAX)
+            allow_floor_seek = False
+            for zone in ZONES:
+                zone.integral = 0.0
 
         fan_pwms: dict[str, int] = {}
+        output_ok = (chassis_present and not known_recovery and not recovery_write_failed and
+                     forced_ok and precheck_ok and export_ok)
         for fan in self.fans:
-            if not fan.get("present", True):
-                fan_pwms[fan["name"]] = 0
+            if not fan.get("present", True) or fan['recovering'] or fan['tach_mode'] != 1:
+                fan_pwms[fan["name"]] = PWM_MAX
                 continue
-            if fan["kick"]:
+            if fan['recovered_tick']:
+                out = PWM_MAX
+            elif fan["kick"]:
                 out = PWM_MAX
                 fan["kick"] = False
             elif allow_floor_seek:
@@ -729,21 +1213,92 @@ class Controller:
             else:
                 out = max(shared, fan["floor"])
             out = max(0, min(PWM_MAX, out))
+            if out < PWM_MAX and not self.settings_current():
+                verified = False
+                config_failsafe = True
+                output_ok = False
+                self.invalidate_settings_ack()
+                forced_ok = self.force_max() and forced_ok
+                shared = PWM_MAX
+                self.smoothed_pwm = float(PWM_MAX)
+                allow_floor_seek = False
+                for zone in ZONES:
+                    zone.integral = 0.0
+                out = PWM_MAX
             fan_pwms[fan["name"]] = out
             force = (out == 0 or out == PWM_MAX)
             if (force or fan["last_written_pwm"] < 0
                     or abs(out - fan["last_written_pwm"]) >= PWM_DEADBAND):
-                i2c_write_pwm(self.i2c_fd, out, fan["duty_reg"])
-                fan["last_written_pwm"] = out
+                if i2c_write_pwm(self.i2c_fd, out, fan["duty_reg"]):
+                    fan["last_written_pwm"] = out
+                    if out == PWM_MAX:
+                        self.record_max(fan, True)
+                    else:
+                        fan['max_since'] = None
+                        fan['max_boot'] = None
+                else:
+                    self.reset_recovery(fan)
+                    self.record_max(fan, False)
+                    output_ok = False
 
         for fan in self.fans:
-            if fan.get("present", True):
-                self._refine_floor(fan, allow_floor_seek)
-        self.export_floors()   # cheap tmpfs write; keeps the RPM sample fresh
+            fan['sampled_rpm'] = None
+            fan['sampled_at'] = None
+            if fan.get("present", True) and not fan['recovering'] and fan['tach_mode'] == 1:
+                self._refine_floor(fan, allow_floor_seek and not fan['recovered_tick'])
+                rpm = fan.get('sampled_rpm')
+                sampled = fan.get('sampled_at')
+                if (type(rpm) is not int or rpm <= 0 or sampled is None or
+                        clock_now() - sampled > SENSOR_MAX_AGE or TACH_MODES.get(fan['duty_reg']) != 1):
+                    self.reset_recovery(fan)
+                    output_ok = False
+                    syslog.syslog(syslog.LOG_ERR, f"fan-pid: {fan['name']} tach unavailable; PWM forced to MAX")
+        for fan in self.fans:
+            if fan['present'] and not fan['recovering'] and fan['tach_mode'] == 1:
+                mode = current_tach_mode(self.i2c_fd, fan['duty_reg'])
+                TACH_MODES[fan['duty_reg']] = mode
+                if mode != 1:
+                    fan['tach_mode'] = mode
+                    fan['rpm'] = None
+                    fan['rpm_at'] = None
+                    self.reset_recovery(fan)
+                    output_ok = False
+        chassis_sample = None
+        if chassis_present:
+            rpm = chassis.get('sampled_rpm')
+            sampled = chassis.get('sampled_at')
+            if type(rpm) is int and rpm > 0 and sampled is not None:
+                chassis_sample = {'rpm': rpm, 'sampled': sampled}
+            else:
+                output_ok = False
+                syslog.syslog(syslog.LOG_ERR, "fan-pid: chassis tach unavailable; PWM forced to MAX")
+        if not self.export_floors():
+            output_ok = False
+        if not output_ok:
+            self.output_failed = True
+            self.invalidate_settings_ack()
+            self.force_max()
+            for fan in self.fans:
+                if fan.get('present', True):
+                    fan_pwms[fan['name']] = PWM_MAX
+        elif settings_valid and verified and not sensor_failures:
+            try:
+                read_verification(self.active_settings, self.active_generation)
+                write_applied(self.active_settings, 'failsafe' if config_failsafe else 'normal',
+                              sensors=samples, generation=self.active_generation, chassis=chassis_sample)
+            except (OSError, ValueError) as error:
+                self.ack_failed = True
+                self.invalidate_settings_ack()
+                self.force_max()
+                syslog.syslog(syslog.LOG_ERR, f"fan-pid: cannot acknowledge zone settings: {error}")
+            else:
+                self.ack_failed = False
+                self.output_failed = False
 
         return fan_pwms, zone_temps, zone_pwms
 
-    def _refine_floor(self, fan: dict, allow_seek: bool) -> None:
+    def _refine_floor(self, fan: dict, allow_seek: bool,
+                      tach_sample: Optional[tuple[float, Optional[int]]] = None) -> None:
         """Maintain one fan's floor with cliff-safe proportional control.
 
         rpm==0 learns a hard lower bound, bumps the floor and kicks once; blackout
@@ -754,11 +1309,48 @@ class Controller:
             return
         if fan["cooldown"] > 0:
             fan["cooldown"] -= 1
-        rpm = fan_rpm(fan, self.i2c_fd)
+        if tach_sample is None:
+            fan['sampled_at'] = clock_now()
+            rpm = fan_rpm(fan, self.i2c_fd)
+        else:
+            fan['sampled_at'], rpm = tach_sample
+        elapsed = clock_now() - fan['sampled_at']
+        if elapsed < 0 or elapsed > SENSOR_MAX_AGE:
+            rpm = None
+        if TACH_MODES.get(fan['duty_reg']) != 1:
+            fan['tach_mode'] = TACH_MODES.get(fan['duty_reg'])
+            rpm = None
+        fan['sampled_rpm'] = rpm
         if rpm is None:
+            fan['rpm'] = None
+            fan['rpm_at'] = None
             return
         last = fan.get("rpm")
         fan["rpm"] = rpm
+        fan['rpm_at'] = fan['sampled_at']
+
+        duty = fan['last_written_pwm']
+        if (rpm == 0 and 0 < duty < PWM_MAX and
+                (fan['seek_settle'] > 0 or (allow_seek and duty <= fan['floor'] + SEEK_MEASURE_TOL))):
+            old = fan['floor']
+            stalled_duty = max(old, duty)
+            bound = max(fan['floor_lo'], stalled_duty + SEEK_STALL_MARGIN)
+            if bound > FLOOR_MAX:
+                fan['floor_lo'] = PWM_MAX
+                fan['floor'] = PWM_MAX
+            else:
+                fan['floor_lo'] = bound
+                fan['floor'] = min(FLOOR_MAX, max(bound, stalled_duty + SEEK_STALL_BUMP))
+            fan['seek_flat'] = 0
+            fan['seek_settle'] = 0
+            fan['stall_hysteresis'] = True
+            fan['kick'] = True
+            fan['seek_blackout'] = SEEK_BLACKOUT
+            fan['cooldown'] = SEEK_COOLDOWN
+            syslog.syslog(syslog.LOG_INFO,
+                          f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
+                          f"(stall rpm=0, lo={fan['floor_lo']}, kick)")
+            return
 
         if not allow_seek:
             fan["seek_flat"] = 0
@@ -775,19 +1367,6 @@ class Controller:
 
         old = fan["floor"]
         if rpm == 0:
-            fan["seek_flat"] = 0
-            fan["floor_lo"] = max(fan["floor_lo"],
-                                  fan["floor"] + SEEK_STALL_MARGIN)
-            if fan["floor"] >= FLOOR_MAX:
-                return
-            fan["floor"] = min(FLOOR_MAX,
-                               max(fan["floor_lo"],
-                                   fan["floor"] + SEEK_STALL_BUMP))
-            fan["kick"] = True
-            fan["seek_blackout"] = SEEK_BLACKOUT
-            syslog.syslog(syslog.LOG_INFO,
-                          f"fan-pid: {fan['name']} floor {old}->{fan['floor']} "
-                          f"(stall rpm=0, lo={fan['floor_lo']}, kick)")
             return
 
         err = SEEK_TARGET_RPM - rpm
@@ -870,8 +1449,8 @@ def _on_sigterm(_sig, _frame):
 
 
 def main() -> int:
-    global USE_RAW_TACH
     syslog.openlog("fan-pid", syslog.LOG_PID, syslog.LOG_DAEMON)
+    notify_watchdog()
 
     # Board gate.
     try:
@@ -879,39 +1458,42 @@ def main() -> int:
             compat = f.read().split(b"\0")
     except OSError:
         compat = []
-    if not any(b"fsl,ls1046a" in c for c in compat):
-        syslog.syslog(syslog.LOG_INFO, "fan-pid: not LS1046A, exiting")
+    if b'mono,gateway-dk' not in compat:
+        syslog.syslog(syslog.LOG_INFO, "fan-pid: not Mono Gateway DK, exiting")
         return 0
 
     try:
-        pwm_path, _fan_path = find_emc2305_pwm()
-    except RuntimeError as e:
-        syslog.syslog(syslog.LOG_ERR, f"fan-pid: {e} — failing to MAX_PWM if possible, exit 1")
+        invalidate_applied()
+    except OSError as error:
+        syslog.syslog(syslog.LOG_ERR, f"fan-pid: cannot invalidate zone acknowledgement: {error}")
+
+    try:
+        bound = find_bound_emc2305()
+        pwm_path, _fan_path = find_emc2305_pwm(bound[1])
+    except (OSError, RuntimeError) as error:
+        syslog.syslog(syslog.LOG_ERR, f"fan-pid: refusing controller discovery: {error}")
         return 1
     hwmon_dir = os.path.dirname(pwm_path)
     syslog.syslog(syslog.LOG_INFO,
                   f"fan-pid: hwmon dir {hwmon_dir} (sysfs pwm introspection only; tach reads here)")
 
     try:
-        i2c_fd = find_emc2305_i2c()
+        i2c_fd = find_emc2305_i2c(bound)
     except (RuntimeError, OSError) as e:
         syslog.syslog(syslog.LOG_ERR, f"fan-pid: i2c open failed: {e!r} — exit 1")
         return 1
     syslog.syslog(syslog.LOG_INFO, f"fan-pid: i2c bus claimed at addr 0x{EMC2305_I2C_ADDR:02x}")
+    i2c_write_all_fans(i2c_fd, PWM_MAX)
+    notify_watchdog()
 
-    # Program RANGE=500 (m=1) for the lower ~484 RPM floor; only trust raw TACH
-    # if it succeeds, else sysfs (m=2) stays correct.
     try:
         set_tach_range_500(i2c_fd)
-        USE_RAW_TACH = True
-        syslog.syslog(syslog.LOG_INFO,
-                      "fan-pid: raw 13-bit tach enabled (RANGE=500, floor ~484 RPM)")
-    except RuntimeError as e:
-        USE_RAW_TACH = False
-        syslog.syslog(syslog.LOG_WARNING,
-                      f"fan-pid: {e}; using kernel sysfs tach (floor ~960 RPM)")
+    except (OSError, RuntimeError) as error:
+        TACH_MODES.update({fan['duty_reg']: None for fan in FAN_DEFS})
+        syslog.syslog(syslog.LOG_WARNING, f"fan-pid: tach RANGE unknown; will retry: {error}")
 
     neutralize_kernel_cooling_devices()
+    notify_watchdog()
 
     zone_paths = find_thermal_zones()
     if not zone_paths:
@@ -932,14 +1514,13 @@ def main() -> int:
     signal.signal(signal.SIGINT,  _on_sigterm)
 
     try:
-        play_startup_whistle(i2c_fd)
-        # Hold MAX so slow fans cross the tach floor before the presence read.
-        i2c_write_all_fans(i2c_fd, PWM_MAX)
-        for _ in range(int(PRESENCE_SPINUP_S / 0.2)):
-            if not _running:
-                break
-            time.sleep(0.2)
-        fans = detect_present_fans(i2c_fd, hwmon_dir)
+        initial_fans = spinup_and_detect(i2c_fd, hwmon_dir)
+        notify_watchdog()
+        fans = combine_startup_detections(initial_fans, spinup_and_detect(i2c_fd, hwmon_dir))
+        notify_watchdog()
+        if _running:
+            play_startup_whistle(i2c_fd, zone_paths, fans)
+        notify_watchdog()
         syslog.syslog(syslog.LOG_INFO,
                       "fan-pid: driving fans: " + ",".join(f["name"] for f in fans))
 
@@ -951,7 +1532,7 @@ def main() -> int:
                       "fan-pid: seeding floors at %d; seek target %d rpm"
                       % (FLOOR_START, SEEK_TARGET_RPM))
 
-        ctrl = Controller(i2c_fd, fans, hwmon_dir, zone_paths, floors)
+        ctrl = Controller(i2c_fd, fans, hwmon_dir, zone_paths, floors, controller_device=bound[1])
         next_tick = time.monotonic()
         while _running:
             now = time.monotonic()
@@ -963,8 +1544,16 @@ def main() -> int:
                 final, zt, zp = ctrl.step()
                 ctrl.maybe_log(now, final, zt, zp)
             except Exception as e:   # never crash on a single tick
+                ctrl.output_failed = True
+                ctrl.invalidate_settings_ack()
+                ctrl.force_max()
                 syslog.syslog(syslog.LOG_ERR, f"fan-pid: tick failed: {e!r}")
+            notify_watchdog()
     finally:
+        try:
+            invalidate_applied()
+        except OSError:
+            pass
         # Leave fans at MAX so a restart never throttles the SoC during the gap.
         try:
             i2c_write_all_fans(i2c_fd, PWM_MAX)

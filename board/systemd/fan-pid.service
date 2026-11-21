@@ -26,12 +26,17 @@ ConditionPathExists=/proc/device-tree/compatible
 
 [Service]
 Type=simple
+NotifyAccess=main
+WatchdogSec=30s
 ExecStart=/usr/local/bin/fan-pid
+ExecStopPost=/usr/bin/python3 /usr/local/bin/fan-pid-failsafe
 Restart=on-failure
 RestartSec=5
 # Daemon already handles SIGTERM cleanly (writes PWM=MAX as failsafe).
 KillSignal=SIGTERM
-TimeoutStopSec=10
+KillMode=control-group
+TimeoutAbortSec=10s
+TimeoutStopSec=10s
 # Daemon logs via syslog(); journald collects it under SYSLOG_IDENTIFIER=fan-pid.
 StandardOutput=journal
 StandardError=journal
@@ -39,6 +44,7 @@ StandardError=journal
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateDevices=no
 PrivateNetwork=yes
 NoNewPrivileges=yes
 RestrictRealtime=yes

@@ -1,0 +1,8 @@
+[Unit]
+Description=Reconcile VyOS fan thermal configuration
+After=vyos-router.service
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/libexec/vyos/conf_mode/system_hardware_fan.py --reconcile

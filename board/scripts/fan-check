@@ -28,31 +28,20 @@
 
 set -u
 
-# ---------------------------------------------------------------------------
-# Tunables — MUST mirror board/scripts/fan-pid (kept in lockstep manually).
-# Not sourced because /usr/local/bin/fan-pid is a Python file; duplicating
-# the small constants is simpler than adding a JSON sidecar.
-# ---------------------------------------------------------------------------
-declare -A SETPOINT=(
-    [ddr-thermal]=65
-    [serdes-thermal]=70
-    [fman-thermal]=70
-    [cluster-thermal]=65
-    [sec-thermal]=65
-    [PCB]=60
-    [CPU]=70
-    [SFP+]=60
-)
-declare -A CRIT=(
-    [ddr-thermal]=80
-    [serdes-thermal]=85
-    [fman-thermal]=87
-    [cluster-thermal]=85
-    [sec-thermal]=85
-    [PCB]=85
-    [CPU]=85
-    [SFP+]=85
-)
+declare -A SETPOINT CRIT
+CONFIG_STATE=unknown
+CONFIG_MESSAGE='No fan controller acknowledgement'
+zone_settings=$(python3 -m vyos.fan_control) || {
+    echo "fan-check: unable to read fan zone settings" >&2
+    exit 1
+}
+while read -r zone setpoint critical; do
+    case "$zone" in
+        __status__) CONFIG_STATE=$setpoint ;;
+        __message__) CONFIG_MESSAGE="$setpoint${critical:+ $critical}" ;;
+        *) SETPOINT["$zone"]=$setpoint; CRIT["$zone"]=$critical ;;
+    esac
+done <<< "$zone_settings"
 # Board TMP431 zones: label -> "<DT node suffix>:<hwmon temp file>". Matched by
 # device-tree node because the i2c bus number and hwmon index are probe-order
 # dependent. Mux ch1 chip = PCB (PCB = local temp1, CPU = remote
@@ -77,9 +66,12 @@ declare -A FAN_MIN_RUN=([1]=0 [2]=0)
 # 2x the true speed (it assumes the m=2 default range). fan-pid therefore
 # publishes the correctly-scaled RPM here; we prefer it over sysfs when present.
 declare -A FAN_RPM=([1]=- [2]=-)
-declare -A FAN_PRESENT=([1]=1 [2]=1)
-TACH_SOURCE=sysfs-m2
-if [ -r "$FLOOR_STATE_FILE" ]; then
+declare -A FAN_PRESENT=([1]='?' [2]='?')
+declare -A FAN_STATE=([1]='' [2]='') FAN_RECOVERY=([1]=0 [2]=0) FAN_RPM_UNAVAILABLE=([1]=0 [2]=0)
+TACH_SOURCE=raw-m1
+CONTROLLER_DEVICE=''
+CONTROLLER_RECORDED=0
+if floor_export=$(python3 -m vyos.fan_control --floor-export 2>/dev/null); then
     while IFS='=' read -r key val; do
         case "$key" in
             0x30) [[ "$val" =~ ^[0-9]+$ ]] && FAN_MIN_RUN[1]=$val ;;
@@ -88,9 +80,23 @@ if [ -r "$FLOOR_STATE_FILE" ]; then
             present:0x40) [[ "$val" =~ ^[01]$ ]] && FAN_PRESENT[2]=$val ;;
             rpm:0x30) [[ "$val" =~ ^[0-9]+$ ]] && FAN_RPM[1]=$val ;;
             rpm:0x40) [[ "$val" =~ ^[0-9]+$ ]] && FAN_RPM[2]=$val ;;
-            tach_source) TACH_SOURCE=$val ;;
+            rpm_unavailable:0x30) FAN_RPM_UNAVAILABLE[1]=1 ;;
+            rpm_unavailable:0x40) FAN_RPM_UNAVAILABLE[2]=1 ;;
+            fan_state:0x30) case "$val" in present|recovering|unknown) FAN_STATE[1]=$val ;; *) FAN_STATE[1]=unknown ;; esac ;;
+            fan_state:0x40) case "$val" in present|recovering|unknown) FAN_STATE[2]=$val ;; *) FAN_STATE[2]=unknown ;; esac ;;
+            tach_recovery:0x30) [ "$val" = 0 ] || FAN_RECOVERY[1]=1 ;;
+            tach_recovery:0x40) [ "$val" = 0 ] || FAN_RECOVERY[2]=1 ;;
+            tach_source) case "$val" in raw-m1|sysfs-m2) TACH_SOURCE=$val ;; *) TACH_SOURCE=raw-m1 ;; esac ;;
+            controller_device) CONTROLLER_DEVICE=$val; CONTROLLER_RECORDED=1 ;;
         esac
-    done < "$FLOOR_STATE_FILE"
+    done <<< "$floor_export"
+else
+    CONFIG_STATE=error
+    CONFIG_MESSAGE="$CONFIG_MESSAGE; fan telemetry unavailable"
+    FAN_STATE[1]=unknown
+    FAN_STATE[2]=unknown
+    FAN_RPM_UNAVAILABLE[1]=1
+    FAN_RPM_UNAVAILABLE[2]=1
 fi
 
 # Display order (matches the daemon's ZONES order: SoC first, then board)
@@ -138,13 +144,41 @@ fi
 # ---------------------------------------------------------------------------
 # Locate EMC2305 hwmon by name (numbers drift across boots).
 # ---------------------------------------------------------------------------
-EMC=""
-for h in /sys/class/hwmon/hwmon*; do
-    [ -r "$h/name" ] || continue
-    [ "$(cat "$h/name" 2>/dev/null)" = emc2305 ] || continue
-    EMC=$h
-    break
-done
+find_bound_emc2305() {
+    local root=/sys/bus/i2c/devices driver=/sys/bus/i2c/drivers/emc2305
+    local expected entry target found='' count=0
+    [ -d "$driver" ] || return 1
+    expected=$(readlink -f "$driver") || return 1
+    for entry in "$root"/*-002e; do
+        [[ "${entry##*/}" =~ ^[0-9]+-002e$ ]] || continue
+        [ -L "$entry/driver" ] || continue
+        target=$(readlink -f "$entry/driver") || continue
+        [ "$target" = "$expected" ] || continue
+        found=$(readlink -f "$entry") || continue
+        count=$((count + 1))
+    done
+    [ "$count" -eq 1 ] || return 1
+    printf '%s\n' "$found"
+}
+
+EMC=''
+bound_device=$(find_bound_emc2305) || bound_device=''
+if [ -n "$bound_device" ] && { [ "$CONTROLLER_RECORDED" = 0 ] || [ "$CONTROLLER_DEVICE" = "$bound_device" ]; }; then
+    hwmon_count=0
+    candidate=''
+    for h in /sys/class/hwmon/hwmon*; do
+        [ -r "$h/name" ] || continue
+        [ "$(cat "$h/name" 2>/dev/null)" = emc2305 ] || continue
+        hwmon_device=$(readlink -f "$h/device") || continue
+        [ "$hwmon_device" = "$bound_device" ] || continue
+        candidate=$h
+        hwmon_count=$((hwmon_count + 1))
+    done
+    current_device=$(find_bound_emc2305) || current_device=''
+    if [ "$hwmon_count" -eq 1 ] && [ "$current_device" = "$bound_device" ]; then
+        EMC=$candidate
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Locate the 5 LS1046A thermal zones by `type` string.
@@ -190,7 +224,8 @@ read_temp_c() {
     local p=$1 m
     [ -r "$p" ] || { echo "?"; return; }
     m=$(cat "$p" 2>/dev/null) || { echo "?"; return; }
-    awk -v m="$m" 'BEGIN{ printf "%.1f", m/1000.0 }'
+    [[ "$m" =~ ^-?[0-9]+$ ]] || { echo "?"; return; }
+    awk -v m="$m" 'BEGIN{ if (m < -273150) print "?"; else printf "%.1f", m/1000.0 }'
 }
 
 classify_zone() {
@@ -221,6 +256,7 @@ color_for() {
 hostname_str=$(hostname 2>/dev/null || echo '?')
 kernel_str=$(uname -r 2>/dev/null || echo '?')
 echo "${C_BOLD}fan-check${C_RST}  host=${hostname_str}  kernel=${kernel_str}  $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+echo "  configuration: ${CONFIG_STATE} — ${CONFIG_MESSAGE}"
 echo
 
 # ---------------------------------------------------------------------------
@@ -234,17 +270,31 @@ for zone in "${ZONE_ORDER[@]}"; do
     path=${ZONE_PATH[$zone]:-}
     if [ -z "$path" ]; then
         printf "  %-16s  %s\n" "$label" "${C_DIM}(not present)${C_RST}"
+        hot_or_crit=1
         continue
+    fi
+    if [ "$zone" = CPU ]; then
+        sensor_fault=$(cat "${path%_input}_fault" 2>/dev/null || echo '?')
+        if [ "$sensor_fault" != 0 ]; then
+            printf "  %-16s  %s\n" "$label" "${C_RED}(sensor fault or read failed)${C_RST}"
+            hot_or_crit=1
+            continue
+        fi
     fi
     t=$(read_temp_c "$path")
     if [ "$t" = "?" ]; then
         printf "  %-16s  %s\n" "$label" "${C_RED}(read failed)${C_RST}"
+        hot_or_crit=1
+        continue
+    fi
+    sp=${SETPOINT[$zone]:-?}
+    ct=${CRIT[$zone]:-?}
+    if [ "$sp" = '?' ] || [ "$ct" = '?' ]; then
+        printf "  %-16s  %6s C  %6s C  %6s C  [UNKNOWN]\n" "$label" "$t" '?' '?'
         continue
     fi
     state=$(classify_zone "$t" "$zone")
     col=$(color_for "$state")
-    sp=${SETPOINT[$zone]}
-    ct=${CRIT[$zone]}
     printf "  %-16s  %s%6s C%s  %6d C  %6d C  %s[%s]%s\n" \
         "$label" "$col" "$t" "$C_RST" "$sp" "$ct" "$col" "$state" "$C_RST"
     [ "$state" = HOT ] || [ "$state" = CRIT ] && hot_or_crit=1
@@ -256,8 +306,7 @@ echo
 # ---------------------------------------------------------------------------
 echo "${C_BOLD}EMC2305 PWM fan controller${C_RST}"
 if [ -z "$EMC" ]; then
-    echo "  ${C_RED}NOT FOUND${C_RST} — EMC2305 hwmon entry missing" \
-         "(check i2c bus / driver bind)"
+    echo "  ${C_RED}NOT FOUND${C_RST} — EMC2305 unavailable, unbound, or ambiguous"
     fan_emc_ok=0
 else
     printf "  hwmon path : %s\n" "$EMC"
@@ -265,14 +314,34 @@ else
         "fan" "min" "cur" "max" "%" "RPM" "fault" "state"
     printf "  %s\n" "--------------------------------------------------------------------------"
     fan_emc_ok=1
+    if [ ! -e "$EMC/pwm1" ] || [ ! -e "$EMC/fan1_input" ]; then
+        echo "  ${C_RED}UNAVAILABLE${C_RST} — required controller attributes missing"
+        fan_emc_ok=0
+    fi
     for channel in 1 2; do
         pwm_path="$EMC/pwm${channel}"
         rpm_path="$EMC/fan${channel}_input"
         fault_path="$EMC/fan${channel}_fault"
-        [ -r "$pwm_path" ] && [ -r "$rpm_path" ] || continue
-
         min_run=${FAN_MIN_RUN[$channel]}
-        present=${FAN_PRESENT[$channel]:-1}
+        present=${FAN_PRESENT[$channel]:-?}
+        exported_state=${FAN_STATE[$channel]:-}
+        if [ "$present" = '?' ] && [ "$exported_state" != recovering ]; then
+            exported_state=unknown
+        fi
+        if [ "${FAN_RECOVERY[$channel]:-0}" = 1 ] &&
+           [ "$exported_state" != recovering ] && [ "$exported_state" != unknown ]; then
+            if [ "$channel" = 1 ] || [ "$present" = 1 ]; then
+                exported_state=recovering
+            else
+                exported_state=unknown
+            fi
+        elif [ "$exported_state" = present ] && [ "$present" = 0 ]; then
+            exported_state=unknown
+        fi
+        [ -r "$pwm_path" ] && [ -r "$rpm_path" ] || {
+            [ -r "$fault_path" ] && [ "$(cat "$fault_path" 2>/dev/null)" = 1 ] ||
+                [ "$exported_state" = recovering ] || [ "$exported_state" = unknown ] || continue
+        }
 
         pwm=$(cat "$pwm_path" 2>/dev/null || echo '?')
         # Prefer fan-pid's published RPM (correct at m=1 / RANGE=500); fall back
@@ -281,6 +350,8 @@ else
         # in that state.
         if [ "${FAN_RPM[$channel]}" != "-" ]; then
             rpm=${FAN_RPM[$channel]}
+        elif [ "${FAN_RPM_UNAVAILABLE[$channel]:-0}" = 1 ]; then
+            rpm='?'
         elif [ "$TACH_SOURCE" = "raw-m1" ]; then
             rpm="?"   # daemon at m=1 but no sample yet — don't trust 2x sysfs
         else
@@ -292,14 +363,26 @@ else
             pwm_pct=$(awk -v p="$pwm" -v m="$PWM_MAX" 'BEGIN{printf "%.0f", p*100.0/m}')
         fi
 
+        if [ "$fault" != 1 ] && { [ "$exported_state" = recovering ] || [ "$exported_state" = unknown ]; }; then
+            fault_display='?'
+            [ "$fault" = 0 ] && fault_display=no
+            printf "  Fan %-1d  %4s  %4s  %4s  %4s%%  %8s  %-5s  %s\n" \
+                "$channel" "$min_run" "$pwm" "$PWM_MAX" "$pwm_pct" "$rpm" "$fault_display" "${exported_state^^}"
+            if [ "$channel" = 1 ] || [ "$exported_state" = recovering ]; then
+                fan_emc_ok=0
+            fi
+            continue
+        fi
+
         # Not present detection:
         # 1) fan-pid explicitly reported present=0
         # 2) fan-pid pinned floor at PWM_MAX with 0 RPM / no sample
         # 3) fan-pid not running (min_run=0) and tach reads 0 (no pulses on channel)
-        if [ "$present" = "0" ] || { [ "$min_run" -eq "$PWM_MAX" ] && [ "$rpm" = "0" -o "$rpm" = "?" -o "${FAN_RPM[$channel]}" = "0" ]; } \
-           || { [ "$min_run" -eq 0 ] && [ "$rpm" = "0" ]; }; then
+        if [ "$fault" != "1" ] && { [ "$present" = "0" ] || { [ "$min_run" -eq "$PWM_MAX" ] && [ "$rpm" = "0" -o "$rpm" = "?" -o "${FAN_RPM[$channel]}" = "0" ]; } \
+           || { [ "$min_run" -eq 0 ] && [ "$rpm" = "0" ]; }; }; then
             printf "  Fan %-1d  %4s  %4s  %4s  %5s  %8s  %-5b  %b\n" \
                 "$channel" "-" "-" "-" "-" "-" "no" "${C_DIM}not present${C_RST}"
+            [ "$channel" = 1 ] && fan_emc_ok=0
             continue
         fi
 
@@ -364,6 +447,11 @@ else
             "$channel" "$min_disp" "$pwm" "$PWM_MAX" "$pwm_pct" \
             "$rpm_disp" "$fault_state" "$pwm_state"
     done
+fi
+if [ "$fan_emc_ok" -eq 1 ]; then
+    echo "  fan health: OK"
+else
+    echo "  fan health: ERROR"
 fi
 echo
 
@@ -433,7 +521,8 @@ fi
 # 0 only when EMC2305 is present, no zone is HOT/CRIT, and the daemon is up
 # (or at least not failed). Anything else → 1, so this script is usable as a
 # Nagios/monit probe.
-if [ "$fan_emc_ok" -eq 1 ] && [ "$hot_or_crit" -eq 0 ] && [ "${daemon_ok:-0}" -eq 1 ]; then
+if [ "$fan_emc_ok" -eq 1 ] && [ "$hot_or_crit" -eq 0 ] && [ "${daemon_ok:-0}" -eq 1 ] \
+   && [ "$CONFIG_STATE" = ok ]; then
     exit 0
 else
     exit 1

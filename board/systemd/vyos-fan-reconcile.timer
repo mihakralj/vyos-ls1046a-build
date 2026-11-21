@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically reconcile VyOS fan thermal configuration
+
+[Timer]
+OnBootSec=2s
+OnUnitInactiveSec=2s
+AccuracySec=1s
+Unit=vyos-fan-reconcile.service
+
+[Install]
+WantedBy=multi-user.target
