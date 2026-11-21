@@ -13,6 +13,9 @@ sudo led 51 102 153
 sudo led 51 102 153 0
 sudo led off
 
+# led based on system load (default: enabled)
+sudo systemctl start monoledd
+
 # Fan-check: Status, temps, set-points, PWM control, PWM duty, Fan RPM
 fan-check
 
@@ -65,6 +68,8 @@ fan-check >/dev/null || logger -p user.err "fan-check failed rc=$?"
 >**NOTE:** By default, the stock LED behaviour of the Mono Gateway Development Kit is **not** modified. The helper enables both static user-set, or programmatic control of the LED in response to user-defined triggers, e.g. indicating traffic throughput.
 
 Every ISO installs [board/scripts/led.py](board/scripts/led.py) as **`/usr/local/bin/led`** a flag-free, Python-stdlib-only CLI that treats the four LP5812 channels as one logical RGBW indicator. Every colour change **fades** from the current state to the target (linear interpolation in raw 8-bit PWM space, 50 ms total), and the helper forces `trigger=none` before writing, so it always works regardless of what trigger was active. Reads work as user `vyos`, but writes require `sudo`.
+
+>**NOTE:** Before trying to modify the RGB LED, don't forget to disable the `monoledd` systemd service or your changes will be overwritten immediatly. (`sudo systemctl stop monoledd` or permanently `echo "systemctl stop monoledd" | sudo tee -a /config/scripts/vyos-postconfig-bootup.script`)
 
 ```bash
 led                      # no args: read and print current state — "R G B W  #RRGGBBWW"
